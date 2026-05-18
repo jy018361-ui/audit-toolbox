@@ -1,0 +1,30 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 构建产物
+build/
+dist/
+*.spec.bak
+
+# vendor 目录（由 build_suite.py --sync-only 生成，不入库）
+vendor/
+
+# IDE 和系统文件
+.vscode/
+.idea/
+.cursor/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# 日志和临时文件
+*.log
+*.tmp
+pack_build.log

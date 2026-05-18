@@ -1,0 +1,25 @@
+{
+  "suite_title": "审计工具箱",
+  "suite_version": "1.0.0",
+  "tools": [
+    {
+      "id": "fa_list",
+      "name": "FA List 匹配工具",
+      "description": "固定资产底稿双表匹配、透视与 FA List 导出",
+      "vendor_dir": "fa_list",
+      "dev_root": "C:/Users/Administrator/Downloads/备份FA/挤塑板",
+      "entry": "main.py",
+      "callable": "main"
+    },
+    {
+      "id": "kanzhang",
+      "name": "看账小工具",
+      "description": "凭证导入、科目筛选、透视与导出",
+      "vendor_dir": "kanzhang",
+      "dev_root": "C:/Users/Administrator/Downloads/看账小工具",
+      "entry_dev": "看账小工具+4.0.py",
+      "entry_vendor": "kanzhang_app.py",
+      "callable": "main"
+    }
+  ]
+}

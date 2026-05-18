@@ -1,0 +1,31 @@
+"""
+配置文件
+"""
+import os
+
+# 应用配置
+APP_NAME = "FA List匹配工具"
+APP_VERSION = "1.0.0"
+
+# 文件配置
+SUPPORTED_EXCEL_FORMATS = ['.xlsx', '.xls']
+SUPPORTED_CSV_FORMATS = ['.csv']
+SUPPORTED_FORMATS = SUPPORTED_EXCEL_FORMATS + SUPPORTED_CSV_FORMATS
+
+# 数据预览配置
+PREVIEW_ROWS = 10  # 预览时显示的行数
+
+# 数据预处理配置
+DEFAULT_TEXT_CLEANUP = True  # 默认去除空格
+DEFAULT_CASE_SENSITIVE = False  # 默认不区分大小写
+
+# 导出配置
+DEFAULT_EXPORT_FORMAT = 'xlsx'  # 默认导出格式
+DEPRECIATION_FORMULA_ROW_LIMIT = 5000  # 超过该行数时仅写前几行折旧测算公式，避免大量公式拖慢导出
+DEPRECIATION_FORMULA_SAMPLE_ROWS = 10  # 大表导出时保留的公式模板行数
+
+# GUI配置
+WINDOW_WIDTH = 1200
+WINDOW_HEIGHT = 800
+MIN_WINDOW_WIDTH = 800
+MIN_WINDOW_HEIGHT = 600

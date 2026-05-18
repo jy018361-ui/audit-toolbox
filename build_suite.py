@@ -1,5 +1,5 @@
 """
-审计工具箱构建：同步 vendor 源码 → PyInstaller 单文件 exe。
+审计工具箱构建：同步工具源码 → PyInstaller 单文件 exe。
 用法:
   python build_suite.py --sync-only
   python build_suite.py
@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import argparse
-import fnmatch
+import json
 import os
 import shutil
 import subprocess
@@ -18,13 +18,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 VENDOR = ROOT / "vendor"
 DIST = ROOT / "dist"
+TOOLS = ROOT / "tools"
 
-FA_SRC = Path(r"C:\Users\Administrator\Downloads\备份FA\挤塑板")
-KANZHANG_SRC = Path(r"C:\Users\Administrator\Downloads\看账小工具")
+# 旧版兼容：如果 tools/ 目录不存在，尝试从这些路径同步
+LEGACY_PATHS = {
+    "fa_list": Path(r"C:\Users\Administrator\Downloads\备份FA\挤塑板"),
+    "kanzhang": Path(r"C:\Users\Administrator\Downloads\看账小工具"),
+}
 KANZHANG_ENTRY = "看账小工具+4.0.py"
 
-FA_EXCLUDE_DIRS = {"build", "dist", "__pycache__", ".cursor", ".vscode", ".git"}
-FA_EXCLUDE_GLOBS = [
+EXCLUDE_DIRS = {"build", "dist", "__pycache__", ".cursor", ".vscode", ".git"}
+EXCLUDE_GLOBS = [
     "test_*.py",
     "*_recovered.py",
     "*_restored*.py",
@@ -39,48 +43,70 @@ FA_EXCLUDE_GLOBS = [
 
 
 def _should_skip_file(name: str) -> bool:
-    for pat in FA_EXCLUDE_GLOBS:
+    for pat in EXCLUDE_GLOBS:
+        import fnmatch
         if fnmatch.fnmatch(name, pat):
             return True
     return False
 
 
-def sync_fa_list(dest: Path) -> None:
-    if not FA_SRC.is_dir():
-        raise FileNotFoundError(f"FA 源码目录不存在: {FA_SRC}")
+def _sync_directory(src: Path, dest: Path) -> None:
+    """将 src 目录内容同步到 dest，排除不需要的文件。"""
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
 
-    for dirpath, dirnames, filenames in os.walk(FA_SRC):
-        dirnames[:] = [d for d in dirnames if d not in FA_EXCLUDE_DIRS]
-        rel = Path(dirpath).relative_to(FA_SRC)
+    for dirpath, dirnames, filenames in os.walk(src):
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
+        rel = Path(dirpath).relative_to(src)
         for fname in filenames:
             if _should_skip_file(fname):
                 continue
-            src = Path(dirpath) / fname
+            src_file = Path(dirpath) / fname
             out = dest / rel / fname
             out.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, out)
+            shutil.copy2(src_file, out)
 
 
-def sync_kanzhang(dest: Path) -> None:
-    if not KANZHANG_SRC.is_dir():
-        raise FileNotFoundError(f"看账源码目录不存在: {KANZHANG_SRC}")
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.mkdir(parents=True)
-    src_file = KANZHANG_SRC / KANZHANG_ENTRY
-    if not src_file.is_file():
-        raise FileNotFoundError(src_file)
-    shutil.copy2(src_file, dest / "kanzhang_app.py")
+def sync_tool(tool_id: str, tool_dir: Path, dest: Path) -> None:
+    """同步单个工具到 vendor 目录。"""
+    # 优先使用 tools/ 目录
+    if tool_dir.is_dir():
+        print(f"同步 {tool_id} (从 tools/) ...")
+        _sync_directory(tool_dir, dest)
+        return
+
+    # 回退到旧版路径
+    if tool_id in LEGACY_PATHS:
+        legacy = LEGACY_PATHS[tool_id]
+        if legacy.is_dir():
+            print(f"同步 {tool_id} (从旧版路径) ...")
+            _sync_directory(legacy, dest)
+            return
+
+    print(f"警告: 找不到 {tool_id} 的源码目录，跳过同步")
 
 
 def sync_vendor() -> None:
-    print("同步 vendor/fa_list ...")
-    sync_fa_list(VENDOR / "fa_list")
-    print("同步 vendor/kanzhang ...")
-    sync_kanzhang(VENDOR / "kanzhang")
+    """从 tools/ 目录同步所有工具到 vendor/。"""
+    # 读取 tools.json 获取工具列表
+    config_path = ROOT / "tools.json"
+    if config_path.is_file():
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        tools = config.get("tools", [])
+    else:
+        # 默认同步已知工具
+        tools = [{"vendor_dir": "fa_list"}, {"vendor_dir": "kanzhang"}]
+
+    for tool in tools:
+        vendor_dir = tool.get("vendor_dir", "")
+        if not vendor_dir:
+            continue
+        tool_dir = TOOLS / vendor_dir
+        dest = VENDOR / vendor_dir
+        sync_tool(vendor_dir, tool_dir, dest)
+
     print("vendor 同步完成.")
 
 
@@ -96,21 +122,21 @@ def _latest_exe(folder: Path) -> Path | None:
 
 
 def build_fa_baseline(py: str) -> Path | None:
-    spec = FA_SRC / "main.spec"
+    spec = LEGACY_PATHS.get("fa_list", ROOT) / "main.spec"
     if not spec.is_file():
         print("跳过 FA 基线: 无 main.spec")
         return None
     print("构建 FA 单包基线 ...")
     subprocess.check_call(
         [py, "-m", "PyInstaller", str(spec), "--noconfirm", "--clean"],
-        cwd=str(FA_SRC),
+        cwd=str(spec.parent),
     )
-    return _latest_exe(FA_SRC / "dist")
+    return _latest_exe(spec.parent / "dist")
 
 
 def build_kanzhang_baseline(py: str) -> Path | None:
-    entry = KANZHANG_SRC / KANZHANG_ENTRY
-    if not entry.is_file():
+    src = LEGACY_PATHS.get("kanzhang", ROOT) / KANZHANG_ENTRY
+    if not src.is_file():
         print("跳过看账基线: 入口不存在")
         return None
     print("构建看账单包基线 ...")
@@ -126,11 +152,11 @@ def build_kanzhang_baseline(py: str) -> Path | None:
             "--windowed",
             "--name",
             out_name,
-            str(entry),
+            str(src),
         ],
-        cwd=str(KANZHANG_SRC),
+        cwd=str(src.parent),
     )
-    return _latest_exe(KANZHANG_SRC / "dist")
+    return _latest_exe(src.parent / "dist")
 
 
 def build_suite(py: str) -> Path:
@@ -183,6 +209,11 @@ def main() -> int:
 
     py = sys.executable
     os.chdir(ROOT)
+
+    # 确保 tools/ 目录存在
+    if not TOOLS.is_dir():
+        TOOLS.mkdir(parents=True)
+        print(f"已创建 {TOOLS} 目录，请将子工具源码放入此目录。")
 
     sync_vendor()
     if args.sync_only:

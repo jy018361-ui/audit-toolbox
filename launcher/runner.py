@@ -5,12 +5,30 @@ import importlib.util
 import inspect
 import os
 import sys
+import tkinter as tk
 import traceback
+from pathlib import Path
 from typing import Callable, Optional
 
-from pathlib import Path
-
 from launcher.registry import ToolSpec, resolve_entry_path, resolve_tool_root, suite_root
+
+
+def _get_entry_mode(fn, tool_name: str) -> str:
+    """兼容旧工具 main(parent=None) 与新工具 main(root=None) 两种入口。"""
+    sig = inspect.signature(fn)
+    params = sig.parameters
+
+    if "root" in params:
+        return "root"
+    if "parent" in params:
+        return "parent"
+    if not params:
+        raise TypeError(
+            f"工具「{tool_name}」入口函数 main() 未接受任何参数，无法与 Hub 对接。"
+        )
+    raise TypeError(
+        f"工具「{tool_name}」入口参数不兼容，请使用 main(root=None) 或 main(parent=None)。"
+    )
 
 
 def _purge_tool_modules(tool_root: Path) -> None:
@@ -30,7 +48,7 @@ def launch_tool(
     parent=None,
     on_error: Optional[Callable[[str], None]] = None,
 ) -> None:
-    """启动子工具；Hub 传入 parent 时子窗口为 Toplevel，主界面保持显示。"""
+    """启动子工具；兼容旧 parent 签名和新 root 签名。"""
     tool_root = resolve_tool_root(tool)
     entry_path = resolve_entry_path(tool, tool_root)
     old_cwd = os.getcwd()
@@ -58,11 +76,29 @@ def launch_tool(
 
         try:
             kwargs = {}
-            if parent is not None:
-                sig = inspect.signature(fn)
-                if "parent" in sig.parameters:
+            entry_mode = _get_entry_mode(fn, tool.name)
+            tool_window: tk.Misc | None = None
+            if entry_mode == "parent":
+                if parent is not None:
                     kwargs["parent"] = parent
+            else:
+                if parent is not None:
+                    tool_window = tk.Toplevel(parent)
+                    kwargs["root"] = tool_window
+                else:
+                    kwargs["root"] = tk.Tk()
             fn(**kwargs)
+
+            # 嵌入模式下，runner 兜底等待子工具窗口关闭。
+            # 部分子工具（如 fa_list）在嵌入模式 main() 仅构建 UI 后立即返回，
+            # 若 runner 不等待，调用方（Hub）会以为子工具已结束，立刻恢复主界面，
+            # 导致 Hub 在子工具仍在使用时反复抢前台。
+            if tool_window is not None and parent is not None:
+                try:
+                    if tool_window.winfo_exists():
+                        parent.wait_window(tool_window)
+                except tk.TclError:
+                    pass
         except SystemExit as exc:
             if exc.code not in (0, None) and on_error:
                 on_error(f"工具「{tool.name}」异常退出 (code={exc.code})")

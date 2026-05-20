@@ -14,6 +14,11 @@ dist/
 # vendor 目录（由 build_suite.py --sync-only 生成，不入库）
 vendor/
 
+# 独立模块（各人 git clone，不入库；保留占位与说明）
+modules/*
+!modules/.gitkeep
+!modules/README.md
+
 # IDE 和系统文件
 .vscode/
 .idea/

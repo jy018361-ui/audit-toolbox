@@ -20,7 +20,8 @@ class AddToolApp:
 
         # 项目根目录
         self.project_root = Path(__file__).resolve().parent
-        self.tools_dir = self.project_root / "tools"
+        self.modules_dir = self.project_root / "modules"
+        self.modules_dir.mkdir(parents=True, exist_ok=True)
 
         self._build_ui()
         self.root.mainloop()
@@ -124,7 +125,7 @@ class AddToolApp:
             return
 
         # 创建工具目录
-        tool_dir = self.tools_dir / tool_id
+        tool_dir = self.modules_dir / tool_id
         if tool_dir.exists():
             if not messagebox.askyesno("确认", f"工具目录 '{tool_id}' 已存在，是否覆盖？", parent=self.root):
                 return
@@ -158,7 +159,8 @@ class AddToolApp:
         messagebox.showinfo(
             "成功",
             f"工具 '{name}' 已添加成功！\n\n"
-            f"工具目录: tools/{tool_id}/\n"
+            f"工具目录: modules/{tool_id}/\n"
+            f"（独立仓库模式，该目录默认不入主仓库 Git）\n\n"
             f"入口文件: {script_path.name}\n\n"
             f"重启工具箱即可看到新工具。",
             parent=self.root
@@ -296,7 +298,7 @@ if __name__ == "__main__":
 注意事项
 - 原脚本需要使用 tkinter 创建 GUI
 - 如果有特殊依赖库，需要手动安装
-- 所有文件会被复制到 tools/ 目录
+- 所有文件会被复制到 modules/ 目录（不入主仓库，见 modules/README.md）
 """
         messagebox.showinfo("使用说明", help_text, parent=self.root)
 

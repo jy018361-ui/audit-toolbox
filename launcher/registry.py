@@ -1,4 +1,4 @@
-"""工具注册表：解析 tools.json 与工具根目录（开发 / vendor / 冻结）。"""
+"""工具注册表：解析 tools.json 与工具根目录（vendor / modules / tools / dev_root）。"""
 from __future__ import annotations
 
 import json
@@ -6,6 +6,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional
+
+# 开发时查找子工具源码的顺序（冻结后仅 bundle 内的 vendor/）
+_TOOL_SOURCE_DIRS = ("vendor", "modules", "tools")
 
 
 def suite_root() -> Path:
@@ -22,6 +25,13 @@ def config_path() -> Path:
     return Path(__file__).resolve().parent.parent / "tools.json"
 
 
+def tool_source_roots() -> tuple[str, ...]:
+    """返回当前环境下用于查找工具源码的子目录名。"""
+    if getattr(sys, "frozen", False):
+        return ("vendor",)
+    return _TOOL_SOURCE_DIRS
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     id: str
@@ -36,12 +46,16 @@ class ToolSpec:
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> "ToolSpec":
-        vendor_root = suite_root() / "vendor" / data["vendor_dir"]
+        root = suite_root()
+        vendor_dir = data["vendor_dir"]
         entry_dev = data.get("entry_dev")
         entry_vendor = data.get("entry_vendor")
         entry = data.get("entry")
         if not entry:
-            if vendor_root.is_dir() and entry_vendor:
+            has_vendor_tree = any(
+                (root / sub / vendor_dir).is_dir() for sub in tool_source_roots()
+            )
+            if has_vendor_tree and entry_vendor:
                 entry = entry_vendor
             elif entry_dev:
                 entry = entry_dev
@@ -51,7 +65,7 @@ class ToolSpec:
             id=data["id"],
             name=data["name"],
             description=data.get("description", ""),
-            vendor_dir=data["vendor_dir"],
+            vendor_dir=vendor_dir,
             dev_root=data.get("dev_root"),
             entry=entry,
             callable_name=data.get("callable", "main"),
@@ -79,16 +93,26 @@ def suite_version() -> str:
 
 
 def resolve_tool_root(tool: ToolSpec) -> Path:
-    vendor = suite_root() / "vendor" / tool.vendor_dir
-    if vendor.is_dir():
-        return vendor.resolve()
+    root = suite_root()
+    for sub in tool_source_roots():
+        candidate = root / sub / tool.vendor_dir
+        if candidate.is_dir():
+            return candidate.resolve()
     if tool.dev_root:
         dev = Path(tool.dev_root)
         if dev.is_dir():
             return dev.resolve()
+    frozen = getattr(sys, "frozen", False)
+    hint = (
+        "请执行: python build_suite.py --sync-only"
+        if frozen
+        else (
+            "请在本机 modules/ 下克隆对应仓库（见 modules/README.md），\n"
+            "或放入 tools/，或配置 dev_root，然后执行: python build_suite.py --sync-only"
+        )
+    )
     raise FileNotFoundError(
-        f"找不到工具「{tool.name}」的运行目录。\n"
-        f"请确认 dev_root 存在，或执行: python build_suite.py --sync-only"
+        f"找不到工具「{tool.name}」的运行目录（vendor_dir={tool.vendor_dir}）。\n{hint}"
     )
 
 

@@ -81,11 +81,39 @@ pip install -r requirements.txt
 
 ## 关键约定
 
-### 新增子工具
-1. 在 `tools.json` 的 `tools` 数组中添加条目，指定 `vendor_dir`、`entry`、`callable`
-2. 子工具入口函数需支持 `parent` 参数（被 Hub 调用时传入父窗口）
-3. 在 `build_suite.py` 中添加对应的 `sync_xxx()` 函数
-4. 若依赖新的第三方库，需同步更新 `suite.spec` 的 `hiddenimports` 和 `launcher/bundle_anchor.py`
+### 子工具入口签名（硬性约束，runner 会强制校验）
+
+**唯一支持的签名**：`main(root=None)`
+
+```python
+def main(root=None):
+    is_embedded = root is not None
+    if root is None:
+        root = tk.Tk()
+
+    MyApp(root)  # 构建 UI
+
+    if is_embedded:
+        root.wait_window()  # 等待窗口关闭，禁止调用 mainloop()
+    else:
+        root.mainloop()     # 独立运行时启动事件循环
+```
+
+**runner 的强校验机制**（`launcher/runner.py`）：
+- **签名检查**：入口函数必须接受 `root` 参数。使用旧 `parent` 签名或无参数会被直接拒绝启动，并给出修复提示
+- **禁止模式扫描**：启动前扫描入口源码，检测以下危险模式并打印警告：
+  - `SetProcessDpiAwareness()` — 进程级 DPI 设置，会改变 Hub 分辨率
+  - `.mainloop()` — 可能引发事件循环冲突导致 Hub 卡死
+- **孤儿窗口清理**：工具退出后自动销毁残留的 Toplevel 窗口
+- **模块隔离清理**：移除工具引入的所有模块（`_purge_tool_modules`），避免重复进入时状态污染
+
+**新接入工具的检查清单**：
+1. [ ] 入口函数使用 `main(root=None)` 签名（不接受 `parent` 参数）
+2. [ ] 接收 `root` 时 **不调用 `mainloop()`**，改用 `wait_window()` 或直接返回
+3. [ ] **不调用 `SetProcessDpiAwareness()`**（如需要 DPI 适配，放在 `if __name__ == "__main__"` 块中）
+4. [ ] **不调用 `grab_set()`** 在入口传入的 `root` 窗口上（内部对话框可用）
+5. [ ] **不修改窗口装饰器**（`transient()`、`overrideredirect()`、`attributes('-toolwindow')`）
+6. [ ] 独立运行和嵌入式运行行为一致
 
 ### vendor 目录
 `vendor/` 已被 `.gitignore` 排除，由 `build_suite.py --sync-only` 从外部开发目录同步。开发时可直接编辑 `vendor/` 下的文件，但需注意这些更改不会被版本控制。

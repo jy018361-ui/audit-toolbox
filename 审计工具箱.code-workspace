@@ -1,0 +1,21 @@
+{
+	"folders": [
+		{
+			"name": "审计工具箱",
+			"path": "."
+		},
+		{
+			"name": "Excel-Merger",
+			"path": "modules/Excel-Merger"
+		},
+		{
+			"name": "AI-file",
+			"path": "modules/AI-file"
+		},
+		{
+			"name": "April-tools",
+			"path": "modules/April-tools"
+		}
+	],
+	"settings": {}
+}

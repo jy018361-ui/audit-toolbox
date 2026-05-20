@@ -1201,16 +1201,13 @@ class AuditApp_V70_2:
         if not os.path.exists(self.file_path):
             raise FileNotFoundError(f"shadow Parquet不存在：{self.file_path}")
 
-        raw_df = self._to_pandas_df_safe(pl.read_parquet(self.file_path))
-
-        if raw_df.empty:
-            return raw_df
-
         header_idx = max(0, int(h_idx))
-        if header_idx >= len(raw_df):
+        header_pl = pl.read_parquet(self.file_path, n_rows=header_idx + 1)
+        if header_pl.height == 0 or header_idx >= header_pl.height:
             return pd.DataFrame()
 
-        header_vals = raw_df.iloc[header_idx].tolist()
+        raw_cols = list(header_pl.columns)
+        header_vals = header_pl.row(header_idx)
         seen = {}
         out_cols = []
         for i, v in enumerate(header_vals):
@@ -1225,23 +1222,42 @@ class AuditApp_V70_2:
                 seen[base] += 1
                 out_cols.append(f"{base}.{seen[base]}")
 
-        data_df = raw_df.iloc[header_idx + 1:].copy()
-        data_df.columns = out_cols
-        data_df = data_df.fillna("").astype(str)
-
+        selected_pairs = list(zip(raw_cols, out_cols))
         if usecols is not None:
-            keep_cols = [c for c in usecols if c in data_df.columns]
-            data_df = data_df[keep_cols]
+            use_set = set(usecols)
+            selected_pairs = [(raw, out) for raw, out in selected_pairs if out in use_set]
+        if not selected_pairs:
+            return pd.DataFrame(columns=list(usecols or []))
 
-        if nrows is not None:
-            data_df = data_df.iloc[:nrows]
+        selected_raw_cols = [raw for raw, _ in selected_pairs]
+        selected_out_cols = [out for _, out in selected_pairs]
+
+        def _collect_slice(offset, length=None):
+            scan = pl.scan_parquet(self.file_path).select(selected_raw_cols).slice(header_idx + 1 + offset, length)
+            part = scan.collect()
+            part.columns = selected_out_cols
+            return self._to_pandas_df_safe(part.fill_null("")).astype(str)
 
         if chunksize:
             def _gen():
-                for start in range(0, len(data_df), int(chunksize)):
-                    yield data_df.iloc[start:start + int(chunksize)]
+                start = 0
+                step = int(chunksize)
+                remaining = None if nrows is None else int(nrows)
+                while remaining is None or remaining > 0:
+                    take = step if remaining is None else min(step, remaining)
+                    chunk_df = _collect_slice(start, take)
+                    if chunk_df.empty:
+                        break
+                    yield chunk_df
+                    got = len(chunk_df)
+                    start += got
+                    if remaining is not None:
+                        remaining -= got
+                    if got < take:
+                        break
             return _gen()
-        return data_df
+
+        return _collect_slice(0, None if nrows is None else int(nrows))
 
     def _create_shadow_parquet(self, source_path=None, sheet_name=None):
         temp_dir = tempfile.gettempdir()
@@ -1639,13 +1655,20 @@ class AuditApp_V70_2:
                 else:
                     add_role(role, c)
         c_dr, c_cr = self._find_col_strict("role_dr", cols_lower), self._find_col_strict("role_cr", cols_lower)
+        c_dir = self._find_col_strict("role_dir", cols_lower)
         if c_dr and c_cr:
-            add_role("role_dr", c_dr); add_role("role_cr", c_cr)
-            # 方案B存在时，不再自动映射方案A金额列
+            # 同一列表头同时含有借贷语义时，按方案A方向列处理，不再误判为方案B借贷分列
+            if c_dr == c_cr and self._is_combined_dr_cr_header(c_dr, cols_lower):
+                add_role("role_dir", c_dr)
+                c_amt = self._find_col_strict("role_amt", cols_lower)
+                if c_amt:
+                    add_role("role_amt", c_amt)
+            else:
+                add_role("role_dr", c_dr); add_role("role_cr", c_cr)
+                # 方案B存在时，不再自动映射方案A金额列
         else:
             c_amt = self._find_col_strict("role_amt", cols_lower)
             if c_amt: add_role("role_amt", c_amt)
-        c_dir = self._find_col_strict("role_dir", cols_lower)
         if c_dir: add_role("role_dir", c_dir)
         self.root.after(0, self.update_scheme_status)
 
@@ -1657,6 +1680,12 @@ class AuditApp_V70_2:
             for col in self.full_columns:
                 if kw in cols_lower[str(col)]: return col
         return None
+
+    def _is_combined_dr_cr_header(self, col, cols_lower):
+        normalized = cols_lower.get(str(col), str(col).lower().replace("_", "").replace(" ", ""))
+        has_dr = ("借" in normalized) or ("debit" in normalized)
+        has_cr = ("贷" in normalized) or ("credit" in normalized)
+        return has_dr and has_cr
 
     def build_table(self):
         self.tree.delete(*self.tree.get_children()); self.tree["columns"] = self.full_columns
@@ -2106,7 +2135,7 @@ class AuditApp_V70_2:
         try:
             return pl_df.to_pandas(use_pyarrow_extension_array=False)
         except Exception:
-            return pd.DataFrame(pl_df.to_dicts(), columns=pl_df.columns)
+            return pd.DataFrame(pl_df.to_dict(as_series=False), columns=pl_df.columns)
 
     def _pl_clean_num_series(self, series):
         vals = ["" if v is None else str(v) for v in series.tolist()]
@@ -3023,7 +3052,8 @@ class AuditApp_V70_2:
         if temp_filter_col in pl_df.columns:
             pl_df = pl_df.drop(temp_filter_col)
 
-        df_out = self._to_pandas_df_safe(pl_df)
+        # 后续只需要全量数据的列顺序，避免把清洗后的大表再复制回 pandas。
+        df_out = pd.DataFrame(columns=pl_df.columns)
         df_target = self._to_pandas_df_safe(df_target_pl)
         df_exclude = self._to_pandas_df_safe(df_exclude_pl)
 
@@ -3140,7 +3170,7 @@ class AuditApp_V70_2:
 
             if self.full_cache_ready and self.full_cache_df is not None:
                 if self.full_cache_header_idx == int(self.header_row_idx) and self.full_cache_source_tag == cache_tag:
-                    df = self.full_cache_df.copy(deep=True)
+                    df = self.full_cache_df.copy(deep=False)
                     use_cached = True
                 else:
                     df = self._universal_loader(self.header_row_idx)
@@ -3983,7 +4013,6 @@ class AuditApp_V70_2:
 def main(parent=None):
     if parent is not None:
         win = tk.Toplevel(parent)
-        win.transient(parent)
         app = AuditApp_V70_2(win)
         win.wait_window()
     else:
@@ -3994,11 +4023,4 @@ def main(parent=None):
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
 

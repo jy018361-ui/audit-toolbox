@@ -6,6 +6,7 @@
 
 - **FA List 匹配工具**：固定资产底稿双表匹配、透视与导出
 - **看账小工具**：凭证导入、科目筛选、透视与导出
+- **Excel 批量合并**：独立仓库 [Excel-Merger](https://github.com/JY01013232/Excel-Merger)，克隆到 `modules/excel_merger`
 - **可扩展架构**：轻松添加新的审计工具
 
 ## 快速开始
@@ -56,9 +57,9 @@ audit-toolbox/
 │   ├── registry.py        # 工具注册表
 │   ├── runner.py          # 工具加载器
 │   └── bundle_anchor.py   # 依赖追踪锚点
-├── vendor/                # 子工具源码（gitignore）
-│   ├── fa_list/
-│   └── kanzhang/
+├── modules/               # 独立仓库克隆目录（gitignore 内容，见 modules/README.md）
+├── tools/                 # 可选：主仓内置工具源码（兼容）
+├── vendor/                # 打包用副本（gitignore，由 build_suite 同步）
 └── dist/                  # 打包输出（gitignore）
 ```
 
@@ -78,9 +79,9 @@ audit-toolbox/
 
 #### 快速步骤
 
-1. 在 `tools/` 目录下创建子目录，放入工具源码
-2. 在 `tools.json` 中添加工具配置
-3. 提交代码
+1. 在 `modules/` 下克隆独立仓库（推荐，见 [modules/README.md](modules/README.md)）
+2. 在 `tools.json` 中添加工具配置（可只提交 JSON，不提交模块源码）
+3. 维护者打包：`python build_suite.py`
 
 示例：
 
@@ -119,20 +120,30 @@ launcher.runner.launch_tool()   ← 动态加载子工具
 - `tools.json` 和整个 `vendor/` 目录打包进单文件 exe
 - `bundle_anchor.py` 触发重依赖追踪，确保运行时不缺模块
 
-## 多人协同
+## 多人协同（方式 B：独立仓库 + modules/）
 
 ### 工作流
 
-1. **开发者**：各自在 `tools/` 目录开发子工具，提交到 Git
-2. **打包者**：拉取最新代码，执行 `python build_suite.py` 一键构建
-3. **分发**：将 `dist/审计工具箱.exe` 发给用户
+1. **维护者**：主仓库提供 Hub、`tools.json`、空目录 `modules/`
+2. **各开发者**：在自己的 Git 仓库开发；克隆主项目后执行：
+   ```bash
+   cd modules
+   git clone https://github.com/xxx/你的工具.git <vendor_dir名>
+   ```
+   `vendor_dir名` 必须与 `tools.json` 里该项的 `vendor_dir` 一致。
+3. **注册工具**：向主仓提 PR，**只改 `tools.json`**（不必提交 `modules/` 内代码）
+4. **打包者**：在本机拉齐各 `modules/*` 后执行 `python build_suite.py`
+5. **分发**：将 `dist/审计工具箱.exe` 发给最终用户
 
-### 克隆仓库
+开发时启动器查找顺序：`vendor/` → `modules/` → `tools/` → `dev_root`。
+
+### 克隆主项目
 
 ```bash
 git clone https://github.com/jy018361-ui/audit-toolbox.git
 cd audit-toolbox
 pip install -r requirements.txt
+# 按需克隆子模块到 modules/，见 modules/README.md
 python suite_main.py
 ```
 
@@ -146,9 +157,12 @@ A: 检查 `launcher/bundle_anchor.py` 是否包含该模块的 import，以及 `
 
 A: 使用 `python build_suite.py --sync-only` 同步 vendor，然后运行 `python suite_main.py`。
 
-### Q: vendor 目录和 tools 目录的区别？
+### Q: modules、tools、vendor 有什么区别？
 
-A: `tools/` 在 Git 中托管，是源码；`vendor/` 由 `build_suite.py` 从 `tools/` 同步生成，不入库。
+A:
+- **`modules/`**：各人独立仓库 clone 的位置，**默认不入主仓 Git**
+- **`tools/`**：可选，主仓内置工具源码（兼容旧流程）
+- **`vendor/`**：打包缓存，由 `build_suite.py` 从 `modules/`（优先）或 `tools/` 同步，不入库
 
 ## License
 

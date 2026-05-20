@@ -3,17 +3,21 @@
 
 import os
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 block_cipher = None
 ROOT = Path(SPECPATH)
 VENDOR_FA = ROOT / "vendor" / "fa_list"
 VENDOR_KZ = ROOT / "vendor" / "kanzhang"
+VENDOR_EM = ROOT / "vendor" / "Excel-Merger"
 
 pathex = [str(ROOT)]
 if VENDOR_FA.is_dir():
     pathex.append(str(VENDOR_FA))
 if VENDOR_KZ.is_dir():
     pathex.append(str(VENDOR_KZ))
+if VENDOR_EM.is_dir():
+    pathex.append(str(VENDOR_EM))
 
 hiddenimports = [
     "pandas",
@@ -36,7 +40,9 @@ hiddenimports = [
     "polars",
     "polars._utils",
     "python_calamine",
+    "fastexcel",
 ]
+hiddenimports += collect_submodules("fastexcel")
 
 excludes = [
     "matplotlib",
@@ -75,13 +81,15 @@ excludes = [
 ]
 
 datas = [(str(ROOT / "tools.json"), ".")]
+datas += collect_data_files("fastexcel")
+binaries = collect_dynamic_libs("fastexcel")
 if (ROOT / "vendor").is_dir():
     datas.append((str(ROOT / "vendor"), "vendor"))
 
 a = Analysis(
     ["suite_main.py"],
     pathex=pathex,
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

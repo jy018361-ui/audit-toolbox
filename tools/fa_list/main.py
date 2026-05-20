@@ -7,25 +7,26 @@ from tkinter import messagebox
 from gui.main_window import MainWindow
 
 
-def main(parent=None):
-    """主函数。parent 为工具箱 Hub 窗口时，子工具以 Toplevel 打开且不关闭 Hub。"""
+def main(root=None):
+    """主函数。root 为 runner 传入的窗口，独立运行时自己创建。"""
+    own_root = root is None
     try:
-        if parent is not None:
-            win = tk.Toplevel(parent)
-            win.transient(parent)
-            app = MainWindow(root=win)
-            app.run()
-        else:
-            app = MainWindow()
+        if own_root:
+            root = tk.Tk()
+        app = MainWindow(root=root)
+        if own_root:
             app.run()
     except Exception as e:
         # 显示错误信息
-        root = tk.Tk()
-        root.withdraw()  # 隐藏主窗口
+        err_root = root if root is not None and root.winfo_exists() else tk.Tk()
+        if err_root is not root:
+            err_root.withdraw()
         messagebox.showerror(
             "启动错误",
             f"应用程序启动失败:\n{str(e)}\n\n请检查依赖包是否已正确安装。"
-        )
+        , parent=err_root)
+        if err_root is not root and err_root.winfo_exists():
+            err_root.destroy()
         return
 
 

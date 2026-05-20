@@ -336,14 +336,30 @@ class FileAndMatchConfig(ttk.Frame):
         mapping_frame.grid(row=1, column=1, sticky="nsew", padx=(2, 5), pady=(2, 0))
         mapping_frame.grid_propagate(False)  # 锁定区域大小
         
-        mapping_canvas = tk.Canvas(mapping_frame)
+        # 取 ttk 主题的 Frame 背景色，保证 canvas 与 ttk 控件视觉一致
+        # （Toplevel 与 Tk 根窗口共享同一 Tcl 解释器，但 canvas 默认背景在不同宿主下
+        #   渲染上下文有差异，显式指定可消除差异并避免 Combobox 退化为按钮外观）
+        _style = ttk.Style()
+        _canvas_bg = _style.lookup('TFrame', 'background') or 'SystemButtonFace'
+
+        mapping_canvas = tk.Canvas(
+            mapping_frame,
+            bg=_canvas_bg,
+            highlightthickness=0,
+            bd=0,
+        )
         mapping_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         mapping_scrollbar = ttk.Scrollbar(mapping_frame, orient=tk.VERTICAL, command=mapping_canvas.yview)
         mapping_canvas.configure(yscrollcommand=mapping_scrollbar.set)
         mapping_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         mapping_inner = ttk.Frame(mapping_canvas)
-        mapping_canvas.create_window((0, 0), window=mapping_inner, anchor='nw')
+        _mapping_window = mapping_canvas.create_window((0, 0), window=mapping_inner, anchor='nw')
+
+        # 让内部 Frame 宽度随 canvas 宽度自适应，避免右侧留白
+        def _on_canvas_resize(event, canvas=mapping_canvas, win_id=_mapping_window):
+            canvas.itemconfig(win_id, width=event.width)
+        mapping_canvas.bind('<Configure>', _on_canvas_resize)
         self.mapping_row_frames = {}
         self.mapping_row_controls = {}
         
@@ -438,6 +454,11 @@ class FileAndMatchConfig(ttk.Frame):
         
         mapping_inner.update_idletasks()
         mapping_canvas.configure(scrollregion=mapping_canvas.bbox('all'))
+
+        # 当内部 Frame 尺寸变化时更新 scrollregion
+        def _update_scrollregion(event, canvas=mapping_canvas):
+            canvas.configure(scrollregion=canvas.bbox('all'))
+        mapping_inner.bind('<Configure>', _update_scrollregion)
         
         def on_mousewheel(event):
             mapping_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")

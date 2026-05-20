@@ -20,6 +20,38 @@
       "entry_dev": "看账小工具+4.0.py",
       "entry_vendor": "kanzhang_app.py",
       "callable": "main"
+    },
+    {
+      "id": "ts_manager",
+      "name": "TS 管理",
+      "description": "默认读取timesheet云数据，工时统计系统 - 智能列选择、筛选与导出",
+      "vendor_dir": "TS",
+      "entry": "main.py",
+      "callable": "main"
+    },
+    {
+      "id": "confirmation_progress",
+      "name": "函证进度小能手",
+      "description": "选中函证列表，实现银行/往来函证统计、汇总与报告生成",
+      "vendor_dir": "confirmation_progress",
+      "entry": "confirmation_app.py",
+      "callable": "main"
+    },
+    {
+      "id": "Excel_Merger",
+      "name": "Excel 批量合并",
+      "description": "批量合并多个 Excel/CSV，按 Sheet 名称匹配或全部堆叠",
+      "vendor_dir": "Excel-Merger",
+      "entry": "main.py",
+      "callable": "main"
+    },
+    {
+      "id": "file_list_directory",
+      "name": "文件夹超链接清单",
+      "description": "扫描选定文件夹并导出 Excel 清单，按层级列出文件夹结构与可点击超链接",
+      "vendor_dir": "file-list-directory",
+      "entry": "main.py",
+      "callable": "main"
     }
   ]
 }

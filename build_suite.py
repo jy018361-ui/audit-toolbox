@@ -19,8 +19,9 @@ ROOT = Path(__file__).resolve().parent
 VENDOR = ROOT / "vendor"
 DIST = ROOT / "dist"
 TOOLS = ROOT / "tools"
+MODULES = ROOT / "modules"
 
-# 旧版兼容：如果 tools/ 目录不存在，尝试从这些路径同步
+# 旧版兼容：modules/、tools/ 均无时，尝试从这些路径同步
 LEGACY_PATHS = {
     "fa_list": Path(r"C:\Users\Administrator\Downloads\备份FA\挤塑板"),
     "kanzhang": Path(r"C:\Users\Administrator\Downloads\看账小工具"),
@@ -68,44 +69,48 @@ def _sync_directory(src: Path, dest: Path) -> None:
             shutil.copy2(src_file, out)
 
 
-def sync_tool(tool_id: str, tool_dir: Path, dest: Path) -> None:
-    """同步单个工具到 vendor 目录。"""
-    # 优先使用 tools/ 目录
-    if tool_dir.is_dir():
-        print(f"同步 {tool_id} (从 tools/) ...")
-        _sync_directory(tool_dir, dest)
-        return
-
-    # 回退到旧版路径
+def _find_tool_source(tool_id: str) -> tuple[Path | None, str]:
+    """按 modules → tools → 旧版路径 查找源码目录。"""
+    modules_dir = MODULES / tool_id
+    if modules_dir.is_dir():
+        return modules_dir, "modules"
+    tools_dir = TOOLS / tool_id
+    if tools_dir.is_dir():
+        return tools_dir, "tools"
     if tool_id in LEGACY_PATHS:
         legacy = LEGACY_PATHS[tool_id]
         if legacy.is_dir():
-            print(f"同步 {tool_id} (从旧版路径) ...")
-            _sync_directory(legacy, dest)
-            return
+            return legacy, "legacy"
+    return None, ""
 
-    print(f"警告: 找不到 {tool_id} 的源码目录，跳过同步")
+
+def sync_tool(tool_id: str, dest: Path) -> None:
+    """同步单个工具到 vendor 目录。"""
+    src, label = _find_tool_source(tool_id)
+    if src is not None:
+        print(f"同步 {tool_id} (从 {label}/) ...")
+        _sync_directory(src, dest)
+        return
+
+    print(f"警告: 找不到 {tool_id} 的源码（请放入 modules/{tool_id} 或 tools/{tool_id}），跳过同步")
 
 
 def sync_vendor() -> None:
-    """从 tools/ 目录同步所有工具到 vendor/。"""
-    # 读取 tools.json 获取工具列表
+    """从 modules/、tools/ 或旧版路径同步所有工具到 vendor/。"""
     config_path = ROOT / "tools.json"
     if config_path.is_file():
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
         tools = config.get("tools", [])
     else:
-        # 默认同步已知工具
         tools = [{"vendor_dir": "fa_list"}, {"vendor_dir": "kanzhang"}]
 
     for tool in tools:
         vendor_dir = tool.get("vendor_dir", "")
         if not vendor_dir:
             continue
-        tool_dir = TOOLS / vendor_dir
         dest = VENDOR / vendor_dir
-        sync_tool(vendor_dir, tool_dir, dest)
+        sync_tool(vendor_dir, dest)
 
     print("vendor 同步完成.")
 
@@ -210,10 +215,11 @@ def main() -> int:
     py = sys.executable
     os.chdir(ROOT)
 
-    # 确保 tools/ 目录存在
+    if not MODULES.is_dir():
+        MODULES.mkdir(parents=True)
+        (MODULES / ".gitkeep").touch(exist_ok=True)
     if not TOOLS.is_dir():
         TOOLS.mkdir(parents=True)
-        print(f"已创建 {TOOLS} 目录，请将子工具源码放入此目录。")
 
     sync_vendor()
     if args.sync_only:

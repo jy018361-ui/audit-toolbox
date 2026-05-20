@@ -8,7 +8,6 @@ __pycache__/
 
 # 构建产物
 build/
-dist/
 *.spec.bak
 
 # vendor 目录（由 build_suite.py --sync-only 生成，不入库）

@@ -65,6 +65,24 @@ class SummaryGenerator:
         return pd.Series([default] * len(df), index=df.index)
 
     @staticmethod
+    def _build_composite_key_series(df: pd.DataFrame, cols: List[str]) -> pd.Series:
+        """按匹配列构造组键；仅用于组级分摊，不改变原始匹配结果。"""
+        valid_cols = [c for c in (cols or []) if c in df.columns]
+        if not valid_cols:
+            return pd.Series([""] * len(df), index=df.index)
+        parts = []
+        for col in valid_cols:
+            parts.append(
+                df[col]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+            )
+        if len(parts) == 1:
+            return parts[0]
+        return pd.concat(parts, axis=1).agg("|||".join, axis=1)
+
+    @staticmethod
     def _ordered_unique(values: List[str]) -> List[str]:
         seen = set()
         ordered = []
@@ -288,6 +306,9 @@ class SummaryGenerator:
         disposal_orig_col2: Optional[str] = None,
         disposal_dep_col1: Optional[str] = None,
         disposal_dep_col2: Optional[str] = None,
+        match_col: Optional[str] = None,
+        match_cols: Optional[List[str]] = None,
+        disposal_bkd_df: Optional[pd.DataFrame] = None,
         extended_mode: bool = False,
         use_supplement_lists: bool = True,
     ) -> Tuple[bool, str, Optional[Dict]]:
@@ -466,6 +487,27 @@ class SummaryGenerator:
             else:
                 dep_change = dep1 - dep2
 
+            group_dep_base_abs = dep1.abs().astype(float)
+            group_key_cols = list(match_cols or [])
+            if not group_key_cols and match_col:
+                group_key_cols = [match_col]
+            group_key_cols = [c for c in group_key_cols if c in work_df.columns]
+            if group_key_cols:
+                group_key = self._build_composite_key_series(work_df, group_key_cols)
+                valid_group = group_key != ""
+                if valid_group.any():
+                    group_size = group_key[valid_group].groupby(group_key[valid_group]).transform("size")
+                    group_orig1_abs = orig1.abs().loc[valid_group].groupby(group_key[valid_group]).transform("sum")
+                    group_dep1_abs = dep1.abs().loc[valid_group].groupby(group_key[valid_group]).transform("sum")
+                    multi_idx = group_size[group_size > 1].index
+                    target_idx = multi_idx[group_orig1_abs.loc[multi_idx] > 0]
+                    if len(target_idx) > 0:
+                        ratio = (
+                            orig_change.abs().loc[target_idx]
+                            / group_orig1_abs.loc[target_idx]
+                        ).clip(upper=1.0)
+                        group_dep_base_abs.loc[target_idx] = group_dep1_abs.loc[target_idx] * ratio
+
             if "原值变动类型" in work_df.columns:
                 change_type = work_df["原值变动类型"].astype(str)
             else:
@@ -533,8 +575,14 @@ class SummaryGenerator:
             if has_disposal_amount_mapping:
                 disp_orig_raw = self._pick_series(work_df, disposal_orig_col1, disposal_orig_col2, "")
                 disp_dep_raw = self._pick_series(work_df, disposal_dep_col1, disposal_dep_col2, "")
-                disp_orig_amount = disp_orig_raw.apply(_to_numeric_or_nan)
-                disp_dep_amount = disp_dep_raw.apply(_to_numeric_or_nan)
+                disp_orig_amount = pd.to_numeric(
+                    disp_orig_raw.astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False),
+                    errors="coerce",
+                )
+                disp_dep_amount = pd.to_numeric(
+                    disp_dep_raw.astype(str).str.replace(",", "", regex=False).str.replace(" ", "", regex=False),
+                    errors="coerce",
+                )
 
             category_data: Dict[str, defaultdict] = defaultdict(lambda: defaultdict(float))
 
@@ -679,7 +727,33 @@ class SummaryGenerator:
                     "cat": cat1_series.where(cat1_series != "未分类", final_cat_series),
                 }
             )[dec_mask]
-            if not dep_adj_method_df.empty:
+            used_disposal_bkd_for_dep_split = False
+            if disposal_bkd_df is not None and not disposal_bkd_df.empty and "年初累计折旧" in disposal_bkd_df.columns:
+                bkd = disposal_bkd_df.copy()
+                cat_col = "资产类别" if "资产类别" in bkd.columns else None
+                method_col = "处置方式" if "处置方式" in bkd.columns else None
+                has_disp_dep_mapping = use_supplement_lists and bool(
+                    (disposal_dep_col1 and disposal_dep_col1 in work_df.columns)
+                    or (disposal_dep_col2 and disposal_dep_col2 in work_df.columns)
+                )
+                bkd_amount_col = "处置折旧" if has_disp_dep_mapping and "处置折旧" in bkd.columns else "年初累计折旧"
+                bkd["cat"] = bkd[cat_col].apply(lambda v: self._normalize_text(v, "未分类")) if cat_col else "未分类"
+                bkd["method"] = bkd[method_col].apply(lambda v: self._normalize_text(v, "未标注处置方式")) if method_col else "未标注处置方式"
+                bkd["method"] = bkd["method"].apply(
+                    lambda v: "未标注处置方式"
+                    if self._normalize_text(v, "").lower() in {"", "0", "0.0", "nan", "none", "null"}
+                    else self._normalize_text(v, "未标注处置方式")
+                )
+                bkd["amount"] = self._safe_numeric_series(bkd[bkd_amount_col]).abs()
+                if not bkd.empty:
+                    disposal_methods = self._ordered_unique([self._normalize_text(v, "未标注处置方式") for v in bkd["method"].tolist()])
+                    bkd_method = bkd.groupby(["cat", "method"])["amount"].sum()
+                    for (cat, method), val in bkd_method.items():
+                        m = self._normalize_text(method, "未标注处置方式")
+                        category_data[cat][f"depreciation_adjustment_by_method::{m}"] += float(val)
+                    used_disposal_bkd_for_dep_split = True
+
+            if not used_disposal_bkd_for_dep_split and not dep_adj_method_df.empty:
                 if has_disp_method_mapping and disp_method_series is not None:
                     dep_adj_method_df["method"] = disp_method_series.loc[dep_adj_method_df.index]
                     invalid_method_mask = method_unmarked_mask.loc[dep_adj_method_df.index]
@@ -693,16 +767,7 @@ class SummaryGenerator:
                 # - 原值修改（部分处置）：比例 = abs(原值变动) / abs(年初原值)
                 # - 取不到年初原值或为 0 时退回全额（比例=1），避免误算
                 idx_for_dep = dep_adj_method_df.index
-                full_dep_abs = dep1.loc[idx_for_dep].abs().astype(float)
-                orig1_abs = orig1.loc[idx_for_dep].abs().astype(float)
-                orig_change_abs = orig_change.loc[idx_for_dep].abs().astype(float)
-                ratio = pd.Series(1.0, index=idx_for_dep, dtype="float64")
-                positive_orig1 = orig1_abs > 0
-                ratio.loc[positive_orig1] = (
-                    orig_change_abs.loc[positive_orig1] / orig1_abs.loc[positive_orig1]
-                ).clip(upper=1.0)
-                base_dep_abs = (full_dep_abs * ratio).astype(float)
-                dep_adj_method_df["amount"] = base_dep_abs
+                dep_adj_method_df["amount"] = group_dep_base_abs.loc[idx_for_dep].astype(float)
                 if has_disposal_amount_mapping and disp_dep_amount is not None:
                     dep_amt = disp_dep_amount.loc[dep_adj_method_df.index]
                     dep_abs = dep_amt.abs()

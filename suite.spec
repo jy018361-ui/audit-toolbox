@@ -7,17 +7,17 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 
 block_cipher = None
 ROOT = Path(SPECPATH)
-VENDOR_FA = ROOT / "vendor" / "fa_list"
-VENDOR_KZ = ROOT / "vendor" / "kanzhang"
-VENDOR_EM = ROOT / "vendor" / "Excel-Merger"
+TOOLS_DIR = ROOT / "tools"
+MODULES_DIR = ROOT / "modules"
 
 pathex = [str(ROOT)]
-if VENDOR_FA.is_dir():
-    pathex.append(str(VENDOR_FA))
-if VENDOR_KZ.is_dir():
-    pathex.append(str(VENDOR_KZ))
-if VENDOR_EM.is_dir():
-    pathex.append(str(VENDOR_EM))
+
+# 将 tools/ 和 modules/ 下所有子目录加入 path，供 PyInstaller 追踪导入
+for base in (TOOLS_DIR, MODULES_DIR):
+    if base.is_dir():
+        for sub in base.iterdir():
+            if sub.is_dir() and sub.name != "__pycache__":
+                pathex.append(str(sub))
 
 hiddenimports = [
     "pandas",
@@ -83,8 +83,10 @@ excludes = [
 datas = [(str(ROOT / "tools.json"), ".")]
 datas += collect_data_files("fastexcel")
 binaries = collect_dynamic_libs("fastexcel")
-if (ROOT / "vendor").is_dir():
-    datas.append((str(ROOT / "vendor"), "vendor"))
+if TOOLS_DIR.is_dir():
+    datas.append((str(TOOLS_DIR), "tools"))
+if MODULES_DIR.is_dir():
+    datas.append((str(MODULES_DIR), "modules"))
 
 a = Analysis(
     ["suite_main.py"],

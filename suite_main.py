@@ -20,32 +20,10 @@ if str(_SUITE_ROOT) not in sys.path:
     sys.path.insert(0, str(_SUITE_ROOT))
 
 
-def _ensure_vendor() -> None:
-    """开发模式下若 vendor 缺失则自动同步（便于首次运行）。"""
-    if getattr(sys, "frozen", False):
-        return
-    try:
-        from launcher.registry import load_tools, resolve_tool_root
-
-        for tool in load_tools():
-            resolve_tool_root(tool)
-        return
-    except FileNotFoundError:
-        pass
-    try:
-        from build_suite import sync_vendor
-
-        print("首次运行：正在从 modules/ 或 tools/ 同步 vendor ...")
-        sync_vendor()
-    except Exception as exc:
-        print(f"vendor 自动同步失败（将尝试 modules/、tools/ 或 dev_root）: {exc}")
-
-
 def main() -> None:
     from launcher.bundle_anchor import touch_bundle_deps
     from launcher.hub_window import HubWindow
 
-    _ensure_vendor()
     touch_bundle_deps()
     app = HubWindow()
     app.run()

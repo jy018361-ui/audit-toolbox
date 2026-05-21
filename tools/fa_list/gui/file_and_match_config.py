@@ -1538,7 +1538,7 @@ class FileAndMatchConfig(ttk.Frame):
         # 精确匹配关键词（优先）
         life_exact_keywords = ['使用寿命', '预计寿命', '使用年限']
         # 包含匹配关键词（次优先）
-        life_contain_keywords = ['寿命', '年限','计划']
+        life_contain_keywords = ['寿命', '年限','计划','预计']
         def _life_col_allowed(col):
             return '剩余' not in str(col)
         
@@ -1693,9 +1693,6 @@ class FileAndMatchConfig(ttk.Frame):
         dialog.grab_set()
         
         ttk.Label(dialog, text="请选择列:", font=("Arial", 10)).pack(pady=10)
-
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
         
         list_frame = ttk.Frame(dialog)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -1721,6 +1718,9 @@ class FileAndMatchConfig(ttk.Frame):
                 # 其他列：选中当前值
                 if col == current_col:
                     listbox.selection_set(tk.END)
+        
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=10)
         
         def on_ok():
             selection = listbox.curselection()
@@ -1802,7 +1802,7 @@ class FileAndMatchConfig(ttk.Frame):
         def on_cancel():
             dialog.destroy()
         
-        ttk.Button(button_frame, text="确定", command=on_ok, width=10).pack(side=tk.LEFT, padx=8)
+        ttk.Button(button_frame, text="确定", command=on_ok, width=10).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="取消", command=on_cancel, width=10).pack(side=tk.LEFT, padx=5)
         
         listbox.bind('<Double-Button-1>', lambda e: on_ok())

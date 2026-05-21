@@ -1862,13 +1862,20 @@ class AuditApp_V70_2:
             canvas.itemconfig(role_window, width=canvas.winfo_width())
             canvas.configure(scrollregion=canvas.bbox("all"))
 
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
         role_frame.bind("<Configure>", _sync_scrollregion)
         canvas.bind("<Configure>", _sync_scrollregion)
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        role_frame.bind("<MouseWheel>", _on_mousewheel)
         current_roles = self.column_mapping.get(col, set())
         vars_map = {}
         for label, role_code in self.ROLES.items():
             var = tk.BooleanVar(value=(role_code in current_roles))
-            tk.Checkbutton(role_frame, text=label, variable=var).pack(anchor="w", padx=20, pady=2)
+            cb = tk.Checkbutton(role_frame, text=label, variable=var)
+            cb.pack(anchor="w", padx=20, pady=2)
+            cb.bind("<MouseWheel>", _on_mousewheel)
             vars_map[role_code] = var
         def confirm():
             new = {r for r, v in vars_map.items() if v.get()}
@@ -3091,6 +3098,26 @@ class AuditApp_V70_2:
         safe_batch = re.sub(r"\s+", "_", safe_batch) or f"批次{idx}"
         return f"{base_name}_{idx:02d}_{safe_batch}{ext}"
 
+    def _build_default_save_name(self, ext=".csv"):
+        src = self.real_xlsx_path or self.file_path or ""
+        stem = os.path.splitext(os.path.basename(src))[0] if src else "未命名"
+        parts = ["看账导出", stem]
+        if self.current_sheet_name not in (None, 0, "0"):
+            parts.append(f"工作表{self.current_sheet_name}")
+        parts.append(datetime.now().strftime("%Y%m%d_%H%M%S"))
+        raw_name = "_".join(str(p).strip() for p in parts if str(p).strip())
+        safe_name = re.sub(r'[\\/:*?"<>|]+', "_", raw_name)
+        safe_name = re.sub(r"\s+", "_", safe_name).strip("._ ") or "看账导出"
+        return f"{safe_name}{ext}"
+
+    def _default_save_initialdir(self):
+        src = self.real_xlsx_path or self.file_path
+        if src:
+            folder = os.path.dirname(os.path.abspath(src))
+            if os.path.isdir(folder):
+                return folder
+        return None
+
     def _preprocess_and_filter_with_polars(self, df, map_inv):
         if not HAS_POLARS:
             raise RuntimeError("polars不可用")
@@ -4137,7 +4164,15 @@ class AuditApp_V70_2:
 
     def _ask_save_ui(self):
         # 默认导出格式改为CSV，提高导出速度
-        self.user_save_path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv"), ("Excel", "*.xlsx")])
+        initialdir = self._default_save_initialdir()
+        kwargs = {
+            "defaultextension": ".csv",
+            "filetypes": [("CSV", "*.csv"), ("Excel", "*.xlsx")],
+            "initialfile": self._build_default_save_name(".csv"),
+        }
+        if initialdir:
+            kwargs["initialdir"] = initialdir
+        self.user_save_path = filedialog.asksaveasfilename(**kwargs)
         self.thread_event.set()
 
 def main(parent=None):

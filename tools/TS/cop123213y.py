@@ -242,7 +242,7 @@ class ProgressWindow(tk.Toplevel):
 class TimesheetPivotApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Timesheet Pivot Tool (JE Net 风格)")
+        self.root.title("Timesheet Pivot Tool ( !!!导出需要5分钟!!!)")
         self._init_window_geometry()
 
         self.folder_var = tk.StringVar(value=DEFAULT_FOLDER)

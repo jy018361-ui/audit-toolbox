@@ -21,8 +21,14 @@ class _NoopProgress:
         return None
 
 
-def _to_excel_file_url(file_path):
-    return Path(file_path).resolve().as_uri()
+def _escape_excel_formula_text(value):
+    return str(value).replace('"', '""')
+
+
+def _to_excel_hyperlink_formula(file_path, display_text):
+    target = _escape_excel_formula_text(Path(file_path).resolve())
+    label = _escape_excel_formula_text(display_text)
+    return f'=HYPERLINK("{target}","{label}")'
 
 
 def list_all_files_in_folder(folder_path, workbook, worksheet):
@@ -50,6 +56,7 @@ def list_all_files_in_folder(folder_path, workbook, worksheet):
     worksheet.write(0, col, '文件路径')
 
     row = 1  # 从第二行开始写入数据，第一行是标题
+    hyperlink_format = workbook.add_format({'font_color': 'blue', 'underline': 1})
 
     # 计算文件夹中的文件总数
     total_files = 0
@@ -95,10 +102,9 @@ def list_all_files_in_folder(folder_path, workbook, worksheet):
                 worksheet.write(row, col, file_name)
                 col += 1
 
-                # xlsxwriter 需要标准 URL；Windows 本地路径需先转成 file:/// URI
-                file_url = _to_excel_file_url(file_path)
+                formula = _to_excel_hyperlink_formula(file_path, file_name)
                 try:
-                    worksheet.write_url(row, col, file_url, string=file_name, tip=file_path)
+                    worksheet.write_formula(row, col, formula, hyperlink_format, file_name)
                 except ValueError:
                     worksheet.write(row, col, file_name)
                 col += 1

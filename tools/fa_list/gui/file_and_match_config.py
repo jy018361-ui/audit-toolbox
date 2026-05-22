@@ -110,6 +110,16 @@ class FileAndMatchConfig(ttk.Frame):
         else:
             # CSV文件没有sheet，只显示文件名
             return file_name
+
+    @staticmethod
+    def _shorten_for_ui(text: str, max_len: int = 16) -> str:
+        """将较长文本截断为适合标签显示的短文本，避免挤压布局。"""
+        if text is None:
+            return ""
+        text = str(text).strip()
+        if len(text) <= max_len:
+            return text
+        return text[: max_len - 2] + ".."
     
     def _create_widgets(self):
         """创建界面组件"""
@@ -169,22 +179,39 @@ class FileAndMatchConfig(ttk.Frame):
         lbl_suggest.pack(side=tk.LEFT)
         lbl_suggest.bind("<Button-1>", lambda e: _open_mailto("FA List匹配工具 - 功能建议", "我的建议如下：[]"))
         
-        # 主容器：使用grid布局，左右两列
-        # 左侧列：文件选择（上） + 文件预览（下）
-        # 右侧列：匹配列配置（上） + 字段映射配置（下）
+        # 主容器：左右列使用固定比例分配，避免导入后被长路径或预览表格撑宽。
         main_container = ttk.Frame(self)
         main_container.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
-        
-        # 设置列权重，左右各占一半，固定最小宽度
-        main_container.columnconfigure(0, weight=1, minsize=450)  # 左列：文件选择+预览
-        main_container.columnconfigure(1, weight=1, minsize=450)  # 右列：匹配列+字段映射
-        main_container.rowconfigure(0, weight=0, minsize=100)  # 上行：固定高度
-        main_container.rowconfigure(1, weight=1, minsize=300)  # 下行：可扩展
+
+        left_container = ttk.Frame(main_container)
+        right_container = ttk.Frame(main_container)
+
+        def _layout_main_columns(event=None):
+            total_width = main_container.winfo_width()
+            total_height = main_container.winfo_height()
+            if total_width <= 1 or total_height <= 1:
+                return
+            # 右侧需要同时展示字段名、文件1、文件2三列，优先保证映射区完整可见。
+            right_width = max(640, min(760, int(total_width * 0.42)))
+            if total_width < 1180:
+                right_width = max(520, int(total_width * 0.48))
+            left_width = max(1, total_width - right_width - 8)
+            left_container.place(x=0, y=0, width=left_width, height=total_height)
+            right_container.place(x=left_width + 8, y=0, width=right_width, height=total_height)
+
+        main_container.bind("<Configure>", _layout_main_columns)
+
+        left_container.columnconfigure(0, weight=1)
+        left_container.rowconfigure(0, weight=0, minsize=100)
+        left_container.rowconfigure(1, weight=1, minsize=300)
+        right_container.columnconfigure(0, weight=1)
+        right_container.rowconfigure(0, weight=0, minsize=130)
+        right_container.rowconfigure(1, weight=1, minsize=300)
         
         # ==================== 左上：文件选择区域 ====================
-        file_frame = ttk.LabelFrame(main_container, text="文件选择", padding="5")
+        file_frame = ttk.LabelFrame(left_container, text="文件选择", padding="5")
+        file_frame.grid_propagate(False)  # 锁定区域大小（必须在grid之前设置，避免初始布局受子控件影响）
         file_frame.grid(row=0, column=0, sticky="nsew", padx=(5, 2), pady=(0, 2))
-        file_frame.grid_propagate(False)  # 锁定区域大小
         
         # 添加提示信息
         tip_label = ttk.Label(
@@ -224,9 +251,9 @@ class FileAndMatchConfig(ttk.Frame):
         self.file2_sheet_combo.bind('<<ComboboxSelected>>', lambda e: self._load_file2())
         
         # ==================== 右上：匹配列配置区域 ====================
-        match_frame = ttk.LabelFrame(main_container, text="匹配列配置（按ctrl可多选）", padding="5")
-        match_frame.grid(row=0, column=1, sticky="nsew", padx=(2, 5), pady=(0, 2))
-        match_frame.grid_propagate(False)  # 锁定区域大小
+        match_frame = ttk.LabelFrame(right_container, text="匹配列配置（按ctrl可多选）", padding="5")
+        match_frame.grid_propagate(False)  # 锁定区域大小（必须在grid之前设置，避免初始布局受子控件影响）
+        match_frame.grid(row=0, column=0, sticky="nsew", padx=(2, 5), pady=(0, 2))
         
         match_col_frame = ttk.Frame(match_frame)
         match_col_frame.pack(fill=tk.BOTH, expand=True, pady=2)
@@ -274,9 +301,9 @@ class FileAndMatchConfig(ttk.Frame):
         ttk.Combobox(data_type_frame, textvariable=self.data_type2_var, values=["auto", "text", "number", "date"], state="readonly", width=8).pack(side=tk.LEFT, padx=2)
         
         # ==================== 左下：文件预览区域 ====================
-        preview_frame = ttk.LabelFrame(main_container, text="文件预览（底部滚动条或 Shift+滚轮 可左右滑动）", padding="5")
+        preview_frame = ttk.LabelFrame(left_container, text="文件预览（底部滚动条或 Shift+滚轮 可左右滑动）", padding="5")
+        preview_frame.grid_propagate(False)  # 锁定区域大小（必须在grid之前设置，避免初始布局受子控件影响）
         preview_frame.grid(row=1, column=0, sticky="nsew", padx=(5, 2), pady=(2, 0))
-        preview_frame.grid_propagate(False)  # 锁定区域大小
         
         self.preview_notebook = ttk.Notebook(preview_frame)
         self.preview_notebook.pack(fill=tk.BOTH, expand=True)
@@ -332,9 +359,9 @@ class FileAndMatchConfig(ttk.Frame):
         self.file2_tree.bind('<Shift-MouseWheel>', lambda e: _on_shift_wheel_hscroll(self.file2_tree, e))
         
         # ==================== 右下：字段映射配置区域 ====================
-        mapping_frame = ttk.LabelFrame(main_container, text="字段映射配置（自动预映射，可手动调整）", padding="5")
-        mapping_frame.grid(row=1, column=1, sticky="nsew", padx=(2, 5), pady=(2, 0))
-        mapping_frame.grid_propagate(False)  # 锁定区域大小
+        mapping_frame = ttk.LabelFrame(right_container, text="字段映射配置（自动预映射，可手动调整）", padding="5")
+        mapping_frame.grid_propagate(False)  # 锁定区域大小（必须在grid之前设置，避免初始布局受子控件影响）
+        mapping_frame.grid(row=1, column=0, sticky="nsew", padx=(2, 5), pady=(2, 0))
         
         # 取 ttk 主题的 Frame 背景色，保证 canvas 与 ttk 控件视觉一致
         # （Toplevel 与 Tk 根窗口共享同一 Tcl 解释器，但 canvas 默认背景在不同宿主下
@@ -348,18 +375,30 @@ class FileAndMatchConfig(ttk.Frame):
             highlightthickness=0,
             bd=0,
         )
-        mapping_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        mapping_hscrollbar = ttk.Scrollbar(mapping_frame, orient=tk.HORIZONTAL, command=mapping_canvas.xview)
         mapping_scrollbar = ttk.Scrollbar(mapping_frame, orient=tk.VERTICAL, command=mapping_canvas.yview)
-        mapping_canvas.configure(yscrollcommand=mapping_scrollbar.set)
+        mapping_canvas.configure(xscrollcommand=mapping_hscrollbar.set, yscrollcommand=mapping_scrollbar.set)
+        mapping_hscrollbar.pack(side=tk.BOTTOM, fill=tk.X)
         mapping_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        mapping_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
         mapping_inner = ttk.Frame(mapping_canvas)
         _mapping_window = mapping_canvas.create_window((0, 0), window=mapping_inner, anchor='nw')
 
-        # 让内部 Frame 宽度随 canvas 宽度自适应，避免右侧留白
+        def _update_mapping_scrollregion(event=None, canvas=mapping_canvas, win_id=_mapping_window):
+            required_width = mapping_inner.winfo_reqwidth()
+            canvas_width = canvas.winfo_width()
+            canvas.itemconfig(win_id, width=max(required_width, canvas_width))
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
         def _on_canvas_resize(event, canvas=mapping_canvas, win_id=_mapping_window):
-            canvas.itemconfig(win_id, width=event.width)
+            required_width = mapping_inner.winfo_reqwidth()
+            canvas.itemconfig(win_id, width=max(required_width, event.width))
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
         mapping_canvas.bind('<Configure>', _on_canvas_resize)
+        mapping_inner.bind('<Configure>', _update_mapping_scrollregion)
+        mapping_canvas.bind('<Shift-MouseWheel>', lambda e: mapping_canvas.xview_scroll(int(-1 * (e.delta / 120)), "units"))
         self.mapping_row_frames = {}
         self.mapping_row_controls = {}
         
@@ -456,8 +495,8 @@ class FileAndMatchConfig(ttk.Frame):
         mapping_canvas.configure(scrollregion=mapping_canvas.bbox('all'))
 
         # 当内部 Frame 尺寸变化时更新 scrollregion
-        def _update_scrollregion(event, canvas=mapping_canvas):
-            canvas.configure(scrollregion=canvas.bbox('all'))
+        def _update_scrollregion(event):
+            _update_mapping_scrollregion(event)
         mapping_inner.bind('<Configure>', _update_scrollregion)
         
         def on_mousewheel(event):
@@ -968,6 +1007,11 @@ class FileAndMatchConfig(ttk.Frame):
         
         file1_name = self._get_file_display_name(1)
         file2_name = self._get_file_display_name(2)
+        # UI标签使用短名，避免长文件名撑开布局挤压右侧配置区
+        file1_name_short = self._shorten_for_ui(file1_name, max_len=10)
+        file2_name_short = self._shorten_for_ui(file2_name, max_len=10)
+        file1_mapping_short = self._shorten_for_ui(file1_name, max_len=12)
+        file2_mapping_short = self._shorten_for_ui(file2_name, max_len=12)
         
         # #region agent log
         _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_and_match_config._update_file_labels.entry", message="updating file labels", data={"file1_name": file1_name, "file2_name": file2_name, "file1_path": self.file1_path_var.get(), "file1_sheet": self.file1_sheet_var.get(), "file2_path": self.file2_path_var.get(), "file2_sheet": self.file2_sheet_var.get()})
@@ -975,14 +1019,14 @@ class FileAndMatchConfig(ttk.Frame):
         
         # 更新文件选择区域的标签
         if hasattr(self, 'file1_label'):
-            self.file1_label.config(text=f"{file1_name}:")
+            self.file1_label.config(text=f"{file1_name_short}:")
             # #region agent log
-            _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_and_match_config._update_file_labels.file1_label", message="updated file1 label", data={"text": f"{file1_name}:"})
+            _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_and_match_config._update_file_labels.file1_label", message="updated file1 label", data={"text": f"{file1_name_short}:"})
             # #endregion
         if hasattr(self, 'file2_label'):
-            self.file2_label.config(text=f"{file2_name}:")
+            self.file2_label.config(text=f"{file2_name_short}:")
             # #region agent log
-            _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_and_match_config._update_file_labels.file2_label", message="updated file2 label", data={"text": f"{file2_name}:"})
+            _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_and_match_config._update_file_labels.file2_label", message="updated file2 label", data={"text": f"{file2_name_short}:"})
             # #endregion
         
         # 更新匹配列配置区域的标签
@@ -997,18 +1041,21 @@ class FileAndMatchConfig(ttk.Frame):
         
         # 更新字段映射配置区域的标签
         if hasattr(self, 'mapping_file1_label'):
-            self.mapping_file1_label.config(text=file1_name)
+            self.mapping_file1_label.config(text=file1_mapping_short)
         if hasattr(self, 'mapping_file2_label'):
-            self.mapping_file2_label.config(text=file2_name)
+            self.mapping_file2_label.config(text=file2_mapping_short)
         
-        # 更新预览标签页
+        # 更新预览标签页（截断过长文本，防止标签页撑开布局）
         if hasattr(self, 'preview_notebook'):
+            tab_max_len = 22
+            f1_tab = file1_name if len(file1_name) <= tab_max_len else file1_name[:tab_max_len - 2] + ".."
+            f2_tab = file2_name if len(file2_name) <= tab_max_len else file2_name[:tab_max_len - 2] + ".."
             try:
                 # 更新文件1预览标签页（索引0）
-                self.preview_notebook.tab(0, text=file1_name)
-                self.file1_preview_tab_text = file1_name
+                self.preview_notebook.tab(0, text=f1_tab)
+                self.file1_preview_tab_text = f1_tab
                 # #region agent log
-                _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_and_match_config._update_file_labels.file1_tab", message="updated file1 tab", data={"text": file1_name})
+                _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_and_match_config._update_file_labels.file1_tab", message="updated file1 tab", data={"text": f1_tab})
                 # #endregion
             except Exception as e:
                 # #region agent log
@@ -1017,10 +1064,10 @@ class FileAndMatchConfig(ttk.Frame):
                 pass
             try:
                 # 更新文件2预览标签页（索引1）
-                self.preview_notebook.tab(1, text=file2_name)
-                self.file2_preview_tab_text = file2_name
+                self.preview_notebook.tab(1, text=f2_tab)
+                self.file2_preview_tab_text = f2_tab
                 # #region agent log
-                _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_and_match_config._update_file_labels.file2_tab", message="updated file2 tab", data={"text": file2_name})
+                _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_and_match_config._update_file_labels.file2_tab", message="updated file2 tab", data={"text": f2_tab})
                 # #endregion
             except Exception as e:
                 # #region agent log
@@ -1491,7 +1538,7 @@ class FileAndMatchConfig(ttk.Frame):
         # 精确匹配关键词（优先）
         life_exact_keywords = ['使用寿命', '预计寿命', '使用年限']
         # 包含匹配关键词（次优先）
-        life_contain_keywords = ['寿命', '年限','计划']
+        life_contain_keywords = ['寿命', '年限','计划','预计']
         def _life_col_allowed(col):
             return '剩余' not in str(col)
         

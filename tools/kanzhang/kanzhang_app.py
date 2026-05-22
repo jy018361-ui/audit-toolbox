@@ -47,6 +47,21 @@ class ExportCancelled(Exception):
     pass
 
 
+def _fit_toplevel_to_screen(win, width, height, min_width=None, min_height=None, margin_x=80, margin_y=120):
+    try:
+        screen_w = win.winfo_screenwidth()
+        screen_h = win.winfo_screenheight()
+        actual_w = min(width, max(320, screen_w - margin_x))
+        actual_h = min(height, max(240, screen_h - margin_y))
+        pos_x = max(20, (screen_w - actual_w) // 2)
+        pos_y = max(20, (screen_h - actual_h) // 2)
+        win.geometry(f"{actual_w}x{actual_h}+{pos_x}+{pos_y}")
+        if min_width and min_height:
+            win.minsize(min(min_width, actual_w), min(min_height, actual_h))
+    except Exception:
+        win.geometry(f"{width}x{height}")
+
+
 class ExportPerfTracer:
     def __init__(self, log_path, context=None):
         self.log_path = log_path
@@ -93,33 +108,82 @@ class ExportPerfTracer:
 # 1. 进度弹窗
 # ==========================================
 class ProgressWindow(tk.Toplevel):
-    def __init__(self, parent, title="正在处理", on_cancel=None, cancellable=False):
+    """导出/处理进度提示，固定足够高度避免按钮与进度条重叠。"""
+
+    _BG = "#f4f6f8"
+    _TITLE_FG = "#1b2a33"
+    _MSG_FG = "#4a5a63"
+    _FONT = ("Microsoft YaHei UI", 10)
+    _TITLE_FONT = ("Microsoft YaHei UI", 11, "bold")
+
+    def __init__(self, parent, title="正在处理", message=None, on_cancel=None, cancellable=False):
         super().__init__(parent)
         self.title(title)
-        self.geometry("400x120")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
         self.on_cancel = on_cancel
         self.cancellable = cancellable
-        
-        x = parent.winfo_x() + (parent.winfo_width() // 2) - 200
-        y = parent.winfo_y() + (parent.winfo_height() // 2) - 60
-        self.geometry(f"+{x}+{y}")
-        
-        self.lbl = tk.Label(self, text="正在处理数据，请稍候...", pady=10)
-        self.lbl.pack()
-        
-        self.pb = ttk.Progressbar(self, orient="horizontal", length=350, mode="indeterminate")
-        self.pb.pack(pady=10)
-        self.pb.start(10)
+        self.configure(bg=self._BG)
+
+        display_msg = (message or title or "正在处理数据，请稍候...").strip()
+        win_h = 188 if cancellable else 148
+        _fit_toplevel_to_screen(self, 440, win_h, min_width=400, min_height=win_h)
+
+        outer = tk.Frame(self, bg=self._BG, padx=22, pady=18)
+        outer.pack(fill=tk.BOTH, expand=True)
+        outer.columnconfigure(0, weight=1)
+
+        tk.Label(
+            outer,
+            text=title,
+            bg=self._BG,
+            fg=self._TITLE_FG,
+            font=self._TITLE_FONT,
+            anchor="w",
+            justify="left",
+            wraplength=380,
+        ).grid(row=0, column=0, sticky="ew")
+
+        self.lbl = tk.Label(
+            outer,
+            text=display_msg,
+            bg=self._BG,
+            fg=self._MSG_FG,
+            font=self._FONT,
+            anchor="w",
+            justify="left",
+            wraplength=380,
+        )
+        self.lbl.grid(row=1, column=0, sticky="ew", pady=(8, 12))
+
+        self.pb = ttk.Progressbar(outer, orient="horizontal", length=360, mode="indeterminate")
+        self.pb.grid(row=2, column=0, sticky="ew", pady=(0, 14))
+        self.pb.start(12)
 
         if self.cancellable:
-            ttk.Button(self, text="终止导出", command=self._on_cancel).pack(pady=(0, 6))
+            btn_row = tk.Frame(outer, bg=self._BG)
+            btn_row.grid(row=3, column=0, sticky="e")
+            ttk.Button(btn_row, text="终止导出", width=14, command=self._on_cancel).pack(side=tk.RIGHT)
             self.protocol("WM_DELETE_WINDOW", self._on_cancel)
             self.bind("<Escape>", lambda e: self._on_cancel())
         else:
             self.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        self.update_idletasks()
+        try:
+            px = parent.winfo_rootx() + max(0, (parent.winfo_width() - self.winfo_width()) // 2)
+            py = parent.winfo_rooty() + max(0, (parent.winfo_height() - self.winfo_height()) // 2)
+            self.geometry(f"+{px}+{py}")
+        except Exception:
+            pass
+
+    def set_message(self, text: str) -> None:
+        try:
+            if self.lbl.winfo_exists():
+                self.lbl.config(text=str(text))
+        except Exception:
+            pass
 
     def _on_cancel(self):
         if callable(self.on_cancel):
@@ -128,7 +192,10 @@ class ProgressWindow(tk.Toplevel):
             self.close()
 
     def close(self):
-        self.grab_release()
+        try:
+            self.grab_release()
+        except Exception:
+            pass
         self.destroy()
 
 # ==========================================
@@ -258,7 +325,7 @@ class PivotDesignerDialog:
     def __init__(self, parent, all_columns, predefined_calc_cols, defaults):
         self.top = tk.Toplevel(parent)
         self.top.title("📊 透视表配置 (支持拖拽)")
-        self.top.geometry("850x600")
+        _fit_toplevel_to_screen(self.top, 850, 600, min_width=720, min_height=500)
         self.top.transient(parent)
         self.top.grab_set()
         self.result = None
@@ -268,8 +335,25 @@ class PivotDesignerDialog:
         self.top.lift()
         self.top.after(10, lambda: self.top.focus_force())
         self._bind_ctrl_a()
-        
-        tk.Label(self.top, text="💡 提示：支持将字段直接拖拽到行、列、值区域。", bg="#E3F2FD", fg="#0D47A1", pady=5).pack(fill="x")
+
+        btn_frame = tk.Frame(self.top, pady=12, padx=16, bg="#eef2f5")
+        btn_frame.pack(side="bottom", fill="x")
+        ttk.Button(btn_frame, text="正常导出（含套表）", width=18, command=self.on_confirm).pack(side="right", padx=(10, 0))
+        ttk.Button(btn_frame, text="快速导出（仅明细）", width=18, command=self.on_skip).pack(side="right")
+        ttk.Button(btn_frame, text="取消", width=10, command=self.on_cancel).pack(side="left")
+
+        tip_bar = tk.Frame(self.top, bg="#e8f4f8", padx=12, pady=8)
+        tip_bar.pack(fill="x")
+        tk.Label(
+            tip_bar,
+            text="提示：可将左侧字段拖拽到行、列、值区域；行与列不能同时为空，至少需要一个数值字段。",
+            bg="#e8f4f8",
+            fg="#205860",
+            font=("Microsoft YaHei UI", 9),
+            anchor="w",
+            justify="left",
+            wraplength=780,
+        ).pack(fill="x")
         main_frame = tk.Frame(self.top, padx=10, pady=10)
         main_frame.pack(fill="both", expand=True)
 
@@ -306,11 +390,6 @@ class PivotDesignerDialog:
             for item in defaults.get('rows', []): self.lb_rows.insert(tk.END, item)
             for item in defaults.get('cols', []): self.lb_cols.insert(tk.END, item)
             for item in defaults.get('vals', []): self.lb_vals.insert(tk.END, item)
-
-        btn_frame = tk.Frame(self.top, pady=10)
-        btn_frame.pack(side="bottom", fill="x")
-        ttk.Button(btn_frame, text="✅ 正常导出（有套表）", command=self.on_confirm).pack(side="right", padx=20)
-        ttk.Button(btn_frame, text="⏩ 快速导出（无套表）", command=self.on_skip).pack(side="right")
 
     def _bind_ctrl_a(self):
         def _select_all(event=None):
@@ -1495,7 +1574,7 @@ class AuditApp_V70_2:
             self.export_cancel_event.set()
             if self.progress_win:
                 try:
-                    self.progress_win.lbl.config(text="正在终止导出，请稍候...")
+                    self.progress_win.set_message("正在终止导出，请稍候...")
                 except Exception:
                     pass
 
@@ -1504,12 +1583,14 @@ class AuditApp_V70_2:
             raise ExportCancelled("用户已终止导出")
 
     def show_progress(self, msg="处理中...", allow_cancel=False):
-        if self.progress_win: self.progress_win.destroy()
+        if self.progress_win:
+            self.progress_win.destroy()
         self.progress_win = ProgressWindow(
             self.root,
             title=msg,
+            message=msg,
             on_cancel=self.request_export_cancel if allow_cancel else None,
-            cancellable=allow_cancel
+            cancellable=allow_cancel,
         )
         self.root.update()
     def hide_progress(self):
@@ -1632,7 +1713,7 @@ class AuditApp_V70_2:
         finally: self.root.after(0, self.hide_progress)
 
     def _ask_sheet_on_main(self, names):
-        self.hide_progress(); top = tk.Toplevel(self.root); top.geometry("300x150")
+        self.hide_progress(); top = tk.Toplevel(self.root); _fit_toplevel_to_screen(top, 300, 150, min_width=280, min_height=140)
         cb = ttk.Combobox(top, values=names, state="readonly"); cb.pack(pady=20); cb.current(0)
         def ok(): self.user_sheet_choice = cb.get(); top.destroy(); self.show_progress(); self.thread_event.set()
         top.protocol("WM_DELETE_WINDOW", lambda: (setattr(self, 'user_sheet_choice', None), top.destroy(), self.thread_event.set()))
@@ -1754,13 +1835,47 @@ class AuditApp_V70_2:
         self.lbl_scheme_status.config(text=status_show, fg=color)
 
     def on_header_click(self, col):
-        top = tk.Toplevel(self.root); top.geometry("300x400")
-        tk.Label(top, text="勾选角色:", pady=10).pack()
+        top = tk.Toplevel(self.root)
+        top.title("勾选角色")
+        _fit_toplevel_to_screen(top, 340, 460, min_width=320, min_height=360)
+        try:
+            top.transient(self.root)
+        except Exception:
+            pass
+
+        button_bar = tk.Frame(top, padx=10, pady=10)
+        button_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        body = tk.Frame(top)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        tk.Label(body, text="勾选角色:", pady=10).pack()
+
+        canvas = tk.Canvas(body, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=canvas.yview)
+        role_frame = tk.Frame(canvas)
+        role_window = canvas.create_window((0, 0), window=role_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _sync_scrollregion(event=None):
+            canvas.itemconfig(role_window, width=canvas.winfo_width())
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        role_frame.bind("<Configure>", _sync_scrollregion)
+        canvas.bind("<Configure>", _sync_scrollregion)
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        role_frame.bind("<MouseWheel>", _on_mousewheel)
         current_roles = self.column_mapping.get(col, set())
         vars_map = {}
         for label, role_code in self.ROLES.items():
             var = tk.BooleanVar(value=(role_code in current_roles))
-            tk.Checkbutton(top, text=label, variable=var).pack(anchor="w", padx=20)
+            cb = tk.Checkbutton(role_frame, text=label, variable=var)
+            cb.pack(anchor="w", padx=20, pady=2)
+            cb.bind("<MouseWheel>", _on_mousewheel)
             vars_map[role_code] = var
         def confirm():
             new = {r for r, v in vars_map.items() if v.get()}
@@ -1769,7 +1884,8 @@ class AuditApp_V70_2:
             self.cached_accounts = None; self._reset_filter_state()
             self.build_table(); self.update_scheme_status(); top.destroy()
         self._bind_esc_close(top)
-        tk.Button(top, text="确定", command=confirm).pack(pady=20)
+        tk.Button(button_bar, text="取消", command=top.destroy, width=10).pack(side=tk.RIGHT, padx=5)
+        tk.Button(button_bar, text="确定", command=confirm, width=10).pack(side=tk.RIGHT, padx=5)
 
     # ===============================================
     # 4. 筛选逻辑
@@ -1792,7 +1908,7 @@ class AuditApp_V70_2:
                     self._start_shadow_parquet_background()
                 if self.shadow_running:
                     t_wait = time.perf_counter()
-                    self.root.after(0, lambda: self.progress_win and self.progress_win.lbl.config(text="后台正在转换shadow文件，请稍候..."))
+                    self.root.after(0, lambda: self.progress_win and self.progress_win.set_message("后台正在转换 shadow 文件，请稍候..."))
                     self.shadow_event.wait()
                     self._perf_log(f"筛选前等待后台转shadow耗时: {time.perf_counter() - t_wait:.3f}s")
                 if self.shadow_error:
@@ -1868,16 +1984,27 @@ class AuditApp_V70_2:
         if self.shuttle_top and self.shuttle_top.winfo_exists(): self.shuttle_top.lift(); return
         self._ensure_default_batch()
         self._load_target_accounts_from_active_batch()
-        top = tk.Toplevel(self.root); top.geometry("980x700")
+        top = tk.Toplevel(self.root)
+        _fit_toplevel_to_screen(top, 980, 700, min_width=760, min_height=520)
         self.shuttle_top = top
         self._bind_esc_close(top)
-        f_top = tk.Frame(top, bg="#f0f0f0", pady=5); f_top.pack(fill="x")
+        f_bottom = tk.Frame(top, padx=10, pady=10)
+        f_bottom.pack(side=tk.BOTTOM, fill=tk.X)
+        ttk.Button(f_bottom, text="取消", width=12, command=top.destroy).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(
+            f_bottom,
+            text="确定并导出",
+            width=20,
+            command=lambda: [self._sync_active_batch_from_target_accounts(), top.destroy(), self.start_process_flow()],
+        ).pack(side=tk.RIGHT)
+
+        f_top = tk.Frame(top, bg="#f0f0f0", pady=5); f_top.pack(side=tk.TOP, fill=tk.X)
         self.shuttle_btn_refresh = ttk.Button(f_top, text="🔄 刷新", command=self.refresh_filter_data)
         self.shuttle_btn_refresh.pack(side="left", padx=10)
         tk.Label(f_top, text="🔍 搜索:", bg="#f0f0f0").pack(side="left")
         self.shuttle_search_var = tk.StringVar(); ttk.Entry(f_top, textvariable=self.shuttle_search_var).pack(side="left", fill="x", expand=True)
         
-        f_main = tk.Frame(top); f_main.pack(fill="both", expand=True, padx=10, pady=5)
+        f_main = tk.Frame(top); f_main.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=5)
         f_main.grid_columnconfigure(0, weight=1)
         f_main.grid_columnconfigure(1, weight=0)
         f_main.grid_columnconfigure(2, weight=1)
@@ -1979,10 +2106,6 @@ class AuditApp_V70_2:
         ttk.Button(f_btn_exclude, text="移除 (从剔除)", width=18, command=lambda: remove('exclude')).pack(pady=8, fill="x")
 
         self.shuttle_search_var.trace("w", lambda *a: self.update_shuttle_ui())
-        f_bottom = tk.Frame(top)
-        f_bottom.pack(fill="x", pady=10)
-        ttk.Button(f_bottom, text="确定并导出", width=20, command=lambda: [self._sync_active_batch_from_target_accounts(), top.destroy(), self.start_process_flow()]).pack(side="right", padx=10)
-        ttk.Button(f_bottom, text="取消", width=12, command=top.destroy).pack(side="right")
         self.update_shuttle_ui()
         self._refresh_batch_list_ui()
         self.shuttle_batch_list.bind(
@@ -2104,6 +2227,16 @@ class AuditApp_V70_2:
             df[join_col] = df[cols].fillna("").astype(str).agg("-".join, axis=1)
         return join_col
 
+    def _get_voucher_id_cols(self, map_inv, df=None):
+        cols = []
+        for c in map_inv.get('role_entity', []):
+            if df is None or c in df.columns:
+                cols.append(c)
+        for c in map_inv.get('role_id', []):
+            if df is None or c in df.columns:
+                cols.append(c)
+        return list(dict.fromkeys(cols)) or list(map_inv.get('role_id', []))
+
     def _safe_convert_date(self, series):
         s_clean = series.fillna("").astype(str).str.replace(r'\.0$', '', regex=True)
         s_num = pd.to_numeric(s_clean, errors='coerce')
@@ -2155,7 +2288,8 @@ class AuditApp_V70_2:
             return frame
 
         out = frame.copy()
-        id_col = map_inv['role_id'][0] if map_inv.get('role_id') else None
+        voucher_id_cols = self._get_voucher_id_cols(map_inv, out)
+        id_col = self._make_join_col(out, voucher_id_cols) if voucher_id_cols else None
 
         if logic == "B":
             dr_col = map_inv['role_dr'][0]
@@ -2287,7 +2421,7 @@ class AuditApp_V70_2:
     def build_voucher_pivot(self, df_target, map_inv, logic):
         if df_target is None or df_target.empty:
             return None, None, None
-        id_cols = map_inv['role_id']
+        id_cols = self._get_voucher_id_cols(map_inv, df_target)
         acc_cols = map_inv['role_acc']
         id_join_col = self._make_join_col(df_target, id_cols)
         acc_join_col = self._make_join_col(df_target, acc_cols)
@@ -2348,7 +2482,7 @@ class AuditApp_V70_2:
             v_pivot = v_pivot[~v_pivot.index.get_level_values(id_col_name).astype(str).isin(loss_ids_str)]
             if v_pivot.empty:
                 return None, None, None, []
-            id_join_col = self._make_join_col(df_target_f, map_inv['role_id'])
+            id_join_col = self._make_join_col(df_target_f, self._get_voucher_id_cols(map_inv, df_target_f))
             df_target_f = df_target_f[~df_target_f[id_join_col].astype(str).isin(loss_ids_str)].copy()
 
         norm_cache = {}
@@ -2409,6 +2543,12 @@ class AuditApp_V70_2:
                 "target_keys": target_keys,
                 "target_keys_set": target_keys_set,
             })
+
+        # 凭证类型只分析命中目标科目的凭证。没有目标科目的凭证即使被前序数据带入，
+        # 也不能参与类型归并，否则会出现“类型无目标科目”或金额只像代表凭证的错觉。
+        voucher_info = [info for info in voucher_info if info["target_keys_set"]]
+        if not voucher_info:
+            return None, None, None, []
 
         n = len(voucher_info)
         parent = list(range(n))
@@ -2690,7 +2830,10 @@ class AuditApp_V70_2:
         # 2) 汇总同类凭证
         reset = v_pivot_num.reset_index()
         reset_id = reset[id_col_name].astype(str)
-        reset["__rep_id__"] = reset_id.map(rep_map).fillna(reset_id)
+        reset["__rep_id__"] = reset_id.map(rep_map)
+        reset = reset[reset["__rep_id__"].notna()].copy()
+        if reset.empty:
+            return None, None, None, []
         grouped = reset.groupby(["__rep_id__", acc_col_name], dropna=False).sum(numeric_only=True)
         grouped = grouped.rename_axis(index={"__rep_id__": id_col_name})
 
@@ -2730,10 +2873,8 @@ class AuditApp_V70_2:
             for oid in group:
                 accs_in_group.update(accs_per_vid.get(oid, set()))
             accs_target = [a for a in accs_in_group if _norm_acc(a) in target_acc_norm]
-            # 若目标科目在该组内未命中，则回退为该组全部科目，避免“科目名称-类型”整列为空
-            accs_in_group = accs_target if accs_target else list(accs_in_group)
             labels = []
-            for acc in sorted(accs_in_group, key=lambda x: str(x)):
+            for acc in sorted(accs_target, key=lambda x: str(x)):
                 t_idx = type_rank_map.get((acc, rep_id), 1)
                 labels.append(f"{acc}-类型{t_idx}")
             if labels:
@@ -2743,7 +2884,7 @@ class AuditApp_V70_2:
         summary_col = map_inv.get('role_summary', [None])[0] if map_inv.get('role_summary') else None
         summary_map = {}
         if summary_col and summary_col in df_target_f.columns:
-            id_join_col = self._make_join_col(df_target_f, map_inv['role_id'])
+            id_join_col = self._make_join_col(df_target_f, self._get_voucher_id_cols(map_inv, df_target_f))
             summary_map = self._collect_summary_map(df_target_f, id_join_col, summary_col)
 
         rep_summaries = {}
@@ -2803,12 +2944,9 @@ class AuditApp_V70_2:
         if date_cols and date_cols[0] in df_target_f.columns and '__net__' in df_target_f.columns:
             date_col = date_cols[0]
             df_m = df_target_f.copy()
-            id_join_col = self._make_join_col(df_m, map_inv['role_id'])
+            id_join_col = self._make_join_col(df_m, self._get_voucher_id_cols(map_inv, df_m))
             df_m['__month__'] = self._safe_convert_date(df_m[date_col])
             df_m['__rep_id__'] = df_m[id_join_col].astype(str).map(rep_map)
-            # 若映射失败则回退为原始ID
-            if df_m['__rep_id__'].isna().all():
-                df_m['__rep_id__'] = df_m[id_join_col].astype(str)
             df_m = df_m[df_m['__rep_id__'].notna()]
             df_m['__net__'] = pd.to_numeric(df_m['__net__'], errors='coerce').fillna(0)
             # 按（rep_id, 科目, 方向）汇总月份
@@ -2867,10 +3005,8 @@ class AuditApp_V70_2:
             for oid in group:
                 accs_in_group.update(accs_per_vid.get(oid, set()))
             accs_target = [a for a in accs_in_group if _norm_acc(a) in target_acc_norm]
-            # 同步回退策略：保证最终写入列不会全空
-            accs_in_group = accs_target if accs_target else list(accs_in_group)
             labels = []
-            for acc in sorted(accs_in_group, key=lambda x: str(x)):
+            for acc in sorted(accs_target, key=lambda x: str(x)):
                 t_idx = type_rank_map_rem.get((acc, rep_id), 1)
                 labels.append(f"{acc}-类型{t_idx}")
             if labels:
@@ -2962,11 +3098,31 @@ class AuditApp_V70_2:
         safe_batch = re.sub(r"\s+", "_", safe_batch) or f"批次{idx}"
         return f"{base_name}_{idx:02d}_{safe_batch}{ext}"
 
+    def _build_default_save_name(self, ext=".csv"):
+        src = self.real_xlsx_path or self.file_path or ""
+        stem = os.path.splitext(os.path.basename(src))[0] if src else "未命名"
+        parts = ["看账导出", stem]
+        if self.current_sheet_name not in (None, 0, "0"):
+            parts.append(f"工作表{self.current_sheet_name}")
+        parts.append(datetime.now().strftime("%Y%m%d_%H%M%S"))
+        raw_name = "_".join(str(p).strip() for p in parts if str(p).strip())
+        safe_name = re.sub(r'[\\/:*?"<>|]+', "_", raw_name)
+        safe_name = re.sub(r"\s+", "_", safe_name).strip("._ ") or "看账导出"
+        return f"{safe_name}{ext}"
+
+    def _default_save_initialdir(self):
+        src = self.real_xlsx_path or self.file_path
+        if src:
+            folder = os.path.dirname(os.path.abspath(src))
+            if os.path.isdir(folder):
+                return folder
+        return None
+
     def _preprocess_and_filter_with_polars(self, df, map_inv):
         if not HAS_POLARS:
             raise RuntimeError("polars不可用")
 
-        id_cols = map_inv.get('role_id', [])
+        id_cols = self._get_voucher_id_cols(map_inv, df)
         acc_cols = [c for c in map_inv.get('role_acc', []) if c in df.columns]
         if not id_cols or any(c not in df.columns for c in id_cols):
             raise RuntimeError("ID列缺失，无法使用polars快速路径")
@@ -3187,7 +3343,7 @@ class AuditApp_V70_2:
                 cols=int(len(df.columns)),
                 from_cache=bool(use_cached),
             )
-            id_cols = map_inv['role_id']
+            id_cols = self._get_voucher_id_cols(map_inv, df)
 
             # === 新增：对所有已映射字段做向上填充（ffill），全空行剔除 ===
             t_preprocess = time.perf_counter()
@@ -3212,7 +3368,7 @@ class AuditApp_V70_2:
             if map_inv.get('role_date'):
                 date_col = map_inv['role_date'][0]
                 if date_col in df_target.columns:
-                    id_cols = map_inv['role_id']
+                    id_cols = self._get_voucher_id_cols(map_inv, df_target)
                     df_target[date_col] = (
                         df_target.groupby(id_cols)[date_col]
                         .ffill()
@@ -3230,7 +3386,7 @@ class AuditApp_V70_2:
                         if c in df_target.columns:
                             loss_mask = loss_mask | df_target[c].astype(str).str.contains(r'本年利润|未分配利润', na=False)
                     if loss_mask is not False and loss_mask.any():
-                        id_join_col_for_loss = self._make_join_col(df_target, map_inv['role_id'])
+                        id_join_col_for_loss = self._make_join_col(df_target, self._get_voucher_id_cols(map_inv, df_target))
                         loss_ids = set(df_target.loc[loss_mask, id_join_col_for_loss].astype(str).unique())
                         df_target[loss_col] = df_target[id_join_col_for_loss].astype(str).isin(loss_ids).map(lambda x: "损益结转" if x else "")
                     else:
@@ -3283,7 +3439,7 @@ class AuditApp_V70_2:
 
                 # 方案B：多ID合并列，仅用于透视表
                 if logic == "B":
-                    id_cols = map_inv['role_id']
+                    id_cols = self._get_voucher_id_cols(map_inv, p_df)
                     if len(id_cols) > 1:
                         id_join_col = "-".join(id_cols)
                         if id_join_col not in p_df.columns:
@@ -3291,7 +3447,7 @@ class AuditApp_V70_2:
 
                 # 透视分析剔除损益结转凭证
                 if self.var_mark_loss.get() and loss_ids:
-                    id_join_col_for_pivot = self._make_join_col(p_df, map_inv['role_id'])
+                    id_join_col_for_pivot = self._make_join_col(p_df, self._get_voucher_id_cols(map_inv, p_df))
                     p_df = p_df[~p_df[id_join_col_for_pivot].astype(str).isin(loss_ids)].copy()
 
                 # 确保透视表行字段存在（缺失则补空值）
@@ -3498,7 +3654,7 @@ class AuditApp_V70_2:
                     # 创建目标科目掩码：仅对目标科目行执行匹配（损益结转不参与）
                     is_target_account = df_target[temp_filter_col].isin(self.target_accounts)
                     if self.var_mark_loss.get() and loss_ids:
-                        loss_id_col = self._make_join_col(df_target, map_inv['role_id'])
+                        loss_id_col = self._make_join_col(df_target, self._get_voucher_id_cols(map_inv, df_target))
                         is_target_account = is_target_account & ~df_target[loss_id_col].astype(str).isin(loss_ids)
                     tracer.event("je_mark_target_mask", target_hit_rows=int(is_target_account.sum()))
                     
@@ -3509,7 +3665,7 @@ class AuditApp_V70_2:
                     df_target['【智能匹配状态】'] = ""
                     # 损益结转行保持空白不参与匹配
                     if self.var_mark_loss.get() and loss_ids:
-                        loss_id_col = self._make_join_col(df_target, map_inv['role_id'])
+                        loss_id_col = self._make_join_col(df_target, self._get_voucher_id_cols(map_inv, df_target))
                         loss_mask = df_target[loss_id_col].astype(str).isin(loss_ids)
                         # 避免向 float 列写入空字符串导致 dtype 报错
                         df_target.loc[loss_mask, '【辅助_绝对值】'] = np.nan
@@ -3552,7 +3708,7 @@ class AuditApp_V70_2:
                                 target_rows.loc[both_mask, '__match_amt__'] = net_amt
                             
                             # 执行智能匹配，使用匹配金额列
-                            id_join_col_for_match = self._make_join_col(target_rows, map_inv['role_id'])
+                            id_join_col_for_match = self._make_join_col(target_rows, self._get_voucher_id_cols(map_inv, target_rows))
                             df_calc = self.apply_je_2_0_matching(target_rows, acc_col_prime, '__match_amt__', entity_col, id_join_col_for_match, '__net__')
                             tracer.event("je_mark_match_done", logic=logic, mode="B", rows=int(len(target_rows)))
                             
@@ -3571,13 +3727,13 @@ class AuditApp_V70_2:
                                 is_credit = target_rows[dir_col].astype(str).str.contains(cr_regex, case=False, regex=True, na=False)
                                 # 贷方且金额<0 → 匹配用金额取绝对值（当正数）；否则用净额
                                 target_rows['__match_amt__'] = np.where(is_credit & (raw_amt < 0), raw_amt.abs(), target_rows['__net__'])
-                                id_join_col_for_match = self._make_join_col(target_rows, map_inv['role_id'])
+                                id_join_col_for_match = self._make_join_col(target_rows, self._get_voucher_id_cols(map_inv, target_rows))
                                 df_calc = self.apply_je_2_0_matching(target_rows, acc_col_prime, '__match_amt__', entity_col, id_join_col_for_match, '__net__')
                                 tracer.event("je_mark_match_done", logic=logic, mode="A_dir", rows=int(len(target_rows)))
                                 if '__match_amt__' in target_rows.columns:
                                     del target_rows['__match_amt__']
                             else:
-                                id_join_col_for_match = self._make_join_col(target_rows, map_inv['role_id'])
+                                id_join_col_for_match = self._make_join_col(target_rows, self._get_voucher_id_cols(map_inv, target_rows))
                                 df_calc = self.apply_je_2_0_matching(target_rows, acc_col_prime, '__net__', entity_col, id_join_col_for_match, '__net__')
                                 tracer.event("je_mark_match_done", logic=logic, mode="A_no_dir", rows=int(len(target_rows)))
                         
@@ -3985,8 +4141,8 @@ class AuditApp_V70_2:
         return df
 
     def _ask_columns_ui(self):
-        top = tk.Toplevel(self.root); top.geometry("600x600")
-        f_btn = tk.Frame(top, pady=10, bg="#f0f0f0"); f_btn.pack(side="bottom", fill="x")
+        top = tk.Toplevel(self.root); _fit_toplevel_to_screen(top, 600, 600, min_width=480, min_height=420)
+        f_btn = tk.Frame(top, padx=10, pady=10, bg="#f0f0f0"); f_btn.pack(side=tk.BOTTOM, fill=tk.X)
         cvs = tk.Canvas(top); sb = ttk.Scrollbar(top, orient="vertical", command=cvs.yview)
         frm = tk.Frame(cvs); cvs.create_window((0,0), window=frm, anchor="nw")
         cvs.configure(yscrollcommand=sb.set); cvs.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
@@ -4002,12 +4158,21 @@ class AuditApp_V70_2:
                 v.set(True)
         self._bind_esc_close(top, lambda: (setattr(self, 'user_selected_cols', None), top.destroy(), self.thread_event.set()))
         self._bind_ctrl_a(top, callback=select_all_cols)
-        ttk.Button(top, text="确定", command=ok).pack(side="bottom", pady=10)
+        ttk.Button(f_btn, text="取消", width=12, command=lambda: (setattr(self, 'user_selected_cols', None), top.destroy(), self.thread_event.set())).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Button(f_btn, text="确定", width=12, command=ok).pack(side=tk.RIGHT)
         top.protocol("WM_DELETE_WINDOW", lambda: (setattr(self, 'user_selected_cols', None), top.destroy(), self.thread_event.set()))
 
     def _ask_save_ui(self):
         # 默认导出格式改为CSV，提高导出速度
-        self.user_save_path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv"), ("Excel", "*.xlsx")])
+        initialdir = self._default_save_initialdir()
+        kwargs = {
+            "defaultextension": ".csv",
+            "filetypes": [("CSV", "*.csv"), ("Excel", "*.xlsx")],
+            "initialfile": self._build_default_save_name(".csv"),
+        }
+        if initialdir:
+            kwargs["initialdir"] = initialdir
+        self.user_save_path = filedialog.asksaveasfilename(**kwargs)
         self.thread_event.set()
 
 def main(parent=None):
@@ -4023,4 +4188,3 @@ def main(parent=None):
 
 if __name__ == "__main__":
     main()
-

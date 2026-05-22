@@ -247,6 +247,24 @@ class SheetGenerator:
         except (ValueError, TypeError):
             return 0.0
 
+    @staticmethod
+    def _build_composite_key_series(df: pd.DataFrame, cols: List[str]) -> pd.Series:
+        """按匹配列构造组键；用于同一ID多卡片的组级分摊。"""
+        valid_cols = [c for c in (cols or []) if c in df.columns]
+        if not valid_cols:
+            return pd.Series([""] * len(df), index=df.index)
+        parts = []
+        for col in valid_cols:
+            parts.append(
+                df[col]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+            )
+        if len(parts) == 1:
+            return parts[0]
+        return pd.concat(parts, axis=1).agg("|||".join, axis=1)
+
     def _format_date_only(self, value) -> str:
         """统一日期展示为 YYYY-MM-DD，去掉时间部分。"""
         if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -1105,8 +1123,29 @@ class SheetGenerator:
                 )
                 if disposal_dep_col1 or disposal_dep_col2:
                     no_disposal_dep_mapping = False
+
+            group_dep_base_abs = None
+            if original_value_col1 in df.columns and dep_col1 in df.columns:
+                group_key_cols = [c for c in (self.match_cols or ([self.match_col] if self.match_col else [])) if c in df.columns]
+                if group_key_cols:
+                    group_key = self._build_composite_key_series(df, group_key_cols)
+                    valid_group = group_key != ""
+                    if valid_group.any():
+                        orig1_abs = df[original_value_col1].apply(self._safe_numeric).abs()
+                        dep1_abs = df[dep_col1].apply(self._safe_numeric).abs()
+                        group_size = group_key[valid_group].groupby(group_key[valid_group]).transform("size")
+                        group_orig1_abs = orig1_abs.loc[valid_group].groupby(group_key[valid_group]).transform("sum")
+                        group_dep1_abs = dep1_abs.loc[valid_group].groupby(group_key[valid_group]).transform("sum")
+                        group_dep_base_abs = pd.DataFrame(
+                            {
+                                "size": group_size,
+                                "orig1_abs": group_orig1_abs,
+                                "dep1_abs": group_dep1_abs,
+                            },
+                            index=group_size.index,
+                        )
             
-            for row in disposal_df.to_dict("records"):
+            for idx, row in disposal_df.iterrows():
                 category = row.get(category_col, '') if category_col else ''
                 asset_no = row.get(match_col, '') if match_col else ''
                 asset_name = row.get(name_col, '') if name_col else ''
@@ -1158,6 +1197,17 @@ class SheetGenerator:
                         if opening_orig1_num > 0:
                             ratio = abs(self._safe_numeric(original_value)) / opening_orig1_num
                             depreciation_value = depreciation_value * ratio
+                    if (
+                        group_dep_base_abs is not None
+                        and idx in group_dep_base_abs.index
+                        and group_dep_base_abs.at[idx, "size"] > 1
+                        and group_dep_base_abs.at[idx, "orig1_abs"] > 0
+                    ):
+                        ratio = min(
+                            abs(self._safe_numeric(original_value)) / group_dep_base_abs.at[idx, "orig1_abs"],
+                            1.0,
+                        )
+                        depreciation_value = group_dep_base_abs.at[idx, "dep1_abs"] * ratio
                     if disposal_dep_value == '':
                         current_year_dep_value = ''
                     else:

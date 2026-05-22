@@ -205,7 +205,7 @@ def print_size_report(fa: Path | None, kz: Path | None, suite: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="审计工具箱构建")
-    parser.add_argument("--sync-only", action="store_true", help="仅同步 vendor")
+    parser.add_argument("--sync-only", action="store_true", help="同步工具到 vendor/（默认不再自动同步）")
     parser.add_argument(
         "--no-baseline", action="store_true", help="跳过 FA/看账单包基线对比"
     )
@@ -221,8 +221,8 @@ def main() -> int:
     if not TOOLS.is_dir():
         TOOLS.mkdir(parents=True)
 
-    sync_vendor()
     if args.sync_only:
+        sync_vendor()
         return 0
 
     req = ROOT / "requirements.txt"

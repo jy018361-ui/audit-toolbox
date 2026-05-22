@@ -1,0 +1,30 @@
+# Cursor 本地状态与项目配置
+# 保留 rules/skills/agents，便于团队共享 Agent 上下文。
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
+!.cursor/skills/
+!.cursor/skills/**
+!.cursor/agents/
+!.cursor/agents/**
+!.cursor/hooks.json
+
+# Excel 临时/锁文件
+~$*
+
+# 本地资料库/案例库（体积大，可能包含脱敏但不适合直接入库的底稿）
+固定资产质检agent/资料库/
+固定资产质检agent/案例库/
+
+# 系统文件
+Thumbs.db
+Desktop.ini
+
+# 环境与密钥
+.env
+.env.*
+*.pem
+
+# 日志与依赖（若后续有）
+*.log
+node_modules/

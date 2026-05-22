@@ -26,6 +26,25 @@ class Exporter:
         self.pivot_engine = PivotEngine()
         self._export_notes = []
         self._template_map_cache = {}
+
+    @staticmethod
+    def _make_unique_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """Ensure duplicate headers do not turn df[col] into a DataFrame."""
+        if not isinstance(df, pd.DataFrame) or df.empty or df.columns.is_unique:
+            return df
+        out = df.copy()
+        seen = {}
+        new_cols = []
+        for col in out.columns:
+            text = str(col)
+            count = seen.get(text, 0)
+            if count == 0:
+                new_cols.append(col)
+            else:
+                new_cols.append(f"{text}_{count + 1}")
+            seen[text] = count + 1
+        out.columns = new_cols
+        return out
     
     def export_dataframe(
         self,
@@ -59,12 +78,13 @@ class Exporter:
                 df_export = df[selected_columns].copy()
             else:
                 df_export = df.copy()
+            df_export = self._make_unique_columns(df_export)
             
             # 纭繚鐩綍瀛樺湪
             os.makedirs(os.path.dirname(file_path) if os.path.dirname(file_path) else '.', exist_ok=True)
             
             # 鏍规嵁鏍煎紡瀵煎嚭
-            full_df_for_lists = full_df if full_df is not None else df
+            full_df_for_lists = self._make_unique_columns(full_df if full_df is not None else df)
             
             if format.lower() == 'xlsx':
                 return self._export_excel(df_export, file_path, pivot_df, full_df_for_lists, summary_config)
@@ -126,6 +146,21 @@ class Exporter:
 
                 if summary_config and summary_input_df is not None:
                     summary_field_mapping = summary_config.get('field_mapping', {}) or {}
+                    field_mapping = summary_config.get('field_mapping', {})
+                    self.sheet_generator.set_config(
+                        field_mapping=field_mapping,
+                        match_col=summary_config.get('match_col'),
+                        match_col2=summary_config.get('match_col2'),
+                        match_cols=summary_config.get('match_cols'),
+                        match_cols2=summary_config.get('match_cols2'),
+                        category_col=summary_config.get('category_col'),
+                        original_value_col1=summary_config.get('original_value_col1'),
+                        original_value_col2=summary_config.get('original_value_col2'),
+                        depreciation_col1=summary_config.get('depreciation_col1'),
+                        depreciation_col2=summary_config.get('depreciation_col2'),
+                        use_supplement_lists=bool(summary_config.get('use_supplement_lists')),
+                    )
+                    disp_success, disp_msg, disp_df = self.sheet_generator.generate_disposal_list(data_for_lists)
                     try:
                         success, msg, _summary_data = self.summary_generator.generate_summary(
                             summary_input_df,
@@ -147,6 +182,9 @@ class Exporter:
                             disposal_orig_col2=summary_field_mapping.get('disposal_orig_col2'),
                             disposal_dep_col1=summary_field_mapping.get('disposal_dep_col1'),
                             disposal_dep_col2=summary_field_mapping.get('disposal_dep_col2'),
+                            match_col=summary_config.get('match_col'),
+                            match_cols=summary_config.get('match_cols'),
+                            disposal_bkd_df=disp_df,
                             extended_mode=bool(summary_config.get('extended_summary_mode')),
                             use_supplement_lists=bool(summary_config.get('use_supplement_lists', True)),
                         )
@@ -158,7 +196,6 @@ class Exporter:
                         print(f"生成固定资产变动汇总表出错: {str(e)}")
 
                     try:
-                        field_mapping = summary_config.get('field_mapping', {})
                         self.sheet_generator.set_config(
                             field_mapping=field_mapping,
                             match_col=summary_config.get('match_col'),
@@ -207,7 +244,6 @@ class Exporter:
                                 if "【" in line and line not in correction_warnings:
                                     correction_warnings.append(line)
 
-                        disp_success, disp_msg, disp_df = self.sheet_generator.generate_disposal_list(data_for_lists)
                         if disp_success and disp_df is not None and not disp_df.empty:
                             if not self._has_user_disposal_mapping(summary_config):
                                 disp_df = self._apply_placeholder_tail_columns(
@@ -311,6 +347,21 @@ class Exporter:
             data_for_lists = full_df if full_df is not None else df
             summary_input_df = df
             if summary_config and summary_input_df is not None:
+                field_mapping = summary_config.get('field_mapping', {})
+                self.sheet_generator.set_config(
+                    field_mapping=field_mapping,
+                    match_col=summary_config.get('match_col'),  # 鍚戝悗鍏煎
+                    match_col2=summary_config.get('match_col2'),  # 鍚戝悗鍏煎
+                    match_cols=summary_config.get('match_cols'),  # 澶氬垪鏍煎紡
+                    match_cols2=summary_config.get('match_cols2'),  # 澶氬垪鏍煎紡
+                    category_col=summary_config.get('category_col'),
+                    original_value_col1=summary_config.get('original_value_col1'),
+                    original_value_col2=summary_config.get('original_value_col2'),
+                    depreciation_col1=summary_config.get('depreciation_col1'),
+                    depreciation_col2=summary_config.get('depreciation_col2'),
+                    use_supplement_lists=bool(summary_config.get('use_supplement_lists')),
+                )
+                disp_success, disp_msg, disp_df = self.sheet_generator.generate_disposal_list(data_for_lists)
                 try:
                     summary_field_mapping = summary_config.get('field_mapping', {}) or {}
                     # 鐢熸垚姹囨€昏〃
@@ -334,6 +385,9 @@ class Exporter:
                         disposal_orig_col2=summary_field_mapping.get('disposal_orig_col2'),
                         disposal_dep_col1=summary_field_mapping.get('disposal_dep_col1'),
                         disposal_dep_col2=summary_field_mapping.get('disposal_dep_col2'),
+                        match_col=summary_config.get('match_col'),
+                        match_cols=summary_config.get('match_cols'),
+                        disposal_bkd_df=disp_df,
                         extended_mode=bool(summary_config.get('extended_summary_mode')),
                         use_supplement_lists=bool(summary_config.get('use_supplement_lists', True)),
                     )
@@ -349,7 +403,6 @@ class Exporter:
                     print(f"鐢熸垚姹囨€昏〃鏃跺嚭閿? {str(e)}")
                 
                 try:
-                    field_mapping = summary_config.get('field_mapping', {})
                     self.sheet_generator.set_config(
                         field_mapping=field_mapping,
                         match_col=summary_config.get('match_col'),  # 鍚戝悗鍏煎
@@ -415,7 +468,6 @@ class Exporter:
                         msg += "\n??: ????_BKD??????????????????"
                     
                     # 鐢熸垚澶勭疆娓呭崟_BKD
-                    disp_success, disp_msg, disp_df = self.sheet_generator.generate_disposal_list(data_for_lists)
                     if disp_success and disp_df is not None and not disp_df.empty:
                         if not self._has_user_disposal_mapping(summary_config):
                             disp_df = self._apply_placeholder_tail_columns(
@@ -813,6 +865,7 @@ class Exporter:
     def _prepare_pivot_export_df(self, pivot_df: pd.DataFrame) -> pd.DataFrame:
         """Prepare pivot output per business rules before writing to Excel."""
         out = pivot_df.copy()
+        out = self._make_unique_columns(out)
         if isinstance(out, pd.DataFrame) and not isinstance(out.index, pd.RangeIndex):
             out = out.reset_index()
         if out.shape[1] < 2:
@@ -1040,6 +1093,7 @@ class Exporter:
         if df is None:
             return pd.DataFrame()
         out = df.copy()
+        out = self._make_unique_columns(out)
         if out.empty:
             return out
 
@@ -1687,6 +1741,7 @@ class Exporter:
             errors='ignore'
         )
         out = out.drop(columns=[temp_res_amt1_col, temp_res_amt2_col], errors='ignore')
+        out = self._make_unique_columns(out)
         if out is None or out.empty:
             return None
 

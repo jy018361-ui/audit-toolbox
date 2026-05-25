@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
 import threading
+from datetime import datetime
 import pandas as pd
 from exporter import Exporter
 
@@ -131,10 +132,12 @@ class ExportSettings(ttk.Frame):
     def _select_export_path(self):
         """选择导出路径，选择后自动导出"""
         format_ext = ".xlsx" if self.export_format_var.get() == "xlsx" else ".csv"
+        default_name = f"FA_List_{datetime.now().strftime('%Y%m%d_%H%M%S')}{format_ext}"
         
         file_path = filedialog.asksaveasfilename(
             title="选择导出路径",
             defaultextension=format_ext,
+            initialfile=default_name,
             filetypes=[
                 ("Excel文件", "*.xlsx"),
                 ("CSV文件", "*.csv"),

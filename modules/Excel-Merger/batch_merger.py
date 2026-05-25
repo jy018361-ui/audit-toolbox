@@ -4,6 +4,7 @@ import pandas as pd
 import os
 import threading
 import warnings
+from datetime import datetime
 
 # 忽略警告
 warnings.filterwarnings("ignore")
@@ -14,6 +15,15 @@ try:
     HAS_XLSXWRITER = True
 except ImportError:
     HAS_XLSXWRITER = False
+
+try:
+    import polars as pl
+    import fastexcel
+    HAS_POLARS = True
+except ImportError:
+    pl = None
+    fastexcel = None
+    HAS_POLARS = False
 
 # ==========================================
 # V2.3: 页签选择弹窗 (保持 V2.2 逻辑不变)
@@ -74,14 +84,20 @@ class SheetSelectDialog(tk.Toplevel):
         ttk.Button(f_tool, text="全选", command=lambda: self.set_all(True), width=6).pack(side="left")
         ttk.Button(f_tool, text="全不选", command=lambda: self.set_all(False), width=6).pack(side="left")
 
-        self.cvs = tk.Canvas(self.f_list)
-        sb = ttk.Scrollbar(self.f_list, orient="vertical", command=self.cvs.yview)
+        list_body = tk.Frame(self.f_list)
+        list_body.pack(fill="both", expand=True)
+        list_body.grid_rowconfigure(0, weight=1)
+        list_body.grid_columnconfigure(0, weight=1)
+
+        self.cvs = tk.Canvas(list_body, highlightthickness=0)
+        sb = ttk.Scrollbar(list_body, orient="vertical", command=self.cvs.yview)
         self.frm_inner = tk.Frame(self.cvs)
-        self.cvs.create_window((0,0), window=self.frm_inner, anchor="nw")
+        self.inner_window = self.cvs.create_window((0,0), window=self.frm_inner, anchor="nw")
         self.cvs.configure(yscrollcommand=sb.set)
-        self.cvs.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
+        self.cvs.grid(row=0, column=0, sticky="nsew")
+        sb.grid(row=0, column=1, sticky="ns")
         self.frm_inner.bind("<Configure>", lambda e: self.cvs.configure(scrollregion=self.cvs.bbox("all")))
+        self.cvs.bind("<Configure>", self._sync_sheet_list_width)
         
         self.vars = {}
         self.refresh_sheet_list(self.excel_files[self.cb_files.current()])
@@ -102,6 +118,9 @@ class SheetSelectDialog(tk.Toplevel):
             self.toggle_list()
         except Exception as e:
             tk.Label(self.frm_inner, text=f"读取失败: {e}", fg="red").pack()
+
+    def _sync_sheet_list_width(self, event):
+        self.cvs.itemconfigure(self.inner_window, width=event.width)
 
     def toggle_list(self):
         state = "normal" if self.var_mode.get() == "match" else "disabled"
@@ -287,7 +306,12 @@ class BatchMergeApp:
             sheet_config["action"] = dlg.result_action
             sheet_config["targets"] = dlg.selected_sheets
         
-        save_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel文件", "*.xlsx"), ("CSV文件", "*.csv")])
+        default_name = f"Excel合并结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel文件", "*.xlsx"), ("CSV文件", "*.csv")],
+            initialfile=default_name
+        )
         if not save_path: return
 
         self.pb.start(10)
@@ -364,6 +388,14 @@ class BatchMergeApp:
 
             # === 2. 单 Sheet 合并模式 ===
             else:
+                if HAS_POLARS and HAS_XLSXWRITER:
+                    try:
+                        self.run_process_single_polars(save_path, sheet_config)
+                        self.root.after(0, lambda: self.on_success(save_path))
+                        return
+                    except Exception as fast_err:
+                        print(f"polars fast path failed, fallback to pandas: {fast_err}")
+
                 direction = self.var_direction.get()
                 use_smart = self.var_smart_align.get()
                 dfs = []
@@ -445,6 +477,234 @@ class BatchMergeApp:
         except Exception as e:
             err_msg = str(e); print(err_msg)
             self.root.after(0, lambda: self.on_error(err_msg))
+
+    def run_process_single_polars(self, save_path, sheet_config):
+        direction = self.var_direction.get()
+        use_smart = self.var_smart_align.get()
+        is_physical = (direction == "vertical" and not use_smart)
+        dfs = []
+        dfs_metadata = []
+
+        for fp in self.file_list:
+            f_base = os.path.basename(fp)
+            df_dict = self.load_all_sheets_polars(fp, sheet_config, auto_header=(not is_physical))
+            if not df_dict:
+                continue
+
+            for sn, df in df_dict.items():
+                if df.is_empty():
+                    continue
+
+                meta = {
+                    "path": fp,
+                    "fname": f_base,
+                    "sheet": sn,
+                    "rows": df.height,
+                    "cols": df.width,
+                    "columns": list(df.columns),
+                }
+
+                if direction == "horizontal":
+                    df = df.rename({col: f"__{len(dfs)}_{i}" for i, col in enumerate(df.columns)})
+                    dfs.append(df)
+                    dfs_metadata.append(meta)
+                elif direction == "vertical":
+                    if use_smart:
+                        df = self.apply_smart_mapping_polars(df)
+                    if is_physical:
+                        df.columns = [str(i) for i in range(df.width)]
+                    source_cols = [pl.lit(f_base).alias("【来源文件】")]
+                    if len(df_dict) > 1 or sheet_config['action'] != 'default':
+                        source_cols.append(pl.lit(sn).alias("【来源Sheet】"))
+                    df = df.with_columns(source_cols)
+                    leading = [expr.meta.output_name() for expr in source_cols]
+                    df = df.select(leading + [c for c in df.columns if c not in leading])
+                    dfs.append(df)
+                    dfs_metadata.append(meta)
+
+        if not dfs:
+            raise Exception("没有读取到有效数据")
+
+        if direction == "horizontal":
+            final_df = pl.concat(dfs, how="horizontal")
+        else:
+            final_df = pl.concat(dfs, how="diagonal_relaxed")
+
+        if save_path.lower().endswith(".csv"):
+            final_df.write_csv(save_path, include_header=(not is_physical), include_bom=True)
+            return
+
+        self.write_polars_excel(save_path, final_df, dfs_metadata, direction, is_physical, sheet_config)
+
+    def write_polars_excel(self, save_path, final_df, dfs_metadata, direction, is_physical, sheet_config):
+        workbook = xlsxwriter.Workbook(save_path)
+        try:
+            ws = workbook.add_worksheet("合并结果")
+            if direction == "horizontal":
+                fmt_h = workbook.add_format({'bold': True, 'border': 1, 'align': 'center', 'bg_color': '#D7E4BC'})
+                fmt_l = workbook.add_format({'font_color': 'blue', 'underline': 1, 'bold': True, 'border': 1, 'align': 'center', 'bg_color': '#D7E4BC'})
+
+                start_col = 0
+                flat_columns = []
+                for meta in dfs_metadata:
+                    display_name = meta['fname']
+                    if sheet_config['action'] != 'default':
+                        display_name += f" ({meta['sheet']})"
+                    for col_name in meta["columns"]:
+                        try:
+                            ws.write_url(0, start_col, f"external:{meta['path']}", fmt_l, string=display_name)
+                        except Exception:
+                            ws.write(0, start_col, display_name, fmt_h)
+                        ws.write(1, start_col, str(col_name), fmt_h)
+                        flat_columns.append(str(col_name))
+                        start_col += 1
+
+                self.write_polars_table(ws, final_df, startrow=2, header=False)
+            else:
+                self.write_polars_table(ws, final_df, startrow=0, header=(not is_physical))
+                link_fmt = workbook.add_format({'font_color': 'blue', 'underline': 1})
+                current_row = 0 if is_physical else 1
+                for i, meta in enumerate(dfs_metadata):
+                    row_count = dfs_metadata[i]["rows"]
+                    for _ in range(row_count):
+                        try:
+                            ws.write_url(current_row, 0, f"external:{meta['path']}", link_fmt, string=meta['fname'])
+                        except Exception:
+                            pass
+                        current_row += 1
+        finally:
+            workbook.close()
+
+    def write_polars_table(self, worksheet, df, startrow=0, header=True):
+        row_offset = startrow
+        if header:
+            for c_i, col in enumerate(df.columns):
+                worksheet.write(row_offset, c_i, str(col))
+            row_offset += 1
+
+        for r_i, row in enumerate(df.iter_rows()):
+            for c_i, value in enumerate(row):
+                if value is None:
+                    worksheet.write_blank(row_offset + r_i, c_i, None)
+                else:
+                    worksheet.write(row_offset + r_i, c_i, value)
+
+    def load_all_sheets_polars(self, fp, sheet_config, auto_header=True):
+        result = {}
+        if fp.lower().endswith(('.csv', '.txt')):
+            df = self.load_single_sheet_data_polars(fp, None, auto_header)
+            if df is not None:
+                result["CSV"] = df
+            return result
+
+        all_sheets = fastexcel.read_excel(fp).sheet_names
+        action = sheet_config.get("action", "default")
+        if action == "match_selected":
+            req = sheet_config.get("targets", [])
+            targets = [s for s in all_sheets if s in req]
+        elif action == "merge_all":
+            targets = all_sheets
+        else:
+            targets = [all_sheets[0]]
+
+        for s in targets:
+            df = self.load_single_sheet_data_polars(fp, s, auto_header)
+            if df is not None:
+                result[s] = df
+        return result
+
+    def load_single_sheet_data_polars(self, fp, sheet_name, auto_header):
+        is_text = fp.lower().endswith(('.csv', '.txt'))
+
+        if not auto_header:
+            return self.read_polars_data(fp, sheet_name, has_header=False, is_text=is_text)
+
+        df_p = self.read_polars_data(fp, sheet_name, has_header=False, is_text=is_text, n_rows=20)
+        if df_p.is_empty():
+            return None
+
+        s_r = 0
+        s_c = 0
+        found = False
+        for r, row in enumerate(df_p.iter_rows()):
+            for c, value in enumerate(row):
+                if value is not None and str(value) != "":
+                    s_r = r
+                    s_c = c
+                    found = True
+                    break
+            if found:
+                break
+        if not found:
+            return None
+
+        vals = df_p.row(s_r)[s_c:]
+        has_num = False
+        for v in vals:
+            if v is None:
+                continue
+            try:
+                float(str(v).replace(',', ''))
+                has_num = True
+                break
+            except Exception:
+                continue
+
+        df = self.read_polars_data(
+            fp,
+            sheet_name,
+            has_header=(not has_num),
+            is_text=is_text,
+            skip_rows=s_r,
+            header_row=(s_r if not has_num else None),
+        )
+        if s_c > 0:
+            df = df[:, s_c:]
+        return df
+
+    def read_polars_data(self, fp, sheet_name, has_header, is_text, n_rows=None, skip_rows=0, header_row=None):
+        if is_text:
+            return pl.read_csv(
+                fp,
+                has_header=has_header,
+                infer_schema=False,
+                n_rows=n_rows,
+                skip_rows=skip_rows,
+                encoding="utf8",
+            )
+
+        read_options = {}
+        if n_rows is not None:
+            read_options["n_rows"] = n_rows
+        if header_row is not None:
+            read_options["header_row"] = header_row
+        elif skip_rows:
+            read_options["header_row"] = None
+            read_options["skip_rows"] = skip_rows
+
+        return pl.read_excel(
+            fp,
+            sheet_name=sheet_name,
+            has_header=has_header,
+            infer_schema_length=0,
+            read_options=(read_options or None),
+        )
+
+    def apply_smart_mapping_polars(self, df):
+        rename_map = {}
+        cols_map = {c: str(c).lower().replace(" ", "").replace("_", "") for c in df.columns}
+        for role, kws in self.KEYWORDS.items():
+            t = f"【统一】{self.get_role_label(role)}"
+            for col_o, col_c in cols_map.items():
+                for kw in kws:
+                    if kw.replace(" ", "") in col_c:
+                        rename_map[col_o] = t
+                        break
+                if col_o in rename_map:
+                    break
+        if rename_map:
+            df = df.rename(rename_map)
+        return df
 
     def load_all_sheets(self, fp, sheet_config, auto_header=True):
         result = {}

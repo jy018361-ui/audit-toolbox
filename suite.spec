@@ -83,10 +83,21 @@ excludes = [
 datas = [(str(ROOT / "tools.json"), ".")]
 datas += collect_data_files("fastexcel")
 binaries = collect_dynamic_libs("fastexcel")
+
+def collect_runtime_tree(src: Path, dest: str):
+    collected = []
+    for dirpath, dirnames, filenames in os.walk(src):
+        dirnames[:] = [d for d in dirnames if d not in {"build", "dist"}]
+        rel = Path(dirpath).relative_to(src)
+        target = Path(dest) / rel
+        for fname in filenames:
+            collected.append((str(Path(dirpath) / fname), str(target)))
+    return collected
+
 if TOOLS_DIR.is_dir():
-    datas.append((str(TOOLS_DIR), "tools"))
+    datas += collect_runtime_tree(TOOLS_DIR, "tools")
 if MODULES_DIR.is_dir():
-    datas.append((str(MODULES_DIR), "modules"))
+    datas += collect_runtime_tree(MODULES_DIR, "modules")
 
 a = Analysis(
     ["suite_main.py"],

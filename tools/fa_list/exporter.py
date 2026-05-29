@@ -6,7 +6,7 @@ import pandas as pd
 import os
 import re
 from datetime import date
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.cell.cell import MergedCell
@@ -219,6 +219,12 @@ class Exporter:
                             fa_df.to_excel(writer, index=False, sheet_name=fa_sheet)
                             self._format_sheet_xlsxwriter(writer, fa_sheet, fa_df, fmts, summary_config=summary_config)
                             sheets.append(fa_sheet)
+                        if fa_success and fa_df is not None:
+                            short_life_df = self._build_short_life_cards_df(fa_df)
+                            short_life_sheet = self._reserve_sheet_name('≤12月卡片明细', used_sheet_names)
+                            short_life_df.to_excel(writer, index=False, sheet_name=short_life_sheet)
+                            self._format_sheet_xlsxwriter(writer, short_life_sheet, short_life_df, fmts, summary_config=summary_config)
+                            sheets.append(short_life_sheet)
                         if fa_msg:
                             for line in str(fa_msg).split('\n'):
                                 if "【" in line and line not in correction_warnings:
@@ -1099,8 +1105,13 @@ class Exporter:
 
         if sheet_name == "处置清单_BKD":
             out = out.rename(columns={"原值": "原值减少", "累计折旧": "年初累计折旧"})
-            if "入账开始日期" in out.columns:
-                out["入账开始日期"] = out["入账开始日期"].map(self.sheet_generator._format_date_only)
+
+        if sheet_name in ("FA List", "新增清单_BKD", "处置清单_BKD"):
+            for date_header in ("入账开始日期", "新增时间", "处置时间"):
+                if date_header in out.columns:
+                    out[date_header] = out[date_header].map(self.sheet_generator._format_date_only)
+            if "使用寿命(月)" in out.columns:
+                out["使用寿命(月)"] = out["使用寿命(月)"].map(self._format_life_number)
 
         force_numeric_headers = self._get_force_numeric_headers(summary_config) | self._sheet_numeric_header_hints(sheet_name)
         percent_headers = self._get_percent_headers(sheet_name)
@@ -1578,10 +1589,12 @@ class Exporter:
         if any(col not in df.columns for col in required):
             return None
 
-        def _correct_life_series(src: pd.Series) -> pd.Series:
-            num = pd.to_numeric(src, errors='coerce')
-            valid = num.dropna()
-            if not valid.empty and float(valid.max()) < 30:
+        def _correct_life_series(src: pd.Series, col_name: str) -> pd.Series:
+            num = pd.to_numeric(src.map(self._extract_life_number), errors='coerce')
+            decision, warning = self._life_unit_decision(col_name, src)
+            if warning and warning not in self._export_notes:
+                self._export_notes.append(warning)
+            if decision == "year":
                 return num * 12
             return num
 
@@ -1610,8 +1623,8 @@ class Exporter:
         df_work[temp_cat2_col] = df_work[category_col2].map(_norm_text)
         df_work[temp_value_col1] = pd.to_numeric(df_work[original_value_col1].map(self._to_number), errors='coerce').fillna(0)
         df_work[temp_value_col2] = pd.to_numeric(df_work[original_value_col2].map(self._to_number), errors='coerce').fillna(0)
-        df_work[temp_life_col1] = _correct_life_series(df_work[life_col1])
-        df_work[temp_life_col2] = _correct_life_series(df_work[life_col2])
+        df_work[temp_life_col1] = _correct_life_series(df_work[life_col1], life_col1)
+        df_work[temp_life_col2] = _correct_life_series(df_work[life_col2], life_col2)
 
         # B未分类/A非未分类 -> 按 A+C 查找已有聚合对象并归并（无对象则保留，后续可见N/A）
         # A未分类/B非未分类 -> 仅当“B分类在年初已存在”时，才将A回填为B并做同寿命聚合；
@@ -1800,8 +1813,8 @@ class Exporter:
             # 展示口径：若对应原值为0，则对应使用寿命显示为0
             out.loc[orig1_num == 0, life1_col] = 0
             out.loc[orig2_num == 0, life2_col] = 0
-            life1_num = pd.to_numeric(out[life1_col], errors='coerce')
-            life2_num = pd.to_numeric(out[life2_col], errors='coerce')
+            life1_num = pd.to_numeric(out[life1_col].map(self._extract_life_number), errors='coerce')
+            life2_num = pd.to_numeric(out[life2_col].map(self._extract_life_number), errors='coerce')
             res1_num = pd.to_numeric(out[res1_col], errors='coerce').fillna(0)
             res2_num = pd.to_numeric(out[res2_col], errors='coerce').fillna(0)
 
@@ -1832,7 +1845,7 @@ class Exporter:
                 return keys
 
             def _life_token(v) -> str:
-                n = pd.to_numeric(pd.Series([v]), errors='coerce').iloc[0]
+                n = self._extract_life_number(v)
                 if pd.notna(n):
                     return f"N:{float(n):.10g}"
                 s = str(v).strip()
@@ -1879,8 +1892,8 @@ class Exporter:
                 if str(row.get("判断结果", "")).strip() != "不一致":
                     return 0.0
                 y_end_orig = pd.to_numeric(pd.Series([row.get(orig2_col)]).map(self._to_number), errors='coerce').iloc[0]
-                y_end_life = pd.to_numeric(pd.Series([row.get(life2_col)]), errors='coerce').iloc[0]
-                y_start_life = pd.to_numeric(pd.Series([row.get(life1_col)]), errors='coerce').iloc[0]
+                y_end_life = self._extract_life_number(row.get(life2_col))
+                y_start_life = self._extract_life_number(row.get(life1_col))
                 rr_start = pd.to_numeric(pd.Series([row.get(res1_col)]), errors='coerce').iloc[0]
                 rr_end = pd.to_numeric(pd.Series([row.get(res2_col)]), errors='coerce').iloc[0]
                 if row.name in new_life_in_end_mask.index and bool(new_life_in_end_mask.loc[row.name]):
@@ -1901,8 +1914,8 @@ class Exporter:
                 if str(row.get("判断结果", "")).strip() != "不一致":
                     return ""
                 y_end_orig = pd.to_numeric(pd.Series([row.get(orig2_col)]).map(self._to_number), errors='coerce').iloc[0]
-                y_end_life = pd.to_numeric(pd.Series([row.get(life2_col)]), errors='coerce').iloc[0]
-                y_start_life = pd.to_numeric(pd.Series([row.get(life1_col)]), errors='coerce').iloc[0]
+                y_end_life = self._extract_life_number(row.get(life2_col))
+                y_start_life = self._extract_life_number(row.get(life1_col))
                 rr_start = pd.to_numeric(pd.Series([row.get(res1_col)]), errors='coerce').iloc[0]
                 rr_end = pd.to_numeric(pd.Series([row.get(res2_col)]), errors='coerce').iloc[0]
                 impact = row.get("影响当年金额", 0.0)
@@ -2496,16 +2509,79 @@ class Exporter:
         """依据源数据判断是否应按“年->月”纠偏。"""
         if not isinstance(source_df, pd.DataFrame) or source_df.empty or not source_life_col or source_life_col not in source_df.columns:
             return False
-        vals = pd.to_numeric(source_df[source_life_col], errors="coerce").dropna()
-        return bool(len(vals) > 0 and (vals < 30).all())
+        decision, warning = self._life_unit_decision(source_life_col, source_df[source_life_col])
+        if warning and warning not in self._export_notes:
+            self._export_notes.append(warning)
+        return decision == "year"
 
-    def _convert_life_lt30_to_month(self, df: pd.DataFrame, col_name: str) -> pd.DataFrame:
-        """仅把<30的寿命值按年转月，避免对已是月的值重复转换。"""
+    def _life_unit_decision(self, col_name: Optional[str], values) -> Tuple[str, str]:
+        """Decide whether useful life values are years, months, or ambiguous."""
+        name = str(col_name or "").replace("_文件1", "").replace("_文件2", "").lower()
+        if any(k in name for k in ("月", "月份", "month", "months")):
+            return "month", ""
+        year_markers = ("使用年限", "折旧年限", "预计年限", "年限", "寿命(年)", "寿命（年）", "(年)", "（年）", "year", "years")
+        if any(k in name for k in year_markers):
+            return "year", "【使用寿命纠偏】系统根据列名判断使用寿命单位为“年”，已自动修正为：使用寿命(月) = 使用寿命 × 12。"
+
+        vals = values.map(self._extract_life_number) if isinstance(values, pd.Series) else pd.Series(values).map(self._extract_life_number)
+        vals = pd.to_numeric(vals, errors="coerce").dropna()
+        if vals.empty:
+            return "unknown", ""
+        typical_months = {36, 48, 60, 120, 240}
+        rounded_vals = vals.round().astype(int)
+        if float(vals.max()) > 70 or bool(rounded_vals.isin(typical_months).any()):
+            return "month", ""
+        typical_years = {3, 5, 10, 20}
+        year_like_ratio = float(rounded_vals.isin(typical_years).mean())
+        if len(rounded_vals) >= 3 and year_like_ratio >= 0.6:
+            return "ambiguous", "【使用寿命纠偏】系统检测到使用寿命列名未明确单位，且多数数值落在3/5/10/20这类常见年限，可能是年也可能是月。为避免误判，已保留原值，未自动乘以12；请确认导出的使用寿命(月)是否需要手工调整。"
+        return "unknown", ""
+
+    def _extract_life_number(self, value):
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).replace(",", "").strip()
+        if not text:
+            return None
+        match = re.search(r"[+-]?\d+(?:\.\d+)?", text)
+        if not match:
+            return None
+        try:
+            return float(match.group(0))
+        except Exception:
+            return None
+
+    def _format_life_number(self, value):
+        n = self._extract_life_number(value)
+        if n is None:
+            return ''
+        return int(n) if n == int(n) else n
+
+    def _build_short_life_cards_df(self, fa_df: Optional[pd.DataFrame]) -> pd.DataFrame:
+        message = "经检查，期末FA LIST中未发现任何≤12月的资产卡片"
+        if fa_df is None or fa_df.empty or "使用寿命(月)" not in fa_df.columns:
+            return pd.DataFrame({"提示": [message]})
+        work = fa_df.copy()
+        life_num = pd.to_numeric(work["使用寿命(月)"].map(self._extract_life_number), errors="coerce")
+        out = work.loc[life_num.notna() & (life_num <= 12)].copy()
+        if out.empty:
+            return pd.DataFrame({"提示": [message]})
+        return out
+
+    def _convert_life_year_to_month(self, df: pd.DataFrame, col_name: str) -> pd.DataFrame:
+        """Convert useful life values from years to months."""
         if df is None or df.empty or col_name not in df.columns:
             return df
         out = df.copy()
-        nums = pd.to_numeric(out[col_name], errors="coerce")
-        mask = nums.notna() & (nums < 30)
+        nums = pd.to_numeric(out[col_name].map(self._extract_life_number), errors="coerce")
+        mask = nums.notna()
         if not bool(mask.any()):
             return out
         converted = (nums[mask] * 12.0)
@@ -2852,9 +2928,9 @@ class Exporter:
             if "__fa_match_key__" in fa_work.columns:
                 fa_work = fa_work.drop(columns=["__fa_match_key__"], errors="ignore")
             fa_out = fa_work
-            # 若源文件2寿命列判定为“年”，则对FA表中<30的寿命值转月（避免重复转换）
+            # 若源文件2寿命列判定为“年”，则对FA表寿命值转月
             if "使用寿命(月)" in fa_out.columns and self._source_life_year_mode(source_file2_df, source_life_col2_raw):
-                fa_out = self._convert_life_lt30_to_month(fa_out, "使用寿命(月)")
+                fa_out = self._convert_life_year_to_month(fa_out, "使用寿命(月)")
             # 回填后同步净值，保证与原值/累计折旧一致
             if {"原值", "累计折旧", "净值"}.issubset(set(fa_out.columns)):
                 def _to_num(v):
@@ -2939,9 +3015,9 @@ class Exporter:
                 add_tpl_map,
                 overwrite_all_rows=True,
             )
-            # 若源文件2寿命列判定为“年”，则对新增清单中<30的寿命值转月（避免重复转换）
+            # 若源文件2寿命列判定为“年”，则对新增清单寿命值转月
             if "使用寿命(月)" in add_work.columns and self._source_life_year_mode(source_file2_df, source_life_col2_raw):
-                add_work = self._convert_life_lt30_to_month(add_work, "使用寿命(月)")
+                add_work = self._convert_life_year_to_month(add_work, "使用寿命(月)")
             add_work = self._fill_display_fields_by_duplicate_id(
                 add_work, add_id_col, [], keep_first_only_cols=["原值增加"]
             )
@@ -2977,15 +3053,39 @@ class Exporter:
         return merged_out, fa_out, add_out, disp_out
 
     def _export_unmatched_change_workbook(self, main_file_path: str, add_df: Optional[pd.DataFrame], disp_df: Optional[pd.DataFrame]):
-        """导出未匹配资产变动清单（两个sheet放在一个工作簿）。"""
+        """导出未匹配资产变动清单。"""
         try:
             out_dir = os.path.dirname(main_file_path) if os.path.dirname(main_file_path) else "."
             out_path = os.path.join(out_dir, "[未匹配资产变动清单].xlsx")
             add_out = add_df.copy() if isinstance(add_df, pd.DataFrame) else pd.DataFrame()
             disp_out = disp_df.copy() if isinstance(disp_df, pd.DataFrame) else pd.DataFrame()
             with pd.ExcelWriter(out_path, engine="xlsxwriter") as writer:
+                note_df = pd.DataFrame({
+                    "说明": [
+                        "这个工作簿用于列示“补充清单”中没有成功匹配到主数据的资产变动记录。",
+                        "补充清单是指你在第二步额外上传的新增清单或处置清单；系统会按你选择的唯一识别码，把新增方式、处置方式、处置原值、处置折旧等信息回填到主表。",
+                        "如果补充清单中的某些唯一识别码在主表中找不到，就会出现在这里，表示这些记录尚未被用于FA List、新增清单_BKD或处置清单_BKD的回填。",
+                        "请检查这些记录的资产编号/卡片编号/组合匹配列是否与主表一致，常见原因包括编号多空格、前导零缺失、选错匹配列、补充清单包含非本期或非本公司的资产。",
+                        "处理建议：修正补充清单或主表中的唯一识别码后重新运行；如果确认这些记录不应进入本次审计范围，可保留此工作簿作为排除说明；如果并非上述原因，请与客户确认这一异常情况。",
+                    ]
+                })
+                note_df.to_excel(writer, sheet_name="说明", index=False)
                 add_out.to_excel(writer, sheet_name="未匹配新增清单", index=False)
                 disp_out.to_excel(writer, sheet_name="未匹配处置清单", index=False)
+                workbook = writer.book
+                wrap_fmt = workbook.add_format({"text_wrap": True, "valign": "top"})
+                header_fmt = workbook.add_format({"bold": True, "valign": "top"})
+                ws_note = writer.sheets.get("说明")
+                if ws_note is not None:
+                    ws_note.set_column(0, 0, 110, wrap_fmt)
+                    ws_note.write(0, 0, "说明", header_fmt)
+                for sheet_name, data in (("未匹配新增清单", add_out), ("未匹配处置清单", disp_out)):
+                    ws = writer.sheets.get(sheet_name)
+                    if ws is None:
+                        continue
+                    for idx, col in enumerate(data.columns):
+                        width = min(max(len(str(col)) + 2, 12), 28)
+                        ws.set_column(idx, idx, width)
             return True, out_path
         except Exception as e:
             return False, str(e)

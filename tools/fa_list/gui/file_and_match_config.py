@@ -1365,7 +1365,7 @@ class FileAndMatchConfig(ttk.Frame):
             disposal_date_contain = ['处置', '减少', '时间', '日期', '时点']
             disposal_orig_exact = ['处置原值', '减少原值', '原值减少', '处置成本']
             disposal_orig_contain = ['处置原值', '减少原值', '原值减少', '原值']
-            disposal_dep_exact = ['处置折旧', '减少折旧', '累计折旧处置', '累计折旧减少']
+            disposal_dep_exact = ['处置折旧', '减少折旧', '累计折旧处置', '累计折旧减少', '累计折旧']
             disposal_dep_contain = ['处置折旧', '减少折旧', '折旧减少', '累计折旧减少', '累计折旧处置']
 
             add_method_col1 = auto_map_column(cols1, addition_method_exact, addition_method_contain)

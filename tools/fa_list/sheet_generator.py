@@ -247,6 +247,58 @@ class SheetGenerator:
         except (ValueError, TypeError):
             return 0.0
 
+    def _life_unit_decision(self, col_name: Optional[str], values) -> Tuple[str, str]:
+        """Decide whether useful life values are years, months, or ambiguous."""
+        name = str(col_name or "").replace("_文件1", "").replace("_文件2", "").lower()
+        if any(k in name for k in ("月", "月份", "month", "months")):
+            return "month", ""
+        year_markers = ("使用年限", "折旧年限", "预计年限", "年限", "寿命(年)", "寿命（年）", "(年)", "（年）", "year", "years")
+        if any(k in name for k in year_markers):
+            return "year", "【使用寿命纠偏】系统根据列名判断使用寿命单位为“年”，已自动修正为：使用寿命(月) = 使用寿命 × 12。"
+
+        vals = values.map(self._extract_life_number) if isinstance(values, pd.Series) else pd.Series(values).map(self._extract_life_number)
+        vals = pd.to_numeric(vals, errors="coerce").dropna()
+        if vals.empty:
+            return "unknown", ""
+        typical_months = {36, 48, 60, 120, 240}
+        rounded_vals = vals.round().astype(int)
+        if float(vals.max()) > 70 or bool(rounded_vals.isin(typical_months).any()):
+            return "month", ""
+        typical_years = {3, 5, 10, 20}
+        year_like_ratio = float(rounded_vals.isin(typical_years).mean())
+        if len(rounded_vals) >= 3 and year_like_ratio >= 0.6:
+            return "ambiguous", "【使用寿命纠偏】系统检测到使用寿命列名未明确单位，且多数数值落在3/5/10/20这类常见年限，可能是年也可能是月。为避免误判，已保留原值，未自动乘以12；请确认导出的使用寿命(月)是否需要手工调整。"
+        return "unknown", ""
+
+    def _extract_life_number(self, value):
+        if pd.isna(value) or value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).replace(",", "").strip()
+        if not text:
+            return None
+        match = re.search(r"[+-]?\d+(?:\.\d+)?", text)
+        if not match:
+            return None
+        try:
+            return float(match.group(0))
+        except Exception:
+            return None
+
+    def _format_life_number(self, value):
+        n = self._extract_life_number(value)
+        if n is None:
+            return ''
+        return int(n) if n == int(n) else n
+
+    def _life_value_to_months(self, value):
+        x = self._extract_life_number(value)
+        if x is None:
+            return ''
+        y = x * 12
+        return int(y) if y == int(y) else y
+
     @staticmethod
     def _build_composite_key_series(df: pd.DataFrame, cols: List[str]) -> pd.Series:
         """按匹配列构造组键；用于同一ID多卡片的组级分摊。"""
@@ -265,34 +317,60 @@ class SheetGenerator:
             return parts[0]
         return pd.concat(parts, axis=1).agg("|||".join, axis=1)
 
-    def _format_date_only(self, value) -> str:
-        """统一日期展示为 YYYY-MM-DD，去掉时间部分。"""
+    def _parse_date_value(self, value) -> Optional[datetime]:
+        """Parse common asset date formats into a datetime."""
         if value is None or (isinstance(value, float) and pd.isna(value)):
-            return ""
+            return None
         if isinstance(value, datetime):
-            return value.strftime("%Y-%m-%d")
+            return value
         if hasattr(value, "to_pydatetime"):
             try:
-                return value.to_pydatetime().strftime("%Y-%m-%d")
+                return value.to_pydatetime()
             except Exception:
                 pass
-        text = str(value).strip()
+        if isinstance(value, (int, float)) and value > 0:
+            return datetime(1899, 12, 30) + relativedelta(days=int(value))
+
+        text = str(value).strip().lstrip("\ufeff\u200b\u200c\u200d'`‘’“”\"")
         if not text:
-            return ""
-        normalized = text.replace("/", "-").replace(".", "-")
+            return None
+
+        num_text = text.replace(",", "")
+        if re.fullmatch(r"[+-]?\d+(\.\d+)?", num_text):
+            serial = float(num_text)
+            if not re.fullmatch(r"\d{8}", num_text.split(".", 1)[0]) and 0 < serial <= 100000:
+                return datetime(1899, 12, 30) + relativedelta(days=int(serial))
+
+        normalized = (
+            text.replace("年", "-")
+            .replace("月", "-")
+            .replace("日", "")
+            .replace(".", "-")
+            .replace("/", "-")
+        )
         if " " in normalized:
             normalized = normalized.split(" ")[0]
-        for fmt in ("%Y-%m-%d", "%Y%m%d", "%Y年%m月%d日"):
-            try:
-                return datetime.strptime(normalized, fmt).strftime("%Y-%m-%d")
-            except ValueError:
-                continue
+        normalized = normalized.strip("-")
+        for candidate in (text, normalized):
+            for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%m-%d-%Y", "%Y-%m", "%Y/%m", "%Y.%m"):
+                try:
+                    return datetime.strptime(candidate, fmt)
+                except ValueError:
+                    continue
         ts = pd.to_datetime(text, errors="coerce")
         if pd.notna(ts):
             try:
-                return ts.to_pydatetime().strftime("%Y-%m-%d")
+                return ts.to_pydatetime()
             except Exception:
                 pass
+        return None
+
+    def _format_date_only(self, value) -> str:
+        """统一日期展示为 YYYY-MM-DD，去掉时间部分。"""
+        parsed = self._parse_date_value(value)
+        if parsed is not None:
+            return parsed.strftime("%Y-%m-%d")
+        text = str(value).strip() if value is not None else ""
         return text
     
     def _calculate_depreciation_end_date(self, start_date, months) -> str:
@@ -351,51 +429,14 @@ class SheetGenerator:
             return ""
 
         try:
-            months_int = int(self._safe_numeric(months))
+            months_value = self._extract_life_number(months)
+            if months_value is None:
+                return ""
+            months_int = int(months_value)
             if months_int <= 0:
                 return ""
 
-            start_dt = None
-            if isinstance(start_date, str):
-                raw = start_date.strip()
-                if not raw:
-                    return ""
-
-                num_text = raw.replace(",", "")
-                if re.fullmatch(r"[+-]?\d+(\.\d+)?", num_text):
-                    serial = float(num_text)
-                    # 8位纯数字通常是 YYYYMMDD，不按 Excel 序列处理
-                    if re.fullmatch(r"\d{8}", num_text.split(".", 1)[0]):
-                        serial = -1
-                    # Excel 日期序列合理范围，避免把 20240115 误当序列号
-                    if 0 < serial <= 100000:
-                        start_dt = datetime(1899, 12, 30) + relativedelta(days=int(serial))
-
-                if start_dt is None:
-                    normalized = (
-                        raw.replace("年", "-")
-                        .replace("月", "-")
-                        .replace("日", "")
-                        .replace(".", "-")
-                        .replace("/", "-")
-                    )
-                    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d", "%d/%m/%Y", "%m/%d/%Y", "%Y-%m"):
-                        try:
-                            start_dt = datetime.strptime(normalized, fmt)
-                            break
-                        except ValueError:
-                            continue
-                    if start_dt is None:
-                        ts = pd.to_datetime(raw, errors="coerce")
-                        if pd.notna(ts):
-                            start_dt = ts.to_pydatetime()
-            elif isinstance(start_date, datetime):
-                start_dt = start_date
-            elif hasattr(start_date, "to_pydatetime"):
-                start_dt = start_date.to_pydatetime()
-            elif isinstance(start_date, (int, float)) and start_date > 0:
-                start_dt = datetime(1899, 12, 30) + relativedelta(days=int(start_date))
-
+            start_dt = self._parse_date_value(start_date)
             if start_dt is None:
                 return ""
 
@@ -600,14 +641,11 @@ class SheetGenerator:
             original_col = _use(self.original_value_col2)
             depreciation_col = _use(self.depreciation_col2)
             
-            # 纠偏：若使用寿命（转为数值后）全部 < 30，视为年数，输出时整列 ×12
-            life_correct_years_to_months = False
+            # 纠偏：列名明确为年才自动转月；单位不明确时仅提示，不自动改值
+            life_unit = "unknown"
             life_warning = ""
             if life_col and life_col in df.columns:
-                life_vals = pd.to_numeric(df[life_col], errors='coerce').dropna()
-                if len(life_vals) > 0 and (life_vals < 30).all():
-                    life_correct_years_to_months = True
-                    life_warning = "【使用寿命纠偏】系统检测到使用寿命列中全部小于30，判断该列可能是年数而非月数。已自动修正为：使用寿命(月) = 使用寿命 × 12。"
+                life_unit, life_warning = self._life_unit_decision(life_col, df[life_col])
             
             # 纠偏：若残值率列中有大于100的值，判断为残值而非残值率，输出 残值率=残值/原值
             need_residual_correction = False
@@ -639,18 +677,10 @@ class SheetGenerator:
                 asset_name = row.get(name_col, '') if name_col else ''
                 start_date = self._format_date_only(row.get(date_col, '')) if date_col else ''
                 raw_life = row.get(life_col, '') if life_col else ''
-                if life_correct_years_to_months:
-                    if pd.isna(raw_life) or raw_life is None or (isinstance(raw_life, str) and raw_life.strip() == ''):
-                        service_life = ''
-                    else:
-                        try:
-                            x = self._safe_numeric(raw_life)
-                            y = x * 12
-                            service_life = int(y) if y == int(y) else y
-                        except Exception:
-                            service_life = raw_life
+                if life_unit == "year":
+                    service_life = self._life_value_to_months(raw_life)
                 else:
-                    service_life = raw_life
+                    service_life = self._format_life_number(raw_life)
                 original_value = row.get(original_col, 0) if original_col else 0
                 depreciation = row.get(depreciation_col, 0) if depreciation_col else 0
                 ov = self._safe_numeric(original_value)
@@ -871,14 +901,11 @@ class SheetGenerator:
                     ['新增日期', '新增时间', '增加日期', '取得日期']
                 )
             
-            # 纠偏机制：若使用寿命（转为数值后）全部 < 30，视为年数，输出时整列 ×12
-            life_correct_years_to_months = False
+            # 纠偏机制：列名明确为年才自动转月；单位不明确时仅提示，不自动改值
+            life_unit = "unknown"
             life_warning = ""
             if life_col and life_col in addition_df.columns:
-                life_vals = pd.to_numeric(addition_df[life_col], errors='coerce').dropna()
-                if len(life_vals) > 0 and (life_vals < 30).all():
-                    life_correct_years_to_months = True
-                    life_warning = "【使用寿命纠偏】系统检测到使用寿命列中全部小于30，判断该列可能是年数而非月数。已自动修正为：使用寿命(月) = 使用寿命 × 12。"
+                life_unit, life_warning = self._life_unit_decision(life_col, addition_df[life_col])
             
             # 纠偏机制：检测残值率列是否有大于100的值
             need_correction = False
@@ -915,20 +942,15 @@ class SheetGenerator:
                 asset_name = row.get(name_col, '') if name_col else ''
                 start_date = row.get(date_col, '') if date_col else ''
                 
-                # 获取使用寿命(月)值，处理NaN情况；纠偏：若全部<30则按年转月×12
+                # 获取使用寿命(月)值，处理NaN情况；列名明确为年时按年转月×12
                 if life_col:
                     service_life_raw = row.get(life_col, '')
                     if pd.isna(service_life_raw) or service_life_raw is None or (isinstance(service_life_raw, str) and service_life_raw.strip() == ''):
                         service_life = ''
-                    elif life_correct_years_to_months:
-                        try:
-                            x = self._safe_numeric(service_life_raw)
-                            y = x * 12
-                            service_life = int(y) if y == int(y) else y
-                        except Exception:
-                            service_life = service_life_raw
+                    elif life_unit == "year":
+                        service_life = self._life_value_to_months(service_life_raw)
                     else:
-                        service_life = service_life_raw
+                        service_life = self._format_life_number(service_life_raw)
                 else:
                     service_life = ''
                 
@@ -1151,11 +1173,18 @@ class SheetGenerator:
                 asset_name = row.get(name_col, '') if name_col else ''
                 start_date = row.get(date_col, '') if date_col else ''
                 service_life = row.get(life_col, '') if life_col else ''
-                residual_rate = row.get(residual_col, '') if residual_col else ''
                 
                 # 原值：取自原值变动的绝对值
                 orig_change = row.get(change_col, 0) if change_col else 0
                 original_value = abs(self._safe_numeric(orig_change))
+                residual_rate = row.get(residual_col, '') if residual_col else ''
+                residual_num = self._safe_numeric(residual_rate) if residual_col else 0.0
+                if residual_col and residual_num > 1:
+                    residual_base = abs(self._safe_numeric(row.get(original_value_col1, 0))) if original_value_col1 else 0.0
+                    if residual_base <= 0:
+                        residual_base = original_value
+                    if residual_base > 0:
+                        residual_rate = residual_num / residual_base
                 ending_orig2 = self._safe_numeric(row.get(original_value_col2, 0)) if original_value_col2 else 0
                 decrease_type = '原值修改' if ending_orig2 != 0 else '非原值修改'
                 disposal_method = self._get_value_with_fallback(row, disposal_method_col1, disposal_method_col2, '')

@@ -1,0 +1,24 @@
+﻿# 仅托管源码；不提交构建产物与演示媒体
+*.exe
+*.mp4
+*.avi
+*.mkv
+*.zip
+*.7z
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+
+# IDE / 本地
+.cursor/
+.vscode/
+.idea/
+*.log
+.DS_Store
+Thumbs.db

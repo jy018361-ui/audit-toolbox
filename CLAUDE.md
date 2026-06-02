@@ -14,16 +14,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### 开发运行
 ```bash
-# 直接启动（开发模式，需要 vendor 目录已同步或 dev_root 可用）
+# 直接启动（开发模式，自动从 tools/ 和 modules/ 加载工具）
 python suite_main.py
-
-# 仅同步 vendor 目录（从 dev_root 拷贝源码到 vendor/）
-python build_suite.py --sync-only
 ```
 
 ### 打包构建
 ```bash
-# 完整构建：同步 vendor → 安装依赖 → 构建单文件 exe（含体积对比）
+# 完整构建：安装依赖 → 构建单文件 exe（直接从 tools/ 和 modules/ 打包）
 python build_suite.py
 
 # 跳过基线对比
@@ -31,6 +28,9 @@ python build_suite.py --no-baseline
 
 # 跳过 pip install
 python build_suite.py --no-pip
+
+# 手动同步工具到 vendor/（仅旧版兼容，一般不需要）
+python build_suite.py --sync-only
 ```
 
 ### 依赖安装
@@ -51,31 +51,23 @@ pip install -r requirements.txt
 
 ### 构建系统
 `build_suite.py` 负责：
-1. `sync_vendor()`: 从外部 dev_root 同步源码到 `vendor/`，自动排除测试文件、缓存、构建产物
+1. 直接使用 `tools/` 和 `modules/` 目录中的源码进行打包
 2. 调用 PyInstaller 使用 `suite.spec` 构建单文件 exe
 3. 可选地构建各子工具的基线 exe 用于体积对比
+4. `--sync-only` 仅作为旧版兼容，手动将工具同步到 `vendor/`（一般不需要）
 
-### 跨电脑协同构建（推荐方案）
+### 跨电脑协同构建
 当多个同事各自开发子工具、需要在不同电脑上统一打包时，推荐以下工作流：
 
-1. **各自开发，代码托管到 Git 仓库**（vendor/ 已在 .gitignore 中，不入库）
-2. **每人只把子工具源码目录提交到仓库的指定路径**，例如：
-   - `tools/fa_list/` — 同事 A 的固定资产工具
-   - `tools/kanzhang/` — 同事 B 的看账工具
-   - `tools/your_tool/` — 你自己的新工具
-3. **修改 `build_suite.py`**，将同步源从硬编码的本地路径改为读取仓库中的 `tools/` 目录：
-   ```python
-   # 替换 FA_SRC = Path(r"C:\Users\Administrator\Downloads\...") 为：
-   FA_SRC = ROOT / "tools" / "fa_list"
-   KANZHANG_SRC = ROOT / "tools" / "kanzhang"
-   ```
-4. **打包者拉取最新代码**后执行 `python build_suite.py`，即可一键同步并构建。
-
-> **备选方案**：如果子工具开发者不想提交源码到仓库，也可以把各自目录放在共享网盘/内网共享文件夹，`build_suite.py` 中路径指向共享位置即可。
+1. **各自开发，代码托管到 Git 仓库**
+2. **每人把子工具源码放入对应目录**：
+   - `tools/fa_list/` — 本地开发的工具
+   - `modules/confirmation_progress/` — 外部克隆的工具仓库
+3. **打包者拉取最新代码**后执行 `python build_suite.py`，直接从 `tools/` 和 `modules/` 打包，无需额外同步步骤
 
 ### PyInstaller 配置（suite.spec）
 - 入口：`suite_main.py`
-- `tools.json` 和整个 `vendor/` 目录打包进 exe
+- `tools.json` 和整个 `tools/`、`modules/` 目录打包进 exe
 - `launcher/bundle_anchor.py` 通过 `touch_bundle_deps()` 触发 PyInstaller 追踪 pandas/numpy/openpyxl 等重依赖
 - 大量排除了不使用的科学计算库以控制体积
 
@@ -115,8 +107,10 @@ def main(root=None):
 5. [ ] **不修改窗口装饰器**（`transient()`、`overrideredirect()`、`attributes('-toolwindow')`）
 6. [ ] 独立运行和嵌入式运行行为一致
 
-### vendor 目录
-`vendor/` 已被 `.gitignore` 排除，由 `build_suite.py --sync-only` 从外部开发目录同步。开发时可直接编辑 `vendor/` 下的文件，但需注意这些更改不会被版本控制。
+### 源码目录约定
+- `tools/` — 本地开发的子工具源码，纳入版本控制
+- `modules/` — 外部克隆的子工具仓库，纳入版本控制
+- `vendor/` — 已废弃，不再作为打包源。仅 `--sync-only` 手动同步时使用，已被 `.gitignore` 排除
 
 ## 测试
 

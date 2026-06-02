@@ -651,6 +651,9 @@ class PivotConfig(ttk.Frame):
         dialog.grab_set()
         
         ttk.Label(dialog, text="请选择要添加的字段:", font=("Arial", 10)).pack(pady=10)
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
         
         list_frame = ttk.Frame(dialog)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -666,9 +669,6 @@ class PivotConfig(ttk.Frame):
             # 显示格式化后的列名
             display_name = self._format_column_name(field)
             listbox.insert(tk.END, display_name)
-        
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(pady=10)
         
         def on_ok():
             selection = listbox.curselection()
@@ -721,7 +721,7 @@ class PivotConfig(ttk.Frame):
         def on_cancel():
             dialog.destroy()
         
-        ttk.Button(button_frame, text="确定", command=on_ok, width=10).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="确定", command=on_ok, width=10).pack(side=tk.LEFT, padx=8)
         ttk.Button(button_frame, text="取消", command=on_cancel, width=10).pack(side=tk.LEFT, padx=5)
         
         listbox.bind('<Double-Button-1>', lambda e: on_ok())

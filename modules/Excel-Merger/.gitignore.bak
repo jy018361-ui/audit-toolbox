@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller（本地重新打包即可，不必每次提交）
+build/
+dist/
+
+# IDE / OS
+.vscode/
+.idea/
+*.log
+Thumbs.db
+Desktop.ini

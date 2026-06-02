@@ -28,7 +28,7 @@ def config_path() -> Path:
 def tool_source_roots() -> tuple[str, ...]:
     """返回当前环境下用于查找工具源码的子目录名。"""
     if getattr(sys, "frozen", False):
-        return ("vendor",)
+        return ("modules", "tools")
     return _TOOL_SOURCE_DIRS
 
 
@@ -104,11 +104,10 @@ def resolve_tool_root(tool: ToolSpec) -> Path:
             return dev.resolve()
     frozen = getattr(sys, "frozen", False)
     hint = (
-        "请执行: python build_suite.py --sync-only"
+        "工具未打包进 exe，请检查 tools.json 配置和构建流程"
         if frozen
         else (
-            "请在本机 modules/ 下克隆对应仓库（见 modules/README.md），\n"
-            "或放入 tools/，或配置 dev_root，然后执行: python build_suite.py --sync-only"
+            "请将工具放入 tools/ 或 modules/ 目录，或配置 dev_root 路径"
         )
     )
     raise FileNotFoundError(

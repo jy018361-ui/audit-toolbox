@@ -208,6 +208,10 @@ class MatchConfig(ttk.Frame):
         
         # 说明文字
         ttk.Label(dialog, text="请选择匹配列:", font=("Arial", 10)).pack(pady=10)
+
+        # 按钮固定在底部，避免列表区域撑开后遮住确认按钮
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
         
         # 列列表
         list_frame = ttk.Frame(dialog)
@@ -225,10 +229,6 @@ class MatchConfig(ttk.Frame):
             listbox.insert(tk.END, col)
             if col == current_col:
                 listbox.selection_set(tk.END)
-        
-        # 按钮
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(pady=10)
         
         def on_ok():
             selection = listbox.curselection()
@@ -249,7 +249,7 @@ class MatchConfig(ttk.Frame):
         def on_cancel():
             dialog.destroy()
         
-        ttk.Button(button_frame, text="确定", command=on_ok, width=10).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="确定", command=on_ok, width=10).pack(side=tk.LEFT, padx=8)
         ttk.Button(button_frame, text="取消", command=on_cancel, width=10).pack(side=tk.LEFT, padx=5)
         
         # 双击选择

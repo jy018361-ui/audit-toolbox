@@ -7,6 +7,7 @@ from tkinter import ttk, messagebox, filedialog
 import os
 import threading
 import webbrowser
+from datetime import datetime
 from urllib.parse import quote
 import pandas as pd
 from config import APP_NAME, WINDOW_WIDTH, WINDOW_HEIGHT, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT
@@ -1100,10 +1101,12 @@ class MainWindow:
         self.update_status(f"已选择 {len(selected_columns)} 列")
         self._auto_create_pivot_table()
         summary_config = self._build_summary_config()
+        default_name = f"FA_List_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         path = filedialog.asksaveasfilename(
             title="选择导出路径",
             defaultextension=".xlsx",
-            filetypes=[("Excel文件", "*.xlsx"), ("CSV文件", "*.csv"), ("所有文件", "*.*")]
+            filetypes=[("Excel文件", "*.xlsx"), ("CSV文件", "*.csv"), ("所有文件", "*.*")],
+            initialfile=default_name
         )
         if path:
             if path.lower().endswith(".xlsx"):

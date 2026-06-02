@@ -15,10 +15,14 @@ dist/*
 # vendor 目录（由 build_suite.py --sync-only 生成，不入库）
 vendor/
 
-# 独立模块（各人 git clone，不入库；保留占位与说明）
-modules/*
-!modules/.gitkeep
-!modules/README.md
+# 独立模块目录（MODULES），参与 PR 提交
+# 排除嵌套 git 仓库的内部 .git 目录（避免子模块冲突）
+modules/*/.git/
+# 排除各子工具内的构建产物和缓存
+modules/*/build/
+modules/*/dist/
+modules/*/__pycache__/
+modules/*/*.pyc
 
 # IDE 和系统文件
 .vscode/

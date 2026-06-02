@@ -1,4 +1,5 @@
 ﻿import math
+import re
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -117,6 +118,38 @@ def to_number(value) -> float:
         return float(text)
     except Exception:
         return 0.0
+
+
+def parse_life_months(value) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        if math.isnan(value) if isinstance(value, float) else False:
+            return 0.0
+        return float(value)
+    text = str(value).strip().replace(",", "").replace("，", "").replace(" ", "")
+    text = text.strip("'`‘’“”\"\ufeff\u200b\u200c\u200d")
+    if not text:
+        return 0.0
+    try:
+        return float(text)
+    except Exception:
+        pass
+    normalized = (
+        text.replace("（", "(")
+        .replace("）", ")")
+        .replace("個", "个")
+        .replace("个月", "月")
+        .replace("月份", "月")
+        .replace("期数", "期")
+    )
+    normalized = normalized.strip("()[]【】")
+    match = re.fullmatch(r"第?([+-]?\d+(?:\.\d+)?)(?:月|期|m|M|month|months)", normalized)
+    if match:
+        return float(match.group(1))
+    return 0.0
 
 
 def normalize_rate(value) -> float:
@@ -470,7 +503,8 @@ def build_lookup(data_ws, id_columns: list[str], value_column: str):
 
 def compute_row_values(start_date_value, life_value, residual_value, original_value, accumulated_value, q_value, balance_sheet_date: date):
     start_date = parse_date(start_date_value)
-    life_months = int(to_number(life_value)) if to_number(life_value) > 0 else 0
+    life_value_num = parse_life_months(life_value)
+    life_months = int(life_value_num) if life_value_num > 0 else 0
     residual_rate = normalize_rate(residual_value)
     original_cost = to_number(original_value)
     accumulated_dep = to_number(accumulated_value)

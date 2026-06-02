@@ -4,6 +4,7 @@
 """
 import pandas as pd
 import numpy as np
+import re
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -217,7 +218,7 @@ class FieldMapper:
             if pd.isna(life_months):
                 return ''
             try:
-                months = int(float(life_months))
+                months = int(self._parse_life_months(life_months))
             except (ValueError, TypeError):
                 return ''
             
@@ -227,6 +228,35 @@ class FieldMapper:
             
         except Exception:
             return ''
+
+    def _parse_life_months(self, value) -> float:
+        if value is None:
+            raise ValueError("empty life")
+        if isinstance(value, bool):
+            raise ValueError("invalid life")
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip().replace(",", "").replace("，", "").replace(" ", "")
+        text = text.strip("'`‘’“”\"\ufeff\u200b\u200c\u200d")
+        if not text:
+            raise ValueError("empty life")
+        try:
+            return float(text)
+        except Exception:
+            pass
+        normalized = (
+            text.replace("（", "(")
+            .replace("）", ")")
+            .replace("個", "个")
+            .replace("个月", "月")
+            .replace("月份", "月")
+            .replace("期数", "期")
+        )
+        normalized = normalized.strip("()[]【】")
+        match = re.fullmatch(r"第?([+-]?\d+(?:\.\d+)?)(?:月|期|m|M|month|months)", normalized)
+        if match:
+            return float(match.group(1))
+        raise ValueError("invalid life")
     
     def get_field_mappings(self) -> Dict[str, str]:
         """获取字段映射关系"""

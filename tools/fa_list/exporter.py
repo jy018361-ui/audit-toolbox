@@ -12,7 +12,14 @@ from openpyxl.utils import get_column_letter
 from openpyxl.cell.cell import MergedCell
 from config import DEFAULT_EXPORT_FORMAT, DEPRECIATION_FORMULA_ROW_LIMIT, DEPRECIATION_FORMULA_SAMPLE_ROWS
 from summary_generator import SummaryGenerator
-from sheet_generator import SheetGenerator
+from sheet_generator import (
+    SheetGenerator,
+    align_life_pair_to_months,
+    format_life_months_value,
+    parse_life_months_series,
+    parse_life_months_value,
+    should_convert_life_series_to_months,
+)
 from pivot_engine import PivotEngine
 
 
@@ -1524,13 +1531,6 @@ class Exporter:
         if any(col not in df.columns for col in required):
             return None
 
-        def _correct_life_series(src: pd.Series) -> pd.Series:
-            num = pd.to_numeric(src, errors='coerce')
-            valid = num.dropna()
-            if not valid.empty and float(valid.max()) < 30:
-                return num * 12
-            return num
-
         df_work = df.copy()
         temp_cat1_col = "__temp_cat1__"
         temp_cat2_col = "__temp_cat2__"
@@ -1556,8 +1556,14 @@ class Exporter:
         df_work[temp_cat2_col] = df_work[category_col2].map(_norm_text)
         df_work[temp_value_col1] = pd.to_numeric(df_work[original_value_col1].map(self._to_number), errors='coerce').fillna(0)
         df_work[temp_value_col2] = pd.to_numeric(df_work[original_value_col2].map(self._to_number), errors='coerce').fillna(0)
-        df_work[temp_life_col1] = _correct_life_series(df_work[life_col1])
-        df_work[temp_life_col2] = _correct_life_series(df_work[life_col2])
+        life1_aligned, life2_aligned = align_life_pair_to_months(
+            df_work[life_col1],
+            life_col1,
+            df_work[life_col2],
+            life_col2,
+        )
+        df_work[temp_life_col1] = life1_aligned
+        df_work[temp_life_col2] = life2_aligned
 
         # B未分类/A非未分类 -> 按 A+C 查找已有聚合对象并归并（无对象则保留，后续可见N/A）
         # A未分类/B非未分类 -> 仅当“B分类在年初已存在”时，才将A回填为B并做同寿命聚合；
@@ -1745,8 +1751,8 @@ class Exporter:
             # 展示口径：若对应原值为0，则对应使用寿命显示为0
             out.loc[orig1_num == 0, life1_col] = 0
             out.loc[orig2_num == 0, life2_col] = 0
-            life1_num = pd.to_numeric(out[life1_col], errors='coerce')
-            life2_num = pd.to_numeric(out[life2_col], errors='coerce')
+            life1_num = parse_life_months_series(out[life1_col])
+            life2_num = parse_life_months_series(out[life2_col])
             res1_num = pd.to_numeric(out[res1_col], errors='coerce').fillna(0)
             res2_num = pd.to_numeric(out[res2_col], errors='coerce').fillna(0)
 
@@ -1777,7 +1783,7 @@ class Exporter:
                 return keys
 
             def _life_token(v) -> str:
-                n = pd.to_numeric(pd.Series([v]), errors='coerce').iloc[0]
+                n = parse_life_months_value(v)
                 if pd.notna(n):
                     return f"N:{float(n):.10g}"
                 s = str(v).strip()
@@ -1824,8 +1830,8 @@ class Exporter:
                 if str(row.get("判断结果", "")).strip() != "不一致":
                     return 0.0
                 y_end_orig = pd.to_numeric(pd.Series([row.get(orig2_col)]).map(self._to_number), errors='coerce').iloc[0]
-                y_end_life = pd.to_numeric(pd.Series([row.get(life2_col)]), errors='coerce').iloc[0]
-                y_start_life = pd.to_numeric(pd.Series([row.get(life1_col)]), errors='coerce').iloc[0]
+                y_end_life = parse_life_months_value(row.get(life2_col))
+                y_start_life = parse_life_months_value(row.get(life1_col))
                 rr_start = pd.to_numeric(pd.Series([row.get(res1_col)]), errors='coerce').iloc[0]
                 rr_end = pd.to_numeric(pd.Series([row.get(res2_col)]), errors='coerce').iloc[0]
                 if row.name in new_life_in_end_mask.index and bool(new_life_in_end_mask.loc[row.name]):
@@ -1846,8 +1852,8 @@ class Exporter:
                 if str(row.get("判断结果", "")).strip() != "不一致":
                     return ""
                 y_end_orig = pd.to_numeric(pd.Series([row.get(orig2_col)]).map(self._to_number), errors='coerce').iloc[0]
-                y_end_life = pd.to_numeric(pd.Series([row.get(life2_col)]), errors='coerce').iloc[0]
-                y_start_life = pd.to_numeric(pd.Series([row.get(life1_col)]), errors='coerce').iloc[0]
+                y_end_life = parse_life_months_value(row.get(life2_col))
+                y_start_life = parse_life_months_value(row.get(life1_col))
                 rr_start = pd.to_numeric(pd.Series([row.get(res1_col)]), errors='coerce').iloc[0]
                 rr_end = pd.to_numeric(pd.Series([row.get(res2_col)]), errors='coerce').iloc[0]
                 impact = row.get("影响当年金额", 0.0)
@@ -2240,6 +2246,8 @@ class Exporter:
                 "累计折旧": _col_or_blank(dep_col),
                 "本年折旧": current_year_dep_series,
             })
+            if "使用寿命(月)" in out.columns:
+                out["使用寿命(月)"] = out["使用寿命(月)"].map(format_life_months_value)
             # 若单列匹配不存在，退回“匹配列”展示
             if ("固定资产编号" not in out.columns) or out["固定资产编号"].isna().all() or (out["固定资产编号"].astype(str).str.strip() == "").all():
                 if "匹配列" in work.columns:
@@ -2441,15 +2449,14 @@ class Exporter:
         """依据源数据判断是否应按“年->月”纠偏。"""
         if not isinstance(source_df, pd.DataFrame) or source_df.empty or not source_life_col or source_life_col not in source_df.columns:
             return False
-        vals = pd.to_numeric(source_df[source_life_col], errors="coerce").dropna()
-        return bool(len(vals) > 0 and (vals < 30).all())
+        return should_convert_life_series_to_months(source_df[source_life_col], source_life_col)
 
     def _convert_life_lt30_to_month(self, df: pd.DataFrame, col_name: str) -> pd.DataFrame:
         """仅把<30的寿命值按年转月，避免对已是月的值重复转换。"""
         if df is None or df.empty or col_name not in df.columns:
             return df
         out = df.copy()
-        nums = pd.to_numeric(out[col_name], errors="coerce")
+        nums = parse_life_months_series(out[col_name])
         mask = nums.notna() & (nums < 30)
         if not bool(mask.any()):
             return out
@@ -2797,6 +2804,8 @@ class Exporter:
             if "__fa_match_key__" in fa_work.columns:
                 fa_work = fa_work.drop(columns=["__fa_match_key__"], errors="ignore")
             fa_out = fa_work
+            if "使用寿命(月)" in fa_out.columns:
+                fa_out["使用寿命(月)"] = fa_out["使用寿命(月)"].map(format_life_months_value)
             # 若源文件2寿命列判定为“年”，则对FA表中<30的寿命值转月（避免重复转换）
             if "使用寿命(月)" in fa_out.columns and self._source_life_year_mode(source_file2_df, source_life_col2_raw):
                 fa_out = self._convert_life_lt30_to_month(fa_out, "使用寿命(月)")
@@ -2884,6 +2893,8 @@ class Exporter:
                 add_tpl_map,
                 overwrite_all_rows=True,
             )
+            if "使用寿命(月)" in add_work.columns:
+                add_work["使用寿命(月)"] = add_work["使用寿命(月)"].map(format_life_months_value)
             # 若源文件2寿命列判定为“年”，则对新增清单中<30的寿命值转月（避免重复转换）
             if "使用寿命(月)" in add_work.columns and self._source_life_year_mode(source_file2_df, source_life_col2_raw):
                 add_work = self._convert_life_lt30_to_month(add_work, "使用寿命(月)")
@@ -2918,6 +2929,8 @@ class Exporter:
                 list(disp_out_to_source_cols.keys()),
                 disp_tpl_map,
             )
+            if "使用寿命(月)" in disp_out.columns:
+                disp_out["使用寿命(月)"] = disp_out["使用寿命(月)"].map(format_life_months_value)
 
         return merged_out, fa_out, add_out, disp_out
 

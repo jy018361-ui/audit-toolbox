@@ -41,6 +41,7 @@ hiddenimports = [
     "polars._utils",
     "python_calamine",
     "fastexcel",
+    "windnd",
 ]
 hiddenimports += collect_submodules("fastexcel")
 

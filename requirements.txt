@@ -7,4 +7,5 @@ python-dateutil>=2.8
 xlrd>=2.0
 python-calamine
 fastexcel
+windnd
 pyinstaller>=6.0

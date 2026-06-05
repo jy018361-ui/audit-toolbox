@@ -5,9 +5,19 @@ import os
 import threading
 import warnings
 from datetime import datetime
+from pathlib import Path
 
 # 忽略警告
 warnings.filterwarnings("ignore")
+
+SUPPORTED_TABLE_EXTENSIONS = ('.xlsx', '.xls', '.csv', '.txt')
+
+try:
+    import windnd
+    HAS_WINDND = True
+except ImportError:
+    windnd = None
+    HAS_WINDND = False
 
 # 尝试导入 xlsxwriter
 try:
@@ -145,23 +155,12 @@ class SheetSelectDialog(tk.Toplevel):
 class BatchMergeApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Excel/CSV 批量智能合并工具 By CSDC      !!!大文件合并建议选CSV格式!!!")
+        self.root.title("Excel/CSV 批量合并工具 By CSDC      !!!大文件合并建议选CSV格式!!!")
         self.root.geometry("850x650")
-        
-        self.KEYWORDS = {
-            "role_id": ["凭证编号", "凭证号", "单据号", "jenumber", "je number", "id", "序号", "No."],
-            "role_acc": ["科目名称", "科目", "account", "gl account", "description", "摘要", "desc"],
-            "role_date": ["日期", "date", "posting date", "doc date", "时间", "time"],
-            "role_amt": ["金额", "amount", "amt", "本币金额", "余额", "balance", "money"],
-            "role_dr": ["借方", "借方金额", "debit", "dr", "debit amount"],
-            "role_cr": ["贷方", "贷方金额", "credit", "cr", "credit amount"],
-            "role_entity": ["公司", "主体", "entity", "company", "unit", "部门", "dept"]
-        }
-        
+
         self.file_list = []
         self.var_mode = tk.StringVar(value="one_sheet")
         self.var_direction = tk.StringVar(value="vertical")
-        self.var_smart_align = tk.BooleanVar(value=False)
         
         self.setup_ui()
         self.update_ui_state()
@@ -191,6 +190,9 @@ class BatchMergeApp:
         
         self.lbl_status = tk.Label(frame_top, text="待处理: 0 个文件", fg="gray")
         self.lbl_status.pack(side="bottom", anchor="w", pady=(5,0))
+        self.setup_drag_drop(self.root, frame_top, f_list, self.lb_files)
+        if HAS_WINDND:
+            self.lbl_status.config(text="待处理: 0 个文件（可拖拽文件/文件夹到文件源区域）")
 
         frame_mid = tk.LabelFrame(self.root, text=" 2. 合并规则 ", padx=10, pady=10)
         frame_mid.pack(fill="x", padx=10, pady=5)
@@ -210,10 +212,6 @@ class BatchMergeApp:
         self.rb_v.pack(side="left", padx=10)
         self.rb_h = ttk.Radiobutton(self.f_opts, text="➡️ 横向拼接 (左右拼)", variable=self.var_direction, value="horizontal", command=self.update_ui_state)
         self.rb_h.pack(side="left", padx=10)
-        
-        ttk.Separator(self.f_opts, orient="vertical").pack(side="left", fill="y", padx=20)
-        self.cb_smart = ttk.Checkbutton(self.f_opts, text="🧠 启用智能清洗 (合并表头)", variable=self.var_smart_align)
-        self.cb_smart.pack(side="left")
 
         frame_bot = tk.Frame(self.root, pady=15)
         frame_bot.pack(fill="x", padx=15)
@@ -233,30 +231,64 @@ class BatchMergeApp:
             for c in children: 
                 try: c.configure(state="normal")
                 except: pass
-            if self.var_direction.get() == "horizontal":
-                self.cb_smart.configure(state="disabled")
-                self.var_smart_align.set(False)
 
     # --- 文件操作 ---
+    def setup_drag_drop(self, *widgets):
+        if not HAS_WINDND:
+            return
+        for widget in widgets:
+            try:
+                windnd.hook_dropfiles(widget, func=self.on_drop_files, force_unicode=True)
+            except Exception:
+                pass
+
+    def on_drop_files(self, files):
+        paths = []
+        for item in files:
+            if isinstance(item, bytes):
+                try:
+                    paths.append(item.decode("gbk"))
+                except UnicodeDecodeError:
+                    paths.append(item.decode("utf-8", errors="ignore"))
+            else:
+                paths.append(str(item))
+        self.root.after(0, lambda: self.add_paths(paths))
+
+    def add_paths(self, paths):
+        added = 0
+        for path in paths:
+            if not path:
+                continue
+            path = os.path.normpath(path)
+            if os.path.isdir(path):
+                for root, _, files in os.walk(path):
+                    for name in files:
+                        full_path = os.path.join(root, name)
+                        if self.add_file_path(full_path):
+                            added += 1
+            elif self.add_file_path(path):
+                added += 1
+        self.lbl_status.config(text=f"待处理: {len(self.file_list)} 个文件")
+        if paths and added == 0:
+            messagebox.showinfo("提示", "未发现支持的表格文件（支持 xlsx/xls/csv/txt）")
+
+    def add_file_path(self, file_path):
+        if not file_path.lower().endswith(SUPPORTED_TABLE_EXTENSIONS):
+            return False
+        if file_path in self.file_list:
+            return False
+        self.file_list.append(file_path)
+        self.lb_files.insert(tk.END, os.path.basename(file_path))
+        return True
+
     def add_files(self):
         files = filedialog.askopenfilenames(filetypes=[("表格文件", "*.xlsx *.xls *.csv *.txt")])
-        for f in files:
-            if f not in self.file_list:
-                self.file_list.append(f)
-                self.lb_files.insert(tk.END, os.path.basename(f))
-        self.lbl_status.config(text=f"待处理: {len(self.file_list)} 个文件")
+        self.add_paths(files)
 
     def add_folder(self):
         folder = filedialog.askdirectory()
         if not folder: return
-        for root, _, files in os.walk(folder):
-            for f in files:
-                if f.lower().endswith(('.xlsx', '.xls', '.csv', '.txt')):
-                    full_path = os.path.join(root, f)
-                    if full_path not in self.file_list:
-                        self.file_list.append(full_path)
-                        self.lb_files.insert(tk.END, f)
-        self.lbl_status.config(text=f"待处理: {len(self.file_list)} 个文件")
+        self.add_paths([folder])
 
     def remove_files(self):
         indices = list(self.lb_files.curselection())
@@ -317,6 +349,176 @@ class BatchMergeApp:
         self.pb.start(10)
         threading.Thread(target=self.run_process, args=(save_path, sheet_config), daemon=True).start()
 
+    def get_target_sheet_names_for_com(self, workbook, sheet_config):
+        all_sheets = [workbook.Worksheets(i).Name for i in range(1, workbook.Worksheets.Count + 1)]
+        action = sheet_config.get("action", "default")
+        if action == "match_selected":
+            targets = set(sheet_config.get("targets", []))
+            return [name for name in all_sheets if name in targets]
+        if action == "merge_all":
+            return all_sheets
+        return all_sheets[:1]
+
+    def make_unique_com_sheet_name(self, workbook, preferred):
+        existing = {workbook.Worksheets(i).Name for i in range(1, workbook.Worksheets.Count + 1)}
+        base = self.clean_sheet_name(preferred) or "Sheet"
+        if base not in existing:
+            return base
+        for n in range(1, 10000):
+            suffix = f"_{n}"
+            candidate = self.clean_sheet_name(base[:31 - len(suffix)] + suffix)
+            if candidate not in existing:
+                return candidate
+        raise Exception(f"无法生成不重复的Sheet名称: {preferred}")
+
+    def add_reference_sheet_com(self, workbook, toc_data):
+        if not toc_data:
+            return
+        ref_name = self.make_unique_com_sheet_name(workbook, "Reference")
+        ws = workbook.Worksheets.Add(Before=workbook.Worksheets(1))
+        ws.Name = ref_name
+        ws.Cells(1, 1).Value = "Source File Name"
+        ws.Cells(1, 2).Value = "Target Sheet Link"
+        ws.Range("A1:B1").Font.Bold = True
+        ws.Columns(1).ColumnWidth = 40
+        ws.Columns(2).ColumnWidth = 40
+        for row, item in enumerate(toc_data, start=2):
+            target_sheet = item["Target Sheet"]
+            ws.Cells(row, 1).Value = item["Source File"]
+            ws.Hyperlinks.Add(
+                Anchor=ws.Cells(row, 2),
+                Address="",
+                SubAddress=f"'{target_sheet}'!A1",
+                TextToDisplay=target_sheet,
+            )
+        ws.Activate()
+
+    def copy_workbook_sheets_with_com(self, save_path, sheet_config):
+        import pythoncom
+        import win32com.client
+
+        pythoncom.CoInitialize()
+        excel = None
+        dest_wb = None
+        src_wbs = []
+        try:
+            excel = win32com.client.DispatchEx("Excel.Application")
+            excel.Visible = False
+            excel.DisplayAlerts = False
+            excel.ScreenUpdating = False
+            excel.EnableEvents = False
+
+            dest_wb = excel.Workbooks.Add(1)
+            placeholder = dest_wb.Worksheets(1)
+            placeholder.Name = "__placeholder__"
+            placeholder_name = placeholder.Name
+            toc_data = []
+            copied_count = 0
+
+            for fp in self.file_list:
+                src_wb = excel.Workbooks.Open(str(Path(fp).resolve()), ReadOnly=True, UpdateLinks=0)
+                src_wbs.append(src_wb)
+                sheet_names = self.get_target_sheet_names_for_com(src_wb, sheet_config)
+                for sheet_name in sheet_names:
+                    src_ws = src_wb.Worksheets(sheet_name)
+                    src_ws.Copy(None, dest_wb.Worksheets(dest_wb.Worksheets.Count))
+                    new_ws = excel.ActiveSheet
+                    preferred = (
+                        f"{Path(fp).stem}_{sheet_name}"
+                        if len(sheet_names) > 1 or sheet_config.get("action") != "default"
+                        else Path(fp).stem
+                    )
+                    new_name = self.make_unique_com_sheet_name(dest_wb, preferred)
+                    new_ws.Name = new_name
+                    toc_data.append({
+                        "Source File": os.path.basename(fp),
+                        "Target Sheet": new_name,
+                    })
+                    copied_count += 1
+
+            if copied_count == 0:
+                raise Exception("没有读取到有效Sheet")
+
+            try:
+                dest_wb.Worksheets(placeholder_name).Delete()
+            except Exception:
+                pass
+            self.add_reference_sheet_com(dest_wb, toc_data)
+            dest_wb.SaveAs(str(Path(save_path).resolve()), FileFormat=51)
+        finally:
+            for wb in reversed(src_wbs):
+                try:
+                    wb.Close(SaveChanges=False)
+                except Exception:
+                    pass
+            if dest_wb is not None:
+                try:
+                    dest_wb.Close(SaveChanges=False)
+                except Exception:
+                    pass
+            if excel is not None:
+                try:
+                    excel.Quit()
+                except Exception:
+                    pass
+            pythoncom.CoUninitialize()
+
+    def write_vertical_csv_polars_stream(self, save_path, sheet_config, is_physical):
+        wrote_any = False
+        wrote_header = False
+        for fp in self.file_list:
+            f_base = os.path.basename(fp)
+            df_dict = self.load_all_sheets_polars(fp, sheet_config, auto_header=(not is_physical))
+            if not df_dict:
+                continue
+            for sn, df in df_dict.items():
+                if df.is_empty():
+                    continue
+                if is_physical:
+                    df.columns = [str(i) for i in range(df.width)]
+                source_cols = [pl.lit(f_base).alias("【来源文件】")]
+                if len(df_dict) > 1 or sheet_config['action'] != 'default':
+                    source_cols.append(pl.lit(sn).alias("【来源Sheet】"))
+                df = df.with_columns(source_cols)
+                leading = [expr.meta.output_name() for expr in source_cols]
+                df = df.select(leading + [c for c in df.columns if c not in leading])
+                with open(save_path, "ab" if wrote_any else "wb") as f:
+                    if not wrote_any:
+                        f.write(b"\xef\xbb\xbf")
+                    df.write_csv(f, include_header=((not is_physical) and not wrote_header))
+                wrote_any = True
+                wrote_header = True
+        if not wrote_any:
+            raise Exception("没有读取到有效数据")
+
+    def write_vertical_csv_pandas_stream(self, save_path, sheet_config, is_physical):
+        wrote_any = False
+        wrote_header = False
+        for fp in self.file_list:
+            f_base = os.path.basename(fp)
+            df_dict = self.load_all_sheets(fp, sheet_config, auto_header=(not is_physical))
+            if not df_dict:
+                continue
+            for sn, df in df_dict.items():
+                if df.empty:
+                    continue
+                if is_physical:
+                    df.columns = range(len(df.columns))
+                df.insert(0, "【来源文件】", f_base)
+                if len(df_dict) > 1 or sheet_config['action'] != 'default':
+                    df.insert(1, "【来源Sheet】", sn)
+                df.to_csv(
+                    save_path,
+                    mode=("w" if not wrote_any else "a"),
+                    index=False,
+                    header=((not is_physical) and not wrote_header),
+                    encoding=("utf-8-sig" if not wrote_any else "utf-8"),
+                )
+                wrote_any = True
+                wrote_header = True
+        if not wrote_any:
+            raise Exception("没有读取到有效数据")
+
     def run_process(self, save_path, sheet_config):
         try:
             mode = self.var_mode.get()
@@ -325,6 +527,17 @@ class BatchMergeApp:
             if mode == "one_workbook":
                 if save_path.lower().endswith(".csv"):
                     raise Exception("多Sheet模式必须保存为 .xlsx 格式")
+
+                try:
+                    self.copy_workbook_sheets_with_com(save_path, sheet_config)
+                    self.root.after(0, lambda: self.on_success(save_path))
+                    return
+                except Exception as com_err:
+                    fallback_warning = (
+                        "Excel COM 原样复制失败，已自动改用普通导出。\n"
+                        "导出文件已生成，但源 Sheet 的完整格式、对象、部分公式/超链接可能无法保留。\n\n"
+                        f"COM 错误信息：{com_err}"
+                    )
                 
                 with pd.ExcelWriter(save_path, engine="xlsxwriter" if HAS_XLSXWRITER else "openpyxl") as writer:
                     # 【核心更新】提前创建目录页，并记录目录数据
@@ -347,7 +560,8 @@ class BatchMergeApp:
                         for sn, df in df_dict.items():
                             target = f"{f_base}_{sn}" if len(df_dict)>1 or sheet_config['action']!='default' else f_base
                             target = self.clean_sheet_name(target)
-                            if target in writer.sheets: target = f"{target}_{idx}"
+                            if target in writer.sheets:
+                                target = self.make_unique_sheet_name(target, writer.sheets, idx)
                             
                             # 写入数据
                             df.to_excel(writer, sheet_name=target, index=False)
@@ -385,9 +599,26 @@ class BatchMergeApp:
                         
                         # 激活 Reference 页为默认打开页
                         ws_ref.activate()
+                if 'fallback_warning' in locals():
+                    self.root.after(0, lambda msg=fallback_warning: self.on_success_with_warning(save_path, msg))
+                    return
 
             # === 2. 单 Sheet 合并模式 ===
             else:
+                direction = self.var_direction.get()
+                is_physical = (direction == "vertical")
+                if save_path.lower().endswith(".csv") and direction == "vertical":
+                    if HAS_POLARS:
+                        try:
+                            self.write_vertical_csv_polars_stream(save_path, sheet_config, is_physical)
+                            self.root.after(0, lambda: self.on_success(save_path))
+                            return
+                        except Exception as fast_err:
+                            print(f"polars csv stream failed, fallback to pandas: {fast_err}")
+                    self.write_vertical_csv_pandas_stream(save_path, sheet_config, is_physical)
+                    self.root.after(0, lambda: self.on_success(save_path))
+                    return
+
                 if HAS_POLARS and HAS_XLSXWRITER:
                     try:
                         self.run_process_single_polars(save_path, sheet_config)
@@ -396,12 +627,8 @@ class BatchMergeApp:
                     except Exception as fast_err:
                         print(f"polars fast path failed, fallback to pandas: {fast_err}")
 
-                direction = self.var_direction.get()
-                use_smart = self.var_smart_align.get()
                 dfs = []
                 dfs_metadata = [] 
-                
-                is_physical = (direction == "vertical" and not use_smart)
 
                 for fp in self.file_list:
                     f_base = os.path.basename(fp)
@@ -417,7 +644,6 @@ class BatchMergeApp:
                             dfs.append(df)
                             dfs_metadata.append(meta)
                         elif direction == "vertical":
-                            if use_smart: df = self.apply_smart_mapping(df)
                             if is_physical: df.columns = range(len(df.columns))
                             df.insert(0, "【来源文件】", f_base)
                             if len(df_dict)>1 or sheet_config['action']!='default':
@@ -480,8 +706,7 @@ class BatchMergeApp:
 
     def run_process_single_polars(self, save_path, sheet_config):
         direction = self.var_direction.get()
-        use_smart = self.var_smart_align.get()
-        is_physical = (direction == "vertical" and not use_smart)
+        is_physical = (direction == "vertical")
         dfs = []
         dfs_metadata = []
 
@@ -509,8 +734,6 @@ class BatchMergeApp:
                     dfs.append(df)
                     dfs_metadata.append(meta)
                 elif direction == "vertical":
-                    if use_smart:
-                        df = self.apply_smart_mapping_polars(df)
                     if is_physical:
                         df.columns = [str(i) for i in range(df.width)]
                     source_cols = [pl.lit(f_base).alias("【来源文件】")]
@@ -690,22 +913,6 @@ class BatchMergeApp:
             read_options=(read_options or None),
         )
 
-    def apply_smart_mapping_polars(self, df):
-        rename_map = {}
-        cols_map = {c: str(c).lower().replace(" ", "").replace("_", "") for c in df.columns}
-        for role, kws in self.KEYWORDS.items():
-            t = f"【统一】{self.get_role_label(role)}"
-            for col_o, col_c in cols_map.items():
-                for kw in kws:
-                    if kw.replace(" ", "") in col_c:
-                        rename_map[col_o] = t
-                        break
-                if col_o in rename_map:
-                    break
-        if rename_map:
-            df = df.rename(rename_map)
-        return df
-
     def load_all_sheets(self, fp, sheet_config, auto_header=True):
         result = {}
         try:
@@ -782,25 +989,25 @@ class BatchMergeApp:
         for char in '[]:*?/\\': name = name.replace(char, "_")
         return name[:31]
 
-    def apply_smart_mapping(self, df):
-        rename_map = {}
-        cols_map = {c: str(c).lower().replace(" ", "").replace("_", "") for c in df.columns}
-        for role, kws in self.KEYWORDS.items():
-            t = f"【统一】{self.get_role_label(role)}"
-            for col_o, col_c in cols_map.items():
-                for kw in kws:
-                    if kw.replace(" ", "") in col_c: rename_map[col_o] = t; break
-                if col_o in rename_map: break
-        if rename_map: df.rename(columns=rename_map, inplace=True)
-        return df
-
-    def get_role_label(self, role):
-        m = {"role_id": "ID", "role_acc": "科目", "role_date": "日期", "role_amt": "金额", "role_dr": "借方", "role_cr": "贷方", "role_entity": "主体"}
-        return m.get(role, role)
+    def make_unique_sheet_name(self, preferred, existing_sheets, index_hint=1):
+        existing = set(existing_sheets)
+        base = self.clean_sheet_name(preferred) or "Sheet"
+        if base not in existing:
+            return base
+        for n in [index_hint] + list(range(1, 10000)):
+            suffix = f"_{n}"
+            candidate = self.clean_sheet_name(base[:31 - len(suffix)] + suffix)
+            if candidate not in existing:
+                return candidate
+        raise Exception(f"无法生成不重复的Sheet名称: {preferred}")
 
     def on_success(self, path):
         self.pb.stop()
         messagebox.showinfo("完成", f"合并成功！\n文件已保存至：\n{path}")
+
+    def on_success_with_warning(self, path, warning):
+        self.pb.stop()
+        messagebox.showwarning("完成（已降级导出）", f"合并已完成！\n文件已保存至：\n{path}\n\n{warning}")
         
     def on_error(self, msg):
         self.pb.stop()

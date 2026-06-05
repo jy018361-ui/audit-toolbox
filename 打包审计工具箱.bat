@@ -11,7 +11,7 @@ echo [%date% %time%] start > pack_build.log
 title Audit Suite Pack
 
 echo ========================================
-echo   Audit Toolbox - sync and pack
+echo   Audit Toolbox - pack
 echo ========================================
 echo.
 
@@ -37,10 +37,6 @@ goto run
 
 :run
 echo Using %PY%
-echo sync vendor...
-%PY% "%~dp0build_suite.py" --sync-only
-if not %ERRORLEVEL%==0 goto done
-echo.
 echo packing...
 %PY% "%~dp0build_suite.py" --no-baseline
 set EXIT_CODE=%ERRORLEVEL%

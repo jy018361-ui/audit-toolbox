@@ -1,168 +1,120 @@
 # 审计工具箱
 
-基于 tkinter 的审计辅助工具套件，采用"Hub + 插件"架构，支持多人协同开发和一键打包。
+一个面向审计、财务和数据处理场景的 Windows 桌面工具箱。项目基于 Python + Tkinter，采用 Hub 启动器统一承载多个子工具，重点服务固定资产匹配、凭证查看、Excel 合并、函证进度整理、文件目录清单等高频工作。
 
-## 功能
+## 主要功能
 
-- **FA List 匹配工具**：固定资产底稿双表匹配、透视与导出
-- **看账小工具**：凭证导入、科目筛选、透视与导出
-- **Excel 批量合并**：独立仓库 [Excel-Merger](https://github.com/JY01013232/Excel-Merger)，克隆到 `modules/excel_merger`
-- **可扩展架构**：轻松添加新的审计工具
+- **FA List 匹配工具**：固定资产底稿双表匹配、字段配置、透视汇总、异常检查和导出。
+- **看账小工具**：凭证导入、科目筛选、数据查看、导出和辅助映射。
+- **Excel 批量合并**：批量读取工作簿和工作表，合并输出并在异常场景给出可见提示。
+- **函证进度工具**：整理函证流程中的清单、进度和导出结果。
+- **文件目录工具**：生成目录清单、超链接和辅助检查结果。
+- **统一 Hub**：通过一个入口启动各子工具，尽量保持一致的窗口布局、状态反馈和错误提示。
+
+## 环境要求
+
+- Windows 10/11
+- Python 3.10+
 
 ## 快速开始
 
-### 环境要求
-
-- Python 3.10+
-- Windows 10/11
-
-### 安装依赖
+安装依赖：
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 运行开发模式
+启动工具箱：
 
 ```bash
 python suite_main.py
 ```
 
-### 一键打包
+运行测试：
 
 ```bash
-# 完整构建（同步 vendor + 安装依赖 + 打包 exe）
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+## 打包
+
+完整构建：
+
+```bash
 python build_suite.py
+```
 
-# 仅同步 vendor 目录
+仅同步打包用依赖目录：
+
+```bash
 python build_suite.py --sync-only
+```
 
-# 跳过基线对比
+跳过基线对比：
+
+```bash
 python build_suite.py --no-baseline
 ```
 
-打包完成后，`dist/审计工具箱.exe` 即可分发给用户使用。
+打包输出位于 `dist/`。`vendor/`、`build/`、多数打包产物和本地验证产物不进入 Git。
 
 ## 项目结构
 
-```
+```text
 audit-toolbox/
-├── suite_main.py          # 套件主入口
+├── suite_main.py          # 工具箱主入口
 ├── tools.json             # 工具注册配置
-├── build_suite.py         # 构建脚本
+├── build_suite.py         # 打包脚本
 ├── suite.spec             # PyInstaller 配置
 ├── requirements.txt       # Python 依赖
-├── launcher/              # 启动器模块
-│   ├── hub_window.py      # Hub 主界面
-│   ├── registry.py        # 工具注册表
-│   ├── runner.py          # 工具加载器
-│   └── bundle_anchor.py   # 依赖追踪锚点
-├── modules/               # 独立仓库克隆目录（gitignore 内容，见 modules/README.md）
-├── tools/                 # 可选：主仓内置工具源码（兼容）
-├── vendor/                # 打包用副本（gitignore，由 build_suite 同步）
-└── dist/                  # 打包输出（gitignore）
+├── launcher/              # Hub、工具加载、主题和运行时辅助
+├── tools/                 # 内置工具源码
+├── modules/               # 可放置独立工具仓库或适配入口
+├── tests/                 # 回归测试
+└── dist/                  # 打包输出
 ```
 
-## 添加新工具
+## 开发说明
 
-### 方式一：使用添加工具界面（推荐新手）
+新增工具时，通常需要：
 
-1. 双击运行 `添加工具.bat`
-2. 在界面中填写工具名称、选择脚本文件
-3. 点击"添加工具"，完成！
+1. 将工具源码放入 `tools/` 或在 `modules/` 中接入独立工具目录。
+2. 在 `tools.json` 中注册工具名称、入口文件和调用方式。
+3. 确保入口提供 `main(parent=None)`，由 Hub 作为子窗口启动。
+4. 对核心数据处理逻辑补充 `tests/` 下的回归测试。
+5. 本地运行 `python suite_main.py` 和 `python -m unittest discover -s tests -p "test_*.py"` 验证。
 
-详见 [添加工具使用说明.md](添加工具使用说明.md)
+本项目偏向稳定、克制、业务优先的桌面工具体验。UI 调整应优先改善信息层级、状态反馈、错误提示、窗口伸缩和操作效率，避免改变既有业务流程。
 
-### 方式二：手动添加
+## Git 分支
 
-详见 [CONTRIBUTING.md](CONTRIBUTING.md)
+- 默认分支：`main`
+- 远端发布和网页展示以 `main` 为准。
+- 如果需要保留 `master` 分支，请通过 Pull Request 或合并提交让 GitHub 知道 `master` 已合入 `main`。否则即使两个分支文件内容一致，GitHub 也可能因为提交关系不同显示 “recent pushes” 提示。
 
-#### 快速步骤
+## 本地文件约定
 
-1. 在 `modules/` 下克隆独立仓库（推荐，见 [modules/README.md](modules/README.md)）
-2. 在 `tools.json` 中添加工具配置（可只提交 JSON，不提交模块源码）
-3. 维护者打包：`python build_suite.py`
+以下内容不应提交到仓库：
 
-示例：
-
-```json
-{
-  "id": "my_tool",
-  "name": "我的工具",
-  "description": "工具描述",
-  "vendor_dir": "my_tool",
-  "entry": "main.py",
-  "callable": "main"
-}
-```
-
-## 架构说明
-
-### 运行时流程
-
-```
-suite_main.py
-    ↓
-launcher.hub_window.HubWindow   ← 工具选择界面
-    ↓
-launcher.runner.launch_tool()   ← 动态加载子工具
-    ↓
-子工具 GUI 界面
-```
-
-### 子工具加载机制
-
-启动器通过 `importlib.util` 动态加载子工具，执行后自动清理模块缓存，实现工具间完全隔离。
-
-### PyInstaller 打包
-
-- 入口：`suite_main.py`
-- `tools.json` 和整个 `vendor/` 目录打包进单文件 exe
-- `bundle_anchor.py` 触发重依赖追踪，确保运行时不缺模块
-
-## 多人协同（方式 B：独立仓库 + modules/）
-
-### 工作流
-
-1. **维护者**：主仓库提供 Hub、`tools.json`、空目录 `modules/`
-2. **各开发者**：在自己的 Git 仓库开发；克隆主项目后执行：
-   ```bash
-   cd modules
-   git clone https://github.com/xxx/你的工具.git <vendor_dir名>
-   ```
-   `vendor_dir名` 必须与 `tools.json` 里该项的 `vendor_dir` 一致。
-3. **注册工具**：向主仓提 PR，**只改 `tools.json`**（不必提交 `modules/` 内代码）
-4. **打包者**：在本机拉齐各 `modules/*` 后执行 `python build_suite.py`
-5. **分发**：将 `dist/审计工具箱.exe` 发给最终用户
-
-开发时启动器查找顺序：`vendor/` → `modules/` → `tools/` → `dev_root`。
-
-### 克隆主项目
-
-```bash
-git clone https://github.com/jy018361-ui/audit-toolbox.git
-cd audit-toolbox
-pip install -r requirements.txt
-# 按需克隆子模块到 modules/，见 modules/README.md
-python suite_main.py
-```
+- `scratchpad/`
+- `verification_screenshots/`
+- `__pycache__/`
+- `.venv/` 或 `venv/`
+- 临时日志、打包缓存和生成的中间文件
 
 ## 常见问题
 
-### Q: 打包后运行报错"找不到模块"
+### 打包后提示找不到模块
 
-A: 检查 `launcher/bundle_anchor.py` 是否包含该模块的 import，以及 `suite.spec` 的 `hiddenimports` 列表。
+检查 `launcher/bundle_anchor.py`、`suite.spec` 的 hidden imports，以及对应工具是否已经同步到打包目录。
 
-### Q: 如何在开发模式下测试打包效果？
+### 子工具能单独运行，但从 Hub 启动失败
 
-A: 使用 `python build_suite.py --sync-only` 同步 vendor，然后运行 `python suite_main.py`。
+确认入口文件存在 `main(parent=None)`，并且 `tools.json` 中的 `entry`、`vendor_dir`、`callable` 配置与实际目录一致。
 
-### Q: modules、tools、vendor 有什么区别？
+### GitHub 显示 “Compare & pull request”
 
-A:
-- **`modules/`**：各人独立仓库 clone 的位置，**默认不入主仓 Git**
-- **`tools/`**：可选，主仓内置工具源码（兼容旧流程）
-- **`vendor/`**：打包缓存，由 `build_suite.py` 从 `modules/`（优先）或 `tools/` 同步，不入库
+这通常是 GitHub 发现某个非默认分支最近被推送。它不一定代表文件内容不同。若要保留该分支并消除提示，应把该分支通过 PR 或合并提交并入 `main`。
 
 ## License
 

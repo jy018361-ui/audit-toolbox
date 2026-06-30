@@ -42,3 +42,6 @@ pack_build.log
 # Local experiments and verification artifacts
 scratchpad/
 verification_screenshots/
+
+# Local agent/editor settings
+**/.claude/settings.local.json

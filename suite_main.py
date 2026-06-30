@@ -8,11 +8,21 @@ from pathlib import Path
 
 # 在创建任何 Tk 窗口之前设置进程级 DPI 感知，确保全程 UI 清晰度一致。
 # 必须在 import tkinter 之前调用；子工具若重复调用此 API 会静默忽略（已设置则无效）。
+# 优先 Per-Monitor v2（Win10 1703+），跨屏/改缩放时系统按真实 DPI 通知重绘，
+# 避免位图拉伸导致的撕裂感；失败则降级到 System DPI Aware。
 try:
-    from ctypes import windll
-    windll.shcore.SetProcessDpiAwareness(1)
+    from ctypes import c_int, c_void_p, windll
+    # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4，按指针大小做符号扩展
+    _set_ctx = windll.user32.SetProcessDpiAwarenessContext
+    _set_ctx.argtypes = [c_void_p]
+    _set_ctx.restype = c_int
+    if not _set_ctx(c_void_p(-4)):
+        windll.shcore.SetProcessDpiAwareness(2)  # Per-Monitor v1
 except Exception:
-    pass
+    try:
+        windll.shcore.SetProcessDpiAwareness(1)  # System DPI Aware
+    except Exception:
+        pass
 
 # 保证套件根目录在 sys.path，便于 import launcher
 _SUITE_ROOT = Path(__file__).resolve().parent

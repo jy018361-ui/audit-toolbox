@@ -228,7 +228,7 @@ class FileSelector(ttk.Frame):
     def _preview_file1(self):
         """预览文件1"""
         if self.file_handler.file1_df is None:
-            messagebox.showwarning("警告", "请先选择文件1")
+            messagebox.showwarning("无法预览文件1", "请先在“文件1”区域选择并加载原始文件。")
             return
         
         preview_df = self.file_handler.get_file1_preview()
@@ -237,7 +237,7 @@ class FileSelector(ttk.Frame):
     def _preview_file2(self):
         """预览文件2"""
         if self.file_handler.file2_df is None:
-            messagebox.showwarning("警告", "请先选择文件2")
+            messagebox.showwarning("无法预览文件2", "请先在“文件2”区域选择并加载对比文件。")
             return
         
         preview_df = self.file_handler.get_file2_preview()
@@ -246,7 +246,7 @@ class FileSelector(ttk.Frame):
     def _show_preview(self, title: str, df):
         """显示预览窗口"""
         if df is None or df.empty:
-            messagebox.showinfo("提示", "没有可预览的数据")
+            messagebox.showinfo("无可预览数据", "当前文件没有可预览的数据行，请确认工作表或文件内容。")
             return
         
         preview_window = tk.Toplevel(self)
@@ -269,7 +269,7 @@ class FileSelector(ttk.Frame):
             tree.heading(col, text=str(col))
             # 根据内容调整列宽
             max_len = max(len(str(col)), *[len(str(val)) for val in df[col].head(10) if pd.notna(val)])
-            tree.column(col, width=min(max_len * 10 + 20, 200))
+            tree.column(col, width=min(max(max_len * 9 + 28, 110), 260), minwidth=90, stretch=False)
         
         # 添加数据
         for idx, row in df.iterrows():
@@ -296,11 +296,11 @@ class FileSelector(ttk.Frame):
         
         # 验证文件是否已选择
         if self.file_handler.file1_df is None:
-            messagebox.showwarning("警告", "请选择文件1")
+            messagebox.showwarning("无法进入下一步", "请先在“文件1”区域选择并加载原始文件。")
             return
         
         if self.file_handler.file2_df is None:
-            messagebox.showwarning("警告", "请选择文件2")
+            messagebox.showwarning("无法进入下一步", "请先在“文件2”区域选择并加载对比文件。")
             return
         
         # 调用完成回调

@@ -870,7 +870,7 @@ class PivotConfig(ttk.Frame):
                 col_values = pivot_df.iloc[:, i]
                 max_val_len = max([len(str(val)) for val in col_values.head(10) if pd.notna(val)], default=0)
                 max_len = max(max_len, max_val_len)
-            self.preview_tree.column(cid, width=min(max_len * 10 + 20, 200))
+            self.preview_tree.column(cid, width=min(max(max_len * 9 + 28, 110), 260), minwidth=90, stretch=False)
         
         # 插入数据（按列索引取值）
         for row_idx, idx in enumerate(pivot_df.index):

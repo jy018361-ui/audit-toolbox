@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from launcher.registry import ToolSpec, resolve_entry_path, resolve_tool_root, suite_root
+from launcher.ui_theme import apply_app_theme, set_dark_title_bar
 
 
 def _get_entry_mode(fn, tool_name: str) -> str:
@@ -84,9 +85,13 @@ def launch_tool(
             else:
                 if parent is not None:
                     tool_window = tk.Toplevel(parent)
+                    apply_app_theme(tool_window)
+                    set_dark_title_bar(tool_window)
                     kwargs["root"] = tool_window
                 else:
                     kwargs["root"] = tk.Tk()
+                    apply_app_theme(kwargs["root"])
+                    set_dark_title_bar(kwargs["root"])
             fn(**kwargs)
 
             # 嵌入模式下，runner 兜底等待子工具窗口关闭。

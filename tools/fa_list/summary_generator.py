@@ -2,6 +2,7 @@
 汇总表生成器模块：生成固定资产变动汇总表（支持按新增/处置方式分拆与重分类）。
 """
 from collections import defaultdict
+import re
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -32,11 +33,60 @@ class SummaryGenerator:
         return series.apply(convert)
 
     @staticmethod
+    def _reconcile_change_type(change_type: pd.Series, orig_change: pd.Series, tol: float = 1e-6) -> pd.Series:
+        """修正上游传入的 '原值变动类型' 与 '原值变动' 不一致的行。
+
+        当 |原值变动| > tol 但类型被错标为 '原值不变' 时，按符号重新归类。
+        这种错配会让金额漏出 增/减 桶 → 全部落入 reclass 残差。
+        典型场景：GUI 在补充清单回填后没刷新类型列。
+        """
+        try:
+            ct = change_type.astype(str)
+            oc = pd.to_numeric(orig_change, errors="coerce").fillna(0.0)
+            mismatch = (ct == "原值不变") & (oc.abs() > tol)
+            if bool(mismatch.any()):
+                ct = ct.copy()
+                ct.loc[mismatch & (oc > 0)] = "原值减少"
+                ct.loc[mismatch & (oc < 0)] = "原值增加"
+            return ct
+        except Exception:
+            return change_type
+
+    @staticmethod
     def _normalize_text(val, default=""):
         if val is None or pd.isna(val):
             return default
         s = str(val).strip()
         return s if s else default
+
+    @staticmethod
+    def _is_summary_noise_value(value) -> bool:
+        if value is None:
+            return False
+        text = re.sub(r"[\s　:：,，;；.。\-－—_/／\\、]+", "", str(value).strip().lower())
+        if not text:
+            return False
+        exact = {
+            "合计", "合计数", "小计", "总计", "总额", "总和", "汇总", "共计",
+            "本年合计", "累计合计",
+            "total", "subtotal", "grandtotal", "sum",
+        }
+        if text in exact:
+            return True
+        # 子合计行经常是「类别名+合计/小计/总计」的形式，例如
+        # "其他设备-工具/夹合计"、"运输工具小计"、"本年合计"——按结尾后缀识别。
+        for suffix in ("合计", "合计数", "小计", "总计", "总和", "汇总", "subtotal", "total"):
+            if text.endswith(suffix) and len(text) > len(suffix):
+                return True
+        return "合计数" in text
+
+    def _drop_summary_noise_rows(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        mask = df.apply(lambda row: any(self._is_summary_noise_value(v) for v in row.tolist()), axis=1)
+        if not bool(mask.any()):
+            return df
+        return df.loc[~mask].copy()
 
     @staticmethod
     def _pick_series(
@@ -318,7 +368,9 @@ class SummaryGenerator:
             if df is None or df.empty:
                 return False, "数据为空，无法生成汇总表", None
 
-            work_df = df.copy()
+            work_df = self._drop_summary_noise_rows(df.copy())
+            if work_df.empty:
+                return False, "剔除合计/小计/total 干扰行后无可汇总数据", None
 
             if category_col not in work_df.columns:
                 if category_col1 and category_col1 in work_df.columns:
@@ -357,6 +409,8 @@ class SummaryGenerator:
                     change_type = work_df["原值变动类型"].astype(str)
                 else:
                     change_type = orig_change.apply(lambda x: "原值减少" if x > 0 else ("原值增加" if x < 0 else "原值不变"))
+                # 防御：上游若把 |变动| > 0 的行错标为 '原值不变'，按符号重新归类，避免漏入 增/减 桶导致 reclass 残差
+                change_type = self._reconcile_change_type(change_type, orig_change)
 
                 category_candidates: List[str] = []
                 category_candidates.extend(final_cat_series.tolist())
@@ -512,6 +566,8 @@ class SummaryGenerator:
                 change_type = work_df["原值变动类型"].astype(str)
             else:
                 change_type = orig_change.apply(lambda x: "原值减少" if x > 0 else ("原值增加" if x < 0 else "原值不变"))
+            # 防御：上游若把 |变动| > 0 的行错标为 '原值不变'，按符号重新归类，避免漏入 增/减 桶导致 reclass 残差
+            change_type = self._reconcile_change_type(change_type, orig_change)
 
             has_add_method_mapping = bool(
                 (addition_method_col1 and addition_method_col1 in work_df.columns)

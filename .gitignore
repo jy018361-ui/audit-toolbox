@@ -38,3 +38,7 @@ Thumbs.db
 *.log
 *.tmp
 pack_build.log
+
+# Local experiments and verification artifacts
+scratchpad/
+verification_screenshots/

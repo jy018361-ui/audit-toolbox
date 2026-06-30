@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from launcher.ui_theme import apply_app_theme, normalize_layout_tree, set_dark_title_bar
 
 
 def main(parent=None):
@@ -10,6 +11,8 @@ def main(parent=None):
         root = tk.Toplevel(parent)
     else:
         root = tk.Tk()
+    apply_app_theme(root)
+    set_dark_title_bar(root)
 
     try:
         from ctypes import windll
@@ -19,6 +22,7 @@ def main(parent=None):
 
     from batch_merger import BatchMergeApp
     app = BatchMergeApp(root)
+    normalize_layout_tree(root)
     root.mainloop()
 
 

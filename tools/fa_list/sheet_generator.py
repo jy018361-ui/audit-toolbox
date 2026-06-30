@@ -386,7 +386,11 @@ class SheetGenerator:
         name = str(col_name or "").replace("_文件1", "").replace("_文件2", "").lower()
         if any(k in name for k in ("月", "月份", "month", "months")):
             return "month", ""
-        year_markers = ("使用年限", "折旧年限", "预计年限", "年限", "寿命(年)", "寿命（年）", "(年)", "（年）", "year", "years")
+        year_markers = (
+            "使用年限", "折旧年限", "预计年限", "计划使用年", "预计使用年",
+            "使用寿命年", "寿命年", "年限", "寿命(年)", "寿命（年）",
+            "(年)", "（年）", "year", "years",
+        )
         if any(k in name for k in year_markers):
             return "year", "【使用寿命纠偏】系统根据列名判断使用寿命单位为“年”，已自动修正为：使用寿命(月) = 使用寿命 × 12。"
 
@@ -779,7 +783,7 @@ class SheetGenerator:
             life_warning = ""
             if life_col and life_col in df.columns:
                 life_unit, life_warning = self._life_unit_decision(life_col, df[life_col])
-                if life_unit == "unknown" and should_convert_life_series_to_months(df[life_col], life_col):
+                if life_unit in ("unknown", "ambiguous") and should_convert_life_series_to_months(df[life_col], life_col):
                     life_unit = "year"
                     life_warning = "【使用寿命纠偏】系统检测到使用寿命列未标明月份且数值特征高度符合年数口径。已自动修正为：使用寿命(月) = 使用寿命 × 12。"
             
@@ -1042,7 +1046,7 @@ class SheetGenerator:
             life_warning = ""
             if life_col and life_col in addition_df.columns:
                 life_unit, life_warning = self._life_unit_decision(life_col, addition_df[life_col])
-                if life_unit == "unknown" and should_convert_life_series_to_months(addition_df[life_col], life_col):
+                if life_unit in ("unknown", "ambiguous") and should_convert_life_series_to_months(addition_df[life_col], life_col):
                     life_unit = "year"
                     life_warning = "【使用寿命纠偏】系统检测到使用寿命列未标明月份且数值特征高度符合年数口径。已自动修正为：使用寿命(月) = 使用寿命 × 12。"
             

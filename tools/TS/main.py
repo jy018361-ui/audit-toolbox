@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from launcher.ui_theme import apply_app_theme, normalize_layout_tree
 
 
 def _load_impl_module():
@@ -33,7 +34,9 @@ def main(root=None):
         import tkinter as tk
         root = tk.Tk()
 
+    apply_app_theme(root)
     app_cls(root)
+    normalize_layout_tree(root)
 
     if own_root:
         root.mainloop()

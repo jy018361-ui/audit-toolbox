@@ -110,7 +110,7 @@ class DataPreview(ttk.Frame):
                 self.tree.heading(cid, text=str(col))
                 vals = [len(str(val)) for val in preview_df.iloc[:, i].head(10) if pd.notna(val)]
                 max_len = max([len(str(col))] + vals) if vals else len(str(col))
-                self.tree.column(cid, width=min(max_len * 10 + 20, 200))
+                self.tree.column(cid, width=min(max(max_len * 9 + 28, 110), 260), minwidth=90, stretch=False)
         except Exception as e:
             # #region agent log
             _dbg(sessionId="debug", runId="run1", hypothesisId="H4", location="data_preview._load_data.config_cols",

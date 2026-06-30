@@ -6,8 +6,10 @@ from tkinter import font as tkfont
 from tkinter import messagebox
 from typing import Callable, Optional
 
+from launcher.llm_settings import open_llm_settings_dialog
 from launcher.registry import ToolSpec, load_tools, suite_title, suite_version
 from launcher.runner import launch_tool
+from launcher.ui_theme import BG, PANEL_BG, apply_app_theme, set_dark_title_bar
 
 
 class HubWindow:
@@ -47,7 +49,9 @@ class HubWindow:
       self.root.state("zoomed")
     except tk.TclError:
       pass
-    self.root.configure(bg="#f3efe7")
+    self.root.configure(bg=BG)
+    apply_app_theme(self.root)
+    set_dark_title_bar(self.root)
     self._title_font_family = self._pick_font_family(
       "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"
     )
@@ -65,7 +69,7 @@ class HubWindow:
   # ── Build UI ─────────────────────────────────────────────────────
 
   def _build_ui(self) -> None:
-    shell = tk.Frame(self.root, bg="#f3efe7", padx=18, pady=18)
+    shell = tk.Frame(self.root, bg=BG, padx=18, pady=18)
     shell.pack(fill="both", expand=True)
     shell.grid_columnconfigure(0, weight=0)
     shell.grid_columnconfigure(1, weight=1)
@@ -202,39 +206,54 @@ class HubWindow:
   # ── Main panel ───────────────────────────────────────────────────
 
   def _build_main_panel(self, parent: tk.Widget) -> None:
-    main = tk.Frame(parent, bg="#efe7db", padx=18, pady=18)
+    main = tk.Frame(parent, bg=PANEL_BG, padx=18, pady=18)
     main.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
     main.grid_columnconfigure(0, weight=1)
     main.grid_rowconfigure(2, weight=1)
 
     # Top bar: heading + search
-    topbar = tk.Frame(main, bg="#efe7db")
+    topbar = tk.Frame(main, bg=PANEL_BG)
     topbar.grid(row=0, column=0, sticky="ew")
     topbar.grid_columnconfigure(0, weight=1)
     topbar.grid_columnconfigure(1, weight=0)
 
     # Heading
-    intro = tk.Frame(topbar, bg="#efe7db")
+    intro = tk.Frame(topbar, bg=PANEL_BG)
     intro.grid(row=0, column=0, sticky="w")
     tk.Label(
       intro,
       text="作业中枢",
-      bg="#efe7db",
+      bg=PANEL_BG,
       fg="#205860",
       font=(self._ui_font_family, 11, "bold"),
     ).pack(anchor="w")
     tk.Label(
       intro,
       text="选择一个入口，开始本轮审计处理",
-      bg="#efe7db",
+      bg=PANEL_BG,
       fg="#1b1f23",
       font=(self._title_font_family, 20, "bold"),
       pady=2,
     ).pack(anchor="w")
 
     # Search box
-    actions = tk.Frame(topbar, bg="#efe7db")
+    actions = tk.Frame(topbar, bg=PANEL_BG)
     actions.grid(row=0, column=1, sticky="e", padx=(12, 0))
+    tk.Button(
+      actions,
+      text="LLM API 配置",
+      command=lambda: open_llm_settings_dialog(self.root),
+      bg="#205860",
+      fg="#f8f5ee",
+      activebackground="#173f46",
+      activeforeground="#f8f5ee",
+      relief="flat",
+      bd=0,
+      padx=12,
+      pady=7,
+      cursor="hand2",
+      font=(self._ui_font_family, 10, "bold"),
+    ).pack(side="left", padx=(0, 10))
     search_shell = tk.Frame(
       actions,
       bg="#fbf7f0",
@@ -272,33 +291,33 @@ class HubWindow:
     self._search_entry.focus_set()
 
     # Status bar
-    toolbar = tk.Frame(main, bg="#efe7db")
+    toolbar = tk.Frame(main, bg=PANEL_BG)
     toolbar.grid(row=1, column=0, sticky="ew", pady=(10, 6))
     toolbar.grid_columnconfigure(0, weight=1)
     tk.Label(
       toolbar,
       textvariable=self._status_var,
-      bg="#efe7db",
+      bg=PANEL_BG,
       fg="#5b6765",
       font=(self._ui_font_family, 10),
     ).grid(row=0, column=0, sticky="w")
     tk.Label(
       toolbar,
       textvariable=self._summary_var,
-      bg="#efe7db",
+      bg=PANEL_BG,
       fg="#7f7567",
       font=(self._ui_font_family, 10),
     ).grid(row=0, column=1, sticky="e")
 
     # Scrollable card area
-    cards_shell = tk.Frame(main, bg="#efe7db")
+    cards_shell = tk.Frame(main, bg=PANEL_BG)
     cards_shell.grid(row=2, column=0, sticky="nsew")
     cards_shell.grid_columnconfigure(0, weight=1)
     cards_shell.grid_rowconfigure(0, weight=1)
 
     self._content_canvas = tk.Canvas(
       cards_shell,
-      bg="#efe7db",
+      bg=PANEL_BG,
       highlightthickness=0,
       bd=0,
       relief="flat",
@@ -310,7 +329,7 @@ class HubWindow:
     scrollbar.configure(command=self._content_canvas.yview)
     self._content_canvas.configure(yscrollcommand=scrollbar.set)
 
-    content = tk.Frame(self._content_canvas, bg="#efe7db")
+    content = tk.Frame(self._content_canvas, bg=PANEL_BG)
     self._cards_container = content
     self._content_window = self._content_canvas.create_window(
       (0, 0), window=content, anchor="nw"

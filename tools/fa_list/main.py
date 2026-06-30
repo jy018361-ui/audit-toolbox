@@ -5,6 +5,7 @@ import sys
 import tkinter as tk
 from tkinter import messagebox
 from gui.main_window import MainWindow
+from launcher.ui_theme import apply_app_theme
 
 
 def main(root=None):
@@ -13,12 +14,14 @@ def main(root=None):
     try:
         if own_root:
             root = tk.Tk()
+        apply_app_theme(root)
         app = MainWindow(root=root)
         if own_root:
             app.run()
     except Exception as e:
         # 显示错误信息
         err_root = root if root is not None and root.winfo_exists() else tk.Tk()
+        apply_app_theme(err_root)
         if err_root is not root:
             err_root.withdraw()
         messagebox.showerror(

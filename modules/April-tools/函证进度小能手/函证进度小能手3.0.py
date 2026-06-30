@@ -12,6 +12,7 @@ from openpyxl.utils import get_column_letter
 import numpy as np
 import traceback
 import re
+from launcher.ui_theme import apply_app_theme
 
 # 全局配置
 DATE_FORMAT = '%Y-%m-%d'
@@ -32,6 +33,7 @@ def select_input_file():
     try:
         print("=== 调试：开始文件选择 ===")
         root = tk.Tk()
+        apply_app_theme(root)
         root.withdraw()
         root.attributes('-topmost', True)
         file_path = filedialog.askopenfilename(
@@ -843,12 +845,14 @@ def main():
         # 显示结果
         if bank_success or trade_success:
             root = tk.Tk()
+            apply_app_theme(root)
             root.withdraw()
             messagebox.showinfo("统计完成", "\n".join(messages))
             root.destroy()
             print("\n✓ 程序执行成功完成!")
         else:
             root = tk.Tk()
+            apply_app_theme(root)
             root.withdraw()
             messagebox.showwarning("统计完成", "未找到任何函证数据！")
             root.destroy()

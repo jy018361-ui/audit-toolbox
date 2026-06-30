@@ -153,6 +153,9 @@ class MergeEngine:
                 dup_keys_file2 = dup_vals.unique().tolist()
             
             # 合并dup_keys，用于后续处理
+            # 分别跟踪左右两侧的重复键，以便区分"文件1有重复"和"文件2有重复"两类场景
+            dup_keys_left = list(dup_keys_file1) if handle_duplicates == 'pivot' else []
+            dup_keys_right = list(dup_keys_file2) if handle_duplicates == 'pivot' else []
             dup_keys = list(set(dup_keys_file1 + dup_keys_file2)) if handle_duplicates == 'pivot' else []
             
             # #region agent log
@@ -167,7 +170,7 @@ class MergeEngine:
                        "dup_keys_file2_count": len(dup_keys_file2)})
             # #endregion
             
-            # 始终聚合文件2（按匹配键），确保每个匹配键只有一行，避免笛卡尔积
+            # ===== 数值列预处理（pivot 与 keep_first/keep_last 两种模式都需要）=====
             sum_cols = []
             if original_value_col2 and original_value_col2 in df2_processed.columns:
                 df2_processed[original_value_col2] = df2_processed[original_value_col2].apply(self._safe_to_numeric)
@@ -181,37 +184,60 @@ class MergeEngine:
                 if bool((residual_series > 100).any()):
                     df2_processed[residual_col2] = residual_series
                     sum_cols.append(residual_col2)
-            
-            # 构建聚合字典：数值列求和，其他列取首行
-            agg_dict = {}
-            for c in df2_processed.columns:
-                if c == '__match_key__':
-                    continue
-                if c in sum_cols:
-                    agg_dict[c] = 'sum'
-                else:
-                    agg_dict[c] = 'first'
-            
-            # 按匹配键聚合文件2
-            df2_aggregated = df2_processed.groupby('__match_key__', as_index=False).agg(agg_dict)
-            
+
+            # ===== 关键修复：使用 cumcount 按位置配对，替代"聚合+笛卡尔积+去重"策略 =====
+            #
+            # 旧策略的问题：当文件1有 N 行、文件2有 M 行同键时，先 groupby 把
+            # M 行聚合成 1 行（非数值列取 first()），再 outer merge。这会导致：
+            # 1) 文件2的非数值字段（如 资产类型描述）只保留第一行的值，丢失类别多样性
+            # 2) 汇总按 资产类别 时，整组期末原值被错误归到首行的那个类别
+            #
+            # 新策略：为左右两侧分别加 __group_pos__ = groupby(key).cumcount()，
+            # 然后按 (__match_key__, __group_pos__) 做 outer merge：
+            # - N==M：N 行配对输出，全部 '两文件都有'
+            # - N<M：N 行 '两文件都有'，M-N 行 '仅文件2'（文件1侧 NaN）
+            # - 仅 file1 有：全部 '仅文件1'
+            # - 仅 file2 有：全部 '仅文件2'
+            # 每个文件2原始行都保留其真实的非数值字段，汇总不再错配类别。
+            if handle_duplicates == 'pivot':
+                df1_processed['__group_pos__'] = (
+                    df1_processed.groupby('__match_key__').cumcount()
+                )
+                df2_processed['__group_pos__'] = (
+                    df2_processed.groupby('__match_key__').cumcount()
+                )
+                df2_processed_for_merge = df2_processed
+            else:
+                # keep_first / keep_last：沿用旧的聚合策略（DuplicateChecker 后续会
+                # 在 has_duplicates1 分支按要求丢弃 file1 重复，再与聚合后的 file2 合并）
+                agg_dict = {}
+                for c in df2_processed.columns:
+                    if c == '__match_key__':
+                        continue
+                    if c in sum_cols:
+                        agg_dict[c] = 'sum'
+                    else:
+                        agg_dict[c] = 'first'
+                df2_aggregated = df2_processed.groupby('__match_key__', as_index=False).agg(agg_dict)
+                # 删除临时匹配键列
+                if '__match_key__' in df2_aggregated.columns:
+                    df2_aggregated = df2_aggregated.drop(columns=['__match_key__'])
+                df2_processed_for_merge = df2_aggregated
+
             # #region agent log
             _dbg(sessionId="debug", runId="run1", hypothesisId="H6",
-                 location="merge_engine.df2_aggregated",
-                 message="df2 aggregated",
+                 location="merge_engine.df2_prepared_for_merge",
+                 message="df2 prepared for merge",
                  data={"df2_original_rows": len(df2_processed),
-                       "df2_aggregated_rows": len(df2_aggregated)})
+                       "df2_for_merge_rows": len(df2_processed_for_merge),
+                       "strategy": "cumcount_pairing" if handle_duplicates == 'pivot' else "aggregate"})
             # #endregion
-            
-            # 删除临时匹配键列
-            if '__match_key__' in df2_aggregated.columns:
-                df2_aggregated = df2_aggregated.drop(columns=['__match_key__'])
-            
-            df2_processed_for_merge = df2_aggregated
-            
-            # 删除文件1的临时匹配键列（在rename前删除，避免列名冲突）
-            if '__match_key__' in df1_processed.columns:
-                df1_processed = df1_processed.drop(columns=['__match_key__'])
+
+            # pivot 模式：保留 __match_key__ 和 __group_pos__ 以便联合配对
+            # 其他模式：删除临时匹配键列（df2_aggregated 已经删过；这里删除 df1 的）
+            if handle_duplicates != 'pivot':
+                if '__match_key__' in df1_processed.columns:
+                    df1_processed = df1_processed.drop(columns=['__match_key__'])
             
             # 根据重复值处理方式处理文件1
             if has_duplicates1 and handle_duplicates != 'pivot':
@@ -256,21 +282,48 @@ class MergeEngine:
             right_on = [f"{col}_文件2" for col in effective_match_columns2]
             left_on_display = [f"{col}_文件1" for col in match_columns1]
             right_on_display = [f"{col}_文件2" for col in match_columns2]
-            
+
+            # pivot 模式：把 __match_key__ + __group_pos__ 加入联合配对键，
+            # 保证同键多行按位置一对一配对；其他模式按业务列配对。
+            if handle_duplicates == 'pivot':
+                left_on_merge = ['__match_key___文件1', '__group_pos___文件1']
+                right_on_merge = ['__match_key___文件2', '__group_pos___文件2']
+            else:
+                left_on_merge = left_on
+                right_on_merge = right_on
+
             # 执行完全外部联接（支持多列）
             # #region agent log
             _dbg(sessionId="debug", runId="run1", hypothesisId="H1", location="merge_engine.before_merge",
-                 message="before pd.merge", data={"left_on": left_on, "right_on": right_on})
+                 message="before pd.merge", data={"left_on": left_on_merge, "right_on": right_on_merge,
+                                                  "strategy": "cumcount_pairing" if handle_duplicates == 'pivot' else "business_keys"})
             # #endregion
             merged = pd.merge(
                 df1_renamed,
                 df2_renamed,
-                left_on=left_on,
-                right_on=right_on,
+                left_on=left_on_merge,
+                right_on=right_on_merge,
                 how='outer',
                 suffixes=('_文件1', '_文件2'),  # 已预先加后缀，冲突时再追加
                 indicator=True
             )
+
+            # pivot 模式：merge 后立即丢掉内部联合键列，避免泄露给下游
+            if handle_duplicates == 'pivot':
+                internal_cols = [
+                    '__match_key___文件1', '__match_key___文件2',
+                    '__group_pos___文件1', '__group_pos___文件2',
+                ]
+                merged = merged.drop(
+                    columns=[c for c in internal_cols if c in merged.columns],
+                    errors='ignore',
+                )
+
+                # cumcount 配对方案的一个副作用：当文件1只有一条主卡、文件2有多条副卡时，
+                # 主卡在 left_on 业务列上保留了原值（仅副卡#1 的那一行），但副卡 #2/#3 行
+                # 由于联合键只配到右侧位次，左侧业务列会是 NaN。
+                # 这正是预期：把 left_on 的展示列保持 NaN，外加 _merge=right_only，
+                # 自然表达"这是仅文件2的副卡"。无需任何额外的 wipe 逻辑。
             # #region agent log
             merged_cols_list = list(merged.columns)
             merged_cols_duplicates = [col for col in merged_cols_list if merged_cols_list.count(col) > 1]
@@ -347,75 +400,24 @@ class MergeEngine:
                 merged['匹配列'] = ''
             
             # 添加计算的辅助列（原值变动、累计折旧变动等）
-            # 传递dup_keys和left_on，用于处理重复匹配值的变动计算
+            # pivot 模式：cumcount 配对后每行都有自己配对的 file1/file2 值，
+            #   直接逐行 val1 - val2 即正确，不再需要 dup_keys 的"首行汇总"分支
+            # keep_first / keep_last 模式：理论上 file1 已经去重不再有 dup_keys，
+            #   也走标准逐行差值路径
             merged = self._add_calculated_columns(
                 merged,
                 original_value_col1,
                 original_value_col2,
                 depreciation_col1,
                 depreciation_col2,
-                dup_keys=dup_keys if (has_duplicates1 or has_duplicates2) and handle_duplicates == 'pivot' else [],
+                dup_keys=[],
                 left_on=left_on
             )
 
-            # 若文件1存在重复匹配值（pivot模式），仅在每个重复匹配值的首行展示文件2字段
-            # 这样对文件2原值/累计折旧等做汇总时不会被重复计算，同时保持文件1原始行不变
-            if dup_keys and handle_duplicates == 'pivot':
-                try:
-                    # 仅处理“文件1侧有该匹配值且文件2匹配成功”的行
-                    # 生成组合键用于匹配（与dup_keys的格式一致）
-                    SEPARATOR_LOCAL = '|||'
-                    merged['__left_key__'] = merged[left_on].fillna('').astype(str).agg(SEPARATOR_LOCAL.join, axis=1)
-                    merged['__right_key__'] = merged[right_on].fillna('').astype(str).agg(SEPARATOR_LOCAL.join, axis=1)
-                    
-                    # 以“右侧存在匹配行”为准判定匹配成功；允许空键（如空ID）进入重复组抑制
-                    right_matched = merged[right_on].notna().any(axis=1)
-                    mask_dup = merged['__left_key__'].isin(dup_keys) & right_matched
-                    if mask_dup.any():
-                        # 需要置空的文件2字段（保留匹配列本身right_on，便于识别匹配）
-                        def _is_file2_col(col):
-                            s = str(col)
-                            return s.endswith('_文件2') or '_文件2_' in s
-                        file2_cols = [c for c in merged.columns if _is_file2_col(c) and c not in right_on]
-
-                        if file2_cols:
-                            # 每个匹配值，仅保留第一行的文件2字段，其余置空
-                            grp = merged.loc[mask_dup, '__left_key__']
-                            cc = merged.loc[mask_dup].groupby(grp).cumcount()
-                            mask_blank = pd.Series(False, index=merged.index)
-                            mask_blank.loc[mask_dup] = cc > 0
-                            merged.loc[mask_blank, file2_cols] = pd.NA
-                            
-                            # 同时置空"原值变动"和"累计折旧变动"在非首行（确保一致性）
-                            calculated_cols = []
-                            if '原值变动' in merged.columns:
-                                calculated_cols.append('原值变动')
-                            if '累计折旧变动' in merged.columns:
-                                calculated_cols.append('累计折旧变动')
-                            if calculated_cols:
-                                merged.loc[mask_blank, calculated_cols] = pd.NA
-
-                            # 空ID组（空匹配键）非首行：匹配列保持首行展示；
-                            # 变动类型列与首行保持一致（用户要求）
-                            empty_group_mask = mask_dup & (merged['__left_key__'] == '')
-                            empty_key_mask = mask_blank & (merged['__left_key__'] == '')
-                            if bool(empty_key_mask.any()) and '匹配列' in merged.columns:
-                                merged.loc[empty_key_mask, '匹配列'] = pd.NA
-                            if bool(empty_group_mask.any()):
-                                first_idx = merged.loc[empty_group_mask].index[0]
-                                for c in ('原值变动类型', '累计折旧变动类型'):
-                                    if c in merged.columns:
-                                        merged.loc[empty_group_mask, c] = merged.at[first_idx, c]
-                    
-                    # 删除临时键列
-                    merged = merged.drop(columns=['__left_key__', '__right_key__'], errors='ignore')
-                except Exception:
-                    # 不影响主流程
-                    if '__left_key__' in merged.columns:
-                        merged = merged.drop(columns=['__left_key__'], errors='ignore')
-                    if '__right_key__' in merged.columns:
-                        merged = merged.drop(columns=['__right_key__'], errors='ignore')
-                    pass
+            # ===== 注意：pivot 模式不再需要"首行展示+其余置空"的去重处理 =====
+            # cumcount 配对策略已经在合并阶段把每个文件2行按位置唯一配到一个文件1行
+            # （或标为 right_only）。汇总不会重复计入文件2，副卡也以独立 '仅文件2' 行体现。
+            # 仅保留 keep_first / keep_last 模式下 DuplicateChecker 在合并前的去重作用。
 
             # 空ID组展示口径（方案B）：
             # - 文件2卡片逐行保留；

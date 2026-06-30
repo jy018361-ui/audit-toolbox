@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from launcher.ui_theme import apply_app_theme, normalize_layout_tree
 
 
 def _load_impl_module():
@@ -25,7 +26,12 @@ def _load_impl_module():
 
 
 def main(root=None):
+    if root is not None:
+        apply_app_theme(root)
     module = _load_impl_module()
     if not hasattr(module, "main"):
         raise AttributeError("工具实现缺少 main(root=None) 入口")
-    return module.main(root=root)
+    result = module.main(root=root)
+    if root is not None:
+        normalize_layout_tree(root)
+    return result

@@ -14,6 +14,10 @@ import csv
 from datetime import datetime
 import json
 from contextlib import contextmanager
+from launcher.llm_analysis import append_kanzhang_analysis_sheet
+from launcher.llm_client import check_kanzhang_field_mappings
+from launcher.llm_settings import is_llm_enabled, load_llm_settings
+from launcher.ui_theme import PRIMARY, SUCCESS, WARNING, apply_app_theme, create_standard_layout, fit_window_to_screen, normalize_layout_tree
 
 try:
     from openpyxl import load_workbook
@@ -208,6 +212,7 @@ class DraggableListbox(tk.Listbox):
         self.dialog = dialog_ref  
         self.box_type = box_type  
         self._selection_anchor = None
+        self._drag_start_index = None
 
         self.bind('<Button-1>', self.on_click)
         self.bind('<Shift-Button-1>', self.on_click)
@@ -254,6 +259,7 @@ class DraggableListbox(tk.Listbox):
             self._selection_anchor = idx
 
         self.activate(idx)
+        self._drag_start_index = idx
         self.cur_selection_indices = self.curselection()
         self.cur_selection_values = [self.get(i) for i in self.cur_selection_indices]
         return "break"
@@ -290,6 +296,8 @@ class DraggableListbox(tk.Listbox):
                         if val not in target_lb.get(0, tk.END): target_lb.insert(tk.END, val)
                         idx_opts = [i for i, v in enumerate(self.get(0, tk.END)) if v == val]
                         for i in reversed(idx_opts): self.delete(i)
+            elif target_lb == self and self.dialog and self != self.dialog.lb_src:
+                self._reorder_selected_to(event.y)
             return
 
         # 场景2: 主界面筛选框拖拽
@@ -318,15 +326,34 @@ class DraggableListbox(tk.Listbox):
             pass
         return "break"
 
+    def _reorder_selected_to(self, y):
+        selected = list(self.curselection())
+        if not selected or self._drag_start_index is None:
+            return
+        if len(selected) == 1 and selected[0] == self.nearest(y):
+            return
+        values = [self.get(i) for i in selected]
+        selected_set = set(selected)
+        remaining = [self.get(i) for i in range(self.size()) if i not in selected_set]
+        target = max(0, min(len(remaining), self.nearest(y)))
+        removed_before_target = sum(1 for i in selected if i < self.nearest(y))
+        target = max(0, min(len(remaining), target - removed_before_target))
+        self.delete(0, tk.END)
+        for idx, value in enumerate(remaining[:target] + values + remaining[target:]):
+            self.insert(tk.END, value)
+            if target <= idx < target + len(values):
+                self.selection_set(idx)
+        self.activate(target)
+
 # ==========================================
 # 3. 透视表设计器
 # ==========================================
 class PivotDesignerDialog:
     def __init__(self, parent, all_columns, predefined_calc_cols, defaults):
         self.top = tk.Toplevel(parent)
-        self.top.title("📊 透视表配置 (支持拖拽)")
+        self.top.title("透视表配置（支持拖拽）")
         _fit_toplevel_to_screen(self.top, 850, 600, min_width=720, min_height=500)
-        self.top.transient(parent)
+        self.top.resizable(True, True)
         self.top.grab_set()
         self.result = None
         self.action = "cancel" 
@@ -372,19 +399,23 @@ class PivotDesignerDialog:
         ttk.Button(frame_mid, text="列 (Cols) >", command=lambda: self.add_item(self.lb_cols)).pack(fill="x", pady=4)
         ttk.Button(frame_mid, text="值 (Values) >", command=lambda: self.add_item(self.lb_vals)).pack(fill="x", pady=4)
         ttk.Separator(frame_mid, orient="horizontal").pack(fill="x", pady=30)
-        ttk.Button(frame_mid, text="❌ 移除", command=self.remove_item).pack(fill="x", pady=4)
+        ttk.Button(frame_mid, text="移除", command=self.remove_item).pack(fill="x", pady=4)
 
         frame_dest = tk.Frame(main_frame)
         frame_dest.pack(side="right", fill="both", expand=True, padx=5)
+        frame_dest.grid_columnconfigure(0, weight=1)
+        frame_dest.grid_rowconfigure(1, weight=2)
+        frame_dest.grid_rowconfigure(3, weight=1)
+        frame_dest.grid_rowconfigure(5, weight=1)
         
-        tk.Label(frame_dest, text="1. 行字段 (Index)", fg="#1565C0").pack(anchor="w")
-        self.lb_rows = DraggableListbox(frame_dest, dialog_ref=self, height=6, bg="white"); self.lb_rows.pack(fill="x", expand=True)
+        tk.Label(frame_dest, text="1. 行字段 (Index)", fg=PRIMARY).grid(row=0, column=0, sticky="w")
+        self.lb_rows = DraggableListbox(frame_dest, dialog_ref=self, height=6, bg="white"); self.lb_rows.grid(row=1, column=0, sticky="nsew")
         
-        tk.Label(frame_dest, text="2. 列字段 (Cols)", fg="#2E7D32").pack(anchor="w")
-        self.lb_cols = DraggableListbox(frame_dest, dialog_ref=self, height=5, bg="white"); self.lb_cols.pack(fill="x", expand=True)
+        tk.Label(frame_dest, text="2. 列字段 (Cols)", fg=SUCCESS).grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.lb_cols = DraggableListbox(frame_dest, dialog_ref=self, height=5, bg="white"); self.lb_cols.grid(row=3, column=0, sticky="nsew")
         
-        tk.Label(frame_dest, text="3. 数值字段 (Values)", fg="#C62828").pack(anchor="w")
-        self.lb_vals = DraggableListbox(frame_dest, dialog_ref=self, height=5, bg="white"); self.lb_vals.pack(fill="x", expand=True)
+        tk.Label(frame_dest, text="3. 数值字段 (Values)", fg=WARNING).grid(row=4, column=0, sticky="w", pady=(8, 0))
+        self.lb_vals = DraggableListbox(frame_dest, dialog_ref=self, height=5, bg="white"); self.lb_vals.grid(row=5, column=0, sticky="nsew")
 
         if defaults:
             for item in defaults.get('rows', []): self.lb_rows.insert(tk.END, item)
@@ -446,7 +477,8 @@ class AuditApp_V70_2:
     def __init__(self, root):
         self.root = root
         self.root.title("看账小工具 by CSDC")
-        self.root.geometry("1280x850")
+        apply_app_theme(self.root)
+        fit_window_to_screen(self.root, 1280, 850, 920, 620)
         style = ttk.Style(); style.theme_use('clam')
         style.configure("Slim.Horizontal.TScrollbar", arrowsize=10, width=10)
         
@@ -462,6 +494,8 @@ class AuditApp_V70_2:
         self.active_batch_idx = 0
         
         self.column_mapping = {} 
+        self._llm_mapping_note = ""
+        self._llm_status_text = "LLM字段映射：等待加载数据"
         self.cached_accounts = None 
         self.current_sheet_name = 0
         self.header_row_idx = 0
@@ -500,7 +534,10 @@ class AuditApp_V70_2:
         self.shuttle_list_exclude = None
         self.shuttle_search_var = None
         self.shuttle_batch_list = None
-
+        self.shuttle_exclude_expanded = False
+        self.shuttle_exclude_panel = None
+        self.shuttle_exclude_button_panel = None
+        self.shuttle_toggle_exclude_btn = None
         self.final_csv_sep = None
         self.final_csv_enc = None
         self.final_csv_sig = None
@@ -527,7 +564,7 @@ class AuditApp_V70_2:
             "role_acc": ["科目名称", "科目描述", "account", "gl account", "总账科目", "GL Account Name"],
             "role_entity": ["公司名称", "公司", "单位名称", "单位", "主体", "entity", "company", "bukrs", "co code", "Business unit", "businessunit"],
             "role_date": ["日期", "date", "过账日期", "posting", "docdate", "postdate", "凭证日期", "effective date", "effectivedate"], 
-            "role_summary": ["摘要", "描述", "行项目文本", "Description", "JE Line Description", "凭证摘要", "description"],
+            "role_summary": ["摘要", "描述", "文本", "行项目文本", "凭证文本", "项目文本", "说明", "Description", "Text", "Line Text", "Item Text", "Document Text", "JE Line Description", "凭证摘要", "description"],
             
             # --- 方案B：借贷分列 (添加无空格小写版本以匹配清洗后的表头) ---
             "role_dr": [
@@ -556,6 +593,7 @@ class AuditApp_V70_2:
             raise RuntimeError("缺少依赖 polars。按当前性能方案，系统禁止回退到 pandas 路径。请先安装：pip install polars")
         self.root.protocol("WM_DELETE_WINDOW", self._on_app_close)
         self.setup_ui()
+        normalize_layout_tree(self.root)
 
     def _cleanup_shadow_files_on_exit(self):
         temp_dir = tempfile.gettempdir()
@@ -621,20 +659,21 @@ class AuditApp_V70_2:
         top.bind("<Control-A>", _select_all)
 
     def setup_ui(self):
-        frame_ctrl = tk.LabelFrame(self.root, text=" 核心操作流程 ", padx=10, pady=8, font=("微软雅黑", 10, "bold"), fg="#333")
+        _header, body, _footer = create_standard_layout(self.root, "看账工具", "加载数据、筛选科目并导出透视结果")
+        frame_ctrl = tk.LabelFrame(body, text=" 核心操作流程 ", padx=10, pady=8, font=("微软雅黑", 10, "bold"), fg="#333")
         frame_ctrl.pack(fill="x", padx=10, pady=5)
         
         f_1 = tk.Frame(frame_ctrl); f_1.pack(side="left", padx=5)
-        ttk.Button(f_1, text="📂 1. 加载数据", command=self.load_file).pack(side="left")
+        ttk.Button(f_1, text="1. 加载数据", command=self.load_file).pack(side="left")
         ttk.Separator(frame_ctrl, orient="vertical").pack(side="left", fill="y", padx=15)
         
         f_2 = tk.Frame(frame_ctrl); f_2.pack(side="left", padx=5)
-        self.btn_filter = ttk.Button(f_2, text="🔍 2. 科目筛选", command=self.prepare_filter_data, state="disabled")
+        self.btn_filter = ttk.Button(f_2, text="2. 科目筛选", command=self.prepare_filter_data, state="disabled")
         self.btn_filter.pack(side="left")
         ttk.Separator(frame_ctrl, orient="vertical").pack(side="left", fill="y", padx=15)
 
         f_3 = tk.Frame(frame_ctrl); f_3.pack(side="left", padx=5)
-        self.btn_run = ttk.Button(f_3, text="🚀 3. 导出 & 透视", command=self.start_process_flow, state="disabled")
+        self.btn_run = ttk.Button(f_3, text="3. 导出与透视", command=self.start_process_flow, state="disabled")
         self.btn_run.pack(side="left")
 
         self.lbl_scheme_status = tk.Label(frame_ctrl, text="等待加载...", fg="gray", font=("Arial", 9, "bold"), width=52, anchor="w")
@@ -649,7 +688,7 @@ class AuditApp_V70_2:
         self.var_partial_col = tk.BooleanVar(value=False)
         ttk.Checkbutton(f_opts, text="仅导出部分列", variable=self.var_partial_col).pack(anchor="e")
 
-        frame_desc = tk.Frame(self.root, bg="#FFF8E1", padx=10, pady=8, relief="groove", borderwidth=1)
+        frame_desc = tk.Frame(body, bg="#FFF8E1", padx=10, pady=8, relief="groove", borderwidth=1)
         frame_desc.pack(fill="x", padx=10, pady=(0, 5))
 
         # 左侧文本区域
@@ -657,13 +696,13 @@ class AuditApp_V70_2:
         left_frame.pack(side="left", fill="both", expand=True)
 
         info_text = (
-            "ℹ️ 自动配置方案说明：\n"
+            "自动配置方案说明：\n"
             "   【方案 A】：适用于JE仅有'金额列'，或'金额列'加'方向列'。\n"
             "   【方案 B】：适用于JE有'借方'和'贷方'两列。\n"
-            "   💡 快捷操作：【右键设置标题行，左键标题映射】/【复选多列作为凭证唯一识别码】/【标题自动映射】/【勾选开启“损益结转”识别】\n" 
-            "   💡 支持导出套表：【月度透视表】/【对方科目表】/【凭证类型表】/【剔除科目[薪酬.折旧...]明细表】\n"
-            "   💡 核心功能：【对方科目分析】/【凭证类型分析】/【正负数标记】\n"
-            "   💡 支持选择csv格式导出，可大幅提升写入速度" 
+            "   快捷操作：【右键设置标题行，左键标题映射】/【复选多列作为凭证唯一识别码】/【标题自动映射】/【勾选开启“损益结转”识别】\n" 
+            "   支持导出套表：【月度透视表】/【对方科目表】/【凭证类型表】/【剔除科目[薪酬.折旧...]明细表】\n"
+            "   核心功能：【对方科目分析】/【凭证类型分析】/【正负数标记】\n"
+            "   支持选择csv格式导出，可大幅提升写入速度" 
         )
 
 # === 修改开始：将长文本拆分为多行，以便调整间距 ===
@@ -683,19 +722,35 @@ class AuditApp_V70_2:
         right_frame.pack(side="right", anchor="ne")  # 移除fill="y"，减少垂直占用
 
         # 点赞按钮 - 标准化尺寸和样式
-        ttk.Button(right_frame, text="👍 认可", command=self.send_like_email, width=8).pack(fill="x", pady=2, padx=0)  # 统一按钮宽度和间距
+        ttk.Button(right_frame, text="认可", command=self.send_like_email, width=8).pack(fill="x", pady=2, padx=0)  # 统一按钮宽度和间距
 
         # 建议按钮 - 标准化尺寸和样式
-        ttk.Button(right_frame, text="💡 建议", command=self.send_suggestion_email, width=8).pack(fill="x", pady=2, padx=0)  # 统一按钮宽度和间距
+        ttk.Button(right_frame, text="建议", command=self.send_suggestion_email, width=8).pack(fill="x", pady=2, padx=0)  # 统一按钮宽度和间距
 
         # 提示文字 - 与左侧注释字体保持一致
         tk.Label(right_frame, text="", bg="#FFF8E1", fg="#0D47A1", font=("宋体", 9, "normal")).pack(anchor="center", pady=2)
 
-        frame_info = tk.Frame(self.root, padx=10); frame_info.pack(fill="x")
+        frame_info = tk.Frame(body, padx=10); frame_info.pack(fill="x")
         self.lbl_file = tk.Label(frame_info, text="当前文件: (未加载)", fg="gray"); self.lbl_file.pack(side="left")
         self.lbl_status = tk.Label(frame_info, text="", fg="blue"); self.lbl_status.pack(side="right")
 
-        frame_table = tk.Frame(self.root); frame_table.pack(fill="both", expand=True, padx=7, pady=3)
+        frame_llm = tk.LabelFrame(body, text=" LLM字段映射状态 ", padx=8, pady=5, fg="#205860")
+        frame_llm.pack(fill="x", padx=10, pady=(2, 4))
+        self.llm_status_text = tk.Text(
+            frame_llm,
+            height=4,
+            wrap="word",
+            bg="#F7F8FA",
+            fg="gray",
+            relief="flat",
+            borderwidth=0,
+            font=("微软雅黑", 9),
+        )
+        self.llm_status_text.pack(fill="x", expand=True)
+        self.llm_status_text.insert("1.0", self._llm_status_text)
+        self.llm_status_text.configure(state="disabled")
+
+        frame_table = tk.Frame(body); frame_table.pack(fill="both", expand=True, padx=7, pady=3)
         self.tree = ttk.Treeview(frame_table, show='headings', height=10)
         vsb = ttk.Scrollbar(frame_table, orient="vertical", command=self.tree.yview)
         hsb = tk.Scrollbar(frame_table, orient="horizontal", command=self.tree.xview, width=10, highlightthickness=0)
@@ -705,7 +760,7 @@ class AuditApp_V70_2:
         frame_table.grid_rowconfigure(0, weight=1); frame_table.grid_columnconfigure(0, weight=1)
         
         self.context_menu = tk.Menu(self.root, tearoff=0)
-        self.context_menu.add_command(label="⬇️ 设为标题行 (重新加载)", command=self.set_row_as_header)
+        self.context_menu.add_command(label="设为标题行（重新加载）", command=self.set_row_as_header)
         self.tree.bind("<Button-3>", lambda e: (self.tree.identify_row(e.y) and self.tree.selection_set(self.tree.identify_row(e.y)), self.context_menu.post(e.x_root, e.y_root)))
         self._bind_global_select_all()
 
@@ -968,6 +1023,7 @@ class AuditApp_V70_2:
             ws = writer.sheets["透视分析"]
             pivot_out = pivot_res.reset_index()
             pivot_out.columns = self._flatten_pivot_columns(pivot_out.columns)
+            pivot_out = self._add_pivot_total_before_months(pivot_out)
             p_cols = list(pivot_out.columns)
             rows = len(pivot_out)
             cols = len(p_cols)
@@ -1657,7 +1713,7 @@ class AuditApp_V70_2:
         idx = self.tree.index(sel[0])
         # Treeview展示的是“当前标题行之后”的数据行，所以要 +1 才是实际标题行索引
         self.header_row_idx += idx + 1
-        self.lbl_status.config(text=f"⏳ 重载中... 标题行: {self.header_row_idx+1}")
+        self.lbl_status.config(text=f"重载中... 标题行: {self.header_row_idx+1}", fg=PRIMARY)
         self.cached_accounts = None; self._reset_filter_state(); self._reset_full_cache_state()
         self.show_progress("重新读取..."); threading.Thread(target=self.process_load, args=(False,)).start()
 
@@ -1722,6 +1778,11 @@ class AuditApp_V70_2:
 
     def auto_map_columns(self):
         self.column_mapping = {} 
+        self._llm_mapping_note = ""
+        if is_llm_enabled():
+            self._set_llm_status("LLM字段映射：本地规则已完成，正在准备大模型辅助判断...", PRIMARY)
+        else:
+            self._set_llm_status("LLM字段映射：未启用。当前仅使用本地表头规则自动映射。", "gray")
         cols_lower = {str(c): str(c).lower().replace("_", "").replace(" ", "") for c in self.full_columns}
         def add_role(role, col):
             if col not in self.column_mapping: self.column_mapping[col] = set()
@@ -1751,7 +1812,243 @@ class AuditApp_V70_2:
             c_amt = self._find_col_strict("role_amt", cols_lower)
             if c_amt: add_role("role_amt", c_amt)
         if c_dir: add_role("role_dir", c_dir)
+        self._apply_llm_mapping_assist()
         self.root.after(0, self.update_scheme_status)
+
+    def _apply_llm_mapping_assist(self):
+        if not is_llm_enabled() or not self.full_columns:
+            if not self.full_columns:
+                self._set_llm_status("LLM字段映射：等待加载数据。", "gray")
+            return
+        try:
+            self._perf_log("LLM字段映射：开始")
+            self._set_llm_status("LLM字段映射：正在检查缺失字段和已映射关系，请稍候...", PRIMARY)
+            current_mapping = self._mapping_by_role()
+            files = [{
+                "file_side": "main",
+                "headers": [str(c) for c in self.full_columns],
+                "samples": self._llm_column_samples(self.df_preview),
+            }]
+            role_definitions = [
+                {
+                    "role": role_id,
+                    "label": label,
+                    "required": role_id in {"role_id", "role_acc", "role_amt", "role_dr", "role_cr"},
+                    "description": label,
+                }
+                for label, role_id in self.ROLES.items()
+            ]
+            settings = load_llm_settings()
+            base_instructions = (
+                    "字段角色：role_id=凭证唯一识别码；role_acc=科目名称；role_entity=公司/主体；"
+                    "role_date=凭证或过账日期；role_summary=摘要；role_dr/role_cr=借贷分列；"
+                    "role_amt/role_dir=单金额列加借贷方向。缺失角色请补全；已映射角色如明显异常请提出替换建议。"
+                    "如果 role_acc 缺失，请从表头和样例值判断哪一列最像会计科目。"
+                    "多候选时优先选择中文科目名称/科目描述/总账科目名称；"
+                    "没有中文名称列时再选择数字科目编码/账户编码；最后才选择英文 Account/GL Account 字段。"
+                    "role_summary 可以由“文本”、行项目文本、摘要、描述、Description 等表头和长文本样例判断。"
+            )
+            result = check_kanzhang_field_mappings(
+                settings,
+                role_definitions=role_definitions,
+                files=files,
+                current_mapping=current_mapping,
+                extra_instructions=base_instructions,
+            )
+            header_lookup = self._llm_header_lookup()
+
+            role_labels = {role: label for label, role in self.ROLES.items()}
+
+            scheme_changes = self._apply_llm_scheme_choice(result.scheme, role_labels)
+            applied_details = self._apply_llm_fill_suggestions(result.fills, current_mapping, header_lookup)
+            review_results = self._confirm_llm_mapping_reviews(result.reviews, role_labels, header_lookup)
+            accepted_reviews = [item for item in review_results if item[3]]
+            rejected_reviews = [item for item in review_results if not item[3]]
+
+            if applied_details or review_results or scheme_changes or result.scheme:
+                note_parts = []
+                if result.scheme in {"A", "B"}:
+                    note_parts.append(f"LLM判定方案{result.scheme}")
+                if applied_details:
+                    note_parts.append(f"LLM已补充{len(applied_details)}项映射")
+                if review_results:
+                    note_parts.append(f"复核{len(review_results)}项，采纳{len(accepted_reviews)}项")
+                note = "；".join(note_parts)
+                detail_lines = []
+                if result.scheme_reason:
+                    detail_lines.append("方案判断：" + result.scheme_reason)
+                if scheme_changes:
+                    detail_lines.append("方案互斥调整：" + "；".join(scheme_changes[:5]))
+                if applied_details:
+                    detail_lines.append("补充结果：" + "；".join(
+                        f"{role_labels.get(role, role)} -> {col}"
+                        for role, col, _confidence in applied_details[:8]
+                    ))
+                    if len(applied_details) > 8:
+                        detail_lines[-1] += f"；另有{len(applied_details) - 8}项"
+                if review_results:
+                    detail_lines.append("复核结果：" + "；".join(
+                        f"{role_labels.get(role, role)}：{old_col} -> {new_col}（{'采纳' if accepted else '未采纳'}）"
+                        for role, old_col, new_col, accepted in review_results[:5]
+                    ))
+                    if len(review_results) > 5:
+                        detail_lines[-1] += f"；另有{len(review_results) - 5}项"
+                status_message = f"LLM字段映射：{note}。"
+                if detail_lines:
+                    status_message += "\n" + "\n".join(detail_lines)
+                self._llm_mapping_note = note
+                self._perf_log(note)
+                self.root.after(0, self.build_table)
+                self.root.after(0, lambda n=note: self.lbl_status.config(text=n, fg=PRIMARY))
+                self._set_llm_status(status_message, SUCCESS)
+            else:
+                self._perf_log("LLM字段映射：无补充或异常")
+                self._set_llm_status("LLM字段映射：已完成，未发现可补充字段或异常映射。", "gray")
+        except Exception as exc:
+            self.root.after(0, self.update_scheme_status)
+            msg = f"LLM映射未生成：{exc}"
+            self._perf_log(msg)
+            self.root.after(0, lambda m=msg: self.lbl_status.config(text=m[:80], fg=WARNING))
+            self._set_llm_status(msg, WARNING)
+
+    def _apply_llm_scheme_choice(self, scheme, role_labels):
+        changes = []
+        if scheme == "A":
+            for role in ("role_dr", "role_cr"):
+                removed = self._remove_role_from_all_columns(role)
+                if removed:
+                    changes.append(f"移除{role_labels.get(role, role)}：{','.join(removed)}")
+        elif scheme == "B":
+            for role in ("role_amt", "role_dir"):
+                removed = self._remove_role_from_all_columns(role)
+                if removed:
+                    changes.append(f"移除{role_labels.get(role, role)}：{','.join(removed)}")
+        if changes:
+            self.cached_accounts = None
+            self._reset_filter_state()
+        return changes
+
+    def _remove_role_from_all_columns(self, role):
+        removed = []
+        for col in list(self.column_mapping.keys()):
+            roles = self.column_mapping.get(col)
+            if roles and role in roles:
+                roles.discard(role)
+                removed.append(str(col))
+                if not roles:
+                    del self.column_mapping[col]
+        return removed
+
+    def _apply_llm_fill_suggestions(self, items, current_mapping, header_lookup):
+        applied_items = []
+        for item in items or []:
+            if item.file_side not in ("main", ""):
+                continue
+            col = header_lookup.get(self._normalize_llm_header(item.suggested_column))
+            if col is None or item.role not in self.KEYWORDS:
+                continue
+            if current_mapping.get(item.role):
+                continue
+            self.column_mapping.setdefault(col, set()).add(item.role)
+            current_mapping.setdefault(item.role, []).append(col)
+            applied_items.append((item.role, col, item.confidence))
+        return applied_items
+
+    def _confirm_llm_mapping_reviews(self, items, role_labels, header_lookup):
+        results = []
+        for item in items or []:
+            role = item.role
+            if role not in self.KEYWORDS:
+                continue
+            old_col = ""
+            if item.current_mapping:
+                old_col = str(item.current_mapping.get("main") or "").strip()
+            new_col = header_lookup.get(self._normalize_llm_header(item.suggested_column))
+            old_key = header_lookup.get(self._normalize_llm_header(old_col))
+            if not old_key or not new_col or old_key == new_col:
+                continue
+            accepted = self._ask_apply_llm_mapping_review(role, old_key, new_col, item.reason, item.confidence, role_labels)
+            if accepted:
+                self._replace_column_role(role, old_key, new_col)
+            results.append((role, old_key, new_col, accepted))
+        if results:
+            self.root.after(0, self.build_table)
+            self.root.after(0, self.update_scheme_status)
+        return results
+
+    def _replace_column_role(self, role, old_col, new_col):
+        if old_col in self.column_mapping:
+            self.column_mapping[old_col].discard(role)
+            if not self.column_mapping[old_col]:
+                del self.column_mapping[old_col]
+        self.column_mapping.setdefault(new_col, set()).add(role)
+        self.cached_accounts = None
+        self._reset_filter_state()
+
+    def _ask_apply_llm_mapping_review(self, role, old_col, new_col, reason, confidence, role_labels):
+        role_label = role_labels.get(role, role)
+        message = (
+            f"字段：{role_label}\n\n"
+            f"当前映射：{old_col}\n"
+            f"建议改为：{new_col}\n\n"
+            f"异常原因：{reason or 'LLM认为当前列与字段含义不一致，建议使用更匹配的表头。'}\n\n"
+            f"置信度：{confidence:.0%}\n\n"
+            "是否采纳该调整？"
+        )
+        if threading.current_thread() is threading.main_thread():
+            return messagebox.askyesno("LLM 字段映射复核", message, parent=self.root)
+
+        done = threading.Event()
+        result = {"accepted": False}
+
+        def ask_on_main():
+            try:
+                result["accepted"] = messagebox.askyesno("LLM 字段映射复核", message, parent=self.root)
+            finally:
+                done.set()
+
+        self.root.after(0, ask_on_main)
+        done.wait()
+        return result["accepted"]
+
+    def _mapping_by_role(self):
+        out = {role: [] for role in self.ROLES.values()}
+        for col, roles in self.column_mapping.items():
+            for role in roles:
+                if role in out:
+                    out[role].append(col)
+        return out
+
+    def _llm_column_samples(self, df):
+        samples = {}
+        if df is None:
+            return samples
+        try:
+            for col in list(df.columns)[:120]:
+                vals = []
+                for val in df[col].dropna().astype(str).head(5).tolist():
+                    text = val.strip()
+                    if text:
+                        vals.append(text[:80])
+                samples[str(col)] = vals
+        except Exception:
+            pass
+        return samples
+
+    def _normalize_llm_header(self, value):
+        text = str(value or "").strip()
+        strip_chars = "[](){}" + chr(0x3010) + chr(0x3011) + chr(0xff08) + chr(0xff09)
+        text = text.strip(strip_chars)
+        text = re.sub(r"\s+", "", text)
+        return text.lower()
+
+    def _llm_header_lookup(self):
+        lookup = {}
+        for col in self.full_columns:
+            key = self._normalize_llm_header(col)
+            if key and key not in lookup:
+                lookup[key] = col
+        return lookup
 
     def _find_col_strict(self, role, cols_lower):
         for kw in self.KEYWORDS[role]:
@@ -1768,6 +2065,26 @@ class AuditApp_V70_2:
         has_cr = ("贷" in normalized) or ("credit" in normalized)
         return has_dr and has_cr
 
+    def _set_llm_status(self, message, fg="gray"):
+        self._llm_status_text = str(message or "")
+
+        def apply():
+            widget = getattr(self, "llm_status_text", None)
+            if not widget:
+                return
+            try:
+                widget.configure(state="normal", fg=fg)
+                widget.delete("1.0", tk.END)
+                widget.insert("1.0", self._llm_status_text)
+                widget.configure(state="disabled")
+            except tk.TclError:
+                pass
+
+        try:
+            self.root.after(0, apply)
+        except Exception:
+            apply()
+
     def build_table(self):
         self.tree.delete(*self.tree.get_children()); self.tree["columns"] = self.full_columns
         prefix_map = {"role_id": "【🔑ID】", "role_acc": "【📘科目】", "role_entity": "【🏢公司】", 
@@ -1783,8 +2100,10 @@ class AuditApp_V70_2:
         for _, row in self.df_preview.iterrows(): self.tree.insert("", "end", values=list(row))
         self.btn_filter.config(state="normal"); self.btn_run.config(state="normal")
         display_name = os.path.basename(self.real_xlsx_path) if self.real_xlsx_path else os.path.basename(self.file_path)
-        if self.header_row_idx == 0: self.lbl_status.config(text="⚠️ 请右键设置标题行", fg="red")
-        else: self.lbl_status.config(text=f"✅ 加载完成 [{display_name}]", fg="green")
+        llm_note = getattr(self, "_llm_mapping_note", "")
+        if llm_note: self.lbl_status.config(text=llm_note, fg=PRIMARY)
+        elif self.header_row_idx == 0: self.lbl_status.config(text="请右键设置标题行", fg=WARNING)
+        else: self.lbl_status.config(text=f"加载完成 [{display_name}]", fg=SUCCESS)
         self.update_scheme_status()
 
     def update_scheme_status(self):
@@ -1813,13 +2132,13 @@ class AuditApp_V70_2:
         ready_b = (len(missing_b) == 0)
 
         if ready_b:
-            status, color = "🟢 就绪 (方案B: 借贷分列)", "#2E7D32"
+            status, color = "就绪（方案B：借贷分列）", SUCCESS
             optional_notice = ["role_summary", "role_date"]
         elif ready_a:
-            status, color = "🟢 就绪 (方案A: 单列金额)", "#2E7D32"
+            status, color = "就绪（方案A：单列金额）", SUCCESS
             optional_notice = ["role_summary", "role_date", "role_dir"]
         else:
-            status, color = "🔴 未就绪", "red"
+            status, color = "未就绪", WARNING
             status += f" ｜ 方案A缺少: {'、'.join(missing_a)}"
             status += f"；方案B缺少: {'、'.join(missing_b)}"
             optional_notice = ["role_summary", "role_date"]
@@ -1896,7 +2215,7 @@ class AuditApp_V70_2:
         acc_cols = [c for c, roles in self.column_mapping.items() if "role_acc" in roles]
         if not acc_cols: return messagebox.showerror("错误", "请先标记【科目名称】")
         
-        self.btn_filter.config(text="⏳...", state="disabled"); self.show_progress("扫描科目...")
+        self.btn_filter.config(text="扫描中...", state="disabled"); self.show_progress("扫描科目...")
         threading.Thread(target=self.scan_core, args=(acc_cols,)).start()
 
     def scan_core(self, acc_cols):
@@ -1938,14 +2257,14 @@ class AuditApp_V70_2:
             
             self.cached_accounts = sorted(list(accs))
             self._perf_log(f"科目扫描总耗时: {time.perf_counter() - t_scan:.3f}s, 科目数={len(self.cached_accounts)}")
-            self.root.after(0, lambda: [self.btn_filter.config(text="🔍 科目筛选", state="normal"), self.hide_progress(), self.open_shuttle_dialog()])
+            self.root.after(0, lambda: [self.btn_filter.config(text="2. 科目筛选", state="normal"), self.hide_progress(), self.open_shuttle_dialog()])
         except Exception as e:
             msg = str(e); self.root.after(0, lambda: [self.hide_progress(), messagebox.showerror("失败", msg)])
 
     def refresh_filter_data(self):
         acc_cols = [c for c, roles in self.column_mapping.items() if "role_acc" in roles]
         if not acc_cols: return messagebox.showerror("错误", "找不到【科目名称】列")
-        self.shuttle_btn_refresh.config(state="disabled", text="⏳..."); self.show_progress("重新扫描...")
+        self.shuttle_btn_refresh.config(state="disabled", text="扫描中..."); self.show_progress("重新扫描...")
         threading.Thread(target=self.scan_core, args=(acc_cols,)).start()
 
     def handle_drag_drop(self, items, target_type):
@@ -1986,7 +2305,9 @@ class AuditApp_V70_2:
         self._load_target_accounts_from_active_batch()
         top = tk.Toplevel(self.root)
         _fit_toplevel_to_screen(top, 980, 700, min_width=760, min_height=520)
+        top.resizable(True, True)
         self.shuttle_top = top
+        self.shuttle_exclude_expanded = False
         self._bind_esc_close(top)
         f_bottom = tk.Frame(top, padx=10, pady=10)
         f_bottom.pack(side=tk.BOTTOM, fill=tk.X)
@@ -1997,11 +2318,10 @@ class AuditApp_V70_2:
             width=20,
             command=lambda: [self._sync_active_batch_from_target_accounts(), top.destroy(), self.start_process_flow()],
         ).pack(side=tk.RIGHT)
-
         f_top = tk.Frame(top, bg="#f0f0f0", pady=5); f_top.pack(side=tk.TOP, fill=tk.X)
-        self.shuttle_btn_refresh = ttk.Button(f_top, text="🔄 刷新", command=self.refresh_filter_data)
+        self.shuttle_btn_refresh = ttk.Button(f_top, text="刷新", command=self.refresh_filter_data)
         self.shuttle_btn_refresh.pack(side="left", padx=10)
-        tk.Label(f_top, text="🔍 搜索:", bg="#f0f0f0").pack(side="left")
+        tk.Label(f_top, text="搜索:", bg="#f0f0f0").pack(side="left")
         self.shuttle_search_var = tk.StringVar(); ttk.Entry(f_top, textvariable=self.shuttle_search_var).pack(side="left", fill="x", expand=True)
         
         f_main = tk.Frame(top); f_main.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -2010,10 +2330,10 @@ class AuditApp_V70_2:
         f_main.grid_columnconfigure(2, weight=1)
         f_main.grid_rowconfigure(0, weight=0)
         f_main.grid_rowconfigure(1, weight=1)
-        f_main.grid_rowconfigure(2, weight=1)
+        f_main.grid_rowconfigure(2, weight=0)
 
         f_left = tk.LabelFrame(f_main, text="待选科目 (可拖拽)")
-        f_left.grid(row=0, column=0, rowspan=3, sticky="nsew")
+        f_left.grid(row=0, column=0, rowspan=4, sticky="nsew")
         self.shuttle_list_left = DraggableListbox(f_left, self, None, 'source', selectmode="extended")
         self.shuttle_list_left.pack(fill="both", expand=True)
 
@@ -2072,15 +2392,27 @@ class AuditApp_V70_2:
             ),
         ).pack(side="left")
         
-        f_r_top = tk.LabelFrame(f_main, text="🟢 目标匹配 (智能对冲)", fg="green")
+        f_r_top = tk.LabelFrame(f_main, text="目标匹配（智能对冲）", fg=SUCCESS)
         f_r_top.grid(row=1, column=2, sticky="nsew", padx=(5, 0))
         self.shuttle_list_right = DraggableListbox(f_r_top, self, None, 'target', selectmode="extended")
         self.shuttle_list_right.pack(fill="both", expand=True)
+
+        f_exclude_toggle = tk.Frame(f_main)
+        f_exclude_toggle.grid(row=2, column=2, sticky="ew", padx=(5, 0), pady=(8, 0))
+        self.shuttle_toggle_exclude_btn = ttk.Button(
+            f_exclude_toggle,
+            text="展开剔除/例外",
+            command=self._toggle_exclude_panel,
+        )
+        self.shuttle_toggle_exclude_btn.pack(side="left")
+        tk.Label(f_exclude_toggle, text="已选剔除项会保留，展开后可编辑", fg="gray").pack(side="left", padx=8)
         
-        f_r_bot = tk.LabelFrame(f_main, text="🔴 剔除/例外 (独立导出)", fg="red")
-        f_r_bot.grid(row=2, column=2, sticky="nsew", padx=(5, 0), pady=(5, 0))
+        f_r_bot = tk.LabelFrame(f_main, text="剔除/例外（独立导出）", fg=WARNING)
+        f_r_bot.grid(row=3, column=2, sticky="nsew", padx=(5, 0), pady=(5, 0))
+        self.shuttle_exclude_panel = f_r_bot
         self.shuttle_list_exclude = DraggableListbox(f_r_bot, self, None, 'exclude', selectmode="extended")
         self.shuttle_list_exclude.pack(fill="both", expand=True)
+        f_r_bot.grid_remove()
 
         def move(target_name):
             items = [self.shuttle_list_left.get(i) for i in self.shuttle_list_left.curselection()]
@@ -2098,12 +2430,14 @@ class AuditApp_V70_2:
         f_btn_target = tk.Frame(f_main, width=160)
         f_btn_target.grid(row=1, column=1, sticky="n", padx=8, pady=(10, 0))
         f_btn_exclude = tk.Frame(f_main, width=160)
-        f_btn_exclude.grid(row=2, column=1, sticky="n", padx=8, pady=(10, 0))
+        f_btn_exclude.grid(row=3, column=1, sticky="n", padx=8, pady=(10, 0))
+        self.shuttle_exclude_button_panel = f_btn_exclude
 
         ttk.Button(f_btn_target, text="移入目标 >", width=18, command=lambda: move('target')).pack(pady=8, fill="x")
         ttk.Button(f_btn_target, text="移除 (从目标)", width=18, command=lambda: remove('target')).pack(pady=8, fill="x")
         ttk.Button(f_btn_exclude, text="移入剔除 >", width=18, command=lambda: move('exclude')).pack(pady=8, fill="x")
         ttk.Button(f_btn_exclude, text="移除 (从剔除)", width=18, command=lambda: remove('exclude')).pack(pady=8, fill="x")
+        f_btn_exclude.grid_remove()
 
         self.shuttle_search_var.trace("w", lambda *a: self.update_shuttle_ui())
         self.update_shuttle_ui()
@@ -2125,6 +2459,27 @@ class AuditApp_V70_2:
             return "break"
         top.bind("<Control-a>", _shuttle_select_all)
         top.bind("<Control-A>", _shuttle_select_all)
+
+    def _toggle_exclude_panel(self):
+        if not self.shuttle_exclude_panel or not self.shuttle_exclude_button_panel:
+            return
+        self.shuttle_exclude_expanded = not self.shuttle_exclude_expanded
+        parent = self.shuttle_exclude_panel.master
+        if self.shuttle_exclude_expanded:
+            self.shuttle_exclude_panel.grid()
+            self.shuttle_exclude_button_panel.grid()
+            if self.shuttle_toggle_exclude_btn:
+                self.shuttle_toggle_exclude_btn.config(text="折叠剔除/例外")
+            parent.grid_rowconfigure(2, weight=0)
+            parent.grid_rowconfigure(3, weight=1)
+        else:
+            self.shuttle_exclude_panel.grid_remove()
+            self.shuttle_exclude_button_panel.grid_remove()
+            if self.shuttle_toggle_exclude_btn:
+                self.shuttle_toggle_exclude_btn.config(text="展开剔除/例外")
+            parent.grid_rowconfigure(2, weight=0)
+            parent.grid_rowconfigure(3, weight=0)
+        self.update_shuttle_ui()
 
     def update_shuttle_ui(self):
         if not self.shuttle_list_left: return
@@ -2159,62 +2514,98 @@ class AuditApp_V70_2:
         self.thread_event.set()
 
     def start_process_flow(self):
+        if self.export_in_progress:
+            self.lbl_status.config(text="导出处理中，请等待当前任务完成", fg=WARNING)
+            return
         self._sync_active_batch_from_target_accounts()
         map_inv = {v: [] for v in self.ROLES.values()}
         for col, roles in self.column_mapping.items():
             for r in roles: map_inv[r].append(col) if r in map_inv else None
         
-        if not map_inv['role_id'] or not map_inv['role_acc']: return messagebox.showerror("提示", "需标记ID和科目")
+        if not map_inv['role_id'] or not map_inv['role_acc']:
+            return messagebox.showerror(
+                "无法导出",
+                "请先在表头中标记“唯一识别码 (ID)”和“科目名称”。\n\n"
+                "操作方式：左键点击对应列标题，完成字段映射后再导出。"
+            )
         
         # 逻辑判断
-        logic = "B" if (map_inv['role_dr'] and map_inv['role_cr']) else ("A" if map_inv['role_amt'] else None)
-        if not logic: return messagebox.showerror("提示", "缺少金额列")
+        logic, scheme_note = self._resolve_amount_logic_before_export(map_inv)
+        if scheme_note:
+            self._llm_mapping_note = scheme_note
+            self._set_llm_status(f"字段方案已校正：{scheme_note}", WARNING)
+        if not logic:
+            return messagebox.showerror(
+                "无法导出",
+                "请先在表头中标记金额字段。\n\n"
+                "方案 A：标记“方案A-金额列”。\n"
+                "方案 B：同时标记“方案B-借方金额”和“方案B-贷方金额”。"
+            )
         
         # === 修改开始 ===
         calc = ["#_净额(Net)"]
         
-        # 逻辑：优先查找“金额”列，如果没找到，再查找“借贷”列，最后才用“净额”兜底
-        default_vals = []
-        if map_inv['role_amt']:
-            default_vals.append(map_inv['role_amt'][0])
-        elif map_inv['role_dr'] and map_inv['role_cr']:
-            default_vals.append(map_inv['role_dr'][0])
-            default_vals.append(map_inv['role_cr'][0])
-        else:
-            default_vals.append("#_净额(Net)")
-
         defaults = {
             'rows': map_inv['role_entity'] + map_inv['role_acc'], 
             'cols': [], 
-            'vals': default_vals
+            'vals': ["#_净额(Net)"]
         }
         # === 修改结束 ===
-        
-        # 默认不再预填“日期”为列字段
-        if logic == "A" and map_inv['role_dir']: defaults['cols'].append(map_inv['role_dir'][0])
+
+        # 默认列字段仅使用日期；不再默认加入方向或其他字段。
+        default_date_cols = [c for c in map_inv.get('role_date', []) if c in self.full_columns]
+        defaults['cols'] = default_date_cols[:1]
 
         # 方案B也改为弹窗确认（默认值预填）
         if logic == "B":
             acc_col = map_inv['role_acc'][0]
             # 方案B默认行字段仅保留科目列（不再合并ID）
             defaults['rows'] = [acc_col]
-            defaults['cols'] = []
-            if map_inv.get('role_dir'):
-                defaults['cols'].append(map_inv['role_dir'][0])
-            # 值字段：优先借/贷，没有则用金额
-            if map_inv['role_dr'] and map_inv['role_cr']:
-                defaults['vals'] = [map_inv['role_dr'][0], map_inv['role_cr'][0]]
-            elif map_inv['role_amt']:
-                defaults['vals'] = [map_inv['role_amt'][0]]
-            else:
-                defaults['vals'] = ["#_净额(Net)"]
+            defaults['cols'] = default_date_cols[:1]
+            defaults['vals'] = ["#_净额(Net)"]
 
         dlg = PivotDesignerDialog(self.root, self.full_columns, calc, defaults)
         self.root.wait_window(dlg.top)
         if dlg.action == "cancel": return
         self.pivot_config = dlg.result if dlg.action == "pivot" else None
         batches = self._get_effective_batches()
+        self.export_in_progress = True
+        self.btn_run.config(state="disabled")
+        self.lbl_status.config(text="正在导出，请稍候...", fg=PRIMARY)
         threading.Thread(target=self.run_export, args=(map_inv, logic, batches)).start()
+
+    def _resolve_amount_logic_before_export(self, map_inv):
+        dr_cols = list(dict.fromkeys(map_inv.get('role_dr') or []))
+        cr_cols = list(dict.fromkeys(map_inv.get('role_cr') or []))
+        amt_cols = list(dict.fromkeys(map_inv.get('role_amt') or []))
+        dir_cols = list(dict.fromkeys(map_inv.get('role_dir') or []))
+        note = ""
+
+        same_dr_cr = bool(dr_cols and cr_cols and set(dr_cols) == set(cr_cols))
+        if same_dr_cr:
+            amount_col = amt_cols[0] if amt_cols else dr_cols[0]
+            self._remove_role_from_all_columns("role_dr")
+            self._remove_role_from_all_columns("role_cr")
+            self.column_mapping.setdefault(amount_col, set()).add("role_amt")
+            map_inv['role_dr'] = []
+            map_inv['role_cr'] = []
+            map_inv['role_amt'] = list(dict.fromkeys([amount_col] + amt_cols))
+            note = "借方金额和贷方金额指向同一列，已按方案A（金额列+方向列）处理。"
+            return "A", note
+
+        if dr_cols and cr_cols:
+            for role in ("role_amt", "role_dir"):
+                self._remove_role_from_all_columns(role)
+                map_inv[role] = []
+            return "B", ""
+
+        if amt_cols:
+            for role in ("role_dr", "role_cr"):
+                self._remove_role_from_all_columns(role)
+                map_inv[role] = []
+            return "A", ""
+
+        return None, ""
 
     # ==============================
     # 透视/凭证输出辅助函数
@@ -2228,6 +2619,19 @@ class AuditApp_V70_2:
         return join_col
 
     def _get_voucher_id_cols(self, map_inv, df=None):
+        cols = []
+        for c in map_inv.get('role_entity', []):
+            if df is None or c in df.columns:
+                cols.append(c)
+        for c in map_inv.get('role_date', []):
+            if df is None or c in df.columns:
+                cols.append(c)
+        for c in map_inv.get('role_id', []):
+            if df is None or c in df.columns:
+                cols.append(c)
+        return list(dict.fromkeys(cols)) or list(map_inv.get('role_id', []))
+
+    def _get_date_fill_group_cols(self, map_inv, df=None):
         cols = []
         for c in map_inv.get('role_entity', []):
             if df is None or c in df.columns:
@@ -2375,6 +2779,23 @@ class AuditApp_V70_2:
                 out.append(str(c))
         return out
 
+    def _add_pivot_total_before_months(self, df):
+        if df is None or df.empty or "合计" in df.columns:
+            return df
+
+        def _is_month_col(x):
+            s = str(x).strip()
+            return bool(re.search(r"20\d{2}[-/.年]?\d{1,2}", s))
+
+        month_cols = [c for c in df.columns if _is_month_col(c)]
+        if not month_cols:
+            return df
+        total = df[month_cols].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)
+        first_month_idx = min(df.columns.get_loc(c) for c in month_cols)
+        out = df.copy()
+        out.insert(first_month_idx, "合计", total)
+        return out
+
     def _reorder_voucher_type_columns(self, df, type_col=None, id_col=None, acc_col=None):
         cols = list(df.columns)
 
@@ -2475,8 +2896,14 @@ class AuditApp_V70_2:
         if not effective_targets:
             return None, None, None, []
 
-        # 损益结转：先按ID过滤，再做汇总
-        df_target_f = df_target
+        # 损益结转：先按ID过滤，再做汇总。这里同步准备 __net__，
+        # 避免凭证类型表有月份分布但缺少总净额列。
+        df_target_f = df_target.copy()
+        if "__net__" not in df_target_f.columns:
+            try:
+                df_target_f = self._ensure_net_column_polars(df_target_f, map_inv, "B")
+            except Exception:
+                df_target_f["__net__"] = 0.0
         if loss_ids:
             loss_ids_str = {str(x) for x in loss_ids}
             v_pivot = v_pivot[~v_pivot.index.get_level_values(id_col_name).astype(str).isin(loss_ids_str)]
@@ -2938,6 +3365,29 @@ class AuditApp_V70_2:
             flat = flat.drop(columns=["摘要"])
         flat["摘要"] = flat[id_col_name].astype(str).map(rep_summaries).fillna("")
 
+        net_total_col = "#_净额(Net)"
+        if net_total_col not in flat.columns:
+            existing_base_cols = {id_col_name, acc_col_name, "摘要", "__rep_id__", type_col_name}
+            if dir_col_name:
+                existing_base_cols.add(dir_col_name)
+            net_source_cols = []
+            for c in flat.columns:
+                if c in existing_base_cols:
+                    continue
+                s = str(c).strip()
+                if len(s) == 7 and s[4] == "-" and s[:4].isdigit() and s[5:].isdigit():
+                    continue
+                series = pd.to_numeric(flat[c], errors="coerce")
+                if series.notna().any():
+                    net_source_cols.append(c)
+            if net_source_cols:
+                flat[net_total_col] = (
+                    flat[net_source_cols]
+                    .apply(pd.to_numeric, errors="coerce")
+                    .fillna(0)
+                    .sum(axis=1)
+                )
+
         # 5) 合并YYYY-MM分布列
         month_cols = []
         date_cols = map_inv.get('role_date', [])
@@ -3368,12 +3818,13 @@ class AuditApp_V70_2:
             if map_inv.get('role_date'):
                 date_col = map_inv['role_date'][0]
                 if date_col in df_target.columns:
-                    id_cols = self._get_voucher_id_cols(map_inv, df_target)
-                    df_target[date_col] = (
-                        df_target.groupby(id_cols)[date_col]
-                        .ffill()
-                        .bfill()
-                    )
+                    fill_group_cols = self._get_date_fill_group_cols(map_inv, df_target)
+                    if fill_group_cols:
+                        df_target[date_col] = (
+                            df_target.groupby(fill_group_cols)[date_col]
+                            .ffill()
+                            .bfill()
+                        )
 
             # === 损益结转标记（凭证明细辅助列） ===
             loss_ids = set()
@@ -3537,6 +3988,7 @@ class AuditApp_V70_2:
                         pivot_res = None
             tracer.event("build_pivot", elapsed_s=round(time.perf_counter() - t_pivot, 6), has_pivot=bool(self.pivot_config), pivot_ok=bool(pivot_res is not None))
             suite_written = False
+            llm_analysis_msg = ""
             suite_path = f"{base_name}_套表.xlsx"
             suite_enabled = any([
                 voucher_pivot is not None,
@@ -3593,6 +4045,7 @@ class AuditApp_V70_2:
                         t_sheet = time.perf_counter()
                         pivot_out = pivot_res.reset_index()
                         pivot_out.columns = self._flatten_pivot_columns(pivot_out.columns)
+                        pivot_out = self._add_pivot_total_before_months(pivot_out)
                         pivot_out.to_excel(writer_suite, sheet_name="透视分析", index=False)
                         tracer.event("suite_sheet_pivot", elapsed_s=round(time.perf_counter() - t_sheet, 6), rows=int(len(pivot_out)))
 
@@ -3613,6 +4066,19 @@ class AuditApp_V70_2:
                         vt_id_col_s,
                         target_accounts=self.target_accounts,
                     )
+                    llm_ok, llm_msg = append_kanzhang_analysis_sheet(
+                        writer_suite,
+                        voucher_pivot=voucher_pivot,
+                        voucher_type_df=voucher_type_df,
+                        voucher_type_strict_df=voucher_type_strict_df,
+                        pivot_res=pivot_res,
+                        target_accounts=self.target_accounts,
+                    )
+                    if not llm_ok and "未启用" not in llm_msg:
+                        llm_analysis_msg = llm_msg
+                        tracer.event("llm_analysis_failed", message=llm_msg)
+                    elif llm_ok:
+                        llm_analysis_msg = llm_msg
                     tracer.event("suite_formatting", elapsed_s=round(time.perf_counter() - t_fmt, 6))
                     # 双保险：确保“凭证”sheet在套表中隐藏
                     if "凭证" in writer_suite.sheets:
@@ -3907,6 +4373,7 @@ class AuditApp_V70_2:
                     with pd.ExcelWriter(pivot_path, engine='xlsxwriter') as pw:
                         pivot_out = pivot_res.reset_index()
                         pivot_out.columns = self._flatten_pivot_columns(pivot_out.columns)
+                        pivot_out = self._add_pivot_total_before_months(pivot_out)
                         pivot_out.to_excel(pw, sheet_name="透视分析", index=False)
                         if voucher_type_df is not None:
                             vt_out = voucher_type_df.copy()
@@ -4015,6 +4482,8 @@ class AuditApp_V70_2:
             
             if pivot_err:
                 msg += " (透视表失败: " + str(pivot_err) + ")"
+            if llm_analysis_msg:
+                msg += f" ({llm_analysis_msg})"
             if batch_name:
                 msg = f"[{batch_name}] {msg}"
             if show_done_msg:
@@ -4176,12 +4645,17 @@ class AuditApp_V70_2:
         self.thread_event.set()
 
 def main(parent=None):
+    from launcher.ui_theme import apply_app_theme, set_dark_title_bar
     if parent is not None:
         win = tk.Toplevel(parent)
+        apply_app_theme(win)
+        set_dark_title_bar(win)
         app = AuditApp_V70_2(win)
         win.wait_window()
     else:
         root = tk.Tk()
+        apply_app_theme(root)
+        set_dark_title_bar(root)
         app = AuditApp_V70_2(root)
         root.mainloop()
 

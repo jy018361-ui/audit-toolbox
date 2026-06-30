@@ -8,6 +8,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
+from launcher.ui_theme import apply_app_theme, center_on_parent, fit_window_to_screen
 
 
 FA_SHEET_NAME = "FA List"
@@ -296,6 +297,7 @@ class BalanceDateDialog:
         self.result = None
 
         self.window = tk.Tk()
+        apply_app_theme(self.window)
         self.window.title("折旧测算参数确认")
         self.window.resizable(False, False)
         self.window.protocol("WM_DELETE_WINDOW", self.on_cancel)
@@ -320,12 +322,7 @@ class BalanceDateDialog:
         ttk.Button(btn_frame, text="确定", command=self.on_ok).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(btn_frame, text="取消", command=self.on_cancel).grid(row=0, column=1)
 
-        self.window.update_idletasks()
-        width = self.window.winfo_width()
-        height = self.window.winfo_height()
-        x_pos = (self.window.winfo_screenwidth() - width) // 2
-        y_pos = (self.window.winfo_screenheight() - height) // 2
-        self.window.geometry(f"+{x_pos}+{y_pos}")
+        center_on_parent(self.window)
         self.window.lift()
         self.window.focus_force()
         self.window.after(300, lambda: self.window.attributes("-topmost", False))
@@ -363,6 +360,7 @@ class FieldMappingDialog:
         self.default_sheet_name = sheet_name
         self.result = None
         self.window = tk.Tk()
+        apply_app_theme(self.window)
         self.window.title(dialog_title)
         self.window.resizable(False, False)
         self.window.protocol("WM_DELETE_WINDOW", self.on_cancel)
@@ -375,12 +373,7 @@ class FieldMappingDialog:
 
         self._build()
         self._init_defaults()
-        self.window.update_idletasks()
-        width = self.window.winfo_width()
-        height = self.window.winfo_height()
-        x_pos = (self.window.winfo_screenwidth() - width) // 2
-        y_pos = (self.window.winfo_screenheight() - height) // 2
-        self.window.geometry(f"+{x_pos}+{y_pos}")
+        center_on_parent(self.window)
         self.window.lift()
         self.window.focus_force()
         self.window.after(300, lambda: self.window.attributes("-topmost", False))
@@ -465,6 +458,7 @@ def choose_workbook(root, initial_dir: Path):
 
 def show_error(title: str, text: str):
     root = tk.Tk()
+    apply_app_theme(root)
     root.withdraw()
     messagebox.showerror(title, text, parent=root)
     root.destroy()
@@ -472,6 +466,7 @@ def show_error(title: str, text: str):
 
 def show_info(title: str, text: str):
     root = tk.Tk()
+    apply_app_theme(root)
     root.withdraw()
     messagebox.showinfo(title, text, parent=root)
     root.destroy()
@@ -689,6 +684,7 @@ def process_workbook(choice: WorkbookChoice):
 def main():
     write_log("main start")
     root = tk.Tk()
+    apply_app_theme(root)
     root.withdraw()
 
     base_dir = Path(__file__).resolve().parent.parent

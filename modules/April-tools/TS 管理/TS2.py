@@ -1,4 +1,4 @@
-import pandas as pd
+﻿import pandas as pd
 import numpy as np
 import os
 import re
@@ -7,6 +7,7 @@ from tkinter import filedialog, messagebox, ttk
 from datetime import datetime
 import sys
 import warnings
+from launcher.ui_theme import apply_app_theme, create_standard_layout, fit_window_to_screen, normalize_layout_tree
 
 warnings.filterwarnings('ignore')
 
@@ -224,9 +225,9 @@ class TimesheetProcessor:
 class CompactTimesheetGUI:
     def __init__(self):
         self.root = tk.Tk()
+        apply_app_theme(self.root)
         self.root.title("工时统计系统 - 智能列选择版")
-        self.root.geometry("800x650+100+50")
-        self.root.minsize(750, 600)
+        fit_window_to_screen(self.root, 860, 680, 750, 600)
 
         self.timesheet_path = tk.StringVar()
         self.filter_files = [tk.StringVar() for _ in range(3)]
@@ -239,25 +240,21 @@ class CompactTimesheetGUI:
         self.filter_file_columns = [[] for _ in range(3)]  # 存储每个筛选文件的列名
 
         self.setup_ui()
+        normalize_layout_tree(self.root)
 
     def setup_ui(self):
-        """设置用户界面"""
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        """设置三段式用户界面。"""
+        _header, body, footer = create_standard_layout(
+            self.root,
+            "工时统计系统",
+            "智能列选择、数据一致性与紧凑操作流程",
+        )
+        body.rowconfigure(0, weight=1)
+        body.rowconfigure(1, weight=0)
+        body.columnconfigure(0, weight=1)
 
-        title_frame = ttk.Frame(main_frame)
-        title_frame.pack(fill=tk.X, pady=(0, 10))
-
-        title_label = ttk.Label(title_frame, text="工时统计系统", font=("Arial", 16, "bold"))
-        title_label.pack(pady=5)
-
-        desc_label = ttk.Label(title_frame, text="智能列选择 • 数据一致性 • 紧凑界面", font=("Arial", 10))
-        desc_label.pack(pady=2)
-
-        self.setup_action_buttons(main_frame)
-
-        notebook = ttk.Notebook(main_frame)
-        notebook.pack(fill=tk.BOTH, expand=True, pady=10)
+        notebook = ttk.Notebook(body)
+        notebook.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
 
         file_tab = self.create_file_tab(notebook)
         notebook.add(file_tab, text="文件选择")
@@ -265,7 +262,10 @@ class CompactTimesheetGUI:
         filter_tab = self.create_filter_tab(notebook)
         notebook.add(filter_tab, text="筛选条件")
 
-        self.setup_status_log_area(main_frame)
+        log_container = ttk.Frame(body)
+        log_container.grid(row=1, column=0, sticky="nsew")
+        self.setup_status_log_area(log_container)
+        self.setup_action_buttons(footer)
 
     def setup_action_buttons(self, parent):
         """设置操作按钮区域"""
@@ -421,7 +421,7 @@ class CompactTimesheetGUI:
                    command=lambda idx=condition_index: self.refresh_filter_columns(idx),
                    width=8).pack(side=tk.RIGHT, padx=5)
 
-        help_text = """💡 说明：选择条件文件后，点击"刷新列名"按钮加载可用列，然后从下拉列表选择匹配列"""
+        help_text = """说明：选择条件文件后，点击"刷新列名"按钮加载可用列，然后从下拉列表选择匹配列"""
         help_label = ttk.Label(self.condition_config_frame, text=help_text,
                                justify=tk.LEFT, font=("Arial", 8))
         help_label.pack(anchor=tk.W, pady=8)

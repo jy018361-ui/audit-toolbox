@@ -8,6 +8,16 @@ import threading
 from datetime import datetime
 import pandas as pd
 from exporter import Exporter
+from launcher.ui_theme import (
+    ERROR,
+    MUTED_TEXT,
+    PRIMARY,
+    SUCCESS,
+    WARNING,
+    apply_app_theme,
+    center_on_parent,
+    fit_window_to_screen,
+)
 
 
 class ExportSettings(ttk.Frame):
@@ -32,8 +42,37 @@ class ExportSettings(ttk.Frame):
         
         self.export_path_var = tk.StringVar()
         self.export_format_var = tk.StringVar(value="xlsx")
+        self.export_in_progress = False
+        self.export_controls = []
+        self._closing = False
         
         self._create_widgets()
+
+    def _dialog_parent(self):
+        try:
+            if self.root.winfo_exists() and self.winfo_exists() and not self._closing:
+                return self.root
+        except tk.TclError:
+            pass
+        return None
+
+    def _can_show_dialog(self) -> bool:
+        return self._dialog_parent() is not None
+
+    def _show_info(self, title: str, message: str) -> None:
+        parent = self._dialog_parent()
+        if parent is not None:
+            messagebox.showinfo(title, message, parent=parent)
+
+    def _show_warning(self, title: str, message: str) -> None:
+        parent = self._dialog_parent()
+        if parent is not None:
+            messagebox.showwarning(title, message, parent=parent)
+
+    def _show_error(self, title: str, message: str) -> None:
+        parent = self._dialog_parent()
+        if parent is not None:
+            messagebox.showerror(title, message, parent=parent)
     
     def _create_widgets(self):
         """创建界面组件"""
@@ -53,34 +92,37 @@ class ExportSettings(ttk.Frame):
         path_input_frame.pack(fill=tk.X, pady=5)
         
         ttk.Label(path_input_frame, text="文件路径:").pack(side=tk.LEFT, padx=5)
-        path_entry = ttk.Entry(path_input_frame, textvariable=self.export_path_var, width=50)
-        path_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        self.path_entry = ttk.Entry(path_input_frame, textvariable=self.export_path_var, width=50)
+        self.path_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         # 绑定回车键，输入路径后按回车自动导出
-        path_entry.bind('<Return>', lambda e: self._start_export())
+        self.path_entry.bind('<Return>', lambda e: self._start_export())
         
-        ttk.Button(
+        self.browse_button = ttk.Button(
             path_input_frame,
             text="浏览...",
             command=self._select_export_path
-        ).pack(side=tk.LEFT, padx=5)
+        )
+        self.browse_button.pack(side=tk.LEFT, padx=5)
         
         # 导出格式选择
         format_frame = ttk.LabelFrame(self, text="导出格式", padding="10")
         format_frame.pack(fill=tk.X, pady=5)
         
-        ttk.Radiobutton(
+        self.xlsx_radio = ttk.Radiobutton(
             format_frame,
             text="Excel (.xlsx)",
             variable=self.export_format_var,
             value="xlsx"
-        ).pack(anchor=tk.W, pady=2)
+        )
+        self.xlsx_radio.pack(anchor=tk.W, pady=2)
         
-        ttk.Radiobutton(
+        self.csv_radio = ttk.Radiobutton(
             format_frame,
             text="CSV (.csv)",
             variable=self.export_format_var,
             value="csv"
-        ).pack(anchor=tk.W, pady=2)
+        )
+        self.csv_radio.pack(anchor=tk.W, pady=2)
         
         # 导出信息
         info_frame = ttk.LabelFrame(self, text="导出信息", padding="10")
@@ -115,19 +157,21 @@ class ExportSettings(ttk.Frame):
         )
         self.progress_bar.pack(pady=10)
         
-        self.status_label = ttk.Label(self, text="", foreground="gray")
+        self.status_label = ttk.Label(self, text="", foreground=MUTED_TEXT)
         self.status_label.pack()
         
         # 按钮区域（只保留上一步按钮，选择路径后自动导出）
         button_frame = ttk.Frame(self)
         button_frame.pack(pady=20)
         
-        ttk.Button(
+        self.back_button = ttk.Button(
             button_frame,
             text="上一步",
             command=self._on_back,
             width=15
-        ).pack(side=tk.LEFT, padx=5)
+        )
+        self.back_button.pack(side=tk.LEFT, padx=5)
+        self.export_controls = [self.path_entry, self.browse_button, self.xlsx_radio, self.csv_radio, self.back_button]
     
     def _select_export_path(self):
         """选择导出路径，选择后自动导出"""
@@ -135,6 +179,7 @@ class ExportSettings(ttk.Frame):
         default_name = f"FA_List_{datetime.now().strftime('%Y%m%d_%H%M%S')}{format_ext}"
         
         file_path = filedialog.asksaveasfilename(
+            parent=self.root,
             title="选择导出路径",
             defaultextension=format_ext,
             initialfile=default_name,
@@ -152,9 +197,13 @@ class ExportSettings(ttk.Frame):
     
     def _start_export(self):
         """开始导出"""
+        if self.export_in_progress:
+            self.status_label.config(text="正在导出，请等待当前任务完成", foreground=WARNING)
+            return
+
         export_path = self.export_path_var.get()
         if not export_path:
-            messagebox.showwarning("警告", "请选择导出路径")
+            self._show_warning("无法导出", "请先选择导出文件的保存路径。")
             return
         
         export_format = self.export_format_var.get()
@@ -167,19 +216,18 @@ class ExportSettings(ttk.Frame):
             export_path = os.path.splitext(export_path)[0] + '.csv'
             self.export_path_var.set(export_path)
         
+        self._set_exporting_state(True)
+
         # 显示进度提示弹窗
         progress_window = tk.Toplevel(self.winfo_toplevel())
         progress_window.title("导出中")
-        progress_window.geometry("350x150")
+        apply_app_theme(progress_window)
+        fit_window_to_screen(progress_window, 350, 150)
         progress_window.transient(self.winfo_toplevel())
         progress_window.grab_set()
         progress_window.resizable(False, False)
-        
-        # 居中显示
-        progress_window.update_idletasks()
-        x = (progress_window.winfo_screenwidth() // 2) - (progress_window.winfo_width() // 2)
-        y = (progress_window.winfo_screenheight() // 2) - (progress_window.winfo_height() // 2)
-        progress_window.geometry(f"+{x}+{y}")
+        progress_window.protocol("WM_DELETE_WINDOW", lambda: None)
+        center_on_parent(progress_window, self.winfo_toplevel())
         
         progress_label = ttk.Label(progress_window, text="正在导出数据，请稍候...", font=("Arial", 10))
         progress_label.pack(pady=20)
@@ -188,7 +236,7 @@ class ExportSettings(ttk.Frame):
         progress_bar_window = ttk.Progressbar(progress_window, variable=progress_var_window, maximum=100, length=300, mode='determinate')
         progress_bar_window.pack(pady=10)
         
-        status_label_window = ttk.Label(progress_window, text="", font=("Arial", 9), foreground="gray")
+        status_label_window = ttk.Label(progress_window, text="", font=("Arial", 9), foreground=MUTED_TEXT)
         status_label_window.pack(pady=5)
         
         # 在后台线程中执行导出
@@ -281,6 +329,8 @@ class ExportSettings(ttk.Frame):
                     pf = summary_config_to_export.get('pivot_row_fields') or []
                     if pf:
                         summary_config_to_export['pivot_row_fields'] = [self._format_column_name(c) for c in pf]
+                    if export_format == "xlsx":
+                        summary_config_to_export["defer_llm_analysis"] = True
                 
                 # 更新进度
                 def safe_update_progress(text="", progress=30, status=""):
@@ -306,23 +356,32 @@ class ExportSettings(ttk.Frame):
                     full_df=full_df_to_export,  # 传递完整数据（用于原值增加/减少清单）
                     summary_config=summary_config_to_export  # 传递汇总表配置
                 )
+                pending_llm = self.exporter.take_pending_llm_export() if success else None
 
                 # 更新进度并关闭窗口
                 def safe_close_progress():
                     try:
                         if progress_window.winfo_exists():
                             progress_var_window.set(100)
+                            try:
+                                progress_window.grab_release()
+                            except Exception:
+                                pass
                             progress_window.destroy()
                     except Exception:
                         pass
                 
                 self.root.after(0, safe_close_progress)
-                self.root.after(0, lambda: self._on_export_complete(success, error_msg))
+                self.root.after(0, lambda: self._on_export_complete(success, error_msg, pending_llm))
             except Exception as e:
                 # 安全地关闭进度窗口
                 def safe_close_on_error():
                     try:
                         if progress_window.winfo_exists():
+                            try:
+                                progress_window.grab_release()
+                            except Exception:
+                                pass
                             progress_window.destroy()
                     except Exception:
                         pass
@@ -331,28 +390,77 @@ class ExportSettings(ttk.Frame):
         
         threading.Thread(target=export_task, daemon=True).start()
     
-    def _on_export_complete(self, success: bool, error_msg: str):
+    def _on_export_complete(self, success: bool, error_msg: str, pending_llm: dict = None):
         """导出完成回调"""
+        if not self._can_show_dialog():
+            return
+        self._set_exporting_state(False)
         self.progress_var.set(100)
         
         if success:
-            self.status_label.config(text="导出完成！", foreground="green")
+            if pending_llm:
+                self.status_label.config(text="主文件已导出，LLM分析版正在后台生成...", foreground=PRIMARY)
+            else:
+                self.status_label.config(text="导出完成！", foreground=SUCCESS)
             correction_warnings = []
             if "===CORRECTION_WARNINGS===" in error_msg:
                 parts = error_msg.split("===CORRECTION_WARNINGS===")
                 error_msg = parts[0].strip()
                 if len(parts) > 1:
                     correction_warnings = [line.strip() for line in parts[1].split("\n") if line.strip()]
+            if pending_llm:
+                self._start_llm_export_task(pending_llm)
+                llm_path = pending_llm.get("llm_file_path", "")
+                self._show_info(
+                    "主文件已导出",
+                    f"主文件已成功导出。\n\nLLM分析版正在后台生成，完成后会另行提示。\n目标文件：\n{llm_path}"
+                )
+            else:
+                self._show_info("导出完成", "文件已成功导出！")
             for warning in correction_warnings:
                 if "【导出提速】" in warning:
-                    messagebox.showwarning("折旧测算公式填充提示", warning)
+                    self._show_warning("折旧测算公式填充提示", warning)
                 else:
-                    messagebox.showwarning("导出提示", warning)
+                    self._show_warning("导出提示", warning)
             if self.on_complete:
                 self.on_complete()
         else:
-            self.status_label.config(text="导出失败", foreground="red")
-            messagebox.showerror("导出失败", error_msg)
+            self.status_label.config(text="导出失败", foreground=ERROR)
+            self._show_error("导出失败", error_msg)
+
+    def _start_llm_export_task(self, pending_llm: dict):
+        llm_path = pending_llm.get("llm_file_path", "")
+        self.status_label.config(text="主文件已导出，LLM分析版正在后台生成...", foreground=PRIMARY)
+
+        def worker():
+            ok, msg = Exporter().export_llm_analysis_workbook(pending_llm)
+
+            def done():
+                if not self._can_show_dialog():
+                    return
+                if ok:
+                    self.status_label.config(text=f"LLM分析版已生成: {msg}", foreground=SUCCESS)
+                    self._show_info("LLM分析版已生成", f"已生成文件：\n{msg}")
+                else:
+                    self.status_label.config(text="LLM分析版生成失败", foreground=WARNING)
+                    self._show_warning("LLM分析版未生成", msg or f"未能生成：{llm_path}")
+
+            self.root.after(0, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _set_exporting_state(self, exporting: bool):
+        """Lock controls while the export thread is running."""
+        self.export_in_progress = exporting
+        state = tk.DISABLED if exporting else tk.NORMAL
+        for control in self.export_controls:
+            try:
+                control.configure(state=state)
+            except tk.TclError:
+                pass
+        if exporting:
+            self.status_label.config(text="正在导出，请稍候...", foreground=PRIMARY)
+            self.progress_var.set(10)
     
     def _format_column_name(self, col_name):
         """将列名中的_文件1/_文件2替换为显示名称"""
@@ -367,6 +475,9 @@ class ExportSettings(ttk.Frame):
     
     def _on_back(self):
         """上一步按钮"""
+        if self.export_in_progress:
+            self.status_label.config(text="正在导出，请等待当前任务完成", foreground=WARNING)
+            return
         if self.on_back:
             self.on_back()
     

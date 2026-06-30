@@ -35,7 +35,7 @@ class FileHandler:
             pass
         return sheet_name
     
-    def _detect_header_row(self, df_raw: pd.DataFrame, max_rows: int = 3) -> int:
+    def _detect_header_row(self, df_raw: pd.DataFrame, max_rows: int = 20) -> int:
         """
         检测有效的标题行索引（0-based）
         
@@ -49,22 +49,50 @@ class FileHandler:
         if df_raw is None or df_raw.empty:
             return 0
         
+        header_keywords = (
+            "资产", "编号", "编码", "名称", "类别", "部门", "日期", "时间",
+            "寿命", "月份", "原值", "折旧", "净值", "残值", "状态", "数量",
+            "规格", "型号", "卡片", "使用", "入账", "取得",
+        )
+        best_index = 0
+        best_score = -1.0
         for i in range(min(max_rows, len(df_raw))):
             row = df_raw.iloc[i]
-            # 检查行是否有效（非空、非全NaN、至少有一半的列有值）
-            non_null_count = row.notna().sum()
+            values = [str(val).strip() for val in row if pd.notna(val) and str(val).strip()]
+            non_null_count = len(values)
             total_cols = len(row)
-            if total_cols > 0 and non_null_count > total_cols * 0.5:  # 至少一半的列有值
-                # 进一步检查：如果所有值都是字符串且长度合理，更可能是标题行
-                non_null_values = [str(val) for val in row if pd.notna(val)]
-                if non_null_values:
-                    # 检查是否有至少一个非空字符串（不是纯空格）
-                    meaningful_values = [v for v in non_null_values if v.strip()]
-                    if len(meaningful_values) >= non_null_count * 0.7:  # 至少70%的非空值是有效的
-                        return i
-        
-        # 如果所有行都无效，默认使用第一行
-        return 0
+            if not total_cols or not values:
+                continue
+            fill_ratio = non_null_count / max(total_cols, 1)
+            unique_ratio = len(set(values)) / max(non_null_count, 1)
+            keyword_hits = sum(1 for val in values if any(keyword in val for keyword in header_keywords))
+            data_like = sum(1 for val in values if self._looks_like_data_value(val))
+            title_penalty = 1.5 if non_null_count <= 2 and any("固定资产" in val for val in values) else 0.0
+            score = (
+                fill_ratio * 2.0
+                + min(keyword_hits, 8) * 0.7
+                + unique_ratio * 0.6
+                - data_like * 0.35
+                - title_penalty
+            )
+            if score > best_score:
+                best_score = score
+                best_index = i
+
+        return best_index
+
+    @staticmethod
+    def _looks_like_data_value(value: str) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        if text.replace(".", "", 1).replace("-", "", 1).isdigit():
+            return True
+        if "/" in text or "-" in text:
+            digits = sum(ch.isdigit() for ch in text)
+            if digits >= 6:
+                return True
+        return False
     
     def _convert_excel_to_csv(self, file_path: str, sheet_name: Optional[str] = None) -> str:
         """
@@ -79,7 +107,7 @@ class FileHandler:
         """
         # 生成缓存文件名
         sheet_name = self._resolve_sheet_name(file_path, sheet_name)
-        cache_key = f"{file_path}_{sheet_name or 'default'}"
+        cache_key = f"{file_path}_{sheet_name or 'default'}_raw_header_v3"
         cache_hash = hashlib.md5(cache_key.encode('utf-8')).hexdigest()
         cache_dir = os.path.join(tempfile.gettempdir(), 'excel_merge_cache')
         os.makedirs(cache_dir, exist_ok=True)
@@ -99,15 +127,15 @@ class FileHandler:
         # 读取Excel并转换为CSV
         _, ext = os.path.splitext(file_path)
         if ext.lower() == '.xls':
-            df = pd.read_excel(file_path, sheet_name=sheet_name, engine='xlrd')
+            df = pd.read_excel(file_path, sheet_name=sheet_name, engine='xlrd', header=None)
         else:
             if sheet_name:
-                df = pd.read_excel(file_path, sheet_name=sheet_name, engine='openpyxl')
+                df = pd.read_excel(file_path, sheet_name=sheet_name, engine='openpyxl', header=None)
             else:
-                df = pd.read_excel(file_path, sheet_name=0, engine='openpyxl')
+                df = pd.read_excel(file_path, sheet_name=0, engine='openpyxl', header=None)
         
         # 保存为CSV，使用utf-8-sig编码以确保Excel兼容性
-        df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        df.to_csv(csv_path, index=False, header=False, encoding='utf-8-sig')
         
         return csv_path
     
@@ -185,11 +213,11 @@ class FileHandler:
             # 如果header为None，先检测有效的标题行
             if header is None:
                 try:
-                    # 读取前3行原始数据用于检测标题行
-                    df_raw = pd.read_csv(csv_path, encoding='utf-8-sig', header=None, nrows=3, low_memory=False)
+                    # 读取原始前几行用于检测标题行；Excel 缓存按 header=None 保存，避免首行标题覆盖真实表头。
+                    df_raw = pd.read_csv(csv_path, encoding='utf-8-sig', header=None, nrows=20, low_memory=False)
                     
                     # 检测有效的标题行
-                    detected_header = self._detect_header_row(df_raw, max_rows=3)
+                    detected_header = self._detect_header_row(df_raw, max_rows=20)
                     header = detected_header
                     # #region agent log
                     _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_handler._load_excel.header_detected", message="header detected", data={"detected_header": detected_header})
@@ -274,14 +302,14 @@ class FileHandler:
                     df_raw = None
                     for enc in encodings:
                         try:
-                            df_raw = pd.read_csv(file_path, encoding=enc, header=None, nrows=3, low_memory=False)
+                            df_raw = pd.read_csv(file_path, encoding=enc, header=None, nrows=20, low_memory=False)
                             break
                         except (UnicodeDecodeError, Exception):
                             continue
                     
                     if df_raw is not None and not df_raw.empty:
                         # 检测有效的标题行
-                        detected_header = self._detect_header_row(df_raw, max_rows=3)
+                        detected_header = self._detect_header_row(df_raw, max_rows=20)
                         header = detected_header
                         # #region agent log
                         _dbg(sessionId="debug", runId="run1", hypothesisId="H1", location="file_handler._load_csv.header_detected", message="header detected", data={"detected_header": detected_header})

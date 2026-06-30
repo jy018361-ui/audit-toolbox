@@ -5,8 +5,12 @@
 import pandas as pd
 import os
 import re
-from datetime import date
+import numbers
+import shutil
+from datetime import date, datetime
 from typing import List, Optional, Dict, Tuple
+from openpyxl import load_workbook
+from openpyxl.formula.translate import Translator
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.cell.cell import MergedCell
@@ -21,6 +25,7 @@ from sheet_generator import (
     should_convert_life_series_to_months,
 )
 from pivot_engine import PivotEngine
+from launcher.llm_analysis import build_fa_list_analysis, write_fa_list_analysis_sheet
 
 
 class Exporter:
@@ -33,6 +38,9 @@ class Exporter:
         self.pivot_engine = PivotEngine()
         self._export_notes = []
         self._template_map_cache = {}
+        self._summary_noise_backup = []
+        self._exception_backup = []
+        self._pending_llm_export = None
 
     @staticmethod
     def _make_unique_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -109,28 +117,36 @@ class Exporter:
         try:
             self._export_notes = []
             self._template_map_cache = {}
+            self._pending_llm_export = None
             if not file_path.endswith('.xlsx'):
                 file_path = os.path.splitext(file_path)[0] + '.xlsx'
 
             data_for_lists = full_df if full_df is not None else df
             correction_warnings = []
+            self._summary_noise_backup = []
+            self._exception_backup = []
             sheets = []
             used_sheet_names = set()
+            llm_tables = {}
+            defer_llm_analysis = bool((summary_config or {}).get("defer_llm_analysis"))
 
             with pd.ExcelWriter(file_path, engine='xlsxwriter') as writer:
                 wb = writer.book
                 fmts = self._build_xlsx_formats(wb)
+                map_sheet_name = self._reserve_sheet_name('01_套表地图', used_sheet_names)
+                self._create_sheet_map_xlsxwriter(writer, map_sheet_name, fmts)
 
                 # 合并数据
                 sheet_name = self._reserve_sheet_name('合并数据', used_sheet_names)
                 merged_df, _, _, _ = self._enhance_duplicate_display(df, None, None, None, summary_config=summary_config)
                 merged_df_for_pivot = merged_df.copy()
-                summary_input_df = merged_df_for_pivot
+                summary_input_df = self._remove_summary_noise_rows(merged_df_for_pivot, "合并数据", backup_sheet_name="固定资产变动汇总表")
+                summary_input_df = self._remove_unclassified_end_rows(summary_input_df, summary_config)
                 merged_df = self._coerce_sheet_df_for_write(merged_df, sheet_name, summary_config)
                 # 先写，后续若生成了FA/新增清单则再按重复ID场景回写增强展示
-                merged_df.to_excel(writer, index=False, sheet_name=sheet_name)
-                self._format_sheet_xlsxwriter(writer, sheet_name, merged_df, fmts, summary_config=summary_config)
+                self._write_dataframe_sheet_xlsxwriter(writer, sheet_name, merged_df, fmts, summary_config=summary_config)
                 sheets.append(sheet_name)
+                llm_tables[sheet_name] = merged_df
 
                 # 数据透视表
                 pivot_for_export = self._rebuild_pivot_from_export_config(merged_df_for_pivot, summary_config)
@@ -140,8 +156,7 @@ class Exporter:
                     pivot_export_df = self._prepare_pivot_export_df(pivot_for_export)
                     pivot_sheet = self._reserve_sheet_name('数据透视表', used_sheet_names)
                     pivot_export_df = self._coerce_sheet_df_for_write(pivot_export_df, pivot_sheet, summary_config)
-                    pivot_export_df.to_excel(writer, index=False, sheet_name=pivot_sheet, merge_cells=False)
-                    self._format_sheet_xlsxwriter(
+                    self._write_dataframe_sheet_xlsxwriter(
                         writer,
                         pivot_sheet,
                         pivot_export_df,
@@ -150,6 +165,7 @@ class Exporter:
                         merge_total_ab=True,
                     )
                     sheets.append(pivot_sheet)
+                    llm_tables[pivot_sheet] = pivot_export_df
 
                 if summary_config and summary_input_df is not None:
                     summary_field_mapping = summary_config.get('field_mapping', {}) or {}
@@ -199,6 +215,10 @@ class Exporter:
                             summary_sheet = self._reserve_sheet_name('固定资产变动汇总表', used_sheet_names)
                             if self._write_summary_sheet_xlsxwriter(writer, summary_sheet, fmts):
                                 sheets.append(summary_sheet)
+                                try:
+                                    llm_tables[summary_sheet] = self.summary_generator.get_summary_dataframe()
+                                except Exception:
+                                    pass
                     except Exception as e:
                         print(f"生成固定资产变动汇总表出错: {str(e)}")
 
@@ -221,17 +241,23 @@ class Exporter:
                         if fa_success and fa_df is not None and not fa_df.empty:
                             # 仅增强FA展示；合并数据sheet已在前面写入，避免重复写盘
                             _, fa_df, _, _ = self._enhance_duplicate_display(pd.DataFrame(), fa_df, None, None, summary_config=summary_config)
+                            if "使用寿命(月)" in fa_df.columns and self._life_values_look_like_years(
+                                fa_df["使用寿命(月)"],
+                                ((summary_config or {}).get("field_mapping") or {}).get("life_col2") or "使用寿命",
+                            ):
+                                fa_df = self._convert_life_year_to_month(fa_df, "使用寿命(月)")
                             fa_sheet = self._reserve_sheet_name('FA List', used_sheet_names)
                             fa_df = self._coerce_sheet_df_for_write(fa_df, fa_sheet, summary_config)
-                            fa_df.to_excel(writer, index=False, sheet_name=fa_sheet)
-                            self._format_sheet_xlsxwriter(writer, fa_sheet, fa_df, fmts, summary_config=summary_config)
+                            fa_df = self._remove_summary_noise_rows(fa_df, fa_sheet)
+                            self._write_dataframe_sheet_xlsxwriter(writer, fa_sheet, fa_df, fmts, summary_config=summary_config)
                             sheets.append(fa_sheet)
+                            llm_tables[fa_sheet] = fa_df
                         if fa_success and fa_df is not None:
                             short_life_df = self._build_short_life_cards_df(fa_df)
                             short_life_sheet = self._reserve_sheet_name('≤12月卡片明细', used_sheet_names)
-                            short_life_df.to_excel(writer, index=False, sheet_name=short_life_sheet)
-                            self._format_sheet_xlsxwriter(writer, short_life_sheet, short_life_df, fmts, summary_config=summary_config)
+                            self._write_dataframe_sheet_xlsxwriter(writer, short_life_sheet, short_life_df, fmts, summary_config=summary_config)
                             sheets.append(short_life_sheet)
+                            llm_tables[short_life_sheet] = short_life_df
                         if fa_msg:
                             for line in str(fa_msg).split('\n'):
                                 if "【" in line and line not in correction_warnings:
@@ -249,9 +275,10 @@ class Exporter:
                         _, _, add_df, _ = self._enhance_duplicate_display(pd.DataFrame(), None, add_df, None, summary_config=summary_config)
                         add_sheet = self._reserve_sheet_name('新增清单_BKD', used_sheet_names)
                         add_df = self._coerce_sheet_df_for_write(add_df, add_sheet, summary_config)
-                        add_df.to_excel(writer, index=False, sheet_name=add_sheet)
-                        self._format_sheet_xlsxwriter(writer, add_sheet, add_df, fmts, summary_config=summary_config)
+                        add_df = self._remove_summary_noise_rows(add_df, add_sheet)
+                        self._write_dataframe_sheet_xlsxwriter(writer, add_sheet, add_df, fmts, summary_config=summary_config)
                         sheets.append(add_sheet)
+                        llm_tables[add_sheet] = add_df
                         if add_msg:
                             for line in str(add_msg).split('\n'):
                                 if "【" in line and line not in correction_warnings:
@@ -266,9 +293,10 @@ class Exporter:
                             _, _, _, disp_df = self._enhance_duplicate_display(pd.DataFrame(), None, None, disp_df, summary_config=summary_config)
                             disp_sheet = self._reserve_sheet_name('处置清单_BKD', used_sheet_names)
                             disp_df = self._coerce_sheet_df_for_write(disp_df, disp_sheet, summary_config)
-                            disp_df.to_excel(writer, index=False, sheet_name=disp_sheet)
-                            self._format_sheet_xlsxwriter(writer, disp_sheet, disp_df, fmts, summary_config=summary_config)
+                            disp_df = self._remove_summary_noise_rows(disp_df, disp_sheet)
+                            self._write_dataframe_sheet_xlsxwriter(writer, disp_sheet, disp_df, fmts, summary_config=summary_config)
                             sheets.append(disp_sheet)
+                            llm_tables[disp_sheet] = disp_df
                         if disp_msg:
                             for line in str(disp_msg).split('\n'):
                                 if "【" in line and line not in correction_warnings:
@@ -278,16 +306,61 @@ class Exporter:
                         if dep_df is not None and not dep_df.empty:
                             dep_sheet = self._reserve_sheet_name('折旧期间', used_sheet_names)
                             dep_df = self._coerce_sheet_df_for_write(dep_df, dep_sheet, summary_config)
-                            dep_df.to_excel(writer, index=False, sheet_name=dep_sheet)
-                            self._format_sheet_xlsxwriter(writer, dep_sheet, dep_df, fmts, summary_config=summary_config)
+                            self._write_dataframe_sheet_xlsxwriter(writer, dep_sheet, dep_df, fmts, summary_config=summary_config)
                             sheets.append(dep_sheet)
+                            llm_tables[dep_sheet] = dep_df
                     except Exception as e:
                         import traceback
                         error_msg = f"生成FA List/BKD清单时出错: {str(e)}\n{traceback.format_exc()}"
                         print(error_msg)
                         correction_warnings.append(f"错误: {str(e)}")
 
+                if defer_llm_analysis:
+                    self._pending_llm_export = {
+                        "main_file_path": file_path,
+                        "llm_file_path": self._llm_output_path(file_path),
+                        "summary_config": dict(summary_config or {}),
+                        "tables": {
+                            name: table.copy() if isinstance(table, pd.DataFrame) else table
+                            for name, table in llm_tables.items()
+                        },
+                    }
+                else:
+                    llm_ok, llm_msg, llm_analysis = build_fa_list_analysis(
+                        summary_config=summary_config,
+                        tables=llm_tables,
+                    )
+                    llm_sheet_names_before = set(writer.sheets)
+                    if llm_ok:
+                        llm_ok, llm_msg = write_fa_list_analysis_sheet(
+                            writer,
+                            used_sheet_names,
+                            llm_analysis,
+                        )
+                    if llm_ok:
+                        new_llm_sheets = [name for name in writer.sheets if name not in llm_sheet_names_before]
+                        llm_sheet_name = new_llm_sheets[0] if new_llm_sheets else "LLM分析"
+                        llm_ws = writer.sheets.get(llm_sheet_name)
+                        if llm_ws is not None:
+                            last_row = getattr(llm_ws, "dim_rowmax", 0) or 0
+                            self._append_sheet_note_at_xlsxwriter(llm_ws, llm_sheet_name, last_row + 2, fmts)
+                        sheets.append(llm_sheet_name)
+                    elif "未启用" not in llm_msg:
+                        correction_warnings.append(llm_msg)
+
+                exception_sheet = self._reserve_sheet_name("异常清单", used_sheet_names)
+                self._write_exception_sheet_xlsxwriter(writer, exception_sheet, fmts, summary_config=summary_config)
+                self._write_sheet_map_xlsxwriter(writer, map_sheet_name, [map_sheet_name] + sheets + [exception_sheet], fmts)
                 msg = f"成功导出到: {file_path}"
+            # xlsxwriter 写完后只对「固定资产变动汇总表」做 openpyxl 二次清理：
+            # 把 合计 列锁在 C 列、删掉源数据漏过过滤器留下的「合计/小计/总计」
+            # 伪类别列、刷新第二行的"信息来源"标签。其他 sheet 不动——它们的
+            # 第二行源标签已经由 xlsxwriter 写好，再跑 _insert_field_source_row
+            # 会重复插行、数据错位。
+            try:
+                self._postprocess_summary_sheet_only(file_path, summary_config)
+            except Exception as exc:
+                correction_warnings.append(f"导出后汇总表清理失败：{exc}")
             if len(sheets) > 1:
                 msg += f"\n(包含{len(sheets)}个sheet: {', '.join(sheets)})"
             for note in getattr(self, "_export_notes", []):
@@ -1027,19 +1100,132 @@ class Exporter:
         used.add(candidate)
         return candidate
 
+    @staticmethod
+    def _llm_output_path(file_path: str) -> str:
+        base, ext = os.path.splitext(file_path)
+        return f"{base}_LLM{ext or '.xlsx'}"
+
+    def take_pending_llm_export(self) -> Optional[Dict]:
+        pending = self._pending_llm_export
+        self._pending_llm_export = None
+        return pending
+
+    def export_llm_analysis_workbook(self, pending: Optional[Dict]) -> Tuple[bool, str]:
+        """Create a sibling *_LLM.xlsx workbook with the generated LLM analysis sheet."""
+        if not pending:
+            return False, "没有待生成的 LLM 分析任务。"
+        main_file = pending.get("main_file_path")
+        llm_file = pending.get("llm_file_path") or self._llm_output_path(main_file)
+        if not main_file or not os.path.exists(main_file):
+            return False, "主导出文件不存在，无法生成 LLM 分析版。"
+        ok, msg, analysis = build_fa_list_analysis(
+            summary_config=pending.get("summary_config") or {},
+            tables=pending.get("tables") or {},
+        )
+        if not ok:
+            return False, msg
+        try:
+            shutil.copy2(main_file, llm_file)
+            wb = load_workbook(llm_file)
+            if "LLM分析" in wb.sheetnames:
+                del wb["LLM分析"]
+            insert_at = wb.sheetnames.index("异常清单") if "异常清单" in wb.sheetnames else len(wb.sheetnames)
+            ws = wb.create_sheet("LLM分析", insert_at)
+            self._write_llm_analysis_sheet_openpyxl(ws, analysis or {})
+            wb.save(llm_file)
+            return True, llm_file
+        except PermissionError:
+            return False, f"LLM 分析版文件被占用，无法保存：{llm_file}"
+        except Exception as exc:
+            return False, f"LLM 分析版生成失败：{exc}"
+
+    def _write_llm_analysis_sheet_openpyxl(self, ws, analysis: Dict) -> None:
+        title_font = Font(name="Microsoft YaHei", size=14, bold=True, color="205860")
+        heading_font = Font(name="Microsoft YaHei", size=10, bold=True, color="205860")
+        text_font = Font(name="Microsoft YaHei", size=10)
+        note_font = Font(name="Microsoft YaHei", size=10, color="9B5D33")
+        heading_fill = PatternFill("solid", fgColor="E6DDCF")
+        note_fill = PatternFill("solid", fgColor="F6F6F6")
+        thin = Side(style="thin", color="D9DEE7")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        ws.column_dimensions["A"].width = 24
+        ws.column_dimensions["B"].width = 64
+        row = 1
+        ws.cell(row, 1).value = analysis.get("title") or "LLM分析"
+        ws.cell(row, 1).font = title_font
+        row += 2
+        for section in analysis.get("sections", []) or []:
+            ws.cell(row, 1).value = section.get("heading") or ""
+            ws.cell(row, 1).font = heading_font
+            ws.cell(row, 1).fill = heading_fill
+            row += 1
+            for point in section.get("points", []) or []:
+                if isinstance(point, dict):
+                    label = point.get("label") or section.get("heading") or "分析"
+                    text = point.get("text") or ""
+                else:
+                    label = section.get("row_label") or section.get("heading") or "分析"
+                    text = point
+                ws.cell(row, 1).value = label
+                ws.cell(row, 2).value = text
+                ws.cell(row, 1).font = text_font
+                ws.cell(row, 2).font = text_font
+                ws.cell(row, 2).alignment = Alignment(vertical="top", wrap_text=True)
+                row += 1
+            row += 1
+        notes = analysis.get("review_notes") or ["LLM 输出为辅助说明，需结合原始数据人工复核。"]
+        ws.cell(row, 1).value = "人工复核提示"
+        ws.cell(row, 1).font = heading_font
+        ws.cell(row, 1).fill = heading_fill
+        row += 1
+        for note in notes:
+            ws.cell(row, 2).value = note
+            ws.cell(row, 2).font = note_font
+            ws.cell(row, 2).alignment = Alignment(vertical="top", wrap_text=True)
+            row += 1
+
+        for r in range(1, row):
+            ws.row_dimensions[r].height = 42 if r > 1 else 24
+            for c in range(1, 3):
+                cell = ws.cell(r, c)
+                cell.border = border
+                if not cell.alignment:
+                    cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+        note_row = row + 1
+        info = self._sheet_explanation("LLM分析")
+        ws.row_dimensions[note_row].height = 72
+        ws.cell(note_row, 1).value = "本表说明"
+        ws.cell(note_row, 1).font = heading_font
+        ws.cell(note_row, 1).fill = note_fill
+        ws.cell(note_row, 1).border = border
+        note_text = f"{info['作用']} 信息来源：{info['信息来源']} 重点关注：{info['关注点']}"
+        ws.merge_cells(start_row=note_row, start_column=2, end_row=note_row, end_column=4)
+        note_cell = ws.cell(note_row, 2)
+        note_cell.value = note_text
+        note_cell.font = text_font
+        note_cell.fill = note_fill
+        note_cell.border = border
+        note_cell.alignment = Alignment(vertical="center", wrap_text=True)
+        ws.sheet_view.showGridLines = False
+
     def _build_xlsx_formats(self, workbook):
         return {
-            "header_left": workbook.add_format({"bold": True, "align": "left", "valign": "vcenter"}),
-            "header_left_file2": workbook.add_format({"bold": True, "align": "left", "valign": "vcenter", "bg_color": "#E6E6E6"}),
+            "header_left": workbook.add_format({"bold": True, "align": "left", "valign": "vcenter", "border": 1, "border_color": "#D9DEE7", "bg_color": "#E9EEF5"}),
+            "header_left_file2": workbook.add_format({"bold": True, "align": "left", "valign": "vcenter", "border": 1, "border_color": "#D9DEE7", "bg_color": "#E6E6E6"}),
+            "source_row": workbook.add_format({"italic": True, "font_color": "#374151", "align": "center", "valign": "vcenter", "text_wrap": True, "border": 1, "border_color": "#D9DEE7", "bg_color": "#F7F8FA"}),
             "text_left": workbook.add_format({"align": "left", "valign": "vcenter"}),
             "text_left_file2": workbook.add_format({"align": "left", "valign": "vcenter", "bg_color": "#E6E6E6"}),
             "num_right": workbook.add_format({"align": "right", "valign": "vcenter", "num_format": "#,##0"}),
             "num_right_file2": workbook.add_format({"align": "right", "valign": "vcenter", "num_format": "#,##0", "bg_color": "#E6E6E6"}),
             "pct_right": workbook.add_format({"align": "right", "valign": "vcenter", "num_format": "0.00%"}),
             "pct_right_file2": workbook.add_format({"align": "right", "valign": "vcenter", "num_format": "0.00%", "bg_color": "#E6E6E6"}),
-            "border_only": workbook.add_format({"border": 1, "border_color": "#000000"}),
+            "border_only": workbook.add_format({"border": 1, "border_color": "#D9DEE7"}),
             "group_gray": workbook.add_format({"bg_color": "#E6E6E6"}),
-            "summary_light_blue": workbook.add_format({"bold": True, "align": "left", "valign": "vcenter", "bg_color": "#DDEBF7"}),
+            "summary_light_blue": workbook.add_format({"bold": True, "align": "left", "valign": "vcenter", "border": 1, "border_color": "#D9DEE7", "bg_color": "#DDEBF7"}),
+            "note_label": workbook.add_format({"bold": True, "align": "left", "valign": "vcenter", "text_wrap": True, "border": 1, "border_color": "#D9DEE7", "bg_color": "#F6F6F6"}),
+            "note_text": workbook.add_format({"align": "left", "valign": "vcenter", "text_wrap": True, "border": 1, "border_color": "#D9DEE7", "bg_color": "#F6F6F6"}),
         }
 
     def _get_force_numeric_headers(self, summary_config: Optional[Dict] = None) -> set:
@@ -1212,6 +1398,7 @@ class Exporter:
         df: pd.DataFrame,
         fmts: Dict,
         summary_config: Optional[Dict] = None,
+        data_start_row: int = 1,
     ) -> int:
         """Append depreciation testing formulas to FA List / disposal sheets."""
         if df is None or df.empty or sheet_name not in ("FA List", "处置清单_BKD"):
@@ -1262,6 +1449,8 @@ class Exporter:
         ws.set_column(separator_idx, separator_idx, 3, fmts["text_left"])
         for offset, header in enumerate(result_headers):
             ws.write(0, start_idx + offset, header, fmts["header_left"])
+            if data_start_row > 1:
+                ws.write(1, start_idx + offset, "计算", fmts["source_row"])
 
         start_date_col = self._xlsx_col_letter(headers.index(source["start_date"]))
         life_col = self._xlsx_col_letter(headers.index(source["life"]))
@@ -1341,7 +1530,8 @@ class Exporter:
         ]
         row_count = int(len(df))
         formula_rows = self._depreciation_formula_rows_to_write(sheet_name, row_count)
-        for row_idx in range(1, formula_rows + 1):
+        for row_offset in range(formula_rows):
+            row_idx = data_start_row + row_offset
             excel_row = row_idx + 1
             for offset, kind in enumerate(formula_kinds):
                 fmt = fmts["num_right"] if offset not in (1, 2) else fmts["text_left"]
@@ -1352,6 +1542,97 @@ class Exporter:
         for offset in (1, 2):
             ws.set_column(start_idx + offset, start_idx + offset, 16, fmts["text_left"])
         return start_idx + len(result_headers)
+
+    def _write_dataframe_sheet_xlsxwriter(
+        self,
+        writer,
+        sheet_name: str,
+        df: pd.DataFrame,
+        fmts: Dict,
+        summary_config: Optional[Dict] = None,
+        merge_total_ab: bool = False,
+    ) -> None:
+        """Write a normal data sheet in its final shape, without openpyxl post-processing."""
+        if df is None:
+            df = pd.DataFrame()
+        df.to_excel(writer, index=False, header=False, sheet_name=sheet_name, startrow=2)
+        self._format_sheet_xlsxwriter(
+            writer,
+            sheet_name,
+            df,
+            fmts,
+            summary_config=summary_config,
+            merge_total_ab=merge_total_ab,
+            data_start_row=2,
+        )
+        self._append_sheet_note_xlsxwriter(writer.sheets[sheet_name], sheet_name, len(df), len(df.columns), fmts)
+
+    def _append_sheet_note_xlsxwriter(self, ws, sheet_name: str, row_count: int, col_count: int, fmts: Dict) -> None:
+        if sheet_name in ("00_使用说明", "01_套表地图", "汇总备查"):
+            return
+        info = self._sheet_explanation(sheet_name)
+        blank_row = int(row_count) + 2
+        note_row = blank_row + 1
+        ws.set_row(blank_row, 8)
+        self._append_sheet_note_at_xlsxwriter(ws, sheet_name, note_row, fmts)
+
+    def _append_sheet_note_at_xlsxwriter(self, ws, sheet_name: str, note_row: int, fmts: Dict) -> None:
+        info = self._sheet_explanation(sheet_name)
+        ws.set_row(note_row, 72)
+        ws.write(note_row, 0, "本表说明", fmts["note_label"])
+        note = f"{info['作用']} 信息来源：{info['信息来源']} 重点关注：{info['关注点']}"
+        ws.merge_range(note_row, 1, note_row, 3, note, fmts["note_text"])
+
+    def _create_sheet_map_xlsxwriter(self, writer, sheet_name: str, fmts: Dict) -> None:
+        ws = writer.book.add_worksheet(sheet_name)
+        writer.sheets[sheet_name] = ws
+        ws.write(0, 0, "页签", fmts["header_left"])
+        ws.write(0, 1, "本表作用", fmts["header_left"])
+        ws.write(0, 2, "信息来源", fmts["header_left"])
+        ws.set_column(0, 0, 24, fmts["text_left"])
+        ws.set_column(1, 1, 52, fmts["text_left"])
+        ws.set_column(2, 2, 64, fmts["text_left"])
+        ws.freeze_panes(1, 0)
+
+    def _write_sheet_map_xlsxwriter(self, writer, sheet_name: str, sheet_names: List[str], fmts: Dict) -> None:
+        ws = writer.sheets.get(sheet_name)
+        if ws is None:
+            return
+        row = 1
+        for name in sheet_names:
+            if name in ("00_使用说明", "汇总备查", sheet_name):
+                continue
+            info = self._sheet_explanation(name)
+            ws.write(row, 0, name, fmts["text_left"])
+            ws.write(row, 1, info["作用"], fmts["text_left"])
+            ws.write(row, 2, info["信息来源"], fmts["text_left"])
+            ws.set_row(row, 42)
+            row += 1
+        ws.conditional_format(0, 0, max(row - 1, 0), 2, {"type": "no_errors", "format": fmts["border_only"]})
+
+    def _write_exception_sheet_xlsxwriter(
+        self,
+        writer,
+        sheet_name: str,
+        fmts: Dict,
+        summary_config: Optional[Dict] = None,
+    ) -> None:
+        headers = ["异常类型", "原始行号", "资产类别", "资产编码", "资产名称", "期末原值", "处理方式", "行内容"]
+        rows = getattr(self, "_exception_backup", []) or []
+        if rows:
+            df = pd.DataFrame([{h: row.get(h, "") for h in headers} for row in rows], columns=headers)
+        else:
+            df = pd.DataFrame([{
+                "异常类型": "未发现异常",
+                "原始行号": "",
+                "资产类别": "",
+                "资产编码": "",
+                "资产名称": "",
+                "期末原值": "",
+                "处理方式": "未发现期末原值有金额但数据来源为空的记录。",
+                "行内容": "",
+            }], columns=headers)
+        self._write_dataframe_sheet_xlsxwriter(writer, sheet_name, df, fmts, summary_config=summary_config)
 
     def _is_file2_column_header(self, header: str, summary_config: Optional[Dict]) -> bool:
         h = str(header or "")
@@ -1370,6 +1651,7 @@ class Exporter:
         fmts: Dict,
         summary_config: Optional[Dict] = None,
         merge_total_ab: bool = False,
+        data_start_row: int = 1,
     ):
         ws = writer.sheets[sheet_name]
         row_count = int(len(df))
@@ -1378,8 +1660,13 @@ class Exporter:
             return
 
         ws.set_row(0, None, fmts["header_left"])
-        ws.freeze_panes(1, 0)
-        ws.autofilter(0, 0, max(row_count, 0), col_count - 1)
+        if data_start_row > 1:
+            ws.set_row(1, 22, fmts["source_row"])
+            ws.freeze_panes(data_start_row, 0)
+        else:
+            ws.freeze_panes(1, 0)
+        data_last_row = data_start_row + max(row_count - 1, 0)
+        ws.autofilter(0, 0, data_last_row, col_count - 1)
 
         force_numeric_headers = self._get_force_numeric_headers(summary_config) | self._sheet_numeric_header_hints(sheet_name)
         percent_headers = self._get_percent_headers(sheet_name)
@@ -1431,6 +1718,8 @@ class Exporter:
                 header = "计算过程=年末原值*(1-年末残值率)/年末寿命-年末原值*(1-年初残值率)/年初寿命"
             is_file2_col = sheet_name == "合并数据" and self._is_file2_column_header(header, summary_config)
             ws.write(0, col_idx, header, fmts["header_left_file2"] if is_file2_col else fmts["header_left"])
+            if data_start_row > 1:
+                ws.write(1, col_idx, self._field_source_for_header(sheet_name, col, col_idx + 1, summary_config), fmts["source_row"])
 
         if sheet_name == "处置清单_BKD" and row_count > 0:
             headers = [str(c) for c in df.columns]
@@ -1442,52 +1731,57 @@ class Exporter:
                 opening_dep_letter = self._xlsx_col_letter(opening_dep_col)
                 disposal_dep_letter = self._xlsx_col_letter(disposal_dep_col)
                 formula_rows = self._depreciation_formula_rows_to_write(sheet_name, row_count)
-                for row_idx in range(1, formula_rows + 1):
+                for row_offset in range(formula_rows):
+                    row_idx = data_start_row + row_offset
                     excel_row = row_idx + 1
                     formula = f'=IFERROR({disposal_dep_letter}{excel_row}-{opening_dep_letter}{excel_row},"")'
-                    cached_value = df.iloc[row_idx - 1, current_dep_col]
+                    cached_value = df.iloc[row_offset, current_dep_col]
                     if pd.isna(cached_value):
                         cached_value = ""
                     ws.write_formula(row_idx, current_dep_col, formula, fmts["num_right"], cached_value)
 
         formula_col_count = self._append_depreciation_formula_block(
-            ws, sheet_name, df, fmts, summary_config=summary_config
+            ws, sheet_name, df, fmts, summary_config=summary_config, data_start_row=data_start_row
         )
         if formula_col_count:
             col_count = max(col_count, formula_col_count)
-            ws.autofilter(0, 0, max(row_count, 0), col_count - 1)
+            ws.autofilter(0, 0, data_last_row, col_count - 1)
 
         if merge_total_ab and row_count > 0 and col_count >= 2:
             if str(df.iloc[-1, 0]).strip().lower() == "total":
-                row_idx = row_count
+                row_idx = data_start_row + row_count - 1
                 # total 行用公式求和，避免写死数值
                 for col_idx in range(2, col_count):
                     col_letter = self._xlsx_col_letter(col_idx)
-                    formula = f"=SUM({col_letter}2:{col_letter}{row_count})"
+                    first_excel_row = data_start_row + 1
+                    last_excel_row = data_start_row + row_count - 1
+                    formula = f"=SUM({col_letter}{first_excel_row}:{col_letter}{last_excel_row})"
                     ws.write_formula(row_idx, col_idx, formula, fmts["num_right"])
                 ws.merge_range(row_idx, 0, row_idx, 1, "total", fmts["text_left"])
 
         ws.conditional_format(
-            0, 0, max(row_count, 0), col_count - 1,
+            0, 0, data_last_row, col_count - 1,
             {"type": "no_errors", "format": fmts["border_only"]}
         )
 
         if sheet_name == "数据透视表" and row_count > 0:
             # 按B列分组交替灰白底色；若B=未分类则回退按A分组
+            first_data_excel_row = data_start_row + 1
             ws.conditional_format(
-                1, 0, row_count, col_count - 1,
+                data_start_row, 0, data_last_row, col_count - 1,
                 {
                     "type": "formula",
-                    "criteria": '=MOD(SUMPRODUCT(--(IF($B$2:$B2="未分类",$A$2:$A2,$B$2:$B2)<>IF($B$1:$B1="未分类",$A$1:$A1,$B$1:$B1)))-1,2)=1',
+                    "criteria": f'=MOD(SUMPRODUCT(--(IF($B${first_data_excel_row}:$B{first_data_excel_row}="未分类",$A${first_data_excel_row}:$A{first_data_excel_row},$B${first_data_excel_row}:$B{first_data_excel_row})<>IF($B${first_data_excel_row-1}:$B{first_data_excel_row-1}="未分类",$A${first_data_excel_row-1}:$A{first_data_excel_row-1},$B${first_data_excel_row-1}:$B{first_data_excel_row-1})))-1,2)=1',
                     "format": fmts["group_gray"],
                 },
             )
         elif sheet_name == "折旧期间" and row_count > 0:
+            first_data_excel_row = data_start_row + 1
             ws.conditional_format(
-                1, 0, row_count, col_count - 1,
+                data_start_row, 0, data_last_row, col_count - 1,
                 {
                     "type": "formula",
-                    "criteria": "=MOD(SUMPRODUCT(--($A$2:$A2<>$A$1:$A1))-1,2)=1",
+                    "criteria": f"=MOD(SUMPRODUCT(--($A${first_data_excel_row}:$A{first_data_excel_row}<>$A${first_data_excel_row-1}:$A{first_data_excel_row-1}))-1,2)=1",
                     "format": fmts["group_gray"],
                 },
             )
@@ -1518,10 +1812,16 @@ class Exporter:
         row_defs = summary_data.get("row_defs", [])
         ws.write(0, 0, "", fmts["header_left"])
         ws.write(0, 1, "", fmts["header_left"])
+        ws.write(0, 2, "合计", fmts["header_left"])
+        ws.write(1, 0, "变动项目", fmts["source_row"])
+        ws.write(1, 1, "变动项目", fmts["source_row"])
+        ws.write(1, 2, "计算", fmts["source_row"])
         for i, cat in enumerate(categories):
             cat_fmt = fmts["summary_light_blue"] if cat in file2_only_categories else fmts["header_left"]
-            ws.write(0, i + 2, cat, cat_fmt)
-            ws.write(1, i + 2, "账面数", fmts["header_left"])
+            col = i + 3
+            ws.write(0, col, cat, cat_fmt)
+            source = "取自期末卡片" if cat in file2_only_categories else "根据期初/期末卡片聚合"
+            ws.write(1, col, source, fmts["source_row"])
 
         start_row = 2
         for idx, row_def in enumerate(row_defs):
@@ -1530,8 +1830,12 @@ class Exporter:
             item = row_def.get("item", "")
             ws.write(row, 0, section, fmts["text_left"])
             ws.write(row, 1, item, fmts["text_left"])
+            first_cat_col = self._xlsx_col_letter(3)
+            last_cat_col = self._xlsx_col_letter(len(categories) + 2)
+            excel_row = row + 1
+            ws.write_formula(row, 2, f"=SUM({first_cat_col}{excel_row}:{last_cat_col}{excel_row})", fmts["num_right"])
             for i, cat in enumerate(categories):
-                col = i + 2
+                col = i + 3
                 cat_data = data.get(cat, {})
                 if row_def.get("kind") == "formula":
                     value = self.summary_generator._calc_formula_value(cat_data, row_def.get("key"))
@@ -1559,16 +1863,18 @@ class Exporter:
 
         ws.set_column(0, 0, 14, fmts["text_left"])
         ws.set_column(1, 1, 30, fmts["text_left"])
+        ws.set_column(2, 2, 16, fmts["num_right"])
         for i in range(len(categories)):
-            ws.set_column(i + 2, i + 2, 16, fmts["num_right"])
+            ws.set_column(i + 3, i + 3, 16, fmts["num_right"])
 
         ws.freeze_panes(2, 2)
         max_row = max(start_row + len(row_defs) - 1, 1)
-        max_col = max(len(categories) + 1, 1)
+        max_col = max(len(categories) + 2, 2)
         ws.conditional_format(
             0, 0, max_row, max_col,
             {"type": "no_errors", "format": fmts["border_only"]}
         )
+        self._append_sheet_note_xlsxwriter(ws, sheet_name, len(row_defs), len(categories) + 3, fmts)
         return True
 
     def _build_depreciation_period_df(
@@ -1942,6 +2248,608 @@ class Exporter:
         """鏇存柊杩涘害"""
         if self.export_progress_callback:
             self.export_progress_callback(progress, message)
+
+    @staticmethod
+    def _is_summary_noise_value(value) -> bool:
+        if value is None:
+            return False
+        text = re.sub(r"[\s　:：,，;；.。\-－—_/／\\、]+", "", str(value).strip().lower())
+        if not text:
+            return False
+        exact = {
+            "合计", "合计数", "小计", "总计", "总额", "总和", "汇总", "共计",
+            "本年合计", "累计合计",
+            "total", "subtotal", "grandtotal", "sum",
+        }
+        if text in exact:
+            return True
+        # 子合计行经常是「类别名+合计/小计/总计」的形式，例如
+        # "其他设备-工具/夹合计"、"运输工具小计"、"本年合计"——按结尾后缀识别。
+        for suffix in ("合计", "合计数", "小计", "总计", "总和", "汇总", "subtotal", "total"):
+            if text.endswith(suffix) and len(text) > len(suffix):
+                return True
+        return "合计数" in text
+
+    def _remove_summary_noise_rows(self, df: pd.DataFrame, sheet_name: str, backup_sheet_name: Optional[str] = None) -> pd.DataFrame:
+        """Move subtotal/total rows out of detail sheets before formulas are written."""
+        if df is None or df.empty or sheet_name not in ("合并数据", "FA List", "新增清单_BKD", "处置清单_BKD"):
+            return df
+        mask = df.apply(lambda row: any(self._is_summary_noise_value(v) for v in row.tolist()), axis=1)
+        if not bool(mask.any()):
+            return df
+        if not hasattr(self, "_summary_noise_backup"):
+            self._summary_noise_backup = []
+        for idx, row in df.loc[mask].iterrows():
+            mark = ""
+            for value in row.tolist():
+                if self._is_summary_noise_value(value):
+                    mark = str(value).strip()
+                    break
+            self._summary_noise_backup.append({
+                "来源页签": backup_sheet_name or sheet_name,
+                "原始行号": int(idx) + 2,
+                "识别标识": mark,
+                "行内容": " | ".join("" if pd.isna(v) else str(v) for v in row.tolist()),
+            })
+        return df.loc[~mask].copy()
+
+    @staticmethod
+    def _is_blank_cell(value) -> bool:
+        if value is None:
+            return True
+        try:
+            if pd.isna(value):
+                return True
+        except Exception:
+            pass
+        return str(value).strip().lower() in {"", "nan", "none", "<na>"}
+
+    def _find_col_by_config_or_keyword(self, df: pd.DataFrame, configured: Optional[str], keywords: Tuple[str, ...]) -> Optional[str]:
+        if df is None or df.empty:
+            return None
+        if configured in df.columns:
+            return configured
+        configured_text = str(configured or "").strip()
+        configured_base = configured_text.rsplit("_", 1)[0] if configured_text else ""
+        for col in df.columns:
+            text = str(col)
+            if configured_text and (text == configured_text or configured_text in text):
+                return col
+            if configured_base and configured_base in text:
+                return col
+        candidates = []
+        for col in df.columns:
+            text = str(col)
+            if all(k in text for k in keywords):
+                candidates.append(col)
+        return candidates[0] if candidates else None
+
+    def _remove_unclassified_end_rows(self, df: pd.DataFrame, summary_config: Optional[Dict]) -> pd.DataFrame:
+        """Exclude file2 amount rows with blank source from summary and keep them for review."""
+        if df is None or df.empty or "数据来源" not in df.columns:
+            return df
+        config = summary_config or {}
+        orig2_col = self._find_col_by_config_or_keyword(
+            df,
+            config.get("original_value_col2"),
+            ("原值", "期末"),
+        )
+        if not orig2_col or orig2_col not in df.columns:
+            return df
+
+        source_blank = df["数据来源"].map(self._is_blank_cell)
+        end_amount = pd.to_numeric(df[orig2_col], errors="coerce").fillna(0.0)
+        mask = source_blank & (end_amount.abs() > 1e-6)
+        if not bool(mask.any()):
+            return df
+
+        if not hasattr(self, "_exception_backup"):
+            self._exception_backup = []
+
+        category_col = self._find_col_by_config_or_keyword(df, config.get("category_col2"), ("类别",))
+        code_col = self._find_col_by_config_or_keyword(df, config.get("match_col2"), ("编码",))
+        name_col = self._find_col_by_config_or_keyword(df, (config.get("field_mapping") or {}).get("name_col2"), ("名称",))
+
+        for idx, row in df.loc[mask].iterrows():
+            self._exception_backup.append({
+                "异常类型": "期末原值有金额但数据来源为空",
+                "原始行号": int(idx) + 2,
+                "资产类别": "" if not category_col else row.get(category_col, ""),
+                "资产编码": "" if not code_col else row.get(code_col, ""),
+                "资产名称": "" if not name_col else row.get(name_col, ""),
+                "期末原值": row.get(orig2_col, ""),
+                "处理方式": "已从固定资产变动汇总表计算口径中剔除，需复核匹配键或补行来源。",
+                "行内容": " | ".join("" if pd.isna(v) else str(v) for v in row.tolist()),
+            })
+        return df.loc[~mask].copy()
+
+    def _clean_category_value(self, value) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        if not text or text.lower() in {"nan", "none"}:
+            return ""
+        if text in {"本表说明", "字段来源说明"}:
+            return ""
+        if self._is_summary_noise_value(text):
+            return ""
+        return text
+
+    def _postprocess_summary_sheet_only(self, file_path: str, summary_config: Optional[Dict] = None) -> None:
+        """Re-open the just-written xlsx via openpyxl and clean up only the
+        固定资产变动汇总表 sheet. Keeps all other sheets untouched so that
+        xlsxwriter's source row (row 2) is not duplicated."""
+        try:
+            wb = load_workbook(file_path)
+        except Exception:
+            return
+        if "固定资产变动汇总表" not in wb.sheetnames:
+            return
+        begin_categories, end_categories = self._collect_category_sources_from_workbook(wb, summary_config)
+        ws = wb["固定资产变动汇总表"]
+        self._postprocess_summary_sheet(ws, begin_categories, end_categories)
+        try:
+            wb.save(file_path)
+        except PermissionError:
+            base, ext = os.path.splitext(file_path)
+            wb.save(f"{base}_汇总表清理版{ext or '.xlsx'}")
+
+    def _postprocess_explanation_workbook(self, file_path: str, summary_config: Optional[Dict] = None) -> None:
+        """Add user-facing sheet/field explanations to every exported FA List workbook."""
+        try:
+            wb = load_workbook(file_path)
+        except Exception:
+            return
+
+        guide_sheets = ("00_使用说明", "01_套表地图", "02_字段字典", "汇总备查")
+        for sheet_name in guide_sheets:
+            if sheet_name in wb.sheetnames:
+                del wb[sheet_name]
+
+        begin_categories, end_categories = self._collect_category_sources_from_workbook(wb, summary_config)
+
+        for ws in list(wb.worksheets):
+            if ws.title in ("00_使用说明", "01_套表地图", "汇总备查"):
+                continue
+            if ws.title == "固定资产变动汇总表":
+                self._postprocess_summary_sheet(ws, begin_categories, end_categories)
+            else:
+                self._insert_field_source_row(ws, summary_config)
+
+        self._write_exception_sheet(wb)
+        self._write_guide_sheets(wb)
+        for sheet_name in ("00_使用说明", "00_浣跨敤璇存槑"):
+            if sheet_name in wb.sheetnames:
+                del wb[sheet_name]
+        self._append_sheet_notes(wb)
+        self._style_explained_workbook(wb)
+        try:
+            wb.save(file_path)
+        except PermissionError:
+            base, ext = os.path.splitext(file_path)
+            wb.save(f"{base}_说明增强版{ext or '.xlsx'}")
+
+    def _collect_category_sources_from_workbook(self, wb, summary_config: Optional[Dict]) -> Tuple[set, set]:
+        if "合并数据" not in wb.sheetnames:
+            return set(), set()
+        ws = wb["合并数据"]
+        headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+        begin_col = self._find_header_index(headers, (summary_config or {}).get("category_col1"))
+        end_col = self._find_header_index(headers, (summary_config or {}).get("category_col2"))
+        if begin_col is None:
+            begin_col = self._find_header_by_side(headers, side=1)
+        if end_col is None:
+            end_col = self._find_header_by_side(headers, side=2)
+        begin_categories, end_categories = set(), set()
+        for r in range(2, ws.max_row + 1):
+            if begin_col is not None:
+                value = self._clean_category_value(ws.cell(r, begin_col).value)
+                if value:
+                    begin_categories.add(value)
+            if end_col is not None:
+                value = self._clean_category_value(ws.cell(r, end_col).value)
+                if value:
+                    end_categories.add(value)
+        return begin_categories, end_categories
+
+    @staticmethod
+    def _find_header_index(headers: List, target) -> Optional[int]:
+        if not target:
+            return None
+        target_text = str(target).strip()
+        for idx, header in enumerate(headers, start=1):
+            if str(header).strip() == target_text:
+                return idx
+        return None
+
+    def _find_header_by_side(self, headers: List, side: int) -> Optional[int]:
+        for idx, header in enumerate(headers, start=1):
+            text = str(header or "")
+            is_category = any(k in text for k in ("资产类别", "固定资产类别", "资产类型描述", "资产分类"))
+            if not is_category:
+                continue
+            if side == 2 and ("_文件2" in text or self._is_file2_column_header(text, None)):
+                return idx
+            if side == 1 and "_文件2" not in text:
+                return idx
+        return None
+
+    def _insert_field_source_row(self, ws, summary_config: Optional[Dict]) -> None:
+        ws.insert_rows(2)
+        for c in range(1, ws.max_column + 1):
+            ws.cell(2, c).value = self._field_source_for_header(ws.title, ws.cell(1, c).value, c, summary_config)
+        self._translate_formulas_after_row_insert(ws, inserted_at=2)
+
+    def _translate_formulas_after_row_insert(self, ws, inserted_at: int = 2) -> None:
+        # Export formulas are written in summary/header areas and the first few
+        # depreciation test rows. Avoid scanning every detail cell in large sheets.
+        max_scan_row = min(ws.max_row, 250)
+        for row in ws.iter_rows(min_row=inserted_at + 1, max_row=max_scan_row):
+            for cell in row:
+                if isinstance(cell.value, str) and cell.value.startswith("="):
+                    origin = f"{get_column_letter(cell.column)}{cell.row - 1}"
+                    try:
+                        cell.value = Translator(cell.value, origin=origin).translate_formula(cell.coordinate)
+                    except Exception:
+                        pass
+
+    def _field_source_for_header(self, sheet_name: str, header, col_idx: int, summary_config: Optional[Dict]) -> str:
+        text = str(header or "")
+        if sheet_name == "合并数据":
+            if self._is_file2_column_header(text, summary_config):
+                return "取自期末卡片"
+            if any(k in text for k in ("数据来源", "匹配列", "变动类型")):
+                return "逻辑判断"
+            if any(k in text for k in ("变动", "差异", "影响", "计算过程")):
+                return "计算"
+            return "取自期初卡片"
+        if sheet_name == "数据透视表":
+            return "根据期末卡片聚合" if self._is_file2_column_header(text, summary_config) else "根据期初卡片聚合"
+        if sheet_name in ("FA List", "≤12月卡片明细"):
+            return "计算" if any(k in text for k in ("测算", "差异", "月份", "月折旧额")) else "取自期末卡片"
+        if sheet_name == "新增清单_BKD":
+            if any(k in text for k in ("增加类型", "减少类型")):
+                return "逻辑判断"
+            if any(k in text for k in ("原值增加", "影响", "差异")):
+                return "计算"
+            if "?" in text:
+                return "人工补充"
+            return "取自期末卡片"
+        if sheet_name == "处置清单_BKD":
+            if any(k in text for k in ("减少类型", "增加类型")):
+                return "逻辑判断"
+            if any(k in text for k in ("原值减少", "年初累计折旧", "本年折旧", "净值")):
+                return "计算"
+            return "取自期初卡片" if col_idx <= 6 else "取自期末卡片"
+        if sheet_name == "折旧期间":
+            if any(k in text for k in ("判断结果",)):
+                return "逻辑判断"
+            if any(k in text for k in ("影响", "计算过程")):
+                return "计算"
+            return "根据期末卡片聚合" if self._is_file2_column_header(text, summary_config) else "根据期初卡片聚合"
+        if sheet_name == "LLM分析":
+            return "LLM生成"
+        return "根据期初/期末卡片聚合"
+
+    def _postprocess_summary_sheet(self, ws, begin_categories: set, end_categories: set) -> None:
+        for rng in list(ws.merged_cells.ranges):
+            ws.unmerge_cells(str(rng))
+        if ws.max_row >= 2:
+            ws.delete_rows(2)
+        if ws.cell(1, 3).value != "合计":
+            ws.insert_cols(3)
+        for c in range(ws.max_column, 3, -1):
+            if self._is_summary_noise_value(ws.cell(1, c).value):
+                ws.delete_cols(c)
+        ws.cell(1, 3).value = "合计"
+        ws.insert_rows(2)
+        ws.cell(2, 1).value = "变动项目"
+        ws.cell(2, 2).value = "变动项目"
+        ws.cell(2, 3).value = "计算"
+        last_col = ws.max_column
+        last_letter = get_column_letter(last_col)
+        last_main_row = self._summary_main_last_row(ws)
+        for c in range(4, last_col + 1):
+            cat = self._clean_category_value(ws.cell(1, c).value)
+            if cat in begin_categories and cat in end_categories:
+                source = "期初&期末都有"
+            elif cat in begin_categories:
+                source = "取自期初卡片"
+            elif cat in end_categories:
+                source = "取自期末卡片"
+            else:
+                source = "类别来源待确认"
+            ws.cell(2, c).value = source
+        for r in range(3, last_main_row + 1):
+            total_cell = ws.cell(r, 3)
+            total_cell.value = f"=SUM(D{r}:{last_letter}{r})"
+            total_cell.number_format = "#,##0"
+            total_cell.alignment = Alignment(horizontal="right", vertical="center")
+            for c in range(4, last_col + 1):
+                cell = ws.cell(r, c)
+                if isinstance(cell.value, numbers.Number) or (isinstance(cell.value, str) and cell.value.startswith("=")):
+                    cell.number_format = "#,##0"
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+        self._merge_summary_sections(ws, last_main_row)
+
+    @staticmethod
+    def _summary_main_last_row(ws) -> int:
+        for r in range(3, ws.max_row + 1):
+            if ws.cell(r, 1).value == "本表说明":
+                return max(3, r - 4)
+        return ws.max_row
+
+    @staticmethod
+    def _merge_summary_sections(ws, last_main_row: int) -> None:
+        starts = []
+        for r in range(3, last_main_row + 1):
+            if ws.cell(r, 1).value not in (None, ""):
+                starts.append(r)
+        for idx, start in enumerate(starts):
+            end = (starts[idx + 1] - 1) if idx + 1 < len(starts) else last_main_row
+            if end > start:
+                ws.merge_cells(start_row=start, start_column=1, end_row=end, end_column=1)
+
+    def _write_summary_backup_sheet(self, wb) -> None:
+        if "汇总备查" in wb.sheetnames:
+            del wb["汇总备查"]
+        ws = wb.create_sheet("汇总备查")
+        ws.append(["来源页签", "原始行号", "识别标识", "行内容"])
+        rows = getattr(self, "_summary_noise_backup", []) or []
+        if rows:
+            for row in rows:
+                ws.append([row.get("来源页签"), row.get("原始行号"), row.get("识别标识"), row.get("行内容")])
+        else:
+            ws.append(["未识别到需移出的汇总性干扰行", None, None, "FA List、新增清单_BKD、处置清单_BKD 中未发现合计/小计/total 行。"])
+        ws.append([None, None, None, None])
+        ws.append(["说明", None, None, "识别规则：单元格去除空格/分隔符后等于“合计/小计/总计/汇总/共计/合计数/total/subtotal”，或以“合计/小计/总计/汇总”结尾（覆盖“其他设备-工具/夹合计”这类子合计行）。"])
+
+    def _write_exception_sheet(self, wb) -> None:
+        if "异常清单" in wb.sheetnames:
+            del wb["异常清单"]
+        ws = wb.create_sheet("异常清单")
+        headers = ["异常类型", "原始行号", "资产类别", "资产编码", "资产名称", "期末原值", "处理方式", "行内容"]
+        ws.append(headers)
+        rows = getattr(self, "_exception_backup", []) or []
+        if rows:
+            for row in rows:
+                ws.append([row.get(h, "") for h in headers])
+        else:
+            ws.append(["未发现异常", None, None, None, None, None, "未发现期末原值有金额但数据来源为空的记录。", None])
+        ws.append([None] * len(headers))
+        ws.append(["说明", None, None, None, None, None, "这些记录已从固定资产变动汇总表计算口径中剔除，避免被倒挤进重分类；请复核匹配键、资产次级编号或补行来源。", None])
+
+    def _write_guide_sheets(self, wb) -> None:
+        use = wb.create_sheet("00_使用说明", 0)
+        mp = wb.create_sheet("01_套表地图", 1)
+        use.append(["FA List 套表说明"])
+        use.append(["说明项", "内容"])
+        use_rows = [
+            ["这版文件解决什么问题", "在每个套表表头下方增加字段来源说明，并在每个页签底部补充本表说明。"],
+            ["来源口径", "file1 映射字段视为期初卡片；file2 映射字段视为期末卡片。合并数据的期初/期末来源按运行时字段映射判定。"],
+            ["统一术语", "取自期初卡片、取自期末卡片、根据期初卡片聚合、根据期末卡片聚合、根据期初/期末卡片聚合、逻辑判断、计算、人工补充、LLM生成。"],
+            ["干扰行处理", "FA List、新增清单_BKD、处置清单_BKD 中识别到的合计、合计数、小计、total 行不会进入明细分析口径。"],
+            ["异常行处理", "合并数据中“期末原值有金额但数据来源为空”的记录会移入异常清单，并从固定资产变动汇总表计算口径中剔除。"],
+        ]
+        for row in use_rows:
+            use.append(row)
+        mp.append(["页签", "本表作用", "信息来源"])
+        for sheet_name in [s for s in wb.sheetnames if s not in ("00_使用说明", "01_套表地图")]:
+            info = self._sheet_explanation(sheet_name)
+            mp.append([sheet_name, info["作用"], info["信息来源"]])
+
+    def _append_sheet_notes(self, wb) -> None:
+        for ws in wb.worksheets:
+            if ws.title in ("00_使用说明", "01_套表地图"):
+                continue
+            info = self._sheet_explanation(ws.title)
+            while ws.max_row > 1 and ws.cell(ws.max_row, 1).value in ("本表说明", "鏈〃璇存槑"):
+                ws.delete_rows(ws.max_row)
+                if ws.max_row > 1 and all(ws.cell(ws.max_row, c).value in (None, "") for c in range(1, ws.max_column + 1)):
+                    ws.delete_rows(ws.max_row)
+            ws.append([None] * max(ws.max_column, 2))
+            ws.append([
+                "本表说明",
+                f"{info['作用']} 信息来源：{info['信息来源']} 重点关注：{info['关注点']}",
+            ])
+            try:
+                ws.merge_cells(start_row=ws.max_row, start_column=2, end_row=ws.max_row, end_column=4)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _sheet_explanation(sheet_name: str) -> Dict[str, str]:
+        mapping = {
+            "合并数据": {"作用": "把期初卡片与期末卡片按映射字段和匹配键合并，保留两侧原始字段并生成差异判断。", "信息来源": "file1 映射字段为期初卡片，file2 映射字段为期末卡片；差异列由工具逻辑生成。", "关注点": "关注匹配列、仅存在某一侧、原值变动、累计折旧变动及其变动类型。"},
+            "数据透视表": {"作用": "按资产类别汇总期初与期末原值、累计折旧。", "信息来源": "根据合并数据中的期初卡片和期末卡片字段聚合。", "关注点": "关注类别映射是否一致，以及期初/期末金额是否能与明细相互勾稽。"},
+            "固定资产变动汇总表": {"作用": "按资产类别展示原值、累计折旧和净值的期初、增加、减少、重分类及期末情况。", "信息来源": "根据期初卡片、期末卡片、新增清单和处置清单聚合计算；类别来源按期初/期末映射字段判定。", "关注点": "关注大额增加、减少、重分类，以及合计/小计/total 噪音类别是否已剔除。"},
+            "FA List": {"作用": "以期末卡片为基础形成固定资产明细，并附带折旧测算字段。", "信息来源": "基础字段取自期末卡片，测算和差异字段由计算。", "关注点": "关注折旧差异、疑似费用化或基础字段缺失。"},
+            "≤12月卡片明细": {"作用": "筛选使用寿命≤12个月的期末固定资产卡片明细。", "信息来源": "取自期末卡片。", "关注点": "关注使用寿命、入账日期、原值和折旧字段是否完整准确。"},
+            "新增清单_BKD": {"作用": "列示本期新增固定资产，辅助核对新增金额、入账日期和新增方式。", "信息来源": "根据期末卡片和期初卡片差异逻辑生成，部分字段需人工补充或来自映射字段。", "关注点": "关注新增日期是否属于本期、增加类型是否合理、是否存在汇总行干扰。"},
+            "处置清单_BKD": {"作用": "列示本期减少或处置固定资产，辅助核对处置金额、折旧和处置方式。", "信息来源": "根据期初卡片和期末卡片差异逻辑生成，处置信息优先来自映射字段。", "关注点": "关注减少类型、处置方式、处置时间和处置金额是否完整一致。"},
+            "折旧期间": {"作用": "按类别、寿命和残值率比较期初与期末折旧参数，测算当年折旧影响。", "信息来源": "根据期初卡片和期末卡片字段聚合，并由工具计算影响金额。", "关注点": "关注判断结果为不一致、待确认或影响金额较大的项目。"},
+            "LLM分析": {"作用": "将套表中的关键变动和异常以文字方式汇总。", "信息来源": "LLM生成，基于套表结果归纳，需结合底稿和原始卡片复核。", "关注点": "关注总体变动、大额明细示例、异常新增、疑似费用化和人工复核提示。"},
+            "汇总备查": {"作用": "保留从主表中剔除的汇总性干扰行，便于追溯但不影响明细分析。", "信息来源": "来自 FA List、新增清单_BKD、处置清单_BKD 中识别到的合计/小计/total 行。", "关注点": "确认被移出的行确属汇总性行，而非真实资产明细。"},
+            "异常清单": {"作用": "保留从固定资产变动汇总表计算口径中剔除的异常明细。", "信息来源": "来自合并数据中期末原值有金额但数据来源为空的记录。", "关注点": "复核匹配键、资产次级编号、日期格式及补行来源，确认是否应归入新增或其他变动。"},
+        }
+        return mapping.get(sheet_name, {"作用": "原始套表页。", "信息来源": "根据固定资产卡片和工具逻辑生成。", "关注点": "结合字段来源行和底部说明复核。"})
+
+    def _style_explained_workbook(self, wb) -> None:
+        thin = Side(style="thin", color="D9DEE7")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        header_fill = PatternFill("solid", fgColor="E9EEF5")
+        source_fill = PatternFill("solid", fgColor="F7F8FA")
+        note_fill = PatternFill("solid", fgColor="F6F6F6")
+        base_font = Font(name="Microsoft YaHei", size=10)
+        header_font = Font(name="Microsoft YaHei", size=10, bold=True, color="1F2937")
+        source_font = Font(name="Microsoft YaHei", size=9, italic=True, color="374151")
+        for ws in wb.worksheets:
+            note_rows = set()
+            for row_idx in range(1, ws.max_row + 1):
+                if ws.cell(row_idx, 1).value == "本表说明":
+                    note_rows.add(row_idx)
+                elif ws.cell(row_idx, 1).value == "鏈〃璇存槑":
+                    note_rows.add(row_idx)
+
+            if ws.max_row >= 1:
+                for cell in ws[1]:
+                    cell.font = header_font
+                    cell.border = border
+                    cell.fill = header_fill
+                    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+            if ws.max_row >= 2 and ws.title not in ("00_使用说明", "01_套表地图", "汇总备查"):
+                for cell in ws[2]:
+                    cell.font = source_font
+                    cell.border = border
+                    cell.fill = source_fill
+                    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                ws.freeze_panes = "A3"
+            else:
+                ws.freeze_panes = "A2"
+
+            for row_idx in range(1, min(ws.max_row, 2) + 1):
+                ws.row_dimensions[row_idx].height = 22
+            for row_idx in note_rows:
+                ws.row_dimensions[row_idx].height = 72
+                for c in range(1, ws.max_column + 1):
+                    cell = ws.cell(row_idx, c)
+                    if isinstance(cell, MergedCell):
+                        continue
+                    cell.font = header_font if c == 1 else base_font
+                    cell.border = border
+                    cell.fill = note_fill
+                    cell.alignment = Alignment(vertical="center", wrap_text=True)
+                for c in range(2, min(4, ws.max_column) + 1):
+                    cell = ws.cell(row_idx, c)
+                    if not isinstance(cell, MergedCell):
+                        cell.border = border
+                        cell.fill = note_fill
+                        cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+            for c in range(1, ws.max_column + 1):
+                letter = get_column_letter(c)
+                if self._worksheet_column_is_numeric_like(ws, c):
+                    ws.column_dimensions[letter].width = 16
+                else:
+                    sample = [ws.cell(r, c).value for r in range(1, min(ws.max_row, 80) + 1)]
+                    width = max([len(str(v)) if v is not None else 0 for v in sample] + [8])
+                    ws.column_dimensions[letter].width = min(max(width + 2, 10), 42)
+
+            if ws.title in ("00_使用说明", "00_浣跨敤璇存槑"):
+                ws.column_dimensions["A"].width = 24
+                ws.column_dimensions["B"].width = 100
+                for row_idx in range(1, ws.max_row + 1):
+                    for c in range(1, min(ws.max_column, 2) + 1):
+                        cell = ws.cell(row_idx, c)
+                        cell.border = border
+                        cell.alignment = Alignment(vertical="center", wrap_text=True)
+                    ws.row_dimensions[row_idx].height = 42 if row_idx > 2 else 24
+            elif ws.title in ("01_套表地图", "01_濂楄〃鍦板浘"):
+                widths = {1: 24, 2: 52, 3: 64}
+                for c, width in widths.items():
+                    ws.column_dimensions[get_column_letter(c)].width = width
+                for row_idx in range(1, ws.max_row + 1):
+                    for c in range(1, min(ws.max_column, 3) + 1):
+                        cell = ws.cell(row_idx, c)
+                        cell.border = border
+                        cell.alignment = Alignment(vertical="center", wrap_text=True)
+                    ws.row_dimensions[row_idx].height = 42 if row_idx > 1 else 24
+            elif ws.title in ("LLM分析", "LLM鍒嗘瀽"):
+                ws.column_dimensions["A"].width = 24
+                ws.column_dimensions["B"].width = 64
+                for row_idx in range(1, ws.max_row + 1):
+                    ws.row_dimensions[row_idx].height = 42
+
+            for row_idx in note_rows:
+                ws.row_dimensions[row_idx].height = 72
+
+            self._restyle_last_used_row(ws, border, base_font)
+            ws.sheet_view.showGridLines = False
+        return
+        for ws in wb.worksheets:
+            for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+                for cell in row:
+                    cell.font = base_font
+                    cell.border = border
+                    cell.alignment = Alignment(vertical="center", wrap_text=True)
+                    if cell.value == "本表说明":
+                        cell.font = header_font
+                        cell.fill = note_fill
+            if ws.max_row >= 1:
+                for cell in ws[1]:
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            if ws.max_row >= 2 and ws.title not in ("00_使用说明", "01_套表地图", "汇总备查"):
+                for cell in ws[2]:
+                    cell.font = source_font
+                    cell.fill = source_fill
+                    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                ws.freeze_panes = "A3"
+            else:
+                ws.freeze_panes = "A2"
+            for row_idx in range(1, ws.max_row + 1):
+                ws.row_dimensions[row_idx].height = 22
+            for c in range(1, ws.max_column + 1):
+                letter = get_column_letter(c)
+                is_numeric_col = self._worksheet_column_is_numeric_like(ws, c)
+                if is_numeric_col:
+                    ws.column_dimensions[letter].width = 16
+                    for r in range(1, ws.max_row + 1):
+                        cell = ws.cell(r, c)
+                        if isinstance(cell, MergedCell):
+                            continue
+                        if isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
+                            cell.number_format = "#,##0"
+                        cell.alignment = Alignment(horizontal="right" if r > 1 else "center", vertical="center", wrap_text=True)
+                else:
+                    sample = [ws.cell(r, c).value for r in range(1, min(ws.max_row, 80) + 1)]
+                    width = max([len(str(v)) if v is not None else 0 for v in sample] + [8])
+                    ws.column_dimensions[letter].width = min(max(width + 2, 10), 42)
+            self._restyle_last_used_row(ws, border, base_font)
+            ws.sheet_view.showGridLines = False
+
+    def _worksheet_column_is_numeric_like(self, ws, col_idx: int) -> bool:
+        values = []
+        start_row = 3 if ws.title not in ("00_使用说明", "01_套表地图", "汇总备查") else 2
+        for r in range(start_row, ws.max_row + 1):
+            raw = ws.cell(r, col_idx).value
+            if raw is None or raw == "":
+                continue
+            text = str(raw).strip()
+            if text in {"本表说明", "说明"}:
+                continue
+            if text.startswith("="):
+                values.append(raw)
+                continue
+            values.append(raw)
+            if len(values) >= 500:
+                break
+        if not values:
+            return False
+        numeric_count = 0
+        for value in values[:200]:
+            if isinstance(value, str) and value.startswith("="):
+                numeric_count += 1
+            elif self._to_number(value) is not None:
+                numeric_count += 1
+        return numeric_count / max(len(values[:200]), 1) >= 0.75
+
+    def _restyle_last_used_row(self, ws, border, base_font) -> None:
+        last_row = ws.max_row
+        while last_row > 1:
+            values = [ws.cell(last_row, c).value for c in range(1, ws.max_column + 1)]
+            if any(v not in (None, "") for v in values):
+                break
+            last_row -= 1
+        for c in range(1, ws.max_column + 1):
+            cell = ws.cell(last_row, c)
+            if isinstance(cell, MergedCell):
+                continue
+            cell.font = base_font
+            cell.border = border
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
 
     def _beautify_workbook(self, wb, summary_sheet_name: str = "固定资产变动汇总表", summary_config: Optional[Dict] = None):
         """??????????"""
@@ -2448,6 +3356,52 @@ class Exporter:
             out.loc[tgt_mask, col] = mapped
         return out
 
+    def _complete_file2_only_calculated_fields(
+        self,
+        df: pd.DataFrame,
+        original_value_col1: Optional[str],
+        original_value_col2: Optional[str],
+        depreciation_col1: Optional[str],
+        depreciation_col2: Optional[str],
+    ) -> pd.DataFrame:
+        """补齐导出阶段还原出的仅文件2卡片计算字段。"""
+        if df is None or df.empty:
+            return df
+        out = df.copy()
+
+        def _num_series(col: Optional[str]) -> pd.Series:
+            if col and col in out.columns:
+                return pd.to_numeric(out[col].map(self._to_number), errors="coerce")
+            return pd.Series([pd.NA] * len(out), index=out.index, dtype="Float64")
+
+        orig1 = _num_series(original_value_col1)
+        orig2 = _num_series(original_value_col2)
+        dep1 = _num_series(depreciation_col1)
+        dep2 = _num_series(depreciation_col2)
+
+        # 展示补行来自期末源文件2：文件1侧为空、文件2侧有金额。
+        file2_only = orig1.isna() & orig2.notna()
+        if not bool(file2_only.any()):
+            return out
+
+        def _ensure_col(col: str):
+            if col not in out.columns:
+                out[col] = ""
+
+        for col in ("数据来源", "原值变动", "原值变动类型", "累计折旧变动", "累计折旧变动类型"):
+            _ensure_col(col)
+
+        out.loc[file2_only, "数据来源"] = "仅文件2"
+        out.loc[file2_only, "原值变动"] = -orig2.loc[file2_only].astype(float)
+        out.loc[file2_only, "原值变动类型"] = "原值增加"
+
+        dep_change = -dep2.loc[file2_only].fillna(0).astype(float)
+        out.loc[file2_only, "累计折旧变动"] = dep_change
+        out.loc[file2_only, "累计折旧变动类型"] = dep_change.apply(
+            lambda x: "累计折旧增加" if x < 0 else "累计折旧不变"
+        )
+        return out
+
     @staticmethod
     def _is_blank_value(v) -> bool:
         if v is None:
@@ -2462,7 +3416,12 @@ class Exporter:
 
     @staticmethod
     def _coerce_for_series_dtype(series: pd.Series, value):
-        """按目标列 dtype 做赋值兼容，避免 StringDtype 列写入 int 报错。"""
+        """按目标列 dtype 做赋值兼容。
+
+        - 字符串列：None/NaN → pd.NA；其它 → str(value)
+        - 数值/日期/布尔列：空串/None/NaN → 该 dtype 的 missing 值
+          （pandas 2.x 严格 dtype 校验下，把 '' 写入 float64 会 LossySetitemError）
+        """
         try:
             if pd.api.types.is_string_dtype(series.dtype):
                 if value is None:
@@ -2473,6 +3432,24 @@ class Exporter:
                 except Exception:
                     pass
                 return str(value)
+
+            # 非字符串列：把"空"统一映射为该 dtype 接受的缺失值
+            is_empty = value is None
+            if not is_empty:
+                try:
+                    if isinstance(value, str) and value.strip() == "":
+                        is_empty = True
+                    elif pd.isna(value):
+                        is_empty = True
+                except Exception:
+                    pass
+            if is_empty:
+                dtype = series.dtype
+                if pd.api.types.is_extension_array_dtype(dtype) or pd.api.types.is_datetime64_any_dtype(dtype):
+                    return pd.NA
+                # 普通 numpy 数值/布尔列：用 np.nan（float 列直接接受；int/bool 列由调用方处理）
+                import numpy as np
+                return np.nan
         except Exception:
             pass
         return value
@@ -2486,14 +3463,58 @@ class Exporter:
                 return ""
         except Exception:
             pass
-        if isinstance(v, float) and v == int(v):
-            return str(int(v))
+        # 日期/时间统一为 'YYYY-MM-DD'，与 merge_engine 的匹配键格式（utils.helpers.normalize_date）对齐。
+        # 否则模板键 'YYYY-MM-DD 00:00:00' 与 合并数据 中的 'YYYY-MM-DD' 对不上，
+        # 会让 _expand_rows_for_template_cardinality 把每张 file2 卡片再追加一份空行（数据来源=NaN）。
+        if isinstance(v, (pd.Timestamp, datetime, date)):
+            try:
+                return pd.Timestamp(v).strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        if isinstance(v, numbers.Number) and not isinstance(v, bool):
+            try:
+                if float(v).is_integer():
+                    return str(int(v))
+            except Exception:
+                pass
         s = str(v).strip()
         if s.lower() == "nan":
             return ""
+        int_decimal_match = re.fullmatch(r"([+-]?\d+)\.0+", s)
+        if int_decimal_match:
+            return int_decimal_match.group(1)
+        if Exporter._looks_like_match_date_string(s):
+            try:
+                parsed = pd.to_datetime(s, errors="coerce")
+                if not pd.isna(parsed):
+                    return parsed.strftime("%Y-%m-%d")
+            except Exception:
+                pass
         return s
 
+    @staticmethod
+    def _looks_like_match_date_string(s: str) -> bool:
+        if not s:
+            return False
+        return bool(
+            re.fullmatch(
+                r"\d{4}[-/]\d{1,2}[-/]\d{1,2}"
+                r"(?:[ T]\d{1,2}:\d{1,2}(?::\d{1,2})?(?:\.\d+)?)?",
+                s,
+            )
+            or re.fullmatch(r"\d{4}年\d{1,2}月\d{1,2}日", s)
+        )
+
+    @classmethod
+    def _format_match_key_value(cls, v) -> str:
+        s = cls._format_match_component(v)
+        if " | " not in s:
+            return s
+        return " | ".join(cls._format_match_component(part) for part in s.split(" | "))
+
     def _build_match_key_from_row(self, row, match_cols: List[str]) -> str:
+        if len(match_cols or []) == 1:
+            return self._format_match_key_value(row.get(match_cols[0], ""))
         parts = [self._format_match_component(row.get(c, "")) for c in match_cols]
         return " | ".join(parts)
 
@@ -2503,6 +3524,8 @@ class Exporter:
         valid = [c for c in cols if c in df.columns]
         if not valid:
             return pd.Series([""] * len(df), index=df.index)
+        if len(valid) == 1:
+            return df[valid[0]].map(self._format_match_key_value)
         formatted = pd.DataFrame(
             {col: df[col].map(self._format_match_component) for col in valid},
             index=df.index,
@@ -2511,21 +3534,43 @@ class Exporter:
 
     def _source_life_year_mode(self, source_df: Optional[pd.DataFrame], source_life_col: Optional[str]) -> bool:
         """依据源数据判断是否应按“年->月”纠偏。"""
-        if not isinstance(source_df, pd.DataFrame) or source_df.empty or not source_life_col or source_life_col not in source_df.columns:
+        if not isinstance(source_df, pd.DataFrame) or source_df.empty or not source_life_col:
             return False
-        decision, warning = self._life_unit_decision(source_life_col, source_df[source_life_col])
+        actual_col = source_life_col
+        if actual_col not in source_df.columns:
+            actual_col = self._strip_display_suffix(actual_col, None)
+        if actual_col not in source_df.columns and "_" in str(source_life_col):
+            actual_col = str(source_life_col).rsplit("_", 1)[0]
+        if actual_col not in source_df.columns:
+            return False
+        decision, warning = self._life_unit_decision(source_life_col, source_df[actual_col])
         if warning and warning not in self._export_notes:
             self._export_notes.append(warning)
         if decision == "year":
             return True
-        return decision == "unknown" and should_convert_life_series_to_months(source_df[source_life_col], source_life_col)
+        return decision in ("unknown", "ambiguous") and should_convert_life_series_to_months(source_df[actual_col], source_life_col)
+
+    def _life_values_look_like_years(self, values, col_name: Optional[str]) -> bool:
+        """Fallback for export-only FA List values when source_file2_df is absent."""
+        if values is None:
+            return False
+        decision, warning = self._life_unit_decision(col_name, values)
+        if warning and warning not in self._export_notes:
+            self._export_notes.append(warning)
+        if decision == "year":
+            return True
+        return decision in ("unknown", "ambiguous") and should_convert_life_series_to_months(pd.Series(values), col_name)
 
     def _life_unit_decision(self, col_name: Optional[str], values) -> Tuple[str, str]:
         """Decide whether useful life values are years, months, or ambiguous."""
         name = str(col_name or "").replace("_文件1", "").replace("_文件2", "").lower()
         if any(k in name for k in ("月", "月份", "month", "months")):
             return "month", ""
-        year_markers = ("使用年限", "折旧年限", "预计年限", "年限", "寿命(年)", "寿命（年）", "(年)", "（年）", "year", "years")
+        year_markers = (
+            "使用年限", "折旧年限", "预计年限", "计划使用年", "预计使用年",
+            "使用寿命年", "寿命年", "年限", "寿命(年)", "寿命（年）",
+            "(年)", "（年）", "year", "years",
+        )
         if any(k in name for k in year_markers):
             return "year", "【使用寿命纠偏】系统根据列名判断使用寿命单位为“年”，已自动修正为：使用寿命(月) = 使用寿命 × 12。"
 
@@ -2665,7 +3710,7 @@ class Exporter:
         if df is None or df.empty or id_col not in df.columns or not template_map:
             return df
         out = df.copy()
-        grp = out[id_col].apply(self._format_match_component)
+        grp = out[id_col].apply(self._format_match_key_value)
         counts = grp.value_counts(dropna=False)
 
         add_rows = []
@@ -2701,7 +3746,7 @@ class Exporter:
         if df is None or df.empty or id_col not in df.columns or not template_map:
             return df
         out = df.copy()
-        grp = out[id_col].apply(self._format_match_component)
+        grp = out[id_col].apply(self._format_match_key_value)
         dup_mask = grp.duplicated(keep=False) if include_blank_key else (grp.duplicated(keep=False) & (grp != ""))
         if not bool(dup_mask.any()):
             return out
@@ -2846,6 +3891,13 @@ class Exporter:
                 ["数据来源", "匹配列", "原值变动类型", "累计折旧变动类型"],
                 only_when_blank=False,
             )
+            merged_out = self._complete_file2_only_calculated_fields(
+                merged_out,
+                sc.get("original_value_col1"),
+                original_value_col2_fmt,
+                sc.get("depreciation_col1"),
+                depreciation_col2_fmt,
+            )
 
         if isinstance(fa_out, pd.DataFrame) and not fa_out.empty and "固定资产编号" in fa_out.columns:
             fa_out_to_source_cols = {
@@ -2941,6 +3993,12 @@ class Exporter:
                 fa_out = self._convert_life_year_to_month(fa_out, "使用寿命(月)")
             # 回填后同步净值，保证与原值/累计折旧一致
             if {"原值", "累计折旧", "净值"}.issubset(set(fa_out.columns)):
+                life_out_col = "浣跨敤瀵垮懡(鏈?"
+                if life_out_col in fa_out.columns:
+                    life_hint = source_life_col2_raw or fm_fmt.get("life_col2") or life_out_col
+                    if self._life_values_look_like_years(fa_out[life_out_col], life_hint):
+                        fa_out = self._convert_life_year_to_month(fa_out, life_out_col)
+
                 def _to_num(v):
                     if v is None:
                         return 0.0

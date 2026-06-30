@@ -1,14 +1,23 @@
-"""Debug logging for NDJSON to workspace log path. Do not log secrets."""
+"""Debug logging for NDJSON to the current user's AuditToolbox log path."""
 import json
+import os
 import time
+from pathlib import Path
 
-_LOG_PATH = r"c:\Users\Administrator\Downloads\新建文件夹 (7)\.cursor\debug.log"
+
+def _log_path() -> Path:
+    base = os.environ.get("APPDATA")
+    if base:
+        return Path(base) / "AuditToolbox" / "fa_list_debug.jsonl"
+    return Path.home() / ".audit_toolbox" / "fa_list_debug.jsonl"
 
 
 def _write(**payload) -> None:
     try:
         payload.setdefault("timestamp", int(time.time() * 1000))
-        with open(_LOG_PATH, "a", encoding="utf-8") as f:
+        path = _log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
     except Exception:
         pass

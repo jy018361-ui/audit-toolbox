@@ -18,6 +18,8 @@ class ColumnSelector(ttk.Frame):
         self.file2_display_name = file2_display_name or "文件2"
         
         self.column_vars = {}
+        self.count_label = None
+        self.next_button = None
         # 创建列名映射：原始列名 -> 显示列名
         self.column_name_map = {}
         self.reverse_column_name_map = {}
@@ -148,12 +150,19 @@ class ColumnSelector(ttk.Frame):
         left_canvas.configure(yscrollcommand=left_scrollbar.set)
         
         left_columns_frame = ttk.Frame(left_canvas)
-        left_canvas.create_window((0, 0), window=left_columns_frame, anchor='nw')
-        left_canvas.bind('<Configure>', lambda e: left_canvas.configure(scrollregion=left_canvas.bbox('all')))
+        left_window = left_canvas.create_window((0, 0), window=left_columns_frame, anchor='nw')
+        left_canvas.bind(
+            '<Configure>',
+            lambda e: (
+                left_canvas.itemconfigure(left_window, width=e.width),
+                left_canvas.configure(scrollregion=left_canvas.bbox('all')),
+            ),
+        )
         
         # 创建文件1的复选框
         for i, col in enumerate(file1_columns):
             var = tk.BooleanVar(value=True)  # 默认全选
+            var.trace_add("write", lambda *_args: self._update_count_label())
             self.column_vars[col] = var
             
             # 格式化列名用于显示（移除后缀）
@@ -206,12 +215,19 @@ class ColumnSelector(ttk.Frame):
         right_canvas.configure(yscrollcommand=right_scrollbar.set)
         
         right_columns_frame = ttk.Frame(right_canvas)
-        right_canvas.create_window((0, 0), window=right_columns_frame, anchor='nw')
-        right_canvas.bind('<Configure>', lambda e: right_canvas.configure(scrollregion=right_canvas.bbox('all')))
+        right_window = right_canvas.create_window((0, 0), window=right_columns_frame, anchor='nw')
+        right_canvas.bind(
+            '<Configure>',
+            lambda e: (
+                right_canvas.itemconfigure(right_window, width=e.width),
+                right_canvas.configure(scrollregion=right_canvas.bbox('all')),
+            ),
+        )
         
         # 创建文件2的复选框
         for i, col in enumerate(file2_columns):
             var = tk.BooleanVar(value=True)  # 默认全选
+            var.trace_add("write", lambda *_args: self._update_count_label())
             self.column_vars[col] = var
             
             # 格式化列名用于显示（移除后缀）
@@ -257,11 +273,18 @@ class ColumnSelector(ttk.Frame):
             other_canvas.configure(yscrollcommand=other_scrollbar.set)
             
             other_columns_frame = ttk.Frame(other_canvas)
-            other_canvas.create_window((0, 0), window=other_columns_frame, anchor='nw')
-            other_canvas.bind('<Configure>', lambda e: other_canvas.configure(scrollregion=other_canvas.bbox('all')))
+            other_window = other_canvas.create_window((0, 0), window=other_columns_frame, anchor='nw')
+            other_canvas.bind(
+                '<Configure>',
+                lambda e: (
+                    other_canvas.itemconfigure(other_window, width=e.width),
+                    other_canvas.configure(scrollregion=other_canvas.bbox('all')),
+                ),
+            )
             
             for col in other_columns:
                 var = tk.BooleanVar(value=True)
+                var.trace_add("write", lambda *_args: self._update_count_label())
                 self.column_vars[col] = var
                 display_name = self._format_column_name(col)
                 self.column_name_map[col] = display_name
@@ -290,9 +313,9 @@ class ColumnSelector(ttk.Frame):
         
         # 按钮区域
         button_frame = ttk.Frame(self)
-        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=20)
-        count_label = ttk.Label(self, text=f"已选择 {len([v for v in self.column_vars.values() if v.get()])} 列")
-        count_label.pack(side=tk.BOTTOM, pady=5)
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
+        self.count_label = ttk.Label(button_frame, text="")
+        self.count_label.pack(side=tk.RIGHT, padx=5)
         
         ttk.Button(
             button_frame,
@@ -301,28 +324,42 @@ class ColumnSelector(ttk.Frame):
             width=15
         ).pack(side=tk.LEFT, padx=5)
         
-        ttk.Button(
+        self.next_button = ttk.Button(
             button_frame,
             text="下一步：选择路径并导出",
             command=self._on_next,
             width=25
-        ).pack(side=tk.LEFT, padx=5)
+        )
+        self.next_button.pack(side=tk.LEFT, padx=5)
+        self._update_count_label()
     
     def _select_file_columns(self, columns, select):
         """选择或取消选择指定文件的列"""
         for col in columns:
             if col in self.column_vars:
                 self.column_vars[col].set(select)
+        self._update_count_label()
     
     def _select_all(self):
         """全选"""
         for var in self.column_vars.values():
             var.set(True)
+        self._update_count_label()
     
     def _deselect_all(self):
         """全不选"""
         for var in self.column_vars.values():
             var.set(False)
+        self._update_count_label()
+
+    def _update_count_label(self):
+        """刷新已选列数量，并在没有选择时限制下一步。"""
+        selected_count = len([var for var in self.column_vars.values() if var.get()])
+        total_count = len(self.column_vars)
+        if self.count_label is not None:
+            self.count_label.config(text=f"已选择 {selected_count}/{total_count} 列")
+        if self.next_button is not None:
+            self.next_button.config(state=tk.NORMAL if selected_count else tk.DISABLED)
     
     def _on_back(self):
         """上一步按钮"""
@@ -338,7 +375,7 @@ class ColumnSelector(ttk.Frame):
         
         if not selected_columns:
             from tkinter import messagebox
-            messagebox.showwarning("警告", "请至少选择一列")
+            messagebox.showwarning("无法进入下一步", "请至少勾选一列作为导出内容。")
             return
         
         # 调用完成回调

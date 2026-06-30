@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from datetime import datetime
 from pathlib import Path
+from launcher.ui_theme import apply_app_theme
 
 
 class _NoopProgress:
@@ -120,6 +121,7 @@ def choose_folder_and_save_file(root=None):
     own_root = root is None
     if own_root:
         root = tk.Tk()
+        apply_app_theme(root)
     root.withdraw()  # 隐藏主窗口，仅作为对话框父窗口
 
     folder_path = filedialog.askdirectory(title="选择文件夹", parent=root)

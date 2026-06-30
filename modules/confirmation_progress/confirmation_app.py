@@ -12,6 +12,7 @@ from openpyxl.utils import get_column_letter
 import numpy as np
 import traceback
 import re
+from launcher.ui_theme import apply_app_theme
 
 # 全局配置
 DATE_FORMAT = '%Y-%m-%d'
@@ -32,6 +33,7 @@ def select_input_file(root=None):
     need_cleanup = root is None
     if need_cleanup:
         root = tk.Tk()
+        apply_app_theme(root)
         root.withdraw()
     try:
         print("=== 调试：开始文件选择 ===")
@@ -795,8 +797,10 @@ def main(root=None):
     need_mainloop = root is None
     if need_mainloop:
         root = tk.Tk()
+        apply_app_theme(root)
         root.withdraw()
     else:
+        apply_app_theme(root)
         root.withdraw()
     print("=" * 70)
     print("函证进度统计工具 - 修复项目名称显示问题")

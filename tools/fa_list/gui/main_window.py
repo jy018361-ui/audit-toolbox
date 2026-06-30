@@ -75,12 +75,43 @@ class MainWindow:
         self.unmatched_add_df = None
         self.unmatched_disp_df = None
         self.step_widgets = {}
+        self._closing = False
         
         # 创建界面
         self._create_widgets()
         
         # 绑定关闭事件
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def _dialog_parent(self):
+        try:
+            if self.root.winfo_exists() and not self._closing:
+                return self.root
+        except tk.TclError:
+            pass
+        return None
+
+    def _can_show_dialog(self) -> bool:
+        return self._dialog_parent() is not None
+
+    def _show_info(self, title: str, message: str) -> None:
+        parent = self._dialog_parent()
+        if parent is not None:
+            messagebox.showinfo(title, message, parent=parent)
+
+    def _show_warning(self, title: str, message: str) -> None:
+        parent = self._dialog_parent()
+        if parent is not None:
+            messagebox.showwarning(title, message, parent=parent)
+
+    def _show_error(self, title: str, message: str) -> None:
+        parent = self._dialog_parent()
+        if parent is not None:
+            messagebox.showerror(title, message, parent=parent)
+
+    def _ask_yes_no(self, title: str, message: str) -> bool:
+        parent = self._dialog_parent()
+        return bool(parent is not None and messagebox.askyesno(title, message, parent=parent))
 
     def _show_progress_dialog(self, title: str, message: str):
         """显示模态进度提示框（不定进度条），返回窗口对象。"""
@@ -267,7 +298,7 @@ class MainWindow:
     def _show_match_config(self):
         """显示匹配列配置界面（保留用于兼容）"""
         if self.file_handler.file1_df is None or self.file_handler.file2_df is None:
-            messagebox.showwarning("警告", "请先选择文件")
+            self._show_warning("警告", "请先选择文件")
             self.show_step(0)
             return
         
@@ -282,7 +313,7 @@ class MainWindow:
     def _show_data_preview(self):
         """显示数据预览界面"""
         if self.merged_df is None:
-            messagebox.showwarning("警告", "请先完成合并操作")
+            self._show_warning("警告", "请先完成合并操作")
             self.show_step(0)
             return
         
@@ -301,7 +332,7 @@ class MainWindow:
     def _show_column_selector(self):
         """显示列选择界面"""
         if self.merged_df is None:
-            messagebox.showwarning("警告", "请先完成合并操作")
+            self._show_warning("警告", "请先完成合并操作")
             self.show_step(0)
             return
         
@@ -318,7 +349,7 @@ class MainWindow:
     def _show_pivot_config(self):
         """显示数据透视配置界面"""
         if self.merged_df is None:
-            messagebox.showwarning("警告", "请先完成合并操作")
+            self._show_warning("警告", "请先完成合并操作")
             self.show_step(2)
             return
         
@@ -345,7 +376,7 @@ class MainWindow:
         """显示导出设置界面（category_col 仅来自映射列，与 _build_summary_config 一致）"""
         export_data = self.merged_df
         if export_data is None:
-            messagebox.showwarning("警告", "没有可导出的数据")
+            self._show_warning("警告", "没有可导出的数据")
             return
         summary_config = self._build_summary_config()
 
@@ -432,7 +463,7 @@ class MainWindow:
     def _show_column_selector(self):
         """显示导出列选择页面。"""
         if self.merged_df is None:
-            messagebox.showwarning("警告", "请先完成合并操作")
+            self._show_warning("警告", "请先完成合并操作")
             self.show_step(0)
             return
 
@@ -589,6 +620,8 @@ class MainWindow:
                 )
 
                 def _finish():
+                    if self._closing:
+                        return
                     try:
                         if progress_window is not None and progress_window.winfo_exists():
                             progress_window.destroy()
@@ -599,6 +632,8 @@ class MainWindow:
                 self.root.after(0, _finish)
             except Exception as e:
                 def _fail():
+                    if self._closing:
+                        return
                     try:
                         if progress_window is not None and progress_window.winfo_exists():
                             progress_window.destroy()
@@ -611,6 +646,8 @@ class MainWindow:
     
     def _on_direct_export_complete(self, success: bool, error_msg: str):
         """直接导出完成：更新状态并弹窗。检查是否有纠偏警告需要单独提示。"""
+        if not self._can_show_dialog():
+            return
         if success:
             self.update_status("导出完成")
             
@@ -627,38 +664,38 @@ class MainWindow:
                             correction_warnings.append(line)
             
             # 先显示导出成功消息
-            messagebox.showinfo("导出完成", "文件已成功导出！")
+            self._show_info("导出完成", "文件已成功导出！")
             
             # 如果有纠偏警告，分别显示弹窗
             for warning in correction_warnings:
                 if "【残值率纠偏】" in warning:
-                    messagebox.showwarning(
+                    self._show_warning(
                         "残值率纠偏提示",
                         f"{warning}\n\n请确认导出的FA List和新增清单_BKD中的残值率是否正确。"
                     )
                 elif "【使用寿命纠偏】" in warning:
-                    messagebox.showwarning(
+                    self._show_warning(
                         "使用寿命纠偏提示",
                         f"{warning}\n\n请确认导出的FA List和新增清单_BKD中的使用寿命(月)是否正确。"
                     )
                 elif "【未匹配资产变动清单】" in warning:
-                    messagebox.showwarning(
+                    self._show_warning(
                         "未匹配资产变动清单提示",
                         warning
                     )
                 elif "【导出提速】" in warning:
-                    messagebox.showwarning(
+                    self._show_warning(
                         "折旧测算公式填充提示",
                         warning
                     )
                 else:
-                    messagebox.showwarning(
+                    self._show_warning(
                         "导出提示",
                         warning
                     )
         else:
             self.update_status("导出失败")
-            messagebox.showerror("导出失败", error_msg)
+            self._show_error("导出失败", error_msg)
     
     def _on_preview_next(self):
         """预览界面点击「下一步：选择导出列」后的回调（已删除预览步骤，不再使用）"""
@@ -1050,6 +1087,8 @@ class MainWindow:
     
     def _on_merge_complete(self, success: bool, message: str, merged_df):
         """合并完成回调"""
+        if self._closing:
+            return
         # #region agent log
         sh = [len(merged_df), len(merged_df.columns)] if merged_df is not None and not merged_df.empty else None
         _dbg(sessionId="debug", runId="run1", hypothesisId="H3", location="main_window._on_merge_complete",
@@ -1075,7 +1114,7 @@ class MainWindow:
             _dbg(sessionId="debug", runId="run1", hypothesisId="H3", location="main_window.before_show_step_1",
                  message="before show_step(1)", data={})
             # #endregion
-            has_supplement = messagebox.askyesno(
+            has_supplement = self._ask_yes_no(
                 "补充清单确认",
                 "是否有新增清单和处置清单需要映射？\n\n"
                 "选择“是”：进入补充清单映射界面。\n"
@@ -1092,7 +1131,7 @@ class MainWindow:
                 self.update_status("已跳过补充清单映射")
                 self.show_step(2)
         else:
-            messagebox.showerror("合并失败", message)
+            self._show_error("合并失败", message)
             self.update_status("合并失败")
     
     def _on_columns_selected(self, selected_columns):
@@ -1103,6 +1142,7 @@ class MainWindow:
         summary_config = self._build_summary_config()
         default_name = f"FA_List_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         path = filedialog.asksaveasfilename(
+            parent=self.root,
             title="选择导出路径",
             defaultextension=".xlsx",
             filetypes=[("Excel文件", "*.xlsx"), ("CSV文件", "*.csv"), ("所有文件", "*.*")],
@@ -1269,7 +1309,7 @@ class MainWindow:
         """步骤点击事件处理"""
         # 检查是否可以跳转到目标步骤
         if not self._can_jump_to_step(step_index):
-            messagebox.showwarning("警告", "请先完成前置步骤")
+            self._show_warning("警告", "请先完成前置步骤")
             return
         
         # 跳转到目标步骤
@@ -1292,7 +1332,7 @@ class MainWindow:
     
     def _on_export_complete(self):
         """导出完成回调"""
-        messagebox.showinfo("导出完成", "文件已成功导出！")
+        self._show_info("导出完成", "文件已成功导出！")
         self.update_status("导出完成")
     
     def update_status(self, message: str):
@@ -1303,7 +1343,8 @@ class MainWindow:
     def on_closing(self):
         """关闭窗口事件"""
         prompt = ("关闭", "确定要关闭此工具吗？") if self._embedded else ("退出", "确定要退出吗？")
-        if messagebox.askokcancel(prompt[0], prompt[1]):
+        if messagebox.askokcancel(prompt[0], prompt[1], parent=self.root):
+            self._closing = True
             self.root.destroy()
     
     def run(self):

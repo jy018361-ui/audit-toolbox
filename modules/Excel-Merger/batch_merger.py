@@ -4,13 +4,24 @@ import pandas as pd
 import os
 import threading
 import warnings
+import csv
 from datetime import datetime
 from pathlib import Path
+from launcher.ui_theme import (
+    add_standard_button,
+    apply_app_theme,
+    create_button_group,
+    create_section,
+    create_standard_layout,
+    fit_window_to_screen,
+)
 
 # 忽略警告
 warnings.filterwarnings("ignore")
 
 SUPPORTED_TABLE_EXTENSIONS = ('.xlsx', '.xls', '.csv', '.txt')
+EXCEL_MAX_ROWS = 1048576
+STREAM_XLSX_EXTENSIONS = ('.xlsx', '.xlsm')
 
 try:
     import windnd
@@ -35,14 +46,22 @@ except ImportError:
     fastexcel = None
     HAS_POLARS = False
 
+try:
+    from python_calamine import load_workbook as load_calamine_workbook
+    HAS_CALAMINE = True
+except ImportError:
+    load_calamine_workbook = None
+    HAS_CALAMINE = False
+
 # ==========================================
 # V2.3: 页签选择弹窗 (保持 V2.2 逻辑不变)
 # ==========================================
 class SheetSelectDialog(tk.Toplevel):
     def __init__(self, parent, file_list, default_file_index):
         super().__init__(parent)
+        apply_app_theme(self)
         self.title("检测到多Sheet - 请定义合并范围")
-        self.geometry("500x600")
+        fit_window_to_screen(self, 520, 620, 460, 420)
         self.transient(parent)
         self.grab_set()
         
@@ -53,7 +72,7 @@ class SheetSelectDialog(tk.Toplevel):
         # 底部按钮
         f_bot = tk.Frame(self, pady=10, bg="#f0f0f0")
         f_bot.pack(side="bottom", fill="x")
-        ttk.Button(f_bot, text="✅ 确定合并", command=self.on_confirm).pack(side="right", padx=20)
+        ttk.Button(f_bot, text="确定合并", command=self.on_confirm).pack(side="right", padx=20)
         ttk.Button(f_bot, text="取消", command=self.destroy).pack(side="right")
         
         # 1. 基准文件
@@ -156,70 +175,82 @@ class BatchMergeApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Excel/CSV 批量合并工具 By CSDC      !!!大文件合并建议选CSV格式!!!")
-        self.root.geometry("850x650")
+        apply_app_theme(self.root)
+        fit_window_to_screen(self.root, 900, 680, 760, 560)
 
         self.file_list = []
+        self.read_warnings = []
         self.var_mode = tk.StringVar(value="one_sheet")
         self.var_direction = tk.StringVar(value="vertical")
+        self.is_processing = False
+        self.btn_start = None
         
         self.setup_ui()
         self.update_ui_state()
 
     def setup_ui(self):
-        frame_top = tk.LabelFrame(self.root, text=" 1. 文件源 ", padx=10, pady=5)
-        frame_top.pack(fill="both", expand=True, padx=10, pady=5)
-        
-        f_list = tk.Frame(frame_top)
-        f_list.pack(side="left", fill="both", expand=True)
+        _header, body, footer = create_standard_layout(
+            self.root,
+            "Excel/CSV 批量合并",
+            "添加文件、配置合并规则，然后执行合并",
+        )
+        body.rowconfigure(0, weight=1)
+        body.rowconfigure(1, weight=0)
+        body.columnconfigure(0, weight=1)
+
+        frame_top = create_section(body, "1. 文件源", row=0, pady=(0, 10))
+        frame_top.columnconfigure(0, weight=1)
+        frame_top.columnconfigure(1, weight=0)
+        frame_top.rowconfigure(0, weight=1)
+        frame_top.rowconfigure(1, weight=0)
+
+        f_list = ttk.Frame(frame_top)
+        f_list.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
         self.lb_files = tk.Listbox(f_list, selectmode="extended", height=10, bg="#f9f9f9")
         sb = ttk.Scrollbar(f_list, orient="vertical", command=self.lb_files.yview)
         self.lb_files.configure(yscrollcommand=sb.set)
         self.lb_files.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
-        
-        f_btns = tk.Frame(frame_top)
-        f_btns.pack(side="right", fill="y", padx=10)
-        ttk.Button(f_btns, text="➕ 添加文件", command=self.add_files).pack(fill="x", pady=3)
-        ttk.Button(f_btns, text="📂 扫描文件夹", command=self.add_folder).pack(fill="x", pady=3)
+
+        f_btns = ttk.Frame(frame_top)
+        f_btns.grid(row=0, column=1, sticky="n")
+        ttk.Button(f_btns, text="添加文件", command=self.add_files, width=14).pack(fill="x", pady=3)
+        ttk.Button(f_btns, text="扫描文件夹", command=self.add_folder, width=14).pack(fill="x", pady=3)
         ttk.Separator(f_btns, orient="horizontal").pack(fill="x", pady=8)
-        ttk.Button(f_btns, text="⬆️ 上移", command=lambda: self.move_item(-1)).pack(fill="x", pady=3)
-        ttk.Button(f_btns, text="⬇️ 下移", command=lambda: self.move_item(1)).pack(fill="x", pady=3)
+        ttk.Button(f_btns, text="上移", command=lambda: self.move_item(-1), width=14).pack(fill="x", pady=3)
+        ttk.Button(f_btns, text="下移", command=lambda: self.move_item(1), width=14).pack(fill="x", pady=3)
         ttk.Separator(f_btns, orient="horizontal").pack(fill="x", pady=8)
-        ttk.Button(f_btns, text="➖ 移除选中", command=self.remove_files).pack(fill="x", pady=3)
-        ttk.Button(f_btns, text="🗑️ 清空列表", command=self.clear_files).pack(fill="x", pady=3)
-        
-        self.lbl_status = tk.Label(frame_top, text="待处理: 0 个文件", fg="gray")
-        self.lbl_status.pack(side="bottom", anchor="w", pady=(5,0))
+        ttk.Button(f_btns, text="移除选中", command=self.remove_files, width=14).pack(fill="x", pady=3)
+        ttk.Button(f_btns, text="清空列表", command=self.clear_files, width=14).pack(fill="x", pady=3)
+
+        self.lbl_status = ttk.Label(frame_top, text="待处理 0 个文件", style="Muted.TLabel")
+        self.lbl_status.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.setup_drag_drop(self.root, frame_top, f_list, self.lb_files)
         if HAS_WINDND:
-            self.lbl_status.config(text="待处理: 0 个文件（可拖拽文件/文件夹到文件源区域）")
+            self.lbl_status.config(text="待处理 0 个文件（可拖拽文件/文件夹到文件源区域）")
 
-        frame_mid = tk.LabelFrame(self.root, text=" 2. 合并规则 ", padx=10, pady=10)
-        frame_mid.pack(fill="x", padx=10, pady=5)
-        
-        f_mode = tk.Frame(frame_mid)
+        frame_mid = create_section(body, "2. 合并规则", row=1)
+
+        f_mode = ttk.Frame(frame_mid)
         f_mode.pack(fill="x", pady=2)
-        tk.Label(f_mode, text="输出目标：", font=("微软雅黑", 9, "bold")).pack(side="left")
-        ttk.Radiobutton(f_mode, text="合并成一张大表 (One Sheet)", variable=self.var_mode, value="one_sheet", command=self.update_ui_state).pack(side="left", padx=15)
-        ttk.Radiobutton(f_mode, text="合并成一个工作簿 (多Sheet)", variable=self.var_mode, value="one_workbook", command=self.update_ui_state).pack(side="left", padx=5)
+        ttk.Label(f_mode, text="输出目标:", width=10).pack(side="left")
+        ttk.Radiobutton(f_mode, text="合并成一张大表 (One Sheet)", variable=self.var_mode, value="one_sheet", command=self.update_ui_state).pack(side="left", padx=(0, 18))
+        ttk.Radiobutton(f_mode, text="合并成一个工作簿 (多 Sheet)", variable=self.var_mode, value="one_workbook", command=self.update_ui_state).pack(side="left")
 
         ttk.Separator(frame_mid, orient="horizontal").pack(fill="x", pady=10)
 
-        self.f_opts = tk.Frame(frame_mid)
+        self.f_opts = ttk.Frame(frame_mid)
         self.f_opts.pack(fill="x")
-        tk.Label(self.f_opts, text="拼接方向：", font=("微软雅黑", 9, "bold")).pack(side="left")
-        self.rb_v = ttk.Radiobutton(self.f_opts, text="⬇️ 纵向堆叠 (上下拼)", variable=self.var_direction, value="vertical", command=self.update_ui_state)
-        self.rb_v.pack(side="left", padx=10)
-        self.rb_h = ttk.Radiobutton(self.f_opts, text="➡️ 横向拼接 (左右拼)", variable=self.var_direction, value="horizontal", command=self.update_ui_state)
-        self.rb_h.pack(side="left", padx=10)
+        ttk.Label(self.f_opts, text="拼接方向:", width=10).pack(side="left")
+        self.rb_v = ttk.Radiobutton(self.f_opts, text="纵向堆叠 (上下拼)", variable=self.var_direction, value="vertical", command=self.update_ui_state)
+        self.rb_v.pack(side="left", padx=(0, 18))
+        self.rb_h = ttk.Radiobutton(self.f_opts, text="横向拼接 (左右拼)", variable=self.var_direction, value="horizontal", command=self.update_ui_state)
+        self.rb_h.pack(side="left")
 
-        frame_bot = tk.Frame(self.root, pady=15)
-        frame_bot.pack(fill="x", padx=15)
-        self.pb = ttk.Progressbar(frame_bot, mode="indeterminate")
-        self.pb.pack(fill="x", pady=5)
-        btn_run = ttk.Button(frame_bot, text="🚀 开始执行合并", command=self.prepare_and_start)
-        btn_run.pack(fill="x", ipady=5)
-
+        self.pb = ttk.Progressbar(footer, mode="indeterminate")
+        self.pb.pack(side="left", fill="x", expand=True, padx=(0, 12), pady=2)
+        btn_group = create_button_group(footer)
+        self.btn_start = add_standard_button(btn_group, "开始合并", self.prepare_and_start)
     def update_ui_state(self):
         mode = self.var_mode.get()
         children = self.f_opts.winfo_children()
@@ -317,6 +348,8 @@ class BatchMergeApp:
 
     # --- 核心逻辑 ---
     def prepare_and_start(self):
+        if self.is_processing:
+            return
         if not self.file_list:
             return messagebox.showwarning("提示", "请先添加需要合并的文件！")
         
@@ -346,8 +379,45 @@ class BatchMergeApp:
         )
         if not save_path: return
 
+        self._set_processing_state(True, f"正在合并 {len(self.file_list)} 个文件，请稍候...")
         self.pb.start(10)
         threading.Thread(target=self.run_process, args=(save_path, sheet_config), daemon=True).start()
+
+    def _set_processing_state(self, processing, status_text=None):
+        self.is_processing = processing
+        if self.btn_start is not None:
+            self.btn_start.configure(state="disabled" if processing else "normal")
+        if status_text:
+            self.lbl_status.config(text=status_text)
+
+    def _reset_read_warnings(self):
+        self.read_warnings = []
+
+    def _record_read_warning(self, file_path, sheet_name=None, reason="读取失败"):
+        file_name = os.path.basename(str(file_path))
+        sheet_part = f" / {sheet_name}" if sheet_name else ""
+        message = f"{file_name}{sheet_part}: {reason}"
+        if message not in self.read_warnings:
+            self.read_warnings.append(message)
+
+    def _build_read_warning_message(self, extra_warning=None):
+        parts = []
+        if extra_warning:
+            parts.append(str(extra_warning))
+        if self.read_warnings:
+            shown = self.read_warnings[:12]
+            warning = "以下文件或 Sheet 未成功合并，请核对源文件：\n" + "\n".join(f"- {item}" for item in shown)
+            if len(self.read_warnings) > len(shown):
+                warning += f"\n- 另有 {len(self.read_warnings) - len(shown)} 项未显示"
+            parts.append(warning)
+        return "\n\n".join(parts)
+
+    def _notify_success(self, save_path, extra_warning=None):
+        warning = self._build_read_warning_message(extra_warning)
+        if warning:
+            self.on_success_with_warning(save_path, warning)
+        else:
+            self.on_success(save_path)
 
     def get_target_sheet_names_for_com(self, workbook, sheet_config):
         all_sheets = [workbook.Worksheets(i).Name for i in range(1, workbook.Worksheets.Count + 1)]
@@ -519,8 +589,326 @@ class BatchMergeApp:
         if not wrote_any:
             raise Exception("没有读取到有效数据")
 
+    def write_vertical_csv_calamine_stream(self, save_path, sheet_config, is_physical):
+        wrote_any = False
+        wrote_header = False
+        with open(save_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            for fp, sheet_name, include_sheet_col, row_iter in self.iter_calamine_sheet_sources(sheet_config, is_physical):
+                f_base = os.path.basename(fp)
+                sheet_rows = 0
+                for values in row_iter:
+                    if not is_physical and not wrote_header:
+                        header_row = ["Source File"]
+                        if include_sheet_col:
+                            header_row.append("Source Sheet")
+                        header_row.extend(values)
+                        writer.writerow(header_row)
+                        wrote_header = True
+                        continue
+
+                    out_row = [f_base]
+                    if include_sheet_col:
+                        out_row.append(sheet_name)
+                    out_row.extend(values)
+                    writer.writerow(out_row)
+                    sheet_rows += 1
+                    wrote_any = True
+                if sheet_rows == 0:
+                    self._record_read_warning(fp, sheet_name, "未读取到有效数据")
+        if not wrote_any:
+            raise Exception("没有读取到有效数据")
+
+    def can_stream_vertical_xlsx(self):
+        return all(f.lower().endswith(STREAM_XLSX_EXTENSIONS) for f in self.file_list)
+
+    def get_target_sheet_names_for_openpyxl(self, workbook, sheet_config):
+        all_sheets = workbook.sheetnames
+        action = sheet_config.get("action", "default")
+        if action == "match_selected":
+            targets = set(sheet_config.get("targets", []))
+            return [name for name in all_sheets if name in targets]
+        if action == "merge_all":
+            return all_sheets
+        return all_sheets[:1]
+
+    def get_target_sheet_names_for_calamine(self, workbook, sheet_config):
+        all_sheets = workbook.sheet_names
+        action = sheet_config.get("action", "default")
+        if action == "match_selected":
+            targets = set(sheet_config.get("targets", []))
+            return [name for name in all_sheets if name in targets]
+        if action == "merge_all":
+            return all_sheets
+        return all_sheets[:1]
+
+    def iter_openpyxl_rows_for_merge(self, worksheet, auto_header):
+        rows_iter = worksheet.iter_rows(values_only=True)
+        if not auto_header:
+            for row in rows_iter:
+                if row and any(value is not None and str(value) != "" for value in row):
+                    yield list(row)
+            return
+
+        preview = []
+        first_row_index = None
+        first_col_index = 0
+        for idx, row in enumerate(rows_iter):
+            row_values = list(row or [])
+            preview.append(row_values)
+            if first_row_index is None:
+                for col_idx, value in enumerate(row_values):
+                    if value is not None and str(value) != "":
+                        first_row_index = idx
+                        first_col_index = col_idx
+                        break
+            if len(preview) >= 20 and first_row_index is not None:
+                break
+
+        if first_row_index is None:
+            return
+
+        first_data_row = preview[first_row_index][first_col_index:]
+        has_num = False
+        for value in first_data_row:
+            if value is None or str(value) == "":
+                continue
+            try:
+                float(str(value).replace(',', ''))
+                has_num = True
+                break
+            except Exception:
+                continue
+
+        start_index = first_row_index if has_num else first_row_index + 1
+        header = None if has_num else [str(v) if v is not None else "" for v in first_data_row]
+
+        if header is not None:
+            yield header
+
+        for row in preview[start_index:]:
+            row_values = row[first_col_index:]
+            if row_values and any(value is not None and str(value) != "" for value in row_values):
+                yield row_values
+
+        for row in rows_iter:
+            row_values = list(row or [])[first_col_index:]
+            if row_values and any(value is not None and str(value) != "" for value in row_values):
+                yield row_values
+
+    def iter_calamine_rows_for_merge(self, worksheet, auto_header):
+        rows_iter = worksheet.iter_rows()
+        if not auto_header:
+            for row in rows_iter:
+                if row and any(value is not None and str(value) != "" for value in row):
+                    yield list(row)
+            return
+
+        preview = []
+        first_row_index = None
+        first_col_index = 0
+        for idx, row in enumerate(rows_iter):
+            row_values = list(row or [])
+            preview.append(row_values)
+            if first_row_index is None:
+                for col_idx, value in enumerate(row_values):
+                    if value is not None and str(value) != "":
+                        first_row_index = idx
+                        first_col_index = col_idx
+                        break
+            if len(preview) >= 20 and first_row_index is not None:
+                break
+
+        if first_row_index is None:
+            return
+
+        first_data_row = preview[first_row_index][first_col_index:]
+        has_num = False
+        for value in first_data_row:
+            if value is None or str(value) == "":
+                continue
+            try:
+                float(str(value).replace(',', ''))
+                has_num = True
+                break
+            except Exception:
+                continue
+
+        start_index = first_row_index if has_num else first_row_index + 1
+        header = None if has_num else [str(v) if v is not None else "" for v in first_data_row]
+
+        if header is not None:
+            yield header
+
+        for row in preview[start_index:]:
+            row_values = row[first_col_index:]
+            if row_values and any(value is not None and str(value) != "" for value in row_values):
+                yield row_values
+
+        for row in rows_iter:
+            row_values = list(row or [])[first_col_index:]
+            if row_values and any(value is not None and str(value) != "" for value in row_values):
+                yield row_values
+
+    def write_vertical_xlsx_rows_stream(self, save_path, sheet_config, is_physical, sheet_sources):
+        from openpyxl import Workbook
+
+        out_wb = Workbook(write_only=True)
+        current_ws = None
+        current_row = 0
+        sheet_no = 0
+        wrote_any = False
+        wrote_header = False
+        header_row = None
+
+        def create_output_sheet():
+            nonlocal current_ws, current_row, sheet_no
+            sheet_no += 1
+            title = "Merged" if sheet_no == 1 else f"Merged_{sheet_no}"
+            current_ws = out_wb.create_sheet(title=title)
+            current_row = 0
+            if header_row is not None and not is_physical:
+                current_ws.append(header_row)
+                current_row = 1
+
+        create_output_sheet()
+
+        for fp, sheet_name, include_sheet_col, row_iter in sheet_sources:
+            f_base = os.path.basename(fp)
+            sheet_rows = 0
+            for values in row_iter:
+                if not is_physical and not wrote_header:
+                    header_row = ["Source File"]
+                    if include_sheet_col:
+                        header_row.append("Source Sheet")
+                    header_row.extend(values)
+                    current_ws.append(header_row)
+                    current_row += 1
+                    wrote_header = True
+                    continue
+
+                out_row = [f_base]
+                if include_sheet_col:
+                    out_row.append(sheet_name)
+                out_row.extend(values)
+
+                if current_row >= EXCEL_MAX_ROWS:
+                    create_output_sheet()
+                current_ws.append(out_row)
+                current_row += 1
+                sheet_rows += 1
+                wrote_any = True
+            if sheet_rows == 0:
+                self._record_read_warning(fp, sheet_name, "未读取到有效数据")
+
+        if not wrote_any:
+            raise Exception("没有读取到有效数据")
+        out_wb.save(save_path)
+
+    def write_vertical_xlsx_rows_xlsxwriter_stream(self, save_path, sheet_config, is_physical, sheet_sources):
+        workbook = xlsxwriter.Workbook(save_path, {'constant_memory': True})
+        workbook.use_zip64()
+        current_ws = None
+        current_row = 0
+        sheet_no = 0
+        wrote_any = False
+        wrote_header = False
+        header_row = None
+
+        def create_output_sheet():
+            nonlocal current_ws, current_row, sheet_no
+            sheet_no += 1
+            title = "Merged" if sheet_no == 1 else f"Merged_{sheet_no}"
+            current_ws = workbook.add_worksheet(title)
+            current_row = 0
+            if header_row is not None and not is_physical:
+                current_ws.write_row(current_row, 0, header_row)
+                current_row = 1
+
+        try:
+            create_output_sheet()
+
+            for fp, sheet_name, include_sheet_col, row_iter in sheet_sources:
+                f_base = os.path.basename(fp)
+                sheet_rows = 0
+                for values in row_iter:
+                    if not is_physical and not wrote_header:
+                        header_row = ["Source File"]
+                        if include_sheet_col:
+                            header_row.append("Source Sheet")
+                        header_row.extend(values)
+                        current_ws.write_row(current_row, 0, header_row)
+                        current_row += 1
+                        wrote_header = True
+                        continue
+
+                    out_row = [f_base]
+                    if include_sheet_col:
+                        out_row.append(sheet_name)
+                    out_row.extend(values)
+
+                    if current_row >= EXCEL_MAX_ROWS:
+                        create_output_sheet()
+                    current_ws.write_row(current_row, 0, out_row)
+                    current_row += 1
+                    sheet_rows += 1
+                    wrote_any = True
+                if sheet_rows == 0:
+                    self._record_read_warning(fp, sheet_name, "未读取到有效数据")
+
+            if not wrote_any:
+                raise Exception("没有读取到有效数据")
+        finally:
+            workbook.close()
+
+    def iter_openpyxl_sheet_sources(self, sheet_config, is_physical):
+        from openpyxl import load_workbook
+
+        for fp in self.file_list:
+            src_wb = None
+            try:
+                src_wb = load_workbook(fp, read_only=True, data_only=True, keep_links=False)
+                target_sheets = self.get_target_sheet_names_for_openpyxl(src_wb, sheet_config)
+                if not target_sheets:
+                    self._record_read_warning(fp, reason="未找到符合条件的 Sheet")
+                include_sheet_col = len(target_sheets) > 1 or sheet_config.get('action') != 'default'
+                for sheet_name in target_sheets:
+                    ws = src_wb[sheet_name]
+                    row_iter = self.iter_openpyxl_rows_for_merge(ws, auto_header=(not is_physical))
+                    yield fp, sheet_name, include_sheet_col, row_iter
+            finally:
+                if src_wb is not None:
+                    src_wb.close()
+
+    def iter_calamine_sheet_sources(self, sheet_config, is_physical):
+        for fp in self.file_list:
+            src_wb = load_calamine_workbook(fp)
+            target_sheets = self.get_target_sheet_names_for_calamine(src_wb, sheet_config)
+            if not target_sheets:
+                self._record_read_warning(fp, reason="未找到符合条件的 Sheet")
+            include_sheet_col = len(target_sheets) > 1 or sheet_config.get('action') != 'default'
+            for sheet_name in target_sheets:
+                ws = src_wb.get_sheet_by_name(sheet_name)
+                row_iter = self.iter_calamine_rows_for_merge(ws, auto_header=(not is_physical))
+                yield fp, sheet_name, include_sheet_col, row_iter
+
+    def write_vertical_xlsx_calamine_stream(self, save_path, sheet_config, is_physical):
+        sheet_sources = self.iter_calamine_sheet_sources(sheet_config, is_physical)
+        if HAS_XLSXWRITER:
+            self.write_vertical_xlsx_rows_xlsxwriter_stream(save_path, sheet_config, is_physical, sheet_sources)
+        else:
+            self.write_vertical_xlsx_rows_stream(save_path, sheet_config, is_physical, sheet_sources)
+
+    def write_vertical_xlsx_openpyxl_stream(self, save_path, sheet_config, is_physical):
+        sheet_sources = self.iter_openpyxl_sheet_sources(sheet_config, is_physical)
+        if HAS_XLSXWRITER:
+            self.write_vertical_xlsx_rows_xlsxwriter_stream(save_path, sheet_config, is_physical, sheet_sources)
+        else:
+            self.write_vertical_xlsx_rows_stream(save_path, sheet_config, is_physical, sheet_sources)
+
     def run_process(self, save_path, sheet_config):
         try:
+            self._reset_read_warnings()
             mode = self.var_mode.get()
             
             # === 1. 多 Sheet 模式 (带 Reference) ===
@@ -530,7 +918,7 @@ class BatchMergeApp:
 
                 try:
                     self.copy_workbook_sheets_with_com(save_path, sheet_config)
-                    self.root.after(0, lambda: self.on_success(save_path))
+                    self.root.after(0, lambda: self._notify_success(save_path))
                     return
                 except Exception as com_err:
                     fallback_warning = (
@@ -600,7 +988,7 @@ class BatchMergeApp:
                         # 激活 Reference 页为默认打开页
                         ws_ref.activate()
                 if 'fallback_warning' in locals():
-                    self.root.after(0, lambda msg=fallback_warning: self.on_success_with_warning(save_path, msg))
+                    self.root.after(0, lambda msg=fallback_warning: self._notify_success(save_path, msg))
                     return
 
             # === 2. 单 Sheet 合并模式 ===
@@ -608,23 +996,39 @@ class BatchMergeApp:
                 direction = self.var_direction.get()
                 is_physical = (direction == "vertical")
                 if save_path.lower().endswith(".csv") and direction == "vertical":
+                    if HAS_CALAMINE and self.can_stream_vertical_xlsx():
+                        self.write_vertical_csv_calamine_stream(save_path, sheet_config, is_physical)
+                        self.root.after(0, lambda: self._notify_success(save_path))
+                        return
                     if HAS_POLARS:
+                        warning_checkpoint = len(self.read_warnings)
                         try:
                             self.write_vertical_csv_polars_stream(save_path, sheet_config, is_physical)
-                            self.root.after(0, lambda: self.on_success(save_path))
+                            self.root.after(0, lambda: self._notify_success(save_path))
                             return
                         except Exception as fast_err:
+                            self.read_warnings = self.read_warnings[:warning_checkpoint]
                             print(f"polars csv stream failed, fallback to pandas: {fast_err}")
                     self.write_vertical_csv_pandas_stream(save_path, sheet_config, is_physical)
-                    self.root.after(0, lambda: self.on_success(save_path))
+                    self.root.after(0, lambda: self._notify_success(save_path))
+                    return
+
+                if save_path.lower().endswith(".xlsx") and direction == "vertical" and self.can_stream_vertical_xlsx():
+                    if HAS_CALAMINE:
+                        self.write_vertical_xlsx_calamine_stream(save_path, sheet_config, is_physical)
+                    else:
+                        self.write_vertical_xlsx_openpyxl_stream(save_path, sheet_config, is_physical)
+                    self.root.after(0, lambda: self._notify_success(save_path))
                     return
 
                 if HAS_POLARS and HAS_XLSXWRITER:
+                    warning_checkpoint = len(self.read_warnings)
                     try:
                         self.run_process_single_polars(save_path, sheet_config)
-                        self.root.after(0, lambda: self.on_success(save_path))
+                        self.root.after(0, lambda: self._notify_success(save_path))
                         return
                     except Exception as fast_err:
+                        self.read_warnings = self.read_warnings[:warning_checkpoint]
                         print(f"polars fast path failed, fallback to pandas: {fast_err}")
 
                 dfs = []
@@ -698,7 +1102,7 @@ class BatchMergeApp:
                                         except: pass
                                         current_row += 1
 
-            self.root.after(0, lambda: self.on_success(save_path))
+            self.root.after(0, lambda: self._notify_success(save_path))
 
         except Exception as e:
             err_msg = str(e); print(err_msg)
@@ -815,12 +1219,21 @@ class BatchMergeApp:
     def load_all_sheets_polars(self, fp, sheet_config, auto_header=True):
         result = {}
         if fp.lower().endswith(('.csv', '.txt')):
-            df = self.load_single_sheet_data_polars(fp, None, auto_header)
-            if df is not None:
-                result["CSV"] = df
+            try:
+                df = self.load_single_sheet_data_polars(fp, None, auto_header)
+                if df is not None and not df.is_empty():
+                    result["CSV"] = df
+                else:
+                    self._record_read_warning(fp, reason="未读取到有效数据")
+            except Exception as exc:
+                self._record_read_warning(fp, reason=f"读取失败：{exc}")
             return result
 
-        all_sheets = fastexcel.read_excel(fp).sheet_names
+        try:
+            all_sheets = fastexcel.read_excel(fp).sheet_names
+        except Exception as exc:
+            self._record_read_warning(fp, reason=f"读取工作簿失败：{exc}")
+            return result
         action = sheet_config.get("action", "default")
         if action == "match_selected":
             req = sheet_config.get("targets", [])
@@ -830,10 +1243,19 @@ class BatchMergeApp:
         else:
             targets = [all_sheets[0]]
 
+        if not targets:
+            self._record_read_warning(fp, reason="未找到符合条件的 Sheet")
+            return result
+
         for s in targets:
-            df = self.load_single_sheet_data_polars(fp, s, auto_header)
-            if df is not None:
-                result[s] = df
+            try:
+                df = self.load_single_sheet_data_polars(fp, s, auto_header)
+                if df is not None and not df.is_empty():
+                    result[s] = df
+                else:
+                    self._record_read_warning(fp, s, "未读取到有效数据")
+            except Exception as exc:
+                self._record_read_warning(fp, s, f"读取失败：{exc}")
         return result
 
     def load_single_sheet_data_polars(self, fp, sheet_name, auto_header):
@@ -918,7 +1340,10 @@ class BatchMergeApp:
         try:
             if fp.lower().endswith(('.csv', '.txt')):
                 df = self.load_single_sheet_data(fp, None, auto_header)
-                if df is not None: result["CSV"] = df
+                if df is not None and not df.empty:
+                    result["CSV"] = df
+                else:
+                    self._record_read_warning(fp, reason="未读取到有效数据")
                 return result
 
             xls = pd.ExcelFile(fp)
@@ -933,12 +1358,21 @@ class BatchMergeApp:
                 targets = all_sheets
             else:
                 targets = [all_sheets[0]]
+
+            if not targets:
+                self._record_read_warning(fp, reason="未找到符合条件的 Sheet")
+                return result
             
             for s in targets:
                 df = self.load_single_sheet_data(fp, s, auto_header)
-                if df is not None: result[s] = df
+                if df is not None and not df.empty:
+                    result[s] = df
+                else:
+                    self._record_read_warning(fp, s, "未读取到有效数据")
             return result
-        except: return {}
+        except Exception as exc:
+            self._record_read_warning(fp, reason=f"读取工作簿失败：{exc}")
+            return {}
 
     def load_single_sheet_data(self, fp, sheet_name, auto_header):
         try:
@@ -982,7 +1416,8 @@ class BatchMergeApp:
             
             if s_c > 0: df = df.iloc[:, s_c:]
             return df
-        except: return None
+        except Exception:
+            return None
 
     def clean_sheet_name(self, filename):
         name = os.path.splitext(filename)[0]
@@ -1003,14 +1438,17 @@ class BatchMergeApp:
 
     def on_success(self, path):
         self.pb.stop()
+        self._set_processing_state(False, f"合并完成：{len(self.file_list)} 个文件")
         messagebox.showinfo("完成", f"合并成功！\n文件已保存至：\n{path}")
 
     def on_success_with_warning(self, path, warning):
         self.pb.stop()
+        self._set_processing_state(False, f"合并完成：{len(self.file_list)} 个文件（有提示）")
         messagebox.showwarning("完成（已降级导出）", f"合并已完成！\n文件已保存至：\n{path}\n\n{warning}")
         
     def on_error(self, msg):
         self.pb.stop()
+        self._set_processing_state(False, "合并失败，请检查文件或规则后重试")
         messagebox.showerror("发生错误", msg)
 
 if __name__ == "__main__":

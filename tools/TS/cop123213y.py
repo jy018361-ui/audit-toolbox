@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Timesheet Pivot GUI
 
@@ -36,6 +36,7 @@ try:
 except Exception:
     cal_load_workbook = None
 from tkinter import filedialog, messagebox, ttk
+from launcher.ui_theme import add_standard_button, create_button_group, create_standard_layout
 try:
     import polars as pl
 except Exception:
@@ -303,11 +304,18 @@ class TimesheetPivotApp:
         self.root.minsize(920, 320)
 
     def _build_scrollable_container(self) -> None:
-        self.canvas = tk.Canvas(self.root, highlightthickness=0)
-        self.v_scroll = ttk.Scrollbar(self.root, orient="vertical", command=self.canvas.yview)
+        _header, body, self.footer = create_standard_layout(
+            self.root,
+            "TS 管理",
+            "选择目标文件、设置筛选条件并导出默认双 Sheet",
+        )
+        self.canvas = tk.Canvas(body, highlightthickness=0)
+        self.v_scroll = ttk.Scrollbar(body, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.v_scroll.set)
-        self.v_scroll.pack(side="right", fill="y")
-        self.canvas.pack(side="left", fill="both", expand=True)
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.v_scroll.grid(row=0, column=1, sticky="ns")
 
         self.main = ttk.Frame(self.canvas)
         self.canvas_window = self.canvas.create_window((0, 0), window=self.main, anchor="nw")
@@ -366,24 +374,13 @@ class TimesheetPivotApp:
         self.filter_rows_ui = []
         self._add_filter_row_ui()
 
-        bottom = ttk.LabelFrame(self.main, text="3) 一键导出（默认 by经理 + by项目）")
-        bottom.pack(fill="x", padx=10, pady=(6, 10))
-        export_btn = tk.Button(
-            bottom,
-            text="导出默认双sheet",
-            command=self._export_default_dual,
-            bg="#0A66C2",
-            fg="white",
-            activebackground="#084E97",
-            activeforeground="white",
-            font=("Microsoft YaHei UI", 12, "bold"),
-            padx=28,
-            pady=8,
-            relief="raised",
-            bd=2,
-        )
-        export_btn.pack(side="left", padx=8, pady=8)
-        ttk.Label(bottom, text="将按默认字段配置导出到同一个Excel：by经理 + by项目").pack(side="left", padx=12, pady=8)
+        ttk.Label(
+            self.footer,
+            text="将按默认字段配置导出到同一个 Excel：by经理 + by项目",
+            style="Muted.TLabel",
+        ).pack(side="left", fill="x", expand=True)
+        btn_group = create_button_group(self.footer)
+        add_standard_button(btn_group, "导出默认双Sheet", self._export_default_dual)
 
     def _open_pivot_window(self, mode: str) -> None:
         messagebox.showinfo("提示", "数据透视配置窗口已停用，请在首页直接导出默认双sheet。")

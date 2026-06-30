@@ -42,6 +42,8 @@ hiddenimports = [
     "python_calamine",
     "fastexcel",
     "windnd",
+    "launcher.llm_client",
+    "launcher.llm_settings",
 ]
 hiddenimports += collect_submodules("fastexcel")
 

@@ -10,6 +10,7 @@
 - **函证进度工具**：整理函证流程中的清单、进度和导出结果。
 - **文件目录工具**：生成目录清单、超链接和辅助检查结果。
 - **统一 Hub**：通过一个入口启动各子工具，尽量保持一致的窗口布局、状态反馈和错误提示。
+- **LLM 辅助能力**：可选配置 OpenAI 兼容接口，用于字段映射建议、映射复核和导出结果分析。
 
 ## 环境要求
 
@@ -35,6 +36,25 @@ python suite_main.py
 ```bash
 python -m unittest discover -s tests -p "test_*.py"
 ```
+
+## LLM 辅助能力
+
+Hub 顶部提供 **LLM 设置**入口。启用后，FA List 和看账工具可以调用 OpenAI 兼容 API 辅助完成字段映射建议、字段复核、匹配键复核和导出分析。
+
+LLM 配置保存在当前 Windows 用户目录下：
+
+```text
+%APPDATA%\AuditToolbox\llm_settings.json
+```
+
+该配置文件只保存在本机，不提交到 GitHub。仓库中的代码只包含默认空配置和调用逻辑，不包含真实 API Key。
+
+支持的常见配置项：
+
+- `base_url`：OpenAI 兼容接口地址，例如 `https://api.openai.com/v1` 或其他兼容服务地址。
+- `model`：模型名称。
+- `api_key`：本机密钥，仅保存在用户 AppData 配置文件中。
+- `timeout_seconds`：请求超时时间。
 
 ## 打包
 

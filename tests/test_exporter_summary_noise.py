@@ -110,6 +110,28 @@ class SummaryNoiseDetectorTests(unittest.TestCase):
             # 合计列的第二行应为 "计算"，不应留着原来的 根据期初/期末卡片聚合
             self.assertEqual(cleaned_ws.cell(2, 3).value, "计算")
 
+    def test_postprocess_summary_keeps_sheet_note_merged(self):
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "固定资产变动汇总表"
+        ws.append(["", "", "合计", "运输工具"])
+        ws.append(["变动项目", "变动项目", "计算", "根据期初/期末卡片聚合"])
+        ws.append(["原值", "年初余额", 100, 100])
+        ws.append([None, None, None, None])
+        ws.append(["本表说明", "汇总说明文字", None, None])
+        ws.merge_cells(start_row=5, start_column=2, end_row=5, end_column=4)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            file_path = str(Path(tmp) / "summary_note_merge.xlsx")
+            wb.save(file_path)
+            Exporter()._postprocess_summary_sheet_only(file_path, summary_config=None)
+
+            cleaned = load_workbook(file_path)
+            cleaned_ws = cleaned["固定资产变动汇总表"]
+            merged_ranges = {str(rng) for rng in cleaned_ws.merged_cells.ranges}
+            self.assertIn("B5:D5", merged_ranges)
+            self.assertEqual(cleaned_ws.cell(5, 2).value, "汇总说明文字")
+
     def test_remove_summary_noise_rows_drops_total_label_row(self):
         exporter = Exporter()
         df = pd.DataFrame(

@@ -53,6 +53,31 @@ class CoerceForSeriesDtypeTests(unittest.TestCase):
         out = Exporter._coerce_for_series_dtype(s, 5.5)
         self.assertEqual(out, 5.5)
 
+    def test_comma_number_string_into_float_column_becomes_number(self):
+        s = pd.Series([1.0, 2.0], dtype="float64")
+        out = Exporter._coerce_for_series_dtype(s, "98,070,805.30")
+        self.assertEqual(out, 98070805.30)
+
+    def test_template_backfill_comma_number_into_float_column_without_error(self):
+        df = pd.DataFrame(
+            {
+                "匹配列": ["A001", "A001"],
+                "原值": pd.Series([0.0, 0.0], dtype="float64"),
+            }
+        )
+        template_map = {"A001": [{"原值": "98,070,805.30"}, {"原值": "98,070,805.30"}]}
+
+        out = Exporter()._fill_duplicate_rows_from_template_order(
+            df,
+            "匹配列",
+            ["原值"],
+            template_map,
+            overwrite_first_row=True,
+            overwrite_all_rows=True,
+        )
+
+        self.assertEqual(out.loc[0, "原值"], 98070805.30)
+
     def test_fill_display_fields_clears_float_column_without_error(self):
         """复现用户报错场景：副卡组的非首行需要把数值列清空。"""
         df = pd.DataFrame({

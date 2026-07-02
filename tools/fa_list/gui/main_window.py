@@ -71,6 +71,7 @@ class MainWindow:
         # 补充清单（新增/处置）配置状态
         self.use_supplement_lists = False
         self.supplement_config = None
+        self.addition_supplement_prefill = None
         self.supplement_done = False
         self.unmatched_add_df = None
         self.unmatched_disp_df = None
@@ -282,6 +283,8 @@ class MainWindow:
             mode="supplement",
             on_back=lambda: self.show_step(0),
             on_skip=self._skip_supplement_step,
+            supplement_reference_match_columns1=self.match_columns2 or self.match_columns1,
+            supplement_reference_match_columns2=self.match_columns1 or self.match_columns2,
         )
         supplement_config.pack(fill=tk.BOTH, expand=True)
     
@@ -456,9 +459,76 @@ class MainWindow:
                 mode="supplement",
                 on_back=lambda: self.show_step(0),
                 on_skip=self._skip_supplement_step,
+                supplement_reference_match_columns1=self.match_columns2 or self.match_columns1,
+                supplement_reference_match_columns2=self.match_columns1 or self.match_columns2,
+                supplement_prefill_config=self.addition_supplement_prefill,
             )
             self.step_widgets[1] = widget
         widget.pack(fill=tk.BOTH, expand=True)
+
+    @staticmethod
+    def _present_mapping_value(value):
+        text = str(value or "").strip()
+        if not text or text == "[不映射]":
+            return None
+        return value
+
+    def _build_addition_supplement_prefill(self, config):
+        """Build the optional step-2 addition-list prefill from step-1 mappings."""
+        config = config or {}
+
+        def side_has_addition(side):
+            return bool(
+                self._present_mapping_value(config.get(f"addition_method_col{side}"))
+                or self._present_mapping_value(config.get(f"addition_date_col{side}"))
+            )
+
+        source_side = 2 if side_has_addition(2) else (1 if side_has_addition(1) else None)
+        if source_side is None:
+            return None
+
+        path = config.get(f"file{source_side}_path") or getattr(
+            self.file_handler,
+            f"file{source_side}_path",
+            None,
+        )
+        if not path:
+            return None
+
+        match_columns = self.match_columns2 if source_side == 2 else self.match_columns1
+        match_columns = [col for col in (match_columns or []) if col]
+        if not match_columns:
+            return None
+
+        return {
+            "source_side": source_side,
+            "path": path,
+            "sheet": config.get(f"file{source_side}_sheet") or getattr(
+                self.file_handler,
+                f"file{source_side}_sheet",
+                None,
+            ),
+            "header_row": config.get(f"file{source_side}_header_row", 0) or 0,
+            "match_columns": match_columns,
+            "addition_method_col": self._present_mapping_value(config.get(f"addition_method_col{source_side}")),
+            "addition_date_col": self._present_mapping_value(config.get(f"addition_date_col{source_side}")),
+        }
+
+    def _merged_has_file2_only_rows(self):
+        if self.merged_df is None or "数据来源" not in self.merged_df.columns:
+            return False
+        file2_display = self.file2_display_name or "文件2"
+        markers = {"仅文件2", f"仅{file2_display}"}
+        return self.merged_df["数据来源"].astype(str).isin(markers).any()
+
+    def _should_auto_enter_addition_supplement(self):
+        """Enter step 2 directly when step 1 already identified file2-only addition info."""
+        prefill = self.addition_supplement_prefill or {}
+        if prefill.get("source_side") != 2:
+            return False
+        if not (prefill.get("addition_method_col") or prefill.get("addition_date_col")):
+            return False
+        return self._merged_has_file2_only_rows()
 
     def _show_column_selector(self):
         """显示导出列选择页面。"""
@@ -933,10 +1003,12 @@ class MainWindow:
         # 每次重新执行第一步后，重置补充清单状态
         self.use_supplement_lists = False
         self.supplement_config = None
+        self.addition_supplement_prefill = None
         self.supplement_done = False
         self.supp_file_handler.clear()
         self.unmatched_add_df = None
         self.unmatched_disp_df = None
+        self._invalidate_step_widget(1)
         self.selected_columns = None
         self.pivot_df = None
         self._invalidate_step_widget(1)
@@ -988,6 +1060,7 @@ class MainWindow:
             'disposal_dep_col1': config.get('disposal_dep_col1'),
             'disposal_dep_col2': config.get('disposal_dep_col2'),
         }
+        self.addition_supplement_prefill = self._build_addition_supplement_prefill(config)
         
         # 显示进度提示弹窗
         progress_window = tk.Toplevel(self.root)
@@ -1114,6 +1187,13 @@ class MainWindow:
             _dbg(sessionId="debug", runId="run1", hypothesisId="H3", location="main_window.before_show_step_1",
                  message="before show_step(1)", data={})
             # #endregion
+            if self._should_auto_enter_addition_supplement():
+                self.use_supplement_lists = True
+                self.supplement_done = False
+                self.update_status("已识别文件2新增清单字段，请确认补充清单映射")
+                self.show_step(1)
+                return
+
             has_supplement = self._ask_yes_no(
                 "补充清单确认",
                 "是否有新增清单和处置清单需要映射？\n\n"

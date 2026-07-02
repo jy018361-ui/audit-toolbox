@@ -852,8 +852,8 @@ def review_fa_list_field_mappings(
             "Do NOT flag a '残值率 vs 残�? difference on the residual/残值率 field �?the export script auto-converts residual values (>100) to a rate via 残�?原�?",
             "Do NOT emit issue_type='unit_mismatch' for the life or residual roles for the same reason.",
             "字段复核必须以样例值和 column_profiles 为主，列名只作参考；当列名暗示、脚本初判与数据形态明显冲突时，优先相信数据形态并 flag issue_type='wrong_column'.",
-            "category 应是短中文类别名：多数样例较短（通常 <=15 字）、中文类型名占比高、unique_count 通常较少；name 应是具体资产名称/型号/规格/地点等长描述，通常文本更长�?unique_count 明显更多。",
-            "Before suggesting a category column, verify its column_profiles: reject columns with looks_like_code_ratio >= 0.5; prefer cjk_short_name_ratio high, long_text_ratio low, and unique_count low. If current category already matches that shape, do not suggest changing it.",
+            "category/资产类别是资产种类名称或描述，可以是中文或英文文本；不是资产类代码、分类编码、SAP代码、数字短码或其他编码值。",
+            "Before suggesting a category column, first verify values are descriptive asset type/category text; reject columns with looks_like_code_ratio >= 0.5 or samples dominated by 010/030/Y110/A12-like codes. Only then use short text and low unique_count as supporting evidence. If current category already matches that shape, do not suggest changing it.",
             "Before suggesting a name column, verify its column_profiles: reject columns that look like low-cardinality short category names (unique_count <= 50 and cjk_short_name_ratio >= 0.8). Prefer columns with high unique_count or longer asset-description text. If current name already matches that shape, do not suggest changing it.",
             "category �?name 在同一 file_side 不应映射到同一列。若当前相同，或 category 建议列正�?name 使用，必须同时复�?name 并建议一个长描述/高唯一值列；若无合�?name 列则留空并说明冲突。",
             "When several columns appear to form a swapped or shifted group, return one review issue per affected role so the user can apply a complete correction, not a partial single-field fix.",
@@ -1020,9 +1020,17 @@ def _generate_independent_fa_list_assistance(
             "For each file, identify business fields independently. For ID review, identify only the primary asset code/number columns, not the full matching key.",
             "The application may append asset name/description as an auxiliary matching column; do not judge, add, remove, or replace that auxiliary name part.",
             "match_key in your output means code columns only. It may contain one or more code/number columns, but must not include asset name/description columns.",
-            "category should be short low-cardinality type/category names, not code-like values.",
+            "category means the asset type/category name or description, in Chinese or English text. It is NOT an asset class code, category code, SAP code, numeric short code, or other coded value.",
+            "For category, first verify the values are descriptive type names; only then consider short length and low cardinality. A short/low-cardinality code-like column is still wrong for category.",
             "name should be concrete asset name/description, usually longer text or higher cardinality.",
+            "depreciation means accumulated depreciation balance / accumulated depreciation to date. It is a cumulative balance column.",
+            "depreciation must NOT be monthly/current-period/current-year depreciation. Reject columns whose header or samples indicate 本月折旧, 月折旧, 当月折旧, 本期折旧, 本年折旧, 本年至今折旧, 当年折旧, 计提折旧, monthly depreciation, current period depreciation, current year depreciation, or YTD depreciation.",
+            "current_year_dep means current-year/current-period depreciation charge. It may correspond to 本月折旧, 本期折旧, 本年折旧, 本年至今折旧, 当年折旧, or 计提折旧.",
+            "If both 累计折旧 and 本月/本期/本年折旧 columns exist, depreciation must choose 累计折旧. Never suggest mapping depreciation to 本月折旧/本期折旧/本年折旧 merely because it is numeric.",
+            "If current depreciation already maps to an accumulated-depreciation column, do not output field_review for depreciation.",
             "asset codes/IDs are usually numeric or alphanumeric identifiers, not dates, amounts, rates, or category names.",
+            "addition_method and addition_date are optional. Classify them only when headers/samples/profiles give clear evidence of addition/increase/acquisition; otherwise omit those roles entirely.",
+            "Do not guess addition_method/addition_date from generic date/time/method/source columns. If evidence is unclear, output no role and no warning for them.",
             "Return anonymous ids only; do not return headers in roles or match_key.",
         ],
         "output_shape": {
@@ -1371,6 +1379,117 @@ def review_match_key_columns(
     return review
 
 
+def _normalize_supplement_match_key_review(raw: dict[str, Any], *, files: list[dict[str, Any]]) -> LLMMatchKeyReview:
+    try:
+        confidence = float(raw.get("confidence", 0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    status = str(raw.get("status") or "warning").strip().lower()
+    if status not in {"ok", "warning", "bad"}:
+        status = "warning"
+    action = str(raw.get("action") or "review").strip().lower()
+    if action not in {"keep", "replace", "review"}:
+        action = "review"
+
+    def _string_list(value: Any) -> list[str]:
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, (list, tuple)):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    headers = _headers_by_file_side(files)
+    suggested_file1 = [col for col in _string_list(raw.get("suggested_file1_columns")) if col in headers.get("file1", set())]
+    suggested_file2 = [col for col in _string_list(raw.get("suggested_file2_columns")) if col in headers.get("file2", set())]
+    if action == "replace" and not (suggested_file1 or suggested_file2):
+        action = "review"
+    reasons = [
+        reason
+        for reason in _string_list(raw.get("reasons"))[:6]
+        if reason not in {"????", "??????", "..."}
+    ]
+    suggestion_reason = str(raw.get("suggestion_reason") or "").strip()
+    if suggestion_reason in {"中文原因", "中文建议理由", "..."}:
+        suggestion_reason = ""
+
+    return LLMMatchKeyReview(
+        status=status,
+        confidence=max(0.0, min(1.0, confidence)),
+        action=action,
+        reasons=reasons,
+        suggested_file1_columns=suggested_file1[:5],
+        suggested_file2_columns=suggested_file2[:5],
+        suggestion_reason=suggestion_reason,
+    )
+
+
+def review_supplement_match_key_columns(
+    settings: dict[str, Any],
+    *,
+    tool_name: str,
+    files: list[dict[str, Any]],
+    current_match: dict[str, Any],
+    reference_match: dict[str, Any],
+    extra_instructions: str = "",
+) -> LLMMatchKeyReview:
+    """Review whether supplement-list IDs align with first-step match-key shape.
+
+    Unlike the normal FA List match review, this accepts one-sided files: an
+    added list and a disposal list do not need to be present together.
+    """
+    settings = _fast_llm_settings(settings)
+    compact_files = _compact_llm_files(files, max_headers=48, sample_columns=16, sample_values=2)
+    payload = {
+        "tool_name": tool_name,
+        "task": "supplement_match_key_review",
+        "files": compact_files,
+        "current_match": current_match,
+        "reference_match": reference_match,
+        "rules": [
+            "Return strict JSON only.",
+            "Only review supplement-list match IDs. Do not review disposal/addition amount fields.",
+            "The target ID shape is reference_match, copied from the first-step FA List match key.",
+            "For each present file_side, check whether current_match has the same number of ID parts and same business meaning as reference_match for that side.",
+            "If the first-step ID is code + name, the supplement list must also use equivalent code + name columns.",
+            "Do not freely choose a new ID口径. Do not downgrade to a single code when reference_match has code + name.",
+            "If current_match is complete and aligned, return status=ok, action=keep, and echo the current columns.",
+            "If a side is missing a required ID part or picked a wrong part, return status=warning or bad, action=replace, and only suggest columns for that affected side.",
+            "Suggestions must be exact headers from that same file_side.",
+            "Reasons must be short Chinese.",
+        ],
+        "extra_instructions": extra_instructions,
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是固定资产补充清单匹配ID复核助手。只判断补充清单匹配ID是否完整对齐第一步ID口径。"
+                "只返回 JSON："
+                '{"status":"ok|warning|bad","confidence":0.0,"action":"keep|replace|review",'
+                '"reasons":["中文原因"],"suggested_file1_columns":["existing header"],'
+                '"suggested_file2_columns":["existing header"],"suggestion_reason":"中文建议理由"}'
+            ),
+        },
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    try:
+        content = _chat_completion(settings, messages, max_tokens=420, json_response=True, task_name="supplement_match_review")
+        raw = _extract_json(content)
+    except LLMClientError:
+        raw = {
+            "status": "ok",
+            "confidence": 0.0,
+            "action": "keep",
+            "reasons": [],
+            "suggested_file1_columns": current_match.get("file1", []) if isinstance(current_match, dict) else [],
+            "suggested_file2_columns": current_match.get("file2", []) if isinstance(current_match, dict) else [],
+            "suggestion_reason": "",
+        }
+    if not isinstance(raw, dict):
+        raise LLMClientError("模型没有返回补充清单匹配ID复核 JSON 对象。")
+    return _normalize_supplement_match_key_review(raw, files=files)
+
+
 def generate_combined_fa_list_assistance(
     settings: dict[str, Any],
     *,
@@ -1436,6 +1555,7 @@ def generate_combined_fa_list_assistance(
         return _normalize_combined_fa_list_result(
             raw,
             files=files,
+            role_definitions=role_definitions,
             current_mapping=current_mapping,
             current_match=current_match,
             local_profile=local_profile,
@@ -1452,6 +1572,7 @@ def generate_combined_fa_list_assistance(
             return _normalize_combined_fa_list_result(
                 raw,
                 files=files,
+                role_definitions=role_definitions,
                 current_mapping=current_mapping,
                 current_match=current_match,
                 local_profile=local_profile,
@@ -1498,15 +1619,23 @@ def _build_combined_fa_list_payload(
             "Never output null. Use empty arrays, empty strings, keep, or unknown_reason instead.",
             "Use exact supplied headers only. If no exact supplied header exists, use empty string or keep.",
             "Prefer precision over coverage. Small valid output is better than broad guesses.",
+            "addition_method and addition_date are optional fields. Fill or review them only with clear addition/increase/acquisition evidence from headers/samples/profiles; otherwise omit them with no warning.",
+            "Do not guess addition_method/addition_date from generic date/time/method/source columns.",
             "For field_review, use data.blind_field_files as the primary evidence. First choose anonymous column ids by samples/profiles only, then use data.field_header_lookup only to translate the chosen ids back to real headers.",
             "For field_review, do not decide from real header text or current_mapping first. Treat current_mapping as a script guess; it is only compared after the blind role choice is complete.",
             "Operationally: first classify relevant columns from blind_field_files, then compare the blind classification with current_mapping.",
             "In short: current_mapping as a script guess, not ground truth.",
             "Header names may be renamed, duplicated, or misleading；列名只作参考。When header meaning conflicts with values/profile, trust values/profile.",
             "Review fields as a group. If category/name/code/date/value roles are shifted or swapped, return separate field_review records for every affected role instead of a partial single-field fix.",
-            "For category, prefer columns whose values are short Chinese category names with low unique_count. Reject code-like values and long/high-cardinality asset descriptions even if the header sounds category-like.",
-            "Hard validation for field_review suggestions: a suggested category column must not have looks_like_code_ratio >= 0.5; a suggested name column must not have unique_count <= 50 with cjk_short_name_ratio >= 0.8. If current_mapping already satisfies these role-shape checks, omit field_review for that role.",
+            "For category, prefer columns whose values are Chinese or English asset type/category names or descriptions with low unique_count. Reject asset class codes/category codes/SAP codes/numeric short codes even if the header sounds category-like.",
+            "For category, descriptive text is mandatory: first reject looks_like_code_ratio >= 0.5 or samples dominated by values such as 010/030/Y110/A12; only after that use short length and low unique_count as supporting evidence.",
+            "Hard validation for field_review suggestions: a suggested category column must not have looks_like_code_ratio >= 0.5 and must look like descriptive asset type/category text; a suggested name column must not have unique_count <= 50 with cjk_short_name_ratio >= 0.8. If current_mapping already satisfies these role-shape checks, omit field_review for that role.",
             "For category/name conflicts, never leave both roles mapped to the same column on the same file_side. If category should move to a column currently used by name, also return a field_review record for name pointing to the long/high-cardinality asset-description column.",
+            "depreciation means accumulated depreciation balance / accumulated depreciation to date. It is a cumulative balance column.",
+            "depreciation must NOT be monthly/current-period/current-year depreciation. Reject columns whose header or samples indicate 本月折旧, 月折旧, 当月折旧, 本期折旧, 本年折旧, 本年至今折旧, 当年折旧, 计提折旧, monthly depreciation, current period depreciation, current year depreciation, or YTD depreciation.",
+            "current_year_dep means current-year/current-period depreciation charge. It may correspond to 本月折旧, 本期折旧, 本年折旧, 本年至今折旧, 当年折旧, or 计提折旧.",
+            "If both 累计折旧 and 本月/本期/本年折旧 columns exist, depreciation must choose 累计折旧. Never suggest mapping depreciation to 本月折旧/本期折旧/本年折旧 merely because it is numeric.",
+            "If current depreciation already maps to an accumulated-depreciation column, do not output field_review for depreciation.",
             "Do not flag life years vs months or residual value vs residual rate; the app converts those later.",
             "For match key review, use data.blind_match_files as the primary evidence. First infer the best match key from anonymous column values/profiles, then compare with data.current_match_blind and current_match.",
             "For match_review, current_match/local_profile/candidate_profiles are script/reference data only after the blind key choice; do not let them choose the key first.",
@@ -1855,6 +1984,7 @@ def _normalize_combined_fa_list_result(
     raw: Any,
     *,
     files: list[dict[str, Any]],
+    role_definitions: list[dict[str, Any]],
     current_mapping: dict[str, Any],
     current_match: dict[str, Any],
     local_profile: dict[str, Any],
@@ -1922,9 +2052,9 @@ def _normalize_combined_fa_list_result(
             match_item = item
 
     suggestions = [_normalize_suggestion(item) for item in suggestion_items]
-    missing_roles = _unmapped_role_requests(_default_fa_list_role_definitions(), current_mapping)
+    missing_roles = _unmapped_role_requests(role_definitions, current_mapping)
     _promote_valid_missing_role_fills(suggestions, missing_roles=missing_roles, files=files)
-    suggestions.extend(_fallback_unmapped_field_suggestions(_default_fa_list_role_definitions(), files, current_mapping, suggestions))
+    suggestions.extend(_fallback_unmapped_field_suggestions(role_definitions, files, current_mapping, suggestions))
     fa_review = normalize_fa_list_mapping_review(
         {"mapping_review": review_items},
         files=files,

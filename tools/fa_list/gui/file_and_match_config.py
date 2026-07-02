@@ -13,7 +13,7 @@ import pandas as pd
 from file_handler import FileHandler
 from utils.helpers import get_column_matches, detect_encoding
 from config import SUPPORTED_EXCEL_FORMATS, SUPPORTED_CSV_FORMATS, PREVIEW_ROWS
-from launcher.llm_client import AUTO_APPLY_CONFIDENCE, LLMMatchKeyReview, generate_combined_fa_list_assistance, review_fa_list_field_mappings, review_match_key_columns, suggest_field_mappings
+from launcher.llm_client import AUTO_APPLY_CONFIDENCE, LLMMatchKeyReview, generate_combined_fa_list_assistance, review_fa_list_field_mappings, review_match_key_columns, review_supplement_match_key_columns, suggest_field_mappings
 from launcher.llm_settings import is_llm_enabled, load_llm_settings
 from launcher.ui_theme import (
     ERROR,
@@ -818,6 +818,57 @@ def build_match_key_review_decision(review, *, cols1, cols2, current1, current2,
     }
 
 
+def build_supplement_match_key_review_decision(review, *, cols1, cols2, current1, current2, min_confidence=0.55):
+    """Normalize one-sided supplement ID review into a UI decision."""
+    if review is None:
+        return {"show": False, "can_apply": False, "reasons": [], "suggested_file1_columns": [], "suggested_file2_columns": []}
+
+    def _get(name, default=None):
+        if isinstance(review, dict):
+            return review.get(name, default)
+        return getattr(review, name, default)
+
+    def _list(value):
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, (list, tuple)):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    try:
+        confidence = float(_get("confidence", 0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    status = str(_get("status", "warning") or "warning").lower()
+    action = str(_get("action", "review") or "review").lower()
+    suggested1 = [col for col in _list(_get("suggested_file1_columns")) if col in set(cols1 or [])]
+    suggested2 = [col for col in _list(_get("suggested_file2_columns")) if col in set(cols2 or [])]
+    reasons = [_localize_llm_reason(reason) for reason in _list(_get("reasons"))]
+    suggestion_reason = str(_get("suggestion_reason", "") or "").strip()
+    if suggestion_reason:
+        reasons.append(_localize_llm_reason(suggestion_reason))
+    current1 = [str(col) for col in (current1 or [])]
+    current2 = [str(col) for col in (current2 or [])]
+    changed1 = bool(suggested1) and suggested1 != current1
+    changed2 = bool(suggested2) and suggested2 != current2
+    has_suggestion = bool(suggested1 or suggested2)
+    has_change = changed1 or changed2
+    has_review_warning = action == "review" and bool(reasons)
+    can_apply = action in {"replace", "review"} and confidence >= min_confidence and has_change
+    show = status in {"warning", "bad"} and confidence >= min_confidence and (has_change or not has_suggestion or has_review_warning)
+    return {
+        "show": show,
+        "can_apply": can_apply,
+        "has_change": has_change,
+        "status": status,
+        "action": action,
+        "confidence": max(0.0, min(1.0, confidence)),
+        "reasons": reasons[:6],
+        "suggested_file1_columns": suggested1,
+        "suggested_file2_columns": suggested2,
+    }
+
+
 def build_local_match_key_review(profile, *, current1, current2):
     """Build a deterministic review warning from local key uniqueness stats."""
     if not isinstance(profile, dict):
@@ -979,80 +1030,24 @@ def build_fa_mapping_review_decisions(review_items, *, cols1, cols2, current_map
 
 
 def build_fa_mapping_review_dialog_text(decision):
-    """Build a user-facing, single-suggestion FA mapping review prompt."""
+    """Build a concise user-facing FA mapping review prompt."""
     decision = decision or {}
-    label = decision.get("label") or decision.get("role") or "字段"
-    role = decision.get("role") or ""
-    issue_type = decision.get("issue_type") or ""
+    label = decision.get("label") or decision.get("role") or "\u5b57\u6bb5"
     current = decision.get("current_mapping") or {}
     suggested = decision.get("suggested_mapping") or {}
     apply_mapping = decision.get("apply_mapping") or {}
-    raw_reason = str(decision.get("reason") or "").strip()
-
-    def _fmt_mapping(mapping):
-        parts = []
-        if mapping.get("file1"):
-            parts.append(f"文件1：{mapping['file1']}")
-        if mapping.get("file2"):
-            parts.append(f"文件2：{mapping['file2']}")
-        return "；".join(parts) if parts else "未选择"
-
-    def _fmt_apply(mapping):
-        parts = []
-        if mapping.get("file1"):
-            parts.append(f"文件1的“{label}”改为“{mapping['file1']}”")
-        if mapping.get("file2"):
-            parts.append(f"文件2的“{label}”改为“{mapping['file2']}”")
-        return "；".join(parts) if parts else "这条建议没有可自动修改的下拉框，请手动核对。"
-
-    issue_hints = {
-        "wrong_column": "当前列名看起来不像这个字段，可能把相近名称的列选进来了。",
-        "cross_period_inconsistent": "两边选的列口径可能不一致，后续比较时容易把不同含义的数据放在一起算。",
-        "unit_mismatch": "两边选的列单位可能不一致，建议再看一眼。",
-        "ambiguous": "当前列名比较接近，但含义不够明确，建议再看一眼。",
-    }
-    role_hints = {
-        "original_value": "原值应对应资产入账原值，不应混用处置原值、原值减少或净值。",
-        "depreciation": "累计折旧应对应累计数，不应混用本年折旧、本期折旧或处置折旧。",
-        "category": "资产类别应对应分类/大类口径，不应混用资产描述或型号规格。",
-        "current_year_dep": "本年折旧应对应当年/本期折旧额，不应混用累计折旧。",
-        "disposal_orig": "处置原值应对应减少或处置资产的原值。",
-        "disposal_dep": "处置折旧应对应减少或处置资产带走的累计折旧。",
-    }
-    reason_parts = []
-    if raw_reason:
-        reason_parts.append(raw_reason)
-    if issue_type in issue_hints:
-        reason_parts.append(issue_hints[issue_type])
-    if role in role_hints:
-        reason_parts.append(role_hints[role])
-    if not reason_parts:
-        reason_parts.append("LLM 根据列名和样例判断，当前映射可能和这个字段的含义不完全一致。")
-
-    can_apply = bool(decision.get("can_apply") and apply_mapping)
-    has_change = bool(decision.get("has_change"))
-    if can_apply:
-        action_line = _fmt_apply(apply_mapping)
-        return (
-            f"LLM 发现“{label}”可能需要调整。\n\n"
-            f"当前选了什么：\n{_fmt_mapping(current)}\n\n"
-            f"为什么可能不对：\n" + "；".join(reason_parts) + "\n\n"
-            f"建议改成什么：\n{_fmt_mapping(suggested)}\n\n"
-            f"采纳后会改哪里：\n{action_line}\n\n"
-            "请选择是否采纳建议。采纳后会自动修改对应下拉框；不采纳则保持当前设置。"
-        )
-
-    if has_change:
-        reference = f"\n\n复核参考：\n{_fmt_mapping(suggested)}"
-    else:
-        reference = "\n\nLLM 返回的参考列和当前选择一致，当前没有可自动修改的内容。"
-    return (
-        f"LLM 提示“{label}”建议人工复核。\n\n"
-        f"当前选了什么：\n{_fmt_mapping(current)}\n\n"
-        f"为什么需要看一眼：\n" + "；".join(reason_parts) +
-        f"{reference}\n\n"
-        "这条提示不会自动修改设置，请按业务口径复核。"
-    )
+    reason = str(decision.get("reason") or "").strip() or "LLM \u6839\u636e\u6807\u9898\u3001\u6837\u4f8b\u548c\u5b57\u6bb5\u7279\u5f81\u5224\u65ad\u5f53\u524d\u6620\u5c04\u53ef\u80fd\u4e0d\u51c6"
+    target_mapping = apply_mapping if decision.get("can_apply") and apply_mapping else suggested
+    lines = []
+    for side_key, side_label in (("file1", "\u6587\u4ef61"), ("file2", "\u6587\u4ef62")):
+        if side_key in target_mapping:
+            before = current.get(side_key) or "\u672a\u9009\u62e9"
+            after = target_mapping.get(side_key) or "\u672a\u9009\u62e9"
+            lines.append(f"{side_label} + [{label}]\uff0c\u5efa\u8bae\u7531 {before} \u8c03\u6574\u4e3a {after}\uff0c\u539f\u56e0\u7cfb\uff1a{reason}\u3002")
+    body = "\n".join(lines) if lines else f"[{label}] \u5efa\u8bae\u4eba\u5de5\u590d\u6838\uff0c\u539f\u56e0\u7cfb\uff1a{reason}\u3002"
+    if decision.get("can_apply") and apply_mapping:
+        return body + "\n\n\u91c7\u7eb3\u540e\u4f1a\u81ea\u52a8\u4fee\u6539\u5bf9\u5e94\u4e0b\u62c9\u6846\uff1b\u4e0d\u91c7\u7eb3\u5219\u4fdd\u6301\u5f53\u524d\u8bbe\u7f6e\u3002"
+    return body + "\n\n\u8fd9\u6761\u63d0\u793a\u4e0d\u4f1a\u81ea\u52a8\u4fee\u6539\u8bbe\u7f6e\uff0c\u8bf7\u6309\u4e1a\u52a1\u53e3\u5f84\u590d\u6838\u3002"
 
 
 def _normalize_llm_error_message(message):
@@ -1384,6 +1379,17 @@ def _normalize_key_part(value):
 
 
 class FileAndMatchConfig(ttk.Frame):
+    OPTIONAL_ADDITION_ROLES = (
+        "addition_method",
+        "addition_date",
+    )
+    SUPPLEMENT_ONLY_LLM_ROLES = {
+        "disposal_method",
+        "disposal_date",
+        "disposal_orig",
+        "disposal_dep",
+    }
+
     """文件选择和匹配列配置合并组件"""
     
     def __init__(
@@ -1394,7 +1400,10 @@ class FileAndMatchConfig(ttk.Frame):
         status_callback=None,
         mode="normal",
         on_back=None,
-        on_skip=None
+        on_skip=None,
+        supplement_reference_match_columns1=None,
+        supplement_reference_match_columns2=None,
+        supplement_prefill_config=None,
     ):
         super().__init__(parent, padding="10")
         self.file_handler = file_handler
@@ -1403,10 +1412,15 @@ class FileAndMatchConfig(ttk.Frame):
         self.mode = mode
         self.on_back = on_back
         self.on_skip = on_skip
+        self.supplement_reference_match_columns1 = list(supplement_reference_match_columns1 or [])
+        self.supplement_reference_match_columns2 = list(supplement_reference_match_columns2 or [])
+        self.supplement_prefill_config = dict(supplement_prefill_config or {})
         self._llm_mapping_running = False
         self._llm_mapping_assist_scheduled = False
         self._llm_mapping_assist_job = None
         self._last_llm_match_review_signature = None
+        self._llm_generation = 0
+        self._llm_rerun_after_current = False
         # 已经向用户弹过的 LLM 风险提示签名集合，避免重复跳出同样的弹窗。
         # 在文件/工作表变更时（_update_match_columns）清空。
         self._llm_shown_match_review_keys = set()
@@ -1429,8 +1443,6 @@ class FileAndMatchConfig(ttk.Frame):
         self.match_columns1 = []  # 文件1的匹配列列表
         self.match_columns2 = []  # 文件2的匹配列列表
         self._match_columns_auto_default = False
-        self.data_type1_var = tk.StringVar(value="auto")
-        self.data_type2_var = tk.StringVar(value="auto")
         
         # 原值列变量
         self.original_value_col1_var = tk.StringVar()
@@ -1472,6 +1484,8 @@ class FileAndMatchConfig(ttk.Frame):
         self.file2_header_row = 0
         
         self._create_widgets()
+        if self.mode == "supplement" and self.supplement_prefill_config:
+            self._apply_supplement_prefill_config()
     
     def _get_file_display_name(self, file_num):
         """获取文件显示名称：原始文件 & sheet名称"""
@@ -1506,7 +1520,249 @@ class FileAndMatchConfig(ttk.Frame):
         if len(text) <= max_len:
             return text
         return text[: max_len - 2] + ".."
-    
+
+    def _role_available_in_current_mode(self, role):
+        if self.mode == "supplement":
+            return role == "match" or role in self.OPTIONAL_ADDITION_ROLES or role in self.SUPPLEMENT_ONLY_LLM_ROLES
+        return role not in self.SUPPLEMENT_ONLY_LLM_ROLES
+
+    def _supplement_role_allowed_side(self, role, file_index):
+        if self.mode != "supplement":
+            return role not in self.SUPPLEMENT_ONLY_LLM_ROLES
+        if role in {"addition_method", "addition_date"}:
+            return file_index == 1
+        if role in {"disposal_method", "disposal_date", "disposal_orig", "disposal_dep"}:
+            return file_index == 2
+        return False
+
+    def _is_file_loaded(self, file_index):
+        return self.file_handler.file1_df is not None if file_index == 1 else self.file_handler.file2_df is not None
+
+    def _clear_disallowed_supplement_mappings(self):
+        if not hasattr(self, "mapping_row_controls"):
+            return
+        for role, sides in self._llm_role_targets(include_disallowed=True).items():
+            for file_index, entry in sides.items():
+                if self._supplement_role_allowed_side(role, file_index):
+                    continue
+                var = entry.get("var")
+                combo = entry.get("combo")
+                if var is not None:
+                    var.set("")
+                if combo is not None:
+                    combo.set("")
+
+    def _has_optional_addition_mapping(self):
+        for var_name in (
+            "addition_method_col1_var",
+            "addition_method_col2_var",
+            "addition_date_col1_var",
+            "addition_date_col2_var",
+        ):
+            var = getattr(self, var_name, None)
+            try:
+                value = var.get() if var is not None else ""
+            except Exception:
+                value = ""
+            if value and value != "[不映射]":
+                return True
+        return False
+
+    def _update_optional_addition_rows_visibility(self):
+        if getattr(self, "mode", "normal") == "supplement":
+            return
+        if not hasattr(self, "mapping_row_frames"):
+            return
+        show = self._has_optional_addition_mapping()
+        for row_type in self.OPTIONAL_ADDITION_ROLES:
+            row_widget = self.mapping_row_frames.get(row_type)
+            if row_widget is None:
+                continue
+            if show:
+                row_widget.pack(fill=tk.X, pady=2, padx=5, before=self.depreciation_param_frame)
+                ctrls = self.mapping_row_controls.get(row_type, {})
+                for combo_key in ("combo1", "combo2"):
+                    combo = ctrls.get(combo_key)
+                    if combo is not None:
+                        combo.configure(state="readonly")
+            else:
+                row_widget.pack_forget()
+
+    def _fallback_addition_date_to_entry_date(self, cols1=None, cols2=None):
+        """When addition date is absent, reuse entry/start date for sides with addition method."""
+        if getattr(self, "mode", "normal") == "supplement":
+            return False
+        changed = False
+
+        def _apply(side, method_var, add_date_var, entry_date_var, add_date_combo, cols):
+            method = (method_var.get() or "").strip()
+            add_date = (add_date_var.get() or "").strip()
+            entry_date = (entry_date_var.get() or "").strip()
+            if not method or method == "[不映射]" or add_date or not entry_date or entry_date == "[不映射]":
+                return False
+            add_date_var.set(entry_date)
+            if add_date_combo is not None:
+                try:
+                    if entry_date in (cols or []):
+                        add_date_combo.current(1 + list(cols).index(entry_date))
+                    else:
+                        add_date_combo.set(entry_date)
+                except tk.TclError:
+                    add_date_combo.set(entry_date)
+            return True
+
+        changed |= _apply(
+            1,
+            self.addition_method_col1_var,
+            self.addition_date_col1_var,
+            self.date_col1_var,
+            getattr(self, "addition_date_col1_combo", None),
+            cols1 or [],
+        )
+        changed |= _apply(
+            2,
+            self.addition_method_col2_var,
+            self.addition_date_col2_var,
+            self.date_col2_var,
+            getattr(self, "addition_date_col2_combo", None),
+            cols2 or [],
+        )
+        return changed
+
+    def _visible_excel_sheets(self, file_path, sheets):
+        sheets = list(sheets or [])
+        if not sheets:
+            return sheets
+        _, ext = os.path.splitext(file_path or "")
+        ext = str(ext).lower()
+        try:
+            if ext in {".xlsx", ".xlsm"}:
+                from openpyxl import load_workbook
+                wb = load_workbook(file_path, read_only=True, data_only=True)
+                try:
+                    visible = [ws.title for ws in wb.worksheets if getattr(ws, "sheet_state", "visible") == "visible"]
+                finally:
+                    wb.close()
+                return [name for name in sheets if name in visible] or sheets
+            if ext == ".xls":
+                import xlrd
+                book = xlrd.open_workbook(file_path, on_demand=True)
+                try:
+                    visible = []
+                    for index, name in enumerate(book.sheet_names()):
+                        visibility = getattr(book.sheet_by_index(index), "visibility", 0)
+                        if visibility == 0:
+                            visible.append(name)
+                finally:
+                    book.release_resources()
+                return [name for name in sheets if name in visible] or sheets
+        except Exception:
+            return sheets
+        return sheets
+
+    def _set_mapping_value_from_prefill(self, var, combo, value, columns):
+        value = str(value or "").strip()
+        if not value:
+            return
+        var.set(value)
+        try:
+            if combo is not None:
+                if value in columns:
+                    combo.current(1 + columns.index(value))
+                else:
+                    combo.set(value)
+        except Exception:
+            pass
+
+    def _apply_supplement_prefill_config(self):
+        """Prefill the supplement addition side from optional step-1 addition mappings."""
+        prefill = dict(self.supplement_prefill_config or {})
+        file_path = str(prefill.get("path") or "").strip()
+        if not file_path or not os.path.exists(file_path):
+            return
+
+        def _source_column_name(value):
+            text = str(value or "").strip()
+            return text.replace("_文件1", "").replace("_文件2", "")
+
+        sheet_name = prefill.get("sheet") or None
+        header_row = int(prefill.get("header_row") or 0)
+        header_0based = None if header_row == 0 else header_row + 1
+
+        self.file1_path_var.set(file_path)
+        self.file1_sheet_var.set(sheet_name or "")
+
+        success, _, sheets = self.file_handler.get_excel_sheets(file_path)
+        if success and sheets:
+            sheets = self._visible_excel_sheets(file_path, sheets)
+            self.file1_sheet_combo["values"] = sheets
+            if not sheet_name and len(sheets) == 1:
+                sheet_name = sheets[0]
+                self.file1_sheet_var.set(sheet_name)
+            elif sheet_name and sheet_name not in sheets:
+                self.file1_sheet_combo["values"] = [sheet_name] + [s for s in sheets if s != sheet_name]
+        elif sheet_name:
+            self.file1_sheet_combo["values"] = [sheet_name]
+
+        success, error_msg = self.file_handler.set_file1(file_path, sheet_name, header_0based)
+        if not success:
+            if self.status_callback:
+                self.status_callback(f"新增清单预填失败：{error_msg}")
+            return
+
+        if self.status_callback:
+            self.status_callback("已从第一步预填新增清单")
+
+        self._update_file_labels()
+        self._update_file1_preview()
+        self._update_match_columns(trigger_llm=True)
+
+        cols1 = [
+            str(col).replace("_文件1", "").replace("_文件2", "")
+            if "_文件1" in str(col) or "_文件2" in str(col)
+            else str(col)
+            for col in list(self.file_handler.get_file1_columns())
+        ]
+        match_columns = [
+            col
+            for col in (_source_column_name(col) for col in (prefill.get("match_columns") or []))
+            if col in cols1
+        ]
+        if match_columns:
+            self._apply_supplement_match_key_columns(match_columns, None, cols1, [])
+
+        self._set_mapping_value_from_prefill(
+            self.addition_method_col1_var,
+            self.addition_method_col1_combo,
+            _source_column_name(prefill.get("addition_method_col")),
+            cols1,
+        )
+        self._set_mapping_value_from_prefill(
+            self.addition_date_col1_var,
+            self.addition_date_col1_combo,
+            _source_column_name(prefill.get("addition_date_col")),
+            cols1,
+        )
+
+    def _reset_llm_state_for_new_input(self):
+        self._llm_generation += 1
+        if self._llm_mapping_running:
+            self._llm_rerun_after_current = True
+        self._last_llm_match_review_signature = None
+        self._llm_shown_match_review_keys = set()
+        self._llm_shown_fa_review_keys = set()
+        if self._llm_mapping_assist_job is not None:
+            try:
+                self.after_cancel(self._llm_mapping_assist_job)
+            except Exception:
+                pass
+            self._llm_mapping_assist_job = None
+        self._llm_mapping_assist_scheduled = False
+
+    def _manual_run_llm_mapping_assist(self):
+        self._reset_llm_state_for_new_input()
+        self._queue_llm_mapping_assist(force=True)
+
     def _create_widgets(self):
         """创建界面组件"""
         is_supplement_mode = self.mode == "supplement"
@@ -1534,12 +1790,18 @@ class FileAndMatchConfig(ttk.Frame):
             textvariable=self.llm_status_var,
             font=("Arial", 10, "bold"),
             foreground=ERROR,
-            wraplength=900,
+            wraplength=1400,
             justify=tk.LEFT,
         )
         self.llm_status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.llm_run_button = ttk.Button(
+            self.llm_status_frame,
+            text="\u91cd\u65b0\u590d\u6838",
+            command=self._manual_run_llm_mapping_assist,
+            width=10,
+        )
+        self.llm_run_button.pack(side=tk.RIGHT, padx=(8, 0))
         self.llm_status_frame.pack(fill=tk.X, pady=(0, 8))
-        self.llm_status_frame.pack_forget()
         
         # 【重要】按钮区域必须先pack，使用side=BOTTOM，这样它会固定在底部
         button_frame = ttk.Frame(self)
@@ -1613,11 +1875,11 @@ class FileAndMatchConfig(ttk.Frame):
         main_container.bind("<Configure>", _layout_main_columns)
 
         left_container.columnconfigure(0, weight=1)
-        left_container.rowconfigure(0, weight=0, minsize=100)
-        left_container.rowconfigure(1, weight=1, minsize=300)
+        left_container.rowconfigure(0, weight=0, minsize=88)
+        left_container.rowconfigure(1, weight=1, minsize=260)
         right_container.columnconfigure(0, weight=1)
-        right_container.rowconfigure(0, weight=0, minsize=130)
-        right_container.rowconfigure(1, weight=1, minsize=300)
+        right_container.rowconfigure(0, weight=0, minsize=110)
+        right_container.rowconfigure(1, weight=1, minsize=260)
         
         # ==================== 左上：文件选择区域 ====================
         file_frame = ttk.LabelFrame(left_container, text="文件选择", padding="5")
@@ -1636,36 +1898,38 @@ class FileAndMatchConfig(ttk.Frame):
         # 文件1
         file1_frame = ttk.Frame(file_frame)
         file1_frame.pack(fill=tk.X, pady=2)
-        file1_frame.columnconfigure(1, weight=1, minsize=60)
+        file1_frame.columnconfigure(1, weight=2, minsize=120)
+        file1_frame.columnconfigure(4, weight=1, minsize=90)
         
-        self.file1_label = ttk.Label(file1_frame, text="新增清单:" if is_supplement_mode else "文件1:", width=6)
+        self.file1_label = ttk.Label(file1_frame, text="新增清单:" if is_supplement_mode else "文件1:", width=8)
         self.file1_label.grid(row=0, column=0, sticky="w", padx=(0, 2))
         file1_entry = ttk.Entry(file1_frame, textvariable=self.file1_path_var, width=10)
         file1_entry.grid(row=0, column=1, sticky="ew", padx=2)
         file1_browse_btn = ttk.Button(file1_frame, text="浏览...", command=self._select_file1, width=6)
         file1_browse_btn._compact_width = True
-        file1_browse_btn.grid(row=0, column=2, sticky="ew", padx=2)
+        file1_browse_btn.grid(row=0, column=2, sticky="w", padx=2)
         ttk.Label(file1_frame, text="表:", width=3).grid(row=0, column=3, sticky="e", padx=(4, 1))
-        self.file1_sheet_combo = ttk.Combobox(file1_frame, textvariable=self.file1_sheet_var, state="readonly", width=8)
+        self.file1_sheet_combo = ttk.Combobox(file1_frame, textvariable=self.file1_sheet_var, state="readonly", width=14)
         self.file1_sheet_combo.grid(row=0, column=4, sticky="ew", padx=(1, 0))
-        self.file1_sheet_combo.bind('<<ComboboxSelected>>', lambda e: self._load_file1())
+        self.file1_sheet_combo.bind('<<ComboboxSelected>>', lambda e: (self._reset_llm_state_for_new_input(), self._load_file1()))
         
         # 文件2
         file2_frame = ttk.Frame(file_frame)
         file2_frame.pack(fill=tk.X, pady=2)
-        file2_frame.columnconfigure(1, weight=1, minsize=60)
+        file2_frame.columnconfigure(1, weight=2, minsize=120)
+        file2_frame.columnconfigure(4, weight=1, minsize=90)
         
-        self.file2_label = ttk.Label(file2_frame, text="处置清单:" if is_supplement_mode else "文件2:", width=6)
+        self.file2_label = ttk.Label(file2_frame, text="处置清单:" if is_supplement_mode else "文件2:", width=8)
         self.file2_label.grid(row=0, column=0, sticky="w", padx=(0, 2))
         file2_entry = ttk.Entry(file2_frame, textvariable=self.file2_path_var, width=10)
         file2_entry.grid(row=0, column=1, sticky="ew", padx=2)
         file2_browse_btn = ttk.Button(file2_frame, text="浏览...", command=self._select_file2, width=6)
         file2_browse_btn._compact_width = True
-        file2_browse_btn.grid(row=0, column=2, sticky="ew", padx=2)
+        file2_browse_btn.grid(row=0, column=2, sticky="w", padx=2)
         ttk.Label(file2_frame, text="表:", width=3).grid(row=0, column=3, sticky="e", padx=(4, 1))
-        self.file2_sheet_combo = ttk.Combobox(file2_frame, textvariable=self.file2_sheet_var, state="readonly", width=8)
+        self.file2_sheet_combo = ttk.Combobox(file2_frame, textvariable=self.file2_sheet_var, state="readonly", width=14)
         self.file2_sheet_combo.grid(row=0, column=4, sticky="ew", padx=(1, 0))
-        self.file2_sheet_combo.bind('<<ComboboxSelected>>', lambda e: self._load_file2())
+        self.file2_sheet_combo.bind('<<ComboboxSelected>>', lambda e: (self._reset_llm_state_for_new_input(), self._load_file2()))
         
         # ==================== 右上：匹配列配置区域 ====================
         match_frame = ttk.LabelFrame(right_container, text="匹配列配置（按ctrl可多选）", padding="5")
@@ -1708,14 +1972,6 @@ class FileAndMatchConfig(ttk.Frame):
         self.match_col2_selected_label.pack(side=tk.LEFT, padx=2)
         self.match_col2_listbox = tk.Listbox(file2_match_frame, height=0)
         self.match_col2_listbox.pack_forget()
-        
-        # 数据类型
-        data_type_frame = ttk.Frame(match_frame)
-        data_type_frame.pack(fill=tk.X, pady=2)
-        ttk.Label(data_type_frame, text="数据类型:", width=8).pack(side=tk.LEFT, padx=2)
-        ttk.Combobox(data_type_frame, textvariable=self.data_type1_var, values=["auto", "text", "number", "date"], state="readonly", width=8).pack(side=tk.LEFT, padx=2)
-        ttk.Label(data_type_frame, text="文件2:", width=6).pack(side=tk.LEFT, padx=2)
-        ttk.Combobox(data_type_frame, textvariable=self.data_type2_var, values=["auto", "text", "number", "date"], state="readonly", width=8).pack(side=tk.LEFT, padx=2)
         
         # ==================== 左下：文件预览区域 ====================
         preview_frame = ttk.LabelFrame(left_container, text="文件预览（底部滚动条或 Shift+滚轮 可左右滑动）", padding="5")
@@ -1899,11 +2155,12 @@ class FileAndMatchConfig(ttk.Frame):
                         combo2.configure(state="disabled")
             self.depreciation_param_frame.pack_forget()
         else:
-            hide_rows = {'addition_method', 'addition_date', 'disposal_method', 'disposal_date', 'disposal_orig', 'disposal_dep'}
+            hide_rows = {'disposal_method', 'disposal_date', 'disposal_orig', 'disposal_dep'}
             for row_type in hide_rows:
                 row_widget = self.mapping_row_frames.get(row_type)
                 if row_widget is not None:
                     row_widget.pack_forget()
+            self._update_optional_addition_rows_visibility()
             self.current_year_dep_col1_var.set("")
             self.current_year_dep_col1_combo.set("")
             self.current_year_dep_col1_combo.configure(state="disabled")
@@ -1934,6 +2191,8 @@ class FileAndMatchConfig(ttk.Frame):
         )
         
         if file_path:
+            self._reset_llm_state_for_new_input()
+            self.file1_sheet_var.set("")
             self.file1_path_var.set(file_path)
             # 确保变量已更新后再更新标签
             self.update_idletasks()  # 确保Tkinter变量已更新
@@ -1954,6 +2213,8 @@ class FileAndMatchConfig(ttk.Frame):
         )
         
         if file_path:
+            self._reset_llm_state_for_new_input()
+            self.file2_sheet_var.set("")
             self.file2_path_var.set(file_path)
             # 确保变量已更新后再更新标签
             self.update_idletasks()  # 确保Tkinter变量已更新
@@ -2014,6 +2275,10 @@ class FileAndMatchConfig(ttk.Frame):
         _dbg(sessionId="debug", runId="run1", hypothesisId="H7", location="file_and_match_config._on_sheets_loaded.entry", message="sheets loaded callback", data={"file_num": file_num, "success": success, "sheets_count": len(sheets) if sheets else 0, "sheets": sheets[:5] if sheets else []})
         # #endregion
         
+        if success and sheets:
+            file_path = self.file1_path_var.get() if file_num == 1 else self.file2_path_var.get()
+            sheets = self._visible_excel_sheets(file_path, sheets)
+
         if file_num == 1:
             if success and sheets:
                 self.file1_sheet_combo['values'] = sheets
@@ -2195,7 +2460,7 @@ class FileAndMatchConfig(ttk.Frame):
             # 立即更新标签，确保sheet变量已设置
             self._update_file_labels()
             self._update_file1_preview()
-            self._update_match_columns()
+            self._update_match_columns(trigger_llm=True)
         else:
             if self.status_callback:
                 self.status_callback(f"{file_display_name}读取失败")
@@ -2313,7 +2578,7 @@ class FileAndMatchConfig(ttk.Frame):
             # 立即更新标签，确保sheet变量已设置
             self._update_file_labels()
             self._update_file2_preview()
-            self._update_match_columns()
+            self._update_match_columns(trigger_llm=True)
         else:
             if self.status_callback:
                 self.status_callback(f"{file_display_name}读取失败")
@@ -2403,9 +2668,6 @@ class FileAndMatchConfig(ttk.Frame):
         
         file1_name = self._get_file_display_name(1)
         file2_name = self._get_file_display_name(2)
-        # UI标签使用短名，避免长文件名撑开布局挤压右侧配置区
-        file1_name_short = self._shorten_for_ui(file1_name, max_len=10)
-        file2_name_short = self._shorten_for_ui(file2_name, max_len=10)
         file1_mapping_short = self._shorten_for_ui(file1_name, max_len=12)
         file2_mapping_short = self._shorten_for_ui(file2_name, max_len=12)
         
@@ -2415,14 +2677,16 @@ class FileAndMatchConfig(ttk.Frame):
         
         # 更新文件选择区域的标签
         if hasattr(self, 'file1_label'):
-            self.file1_label.config(text=f"{file1_name_short}:")
+            file1_label_text = "新增清单:" if self.mode == "supplement" else "文件1:"
+            self.file1_label.config(text=file1_label_text)
             # #region agent log
-            _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_and_match_config._update_file_labels.file1_label", message="updated file1 label", data={"text": f"{file1_name_short}:"})
+            _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_and_match_config._update_file_labels.file1_label", message="updated file1 label", data={"text": file1_label_text})
             # #endregion
         if hasattr(self, 'file2_label'):
-            self.file2_label.config(text=f"{file2_name_short}:")
+            file2_label_text = "处置清单:" if self.mode == "supplement" else "文件2:"
+            self.file2_label.config(text=file2_label_text)
             # #region agent log
-            _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_and_match_config._update_file_labels.file2_label", message="updated file2 label", data={"text": f"{file2_name_short}:"})
+            _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_and_match_config._update_file_labels.file2_label", message="updated file2 label", data={"text": file2_label_text})
             # #endregion
         
         # 更新匹配列配置区域的标签
@@ -2430,10 +2694,6 @@ class FileAndMatchConfig(ttk.Frame):
             self.match_file1_label.config(text=f"{file1_name}:")
         if hasattr(self, 'match_file2_label'):
             self.match_file2_label.config(text=f"{file2_name}:")
-        
-        # 更新数据类型区域的标签
-        if hasattr(self, 'data_type_file2_label'):
-            self.data_type_file2_label.config(text=f"{file2_name}:")
         
         # 更新字段映射配置区域的标签
         if hasattr(self, 'mapping_file1_label'):
@@ -2516,7 +2776,7 @@ class FileAndMatchConfig(ttk.Frame):
                     values.append(val_str)
             self.file2_tree.insert('', tk.END, values=values)
     
-    def _update_match_columns(self):
+    def _update_match_columns(self, *, trigger_llm=False):
         """更新匹配列下拉框并自动预映射"""
         # 分别获取文件1、文件2的列，确保下拉框来源正确
         # 使用 list() 创建独立副本，避免共享引用
@@ -2626,62 +2886,65 @@ class FileAndMatchConfig(ttk.Frame):
         self.match_col1_listbox.selection_clear(0, tk.END)
         self.match_col2_listbox.selection_clear(0, tk.END)
 
-        id_col1, id_col2 = pick_paired_fa_match_id_columns(cols1, cols2)
+        if self.mode == "supplement":
+            self._auto_map_supplement_match_columns(cols1, cols2)
+        else:
+            id_col1, id_col2 = pick_paired_fa_match_id_columns(cols1, cols2)
 
-        if id_col1 and id_col2:
-            self.match_col1_listbox.selection_set(cols1.index(id_col1))
-            self.match_col2_listbox.selection_set(cols2.index(id_col2))
-            self.match_columns1 = [id_col1]
-            self.match_columns2 = [id_col2]
-            self._update_selected_match_columns(1)
-            self._update_selected_match_columns(2)
-            if hasattr(self, '_update_match_col1_button'):
-                self._update_match_col1_button()
-            if hasattr(self, '_update_match_col2_button'):
-                self._update_match_col2_button()
-        elif cols1 and cols2:
-            # 回退到原有匹配逻辑，但不把明显非ID的列当作第一匹配列。
-            matches = get_column_matches(cols1, cols2)
-            matches = [
-                (col1, col2)
-                for col1, col2 in matches
-                if not is_forbidden_fa_match_key_column(col1)
-                and not is_forbidden_fa_match_key_column(col2)
-            ]
-            if matches:
-                col1, col2 = matches[0]
-                if col1 in cols1:
-                    idx1 = cols1.index(col1)
-                    self.match_col1_listbox.selection_set(idx1)
-                    self.match_columns1 = [col1]
-                if col2 in cols2:
-                    idx2 = cols2.index(col2)
-                    self.match_col2_listbox.selection_set(idx2)
-                    self.match_columns2 = [col2]
+            if id_col1 and id_col2:
+                self.match_col1_listbox.selection_set(cols1.index(id_col1))
+                self.match_col2_listbox.selection_set(cols2.index(id_col2))
+                self.match_columns1 = [id_col1]
+                self.match_columns2 = [id_col2]
                 self._update_selected_match_columns(1)
                 self._update_selected_match_columns(2)
-                # 更新按钮文本
                 if hasattr(self, '_update_match_col1_button'):
                     self._update_match_col1_button()
                 if hasattr(self, '_update_match_col2_button'):
-                        self._update_match_col2_button()
-            else:
-                fallback1 = next((col for col in cols1 if not is_forbidden_fa_match_key_column(col)), None)
-                fallback2 = next((col for col in cols2 if not is_forbidden_fa_match_key_column(col)), None)
-                if fallback1 and fallback2:
-                    self.match_col1_listbox.selection_set(cols1.index(fallback1))
-                    self.match_col2_listbox.selection_set(cols2.index(fallback2))
-                    self.match_columns1 = [fallback1]
-                    self.match_columns2 = [fallback2]
+                    self._update_match_col2_button()
+            elif cols1 and cols2:
+                # 回退到原有匹配逻辑，但不把明显非ID的列当作第一匹配列。
+                matches = get_column_matches(cols1, cols2)
+                matches = [
+                    (col1, col2)
+                    for col1, col2 in matches
+                    if not is_forbidden_fa_match_key_column(col1)
+                    and not is_forbidden_fa_match_key_column(col2)
+                ]
+                if matches:
+                    col1, col2 = matches[0]
+                    if col1 in cols1:
+                        idx1 = cols1.index(col1)
+                        self.match_col1_listbox.selection_set(idx1)
+                        self.match_columns1 = [col1]
+                    if col2 in cols2:
+                        idx2 = cols2.index(col2)
+                        self.match_col2_listbox.selection_set(idx2)
+                        self.match_columns2 = [col2]
                     self._update_selected_match_columns(1)
                     self._update_selected_match_columns(2)
+                    # 更新按钮文本
                     if hasattr(self, '_update_match_col1_button'):
                         self._update_match_col1_button()
                     if hasattr(self, '_update_match_col2_button'):
-                        self._update_match_col2_button()
+                            self._update_match_col2_button()
+                else:
+                    fallback1 = next((col for col in cols1 if not is_forbidden_fa_match_key_column(col)), None)
+                    fallback2 = next((col for col in cols2 if not is_forbidden_fa_match_key_column(col)), None)
+                    if fallback1 and fallback2:
+                        self.match_col1_listbox.selection_set(cols1.index(fallback1))
+                        self.match_col2_listbox.selection_set(cols2.index(fallback2))
+                        self.match_columns1 = [fallback1]
+                        self.match_columns2 = [fallback2]
+                        self._update_selected_match_columns(1)
+                        self._update_selected_match_columns(2)
+                        if hasattr(self, '_update_match_col1_button'):
+                            self._update_match_col1_button()
+                        if hasattr(self, '_update_match_col2_button'):
+                            self._update_match_col2_button()
 
         self._match_columns_auto_default = bool(self.match_columns1 or self.match_columns2)
-        
+
         # 通用预映射函数：精确匹配优先，包含匹配次之
         def auto_map_column(cols, exact_keywords, contain_keywords=None):
             """
@@ -2712,11 +2975,15 @@ class FileAndMatchConfig(ttk.Frame):
             
             return None
 
+        addition_method_exact = ['新增方式', '增加方式', '取得方式', '资产来源', '新增来源']
+        addition_method_contain = ['新增方式', '增加方式', '取得方式', '新增来源', '增加来源']
+        addition_date_exact = ['新增时间', '新增日期', '增加时间', '增加日期', '取得日期', '购置日期']
+        addition_date_contain = ['新增时间', '新增日期', '增加时间', '增加日期', '取得时间', '取得日期', '购置时间', '购置日期']
+
         if self.mode == "supplement":
-            addition_method_exact = ['新增方式', '增加方式', '取得方式', '资产来源', '新增来源']
-            addition_method_contain = ['新增方式', '增加方式', '取得方式', '来源', '方式', '途径']
-            addition_date_exact = ['新增时间', '增加时间', '取得日期', '日期', '时间', '时点']
-            addition_date_contain = ['新增', '增加', '时间', '日期', '时点']
+            supplement_addition_method_contain = addition_method_contain + ['来源', '方式', '途径']
+            supplement_addition_date_exact = addition_date_exact + ['日期', '时间', '时点']
+            supplement_addition_date_contain = addition_date_contain + ['新增', '增加', '时间', '日期', '时点']
 
             disposal_method_exact = ['处置方式', '减少方式', '报废方式', '出售方式']
             disposal_method_contain = ['处置方式', '减少方式', '报废', '出售', '转出', '方式']
@@ -2727,8 +2994,8 @@ class FileAndMatchConfig(ttk.Frame):
             disposal_dep_exact = ['处置折旧', '减少折旧', '累计折旧处置', '累计折旧减少', '累计折旧']
             disposal_dep_contain = ['处置折旧', '减少折旧', '折旧减少', '累计折旧减少', '累计折旧处置']
 
-            add_method_col1 = auto_map_column(cols1, addition_method_exact, addition_method_contain)
-            add_date_col1 = auto_map_column(cols1, addition_date_exact, addition_date_contain)
+            add_method_col1 = auto_map_column(cols1, addition_method_exact, supplement_addition_method_contain)
+            add_date_col1 = auto_map_column(cols1, supplement_addition_date_exact, supplement_addition_date_contain)
             disp_method_col2 = auto_map_column(cols2, disposal_method_exact, disposal_method_contain)
             disp_date_col2 = auto_map_column(cols2, disposal_date_exact, disposal_date_contain)
             disp_orig_col2 = auto_map_column(cols2, disposal_orig_exact, disposal_orig_contain)
@@ -2758,9 +3025,34 @@ class FileAndMatchConfig(ttk.Frame):
                 self.disposal_dep_col2_var.set(disp_dep_col2)
                 if disp_dep_col2 in cols2:
                     self.disposal_dep_col2_combo.current(_mapping_combo_index(disp_dep_col2, cols2))
-            self._queue_llm_mapping_assist()
+            self._clear_disallowed_supplement_mappings()
+            if trigger_llm:
+                self._queue_llm_mapping_assist(force=True)
             return
-        
+
+        add_method_col1 = auto_map_column(cols1, addition_method_exact, addition_method_contain)
+        add_method_col2 = auto_map_column(cols2, addition_method_exact, addition_method_contain)
+        add_date_col1 = auto_map_column(cols1, addition_date_exact, addition_date_contain)
+        add_date_col2 = auto_map_column(cols2, addition_date_exact, addition_date_contain)
+
+        if add_method_col1:
+            self.addition_method_col1_var.set(add_method_col1)
+            if add_method_col1 in cols1:
+                self.addition_method_col1_combo.current(_mapping_combo_index(add_method_col1, cols1))
+        if add_method_col2:
+            self.addition_method_col2_var.set(add_method_col2)
+            if add_method_col2 in cols2:
+                self.addition_method_col2_combo.current(_mapping_combo_index(add_method_col2, cols2))
+        if add_date_col1:
+            self.addition_date_col1_var.set(add_date_col1)
+            if add_date_col1 in cols1:
+                self.addition_date_col1_combo.current(_mapping_combo_index(add_date_col1, cols1))
+        if add_date_col2:
+            self.addition_date_col2_var.set(add_date_col2)
+            if add_date_col2 in cols2:
+                self.addition_date_col2_combo.current(_mapping_combo_index(add_date_col2, cols2))
+        self._update_optional_addition_rows_visibility()
+
         # 自动预映射原值列
         orig_exact = ['原值', '资产原值', '固定资产原值']
         orig_contain = ['成本', '入账价值']
@@ -2855,6 +3147,8 @@ class FileAndMatchConfig(ttk.Frame):
             self.date_col2_var.set(date_cols2[0])
             if date_cols2[0] in cols2:
                 self.date_col2_combo.current(_mapping_combo_index(date_cols2[0], cols2))
+        self._fallback_addition_date_to_entry_date(cols1, cols2)
+        self._update_optional_addition_rows_visibility()
         
         # 自动预映射使用寿命列
         life_col1 = find_fa_life_column(cols1)
@@ -2897,7 +3191,9 @@ class FileAndMatchConfig(ttk.Frame):
             self.current_year_dep_col2_var.set(current_year_dep_col2)
             if current_year_dep_col2 in cols2:
                 self.current_year_dep_col2_combo.current(_mapping_combo_index(current_year_dep_col2, cols2))
-        self._queue_llm_mapping_assist()
+        self._clear_disallowed_supplement_mappings()
+        if trigger_llm:
+            self._queue_llm_mapping_assist(force=True)
 
     def _mapped_name_columns_for_match(self, cols1, cols2):
         """Return mapped asset-name columns only when both mapped values exist in their files."""
@@ -3067,6 +3363,86 @@ class FileAndMatchConfig(ttk.Frame):
         helper_columns = [col for col in columns if score_fa_match_id_column(col) is None]
         return id_columns + helper_columns
 
+    def _reference_match_columns_for_supplement_file(self, file_index):
+        if file_index == 1:
+            return list(self.supplement_reference_match_columns1 or [])
+        return list(self.supplement_reference_match_columns2 or [])
+
+    @staticmethod
+    def _reference_col_is_code_like(column):
+        normalized = _normalize_candidate_header(column)
+        if score_fa_match_id_column(column) is not None:
+            return True
+        return any(token in normalized for token in ("coding", "assetcode", "code", "assetid", "id", "编码", "编号", "卡片号"))
+
+    @staticmethod
+    def _reference_col_is_name_like(column):
+        normalized = _normalize_candidate_header(column)
+        return any(token in normalized for token in ("资产名称", "固定资产名称", "名称", "assetname", "name"))
+
+    def _pick_supplement_column_for_reference(self, reference_col, columns, df, used_columns):
+        available = [col for col in (columns or []) if col not in used_columns]
+        if not available:
+            return None
+
+        ref_norm = _normalize_candidate_header(reference_col)
+        for col in available:
+            if _normalize_candidate_header(col) == ref_norm:
+                return col
+
+        if self._reference_col_is_code_like(reference_col):
+            scored = []
+            for index, col in enumerate(available):
+                score = score_fa_match_id_column(col)
+                if score is not None:
+                    scored.append((-score, index, col))
+            if scored:
+                scored.sort()
+                return scored[0][2]
+
+        if self._reference_col_is_name_like(reference_col):
+            picked = pick_fa_name_column(available, df=df, exclude_cols=list(used_columns))
+            if picked and picked not in used_columns:
+                return picked
+
+        for col in available:
+            col_norm = _normalize_candidate_header(col)
+            if ref_norm and (ref_norm in col_norm or col_norm in ref_norm):
+                return col
+        return None
+
+    def _auto_map_supplement_match_columns(self, cols1, cols2):
+        """Map supplement IDs by the first-step match-key口径, even when only one side is loaded."""
+        changed = False
+
+        def apply_side(file_index, columns, df):
+            refs = self._reference_match_columns_for_supplement_file(file_index)
+            if not refs or not columns:
+                return False
+            selected = []
+            used = set()
+            for ref in refs:
+                picked = self._pick_supplement_column_for_reference(ref, columns, df, used)
+                if picked:
+                    selected.append(picked)
+                    used.add(picked)
+            if not selected:
+                return False
+            if file_index == 1:
+                self.match_columns1 = selected
+            else:
+                self.match_columns2 = selected
+            return True
+
+        if apply_side(1, cols1, self.file_handler.file1_df):
+            changed = True
+        if apply_side(2, cols2, self.file_handler.file2_df):
+            changed = True
+        if changed:
+            self._match_columns_auto_default = True
+            self._sync_auto_match_column_selection(cols1, cols2)
+        return changed
+
     def _log_llm_mapping_event(self, event, **data):
         try:
             from debug_logger import _write as _dbg
@@ -3081,7 +3457,7 @@ class FileAndMatchConfig(ttk.Frame):
         except Exception:
             pass
 
-    def _queue_llm_mapping_assist(self):
+    def _queue_llm_mapping_assist(self, *, force=False):
         if (
             self._llm_mapping_assist_scheduled
             and not self._llm_mapping_running
@@ -3102,7 +3478,8 @@ class FileAndMatchConfig(ttk.Frame):
             return
         has_file1 = self.file_handler.file1_df is not None
         has_file2 = self.file_handler.file2_df is not None
-        if not has_file1 or not has_file2:
+        has_required_files = (has_file1 and has_file2) if self.mode != "supplement" else (has_file1 or has_file2)
+        if not has_required_files:
             self._log_llm_mapping_event(
                 "queue_skipped",
                 reason="missing_dataframe",
@@ -3133,7 +3510,10 @@ class FileAndMatchConfig(ttk.Frame):
                 self._log_llm_mapping_event("start_skipped", reason="llm_disabled")
                 self._set_llm_mapping_status("")
                 return
-            if self.file_handler.file1_df is None or self.file_handler.file2_df is None:
+            has_file1 = self.file_handler.file1_df is not None
+            has_file2 = self.file_handler.file2_df is not None
+            has_required_files = (has_file1 and has_file2) if self.mode != "supplement" else (has_file1 or has_file2)
+            if not has_required_files:
                 self._log_llm_mapping_event(
                     "start_skipped",
                     reason="missing_dataframe",
@@ -3142,9 +3522,10 @@ class FileAndMatchConfig(ttk.Frame):
                 )
                 self._set_llm_mapping_status("")
                 return
-            cols1 = list(self.file_handler.get_file1_columns())
-            cols2 = list(self.file_handler.get_file2_columns())
-            if not cols1 or not cols2:
+            cols1 = list(self.file_handler.get_file1_columns()) if self.file_handler.file1_df is not None else []
+            cols2 = list(self.file_handler.get_file2_columns()) if self.file_handler.file2_df is not None else []
+            has_required_columns = bool(cols1 and cols2) if self.mode != "supplement" else bool(cols1 or cols2)
+            if not has_required_columns:
                 self._log_llm_mapping_event(
                     "start_skipped",
                     reason="missing_columns",
@@ -3153,7 +3534,8 @@ class FileAndMatchConfig(ttk.Frame):
                 )
                 self._set_llm_mapping_status("")
                 return
-            repaired_match = self._repair_auto_match_columns(cols1, cols2)
+            generation = self._llm_generation
+            repaired_match = self._repair_auto_match_columns(cols1, cols2) if cols1 and cols2 else False
             if repaired_match:
                 self._log_llm_mapping_event(
                     "auto_match_repaired_before_llm",
@@ -3173,16 +3555,20 @@ class FileAndMatchConfig(ttk.Frame):
             payload = {
                 "cols1": cols1,
                 "cols2": cols2,
-                "samples1": self._llm_column_samples(self.file_handler.file1_df),
-                "samples2": self._llm_column_samples(self.file_handler.file2_df),
-                "profiles1": self._llm_column_profiles(self.file_handler.file1_df),
-                "profiles2": self._llm_column_profiles(self.file_handler.file2_df),
+                "samples1": self._llm_column_samples(self.file_handler.file1_df) if self.file_handler.file1_df is not None else {},
+                "samples2": self._llm_column_samples(self.file_handler.file2_df) if self.file_handler.file2_df is not None else {},
+                "profiles1": self._llm_column_profiles(self.file_handler.file1_df) if self.file_handler.file1_df is not None else {},
+                "profiles2": self._llm_column_profiles(self.file_handler.file2_df) if self.file_handler.file2_df is not None else {},
                 "current": self._current_llm_mapping(),
                 "match_profile": match_profile,
                 "candidate_profiles": candidate_profiles,
                 "candidate_profiles_all": candidate_profiles_all,
                 "forbidden_columns": forbidden_initial,
                 "mode": self.mode,
+                "supplement_reference_match": {
+                    "file1": list(self.supplement_reference_match_columns1 or []),
+                    "file2": list(self.supplement_reference_match_columns2 or []),
+                },
             }
             signature = self._match_review_signature(payload["current"].get("match"), payload["match_profile"])
             self._log_llm_mapping_event(
@@ -3206,6 +3592,8 @@ class FileAndMatchConfig(ttk.Frame):
             fa_review_error = None
             match_review = None
             match_review_error = None
+            supplement_match_review = None
+            supplement_match_review_error = None
             mapping_error = None
             try:
                 self._log_llm_mapping_event("worker_started")
@@ -3218,24 +3606,34 @@ class FileAndMatchConfig(ttk.Frame):
                     api_key=bool(settings.get("api_key")) if isinstance(settings, dict) else bool(getattr(settings, "api_key", "")),
                 )
                 role_definitions = self._llm_role_definitions()
-                files = [
-                    {
+                files = []
+                if payload["cols1"]:
+                    files.append({
                         "file_side": "file1",
                         "headers": [str(c) for c in payload["cols1"]],
                         "samples": payload["samples1"],
                         "column_profiles": payload["profiles1"],
-                    },
-                    {
+                    })
+                if payload["cols2"]:
+                    files.append({
                         "file_side": "file2",
                         "headers": [str(c) for c in payload["cols2"]],
                         "samples": payload["samples2"],
                         "column_profiles": payload["profiles2"],
-                    },
-                ]
+                    })
+                supplement_ref = payload.get("supplement_reference_match") or {}
+                supplement_ref_text = (
+                    f"补充清单模式下，match 必须沿用第一步匹配ID口径："
+                    f"file1参考 {' + '.join(supplement_ref.get('file1') or []) or '无'}；"
+                    f"file2参考 {' + '.join(supplement_ref.get('file2') or []) or '无'}。"
+                    "若第一步为 资产编码 + 名称，补充清单也应找等价的 编码 + 名称；不要自行降级为单列或改用流水号/期间/型号。"
+                ) if self.mode == "supplement" else ""
                 mapping_instructions = (
                     "file1通常为期初或新增清单，file2通常为期末或处置清单。"
                     "只对未映射字段使用 action=fill；已映射字段仅 action=review/keep。"
+                    "普通模式下，addition_method/addition_date 是可选字段：只有列名、样例值或列画像能明确证明新增/增加/取得/购置含义时才填补或复核；证据不足时不要输出、不要提示、不要硬猜。"
                     "补充清单模式下，file1优先新增方式/新增时间，file2优先处置方式/处置时间/处置原值/处置折旧。"
+                    f"{supplement_ref_text}"
                 )
                 review_instructions = (
                     "先脱离自动预映射结论，依据 headers、samples、column_profiles 独立判断各列实际业务角色，再复核已自动预映射字段是否明显错列或两期口径不一致。"
@@ -3243,7 +3641,11 @@ class FileAndMatchConfig(ttk.Frame):
                     "不要再提示使用寿命的年/月单位差异，也不要再提示残值率/残值的口径差异——脚本已分别按 ×12 与 残值/原值 自动校正。"
                     "特别注意列名暗示和脚本初判都可能与实际数据形态冲突：列名和 current_mapping 只作参考，样例值和 column_profiles 优先。"
                     "请把 category、name、code/id、date、value、depreciation 等字段作为一组联动复核；若多列发生错位或互换，应分别返回每个受影响字段的 field_review，而不是只修一个字段。"
-                    "category 应是短中文类别名且 unique_count 通常较少；name 应是具体资产名称/型号/规格等长描述，通常更长或 unique_count 明显更多；短英数字值通常是代码/编号。"
+                    "depreciation/累计折旧必须是累计数；凡表头或样例语义为本月折旧、本期折旧、本年折旧、当年折旧、计提折旧、月折旧的列，都属于 current_year_dep/本年折旧口径，禁止建议映射到 depreciation/累计折旧。"
+                    "current_year_dep/本年折旧可以对应本月折旧、本期折旧、本年折旧、当年折旧、计提折旧；若当前累计折旧映射到了这些列，应建议把累计折旧改回真正累计数列，而不是把这些列作为累计折旧。"
+                    "addition_method/addition_date 是可选字段，只在明确新增/增加/取得/购置证据下复核；普通日期、时间、方式、来源列不要强行归为新增字段。"
+                    "category/资产类别是资产种类名称或描述，可以是中文或英文文本；不是资产类代码、分类编码、SAP代码、数字短码或其他编码值。"
+                    "判断 category 时先确认样例值是描述性资产种类文本，再把短文本、低 unique_count 作为辅助证据；短且唯一值少的 010/030/Y110/A12 这类编码列仍然禁止作为 category。"
                     "如果 category 当前列的样例像代码/编号或长资产描述，应 flag wrong_column；若两侧 category 数据形态不一致，应 flag cross_period_inconsistent。"
                     "category 与 name 在同一文件侧不能共用同一列；若 category 建议改到 name 当前列，必须同步复核 name 并建议长描述/高唯一值列。"
                     "如建议修正，suggested_mapping 只返回需要修正的一侧或两侧。"
@@ -3252,7 +3654,21 @@ class FileAndMatchConfig(ttk.Frame):
                     "文件1和文件2的匹配列数量必须一致；可建议多列组合。"
                     "如果当前列有空值、重复较多，或两边一个是编号一个是名称，应提示用户。"
                 )
-                match_review_enabled = bool(signature and signature != self._last_llm_match_review_signature)
+                match_review_enabled = bool(self.mode != "supplement" and payload["cols1"] and payload["cols2"] and signature and signature != self._last_llm_match_review_signature)
+                supplement_match_review_enabled = bool(self.mode == "supplement" and (payload["cols1"] or payload["cols2"]))
+
+                def run_supplement_match_review():
+                    if not supplement_match_review_enabled:
+                        return None
+                    return review_supplement_match_key_columns(
+                        settings,
+                        tool_name="FA List",
+                        files=files,
+                        current_match=payload["current"].get("match", {}),
+                        reference_match=payload.get("supplement_reference_match") or {},
+                        extra_instructions="只判断补充清单匹配ID是否完整对齐第一步ID口径。",
+                    )
+
                 try:
                     self._log_llm_mapping_event("combined_task_submitted", include_match_review=match_review_enabled)
                     combined = generate_combined_fa_list_assistance(
@@ -3273,11 +3689,17 @@ class FileAndMatchConfig(ttk.Frame):
                     suggestions = combined.suggestions
                     fa_review = combined.fa_review
                     match_review = combined.match_review
+                    try:
+                        supplement_match_review = run_supplement_match_review()
+                    except Exception as exc:
+                        supplement_match_review_error = str(exc)
+                        self._log_llm_mapping_event("supplement_match_review_failed", error=str(exc))
                     self._log_llm_mapping_event(
                         "combined_task_done",
                         suggestions_count=len(suggestions or []),
                         fa_review_count=len(fa_review or []),
                         has_match_review=match_review is not None,
+                        has_supplement_match_review=supplement_match_review is not None,
                         repair_used=combined.repair_used,
                     )
                     # 把 match_review 实际内容也记下来，便于排查 LLM 推不推、推什么。
@@ -3313,6 +3735,9 @@ class FileAndMatchConfig(ttk.Frame):
                         payload["current"],
                         mapping_error,
                         payload["match_profile"],
+                        supplement_match_review,
+                        supplement_match_review_error,
+                        generation,
                     ))
                     return
                 except Exception as exc:
@@ -3414,6 +3839,11 @@ class FileAndMatchConfig(ttk.Frame):
                     except Exception as exc:
                         match_review_error = str(exc)
                         self._log_llm_mapping_event("match_review_phase2_failed", error=str(exc))
+                try:
+                    supplement_match_review = run_supplement_match_review()
+                except Exception as exc:
+                    supplement_match_review_error = str(exc)
+                    self._log_llm_mapping_event("supplement_match_review_failed", error=str(exc))
             except Exception as exc:
                 mapping_error = str(exc)
                 self._log_llm_mapping_event("worker_failed", error=str(exc))
@@ -3422,6 +3852,7 @@ class FileAndMatchConfig(ttk.Frame):
                 suggestions_count=len(suggestions or []),
                 fa_review_count=len(fa_review or []),
                 has_match_review=match_review is not None,
+                has_supplement_match_review=supplement_match_review is not None,
                 errors=[msg for msg in (mapping_error, fa_review_error, match_review_error) if msg],
             )
             self.after(0, lambda: self._safe_apply_llm_mapping_suggestions(
@@ -3436,6 +3867,9 @@ class FileAndMatchConfig(ttk.Frame):
                 payload["current"],
                 mapping_error,
                 payload["match_profile"],
+                supplement_match_review,
+                supplement_match_review_error,
+                generation,
             ))
 
         self._log_llm_mapping_event("worker_thread_starting")
@@ -3448,12 +3882,46 @@ class FileAndMatchConfig(ttk.Frame):
             self._log_llm_mapping_event("apply_failed", error=str(exc))
             self._finish_llm_mapping(f"大模型辅助判断未能完成：{exc}", show_warning=True)
 
-    def _apply_llm_mapping_suggestions(self, suggestions, cols1, cols2, match_review=None, match_signature=None, match_review_error=None, fa_review=None, fa_review_error=None, review_current_mapping=None, mapping_error=None, match_profile=None):
+    def _llm_role_display_label(self, role):
+        labels = self._llm_role_label_map()
+        text = labels.get(role) or role or "字段"
+        return str(text).split("/")[0].strip() or str(text)
+
+    def _llm_side_role_display_label(self, role, side):
+        side_text = "文件1" if side == "file1" else "文件2" if side == "file2" else ""
+        role_text = self._llm_role_display_label(role)
+        return f"{side_text}{role_text}" if side_text else role_text
+
+    @staticmethod
+    def _summarize_labels(labels, limit=4):
+        out = []
+        seen = set()
+        for label in labels or []:
+            text = str(label or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            out.append(text)
+        if not out:
+            return "无"
+        if len(out) > limit:
+            return "、".join(out[:limit]) + f"等{len(out)}项"
+        return "、".join(out)
+
+    def _apply_llm_mapping_suggestions(self, suggestions, cols1, cols2, match_review=None, match_signature=None, match_review_error=None, fa_review=None, fa_review_error=None, review_current_mapping=None, mapping_error=None, match_profile=None, supplement_match_review=None, supplement_match_review_error=None, generation=None):
+        if generation is not None and generation != self._llm_generation:
+            self._llm_mapping_running = False
+            if self._llm_rerun_after_current:
+                self._llm_rerun_after_current = False
+                self._queue_llm_mapping_assist(force=True)
+            return
         # 每次大模型跑完都重新评估弹窗——只在“当前这一批返回”内防止同一条建议被
         # 重复展示，不要把上一次的指纹带过来，否则用户重新选文件后即使 LLM 又给出
         # 同样的提示，弹窗也会被吞掉。
         self._llm_shown_match_review_keys = set()
         self._llm_shown_fa_review_keys = set()
+        self._llm_fill_labels_current = []
+        self._llm_review_labels_current = []
         review_current_mapping = review_current_mapping or self._current_llm_mapping()
         suggestions = list(suggestions or [])
         fa_review = list(fa_review or [])
@@ -3483,6 +3951,7 @@ class FileAndMatchConfig(ttk.Frame):
             if item.action == "fill" and item.confidence >= AUTO_APPLY_CONFIDENCE:
                 if self._fill_llm_role(item.role, side, col, cols1, cols2):
                     applied += 1
+                    self._llm_fill_labels_current.append(self._llm_side_role_display_label(item.role, side))
                 else:
                     skipped += 1
                     self._log_llm_mapping_event(
@@ -3535,8 +4004,11 @@ class FileAndMatchConfig(ttk.Frame):
             if self._handle_llm_match_key_review(match_review, cols1, cols2, match_profile=match_profile):
                 reviews += 1
             self._last_llm_match_review_signature = match_signature
+        if supplement_match_review is not None:
+            if self._handle_llm_supplement_match_key_review(supplement_match_review, cols1, cols2):
+                reviews += 1
         reviews += self._handle_llm_fa_mapping_review(fa_review, cols1, cols2, review_current_mapping)
-        errors = _dedupe_messages([msg for msg in (mapping_error, fa_review_error, match_review_error) if msg])
+        errors = _dedupe_messages([msg for msg in (mapping_error, fa_review_error, match_review_error, supplement_match_review_error) if msg])
         if errors and applied == 0 and reviews == 0:
             if all(_is_llm_empty_response_error(msg) for msg in errors):
                 self._finish_llm_mapping("大模型暂未返回可用建议，已跳过辅助判断；你仍可继续手动配置。", show_warning=False)
@@ -3548,6 +4020,7 @@ class FileAndMatchConfig(ttk.Frame):
                 ("字段建议", mapping_error),
                 ("字段口径复核", fa_review_error),
                 ("匹配列复核", match_review_error),
+                ("补充ID复核", supplement_match_review_error),
             ]
         )
         suffix = (" " + "；".join(suffix_parts)) if suffix_parts else ""
@@ -3556,9 +4029,13 @@ class FileAndMatchConfig(ttk.Frame):
             applied=applied,
             reviews=reviews,
             skipped=skipped,
-            errors=[msg for msg in (mapping_error, fa_review_error, match_review_error) if msg],
+            errors=[msg for msg in (mapping_error, fa_review_error, match_review_error, supplement_match_review_error) if msg],
         )
-        self._finish_llm_mapping(f"大模型辅助判断完成：已补充 {applied} 项字段映射，复核提示 {reviews} 项。{suffix}")
+        fill_summary = self._summarize_labels(self._llm_fill_labels_current)
+        review_summary = self._summarize_labels(self._llm_review_labels_current)
+        self._finish_llm_mapping(
+            f"大模型辅助判断完成：已补充 {applied} 项（{fill_summary}），复核提示 {reviews} 项（{review_summary}）。{suffix}"
+        )
 
     def _handle_llm_fa_mapping_review(self, review_items, cols1, cols2, current_mapping):
         decisions = build_fa_mapping_review_decisions(
@@ -3591,6 +4068,8 @@ class FileAndMatchConfig(ttk.Frame):
         total = len(pending)
         for index, (sig, decision) in enumerate(pending, start=1):
             shown_keys.add(sig)
+            if hasattr(self, "_llm_review_labels_current"):
+                self._llm_review_labels_current.append(decision.get("label") or self._llm_role_display_label(decision.get("role")))
             message = build_fa_mapping_review_dialog_text(decision)
             title = f"LLM 字段映射复核（{index}/{total}）"
             if decision.get("can_apply") and decision.get("apply_mapping"):
@@ -3627,6 +4106,8 @@ class FileAndMatchConfig(ttk.Frame):
             )
         if not decision.get("show"):
             return False
+        if hasattr(self, "_llm_review_labels_current"):
+            self._llm_review_labels_current.append("匹配ID")
         # 相同的匹配列 + 相同的建议组合只向用户提示一次，避免再次配置或点击下一步时
         # 反复跳出同样的风险弹窗。
         sig = (
@@ -3645,32 +4126,85 @@ class FileAndMatchConfig(ttk.Frame):
             log_event("match_review_dedup_skipped")
             return False
         shown_keys.add(sig)
-        current_text = (
-            f"文件1：{' + '.join(self.match_columns1 or ['未选择'])}\n"
-            f"文件2：{' + '.join(self.match_columns2 or ['未选择'])}"
-        )
-        reasons = "\n".join(f"- {reason}" for reason in decision.get("reasons", []) if reason) or "- LLM 认为当前匹配列需要人工复核。"
-        suggestion = (
-            f"文件1：{' + '.join(decision['suggested_file1_columns']) or '无明确建议'}\n"
-            f"文件2：{' + '.join(decision['suggested_file2_columns']) or '无明确建议'}"
-        )
+        current_text = f"文件1：{' + '.join(self.match_columns1 or ['未选择'])}；文件2：{' + '.join(self.match_columns2 or ['未选择'])}"
+        reasons = "；".join(str(reason).strip() for reason in decision.get("reasons", []) if str(reason).strip()) or "LLM 认为当前匹配列需要人工复核"
+        suggestion = f"文件1：{' + '.join(decision['suggested_file1_columns']) or '无明确建议'}；文件2：{' + '.join(decision['suggested_file2_columns']) or '无明确建议'}"
         if decision.get("can_apply"):
             message = (
-                "LLM 提示当前唯一识别码可能不适合作为匹配列。\n\n"
-                f"当前匹配列：\n{current_text}\n\n"
-                f"原因：\n{reasons}\n\n"
-                f"建议改为：\n{suggestion}\n\n"
-                "请选择是否采纳建议。采纳后会自动修正匹配列；不采纳则保持当前设置。"
+                f"匹配ID，建议由 {current_text} 调整为 {suggestion}。\n"
+                f"原因系：{reasons}。\n\n"
+                "采纳后会自动修正匹配列；不采纳则保持当前设置。"
             )
             if ask_apply_llm_suggestion(self, "LLM 匹配列复核", message):
                 self._apply_match_key_columns(decision["suggested_file1_columns"], decision["suggested_file2_columns"], cols1, cols2)
         else:
             messagebox.showinfo(
                 "LLM 匹配列复核",
-                "LLM 提示当前唯一识别码可能需要人工复核。\n\n"
-                f"当前匹配列：\n{current_text}\n\n"
-                f"原因：\n{reasons}\n\n"
-                f"建议参考：\n{suggestion}",
+                f"匹配ID，当前为 {current_text}。\n"
+                f"建议参考：{suggestion}。\n"
+                f"原因系：{reasons}。",
+            )
+        return True
+
+    def _handle_llm_supplement_match_key_review(self, review, cols1, cols2):
+        decision = build_supplement_match_key_review_decision(
+            review,
+            cols1=cols1,
+            cols2=cols2,
+            current1=self.match_columns1,
+            current2=self.match_columns2,
+        )
+        if not decision.get("show"):
+            return False
+        if hasattr(self, "_llm_review_labels_current"):
+            self._llm_review_labels_current.append("补充ID")
+        sig = (
+            tuple(self.match_columns1 or []),
+            tuple(self.match_columns2 or []),
+            tuple(decision.get("suggested_file1_columns") or []),
+            tuple(decision.get("suggested_file2_columns") or []),
+            bool(decision.get("can_apply")),
+            "supplement",
+        )
+        shown_keys = getattr(self, "_llm_shown_match_review_keys", None)
+        if shown_keys is None:
+            shown_keys = set()
+            self._llm_shown_match_review_keys = shown_keys
+        if sig in shown_keys:
+            self._log_llm_mapping_event("supplement_match_review_dedup_skipped")
+            return False
+        shown_keys.add(sig)
+
+        current_parts = []
+        suggestion_parts = []
+        if cols1:
+            current_parts.append(f"文件1：{' + '.join(self.match_columns1 or ['未选择'])}")
+            suggestion_parts.append(f"文件1：{' + '.join(decision['suggested_file1_columns']) or '无明确建议'}")
+        if cols2:
+            current_parts.append(f"文件2：{' + '.join(self.match_columns2 or ['未选择'])}")
+            suggestion_parts.append(f"文件2：{' + '.join(decision['suggested_file2_columns']) or '无明确建议'}")
+        current_text = "；".join(current_parts) or "未选择"
+        suggestion = "；".join(suggestion_parts) or "无明确建议"
+        reasons = "；".join(str(reason).strip() for reason in decision.get("reasons", []) if str(reason).strip()) or "需与第一步ID口径一致"
+        if decision.get("can_apply"):
+            message = (
+                f"补充清单匹配ID，建议由 {current_text} 调整为 {suggestion}。\n"
+                f"原因系：{reasons}。\n\n"
+                "采纳后会自动修正对应补充清单的匹配列；不采纳则保持当前设置。"
+            )
+            if ask_apply_llm_suggestion(self, "LLM 补充清单ID复核", message):
+                self._apply_supplement_match_key_columns(
+                    decision["suggested_file1_columns"],
+                    decision["suggested_file2_columns"],
+                    cols1,
+                    cols2,
+                )
+        else:
+            messagebox.showinfo(
+                "LLM 补充清单ID复核",
+                f"补充清单匹配ID，当前为 {current_text}。\n"
+                f"建议参考：{suggestion}。\n"
+                f"原因系：{reasons}。",
             )
         return True
 
@@ -3692,19 +4226,45 @@ class FileAndMatchConfig(ttk.Frame):
         self._match_columns_auto_default = False
         return True
 
+    def _apply_supplement_match_key_columns(self, columns1, columns2, cols1, cols2):
+        changed = False
+        if columns1:
+            if any(col not in cols1 for col in columns1):
+                return False
+            self.match_col1_listbox.selection_clear(0, tk.END)
+            for col in columns1:
+                self.match_col1_listbox.selection_set(cols1.index(col))
+            self.match_columns1 = list(columns1)
+            self._update_selected_match_columns(1)
+            changed = True
+        if columns2:
+            if any(col not in cols2 for col in columns2):
+                return False
+            self.match_col2_listbox.selection_clear(0, tk.END)
+            for col in columns2:
+                self.match_col2_listbox.selection_set(cols2.index(col))
+            self.match_columns2 = list(columns2)
+            self._update_selected_match_columns(2)
+            changed = True
+        if changed:
+            self._match_columns_auto_default = False
+        return changed
+
     def _current_match_key_profile(self):
         cols1_raw = list(self.file_handler.get_file1_columns()) if self.file_handler.file1_df is not None else []
         cols2_raw = list(self.file_handler.get_file2_columns()) if self.file_handler.file2_df is not None else []
         match1 = [self._find_actual_column_name(col, cols1_raw, '_文件1') for col in (self.match_columns1 or [])]
         match2 = [self._find_actual_column_name(col, cols2_raw, '_文件2') for col in (self.match_columns2 or [])]
         return {
-            "file1": build_unique_key_profile(self.file_handler.file1_df, match1),
-            "file2": build_unique_key_profile(self.file_handler.file2_df, match2),
+            "file1": build_unique_key_profile(self.file_handler.file1_df, match1) if self.file_handler.file1_df is not None else {},
+            "file2": build_unique_key_profile(self.file_handler.file2_df, match2) if self.file_handler.file2_df is not None else {},
         }
 
     def _current_match_key_candidate_profiles(self):
         cols1_raw = list(self.file_handler.get_file1_columns()) if self.file_handler.file1_df is not None else []
         cols2_raw = list(self.file_handler.get_file2_columns()) if self.file_handler.file2_df is not None else []
+        if self.file_handler.file1_df is None or self.file_handler.file2_df is None:
+            return []
         match1 = [self._find_actual_column_name(col, cols1_raw, '_鏂囦欢1') for col in (self.match_columns1 or [])]
         match2 = [self._find_actual_column_name(col, cols2_raw, '_鏂囦欢2') for col in (self.match_columns2 or [])]
         return build_match_key_candidate_profiles(
@@ -3784,8 +4344,8 @@ class FileAndMatchConfig(ttk.Frame):
             self._llm_status_animating = False
             self._llm_status_mode = ""
             self.llm_status_icon_var.set("")
-            if self.llm_status_frame.winfo_ismapped():
-                self.llm_status_frame.pack_forget()
+            if not self.llm_status_frame.winfo_ismapped():
+                self.llm_status_frame.pack(fill=tk.X, pady=(0, 8), after=self.info_label)
 
     def _animate_llm_status_icon(self):
         if not self._llm_status_animating or not hasattr(self, "llm_status_icon_var"):
@@ -3822,10 +4382,13 @@ class FileAndMatchConfig(ttk.Frame):
         if not target or side not in ("file1", "file2"):
             return False
         file_index = 1 if side == "file1" else 2
+        if not self._supplement_role_allowed_side(role, file_index):
+            return False
         entry = target.get(file_index)
         cols = cols1 if file_index == 1 else cols2
         if not entry or col not in cols:
             return False
+        previous_value = entry["var"].get() if entry.get("var") is not None else ""
         if entry.get("var") is not None:
             entry["var"].set(col)
         combo = entry.get("combo")
@@ -3834,6 +4397,16 @@ class FileAndMatchConfig(ttk.Frame):
                 combo.current(1 + cols.index(col))
             except tk.TclError:
                 combo.set(col)
+        if role == "name":
+            if previous_value and previous_value != col:
+                if side == "file1":
+                    self.match_columns1 = [item for item in (self.match_columns1 or []) if item != previous_value]
+                else:
+                    self.match_columns2 = [item for item in (self.match_columns2 or []) if item != previous_value]
+            self._append_mapped_name_to_auto_match_columns(cols1, cols2)
+        if role in self.OPTIONAL_ADDITION_ROLES:
+            self._fallback_addition_date_to_entry_date(cols1, cols2)
+            self._update_optional_addition_rows_visibility()
         return True
 
     def _fill_llm_role(self, role, side, col, cols1, cols2):
@@ -3859,6 +4432,8 @@ class FileAndMatchConfig(ttk.Frame):
         if not target:
             return False
         file_index = 1 if side == "file1" else 2
+        if not self._supplement_role_allowed_side(role, file_index):
+            return False
         entry = target.get(file_index)
         if not entry:
             return False
@@ -3875,10 +4450,13 @@ class FileAndMatchConfig(ttk.Frame):
                 combo.set(col)
         if role == "name":
             self._append_mapped_name_to_auto_match_columns(cols1, cols2)
+        if role in self.OPTIONAL_ADDITION_ROLES:
+            self._fallback_addition_date_to_entry_date(cols1, cols2)
+            self._update_optional_addition_rows_visibility()
         return True
 
-    def _llm_role_targets(self):
-        return {
+    def _llm_role_targets(self, include_disallowed=False):
+        targets = {
             "original_value": {1: {"var": self.original_value_col1_var, "combo": self.orig_col1_combo}, 2: {"var": self.original_value_col2_var, "combo": self.orig_col2_combo}},
             "depreciation": {1: {"var": self.depreciation_col1_var, "combo": self.dep_col1_combo}, 2: {"var": self.depreciation_col2_var, "combo": self.dep_col2_combo}},
             "category": {1: {"var": self.category_col1_var, "combo": self.category_col1_combo}, 2: {"var": self.category_col2_var, "combo": self.category_col2_combo}},
@@ -3894,6 +4472,20 @@ class FileAndMatchConfig(ttk.Frame):
             "disposal_orig": {1: {"var": self.disposal_orig_col1_var, "combo": self.disposal_orig_col1_combo}, 2: {"var": self.disposal_orig_col2_var, "combo": self.disposal_orig_col2_combo}},
             "disposal_dep": {1: {"var": self.disposal_dep_col1_var, "combo": self.disposal_dep_col1_combo}, 2: {"var": self.disposal_dep_col2_var, "combo": self.disposal_dep_col2_combo}},
         }
+        if include_disallowed:
+            return targets
+        filtered = {}
+        for role, sides in targets.items():
+            if not self._role_available_in_current_mode(role):
+                continue
+            allowed = {
+                file_index: entry
+                for file_index, entry in sides.items()
+                if self._supplement_role_allowed_side(role, file_index)
+            }
+            if allowed:
+                filtered[role] = allowed
+        return filtered
 
     def _llm_role_label_map(self):
         return {item["role"]: item.get("label") or item["role"] for item in self._llm_role_definitions()}
@@ -3977,7 +4569,11 @@ class FileAndMatchConfig(ttk.Frame):
             ("disposal_orig", "处置原值/原值减少"),
             ("disposal_dep", "处置折旧/累计折旧减少"),
         ]
-        return [{"role": role, "label": label, "description": label} for role, label in base]
+        return [
+            {"role": role, "label": label, "description": label}
+            for role, label in base
+            if self._role_available_in_current_mode(role)
+        ]
 
     def _llm_column_samples(self, df):
         samples = {}
@@ -4420,65 +5016,65 @@ class FileAndMatchConfig(ttk.Frame):
         # 验证文件是否已选择
         file1_display_name = self._get_file_display_name(1)
         file2_display_name = self._get_file_display_name(2)
-        
-        # 检查是否选择了文件路径
-        file1_display_name = self._get_file_display_name(1)
-        file2_display_name = self._get_file_display_name(2)
-        
-        if not self.file1_path_var.get():
-            self._show_next_step_warning("请先在左侧“文件1”区域选择并加载原始文件。")
-            return
-        
         is_supplement_mode = (self.mode == "supplement")
+        file1_path = (self.file1_path_var.get() or "").strip()
         file2_path = (self.file2_path_var.get() or "").strip()
-        require_file2 = (not is_supplement_mode) or bool(file2_path)
-        if require_file2 and not file2_path:
-            self._show_next_step_warning("请先在左侧“文件2”区域选择并加载对比文件。")
-            return
-        
-        # 检查Excel文件是否选择了sheet
-        _, ext1 = os.path.splitext(self.file1_path_var.get())
-        ext1 = str(ext1).lower() if ext1 else ''
-        if ext1 in ['.xlsx', '.xls'] and not self.file1_sheet_var.get():
-            self._show_next_step_warning(f"请先为“{file1_display_name}”选择工作表，再继续。")
-            return
-        
-        if require_file2:
-            _, ext2 = os.path.splitext(file2_path)
-            ext2 = str(ext2).lower() if ext2 else ''
-            if ext2 in ['.xlsx', '.xls'] and not self.file2_sheet_var.get():
-                self._show_next_step_warning(f"请先为“{file2_display_name}”选择工作表，再继续。")
+        has_file1_input = bool(file1_path)
+        has_file2_input = bool(file2_path)
+
+        if is_supplement_mode:
+            if not has_file1_input and not has_file2_input:
+                self._show_next_step_warning("\u8bf7\u81f3\u5c11\u9009\u62e9\u5e76\u52a0\u8f7d\u4e00\u4efd\u65b0\u589e\u6e05\u5355\u6216\u5904\u7f6e\u6e05\u5355\u3002")
                 return
-        
-        if self.file_handler.file1_df is None:
-            self._show_next_step_warning(f"“{file1_display_name}”尚未加载完成，请重新选择文件或工作表。")
-            return
-        
-        if require_file2 and self.file_handler.file2_df is None:
-            self._show_next_step_warning(f"“{file2_display_name}”尚未加载完成，请重新选择文件或工作表。")
-            return
-        
-        # 获取选中的匹配列（列表格式）
-        match_cols1 = self.match_columns1.copy() if self.match_columns1 else []
-        match_cols2 = self.match_columns2.copy() if self.match_columns2 else []
-        
-        if not match_cols1:
-            self._show_next_step_warning(f"请在“{file1_display_name}”的匹配列区域至少选择一个匹配列。")
-            return
-        
-        if require_file2:
-            if not match_cols2:
-                self._show_next_step_warning(f"请在“{file2_display_name}”的匹配列区域至少选择一个匹配列。")
+        else:
+            if not has_file1_input:
+                self._show_next_step_warning("\u8bf7\u5148\u5728\u5de6\u4fa7\u201c\u6587\u4ef61\u201d\u533a\u57df\u9009\u62e9\u5e76\u52a0\u8f7d\u539f\u59cb\u6587\u4ef6\u3002")
                 return
-            if len(match_cols1) != len(match_cols2):
-                self._show_next_step_warning(
-                    f"文件1和文件2的匹配列数量必须相同。\n\n"
-                    f"当前：文件1已选 {len(match_cols1)} 列，文件2已选 {len(match_cols2)} 列。"
-                )
+            if not has_file2_input:
+                self._show_next_step_warning("\u8bf7\u5148\u5728\u5de6\u4fa7\u201c\u6587\u4ef62\u201d\u533a\u57df\u9009\u62e9\u5e76\u52a0\u8f7d\u5bf9\u6bd4\u6587\u4ef6\u3002")
                 return
-        
-        # 如果列名中有"_文件1"或"_文件2"后缀，需要移除（因为这是合并时添加的，不应该在文件选择阶段存在）
-        # 但如果DataFrame的列名确实有后缀，需要找到对应的原始列名
+
+        def _require_sheet(path, sheet_var, display_name):
+            _, ext = os.path.splitext(path)
+            ext = str(ext).lower() if ext else ''
+            if ext in ['.xlsx', '.xls'] and not sheet_var.get():
+                self._show_next_step_warning(f"\u8bf7\u5148\u4e3a\u201c{display_name}\u201d\u9009\u62e9\u5de5\u4f5c\u8868\uff0c\u518d\u7ee7\u7eed\u3002")
+                return False
+            return True
+
+        if has_file1_input and not _require_sheet(file1_path, self.file1_sheet_var, file1_display_name):
+            return
+        if has_file2_input and not _require_sheet(file2_path, self.file2_sheet_var, file2_display_name):
+            return
+
+        has_file1_df = self.file_handler.file1_df is not None
+        has_file2_df = self.file_handler.file2_df is not None
+        if has_file1_input and not has_file1_df:
+            self._show_next_step_warning(f"\u201c{file1_display_name}\u201d\u5c1a\u672a\u52a0\u8f7d\u5b8c\u6210\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u6587\u4ef6\u6216\u5de5\u4f5c\u8868\u3002")
+            return
+        if has_file2_input and not has_file2_df:
+            self._show_next_step_warning(f"\u201c{file2_display_name}\u201d\u5c1a\u672a\u52a0\u8f7d\u5b8c\u6210\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u6587\u4ef6\u6216\u5de5\u4f5c\u8868\u3002")
+            return
+        if is_supplement_mode and not has_file1_df and not has_file2_df:
+            self._show_next_step_warning("\u8bf7\u81f3\u5c11\u52a0\u8f7d\u4e00\u4efd\u65b0\u589e\u6e05\u5355\u6216\u5904\u7f6e\u6e05\u5355\u3002")
+            return
+
+        match_cols1 = self.match_columns1.copy() if (has_file1_df and self.match_columns1) else []
+        match_cols2 = self.match_columns2.copy() if (has_file2_df and self.match_columns2) else []
+
+        if has_file1_df and not match_cols1:
+            self._show_next_step_warning(f"\u8bf7\u5728\u201c{file1_display_name}\u201d\u7684\u5339\u914d\u5217\u533a\u57df\u81f3\u5c11\u9009\u62e9\u4e00\u4e2a\u5339\u914d\u5217\u3002")
+            return
+        if has_file2_df and not match_cols2:
+            self._show_next_step_warning(f"\u8bf7\u5728\u201c{file2_display_name}\u201d\u7684\u5339\u914d\u5217\u533a\u57df\u81f3\u5c11\u9009\u62e9\u4e00\u4e2a\u5339\u914d\u5217\u3002")
+            return
+        if has_file1_df and has_file2_df and len(match_cols1) != len(match_cols2):
+            self._show_next_step_warning(
+                f"\u6587\u4ef61\u548c\u6587\u4ef62\u7684\u5339\u914d\u5217\u6570\u91cf\u5fc5\u987b\u76f8\u540c\u3002\n\n"
+                f"\u5f53\u524d\uff1a\u6587\u4ef61\u5df2\u9009 {len(match_cols1)} \u5217\uff0c\u6587\u4ef62\u5df2\u9009 {len(match_cols2)} \u5217\u3002"
+            )
+            return
+
         cols1_raw = list(self.file_handler.get_file1_columns()) if self.file_handler.file1_df is not None else []
         cols2_raw = list(self.file_handler.get_file2_columns()) if self.file_handler.file2_df is not None else []
         
@@ -4516,10 +5112,16 @@ class FileAndMatchConfig(ttk.Frame):
         
         # 准备配置（使用实际的列名，列表格式）
         config = {
+            'file1_path': self.file1_path_var.get().strip(),
+            'file2_path': self.file2_path_var.get().strip(),
+            'file1_sheet': self.file1_sheet_var.get().strip(),
+            'file2_sheet': self.file2_sheet_var.get().strip(),
+            'file1_header_row': self.file1_header_row,
+            'file2_header_row': self.file2_header_row,
             'match_column1': match_cols1_actual,  # 改为列表
             'match_column2': match_cols2_actual,  # 改为列表
-            'data_type1': self.data_type1_var.get(),
-            'data_type2': self.data_type2_var.get(),
+            'data_type1': 'auto',
+            'data_type2': 'auto',
             'remove_spaces': False,
             'case_sensitive': True,
             'handle_duplicates': 'pivot',

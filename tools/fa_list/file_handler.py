@@ -7,6 +7,7 @@ import os
 import hashlib
 import tempfile
 from typing import Optional, Tuple
+from openpyxl import load_workbook
 from utils.validators import validate_file_path, validate_dataframe
 from utils.helpers import detect_encoding
 from config import SUPPORTED_EXCEL_FORMATS, SUPPORTED_CSV_FORMATS, PREVIEW_ROWS
@@ -405,7 +406,12 @@ class FileHandler:
         """
         try:
             _, ext = os.path.splitext(file_path)
-            if ext.lower() == '.xls':
+            ext_lower = ext.lower()
+            if ext_lower in ('.xlsx', '.xlsm'):
+                visible_sheets = self._get_visible_openpyxl_sheets(file_path)
+                if visible_sheets:
+                    return True, "", visible_sheets
+            if ext_lower == '.xls':
                 xl_file = pd.ExcelFile(file_path, engine='xlrd')
             else:
                 xl_file = pd.ExcelFile(file_path, engine='openpyxl')
@@ -415,6 +421,25 @@ class FileHandler:
             
         except Exception as e:
             return False, f"获取工作表列表时出错: {str(e)}", []
+
+    @staticmethod
+    def _get_visible_openpyxl_sheets(file_path: str) -> list:
+        """Return visible worksheet names for modern Excel files, or [] on fallback."""
+        try:
+            wb = load_workbook(file_path, read_only=True, data_only=True)
+        except Exception:
+            return []
+        try:
+            return [
+                ws.title
+                for ws in wb.worksheets
+                if getattr(ws, "sheet_state", "visible") == "visible"
+            ]
+        finally:
+            try:
+                wb.close()
+            except Exception:
+                pass
     
     def set_file1(self, file_path: str, sheet_name: Optional[str] = None, header: Optional[int] = None) -> Tuple[bool, str]:
         """

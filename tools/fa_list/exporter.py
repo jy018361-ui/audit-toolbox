@@ -2237,7 +2237,10 @@ class Exporter:
                 rr_start = 0.0 if pd.isna(rr_start) else max(0.0, min(float(rr_start), 1.0))
                 rr_end = 0.0 if pd.isna(rr_end) else max(0.0, min(float(rr_end), 1.0))
                 return f"{float(y_end_orig):,.2f}*(1-{float(rr_end):.4f})/{float(y_end_life):.4f}-{float(y_end_orig):,.2f}*(1-{float(rr_start):.4f})/{float(y_start_life):.4f}={float(impact):,.2f}"
-            out["计算过程"] = out.apply(_impact_expr, axis=1)
+            calc_process_col = "计算过程"
+            if calc_process_col in out.columns:
+                out[calc_process_col] = out[calc_process_col].astype(object)
+            out[calc_process_col] = out.apply(_impact_expr, axis=1).astype(object)
         return out
 
     def set_progress_callback(self, callback):
@@ -2388,6 +2391,7 @@ class Exporter:
         begin_categories, end_categories = self._collect_category_sources_from_workbook(wb, summary_config)
         ws = wb["固定资产变动汇总表"]
         self._postprocess_summary_sheet(ws, begin_categories, end_categories)
+        self._ensure_sheet_note_merges(ws)
         try:
             wb.save(file_path)
         except PermissionError:
@@ -2413,6 +2417,7 @@ class Exporter:
                 continue
             if ws.title == "固定资产变动汇总表":
                 self._postprocess_summary_sheet(ws, begin_categories, end_categories)
+                self._ensure_sheet_note_merges(ws)
             else:
                 self._insert_field_source_row(ws, summary_config)
 
@@ -2656,6 +2661,23 @@ class Exporter:
                 ws.merge_cells(start_row=ws.max_row, start_column=2, end_row=ws.max_row, end_column=4)
             except Exception:
                 pass
+            self._ensure_sheet_note_merges(ws)
+
+    @staticmethod
+    def _ensure_sheet_note_merges(ws) -> None:
+        for row_idx in range(1, ws.max_row + 1):
+            if ws.cell(row_idx, 1).value not in ("本表说明", "鏈〃璇存槑"):
+                continue
+            note_value = ws.cell(row_idx, 2).value
+            for rng in list(ws.merged_cells.ranges):
+                if (
+                    rng.min_row <= row_idx <= rng.max_row
+                    and rng.max_col >= 2
+                    and rng.min_col <= 4
+                ):
+                    ws.unmerge_cells(str(rng))
+            ws.cell(row_idx, 2).value = note_value
+            ws.merge_cells(start_row=row_idx, start_column=2, end_row=row_idx, end_column=4)
 
     @staticmethod
     def _sheet_explanation(sheet_name: str) -> Dict[str, str]:
@@ -3450,6 +3472,16 @@ class Exporter:
                 # 普通 numpy 数值/布尔列：用 np.nan（float 列直接接受；int/bool 列由调用方处理）
                 import numpy as np
                 return np.nan
+            if pd.api.types.is_numeric_dtype(series.dtype) and not pd.api.types.is_bool_dtype(series.dtype):
+                if isinstance(value, str):
+                    text = value.strip().replace(",", "").replace(" ", "")
+                    numeric = pd.to_numeric(text, errors="coerce")
+                    if pd.notna(numeric):
+                        return numeric.item() if hasattr(numeric, "item") else numeric
+                else:
+                    numeric = pd.to_numeric(value, errors="coerce")
+                    if pd.notna(numeric):
+                        return numeric.item() if hasattr(numeric, "item") else numeric
         except Exception:
             pass
         return value

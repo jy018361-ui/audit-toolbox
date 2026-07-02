@@ -87,6 +87,14 @@ class IndependentFAListLLMTests(unittest.TestCase):
         self.assertIn("file2_col_2", payload_text)
         self.assertIn("房屋及建筑物", payload_text)
         self.assertIn("资产类别", payload_text)
+        self.assertIn("addition_method and addition_date are optional", payload_text)
+        self.assertIn("Do not guess addition_method/addition_date", payload_text)
+        self.assertIn("category means the asset type/category name or description", payload_text)
+        self.assertIn("It is NOT an asset class code", payload_text)
+        self.assertIn("short/low-cardinality code-like column is still wrong", payload_text)
+        self.assertIn("depreciation means accumulated depreciation balance", payload_text)
+        self.assertIn("depreciation must NOT be monthly/current-period/current-year depreciation", payload_text)
+        self.assertIn("If both 累计折旧 and 本月/本期/本年折旧 columns exist", payload_text)
 
     def test_haili_02_shape_returns_category_name_and_match_key_corrections(self):
         captured = {}
@@ -204,6 +212,40 @@ class IndependentFAListLLMTests(unittest.TestCase):
         self.assertEqual(review.action, "keep")
         self.assertNotIn("local_profile", captured["payload"])
         self.assertNotIn("candidate_profiles", captured["payload"])
+
+    def test_supplement_match_review_uses_first_step_reference(self):
+        captured = {}
+        self._patch_chat(
+            {
+                "status": "warning",
+                "confidence": 0.88,
+                "action": "replace",
+                "reasons": ["缺少名称项"],
+                "suggested_file1_columns": [],
+                "suggested_file2_columns": ["编码", "名称"],
+                "suggestion_reason": "需对齐第一步ID",
+            },
+            captured,
+        )
+
+        review = llm_client.review_supplement_match_key_columns(
+            {"api_key": "test"},
+            tool_name="FA List",
+            files=[
+                {
+                    "file_side": "file2",
+                    "headers": ["流水号", "编码", "名称"],
+                    "samples": {"编码": ["TMDN001"], "名称": ["电脑A"]},
+                }
+            ],
+            current_match={"file1": [], "file2": ["编码"]},
+            reference_match={"file1": [], "file2": ["资产编码", "固定资产名称"]},
+        )
+
+        self.assertEqual(captured["task_name"], "supplement_match_review")
+        self.assertEqual(captured["payload"]["reference_match"]["file2"], ["资产编码", "固定资产名称"])
+        self.assertEqual(review.action, "replace")
+        self.assertEqual(review.suggested_file2_columns, ["编码", "名称"])
 
 
     def test_code_review_keeps_existing_auxiliary_name_column(self):

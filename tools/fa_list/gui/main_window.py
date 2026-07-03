@@ -25,7 +25,6 @@ from gui.file_selector import FileSelector
 from gui.file_and_match_config import FileAndMatchConfig
 from gui.match_config import MatchConfig
 from gui.data_preview import DataPreview
-from gui.column_selector import ColumnSelector
 from gui.pivot_config import PivotConfig
 from gui.export_settings import ExportSettings
 
@@ -156,8 +155,7 @@ class MainWindow:
         
         self.steps = [
             "1. 选择文件并配置",
-            "2. 补充清单映射（可选）",
-            "3. 选择导出列【大于5万行优先选择CSV格式】"
+            "2. 补充清单映射（可选）"
         ]
         self.step_labels = []
         
@@ -260,8 +258,8 @@ class MainWindow:
             self._show_file_and_match_config()
         elif step_index == 1:
             self._show_supplement_config()
-        elif step_index == 2:
-            self._show_column_selector()
+        else:
+            self._prompt_and_export_all_columns()
     
     def _show_file_and_match_config(self):
         """显示文件选择和匹配列配置合并界面"""
@@ -334,26 +332,13 @@ class MainWindow:
     
     def _show_column_selector(self):
         """显示列选择界面"""
-        if self.merged_df is None:
-            self._show_warning("警告", "请先完成合并操作")
-            self.show_step(0)
-            return
-        
-        column_selector = ColumnSelector(
-            self.content_frame,
-            self.merged_df,
-            on_complete=self._on_columns_selected,
-            on_back=lambda: self.show_step(1) if self.use_supplement_lists else self.show_step(0),
-            file1_display_name=self.file1_display_name,
-            file2_display_name=self.file2_display_name
-        )
-        column_selector.pack(fill=tk.BOTH, expand=True)
+        self._prompt_and_export_all_columns()
     
     def _show_pivot_config(self):
         """显示数据透视配置界面"""
         if self.merged_df is None:
             self._show_warning("警告", "请先完成合并操作")
-            self.show_step(2)
+            self._prompt_and_export_all_columns()
             return
         
         # 获取用户映射的资产类别配置
@@ -363,7 +348,7 @@ class MainWindow:
             self.merged_df,
             self.pivot_engine,
             on_complete=self._on_pivot_configured,
-            on_back=lambda: self.show_step(2),
+            on_back=lambda: self.show_step(1) if self.use_supplement_lists else self.show_step(0),
             original_value_col1=self.original_value_col1,  # 传递配置的原值列
             original_value_col2=self.original_value_col2,
             depreciation_col1=self.depreciation_col1,
@@ -422,8 +407,8 @@ class MainWindow:
             self._show_file_and_match_config()
         elif step_index == 1:
             self._show_supplement_config()
-        elif step_index == 2:
-            self._show_column_selector()
+        else:
+            self._prompt_and_export_all_columns()
 
     def _invalidate_step_widget(self, step_index: int):
         """销毁某个步骤组件，下次进入时重建。"""
@@ -532,23 +517,7 @@ class MainWindow:
 
     def _show_column_selector(self):
         """显示导出列选择页面。"""
-        if self.merged_df is None:
-            self._show_warning("警告", "请先完成合并操作")
-            self.show_step(0)
-            return
-
-        widget = self.step_widgets.get(2)
-        if widget is None or not widget.winfo_exists():
-            widget = ColumnSelector(
-                self.content_frame,
-                self.merged_df,
-                on_complete=self._on_columns_selected,
-                on_back=lambda: self.show_step(1) if self.use_supplement_lists else self.show_step(0),
-                file1_display_name=self.file1_display_name,
-                file2_display_name=self.file2_display_name
-            )
-            self.step_widgets[2] = widget
-        widget.pack(fill=tk.BOTH, expand=True)
+        self._prompt_and_export_all_columns()
 
     def _format_column_name(self, col_name):
         """将列名中的_文件1/_文件2替换为显示名称（与 export_settings 一致）"""
@@ -768,7 +737,7 @@ class MainWindow:
             self._show_error("导出失败", error_msg)
     
     def _on_preview_next(self):
-        """预览界面点击「下一步：选择导出列」后的回调（已删除预览步骤，不再使用）"""
+        """预览界面点击下一步后的回调（已删除预览步骤，不再使用）"""
         pass
 
     def _skip_supplement_step(self):
@@ -779,7 +748,7 @@ class MainWindow:
         self.unmatched_add_df = None
         self.unmatched_disp_df = None
         self.update_status("已跳过补充清单映射")
-        self.show_step(2)
+        self._prompt_and_export_all_columns()
 
     @staticmethod
     def _normalize_key_series(series: pd.Series) -> pd.Series:
@@ -996,7 +965,7 @@ class MainWindow:
         self._apply_supplement_data(config)
         self._invalidate_step_widget(2)
         self.update_status("补充清单映射已完成")
-        self.show_step(2)
+        self._prompt_and_export_all_columns()
     
     def _on_file_and_match_configured(self, config):
         """文件选择和匹配列配置完成回调"""
@@ -1198,7 +1167,7 @@ class MainWindow:
                 "补充清单确认",
                 "是否有新增清单和处置清单需要映射？\n\n"
                 "选择“是”：进入补充清单映射界面。\n"
-                "选择“否”：直接进入选择导出列。"
+                "选择“否”：直接选择保存路径并导出。"
             )
             if has_supplement:
                 self.use_supplement_lists = True
@@ -1209,15 +1178,19 @@ class MainWindow:
                 self.use_supplement_lists = False
                 self.supplement_done = True
                 self.update_status("已跳过补充清单映射")
-                self.show_step(2)
+                self._prompt_and_export_all_columns()
         else:
             self._show_error("合并失败", message)
             self.update_status("合并失败")
     
-    def _on_columns_selected(self, selected_columns):
-        """列选择完成回调：直接弹出保存路径，选路径后导出（不跳转界面）"""
-        self.selected_columns = selected_columns
-        self.update_status(f"已选择 {len(selected_columns)} 列")
+    def _prompt_and_export_all_columns(self):
+        """弹出保存路径并导出全部列。"""
+        if self.merged_df is None:
+            self._show_warning("警告", "请先完成合并操作")
+            self.show_step(0)
+            return
+
+        self.selected_columns = None
         self._auto_create_pivot_table()
         summary_config = self._build_summary_config()
         default_name = f"FA_List_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
@@ -1239,6 +1212,10 @@ class MainWindow:
             self.update_status("正在导出...")
             progress_win = self._show_progress_dialog("导出中", "正在导出数据，请稍候...")
             self._run_export_to_path(path, fmt, summary_config, progress_window=progress_win)
+
+    def _on_columns_selected(self, selected_columns):
+        """兼容旧列选择回调：现在始终导出全部列。"""
+        self._prompt_and_export_all_columns()
     
     def _auto_create_pivot_table(self):
         """自动创建数据透视表（优先使用用户映射的资产类别字段，否则自动查找）"""
@@ -1383,7 +1360,7 @@ class MainWindow:
         else:
             self.pivot_row_fields = None
             self.update_status("已跳过数据透视表")
-        self.show_step(2)  # 跳转到导出步骤
+        self._prompt_and_export_all_columns()
     
     def _on_step_clicked(self, step_index: int):
         """步骤点击事件处理"""
@@ -1401,14 +1378,12 @@ class MainWindow:
             return True  # 总是可以回到第一步
         elif target_step == 1:
             return self.merged_df is not None  # 补充清单步骤
-        elif target_step == 2:
-            return self.merged_df is not None and self.supplement_done  # 选择导出列
         return False
     
     def _on_export_back(self):
-        """导出界面上一步：返回选择导出列"""
+        """导出界面上一步：返回前一个配置步骤"""
         self._column_selection_done = False
-        self.show_step(2)
+        self.show_step(1 if self.use_supplement_lists else 0)
     
     def _on_export_complete(self):
         """导出完成回调"""

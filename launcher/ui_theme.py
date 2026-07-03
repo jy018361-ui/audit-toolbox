@@ -67,10 +67,10 @@ def apply_app_theme(root: tk.Misc) -> str:
         ("*Listbox.Foreground", TEXT),
         ("*Listbox.SelectBackground", PRIMARY),
         ("*Listbox.SelectForeground", "#ffffff"),
-        ("*TCombobox*Listbox.background", "#e6ddcf"),
+        ("*TCombobox*Listbox.background", "#ffffff"),
         ("*TCombobox*Listbox.foreground", TEXT),
-        ("*TCombobox*Listbox.selectBackground", "#ffffff"),
-        ("*TCombobox*Listbox.selectForeground", PRIMARY),
+        ("*TCombobox*Listbox.selectBackground", "#d8e8ea"),
+        ("*TCombobox*Listbox.selectForeground", PRIMARY_DARK),
     ):
         try:
             root.option_add(pattern, value)
@@ -104,13 +104,54 @@ def apply_app_theme(root: tk.Misc) -> str:
     )
     style.configure("Secondary.TButton", background=SURFACE_BG, foreground=PRIMARY, bordercolor=BORDER, borderwidth=1)
     style.map("Secondary.TButton", background=[("active", "#fffcf5")], foreground=[("active", PRIMARY_DARK)])
+    style.configure(
+        "Toolband.TButton",
+        font=(family, SMALL_FONT_SIZE, "bold"),
+        padding=(10, 4),
+        background="#f8f3ea",
+        foreground=PRIMARY_DARK,
+        bordercolor=BORDER,
+        borderwidth=1,
+    )
+    style.map(
+        "Toolband.TButton",
+        background=[("active", "#ffffff"), ("disabled", "#e8dfd3")],
+        foreground=[("active", PRIMARY_DARK), ("disabled", "#8a8176")],
+    )
+    style.configure(
+        "ToolbandPrimary.TButton",
+        font=(family, SMALL_FONT_SIZE, "bold"),
+        padding=(12, 4),
+        background=PRIMARY,
+        foreground="#ffffff",
+        borderwidth=0,
+    )
+    style.map(
+        "ToolbandPrimary.TButton",
+        background=[("active", PRIMARY_DARK), ("disabled", "#c9c1b4")],
+        foreground=[("disabled", "#7d756a")],
+    )
+    style.configure(
+        "ToolbandDanger.TButton",
+        font=(family, SMALL_FONT_SIZE, "bold"),
+        padding=(10, 4),
+        background="#f3e8e2",
+        foreground=ERROR,
+        bordercolor="#e0c6bd",
+        borderwidth=1,
+    )
+    style.map(
+        "ToolbandDanger.TButton",
+        background=[("active", "#fff6f2"), ("disabled", "#e8dfd3")],
+        foreground=[("active", ERROR), ("disabled", "#8a8176")],
+    )
     style.configure("TEntry", fieldbackground="#ffffff", foreground=TEXT, bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, padding=4)
-    style.configure("TCombobox", fieldbackground="#ffffff", foreground=TEXT, bordercolor=BORDER, arrowcolor=PRIMARY, padding=4)
+    style.configure("TCombobox", fieldbackground="#ffffff", foreground=TEXT, bordercolor="#c9d3cf", arrowcolor=PRIMARY, arrowsize=14, padding=4)
     style.map(
         "TCombobox",
         fieldbackground=[("readonly", "#ffffff"), ("disabled", "#e6ddcf")],
-        selectbackground=[("readonly", "#e6ddcf")],
-        selectforeground=[("readonly", TEXT)],
+        selectbackground=[("readonly", "#e6f2f3")],
+        selectforeground=[("readonly", PRIMARY_DARK)],
     )
     style.configure("TNotebook", background=BG, borderwidth=0)
     style.configure("TNotebook.Tab", font=base_font, padding=(12, 6), background="#e6ddcf", foreground=MUTED_TEXT)

@@ -16,9 +16,12 @@ from config import SUPPORTED_EXCEL_FORMATS, SUPPORTED_CSV_FORMATS, PREVIEW_ROWS
 from launcher.llm_client import AUTO_APPLY_CONFIDENCE, LLMMatchKeyReview, generate_combined_fa_list_assistance, review_fa_list_field_mappings, review_match_key_columns, review_supplement_match_key_columns, suggest_field_mappings
 from launcher.llm_settings import is_llm_enabled, load_llm_settings
 from launcher.ui_theme import (
+    BG,
     ERROR,
     MUTED_TEXT,
     PRIMARY,
+    PRIMARY_DARK,
+    SUCCESS,
     apply_app_theme,
     center_on_parent,
     fit_window_to_screen,
@@ -26,6 +29,18 @@ from launcher.ui_theme import (
 
 
 LLM_MAPPING_BATCH_TIMEOUT_SECONDS = 45
+LLM_STATUS_BG = "#fffdf8"
+LLM_STATUS_BORDER = "#d9cebf"
+LLM_STATUS_IDLE_BG = "#efe7db"
+LLM_STATUS_RUNNING_BG = "#e6f2f3"
+LLM_STATUS_DONE_BG = "#e9f4ef"
+LLM_STATUS_ERROR_BG = "#f7e7e2"
+ROW_STATUS_OK = SUCCESS
+ROW_STATUS_PENDING = MUTED_TEXT
+ROW_STATUS_REVIEW = "#9b5d33"
+TREE_ODD_ROW = "#fbf7f0"
+TREE_EVEN_ROW = "#ffffff"
+TOP_PANEL_HEIGHT = 172
 
 
 def build_unique_key_profile(df, columns, *, sample_limit=5):
@@ -1476,12 +1491,18 @@ class FileAndMatchConfig(ttk.Frame):
         self._llm_status_text = ""
         self._llm_status_animating = False
         self._llm_status_mode = ""
+        self._llm_review_row_roles = set()
+        self._llm_last_detail_text = ""
+        self.llm_status_badge_var = tk.StringVar(value="待复核")
+        self.llm_status_message_var = tk.StringVar(value="选择文件并确认匹配列后，系统会进行字段复核。")
         self.llm_status_icon_var = tk.StringVar(value="")
         self.llm_status_var = tk.StringVar(value="")
         
         # 文件路径变量
         self.file1_path_var = tk.StringVar()
         self.file2_path_var = tk.StringVar()
+        self.file1_path_display_var = tk.StringVar()
+        self.file2_path_display_var = tk.StringVar()
         self.file1_sheet_var = tk.StringVar()
         self.file2_sheet_var = tk.StringVar()
         
@@ -1619,18 +1640,12 @@ class FileAndMatchConfig(ttk.Frame):
                     pass
 
     def _has_optional_addition_mapping(self):
-        for var_name in (
-            "addition_method_col2_var",
-            "addition_date_col2_var",
-        ):
-            var = getattr(self, var_name, None)
-            try:
-                value = var.get() if var is not None else ""
-            except Exception:
-                value = ""
-            if value and value != "[不映射]":
-                return True
-        return False
+        var = getattr(self, "addition_method_col2_var", None)
+        try:
+            value = var.get() if var is not None else ""
+        except Exception:
+            value = ""
+        return bool(value and value != "[不映射]")
 
     def _update_optional_addition_rows_visibility(self):
         if getattr(self, "mode", "normal") == "supplement":
@@ -1655,6 +1670,7 @@ class FileAndMatchConfig(ttk.Frame):
             else:
                 row_widget.pack_forget()
         self._clear_normal_file1_addition_mappings()
+        self._update_mapping_row_status()
 
     def _fallback_addition_date_to_entry_date(self, cols1=None, cols2=None):
         """When addition date is absent, reuse entry/start date for sides with addition method."""
@@ -1750,6 +1766,7 @@ class FileAndMatchConfig(ttk.Frame):
         header_0based = None if header_row == 0 else header_row + 1
 
         self.file1_path_var.set(file_path)
+        self._sync_file_path_display(1)
         self.file1_sheet_var.set(sheet_name or "")
 
         success, _, sheets = self.file_handler.get_excel_sheets(file_path)
@@ -1812,6 +1829,10 @@ class FileAndMatchConfig(ttk.Frame):
         self._last_llm_match_review_signature = None
         self._llm_shown_match_review_keys = set()
         self._llm_shown_fa_review_keys = set()
+        self._llm_review_row_roles = set()
+        self._llm_last_detail_text = ""
+        self._update_llm_detail_button()
+        self._update_mapping_row_status()
         if self._llm_mapping_assist_job is not None:
             try:
                 self.after_cancel(self._llm_mapping_assist_job)
@@ -1820,6 +1841,7 @@ class FileAndMatchConfig(ttk.Frame):
             self._llm_mapping_assist_job = None
         self._llm_mapping_assist_scheduled = False
         self._update_llm_action_buttons()
+        self._update_llm_detail_button()
         self._update_next_button_state()
 
     def _manual_run_llm_mapping_assist(self):
@@ -1864,6 +1886,182 @@ class FileAndMatchConfig(ttk.Frame):
         except Exception:
             self.next_button.configure(state=tk.NORMAL)
 
+    def _compact_path_for_display(self, path, max_len=58):
+        path = str(path or "").strip()
+        if not path:
+            return ""
+        name = os.path.basename(path) or path
+        if len(name) <= max_len:
+            return name
+        return name[: max_len - 3] + "..."
+
+    def _sync_file_path_display(self, file_num):
+        if file_num == 1:
+            self.file1_path_display_var.set(self._compact_path_for_display(self.file1_path_var.get()))
+        else:
+            self.file2_path_display_var.set(self._compact_path_for_display(self.file2_path_var.get()))
+
+    def _sync_file_path_from_display(self, file_num):
+        display_var = self.file1_path_display_var if file_num == 1 else self.file2_path_display_var
+        path_var = self.file1_path_var if file_num == 1 else self.file2_path_var
+        typed = display_var.get().strip()
+        current = path_var.get().strip()
+        if typed and typed != self._compact_path_for_display(current):
+            path_var.set(typed)
+
+    def _decorate_preview_tree(self, tree):
+        try:
+            tree.tag_configure("odd", background=TREE_ODD_ROW)
+            tree.tag_configure("even", background=TREE_EVEN_ROW)
+        except tk.TclError:
+            pass
+
+    def _update_mapping_row_status(self, row_type=None):
+        if not hasattr(self, "mapping_row_controls"):
+            return
+        target_rows = [row_type] if row_type else list(self.mapping_row_controls.keys())
+        for current_type in target_rows:
+            ctrls = self.mapping_row_controls.get(current_type) or {}
+            status_label = ctrls.get("status")
+            if status_label is None:
+                continue
+            combo1 = ctrls.get("combo1")
+            combo2 = ctrls.get("combo2")
+            values = []
+            for combo in (combo1, combo2):
+                try:
+                    values.append(str(combo.get() or "").strip())
+                except Exception:
+                    values.append("")
+            states = []
+            for combo in (combo1, combo2):
+                try:
+                    states.append(str(combo.cget("state") or ""))
+                except Exception:
+                    states.append("")
+            if current_type in getattr(self, "_llm_review_row_roles", set()):
+                text, color = "复核建议", ROW_STATUS_REVIEW
+            elif any(value and value != "[不映射]" for value in values):
+                text, color = "OK", ROW_STATUS_OK
+            else:
+                text, color = "待选", ROW_STATUS_PENDING
+            try:
+                status_label.configure(text=text, foreground=color)
+            except tk.TclError:
+                pass
+
+    def _compact_llm_status_for_ui(self, message, mode):
+        message = str(message or "").strip()
+        if not message:
+            return "LLM复核：待复核"
+        if mode in {"queued", "running"}:
+            return "LLM复核：正在处理，请稍候"
+        if mode == "done":
+            applied_match = re.search(r"已补充\s*(\d+)\s*项", message)
+            review_match = re.search(r"复核提示\s*(\d+)\s*项", message)
+            applied = applied_match.group(1) if applied_match else "0"
+            reviews = review_match.group(1) if review_match else "0"
+            return f"LLM复核：已完成 · 已补充 {applied} 项 · 复核提示 {reviews} 项"
+        if mode == "error":
+            if "已停止" in message:
+                return "LLM复核：已停止 · 重新复核成功后可继续"
+            if "未返回可用复核结果" in message:
+                return "LLM复核：未返回结果 · 请重新复核"
+            return "LLM复核：未完成 · 请查看提示并重新复核"
+        return message if len(message) <= 80 else message[:77] + "..."
+
+    def _llm_status_visuals(self, mode, show_warning=False):
+        if mode in {"queued", "running"}:
+            return {
+                "badge": "复核中",
+                "message": "正在复核字段映射和匹配列，请稍候。",
+                "surface": LLM_STATUS_RUNNING_BG,
+                "badge_bg": PRIMARY,
+                "badge_fg": "#ffffff",
+                "accent": PRIMARY,
+                "fg": PRIMARY_DARK,
+            }
+        if mode == "done":
+            return {
+                "badge": "已完成",
+                "message": "复核完成，可查看明细或继续下一步。",
+                "surface": LLM_STATUS_DONE_BG,
+                "badge_bg": SUCCESS,
+                "badge_fg": "#ffffff",
+                "accent": SUCCESS,
+                "fg": PRIMARY_DARK,
+            }
+        if mode == "error" or show_warning:
+            return {
+                "badge": "需处理",
+                "message": "复核未完成，请按提示重新复核。",
+                "surface": LLM_STATUS_ERROR_BG,
+                "badge_bg": ERROR,
+                "badge_fg": "#ffffff",
+                "accent": ERROR,
+                "fg": ERROR,
+            }
+        return {
+            "badge": "待复核",
+            "message": "选择文件并确认匹配列后，系统会进行字段复核。",
+            "surface": LLM_STATUS_BG,
+            "badge_bg": LLM_STATUS_IDLE_BG,
+            "badge_fg": PRIMARY_DARK,
+            "accent": PRIMARY,
+            "fg": PRIMARY_DARK,
+        }
+
+    def _apply_llm_status_visuals(self, mode, display_message=""):
+        visuals = self._llm_status_visuals(mode)
+        message = display_message or visuals["message"]
+        if mode == "done" and display_message:
+            message = display_message.replace("LLM复核：", "", 1)
+        elif mode == "error" and display_message:
+            message = display_message.replace("LLM复核：", "", 1)
+        elif mode in {"queued", "running"}:
+            message = visuals["message"]
+        try:
+            self.llm_status_badge_var.set(visuals["badge"])
+            self.llm_status_message_var.set(message)
+            self.llm_status_frame.configure(bg=BG)
+            self.llm_status_inner.configure(bg=BG)
+            self.llm_status_surface_frame.configure(bg=visuals["surface"])
+            self.llm_status_accent.configure(bg=visuals["accent"])
+            self.llm_status_badge_label.configure(bg=visuals["badge_bg"], fg=visuals["badge_fg"])
+            self.llm_status_icon_label.configure(bg=visuals["surface"], fg=visuals["accent"])
+            self.llm_status_label.configure(bg=visuals["surface"], fg=visuals["fg"])
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _update_llm_detail_button(self):
+        if not hasattr(self, "llm_detail_button"):
+            return
+        try:
+            self.llm_detail_button.configure(state=tk.NORMAL if self._llm_last_detail_text else tk.DISABLED)
+        except tk.TclError:
+            pass
+
+    def _show_llm_detail_dialog(self):
+        detail = str(getattr(self, "_llm_last_detail_text", "") or "").strip()
+        if not detail:
+            messagebox.showinfo("LLM 复核明细", "暂无本轮复核明细。")
+            return
+        win = tk.Toplevel(self.winfo_toplevel())
+        win.title("LLM 复核明细")
+        apply_app_theme(win)
+        fit_window_to_screen(win, 620, 420, min_width=520, min_height=320)
+        win.transient(self.winfo_toplevel())
+        frame = ttk.Frame(win, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+        text = tk.Text(frame, wrap=tk.WORD, height=14, relief=tk.FLAT, padx=8, pady=8)
+        text.insert("1.0", detail)
+        text.configure(state=tk.DISABLED)
+        text.pack(fill=tk.BOTH, expand=True)
+        button_frame = ttk.Frame(frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(button_frame, text="关闭", command=win.destroy, width=10).pack(side=tk.RIGHT)
+        center_on_parent(win, self.winfo_toplevel())
+
     def _clear_treeview(self, tree):
         if tree is None:
             return
@@ -1896,6 +2094,7 @@ class FileAndMatchConfig(ttk.Frame):
         self._reset_llm_state_for_new_input()
         if file_num == 1:
             self.file1_path_var.set("")
+            self.file1_path_display_var.set("")
             self.file1_sheet_var.set("")
             self.file1_sheet_combo["values"] = []
             self.file1_header_row = 0
@@ -1908,6 +2107,7 @@ class FileAndMatchConfig(ttk.Frame):
             self._clear_treeview(getattr(self, "file1_tree", None))
         else:
             self.file2_path_var.set("")
+            self.file2_path_display_var.set("")
             self.file2_sheet_var.set("")
             self.file2_sheet_combo["values"] = []
             self.file2_header_row = 0
@@ -1936,68 +2136,111 @@ class FileAndMatchConfig(ttk.Frame):
         )
         self.info_label.pack(pady=(0, 10))
 
-        self.llm_status_frame = ttk.Frame(self)
-        self.llm_status_icon_label = ttk.Label(
+        self.llm_status_frame = tk.Frame(
+            self,
+            bg=BG,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.llm_status_inner = tk.Frame(
             self.llm_status_frame,
+            bg=BG,
+            padx=10,
+            pady=4,
+        )
+        self.llm_status_inner.pack(fill=tk.X)
+        self.llm_status_surface_frame = tk.Frame(self.llm_status_inner, bg=LLM_STATUS_BG)
+        self.llm_status_accent = tk.Frame(self.llm_status_surface_frame, bg=PRIMARY, width=4)
+        self.llm_status_accent.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        self.llm_status_badge_label = tk.Label(
+            self.llm_status_surface_frame,
+            textvariable=self.llm_status_badge_var,
+            font=("Arial", 9, "bold"),
+            fg=PRIMARY_DARK,
+            bg=LLM_STATUS_IDLE_BG,
+            padx=10,
+            pady=3,
+        )
+        self.llm_status_badge_label.pack(side=tk.LEFT, padx=(0, 10))
+        self.llm_status_icon_label = tk.Label(
+            self.llm_status_surface_frame,
             textvariable=self.llm_status_icon_var,
-            font=("Arial", 12, "bold"),
-            foreground=ERROR,
+            font=("Arial", 10, "bold"),
+            foreground=PRIMARY,
+            bg=LLM_STATUS_BG,
             width=5,
         )
         self.llm_status_icon_label.pack(side=tk.LEFT, padx=(0, 2))
-        self.llm_status_label = ttk.Label(
-            self.llm_status_frame,
-            textvariable=self.llm_status_var,
+        self.llm_status_label = tk.Label(
+            self.llm_status_surface_frame,
+            textvariable=self.llm_status_message_var,
             font=("Arial", 10, "bold"),
-            foreground=ERROR,
-            wraplength=1400,
+            foreground=PRIMARY_DARK,
+            bg=LLM_STATUS_BG,
+            anchor=tk.W,
             justify=tk.LEFT,
         )
         self.llm_status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.llm_run_button = ttk.Button(
-            self.llm_status_frame,
-            text="\u91cd\u65b0\u590d\u6838",
-            command=self._manual_run_llm_mapping_assist,
-            width=10,
-        )
-        self.llm_run_button.pack(side=tk.RIGHT, padx=(8, 0))
-        self.llm_stop_button = ttk.Button(
-            self.llm_status_frame,
-            text="\u505c\u6b62\u590d\u6838",
-            command=self._stop_llm_mapping_assist,
-            width=10,
-            state=tk.DISABLED,
-        )
-        self.llm_stop_button.pack(side=tk.RIGHT, padx=(8, 0))
         self.llm_status_frame.pack(fill=tk.X, pady=(0, 8))
+        self._apply_llm_status_visuals("")
         
         # 【重要】按钮区域必须先pack，使用side=BOTTOM，这样它会固定在底部
-        button_frame = ttk.Frame(self)
-        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=10)
+        button_frame = ttk.Frame(self, padding=(10, 8))
+        button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
+        bottom_action_row = ttk.Frame(button_frame)
+        bottom_action_row.pack(fill=tk.X)
+        self.llm_actions_frame = ttk.Frame(bottom_action_row)
+        self.llm_actions_frame.pack(side=tk.LEFT)
+        self.llm_stop_button = ttk.Button(
+            self.llm_actions_frame,
+            text="\u505c\u6b62\u590d\u6838",
+            command=self._stop_llm_mapping_assist,
+            width=8,
+            state=tk.DISABLED,
+            style="ToolbandDanger.TButton",
+        )
+        self.llm_detail_button = ttk.Button(
+            self.llm_actions_frame,
+            text="查看明细",
+            command=self._show_llm_detail_dialog,
+            width=8,
+            state=tk.DISABLED,
+            style="Toolband.TButton",
+        )
+        self.llm_run_button = ttk.Button(
+            self.llm_actions_frame,
+            text="\u91cd\u65b0\u590d\u6838",
+            command=self._manual_run_llm_mapping_assist,
+            width=9,
+            style="ToolbandPrimary.TButton",
+        )
+        self.llm_stop_button.pack(side=tk.LEFT, padx=(0, 6))
+        self.llm_detail_button.pack(side=tk.LEFT, padx=(0, 10))
+        self.llm_run_button.pack(side=tk.LEFT)
         
         self.next_button = ttk.Button(
-            button_frame,
+            bottom_action_row,
             text="下一步：应用补充映射 >>" if self.mode == "supplement" else "下一步：执行合并 >>",
             command=self._on_next,
             width=25
         )
-        self.next_button.pack(side=tk.LEFT, pady=5)
+        self.next_button.pack(side=tk.RIGHT, pady=2)
 
         if is_supplement_mode:
             if callable(self.on_back):
                 ttk.Button(
-                    button_frame,
+                    bottom_action_row,
                     text="<< 返回上一步",
                     command=self.on_back,
                     width=12
-                ).pack(side=tk.LEFT, padx=(8, 0), pady=5)
+                ).pack(side=tk.RIGHT, padx=(0, 8), pady=2)
             if callable(self.on_skip):
                 ttk.Button(
-                    button_frame,
+                    bottom_action_row,
                     text="无补充清单，跳过",
                     command=self.on_skip,
                     width=16
-                ).pack(side=tk.LEFT, padx=(8, 0), pady=5)
+                ).pack(side=tk.RIGHT, padx=(0, 8), pady=2)
         
         def _open_mailto(subject: str, body: str):
             to = "John.SX.Yan@cn.ey.com;melody.bt.liu@cn.ey.com;april.yl.wang@cn.ey.com"
@@ -2007,8 +2250,8 @@ class FileAndMatchConfig(ttk.Frame):
             except Exception:
                 pass
         
-        links_frame = ttk.Frame(button_frame)
-        links_frame.pack(side=tk.RIGHT, padx=(8, 0))
+        links_frame = ttk.Frame(bottom_action_row)
+        links_frame.pack(side=tk.RIGHT, padx=(0, 12))
         
         lbl_like = ttk.Label(links_frame, text="认可", cursor="hand2", style="Link.TLabel")
         lbl_like.pack(side=tk.LEFT, padx=(0, 14))
@@ -2017,6 +2260,15 @@ class FileAndMatchConfig(ttk.Frame):
         lbl_suggest = ttk.Label(links_frame, text="建议", cursor="hand2", style="Link.TLabel")
         lbl_suggest.pack(side=tk.LEFT)
         lbl_suggest.bind("<Button-1>", lambda e: _open_mailto("FA List匹配工具 - 功能建议", "我的建议如下："))
+
+        self.bottom_status_label = ttk.Label(
+            button_frame,
+            textvariable=self.llm_status_var,
+            foreground=MUTED_TEXT,
+            wraplength=1200,
+            justify=tk.LEFT,
+        )
+        self.bottom_status_label.pack(fill=tk.X, pady=(8, 0))
         
         # 主容器：左右列使用固定比例分配，避免导入后被长路径或预览表格撑宽。
         main_container = ttk.Frame(self)
@@ -2039,20 +2291,33 @@ class FileAndMatchConfig(ttk.Frame):
             left_width = max(1, total_width - right_width - 8)
             left_container.place(x=0, y=0, width=left_width, height=total_height)
             right_container.place(x=left_width + 8, y=0, width=right_width, height=total_height)
+            if hasattr(self, "llm_status_surface_frame"):
+                try:
+                    self.llm_status_inner.update_idletasks()
+                    inner_width = self.llm_status_inner.winfo_width()
+                    surface_width = max(1, min(inner_width, left_width))
+                    self.llm_status_surface_frame.place(
+                        x=0,
+                        y=0,
+                        relheight=1.0,
+                        width=surface_width,
+                    )
+                except tk.TclError:
+                    pass
 
         main_container.bind("<Configure>", _layout_main_columns)
 
         left_container.columnconfigure(0, weight=1)
-        left_container.rowconfigure(0, weight=0, minsize=88)
+        left_container.rowconfigure(0, weight=0, minsize=TOP_PANEL_HEIGHT)
         left_container.rowconfigure(1, weight=1, minsize=260)
         right_container.columnconfigure(0, weight=1)
-        right_container.rowconfigure(0, weight=0, minsize=110)
+        right_container.rowconfigure(0, weight=0, minsize=TOP_PANEL_HEIGHT)
         right_container.rowconfigure(1, weight=1, minsize=260)
         
         # ==================== 左上：文件选择区域 ====================
         file_frame = ttk.LabelFrame(left_container, text="文件选择", padding="5")
-        file_frame.grid_propagate(False)  # 锁定区域大小（必须在grid之前设置，避免初始布局受子控件影响）
-        file_frame.grid(row=0, column=0, sticky="nsew", padx=(5, 2), pady=(0, 2))
+        file_frame.place(x=5, y=0, relwidth=1.0, width=-7, height=TOP_PANEL_HEIGHT - 2)
+        file_frame.columnconfigure(0, weight=1)
         
         # 添加提示信息
         tip_label = ttk.Label(
@@ -2061,25 +2326,25 @@ class FileAndMatchConfig(ttk.Frame):
             font=("Arial", 8),
             foreground=ERROR
         )
-        tip_label.pack(pady=(0, 3), anchor=tk.W)
+        tip_label.grid(row=0, column=0, sticky="w", pady=(0, 1))
         
         # 文件1
         file1_frame = ttk.Frame(file_frame)
-        file1_frame.pack(fill=tk.X, pady=2)
-        file1_frame.columnconfigure(1, weight=2, minsize=120)
-        file1_frame.columnconfigure(4, weight=1, minsize=90)
+        file1_frame.grid(row=1, column=0, sticky="ew", pady=2)
+        file1_frame.columnconfigure(1, weight=1, minsize=120)
+        file1_frame.columnconfigure(4, weight=0, minsize=170)
         
         self.file1_label = ttk.Label(file1_frame, text="新增清单:" if is_supplement_mode else "文件1:", width=8)
         self.file1_label.grid(row=0, column=0, sticky="w", padx=(0, 2))
-        file1_entry = ttk.Entry(file1_frame, textvariable=self.file1_path_var, width=10)
+        file1_entry = ttk.Entry(file1_frame, textvariable=self.file1_path_display_var, width=10)
         file1_entry.grid(row=0, column=1, sticky="ew", padx=2)
-        file1_entry.bind("<KeyRelease>", lambda e: self._reset_llm_state_for_new_input())
-        file1_entry.bind("<FocusOut>", lambda e: self._reset_llm_state_for_new_input())
+        file1_entry.bind("<KeyRelease>", lambda e: (self._sync_file_path_from_display(1), self._reset_llm_state_for_new_input()))
+        file1_entry.bind("<FocusOut>", lambda e: (self._sync_file_path_from_display(1), self._sync_file_path_display(1), self._reset_llm_state_for_new_input()))
         file1_browse_btn = ttk.Button(file1_frame, text="浏览...", command=self._select_file1, width=6)
         file1_browse_btn._compact_width = True
         file1_browse_btn.grid(row=0, column=2, sticky="w", padx=2)
         ttk.Label(file1_frame, text="表:", width=3).grid(row=0, column=3, sticky="e", padx=(4, 1))
-        self.file1_sheet_combo = ttk.Combobox(file1_frame, textvariable=self.file1_sheet_var, state="readonly", width=14)
+        self.file1_sheet_combo = ttk.Combobox(file1_frame, textvariable=self.file1_sheet_var, state="readonly", width=18)
         self.file1_sheet_combo.grid(row=0, column=4, sticky="ew", padx=(1, 0))
         if is_supplement_mode:
             file1_clear_btn = ttk.Button(file1_frame, text="清除", command=lambda: self._clear_supplement_file(1), width=5)
@@ -2088,21 +2353,21 @@ class FileAndMatchConfig(ttk.Frame):
         
         # 文件2
         file2_frame = ttk.Frame(file_frame)
-        file2_frame.pack(fill=tk.X, pady=2)
-        file2_frame.columnconfigure(1, weight=2, minsize=120)
-        file2_frame.columnconfigure(4, weight=1, minsize=90)
+        file2_frame.grid(row=2, column=0, sticky="ew", pady=2)
+        file2_frame.columnconfigure(1, weight=1, minsize=120)
+        file2_frame.columnconfigure(4, weight=0, minsize=170)
         
         self.file2_label = ttk.Label(file2_frame, text="处置清单:" if is_supplement_mode else "文件2:", width=8)
         self.file2_label.grid(row=0, column=0, sticky="w", padx=(0, 2))
-        file2_entry = ttk.Entry(file2_frame, textvariable=self.file2_path_var, width=10)
+        file2_entry = ttk.Entry(file2_frame, textvariable=self.file2_path_display_var, width=10)
         file2_entry.grid(row=0, column=1, sticky="ew", padx=2)
-        file2_entry.bind("<KeyRelease>", lambda e: self._reset_llm_state_for_new_input())
-        file2_entry.bind("<FocusOut>", lambda e: self._reset_llm_state_for_new_input())
+        file2_entry.bind("<KeyRelease>", lambda e: (self._sync_file_path_from_display(2), self._reset_llm_state_for_new_input()))
+        file2_entry.bind("<FocusOut>", lambda e: (self._sync_file_path_from_display(2), self._sync_file_path_display(2), self._reset_llm_state_for_new_input()))
         file2_browse_btn = ttk.Button(file2_frame, text="浏览...", command=self._select_file2, width=6)
         file2_browse_btn._compact_width = True
         file2_browse_btn.grid(row=0, column=2, sticky="w", padx=2)
         ttk.Label(file2_frame, text="表:", width=3).grid(row=0, column=3, sticky="e", padx=(4, 1))
-        self.file2_sheet_combo = ttk.Combobox(file2_frame, textvariable=self.file2_sheet_var, state="readonly", width=14)
+        self.file2_sheet_combo = ttk.Combobox(file2_frame, textvariable=self.file2_sheet_var, state="readonly", width=18)
         self.file2_sheet_combo.grid(row=0, column=4, sticky="ew", padx=(1, 0))
         if is_supplement_mode:
             file2_clear_btn = ttk.Button(file2_frame, text="清除", command=lambda: self._clear_supplement_file(2), width=5)
@@ -2111,15 +2376,24 @@ class FileAndMatchConfig(ttk.Frame):
         
         # ==================== 右上：匹配列配置区域 ====================
         match_frame = ttk.LabelFrame(right_container, text="匹配列配置（按ctrl可多选）", padding="5")
-        match_frame.grid_propagate(False)  # 锁定区域大小（必须在grid之前设置，避免初始布局受子控件影响）
-        match_frame.grid(row=0, column=0, sticky="nsew", padx=(2, 5), pady=(0, 2))
-        
+        match_frame.place(x=2, y=0, relwidth=1.0, width=-7, height=TOP_PANEL_HEIGHT - 2)
+        match_frame.columnconfigure(0, weight=1)
+
+        match_tip_label = ttk.Label(
+            match_frame,
+            text="提示：文件1和文件2的匹配列数量需一致",
+            font=("Arial", 8),
+            foreground=MUTED_TEXT,
+        )
+        match_tip_label.grid(row=0, column=0, sticky="w", pady=(0, 1))
+
         match_col_frame = ttk.Frame(match_frame)
-        match_col_frame.pack(fill=tk.BOTH, expand=True, pady=2)
+        match_col_frame.grid(row=1, column=0, sticky="nsew")
+        match_col_frame.columnconfigure(0, weight=1)
         
         # 文件1匹配列
         file1_match_frame = ttk.Frame(match_col_frame)
-        file1_match_frame.pack(fill=tk.X, pady=1)
+        file1_match_frame.pack(fill=tk.X, pady=2)
         ttk.Label(file1_match_frame, text="文件1:", width=6).pack(side=tk.LEFT, padx=2)
         self.match_col1_button = ttk.Button(file1_match_frame, text="选择匹配列...", command=lambda: self._show_column_picker_dialog('match', 1), width=12)
         self.match_col1_button.pack(side=tk.LEFT, padx=2)
@@ -2129,14 +2403,14 @@ class FileAndMatchConfig(ttk.Frame):
             else:
                 self.match_col1_button.config(text="选择匹配列...")
         self._update_match_col1_button = update_button1_text
-        self.match_col1_selected_label = ttk.Label(file1_match_frame, text="已选择: 无", foreground=PRIMARY, wraplength=180, justify=tk.LEFT, font=("Arial", 8))
+        self.match_col1_selected_label = ttk.Label(file1_match_frame, text="已选择: 无", foreground=PRIMARY, justify=tk.LEFT, font=("Arial", 8))
         self.match_col1_selected_label.pack(side=tk.LEFT, padx=2)
         self.match_col1_listbox = tk.Listbox(file1_match_frame, height=0)
         self.match_col1_listbox.pack_forget()
         
         # 文件2匹配列
         file2_match_frame = ttk.Frame(match_col_frame)
-        file2_match_frame.pack(fill=tk.X, pady=1)
+        file2_match_frame.pack(fill=tk.X, pady=2)
         ttk.Label(file2_match_frame, text="文件2:", width=6).pack(side=tk.LEFT, padx=2)
         self.match_col2_button = ttk.Button(file2_match_frame, text="选择匹配列...", command=lambda: self._show_column_picker_dialog('match', 2), width=12)
         self.match_col2_button.pack(side=tk.LEFT, padx=2)
@@ -2146,15 +2420,14 @@ class FileAndMatchConfig(ttk.Frame):
             else:
                 self.match_col2_button.config(text="选择匹配列...")
         self._update_match_col2_button = update_button2_text
-        self.match_col2_selected_label = ttk.Label(file2_match_frame, text="已选择: 无", foreground=PRIMARY, wraplength=180, justify=tk.LEFT, font=("Arial", 8))
+        self.match_col2_selected_label = ttk.Label(file2_match_frame, text="已选择: 无", foreground=PRIMARY, justify=tk.LEFT, font=("Arial", 8))
         self.match_col2_selected_label.pack(side=tk.LEFT, padx=2)
         self.match_col2_listbox = tk.Listbox(file2_match_frame, height=0)
         self.match_col2_listbox.pack_forget()
         
         # ==================== 左下：文件预览区域 ====================
         preview_frame = ttk.LabelFrame(left_container, text="文件预览（底部滚动条或 Shift+滚轮 可左右滑动）", padding="5")
-        preview_frame.grid_propagate(False)  # 锁定区域大小（必须在grid之前设置，避免初始布局受子控件影响）
-        preview_frame.grid(row=1, column=0, sticky="nsew", padx=(5, 2), pady=(2, 0))
+        preview_frame.place(x=5, y=TOP_PANEL_HEIGHT + 2, relwidth=1.0, width=-7, relheight=1.0, height=-(TOP_PANEL_HEIGHT + 2))
         
         self.preview_notebook = ttk.Notebook(preview_frame)
         self.preview_notebook.pack(fill=tk.BOTH, expand=True)
@@ -2170,6 +2443,7 @@ class FileAndMatchConfig(ttk.Frame):
         self.file1_tree = ttk.Treeview(file1_table_frame, height=15, show='headings')
         self.file1_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.file1_tree.configure(selectmode='extended')
+        self._decorate_preview_tree(self.file1_tree)
         file1_v_scroll = ttk.Scrollbar(file1_table_frame, orient=tk.VERTICAL, command=self.file1_tree.yview)
         file1_v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.file1_tree.configure(yscrollcommand=file1_v_scroll.set)
@@ -2187,6 +2461,7 @@ class FileAndMatchConfig(ttk.Frame):
         self.file2_tree = ttk.Treeview(file2_table_frame, height=15, show='headings')
         self.file2_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.file2_tree.configure(selectmode='extended')
+        self._decorate_preview_tree(self.file2_tree)
         file2_v_scroll = ttk.Scrollbar(file2_table_frame, orient=tk.VERTICAL, command=self.file2_tree.yview)
         file2_v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.file2_tree.configure(yscrollcommand=file2_v_scroll.set)
@@ -2211,8 +2486,7 @@ class FileAndMatchConfig(ttk.Frame):
         
         # ==================== 右下：字段映射配置区域 ====================
         mapping_frame = ttk.LabelFrame(right_container, text="字段映射配置（自动预映射，可手动调整）", padding="5")
-        mapping_frame.grid_propagate(False)  # 锁定区域大小（必须在grid之前设置，避免初始布局受子控件影响）
-        mapping_frame.grid(row=1, column=0, sticky="nsew", padx=(2, 5), pady=(2, 0))
+        mapping_frame.place(x=2, y=TOP_PANEL_HEIGHT + 2, relwidth=1.0, width=-7, relheight=1.0, height=-(TOP_PANEL_HEIGHT + 2))
 
         # 取 ttk 主题的 Frame 背景色，保证 canvas 与 ttk 控件视觉一致
         # （Toplevel 与 Tk 根窗口共享同一 Tcl 解释器，但 canvas 默认背景在不同宿主下
@@ -2255,32 +2529,42 @@ class FileAndMatchConfig(ttk.Frame):
         
         # 固定宽度的下拉框
         COMBO_WIDTH = 15
+        MAPPING_LABEL_WIDTH = 14
+        STATUS_WIDTH = 8
         
         def create_mapping_row(parent, label_text, var1, var2, col_type):
             row_frame = ttk.Frame(parent)
             row_frame.pack(fill=tk.X, pady=2, padx=5)
-            label_widget = ttk.Label(row_frame, text=label_text, width=14)
-            label_widget.pack(side=tk.LEFT, padx=(0, 5))
+            label_widget = ttk.Label(row_frame, text=label_text, width=MAPPING_LABEL_WIDTH)
+            label_widget.grid(row=0, column=0, sticky="w", padx=(0, 5))
             combo1 = ttk.Combobox(row_frame, textvariable=var1, state="readonly", width=COMBO_WIDTH)
-            combo1.pack(side=tk.LEFT, padx=(0, 10))
+            combo1.grid(row=0, column=1, sticky="w", padx=(0, 10))
             combo1.bind('<Button-3>', lambda e, ct=col_type: self._show_column_selection_menu(e, ct, 1))
-            combo1.bind('<<ComboboxSelected>>', lambda e: self._reset_llm_state_for_new_input())
+            combo1.bind('<<ComboboxSelected>>', lambda e, ct=col_type: (self._reset_llm_state_for_new_input(), self._update_mapping_row_status(ct)))
             combo2 = ttk.Combobox(row_frame, textvariable=var2, state="readonly", width=COMBO_WIDTH)
-            combo2.pack(side=tk.LEFT, padx=(0, 5))
+            combo2.grid(row=0, column=2, sticky="w", padx=(0, 5))
             combo2.bind('<Button-3>', lambda e, ct=col_type: self._show_column_selection_menu(e, ct, 2))
-            combo2.bind('<<ComboboxSelected>>', lambda e: self._reset_llm_state_for_new_input())
+            combo2.bind('<<ComboboxSelected>>', lambda e, ct=col_type: (self._reset_llm_state_for_new_input(), self._update_mapping_row_status(ct)))
+            status_label = ttk.Label(row_frame, text="待选", width=STATUS_WIDTH, foreground=ROW_STATUS_PENDING)
+            status_label.grid(row=0, column=3, sticky="w", padx=(6, 0))
+            try:
+                var1.trace_add("write", lambda *args, ct=col_type: self._update_mapping_row_status(ct))
+                var2.trace_add("write", lambda *args, ct=col_type: self._update_mapping_row_status(ct))
+            except Exception:
+                pass
             self.mapping_row_frames[col_type] = row_frame
-            self.mapping_row_controls[col_type] = {"label": label_widget, "combo1": combo1, "combo2": combo2}
+            self.mapping_row_controls[col_type] = {"label": label_widget, "combo1": combo1, "combo2": combo2, "status": status_label}
             return combo1, combo2
         
         # 标题行
         header_frame = ttk.Frame(mapping_inner)
         header_frame.pack(fill=tk.X, pady=2, padx=5)
-        ttk.Label(header_frame, text="映射字段", width=14, font=("Arial", 9, "bold")).pack(side=tk.LEFT, padx=(0, 5))
-        self.mapping_file1_label = ttk.Label(header_frame, text="新增清单" if is_supplement_mode else "原始文件1", width=COMBO_WIDTH, font=("Arial", 9, "bold"))
-        self.mapping_file1_label.pack(side=tk.LEFT, padx=(0, 10))
-        self.mapping_file2_label = ttk.Label(header_frame, text="处置清单" if is_supplement_mode else "原始文件2", width=COMBO_WIDTH, font=("Arial", 9, "bold"))
-        self.mapping_file2_label.pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Label(header_frame, text="映射字段", width=MAPPING_LABEL_WIDTH, font=("Arial", 9, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 5))
+        self.mapping_file1_label = ttk.Label(header_frame, text="新增清单" if is_supplement_mode else "期初", width=COMBO_WIDTH, font=("Arial", 9, "bold"))
+        self.mapping_file1_label.grid(row=0, column=1, sticky="ew", padx=(0, 10))
+        self.mapping_file2_label = ttk.Label(header_frame, text="处置清单" if is_supplement_mode else "期末", width=COMBO_WIDTH, font=("Arial", 9, "bold"))
+        self.mapping_file2_label.grid(row=0, column=2, sticky="ew", padx=(0, 5))
+        ttk.Label(header_frame, text="状态", width=STATUS_WIDTH, font=("Arial", 9, "bold"), foreground=PRIMARY_DARK).grid(row=0, column=3, sticky="w", padx=(6, 0))
         
         ttk.Separator(mapping_inner, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=3)
         
@@ -2344,6 +2628,7 @@ class FileAndMatchConfig(ttk.Frame):
             self.current_year_dep_col1_var.set("")
             self.current_year_dep_col1_combo.set("")
             self.current_year_dep_col1_combo.configure(state="disabled")
+        self._update_mapping_row_status()
         
         mapping_inner.update_idletasks()
         mapping_canvas.configure(scrollregion=mapping_canvas.bbox('all'))
@@ -2376,6 +2661,7 @@ class FileAndMatchConfig(ttk.Frame):
             self._reset_llm_state_for_new_input()
             self.file1_sheet_var.set("")
             self.file1_path_var.set(file_path)
+            self._sync_file_path_display(1)
             # 确保变量已更新后再更新标签
             self.update_idletasks()  # 确保Tkinter变量已更新
             self._update_file_labels()
@@ -2398,6 +2684,7 @@ class FileAndMatchConfig(ttk.Frame):
             self._reset_llm_state_for_new_input()
             self.file2_sheet_var.set("")
             self.file2_path_var.set(file_path)
+            self._sync_file_path_display(2)
             # 确保变量已更新后再更新标签
             self.update_idletasks()  # 确保Tkinter变量已更新
             self._update_file_labels()
@@ -2837,7 +3124,7 @@ class FileAndMatchConfig(ttk.Frame):
                     if len(val_str) > 50:
                         val_str = val_str[:47] + '...'
                     values.append(val_str)
-            self.file1_tree.insert('', tk.END, values=values)
+            self.file1_tree.insert('', tk.END, values=values, tags=("even" if j % 2 == 0 else "odd",))
     
     def _update_file_labels(self):
         """更新所有文件标签显示为"原始文件 & sheet名称"格式"""
@@ -2850,9 +3137,10 @@ class FileAndMatchConfig(ttk.Frame):
         
         file1_name = self._get_file_display_name(1)
         file2_name = self._get_file_display_name(2)
-        file1_mapping_short = self._shorten_for_ui(file1_name, max_len=12)
-        file2_mapping_short = self._shorten_for_ui(file2_name, max_len=12)
-        
+        if hasattr(self, "file1_path_display_var"):
+            self._sync_file_path_display(1)
+        if hasattr(self, "file2_path_display_var"):
+            self._sync_file_path_display(2)
         # #region agent log
         _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_and_match_config._update_file_labels.entry", message="updating file labels", data={"file1_name": file1_name, "file2_name": file2_name, "file1_path": self.file1_path_var.get(), "file1_sheet": self.file1_sheet_var.get(), "file2_path": self.file2_path_var.get(), "file2_sheet": self.file2_sheet_var.get()})
         # #endregion
@@ -2879,9 +3167,9 @@ class FileAndMatchConfig(ttk.Frame):
         
         # 更新字段映射配置区域的标签
         if hasattr(self, 'mapping_file1_label'):
-            self.mapping_file1_label.config(text=file1_mapping_short)
+            self.mapping_file1_label.config(text="新增清单" if self.mode == "supplement" else "期初")
         if hasattr(self, 'mapping_file2_label'):
-            self.mapping_file2_label.config(text=file2_mapping_short)
+            self.mapping_file2_label.config(text="处置清单" if self.mode == "supplement" else "期末")
         
         # 更新预览标签页（截断过长文本，防止标签页撑开布局）
         if hasattr(self, 'preview_notebook'):
@@ -2956,7 +3244,7 @@ class FileAndMatchConfig(ttk.Frame):
                     if len(val_str) > 50:
                         val_str = val_str[:47] + '...'
                     values.append(val_str)
-            self.file2_tree.insert('', tk.END, values=values)
+            self.file2_tree.insert('', tk.END, values=values, tags=("even" if j % 2 == 0 else "odd",))
     
     def _update_match_columns(self, *, trigger_llm=False):
         """更新匹配列下拉框并自动预映射"""
@@ -3493,8 +3781,8 @@ class FileAndMatchConfig(ttk.Frame):
             if self.match_columns1:
                 display_text = " + ".join(self.match_columns1)
                 # 如果文本太长，截断并添加省略号
-                if len(display_text) > 50:
-                    display_text = display_text[:47] + "..."
+                if len(display_text) > 90:
+                    display_text = display_text[:87] + "..."
                 self.match_col1_selected_label.config(text=f"已选择: {display_text}", foreground=PRIMARY)
                 # 更新按钮文本
                 if hasattr(self, '_update_match_col1_button'):
@@ -3513,8 +3801,8 @@ class FileAndMatchConfig(ttk.Frame):
             if self.match_columns2:
                 display_text = " + ".join(self.match_columns2)
                 # 如果文本太长，截断并添加省略号
-                if len(display_text) > 50:
-                    display_text = display_text[:47] + "..."
+                if len(display_text) > 90:
+                    display_text = display_text[:87] + "..."
                 self.match_col2_selected_label.config(text=f"已选择: {display_text}", foreground=PRIMARY)
                 # 更新按钮文本
                 if hasattr(self, '_update_match_col2_button'):
@@ -4217,6 +4505,20 @@ class FileAndMatchConfig(ttk.Frame):
         )
         fill_summary = self._summarize_labels(self._llm_fill_labels_current)
         review_summary = self._summarize_labels(self._llm_review_labels_current)
+        detail_lines = [
+            "当前选择",
+            f"已补充：{applied} 项（{fill_summary}）",
+            f"复核提示：{reviews} 项（{review_summary}）",
+        ]
+        if skipped:
+            detail_lines.append(f"未自动采纳：{skipped} 项")
+        if suffix_parts:
+            detail_lines.extend(["", "复核发现", *suffix_parts])
+        else:
+            detail_lines.extend(["", "复核发现", "未发现需要额外说明的问题。"])
+        detail_lines.extend(["", "建议选择", "如字段行显示“复核建议”，请按弹窗建议确认是否采纳；其余 OK 项可继续使用当前选择。"])
+        self._llm_last_detail_text = "\n".join(detail_lines)
+        self._update_llm_detail_button()
         self._finish_llm_mapping(
             f"大模型辅助判断完成：已补充 {applied} 项（{fill_summary}），复核提示 {reviews} 项（{review_summary}）。{suffix}",
             passed=not bool(errors),
@@ -4253,6 +4555,9 @@ class FileAndMatchConfig(ttk.Frame):
         total = len(pending)
         for index, (sig, decision) in enumerate(pending, start=1):
             shown_keys.add(sig)
+            role = decision.get("role")
+            if role:
+                self._llm_review_row_roles.add(role)
             if hasattr(self, "_llm_review_labels_current"):
                 self._llm_review_labels_current.append(decision.get("label") or self._llm_role_display_label(decision.get("role")))
             message = build_fa_mapping_review_dialog_text(decision)
@@ -4263,6 +4568,7 @@ class FileAndMatchConfig(ttk.Frame):
                         self._replace_llm_role(decision["role"], side, col, cols1, cols2)
             else:
                 messagebox.showinfo(title, message)
+        self._update_mapping_row_status()
         return total
 
 
@@ -4532,12 +4838,12 @@ class FileAndMatchConfig(ttk.Frame):
         self._llm_status_text = message
         self._llm_status_mode = mode
         self._llm_status_spin_index = 0
-        self.llm_status_var.set(message)
+        display_message = self._compact_llm_status_for_ui(message, mode)
+        self.llm_status_var.set(display_message)
+        self._apply_llm_status_visuals(mode, display_message)
         if message:
             self._llm_status_animating = mode in {"queued", "running"}
             self.llm_status_icon_var.set(icon or self._llm_status_icon())
-            self.llm_status_icon_label.configure(foreground=foreground)
-            self.llm_status_label.configure(foreground=foreground)
             if not self.llm_status_frame.winfo_ismapped():
                 self.llm_status_frame.pack(fill=tk.X, pady=(0, 8), after=self.info_label)
             if self._llm_status_animating:
@@ -4546,6 +4852,7 @@ class FileAndMatchConfig(ttk.Frame):
             self._llm_status_animating = False
             self._llm_status_mode = ""
             self.llm_status_icon_var.set("")
+            self._apply_llm_status_visuals("", display_message)
             if not self.llm_status_frame.winfo_ismapped():
                 self.llm_status_frame.pack(fill=tk.X, pady=(0, 8), after=self.info_label)
         self._update_llm_action_buttons()
@@ -5329,6 +5636,9 @@ class FileAndMatchConfig(ttk.Frame):
                             break
             match_cols2_actual.append(match_col2_actual)
         
+        addition_method_col2 = self._get_mapped_col(self.addition_method_col2_var.get(), cols2_raw, '_文件2')
+        addition_date_col2 = self._get_mapped_col(self.addition_date_col2_var.get(), cols2_raw, '_文件2') if addition_method_col2 else None
+
         # 准备配置（使用实际的列名，列表格式）
         config = {
             'file1_path': self.file1_path_var.get().strip(),
@@ -5365,9 +5675,9 @@ class FileAndMatchConfig(ttk.Frame):
             'current_year_dep_col2': self._get_mapped_col(self.current_year_dep_col2_var.get(), cols2_raw, '_文件2'),
             'balance_sheet_date': self.balance_sheet_date_var.get().strip() or "2025/12/31",
             'addition_method_col1': None if self.mode != "supplement" else self._get_mapped_col(self.addition_method_col1_var.get(), cols1_raw, '_文件1'),
-            'addition_method_col2': self._get_mapped_col(self.addition_method_col2_var.get(), cols2_raw, '_文件2'),
+            'addition_method_col2': addition_method_col2,
             'addition_date_col1': None if self.mode != "supplement" else self._get_mapped_col(self.addition_date_col1_var.get(), cols1_raw, '_文件1'),
-            'addition_date_col2': self._get_mapped_col(self.addition_date_col2_var.get(), cols2_raw, '_文件2'),
+            'addition_date_col2': addition_date_col2,
             'disposal_method_col1': self._get_mapped_col(self.disposal_method_col1_var.get(), cols1_raw, '_文件1'),
             'disposal_method_col2': self._get_mapped_col(self.disposal_method_col2_var.get(), cols2_raw, '_文件2'),
             'disposal_date_col1': self._get_mapped_col(self.disposal_date_col1_var.get(), cols1_raw, '_文件1'),

@@ -98,6 +98,12 @@ class FAListLLMDialogTextTests(unittest.TestCase):
         widget.addition_date_col2_var.set("新增日期")
         widget._update_optional_addition_rows_visibility()
 
+        self.assertFalse(method_row.visible)
+        self.assertFalse(date_row.visible)
+
+        widget.addition_method_col2_var.set("新增方式")
+        widget._update_optional_addition_rows_visibility()
+
         self.assertTrue(method_row.visible)
         self.assertTrue(date_row.visible)
 
@@ -534,6 +540,40 @@ class FAListLLMDialogTextTests(unittest.TestCase):
         self.assertIsNone(captured["addition_date_col1"])
         self.assertEqual("change_type", captured["addition_method_col2"])
         self.assertEqual("change_date", captured["addition_date_col2"])
+
+    def test_normal_mode_next_ignores_addition_date_without_method(self):
+        root = tk.Tcl()
+        widget = self._make_widget_with_mapping_vars(root)
+        widget.file1_path_var = tk.StringVar(master=root, value="old.csv")
+        widget.file2_path_var = tk.StringVar(master=root, value="new.csv")
+        widget.file1_sheet_var = tk.StringVar(master=root, value="")
+        widget.file2_sheet_var = tk.StringVar(master=root, value="")
+        widget.balance_sheet_date_var = tk.StringVar(master=root, value="2025/12/31")
+        widget.match_columns1 = ["asset_code"]
+        widget.match_columns2 = ["card_code"]
+        widget.addition_method_col2_var.set("")
+        widget.addition_date_col2_var.set("capitalized_date")
+        widget.file_handler = type(
+            "HandlerStub",
+            (),
+            {
+                "file1_df": pd.DataFrame({"asset_code": ["A1"]}),
+                "file2_df": pd.DataFrame({"card_code": ["A1"], "capitalized_date": ["2025/01/01"]}),
+                "get_file1_columns": lambda self: ["asset_code"],
+                "get_file2_columns": lambda self: ["card_code", "capitalized_date"],
+            },
+        )()
+        widget.file1_header_row = 0
+        widget.file2_header_row = 0
+        captured = {}
+        widget.on_complete = lambda config: captured.update(config)
+        widget._show_next_step_warning = lambda message: self.fail(message)
+
+        with patch("tools.fa_list.gui.file_and_match_config.is_llm_enabled", return_value=False):
+            widget._on_next()
+
+        self.assertIsNone(captured["addition_method_col2"])
+        self.assertIsNone(captured["addition_date_col2"])
 
 
 if __name__ == "__main__":

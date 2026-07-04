@@ -12,3 +12,12 @@ def touch_bundle_deps() -> None:
     import python_calamine  # noqa: F401
     import xlsxwriter  # noqa: F401
     import xlrd  # noqa: F401
+
+    try:
+        import pythoncom  # noqa: F401
+        import pywintypes  # noqa: F401
+        import win32com.client  # noqa: F401
+    except ImportError:
+        # pywin32 只用于“多 Sheet 原样复制”的可选快路径。
+        # 开发环境缺失时不应阻止整个工具箱启动；打包追踪由 suite.spec 兜底。
+        pass

@@ -5,6 +5,8 @@ import os
 import threading
 import warnings
 import csv
+import zipfile
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 from launcher.ui_theme import (
@@ -22,6 +24,14 @@ warnings.filterwarnings("ignore")
 SUPPORTED_TABLE_EXTENSIONS = ('.xlsx', '.xls', '.csv', '.txt')
 EXCEL_MAX_ROWS = 1048576
 STREAM_XLSX_EXTENSIONS = ('.xlsx', '.xlsm')
+HYPERLINK_WARNING_ROW_THRESHOLD = 50000
+HYPERLINK_WARNING_SIZE_THRESHOLD = 40 * 1024 * 1024
+EXACT_ESTIMATE_MAX_FILE_SIZE = 20 * 1024 * 1024
+ONE_WORKBOOK_FALLBACK_REWRITE_LIMIT = 100 * 1024 * 1024
+
+
+class MergeCancelled(Exception):
+    pass
 
 try:
     import windnd
@@ -52,6 +62,26 @@ try:
 except ImportError:
     load_calamine_workbook = None
     HAS_CALAMINE = False
+
+
+def get_xlsx_sheet_names_from_zip_file(file_path):
+    with zipfile.ZipFile(file_path) as zf:
+        workbook_root = ET.fromstring(zf.read("xl/workbook.xml"))
+        sheet_names = []
+        for sheet in workbook_root.findall(".//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet"):
+            name = sheet.attrib.get("name")
+            state = sheet.attrib.get("state", "visible")
+            if name and state == "visible":
+                sheet_names.append(name)
+        return sheet_names
+
+
+def get_sheet_names_lightweight_file(file_path):
+    fp_lower = file_path.lower()
+    if fp_lower.endswith(STREAM_XLSX_EXTENSIONS):
+        return get_xlsx_sheet_names_from_zip_file(file_path)
+    xls = pd.ExcelFile(file_path)
+    return xls.sheet_names
 
 # ==========================================
 # V2.3: 页签选择弹窗 (保持 V2.2 逻辑不变)
@@ -139,8 +169,7 @@ class SheetSelectDialog(tk.Toplevel):
         for w in self.frm_inner.winfo_children(): w.destroy()
         self.vars = {}
         try:
-            xls = pd.ExcelFile(filepath)
-            for sn in xls.sheet_names:
+            for sn in get_sheet_names_lightweight_file(filepath):
                 v = tk.BooleanVar(value=True)
                 self.vars[sn] = v
                 tk.Checkbutton(self.frm_inner, text=sn, variable=v, anchor="w").pack(fill="x", padx=5)
@@ -182,7 +211,9 @@ class BatchMergeApp:
         self.read_warnings = []
         self.var_mode = tk.StringVar(value="one_sheet")
         self.var_direction = tk.StringVar(value="vertical")
+        self.var_add_hyperlinks = tk.BooleanVar(value=True)
         self.is_processing = False
+        self.cancel_requested = False
         self.btn_start = None
         
         self.setup_ui()
@@ -217,9 +248,6 @@ class BatchMergeApp:
         ttk.Button(f_btns, text="添加文件", command=self.add_files, width=14).pack(fill="x", pady=3)
         ttk.Button(f_btns, text="扫描文件夹", command=self.add_folder, width=14).pack(fill="x", pady=3)
         ttk.Separator(f_btns, orient="horizontal").pack(fill="x", pady=8)
-        ttk.Button(f_btns, text="上移", command=lambda: self.move_item(-1), width=14).pack(fill="x", pady=3)
-        ttk.Button(f_btns, text="下移", command=lambda: self.move_item(1), width=14).pack(fill="x", pady=3)
-        ttk.Separator(f_btns, orient="horizontal").pack(fill="x", pady=8)
         ttk.Button(f_btns, text="移除选中", command=self.remove_files, width=14).pack(fill="x", pady=3)
         ttk.Button(f_btns, text="清空列表", command=self.clear_files, width=14).pack(fill="x", pady=3)
 
@@ -247,10 +275,32 @@ class BatchMergeApp:
         self.rb_h = ttk.Radiobutton(self.f_opts, text="横向拼接 (左右拼)", variable=self.var_direction, value="horizontal", command=self.update_ui_state)
         self.rb_h.pack(side="left")
 
+        f_link = ttk.Frame(frame_mid)
+        f_link.pack(fill="x", pady=(8, 0))
+        ttk.Label(f_link, text="来源追溯:", width=10).pack(side="left")
+        self.cb_hyperlinks = ttk.Checkbutton(
+            f_link,
+            text="加入源文件超链接",
+            variable=self.var_add_hyperlinks,
+        )
+        self.cb_hyperlinks.pack(side="left", padx=(0, 12))
+        ttk.Label(
+            f_link,
+            text="勾选后可点击来源文件跳转原文件，但大文件会明显降低导出速度。",
+            style="Muted.TLabel",
+        ).pack(side="left")
+
         self.pb = ttk.Progressbar(footer, mode="indeterminate")
         self.pb.pack(side="left", fill="x", expand=True, padx=(0, 12), pady=2)
         btn_group = create_button_group(footer)
-        self.btn_start = add_standard_button(btn_group, "开始合并", self.prepare_and_start)
+        self.btn_start = add_standard_button(btn_group, "开始合并", self.on_start_stop_clicked)
+
+    def on_start_stop_clicked(self):
+        if self.is_processing:
+            self.request_cancel()
+        else:
+            self.prepare_and_start()
+
     def update_ui_state(self):
         mode = self.var_mode.get()
         children = self.f_opts.winfo_children()
@@ -352,13 +402,13 @@ class BatchMergeApp:
             return
         if not self.file_list:
             return messagebox.showwarning("提示", "请先添加需要合并的文件！")
+        self.cancel_requested = False
         
         trigger_index = -1
         for i, f in enumerate(self.file_list):
             if f.lower().endswith(('.xlsx', '.xls')):
                 try:
-                    xls = pd.ExcelFile(f)
-                    if len(xls.sheet_names) > 1:
+                    if self.get_sheet_names_lightweight(f):
                         trigger_index = i
                         break
                 except: continue
@@ -379,14 +429,267 @@ class BatchMergeApp:
         )
         if not save_path: return
 
+        if not self._confirm_hyperlink_choice(save_path, sheet_config):
+            return
+
         self._set_processing_state(True, f"正在合并 {len(self.file_list)} 个文件，请稍候...")
         self.pb.start(10)
         threading.Thread(target=self.run_process, args=(save_path, sheet_config), daemon=True).start()
 
+    def _format_size(self, size_bytes):
+        if size_bytes >= 1024 * 1024 * 1024:
+            return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+        if size_bytes >= 1024 * 1024:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+        if size_bytes >= 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        return f"{size_bytes} B"
+
+    def _format_duration_range(self, low_seconds, high_seconds):
+        low_seconds = max(10, int(low_seconds))
+        high_seconds = max(low_seconds + 10, int(high_seconds))
+
+        def fmt(seconds):
+            if seconds < 60:
+                return f"{seconds} 秒"
+            minutes = seconds / 60
+            if minutes < 60:
+                return f"{minutes:.0f} 分钟"
+            hours = minutes / 60
+            return f"{hours:.1f} 小时"
+
+        return f"约 {fmt(low_seconds)} - {fmt(high_seconds)}"
+
+    def _estimate_duration_text(self, save_path, scale, include_hyperlinks=True):
+        input_mb = max(scale.get("input_size", 0) / (1024 * 1024), 0.1)
+        output_mb = max(scale.get("output_size", 0) / (1024 * 1024), 0.1)
+        rows = scale.get("rows") or 0
+        mode = self.var_mode.get()
+        direction = self.var_direction.get()
+        is_xlsx = save_path.lower().endswith(".xlsx")
+
+        if mode == "one_workbook":
+            # Excel COM 原样复制主要受 Excel 打开/复制大工作表影响。
+            low = input_mb * 0.8
+            high = input_mb * 2.5
+        elif save_path.lower().endswith(".csv"):
+            # CSV 省掉 xlsx 打包写入，通常明显更快。
+            low = input_mb * 0.5 + output_mb * 0.05
+            high = input_mb * 1.5 + output_mb * 0.15
+        elif is_xlsx and direction == "vertical":
+            low = input_mb * 0.9 + output_mb * 0.5
+            high = input_mb * 2.2 + output_mb * 1.2
+        else:
+            low = input_mb * 0.7 + output_mb * 0.4
+            high = input_mb * 1.8 + output_mb * 1.0
+
+        if include_hyperlinks and is_xlsx and self.var_add_hyperlinks.get():
+            if rows:
+                low += rows / 4500
+                high += rows / 1200
+            else:
+                low += input_mb * 0.4
+                high += input_mb * 1.0
+
+        return self._format_duration_range(low, high)
+
+    def _get_total_input_size(self):
+        total = 0
+        for fp in self.file_list:
+            try:
+                total += os.path.getsize(fp)
+            except OSError:
+                pass
+        return total
+
+    def _post_status(self, status_text):
+        self.root.after(0, lambda text=status_text: self.lbl_status.config(text=text))
+
+    def _check_cancelled(self):
+        if self.cancel_requested:
+            raise MergeCancelled("用户已停止本次合并。")
+
+    def request_cancel(self):
+        if not self.is_processing or self.cancel_requested:
+            return
+        should_stop = messagebox.askyesno(
+            "确认停止",
+            "当前合并正在执行。\n\n确认停止后，正在写入的结果文件可能不完整，需要重新导出。\n\n是否确认停止？",
+            parent=self.root,
+        )
+        if not should_stop:
+            return
+        self.cancel_requested = True
+        self._set_processing_state(True, "正在停止，请稍候... 当前文件处理到安全点后会退出。")
+
+    def _ask_hyperlink_choice(self, title, message):
+        try:
+            self.root.lift()
+            self.root.focus_force()
+            self.root.attributes("-topmost", True)
+            self.root.after(200, lambda: self.root.attributes("-topmost", False))
+        except Exception:
+            pass
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.result = None
+
+        body = ttk.Frame(dialog, padding=(22, 20, 22, 12))
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="?", width=3, anchor="center", font=("Arial", 28, "bold"), foreground="#1686d9").pack(side="left", anchor="n", padx=(0, 18))
+        ttk.Label(body, text=message, justify="left", wraplength=520).pack(side="left", fill="both", expand=True)
+
+        footer = ttk.Frame(dialog, padding=(12, 12, 12, 14))
+        footer.pack(fill="x")
+
+        def choose(value):
+            dialog.result = value
+            dialog.destroy()
+
+        ttk.Button(footer, text="关闭超链接并继续", command=lambda: choose(True), width=18).pack(side="right", padx=(8, 0))
+        ttk.Button(footer, text="保留超链接继续", command=lambda: choose(False), width=18).pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose(False))
+
+        dialog.update_idletasks()
+        x = self.root.winfo_rootx() + max((self.root.winfo_width() - dialog.winfo_width()) // 2, 0)
+        y = self.root.winfo_rooty() + max((self.root.winfo_height() - dialog.winfo_height()) // 2, 0)
+        dialog.geometry(f"+{x}+{y}")
+        dialog.wait_window()
+        return bool(dialog.result)
+
+    def _estimate_text_rows(self, file_path):
+        try:
+            if os.path.getsize(file_path) > EXACT_ESTIMATE_MAX_FILE_SIZE:
+                return 0
+        except OSError:
+            return 0
+        try:
+            with open(file_path, "rb") as f:
+                return sum(chunk.count(b"\n") for chunk in iter(lambda: f.read(1024 * 1024), b""))
+        except Exception:
+            return 0
+
+    def _estimate_xlsx_rows(self, file_path, sheet_config):
+        try:
+            if os.path.getsize(file_path) > EXACT_ESTIMATE_MAX_FILE_SIZE:
+                return 0
+        except OSError:
+            return 0
+        try:
+            from openpyxl import load_workbook
+
+            wb = load_workbook(file_path, read_only=True, data_only=True, keep_links=False)
+            try:
+                target_sheets = self.get_target_sheet_names_for_openpyxl(wb, sheet_config)
+                return sum(max((wb[name].max_row or 0) - 1, 0) for name in target_sheets)
+            finally:
+                wb.close()
+        except Exception:
+            return 0
+
+    def get_xlsx_sheet_names_from_zip(self, file_path):
+        return get_xlsx_sheet_names_from_zip_file(file_path)
+
+    def get_sheet_names_lightweight(self, file_path):
+        return get_sheet_names_lightweight_file(file_path)
+
+    def _estimate_selected_sheet_count(self, file_path, sheet_config):
+        if file_path.lower().endswith(('.csv', '.txt')):
+            return 1
+        try:
+            all_sheets = self.get_sheet_names_lightweight(file_path)
+            action = sheet_config.get("action", "default")
+            if action == "match_selected":
+                targets = set(sheet_config.get("targets", []))
+                return len([name for name in all_sheets if name in targets])
+            if action == "merge_all":
+                return len(all_sheets)
+            return 1 if all_sheets else 0
+        except Exception:
+            return 0
+
+    def _estimate_export_scale(self, sheet_config):
+        estimated_rows = 0
+        input_size = 0
+        selected_sheet_count = 0
+        for fp in self.file_list:
+            try:
+                input_size += os.path.getsize(fp)
+            except OSError:
+                pass
+            selected_sheet_count += self._estimate_selected_sheet_count(fp, sheet_config)
+            fp_lower = fp.lower()
+            if fp_lower.endswith(('.csv', '.txt')):
+                estimated_rows += self._estimate_text_rows(fp)
+            elif fp_lower.endswith(STREAM_XLSX_EXTENSIONS):
+                estimated_rows += self._estimate_xlsx_rows(fp, sheet_config)
+
+        if self.var_mode.get() == "one_sheet" and self.var_direction.get() == "horizontal":
+            estimated_hyperlinks = len(self.file_list)
+        elif self.var_mode.get() == "one_sheet":
+            estimated_hyperlinks = estimated_rows if estimated_rows else None
+        else:
+            estimated_hyperlinks = selected_sheet_count
+
+        estimated_output_size = int(max(input_size * 1.15, estimated_rows * 120))
+        return {
+            "rows": estimated_rows,
+            "input_size": input_size,
+            "output_size": estimated_output_size,
+            "hyperlinks": estimated_hyperlinks,
+            "sheets": selected_sheet_count,
+        }
+
+    def _confirm_hyperlink_choice(self, save_path, sheet_config):
+        if not self.var_add_hyperlinks.get():
+            return True
+        if not save_path.lower().endswith(".xlsx"):
+            return True
+
+        scale = self._estimate_export_scale(sheet_config)
+        hyperlinks = scale["hyperlinks"]
+        hyperlink_count_is_large = (
+            hyperlinks is not None
+            and hyperlinks >= HYPERLINK_WARNING_ROW_THRESHOLD
+        )
+        if (
+            not hyperlink_count_is_large
+            and scale["input_size"] < HYPERLINK_WARNING_SIZE_THRESHOLD
+            and scale["output_size"] < HYPERLINK_WARNING_SIZE_THRESHOLD
+        ):
+            return True
+
+        rows_text = f"{scale['rows']:,}" if scale["rows"] else "无法准确预估"
+        links_text = f"{hyperlinks:,}" if hyperlinks is not None else "无法准确预估"
+        duration_text = self._estimate_duration_text(save_path, scale, include_hyperlinks=True)
+        no_link_duration_text = self._estimate_duration_text(save_path, scale, include_hyperlinks=False)
+        message = (
+            "预计本次导出规模较大。\n\n"
+            f"预计数据行数：{rows_text}\n"
+            f"输入文件总大小：约 {self._format_size(scale['input_size'])}\n"
+            f"预计导出文件大小：约 {self._format_size(scale['output_size'])}\n"
+            f"预计写入超链接数量：约 {links_text}\n\n"
+            f"预计耗时：{duration_text}\n"
+            f"关闭超链接后预计：{no_link_duration_text}\n\n"
+            "保留源文件超链接会方便追溯，但会明显拖慢 .xlsx 导出。\n\n"
+            "请选择本次导出的超链接策略。"
+        )
+        disable_links = self._ask_hyperlink_choice("大文件导出提示", message)
+        if disable_links:
+            self.var_add_hyperlinks.set(False)
+        return True
+
     def _set_processing_state(self, processing, status_text=None):
         self.is_processing = processing
         if self.btn_start is not None:
-            self.btn_start.configure(state="disabled" if processing else "normal")
+            self.btn_start.configure(
+                state="normal",
+                text=("停止执行" if processing else "开始合并"),
+            )
         if status_text:
             self.lbl_status.config(text=status_text)
 
@@ -455,17 +758,27 @@ class BatchMergeApp:
         for row, item in enumerate(toc_data, start=2):
             target_sheet = item["Target Sheet"]
             ws.Cells(row, 1).Value = item["Source File"]
-            ws.Hyperlinks.Add(
-                Anchor=ws.Cells(row, 2),
-                Address="",
-                SubAddress=f"'{target_sheet}'!A1",
-                TextToDisplay=target_sheet,
-            )
+            if self.var_add_hyperlinks.get():
+                ws.Hyperlinks.Add(
+                    Anchor=ws.Cells(row, 2),
+                    Address="",
+                    SubAddress=f"'{target_sheet}'!A1",
+                    TextToDisplay=target_sheet,
+                )
+            else:
+                ws.Cells(row, 2).Value = target_sheet
         ws.Activate()
 
     def copy_workbook_sheets_with_com(self, save_path, sheet_config):
-        import pythoncom
-        import win32com.client
+        try:
+            import pythoncom
+            import win32com.client
+        except ImportError as exc:
+            raise Exception(
+                "缺少 Excel 直接复制所需的 pywin32 依赖。\n"
+                "请先安装 pywin32，或使用 One Sheet/CSV 普通合并模式。\n"
+                "安装命令：pip install pywin32"
+            ) from exc
 
         pythoncom.CoInitialize()
         excel = None
@@ -486,10 +799,14 @@ class BatchMergeApp:
             copied_count = 0
 
             for fp in self.file_list:
+                self._check_cancelled()
+                self._post_status(f"正在直接复制 Sheet：{os.path.basename(fp)}")
                 src_wb = excel.Workbooks.Open(str(Path(fp).resolve()), ReadOnly=True, UpdateLinks=0)
                 src_wbs.append(src_wb)
                 sheet_names = self.get_target_sheet_names_for_com(src_wb, sheet_config)
                 for sheet_name in sheet_names:
+                    self._check_cancelled()
+                    self._post_status(f"正在复制：{os.path.basename(fp)} / {sheet_name}")
                     src_ws = src_wb.Worksheets(sheet_name)
                     src_ws.Copy(None, dest_wb.Worksheets(dest_wb.Worksheets.Count))
                     new_ws = excel.ActiveSheet
@@ -537,11 +854,14 @@ class BatchMergeApp:
         wrote_any = False
         wrote_header = False
         for fp in self.file_list:
+            self._check_cancelled()
+            self._post_status(f"正在读取并写入 CSV：{os.path.basename(fp)}")
             f_base = os.path.basename(fp)
             df_dict = self.load_all_sheets_polars(fp, sheet_config, auto_header=(not is_physical))
             if not df_dict:
                 continue
             for sn, df in df_dict.items():
+                self._check_cancelled()
                 if df.is_empty():
                     continue
                 if is_physical:
@@ -552,6 +872,7 @@ class BatchMergeApp:
                 df = df.with_columns(source_cols)
                 leading = [expr.meta.output_name() for expr in source_cols]
                 df = df.select(leading + [c for c in df.columns if c not in leading])
+                self._post_status(f"正在写入 CSV：{os.path.basename(fp)} / {sn}")
                 with open(save_path, "ab" if wrote_any else "wb") as f:
                     if not wrote_any:
                         f.write(b"\xef\xbb\xbf")
@@ -565,11 +886,14 @@ class BatchMergeApp:
         wrote_any = False
         wrote_header = False
         for fp in self.file_list:
+            self._check_cancelled()
+            self._post_status(f"正在读取并写入 CSV：{os.path.basename(fp)}")
             f_base = os.path.basename(fp)
             df_dict = self.load_all_sheets(fp, sheet_config, auto_header=(not is_physical))
             if not df_dict:
                 continue
             for sn, df in df_dict.items():
+                self._check_cancelled()
                 if df.empty:
                     continue
                 if is_physical:
@@ -577,6 +901,7 @@ class BatchMergeApp:
                 df.insert(0, "【来源文件】", f_base)
                 if len(df_dict) > 1 or sheet_config['action'] != 'default':
                     df.insert(1, "【来源Sheet】", sn)
+                self._post_status(f"正在写入 CSV：{os.path.basename(fp)} / {sn}")
                 df.to_csv(
                     save_path,
                     mode=("w" if not wrote_any else "a"),
@@ -595,9 +920,13 @@ class BatchMergeApp:
         with open(save_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             for fp, sheet_name, include_sheet_col, row_iter in self.iter_calamine_sheet_sources(sheet_config, is_physical):
+                self._check_cancelled()
+                self._post_status(f"正在流式写入 CSV：{os.path.basename(fp)} / {sheet_name}")
                 f_base = os.path.basename(fp)
                 sheet_rows = 0
                 for values in row_iter:
+                    if sheet_rows % 1000 == 0:
+                        self._check_cancelled()
                     if not is_physical and not wrote_header:
                         header_row = ["Source File"]
                         if include_sheet_col:
@@ -774,9 +1103,13 @@ class BatchMergeApp:
         create_output_sheet()
 
         for fp, sheet_name, include_sheet_col, row_iter in sheet_sources:
+            self._check_cancelled()
+            self._post_status(f"正在流式写入 Excel：{os.path.basename(fp)} / {sheet_name}")
             f_base = os.path.basename(fp)
             sheet_rows = 0
             for values in row_iter:
+                if sheet_rows % 1000 == 0:
+                    self._check_cancelled()
                 if not is_physical and not wrote_header:
                     header_row = ["Source File"]
                     if include_sheet_col:
@@ -808,6 +1141,7 @@ class BatchMergeApp:
     def write_vertical_xlsx_rows_xlsxwriter_stream(self, save_path, sheet_config, is_physical, sheet_sources):
         workbook = xlsxwriter.Workbook(save_path, {'constant_memory': True})
         workbook.use_zip64()
+        link_fmt = workbook.add_format({'font_color': 'blue', 'underline': 1}) if self.var_add_hyperlinks.get() else None
         current_ws = None
         current_row = 0
         sheet_no = 0
@@ -829,9 +1163,13 @@ class BatchMergeApp:
             create_output_sheet()
 
             for fp, sheet_name, include_sheet_col, row_iter in sheet_sources:
+                self._check_cancelled()
+                self._post_status(f"正在流式写入 Excel：{os.path.basename(fp)} / {sheet_name}")
                 f_base = os.path.basename(fp)
                 sheet_rows = 0
                 for values in row_iter:
+                    if sheet_rows % 1000 == 0:
+                        self._check_cancelled()
                     if not is_physical and not wrote_header:
                         header_row = ["Source File"]
                         if include_sheet_col:
@@ -849,7 +1187,15 @@ class BatchMergeApp:
 
                     if current_row >= EXCEL_MAX_ROWS:
                         create_output_sheet()
-                    current_ws.write_row(current_row, 0, out_row)
+                    if link_fmt is not None:
+                        try:
+                            current_ws.write_url(current_row, 0, f"external:{fp}", link_fmt, string=f_base)
+                            if len(out_row) > 1:
+                                current_ws.write_row(current_row, 1, out_row[1:])
+                        except Exception:
+                            current_ws.write_row(current_row, 0, out_row)
+                    else:
+                        current_ws.write_row(current_row, 0, out_row)
                     current_row += 1
                     sheet_rows += 1
                     wrote_any = True
@@ -921,6 +1267,15 @@ class BatchMergeApp:
                     self.root.after(0, lambda: self._notify_success(save_path))
                     return
                 except Exception as com_err:
+                    total_input_size = self._get_total_input_size()
+                    if total_input_size >= ONE_WORKBOOK_FALLBACK_REWRITE_LIMIT:
+                        raise Exception(
+                            "多 Sheet 模式的 Excel 直接复制失败，且源文件体积较大，已停止自动回退重写。\n\n"
+                            f"源文件总大小：约 {self._format_size(total_input_size)}\n"
+                            "如果继续回退为普通导出，工具需要重新读取并写入所有 Sheet，可能等待很久且丢失部分原始格式。\n\n"
+                            "建议：关闭已打开的 Excel 文件后重试；如果只是要合成一张明细表，请改选 One Sheet 并优先导出 CSV。\n\n"
+                            f"直接复制错误信息：{com_err}"
+                        )
                     fallback_warning = (
                         "Excel COM 原样复制失败，已自动改用普通导出。\n"
                         "导出文件已生成，但源 Sheet 的完整格式、对象、部分公式/超链接可能无法保留。\n\n"
@@ -941,11 +1296,15 @@ class BatchMergeApp:
                     
                     # 2. 写入数据页
                     for idx, fp in enumerate(self.file_list):
+                        self._check_cancelled()
+                        self._post_status(f"正在普通导出：{os.path.basename(fp)}")
                         df_dict = self.load_all_sheets(fp, sheet_config)
                         if not df_dict: continue
                         f_base = self.clean_sheet_name(os.path.basename(fp))
                         
                         for sn, df in df_dict.items():
+                            self._check_cancelled()
+                            self._post_status(f"正在写入：{os.path.basename(fp)} / {sn}")
                             target = f"{f_base}_{sn}" if len(df_dict)>1 or sheet_config['action']!='default' else f_base
                             target = self.clean_sheet_name(target)
                             if target in writer.sheets:
@@ -982,8 +1341,11 @@ class BatchMergeApp:
                             # 写入超链接: internal:'SheetName'!A1
                             # 注意 Excel Sheet 名如果包含空格或特殊字符，需用单引号包裹
                             s_name = item["Target Sheet"]
-                            link = f"internal:'{s_name}'!A1"
-                            ws_ref.write_url(row, 1, link, fmt_link, string=s_name)
+                            if self.var_add_hyperlinks.get():
+                                link = f"internal:'{s_name}'!A1"
+                                ws_ref.write_url(row, 1, link, fmt_link, string=s_name)
+                            else:
+                                ws_ref.write(row, 1, s_name, fmt_norm)
                         
                         # 激活 Reference 页为默认打开页
                         ws_ref.activate()
@@ -1035,11 +1397,15 @@ class BatchMergeApp:
                 dfs_metadata = [] 
 
                 for fp in self.file_list:
+                    self._check_cancelled()
+                    self._post_status(f"正在读取：{os.path.basename(fp)}")
                     f_base = os.path.basename(fp)
                     df_dict = self.load_all_sheets(fp, sheet_config, auto_header=(not is_physical))
                     if not df_dict: continue
 
                     for sn, df in df_dict.items():
+                        self._check_cancelled()
+                        self._post_status(f"正在整理：{os.path.basename(fp)} / {sn}")
                         if df.empty: continue
                         meta = {"path": fp, "fname": f_base, "sheet": sn, "rows": len(df), "cols": len(df.columns)}
                         
@@ -1058,14 +1424,22 @@ class BatchMergeApp:
                 if not dfs: raise Exception("没有读取到有效数据")
 
                 if direction == "horizontal":
+                    self._check_cancelled()
+                    self._post_status("正在横向拼接所有表格...")
                     keys = [f"{m['fname']} - {m['sheet']}" for m in dfs_metadata]
                     final_df = pd.concat(dfs, axis=1, keys=keys)
                 else:
+                    self._check_cancelled()
+                    self._post_status("正在纵向堆叠所有表格...")
                     final_df = pd.concat(dfs, axis=0, ignore_index=True, sort=False)
 
                 if save_path.lower().endswith(".csv"):
+                    self._check_cancelled()
+                    self._post_status("正在写出 CSV 文件...")
                     final_df.to_csv(save_path, index=False, header=(not is_physical), encoding="utf-8-sig")
                 else:
+                    self._check_cancelled()
+                    self._post_status("正在写出 Excel 文件...")
                     with pd.ExcelWriter(save_path, engine='xlsxwriter') as writer:
                         if direction == "horizontal":
                             flat_df = final_df.copy()
@@ -1082,8 +1456,11 @@ class BatchMergeApp:
                                 display_name = meta['fname']
                                 if sheet_config['action'] != 'default': display_name += f" ({meta['sheet']})"
                                 for offset in range(w):
-                                    try: ws.write_url(0, start_col+offset, f"external:{meta['path']}", fmt_l, string=display_name)
-                                    except: ws.write(0, start_col+offset, display_name, fmt_h)
+                                    if self.var_add_hyperlinks.get():
+                                        try: ws.write_url(0, start_col+offset, f"external:{meta['path']}", fmt_l, string=display_name)
+                                        except: ws.write(0, start_col+offset, display_name, fmt_h)
+                                    else:
+                                        ws.write(0, start_col+offset, display_name, fmt_h)
                                 sub_df = dfs[dfs_metadata.index(meta)]
                                 for c_i, c_name in enumerate(sub_df.columns):
                                     ws.write(1, start_col+c_i, str(c_name), fmt_h)
@@ -1098,12 +1475,17 @@ class BatchMergeApp:
                                     row_count = len(dfs[i]) 
                                     f_path = meta['path']; f_name = meta['fname']
                                     for _ in range(row_count):
-                                        try: ws.write_url(current_row, 0, f"external:{f_path}", link_fmt, string=f_name)
-                                        except: pass
+                                        if current_row % 1000 == 0:
+                                            self._check_cancelled()
+                                        if self.var_add_hyperlinks.get():
+                                            try: ws.write_url(current_row, 0, f"external:{f_path}", link_fmt, string=f_name)
+                                            except: pass
                                         current_row += 1
 
             self.root.after(0, lambda: self._notify_success(save_path))
 
+        except MergeCancelled as e:
+            self.root.after(0, lambda msg=str(e): self.on_cancelled(msg))
         except Exception as e:
             err_msg = str(e); print(err_msg)
             self.root.after(0, lambda: self.on_error(err_msg))
@@ -1115,12 +1497,16 @@ class BatchMergeApp:
         dfs_metadata = []
 
         for fp in self.file_list:
+            self._check_cancelled()
+            self._post_status(f"正在快速读取：{os.path.basename(fp)}")
             f_base = os.path.basename(fp)
             df_dict = self.load_all_sheets_polars(fp, sheet_config, auto_header=(not is_physical))
             if not df_dict:
                 continue
 
             for sn, df in df_dict.items():
+                self._check_cancelled()
+                self._post_status(f"正在快速整理：{os.path.basename(fp)} / {sn}")
                 if df.is_empty():
                     continue
 
@@ -1153,14 +1539,22 @@ class BatchMergeApp:
             raise Exception("没有读取到有效数据")
 
         if direction == "horizontal":
+            self._check_cancelled()
+            self._post_status("正在快速横向拼接所有表格...")
             final_df = pl.concat(dfs, how="horizontal")
         else:
+            self._check_cancelled()
+            self._post_status("正在快速纵向堆叠所有表格...")
             final_df = pl.concat(dfs, how="diagonal_relaxed")
 
         if save_path.lower().endswith(".csv"):
+            self._check_cancelled()
+            self._post_status("正在写出 CSV 文件...")
             final_df.write_csv(save_path, include_header=(not is_physical), include_bom=True)
             return
 
+        self._check_cancelled()
+        self._post_status("正在写出 Excel 文件...")
         self.write_polars_excel(save_path, final_df, dfs_metadata, direction, is_physical, sheet_config)
 
     def write_polars_excel(self, save_path, final_df, dfs_metadata, direction, is_physical, sheet_config):
@@ -1178,9 +1572,12 @@ class BatchMergeApp:
                     if sheet_config['action'] != 'default':
                         display_name += f" ({meta['sheet']})"
                     for col_name in meta["columns"]:
-                        try:
-                            ws.write_url(0, start_col, f"external:{meta['path']}", fmt_l, string=display_name)
-                        except Exception:
+                        if self.var_add_hyperlinks.get():
+                            try:
+                                ws.write_url(0, start_col, f"external:{meta['path']}", fmt_l, string=display_name)
+                            except Exception:
+                                ws.write(0, start_col, display_name, fmt_h)
+                        else:
                             ws.write(0, start_col, display_name, fmt_h)
                         ws.write(1, start_col, str(col_name), fmt_h)
                         flat_columns.append(str(col_name))
@@ -1194,10 +1591,13 @@ class BatchMergeApp:
                 for i, meta in enumerate(dfs_metadata):
                     row_count = dfs_metadata[i]["rows"]
                     for _ in range(row_count):
-                        try:
-                            ws.write_url(current_row, 0, f"external:{meta['path']}", link_fmt, string=meta['fname'])
-                        except Exception:
-                            pass
+                        if current_row % 1000 == 0:
+                            self._check_cancelled()
+                        if self.var_add_hyperlinks.get():
+                            try:
+                                ws.write_url(current_row, 0, f"external:{meta['path']}", link_fmt, string=meta['fname'])
+                            except Exception:
+                                pass
                         current_row += 1
         finally:
             workbook.close()
@@ -1438,16 +1838,25 @@ class BatchMergeApp:
 
     def on_success(self, path):
         self.pb.stop()
+        self.cancel_requested = False
         self._set_processing_state(False, f"合并完成：{len(self.file_list)} 个文件")
         messagebox.showinfo("完成", f"合并成功！\n文件已保存至：\n{path}")
 
     def on_success_with_warning(self, path, warning):
         self.pb.stop()
+        self.cancel_requested = False
         self._set_processing_state(False, f"合并完成：{len(self.file_list)} 个文件（有提示）")
         messagebox.showwarning("完成（已降级导出）", f"合并已完成！\n文件已保存至：\n{path}\n\n{warning}")
-        
+
+    def on_cancelled(self, msg):
+        self.pb.stop()
+        self.cancel_requested = False
+        self._set_processing_state(False, "合并已停止")
+        messagebox.showinfo("已停止", msg or "本次合并已停止。")
+
     def on_error(self, msg):
         self.pb.stop()
+        self.cancel_requested = False
         self._set_processing_state(False, "合并失败，请检查文件或规则后重试")
         messagebox.showerror("发生错误", msg)
 

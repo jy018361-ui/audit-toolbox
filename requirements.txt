@@ -8,4 +8,5 @@ xlrd>=2.0
 python-calamine
 fastexcel
 windnd
+pywin32
 pyinstaller>=6.0

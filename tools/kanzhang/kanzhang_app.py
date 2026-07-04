@@ -481,6 +481,8 @@ class AuditApp_V70_2:
         fit_window_to_screen(self.root, 1280, 850, 920, 620)
         style = ttk.Style(); style.theme_use('clam')
         style.configure("Slim.Horizontal.TScrollbar", arrowsize=10, width=10)
+        style.configure("Export.TCheckbutton", font=("微软雅黑", 9), foreground="#263238", background="#f8f5ee")
+        style.map("Export.TCheckbutton", foreground=[("disabled", "#8a8174")])
         
         self.file_path = None
         self.real_xlsx_path = None
@@ -494,6 +496,8 @@ class AuditApp_V70_2:
         self.active_batch_idx = 0
         
         self.column_mapping = {} 
+        self.mapping_vars = {}
+        self._mapping_combo_updating = False
         self._llm_mapping_note = ""
         self._llm_status_text = "LLM字段映射：等待加载数据"
         self.cached_accounts = None 
@@ -663,37 +667,47 @@ class AuditApp_V70_2:
         frame_ctrl = tk.LabelFrame(body, text=" 核心操作流程 ", padx=10, pady=8, font=("微软雅黑", 10, "bold"), fg="#333")
         frame_ctrl.pack(fill="x", padx=10, pady=5)
         
-        f_1 = tk.Frame(frame_ctrl); f_1.pack(side="left", padx=5)
-        ttk.Button(f_1, text="1. 加载数据", command=self.load_file).pack(side="left")
-        ttk.Separator(frame_ctrl, orient="vertical").pack(side="left", fill="y", padx=15)
+        flow_frame = tk.Frame(frame_ctrl)
+        flow_frame.pack(side="left", fill="x", expand=True)
         
-        f_2 = tk.Frame(frame_ctrl); f_2.pack(side="left", padx=5)
-        self.btn_filter = ttk.Button(f_2, text="2. 科目筛选", command=self.prepare_filter_data, state="disabled")
-        self.btn_filter.pack(side="left")
-        ttk.Separator(frame_ctrl, orient="vertical").pack(side="left", fill="y", padx=15)
+        f_1 = tk.Frame(flow_frame, padx=8, pady=7, relief="groove", borderwidth=1)
+        f_1.pack(side="left", padx=(0, 10))
+        self.step_load_frame = f_1
+        self.btn_load = tk.Button(f_1, text="1. 加载数据", command=self.load_file, width=16, relief="flat", font=("微软雅黑", 10, "bold"))
+        self.btn_load.pack(fill="x")
+        self.lbl_step_load = tk.Label(f_1, text="等待文件", font=("微软雅黑", 8), anchor="w")
+        self.lbl_step_load.pack(fill="x", pady=(5, 0))
+        ttk.Separator(flow_frame, orient="vertical").pack(side="left", fill="y", padx=8)
+        
+        f_2 = tk.Frame(flow_frame, padx=8, pady=7, relief="groove", borderwidth=1)
+        f_2.pack(side="left", padx=10)
+        self.step_filter_frame = f_2
+        self.btn_filter = tk.Button(f_2, text="2. 科目筛选", command=self.prepare_filter_data, state="disabled", width=16, relief="flat", font=("微软雅黑", 10, "bold"))
+        self.btn_filter.pack(fill="x")
+        self.lbl_step_filter = tk.Label(f_2, text="待映射", font=("微软雅黑", 8), anchor="w")
+        self.lbl_step_filter.pack(fill="x", pady=(5, 0))
+        ttk.Separator(flow_frame, orient="vertical").pack(side="left", fill="y", padx=8)
 
-        f_3 = tk.Frame(frame_ctrl); f_3.pack(side="left", padx=5)
-        self.btn_run = ttk.Button(f_3, text="3. 导出与透视", command=self.start_process_flow, state="disabled")
-        self.btn_run.pack(side="left")
+        f_3 = tk.Frame(flow_frame, padx=8, pady=7, relief="groove", borderwidth=1)
+        f_3.pack(side="left", padx=10)
+        self.step_export_frame = f_3
+        self.btn_run = tk.Button(f_3, text="3. 导出与透视", command=self.start_process_flow, state="disabled", width=16, relief="flat", font=("微软雅黑", 10, "bold"))
+        self.btn_run.pack(fill="x")
+        self.lbl_step_export = tk.Label(f_3, text="待筛选", font=("微软雅黑", 8), anchor="w")
+        self.lbl_step_export.pack(fill="x", pady=(5, 0))
 
-        self.lbl_scheme_status = tk.Label(frame_ctrl, text="等待加载...", fg="gray", font=("Arial", 9, "bold"), width=52, anchor="w")
-        self.lbl_scheme_status.pack(side="left", padx=20, fill="x", expand=True)
+        self.lbl_scheme_status = tk.Label(flow_frame, text="等待加载...", fg="gray", font=("微软雅黑", 9, "bold"), anchor="w")
+        self.lbl_scheme_status.pack(side="left", padx=(18, 0), fill="x", expand=True)
 
-        f_opts = tk.Frame(frame_ctrl); f_opts.pack(side="right", padx=10)
+        f_opts = tk.LabelFrame(frame_ctrl, text=" 导出设置 ", padx=10, pady=6, fg=PRIMARY)
+        f_opts.pack(side="right", padx=(12, 0), anchor="ne")
         self.var_mark_je = tk.BooleanVar(value=True)
-        ttk.Checkbutton(f_opts, text="启用正负数智能标记", variable=self.var_mark_je).pack(anchor="e")
+        ttk.Checkbutton(f_opts, text="启用正负数智能标记", variable=self.var_mark_je, style="Export.TCheckbutton").pack(anchor="w")
         self.var_mark_loss = tk.BooleanVar(value=True)
-        ttk.Checkbutton(f_opts, text="标记损益结转凭证", variable=self.var_mark_loss).pack(anchor="e")
+        ttk.Checkbutton(f_opts, text="标记损益结转凭证", variable=self.var_mark_loss, style="Export.TCheckbutton").pack(anchor="w")
         # --- 已删除: "按借正贷负处理(方案A)" 勾选框 ---
         self.var_partial_col = tk.BooleanVar(value=False)
-        ttk.Checkbutton(f_opts, text="仅导出部分列", variable=self.var_partial_col).pack(anchor="e")
-
-        frame_desc = tk.Frame(body, bg="#FFF8E1", padx=10, pady=8, relief="groove", borderwidth=1)
-        frame_desc.pack(fill="x", padx=10, pady=(0, 5))
-
-        # 左侧文本区域
-        left_frame = tk.Frame(frame_desc, bg="#FFF8E1")
-        left_frame.pack(side="left", fill="both", expand=True)
+        ttk.Checkbutton(f_opts, text="仅导出部分列", variable=self.var_partial_col, style="Export.TCheckbutton").pack(anchor="w")
 
         info_text = (
             "自动配置方案说明：\n"
@@ -705,36 +719,11 @@ class AuditApp_V70_2:
             "   支持选择csv格式导出，可大幅提升写入速度" 
         )
 
-# === 修改开始：将长文本拆分为多行，以便调整间距 ===
-        for line in info_text.strip().split('\n'):
-            tk.Label(
-                left_frame, 
-                text=line, 
-                bg="#FFF8E1", 
-                justify="left", 
-                fg="#5D4037", 
-                font=("宋体", 9, "normal")
-            ).pack(anchor="w", pady=2)  # <--- 修改这里的 pady 值（例如改为 2, 4, 5）来调整行间距
-        # === 修改结束 ===
-
-        # 右侧反馈功能区域 - 与左边字体和样式保持一致
-        right_frame = tk.Frame(frame_desc, bg="#FFF8E1", padx=10, pady=0)  # 调整内边距，移除底部间距
-        right_frame.pack(side="right", anchor="ne")  # 移除fill="y"，减少垂直占用
-
-        # 点赞按钮 - 标准化尺寸和样式
-        ttk.Button(right_frame, text="认可", command=self.send_like_email, width=8).pack(fill="x", pady=2, padx=0)  # 统一按钮宽度和间距
-
-        # 建议按钮 - 标准化尺寸和样式
-        ttk.Button(right_frame, text="建议", command=self.send_suggestion_email, width=8).pack(fill="x", pady=2, padx=0)  # 统一按钮宽度和间距
-
-        # 提示文字 - 与左侧注释字体保持一致
-        tk.Label(right_frame, text="", bg="#FFF8E1", fg="#0D47A1", font=("宋体", 9, "normal")).pack(anchor="center", pady=2)
-
         frame_info = tk.Frame(body, padx=10); frame_info.pack(fill="x")
         self.lbl_file = tk.Label(frame_info, text="当前文件: (未加载)", fg="gray"); self.lbl_file.pack(side="left")
-        self.lbl_status = tk.Label(frame_info, text="", fg="blue"); self.lbl_status.pack(side="right")
+        self.lbl_status = tk.Label(frame_info, text="", fg="blue")
 
-        frame_llm = tk.LabelFrame(body, text=" LLM字段映射状态 ", padx=8, pady=5, fg="#205860")
+        frame_llm = tk.LabelFrame(body, text=" LLM字段映射诊断 ", padx=8, pady=5, fg="#205860")
         frame_llm.pack(fill="x", padx=10, pady=(2, 4))
         self.llm_status_text = tk.Text(
             frame_llm,
@@ -750,14 +739,20 @@ class AuditApp_V70_2:
         self.llm_status_text.insert("1.0", self._llm_status_text)
         self.llm_status_text.configure(state="disabled")
 
+        self.lbl_mapping_legend = tk.Label(body, text="", fg=SUCCESS, anchor="w", font=("微软雅黑", 9))
+        self.lbl_mapping_legend.pack(fill="x", padx=12, pady=(0, 2))
         frame_table = tk.Frame(body); frame_table.pack(fill="both", expand=True, padx=7, pady=3)
+        self.mapping_canvas = tk.Canvas(frame_table, height=0, bg="#F7F8FA", highlightthickness=0)
+        self.mapping_inner = tk.Frame(self.mapping_canvas, bg="#F7F8FA")
+        self.mapping_window = self.mapping_canvas.create_window((0, 0), window=self.mapping_inner, anchor="nw")
         self.tree = ttk.Treeview(frame_table, show='headings', height=10)
         vsb = ttk.Scrollbar(frame_table, orient="vertical", command=self.tree.yview)
-        hsb = tk.Scrollbar(frame_table, orient="horizontal", command=self.tree.xview, width=10, highlightthickness=0)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        self.tree.grid(row=0, column=0, sticky='nsew')
-        vsb.grid(row=0, column=1, sticky='ns'); hsb.grid(row=1, column=0, sticky='ew')
-        frame_table.grid_rowconfigure(0, weight=1); frame_table.grid_columnconfigure(0, weight=1)
+        hsb = tk.Scrollbar(frame_table, orient="horizontal", command=self._on_table_xscroll, width=10, highlightthickness=0)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=lambda first, last: self._on_tree_xscroll(first, last, hsb))
+        self.mapping_canvas.grid(row=0, column=0, sticky='ew')
+        self.tree.grid(row=1, column=0, sticky='nsew')
+        vsb.grid(row=1, column=1, sticky='ns'); hsb.grid(row=2, column=0, sticky='ew')
+        frame_table.grid_rowconfigure(1, weight=1); frame_table.grid_columnconfigure(0, weight=1)
         
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="设为标题行（重新加载）", command=self.set_row_as_header)
@@ -772,6 +767,143 @@ class AuditApp_V70_2:
             if item:
                 self.tree.selection_set(item)
         self.tree.bind("<Button-1>", _tree_click_clear, add="+")
+
+        frame_desc = tk.Frame(body, bg="#F7F5EF", padx=10, pady=5, relief="flat", borderwidth=0)
+        frame_desc.pack(fill="x", padx=10, pady=(0, 6))
+
+        left_frame = tk.Frame(frame_desc, bg="#F7F5EF")
+        left_frame.pack(side="left", fill="both", expand=True)
+
+        self._desc_expanded = tk.BooleanVar(value=False)
+        self.lbl_quick_summary = tk.Label(
+            left_frame,
+            text="当前规则：自动识别方案A/方案B，可右键设置标题行、左键映射字段。",
+            bg="#F7F5EF",
+            fg="#6D756F",
+            font=("微软雅黑", 8),
+            anchor="w",
+        )
+        self.lbl_quick_summary.pack(anchor="w")
+        self.btn_toggle_desc = ttk.Button(left_frame, text="规则说明", width=10, style="Secondary.TButton", command=self._toggle_desc_panel)
+        self.btn_toggle_desc.pack(anchor="w", pady=(3, 0))
+        self.desc_detail_frame = tk.Frame(left_frame, bg="#F7F5EF")
+        for line in info_text.strip().split('\n')[1:]:
+            tk.Label(
+                self.desc_detail_frame,
+                text=line,
+                bg="#F7F5EF",
+                justify="left",
+                fg="#6D5F52",
+                font=("微软雅黑", 8, "normal")
+            ).pack(anchor="w", pady=1)
+
+        right_frame = tk.Frame(frame_desc, bg="#F7F5EF", padx=4, pady=0)
+        right_frame.pack(side="right", anchor="se")
+        ttk.Button(right_frame, text="认可", command=self.send_like_email, width=6, style="Secondary.TButton").pack(side="left", padx=(0, 4))
+        ttk.Button(right_frame, text="建议", command=self.send_suggestion_email, width=6, style="Secondary.TButton").pack(side="left")
+        self._refresh_flow_status()
+
+    def _toggle_desc_panel(self):
+        expanded = bool(self._desc_expanded.get())
+        self._desc_expanded.set(not expanded)
+        if expanded:
+            self.desc_detail_frame.pack_forget()
+            self.btn_toggle_desc.configure(text="规则说明")
+        else:
+            self.desc_detail_frame.pack(fill="x", pady=(6, 0))
+            self.btn_toggle_desc.configure(text="收起说明")
+
+    def _on_table_xscroll(self, *args):
+        self.tree.xview(*args)
+        self.mapping_canvas.xview(*args)
+
+    def _on_tree_xscroll(self, first, last, scrollbar):
+        scrollbar.set(first, last)
+        self.mapping_canvas.xview_moveto(first)
+
+    def _role_label_by_code(self):
+        return {role: label for label, role in self.ROLES.items()}
+
+    def _mapping_label_for_col(self, col):
+        role_order = ["role_id", "role_acc", "role_entity", "role_date", "role_summary", "role_dr", "role_cr", "role_amt", "role_dir"]
+        roles = [role for role in role_order if role in self.column_mapping.get(col, set())]
+        if not roles:
+            return "未映射"
+        short = {
+            "role_id": "ID",
+            "role_acc": "科目",
+            "role_entity": "公司",
+            "role_date": "日期",
+            "role_summary": "摘要",
+            "role_dr": "借方",
+            "role_cr": "贷方",
+            "role_amt": "金额",
+            "role_dir": "方向",
+        }
+        return " / ".join(short.get(role, role) for role in roles)
+
+    def _refresh_mapping_bar(self):
+        canvas = getattr(self, "mapping_canvas", None)
+        inner = getattr(self, "mapping_inner", None)
+        if not canvas or not inner:
+            return
+
+            self._mapping_combo_updating = True
+        try:
+            for child in inner.winfo_children():
+                child.destroy()
+            self.mapping_vars = {}
+
+            if not self.full_columns:
+                canvas.configure(height=0, scrollregion=(0, 0, 0, 0))
+                return
+
+            canvas.configure(height=38)
+            for col in self.full_columns:
+                label_value = self._mapping_label_for_col(col)
+                if label_value == "未映射":
+                    cell_bg = "#F1EEE8"
+                    fg = "#7A746B"
+                    font = ("微软雅黑", 9)
+                elif "/" in label_value:
+                    cell_bg = "#FFF3E2"
+                    fg = WARNING
+                    font = ("微软雅黑", 9, "bold")
+                else:
+                    cell_bg = "#E7F2ED"
+                    fg = PRIMARY
+                    font = ("微软雅黑", 9, "bold")
+
+                cell = tk.Frame(inner, width=120, height=36, bg=cell_bg, padx=2, pady=4)
+                cell.pack(side=tk.LEFT)
+                cell.pack_propagate(False)
+                text = f"{label_value} ▾"
+                btn = tk.Button(
+                    cell,
+                    text=text,
+                    command=lambda c=col: self.on_header_click(c),
+                    bg=cell_bg,
+                    fg=fg,
+                    activebackground=cell_bg,
+                    activeforeground=fg,
+                    relief="groove",
+                    borderwidth=1,
+                    font=font,
+                    anchor="w",
+                    padx=3,
+                    pady=0,
+                )
+                btn.pack(fill="both", expand=True)
+                self.mapping_vars[col] = tk.StringVar(value=label_value)
+
+            width = max(1, len(self.full_columns) * 120)
+            inner.update_idletasks()
+            canvas.itemconfig(self.mapping_window, width=width, height=36)
+            canvas.configure(scrollregion=(0, 0, width, 36))
+            first = self.tree.xview()[0] if hasattr(self, "tree") else 0
+            canvas.xview_moveto(first)
+        finally:
+            self._mapping_combo_updating = False
     
     # === 反馈功能 ===
     def send_like_email(self):
@@ -2085,19 +2217,114 @@ class AuditApp_V70_2:
         except Exception:
             apply()
 
+    def _apply_step_state(self, frame, button, label, state, status_text):
+        palette = {
+            "done": {"frame": "#E7F2ED", "button": PRIMARY, "button_fg": "#FFFFFF", "label": SUCCESS},
+            "current": {"frame": "#FFF3E2", "button": WARNING, "button_fg": "#FFFFFF", "label": WARNING},
+            "pending": {"frame": "#F1EEE8", "button": "#C9C1B4", "button_fg": "#6F675D", "label": "#7A746B"},
+            "disabled": {"frame": "#F1EEE8", "button": "#D7D0C6", "button_fg": "#8A8174", "label": "#8A8174"},
+        }
+        colors = palette.get(state, palette["pending"])
+        try:
+            frame.configure(bg=colors["frame"])
+            button.configure(
+                bg=colors["button"],
+                fg=colors["button_fg"],
+                activebackground=colors["button"],
+                activeforeground=colors["button_fg"],
+                disabledforeground=colors["button_fg"],
+            )
+            label.configure(text=status_text, bg=colors["frame"], fg=colors["label"])
+        except tk.TclError:
+            pass
+
+    def _refresh_flow_status(self, scheme_text=None, scheme_color=None):
+        display_name = ""
+        if self.file_path:
+            display_name = os.path.basename(self.real_xlsx_path) if self.real_xlsx_path else os.path.basename(self.file_path)
+
+        if display_name:
+            load_text, load_color = f"已加载 {display_name}", SUCCESS
+            load_state = "done"
+        else:
+            load_text, load_color = "等待文件", "gray"
+            load_state = "current"
+
+        if self.column_mapping:
+            mapped_count = sum(1 for roles in self.column_mapping.values() if roles)
+            filter_text, filter_color = f"已映射 {mapped_count} 列", SUCCESS
+            filter_state = "done" if (self.cached_accounts is not None or self.target_accounts or self.target_batches) else "current"
+        elif display_name:
+            filter_text, filter_color = "待映射", WARNING
+            filter_state = "current"
+        else:
+            filter_text, filter_color = "待加载", "gray"
+            filter_state = "disabled"
+
+        try:
+            export_ready = self.btn_run["state"] == "normal"
+        except Exception:
+            export_ready = False
+        filter_done = self.cached_accounts is not None or bool(self.target_accounts) or bool(self.target_batches)
+        if export_ready and filter_done:
+            export_text, export_color = "可导出", SUCCESS
+            export_state = "current"
+        elif export_ready:
+            export_text, export_color = "待筛选", WARNING
+            export_state = "pending"
+        elif display_name:
+            export_text, export_color = "待筛选", WARNING
+            export_state = "pending"
+        else:
+            export_text, export_color = "待加载", "gray"
+            export_state = "disabled"
+
+        for label, text, color in (
+            (getattr(self, "lbl_step_load", None), load_text, load_color),
+            (getattr(self, "lbl_step_filter", None), filter_text, filter_color),
+            (getattr(self, "lbl_step_export", None), export_text, export_color),
+        ):
+            if label:
+                label.config(text=text, fg=color)
+
+        steps = (
+            ("step_load_frame", "btn_load", "lbl_step_load", load_state, load_text),
+            ("step_filter_frame", "btn_filter", "lbl_step_filter", filter_state, filter_text),
+            ("step_export_frame", "btn_run", "lbl_step_export", export_state, export_text),
+        )
+        for frame_name, button_name, label_name, state, text in steps:
+            frame = getattr(self, frame_name, None)
+            button = getattr(self, button_name, None)
+            label = getattr(self, label_name, None)
+            if frame and button and label:
+                self._apply_step_state(frame, button, label, state, text)
+
+        if scheme_text and hasattr(self, "lbl_quick_summary"):
+            self.lbl_quick_summary.config(text=f"当前结论：{scheme_text}", fg=scheme_color or PRIMARY)
+
     def build_table(self):
         self.tree.delete(*self.tree.get_children()); self.tree["columns"] = self.full_columns
-        prefix_map = {"role_id": "【🔑ID】", "role_acc": "【📘科目】", "role_entity": "【🏢公司】", 
-                      "role_date": "【📅日期】", "role_summary": "【📝摘要】", "role_dr": "【➕借方】", "role_cr": "【➖贷方】", 
-                      "role_amt": "【💰金额】", "role_dir": "【🧭方向】"}
+        prefix_map = {"role_id": "ID", "role_acc": "科目", "role_entity": "公司",
+                      "role_date": "日期", "role_summary": "摘要", "role_dr": "借方", "role_cr": "贷方",
+                      "role_amt": "金额", "role_dir": "方向"}
+        mapped_bits = []
         for col in self.full_columns:
             txt = str(col)
             if col in self.column_mapping:
-                tags = "".join([prefix_map.get(r, "") for r in self.column_mapping[col]])
-                txt = f"{tags}{col}"
+                tags = " / ".join(prefix_map.get(r, "") for r in self.column_mapping[col] if prefix_map.get(r))
+                if tags:
+                    mapped_bits.append(f"{tags}: {col}")
             self.tree.heading(col, text=txt, command=lambda c=col: self.on_header_click(c))
             self.tree.column(col, width=120, stretch=False)
+        self._refresh_mapping_bar()
         for _, row in self.df_preview.iterrows(): self.tree.insert("", "end", values=list(row))
+        if mapped_bits and hasattr(self, "lbl_mapping_legend"):
+            legend = "已映射字段：" + "；".join(mapped_bits[:6])
+            if len(mapped_bits) > 6:
+                legend += f"；另 {len(mapped_bits) - 6} 列"
+            self.lbl_mapping_legend.config(text=legend)
+        elif hasattr(self, "lbl_mapping_legend"):
+            self.lbl_mapping_legend.config(text="已映射字段：暂无，请点击表头设置")
         self.btn_filter.config(state="normal"); self.btn_run.config(state="normal")
         display_name = os.path.basename(self.real_xlsx_path) if self.real_xlsx_path else os.path.basename(self.file_path)
         llm_note = getattr(self, "_llm_mapping_note", "")
@@ -2105,6 +2332,7 @@ class AuditApp_V70_2:
         elif self.header_row_idx == 0: self.lbl_status.config(text="请右键设置标题行", fg=WARNING)
         else: self.lbl_status.config(text=f"加载完成 [{display_name}]", fg=SUCCESS)
         self.update_scheme_status()
+        self._refresh_flow_status()
 
     def update_scheme_status(self):
         map_inv = {v: [] for v in self.ROLES.values()}
@@ -2152,10 +2380,11 @@ class AuditApp_V70_2:
         max_len = 72
         status_show = status if len(status) <= max_len else (status[:max_len - 1] + "…")
         self.lbl_scheme_status.config(text=status_show, fg=color)
+        self._refresh_flow_status(status_show, color)
 
     def on_header_click(self, col):
         top = tk.Toplevel(self.root)
-        top.title("勾选角色")
+        top.title("选择映射角色")
         _fit_toplevel_to_screen(top, 340, 460, min_width=320, min_height=360)
         try:
             top.transient(self.root)
@@ -2167,7 +2396,8 @@ class AuditApp_V70_2:
 
         body = tk.Frame(top)
         body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        tk.Label(body, text="勾选角色:", pady=10).pack()
+        tk.Label(body, text=f"字段：{col}", pady=(10, 2), font=("微软雅黑", 9, "bold")).pack()
+        tk.Label(body, text="可多选映射角色，完成后点击确定。", fg="#666", pady=(0, 8)).pack()
 
         canvas = tk.Canvas(body, highlightthickness=0)
         scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=canvas.yview)
@@ -4644,19 +4874,18 @@ class AuditApp_V70_2:
         self.user_save_path = filedialog.asksaveasfilename(**kwargs)
         self.thread_event.set()
 
-def main(parent=None):
+def main(root=None):
     from launcher.ui_theme import apply_app_theme, set_dark_title_bar
-    if parent is not None:
-        win = tk.Toplevel(parent)
-        apply_app_theme(win)
-        set_dark_title_bar(win)
-        app = AuditApp_V70_2(win)
-        win.wait_window()
-    else:
+
+    own_root = root is None
+    if own_root:
         root = tk.Tk()
-        apply_app_theme(root)
-        set_dark_title_bar(root)
-        app = AuditApp_V70_2(root)
+
+    apply_app_theme(root)
+    set_dark_title_bar(root)
+    app = AuditApp_V70_2(root)
+
+    if own_root:
         root.mainloop()
 
 

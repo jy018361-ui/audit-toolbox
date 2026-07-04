@@ -1,10 +1,12 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
 import tkinter as tk
+from tkinter import ttk
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +18,41 @@ from tools.fa_list.gui.main_window import MainWindow
 
 
 class FAListLLMDialogTextTests(unittest.TestCase):
+    def test_supplement_sheet_combo_resyncs_from_loaded_handler_sheet(self):
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            widget = object.__new__(FileAndMatchConfig)
+            widget.mode = "supplement"
+            widget.file_handler = SimpleNamespace(
+                file1_path=str(ROOT / "addition.xlsx"),
+                file2_path=str(ROOT / "disposal.xlsx"),
+                file1_sheet="新增清单_BKD",
+                file2_sheet="处置清单_BKD",
+            )
+            widget.file1_path_var = tk.StringVar(master=root, value=widget.file_handler.file1_path)
+            widget.file2_path_var = tk.StringVar(master=root, value=widget.file_handler.file2_path)
+            widget.file1_path_display_var = tk.StringVar(master=root, value="")
+            widget.file2_path_display_var = tk.StringVar(master=root, value="")
+            widget.file1_sheet_var = tk.StringVar(master=root, value="")
+            widget.file2_sheet_var = tk.StringVar(master=root, value="")
+            widget.file1_sheet_combo = ttk.Combobox(root, textvariable=widget.file1_sheet_var)
+            widget.file2_sheet_combo = ttk.Combobox(root, textvariable=widget.file2_sheet_var)
+            widget.file1_sheet_combo["values"] = ["新增清单_BKD"]
+            widget.file2_sheet_combo["values"] = []
+            widget.file1_label = ttk.Label(root)
+            widget.file2_label = ttk.Label(root)
+
+            widget._update_file_labels()
+
+            self.assertEqual(widget.file1_sheet_var.get(), "新增清单_BKD")
+            self.assertEqual(widget.file1_sheet_combo.get(), "新增清单_BKD")
+            self.assertEqual(widget.file2_sheet_var.get(), "处置清单_BKD")
+            self.assertEqual(widget.file2_sheet_combo.get(), "处置清单_BKD")
+            self.assertIn("处置清单_BKD", list(widget.file2_sheet_combo.cget("values")))
+        finally:
+            root.destroy()
+
     def test_field_review_text_is_concise_and_actionable(self):
         text = build_fa_mapping_review_dialog_text(
             {
@@ -178,6 +215,58 @@ class FAListLLMDialogTextTests(unittest.TestCase):
 
         self.assertEqual("编码", picked_code)
         self.assertEqual("名称", picked_name)
+
+    def test_supplement_id_inherits_asset_description_as_name_role(self):
+        widget = object.__new__(FileAndMatchConfig)
+        widget.mode = "supplement"
+        df = pd.DataFrame(
+            {
+                "固定资产编号": ["1100003", "1100004"],
+                "固定资产名称": ["R290消防室", "实验室扩建工程"],
+                "新增方式": ["购入", "购入"],
+            }
+        )
+
+        picked_code = widget._pick_supplement_column_for_reference(
+            "固定资产编号", list(df.columns), df, set()
+        )
+        picked_name = widget._pick_supplement_column_for_reference(
+            "资产描述", list(df.columns), df, {picked_code}
+        )
+
+        self.assertEqual("固定资产编号", picked_code)
+        self.assertEqual("固定资产名称", picked_name)
+
+    def test_supplement_id_falls_back_to_first_step_id_rules_without_reference(self):
+        widget = object.__new__(FileAndMatchConfig)
+        widget.mode = "supplement"
+        widget.supplement_reference_match_columns1 = []
+        widget.supplement_reference_match_columns2 = []
+        widget.match_columns1 = []
+        widget.match_columns2 = []
+        widget._sync_auto_match_column_selection = lambda cols1, cols2: None
+        widget.file_handler = type(
+            "HandlerStub",
+            (),
+            {
+                "file1_df": pd.DataFrame(
+                    {
+                        "流水号": [1, 2],
+                        "固定资产编号": ["A001", "A002"],
+                        "固定资产名称": ["电脑A", "电脑B"],
+                    }
+                ),
+                "file2_df": pd.DataFrame(),
+            },
+        )()
+
+        changed = widget._auto_map_supplement_match_columns(
+            ["流水号", "固定资产编号", "固定资产名称"],
+            [],
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(widget.match_columns1, ["固定资产编号", "固定资产名称"])
 
     def test_auto_enter_addition_supplement_only_for_file2_only_rows(self):
         window = object.__new__(MainWindow)
@@ -574,6 +663,151 @@ class FAListLLMDialogTextTests(unittest.TestCase):
 
         self.assertIsNone(captured["addition_method_col2"])
         self.assertIsNone(captured["addition_date_col2"])
+
+    def test_sheet_combo_sync_uses_handler_sheet_when_var_is_empty(self):
+        class SheetComboStub:
+            def __init__(self, values=()):
+                self.values = list(values)
+                self.value = ""
+
+            def cget(self, key):
+                if key == "values":
+                    return tuple(self.values)
+                return ""
+
+            def __setitem__(self, key, value):
+                if key == "values":
+                    self.values = list(value)
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+            def selection_clear(self):
+                pass
+
+        root = tk.Tcl()
+        for mode in ("normal", "supplement"):
+            with self.subTest(mode=mode):
+                widget = object.__new__(FileAndMatchConfig)
+                widget.mode = mode
+                widget.file1_path_var = tk.StringVar(master=root, value="old.xlsx")
+                widget.file2_path_var = tk.StringVar(master=root, value="new.xlsx")
+                widget.file1_sheet_var = tk.StringVar(master=root, value="")
+                widget.file2_sheet_var = tk.StringVar(master=root, value="")
+                widget.file1_sheet_combo = SheetComboStub(values=("Other",))
+                widget.file2_sheet_combo = SheetComboStub(values=())
+                widget.file_handler = type(
+                    "HandlerStub",
+                    (),
+                    {
+                        "file1_path": "old.xlsx",
+                        "file2_path": "new.xlsx",
+                        "file1_sheet": "OldSheet",
+                        "file2_sheet": "NewSheet",
+                    },
+                )()
+
+                widget._sync_all_sheet_combo_displays()
+
+                self.assertEqual("OldSheet", widget.file1_sheet_var.get())
+                self.assertEqual("OldSheet", widget.file1_sheet_combo.get())
+                self.assertIn("OldSheet", widget.file1_sheet_combo.values)
+                self.assertEqual("NewSheet", widget.file2_sheet_var.get())
+                self.assertEqual("NewSheet", widget.file2_sheet_combo.get())
+                self.assertIn("NewSheet", widget.file2_sheet_combo.values)
+
+    def test_sheet_combo_sync_can_fallback_to_first_value(self):
+        class SheetComboStub:
+            def __init__(self, values=()):
+                self.values = list(values)
+                self.value = ""
+
+            def cget(self, key):
+                if key == "values":
+                    return tuple(self.values)
+                return ""
+
+            def __setitem__(self, key, value):
+                if key == "values":
+                    self.values = list(value)
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+            def selection_clear(self):
+                pass
+
+        root = tk.Tcl()
+        widget = object.__new__(FileAndMatchConfig)
+        widget.file1_path_var = tk.StringVar(master=root, value="old.xlsx")
+        widget.file2_path_var = tk.StringVar(master=root, value="new.xlsx")
+        widget.file1_sheet_var = tk.StringVar(master=root, value="")
+        widget.file2_sheet_var = tk.StringVar(master=root, value="")
+        widget.file1_sheet_combo = SheetComboStub(values=("Sheet1", "Sheet2"))
+        widget.file2_sheet_combo = SheetComboStub(values=("BKD",))
+        widget.file_handler = type(
+            "HandlerStub",
+            (),
+            {
+                "file1_path": "old.xlsx",
+                "file2_path": "new.xlsx",
+                "file1_sheet": None,
+                "file2_sheet": None,
+            },
+        )()
+
+        widget._sync_all_sheet_combo_displays(fallback_to_first=True)
+
+        self.assertEqual("Sheet1", widget.file1_sheet_var.get())
+        self.assertEqual("Sheet1", widget.file1_sheet_combo.get())
+        self.assertEqual("Sheet1", widget.file_handler.file1_sheet)
+        self.assertEqual("BKD", widget.file2_sheet_var.get())
+        self.assertEqual("BKD", widget.file2_sheet_combo.get())
+        self.assertEqual("BKD", widget.file_handler.file2_sheet)
+
+    def test_llm_stop_bypass_allows_next_when_llm_is_enabled(self):
+        class ButtonStub:
+            def __init__(self):
+                self.state = None
+
+            def configure(self, **kwargs):
+                if "state" in kwargs:
+                    self.state = kwargs["state"]
+
+        widget = object.__new__(FileAndMatchConfig)
+        widget.next_button = ButtonStub()
+        widget._llm_mapping_passed = False
+        widget._llm_mapping_bypassed = True
+
+        with patch("tools.fa_list.gui.file_and_match_config.is_llm_enabled", return_value=True):
+            widget._update_next_button_state()
+
+        self.assertEqual(tk.NORMAL, widget.next_button.state)
+
+    def test_missing_llm_api_config_does_not_lock_next(self):
+        class ButtonStub:
+            def __init__(self):
+                self.state = None
+
+            def configure(self, **kwargs):
+                if "state" in kwargs:
+                    self.state = kwargs["state"]
+
+        widget = object.__new__(FileAndMatchConfig)
+        widget.next_button = ButtonStub()
+        widget._llm_mapping_passed = False
+        widget._llm_mapping_bypassed = False
+
+        with patch("tools.fa_list.gui.file_and_match_config.is_llm_enabled", return_value=False):
+            widget._update_next_button_state()
+
+        self.assertEqual(tk.NORMAL, widget.next_button.state)
 
 
 if __name__ == "__main__":

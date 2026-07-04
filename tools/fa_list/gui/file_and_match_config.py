@@ -17,6 +17,7 @@ from launcher.llm_client import AUTO_APPLY_CONFIDENCE, LLMMatchKeyReview, genera
 from launcher.llm_settings import is_llm_enabled, load_llm_settings
 from launcher.ui_theme import (
     BG,
+    BORDER,
     ERROR,
     MUTED_TEXT,
     PRIMARY,
@@ -1482,6 +1483,7 @@ class FileAndMatchConfig(ttk.Frame):
         self._llm_generation = 0
         self._llm_rerun_after_current = False
         self._llm_mapping_passed = False
+        self._llm_mapping_bypassed = False
         # 已经向用户弹过的 LLM 风险提示签名集合，避免重复跳出同样的弹窗。
         # 在文件/工作表变更时（_update_match_columns）清空。
         self._llm_shown_match_review_keys = set()
@@ -1493,10 +1495,13 @@ class FileAndMatchConfig(ttk.Frame):
         self._llm_status_mode = ""
         self._llm_review_row_roles = set()
         self._llm_last_detail_text = ""
+        self._llm_detail_sections_current = []
         self.llm_status_badge_var = tk.StringVar(value="待复核")
         self.llm_status_message_var = tk.StringVar(value="选择文件并确认匹配列后，系统会进行字段复核。")
         self.llm_status_icon_var = tk.StringVar(value="")
         self.llm_status_var = tk.StringVar(value="")
+        self.loading_message_var = tk.StringVar(value="")
+        self._loading_mask_depth = 0
         
         # 文件路径变量
         self.file1_path_var = tk.StringVar()
@@ -1786,6 +1791,7 @@ class FileAndMatchConfig(ttk.Frame):
             if self.status_callback:
                 self.status_callback(f"新增清单预填失败：{error_msg}")
             return
+        self._sync_sheet_combo_display(1, fallback_to_first=True)
 
         if self.status_callback:
             self.status_callback("已从第一步预填新增清单")
@@ -1824,6 +1830,7 @@ class FileAndMatchConfig(ttk.Frame):
     def _reset_llm_state_for_new_input(self):
         self._llm_generation += 1
         self._llm_mapping_passed = False
+        self._llm_mapping_bypassed = False
         if self._llm_mapping_running:
             self._llm_rerun_after_current = True
         self._last_llm_match_review_signature = None
@@ -1831,6 +1838,7 @@ class FileAndMatchConfig(ttk.Frame):
         self._llm_shown_fa_review_keys = set()
         self._llm_review_row_roles = set()
         self._llm_last_detail_text = ""
+        self._llm_detail_sections_current = []
         self._update_llm_detail_button()
         self._update_mapping_row_status()
         if self._llm_mapping_assist_job is not None:
@@ -1846,11 +1854,13 @@ class FileAndMatchConfig(ttk.Frame):
 
     def _manual_run_llm_mapping_assist(self):
         self._reset_llm_state_for_new_input()
+        self._llm_mapping_bypassed = False
         self._queue_llm_mapping_assist(force=True)
 
     def _stop_llm_mapping_assist(self):
         self._llm_generation += 1
         self._llm_mapping_passed = False
+        self._llm_mapping_bypassed = True
         self._llm_mapping_running = False
         self._llm_rerun_after_current = False
         if self._llm_mapping_assist_job is not None:
@@ -1860,7 +1870,7 @@ class FileAndMatchConfig(ttk.Frame):
                 pass
             self._llm_mapping_assist_job = None
         self._llm_mapping_assist_scheduled = False
-        self._set_llm_mapping_status("大模型复核已停止。请重新复核成功后再继续。", foreground=ERROR, mode="error")
+        self._set_llm_mapping_status("大模型复核已停止。你可以继续下一步，或重新复核后再继续。", foreground=ERROR, mode="stopped")
         self._log_llm_mapping_event("stopped_by_user")
 
     def _update_llm_action_buttons(self):
@@ -1881,7 +1891,7 @@ class FileAndMatchConfig(ttk.Frame):
         if not hasattr(self, "next_button"):
             return
         try:
-            locked = bool(is_llm_enabled() and not self._llm_mapping_passed)
+            locked = bool(is_llm_enabled() and not self._llm_mapping_passed and not self._llm_mapping_bypassed)
             self.next_button.configure(state=tk.DISABLED if locked else tk.NORMAL)
         except Exception:
             self.next_button.configure(state=tk.NORMAL)
@@ -1908,6 +1918,64 @@ class FileAndMatchConfig(ttk.Frame):
         current = path_var.get().strip()
         if typed and typed != self._compact_path_for_display(current):
             path_var.set(typed)
+
+    def _handler_sheet_matches_current_path(self, file_num):
+        current_path = self.file1_path_var.get() if file_num == 1 else self.file2_path_var.get()
+        handler_path = getattr(self.file_handler, f"file{file_num}_path", None)
+        current_path = os.path.abspath(str(current_path or "").strip()) if current_path else ""
+        handler_path = os.path.abspath(str(handler_path or "").strip()) if handler_path else ""
+        return bool(current_path and handler_path and current_path == handler_path)
+
+    def _clear_handler_sheet(self, file_num):
+        try:
+            setattr(self.file_handler, f"file{file_num}_sheet", None)
+        except Exception:
+            pass
+
+    def _sync_sheet_combo_display(self, file_num, fallback_to_first=False):
+        var = self.file1_sheet_var if file_num == 1 else self.file2_sheet_var
+        combo = getattr(self, f"file{file_num}_sheet_combo", None)
+        handler_value = (
+            getattr(self.file_handler, f"file{file_num}_sheet", None)
+            if self._handler_sheet_matches_current_path(file_num)
+            else None
+        )
+        if combo is None:
+            return
+        try:
+            values = list(combo.cget("values") or [])
+        except tk.TclError:
+            values = []
+        current = str(var.get() or "").strip()
+        try:
+            combo_value = str(combo.get() or "").strip()
+        except Exception:
+            combo_value = ""
+        value = current or str(handler_value or "").strip() or combo_value
+        if not value and fallback_to_first and values:
+            value = str(values[0])
+        if not value:
+            return
+        if value not in values:
+            try:
+                combo["values"] = [value] + [item for item in values if item != value]
+            except tk.TclError:
+                pass
+        try:
+            var.set(value)
+            combo.set(value)
+            combo.selection_clear()
+        except tk.TclError:
+            pass
+        if fallback_to_first and not str(handler_value or "").strip():
+            try:
+                setattr(self.file_handler, f"file{file_num}_sheet", value)
+            except Exception:
+                pass
+
+    def _sync_all_sheet_combo_displays(self, fallback_to_first=False):
+        self._sync_sheet_combo_display(1, fallback_to_first=fallback_to_first)
+        self._sync_sheet_combo_display(2, fallback_to_first=fallback_to_first)
 
     def _decorate_preview_tree(self, tree):
         try:
@@ -1956,6 +2024,8 @@ class FileAndMatchConfig(ttk.Frame):
             return "LLM复核：待复核"
         if mode in {"queued", "running"}:
             return "LLM复核：正在处理，请稍候"
+        if mode == "stopped":
+            return "LLM复核：已停止 · 可继续或重新复核"
         if mode == "done":
             applied_match = re.search(r"已补充\s*(\d+)\s*项", message)
             review_match = re.search(r"复核提示\s*(\d+)\s*项", message)
@@ -1964,7 +2034,7 @@ class FileAndMatchConfig(ttk.Frame):
             return f"LLM复核：已完成 · 已补充 {applied} 项 · 复核提示 {reviews} 项"
         if mode == "error":
             if "已停止" in message:
-                return "LLM复核：已停止 · 重新复核成功后可继续"
+                return "LLM复核：已停止 · 可继续或重新复核"
             if "未返回可用复核结果" in message:
                 return "LLM复核：未返回结果 · 请重新复核"
             return "LLM复核：未完成 · 请查看提示并重新复核"
@@ -1989,6 +2059,16 @@ class FileAndMatchConfig(ttk.Frame):
                 "badge_bg": SUCCESS,
                 "badge_fg": "#ffffff",
                 "accent": SUCCESS,
+                "fg": PRIMARY_DARK,
+            }
+        if mode == "stopped":
+            return {
+                "badge": "已停止",
+                "message": "已停止大模型复核，可继续下一步或重新复核。",
+                "surface": LLM_STATUS_IDLE_BG,
+                "badge_bg": MUTED_TEXT,
+                "badge_fg": "#ffffff",
+                "accent": MUTED_TEXT,
                 "fg": PRIMARY_DARK,
             }
         if mode == "error" or show_warning:
@@ -2041,6 +2121,34 @@ class FileAndMatchConfig(ttk.Frame):
         except tk.TclError:
             pass
 
+    def _append_llm_detail_section(self, title, body):
+        title = str(title or "").strip()
+        body = str(body or "").strip()
+        if not title and not body:
+            return
+        sections = getattr(self, "_llm_detail_sections_current", None)
+        if sections is None:
+            sections = []
+            self._llm_detail_sections_current = sections
+        if title and body:
+            sections.append(f"{title}\n{body}")
+        else:
+            sections.append(title or body)
+
+    def _format_llm_suggestion_detail(self, item, outcome):
+        role = self._llm_role_display_label(getattr(item, "role", ""))
+        side = "文件1" if getattr(item, "file_side", "") == "file1" else "文件2"
+        return (
+            f"字段：{role}\n"
+            f"文件：{side}\n"
+            f"建议列：{getattr(item, 'suggested_column', '') or '无'}\n"
+            f"动作：{getattr(item, 'action', '') or '无'}\n"
+            f"置信度：{getattr(item, 'confidence', '')}\n"
+            f"原因：{getattr(item, 'reason', '') or '无'}\n"
+            f"复核提示：{getattr(item, 'review_warning', '') or '无'}\n"
+            f"处理结果：{outcome}"
+        )
+
     def _show_llm_detail_dialog(self):
         detail = str(getattr(self, "_llm_last_detail_text", "") or "").strip()
         if not detail:
@@ -2068,6 +2176,38 @@ class FileAndMatchConfig(ttk.Frame):
         try:
             tree.delete(*tree.get_children())
             tree["columns"] = ()
+        except tk.TclError:
+            pass
+
+    def _show_loading_mask(self, message):
+        self._loading_mask_depth += 1
+        self.loading_message_var.set(message or "正在处理，请稍候...")
+        try:
+            self.configure(cursor="watch")
+        except tk.TclError:
+            pass
+        if not hasattr(self, "loading_mask_frame"):
+            return
+        try:
+            if hasattr(self, "loading_progress"):
+                self.loading_progress.start(12)
+            self.loading_mask_frame.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+            self.loading_mask_frame.lift()
+            self.update_idletasks()
+        except tk.TclError:
+            pass
+
+    def _hide_loading_mask(self):
+        self._loading_mask_depth = max(0, self._loading_mask_depth - 1)
+        if self._loading_mask_depth:
+            return
+        try:
+            if hasattr(self, "loading_progress"):
+                self.loading_progress.stop()
+            if hasattr(self, "loading_mask_frame"):
+                self.loading_mask_frame.place_forget()
+            self.configure(cursor="")
+            self.update_idletasks()
         except tk.TclError:
             pass
 
@@ -2272,10 +2412,23 @@ class FileAndMatchConfig(ttk.Frame):
         
         # 主容器：左右列使用固定比例分配，避免导入后被长路径或预览表格撑宽。
         main_container = ttk.Frame(self)
+        self.main_container = main_container
         main_container.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
 
         left_container = ttk.Frame(main_container)
         right_container = ttk.Frame(main_container)
+        self.loading_mask_frame = tk.Frame(main_container, bg=BG, highlightthickness=1, highlightbackground=BORDER)
+        loading_card = tk.Frame(self.loading_mask_frame, bg=LLM_STATUS_RUNNING_BG, padx=18, pady=14)
+        loading_card.place(relx=0.5, rely=0.45, anchor=tk.CENTER)
+        tk.Label(
+            loading_card,
+            textvariable=self.loading_message_var,
+            bg=LLM_STATUS_RUNNING_BG,
+            fg=PRIMARY_DARK,
+            font=("Arial", 10, "bold"),
+        ).pack(pady=(0, 8))
+        self.loading_progress = ttk.Progressbar(loading_card, mode="indeterminate", length=260)
+        self.loading_progress.pack()
 
         def _layout_main_columns(event=None):
             total_width = main_container.winfo_width()
@@ -2350,6 +2503,9 @@ class FileAndMatchConfig(ttk.Frame):
             file1_clear_btn = ttk.Button(file1_frame, text="清除", command=lambda: self._clear_supplement_file(1), width=5)
             file1_clear_btn.grid(row=0, column=5, sticky="w", padx=(4, 0))
         self.file1_sheet_combo.bind('<<ComboboxSelected>>', lambda e: (self._reset_llm_state_for_new_input(), self._load_file1()))
+        self.file1_sheet_combo.bind("<FocusIn>", lambda e: self._sync_sheet_combo_display(1), add="+")
+        self.file1_sheet_combo.bind("<FocusOut>", lambda e: self._sync_sheet_combo_display(1), add="+")
+        self.file1_sheet_combo.bind("<Configure>", lambda e: self._sync_sheet_combo_display(1), add="+")
         
         # 文件2
         file2_frame = ttk.Frame(file_frame)
@@ -2373,6 +2529,9 @@ class FileAndMatchConfig(ttk.Frame):
             file2_clear_btn = ttk.Button(file2_frame, text="清除", command=lambda: self._clear_supplement_file(2), width=5)
             file2_clear_btn.grid(row=0, column=5, sticky="w", padx=(4, 0))
         self.file2_sheet_combo.bind('<<ComboboxSelected>>', lambda e: (self._reset_llm_state_for_new_input(), self._load_file2()))
+        self.file2_sheet_combo.bind("<FocusIn>", lambda e: self._sync_sheet_combo_display(2), add="+")
+        self.file2_sheet_combo.bind("<FocusOut>", lambda e: self._sync_sheet_combo_display(2), add="+")
+        self.file2_sheet_combo.bind("<Configure>", lambda e: self._sync_sheet_combo_display(2), add="+")
         
         # ==================== 右上：匹配列配置区域 ====================
         match_frame = ttk.LabelFrame(right_container, text="匹配列配置（按ctrl可多选）", padding="5")
@@ -2660,6 +2819,7 @@ class FileAndMatchConfig(ttk.Frame):
         if file_path:
             self._reset_llm_state_for_new_input()
             self.file1_sheet_var.set("")
+            self._clear_handler_sheet(1)
             self.file1_path_var.set(file_path)
             self._sync_file_path_display(1)
             # 确保变量已更新后再更新标签
@@ -2683,6 +2843,7 @@ class FileAndMatchConfig(ttk.Frame):
         if file_path:
             self._reset_llm_state_for_new_input()
             self.file2_sheet_var.set("")
+            self._clear_handler_sheet(2)
             self.file2_path_var.set(file_path)
             self._sync_file_path_display(2)
             # 确保变量已更新后再更新标签
@@ -2693,6 +2854,8 @@ class FileAndMatchConfig(ttk.Frame):
     
     def _load_file1_sheets(self, file_path: str):
         """加载文件1的工作表列表"""
+        file_name = os.path.basename(file_path)
+        self._show_loading_mask(f"正在识别 {file_name} 的工作表...")
         # 显示进度提示弹窗
         progress_window = tk.Toplevel(self.winfo_toplevel())
         progress_window.title("处理中")
@@ -2703,7 +2866,6 @@ class FileAndMatchConfig(ttk.Frame):
         progress_window.resizable(False, False)
         center_on_parent(progress_window, self.winfo_toplevel())
         
-        file_name = os.path.basename(file_path)
         ttk.Label(progress_window, text=f"正在识别{file_name}格式，请稍候...", font=("Arial", 10)).pack(pady=20)
         progress_var = tk.DoubleVar()
         progress_bar = ttk.Progressbar(progress_window, variable=progress_var, maximum=100, length=250, mode='indeterminate')
@@ -2723,18 +2885,21 @@ class FileAndMatchConfig(ttk.Frame):
                     self.after(0, lambda: self._on_sheets_loaded(1, success, error_msg, sheets, progress_window))
                 else:
                     # CSV文件，直接加载
-                    self.after(0, lambda: progress_window.destroy())
-                    self.after(0, lambda: self._load_file1())
+                    self.after(0, lambda: (progress_window.destroy(), self._hide_loading_mask(), self._load_file1()))
             except Exception as e:
                 error_msg = str(e)
                 self.after(0, lambda: progress_window.destroy())
+                self.after(0, lambda: self._hide_loading_mask())
                 self.after(0, lambda msg=error_msg: messagebox.showerror("错误", f"获取工作表列表失败:\n{msg}"))
         
         threading.Thread(target=get_sheets_task, daemon=True).start()
     
     def _on_sheets_loaded(self, file_num, success, error_msg, sheets, progress_window):
         """工作表列表加载完成回调"""
-        progress_window.destroy()
+        try:
+            progress_window.destroy()
+        except tk.TclError:
+            pass
         
         # #region agent log
         try:
@@ -2751,6 +2916,7 @@ class FileAndMatchConfig(ttk.Frame):
         if file_num == 1:
             if success and sheets:
                 self.file1_sheet_combo['values'] = sheets
+                self._sync_sheet_combo_display(1, fallback_to_first=False)
                 # 工作表选择框已经在file1_frame中，不需要单独pack
                 # 更新标签显示（即使还没选择sheet，也显示文件名）
                 self._update_file_labels()
@@ -2761,6 +2927,7 @@ class FileAndMatchConfig(ttk.Frame):
                 else:
                     # 如果只有一个sheet，自动选择并加载
                     self.file1_sheet_var.set(sheets[0])
+                    self._sync_sheet_combo_display(1)
                     self._load_file1()
             else:
                 # CSV文件没有工作表选择框，直接加载
@@ -2768,6 +2935,7 @@ class FileAndMatchConfig(ttk.Frame):
         else:
             if success and sheets:
                 self.file2_sheet_combo['values'] = sheets
+                self._sync_sheet_combo_display(2, fallback_to_first=False)
                 # 工作表选择框已经在file2_frame中，不需要单独pack
                 # 更新标签显示（即使还没选择sheet，也显示文件名）
                 self._update_file_labels()
@@ -2778,13 +2946,17 @@ class FileAndMatchConfig(ttk.Frame):
                 else:
                     # 如果只有一个sheet，自动选择并加载
                     self.file2_sheet_var.set(sheets[0])
+                    self._sync_sheet_combo_display(2)
                     self._load_file2()
             else:
                 # CSV文件没有工作表选择框，直接加载
                 self._load_file2()
+        self._hide_loading_mask()
     
     def _load_file2_sheets(self, file_path: str):
         """加载文件2的工作表列表"""
+        file_name = os.path.basename(file_path)
+        self._show_loading_mask(f"正在识别 {file_name} 的工作表...")
         # 显示进度提示弹窗
         progress_window = tk.Toplevel(self.winfo_toplevel())
         progress_window.title("处理中")
@@ -2795,7 +2967,6 @@ class FileAndMatchConfig(ttk.Frame):
         progress_window.resizable(False, False)
         center_on_parent(progress_window, self.winfo_toplevel())
         
-        file_name = os.path.basename(file_path)
         ttk.Label(progress_window, text=f"正在识别{file_name}格式，请稍候...", font=("Arial", 10)).pack(pady=20)
         progress_var = tk.DoubleVar()
         progress_bar = ttk.Progressbar(progress_window, variable=progress_var, maximum=100, length=250, mode='indeterminate')
@@ -2815,11 +2986,11 @@ class FileAndMatchConfig(ttk.Frame):
                     self.after(0, lambda: self._on_sheets_loaded(2, success, error_msg, sheets, progress_window))
                 else:
                     # CSV文件，直接加载
-                    self.after(0, lambda: progress_window.destroy())
-                    self.after(0, lambda: self._load_file2())
+                    self.after(0, lambda: (progress_window.destroy(), self._hide_loading_mask(), self._load_file2()))
             except Exception as e:
                 error_msg = str(e)
                 self.after(0, lambda: progress_window.destroy())
+                self.after(0, lambda: self._hide_loading_mask())
                 self.after(0, lambda msg=error_msg: messagebox.showerror("错误", f"获取工作表列表失败:\n{msg}"))
         
         threading.Thread(target=get_sheets_task, daemon=True).start()
@@ -2837,12 +3008,14 @@ class FileAndMatchConfig(ttk.Frame):
         if not file_path:
             return
         
+        self._sync_sheet_combo_display(1, fallback_to_first=False)
         file_display_name = self._get_file_display_name(1)
         
         # 检查Excel文件是否已选择sheet
         _, ext = os.path.splitext(file_path)
         ext = str(ext).lower() if ext else ''
         if ext in ['.xlsx', '.xls']:
+            self._sync_sheet_combo_display(1, fallback_to_first=False)
             sheet_name = self.file1_sheet_var.get()
             if not sheet_name:
                 # #region agent log
@@ -2850,6 +3023,7 @@ class FileAndMatchConfig(ttk.Frame):
                 # #endregion
                 messagebox.showwarning("提示", f"请为{file_display_name}选择工作表")
                 return
+        self._show_loading_mask(f"正在读取 {file_display_name}...")
         
         # 显示进度提示弹窗
         progress_window = tk.Toplevel(self.winfo_toplevel())
@@ -2870,6 +3044,7 @@ class FileAndMatchConfig(ttk.Frame):
         if self.status_callback:
             self.status_callback(f"正在读取{file_display_name}，请稍候...")
         
+        self._sync_sheet_combo_display(1, fallback_to_first=True)
         sheet_name = self.file1_sheet_var.get() if self.file1_sheet_var.get() else None
         # 使用file1_header_row作为header参数
         # file1_header_row初始值为0，表示使用默认第一行作为标题行（header=None）
@@ -2897,50 +3072,53 @@ class FileAndMatchConfig(ttk.Frame):
     
     def _on_file1_loaded(self, success, error_msg, file_display_name, progress_window):
         """文件1加载完成回调"""
-        progress_window.destroy()
-        
-        if success:
-            # #region agent log
-            try:
-                from debug_logger import _write as _dbg
-            except Exception:
-                _dbg = lambda **kw: None
-            _dbg(sessionId="debug", runId="run1", hypothesisId="H8", location="file_and_match_config._on_file1_loaded.success", message="file1 loaded", data={"rows": len(self.file_handler.file1_df) if self.file_handler.file1_df is not None else 0, "cols": len(self.file_handler.file1_df.columns) if self.file_handler.file1_df is not None else 0, "columns": list(self.file_handler.file1_df.columns)[:5] if self.file_handler.file1_df is not None else [], "first_row_sample": list(self.file_handler.file1_df.iloc[0, :5]) if self.file_handler.file1_df is not None and len(self.file_handler.file1_df) > 0 else []})
-            # #endregion
-            
-            # 检查标题行识别是否正确（如果列名看起来像数据值，可能需要调整）
-            if self.file_handler.file1_df is not None and len(self.file_handler.file1_df.columns) > 0:
-                first_col_name = str(self.file_handler.file1_df.columns[0])
-                # 如果列名看起来像数据值（包含逗号、数字、日期格式等），可能是标题行识别错误
-                looks_like_data = (
-                    ',' in first_col_name or  # 包含逗号（如"固定资产,电子设备"）
-                    (len(first_col_name) > 0 and first_col_name[0].isdigit()) or  # 以数字开头
-                    len(first_col_name) > 50  # 列名过长
-                )
+        try:
+            progress_window.destroy()
+        except tk.TclError:
+            pass
+        try:
+            if success:
+                self.loading_message_var.set(f"正在更新 {file_display_name} 的预览和映射...")
+                self._sync_sheet_combo_display(1, fallback_to_first=True)
                 # #region agent log
-                _dbg(sessionId="debug", runId="run1", hypothesisId="H8", location="file_and_match_config._on_file1_loaded.header_check", message="checking if header looks like data", data={"first_col_name": first_col_name, "looks_like_data": looks_like_data})
+                try:
+                    from debug_logger import _write as _dbg
+                except Exception:
+                    _dbg = lambda **kw: None
+                _dbg(sessionId="debug", runId="run1", hypothesisId="H8", location="file_and_match_config._on_file1_loaded.success", message="file1 loaded", data={"rows": len(self.file_handler.file1_df) if self.file_handler.file1_df is not None else 0, "cols": len(self.file_handler.file1_df.columns) if self.file_handler.file1_df is not None else 0, "columns": list(self.file_handler.file1_df.columns)[:5] if self.file_handler.file1_df is not None else [], "first_row_sample": list(self.file_handler.file1_df.iloc[0, :5]) if self.file_handler.file1_df is not None and len(self.file_handler.file1_df) > 0 else []})
                 # #endregion
-                if looks_like_data:
-                    # 提示用户可能需要设置标题行
-                    messagebox.showwarning("提示", f"{file_display_name}的标题行可能识别不正确。\n如果列名显示为数据值，请在预览区域右键点击正确的标题行，选择\"设本行为标题行\"。")
-            
-            if self.status_callback:
-                self.status_callback(f"{file_display_name}读取完成")
-            # 立即更新标签，确保sheet变量已设置
-            self._update_file_labels()
-            self._update_file1_preview()
-            self._update_match_columns(trigger_llm=True)
-        else:
-            if self.status_callback:
-                self.status_callback(f"{file_display_name}读取失败")
-            # #region agent log
-            try:
-                from debug_logger import _write as _dbg
-            except Exception:
-                _dbg = lambda **kw: None
-            _dbg(sessionId="debug", runId="run1", hypothesisId="H3", location="file_and_match_config._on_file1_loaded.failed", message="file1 load failed", data={"error": error_msg})
-            # #endregion
-            messagebox.showerror("错误", f"加载{file_display_name}失败:\n{error_msg}")
+                header_warning = None
+                if self.file_handler.file1_df is not None and len(self.file_handler.file1_df.columns) > 0:
+                    first_col_name = str(self.file_handler.file1_df.columns[0])
+                    looks_like_data = (
+                        ',' in first_col_name or
+                        (len(first_col_name) > 0 and first_col_name[0].isdigit()) or
+                        len(first_col_name) > 50
+                    )
+                    _dbg(sessionId="debug", runId="run1", hypothesisId="H8", location="file_and_match_config._on_file1_loaded.header_check", message="checking if header looks like data", data={"first_col_name": first_col_name, "looks_like_data": looks_like_data})
+                    if looks_like_data:
+                        header_warning = f"{file_display_name}的标题行可能识别不正确。\n如果列名显示为数据值，请在预览区域右键点击正确的标题行，选择\"设本行为标题行\"。"
+                if self.status_callback:
+                    self.status_callback(f"{file_display_name}读取完成")
+                self._update_file_labels()
+                self._update_file1_preview()
+                self._update_match_columns(trigger_llm=True)
+                self._sync_sheet_combo_display(1, fallback_to_first=True)
+                if header_warning:
+                    messagebox.showwarning("提示", header_warning)
+            else:
+                if self.status_callback:
+                    self.status_callback(f"{file_display_name}读取失败")
+                # #region agent log
+                try:
+                    from debug_logger import _write as _dbg
+                except Exception:
+                    _dbg = lambda **kw: None
+                _dbg(sessionId="debug", runId="run1", hypothesisId="H3", location="file_and_match_config._on_file1_loaded.failed", message="file1 load failed", data={"error": error_msg})
+                # #endregion
+                messagebox.showerror("错误", f"加载{file_display_name}失败:\n{error_msg}")
+        finally:
+            self._hide_loading_mask()
     
     def _load_file2(self):
         """加载文件2"""
@@ -2955,12 +3133,14 @@ class FileAndMatchConfig(ttk.Frame):
         if not file_path:
             return
         
+        self._sync_sheet_combo_display(2, fallback_to_first=False)
         file_display_name = self._get_file_display_name(2)
         
         # 检查Excel文件是否已选择sheet
         _, ext = os.path.splitext(file_path)
         ext = str(ext).lower() if ext else ''
         if ext in ['.xlsx', '.xls']:
+            self._sync_sheet_combo_display(2, fallback_to_first=False)
             sheet_name = self.file2_sheet_var.get()
             if not sheet_name:
                 # #region agent log
@@ -2968,6 +3148,7 @@ class FileAndMatchConfig(ttk.Frame):
                 # #endregion
                 messagebox.showwarning("提示", f"请为{file_display_name}选择工作表")
                 return
+        self._show_loading_mask(f"正在读取 {file_display_name}...")
         
         # 显示进度提示弹窗
         progress_window = tk.Toplevel(self.winfo_toplevel())
@@ -2988,6 +3169,7 @@ class FileAndMatchConfig(ttk.Frame):
         if self.status_callback:
             self.status_callback(f"正在读取{file_display_name}，请稍候...")
         
+        self._sync_sheet_combo_display(2, fallback_to_first=True)
         sheet_name = self.file2_sheet_var.get() if self.file2_sheet_var.get() else None
         # 使用file2_header_row作为header参数
         # file2_header_row初始值为0，表示使用默认第一行作为标题行（header=None）
@@ -3015,50 +3197,53 @@ class FileAndMatchConfig(ttk.Frame):
     
     def _on_file2_loaded(self, success, error_msg, file_display_name, progress_window):
         """文件2加载完成回调"""
-        progress_window.destroy()
-        
-        if success:
-            # #region agent log
-            try:
-                from debug_logger import _write as _dbg
-            except Exception:
-                _dbg = lambda **kw: None
-            _dbg(sessionId="debug", runId="run1", hypothesisId="H8", location="file_and_match_config._on_file2_loaded.success", message="file2 loaded", data={"rows": len(self.file_handler.file2_df) if self.file_handler.file2_df is not None else 0, "cols": len(self.file_handler.file2_df.columns) if self.file_handler.file2_df is not None else 0, "columns": list(self.file_handler.file2_df.columns)[:5] if self.file_handler.file2_df is not None else [], "first_row_sample": list(self.file_handler.file2_df.iloc[0, :5]) if self.file_handler.file2_df is not None and len(self.file_handler.file2_df) > 0 else []})
-            # #endregion
-            
-            # 检查标题行识别是否正确（如果列名看起来像数据值，可能需要调整）
-            if self.file_handler.file2_df is not None and len(self.file_handler.file2_df.columns) > 0:
-                first_col_name = str(self.file_handler.file2_df.columns[0])
-                # 如果列名看起来像数据值（包含逗号、数字、日期格式等），可能是标题行识别错误
-                looks_like_data = (
-                    ',' in first_col_name or  # 包含逗号（如"固定资产,电子设备"）
-                    (len(first_col_name) > 0 and first_col_name[0].isdigit()) or  # 以数字开头
-                    len(first_col_name) > 50  # 列名过长
-                )
+        try:
+            progress_window.destroy()
+        except tk.TclError:
+            pass
+        try:
+            if success:
+                self.loading_message_var.set(f"正在更新 {file_display_name} 的预览和映射...")
+                self._sync_sheet_combo_display(2, fallback_to_first=True)
                 # #region agent log
-                _dbg(sessionId="debug", runId="run1", hypothesisId="H8", location="file_and_match_config._on_file2_loaded.header_check", message="checking if header looks like data", data={"first_col_name": first_col_name, "looks_like_data": looks_like_data})
+                try:
+                    from debug_logger import _write as _dbg
+                except Exception:
+                    _dbg = lambda **kw: None
+                _dbg(sessionId="debug", runId="run1", hypothesisId="H8", location="file_and_match_config._on_file2_loaded.success", message="file2 loaded", data={"rows": len(self.file_handler.file2_df) if self.file_handler.file2_df is not None else 0, "cols": len(self.file_handler.file2_df.columns) if self.file_handler.file2_df is not None else 0, "columns": list(self.file_handler.file2_df.columns)[:5] if self.file_handler.file2_df is not None else [], "first_row_sample": list(self.file_handler.file2_df.iloc[0, :5]) if self.file_handler.file2_df is not None and len(self.file_handler.file2_df) > 0 else []})
                 # #endregion
-                if looks_like_data:
-                    # 提示用户可能需要设置标题行
-                    messagebox.showwarning("提示", f"{file_display_name}的标题行可能识别不正确。\n如果列名显示为数据值，请在预览区域右键点击正确的标题行，选择\"设本行为标题行\"。")
-            
-            if self.status_callback:
-                self.status_callback(f"{file_display_name}读取完成")
-            # 立即更新标签，确保sheet变量已设置
-            self._update_file_labels()
-            self._update_file2_preview()
-            self._update_match_columns(trigger_llm=True)
-        else:
-            if self.status_callback:
-                self.status_callback(f"{file_display_name}读取失败")
-            # #region agent log
-            try:
-                from debug_logger import _write as _dbg
-            except Exception:
-                _dbg = lambda **kw: None
-            _dbg(sessionId="debug", runId="run1", hypothesisId="H3", location="file_and_match_config._on_file2_loaded.failed", message="file2 load failed", data={"error": error_msg})
-            # #endregion
-            messagebox.showerror("错误", f"加载{file_display_name}失败:\n{error_msg}")
+                header_warning = None
+                if self.file_handler.file2_df is not None and len(self.file_handler.file2_df.columns) > 0:
+                    first_col_name = str(self.file_handler.file2_df.columns[0])
+                    looks_like_data = (
+                        ',' in first_col_name or
+                        (len(first_col_name) > 0 and first_col_name[0].isdigit()) or
+                        len(first_col_name) > 50
+                    )
+                    _dbg(sessionId="debug", runId="run1", hypothesisId="H8", location="file_and_match_config._on_file2_loaded.header_check", message="checking if header looks like data", data={"first_col_name": first_col_name, "looks_like_data": looks_like_data})
+                    if looks_like_data:
+                        header_warning = f"{file_display_name}的标题行可能识别不正确。\n如果列名显示为数据值，请在预览区域右键点击正确的标题行，选择\"设本行为标题行\"。"
+                if self.status_callback:
+                    self.status_callback(f"{file_display_name}读取完成")
+                self._update_file_labels()
+                self._update_file2_preview()
+                self._update_match_columns(trigger_llm=True)
+                self._sync_sheet_combo_display(2, fallback_to_first=True)
+                if header_warning:
+                    messagebox.showwarning("提示", header_warning)
+            else:
+                if self.status_callback:
+                    self.status_callback(f"{file_display_name}读取失败")
+                # #region agent log
+                try:
+                    from debug_logger import _write as _dbg
+                except Exception:
+                    _dbg = lambda **kw: None
+                _dbg(sessionId="debug", runId="run1", hypothesisId="H3", location="file_and_match_config._on_file2_loaded.failed", message="file2 load failed", data={"error": error_msg})
+                # #endregion
+                messagebox.showerror("错误", f"加载{file_display_name}失败:\n{error_msg}")
+        finally:
+            self._hide_loading_mask()
     
     def _update_file1_preview(self):
         """更新文件1预览"""
@@ -3128,6 +3313,8 @@ class FileAndMatchConfig(ttk.Frame):
     
     def _update_file_labels(self):
         """更新所有文件标签显示为"原始文件 & sheet名称"格式"""
+        if hasattr(self, "file1_sheet_combo") and hasattr(self, "file2_sheet_combo"):
+            self._sync_all_sheet_combo_displays(fallback_to_first=False)
         # #region agent log
         try:
             from debug_logger import _write as _dbg
@@ -3135,12 +3322,16 @@ class FileAndMatchConfig(ttk.Frame):
             _dbg = lambda **kw: None
         # #endregion
         
-        file1_name = self._get_file_display_name(1)
-        file2_name = self._get_file_display_name(2)
         if hasattr(self, "file1_path_display_var"):
             self._sync_file_path_display(1)
         if hasattr(self, "file2_path_display_var"):
             self._sync_file_path_display(2)
+        if hasattr(self, "file1_sheet_combo"):
+            self._sync_sheet_combo_display(1)
+        if hasattr(self, "file2_sheet_combo"):
+            self._sync_sheet_combo_display(2)
+        file1_name = self._get_file_display_name(1)
+        file2_name = self._get_file_display_name(2)
         # #region agent log
         _dbg(sessionId="debug", runId="run1", hypothesisId="H2", location="file_and_match_config._update_file_labels.entry", message="updating file labels", data={"file1_name": file1_name, "file2_name": file2_name, "file1_path": self.file1_path_var.get(), "file1_sheet": self.file1_sheet_var.get(), "file2_path": self.file2_path_var.get(), "file2_sheet": self.file2_sheet_var.get()})
         # #endregion
@@ -3843,7 +4034,7 @@ class FileAndMatchConfig(ttk.Frame):
     @staticmethod
     def _reference_col_is_name_like(column):
         normalized = _normalize_candidate_header(column)
-        return any(token in normalized for token in ("资产名称", "固定资产名称", "名称", "assetname", "name"))
+        return any(token in normalized for token in ("资产名称", "固定资产名称", "名称", "资产描述", "固定资产描述", "描述", "assetname", "name", "description", "desc"))
 
     def _pick_supplement_column_for_reference(self, reference_col, columns, df, used_columns):
         available = [col for col in (columns or []) if col not in used_columns]
@@ -3882,15 +4073,28 @@ class FileAndMatchConfig(ttk.Frame):
 
         def apply_side(file_index, columns, df):
             refs = self._reference_match_columns_for_supplement_file(file_index)
-            if not refs or not columns:
+            if not columns:
                 return False
             selected = []
             used = set()
             for ref in refs:
                 picked = self._pick_supplement_column_for_reference(ref, columns, df, used)
+                if not picked and self._reference_col_is_code_like(ref):
+                    picked = pick_fa_match_id_column([col for col in columns if col not in used])
+                if not picked and self._reference_col_is_name_like(ref):
+                    picked = pick_fa_name_column(columns, df=df, exclude_cols=list(used))
                 if picked:
                     selected.append(picked)
                     used.add(picked)
+            if not selected:
+                fallback_code = pick_fa_match_id_column(columns)
+                if fallback_code:
+                    selected.append(fallback_code)
+                    used.add(fallback_code)
+                fallback_name = pick_fa_name_column(columns, df=df, exclude_cols=list(used))
+                if fallback_name:
+                    selected.append(fallback_name)
+                    used.add(fallback_name)
             if not selected:
                 return False
             if file_index == 1:
@@ -4111,7 +4315,7 @@ class FileAndMatchConfig(ttk.Frame):
                     "特别注意列名暗示和脚本初判都可能与实际数据形态冲突：列名和 current_mapping 只作参考，样例值和 column_profiles 优先。"
                     "请把 category、name、code/id、date、value、depreciation 等字段作为一组联动复核；若多列发生错位或互换，应分别返回每个受影响字段的 field_review，而不是只修一个字段。"
                     "depreciation/累计折旧必须是累计数；凡表头或样例语义为本月折旧、本期折旧、本年折旧、当年折旧、计提折旧、月折旧的列，都属于 current_year_dep/本年折旧口径，禁止建议映射到 depreciation/累计折旧。"
-                    "current_year_dep/本年折旧可以对应本月折旧、本期折旧、本年折旧、当年折旧、计提折旧；若当前累计折旧映射到了这些列，应建议把累计折旧改回真正累计数列，而不是把这些列作为累计折旧。"
+                    "current_year_dep/本年折旧只表示年度或本年至今折旧，例如本年折旧、当年折旧、本年至今折旧、年折旧额；禁止建议映射到本月折旧、当月折旧、月折旧，若只有月折旧列则保持不映射或不建议替换。"
                     "普通模式下 addition_method/addition_date 只复核 file2，不复核也不建议 file1；file2 的变动方式/变动类型/变动日期可结合样例判断是否为新增来源和新增时间。"
                     "category/资产类别是资产种类名称或描述，可以是中文或英文文本；不是资产类代码、分类编码、SAP代码、数字短码或其他编码值。"
                     "判断 category 时先确认样例值是描述性资产种类文本，再把短文本、低 unique_count 作为辅助证据；短且唯一值少的 010/030/Y110/A12 这类编码列仍然禁止作为 category。"
@@ -4394,6 +4598,7 @@ class FileAndMatchConfig(ttk.Frame):
         self._llm_shown_fa_review_keys = set()
         self._llm_fill_labels_current = []
         self._llm_review_labels_current = []
+        self._llm_detail_sections_current = []
         review_current_mapping = review_current_mapping or self._current_llm_mapping()
         suggestions = list(suggestions or [])
         fa_review = list(fa_review or [])
@@ -4412,6 +4617,7 @@ class FileAndMatchConfig(ttk.Frame):
             col = item.suggested_column
             if not side or col not in headers.get(side, set()):
                 skipped += 1
+                self._append_llm_detail_section("字段建议（跳过）", self._format_llm_suggestion_detail(item, "列不存在或文件侧无效"))
                 self._log_llm_mapping_event(
                     "suggestion_skipped",
                     reason="column_not_found",
@@ -4424,8 +4630,10 @@ class FileAndMatchConfig(ttk.Frame):
                 if self._fill_llm_role(item.role, side, col, cols1, cols2):
                     applied += 1
                     self._llm_fill_labels_current.append(self._llm_side_role_display_label(item.role, side))
+                    self._append_llm_detail_section("字段建议（已自动补充）", self._format_llm_suggestion_detail(item, "已写入下拉框"))
                 else:
                     skipped += 1
+                    self._append_llm_detail_section("字段建议（跳过）", self._format_llm_suggestion_detail(item, "写入下拉框失败"))
                     self._log_llm_mapping_event(
                         "suggestion_skipped",
                         reason="fill_failed",
@@ -4435,8 +4643,10 @@ class FileAndMatchConfig(ttk.Frame):
                     )
             elif item.action == "review":
                 reviews += 1
+                self._append_llm_detail_section("字段建议（需人工复核）", self._format_llm_suggestion_detail(item, "未自动采纳"))
             else:
                 skipped += 1
+                self._append_llm_detail_section("字段建议（跳过）", self._format_llm_suggestion_detail(item, "未满足自动补充条件"))
                 self._log_llm_mapping_event(
                     "suggestion_skipped",
                     reason="not_auto_apply",
@@ -4516,6 +4726,9 @@ class FileAndMatchConfig(ttk.Frame):
             detail_lines.extend(["", "复核发现", *suffix_parts])
         else:
             detail_lines.extend(["", "复核发现", "未发现需要额外说明的问题。"])
+        full_sections = list(getattr(self, "_llm_detail_sections_current", []) or [])
+        if full_sections:
+            detail_lines.extend(["", "本轮完整提示与复核项", *full_sections])
         detail_lines.extend(["", "建议选择", "如字段行显示“复核建议”，请按弹窗建议确认是否采纳；其余 OK 项可继续使用当前选择。"])
         self._llm_last_detail_text = "\n".join(detail_lines)
         self._update_llm_detail_button()
@@ -4562,6 +4775,7 @@ class FileAndMatchConfig(ttk.Frame):
                 self._llm_review_labels_current.append(decision.get("label") or self._llm_role_display_label(decision.get("role")))
             message = build_fa_mapping_review_dialog_text(decision)
             title = f"LLM 字段映射复核（{index}/{total}）"
+            self._append_llm_detail_section(title, message)
             if decision.get("can_apply") and decision.get("apply_mapping"):
                 if ask_apply_llm_suggestion(self, title, message):
                     for side, col in (decision.get("apply_mapping") or {}).items():
@@ -4632,17 +4846,22 @@ class FileAndMatchConfig(ttk.Frame):
                 f"{suggestion}\n\n"
                 "采纳后会自动修正匹配列；不采纳则保持当前设置。"
             )
+            self._append_llm_detail_section("LLM 匹配列复核", message)
             if ask_apply_llm_suggestion(self, "LLM 匹配列复核", message):
                 self._apply_match_key_columns(decision["suggested_file1_columns"], decision["suggested_file2_columns"], cols1, cols2)
         else:
-            messagebox.showinfo(
-                "LLM 匹配列复核",
+            message = (
                 "当前选择\n"
                 f"{current_text}\n\n"
                 "复核发现\n"
                 f"{finding}\n\n"
                 "建议选择\n"
-                f"{suggestion}",
+                f"{suggestion}"
+            )
+            self._append_llm_detail_section("LLM 匹配列复核", message)
+            messagebox.showinfo(
+                "LLM 匹配列复核",
+                message,
             )
         return True
 
@@ -4696,6 +4915,7 @@ class FileAndMatchConfig(ttk.Frame):
                 f"{suggestion}\n\n"
                 "采纳后会自动修正对应补充清单的匹配列；不采纳则保持当前设置。"
             )
+            self._append_llm_detail_section("LLM 补充清单ID复核", message)
             if ask_apply_llm_suggestion(self, "LLM 补充清单ID复核", message):
                 self._apply_supplement_match_key_columns(
                     decision["suggested_file1_columns"],
@@ -4704,14 +4924,18 @@ class FileAndMatchConfig(ttk.Frame):
                     cols2,
                 )
         else:
-            messagebox.showinfo(
-                "LLM 补充清单ID复核",
+            message = (
                 "当前选择\n"
                 f"{current_text}\n\n"
                 "复核发现\n"
                 f"{finding}\n\n"
                 "建议选择\n"
-                f"{suggestion}",
+                f"{suggestion}"
+            )
+            self._append_llm_detail_section("LLM 补充清单ID复核", message)
+            messagebox.showinfo(
+                "LLM 补充清单ID复核",
+                message,
             )
         return True
 
@@ -5179,22 +5403,27 @@ class FileAndMatchConfig(ttk.Frame):
         # 创建对话框
         dialog = tk.Toplevel(self)
         dialog.title(title)
-        dialog.geometry("460x360")
+        apply_app_theme(dialog)
+        fit_window_to_screen(dialog, 460, 420, min_width=420, min_height=360)
         dialog.transient(self.winfo_toplevel())
         dialog.grab_set()
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
         
-        ttk.Label(dialog, text="请选择列:", font=("Arial", 10)).pack(side=tk.TOP, fill=tk.X, padx=12, pady=(12, 6))
+        ttk.Label(dialog, text="请选择列:", font=("Arial", 10)).grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
         
         list_frame = ttk.Frame(dialog)
-        list_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        list_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
         
         # 匹配列支持多选，其他列单选
         selectmode = tk.EXTENDED if col_type == 'match' else tk.SINGLE
         listbox = tk.Listbox(list_frame, height=10, selectmode=selectmode)
-        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        listbox.grid(row=0, column=0, sticky="nsew")
         
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        scrollbar.grid(row=0, column=1, sticky="ns")
         listbox.configure(yscrollcommand=scrollbar.set)
         
         for col in columns:
@@ -5294,7 +5523,7 @@ class FileAndMatchConfig(ttk.Frame):
             dialog.destroy()
         
         action_frame = ttk.Frame(dialog)
-        action_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(0, 12))
+        action_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 12))
         ttk.Separator(action_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(0, 8))
         button_frame = ttk.Frame(action_frame)
         button_frame.pack(side=tk.RIGHT)
@@ -5306,6 +5535,7 @@ class FileAndMatchConfig(ttk.Frame):
         dialog.bind('<Return>', lambda e: on_ok())
         dialog.bind('<Escape>', lambda e: on_cancel())
         listbox.focus_set()
+        center_on_parent(dialog, self.winfo_toplevel())
     
     def _show_header_row_menu(self, event, file_num):
         """显示标题行选择菜单。支持在任意数据行右键，将该行设为标题行。"""
@@ -5343,6 +5573,7 @@ class FileAndMatchConfig(ttk.Frame):
         优化：如果新的标题行在已加载的DataFrame中，直接从DataFrame提取，避免重新读取文件。
         """
         if file_num == 1:
+            self._sync_sheet_combo_display(1, fallback_to_first=True)
             file_path = self.file1_path_var.get()
             sheet_name = self.file1_sheet_var.get() if self.file1_sheet_var.get() else None
             # 获取当前使用的header（如果之前设置过）
@@ -5350,6 +5581,7 @@ class FileAndMatchConfig(ttk.Frame):
             current_df = self.file_handler.file1_df  # 获取当前DataFrame
             self.file1_header_row = row_index
         else:
+            self._sync_sheet_combo_display(2, fallback_to_first=True)
             file_path = self.file2_path_var.get()
             sheet_name = self.file2_sheet_var.get() if self.file2_sheet_var.get() else None
             # 获取当前使用的header（如果之前设置过）
@@ -5476,6 +5708,7 @@ class FileAndMatchConfig(ttk.Frame):
     def _on_header_row_set(self, file_num, file_display_name, header_0based):
         """标题行设置完成回调"""
         self._reset_llm_state_for_new_input()
+        self._sync_sheet_combo_display(file_num, fallback_to_first=True)
         if file_num == 1:
             self._update_file1_preview()
         else:
@@ -5531,6 +5764,7 @@ class FileAndMatchConfig(ttk.Frame):
         # 注意：这里不要无条件重载文件。
         # _load_file1/_load_file2 会触发 _update_match_columns，从而重置手工映射和多选匹配列。
         # 文件在“选择文件/切换工作表/设标题行”时已经加载，下一步只做校验与提交。
+        self._sync_all_sheet_combo_displays(fallback_to_first=True)
         
         # 验证文件是否已选择
         file1_display_name = self._get_file_display_name(1)
@@ -5593,7 +5827,11 @@ class FileAndMatchConfig(ttk.Frame):
                 f"\u5f53\u524d\uff1a\u6587\u4ef61\u5df2\u9009 {len(match_cols1)} \u5217\uff0c\u6587\u4ef62\u5df2\u9009 {len(match_cols2)} \u5217\u3002"
             )
             return
-        if is_llm_enabled() and not getattr(self, "_llm_mapping_passed", False):
+        if (
+            is_llm_enabled()
+            and not getattr(self, "_llm_mapping_passed", False)
+            and not getattr(self, "_llm_mapping_bypassed", False)
+        ):
             if self._llm_mapping_running or self._llm_mapping_assist_scheduled:
                 self._show_next_step_warning("大模型正在复核当前配置，请等待复核成功完成后再继续。")
             else:

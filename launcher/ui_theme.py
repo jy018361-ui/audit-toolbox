@@ -149,9 +149,10 @@ def apply_app_theme(root: tk.Misc) -> str:
     style.configure("TCombobox", fieldbackground="#ffffff", foreground=TEXT, bordercolor="#c9d3cf", arrowcolor=PRIMARY, arrowsize=14, padding=4)
     style.map(
         "TCombobox",
+        foreground=[("disabled", "#7d756a"), ("readonly", TEXT), ("focus", TEXT), ("!disabled", TEXT)],
         fieldbackground=[("readonly", "#ffffff"), ("disabled", "#e6ddcf")],
-        selectbackground=[("readonly", "#e6f2f3")],
-        selectforeground=[("readonly", PRIMARY_DARK)],
+        selectbackground=[("focus", "#d8e8ea"), ("readonly", "#d8e8ea")],
+        selectforeground=[("focus", PRIMARY_DARK), ("readonly", PRIMARY_DARK)],
     )
     style.configure("TNotebook", background=BG, borderwidth=0)
     style.configure("TNotebook.Tab", font=base_font, padding=(12, 6), background="#e6ddcf", foreground=MUTED_TEXT)

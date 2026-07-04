@@ -95,6 +95,9 @@ class IndependentFAListLLMTests(unittest.TestCase):
         self.assertIn("depreciation means accumulated depreciation balance", payload_text)
         self.assertIn("depreciation must NOT be monthly/current-period/current-year depreciation", payload_text)
         self.assertIn("If both 累计折旧 and 本月/本期/本年折旧 columns exist", payload_text)
+        self.assertIn("current_year_dep means annual/YTD depreciation only", payload_text)
+        self.assertIn("current_year_dep must NOT map to monthly depreciation columns", payload_text)
+        self.assertNotIn("current_year_dep means current-year/current-period depreciation charge", payload_text)
 
     def test_haili_02_shape_returns_category_name_and_match_key_corrections(self):
         captured = {}
@@ -244,6 +247,13 @@ class IndependentFAListLLMTests(unittest.TestCase):
 
         self.assertEqual(captured["task_name"], "supplement_match_review")
         self.assertEqual(captured["payload"]["reference_match"]["file2"], ["资产编码", "固定资产名称"])
+        rules = "\n".join(captured["payload"]["rules"])
+        self.assertIn("NOT to find the most unique or strongest match key", rules)
+        self.assertIn("ONLY to check whether current_match is equivalent", rules)
+        self.assertIn("return status=ok, action=keep", rules)
+        self.assertIn("not category + code + name", rules)
+        self.assertIn("suggested_fileX_columns count MUST equal", rules)
+        self.assertIn("Never add extra ID columns beyond reference_match.", rules)
         self.assertEqual(review.action, "replace")
         self.assertEqual(review.suggested_file2_columns, ["编码", "名称"])
 

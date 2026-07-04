@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,33 @@ EXCLUDE_GLOBS = [
     "ev_capture_config.txt",
 ]
 
+SECRET_SCAN_EXCLUDE_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    "__pycache__",
+    ".cursor",
+    ".vscode",
+}
+SECRET_FILE_NAME_PATTERNS = {
+    ".env",
+    ".env.*",
+    "*llm_settings*.json",
+    "*api_key*",
+    "*apikey*",
+    "*secret*",
+    "*token*",
+    "*credential*",
+    "*credentials*",
+}
+SECRET_CONTENT_PATTERNS = [
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"OPENAI_API_KEY\s*=", re.IGNORECASE),
+    re.compile(r"Authorization\s*:\s*Bearer\s+[A-Za-z0-9._-]{20,}", re.IGNORECASE),
+]
+
 
 def _should_skip_file(name: str) -> bool:
     for pat in EXCLUDE_GLOBS:
@@ -49,6 +77,45 @@ def _should_skip_file(name: str) -> bool:
         if fnmatch.fnmatch(name, pat):
             return True
     return False
+
+
+def _matches_any_glob(name: str, patterns: set[str]) -> bool:
+    import fnmatch
+
+    lower = name.lower()
+    return any(fnmatch.fnmatch(lower, pat) for pat in patterns)
+
+
+def assert_no_packaged_secrets() -> None:
+    """Fail fast if local secrets are accidentally placed under the project tree."""
+    findings: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        dirnames[:] = [d for d in dirnames if d not in SECRET_SCAN_EXCLUDE_DIRS]
+        rel_dir = Path(dirpath).relative_to(ROOT)
+        for fname in filenames:
+            path = Path(dirpath) / fname
+            rel = rel_dir / fname
+            if _matches_any_glob(fname, SECRET_FILE_NAME_PATTERNS):
+                findings.append(f"敏感文件名: {rel}")
+                continue
+            try:
+                if path.stat().st_size > 2 * 1024 * 1024:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            if any(pattern.search(text) for pattern in SECRET_CONTENT_PATTERNS):
+                findings.append(f"疑似密钥内容: {rel}")
+
+    if findings:
+        preview = "\n".join(f"- {item}" for item in findings[:20])
+        extra = "" if len(findings) <= 20 else f"\n- 另有 {len(findings) - 20} 项未显示"
+        raise RuntimeError(
+            "打包已中止：项目目录中发现疑似 API 密钥或敏感配置，不能写入 exe。\n"
+            f"{preview}{extra}\n\n"
+            "请将真实密钥只保存在 %APPDATA%\\AuditToolbox\\llm_settings.json "
+            "或环境变量中，不要放在项目目录、tools/ 或 modules/ 下。"
+        )
 
 
 def _sync_directory(src: Path, dest: Path) -> None:
@@ -224,6 +291,8 @@ def main() -> int:
     if args.sync_only:
         sync_vendor()
         return 0
+
+    assert_no_packaged_secrets()
 
     req = ROOT / "requirements.txt"
     if not args.no_pip and req.is_file():

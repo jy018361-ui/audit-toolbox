@@ -2,6 +2,7 @@
 # 审计工具箱单文件 exe
 
 import os
+import fnmatch
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
@@ -91,14 +92,45 @@ datas = [(str(ROOT / "tools.json"), ".")]
 datas += collect_data_files("fastexcel")
 binaries = collect_dynamic_libs("fastexcel")
 
+EXCLUDED_RUNTIME_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "build",
+    "dist",
+    ".cursor",
+    ".vscode",
+}
+EXCLUDED_RUNTIME_FILE_PATTERNS = {
+    ".env",
+    ".env.*",
+    "*llm_settings*.json",
+    "*api_key*",
+    "*apikey*",
+    "*secret*",
+    "*token*",
+    "*credential*",
+    "*credentials*",
+}
+
+
+def should_exclude_runtime_file(path: Path) -> bool:
+    name = path.name.lower()
+    return any(fnmatch.fnmatch(name, pattern) for pattern in EXCLUDED_RUNTIME_FILE_PATTERNS)
+
+
 def collect_runtime_tree(src: Path, dest: str):
     collected = []
     for dirpath, dirnames, filenames in os.walk(src):
-        dirnames[:] = [d for d in dirnames if d not in {"build", "dist"}]
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDED_RUNTIME_DIRS]
         rel = Path(dirpath).relative_to(src)
         target = Path(dest) / rel
         for fname in filenames:
-            collected.append((str(Path(dirpath) / fname), str(target)))
+            src_file = Path(dirpath) / fname
+            if should_exclude_runtime_file(src_file):
+                continue
+            collected.append((str(src_file), str(target)))
     return collected
 
 if TOOLS_DIR.is_dir():

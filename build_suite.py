@@ -69,6 +69,11 @@ SECRET_CONTENT_PATTERNS = [
     re.compile(r"OPENAI_API_KEY\s*=", re.IGNORECASE),
     re.compile(r"Authorization\s*:\s*Bearer\s+[A-Za-z0-9._-]{20,}", re.IGNORECASE),
 ]
+SECRET_BINARY_PATTERNS = [
+    re.compile(rb"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(rb"OPENAI_API_KEY\s*=", re.IGNORECASE),
+    re.compile(rb"Authorization\s*:\s*Bearer\s+[A-Za-z0-9._-]{20,}", re.IGNORECASE),
+]
 
 
 def _should_skip_file(name: str) -> bool:
@@ -115,6 +120,37 @@ def assert_no_packaged_secrets() -> None:
             f"{preview}{extra}\n\n"
             "请将真实密钥只保存在 %APPDATA%\\AuditToolbox\\llm_settings.json "
             "或环境变量中，不要放在项目目录、tools/ 或 modules/ 下。"
+        )
+
+
+def _load_local_runtime_api_key() -> str:
+    appdata = os.environ.get("APPDATA")
+    if not appdata:
+        return ""
+    settings = Path(appdata) / "AuditToolbox" / "llm_settings.json"
+    try:
+        data = json.loads(settings.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("api_key") or "")
+
+
+def assert_built_exe_has_no_secrets(exe: Path) -> None:
+    data = exe.read_bytes()
+    findings: list[str] = []
+    local_key = _load_local_runtime_api_key()
+    if local_key:
+        if local_key.encode("utf-8") in data or local_key.encode("utf-16le") in data:
+            findings.append("当前本机 AppData 中保存的 LLM API Key")
+    if any(pattern.search(data) for pattern in SECRET_BINARY_PATTERNS):
+        findings.append("疑似明文 OpenAI/API Key 形态")
+    if findings:
+        raise RuntimeError(
+            "打包已中止：生成的 exe 中发现疑似 API 密钥，已拒绝发布。\n"
+            + "\n".join(f"- {item}" for item in findings)
+            + "\n\n请删除 dist/build 后重新打包，并立即轮换已暴露的密钥。"
         )
 
 
@@ -312,6 +348,7 @@ def main() -> int:
             print(f"看账基线构建失败 (可忽略): {e}")
 
     suite_exe = build_suite(py)
+    assert_built_exe_has_no_secrets(suite_exe)
     print_size_report(fa_exe, kz_exe, suite_exe)
     return 0
 

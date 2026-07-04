@@ -36,8 +36,10 @@ Thumbs.db
 
 # 日志和临时文件
 *.log
+*.jsonl
 *.tmp
 pack_build.log
+tools/kanzhang/导出耗时日志.jsonl
 
 # Local experiments and verification artifacts
 scratchpad/

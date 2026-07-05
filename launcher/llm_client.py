@@ -2193,6 +2193,7 @@ def _chat_completion(
     api_key = str(settings.get("api_key") or "").strip()
     model = str(settings.get("model") or "").strip()
     timeout = float(settings.get("timeout") or 30)
+    auth_mode = str(settings.get("auth_mode") or "bearer").strip().lower()
     if not base_url or not api_key or not model:
         raise LLMClientError("请先填写 Base URL、模型和 API Key。")
 
@@ -2226,11 +2227,12 @@ def _chat_completion(
         input_chars=sum(len(str(item.get("content") or "")) for item in messages),
     )
     body = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
+    authorization = api_key if auth_mode == "raw" else f"Bearer {api_key}"
     req = urllib.request.Request(
         url,
         data=body,
         headers={
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": authorization,
             "Content-Type": "application/json",
         },
         method="POST",

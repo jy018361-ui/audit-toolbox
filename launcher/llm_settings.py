@@ -17,9 +17,16 @@ DEFAULT_SETTINGS = {
     "base_url": "https://api.openai.com/v1",
     "model": "",
     "api_key": "",
+    "auth_mode": "bearer",
     "timeout": 30,
     "thinking_enabled": False,
 }
+
+AUTH_MODE_OPTIONS = {
+    "Bearer Token": "bearer",
+    "直接使用 API Key": "raw",
+}
+AUTH_MODE_LABELS = {value: label for label, value in AUTH_MODE_OPTIONS.items()}
 
 
 def settings_path() -> Path:
@@ -73,6 +80,7 @@ def open_llm_settings_dialog(parent: tk.Misc | None = None) -> bool:
     base_url_var = tk.StringVar(value=str(settings.get("base_url") or ""))
     model_var = tk.StringVar(value=str(settings.get("model") or ""))
     api_key_var = tk.StringVar(value=str(settings.get("api_key") or ""))
+    auth_mode_var = tk.StringVar(value=AUTH_MODE_LABELS.get(str(settings.get("auth_mode") or "bearer"), "Bearer Token"))
     timeout_var = tk.StringVar(value=str(settings.get("timeout") or 30))
     thinking_var = tk.BooleanVar(value=bool(settings.get("thinking_enabled")))
     saved = {"ok": False}
@@ -88,13 +96,20 @@ def open_llm_settings_dialog(parent: tk.Misc | None = None) -> bool:
     ttk.Entry(body, textvariable=model_var).grid(row=2, column=1, sticky="ew", pady=5)
     ttk.Label(body, text="API Key").grid(row=3, column=0, sticky="w", pady=5)
     ttk.Entry(body, textvariable=api_key_var, show="*").grid(row=3, column=1, sticky="ew", pady=5)
-    ttk.Label(body, text="超时秒数").grid(row=4, column=0, sticky="w", pady=5)
-    ttk.Entry(body, textvariable=timeout_var, width=10).grid(row=4, column=1, sticky="w", pady=5)
+    ttk.Label(body, text="鉴权方式").grid(row=4, column=0, sticky="w", pady=5)
+    ttk.Combobox(
+        body,
+        textvariable=auth_mode_var,
+        values=list(AUTH_MODE_OPTIONS.keys()),
+        state="readonly",
+    ).grid(row=4, column=1, sticky="ew", pady=5)
+    ttk.Label(body, text="超时秒数").grid(row=5, column=0, sticky="w", pady=5)
+    ttk.Entry(body, textvariable=timeout_var, width=10).grid(row=5, column=1, sticky="w", pady=5)
     ttk.Checkbutton(
         body,
         text="启用模型思考模式（响应更慢，单次约 30 秒；关闭时约 3 秒）",
         variable=thinking_var,
-    ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+    ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
     ttk.Label(
         body,
         text="仅发送表头、当前映射和少量截断/脱敏样例，不发送整表数据。LLM 建议用于减少配置时间，关键映射仍需人工确认。"
@@ -102,7 +117,7 @@ def open_llm_settings_dialog(parent: tk.Misc | None = None) -> bool:
         style="Muted.TLabel",
         wraplength=580,
         justify=tk.LEFT,
-    ).grid(row=6, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+    ).grid(row=7, column=0, columnspan=2, sticky="ew", pady=(10, 0))
 
     footer = ttk.Frame(win, padding=(14, 0, 14, 14))
     footer.grid(row=1, column=0, sticky="ew")
@@ -119,6 +134,7 @@ def open_llm_settings_dialog(parent: tk.Misc | None = None) -> bool:
             "base_url": base_url_var.get().strip(),
             "model": model_var.get().strip(),
             "api_key": api_key_var.get().strip(),
+            "auth_mode": AUTH_MODE_OPTIONS.get(auth_mode_var.get(), "bearer"),
             "timeout": timeout,
             "thinking_enabled": bool(thinking_var.get()),
         }

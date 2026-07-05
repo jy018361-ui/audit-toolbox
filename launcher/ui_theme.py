@@ -158,8 +158,33 @@ def apply_app_theme(root: tk.Misc) -> str:
     style.configure("TNotebook.Tab", font=base_font, padding=(12, 6), background="#e6ddcf", foreground=MUTED_TEXT)
     style.map("TNotebook.Tab", background=[("selected", SURFACE_BG)], foreground=[("selected", PRIMARY)])
     style.configure("Horizontal.TProgressbar", troughcolor="#e6ddcf", background=PRIMARY, bordercolor=BORDER, lightcolor=PRIMARY, darkcolor=PRIMARY)
-    style.configure("Vertical.TScrollbar", background="#d8cdbd", troughcolor="#efe7db", arrowcolor=PRIMARY, bordercolor=BORDER)
-    style.configure("Horizontal.TScrollbar", background="#d8cdbd", troughcolor="#efe7db", arrowcolor=PRIMARY, bordercolor=BORDER)
+    style.configure(
+        "Vertical.TScrollbar",
+        background="#a7b7b0",
+        troughcolor="#efe7db",
+        arrowcolor=PRIMARY,
+        bordercolor=BORDER,
+        lightcolor="#a7b7b0",
+        darkcolor="#7f938b",
+        width=14,
+        arrowsize=13,
+    )
+    style.configure(
+        "Horizontal.TScrollbar",
+        background="#a7b7b0",
+        troughcolor="#efe7db",
+        arrowcolor=PRIMARY,
+        bordercolor=BORDER,
+        lightcolor="#a7b7b0",
+        darkcolor="#7f938b",
+        width=14,
+        arrowsize=13,
+    )
+    style.map(
+        "TScrollbar",
+        background=[("active", PRIMARY), ("pressed", PRIMARY_DARK)],
+        arrowcolor=[("active", "#ffffff"), ("pressed", "#ffffff")],
+    )
     style.configure(
         "Treeview",
         font=base_font,

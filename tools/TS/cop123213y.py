@@ -744,6 +744,8 @@ class TimesheetPivotApp:
             "infer_schema_length": 0,
             "ignore_errors": True,
         }
+        if cols:
+            read_kwargs["columns"] = cols
         if source.encoding.lower().replace("_", "-") in {"utf-8", "utf-8-sig", "utf8"}:
             df = pl.read_csv(source.data_path, encoding="utf8-lossy", **read_kwargs)
         else:
@@ -1678,7 +1680,7 @@ class TimesheetPivotApp:
         field_values = [NO_FILTER_OPTION] + self.available_fields[:]
         cb_field = ttk.Combobox(row, state="readonly", textvariable=field_var, values=field_values)
         cb_field.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        cb_value = ttk.Combobox(row, state="readonly", textvariable=value_var, values=[NO_FILTER_OPTION])
+        cb_value = ttk.Combobox(row, state="normal", textvariable=value_var, values=[NO_FILTER_OPTION])
         cb_value.grid(row=0, column=1, sticky="ew", padx=(0, 0))
 
         row_data: Dict[str, object] = {
@@ -1688,25 +1690,48 @@ class TimesheetPivotApp:
             "cb_field": cb_field,
             "cb_value": cb_value,
             "load_token": 0,
+            "filter_values": [],
+            "filter_display_values": [],
+            "search_after_id": None,
         }
         self.filter_rows_ui.append(row_data)
 
         def on_field_selected(_evt=None):
             field = field_var.get().strip()
             if not field or field == NO_FILTER_OPTION:
+                row_data["filter_values"] = []
+                row_data["filter_display_values"] = []
                 cb_value.configure(values=[NO_FILTER_OPTION])
                 value_var.set(NO_FILTER_OPTION)
                 return
-            self._load_filter_values_async(row_data, field)
+            if field in MANUAL_FILTER_CACHE:
+                display_vals = [self._display_value(v) for v in MANUAL_FILTER_CACHE[field]]
+                row_data["filter_values"] = MANUAL_FILTER_CACHE[field][:]
+                row_data["filter_display_values"] = display_vals[:]
+                cb_value.configure(values=[NO_FILTER_OPTION] + display_vals)
+                value_var.set(NO_FILTER_OPTION)
+                return
+            row_data["filter_values"] = []
+            row_data["filter_display_values"] = []
+            cb_value.configure(values=[NO_FILTER_OPTION, "请输入关键字搜索"])
+            value_var.set("")
 
         cb_field.bind("<<ComboboxSelected>>", on_field_selected)
+
+        def on_value_keyrelease(_evt=None):
+            self._filter_value_dropdown_by_keyword(row_data)
+
+        cb_value.bind("<KeyRelease>", on_value_keyrelease)
 
         # 首行默认预填（仍允许用户改为“无筛选”）
         if row_idx == 0:
             if DEFAULT_FILTER_FIELD in self.available_fields:
                 field_var.set(DEFAULT_FILTER_FIELD)
                 if DEFAULT_FILTER_FIELD in MANUAL_FILTER_CACHE:
-                    vals = [NO_FILTER_OPTION] + [self._display_value(v) for v in MANUAL_FILTER_CACHE[DEFAULT_FILTER_FIELD]]
+                    display_vals = [self._display_value(v) for v in MANUAL_FILTER_CACHE[DEFAULT_FILTER_FIELD]]
+                    row_data["filter_values"] = MANUAL_FILTER_CACHE[DEFAULT_FILTER_FIELD][:]
+                    row_data["filter_display_values"] = display_vals[:]
+                    vals = [NO_FILTER_OPTION] + display_vals
                     cb_value.configure(values=vals)
                     if DEFAULT_FILTER_VALUE in vals:
                         value_var.set(DEFAULT_FILTER_VALUE)
@@ -1749,17 +1774,76 @@ class TimesheetPivotApp:
                 continue
             if field == NO_FILTER_OPTION or value_disp == NO_FILTER_OPTION:
                 continue
-            if value_disp in {"正在加载...", "（无可用筛选值）"}:
+            if value_disp in {"正在加载...", "正在搜索...", "后台预读中，稍后自动重试...", "请输入关键字搜索", "（无可用筛选值）", "（无匹配筛选值）"}:
                 continue
+            displays = item.get("filter_display_values")
+            if isinstance(displays, list):
+                if not displays or value_disp not in displays:
+                    continue
             value = "" if value_disp == "<空白>" else value_disp
             filters.setdefault(field, set()).add(value)
         return filters
+
+    def _filter_value_dropdown_by_keyword(self, row_data: Dict[str, object]) -> None:
+        cb_value = row_data.get("cb_value")
+        value_var = row_data.get("value_var")
+        if not isinstance(cb_value, ttk.Combobox) or not isinstance(value_var, tk.StringVar):
+            return
+        displays = row_data.get("filter_display_values")
+        if not isinstance(displays, list) or not displays:
+            keyword = value_var.get().strip()
+            if not keyword:
+                cb_value.configure(values=[NO_FILTER_OPTION, "请输入关键字搜索"])
+                return
+            field_var = row_data.get("field_var")
+            if not isinstance(field_var, tk.StringVar):
+                return
+            field = field_var.get().strip()
+            if not field or field == NO_FILTER_OPTION:
+                return
+            after_id = row_data.get("search_after_id")
+            if after_id:
+                try:
+                    self.root.after_cancel(after_id)
+                except Exception:
+                    pass
+
+            def run_search():
+                row_data["search_after_id"] = None
+                self._load_filter_values_async(
+                    row_data,
+                    field,
+                    search_keyword=keyword,
+                    preserve_text=True,
+                )
+
+            row_data["search_after_id"] = self.root.after(450, run_search)
+            return
+        keyword = value_var.get().strip().lower()
+        if keyword in {
+            "",
+            NO_FILTER_OPTION.lower(),
+            "正在加载...",
+            "后台预读中，稍后自动重试...",
+        }:
+            filtered = [NO_FILTER_OPTION] + displays[:1000]
+        else:
+            filtered = [NO_FILTER_OPTION] + [v for v in displays if keyword in str(v).lower()][:1000]
+        if len(filtered) == 1:
+            filtered.append("（无匹配筛选值）")
+        cb_value.configure(values=filtered)
+        try:
+            cb_value.event_generate("<Down>")
+        except Exception:
+            pass
 
     def _load_filter_values_async(
         self,
         row_data: Dict[str, object],
         field: str,
         preferred_value: Optional[str] = None,
+        search_keyword: str = "",
+        preserve_text: bool = False,
     ) -> None:
         cb_value = row_data.get("cb_value")
         value_var = row_data.get("value_var")
@@ -1774,8 +1858,11 @@ class TimesheetPivotApp:
 
         token = time.time_ns()
         row_data["load_token"] = token
-        cb_value.configure(values=["正在加载..."])
-        value_var.set("正在加载...")
+        row_data["filter_values"] = []
+        row_data["filter_display_values"] = []
+        cb_value.configure(values=["正在搜索..." if search_keyword else "正在加载..."])
+        if not preserve_text:
+            value_var.set("正在加载...")
 
         def worker():
             try:
@@ -1783,12 +1870,8 @@ class TimesheetPivotApp:
                 vals = self._read_distinct_cache_values(field)
                 status = "ok"
                 if not vals:
-                    # 2) 若正在后台预热，避免在筛选下拉无限等待
-                    if self.prewarm_running and not self.source_loaded:
-                        status = "warming"
-                    else:
-                        # 3) 没有预热阻塞时再走常规查询
-                        vals = self._get_unique_values(field)
+                    # 2) 不等待后台预读，直接走单列 distinct 快路径。
+                    vals = self._get_unique_values(field)
                 err = None
             except Exception as ex:
                 vals = []
@@ -1806,13 +1889,26 @@ class TimesheetPivotApp:
                     cb_value.configure(values=[NO_FILTER_OPTION])
                     value_var.set(NO_FILTER_OPTION)
                     return
-                if status == "warming":
-                    cb_value.configure(values=[NO_FILTER_OPTION, "后台预热中，请稍后重试"])
-                    value_var.set("后台预热中，请稍后重试")
-                    return
+                row_data["load_retry_count"] = 0
                 disp = [NO_FILTER_OPTION] + [self._display_value(v) for v in vals]
                 if len(disp) == 1:
                     disp.append("（无可用筛选值）")
+                row_data["filter_values"] = vals[:]
+                row_data["filter_display_values"] = [self._display_value(v) for v in vals]
+                if search_keyword:
+                    filtered = [NO_FILTER_OPTION] + [
+                        v for v in row_data["filter_display_values"]
+                        if search_keyword.lower() in str(v).lower()
+                    ][:1000]
+                    if len(filtered) == 1:
+                        filtered.append("（无匹配筛选值）")
+                    cb_value.configure(values=filtered)
+                    value_var.set(search_keyword)
+                    try:
+                        cb_value.event_generate("<Down>")
+                    except Exception:
+                        pass
+                    return
                 cb_value.configure(values=disp)
                 if preferred_value and preferred_value in disp:
                     value_var.set(preferred_value)
@@ -1907,21 +2003,16 @@ class TimesheetPivotApp:
         dpath = self._distinct_cache_path(self.data_source, field)
         if dpath.exists():
             try:
-                values = pl.read_parquet(str(dpath)).select(pl.col("v").cast(pl.Utf8, strict=False).fill_null("")).head(20000).to_series().to_list()
+                values = pl.read_parquet(str(dpath)).select(
+                    pl.col("v").cast(pl.Utf8, strict=False).fill_null("")
+                ).head(20000).to_series().to_list()
                 values = sorted([str(v) for v in values], key=lambda x: (x == "", x.lower()))
                 self.filter_values_cache[field] = values
                 return values
             except Exception:
                 pass
-        self._ensure_duckdb_source_loaded(required_cols=[field])
-        df = self._active_df()
-        if field not in df.columns:
-            return []
-        values_df = (
-            df.select(pl.col(field).cast(pl.Utf8, strict=False).fill_null("").alias("v"))
-            .unique()
-            .sort("v")
-        )
+
+        values_df = self._build_distinct_values_for_field(field)
         try:
             values_df.write_parquet(str(dpath), compression="zstd")
         except Exception:
@@ -1929,39 +2020,58 @@ class TimesheetPivotApp:
         values = sorted([str(v) for v in values_df.head(20000).to_series().to_list()], key=lambda x: (x == "", x.lower()))
         self.filter_values_cache[field] = values
         return values
+
+    def _build_distinct_values_for_field(self, field: str):
+        if pl is None:
+            raise RuntimeError("筛选快速读取需要 polars。")
         if not self.data_source:
             raise RuntimeError("数据源未加载。")
+        source = self.data_source
+        if field not in source.headers:
+            return pl.DataFrame({"v": []})
 
-        # 优先命中持久化 distinct 缓存（无需全表加载）
-        dpath = self._distinct_cache_path(self.data_source, field)
-        if dpath.exists():
-            con = duckdb.connect(database=":memory:")
-            try:
-                p = self._duck_quote_literal(str(dpath))
-                rows = con.execute(f"SELECT v FROM read_parquet({p}) LIMIT 20000").fetchall()
-                values = sorted([str(r[0]) for r in rows], key=lambda x: (x == "", x.lower()))
-                self.filter_values_cache[field] = values
-                return values
-            finally:
-                con.close()
+        source_key = self._source_cache_key(source)
+        if (
+            self.source_loaded
+            and self.loaded_source_key == source_key
+            and self.source_df is not None
+            and field in self.source_df.columns
+        ):
+            return (
+                self.source_df.select(pl.col(field).cast(pl.Utf8, strict=False).fill_null("").alias("v"))
+                .unique()
+                .sort("v")
+            )
 
-        self._ensure_duckdb_source_loaded(required_cols=[field])
-        with self.load_lock:
-            if field in self.distinct_cache_tables:
-                tbl = self.distinct_cache_tables[field]
-                rows = self.db.execute(f"SELECT v FROM {tbl} LIMIT 20000").fetchall()
-            else:
-                q = self._duck_quote_ident(field)
-                rows = self.db.execute(
-                    f"""
-                    SELECT DISTINCT COALESCE({q}, '') AS v
-                    FROM {self.source_table_name}
-                    LIMIT 20000
-                    """
-                ).fetchall()
-        values = sorted([str(r[0]) for r in rows], key=lambda x: (x == "", x.lower()))
-        self.filter_values_cache[field] = values
-        return values
+        one_col_cache = self._source_cache_parquet(source, [field])
+        full_cache = self._source_cache_parquet(source, None)
+        for cache_path in (one_col_cache, full_cache):
+            if cache_path.exists():
+                try:
+                    df = pl.read_parquet(str(cache_path), columns=[field])
+                    if field in df.columns:
+                        return (
+                            df.select(pl.col(field).cast(pl.Utf8, strict=False).fill_null("").alias("v"))
+                            .unique()
+                            .sort("v")
+                        )
+                except Exception:
+                    pass
+
+        df = self._read_source_polars(source, [field])
+        if field not in df.columns:
+            return pl.DataFrame({"v": []})
+        try:
+            one_col_cache.parent.mkdir(parents=True, exist_ok=True)
+            df.select([field]).write_parquet(str(one_col_cache), compression="zstd")
+            self._record_cache_manifest(source, one_col_cache, "single_column_filter_cache")
+        except Exception:
+            pass
+        return (
+            df.select(pl.col(field).cast(pl.Utf8, strict=False).fill_null("").alias("v"))
+            .unique()
+            .sort("v")
+        )
 
     def _read_distinct_cache_values(self, field: str) -> List[str]:
         if not self.data_source:

@@ -480,7 +480,22 @@ class AuditApp_V70_2:
         apply_app_theme(self.root)
         fit_window_to_screen(self.root, 1280, 850, 920, 620)
         style = ttk.Style(); style.theme_use('clam')
-        style.configure("Slim.Horizontal.TScrollbar", arrowsize=10, width=10)
+        style.configure(
+            "Preview.Horizontal.TScrollbar",
+            arrowsize=13,
+            width=14,
+            background="#a7b7b0",
+            troughcolor="#efe7db",
+            bordercolor="#d9cebf",
+            lightcolor="#a7b7b0",
+            darkcolor="#7f938b",
+            arrowcolor=PRIMARY,
+        )
+        style.map(
+            "Preview.Horizontal.TScrollbar",
+            background=[("active", PRIMARY), ("pressed", "#173f46")],
+            arrowcolor=[("active", "#ffffff"), ("pressed", "#ffffff")],
+        )
         style.configure("Export.TCheckbutton", font=("微软雅黑", 9), foreground="#263238", background="#f8f5ee")
         style.map("Export.TCheckbutton", foreground=[("disabled", "#8a8174")])
         
@@ -747,12 +762,13 @@ class AuditApp_V70_2:
         self.mapping_window = self.mapping_canvas.create_window((0, 0), window=self.mapping_inner, anchor="nw")
         self.tree = ttk.Treeview(frame_table, show='headings', height=10)
         vsb = ttk.Scrollbar(frame_table, orient="vertical", command=self.tree.yview)
-        hsb = tk.Scrollbar(frame_table, orient="horizontal", command=self._on_table_xscroll, width=10, highlightthickness=0)
+        hsb = ttk.Scrollbar(frame_table, orient="horizontal", command=self._on_table_xscroll, style="Preview.Horizontal.TScrollbar")
+        self.preview_hscrollbar = hsb
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=lambda first, last: self._on_tree_xscroll(first, last, hsb))
         self.mapping_canvas.grid(row=0, column=0, sticky='ew')
         self.tree.grid(row=1, column=0, sticky='nsew')
         vsb.grid(row=1, column=1, sticky='ns'); hsb.grid(row=2, column=0, sticky='ew')
-        frame_table.grid_rowconfigure(1, weight=1); frame_table.grid_columnconfigure(0, weight=1)
+        frame_table.grid_rowconfigure(1, weight=1); frame_table.grid_rowconfigure(2, minsize=16); frame_table.grid_columnconfigure(0, weight=1)
         
         self.context_menu = tk.Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="设为标题行（重新加载）", command=self.set_row_as_header)
@@ -2396,8 +2412,8 @@ class AuditApp_V70_2:
 
         body = tk.Frame(top)
         body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        tk.Label(body, text=f"字段：{col}", pady=(10, 2), font=("微软雅黑", 9, "bold")).pack()
-        tk.Label(body, text="可多选映射角色，完成后点击确定。", fg="#666", pady=(0, 8)).pack()
+        tk.Label(body, text=f"字段：{col}", font=("微软雅黑", 9, "bold")).pack(pady=(10, 2))
+        tk.Label(body, text="可多选映射角色，完成后点击确定。", fg="#666").pack(pady=(0, 8))
 
         canvas = tk.Canvas(body, highlightthickness=0)
         scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=canvas.yview)
@@ -4327,7 +4343,6 @@ class AuditApp_V70_2:
                         pivot_out = self._add_pivot_total_before_months(pivot_out)
                         pivot_out.to_excel(writer_suite, sheet_name="透视分析", index=False)
                         tracer.event("suite_sheet_pivot", elapsed_s=round(time.perf_counter() - t_sheet, 6), rows=int(len(pivot_out)))
-
                     t_fmt = time.perf_counter()
                     self._apply_output_formatting(
                         writer_suite,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+import webbrowser
 from tkinter import font as tkfont
 from tkinter import messagebox
 from typing import Callable, Optional
@@ -10,6 +11,19 @@ from launcher.llm_settings import open_llm_settings_dialog
 from launcher.registry import ToolSpec, load_tools, suite_title, suite_version
 from launcher.runner import launch_tool
 from launcher.ui_theme import BG, PANEL_BG, apply_app_theme, set_dark_title_bar
+
+DEMO_VIDEO_URL = (
+  "https://eychinamanaged.sharepoint.cn/sites/FutureofAssuranceNow/"
+  "Future%20of%20Assurance%20NowAI2026/Forms/AllItems.aspx?"
+  "id=%2Fsites%2FFutureofAssuranceNow%2FFuture%20of%20Assurance%20NowAI2026"
+  "%2F0166%2DCSDC%2DJohn%20SX%20Yan%2DE%E7%82%B9%E9%80%9A%E5%B7%A5%E5%85%B7%E7%AE%B1"
+  "&viewid=eb3288f7%2Db442%2D492c%2D8420%2D408f3fcd231b"
+  "&FolderCTID=0x0120007291CEC5A0AF3747914586CA3B07BBF8"
+)
+HTML_GUIDE_URL = (
+  "https://eychinamanaged-my.sharepoint.cn/:f:/g/personal/"
+  "john_sx_yan_cn_ey_com/IgBIPNlR5DD5QrmebHQN8eLOAVBLAZfXMovhjYQFzOqc3Y0?e=vz3A8B"
+)
 
 
 class HubWindow:
@@ -209,7 +223,7 @@ class HubWindow:
     main = tk.Frame(parent, bg=PANEL_BG, padx=18, pady=18)
     main.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
     main.grid_columnconfigure(0, weight=1)
-    main.grid_rowconfigure(2, weight=1)
+    main.grid_rowconfigure(3, weight=1)
 
     # Top bar: heading + search
     topbar = tk.Frame(main, bg=PANEL_BG)
@@ -290,9 +304,11 @@ class HubWindow:
     self._search_entry.configure(fg="#9a917f")
     self._search_entry.focus_set()
 
+    self._build_demo_banner(main)
+
     # Status bar
     toolbar = tk.Frame(main, bg=PANEL_BG)
-    toolbar.grid(row=1, column=0, sticky="ew", pady=(10, 6))
+    toolbar.grid(row=2, column=0, sticky="ew", pady=(8, 6))
     toolbar.grid_columnconfigure(0, weight=1)
     tk.Label(
       toolbar,
@@ -311,7 +327,7 @@ class HubWindow:
 
     # Scrollable card area
     cards_shell = tk.Frame(main, bg=PANEL_BG)
-    cards_shell.grid(row=2, column=0, sticky="nsew")
+    cards_shell.grid(row=3, column=0, sticky="nsew")
     cards_shell.grid_columnconfigure(0, weight=1)
     cards_shell.grid_rowconfigure(0, weight=1)
 
@@ -339,6 +355,82 @@ class HubWindow:
     self._content_canvas.bind("<Configure>", self._on_canvas_resize)
     self._content_canvas.bind("<MouseWheel>", self._on_mouse_wheel)
     content.bind("<MouseWheel>", self._on_mouse_wheel)
+
+  def _build_demo_banner(self, parent: tk.Widget) -> None:
+    banner = tk.Frame(
+      parent,
+      bg="#eaf4f1",
+      highlightbackground="#9cc5bb",
+      highlightthickness=1,
+      padx=14,
+      pady=10,
+    )
+    banner.grid(row=1, column=0, sticky="ew", pady=(14, 0))
+    banner.grid_columnconfigure(0, weight=1)
+
+    copy = tk.Frame(banner, bg="#eaf4f1")
+    copy.grid(row=0, column=0, sticky="ew")
+    tk.Label(
+      copy,
+      text="新手快速上手",
+      bg="#eaf4f1",
+      fg="#205860",
+      font=(self._ui_font_family, 10, "bold"),
+    ).pack(anchor="w")
+    tk.Label(
+      copy,
+      text="观看功能介绍 demo 视频，快速了解工具箱的主要入口和使用流程。",
+      bg="#eaf4f1",
+      fg="#32433f",
+      font=(self._ui_font_family, 10),
+    ).pack(anchor="w", pady=(2, 0))
+
+    actions = tk.Frame(banner, bg="#eaf4f1")
+    actions.grid(row=0, column=1, sticky="e", padx=(14, 0))
+
+    tk.Button(
+      actions,
+      text="打开HTML指引",
+      command=self._open_html_guide,
+      bg="#9b5d33",
+      fg="#fffaf2",
+      activebackground="#7e4827",
+      activeforeground="#fffaf2",
+      relief="flat",
+      bd=0,
+      padx=14,
+      pady=8,
+      cursor="hand2",
+      font=(self._ui_font_family, 10, "bold"),
+    ).pack(side="left", padx=(0, 8))
+
+    tk.Button(
+      actions,
+      text="观看视频介绍",
+      command=self._open_demo_video,
+      bg="#205860",
+      fg="#f8f5ee",
+      activebackground="#173f46",
+      activeforeground="#f8f5ee",
+      relief="flat",
+      bd=0,
+      padx=16,
+      pady=8,
+      cursor="hand2",
+      font=(self._ui_font_family, 10, "bold"),
+    ).pack(side="left")
+
+  def _open_demo_video(self) -> None:
+    try:
+      webbrowser.open(DEMO_VIDEO_URL, new=2)
+    except Exception as exc:
+      messagebox.showerror("无法打开视频", f"无法打开功能介绍链接：\n{exc}", parent=self.root)
+
+  def _open_html_guide(self) -> None:
+    try:
+      webbrowser.open(HTML_GUIDE_URL, new=2)
+    except Exception as exc:
+      messagebox.showerror("无法打开指引", f"无法打开操作指引链接：\n{exc}", parent=self.root)
 
   def _on_canvas_resize(self, event: tk.Event) -> None:
     """窗口宽度变化时重新计算列数和排列卡片。"""

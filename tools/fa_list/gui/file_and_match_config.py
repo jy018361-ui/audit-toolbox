@@ -2031,6 +2031,8 @@ class FileAndMatchConfig(ttk.Frame):
             review_match = re.search(r"复核提示\s*(\d+)\s*项", message)
             applied = applied_match.group(1) if applied_match else "0"
             reviews = review_match.group(1) if review_match else "0"
+            if applied == "0" and reviews == "0" and "未发现需要调整" in message:
+                return "LLM复核：模型已返回 · 未发现需要调整"
             return f"LLM复核：已完成 · 已补充 {applied} 项 · 复核提示 {reviews} 项"
         if mode == "error":
             if "已停止" in message:
@@ -4692,6 +4694,14 @@ class FileAndMatchConfig(ttk.Frame):
         reviews += self._handle_llm_fa_mapping_review(fa_review, cols1, cols2, review_current_mapping)
         errors = _dedupe_messages([msg for msg in (mapping_error, fa_review_error, match_review_error, supplement_match_review_error) if msg])
         if errors and applied == 0 and reviews == 0:
+            self._llm_last_detail_text = "\n".join([
+                "模型调用",
+                "请求已发出，但本轮没有得到可用复核结果。",
+                "",
+                "失败环节",
+                *errors,
+            ])
+            self._update_llm_detail_button()
             if all(_is_llm_empty_response_error(msg) for msg in errors):
                 self._finish_llm_mapping("大模型未返回可用复核结果。请重新复核成功后再继续。", show_warning=True, passed=False)
                 return
@@ -4715,7 +4725,17 @@ class FileAndMatchConfig(ttk.Frame):
         )
         fill_summary = self._summarize_labels(self._llm_fill_labels_current)
         review_summary = self._summarize_labels(self._llm_review_labels_current)
+        llm_return_summary = [
+            "模型调用",
+            "已成功返回并完成解析。",
+            f"返回字段建议：{len(suggestions)} 条",
+            f"返回字段复核：{len(fa_review)} 条",
+            f"返回匹配列复核：{'有' if match_review is not None else '无'}",
+            f"返回补充ID复核：{'有' if supplement_match_review is not None else '无'}",
+        ]
         detail_lines = [
+            *llm_return_summary,
+            "",
             "当前选择",
             f"已补充：{applied} 项（{fill_summary}）",
             f"复核提示：{reviews} 项（{review_summary}）",
@@ -4732,8 +4752,13 @@ class FileAndMatchConfig(ttk.Frame):
         detail_lines.extend(["", "建议选择", "如字段行显示“复核建议”，请按弹窗建议确认是否采纳；其余 OK 项可继续使用当前选择。"])
         self._llm_last_detail_text = "\n".join(detail_lines)
         self._update_llm_detail_button()
+        finish_message = (
+            "大模型辅助判断完成：模型已返回，未发现需要调整；当前脚本预映射可继续使用。"
+            if applied == 0 and reviews == 0 and not suffix
+            else f"大模型辅助判断完成：已补充 {applied} 项（{fill_summary}），复核提示 {reviews} 项（{review_summary}）。{suffix}"
+        )
         self._finish_llm_mapping(
-            f"大模型辅助判断完成：已补充 {applied} 项（{fill_summary}），复核提示 {reviews} 项（{review_summary}）。{suffix}",
+            finish_message,
             passed=not bool(errors),
         )
 

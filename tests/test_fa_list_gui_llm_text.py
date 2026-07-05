@@ -809,6 +809,16 @@ class FAListLLMDialogTextTests(unittest.TestCase):
 
         self.assertEqual(tk.NORMAL, widget.next_button.state)
 
+    def test_llm_done_status_distinguishes_no_adjustment_from_no_response(self):
+        widget = object.__new__(FileAndMatchConfig)
+
+        text = widget._compact_llm_status_for_ui(
+            "大模型辅助判断完成：模型已返回，未发现需要调整；当前脚本预映射可继续使用。",
+            "done",
+        )
+
+        self.assertEqual("LLM复核：模型已返回 · 未发现需要调整", text)
+
 
 if __name__ == "__main__":
     unittest.main()

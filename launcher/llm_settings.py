@@ -56,7 +56,6 @@ def is_llm_enabled() -> bool:
 
 def open_llm_settings_dialog(parent: tk.Misc | None = None) -> bool:
     settings = load_llm_settings()
-    existing_api_key = str(settings.get("api_key") or "")
     win = tk.Toplevel(parent) if parent is not None else tk.Toplevel()
     win.title("LLM API 配置")
     apply_app_theme(win)
@@ -73,7 +72,7 @@ def open_llm_settings_dialog(parent: tk.Misc | None = None) -> bool:
     enabled_var = tk.BooleanVar(value=bool(settings.get("enabled")))
     base_url_var = tk.StringVar(value=str(settings.get("base_url") or ""))
     model_var = tk.StringVar(value=str(settings.get("model") or ""))
-    api_key_var = tk.StringVar(value="")
+    api_key_var = tk.StringVar(value=str(settings.get("api_key") or ""))
     timeout_var = tk.StringVar(value=str(settings.get("timeout") or 30))
     thinking_var = tk.BooleanVar(value=bool(settings.get("thinking_enabled")))
     saved = {"ok": False}
@@ -87,8 +86,7 @@ def open_llm_settings_dialog(parent: tk.Misc | None = None) -> bool:
     ttk.Entry(body, textvariable=base_url_var).grid(row=1, column=1, sticky="ew", pady=5)
     ttk.Label(body, text="模型").grid(row=2, column=0, sticky="w", pady=5)
     ttk.Entry(body, textvariable=model_var).grid(row=2, column=1, sticky="ew", pady=5)
-    key_label = "API Key（已保存；留空则不修改）" if existing_api_key else "API Key"
-    ttk.Label(body, text=key_label).grid(row=3, column=0, sticky="w", pady=5)
+    ttk.Label(body, text="API Key").grid(row=3, column=0, sticky="w", pady=5)
     ttk.Entry(body, textvariable=api_key_var, show="*").grid(row=3, column=1, sticky="ew", pady=5)
     ttk.Label(body, text="超时秒数").grid(row=4, column=0, sticky="w", pady=5)
     ttk.Entry(body, textvariable=timeout_var, width=10).grid(row=4, column=1, sticky="w", pady=5)
@@ -120,7 +118,7 @@ def open_llm_settings_dialog(parent: tk.Misc | None = None) -> bool:
             "enabled": bool(enabled_var.get()),
             "base_url": base_url_var.get().strip(),
             "model": model_var.get().strip(),
-            "api_key": api_key_var.get().strip() or existing_api_key,
+            "api_key": api_key_var.get().strip(),
             "timeout": timeout,
             "thinking_enabled": bool(thinking_var.get()),
         }

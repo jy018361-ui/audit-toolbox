@@ -47,9 +47,11 @@ hiddenimports = [
     "win32com",
     "win32com.client",
     "windnd",
+    "launcher.llm_analysis",
     "launcher.llm_client",
     "launcher.llm_settings",
 ]
+hiddenimports += collect_submodules("launcher")
 hiddenimports += collect_submodules("fastexcel")
 
 excludes = [

@@ -10,6 +10,9 @@ def touch_bundle_deps() -> None:
     import pandas  # noqa: F401
     import polars  # noqa: F401
     import python_calamine  # noqa: F401
+    import launcher.llm_analysis  # noqa: F401
+    import launcher.llm_client  # noqa: F401
+    import launcher.llm_settings  # noqa: F401
     import xlsxwriter  # noqa: F401
     import xlrd  # noqa: F401
 

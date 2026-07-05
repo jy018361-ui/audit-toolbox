@@ -2194,6 +2194,18 @@ def _chat_completion(
     model = str(settings.get("model") or "").strip()
     timeout = float(settings.get("timeout") or 30)
     auth_mode = str(settings.get("auth_mode") or "bearer").strip().lower()
+    api_type = str(settings.get("api_type") or "openai").strip().lower()
+    if api_type == "dify_chat":
+        return _dify_chat_completion(
+            settings,
+            messages,
+            max_tokens,
+            json_response=json_response,
+            _empty_retry=_empty_retry,
+            task_name=task_name,
+            call_id=call_id,
+            started=started,
+        )
     if not base_url or not api_key or not model:
         raise LLMClientError("请先填写 Base URL、模型和 API Key。")
 
@@ -2227,7 +2239,7 @@ def _chat_completion(
         input_chars=sum(len(str(item.get("content") or "")) for item in messages),
     )
     body = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
-    authorization = api_key if auth_mode == "raw" else f"Bearer {api_key}"
+    authorization = _authorization_value(api_key, auth_mode)
     req = urllib.request.Request(
         url,
         data=body,
@@ -2321,6 +2333,172 @@ def _chat_completion(
             f"这通常是模�?网关返回格式不兼容或当前模型不适合 JSON 对话输出，不�?API Key 错误。{detail}"
         )
     return content
+
+
+def _dify_chat_completion(
+    settings: dict[str, Any],
+    messages: list[dict[str, str]],
+    max_tokens: int,
+    *,
+    json_response: bool = False,
+    _empty_retry: bool = False,
+    task_name: str = "",
+    call_id: str = "",
+    started: float | None = None,
+) -> str:
+    started = started if started is not None else time.perf_counter()
+    base_url = str(settings.get("base_url") or "").strip().rstrip("/")
+    api_key = str(settings.get("api_key") or "").strip()
+    timeout = float(settings.get("timeout") or 30)
+    auth_mode = str(settings.get("auth_mode") or "bearer").strip().lower()
+    if not base_url or not api_key:
+        raise LLMClientError("Dify Chat App 请先填写 Base URL 和 API Key。")
+
+    url = _dify_chat_messages_url(base_url)
+    request_body = {
+        "inputs": {},
+        "query": _messages_to_dify_query(messages, json_response=json_response),
+        "response_mode": "blocking",
+        "user": "audit-toolbox",
+    }
+    _write_llm_log(
+        "chat_start",
+        call_id=call_id,
+        api_type="dify_chat",
+        base_url=_redact_base_url(base_url),
+        model="",
+        timeout=timeout,
+        max_tokens_param=max_tokens,
+        task_name=task_name,
+        json_response=json_response,
+        empty_retry=_empty_retry,
+        message_count=len(messages),
+        input_chars=sum(len(str(item.get("content") or "")) for item in messages),
+    )
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(request_body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": _authorization_value(api_key, auth_mode),
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        _write_llm_log(
+            "chat_http_error",
+            call_id=call_id,
+            api_type="dify_chat",
+            task_name=task_name,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+            status=exc.code,
+            detail=_content_excerpt(detail, 240),
+        )
+        raise LLMClientError(f"HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        _write_llm_log(
+            "chat_url_error",
+            call_id=call_id,
+            api_type="dify_chat",
+            task_name=task_name,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+            reason=str(exc.reason),
+        )
+        raise LLMClientError(str(exc.reason)) from exc
+    except (TimeoutError, socket.timeout) as exc:
+        _write_llm_log(
+            "chat_timeout",
+            call_id=call_id,
+            api_type="dify_chat",
+            task_name=task_name,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+            timeout=timeout,
+        )
+        raise LLMClientError("请求超时。") from exc
+
+    content = _extract_dify_answer(data).strip()
+    _write_llm_log(
+        "chat_done",
+        call_id=call_id,
+        api_type="dify_chat",
+        task_name=task_name,
+        elapsed_ms=int((time.perf_counter() - started) * 1000),
+        json_response=json_response,
+        empty_retry=_empty_retry,
+        finish_reason="",
+        message_keys=sorted(str(k) for k in data.keys()) if isinstance(data, dict) else [],
+        content_chars=len(content),
+    )
+    disable_empty_retry = bool(settings.get("_disable_empty_retry"))
+    if not content and not _empty_retry and not disable_empty_retry:
+        retry_messages = list(messages) + [
+            {
+                "role": "user",
+                "content": "上一次 Dify 返回为空。请直接返回最终答案；如果任务要求 JSON，只返回 JSON。",
+            }
+        ]
+        return _dify_chat_completion(
+            settings,
+            retry_messages,
+            max_tokens,
+            json_response=json_response,
+            _empty_retry=True,
+            task_name=task_name,
+        )
+    if not content:
+        raise LLMClientError("Dify 服务已响应，但未返回 answer 正文。")
+    return content
+
+
+def _authorization_value(api_key: str, auth_mode: str) -> str:
+    return api_key if auth_mode == "raw" else f"Bearer {api_key}"
+
+
+def _dify_chat_messages_url(base_url: str) -> str:
+    url = str(base_url or "").strip().rstrip("/")
+    if url.endswith("/chat-messages"):
+        return url
+    return f"{url}/chat-messages"
+
+
+def _messages_to_dify_query(messages: list[dict[str, str]], *, json_response: bool = False) -> str:
+    parts = []
+    for item in messages or []:
+        role = str(item.get("role") or "user").strip() or "user"
+        content = str(item.get("content") or "").strip()
+        if content:
+            parts.append(f"{role}:\n{content}")
+    query = "\n\n".join(parts).strip()
+    if json_response:
+        query += "\n\n请只返回严格 JSON，不要 Markdown、不要解释、不要代码块。"
+    return query
+
+
+def _extract_dify_answer(data: Any) -> str:
+    if not isinstance(data, dict):
+        return ""
+    answer = data.get("answer")
+    if isinstance(answer, str):
+        return answer
+    data_obj = data.get("data")
+    if isinstance(data_obj, dict):
+        outputs = data_obj.get("outputs")
+        if isinstance(outputs, dict):
+            for key in ("answer", "text", "result", "output"):
+                value = outputs.get(key)
+                if isinstance(value, str):
+                    return value
+            if outputs:
+                return json.dumps(outputs, ensure_ascii=False)
+    for key in ("text", "result", "output"):
+        value = data.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
 
 
 def _write_llm_log(event: str, **payload: Any) -> None:

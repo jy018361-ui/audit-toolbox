@@ -3830,6 +3830,20 @@ class AuditApp_V70_2:
                 pl.col(col_name).is_null() | (pl.col(col_name).cast(pl.Utf8).str.strip_chars() == "")
             ).then(None).otherwise(pl.col(col_name).cast(pl.Utf8))
 
+        fill_check_cols = list(dict.fromkeys([c for c in (id_cols + acc_cols) if c in all_cols]))
+        if amt_cols and fill_check_cols:
+            amt_non_empty_for_fill = _blank_to_null_expr(amt_cols[0]).is_not_null()
+            for c in amt_cols[1:]:
+                amt_non_empty_for_fill = amt_non_empty_for_fill | _blank_to_null_expr(c).is_not_null()
+            fill_missing_expr = _blank_to_null_expr(fill_check_cols[0]).is_null()
+            for c in fill_check_cols[1:]:
+                fill_missing_expr = fill_missing_expr | _blank_to_null_expr(c).is_null()
+            pl_df = pl_df.with_columns(
+                (amt_non_empty_for_fill & fill_missing_expr).alias("__ffill_balance_check_candidate__")
+            )
+        else:
+            pl_df = pl_df.with_columns(pl.lit(False).alias("__ffill_balance_check_candidate__"))
+
         if mapped_cols:
             repl_exprs = [_blank_to_null_expr(c).alias(c) for c in mapped_cols if c in all_cols]
             if repl_exprs:
@@ -4043,6 +4057,41 @@ class AuditApp_V70_2:
             t_logic_calc = time.perf_counter()
             df_target = self._ensure_net_column_polars(df_target, map_inv, logic)
             tracer.event("logic_calc_net", elapsed_s=round(time.perf_counter() - t_logic_calc, 6), logic=logic)
+
+            balance_cleanup_notice = None
+            marker_col = "__ffill_balance_check_candidate__"
+            if marker_col in df_target.columns and "__net__" in df_target.columns:
+                candidate_mask = df_target[marker_col].astype(str).str.lower().isin(["true", "1"])
+                if candidate_mask.any():
+                    original_target_cols = set(df_target.columns)
+                    id_join_col_for_balance = self._make_join_col(df_target, self._get_voucher_id_cols(map_inv, df_target))
+                    created_balance_join_col = id_join_col_for_balance not in original_target_cols
+                    net_for_balance = pd.to_numeric(df_target["__net__"], errors="coerce").fillna(0.0)
+                    balance_by_id = net_for_balance.groupby(df_target[id_join_col_for_balance].astype(str)).sum()
+                    imbalanced_ids = set(balance_by_id[balance_by_id.abs() > 0.01].index.astype(str))
+                    drop_mask = candidate_mask & df_target[id_join_col_for_balance].astype(str).isin(imbalanced_ids)
+                    if drop_mask.any():
+                        removed_rows = int(drop_mask.sum())
+                        removed_amount = float(net_for_balance.loc[drop_mask].sum())
+                        removed_ids = int(df_target.loc[drop_mask, id_join_col_for_balance].astype(str).nunique())
+                        df_target = df_target.loc[~drop_mask].copy()
+                        balance_cleanup_notice = {
+                            "removed_rows": removed_rows,
+                            "removed_amount": removed_amount,
+                            "affected_ids": removed_ids,
+                            "rule": "Keep forward fill; after fill, check voucher ID net balance. If imbalanced, remove only candidate rows that originally lacked voucher ID or account.",
+                        }
+                        tracer.event(
+                            "ffill_balance_cleanup",
+                            rows=removed_rows,
+                            amount_sum=round(removed_amount, 2),
+                            affected_ids=removed_ids,
+                            rule=balance_cleanup_notice["rule"],
+                        )
+                    if created_balance_join_col and id_join_col_for_balance in df_target.columns:
+                        df_target.drop(columns=[id_join_col_for_balance], inplace=True)
+                if marker_col in df_target.columns:
+                    df_target.drop(columns=[marker_col], inplace=True)
 
             # 日期列按ID向上填充（处理合并单元格/空白）
             if map_inv.get('role_date'):

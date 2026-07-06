@@ -3919,7 +3919,8 @@ class AuditApp_V70_2:
             pl_df = pl_df.drop(temp_filter_col)
 
         # 后续只需要全量数据的列顺序，避免把清洗后的大表再复制回 pandas。
-        df_out = pd.DataFrame(columns=pl_df.columns)
+        export_order_cols = [c for c in pl_df.columns if c != "__ffill_balance_check_candidate__"]
+        df_out = pd.DataFrame(columns=export_order_cols)
         df_target = self._to_pandas_df_safe(df_target_pl)
         df_exclude = self._to_pandas_df_safe(df_exclude_pl)
 

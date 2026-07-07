@@ -118,7 +118,7 @@ class TaskContext:
             self.report_stage(text)
 
     def progress(self, pct: int, text: Optional[str] = None) -> None:
-        v = max(0, min(100, int(pct)))
+        v = max(0.0, min(100.0, float(pct)))
         if v < self._last_progress:
             v = self._last_progress
         self._last_progress = v
@@ -190,21 +190,29 @@ class ProgressWindow(tk.Toplevel):
     ):
         super().__init__(parent)
         self.title(title)
-        self.geometry("520x180")
+        dialog_w = 680
+        dialog_h = 190
+        self.geometry(f"{dialog_w}x{dialog_h}")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
-        x = parent.winfo_x() + (parent.winfo_width() // 2) - 260
-        y = parent.winfo_y() + (parent.winfo_height() // 2) - 90
+        x = parent.winfo_x() + (parent.winfo_width() // 2) - (dialog_w // 2)
+        y = parent.winfo_y() + (parent.winfo_height() // 2) - (dialog_h // 2)
         self.geometry(f"+{x}+{y}")
         self._on_cancel = on_cancel
 
         self.lbl = tk.Label(self, text="正在处理数据，请稍候...", pady=10)
         self.lbl.pack()
         self.stage_var = tk.StringVar(value="准备中...")
-        self.stage_lbl = tk.Label(self, textvariable=self.stage_var, fg="#1f4e79")
-        self.stage_lbl.pack()
-        self.pb = ttk.Progressbar(self, orient="horizontal", length=450, mode="determinate", maximum=100, value=0)
+        self.stage_lbl = tk.Label(
+            self,
+            textvariable=self.stage_var,
+            fg="#1f4e79",
+            wraplength=620,
+            justify="center",
+        )
+        self.stage_lbl.pack(fill="x", padx=24)
+        self.pb = ttk.Progressbar(self, orient="horizontal", length=610, mode="determinate", maximum=100, value=0)
         self.pb.pack(pady=10)
         self.percent_var = tk.StringVar(value="0%")
         tk.Label(self, textvariable=self.percent_var, fg="#1f4e79").pack(pady=(0, 4))
@@ -216,9 +224,12 @@ class ProgressWindow(tk.Toplevel):
         self.update_idletasks()
 
     def set_progress(self, pct: int, text: Optional[str] = None) -> None:
-        v = max(0, min(100, int(pct)))
+        v = max(0.0, min(100.0, float(pct)))
         self.pb["value"] = v
-        self.percent_var.set(f"{v}%")
+        if abs(v - round(v)) < 0.05:
+            self.percent_var.set(f"{int(round(v))}%")
+        else:
+            self.percent_var.set(f"{v:.1f}%")
         if text:
             self.stage_var.set(text)
         self.update_idletasks()
@@ -252,6 +263,7 @@ class TimesheetPivotApp:
         self.source_info_var = tk.StringVar(value="未加载文件")
         self.agg_var = tk.StringVar(value="sum")
         self.fast_load_var = tk.BooleanVar(value=True)
+        self.export_raw_data_var = tk.BooleanVar(value=False)
         self.pyarrow_available = bool(importlib.util.find_spec("pyarrow"))
         self.polars_available = pl is not None and bool(importlib.util.find_spec("fastexcel"))
         self.source_df = None
@@ -376,9 +388,14 @@ class TimesheetPivotApp:
 
         ttk.Label(
             self.footer,
-            text="将按默认字段配置导出到同一个 Excel：by经理 + by项目",
+            text="将按默认字段配置导出套表 Excel",
             style="Muted.TLabel",
         ).pack(side="left", fill="x", expand=True)
+        ttk.Checkbutton(
+            self.footer,
+            text="导出原始data（勾选会额外等待约1分钟）",
+            variable=self.export_raw_data_var,
+        ).pack(side="left", padx=(8, 12))
         btn_group = create_button_group(self.footer)
         add_standard_button(btn_group, "导出默认双Sheet", self._export_default_dual)
 
@@ -2195,8 +2212,10 @@ class TimesheetPivotApp:
             messagebox.showwarning("提示", "请先加载文件。")
             return
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_raw_data = bool(self.export_raw_data_var.get())
+        dialog_title = "导出默认双sheet数据透视和明细data" if export_raw_data else "导出默认双sheet数据透视"
         save_path = filedialog.asksaveasfilename(
-            title="导出默认双sheet数据透视",
+            title=dialog_title,
             defaultextension=".xlsx",
             initialfile=f"Timesheet_Default_Dual_{ts}.xlsx",
             filetypes=[("Excel", "*.xlsx")],
@@ -2204,7 +2223,7 @@ class TimesheetPivotApp:
         if not save_path:
             return
         filters = self._collect_filters_from_rows()
-        self._run_dual_export_background(save_path, filters)
+        self._run_dual_export_background(save_path, filters, export_raw_data=export_raw_data)
 
     def _default_column_field(self) -> str:
         if "Transaction Cycle Date" in self.available_fields:
@@ -2213,13 +2232,14 @@ class TimesheetPivotApp:
             return "Month"
         return ""
 
-    def _run_dual_export_background(self, save_path: str, filters: Dict[str, Set[str]]) -> None:
+    def _run_dual_export_background(self, save_path: str, filters: Dict[str, Set[str]], export_raw_data: bool) -> None:
         if self.busy:
             return
         self.busy = True
         cancel_event = threading.Event()
         self.current_cancel_event = cancel_event
-        self._show_progress("正在生成并导出双sheet数据透视...", on_cancel=cancel_event.set)
+        title = "正在生成并导出双sheet数据透视和明细data..." if export_raw_data else "正在生成并导出双sheet数据透视..."
+        self._show_progress(title, on_cancel=cancel_event.set)
         self._update_progress_value(2, "阶段 1/4：准备数据源...")
 
         def report_stage(msg: str) -> None:
@@ -2240,7 +2260,7 @@ class TimesheetPivotApp:
             err = None
             result = None
             try:
-                result = self._build_and_export_dual_default(save_path, filters, ctx)
+                result = self._build_and_export_dual_default(save_path, filters, ctx, export_raw_data=export_raw_data)
             except Exception as ex:
                 err = ex
             finally:
@@ -2552,7 +2572,13 @@ class TimesheetPivotApp:
         self.pivot_result_cache[cache_key] = (columns[:], [r[:] for r in rows])
         return columns, rows
 
-    def _build_and_export_dual_default(self, save_path: str, filters: Dict[str, Set[str]], ctx: TaskContext) -> Dict[str, object]:
+    def _build_and_export_dual_default(
+        self,
+        save_path: str,
+        filters: Dict[str, Set[str]],
+        ctx: TaskContext,
+        export_raw_data: bool = False,
+    ) -> Dict[str, object]:
         if not self.data_source:
             raise RuntimeError("数据源不存在。")
         src = self.data_source
@@ -2598,26 +2624,44 @@ class TimesheetPivotApp:
         ctx.progress(62, "阶段 3/4：计算 by项目...")
         cols_prj, rows_prj = self._compute_pivot_result(src, cfg_prj)
 
-        ctx.progress(85, "阶段 4/4：写出双sheet Excel...")
+        excel_start = 76.0 if export_raw_data else 85.0
+        excel_mid = 81.0 if export_raw_data else 91.0
+        excel_end = 86.0 if export_raw_data else 99.0
+
+        ctx.progress(excel_start, "阶段 4/4：写出双sheet Excel...")
         wb = xlsxwriter.Workbook(save_path)
         ws_mgr = wb.add_worksheet("by经理")
         ws_prj = wb.add_worksheet("by项目")
 
         def on_mgr(done: int, total: int) -> None:
-            pct = 85 + int((done / max(total, 1)) * 6)
+            pct = excel_start + (done / max(total, 1)) * (excel_mid - excel_start)
             ctx.progress(pct, f"阶段 4/4：写出 by经理... {done:,}/{total:,}")
 
         def on_prj(done: int, total: int) -> None:
-            pct = 91 + int((done / max(total, 1)) * 8)
+            pct = excel_mid + (done / max(total, 1)) * (excel_end - excel_mid)
             ctx.progress(pct, f"阶段 4/4：写出 by项目... {done:,}/{total:,}")
 
         self._write_excel_sheet(ws_mgr, cols_mgr, rows_mgr, cfg_mgr, wb, progress_cb=on_mgr)
         self._write_excel_sheet(ws_prj, cols_prj, rows_prj, cfg_prj, wb, progress_cb=on_prj)
         wb.close()
+
+        data_path = ""
+        data_rows = 0
+        data_cols = 0
+        if export_raw_data:
+            data_path = self._matching_data_export_path(save_path)
+            ctx.progress(86, "阶段 4/4：写出对应原始明细 data...")
+            data_rows, data_cols = self._write_filtered_raw_data_csv(
+                data_path=data_path,
+                filters=filters,
+                ctx=ctx,
+                progress_start=86.0,
+                progress_end=99.0,
+            )
         ctx.progress(100, "100% 完成")
 
         elapsed = time.monotonic() - ctx.start_ts
-        return {
+        result = {
             "save_path": save_path,
             "rows": len(rows_mgr) + len(rows_prj),
             "cols": max(len(cols_mgr), len(cols_prj)),
@@ -2625,6 +2669,174 @@ class TimesheetPivotApp:
             "timings": dict(ctx.timings),
             "notes": list(ctx.notes),
         }
+        if export_raw_data:
+            result.update({
+                "data_path": data_path,
+                "data_rows": data_rows,
+                "data_cols": data_cols,
+            })
+        return result
+
+    @staticmethod
+    def _matching_data_export_path(save_path: str) -> str:
+        p = Path(save_path)
+        return str(p.with_name(f"{p.stem}_data.csv"))
+
+    def _write_filtered_raw_data_csv(
+        self,
+        data_path: str,
+        filters: Dict[str, Set[str]],
+        ctx: TaskContext,
+        progress_start: float = 86.0,
+        progress_end: float = 99.0,
+    ) -> Tuple[int, int]:
+        if not self.data_source:
+            raise RuntimeError("数据源不存在。")
+        tmp_path = f"{data_path}.tmp"
+        columns = self.data_source.headers[:]
+        valid_filters = {k: {str(v) for v in vals} for k, vals in filters.items() if k in columns and vals}
+        filter_indexes = {columns.index(k): vals for k, vals in valid_filters.items()}
+        rows_scanned = 0
+        rows_written = 0
+        total_rows = self._estimate_source_data_rows(self.data_source)
+
+        ctx.check_abort()
+        if total_rows:
+            ctx.progress(
+                progress_start,
+                f"阶段 4/4：导出data CSV... 预计扫描 {total_rows:,} 行",
+            )
+        else:
+            ctx.progress(progress_start, "阶段 4/4：导出data CSV...")
+        try:
+            with open(tmp_path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow(columns)
+                for raw_row in self._iter_source_data_rows(self.data_source):
+                    ctx.check_abort()
+                    rows_scanned += 1
+                    row = self._normalize_raw_data_row(raw_row, len(columns))
+                    if self._raw_row_matches_filters(row, filter_indexes):
+                        writer.writerow(row)
+                        rows_written += 1
+                    if rows_scanned % 5000 == 0:
+                        pct = self._raw_data_progress_pct(
+                            rows_scanned,
+                            total_rows,
+                            progress_start,
+                            progress_end,
+                        )
+                        ctx.progress(
+                            pct,
+                            self._raw_data_progress_text(rows_scanned, rows_written, total_rows),
+                        )
+            ctx.check_abort()
+            ctx.progress(progress_end, "阶段 4/4：data CSV写出完成，正在保存文件...")
+            os.replace(tmp_path, data_path)
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            raise
+        return rows_written, len(columns)
+
+    def _estimate_source_data_rows(self, source: DataSource) -> Optional[int]:
+        try:
+            if source.file_type == "excel":
+                wb = ox_load_workbook(source.original_path, read_only=True, data_only=True)
+                try:
+                    ws = wb[source.sheet_name] if source.sheet_name else wb.worksheets[0]
+                    if ws.max_row:
+                        return max(0, int(ws.max_row) - int(source.header_row))
+                finally:
+                    wb.close()
+            else:
+                with open(source.data_path, "r", encoding=source.encoding, newline="") as f:
+                    total = sum(1 for _ in f)
+                return max(0, total - int(source.header_row))
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _raw_data_progress_pct(
+        rows_scanned: int,
+        total_rows: Optional[int],
+        progress_start: float,
+        progress_end: float,
+    ) -> float:
+        if not total_rows or total_rows <= 0:
+            return progress_start
+        ratio = min(1.0, max(0.0, rows_scanned / total_rows))
+        return progress_start + (progress_end - progress_start) * ratio
+
+    @staticmethod
+    def _raw_data_progress_text(
+        rows_scanned: int,
+        rows_written: int,
+        total_rows: Optional[int],
+    ) -> str:
+        if total_rows and total_rows > 0:
+            return (
+                f"阶段 4/4：导出data CSV... "
+                f"已扫描 {rows_scanned:,}/{total_rows:,} 行，已写出 {rows_written:,} 行"
+            )
+        return f"阶段 4/4：导出data CSV... 已扫描 {rows_scanned:,} 行，已写出 {rows_written:,} 行"
+
+    def _iter_source_data_rows(self, source: DataSource):
+        if source.file_type == "excel":
+            yield from self._iter_excel_data_rows(source)
+            return
+        with open(source.data_path, "r", encoding=source.encoding, newline="") as f:
+            reader = csv.reader(f, delimiter=source.sep)
+            for _ in range(max(0, source.header_row)):
+                next(reader, None)
+            for row in reader:
+                yield row
+
+    def _iter_excel_data_rows(self, source: DataSource):
+        if cal_load_workbook is not None:
+            try:
+                wb = cal_load_workbook(source.original_path)
+                try:
+                    ws = wb.get_sheet_by_name(source.sheet_name) if source.sheet_name else wb.get_sheet_by_index(0)
+                    for ridx, row in enumerate(ws.iter_rows(), start=1):
+                        if ridx <= source.header_row:
+                            continue
+                        yield row
+                    return
+                finally:
+                    wb.close()
+            except Exception:
+                pass
+
+        wb = ox_load_workbook(source.original_path, read_only=True, data_only=True)
+        try:
+            ws = wb[source.sheet_name] if source.sheet_name else wb.worksheets[0]
+            for ridx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+                if ridx <= source.header_row:
+                    continue
+                yield row
+        finally:
+            wb.close()
+
+    def _normalize_raw_data_row(self, raw_row: Sequence[object], width: int) -> List[str]:
+        row = [self._cell_to_text(v) for v in list(raw_row)]
+        if len(row) < width:
+            row.extend([""] * (width - len(row)))
+        elif len(row) > width:
+            row = row[:width]
+        return row
+
+    @staticmethod
+    def _raw_row_matches_filters(row: Sequence[str], filter_indexes: Dict[int, Set[str]]) -> bool:
+        for idx, allowed in filter_indexes.items():
+            value = row[idx] if idx < len(row) else ""
+            if value not in allowed:
+                return False
+        return True
 
     def _pivot_cache_key(
         self,
@@ -2866,9 +3078,15 @@ class TimesheetPivotApp:
         if isinstance(notes, list) and notes:
             warn_lines = [f"- {str(x)}" for x in notes[:3]]
             warn = "\n\n快路径诊断：\n" + "\n".join(warn_lines)
+        data_line = ""
+        if isinstance(d, dict) and d.get("data_path"):
+            data_line = (
+                f"\n\n对应明细data：\n{d['data_path']}"
+                f"\n明细规模：{int(d.get('data_rows', 0)):,} 行 × {int(d.get('data_cols', 0)):,} 列"
+            )
         messagebox.showinfo(
             "导出完成",
-            f"已导出：\n{d['save_path']}\n\n结果规模：{d['rows']:,} 行 × {d['cols']:,} 列\n耗时：{float(d.get('elapsed_sec', 0.0)):.1f} 秒{extra}{warn}",
+            f"已导出套表：\n{d['save_path']}{data_line}\n\n套表规模：{d['rows']:,} 行 × {d['cols']:,} 列\n耗时：{float(d.get('elapsed_sec', 0.0)):.1f} 秒{extra}{warn}",
         )
 
     @staticmethod

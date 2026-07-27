@@ -52,6 +52,14 @@
       "vendor_dir": "file-list-directory",
       "entry": "main.py",
       "callable": "main"
+    },
+    {
+      "id": "wp_service_generator",
+      "name": "FY27 WP服务单生成工具",
+      "description": "自动拆分 AUD、IPO 及 archive，生成 Section 服务方案、Outlook Hours 核对和本地配置 SER 测算",
+      "vendor_dir": "wp-service-generator",
+      "entry": "main.py",
+      "callable": "main"
     }
   ]
 }

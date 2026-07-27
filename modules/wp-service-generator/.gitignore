@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+*.spec
+
+# Never commit production workbooks or generated outputs.
+*.xls
+*.xlsx
+*.xlsm
+*.zip
+
+# The sanitized blank template is stored as a text resource.

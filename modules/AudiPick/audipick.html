@@ -1,0 +1,2701 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>AudiPick - Smart Contract Audit</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="vendor/pdfjs/legacy/build/pdf.min.js"></script>
+<script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="vendor/xlsx/xlsx.full.min.js"></script>
+<script>
+tailwind.config={theme:{extend:{colors:{ey:'#FFCC00',eydark:'#1A1A1A',eygray:'#333333',eylight:'#FFF8E1'}}}};
+</script>
+<script src="rules/theme.js"></script>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;}
+/* ===== Intro Animation ===== */
+#intro{position:fixed;top:0;left:0;width:100%;height:100%;background:#000;z-index:9999;display:flex;justify-content:center;align-items:center;cursor:pointer;transition:all 0.8s ease-out;}
+#intro.intro-gone{display:none!important;pointer-events:none!important;}
+#intro canvas{position:absolute;top:0;left:0;width:100%;height:100%;}
+/* ===== End Intro ===== */
+.spinner{border:3px solid #333;border-top:3px solid #FFCC00;border-radius:50%;width:20px;height:20px;animation:spin .8s linear infinite;display:inline-block;}
+@keyframes spin{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
+.btn{background:#FFCC00;color:#1A1A1A;border:none;cursor:pointer;transition:all .2s;font-weight:600;}
+.btn:hover{background:#FFD633;}
+.btn:disabled{opacity:.5;cursor:not-allowed;}
+.btn-sm{padding:6px 16px;border-radius:8px;font-size:13px;}
+.btn-lg{padding:10px 24px;border-radius:10px;font-size:15px;}
+.btn-outline{background:transparent;color:#ccc;border:1px solid #555;cursor:pointer;transition:all .2s;font-weight:500;}
+.btn-outline:hover:not(:disabled){background:#2a2a2a;color:#fff;border-color:#777;}
+.btn-outline:disabled{opacity:.45;cursor:not-allowed;color:#666;border-color:#444;}
+.btn-sec{background:#333;color:#FFCC00;border:1px solid #FFCC00;}
+.btn-sec:hover{background:#444;}
+.ap-scroll{scrollbar-width:thin;scrollbar-color:#555 transparent;}
+.ap-scroll::-webkit-scrollbar{width:6px;height:6px;}
+.ap-scroll::-webkit-scrollbar-track{background:transparent;}
+.ap-scroll::-webkit-scrollbar-thumb{background:#555;border-radius:3px;}
+.ap-scroll::-webkit-scrollbar-thumb:hover{background:#777;}
+#ap-shell ::-webkit-scrollbar{width:6px;height:6px;}
+#ap-shell ::-webkit-scrollbar-track{background:transparent;}
+#ap-shell ::-webkit-scrollbar-thumb{background:#555;border-radius:3px;}
+#ap-shell ::-webkit-scrollbar-thumb:hover{background:#777;}
+#ap-shell *{scrollbar-width:thin;scrollbar-color:#555 transparent;}
+.ap-details{border:1px solid #333;border-radius:10px;background:#1a1a1a;}
+.ap-details>summary{padding:12px 16px;font-size:13px;color:#999;cursor:pointer;list-style:none;user-select:none;}
+.ap-details>summary::-webkit-details-marker{display:none;}
+.ap-details>summary::before{content:'▸ ';color:#666;}
+.ap-details[open]>summary::before{content:'▾ ';}
+.ap-details>summary:hover{color:#ccc;}
+.ap-details .ap-details-body{padding:0 16px 16px;border-top:1px solid #333;}
+.work-row-active{background:#2a2200;box-shadow:inset 0 0 0 1px #FFCC00;}
+#pdfContainer.pdf-flash{box-shadow:inset 0 0 0 3px rgba(255,204,0,0.5);transition:box-shadow .3s;}
+.pdf-search-note{position:absolute;left:12px;right:12px;top:12px;background:rgba(26,26,26,.92);border:1px solid rgba(255,204,0,.8);color:#FFCC00;border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.4;z-index:3;box-shadow:0 6px 18px rgba(0,0,0,.35);}
+#taskControlBar.hidden{display:none!important;}
+#splitHandle{touch-action:none;user-select:none;}
+.ap-menu-wrap .hidden{display:none;}
+.card{border:1px solid #444;border-radius:12px;background:#222;transition:box-shadow .2s;}
+.card:hover{box-shadow:0 4px 16px rgba(255,204,0,.1);}
+.dropzone{border:2px dashed #555;border-radius:12px;padding:28px;text-align:center;transition:all .2s;cursor:pointer;background:#1A1A1A;}
+.dropzone:hover{border-color:#FFCC00;background:#252000;}
+.dropzone.dragover{border-color:#FFCC00;background:#2A2200;}
+input:focus,textarea:focus{outline:none;border-color:#FFCC00;box-shadow:0 0 0 3px rgba(255,204,0,.15);}
+pre{white-space:pre-wrap;word-break:break-word;font-family:monospace;font-size:12px;background:#1A1A1A;padding:12px;border-radius:8px;max-height:300px;overflow:auto;border:1px solid #444;color:#ccc;}
+.text-ey{color:#FFCC00;}
+.bg-ey{background:#FFCC00;}
+.bg-eydark{background:#1A1A1A;}
+.border-ey{border-color:#FFCC00;}
+.tab-active{background:#FFCC00;color:#1A1A1A;font-weight:600;}
+.tab-inactive{background:#333;color:#999;}
+.tab-inactive:hover{background:#444;color:#ccc;}
+.radio-sel{border-color:#FFCC00;background:#2A2200;}
+.radio-nor{border-color:#555;background:#1A1A1A;}
+/* ===== Theme System ===== */
+html[data-theme="classic-dark"]{
+--app-bg:#1A1A1A;--surface:#222222;--surface-raised:#111827;--surface-strong:#050505;--surface-muted:#2D333B;--surface-tint:#2A2200;--control-bg:#050505;
+--text:#F7F7F7;--text-soft:#E2E6EA;--text-muted:#C5CBD3;--text-faint:#AEB7C2;--border:#4B5563;--border-soft:#303842;
+--accent:#FFCC00;--accent-hover:#FFD633;--accent-text:#171717;--accent-ink:#FFCC00;--accent-soft:#302700;--sidebar-bg:#050505;--sidebar-text:#F7F7F7;--sidebar-muted:#B8C0CB;--sidebar-accent:#FFCC00;--sidebar-border:#303842;--sidebar-hover:#1F252C;
+--success:#6EE7B7;--success-soft:#064E3B;--danger:#FCA5A5;--danger-soft:#7F1D1D;--warning:#FCD34D;--warning-soft:#78350F;--info:#93C5FD;--info-soft:#1E3A8A;--scroll-thumb:#657080;--focus-ring:rgba(255,204,0,.22);--accent-shadow:rgba(255,204,0,.14);
+}
+html[data-theme="yellow-light"]{
+--app-bg:#F6F7F9;--surface:#FFFFFF;--surface-raised:#F9FAFB;--surface-strong:#F1F3F5;--surface-muted:#E8EBEF;--surface-tint:#FFF4B8;--control-bg:#FFFFFF;
+--text:#171A1F;--text-soft:#2D333B;--text-muted:#4B5563;--text-faint:#5F6975;--border:#C7CDD5;--border-soft:#DFE3E8;
+--accent:#F2C200;--accent-hover:#DDB100;--accent-text:#171717;--accent-ink:#765E00;--accent-soft:#FFF2A8;--sidebar-bg:#FFFFFF;--sidebar-text:#171A1F;--sidebar-muted:#4B5563;--sidebar-accent:#765E00;--sidebar-border:#D9DEE5;--sidebar-hover:#F1F3F5;
+--success:#166534;--success-soft:#DCFCE7;--danger:#B91C1C;--danger-soft:#FEE2E2;--warning:#854D0E;--warning-soft:#FEF3C7;--info:#1E40AF;--info-soft:#DBEAFE;--scroll-thumb:#8B95A2;--focus-ring:rgba(242,194,0,.26);--accent-shadow:rgba(173,136,0,.15);
+}
+html[data-theme="blue-white"]{
+--app-bg:#F1F5F9;--surface:#FFFFFF;--surface-raised:#F8FAFC;--surface-strong:#EDF2F7;--surface-muted:#E2E8F0;--surface-tint:#DBEAFE;--control-bg:#FFFFFF;
+--text:#172033;--text-soft:#28364D;--text-muted:#4B5563;--text-faint:#5D6878;--border:#BCC7D4;--border-soft:#D9E1EA;
+--accent:#1D4ED8;--accent-hover:#1E40AF;--accent-text:#FFFFFF;--accent-ink:#1D4ED8;--accent-soft:#DBEAFE;--sidebar-bg:#16324F;--sidebar-text:#FFFFFF;--sidebar-muted:#C7D5E4;--sidebar-accent:#93C5FD;--sidebar-border:#31506F;--sidebar-hover:#234361;
+--success:#166534;--success-soft:#DCFCE7;--danger:#B91C1C;--danger-soft:#FEE2E2;--warning:#854D0E;--warning-soft:#FEF3C7;--info:#1E40AF;--info-soft:#DBEAFE;--scroll-thumb:#7B8A9A;--focus-ring:rgba(29,78,216,.2);--accent-shadow:rgba(29,78,216,.14);
+}
+html[data-theme="red-white"]{
+--app-bg:#F7F7F8;--surface:#FFFFFF;--surface-raised:#FAF8F8;--surface-strong:#F3F1F1;--surface-muted:#EAE6E5;--surface-tint:#FDE8E7;--control-bg:#FFFFFF;
+--text:#25201F;--text-soft:#37302E;--text-muted:#514B49;--text-faint:#675F5C;--border:#CBC3C1;--border-soft:#E2DCDA;
+--accent:#C62828;--accent-hover:#A91F1F;--accent-text:#FFFFFF;--accent-ink:#B91C1C;--accent-soft:#FDE2E2;--sidebar-bg:#FFFFFF;--sidebar-text:#25201F;--sidebar-muted:#5E5754;--sidebar-accent:#B91C1C;--sidebar-border:#DED7D5;--sidebar-hover:#F3EEEE;
+--success:#166534;--success-soft:#DCFCE7;--danger:#A71919;--danger-soft:#FEE2E2;--warning:#854D0E;--warning-soft:#FEF3C7;--info:#1E40AF;--info-soft:#DBEAFE;--scroll-thumb:#948986;--focus-ring:rgba(198,40,40,.2);--accent-shadow:rgba(198,40,40,.14);
+}
+html[data-theme="yellow-blue"]{
+--app-bg:#EAF1F7;--surface:#FFFFFF;--surface-raised:#F7FAFC;--surface-strong:#E5EDF4;--surface-muted:#D9E5EF;--surface-tint:#FFF1A8;--control-bg:#FFFFFF;
+--text:#102A43;--text-soft:#243F57;--text-muted:#425B70;--text-faint:#526B80;--border:#B5C6D4;--border-soft:#D2DEE8;
+--accent:#F3C300;--accent-hover:#DDB100;--accent-text:#102A43;--accent-ink:#6B5600;--accent-soft:#FFF0A3;--sidebar-bg:#102A43;--sidebar-text:#FFFFFF;--sidebar-muted:#D7E3EE;--sidebar-accent:#F3C300;--sidebar-border:#294861;--sidebar-hover:#1C3B55;
+--success:#166534;--success-soft:#DCFCE7;--danger:#B91C1C;--danger-soft:#FEE2E2;--warning:#854D0E;--warning-soft:#FEF3C7;--info:#1E40AF;--info-soft:#DBEAFE;--scroll-thumb:#72889A;--focus-ring:rgba(243,195,0,.25);--accent-shadow:rgba(135,107,0,.15);
+}
+html[data-theme="red-yellow-ivory"]{
+--app-bg:#F6F0E2;--surface:#FFFDF7;--surface-raised:#FAF5EA;--surface-strong:#F1E8D5;--surface-muted:#E9DDC7;--surface-tint:#FFF0B3;--control-bg:#FFFDF7;
+--text:#3B2520;--text-soft:#4D3731;--text-muted:#62504A;--text-faint:#74615A;--border:#CDBEAA;--border-soft:#E3D7C5;
+--accent:#E0A800;--accent-hover:#C59000;--accent-text:#2D1C16;--accent-ink:#765700;--accent-soft:#FFE9A0;--sidebar-bg:#8F2424;--sidebar-text:#FFFFFF;--sidebar-muted:#F4D6CE;--sidebar-accent:#FFD55A;--sidebar-border:#A94A43;--sidebar-hover:#A23331;
+--success:#166534;--success-soft:#DCFCE7;--danger:#A71919;--danger-soft:#FEE2E2;--warning:#7A450B;--warning-soft:#FDE7AF;--info:#1E40AF;--info-soft:#DBEAFE;--scroll-thumb:#907E6B;--focus-ring:rgba(224,168,0,.24);--accent-shadow:rgba(143,36,36,.13);
+}
+html[data-theme="yellow-green"]{
+--app-bg:#EEF4EA;--surface:#FFFFFF;--surface-raised:#F7FAF5;--surface-strong:#E7EFE3;--surface-muted:#DDE8D7;--surface-tint:#FFF2A8;--control-bg:#FFFFFF;
+--text:#173A2B;--text-soft:#294A3B;--text-muted:#465E53;--text-faint:#566E63;--border:#B7C9BF;--border-soft:#D5E1DA;
+--accent:#F0C419;--accent-hover:#D7AD0D;--accent-text:#173A2B;--accent-ink:#6B5600;--accent-soft:#FFF1A1;--sidebar-bg:#24513F;--sidebar-text:#FFFFFF;--sidebar-muted:#D6E8DF;--sidebar-accent:#F0C419;--sidebar-border:#3D6A58;--sidebar-hover:#32614E;
+--success:#166534;--success-soft:#DCFCE7;--danger:#B91C1C;--danger-soft:#FEE2E2;--warning:#7A4C08;--warning-soft:#FEF3C7;--info:#1E40AF;--info-soft:#DBEAFE;--scroll-thumb:#71877B;--focus-ring:rgba(240,196,25,.25);--accent-shadow:rgba(70,105,67,.14);
+}
+html[data-theme="teal-dark"]{
+--app-bg:#101817;--surface:#182422;--surface-raised:#1D2B28;--surface-strong:#07110F;--surface-muted:#293936;--surface-tint:#123F38;--control-bg:#0B1513;
+--text:#F1F8F6;--text-soft:#D9E7E3;--text-muted:#B9CBC6;--text-faint:#A3BAB4;--border:#49615B;--border-soft:#2C403B;
+--accent:#2DD4BF;--accent-hover:#5EEAD4;--accent-text:#062620;--accent-ink:#5EEAD4;--accent-soft:#124A42;--sidebar-bg:#07110F;--sidebar-text:#F5FAF8;--sidebar-muted:#ADC3BD;--sidebar-accent:#5EEAD4;--sidebar-border:#263B36;--sidebar-hover:#162622;
+--success:#6EE7B7;--success-soft:#064E3B;--danger:#FCA5A5;--danger-soft:#7F1D1D;--warning:#FCD34D;--warning-soft:#78350F;--info:#93C5FD;--info-soft:#1E3A8A;--scroll-thumb:#66807A;--focus-ring:rgba(45,212,191,.23);--accent-shadow:rgba(45,212,191,.14);
+}
+html[data-theme="classic-dark"],html[data-theme="teal-dark"]{color-scheme:dark;}
+html[data-theme="yellow-light"],html[data-theme="blue-white"],html[data-theme="red-white"],html[data-theme="yellow-blue"],html[data-theme="red-yellow-ivory"],html[data-theme="yellow-green"]{color-scheme:light;}
+html[data-theme] body,html[data-theme] #ap-shell,html[data-theme] .bg-eydark{background-color:var(--app-bg)!important;color:var(--text-soft)!important;}
+html.theme-applying *,html.theme-applying *::before,html.theme-applying *::after{transition:none!important;}
+html[data-theme] .bg-black{background-color:var(--surface-strong)!important;}
+html[data-theme] .bg-gray-900{background-color:var(--surface-raised)!important;}
+html[data-theme] .bg-gray-800{background-color:var(--surface-muted)!important;}
+html[data-theme] .bg-gray-700{background-color:var(--border)!important;}
+html[data-theme] .bg-black\/30,html[data-theme] .bg-black\/40,html[data-theme] .bg-black\/50{background-color:var(--surface-strong)!important;}
+html[data-theme] .text-white{color:var(--text)!important;}
+html[data-theme] .text-gray-200,html[data-theme] .text-gray-300{color:var(--text-soft)!important;}
+html[data-theme] .text-gray-400{color:var(--text-muted)!important;}
+html[data-theme] .text-gray-500,html[data-theme] .text-gray-600,html[data-theme] .text-gray-700{color:var(--text-faint)!important;}
+html[data-theme] .border-gray-500,html[data-theme] .border-gray-600,html[data-theme] .border-gray-700{border-color:var(--border)!important;}
+html[data-theme] .border-gray-800{border-color:var(--border-soft)!important;}
+html[data-theme] .text-ey{color:var(--accent-ink)!important;}
+html[data-theme] .text-eydark{color:var(--accent-text)!important;}
+html[data-theme] .bg-ey{background-color:var(--accent)!important;}
+html[data-theme] .border-ey{border-color:var(--accent)!important;}
+html[data-theme] .hover\:bg-gray-900:hover,html[data-theme] .hover\:bg-gray-800:hover,html[data-theme] .hover\:bg-gray-700:hover{background-color:var(--surface-muted)!important;}
+html[data-theme] .hover\:text-white:hover,html[data-theme] .hover\:text-gray-200:hover{color:var(--text)!important;}
+html[data-theme] .hover\:text-ey:hover{color:var(--accent)!important;}
+html[data-theme] .hover\:border-ey:hover{border-color:var(--accent)!important;}
+html[data-theme] .placeholder\:text-gray-600::placeholder{color:var(--text-faint)!important;opacity:1;}
+html[data-theme] input:not([type="checkbox"]):not([type="radio"]),html[data-theme] textarea,html[data-theme] select{background-color:var(--control-bg)!important;color:var(--text)!important;border-color:var(--border)!important;}
+html[data-theme] input[type="checkbox"],html[data-theme] input[type="radio"]{accent-color:var(--accent);}
+html[data-theme] option{background:var(--control-bg);color:var(--text);}
+html[data-theme] input:focus,html[data-theme] textarea:focus,html[data-theme] select:focus{outline:none;border-color:var(--accent)!important;box-shadow:0 0 0 3px var(--focus-ring)!important;}
+html[data-theme] .btn{background:var(--accent);color:var(--accent-text);}
+html[data-theme] .btn:hover:not(:disabled){background:var(--accent-hover);}
+html[data-theme] .btn-sec{background:var(--surface-muted);color:var(--accent-ink);border-color:var(--accent);}
+html[data-theme] .btn-sec:hover:not(:disabled){background:var(--accent-soft);}
+html[data-theme] .btn-outline{background:transparent;color:var(--text-muted);border-color:var(--border);}
+html[data-theme] .btn-outline:hover:not(:disabled){background:var(--surface-muted);color:var(--text);border-color:var(--text-faint);}
+html[data-theme] .card{background:var(--surface);border-color:var(--border);}
+html[data-theme] .card:hover{box-shadow:0 4px 16px var(--accent-shadow);}
+html[data-theme] .dropzone{background:var(--surface);border-color:var(--border);}
+html[data-theme] .dropzone:hover,html[data-theme] .dropzone.dragover{background:var(--accent-soft);border-color:var(--accent);}
+html[data-theme] .ap-details{background:var(--surface);border-color:var(--border);}
+html[data-theme] .ap-details>summary{color:var(--text-muted);}
+html[data-theme] .ap-details>summary::before{color:var(--text-faint);}
+html[data-theme] .ap-details>summary:hover{color:var(--text);}
+html[data-theme] .ap-details .ap-details-body{border-color:var(--border-soft);}
+html[data-theme] pre{background:var(--surface-strong);border-color:var(--border);color:var(--text-soft);}
+html[data-theme] .tab-active{background:var(--accent);color:var(--accent-text);}
+html[data-theme] .tab-inactive{background:var(--surface-muted);color:var(--text-muted);}
+html[data-theme] .tab-inactive:hover{background:var(--accent-soft);color:var(--text);}
+html[data-theme] .radio-sel{border-color:var(--accent);background:var(--accent-soft);}
+html[data-theme] .radio-nor{border-color:var(--border);background:var(--surface);}
+html[data-theme] .work-row-active{background:var(--accent-soft)!important;box-shadow:inset 0 0 0 1px var(--accent);}
+html[data-theme] .spinner{border-color:var(--border);border-top-color:var(--accent);}
+html[data-theme] .ap-scroll,html[data-theme] #ap-shell *{scrollbar-color:var(--scroll-thumb) transparent;}
+html[data-theme] .ap-scroll::-webkit-scrollbar-thumb,html[data-theme] #ap-shell ::-webkit-scrollbar-thumb{background:var(--scroll-thumb);}
+html[data-theme] #tour-tooltip{background:var(--surface);border-color:var(--border);color:var(--text);}
+html[data-theme] #intro{background:var(--sidebar-bg);}
+html[data-theme] .text-emerald-400,html[data-theme] .text-emerald-500{color:var(--success)!important;}
+html[data-theme] .bg-emerald-900,html[data-theme] .bg-emerald-900\/40{background-color:var(--success-soft)!important;}
+html[data-theme] .text-red-300,html[data-theme] .text-red-400,html[data-theme] .text-red-500{color:var(--danger)!important;}
+html[data-theme] .bg-red-900,html[data-theme] .bg-red-900\/30,html[data-theme] .bg-red-900\/40{background-color:var(--danger-soft)!important;}
+html[data-theme] .text-amber-400,html[data-theme] .text-yellow-400{color:var(--warning)!important;}
+html[data-theme] .bg-amber-900,html[data-theme] .bg-yellow-900{background-color:var(--warning-soft)!important;}
+html[data-theme] .text-blue-400{color:var(--info)!important;}
+html[data-theme] .bg-blue-900{background-color:var(--info-soft)!important;}
+html[data-theme] #ap-shell>aside:first-of-type{background:var(--sidebar-bg)!important;border-color:var(--sidebar-border)!important;color:var(--sidebar-text)!important;}
+html[data-theme] #ap-shell>aside:first-of-type .text-white,html[data-theme] #ap-shell>aside:first-of-type .text-gray-200,html[data-theme] #ap-shell>aside:first-of-type .text-gray-300{color:var(--sidebar-text)!important;}
+html[data-theme] #ap-shell>aside:first-of-type .text-gray-400,html[data-theme] #ap-shell>aside:first-of-type .text-gray-500,html[data-theme] #ap-shell>aside:first-of-type .text-gray-600,html[data-theme] #ap-shell>aside:first-of-type .text-gray-700{color:var(--sidebar-muted)!important;}
+html[data-theme] #ap-shell>aside:first-of-type .text-ey{color:var(--sidebar-accent)!important;}
+html[data-theme] #ap-shell>aside:first-of-type .border-gray-800{border-color:var(--sidebar-border)!important;}
+html[data-theme] #ap-shell>aside:first-of-type .hover\:bg-gray-900:hover{background:var(--sidebar-hover)!important;}
+html[data-theme] #ap-shell>aside:first-of-type .hover\:text-gray-200:hover{color:var(--sidebar-text)!important;}
+.theme-dialog{background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 24px 70px rgba(0,0,0,.3);padding:20px;color:var(--text);}
+.theme-dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px;}
+.theme-dialog-head h3{font-size:18px;font-weight:700;color:var(--text);}
+.theme-dialog-head p{font-size:12px;color:var(--text-muted);margin-top:4px;}
+.theme-close{width:32px;height:32px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:22px;border-radius:6px;}
+.theme-close:hover{background:var(--surface-muted);color:var(--text);}
+.theme-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;max-height:62vh;overflow:auto;padding:1px;}
+.theme-option{min-height:84px;width:100%;display:grid;grid-template-columns:92px minmax(0,1fr) auto;align-items:center;gap:12px;text-align:left;padding:12px;border:1px solid var(--border-soft);border-radius:8px;background:var(--surface-raised);color:var(--text);transition:border-color .18s,background .18s,box-shadow .18s;}
+.theme-option:hover{border-color:var(--accent);background:var(--surface-muted);}
+.theme-option-selected{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--accent-soft);}
+.theme-option-swatches{display:flex;height:42px;border-radius:6px;overflow:hidden;border:1px solid rgba(0,0,0,.16);}
+.theme-swatch{flex:1;min-width:0;}
+.theme-option-copy{min-width:0;display:block;}
+.theme-option-copy strong{display:block;font-size:14px;color:var(--text);}
+.theme-option-copy small{display:block;font-size:11px;color:var(--text-muted);margin-top:4px;white-space:normal;line-height:1.35;}
+.theme-option-state{font-size:11px;color:var(--text-muted);white-space:nowrap;}
+.theme-option-selected .theme-option-state{color:var(--accent-text);background:var(--accent);padding:3px 7px;border-radius:999px;font-weight:600;}
+.theme-dialog-foot{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:18px;padding-top:14px;border-top:1px solid var(--border-soft);}
+.theme-dialog-foot p{font-size:11px;color:var(--text-muted);}
+@media(max-width:720px){.theme-grid{grid-template-columns:1fr}.theme-option{grid-template-columns:78px minmax(0,1fr) auto}.theme-dialog{padding:16px}.theme-dialog-foot{align-items:flex-end}.theme-dialog-foot p{max-width:70%}}
+/* ===== Tour Guide ===== */
+#tour-overlay{position:fixed;box-shadow:0 0 0 9999px rgba(0,0,0,0.8);border-radius:8px;z-index:99998;transition:all 0.4s cubic-bezier(0.4,0,0.2,1);pointer-events:none;}
+#tour-tooltip{position:fixed;z-index:99999;width:320px;background:#222;border:1px solid #444;border-radius:12px;padding:20px;color:#fff;transition:all 0.4s cubic-bezier(0.4,0,0.2,1);box-shadow:0 10px 30px rgba(0,0,0,0.8);}
+#modal-root{position:fixed;inset:0;z-index:100000;pointer-events:none;}
+#modal-root .modal-backdrop{pointer-events:auto;}
+</style>
+</head>
+<body class="bg-eydark text-gray-200 min-h-screen">
+<div id="intro">
+  <canvas id="introCanvas"></canvas>
+  <div id="intro-content" class="flex flex-col items-center justify-center absolute z-10 pointer-events-none w-full h-full">
+    <div id="intro-icon" class="w-24 h-24 bg-ey rounded-3xl flex items-center justify-center text-eydark text-6xl font-black shadow-[0_0_60px_rgba(255,204,0,0.6)] opacity-0 transform scale-0 transition-all duration-700 ease-[cubic-bezier(0.34,1.56,0.64,1)]">A</div>
+    <div id="intro-title" class="text-ey text-5xl font-black tracking-widest mt-8 opacity-0 translate-y-8 transition-all duration-700 delay-200">AudiPick</div>
+    <div id="intro-sub" class="text-gray-400 text-sm tracking-[0.4em] opacity-0 translate-y-8 transition-all duration-700 delay-300 mt-3 font-medium">SMART CONTRACT AUDIT</div>
+    <button id="intro-btn" onclick="endIntroBtn(event)" class="mt-12 bg-ey text-eydark font-bold text-lg py-3 px-10 rounded-xl opacity-0 translate-y-8 transition-all duration-700 delay-500 shadow-[0_6px_0_#b38f00] hover:translate-y-1 hover:shadow-[0_4px_0_#b38f00] active:translate-y-2 active:shadow-none pointer-events-auto">开始审计</button>
+  </div>
+</div>
+<div id="app" style="opacity:0; transition:opacity 0.5s;"></div>
+<div id="taskControlBar" class="hidden"></div>
+<div id="modal-root"></div>
+<script>
+// ===== Intro Animation Logic =====
+window.hideIntro=function(){
+var intro=document.getElementById('intro');
+if(intro){intro.classList.add('intro-gone');intro.style.pointerEvents='none';intro.style.display='none';intro.style.opacity='0';}
+var app=document.getElementById('app');
+if(app)app.style.opacity='1';
+};
+(function(){
+    var lastIntro = localStorage.getItem('ap_last_intro');
+    var now = Date.now();
+    // 选项B：每天只播放一次 (24 * 60 * 60 * 1000 = 86400000ms)
+    if(lastIntro && now - parseInt(lastIntro) < 86400000) {
+        window.hideIntro();
+        window.apPendingTour=!localStorage.getItem('ap_tour_done');
+        return;
+    }
+    
+    // 如果没有跳过，则设置本次播放时间
+    localStorage.setItem('ap_last_intro', now.toString());
+
+    var intro = document.getElementById('intro');
+    var canvas = document.getElementById('introCanvas');
+    var ctx = canvas.getContext('2d');
+    var app = document.getElementById('app');
+    var w, h, cx, cy;
+    var fov = 300;
+    var animationId;
+    var introDone = false;
+
+    function resize() {
+        w = canvas.width = window.innerWidth;
+        h = canvas.height = window.innerHeight;
+        cx = w / 2;
+        cy = h / 2;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    class Doc {
+        constructor() { this.init(true); }
+        init(randomZ) {
+            this.x = (Math.random() - 0.5) * 8000;
+            this.y = (Math.random() - 0.5) * 8000;
+            this.z = randomZ ? Math.random() * 4000 + 500 : 4000;
+            this.vz = -(Math.random() * 40 + 20);
+            this.rot = Math.random() * Math.PI * 2;
+            this.vrot = (Math.random() - 0.5) * 0.05;
+        }
+        update(phase) {
+            if (phase === 1) {
+                this.z += this.vz;
+                this.vz *= 1.04; // 加速飞向镜头
+                if (this.z < 10) this.init(false);
+                this.rot += this.vrot;
+            } else if (phase === 2) {
+                // 坍缩
+                this.x *= 0.75;
+                this.y *= 0.75;
+                this.z *= 0.75;
+                this.rot += this.vrot * 15;
+            }
+        }
+        draw() {
+            if (this.z < 10) return;
+            var scale = fov / (fov + this.z);
+            var px = cx + this.x * scale;
+            var py = cy + this.y * scale;
+            
+            ctx.save();
+            ctx.translate(px, py);
+            ctx.rotate(this.rot);
+            ctx.scale(scale, scale);
+            
+            // 画文档面片
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.03)';
+            ctx.strokeStyle = 'rgba(255, 204, 0, 0.3)';
+            ctx.lineWidth = 3;
+            ctx.fillRect(-60, -80, 120, 160);
+            ctx.strokeRect(-60, -80, 120, 160);
+            
+            // 画文字线条
+            ctx.fillStyle = 'rgba(255, 204, 0, 0.4)';
+            for(var i=0; i<5; i++) {
+                ctx.fillRect(-40, -50 + i*20, 80 - Math.random()*40, 6);
+            }
+            ctx.restore();
+        }
+    }
+
+    class DataPoint {
+        constructor() {
+            this.x = cx + (Math.random() - 0.5) * 150;
+            this.y = cy + (Math.random() - 0.5) * 150;
+            this.vx = (Math.random() - 0.5) * 80;
+            this.vy = (Math.random() - 0.5) * 80;
+            this.life = 1;
+        }
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.vx *= 0.85;
+            this.vy *= 0.85;
+            this.life -= 0.03;
+        }
+        draw() {
+            ctx.fillStyle = 'rgba(255, 204, 0, ' + this.life + ')';
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, 4, 0, Math.PI*2);
+            ctx.fill();
+        }
+    }
+
+    var docs = [];
+    for(var i=0; i<250; i++) docs.push(new Doc());
+    var points = [];
+    var shockwave = { r: 0, active: false, opacity: 1 };
+    var startTime = Date.now();
+
+    function animate() {
+        if(introDone) return;
+        var elapsed = Date.now() - startTime;
+        
+        // 拖尾效果
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+        ctx.fillRect(0, 0, w, h);
+        
+        var phase = 1;
+        if (elapsed > 1800) phase = 2; // 1.8s开始坍缩
+        if (elapsed > 2400) phase = 3; // 2.4s爆发
+        
+        if (phase === 1 || phase === 2) {
+            for(var i=0; i<docs.length; i++) {
+                docs[i].update(phase);
+                docs[i].draw();
+            }
+        }
+        
+        if (phase === 2) {
+            for(var j=0; j<20; j++) points.push(new DataPoint());
+        }
+        
+        if (phase >= 2) {
+            for(var k=0; k<points.length; k++) {
+                points[k].update();
+                points[k].draw();
+            }
+            points = points.filter(function(p){ return p.life > 0; });
+        }
+        
+        if (phase === 3 && !shockwave.active) {
+            shockwave.active = true;
+            document.getElementById('intro-icon').style.opacity = '1';
+            document.getElementById('intro-icon').style.transform = 'scale(1)';
+            document.getElementById('intro-title').style.opacity = '1';
+            document.getElementById('intro-title').style.transform = 'translateY(0)';
+            document.getElementById('intro-sub').style.opacity = '1';
+            document.getElementById('intro-sub').style.transform = 'translateY(0)';
+            document.getElementById('intro-btn').style.opacity = '1';
+            document.getElementById('intro-btn').style.transform = 'translateY(0)';
+            
+            // 冲击波点亮背景
+            intro.style.background = 'radial-gradient(circle at center, #2a1f00 0%, #000 80%)';
+        }
+        
+        if (shockwave.active) {
+            shockwave.r += 80;
+            shockwave.opacity -= 0.03;
+            if (shockwave.opacity > 0) {
+                ctx.beginPath();
+                ctx.arc(cx, cy, shockwave.r, 0, Math.PI*2);
+                ctx.strokeStyle = 'rgba(255, 204, 0, ' + shockwave.opacity + ')';
+                ctx.lineWidth = 20;
+                ctx.stroke();
+            }
+        }
+        
+        animationId = requestAnimationFrame(animate);
+    }
+
+    animate();
+
+    window.endIntroBtn = function(e) {
+        if(e) e.stopPropagation();
+        if(introDone) return;
+        introDone = true;
+        cancelAnimationFrame(animationId);
+        window.hideIntro();
+        if(!localStorage.getItem('ap_tour_done')) {
+            if(typeof nav==='function' && typeof page!=='undefined' && page!=='dash') nav('dash');
+            setTimeout(function(){ if(window.startTour) window.startTour(); }, 150);
+        }
+    };
+    
+    // 点击背景也可以跳过
+    intro.addEventListener('click', function(e){
+        if(e.target.id !== 'intro-btn') window.endIntroBtn();
+    });
+})();
+// ===== Intro Animation Logic End =====
+
+// ===== Tour Guide Logic =====
+window.startTour = function() {
+    if(document.getElementById('tour-overlay')) return;
+    
+    // 确保在工作台页面，否则找不到对应元素
+    if(page !== 'dash') {
+        nav('dash');
+        // 如果进行了页面跳转，需要等待渲染完成再执行后续逻辑
+        setTimeout(window.startTour, 100);
+        return;
+    }
+    
+    var steps = [
+        { el: 'nav-cfg', title: '第一步：配置 AI 接口 🔑', desc: 'AudiPick 依赖大模型进行智能提取。请先进入配置页面，填写您的 API Key。' },
+        { el: 'btn-new-proj', title: '第二步：新建审计项目 📁', desc: '配置完成后，在这里创建一个新项目，用于归档和管理您的合同文件。' },
+        { el: 'nav-dash', title: '第三步：上传与提取 🤖', desc: '进入项目后，拖拽上传 PDF 合同，系统会自动进行 OCR 识别和 AI 条款提取，最后可一键导出 Excel 底稿！' }
+    ];
+    
+    var currentStep = 0;
+    var overlay = document.createElement('div');
+    overlay.id = 'tour-overlay';
+    var tooltip = document.createElement('div');
+    tooltip.id = 'tour-tooltip';
+    
+    document.body.appendChild(overlay);
+    document.body.appendChild(tooltip);
+    
+    function showStep() {
+        var step = steps[currentStep];
+        var target = document.getElementById(step.el);
+        if(!target) {
+            endTour();
+            return;
+        }
+        
+        var rect = target.getBoundingClientRect();
+        
+        // 设置遮罩层（高亮目标）
+        overlay.style.top = (rect.top - 4) + 'px';
+        overlay.style.left = (rect.left - 4) + 'px';
+        overlay.style.width = (rect.width + 8) + 'px';
+        overlay.style.height = (rect.height + 8) + 'px';
+        
+        // 设置提示框内容
+        var isLast = currentStep === steps.length - 1;
+        tooltip.innerHTML = '<h3 class="text-lg font-bold text-ey mb-2">' + step.title + '</h3><p class="text-sm text-gray-300 mb-4 leading-relaxed">' + step.desc + '</p><div class="flex justify-between items-center mt-4 pt-4 border-t border-gray-700"><span class="text-xs text-gray-500">' + (currentStep + 1) + ' / ' + steps.length + '</span><div class="flex gap-2"><button onclick="endTour()" class="text-xs text-gray-400 hover:text-white px-2 py-1">跳过</button><button onclick="nextTourStep()" class="bg-ey text-eydark px-3 py-1.5 rounded text-xs font-bold hover:bg-yellow-400 transition-colors">' + (isLast ? '完成体验' : '下一步') + '</button></div></div>';
+        
+        // 计算提示框位置 (尽量放在目标右侧或下方)
+        var tooltipTop = rect.top;
+        var tooltipLeft = rect.right + 20;
+        
+        if(tooltipLeft + 320 > window.innerWidth) {
+            // 如果右侧放不下，放到下方
+            tooltipTop = rect.bottom + 20;
+            // 默认与目标左对齐
+            tooltipLeft = rect.left;
+            // 如果左对齐还是会超出右侧屏幕，则靠右对齐（距离屏幕边缘20px）
+            if (tooltipLeft + 320 > window.innerWidth) {
+                tooltipLeft = window.innerWidth - 320 - 20;
+            }
+        }
+        
+        tooltip.style.top = tooltipTop + 'px';
+        tooltip.style.left = tooltipLeft + 'px';
+    }
+    
+    window.nextTourStep = function() {
+        currentStep++;
+        if(currentStep >= steps.length) endTour();
+        else showStep();
+    };
+    
+    window.endTour = function() {
+        localStorage.setItem('ap_tour_done', 'true');
+        if(overlay) overlay.remove();
+        if(tooltip) tooltip.remove();
+    };
+    
+    // 延迟一点显示，确保DOM渲染完毕
+    setTimeout(showStep, 500);
+};
+
+</script>
+<script src="rules/prompts/loan_covenant.js"></script>
+<script src="rules/prompts/loan_general.js"></script>
+<script src="rules/revenue_workpaper.js"></script>
+<script src="rules/prompts/revenue_workpaper.js"></script>
+<script src="rules/prompts/revenue.js"></script>
+<script src="rules/prompts/procurement.js"></script>
+<script src="rules/prompts/invoicing_agreement.js"></script>
+<script src="rules/prompts/statement.js"></script>
+<script src="rules/prompts/invoice.js"></script>
+<script src="rules/prompts/warehouse_io.js"></script>
+<script src="rules/prompts/account_opening.js"></script>
+<script src="rules/prompts/tax_declaration.js"></script>
+<script src="rules/prompts/credit_report.js"></script>
+<script src="rules/prompts/tax_audit_report.js"></script>
+<script src="rules/registry.js"></script>
+<script src="rules/fieldset.js"></script>
+<script src="rules/classify.js"></script>
+<script src="rules/ui.js"></script>
+<script>
+var PDFJS_CFG=(window.desktop&&window.desktop.pdfjs)||null;
+pdfjsLib.GlobalWorkerOptions.workerSrc=PDFJS_CFG?PDFJS_CFG.workerSrc:'vendor/pdfjs/legacy/build/pdf.worker.min.js';
+function getPdfDocumentOptions(data){
+var cfg=PDFJS_CFG||{cMapUrl:'vendor/pdfjs/cmaps/',standardFontDataUrl:'vendor/pdfjs/standard_fonts/'};
+return{
+data:data,
+cMapUrl:cfg.cMapUrl,
+cMapPacked:true,
+standardFontDataUrl:cfg.standardFontDataUrl,
+useSystemFonts:true
+};
+}
+if(typeof refreshRulePresets==='function')refreshRulePresets();
+
+let page='home',pid='',cid='';
+let activeRuleId='loan_covenant';
+let batchRuleId='loan_covenant';
+let rulesViewId='loan_covenant';
+let templateTab='all';
+let templateSearch='';
+let selectedWorkRowId=null;
+let activeFieldSetId=null;
+let workFilterText='';
+let editingCustomId=null;
+let pendingExtractOpts=null;
+let CUSTOM_RULES=[];
+let P=JSON.parse(localStorage.getItem('ap_p')||'[]');
+let Ct=JSON.parse(localStorage.getItem('ap_c')||'[]');
+let V=JSON.parse(localStorage.getItem('ap_v')||'[]');
+let A=JSON.parse(localStorage.getItem('ap_k')||'{}');
+let O=JSON.parse(localStorage.getItem('ap_ocr')||JSON.stringify({engine:'ai'}));
+let workLog=JSON.parse(localStorage.getItem('ap_log')||'[]');
+let extractCache=JSON.parse(localStorage.getItem('ap_cache')||'{}');
+let logCollapsed=true;
+const BATCH_CONCURRENCY=3;
+var TASK_STOPPED='TASK_STOPPED';
+var taskRunner={
+active:false,type:'',label:'',detail:'',progress:'',paused:false,stopped:false,abortCtrl:null,_total:0,_done:0,
+start:function(type,label,total){
+if(this.active&&this.abortCtrl){try{this.abortCtrl.abort();}catch(e){}}
+this.active=true;this.type=type;this.label=label;this.detail='';this.progress=total?( '0/'+total):'';this.paused=false;this.stopped=false;this.abortCtrl=new AbortController();this._total=total||0;this._done=0;renderTaskBar();
+},
+update:function(detail,progress){
+if(detail!==undefined)this.detail=detail;
+if(progress!==undefined)this.progress=progress;
+renderTaskBar();
+},
+tick:function(n){
+this._done=(this._done||0)+(n||1);
+if(this._total)this.progress=this._done+'/'+this._total;
+renderTaskBar();
+},
+finish:function(msg,progress){
+this.active=false;this.paused=false;this.stopped=false;this.abortCtrl=null;
+if(msg)this.detail=msg;
+if(progress!==undefined)this.progress=progress;
+renderTaskBar();
+var self=this;
+setTimeout(function(){if(!self.active)hideTaskBar();},4500);
+},
+pause:function(){if(!this.active||this.stopped)return;this.paused=true;renderTaskBar();},
+resume:function(){if(!this.active||this.stopped)return;this.paused=false;renderTaskBar();},
+stop:function(){if(!this.active)return;this.stopped=true;this.paused=false;if(this.abortCtrl){try{this.abortCtrl.abort();}catch(e){}}renderTaskBar();},
+getSignal:function(){return this.abortCtrl?this.abortCtrl.signal:null;},
+isStopped:function(){return !!this.stopped;},
+async checkpoint(){if(this.stopped)throw new Error(TASK_STOPPED);while(this.paused&&!this.stopped){renderTaskBar();await new Promise(function(r){setTimeout(r,250);});}if(this.stopped)throw new Error(TASK_STOPPED);}
+};
+window.taskRunner=taskRunner;
+window.taskPause=function(){taskRunner.pause();};
+window.taskResume=function(){taskRunner.resume();};
+window.taskStop=function(){taskRunner.stop();};
+function taskTypeLabel(t){if(t==='upload')return '上传/OCR';if(t==='extract')return 'AI提取';if(t==='batch')return '批量提取';return '任务';}
+function renderTaskBar(){
+var bar=document.getElementById('taskControlBar');if(!bar)return;
+if(!taskRunner.active){bar.className='hidden';return;}
+bar.className='fixed bottom-6 left-1/2 -translate-x-1/2 z-[60] w-[min(640px,calc(100vw-2rem))]';
+var stateLabel=taskRunner.stopped?'正在停止…':taskRunner.paused?'已暂停':'运行中';
+var stateCls=taskRunner.stopped?'text-amber-400':taskRunner.paused?'text-blue-400':'text-emerald-400';
+bar.innerHTML='<div class="bg-gray-900 border border-gray-700 rounded-xl shadow-2xl px-4 py-3 flex items-center gap-3">'+
+'<span class="spinner shrink-0"></span>'+
+'<div class="flex-1 min-w-0"><div class="flex items-center gap-2 flex-wrap"><span class="text-xs font-semibold text-ey">'+escapeHtml(taskTypeLabel(taskRunner.type))+'</span><span class="text-xs '+stateCls+'">'+stateLabel+'</span>'+(taskRunner.progress?'<span class="text-xs text-gray-500">'+escapeHtml(String(taskRunner.progress))+'</span>':'')+'</div>'+
+'<p class="text-xs text-white truncate mt-0.5" title="'+escapeHtml(taskRunner.detail||taskRunner.label)+'">'+escapeHtml(taskRunner.detail||taskRunner.label)+'</p></div>'+
+'<div class="flex gap-1.5 shrink-0">'+
+(taskRunner.paused&&!taskRunner.stopped?'<button type="button" onclick="taskResume()" class="btn btn-sm text-xs px-3 py-1.5">继续</button>':'<button type="button" onclick="taskPause()" class="btn-sec btn-sm text-xs px-3 py-1.5"'+(taskRunner.stopped?' disabled':'')+'>暂停</button>')+
+'<button type="button" onclick="taskStop()" class="text-xs px-3 py-1.5 rounded-lg border border-red-800 text-red-400 hover:bg-red-900/40"'+(taskRunner.stopped?' disabled':'')+'>停止</button></div></div>';
+}
+function hideTaskBar(){var bar=document.getElementById('taskControlBar');if(bar)bar.className='hidden';}
+function isTaskStoppedErr(e){return e&&(e.message===TASK_STOPPED||(e.name==='AbortError'&&taskRunner.stopped));}
+function bindTaskAbort(ctrl){var sig=taskRunner.getSignal();if(!sig||!ctrl)return; if(sig.aborted){try{ctrl.abort();}catch(e){}}else{sig.addEventListener('abort',function(){try{ctrl.abort();}catch(e){}});}}
+const DB_NAME='AudiPickDB';let db;
+function initDB(){
+    return new Promise(function(resolve,reject){
+        var req=indexedDB.open(DB_NAME,2);
+        req.onupgradeneeded=function(e){
+            var d=e.target.result;
+            if(!d.objectStoreNames.contains('store'))d.createObjectStore('store');
+            if(!d.objectStoreNames.contains('pdfs'))d.createObjectStore('pdfs');
+        };
+        req.onsuccess=function(e){db=e.target.result;resolve();};
+        req.onerror=function(e){reject(e);};
+    });
+}
+function dbGet(k){return new Promise(function(resolve){var tx=db.transaction('store','readonly');var req=tx.objectStore('store').get(k);req.onsuccess=function(e){resolve(e.target.result);};req.onerror=function(){resolve(null);};});}
+function dbPut(k,v){return new Promise(function(resolve){var tx=db.transaction('store','readwrite');tx.objectStore('store').put(v,k);tx.oncomplete=function(){resolve();};});}
+function dbPutPdf(k,v){return new Promise(function(resolve){var tx=db.transaction('pdfs','readwrite');tx.objectStore('pdfs').put(v,k);tx.oncomplete=function(){resolve();};});}
+function dbGetPdf(k){return new Promise(function(resolve){var tx=db.transaction('pdfs','readonly');var req=tx.objectStore('pdfs').get(k);req.onsuccess=function(e){resolve(e.target.result);};req.onerror=function(){resolve(null);};});}
+function dbDeletePdf(k){return new Promise(function(resolve){if(!db)return resolve();try{var tx=db.transaction('pdfs','readwrite');tx.objectStore('pdfs').delete(k);tx.oncomplete=function(){resolve();};tx.onerror=function(){resolve();};}catch(e){resolve();}});}
+function save(){
+    dbPut('ap_p',P);dbPut('ap_c',Ct);dbPut('ap_v',V);dbPut('ap_k',A);dbPut('ap_ocr',O);dbPut('ap_custom_rules',CUSTOM_RULES);dbPut('ap_cache',extractCache);RuleEngine.setCustomRules(CUSTOM_RULES);if(typeof refreshRulePresets==='function')refreshRulePresets();
+}
+async function loadData(){
+    await initDB();
+    var m=await dbGet('migrated');
+    if(!m){
+        await dbPut('migrated',true);
+        save();
+    }else{
+        P=(await dbGet('ap_p'))||[];Ct=(await dbGet('ap_c'))||[];V=(await dbGet('ap_v'))||[];A=(await dbGet('ap_k'))||{};O=(await dbGet('ap_ocr'))||{engine:'ai'};
+        CUSTOM_RULES=(await dbGet('ap_custom_rules'))||[];
+        RuleEngine.setCustomRules(CUSTOM_RULES);
+        if(typeof refreshRulePresets==='function')refreshRulePresets();
+        // 旧数据：提取结果补 ruleId；合同补分类确认状态
+        V.forEach(function(v){if(!v.ruleId)v.ruleId='loan_covenant';if(!v.ruleVersion)v.ruleVersion='1.0';});
+        Ct.forEach(function(c){
+          if(c.ruleConfirmed===undefined)c.ruleConfirmed=!c.detectedRuleId||c.detectedConfidence==='high';
+        });
+        P.forEach(function(project){
+          if(!Array.isArray(project.relationGroups))project.relationGroups=[];
+          project.relationGroups=project.relationGroups.filter(function(group){
+            if(!group||!group.anchorFileId||!gc(group.anchorFileId))return false;
+            group.members=(Array.isArray(group.members)?group.members:[]).filter(function(member){return member&&member.fileId&&gc(member.fileId);});
+            return group.members.length>0;
+          });
+        });
+        if(typeof FieldSet!=='undefined')FieldSet.migrateAllFieldSets();
+        if(window.RevenueWorkpaper){
+          V.filter(function(v){return v.ruleId==='revenue_workpaper';}).forEach(function(v){
+            RevenueWorkpaper.normalizeResults([v]);
+          });
+        }
+        extractCache=(await dbGet('ap_cache'))||{};
+        // 旧缓存 key c_{cid} -> c_{cid}_loan_covenant
+        Object.keys(extractCache).forEach(function(k){
+          if(/^c_[^_]+$/.test(k)){
+            var nk=k+'_loan_covenant';
+            if(!extractCache[nk])extractCache[nk]=extractCache[k];
+            delete extractCache[k];
+          }
+        });
+    }
+    if(typeof hideIntro==='function')hideIntro();
+    if(page==='home')page='dash';
+    var shouldTour=window.apPendingTour&&!localStorage.getItem('ap_tour_done');
+    if(shouldTour){window.apPendingTour=false;page='dash';}
+    try{
+        render();
+    }catch(err){
+        console.error('AudiPick render failed:',err);
+        if(typeof hideIntro==='function')hideIntro();
+        var appEl=document.getElementById('app');
+        if(appEl){
+            appEl.style.opacity='1';
+            appEl.innerHTML='<div class="p-8 max-w-lg mx-auto"><h1 class="text-xl font-bold text-red-400 mb-2">界面加载失败</h1><p class="text-sm text-gray-400 mb-4">'+escapeHtml(err.message||String(err))+'</p><button onclick="location.reload()" class="btn btn-sm">重新加载</button></div>';
+        }
+        return;
+    }
+    if(shouldTour){
+        setTimeout(function(){if(window.startTour&&document.getElementById('btn-new-proj'))window.startTour();},400);
+    }
+}
+// ===== Work Log =====
+function addLog(fileId,fileName,step,detail,status){
+var ts=new Date().toLocaleTimeString('zh-CN',{hour12:false});
+var entry={id:fileId,fileName:fileName||fileId,step:step,detail:detail||'',status:status||'info',time:ts};
+var idx=workLog.findIndex(function(l){return l.id===fileId;});
+if(idx>=0){workLog.splice(idx,1);}
+workLog.unshift(entry);
+if(workLog.length>100){workLog.pop();}
+localStorage.setItem('ap_log',JSON.stringify(workLog));
+renderLogPanel();
+}
+function updateLog(fileId,step,detail,status){
+var entry=workLog.find(function(l){return l.id===fileId;});
+if(entry){entry.step=step;entry.detail=detail||'';entry.status=status||entry.status;entry.time=new Date().toLocaleTimeString('zh-CN',{hour12:false});localStorage.setItem('ap_log',JSON.stringify(workLog));renderLogPanel();}
+}
+function renderLogPanel(){var el=document.getElementById('logEntries');if(!el)return;el.innerHTML=renderLogEntries();}
+function renderLogEntries(){
+if(workLog.length===0)return'<p class="text-xs text-gray-600 text-center py-8">暂无处理记录</p>';
+return workLog.map(function(l){
+var icon=l.status==='done'?'✅':l.status==='error'?'❌':l.status==='warn'?'⚠️':'🔄';
+var col=l.status==='done'?'text-emerald-400':l.status==='error'?'text-red-400':l.status==='warn'?'text-amber-400':'text-blue-400';
+return'<div class="p-2 rounded bg-gray-900 border border-gray-800"><div class="flex gap-2 items-start"><span class="text-xs mt-0.5">'+icon+'</span><div class="flex-1 min-w-0"><p class="text-xs font-medium text-white truncate">'+l.fileName+'</p><p class="text-xs '+col+'">'+l.step+'</p>'+(l.detail?'<p class="text-xs text-gray-600 mt-0.5">'+l.detail+'</p>':'')+'<p class="text-xs text-gray-700 mt-0.5">'+l.time+'</p></div></div></div>';
+}).join('');
+}
+function togLog(){logCollapsed=!logCollapsed;var drawer=document.getElementById('ap-log-drawer');if(drawer){drawer.className='fixed top-0 right-0 h-full w-80 bg-black border-l border-gray-800 z-50 flex flex-col p-4 transform transition-transform duration-300 shadow-2xl '+(logCollapsed?'translate-x-full':'translate-x-0');}else{render();}}
+function clearLog(){workLog=[];localStorage.removeItem('ap_log');renderLogPanel();}
+function exportLog(){
+if(typeof XLSX==='undefined'){alert('Excel 导出组件未加载，请使用最新版 AudiPick');return;}
+if(workLog.length===0){alert('日志为空');return;}
+var rows=workLog.map(function(l){return{时间:l.time,文件名:l.fileName,步骤:l.step,详情:l.detail,状态:l.status};});
+var ws=styleExportSheet(XLSX.utils.json_to_sheet(rows));
+var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'日志');
+XLSX.writeFile(wb,'AudiPick_日志_'+new Date().toISOString().split('T')[0]+'.xlsx');
+}
+
+function gid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6);}
+function gp(id){return P.find(function(x){return x.id===id;});}
+function gc(id){return Ct.find(function(x){return x.id===id;});}
+function gvRule(id,ruleId){
+  ruleId=ruleId||activeRuleId;
+  return V.filter(function(x){return x.contractId===id&&(x.ruleId||'loan_covenant')===ruleId;});
+}
+function gv(id){return V.filter(function(x){return x.contractId===id;});}
+function getAppliedRuleIds(contractId){
+  var set={};
+  V.filter(function(x){return x.contractId===contractId;}).forEach(function(x){set[x.ruleId||'loan_covenant']=true;});
+  return Object.keys(set);
+}
+function getContractRuleId(c){
+  var p=gp(c.pid);
+  return RuleEngine.getContractDefaultRuleId(c,p);
+}
+function cacheKeyFor(cid,ruleId,fieldSetId){return 'c_'+cid+'_'+(ruleId||activeRuleId)+(fieldSetId?('_fs_'+fieldSetId):'');}
+var ASSOCIATION_ROLES=['补充协议/变更','框架协议','订单/采购订单','技术附件','信用资料','验收/交付资料','其他支持文件'];
+function relationGroupsForProject(projectId){
+  var project=gp(projectId);if(!project)return[];
+  if(!Array.isArray(project.relationGroups))project.relationGroups=[];
+  return project.relationGroups;
+}
+function relationGroupForAnchor(contractId){
+  var c=gc(contractId);if(!c)return null;
+  return relationGroupsForProject(c.pid).find(function(group){return group&&group.anchorFileId===contractId;})||null;
+}
+function relationRoleOptionsHtml(selected){
+  return ASSOCIATION_ROLES.map(function(role){return '<option value="'+escapeHtml(role)+'"'+(role===selected?' selected':'')+'>'+escapeHtml(role)+'</option>';}).join('');
+}
+function associatedDocumentsFor(contractOrId,fallbackText){
+  var contract=typeof contractOrId==='string'?gc(contractOrId):contractOrId;
+  if(!contract)return[];
+  var docs=[{id:contract.id,name:contract.file||'主文件',docType:'主文件',text:contract.text||fallbackText||'',isPrimary:true}];
+  var group=relationGroupForAnchor(contract.id);
+  (group&&Array.isArray(group.members)?group.members:[]).forEach(function(member){
+    var linked=gc(member.fileId);
+    if(linked&&linked.pid===contract.pid&&linked.text){docs.push({id:linked.id,name:linked.file||'关联文件',docType:member.role||'其他支持文件',text:linked.text,isPrimary:false});}
+  });
+  return docs;
+}
+function extractionContextFingerprint(contractOrId,fallbackText){
+  var docs=associatedDocumentsFor(contractOrId,fallbackText);var h=2166136261;
+  docs.forEach(function(doc){
+    var value=[doc.id,doc.name,doc.docType,String(doc.text||'').length,String(doc.text||'')].join('|');
+    var step=Math.max(1,Math.floor(value.length/4000));
+    for(var i=0;i<value.length;i+=step){h^=value.charCodeAt(i);h=Math.imul(h,16777619);}
+  });
+  return docs.length+'_'+(h>>>0).toString(16);
+}
+function buildAssociatedExtractionText(contractOrId,fallbackText){
+  var docs=associatedDocumentsFor(contractOrId,fallbackText);
+  if(docs.length<=1)return docs.length?docs[0].text:String(fallbackText||'');
+  return docs.map(function(doc,index){
+    return '【资料包文件'+(index+1)+'｜'+(doc.isPrimary?'主文件':doc.docType)+'｜'+doc.name+'】\n'+doc.text;
+  }).join('\n\n');
+}
+function clearAllExtractCacheForContract(contractId){
+  var prefix='c_'+contractId+'_';
+  Object.keys(extractCache).forEach(function(key){if(key.indexOf(prefix)===0)delete extractCache[key];});
+}
+function invalidateAssociationOwnersForFile(fileId){
+  P.forEach(function(project){(project.relationGroups||[]).forEach(function(group){
+    if(group.anchorFileId!==fileId&&!(group.members||[]).some(function(member){return member.fileId===fileId;}))return;
+    var owner=gc(group.anchorFileId);if(!owner)return;
+    clearAllExtractCacheForContract(owner.id);owner.associationNeedsRefresh=gv(owner.id).length>0;
+    if(owner.revenueFactCache)owner.revenueFactCache={};
+    if(FieldSet.listFieldSets(owner.id,'revenue_workpaper').length>0)owner.revenueNeedsRefresh=true;
+  });});
+}
+function getFileAssociationSummary(contractId){
+  var c=gc(contractId);var group=c?relationGroupForAnchor(contractId):null;var docs=c?associatedDocumentsFor(c):[];
+  return {count:Math.max(0,docs.length-1),group:group,documents:docs,needsRefresh:!!(c&&c.associationNeedsRefresh)};
+}
+window.getFileAssociationSummary=getFileAssociationSummary;
+window.openFileAssociationModal=function(contractId){
+  var c=gc(contractId);if(!c)return;
+  var candidates=Ct.filter(function(item){return item.pid===c.pid&&item.id!==c.id&&item.text;});
+  if(!candidates.length){alert('当前项目还没有其他已完成OCR的文件，请先上传并识别文件。');return;}
+  var group=relationGroupForAnchor(contractId);var memberMap={};
+  (group&&group.members||[]).forEach(function(member){memberMap[member.fileId]=member;});
+  var rows=candidates.map(function(item){var member=memberMap[item.id];return '<div class="grid grid-cols-[auto_minmax(0,1fr)_150px] gap-3 items-center py-3 border-t border-gray-800 first:border-t-0">'+
+    '<input type="checkbox" class="assoc-file-cb w-4 h-4 rounded border-gray-700 bg-black text-ey" data-file-id="'+item.id+'"'+(member?' checked':'')+'>'+
+    '<div class="min-w-0"><p class="text-sm text-white truncate">'+escapeHtml(item.file||'')+'</p><p class="text-xs text-gray-600">OCR文本 '+String((item.text||'').length)+' 字</p></div>'+
+    '<select id="assoc_role_'+item.id+'" class="bg-black border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-white">'+relationRoleOptionsHtml(member&&member.role||'其他支持文件')+'</select></div>';}).join('');
+  var root=ensureModalRoot();root.innerHTML='<div class="modal-backdrop fixed inset-0 bg-black/70 flex items-center justify-center p-4" onclick="if(event.target===this)cm()"><div class="bg-gray-900 border border-gray-700 rounded-lg p-5 w-full max-w-2xl shadow-2xl" onclick="event.stopPropagation()">'+
+    '<div class="flex items-start justify-between gap-3 mb-4"><div><h3 class="font-semibold text-white">关联项目内文件</h3><p class="text-xs text-gray-500 mt-1">主文件：'+escapeHtml(c.file||'')+'。关联后，各模板均可共用所选文件的OCR内容。</p></div><button type="button" onclick="cm()" class="text-gray-500 hover:text-white text-lg" title="关闭">×</button></div>'+
+    '<div class="max-h-[55vh] overflow-y-auto ap-scroll border border-gray-800 rounded-lg px-3">'+rows+'</div>'+
+    '<p class="text-xs text-gray-600 mt-3">关联文件仍可单独提取；联合底稿和结果保存在当前主文件下。</p>'+
+    '<div class="flex justify-end gap-2 mt-4"><button type="button" onclick="cm()" class="btn-sec btn-sm">取消</button><button type="button" onclick="saveFileAssociations(\''+contractId+'\')" class="btn btn-sm">保存关联</button></div></div></div>';
+};
+window.saveFileAssociations=function(contractId){
+  var c=gc(contractId);if(!c)return;var project=gp(c.pid);if(!project)return;
+  var members=[];document.querySelectorAll('.assoc-file-cb:checked').forEach(function(cb){
+    var fileId=cb.getAttribute('data-file-id');var roleEl=document.getElementById('assoc_role_'+fileId);
+    if(fileId&&gc(fileId))members.push({fileId:fileId,role:roleEl?roleEl.value:'其他支持文件'});
+  });
+  var groups=relationGroupsForProject(c.pid);var existing=relationGroupForAnchor(contractId);
+  if(existing){existing.members=members;existing.updatedAt=new Date().toISOString();}
+  else if(members.length){groups.push({id:gid(),name:(c.file||'主文件')+'资料包',anchorFileId:contractId,members:members,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()});}
+  project.relationGroups=groups.filter(function(group){return group.anchorFileId!==contractId||(group.members&&group.members.length);});
+  clearAllExtractCacheForContract(contractId);if(c.revenueFactCache)c.revenueFactCache={};
+  c.associationNeedsRefresh=gv(c.id).length>0;c.revenueNeedsRefresh=FieldSet.listFieldSets(c.id,'revenue_workpaper').length>0;
+  save();cm();render();
+};
+function ok(){return !!(A.k&&A.u);}
+function chatCompletionsUrl(base){
+var url=String(base||'').trim().replace(/\/+$/,'');
+if(!url)return '';
+if(!/\/chat\/completions$/i.test(url))url+='/chat/completions';
+return url+(url.indexOf('?')>=0?'&':'?')+'r='+Date.now();
+}
+function applyJsonResponseMode(body,base){
+if(/(^|\.)api\.deepseek\.com/i.test((function(){try{return new URL(String(base||'')).hostname;}catch(e){return '';}})()))body.response_format={type:'json_object'};
+return body;
+}
+function getActiveExtractFields(ruleId){
+ruleId=ruleId||activeRuleId;
+if(pendingExtractOpts&&pendingExtractOpts.ruleId===ruleId&&pendingExtractOpts.fieldKeys){
+return FieldSet.fieldsForKeys(ruleId,pendingExtractOpts.fieldKeys);
+}
+return getFields(ruleId);
+}
+
+// ===== OCR =====
+async function aiVisionOCR(imgBase64){
+await taskRunner.checkpoint();
+var v=O.vision||{};
+if(!(v.k&&v.u)){throw new Error('AI视觉OCR未配置API，请在OCR引擎页填写视觉模型接口');}
+var data={model:v.m||'gpt-4o',messages:[{role:'user',content:[{type:'text',text:'请识别这张合同图片中的所有文字内容，完整输出所有文字，不要遗漏任何内容。保持原始排版格式。如果图片中包含表格，请务必将其转换为严格的Markdown表格格式输出。只输出文字内容，不要任何解释。'},{type:'image_url',image_url:{url:'data:image/jpeg;base64,'+imgBase64}}]}],max_tokens:4000};
+var ctrl=new AbortController();bindTaskAbort(ctrl);
+var r=await safeFetch(chatCompletionsUrl(v.u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+v.k},body:JSON.stringify(data)});
+if(!r.ok){var err=await r.text();throw new Error('视觉API('+r.status+'):'+err.substring(0,200));}
+var d=await r.json();
+return d.choices&&d.choices[0]&&d.choices[0].message&&d.choices[0].message.content||'';
+}
+function visionOk(){var v=O.vision||{};return !!(v.k&&v.u);}
+async function tesseractOCR(imgBase64){
+if(typeof Tesseract==='undefined')throw new Error('Tesseract.js未加载');
+var result=await Tesseract.recognize('data:image/jpeg;base64,'+imgBase64,'chi_sim',{logger:function(m){if(m.status==='recognizing text')console.log('OCR:',Math.round(m.progress*100)+'%');}});
+return result.data.text||'';
+}
+async function localOCR(imgBase64){
+var r=await fetch('http://127.0.0.1:8765/ocr',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image:imgBase64})});
+if(!r.ok){var e=await r.text();throw new Error('OCR('+r.status+'):'+e.substring(0,200));}
+var d=await r.json();if(d.error)throw new Error(d.error);
+return d.text||'';
+}
+async function checkLocalOCR(){
+try{var ctrl=new AbortController();setTimeout(function(){ctrl.abort();},2000);var r=await fetch('http://127.0.0.1:8765/health',{method:'GET',signal:ctrl.signal});if(!r.ok)return false;var d=await r.json();return d.status==='ok';}catch(e){return false;}
+}
+// ===== 自定义第三方OCR接口（支持百度OCR等）=====
+// 桌面版(Electron)走主进程绕过CORS；网页版退回原生fetch
+function isDesktop(){return !!(window.desktop&&window.desktop.fetch);}
+async function safeFetch(url,opts){
+opts=opts||{};
+if(isDesktop()){
+var ro={method:opts.method||'GET',headers:opts.headers||{},body:opts.body||null};
+var r;
+try{r=await window.desktop.fetch(url,ro);}
+catch(ipcErr){throw new Error('桌面网络通道调用失败：'+String(ipcErr&&ipcErr.message||ipcErr));}
+if(window.desktop.focusWindow) try{ await window.desktop.focusWindow(); }catch(e){}
+if(!r||r.status===0){throw new Error('模型接口连接失败：'+String(r&&r.statusText||'未收到网络响应'));}
+return{ok:r.ok,status:r.status,statusText:r.statusText,text:function(){return Promise.resolve(r.bodyText);},json:function(){return Promise.resolve(JSON.parse(r.bodyText));}};
+}
+if(location.protocol==='file:')throw new Error('桌面网络组件未加载，请完全退出所有 AudiPick 进程后重新打开最新版');
+var lastErr;
+for(var attempt=1;attempt<=3;attempt++){
+try{return await fetch(url,opts);}catch(fetchErr){lastErr=fetchErr;if(attempt<3)await new Promise(function(resolve){setTimeout(resolve,700*attempt);});}
+}
+throw new Error('模型接口连接失败：'+String(lastErr&&lastErr.message||lastErr||'未知网络错误'));
+}
+function friendlyAiError(err){
+var msg=String(err&&err.message||err||'未知错误');
+if(/Failed to fetch|接口连接失败|网络通道|ECONN|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|fetch failed/i.test(msg)){
+return msg+'。请先到“配置”页点击“测试连接”；原底稿和已缓存的共享事实不会被删除。';
+}
+return msg;
+}
+function restoreAppFocus(preferInputId){
+if(window.desktop&&window.desktop.focusWindow) window.desktop.focusWindow().catch(function(){});
+else try{ window.focus(); }catch(e){}
+if(!preferInputId)return;
+var el=document.getElementById(preferInputId);
+if(el){ try{ el.focus({preventScroll:true}); if(el.select) el.select(); }catch(err){} return; }
+setTimeout(function(){
+el=document.getElementById(preferInputId);
+if(el){ try{ el.focus({preventScroll:true}); if(el.select) el.select(); }catch(err){} }
+}, 50);
+}
+function focusModalInput(){
+var n1=document.getElementById('n1');
+if(!n1)return;
+if(window.desktop&&window.desktop.focusWindow) window.desktop.focusWindow().catch(function(){});
+try{ n1.focus({preventScroll:true}); n1.select(); }catch(e){}
+}
+function ensureModalRoot(){
+var root=document.getElementById('modal-root');
+if(!root){ root=document.createElement('div'); root.id='modal-root'; document.body.appendChild(root); }
+return root;
+}
+var baiduTokenCache={token:null,expire:0};
+async function getBaiduAccessToken(ak,sk){
+var now=Date.now();
+if(baiduTokenCache.token&&baiduTokenCache.expire>now+60000)return baiduTokenCache.token;
+var url='https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials&client_id='+encodeURIComponent(ak)+'&client_secret='+encodeURIComponent(sk);
+var r=await safeFetch(url,{method:'POST'});
+if(!r.ok){var e=await r.text();var hint='';if(r.status===0&&/ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|ENETUNREACH|EAI_AGAIN|socket hang up/i.test(r.statusText||e)){hint=' [网络连接被中断，非密钥错误。请检查：1) 能否打开 https://aip.baidubce.com  2) 公司代理/VPN/防火墙是否拦截  3) 可改用本地代理 baidu_ocr_proxy.py，URL 填 http://127.0.0.1:8765/ocr]';}throw new Error('百度token获取失败('+r.status+')'+(r.statusText?' '+r.statusText:'')+':'+e.substring(0,150)+hint);}
+var d=await r.json();
+if(!d.access_token)throw new Error('百度token获取失败:返回无access_token');
+baiduTokenCache.token=d.access_token;
+baiduTokenCache.expire=now+(d.expires_in?d.expires_in*1000:2592000000);
+return d.access_token;
+}
+// 按路径从响应里提取文本。支持: a.b.c / arr[].field / arr
+function extractTextByPath(obj,path){
+if(!path)return typeof obj==='string'?obj:(obj&&obj.text?obj.text:'');
+path=path.trim();
+if(path.indexOf('[]')>=0){
+var parts=path.split('[]');
+var before=parts[0].replace(/^\./,'');
+var after=(parts[1]||'').replace(/^\./,'');
+var arr=obj;
+if(before){before.split('.').forEach(function(k){if(arr)arr=arr[k];});}
+if(!Array.isArray(arr))return '';
+return arr.map(function(it){var v=it;if(after){after.split('.').forEach(function(k){if(v)v=v[k];});}return v===null||v===undefined?'':String(v);}).filter(function(s){return s;}).join('\n');
+}
+var cur=obj;
+path.split('.').forEach(function(k){if(cur)cur=cur[k];});
+if(cur===null||cur===undefined)return '';
+if(Array.isArray(cur))return cur.map(function(x){return String(x);}).join('\n');
+return String(cur);
+}
+async function customOCR(imgBase64){
+await taskRunner.checkpoint();
+var cfg=O.custom||{};
+if(!cfg.url)throw new Error('未配置自定义OCR接口地址');
+var auth=cfg.auth||'none';
+var headers={};
+var url=cfg.url;
+var body,contentType;
+// 鉴权
+if(auth==='baidu_aksk'){
+if(!cfg.ak||!cfg.sk)throw new Error('百度OCR需填写API Key和Secret Key');
+var token=await getBaiduAccessToken(cfg.ak,cfg.sk);
+url+=(url.indexOf('?')>=0?'&':'?')+'access_token='+encodeURIComponent(token);
+}else if(auth==='bearer'){
+headers['Authorization']='Bearer '+(cfg.token||'');
+}else if(auth==='query'){
+url+=(url.indexOf('?')>=0?'&':'?')+'access_token='+encodeURIComponent(cfg.token||'');
+}
+// 请求格式
+if(cfg.format==='baidu'){
+contentType='application/x-www-form-urlencoded';
+body='image='+encodeURIComponent(imgBase64);
+}else{
+contentType='application/json';
+body=JSON.stringify({image:imgBase64});
+}
+headers['Content-Type']=contentType;
+var ctrl=new AbortController();bindTaskAbort(ctrl);var t=setTimeout(function(){ctrl.abort();},90000);
+var r=await safeFetch(url,{method:'POST',signal:isDesktop()?undefined:ctrl.signal,headers:headers,body:body});
+clearTimeout(t);
+if(!r.ok){var e=await r.text();throw new Error('OCR接口('+r.status+'):'+e.substring(0,200));}
+var d=await r.json();
+if(d.error_code)throw new Error('OCR错误('+d.error_code+'):'+(d.error_msg||''));
+var text=extractTextByPath(d,cfg.textPath||'words_result[].words');
+return text||'';
+}
+function getOCRLabel(){if(O.engine==='tesseract')return '浏览器OCR';if(O.engine==='custom')return '自定义OCR';return 'AI视觉';}
+
+async function runOCR(imgBase64,pageNum,totalPages,statusCb){
+await taskRunner.checkpoint();
+var engine=O.engine||'ai';
+if(engine==='tesseract'){if(statusCb)statusCb('浏览器OCR第'+pageNum+'/'+totalPages+'页...');var t=await tesseractOCR(imgBase64);if(statusCb)statusCb('浏览器OCR第'+pageNum+'页OK('+t.length+'字)');return t;}
+if(engine==='custom'){if(statusCb)statusCb('自定义OCR第'+pageNum+'/'+totalPages+'页...');var t2=await customOCR(imgBase64);if(statusCb)statusCb('自定义OCR第'+pageNum+'页OK('+t2.length+'字)');return t2;}
+if(statusCb)statusCb('AI视觉第'+pageNum+'/'+totalPages+'页...');var t=await aiVisionOCR(imgBase64);if(statusCb)statusCb('AI视觉第'+pageNum+'页OK('+t.length+'字)');return t;
+}
+
+async function pdfPageToImage(pdf,pageNum,scale){
+var page=await pdf.getPage(pageNum);var viewport=page.getViewport({scale:scale||1.5});
+var canvas=document.createElement('canvas');var ctx=canvas.getContext('2d');
+canvas.width=viewport.width;canvas.height=viewport.height;
+await page.render({canvasContext:ctx,viewport:viewport}).promise;
+return canvas.toDataURL('image/jpeg',0.75).split(',')[1];
+}
+
+// ===== AI Extract with cache, streaming, chunking =====
+function aiExtract(text,statusCb,cid,ruleId,fieldKeys){
+ruleId=ruleId||activeRuleId;
+var contextFingerprint=cid?extractionContextFingerprint(cid,text):'';
+if(cid&&ruleId!=='revenue_workpaper')text=buildAssociatedExtractionText(cid,text);
+if(ruleId==='revenue_workpaper')fieldKeys=FieldSet.defaultFieldKeys(ruleId);
+fieldKeys=FieldSet.ensurePageInKeys(ruleId,fieldKeys||FieldSet.defaultFieldKeys(ruleId));
+var fsId=FieldSet.fieldSetIdOf(fieldKeys);
+var cacheKey=cid?cacheKeyFor(cid,ruleId,fsId):null;
+if(cacheKey&&extractCache[cacheKey]){
+  var cacheEntry=extractCache[cacheKey];var hasAssociations=cid&&associatedDocumentsFor(cid).length>1;
+  var cacheMatches=cacheEntry.contextFingerprint?cacheEntry.contextFingerprint===contextFingerprint:!hasAssociations;
+  var cachedItems=cacheMatches?(cacheEntry.items||[]):[];
+  if(cachedItems.length){var cachedContract=cid?gc(cid):null;if(cachedContract)cachedContract.associationNeedsRefresh=false;if(statusCb)statusCb({msg:'使用缓存结果',progress:100});return Promise.resolve(cachedItems);}
+  delete extractCache[cacheKey];
+}
+if(ruleId==='revenue_workpaper')return aiExtractRevenueWithFacts(text,statusCb,cid,fieldKeys,cacheKey,contextFingerprint);
+var CHUNK_SIZE=8000;
+var MAX_SINGLE=10000;
+if(text.length<=MAX_SINGLE)return aiExtractChunk(text,function(st){if(statusCb)statusCb({msg:st,progress:st.indexOf('提取中')>-1?55:100});},cid,3,ruleId,fieldKeys).then(function(items){
+  var finalItems=items;
+  if(cacheKey)extractCache[cacheKey]={items:finalItems,t:Date.now(),contextFingerprint:contextFingerprint};
+  var extractedContract=cid?gc(cid):null;if(extractedContract)extractedContract.associationNeedsRefresh=false;
+  save();
+  if(statusCb)statusCb({msg:'提取完成',progress:100});
+  return finalItems;
+});
+if(statusCb)statusCb({msg:'合同超长('+text.length+'字)，分段提取...',progress:5});
+var chunks=[];
+var lines=text.split('\n');
+var cur='';
+var lastPageMarker='';
+for(var i=0;i<lines.length;i++){
+  var m=lines[i].match(/---PDF第\d+页---/);
+  if(m)lastPageMarker=m[0]+'\n';
+  if(cur.length+lines[i].length>CHUNK_SIZE){
+    chunks.push(cur);
+    cur=lastPageMarker+lines[i]+'\n';
+  }else{
+    cur+=lines[i]+'\n';
+  }
+}
+if(cur)chunks.push(cur);
+if(statusCb)statusCb({msg:'分为'+chunks.length+'段提取...',progress:10});
+var allResults=[];
+var completed=0;
+
+return new Promise(function(resolve, reject) {
+    var concurrency = 3; // 提升并发数到3，加快提取速度
+    var index = 0;
+    var hasError = false;
+
+    function next() {
+        if (hasError) return Promise.resolve();
+        if (index >= chunks.length) return Promise.resolve();
+        return taskRunner.checkpoint().then(function(){
+        if (hasError || taskRunner.isStopped()) return Promise.resolve();
+        var i = index++;
+        var chunk = chunks[i];
+        if(statusCb)statusCb({msg:'正在提取第 '+(i+1)+'/'+chunks.length+' 段...',progress:10+Math.round((completed/chunks.length)*90)});
+        return aiExtractChunk(chunk, function(st){}, cid, 3, ruleId, fieldKeys).then(function(res){
+            allResults = allResults.concat(res);
+            completed++;
+            if(statusCb)statusCb({msg:'第 '+(i+1)+' 段完成',progress:10+Math.round((completed/chunks.length)*90)});
+            return next();
+        }).catch(function(err){
+            if(isTaskStoppedErr(err)){hasError=true;reject(err);return;}
+            hasError = true;
+            reject(err);
+        });
+        }).catch(function(err){if(isTaskStoppedErr(err)){hasError=true;reject(err);}});
+    }
+
+    var workers = [];
+    for(var w=0; w<concurrency; w++) workers.push(next());
+
+    Promise.all(workers).then(function() {
+        if (!hasError) {
+            var finalItems=ruleId==='revenue_workpaper'&&window.RevenueWorkpaper
+              ? RevenueWorkpaper.normalizeResults(allResults)
+              : allResults;
+            if(cacheKey)extractCache[cacheKey]={items:finalItems,t:Date.now(),contextFingerprint:contextFingerprint};
+            var extractedContract=cid?gc(cid):null;if(extractedContract)extractedContract.associationNeedsRefresh=false;
+            save();
+            if(statusCb)statusCb({msg:'分段提取完成',progress:100});
+            resolve(finalItems);
+        }
+    });
+});
+}
+function revenueTextFingerprint(text){
+  text=String(text||'');var h=2166136261;
+  for(var i=0;i<text.length;i+=Math.max(1,Math.floor(text.length/5000))){h^=text.charCodeAt(i);h=Math.imul(h,16777619);}
+  return text.length+'_'+(h>>>0).toString(16);
+}
+function splitRevenueText(text,size){
+  size=size||8000;var chunks=[],lines=String(text||'').split('\n'),cur='',lastPage='';
+  lines.forEach(function(line){
+    var m=line.match(/---PDF第\d+页---/);if(m)lastPage=m[0]+'\n';
+    if(cur.length+line.length>size&&cur){chunks.push(cur);cur=lastPage+line+'\n';}else cur+=line+'\n';
+  });
+  if(cur.trim())chunks.push(cur);
+  return chunks;
+}
+function getRevenueDocuments(contract,fallbackText){
+  var docs=contract?associatedDocumentsFor(contract,fallbackText).map(function(doc){return{id:doc.id,name:doc.name,docType:doc.isPrimary?'主合同':doc.docType,text:doc.text};}):[];
+  var seen={};docs.forEach(function(doc){seen[doc.id]=true;});
+  if(contract)(contract.supplements||[]).forEach(function(s){
+    if(s&&s.text&&!seen[s.id]){docs.push({id:s.id,name:s.file||'补充资料',docType:s.docType||'补充资料',text:s.text});seen[s.id]=true;}
+  });
+  if(!docs.length)docs.push({id:'primary',name:'主合同',docType:'主合同',text:fallbackText||''});
+  return docs;
+}
+function normalizeRevenueFact(x,doc){
+  return {
+    fact_type:toStr(x.fact_type||'其他').trim()||'其他',
+    fact_summary:toStr(x.fact_summary).trim(),
+    contract_excerpt:toStr(x.contract_excerpt).trim(),
+    source_document:doc.name,
+    pages:fmtPage(x.pages),
+    qualifier:toStr(x.qualifier||'无').trim()||'无'
+  };
+}
+function mergeRevenueFacts(facts){
+  var dedup={},perType={};
+  (facts||[]).forEach(function(f){
+    if(!f||!f.fact_summary)return;
+    var key=normKey(f.fact_type)+'|'+normKey(f.fact_summary)+'|'+String(f.source_document||'');
+    if(!dedup[key]||String(f.contract_excerpt||'').length>String(dedup[key].contract_excerpt||'').length)dedup[key]=f;
+  });
+  return Object.keys(dedup).map(function(k){return dedup[k];}).filter(function(f){
+    var type=f.fact_type||'其他';perType[type]=(perType[type]||0)+1;
+    return perType[type]<=18;
+  }).slice(0,220);
+}
+function cleanStructuredJson(text){
+  return String(text||'')
+    .replace(/[\u0000-\u001F\u007F-\u009F]/g,'')
+    .replace(/“([a-zA-Z_][a-zA-Z0-9_]*)”\s*:/g,'"$1":')
+    .replace(/([{,])\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g,'$1"$2":')
+    .replace(/:\s*'([^']*)'/g,':"$1"')
+    .replace(/,\s*([}\]])/g,'$1');
+}
+function parseStructuredArray(content,arrayKeys){
+  var source=String(content||'').replace(/^```(?:json)?\s*/i,'').replace(/```\s*$/,'').trim();
+  var objectMatch=source.match(/\{[\s\S]*\}/);
+  var jsonText=cleanStructuredJson(objectMatch?objectMatch[0]:source);
+  var attempts=[jsonText,jsonText.replace(/}\s*{/g,'},{')];
+  for(var a=0;a<attempts.length;a++){
+    try{
+      var parsed=JSON.parse(attempts[a]);
+      for(var k=0;k<(arrayKeys||[]).length;k++){
+        if(Array.isArray(parsed[arrayKeys[k]]))return parsed[arrayKeys[k]];
+      }
+      if(Array.isArray(parsed))return parsed;
+      if(parsed&&typeof parsed==='object'&&Object.keys(parsed).length)return [parsed];
+    }catch(ignore){}
+  }
+  var arrayStart=-1;
+  (arrayKeys||[]).some(function(key){
+    var keyAt=source.search(new RegExp('["“]?'+key+'["”]?\\s*:','i'));
+    if(keyAt<0)return false;
+    arrayStart=source.indexOf('[',keyAt);return arrayStart>=0;
+  });
+  if(arrayStart<0)arrayStart=source.indexOf('[');
+  if(arrayStart<0)throw new Error('JSON中未找到结果数组');
+  var recovered=[],depth=0,start=-1,inString=false,escaped=false;
+  for(var i=arrayStart+1;i<source.length;i++){
+    var ch=source.charAt(i);
+    if(inString){
+      if(escaped)escaped=false;
+      else if(ch==='\\')escaped=true;
+      else if(ch==='"')inString=false;
+      continue;
+    }
+    if(ch==='"'){inString=true;continue;}
+    if(ch==='{'){if(depth===0)start=i;depth++;continue;}
+    if(ch==='}'&&depth>0){
+      depth--;
+      if(depth===0&&start>=0){
+        var itemText=cleanStructuredJson(source.slice(start,i+1));
+        try{var item=JSON.parse(itemText);if(item&&typeof item==='object')recovered.push(item);}catch(ignoreItem){}
+        start=-1;
+      }
+    }
+  }
+  if(recovered.length){console.warn('JSON不完整，已逐条恢复 '+recovered.length+' 条完整记录');return recovered;}
+  throw new Error('JSON格式损坏且无法恢复完整记录');
+}
+function revenueAnswerQuestionGroups(){
+  var numberGroups=[
+    ['1.1','1.1(a)','1.1.1','1.1.1(a)','1.1.1(b)','1.2','1.2.1','1.3','1.3.1','1.4'],
+    ['2.1','2.1.1','2.2','2.2.1','2.3','2.4','3.1','3.2','3.3'],
+    ['3.4','3.5','3.6','4.1','4.2','4.2.1','4.3'],
+    ['5.1','5.2','5.2.1','5.2.2','5.3','5.3.1','5.4','5.4.1','5.5','5.5.1'],
+    ['C.1','C.1.1','C.2','C.2.1','C.3','C.4','C.4.1']
+  ];
+  var catalog=(window.RevenueWorkpaper&&RevenueWorkpaper.questions)||[];
+  return numberGroups.map(function(numbers){
+    return numbers.map(function(no){return catalog.find(function(q){return String(q.questionNo)===no;});}).filter(Boolean);
+  });
+}
+function revenuePromptForQuestions(targets){
+  var prompt=RuleEngine.getRulePrompt('revenue_workpaper');
+  var start=prompt.indexOf('【底稿问题目录】');
+  var end=start>=0?prompt.indexOf('【实务判断口径】',start):-1;
+  var lines=(targets||[]).map(function(q){return q.sheet+' | 第'+q.row+'行 | '+q.questionNo+' | '+q.question;}).join('\n');
+  var targetBlock='【本批必须逐项回答的底稿问题】\n'+lines+'\n\n'+
+    '本批只输出上述问题，每个问题至少输出一条，不得返回空数组。合同不适用的问题也要明确回答“否”或“不适用”并说明原因。\n'+
+    '为避免输出被截断，请保持精准简洁：contract_basis不超过120字，answer_reason不超过180字，contract_excerpt不超过240字，supporting_evidence和missing_information各不超过120字；数字、条件、方向、页码和来源文件不得省略。\n\n';
+  if(start>=0&&end>start)return prompt.slice(0,start)+targetBlock+prompt.slice(end);
+  return prompt+'\n\n'+targetBlock;
+}
+function aiExtractRevenueFactChunk(doc,chunk,retries){
+  if(retries===undefined)retries=2;
+  var prompt=(window.REVENUE_FACT_PROMPT||'')+'\n\n文档名称：'+doc.name+'\n资料类型：'+doc.docType+'\n\n文档文本：\n'+chunk;
+  var ctrl=new AbortController();bindTaskAbort(ctrl);var timer=setTimeout(function(){ctrl.abort();},120000);
+  var body={model:A.m||'gpt-4',messages:[
+    {role:'system',content:'你是审计合同资料包的事实整理助手。只记录文件明确写明的事实，严格输出JSON。'},
+    {role:'user',content:prompt}
+  ],temperature:0,max_tokens:4500};
+  applyJsonResponseMode(body,A.u);
+  if(!A.think)body.enable_thinking=false;
+  return taskRunner.checkpoint().then(function(){
+    return safeFetch(chatCompletionsUrl(A.u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+A.k},body:JSON.stringify(body)});
+  }).then(function(r){
+    clearTimeout(timer);if(!r.ok)return r.text().then(function(e){throw new Error('API('+r.status+'):'+e.substring(0,300));});return r.json();
+  }).then(function(d){
+    var msg=d.choices&&d.choices[0]&&d.choices[0].message;var content=msg&&msg.content;
+    if(!content||!content.trim())throw new Error('共享事实提取返回空');
+    var arr=parseStructuredArray(content,['facts','items']);
+    return (Array.isArray(arr)?arr:[]).map(function(x){return normalizeRevenueFact(x,doc);}).filter(function(x){return x.fact_summary;});
+  }).catch(function(err){
+    clearTimeout(timer);if(isTaskStoppedErr(err))throw err;
+    if(retries>0&&!taskRunner.isStopped())return new Promise(function(resolve){setTimeout(resolve,1200);}).then(function(){return aiExtractRevenueFactChunk(doc,chunk,retries-1);});
+    if(err.name==='AbortError'){if(taskRunner.isStopped())throw new Error(TASK_STOPPED);throw new Error('共享事实提取超时');}throw err;
+  });
+}
+function aiExtractRevenueWithFacts(text,statusCb,cid,fieldKeys,cacheKey,contextFingerprint){
+  var contract=cid?gc(cid):null;var docs=getRevenueDocuments(contract,text);
+  if(contract&&!contract.revenueFactCache)contract.revenueFactCache={};
+  var facts=[],jobs=[],freshByDoc={};
+  docs.forEach(function(doc){
+    var fp=revenueTextFingerprint(doc.text);var cached=contract&&contract.revenueFactCache[doc.id];
+    if(cached&&cached.fingerprint===fp&&Array.isArray(cached.facts))facts=facts.concat(cached.facts);
+    else splitRevenueText(doc.text,12000).forEach(function(chunk,index){jobs.push({doc:doc,chunk:chunk,index:index,fp:fp});});
+  });
+  if(statusCb)statusCb({msg:jobs.length?'正在建立共享合同事实表...':'使用已缓存的共享事实表',progress:8});
+  var nextIndex=0,completed=0,failed=false;
+  return new Promise(function(resolve,reject){
+    function next(){
+      if(failed||nextIndex>=jobs.length)return Promise.resolve();
+      var job=jobs[nextIndex++];
+      if(statusCb)statusCb({msg:'整理共享事实 '+(completed+1)+'/'+jobs.length+' · '+job.doc.name,progress:8+Math.round((completed/Math.max(1,jobs.length))*57)});
+      return aiExtractRevenueFactChunk(job.doc,job.chunk,1).then(function(res){
+        if(!freshByDoc[job.doc.id])freshByDoc[job.doc.id]={doc:job.doc,fp:job.fp,facts:[]};
+        freshByDoc[job.doc.id].facts=freshByDoc[job.doc.id].facts.concat(res);completed++;return next();
+      }).catch(function(err){failed=true;reject(err);});
+    }
+    var workers=[];for(var w=0;w<Math.min(3,Math.max(1,jobs.length));w++)workers.push(next());
+    Promise.all(workers).then(function(){if(!failed)resolve();});
+  }).then(function(){
+    Object.keys(freshByDoc).forEach(function(id){
+      var entry=freshByDoc[id];entry.facts=mergeRevenueFacts(entry.facts);facts=facts.concat(entry.facts);
+      if(contract)contract.revenueFactCache[id]={fingerprint:entry.fp,facts:entry.facts,t:Date.now()};
+    });
+    facts=mergeRevenueFacts(facts);
+    if(contract){contract.revenueFacts=facts;contract.revenueNeedsRefresh=false;save();}
+    if(statusCb)statusCb({msg:'共享事实表完成，共'+facts.length+'项；正在分组生成底稿...',progress:72});
+    var factText='【同一合同资料包的共享事实表】\n所有底稿问题必须共同使用以下事实；不得说已列示的事实未明确。\n'+JSON.stringify({facts:facts});
+    if(factText.length>70000)factText=factText.substring(0,70000)+'\n【事实表已按长度截断】';
+    var groups=revenueAnswerQuestionGroups(),completedGroups=0;
+    return Promise.all(groups.map(function(targets,index){
+      return aiExtractChunk(factText,function(st){
+        if(statusCb)statusCb({msg:'正在生成底稿第'+(index+1)+'/'+groups.length+'组...',progress:76+Math.round((completedGroups/groups.length)*18)});
+      },cid,1,'revenue_workpaper',fieldKeys,revenuePromptForQuestions(targets)).then(function(items){
+        var seen={};
+        (items||[]).forEach(function(item){seen[String(item.question_no||'').trim()]=true;});
+        var missing=targets.filter(function(q){return !seen[String(q.questionNo)];});
+        if(!missing.length)return items;
+        if(statusCb)statusCb({msg:'第'+(index+1)+'组补齐缺失的'+missing.length+'个问题...',progress:88});
+        return aiExtractChunk(factText,function(){},cid,0,'revenue_workpaper',fieldKeys,revenuePromptForQuestions(missing)).then(function(extra){
+          var combined=(items||[]).concat(extra||[]),complete={};
+          combined.forEach(function(item){complete[String(item.question_no||'').trim()]=true;});
+          var stillMissing=targets.filter(function(q){return !complete[String(q.questionNo)];});
+          if(stillMissing.length)throw new Error('底稿第'+(index+1)+'组仍缺少问题：'+stillMissing.map(function(q){return q.questionNo;}).join('、'));
+          return combined;
+        });
+      }).then(function(items){
+          completedGroups++;
+          if(statusCb)statusCb({msg:'底稿第'+(index+1)+'组已完成',progress:76+Math.round((completedGroups/groups.length)*18)});
+          return items;
+      });
+    })).then(function(grouped){
+      return grouped.reduce(function(all,items){return all.concat(items||[]);},[]);
+    });
+  }).then(function(items){
+    var finalItems=window.RevenueWorkpaper?RevenueWorkpaper.normalizeResults(items):items;
+    if(window.RevenueWorkpaper&&RevenueWorkpaper.applySharedFacts)finalItems=RevenueWorkpaper.applySharedFacts(finalItems,facts);
+    if(!finalItems.length)throw new Error('模型未返回任何底稿条目，已保留原底稿，请重试');
+    if(cacheKey)extractCache[cacheKey]={items:finalItems,t:Date.now(),contextFingerprint:contextFingerprint};
+    if(contract){(contract.supplements||[]).forEach(function(s){s.status='已吸收';});contract.associationNeedsRefresh=false;save();}
+    if(statusCb)statusCb({msg:'统一分析完成',progress:100});
+    return finalItems;
+  });
+}
+// 规范化字符串：去括号、空格、标点，用于模糊匹配键名
+function normKey(s){
+return String(s||'').replace(/[（(].*?[)）]/g,'').replace(/[【\[].*?[\]】]/g,'').replace(/[《<].*?[>》]/g,'').replace(/[:：].*$/,'').replace(/[\/／、，,\s]/g,'').trim();
+}
+// ===== 动态字段解析（完全自定义提示词）=====
+// 从提示词【字段定义】区块解析字段：每行 "字段名: 中文列名（说明）"
+function parseFields(ruleId){return RuleEngine.parseFieldsFromPrompt(RuleEngine.getRulePrompt(ruleId||activeRuleId));}
+function getFields(ruleId){return RuleEngine.getFieldsForRule(ruleId||activeRuleId);}
+function resetFields(ruleId){RuleEngine.resetFieldsCache(ruleId||null);}
+function pageKey(ruleId){return RuleEngine.pageKeyForRule(ruleId||activeRuleId);}
+// 任意值 → 字符串（布尔→是/否；数组→join；对象→JSON）
+function toStr(v){
+  if(v===undefined||v===null)return '';
+  if(typeof v==='boolean')return v?'是':'否';
+  if(Array.isArray(v))return v.join('、');
+  if(typeof v==='object')return JSON.stringify(v);
+  return String(v);
+}
+// 页码值统一格式化为【第N页】/【第N-M页】/【页码未知】
+function fmtPage(v){
+  var s=toStr(v).trim();
+  if(!s)return '【页码未知】';
+  if(/^【.*】$/.test(s))return s;
+  var nums=s.match(/\d+/g);
+  if(nums&&nums.length){
+    nums=nums.map(function(n){return parseInt(n,10);}).sort(function(a,b){return a-b;});
+    if(nums.length===1)return '【第'+nums[0]+'页】';
+    return '【第'+nums[0]+'-'+nums[nums.length-1]+'页】';
+  }
+  if(/第.*页/.test(s))return '【'+s+'】';
+  return '【页码未知】';
+}
+// matchColIndex 已废弃（改为动态字段方案，按用户定义的字段名直接取值）
+// 按 getFields() 定义的字段，把 AI 返回的一条对象规范化为存储对象
+function normalizeItem(x,ruleId,fieldKeys){
+  ruleId=ruleId||activeRuleId;
+  var item={id:gid(),contractId:'',ruleId:ruleId,ruleVersion:(RuleEngine.getRule(ruleId)||{}).version||'1.0'};
+  var fs=fieldKeys&&fieldKeys.length?FieldSet.fieldsForKeys(ruleId,fieldKeys):getFields(ruleId);
+  var pk=pageKey(ruleId);
+  fs.forEach(function(f){
+    var v=null;
+    if(Object.prototype.hasOwnProperty.call(x,f.key))v=x[f.key];
+    else{
+      var lk=f.key.toLowerCase().replace(/[\s\-_]/g,'');
+      Object.keys(x).some(function(k){if(k.toLowerCase().replace(/[\s\-_]/g,'')===lk){v=x[k];return true;}return false;});
+    }
+    item[f.key]=(f.key===pk)?fmtPage(v):toStr(v);
+  });
+  if(pk&&!item[pk])item[pk]='【页码未知】';
+  return item;
+}
+function parseStructuredItems(content){
+  return parseStructuredArray(content,['items','covenants','results','data']);
+}
+function consolidateRevenueWorkpaperResults(items,statusCb,cid,ruleId,fieldKeys,strictMode){
+  if(ruleId!=='revenue_workpaper'||!window.RevenueWorkpaper)return Promise.resolve(items||[]);
+  var candidates=RevenueWorkpaper.normalizeResults(items||[]);
+  if(!candidates.length)return Promise.resolve([]);
+  if(statusCb)statusCb({msg:'深度复核中：正在合并重复项和冲突结论...',progress:15});
+  var fs=FieldSet.fieldsForKeys(ruleId,fieldKeys);
+  var keyList=fs.map(function(f){return f.key;});
+  var compact=candidates.map(function(item){
+    var out={};
+    keyList.forEach(function(key){
+      var val=String(item[key]||'');
+      out[key]=val.length>2400?val.substring(0,2400):val;
+    });
+    return out;
+  });
+  var sample='{'+keyList.map(function(k){return '"'+k+'":""';}).join(',')+'}';
+  var sharedFacts=(cid&&gc(cid)&&gc(cid).revenueFacts)||[];
+  var prompt='以下是同一份收入合同逐段提取出的候选底稿结果。请进行整合同汇总复核：\n'+
+    '1. 合并同一工作表、同一底稿行的问题，只保留证据最完整的一条；前后冲突时不得擅自选边，应降低置信度并标记需人工复核。\n'+
+    '2. 只依据候选项中的合同原文摘录，不得新增原文中没有的事实、数字或页码。\n'+
+    '3. 合同未写不等于“否”；缺少合同外资料时，明确填写missing_information和fill_readiness。\n'+
+    '4. 严格执行以下SOP口径：\n'+(window.REVENUE_WORKPAPER_SOP_GUIDE||'')+'\n\n'+
+    '共享合同事实表（所有问题必须共同使用，不得与之矛盾）：\n'+JSON.stringify({facts:sharedFacts})+'\n\n候选结果：\n'+JSON.stringify({items:compact})+'\n\n'+
+    '只输出JSON：{"items":['+sample+']}。每个对象必须且只能包含这些字段：'+keyList.join(', ')+'；所有值必须是字符串。';
+  var ctrl=new AbortController();bindTaskAbort(ctrl);var timer=setTimeout(function(){ctrl.abort();},180000);
+  var body={model:A.m||'gpt-4',messages:[
+    {role:'system',content:'你是收入合同审阅结果复核助手。严格区分合同事实、SOP判断和缺失资料，只输出JSON。'},
+    {role:'user',content:prompt}
+  ],temperature:0,max_tokens:10000};
+  applyJsonResponseMode(body,A.u);
+  if(!A.think)body.enable_thinking=false;
+  return taskRunner.checkpoint().then(function(){
+    return safeFetch(chatCompletionsUrl(A.u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+A.k},body:JSON.stringify(body)});
+  }).then(function(r){
+    clearTimeout(timer);
+    if(!r.ok)return r.text().then(function(e){throw new Error('API('+r.status+'):'+e.substring(0,300));});
+    return r.json();
+  }).then(function(d){
+    var msg=d.choices&&d.choices[0]&&d.choices[0].message;
+    var content=msg&&msg.content;
+    if(!content||!content.trim())throw new Error('SOP汇总复核返回空');
+    var arr=parseStructuredItems(content);
+    var normalized=arr.filter(function(x){return x&&typeof x==='object';}).map(function(x){return normalizeItem(x,ruleId,fieldKeys);});
+    if(!normalized.length)throw new Error('SOP汇总复核未返回有效结果');
+    var finalItems=RevenueWorkpaper.normalizeResults(normalized);
+    if(RevenueWorkpaper.applySharedFacts)finalItems=RevenueWorkpaper.applySharedFacts(finalItems,sharedFacts);
+    if(statusCb)statusCb({msg:'深度复核完成',progress:100});
+    return finalItems;
+  }).catch(function(err){
+    clearTimeout(timer);
+    if(isTaskStoppedErr(err)||taskRunner.isStopped())throw err;
+    if(strictMode)throw err;
+    console.warn('SOP汇总复核失败，保留首轮结果:',err);
+    if(statusCb)statusCb({msg:'SOP汇总复核失败，已保留首轮结果',progress:100});
+    return candidates;
+  });
+}
+window.runRevenueDeepReview=function(contractId,fieldSetId){
+  if(!ok()){alert('请先配置API');nav('cfg');return;}
+  if(!window.RevenueWorkpaper){alert('收入底稿套用组件未加载，请重启工具后重试');return;}
+  var c=gc(contractId);if(!c){alert('未找到当前合同');return;}
+  var sets=FieldSet.listFieldSets(contractId,'revenue_workpaper');
+  var fsId=fieldSetId||FieldSet.latestFieldSetId(contractId,'revenue_workpaper');
+  var set=sets.find(function(s){return s.id===fsId;});
+  var fieldKeys=(set&&set.keys)||FieldSet.defaultFieldKeys('revenue_workpaper');
+  fieldKeys=FieldSet.ensurePageInKeys('revenue_workpaper',fieldKeys);
+  fsId=FieldSet.fieldSetIdOf(fieldKeys);
+  var items=FieldSet.gvFieldSet(contractId,'revenue_workpaper',fsId);
+  if(!items.length){alert('当前文件没有可复核的收入底稿结果，请先完成提取');return;}
+  if(!confirm('深度复核会额外调用一次AI，重新合并和检查当前 '+items.length+' 条结果，通常需要1-3分钟，并会覆盖当前这套清单。\n\n是否继续？'))return;
+  taskRunner.start('extract',c.file+' · 深度复核','1/1');
+  addLog(contractId,c.file,'深度复核开始','可随时通过底部任务栏停止','info');
+  consolidateRevenueWorkpaperResults(items,function(st){
+    var msg=typeof st==='string'?st:st.msg;
+    var pct=typeof st==='string'?'1/1':((st.progress||0)+'%');
+    taskRunner.update(c.file+' · '+msg,pct);
+    updateLog(contractId,'深度复核中',msg,'info');
+  },contractId,'revenue_workpaper',fieldKeys,true).then(function(result){
+    if(taskRunner.isStopped())return;
+    var extractAt=new Date().toISOString();
+    var label=FieldSet.formatVersionLabel('revenue_workpaper',fieldKeys,extractAt)+' · 已深度复核';
+    FieldSet.replaceFieldSetResults(contractId,'revenue_workpaper',fsId,result,{keys:fieldKeys,extractAt:extractAt,label:label});
+    extractCache[cacheKeyFor(contractId,'revenue_workpaper',fsId)]={items:result,t:Date.now(),contextFingerprint:extractionContextFingerprint(contractId)};
+    activeFieldSetId=fsId;
+    save();
+    taskRunner.finish('深度复核完成','');
+    addLog(contractId,c.file,'深度复核完成',result.length+'条','done');
+    render();
+  }).catch(function(err){
+    if(isTaskStoppedErr(err)){
+      taskRunner.finish('已停止','');
+      addLog(contractId,c.file,'深度复核已停止','原提取结果未改动','warn');
+      return;
+    }
+    taskRunner.finish('深度复核失败','');
+    addLog(contractId,c.file,'深度复核失败',String(err.message||err).substring(0,80),'error');
+    alert('深度复核失败，原提取结果未改动：'+(err.message||err));
+  });
+};
+function aiExtractChunk(text,statusCb,cid,retries,ruleId,fieldKeys,promptOverride){
+if(retries===undefined)retries=3;
+ruleId=ruleId||activeRuleId;
+fieldKeys=FieldSet.ensurePageInKeys(ruleId,fieldKeys||FieldSet.defaultFieldKeys(ruleId));
+resetFields(ruleId);
+var fs=FieldSet.fieldsForKeys(ruleId,fieldKeys);
+var keyList=fs.map(function(f){return f.key;});
+// 拼接合同文本：用户提示词含 {{TEXT}} 则替换，否则系统自动追加（用户无需手写占位符）
+var prompt=FieldSet.filterPromptByFields(promptOverride||RuleEngine.getRulePrompt(ruleId),keyList);
+var ruleMeta=RuleEngine.getRule(ruleId)||{};
+var isTable=ruleMeta.docKind==='table';
+if(String(text||'').indexOf('【资料包文件')>=0){
+  prompt+='\n\n【关联资料分析规则】以下文本来自用户手动关联的同一资料包。必须联合分析，并保留文件边界；补充协议明确修改主文件条款时以补充协议为准，框架协议与订单应结合判断。不得把不同文件的原文、数字或页码拼成一条虚构条款。输出字段如支持来源文件，应写明实际文件名。';
+}
+if(prompt.indexOf('{{TEXT}}')>=0){prompt=prompt.replace('{{TEXT}}',text);}
+else{prompt=prompt+'\n\n'+(isTable?'文档文本（OCR识别结果）':'合同文本')+'：\n'+text;}
+// 动态 schema 锁：按用户勾选的字段名强制输出结构
+var sample='{'+keyList.map(function(k){return '"'+k+'":""';}).join(',')+'}';
+var schemaLock='\n\n【强制输出格式 - 最高优先级，必须严格遵守】\n你只能输出如下结构的JSON：\n{"items":['+sample+']}\n硬性要求：\n1. 每个对象的键名必须是且只能是：'+keyList.join(', ')+'，缺一不可，顺序不变。\n2. 不得使用任何其他字段名（无论英文或中文）。\n3. 布尔值用"是"/"否"字符串；所有值必须是字符串。\n4. 只输出JSON，不要markdown代码块，不要任何解释文字。';
+prompt=prompt+schemaLock;
+if(statusCb)statusCb('AI提取中...');
+var ctrl=new AbortController();bindTaskAbort(ctrl);var t=setTimeout(function(){ctrl.abort();},120000);
+var sysMsg=(isTable?'你是审计专用的单据结构化摘录助手。':'你是审计专用的合同条款精准摘录助手。')+'只输出JSON，用 {"items":[...]} 包装，每个对象的键名必须为：'+keyList.join(', ')+'，禁止使用任何其他字段名，不要任何解释。';
+var body={model:A.m||'gpt-4',messages:[{role:'system',content:sysMsg},{role:'user',content:prompt}],temperature:0.1,max_tokens:8000};
+applyJsonResponseMode(body,A.u);
+if(!A.think){body.enable_thinking=false;}
+return safeFetch(chatCompletionsUrl(A.u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+A.k},body:JSON.stringify(body)}).then(function(r){clearTimeout(t);if(!r.ok)return r.text().then(function(e){throw new Error('API('+r.status+'):'+e.substring(0,300));});return r.json();}).then(function(d){
+var msg=d.choices&&d.choices[0]&&d.choices[0].message;
+var c=msg&&msg.content;
+if(!c||!c.trim()){
+var rc=msg&&msg.reasoning_content;
+if(rc&&rc.length>0)throw new Error('content为空(思维链占用'+rc.length+'字token,请在配置中关闭思维链)');
+throw new Error('返回空');
+}
+try{var arr=parseStructuredItems(c);}
+catch(pe){console.error('JSON fail:',pe,'raw:',c.substring(0,500));throw new Error('底稿答案JSON解析失败:'+pe.message);}
+console.log('字段定义 fields:',keyList,'模型返回第一条键:',arr[0]?Object.keys(arr[0]):'');
+var normalized=arr.filter(function(x){return x&&typeof x==='object';}).map(function(x){return normalizeItem(x,ruleId,fieldKeys);});
+if(normalized.length===0)throw new Error('模型未返回任何底稿条目');
+// 诊断：统计有效条数（至少有一个字段非空）
+var validCount=normalized.filter(function(it){return fs.some(function(f){return it[f.key]&&String(it[f.key]).trim();});}).length;
+if(normalized.length>0&&validCount===0){
+window.__lastRawExtract=c.substring(0,3000);
+var firstKeys=arr[0]?Object.keys(arr[0]).join('、'):'(无)';
+console.warn('提取到'+normalized.length+'条但全部字段为空。模型键名:['+firstKeys+'] 期望字段:['+keyList.join(', ')+'] 原始返回:',window.__lastRawExtract);
+throw new Error('字段名未匹配。模型用的键:['+firstKeys.substring(0,80)+']。详情见控制台 window.__lastRawExtract');
+}
+return normalized;
+}).catch(function(e){
+clearTimeout(t);
+if(isTaskStoppedErr(e))throw e;
+if(retries>0&&!taskRunner.isStopped()){
+if(statusCb)statusCb('失败重试中...剩余'+retries+'次');
+return new Promise(function(resolve){setTimeout(resolve,2000);}).then(function(){return aiExtractChunk(text,statusCb,cid,retries-1,ruleId,fieldKeys,promptOverride);});
+}
+if(e.name==='AbortError'){if(taskRunner.isStopped())throw new Error(TASK_STOPPED);throw new Error('超时');}throw e;
+});
+}
+
+// ===== Process PDF with logging =====
+var MIN_PAGE_TEXT=60; // 单页文字层低于此字数则对该页做OCR（避免扫描件仅前几页有杂散文字就跳过OCR）
+async function processPDF(file,onProgress,fileId){
+await taskRunner.checkpoint();
+var fid=fileId||file.name+'_'+Date.now();
+var fsize=(file.size/1024).toFixed(0)+'KB';
+addLog(fid,file.name,'文件上传成功','大小:'+fsize+' | 开始处理','done');
+var typedArray=await file.arrayBuffer();
+var pdf=await pdfjsLib.getDocument(getPdfDocumentOptions(typedArray)).promise;
+var numPages=pdf.numPages;
+addLog(fid,file.name,'解析PDF','共'+numPages+'页','done');
+onProgress('分析PDF文字层...');
+var pageTexts=[];
+for(var pi=1;pi<=numPages;pi++){
+await taskRunner.checkpoint();
+var page=await pdf.getPage(pi);
+var tc=await page.getTextContent();
+pageTexts[pi]=tc.items.map(function(it){return it.str;}).join(' ').replace(/\s+/g,' ').trim();
+}
+var ocrPages=[];
+for(var pi2=1;pi2<=numPages;pi2++){if((pageTexts[pi2]||'').length<MIN_PAGE_TEXT)ocrPages.push(pi2);}
+var needOcr=ocrPages.length>0;
+if(!needOcr){
+var parts=[];
+for(var pi3=1;pi3<=numPages;pi3++){
+parts.push('---PDF第'+pi3+'页---\n'+(pageTexts[pi3]||''));
+}
+var pureText=parts.join('\n\n');
+addLog(fid,file.name,'文字PDF提取完成','共'+pureText.length+'字 | 全部'+numPages+'页有文字层','done');
+onProgress('文字PDF('+pureText.length+'字)');
+return{text:pureText,isScanned:false,pagesMap:{}};
+}
+var engine=O.engine||'ai';
+if(engine==='ai'&&!visionOk()){addLog(fid,file.name,'❌ 处理失败','未配置视觉模型API','error');throw new Error('请先在OCR引擎页配置视觉模型API');}
+if(engine==='tesseract'&&typeof Tesseract==='undefined'){addLog(fid,file.name,'❌ Tesseract未加载','请检查网络','error');throw new Error('Tesseract.js未加载');}
+if(engine==='custom'&&!(O.custom&&O.custom.url)){addLog(fid,file.name,'❌ 处理失败','未配置自定义OCR接口','error');throw new Error('请先配置自定义OCR接口');}
+if(ocrPages.length===numPages){
+addLog(fid,file.name,'扫描件识别开始','使用'+getOCRLabel()+'，共'+numPages+'页','warn');
+}else{
+addLog(fid,file.name,'混合PDF识别',''+ocrPages.length+'/'+numPages+'页需OCR，其余页用文字层','warn');
+}
+var allTexts=[];
+var pagesMap={};
+var ocrStart=Date.now();
+for(var i=1;i<=numPages;i++){
+await taskRunner.checkpoint();
+var body=pageTexts[i]||'';
+if(ocrPages.indexOf(i)>=0){
+onProgress('OCR第'+i+'/'+numPages+'页...');
+addLog(fid,file.name,'OCR识别中','正在识别第'+i+'页 / 共'+numPages+'页','info');
+var b64=await pdfPageToImage(pdf,i,1.5);
+try{
+body=await runOCR(b64,i,numPages,onProgress);
+addLog(fid,file.name,'OCR识别中','第'+i+'/'+numPages+'页 OK('+body.length+'字)','info');
+}catch(e){
+if(isTaskStoppedErr(e))throw e;
+console.error('第'+i+'页OCR失败:',e);
+addLog(fid,file.name,'第'+i+'页识别失败',e.message.substring(0,40),'error');
+onProgress('第'+i+'页失败:'+e.message.substring(0,40));
+body=body||pageTexts[i]||'';
+}
+}else{
+onProgress('文字层第'+i+'/'+numPages+'页('+body.length+'字)');
+}
+if(body&&body.trim()){
+allTexts.push('---PDF第'+i+'页---\n'+body);
+pagesMap[i]=body.length;
+}
+}
+var ocrElapsed=((Date.now()-ocrStart)/1000).toFixed(1);
+var fullText=allTexts.join('\n');
+if(fullText&&fullText.trim().length>50){
+addLog(fid,file.name,'识别完成','耗时'+ocrElapsed+'秒 | 共'+fullText.length+'字 | OCR'+ocrPages.length+'页','done');
+onProgress(getOCRLabel()+'完成('+fullText.length+'字)');
+return{text:fullText,isScanned:true,pagesMap:pagesMap};
+}
+addLog(fid,file.name,'❌ 未能识别到文字','请检查PDF是否有效','error');
+throw new Error('未能识别到文字');
+}
+
+// ===== PDF Viewer =====
+let currentPdfDoc = null;
+let currentPdfSourceId = null;
+let currentPdfPage = 1;
+let pdfScale = 1.5;
+let pdfRotation = 0;
+let pdfFitWidth = false;
+let pdfSearchMatches = [];
+let pdfSearchCursor = -1;
+let pdfSearchQuery = '';
+let pdfPaneOpen = false;
+
+function parsePageNumber(pageStr) {
+    if(pageStr === null || pageStr === undefined) return null;
+    var s = String(pageStr).trim();
+    if(!s) return null;
+    var m = s.match(/第(\d+)(?:\s*[-~～]\s*\d+)?页/);
+    if(m && m[1]) return parseInt(m[1], 10);
+    var n = parseInt(s, 10);
+    return isNaN(n) ? null : n;
+}
+
+function buildPageMarkers(text) {
+    var markers = [];
+    if(!text) return markers;
+    var re = /---PDF第(\d+)页---/g;
+    var m;
+    while((m = re.exec(text)) !== null) {
+        markers.push({ page: parseInt(m[1], 10), start: m.index });
+    }
+    return markers;
+}
+
+function pageNumAtTextIndex(text, index) {
+    var markers = buildPageMarkers(text);
+    if(!markers.length) return 1;
+    var page = 1;
+    for(var i = 0; i < markers.length; i++) {
+        if(index >= markers[i].start) page = markers[i].page;
+        else break;
+    }
+    return page;
+}
+
+function findTextMatches(text, query) {
+    if(!text || !query) return [];
+    var lower = text.toLowerCase();
+    var ql = query.toLowerCase();
+    var out = [];
+    var pos = 0;
+    while((pos = lower.indexOf(ql, pos)) !== -1) {
+        out.push({ index: pos, page: pageNumAtTextIndex(text, pos) });
+        pos += ql.length;
+    }
+    return out;
+}
+
+function updatePdfSearchStatus() {
+    var el = document.getElementById('pdfSearchStatus');
+    if(!el) return;
+    if(!pdfSearchQuery || pdfSearchMatches.length === 0) {
+        el.textContent = pdfSearchQuery ? '未找到' : '';
+        return;
+    }
+    el.textContent = (pdfSearchCursor + 1) + '/' + pdfSearchMatches.length + ' · 第' + pdfSearchMatches[pdfSearchCursor].page + '页';
+}
+
+function isPdfPreviewOpen(){
+    return !!pdfPaneOpen;
+}
+function goToPdfSearchMatch(dir) {
+    if(!pdfSearchMatches.length) return;
+    if(dir === 'next') pdfSearchCursor = (pdfSearchCursor + 1) % pdfSearchMatches.length;
+    else pdfSearchCursor = (pdfSearchCursor - 1 + pdfSearchMatches.length) % pdfSearchMatches.length;
+    var hit = pdfSearchMatches[pdfSearchCursor];
+    jumpToPage(hit.page);
+    updatePdfSearchStatus();
+    pdfFlashHighlight();
+}
+async function loadPdfViewer(cid) {
+    var file = await dbGetPdf(cid);
+    if(!file) {
+        var canvas = document.getElementById('pdfCanvas');
+        if(canvas) {
+            var ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0,0,canvas.width,canvas.height);
+            ctx.fillStyle = '#666'; ctx.font = '14px sans-serif'; ctx.fillText('未找到PDF源文件', 20, 30);
+        }
+        return;
+    }
+    var arrayBuffer = await file.arrayBuffer();
+    currentPdfDoc = await pdfjsLib.getDocument(getPdfDocumentOptions(arrayBuffer)).promise;
+    renderPdfPage(currentPdfPage || 1);
+}
+window.openPdfPreview = function(contractId, pageStr) {
+    var c = gc(contractId || cid);
+    if(!c){alert('未找到文件');return;}
+    cid = c.id;
+    currentPdfSourceId = c.id;
+    var targetPage = parsePageNumber(pageStr);
+    if(targetPage !== null) currentPdfPage = targetPage;
+    else currentPdfPage = 1;
+    pdfPaneOpen = true;
+    render();
+};
+window.closePdfPreview = function(){
+    pdfPaneOpen = false;
+    currentPdfDoc = null;
+    currentPdfSourceId = null;
+    render();
+};
+window.jumpToEvidence=function(contractId,sourceDocuments,pageStr){
+    var c=gc(contractId||cid);if(!c){alert('未找到文件');return;}
+    var names=String(sourceDocuments||'').split(/[；;]/).map(function(v){return v.trim();}).filter(Boolean);
+    var sourceId=c.id;
+    if(names.length&&names[0]!==c.file){
+      var supp=(c.supplements||[]).find(function(s){return names.indexOf(s.file)>=0;});
+      var linked=associatedDocumentsFor(c).find(function(doc){return !doc.isPrimary&&names.indexOf(doc.name)>=0;});
+      if(linked)sourceId=linked.id;
+      else if(supp)sourceId=supp.id;
+    }
+    cid=c.id;currentPdfSourceId=sourceId;
+    var targetPage=parsePageNumber(pageStr);currentPdfPage=targetPage!==null?targetPage:1;
+    pdfPaneOpen=true;render();
+};
+function clearPdfSearchHighlights(){
+    var layer = document.getElementById('pdfHighlightLayer');
+    if(layer) {
+        var ctx = layer.getContext('2d');
+        ctx.clearRect(0, 0, layer.width || 0, layer.height || 0);
+    }
+    var note = document.getElementById('pdfSearchNote');
+    if(note) note.className = 'hidden';
+}
+function setPdfSearchNote(text){
+    var note = document.getElementById('pdfSearchNote');
+    if(!note) return;
+    if(!text){note.className='hidden';note.textContent='';return;}
+    note.className='pdf-search-note';
+    note.textContent=text;
+}
+async function renderPdfSearchHighlights(page, viewport, canvas) {
+    var layer = document.getElementById('pdfHighlightLayer');
+    if(!layer || !canvas) return;
+    layer.width = canvas.width;
+    layer.height = canvas.height;
+    layer.style.width = canvas.style.width || canvas.width + 'px';
+    layer.style.height = canvas.style.height || canvas.height + 'px';
+    var hctx = layer.getContext('2d');
+    hctx.clearRect(0, 0, layer.width, layer.height);
+    setPdfSearchNote('');
+    var q = (pdfSearchQuery || '').trim();
+    if(!q) {
+        var input = document.getElementById('pdfSearchInput');
+        q = input ? input.value.trim() : '';
+    }
+    if(!q) return;
+    var ql = q.toLowerCase();
+    var activeIndexOnPage = 0;
+    if(pdfSearchMatches.length && pdfSearchCursor >= 0 && pdfSearchMatches[pdfSearchCursor] && pdfSearchMatches[pdfSearchCursor].page === currentPdfPage) {
+        for(var mi = 0; mi < pdfSearchCursor; mi++) {
+            if(pdfSearchMatches[mi].page === currentPdfPage) activeIndexOnPage++;
+        }
+    }
+    var localHitIndex = 0;
+    var activeRect = null;
+    try {
+        var textContent = await page.getTextContent();
+        if(!textContent.items || textContent.items.length === 0) {
+            if(pdfSearchMatches.some(function(m){return m.page === currentPdfPage;})) {
+                setPdfSearchNote('已在OCR文本中找到“'+q+'”，但当前PDF页是扫描图片，没有可用文字坐标，无法精确标黄。');
+            }
+            return;
+        }
+        var mapped = [];
+        var pageText = '';
+        textContent.items.forEach(function(item) {
+            var str = item.str || '';
+            if(!str) return;
+            var tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+            var fontHeight = Math.max(8, Math.hypot(tx[2], tx[3]) || Math.abs(tx[3]) || 10);
+            var itemWidth = Math.max(fontHeight, (item.width || str.length * fontHeight * 0.5) * viewport.scale);
+            var charWidth = itemWidth / Math.max(str.length, 1);
+            mapped.push({text:str,start:pageText.length,end:pageText.length+str.length,x:tx[4],y:tx[5]-fontHeight,fontHeight:fontHeight,charWidth:charWidth});
+            pageText += str;
+        });
+        var pageLower = pageText.toLowerCase();
+        var starts = [];
+        var searchAt = 0;
+        while((searchAt = pageLower.indexOf(ql, searchAt)) !== -1) {
+            starts.push(searchAt);
+            searchAt += Math.max(ql.length, 1);
+        }
+        starts.forEach(function(matchStart) {
+            var matchEnd = matchStart + q.length;
+            mapped.forEach(function(seg) {
+                var from = Math.max(matchStart, seg.start);
+                var to = Math.min(matchEnd, seg.end);
+                if(to <= from) return;
+                var offset = from - seg.start;
+                var len = to - from;
+                var left = seg.x + offset * seg.charWidth;
+                var top = seg.y;
+                var width = Math.max(seg.charWidth * len, 6);
+                var height = Math.max(seg.fontHeight, 10);
+                hctx.save();
+                hctx.fillStyle = localHitIndex === activeIndexOnPage ? 'rgba(255,133,0,.48)' : 'rgba(255,204,0,.38)';
+                hctx.strokeStyle = localHitIndex === activeIndexOnPage ? '#ff8500' : '#FFCC00';
+                hctx.lineWidth = Math.max(2, viewport.scale);
+                hctx.fillRect(left, top, width, height);
+                hctx.strokeRect(left, top, width, height);
+                hctx.restore();
+                if(localHitIndex === activeIndexOnPage && !activeRect) activeRect = {left:left, top:top, width:width, height:height};
+            });
+            localHitIndex++;
+        });
+        textContent.items.forEach(function(item) {
+            var str = item.str || '';
+            if(!str) return;
+            var lower = str.toLowerCase();
+            var start = 0;
+            var matches = [];
+            while((start = lower.indexOf(ql, start)) !== -1) {
+                matches.push(start);
+                start += Math.max(ql.length, 1);
+            }
+            if(!matches.length || starts.length) return;
+            var tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+            var fontHeight = Math.max(8, Math.hypot(tx[2], tx[3]) || Math.abs(tx[3]) || 10);
+            var itemWidth = Math.max(fontHeight, (item.width || str.length * fontHeight * 0.5) * viewport.scale);
+            var charWidth = itemWidth / Math.max(str.length, 1);
+            matches.forEach(function(pos) {
+                var left = tx[4] + pos * charWidth;
+                var top = tx[5] - fontHeight;
+                var width = Math.max(charWidth * q.length, 8);
+                var height = Math.max(fontHeight, 10);
+                hctx.save();
+                hctx.fillStyle = localHitIndex === activeIndexOnPage ? 'rgba(255,133,0,.48)' : 'rgba(255,204,0,.38)';
+                hctx.strokeStyle = localHitIndex === activeIndexOnPage ? '#ff8500' : '#FFCC00';
+                hctx.lineWidth = Math.max(2, viewport.scale);
+                hctx.fillRect(left, top, width, height);
+                hctx.strokeRect(left, top, width, height);
+                hctx.restore();
+                if(localHitIndex === activeIndexOnPage) activeRect = {left:left, top:top, width:width, height:height};
+                localHitIndex++;
+            });
+        });
+        if(localHitIndex === 0 && pdfSearchMatches.some(function(m){return m.page === currentPdfPage;})) {
+            setPdfSearchNote('已在OCR文本中找到“'+q+'”，但当前PDF页没有匹配的原生文字坐标，无法精确标黄。');
+        }
+        if(activeRect) {
+            var box = document.getElementById('pdfContainer');
+            if(box) {
+                setTimeout(function(){
+                    try{
+                        box.scrollLeft = Math.max(0, activeRect.left - box.clientWidth / 2 + activeRect.width / 2);
+                        box.scrollTop = Math.max(0, activeRect.top - box.clientHeight / 2 + activeRect.height / 2);
+                    }catch(e){}
+                }, 30);
+            }
+        }
+    } catch(e) {
+        console.warn('PDF搜索高亮失败:', e);
+        setPdfSearchNote('搜索已定位到本页，但高亮绘制失败：'+(e&&e.message?e.message:'未知错误'));
+    }
+}
+async function renderPdfPage(num) {
+    if(!currentPdfDoc) return;
+    if(num < 1) num = 1;
+    if(num > currentPdfDoc.numPages) num = currentPdfDoc.numPages;
+    currentPdfPage = num;
+    var page = await currentPdfDoc.getPage(num);
+    var container = document.getElementById('pdfContainer');
+    var baseViewport = page.getViewport({scale: 1, rotation: pdfRotation});
+    var scale = pdfFitWidth && container ? Math.max(0.5, (container.clientWidth - 32) / baseViewport.width) : pdfScale;
+    var viewport = page.getViewport({scale: scale, rotation: pdfRotation});
+    var canvas = document.getElementById('pdfCanvas');
+    if(!canvas) return;
+    var ctx = canvas.getContext('2d');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    canvas.style.width = viewport.width + 'px';
+    canvas.style.height = viewport.height + 'px';
+    var layer = document.getElementById('pdfHighlightLayer');
+    if(layer) {
+        layer.width = viewport.width;
+        layer.height = viewport.height;
+        layer.style.width = viewport.width + 'px';
+        layer.style.height = viewport.height + 'px';
+    }
+    await page.render({canvasContext: ctx, viewport: viewport}).promise;
+    var numEl = document.getElementById('pdfPageNum');
+    if(numEl) numEl.innerText = num + ' / ' + currentPdfDoc.numPages;
+    var inputEl = document.getElementById('pdfPageInput');
+    if(inputEl && document.activeElement !== inputEl) inputEl.value = num;
+    await renderPdfSearchHighlights(page, viewport, canvas);
+}
+window.pdfPrev = function() { if(currentPdfPage > 1) renderPdfPage(currentPdfPage - 1); }
+window.pdfNext = function() { if(currentPdfDoc && currentPdfPage < currentPdfDoc.numPages) renderPdfPage(currentPdfPage + 1); }
+window.pdfZoomIn = function() { pdfFitWidth = false; pdfScale = Math.min(pdfScale + 0.25, 3); renderPdfPage(currentPdfPage); }
+window.pdfZoomOut = function() { pdfFitWidth = false; pdfScale = Math.max(pdfScale - 0.25, 0.5); renderPdfPage(currentPdfPage); }
+window.pdfFitWidthToggle = function() { pdfFitWidth = true; renderPdfPage(currentPdfPage); }
+window.pdfRotate = function() { pdfRotation = (pdfRotation + 90) % 360; renderPdfPage(currentPdfPage); }
+window.pdfGoToInput = function() {
+    var el = document.getElementById('pdfPageInput');
+    if(!el) return;
+    jumpToPage(el.value);
+}
+window.jumpToPage = function(pageStr) {
+    var p = parsePageNumber(pageStr);
+    if(!isPdfPreviewOpen()) {
+        openPdfPreview(cid, pageStr);
+        return;
+    }
+    if(p !== null && currentPdfDoc && p >= 1 && p <= currentPdfDoc.numPages) {
+        renderPdfPage(p);
+    }
+}
+window.pdfSearchRun = function(reset) {
+    var el = document.getElementById('pdfSearchInput');
+    if(!el || !cid) return;
+    var q = el.value.trim();
+    if(!q) {
+        pdfSearchMatches = [];
+        pdfSearchCursor = -1;
+        pdfSearchQuery = '';
+        updatePdfSearchStatus();
+        clearPdfSearchHighlights();
+        return;
+    }
+    var c = gc(cid);
+    if(!c || !c.text) {
+        updatePdfSearchStatus();
+        return;
+    }
+    if(reset || q !== pdfSearchQuery) {
+        pdfSearchQuery = q;
+        pdfSearchMatches = findTextMatches(c.text, q);
+        pdfSearchCursor = pdfSearchMatches.length ? 0 : -1;
+    } else if(pdfSearchMatches.length) {
+        pdfSearchCursor = (pdfSearchCursor + 1) % pdfSearchMatches.length;
+    }
+    if(pdfSearchMatches.length === 0) {
+        updatePdfSearchStatus();
+        return;
+    }
+    if(pdfSearchCursor < 0) pdfSearchCursor = 0;
+    jumpToPage(pdfSearchMatches[pdfSearchCursor].page);
+    updatePdfSearchStatus();
+    pdfFlashHighlight();
+}
+window.pdfSearchNext = function() {
+    if(!pdfSearchMatches.length) { pdfSearchRun(true); return; }
+    goToPdfSearchMatch('next');
+}
+window.pdfSearchPrev = function() {
+    if(!pdfSearchMatches.length) return;
+    goToPdfSearchMatch('prev');
+}
+window.pdfSearchText = function() { pdfSearchRun(true); }
+window.pdfFlashHighlight = function() {
+    var box = document.getElementById('pdfContainer');
+    if(!box) return;
+    box.classList.add('pdf-flash');
+    setTimeout(function(){ box.classList.remove('pdf-flash'); }, 1200);
+}
+function pdfViewerHtml(inModal) {
+    var wrapCls = inModal ? 'bg-black border border-gray-800 rounded-lg flex flex-col h-full' : 'bg-black border border-gray-800 rounded-lg flex flex-col h-[calc(100vh-80px)]';
+    return '<div class="'+wrapCls+'">' +
+    '<div class="p-2 border-b border-gray-800 bg-gray-900 rounded-t-lg space-y-2">' +
+    '<div class="flex justify-between items-center gap-2 flex-wrap">' +
+    '<span class="text-sm font-medium text-white flex items-center gap-2 shrink-0"><svg class="w-4 h-4 text-ey" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>PDF 预览</span>' +
+    '<div class="flex gap-1 items-center flex-wrap">' +
+    '<button type="button" onclick="pdfZoomOut()" class="bg-gray-800 hover:bg-gray-700 text-white px-2 py-1 rounded text-xs" title="缩小">−</button>' +
+    '<button type="button" onclick="pdfZoomIn()" class="bg-gray-800 hover:bg-gray-700 text-white px-2 py-1 rounded text-xs" title="放大">+</button>' +
+    '<button type="button" onclick="pdfFitWidthToggle()" class="bg-gray-800 hover:bg-gray-700 text-white px-2 py-1 rounded text-xs">适合宽度</button>' +
+    '<button type="button" onclick="pdfRotate()" class="bg-gray-800 hover:bg-gray-700 text-white px-2 py-1 rounded text-xs" title="旋转">↻</button>' +
+    (isPdfPreviewOpen()?'<button type="button" onclick="closePdfPreview()" class="bg-gray-800 hover:bg-gray-700 text-white px-2 py-1 rounded text-xs">收起预览</button>':'') +
+    '</div></div>' +
+    '<div class="flex gap-1 items-center flex-wrap">' +
+    '<button type="button" onclick="pdfPrev()" class="bg-gray-800 hover:bg-gray-700 text-white px-2 py-1 rounded text-xs">上一页</button>' +
+    '<span id="pdfPageNum" class="text-xs text-gray-400 font-mono w-14 text-center">- / -</span>' +
+    '<button type="button" onclick="pdfNext()" class="bg-gray-800 hover:bg-gray-700 text-white px-2 py-1 rounded text-xs">下一页</button>' +
+    '<span class="text-xs text-gray-600 mx-1">跳转</span>' +
+    '<input type="number" id="pdfPageInput" min="1" class="w-12 bg-black border border-gray-700 rounded px-1 py-0.5 text-xs text-white text-center" onkeydown="if(event.key===\'Enter\')pdfGoToInput()">' +
+    '<button type="button" onclick="pdfGoToInput()" class="bg-gray-800 hover:bg-gray-700 text-white px-2 py-1 rounded text-xs">Go</button>' +
+    '<input type="search" id="pdfSearchInput" placeholder="搜索原文…" class="flex-1 min-w-[80px] bg-black border border-gray-700 rounded px-2 py-1 text-xs text-white placeholder:text-gray-600" oninput="pdfSearchText()" onkeydown="if(event.key===\'Enter\')pdfSearchNext();if(event.key===\'Enter\'&&event.shiftKey)pdfSearchPrev()">' +
+    '<button type="button" onclick="pdfSearchPrev()" class="bg-gray-800 hover:bg-gray-700 text-white px-2 py-1 rounded text-xs" title="上一处">↑</button>' +
+    '<button type="button" onclick="pdfSearchNext()" class="bg-gray-800 hover:bg-gray-700 text-white px-2 py-1 rounded text-xs" title="下一处">↓</button>' +
+    '<span id="pdfSearchStatus" class="text-xs text-gray-500 min-w-[72px]"></span>' +
+    '</div></div>' +
+    '<div class="flex-1 overflow-auto ap-scroll p-4 bg-[#1a1a1a] flex justify-center items-start" id="pdfContainer"><div id="pdfPageWrap" class="relative inline-block"><canvas id="pdfCanvas" class="shadow-2xl block"></canvas><canvas id="pdfHighlightLayer" class="absolute left-0 top-0 pointer-events-none"></canvas><div id="pdfSearchNote" class="hidden"></div></div></div></div>';
+}
+function splitPaneHtml(leftHtml, rightHtml) {
+    var ratio = parseFloat(localStorage.getItem('ap_split_ratio') || '0.42');
+    if(isNaN(ratio) || ratio < 0.25) ratio = 0.25;
+    if(ratio > 0.65) ratio = 0.65;
+    return '<div id="splitPane" class="flex items-stretch h-[calc(100vh-8rem)] min-h-[480px]">' +
+    '<div id="splitLeft" style="width:' + Math.round(ratio * 100) + '%" class="shrink-0 min-w-[260px] max-w-[70%]">' + leftHtml + '</div>' +
+    '<div id="splitHandle" class="w-1.5 shrink-0 bg-gray-800 hover:bg-ey/60 cursor-col-resize transition-colors mx-0.5 rounded" title="拖拽调整宽度"></div>' +
+    '<div id="splitRight" class="flex-1 min-w-[320px] overflow-y-auto ap-scroll pr-1">' + rightHtml + '</div></div>';
+}
+window.initSplitPane = function() {
+    var handle = document.getElementById('splitHandle');
+    var left = document.getElementById('splitLeft');
+    var pane = document.getElementById('splitPane');
+    if(!handle || !left || !pane) return;
+    handle.onmousedown = function(e) {
+        e.preventDefault();
+        var startX = e.clientX;
+        var startW = left.offsetWidth;
+        var totalW = pane.offsetWidth;
+        function onMove(ev) {
+            var nw = startW + (ev.clientX - startX);
+            var ratio = Math.max(0.25, Math.min(0.65, nw / totalW));
+            left.style.width = Math.round(ratio * 100) + '%';
+            localStorage.setItem('ap_split_ratio', String(ratio));
+            if(pdfFitWidth) renderPdfPage(currentPdfPage);
+        }
+        function onUp() {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    };
+}
+
+// ===== Router =====
+function getPageContent(){
+if(page==='dash')return pgDash();
+if(page==='proj')return pgProj();
+if(page==='cont')return pgCont();
+if(page==='work')return pgWork();
+if(page==='cfg')return pgCfg();
+if(page==='rules')return pgRules();
+return '';
+}
+function updateNavActive(){
+var map={dash:'nav-dash',rules:'nav-rules',cfg:'nav-cfg'};
+Object.keys(map).forEach(function(p){
+var el=document.getElementById(map[p]);
+if(!el)return;
+el.className='flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm cursor-pointer '+(page===p?'bg-ey text-eydark font-semibold':'text-gray-400 hover:bg-gray-900 hover:text-gray-200');
+});
+}
+function render(){
+if(typeof hideIntro==='function')hideIntro();
+var a=document.getElementById('app');
+if(!a)return;
+if(page==='home'){a.innerHTML=pgHome();return;}
+var content=getPageContent();
+if(!document.getElementById('ap-shell')){
+a.innerHTML=L(content);
+}else{
+var main=document.getElementById('ap-main');
+if(main)main.innerHTML=content;
+updateNavActive();
+renderLogPanel();
+}
+}
+function nav(p,pr){var prevCid=cid;page=p;if(pr){if(pr.pid)pid=pr.pid;if(pr.cid){cid=pr.cid;var c=gc(pr.cid);if(c)activeRuleId=getContractRuleId(c);activeFieldSetId=FieldSet.latestFieldSetId(cid,activeRuleId);selectedWorkRowId=null;}if(pr.ruleId){activeRuleId=pr.ruleId;if(cid)activeFieldSetId=FieldSet.latestFieldSetId(cid,activeRuleId);}}if((p!=='cont'&&p!=='work')||(pr&&pr.cid&&pr.cid!==prevCid)){pdfPaneOpen=false;currentPdfDoc=null;currentPdfSourceId=null;}if(typeof window.cm==='function')window.cm();render();window.scrollTo(0,0);}
+
+function L(c){
+var badge=ok()?'<span class="ml-2 text-xs px-2 py-0.5 rounded-full bg-ey text-eydark font-bold">已配置</span>':'<span class="ml-2 text-xs px-2 py-0.5 rounded-full bg-red-900 text-red-300">未配置</span>';
+var logContent='<div class="flex items-center justify-between mb-3"><h3 class="text-sm font-semibold text-white">处理工作日志</h3><button onclick="togLog()" class="text-gray-500 hover:text-ey text-xs">关闭</button></div><div id="logEntries" class="space-y-2 flex-1 overflow-y-auto">'+renderLogEntries()+'</div><div class="flex gap-2 mt-3 pt-3 border-t border-gray-800"><button onclick="clearLog()" class="flex-1 btn-sec btn-sm text-xs py-1">清空</button><button onclick="exportLog()" class="flex-1 btn-sec btn-sm text-xs py-1">导出</button></div>';
+var drawerClass=logCollapsed?'translate-x-full':'translate-x-0';
+var themeLabel=window.ThemeManager?ThemeManager.current().shortName:'黄黑';
+if (page === 'home') return pgHome();
+return '<div id="ap-shell" class="min-h-screen bg-eydark flex"><aside class="w-56 bg-black border-r border-gray-800 fixed h-full flex flex-col z-10"><div class="p-4 border-b border-gray-800"><div class="flex items-center gap-2 cursor-pointer" onclick="nav(\'home\')"><div class="w-8 h-8 bg-ey rounded flex items-center justify-center"><span class="text-eydark font-bold text-sm">A</span></div><div><span class="font-bold text-ey text-lg">AudiPick</span><span class="text-xs text-gray-500 block">Smart Contract Audit</span></div></div></div><nav class="flex-1 p-2 space-y-1"><a id="nav-dash" onclick="nav(\'dash\')" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm cursor-pointer '+(page==='dash'?'bg-ey text-eydark font-semibold':'text-gray-400 hover:bg-gray-900 hover:text-gray-200')+'"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>工作台</a><a id="nav-rules" onclick="nav(\'rules\')" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm cursor-pointer '+(page==='rules'?'bg-ey text-eydark font-semibold':'text-gray-400 hover:bg-gray-900 hover:text-gray-200')+'"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>提取模板库</a><a id="nav-cfg" onclick="nav(\'cfg\')" class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm cursor-pointer '+(page==='cfg'?'bg-ey text-eydark font-semibold':'text-gray-400 hover:bg-gray-900 hover:text-gray-200')+'"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/></svg>配置'+badge+'</a></nav><div class="p-3 border-t border-gray-800 space-y-1"><a onclick="togLog()" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm cursor-pointer text-gray-400 hover:bg-gray-900 hover:text-gray-200 relative"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg><span>处理工作日志</span>'+(workLog.length>0?'<span class="ml-auto w-2 h-2 bg-ey rounded-full"></span>':'')+'</a><a id="theme-settings-button" onclick="openThemeSettings()" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm cursor-pointer text-gray-400 hover:bg-gray-900 hover:text-gray-200"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 22a10 10 0 1 1 10-10 4 4 0 0 1-4 4h-1.5a2.5 2.5 0 0 0-2.5 2.5v.5a3 3 0 0 1-3 3z"/><circle cx="7.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="10.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="14.5" cy="7.5" r=".5" fill="currentColor"/></svg><span>主题设置</span><span id="theme-current-label" class="ml-auto text-xs">'+themeLabel+'</span></a><a onclick="window.startTour()" class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm cursor-pointer text-gray-400 hover:bg-gray-900 hover:text-gray-200"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>新手引导</a></div><div class="p-3 text-xs text-gray-600 border-t border-gray-800">数据仅存本地</div></aside><main id="ap-main" class="flex-1 ml-56 p-6 max-w-full overflow-hidden">'+c+'</main><aside id="ap-log-drawer" class="fixed top-0 right-0 h-full w-80 bg-black border-l border-gray-800 z-50 flex flex-col p-4 transform transition-transform duration-300 '+drawerClass+' shadow-2xl">'+logContent+'</aside></div>';
+}
+
+// ===== Home =====
+function pgHome(){return '<div class="min-h-screen bg-eydark"><header class="bg-black border-b border-gray-800"><div class="max-w-5xl mx-auto px-6 h-16 flex items-center justify-between"><div class="flex items-center gap-2"><div class="w-8 h-8 bg-ey rounded flex items-center justify-center"><span class="text-eydark font-bold text-sm">A</span></div><span class="font-bold text-ey text-lg">AudiPick</span></div><div class="flex gap-3"><button onclick="nav(\'cfg\')" class="text-sm text-gray-400 hover:text-ey px-3 py-1.5 border border-gray-700 rounded-lg hover:border-ey transition-colors">配置</button><button onclick="nav(\'dash\')" class="btn btn-sm px-4 py-1.5 rounded-lg">开始使用</button></div></div></header><section class="py-20 px-6 text-center"><div class="max-w-2xl mx-auto"><div class="w-16 h-16 bg-ey rounded-xl flex items-center justify-center mx-auto mb-6"><span class="text-eydark font-black text-3xl">A</span></div><h1 class="text-4xl font-black text-white mb-4">AudiPick</h1><p class="text-xl text-gray-400 mb-3">智能合同审计助手</p><p class="text-sm text-gray-500 mb-8">从合同文档中提取关键条款，生成结构化工作底稿</p><div class="flex justify-center gap-3"><button onclick="nav(\'dash\')" class="btn btn-lg px-8 py-3 rounded-lg text-lg">开始审计</button></div></div></section><section class="py-12 px-6 bg-black"><div class="max-w-4xl mx-auto"><h2 class="text-xl font-bold text-center mb-8 text-ey">核心能力</h2><div class="grid md:grid-cols-3 gap-6"><div class="card p-6 bg-gray-900 rounded-xl border border-gray-800"><div class="w-10 h-10 bg-ey rounded-lg flex items-center justify-center mb-3"><svg class="w-5 h-5 text-eydark" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg></div><h3 class="font-semibold text-white mb-1">批量上传PDF</h3><p class="text-sm text-gray-500">支持多文件、文件夹上传，扫描件自动OCR识别</p></div><div class="card p-6 bg-gray-900 rounded-xl border border-gray-800"><div class="w-10 h-10 bg-ey rounded-lg flex items-center justify-center mb-3"><svg class="w-5 h-5 text-eydark" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg></div><h3 class="font-semibold text-white mb-1">AI智能提取</h3><p class="text-sm text-gray-500">自动识别合同中的关键条款和约束条件</p></div><div class="card p-6 bg-gray-900 rounded-xl border border-gray-800"><div class="w-10 h-10 bg-ey rounded-lg flex items-center justify-center mb-3"><svg class="w-5 h-5 text-eydark" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg></div><h3 class="font-semibold text-white mb-1">导出工作底稿</h3><p class="text-sm text-gray-500">导出Excel格式工作底稿</p></div></div></div></section></div>';}
+
+// ===== Config =====
+function cfgStatusHtml(){
+var engine=O.engine||'ai';
+var bridgeReady=isDesktop();
+var ocrReady=false;
+var ocrDetail='';
+if(engine==='ai'){ocrReady=visionOk();ocrDetail=ocrReady?'视觉模型已配置':'视觉模型未配置';}
+else if(engine==='tesseract'){ocrReady=typeof Tesseract!=='undefined';ocrDetail=ocrReady?'浏览器OCR可用':'Tesseract.js未加载';}
+else{ocrReady=!!(O.custom&&O.custom.url);ocrDetail=ocrReady?'第三方OCR接口已配置':'第三方OCR接口未配置';}
+return '<div class="grid md:grid-cols-4 gap-3">'+
+'<div class="card p-4"><p class="text-xs text-gray-600">提取AI</p><p class="text-lg font-bold '+(ok()?'text-emerald-400':'text-red-400')+'">'+(ok()?'已配置':'未配置')+'</p><p class="text-xs text-gray-600 mt-1">'+escapeHtml(A.m||'用于条款/底稿提取')+'</p></div>'+
+'<div class="card p-4"><p class="text-xs text-gray-600">桌面网络</p><p class="text-lg font-bold '+(bridgeReady?'text-emerald-400':'text-red-400')+'">'+(bridgeReady?'可用':'未加载')+'</p><p class="text-xs text-gray-600 mt-1">'+(bridgeReady?'已启用系统代理通道':'请使用最新便携版')+'</p></div>'+
+'<div class="card p-4"><p class="text-xs text-gray-600">OCR引擎</p><p class="text-lg font-bold text-white">'+escapeHtml(getOCRLabel())+'</p><p class="text-xs text-gray-600 mt-1">扫描件PDF识别方式</p></div>'+
+'<div class="card p-4"><p class="text-xs text-gray-600">OCR状态</p><p class="text-lg font-bold '+(ocrReady?'text-emerald-400':'text-amber-400')+'">'+(ocrReady?'可用':'待配置')+'</p><p class="text-xs text-gray-600 mt-1">'+escapeHtml(ocrDetail)+'</p></div></div>';
+}
+function pgCfg(){return '<div class="space-y-6"><div><h1 class="text-2xl font-bold text-white">配置</h1><p class="text-sm text-gray-500">管理 OCR 引擎与 AI 模型。提取模板请前往侧边栏「提取模板库」。</p></div>'+cfgStatusHtml()+'<div class="flex gap-2 mb-4"><button onclick="showCfgTab(\'ocr\')" id="tab-ocr" class="tab-active px-4 py-2 rounded-lg text-sm">OCR引擎</button><button onclick="showCfgTab(\'ai\')" id="tab-ai" class="tab-inactive px-4 py-2 rounded-lg text-sm">AI模型</button></div><div id="cfgContent">'+ocrCfgHtml()+'</div></div>';}
+
+window.showCfgTab=function(tab){
+var aiBtn=document.getElementById('tab-ai');var ocrBtn=document.getElementById('tab-ocr');
+var content=document.getElementById('cfgContent');
+[aiBtn,ocrBtn].forEach(function(b){b.className='tab-inactive px-4 py-2 rounded-lg text-sm';});
+if(tab==='ai'){aiBtn.className='tab-active px-4 py-2 rounded-lg text-sm';content.innerHTML=aiCfgHtml();}
+else{ocrBtn.className='tab-active px-4 py-2 rounded-lg text-sm';content.innerHTML=ocrCfgHtml();}
+};
+
+function aiCfgHtml(){return '<div class="card p-5 max-w-lg space-y-4"><h3 class="font-medium text-white">提取条款AI模型配置</h3><p class="text-xs text-gray-500 -mt-2">用于从合同文本中智能提取条款，与OCR引擎页的视觉模型相互独立。纯文本模型即可（如 deepseek-v4-flash、qwen-plus、glm-4）。</p><div><label class="text-sm font-medium block mb-1 text-gray-400">API Key <span class="text-ey">*</span></label><input id="ak" type="password" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="sk-xxxxxxxx" value="'+(A.k||'')+'"></div><div><label class="text-sm font-medium block mb-1 text-gray-400">Base URL <span class="text-ey">*</span></label><input id="au" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="https://api.xxx.com/v1" value="'+(A.u||'')+'"></div><div><label class="text-sm font-medium block mb-1 text-gray-400">Model <span class="text-ey">*</span></label><input id="am" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="qwen3.6-plus" value="'+(A.m||'')+'"></div><div class="flex items-center gap-3 p-3 bg-black border border-gray-700 rounded-lg"><label class="flex items-center gap-2 cursor-pointer flex-1"><input id="athink" type="checkbox" class="w-4 h-4 rounded border-gray-700 bg-black text-ey focus:ring-ey" '+(A.think?'checked':'')+'><span class="text-sm text-gray-300">启用思维链 (Thinking)</span></label><div class="text-xs text-gray-500 leading-tight">qwen3等推理模型建议关闭，否则会因思考耗尽token导致返回空</div></div><div class="flex gap-3"><button onclick="svCfg()" class="btn btn-sm">保存</button><button onclick="tsCfg()" class="btn-sec btn-sm">测试并保存</button></div><div id="cr" class="mt-3"></div></div>';}
+
+function ocrCfgHtml(){
+var engine=O.engine||'ai';
+var c=O.custom||{};
+var v=O.vision||{};
+var html='<div class="space-y-4"><div class="card p-5"><h3 class="font-medium text-white mb-1">OCR引擎选择</h3><p class="text-xs text-gray-500 mb-4">扫描件PDF的文字识别方式（括号内为识别速度参考）</p>';
+html+='<div class="space-y-3">';
+html+='<div onclick="selOcr(\'ai\')" id="ocr-ai" class="cursor-pointer p-4 rounded-lg border-2 '+(engine==='ai'?'radio-sel':'radio-nor')+' transition-all"><div class="flex items-center gap-3"><div class="w-5 h-5 rounded-full border-2 border-ey flex items-center justify-center flex-shrink-0">'+(engine==='ai'?'<div class="w-2.5 h-2.5 rounded-full bg-ey"></div>':'')+'</div><div class="flex-1"><h4 class="font-medium text-white text-sm">AI视觉识别 <span class="text-xs text-emerald-400">（速度较快，消耗token）</span></h4><p class="text-xs text-gray-500 mt-0.5">调用多模态AI接口识别图片，需单独配置视觉模型API（须支持图片输入）。</p></div></div></div>';
+html+='<div onclick="selOcr(\'tesseract\')" id="ocr-tesseract" class="cursor-pointer p-4 rounded-lg border-2 '+(engine==='tesseract'?'radio-sel':'radio-nor')+' transition-all"><div class="flex items-center gap-3"><div class="w-5 h-5 rounded-full border-2 border-ey flex items-center justify-center flex-shrink-0">'+(engine==='tesseract'?'<div class="w-2.5 h-2.5 rounded-full bg-ey"></div>':'')+'</div><div class="flex-1"><h4 class="font-medium text-white text-sm">浏览器OCR <span class="text-xs text-amber-400">（速度较慢，免费离线）</span></h4><p class="text-xs text-gray-500 mt-0.5">使用Tesseract.js在浏览器中运行，无需额外配置。首次需下载中文语言包(约10MB)。</p></div></div></div>';
+html+='<div onclick="selOcr(\'custom\')" id="ocr-custom" class="cursor-pointer p-4 rounded-lg border-2 '+(engine==='custom'?'radio-sel':'radio-nor')+' transition-all"><div class="flex items-center gap-3"><div class="w-5 h-5 rounded-full border-2 border-ey flex items-center justify-center flex-shrink-0">'+(engine==='custom'?'<div class="w-2.5 h-2.5 rounded-full bg-ey"></div>':'')+'</div><div class="flex-1"><h4 class="font-medium text-white text-sm">第三方OCR <span class="text-xs text-blue-400">（速度取决于接口，如百度OCR）</span></h4><p class="text-xs text-gray-500 mt-0.5">接入第三方OCR接口，自行配置URL、鉴权与返回字段。</p></div></div></div>';
+html+='</div>';
+// AI视觉配置面板
+html+='<div id="ocrVisionPanel" class="mt-4 space-y-3 '+(engine==='ai'?'':'hidden')+'">';
+html+='<div class="text-xs text-amber-400 bg-amber-900 rounded-lg p-2">⚠️ 此处配置的是"视觉模型"，用于扫描件图片识别，与「AI模型」页的条款提取模型相互独立。模型必须支持图片输入（如 gpt-4o、qwen-vl-plus、glm-4v），纯文本模型（如 deepseek）无法识别图片。</div>';
+html+='<div><label class="text-sm font-medium block mb-1 text-gray-400">视觉模型 Base URL <span class="text-ey">*</span></label><input id="visUrl" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="https://api.xxx.com/v1" value="'+escapeHtml(v.u||'')+'"></div>';
+html+='<div><label class="text-sm font-medium block mb-1 text-gray-400">视觉模型 API Key <span class="text-ey">*</span></label><input id="visKey" type="password" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="sk-xxxxxxxx" value="'+escapeHtml(v.k||'')+'"></div>';
+html+='<div><label class="text-sm font-medium block mb-1 text-gray-400">视觉模型名称 <span class="text-ey">*</span></label><input id="visModel" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="如 qwen-vl-plus / glm-4v / gpt-4o" value="'+escapeHtml(v.m||'')+'"></div>';
+html+='</div>';
+// 自定义OCR配置面板
+html+='<div id="ocrCustomPanel" class="mt-4 space-y-3 '+(engine==='custom'?'':'hidden')+'">';
+html+='<div><label class="text-sm font-medium block mb-1 text-gray-400">接口预设</label><select id="ocrPreset" onchange="applyOcrPreset()" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white"><option value="">请选择预设（可选）</option><option value="baidu_general">百度通用文字识别（标准版）</option><option value="baidu_accurate">百度通用文字识别（高精度版）</option><option value="custom_json">通用JSON接口（image base64）</option></select></div>';
+html+='<div><label class="text-sm font-medium block mb-1 text-gray-400">接口URL <span class="text-ey">*</span></label><input id="ocrUrl" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="如 https://aip.baidubce.com/rest/2.0/ocr/v1/general_basic" value="'+escapeHtml(c.url||'')+'"></div>';
+html+='<div><label class="text-sm font-medium block mb-1 text-gray-400">鉴权方式</label><select id="ocrAuth" onchange="toggleOcrAuth()" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white"><option value="baidu_aksk"'+(c.auth==='baidu_aksk'?' selected':'')+'>百度AK/SK自动获取token</option><option value="bearer"'+(c.auth==='bearer'?' selected':'')+'>Header: Authorization Bearer</option><option value="query"'+(c.auth==='query'?' selected':'')+'>URL参数 access_token=</option><option value="none"'+(c.auth==='none'?' selected':'')+'>无需鉴权</option></select></div>';
+html+='<div id="ocrAkSkWrap" class="space-y-2 '+(c.auth==='baidu_aksk'?'':'hidden')+'"><div><label class="text-sm font-medium block mb-1 text-gray-400">百度 API Key (AK)</label><input id="ocrAk" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="百度智能云控制台获取" value="'+escapeHtml(c.ak||'')+'"></div><div><label class="text-sm font-medium block mb-1 text-gray-400">百度 Secret Key (SK)</label><input id="ocrSk" type="password" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="百度智能云控制台获取" value="'+escapeHtml(c.sk||'')+'"></div></div>';
+html+='<div id="ocrTokenWrap" class="'+(c.auth==='bearer'||c.auth==='query'?'':'hidden')+'"><label class="text-sm font-medium block mb-1 text-gray-400">Token</label><input id="ocrToken" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="鉴权用的Token" value="'+escapeHtml(c.token||'')+'"></div>';
+html+='<div><label class="text-sm font-medium block mb-1 text-gray-400">请求格式</label><select id="ocrFormat" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white"><option value="baidu"'+(c.format==='baidu'?' selected':'')+'>表单: image=base64（百度OCR等）</option><option value="json"'+(c.format==='json'?' selected':'')+'>JSON: {"image":"base64"}</option></select></div>';
+html+='<div><label class="text-sm font-medium block mb-1 text-gray-400">返回文本字段路径</label><input id="ocrTextPath" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white font-mono" placeholder="如 words_result[].words 或 text 或 data.text" value="'+escapeHtml(c.textPath||'')+'"></div>';
+html+='<div class="text-xs text-amber-400 bg-amber-900 rounded-lg p-2">⚠️ 浏览器直接调用第三方OCR可能遇到CORS跨域限制。若报CORS错误，请用支持跨域的接口，或自己起一个转发代理（URL填代理地址）。</div>';
+html+='</div>';
+html+='<div class="flex gap-3 mt-4"><button onclick="svOcr()" class="btn btn-sm">保存设置</button><button onclick="checkOcrStatus()" class="btn-sec btn-sm">检测可用性</button></div><div id="ocrStatus" class="mt-3"></div></div>';
+return html;
+}
+
+
+function escapeHtml(t){return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+window.selOcr=function(engine){
+O.engine=engine;
+function hl(id,active){var el=document.getElementById(id);if(!el)return;el.className='cursor-pointer p-4 rounded-lg border-2 '+(active?'radio-sel':'radio-nor')+' transition-all';el.querySelector('.w-5').innerHTML=active?'<div class="w-2.5 h-2.5 rounded-full bg-ey"></div>':'';}
+hl('ocr-ai',engine==='ai');hl('ocr-tesseract',engine==='tesseract');hl('ocr-custom',engine==='custom');
+var vp=document.getElementById('ocrVisionPanel');if(vp)vp.className='mt-4 space-y-3 '+(engine==='ai'?'':'hidden');
+var panel=document.getElementById('ocrCustomPanel');if(panel)panel.className='mt-4 space-y-3 '+(engine==='custom'?'':'hidden');
+};
+window.applyOcrPreset=function(){
+var p=document.getElementById('ocrPreset').value;
+var presets={
+baidu_general:{url:'https://aip.baidubce.com/rest/2.0/ocr/v1/general_basic',auth:'baidu_aksk',format:'baidu',textPath:'words_result[].words'},
+baidu_accurate:{url:'https://aip.baidubce.com/rest/2.0/ocr/v1/accurate_basic',auth:'baidu_aksk',format:'baidu',textPath:'words_result[].words'},
+custom_json:{url:'',auth:'bearer',format:'json',textPath:'text'}
+};
+var c=presets[p];if(!c)return;
+document.getElementById('ocrUrl').value=c.url;
+document.getElementById('ocrAuth').value=c.auth;
+document.getElementById('ocrFormat').value=c.format;
+document.getElementById('ocrTextPath').value=c.textPath;
+toggleOcrAuth();
+};
+window.toggleOcrAuth=function(){
+var a=document.getElementById('ocrAuth').value;
+var akSk=document.getElementById('ocrAkSkWrap');var tk=document.getElementById('ocrTokenWrap');
+if(akSk)akSk.className='space-y-2 '+(a==='baidu_aksk'?'':'hidden');
+if(tk)tk.className=(a==='bearer'||a==='query'?'':'hidden');
+};
+
+window.svCfg=function(){var k=document.getElementById('ak').value.trim(),u=document.getElementById('au').value.trim(),m=document.getElementById('am').value.trim();if(!k||!u||!m){alert('请填写所有必填项');return;}A={k:k,u:u,m:m,think:!!document.getElementById('athink').checked};save();var el=document.getElementById('cr');if(el){el.innerHTML='<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">AI配置已保存！</div>';}restoreAppFocus();localStorage.setItem('ap_tour_done','true');if(typeof window.endTour==='function') try{ window.endTour(); }catch(e){}};
+window.tsCfg=function(){var k=document.getElementById('ak').value.trim(),u=document.getElementById('au').value.trim(),m=document.getElementById('am').value.trim();if(!k||!u||!m){alert('请填写所有必填项');return;}var think=!!document.getElementById('athink').checked;var el=document.getElementById('cr');el.innerHTML='<span class="spinner mr-2"></span>测试中...';var ctrl=new AbortController();var t=setTimeout(function(){ctrl.abort();},30000);var body={model:m,messages:[{role:'user',content:'请只回复两个字符：ok'}],max_tokens:300};if(!think){body.enable_thinking=false;}safeFetch(chatCompletionsUrl(u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},body:JSON.stringify(body)}).then(function(r){clearTimeout(t);return r.text().then(function(txt){var detail='';try{var jj=JSON.parse(txt);var ch=jj.choices&&jj.choices[0];var msg=ch&&ch.message;var fr=ch&&ch.finish_reason;var c=msg&&(msg.content||'');var rc=msg&&(msg.reasoning_content||'');detail='content='+JSON.stringify(c).substring(0,60)+(rc?' | reasoning='+rc.length+'字':'')+' | finish_reason='+fr;}catch(e){detail=txt.substring(0,120);}if(r.ok){A={k:k,u:u.replace(/\/+$/,''),m:m,think:think};save();render();showCfgTab('ai');el=document.getElementById('cr');}el.innerHTML=r.ok?'<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">连接成功，已保存！'+detail+'</div>':'<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">失败('+r.status+') '+txt.substring(0,120)+'</div>';localStorage.setItem('ap_tour_done','true');if(typeof window.endTour==='function') try{ window.endTour(); }catch(e2){}restoreAppFocus();});}).catch(function(e){clearTimeout(t);el.innerHTML='<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">'+(e.name==='AbortError'?'超时':e.message)+'</div>';restoreAppFocus();});};
+window.svOcr=function(){
+if(O.engine==='ai'){
+var vu=document.getElementById('visUrl').value.trim(),vk=document.getElementById('visKey').value.trim(),vm=document.getElementById('visModel').value.trim();
+if(!vu||!vk||!vm){alert('请填写视觉模型的URL、API Key和模型名称');return;}
+O.vision={u:vu,k:vk,m:vm};
+}
+if(O.engine==='custom'){
+var url=document.getElementById('ocrUrl').value.trim();
+if(!url){alert('请填写自定义OCR接口URL');return;}
+O.custom={url:url,auth:document.getElementById('ocrAuth').value,ak:document.getElementById('ocrAk').value.trim(),sk:document.getElementById('ocrSk').value.trim(),token:document.getElementById('ocrToken').value.trim(),format:document.getElementById('ocrFormat').value,textPath:document.getElementById('ocrTextPath').value.trim()};
+}
+save();var el=document.getElementById('ocrStatus');el.innerHTML='<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">OCR设置已保存: '+getOCRLabel()+'</div>';
+};
+window.checkOcrStatus=function(){
+var el=document.getElementById('ocrStatus');el.innerHTML='<span class="spinner mr-2"></span>检测中...';
+var engine=O.engine||'ai';
+if(engine==='ai'){
+if(!visionOk()){el.innerHTML='<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">AI视觉: 需先填写并保存视觉模型API</div>';return;}
+var v=O.vision;
+el.innerHTML='<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">AI视觉就绪（模型: '+(v.m||'未填')+'）</div><div class="text-xs text-amber-400 bg-amber-900 rounded-lg p-2 mt-1">⚠️ 视觉模型必须支持图片输入。纯文本模型（如 deepseek）无法识别图片，请用 qwen-vl-plus、glm-4v、gpt-4o 等多模态模型。</div>';
+return;
+}
+if(engine==='tesseract'){if(typeof Tesseract==='undefined'){el.innerHTML='<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">Tesseract.js未加载</div>';}else{el.innerHTML='<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">浏览器OCR就绪（离线运行，首次识别需下载中文语言包约10MB）</div>';}return;}
+if(engine==='custom'){
+var cfg=O.custom||{};
+if(!cfg.url){el.innerHTML='<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">自定义OCR: 尚未保存接口配置，请填写后点"保存设置"</div>';return;}
+// 现场画一张带文字的测试图，避免因图片过小被百度拒绝(216202)
+var tcv=document.createElement('canvas');tcv.width=320;tcv.height=120;
+var tctx=tcv.getContext('2d');tctx.fillStyle='#ffffff';tctx.fillRect(0,0,320,120);
+tctx.fillStyle='#000000';tctx.font='28px sans-serif';tctx.fillText('AudiPick OCR Test 审计',20,60);
+var testImg=tcv.toDataURL('image/jpeg',0.9).split(',')[1];
+customOCR(testImg).then(function(txt){el.innerHTML='<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">自定义OCR连接成功（返回'+txt.length+'字）</div><div class="text-xs text-gray-500 mt-1">运行模式: '+(isDesktop()?'桌面版(主进程直连，无CORS)':'网页版')+'</div>';}).catch(function(e){el.innerHTML='<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">自定义OCR失败: '+e.message.substring(0,180)+'</div><div class="text-xs text-gray-500 mt-1">运行模式: '+(isDesktop()?'桌面版(主进程直连)':'网页版(受CORS限制)')+'</div>';});
+return;
+}
+};
+
+// ===== Dashboard & Project =====
+function projectStatsLine(p){
+var cs=Ct.filter(function(c){return c.pid===p.id;});
+var ruleSet={};
+cs.forEach(function(c){
+if(c.ruleId)ruleSet[c.ruleId]=true;
+getAppliedRuleIds(c.id).forEach(function(rid){ruleSet[rid]=true;});
+});
+var pref=p.defaultRuleId?RuleEngine.getRuleShortName(p.defaultRuleId):'未设置';
+return cs.length+'份文件 · 已用'+Object.keys(ruleSet).length+'种模板 · 批量首选'+pref;
+}
+function pgDash(){
+var a=P.filter(function(p){return p.status==='active';}).length;
+return '<div class="space-y-6"><div class="flex justify-between items-center"><div><h1 class="text-2xl font-bold text-white">工作台</h1></div><button id="btn-new-proj" type="button" onmousedown="event.preventDefault();np(event)" class="btn btn-sm">新建项目</button></div><div class="grid grid-cols-3 gap-4"><div class="card p-4"><p class="text-xs text-gray-500">项目总数</p><p class="text-2xl font-bold text-white">'+P.length+'</p></div><div class="card p-4"><p class="text-xs text-gray-500">进行中</p><p class="text-2xl font-bold text-ey">'+a+'</p></div><div class="card p-4"><p class="text-xs text-gray-500">已完成</p><p class="text-2xl font-bold text-blue-400">'+P.filter(function(p){return p.status==='completed';}).length+'</p></div></div><div><h2 class="text-base font-semibold mb-3 text-gray-300">审计项目</h2>'+(P.length===0?'<div class="card p-10 text-center text-gray-600 text-sm">暂无项目</div>':'<div class="space-y-2">'+P.map(function(p){return '<div class="card p-4 flex justify-between items-start gap-3"><div class="flex-1 min-w-0 cursor-pointer" onclick="nav(\'proj\',{pid:\''+p.id+'\'})"><div class="flex items-center gap-2"><span class="font-medium text-white">'+escapeHtml(p.name)+'</span><span class="text-xs px-2 py-0.5 rounded-full '+(p.status==='active'?'bg-emerald-900 text-emerald-400':'bg-blue-900 text-blue-400')+'">'+(p.status==='active'?'进行中':'已完成')+'</span></div><p class="text-xs text-gray-600 mt-1">'+escapeHtml(p.client)+' | '+p.date+' | '+projectStatsLine(p)+'</p></div><button type="button" onclick="event.stopPropagation();delProj(\''+p.id+'\')" class="text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-900/30 shrink-0" title="删除项目">删除</button></div>';}).join('')+'</div>')+'</div></div>';
+}
+function pgProj(){
+var p=gp(pid);if(!p){nav('dash');return'';}
+var cs=Ct.filter(function(c){return c.pid===pid;});
+var pending=cs.filter(function(c){return c.text&&c.text.length>0&&gv(c.id).length===0;}).length;
+var confirmed=cs.filter(function(c){return c.ruleConfirmed;}).length;
+var extracted=cs.filter(function(c){return gv(c.id).length>0;}).length;
+var prefLabel=p.defaultRuleId?RuleEngine.getRuleName(p.defaultRuleId):'未设置（上传后AI识别）';
+var hasResults=cs.some(function(c){return gv(c.id).length>0;});
+var exportBtn=hasResults
+  ? '<button onclick="exportToExcel(null,true,null,true)" class="btn-outline btn-sm px-4 py-1.5 rounded-lg text-sm">导出结果</button>'
+  : '<button type="button" disabled class="btn-outline btn-sm px-4 py-1.5 rounded-lg text-sm" title="提取完成后可导出">导出结果</button><span class="text-xs text-gray-600 self-center">提取完成后可导出</span>';
+var uploadInputs='<input type="file" id="pdfup" class="hidden" accept=".pdf" multiple onchange="handleFiles(this.files)"><input type="file" id="pdfdir" class="hidden" webkitdirectory directory onchange="handleFiles(this.files)">';
+var uploadButtons='<button onclick="document.getElementById(\'pdfup\').click()" class="btn btn-sm">选择PDF</button><button onclick="document.getElementById(\'pdfdir\').click()" class="btn-sec btn-sm">选择文件夹</button>';
+var dropHandlers=' ondragover="event.preventDefault();this.classList.add(\'dragover\')" ondragleave="event.preventDefault();this.classList.remove(\'dragover\')" ondrop="event.preventDefault();this.classList.remove(\'dragover\');handleFiles(event.dataTransfer.files)"';
+var uploadArea=cs.length===0
+  ? '<div class="card p-5"><h3 class="font-medium text-white mb-2">上传PDF/扫描件</h3><p class="text-sm text-gray-500 mb-3">合同、对账单、发票、出入库单等；文字PDF直接提取，扫描件使用<span class="text-ey">'+getOCRLabel()+'</span>识别</p><div class="flex gap-2 mb-3">'+uploadButtons+'</div>'+uploadInputs+'<div class="dropzone" id="dz"'+dropHandlers+'><svg class="w-10 h-10 text-gray-600 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg><p class="font-medium text-gray-300">拖拽PDF或文件夹到此处</p><p class="text-xs text-gray-600 mt-1">扫描件使用'+getOCRLabel()+'识别</p></div><div id="parseStatus" class="mt-3"></div></div>'
+  : '<div class="card p-3"><div class="flex flex-wrap items-center justify-between gap-3"><div><p class="text-sm font-medium text-white">上传PDF/扫描件</p><p class="text-xs text-gray-600">文字PDF直接提取，扫描件使用<span class="text-ey">'+getOCRLabel()+'</span>识别；也可以把文件拖到这里追加。</p></div><div class="flex gap-2">'+uploadButtons+'</div></div>'+uploadInputs+'<div class="dropzone mt-3 py-4" id="dz"'+dropHandlers+'><p class="text-sm text-gray-400">拖拽PDF或文件夹到此处继续添加</p></div><div id="parseStatus" class="mt-3"></div></div>';
+var fileList=cs.length===0
+  ? '<div class="card p-8 text-center text-gray-600 text-sm">暂无文件，请上传PDF</div>'
+  : '<div class="space-y-2">'+cs.map(function(c){var cv=gv(c.id).length;var canExtract=(c.text&&c.text.length>0&&cv===0);var meta=contractListMetaHtml(c);return '<div class="card p-4 flex gap-3 items-start"><div class="pt-1">'+(canExtract?'<input type="checkbox" class="contract-cb w-4 h-4 rounded border-gray-700 bg-black text-ey focus:ring-ey focus:ring-offset-gray-900" value="'+c.id+'">':'<input type="checkbox" disabled class="w-4 h-4 rounded border-gray-800 bg-gray-900 opacity-50">')+'</div><div class="flex-1 min-w-0"><div class="flex justify-between items-center cursor-pointer" onclick="nav(\'cont\',{cid:\''+c.id+'\'})"><div class="flex items-center gap-2 flex-wrap"><span class="font-medium text-white">'+escapeHtml(c.file)+'</span></div><svg class="w-4 h-4 text-gray-700 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg></div>'+meta+'</div><button type="button" onclick="event.stopPropagation();delCont(\''+c.id+'\')" class="text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-900/30 shrink-0" title="删除">删除</button></div>';}).join('')+'</div>';
+return '<div class="space-y-5"><div class="flex flex-wrap justify-between items-start gap-3"><div><a onclick="nav(\'dash\')" class="text-sm text-gray-500 hover:text-ey cursor-pointer">返回</a><h1 class="text-2xl font-bold text-white mt-1">'+escapeHtml(p.name)+'</h1><p class="text-sm text-gray-600">'+escapeHtml(p.client)+' | '+p.date+'</p><p class="text-xs text-gray-500 mt-1">批量提取首选：'+escapeHtml(prefLabel)+' · 每个文件可单独选模板</p></div><div class="flex gap-3 flex-wrap items-center"><button onclick="batchExtractSelected()" class="btn btn-sm">开始提取</button>'+exportBtn+'</div></div><div class="grid grid-cols-4 gap-3"><div class="card p-3"><p class="text-xs text-gray-600">文件总数</p><p class="text-xl font-bold text-white">'+cs.length+'</p></div><div class="card p-3"><p class="text-xs text-gray-600">模板已确认</p><p class="text-xl font-bold text-emerald-400">'+confirmed+'</p></div><div class="card p-3"><p class="text-xs text-gray-600">待提取</p><p class="text-xl font-bold text-ey">'+pending+'</p></div><div class="card p-3"><p class="text-xs text-gray-600">已提取</p><p class="text-xl font-bold text-blue-400">'+extracted+'</p></div></div>'+uploadArea+'<div><div class="flex justify-between items-center mb-2"><h2 class="text-base font-semibold text-gray-300">文件列表 ('+cs.length+')'+(pending>0?' · '+pending+'份待提取':'')+'</h2>'+(cs.length>0?'<label class="flex items-center gap-2 text-sm text-gray-400 cursor-pointer"><input type="checkbox" id="selectAll" onchange="toggleAll(this.checked)" class="w-4 h-4 rounded border-gray-700 bg-black text-ey focus:ring-ey focus:ring-offset-gray-900"> 全选待提取</label>':'')+'</div>'+fileList+'</div></div>';
+}
+window.np=function(ev){if(ev&&ev.preventDefault)ev.preventDefault();if(typeof window.endTour==='function') try{ window.endTour(); }catch(e){} var root=ensureModalRoot(); root.innerHTML='<div class="modal-backdrop fixed inset-0 bg-black/70 flex items-center justify-center" onclick="if(event.target===this)cm()"><div class="bg-gray-900 border border-gray-700 rounded-xl p-5 w-full max-w-sm mx-4 shadow-2xl" onclick="event.stopPropagation()" onmousedown="event.stopPropagation()"><h3 class="font-semibold text-white mb-3">新建项目</h3><div class="space-y-3"><input id="n1" type="text" autocomplete="off" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="项目名称"><input id="n2" type="text" autocomplete="off" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="客户名称"><div><label class="text-xs text-gray-400 block mb-1">批量提取首选模板（可选，单文件可单独选）</label><select id="n4" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white">'+ruleSelectOptionsHtml(batchRuleId,true)+'</select></div><input id="n3" type="date" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" value="'+new Date().toISOString().split('T')[0]+'"><div class="flex gap-2"><button type="button" onclick="cm()" class="flex-1 border border-gray-700 py-2 rounded-lg text-sm text-gray-400 hover:bg-gray-800">取消</button><button type="button" onclick="cp2()" class="flex-1 btn btn-sm">创建</button></div></div></div></div>'; focusModalInput(); requestAnimationFrame(focusModalInput); setTimeout(focusModalInput,0); };
+window.cm=function(){ var root=document.getElementById('modal-root'); if(root) root.innerHTML=''; };
+window.cp2=function(){var n=document.getElementById('n1').value.trim(),c=document.getElementById('n2').value.trim(),d=document.getElementById('n3').value;var drEl=document.getElementById('n4');var dr=drEl?drEl.value:'';if(!n||!c){alert('请填写名称');return;}if(dr)batchRuleId=dr;var proj={id:gid(),name:n,client:c,date:d,status:'active',relationGroups:[],t:new Date().toISOString()};if(dr)proj.defaultRuleId=dr;P.push(proj);save();cm();render();};
+window.delProj=function(id){var p=gp(id);if(!p)return;if(!confirm('确认删除项目「'+p.name+'」？\n将同时删除该项目下全部合同、补充资料、提取结果及PDF，不可恢复。'))return;var projectContracts=Ct.filter(function(c){return c.pid===id;});var cids=projectContracts.map(function(c){return c.id;});var suppIds=[];projectContracts.forEach(function(c){(c.supplements||[]).forEach(function(s){suppIds.push(s.id);});});P=P.filter(function(x){return x.id!==id;});Ct=Ct.filter(function(c){return c.pid!==id;});V=V.filter(function(v){return cids.indexOf(v.contractId)<0;});Object.keys(extractCache).forEach(function(k){cids.forEach(function(cid){if(k===('c_'+cid)||k.indexOf('c_'+cid+'_')===0)delete extractCache[k];});});cids.concat(suppIds).forEach(function(fileId){dbDeletePdf(fileId);});if(pid===id)pid=null;save();nav('dash');};
+window.delCont=function(id){var c=gc(id);if(!c)return;if(!confirm('确认删除合同「'+c.file+'」？\n将同时删除补充资料、提取结果及PDF，不可恢复。'))return;var suppIds=(c.supplements||[]).map(function(s){return s.id;});P.forEach(function(project){if(!Array.isArray(project.relationGroups))return;project.relationGroups=project.relationGroups.filter(function(group){if(group.anchorFileId===id)return false;group.members=(group.members||[]).filter(function(member){return member.fileId!==id;});return group.members.length>0;});});Ct=Ct.filter(function(x){return x.id!==id;});V=V.filter(function(v){return v.contractId!==id;});Object.keys(extractCache).forEach(function(k){if(k===('c_'+id)||k.indexOf('c_'+id+'_')===0)delete extractCache[k];});[id].concat(suppIds).forEach(function(fileId){dbDeletePdf(fileId);});if(cid===id)cid=null;save();render();};
+window.toggleAll=function(checked){document.querySelectorAll('.contract-cb:not(:disabled)').forEach(function(cb){cb.checked=checked;});};
+async function handleFiles(fileList){
+if(!pid){alert('请先进入项目');return;}
+var engine=O.engine||'ai';
+if(engine==='ai'&&!visionOk()){alert('请先在OCR引擎页配置视觉模型API');nav('cfg');return;}
+if(engine==='tesseract'&&typeof Tesseract==='undefined'){alert('Tesseract.js未加载，请检查网络');return;}
+if(engine==='custom'&&!(O.custom&&O.custom.url)){alert('请先配置自定义OCR接口');nav('cfg');return;}
+var files=Array.from(fileList||[]).filter(function(f){return f.name&&/\.pdf$/i.test(f.name);});
+if(files.length===0){alert('没有PDF文件');return;}
+var statusEl=document.getElementById('parseStatus');
+var okCount=0;
+var stopped=false;
+taskRunner.start('upload','上传处理',files.length);
+try{
+for(var i=0;i<files.length;i++){
+await taskRunner.checkpoint();
+var file=files[i];var fid=gid();
+taskRunner.update(file.name+' ('+(i+1)+'/'+files.length+')',(i+1)+'/'+files.length);
+if(statusEl)statusEl.innerHTML='<span class="spinner mr-2"></span>处理中 '+escapeHtml(file.name)+' ('+(i+1)+'/'+files.length+')';
+try{
+var result=await processPDF(file,function(msg){taskRunner.update(file.name+': '+String(msg),(i+1)+'/'+files.length);if(statusEl)statusEl.innerHTML='<span class="spinner mr-2"></span>'+escapeHtml(file.name)+': '+escapeHtml(String(msg));},fid);
+await taskRunner.checkpoint();
+if(statusEl)statusEl.innerHTML='<span class="spinner mr-2"></span>'+escapeHtml(file.name)+': AI识别文档类型...';
+taskRunner.update(file.name+': AI识别文档类型…',(i+1)+'/'+files.length);
+var proj=gp(pid);
+var cls=await classifyDocument(result.text,file.name,proj);
+await taskRunner.checkpoint();
+var contractId=gid();
+Ct.push({id:contractId,pid:pid,file:file.name,text:result.text,isScanned:!!result.isScanned,status:'uploaded',ruleId:cls.ruleId,detectedRuleId:cls.ruleId,detectedConfidence:cls.confidence,detectedReason:cls.reason,docLabel:cls.docLabel,ruleConfirmed:cls.confidence==='high',t:new Date().toISOString()});
+await dbPutPdf(contractId,file);
+okCount++;
+}catch(e){
+if(isTaskStoppedErr(e)){stopped=true;break;}
+if(statusEl)statusEl.innerHTML='<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">'+escapeHtml(file.name)+' 失败: '+escapeHtml(e.message)+'</div>';
+}
+}
+}catch(e){
+if(isTaskStoppedErr(e))stopped=true;
+}
+save();
+if(stopped){
+taskRunner.finish('已停止','成功 '+okCount+'/'+files.length);
+if(statusEl)statusEl.innerHTML='<div class="text-sm text-amber-400 bg-amber-900/40 rounded-lg p-2">已停止。成功处理 '+okCount+'/'+files.length+' 个文件</div>';
+}else{
+taskRunner.finish('上传完成','成功 '+okCount+'/'+files.length);
+if(statusEl)statusEl.innerHTML='<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">完成，成功处理 '+okCount+'/'+files.length+' 个文件</div>';
+}
+render();
+}
+window.handleFiles=handleFiles;
+
+window.addEventListener('DOMContentLoaded',function(){var dz=document.getElementById('dz');if(dz){dz.addEventListener('dragover',function(e){e.preventDefault();dz.classList.add('dragover');});dz.addEventListener('dragleave',function(e){e.preventDefault();dz.classList.remove('dragover');});dz.addEventListener('drop',function(e){e.preventDefault();dz.classList.remove('dragover');handleFiles(e.dataTransfer.files);});}});
+
+window.updateV=function(id,f,val){var item=V.find(function(x){return x.id===id;});if(item&&item[f]!==val){item[f]=val;save();}};
+function td(v,f){return '<td class="p-2 text-xs text-gray-300 outline-none focus:bg-gray-800 focus:ring-1 ring-ey rounded transition-colors break-words min-w-[120px] max-w-[300px]" contenteditable="true" onblur="window.updateV(\''+v.id+'\',\''+f+'\',this.innerText)">'+escapeHtml(v[f]||'')+'</td>';}
+function tdPage(v,key) {var p = v[key] || '【页码未知】';return '<td class="p-2 text-xs text-ey whitespace-nowrap cursor-pointer hover:underline" onclick="jumpToPage(\''+p+'\')" title="点击跳转到该页">'+escapeHtml(p)+'</td>';}
+// 动态表头/行：按 getFields() 生成的字段渲染，页码字段单独走 tdPage
+function tableHead(ruleId){ruleId=ruleId||activeRuleId;var pk=pageKey(ruleId);return getFields(ruleId).map(function(f){var cls=(f.key===pk)?'text-ey w-24':'text-gray-400 w-auto';return '<th class="text-left p-2 border-b border-gray-800 text-xs '+cls+' whitespace-nowrap">'+escapeHtml(f.label)+'</th>';}).join('');}
+function tableRow(v,i,ruleId){ruleId=ruleId||activeRuleId;var pk=pageKey(ruleId);var bg=(i%2===0)?'bg-black':'bg-gray-900';return '<tr class="border-b border-gray-800 '+bg+'">'+getFields(ruleId).map(function(f){return f.key===pk?tdPage(v,f.key):td(v,f.key);}).join('')+'</tr>';}
+
+// ===== Contract Detail =====
+function pgCont(){var c=gc(cid);if(!c){nav('dash');return'';}
+var vs=gvRule(cid,activeRuleId);var hasText=c.text&&c.text.length>0;
+var totalExtracted=gv(cid).length;
+var rightContent='<div class="space-y-6"><div><div class="flex gap-1 text-xs text-gray-600 mb-2"><a onclick="nav(\'dash\')" class="hover:text-ey cursor-pointer">工作台</a><span>/</span><a onclick="nav(\'proj\',{pid:\''+c.pid+'\'})" class="hover:text-ey cursor-pointer">项目</a><span class="text-gray-700">/</span><span class="text-gray-500">'+escapeHtml(c.file)+'</span></div><div class="flex justify-between items-start flex-wrap gap-2"><div class="flex items-center gap-3"><button onclick="nav(\'proj\',{pid:\''+c.pid+'\'})" class="text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded transition-colors" title="返回项目">⬅️ 返回</button><div><h1 class="text-2xl font-bold text-white">'+escapeHtml(c.file)+'</h1><p class="text-xs text-gray-600">'+(hasText?c.text.length+'字 ':'')+(c.isScanned?'('+getOCRLabel()+'识别)':'')+' · 累计提取 '+totalExtracted+' 条</p></div></div><div class="flex gap-2"><button type="button" onclick="openPdfPreview(\''+c.id+'\')" class="btn-outline btn-sm px-3 py-1.5 rounded-lg text-xs">预览PDF</button>'+(ok()?'<span class="text-xs px-2 py-0.5 rounded-full bg-emerald-900 text-emerald-400">AI就绪</span>':'<span class="text-xs px-2 py-0.5 rounded-full bg-red-900 text-red-400">未配置</span>')+'</div></div></div>'+
+fileFlowCardHtml(cid)+
+'<div class="grid grid-cols-4 gap-3"><div class="card p-3"><p class="text-xs text-gray-600">当前模板条数</p><p class="text-xl font-bold text-white">'+vs.length+'</p></div><div class="card p-3"><p class="text-xs text-gray-600">合同字数</p><p class="text-xl font-bold text-blue-400">'+(hasText?c.text.length:0)+'</p></div><div class="card p-3"><p class="text-xs text-gray-600">已用模板数</p><p class="text-xl font-bold text-ey">'+getAppliedRuleIds(cid).length+'</p></div><div class="card p-3"><p class="text-xs text-gray-600">识别方式</p><p class="text-sm font-bold text-gray-300">'+(c.isScanned?'OCR':'文字')+'</p></div></div>'+
+(hasText?'<details class="ap-details"><summary>合同文本 / OCR文本（'+c.text.length+'字）</summary><div class="ap-details-body pt-3"><textarea id="ctx" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 font-mono h-48">'+escapeHtml(c.text)+'</textarea><div class="flex gap-2 mt-2"><button onclick="sct()" class="btn btn-sm">保存修改</button><button onclick="cp3()" class="btn-sec btn-sm">复制文本</button></div></div></details>':'')+
+(hasText?'<div id="debugArea"></div>':'')+
+'</div>';
+if(pdfPaneOpen){setTimeout(function(){ loadPdfViewer(currentPdfSourceId||cid); initSplitPane(); }, 100);return splitPaneHtml(pdfViewerHtml(false), rightContent);}
+return rightContent;
+}
+window.sct=function(){var t=document.getElementById('ctx').value.trim();if(!t)return;var c=gc(cid);if(c){c.text=t;c.status='uploaded';if(c.revenueFactCache)delete c.revenueFactCache[c.id];c.revenueNeedsRefresh=true;clearAllExtractCacheForContract(c.id);invalidateAssociationOwnersForFile(c.id);save();render();}};
+window.cp3=function(){var t=document.getElementById('ctx');t.select();document.execCommand('copy');alert('已复制');};
+window.svExportCols=function(){save();};
+window.autoCols=function(){nav('rules');};
+
+// ===== Revenue evidence pack =====
+function inferRevenueSupplementType(fileName,text){
+  var value=String(fileName||'')+' '+String(text||'').substring(0,1200);
+  if(/工作说明书|statement of work|\bSOW\b/i.test(value))return '工作说明书/SOW';
+  if(/补充协议|变更协议|合同变更/.test(value))return '补充协议/变更';
+  if(/订单|采购单|purchase order|\bPO\b/i.test(value))return '订单';
+  if(/信用报告|信用评估|授信|征信/.test(value))return '客户信用资料';
+  if(/收款记录|回款记录|银行流水|应收账款账龄/.test(value))return '历史收款资料';
+  if(/验收单|验收报告|签收单|交付单/.test(value))return '交付验收资料';
+  if(/返利|折扣|退款|可变对价|测算/.test(value))return '价格及测算资料';
+  return '其他补充资料';
+}
+function clearRevenueExtractCache(contractId){
+  var prefix='c_'+contractId+'_revenue_workpaper';
+  Object.keys(extractCache).forEach(function(key){if(key.indexOf(prefix)===0)delete extractCache[key];});
+}
+window.pickRevenueSupplement=function(contractId,encodedRequest){
+  var input=document.createElement('input');input.type='file';input.accept='application/pdf';input.multiple=true;
+  input.onchange=function(){
+    var requestText='';try{requestText=decodeURIComponent(encodedRequest||'');}catch(e){}
+    uploadRevenueSupplements(contractId,Array.from(input.files||[]),requestText);
+  };
+  input.click();
+};
+window.uploadRevenueSupplements=async function(contractId,files,requestText){
+  var c=gc(contractId);if(!c||!files||!files.length)return;
+  if(!c.supplements)c.supplements=[];
+  taskRunner.start('upload',c.file+' · 补充资料',files.length);
+  addLog(contractId,c.file,'补充资料上传开始',files.length+'份','info');
+  var added=0;
+  try{
+    for(var i=0;i<files.length;i++){
+      await taskRunner.checkpoint();
+      var file=files[i];
+      if(file.type!=='application/pdf'&&!/\.pdf$/i.test(file.name)){throw new Error('目前补充资料仅支持PDF：'+file.name);}
+      var sid=gid();
+      taskRunner.update('解析补充资料 '+(i+1)+'/'+files.length+' · '+file.name,(i+1)+'/'+files.length);
+      var result=await processPDF(file,function(msg){taskRunner.update(file.name+' · '+String(msg),(i+1)+'/'+files.length);},sid);
+      var supplement={id:sid,file:file.name,docType:inferRevenueSupplementType(file.name,result.text),text:result.text,status:'已解析，待吸收',requestText:requestText||'',t:new Date().toISOString()};
+      c.supplements.push(supplement);
+      await dbPutPdf(sid,file);added++;
+    }
+    c.revenueNeedsRefresh=true;clearRevenueExtractCache(contractId);save();
+    var hasResults=FieldSet.listFieldSets(contractId,'revenue_workpaper').length>0;
+    if(hasResults&&ok()){
+      taskRunner.finish('资料解析完成','');
+      await reanalyzeRevenueContract(contractId,true);
+    }else{
+      taskRunner.finish('补充资料已加入合同资料包',added+'/'+files.length);
+      addLog(contractId,c.file,'补充资料已加入合同资料包',added+'份；下次提取将自动合并','done');
+      save();render();
+      if(hasResults&&!ok())alert('补充资料已加入当前合同。配置API后点击“更新判断”即可合并分析。');
+    }
+  }catch(err){
+    if(isTaskStoppedErr(err)){taskRunner.finish('已停止','');addLog(contractId,c.file,'补充资料上传已停止',added+'份已保存','warn');save();render();return;}
+    taskRunner.finish('补充资料上传失败','');addLog(contractId,c.file,'补充资料上传失败',String(err.message||err).substring(0,80),'error');save();render();alert('补充资料处理失败：'+(err.message||err));
+  }
+};
+window.reanalyzeRevenueContract=async function(contractId,fromUpload){
+  if(!ok()){if(!fromUpload){alert('请先配置API');nav('cfg');}return;}
+  var c=gc(contractId);if(!c)return;
+  var sourceSetId=FieldSet.latestFieldSetId(contractId,'revenue_workpaper');
+  if(!sourceSetId){if(!fromUpload)alert('请先完成一次收入底稿提取');return;}
+  var fieldKeys=FieldSet.defaultFieldKeys('revenue_workpaper');
+  var fsId=FieldSet.fieldSetIdOf(fieldKeys);var extractAt=new Date().toISOString();
+  clearRevenueExtractCache(contractId);taskRunner.start('extract',c.file+' · 更新判断','1/1');
+  addLog(contractId,c.file,'补充资料吸收中','正在更新共享事实表和受影响判断','info');
+  try{
+    var result=await aiExtract(c.text,function(st){
+      var msg=typeof st==='string'?st:st.msg;var pct=typeof st==='string'?'1/1':((st.progress||0)+'%');
+      taskRunner.update(c.file+' · '+msg,pct);updateLog(contractId,'补充资料吸收中',msg,'info');
+    },contractId,'revenue_workpaper',fieldKeys);
+    await taskRunner.checkpoint();
+    var label=FieldSet.formatVersionLabel('revenue_workpaper',fieldKeys,extractAt)+' · 资料包已更新';
+    FieldSet.replaceFieldSetResults(contractId,'revenue_workpaper',fsId,result,{keys:fieldKeys,extractAt:extractAt,label:label});
+    c.revenueNeedsRefresh=false;(c.supplements||[]).forEach(function(s){s.status='已吸收';});activeFieldSetId=fsId;save();
+    taskRunner.finish('判断已更新','');addLog(contractId,c.file,'补充资料已吸收','已更新'+result.length+'项底稿判断','done');render();
+  }catch(err){
+    if(isTaskStoppedErr(err)){taskRunner.finish('已停止','');addLog(contractId,c.file,'更新判断已停止','原底稿结果未改动','warn');return;}
+    taskRunner.finish('更新判断失败','');addLog(contractId,c.file,'更新判断失败',String(err.message||err).substring(0,80),'error');alert('更新判断失败，原底稿结果未改动：'+(err.message||err));
+  }
+};
+window.removeRevenueSupplement=function(contractId,supplementId){
+  var c=gc(contractId);if(!c||!c.supplements)return;
+  var item=c.supplements.find(function(s){return s.id===supplementId;});if(!item)return;
+  if(!confirm('确认从当前合同资料包移除“'+item.file+'”？已有底稿不会立即删除，但会标记为需要更新。'))return;
+  c.supplements=c.supplements.filter(function(s){return s.id!==supplementId;});
+  if(c.revenueFactCache)delete c.revenueFactCache[supplementId];
+  c.revenueNeedsRefresh=true;clearRevenueExtractCache(contractId);dbDeletePdf(supplementId);save();render();
+};
+
+// ===== Batch Extract =====
+window.batchExtractSelected=function(){openBatchExtractModal();};
+
+window.re=function(){
+if(!ok()){alert('请配置API');nav('cfg');return;}
+var c=gc(cid);if(!c)return;
+if(c.detectedRuleId&&!c.ruleConfirmed&&c.detectedConfidence!=='high'){
+if(!confirm('该文件提取模板尚未确认（置信度'+((c.detectedConfidence==='medium')?'中':'低')+'）。\n当前模板：'+RuleEngine.getRuleName(activeRuleId)+'\n\n确认使用该模板继续提取？'))return;
+c.ruleConfirmed=true;save();
+}
+if(!c.text){alert('文本为空');return;}
+openFieldSelectModal({mode:'single',contractId:cid,ruleId:activeRuleId,projectId:c.pid});
+};
+
+window.runSingleExtractWithFields=function(fieldKeys){
+var c=gc(cid);if(!c)return;
+var text=c.text;if(!text){alert('文本为空');return;}
+var ruleId=activeRuleId;
+fieldKeys=FieldSet.ensurePageInKeys(ruleId,fieldKeys);
+var fsId=FieldSet.fieldSetIdOf(fieldKeys);
+var existing=FieldSet.gvFieldSet(cid,ruleId,fsId);
+if(existing.length>0&&!confirm('已有相同字段组合的底稿（'+existing.length+' 条）。继续将覆盖该套底稿，其他字段组合的底稿会保留。确认？'))return;
+FieldSet.setProjectFieldPrefs(c.pid,ruleId,fieldKeys);
+pendingExtractOpts={ruleId:ruleId,fieldKeys:fieldKeys,fieldSetId:fsId};
+var extractAt=new Date().toISOString();
+var versionLabel=FieldSet.formatVersionLabel(ruleId,fieldKeys,extractAt);
+var btn=document.getElementById('eb');if(btn){btn.disabled=true;btn.innerHTML='<span class="spinner mr-2"></span>提取中...';}
+var da=document.getElementById('debugArea');
+if(da)da.innerHTML='<div class="mt-3"><div class="flex justify-between text-xs text-gray-400 mb-1"><span id="extMsg">准备提取...</span><span id="extPct">0%</span></div><div class="w-full bg-gray-800 rounded-full h-2"><div id="extBar" class="bg-ey h-2 rounded-full transition-all duration-300" style="width:0%"></div></div></div>';
+addLog(cid,c.file,'AI条款提取开始',versionLabel+' | 合同字数:'+text.length,'info');
+delete extractCache[cacheKeyFor(cid,ruleId,fsId)];
+taskRunner.start('extract',c.file,'1/1');
+aiExtract(text,function(st){
+  var msg=typeof st==='string'?st:st.msg;var pct=typeof st==='string'?null:st.progress;
+  taskRunner.update(c.file+(msg?(' · '+msg):''),pct!==null?(pct+'%'):'1/1');
+  var msgEl=document.getElementById('extMsg');if(msgEl)msgEl.innerText=msg;
+  if(pct!==null){var pctEl=document.getElementById('extPct');if(pctEl)pctEl.innerText=pct+'%';var barEl=document.getElementById('extBar');if(barEl)barEl.style.width=pct+'%';}
+  updateLog(cid,'AI条款提取中['+RuleEngine.getRuleShortName(ruleId)+']',msg,'info');
+},cid,ruleId,fieldKeys).then(function(result){
+  pendingExtractOpts=null;
+  if(taskRunner.isStopped()||!result)return;
+  taskRunner.finish('提取完成','');
+  FieldSet.replaceFieldSetResults(cid,ruleId,fsId,result,{keys:fieldKeys,extractAt:extractAt,label:versionLabel});
+  activeFieldSetId=fsId;
+  c.status='extracted';save();
+  var fs=FieldSet.fieldsForKeys(ruleId,fieldKeys);
+  var validCount=result.filter(function(it){return fs.some(function(f){return it[f.key]&&String(it[f.key]).trim();});}).length;
+  if(da){
+    if(result.length>0&&validCount===0){
+      var raw=(window.__lastRawExtract||'（无缓存，请重试提取）').replace(/</g,'&lt;');
+      da.innerHTML='<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2 mt-2">提取到'+result.length+'条，但字段名与模板定义的字段不匹配，全部为空。</div><pre class="mt-2">'+raw+'</pre>';
+    }else{
+      da.innerHTML='<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2 mt-2">完成！'+escapeHtml(versionLabel)+' 共'+result.length+'条（有效'+validCount+'条）</div>';
+    }
+  }
+  addLog(cid,c.file,'提取完成',versionLabel+' '+result.length+'条','done');
+  render();
+}).catch(function(err){
+  pendingExtractOpts=null;
+  if(isTaskStoppedErr(err)){
+    if(da)da.innerHTML='<div class="text-sm text-amber-400 bg-amber-900/40 rounded-lg p-2 mt-2">已停止提取</div>';
+    addLog(cid,c.file,'已停止','用户终止提取','warn');
+    taskRunner.finish('已停止','');
+    if(btn){btn.disabled=false;btn.innerHTML='开始提取';}
+    return;
+  }
+  var rawHtml='';
+  if(window.__lastRawExtract&&err.message.indexOf('字段名未匹配')>=0){rawHtml='<pre class="mt-2">'+window.__lastRawExtract.replace(/</g,'&lt;')+'</pre>';}
+  var friendly=friendlyAiError(err);
+  if(da)da.innerHTML='<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2 mt-2">失败: '+escapeHtml(friendly)+'</div>'+rawHtml;
+  addLog(cid,c.file,'❌ 提取失败',friendly.substring(0,120),'error');
+  taskRunner.finish('提取失败','');
+  if(btn){btn.disabled=false;btn.innerHTML='开始提取';}
+});
+};
+
+// ===== Excel Export =====
+function isAmountHeader(h){
+  return /金额|税额|价税|借方|贷方|余额|单价|数量/.test(String(h||''));
+}
+function parseAmountNumber(v){
+  if(v===undefined||v===null||v==='')return null;
+  if(typeof v==='number'&&isFinite(v))return v;
+  var s=String(v).trim();
+  if(!s)return null;
+  s=s.replace(/[¥￥$€£,\s]/g,'').replace(/人民币|RMB|CNY/gi,'');
+  if(!/^-?\d+(\.\d+)?$/.test(s))return null;
+  var n=parseFloat(s);
+  return isFinite(n)?n:null;
+}
+function styleExportSheet(ws){
+  if(!ws||!ws['!ref'])return ws;
+  var range=XLSX.utils.decode_range(ws['!ref']);
+  var thin={style:'thin',color:{rgb:'B0B8C4'}};
+  var border={top:thin,bottom:thin,left:thin,right:thin};
+  var headerFill={patternType:'solid',fgColor:{rgb:'1F4E79'}};
+  var headerFont={name:'微软雅黑',sz:11,bold:true,color:{rgb:'FFFFFF'}};
+  var bodyFont={name:'微软雅黑',sz:10,color:{rgb:'1F2937'}};
+  var altFill={patternType:'solid',fgColor:{rgb:'F2F5F9'}};
+  var whiteFill={patternType:'solid',fgColor:{rgb:'FFFFFF'}};
+  var amountCols={};
+  var cols=[];
+  var C,R,addr,cell,header,maxW,len,num,isHeader,isAmt;
+  for(C=range.s.c;C<=range.e.c;++C){
+    addr=XLSX.utils.encode_cell({r:range.s.r,c:C});
+    cell=ws[addr];
+    header=cell&&cell.v!=null?String(cell.v):'';
+    if(isAmountHeader(header))amountCols[C]=true;
+    maxW=Math.max(8,header.length);
+    for(R=range.s.r+1;R<=range.e.r;++R){
+      cell=ws[XLSX.utils.encode_cell({r:R,c:C})];
+      if(cell&&cell.v!=null){len=String(cell.v).length;if(len>maxW)maxW=len;}
+    }
+    cols.push({wch:Math.min(Math.max(maxW+2,10),48)});
+  }
+  ws['!cols']=cols;
+  ws['!rows']=[{hpt:24}];
+  for(R=range.s.r;R<=range.e.r;++R){
+    for(C=range.s.c;C<=range.e.c;++C){
+      addr=XLSX.utils.encode_cell({r:R,c:C});
+      if(!ws[addr])ws[addr]={t:'s',v:''};
+      cell=ws[addr];
+      isHeader=R===range.s.r;
+      isAmt=!isHeader&&!!amountCols[C];
+      if(isAmt){
+        num=parseAmountNumber(cell.v);
+        if(num!==null){cell.t='n';cell.v=num;delete cell.w;}
+      }
+      cell.s={
+        font:isHeader?headerFont:bodyFont,
+        fill:isHeader?headerFill:(R%2===0?altFill:whiteFill),
+        border:border,
+        alignment:{vertical:'center',horizontal:(isAmt&&cell.t==='n')?'right':'left',wrapText:true}
+      };
+      if(isAmt&&cell.t==='n')cell.s.numFmt='#,##0.00';
+    }
+  }
+  return ws;
+}
+function exportToExcel(contractId,allMode,ruleId,allRules,fieldSetId){
+if(typeof XLSX==='undefined'){alert('Excel 导出组件未加载，请使用最新版 AudiPick 或检查网络后重试');return;}
+var cids=[];
+if(allMode&&pid){var cs=Ct.filter(function(x){return x.pid===pid;});cs.forEach(function(c){cids.push(c.id);});}
+else if(contractId){cids.push(contractId);}
+if(cids.length===0){alert('没有数据可导出');return;}
+var sheets=buildExportRows(cids,ruleId||activeRuleId,!!allRules,fieldSetId||activeFieldSetId||null);
+var names=Object.keys(sheets);
+var total=0;names.forEach(function(n){total+=sheets[n].rows.length;});
+if(total===0){alert('没有数据可导出（当前文件尚无提取结果）');return;}
+try{
+var wb=XLSX.utils.book_new();
+names.forEach(function(name){
+  var data=sheets[name].rows;
+  if(data.length===0)return;
+  var safeName=name.substring(0,31).replace(/[\/?*\[\]]/g,'_');
+  XLSX.utils.book_append_sheet(wb,styleExportSheet(XLSX.utils.json_to_sheet(data)),safeName);
+});
+if(wb.SheetNames.length===0){alert('没有数据可导出');return;}
+var fname='AudiPick_'+new Date().toISOString().split('T')[0]+'.xlsx';
+XLSX.writeFile(wb,fname);
+}catch(e){
+console.error('export failed',e);
+alert('导出失败: '+(e&&e.message?e.message:String(e)));
+}
+}
+
+function styleRevenueChecklistSheet(ws){
+styleExportSheet(ws);
+if(!ws||!ws['!ref'])return ws;
+ws['!autofilter']={ref:ws['!ref']};
+ws['!freeze']={xSplit:0,ySplit:1,topLeftCell:'A2',activePane:'bottomLeft',state:'frozen'};
+ws['!cols']=[
+{wch:6},{wch:28},{wch:24},{wch:18},{wch:10},{wch:12},{wch:48},{wch:16},{wch:42},
+{wch:42},{wch:48},{wch:52},{wch:28},{wch:38},{wch:38},{wch:28},{wch:22},{wch:20},{wch:14},{wch:10},
+{wch:14},{wch:16},{wch:16},{wch:16},{wch:28}
+];
+var range=XLSX.utils.decode_range(ws['!ref']);
+ws['!rows']=[{hpt:28}];
+for(var R=range.s.r+1;R<=range.e.r;R++){
+  var lineEstimate=1;
+  [[6,42],[8,38],[9,38],[10,42],[11,46],[12,28],[13,34],[14,34]].forEach(function(cfg){
+    var longCell=ws[XLSX.utils.encode_cell({r:R,c:cfg[0]})];
+    var text=longCell&&longCell.v!=null?String(longCell.v):'';
+    lineEstimate=Math.max(lineEstimate,Math.ceil(text.length/cfg[1])+(text.match(/\n/g)||[]).length);
+  });
+  ws['!rows'][R]={hpt:Math.min(180,Math.max(36,lineEstimate*14))};
+  var readinessCell=ws[XLSX.utils.encode_cell({r:R,c:17})];
+  if(readinessCell){
+    readinessCell.s=readinessCell.s||{};
+    if(readinessCell.v==='可直接填入'){
+      readinessCell.s.fill={patternType:'solid',fgColor:{rgb:'E2F0D9'}};
+      readinessCell.s.font={name:'微软雅黑',sz:10,bold:true,color:{rgb:'375623'}};
+    }else if(readinessCell.v==='资料不足'){
+      readinessCell.s.fill={patternType:'solid',fgColor:{rgb:'F4CCCC'}};
+      readinessCell.s.font={name:'微软雅黑',sz:10,bold:true,color:{rgb:'9C0006'}};
+    }else{
+      readinessCell.s.fill={patternType:'solid',fgColor:{rgb:'FFF2CC'}};
+      readinessCell.s.font={name:'微软雅黑',sz:10,bold:true,color:{rgb:'9C5700'}};
+    }
+  }
+  var statusCell=ws[XLSX.utils.encode_cell({r:R,c:20})];
+  if(statusCell&&statusCell.v==='需人工复核'){
+    statusCell.s=statusCell.s||{};
+    statusCell.s.fill={patternType:'solid',fgColor:{rgb:'FFF2CC'}};
+    statusCell.s.font={name:'微软雅黑',sz:10,bold:true,color:{rgb:'9C5700'}};
+  }
+}
+return ws;
+}
+
+window.exportRevenueWorkpaperChecklist=function(contractId,fieldSetId){
+if(typeof XLSX==='undefined'){alert('Excel 导出组件未加载，请使用最新版 AudiPick');return;}
+if(!window.RevenueWorkpaper){alert('收入底稿套用组件未加载，请重启工具后重试');return;}
+var c=gc(contractId);if(!c){alert('未找到当前合同');return;}
+var fsId=fieldSetId||FieldSet.latestFieldSetId(contractId,'revenue_workpaper');
+var items=fsId?FieldSet.gvFieldSet(contractId,'revenue_workpaper',fsId):[];
+if(!items.length){alert('当前文件还没有收入底稿套用结果，请先使用“收入合同审阅底稿”模板提取');return;}
+var rows=RevenueWorkpaper.buildChecklistRows(c,items);
+if(!rows.length){alert('没有可导出的底稿填列建议');return;}
+try{
+  var wb=XLSX.utils.book_new();
+  var introRows=[
+    ['项目','内容'],
+    ['清单用途','把AI从收入合同中识别的信息对应到V2收入合同审阅底稿主问题，供项目组逐项复核后填列。'],
+    ['匹配依据','工作表名称 + 问题编号 + 问题描述；如底稿模板发生变化，以问题描述为主要人工核对依据。'],
+    ['主问题分档','“可直接填入”表示合同事实已明确回答；“建议填入，需复核”表示AI已形成初步判断；“资料不足”只用于确实无法形成结论的情况。'],
+    ['附表状态','主问题填入状态与附表完成状态分别判断。例如合同明确存在返利时，3.2主问题可直接填“是”，但附表仍可能需要历史数据和估计测算。'],
+    ['填写范围','回答列D、意见/回答理由列E、合同条款摘录及支持证据描述列F。'],
+    ['重要提示','本清单不会修改原始.xlsm底稿；所有建议回答和会计判断均须由项目组人工复核。'],
+    ['参考底稿','【V2】U_GP SWP 合同审阅 202YMMDD XYZ公司_示例底稿.xlsm'],
+    ['合同文件',c.file]
+  ];
+  var intro=styleExportSheet(XLSX.utils.aoa_to_sheet(introRows));
+  intro['!cols']=[{wch:16},{wch:100}];
+  intro['!rows']=[{hpt:26},{hpt:36},{hpt:36},{hpt:42},{hpt:42},{hpt:30},{hpt:42},{hpt:30},{hpt:30}];
+  XLSX.utils.book_append_sheet(wb,intro,'使用说明');
+  var checklist=styleRevenueChecklistSheet(XLSX.utils.json_to_sheet(rows));
+  XLSX.utils.book_append_sheet(wb,checklist,'底稿填列清单');
+  var base=String(c.file||'收入合同').replace(/\.[^.]+$/,'').replace(/[\\/:*?"<>|]/g,'_').substring(0,60);
+  XLSX.writeFile(wb,base+'_收入底稿填列清单_'+new Date().toISOString().split('T')[0]+'.xlsx');
+}catch(e){
+  console.error('revenue checklist export failed',e);
+  alert('底稿填列清单导出失败: '+(e&&e.message?e.message:String(e)));
+}
+};
+
+// ===== Workpaper =====
+function pgWork(){var c=gc(cid);if(!c){nav('dash');return'';}
+if(!activeFieldSetId) activeFieldSetId=FieldSet.latestFieldSetId(cid,activeRuleId);
+var vs=activeFieldSetId?FieldSet.gvFieldSet(cid,activeRuleId,activeFieldSetId):gvRule(cid,activeRuleId);
+if(vs.length>0&&!selectedWorkRowId) selectedWorkRowId=vs[0].id;
+var rightContent='<div class="space-y-4"><div class="flex justify-between items-start flex-wrap gap-2"><div class="flex items-center gap-3"><button onclick="nav(\'cont\',{cid:\''+c.id+'\',ruleId:\''+activeRuleId+'\'})" class="text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded transition-colors" title="返回详情">⬅️ 返回</button><div><h1 class="text-2xl font-bold text-white">工作底稿</h1><p class="text-sm text-gray-600">'+escapeHtml(c.file)+'</p></div></div><button type="button" onclick="openPdfPreview(\''+c.id+'\')" class="btn-outline btn-sm px-3 py-1.5 rounded-lg text-xs">预览PDF</button></div>'+
+workpaperHtml(cid)+'</div>';
+if(pdfPaneOpen){setTimeout(function(){ loadPdfViewer(currentPdfSourceId||cid); initSplitPane(); }, 100);return splitPaneHtml(pdfViewerHtml(false), rightContent);}
+return rightContent;
+}
+
+loadData();
+</script>
+</body>
+</html>

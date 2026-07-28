@@ -1,0 +1,7 @@
+node_modules/
+vendor/
+dist/
+scripts/_check.js
+*.log
+.env
+.env.*

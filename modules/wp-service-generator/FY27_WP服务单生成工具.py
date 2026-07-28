@@ -14,7 +14,6 @@ APP_TITLE = "FY27 WP服务单生成工具"
 REQUIRED_FILES = (
     "FY27 WP服务单.xlsx",
     "FY27 section list.xlsx",
-    "SER配置.xlsx",
 )
 
 MB_OK = 0x00000000

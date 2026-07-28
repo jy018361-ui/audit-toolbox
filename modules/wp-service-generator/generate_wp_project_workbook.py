@@ -18,14 +18,21 @@ validate_workbook = workbook_formatter.validate_workbook
 
 
 SER_CONFIG_FILENAME = "SER配置.xlsx"
+DEFAULT_SER_RULES = (
+    {"role": "Manager", "hours_mix": 0.08, "ser_rate": 2733.0},
+    {"role": "Senior", "hours_mix": 0.25, "ser_rate": 1199.0},
+    {"role": "Staff", "hours_mix": 0.58, "ser_rate": 683.0},
+    {"role": "Intern", "hours_mix": 0.09, "ser_rate": 173.0},
+)
+DEFAULT_SER_CONFIG = tuple(
+    (rule["hours_mix"], rule["ser_rate"]) for rule in DEFAULT_SER_RULES
+)
 
 
 def load_ser_config(folder: Path):
     config_path = folder / SER_CONFIG_FILENAME
     if not config_path.exists():
-        raise FileNotFoundError(
-            f"缺少{SER_CONFIG_FILENAME}。请将本地SER配置文件放在导出表所在文件夹。"
-        )
+        return DEFAULT_SER_CONFIG
 
     wb = load_workbook(config_path, data_only=True, read_only=False)
     ws = wb.active

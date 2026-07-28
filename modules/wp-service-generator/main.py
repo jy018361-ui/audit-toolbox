@@ -15,7 +15,7 @@ def main(parent=None):
         return
 
     folder = Path(selected)
-    required = ("FY27 WP服务单.xlsx", "FY27 section list.xlsx", "SER配置.xlsx")
+    required = ("FY27 WP服务单.xlsx", "FY27 section list.xlsx")
     missing = [name for name in required if not (folder / name).exists()]
     if missing:
         messagebox.showerror(

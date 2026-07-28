@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+dist/
+*.spec
+*.exe
+
+# Company templates, branding assets and generated workbooks are distributed internally.
+templates/
+assets/
+*.xls
+*.xlsx
+*.xlsm
+*.zip
+
+# Local settings, logs and temporary output.
+*.log
+*.tmp
+.env
+*settings*.json
+output*/
+tmp*/

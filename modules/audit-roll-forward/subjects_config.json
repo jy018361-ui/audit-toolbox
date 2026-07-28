@@ -1,0 +1,226 @@
+{
+  "version": "3.0",
+  "description": "审计底稿Roll Forward科目映射配置 - 按实际文件名匹配",
+  "subjects": {
+    "C": {
+      "code": "C",
+      "name": "货币资金",
+      "template_file": "C SWP 货币资金 202YMMDD XYZ公司.xlsx",
+      "prior_file_pattern": "C*货币资金*{prior_year}*.xlsx",
+      "lead_sheet": {
+        "sheet_name": "C.00 Lead",
+        "header_search_text": "期末审定数",
+        "closing_col": 10,
+        "opening_col": 11
+      },
+      "k01": {
+        "has_k01": false
+      }
+    },
+    "J1": {
+      "code": "J1",
+      "name": "在建工程",
+      "template_file": "J1 SWP 在建工程 202YMMDD XYZ公司.xlsx",
+      "prior_file_pattern": "J1*在建工程*{prior_year}*.xlsx",
+      "lead_sheet": {
+        "sheet_name": "J.00  Lead Sheet",
+        "header_search_text": "期末审定数",
+        "closing_col": 9,
+        "opening_col": 10,
+        "total_row_keywords": ["净值"],
+        "match_existing_rows_only": true,
+        "match_descriptor_col": 3,
+        "copy_matched_descriptors": true,
+        "clear_current_period_cols": [5, 6, 7, 8, 9]
+      },
+      "k01": {
+        "has_k01": true,
+        "sheet_name": "J.01 Agree SL to GL",
+        "header_row": 11,
+        "opening_balance_rows": [13],
+        "roll_forward_groups": [
+          {
+            "group": "在建工程-账面余额",
+            "source_detail": "期末余额",
+            "target_detail": "期初余额",
+            "value_cols": [5, 7, 9]
+          },
+          {
+            "group": "在建工程-减值准备",
+            "source_detail": "期末余额",
+            "target_detail": "期初余额",
+            "value_cols": [5, 7, 9]
+          }
+        ],
+        "categories": [
+          {"name": "在建工程-账面余额", "audit_col": 11, "book_col": 5}
+        ]
+      }
+    },
+    "K1": {
+      "code": "K1",
+      "name": "固定资产",
+      "template_file": "K1 SWP 固定资产 202YMMDD XYZ公司.xlsx",
+      "prior_file_pattern": "K1*固定资产*{prior_year}*.xlsx",
+      "lead_sheet": {
+        "sheet_name": "K.00 Lead Sheet",
+        "header_search_text": "期末审定数",
+        "closing_col": 9,
+        "opening_col": 10,
+        "total_row_keywords": ["净值"]
+      },
+      "k01": {
+        "has_k01": true,
+        "sheet_name": "K.01 Agree SL to GL",
+        "header_row": 10,
+        "match_categories": true,
+        "opening_balance_rows": [12],
+        "categories": [
+          {"name": "房屋建筑物", "audit_col": 7, "book_col": 5},
+          {"name": "机器设备", "audit_col": 10, "book_col": 8},
+          {"name": "运输设备", "audit_col": 13, "book_col": 11},
+          {"name": "电子产品及通讯设备", "audit_col": 16, "book_col": 14}
+        ]
+      }
+    },
+    "L1": {
+      "code": "L1",
+      "name": "无形资产",
+      "template_file": "L1 SWP 无形资产 202YMMDD XYZ公司.xlsx",
+      "prior_file_pattern": "L1*无形资产*{prior_year}*.xlsx",
+      "prior_file_patterns": [
+        "LAR*无形资产*{prior_year}*.xlsx",
+        "LRA*无形资产*.xlsx",
+        "L1*无形资产*{prior_year}*.xlsx"
+      ],
+      "lead_sheet": {
+        "sheet_name": "L1.00 Lead sheet",
+        "header_search_text": "期末审定数",
+        "closing_col": 9,
+        "opening_col": 10
+      },
+      "k01": {
+        "has_k01": true,
+        "sheet_name": "L1.01.1 Agree SL to GL",
+        "header_row": 10,
+        "opening_balance_rows": [12],
+        "categories": [
+          {"name": "土地使用权", "audit_col": 7, "book_col": 5},
+          {"name": "商标权", "audit_col": 10, "book_col": 8},
+          {"name": "专利权", "audit_col": 13, "book_col": 11}
+        ]
+      }
+    },
+    "L2": {
+      "code": "L2",
+      "name": "长期待摊费用",
+      "template_file": "L2 SWP 长期待摊费用 202YMMDD XYZ公司.xlsx",
+      "prior_file_pattern": "L2*长期待摊费用*{prior_year}*.xlsx",
+      "lead_sheet": {
+        "sheet_name": "L2.00 Lead",
+        "header_search_text": "期末审定数",
+        "closing_col": 12,
+        "opening_col": 13,
+        "copy_formula_row_for_all_details": true,
+        "strict_detail_sum_formulas": true
+      },
+      "k01": {
+        "has_k01": false
+      }
+    },
+    "M": {
+      "code": "M",
+      "name": "应付票据",
+      "template_file": "M SWP 应付票据 202YMMDD XYZ公司.xlsx",
+      "prior_file_pattern": "M*应付票据*{prior_year}*.xlsx",
+      "lead_sheet": {
+        "sheet_name": "M.00 Lead",
+        "header_search_text": "期末审定数",
+        "closing_col": 10,
+        "opening_col": 11
+      },
+      "k01": {
+        "has_k01": false
+      }
+    },
+    "N": {
+      "code": "N",
+      "name": "应付账款",
+      "template_file": "N SWP  应付账款 202YMMDD XYZ公司.xlsx",
+      "prior_file_pattern": "N*应付账款*{prior_year}*.xlsx",
+      "lead_sheet": {
+        "sheet_name": "N.00 Lead sheet",
+        "header_search_text": "期末审定数",
+        "closing_col": 10,
+        "opening_col": 11
+      },
+      "k01": {
+        "has_k01": false
+      }
+    },
+    "Q1": {
+      "code": "Q1",
+      "name": "银行借款",
+      "template_file": "Q1 SWP 银行借款 202YMMDD XYZ公司.xlsx",
+      "prior_file_pattern": "Q1*借款*{prior_year}*.xlsx",
+      "lead_sheet": {
+        "sheet_name": "Q1.00 Lead",
+        "header_search_text": "期末审定数",
+        "closing_col": 9,
+        "opening_col": 10,
+        "clear_extra_template_rows": true
+      },
+      "k01": {
+        "has_k01": false
+      }
+    },
+    "Uexp": {
+      "code": "Uexp",
+      "name": "财务费用",
+      "template_file": "U_exp SWP other 202YMMDD XYZ公司.xlsx",
+      "prior_file_pattern": "U_exp*other*{prior_year}*.xlsx",
+      "lead_sheet": {
+        "sheet_name": "Uexp_Lead",
+        "header_search_text": "期末审定数",
+        "closing_col": 9,
+        "opening_col": 10,
+        "match_existing_rows_only": true
+      },
+      "sub_sheets": [
+        {
+          "sheet_name": "Uexp财务费用BKD",
+          "header_search_text": "本期期末审定数",
+          "closing_col": 13,
+          "opening_col": 14,
+          "dynamic_prior_current_to_py": true
+        }
+      ]
+    },
+    "UexpVCVD": {
+      "code": "UexpVCVD",
+      "name": "销售费用及管理费用",
+      "template_file": "U_exp SWP VC&VD 202YMMDD XYZ公司.xlsx",
+      "prior_file_pattern": "U_exp*VC&VD*{prior_year}*.xlsx",
+      "lead_sheet": {
+        "sheet_name": "Uexp.00 Lead",
+        "header_search_text": "本期审定数",
+        "closing_col": 8,
+        "opening_col": 9,
+        "match_existing_rows_only": true
+      },
+      "k01": {
+        "has_k01": false
+      },
+      "sub_sheets": [
+        {
+          "sheet_name": "VC.00 销售费用BKD",
+          "dynamic_prior_current_to_py": true
+        },
+        {
+          "sheet_name": "VD.00 管理费用BKD",
+          "dynamic_prior_current_to_py": true
+        }
+      ]
+    }
+  }
+}

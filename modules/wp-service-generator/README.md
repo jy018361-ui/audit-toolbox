@@ -2,6 +2,8 @@
 
 根据系统导出的 WP 服务单和 FY27 Section List，自动生成 AUD2026、IPO、IPO archive、AUD2025 及逐服务单方案，完成 Section 数量回填、Outlook Hours 核对和 SER 测算。
 
+WP 服务单和 Section List 均按表头名称识别字段，输入列顺序可以变化；不要修改字段名称。
+
 本仓库不包含任何真实客户、项目、订单、人员或项目工时数据。代码内置标准 SER 工时占比和 Rate；`templates/FY27+WP服务单.xlsx.b64` 是脱敏空白模板的文本资源，程序首次运行时自动还原。
 
 ## 使用方式
@@ -35,6 +37,10 @@ FY27+WP服务单汇总.xlsx
 pip install -r requirements.txt
 python main.py
 ```
+
+### Jupyter Notebook
+
+打开 `生成项目组展示版_Jupyter.ipynb`，将 Notebook、程序文件、`templates` 文件夹和两个系统导出文件放在同一文件夹，依次运行两个代码单元格。输出文件名为 `FY27+WP服务单汇总.xlsx`。
 
 ### 本地独立 EXE
 

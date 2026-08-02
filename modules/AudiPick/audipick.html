@@ -50,6 +50,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica N
 .ap-details>summary:hover{color:#ccc;}
 .ap-details .ap-details-body{padding:0 16px 16px;border-top:1px solid #333;}
 .work-row-active{background:#2a2200;box-shadow:inset 0 0 0 1px #FFCC00;}
+.workpaper-reader-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(320px,.85fr);gap:16px;align-items:stretch;height:calc(100vh - 19rem);min-height:430px;}
+.workpaper-list-card{display:flex;min-height:0;flex-direction:column;overflow:hidden;}
+.workpaper-list-scroll{min-height:0;flex:1;overflow:auto!important;}
+.workpaper-list-scroll table{min-width:760px;}
+.workpaper-list-scroll thead{position:sticky;top:0;z-index:4;}
+.workpaper-list-scroll thead th{background:var(--surface-raised,#111827);box-shadow:0 1px 0 var(--border-soft,#303842);}
+.workpaper-detail-scroll{height:100%;min-height:0;overflow-y:auto;padding-right:4px;}
+.workpaper-page-link{white-space:nowrap;line-height:1.25;}
+#splitRight .workpaper-reader-grid{height:calc(100vh - 22rem);min-height:360px;}
+@media(max-width:1099px){.workpaper-reader-grid,#splitRight .workpaper-reader-grid{display:block;height:auto;min-height:0}.workpaper-list-card{height:min(56vh,620px)}.workpaper-detail-scroll{height:min(60vh,680px);margin-top:16px}}
 #pdfContainer.pdf-flash{box-shadow:inset 0 0 0 3px rgba(255,204,0,0.5);transition:box-shadow .3s;}
 .pdf-search-note{position:absolute;left:12px;right:12px;top:12px;background:rgba(26,26,26,.92);border:1px solid rgba(255,204,0,.8);color:#FFCC00;border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.4;z-index:3;box-shadow:0 6px 18px rgba(0,0,0,.35);}
 #taskControlBar.hidden{display:none!important;}
@@ -190,6 +200,7 @@ html[data-theme] #ap-shell>aside:first-of-type .text-ey{color:var(--sidebar-acce
 html[data-theme] #ap-shell>aside:first-of-type .border-gray-800{border-color:var(--sidebar-border)!important;}
 html[data-theme] #ap-shell>aside:first-of-type .hover\:bg-gray-900:hover{background:var(--sidebar-hover)!important;}
 html[data-theme] #ap-shell>aside:first-of-type .hover\:text-gray-200:hover{color:var(--sidebar-text)!important;}
+html[data-theme] #ap-shell>aside:first-of-type>div:last-of-type::after{content:'For questions, contact Dana D Li.';display:block;margin-top:4px;font-size:10px;line-height:1.35;opacity:.62;color:var(--sidebar-muted);}
 .theme-dialog{background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 24px 70px rgba(0,0,0,.3);padding:20px;color:var(--text);}
 .theme-dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px;}
 .theme-dialog-head h3{font-size:18px;font-weight:700;color:var(--text);}
@@ -516,6 +527,7 @@ window.startTour = function() {
 </script>
 <script src="rules/prompts/loan_covenant.js"></script>
 <script src="rules/prompts/loan_general.js"></script>
+<script src="rules/ai_response.js"></script>
 <script src="rules/revenue_workpaper.js"></script>
 <script src="rules/prompts/revenue_workpaper.js"></script>
 <script src="rules/prompts/revenue.js"></script>
@@ -532,6 +544,8 @@ window.startTour = function() {
 <script src="rules/fieldset.js"></script>
 <script src="rules/classify.js"></script>
 <script src="rules/ui.js"></script>
+<script src="rules/export_naming.js"></script>
+<script src="rules/loan_audit.js"></script>
 <script>
 var PDFJS_CFG=(window.desktop&&window.desktop.pdfjs)||null;
 pdfjsLib.GlobalWorkerOptions.workerSrc=PDFJS_CFG?PDFJS_CFG.workerSrc:'vendor/pdfjs/legacy/build/pdf.worker.min.js';
@@ -556,6 +570,7 @@ let templateSearch='';
 let selectedWorkRowId=null;
 let activeFieldSetId=null;
 let workFilterText='';
+let workpaperReaderScrollState={};
 let editingCustomId=null;
 let pendingExtractOpts=null;
 let CUSTOM_RULES=[];
@@ -566,7 +581,14 @@ let A=JSON.parse(localStorage.getItem('ap_k')||'{}');
 let O=JSON.parse(localStorage.getItem('ap_ocr')||JSON.stringify({engine:'ai'}));
 let workLog=JSON.parse(localStorage.getItem('ap_log')||'[]');
 let extractCache=JSON.parse(localStorage.getItem('ap_cache')||'{}');
+let ocrResumeTasks=[];
 let logCollapsed=true;
+let expandedAssociationGroups={};
+let projectViewPrefs=JSON.parse(localStorage.getItem('ap_project_view')||'{"search":"","status":"all","sort":"updated_desc"}');
+if(!projectViewPrefs||typeof projectViewPrefs!=='object')projectViewPrefs={search:'',status:'all',sort:'updated_desc'};
+if(['all','active','completed'].indexOf(projectViewPrefs.status)<0)projectViewPrefs.status='all';
+if(!projectViewPrefs.sort)projectViewPrefs.sort='updated_desc';
+var projectSearchTimer=null;
 const BATCH_CONCURRENCY=3;
 var TASK_STOPPED='TASK_STOPPED';
 var taskRunner={
@@ -640,8 +662,32 @@ function dbPut(k,v){return new Promise(function(resolve){var tx=db.transaction('
 function dbPutPdf(k,v){return new Promise(function(resolve){var tx=db.transaction('pdfs','readwrite');tx.objectStore('pdfs').put(v,k);tx.oncomplete=function(){resolve();};});}
 function dbGetPdf(k){return new Promise(function(resolve){var tx=db.transaction('pdfs','readonly');var req=tx.objectStore('pdfs').get(k);req.onsuccess=function(e){resolve(e.target.result);};req.onerror=function(){resolve(null);};});}
 function dbDeletePdf(k){return new Promise(function(resolve){if(!db)return resolve();try{var tx=db.transaction('pdfs','readwrite');tx.objectStore('pdfs').delete(k);tx.oncomplete=function(){resolve();};tx.onerror=function(){resolve();};}catch(e){resolve();}});}
+async function persistOcrResumeTask(task){
+    if(!task||!task.id)return;
+    task.updatedAt=new Date().toISOString();
+    var idx=ocrResumeTasks.findIndex(function(item){return item.id===task.id;});
+    if(idx>=0)ocrResumeTasks[idx]=task;else ocrResumeTasks.push(task);
+    await dbPut('ap_ocr_resume_tasks',ocrResumeTasks);
+}
+async function removeOcrResumeTask(taskId,removeFile){
+    ocrResumeTasks=ocrResumeTasks.filter(function(item){return item.id!==taskId;});
+    await dbPut('ap_ocr_resume_tasks',ocrResumeTasks);
+    if(removeFile!==false)await dbDeletePdf(taskId);
+}
+function pendingOcrTasks(projectId){
+    return ocrResumeTasks.filter(function(task){return task&&task.status!=='complete'&&(!projectId||task.projectId===projectId);});
+}
+function quickFileFingerprint(buffer,file){
+    var bytes=new Uint8Array(buffer),hash=2166136261,total=bytes.length;
+    var ranges=[[0,Math.min(total,65536)],[Math.max(0,total-65536),total]];
+    ranges.forEach(function(range){for(var i=range[0];i<range[1];i++){hash^=bytes[i];hash=Math.imul(hash,16777619);}});
+    return [file&&file.name||'',file&&file.size||total,file&&file.lastModified||0,total,(hash>>>0).toString(16)].join('|');
+}
 function save(){
-    dbPut('ap_p',P);dbPut('ap_c',Ct);dbPut('ap_v',V);dbPut('ap_k',A);dbPut('ap_ocr',O);dbPut('ap_custom_rules',CUSTOM_RULES);dbPut('ap_cache',extractCache);RuleEngine.setCustomRules(CUSTOM_RULES);if(typeof refreshRulePresets==='function')refreshRulePresets();
+    var writes=[];
+    if(db)writes=[dbPut('ap_p',P),dbPut('ap_c',Ct),dbPut('ap_v',V),dbPut('ap_k',A),dbPut('ap_ocr',O),dbPut('ap_custom_rules',CUSTOM_RULES),dbPut('ap_cache',extractCache)];
+    RuleEngine.setCustomRules(CUSTOM_RULES);if(typeof refreshRulePresets==='function')refreshRulePresets();if(typeof updateConfigStatusBadge==='function')updateConfigStatusBadge();
+    return Promise.all(writes);
 }
 async function loadData(){
     await initDB();
@@ -660,6 +706,7 @@ async function loadData(){
           if(c.ruleConfirmed===undefined)c.ruleConfirmed=!c.detectedRuleId||c.detectedConfidence==='high';
         });
         P.forEach(function(project){
+          if(project.status!=='completed')project.status='active';
           if(!Array.isArray(project.relationGroups))project.relationGroups=[];
           project.relationGroups=project.relationGroups.filter(function(group){
             if(!group||!group.anchorFileId||!gc(group.anchorFileId))return false;
@@ -674,6 +721,7 @@ async function loadData(){
           });
         }
         extractCache=(await dbGet('ap_cache'))||{};
+        ocrResumeTasks=(await dbGet('ap_ocr_resume_tasks'))||[];
         // 旧缓存 key c_{cid} -> c_{cid}_loan_covenant
         Object.keys(extractCache).forEach(function(k){
           if(/^c_[^_]+$/.test(k)){
@@ -683,6 +731,9 @@ async function loadData(){
           }
         });
     }
+    var restoredAssociations=0;
+    P.forEach(function(project){restoredAssociations+=autoAssociateProjectFiles(project.id).length;});
+    if(restoredAssociations>0)save();
     if(typeof hideIntro==='function')hideIntro();
     if(page==='home')page='dash';
     var shouldTour=window.apPendingTour&&!localStorage.getItem('ap_tour_done');
@@ -756,7 +807,7 @@ function getContractRuleId(c){
   return RuleEngine.getContractDefaultRuleId(c,p);
 }
 function cacheKeyFor(cid,ruleId,fieldSetId){return 'c_'+cid+'_'+(ruleId||activeRuleId)+(fieldSetId?('_fs_'+fieldSetId):'');}
-var ASSOCIATION_ROLES=['补充协议/变更','框架协议','订单/采购订单','技术附件','信用资料','验收/交付资料','其他支持文件'];
+var ASSOCIATION_ROLES=['补充协议/变更','框架协议','订单/采购订单','技术附件','信用资料','验收/交付资料','发票/结算资料','其他支持文件'];
 function relationGroupsForProject(projectId){
   var project=gp(projectId);if(!project)return[];
   if(!Array.isArray(project.relationGroups))project.relationGroups=[];
@@ -769,6 +820,101 @@ function relationGroupForAnchor(contractId){
 function relationRoleOptionsHtml(selected){
   return ASSOCIATION_ROLES.map(function(role){return '<option value="'+escapeHtml(role)+'"'+(role===selected?' selected':'')+'>'+escapeHtml(role)+'</option>';}).join('');
 }
+function relationMembershipForFile(fileId){
+  var found=null;
+  P.some(function(project){return (project.relationGroups||[]).some(function(group){
+    var member=(group.members||[]).find(function(item){return item&&item.fileId===fileId;});
+    if(!member)return false;found={project:project,group:group,member:member};return true;
+  });});
+  return found;
+}
+function associationRoleForContract(contract){
+  if(!contract)return null;
+  var label=[contract.file,contract.docLabel].filter(Boolean).join(' ');var heading=String(contract.text||'').substring(0,500);
+  function roleMatch(labelPattern,headingPattern){return labelPattern.test(label)||(headingPattern&&headingPattern.test(heading));}
+  if(roleMatch(/补充协议|变更协议|合同变更|amendment|addendum/i,/(?:^|\n)\s*(?:补充|变更)协议/))return '补充协议/变更';
+  if(roleMatch(/验收单|验收报告|交付单|签收单|验收证明|acceptance|delivery\s*(note|report)/i,/(?:^|\n)\s*(?:项目|产品|服务|交付)?\s*(?:验收单|验收报告|交付单|签收单)/))return '验收/交付资料';
+  if(roleMatch(/采购订单|订单|purchase\s*order|\bPO\b/i,/(?:^|\n)\s*(?:采购)?订单/))return '订单/采购订单';
+  if(roleMatch(/技术附件|规格书|技术协议|需求书|technical\s*(appendix|specification)/i,/(?:^|\n)\s*(?:技术附件|技术规格书|项目需求书)/))return '技术附件';
+  if(roleMatch(/征信|信用报告|信用评估|授信资料|credit\s*(report|assessment)/i,/(?:^|\n)\s*(?:企业)?(?:征信|信用)报告/))return '信用资料';
+  if(roleMatch(/发票|开票|结算单|对账单|收款凭证|回款记录|invoice|settlement/i,/(?:^|\n)\s*(?:发票|结算单|对账单|收款凭证)/))return '发票/结算资料';
+  return null;
+}
+function uniqueAssociationValues(values){
+  var seen={};return values.filter(function(value){value=String(value||'').toUpperCase().replace(/[\s_—–－]/g,'-').replace(/-+/g,'-');if(!value||seen[value])return false;seen[value]=true;return true;});
+}
+function associationSignals(contract){
+  var source=[contract&&contract.file||'',String(contract&&contract.text||'').substring(0,5000)].join('\n');
+  var projectCodes=[];var codeRe=/(?:^|[^A-Z0-9])([A-Z]{1,6})[\s_—–－-]*(\d{2,10})(?![A-Z0-9])/gi;var match;
+  while((match=codeRe.exec(source)))projectCodes.push(match[1]+match[2]);
+  var documentNumbers=[];var numberRe=/(?:合同|协议|项目|订单)(?:编号|号)?\s*[：:]?\s*([A-Z0-9][A-Z0-9._\/-]{3,})/gi;
+  while((match=numberRe.exec(source)))documentNumbers.push(match[1]);
+  var entities=[];var entityRe=/[\u4e00-\u9fa5]{2,32}(?:股份有限公司|有限责任公司|有限公司|集团公司|研究所|银行)/g;
+  while((match=entityRe.exec(source)))entities.push(match[0].replace(/[\s（）()]/g,''));
+  return {projectCodes:uniqueAssociationValues(projectCodes),documentNumbers:uniqueAssociationValues(documentNumbers),entities:uniqueAssociationValues(entities)};
+}
+function sharedAssociationValues(left,right){return left.filter(function(value){return right.indexOf(value)>=0;});}
+function associationPairKey(anchorFileId,fileId){return String(anchorFileId||'')+'>'+String(fileId||'');}
+function associationPairDismissed(project,anchorFileId,fileId){return !!(project&&Array.isArray(project.dismissedAssociations)&&project.dismissedAssociations.indexOf(associationPairKey(anchorFileId,fileId))>=0);}
+function isLikelyPrimaryContract(contract){
+  if(!contract||associationRoleForContract(contract))return false;
+  var value=[contract.file,contract.docLabel].filter(Boolean).join(' ');
+  if(/合同|协议|contract|agreement/i.test(value))return true;
+  var rid=contract.detectedRuleId||contract.ruleId;
+  return !!(rid&&typeof RuleEngine!=='undefined'&&/合同|协议/.test(RuleEngine.getRuleName(rid)||''));
+}
+function associationSuggestionForFile(contract){
+  if(!contract||relationMembershipForFile(contract.id)||relationGroupForAnchor(contract.id))return null;
+  var role=associationRoleForContract(contract);if(!role)return null;
+  var sourceSignals=associationSignals(contract);
+  var project=gp(contract.pid);
+  var candidates=Ct.filter(function(item){return item.pid===contract.pid&&item.id!==contract.id&&!relationMembershipForFile(item.id)&&isLikelyPrimaryContract(item)&&!associationPairDismissed(project,item.id,contract.id);}).map(function(anchor){
+    var targetSignals=associationSignals(anchor);var reasons=[];var score=0;
+    var codes=sharedAssociationValues(sourceSignals.projectCodes,targetSignals.projectCodes);
+    var numbers=sharedAssociationValues(sourceSignals.documentNumbers,targetSignals.documentNumbers);
+    var entities=sharedAssociationValues(sourceSignals.entities,targetSignals.entities);
+    if(codes.length){score+=85;reasons.push('项目编号 '+codes[0]+' 一致');}
+    if(numbers.length){score+=70;reasons.push('合同/项目编号一致');}
+    if(entities.length){score+=20;reasons.push('合同主体 '+entities[0]+' 一致');}
+    if(contract.detectedRuleId&&anchor.detectedRuleId&&contract.detectedRuleId===anchor.detectedRuleId)score+=5;
+    return {anchor:anchor,role:role,score:score,reasons:reasons};
+  }).filter(function(item){return item.score>=65;}).sort(function(a,b){return b.score-a.score;});
+  if(!candidates.length)return null;
+  if(candidates[1]&&candidates[0].score-candidates[1].score<15)return null;
+  var best=candidates[0];
+  return {fileId:contract.id,anchorFileId:best.anchor.id,anchorName:best.anchor.file||'主合同',role:best.role,score:best.score,confidence:best.score>=85?'high':'medium',reason:best.reasons.concat(['文件识别为'+best.role]).join('；')};
+}
+function addFileAssociation(anchorFileId,fileId,options){
+  options=options||{};var anchor=gc(anchorFileId);var file=gc(fileId);
+  if(!anchor||!file||anchor.id===file.id||anchor.pid!==file.pid||relationMembershipForFile(anchor.id))return false;
+  var project=gp(anchor.pid);if(!project)return false;
+  var groups=relationGroupsForProject(anchor.pid);var now=new Date().toISOString();var changed=false;
+  groups.forEach(function(group){
+    if(group.anchorFileId===anchorFileId)return;
+    var before=(group.members||[]).length;
+    group.members=(group.members||[]).filter(function(member){return member.fileId!==fileId;});
+    if(group.members.length!==before){changed=true;var previousOwner=gc(group.anchorFileId);if(previousOwner){clearAllExtractCacheForContract(previousOwner.id);previousOwner.associationNeedsRefresh=gv(previousOwner.id).length>0;}}
+  });
+  groups=groups.filter(function(group){return (group.members||[]).length>0;});
+  var group=groups.find(function(item){return item.anchorFileId===anchorFileId;});
+  if(!group){group={id:gid(),name:(anchor.file||'主文件')+'资料包',anchorFileId:anchorFileId,members:[],createdAt:now,updatedAt:now};groups.push(group);}
+  var member=(group.members||[]).find(function(item){return item.fileId===fileId;});
+  if(!member){group.members.push({fileId:fileId,role:options.role||associationRoleForContract(file)||'其他支持文件',source:options.source||'manual',confidence:options.confidence||'',reason:options.reason||'',createdAt:now});changed=true;}
+  else if(options.role&&member.role!==options.role){member.role=options.role;changed=true;}
+  if(Array.isArray(project.dismissedAssociations)){var pairKey=associationPairKey(anchorFileId,fileId);project.dismissedAssociations=project.dismissedAssociations.filter(function(key){return key!==pairKey;});}
+  if(changed){group.updatedAt=now;project.relationGroups=groups;clearAllExtractCacheForContract(anchor.id);anchor.associationNeedsRefresh=gv(anchor.id).length>0;if(anchor.revenueFactCache)anchor.revenueFactCache={};if(typeof FieldSet!=='undefined'&&FieldSet.listFieldSets(anchor.id,'revenue_workpaper').length>0)anchor.revenueNeedsRefresh=true;}
+  return changed;
+}
+function autoAssociateProjectFiles(projectId){
+  var linked=[];
+  Ct.filter(function(contract){return contract.pid===projectId&&!relationMembershipForFile(contract.id)&&!relationGroupForAnchor(contract.id);}).forEach(function(contract){
+    var suggestion=associationSuggestionForFile(contract);
+    if(suggestion&&suggestion.confidence==='high'&&addFileAssociation(suggestion.anchorFileId,contract.id,{role:suggestion.role,source:'ai',confidence:'high',reason:suggestion.reason}))linked.push(suggestion);
+  });
+  return linked;
+}
+window.getAssociationSuggestion=associationSuggestionForFile;
+window.autoAssociateProjectFiles=autoAssociateProjectFiles;
 function associatedDocumentsFor(contractOrId,fallbackText){
   var contract=typeof contractOrId==='string'?gc(contractOrId):contractOrId;
   if(!contract)return[];
@@ -776,7 +922,7 @@ function associatedDocumentsFor(contractOrId,fallbackText){
   var group=relationGroupForAnchor(contract.id);
   (group&&Array.isArray(group.members)?group.members:[]).forEach(function(member){
     var linked=gc(member.fileId);
-    if(linked&&linked.pid===contract.pid&&linked.text){docs.push({id:linked.id,name:linked.file||'关联文件',docType:member.role||'其他支持文件',text:linked.text,isPrimary:false});}
+    if(linked&&linked.pid===contract.pid&&linked.text){docs.push({id:linked.id,name:linked.file||'关联文件',docType:member.role||'其他支持文件',text:linked.text,isPrimary:false,associationSource:member.source||'manual',associationConfidence:member.confidence||'',associationReason:member.reason||''});}
   });
   return docs;
 }
@@ -816,14 +962,20 @@ function getFileAssociationSummary(contractId){
 window.getFileAssociationSummary=getFileAssociationSummary;
 window.openFileAssociationModal=function(contractId){
   var c=gc(contractId);if(!c)return;
-  var candidates=Ct.filter(function(item){return item.pid===c.pid&&item.id!==c.id&&item.text;});
-  if(!candidates.length){alert('当前项目还没有其他已完成OCR的文件，请先上传并识别文件。');return;}
-  var group=relationGroupForAnchor(contractId);var memberMap={};
+  var group=relationGroupForAnchor(contractId);var currentMemberIds=(group&&group.members||[]).map(function(member){return member.fileId;});
+  var candidates=Ct.filter(function(item){
+    if(item.pid!==c.pid||item.id===c.id||!item.text)return false;
+    var membership=relationMembershipForFile(item.id);
+    if(membership&&membership.group.anchorFileId!==contractId)return false;
+    return currentMemberIds.indexOf(item.id)>=0||!relationGroupForAnchor(item.id);
+  });
+  if(!candidates.length){alert('当前没有可关联的文件。请先上传并识别资料，或先从其他合同组中解除关联。');return;}
+  var memberMap={};
   (group&&group.members||[]).forEach(function(member){memberMap[member.fileId]=member;});
-  var rows=candidates.map(function(item){var member=memberMap[item.id];return '<div class="grid grid-cols-[auto_minmax(0,1fr)_150px] gap-3 items-center py-3 border-t border-gray-800 first:border-t-0">'+
+  var rows=candidates.map(function(item){var member=memberMap[item.id];var suggestedRole=member&&member.role||associationRoleForContract(item)||'其他支持文件';return '<div class="grid grid-cols-[auto_minmax(0,1fr)_150px] gap-3 items-center py-3 border-t border-gray-800 first:border-t-0">'+
     '<input type="checkbox" class="assoc-file-cb w-4 h-4 rounded border-gray-700 bg-black text-ey" data-file-id="'+item.id+'"'+(member?' checked':'')+'>'+
     '<div class="min-w-0"><p class="text-sm text-white truncate">'+escapeHtml(item.file||'')+'</p><p class="text-xs text-gray-600">OCR文本 '+String((item.text||'').length)+' 字</p></div>'+
-    '<select id="assoc_role_'+item.id+'" class="bg-black border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-white">'+relationRoleOptionsHtml(member&&member.role||'其他支持文件')+'</select></div>';}).join('');
+    '<select id="assoc_role_'+item.id+'" class="bg-black border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-white">'+relationRoleOptionsHtml(suggestedRole)+'</select></div>';}).join('');
   var root=ensureModalRoot();root.innerHTML='<div class="modal-backdrop fixed inset-0 bg-black/70 flex items-center justify-center p-4" onclick="if(event.target===this)cm()"><div class="bg-gray-900 border border-gray-700 rounded-lg p-5 w-full max-w-2xl shadow-2xl" onclick="event.stopPropagation()">'+
     '<div class="flex items-start justify-between gap-3 mb-4"><div><h3 class="font-semibold text-white">关联项目内文件</h3><p class="text-xs text-gray-500 mt-1">主文件：'+escapeHtml(c.file||'')+'。关联后，各模板均可共用所选文件的OCR内容。</p></div><button type="button" onclick="cm()" class="text-gray-500 hover:text-white text-lg" title="关闭">×</button></div>'+
     '<div class="max-h-[55vh] overflow-y-auto ap-scroll border border-gray-800 rounded-lg px-3">'+rows+'</div>'+
@@ -832,17 +984,42 @@ window.openFileAssociationModal=function(contractId){
 };
 window.saveFileAssociations=function(contractId){
   var c=gc(contractId);if(!c)return;var project=gp(c.pid);if(!project)return;
+  var existing=relationGroupForAnchor(contractId);var oldMemberMap={};(existing&&existing.members||[]).forEach(function(member){oldMemberMap[member.fileId]=member;});
   var members=[];document.querySelectorAll('.assoc-file-cb:checked').forEach(function(cb){
     var fileId=cb.getAttribute('data-file-id');var roleEl=document.getElementById('assoc_role_'+fileId);
-    if(fileId&&gc(fileId))members.push({fileId:fileId,role:roleEl?roleEl.value:'其他支持文件'});
+    if(fileId&&gc(fileId)){var previous=oldMemberMap[fileId]||{};members.push({fileId:fileId,role:roleEl?roleEl.value:'其他支持文件',source:previous.source||'manual',confidence:previous.confidence||'',reason:previous.reason||'',createdAt:previous.createdAt||new Date().toISOString()});}
   });
-  var groups=relationGroupsForProject(c.pid);var existing=relationGroupForAnchor(contractId);
+  var selectedIds=members.map(function(member){return member.fileId;});var groups=relationGroupsForProject(c.pid);
+  var removedIds=Object.keys(oldMemberMap).filter(function(fileId){return selectedIds.indexOf(fileId)<0;});
+  if(removedIds.length){if(!Array.isArray(project.dismissedAssociations))project.dismissedAssociations=[];removedIds.forEach(function(fileId){var key=associationPairKey(contractId,fileId);if(project.dismissedAssociations.indexOf(key)<0)project.dismissedAssociations.push(key);});}
+  if(Array.isArray(project.dismissedAssociations))selectedIds.forEach(function(fileId){var key=associationPairKey(contractId,fileId);project.dismissedAssociations=project.dismissedAssociations.filter(function(item){return item!==key;});});
+  groups.forEach(function(group){if(group.anchorFileId!==contractId)group.members=(group.members||[]).filter(function(member){return selectedIds.indexOf(member.fileId)<0;});});
+  groups=groups.filter(function(group){return group.anchorFileId===contractId||(group.members||[]).length>0;});
   if(existing){existing.members=members;existing.updatedAt=new Date().toISOString();}
   else if(members.length){groups.push({id:gid(),name:(c.file||'主文件')+'资料包',anchorFileId:contractId,members:members,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()});}
   project.relationGroups=groups.filter(function(group){return group.anchorFileId!==contractId||(group.members&&group.members.length);});
   clearAllExtractCacheForContract(contractId);if(c.revenueFactCache)c.revenueFactCache={};
   c.associationNeedsRefresh=gv(c.id).length>0;c.revenueNeedsRefresh=FieldSet.listFieldSets(c.id,'revenue_workpaper').length>0;
   save();cm();render();
+};
+window.removeFileAssociation=function(anchorFileId,fileId){
+  var anchor=gc(anchorFileId);if(!anchor)return;var project=gp(anchor.pid);if(!project)return;
+  var group=relationGroupForAnchor(anchorFileId);if(!group)return;
+  group.members=(group.members||[]).filter(function(member){return member.fileId!==fileId;});
+  project.relationGroups=relationGroupsForProject(anchor.pid).filter(function(item){return item.anchorFileId!==anchorFileId||(item.members||[]).length>0;});
+  if(!Array.isArray(project.dismissedAssociations))project.dismissedAssociations=[];var pairKey=associationPairKey(anchorFileId,fileId);if(project.dismissedAssociations.indexOf(pairKey)<0)project.dismissedAssociations.push(pairKey);
+  clearAllExtractCacheForContract(anchor.id);anchor.associationNeedsRefresh=gv(anchor.id).length>0;if(anchor.revenueFactCache)anchor.revenueFactCache={};if(typeof FieldSet!=='undefined'&&FieldSet.listFieldSets(anchor.id,'revenue_workpaper').length>0)anchor.revenueNeedsRefresh=true;
+  save();render();
+};
+window.confirmAssociationSuggestion=function(fileId,anchorFileId){
+  var file=gc(fileId);var suggestion=file?associationSuggestionForFile(file):null;
+  if(!suggestion||suggestion.anchorFileId!==anchorFileId)return;
+  if(addFileAssociation(anchorFileId,fileId,{role:suggestion.role,source:'ai-confirmed',confidence:suggestion.confidence,reason:suggestion.reason})){expandedAssociationGroups[anchorFileId]=true;save();render();}
+};
+window.toggleAssociationChildren=function(anchorFileId){
+  expandedAssociationGroups[anchorFileId]=!expandedAssociationGroups[anchorFileId];
+  var body=document.getElementById('association_children_'+anchorFileId);if(body)body.classList.toggle('hidden',!expandedAssociationGroups[anchorFileId]);
+  var icon=document.getElementById('association_chevron_'+anchorFileId);if(icon)icon.style.transform=expandedAssociationGroups[anchorFileId]?'rotate(180deg)':'';
 };
 function ok(){return !!(A.k&&A.u);}
 function chatCompletionsUrl(base){
@@ -855,6 +1032,12 @@ function applyJsonResponseMode(body,base){
 if(/(^|\.)api\.deepseek\.com/i.test((function(){try{return new URL(String(base||'')).hostname;}catch(e){return '';}})()))body.response_format={type:'json_object'};
 return body;
 }
+function applyThinkingMode(body,base,model,enabled){
+if(window.AiResponse&&AiResponse.applyThinkingMode)return AiResponse.applyThinkingMode(body,base,model,enabled);
+if(!enabled)body.enable_thinking=false;
+return body;
+}
+function isDeepSeekRequest(base,model){return !!(window.AiResponse&&AiResponse.isDeepSeek&&AiResponse.isDeepSeek(base,model));}
 function getActiveExtractFields(ruleId){
 ruleId=ruleId||activeRuleId;
 if(pendingExtractOpts&&pendingExtractOpts.ruleId===ruleId&&pendingExtractOpts.fieldKeys){
@@ -896,11 +1079,22 @@ function isDesktop(){return !!(window.desktop&&window.desktop.fetch);}
 async function safeFetch(url,opts){
 opts=opts||{};
 if(isDesktop()){
-var ro={method:opts.method||'GET',headers:opts.headers||{},body:opts.body||null};
+var ro={method:opts.method||'GET',headers:opts.headers||{},body:opts.body||null,timeoutMs:opts.timeoutMs||90000};
 var r;
-try{r=await window.desktop.fetch(url,ro);}
-catch(ipcErr){throw new Error('桌面网络通道调用失败：'+String(ipcErr&&ipcErr.message||ipcErr));}
-if(window.desktop.focusWindow) try{ await window.desktop.focusWindow(); }catch(e){}
+try{
+  var desktopRequest=window.desktop.fetch(url,ro);
+  if(opts.signal){
+    r=await new Promise(function(resolve,reject){
+      var settled=false;
+      function done(){if(settled)return false;settled=true;opts.signal.removeEventListener('abort',onAbort);return true;}
+      function onAbort(){if(!done())return;var abortErr=new Error('请求已取消或超时');abortErr.name='AbortError';reject(abortErr);}
+      if(opts.signal.aborted){onAbort();return;}
+      opts.signal.addEventListener('abort',onAbort);
+      desktopRequest.then(function(value){if(done())resolve(value);},function(error){if(done())reject(error);});
+    });
+  }else r=await desktopRequest;
+}
+catch(ipcErr){if(ipcErr&&ipcErr.name==='AbortError')throw ipcErr;throw new Error('桌面网络通道调用失败：'+String(ipcErr&&ipcErr.message||ipcErr));}
 if(!r||r.status===0){throw new Error('模型接口连接失败：'+String(r&&r.statusText||'未收到网络响应'));}
 return{ok:r.ok,status:r.status,statusText:r.statusText,text:function(){return Promise.resolve(r.bodyText);},json:function(){return Promise.resolve(JSON.parse(r.bodyText));}};
 }
@@ -1039,14 +1233,17 @@ if(cacheKey&&extractCache[cacheKey]){
   var cacheEntry=extractCache[cacheKey];var hasAssociations=cid&&associatedDocumentsFor(cid).length>1;
   var cacheMatches=cacheEntry.contextFingerprint?cacheEntry.contextFingerprint===contextFingerprint:!hasAssociations;
   var cachedItems=cacheMatches?(cacheEntry.items||[]):[];
-  if(cachedItems.length){var cachedContract=cid?gc(cid):null;if(cachedContract)cachedContract.associationNeedsRefresh=false;if(statusCb)statusCb({msg:'使用缓存结果',progress:100});return Promise.resolve(cachedItems);}
+  var missingRevenueGeneralInfo=ruleId==='revenue_workpaper'&&window.RevenueWorkpaper&&RevenueWorkpaper.hasGeneralInformation&&!RevenueWorkpaper.hasGeneralInformation(cachedItems);
+  if(cachedItems.length&&!missingRevenueGeneralInfo){var cachedContract=cid?gc(cid):null;if(cachedContract)cachedContract.associationNeedsRefresh=false;if(statusCb)statusCb({msg:'使用缓存结果',progress:100});return Promise.resolve(cachedItems);}
   delete extractCache[cacheKey];
 }
 if(ruleId==='revenue_workpaper')return aiExtractRevenueWithFacts(text,statusCb,cid,fieldKeys,cacheKey,contextFingerprint);
-var CHUNK_SIZE=8000;
-var MAX_SINGLE=10000;
+var CHUNK_SIZE=ruleId==='loan_general'?12000:8000;
+var MAX_SINGLE=ruleId==='loan_general'?45000:10000;
 if(text.length<=MAX_SINGLE)return aiExtractChunk(text,function(st){if(statusCb)statusCb({msg:st,progress:st.indexOf('提取中')>-1?55:100});},cid,3,ruleId,fieldKeys).then(function(items){
-  var finalItems=items;
+  if(ruleId==='loan_general')return finalizeLoanGeneralResults(items,statusCb,cid,fieldKeys,items.length>1);
+  return items;
+}).then(function(finalItems){
   if(cacheKey)extractCache[cacheKey]={items:finalItems,t:Date.now(),contextFingerprint:contextFingerprint};
   var extractedContract=cid?gc(cid):null;if(extractedContract)extractedContract.associationNeedsRefresh=false;
   save();
@@ -1072,6 +1269,10 @@ if(cur)chunks.push(cur);
 if(statusCb)statusCb({msg:'分为'+chunks.length+'段提取...',progress:10});
 var allResults=[];
 var completed=0;
+var chunkPromptOverride=null;
+if(ruleId==='loan_general'){
+  chunkPromptOverride=RuleEngine.getRulePrompt(ruleId)+'\n\n【超长合同分段证据整理阶段】\n当前输入只是同一主合同或资料包的一部分，不是完整合同。你本阶段只整理当前片段中明确可见的候选事实及页码，不得因为当前片段信息不完整就推定存在另一笔借款，不得把附件名称、文件名或某一条款单独认定为新的债务记录。未知字段填“未明确”。这些候选事实将在读取全部片段后统一汇总，本阶段结果不是最终底稿。';
+}
 
 return new Promise(function(resolve, reject) {
     var concurrency = 3; // 提升并发数到3，加快提取速度
@@ -1086,7 +1287,7 @@ return new Promise(function(resolve, reject) {
         var i = index++;
         var chunk = chunks[i];
         if(statusCb)statusCb({msg:'正在提取第 '+(i+1)+'/'+chunks.length+' 段...',progress:10+Math.round((completed/chunks.length)*90)});
-        return aiExtractChunk(chunk, function(st){}, cid, 3, ruleId, fieldKeys).then(function(res){
+        return aiExtractChunk(chunk, function(st){}, cid, 3, ruleId, fieldKeys, chunkPromptOverride).then(function(res){
             allResults = allResults.concat(res);
             completed++;
             if(statusCb)statusCb({msg:'第 '+(i+1)+' 段完成',progress:10+Math.round((completed/chunks.length)*90)});
@@ -1104,14 +1305,18 @@ return new Promise(function(resolve, reject) {
 
     Promise.all(workers).then(function() {
         if (!hasError) {
-            var finalItems=ruleId==='revenue_workpaper'&&window.RevenueWorkpaper
-              ? RevenueWorkpaper.normalizeResults(allResults)
-              : allResults;
-            if(cacheKey)extractCache[cacheKey]={items:finalItems,t:Date.now(),contextFingerprint:contextFingerprint};
-            var extractedContract=cid?gc(cid):null;if(extractedContract)extractedContract.associationNeedsRefresh=false;
-            save();
-            if(statusCb)statusCb({msg:'分段提取完成',progress:100});
-            resolve(finalItems);
+            var finalPromise=ruleId==='loan_general'
+              ? finalizeLoanGeneralResults(allResults,statusCb,cid,fieldKeys,true)
+              : Promise.resolve(ruleId==='revenue_workpaper'&&window.RevenueWorkpaper
+                ? RevenueWorkpaper.normalizeResults(allResults)
+                : allResults);
+            finalPromise.then(function(finalItems){
+              if(cacheKey)extractCache[cacheKey]={items:finalItems,t:Date.now(),contextFingerprint:contextFingerprint};
+              var extractedContract=cid?gc(cid):null;if(extractedContract)extractedContract.associationNeedsRefresh=false;
+              save();
+              if(statusCb)statusCb({msg:ruleId==='loan_general'?'全合同汇总完成':'分段提取完成',progress:100});
+              resolve(finalItems);
+            }).catch(function(err){hasError=true;reject(err);});
         }
     });
 });
@@ -1139,15 +1344,82 @@ function getRevenueDocuments(contract,fallbackText){
   if(!docs.length)docs.push({id:'primary',name:'主合同',docType:'主合同',text:fallbackText||''});
   return docs;
 }
+function revenueFactId(fact){
+  var value=[fact.source_id||'',fact.source_document||'',fact.pages||'',fact.fact_type||'',fact.fact_summary||''].join('|');
+  var hash=2166136261;
+  for(var i=0;i<value.length;i++){hash^=value.charCodeAt(i);hash=Math.imul(hash,16777619);}
+  return 'RF-'+(hash>>>0).toString(16);
+}
+function normalizedEvidenceMatchText(value){
+  return String(value||'').toLowerCase().replace(/---pdf第\d+页---/gi,'').replace(/[\s\u3000，。；：、“”‘’（）()【】\[\]《》<>！？!?,.;:'"`~\-—–_\/\\]/g,'');
+}
+function evidencePageTextFromDocument(text,pageStr){
+  text=String(text||'');var page=parsePageNumber(pageStr);if(!page)return text;
+  var re=/---PDF第(\d+)页---/g,m,start=-1,end=text.length;
+  while((m=re.exec(text))!==null){
+    var markerPage=parseInt(m[1],10);
+    if(markerPage===page){start=re.lastIndex;continue;}
+    if(start>=0){end=m.index;break;}
+  }
+  return start>=0?text.slice(start,end):'';
+}
+function evidenceDocumentScore(documentRecord,pageStr,evidenceText){
+  var fullText=String(documentRecord&&documentRecord.text||'');
+  var pageText=evidencePageTextFromDocument(fullText,pageStr);
+  var normalizedPage=normalizedEvidenceMatchText(pageText);
+  var normalizedFull=normalizedEvidenceMatchText(fullText);
+  var query=normalizedEvidenceMatchText(evidenceText);
+  var score=0;
+  if(pageText)score+=20;
+  else if(parsePageNumber(pageStr)&&/---PDF第\d+页---/.test(fullText))score-=30;
+  if(query.length>=6){
+    if(normalizedPage.indexOf(query)>=0)score+=300;
+    else if(normalizedFull.indexOf(query)>=0)score+=80;
+    var width=Math.min(18,Math.max(8,Math.floor(query.length/4)));
+    for(var i=0;i+width<=query.length;i+=Math.max(4,Math.floor(width/2))){
+      var piece=query.slice(i,i+width);
+      if(normalizedPage.indexOf(piece)>=0)score+=18;
+      else if(normalizedFull.indexOf(piece)>=0)score+=4;
+    }
+  }
+  var numbers=String(evidenceText||'').match(/\d+(?:\.\d+)?%?/g)||[];
+  numbers.slice(0,12).forEach(function(number){if(pageText.indexOf(number)>=0)score+=5;});
+  if(documentRecord&&(documentRecord.isPrimary||documentRecord.docType==='主合同'))score+=1;
+  return score;
+}
+function bestEvidenceDocument(documents,pageStr,evidenceText){
+  var best=null,bestScore=-Infinity;
+  (documents||[]).forEach(function(documentRecord){
+    var score=evidenceDocumentScore(documentRecord,pageStr,evidenceText);
+    if(score>bestScore){bestScore=score;best=documentRecord;}
+  });
+  return best;
+}
+function resolveRevenueFactDocument(x,doc){
+  var documents=Array.isArray(doc&&doc.sources)&&doc.sources.length?doc.sources:[doc];
+  var claimed=toStr(x&&x.source_document).trim();var normalizedClaim=normalizedEvidenceSourceName(claimed);
+  if(claimed&&!isSyntheticEvidenceSource(claimed)){
+    var exact=documents.find(function(candidate){return normalizedEvidenceSourceName(candidate.name)===normalizedClaim;});
+    if(exact)return exact;
+    var base=normalizedClaim.replace(/\.[^.]+$/,'');
+    var baseMatches=documents.filter(function(candidate){return normalizedEvidenceSourceName(candidate.name).replace(/\.[^.]+$/,'')===base;});
+    if(baseMatches.length===1)return baseMatches[0];
+  }
+  return bestEvidenceDocument(documents,x&&x.pages,[x&&x.contract_excerpt,x&&x.fact_summary].filter(Boolean).join(' '))||doc;
+}
 function normalizeRevenueFact(x,doc){
-  return {
+  var source=resolveRevenueFactDocument(x,doc);
+  var fact={
     fact_type:toStr(x.fact_type||'其他').trim()||'其他',
     fact_summary:toStr(x.fact_summary).trim(),
     contract_excerpt:toStr(x.contract_excerpt).trim(),
-    source_document:doc.name,
+    source_id:source.id,
+    source_document:source.name,
     pages:fmtPage(x.pages),
     qualifier:toStr(x.qualifier||'无').trim()||'无'
   };
+  fact.fact_id=revenueFactId(fact);
+  return fact;
 }
 function mergeRevenueFacts(facts){
   var dedup={},perType={};
@@ -1156,7 +1428,7 @@ function mergeRevenueFacts(facts){
     var key=normKey(f.fact_type)+'|'+normKey(f.fact_summary)+'|'+String(f.source_document||'');
     if(!dedup[key]||String(f.contract_excerpt||'').length>String(dedup[key].contract_excerpt||'').length)dedup[key]=f;
   });
-  return Object.keys(dedup).map(function(k){return dedup[k];}).filter(function(f){
+  return Object.keys(dedup).map(function(k){var fact=dedup[k];if(!fact.fact_id)fact.fact_id=revenueFactId(fact);return fact;}).filter(function(f){
     var type=f.fact_type||'其他';perType[type]=(perType[type]||0)+1;
     return perType[type]<=18;
   }).slice(0,220);
@@ -1217,80 +1489,168 @@ function parseStructuredArray(content,arrayKeys){
 }
 function revenueAnswerQuestionGroups(){
   var numberGroups=[
+    ['GI.1','GI.2','GI.3','GI.4','GI.5'],
     ['1.1','1.1(a)','1.1.1','1.1.1(a)','1.1.1(b)','1.2','1.2.1','1.3','1.3.1','1.4'],
     ['2.1','2.1.1','2.2','2.2.1','2.3','2.4','3.1','3.2','3.3'],
     ['3.4','3.5','3.6','4.1','4.2','4.2.1','4.3'],
-    ['5.1','5.2','5.2.1','5.2.2','5.3','5.3.1','5.4','5.4.1','5.5','5.5.1'],
+    ['5.2','5.2.1','5.2.2','5.3','5.3.1','5.4','5.4.1','5.5','5.5.1'],
     ['C.1','C.1.1','C.2','C.2.1','C.3','C.4','C.4.1']
   ];
   var catalog=(window.RevenueWorkpaper&&RevenueWorkpaper.questions)||[];
   return numberGroups.map(function(numbers){
-    return numbers.map(function(no){return catalog.find(function(q){return String(q.questionNo)===no;});}).filter(Boolean);
+    return numbers.reduce(function(group,no){
+      return group.concat(catalog.filter(function(q){return String(q.questionNo)===no;}));
+    },[]);
   });
+}
+function revenueQuestionKey(item){
+  return String((item||{}).workpaper_sheet||(item||{}).sheet||'').trim()+'|'+String((item||{}).question_no||(item||{}).questionNo||'').trim();
 }
 function revenuePromptForQuestions(targets){
   var prompt=RuleEngine.getRulePrompt('revenue_workpaper');
   var start=prompt.indexOf('【底稿问题目录】');
   var end=start>=0?prompt.indexOf('【实务判断口径】',start):-1;
   var lines=(targets||[]).map(function(q){return q.sheet+' | 第'+q.row+'行 | '+q.questionNo+' | '+q.question;}).join('\n');
+  var poContexts=[];
+  (targets||[]).forEach(function(q){
+    var context=String(q&&q.poContext||'').trim();
+    if(context&&poContexts.indexOf(context)<0)poContexts.push(context);
+  });
   var targetBlock='【本批必须逐项回答的底稿问题】\n'+lines+'\n\n'+
+    (poContexts.length?'【已确认履约义务及一致性约束】\n'+poContexts.join('\n\n')+'\n\n':'')+
     '本批只输出上述问题，每个问题至少输出一条，不得返回空数组。合同不适用的问题也要明确回答“否”或“不适用”并说明原因。\n'+
+    (poContexts.length?'已确认清单中的PO真实存在，严禁回答“不存在PO”“无此履约义务”或重新分配PO编号。同一控制权转移模式组的相同指标必须一致；只有明确列示了不同合同条款时才可不同，并须在answer_reason说明差异。\n':'')+
     '为避免输出被截断，请保持精准简洁：contract_basis不超过120字，answer_reason不超过180字，contract_excerpt不超过240字，supporting_evidence和missing_information各不超过120字；数字、条件、方向、页码和来源文件不得省略。\n\n';
   if(start>=0&&end>start)return prompt.slice(0,start)+targetBlock+prompt.slice(end);
   return prompt+'\n\n'+targetBlock;
 }
-function aiExtractRevenueFactChunk(doc,chunk,retries){
+function groupRevenueDetailQuestions(detailQuestions){
+  var timingBuckets={},other=[];
+  (detailQuestions||[]).forEach(function(question){
+    var isPoTiming=question&&question.po_no&&/^5\.1\.[12]-/.test(String(question.questionNo||''));
+    if(!isPoTiming){other.push(question);return;}
+    var timingType=/^5\.1\.1-/.test(String(question.questionNo||''))?'5.1.1':'5.1.2';
+    var key=timingType+'|'+String(question.questionNo||'');
+    if(!timingBuckets[key])timingBuckets[key]=[];
+    timingBuckets[key].push(question);
+  });
+  var groups=Object.keys(timingBuckets).sort().map(function(key){return timingBuckets[key];});
+  for(var index=0;index<other.length;index+=6)groups.push(other.slice(index,index+6));
+  return groups;
+}
+function normalizeRevenueBatchItems(items){
+  var list=Array.isArray(items)?items:[];
+  return window.RevenueWorkpaper?RevenueWorkpaper.normalizeResults(list):list;
+}
+function missingRevenueTargets(items,targets){
+  var seen={};
+  normalizeRevenueBatchItems(items).forEach(function(item){seen[revenueQuestionKey(item)]=true;});
+  return (targets||[]).filter(function(question){return !seen[revenueQuestionKey(question)];});
+}
+function revenueMissingQuestionFallback(question){
+  return {
+    workpaper_sheet:question.sheet,
+    workpaper_row:String(question.row||''),
+    question_no:question.questionNo,
+    question_description:question.question,
+    suggested_answer:'',
+    contract_basis:'',
+    sop_basis:'SOP未明确涉及该具体情形',
+    answer_reason:'模型在分组回答及逐题补答后仍未返回本问题，系统已保留该底稿行并标记人工复核。',
+    contract_excerpt:'',
+    source_documents:'',
+    supporting_evidence:'请人工核对合同及相关支持文件。',
+    missing_information:'重新提取或人工核对本问题',
+    triggered_sheet:'无',
+    appendix_status:'未触发',
+    performance_obligations:'[]',
+    appendix_subjects:'[]',
+    over_time_criteria:'[]',
+    fill_readiness:'资料不足',
+    pages:'【页码未知】',
+    confidence:'低',
+    review_status:'需人工复核',
+    technical_fallback:true,
+    evidence_fact_ids:'[]'
+  };
+}
+function completeRevenueQuestionBatch(factText,items,targets,cid,fieldKeys){
+  var normalized=normalizeRevenueBatchItems(items);
+  var missing=missingRevenueTargets(normalized,targets);
+  if(!missing.length)return Promise.resolve(normalized);
+  var retryGroups=[];
+  for(var index=0;index<missing.length;index+=3)retryGroups.push(missing.slice(index,index+3));
+  return Promise.all(retryGroups.map(function(group){
+    return aiExtractChunk(factText,function(){},cid,0,'revenue_workpaper',fieldKeys,revenuePromptForQuestions(group))
+      .then(normalizeRevenueBatchItems)
+      .catch(function(err){console.warn('收入底稿逐题补答失败，保留待复核行:',err);return [];});
+  })).then(function(retriedGroups){
+    var combined=normalized.concat(retriedGroups.reduce(function(all,groupItems){return all.concat(groupItems||[]);},[]));
+    var stillMissing=missingRevenueTargets(combined,targets);
+    if(stillMissing.length){
+      console.warn('收入底稿仍有'+stillMissing.length+'个问题未返回，已生成答案留空的待复核占位行:',stillMissing.map(function(q){return q.questionNo;}));
+      combined=combined.concat(stillMissing.map(revenueMissingQuestionFallback));
+    }
+    return normalizeRevenueBatchItems(combined);
+  });
+}
+function aiExtractRevenueFactChunk(doc,chunk,retries,plainJsonMode){
   if(retries===undefined)retries=2;
   var prompt=(window.REVENUE_FACT_PROMPT||'')+'\n\n文档名称：'+doc.name+'\n资料类型：'+doc.docType+'\n\n文档文本：\n'+chunk;
   var ctrl=new AbortController();bindTaskAbort(ctrl);var timer=setTimeout(function(){ctrl.abort();},120000);
   var body={model:A.m||'gpt-4',messages:[
-    {role:'system',content:'你是审计合同资料包的事实整理助手。只记录文件明确写明的事实，严格输出JSON。'},
+    {role:'system',content:'你是审计合同资料包的事实整理助手。不要输出分析或推理过程，只记录文件明确写明的事实，直接输出JSON。'},
     {role:'user',content:prompt}
-  ],temperature:0,max_tokens:4500};
-  applyJsonResponseMode(body,A.u);
-  if(!A.think)body.enable_thinking=false;
+  ],temperature:0,max_tokens:7000};
+  if(!plainJsonMode)applyJsonResponseMode(body,A.u);
+  applyThinkingMode(body,A.u,A.m,false);
   return taskRunner.checkpoint().then(function(){
-    return safeFetch(chatCompletionsUrl(A.u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+A.k},body:JSON.stringify(body)});
+    return safeFetch(chatCompletionsUrl(A.u),{method:'POST',signal:ctrl.signal,timeoutMs:120000,headers:{'Content-Type':'application/json','Authorization':'Bearer '+A.k},body:JSON.stringify(body)});
   }).then(function(r){
     clearTimeout(timer);if(!r.ok)return r.text().then(function(e){throw new Error('API('+r.status+'):'+e.substring(0,300));});return r.json();
   }).then(function(d){
-    var msg=d.choices&&d.choices[0]&&d.choices[0].message;var content=msg&&msg.content;
-    if(!content||!content.trim())throw new Error('共享事实提取返回空');
+    var msg=d.choices&&d.choices[0]&&d.choices[0].message;
+    var content=window.AiResponse?AiResponse.messageContent(msg):(msg&&msg.content||'');
+    if(!content||!String(content).trim())throw (window.AiResponse?AiResponse.emptyContentError(d,'共享事实提取'):new Error('共享事实提取返回正文为空'));
     var arr=parseStructuredArray(content,['facts','items']);
     return (Array.isArray(arr)?arr:[]).map(function(x){return normalizeRevenueFact(x,doc);}).filter(function(x){return x.fact_summary;});
   }).catch(function(err){
     clearTimeout(timer);if(isTaskStoppedErr(err))throw err;
-    if(retries>0&&!taskRunner.isStopped())return new Promise(function(resolve){setTimeout(resolve,1200);}).then(function(){return aiExtractRevenueFactChunk(doc,chunk,retries-1);});
+    if(err&&err.code==='EMPTY_ASSISTANT_CONTENT'){
+      if(retries>0&&!plainJsonMode&&isDeepSeekRequest(A.u,A.m)&&!err.reasoningLength&&!taskRunner.isStopped())return new Promise(function(resolve){setTimeout(resolve,500);}).then(function(){return aiExtractRevenueFactChunk(doc,chunk,retries-1,true);});
+      throw err;
+    }
+    if(retries>0&&!taskRunner.isStopped()&&(/API\((429|5\d\d)\)|接口连接失败|网络通道|ECONN|ENOTFOUND|ETIMEDOUT|请求超时/i.test(String(err&&err.message||err))))return new Promise(function(resolve){setTimeout(resolve,1200);}).then(function(){return aiExtractRevenueFactChunk(doc,chunk,retries-1,plainJsonMode);});
     if(err.name==='AbortError'){if(taskRunner.isStopped())throw new Error(TASK_STOPPED);throw new Error('共享事实提取超时');}throw err;
   });
 }
 function aiExtractRevenueWithFacts(text,statusCb,cid,fieldKeys,cacheKey,contextFingerprint){
   var contract=cid?gc(cid):null;var docs=getRevenueDocuments(contract,text);
   if(contract&&!contract.revenueFactCache)contract.revenueFactCache={};
-  var facts=[],jobs=[],freshByDoc={};
-  docs.forEach(function(doc){
-    var fp=revenueTextFingerprint(doc.text);var cached=contract&&contract.revenueFactCache[doc.id];
-    if(cached&&cached.fingerprint===fp&&Array.isArray(cached.facts))facts=facts.concat(cached.facts);
-    else splitRevenueText(doc.text,12000).forEach(function(chunk,index){jobs.push({doc:doc,chunk:chunk,index:index,fp:fp});});
-  });
+  var packageText=docs.map(function(doc){return '【资料包文件：'+doc.name+'｜资料类型：'+doc.docType+'】\n'+doc.text;}).join('\n\n');
+  var packageFingerprint=revenueTextFingerprint(packageText);
+  var packageCache=contract&&contract.revenueFactCache.__complete_package__;
+  var facts=packageCache&&packageCache.sourceResolutionVersion===3&&packageCache.fingerprint===packageFingerprint&&Array.isArray(packageCache.facts)?packageCache.facts.slice():[];
+  var jobs=facts.length?[]:[{doc:{id:'__complete_package__',name:'完整合同资料包（'+docs.length+'份文件）',docType:'主合同及全部关联资料',sources:docs},chunk:packageText,index:0,fp:packageFingerprint}];
+  var freshByDoc={};
   if(statusCb)statusCb({msg:jobs.length?'正在建立共享合同事实表...':'使用已缓存的共享事实表',progress:8});
   var nextIndex=0,completed=0,failed=false;
   return new Promise(function(resolve,reject){
     function next(){
       if(failed||nextIndex>=jobs.length)return Promise.resolve();
       var job=jobs[nextIndex++];
-      if(statusCb)statusCb({msg:'整理共享事实 '+(completed+1)+'/'+jobs.length+' · '+job.doc.name,progress:8+Math.round((completed/Math.max(1,jobs.length))*57)});
+      if(statusCb)statusCb({msg:'完整资料包事实提取：已完成 '+completed+'/'+jobs.length,progress:8+Math.round((completed/Math.max(1,jobs.length))*57)});
       return aiExtractRevenueFactChunk(job.doc,job.chunk,1).then(function(res){
         if(!freshByDoc[job.doc.id])freshByDoc[job.doc.id]={doc:job.doc,fp:job.fp,facts:[]};
         freshByDoc[job.doc.id].facts=freshByDoc[job.doc.id].facts.concat(res);completed++;return next();
       }).catch(function(err){failed=true;reject(err);});
     }
-    var workers=[];for(var w=0;w<Math.min(3,Math.max(1,jobs.length));w++)workers.push(next());
+    var workers=[];for(var w=0;w<Math.min(1,Math.max(1,jobs.length));w++)workers.push(next());
     Promise.all(workers).then(function(){if(!failed)resolve();});
   }).then(function(){
     Object.keys(freshByDoc).forEach(function(id){
       var entry=freshByDoc[id];entry.facts=mergeRevenueFacts(entry.facts);facts=facts.concat(entry.facts);
-      if(contract)contract.revenueFactCache[id]={fingerprint:entry.fp,facts:entry.facts,t:Date.now()};
+      if(contract)contract.revenueFactCache[id]={sourceResolutionVersion:3,fingerprint:entry.fp,facts:entry.facts,t:Date.now()};
     });
     facts=mergeRevenueFacts(facts);
     if(contract){contract.revenueFacts=facts;contract.revenueNeedsRefresh=false;save();}
@@ -1302,18 +1662,9 @@ function aiExtractRevenueWithFacts(text,statusCb,cid,fieldKeys,cacheKey,contextF
       return aiExtractChunk(factText,function(st){
         if(statusCb)statusCb({msg:'正在生成底稿第'+(index+1)+'/'+groups.length+'组...',progress:76+Math.round((completedGroups/groups.length)*18)});
       },cid,1,'revenue_workpaper',fieldKeys,revenuePromptForQuestions(targets)).then(function(items){
-        var seen={};
-        (items||[]).forEach(function(item){seen[String(item.question_no||'').trim()]=true;});
-        var missing=targets.filter(function(q){return !seen[String(q.questionNo)];});
-        if(!missing.length)return items;
-        if(statusCb)statusCb({msg:'第'+(index+1)+'组补齐缺失的'+missing.length+'个问题...',progress:88});
-        return aiExtractChunk(factText,function(){},cid,0,'revenue_workpaper',fieldKeys,revenuePromptForQuestions(missing)).then(function(extra){
-          var combined=(items||[]).concat(extra||[]),complete={};
-          combined.forEach(function(item){complete[String(item.question_no||'').trim()]=true;});
-          var stillMissing=targets.filter(function(q){return !complete[String(q.questionNo)];});
-          if(stillMissing.length)throw new Error('底稿第'+(index+1)+'组仍缺少问题：'+stillMissing.map(function(q){return q.questionNo;}).join('、'));
-          return combined;
-        });
+        var missing=missingRevenueTargets(items,targets);
+        if(missing.length&&statusCb)statusCb({msg:'第'+(index+1)+'组正在逐题补齐'+missing.length+'个问题...',progress:88});
+        return completeRevenueQuestionBatch(factText,items,targets,cid,fieldKeys);
       }).then(function(items){
           completedGroups++;
           if(statusCb)statusCb({msg:'底稿第'+(index+1)+'组已完成',progress:76+Math.round((completedGroups/groups.length)*18)});
@@ -1321,6 +1672,67 @@ function aiExtractRevenueWithFacts(text,statusCb,cid,fieldKeys,cacheKey,contextF
       });
     })).then(function(grouped){
       return grouped.reduce(function(all,items){return all.concat(items||[]);},[]);
+    }).then(function(mainItems){
+      var preliminary=window.RevenueWorkpaper?RevenueWorkpaper.normalizeResults(mainItems):mainItems;
+      if(window.RevenueWorkpaper&&RevenueWorkpaper.applySharedFacts)preliminary=RevenueWorkpaper.applySharedFacts(preliminary,facts);
+      function extractPoTimingAssessments(currentItems){
+        var timingQuestions=(window.RevenueWorkpaper&&RevenueWorkpaper.buildPerformanceObligationTimingQuestions)
+          ?RevenueWorkpaper.buildPerformanceObligationTimingQuestions(currentItems||[]):[];
+        if(!timingQuestions.length)return Promise.resolve(currentItems||[]);
+        if(statusCb)statusCb({msg:'已锁定'+timingQuestions.length+'项履约义务，正在逐项判断收入确认时段/时点...',progress:93});
+        return aiExtractChunk(factText,function(){},cid,1,'revenue_workpaper',fieldKeys,revenuePromptForQuestions(timingQuestions)).then(function(items){
+          return completeRevenueQuestionBatch(factText,items,timingQuestions,cid,fieldKeys);
+        }).then(function(timingItems){
+          var withoutGenericTiming=(currentItems||[]).filter(function(item){
+            return !(String(item.question_no||'').trim()==='5.1'&&/第5a步（PO#\d+）/.test(String(item.workpaper_sheet||'')));
+          });
+          var combined=withoutGenericTiming.concat(timingItems||[]);
+          var normalized=window.RevenueWorkpaper?RevenueWorkpaper.normalizeResults(combined):combined;
+          return window.RevenueWorkpaper&&RevenueWorkpaper.applySharedFacts?RevenueWorkpaper.applySharedFacts(normalized,facts):normalized;
+        });
+      }
+      function extractTriggeredAppendixRound(currentItems,round){
+        var normalized=window.RevenueWorkpaper?RevenueWorkpaper.normalizeResults(currentItems||[]):(currentItems||[]);
+        var detailQuestions=(window.RevenueWorkpaper&&RevenueWorkpaper.buildTriggeredDetailQuestions)
+          ?RevenueWorkpaper.buildTriggeredDetailQuestions(normalized):[];
+        if(!detailQuestions.length)return Promise.resolve(normalized);
+        if(round>=8)throw new Error('附表条件问题超过最大展开层级，请检查附表回答是否存在循环或冲突');
+        var detailGroups=groupRevenueDetailQuestions(detailQuestions);
+        if(statusCb)statusCb({msg:'正在按底稿跳转回答附表第'+(round+1)+'轮（'+detailQuestions.length+'个问题）...',progress:94+Math.min(4,round)});
+        return Promise.all(detailGroups.map(function(targets,index){
+          return aiExtractChunk(factText,function(){},cid,1,'revenue_workpaper',fieldKeys,revenuePromptForQuestions(targets)).then(function(items){
+            return completeRevenueQuestionBatch(factText,items,targets,cid,fieldKeys);
+          }).then(function(items){
+            if(statusCb)statusCb({msg:'附表第'+(round+1)+'轮 '+(index+1)+'/'+detailGroups.length+' 已完成',progress:94+Math.min(5,round+1)});
+            return items;
+          });
+        })).then(function(groupedDetails){
+          var newItems=groupedDetails.reduce(function(all,items){return all.concat(items||[]);},[]);
+          return extractTriggeredAppendixRound(normalized.concat(newItems),round+1);
+        });
+      }
+      function reviewPoConsistency(currentItems){
+        var normalized=window.RevenueWorkpaper?RevenueWorkpaper.normalizeResults(currentItems||[]):(currentItems||[]);
+        var reviewQuestions=(window.RevenueWorkpaper&&RevenueWorkpaper.buildPoConsistencyReviewQuestions)
+          ?RevenueWorkpaper.buildPoConsistencyReviewQuestions(normalized):[];
+        if(!reviewQuestions.length)return Promise.resolve(normalized);
+        var reviewGroups=groupRevenueDetailQuestions(reviewQuestions);
+        if(statusCb)statusCb({msg:'检测到同类履约义务答案不一致，正在按相同指标统一复核...',progress:99});
+        return Promise.all(reviewGroups.map(function(targets){
+          return aiExtractChunk(factText,function(){},cid,1,'revenue_workpaper',fieldKeys,revenuePromptForQuestions(targets)).then(function(items){
+            return completeRevenueQuestionBatch(factText,items,targets,cid,fieldKeys);
+          });
+        })).then(function(groupedReviewed){
+          var reviewed=groupedReviewed.reduce(function(all,items){return all.concat(items||[]);},[]);
+          var replaced={};
+          reviewed.forEach(function(item){replaced[revenueQuestionKey(item)]=true;});
+          var combined=normalized.filter(function(item){return !replaced[revenueQuestionKey(item)];}).concat(reviewed);
+          return window.RevenueWorkpaper?RevenueWorkpaper.normalizeResults(combined):combined;
+        });
+      }
+      return extractPoTimingAssessments(preliminary)
+        .then(function(items){return extractTriggeredAppendixRound(items,0);})
+        .then(reviewPoConsistency);
     });
   }).then(function(items){
     var finalItems=window.RevenueWorkpaper?RevenueWorkpaper.normalizeResults(items):items;
@@ -1380,6 +1792,11 @@ function normalizeItem(x,ruleId,fieldKeys){
     }
     item[f.key]=(f.key===pk)?fmtPage(v):toStr(v);
   });
+  if(ruleId==='revenue_workpaper'){
+    ['evidence_fact_ids','evidence_refs'].forEach(function(key){
+      if(Object.prototype.hasOwnProperty.call(x,key))item[key]=toStr(x[key]);
+    });
+  }
   if(pk&&!item[pk])item[pk]='【页码未知】';
   return item;
 }
@@ -1393,15 +1810,17 @@ function consolidateRevenueWorkpaperResults(items,statusCb,cid,ruleId,fieldKeys,
   if(statusCb)statusCb({msg:'深度复核中：正在合并重复项和冲突结论...',progress:15});
   var fs=FieldSet.fieldsForKeys(ruleId,fieldKeys);
   var keyList=fs.map(function(f){return f.key;});
+  var reviewKeyList=keyList.slice();
+  if(reviewKeyList.indexOf('evidence_fact_ids')<0)reviewKeyList.push('evidence_fact_ids');
   var compact=candidates.map(function(item){
     var out={};
-    keyList.forEach(function(key){
+    reviewKeyList.forEach(function(key){
       var val=String(item[key]||'');
       out[key]=val.length>2400?val.substring(0,2400):val;
     });
     return out;
   });
-  var sample='{'+keyList.map(function(k){return '"'+k+'":""';}).join(',')+'}';
+  var sample='{'+reviewKeyList.map(function(k){return '"'+k+'":""';}).join(',')+'}';
   var sharedFacts=(cid&&gc(cid)&&gc(cid).revenueFacts)||[];
   var prompt='以下是同一份收入合同逐段提取出的候选底稿结果。请进行整合同汇总复核：\n'+
     '1. 合并同一工作表、同一底稿行的问题，只保留证据最完整的一条；前后冲突时不得擅自选边，应降低置信度并标记需人工复核。\n'+
@@ -1409,14 +1828,14 @@ function consolidateRevenueWorkpaperResults(items,statusCb,cid,ruleId,fieldKeys,
     '3. 合同未写不等于“否”；缺少合同外资料时，明确填写missing_information和fill_readiness。\n'+
     '4. 严格执行以下SOP口径：\n'+(window.REVENUE_WORKPAPER_SOP_GUIDE||'')+'\n\n'+
     '共享合同事实表（所有问题必须共同使用，不得与之矛盾）：\n'+JSON.stringify({facts:sharedFacts})+'\n\n候选结果：\n'+JSON.stringify({items:compact})+'\n\n'+
-    '只输出JSON：{"items":['+sample+']}。每个对象必须且只能包含这些字段：'+keyList.join(', ')+'；所有值必须是字符串。';
+    '只输出JSON：{"items":['+sample+']}。每个对象必须且只能包含这些字段：'+reviewKeyList.join(', ')+'；所有值必须是字符串。';
   var ctrl=new AbortController();bindTaskAbort(ctrl);var timer=setTimeout(function(){ctrl.abort();},180000);
   var body={model:A.m||'gpt-4',messages:[
-    {role:'system',content:'你是收入合同审阅结果复核助手。严格区分合同事实、SOP判断和缺失资料，只输出JSON。'},
+    {role:'system',content:'你是收入合同审阅结果复核助手。不要输出分析过程，严格区分合同事实、SOP判断和缺失资料，直接输出JSON。'},
     {role:'user',content:prompt}
   ],temperature:0,max_tokens:10000};
   applyJsonResponseMode(body,A.u);
-  if(!A.think)body.enable_thinking=false;
+  applyThinkingMode(body,A.u,A.m,false);
   return taskRunner.checkpoint().then(function(){
     return safeFetch(chatCompletionsUrl(A.u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+A.k},body:JSON.stringify(body)});
   }).then(function(r){
@@ -1425,12 +1844,13 @@ function consolidateRevenueWorkpaperResults(items,statusCb,cid,ruleId,fieldKeys,
     return r.json();
   }).then(function(d){
     var msg=d.choices&&d.choices[0]&&d.choices[0].message;
-    var content=msg&&msg.content;
-    if(!content||!content.trim())throw new Error('SOP汇总复核返回空');
+    var content=window.AiResponse?AiResponse.messageContent(msg):(msg&&msg.content||'');
+    if(!content||!String(content).trim())throw (window.AiResponse?AiResponse.emptyContentError(d,'SOP汇总复核'):new Error('SOP汇总复核返回正文为空'));
     var arr=parseStructuredItems(content);
     var normalized=arr.filter(function(x){return x&&typeof x==='object';}).map(function(x){return normalizeItem(x,ruleId,fieldKeys);});
     if(!normalized.length)throw new Error('SOP汇总复核未返回有效结果');
     var finalItems=RevenueWorkpaper.normalizeResults(normalized);
+    if(RevenueWorkpaper.preserveGeneralInformation)finalItems=RevenueWorkpaper.preserveGeneralInformation(candidates,finalItems);
     if(RevenueWorkpaper.applySharedFacts)finalItems=RevenueWorkpaper.applySharedFacts(finalItems,sharedFacts);
     if(statusCb)statusCb({msg:'深度复核完成',progress:100});
     return finalItems;
@@ -1485,13 +1905,138 @@ window.runRevenueDeepReview=function(contractId,fieldSetId){
     alert('深度复核失败，原提取结果未改动：'+(err.message||err));
   });
 };
-function aiExtractChunk(text,statusCb,cid,retries,ruleId,fieldKeys,promptOverride){
+
+// 借款主表：把超长合同各片段的候选事实汇总为整份合同结论，并做期限一致性校验。
+function parseLoanDateValue(value){
+  var s=String(value||'').trim();
+  var m=s.match(/(20\d{2})[年\-\/.](\d{1,2})[月\-\/.](\d{1,2})日?/);
+  if(!m)return null;
+  var d=new Date(Number(m[1]),Number(m[2])-1,Number(m[3]));
+  return isNaN(d.getTime())?null:d;
+}
+function loanContractTermMonths(item){
+  var s=[item&&item.contract_term,item&&item.maturity_date].filter(Boolean).join('；');
+  var monthMatch=s.match(/(\d+(?:\.\d+)?)\s*(?:个?月)/);
+  if(monthMatch)return Number(monthMatch[1]);
+  var yearMatch=s.match(/(\d+(?:\.\d+)?)\s*年/);
+  if(yearMatch)return Number(yearMatch[1])*12;
+  var start=parseLoanDateValue(item&&item.loan_start_date);
+  var end=parseLoanDateValue(item&&item.maturity_date);
+  if(start&&end&&end>start)return (end-start)/(365.2425/12*24*60*60*1000);
+  return null;
+}
+function appendLoanAuditNote(item,note){
+  if(!item||!Object.prototype.hasOwnProperty.call(item,'auditor_summary')||!note)return;
+  var current=String(item.auditor_summary||'').trim();
+  if(!current||current==='未明确'||current==='无')item.auditor_summary=note;
+  else if(current.indexOf(note)<0)item.auditor_summary=current+'；'+note;
+}
+function humanizeLoanRepaymentSchedule(value){
+  var s=String(value||'').trim();
+  if(!s||s.charAt(0)!=='[')return s;
+  try{
+    var list=JSON.parse(s);
+    if(!Array.isArray(list))return s;
+    var parts=list.map(function(row){
+      if(!row||typeof row!=='object')return String(row||'');
+      var due=row.due_date||row.date||row.payment_date||'';
+      var amount=row.principal_amount||row.amount||row.payment||'';
+      var interest=row.interest_or_payment||row.interest||'';
+      var condition=row.condition||'';
+      return [due,amount,interest,condition].filter(function(v){return v&&v!=='未明确';}).join('：');
+    }).filter(Boolean);
+    return parts.length?parts.join('；'):'无单独还款计划';
+  }catch(e){return s;}
+}
+function normalizeLoanGeneralResults(items){
+  return (items||[]).map(function(item){
+    if(!item)return item;
+    if(Object.prototype.hasOwnProperty.call(item,'repayment_schedule')){
+      item.repayment_schedule=humanizeLoanRepaymentSchedule(item.repayment_schedule);
+    }
+    var months=loanContractTermMonths(item);
+    if(Object.prototype.hasOwnProperty.call(item,'term_classification')&&months!==null&&isFinite(months)){
+      var expected=months>12?'长期':'短期';
+      var previous=String(item.term_classification||'').trim();
+      item.term_classification=expected;
+      if(previous&&previous!=='未明确'&&previous!==expected){
+        appendLoanAuditNote(item,'合同期限约'+Math.round(months*10)/10+'个月，已按明确期限校正为'+expected);
+      }
+    }
+    if(Object.prototype.hasOwnProperty.call(item,'statement_classification')){
+      item.statement_classification='待结合报告日判断';
+    }
+    return item;
+  }).filter(Boolean);
+}
+function consolidateLoanGeneralResults(candidates,statusCb,cid,fieldKeys,strictMode){
+  candidates=normalizeLoanGeneralResults(candidates||[]);
+  if(!candidates.length)return Promise.resolve([]);
+  if(statusCb)statusCb({msg:'整份合同汇总中：正在合并各页及附件信息...',progress:92});
+  var fs=FieldSet.fieldsForKeys('loan_general',fieldKeys);
+  var keyList=fs.map(function(f){return f.key;});
+  var compact=candidates.map(function(item){
+    var out={};
+    keyList.forEach(function(key){
+      var val=String(item[key]||'');
+      out[key]=val.length>2200?val.substring(0,2200):val;
+    });
+    return out;
+  });
+  var mainContract=cid&&gc(cid)?gc(cid).file:'';
+  var related=[];
+  if(cid&&typeof associatedDocumentsFor==='function'){
+    related=associatedDocumentsFor(cid).filter(function(doc){return !doc.isPrimary;}).map(function(doc){return doc.name;});
+  }
+  var basePrompt=FieldSet.filterPromptByFields(RuleEngine.getRulePrompt('loan_general'),keyList);
+  var sample='{'+keyList.map(function(k){return '"'+k+'":""';}).join(',')+'}';
+  var prompt=basePrompt+'\n\n【整份合同候选事实】\n以下候选项来自同一主文件及关联资料的全文读取或各片段证据整理。它们不是最终底稿，必须先跨页、跨附件合并，再输出最终记录。\n主文件：'+mainContract+'\n关联资料：'+(related.length?related.join('；'):'无')+'\n候选事实：\n'+JSON.stringify({items:compact})+'\n\n【本阶段最高优先级】\n1. 默认把候选事实合并为一条主合同记录；金额、期限、利率、还款、担保分别出现在不同候选项时，必须填到同一行。\n2. 文件名、封面、合同编号页、委托支付协议、担保协议、还款附件和补充协议不得单独形成借款记录。\n3. 只有候选证据明确证明存在多个独立合同号或借据号，且各自有可区分的本金、到期日或执行利率时，才允许多行。\n4. 不得把“流动资金”理解为短期；期限超过12个月必须填长期。未提供资产负债表日时，报表列报分类必须填“待结合报告日判断”。\n5. 所有字段必须是普通中文字符串，不得输出JSON数组、嵌套对象或格式说明。\n6. 只能依据候选事实，不得补造金额、日期、期限、合同号或担保信息。\n\n只输出JSON：{"items":['+sample+']}。每个对象必须且只能包含这些字段：'+keyList.join(', ')+'。';
+  var ctrl=new AbortController();bindTaskAbort(ctrl);var timer=setTimeout(function(){ctrl.abort();},180000);
+  var body={model:A.m||'gpt-4',messages:[
+    {role:'system',content:'你是借款合同整份汇总复核助手。先合并同一主合同的跨页和附件事实，再输出最终主表；默认一份主合同一行。只输出JSON。'},
+    {role:'user',content:prompt}
+  ],temperature:0,max_tokens:8000};
+  applyJsonResponseMode(body,A.u);
+  applyThinkingMode(body,A.u,A.m,!!A.think);
+  return taskRunner.checkpoint().then(function(){
+    return safeFetch(chatCompletionsUrl(A.u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+A.k},body:JSON.stringify(body)});
+  }).then(function(r){
+    clearTimeout(timer);
+    if(!r.ok)return r.text().then(function(e){throw new Error('API('+r.status+'):'+e.substring(0,300));});
+    return r.json();
+  }).then(function(d){
+    var msg=d.choices&&d.choices[0]&&d.choices[0].message;
+    var content=msg&&msg.content;
+    if(!content||!content.trim())throw new Error('整份借款合同汇总返回空');
+    var arr=parseStructuredItems(content);
+    var normalized=arr.filter(function(x){return x&&typeof x==='object';}).map(function(x){return normalizeItem(x,'loan_general',fieldKeys);});
+    normalized=normalizeLoanGeneralResults(normalized);
+    if(!normalized.length)throw new Error('整份借款合同汇总未返回有效结果');
+    if(statusCb)statusCb({msg:'整份合同汇总完成',progress:100});
+    return normalized;
+  }).catch(function(err){
+    clearTimeout(timer);
+    if(isTaskStoppedErr(err)||taskRunner.isStopped())throw err;
+    if(strictMode)throw err;
+    console.warn('整份借款合同汇总失败，保留候选结果:',err);
+    return candidates;
+  });
+}
+function finalizeLoanGeneralResults(items,statusCb,cid,fieldKeys,forceReview){
+  var normalized=normalizeLoanGeneralResults(items||[]);
+  if(!forceReview&&normalized.length<=1)return Promise.resolve(normalized);
+  return consolidateLoanGeneralResults(normalized,statusCb,cid,fieldKeys,true);
+}
+
+function aiExtractChunk(text,statusCb,cid,retries,ruleId,fieldKeys,promptOverride,plainJsonMode){
 if(retries===undefined)retries=3;
 ruleId=ruleId||activeRuleId;
 fieldKeys=FieldSet.ensurePageInKeys(ruleId,fieldKeys||FieldSet.defaultFieldKeys(ruleId));
 resetFields(ruleId);
 var fs=FieldSet.fieldsForKeys(ruleId,fieldKeys);
 var keyList=fs.map(function(f){return f.key;});
+var responseKeyList=keyList.slice();
+if(ruleId==='revenue_workpaper'&&responseKeyList.indexOf('evidence_fact_ids')<0)responseKeyList.push('evidence_fact_ids');
 // 拼接合同文本：用户提示词含 {{TEXT}} 则替换，否则系统自动追加（用户无需手写占位符）
 var prompt=FieldSet.filterPromptByFields(promptOverride||RuleEngine.getRulePrompt(ruleId),keyList);
 var ruleMeta=RuleEngine.getRule(ruleId)||{};
@@ -1502,23 +2047,20 @@ if(String(text||'').indexOf('【资料包文件')>=0){
 if(prompt.indexOf('{{TEXT}}')>=0){prompt=prompt.replace('{{TEXT}}',text);}
 else{prompt=prompt+'\n\n'+(isTable?'文档文本（OCR识别结果）':'合同文本')+'：\n'+text;}
 // 动态 schema 锁：按用户勾选的字段名强制输出结构
-var sample='{'+keyList.map(function(k){return '"'+k+'":""';}).join(',')+'}';
-var schemaLock='\n\n【强制输出格式 - 最高优先级，必须严格遵守】\n你只能输出如下结构的JSON：\n{"items":['+sample+']}\n硬性要求：\n1. 每个对象的键名必须是且只能是：'+keyList.join(', ')+'，缺一不可，顺序不变。\n2. 不得使用任何其他字段名（无论英文或中文）。\n3. 布尔值用"是"/"否"字符串；所有值必须是字符串。\n4. 只输出JSON，不要markdown代码块，不要任何解释文字。';
+var sample='{'+responseKeyList.map(function(k){return '"'+k+'":""';}).join(',')+'}';
+var schemaLock='\n\n【强制输出格式 - 最高优先级，必须严格遵守】\n你只能输出如下结构的JSON：\n{"items":['+sample+']}\n硬性要求：\n1. 每个对象的键名必须是且只能是：'+responseKeyList.join(', ')+'，缺一不可，顺序不变。\n2. 不得使用任何其他字段名（无论英文或中文）。\n3. 布尔值用"是"/"否"字符串；所有值必须是字符串。\n4. 只输出JSON，不要markdown代码块，不要任何解释文字。';
 prompt=prompt+schemaLock;
 if(statusCb)statusCb('AI提取中...');
 var ctrl=new AbortController();bindTaskAbort(ctrl);var t=setTimeout(function(){ctrl.abort();},120000);
-var sysMsg=(isTable?'你是审计专用的单据结构化摘录助手。':'你是审计专用的合同条款精准摘录助手。')+'只输出JSON，用 {"items":[...]} 包装，每个对象的键名必须为：'+keyList.join(', ')+'，禁止使用任何其他字段名，不要任何解释。';
+var sysMsg=(isTable?'你是审计专用的单据结构化摘录助手。':'你是审计专用的合同条款精准摘录助手。')+'只输出JSON，用 {"items":[...]} 包装，每个对象的键名必须为：'+responseKeyList.join(', ')+'，禁止使用任何其他字段名，不要任何解释。';
+var forceNoThinking=ruleId==='revenue_workpaper';
 var body={model:A.m||'gpt-4',messages:[{role:'system',content:sysMsg},{role:'user',content:prompt}],temperature:0.1,max_tokens:8000};
-applyJsonResponseMode(body,A.u);
-if(!A.think){body.enable_thinking=false;}
+if(!plainJsonMode)applyJsonResponseMode(body,A.u);
+applyThinkingMode(body,A.u,A.m,forceNoThinking?false:!!A.think);
 return safeFetch(chatCompletionsUrl(A.u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+A.k},body:JSON.stringify(body)}).then(function(r){clearTimeout(t);if(!r.ok)return r.text().then(function(e){throw new Error('API('+r.status+'):'+e.substring(0,300));});return r.json();}).then(function(d){
 var msg=d.choices&&d.choices[0]&&d.choices[0].message;
-var c=msg&&msg.content;
-if(!c||!c.trim()){
-var rc=msg&&msg.reasoning_content;
-if(rc&&rc.length>0)throw new Error('content为空(思维链占用'+rc.length+'字token,请在配置中关闭思维链)');
-throw new Error('返回空');
-}
+var c=window.AiResponse?AiResponse.messageContent(msg):(msg&&msg.content||'');
+if(!c||!String(c).trim())throw (window.AiResponse?AiResponse.emptyContentError(d,'合同提取'):new Error('合同提取返回正文为空'));
 try{var arr=parseStructuredItems(c);}
 catch(pe){console.error('JSON fail:',pe,'raw:',c.substring(0,500));throw new Error('底稿答案JSON解析失败:'+pe.message);}
 console.log('字段定义 fields:',keyList,'模型返回第一条键:',arr[0]?Object.keys(arr[0]):'');
@@ -1536,9 +2078,13 @@ return normalized;
 }).catch(function(e){
 clearTimeout(t);
 if(isTaskStoppedErr(e))throw e;
+if(e&&e.code==='EMPTY_ASSISTANT_CONTENT'){
+if(retries>0&&!plainJsonMode&&isDeepSeekRequest(A.u,A.m)&&!e.reasoningLength&&!taskRunner.isStopped())return new Promise(function(resolve){setTimeout(resolve,500);}).then(function(){return aiExtractChunk(text,statusCb,cid,retries-1,ruleId,fieldKeys,promptOverride,true);});
+throw e;
+}
 if(retries>0&&!taskRunner.isStopped()){
 if(statusCb)statusCb('失败重试中...剩余'+retries+'次');
-return new Promise(function(resolve){setTimeout(resolve,2000);}).then(function(){return aiExtractChunk(text,statusCb,cid,retries-1,ruleId,fieldKeys,promptOverride);});
+return new Promise(function(resolve){setTimeout(resolve,2000);}).then(function(){return aiExtractChunk(text,statusCb,cid,retries-1,ruleId,fieldKeys,promptOverride,plainJsonMode);});
 }
 if(e.name==='AbortError'){if(taskRunner.isStopped())throw new Error(TASK_STOPPED);throw new Error('超时');}throw e;
 });
@@ -1546,22 +2092,33 @@ if(e.name==='AbortError'){if(taskRunner.isStopped())throw new Error(TASK_STOPPED
 
 // ===== Process PDF with logging =====
 var MIN_PAGE_TEXT=60; // 单页文字层低于此字数则对该页做OCR（避免扫描件仅前几页有杂散文字就跳过OCR）
-async function processPDF(file,onProgress,fileId){
+async function processPDF(file,onProgress,fileId,resumeTask){
 await taskRunner.checkpoint();
 var fid=fileId||file.name+'_'+Date.now();
 var fsize=(file.size/1024).toFixed(0)+'KB';
 addLog(fid,file.name,'文件上传成功','大小:'+fsize+' | 开始处理','done');
 var typedArray=await file.arrayBuffer();
+var fingerprint=quickFileFingerprint(typedArray,file);
+if(resumeTask&&resumeTask.fingerprint&&resumeTask.fingerprint!==fingerprint)throw new Error('暂存PDF与识别任务不一致，已停止恢复以避免串用文件');
+if(resumeTask){
+resumeTask.fingerprint=fingerprint;resumeTask.status='processing';resumeTask.stage=resumeTask.stage||'text';
+resumeTask.pageTexts=resumeTask.pageTexts||[];resumeTask.completedPages=resumeTask.completedPages||{};resumeTask.pagesMap=resumeTask.pagesMap||{};
+await persistOcrResumeTask(resumeTask);
+if(resumeTask.resultText){onProgress('读取已保存的识别结果...');return{text:resumeTask.resultText,isScanned:!!resumeTask.isScanned,pagesMap:resumeTask.pagesMap||{}};}
+}
 var pdf=await pdfjsLib.getDocument(getPdfDocumentOptions(typedArray)).promise;
 var numPages=pdf.numPages;
+if(resumeTask){resumeTask.numPages=numPages;await persistOcrResumeTask(resumeTask);}
 addLog(fid,file.name,'解析PDF','共'+numPages+'页','done');
 onProgress('分析PDF文字层...');
-var pageTexts=[];
+var pageTexts=resumeTask&&resumeTask.pageTexts||[];
 for(var pi=1;pi<=numPages;pi++){
 await taskRunner.checkpoint();
+if(pageTexts[pi]!==undefined)continue;
 var page=await pdf.getPage(pi);
 var tc=await page.getTextContent();
 pageTexts[pi]=tc.items.map(function(it){return it.str;}).join(' ').replace(/\s+/g,' ').trim();
+if(resumeTask){resumeTask.pageTexts=pageTexts;resumeTask.stage='text';resumeTask.nextPage=pi+1;await persistOcrResumeTask(resumeTask);}
 }
 var ocrPages=[];
 for(var pi2=1;pi2<=numPages;pi2++){if((pageTexts[pi2]||'').length<MIN_PAGE_TEXT)ocrPages.push(pi2);}
@@ -1574,6 +2131,7 @@ parts.push('---PDF第'+pi3+'页---\n'+(pageTexts[pi3]||''));
 var pureText=parts.join('\n\n');
 addLog(fid,file.name,'文字PDF提取完成','共'+pureText.length+'字 | 全部'+numPages+'页有文字层','done');
 onProgress('文字PDF('+pureText.length+'字)');
+if(resumeTask){resumeTask.stage='classify';resumeTask.resultText=pureText;resumeTask.isScanned=false;resumeTask.pagesMap={};await persistOcrResumeTask(resumeTask);}
 return{text:pureText,isScanned:false,pagesMap:{}};
 }
 var engine=O.engine||'ai';
@@ -1586,11 +2144,18 @@ addLog(fid,file.name,'扫描件识别开始','使用'+getOCRLabel()+'，共'+num
 addLog(fid,file.name,'混合PDF识别',''+ocrPages.length+'/'+numPages+'页需OCR，其余页用文字层','warn');
 }
 var allTexts=[];
-var pagesMap={};
+var pagesMap=resumeTask&&resumeTask.pagesMap||{};
+var completedPages=resumeTask&&resumeTask.completedPages||{};
+var failedPages=resumeTask&&resumeTask.failedPages||{};
 var ocrStart=Date.now();
 for(var i=1;i<=numPages;i++){
 await taskRunner.checkpoint();
 var body=pageTexts[i]||'';
+var pageFailed=false;
+if(Object.prototype.hasOwnProperty.call(completedPages,i)){
+body=completedPages[i]||'';
+onProgress('恢复已完成的第'+i+'/'+numPages+'页');
+}else{
 if(ocrPages.indexOf(i)>=0){
 onProgress('OCR第'+i+'/'+numPages+'页...');
 addLog(fid,file.name,'OCR识别中','正在识别第'+i+'页 / 共'+numPages+'页','info');
@@ -1604,20 +2169,27 @@ console.error('第'+i+'页OCR失败:',e);
 addLog(fid,file.name,'第'+i+'页识别失败',e.message.substring(0,40),'error');
 onProgress('第'+i+'页失败:'+e.message.substring(0,40));
 body=body||pageTexts[i]||'';
+pageFailed=true;failedPages[i]=String(e&&e.message||e);
 }
 }else{
 onProgress('文字层第'+i+'/'+numPages+'页('+body.length+'字)');
+}
+if(!pageFailed){completedPages[i]=body||'';delete failedPages[i];}
+if(body&&body.trim())pagesMap[i]=body.length;else delete pagesMap[i];
+if(resumeTask){resumeTask.stage='pages';resumeTask.completedPages=completedPages;resumeTask.failedPages=failedPages;resumeTask.pagesMap=pagesMap;resumeTask.nextPage=i+1;await persistOcrResumeTask(resumeTask);}
 }
 if(body&&body.trim()){
 allTexts.push('---PDF第'+i+'页---\n'+body);
 pagesMap[i]=body.length;
 }
 }
+if(resumeTask&&Object.keys(failedPages).length){resumeTask.status='error';await persistOcrResumeTask(resumeTask);throw new Error('有 '+Object.keys(failedPages).length+' 页识别失败，已保存其他页面，可点击继续识别重试失败页');}
 var ocrElapsed=((Date.now()-ocrStart)/1000).toFixed(1);
 var fullText=allTexts.join('\n');
 if(fullText&&fullText.trim().length>50){
 addLog(fid,file.name,'识别完成','耗时'+ocrElapsed+'秒 | 共'+fullText.length+'字 | OCR'+ocrPages.length+'页','done');
 onProgress(getOCRLabel()+'完成('+fullText.length+'字)');
+if(resumeTask){resumeTask.stage='classify';resumeTask.resultText=fullText;resumeTask.isScanned=true;resumeTask.pagesMap=pagesMap;resumeTask.nextPage=numPages+1;await persistOcrResumeTask(resumeTask);}
 return{text:fullText,isScanned:true,pagesMap:pagesMap};
 }
 addLog(fid,file.name,'❌ 未能识别到文字','请检查PDF是否有效','error');
@@ -1628,6 +2200,8 @@ throw new Error('未能识别到文字');
 let currentPdfDoc = null;
 let currentPdfSourceId = null;
 let currentPdfPage = 1;
+let pendingPdfTargetPage = null;
+let pdfLoadToken = 0;
 let pdfScale = 1.5;
 let pdfRotation = 0;
 let pdfFitWidth = false;
@@ -1640,7 +2214,7 @@ function parsePageNumber(pageStr) {
     if(pageStr === null || pageStr === undefined) return null;
     var s = String(pageStr).trim();
     if(!s) return null;
-    var m = s.match(/第(\d+)(?:\s*[-~～]\s*\d+)?页/);
+    var m = s.match(/第\s*(\d+)(?:\s*[-~～—–至到]\s*\d+)?\s*页/);
     if(m && m[1]) return parseInt(m[1], 10);
     var n = parseInt(s, 10);
     return isNaN(n) ? null : n;
@@ -1704,7 +2278,9 @@ function goToPdfSearchMatch(dir) {
     pdfFlashHighlight();
 }
 async function loadPdfViewer(cid) {
+    var loadToken = ++pdfLoadToken;
     var file = await dbGetPdf(cid);
+    if(loadToken !== pdfLoadToken) return;
     if(!file) {
         var canvas = document.getElementById('pdfCanvas');
         if(canvas) {
@@ -1712,13 +2288,70 @@ async function loadPdfViewer(cid) {
             ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0,0,canvas.width,canvas.height);
             ctx.fillStyle = '#666'; ctx.font = '14px sans-serif'; ctx.fillText('未找到PDF源文件', 20, 30);
         }
+        pendingPdfTargetPage = null;
         return;
     }
     var arrayBuffer = await file.arrayBuffer();
-    currentPdfDoc = await pdfjsLib.getDocument(getPdfDocumentOptions(arrayBuffer)).promise;
-    renderPdfPage(currentPdfPage || 1);
+    var loadedPdf = await pdfjsLib.getDocument(getPdfDocumentOptions(arrayBuffer)).promise;
+    if(loadToken !== pdfLoadToken) return;
+    currentPdfDoc = loadedPdf;
+    var targetPage = pendingPdfTargetPage || currentPdfPage || 1;
+    pendingPdfTargetPage = null;
+    await renderPdfPage(targetPage);
 }
+function workpaperReaderStateKey(){return [cid||'',activeRuleId||'',activeFieldSetId||''].join('|');}
+function rememberWorkpaperReaderScroll(kind,value){
+    var key=workpaperReaderStateKey();
+    if(!workpaperReaderScrollState[key])workpaperReaderScrollState[key]={list:0,detail:0};
+    workpaperReaderScrollState[key][kind]=Math.max(0,Number(value)||0);
+}
+function captureWorkpaperReaderScroll(){
+    var list=document.getElementById('workpaperListScroll');
+    var detail=document.getElementById('workDetailPanel');
+    if(list)rememberWorkpaperReaderScroll('list',list.scrollTop);
+    if(detail)rememberWorkpaperReaderScroll('detail',detail.scrollTop);
+}
+function restoreWorkpaperReaderScroll(){
+    var state=workpaperReaderScrollState[workpaperReaderStateKey()];
+    if(!state)return;
+    var list=document.getElementById('workpaperListScroll');
+    var detail=document.getElementById('workDetailPanel');
+    if(list)list.scrollTop=state.list||0;
+    if(detail)detail.scrollTop=state.detail||0;
+}
+function compactEvidencePageLabel(value){
+    var text=String(value||'');
+    var match=text.match(/第\s*(\d+)\s*(?:[-~—–至到]\s*(\d+))?\s*页/);
+    if(!match)return /页码未知/.test(text)?'页码未知':text.trim();
+    return match[2]?'第'+match[1]+'–'+match[2]+'页':'第'+match[1]+'页';
+}
+function compactEvidenceButtons(root){
+    (root||document).querySelectorAll('button[onclick*="jumpToEvidence("]').forEach(function(button){
+        var label=compactEvidencePageLabel(button.textContent);
+        if(label&&label!==button.textContent.trim())button.textContent=label;
+        button.classList.add('workpaper-page-link');
+    });
+}
+function enhanceWorkpaperReaderDom(){
+    var detail=document.getElementById('workDetailPanel');
+    if(!detail||!detail.parentElement)return;
+    var grid=detail.parentElement;
+    var listCard=grid.firstElementChild;
+    var listScroll=listCard&&listCard.querySelector('.overflow-x-auto.ap-scroll');
+    grid.id='workpaperReader';grid.className='workpaper-reader-grid';
+    if(listCard)listCard.classList.add('workpaper-list-card');
+    if(listScroll){
+        listScroll.id='workpaperListScroll';listScroll.classList.add('workpaper-list-scroll');
+        listScroll.onscroll=function(){rememberWorkpaperReaderScroll('list',this.scrollTop);};
+    }
+    detail.classList.add('workpaper-detail-scroll','ap-scroll');
+    detail.onscroll=function(){rememberWorkpaperReaderScroll('detail',this.scrollTop);};
+    compactEvidenceButtons(grid);
+    restoreWorkpaperReaderScroll();
+}
+
 window.openPdfPreview = function(contractId, pageStr) {
+    captureWorkpaperReaderScroll();
     var c = gc(contractId || cid);
     if(!c){alert('未找到文件');return;}
     cid = c.id;
@@ -1726,27 +2359,97 @@ window.openPdfPreview = function(contractId, pageStr) {
     var targetPage = parsePageNumber(pageStr);
     if(targetPage !== null) currentPdfPage = targetPage;
     else currentPdfPage = 1;
+    pendingPdfTargetPage = currentPdfPage;
+    currentPdfDoc = null;
     pdfPaneOpen = true;
     render();
 };
 window.closePdfPreview = function(){
+    captureWorkpaperReaderScroll();
     pdfPaneOpen = false;
+    pdfLoadToken++;
+    pendingPdfTargetPage = null;
     currentPdfDoc = null;
     currentPdfSourceId = null;
     render();
 };
-window.jumpToEvidence=function(contractId,sourceDocuments,pageStr){
-    var c=gc(contractId||cid);if(!c){alert('未找到文件');return;}
-    var names=String(sourceDocuments||'').split(/[；;]/).map(function(v){return v.trim();}).filter(Boolean);
-    var sourceId=c.id;
-    if(names.length&&names[0]!==c.file){
-      var supp=(c.supplements||[]).find(function(s){return names.indexOf(s.file)>=0;});
-      var linked=associatedDocumentsFor(c).find(function(doc){return !doc.isPrimary&&names.indexOf(doc.name)>=0;});
-      if(linked)sourceId=linked.id;
-      else if(supp)sourceId=supp.id;
+function isSyntheticEvidenceSource(name){
+    return /完整合同资料包|完整资料包|合成资料包|主合同及全部关联资料|合同资料包\s*[（(]\s*\d+\s*份文件/.test(String(name||''));
+}
+function normalizedEvidenceSourceName(name){
+    return String(name||'').trim().replace(/^.*[\\/]/,'').replace(/\s+/g,'').toLowerCase();
+}
+function evidenceSourceRecords(contract){
+    var records=associatedDocumentsFor(contract).map(function(doc){
+      return{id:doc.id,name:doc.name,text:doc.text||'',docType:doc.docType||'',isPrimary:!!doc.isPrimary};
+    });
+    (contract.supplements||[]).forEach(function(item){
+      records.push({id:item.id,name:item.file||'',text:item.text||'',docType:item.docType||'',isPrimary:false});
+    });
+    var seen={};
+    return records.filter(function(record){if(!record.id||seen[record.id])return false;seen[record.id]=true;return true;});
+}
+function resolveEvidenceSourceId(contract,sourceName){
+    var name=String(sourceName||'').trim();
+    if(!name||isSyntheticEvidenceSource(name)||/^(主合同|主文件|当前合同)$/.test(name))return contract.id;
+    var records=evidenceSourceRecords(contract);var normalized=normalizedEvidenceSourceName(name);
+    var exact=records.find(function(record){return normalizedEvidenceSourceName(record.name)===normalized;});
+    if(exact)return exact.id;
+    var base=normalized.replace(/\.[^.]+$/,'');
+    var baseMatches=records.filter(function(record){return normalizedEvidenceSourceName(record.name).replace(/\.[^.]+$/,'')===base;});
+    return baseMatches.length===1?baseMatches[0].id:null;
+}
+function evidencePageOptions(pageStr){
+    var text=String(pageStr||'');
+    return text.match(/【[^】]+】/g)||text.split(/[、；;\n]/).map(function(value){return value.trim();}).filter(Boolean);
+}
+function evidenceItemSearchText(itemId){
+    var item=(typeof V!=='undefined'&&Array.isArray(V))?V.find(function(value){return value.id===itemId;}):null;
+    if(!item)return '';
+    return [item.contract_excerpt,item.contract_basis,item.supporting_evidence,item.answer_reason,item.question_description].filter(Boolean).join(' ');
+}
+function autoResolveEvidenceSourceId(contract,sourceName,pageStr,sourceId,itemId){
+    var records=evidenceSourceRecords(contract);
+    if(sourceId){
+      var sourceMatch=records.find(function(record){return record.id===sourceId;});
+      if(sourceMatch)return sourceMatch.id;
     }
+    if(sourceName&&!isSyntheticEvidenceSource(sourceName)){
+      var direct=resolveEvidenceSourceId(contract,sourceName);
+      if(direct)return direct;
+    }
+    if(records.length===1)return records[0].id;
+    var match=bestEvidenceDocument(records,pageStr,evidenceItemSearchText(itemId));
+    return match&&match.id?match.id:contract.id;
+}
+window.jumpToEvidence=function(contractId,sourceDocuments,pageStr,sourceId,itemId){
+    captureWorkpaperReaderScroll();
+    var c=gc(contractId||cid);if(!c){alert('未找到文件');return;}
+    var names=String(sourceDocuments||'').split(/[；;\n]/).map(function(v){return v.trim();}).filter(Boolean);
+    var pageText=String(pageStr||'');
+    var pageOptions=evidencePageOptions(pageText);
+    var selectedName=names[0]||c.file;
+    var selectedPage=pageOptions[0]||pageText;
+    if(names.length>1){
+      var sourceChoice=window.prompt('该条引用涉及多份文件，请输入来源文件序号：\n'+names.map(function(name,index){return (index+1)+'. '+name;}).join('\n'),'1');
+      if(sourceChoice===null)return;
+      var sourceIndex=parseInt(sourceChoice,10)-1;
+      if(isNaN(sourceIndex)||sourceIndex<0||sourceIndex>=names.length){alert('来源文件序号无效');return;}
+      selectedName=names[sourceIndex];
+      if(pageOptions.length===names.length)selectedPage=pageOptions[sourceIndex];
+    }
+    if(pageOptions.length>1&&pageOptions.length!==names.length){
+      var pageChoice=window.prompt('请选择要查看的引用页码：\n'+pageOptions.map(function(page,index){return (index+1)+'. '+page;}).join('\n'),'1');
+      if(pageChoice===null)return;
+      var pageIndex=parseInt(pageChoice,10)-1;
+      if(isNaN(pageIndex)||pageIndex<0||pageIndex>=pageOptions.length){alert('页码序号无效');return;}
+      selectedPage=pageOptions[pageIndex];
+    }
+    sourceId=autoResolveEvidenceSourceId(c,selectedName,selectedPage,sourceId,itemId);
+    if(!sourceId){alert('未找到引用文件：'+selectedName+'。请检查底稿中的来源文件名称是否与资料包一致。');return;}
     cid=c.id;currentPdfSourceId=sourceId;
-    var targetPage=parsePageNumber(pageStr);currentPdfPage=targetPage!==null?targetPage:1;
+    var targetPage=parsePageNumber(selectedPage);currentPdfPage=targetPage!==null?targetPage:1;
+    pendingPdfTargetPage=currentPdfPage;currentPdfDoc=null;
     pdfPaneOpen=true;render();
 };
 function clearPdfSearchHighlights(){
@@ -2056,6 +2759,7 @@ window.initSplitPane = function() {
 function getPageContent(){
 if(page==='dash')return pgDash();
 if(page==='proj')return pgProj();
+if(page==='loan_audit')return pgLoanAudit();
 if(page==='cont')return pgCont();
 if(page==='work')return pgWork();
 if(page==='cfg')return pgCfg();
@@ -2070,6 +2774,16 @@ if(!el)return;
 el.className='flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm cursor-pointer '+(page===p?'bg-ey text-eydark font-semibold':'text-gray-400 hover:bg-gray-900 hover:text-gray-200');
 });
 }
+function configStatusBadgeHtml(){
+var ready=ok();
+return '<span id="config-status-badge" class="ml-2 text-xs px-2 py-0.5 rounded-full '+(ready?'bg-emerald-100 text-emerald-700 font-bold':'bg-red-900 text-red-300')+'">'+(ready?'已配置':'未配置')+'</span>';
+}
+function updateConfigStatusBadge(){
+var badge=document.getElementById('config-status-badge');if(!badge)return;
+var ready=ok();
+badge.className='ml-2 text-xs px-2 py-0.5 rounded-full '+(ready?'bg-emerald-100 text-emerald-700 font-bold':'bg-red-900 text-red-300');
+badge.textContent=ready?'已配置':'未配置';
+}
 function render(){
 if(typeof hideIntro==='function')hideIntro();
 var a=document.getElementById('app');
@@ -2082,13 +2796,14 @@ a.innerHTML=L(content);
 var main=document.getElementById('ap-main');
 if(main)main.innerHTML=content;
 updateNavActive();
+updateConfigStatusBadge();
 renderLogPanel();
 }
 }
 function nav(p,pr){var prevCid=cid;page=p;if(pr){if(pr.pid)pid=pr.pid;if(pr.cid){cid=pr.cid;var c=gc(pr.cid);if(c)activeRuleId=getContractRuleId(c);activeFieldSetId=FieldSet.latestFieldSetId(cid,activeRuleId);selectedWorkRowId=null;}if(pr.ruleId){activeRuleId=pr.ruleId;if(cid)activeFieldSetId=FieldSet.latestFieldSetId(cid,activeRuleId);}}if((p!=='cont'&&p!=='work')||(pr&&pr.cid&&pr.cid!==prevCid)){pdfPaneOpen=false;currentPdfDoc=null;currentPdfSourceId=null;}if(typeof window.cm==='function')window.cm();render();window.scrollTo(0,0);}
 
 function L(c){
-var badge=ok()?'<span class="ml-2 text-xs px-2 py-0.5 rounded-full bg-ey text-eydark font-bold">已配置</span>':'<span class="ml-2 text-xs px-2 py-0.5 rounded-full bg-red-900 text-red-300">未配置</span>';
+var badge=configStatusBadgeHtml();
 var logContent='<div class="flex items-center justify-between mb-3"><h3 class="text-sm font-semibold text-white">处理工作日志</h3><button onclick="togLog()" class="text-gray-500 hover:text-ey text-xs">关闭</button></div><div id="logEntries" class="space-y-2 flex-1 overflow-y-auto">'+renderLogEntries()+'</div><div class="flex gap-2 mt-3 pt-3 border-t border-gray-800"><button onclick="clearLog()" class="flex-1 btn-sec btn-sm text-xs py-1">清空</button><button onclick="exportLog()" class="flex-1 btn-sec btn-sm text-xs py-1">导出</button></div>';
 var drawerClass=logCollapsed?'translate-x-full':'translate-x-0';
 var themeLabel=window.ThemeManager?ThemeManager.current().shortName:'黄黑';
@@ -2190,7 +2905,7 @@ if(tk)tk.className=(a==='bearer'||a==='query'?'':'hidden');
 };
 
 window.svCfg=function(){var k=document.getElementById('ak').value.trim(),u=document.getElementById('au').value.trim(),m=document.getElementById('am').value.trim();if(!k||!u||!m){alert('请填写所有必填项');return;}A={k:k,u:u,m:m,think:!!document.getElementById('athink').checked};save();var el=document.getElementById('cr');if(el){el.innerHTML='<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">AI配置已保存！</div>';}restoreAppFocus();localStorage.setItem('ap_tour_done','true');if(typeof window.endTour==='function') try{ window.endTour(); }catch(e){}};
-window.tsCfg=function(){var k=document.getElementById('ak').value.trim(),u=document.getElementById('au').value.trim(),m=document.getElementById('am').value.trim();if(!k||!u||!m){alert('请填写所有必填项');return;}var think=!!document.getElementById('athink').checked;var el=document.getElementById('cr');el.innerHTML='<span class="spinner mr-2"></span>测试中...';var ctrl=new AbortController();var t=setTimeout(function(){ctrl.abort();},30000);var body={model:m,messages:[{role:'user',content:'请只回复两个字符：ok'}],max_tokens:300};if(!think){body.enable_thinking=false;}safeFetch(chatCompletionsUrl(u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},body:JSON.stringify(body)}).then(function(r){clearTimeout(t);return r.text().then(function(txt){var detail='';try{var jj=JSON.parse(txt);var ch=jj.choices&&jj.choices[0];var msg=ch&&ch.message;var fr=ch&&ch.finish_reason;var c=msg&&(msg.content||'');var rc=msg&&(msg.reasoning_content||'');detail='content='+JSON.stringify(c).substring(0,60)+(rc?' | reasoning='+rc.length+'字':'')+' | finish_reason='+fr;}catch(e){detail=txt.substring(0,120);}if(r.ok){A={k:k,u:u.replace(/\/+$/,''),m:m,think:think};save();render();showCfgTab('ai');el=document.getElementById('cr');}el.innerHTML=r.ok?'<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">连接成功，已保存！'+detail+'</div>':'<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">失败('+r.status+') '+txt.substring(0,120)+'</div>';localStorage.setItem('ap_tour_done','true');if(typeof window.endTour==='function') try{ window.endTour(); }catch(e2){}restoreAppFocus();});}).catch(function(e){clearTimeout(t);el.innerHTML='<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">'+(e.name==='AbortError'?'超时':e.message)+'</div>';restoreAppFocus();});};
+window.tsCfg=function(){var k=document.getElementById('ak').value.trim(),u=document.getElementById('au').value.trim(),m=document.getElementById('am').value.trim();if(!k||!u||!m){alert('请填写所有必填项');return;}var think=!!document.getElementById('athink').checked;var el=document.getElementById('cr');el.innerHTML='<span class="spinner mr-2"></span>测试中...';var ctrl=new AbortController();var t=setTimeout(function(){ctrl.abort();},30000);var body={model:m,messages:[{role:'user',content:'请只回复两个字符：ok'}],max_tokens:300};applyThinkingMode(body,u,m,think);safeFetch(chatCompletionsUrl(u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},body:JSON.stringify(body)}).then(function(r){clearTimeout(t);return r.text().then(function(txt){var detail='';try{var jj=JSON.parse(txt);var ch=jj.choices&&jj.choices[0];var msg=ch&&ch.message;var fr=ch&&ch.finish_reason;var c=msg&&(msg.content||'');var rc=msg&&(msg.reasoning_content||'');detail='content='+JSON.stringify(c).substring(0,60)+(rc?' | reasoning='+rc.length+'字':'')+' | finish_reason='+fr;}catch(e){detail=txt.substring(0,120);}if(r.ok){A={k:k,u:u.replace(/\/+$/,''),m:m,think:think};save();render();showCfgTab('ai');el=document.getElementById('cr');}el.innerHTML=r.ok?'<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">连接成功，已保存！'+detail+'</div>':'<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">失败('+r.status+') '+txt.substring(0,120)+'</div>';localStorage.setItem('ap_tour_done','true');if(typeof window.endTour==='function') try{ window.endTour(); }catch(e2){}restoreAppFocus();});}).catch(function(e){clearTimeout(t);el.innerHTML='<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">'+(e.name==='AbortError'?'超时':e.message)+'</div>';restoreAppFocus();});};
 window.svOcr=function(){
 if(O.engine==='ai'){
 var vu=document.getElementById('visUrl').value.trim(),vk=document.getElementById('visKey').value.trim(),vm=document.getElementById('visModel').value.trim();
@@ -2228,6 +2943,77 @@ return;
 };
 
 // ===== Dashboard & Project =====
+function touchProject(projectId){var project=gp(projectId);if(project)project.updatedAt=new Date().toISOString();}
+function projectMemberFileMap(project){
+var map={};(project&&project.relationGroups||[]).forEach(function(group){(group.members||[]).forEach(function(member){if(member&&member.fileId)map[member.fileId]=true;});});return map;
+}
+function latestReviewItemsForContract(contractId){
+var items=[];getAppliedRuleIds(contractId).forEach(function(ruleId){
+  var fieldSetId=FieldSet.latestFieldSetId(contractId,ruleId);
+  var current=fieldSetId?FieldSet.gvFieldSet(contractId,ruleId,fieldSetId):gvRule(contractId,ruleId);
+  items=items.concat(current||[]);
+});return items;
+}
+function projectProgressInfo(project){
+var contracts=Ct.filter(function(contract){return contract.pid===project.id;});var memberMap=projectMemberFileMap(project);
+var roots=contracts.filter(function(contract){return !memberMap[contract.id];});
+var extractedRoots=roots.filter(function(contract){return gv(contract.id).length>0;});
+var reviewItems=[];extractedRoots.forEach(function(contract){reviewItems=reviewItems.concat(latestReviewItemsForContract(contract.id));});
+var reviewed=reviewItems.filter(function(item){return !!item.reviewed;}).length;var reviewTotal=reviewItems.length;
+var stale=roots.some(function(contract){return !!(contract.associationNeedsRefresh||contract.revenueNeedsRefresh);});
+var phase='未上传',tone='gray';
+if(contracts.length&&roots.length&&extractedRoots.length<roots.length){phase='待提取';tone='amber';}
+else if(contracts.length&&stale){phase='结果需更新';tone='red';}
+else if(contracts.length&&reviewTotal>0&&reviewed<reviewTotal){phase='待复核';tone='blue';}
+else if(contracts.length&&reviewTotal>0&&reviewed===reviewTotal){phase='复核完成';tone='green';}
+else if(contracts.length&&extractedRoots.length===roots.length){phase='待复核';tone='blue';}
+var extractRate=roots.length?extractedRoots.length/roots.length:0;var reviewRate=reviewTotal?reviewed/reviewTotal:0;
+var percent=Math.round(extractRate*60+reviewRate*40);var ready=roots.length>0&&extractedRoots.length===roots.length&&reviewTotal>0&&reviewed===reviewTotal&&!stale;
+return{fileCount:contracts.length,rootCount:roots.length,extracted:extractedRoots.length,reviewed:reviewed,reviewTotal:reviewTotal,stale:stale,phase:phase,tone:tone,percent:percent,ready:ready};
+}
+function projectLastActivity(project){
+var latest=Date.parse(project.updatedAt||project.t||project.date||'')||0;
+Ct.filter(function(contract){return contract.pid===project.id;}).forEach(function(contract){
+  [contract.updatedAt,contract.t].forEach(function(value){var ts=Date.parse(value||'');if(isFinite(ts)&&ts>latest)latest=ts;});
+  (contract.supplements||[]).forEach(function(item){var ts=Date.parse(item.updatedAt||item.t||'');if(isFinite(ts)&&ts>latest)latest=ts;});
+});
+V.forEach(function(item){var contract=gc(item.contractId);if(!contract||contract.pid!==project.id)return;var ts=Date.parse(item.updatedAt||item.extractAt||'');if(isFinite(ts)&&ts>latest)latest=ts;});
+(project.relationGroups||[]).forEach(function(group){var ts=Date.parse(group.updatedAt||group.createdAt||'');if(isFinite(ts)&&ts>latest)latest=ts;});
+return latest;
+}
+function formatProjectTime(timestamp){
+if(!timestamp)return'暂无记录';var date=new Date(timestamp);if(isNaN(date.getTime()))return'暂无记录';
+var now=new Date();var sameDay=date.getFullYear()===now.getFullYear()&&date.getMonth()===now.getMonth()&&date.getDate()===now.getDate();
+var hh=String(date.getHours()).padStart(2,'0'),mm=String(date.getMinutes()).padStart(2,'0');
+return sameDay?'今天 '+hh+':'+mm:date.getFullYear()+'-'+String(date.getMonth()+1).padStart(2,'0')+'-'+String(date.getDate()).padStart(2,'0')+' '+hh+':'+mm;
+}
+function projectPhaseBadge(progress){
+var classes={green:'bg-emerald-900 text-emerald-400',blue:'bg-blue-900 text-blue-400',amber:'bg-amber-900 text-amber-400',red:'bg-red-900 text-red-400',gray:'bg-gray-800 text-gray-400'};
+return'<span class="text-xs px-2 py-0.5 rounded-full '+(classes[progress.tone]||classes.gray)+'">'+progress.phase+'</span>';
+}
+function projectDashboardRows(){
+var search=String(projectViewPrefs.search||'').trim().toLowerCase();var status=projectViewPrefs.status||'all';
+var rows=P.map(function(project,index){return{project:project,index:index,progress:projectProgressInfo(project),updatedAt:projectLastActivity(project),createdAt:Date.parse(project.t||'')||0};});
+rows=rows.filter(function(row){var project=row.project;if(status!=='all'&&(project.status||'active')!==status)return false;if(!search)return true;return String(project.name||'').toLowerCase().indexOf(search)>=0||String(project.client||'').toLowerCase().indexOf(search)>=0;});
+var sort=projectViewPrefs.sort||'updated_desc';rows.sort(function(left,right){var result=0;
+  if(sort.indexOf('name_')===0)result=String(left.project.name||'').localeCompare(String(right.project.name||''),'zh-CN');
+  else if(sort.indexOf('created_')===0)result=left.createdAt-right.createdAt;
+  else if(sort.indexOf('date_')===0)result=String(left.project.date||'').localeCompare(String(right.project.date||''));
+  else if(sort.indexOf('status_')===0)result=String(left.project.status||'active').localeCompare(String(right.project.status||'active'));
+  else if(sort.indexOf('progress_')===0)result=left.progress.percent-right.progress.percent;
+  else result=left.updatedAt-right.updatedAt;
+  if(/_desc$/.test(sort))result=-result;return result||(left.index-right.index);
+});return rows;
+}
+function saveProjectViewPrefs(){localStorage.setItem('ap_project_view',JSON.stringify(projectViewPrefs));}
+window.setProjectDashboardStatusFilter=function(status){projectViewPrefs.status=status||'all';saveProjectViewPrefs();render();};
+window.setProjectDashboardSort=function(sort){projectViewPrefs.sort=sort||'updated_desc';saveProjectViewPrefs();render();};
+window.onProjectDashboardSearch=function(value){projectViewPrefs.search=value||'';saveProjectViewPrefs();if(projectSearchTimer)clearTimeout(projectSearchTimer);projectSearchTimer=setTimeout(function(){render();setTimeout(function(){var input=document.getElementById('projectSearchInput');if(input){input.focus();input.setSelectionRange(input.value.length,input.value.length);}},0);},180);};
+window.setProjectStatus=function(projectId,status){
+var project=gp(projectId);if(!project||['active','completed'].indexOf(status)<0)return;var progress=projectProgressInfo(project);
+if(status==='completed'&&!progress.ready&&!confirm('当前项目仍有待提取、待复核或需更新事项。是否仍标记为已完成？')){render();return;}
+project.status=status;touchProject(projectId);save();render();
+};
 function projectStatsLine(p){
 var cs=Ct.filter(function(c){return c.pid===p.id;});
 var ruleSet={};
@@ -2238,9 +3024,56 @@ getAppliedRuleIds(c.id).forEach(function(rid){ruleSet[rid]=true;});
 var pref=p.defaultRuleId?RuleEngine.getRuleShortName(p.defaultRuleId):'未设置';
 return cs.length+'份文件 · 已用'+Object.keys(ruleSet).length+'种模板 · 批量首选'+pref;
 }
+function projectFileCheckboxHtml(contract){
+  var canExtract=contract&&contract.text&&contract.text.length>0&&gv(contract.id).length===0;
+  return canExtract?'<input type="checkbox" class="contract-cb w-4 h-4 rounded border-gray-700 bg-black text-ey focus:ring-ey focus:ring-offset-gray-900" value="'+contract.id+'">':'<input type="checkbox" disabled class="w-4 h-4 rounded border-gray-800 bg-gray-900 opacity-50">';
+}
+function projectAssociationChildHtml(anchor,member){
+  var child=member&&gc(member.fileId);if(!child)return '';
+  var sourceLabel=member.source==='ai'?'<span class="text-xs text-emerald-400 px-1.5 py-0.5 rounded bg-emerald-900/40" title="'+escapeHtml(member.reason||'AI高置信度自动关联').replace(/"/g,'&quot;')+'">AI自动关联</span>':member.source==='ai-confirmed'?'<span class="text-xs text-blue-400 px-1.5 py-0.5 rounded bg-blue-900">AI建议已确认</span>':'';
+  return '<div class="flex gap-3 items-start px-4 py-3 border-t border-gray-800 bg-black/30">'+
+    '<div class="pt-1 flex items-center gap-2"><span class="text-gray-600 text-sm">└</span>'+projectFileCheckboxHtml(child)+'</div>'+
+    '<div class="flex-1 min-w-0"><div class="flex justify-between items-center gap-3"><div class="flex items-center gap-2 min-w-0 cursor-pointer" onclick="nav(\'cont\',{cid:\''+child.id+'\'})"><span class="text-xs px-2 py-0.5 rounded-full bg-gray-800 text-gray-300 shrink-0">'+escapeHtml(member.role||'关联资料')+'</span><span class="text-sm text-white truncate" title="'+escapeHtml(child.file||'').replace(/"/g,'&quot;')+'">'+escapeHtml(child.file||'')+'</span>'+sourceLabel+'</div><svg class="w-4 h-4 text-gray-700 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg></div>'+contractListMetaHtml(child,{hideAssociation:true,compact:true})+'</div>'+
+    '<div class="flex items-center gap-1 shrink-0"><button type="button" onclick="event.stopPropagation();removeFileAssociation(\''+anchor.id+'\',\''+child.id+'\')" class="text-xs text-gray-500 hover:text-white px-2 py-1 rounded hover:bg-gray-800" title="解除后文件回到待归属资料">解除关联</button><button type="button" onclick="event.stopPropagation();delCont(\''+child.id+'\')" class="text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-900/30" title="删除">删除</button></div></div>';
+}
+function projectContractGroupHtml(contract){
+  var group=relationGroupForAnchor(contract.id);var members=group&&Array.isArray(group.members)?group.members.filter(function(member){return !!gc(member.fileId);}):[];
+  var isExpanded=!!expandedAssociationGroups[contract.id];var meta=contractListMetaHtml(contract,{grouped:members.length>0});
+  var groupToggle=members.length?'<button type="button" onclick="event.stopPropagation();toggleAssociationChildren(\''+contract.id+'\')" class="flex items-center gap-1.5 text-xs text-emerald-400 px-2 py-1 rounded hover:bg-emerald-900/40 shrink-0" title="展开关联资料"><span>已关联 '+members.length+' 份</span><svg id="association_chevron_'+contract.id+'" class="w-4 h-4 transition-transform" style="'+(isExpanded?'transform:rotate(180deg)':'')+'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg></button>':'';
+  var children=members.length?'<div id="association_children_'+contract.id+'" class="'+(isExpanded?'':'hidden')+'">'+members.map(function(member){return projectAssociationChildHtml(contract,member);}).join('')+'</div>':'';
+  return '<div class="card overflow-hidden"><div class="p-4 flex gap-3 items-start"><div class="pt-1">'+projectFileCheckboxHtml(contract)+'</div><div class="flex-1 min-w-0"><div class="flex justify-between items-center gap-3"><div class="flex-1 min-w-0 cursor-pointer" onclick="nav(\'cont\',{cid:\''+contract.id+'\'})"><span class="font-medium text-white">'+escapeHtml(contract.file||'')+'</span></div><div class="flex items-center gap-2">'+groupToggle+'<svg class="w-4 h-4 text-gray-700 shrink-0 cursor-pointer" onclick="nav(\'cont\',{cid:\''+contract.id+'\'})" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg></div></div>'+meta+'</div><button type="button" onclick="event.stopPropagation();delCont(\''+contract.id+'\')" class="text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-900/30 shrink-0" title="删除">删除</button></div>'+children+'</div>';
+}
+function projectAssociationSuggestionHtml(contract,suggestion){
+  return '<div class="card overflow-hidden"><div class="px-4 py-2.5 bg-amber-900/20 border-b border-gray-800 flex flex-wrap items-center justify-between gap-2"><div class="min-w-0"><span class="text-xs text-amber-400">AI建议关联至：</span><span class="text-xs text-white ml-1">'+escapeHtml(suggestion.anchorName)+'</span><p class="text-xs text-gray-600 mt-0.5">'+escapeHtml(suggestion.reason)+'</p></div><button type="button" onclick="confirmAssociationSuggestion(\''+contract.id+'\',\''+suggestion.anchorFileId+'\')" class="btn-outline btn-sm px-3 py-1.5 rounded-lg text-xs shrink-0">确认关联</button></div><div class="p-4 flex gap-3 items-start"><div class="pt-1">'+projectFileCheckboxHtml(contract)+'</div><div class="flex-1 min-w-0"><div class="flex justify-between items-center cursor-pointer" onclick="nav(\'cont\',{cid:\''+contract.id+'\'})"><span class="font-medium text-white">'+escapeHtml(contract.file||'')+'</span><svg class="w-4 h-4 text-gray-700 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg></div>'+contractListMetaHtml(contract)+'</div><button type="button" onclick="event.stopPropagation();delCont(\''+contract.id+'\')" class="text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-900/30 shrink-0" title="删除">删除</button></div></div>';
+}
+function projectDashboardCardHtml(row){
+var project=row.project,progress=row.progress,status=project.status==='completed'?'completed':'active';
+var statusSelect='<select onclick="event.stopPropagation()" onchange="event.stopPropagation();setProjectStatus(\''+project.id+'\',this.value)" class="bg-black border border-gray-700 rounded-lg px-2 py-1 text-xs '+(status==='completed'?'text-blue-400':'text-emerald-400')+'"><option value="active"'+(status==='active'?' selected':'')+'>进行中</option><option value="completed"'+(status==='completed'?' selected':'')+'>已完成</option></select>';
+var readyHint=progress.ready&&status==='active'?'<span class="text-xs text-emerald-400">已满足完成条件</span>':'';
+return '<div class="card p-4"><div class="grid lg:grid-cols-[minmax(240px,1.5fr)_150px_minmax(250px,1fr)_150px_auto] gap-4 items-center">'+
+'<div class="min-w-0 cursor-pointer" onclick="nav(\'proj\',{pid:\''+project.id+'\'})"><div class="flex flex-wrap items-center gap-2"><span class="font-semibold text-white truncate">'+escapeHtml(project.name||'未命名项目')+'</span>'+projectPhaseBadge(progress)+readyHint+'</div><p class="text-xs text-gray-600 mt-1 truncate">'+escapeHtml(project.client||'未填写客户')+' · 项目日期 '+escapeHtml(project.date||'未设置')+'</p><p class="text-xs text-gray-700 mt-1">'+projectStatsLine(project)+'</p></div>'+
+'<div><p class="text-xs text-gray-600 mb-1">项目状态</p>'+statusSelect+'</div>'+
+'<div><div class="flex justify-between gap-3 text-xs"><span class="text-gray-500">提取 '+progress.extracted+'/'+progress.rootCount+' · 复核 '+progress.reviewed+'/'+progress.reviewTotal+'</span><span class="text-gray-400">'+progress.percent+'%</span></div><div class="h-1.5 rounded-full bg-gray-800 mt-2 overflow-hidden"><div class="h-full bg-ey rounded-full" style="width:'+Math.max(0,Math.min(100,progress.percent))+'%"></div></div>'+(progress.stale?'<p class="text-xs text-red-400 mt-1">关联资料已更新，需要重新提取</p>':'')+'</div>'+
+'<div><p class="text-xs text-gray-600">最近更新</p><p class="text-xs text-gray-300 mt-1">'+formatProjectTime(row.updatedAt)+'</p></div>'+
+'<div class="flex items-center justify-end gap-2"><button type="button" onclick="nav(\'proj\',{pid:\''+project.id+'\'})" class="btn-outline btn-sm px-3 py-1.5 rounded-lg text-xs">继续</button><details class="relative" onclick="event.stopPropagation()"><summary class="list-none cursor-pointer text-gray-500 hover:text-white px-2 py-1 rounded hover:bg-gray-800" title="更多操作">•••</summary><div class="absolute right-0 top-8 z-20 w-32 bg-gray-900 border border-gray-700 rounded-lg shadow-xl p-1"><button type="button" onclick="delProj(\''+project.id+'\')" class="w-full text-left text-xs text-red-400 hover:bg-red-900/30 rounded px-3 py-2">删除项目</button></div></details></div>'+
+'</div></div>';
+}
+function ocrResumeBannerHtml(projectId){
+var tasks=pendingOcrTasks(projectId);
+if(!tasks.length)return'';
+var task=tasks[0],done=task.completedPages?Object.keys(task.completedPages).length:0,total=task.numPages||'?';
+return '<div class="card p-4 border-amber-700 bg-amber-900/10 flex flex-wrap items-center justify-between gap-3"><div><p class="text-sm font-medium text-amber-300">发现未完成的合同识别</p><p class="text-xs text-gray-400 mt-1">'+escapeHtml(task.fileName||'PDF')+' · 已保存 '+done+'/'+total+' 页'+(tasks.length>1?' · 另有 '+(tasks.length-1)+' 个任务':'')+'</p></div><div class="flex gap-2"><button type="button" onclick="discardOcrTask(\''+task.id+'\')" class="btn-sec btn-sm">放弃任务</button><button type="button" onclick="resumeOcrTask(\''+task.id+'\')" class="btn btn-sm">继续识别</button></div></div>';
+}
 function pgDash(){
-var a=P.filter(function(p){return p.status==='active';}).length;
-return '<div class="space-y-6"><div class="flex justify-between items-center"><div><h1 class="text-2xl font-bold text-white">工作台</h1></div><button id="btn-new-proj" type="button" onmousedown="event.preventDefault();np(event)" class="btn btn-sm">新建项目</button></div><div class="grid grid-cols-3 gap-4"><div class="card p-4"><p class="text-xs text-gray-500">项目总数</p><p class="text-2xl font-bold text-white">'+P.length+'</p></div><div class="card p-4"><p class="text-xs text-gray-500">进行中</p><p class="text-2xl font-bold text-ey">'+a+'</p></div><div class="card p-4"><p class="text-xs text-gray-500">已完成</p><p class="text-2xl font-bold text-blue-400">'+P.filter(function(p){return p.status==='completed';}).length+'</p></div></div><div><h2 class="text-base font-semibold mb-3 text-gray-300">审计项目</h2>'+(P.length===0?'<div class="card p-10 text-center text-gray-600 text-sm">暂无项目</div>':'<div class="space-y-2">'+P.map(function(p){return '<div class="card p-4 flex justify-between items-start gap-3"><div class="flex-1 min-w-0 cursor-pointer" onclick="nav(\'proj\',{pid:\''+p.id+'\'})"><div class="flex items-center gap-2"><span class="font-medium text-white">'+escapeHtml(p.name)+'</span><span class="text-xs px-2 py-0.5 rounded-full '+(p.status==='active'?'bg-emerald-900 text-emerald-400':'bg-blue-900 text-blue-400')+'">'+(p.status==='active'?'进行中':'已完成')+'</span></div><p class="text-xs text-gray-600 mt-1">'+escapeHtml(p.client)+' | '+p.date+' | '+projectStatsLine(p)+'</p></div><button type="button" onclick="event.stopPropagation();delProj(\''+p.id+'\')" class="text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-900/30 shrink-0" title="删除项目">删除</button></div>';}).join('')+'</div>')+'</div></div>';
+var activeCount=P.filter(function(project){return project.status!=='completed';}).length;var completedCount=P.filter(function(project){return project.status==='completed';}).length;var rows=projectDashboardRows();
+var status=projectViewPrefs.status||'all';var sort=projectViewPrefs.sort||'updated_desc';
+var metricClass=function(target){return'card p-4 cursor-pointer transition-colors '+(status===target?'border-ey ring-1 ring-ey':'hover:border-gray-600');};
+var sortOptions=[['updated_desc','最近更新：新到旧'],['updated_asc','最近更新：旧到新'],['created_desc','创建时间：新到旧'],['created_asc','创建时间：旧到新'],['date_desc','项目日期：新到旧'],['date_asc','项目日期：旧到新'],['name_asc','项目名称：A-Z'],['name_desc','项目名称：Z-A'],['status_asc','项目状态：进行中优先'],['status_desc','项目状态：已完成优先'],['progress_desc','完成度：高到低'],['progress_asc','完成度：低到高']];
+var sortHtml=sortOptions.map(function(option){return'<option value="'+option[0]+'"'+(sort===option[0]?' selected':'')+'>'+option[1]+'</option>';}).join('');
+var listHtml=P.length===0?'<div class="card p-10 text-center text-gray-600 text-sm">暂无项目</div>':(rows.length?'<div class="space-y-2">'+rows.map(projectDashboardCardHtml).join('')+'</div>':'<div class="card p-10 text-center text-gray-600 text-sm">没有符合当前搜索或筛选条件的项目</div>');
+return '<div class="space-y-6"><div class="flex justify-between items-center"><div><h1 class="text-2xl font-bold text-white">工作台</h1><p class="text-xs text-gray-600 mt-1">项目状态由用户管理，系统进度仅用于提示待提取和待复核事项。</p></div><button id="btn-new-proj" type="button" onmousedown="event.preventDefault();np(event)" class="btn btn-sm">新建项目</button></div>'+ocrResumeBannerHtml(null)+
+'<div class="grid grid-cols-3 gap-4"><div onclick="setProjectDashboardStatusFilter(\'all\')" class="'+metricClass('all')+'"><p class="text-xs text-gray-500">项目总数</p><p class="text-2xl font-bold text-white">'+P.length+'</p></div><div onclick="setProjectDashboardStatusFilter(\'active\')" class="'+metricClass('active')+'"><p class="text-xs text-gray-500">进行中</p><p class="text-2xl font-bold text-ey">'+activeCount+'</p></div><div onclick="setProjectDashboardStatusFilter(\'completed\')" class="'+metricClass('completed')+'"><p class="text-xs text-gray-500">已完成</p><p class="text-2xl font-bold text-blue-400">'+completedCount+'</p></div></div>'+
+'<div><div class="flex flex-wrap justify-between items-end gap-3 mb-3"><div><h2 class="text-base font-semibold text-gray-300">审计项目</h2><p class="text-xs text-gray-600 mt-1">当前显示 '+rows.length+'/'+P.length+' 个项目</p></div><div class="flex flex-wrap gap-2"><input id="projectSearchInput" type="search" value="'+escapeHtml(projectViewPrefs.search||'')+'" oninput="onProjectDashboardSearch(this.value)" placeholder="搜索项目名称或客户" class="w-64 bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder:text-gray-600"><select onchange="setProjectDashboardStatusFilter(this.value)" class="bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white"><option value="all"'+(status==='all'?' selected':'')+'>全部状态</option><option value="active"'+(status==='active'?' selected':'')+'>进行中</option><option value="completed"'+(status==='completed'?' selected':'')+'>已完成</option></select><select onchange="setProjectDashboardSort(this.value)" class="bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white">'+sortHtml+'</select></div></div>'+listHtml+'</div></div>';
 }
 function pgProj(){
 var p=gp(pid);if(!p){nav('dash');return'';}
@@ -2253,22 +3086,74 @@ var hasResults=cs.some(function(c){return gv(c.id).length>0;});
 var exportBtn=hasResults
   ? '<button onclick="exportToExcel(null,true,null,true)" class="btn-outline btn-sm px-4 py-1.5 rounded-lg text-sm">导出结果</button>'
   : '<button type="button" disabled class="btn-outline btn-sm px-4 py-1.5 rounded-lg text-sm" title="提取完成后可导出">导出结果</button><span class="text-xs text-gray-600 self-center">提取完成后可导出</span>';
+var hasLoanContext=cs.some(function(c){
+  return c.ruleId==='loan_general'||c.detectedRuleId==='loan_general'||gvRule(c.id,'loan_general').length>0;
+});
+var loanAuditBtn=hasLoanContext
+  ? '<button onclick="nav(\'loan_audit\',{pid:\''+p.id+'\'})" class="btn-outline btn-sm px-4 py-1.5 rounded-lg text-sm">借款审计中心</button>'
+  : '';
 var uploadInputs='<input type="file" id="pdfup" class="hidden" accept=".pdf" multiple onchange="handleFiles(this.files)"><input type="file" id="pdfdir" class="hidden" webkitdirectory directory onchange="handleFiles(this.files)">';
 var uploadButtons='<button onclick="document.getElementById(\'pdfup\').click()" class="btn btn-sm">选择PDF</button><button onclick="document.getElementById(\'pdfdir\').click()" class="btn-sec btn-sm">选择文件夹</button>';
 var dropHandlers=' ondragover="event.preventDefault();this.classList.add(\'dragover\')" ondragleave="event.preventDefault();this.classList.remove(\'dragover\')" ondrop="event.preventDefault();this.classList.remove(\'dragover\');handleFiles(event.dataTransfer.files)"';
 var uploadArea=cs.length===0
   ? '<div class="card p-5"><h3 class="font-medium text-white mb-2">上传PDF/扫描件</h3><p class="text-sm text-gray-500 mb-3">合同、对账单、发票、出入库单等；文字PDF直接提取，扫描件使用<span class="text-ey">'+getOCRLabel()+'</span>识别</p><div class="flex gap-2 mb-3">'+uploadButtons+'</div>'+uploadInputs+'<div class="dropzone" id="dz"'+dropHandlers+'><svg class="w-10 h-10 text-gray-600 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg><p class="font-medium text-gray-300">拖拽PDF或文件夹到此处</p><p class="text-xs text-gray-600 mt-1">扫描件使用'+getOCRLabel()+'识别</p></div><div id="parseStatus" class="mt-3"></div></div>'
   : '<div class="card p-3"><div class="flex flex-wrap items-center justify-between gap-3"><div><p class="text-sm font-medium text-white">上传PDF/扫描件</p><p class="text-xs text-gray-600">文字PDF直接提取，扫描件使用<span class="text-ey">'+getOCRLabel()+'</span>识别；也可以把文件拖到这里追加。</p></div><div class="flex gap-2">'+uploadButtons+'</div></div>'+uploadInputs+'<div class="dropzone mt-3 py-4" id="dz"'+dropHandlers+'><p class="text-sm text-gray-400">拖拽PDF或文件夹到此处继续添加</p></div><div id="parseStatus" class="mt-3"></div></div>';
+var linkedFileMap={};relationGroupsForProject(pid).forEach(function(group){(group.members||[]).forEach(function(member){linkedFileMap[member.fileId]=true;});});
+var rootFiles=cs.filter(function(contract){return !linkedFileMap[contract.id];});
+var contractGroups=[];var suggestedFiles=[];var unassignedFiles=[];
+rootFiles.forEach(function(contract){
+  if(!associationRoleForContract(contract)||relationGroupForAnchor(contract.id)){contractGroups.push(contract);return;}
+  var suggestion=associationSuggestionForFile(contract);
+  if(suggestion)suggestedFiles.push({contract:contract,suggestion:suggestion});else unassignedFiles.push(contract);
+});
+var sections=[];
+if(contractGroups.length)sections.push('<div><div class="flex items-center gap-2 mb-2"><h3 class="text-sm font-medium text-gray-300">合同组</h3><span class="text-xs text-gray-600">'+contractGroups.length+'组</span></div><div class="space-y-2">'+contractGroups.map(projectContractGroupHtml).join('')+'</div></div>');
+if(suggestedFiles.length)sections.push('<div><div class="flex items-center gap-2 mb-2"><h3 class="text-sm font-medium text-amber-400">待确认关联</h3><span class="text-xs text-gray-600">'+suggestedFiles.length+'份</span></div><div class="space-y-2">'+suggestedFiles.map(function(item){return projectAssociationSuggestionHtml(item.contract,item.suggestion);}).join('')+'</div></div>');
+if(unassignedFiles.length)sections.push('<div><div class="flex items-center gap-2 mb-2"><h3 class="text-sm font-medium text-gray-400">待归属资料</h3><span class="text-xs text-gray-600">'+unassignedFiles.length+'份 · AI暂未找到可靠的主合同</span></div><div class="space-y-2">'+unassignedFiles.map(projectContractGroupHtml).join('')+'</div></div>');
 var fileList=cs.length===0
   ? '<div class="card p-8 text-center text-gray-600 text-sm">暂无文件，请上传PDF</div>'
-  : '<div class="space-y-2">'+cs.map(function(c){var cv=gv(c.id).length;var canExtract=(c.text&&c.text.length>0&&cv===0);var meta=contractListMetaHtml(c);return '<div class="card p-4 flex gap-3 items-start"><div class="pt-1">'+(canExtract?'<input type="checkbox" class="contract-cb w-4 h-4 rounded border-gray-700 bg-black text-ey focus:ring-ey focus:ring-offset-gray-900" value="'+c.id+'">':'<input type="checkbox" disabled class="w-4 h-4 rounded border-gray-800 bg-gray-900 opacity-50">')+'</div><div class="flex-1 min-w-0"><div class="flex justify-between items-center cursor-pointer" onclick="nav(\'cont\',{cid:\''+c.id+'\'})"><div class="flex items-center gap-2 flex-wrap"><span class="font-medium text-white">'+escapeHtml(c.file)+'</span></div><svg class="w-4 h-4 text-gray-700 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg></div>'+meta+'</div><button type="button" onclick="event.stopPropagation();delCont(\''+c.id+'\')" class="text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-900/30 shrink-0" title="删除">删除</button></div>';}).join('')+'</div>';
-return '<div class="space-y-5"><div class="flex flex-wrap justify-between items-start gap-3"><div><a onclick="nav(\'dash\')" class="text-sm text-gray-500 hover:text-ey cursor-pointer">返回</a><h1 class="text-2xl font-bold text-white mt-1">'+escapeHtml(p.name)+'</h1><p class="text-sm text-gray-600">'+escapeHtml(p.client)+' | '+p.date+'</p><p class="text-xs text-gray-500 mt-1">批量提取首选：'+escapeHtml(prefLabel)+' · 每个文件可单独选模板</p></div><div class="flex gap-3 flex-wrap items-center"><button onclick="batchExtractSelected()" class="btn btn-sm">开始提取</button>'+exportBtn+'</div></div><div class="grid grid-cols-4 gap-3"><div class="card p-3"><p class="text-xs text-gray-600">文件总数</p><p class="text-xl font-bold text-white">'+cs.length+'</p></div><div class="card p-3"><p class="text-xs text-gray-600">模板已确认</p><p class="text-xl font-bold text-emerald-400">'+confirmed+'</p></div><div class="card p-3"><p class="text-xs text-gray-600">待提取</p><p class="text-xl font-bold text-ey">'+pending+'</p></div><div class="card p-3"><p class="text-xs text-gray-600">已提取</p><p class="text-xl font-bold text-blue-400">'+extracted+'</p></div></div>'+uploadArea+'<div><div class="flex justify-between items-center mb-2"><h2 class="text-base font-semibold text-gray-300">文件列表 ('+cs.length+')'+(pending>0?' · '+pending+'份待提取':'')+'</h2>'+(cs.length>0?'<label class="flex items-center gap-2 text-sm text-gray-400 cursor-pointer"><input type="checkbox" id="selectAll" onchange="toggleAll(this.checked)" class="w-4 h-4 rounded border-gray-700 bg-black text-ey focus:ring-ey focus:ring-offset-gray-900"> 全选待提取</label>':'')+'</div>'+fileList+'</div></div>';
+  : '<div class="space-y-5">'+sections.join('')+'</div>';
+return '<div class="space-y-5"><div class="flex flex-wrap justify-between items-start gap-3"><div><a onclick="nav(\'dash\')" class="text-sm text-gray-500 hover:text-ey cursor-pointer">返回</a><h1 class="text-2xl font-bold text-white mt-1">'+escapeHtml(p.name)+'</h1><p class="text-sm text-gray-600">'+escapeHtml(p.client)+' | '+p.date+'</p><p class="text-xs text-gray-500 mt-1">批量提取首选：'+escapeHtml(prefLabel)+' · 每个文件可单独选模板</p></div><div class="flex gap-3 flex-wrap items-center"><button onclick="batchExtractSelected()" class="btn btn-sm">开始提取</button>'+loanAuditBtn+exportBtn+'</div></div>'+ocrResumeBannerHtml(pid)+'<div class="grid grid-cols-4 gap-3"><div class="card p-3"><p class="text-xs text-gray-600">文件总数</p><p class="text-xl font-bold text-white">'+cs.length+'</p></div><div class="card p-3"><p class="text-xs text-gray-600">模板已确认</p><p class="text-xl font-bold text-emerald-400">'+confirmed+'</p></div><div class="card p-3"><p class="text-xs text-gray-600">待提取</p><p class="text-xl font-bold text-ey">'+pending+'</p></div><div class="card p-3"><p class="text-xs text-gray-600">已提取</p><p class="text-xl font-bold text-blue-400">'+extracted+'</p></div></div>'+uploadArea+'<div><div class="flex justify-between items-center mb-2"><h2 class="text-base font-semibold text-gray-300">文件列表 ('+cs.length+')'+(pending>0?' · '+pending+'份待提取':'')+'</h2>'+(cs.length>0?'<label class="flex items-center gap-2 text-sm text-gray-400 cursor-pointer"><input type="checkbox" id="selectAll" onchange="toggleAll(this.checked)" class="w-4 h-4 rounded border-gray-700 bg-black text-ey focus:ring-ey focus:ring-offset-gray-900"> 全选待提取</label>':'')+'</div>'+fileList+'</div></div>';
+}
+
+function getLoanAuditContext(projectId){
+  projectId=projectId||pid;
+  var project=gp(projectId);
+  return {
+    project:project,
+    contracts:Ct.filter(function(contract){return contract.pid===projectId;}),
+    results:V.filter(function(item){
+      var contract=gc(item.contractId);
+      return contract&&contract.pid===projectId;
+    }),
+    relationGroups:project&&Array.isArray(project.relationGroups)?project.relationGroups:[]
+  };
+}
+window.getLoanAuditContext=getLoanAuditContext;
+function pgLoanAudit(){
+  var project=gp(pid);if(!project){nav('dash');return'';}
+  if(!window.LoanAudit||typeof LoanAudit.renderPage!=='function'){
+    return '<div class="card p-8 text-center text-red-400">借款审计模块未加载，请重新启动应用。</div>';
+  }
+  return LoanAudit.renderPage(getLoanAuditContext(pid));
 }
 window.np=function(ev){if(ev&&ev.preventDefault)ev.preventDefault();if(typeof window.endTour==='function') try{ window.endTour(); }catch(e){} var root=ensureModalRoot(); root.innerHTML='<div class="modal-backdrop fixed inset-0 bg-black/70 flex items-center justify-center" onclick="if(event.target===this)cm()"><div class="bg-gray-900 border border-gray-700 rounded-xl p-5 w-full max-w-sm mx-4 shadow-2xl" onclick="event.stopPropagation()" onmousedown="event.stopPropagation()"><h3 class="font-semibold text-white mb-3">新建项目</h3><div class="space-y-3"><input id="n1" type="text" autocomplete="off" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="项目名称"><input id="n2" type="text" autocomplete="off" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="客户名称"><div><label class="text-xs text-gray-400 block mb-1">批量提取首选模板（可选，单文件可单独选）</label><select id="n4" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white">'+ruleSelectOptionsHtml(batchRuleId,true)+'</select></div><input id="n3" type="date" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" value="'+new Date().toISOString().split('T')[0]+'"><div class="flex gap-2"><button type="button" onclick="cm()" class="flex-1 border border-gray-700 py-2 rounded-lg text-sm text-gray-400 hover:bg-gray-800">取消</button><button type="button" onclick="cp2()" class="flex-1 btn btn-sm">创建</button></div></div></div></div>'; focusModalInput(); requestAnimationFrame(focusModalInput); setTimeout(focusModalInput,0); };
 window.cm=function(){ var root=document.getElementById('modal-root'); if(root) root.innerHTML=''; };
-window.cp2=function(){var n=document.getElementById('n1').value.trim(),c=document.getElementById('n2').value.trim(),d=document.getElementById('n3').value;var drEl=document.getElementById('n4');var dr=drEl?drEl.value:'';if(!n||!c){alert('请填写名称');return;}if(dr)batchRuleId=dr;var proj={id:gid(),name:n,client:c,date:d,status:'active',relationGroups:[],t:new Date().toISOString()};if(dr)proj.defaultRuleId=dr;P.push(proj);save();cm();render();};
-window.delProj=function(id){var p=gp(id);if(!p)return;if(!confirm('确认删除项目「'+p.name+'」？\n将同时删除该项目下全部合同、补充资料、提取结果及PDF，不可恢复。'))return;var projectContracts=Ct.filter(function(c){return c.pid===id;});var cids=projectContracts.map(function(c){return c.id;});var suppIds=[];projectContracts.forEach(function(c){(c.supplements||[]).forEach(function(s){suppIds.push(s.id);});});P=P.filter(function(x){return x.id!==id;});Ct=Ct.filter(function(c){return c.pid!==id;});V=V.filter(function(v){return cids.indexOf(v.contractId)<0;});Object.keys(extractCache).forEach(function(k){cids.forEach(function(cid){if(k===('c_'+cid)||k.indexOf('c_'+cid+'_')===0)delete extractCache[k];});});cids.concat(suppIds).forEach(function(fileId){dbDeletePdf(fileId);});if(pid===id)pid=null;save();nav('dash');};
-window.delCont=function(id){var c=gc(id);if(!c)return;if(!confirm('确认删除合同「'+c.file+'」？\n将同时删除补充资料、提取结果及PDF，不可恢复。'))return;var suppIds=(c.supplements||[]).map(function(s){return s.id;});P.forEach(function(project){if(!Array.isArray(project.relationGroups))return;project.relationGroups=project.relationGroups.filter(function(group){if(group.anchorFileId===id)return false;group.members=(group.members||[]).filter(function(member){return member.fileId!==id;});return group.members.length>0;});});Ct=Ct.filter(function(x){return x.id!==id;});V=V.filter(function(v){return v.contractId!==id;});Object.keys(extractCache).forEach(function(k){if(k===('c_'+id)||k.indexOf('c_'+id+'_')===0)delete extractCache[k];});[id].concat(suppIds).forEach(function(fileId){dbDeletePdf(fileId);});if(cid===id)cid=null;save();render();};
+window.requestExcelFileName=function(defaultName,onConfirm){
+var root=ensureModalRoot(),safeDefault=ExportNaming.sanitizeFileName(defaultName||'AudiPick_导出结果.xlsx');
+window.__excelExportConfirm=typeof onConfirm==='function'?onConfirm:null;
+root.innerHTML='<div class="modal-backdrop fixed inset-0 bg-black/70 flex items-center justify-center" onclick="if(event.target===this){window.__excelExportConfirm=null;cm()}"><div class="bg-gray-900 border border-gray-700 rounded-xl p-5 w-full max-w-lg mx-4 shadow-2xl" onclick="event.stopPropagation()"><h3 class="font-semibold text-white">导出 Excel</h3><p class="text-xs text-gray-500 mt-1 mb-3">可以按项目、合同或用途修改文件名。</p><input id="excelExportName" type="text" autocomplete="off" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" value="'+escapeHtml(safeDefault)+'" onkeydown="if(event.key===\'Enter\'){event.preventDefault();confirmExcelExportName()}"><p class="text-xs text-gray-600 mt-2">系统会自动补充 .xlsx，并替换 Windows 不允许的字符。</p><div class="flex justify-end gap-2 mt-4"><button type="button" onclick="window.__excelExportConfirm=null;cm()" class="btn-sec btn-sm">取消</button><button type="button" onclick="confirmExcelExportName()" class="btn btn-sm">导出</button></div></div></div>';
+restoreAppFocus('excelExportName');
+};
+window.confirmExcelExportName=function(){
+var input=document.getElementById('excelExportName'),callback=window.__excelExportConfirm;
+if(!input||!callback)return;
+var fileName=ExportNaming.sanitizeFileName(input.value);
+window.__excelExportConfirm=null;cm();callback(fileName);
+};
+window.cp2=function(){var n=document.getElementById('n1').value.trim(),c=document.getElementById('n2').value.trim(),d=document.getElementById('n3').value;var drEl=document.getElementById('n4');var dr=drEl?drEl.value:'';if(!n||!c){alert('请填写名称');return;}if(dr)batchRuleId=dr;var now=new Date().toISOString();var proj={id:gid(),name:n,client:c,date:d,loanReportDate:d,status:'active',relationGroups:[],t:now,updatedAt:now};if(dr)proj.defaultRuleId=dr;P.push(proj);save();cm();render();};
+window.delProj=function(id){var p=gp(id);if(!p)return;if(!confirm('确认删除项目「'+p.name+'」？\n将同时删除该项目下全部合同、补充资料、提取结果及PDF，不可恢复。'))return;var projectContracts=Ct.filter(function(c){return c.pid===id;});var cids=projectContracts.map(function(c){return c.id;});var suppIds=[];projectContracts.forEach(function(c){(c.supplements||[]).forEach(function(s){suppIds.push(s.id);});});var removedTasks=ocrResumeTasks.filter(function(task){return task.projectId===id;});ocrResumeTasks=ocrResumeTasks.filter(function(task){return task.projectId!==id;});removedTasks.forEach(function(task){dbDeletePdf(task.id);});dbPut('ap_ocr_resume_tasks',ocrResumeTasks);P=P.filter(function(x){return x.id!==id;});Ct=Ct.filter(function(c){return c.pid!==id;});V=V.filter(function(v){return cids.indexOf(v.contractId)<0;});Object.keys(extractCache).forEach(function(k){cids.forEach(function(cid){if(k===('c_'+cid)||k.indexOf('c_'+cid+'_')===0)delete extractCache[k];});});cids.concat(suppIds).forEach(function(fileId){dbDeletePdf(fileId);});if(pid===id)pid=null;save();nav('dash');};
+window.delCont=function(id){var c=gc(id);if(!c)return;if(!confirm('确认删除合同「'+c.file+'」？\n将同时删除补充资料、提取结果及PDF，不可恢复。'))return;var projectId=c.pid;var suppIds=(c.supplements||[]).map(function(s){return s.id;});P.forEach(function(project){if(!Array.isArray(project.relationGroups))return;project.relationGroups=project.relationGroups.filter(function(group){if(group.anchorFileId===id)return false;group.members=(group.members||[]).filter(function(member){return member.fileId!==id;});return group.members.length>0;});});Ct=Ct.filter(function(x){return x.id!==id;});V=V.filter(function(v){return v.contractId!==id;});Object.keys(extractCache).forEach(function(k){if(k===('c_'+id)||k.indexOf('c_'+id+'_')===0)delete extractCache[k];});[id].concat(suppIds).forEach(function(fileId){dbDeletePdf(fileId);});if(cid===id)cid=null;touchProject(projectId);save();render();};
 window.toggleAll=function(checked){document.querySelectorAll('.contract-cb:not(:disabled)').forEach(function(cb){cb.checked=checked;});};
 async function handleFiles(fileList){
 if(!pid){alert('请先进入项目');return;}
@@ -2280,6 +3165,7 @@ var files=Array.from(fileList||[]).filter(function(f){return f.name&&/\.pdf$/i.t
 if(files.length===0){alert('没有PDF文件');return;}
 var statusEl=document.getElementById('parseStatus');
 var okCount=0;
+var autoLinkedCount=0;
 var stopped=false;
 taskRunner.start('upload','上传处理',files.length);
 try{
@@ -2289,7 +3175,10 @@ var file=files[i];var fid=gid();
 taskRunner.update(file.name+' ('+(i+1)+'/'+files.length+')',(i+1)+'/'+files.length);
 if(statusEl)statusEl.innerHTML='<span class="spinner mr-2"></span>处理中 '+escapeHtml(file.name)+' ('+(i+1)+'/'+files.length+')';
 try{
-var result=await processPDF(file,function(msg){taskRunner.update(file.name+': '+String(msg),(i+1)+'/'+files.length);if(statusEl)statusEl.innerHTML='<span class="spinner mr-2"></span>'+escapeHtml(file.name)+': '+escapeHtml(String(msg));},fid);
+var resumeTask={id:fid,projectId:pid,fileName:file.name,size:file.size,lastModified:file.lastModified||0,status:'pending',stage:'queued',createdAt:new Date().toISOString(),pageTexts:[],completedPages:{},pagesMap:{}};
+await dbPutPdf(fid,file);
+await persistOcrResumeTask(resumeTask);
+var result=await processPDF(file,function(msg){taskRunner.update(file.name+': '+String(msg),(i+1)+'/'+files.length);if(statusEl)statusEl.innerHTML='<span class="spinner mr-2"></span>'+escapeHtml(file.name)+': '+escapeHtml(String(msg));},fid,resumeTask);
 await taskRunner.checkpoint();
 if(statusEl)statusEl.innerHTML='<span class="spinner mr-2"></span>'+escapeHtml(file.name)+': AI识别文档类型...';
 taskRunner.update(file.name+': AI识别文档类型…',(i+1)+'/'+files.length);
@@ -2299,6 +3188,10 @@ await taskRunner.checkpoint();
 var contractId=gid();
 Ct.push({id:contractId,pid:pid,file:file.name,text:result.text,isScanned:!!result.isScanned,status:'uploaded',ruleId:cls.ruleId,detectedRuleId:cls.ruleId,detectedConfidence:cls.confidence,detectedReason:cls.reason,docLabel:cls.docLabel,ruleConfirmed:cls.confidence==='high',t:new Date().toISOString()});
 await dbPutPdf(contractId,file);
+resumeTask.completedContractId=contractId;await persistOcrResumeTask(resumeTask);
+autoLinkedCount+=autoAssociateProjectFiles(pid).length;
+await save();
+await removeOcrResumeTask(fid,true);
 okCount++;
 }catch(e){
 if(isTaskStoppedErr(e)){stopped=true;break;}
@@ -2313,16 +3206,50 @@ if(stopped){
 taskRunner.finish('已停止','成功 '+okCount+'/'+files.length);
 if(statusEl)statusEl.innerHTML='<div class="text-sm text-amber-400 bg-amber-900/40 rounded-lg p-2">已停止。成功处理 '+okCount+'/'+files.length+' 个文件</div>';
 }else{
-taskRunner.finish('上传完成','成功 '+okCount+'/'+files.length);
-if(statusEl)statusEl.innerHTML='<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">完成，成功处理 '+okCount+'/'+files.length+' 个文件</div>';
+taskRunner.finish('上传完成','成功 '+okCount+'/'+files.length+(autoLinkedCount?' · AI自动关联 '+autoLinkedCount+'份':''));
+if(statusEl)statusEl.innerHTML='<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">完成，成功处理 '+okCount+'/'+files.length+' 个文件'+(autoLinkedCount?'；AI已自动关联 '+autoLinkedCount+' 份资料':'')+'</div>';
 }
 render();
 }
 window.handleFiles=handleFiles;
 
+window.resumeOcrTask=async function(taskId){
+var resumeTask=ocrResumeTasks.find(function(item){return item.id===taskId;});
+if(!resumeTask||taskRunner.active)return;
+if(resumeTask.completedContractId&&gc(resumeTask.completedContractId)){await removeOcrResumeTask(resumeTask.id,true);render();return;}
+var project=gp(resumeTask.projectId);if(!project){alert('原项目已不存在，无法恢复该识别任务');return;}
+var file=await dbGetPdf(resumeTask.id);if(!file){alert('未找到暂存的原PDF，无法恢复识别');return;}
+pid=resumeTask.projectId;page='proj';render();
+var statusEl=document.getElementById('parseStatus');
+taskRunner.start('upload','恢复 '+resumeTask.fileName,1);
+try{
+  var result=await processPDF(file,function(msg){taskRunner.update(resumeTask.fileName+': '+String(msg),'1/1');if(statusEl)statusEl.innerHTML='<span class="spinner mr-2"></span>'+escapeHtml(resumeTask.fileName)+': '+escapeHtml(String(msg));},resumeTask.id,resumeTask);
+  await taskRunner.checkpoint();
+  resumeTask.stage='classify';await persistOcrResumeTask(resumeTask);
+  var cls=await classifyDocument(result.text,resumeTask.fileName,project);
+  await taskRunner.checkpoint();
+  var contractId=gid();
+  Ct.push({id:contractId,pid:resumeTask.projectId,file:resumeTask.fileName,text:result.text,isScanned:!!result.isScanned,status:'uploaded',ruleId:cls.ruleId,detectedRuleId:cls.ruleId,detectedConfidence:cls.confidence,detectedReason:cls.reason,docLabel:cls.docLabel,ruleConfirmed:cls.confidence==='high',t:new Date().toISOString()});
+  await dbPutPdf(contractId,file);
+  resumeTask.completedContractId=contractId;await persistOcrResumeTask(resumeTask);
+  autoAssociateProjectFiles(resumeTask.projectId);await save();
+  await removeOcrResumeTask(resumeTask.id,true);
+  taskRunner.finish('识别恢复完成','1/1');render();
+}catch(e){
+  resumeTask.status=taskRunner.isStopped()?'stopped':'error';resumeTask.lastError=String(e&&e.message||e);await persistOcrResumeTask(resumeTask);
+  taskRunner.finish(taskRunner.isStopped()?'已停止，可稍后继续':'恢复失败，可重试','');render();
+  if(!isTaskStoppedErr(e))alert('恢复识别失败：'+resumeTask.lastError);
+}
+};
+window.discardOcrTask=async function(taskId){
+var task=ocrResumeTasks.find(function(item){return item.id===taskId;});if(!task)return;
+if(!confirm('确认放弃「'+(task.fileName||'PDF')+'」的识别进度？\n已保存的逐页识别结果和暂存PDF将被删除。'))return;
+await removeOcrResumeTask(taskId,true);render();
+};
+
 window.addEventListener('DOMContentLoaded',function(){var dz=document.getElementById('dz');if(dz){dz.addEventListener('dragover',function(e){e.preventDefault();dz.classList.add('dragover');});dz.addEventListener('dragleave',function(e){e.preventDefault();dz.classList.remove('dragover');});dz.addEventListener('drop',function(e){e.preventDefault();dz.classList.remove('dragover');handleFiles(e.dataTransfer.files);});}});
 
-window.updateV=function(id,f,val){var item=V.find(function(x){return x.id===id;});if(item&&item[f]!==val){item[f]=val;save();}};
+window.updateV=function(id,f,val){var item=V.find(function(x){return x.id===id;});if(item&&item[f]!==val){item[f]=val;item.updatedAt=new Date().toISOString();var contract=gc(item.contractId);if(contract)touchProject(contract.pid);save();}};
 function td(v,f){return '<td class="p-2 text-xs text-gray-300 outline-none focus:bg-gray-800 focus:ring-1 ring-ey rounded transition-colors break-words min-w-[120px] max-w-[300px]" contenteditable="true" onblur="window.updateV(\''+v.id+'\',\''+f+'\',this.innerText)">'+escapeHtml(v[f]||'')+'</td>';}
 function tdPage(v,key) {var p = v[key] || '【页码未知】';return '<td class="p-2 text-xs text-ey whitespace-nowrap cursor-pointer hover:underline" onclick="jumpToPage(\''+p+'\')" title="点击跳转到该页">'+escapeHtml(p)+'</td>';}
 // 动态表头/行：按 getFields() 生成的字段渲染，页码字段单独走 tdPage
@@ -2342,7 +3269,7 @@ fileFlowCardHtml(cid)+
 if(pdfPaneOpen){setTimeout(function(){ loadPdfViewer(currentPdfSourceId||cid); initSplitPane(); }, 100);return splitPaneHtml(pdfViewerHtml(false), rightContent);}
 return rightContent;
 }
-window.sct=function(){var t=document.getElementById('ctx').value.trim();if(!t)return;var c=gc(cid);if(c){c.text=t;c.status='uploaded';if(c.revenueFactCache)delete c.revenueFactCache[c.id];c.revenueNeedsRefresh=true;clearAllExtractCacheForContract(c.id);invalidateAssociationOwnersForFile(c.id);save();render();}};
+window.sct=function(){var t=document.getElementById('ctx').value.trim();if(!t)return;var c=gc(cid);if(c){c.text=t;c.status='uploaded';c.updatedAt=new Date().toISOString();touchProject(c.pid);if(c.revenueFactCache)delete c.revenueFactCache[c.id];c.revenueNeedsRefresh=true;clearAllExtractCacheForContract(c.id);invalidateAssociationOwnersForFile(c.id);save();render();}};
 window.cp3=function(){var t=document.getElementById('ctx');t.select();document.execCommand('copy');alert('已复制');};
 window.svExportCols=function(){save();};
 window.autoCols=function(){nav('rules');};
@@ -2596,8 +3523,10 @@ names.forEach(function(name){
   XLSX.utils.book_append_sheet(wb,styleExportSheet(XLSX.utils.json_to_sheet(data)),safeName);
 });
 if(wb.SheetNames.length===0){alert('没有数据可导出');return;}
-var fname='AudiPick_'+new Date().toISOString().split('T')[0]+'.xlsx';
-XLSX.writeFile(wb,fname);
+var project=pid?gp(pid):null,contract=contractId?gc(contractId):null;
+var typeLabel=allRules?'全部合同审阅':RuleEngine.getRuleName(ruleId||activeRuleId);
+var fname=ExportNaming.defaultExportName(contract?{fileName:contract.file,typeLabel:typeLabel}:{projectName:project&&project.name,clientName:project&&project.client,scopeLabel:'全部合同',typeLabel:typeLabel});
+requestExcelFileName(fname,function(finalName){try{XLSX.writeFile(wb,finalName);}catch(writeErr){console.error('export write failed',writeErr);alert('导出失败: '+(writeErr&&writeErr.message?writeErr.message:String(writeErr)));}});
 }catch(e){
 console.error('export failed',e);
 alert('导出失败: '+(e&&e.message?e.message:String(e)));
@@ -2609,22 +3538,22 @@ styleExportSheet(ws);
 if(!ws||!ws['!ref'])return ws;
 ws['!autofilter']={ref:ws['!ref']};
 ws['!freeze']={xSplit:0,ySplit:1,topLeftCell:'A2',activePane:'bottomLeft',state:'frozen'};
-ws['!cols']=[
-{wch:6},{wch:28},{wch:24},{wch:18},{wch:10},{wch:12},{wch:48},{wch:16},{wch:42},
-{wch:42},{wch:48},{wch:52},{wch:28},{wch:38},{wch:38},{wch:28},{wch:22},{wch:20},{wch:14},{wch:10},
-{wch:14},{wch:16},{wch:16},{wch:16},{wch:28}
-];
+  ws['!cols']=[
+  {wch:6},{wch:28},{wch:24},{wch:18},{wch:10},{wch:24},{wch:18},{wch:48},{wch:16},{wch:42},
+  {wch:42},{wch:48},{wch:52},{wch:28},{wch:38},{wch:38},{wch:28},{wch:22},{wch:20},{wch:14},
+  {wch:10},{wch:14},{wch:16},{wch:16},{wch:16},{wch:28}
+  ];
 var range=XLSX.utils.decode_range(ws['!ref']);
 ws['!rows']=[{hpt:28}];
 for(var R=range.s.r+1;R<=range.e.r;R++){
   var lineEstimate=1;
-  [[6,42],[8,38],[9,38],[10,42],[11,46],[12,28],[13,34],[14,34]].forEach(function(cfg){
+  [[7,42],[9,38],[10,38],[11,42],[12,46],[13,28],[14,34],[15,34]].forEach(function(cfg){
     var longCell=ws[XLSX.utils.encode_cell({r:R,c:cfg[0]})];
     var text=longCell&&longCell.v!=null?String(longCell.v):'';
     lineEstimate=Math.max(lineEstimate,Math.ceil(text.length/cfg[1])+(text.match(/\n/g)||[]).length);
   });
   ws['!rows'][R]={hpt:Math.min(180,Math.max(36,lineEstimate*14))};
-  var readinessCell=ws[XLSX.utils.encode_cell({r:R,c:17})];
+  var readinessCell=ws[XLSX.utils.encode_cell({r:R,c:18})];
   if(readinessCell){
     readinessCell.s=readinessCell.s||{};
     if(readinessCell.v==='可直接填入'){
@@ -2638,7 +3567,7 @@ for(var R=range.s.r+1;R<=range.e.r;R++){
       readinessCell.s.font={name:'微软雅黑',sz:10,bold:true,color:{rgb:'9C5700'}};
     }
   }
-  var statusCell=ws[XLSX.utils.encode_cell({r:R,c:20})];
+  var statusCell=ws[XLSX.utils.encode_cell({r:R,c:21})];
   if(statusCell&&statusCell.v==='需人工复核'){
     statusCell.s=statusCell.s||{};
     statusCell.s.fill={patternType:'solid',fgColor:{rgb:'FFF2CC'}};
@@ -2676,8 +3605,8 @@ try{
   XLSX.utils.book_append_sheet(wb,intro,'使用说明');
   var checklist=styleRevenueChecklistSheet(XLSX.utils.json_to_sheet(rows));
   XLSX.utils.book_append_sheet(wb,checklist,'底稿填列清单');
-  var base=String(c.file||'收入合同').replace(/\.[^.]+$/,'').replace(/[\\/:*?"<>|]/g,'_').substring(0,60);
-  XLSX.writeFile(wb,base+'_收入底稿填列清单_'+new Date().toISOString().split('T')[0]+'.xlsx');
+  var suggestedName=ExportNaming.defaultExportName({fileName:c.file||'收入合同',typeLabel:'收入底稿填列清单'});
+  requestExcelFileName(suggestedName,function(finalName){try{XLSX.writeFile(wb,finalName);}catch(writeErr){console.error('revenue checklist export write failed',writeErr);alert('底稿填列清单导出失败: '+(writeErr&&writeErr.message?writeErr.message:String(writeErr)));}});
 }catch(e){
   console.error('revenue checklist export failed',e);
   alert('底稿填列清单导出失败: '+(e&&e.message?e.message:String(e)));
@@ -2694,6 +3623,23 @@ workpaperHtml(cid)+'</div>';
 if(pdfPaneOpen){setTimeout(function(){ loadPdfViewer(currentPdfSourceId||cid); initSplitPane(); }, 100);return splitPaneHtml(pdfViewerHtml(false), rightContent);}
 return rightContent;
 }
+
+function installWorkpaperReaderEnhancements(){
+var baseWorkpaperHtml=window.workpaperHtml;
+if(typeof baseWorkpaperHtml==='function')window.workpaperHtml=function(contractId){var html=baseWorkpaperHtml(contractId);setTimeout(enhanceWorkpaperReaderDom,0);return html;};
+var baseSelectWorkRow=window.selectWorkRow;
+if(typeof baseSelectWorkRow==='function')window.selectWorkRow=function(itemId){
+  var list=document.getElementById('workpaperListScroll');var listTop=list?list.scrollTop:0;
+  baseSelectWorkRow(itemId);
+  var detail=document.getElementById('workDetailPanel');
+  if(detail){detail.scrollTop=0;rememberWorkpaperReaderScroll('detail',0);compactEvidenceButtons(detail);}
+  if(list){list.scrollTop=listTop;rememberWorkpaperReaderScroll('list',listTop);}
+};
+var baseToggleReviewed=window.toggleReviewed;
+if(typeof baseToggleReviewed==='function')window.toggleReviewed=function(itemId){baseToggleReviewed(itemId);var detail=document.getElementById('workDetailPanel');if(detail)compactEvidenceButtons(detail);};
+}
+
+installWorkpaperReaderEnhancements();
 
 loadData();
 </script>

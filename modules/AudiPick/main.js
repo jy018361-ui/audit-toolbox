@@ -6,7 +6,7 @@ const https = require('https');
 const http = require('http');
 const { URL } = require('url');
 
-const DESKTOP_UA = 'AudiPick/1.0 (Electron; Windows)';
+const DESKTOP_UA = 'AudiPick/1.4.6 (Electron; Windows)';
 
 let win;
 
@@ -24,14 +24,16 @@ function createWindow() {
     minWidth: 1120,
     minHeight: 720,
     backgroundColor: '#1A1A1A',
-    title: 'AudiPick - 智能合同审计助手 v1.3.8',
+    title: 'AudiPick - 智能合同审计助手 v1.4.6',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
-      spellcheck: false
+      spellcheck: false,
+      // OCR/PDF parsing must keep running when the window is minimized.
+      backgroundThrottling: false
     }
   });
 
@@ -84,11 +86,14 @@ async function desktopFetchOnce(urlStr, options) {
   const headers = Object.assign({ 'User-Agent': DESKTOP_UA }, options.headers || {});
   const method = options.method || 'GET';
   const body = options.body || null;
+  const timeoutMs = Math.max(1000, Math.min(Number(options.timeoutMs) || 90000, 300000));
 
   let chromiumError = '';
   if (typeof net.fetch === 'function') {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const init = { method, headers };
+      const init = { method, headers, signal: controller.signal };
       if (body != null) init.body = body;
       const resp = await net.fetch(urlStr, init);
       const bodyText = await resp.text();
@@ -99,8 +104,12 @@ async function desktopFetchOnce(urlStr, options) {
         bodyText
       };
     } catch (e) {
+      if (controller.signal.aborted) {
+        return { ok: false, status: 0, statusText: `请求超时(${Math.round(timeoutMs / 1000)}s)`, bodyText: '' };
+      }
       chromiumError = String(e && e.message || e || 'Chromium fetch failed');
-      // 继续尝试 Node 原生请求
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -135,7 +144,7 @@ async function desktopFetchOnce(urlStr, options) {
         });
       });
     });
-    req.setTimeout(90000, () => req.destroy(new Error('请求超时(90s)')));
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`请求超时(${Math.round(timeoutMs / 1000)}s)`)));
     req.on('error', (e) => resolve({
       ok: false,
       status: 0,
@@ -153,6 +162,7 @@ async function desktopFetch(urlStr, options) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     last = await desktopFetchOnce(urlStr, options);
     if (last.ok || last.status > 0) return last;
+    if (/请求超时/i.test(last.statusText)) return last;
     if (!isRetryableNetworkError(last.statusText) || attempt === maxAttempts) return last;
     await sleep(800 * attempt);
   }
@@ -161,14 +171,12 @@ async function desktopFetch(urlStr, options) {
 
 ipcMain.handle('desktop-fetch', async (_event, urlStr, options) => {
   try {
-    const result = await desktopFetch(urlStr, options);
-    if (win && !win.isDestroyed()) { win.focus(); win.webContents.focus(); }
-    return result;
+    return await desktopFetch(urlStr, options);
   }
   catch (e) { return { ok: false, status: 0, statusText: String(e && e.message), bodyText: '' }; }
 });
 
-ipcMain.handle('desktop-ping', () => ({ ok: true, version: '1.3.8-desktop-2' }));
+ipcMain.handle('desktop-ping', () => ({ ok: true, version: '1.4.6-desktop' }));
 
 ipcMain.handle('focus-window', () => {
   if (win && !win.isDestroyed()) {

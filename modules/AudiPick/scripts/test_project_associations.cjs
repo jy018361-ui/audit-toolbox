@@ -57,4 +57,20 @@ const summary = context.getFileAssociationSummary('c1');
 assert.equal(summary.count, 1);
 assert.equal(context.associatedDocumentsFor('c2').length, 1, 'linked file remains independently extractable');
 
+projects.push({ id: 'p2', relationGroups: [] });
+contracts.push(
+  { id: 'c3', pid: 'p2', file: 'A274 \u6280\u672f\u670d\u52a1\u5408\u540c.pdf', text: '\u9879\u76ee\u7f16\u53f7 A274', docLabel: '\u6536\u5165\u5408\u540c', detectedRuleId: 'revenue' },
+  { id: 'c4', pid: 'p2', file: 'A274 \u9a8c\u6536\u5355.pdf', text: '\u9879\u76ee\u7f16\u53f7 A274\n\u9879\u76ee\u9a8c\u6536\u62a5\u544a', docLabel: '\u6536\u5165\u5408\u540c', detectedRuleId: 'revenue' }
+);
+const autoLinked = context.autoAssociateProjectFiles('p2');
+assert.equal(autoLinked.length, 1, 'high-confidence project code match should auto-associate');
+assert.equal(projects[1].relationGroups[0].anchorFileId, 'c3');
+assert.equal(projects[1].relationGroups[0].members[0].fileId, 'c4');
+assert.equal(projects[1].relationGroups[0].members[0].source, 'ai');
+assert.equal(context.getFileAssociationSummary('c3').count, 1);
+
+context.window.removeFileAssociation('c3', 'c4');
+assert.equal(context.getFileAssociationSummary('c3').count, 0);
+assert.equal(context.window.getAssociationSuggestion(contracts[3]), null, 'a manually removed AI association should stay dismissed');
+
 console.log('Project association checks passed.');

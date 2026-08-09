@@ -20,7 +20,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ====== 在这里填你的百度 OCR 凭证 ======
-BAIDU_AK = "把你的APIKey粘贴在这里"
+BAIDU_AK = "1i5O4B3MPstjtNwzKMj1kYD0"
 BAIDU_SK = "把你的SecretKey粘贴在这里"
 # =====================================
 

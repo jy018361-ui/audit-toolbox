@@ -24,5 +24,5 @@ contextBridge.exposeInMainWorld('desktop', {
   pdfjs: pdfjsPaths,
   // 标识当前运行在桌面版
   isDesktop: true,
-  bridgeVersion: '1.3.8-desktop-2'
+  bridgeVersion: '1.4.6-desktop'
 });

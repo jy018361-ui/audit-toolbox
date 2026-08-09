@@ -639,6 +639,13 @@
     return /excerpt|summary|auditor|原文|摘录|提示|remark|content|desc/i.test(key || '');
   }
 
+  function revenueDisplayValue(item, key, ruleId) {
+    if (!isRevenueWorkpaperRule(ruleId) || !item) return item && item[key] != null ? item[key] : '';
+    if (key === 'question_no') return item.display_question_no || item.question_no || '';
+    if (key === 'question_description') return item.display_question_description || item.question_description || '';
+    return item[key] != null ? item[key] : '';
+  }
+
   function fieldsForWorkView(ruleId, fieldSetId, contractId) {
     ruleId = ruleId || activeRuleId;
     contractId = contractId || cid;
@@ -683,11 +690,65 @@
     return isNaN(n) ? null : n;
   }
 
+  function inlineJsValue(value) {
+    return escapeHtml(String(value || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r/g, '\\r').replace(/\n/g, '\\n'));
+  }
+
+  function htmlAttributeValue(value) {
+    return escapeHtml(String(value || '')).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function parseEvidenceRefs(item) {
+    var raw = item && item.evidence_refs;
+    var refs = [];
+    if (Array.isArray(raw)) refs = raw;
+    else if (raw) {
+      try { refs = JSON.parse(raw); } catch (ignore) { refs = []; }
+    }
+    refs = (Array.isArray(refs) ? refs : []).map(function (ref) {
+      if (!ref || typeof ref !== 'object') return null;
+      var sourceId = String(ref.source_id || ref.sourceId || '').trim();
+      var source = String(ref.source_document || ref.source || ref.file || '').trim();
+      var pages = String(ref.pages || ref.page || '').trim();
+      return source ? { sourceId: sourceId, source: source, pages: pages || '【页码未知】' } : null;
+    }).filter(Boolean);
+    if (refs.length) return refs;
+
+    var sources = String((item && item.source_documents) || '').split(/[；;]/).map(function (value) { return value.trim(); }).filter(Boolean);
+    var pageText = String((item && item.pages) || '');
+    var pages = pageText.match(/【[^】]+】/g) || pageText.split(/[、；;]/).map(function (value) { return value.trim(); }).filter(Boolean);
+    if (sources.length === 1 && pages.length) return pages.map(function (page) { return { sourceId: '', source: sources[0], pages: page }; });
+    if (sources.length > 1 && sources.length === pages.length) return sources.map(function (source, index) { return { sourceId: '', source: source, pages: pages[index] }; });
+    return [];
+  }
+
+  function compactEvidencePageText(value) {
+    var text = String(value || '').trim();
+    var match = text.match(/第\s*(\d+)\s*(?:[-~～—–至到]\s*(\d+))?\s*页/);
+    if (!match) return /页码未知/.test(text) ? '页码未知' : text;
+    return match[2] ? '第' + match[1] + '–' + match[2] + '页' : '第' + match[1] + '页';
+  }
+
+  function evidenceLinksHtml(item, compact) {
+    var refs = parseEvidenceRefs(item);
+    var buttonClass = compact
+      ? 'inline-flex items-center px-2 py-1 mr-1 mb-1 rounded border border-blue-800 text-blue-300 hover:bg-blue-950/40'
+      : 'btn-outline btn-sm px-3 py-1.5 rounded-lg text-xs';
+    if (refs.length) {
+      return refs.map(function (ref) {
+        var label = compactEvidencePageText(ref.pages) || '页码未知';
+        return '<button type="button" title="' + htmlAttributeValue(ref.source + ' ' + ref.pages) + '" onclick="event.stopPropagation();jumpToEvidence(\'' + inlineJsValue(item.contractId || '') + '\',\'' + inlineJsValue(ref.source) + '\',\'' + inlineJsValue(ref.pages) + '\',\'' + inlineJsValue(ref.sourceId) + '\',\'' + inlineJsValue(item.id || '') + '\')" class="' + buttonClass + '">' + escapeHtml(label) + '</button>';
+      }).join('');
+    }
+    if (!item.pages && !item.source_documents) return compact ? '—' : '';
+    return '<button type="button" onclick="event.stopPropagation();jumpToEvidence(\'' + inlineJsValue(item.contractId || '') + '\',\'' + inlineJsValue(item.source_documents || '') + '\',\'' + inlineJsValue(item.pages || '') + '\',\'\',\'' + inlineJsValue(item.id || '') + '\')" class="' + buttonClass + '">' + (compact ? '选择来源/页码' : '选择来源文件和页码') + '</button>';
+  }
+
   function workRowMatchesFilter(v, ruleId, q, fieldSetId) {
     if (!q) return true;
     q = q.toLowerCase();
     return fieldsForWorkView(ruleId, fieldSetId).some(function (f) {
-      return String(v[f.key] || '').toLowerCase().indexOf(q) >= 0;
+      return String(revenueDisplayValue(v, f.key, ruleId) || '').toLowerCase().indexOf(q) >= 0;
     });
   }
 
@@ -699,9 +760,14 @@
     var html = '<tr class="work-row border-b border-gray-800 cursor-pointer hover:bg-gray-800/50 ' + bg + activeCls + '" data-id="' + v.id + '" onclick="selectWorkRow(\'' + v.id + '\')">';
     cols.forEach(function (f) {
       if (f.key === pk) {
-        html += '<td class="p-2 text-xs text-ey whitespace-nowrap" onclick="event.stopPropagation();jumpToEvidence(\'' + escapeHtml(v.contractId || '') + '\',\'' + escapeHtml(v.source_documents || '') + '\',\'' + escapeHtml(v[f.key] || '') + '\')">' + escapeHtml(v[f.key] || '—') + '</td>';
+        html += '<td class="p-2 text-xs text-ey">' + evidenceLinksHtml(v, true) + '</td>';
       } else {
-        html += '<td class="p-2 text-xs text-gray-300 max-w-[140px] truncate" title="' + escapeHtml(v[f.key] || '') + '">' + escapeHtml(v[f.key] || '—') + '</td>';
+        var value = revenueDisplayValue(v, f.key, ruleId) || '';
+        var isDetailRow = isRevenueWorkpaperRule(ruleId) && (v.appendix_detail_type || v._structured_detail || /^5\.1\.[12]-/.test(String(v.question_no || '')) || /^2\.1-PO#/.test(String(v.question_no || '')));
+        var prefix = isDetailRow && f.key === 'question_description'
+          ? '<span class="text-blue-400 mr-1">↳ ' + escapeHtml(v.workpaper_sheet || '附表') + '</span>'
+          : '';
+        html += '<td class="p-2 text-xs text-gray-300 max-w-[220px] truncate" title="' + htmlAttributeValue(value) + '">' + prefix + escapeHtml(value || '—') + '</td>';
       }
     });
     html += '<td class="p-2 text-xs whitespace-nowrap">' +
@@ -727,9 +793,16 @@
         ? '<div class="grid grid-cols-3 gap-2 text-xs"><div class="bg-black/40 border border-gray-800 rounded p-2"><span class="text-gray-500 block">回答</span><span class="text-ey">' + escapeHtml(mapped.answerCell) + '</span></div><div class="bg-black/40 border border-gray-800 rounded p-2"><span class="text-gray-500 block">理由</span><span class="text-ey">' + escapeHtml(mapped.reasonCell) + '</span></div><div class="bg-black/40 border border-gray-800 rounded p-2"><span class="text-gray-500 block">摘录</span><span class="text-ey">' + escapeHtml(mapped.evidenceCell) + '</span></div></div>'
         : '<p class="text-xs text-amber-400">未自动定位目标单元格，请按问题描述人工匹配。</p>';
       var workpaperPage = v.pages || '';
+      var displayQuestionNo = revenueDisplayValue(v, 'question_no', ruleId);
+      var displayQuestionDescription = revenueDisplayValue(v, 'question_description', ruleId);
+      var workpaperLocation = v.workpaper_section || (v.workpaper_row ? '第 ' + v.workpaper_row + ' 行' : '');
+      var poSubjectHtml = v.po_name
+        ? '<div class="bg-blue-950/30 border border-blue-900/60 rounded-lg p-3"><p class="text-xs text-blue-300 mb-1">本表分析对象</p><p class="text-sm text-white">PO#' + escapeHtml(v.po_no || '') + ' · ' + escapeHtml(v.po_name) + '</p>' + (v.po_components ? '<p class="text-xs text-gray-400 mt-1">' + escapeHtml(v.po_components) + '</p>' : '') + '</div>'
+        : '';
       return '<div class="card p-4 space-y-4 border-2 border-gray-800">' +
-        '<div><div class="flex items-center gap-2 flex-wrap mb-2"><span class="text-xs text-ey">' + escapeHtml(v.workpaper_sheet || '') + '</span><span class="text-xs text-gray-500">问题 ' + escapeHtml(v.question_no || '') + '</span><span class="text-xs text-gray-600">底稿第 ' + escapeHtml(v.workpaper_row || '') + ' 行</span></div>' +
-        '<p class="text-sm text-white leading-relaxed">' + escapeHtml(v.question_description || '') + '</p></div>' +
+        '<div><div class="flex items-center gap-2 flex-wrap mb-2"><span class="text-xs text-ey">' + escapeHtml(v.workpaper_sheet || '') + '</span><span class="text-xs text-gray-500">' + escapeHtml(displayQuestionNo || '') + '</span><span class="text-xs text-gray-600">底稿位置：' + escapeHtml(workpaperLocation || '待核对') + '</span></div>' +
+        '<p class="text-sm text-white leading-relaxed">' + escapeHtml(displayQuestionDescription || '') + '</p></div>' +
+        poSubjectHtml +
         '<div class="grid md:grid-cols-3 gap-3"><div class="bg-black/50 border border-gray-800 rounded-lg p-3"><p class="text-xs text-gray-500 mb-1">建议回答</p><p class="text-sm text-white">' + escapeHtml(v.suggested_answer || '—') + '</p></div>' +
         '<div class="bg-black/50 border border-gray-800 rounded-lg p-3"><p class="text-xs text-gray-500 mb-1">主问题填入状态</p><p class="text-sm ' + (v.fill_readiness === '可直接填入' ? 'text-emerald-400' : (v.fill_readiness === '资料不足' ? 'text-red-400' : 'text-amber-400')) + '">' + escapeHtml(v.fill_readiness || '资料不足') + '</p></div>' +
         '<div class="bg-black/50 border border-gray-800 rounded-lg p-3"><p class="text-xs text-gray-500 mb-1">置信度 / 复核状态</p><p class="text-sm text-gray-300">' + escapeHtml(v.confidence || '—') + ' · ' + escapeHtml(v.review_status || '需人工复核') + '</p></div></div>' +
@@ -744,7 +817,7 @@
         '<div><h4 class="text-sm font-medium text-gray-300 mb-2">支持证据描述</h4><p class="text-sm text-gray-400 leading-relaxed">' + escapeHtml(v.supporting_evidence || '—') + '</p></div>' +
         '<div><p class="text-xs text-gray-500 mb-2">目标单元格</p>' + targetHtml + '</div>' +
         '<div class="flex flex-wrap gap-2 pt-2 border-t border-gray-800">' +
-        (workpaperPage ? '<button type="button" onclick="jumpToEvidence(\'' + escapeHtml(v.contractId || '') + '\',\'' + escapeHtml(v.source_documents || '') + '\',\'' + escapeHtml(workpaperPage) + '\')" class="btn-outline btn-sm px-3 py-1.5 rounded-lg text-xs">跳转到来源 ' + escapeHtml(workpaperPage) + '</button>' : '') +
+        evidenceLinksHtml(v, false) +
         '<button type="button" onclick="toggleReviewed(\'' + v.id + '\')" class="btn-outline btn-sm px-3 py-1.5 rounded-lg text-xs">' + (v.reviewed ? '取消复核标记' : '标记已复核') + '</button></div></div>';
     }
     var viewFs = fieldsForWorkView(ruleId, fieldSetId || v.fieldSetId);
@@ -774,7 +847,7 @@
 
     html += '<div class="flex flex-wrap gap-2 pt-2 border-t border-gray-800">';
     if (pageVal) {
-      html += '<button type="button" onclick="jumpToPage(\'' + escapeHtml(pageVal) + '\')" class="btn-outline btn-sm px-3 py-1.5 rounded-lg text-xs">跳转到 PDF ' + escapeHtml(pageVal) + '</button>';
+      html += '<button type="button" title="' + htmlAttributeValue((v.source_documents || '当前合同') + ' ' + pageVal) + '" onclick="jumpToEvidence(\'' + inlineJsValue(v.contractId || '') + '\',\'' + inlineJsValue(v.source_documents || '') + '\',\'' + inlineJsValue(pageVal) + '\',\'\',\'' + inlineJsValue(v.id || '') + '\')" class="btn-outline btn-sm px-3 py-1.5 rounded-lg text-xs">' + escapeHtml(compactEvidencePageText(pageVal)) + '</button>';
     }
     html += '<button type="button" onclick="toggleReviewed(\'' + v.id + '\')" class="btn-outline btn-sm px-3 py-1.5 rounded-lg text-xs">' + (v.reviewed ? '取消复核标记' : '标记已复核') + '</button>' +
       '</div></div>';
@@ -866,6 +939,9 @@
     var item = V.find(function (x) { return x.id === itemId; });
     if (!item) return;
     item.reviewed = !item.reviewed;
+    item.updatedAt = new Date().toISOString();
+    var contract = typeof gc === 'function' ? gc(item.contractId) : null;
+    if (contract && typeof touchProject === 'function') touchProject(contract.pid);
     save();
     var panel = document.getElementById('workDetailPanel');
     if (panel && selectedWorkRowId === itemId) panel.innerHTML = workRowDetailHtml(itemId, activeRuleId, activeFieldSetId);
@@ -897,7 +973,8 @@
     return html;
   };
 
-  global.contractListMetaHtml = function (c) {
+  global.contractListMetaHtml = function (c, options) {
+    options = options || {};
     var cv = gv(c.id).length;
     var rules = getAppliedRuleIds(c.id).length;
     var rid = getContractRuleId(c);
@@ -925,8 +1002,8 @@
         : '<button type="button" onclick="quickStartExtract(\'' + c.id + '\')" class="text-xs text-ey hover:underline px-2 py-0.5">开始提取</button>')
       : '';
     var association = fileAssociationSummary(c.id);
-    var associationUi = '<button type="button" onclick="openFileAssociationModal(' + inlineJsArg(c.id) + ')" class="text-xs text-gray-400 hover:text-white px-2 py-0.5 rounded hover:bg-gray-800">关联资料</button>' +
-      (association.count > 0 ? '<span class="text-xs text-emerald-400 px-1">已关联' + association.count + '份</span>' : '');
+    var associationUi = options.hideAssociation ? '' : '<button type="button" onclick="openFileAssociationModal(' + inlineJsArg(c.id) + ')" class="text-xs text-gray-400 hover:text-white px-2 py-0.5 rounded hover:bg-gray-800">' + (association.count > 0 ? '管理资料' : '关联资料') + '</button>' +
+      (association.count > 0 && !options.grouped ? '<span class="text-xs text-emerald-400 px-1">已关联' + association.count + '份</span>' : '');
     var ruleSel = '<div class="mt-2 flex flex-wrap gap-2 items-center" onclick="event.stopPropagation()">' +
       '<span class="text-xs text-gray-500">模板</span>' +
       '<select id="crs_' + c.id + '" onchange="onListTemplateChange(\'' + c.id + '\',this.value)" class="bg-black border border-gray-700 rounded px-2 py-0.5 text-xs text-white max-w-[180px]">' +
@@ -1108,7 +1185,7 @@
               '提取模板': RuleEngine.getRuleName(rid),
               '底稿版本': v.versionLabel || set.label || ''
             };
-            fs.forEach(function (f) { row[f.label] = v[f.key] || ''; });
+            fs.forEach(function (f) { row[f.label] = revenueDisplayValue(v, f.key, rid) || ''; });
             rowsBySheet[sheetName].rows.push(row);
           });
         });

@@ -59,8 +59,27 @@
   function resolveFieldKeys(projectId, ruleId) {
     var prefs = getProjectFieldPrefs(projectId, ruleId);
     if (prefs && prefs.length) {
+      // 借款主表 v1.2 已移除旧版技术字段与JSON字段；旧项目首次使用时切换到新版默认字段。
+      if (ruleId === 'loan_general' && prefs.some(function (key) {
+        return ['debt_record_id', 'record_level', 'document_role', 'key_dates', 'interest_terms', 'fee_items', 'security_items', 'complex_terms'].indexOf(key) >= 0;
+      })) {
+        return defaultFieldKeys(ruleId);
+      }
       if (ruleId === 'revenue_workpaper') {
         defaultFieldKeys(ruleId).forEach(function (key) {
+          if (prefs.indexOf(key) < 0) prefs.push(key);
+        });
+        return ensurePageInKeys(ruleId, prefs);
+      }
+      if (ruleId === 'loan_general') {
+        [
+          'interest_rate_type',
+          'interest_rate_adjustment_frequency',
+          'next_interest_rate_adjustment_date',
+          'prepayment_restriction_status',
+          'financial_covenant_status',
+          'acceleration_or_material_default_trigger_status'
+        ].forEach(function (key) {
           if (prefs.indexOf(key) < 0) prefs.push(key);
         });
         return ensurePageInKeys(ruleId, prefs);

@@ -1,0 +1,68 @@
+.file-list-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.35fr);
+  gap: var(--sp-5);
+  align-items: start;
+}
+.file-list-config hr {
+  border: 0;
+  border-top: 1px solid var(--line, var(--border));
+  margin: var(--sp-5) 0;
+}
+.file-list-actions {
+  justify-content: space-between;
+}
+.danger-text {
+  color: var(--danger-fg);
+}
+.field-hint {
+  color: var(--text-muted);
+  margin: var(--sp-2) 0 0;
+}
+.file-list-preview-card {
+  min-width: 0;
+}
+.file-list-table-wrap {
+  overflow: auto;
+  max-height: 560px;
+  border: 1px solid var(--line, var(--border));
+  border-radius: var(--r-lg);
+}
+.file-list-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-md);
+}
+.file-list-table th,
+.file-list-table td {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--line, var(--border));
+  border-right: 1px solid var(--line, var(--border));
+  text-align: left;
+  white-space: nowrap;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-list-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-muted);
+  color: var(--brand-soft);
+}
+.file-list-table td:last-child,
+.file-list-table th:last-child {
+  border-right: 0;
+}
+.file-list-progress {
+  margin-top: var(--sp-4);
+  display: grid;
+  gap: var(--sp-3);
+}
+@media (max-width: 1370px) {
+  .file-list-workspace {
+    grid-template-columns: 1fr;
+  }
+}

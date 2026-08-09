@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-capability",
+  "description": "The bundled main window can use core events and window state; local files and processes remain behind Rust commands.",
+  "windows": ["main"],
+  "platforms": ["windows"],
+  "permissions": ["core:default", "core:event:allow-listen"]
+}

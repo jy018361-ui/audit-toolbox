@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "审计工具箱",
+  "version": "2.0.0-alpha.15",
+  "identifier": "com.audittoolbox.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist-web"
+  },
+  "app": {
+    "windows": [{
+      "label": "main",
+      "title": "审计工具箱",
+      "width": 1440,
+      "height": 900,
+      "minWidth": 1000,
+      "minHeight": 680,
+      "center": true,
+      "resizable": true,
+      "dragDropEnabled": true
+    }],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost",
+      "capabilities": ["main-capability"]
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": [],
+    "windows": { "webviewInstallMode": { "type": "skip" } }
+  }
+}

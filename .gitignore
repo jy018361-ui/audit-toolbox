@@ -57,6 +57,7 @@ verification_screenshots/
 tauri-app/verification_screenshots/
 tauri-app/design-demos/
 tauri-app/tmp/
+*.bak-*
 
 # Local agent/editor settings
 **/.claude/settings.local.json

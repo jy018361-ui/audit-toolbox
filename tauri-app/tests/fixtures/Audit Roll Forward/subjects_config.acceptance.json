@@ -1,0 +1,20 @@
+{
+  "version": "acceptance",
+  "subjects": {
+    "C": {
+      "code": "C",
+      "name": "货币资金",
+      "template_file": "C SWP 货币资金 202YMMDD XYZ公司.xlsx",
+      "prior_file_pattern": "C*货币资金*{prior_year}*.xlsx",
+      "lead_sheet": {
+        "sheet_name": "C.00 Lead",
+        "header_search_text": "期末审定数",
+        "closing_col": 10,
+        "opening_col": 11
+      },
+      "k01": {
+        "has_k01": false
+      }
+    }
+  }
+}

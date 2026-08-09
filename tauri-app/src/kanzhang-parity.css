@@ -1,0 +1,388 @@
+.kz-page {
+  min-width: 0;
+  color: var(--ink-strong);
+}
+.kz-steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--sp-2);
+  margin: var(--sp-5) 0;
+}
+.kz-steps button,
+.kz-tabs button {
+  border: 1px solid var(--border);
+  background: var(--surface-sunken);
+  padding: var(--sp-3);
+  border-radius: var(--r-md);
+}
+.kz-steps .active,
+.kz-tabs .active {
+  background: var(--brand-link);
+  color: var(--surface);
+}
+/*
+ * 列宽一律用 minmax(0, …)：原来的 px 下限（540+520、680+420）加上 270px 侧边栏
+ * 和页面内边距，在 1366~1450 这一档窗口上必然把右栏挤出视口。
+ * .kz-load-grid 更糟——minmax(480px, 38%) 与 62% 相加已经是 100% 再加 gap，
+ * 天然溢出。改成可收缩的 fr，窄屏由下方媒体查询直接堆成一列。
+ */
+.kz-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  gap: var(--sp-4);
+  align-items: start;
+}
+.kz-load-grid {
+  grid-template-columns: minmax(0, 0.62fr) minmax(0, 1fr);
+}
+.kz-filter-grid {
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.65fr);
+}
+.kz-export-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-4);
+  align-items: start;
+  margin-bottom: var(--sp-4);
+}
+.kz-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: var(--sp-5);
+  box-shadow: var(--shadow-card);
+  min-width: 0;
+}
+.kz-card h2 {
+  margin: 0 0 var(--sp-4);
+}
+.kz-card label {
+  display: grid;
+  gap: var(--sp-1);
+  margin: var(--sp-2) 0;
+  font-weight: 600;
+}
+.kz-card small {
+  color: var(--text-muted);
+  font-weight: 400;
+  line-height: 1.5;
+}
+.kz-card input,
+.kz-card select,
+.kz-card textarea,
+.kz-card button {
+  font: inherit;
+}
+.kz-card input,
+.kz-card select {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2);
+  min-width: 0;
+}
+.kz-card select[multiple] {
+  min-height: 105px;
+}
+.kz-card button {
+  border: 0;
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--border-soft);
+  color: var(--brand-soft);
+  cursor: pointer;
+}
+.kz-card button.primary {
+  background: var(--brand);
+  color: var(--surface);
+}
+.kz-card button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.kz-card select:disabled {
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 1;
+}
+.kz-path,
+.kz-row,
+.kz-search,
+.kz-actions,
+.kz-source-actions {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+}
+.kz-path input,
+.kz-search input {
+  flex: 1;
+}
+.kz-two,
+.kz-map,
+.kz-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+.kz-options label {
+  display: flex;
+  align-items: center;
+}
+.kz-tabs {
+  display: flex;
+  gap: var(--sp-1);
+  overflow: auto;
+  margin-bottom: var(--sp-3);
+}
+.kz-source-panel {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--sp-3);
+  margin-top: var(--sp-3);
+}
+.kz-source-panel h3 {
+  margin: 0 0 var(--sp-2);
+}
+.kz-source-panel .kz-shuttle-list {
+  min-height: 430px;
+  max-height: 52vh;
+}
+.kz-source-actions {
+  margin-top: var(--sp-2);
+  justify-content: flex-end;
+}
+.kz-assigned-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+}
+.kz-progress {
+  margin-top: var(--sp-3);
+}
+.kz-progress strong {
+  display: block;
+  font-size: var(--fs-sm);
+  color: var(--label);
+}
+.kz-progress progress {
+  display: block;
+  width: 100%;
+  margin-top: var(--sp-2);
+}
+.kz-note {
+  background: var(--surface-sunken);
+  border-radius: var(--r-md);
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--label);
+  line-height: 1.65;
+}
+.kz-note b + b {
+  margin-left: var(--sp-3);
+}
+.kz-actions {
+  justify-content: flex-end;
+  margin-top: var(--sp-4);
+}
+.kz-preview > div {
+  overflow: auto;
+  width: 100%;
+  max-height: 68vh;
+  border: 1px solid var(--border);
+}
+.kz-preview table {
+  border-collapse: collapse;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  min-width: max-content;
+}
+.kz-preview th,
+.kz-preview td {
+  border: 1px solid var(--border-soft);
+  padding: var(--sp-1) var(--sp-2);
+}
+.kz-preview th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-muted);
+}
+.kz-result progress {
+  display: block;
+  width: 100%;
+  margin: var(--sp-3) 0;
+}
+.kz-error {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  border: 1px solid var(--danger-border);
+  padding: var(--sp-3);
+  border-radius: var(--r-md);
+  margin-bottom: var(--sp-3);
+}
+.kz-hint {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  margin: var(--sp-2) 0;
+}
+/* 金额口径二选一，落选那套的下拉整体压暗，避免"未映射"被读成漏填。 */
+.kz-field-locked {
+  opacity: 0.5;
+}
+.kz-field-locked select {
+  background: var(--surface-sunken);
+  cursor: not-allowed;
+}
+/*
+ * LLM 复核卡片直接复用固定资产那套 .fa-llm-review / .fa-review-item 样式，
+ * 两个工具的复核结果长得一样，用户不用重新认一遍。这里只把按钮底色拉回
+ * 次要按钮的描边浅底——.kz-card button 的通用底色会盖掉 .secondary。
+ */
+.kz-card .fa-llm-review button {
+  background: var(--surface);
+  color: var(--brand-soft);
+}
+.kz-card .fa-llm-review button:hover:not(:disabled) {
+  background: var(--surface-muted);
+}
+.kz-card .fa-review-item strong em {
+  margin-left: var(--sp-2);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-sm);
+  background: var(--success-dot);
+  color: var(--success-fg);
+  font-size: 0.85em;
+  font-style: normal;
+  white-space: nowrap;
+}
+.kz-card .fa-review-item.attention strong em,
+.kz-card .fa-review-item.fa-pending strong em {
+  background: var(--warning-dot);
+  color: var(--warning-fg);
+}
+/*
+ * 科目穿梭区：旧版三个列表都能直接拖拽互移，迁移版换成了 <select multiple> + 按钮，
+ * 少了最顺手的一种操作。这里改回可拖拽的列表——原生 select 的 <option> 无法当拖放目标，
+ * 所以三个列表统一用 div 实现，自己处理单击 / Ctrl 加选 / Shift 连选。
+ */
+.kz-shuttle-list {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  overflow: auto;
+  user-select: none;
+}
+.kz-shuttle-list:focus-visible {
+  outline: 2px solid var(--border-strong);
+  outline-offset: 1px;
+}
+.kz-shuttle-list.drop-active {
+  border-color: var(--brand-link);
+  background: var(--surface-muted);
+  box-shadow: inset 0 0 0 1px var(--brand-link);
+}
+.kz-shuttle-item {
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-sm);
+  line-height: 1.7;
+  cursor: grab;
+  overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--surface-muted);
+}
+.kz-shuttle-item:hover {
+  background: var(--surface-sunken);
+}
+.kz-shuttle-item.selected {
+  background: var(--brand-link);
+  color: var(--surface);
+}
+.kz-shuttle-item:active {
+  cursor: grabbing;
+}
+/* 拖拽跟随光标的提示块。指针事件自己实现拖拽，没有浏览器自带的拖影，得自己画一个。 */
+.kz-drag-ghost {
+  position: fixed;
+  z-index: 60;
+  pointer-events: none;
+  transform: translate(12px, 12px);
+  max-width: 320px;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--brand-link);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 6px 16px rgb(0 0 0 / 18%);
+}
+.kz-shuttle-empty {
+  padding: var(--sp-3);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.kz-shuttle-more {
+  padding: var(--sp-2);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  text-align: center;
+}
+.kz-assigned-grid .kz-shuttle-list {
+  height: 300px;
+}
+.kz-outputs {
+  display: grid;
+  gap: var(--sp-2);
+  margin: var(--sp-3) 0;
+}
+.kz-outputs button {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-align: left;
+}
+.kz-outputs button span:first-child {
+  flex: 0 0 auto;
+}
+.kz-outputs button span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kz-summary > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) repeat(3, minmax(0, 1fr));
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border-bottom: 1px solid var(--border);
+}
+.kz-summary span,
+.kz-summary b {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 1400px) {
+  .kz-grid,
+  .kz-load-grid,
+  .kz-filter-grid,
+  .kz-export-grid {
+    grid-template-columns: 1fr;
+  }
+  .kz-assigned-grid {
+    grid-template-columns: 1fr;
+  }
+  .kz-account-list {
+    height: 220px;
+  }
+  .kz-source-panel .kz-shuttle-list {
+    min-height: 260px;
+  }
+  .kz-assigned-grid .kz-shuttle-list {
+    height: 220px;
+  }
+}

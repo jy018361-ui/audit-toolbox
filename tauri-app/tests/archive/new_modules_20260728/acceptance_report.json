@@ -1,0 +1,58 @@
+{
+  "generated_at": "2026-07-28T20:40:43",
+  "audipick": {
+    "sample_pdf": "C:\\Users\\lenovo\\Downloads\\审计工具箱\\audit-toolbox-main\\acceptance_artifacts\\new_modules_20260728\\AudiPick\\样例收入合同.pdf",
+    "automated_tests": "run separately via npm test"
+  },
+  "audit_roll_forward": {
+    "subject": "C",
+    "success": true,
+    "message": "处理成功 - CRA记录已提供，但未匹配到当前底稿CRA表",
+    "output": "C:\\Users\\lenovo\\Downloads\\审计工具箱\\audit-toolbox-main\\acceptance_artifacts\\new_modules_20260728\\Audit Roll Forward\\output\\C SWP 货币资金 20261231 验收样例公司.xlsx",
+    "opening_balance": 123456.78,
+    "company_name": "验收样例公司",
+    "report_date": "2026-12-31 00:00:00",
+    "has_summary": true,
+    "cra_records": 3,
+    "cra_write_records": 2,
+    "warnings": [
+      "CRA记录已提供，但未匹配到当前底稿CRA表"
+    ]
+  },
+  "wp_service_generator": {
+    "sheets": 7,
+    "services": 2,
+    "index_rows": 2,
+    "aud2026_rows": 1,
+    "ipo_rows": 1,
+    "ipo_archive_rows": 1,
+    "section_list_found": true,
+    "matched_section_orders": 2,
+    "matched_section_rows": 3,
+    "populated_section_rows": 3,
+    "template_section_rows": 3,
+    "populated_template_rows": 3,
+    "outlook_compared": 2,
+    "outlook_equal": 2,
+    "outlook_differences": [],
+    "unmatched_section_orders": [],
+    "split_file": "C:\\Users\\lenovo\\Downloads\\审计工具箱\\audit-toolbox-main\\acceptance_artifacts\\new_modules_20260728\\WP服务单\\FY27+WP服务单_自动拆分.xlsx",
+    "split_aud2026_rows": 1,
+    "split_ipo_rows": 1,
+    "split_ipo_archive_rows": 1,
+    "split_aud2025_rows": 1,
+    "excluded_ipo": [],
+    "excluded_other": [],
+    "ipo_years": [
+      2026,
+      2027
+    ],
+    "output": "C:\\Users\\lenovo\\Downloads\\审计工具箱\\audit-toolbox-main\\acceptance_artifacts\\new_modules_20260728\\WP服务单\\FY27+WP服务单汇总.xlsx",
+    "service_sheets": [
+      "AUD 2026 验收项目",
+      "IPO 验收项目"
+    ],
+    "formula_errors": []
+  },
+  "failures": {}
+}

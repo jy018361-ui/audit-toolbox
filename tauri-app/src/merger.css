@@ -1,0 +1,214 @@
+.merger-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+  gap: var(--sp-4);
+  margin-top: var(--sp-5);
+  align-items: start;
+}
+.merger-source,
+.merger-rules {
+  min-height: 560px;
+}
+.section-title > span:not(.pill) {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+.drop-zone {
+  width: 100%;
+  white-space: normal;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  min-height: 104px;
+  border: 1.5px dashed var(--muted-soft);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+  color: var(--brand);
+  cursor: pointer;
+}
+.drop-zone span {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+.merger-toolbar {
+  display: flex;
+  gap: var(--sp-2);
+  margin: var(--sp-3) 0;
+}
+.merger-toolbar button,
+.file-item button,
+.sheet-picker button {
+  border: 0;
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-2);
+  cursor: pointer;
+}
+/* 队列的“清空”是破坏性操作，比通用第三档按钮更醒目；限定作用域，不要依赖样式表加载顺序去覆盖全局 .ghost。 */
+.merger-toolbar .ghost {
+  margin-left: auto;
+  background: transparent;
+  color: var(--danger-fg);
+}
+.file-queue {
+  display: grid;
+  gap: var(--sp-2);
+  max-height: 330px;
+  overflow: auto;
+}
+.file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+}
+.file-item > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: var(--sp-1);
+}
+.file-item strong,
+.file-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-item span {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+.file-item em {
+  font-size: var(--fs-xs);
+  color: var(--danger-fg);
+}
+.file-item > div:last-child {
+  display: flex;
+  gap: var(--sp-1);
+}
+.file-item button {
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--border-soft);
+  color: var(--brand);
+}
+.file-item button:last-child {
+  color: var(--danger-fg);
+}
+.compact {
+  padding: var(--sp-5) var(--sp-3);
+}
+.merger-rules fieldset {
+  display: flex;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  padding: var(--sp-1) 0 var(--sp-4);
+  margin: 0 0 var(--sp-4);
+}
+.merger-rules legend {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  color: var(--label);
+  margin-bottom: var(--sp-2);
+}
+.merger-rules fieldset label,
+.check-row {
+  font-size: var(--fs-sm);
+  color: var(--brand);
+}
+.sheet-picker {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: var(--sp-3);
+  margin-bottom: var(--sp-4);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+}
+.sheet-picker > div {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.sheet-picker > div span {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  margin-right: auto;
+}
+.sheet-picker label {
+  font-size: var(--fs-xs);
+}
+.sheet-picker p {
+  font-size: var(--fs-xs);
+  color: var(--muted-soft);
+  margin: var(--sp-1);
+}
+.output-row {
+  display: flex;
+  margin-top: var(--sp-4);
+}
+.output-row input {
+  width: 100%;
+  height: 40px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm) 0 0 var(--r-sm);
+  padding: 0 var(--sp-2);
+  background: var(--surface-sunken);
+}
+/* 「选择目录」后面可能再跟一个「恢复默认」，只有最后一个按钮收右侧圆角。 */
+.output-row .browse:not(:last-child) {
+  border-radius: 0;
+}
+.format-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  margin-top: var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--brand);
+}
+.format-row > span {
+  margin-right: auto;
+  font-weight: 700;
+}
+.output-hint {
+  margin: var(--sp-2) var(--sp-1) 0;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+.merger-progress {
+  margin-top: var(--sp-4);
+}
+.job-banner {
+  display: flex;
+  justify-content: space-between;
+  border-radius: var(--r-sm);
+  background: var(--surface-muted);
+  padding: var(--sp-3);
+  margin-bottom: var(--sp-2);
+}
+.job-banner.warning {
+  background: var(--warning-bg);
+}
+.job-banner.error {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+.merger-progress progress {
+  width: 100%;
+}
+@media (max-width: 1450px) {
+  .merger-layout {
+    grid-template-columns: 1fr;
+  }
+  .merger-source,
+  .merger-rules {
+    min-height: auto;
+  }
+}

@@ -36,15 +36,17 @@ React 页面 → src/api.ts → Tauri invoke → src-tauri/src/lib.rs（命令�
 
 | 工具 | 前端页面 | Rust 业务 |
 |---|---|---|
-| FA List（`fa_list`） | `src/FaListPage.tsx` + `src/faListUi.ts` | `src-tauri/src/fa.rs` |
-| 看账（`kanzhang`） | `src/KanzhangParityPage.tsx` | `src-tauri/src/tabular.rs`（`kanzhang.*` 方法） |
-| TS 管理（`ts_manager`） | `src/TsManagerParityPage.tsx` | `src-tauri/src/tabular.rs`（`ts.*` 方法） |
-| 函证进度（`confirmation_progress`） | `src/ConfirmationProgressPage.tsx` | `src-tauri/src/confirmation.rs` |
-| Excel 合并（`Excel_Merger`） | `src/ExcelMergerPage.tsx` | `src-tauri/src/excel_merger.rs` |
-| 文件目录（`file_list_directory`） | `src/FileListDirectoryPage.tsx` + `src/fileListUi.ts` | `src-tauri/src/file_list.rs` |
-| AudiPick（`audipick`） | `src/AudiPickPage.tsx` + `src/audipickUi.ts` | `src-tauri/src/audipick.rs` |
-| Roll Forward（`audit_roll_forward`） | `src/RollForwardPage.tsx` + `src/rollForwardUi.ts` | `src-tauri/src/roll_forward.rs` |
-| WP 服务单（`wp_service_generator`） | `src/toolDefinitions.ts`（通用 ToolPage 驱动） | `src-tauri/src/wp.rs` |
+| FA List（`fa_list`） | [tauri-app/src/FaListPage.tsx](tauri-app/src/FaListPage.tsx) · [tauri-app/src/faListUi.ts](tauri-app/src/faListUi.ts) | [tauri-app/src-tauri/src/fa.rs](tauri-app/src-tauri/src/fa.rs) |
+| 看账（`kanzhang`） | [tauri-app/src/KanzhangParityPage.tsx](tauri-app/src/KanzhangParityPage.tsx) | [tauri-app/src-tauri/src/tabular.rs](tauri-app/src-tauri/src/tabular.rs)（`kanzhang.*` 方法） |
+| TS 管理（`ts_manager`） | [tauri-app/src/TsManagerParityPage.tsx](tauri-app/src/TsManagerParityPage.tsx) | [tauri-app/src-tauri/src/tabular.rs](tauri-app/src-tauri/src/tabular.rs)（`ts.*` 方法） |
+| 函证进度（`confirmation_progress`） | [tauri-app/src/ConfirmationProgressPage.tsx](tauri-app/src/ConfirmationProgressPage.tsx) | [tauri-app/src-tauri/src/confirmation.rs](tauri-app/src-tauri/src/confirmation.rs) |
+| Excel 合并（`Excel_Merger`） | [tauri-app/src/ExcelMergerPage.tsx](tauri-app/src/ExcelMergerPage.tsx) | [tauri-app/src-tauri/src/excel_merger.rs](tauri-app/src-tauri/src/excel_merger.rs) |
+| 文件目录（`file_list_directory`） | [tauri-app/src/FileListDirectoryPage.tsx](tauri-app/src/FileListDirectoryPage.tsx) · [tauri-app/src/fileListUi.ts](tauri-app/src/fileListUi.ts) | [tauri-app/src-tauri/src/file_list.rs](tauri-app/src-tauri/src/file_list.rs) |
+| AudiPick（`audipick`） | [tauri-app/src/AudiPickPage.tsx](tauri-app/src/AudiPickPage.tsx) · [tauri-app/src/audipickUi.ts](tauri-app/src/audipickUi.ts) | [tauri-app/src-tauri/src/audipick.rs](tauri-app/src-tauri/src/audipick.rs) |
+| Roll Forward（`audit_roll_forward`） | [tauri-app/src/RollForwardPage.tsx](tauri-app/src/RollForwardPage.tsx) · [tauri-app/src/rollForwardUi.ts](tauri-app/src/rollForwardUi.ts) | [tauri-app/src-tauri/src/roll_forward.rs](tauri-app/src-tauri/src/roll_forward.rs) |
+| WP 服务单（`wp_service_generator`） | [tauri-app/src/toolDefinitions.ts](tauri-app/src/toolDefinitions.ts)（通用 ToolPage 驱动） | [tauri-app/src-tauri/src/wp.rs](tauri-app/src-tauri/src/wp.rs) |
+
+> 表格里每个路径都是相对**仓库根**的完整路径，在 GitHub 上点击可直接打开对应文件。
 
 - 简单工具（表单 + 按钮即可）可以在 `src/toolDefinitions.ts` 里用声明式 `fields` + `actions` 加一条定义，由通用 `ToolPage` 渲染，无需新建页面文件。
 - 复杂交互的工具建独立页面（见上表），并优先复用 `src/components/` 里的公共组件：`FileDropInput`（拖放/点选上传）、`DataTable`（数据预览）、`StepIndicator`（步骤条）、`JobProgress`（任务进度）、`PageHeader`、`ResultCard` 等。

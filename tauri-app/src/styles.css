@@ -175,7 +175,7 @@ summary:focus-visible {
   flex-direction: column;
   padding: var(--sp-5) var(--sp-4);
   background: var(--brand-deep);
-  color: var(--ink-inverse);
+  color: var(--on-brand-deep, var(--ink-inverse));
   overflow: auto;
 }
 .brand span,
@@ -214,7 +214,7 @@ summary:focus-visible {
 .sidebar a:hover,
 .sidebar a.active {
   background: var(--brand-soft);
-  color: white;
+  color: var(--on-brand-soft, #fff);
 }
 .nav-icon {
   flex: 0 0 auto;
@@ -223,7 +223,7 @@ summary:focus-visible {
 }
 .sidebar a:hover .nav-icon,
 .sidebar a.active .nav-icon {
-  color: white;
+  color: var(--on-brand-soft, #fff);
 }
 .tool-badge {
   flex: 0 0 auto;
@@ -240,7 +240,7 @@ summary:focus-visible {
 .sidebar a:hover .tool-badge,
 .sidebar a.active .tool-badge {
   background: rgba(255, 255, 255, 0.18);
-  color: white;
+  color: var(--on-brand-soft, #fff);
 }
 .tool-nav {
   margin-top: var(--sp-5);
@@ -544,7 +544,7 @@ summary:focus-visible {
  */
 .primary {
   background: var(--brand);
-  color: white;
+  color: var(--on-brand, #fff);
   font-weight: 600;
   box-shadow: 0 2px 6px rgba(22, 56, 56, 0.18);
 }
@@ -1345,12 +1345,12 @@ summary:focus-visible {
 .step-indicator-item.active {
   border-color: var(--brand);
   background: var(--brand);
-  color: var(--surface);
+  color: var(--on-brand, var(--surface));
   font-weight: 700;
 }
 .step-indicator-item.active .step-indicator-index {
   background: rgba(255, 255, 255, 0.2);
-  color: var(--surface);
+  color: var(--on-brand, var(--surface));
 }
 .step-indicator-item.done {
   border-color: var(--success-bg);
@@ -1695,7 +1695,7 @@ summary:focus-visible {
 .ap-views button.active {
   border-color: var(--brand);
   background: var(--brand);
-  color: var(--surface);
+  color: var(--on-brand, var(--surface));
   font-weight: 600;
 }
 
@@ -1871,4 +1871,76 @@ summary:focus-visible {
 }
 .worklog-done .worklog-step {
   color: var(--success-fg);
+}
+
+/* AudiPick 提取模板库（分类Tab + 卡片列表 + 详情面板） */
+.ap-template-lib {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  gap: var(--sp-4);
+  align-items: start;
+}
+.ap-template-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin: var(--sp-3) 0;
+}
+.ap-template-tabs button {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  padding: var(--sp-1) var(--sp-3);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.ap-template-tabs button.active {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: var(--surface);
+  font-weight: 600;
+}
+.ap-template-list {
+  display: grid;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+.ap-template-card {
+  display: grid;
+  gap: var(--sp-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+  padding: var(--sp-3);
+  text-align: left;
+  cursor: pointer;
+}
+.ap-template-card.selected {
+  border-color: var(--brand-accent);
+  background: var(--surface-muted);
+}
+.ap-template-card strong {
+  color: var(--ink-strong);
+  font-size: var(--fs-md);
+}
+.ap-template-kind {
+  color: var(--brand-soft);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+.ap-template-desc {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+.ap-template-card em {
+  color: var(--brand);
+  font-size: var(--fs-xs);
+  font-style: normal;
+}
+@media (max-width: 1280px) {
+  .ap-template-lib {
+    grid-template-columns: 1fr;
+  }
 }

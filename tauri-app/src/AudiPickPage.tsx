@@ -90,6 +90,9 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
   const [associationTarget, setAssociationTarget] = useState("");
   const [associationRole, setAssociationRole] = useState("补充协议/变更");
   const [customRuleName, setCustomRuleName] = useState("");
+  // 模板库视图状态：分类 tab + 搜索词
+  const [templateTab, setTemplateTab] = useState("all");
+  const [templateSearch, setTemplateSearch] = useState("");
   const [customRulePrompt, setCustomRulePrompt] = useState("");
   const [ruleRevision, setRuleRevision] = useState(0);
   const [suggestedRule, setSuggestedRule] = useState<ClassifiedDocument>();
@@ -1360,8 +1363,26 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
         </button>
       </div>
       {viewMode === "workbench" && (
+      <>
+      <StepIndicator
+        steps={[
+          { key: "1", label: "项目", disabled: false },
+          { key: "2", label: "合同文件", disabled: !selectedId },
+          { key: "3", label: "提取与结果", disabled: !selectedDocument },
+        ]}
+        current={selectedDocument ? 2 : selectedId ? 1 : 0}
+        onStepClick={(index) => {
+          if (index === 0) {
+            document.getElementById("ap-proj")?.scrollIntoView({ behavior: "smooth" });
+          } else if (index === 1) {
+            document.getElementById("ap-contract")?.scrollIntoView({ behavior: "smooth" });
+          } else {
+            document.getElementById("ap-extract")?.scrollIntoView({ behavior: "smooth" });
+          }
+        }}
+      />
       <div className="workspace">
-        <section className="form-card">
+        <section id="ap-proj" className="form-card">
           <div className="section-title">
             <h2>项目</h2>
             <span className="pill preview">迁移进行中</span>
@@ -1417,7 +1438,7 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
             ))}
           </div>
         </section>
-        <section className="form-card">
+        <section id="ap-contract" className="form-card">
           <div className="section-title">
             <h2>{selected?.project.name ?? "合同文件"}</h2>
             <span>{documents.length} 份 PDF</span>
@@ -1715,7 +1736,7 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
             </div>
           )}
         </section>
-        <section className="result-card">
+        <section id="ap-extract" className="result-card">
           <h2>PDF、文字层与结果</h2>
           {pdfDocument && (
             <>
@@ -1879,77 +1900,176 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
           )}
         </section>
       </div>
+      </>
       )}
       {viewMode === "templates" && (
-        <section className="form-card">
-          <div className="section-title">
-            <h2>提取模板库</h2>
-            <span
-              className={`pill ${configStatus.llm?.ready ? "ready" : "preview"}`}
-            >
-              LLM {configStatus.llm?.ready ? "已就绪" : "未配置"}
-            </span>
-          </div>
-          <label className="field">
-            <span>提取模板</span>
-            <select value={ruleId} onChange={(e) => setRuleId(e.target.value)}>
-              {rules.map((rule) => (
-                <option value={rule.id} key={rule.id}>
-                  {rule.name}
-                </option>
+        <div className="ap-template-lib">
+          <section className="form-card">
+            <div className="section-title">
+              <h2>提取模板库</h2>
+              <span
+                className={`pill ${configStatus.llm?.ready ? "ready" : "preview"}`}
+              >
+                LLM {configStatus.llm?.ready ? "已就绪" : "未配置"}
+              </span>
+            </div>
+            <p className="hint">
+              选择一个模板，系统会按预设字段从合同、单据或报告中提取关键信息。你也可以基于内置模板创建自己的模板。
+            </p>
+            <div className="ap-template-tabs">
+              {[
+                { id: "all", label: "全部" },
+                { id: "contract", label: "合同协议" },
+                { id: "voucher", label: "单据票证" },
+                { id: "report", label: "报告" },
+                { id: "mine", label: "我的模板" },
+              ].map((tab) => (
+                <button
+                  key={tab.id}
+                  className={templateTab === tab.id ? "active" : ""}
+                  onClick={() => setTemplateTab(tab.id)}
+                >
+                  {tab.label}
+                </button>
               ))}
-            </select>
-          </label>
-          <small>{rules.find((rule) => rule.id === ruleId)?.description}</small>
-          <div className="chip-list">
-            {fields.map((field) => (
-              <label className="pill ready" key={field.key}>
-                <input
-                  type="checkbox"
-                  checked={activeFieldKeys.includes(field.key)}
-                  onChange={(event) =>
-                    setSelectedFieldKeys((current) =>
-                      event.target.checked
-                        ? [...new Set([...current, field.key])]
-                        : current.filter((key) => key !== field.key),
-                    )
-                  }
-                />
-                {field.label}
-              </label>
-            ))}
-          </div>
-          <details>
-            <summary>新建自定义模板</summary>
-            <div className="form-grid">
-              <label className="field">
-                <span>模板名称</span>
-                <input
-                  value={customRuleName}
-                  onChange={(e) => setCustomRuleName(e.target.value)}
-                />
-              </label>
             </div>
             <label className="field">
-              <span>提示词（必须包含【字段定义】）</span>
-              <textarea
-                value={customRulePrompt}
-                onChange={(e) => setCustomRulePrompt(e.target.value)}
+              <span>搜索模板</span>
+              <input
+                value={templateSearch}
+                placeholder="例如：借款合同、发票、征信报告"
+                onChange={(e) => setTemplateSearch(e.target.value)}
               />
             </label>
-            <div className="actions">
-              <button
-                className="secondary"
-                onClick={() => void saveCustomRule()}
-              >
-                保存自定义模板
-              </button>
+            <p className="hint">
+              共 {rules.length} 个模板 · 点击卡片查看右侧详情
+            </p>
+            <div className="ap-template-list">
+              {rules
+                .filter((rule) => {
+                  const r = rule as unknown as {
+                    category?: string;
+                    name?: string;
+                    description?: string;
+                  };
+                  if (templateTab === "contract") {
+                    if (!["loan", "revenue", "procurement", "agreement"].includes(r.category ?? ""))
+                      return false;
+                  } else if (templateTab === "voucher") {
+                    if (r.category !== "voucher") return false;
+                  } else if (templateTab === "report") {
+                    if (r.category !== "report") return false;
+                  } else if (templateTab === "mine") {
+                    const r2 = rule as unknown as { readonly?: boolean };
+                    if (r2.readonly !== false) return false;
+                  }
+                  if (templateSearch) {
+                    const q = templateSearch.toLowerCase();
+                    if (!`${r.name ?? ""} ${r.description ?? ""} ${rule.id}`.toLowerCase().includes(q))
+                      return false;
+                  }
+                  return true;
+                })
+                .map((rule) => {
+                  const r = rule as unknown as {
+                    id: string;
+                    name: string;
+                    category?: string;
+                    docKind?: string;
+                    description?: string;
+                    readonly?: boolean;
+                  };
+                  const selected = rule.id === ruleId;
+                  return (
+                    <button
+                      key={rule.id}
+                      className={`ap-template-card ${selected ? "selected" : ""}`}
+                      onClick={() => setRuleId(rule.id)}
+                    >
+                      <strong>{r.name}</strong>
+                      <span className="ap-template-kind">
+                        {r.docKind === "table" ? "表格型" : "条款型"}
+                      </span>
+                      <span className="ap-template-desc">{r.description}</span>
+                      {selected && <em>已选中 · 详情见右侧</em>}
+                    </button>
+                  );
+                })}
             </div>
-          </details>
-          <p className="hint">
-            在模板库选好模板与字段后，工作台的提取会使用当前选中的模板。
-          </p>
-        </section>
+          </section>
+          <section className="form-card">
+            <div className="section-title">
+              <h2>模板详情</h2>
+              <div className="actions compact">
+                <button className="secondary" onClick={() => setTemplateTab("mine")}>
+                  我的模板
+                </button>
+              </div>
+            </div>
+            <label className="field">
+              <span>当前模板</span>
+              <select value={ruleId} onChange={(e) => setRuleId(e.target.value)}>
+                {rules.map((rule) => (
+                  <option value={rule.id} key={rule.id}>
+                    {rule.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <small>
+              {rules.find((rule) => rule.id === ruleId)?.description}
+            </small>
+            <h3>提取字段</h3>
+            <div className="chip-list">
+              {fields.map((field) => (
+                <label className="pill ready" key={field.key}>
+                  <input
+                    type="checkbox"
+                    checked={activeFieldKeys.includes(field.key)}
+                    onChange={(event) =>
+                      setSelectedFieldKeys((current) =>
+                        event.target.checked
+                          ? [...new Set([...current, field.key])]
+                          : current.filter((key) => key !== field.key),
+                      )
+                    }
+                  />
+                  {field.label}
+                </label>
+              ))}
+            </div>
+            <details>
+              <summary>新建自定义模板</summary>
+              <div className="form-grid">
+                <label className="field">
+                  <span>模板名称</span>
+                  <input
+                    value={customRuleName}
+                    onChange={(e) => setCustomRuleName(e.target.value)}
+                  />
+                </label>
+              </div>
+              <label className="field">
+                <span>提示词（必须包含【字段定义】）</span>
+                <textarea
+                  value={customRulePrompt}
+                  onChange={(e) => setCustomRulePrompt(e.target.value)}
+                />
+              </label>
+              <div className="actions">
+                <button
+                  className="secondary"
+                  onClick={() => void saveCustomRule()}
+                >
+                  保存自定义模板
+                </button>
+              </div>
+            </details>
+            <p className="hint">
+              在模板库选好模板与字段后，工作台的提取会使用当前选中的模板。
+            </p>
+          </section>
+        </div>
       )}
       {viewMode === "worklog" && (
         <section className="form-card">

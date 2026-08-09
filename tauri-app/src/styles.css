@@ -1832,3 +1832,43 @@ summary:focus-visible {
 .tool-group + .tool-group {
   margin-top: var(--sp-4);
 }
+
+/* AudiPick 处理工作日志 */
+.worklog-list {
+  display: grid;
+  gap: var(--sp-2);
+}
+.worklog-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) auto minmax(0, 1.6fr) auto;
+  gap: var(--sp-3);
+  align-items: center;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+  font-size: var(--fs-sm);
+}
+.worklog-item strong {
+  color: var(--ink-strong);
+}
+.worklog-step {
+  color: var(--brand-soft);
+  font-weight: 600;
+}
+.worklog-detail {
+  color: var(--text-muted);
+}
+.worklog-time {
+  color: var(--muted-soft);
+  font-size: var(--fs-xs);
+}
+.worklog-error .worklog-step {
+  color: var(--danger-fg);
+}
+.worklog-warn .worklog-step {
+  color: var(--warning-fg);
+}
+.worklog-done .worklog-step {
+  color: var(--success-fg);
+}

@@ -116,6 +116,49 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
   const [viewMode, setViewMode] = useState<"workbench" | "templates" | "worklog">(
     "workbench",
   );
+  // 处理工作日志（参考旧版 workLog：记录每步处理操作）
+  type WorkLogEntry = {
+    id: number;
+    fileName: string;
+    step: string;
+    detail: string;
+    status: "done" | "error" | "warn" | "info";
+    time: string;
+  };
+  const [workLog, setWorkLog] = useState<WorkLogEntry[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("audit-toolbox.audipick.log") ?? "[]");
+    } catch {
+      return [];
+    }
+  });
+  const addLog = (
+    fileName: string,
+    step: string,
+    detail: string,
+    status: WorkLogEntry["status"] = "info",
+  ) => {
+    setWorkLog((current) => {
+      const next: WorkLogEntry[] = [
+        { id: Date.now(), fileName, step, detail, status, time: new Date().toLocaleTimeString() },
+        ...current,
+      ].slice(0, 100);
+      try {
+        localStorage.setItem("audit-toolbox.audipick.log", JSON.stringify(next));
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  };
+  const clearLog = () => {
+    setWorkLog([]);
+    try {
+      localStorage.removeItem("audit-toolbox.audipick.log");
+    } catch {
+      /* ignore */
+    }
+  };
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rules = useMemo(
     () => window.RuleEngine?.getAllSelectableRules() ?? [],
@@ -361,11 +404,13 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
     setBusy(true);
     setError("");
     try {
-      for (const path of paths)
+      for (const path of paths) {
         await engineCall("audipick.document_import", {
           projectId: selectedId,
           path,
         });
+        addLog(path.split(/[\\/]/).pop() ?? path, "导入", "PDF 文件已导入", "done");
+      }
       const value = (await engineCall("audipick.documents", {
         projectId: selectedId,
       })) as { documents: AudiPickDocument[] };
@@ -423,6 +468,12 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
       setPdfDocument(pdf);
       setPdfPages(pdf.numPages);
       setPdfPage(1);
+      addLog(
+        documents.find((d) => d.id === id)?.name ?? "文档",
+        "打开",
+        `已加载 PDF，共 ${pdf.numPages} 页`,
+        "done",
+      );
       let text = "";
       let ocrPages = 0;
       for (let number = 1; number <= pdf.numPages; number++) {
@@ -610,7 +661,9 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
         current ? `${current}\n---OCR补充---\n${value.text}` : value.text,
       );
       setResult(value);
+      addLog("当前文档", "OCR", `${value.engine} 引擎识别完成`, "done");
     } catch (e) {
+      addLog("当前文档", "OCR", "识别失败", "error");
       setError(errorText(e));
     } finally {
       setBusy(false);
@@ -1077,7 +1130,19 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
       );
       await saveExtractedItems(items);
       setResult({ items: items.length, chunks: chunks.length });
+      addLog(
+        documents.find((d) => d.id === selectedDocument)?.name ?? "文档",
+        "AI 提取",
+        `提取 ${items.length} 条，分 ${chunks.length} 段处理`,
+        "done",
+      );
     } catch (e) {
+      addLog(
+        documents.find((d) => d.id === selectedDocument)?.name ?? "文档",
+        "AI 提取",
+        "提取失败",
+        "error",
+      );
       setError(errorText(e));
     } finally {
       setBusy(false);
@@ -1177,6 +1242,12 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
           name: document.name,
         })),
       });
+      addLog(
+        `${documents.length} 份文档`,
+        "批量提取",
+        `按「${rules.find((r) => r.id === ruleId)?.name ?? ruleId}」模板启动`,
+        "info",
+      );
       setBatchJob({
         jobId,
         toolId: "audipick",
@@ -1813,24 +1884,70 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
         <section className="form-card">
           <div className="section-title">
             <h2>提取模板库</h2>
+            <span
+              className={`pill ${configStatus.llm?.ready ? "ready" : "preview"}`}
+            >
+              LLM {configStatus.llm?.ready ? "已就绪" : "未配置"}
+            </span>
           </div>
-          <div className="form-grid">
+          <label className="field">
+            <span>提取模板</span>
+            <select value={ruleId} onChange={(e) => setRuleId(e.target.value)}>
+              {rules.map((rule) => (
+                <option value={rule.id} key={rule.id}>
+                  {rule.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <small>{rules.find((rule) => rule.id === ruleId)?.description}</small>
+          <div className="chip-list">
+            {fields.map((field) => (
+              <label className="pill ready" key={field.key}>
+                <input
+                  type="checkbox"
+                  checked={activeFieldKeys.includes(field.key)}
+                  onChange={(event) =>
+                    setSelectedFieldKeys((current) =>
+                      event.target.checked
+                        ? [...new Set([...current, field.key])]
+                        : current.filter((key) => key !== field.key),
+                    )
+                  }
+                />
+                {field.label}
+              </label>
+            ))}
+          </div>
+          <details>
+            <summary>新建自定义模板</summary>
+            <div className="form-grid">
+              <label className="field">
+                <span>模板名称</span>
+                <input
+                  value={customRuleName}
+                  onChange={(e) => setCustomRuleName(e.target.value)}
+                />
+              </label>
+            </div>
             <label className="field">
-              <span>提取模板</span>
-              <select
-                value={ruleId}
-                onChange={(e) => setRuleId(e.target.value)}
-              >
-                {rules.map((rule) => (
-                  <option key={rule.id} value={rule.id}>
-                    {rule.name}
-                  </option>
-                ))}
-              </select>
+              <span>提示词（必须包含【字段定义】）</span>
+              <textarea
+                value={customRulePrompt}
+                onChange={(e) => setCustomRulePrompt(e.target.value)}
+              />
             </label>
-          </div>
+            <div className="actions">
+              <button
+                className="secondary"
+                onClick={() => void saveCustomRule()}
+              >
+                保存自定义模板
+              </button>
+            </div>
+          </details>
           <p className="hint">
-            选择模板后，可在此管理字段与自定义模板；工作台的提取会使用当前选中的模板。
+            在模板库选好模板与字段后，工作台的提取会使用当前选中的模板。
           </p>
         </section>
       )}
@@ -1838,8 +1955,31 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
         <section className="form-card">
           <div className="section-title">
             <h2>处理工作日志</h2>
+            <div className="actions compact">
+              <button className="secondary" onClick={clearLog}>
+                清空日志
+              </button>
+            </div>
           </div>
-          <p className="hint">处理日志功能即将加入。</p>
+          {workLog.length === 0 ? (
+            <p className="hint">
+              暂无处理日志。导入 PDF、OCR、AI 提取等操作会记录在这里。
+            </p>
+          ) : (
+            <div className="worklog-list">
+              {workLog.map((entry) => (
+                <div
+                  key={entry.id}
+                  className={`worklog-item worklog-${entry.status}`}
+                >
+                  <strong>{entry.fileName}</strong>
+                  <span className="worklog-step">{entry.step}</span>
+                  <span className="worklog-detail">{entry.detail}</span>
+                  <span className="worklog-time">{entry.time}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
       )}
     </>

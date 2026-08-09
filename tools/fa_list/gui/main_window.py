@@ -745,8 +745,10 @@ class MainWindow:
         self.use_supplement_lists = False
         self.supplement_config = None
         self.supplement_done = True
+        self.supp_file_handler.clear()
         self.unmatched_add_df = None
         self.unmatched_disp_df = None
+        self._invalidate_step_widget(1)
         self.update_status("已跳过补充清单映射")
         self._prompt_and_export_all_columns()
 
@@ -836,6 +838,27 @@ class MainWindow:
         """将新增/处置清单信息按唯一识别码回填到合并数据。"""
         if self.merged_df is None or self.merged_df.empty:
             return
+
+        # 同一窗口内可能重复执行补充清单步骤。先移除上一轮动态回填结果，
+        # 避免旧辅助列或旧字段映射影响本轮新增/处置方式的取数。
+        auxiliary_mapping = {
+            "addition_method_col2": ("新增方式_辅助", "新增方式_辅助_文件2"),
+            "addition_date_col2": ("新增时间_辅助", "新增时间_辅助_文件2"),
+            "disposal_method_col1": ("处置方式_辅助", "处置方式_辅助_文件1"),
+            "disposal_date_col1": ("处置时间_辅助", "处置时间_辅助_文件1"),
+            "disposal_orig_col1": ("处置原值_辅助", "处置原值_辅助_文件1"),
+            "disposal_dep_col1": ("处置折旧_辅助", "处置折旧_辅助_文件1"),
+        }
+        if self.field_mapping_config is None:
+            self.field_mapping_config = {}
+        stale_columns = []
+        for mapping_key, (mapping_value, column_name) in auxiliary_mapping.items():
+            if self.field_mapping_config.get(mapping_key) == mapping_value:
+                self.field_mapping_config[mapping_key] = None
+            if column_name in self.merged_df.columns:
+                stale_columns.append(column_name)
+        if stale_columns:
+            self.merged_df = self.merged_df.drop(columns=stale_columns)
 
         def _merge_text_values(values: pd.Series) -> str:
             merged_vals = []
@@ -963,7 +986,9 @@ class MainWindow:
         self.supplement_config = config
         self.supplement_done = True
         self._apply_supplement_data(config)
-        self._invalidate_step_widget(2)
+        # 当前仅有步骤0（主清单）和步骤1（补充清单）。
+        # 销毁本轮补充页面，确保再次进入时使用新文件和新映射重建。
+        self._invalidate_step_widget(1)
         self.update_status("补充清单映射已完成")
         self._prompt_and_export_all_columns()
     
@@ -977,11 +1002,9 @@ class MainWindow:
         self.supp_file_handler.clear()
         self.unmatched_add_df = None
         self.unmatched_disp_df = None
-        self._invalidate_step_widget(1)
         self.selected_columns = None
         self.pivot_df = None
         self._invalidate_step_widget(1)
-        self._invalidate_step_widget(2)
 
         # 保存匹配列配置（固定资产编号，支持多列）
         match_cols1 = config.get('match_column1', [])

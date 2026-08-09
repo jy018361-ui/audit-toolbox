@@ -3,13 +3,10 @@ from __future__ import annotations
 
 import json
 import os
-import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
 from typing import Any
 
 from launcher.llm_client import test_connection
-from launcher.ui_theme import apply_app_theme, center_on_parent, fit_window_to_screen
 
 
 DEFAULT_SETTINGS = {
@@ -73,6 +70,14 @@ def is_llm_enabled() -> bool:
 
 
 def open_llm_settings_dialog(parent: tk.Misc | None = None) -> bool:
+    # The Tauri/PyInstaller business engine deliberately excludes Tkinter.
+    # Keep all legacy UI imports local so headless callers can still reuse the
+    # settings loader and LLM client.
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    from launcher.ui_theme import apply_app_theme, center_on_parent, fit_window_to_screen
+
     settings = load_llm_settings()
     win = tk.Toplevel(parent) if parent is not None else tk.Toplevel()
     win.title("LLM API 配置")

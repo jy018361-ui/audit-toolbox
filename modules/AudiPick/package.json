@@ -24,7 +24,8 @@
     "test:dashboard": "node scripts/test_project_dashboard.cjs",
     "test:reader": "node scripts/test_workpaper_reader.cjs",
     "test:resume-export": "node scripts/test_background_resume_export.cjs",
-    "test": "npm run test:associations && npm run test:ai-response && npm run test:revenue && npm run test:revenue-answers && npm run test:loan && npm run test:dashboard && npm run test:reader && npm run test:themes && npm run test:resume-export && npm run check:js",
+    "test:hub-llm": "node scripts/test_hub_llm_bridge.cjs",
+    "test": "npm run test:associations && npm run test:ai-response && npm run test:revenue && npm run test:revenue-answers && npm run test:loan && npm run test:dashboard && npm run test:reader && npm run test:themes && npm run test:resume-export && npm run test:hub-llm && npm run check:js",
     "dist": "npm run setup:pdfjs && electron-builder --win",
     "dist:portable": "npm run check:js && npm run setup:pdfjs && electron-builder --win portable",
     "dist:nsis": "electron-builder --win nsis"
@@ -38,6 +39,7 @@
     "productName": "AudiPick",
     "files": [
       "main.js",
+      "hub_llm_bridge.js",
       "preload.js",
       "audipick.html",
       "rules/**",
@@ -45,6 +47,7 @@
       "vendor/xlsx/**"
     ],
     "win": {
+      "signAndEditExecutable": false,
       "target": [
         {
           "target": "nsis",

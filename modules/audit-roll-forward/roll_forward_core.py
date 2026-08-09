@@ -5783,6 +5783,7 @@ def process_single_subject(subject_code, template_path, prior_path, pmte_path,
         (success: bool, message: str, output_path: str, warnings: list)
     """
     warnings_list = RollForwardWarnings()
+    work_output_path = None
 
     try:
         # 1. 提取公司信息
@@ -5810,7 +5811,9 @@ def process_single_subject(subject_code, template_path, prior_path, pmte_path,
         # 2. 生成输出文件名
         template_name = os.path.basename(template_path)
         output_name = generate_output_filename(template_name, bs_date, company_name)
-        output_path = os.path.join(output_dir, output_name)
+        final_output_path = os.path.join(output_dir, output_name)
+        work_output_path = final_output_path + f".{os.getpid()}.partial.xlsx"
+        output_path = work_output_path
 
         # 确保输出目录存在
         os.makedirs(output_dir, exist_ok=True)
@@ -6202,7 +6205,13 @@ def process_single_subject(subject_code, template_path, prior_path, pmte_path,
                     warnings_list.append(f"Q1 Note/限制性契约图片复制失败，请手工复核: {exc}")
                     warning_msg = "; ".join(dict.fromkeys(warnings_list))
 
-            return True, f"处理成功{(' - ' + warning_msg if warning_msg else '')}", output_path, warnings_list
+            wb_new.close()
+            if wb_prior_formula is not wb_prior_values:
+                wb_prior_formula.close()
+            wb_prior_values.close()
+            os.replace(work_output_path, final_output_path)
+            work_output_path = None
+            return True, f"处理成功{(' - ' + warning_msg if warning_msg else '')}", final_output_path, warnings_list
 
         finally:
             wb_new.close()
@@ -6211,6 +6220,11 @@ def process_single_subject(subject_code, template_path, prior_path, pmte_path,
             wb_prior_values.close()
 
     except Exception as e:
+        if work_output_path:
+            try:
+                os.remove(work_output_path)
+            except OSError:
+                pass
         return False, f"处理失败: {str(e)}", None, warnings_list
 
 
@@ -6233,6 +6247,10 @@ def process_multiple_subjects(subject_codes, template_dir, prior_dir, pmte_path,
 
     total = len(subject_codes)
     for index, subject_code in enumerate(subject_codes, start=1):
+        if control_callback:
+            decision = control_callback("before_subject", subject_code, index, total)
+            if decision == "terminate":
+                break
         def emit(message):
             if progress_callback:
                 progress_callback(index - 1, total, f"[{subject_code}] {message}")
@@ -6282,6 +6300,10 @@ def process_multiple_subjects(subject_codes, template_dir, prior_dir, pmte_path,
         if progress_callback:
             status = "成功" if success else "失败"
             progress_callback(index, total, f"[{status}] {subject_code}: {message}")
+        if control_callback:
+            decision = control_callback("after_subject", subject_code, index, total)
+            if decision == "terminate":
+                break
 
     return results
 

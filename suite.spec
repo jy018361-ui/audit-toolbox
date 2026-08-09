@@ -47,6 +47,13 @@ hiddenimports = [
     "win32com",
     "win32com.client",
     "windnd",
+    "PyQt6",
+    "PyQt6.QtCore",
+    "PyQt6.QtGui",
+    "PyQt6.QtWidgets",
+    "PIL",
+    "PIL.Image",
+    "lxml",
     "launcher.llm_analysis",
     "launcher.llm_client",
     "launcher.llm_settings",
@@ -59,8 +66,6 @@ excludes = [
     "matplotlib.backends",
     "mpl_toolkits",
     "scipy",
-    "PIL",
-    "Pillow",
     "IPython",
     "jupyter",
     "jupyter_client",
@@ -84,7 +89,6 @@ excludes = [
     "statsmodels",
     "torch",
     "tensorflow",
-    "lxml",
     "html5lib",
     "bs4",
     "zmq",
@@ -98,6 +102,7 @@ EXCLUDED_RUNTIME_DIRS = {
     ".git",
     ".venv",
     "venv",
+    "node_modules",
     "__pycache__",
     "build",
     "dist",
@@ -138,7 +143,17 @@ def collect_runtime_tree(src: Path, dest: str):
 if TOOLS_DIR.is_dir():
     datas += collect_runtime_tree(TOOLS_DIR, "tools")
 if MODULES_DIR.is_dir():
-    datas += collect_runtime_tree(MODULES_DIR, "modules")
+    for module_dir in MODULES_DIR.iterdir():
+        if not module_dir.is_dir():
+            continue
+        if module_dir.name == "AudiPick":
+            # Frozen toolbox only needs the launcher adapter. AudiPick's Electron,
+            # PDF.js and XLSX assets live in the portable sidecar next to the suite.
+            adapter = module_dir / "toolbox_adapter.py"
+            if adapter.is_file():
+                datas.append((str(adapter), "modules/AudiPick"))
+            continue
+        datas += collect_runtime_tree(module_dir, f"modules/{module_dir.name}")
 
 a = Analysis(
     ["suite_main.py"],

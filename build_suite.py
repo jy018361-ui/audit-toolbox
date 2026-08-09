@@ -29,7 +29,15 @@ LEGACY_PATHS = {
 }
 KANZHANG_ENTRY = "看账小工具+4.0.py"
 
-EXCLUDE_DIRS = {"build", "dist", "__pycache__", ".cursor", ".vscode", ".git"}
+EXCLUDE_DIRS = {
+    "build",
+    "dist",
+    "node_modules",
+    "__pycache__",
+    ".cursor",
+    ".vscode",
+    ".git",
+}
 EXCLUDE_GLOBS = [
     "test_*.py",
     "*_recovered.py",
@@ -47,6 +55,7 @@ SECRET_SCAN_EXCLUDE_DIRS = {
     ".git",
     ".venv",
     "venv",
+    "node_modules",
     "build",
     "dist",
     "__pycache__",
@@ -282,13 +291,74 @@ def build_suite(py: str) -> Path:
     return exe
 
 
-def print_size_report(fa: Path | None, kz: Path | None, suite: Path) -> None:
+def build_audipick_portable() -> Path | None:
+    """Build AudiPick as a sidecar portable exe for the frozen toolbox."""
+    app_dir = MODULES / "AudiPick"
+    package_json = app_dir / "package.json"
+    if not package_json.is_file():
+        return None
+
+    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    if not npm:
+        raise RuntimeError(
+            "检测到 AudiPick，但未找到 npm。请先安装 Node.js，再重新运行打包脚本。"
+        )
+
+    electron_builder = app_dir / "node_modules" / ".bin" / "electron-builder.cmd"
+    if not electron_builder.is_file():
+        print("安装 AudiPick 构建依赖 ...")
+        subprocess.check_call([npm, "ci"], cwd=str(app_dir))
+
+    source_files = [
+        path
+        for path in app_dir.rglob("*")
+        if path.is_file()
+        and not any(part in {"node_modules", "dist", "__pycache__"} for part in path.parts)
+        and path.name not in {"package-lock.json"}
+    ]
+    source_mtime = max((path.stat().st_mtime for path in source_files), default=0)
+    candidates = sorted(
+        (app_dir / "dist").glob("AudiPick-便携版-*.exe"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates or candidates[0].stat().st_mtime < source_mtime:
+        print("构建 AudiPick 便携版 ...")
+        subprocess.check_call([npm, "run", "dist:portable"], cwd=str(app_dir))
+        candidates = sorted(
+            (app_dir / "dist").glob("AudiPick-便携版-*.exe"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    else:
+        print("AudiPick 源码未变化，复用现有便携版 ...")
+
+    if not candidates:
+        raise RuntimeError("AudiPick 构建完成，但未找到便携版 exe")
+
+    sidecar_dir = DIST / "AudiPick"
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    target = sidecar_dir / candidates[0].name
+    shutil.copy2(candidates[0], target)
+    return target
+
+
+def print_size_report(
+    fa: Path | None,
+    kz: Path | None,
+    suite: Path,
+    audipick: Path | None = None,
+) -> None:
     print()
     print("=" * 56)
     print("体积对比 (MB)")
     print("=" * 56)
     s_suite = _mb(suite)
     print(f"  审计工具箱:     {s_suite:8.1f}  {suite}")
+    if audipick:
+        s_audipick = _mb(audipick)
+        print(f"  AudiPick 侧包:  {s_audipick:8.1f}  {audipick}")
+        print(f"  完整发布包:     {s_suite + s_audipick:8.1f}")
     sum_parts = 0.0
     if fa:
         s_fa = _mb(fa)
@@ -347,9 +417,13 @@ def main() -> int:
         except subprocess.CalledProcessError as e:
             print(f"看账基线构建失败 (可忽略): {e}")
 
+    audipick_exe = build_audipick_portable()
+    if audipick_exe:
+        assert_built_exe_has_no_secrets(audipick_exe)
+    # 主程序最后构建，避免其他打包器清理或占用 dist 中的主 exe。
     suite_exe = build_suite(py)
     assert_built_exe_has_no_secrets(suite_exe)
-    print_size_report(fa_exe, kz_exe, suite_exe)
+    print_size_report(fa_exe, kz_exe, suite_exe, audipick_exe)
     return 0
 
 

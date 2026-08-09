@@ -1,6 +1,13 @@
 import pandas as pd
-import tkinter as tk
-from tkinter import filedialog, messagebox
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox
+    from launcher.ui_theme import apply_app_theme
+except ImportError:  # Tauri sidecar deliberately excludes the legacy UI runtime.
+    tk = None
+    filedialog = None
+    messagebox = None
+    apply_app_theme = None
 import sys
 import os
 from datetime import datetime, date
@@ -12,7 +19,6 @@ from openpyxl.utils import get_column_letter
 import numpy as np
 import traceback
 import re
-from launcher.ui_theme import apply_app_theme
 
 # 全局配置
 DATE_FORMAT = '%Y-%m-%d'
@@ -30,6 +36,8 @@ def resource_path(relative_path):
 
 def select_input_file(root=None):
     """使用Tkinter对话框选择输入文件"""
+    if tk is None or filedialog is None:
+        raise RuntimeError("当前业务引擎不包含旧版 Tkinter 文件选择界面")
     need_cleanup = root is None
     if need_cleanup:
         root = tk.Tk()

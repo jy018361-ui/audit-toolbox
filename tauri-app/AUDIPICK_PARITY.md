@@ -1,15 +1,21 @@
 # AudiPick 智能合同审阅迁移差异记录
 
 基线：`modules/AudiPick/`（Electron 31 + 原生 JS，约 6,663 行，无 React、无打包器）。
-目标：`src-tauri/src/audipick.rs`（570 行）+ `storage.rs` 的 AudiPick 表 + `App.tsx` 内的 `AudiPickPage`。
+目标：`src-tauri/src/audipick.rs` + `storage.rs` 的 AudiPick 表 + `src/AudiPickPage.tsx`。
 
 **这也是 2026-08-05 之前没有任何迁移文档的工具**，且新旧技术栈完全不同、后端最薄、前端最重。
 
-## 规则层：逐文件核对，内容一致
+## 规则层：只同步新版实际加载的那一部分
 
-`modules/AudiPick/rules/**` 与 `tauri-app/assets/audipick/rules/**` 共 19 个文件（13 个提示词、
-收入底稿问题矩阵、注册表、字段集等）逐个比对**内容完全相同**，且新版启动时确实加载。
-"提取模板漂移"这一类担心可以排除——**变的是这些内容如何被使用**。
+`index.html` 用 script 标签加载的只是规则包的一个子集：13 个 `prompts/*.js`、`registry.js`、
+`revenue_workpaper.js`、`fieldset.js`。**`ui.js`、`classify.js`、`theme.js` 不加载**——
+它们是旧 Electron 外壳的界面代码，React 版自己重写了这部分。
+旧栈 1.4.6 新增的 `ai_response.js`、`export_naming.js`、`loan_audit.js` 同样只被 `audipick.html` 引用，
+规则文件之间无依赖，因此也不在同步范围内。
+
+加载顺序有约束：`revenue_workpaper.js` 必须排在 `prompts/revenue_workpaper.js` 之前，
+因为提示词在加载期读取前者设置的 `REVENUE_WORKPAPER_QUESTIONS` 来拼「底稿问题目录」。
+（此前顺序相反，该目录一直是空的，见下节。）
 
 ## 2026-08-05 已修复
 
@@ -58,7 +64,8 @@
 - **批量提取有隐藏前置条件**：读取 PDF 后必须点过"保存文字"，否则整批失败，界面无任何说明。
 - **OCR 未配置时扫描件静默跳过 OCR**，AI 拿到近乎空白的文本，结果不可信但看不出来。
 - **旧数据迁移预计丢四样**（未实机验证）：导入的 PDF 描述信息写空导致文件列表读取报错、
-  历史提取结果因字段组合标识算法不同被全部过滤（数据在库但看不见）、补充资料从属关系丢失、
+  历史提取结果因字段组合标识算法不同被全部过滤（数据在库但看不见；2026-08-09 改按
+  「最近一次提取的字段集」取数后应已缓解，但迁移路径本身仍未实机验证）、补充资料从属关系丢失、
   合同文字不在备份内需重读（扫描件要重跑 OCR）。
 
 ## 新版明确更好
@@ -68,6 +75,112 @@
 （旧版把所有 PDF 转 base64 塞进单个 JSON，几十份即撑爆内存且零校验）、
 批量任务跑在独立进程可真正暂停/取消/崩溃隔离。
 
+## 2026-08-09 同步旧栈 1.4.6 规则
+
+此前 `assets/audipick/rules/` 停留在 1.3.8 之前的版本（`registry.js` 里 loan_general 标 1.1、
+revenue_workpaper 标 1.3）。本次把新版实际加载的 6 个文件同步过来：`registry.js`、
+`revenue_workpaper.js`、`fieldset.js`，以及 `prompts/` 下的 `loan_general.js`、
+`invoicing_agreement.js`、`revenue_workpaper.js`。
+
+### 用户可见的口径变化（不是 bug，是旧栈有意改的）
+
+- **借款合同（loan_general）从"逐条款抽取"改为"借款主表"**：一份合同原本出 N 行条款，
+  现在默认只出 1 行汇总记录。字段 7 个 → 34 个，删除 `title`、`clause_category`、`audit_focus`。
+- **开票/票据协议（invoicing_agreement）**：字段 7 个 → 38 个，只增不删，导出表会宽很多。
+- **收入底稿导出列 25 → 26**，新增「底稿章节」，位置在「底稿行号」与「问题编号」之间。
+  导出列由结果行的 key 动态决定，Rust 侧和页面都不需要改。
+- **收入底稿问题 57 → 62**，新增 `GI.1`~`GI.5` 五条一般合同信息，无问题被删除。
+- `normalizeResults` 现在会把模型返回的 `performance_obligations` / `appendix_subjects`
+  展开成额外的附表明细行；已实测该展开幂等，重复 normalize 不会滚雪球。
+- `suggested_answer` 会被程序改写为带指引的完整选项文本（如「是——请参见…标签页」），
+  与旧版导出文本不同。
+
+### 配套修复（同步暴露出来的问题）
+
+- **历史提取结果不再被隐藏**：页面原先按「当前勾选的字段集」严格过滤结果行，
+  规则一改字段，所有历史行的 `fieldSetId` 就对不上，整个面板会空掉（数据仍在库里）。
+  改为取「该文件+该模板最近一次提取所用的字段集」，与旧版 `FieldSet.latestFieldSetId` 一致。
+  逻辑落在 `src/audipickUi.ts` 的 `latestFieldSetId`，有单测。
+- **深度复核不再丢失一般合同信息**：第二轮只回答底稿问题、不重述 GI，
+  补调 `preserveGeneralInformation` 把 GI 五行折回，与 `audipick.html` 一致。
+- **修正 script 加载顺序**：见上节，「底稿问题目录」此前始终为空，现已实测能列出问题。
+- **事实提取提示词改为读规则包提供的 `window.REVENUE_FACT_PROMPT`**：
+  原先是 `audipickUi.ts` 里的旧版硬编码副本，与新提示词的 `fact_id`、分文件分段契约脱节；
+  规则加载失败时才回退到内置文本。
+
+### 另外两处从 1.4.6 补回来的
+
+- **导出文件名预填**（对应旧栈 `rules/export_naming.js`）：保存对话框原先是空文件名，
+  每次导出都要手打、事后也分不清哪个是哪个。现按旧版规则预填
+  `合同名_模板名_日期.xlsx`（无单份合同时退化为 `项目_客户_范围_类型_日期`），
+  并做 Windows 非法字符替换、保留字规避和 180 字截断——合同名里常见的 `/` `:` 会让保存直接失败。
+  实现落在 `audipickUi.ts` 的 `audipickExportName`，已与旧栈 `defaultExportName` **逐用例实跑比对一致**
+  （含"保留字加了日期后不再触发转义""无任何标识时只剩日期"这两个反直觉分支）。
+  同时接到迁移备份的 zip 导出上。基础设施本来就支持（`pickPath` 第四个参数、FA List 早已在用），
+  只是 AudiPick 没传。
+- **模型返回空正文不再静默变成"0 条"**（对应旧栈 `rules/ai_response.js` 的 `emptyContentError`）：
+  `audipick.rs` 原先把缺失的 `message.content` 兜底成 `""`，解析出零条目正常返回，
+  用户看到的是"提取到 0 条"，与"这份合同确实没内容"无法区分。
+  现改为抛 `EMPTY_ASSISTANT_CONTENT`，并带上 `finish_reason` 与思维内容长度
+  （`finish_reason=length` 时明确提示"输出额度已用尽"）。
+  `ai_response.js` 的另一半能力（关闭思维链、DeepSeek JSON 模式）Rust 侧早已实现，无需移植。
+
+### 已确认不需要改的
+
+`src-tauri/src/audipick.rs` 对 LLM 返回的字段名零硬编码（导出列取行 key 并集，
+`parse_json_content` 不认字段名），三个新提示词的输出仍是 `{"items":[...]}`，因此后端一行未动。
+`window.FieldSet` React 侧未使用，`fieldset.js` 新增的字段迁移分支在新栈里是死代码。
+
+### 附表二轮追问已接入（对照 `modules/AudiPick/audipick.html:1695-1757`）
+
+主问题作答后原本直接落库，新版规则提供的三个追问阶段无人调用。现已在
+`extractRevenueWorkpaper` 里按旧栈顺序接上：
+
+1. **履约义务时点逐项判断**（`buildPerformanceObligationTimingQuestions`）——
+   主问题识别出履约义务后，第 5a 步的时段/时点问题按 PO 逐项重问；
+   回答后剔除 `current` 里题号 5.1 且工作表形如 `第5a步（PO#N）` 的旧行，用新答案取代。
+2. **附表条件问题递归追问**（`buildTriggeredDetailQuestions`）——
+   附表回答会触发新的附表问题，循环追问至某轮不再产生新问题；超过 8 轮抛错，
+   文案沿用旧版「附表条件问题超过最大展开层级…」。
+3. **同类履约义务一致性复核**（`buildPoConsistencyReviewQuestions`）——
+   控制权转移模式相同的 PO 若答案打架，按相同指标统一重问，
+   并用 `revenueQuestionKey` 替换掉原答案。
+
+三个阶段共用 `answerGroup`：先整组问，`missingRevenueTargets` 找出模型漏答的，
+每 3 题一组重问，仍然漏的生成 `technical_fallback` 占位行并标记「需人工复核」——
+**这些占位行同时是递归的收敛保证**：占位行带着目标题号入库后，下一轮
+`buildTriggeredDetailQuestions` 就不会再返回该题。已实测「模型一题不答」的最坏情况下
+递归在下一轮收敛，不会空转到 8 轮上限。
+
+与旧栈一致，追问轮次喂给模型的是**共享事实表**（超过 7 万字符按旧版规则截断），
+不是合同全文；事实表本身已带来源文件与页码。
+
+顺带补上了主问题作答后缺失的 `normalizeResults`——此前只做 `mergeRevenueAnswers`，
+新版的结构化明细展开（`performance_obligations` / `appendix_subjects` 展开成附表行）
+在主路径上根本没跑起来。
+
+结果面板新增 `followUpItems`，显示追问阶段额外产生的行数。
+
+### 明确没有迁移的 1.4.6 新功能
+
+- **借款审计看板**（旧栈 `rules/loan_audit.js`，756 行）：与 loan_general 改为"借款主表"配套的
+  项目级汇总页——把一个项目下所有借款合同的提取结果汇成债务清单
+  （本金、币种、报告日、本年/以后年度列报、关联限制性契约），带校验提示，并可单独导出 Excel。
+  旧栈由 `audipick.html:3160-3163` 渲染。**新栈没有这个页面**，
+  用户只能逐份合同看提取结果，看不到项目级的借款汇总。
+  移植它等于在 React 里新写一个页面，不属于"同步规则"的范畴，需要单独立项。
+
+### 仍未做 / 未验证
+
+- **提取缓存只覆盖主问题两遍**（`extractCache` 存的是第二遍的响应）。
+  重复提取同一份资料时主问题会命中缓存，但三个追问阶段仍会重新调用模型。
+  旧栈没有缓存、每次全跑，所以这不算退步，但重跑成本比界面暗示的高。
+- **编排逻辑本身没有单测**：它写在 `AudiPickPage.tsx` 的组件函数里，依赖 React 状态，
+  无法直接测。纯逻辑部分（问题分组、漏题比对、提示词拼装、占位行）已抽到
+  `audipickUi.ts` 并有单测覆盖；收敛性是用真实规则文件跑脚本验证的，不在自动化测试里。
+- 未用真实脱敏合同跑过端到端提取。新提示词要求模型返回 JSON 数组字符串字段，
+  模型实际遵从度、以及 loan_general 单行口径在真实数据下的观感，**都未验证**。
+
 ## 验证方式
 
 ```bash
@@ -75,6 +188,6 @@ cargo test --manifest-path src-tauri/Cargo.toml audipick::
 npx vitest run src/audipickUi.test.ts
 ```
 
-后端测试仅 4 项，前端 `AudiPickPage` 无组件测试。
+后端测试覆盖面很窄，前端 `AudiPickPage` 无组件测试（纯逻辑抽到 `audipickUi.ts` 才有单测）。
 上述"已修复"全部只经过合成回归，**收入底稿两阶段流程的实际质量必须用真实合同验证**——
 它的价值完全取决于事实表能否让模型少漏题，这一点无法从代码判断。

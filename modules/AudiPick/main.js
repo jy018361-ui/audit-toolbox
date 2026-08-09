@@ -5,6 +5,7 @@ const fs = require('fs');
 const https = require('https');
 const http = require('http');
 const { URL } = require('url');
+const { loadHubLlmSettings } = require('./hub_llm_bridge');
 
 const DESKTOP_UA = 'AudiPick/1.4.6 (Electron; Windows)';
 
@@ -177,6 +178,11 @@ ipcMain.handle('desktop-fetch', async (_event, urlStr, options) => {
 });
 
 ipcMain.handle('desktop-ping', () => ({ ok: true, version: '1.4.6-desktop' }));
+
+ipcMain.handle('hub-llm-settings', () => {
+  const appDataRoot = process.env.APPDATA || app.getPath('appData');
+  return loadHubLlmSettings(appDataRoot);
+});
 
 ipcMain.handle('focus-window', () => {
   if (win && !win.isDestroyed()) {

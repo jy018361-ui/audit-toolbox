@@ -3,8 +3,13 @@
 """
 from __future__ import annotations
 
+import multiprocessing
 import sys
 from pathlib import Path
+
+# PyInstaller 冻结程序的子进程必须在创建任何 GUI 前接管。
+# Audit Roll Forward 使用 spawn 模式执行耗时的底稿结转任务。
+multiprocessing.freeze_support()
 
 # 在创建任何 Tk 窗口之前设置进程级 DPI 感知，确保全程 UI 清晰度一致。
 # 必须在 import tkinter 之前调用；子工具若重复调用此 API 会静默忽略（已设置则无效）。

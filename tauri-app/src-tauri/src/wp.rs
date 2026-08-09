@@ -497,6 +497,89 @@ fn require_headers(map: &HashMap<String, usize>, required: &[&str], context: &st
     }
 }
 
+/// Source-sheet fields mapped to the header texts that may carry them.
+///
+/// The first alias doubles as the label shown when the column is missing.
+/// Reading these by header keeps a reordered export working: the system that
+/// produces `FY27 WP服务单.xlsx` does not guarantee a column order, and the
+/// legacy fixed-index reads silently pulled a neighbouring column instead.
+const SOURCE_FIELD_ALIASES: &[(&str, &[&str])] = &[
+    ("client_name", &["Client Name"]),
+    ("engagement_code", &["Engagement Code"]),
+    ("engagement_name", &["Engagement Name"]),
+    ("outlook_hours", &["Outlook Hours"]),
+    ("service_number", &["WP服务单编号"]),
+    ("task_count", &["底稿任务数量"]),
+    ("schedule_status", &["排班状态"]),
+    ("project_status", &["项目状态"]),
+    ("wp_eic", &["WP EIC"]),
+    ("wp_fic", &["WP FIC", "WP FIC*"]),
+    ("service_type", &["Service Type"]),
+    ("audit_eic", &["Audit EIC"]),
+    ("report_date", &["Audit Report Date"]),
+    ("related_order", &["相关订单"]),
+    ("pre_start", &["Booking Period Start-预审"]),
+    ("pre_end", &["Booking Period End-预审"]),
+    ("final_start", &["Booking Period Start-年审"]),
+    ("final_end", &["Booking Period End-年审"]),
+    ("total_booking_hours", &["Total Booking Hours"]),
+    ("team", &["团队"]),
+    ("client_code", &["Client Code"]),
+    ("engagement_id", &["审计项目"]),
+];
+
+/// Header key used for source-field lookup: whitespace dropped, en/em dashes
+/// folded to `-`, case ignored.
+fn normalize_header(value: &str) -> String {
+    compact(value).replace(['–', '—'], "-").to_lowercase()
+}
+
+/// Zero-based column index of each source field present in `headers`.
+///
+/// Duplicate headers keep the right-most column, matching the legacy dict
+/// comprehension that built the same map in Python.
+fn source_columns<I>(headers: I) -> HashMap<&'static str, usize>
+where
+    I: IntoIterator<Item = String>,
+{
+    let lookup: HashMap<String, usize> = headers
+        .into_iter()
+        .enumerate()
+        .filter(|(_, text)| !text.trim().is_empty())
+        .map(|(index, text)| (normalize_header(&text), index))
+        .collect();
+    SOURCE_FIELD_ALIASES
+        .iter()
+        .filter_map(|(field, aliases)| {
+            aliases
+                .iter()
+                .find_map(|alias| lookup.get(&normalize_header(alias)))
+                .map(|index| (*field, *index))
+        })
+        .collect()
+}
+
+/// One source field of a raw row, or [`Value::Empty`] when the column is absent.
+fn source_field<'a>(
+    row: &'a [Value],
+    columns: &HashMap<&'static str, usize>,
+    field: &str,
+) -> &'a Value {
+    columns
+        .get(field)
+        .and_then(|index| row.get(*index))
+        .unwrap_or(&Value::Empty)
+}
+
+/// One-based source-field columns of a written sheet, read back from row 1.
+fn sheet_source_columns(sheet: &Worksheet) -> HashMap<&'static str, u32> {
+    let headers = (1..=sheet.get_highest_column()).map(|column| sheet.value((column, 1)));
+    source_columns(headers)
+        .into_iter()
+        .map(|(field, index)| (field, index as u32 + 1))
+        .collect()
+}
+
 /// Booking-period year plus the month when the source actually carries one.
 ///
 /// Legacy took the year from the leading digits and treated a missing month as
@@ -680,26 +763,27 @@ struct Record {
 }
 
 fn collect_records(split: &SplitData) -> Vec<Record> {
+    let columns = source_columns(split.headers.iter().map(Value::text));
     let mut records = Vec::new();
     let mut seen = HashSet::new();
     for source in ["AUD2026", "IPO"] {
         for (index, row) in split.groups[source].iter().enumerate() {
-            let service = row.get(5).map(Value::text).unwrap_or_default();
+            let service = source_field(row, &columns, "service_number").text();
             if service.is_empty() || !seen.insert(service.clone()) {
                 continue;
             }
             records.push(Record {
                 source_sheet: source,
                 source_row: index as u32 + 2,
-                engagement_name: row.get(2).map(Value::text).unwrap_or_default(),
-                outlook_hours: row.get(3).map(Value::number).unwrap_or_default(),
+                engagement_name: source_field(row, &columns, "engagement_name").text(),
+                outlook_hours: source_field(row, &columns, "outlook_hours").number(),
                 service_number: service,
-                wp_fic: row.get(9).map(Value::text).unwrap_or_default(),
-                pre_start: row.get(10).cloned().unwrap_or(Value::Empty),
-                pre_end: row.get(11).cloned().unwrap_or(Value::Empty),
-                final_start: row.get(12).cloned().unwrap_or(Value::Empty),
-                final_end: row.get(13).cloned().unwrap_or(Value::Empty),
-                related_order: row.get(17).map(Value::text).unwrap_or_default(),
+                wp_fic: source_field(row, &columns, "wp_fic").text(),
+                pre_start: source_field(row, &columns, "pre_start").clone(),
+                pre_end: source_field(row, &columns, "pre_end").clone(),
+                final_start: source_field(row, &columns, "final_start").clone(),
+                final_end: source_field(row, &columns, "final_end").clone(),
+                related_order: source_field(row, &columns, "related_order").text(),
                 sheet_name: String::new(),
             });
         }
@@ -1060,35 +1144,46 @@ fn add_formula_conditional(
     sheet.add_conditional_formatting_collection(conditional);
 }
 
+/// Source-sheet column widths keyed by field rather than by letter, so a
+/// reordered export still widens the right columns.
+const SOURCE_FIELD_WIDTHS: &[(&str, f64)] = &[
+    ("client_name", 34.0),
+    ("engagement_code", 14.0),
+    ("engagement_name", 38.0),
+    ("outlook_hours", 14.0),
+    ("schedule_status", 13.0),
+    ("service_number", 27.0),
+    ("task_count", 14.0),
+    ("project_status", 15.0),
+    ("wp_eic", 19.0),
+    ("wp_fic", 18.0),
+    ("pre_start", 17.0),
+    ("pre_end", 17.0),
+    ("final_start", 17.0),
+    ("final_end", 17.0),
+    ("service_type", 34.0),
+    ("audit_eic", 25.0),
+    ("report_date", 16.0),
+    ("related_order", 28.0),
+    ("total_booking_hours", 18.0),
+    ("team", 23.0),
+    ("client_code", 16.0),
+    ("engagement_id", 23.0),
+];
+
 fn style_source_sheet(sheet: &mut Worksheet) {
-    set_column_widths(
-        sheet,
-        &[
-            ("A", 34.0),
-            ("B", 14.0),
-            ("C", 38.0),
-            ("D", 14.0),
-            ("E", 13.0),
-            ("F", 27.0),
-            ("G", 14.0),
-            ("H", 15.0),
-            ("I", 19.0),
-            ("J", 18.0),
-            ("K", 17.0),
-            ("L", 17.0),
-            ("M", 17.0),
-            ("N", 17.0),
-            ("O", 34.0),
-            ("P", 25.0),
-            ("Q", 16.0),
-            ("R", 28.0),
-            ("S", 18.0),
-            ("T", 23.0),
-            ("U", 16.0),
-            ("V", 23.0),
-            ("W", 20.0),
-        ],
-    );
+    let columns = sheet_source_columns(sheet);
+    let widths: Vec<(String, f64)> = (1..=sheet.get_highest_column())
+        .map(|column| (column_name(column), 18.0))
+        .chain(SOURCE_FIELD_WIDTHS.iter().filter_map(|(field, width)| {
+            columns
+                .get(field)
+                .map(|column| (column_name(*column), *width))
+        }))
+        .collect();
+    for (column, width) in &widths {
+        sheet.get_column_dimension_mut(column).set_width(*width);
+    }
     let max_col = sheet.get_highest_column();
     let max_row = sheet.get_highest_row();
     set_row_height(sheet, 1, 34.0);
@@ -1108,24 +1203,33 @@ fn style_source_sheet(sheet: &mut Worksheet) {
         for col in 1..=max_col {
             set_visual_style(sheet, (col, row), body.clone());
         }
-        for col in [2, 4, 7, 19, 21] {
-            if col <= max_col {
+        for field in [
+            "engagement_code",
+            "outlook_hours",
+            "task_count",
+            "total_booking_hours",
+            "client_code",
+        ] {
+            if let Some(&col) = columns.get(field) {
                 sheet
                     .get_style_mut((col, row))
                     .alignment_mut()
                     .set_horizontal(HorizontalAlignmentValues::Center);
             }
         }
-        for col in [4, 7, 19] {
-            if col <= max_col {
+        for field in ["outlook_hours", "task_count", "total_booking_hours"] {
+            if let Some(&col) = columns.get(field) {
                 sheet
                     .get_style_mut((col, row))
                     .number_format_mut()
                     .set_format_code("#,##0.00");
             }
         }
-        for col in [6, 18] {
-            if col <= max_col && !sheet.value((col, row)).is_empty() {
+        for field in ["service_number", "related_order"] {
+            let Some(&col) = columns.get(field) else {
+                continue;
+            };
+            if !sheet.value((col, row)).is_empty() {
                 let style = sheet.get_style_mut((col, row));
                 style.set_background_color(PALE_TEAL);
                 style
@@ -1148,21 +1252,27 @@ fn style_source_sheet(sheet: &mut Worksheet) {
             MUTED
         },
     );
-    if max_row >= 2 && max_col >= 8 {
-        add_formula_conditional(
-            sheet,
-            format!("E2:E{max_row}"),
-            "E2=\"已完成\"".into(),
-            cell_style(Some(PALE_GREEN), GREEN, true, 9.0, false),
-            1,
-        );
-        add_formula_conditional(
-            sheet,
-            format!("H2:H{max_row}"),
-            "H2=\"项目承接\"".into(),
-            cell_style(Some(LIGHT_GOLD), NAVY, true, 9.0, false),
-            2,
-        );
+    if max_row >= 2 {
+        if let Some(&col) = columns.get("schedule_status") {
+            let letter = column_name(col);
+            add_formula_conditional(
+                sheet,
+                format!("{letter}2:{letter}{max_row}"),
+                format!("{letter}2=\"已完成\""),
+                cell_style(Some(PALE_GREEN), GREEN, true, 9.0, false),
+                1,
+            );
+        }
+        if let Some(&col) = columns.get("project_status") {
+            let letter = column_name(col);
+            add_formula_conditional(
+                sheet,
+                format!("{letter}2:{letter}{max_row}"),
+                format!("{letter}2=\"项目承接\""),
+                cell_style(Some(LIGHT_GOLD), NAVY, true, 9.0, false),
+                2,
+            );
+        }
     }
     configure_print(
         sheet,
@@ -1950,19 +2060,27 @@ fn rewrite_source_links(book: &mut Workbook, records: &[Record]) {
         .collect();
     for source in ["AUD2026", "IPO"] {
         if let Ok(sheet) = book.get_sheet_by_name_mut(source) {
+            let columns = sheet_source_columns(sheet);
+            let Some(&service_column) = columns.get("service_number") else {
+                continue;
+            };
+            let related_column = columns.get("related_order").copied();
             for row in 2..=sheet.get_highest_row() {
-                let service = sheet.value((6, row));
+                let service = sheet.value((service_column, row));
                 if let Some(record) = by_service.get(service.as_str()) {
                     set_formula(
                         sheet,
-                        &format!("F{row}"),
+                        &format!("{}{row}", column_name(service_column)),
                         hyperlink_formula(&record.sheet_name, "A1", &service),
                     );
-                    let related = sheet.value((18, row));
+                    let Some(related_column) = related_column else {
+                        continue;
+                    };
+                    let related = sheet.value((related_column, row));
                     if !related.is_empty() {
                         set_formula(
                             sheet,
-                            &format!("R{row}"),
+                            &format!("{}{row}", column_name(related_column)),
                             hyperlink_formula(&record.sheet_name, "A1", &related),
                         );
                     }
@@ -2637,9 +2755,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(folder);
     }
 
+    /// Header row in the order the source system emitted it before #12.
+    const LEGACY_SOURCE_HEADERS: &[&str] = &[
+        "Client Name",
+        "Engagement Code",
+        "Engagement Name",
+        "Outlook Hours",
+        "排班状态",
+        "WP服务单编号",
+        "底稿任务数量",
+        "项目状态",
+        "WP EIC",
+        "WP FIC",
+        "Booking Period Start-预审",
+        "Booking Period End-预审",
+        "Booking Period Start-年审",
+        "Booking Period End-年审",
+        "Service Type",
+        "Audit EIC",
+        "Audit Report Date",
+        "相关订单",
+    ];
+
+    fn headers_from(names: &[&str]) -> Vec<Value> {
+        names
+            .iter()
+            .map(|name| Value::Text((*name).into()))
+            .collect()
+    }
+
     #[test]
     fn duplicate_service_numbers_only_generate_one_service_sheet() {
-        let mut split = SplitData::default();
+        let mut split = SplitData {
+            headers: headers_from(LEGACY_SOURCE_HEADERS),
+            ..Default::default()
+        };
         for name in BASE_SHEETS {
             split.groups.insert(name, Vec::new());
         }
@@ -2651,6 +2801,96 @@ mod tests {
         let records = collect_records(&split);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].source_sheet, "AUD2026");
+    }
+
+    /// A reordered export must still land in the right `Record` fields.  The
+    /// fixed-index reads this replaced pulled whichever column happened to sit
+    /// at position 3/6/10/18, so hours and dates silently came from neighbours.
+    #[test]
+    fn reordered_source_columns_still_map_to_the_right_fields() {
+        let reordered = [
+            "WP服务单编号",
+            "相关订单",
+            "Booking Period Start-预审",
+            "Booking Period End-预审",
+            "Booking Period Start-年审",
+            "Booking Period End-年审",
+            "WP FIC",
+            "Outlook Hours",
+            "Engagement Name",
+        ];
+        let mut split = SplitData {
+            headers: headers_from(&reordered),
+            ..Default::default()
+        };
+        for name in BASE_SHEETS {
+            split.groups.insert(name, Vec::new());
+        }
+        split.groups.get_mut("AUD2026").unwrap().push(vec![
+            Value::Text("WP-77".into()),
+            Value::Text("ORD-9".into()),
+            Value::Text("2026-01-02".into()),
+            Value::Text("2026-01-31".into()),
+            Value::Text("2026-03-01".into()),
+            Value::Text("2026-03-31".into()),
+            Value::Text("张三".into()),
+            Value::Number(120.5),
+            Value::Text("样例公司".into()),
+        ]);
+        let records = collect_records(&split);
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.service_number, "WP-77");
+        assert_eq!(record.related_order, "ORD-9");
+        assert_eq!(record.engagement_name, "样例公司");
+        assert_eq!(record.outlook_hours, 120.5);
+        assert_eq!(record.wp_fic, "张三");
+        assert_eq!(record.pre_start.text(), "2026-01-02");
+        assert_eq!(record.pre_end.text(), "2026-01-31");
+        assert_eq!(record.final_start.text(), "2026-03-01");
+        assert_eq!(record.final_end.text(), "2026-03-31");
+    }
+
+    #[test]
+    fn source_columns_tolerate_spacing_dash_and_case_variants() {
+        let columns = source_columns(
+            [
+                "  outlook   hours ",
+                "Booking Period Start–预审",
+                "WP FIC*",
+                "wp服务单编号",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        assert_eq!(columns.get("outlook_hours"), Some(&0));
+        assert_eq!(columns.get("pre_start"), Some(&1));
+        assert_eq!(columns.get("wp_fic"), Some(&2));
+        assert_eq!(columns.get("service_number"), Some(&3));
+    }
+
+    /// Absent optional columns must degrade to empty values, never panic or
+    /// shift the remaining fields.
+    #[test]
+    fn missing_optional_source_columns_yield_empty_values() {
+        let mut split = SplitData {
+            headers: headers_from(&["Engagement Name", "Outlook Hours", "WP服务单编号"]),
+            ..Default::default()
+        };
+        for name in BASE_SHEETS {
+            split.groups.insert(name, Vec::new());
+        }
+        split.groups.get_mut("AUD2026").unwrap().push(vec![
+            Value::Text("样例公司".into()),
+            Value::Number(80.0),
+            Value::Text("WP-001".into()),
+        ]);
+        let records = collect_records(&split);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].engagement_name, "样例公司");
+        assert_eq!(records[0].related_order, "");
+        assert_eq!(records[0].wp_fic, "");
+        assert!(records[0].pre_start.is_empty());
     }
 
     #[test]

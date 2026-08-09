@@ -1,21 +1,43 @@
-# 审计工具箱
+# 审计工具箱代码区说明
 
-一个面向审计、财务和数据处理场景的 Windows 桌面工具箱。项目基于 Python + Tkinter，采用 Hub 启动器统一承载多个子工具，重点服务固定资产匹配、凭证查看、Excel 合并、函证进度整理、文件目录清单等高频工作。
+新版 Tauri 2 + React + Rust 工程已完整集中到 [`tauri-app`](./tauri-app)。
+启动、测试和打包请进入该目录，双击 `启动审计工具箱.bat` 或
+`打包审计工具箱.bat`。
+
+根目录其余 `launcher`、`tools`、`modules`、`audit_engine` 和 Python
+入口文件保留为旧 Tkinter/Python 基线与金标对照，不再参与新版生产运行。
+
+---
+
+一个面向审计、财务和数据处理场景的 Windows 桌面工具箱。当前迁移分支提供 **Tauri 2 + React/TypeScript** 统一桌面入口，九个注册工具的生产 RPC 和独立任务 worker 均由 Rust 执行。Python 源码只保留为迁移金标和回归测试，不进入发布 EXE，也不在用户电脑上启动或释放运行时。
+
+## Tauri 迁移版
+
+- 日常测试：双击 `启动审计工具箱.bat`，直接启动 Tauri 开发版；首次会编译，之后通常更快。开发版可与已打开的发布版并行运行。
+- 命令行开发启动：`npm run tauri:dev`
+- 严格单文件构建：双击 `打包Tauri审计工具箱.bat`
+- 输出：`dist/审计工具箱-v2.0.0-alpha.15-win-x64.exe` 及同名 `.sha256`
+- 构建流程会依次执行 Python 金标、React、AudiPick 和 Rust 测试，验证 Excel COM 原样复制，随后执行九工具共用的 Rust worker 与单文件冷启动验收；冷启动会反向检查不存在 `audit-engine.exe` 和新 Python runtime。
+- 迁移完成度与真实样例验收范围见 [TAURI_MIGRATION.md](TAURI_MIGRATION.md)。
 
 ## 主要功能
 
 - **FA List 匹配工具**：固定资产底稿双表匹配、字段配置、透视汇总、异常检查和导出。
-- **看账小工具**：凭证导入、科目筛选、数据查看、导出和辅助映射。
-- **Excel 批量合并**：批量读取工作簿和工作表，合并输出并在异常场景给出可见提示。
+- **Excel 批量合并**：Rust 直接扫描、读取并纵向/横向写出 XLSX、XLS、XLSM、CSV、TXT；多 Sheet 模式通过 Microsoft Excel 原生接口保留公式、格式、图片和对象。
+- **TS 管理**：Rust Polars 完成筛选、默认双 Sheet 透视、稳定 Parquet 缓存和可选明细 CSV。
+- **看账小工具**：Rust Polars 完成凭证读取、字段映射、目标科目扩展、净额汇总、损益结转、JE 两轮匹配、宽松/严格凭证类型、多批次及工作簿导出。
 - **函证进度工具**：整理函证流程中的清单、进度和导出结果。
 - **文件目录工具**：生成目录清单、超链接和辅助检查结果。
+- **AudiPick 智能合同审阅**：合同 OCR、条款提取、PDF 定位预览和收入合同审阅底稿生成。
+- **Audit Roll Forward**：结转公司标准 V6 审计底稿，迁移期初、公式、审计措辞及 CRA 信息。
+- **FY27 WP 服务单生成工具**：拆分 AUD、IPO 与 archive，生成 Section 服务方案及 SER 测算汇总。
 - **统一 Hub**：通过一个入口启动各子工具，尽量保持一致的窗口布局、状态反馈和错误提示。
 - **LLM 辅助能力**：可选配置 OpenAI 兼容接口，用于字段映射建议、映射复核和导出结果分析。
 
 ## 环境要求
 
-- Windows 10/11
-- Python 3.10+
+- 运行发布版：Windows 10/11 x64、WebView2；仅多 Sheet 原样复制需要安装 Microsoft Excel。
+- 从源码开发/打包：另需 Python 3.10+（仅运行历史金标测试与构建脚本）、Node.js、Rust stable-msvc 与 Visual Studio C++ Build Tools。
 
 ## 快速开始
 
@@ -77,6 +99,8 @@ python build_suite.py --no-baseline
 ```
 
 打包输出位于 `dist/`。`vendor/`、`build/`、多数打包产物和本地验证产物不进入 Git。
+
+Tauri 发布版中的 AudiPick 使用统一 React 界面和 Rust 内核，不需要单独放置 Electron 便携版。
 
 ## 项目结构
 

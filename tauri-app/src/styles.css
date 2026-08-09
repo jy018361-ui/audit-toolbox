@@ -1879,6 +1879,14 @@ summary:focus-visible {
   grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
   gap: var(--sp-4);
   align-items: start;
+  margin-top: var(--sp-5);
+}
+.ap-template-lib > .form-card {
+  min-width: 0;
+}
+.ap-template-lib > .form-card:last-child {
+  position: sticky;
+  top: var(--sp-3);
 }
 .ap-template-tabs {
   display: flex;
@@ -1905,6 +1913,9 @@ summary:focus-visible {
   display: grid;
   gap: var(--sp-2);
   margin-top: var(--sp-3);
+  max-height: 62vh;
+  overflow-y: auto;
+  padding-right: var(--sp-1);
 }
 .ap-template-card {
   display: grid;
@@ -1923,6 +1934,8 @@ summary:focus-visible {
 .ap-template-card strong {
   color: var(--ink-strong);
   font-size: var(--fs-md);
+  white-space: normal;
+  word-break: break-word;
 }
 .ap-template-kind {
   color: var(--brand-soft);
@@ -1933,14 +1946,20 @@ summary:focus-visible {
   color: var(--text-muted);
   font-size: var(--fs-sm);
   line-height: 1.5;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .ap-template-card em {
   color: var(--brand);
   font-size: var(--fs-xs);
   font-style: normal;
 }
-@media (max-width: 1280px) {
+@media (max-width: 1400px) {
   .ap-template-lib {
     grid-template-columns: 1fr;
+  }
+  .ap-template-lib > .form-card:last-child {
+    position: static;
   }
 }

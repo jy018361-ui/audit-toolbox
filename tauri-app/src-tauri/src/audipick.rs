@@ -488,11 +488,55 @@ fn request_llm_with_key(
     }
     let response = request.json(&body).send().map_err(network_error)?;
     let value = read_llm_response(response, "LLM 提取请求失败。")?;
-    Ok(value
+    let content = value
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string())
+        .unwrap_or("");
+    if content.trim().is_empty() {
+        return Err(empty_content_error(&value));
+    }
+    Ok(content.to_string())
+}
+
+/// Error for a response whose assistant message carried no text.
+///
+/// An empty body used to fall through as `""`, parse into zero items and reach
+/// the user as "extracted 0 rows" — indistinguishable from a contract that
+/// genuinely says nothing.  The usual causes are the model spending its output
+/// budget on reasoning tokens or hitting the length limit, so name them.
+fn empty_content_error(value: &Value) -> AppError {
+    let finish = value
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let reasoning = value
+        .pointer("/choices/0/message/reasoning_content")
+        .and_then(Value::as_str)
+        .map(str::len)
+        .unwrap_or(0);
+    let mut detail = Vec::new();
+    if !finish.is_empty() {
+        detail.push(format!("finish_reason={finish}"));
+    }
+    if reasoning > 0 {
+        detail.push(format!("思维内容{reasoning}字"));
+    }
+    if finish == "length" {
+        detail.push("输出额度已用尽".into());
+    }
+    let suffix = if detail.is_empty() {
+        String::new()
+    } else {
+        format!("（{}）", detail.join("，"))
+    };
+    error(
+        "EMPTY_ASSISTANT_CONTENT",
+        &format!(
+            "模型返回正文为空{suffix}。程序已请求关闭思维模式，但当前模型或接口可能未执行；\
+             请改用较短的资料重试，或在设置中更换模型。"
+        ),
+        None,
+    )
 }
 
 fn baidu_ocr(image: &str) -> Result<Value, AppError> {
@@ -649,6 +693,25 @@ fn error(code: &str, message: &str, detail: Option<String>) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// An empty assistant message must surface as an error rather than as a
+    /// successful extraction of nothing.
+    #[test]
+    fn empty_content_names_the_reason() {
+        let value = json!({"choices":[{"finish_reason":"length","message":{"content":"","reasoning_content":"abc"}}]});
+        let error = empty_content_error(&value);
+        let text = serde_json::to_string(&error).unwrap();
+        assert!(text.contains("EMPTY_ASSISTANT_CONTENT"), "{text}");
+        assert!(text.contains("finish_reason=length"), "{text}");
+        assert!(text.contains("输出额度已用尽"), "{text}");
+    }
+
+    #[test]
+    fn empty_content_without_diagnostics_still_explains_itself() {
+        let error = empty_content_error(&json!({"choices":[{"message":{"content":""}}]}));
+        let text = serde_json::to_string(&error).unwrap();
+        assert!(text.contains("模型返回正文为空"), "{text}");
+    }
+
     #[test]
     fn parses_fenced_json() {
         assert_eq!(

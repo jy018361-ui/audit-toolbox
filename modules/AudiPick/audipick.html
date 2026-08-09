@@ -578,6 +578,8 @@ let P=JSON.parse(localStorage.getItem('ap_p')||'[]');
 let Ct=JSON.parse(localStorage.getItem('ap_c')||'[]');
 let V=JSON.parse(localStorage.getItem('ap_v')||'[]');
 let A=JSON.parse(localStorage.getItem('ap_k')||'{}');
+let LocalA=A;
+let hubLlmStatus={available:false,source:'local'};
 let O=JSON.parse(localStorage.getItem('ap_ocr')||JSON.stringify({engine:'ai'}));
 let workLog=JSON.parse(localStorage.getItem('ap_log')||'[]');
 let extractCache=JSON.parse(localStorage.getItem('ap_cache')||'{}');
@@ -685,9 +687,22 @@ function quickFileFingerprint(buffer,file){
 }
 function save(){
     var writes=[];
-    if(db)writes=[dbPut('ap_p',P),dbPut('ap_c',Ct),dbPut('ap_v',V),dbPut('ap_k',A),dbPut('ap_ocr',O),dbPut('ap_custom_rules',CUSTOM_RULES),dbPut('ap_cache',extractCache)];
+    if(db)writes=[dbPut('ap_p',P),dbPut('ap_c',Ct),dbPut('ap_v',V),dbPut('ap_k',LocalA),dbPut('ap_ocr',O),dbPut('ap_custom_rules',CUSTOM_RULES),dbPut('ap_cache',extractCache)];
     RuleEngine.setCustomRules(CUSTOM_RULES);if(typeof refreshRulePresets==='function')refreshRulePresets();if(typeof updateConfigStatusBadge==='function')updateConfigStatusBadge();
     return Promise.all(writes);
+}
+async function syncHubLlmSettings(){
+    hubLlmStatus={available:false,source:'local'};
+    if(!(window.desktop&&window.desktop.hubLlmSettings))return;
+    try{
+        var cfg=await window.desktop.hubLlmSettings();
+        hubLlmStatus=cfg||hubLlmStatus;
+        if(cfg&&cfg.available){
+            A={k:cfg.k,u:cfg.u,m:cfg.m,think:!!cfg.think,authMode:cfg.authMode||'bearer',source:'hub'};
+        }
+    }catch(e){
+        console.warn('Hub LLM settings unavailable:',e&&e.message);
+    }
 }
 async function loadData(){
     await initDB();
@@ -696,7 +711,7 @@ async function loadData(){
         await dbPut('migrated',true);
         save();
     }else{
-        P=(await dbGet('ap_p'))||[];Ct=(await dbGet('ap_c'))||[];V=(await dbGet('ap_v'))||[];A=(await dbGet('ap_k'))||{};O=(await dbGet('ap_ocr'))||{engine:'ai'};
+        P=(await dbGet('ap_p'))||[];Ct=(await dbGet('ap_c'))||[];V=(await dbGet('ap_v'))||[];A=(await dbGet('ap_k'))||{};LocalA=A;O=(await dbGet('ap_ocr'))||{engine:'ai'};
         CUSTOM_RULES=(await dbGet('ap_custom_rules'))||[];
         RuleEngine.setCustomRules(CUSTOM_RULES);
         if(typeof refreshRulePresets==='function')refreshRulePresets();
@@ -734,6 +749,7 @@ async function loadData(){
     var restoredAssociations=0;
     P.forEach(function(project){restoredAssociations+=autoAssociateProjectFiles(project.id).length;});
     if(restoredAssociations>0)save();
+    await syncHubLlmSettings();
     if(typeof hideIntro==='function')hideIntro();
     if(page==='home')page='dash';
     var shouldTour=window.apPendingTour&&!localStorage.getItem('ap_tour_done');
@@ -1022,6 +1038,10 @@ window.toggleAssociationChildren=function(anchorFileId){
   var icon=document.getElementById('association_chevron_'+anchorFileId);if(icon)icon.style.transform=expandedAssociationGroups[anchorFileId]?'rotate(180deg)':'';
 };
 function ok(){return !!(A.k&&A.u);}
+function llmAuthorization(cfg){
+var key=String(cfg&&cfg.k||'');
+return cfg&&cfg.authMode==='raw'?key:'Bearer '+key;
+}
 function chatCompletionsUrl(base){
 var url=String(base||'').trim().replace(/\/+$/,'');
 if(!url)return '';
@@ -1605,7 +1625,7 @@ function aiExtractRevenueFactChunk(doc,chunk,retries,plainJsonMode){
   if(!plainJsonMode)applyJsonResponseMode(body,A.u);
   applyThinkingMode(body,A.u,A.m,false);
   return taskRunner.checkpoint().then(function(){
-    return safeFetch(chatCompletionsUrl(A.u),{method:'POST',signal:ctrl.signal,timeoutMs:120000,headers:{'Content-Type':'application/json','Authorization':'Bearer '+A.k},body:JSON.stringify(body)});
+    return safeFetch(chatCompletionsUrl(A.u),{method:'POST',signal:ctrl.signal,timeoutMs:120000,headers:{'Content-Type':'application/json','Authorization':llmAuthorization(A)},body:JSON.stringify(body)});
   }).then(function(r){
     clearTimeout(timer);if(!r.ok)return r.text().then(function(e){throw new Error('API('+r.status+'):'+e.substring(0,300));});return r.json();
   }).then(function(d){
@@ -1837,7 +1857,7 @@ function consolidateRevenueWorkpaperResults(items,statusCb,cid,ruleId,fieldKeys,
   applyJsonResponseMode(body,A.u);
   applyThinkingMode(body,A.u,A.m,false);
   return taskRunner.checkpoint().then(function(){
-    return safeFetch(chatCompletionsUrl(A.u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+A.k},body:JSON.stringify(body)});
+    return safeFetch(chatCompletionsUrl(A.u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':llmAuthorization(A)},body:JSON.stringify(body)});
   }).then(function(r){
     clearTimeout(timer);
     if(!r.ok)return r.text().then(function(e){throw new Error('API('+r.status+'):'+e.substring(0,300));});
@@ -2057,7 +2077,7 @@ var forceNoThinking=ruleId==='revenue_workpaper';
 var body={model:A.m||'gpt-4',messages:[{role:'system',content:sysMsg},{role:'user',content:prompt}],temperature:0.1,max_tokens:8000};
 if(!plainJsonMode)applyJsonResponseMode(body,A.u);
 applyThinkingMode(body,A.u,A.m,forceNoThinking?false:!!A.think);
-return safeFetch(chatCompletionsUrl(A.u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+A.k},body:JSON.stringify(body)}).then(function(r){clearTimeout(t);if(!r.ok)return r.text().then(function(e){throw new Error('API('+r.status+'):'+e.substring(0,300));});return r.json();}).then(function(d){
+return safeFetch(chatCompletionsUrl(A.u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':llmAuthorization(A)},body:JSON.stringify(body)}).then(function(r){clearTimeout(t);if(!r.ok)return r.text().then(function(e){throw new Error('API('+r.status+'):'+e.substring(0,300));});return r.json();}).then(function(d){
 var msg=d.choices&&d.choices[0]&&d.choices[0].message;
 var c=window.AiResponse?AiResponse.messageContent(msg):(msg&&msg.content||'');
 if(!c||!String(c).trim())throw (window.AiResponse?AiResponse.emptyContentError(d,'合同提取'):new Error('合同提取返回正文为空'));
@@ -2829,7 +2849,7 @@ return '<div class="grid md:grid-cols-4 gap-3">'+
 '<div class="card p-4"><p class="text-xs text-gray-600">OCR引擎</p><p class="text-lg font-bold text-white">'+escapeHtml(getOCRLabel())+'</p><p class="text-xs text-gray-600 mt-1">扫描件PDF识别方式</p></div>'+
 '<div class="card p-4"><p class="text-xs text-gray-600">OCR状态</p><p class="text-lg font-bold '+(ocrReady?'text-emerald-400':'text-amber-400')+'">'+(ocrReady?'可用':'待配置')+'</p><p class="text-xs text-gray-600 mt-1">'+escapeHtml(ocrDetail)+'</p></div></div>';
 }
-function pgCfg(){return '<div class="space-y-6"><div><h1 class="text-2xl font-bold text-white">配置</h1><p class="text-sm text-gray-500">管理 OCR 引擎与 AI 模型。提取模板请前往侧边栏「提取模板库」。</p></div>'+cfgStatusHtml()+'<div class="flex gap-2 mb-4"><button onclick="showCfgTab(\'ocr\')" id="tab-ocr" class="tab-active px-4 py-2 rounded-lg text-sm">OCR引擎</button><button onclick="showCfgTab(\'ai\')" id="tab-ai" class="tab-inactive px-4 py-2 rounded-lg text-sm">AI模型</button></div><div id="cfgContent">'+ocrCfgHtml()+'</div></div>';}
+function pgCfg(){return '<div class="space-y-6"><div><h1 class="text-2xl font-bold text-white">配置</h1><p class="text-sm text-gray-500">管理 OCR 引擎与 AI 模型。提取模板请前往侧边栏「提取模板库」。</p></div>'+cfgStatusHtml()+'<div class="flex gap-2 mb-4"><button onclick="showCfgTab(\'ocr\')" id="tab-ocr" class="tab-active px-4 py-2 rounded-lg text-sm">OCR引擎</button><button onclick="showCfgTab(\'ai\')" id="tab-ai" class="tab-inactive px-4 py-2 rounded-lg text-sm">AI模型</button></div><div id="cfgContent">'+ocrCfgHtml()+'</div><div class="card p-5 max-w-lg"><h3 class="font-medium text-white mb-2">迁移到新版审计工具箱</h3><p class="text-xs text-gray-500 mb-3">导出项目、合同、结果、自定义规则和PDF。API Key不会写入备份。</p><button onclick="exportTauriMigrationBackup()" class="btn-sec btn-sm">导出迁移备份</button><div id="migrationExportStatus" class="mt-3"></div></div></div>';}
 
 window.showCfgTab=function(tab){
 var aiBtn=document.getElementById('tab-ai');var ocrBtn=document.getElementById('tab-ocr');
@@ -2839,7 +2859,12 @@ if(tab==='ai'){aiBtn.className='tab-active px-4 py-2 rounded-lg text-sm';content
 else{ocrBtn.className='tab-active px-4 py-2 rounded-lg text-sm';content.innerHTML=ocrCfgHtml();}
 };
 
-function aiCfgHtml(){return '<div class="card p-5 max-w-lg space-y-4"><h3 class="font-medium text-white">提取条款AI模型配置</h3><p class="text-xs text-gray-500 -mt-2">用于从合同文本中智能提取条款，与OCR引擎页的视觉模型相互独立。纯文本模型即可（如 deepseek-v4-flash、qwen-plus、glm-4）。</p><div><label class="text-sm font-medium block mb-1 text-gray-400">API Key <span class="text-ey">*</span></label><input id="ak" type="password" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="sk-xxxxxxxx" value="'+(A.k||'')+'"></div><div><label class="text-sm font-medium block mb-1 text-gray-400">Base URL <span class="text-ey">*</span></label><input id="au" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="https://api.xxx.com/v1" value="'+(A.u||'')+'"></div><div><label class="text-sm font-medium block mb-1 text-gray-400">Model <span class="text-ey">*</span></label><input id="am" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="qwen3.6-plus" value="'+(A.m||'')+'"></div><div class="flex items-center gap-3 p-3 bg-black border border-gray-700 rounded-lg"><label class="flex items-center gap-2 cursor-pointer flex-1"><input id="athink" type="checkbox" class="w-4 h-4 rounded border-gray-700 bg-black text-ey focus:ring-ey" '+(A.think?'checked':'')+'><span class="text-sm text-gray-300">启用思维链 (Thinking)</span></label><div class="text-xs text-gray-500 leading-tight">qwen3等推理模型建议关闭，否则会因思考耗尽token导致返回空</div></div><div class="flex gap-3"><button onclick="svCfg()" class="btn btn-sm">保存</button><button onclick="tsCfg()" class="btn-sec btn-sm">测试并保存</button></div><div id="cr" class="mt-3"></div></div>';}
+function aiCfgHtml(){
+if(A.source==='hub'){
+return '<div class="card p-5 max-w-lg space-y-4"><div class="flex items-center justify-between gap-3"><h3 class="font-medium text-white">提取条款AI模型</h3><span class="text-xs text-emerald-400 bg-emerald-900 rounded-full px-3 py-1">已连接 Hub 配置</span></div><p class="text-sm text-gray-300">AudiPick 已自动采用工具箱 Hub 中保存的 LLM，无需再次填写 API Key。</p><div class="bg-black border border-gray-700 rounded-lg p-4 space-y-2 text-sm"><div><span class="text-gray-500">Base URL：</span><span class="text-gray-300">'+escapeHtml(A.u||'')+'</span></div><div><span class="text-gray-500">Model：</span><span class="text-gray-300">'+escapeHtml(A.m||'')+'</span></div><div><span class="text-gray-500">鉴权：</span><span class="text-gray-300">'+(A.authMode==='raw'?'直接使用 API Key':'Bearer Token')+'</span></div></div><p class="text-xs text-gray-500">如需更改，请返回审计工具箱 Hub 的「LLM API 配置」。AudiPick 中仅需继续配置 OCR 引擎。</p></div>';
+}
+return '<div class="card p-5 max-w-lg space-y-4"><h3 class="font-medium text-white">提取条款AI模型配置</h3><p class="text-xs text-gray-500 -mt-2">未检测到可用的 Hub OpenAI 兼容配置时，可在此单独配置。用于从合同文本中智能提取条款，与OCR视觉模型相互独立。</p><div><label class="text-sm font-medium block mb-1 text-gray-400">API Key <span class="text-ey">*</span></label><input id="ak" type="password" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="sk-xxxxxxxx" value="'+(A.k||'')+'"></div><div><label class="text-sm font-medium block mb-1 text-gray-400">Base URL <span class="text-ey">*</span></label><input id="au" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="https://api.xxx.com/v1" value="'+(A.u||'')+'"></div><div><label class="text-sm font-medium block mb-1 text-gray-400">Model <span class="text-ey">*</span></label><input id="am" class="w-full bg-black border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" placeholder="qwen3.6-plus" value="'+(A.m||'')+'"></div><div class="flex items-center gap-3 p-3 bg-black border border-gray-700 rounded-lg"><label class="flex items-center gap-2 cursor-pointer flex-1"><input id="athink" type="checkbox" class="w-4 h-4 rounded border-gray-700 bg-black text-ey focus:ring-ey" '+(A.think?'checked':'')+'><span class="text-sm text-gray-300">启用思维链 (Thinking)</span></label><div class="text-xs text-gray-500 leading-tight">qwen3等推理模型建议关闭，否则会因思考耗尽token导致返回空</div></div><div class="flex gap-3"><button onclick="svCfg()" class="btn btn-sm">保存</button><button onclick="tsCfg()" class="btn-sec btn-sm">测试并保存</button></div><div id="cr" class="mt-3"></div></div>';
+}
 
 function ocrCfgHtml(){
 var engine=O.engine||'ai';
@@ -2904,8 +2929,8 @@ if(akSk)akSk.className='space-y-2 '+(a==='baidu_aksk'?'':'hidden');
 if(tk)tk.className=(a==='bearer'||a==='query'?'':'hidden');
 };
 
-window.svCfg=function(){var k=document.getElementById('ak').value.trim(),u=document.getElementById('au').value.trim(),m=document.getElementById('am').value.trim();if(!k||!u||!m){alert('请填写所有必填项');return;}A={k:k,u:u,m:m,think:!!document.getElementById('athink').checked};save();var el=document.getElementById('cr');if(el){el.innerHTML='<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">AI配置已保存！</div>';}restoreAppFocus();localStorage.setItem('ap_tour_done','true');if(typeof window.endTour==='function') try{ window.endTour(); }catch(e){}};
-window.tsCfg=function(){var k=document.getElementById('ak').value.trim(),u=document.getElementById('au').value.trim(),m=document.getElementById('am').value.trim();if(!k||!u||!m){alert('请填写所有必填项');return;}var think=!!document.getElementById('athink').checked;var el=document.getElementById('cr');el.innerHTML='<span class="spinner mr-2"></span>测试中...';var ctrl=new AbortController();var t=setTimeout(function(){ctrl.abort();},30000);var body={model:m,messages:[{role:'user',content:'请只回复两个字符：ok'}],max_tokens:300};applyThinkingMode(body,u,m,think);safeFetch(chatCompletionsUrl(u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},body:JSON.stringify(body)}).then(function(r){clearTimeout(t);return r.text().then(function(txt){var detail='';try{var jj=JSON.parse(txt);var ch=jj.choices&&jj.choices[0];var msg=ch&&ch.message;var fr=ch&&ch.finish_reason;var c=msg&&(msg.content||'');var rc=msg&&(msg.reasoning_content||'');detail='content='+JSON.stringify(c).substring(0,60)+(rc?' | reasoning='+rc.length+'字':'')+' | finish_reason='+fr;}catch(e){detail=txt.substring(0,120);}if(r.ok){A={k:k,u:u.replace(/\/+$/,''),m:m,think:think};save();render();showCfgTab('ai');el=document.getElementById('cr');}el.innerHTML=r.ok?'<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">连接成功，已保存！'+detail+'</div>':'<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">失败('+r.status+') '+txt.substring(0,120)+'</div>';localStorage.setItem('ap_tour_done','true');if(typeof window.endTour==='function') try{ window.endTour(); }catch(e2){}restoreAppFocus();});}).catch(function(e){clearTimeout(t);el.innerHTML='<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">'+(e.name==='AbortError'?'超时':e.message)+'</div>';restoreAppFocus();});};
+window.svCfg=function(){var k=document.getElementById('ak').value.trim(),u=document.getElementById('au').value.trim(),m=document.getElementById('am').value.trim();if(!k||!u||!m){alert('请填写所有必填项');return;}A={k:k,u:u,m:m,think:!!document.getElementById('athink').checked,authMode:'bearer',source:'local'};LocalA=A;save();var el=document.getElementById('cr');if(el){el.innerHTML='<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">AI配置已保存！</div>';}restoreAppFocus();localStorage.setItem('ap_tour_done','true');if(typeof window.endTour==='function') try{ window.endTour(); }catch(e){}};
+window.tsCfg=function(){var k=document.getElementById('ak').value.trim(),u=document.getElementById('au').value.trim(),m=document.getElementById('am').value.trim();if(!k||!u||!m){alert('请填写所有必填项');return;}var think=!!document.getElementById('athink').checked;var el=document.getElementById('cr');el.innerHTML='<span class="spinner mr-2"></span>测试中...';var ctrl=new AbortController();var t=setTimeout(function(){ctrl.abort();},30000);var body={model:m,messages:[{role:'user',content:'请只回复两个字符：ok'}],max_tokens:300};applyThinkingMode(body,u,m,think);safeFetch(chatCompletionsUrl(u),{method:'POST',signal:ctrl.signal,headers:{'Content-Type':'application/json','Authorization':'Bearer '+k},body:JSON.stringify(body)}).then(function(r){clearTimeout(t);return r.text().then(function(txt){var detail='';try{var jj=JSON.parse(txt);var ch=jj.choices&&jj.choices[0];var msg=ch&&ch.message;var fr=ch&&ch.finish_reason;var c=msg&&(msg.content||'');var rc=msg&&(msg.reasoning_content||'');detail='content='+JSON.stringify(c).substring(0,60)+(rc?' | reasoning='+rc.length+'字':'')+' | finish_reason='+fr;}catch(e){detail=txt.substring(0,120);}if(r.ok){A={k:k,u:u.replace(/\/+$/,''),m:m,think:think,authMode:'bearer',source:'local'};LocalA=A;save();render();showCfgTab('ai');el=document.getElementById('cr');}el.innerHTML=r.ok?'<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">连接成功，已保存！'+detail+'</div>':'<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">失败('+r.status+') '+txt.substring(0,120)+'</div>';localStorage.setItem('ap_tour_done','true');if(typeof window.endTour==='function') try{ window.endTour(); }catch(e2){}restoreAppFocus();});}).catch(function(e){clearTimeout(t);el.innerHTML='<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">'+(e.name==='AbortError'?'超时':e.message)+'</div>';restoreAppFocus();});};
 window.svOcr=function(){
 if(O.engine==='ai'){
 var vu=document.getElementById('visUrl').value.trim(),vk=document.getElementById('visKey').value.trim(),vm=document.getElementById('visModel').value.trim();
@@ -3612,6 +3637,10 @@ try{
   alert('底稿填列清单导出失败: '+(e&&e.message?e.message:String(e)));
 }
 };
+
+function dbGetAllPdfs(){return new Promise(function(resolve){var out=[];try{var tx=db.transaction('pdfs','readonly');var req=tx.objectStore('pdfs').openCursor();req.onsuccess=function(e){var cursor=e.target.result;if(!cursor){resolve(out);return;}out.push({id:String(cursor.key),blob:cursor.value});cursor.continue();};req.onerror=function(){resolve(out);};}catch(e){resolve(out);}});}
+function blobToBase64(blob){return new Promise(function(resolve,reject){if(!(blob instanceof Blob)){resolve(blob);return;}var reader=new FileReader();reader.onload=function(){var value=String(reader.result||'');resolve({type:blob.type||'application/pdf',base64:value.split(',')[1]||''});};reader.onerror=function(){reject(reader.error||new Error('读取PDF失败'));};reader.readAsDataURL(blob);});}
+window.exportTauriMigrationBackup=async function(){var status=document.getElementById('migrationExportStatus');if(status)status.innerHTML='<span class="spinner mr-2"></span>正在整理本地数据…';try{var pdfRows=await dbGetAllPdfs();var pdfs=[];for(var i=0;i<pdfRows.length;i++){pdfs.push({id:pdfRows[i].id,data:await blobToBase64(pdfRows[i].blob)});if(status)status.textContent='正在整理PDF '+(i+1)+'/'+pdfRows.length;}var safeO=JSON.parse(JSON.stringify(O||{}));if(safeO.custom){delete safeO.custom.ak;delete safeO.custom.sk;delete safeO.custom.headers;}var payload={format:'audit-toolbox.audipick-backup',version:1,createdAt:new Date().toISOString(),projects:P,contracts:Ct,results:V,customRules:CUSTOM_RULES,ocr:safeO,pdfs:pdfs};var blob=new Blob([JSON.stringify(payload)],{type:'application/json'});var url=URL.createObjectURL(blob);var a=document.createElement('a');a.href=url;a.download='AudiPick迁移备份_'+new Date().toISOString().slice(0,10)+'.json';document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(url);},1000);if(status)status.innerHTML='<div class="text-sm text-emerald-400 bg-emerald-900 rounded-lg p-2">迁移备份已导出，共 '+P.length+' 个项目、'+Ct.length+' 份合同、'+pdfs.length+' 个PDF。</div>';}catch(e){if(status)status.innerHTML='<div class="text-sm text-red-400 bg-red-900 rounded-lg p-2">导出失败：'+escapeHtml(e&&e.message?e.message:String(e))+'</div>';}};
 
 // ===== Workpaper =====
 function pgWork(){var c=gc(cid);if(!c){nav('dash');return'';}

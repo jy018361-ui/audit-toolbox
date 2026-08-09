@@ -1,16 +1,30 @@
 // 收入合同审阅底稿（V2 示例底稿）主问题映射与填列清单辅助逻辑
 (function (global) {
-  function q(sheet, row, questionNo, question) {
+  function q(sheet, row, questionNo, question, cells) {
+    cells = cells || {};
     return {
       sheet: sheet,
       row: row,
       questionNo: questionNo,
       question: question,
-      answerCell: 'D' + row,
-      reasonCell: 'E' + row,
-      evidenceCell: 'F' + row
+      displayQuestionNo: cells.displayQuestionNo || questionNo,
+      displayQuestion: cells.displayQuestion || question,
+      displaySection: cells.displaySection || '',
+      dependencies: cells.dependencies || null,
+      answerCell: cells.answerCell || ('D' + row),
+      reasonCell: cells.reasonCell || ('E' + row),
+      evidenceCell: cells.evidenceCell || ('F' + row),
+      detailType: cells.detailType || ''
     };
   }
+
+  var generalInfoQuestions = [
+    q('第1部分——一般合同信息', 2, 'GI.1', '客户名称', { answerCell: 'D2' }),
+    q('第1部分——一般合同信息', 3, 'GI.2', '法人实体（卖方）', { answerCell: 'D3' }),
+    q('第1部分——一般合同信息', 4, 'GI.3', '合同号', { answerCell: 'D4' }),
+    q('第1部分——一般合同信息', 5, 'GI.4', '合同计价货币', { answerCell: 'D5' }),
+    q('第1部分——一般合同信息', 6, 'GI.5', '合同开始日期', { answerCell: 'D6' })
+  ];
 
   var questions = [
     q('第1步', 5, '1.1', '此协议是否与客户订立，是否适用收入准则？\n\n注意，以下合同不适用HKFRS 15： \n(i) 租赁合同（HKFRS 16/CAS 21）； \n(ii) 保险合同（HKFRS 4或HKFRS 17（如生效）/CAS 25，除非主体选择根据HKFRS 17.8/CAS 25.5对某些服务合同采用HKFRS 15/CAS 14）； \n(iii) 适用HKFRS 9/CAS 22,CAS 23, CAS 24、HKFRS 10/CAS 33、HKFRS 11/CAS 40、HKAS 27和HKAS 28/CAS 2的金融工具及其他合同权利或义务；及\n(iv) 从事相同业务经营的主体之间为便于向客户销售而进行的非货币性交换。\n\n考虑交易对手是否为客户。'),
@@ -92,6 +106,173 @@
       q(sheet, 11, '5.1.2', '控制权的转移 - 时点')
     );
   }
+  // 一般信息只作为首页前置区块，不改变原有五步法问题的插入位置与顺序。
+  questions = generalInfoQuestions.concat(questions);
+
+  var stepFiveCriteria = [
+    '客户在实体履约的同时即取得并消耗企业履约所带来的经济利益。',
+    '实体的履约创造或改良了资产，且客户能够控制履约过程中创造或改良的资产。',
+    '履约产出的商品对实体没有替代用途，且实体在整个合同期间有权就累计至今已完成的履约部分收取款项。'
+  ];
+  var pointInTimeQuestions = [
+    { row: 13, no: '5.1.2-1', displayNo: '第2部分(1)', section: '第2部分—评估客户取得控制权的时点', text: '（1）主体就资产享有现时收款权利——HKFRS 15.38(a)或CAS14.13(I)' },
+    { row: 16, no: '5.1.2-2', displayNo: '第2部分(2)', section: '第2部分—评估客户取得控制权的时点', text: '（2）客户拥有资产的法定所有权——HKFRS 15.38(b)或CAS14.13(II)' },
+    { row: 18, no: '5.1.2-3', displayNo: '第2部分(3)', section: '第2部分—评估客户取得控制权的时点', text: '（3）主体已转移了对资产的实物占有——HKFRS 15.38(c)或CAS14.13(III)' },
+    { row: 21, no: '5.1.2-4', displayNo: '第2部分(4)', section: '第2部分—评估客户取得控制权的时点', text: '（4）客户拥有资产所有权上的重大风险和报酬——HKFRS 15.38(d)或CAS14.13(IV)' },
+    { row: 24, no: '5.1.2-5', displayNo: '第2部分(5)', section: '第2部分—评估客户取得控制权的时点', text: '（5）客户已接受资产——HKFRS 15.38(e) & B83-B86或CAS14.13(V)' },
+    { row: 27, no: '5.1.2-7', displayNo: '第2部分(7)', section: '第2部分—评估客户取得控制权的时点', text: '（7）其他对价（如有，具体说明）' },
+    { row: 28, no: '5.1.2-C', displayNo: '第2部分结论', section: '第2部分—评估客户取得控制权的时点', text: '结论（控制权转移至客户的时点）（根据上述内容）' }
+  ];
+  var overTimeQuestions = [
+    { row: 13, no: '5.1.1-A1', displayNo: '第1部分', section: '第1部分—履约情况概述', text: '已承诺商品和服务的性质及实体的履约情况概述' },
+    { row: 18, no: '5.1.1-A2', displayNo: '第2部分', section: '第2部分—能否合理计量履约进度', text: '实体是否可合理计量履约进度？' },
+    { row: 23, no: '5.1.1-A3', displayNo: '第3部分', section: '第3部分—无法合理计量履约进度', text: '（当实体无法合理计量履约进度时）实体是否预期会收回发生的成本？', dependencies: { conditions: [{ questionNo: '5.1.1-A2', operator: 'no' }] } },
+    { row: 29, no: '5.1.1-A4', displayNo: '第4部分', section: '第4部分—选择进度计量方法', text: '（当实体可以合理计量履约进度时）管理层在计量履约进度时采用哪种方法（投入法/产出法）？', dependencies: { conditions: [{ questionNo: '5.1.1-A2', operator: 'yes' }] } },
+    { row: 36, no: '5.1.1-O1', displayNo: '第5A部分(a)', section: '第5A部分—产出法', text: '实体是否可使用“有权开具发票”的实务变通计量履约进度？（即，发票金额是否与累计至今实体履约情况“对客户的价值”直接相对应）', dependencies: { conditions: [{ questionNo: '5.1.1-A4', operator: 'contains', value: '产出法' }] } },
+    { row: 41, no: '5.1.1-O2', displayNo: '第5A部分(b)', section: '第5A部分—产出法', text: '如果实体不采用/无法采用“有权开具发票”的实务变通计量履约进度，则管理层计量进度的基础是什么？为什么？', dependencies: { conditions: [{ questionNo: '5.1.1-A4', operator: 'contains', value: '产出法' }, { questionNo: '5.1.1-O1', operator: 'no' }] } },
+    { row: 48, no: '5.1.1-I1', displayNo: '第5B部分(a)', section: '第5B部分—投入法', text: '管理层计量履约进度的基础是什么？为什么？', dependencies: { conditions: [{ questionNo: '5.1.1-A4', operator: 'contains', value: '投入法' }] } },
+    { row: 53, no: '5.1.1-I2', displayNo: '第5B部分(b)', section: '第5B部分—投入法', text: '实体是否发生未包含在合同价款中的明显低效率情况（如，未预期的浪费的材料、人工或其他资源的成本金额）？', dependencies: { conditions: [{ questionNo: '5.1.1-A4', operator: 'contains', value: '投入法' }] } },
+    { row: 55, no: '5.1.1-I3', displayNo: '第5B部分(c)', section: '第5B部分—投入法', text: '在客户所在地是否存在任何未安装的材料？', dependencies: { conditions: [{ questionNo: '5.1.1-A4', operator: 'contains', value: '投入法' }] } },
+    { row: 61, no: '5.1.1-I3a', displayNo: '第5B部分(c)(i)', section: '第5B部分—未安装材料的四项条件', text: '商品不可明确区分——HKFRS 15.B19(b)(i)/CASAG 14.IV.(III).1.(2)', dependencies: { conditions: [{ questionNo: '5.1.1-I3', operator: 'yes' }] } },
+    { row: 64, no: '5.1.1-I3b', displayNo: '第5B部分(c)(ii)', section: '第5B部分—未安装材料的四项条件', text: '客户先取得该商品或材料的控制权，之后才接受与之相关的服务——HKFRS 15.B19(b)(ii)/CASAG 14.IV.(III).1.(2)', dependencies: { conditions: [{ questionNo: '5.1.1-I3', operator: 'yes' }] } },
+    { row: 67, no: '5.1.1-I3c', displayNo: '第5B部分(c)(iii)', section: '第5B部分—未安装材料的四项条件', text: '已转移的该商品的成本相对于完全履行履约义务的预计总成本而言是重大的——HKFRS 15.B19(b)(iii)/CASAG 14.IV.(III).1.(2)', dependencies: { conditions: [{ questionNo: '5.1.1-I3', operator: 'yes' }] } },
+    { row: 70, no: '5.1.1-I3d', displayNo: '第5B部分(c)(iv)', section: '第5B部分—未安装材料的四项条件', text: '主体自第三方采购了商品，并且未深入参与该商品的设计和制造（但主体作为主要责任人）——HKFRS 15.B19(b)(iv)/CASAG 14.IV.(III).1.(2)', dependencies: { conditions: [{ questionNo: '5.1.1-I3', operator: 'yes' }] } },
+    { row: 74, no: '5.1.1-I4', displayNo: '第5B部分—调整', section: '第5B部分—投入法', text: '记录调整详情及理由', dependencies: { groups: [[{ questionNo: '5.1.1-I2', operator: 'yes' }], [{ questionNo: '5.1.1-I3a', operator: 'yes' }, { questionNo: '5.1.1-I3b', operator: 'yes' }, { questionNo: '5.1.1-I3c', operator: 'yes' }, { questionNo: '5.1.1-I3d', operator: 'yes' }]] } },
+    { row: 78, no: '5.1.1-I5', displayNo: '第5B部分(d)', section: '第5B部分—投入法', text: '计量履约进度时是否需进行任何其他调整？', dependencies: { conditions: [{ questionNo: '5.1.1-A4', operator: 'contains', value: '投入法' }] } }
+  ];
+  var overTimeCellLayout = {
+    '5.1.1-A1': { row: 14, answerCell: 'B14', reasonCell: 'B14', evidenceCell: 'C14' },
+    '5.1.1-A2': { row: 17, answerCell: 'B17', reasonCell: 'B19', evidenceCell: 'C19' },
+    '5.1.1-A3': { row: 22, answerCell: 'B22', reasonCell: 'B24', evidenceCell: 'C24' },
+    '5.1.1-A4': { row: 28, answerCell: 'B28', reasonCell: 'B30', evidenceCell: 'C30' },
+    '5.1.1-O1': { row: 35, answerCell: 'C35', reasonCell: 'B37', evidenceCell: 'C37' },
+    '5.1.1-O2': { row: 40, answerCell: 'B40', reasonCell: 'B42', evidenceCell: 'C42' },
+    '5.1.1-I1': { row: 47, answerCell: 'B47', reasonCell: 'B49', evidenceCell: 'C49' },
+    '5.1.1-I2': { row: 52, answerCell: 'B52', reasonCell: 'B54', evidenceCell: 'C54' },
+    '5.1.1-I3': { row: 56, answerCell: 'B56', reasonCell: 'B56', evidenceCell: 'C56' },
+    '5.1.1-I3a': { row: 61, answerCell: 'C61', reasonCell: 'B62', evidenceCell: 'C62' },
+    '5.1.1-I3b': { row: 64, answerCell: 'C64', reasonCell: 'B65', evidenceCell: 'C65' },
+    '5.1.1-I3c': { row: 67, answerCell: 'C67', reasonCell: 'B68', evidenceCell: 'C68' },
+    '5.1.1-I3d': { row: 70, answerCell: 'C70', reasonCell: 'B71', evidenceCell: 'C71' },
+    '5.1.1-I4': { row: 73, answerCell: 'B73', reasonCell: 'B75', evidenceCell: 'C75' },
+    '5.1.1-I5': { row: 77, answerCell: 'B77', reasonCell: 'B79', evidenceCell: 'C79' }
+  };
+  overTimeQuestions.forEach(function (entry) { Object.assign(entry, overTimeCellLayout[entry.no] || {}); });
+  pointInTimeQuestions.forEach(function (entry) {
+    if (entry.no === '5.1.2-C') Object.assign(entry, { row: 29, answerCell: 'B29', reasonCell: 'B29', evidenceCell: 'F29' });
+  });
+  var appendixQuestionTemplates = {
+    '1.4 合同变更': [
+      { row: 18, no: '1.4-M1', displayNo: '第1部分', section: '第1部分—合同变更简要说明', text: '合同变更（合同范围、价格或二者的变动）的简要说明' },
+      { row: 22, no: '1.4-M2', displayNo: '第2部分(a)', section: '第2部分—新增商品或服务', text: '请描述“新增商品或服务”。' },
+      { row: 26, no: '1.4-M3', displayNo: '第2部分(b)', section: '第2部分—新增商品或服务', text: '新增商品或服务是否“可明确区分”？（有关可明确区分的确定，见HKFRS 15第27-29段或CASAG 14、四、(二)、1）' },
+      { row: 30, no: '1.4-M4', displayNo: '第2部分(c)', section: '第2部分—新增商品或服务', text: '新增合同价款是否反映新增商品或服务的“单独售价”？（单独售价指引见HKFRS 15第77-78段或CASAG 14、五、(二)、1）' },
+      { row: 33, no: '1.4-M5', displayNo: '第2部分结论', section: '第2部分—新增商品或服务', text: '考虑(b)“可明确区分”且(c)“具有单独售价”的(a)“新增商品或服务”之后，合同变更是否应作为单独合同进行会计处理？' },
+      { row: 37, no: '1.4-M6', displayNo: '第3部分(a)', section: '第3部分—不作为单独合同的会计处理', text: '“剩余商品或服务”是什么？', dependencies: { conditions: [{ questionNo: '1.4-M5', operator: 'no' }] } },
+      { row: 39, no: '1.4-M7', displayNo: '第3部分(b)', section: '第3部分—不作为单独合同的会计处理', text: '剩余商品或服务与已经提供的商品或服务是否“可明确区分”？', dependencies: { conditions: [{ questionNo: '1.4-M5', operator: 'no' }] } },
+      { row: 42, no: '1.4-M8', displayNo: '第3部分结论', section: '第3部分—不作为单独合同的会计处理', text: '考虑(a)“剩余商品或服务”以及其与已经提供的商品或服务是否(b)“可明确区分”之后，合同变更应作为原合同终止并订立新合同，还是作为原合同组成部分进行累计追溯调整？', dependencies: { conditions: [{ questionNo: '1.4-M5', operator: 'no' }] } }
+    ],
+    '2.2.1 PVA': [
+      { row: 16, no: '2.2.1-PVA1', displayNo: '第1部分', section: '第1部分—安排和承诺性质', text: '安排和承诺性质的简要说明（即，主体提供特定商品或服务或安排提供特定商品或服务）' },
+      { row: 20, no: '2.2.1-PVA2', displayNo: '第2部分', section: '第2部分—特定商品或服务', text: '待提供的特定商品或服务（标的商品或服务或获取标的商品或服务的权利）' },
+      { row: 23, no: '2.2.1-PVA3', displayNo: '第3部分', section: '第3部分—参与的第三方', text: '参与提供特定商品或服务的第三方是谁？第三方参与的性质是什么？' },
+      { row: 27, no: '2.2.1-PVA4', displayNo: '第4部分', section: '第4部分—识别客户', text: '客户是谁？客户可能是供应商、用户或二者，具体取决于承诺的性质？' },
+      { row: 33, no: '2.2.1-PVA5', displayNo: '第5部分', section: '第5部分—转让前的控制', text: '主体是否在向客户转让特定商品或服务之前“控制”该商品或服务？' },
+      { row: 41, no: '2.2.1-PVA6', displayNo: '第6部分(1)', section: '第6部分—主要指标', text: '主要指标#1：主体承担向客户转让商品的主要责任' },
+      { row: 45, no: '2.2.1-PVA7', displayNo: '第6部分(2)', section: '第6部分—主要指标', text: '主要指标#2：主体在转让商品或服务之前或之后承担了存货风险' },
+      { row: 49, no: '2.2.1-PVA8', displayNo: '第6部分(3)', section: '第6部分—主要指标', text: '主要指标#3：主体拥有自主定价权' },
+      { row: 52, no: '2.2.1-PVA9', displayNo: '第7部分', section: '第7部分—结论', text: '结论（考虑控制原则（如适用，主要指标）之后，主体为安排中的主要责任人/代理人）' },
+      { row: 55, no: '2.2.1-PVA10', displayNo: '第8部分', section: '第8部分—其他履约义务', text: '是否有任何其他履约义务需要进一步评估主要责任人与代理人的关系？' }
+    ],
+    '2.3 质保': [
+      { row: 15, no: '2.3-W1', displayNo: '第1部分', section: '第1部分—质保安排', text: '简要描述与客户的质保安排' },
+      { row: 18, no: '2.3-W2', displayNo: '第2部分', section: '第2部分—能否单独购买', text: '根据上述描述，客户是否可以选择单独购买质保？' },
+      { row: 26, no: '2.3-W4', displayNo: '第3部分(a)', section: '第3部分—是否提供额外服务', text: '法律是否要求质保？', dependencies: { conditions: [{ questionNo: '2.3-W2', operator: 'no' }] } },
+      { row: 30, no: '2.3-W5', displayNo: '第3部分(b)', section: '第3部分—是否提供额外服务', text: '质保期长度', dependencies: { conditions: [{ questionNo: '2.3-W2', operator: 'no' }] } },
+      { row: 34, no: '2.3-W6', displayNo: '第3部分(c)', section: '第3部分—是否提供额外服务', text: '实体承诺履行任务的性质', dependencies: { conditions: [{ questionNo: '2.3-W2', operator: 'no' }] } },
+      { row: 38, no: '2.3-W7', displayNo: '第3部分(d)', section: '第3部分—是否提供额外服务', text: '法律是否要求对造成伤害或损害的产品进行赔偿？', dependencies: { conditions: [{ questionNo: '2.3-W2', operator: 'no' }] } },
+      { row: 41, no: '2.3-W8', displayNo: '第3部分(e)', section: '第3部分—是否提供额外服务', text: '质保是否承诺赔偿客户因专利、版权、商标或实体产品的其他侵权索赔而产生的责任和损害？', dependencies: { conditions: [{ questionNo: '2.3-W2', operator: 'no' }] } },
+      { row: 44, no: '2.3-W9', displayNo: '第3部分结论', section: '第3部分—是否提供额外服务', text: '除了保证产品符合既定标准外，质保是否还向客户提供服务？（考虑上述因素后）', reasonCell: 'B46', evidenceCell: 'C46', dependencies: { conditions: [{ questionNo: '2.3-W2', operator: 'no' }] } },
+      { row: 49, no: '2.3-W10', displayNo: '第4部分', section: '第4部分—质保类型组合', text: '合同是否包括保证型质保和服务型质保？' },
+      { row: 52, no: '2.3-W11', displayNo: '第5部分', section: '第5部分—质保分配', text: '保证型质保和服务型质保能否合理分配？', dependencies: { conditions: [{ questionNo: '2.3-W10', operator: 'yes' }] } },
+      { row: 55, no: '2.3-W12', displayNo: '第5部分—分配基础', section: '第5部分—质保分配', text: '保证型和服务型质保之间的分配基础。', dependencies: { conditions: [{ questionNo: '2.3-W10', operator: 'yes' }, { questionNo: '2.3-W11', operator: 'yes' }] } }
+    ],
+    '3.2 可变对价': [
+      { row: 18, no: '3.2-VC1', displayNo: '第1部分', section: '第1部分—识别可变对价', text: '简要描述合同条款和导致对价变化的事件' },
+      { row: 22, no: '3.2-VC2', displayNo: '第2部分(1)', section: '第2部分—可变对价的估计', text: '实体有权获得的可变对价的可能结果是什么？仅有两个可能结果，还是存在多个可能结果？每种结果的概率是多少？' },
+      { row: 26, no: '3.2-VC3', displayNo: '第2部分(2)', section: '第2部分—可变对价的估计', text: '实体用于估计可变对价的方法及其选择依据是什么？', reasonCell: 'B28', evidenceCell: 'C28' },
+      { row: 30, no: '3.2-VC4', displayNo: '第2部分—估计计算', section: '第2部分—可变对价的估计', text: '估计可变对价——计算期望值（如使用期望值）或最可能发生的单一金额（如使用最可能发生金额）。' },
+      { row: 40, no: '3.2-VC5', displayNo: '第3部分(a)(i)', section: '第3部分—应用可变对价限制', text: '对价金额极易受到超出主体影响范围之外的因素影响（例如，市场波动性、第三方的判断或行动、天气状况、已承诺商品或服务存在较高的陈旧过时风险）——HKFRS15.57(a)或CASAG 14.V.(I).1(2)', answerCell: 'C40', reasonCell: 'B41', evidenceCell: 'C41' },
+      { row: 43, no: '3.2-VC6', displayNo: '第3部分(a)(ii)', section: '第3部分—应用可变对价限制', text: '关于对价金额的不确定性预计在较长时期内均无法消除。——HKFRS 15.57(b)或CASAG 14.V.(I).1(2)', answerCell: 'C43', reasonCell: 'B44', evidenceCell: 'C44' },
+      { row: 46, no: '3.2-VC7', displayNo: '第3部分(a)(iii)', section: '第3部分—应用可变对价限制', text: '主体对类似类型合同的经验（或其他证据）有限，或相关经验（或其他证据）的预测价值有限。——HKFRS 15.57(c)或CASAG 14.V.(I).1(2)', answerCell: 'C46', reasonCell: 'B47', evidenceCell: 'C47' },
+      { row: 49, no: '3.2-VC8', displayNo: '第3部分(a)(iv)', section: '第3部分—应用可变对价限制', text: '主体在实务中对相似情形下的类似合同提供了较多不同程度的价格折让或不同的付款条款和条件。——HKFRS 15.57(d)或CASAG 14.V.(I).1(2)', answerCell: 'C49', reasonCell: 'B50', evidenceCell: 'C50' },
+      { row: 52, no: '3.2-VC9', displayNo: '第3部分(a)(v)', section: '第3部分—应用可变对价限制', text: '合同具有大量且分布广泛的可能发生的对价金额。——HKFRS 15.57(e)或CASAG 14.V.(I).1(2)', answerCell: 'C52', reasonCell: 'B53', evidenceCell: 'C53' },
+      { row: 55, no: '3.2-VC10', displayNo: '第3部分(a)(vi)', section: '第3部分—应用可变对价限制', text: '其他考虑因素（如有，请指明）', answerCell: 'C55', reasonCell: 'B56', evidenceCell: 'C56' },
+      { row: 60, no: '3.2-VC11', displayNo: '第3部分(b)', section: '第3部分—应用可变对价限制', text: '评估潜在转回对在合同层面确认的累计收入的“重大性”', answerCell: 'C60', reasonCell: 'B60', evidenceCell: 'C60' },
+      { row: 62, no: '3.2-VC12', displayNo: '第3部分结论', section: '第3部分—应用可变对价限制', text: '已确认的累计收入金额是否“极可能”不会发生“重大”转回？是否需要对全部或部分可变对价进行限制？' },
+      { row: 64, no: '3.2-VC13', displayNo: '第3部分—限制依据', section: '第3部分—应用可变对价限制', text: '关于是否需要对全部或部分可变对价进行限制的依据。如需要进行限制，则说明定量和确定依据。' },
+      { row: 67, no: '3.2-VC14', displayNo: '第4部分', section: '第4部分—其他履约义务', text: '是否需要进一步可变对价评估的任何其他履约义务？' }
+    ],
+    '3.5 客户对价': [
+      { row: 17, no: '3.5-PC1', displayNo: '第1部分', section: '第1部分—应付客户对价简述', text: '简要描述（1）提供给客户的商品和服务以及（2）应付客户对价的性质。' },
+      { row: 21, no: '3.5-PC2', displayNo: '第2部分', section: '第2部分—是否取得可明确区分的商品或服务', text: '评估应付客户对价是否用于从客户获取“可明确区分的”商品或服务？请提供理由。' },
+      { row: 23, no: '3.5-PC3', displayNo: '第2部分结论', section: '第2部分—是否取得可明确区分的商品或服务', text: '应付客户对价是否用于获取可明确区分的商品或服务？' },
+      { row: 26, no: '3.5-PC4', displayNo: '第3部分', section: '第3部分—定价与公允价值', text: '可明确区分的商品或服务是如何定价的？能否合理估计可明确区分的商品或服务的公允价值？如果能，估计可明确区分的商品或服务的公允价值的基础。', dependencies: { conditions: [{ questionNo: '3.5-PC3', operator: 'yes' }] } },
+      { row: 28, no: '3.5-PC5', displayNo: '第3部分结论', section: '第3部分—定价与公允价值', text: '可明确区分的商品或服务的公允价值能否合理估计？', dependencies: { conditions: [{ questionNo: '3.5-PC3', operator: 'yes' }] } },
+      { row: 31, no: '3.5-PC6', displayNo: '第4部分', section: '第4部分—超过公允价值的金额', text: '应付客户对价的金额是否超过可明确区分的商品或服务的公允价值？', dependencies: { conditions: [{ questionNo: '3.5-PC5', operator: 'yes' }] } }
+    ]
+  };
+  var detailQuestions = [];
+  for (var detailPo = 1; detailPo <= 5; detailPo++) {
+    var stepSheet = '第5a步（PO#' + detailPo + '）';
+    stepFiveCriteria.forEach(function (text, index) {
+      detailQuestions.push(q(stepSheet, 6 + index, '5.1-C' + (index + 1), text, {
+        displayQuestionNo: '时段条件' + (index + 1),
+        displayQuestion: text,
+        displaySection: '第5.1步—控制权在一段时间内转移的条件',
+        detailType: 'step_five_criterion'
+      }));
+    });
+    pointInTimeQuestions.forEach(function (entry) {
+      detailQuestions.push(q('5.1.2 时点（PO#' + detailPo + '）', entry.row, entry.no, entry.text, {
+        displayQuestionNo: entry.displayNo,
+        displayQuestion: entry.text,
+        displaySection: entry.section,
+        dependencies: entry.dependencies,
+        answerCell: entry.answerCell,
+        reasonCell: entry.reasonCell,
+        evidenceCell: entry.evidenceCell,
+        detailType: 'point_in_time'
+      }));
+    });
+    overTimeQuestions.forEach(function (entry) {
+      detailQuestions.push(q('5.1.1 时段（PO#' + detailPo + '）', entry.row, entry.no, entry.text, {
+        answerCell: entry.answerCell || ('B' + entry.row),
+        reasonCell: entry.reasonCell || ('B' + entry.row),
+        evidenceCell: entry.evidenceCell || ('C' + entry.row),
+        displayQuestionNo: entry.displayNo,
+        displayQuestion: entry.text,
+        displaySection: entry.section,
+        dependencies: entry.dependencies,
+        detailType: 'over_time'
+      }));
+    });
+  }
+  Object.keys(appendixQuestionTemplates).forEach(function (sheet) {
+    appendixQuestionTemplates[sheet].forEach(function (entry) {
+      detailQuestions.push(q(sheet, entry.row, entry.no, entry.text, {
+        answerCell: entry.answerCell || ('B' + entry.row),
+        reasonCell: entry.reasonCell || ('B' + entry.row),
+        evidenceCell: entry.evidenceCell || ('C' + entry.row),
+        displayQuestionNo: entry.displayNo,
+        displayQuestion: entry.text,
+        displaySection: entry.section,
+        dependencies: entry.dependencies,
+        detailType: 'triggered_appendix'
+      }));
+    });
+  });
+  var allQuestions = questions.concat(detailQuestions);
 
   function norm(value) {
     return String(value || '').toLowerCase().replace(/[\s\p{P}\p{S}]/gu, '');
@@ -101,12 +282,41 @@
     var sheet = String(item.workpaper_sheet || '').trim();
     var no = String(item.question_no || '').trim();
     var description = norm(item.question_description);
-    var bySheetNo = questions.find(function (x) {
+    var obligationMatch = no.match(/^2\.1-PO#(\d+)$/i);
+    if (sheet === '2.1 履约义务' && obligationMatch) {
+      var obligationRow = 5 + parseInt(obligationMatch[1], 10);
+      return q(sheet, obligationRow, no, item.question_description || ('履约义务 ' + obligationMatch[1]), {
+        answerCell: 'H' + obligationRow,
+        reasonCell: 'I' + obligationRow,
+        evidenceCell: 'C' + obligationRow,
+        displayQuestionNo: '第' + obligationMatch[1] + '项履约义务',
+        displayQuestion: item.question_description || ('商品和/或服务 ' + obligationMatch[1]),
+        displaySection: '履约义务清单',
+        detailType: 'performance_obligation'
+      });
+    }
+    var bySheetNo = allQuestions.find(function (x) {
       return x.sheet === sheet && String(x.questionNo) === no;
     });
     if (bySheetNo) return bySheetNo;
+    var normalizedTemplate = normalizeTemplateSheet(sheet);
+    if (normalizedTemplate) {
+      var byTemplateNo = allQuestions.find(function (x) {
+        return normalizeTemplateSheet(x.sheet) === normalizedTemplate && String(x.questionNo) === no;
+      });
+      if (byTemplateNo) return Object.assign({}, byTemplateNo, { sheet: sheet });
+    }
+    // Main-workpaper question numbers are unique. Models occasionally return a
+    // descriptive sheet title (for example “第一步：识别客户合同”) instead of the
+    // exact template tab name. Resolve those items by their unique number before
+    // declaring the whole answer batch missing. Repeated PO/detail numbers still
+    // require their sheet/PO context and therefore are not matched here.
+    if (no) {
+      var byNo = allQuestions.filter(function (x) { return String(x.questionNo) === no; });
+      if (byNo.length === 1) return byNo[0];
+    }
     if (description) {
-      return questions.find(function (x) {
+      return allQuestions.find(function (x) {
         var target = norm(x.question);
         return target === description || target.indexOf(description) >= 0 || description.indexOf(target) >= 0;
       }) || null;
@@ -125,7 +335,8 @@
   function itemScore(item) {
     var score = confidenceRank(item.confidence) * 20;
     ['suggested_answer', 'contract_basis', 'sop_basis', 'answer_reason', 'contract_excerpt', 'source_documents',
-      'supporting_evidence', 'missing_information', 'triggered_sheet', 'appendix_status', 'fill_readiness', 'pages'].forEach(function (key) {
+      'supporting_evidence', 'missing_information', 'triggered_sheet', 'appendix_status', 'fill_readiness', 'pages',
+      'performance_obligations', 'appendix_subjects', 'appendix_plan', 'over_time_criteria'].forEach(function (key) {
       score += Math.min(String(item[key] || '').trim().length, 500) / 50;
     });
     if (String(item.question_no || '').trim() === '2.1') {
@@ -150,6 +361,7 @@
 
   function sopSectionFor(item) {
     var no = String(item.question_no || '').trim();
+    if (/^GI\./.test(no)) return 'SOP > 第一步：识别客户合同';
     if (/^1\./.test(no) || /^5\.2/.test(no)) return 'SOP > 第一步：识别客户合同';
     if (/^2\.1/.test(no)) return 'SOP > 第二步：识别合同中的履约义务 > 识别合同中的履约义务 > 可明确区分的商品';
     if (/^2\.2/.test(no)) return 'SOP > 第二步：识别合同中的履约义务 > 判断主要责任人和代理人';
@@ -187,6 +399,182 @@
     var text = norm(value).toLowerCase();
     if (/^(是|有|存在|符合|yes|true)/.test(text)) return 'yes';
     if (/^(否|无|不存在|不符合|no|false)/.test(text)) return 'no';
+    return '';
+  }
+
+  var YES_NO_OPTIONS = ['是', '否'];
+  var TEMPLATE_ANSWER_OPTIONS = {
+    '1.1(a)': YES_NO_OPTIONS, '1.1.1': YES_NO_OPTIONS, '1.1.1(a)': YES_NO_OPTIONS,
+    '1.2': YES_NO_OPTIONS, '1.3': YES_NO_OPTIONS,
+    '1.3.1': ['是——将合同合并，在后续的五步分析中将其一并考虑', '否——分别评估各合同'],
+    '1.4': ['是——请参见“1.4 合同变更”标签页，获取详细信息', '否'],
+    '2.1': ['单项履约义务——单项商品或服务', '单项履约义务——多项商品和/或服务——请参见“2.1 履约义务”标签页，获取详细信息', '多项履约义务——请参见“2.1 履约义务”标签页，获取详细信息'],
+    '2.1.1': ['是-请参阅“第4步”工作表了解更多详细信息', '否'],
+    '2.2': YES_NO_OPTIONS,
+    '2.2.1': ['是——请参见“2.2.1 PVA”标签页，获取详细信息', '否'],
+    '2.3': ['是——请参见“2.3 质保”标签页，获取详细信息', '否'],
+    '2.4': YES_NO_OPTIONS,
+    '3.1': ['是（固定价格）', '否（可变对价）—继续第3.2步', '否（固定价格和可变对价均存在）—继续第3.2步'],
+    '3.2': ['是—请参见“3.2 可变对价”工作表，了解更多详情', '是-实体不估计可变对价，因为金额在报告期末已知', '否'],
+    '3.3': YES_NO_OPTIONS, '3.4': YES_NO_OPTIONS,
+    '3.5': ['是—请参见“3.5 应付客户对价”工作表，了解更多详情', '否'],
+    '3.6': YES_NO_OPTIONS, '4.1': YES_NO_OPTIONS, '4.2': YES_NO_OPTIONS, '4.3': YES_NO_OPTIONS,
+    '5.2': YES_NO_OPTIONS, '5.2.1': YES_NO_OPTIONS, '5.2.2': YES_NO_OPTIONS,
+    '5.3': YES_NO_OPTIONS, '5.4': YES_NO_OPTIONS, '5.5': YES_NO_OPTIONS,
+    'C.1': YES_NO_OPTIONS, 'C.2': YES_NO_OPTIONS, 'C.4': YES_NO_OPTIONS,
+    '1.4-M5': [
+      '基于上述情况，合同变更涉及“可明确区分”且具有“单独售价”的“新增商品或服务”的提供。合同作为单独合同进行会计处理（结果1）。',
+      '基于上述情况，合同变更不涉及“可明确区分”且具有“单独售价”的“新增商品或服务”的提供。请转到第3部分进行进一步评估。'
+    ],
+    '1.4-M8': [
+      '基于上述情况，剩余商品或服务与已经提供的商品或服务可明确区分，且合同变更根据前瞻法进行会计处理（即，终止现有合同并创建新合同）（结果2）。',
+      '基于上述情况，剩余商品或服务与已经提供的商品或服务没有区别，且合同变更作为现有合同的一部分进行会计处理，且构成单项履约义务的一部分，且收入按累计增加法进行调整（结果3）。',
+      '基于上述情况，部分剩余商品或服务与已经提供的商品或服务可明确区分，而部分剩余商品或服务与已经提供的商品或服务不可明确区分。因此，(i)不对可与已修订商品或服务明确区分的完全履约义务进行调整且(ii)对与合同已修订部分不可明确区分的履约义务进行累计增加调整（结果4）。'
+    ],
+    '2.2.1-PVA9': ['基于上述评估，主体是安排中的主要责任人。', '基于上述评估，主体是安排中的代理人。'],
+    '2.2.1-PVA10': YES_NO_OPTIONS,
+    '2.3-W2': [
+      '是—客户可以选择单独购买质保。这是服务型质保，作为单独的履约义务进行会计处理。',
+      '否—客户不可以选择单独购买质保。请转到第3部分进行进一步评估。',
+      '合同包括质保，其中一部分是客户可选择购买的。就顾客可以选择单独购买的质保而言，它属于服务型质保。关于不能单独购买的质保，请转到第3部分进行进一步评估.'
+    ],
+    '2.3-W9': [
+      '是—质保(或部分质保)除保证产品符合商定的规格外，还向客户提供服务。这是服务型质保，作为单独的履约义务进行会计处理。',
+      '否—质保(或部分质保)除保证产品符合商定的规格外，不向客户提供服务。质保(或部分质保)属于担保型质保，并根据HKAS 37进行会计处理。',
+      '是和否——与客户签订的合同包括担保型和服务型质保。请转到第4部分进行进一步评估。'
+    ],
+    '2.3-W10': ['是—合同同时包括保证型质保和服务型质保。请转到第5部分进行进一步评估。', '否—合同不同时包括保证型质保和服务型质保。'],
+    '2.3-W11': ['是—保证型质保和服务型质保能够合理分配。请在下面记录分配依据。', '否—保证型质保和服务型质保不能合理分配。质保被视为一项单独的履约义务，并在质保服务提供期间予以确认。'],
+    '3.2-VC3': ['期望值', '最可能发生金额'],
+    '3.2-VC12': [
+      '已确认的累计收入金额极可能会发生重大转回，且可变对价的估计会减少，直到达到可纳入交易价格的金额，如果后续在与可变对价相关的不确定性后续消除时被转回，将不会导致已确认累计收入的重大转回。',
+      '已确认的累计收入金额极可能不会发生重大转回，因此无需对可变对价进行限制。'
+    ],
+    '3.5-PC3': ['是—应付客户对价是用于获取可明确区分的商品或服务，请转到第3部分进行进一步评估。', '否—应付客户对价不是用于获取可明确区分的商品或服务，因此其应作为交易价格的抵减进行会计处理（结果1）。'],
+    '3.5-PC5': ['是—可以可靠估计可明确区分的商品或服务的公允价值，请转到第4部分进行进一步评估。', '否—不能可靠估计可明确区分的商品或服务的公允价值，因此其应作为交易价格的抵减进行会计处理（结果1）。'],
+    '3.5-PC6': ['是—应付客户对价的金额超过可明确区分的商品或服务的公允价值。对于支付从客户处收到的可明确区分的商品或服务的公允价值的对价，采用与主体向供应商进行的其他采购相同的方式对应付客户对价进行会计处理。超出部分将作为交易价格的抵减进行会计处理。（结果2）', '否—应付客户对价的金额没有超过可明确区分的商品或服务的公允价值，因此采用与主体向供应商进行的其他采购相同的方式对对价进行会计处理。（结果3）'],
+    '5.1.1-A2': ['是 - 主体可合理计量履约进度。请继续第4部分。', '否 - 主体无法合理计量履约进度。请在下面载明导致主体无法计量履约进度的情况，并继续第3部分。'],
+    '5.1.1-A3': ['是 - 预计发生的成本可收回，且仅以发生成本为限可确认收入。', '否 - 预计发生的成本不可收回，且在履约进度可合理计量之前，收入不可确认。'],
+    '5.1.1-A4': ['用产出法计量进度。请在下面填写第5A部分“产出法”。', '用投入法计量进度。请在下面填写第5B部分“投入法”。'],
+    '5.1.1-O1': ['是 - 发票金额与累计至今主体已完成的履约义务对于客户的价值直接相对应。采用“有权开具发票”的实务变通来计量履约进度。', '是 - 发票金额与累计至今主体已完成的履约义务对于客户的价值直接相对应。但是，未采用“有权开具发票”的实务变通计量履约进度。', '否 - 发票金额与累计至今主体已完成的履约义务对于客户的价值不直接相对应。无法采用“有权开具发票”的实务变通计量履约进度。'],
+    '5.1.1-O2': ['测量累计至今的完工进度', '评估已实现的结果', '已达到的里程碑', '时间进度', '已完成或交付的商品或服务单位', '其他 - 请具体说明依据'],
+    '5.1.1-I1': ['耗费的材料数量', '花费的工时数', '发生的成本', '时间进度', '使用的机器工时', '其他 - 请具体说明依据'],
+    '5.1.1-I2': ['是 - 主体发生未包括在合同价款中的明显低效率情况。因此，需在计量进度时对低效率情况进行调整 - 请具体说明', '否 - 主体未发生未包括在合同价款中的明显低效率情况，因此，无需在计量进度时进行调整'],
+    '5.1.1-I3': ['是 - 客户所在地存在未安装的材料。', '否 - 客户所在地无未安装的材料。'],
+    '5.1.1-I4': ['是 - 满足所有四个条件，且需在计量履约进度时进行调整。未安装的材料仅以发生的成本为限确认 - 请具体说明调整情况。', '否 - 无/未满足所有四个条件，无需进行调整。'],
+    '5.1.1-I5': ['是 - 计量进度时需进行其他调整 - 请具体说明', '否 - 计量进度时无需进行其他调整']
+  };
+  ['3.2-VC5', '3.2-VC6', '3.2-VC7', '3.2-VC8', '3.2-VC9', '3.2-VC10', '3.2-VC14',
+    '5.1-C1', '5.1-C2', '5.1-C3', '5.1.1-I3a', '5.1.1-I3b', '5.1.1-I3c', '5.1.1-I3d',
+    '5.1.2-1', '5.1.2-2', '5.1.2-3', '5.1.2-4', '5.1.2-5', '5.1.2-7'].forEach(function (no) {
+    TEMPLATE_ANSWER_OPTIONS[no] = YES_NO_OPTIONS;
+  });
+
+  function normalizeTemplateSuggestedAnswer(item) {
+    var no = String(item.question_no || '').trim();
+    var raw = String(item.suggested_answer || '').trim();
+    // 技术提取失败不等同于业务判断；占位行保持底稿答案为空，由复核状态承接。
+    if (item.technical_fallback || item.answer_mapping_blocked) {
+      item.suggested_answer = '';
+      return item;
+    }
+    var options = TEMPLATE_ANSWER_OPTIONS[no];
+    if (!options) {
+      if (lacksConclusion(raw) || /需要人工判断|需人工复核/.test(raw)) markTemplateAnswerUnresolved(item, raw);
+      return item;
+    }
+    var exact = options.find(function (option) { return norm(option) === norm(raw); });
+    if (exact) {
+      item.suggested_answer = exact;
+      return item;
+    }
+    var evidence = [raw, item.answer_reason, item.contract_basis, item.contract_excerpt].join(' ');
+    var mapped = mapTemplateAnswer(no, raw, evidence, options);
+    if (mapped) item.suggested_answer = mapped;
+    else markTemplateAnswerUnresolved(item, raw);
+    return item;
+  }
+
+  function markTemplateAnswerUnresolved(item, raw) {
+    item.suggested_answer = '';
+    item.answer_mapping_blocked = true;
+    appendReason(item, '原建议值“' + (raw || '空白') + '”无法可靠映射到底稿固定选项，系统未代替项目组猜测填值');
+    item.confidence = '低';
+    item.review_status = '需人工复核';
+    if (isNoMissingInformation(item.missing_information)) item.missing_information = '需复核并选择底稿允许的固定选项';
+  }
+
+  function inferredPolarity(raw, evidence) {
+    var polarity = answerPolarity(raw);
+    if (polarity) return polarity;
+    if (/不构成|不存在|未发现|不满足|不能|不可|无需|不包括|未包括|没有/.test(evidence)) return 'no';
+    if (/构成|存在|满足|能够|可以|包括|适用/.test(evidence)) return 'yes';
+    return '';
+  }
+
+  function templateAnswerPolarity(questionNo, value) {
+    var no = String(questionNo || '').trim();
+    var options = TEMPLATE_ANSWER_OPTIONS[no] || [];
+    var matchedIndex = options.findIndex(function (option) { return norm(option) === norm(value); });
+    if (no === '1.4-M5' && matchedIndex >= 0) return matchedIndex === 0 ? 'yes' : 'no';
+    // 第三个选项仍要求对不能单独购买的部分进入第3部分。
+    if (no === '2.3-W2' && matchedIndex === 2) return 'no';
+    return answerPolarity(value);
+  }
+
+  function mapTemplateAnswer(no, raw, evidence, options) {
+    if (no === '2.1') {
+      if (/单项履约义务.{0,8}(?:单个|单项)商品/.test(raw)) return options[0];
+      if (/单项履约义务.{0,12}(?:多个|多项)商品/.test(raw)) return options[1];
+      if (/多项履约义务/.test(raw)) return options[2];
+    }
+    if (no === '3.1') {
+      var pricePolarity = inferredPolarity(raw, evidence);
+      if (pricePolarity === 'yes') return options[0];
+      if (/固定价格.{0,12}(?:和|及|与).{0,12}可变对价|固定.{0,8}可变.{0,8}均存在/.test(evidence)) return options[2];
+      if (pricePolarity === 'no' && /可变/.test(evidence)) return options[1];
+      return '';
+    }
+    if (no === '3.2') {
+      var variablePolarity = inferredPolarity(raw, evidence);
+      if (variablePolarity === 'no') return options[2];
+      if (variablePolarity === 'yes' && /报告期末.{0,12}(?:已知|确定)|金额.{0,12}(?:已知|确定)/.test(evidence)) return options[1];
+      if (variablePolarity === 'yes') return options[0];
+      return '';
+    }
+    if (no === '1.4-M5') return /不涉及|转到第3部分|不作为单独合同/.test(evidence) ? options[1] : (/涉及|单独合同/.test(evidence) ? options[0] : '');
+    if (no === '1.4-M8') {
+      if (/结果2|前瞻法|终止现有合同/.test(evidence)) return options[0];
+      if (/结果3|累计增加法/.test(evidence) && !/部分/.test(evidence)) return options[1];
+      if (/结果4|部分前瞻|部分.*累计/.test(evidence)) return options[2];
+    }
+    if (no === '2.2.1-PVA9') {
+      if (/主要责任人/.test(evidence)) return options[0];
+      if (/代理人/.test(evidence)) return options[1];
+    }
+    if (no === '2.3-W2') {
+      if (/一部分.{0,16}(?:可以|可选择).{0,8}购买|部分质保/.test(evidence)) return options[2];
+      return inferredPolarity(raw, evidence) === 'yes' ? options[0] : (inferredPolarity(raw, evidence) === 'no' ? options[1] : '');
+    }
+    if (no === '2.3-W9') {
+      if (/二者|是和否|保证型.{0,12}服务型|担保型.{0,12}服务型/.test(evidence)) return options[2];
+      if (/服务型|提供服务/.test(evidence) && !/不向客户提供服务/.test(evidence)) return options[0];
+      if (/保证型|担保型|不向客户提供服务/.test(evidence)) return options[1];
+    }
+    if (no === '3.2-VC3') {
+      if (/期望值/.test(evidence)) return options[0];
+      if (/最可能发生金额/.test(evidence)) return options[1];
+    }
+    if (no === '3.2-VC12') return /不会发生重大转回|无需.*限制/.test(evidence) ? options[1] : (/会发生重大转回|需要.*限制/.test(evidence) ? options[0] : '');
+    if (no === '5.1.1-A4') return /产出法/.test(evidence) ? options[0] : (/投入法/.test(evidence) ? options[1] : '');
+    if (no === '5.1.1-O2' || no === '5.1.1-I1') {
+      return options.find(function (option) { return evidence.indexOf(option.replace(/^其他\s*-\s*/, '')) >= 0; }) || '';
+    }
+    var polarity = inferredPolarity(raw, evidence);
+    var yesOptions = options.filter(function (option) { return answerPolarity(option) === 'yes'; });
+    var noOptions = options.filter(function (option) { return answerPolarity(option) === 'no'; });
+    if (polarity === 'yes' && yesOptions.length === 1) return yesOptions[0];
+    if (polarity === 'no' && noOptions.length === 1) return noOptions[0];
     return '';
   }
 
@@ -233,10 +621,10 @@
     var hasGeneralReturn = /退货权|一般退货|无理由退货|退换货|退款退货|客户.{0,20}(退货|退回商品)/.test(evidence);
 
     if (hasQualityReturn && !hasRepurchase) {
-      item.suggested_answer = '否（质量问题退换货不属于回购）';
+      item.suggested_answer = '否';
       item.answer_reason = prefix + '，合同约定的是因质量问题进行退货、换货、修理或更换，属于正常质量保证安排而非回购。';
     } else if (hasGeneralReturn && !hasRepurchase) {
-      item.suggested_answer = '否（一般退货权不属于回购）';
+      item.suggested_answer = '否';
       item.answer_reason = prefix + '，合同约定的是客户的一般退货权，未赋予销售方回购资产的义务或权利，因此不属于回购安排。';
     } else {
       startsReasonWith(item, prefix);
@@ -268,10 +656,11 @@
     var contrary = hasCollectabilityContraryEvidence(item);
     var polarity = answerPolarity(item.suggested_answer);
     if (!contrary && (!polarity || lacksConclusion(item.suggested_answer) || /需结合合同外资料判断/.test(String(item.suggested_answer || '')))) {
-      item.suggested_answer = '是（五项合同成立条件均满足）';
+      item.suggested_answer = '是';
       polarity = 'yes';
     } else if (contrary && (lacksConclusion(item.suggested_answer) || !polarity)) {
-      item.suggested_answer = '资料不足（存在明确反向证据，需完成对价可收回性评估）';
+      item.suggested_answer = '否';
+      polarity = 'no';
     }
 
     var positive = polarity === 'yes';
@@ -283,7 +672,7 @@
       ? '总体结论：五项合同成立条件均满足，建议1.2回答“是”'
       : (answerPolarity(item.suggested_answer) === 'no'
         ? '总体结论：五项条件未全部满足，建议1.2回答“否”'
-        : '总体结论：存在明确反向证据，暂标记资料不足并进一步评估');
+        : '总体结论：五项条件未全部满足，建议1.2回答“否”，并进一步复核明确反向证据');
 
     item.answer_reason = [
       '1）合同批准及履约承诺：' + criterionDetail(originalReason, /批准|签署|盖章|生效|履约承诺/, defaultPrefix),
@@ -311,8 +700,9 @@
 
   function applyContractCombinationPolicy(item) {
     if (!isSupplementOnlyWithoutMainAgreement(item)) return;
-    item.suggested_answer = '资料不足（需取得原合同后联合判断）';
-    item.answer_reason = '当前输入仅包含补充协议或变更协议，缺少其所关联的原合同，无法据此回答“否”；应取得原合同并与补充/变更协议联合判断是否需与其他合同合并。';
+    item.suggested_answer = '是';
+    delete item.answer_mapping_blocked;
+    item.answer_reason = '当前输入仅包含补充协议或变更协议；补充文件已明确引用关联原合同，因此1.3按底稿固定选项给出倾向性答案“是”。仍应取得原合同并与补充/变更协议联合判断是否满足合同合并条件。';
     item.missing_information = '原合同/主合同（与已提供的补充协议或变更协议联合判断合同合并事项）';
     item.fill_readiness = '资料不足';
     item.confidence = '低';
@@ -332,16 +722,16 @@
       if (/分别交付|分批交付|分别验收|独立验收|单独使用/.test(text)) separateSignals++;
       var integrated = /重大整合|重大集成|整体系统|组合产出|重大定制|重大修改|高度关联|不可单独使用|统一验收/.test(text);
       if (integrated) {
-        item.suggested_answer = '单项履约义务 - 多个商品和/或服务（初步判断）';
+        item.suggested_answer = '单项履约义务 - 多个商品和/或服务';
         appendReason(item, '现有条款显示多个组成部分共同形成组合产出或存在整合关系，初步作为单项履约义务；若各组成部分可分别交付、验收和使用，应重新评估');
       } else if (separateSignals >= 2) {
-        item.suggested_answer = '多项履约义务（初步判断）';
+        item.suggested_answer = '多项履约义务';
         appendReason(item, '合同分别列示多种商品及其编号、数量或单价，且未见重大整合、重大定制或高度关联约定，现有证据更支持多项履约义务');
       }
       if (!item.confidence || confidenceRank(item.confidence) < 2) item.confidence = '中';
     }
     if (no === '3.2' && isCustomerLatePaymentPenalty(item) && !hasSalesPerformanceVariableTerm(item)) {
-      item.suggested_answer = '否（该条款为客户逾期付款违约责任）';
+      item.suggested_answer = '否';
       item.answer_reason = '该条款约定客户因逾期付款向销售方支付违约金、滞纳金或罚息，属于付款及违约责任，未显示销售方因履约结果减少或调整商品/服务交易对价，因此本条不作为可变对价。';
       item.missing_information = '无';
       item.triggered_sheet = '无';
@@ -353,24 +743,654 @@
     return item;
   }
 
+  var APPENDIX_TEMPLATES = {
+    contractModification: '1.4 合同变更',
+    performanceObligations: '2.1 履约义务',
+    principalAgent: '2.2.1 PVA',
+    warranty: '2.3 质保',
+    variableConsideration: '3.2 可变对价',
+    customerConsideration: '3.5 客户对价'
+  };
+
+  function parseStructuredArray(value) {
+    if (Array.isArray(value)) return value;
+    if (value && typeof value === 'object') return [value];
+    var text = String(value || '').trim();
+    if (!text) return [];
+    text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    try {
+      var parsed = JSON.parse(text);
+      if (typeof parsed === 'string') parsed = JSON.parse(parsed);
+      if (Array.isArray(parsed)) return parsed;
+      if (parsed && typeof parsed === 'object') return [parsed];
+    } catch (e) {
+      return [];
+    }
+    return [];
+  }
+
+  function firstNonEmpty(object, keys) {
+    for (var i = 0; i < keys.length; i++) {
+      var value = object && object[keys[i]];
+      if (value !== undefined && value !== null && String(value).trim() !== '') return value;
+    }
+    return '';
+  }
+
+  function positiveInteger(value) {
+    var match = String(value || '').match(/\d+/);
+    if (!match) return null;
+    var result = parseInt(match[0], 10);
+    return result >= 1 && result <= 5 ? result : null;
+  }
+
+  function normalizeTiming(value) {
+    var text = norm(value);
+    if (/overtime|时段|一段时间|在某一时段/.test(text)) return 'over_time';
+    if (/pointintime|时点|某一时点/.test(text)) return 'point_in_time';
+    return '';
+  }
+
+  function criterionPolarity(value) {
+    if (typeof value === 'boolean') return value ? 'yes' : 'no';
+    if (value && typeof value === 'object') {
+      value = firstNonEmpty(value, ['met', 'answer', 'result', 'conclusion', 'value']);
+    }
+    return answerPolarity(value);
+  }
+
+  function timingFromCriteria(criteria) {
+    criteria = parseStructuredArray(criteria);
+    if (!criteria.length) return '';
+    var answers = criteria.map(criterionPolarity).filter(Boolean);
+    if (answers.indexOf('yes') >= 0) return 'over_time';
+    // The workpaper has three over-time criteria. Incomplete criteria must not be
+    // silently treated as a point-in-time conclusion.
+    if (answers.length >= 3 && answers.every(function (answer) { return answer === 'no'; })) return 'point_in_time';
+    return '';
+  }
+
+  function mergeStructuredObject(target, source) {
+    Object.keys(source || {}).forEach(function (key) {
+      var value = source[key];
+      if ((target[key] === undefined || target[key] === null || target[key] === '') && value !== undefined && value !== null && value !== '') {
+        target[key] = value;
+      }
+    });
+    return target;
+  }
+
+  function buildPerformanceObligations(items) {
+    var obligations = [];
+    var byKey = {};
+    var hasStructuredList = false;
+
+    function add(raw, fallbackIndex) {
+      if (typeof raw === 'string') raw = { name: raw };
+      if (!raw || typeof raw !== 'object') return;
+      var poNo = positiveInteger(firstNonEmpty(raw, ['po_no', 'poNo', 'number', 'no', 'index'])) || fallbackIndex;
+      if (!poNo || poNo > 5) return;
+      var name = String(firstNonEmpty(raw, ['name', 'po_name', 'obligation_name', 'performance_obligation', 'subject_name']) || ('PO#' + poNo)).trim();
+      var criteria = parseStructuredArray(firstNonEmpty(raw, ['over_time_criteria', 'overTimeCriteria', 'criteria']));
+      var timing = timingFromCriteria(criteria) || normalizeTiming(firstNonEmpty(raw, ['recognition_timing', 'timing', 'transfer_timing']));
+      var normalizedPo = Object.assign({}, raw, {
+        po_no: poNo,
+        name: name,
+        source_question: String(firstNonEmpty(raw, ['source_question', 'trigger_question']) || '2.1'),
+        recognition_timing: timing,
+        over_time_criteria: criteria
+      });
+      var key = String(poNo);
+      if (!byKey[key]) {
+        byKey[key] = normalizedPo;
+        obligations.push(normalizedPo);
+      } else {
+        mergeStructuredObject(byKey[key], normalizedPo);
+        if (!byKey[key].recognition_timing && timing) byKey[key].recognition_timing = timing;
+        if ((!byKey[key].over_time_criteria || !byKey[key].over_time_criteria.length) && criteria.length) byKey[key].over_time_criteria = criteria;
+      }
+    }
+
+    (items || []).forEach(function (item) {
+      var parsed = parseStructuredArray(item.performance_obligations);
+      if (parsed.length) hasStructuredList = true;
+      parsed.forEach(function (po, index) { add(po, index + 1); });
+    });
+
+    // Backward compatibility: PO-specific Step 5 rows reveal the PO number even
+    // when the old prompt returned only the flat items array.
+    if (!hasStructuredList) {
+      (items || []).forEach(function (item) {
+        if (String(item.question_no || '').trim() !== '5.1') return;
+        var match = String(item.workpaper_sheet || '').match(/PO#(\d+)/i);
+        if (!match) return;
+        var answer = String(item.suggested_answer || '').trim();
+        var explicitlyNotApplicable = /不适用|无此履约义务|不存在(?:该|此)?履约义务/.test(answer);
+        var hasDecision = !!answerPolarity(answer) && !explicitlyNotApplicable;
+        var criteria = parseStructuredArray(item.over_time_criteria);
+        var evidence = [item.contract_basis, item.answer_reason, item.contract_excerpt, item.supporting_evidence]
+          .map(function (value) { return String(value || '').trim(); })
+          .filter(function (value) { return value && !/^无$|不适用/.test(value); })
+          .join(' ');
+        if (!hasDecision && !criteria.length && evidence.length < 6) return;
+        add({ po_no: match[1], name: item.po_name || ('PO#' + match[1]), source_question: '5.1' }, parseInt(match[1], 10));
+      });
+    }
+
+    if (!hasStructuredList && !obligations.length) {
+      var stepTwo = (items || []).find(function (item) { return String(item.question_no || '').trim() === '2.1'; });
+      if (stepTwo) {
+        var answer = String(stepTwo.suggested_answer || '');
+        var countMatch = answer.match(/([1-5])\s*项履约义务/);
+        var count = countMatch ? parseInt(countMatch[1], 10) : (/^单项履约义务/.test(answer) ? 1 : 0);
+        for (var i = 1; i <= count; i++) add({ po_no: i, name: 'PO#' + i, source_question: '2.1' }, i);
+      }
+    }
+
+    // Attach timing information returned on each PO's aggregate 5.1 item. The
+    // 5.1.1/5.1.2 rows are appendix rows, not independent trigger decisions.
+    obligations.forEach(function (po) {
+      var timingItem = (items || []).find(function (item) {
+        var poMatch = String(item.workpaper_sheet || '').match(/PO#(\d+)/i);
+        return String(item.question_no || '').trim() === '5.1' && poMatch && parseInt(poMatch[1], 10) === po.po_no;
+      });
+      if (!timingItem) return;
+      var criteria = parseStructuredArray(timingItem.over_time_criteria);
+      var timing = timingFromCriteria(criteria);
+      if (!timing) {
+        var polarity = answerPolarity(timingItem.suggested_answer);
+        timing = polarity === 'yes' ? 'over_time' : (polarity === 'no' ? 'point_in_time' : '');
+      }
+      if (criteria.length) po.over_time_criteria = criteria;
+      if (timing) po.recognition_timing = timing;
+    });
+
+    return obligations.sort(function (a, b) { return a.po_no - b.po_no; }).slice(0, 5);
+  }
+
+  function hasStructuredPerformanceObligations(items) {
+    return (items || []).some(function (item) {
+      return parseStructuredArray(item && item.performance_obligations).length > 0;
+    });
+  }
+
+  function poTransferPatternGroup(po) {
+    var explicit = String(firstNonEmpty(po || {}, [
+      'transfer_pattern_group', 'recognition_pattern_group', 'consistency_group'
+    ]) || '').trim();
+    if (explicit) return explicit;
+    var serviceNature = String(firstNonEmpty(po || {}, ['service_nature', 'service_type']) || '').trim();
+    if (serviceNature) return '服务性质：' + norm(serviceNature);
+    var identity = norm([po && po.name, po && po.components].filter(Boolean).join('|'));
+    return identity ? '履约义务：' + identity : '';
+  }
+
+  function poContextLine(po) {
+    var parts = ['PO#' + po.po_no + '｜' + (po.name || '履约义务名称待核对')];
+    if (po.components) parts.push('内容：' + po.components);
+    if (po.service_nature) parts.push('服务性质：' + po.service_nature);
+    if (poTransferPatternGroup(po)) parts.push('控制权转移模式组：' + poTransferPatternGroup(po));
+    if (po.control_transfer_difference && !/^(?:无|不适用|相同)$/i.test(String(po.control_transfer_difference).trim())) {
+      parts.push('与同组PO的明确差异：' + po.control_transfer_difference);
+    }
+    if (po.basis) parts.push('2.1识别依据：' + po.basis);
+    return parts.join('；');
+  }
+
+  function poRegistryContext(obligations) {
+    return '以下履约义务清单已经由2.1确认并锁定。后续第5步必须逐项使用，不得回答某个已列示PO“不存在”或“无此履约义务”。\n' +
+      (obligations || []).map(poContextLine).join('\n') +
+      '\n同一“控制权转移模式组”内，如服务性质和适用条款相同，相同指标必须采用一致结论；只有“与同组PO的明确差异”列示了具体条款差异时才可不同。';
+  }
+
+  function contextualPoQuestion(entry, po, obligations) {
+    var cloned = Object.assign({}, entry);
+    cloned.po_no = po.po_no;
+    cloned.po_name = po.name || '';
+    cloned.po_components = po.components || '';
+    cloned.po_basis = po.basis || '';
+    cloned.transfer_pattern_group = poTransferPatternGroup(po);
+    cloned.poContext = poRegistryContext(obligations);
+    cloned.question = '【已确认分析对象】' + poContextLine(po) + '。\n' + entry.question;
+    return cloned;
+  }
+
+  function buildPerformanceObligationTimingQuestions(items) {
+    var obligations = buildPerformanceObligations(items || []);
+    if (!obligations.length) return [];
+    return obligations.map(function (po) {
+      var sheet = '第5a步（PO#' + po.po_no + '）';
+      var entry = questions.find(function (question) {
+        return question.sheet === sheet && question.questionNo === '5.1';
+      });
+      return entry ? contextualPoQuestion(entry, po, obligations) : null;
+    }).filter(Boolean);
+  }
+
+  function poContextConflict(item, po) {
+    if (!item || !po || !/^5\.1(?:\.|$)/.test(String(item.question_no || ''))) return false;
+    var text = [item.suggested_answer, item.answer_reason, item.contract_basis, item.missing_information]
+      .map(function (value) { return String(value || ''); }).join(' ');
+    var exactPo = new RegExp('不存在\\s*(?:该|此)?\\s*PO#?\\s*' + po.po_no, 'i');
+    return exactPo.test(text) || /无此履约义务|不存在(?:该|此)?履约义务/.test(text);
+  }
+
+  function applyPerformanceObligationContext(items) {
+    var obligations = buildPerformanceObligations(items || []);
+    var byNo = {};
+    obligations.forEach(function (po) { byNo[po.po_no] = po; });
+    var locked = hasStructuredPerformanceObligations(items);
+    return (items || []).filter(function (item) {
+      var match = String(item.workpaper_sheet || '').match(/PO#(\d+)/i);
+      if (!match || !/^5\.1(?:\.|$)/.test(String(item.question_no || ''))) return true;
+      return !locked || !!byNo[parseInt(match[1], 10)];
+    }).map(function (item) {
+      var match = String(item.workpaper_sheet || '').match(/PO#(\d+)/i);
+      if (!match) return item;
+      var po = byNo[parseInt(match[1], 10)];
+      if (!po) return item;
+      item.po_no = po.po_no;
+      item.po_name = po.name || '';
+      item.po_components = po.components || '';
+      item.po_basis = po.basis || '';
+      item.po_service_nature = String(firstNonEmpty(po, ['service_nature', 'service_type']) || '');
+      item.transfer_pattern_group = poTransferPatternGroup(po);
+      item.control_transfer_difference = String(po.control_transfer_difference || '');
+      if (poContextConflict(item, po)) {
+        item.po_context_conflict = true;
+        item.suggested_answer = '不适用';
+        var warning = '系统校验：PO#' + po.po_no + '“' + (po.name || '') + '”已在2.1确认存在，当前回答将其认定为不存在，不能采用。';
+        if (String(item.answer_reason || '').indexOf(warning) < 0) item.answer_reason = warning + (item.answer_reason ? '；' + item.answer_reason : '');
+        item.fill_readiness = '资料不足';
+        item.confidence = '低';
+        item.review_status = '需人工复核';
+      }
+      return item;
+    });
+  }
+
+  function poAnswerClass(value) {
+    var text = String(value || '').trim();
+    if (/不适用|N\/?A/i.test(text)) return 'na';
+    return answerPolarity(text) || (/资料不足|待复核|无法判断/.test(text) ? 'unknown' : norm(text));
+  }
+
+  function findPoConsistencyConflicts(items) {
+    var obligations = buildPerformanceObligations(items || []);
+    var byNo = {};
+    obligations.forEach(function (po) { byNo[po.po_no] = po; });
+    var buckets = {};
+    (items || []).forEach(function (item) {
+      if (!/^5\.1\.[12]-/.test(String(item.question_no || ''))) return;
+      var match = String(item.workpaper_sheet || '').match(/PO#(\d+)/i);
+      var po = match ? byNo[parseInt(match[1], 10)] : null;
+      if (!po) return;
+      var group = poTransferPatternGroup(po);
+      if (!group) return;
+      var key = group + '|' + item.question_no;
+      if (!buckets[key]) buckets[key] = { key: key, group: group, question_no: item.question_no, entries: [] };
+      buckets[key].entries.push({ item: item, po: po, answerClass: poAnswerClass(item.suggested_answer) });
+    });
+    return Object.keys(buckets).map(function (key) { return buckets[key]; }).filter(function (bucket) {
+      if (bucket.entries.length < 2) return false;
+      var hasExplicitDifference = bucket.entries.some(function (entry) {
+        var value = String(entry.po.control_transfer_difference || '').trim();
+        return value && !/^(?:无|不适用|相同)$/i.test(value);
+      });
+      if (hasExplicitDifference) return false;
+      return uniqueValues(bucket.entries.map(function (entry) { return entry.answerClass; })).length > 1;
+    });
+  }
+
+  function buildPoConsistencyReviewQuestions(items) {
+    var obligations = buildPerformanceObligations(items || []);
+    var seen = {};
+    var questionsForReview = [];
+    findPoConsistencyConflicts(items || []).forEach(function (conflict) {
+      conflict.entries.forEach(function (entry) {
+        var match = findQuestion(entry.item);
+        if (!match) return;
+        var contextual = contextualPoQuestion(match, entry.po, obligations);
+        contextual.consistency_review = true;
+        var key = questionKey(contextual);
+        if (!seen[key]) {
+          seen[key] = true;
+          questionsForReview.push(contextual);
+        }
+      });
+    });
+    return questionsForReview;
+  }
+
+  function markPoConsistencyConflicts(items) {
+    findPoConsistencyConflicts(items || []).forEach(function (conflict) {
+      conflict.entries.forEach(function (entry) {
+        var item = entry.item;
+        var warning = '系统一致性复核：同一控制权转移模式组“' + conflict.group + '”的相同指标出现不一致答案，且未列明差异条款。';
+        if (String(item.answer_reason || '').indexOf(warning) < 0) item.answer_reason = warning + (item.answer_reason ? '；' + item.answer_reason : '');
+        item.po_consistency_conflict = true;
+        item.fill_readiness = '建议填入，需复核';
+        item.confidence = '低';
+        item.review_status = '需人工复核';
+      });
+    });
+    return items || [];
+  }
+
+  function structuredEvidenceIds(value) {
+    var ids = parseStructuredArray(value).map(function (entry) {
+      if (typeof entry === 'string' || typeof entry === 'number') return String(entry).trim();
+      return String(firstNonEmpty(entry, ['fact_id', 'id']) || '').trim();
+    }).filter(Boolean);
+    return uniqueValues(ids);
+  }
+
+  function inheritedDetailItem(source, suffix) {
+    source = source || {};
+    return {
+      id: String(source.id || 'revenue') + '__' + suffix,
+      contractId: source.contractId || '',
+      ruleId: source.ruleId || 'revenue_workpaper',
+      ruleVersion: source.ruleVersion || '',
+      fieldKeys: source.fieldKeys,
+      fieldSetId: source.fieldSetId,
+      extractAt: source.extractAt,
+      versionLabel: source.versionLabel,
+      contract_basis: source.contract_basis || '',
+      sop_basis: source.sop_basis || 'SOP > 第五步：在实体履约义务时确认收入 > 控制权转移判断',
+      answer_reason: source.answer_reason || '',
+      contract_excerpt: source.contract_excerpt || '',
+      source_documents: source.source_documents || '',
+      supporting_evidence: source.supporting_evidence || '',
+      missing_information: source.missing_information || '无',
+      triggered_sheet: '无',
+      appendix_status: '未触发',
+      fill_readiness: source.fill_readiness || '建议填入，需复核',
+      pages: source.pages || '',
+      confidence: source.confidence || '中',
+      review_status: source.review_status || '需人工复核'
+    };
+  }
+
+  function expandStructuredDetails(items) {
+    var baseItems = (items || []).filter(function (item) { return !item._structured_detail; });
+    var generated = [];
+    var obligations = buildPerformanceObligations(baseItems);
+    var stepTwo = baseItems.find(function (item) { return String(item.question_no || '').trim() === '2.1'; });
+    var showObligationSheet = stepTwo && /(多项履约义务|单项履约义务.{0,12}(?:多个|多项)商品)/.test(String(stepTwo.suggested_answer || ''));
+
+    if (showObligationSheet) {
+      obligations.forEach(function (po) {
+        var source = baseItems.find(function (item) {
+          return String(item.question_no || '').trim() === String(po.source_question || '2.1');
+        }) || stepTwo || {};
+        var detail = inheritedDetailItem(source, 'po_' + po.po_no);
+        var capable = String(firstNonEmpty(po, ['capable_of_being_distinct', 'capable_distinct']) || '资料不足');
+        var context = String(firstNonEmpty(po, ['distinct_in_contract_context', 'distinct_in_context']) || '资料不足');
+        var conclusion = String(firstNonEmpty(po, ['conclusion', 'status']) || '需复核');
+        detail.workpaper_sheet = '2.1 履约义务';
+        detail.workpaper_row = String(5 + po.po_no);
+        detail.question_no = '2.1-PO#' + po.po_no;
+        detail.question_description = 'PO#' + po.po_no + '：' + po.name + (po.components ? '（' + po.components + '）' : '');
+        detail.suggested_answer = '能够单独区分：' + capable + '；在合同背景下可明确区分：' + context + '；结论：' + conclusion;
+        detail.contract_basis = String(po.components || detail.contract_basis || '');
+        detail.answer_reason = String(po.basis || detail.answer_reason || '');
+        detail.evidence_fact_ids = JSON.stringify(structuredEvidenceIds(firstNonEmpty(po, ['evidence_fact_ids', 'fact_ids'])));
+        detail._structured_detail = 'performance_obligation';
+        generated.push(detail);
+      });
+    }
+
+    obligations.forEach(function (po) {
+      var sheet = '第5a步（PO#' + po.po_no + '）';
+      var source = baseItems.find(function (item) {
+        return String(item.question_no || '').trim() === '5.1' && String(item.workpaper_sheet || '') === sheet;
+      });
+      if (!source) return;
+      var criteria = parseStructuredArray(source.over_time_criteria).slice(0, 3);
+      criteria.forEach(function (criterion, index) {
+        var number = positiveInteger(firstNonEmpty(criterion, ['criterion_no', 'number', 'no'])) || (index + 1);
+        if (number < 1 || number > 3) return;
+        var detail = inheritedDetailItem(source, 'po_' + po.po_no + '_criterion_' + number);
+        detail.workpaper_sheet = sheet;
+        detail.workpaper_row = String(5 + number);
+        detail.question_no = '5.1-C' + number;
+        detail.question_description = stepFiveCriteria[number - 1];
+        detail.suggested_answer = String(firstNonEmpty(criterion, ['result', 'answer', 'conclusion']) || '资料不足');
+        detail.contract_basis = String(firstNonEmpty(criterion, ['basis', 'reason']) || detail.contract_basis || '');
+        detail.answer_reason = String(firstNonEmpty(criterion, ['basis', 'reason']) || detail.answer_reason || '');
+        detail.evidence_fact_ids = JSON.stringify(structuredEvidenceIds(firstNonEmpty(criterion, ['evidence_fact_ids', 'fact_ids'])));
+        detail._structured_detail = 'step_five_criterion';
+        generated.push(detail);
+      });
+    });
+
+    return baseItems.concat(generated);
+  }
+
+  function questionKey(item) {
+    return String((item || {}).workpaper_sheet || (item || {}).sheet || '').trim() + '|' +
+      String((item || {}).question_no || (item || {}).questionNo || '').trim();
+  }
+
+  function buildTriggeredDetailQuestions(items) {
+    var normalized = normalizeResults(items || []);
+    var existing = {};
+    normalized.forEach(function (item) { existing[questionKey(item)] = true; });
+    var wanted = [];
+    var obligations = buildPerformanceObligations(normalized);
+    obligations.forEach(function (po) {
+      var sheet = po.recognition_timing === 'over_time'
+        ? '5.1.1 时段（PO#' + po.po_no + '）'
+        : (po.recognition_timing === 'point_in_time' ? '5.1.2 时点（PO#' + po.po_no + '）' : '');
+      if (!sheet) return;
+      detailQuestions.filter(function (entry) { return entry.sheet === sheet; }).forEach(function (entry) {
+        var contextual = contextualPoQuestion(entry, po, obligations);
+        var candidate = {
+          workpaper_sheet: contextual.sheet,
+          question_no: contextual.questionNo,
+          question_description: contextual.question,
+          appendix_instance_no: po.po_no
+        };
+        if (!existing[questionKey(contextual)] && isVisible(candidate, normalized)) wanted.push(contextual);
+      });
+    });
+    buildAppendixPlan(normalized).forEach(function (planEntry) {
+      var templateSheet = normalizeTemplateSheet(planEntry.template_sheet);
+      if (!appendixQuestionTemplates[templateSheet]) return;
+      var displaySheet = String(planEntry.display_name || templateSheet);
+      detailQuestions.filter(function (entry) { return entry.sheet === templateSheet; }).forEach(function (entry) {
+        var cloned = Object.assign({}, entry, {
+          sheet: displaySheet,
+          question: planEntry.subject_name
+            ? '分析对象：' + planEntry.subject_name + '。' + entry.question
+            : entry.question,
+          subject_id: planEntry.subject_id || '',
+          appendix_instance_no: planEntry.instance_no || 1
+        });
+        var candidate = {
+          workpaper_sheet: cloned.sheet,
+          question_no: cloned.questionNo,
+          question_description: cloned.question,
+          subject_id: cloned.subject_id,
+          appendix_instance_no: cloned.appendix_instance_no
+        };
+        if (!existing[questionKey(cloned)] && isVisible(candidate, normalized)) wanted.push(cloned);
+      });
+    });
+    return wanted;
+  }
+
+  function normalizeTemplateSheet(value) {
+    var text = String(value || '').trim();
+    if (/^1\.4/.test(text)) return APPENDIX_TEMPLATES.contractModification;
+    if (/^2\.1(?:\s|履)/.test(text)) return APPENDIX_TEMPLATES.performanceObligations;
+    if (/^2\.2\.1|PVA|主要责任人|代理人/i.test(text)) return APPENDIX_TEMPLATES.principalAgent;
+    if (/^2\.3/.test(text)) return APPENDIX_TEMPLATES.warranty;
+    if (/^3\.2/.test(text)) return APPENDIX_TEMPLATES.variableConsideration;
+    if (/^3\.5|应付客户对价/.test(text)) return APPENDIX_TEMPLATES.customerConsideration;
+    var poMatch = text.match(/PO#(\d+)/i);
+    if (poMatch && /5\.1\.1|时段/.test(text)) return '5.1.1 时段（PO#' + poMatch[1] + '）';
+    if (poMatch && /5\.1\.2|时点/.test(text)) return '5.1.2 时点（PO#' + poMatch[1] + '）';
+    if (poMatch && /第5a步/i.test(text)) return '第5a步（PO#' + poMatch[1] + '）';
+    return '';
+  }
+
+  function structuredSubjects(item, templateSheet) {
+    var subjects = [];
+    parseStructuredArray(item && item.appendix_subjects).forEach(function (subject) {
+      if (typeof subject === 'string') subject = { name: subject };
+      if (!subject || typeof subject !== 'object') return;
+      var subjectTemplate = normalizeTemplateSheet(firstNonEmpty(subject, ['template_sheet', 'sheet', 'appendix_type']));
+      if (subjectTemplate && subjectTemplate !== templateSheet) return;
+      subjects.push(subject);
+    });
+    parseStructuredArray(item && item.appendix_plan).forEach(function (entry) {
+      if (!entry || typeof entry !== 'object') return;
+      if (normalizeTemplateSheet(firstNonEmpty(entry, ['template_sheet', 'sheet', 'display_name'])) !== templateSheet) return;
+      subjects.push(entry);
+    });
+    return subjects;
+  }
+
+  function buildAppendixPlan(items) {
+    var plan = [];
+    var seen = {};
+    var obligations = buildPerformanceObligations(items);
+
+    function add(templateSheet, displayName, triggerQuestion, options) {
+      options = options || {};
+      templateSheet = normalizeTemplateSheet(templateSheet);
+      if (!templateSheet) return;
+      var subjectName = String(options.subject_name || '').trim();
+      var subjectId = String(options.subject_id || '').trim();
+      var key = [templateSheet, options.po_no || '', subjectId || norm(subjectName) || options.instance_no || '1'].join('|');
+      if (seen[key]) return;
+      seen[key] = true;
+      plan.push({
+        template_sheet: templateSheet,
+        display_name: displayName || templateSheet,
+        instance_no: options.instance_no || 1,
+        subject_id: subjectId,
+        related_subject_id: String(options.related_subject_id || '').trim(),
+        subject_name: subjectName,
+        trigger_question: triggerQuestion,
+        po_no: options.po_no || '',
+        appendix_type: options.appendix_type || '',
+        status: String(options.status || '').trim()
+      });
+    }
+
+    function addSubjects(item, templateSheet, baseDisplayName, triggerQuestion, appendixType) {
+      var subjects = structuredSubjects(item, templateSheet).slice(0, 5);
+      if (!subjects.length) {
+        add(templateSheet, baseDisplayName, triggerQuestion, { appendix_type: appendixType });
+        return;
+      }
+      subjects.forEach(function (subject, index) {
+        var subjectName = String(firstNonEmpty(subject, ['subject_name', 'subject', 'name', 'type', 'display_name']) || '').trim();
+        var subjectId = String(firstNonEmpty(subject, ['subject_id', 'id', 'code']) || '').trim();
+        var relatedSubjectId = String(firstNonEmpty(subject, ['related_subject_id', 'relatedSubjectId']) || '').trim();
+        var suffix = subjectName.replace(/^\d+(?:\.\d+)*\s*/, '').replace(/^(?:可变对价|主要责任人和代理人|PVA|质保)\s*[-－:]?\s*/, '');
+        add(templateSheet, suffix ? baseDisplayName + '-' + suffix : baseDisplayName, triggerQuestion, {
+          instance_no: index + 1,
+          subject_id: subjectId,
+          related_subject_id: relatedSubjectId,
+          subject_name: subjectName,
+          appendix_type: appendixType,
+          status: firstNonEmpty(subject, ['status', 'appendix_status'])
+        });
+      });
+    }
+
+    function addSingleWithSubjects(item, templateSheet, displayName, triggerQuestion, appendixType) {
+      var subjects = structuredSubjects(item, templateSheet).slice(0, 5);
+      var names = uniqueValues(subjects.map(function (subject) {
+        return firstNonEmpty(subject, ['subject_name', 'subject', 'name', 'type']);
+      }));
+      var first = subjects[0] || {};
+      add(templateSheet, displayName, triggerQuestion, {
+        subject_id: firstNonEmpty(first, ['subject_id', 'id', 'code']),
+        related_subject_id: firstNonEmpty(first, ['related_subject_id', 'relatedSubjectId']),
+        subject_name: names.join('；'),
+        appendix_type: appendixType,
+        status: firstNonEmpty(first, ['status', 'appendix_status'])
+      });
+    }
+
+    (items || []).forEach(function (item) {
+      if (!isVisible(item, items || [])) return;
+      var no = String(item.question_no || '').trim();
+      var polarity = answerPolarity(item.suggested_answer);
+      if (no === '1.4' && polarity === 'yes') add(APPENDIX_TEMPLATES.contractModification, APPENDIX_TEMPLATES.contractModification, no, { appendix_type: 'contract_modification' });
+      if (no === '2.1' && /(多项履约义务|单项履约义务.{0,12}(?:多个|多项)商品)/.test(String(item.suggested_answer || ''))) {
+        add(APPENDIX_TEMPLATES.performanceObligations, APPENDIX_TEMPLATES.performanceObligations, no, { appendix_type: 'performance_obligations' });
+      }
+      if (no === '2.2.1' && polarity === 'yes') addSubjects(item, APPENDIX_TEMPLATES.principalAgent, '2.2.1 主要责任人和代理人', no, 'principal_agent');
+      if (no === '2.3' && polarity === 'yes') addSubjects(item, APPENDIX_TEMPLATES.warranty, APPENDIX_TEMPLATES.warranty, no, 'warranty');
+      if (no === '3.2' && polarity === 'yes') addSubjects(item, APPENDIX_TEMPLATES.variableConsideration, APPENDIX_TEMPLATES.variableConsideration, no, 'variable_consideration');
+      if (no === '3.5' && polarity === 'yes') addSingleWithSubjects(item, APPENDIX_TEMPLATES.customerConsideration, '3.5 应付客户对价', no, 'customer_consideration');
+    });
+
+    obligations.forEach(function (po) {
+      add('第5a步（PO#' + po.po_no + '）', '第5a步（PO#' + po.po_no + '）', '5.1', {
+        po_no: po.po_no,
+        subject_name: po.name,
+        appendix_type: 'performance_obligation'
+      });
+      if (po.recognition_timing === 'over_time') {
+        add('5.1.1 时段（PO#' + po.po_no + '）', '5.1.1 时段（PO#' + po.po_no + '）', '5.1', {
+          po_no: po.po_no,
+          subject_name: po.name,
+          appendix_type: 'recognition_timing'
+        });
+      } else if (po.recognition_timing === 'point_in_time') {
+        add('5.1.2 时点（PO#' + po.po_no + '）', '5.1.2 时点（PO#' + po.po_no + '）', '5.1', {
+          po_no: po.po_no,
+          subject_name: po.name,
+          appendix_type: 'recognition_timing'
+        });
+      }
+    });
+
+    return plan;
+  }
+
+  function applyResolvedAppendixPlan(items) {
+    var plan = buildAppendixPlan(items);
+    (items || []).forEach(function (item) {
+      var no = String(item.question_no || '').trim();
+      var poMatch = String(item.workpaper_sheet || '').match(/PO#(\d+)/i);
+      var poNo = poMatch ? parseInt(poMatch[1], 10) : null;
+      var relevant = plan.filter(function (entry) {
+        if (entry.trigger_question !== no) return false;
+        return !entry.po_no || !poNo || Number(entry.po_no) === poNo;
+      });
+      var names = uniqueValues(relevant.map(function (entry) { return entry.display_name; }));
+      // Always replace the model-provided value. Sheet selection is a controlled
+      // workpaper rule and must not be accepted as free-form model output.
+      item.triggered_sheet = names.length ? names.join('；') : '无';
+      item.appendix_status = inferAppendixStatus(item);
+    });
+    return items || [];
+  }
+
   function inferTriggeredSheet(item) {
     var polarity = answerPolarity(item.suggested_answer);
     var no = String(item.question_no || '').trim();
     if (no === '2.2') return '无';
     if (no === '2.2.1') return polarity === 'yes' ? '2.2.1 主要责任人和代理人' : '无';
     if (no === '1.4') return polarity === 'yes' ? '1.4 合同变更' : '无';
-    var current = String(item.triggered_sheet || '').trim();
-    if (current && current !== '无') return current;
-    if (no === '2.1' && /(多项履约义务|单项履约义务.{0,12}多个商品)/.test(String(item.suggested_answer || ''))) return '2.1 履约义务';
-    if (polarity !== 'yes' && no !== '5.1.2') return '无';
+    if (no === '2.1' && /(多项履约义务|单项履约义务.{0,12}(?:多个|多项)商品)/.test(String(item.suggested_answer || ''))) return '2.1 履约义务';
+    if (polarity !== 'yes') return '无';
     if (no === '2.1') return '2.1 履约义务';
     if (no === '2.3') return '2.3 质保';
     if (no === '3.2') return '3.2 可变对价';
     if (no === '3.5') return '3.5 应付客户对价';
-    if (/^5\.1(?:\.1|\.2)?$/.test(no)) {
+    if (no === '5.1') {
       var poMatch = String(item.workpaper_sheet || '').match(/PO#(\d+)/i);
       var po = poMatch ? poMatch[1] : '1';
-      var timing = no === '5.1.2' || (no === '5.1' && polarity === 'no') ? '5.1.2 时点' : '5.1.1 时段';
+      var timing = polarity === 'no' ? '5.1.2 时点' : '5.1.1 时段';
       return timing + '（PO#' + po + '）';
     }
     return '无';
@@ -385,7 +1405,14 @@
 
   function applySopPolicy(item) {
     item = applyPracticalCorrections(item);
+    item = normalizeTemplateSuggestedAnswer(item);
     ensureRequiredMissingInformation(item);
+    if (['高', '中', '低'].indexOf(String(item.confidence || '').trim()) < 0) {
+      item.confidence = '低';
+    }
+    if (['需人工复核', '可复核后采用'].indexOf(String(item.review_status || '').trim()) < 0) {
+      item.review_status = '需人工复核';
+    }
     var professional = isProfessionalJudgment(item);
     var readiness = String(item.fill_readiness || '').trim();
     if (readiness === '需人工判断') readiness = '建议填入，需复核';
@@ -408,18 +1435,38 @@
 
   function dependencyFor(item) {
     var no = typeof item === 'string' ? item : String((item || {}).question_no || '').trim();
+    if (typeof item === 'object' && item) {
+      var detailMatch = findQuestion(item);
+      var detailDependency = item.dependencies || (detailMatch && detailMatch.dependencies);
+      if (detailDependency) return Object.assign({ scoped: true }, detailDependency);
+    }
     return questionDependencies.find(function (dependency) {
       return dependency.targetQuestionNo === no;
     }) || null;
   }
 
-  function conditionMatches(condition, items, stack) {
+  function sameDependencyScope(target, candidate) {
+    var targetSubject = String((target || {}).subject_id || '').trim();
+    var candidateSubject = String((candidate || {}).subject_id || '').trim();
+    if (targetSubject || candidateSubject) return !!targetSubject && targetSubject === candidateSubject;
+    var targetSheet = String((target || {}).workpaper_sheet || '').trim();
+    var candidateSheet = String((candidate || {}).workpaper_sheet || '').trim();
+    var targetInstance = positiveInteger((target || {}).appendix_instance_no) || 1;
+    var candidateInstance = positiveInteger((candidate || {}).appendix_instance_no) || 1;
+    return targetSheet === candidateSheet && targetInstance === candidateInstance;
+  }
+
+  function conditionMatches(condition, target, dependency, items, stack) {
     return (items || []).some(function (candidate) {
       if (String(candidate.question_no || '').trim() !== condition.questionNo) return false;
+      if (dependency.scoped && !sameDependencyScope(target, candidate)) return false;
       if (!isVisibleInternal(candidate, items, stack)) return false;
-      var polarity = answerPolarity(candidate.suggested_answer);
+      var polarity = templateAnswerPolarity(condition.questionNo, candidate.suggested_answer);
       if (condition.operator === 'yes') return polarity === 'yes';
       if (condition.operator === 'no') return polarity === 'no';
+      if (condition.operator === 'contains') {
+        return String(candidate.suggested_answer || '').indexOf(String(condition.value || '')) >= 0;
+      }
       if (condition.operator === 'non_fixed_price') {
         return polarity === 'no' || /非固定|可变|浮动|不固定|并非仅.*固定/.test(String(candidate.suggested_answer || ''));
       }
@@ -435,8 +1482,16 @@
     if (stack[no]) return false;
     var nextStack = Object.assign({}, stack);
     nextStack[no] = true;
-    var matches = dependency.conditions.map(function (condition) {
-      return conditionMatches(condition, items, nextStack);
+    var conditionGroups = dependency.groups || [dependency.conditions || []];
+    var groupMatches = conditionGroups.map(function (group) {
+      var matches = group.map(function (condition) {
+        return conditionMatches(condition, item, dependency, items, nextStack);
+      });
+      return dependency.match === 'any' ? matches.some(Boolean) : matches.every(Boolean);
+    });
+    if (dependency.groups) return groupMatches.some(Boolean);
+    var matches = conditionGroups[0].map(function (condition) {
+      return conditionMatches(condition, item, dependency, items, nextStack);
     });
     return dependency.match === 'any'
       ? matches.some(Boolean)
@@ -459,33 +1514,100 @@
     return items || [];
   }
 
-  function normalizeResults(items) {
-    var dedup = {};
+  function questionSortRank(item) {
+    var no = String((item || {}).question_no || '').trim();
+    var sheet = String((item || {}).workpaper_sheet || '').trim();
+    var obligationMatch = no.match(/^2\.1-PO#(\d+)$/i);
+    if (obligationMatch) {
+      var stepTwoIndex = questions.findIndex(function (entry) { return entry.sheet === '第2步' && entry.questionNo === '2.1'; });
+      return stepTwoIndex + parseInt(obligationMatch[1], 10) / 100;
+    }
+    var criterionMatch = no.match(/^5\.1-C([1-3])$/i);
+    var poMatch = sheet.match(/PO#(\d+)/i);
+    if (poMatch && (criterionMatch || /^5\.1\.[12]-/.test(no))) {
+      var stepSheet = '第5a步（PO#' + poMatch[1] + '）';
+      var stepIndex = questions.findIndex(function (entry) { return entry.sheet === stepSheet && entry.questionNo === '5.1'; });
+      if (criterionMatch) return stepIndex + parseInt(criterionMatch[1], 10) / 100;
+      var detail = findQuestion(item);
+      return stepIndex + 2.1 + ((detail && detail.row) || 0) / 1000;
+    }
+    var triggerNo = '';
+    if (/^1\.4-M/.test(no)) triggerNo = '1.4';
+    else if (/^2\.2\.1-PVA/.test(no)) triggerNo = '2.2.1';
+    else if (/^2\.3-W/.test(no)) triggerNo = '2.3';
+    else if (/^3\.2-VC/.test(no)) triggerNo = '3.2';
+    else if (/^3\.5-PC/.test(no)) triggerNo = '3.5';
+    if (triggerNo) {
+      var triggerIndex = questions.findIndex(function (entry) { return entry.questionNo === triggerNo; });
+      var detailQuestion = findQuestion(item);
+      return triggerIndex + 0.1 + ((detailQuestion && detailQuestion.row) || 0) / 1000;
+    }
+    var match = findQuestion(item);
+    var index = match ? questions.indexOf(match) : -1;
+    return index >= 0 ? index : 9999;
+  }
+
+  function isGeneralInformationItem(item) {
+    return /^GI\.[1-5]$/.test(String((item || {}).question_no || '').trim());
+  }
+
+  function hasGeneralInformation(items) {
+    var found = {};
     (items || []).forEach(function (item) {
+      var no = String((item || {}).question_no || '').trim();
+      if (/^GI\.[1-5]$/.test(no)) found[no] = true;
+    });
+    return generalInfoQuestions.every(function (question) { return !!found[question.questionNo]; });
+  }
+
+  function preserveGeneralInformation(sourceItems, reviewedItems) {
+    var sourceByNo = {};
+    var combined = (reviewedItems || []).slice();
+    (sourceItems || []).forEach(function (item) {
+      if (isGeneralInformationItem(item)) sourceByNo[String(item.question_no).trim()] = item;
+    });
+    generalInfoQuestions.forEach(function (question) {
+      var exists = combined.some(function (item) { return String((item || {}).question_no || '').trim() === question.questionNo; });
+      if (!exists && sourceByNo[question.questionNo]) combined.push(sourceByNo[question.questionNo]);
+    });
+    return normalizeResults(combined);
+  }
+
+  function normalizeResults(items) {
+    items = expandStructuredDetails(items || []);
+    items = applyPerformanceObligationContext(items);
+    var dedup = {};
+    items.forEach(function (item) {
+      var originalSheet = String(item.workpaper_sheet || '').trim();
       var match = findQuestion(item);
       if (match) {
         item.workpaper_match_status = norm(item.question_description) === norm(match.question)
           ? '已定位（工作表、编号、问题描述一致）'
           : '已定位（请核对问题描述）';
-        item.workpaper_sheet = match.sheet;
+        item.workpaper_sheet = match.detailType === 'triggered_appendix' && originalSheet
+          ? originalSheet
+          : match.sheet;
+        item.workpaper_template_sheet = match.sheet;
         item.workpaper_row = String(match.row);
         item.question_no = match.questionNo;
         item.question_description = match.question;
+        item.display_question_no = match.displayQuestionNo || match.questionNo;
+        item.display_question_description = match.displayQuestion || match.question;
+        item.workpaper_section = match.displaySection || '';
+        if (match.detailType) item.appendix_detail_type = match.detailType;
       }
       item = applySopPolicy(item);
       var key = match
-        ? match.sheet + '|' + match.row
+        ? [item.workpaper_sheet || match.sheet, match.row, item.subject_id || item.appendix_instance_no || ''].join('|')
         : [item.workpaper_sheet, item.question_no, norm(item.question_description)].join('|');
       if (!dedup[key] || itemScore(item) > itemScore(dedup[key])) dedup[key] = item;
     });
     var normalized = Object.keys(dedup).map(function (key) { return dedup[key]; }).sort(function (a, b) {
-      var ma = findQuestion(a);
-      var mb = findQuestion(b);
-      var ia = ma ? questions.indexOf(ma) : 9999;
-      var ib = mb ? questions.indexOf(mb) : 9999;
-      return ia - ib;
+      return questionSortRank(a) - questionSortRank(b);
     });
-    return applyConditionalVisibility(normalized);
+    normalized = applyConditionalVisibility(normalized);
+    normalized = applyResolvedAppendixPlan(normalized);
+    return markPoConsistencyConflicts(normalized);
   }
 
   function visibleItems(items) {
@@ -496,6 +1618,10 @@
     return visibleItems(items).map(function (item, index) {
       var match = findQuestion(item);
       var descriptionMatches = match && norm(item.question_description) === norm(match.question);
+      var displayDescription = item.display_question_description || (match && match.displayQuestion) || item.question_description || '';
+      if (item.po_name && /^5\.1(?:\.|$)/.test(String(item.question_no || ''))) {
+        displayDescription = 'PO#' + item.po_no + '—' + item.po_name + '｜' + displayDescription;
+      }
       var matchStatus = item.workpaper_match_status || (match
         ? (descriptionMatches ? '已定位（工作表、编号、问题描述一致）' : '已定位（请核对问题描述）')
         : '未定位（请按问题描述人工匹配）');
@@ -505,10 +1631,11 @@
         '序号': index + 1,
         '合同名称': contract ? contract.file : '',
         '参考底稿版本': 'V2 U_GP SWP 合同审阅示例底稿',
-        '工作表名称': match ? match.sheet : (item.workpaper_sheet || ''),
+        '工作表名称': item.workpaper_sheet || (match ? match.sheet : ''),
         '底稿行号': match ? match.row : (item.workpaper_row || ''),
-        '问题编号': match ? match.questionNo : (item.question_no || ''),
-        '问题描述': match ? match.question : (item.question_description || ''),
+        '底稿章节': item.workpaper_section || (match && match.displaySection) || '',
+        '问题编号': item.display_question_no || (match && match.displayQuestionNo) || item.question_no || '',
+        '问题描述': displayDescription,
         '建议回答': item.suggested_answer || '',
         '合同依据': item.contract_basis || '',
         'SOP定位': item.sop_basis || '',
@@ -541,6 +1668,60 @@
     });
   }
 
+  function fallbackFactId(fact, index) {
+    if (fact && fact.fact_id) return String(fact.fact_id);
+    var value = [fact && fact.source_document, fact && fact.pages, fact && fact.fact_summary, index].join('|');
+    var hash = 2166136261;
+    for (var i = 0; i < value.length; i++) {
+      hash ^= value.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return 'RF-' + (hash >>> 0).toString(16);
+  }
+
+  function bindEvidenceRefs(items, facts) {
+    var factMap = {};
+    (facts || []).forEach(function (fact, index) {
+      var id = fallbackFactId(fact, index);
+      factMap[id] = fact;
+      if (fact && !fact.fact_id) fact.fact_id = id;
+    });
+    (items || []).forEach(function (item) {
+      var ids = structuredEvidenceIds(item.evidence_fact_ids);
+      var refs = [];
+      ids.forEach(function (id) {
+        var fact = factMap[id];
+        if (!fact) return;
+        refs.push({
+          fact_id: id,
+          source_id: String(fact.source_id || ''),
+          source_document: String(fact.source_document || ''),
+          pages: String(fact.pages || '【页码未知】')
+        });
+      });
+      if (!refs.length) {
+        parseStructuredArray(item.evidence_refs).forEach(function (ref) {
+          if (!ref || typeof ref !== 'object') return;
+          var source = String(firstNonEmpty(ref, ['source_document', 'source', 'file']) || '').trim();
+          var pages = String(firstNonEmpty(ref, ['pages', 'page']) || '').trim();
+          if (source) refs.push({ source_id: String(ref.source_id || ''), source_document: source, pages: pages || '【页码未知】' });
+        });
+      }
+      var seen = {};
+      refs = refs.filter(function (ref) {
+        var key = [ref.source_id, ref.source_document, ref.pages].join('|');
+        if (seen[key]) return false;
+        seen[key] = true;
+        return true;
+      });
+      if (!refs.length) return;
+      item.evidence_refs = JSON.stringify(refs);
+      item.source_documents = uniqueValues(refs.map(function (ref) { return ref.source_document; })).join('；');
+      item.pages = uniqueValues(refs.map(function (ref) { return ref.pages; })).join('、');
+    });
+    return items || [];
+  }
+
   function stripPaymentMissingClaims(value) {
     return String(value || '').split(/[；。\n]/).filter(function (part) {
       return !(/(付款|支付)条款|付款时间|付款方式/.test(part) && /未明确|未提供|不完整|缺少/.test(part));
@@ -552,11 +1733,13 @@
     var paymentFacts = (facts || []).filter(function (f) {
       return /付款条件|融资相关条件/.test(String(f.fact_type || '')) || /(付款期限|付款时间|支付期限|自然日内付款)/.test(String(f.fact_summary || '') + String(f.contract_excerpt || ''));
     });
+    bindEvidenceRefs(normalized, facts);
     if (!paymentFacts.length) return normalized;
     var paymentText = paymentFacts.map(function (f) { return String(f.fact_summary || '') + ' ' + String(f.contract_excerpt || '') + ' ' + String(f.qualifier || ''); }).join(' ');
     var paymentSummary = uniqueValues(paymentFacts.map(function (f) { return f.fact_summary; })).slice(0, 3).join('；');
     var paymentSources = uniqueValues(paymentFacts.map(function (f) { return f.source_document; })).join('；');
     var paymentPages = uniqueValues(paymentFacts.map(function (f) { return f.pages; })).slice(0, 3).join('、');
+    var paymentFactIds = uniqueValues(paymentFacts.map(function (fact, index) { return fallbackFactId(fact, index); }));
     var dayMatch = paymentText.match(/(?:通知|对账|开票|收到[^，。；]{0,12})?[^，。；]{0,20}?(\d{1,3})\s*(?:个)?(?:自然日|工作日|日)(?:内)?/);
     var days = dayMatch ? parseInt(dayMatch[1], 10) : null;
     var refersWorkStatement = /工作说明书|SOW|订单另行约定|另有约定/.test(paymentText);
@@ -570,6 +1753,7 @@
         item.contract_basis = item.contract_basis ? item.contract_basis + '；' + confirmed : confirmed;
         item.source_documents = uniqueValues([paymentSources, item.source_documents]).join('；');
         item.pages = uniqueValues([paymentPages, item.pages]).join('、');
+        item.evidence_fact_ids = JSON.stringify(uniqueValues(structuredEvidenceIds(item.evidence_fact_ids).concat(paymentFactIds)));
       }
       if (item.question_no === '3.3' && days !== null && days <= 365 && !hasWorkStatement) {
         item._sharedPaymentConfirmed = true;
@@ -582,6 +1766,7 @@
           : '无';
         item.source_documents = paymentSources;
         item.pages = paymentPages || item.pages;
+        item.evidence_fact_ids = JSON.stringify(paymentFactIds);
         item.confidence = refersWorkStatement && !hasWorkStatement ? '中' : '高';
         item.fill_readiness = refersWorkStatement && !hasWorkStatement ? '建议填入，需复核' : '可直接填入';
         item.review_status = refersWorkStatement && !hasWorkStatement ? '需人工复核' : '可复核后采用';
@@ -589,7 +1774,8 @@
       applySopPolicy(item);
       delete item._sharedPaymentConfirmed;
     });
-    return applyConditionalVisibility(normalized);
+    bindEvidenceRefs(normalized, facts);
+    return applyResolvedAppendixPlan(applyConditionalVisibility(normalized));
   }
 
   function buildMissingTasks(items) {
@@ -598,7 +1784,8 @@
       var text = String(item.missing_information || '').trim();
       if (isNoMissingInformation(text)) return;
       if (!map[text]) map[text] = { text: text, questionNos: [], blocking: false };
-      if (map[text].questionNos.indexOf(item.question_no) < 0) map[text].questionNos.push(item.question_no);
+      var displayNo = item.display_question_no || item.question_no;
+      if (map[text].questionNos.indexOf(displayNo) < 0) map[text].questionNos.push(displayNo);
       if (item.fill_readiness === '资料不足') map[text].blocking = true;
     });
     return Object.keys(map).map(function (key) { return map[key]; });
@@ -607,14 +1794,25 @@
   global.REVENUE_WORKPAPER_QUESTIONS = questions;
   global.RevenueWorkpaper = {
     questions: questions,
+    detailQuestions: detailQuestions,
     questionDependencies: questionDependencies,
     findQuestion: findQuestion,
     normalizeResults: normalizeResults,
+    buildPerformanceObligations: buildPerformanceObligations,
+    buildPerformanceObligationTimingQuestions: buildPerformanceObligationTimingQuestions,
+    buildAppendixPlan: buildAppendixPlan,
+    buildTriggeredDetailQuestions: buildTriggeredDetailQuestions,
+    buildPoConsistencyReviewQuestions: buildPoConsistencyReviewQuestions,
+    findPoConsistencyConflicts: findPoConsistencyConflicts,
     applyConditionalVisibility: applyConditionalVisibility,
     visibleItems: visibleItems,
     isVisible: isVisible,
     buildChecklistRows: buildChecklistRows,
     applySharedFacts: applySharedFacts,
-    buildMissingTasks: buildMissingTasks
+    bindEvidenceRefs: bindEvidenceRefs,
+    buildMissingTasks: buildMissingTasks,
+    hasGeneralInformation: hasGeneralInformation,
+    preserveGeneralInformation: preserveGeneralInformation,
+    answerOptions: TEMPLATE_ANSWER_OPTIONS
   };
 })(window);

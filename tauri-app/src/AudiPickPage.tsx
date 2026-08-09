@@ -16,6 +16,7 @@ import { ResultView } from "@/components/ResultView";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
 import {
+  audipickExportName,
   buildClassifyPrompt,
   buildRevenueBatchPrompt,
   buildRevenueQuestionBatches,
@@ -111,6 +112,10 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
     llm?: { ready: boolean };
     ocr?: { ready: boolean; engine: string };
   }>({});
+  // 顶层视图：工作台 / 提取模板库 / 处理工作日志
+  const [viewMode, setViewMode] = useState<"workbench" | "templates" | "worklog">(
+    "workbench",
+  );
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rules = useMemo(
     () => window.RuleEngine?.getAllSelectableRules() ?? [],
@@ -323,9 +328,19 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
     }
   }
   async function exportBackup() {
-    const outputPath = await pickPath("save", "导出 AudiPick 迁移备份", [
-      "zip",
-    ]);
+    const outputPath = await pickPath(
+      "save",
+      "导出 AudiPick 迁移备份",
+      ["zip"],
+      audipickExportName(
+        {
+          projectName: selected?.project.name,
+          clientName: selected?.project.client,
+          typeLabel: "AudiPick迁移备份",
+        },
+        "zip",
+      ),
+    );
     if (typeof outputPath !== "string") return;
     setBusy(true);
     try {
@@ -1200,12 +1215,24 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
       setError("当前合同和模板还没有提取结果。");
       return;
     }
+    const typeLabel =
+      ruleId === "revenue_workpaper"
+        ? "收入底稿填列清单"
+        : (rules.find((rule) => rule.id === ruleId)?.shortName ??
+          rules.find((rule) => rule.id === ruleId)?.name ??
+          "底稿");
     const output = await pickPath(
       "save",
       ruleId === "revenue_workpaper"
         ? "保存收入底稿填列清单"
         : "保存 AudiPick 底稿",
       ["xlsx"],
+      audipickExportName({
+        fileName: documents.find((item) => item.id === selectedDocument)?.name,
+        projectName: selected?.project.name,
+        clientName: selected?.project.client,
+        typeLabel,
+      }),
     );
     if (typeof output !== "string") return;
     setBusy(true);
@@ -1250,15 +1277,18 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
         title={tool.name}
         detail="项目、PDF、本地预览和13个审计模板已接入；扫描页走OCR，文字层直接使用工具箱全局LLM。"
       />
-      <StepIndicator
-        steps={[
-          { key: "1", label: "项目", disabled: true },
-          { key: "2", label: "合同文件", disabled: true },
-          { key: "3", label: "模板与字段", disabled: true },
-          { key: "4", label: "提取与结果", disabled: true },
-        ]}
-        current={0}
-      />
+      <div className="ap-views">
+        <button className={viewMode === "workbench" ? "active" : ""} onClick={() => setViewMode("workbench")}>
+          工作台
+        </button>
+        <button className={viewMode === "templates" ? "active" : ""} onClick={() => setViewMode("templates")}>
+          提取模板库
+        </button>
+        <button className={viewMode === "worklog" ? "active" : ""} onClick={() => setViewMode("worklog")}>
+          处理工作日志
+        </button>
+      </div>
+      {viewMode === "workbench" && (
       <div className="workspace">
         <section className="form-card">
           <div className="section-title">
@@ -1778,6 +1808,40 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
           )}
         </section>
       </div>
+      )}
+      {viewMode === "templates" && (
+        <section className="form-card">
+          <div className="section-title">
+            <h2>提取模板库</h2>
+          </div>
+          <div className="form-grid">
+            <label className="field">
+              <span>提取模板</span>
+              <select
+                value={ruleId}
+                onChange={(e) => setRuleId(e.target.value)}
+              >
+                {rules.map((rule) => (
+                  <option key={rule.id} value={rule.id}>
+                    {rule.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <p className="hint">
+            选择模板后，可在此管理字段与自定义模板；工作台的提取会使用当前选中的模板。
+          </p>
+        </section>
+      )}
+      {viewMode === "worklog" && (
+        <section className="form-card">
+          <div className="section-title">
+            <h2>处理工作日志</h2>
+          </div>
+          <p className="hint">处理日志功能即将加入。</p>
+        </section>
+      )}
     </>
   );
 }

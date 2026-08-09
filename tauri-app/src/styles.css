@@ -1676,3 +1676,159 @@ summary:focus-visible {
   font-size: var(--fs-xs);
   font-weight: 400;
 }
+
+/* AudiPick 顶层视图导航（工作台/模板库/日志） */
+.ap-views {
+  display: flex;
+  gap: var(--sp-2);
+  margin: var(--sp-5) 0 var(--sp-5);
+}
+.ap-views button {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  padding: var(--sp-2) var(--sp-4);
+  cursor: pointer;
+  font-size: var(--fs-md);
+}
+.ap-views button.active {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: var(--surface);
+  font-weight: 600;
+}
+
+/* === 全局主题系统（迁移自旧版 AudiPick，8 主题） ===
+   data-theme 属性切换。默认 green-dark（深绿，即现有风格）。 */
+[data-theme="green-dark"] {
+  /* 默认深绿主题：与 :root 默认值一致，显式声明便于 data-theme 统一 */
+  --brand: #1e6267; --brand-deep: #14353a; --brand-soft: #245158;
+  --brand-link: #1d6e75; --brand-accent: #78b7ad;
+  --ink: #182626; --ink-strong: #173a3e; --ink-inverse: #eef6f2;
+  --label: #4c605d; --text-muted: #687977; --muted-soft: #83908e;
+  --surface: #ffffff; --surface-sunken: #fbfcfb; --surface-muted: #eef4f1;
+  --surface-page: #edf1ee; --surface-code: #13282b;
+  --border: #cbd7d2; --border-soft: #e4e9e7; --border-strong: #76a8a1;
+  --on-dark: #c6dad6; --on-dark-muted: #aac4c0; --on-dark-faint: #82a39e;
+  --accent: #dcebe6; --accent-foreground: #245158;
+}
+[data-theme="classic-dark"] {
+  --brand: #b8a200; --brand-deep: #1a1a1a; --brand-soft: #2d2d2d;
+  --brand-link: #c9b000; --brand-accent: #ffcc00;
+  --ink: #f7f7f7; --ink-strong: #ffffff; --ink-inverse: #171717;
+  --label: #c5cbd3; --text-muted: #c5cbd3; --muted-soft: #a0a8b0;
+  --surface: #222222; --surface-sunken: #1a1a1a; --surface-muted: #2a2a2a;
+  --surface-page: #1a1a1a; --surface-code: #000000;
+  --border: #333333; --border-soft: #2a2a2a; --border-strong: #ffcc00;
+  --on-dark: #f7f7f7; --on-dark-muted: #c5cbd3; --on-dark-faint: #a0a8b0;
+  --accent: #ffcc00; --accent-foreground: #171717;
+}
+[data-theme="yellow-light"] {
+  --brand: #f2c200; --brand-deep: #ffffff; --brand-soft: #e6d78a;
+  --brand-link: #b89a00; --brand-accent: #f2c200;
+  --ink: #171a1f; --ink-strong: #0d0e10; --ink-inverse: #171717;
+  --label: #4b5563; --text-muted: #4b5563; --muted-soft: #6b7280;
+  --surface: #ffffff; --surface-sunken: #f6f7f9; --surface-muted: #f0f1f3;
+  --surface-page: #f6f7f9; --surface-code: #171a1f;
+  --border: #e5e7eb; --border-soft: #eee; --border-strong: #f2c200;
+  --on-dark: #171a1f; --on-dark-muted: #4b5563; --on-dark-faint: #6b7280;
+  --accent: #f2c200; --accent-foreground: #171717;
+}
+[data-theme="blue-white"] {
+  --brand: #1d4ed8; --brand-deep: #16324f; --brand-soft: #1e40af;
+  --brand-link: #2563eb; --brand-accent: #93c5fd;
+  --ink: #172033; --ink-strong: #0f172a; --ink-inverse: #ffffff;
+  --label: #4b5563; --text-muted: #4b5563; --muted-soft: #6b7280;
+  --surface: #ffffff; --surface-sunken: #f1f5f9; --surface-muted: #e2e8f0;
+  --surface-page: #f1f5f9; --surface-code: #172033;
+  --border: #d1d5db; --border-soft: #e5e7eb; --border-strong: #1d4ed8;
+  --on-dark: #ffffff; --on-dark-muted: #c7d5e4; --on-dark-faint: #93a5b8;
+  --accent: #1d4ed8; --accent-foreground: #ffffff;
+}
+[data-theme="red-white"] {
+  --brand: #c62828; --brand-deep: #ffffff; --brand-soft: #ef9a9a;
+  --brand-link: #b91c1c; --brand-accent: #ef5350;
+  --ink: #25201f; --ink-strong: #171311; --ink-inverse: #ffffff;
+  --label: #514b49; --text-muted: #514b49; --muted-soft: #7a7470;
+  --surface: #ffffff; --surface-sunken: #f7f7f8; --surface-muted: #f0f0f1;
+  --surface-page: #f7f7f8; --surface-code: #25201f;
+  --border: #e0dcd9; --border-soft: #eee; --border-strong: #c62828;
+  --on-dark: #25201f; --on-dark-muted: #514b49; --on-dark-faint: #7a7470;
+  --accent: #c62828; --accent-foreground: #ffffff;
+}
+[data-theme="yellow-blue"] {
+  --brand: #f3c300; --brand-deep: #102a43; --brand-soft: #155e75;
+  --brand-link: #d9b000; --brand-accent: #f3c300;
+  --ink: #102a43; --ink-strong: #0b1e31; --ink-inverse: #102a43;
+  --label: #425b70; --text-muted: #425b70; --muted-soft: #64748b;
+  --surface: #ffffff; --surface-sunken: #eaf1f7; --surface-muted: #dbe8f2;
+  --surface-page: #eaf1f7; --surface-code: #102a43;
+  --border: #cbd5e1; --border-soft: #dce5ee; --border-strong: #f3c300;
+  --on-dark: #ffffff; --on-dark-muted: #d7e3ee; --on-dark-faint: #a9bfd0;
+  --accent: #f3c300; --accent-foreground: #102a43;
+}
+[data-theme="red-yellow-ivory"] {
+  --brand: #e0a800; --brand-deep: #8f2424; --brand-soft: #a5322f;
+  --brand-link: #c99900; --brand-accent: #ffd55a;
+  --ink: #3b2520; --ink-strong: #2a1a16; --ink-inverse: #ffffff;
+  --label: #62504a; --text-muted: #62504a; --muted-soft: #8a7870;
+  --surface: #fffdf7; --surface-sunken: #f6f0e2; --surface-muted: #efe6d3;
+  --surface-page: #f6f0e2; --surface-code: #3b2520;
+  --border: #e5d8c2; --border-soft: #efe6d3; --border-strong: #e0a800;
+  --on-dark: #ffffff; --on-dark-muted: #f4d6ce; --on-dark-faint: #d9b8ae;
+  --accent: #e0a800; --accent-foreground: #2d1c16;
+}
+[data-theme="yellow-green"] {
+  --brand: #f0c419; --brand-deep: #24513f; --brand-soft: #2e6b53;
+  --brand-link: #d9ae00; --brand-accent: #f0c419;
+  --ink: #173a2b; --ink-strong: #0f2a1e; --ink-inverse: #173a2b;
+  --label: #465e53; --text-muted: #465e53; --muted-soft: #6a8075;
+  --surface: #ffffff; --surface-sunken: #eef4ea; --surface-muted: #ddebe0;
+  --surface-page: #eef4ea; --surface-code: #173a2b;
+  --border: #c9dac2; --border-soft: #ddebe0; --border-strong: #f0c419;
+  --on-dark: #ffffff; --on-dark-muted: #d6e8df; --on-dark-faint: #a9c4b5;
+  --accent: #f0c419; --accent-foreground: #173a2b;
+}
+[data-theme="teal-dark"] {
+  --brand: #2dd4bf; --brand-deep: #07110f; --brand-soft: #0f2e29;
+  --brand-link: #5eead4; --brand-accent: #2dd4bf;
+  --ink: #f1f8f6; --ink-strong: #ffffff; --ink-inverse: #062620;
+  --label: #b9cbc6; --text-muted: #b9cbc6; --muted-soft: #8aa49c;
+  --surface: #182422; --surface-sunken: #101817; --surface-muted: #1f302d;
+  --surface-page: #101817; --surface-code: #000000;
+  --border: #2b3d39; --border-soft: #22312e; --border-strong: #2dd4bf;
+  --on-dark: #f5faf8; --on-dark-muted: #adc3bd; --on-dark-faint: #7e9b93;
+  --accent: #2dd4bf; --accent-foreground: #062620;
+}
+
+/* 设置页主题选择器 */
+.theme-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.theme-option {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  padding: var(--sp-2) var(--sp-3);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.theme-option.active {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: var(--surface);
+  font-weight: 600;
+}
+
+/* 侧边栏工具分类组 */
+.tool-group {
+  display: grid;
+  gap: var(--sp-1);
+}
+.tool-group + .tool-group {
+  margin-top: var(--sp-4);
+}

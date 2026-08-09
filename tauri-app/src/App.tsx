@@ -196,15 +196,27 @@ export default function App() {
           ))}
         </nav>
         <div className="tool-nav">
-          <div className="nav-caption">工具</div>
-          {catalog.map((t) => (
-            <NavLink key={t.id} to={t.route}>
-              <span className="tool-badge">
-                {TOOL_BADGE[t.id] ?? t.name.slice(0, 1)}
-              </span>
-              {t.name}
-            </NavLink>
-          ))}
+          {[
+            { label: "审计工具", ids: ["fa_list", "kanzhang", "audipick", "audit_roll_forward"] },
+            { label: "效率工具", ids: ["Excel_Merger", "file_list_directory"] },
+            { label: "运营工具", ids: ["ts_manager", "confirmation_progress", "wp_service_generator"] },
+          ].map((group) => {
+            const tools = catalog.filter((t) => group.ids.includes(t.id));
+            if (!tools.length) return null;
+            return (
+              <div key={group.label} className="tool-group">
+                <div className="nav-caption">{group.label}</div>
+                {tools.map((t) => (
+                  <NavLink key={t.id} to={t.route}>
+                    <span className="tool-badge">
+                      {TOOL_BADGE[t.id] ?? t.name.slice(0, 1)}
+                    </span>
+                    {t.name}
+                  </NavLink>
+                ))}
+              </div>
+            );
+          })}
         </div>
         <div className="sidebar-footer">
           <span>v{bootstrap?.appVersion ?? "…"}</span>
@@ -742,6 +754,32 @@ function Settings() {
     text: string;
   }>();
   const [backupPath, setBackupPath] = useState("");
+  // 全局主题（data-theme 切换，默认深绿）
+  const [theme, setTheme] = useState(
+    () => document.documentElement.dataset.theme ?? "green-dark",
+  );
+  const applyTheme = (id: string) => {
+    document.documentElement.dataset.theme = id;
+    try {
+      localStorage.setItem("audit-toolbox.theme", id);
+    } catch {
+      /* ignore */
+    }
+    setTheme(id);
+  };
+  useEffect(() => {
+    const saved =
+      document.documentElement.dataset.theme ??
+      (() => {
+        try {
+          return localStorage.getItem("audit-toolbox.theme") ?? "green-dark";
+        } catch {
+          return "green-dark";
+        }
+      })();
+    applyTheme(saved);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => {
     void settingsGet()
       .then((value) => {
@@ -838,6 +876,31 @@ function Settings() {
         detail="LLM 与 OCR 密钥由 Windows 凭据管理器保存，不写入 SQLite 或日志。"
       />
       <div className="settings-grid">
+        <section className="list-card">
+          <h2>界面主题</h2>
+          <div className="theme-picker">
+            {[
+              { id: "green-dark", name: "深绿" },
+              { id: "classic-dark", name: "经典黄黑" },
+              { id: "yellow-light", name: "明亮黄白" },
+              { id: "blue-white", name: "专业蓝白" },
+              { id: "red-white", name: "利落红白" },
+              { id: "yellow-blue", name: "醒目黄蓝" },
+              { id: "red-yellow-ivory", name: "红黄米白" },
+              { id: "yellow-green", name: "清新黄绿" },
+              { id: "teal-dark", name: "深色青绿" },
+            ].map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                className={`theme-option ${theme === t.id ? "active" : ""}`}
+                onClick={() => applyTheme(t.id)}
+              >
+                {t.name}
+              </button>
+            ))}
+          </div>
+        </section>
         <section className="list-card">
           <h2>统一 LLM 配置</h2>
           <div className="form-grid">

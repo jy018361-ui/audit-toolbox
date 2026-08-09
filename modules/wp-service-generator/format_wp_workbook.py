@@ -117,34 +117,37 @@ def apply_page_setup(ws, print_area: str, repeat_rows: str | None = None):
 def style_source_sheet(ws):
     max_col = ws.max_column
     max_row = ws.max_row
-    widths = {
-        "A": 34,
-        "B": 14,
-        "C": 38,
-        "D": 14,
-        "E": 13,
-        "F": 27,
-        "G": 14,
-        "H": 15,
-        "I": 19,
-        "J": 18,
-        "K": 17,
-        "L": 17,
-        "M": 17,
-        "N": 17,
-        "O": 34,
-        "P": 25,
-        "Q": 16,
-        "R": 28,
-        "S": 18,
-        "T": 23,
-        "U": 16,
-        "V": 23,
-        "W": 20,
+    columns = source_column_map(ws)
+    field_widths = {
+        "client_name": 34,
+        "engagement_code": 14,
+        "engagement_name": 38,
+        "outlook_hours": 14,
+        "schedule_status": 13,
+        "service_number": 27,
+        "task_count": 14,
+        "project_status": 15,
+        "wp_eic": 19,
+        "wp_fic": 18,
+        "pre_start": 17,
+        "pre_end": 17,
+        "final_start": 17,
+        "final_end": 17,
+        "service_type": 34,
+        "audit_eic": 25,
+        "report_date": 16,
+        "related_order": 28,
+        "total_booking_hours": 18,
+        "team": 23,
+        "client_code": 16,
+        "engagement_id": 23,
     }
-    for letter, width in widths.items():
-        if ws.max_column >= ord(letter) - 64:
-            ws.column_dimensions[letter].width = width
+    for column in range(1, max_col + 1):
+        ws.column_dimensions[get_column_letter(column)].width = 18
+    for field, width in field_widths.items():
+        column = columns.get(field)
+        if column:
+            ws.column_dimensions[get_column_letter(column)].width = width
 
     ws.row_dimensions[1].height = 34
     style_header_row(ws, 1, 1, max_col, NAVY)
@@ -155,36 +158,57 @@ def style_source_sheet(ws):
         for col in range(1, max_col + 1):
             cell = ws.cell(row, col)
             set_cell_style(cell, fill=row_fill, size=9)
-        for col in (2, 4, 7, 19, 21):
-            if col <= max_col:
-                ws.cell(row, col).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        for col in (4, 7, 19):
-            if col <= max_col:
-                ws.cell(row, col).number_format = "#,##0.00"
-        for col in (6, 18):
-            if col <= max_col and ws.cell(row, col).value:
-                ws.cell(row, col).font = Font(
+        for field in (
+            "engagement_code", "outlook_hours", "task_count",
+            "total_booking_hours", "client_code",
+        ):
+            column = columns.get(field)
+            if column:
+                ws.cell(row, column).alignment = Alignment(
+                    horizontal="center", vertical="center", wrap_text=True
+                )
+        for field in ("outlook_hours", "task_count", "total_booking_hours"):
+            column = columns.get(field)
+            if column:
+                ws.cell(row, column).number_format = "#,##0.00"
+        for field in ("service_number", "related_order"):
+            column = columns.get(field)
+            if column and ws.cell(row, column).value:
+                ws.cell(row, column).font = Font(
                     name=FONT_NAME,
                     size=9,
                     bold=True,
                     color=TEAL,
                     underline="single",
                 )
-                ws.cell(row, col).fill = solid(PALE_TEAL)
+                ws.cell(row, column).fill = solid(PALE_TEAL)
 
     if max_row >= 2:
         ws.auto_filter.ref = f"A1:{get_column_letter(max_col)}{max_row}"
     ws.freeze_panes = "A2"
     ws.sheet_properties.tabColor = GOLD if ws.title in {"AUD2026", "FY26"} else TEAL if ws.title == "IPO" else MUTED
 
-    if max_row >= 2 and max_col >= 8:
+    schedule_column = columns.get("schedule_status")
+    project_column = columns.get("project_status")
+    if max_row >= 2 and schedule_column:
+        letter = get_column_letter(schedule_column)
         ws.conditional_formatting.add(
-            f"E2:E{max_row}",
-            FormulaRule(formula=['E2="已完成"'], fill=solid(PALE_GREEN), font=Font(color=GREEN, bold=True)),
+            f"{letter}2:{letter}{max_row}",
+            FormulaRule(
+                formula=[f'{letter}2="已完成"'],
+                fill=solid(PALE_GREEN),
+                font=Font(color=GREEN, bold=True),
+            ),
         )
+    if max_row >= 2 and project_column:
+        letter = get_column_letter(project_column)
         ws.conditional_formatting.add(
-            f"H2:H{max_row}",
-            FormulaRule(formula=['H2="项目承接"'], fill=solid(LIGHT_GOLD), font=Font(color=NAVY, bold=True)),
+            f"{letter}2:{letter}{max_row}",
+            FormulaRule(
+                formula=[f'{letter}2="项目承接"'],
+                fill=solid(LIGHT_GOLD),
+                font=Font(color=NAVY, bold=True),
+            ),
         )
 
     apply_page_setup(ws, f"A1:{get_column_letter(max_col)}{max_row}", "1:1")
@@ -315,6 +339,68 @@ def hyperlink_display(value: object):
     return quoted[-1].replace('""', '"') if quoted else value
 
 
+SOURCE_FIELD_ALIASES = {
+    "client_name": ("Client Name",),
+    "engagement_code": ("Engagement Code",),
+    "engagement_name": ("Engagement Name",),
+    "outlook_hours": ("Outlook Hours",),
+    "service_number": ("WP服务单编号",),
+    "task_count": ("底稿任务数量",),
+    "schedule_status": ("排班状态",),
+    "project_status": ("项目状态",),
+    "wp_eic": ("WP EIC",),
+    "wp_fic": ("WP FIC", "WP FIC*"),
+    "service_type": ("Service Type",),
+    "audit_eic": ("Audit EIC",),
+    "report_date": ("Audit Report Date",),
+    "related_order": ("相关订单",),
+    "pre_start": ("Booking Period Start-预审",),
+    "pre_end": ("Booking Period End-预审",),
+    "final_start": ("Booking Period Start-年审",),
+    "final_end": ("Booking Period End-年审",),
+    "total_booking_hours": ("Total Booking Hours",),
+    "team": ("团队",),
+    "client_code": ("Client Code",),
+    "engagement_id": ("审计项目",),
+}
+
+
+def normalize_header(value: object) -> str:
+    return (
+        re.sub(r"\s+", "", str(value or ""))
+        .replace("–", "-")
+        .replace("—", "-")
+        .casefold()
+    )
+
+
+def source_column_map(ws, required=()):
+    """Return source field columns by header name, independent of column order."""
+    headers = {
+        normalize_header(ws.cell(1, column).value): column
+        for column in range(1, ws.max_column + 1)
+        if ws.cell(1, column).value not in (None, "")
+    }
+    columns = {}
+    for field, aliases in SOURCE_FIELD_ALIASES.items():
+        for alias in aliases:
+            column = headers.get(normalize_header(alias))
+            if column:
+                columns[field] = column
+                break
+
+    missing = [field for field in required if field not in columns]
+    if missing:
+        labels = [SOURCE_FIELD_ALIASES[field][0] for field in missing]
+        raise ValueError(f"{ws.title}工作表缺少字段：{'、'.join(labels)}")
+    return columns
+
+
+def source_value(ws, row: int, columns: dict[str, int], field: str, default=None):
+    column = columns.get(field)
+    return ws.cell(row, column).value if column else default
+
+
 def create_index_sheet(wb, service_sheets):
     if "服务方案索引" in wb.sheetnames:
         del wb["服务方案索引"]
@@ -355,14 +441,23 @@ def create_index_sheet(wb, service_sheets):
         if source_name not in wb.sheetnames:
             continue
         source_ws = wb[source_name]
+        columns = source_column_map(
+            source_ws, required=("service_number", "outlook_hours")
+        )
         for row in range(2, source_ws.max_row + 1):
-            service_number = hyperlink_display(source_ws.cell(row, 6).value)
+            service_number = hyperlink_display(
+                source_value(source_ws, row, columns, "service_number")
+            )
             if service_number:
                 key = str(service_number).strip()
                 if key not in source_info_by_service:
                     source_info_by_service[key] = {
-                        "wp_fic": source_ws.cell(row, 10).value,
-                        "outlook_hours": source_ws.cell(row, 4).value,
+                        "wp_fic": source_value(
+                            source_ws, row, columns, "wp_fic", ""
+                        ),
+                        "outlook_hours": source_value(
+                            source_ws, row, columns, "outlook_hours", ""
+                        ),
                     }
 
     headers = [

@@ -14,19 +14,27 @@ import type { JobEvent, ToolManifest } from "./types";
 import { errorText } from "@/lib/errors";
 import { ResultView } from "@/components/ResultView";
 import { PageHeader } from "@/components/PageHeader";
+import { StepIndicator } from "@/components/StepIndicator";
 import {
   buildClassifyPrompt,
   buildRevenueBatchPrompt,
   buildRevenueQuestionBatches,
   classifySample,
   extractionCacheKey,
+  groupRevenueDetailQuestions,
+  latestFieldSetId,
   matchEvidenceDocument,
   mergeRevenueAnswers,
+  missingRevenueTargets,
   pickClassifiedRule,
+  revenueMissingQuestionFallback,
+  revenuePromptForQuestions,
+  revenueQuestionKey,
   splitContractText,
   withRetry,
-  REVENUE_FACT_PROMPT,
+  revenueFactPrompt,
   type ClassifiedDocument,
+  type RevenueTargetQuestion,
 } from "./audipickUi";
 
 type AudiPickRelation = {
@@ -39,6 +47,10 @@ type AudiPickResult = Record<string, unknown> & {
   contractId?: string;
   ruleId?: string;
   reviewed?: boolean;
+  /// Field set and timestamp of the extraction that produced this row; both are
+  /// written on save and decide which rows the panel still shows.
+  fieldSetId?: string;
+  extractAt?: string;
 };
 type AudiPickProjectData = {
   project: {
@@ -108,11 +120,20 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
   const activeFieldKeys = selectedFieldKeys;
   const activeFieldSetId = `${ruleId}:${[...activeFieldKeys].sort().join("|")}`;
   const selected = projects.find((value) => value.project.id === selectedId);
-  const matchedResults = (selected?.results ?? []).filter(
-    (row) =>
-      row.contractId === selectedDocument &&
-      row.ruleId === ruleId &&
-      (!row.fieldSetId || row.fieldSetId === activeFieldSetId),
+  const documentResults = (selected?.results ?? []).filter(
+    (row) => row.contractId === selectedDocument && row.ruleId === ruleId,
+  );
+  // Rows record the field set they were extracted with.  Pinning the view to
+  // the *current* checkbox selection empties the panel whenever a rule gains or
+  // loses a field, because every stored row then carries a stale id -- an
+  // AudiPick rule update makes past extractions look lost even though they are
+  // still in the database.  Legacy shows the newest field set recorded for this
+  // contract and rule instead, so follow that and fall back to the current one
+  // only when nothing has been extracted yet.
+  const visibleFieldSetId =
+    latestFieldSetId(documentResults) ?? activeFieldSetId;
+  const matchedResults = documentResults.filter(
+    (row) => !row.fieldSetId || row.fieldSetId === visibleFieldSetId,
   );
   // The revenue rules mark questions that the contract makes inapplicable (no
   // repurchase clause -> its two sub-questions drop out).  Showing and
@@ -699,7 +720,9 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
 
   /// Two-pass extraction for the revenue workpaper.
   ///
-  /// The workpaper asks 43 questions across a bundle of documents. Sending all
+  /// The workpaper asks dozens of questions across a bundle of documents (the
+  /// rule bundle owns the exact list, so it grows between AudiPick releases).
+  /// Sending all
   /// of them in one request overruns the model's stable output length, so
   /// answers come back missing or truncated with no indication anything was
   /// dropped, and nothing cross-checks a supplement against the master
@@ -754,7 +777,7 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
           setError(
             `正在提取资料事实：${document.name}（${index + 1}/${bundle.length}）…`,
           );
-          const value = await askOnce(REVENUE_FACT_PROMPT, chunk);
+          const value = await askOnce(revenueFactPrompt(), chunk);
           const list = Array.isArray((value.parsed as any)?.facts)
             ? ((value.parsed as any).facts as Array<Record<string, unknown>>)
             : [];
@@ -781,24 +804,159 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
     }
     facts = revenueFacts.current.get(cacheKey) ?? facts;
     setError("");
-    const merged = mergeRevenueAnswers(
-      responses.flatMap((value) =>
-        Array.isArray((value.parsed as any)?.items)
-          ? ((value.parsed as any).items as Array<Record<string, unknown>>)
-          : [],
-      ),
-    );
-    const withFacts =
+    const itemsOf = (value: { parsed?: Record<string, unknown> }) =>
+      Array.isArray((value.parsed as any)?.items)
+        ? ((value.parsed as any).items as Array<Record<string, unknown>>)
+        : [];
+    const normalize = (list: Array<Record<string, unknown>>) =>
+      typeof rules?.normalizeResults === "function"
+        ? (rules.normalizeResults(list) as Array<Record<string, unknown>>)
+        : list;
+    const withSharedFacts = (list: Array<Record<string, unknown>>) =>
       typeof rules?.applySharedFacts === "function"
-        ? (rules.applySharedFacts(merged, facts) as Array<
-            Record<string, unknown>
-          >)
-        : merged;
+        ? (rules.applySharedFacts(list, facts) as Array<Record<string, unknown>>)
+        : list;
+    // The follow-up rounds answer against the shared fact table rather than the
+    // contract text: the facts already carry their source file and pages, and
+    // re-sending a whole bundle to ask a handful of questions is what makes a
+    // long resolution round overrun the request budget.
+    let factText = `【同一合同资料包的共享事实表】\n所有底稿问题必须共同使用以下事实；不得说已列示的事实未明确。\n${JSON.stringify({ facts })}`;
+    if (factText.length > 70_000)
+      factText = `${factText.slice(0, 70_000)}\n【事实表已按长度截断】`;
+
+    /// Ask one group of questions, then chase whatever the model left out.
+    ///
+    /// A skipped question used to leave a hole in the workpaper that nothing
+    /// reported, so misses are retried in small groups and anything still
+    /// absent becomes an explicit placeholder row marked for manual review.
+    const answerGroup = async (targets: RevenueTargetQuestion[]) => {
+      let answered = normalize(
+        itemsOf(
+          await askOnce(revenuePromptForQuestions(prompt, targets), factText),
+        ),
+      );
+      const missed = missingRevenueTargets(answered, targets);
+      for (let index = 0; index < missed.length; index += 3) {
+        try {
+          answered = normalize([
+            ...answered,
+            ...itemsOf(
+              await askOnce(
+                revenuePromptForQuestions(
+                  prompt,
+                  missed.slice(index, index + 3),
+                ),
+                factText,
+              ),
+            ),
+          ]);
+        } catch {
+          // Keep the batch: the placeholder pass below records what never came.
+        }
+      }
+      const stillMissing = missingRevenueTargets(answered, targets);
+      return stillMissing.length
+        ? normalize([
+            ...answered,
+            ...stillMissing.map(revenueMissingQuestionFallback),
+          ])
+        : answered;
+    };
+
+    /// Step 5a asks its timing question once per performance obligation, which
+    /// only becomes answerable once the main pass has identified them.
+    const answerPoTiming = async (current: Array<Record<string, unknown>>) => {
+      const targets =
+        typeof rules?.buildPerformanceObligationTimingQuestions === "function"
+          ? (rules.buildPerformanceObligationTimingQuestions(
+              current,
+            ) as RevenueTargetQuestion[])
+          : [];
+      if (!targets.length) return current;
+      setError(`已锁定 ${targets.length} 项履约义务，正在逐项判断收入确认时段/时点…`);
+      const answered = await answerGroup(targets);
+      // The generic 5.1 row is superseded by the per-obligation answers.
+      const kept = current.filter(
+        (item) =>
+          !(
+            String(item.question_no ?? "").trim() === "5.1" &&
+            /第5a步（PO#\d+）/.test(String(item.workpaper_sheet ?? ""))
+          ),
+      );
+      return withSharedFacts(normalize([...kept, ...answered]));
+    };
+
+    /// An appendix answer can trigger further appendix questions, so keep going
+    /// until a round produces none.  The cap stops answers that contradict each
+    /// other from looping forever.
+    const answerTriggeredAppendix = async (
+      current: Array<Record<string, unknown>>,
+      round: number,
+    ): Promise<Array<Record<string, unknown>>> => {
+      const normalized = normalize(current);
+      const targets =
+        typeof rules?.buildTriggeredDetailQuestions === "function"
+          ? (rules.buildTriggeredDetailQuestions(
+              normalized,
+            ) as RevenueTargetQuestion[])
+          : [];
+      if (!targets.length) return normalized;
+      if (round >= 8)
+        throw new Error(
+          "附表条件问题超过最大展开层级，请检查附表回答是否存在循环或冲突",
+        );
+      const groups = groupRevenueDetailQuestions(targets);
+      const collected: Array<Record<string, unknown>> = [];
+      for (const [index, group] of groups.entries()) {
+        setError(
+          `正在按底稿跳转回答附表第 ${round + 1} 轮：${index + 1}/${groups.length}（本轮共 ${targets.length} 个问题）…`,
+        );
+        collected.push(...(await answerGroup(group)));
+      }
+      return answerTriggeredAppendix([...normalized, ...collected], round + 1);
+    };
+
+    /// Obligations that transfer control the same way must reach the same
+    /// answer; this pass re-asks the ones that disagree so the workpaper does
+    /// not ship a contradiction for the reviewer to find.
+    const reviewPoConsistency = async (
+      current: Array<Record<string, unknown>>,
+    ) => {
+      const normalized = normalize(current);
+      const targets =
+        typeof rules?.buildPoConsistencyReviewQuestions === "function"
+          ? (rules.buildPoConsistencyReviewQuestions(
+              normalized,
+            ) as RevenueTargetQuestion[])
+          : [];
+      if (!targets.length) return normalized;
+      setError("检测到同类履约义务答案不一致，正在按相同指标统一复核…");
+      const reviewed: Array<Record<string, unknown>> = [];
+      for (const group of groupRevenueDetailQuestions(targets))
+        reviewed.push(...(await answerGroup(group)));
+      const replaced = new Set(reviewed.map(revenueQuestionKey));
+      return normalize([
+        ...normalized.filter((item) => !replaced.has(revenueQuestionKey(item))),
+        ...reviewed,
+      ]);
+    };
+
+    const merged = mergeRevenueAnswers(responses.flatMap(itemsOf));
+    let items = withSharedFacts(normalize(merged));
+    const mainAnswers = items.length;
+    items = await answerPoTiming(items);
+    items = await answerTriggeredAppendix(items, 0);
+    items = await reviewPoConsistency(items);
+    const withFacts = withSharedFacts(normalize(items));
+    setError("");
     await saveExtractedItems(withFacts);
     setResult({
       items: withFacts.length,
       questions: questions.length,
       facts: facts.length,
+      // Rows beyond the main pass come from the per-obligation and appendix
+      // rounds, so surface them instead of leaving the count unexplained.
+      followUpItems: Math.max(0, withFacts.length - mainAnswers),
     });
     setBusy(false);
   }
@@ -933,6 +1091,18 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
         typeof (window.RevenueWorkpaper as any)?.normalizeResults === "function"
       )
         items = (window.RevenueWorkpaper as any).normalizeResults(items);
+      // The second pass answers the workpaper questions and does not restate
+      // the general contract information, so without this the five 第1部分
+      // rows are dropped from the reviewed checklist.  Legacy folds them back
+      // in from the pre-review answers.
+      if (
+        typeof (window.RevenueWorkpaper as any)?.preserveGeneralInformation ===
+        "function"
+      )
+        items = (window.RevenueWorkpaper as any).preserveGeneralInformation(
+          currentResults,
+          items,
+        );
       if (selected) {
         const retained = (selected.results ?? []).filter(
           (row) =>
@@ -1040,9 +1210,11 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
     if (typeof output !== "string") return;
     setBusy(true);
     try {
-      // The revenue rules build the legacy 25-column checklist, including which
+      // The revenue rules build the legacy checklist, including which
       // worksheet, row and D/E/F cell each answer belongs in.  Exporting the raw
-      // result keys instead left the user to locate all 43 questions by hand.
+      // result keys instead left the user to locate every question by hand.
+      // Columns come from the rows themselves, so a rule update that adds one
+      // (1.4.6 added 底稿章节) flows through without touching this page.
       const checklist =
         ruleId === "revenue_workpaper" &&
         typeof (window.RevenueWorkpaper as any)?.buildChecklistRows ===
@@ -1074,9 +1246,18 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
   return (
     <>
       <PageHeader
-        eyebrow="AudiPick Tauri 迁移"
+        eyebrow="合同审阅管理"
         title={tool.name}
         detail="项目、PDF、本地预览和13个审计模板已接入；扫描页走OCR，文字层直接使用工具箱全局LLM。"
+      />
+      <StepIndicator
+        steps={[
+          { key: "1", label: "项目", disabled: true },
+          { key: "2", label: "合同文件", disabled: true },
+          { key: "3", label: "模板与字段", disabled: true },
+          { key: "4", label: "提取与结果", disabled: true },
+        ]}
+        current={0}
       />
       <div className="workspace">
         <section className="form-card">

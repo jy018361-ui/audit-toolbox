@@ -14,6 +14,8 @@ import type { JobEvent, ToolManifest } from "./types";
 import { errorText } from "@/lib/errors";
 import { parseRollForwardCraRatio, rollForwardCraWriteRecords } from "./rollForwardUi";
 import { PageHeader } from "@/components/PageHeader";
+import { StepIndicator } from "@/components/StepIndicator";
+import { ErrorBox } from "@/components/ErrorBox";
 import { ResultView } from "@/components/ResultView";
 type RollSubject = {
   code: string;
@@ -677,11 +679,20 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
   return (
     <>
       <PageHeader
-        eyebrow="完整迁移工具"
+        eyebrow="底稿年度结转"
         title={tool.name}
         detail="Rust 原生结转内核统一管理项目、CRA、进度、安全暂停与取消。"
       />
-      {error && <div className="error-box">{error}</div>}
+      <StepIndicator
+        steps={[
+          { key: "1", label: "项目与公司", disabled: true },
+          { key: "2", label: "文件与科目", disabled: true },
+          { key: "3", label: "CRA 解析与确认", disabled: true },
+          { key: "4", label: "运行检查与结果", disabled: true },
+        ]}
+        current={0}
+      />
+      <ErrorBox error={error} onDismiss={() => setError("")} />
       <div className="merger-layout">
         <section className="form-card">
           <div className="section-title">

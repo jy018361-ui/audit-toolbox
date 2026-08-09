@@ -468,7 +468,15 @@ function ToolPage({ catalog }: { catalog: ToolManifest[] }) {
   }
   return (
     <>
-      <PageHeader eyebrow="统一工具" title={tool.name} detail={def.intro} />
+      <PageHeader eyebrow="WP 服务单生成" title={tool.name} detail={def.intro} />
+      <StepIndicator
+        steps={[
+          { key: "1", label: "任务配置", disabled: true },
+          { key: "2", label: "检查输入", disabled: true },
+          { key: "3", label: "生成结果", disabled: true },
+        ]}
+        current={0}
+      />
       <div className="workspace">
         <section className="form-card">
           <div className="section-title">

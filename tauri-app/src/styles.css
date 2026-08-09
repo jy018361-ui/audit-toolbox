@@ -1314,7 +1314,7 @@ summary:focus-visible {
 /* StepIndicator：统一步骤条（三态） */
 .step-indicator {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: var(--sp-2);
   margin: var(--sp-5) 0 var(--sp-5);
 }

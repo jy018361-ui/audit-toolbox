@@ -34,6 +34,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
 import { ResultView } from "@/components/ResultView";
 import { RollForwardPage } from "./RollForwardPage";
+import { applyReadableForegrounds } from "./theme";
 
 const NAV = [
   { to: "/", label: "工作台" },
@@ -184,7 +185,7 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand">
           <span>AUDIT TOOLKIT</span>
-          <h1>审计工具箱</h1>
+          <h1>E点通工具箱</h1>
           <p>统一、安全、可追踪的审计作业工作台</p>
         </div>
         <nav>
@@ -760,6 +761,9 @@ function Settings() {
   );
   const applyTheme = (id: string) => {
     document.documentElement.dataset.theme = id;
+    // Text drawn on the theme's own colours is derived from those colours, so a
+    // light brand does not keep the white label it was hand-paired with.
+    applyReadableForegrounds();
     try {
       localStorage.setItem("audit-toolbox.theme", id);
     } catch {

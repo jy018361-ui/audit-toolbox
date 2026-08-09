@@ -7,11 +7,15 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; img-src 'self' asset: data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
     />
-    <title>审计工具箱</title>
+    <title>E点通工具箱</title>
   </head>
   <body>
     <div id="root"></div>
     <script src="/audipick-pdfjs/legacy/build/pdf.min.js"></script>
+    <!-- revenue_workpaper.js publishes REVENUE_WORKPAPER_QUESTIONS, which its
+         prompt reads at load time to build the workpaper question catalogue.
+         Keep it ahead of the prompts, the order audipick.html uses. -->
+    <script src="/audipick-rules/revenue_workpaper.js"></script>
     <script src="/audipick-rules/prompts/loan_covenant.js"></script>
     <script src="/audipick-rules/prompts/loan_general.js"></script>
     <script src="/audipick-rules/prompts/revenue.js"></script>
@@ -26,7 +30,6 @@
     <script src="/audipick-rules/prompts/credit_report.js"></script>
     <script src="/audipick-rules/prompts/tax_audit_report.js"></script>
     <script src="/audipick-rules/registry.js"></script>
-    <script src="/audipick-rules/revenue_workpaper.js"></script>
     <script src="/audipick-rules/fieldset.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>

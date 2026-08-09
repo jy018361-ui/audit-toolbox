@@ -91,7 +91,7 @@ def build_desktop(npm: str, cargo: str, *, reuse_dependencies: bool = False) -> 
     if not source.is_file():
         raise RuntimeError(f"Tauri 构建后未找到 {source}")
     DIST.mkdir(parents=True, exist_ok=True)
-    target = DIST / f"审计工具箱-v{VERSION}-win-x64.exe"
+    target = DIST / f"E点通工具箱-v{VERSION}-win-x64.exe"
     shutil.copy2(source, target)
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
     target.with_suffix(target.suffix + ".sha256").write_text(f"{digest}  {target.name}\n", encoding="utf-8")
@@ -369,7 +369,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     if args.smoke_only:
-        target = DIST / f"审计工具箱-v{VERSION}-win-x64.exe"
+        target = DIST / f"E点通工具箱-v{VERSION}-win-x64.exe"
         if not target.is_file():
             raise RuntimeError(f"未找到待验收程序：{target}")
         smoke_test_desktop(target)

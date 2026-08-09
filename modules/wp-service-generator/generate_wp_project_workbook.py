@@ -15,17 +15,26 @@ create_index_sheet = workbook_formatter.create_index_sheet
 style_service_sheet = workbook_formatter.style_service_sheet
 style_source_sheet = workbook_formatter.style_source_sheet
 validate_workbook = workbook_formatter.validate_workbook
+source_column_map = workbook_formatter.source_column_map
+source_value = workbook_formatter.source_value
 
 
 SER_CONFIG_FILENAME = "SER配置.xlsx"
+DEFAULT_SER_RULES = (
+    {"role": "Manager", "hours_mix": 0.08, "ser_rate": 2733.0},
+    {"role": "Senior", "hours_mix": 0.25, "ser_rate": 1199.0},
+    {"role": "Staff", "hours_mix": 0.58, "ser_rate": 683.0},
+    {"role": "Intern", "hours_mix": 0.09, "ser_rate": 173.0},
+)
+DEFAULT_SER_CONFIG = tuple(
+    (rule["hours_mix"], rule["ser_rate"]) for rule in DEFAULT_SER_RULES
+)
 
 
 def load_ser_config(folder: Path):
     config_path = folder / SER_CONFIG_FILENAME
     if not config_path.exists():
-        raise FileNotFoundError(
-            f"缺少{SER_CONFIG_FILENAME}。请将本地SER配置文件放在导出表所在文件夹。"
-        )
+        return DEFAULT_SER_CONFIG
 
     wb = load_workbook(config_path, data_only=True, read_only=False)
     ws = wb.active
@@ -309,8 +318,14 @@ def collect_service_orders(wb):
     seen = set()
     for source_name in ("AUD2026", "IPO"):
         ws = wb[source_name]
+        columns = source_column_map(
+            ws,
+            required=("engagement_name", "outlook_hours", "service_number"),
+        )
         for row in range(2, ws.max_row + 1):
-            service_number = display_value(ws.cell(row, 6).value)
+            service_number = display_value(
+                source_value(ws, row, columns, "service_number")
+            )
             if not service_number or service_number in seen:
                 continue
             seen.add(service_number)
@@ -318,18 +333,30 @@ def collect_service_orders(wb):
                 {
                     "source_sheet": source_name,
                     "source_row": row,
-                    "engagement_name": ws.cell(row, 3).value,
-                    "outlook_hours": number_value(ws.cell(row, 4).value),
+                    "engagement_name": source_value(
+                        ws, row, columns, "engagement_name"
+                    ),
+                    "outlook_hours": number_value(
+                        source_value(ws, row, columns, "outlook_hours")
+                    ),
                     "service_number": service_number,
-                    "task_count": number_value(ws.cell(row, 7).value),
-                    "service_type": ws.cell(row, 15).value,
-                    "audit_eic": ws.cell(row, 16).value,
-                    "report_date": ws.cell(row, 17).value,
-                    "related_order": display_value(ws.cell(row, 18).value),
-                    "pre_start": ws.cell(row, 11).value,
-                    "pre_end": ws.cell(row, 12).value,
-                    "final_start": ws.cell(row, 13).value,
-                    "final_end": ws.cell(row, 14).value,
+                    "task_count": number_value(
+                        source_value(ws, row, columns, "task_count")
+                    ),
+                    "service_type": source_value(
+                        ws, row, columns, "service_type"
+                    ),
+                    "audit_eic": source_value(ws, row, columns, "audit_eic"),
+                    "report_date": source_value(
+                        ws, row, columns, "report_date"
+                    ),
+                    "related_order": display_value(
+                        source_value(ws, row, columns, "related_order")
+                    ),
+                    "pre_start": source_value(ws, row, columns, "pre_start"),
+                    "pre_end": source_value(ws, row, columns, "pre_end"),
+                    "final_start": source_value(ws, row, columns, "final_start"),
+                    "final_end": source_value(ws, row, columns, "final_end"),
                     "sheet_name": "",
                 }
             )
@@ -649,17 +676,22 @@ def generate(input_path: Path, output_path: Path):
     record_by_number = {record["service_number"]: record for record in records}
     for source_name in ("AUD2026", "IPO"):
         ws = wb[source_name]
+        columns = source_column_map(ws, required=("service_number",))
         for row in range(2, ws.max_row + 1):
-            service_number = display_value(ws.cell(row, 6).value)
+            service_number = display_value(
+                source_value(ws, row, columns, "service_number")
+            )
             record = record_by_number.get(service_number)
             if not record:
                 continue
-            ws.cell(row, 6).value = hyperlink_formula(
+            ws.cell(row, columns["service_number"]).value = hyperlink_formula(
                 record["sheet_name"], "A1", service_number
             )
-            related_order = display_value(ws.cell(row, 18).value)
+            related_order = display_value(
+                source_value(ws, row, columns, "related_order")
+            )
             if related_order:
-                ws.cell(row, 18).value = hyperlink_formula(
+                ws.cell(row, columns["related_order"]).value = hyperlink_formula(
                     record["sheet_name"], "A1", related_order
                 )
 
@@ -776,14 +808,23 @@ def validate_formula_logic(output_path: Path, section_details=None, ser_config=N
     source_info_by_service = {}
     for source_name in ("AUD2026", "IPO"):
         source_ws = wb[source_name]
+        columns = source_column_map(
+            source_ws, required=("service_number", "outlook_hours")
+        )
         for row in range(2, source_ws.max_row + 1):
-            service_number = display_value(source_ws.cell(row, 6).value)
+            service_number = display_value(
+                source_value(source_ws, row, columns, "service_number")
+            )
             if service_number:
                 key = str(service_number).strip()
                 if key not in source_info_by_service:
                     source_info_by_service[key] = {
-                        "wp_fic": source_ws.cell(row, 10).value,
-                        "outlook_hours": source_ws.cell(row, 4).value,
+                        "wp_fic": source_value(
+                            source_ws, row, columns, "wp_fic", ""
+                        ),
+                        "outlook_hours": source_value(
+                            source_ws, row, columns, "outlook_hours", ""
+                        ),
                     }
     index_mismatches = []
     for row in range(8, index_ws.max_row + 1):

@@ -2,16 +2,17 @@
 
 根据系统导出的 WP 服务单和 FY27 Section List，自动生成 AUD2026、IPO、IPO archive、AUD2025 及逐服务单方案，完成 Section 数量回填、Outlook Hours 核对和 SER 测算。
 
-本仓库不包含任何真实客户、项目、订单、人员、工时或费率数据。`templates/FY27+WP服务单.xlsx.b64` 是脱敏空白模板的文本资源，程序首次运行时自动还原。
+WP 服务单和 Section List 均按表头名称识别字段，输入列顺序可以变化；不要修改字段名称。
+
+本仓库不包含任何真实客户、项目、订单、人员或项目工时数据。代码内置标准 SER 工时占比和 Rate；`templates/FY27+WP服务单.xlsx.b64` 是脱敏空白模板的文本资源，程序首次运行时自动还原。
 
 ## 使用方式
 
-准备同一文件夹中的两个系统导出文件和一个本地 SER 配置文件：
+准备同一文件夹中的两个系统导出文件：
 
 ```text
 FY27 WP服务单.xlsx
 FY27 section list.xlsx
-SER配置.xlsx
 ```
 
 ### audit-toolbox
@@ -23,7 +24,7 @@ def main(parent=None):
     ...
 ```
 
-启动工具后选择包含上述三个文件的文件夹。程序会自动复制脱敏模板，并生成：
+启动工具后选择包含上述两个文件的文件夹。程序会自动复制脱敏模板，并生成：
 
 ```text
 FY27+WP服务单_自动拆分.xlsx
@@ -37,13 +38,26 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### Jupyter Notebook
+
+打开 `生成项目组展示版_Jupyter.ipynb`，将 Notebook、程序文件、`templates` 文件夹和两个系统导出文件放在同一文件夹，依次运行两个代码单元格。输出文件名为 `FY27+WP服务单汇总.xlsx`。
+
 ### 本地独立 EXE
 
-本地构建的 `FY27_WP服务单生成工具.exe` 与两个系统导出文件、`SER配置.xlsx` 放在同一文件夹即可双击运行。EXE 不要求安装 Python；公共仓库仅发布可审阅的 Python 源码和脱敏模板资源。
+本地构建的 `FY27_WP服务单生成工具.exe` 与两个系统导出文件放在同一文件夹即可双击运行。EXE 不要求安装 Python；公共仓库仅发布可审阅的 Python 源码和脱敏模板资源。
 
-## SER配置.xlsx
+## 内置 SER 规则与可选配置
 
-该文件仅保存在本地，不提交 GitHub。使用第一个工作表，第一行为表头，第二至第五行依次为 Manager、Senior、Staff、Intern：
+程序默认使用以下内置规则：
+
+| 级别 | Hours占比 | SER Rate |
+|---|---:|---:|
+| Manager | 8% | 2733 |
+| Senior | 25% | 1199 |
+| Staff | 58% | 683 |
+| Intern | 9% | 173 |
+
+如需调整，可在运行目录放置 `SER配置.xlsx` 覆盖默认值。使用第一个工作表，第一行为表头，第二至第五行依次为 Manager、Senior、Staff、Intern：
 
 | A列 | B列 | C列 |
 |---|---|---|
@@ -100,4 +114,4 @@ python main.py
 
 ## 数据安全
 
-禁止向仓库提交生产 Excel、生成结果、`SER配置.xlsx`、客户名称、项目编号、服务单号、订单号、人员姓名、工时、预算或费率数据。`.gitignore` 默认阻止 Excel 和 ZIP 文件；仓库只保存脱敏空白模板的文本资源。
+禁止向仓库提交生产 Excel、生成结果、`SER配置.xlsx`、客户名称、项目编号、服务单号、订单号、人员姓名、项目工时或预算数据。仓库仅公开上述标准 SER 规则；`.gitignore` 默认阻止 Excel 和 ZIP 文件，仓库只保存脱敏空白模板的文本资源。

@@ -6,7 +6,7 @@ const https = require('https');
 const http = require('http');
 const { URL } = require('url');
 
-const DESKTOP_UA = 'AudiPick/1.0 (Electron; Windows)';
+const DESKTOP_UA = 'AudiPick/1.4.6 (Electron; Windows)';
 
 let win;
 
@@ -24,7 +24,7 @@ function createWindow() {
     minWidth: 1120,
     minHeight: 720,
     backgroundColor: '#1A1A1A',
-    title: 'AudiPick - 智能合同审计助手 v1.3.8',
+    title: 'AudiPick - 智能合同审计助手 v1.4.6',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -176,7 +176,7 @@ ipcMain.handle('desktop-fetch', async (_event, urlStr, options) => {
   catch (e) { return { ok: false, status: 0, statusText: String(e && e.message), bodyText: '' }; }
 });
 
-ipcMain.handle('desktop-ping', () => ({ ok: true, version: '1.3.8-desktop-2' }));
+ipcMain.handle('desktop-ping', () => ({ ok: true, version: '1.4.6-desktop' }));
 
 ipcMain.handle('focus-window', () => {
   if (win && !win.isDestroyed()) {

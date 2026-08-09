@@ -8,8 +8,14 @@ __pycache__/
 
 # 构建产物
 build/
+tauri-app/build/
 dist/*
-!dist/审计工具箱.exe
+tauri-app/dist/*
+tauri-app/dist-web/
+tauri-app/node_modules/
+tauri-app/src-tauri/target/
+tauri-app/src-tauri/target-*/
+*.tsbuildinfo
 *.spec.bak
 
 # vendor 目录（由 build_suite.py --sync-only 生成，不入库）
@@ -37,12 +43,20 @@ Thumbs.db
 # 日志和临时文件
 *.log
 *.tmp
+.tmp/
 pack_build.log
 tools/kanzhang/导出耗时日志.jsonl
+tauri-app/logs/
+
+# 测试缓存
+.pytest_cache/
 
 # Local experiments and verification artifacts
 scratchpad/
 verification_screenshots/
+tauri-app/verification_screenshots/
+tauri-app/design-demos/
+tauri-app/tmp/
 
 # Local agent/editor settings
 **/.claude/settings.local.json

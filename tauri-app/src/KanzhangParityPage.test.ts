@@ -18,6 +18,7 @@ import {
   type KanzhangDraft,
   type Mapping,
   mergeMappingChanges,
+  missingKanzhangRequiredRoles,
   needsAttention,
   shouldAutoApply,
   shouldShowKanzhangJobProgress,
@@ -50,6 +51,25 @@ const draft = (): KanzhangDraft => ({
 });
 
 describe("看账页面状态规则", () => {
+  it("缺少必填映射时明确列出 ID、科目和金额字段", () => {
+    expect(missingKanzhangRequiredRoles({ id: [], account: [] })).toEqual([
+      "唯一识别码 (ID)",
+      "科目名称",
+      "金额字段（方案A-金额，或方案B-借方和贷方）",
+    ]);
+    expect(missingKanzhangRequiredRoles({
+      id: ["凭证号"],
+      account: ["科目"],
+      amount: "金额",
+    })).toEqual([]);
+    expect(missingKanzhangRequiredRoles({
+      id: ["凭证号"],
+      account: ["科目"],
+      debit: "借方",
+      credit: "贷方",
+    })).toEqual([]);
+  });
+
   it("金额方向方案与借贷方案互斥", () => {
     const schemeB = setKanzhangMapping(
       { id: ["凭证号"], account: ["科目"], amount: "金额", direction: "方向" },

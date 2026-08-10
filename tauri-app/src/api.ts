@@ -113,11 +113,15 @@ export const legacyImport = (path: string) =>
   inTauri()
     ? invoke("legacy_import", { path })
     : Promise.reject(previewUnavailable("导入迁移备份"));
+// `defaultDirectory` only decides where the dialog opens. An unreachable path
+// (typically a corporate UNC share reached from outside the intranet) is not an
+// error: the system dialog silently falls back to its own default folder.
 export const pickPath = (
   kind: "file" | "files" | "folder" | "save",
   title: string,
   extensions: string[] = [],
   defaultName?: string,
+  defaultDirectory?: string,
 ) => {
   if (!inTauri()) return Promise.resolve(null);
   return invoke<string | string[] | null>("pick_path", {
@@ -125,6 +129,7 @@ export const pickPath = (
     title,
     extensions,
     defaultName,
+    defaultDirectory,
   });
 };
 

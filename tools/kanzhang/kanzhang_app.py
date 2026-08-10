@@ -570,7 +570,7 @@ class AuditApp_V70_2:
         self.ROLES = {
             "唯一识别码 (ID)": "role_id",
             "科目名称": "role_acc",
-            "🏢 公司/主体 (可选)": "role_entity",
+            "🏢 公司/核算主体 (可选)": "role_entity",
             "日期 (可选)": "role_date",
             "凭证摘要": "role_summary",
             "方案B-借方金额": "role_dr",
@@ -1988,12 +1988,14 @@ class AuditApp_V70_2:
             ]
             settings = load_llm_settings()
             base_instructions = (
-                    "字段角色：role_id=凭证唯一识别码；role_acc=科目名称；role_entity=公司/主体；"
+                    "字段角色：role_id=凭证唯一识别码；role_acc=科目名称；role_entity=凭证所属的核算主体/记账主体；"
                     "role_date=凭证或过账日期；role_summary=摘要；role_dr/role_cr=借贷分列；"
                     "role_amt/role_dir=单金额列加借贷方向。缺失角色请补全；已映射角色如明显异常请提出替换建议。"
                     "如果 role_acc 缺失，请从表头和样例值判断哪一列最像会计科目。"
                     "多候选时优先选择中文科目名称/科目描述/总账科目名称；"
                     "没有中文名称列时再选择数字科目编码/账户编码；最后才选择英文 Account/GL Account 字段。"
+                    "role_entity 用于区分凭证记在哪个公司、账套或法人实体；绝不是交易对手方、往来单位、客户、"
+                    "供应商、客商、收付款对象或对方户名。没有明确核算主体列时保持空缺，不要用对手方字段凑数。"
                     "role_summary 可以由“文本”、行项目文本、摘要、描述、Description 等表头和长文本样例判断。"
             )
             result = check_kanzhang_field_mappings(

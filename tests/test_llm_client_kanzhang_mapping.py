@@ -110,6 +110,34 @@ class KanzhangMappingCheckTests(unittest.TestCase):
         self.assertEqual(review.suggested_mapping, {"main": "文本"})
         self.assertIn("会计科目", review.reason)
 
+    def test_entity_prompt_requires_accounting_entity_and_excludes_counterparty(self):
+        captured = {}
+        self._patch_chat({"fills": [], "reviews": []}, captured)
+
+        llm_client.check_kanzhang_field_mappings(
+            {"api_key": "test"},
+            role_definitions=[{"role": "role_entity", "label": "公司/核算主体"}],
+            files=[
+                {
+                    "file_side": "main",
+                    "headers": ["公司代码", "客户名称", "供应商名称", "对方户名"],
+                    "samples": {
+                        "公司代码": ["1000"],
+                        "客户名称": ["甲客户有限公司"],
+                        "供应商名称": ["乙供应商有限公司"],
+                        "对方户名": ["丙公司"],
+                    },
+                }
+            ],
+            current_mapping={"role_entity": []},
+        )
+
+        rules = "\n".join(captured["payload"]["rules"])
+        self.assertIn("核算主体/记账主体", rules)
+        self.assertIn("绝不是交易对手方", rules)
+        self.assertIn("客户、供应商、客商", rules)
+        self.assertIn("保持缺失", rules)
+
     def test_scheme_a_filters_borrow_credit_fills(self):
         captured = {}
         self._patch_chat(

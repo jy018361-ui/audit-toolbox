@@ -24,12 +24,15 @@
 | 缓存 | 源文件/mtime/大小/Sheet/标题行隔离的 Parquet | 已实现稳定 Rust Polars Parquet，损坏自动重建、原子替换 | Rust 缓存单测 |
 | UNC 路径 | 支持网络共享，缓存后避免重复回源 | 原路径直接读取，缓存键保留 canonical/UNC 身份；缓存命中不再回源读取数据 | `load_ts_cached` |
 | 进度/取消 | 后台任务阶段进度、用户取消 | 已实现统一任务事件与协作取消 | `ts.export` job |
+| 选文件起始目录 | 对话框默认打开 FY27 网络共享目录，选过一次后记住上次文件所在目录 | 已实现：上次目录（sessionStorage）→ FY27 UNC 常量 → 系统默认；不可达时静默退回，不报错 | 前端单测 `pickerStartDirectory` / `parentDirectory`、Rust `dialog_start_directory` |
+| 选完自动读取 | 选中文件立即读取并建缓存（`_confirm_selected_file`），不需要再点按钮 | 已实现：选中后自动触发 `ts.inspect` 任务；「加载文件」按钮保留供改 Sheet/标题行后重读 | `chooseInput` → `inspect(selected)` |
 | 页面缓存 | 工具间切换不丢输入 | 已实现窗口生命周期内草稿缓存 | 模块级 draft |
 | 输出安全 | 旧版直接写目标 | 改进为临时文件完成后原子替换，取消/失败不留下半文件 | `partial_path`/`replace_file` |
 
 ## 仍需真实数据验收
 
 - 超大真实 Timesheet（尤其 UNC 路径）的首次读取、二次缓存命中耗时和峰值内存。
+- 内网环境下文件对话框确实开在 FY27 共享目录、以及断网时退回系统默认目录的实际观感（当前依据是 rfd/Windows Shell 解析失败即跳过设定目录的代码路径，未在真实断网机器上实测）。
 - 真实日期单元格、混合字符串日期在导出列头中的显示是否与项目组当前模板完全一致。
 - 超过 Excel 工作表行列限制、被占用输出文件和无写权限目录的用户提示。
 - 用户正式样例的 by经理/by项目语义对比：字段顺序、分组值、每月工时与总行数。

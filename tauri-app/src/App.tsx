@@ -29,6 +29,7 @@ import { KanzhangParityPage } from "./KanzhangParityPage";
 import { FaListPage } from "./FaListPage";
 import { ExcelMergerPage } from "./ExcelMergerPage";
 import { AudiPickPage } from "./AudiPickPage";
+import { WpServicePage } from "./WpServicePage";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
@@ -445,6 +446,7 @@ function ToolPage({ catalog }: { catalog: ToolManifest[] }) {
   if (!tool || !def)
     return <SimplePage title="工具不存在" text="工具登记信息尚未加载。" />;
   if (tool.id === "Excel_Merger") return <ExcelMergerPage tool={tool} />;
+  if (tool.id === "wp_service_generator") return <WpServicePage tool={tool} />;
   if (tool.id === "fa_list") return <FaListPage tool={tool} />;
   if (tool.id === "audipick") return <AudiPickPage tool={tool} />;
   if (tool.id === "ts_manager") return <TsManagerParityPage tool={tool} />;

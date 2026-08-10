@@ -2,9 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   canApplyFaSupplements,
   faDefaultOutputPath,
+  faMappedRolesForColumn,
+  faMissingOptionalRoles,
   faOutputPathAfterSourceSelection,
   faHeaderOption,
+  faReviewNarrative,
+  faReviewReasons,
   faReviewSummary,
+  faRolesForSide,
   isFaMatchDisabled,
   normalizeFaSuggestedMapping,
   planFaLlmChanges,
@@ -134,6 +139,34 @@ describe("FA List migration parity", () => {
 });
 
 describe("FA LLM 复核先改后核", () => {
+  it("重新复核能把已取消的开始使用日期映射补回对应文件", () => {
+    const plan = planFaLlmChanges({
+      ...baseInput,
+      beginMapping: { ...baseInput.beginMapping, startDate: undefined },
+      endMapping: { ...baseInput.endMapping, startDate: undefined },
+      autoApplied: [
+        {
+          role: "date",
+          file_side: "file1",
+          suggested_column: "开始使用日期",
+          confidence: 0.95,
+        },
+        {
+          role: "date",
+          file_side: "file2",
+          suggested_column: "开始使用日期",
+          confidence: 0.95,
+        },
+      ],
+    });
+    expect(plan.beginMapping.startDate).toBe("开始使用日期");
+    expect(plan.endMapping.startDate).toBe("开始使用日期");
+    expect(plan.changes.map((item) => item.id)).toEqual([
+      "begin.startDate",
+      "end.startDate",
+    ]);
+  });
+
   it("忽略 LLM 对文件1的本年折旧、新增方式和新增日期建议", () => {
     const plan = planFaLlmChanges({
       ...baseInput,
@@ -379,6 +412,25 @@ describe("FA LLM 复核先改后核", () => {
     expect(faReviewSummary(0)).toBe(
       "LLM 复核完成：现有映射与 LLM 判断一致，未做改动。",
     );
+    expect(
+      faReviewNarrative(
+        "LLM 复核完成：现有脚本映射无需补充，匹配键已复核。",
+        0,
+      ),
+    ).toBe("LLM 复核完成：现有脚本映射无需补充，匹配键已复核。");
+    expect(faReviewNarrative("LLM 映射复核完成。", 2, 1)).toBe(
+      "LLM 复核完成：已自动调整 2 项，不合适可逐条撤销；另有 1 项把握不足 60%，未改动，请确认是否采纳。",
+    );
+    expect(faReviewNarrative("LLM 映射复核完成。", 0)).toBe(
+      "LLM 复核完成：现有映射与 LLM 判断一致，未做改动。",
+    );
+    expect(
+      faReviewReasons(
+        [{ reason: "原值列样例均为金额" }],
+        [{ reason: "原值列样例均为金额" }, { reason: "日期格式一致" }],
+        ["匹配 ID 两侧口径一致"],
+      ),
+    ).toEqual(["原值列样例均为金额", "日期格式一致", "匹配 ID 两侧口径一致"]);
   });
 });
 
@@ -546,5 +598,72 @@ describe("FA 补充清单 LLM 复核先改后核", () => {
     });
     expect(plan.changes).toEqual([]);
     expect(plan.addition.keys).toEqual(["资产编号"]);
+  });
+});
+
+describe("字段映射角色按文件侧过滤", () => {
+  const roles = [
+    ["category", "资产类别"],
+    ["originalValue", "原值"],
+    ["currentYearDep", "本年折旧"],
+    ["additionMethod", "新增方式"],
+    ["additionDate", "新增日期"],
+  ] as const;
+  const required = ["category", "originalValue"];
+
+  it("文件1（期初）不出现只属于文件2的角色", () => {
+    expect(faRolesForSide("begin", roles).map(([key]) => key)).toEqual([
+      "category",
+      "originalValue",
+    ]);
+  });
+
+  it("文件2（期末）保留全部角色", () => {
+    expect(faRolesForSide("end", roles)).toHaveLength(roles.length);
+  });
+
+  it("文件2 未映射的本年折旧要作为选填缺失被提示", () => {
+    const missing = faMissingOptionalRoles("end", roles, required, {
+      category: "类别",
+      originalValue: "原值",
+    });
+    expect(missing).toContain("本年折旧");
+  });
+
+  it("必填角色不混进选填提示", () => {
+    const missing = faMissingOptionalRoles("end", roles, required, {});
+    expect(missing).not.toContain("资产类别");
+    expect(missing).not.toContain("原值");
+  });
+
+  it("文件1 不会因为本年折旧未映射而被提示（该角色对它不适用）", () => {
+    expect(faMissingOptionalRoles("begin", roles, required, {})).toEqual([]);
+  });
+
+  it("已映射的选填角色不再提示；空白字符串按未映射处理", () => {
+    expect(
+      faMissingOptionalRoles("end", roles, required, {
+        currentYearDep: "本年折旧额",
+        additionMethod: "   ",
+        additionDate: "新增日",
+      }),
+    ).toEqual(["新增方式"]);
+  });
+});
+
+describe("预览表头展示同列多角色", () => {
+  it("返回同一字段命中的全部映射关系，而不是只取第一个", () => {
+    const roles = [
+      ["matchKeys", "组合匹配键"],
+      ["name", "资产名称"],
+      ["category", "资产类别"],
+    ] as const;
+    expect(
+      faMappedRolesForColumn("资产编号", roles, {
+        matchKeys: ["资产编号"],
+        name: "资产编号",
+        category: "类别",
+      }).map(([, label]) => label),
+    ).toEqual(["组合匹配键", "资产名称"]);
   });
 });

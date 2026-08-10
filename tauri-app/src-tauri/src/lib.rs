@@ -324,7 +324,11 @@ async fn job_start(
     }
     if method == "wp.generate"
         || method == "confirmation.process"
+        // 扫描与导出共用同一条任务通道，两者都必须登记；此前只登记了
+        // export，前端拖放文件夹自动扫描时命中兜底报"未找到对应的 Rust
+        // 任务方法"。excel_merger::is_supported_job_method 里两者都在。
         || method == "file_list.export"
+        || method == "file_list.scan"
         || method == "excel_merger.merge"
         || method.starts_with("ts.")
         || method.starts_with("kanzhang.")
@@ -537,6 +541,7 @@ fn pick_path(
     title: String,
     extensions: Vec<String>,
     default_name: Option<String>,
+    default_directory: Option<String>,
 ) -> Result<Value, AppError> {
     let mut dialog = app.dialog().file().set_title(title);
     if !extensions.is_empty() {
@@ -547,6 +552,15 @@ fn pick_path(
     // instead of an empty field they have to type into.
     if let Some(name) = default_name.as_deref().filter(|v| !v.trim().is_empty()) {
         dialog = dialog.set_file_name(name);
+    }
+    // Opening position only.  Deliberately no `is_dir()` probe: the legacy
+    // default is a corporate UNC share, and probing it off the intranet blocks
+    // on the SMB timeout.  The shell resolves the path itself and silently
+    // falls back to its default folder when it cannot, so an unreachable share
+    // degrades instead of failing.  It is *not* added to `AllowedPaths` — only
+    // paths the user actually selects get authorized.
+    if let Some(directory) = dialog_start_directory(default_directory.as_deref()) {
+        dialog = dialog.set_directory(directory);
     }
     let value = match kind.as_str() {
         "folder" => dialog.blocking_pick_folder().map(|p| json!(p.to_string())),
@@ -611,6 +625,13 @@ fn open_output(
                 Some(e.to_string()),
             )
         })
+}
+
+/// Normalizes the requested opening folder of a file dialog.  Blank/whitespace
+/// input means "let the system decide"; anything else is handed to the shell
+/// as-is, without touching the filesystem.
+fn dialog_start_directory(requested: Option<&str>) -> Option<&str> {
+    requested.map(str::trim).filter(|value| !value.is_empty())
 }
 
 /// A selected directory authorizes its descendants, while a selected/generated
@@ -804,5 +825,22 @@ mod tests {
         assert!(path_is_permitted(&nested, &selected_dir));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dialog_start_directory_passes_paths_through_without_touching_disk() {
+        assert_eq!(dialog_start_directory(None), None);
+        assert_eq!(dialog_start_directory(Some("   ")), None);
+        assert_eq!(dialog_start_directory(Some("")), None);
+        // Unreachable UNC shares must still be forwarded: the shell falls back
+        // on its own, and probing here would block until the SMB timeout.
+        assert_eq!(
+            dialog_start_directory(Some(r"  \\server\share\FY26  ")),
+            Some(r"\\server\share\FY26")
+        );
+        assert_eq!(
+            dialog_start_directory(Some(r"C:\does\not\exist")),
+            Some(r"C:\does\not\exist")
+        );
     }
 }

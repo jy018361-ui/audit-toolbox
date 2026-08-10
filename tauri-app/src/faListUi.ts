@@ -147,6 +147,52 @@ export function sanitizeFaBeginMapping(mapping: FaMappingLike): FaMappingLike {
   for (const key of FA_FILE2_ONLY_MAPPING_KEYS) delete result[key];
   return result;
 }
+// 文件1 不该出现只属于文件2的角色。这些下拉过去在文件1 也照样渲染，
+// 只是禁用并写着"仅适用于文件2"——占了位置又永远点不动，反倒让人
+// 以为文件1漏填了。这里直接把它们从该侧的角色清单里摘掉。
+export function faRolesForSide<T extends readonly [string, string]>(
+  side: FaSide,
+  roles: readonly T[],
+): T[] {
+  return roles.filter(
+    ([key]) => side === "end" || !FA_FILE2_ONLY_MAPPING_KEYS.has(key),
+  );
+}
+
+// 一列可以同时承担多个角色（例如资产编号既是组合匹配键，也是资产名称/编号
+// 的来源）。返回全部命中项，避免 UI 用 `find` 时只展示第一个关系。
+export function faMappedRolesForColumn<T extends readonly [string, string]>(
+  column: string,
+  roles: readonly T[],
+  mapping: Record<string, string | string[] | undefined>,
+): T[] {
+  const normalized = column.trim();
+  return roles.filter(([key]) => {
+    const value = mapping[key];
+    return Array.isArray(value)
+      ? value.includes(normalized)
+      : String(value ?? "") === normalized;
+  });
+}
+// 选填角色未映射：不拦流程，但要让用户知道少了什么。最典型的是文件2的
+// 「本年折旧」——它不是必填，所以过去完全不提示，用户以为已经映射全了。
+export function faMissingOptionalRoles<T extends readonly [string, string]>(
+  side: FaSide,
+  roles: readonly T[],
+  requiredKeys: readonly string[],
+  mapping: FaMappingLike,
+): string[] {
+  const required = new Set(requiredKeys);
+  return faRolesForSide(side, roles)
+    .filter(([key]) => !required.has(key))
+    .filter(([key]) => {
+      const value = mapping[key];
+      return Array.isArray(value)
+        ? value.length === 0
+        : !String(value ?? "").trim();
+    })
+    .map(([, label]) => label);
+}
 export const FA_LOW_CONFIDENCE = 0.7;
 // 把握达到门槛才自动改，不到的原样留着，由用户决定是否采纳。
 export const FA_AUTO_APPLY_MIN = 0.6;
@@ -560,4 +606,40 @@ export function faReviewSummary(applied: number, pending = 0): string {
   if (done) return `LLM 复核完成：${done}。`;
   if (ask) return `LLM 复核完成：${ask}。`;
   return "LLM 复核完成：现有映射与 LLM 判断一致，未做改动。";
+}
+
+export function faReviewNarrative(
+  message: string | undefined,
+  applied: number,
+  pending = 0,
+): string {
+  // The backend's success message contains the useful no-change conclusion
+  // (for example that both the field mapping and match keys were checked).
+  // Once there are concrete changes, the UI can be more useful by stating how
+  // many were applied and how many still need a decision.
+  if (applied || pending) return faReviewSummary(applied, pending);
+  const text = message?.trim() ?? "";
+  // Some providers return fieldReviews with action=keep. Rust therefore used
+  // the generic completion message even though the plan correctly produced no
+  // net change. Do not leave the user with only "completed" in that case.
+  if (/^(?:补充清单\s*)?LLM\s*(?:映射\s*)?复核完成[。.]*$/.test(text)) {
+    return faReviewSummary(0);
+  }
+  return text || faReviewSummary(0);
+}
+
+export function faReviewReasons(
+  autoApplied: readonly { reason?: string }[] = [],
+  fieldReviews: readonly { reason?: string }[] = [],
+  matchReasons: readonly string[] = [],
+): string[] {
+  return [
+    ...autoApplied.map((item) => item.reason),
+    ...fieldReviews.map((item) => item.reason),
+    ...matchReasons,
+  ].reduce<string[]>((result, reason) => {
+    const text = reason?.trim();
+    if (text && !result.includes(text)) result.push(text);
+    return result;
+  }, []);
 }

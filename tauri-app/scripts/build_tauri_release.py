@@ -128,9 +128,28 @@ def runtime_snapshot(root: Path) -> set[str]:
     return {str(path.relative_to(root)) for path in root.rglob("*")}
 
 
+def assert_windows_gui_subsystem(target: Path) -> None:
+    """Fail release validation when Windows would allocate a console window."""
+    data = target.read_bytes()
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        raise RuntimeError(f"发布文件不是有效的 Windows PE 程序：{target}")
+    pe_offset = int.from_bytes(data[0x3C:0x40], "little")
+    optional_header = pe_offset + 24
+    subsystem_offset = optional_header + 68
+    if data[pe_offset:pe_offset + 4] != b"PE\0\0" or len(data) < subsystem_offset + 2:
+        raise RuntimeError(f"发布文件的 PE 头不完整：{target}")
+    subsystem = int.from_bytes(data[subsystem_offset:subsystem_offset + 2], "little")
+    if subsystem != 2:  # IMAGE_SUBSYSTEM_WINDOWS_GUI
+        raise RuntimeError(
+            f"发布 EXE 仍是控制台子系统（值 {subsystem}），用户双击时会出现黑色 CLI 窗口。"
+        )
+
+
 def smoke_test_desktop(target: Path) -> None:
     if os.name != "nt":
         return
+    assert_windows_gui_subsystem(target)
+    print("Windows GUI 子系统验收通过：双击 EXE 不会创建控制台窗口")
     with tempfile.TemporaryDirectory(prefix="audit-rust-release-smoke-") as temp:
         smoke_root = Path(temp)
         first = smoke_root / "输入一.csv"

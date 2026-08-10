@@ -2,13 +2,12 @@ import { describe, expect, it } from "vitest";
 import { tsManagerParity } from "./TsManagerParityPage";
 
 describe("TS legacy filter semantics", () => {
-  it("combines duplicate field rows as OR values and distinct fields as AND filters", () => {
+  it("combines selected values in the same column as OR and distinct columns as AND", () => {
     expect(
-      tsManagerParity.groupedFilters([
-        { id: 1, field: "Department Name", value: "A", keyword: "", values: [], loading: false },
-        { id: 2, field: "Department Name", value: "B", keyword: "", values: [], loading: false },
-        { id: 3, field: "Month", value: "01", keyword: "", values: [], loading: false },
-      ]),
+      tsManagerParity.activeFilters(
+        { Month: ["01"], "Department Name": ["A", "B", "A"] },
+        ["Department Name", "Month"],
+      ),
     ).toEqual([
       { field: "Department Name", values: ["A", "B"] },
       { field: "Month", values: ["01"] },
@@ -17,10 +16,43 @@ describe("TS legacy filter semantics", () => {
 
   it("preserves the explicit blank filter token", () => {
     expect(
-      tsManagerParity.groupedFilters([
-        { id: 1, field: "Department Name", value: "<空白>", keyword: "", values: [], loading: false },
-      ]),
+      tsManagerParity.activeFilters({
+        "Department Name": [tsManagerParity.BLANK_TOKEN],
+      }),
     ).toEqual([{ field: "Department Name", values: ["<空白>"] }]);
+  });
+
+  it("treats a complete untruncated selection as no filter", () => {
+    expect(
+      tsManagerParity.nextSelections(
+        { Month: ["01"] },
+        "Department Name",
+        ["A", "B"],
+        { total: 2, truncated: false },
+      ),
+    ).toEqual({ Month: ["01"] });
+
+    expect(
+      tsManagerParity.nextSelections(
+        {},
+        "Department Name",
+        ["A", "B"],
+        { total: 10, truncated: true },
+      ),
+    ).toEqual({ "Department Name": ["A", "B"] });
+  });
+
+  it("keeps all checked search results as an explicit filter", () => {
+    expect(
+      tsManagerParity.nextSelections(
+        {},
+        "Department Name",
+        ["Delivery Center A", "Delivery Center B"],
+        { total: 2, truncated: false, keyword: "delivery center" },
+      ),
+    ).toEqual({
+      "Department Name": ["Delivery Center A", "Delivery Center B"],
+    });
   });
 
   it("keeps the sheet catalog while requiring the newly selected sheet to reload", () => {
@@ -52,18 +84,9 @@ describe("TS legacy filter semantics", () => {
           inputPath: "C:/data/ts.xlsx",
           sheet: "Data",
           headerRow: "2",
-          filters: [],
-          exportRawData: false,
-          outputPath: "",
         },
-        {
-          id: 1,
-          field: "Department Name",
-          value: "",
-          keyword: "delivery center",
-          values: [],
-          loading: false,
-        },
+        "Department Name",
+        "delivery center",
       ),
     ).toMatchObject({
       sheet: "Data",
@@ -71,5 +94,36 @@ describe("TS legacy filter semantics", () => {
       field: "Department Name",
       keyword: "delivery center",
     });
+  });
+
+  it("opens the file dialog in the legacy shared folder until a file has been picked", () => {
+    expect(tsManagerParity.pickerStartDirectory(null)).toBe(
+      tsManagerParity.LEGACY_DEFAULT_FOLDER,
+    );
+    expect(tsManagerParity.pickerStartDirectory("   ")).toBe(
+      tsManagerParity.LEGACY_DEFAULT_FOLDER,
+    );
+    expect(tsManagerParity.LEGACY_DEFAULT_FOLDER.startsWith("\\\\")).toBe(true);
+    expect(tsManagerParity.LEGACY_DEFAULT_FOLDER.endsWith("\\FY27")).toBe(true);
+  });
+
+  it("reopens the dialog where the last picked file lives", () => {
+    expect(
+      tsManagerParity.parentDirectory("\\\\server\\share\\FY26\\ts.xlsx"),
+    ).toBe("\\\\server\\share\\FY26");
+    expect(tsManagerParity.parentDirectory("C:/data/ts.xlsx")).toBe("C:/data");
+    expect(tsManagerParity.parentDirectory("ts.xlsx")).toBe("");
+    expect(
+      tsManagerParity.pickerStartDirectory("D:\\Timesheet\\FY27"),
+    ).toBe("D:\\Timesheet\\FY27");
+  });
+
+  it("requires the user to choose an output path before export", () => {
+    expect(tsManagerParity.canStartTsExport(["Hours"], "")).toBe(false);
+    expect(tsManagerParity.canStartTsExport(["Hours"], "   ")).toBe(false);
+    expect(tsManagerParity.canStartTsExport([], "C:/data/result.xlsx")).toBe(false);
+    expect(
+      tsManagerParity.canStartTsExport(["Hours"], "C:/data/result.xlsx"),
+    ).toBe(true);
   });
 });

@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use umya_spreadsheet::structs::{
@@ -30,6 +30,22 @@ use crate::excel_merger::PauseCheckpoint;
 
 const BASE_SHEETS: [&str; 4] = ["AUD2026", "IPO", "IPO archive", "AUD2025"];
 const DEFAULT_SER: [(f64, f64); 4] = [(0.08, 2733.0), (0.25, 1199.0), (0.58, 683.0), (0.09, 173.0)];
+const SER_ROLES: [&str; 4] = ["Manager", "Senior", "Staff", "Intern"];
+const TIMELINE_NOTES: [&str; 13] = [
+    "预审开始日前3周，整理发出预审PBC List",
+    "完成抽样、TOD、大额分析性复核等工作",
+    "交付预审工作底稿，优化年审服务方案",
+    "12/31前整理发出年审PBC List",
+    "收集函证资料，及时发出函证",
+    "执行年审工作",
+    "完成抽样、TOD、大额分析性复核等工作",
+    "完成底稿的BKD程序",
+    "确定调整事项【早于最终交付时间】",
+    "WP底稿首次交付【早于最终交付时间】",
+    "WP底稿整体交付【不得晚于报告日前一周】",
+    "报告日前3天完成项目质量检查",
+    "自行填写",
+];
 const NAVY: &str = "17324D";
 const TEAL: &str = "0F7C80";
 const GOLD: &str = "D6A83D";
@@ -42,6 +58,7 @@ const MUTED: &str = "64717D";
 const WHITE: &str = "FFFFFF";
 const GREEN: &str = "2F7D5A";
 const PALE_GREEN: &str = "E6F3EC";
+static TEMPLATE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -174,11 +191,19 @@ pub(crate) fn run_job(
     check_cancel(&cancel)?;
     progress("validate", 1, 3, "输入文件检查通过");
     let folder = required_folder(&params)?;
+    let input_path = check["serviceOrderPath"]
+        .as_str()
+        .map(PathBuf::from)
+        .ok_or_else(|| app_error("WP_INPUT_INVALID", "未识别到 WP 服务单文件。", None))?;
+    let section_list_path = check["sectionListPath"]
+        .as_str()
+        .map(PathBuf::from)
+        .ok_or_else(|| app_error("WP_INPUT_INVALID", "未识别到 Section List 文件。", None))?;
     let template = ensure_template(&folder)?;
     let generation = WpGenerateParams {
-        input_path: folder.join("FY27 WP服务单.xlsx"),
-        section_list_path: Some(folder.join("FY27 section list.xlsx")),
-        template_path: template,
+        input_path,
+        section_list_path: Some(section_list_path),
+        template_path: template.path().to_path_buf(),
         output_path: params
             .get("outputPath")
             .and_then(JsonValue::as_str)
@@ -235,16 +260,20 @@ pub(crate) fn run_job(
 
 fn validate_call(params: JsonValue) -> std::result::Result<JsonValue, AppError> {
     let folder = required_folder(&params)?;
-    let required = ["FY27 WP服务单.xlsx", "FY27 section list.xlsx"];
-    let missing = required
-        .iter()
-        .filter(|name| !folder.join(name).is_file())
-        .copied()
-        .collect::<Vec<_>>();
+    let service_order = find_service_order_file(&folder)
+        .map_err(|error| app_error("WP_INPUT_INVALID", &error.to_string(), None))?;
+    let section_list = find_section_list_file(&folder)
+        .map_err(|error| app_error("WP_INPUT_INVALID", &error.to_string(), None))?;
     Ok(json!({
         "folder": folder.to_string_lossy(),
-        "valid": missing.is_empty(),
-        "missing": missing,
+        "valid": true,
+        "missing": [],
+        "serviceOrderPath": service_order.to_string_lossy(),
+        "sectionListPath": section_list.to_string_lossy(),
+        "inputFiles": {
+            "wpServiceOrder": service_order.file_name().unwrap_or_default().to_string_lossy(),
+            "sectionList": section_list.file_name().unwrap_or_default().to_string_lossy()
+        },
         "outputPath": folder.join("FY27+WP服务单汇总.xlsx").to_string_lossy(),
         "engine": "rust"
     }))
@@ -267,10 +296,24 @@ fn required_folder(params: &JsonValue) -> std::result::Result<PathBuf, AppError>
     Ok(folder)
 }
 
-fn ensure_template(folder: &Path) -> std::result::Result<PathBuf, AppError> {
+struct PreparedTemplate {
+    path: PathBuf,
+    _temporary: Option<TemporaryArtifact>,
+}
+
+impl PreparedTemplate {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn ensure_template(folder: &Path) -> std::result::Result<PreparedTemplate, AppError> {
     let target = folder.join("FY27+WP服务单.xlsx");
     if target.is_file() {
-        return Ok(target);
+        return Ok(PreparedTemplate {
+            path: target,
+            _temporary: None,
+        });
     }
     const TEMPLATE_B64: &str = include_str!("../../assets/wp/FY27+WP服务单.xlsx.b64");
     let compact: String = TEMPLATE_B64
@@ -286,27 +329,37 @@ fn ensure_template(folder: &Path) -> std::result::Result<PathBuf, AppError> {
                 Some(error.to_string()),
             )
         })?;
-    let temporary = target.with_extension("xlsx.tmp");
-    fs::write(&temporary, bytes).map_err(|error| {
+    let temp_folder = std::env::temp_dir().join("AuditToolbox");
+    fs::create_dir_all(&temp_folder).map_err(|error| {
         app_error(
             "WP_TEMPLATE_WRITE_FAILED",
-            "无法释放 WP 服务方案模板。",
+            "无法准备 WP 服务方案临时模板目录。",
             Some(error.to_string()),
         )
     })?;
-    fs::rename(&temporary, &target)
-        .or_else(|_| {
-            fs::copy(&temporary, &target)?;
-            fs::remove_file(&temporary)
-        })
-        .map_err(|error| {
-            app_error(
-                "WP_TEMPLATE_WRITE_FAILED",
-                "无法释放 WP 服务方案模板。",
-                Some(error.to_string()),
-            )
-        })?;
-    Ok(target)
+    let sequence = TEMPLATE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let path = temp_folder.join(format!(
+        "wp-template-{}-{sequence}.xlsx",
+        std::process::id()
+    ));
+    let temporary = TemporaryArtifact::new(path.clone()).map_err(|error| {
+        app_error(
+            "WP_TEMPLATE_WRITE_FAILED",
+            "无法准备 WP 服务方案临时模板。",
+            Some(error.to_string()),
+        )
+    })?;
+    fs::write(&path, bytes).map_err(|error| {
+        app_error(
+            "WP_TEMPLATE_WRITE_FAILED",
+            "无法写入 WP 服务方案临时模板。",
+            Some(error.to_string()),
+        )
+    })?;
+    Ok(PreparedTemplate {
+        path,
+        _temporary: Some(temporary),
+    })
 }
 
 fn check_cancel(cancel: &AtomicBool) -> std::result::Result<(), AppError> {
@@ -373,6 +426,95 @@ fn app_error(code: &str, message: &str, detail: Option<String>) -> AppError {
 }
 
 type Result<T> = std::result::Result<T, WpError>;
+
+const IGNORED_INPUT_MARKERS: [&str; 2] = ["汇总", "自动拆分"];
+
+fn normalized_file_stem(path: &Path) -> String {
+    path.file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_xlsx_input(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("xlsx"))
+        && !path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .starts_with("~$")
+        && !IGNORED_INPUT_MARKERS.iter().any(|marker| {
+            path.file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .contains(marker)
+        })
+}
+
+fn single_input_candidate(mut candidates: Vec<PathBuf>, label: &str) -> Result<PathBuf> {
+    candidates.sort_by_key(|path| {
+        path.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase()
+    });
+    match candidates.len() {
+        0 => Err(WpError(format!(
+            "找不到{label}：请放入文件名包含“{label}”的 Excel 文件。"
+        ))),
+        1 => Ok(candidates.remove(0)),
+        _ => {
+            let names = candidates
+                .iter()
+                .map(|path| {
+                    format!(
+                        "- {}",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(WpError(format!(
+                "找到多个可能的{label}，请只保留一个：\n{names}"
+            )))
+        }
+    }
+}
+
+fn find_service_order_file(folder: &Path) -> Result<PathBuf> {
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(folder)? {
+        let path = entry?.path();
+        if !is_xlsx_input(&path) {
+            continue;
+        }
+        let normalized = normalized_file_stem(&path);
+        if normalized.contains("wp服务单")
+            && !normalized.contains("sectionlist")
+            && !normalized.contains("+wp服务单")
+        {
+            candidates.push(path);
+        }
+    }
+    single_input_candidate(candidates, "WP服务单")
+}
+
+fn find_section_list_file(folder: &Path) -> Result<PathBuf> {
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(folder)? {
+        let path = entry?.path();
+        if is_xlsx_input(&path) && normalized_file_stem(&path).contains("sectionlist") {
+            candidates.push(path);
+        }
+    }
+    single_input_candidate(candidates, "Section List")
+}
 
 #[derive(Clone, Debug)]
 enum Value {
@@ -524,6 +666,7 @@ const SOURCE_FIELD_ALIASES: &[(&str, &[&str])] = &[
     ("final_end", &["Booking Period End-年审"]),
     ("total_booking_hours", &["Total Booking Hours"]),
     ("team", &["团队"]),
+    ("group", &["组别"]),
     ("client_code", &["Client Code"]),
     ("engagement_id", &["审计项目"]),
 ];
@@ -758,6 +901,7 @@ struct Record {
     pre_end: Value,
     final_start: Value,
     final_end: Value,
+    report_date: Value,
     wp_fic: String,
     sheet_name: String,
 }
@@ -783,6 +927,7 @@ fn collect_records(split: &SplitData) -> Vec<Record> {
                 pre_end: source_field(row, &columns, "pre_end").clone(),
                 final_start: source_field(row, &columns, "final_start").clone(),
                 final_end: source_field(row, &columns, "final_end").clone(),
+                report_date: source_field(row, &columns, "report_date").clone(),
                 related_order: source_field(row, &columns, "related_order").text(),
                 sheet_name: String::new(),
             });
@@ -967,10 +1112,16 @@ fn set_cell_value(sheet: &mut Worksheet, col: u32, row: u32, value: &Value) {
     let cell = sheet.get_cell_mut((col, row));
     match value {
         Value::Empty => {
-            cell.set_value("");
+            cell.set_blank();
+        }
+        // `set_value` sniffs the text and silently stores "47141836" as a
+        // number.  The legacy exporter keeps whatever type the source carried,
+        // so Engagement Code / Client Code / 底稿任务数量 must stay text.
+        Value::Text(value) if value.is_empty() => {
+            cell.set_blank();
         }
         Value::Text(value) => {
-            cell.set_value(value);
+            cell.set_value_string(value);
         }
         Value::Number(value) => {
             cell.set_value_number(*value);
@@ -981,7 +1132,13 @@ fn set_cell_value(sheet: &mut Worksheet, col: u32, row: u32, value: &Value) {
     }
 }
 fn set_text(sheet: &mut Worksheet, coordinate: &str, value: impl Into<String>) {
-    sheet.get_cell_mut(coordinate).set_value(value.into());
+    let value: String = value.into();
+    let cell = sheet.get_cell_mut(coordinate);
+    if value.is_empty() {
+        cell.set_blank();
+    } else {
+        cell.set_value_string(value);
+    }
 }
 fn set_number(sheet: &mut Worksheet, coordinate: &str, value: f64) {
     sheet.get_cell_mut(coordinate).set_value_number(value);
@@ -1030,6 +1187,42 @@ fn cell_style(fill: Option<&str>, font_color: &str, bold: bool, size: f64, cente
     style
 }
 
+/// 旧版这些格子用的是不带 `wrap_text` 的 `Alignment(...)`，不能沿用默认换行。
+fn clear_wrap(sheet: &mut Worksheet, coordinate: (u32, u32)) {
+    sheet
+        .get_style_mut(coordinate)
+        .alignment_mut()
+        .set_wrap_text(false);
+}
+
+/// 条件格式的差异格式只覆盖底色和字体颜色/加粗。
+///
+/// 旧版 `FormulaRule(fill=..., font=Font(color=..., bold=True))` 不带字体名、
+/// 字号、边框和对齐；这些一旦写进 dxf，就会在命中的单元格上覆盖原有排版。
+fn conditional_style(fill: &str, font_color: &str) -> Style {
+    let mut style = Style::default();
+    style.set_background_color(fill);
+    style
+        .font_mut()
+        .set_bold(true)
+        .color_mut()
+        .set_argb_str(font_color);
+    style
+}
+
+/// 旧版 `style_section_title` 只给 `Border(bottom=MEDIUM_NAVY)`，四周没有网格线。
+fn section_title_style(fill: &str, font_color: &str) -> Style {
+    let mut style = cell_style(Some(fill), font_color, true, 11.0, false);
+    style.remove_borders();
+    let mut color = Color::default();
+    color.set_argb_str(NAVY);
+    let mut bottom = Border::default();
+    bottom.set_border_style(Border::BORDER_MEDIUM);
+    bottom.set_color(color);
+    style.borders_mut().set_bottom(bottom);
+    style
+}
+
 fn set_number_format(sheet: &mut Worksheet, coordinate: &str, code: &str) {
     sheet
         .get_style_mut(coordinate)
@@ -1072,6 +1265,9 @@ fn configure_view(sheet: &mut Worksheet, freeze_row: u32) {
     let view = &mut views[0];
     view.set_show_grid_lines(false);
     view.set_zoom_scale(90);
+    // 模板表在模板文件里是被选中的；85 张服务方案都克隆自它，
+    // 不复位就会在 Excel 里成组选中——此时改一个格子会同时写进所有表。
+    view.set_tab_selected(false);
     let mut coordinate = Coordinate::default();
     coordinate.set_coordinate(format!("A{freeze_row}"));
     let mut pane = Pane::default();
@@ -1100,7 +1296,9 @@ fn configure_print(sheet: &mut Worksheet, print_area: &str, repeat_rows: Option<
         .set_left(0.25)
         .set_right(0.25)
         .set_top(0.5)
-        .set_bottom(0.5);
+        .set_bottom(0.5)
+        .set_header(0.5)
+        .set_footer(0.5);
     sheet
         .get_header_footer_mut()
         .odd_footer_mut()
@@ -1167,6 +1365,7 @@ const SOURCE_FIELD_WIDTHS: &[(&str, f64)] = &[
     ("related_order", 28.0),
     ("total_booking_hours", 18.0),
     ("team", 23.0),
+    ("group", 23.0),
     ("client_code", 16.0),
     ("engagement_id", 23.0),
 ];
@@ -1183,6 +1382,15 @@ fn style_source_sheet(sheet: &mut Worksheet) {
         .collect();
     for (column, width) in &widths {
         sheet.get_column_dimension_mut(column).set_width(*width);
+    }
+    // 用户提供的旧版成果对尾部五列采用固定版式；即使导出表头的业务含义
+    // 发生过调整，R:V 的宽度仍须保持 28/18/23/16/23。
+    for (column, width) in [(18, 28.0), (19, 18.0), (20, 23.0), (21, 16.0), (22, 23.0)] {
+        if column <= sheet.get_highest_column() {
+            sheet
+                .get_column_dimension_mut(&column_name(column))
+                .set_width(width);
+        }
     }
     let max_col = sheet.get_highest_column();
     let max_row = sheet.get_highest_row();
@@ -1225,12 +1433,29 @@ fn style_source_sheet(sheet: &mut Worksheet) {
                     .set_format_code("#,##0.00");
             }
         }
-        for field in ["service_number", "related_order"] {
-            let Some(&col) = columns.get(field) else {
-                continue;
-            };
-            if !sheet.value((col, row)).is_empty() {
-                let style = sheet.get_style_mut((col, row));
+        // 旧版成果固定把第 18 列作为返回服务方案的链接列。
+        if sheet.get_highest_column() >= 18 {
+            sheet
+                .get_style_mut((18, row))
+                .alignment_mut()
+                .set_horizontal(HorizontalAlignmentValues::Left);
+            sheet
+                .get_style_mut((19, row))
+                .alignment_mut()
+                .set_horizontal(HorizontalAlignmentValues::Center);
+            sheet
+                .get_style_mut((19, row))
+                .number_format_mut()
+                .set_format_code("#,##0.00");
+        }
+        for column in columns
+            .get("service_number")
+            .copied()
+            .into_iter()
+            .chain((sheet.get_highest_column() >= 18).then_some(18))
+        {
+            if !sheet.value((column, row)).is_empty() {
+                let style = sheet.get_style_mut((column, row));
                 style.set_background_color(PALE_TEAL);
                 style
                     .font_mut()
@@ -1259,7 +1484,7 @@ fn style_source_sheet(sheet: &mut Worksheet) {
                 sheet,
                 format!("{letter}2:{letter}{max_row}"),
                 format!("{letter}2=\"已完成\""),
-                cell_style(Some(PALE_GREEN), GREEN, true, 9.0, false),
+                conditional_style(PALE_GREEN, GREEN),
                 1,
             );
         }
@@ -1269,7 +1494,7 @@ fn style_source_sheet(sheet: &mut Worksheet) {
                 sheet,
                 format!("{letter}2:{letter}{max_row}"),
                 format!("{letter}2=\"项目承接\""),
-                cell_style(Some(LIGHT_GOLD), NAVY, true, 9.0, false),
+                conditional_style(LIGHT_GOLD, NAVY),
                 2,
             );
         }
@@ -1331,8 +1556,16 @@ fn style_service_sheet(sheet: &mut Worksheet) {
             cell_style(Some(WHITE), TEXT, matches!(col, 2 | 3 | 4), 10.0, false),
         );
     }
-    for col in 5..=8 {
-        sheet.get_style_mut((col, 2)).remove_borders();
+    // 旧版把 E1:H2 重新刷成无边框白底正文：第 1 行这四格不是表头。
+    for row in [1, 2] {
+        for col in 5..=8 {
+            set_visual_style(
+                sheet,
+                (col, row),
+                cell_style(Some(WHITE), TEXT, false, 10.0, false),
+            );
+            sheet.get_style_mut((col, row)).remove_borders();
+        }
     }
     if !sheet.value("I1").is_empty()
         || sheet
@@ -1343,11 +1576,7 @@ fn style_service_sheet(sheet: &mut Worksheet) {
         sheet.get_style_mut("I1").font_mut().set_underline("single");
     }
     for col in 1..=8 {
-        set_visual_style(
-            sheet,
-            (col, 39),
-            cell_style(Some(GOLD), NAVY, true, 11.0, false),
-        );
+        set_visual_style(sheet, (col, 39), section_title_style(GOLD, NAVY));
     }
     set_visual_style_named(
         sheet,
@@ -1364,6 +1593,7 @@ fn style_service_sheet(sheet: &mut Worksheet) {
                 cell_style(Some(fill), TEXT, false, 9.0, col != 2),
             );
         }
+        clear_wrap(sheet, (1, row));
         for col in [3, 4, 6] {
             sheet
                 .get_style_mut((col, row))
@@ -1394,16 +1624,12 @@ fn style_service_sheet(sheet: &mut Worksheet) {
             set_visual_style(
                 sheet,
                 (col, row),
-                cell_style(Some(fill), TEXT, false, 9.0, false),
+                cell_style(Some(fill), TEXT, false, 9.0, col == 3),
             );
         }
     }
     for col in 1..=8 {
-        set_visual_style(
-            sheet,
-            (col, 55),
-            cell_style(Some(TEAL), WHITE, true, 11.0, false),
-        );
+        set_visual_style(sheet, (col, 55), section_title_style(TEAL, WHITE));
     }
     for col in 1..=8 {
         set_visual_style(
@@ -1449,6 +1675,7 @@ fn style_service_sheet(sheet: &mut Worksheet) {
             ),
         );
     }
+    set_number_format(sheet, "B56", "#,##0.00");
     set_number_format(sheet, "B62", "0%");
     set_number_format(sheet, "C62", "#,##0.00");
     set_number_format(sheet, "F62", "#,##0.00");
@@ -1479,6 +1706,7 @@ fn style_index_sheet(sheet: &mut Worksheet) {
     set_row_height(sheet, 1, 46.0);
     set_row_height(sheet, 2, 27.0);
     set_row_height(sheet, 7, 32.0);
+    // 标题条旧版只设了填充/字体/对齐，没有边框也没有换行。
     set_visual_style_named(
         sheet,
         "A1",
@@ -1489,6 +1717,10 @@ fn style_index_sheet(sheet: &mut Worksheet) {
         "A2",
         cell_style(Some(NAVY), "DDE8F0", false, 10.0, false),
     );
+    for row in [1, 2] {
+        sheet.get_style_mut((1, row)).remove_borders();
+        clear_wrap(sheet, (1, row));
+    }
     for col in [1, 3, 5, 7] {
         set_visual_style(
             sheet,
@@ -1516,6 +1748,9 @@ fn style_index_sheet(sheet: &mut Worksheet) {
                 (col, row),
                 cell_style(Some(fill), TEXT, false, 9.0, matches!(col, 1 | 2 | 10 | 11)),
             );
+        }
+        for col in [1, 2, 10, 11] {
+            clear_wrap(sheet, (col, row));
         }
         for col in [7, 8, 9] {
             sheet
@@ -1610,6 +1845,13 @@ fn template_reference_column(template: &Worksheet) -> u32 {
 struct TemplateMetadata {
     section_by_row: HashMap<u32, String>,
     reference_by_section: HashMap<String, f64>,
+    /// Every literal text cell of the template, keyed by 1-based (column, row)
+    /// **before** the reference-column shift.  umya keeps the template styles
+    /// but only exposes the first run of a rich-text shared string, so labels
+    /// such as `WP服务单编号` come back as `WP` and `阶段`/`预审下场时间`
+    /// come back empty.  Calamine is the canonical reader; these values are
+    /// written back verbatim once the sheet layout is final.
+    text_by_cell: HashMap<(u32, u32), String>,
 }
 
 fn load_template_metadata(path: &Path, sheet_name: &str) -> Result<TemplateMetadata> {
@@ -1634,6 +1876,17 @@ fn load_template_metadata(path: &Path, sheet_name: &str) -> Result<TemplateMetad
         7
     };
     let mut metadata = TemplateMetadata::default();
+    for (row_index, values) in rows.iter().enumerate() {
+        for (col_index, value) in values.iter().enumerate() {
+            if let Value::Text(text) = value {
+                if !text.is_empty() {
+                    metadata
+                        .text_by_cell
+                        .insert((col_index as u32 + 1, row_index as u32 + 1), text.clone());
+                }
+            }
+        }
+    }
     for row in 5..=36_u32 {
         let Some(values) = rows.get(row as usize - 1) else {
             continue;
@@ -1710,8 +1963,51 @@ fn calculate_outlook(
     (template_rows, populated_rows, compared, equal, differences)
 }
 
+/// 把 Calamine 读到的模板文本原样写回，补上 umya 丢失的富文本 run。
+///
+/// `shifted` 表示这张表已按旧版 `delete_cols(8, 1)` 把 I 列并到 H 列。
+fn restore_template_text(sheet: &mut Worksheet, metadata: &TemplateMetadata, shifted: bool) {
+    let highest_row = sheet.get_highest_row();
+    let mut restore: Vec<((u32, u32), String)> = metadata
+        .text_by_cell
+        .iter()
+        .filter_map(|(&(column, row), text)| {
+            if row > highest_row {
+                return None;
+            }
+            let column = match (shifted, column) {
+                (true, 8) => return None,
+                (true, column) if column > 8 => column - 1,
+                (_, column) => column,
+            };
+            Some(((column, row), text.clone()))
+        })
+        .collect();
+    restore.sort_by_key(|(coordinate, _)| *coordinate);
+    for ((column, row), text) in restore {
+        // 模板里的公式不能被字面文本覆盖。
+        if sheet
+            .get_cell((column, row))
+            .is_some_and(|cell| !cell.get_formula().is_empty())
+        {
+            continue;
+        }
+        sheet.get_cell_mut((column, row)).set_value_string(text);
+    }
+    // The sanitized built-in template accidentally removed this non-client,
+    // fixed guidance block. Restore only blank cells so a caller-provided
+    // template can still override the wording.
+    for (offset, note) in TIMELINE_NOTES.iter().enumerate() {
+        let row = 41 + offset as u32;
+        if row <= highest_row && sheet.value((4, row)).is_empty() {
+            sheet.get_cell_mut((4, row)).set_value_string(*note);
+        }
+    }
+}
+
 fn prepare_template(template: &mut Worksheet, metadata: &TemplateMetadata) {
-    if template_reference_column(template) == 9 {
+    let shifted = template_reference_column(template) == 9;
+    if shifted {
         // umya 3.0.1 does not reliably shift sparse styled cells when a
         // column is removed.  The legacy delete-H operation is therefore
         // reproduced explicitly: copy I (参考时间/Entity) into H with its
@@ -1731,13 +2027,31 @@ fn prepare_template(template: &mut Worksheet, metadata: &TemplateMetadata) {
                 template.set_style((8, row), style);
             }
             template.get_cell_mut((9, row)).set_blank();
+            // 旧版是 delete_cols(8, 1)：整列连同样式一起消失。只清值会把
+            // 模板 I 列的居中/边框留在导航列上，所以样式也要一并复位。
+            template.set_style((9, row), Style::default());
         }
     }
     if template.get_highest_row() >= 55 {
         template.remove_row(55, template.get_highest_row() - 54);
     }
+    restore_template_text(template, metadata, shifted);
     for (row, section) in &metadata.section_by_row {
         set_text(template, &format!("B{row}"), section);
+    }
+    // 旧版把参考工时列强制转成 float，转不动就清空——模板里这一列有不少是
+    // 文本数字，留成文本会让 H 列显示为左对齐字符串。
+    for row in 5..=36_u32 {
+        let raw = template.value((8, row));
+        let cell = template.get_cell_mut((8, row));
+        match raw.replace(',', "").trim().parse::<f64>() {
+            Ok(number) if !raw.trim().is_empty() => {
+                cell.set_value_number(number);
+            }
+            _ => {
+                cell.set_blank();
+            }
+        }
     }
 }
 
@@ -1809,6 +2123,7 @@ fn fill_service_sheet(
         ("C42", &record.pre_end),
         ("C47", &record.final_start),
         ("C48", &record.final_end),
+        ("C52", &record.report_date),
     ] {
         set_cell_value(
             sheet,
@@ -1820,7 +2135,14 @@ fn fill_service_sheet(
     set_text(sheet, "A55", "SER测算（计算上浮5%）");
     set_text(sheet, "A56", "Total Outlook Hours");
     set_formula(sheet, "B56", "G37");
-    let headers = ["", "Hours占比", "分配Hours", "", "", "SER金额"];
+    let headers = [
+        "",
+        "Hours占比",
+        "分配Hours",
+        "bill rate",
+        "上浮5%",
+        "SER金额",
+    ];
     for (index, header) in headers.iter().enumerate() {
         set_text(
             sheet,
@@ -1830,7 +2152,7 @@ fn fill_service_sheet(
     }
     for (offset, (mix, rate)) in ser.iter().enumerate() {
         let row = 58 + offset;
-        set_text(sheet, &format!("A{row}"), "");
+        set_text(sheet, &format!("A{row}"), SER_ROLES[offset]);
         set_number(sheet, &format!("B{row}"), *mix);
         set_formula(sheet, &format!("C{row}"), format!("B{row}*$G$37"));
         set_number(sheet, &format!("D{row}"), *rate);
@@ -1843,31 +2165,11 @@ fn fill_service_sheet(
     set_formula(sheet, "F62", "SUM(F58:F61)");
 }
 
-fn clone_base_sheets(template_book: &Workbook) -> HashMap<&'static str, Worksheet> {
-    let mut result = HashMap::new();
-    for name in BASE_SHEETS {
-        let aliases: &[&str] = match name {
-            "AUD2026" => &["AUD2026", "FY26"],
-            "AUD2025" => &["AUD2025", "FY25"],
-            _ => &[name],
-        };
-        if let Some(sheet) = aliases
-            .iter()
-            .find_map(|alias| template_book.get_sheet_by_name(alias).ok())
-        {
-            let mut clone = sheet.clone();
-            clone.set_name(name);
-            result.insert(name, clone);
-        }
-    }
-    result
-}
-
 fn write_split_workbook(
     template_path: &Path,
     output_path: &Path,
     template: &Worksheet,
-    bases: &HashMap<&'static str, Worksheet>,
+    metadata: &TemplateMetadata,
     split: &SplitData,
 ) -> Result<()> {
     let mut book = umya_spreadsheet::reader::xlsx::read(template_path)
@@ -1877,11 +2179,14 @@ fn write_split_workbook(
             .map_err(|error| WpError(error.to_string()))?;
     }
     for name in BASE_SHEETS {
+        // 旧版拆分簿的四张来源表是 create_sheet + append 出来的裸表：
+        // 没有排版，也不继承模板表遗留的列。
         let source = clear_and_fill_source(
-            bases.get(name).cloned().unwrap_or_default(),
+            Worksheet::default(),
             name,
             &split.headers,
             &split.groups[name],
+            false,
         );
         book.add_sheet(source)
             .map_err(|error| WpError(error.to_string()))?;
@@ -1889,6 +2194,7 @@ fn write_split_workbook(
     let mut hidden_template = template.clone();
     hidden_template.set_name("_WP_TEMPLATE");
     hidden_template.set_state(SheetStateValues::Hidden);
+    restore_template_text(&mut hidden_template, metadata, false);
     book.add_sheet(hidden_template)
         .map_err(|error| WpError(error.to_string()))?;
     if let Some(parent) = output_path.parent() {
@@ -1903,6 +2209,7 @@ fn clear_and_fill_source(
     name: &str,
     headers: &[Value],
     rows: &[Vec<Value>],
+    styled: bool,
 ) -> Worksheet {
     sheet.set_name(name);
     let highest = sheet.get_highest_row();
@@ -1912,16 +2219,10 @@ fn clear_and_fill_source(
     for (col, value) in headers.iter().enumerate() {
         set_cell_value(&mut sheet, col as u32 + 1, 1, value);
     }
-    let row2_styles: Vec<_> = (1..=headers.len() as u32)
-        .map(|col| sheet.get_style((col, 2)).clone())
-        .collect();
     for (row_index, row) in rows.iter().enumerate() {
         let target_row = row_index as u32 + 2;
         for (col_index, value) in row.iter().enumerate() {
             set_cell_value(&mut sheet, col_index as u32 + 1, target_row, value);
-            if let Some(style) = row2_styles.get(col_index) {
-                sheet.set_style((col_index as u32 + 1, target_row), style.clone());
-            }
             let header = headers.get(col_index).map(Value::text).unwrap_or_default();
             if matches!(value, Value::Number(_))
                 && (header.contains("BookingPeriod")
@@ -1934,13 +2235,188 @@ fn clear_and_fill_source(
             }
         }
     }
-    sheet.set_auto_filter(format!(
-        "A1:{}{}",
-        column_name(headers.len() as u32),
-        rows.len() + 1
-    ));
-    style_source_sheet(&mut sheet);
+    if !styled {
+        // 裸表沿用 Excel/openpyxl 新建工作表的页边距，别留 umya 的全 0。
+        sheet
+            .get_page_margins_mut()
+            .set_left(0.75)
+            .set_right(0.75)
+            .set_top(1.0)
+            .set_bottom(1.0)
+            .set_header(0.5)
+            .set_footer(0.5);
+    }
+    if styled {
+        sheet.set_auto_filter(format!(
+            "A1:{}{}",
+            column_name(headers.len() as u32),
+            rows.len() + 1
+        ));
+        style_source_sheet(&mut sheet);
+    }
     sheet
+}
+
+/// 打印区域/打印标题必须写成"属于某张表"的定义名。
+///
+/// umya 只有在 `localSheetId` 被显式赋值时才输出该属性；缺了它，90 张表会写出
+/// 90 组同名的工作簿级定义名，Excel 打开时判为重复名称，打印区域和顶端标题行
+/// 直接失效。
+fn assign_local_sheet_ids(book: &mut Workbook) {
+    for (index, sheet) in book.get_sheet_collection_mut().iter_mut().enumerate() {
+        for defined in sheet.defined_names_mut() {
+            defined.set_local_sheet_id(index as u32);
+        }
+    }
+}
+
+/// umya 3.0.1 把 `calcPr` 写死成只有 `calcId`，也完全不支持 `pageSetUpPr`。
+/// 这两项旧版都有（打开时全部重算、缩放到一页宽），只能在写盘后补进 XML。
+fn finalize_workbook_xml(path: &Path) -> Result<()> {
+    let data = fs::read(path)?;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(data))
+        .map_err(|error| WpError(format!("无法打开结果工作簿：{error}")))?;
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(archive.len());
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|error| WpError(format!("无法读取结果工作簿部件：{error}")))?;
+        let name = file.name().to_owned();
+        if name.ends_with('/') {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut bytes)?;
+        if name == "xl/workbook.xml" {
+            bytes = patch_calculation_properties(&bytes);
+        } else if name == "xl/styles.xml" {
+            bytes = patch_differential_fonts(&bytes);
+        } else if name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml") {
+            bytes = patch_fit_to_page(&bytes);
+        }
+        entries.push((name, bytes));
+    }
+    let mut writer = zip::ZipWriter::new(fs::File::create(path)?);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, bytes) in entries {
+        writer
+            .start_file(name, options)
+            .map_err(|error| WpError(format!("无法写回结果工作簿：{error}")))?;
+        std::io::Write::write_all(&mut writer, &bytes)?;
+    }
+    writer
+        .finish()
+        .map_err(|error| WpError(format!("无法关闭结果工作簿：{error}")))?;
+    Ok(())
+}
+
+const CALC_PR: &str =
+    "<calcPr calcId=\"122211\" calcMode=\"auto\" fullCalcOnLoad=\"1\" forceFullCalc=\"1\"/>";
+
+fn patch_calculation_properties(bytes: &[u8]) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return bytes.to_vec();
+    };
+    if let Some(start) = text.find("<calcPr") {
+        if let Some(offset) = text[start..].find("/>") {
+            let end = start + offset + 2;
+            return format!("{}{CALC_PR}{}", &text[..start], &text[end..]).into_bytes();
+        }
+    }
+    if let Some(position) = text.rfind("</workbook>") {
+        return format!("{}{CALC_PR}{}", &text[..position], &text[position..]).into_bytes();
+    }
+    bytes.to_vec()
+}
+
+/// umya 的 `Font` 总会把字体名/字号/family/scheme 写进差异格式。
+///
+/// 条件格式命中时这些会覆盖单元格原有的 Microsoft YaHei 9，把整格换成
+/// Calibri 11。旧版的 dxf 只有加粗和颜色，这里把多余的子元素删掉。
+fn patch_differential_fonts(bytes: &[u8]) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return bytes.to_vec();
+    };
+    let Some(start) = text.find("<dxfs") else {
+        return bytes.to_vec();
+    };
+    let Some(offset) = text[start..].find("</dxfs>") else {
+        return bytes.to_vec();
+    };
+    let end = start + offset + "</dxfs>".len();
+    let mut block = text[start..end].to_owned();
+    for tag in ["<sz ", "<name ", "<family ", "<scheme "] {
+        while let Some(position) = block.find(tag) {
+            let Some(close) = block[position..].find("/>") else {
+                break;
+            };
+            block.replace_range(position..position + close + 2, "");
+        }
+    }
+    format!("{}{block}{}", &text[..start], &text[end..]).into_bytes()
+}
+
+const FIT_TO_PAGE: &str = "<pageSetUpPr fitToPage=\"1\"/>";
+
+fn patch_fit_to_page(bytes: &[u8]) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return bytes.to_vec();
+    };
+    if text.contains("<pageSetUpPr") || !text.contains("<pageSetup") {
+        return bytes.to_vec();
+    }
+    // `<sheetPr` 也是 `<sheetProtection` 的前缀，必须连分隔符一起匹配。
+    let opening = ["<sheetPr>", "<sheetPr ", "<sheetPr/"]
+        .iter()
+        .find_map(|marker| text.find(marker).map(|start| (start, *marker)));
+    match opening {
+        Some((start, "<sheetPr>")) => {
+            let Some(offset) = text[start..].find("</sheetPr>") else {
+                return bytes.to_vec();
+            };
+            let position = start + offset;
+            format!("{}{FIT_TO_PAGE}{}", &text[..position], &text[position..]).into_bytes()
+        }
+        Some((start, _)) => {
+            // 自闭合 `<sheetPr .../>` 要展开成有子元素的写法。
+            let Some(offset) = text[start..].find('>') else {
+                return bytes.to_vec();
+            };
+            let end = start + offset + 1;
+            let head = &text[start..end];
+            if head.ends_with("/>") {
+                let attributes = &head[..head.len() - 2];
+                format!(
+                    "{}{attributes}>{FIT_TO_PAGE}</sheetPr>{}",
+                    &text[..start],
+                    &text[end..]
+                )
+                .into_bytes()
+            } else {
+                let Some(close) = text[end..].find("</sheetPr>") else {
+                    return bytes.to_vec();
+                };
+                let position = end + close;
+                format!("{}{FIT_TO_PAGE}{}", &text[..position], &text[position..]).into_bytes()
+            }
+        }
+        None => {
+            let Some(offset) = text.find("<worksheet") else {
+                return bytes.to_vec();
+            };
+            let Some(close) = text[offset..].find('>') else {
+                return bytes.to_vec();
+            };
+            let position = offset + close + 1;
+            format!(
+                "{}<sheetPr>{FIT_TO_PAGE}</sheetPr>{}",
+                &text[..position],
+                &text[position..]
+            )
+            .into_bytes()
+        }
+    }
 }
 
 fn column_name(mut column: u32) -> String {
@@ -2064,7 +2540,7 @@ fn rewrite_source_links(book: &mut Workbook, records: &[Record]) {
             let Some(&service_column) = columns.get("service_number") else {
                 continue;
             };
-            let related_column = columns.get("related_order").copied();
+            let legacy_link_column = (sheet.get_highest_column() >= 18).then_some(18_u32);
             for row in 2..=sheet.get_highest_row() {
                 let service = sheet.value((service_column, row));
                 if let Some(record) = by_service.get(service.as_str()) {
@@ -2073,15 +2549,15 @@ fn rewrite_source_links(book: &mut Workbook, records: &[Record]) {
                         &format!("{}{row}", column_name(service_column)),
                         hyperlink_formula(&record.sheet_name, "A1", &service),
                     );
-                    let Some(related_column) = related_column else {
+                    let Some(legacy_link_column) = legacy_link_column else {
                         continue;
                     };
-                    let related = sheet.value((related_column, row));
-                    if !related.is_empty() {
+                    let link_text = sheet.value((legacy_link_column, row));
+                    if !link_text.is_empty() {
                         set_formula(
                             sheet,
-                            &format!("{}{row}", column_name(related_column)),
-                            hyperlink_formula(&record.sheet_name, "A1", &related),
+                            &format!("{}{row}", column_name(legacy_link_column)),
+                            hyperlink_formula(&record.sheet_name, "A1", &link_text),
                         );
                     }
                 }
@@ -2136,11 +2612,11 @@ fn generate_cancellable(
         return Err(WpError("AUD2026 和 IPO 中没有找到 WP服务单编号。".into()));
     }
     let ser = load_ser_config(params.input_path.parent().unwrap_or(Path::new(".")))?;
-    let section_path = params.section_list_path.clone().or_else(|| {
-        let candidate = params.input_path.parent()?.join("FY27 section list.xlsx");
-        candidate.exists().then_some(candidate)
-    });
-    let section = load_section_details(section_path.as_deref(), &records)?;
+    let section_path = match params.section_list_path.clone() {
+        Some(path) => path,
+        None => find_section_list_file(params.input_path.parent().unwrap_or(Path::new(".")))?,
+    };
+    let section = load_section_details(Some(&section_path), &records)?;
     pause_wait()?;
     if cancel.load(Ordering::Relaxed) {
         return Err(WpError("任务已取消。".into()));
@@ -2158,7 +2634,6 @@ fn generate_cancellable(
     let mut book = umya_spreadsheet::reader::xlsx::read(&params.template_path)
         .map_err(|error| WpError(format!("无法读取服务方案模板：{error}")))?;
     let template_name = locate_template(&book)?;
-    let base_clones = clone_base_sheets(&book);
     let mut template = book
         .get_sheet_by_name(&template_name)
         .map_err(|error| WpError(error.to_string()))?
@@ -2186,7 +2661,7 @@ fn generate_cancellable(
             &params.template_path,
             &temporary.path,
             &split_template,
-            &base_clones,
+            &template_metadata,
             &split,
         )?;
         pending_split = Some((temporary, split_output));
@@ -2207,6 +2682,9 @@ fn generate_cancellable(
         }
         let mut sheet = template.clone();
         sheet.set_name(&record.sheet_name);
+        // 模板在拆分簿里是隐藏表，克隆会连隐藏状态一起带过来——
+        // 不复位的话 85 张服务方案在 Excel 里全部看不见。
+        sheet.set_state(SheetStateValues::Visible);
         fill_service_sheet(
             &mut sheet,
             record,
@@ -2220,8 +2698,13 @@ fn generate_cancellable(
     book.add_sheet(build_index(&service_sheets, &records))
         .map_err(|error| WpError(error.to_string()))?;
     for name in BASE_SHEETS {
-        let base = base_clones.get(name).cloned().unwrap_or_default();
-        let source = clear_and_fill_source(base, name, &split.headers, &split.groups[name]);
+        let source = clear_and_fill_source(
+            Worksheet::default(),
+            name,
+            &split.headers,
+            &split.groups[name],
+            true,
+        );
         book.add_sheet(source)
             .map_err(|error| WpError(error.to_string()))?;
     }
@@ -2230,6 +2713,7 @@ fn generate_cancellable(
             .map_err(|error| WpError(error.to_string()))?;
     }
     rewrite_source_links(&mut book, &records);
+    assign_local_sheet_ids(&mut book);
 
     if let Some(parent) = params.output_path.parent() {
         fs::create_dir_all(parent)?;
@@ -2237,6 +2721,7 @@ fn generate_cancellable(
     let temporary = TemporaryArtifact::new(params.output_path.with_extension("xlsx.tmp"))?;
     umya_spreadsheet::writer::xlsx::write(&book, &temporary.path)
         .map_err(|error| WpError(format!("无法写入结果工作簿：{error}")))?;
+    finalize_workbook_xml(&temporary.path)?;
     validate_output(&temporary.path, records.len())?;
     if let Some((split_temporary, split_output)) = pending_split {
         split_temporary.commit(split_output, "无法保存 WP 自动拆分结果")?;
@@ -2350,6 +2835,34 @@ pub fn validate_output(path: &Path, expected_services: usize) -> Result<()> {
                 sheet.get_name()
             )));
         }
+        if (41..=53).any(|row| sheet.value((4, row)).is_empty()) {
+            return Err(WpError(format!(
+                "{} 基本时间表操作说明缺失。",
+                sheet.get_name()
+            )));
+        }
+        let ser_headers = [
+            "",
+            "Hours占比",
+            "分配Hours",
+            "bill rate",
+            "上浮5%",
+            "SER金额",
+        ];
+        if ser_headers
+            .iter()
+            .enumerate()
+            .any(|(index, expected)| sheet.value((index as u32 + 1, 57)) != *expected)
+            || SER_ROLES
+                .iter()
+                .enumerate()
+                .any(|(index, expected)| sheet.value((1, index as u32 + 58)) != *expected)
+        {
+            return Err(WpError(format!(
+                "{} SER表头或级别标签缺失。",
+                sheet.get_name()
+            )));
+        }
         for row in 5..=36 {
             let e = format!(
                 "IF(OR(C{row}=\"\",H{row}=\"\"),\"\",ROUND(C{row}*IFERROR(VALUE(H{row}),0),2))"
@@ -2436,6 +2949,36 @@ pub fn validate_output(path: &Path, expected_services: usize) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// 对着一份真实（脱敏）样例跑完整生成，用于和旧版 Python 逐格比对。
+    /// 需要 `WP_REAL_FOLDER` 指向放着两个输入文件的目录：
+    /// `cargo test --lib wp::tests::real_sample_generate -- --ignored`
+    #[test]
+    #[ignore]
+    fn real_sample_generate() {
+        let Ok(folder) = std::env::var("WP_REAL_FOLDER") else {
+            return;
+        };
+        let folder = PathBuf::from(folder);
+        let template = ensure_template(&folder).unwrap();
+        let params = WpGenerateParams {
+            input_path: folder.join("FY27 WP服务单.xlsx"),
+            section_list_path: Some(folder.join("FY27 section list.xlsx")),
+            template_path: template.path().to_path_buf(),
+            output_path: folder.join("FY27+WP服务单汇总.xlsx"),
+            split_output_path: Some(folder.join("FY27+WP服务单_自动拆分.xlsx")),
+            ipo_years: default_ipo_years(),
+        };
+        generate(&params).unwrap();
+    }
+
+    fn read_zip_entry(path: &Path, entry: &str) -> String {
+        let file = std::fs::File::open(path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name(entry).unwrap(), &mut text).unwrap();
+        text
+    }
+
     #[test]
     fn normalizers_match_legacy_rules() {
         assert_eq!(normalize_order(" wp – 01 "), "WP-01");
@@ -2489,15 +3032,64 @@ mod tests {
         let folder = std::env::temp_dir()
             .join("AuditToolbox")
             .join(format!("wp-validate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
         std::fs::create_dir_all(&folder).unwrap();
-        let result = call("wp.validate", json!({ "folder": folder })).unwrap();
-        assert_eq!(result["valid"], false);
-        assert_eq!(
-            result["missing"],
-            json!(["FY27 WP服务单.xlsx", "FY27 section list.xlsx"])
-        );
-        assert_eq!(result["engine"], "rust");
+        let error = call("wp.validate", json!({ "folder": folder })).unwrap_err();
+        assert_eq!(error.code, "WP_INPUT_INVALID");
+        assert!(error.user_message.contains("找不到WP服务单"));
         let _ = std::fs::remove_dir(folder);
+    }
+
+    #[test]
+    fn discovers_keyword_inputs_and_ignores_generated_files() {
+        let folder = std::env::temp_dir()
+            .join("AuditToolbox")
+            .join(format!("wp-discovery-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        for name in [
+            "8月导出的 WP 服务单 v2.XLSX",
+            "Client SECTION LIST final.xlsx",
+            "FY27+WP服务单.xlsx",
+            "FY27+WP服务单汇总.xlsx",
+            "~$临时 WP服务单.xlsx",
+        ] {
+            std::fs::write(folder.join(name), []).unwrap();
+        }
+
+        assert_eq!(
+            find_service_order_file(&folder)
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "8月导出的 WP 服务单 v2.XLSX"
+        );
+        assert_eq!(
+            find_section_list_file(&folder)
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "Client SECTION LIST final.xlsx"
+        );
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn rejects_multiple_keyword_inputs() {
+        let folder = std::env::temp_dir()
+            .join("AuditToolbox")
+            .join(format!("wp-multiple-inputs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        for name in ["WP服务单 A.xlsx", "WP服务单 B.xlsx"] {
+            std::fs::write(folder.join(name), []).unwrap();
+        }
+
+        let error = find_service_order_file(&folder).unwrap_err().to_string();
+        assert!(error.contains("找到多个可能的WP服务单"));
+        assert!(error.contains("WP服务单 A.xlsx"));
+        assert!(error.contains("WP服务单 B.xlsx"));
+        let _ = std::fs::remove_dir_all(folder);
     }
 
     #[test]
@@ -2591,20 +3183,23 @@ mod tests {
             .join(format!("wp-entry-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
         std::fs::create_dir_all(&folder).unwrap();
-        for name in [
-            "FY27 WP服务单.xlsx",
-            "FY27 section list.xlsx",
-            "FY27+WP服务单.xlsx",
-        ] {
+        for name in ["FY27 WP服务单.xlsx", "FY27 section list.xlsx"] {
             std::fs::copy(samples.join(name), folder.join(name)).unwrap();
         }
         let raw_template =
             umya_spreadsheet::reader::xlsx::read(samples.join("FY27+WP服务单.xlsx")).unwrap();
         let raw_template_name = locate_template(&raw_template).unwrap();
-        let raw_h4 = raw_template
-            .get_sheet_by_name(&raw_template_name)
-            .unwrap()
-            .value("H4");
+        // 用 Calamine 取模板原文：umya 对富文本共享字符串只暴露第一段 run，
+        // 拿它当基准会把"标签被截断"当成正确结果。
+        let raw_h4 = read_first_sheet(
+            &samples.join("FY27+WP服务单.xlsx"),
+            Some(raw_template_name.as_str()),
+        )
+        .unwrap()
+        .get(3)
+        .and_then(|row| row.get(7))
+        .map(Value::text)
+        .unwrap_or_default();
         let output = folder.join("中文 长路径 WP 汇总.xlsx");
         let cancel = Arc::new(AtomicBool::new(false));
         let pause = PauseCheckpoint::unpaused(cancel.clone());
@@ -2616,6 +3211,10 @@ mod tests {
             &pause,
         )
         .unwrap();
+        assert!(
+            !folder.join("FY27+WP服务单.xlsx").exists(),
+            "内置模板只能临时使用，不能作为第三个结果文件留在输出目录"
+        );
         assert_eq!(value["services"], 2);
         assert_eq!(value["outlookCompared"], 2);
         let book = umya_spreadsheet::reader::xlsx::read(&output).unwrap();
@@ -2684,14 +3283,90 @@ mod tests {
             "A5"
         );
         assert_eq!(service.page_setup().paper_size(), 9);
+        // 打印标题行同样必须挂在所属工作表上：没有 localSheetId 的话，90 张表
+        // 会写出 90 个同名工作簿级定义名，Excel 会判为重复并丢弃。
+        let print_titles = book
+            .get_sheet_collection()
+            .iter()
+            .flat_map(|sheet| sheet.defined_names())
+            .filter(|name| name.name() == "_xlnm.Print_Titles")
+            .collect::<Vec<_>>();
+        assert!(!print_titles.is_empty());
         assert!(
             book.defined_names()
                 .iter()
-                .any(|name| name.name() == "_xlnm.Print_Titles")
+                .all(|name| name.name() != "_xlnm.Print_Titles")
         );
         assert_eq!(
             service.get_cell((9, 1)).unwrap().get_formula(),
             hyperlink_formula("AUD2026", "A2", "返回源表")
+        );
+        assert!(!service.value("C52").is_empty(), "报告日应逐项目回填");
+        assert_eq!(service.value("D41"), TIMELINE_NOTES[0]);
+        assert_eq!(service.value("D53"), TIMELINE_NOTES[12]);
+        assert!(service.value("A57").is_empty());
+        assert_eq!(service.value("D57"), "bill rate");
+        assert_eq!(service.value("E57"), "上浮5%");
+        for (offset, role) in SER_ROLES.iter().enumerate() {
+            assert_eq!(service.value((1, offset as u32 + 58)), *role);
+        }
+        // 服务方案是这个工具的交付物：模板在拆分簿里是隐藏表，克隆时必须复位，
+        // 否则 Excel 里一张服务方案都看不到。
+        for sheet in book.get_sheet_collection() {
+            if !BASE_SHEETS.contains(&sheet.get_name()) && sheet.get_name() != "服务方案索引"
+            {
+                assert!(matches!(sheet.state(), SheetStateValues::Visible));
+            }
+            // 同理，克隆来的"标签页被选中"也要复位，否则整簿成组选中。
+            assert!(!sheet.sheets_views().sheet_view_list()[0].tab_selected());
+        }
+        assert_eq!(
+            service
+                .get_style("B56")
+                .number_format()
+                .map(|format| format.get_format_code().to_owned()),
+            Some("#,##0.00".to_owned())
+        );
+        // 模板里的中文标签有一部分是富文本共享字符串，umya 只读得到第一段
+        // （`WP服务单编号` 会变成 `WP`，`阶段`/`预审下场时间` 直接变空）。
+        // 基本时间表整块都不参与回填，正好用来守住"文本没丢"这条线。
+        let template_rows = read_first_sheet(
+            &samples.join("FY27+WP服务单.xlsx"),
+            Some(raw_template_name.as_str()),
+        )
+        .unwrap();
+        let mut checked = 0;
+        for row in 39..=54_u32 {
+            let Some(values) = template_rows.get(row as usize - 1) else {
+                continue;
+            };
+            for column in [1_u32, 2, 4] {
+                let Some(Value::Text(expected)) = values.get(column as usize - 1) else {
+                    continue;
+                };
+                if expected.is_empty() {
+                    continue;
+                }
+                assert_eq!(&service.value((column, row)), expected);
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "模板样例里没有可核对的基本时间表文本");
+        // 来源表不能带上模板里遗留的列（旧模板 U/V 是 Client Code / 相关项目）。
+        let source = book.get_sheet_by_name("AUD2026").unwrap();
+        let raw_headers =
+            read_first_sheet(&folder.join("FY27 WP服务单.xlsx"), Some("业务")).unwrap();
+        assert_eq!(
+            source.get_highest_column() as usize,
+            raw_headers[0].len(),
+            "来源表列数应与导出文件表头一致"
+        );
+        let workbook_xml = read_zip_entry(&output, "xl/workbook.xml");
+        assert!(workbook_xml.contains("fullCalcOnLoad=\"1\""));
+        assert!(workbook_xml.contains("forceFullCalc=\"1\""));
+        assert!(
+            read_zip_entry(&output, "xl/worksheets/sheet1.xml")
+                .contains("<pageSetUpPr fitToPage=\"1\"/>")
         );
         let split =
             umya_spreadsheet::reader::xlsx::read(folder.join("FY27+WP服务单_自动拆分.xlsx"))
@@ -2699,8 +3374,26 @@ mod tests {
         let hidden = split.get_sheet_by_name("_WP_TEMPLATE").unwrap();
         assert!(matches!(hidden.state(), SheetStateValues::Hidden));
         assert_eq!(hidden.value("H4"), raw_h4);
+        assert_eq!(hidden.value("D41"), TIMELINE_NOTES[0]);
+        assert_eq!(hidden.value("D53"), TIMELINE_NOTES[12]);
         let source = book.get_sheet_by_name("AUD2026").unwrap();
         assert_eq!(source.conditional_formatting_collection().len(), 2);
+        assert_eq!(source.get_column_dimension("R").unwrap().width(), 28.0);
+        assert_eq!(source.get_column_dimension("T").unwrap().width(), 23.0);
+        assert!(
+            source
+                .get_cell((18, 2))
+                .unwrap()
+                .get_formula()
+                .starts_with("HYPERLINK(")
+        );
+        assert_eq!(
+            source
+                .get_style((19, 2))
+                .number_format()
+                .map(|format| format.get_format_code().to_owned()),
+            Some("#,##0.00".to_owned())
+        );
         assert_eq!(
             source.sheets_views().sheet_view_list()[0]
                 .pane()
@@ -2815,6 +3508,7 @@ mod tests {
             "Booking Period End-预审",
             "Booking Period Start-年审",
             "Booking Period End-年审",
+            "Audit Report Date",
             "WP FIC",
             "Outlook Hours",
             "Engagement Name",
@@ -2833,6 +3527,7 @@ mod tests {
             Value::Text("2026-01-31".into()),
             Value::Text("2026-03-01".into()),
             Value::Text("2026-03-31".into()),
+            Value::Text("2026-04-15".into()),
             Value::Text("张三".into()),
             Value::Number(120.5),
             Value::Text("样例公司".into()),
@@ -2849,6 +3544,7 @@ mod tests {
         assert_eq!(record.pre_end.text(), "2026-01-31");
         assert_eq!(record.final_start.text(), "2026-03-01");
         assert_eq!(record.final_end.text(), "2026-03-31");
+        assert_eq!(record.report_date.text(), "2026-04-15");
     }
 
     #[test]
@@ -2891,6 +3587,7 @@ mod tests {
         assert_eq!(records[0].related_order, "");
         assert_eq!(records[0].wp_fic, "");
         assert!(records[0].pre_start.is_empty());
+        assert!(records[0].report_date.is_empty());
     }
 
     #[test]

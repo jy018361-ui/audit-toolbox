@@ -1903,7 +1903,8 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
       </>
       )}
       {viewMode === "templates" && (
-        <div className="ap-template-lib">
+        <div className="ap-template-shell">
+          <div className="ap-template-lib">
           <section className="form-card">
             <div className="section-title">
               <h2>提取模板库</h2>
@@ -2069,6 +2070,7 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
               在模板库选好模板与字段后，工作台的提取会使用当前选中的模板。
             </p>
           </section>
+          </div>
         </div>
       )}
       {viewMode === "worklog" && (

@@ -369,7 +369,7 @@ fn llm_review(params: Value, supplement: bool) -> Result<Value, AppError> {
     let system = if supplement {
         "你是固定资产审计补充清单映射复核助手。只能使用 payload.headers 中的原始列名。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"新增方式\"}，禁止返回字符串。新增清单角色仅 addition_method/addition_date，file_side=file1；处置清单角色仅 disposal_method/disposal_date/disposal_orig/disposal_dep，file_side=file2。action 只能 fill/review/keep。"
     } else {
-        "你是固定资产清单字段和组合匹配键复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/review/keep。若现有映射正确，返回空数组且 matchReview.action=keep。"
+        "你是固定资产清单字段和组合匹配键复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/review/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。"
     };
     let content = request_fa_llm(&settings, system, &payload.to_string())?;
     let parsed = parse_llm_json(&content).ok_or_else(|| {
@@ -383,7 +383,7 @@ fn llm_review(params: Value, supplement: bool) -> Result<Value, AppError> {
 }
 
 fn finalize_llm_review(parsed: Value, payload: Value, supplement: bool) -> Value {
-    let suggestions = parsed
+    let mut suggestions = parsed
         .get("suggestions")
         .and_then(Value::as_array)
         .cloned()
@@ -407,6 +407,20 @@ fn finalize_llm_review(parsed: Value, payload: Value, supplement: bool) -> Value
             llm_review_item_is_applicable(&mut item, supplement).then_some(item)
         })
         .collect::<Vec<_>>();
+    for fallback in local_unmapped_suggestions(&payload) {
+        let role = fallback.get("role").and_then(Value::as_str).unwrap_or("");
+        let side = fallback
+            .get("file_side")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let already_reviewed = suggestions
+            .iter()
+            .chain(reviews.iter())
+            .any(|item| llm_item_targets(item, role, side));
+        if !already_reviewed {
+            suggestions.push(fallback);
+        }
+    }
     for item in suggestions {
         let confidence = item
             .get("confidence")
@@ -439,6 +453,44 @@ fn finalize_llm_review(parsed: Value, payload: Value, supplement: bool) -> Value
         "LLM 映射复核完成。"
     };
     json!({"engine":"rust-fa","enabled":true,"passed":reviews.is_empty()&&match_action=="keep","message":message,"autoApplied":auto,"fieldReviews":reviews,"matchReview":match_review,"localProfile":payload})
+}
+
+fn llm_item_targets(item: &Value, role: &str, side: &str) -> bool {
+    if item.get("role").and_then(Value::as_str) != Some(role) {
+        return false;
+    }
+    item.get("file_side").and_then(Value::as_str) == Some(side)
+        || item
+            .get("suggested_mapping")
+            .and_then(Value::as_object)
+            .is_some_and(|mapping| mapping.contains_key(side))
+}
+
+fn local_unmapped_suggestions(payload: &Value) -> Vec<Value> {
+    ["file1", "file2"]
+        .into_iter()
+        .flat_map(|side| {
+            payload
+                .get(side)
+                .and_then(|value| value.get("unmappedCandidates"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(move |candidate| {
+                    let role = candidate.get("role")?.as_str()?;
+                    let column = candidate.get("column")?.as_str()?;
+                    Some(json!({
+                        "role": role,
+                        "file_side": side,
+                        "suggested_column": column,
+                        "confidence": 0.95,
+                        "action": "fill",
+                        "reason": format!("当前字段未映射；本地字段规则在 {} 中识别到列“{}”。", side, column)
+                    }))
+                })
+        })
+        .collect()
 }
 
 fn sanitize_llm_review_item(item: &mut Value, payload: &Value) {
@@ -587,9 +639,68 @@ fn main_llm_payload(params: &Value) -> Result<Value, AppError> {
         optional_header(params, "endHeaderRow")?,
         false,
     )?;
-    Ok(
-        json!({"file1":{"headers":begin.headers,"samples":sample_columns(&begin),"mapping":params.get("beginMapping"),"keys":params.get("beginKeys")},"file2":{"headers":end.headers,"samples":sample_columns(&end),"mapping":params.get("endMapping"),"keys":params.get("endKeys")}}),
-    )
+    Ok(json!({
+        "file1": main_llm_side_payload(
+            &begin,
+            params.get("beginMapping"),
+            params.get("beginKeys"),
+            false,
+        ),
+        "file2": main_llm_side_payload(
+            &end,
+            params.get("endMapping"),
+            params.get("endKeys"),
+            true,
+        )
+    }))
+}
+
+fn main_llm_side_payload(
+    table: &Table,
+    mapping: Option<&Value>,
+    keys: Option<&Value>,
+    include_file2_only: bool,
+) -> Value {
+    let suggested = suggest_mapping(table);
+    let roles = [
+        ("category", "category", false),
+        ("name", "name", false),
+        ("originalValue", "original_value", false),
+        ("depreciation", "depreciation", false),
+        ("startDate", "date", false),
+        ("life", "life", false),
+        ("residualRate", "residual", false),
+        ("currentYearDep", "current_year_dep", true),
+        ("additionMethod", "addition_method", true),
+        ("additionDate", "addition_date", true),
+    ];
+    let current = mapping.and_then(Value::as_object);
+    let mut unmapped_roles = Vec::new();
+    let mut unmapped_candidates = Vec::new();
+    for (mapping_key, role, file2_only) in roles {
+        if file2_only && !include_file2_only {
+            continue;
+        }
+        let mapped = current
+            .and_then(|values| values.get(mapping_key))
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        if mapped {
+            continue;
+        }
+        unmapped_roles.push(Value::String(role.to_owned()));
+        if let Some(column) = suggested.get(mapping_key).and_then(Value::as_str) {
+            unmapped_candidates.push(json!({"role": role, "column": column}));
+        }
+    }
+    json!({
+        "headers": table.headers,
+        "samples": sample_columns(table),
+        "mapping": mapping,
+        "keys": keys,
+        "unmappedRoles": unmapped_roles,
+        "unmappedCandidates": unmapped_candidates,
+    })
 }
 fn supplement_llm_payload(params: &Value) -> Result<Value, AppError> {
     let mut payload = Map::new();
@@ -2187,6 +2298,12 @@ const LEGACY_FILE2_FILL: &str = "#E6E6E6";
 const DEPRECIATION_FORMULA_ROW_LIMIT: usize = 20_000;
 const DEPRECIATION_FORMULA_SAMPLE_ROWS: usize = 10;
 
+/// Money rendering for every amount the exporter writes: thousands separator,
+/// no decimals.  Only the *display* is rounded — the cell keeps the full value
+/// (formulas already round to fen where the business口径 requires it), so
+/// downstream SUM/差异 arithmetic is unaffected.
+const MONEY_NUMBER_FORMAT: &str = "#,##0";
+
 /// Legacy column width: longest of the **first 10 data rows** plus 2, clamped.
 /// The header is deliberately not considered — that is what the legacy
 /// exporter did, and it keeps long headers like "本年应计提折旧月份" from
@@ -2271,11 +2388,11 @@ fn write_xlsx(
             .set_background_color(LEGACY_FILE2_FILL)
             .set_border(FormatBorder::Thin)
             .set_align(FormatAlign::Left);
-        let money = Format::new().set_num_format("#,##0");
+        let money = Format::new().set_num_format(MONEY_NUMBER_FORMAT);
         let file2_text = Format::new().set_background_color(LEGACY_FILE2_FILL);
         let file2_number = Format::new()
             .set_background_color(LEGACY_FILE2_FILL)
-            .set_num_format("#,##0");
+            .set_num_format(MONEY_NUMBER_FORMAT);
         let note_format = Format::new()
             .set_background_color("#F6F6F6")
             .set_border(FormatBorder::Thin)
@@ -2480,7 +2597,7 @@ fn write_summary_sheet(
     // The 合计 column is a live =SUM() across the category columns, as in the
     // legacy sheet: a hard-coded total silently goes stale the moment anyone
     // edits a category cell while tying the schedule out.
-    let money_format = Format::new().set_num_format("#,##0");
+    let money_format = Format::new().set_num_format(MONEY_NUMBER_FORMAT);
     // A 列是分组合并后的项目名称：横向靠左方便扫读，纵向居中避免
     // 多行合并区域的标题沉在底部。
     let section_format = header
@@ -4444,8 +4561,8 @@ fn write_string_sheet_labelled(
     // Legacy rendered every amount as #,##0 and sized columns off that same
     // rendering.  Keeping two decimals here while measuring widths as integers
     // is what produced ### in the money columns.
-    let number_format = Format::new().set_num_format("#,##0");
-    let integer_format = Format::new().set_num_format("#,##0");
+    let number_format = Format::new().set_num_format(MONEY_NUMBER_FORMAT);
+    let integer_format = Format::new().set_num_format(MONEY_NUMBER_FORMAT);
     let percent_format = Format::new().set_num_format("0.00%");
     let source_format = Format::new()
         .set_italic()
@@ -4731,6 +4848,13 @@ fn append_depreciation_formulas(
         "差异_本年折旧",
         "差异_累计折旧",
     ];
+    // The six money columns of the block (offsets 0/3/4/5/6/7 — on FA List these
+    // land in N and Q..U).  They are located by offset, never by a hard-coded
+    // letter: the block starts after the sheet's own headers, so on a sheet with
+    // more than 12 columns the same fields shift right.  Offsets 1 and 2 are
+    // month counts and keep their own rendering.
+    const MONEY_OFFSETS: [usize; 6] = [0, 3, 4, 5, 6, 7];
+    let money_format = Format::new().set_num_format(MONEY_NUMBER_FORMAT);
     for (offset, name) in output.iter().enumerate() {
         ws.write_string_with_format(0, (start + offset) as u16, *name, header_format)
             .map_err(xlsx_error)?;
@@ -4805,8 +4929,14 @@ fn append_depreciation_formulas(
             "(YEAR({period_end})-YEAR({dep_start}))*12+MONTH({period_end})-MONTH({dep_start})+1"
         );
         let unusable = format!("OR({d}{excel_row}=\"\",{life}{excel_row}<=0)");
+        // 月折旧额 must land as a number on every single row.  The old fallback
+        // was the empty string "", which Excel stores as *text*: the column then
+        // mixed numbers and text, and any 后续公式 the reviewer wrote over it
+        // (差异, 小计, 乘算) either silently skipped those rows or returned
+        // #VALUE!.  Cards with no life / no original value now read 0 —
+        // "没有折旧" is the honest figure and it stays arithmetic-safe.
         let monthly_depreciation =
-            format!("=IFERROR(ROUND({original}{excel_row}*(1-{rate})/{life}{excel_row},2),\"\")");
+            format!("=IFERROR(ROUND({original}{excel_row}*(1-{rate})/{life}{excel_row},2),0)");
         let measured_current = format!(
             "=IF(OR(LEN({}{excel_row})=0,LEN({}{excel_row})=0),\"\",ROUND({}{excel_row}*{}{excel_row},2))",
             formula_cols[0], formula_cols[1], formula_cols[0], formula_cols[1]
@@ -4838,14 +4968,26 @@ fn append_depreciation_formulas(
             ),
         ];
         for (offset, formula) in formulas.iter().enumerate() {
-            ws.write_formula(r as u32 + 2, (start + offset) as u16, formula.as_str())
+            if MONEY_OFFSETS.contains(&offset) {
+                ws.write_formula_with_format(
+                    r as u32 + 2,
+                    (start + offset) as u16,
+                    formula.as_str(),
+                    &money_format,
+                )
                 .map_err(xlsx_error)?;
+            } else {
+                ws.write_formula(r as u32 + 2, (start + offset) as u16, formula.as_str())
+                    .map_err(xlsx_error)?;
+            }
         }
     }
     if formula_rows < row_count {
+        // Parked one column past the block, not in 月折旧额: that column has to
+        // stay purely numeric so the reviewer can compute over it.
         ws.write_string(
             formula_rows as u32 + 2,
-            start as u16,
+            (start + output.len()) as u16,
             format!(
                 "【导出提速】{sheet_name} 共 {row_count} 行，超过 {DEPRECIATION_FORMULA_ROW_LIMIT} 行，折旧测算公式仅写入前 {formula_rows} 行；如需全量计算，请在 Excel 中选中上方公式向下填充。"
             ),
@@ -6065,6 +6207,73 @@ mod tests {
         assert!(result["message"].as_str().unwrap().contains("未启用"));
     }
     #[test]
+    fn rerun_review_recovers_a_manually_unmapped_start_date() {
+        let dir = std::env::temp_dir().join(format!("fa-llm-unmapped-date-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut p = params(&dir);
+        p["beginMapping"] = json!({
+            "category":"资产类别","name":"资产名称","originalValue":"原值",
+            "depreciation":"累计折旧","life":"使用寿命","residualRate":"残值率"
+        });
+        p["endMapping"] = json!({
+            "category":"资产类别","name":"资产名称","originalValue":"原值",
+            "depreciation":"累计折旧","life":"使用寿命","residualRate":"残值",
+            "currentYearDep":"本年折旧"
+        });
+
+        let payload = main_llm_payload(&p).unwrap();
+        assert!(
+            payload["file1"]["unmappedRoles"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("date"))
+        );
+        assert!(
+            payload["file2"]["unmappedRoles"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("date"))
+        );
+        assert!(
+            payload["file1"]["unmappedCandidates"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({"role":"date","column":"入账开始日期"}))
+        );
+
+        // Even if the provider overlooks the explicit missing role and returns
+        // a no-op, the same deterministic header rule used by initial inspect
+        // must restore the high-confidence suggestion on a manual re-review.
+        let reviewed = finalize_llm_review(
+            json!({
+                "suggestions":[],
+                "fieldReviews":[],
+                "matchReview":{"action":"keep","reasons":[]}
+            }),
+            payload,
+            false,
+        );
+        let applied = reviewed["autoApplied"].as_array().unwrap();
+        assert!(applied.iter().any(|item| {
+            item["role"] == "date"
+                && item["file_side"] == "file1"
+                && item["suggested_column"] == "入账开始日期"
+        }));
+        assert!(applied.iter().any(|item| {
+            item["role"] == "date"
+                && item["file_side"] == "file2"
+                && item["suggested_column"] == "入账开始日期"
+        }));
+        assert!(
+            reviewed["message"]
+                .as_str()
+                .unwrap()
+                .contains("映射复核完成")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
     fn llm_contract_auto_applies_high_confidence_and_preserves_match_review() {
         let value = finalize_llm_review(
             json!({"suggestions":[{"role":"current_year_dep","file_side":"file2","suggested_column":"本年折旧","confidence":0.9,"action":"fill","reason":"字段同义"}],"fieldReviews":[],"matchReview":{"status":"ok","confidence":0.9,"action":"keep","reasons":[],"suggested_file1_columns":["卡片编号"],"suggested_file2_columns":["卡片编号"],"suggestion_reason":""}}),
@@ -7005,6 +7214,137 @@ mod tests {
         assert!(disposal_formulas.iter().any(|value| value == "H3"));
         let llm = wb.worksheet_range("LLM分析").unwrap();
         assert_eq!(llm.get((0, 0)).unwrap().to_string(), "模拟 LLM 分析");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Resolve the format code actually applied to a cell.  rust_xlsxwriter
+    /// registers every string number format as a custom `<numFmt>` starting at
+    /// id 164, so the id on the `<xf>` has to be looked back up in styles.xml.
+    fn cell_number_format(styles: &str, sheet: &str, reference: &str) -> String {
+        let xf = cell_style(styles, sheet, reference);
+        let id = xf
+            .split("numFmtId=\"")
+            .nth(1)
+            .and_then(|value| value.split('"').next())
+            .unwrap_or("0");
+        styles
+            .split(&format!("<numFmt numFmtId=\"{id}\" formatCode=\""))
+            .nth(1)
+            .and_then(|value| value.split('"').next())
+            .unwrap_or("General")
+            .to_owned()
+    }
+
+    /// FA List 的折旧测算块占 N..U 八列。六个金额列（月折旧额、测算的当年折旧、
+    /// 测算的累计折旧、账面本年折旧、差异_本年折旧、差异_累计折旧）必须是
+    /// 千分位、不带小数的数值；月折旧额还必须在算不出来时落成 0 而不是空文本，
+    /// 否则用户在导出件上继续写公式会拿到 #VALUE! 或被静默跳过。
+    #[test]
+    fn depreciation_block_money_columns_are_numeric_thousands() {
+        let dir = std::env::temp_dir().join(format!("fa-rust-money-fmt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let begin = dir.join("begin.csv");
+        let end = dir.join("end.csv");
+        // A2 有完整参数，A3 缺使用寿命——后者正是旧版会写出空文本的那一行。
+        fs::write(
+            &begin,
+            "卡片编号,资产类别,资产名称,原值,累计折旧,使用寿命,残值率,入账开始日期,本年折旧\nA2,机器,甲,120000,20000,60,5%,2020-01-01,24000\nA3,电子,乙,3000,0,,5%,2021-01-01,0\n",
+        )
+        .unwrap();
+        fs::write(
+            &end,
+            "卡片编号,资产类别,资产名称,原值,累计折旧,使用寿命,残值,入账开始日期,本年折旧\nA2,机器,甲,120000,44000,60,5,2020-01-01,24000\nA3,电子,乙,3000,0,,5,2021-01-01,0\n",
+        )
+        .unwrap();
+        let output = dir.join("FA_List.xlsx");
+        let p = json!({
+            "beginPath":begin,"endPath":end,"beginKeys":["卡片编号"],"endKeys":["卡片编号"],
+            "beginMapping":{"category":"资产类别","name":"资产名称","originalValue":"原值","depreciation":"累计折旧","life":"使用寿命","residualRate":"残值率","startDate":"入账开始日期","currentYearDep":"本年折旧"},
+            "endMapping":{"category":"资产类别","name":"资产名称","originalValue":"原值","depreciation":"累计折旧","life":"使用寿命","residualRate":"残值","startDate":"入账开始日期","currentYearDep":"本年折旧"},
+            "balanceSheetDate":"2025-12-31",
+            "outputPath":output,"__settings":{"llm":{"enabled":false}}
+        });
+        test_export(p).unwrap();
+
+        // 先钉住列位：FA List 自身 12 列（A..L），折旧块从 N 起。
+        let mut wb = open_workbook_auto(&output).unwrap();
+        let fa = wb.worksheet_range("FA List").unwrap();
+        for (column, name) in [
+            (13usize, "月折旧额"),
+            (14, "本年应计提折旧月份"),
+            (15, "累计折旧月份"),
+            (16, "测算的当年折旧"),
+            (17, "测算的累计折旧"),
+            (18, "账面本年折旧"),
+            (19, "差异_本年折旧"),
+            (20, "差异_累计折旧"),
+        ] {
+            assert_eq!(
+                fa.get((0, column)).unwrap().to_string(),
+                name,
+                "折旧块列位漂移：第 {column} 列应为 {name}"
+            );
+        }
+
+        let formulas = wb.worksheet_formula("FA List").unwrap();
+        // 公式区间从 N3 起，get 是相对坐标，这里按绝对坐标取。
+        let monthly = (2u32..4)
+            .map(|row| formulas.get_value((row, 13)).unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            monthly.iter().all(|f| f.contains("IFERROR(ROUND(")),
+            "月折旧额应仍是可追溯公式：{monthly:?}"
+        );
+        assert!(
+            monthly.iter().all(|f| f.ends_with(",0)")),
+            "月折旧额算不出来时必须落成数值 0：{monthly:?}"
+        );
+        assert!(
+            !monthly.iter().any(|f| f.contains(",\"\")")),
+            "月折旧额不允许回落成空文本：{monthly:?}"
+        );
+
+        let styles = xlsx_entry(&output, "xl/styles.xml");
+        // 按内容定位 FA List 的 sheet xml：只有它把折旧测算公式写在 N3，
+        // 免得工作表增删时测试跟着漂。
+        let sheet = {
+            use std::io::Read;
+            let file = fs::File::open(&output).unwrap();
+            let mut archive = zip::ZipArchive::new(file).unwrap();
+            let names = archive
+                .file_names()
+                .filter(|name| name.starts_with("xl/worksheets/sheet"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let mut found = None;
+            for name in names {
+                let mut xml = String::new();
+                archive
+                    .by_name(&name)
+                    .unwrap()
+                    .read_to_string(&mut xml)
+                    .unwrap();
+                let is_fa_list = xml.split("<c r=\"N3\"").nth(1).is_some_and(|cell| {
+                    cell.split("</c>")
+                        .next()
+                        .unwrap_or_default()
+                        .contains("IFERROR(ROUND(")
+                });
+                if is_fa_list {
+                    found = Some(xml);
+                    break;
+                }
+            }
+            found.expect("FA List worksheet xml")
+        };
+        for reference in ["N3", "Q3", "R3", "S3", "T3", "U3", "N4", "Q4", "U4"] {
+            assert_eq!(
+                cell_number_format(&styles, &sheet, reference),
+                MONEY_NUMBER_FORMAT,
+                "{reference} 应使用千分位且不显示小数"
+            );
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 

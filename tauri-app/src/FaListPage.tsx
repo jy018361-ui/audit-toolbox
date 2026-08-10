@@ -8,6 +8,8 @@ import {
   pickPath,
 } from "./api";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { faDropSlotAtPosition, type FaDropSlot } from "./faDropTarget";
 import {
   type FaMappingChange,
   type FaPendingSuggestion,
@@ -15,8 +17,13 @@ import {
   canApplyFaSupplements,
   faDefaultOutputName,
   faDefaultOutputPath,
+  faMappedRolesForColumn,
+  faMissingOptionalRoles,
   faOutputPathAfterSourceSelection,
+  faReviewNarrative,
+  faReviewReasons,
   faHeaderOption,
+  faRolesForSide,
   isFaMatchDisabled,
   planFaLlmChanges,
   planFaSupplementChanges,
@@ -277,19 +284,16 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
       if (event.phase === "failed") setError(event.message);
     },
   });
-  // 拖拽上传：记录当前鼠标悬停在哪个文件框（"begin"/"end"/null），
-  // 窗口级拖放事件（Tauri listenFileDrops）到达时按悬停目标分配路径。
-  // 拖拽上传：用 Tauri 的窗口级拖放事件（带 position），根据拖到左/右半窗口
-  // 判断放年初还是年末。比 DOM 拖放事件更可靠（Tauri 会拦截 DOM 拖放）。
-  // 拖拽上传：用 Tauri 的窗口级拖放事件（带 position）。
-  // step=1：拖到左/右半窗口 → 年初/年末；
-  // step=2：拖到上/下半窗口 → 新增/处置补充清单。
-  type DropSlot = "begin" | "end" | "addition" | "disposal";
-  const dragTargetRef = useRef<DropSlot | null>(null);
-  const [dragHover, setDragHover] = useState<DropSlot | null>(null);
-  const applyPathRef = useRef<(side: DropSlot, value: string) => void>(() => {});
-  const stepRef = useRef(step);
-  stepRef.current = step;
+  // Tauri 会拦截 DOM 文件拖放，因此仍监听窗口级事件；但落点必须
+  // 命中实际上传框，不能用窗口左右/上下中线猜测。
+  const dragTargetRef = useRef<FaDropSlot | null>(null);
+  const [dragHover, setDragHover] = useState<FaDropSlot | null>(null);
+  const applyPathRef = useRef<(side: FaDropSlot, value: string) => void>(() => {});
+  const beginDropRef = useRef<HTMLDivElement>(null);
+  const endDropRef = useRef<HTMLDivElement>(null);
+  const additionDropRef = useRef<HTMLDivElement>(null);
+  const disposalDropRef = useRef<HTMLDivElement>(null);
+  const dragScaleFactorRef = useRef(1);
   applyPathRef.current = (slot, value) => {
     if (slot === "begin" || slot === "end") applyPath(slot, value);
     else applySupplementPath(slot, value);
@@ -302,23 +306,34 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
     const inTauriEnv =
       typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
     if (!inTauriEnv) return () => undefined;
+    void getCurrentWindow()
+      .scaleFactor()
+      .then((factor) => {
+        dragScaleFactorRef.current = factor;
+      })
+      .catch(() => {
+        dragScaleFactorRef.current = window.devicePixelRatio || 1;
+      });
+    const targetAt = (position: { x: number; y: number }) =>
+      faDropSlotAtPosition(position, dragScaleFactorRef.current, [
+        ["begin", beginDropRef.current?.getBoundingClientRect() ?? null],
+        ["end", endDropRef.current?.getBoundingClientRect() ?? null],
+        ["addition", additionDropRef.current?.getBoundingClientRect() ?? null],
+        ["disposal", disposalDropRef.current?.getBoundingClientRect() ?? null],
+      ]);
     // Tauri 官方 onDragDropEvent：监听 tauri://drag-* 系列，事件带 position 与 paths。
     void getCurrentWebview()
       .onDragDropEvent((event) => {
         console.log("[fa] drag event:", JSON.stringify(event.payload));
         const payload = event.payload;
         if (payload.type === "over" || payload.type === "enter") {
-          // 步骤 1 用左右分年初/年末；步骤 2 用上下分新增/处置
-          let target: DropSlot;
-          if (stepRef.current === 1) {
-            target = payload.position.x < window.innerWidth / 2 ? "begin" : "end";
-          } else {
-            target = payload.position.y < window.innerHeight / 2 ? "addition" : "disposal";
-          }
+          const target = targetAt(payload.position);
           dragTargetRef.current = target;
           setDragHover(target);
         } else if (payload.type === "drop") {
-          const target = dragTargetRef.current;
+          // drop 事件自带最终坐标，再命中一次，避免最后一次 over
+          // 和松手位置不同时把文件发给旧目标。
+          const target = targetAt(payload.position);
           if (target && payload.paths.length) {
             applyPathRef.current(target, payload.paths[0]);
           }
@@ -351,8 +366,8 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
     draft?.matchStats ?? faMatchStatsFromResult(draft?.result),
   );
   const [error, setError] = useState("");
-  // LLM 复核是异步的，等待期间用户可能继续调映射；应用改动时必须基于最新状态，
-  // 否则会把等待期间的手动修改一并覆盖掉。
+  // LLM 复核是异步的。界面在等待期间会锁定手工映射；这里仍以最新状态应用，
+  // 防止其他状态更新或后续流程调整被异步结果整体覆盖。
   const faStateRef = useRef({
     beginMapping,
     endMapping,
@@ -635,6 +650,8 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
       setEndKeys(suggestedEndKeys);
       setResult(value);
       void reviewLlm({
+        beginPath: bPath,
+        endPath: ePath,
         beginSheet: value.begin.selectedSheet,
         endSheet: value.end.selectedSheet,
         beginHeaderRow: value.begin.detectedHeaderRow,
@@ -736,6 +753,8 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
   }
   async function reviewLlm(
     override: Partial<{
+      beginPath: string;
+      endPath: string;
       beginSheet: string;
       endSheet: string;
       beginHeaderRow: number;
@@ -746,7 +765,9 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
       endKeys: string[];
     }> = {},
   ) {
-    if (!beginPath || !endPath) return;
+    const reviewBeginPath = override.beginPath ?? beginPath;
+    const reviewEndPath = override.endPath ?? endPath;
+    if (!reviewBeginPath || !reviewEndPath) return;
     const generation = ++llmReviewGeneration.current;
     setLlmBusy(true);
     setLlmBypassed(false);
@@ -754,8 +775,8 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
     setLlmPending([]);
     try {
       const value = (await engineCall("fa.review", {
-        beginPath,
-        endPath,
+        beginPath: reviewBeginPath,
+        endPath: reviewEndPath,
         beginSheet: override.beginSheet ?? beginSheet,
         endSheet: override.endSheet ?? endSheet,
         beginHeaderRow:
@@ -1217,6 +1238,20 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
       !["additionMethod", "additionDate"].includes(key) ||
       shouldShowFaAdditionFields(endMapping.additionMethod),
   );
+  // 文件1 不出现只属于文件2的角色（本年折旧/新增方式/新增日期）。
+  // 判定清单复用 faListUi 的 FA_FILE2_ONLY_MAPPING_KEYS，不另写一份。
+  const rolesForSide = (side: "begin" | "end"): [keyof FaMapping, string][] =>
+    faRolesForSide(side, visibleMappingRoles);
+  const missingOptionalRoles = (side: "begin" | "end"): string[] =>
+    faMissingOptionalRoles(
+      side,
+      visibleMappingRoles,
+      REQUIRED_ROLES.map(([key]) => key),
+      (side === "begin" ? beginMapping : endMapping) as Record<
+        string,
+        string | string[] | undefined
+      >,
+    );
   const multi = (event: ChangeEvent<HTMLSelectElement>) =>
     Array.from(event.target.selectedOptions).map((option) => option.value);
   // 单侧字段映射列表（参考看账 kz-map）：第一行「组合匹配键」多选，
@@ -1258,16 +1293,13 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
             })}
           </select>
         </Field>
-        {visibleMappingRoles.map(([key, label]) => {
-          const file2Only =
-            side === "begin" && ["currentYearDep", "additionMethod", "additionDate"].includes(key);
+        {rolesForSide(side).map(([key, label]) => {
           const currentValue = mapping[key];
           const currentText = used(key, String(currentValue ?? ""));
           return (
             <Field key={key} label={label}>
               <select
-                disabled={llmBusy || file2Only}
-                title={file2Only ? "仅适用于文件2（期末）" : undefined}
+                disabled={llmBusy}
                 value={currentText}
                 onChange={(e) => {
                   const value = e.target.value;
@@ -1277,7 +1309,7 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
                   }
                 }}
               >
-                <option value="">{file2Only ? "仅适用于文件2" : "不映射"}</option>
+                <option value="">不映射</option>
                 {headers.map((header, index) => {
                   const option = faHeaderOption(header);
                   const isUsed = usedHeaders.has(option.value) && option.value !== currentValue;
@@ -1308,7 +1340,7 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
   ): { controls: React.ReactNode[]; mappedFlags: boolean[] } => {
     const roleOptions: [keyof FaMapping, string][] = [
       ["matchKeys", "组合匹配键"],
-      ...visibleMappingRoles,
+      ...rolesForSide(side),
     ];
     // 已被某列占用的角色集合（跨列感知，用于标记"已映射"）
     const usedRoles = new Set<string>();
@@ -1325,18 +1357,19 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
     const mappedFlags: boolean[] = [];
     for (const header of inspect.headers) {
       const colValue = header.trim();
-      // 当前哪个角色映射了这列
-      const mappedRole = roleOptions.find(([key]) => {
-        const v = mapping[key];
-        if (Array.isArray(v)) return v.includes(colValue);
-        return String(v ?? "") === colValue;
-      });
-      mappedFlags.push(Boolean(mappedRole));
+      // 同一列可以同时承担组合匹配键、资产名称等多个角色。原先用 find
+      // 只显示第一个，复核时看不到完整关系；这里保留全部角色并合并展示。
+      const mappedRoles = faMappedRolesForColumn(colValue, roleOptions, mapping);
+      const mappedRole = mappedRoles[0];
+      const multipleValue = `__multiple__:${colValue}`;
+      mappedFlags.push(mappedRoles.length > 0);
       controls.push(
         <label className="dt-header-control" key={header}>
           <select
-            className={mappedRole ? "mapped" : undefined}
-            value={mappedRole ? mappedRole[0] : ""}
+            className={mappedRoles.length ? "mapped" : undefined}
+            disabled={llmBusy}
+            title={mappedRoles.map(([, label]) => label).join(" + ") || "未映射"}
+            value={mappedRoles.length > 1 ? multipleValue : mappedRole ? mappedRole[0] : ""}
             onChange={(e) => {
               const role = e.target.value as keyof FaMapping;
               // 清除旧映射：先把该列从原角色移除（如果是多选且该角色值恰为此列）
@@ -1362,9 +1395,15 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
             }}
           >
             <option value="">—</option>
+            {mappedRoles.length > 1 && (
+              <option value={multipleValue} disabled>
+                {mappedRoles.map(([, label]) => label).join(" + ")}
+              </option>
+            )}
             {roleOptions.map(([key, label]) => {
               // 已被其他列占用的角色：标记"已用"，但当前列已选的除外
-              const takenByOther = usedRoles.has(key) && key !== mappedRole?.[0];
+              const mappedHere = mappedRoles.some(([mappedKey]) => mappedKey === key);
+              const takenByOther = usedRoles.has(key) && !mappedHere;
               return (
                 <option key={key} value={key} className={takenByOther ? "dt-role-taken" : undefined}>
                   {label}
@@ -1464,11 +1503,15 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
     } else if (supplement) {
       controls = supplementColumnControls(supplement.kind, inspect, supplement.config, supplement.setter);
     }
-    // 每个文件预览标题旁的"未映射"提示
+    // 每个文件预览标题旁的"未映射"提示。分两档：
+    // 必填缺失是红的、会拦住流程；选填缺失是黄的、只是告知，留空照样能合并。
     let missingHint: string | undefined;
+    let optionalHint: string | undefined;
     if (mapping && side) {
       const m = missingRoles(side);
       if (m.length) missingHint = `尚未映射：${m.join("、")}`;
+      const optional = missingOptionalRoles(side);
+      if (optional.length) optionalHint = `选填未映射：${optional.join("、")}`;
     } else if (supplement) {
       const req = supplementRoleOptions(supplement.kind);
       const missing = req.filter(({ field }) => {
@@ -1488,6 +1531,14 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
               {inspect.dimensions?.rows ?? 0} 行 × {inspect.dimensions?.columns ?? 0} 列
             </strong>
             {missingHint && <span className="fa-caption-missing">{missingHint}</span>}
+            {optionalHint && (
+              <span
+                className="fa-caption-optional"
+                title="选填字段，留空不影响合并，只是对应的计算或分类不会生成。"
+              >
+                {optionalHint}
+              </span>
+            )}
           </div>
         }
         maxHeight={430}
@@ -1507,15 +1558,17 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
       <div className="fa-side">
         <h3 className="fa-side-title">{title}</h3>
         <Field label={title}>
-          <FileDropInput
-            value={config.path}
-            placeholder={title}
-            onBrowse={() => void chooseSupplement(kind)}
-            onClear={config.path && !busy && !supplementLlmBusy ? () => clearSupplement(kind) : undefined}
-            onDragStateChange={(active) => setSupplementDragTarget(kind, active)}
-            highlight={dragHover === kind}
-            disabled={supplementLlmBusy}
-          />
+          <div ref={kind === "addition" ? additionDropRef : disposalDropRef}>
+            <FileDropInput
+              value={config.path}
+              placeholder={title}
+              onBrowse={() => void chooseSupplement(kind)}
+              onClear={config.path && !busy && !supplementLlmBusy ? () => clearSupplement(kind) : undefined}
+              onDragStateChange={(active) => setSupplementDragTarget(kind, active)}
+              highlight={dragHover === kind}
+              disabled={supplementLlmBusy}
+            />
+          </div>
           <Button
             type="button"
             variant="secondary"
@@ -1773,15 +1826,17 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
                 <div className="fa-side fa-side-begin">
                   <h3 className="fa-side-title">期初（年初）</h3>
                   <Field label="年初文件" required>
-                    <FileDropInput
-                      value={beginPath}
-                      placeholder="拖放或点击选择年初清单"
-                      onBrowse={() => void choose("begin")}
-                      onClear={beginPath && !busy ? () => clearMainFile("begin") : undefined}
-                      onDragStateChange={(active) => setDragTarget("begin", active)}
-                      highlight={dragHover === "begin"}
-                      disabled={busy}
-                    />
+                    <div ref={beginDropRef}>
+                      <FileDropInput
+                        value={beginPath}
+                        placeholder="拖放或点击选择年初清单"
+                        onBrowse={() => void choose("begin")}
+                        onClear={beginPath && !busy ? () => clearMainFile("begin") : undefined}
+                        onDragStateChange={(active) => setDragTarget("begin", active)}
+                        highlight={dragHover === "begin"}
+                        disabled={busy}
+                      />
+                    </div>
                   </Field>
                   <Field label="Sheet">
                     {inspection?.begin.sheets.length ? (
@@ -1817,15 +1872,17 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
                 <div className="fa-side fa-side-end">
                   <h3 className="fa-side-title">期末（年末）</h3>
                   <Field label="年末文件" required>
-                    <FileDropInput
-                      value={endPath}
-                      placeholder="拖放或点击选择年末清单"
-                      onBrowse={() => void choose("end")}
-                      onClear={endPath && !busy ? () => clearMainFile("end") : undefined}
-                      onDragStateChange={(active) => setDragTarget("end", active)}
-                      highlight={dragHover === "end"}
-                      disabled={busy}
-                    />
+                    <div ref={endDropRef}>
+                      <FileDropInput
+                        value={endPath}
+                        placeholder="拖放或点击选择年末清单"
+                        onBrowse={() => void choose("end")}
+                        onClear={endPath && !busy ? () => clearMainFile("end") : undefined}
+                        onDragStateChange={(active) => setDragTarget("end", active)}
+                        highlight={dragHover === "end"}
+                        disabled={busy}
+                      />
+                    </div>
                   </Field>
                   <Field label="Sheet">
                     {inspection?.end.sheets.length ? (
@@ -1866,7 +1923,7 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
                   disabled={busy}
                   onClick={() => void inspect()}
                 >
-                  {busy ? "正在读取表格…" : "读取表格"}
+                  {busy ? "正在读取表格…" : "读取表格 + LLM 复核"}
                 </Button>
                 <Button
                   variant="secondary"
@@ -1939,14 +1996,41 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
                                   : "未启用"}
                         </span>
                       </div>
-                      {llmBusy && (
-                        <p>复核期间匹配键与字段映射已暂时锁定。</p>
-                      )}
+                    {llmBusy && (
+                      <p>复核期间匹配键与字段映射已暂时锁定。</p>
+                    )}
                       {llmReview?.detail ? (
                         <details className="fa-llm-detail">
                           <summary>技术详情（排查用）</summary>
                           <p>{llmReview.detail}</p>
                         </details>
+                      ) : null}
+                      {llmReview && !llmBusy ? (
+                        <div className="fa-review-conclusion" role="status">
+                          <strong>复核结论</strong>
+                          <p>
+                            {faReviewNarrative(
+                              llmReview.message,
+                              llmChanges.length,
+                              llmPending.length,
+                            )}
+                          </p>
+                          {llmChanges.length === 0 &&
+                            llmPending.length === 0 &&
+                            faReviewReasons(
+                              llmReview.autoApplied,
+                              llmReview.fieldReviews,
+                              llmReview.matchReview?.reasons,
+                            ).length > 0 && (
+                            <ul>
+                              {faReviewReasons(
+                                llmReview.autoApplied,
+                                llmReview.fieldReviews,
+                                llmReview.matchReview?.reasons,
+                              ).map((reason) => <li key={reason}>{reason}</li>)}
+                            </ul>
+                          )}
+                        </div>
                       ) : null}
                       {(llmBusy || llmReview?.failed) && (
                         <div className="actions compact">
@@ -2168,6 +2252,33 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
                       正在核对补充清单字段和第一步匹配 ID 口径。
                     </p>
                   )}
+                  {supplementLlmReview && !supplementLlmBusy ? (
+                    <div className="fa-review-conclusion" role="status">
+                      <strong>复核结论</strong>
+                      <p>
+                        {faReviewNarrative(
+                          supplementLlmReview.message,
+                          supplementLlmChanges.length,
+                          supplementLlmPending.length,
+                        )}
+                      </p>
+                      {supplementLlmChanges.length === 0 &&
+                        supplementLlmPending.length === 0 &&
+                        faReviewReasons(
+                          supplementLlmReview.autoApplied,
+                          supplementLlmReview.fieldReviews,
+                          supplementLlmReview.matchReview?.reasons,
+                        ).length > 0 && (
+                        <ul>
+                          {faReviewReasons(
+                            supplementLlmReview.autoApplied,
+                            supplementLlmReview.fieldReviews,
+                            supplementLlmReview.matchReview?.reasons,
+                          ).map((reason) => <li key={reason}>{reason}</li>)}
+                        </ul>
+                      )}
+                    </div>
+                  ) : null}
                   {supplementLlmChanges.map((change) => (
                     <div
                       className={`fa-review-item fa-change${change.attention ? " attention" : ""}`}

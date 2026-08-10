@@ -46,7 +46,7 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
   const [activeJobId, setActiveJobId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [step, setStep] = useState<1 | 2 | 3>(1);
+  const [step, setStep] = useState<1 | 2>(1);
   const [dragHover, setDragHover] = useState(false);
 
   useEffect(() => {
@@ -198,11 +198,10 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
       <StepIndicator
         steps={[
           { key: "1", label: "选择文件夹" },
-          { key: "2", label: "确认输出", disabled: !scan },
-          { key: "3", label: "生成清单", disabled: !fileListCanExport(sourceDir, outputPath) },
+          { key: "2", label: "确认并生成", disabled: !scan },
         ]}
         current={step - 1}
-        onStepClick={(index) => setStep((index + 1) as 1 | 2 | 3)}
+        onStepClick={(index) => setStep((index + 1) as 1 | 2)}
       />
       <div className="fa-stack">
         <Card>
@@ -210,9 +209,7 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
             <CardTitle>
               {step === 1
                 ? "1. 选择扫描范围"
-                : step === 2
-                  ? "2. 输出文件"
-                  : "3. 生成文件清单"}
+                : "2. 确认输出并生成"}
             </CardTitle>
             <Badge className="badge-ready">已就绪</Badge>
           </CardHeader>
@@ -253,22 +250,6 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
                 <p className="hint">默认文件名与旧版一致：“文件夹名List-年月日时分.xlsx”。文件数量多时导出需要几分钟，中途可随时取消。</p>
                 <div className="actions">
                   <Button type="button" variant="secondary" size="sm" onClick={() => setStep(1)}>上一步</Button>
-                  <Button type="button" variant="default" disabled={!fileListCanExport(sourceDir, outputPath)} onClick={() => setStep(3)}>
-                    下一步：生成清单
-                  </Button>
-                </div>
-              </>
-            )}
-            {step === 3 && (
-              <>
-                <p className="hint">
-                  源文件夹：{sourceDir || "未指定"}
-                </p>
-                <p className="hint">
-                  输出文件：{outputPath || "未指定"}
-                </p>
-                <div className="actions">
-                  <Button type="button" variant="secondary" size="sm" onClick={() => setStep(2)}>上一步</Button>
                   {busy && activeJobId && !terminal ? (
                     <Button type="button" variant="secondary" size="sm" onClick={() => void jobCancel(activeJobId)}>取消{job?.phase === "scan" || !scan ? "扫描" : "导出"}</Button>
                   ) : (

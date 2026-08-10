@@ -312,7 +312,7 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
     let prompt = if mode == "analysis" {
         "你是审计看账分析助手。只依据输入的汇总数据，输出严格 JSON：{title:string,sections:[{heading:string,points:[{label:string,text:string}]}],review_notes:[string]}。范围仅限科目发生额、主要对方科目、凭证类型和月度波动；不得虚构凭证、金额或审计结论。"
     } else {
-        "你是会计凭证字段映射复核助手。输出严格 JSON：{scheme:\"A\"|\"B\"|\"\",schemeReason:string,fills:[{role:string,suggestedColumn:string,confidence:number,reason:string}],reviews:[{role:string,currentColumn:string,suggestedColumn:string,confidence:number,reason:string}]}。角色仅可为 id/account/entity/date/summary/amount/direction/debit/credit。方案A=金额列（可加方向）；方案B=借方和贷方两列。只可使用输入 headers 中的原始列名。"
+        kanzhang_mapping_prompt()
     };
     let content = request_llm(llm, prompt, &payload.to_string(), None)?;
     let value = parse_json_content(&content);
@@ -324,6 +324,10 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
         ));
     }
     Ok(value)
+}
+
+fn kanzhang_mapping_prompt() -> &'static str {
+    "你是会计凭证字段映射复核助手。输出严格 JSON：{scheme:\"A\"|\"B\"|\"\",schemeReason:string,fills:[{role:string,suggestedColumn:string,confidence:number,reason:string}],reviews:[{role:string,currentColumn:string,suggestedColumn:string,confidence:number,reason:string}]}。角色仅可为 id/account/entity/date/summary/amount/direction/debit/credit。entity 专指凭证所属的核算主体/记账主体（例如公司代码、公司名称、账套公司、法人实体、business unit、company code），用于区分这笔凭证记在哪个主体；entity 绝不是交易对手方、往来单位、客户、供应商、客商、收付款对象或对方户名。即使交易对手方列包含公司名称或企业名称，也不得映射为 entity；没有明确的核算主体列时应让 entity 保持空缺，不得用对手方字段凑数。方案A=金额列（可加方向）；方案B=借方和贷方两列。只可使用输入 headers 中的原始列名。"
 }
 
 fn ocr(params: &Value, settings: &Value) -> Result<Value, AppError> {
@@ -718,6 +722,15 @@ mod tests {
             parse_json_content("```json\n{\"items\":[{\"a\":1}]}\n```")["items"][0]["a"],
             1
         );
+    }
+    #[test]
+    fn kanzhang_entity_prompt_means_accounting_entity_not_counterparty() {
+        let prompt = kanzhang_mapping_prompt();
+        assert!(prompt.contains("核算主体/记账主体"), "{prompt}");
+        assert!(prompt.contains("绝不是交易对手方"), "{prompt}");
+        assert!(prompt.contains("客户"), "{prompt}");
+        assert!(prompt.contains("供应商"), "{prompt}");
+        assert!(prompt.contains("保持空缺"), "{prompt}");
     }
     #[test]
     fn rejects_missing_ocr_image() {

@@ -65,8 +65,6 @@ struct TsJobParams {
     header_row: usize,
     output_path: Option<String>,
     #[serde(default)]
-    export_raw_data: bool,
-    #[serde(default)]
     filters: Vec<FilterSpec>,
     pivot_mode: Option<String>,
     #[serde(default)]
@@ -460,6 +458,11 @@ fn export_ts(
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
     let job: TsJobParams = parse(params, "TS 参数不完整。")?;
+    let selected_output = job
+        .output_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| error("TS_OUTPUT_REQUIRED", "请选择 TS 导出文件的保存路径。", None))?;
     let total_started = Instant::now();
     progress("read", 0, 5, "正在读取 Timesheet 数据…");
     let (table, cache_hit, cache) = load_ts_cached(
@@ -562,7 +565,7 @@ fn export_ts(
     check_cancel(cancel)?;
     let output = output_path(
         &job.input_path,
-        job.output_path.as_deref(),
+        Some(selected_output),
         "Timesheet_Default_Dual",
         "xlsx",
     )?;
@@ -571,17 +574,14 @@ fn export_ts(
     write_ts_workbook(&partial, &manager, project.as_ref(), agg, cancel)?;
     replace_file(&partial, &output)?;
     let mut outputs = vec![output.to_string_lossy().into_owned()];
-    let mut raw_rows = 0usize;
-    if job.export_raw_data {
-        progress("raw", 4, 5, "正在写出对应明细数据…");
-        let raw = output.with_file_name(format!(
-            "{}_data.csv",
-            output.file_stem().unwrap_or_default().to_string_lossy()
-        ));
-        write_csv_table(&raw, &table.headers, &filtered, cancel)?;
-        raw_rows = filtered.len();
-        outputs.push(raw.to_string_lossy().into_owned());
-    }
+    progress("raw", 4, 5, "正在写出对应明细数据…");
+    let raw = output.with_file_name(format!(
+        "{}_data.csv",
+        output.file_stem().unwrap_or_default().to_string_lossy()
+    ));
+    write_csv_table(&raw, &table.headers, &filtered, cancel)?;
+    let raw_rows = filtered.len();
+    outputs.push(raw.to_string_lossy().into_owned());
     Ok(
         json!({"engine":"rust-polars","outputPaths":outputs,"rowsManager":manager.rows.len(),"rowsProject":project.as_ref().map(|p|p.rows.len()).unwrap_or(0),"rawRows":raw_rows,"cacheHit":cache_hit,"cachePath":cache,"timings":{"totalMs":total_started.elapsed().as_millis()}}),
     )
@@ -4415,6 +4415,30 @@ mod tests {
             workbook.sheet_names(),
             &["by经理".to_string(), "by项目".to_string()]
         );
+        let raw = root.join("result_data.csv");
+        assert!(raw.is_file());
+        assert_eq!(result["rawRows"], 2);
+        assert_eq!(result["outputPaths"].as_array().unwrap().len(), 2);
+        assert!(fs::read(&raw).unwrap().starts_with(&[0xEF, 0xBB, 0xBF]));
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn ts_export_requires_a_user_selected_output_path() {
+        let root = temp_dir("ts-output-required");
+        let input = root.join("timesheet.csv");
+        fs::write(
+            &input,
+            "COE Manager,Employee Name,Engagement Name,Transaction Cycle Date,Hours\nM1,Alice,P1,2026-01,2.5\n",
+        )
+        .unwrap();
+        let err = export_ts(
+            json!({"inputPath":input,"pivotMode":"dual_default","filters":[]}),
+            &|_, _, _, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "TS_OUTPUT_REQUIRED");
+        assert!(err.user_message.contains("保存路径"));
         let _ = fs::remove_dir_all(root);
     }
     #[test]

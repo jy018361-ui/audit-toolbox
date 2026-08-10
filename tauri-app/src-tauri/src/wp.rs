@@ -2195,6 +2195,11 @@ fn write_split_workbook(
     hidden_template.set_name("_WP_TEMPLATE");
     hidden_template.set_state(SheetStateValues::Hidden);
     restore_template_text(&mut hidden_template, metadata, false);
+    for column in ["F", "G", "H", "I"] {
+        hidden_template
+            .get_column_dimension_mut(column)
+            .set_width(8.66666666666667);
+    }
     book.add_sheet(hidden_template)
         .map_err(|error| WpError(error.to_string()))?;
     if let Some(parent) = output_path.parent() {
@@ -2237,6 +2242,28 @@ fn clear_and_fill_source(
     }
     if !styled {
         // 裸表沿用 Excel/openpyxl 新建工作表的页边距，别留 umya 的全 0。
+        // openpyxl 的新表还会把已 append 的空格写成 Normal 样式，并使用
+        // Excel 默认列宽 8.43；两项都按旧版中间产物复刻。
+        let normal = sheet.get_style("A1").clone();
+        for (row_index, row) in rows.iter().enumerate() {
+            for (column_index, value) in row.iter().enumerate() {
+                if value.is_empty() {
+                    sheet.set_style(
+                        (column_index as u32 + 1, row_index as u32 + 2),
+                        normal.clone(),
+                    );
+                    sheet
+                        .get_style_mut((column_index as u32 + 1, row_index as u32 + 2))
+                        .alignment_mut()
+                        .set_vertical(VerticalAlignmentValues::Center);
+                }
+            }
+        }
+        for column in 1..=headers.len() as u32 {
+            sheet
+                .get_column_dimension_mut(&column_name(column))
+                .set_width(8.43);
+        }
         sheet
             .get_page_margins_mut()
             .set_left(0.75)

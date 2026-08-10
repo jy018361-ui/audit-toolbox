@@ -1,9 +1,17 @@
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import Workbook
 
 import format_wp_workbook as formatter
-from generate_wp_project_workbook import collect_service_orders
+from generate_wp_project_workbook import (
+    DEFAULT_SER_CONFIG,
+    collect_service_orders,
+    fill_service_sheet,
+    find_section_list_file,
+    find_service_order_file,
+)
 
 
 SHUFFLED_HEADERS = [
@@ -49,6 +57,34 @@ def add_source_sheet(workbook, title):
 
 
 class HeaderBasedSourceReadingTests(unittest.TestCase):
+    def test_input_files_are_found_by_keywords(self):
+        folder = Path("test-inputs")
+        service_order = folder / "8月导出的 WP 服务单 v2.xlsx"
+        section_list = folder / "Client Section LIST final.xlsx"
+        files = [
+            service_order,
+            section_list,
+            folder / "FY27+WP服务单汇总.xlsx",
+            folder / "~$临时 WP服务单.xlsx",
+        ]
+        with patch.object(Path, "iterdir", return_value=iter(files)), patch.object(
+            Path, "is_file", return_value=True
+        ):
+            self.assertEqual(find_service_order_file(folder), service_order)
+        with patch.object(Path, "iterdir", return_value=iter(files)), patch.object(
+            Path, "is_file", return_value=True
+        ):
+            self.assertEqual(find_section_list_file(folder), section_list)
+
+    def test_multiple_keyword_matches_are_rejected(self):
+        folder = Path("test-inputs")
+        files = [folder / "WP服务单 A.xlsx", folder / "WP服务单 B.xlsx"]
+        with patch.object(Path, "iterdir", return_value=iter(files)), patch.object(
+            Path, "is_file", return_value=True
+        ):
+            with self.assertRaisesRegex(ValueError, "多个可能的WP服务单"):
+                find_service_order_file(folder)
+
     def test_collect_service_orders_uses_headers_not_positions(self):
         workbook = Workbook()
         workbook.remove(workbook.active)
@@ -83,6 +119,37 @@ class HeaderBasedSourceReadingTests(unittest.TestCase):
         self.assertEqual(index["F8"].value, "fic.user")
         self.assertEqual(index["H8"].value, 123.45)
         self.assertEqual(index["D8"].value, "TEST-WP-001")
+
+    def test_service_sheet_shows_ser_roles_and_rate_headers(self):
+        workbook = Workbook()
+        service = workbook.active
+        record = {
+            "related_order": "TEST-ORDER-001",
+            "service_number": "TEST-WP-001",
+            "source_sheet": "AUD2026",
+            "source_row": 2,
+            "service_type": "Audit/Working paper",
+            "task_count": 1,
+            "audit_eic": "audit.eic",
+            "report_date": "2027-03-31",
+            "pre_start": "2026-10-01",
+            "pre_end": "2026-10-31",
+            "final_start": "2027-01-01",
+            "final_end": "2027-04-30",
+        }
+
+        fill_service_sheet(service, record, {}, DEFAULT_SER_CONFIG)
+
+        self.assertEqual(service["D57"].value, "bill rate")
+        self.assertEqual(service["E57"].value, "上浮5%")
+        self.assertEqual(
+            [service.cell(row, 1).value for row in range(58, 62)],
+            ["Manager", "Senior", "Staff", "Intern"],
+        )
+        self.assertEqual(
+            [service.cell(row, 2).value for row in range(58, 62)],
+            [0.08, 0.25, 0.58, 0.09],
+        )
 
 
 if __name__ == "__main__":

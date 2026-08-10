@@ -3,7 +3,11 @@
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
-from FY27_WP服务单生成工具 import ensure_template, run_generation
+from FY27_WP服务单生成工具 import run_generation
+from generate_wp_project_workbook import (
+    find_section_list_file,
+    find_service_order_file,
+)
 
 
 def main(parent=None):
@@ -15,18 +19,18 @@ def main(parent=None):
         return
 
     folder = Path(selected)
-    required = ("FY27 WP服务单.xlsx", "FY27 section list.xlsx")
-    missing = [name for name in required if not (folder / name).exists()]
-    if missing:
+    try:
+        service_order_path = find_service_order_file(folder)
+        section_list_path = find_section_list_file(folder)
+    except Exception as exc:
         messagebox.showerror(
             "FY27 WP服务单生成工具",
-            "缺少以下文件：\n\n" + "\n".join(missing),
+            str(exc),
             parent=parent,
         )
         return
 
     try:
-        ensure_template(folder)
         result = run_generation(folder)
     except Exception as exc:
         messagebox.showerror(
@@ -43,6 +47,8 @@ def main(parent=None):
             f"AUD2026：{result['aud2026_rows']}个\n"
             f"IPO：{result['ipo_rows']}个\n"
             f"IPO archive：{result['ipo_archive_rows']}个\n\n"
+            f"WP服务单：{service_order_path.name}\n"
+            f"Section List：{section_list_path.name}\n\n"
             "输出文件：FY27+WP服务单汇总.xlsx"
         ),
         parent=parent,

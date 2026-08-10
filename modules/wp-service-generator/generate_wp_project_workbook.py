@@ -20,14 +20,76 @@ source_value = workbook_formatter.source_value
 
 
 SER_CONFIG_FILENAME = "SER配置.xlsx"
+INPUT_FILE_SUFFIX = ".xlsx"
+IGNORED_INPUT_MARKERS = ("汇总", "自动拆分")
 DEFAULT_SER_RULES = (
     {"role": "Manager", "hours_mix": 0.08, "ser_rate": 2733.0},
     {"role": "Senior", "hours_mix": 0.25, "ser_rate": 1199.0},
     {"role": "Staff", "hours_mix": 0.58, "ser_rate": 683.0},
     {"role": "Intern", "hours_mix": 0.09, "ser_rate": 173.0},
 )
+
+
+def normalized_file_stem(path: Path) -> str:
+    return re.sub(r"\s+", "", path.stem).casefold()
+
+
+def find_named_input(folder: Path, keyword: str, label: str) -> Path:
+    candidates = []
+    for path in folder.iterdir():
+        if not path.is_file() or path.suffix.casefold() != INPUT_FILE_SUFFIX:
+            continue
+        if path.name.startswith("~$"):
+            continue
+        normalized = normalized_file_stem(path)
+        if keyword not in normalized:
+            continue
+        if any(marker in path.stem for marker in IGNORED_INPUT_MARKERS):
+            continue
+        candidates.append(path)
+
+    candidates.sort(key=lambda path: path.name.casefold())
+    if not candidates:
+        raise FileNotFoundError(
+            f"找不到{label}：请放入文件名包含“{label}”的 Excel 文件。"
+        )
+    if len(candidates) > 1:
+        names = "\n".join(f"- {path.name}" for path in candidates)
+        raise ValueError(f"找到多个可能的{label}，请只保留一个：\n{names}")
+    return candidates[0]
+
+
+def find_service_order_file(folder: Path) -> Path:
+    candidates = []
+    for path in folder.iterdir():
+        if not path.is_file() or path.suffix.casefold() != INPUT_FILE_SUFFIX:
+            continue
+        if path.name.startswith("~$"):
+            continue
+        normalized = normalized_file_stem(path)
+        if "wp服务单" not in normalized or "sectionlist" in normalized:
+            continue
+        if "+wp服务单" in normalized:
+            continue
+        if any(marker in path.stem for marker in IGNORED_INPUT_MARKERS):
+            continue
+        candidates.append(path)
+
+    candidates.sort(key=lambda path: path.name.casefold())
+    if not candidates:
+        raise FileNotFoundError(
+            "找不到WP服务单：请放入文件名包含“WP服务单”的 Excel 文件。"
+        )
+    if len(candidates) > 1:
+        names = "\n".join(f"- {path.name}" for path in candidates)
+        raise ValueError(f"找到多个可能的WP服务单，请只保留一个：\n{names}")
+    return candidates[0]
+
+
+def find_section_list_file(folder: Path) -> Path:
+    return find_named_input(folder, "sectionlist", "Section List")
 DEFAULT_SER_CONFIG = tuple(
-    (rule["hours_mix"], rule["ser_rate"]) for rule in DEFAULT_SER_RULES
+    (rule["role"], rule["hours_mix"], rule["ser_rate"]) for rule in DEFAULT_SER_RULES
 )
 
 
@@ -54,7 +116,8 @@ def load_ser_config(folder: Path):
                 mix /= 100
             if mix <= 0 or rate <= 0:
                 raise ValueError(f"{SER_CONFIG_FILENAME}第{row}行比例和费率必须大于0。")
-            rows.append((mix, rate))
+            role = DEFAULT_SER_RULES[len(rows)]["role"]
+            rows.append((role, mix, rate))
     finally:
         wb.close()
 
@@ -62,7 +125,7 @@ def load_ser_config(folder: Path):
         raise ValueError(
             f"{SER_CONFIG_FILENAME}必须有4行配置，顺序为Manager、Senior、Staff、Intern。"
         )
-    if abs(sum(mix for mix, _ in rows) - 1) > 0.0001:
+    if abs(sum(mix for _, mix, _ in rows) - 1) > 0.0001:
         raise ValueError(f"{SER_CONFIG_FILENAME}的Hours占比合计必须为100%。")
     return tuple(rows)
 
@@ -599,13 +662,13 @@ def fill_service_sheet(ws, record, section_details, ser_config):
     ws["A55"] = "SER测算（计算上浮5%）"
     ws["A56"] = "Total Outlook Hours"
     ws["B56"] = "=G37"
-    headers = (None, "Hours占比", "分配Hours", None, None, "SER金额")
+    headers = (None, "Hours占比", "分配Hours", "bill rate", "上浮5%", "SER金额")
     for col, header in enumerate(headers, 1):
         ws.cell(57, col).value = header
 
-    for offset, (mix, rate) in enumerate(ser_config):
+    for offset, (role, mix, rate) in enumerate(ser_config):
         row = 58 + offset
-        ws.cell(row, 1).value = None
+        ws.cell(row, 1).value = role
         ws.cell(row, 2).value = mix
         ws.cell(row, 3).value = f"=B{row}*$G$37"
         ws.cell(row, 4).value = rate
@@ -617,7 +680,13 @@ def fill_service_sheet(ws, record, section_details, ser_config):
     ws["F62"] = "=SUM(F58:F61)"
 
 
-def generate(input_path: Path, output_path: Path):
+def generate(
+    input_path: Path,
+    output_path: Path,
+    section_list_path: Path | None = None,
+):
+    if section_list_path is None:
+        section_list_path = find_section_list_file(input_path.parent)
     ser_config = load_ser_config(input_path.parent)
     split_result = {}
     with warnings.catch_warnings():
@@ -638,9 +707,7 @@ def generate(input_path: Path, output_path: Path):
     records = collect_service_orders(wb)
     if not records:
         raise ValueError("AUD2026 和 IPO 中没有找到 WP服务单编号。")
-    section_result = load_section_details(
-        input_path.parent / "FY27 section list.xlsx", records
-    )
+    section_result = load_section_details(section_list_path, records)
     section_details = section_result["details"]
     unmatched_section_orders = [
         record["service_number"]
@@ -765,13 +832,14 @@ def validate_formula_logic(output_path: Path, section_details=None, ser_config=N
                 for row in range(58, 62)
             )
             and all(ws.cell(row, 5).value == f"=D{row}*1.05" for row in range(58, 62))
-            and all(ws.cell(row, 1).value is None for row in range(58, 62))
-            and ws["D57"].value is None
-            and ws["E57"].value is None
+            and [ws.cell(row, 1).value for row in range(58, 62)]
+            == [role for role, _, _ in ser_config]
+            and ws["D57"].value == "bill rate"
+            and ws["E57"].value == "上浮5%"
             and [ws.cell(row, 2).value for row in range(58, 62)]
-            == [mix for mix, _ in ser_config]
+            == [mix for _, mix, _ in ser_config]
             and [ws.cell(row, 4).value for row in range(58, 62)]
-            == [rate for _, rate in ser_config]
+            == [rate for _, _, rate in ser_config]
         )
         if not expected:
             errors.append(ws.title)

@@ -8,11 +8,22 @@ WP 服务单和 Section List 均按表头名称识别字段，输入列顺序可
 
 ## 使用方式
 
-准备同一文件夹中的两个系统导出文件：
+准备同一文件夹中的两个系统导出文件。文件名不要求固定，只需符合关键词规则：
+
+| 输入文件 | 文件名要求 | 可用示例 |
+|---|---|---|
+| WP服务单 | `.xlsx` 文件名包含 `WP服务单`，空格不影响识别 | `8月导出 WP 服务单 v2.xlsx` |
+| Section List | `.xlsx` 文件名包含 `section list`，不区分大小写和空格 | `项目组 SECTION LIST final.xlsx` |
+
+每类输入文件只能有一个。程序会忽略 `~$` 开头的 Excel 临时文件、服务方案模板、自动拆分文件和汇总结果。如果同类文件匹配到多个，程序会列出候选文件并停止，避免读错文件。
+
+推荐目录示例：
 
 ```text
-FY27 WP服务单.xlsx
-FY27 section list.xlsx
+工作文件夹/
+├─ FY27_WP服务单生成工具.exe
+├─ 8月导出 WP 服务单 v2.xlsx
+└─ 项目组 SECTION LIST final.xlsx
 ```
 
 ### audit-toolbox
@@ -24,7 +35,7 @@ def main(parent=None):
     ...
 ```
 
-启动工具后选择包含上述两个文件的文件夹。程序会自动复制脱敏模板，并生成：
+启动工具后选择包含上述两个文件的文件夹。程序会自动还原脱敏模板，并生成：
 
 ```text
 FY27+WP服务单_自动拆分.xlsx
@@ -40,11 +51,13 @@ python main.py
 
 ### Jupyter Notebook
 
-打开 `生成项目组展示版_Jupyter.ipynb`，将 Notebook、程序文件、`templates` 文件夹和两个系统导出文件放在同一文件夹，依次运行两个代码单元格。输出文件名为 `FY27+WP服务单汇总.xlsx`。
+打开 `生成项目组展示版_Jupyter.ipynb`，将 Notebook、Python 程序文件、`templates` 文件夹和两个系统导出文件放在同一文件夹，依次运行两个代码单元格。Python/Jupyter 版需要保留 `templates/FY27+WP服务单.xlsx.b64`；程序会在首次运行时自动还原模板。输出文件名为 `FY27+WP服务单汇总.xlsx`。
 
 ### 本地独立 EXE
 
-本地构建的 `FY27_WP服务单生成工具.exe` 与两个系统导出文件放在同一文件夹即可双击运行。EXE 不要求安装 Python；公共仓库仅发布可审阅的 Python 源码和脱敏模板资源。
+将 `FY27_WP服务单生成工具.exe` 与两个系统导出文件放在同一文件夹即可双击运行。EXE 已内置脱敏模板，不需要另放 `templates` 文件夹，也不要求安装 Python。仓库同时保留可审阅的 Python 源码、脱敏模板文本资源和独立 EXE。
+
+程序每次运行会更新同一目录下的 `FY27+WP服务单_自动拆分.xlsx` 和 `FY27+WP服务单汇总.xlsx`；如需保留旧结果，请先改名或移到其他目录。
 
 ## 内置 SER 规则与可选配置
 
@@ -63,11 +76,11 @@ python main.py
 |---|---|---|
 | 级别 | Hours占比 | SER Rate |
 
-`Hours占比` 可以输入百分比或小数，四行合计必须为 100%；`SER Rate` 必须为正数。生成表会保留比例、费率和公式，但隐藏职级及费率名称。
+`Hours占比` 可以输入百分比或小数，四行合计必须为 100%；`SER Rate` 必须为正数。生成表会展示 Manager、Senior、Staff、Intern 四个级别，并保留比例、bill rate、上浮 5% 和 SER 金额公式。
 
-## FY27 WP服务单.xlsx
+## WP服务单输入文件
 
-默认读取工作表 `业务`。建议直接使用系统完整导出，不要改列名。
+必须包含名称为 `业务` 的工作表，表头位于第一行。字段列顺序可以任意调整，也可以保留其他无关字段；建议直接使用系统完整导出，不要改列名。
 
 ### 必要字段
 
@@ -85,9 +98,11 @@ python main.py
 
 `Client Name`、`Engagement Code`、`WP FIC*`、`相关订单`、`Service Type`、`WP EIC`、`Audit EIC`、`Audit Report Date`、`底稿任务数量`、`项目状态`、`排班状态`。
 
-## FY27 section list.xlsx
+建议字段缺失时，生成结果中的对应信息会留空，不影响核心生成流程。
 
-默认读取第一个工作表。字段列位置可以变化，但字段名需保留。
+## Section List 输入文件
+
+读取文件中的第一个工作表，表头位于第一行。字段列顺序可以任意调整，也可以保留其他无关字段，但必要字段名需保留。
 
 ### 必要字段
 
@@ -98,6 +113,8 @@ python main.py
 | Entity数量（下单必填） | 计算标准参考工时 |
 | 底稿数量 | 记录底稿数量 |
 | 预算调整 | 计算调整工时 |
+
+`Entity数量` 使用前缀识别，因此 `Entity数量（下单必填）` 等带说明文字的表头可以正常使用。
 
 建议保留 `Outlook Hours`、`标准参考工时`、`Engagement Code`、`项目名称`、`WP EIC`、`WP FIC`、四个 Booking Period 字段和`相关订单`。`Section系统编号`不是必要字段。
 

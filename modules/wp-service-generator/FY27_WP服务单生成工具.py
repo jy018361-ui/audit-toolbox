@@ -7,15 +7,14 @@ import shutil
 import sys
 from pathlib import Path
 
-from generate_wp_project_workbook import generate
+from generate_wp_project_workbook import (
+    find_section_list_file,
+    find_service_order_file,
+    generate,
+)
 
 
 APP_TITLE = "FY27 WP服务单生成工具"
-REQUIRED_FILES = (
-    "FY27 WP服务单.xlsx",
-    "FY27 section list.xlsx",
-)
-
 MB_OK = 0x00000000
 MB_YESNO = 0x00000004
 MB_ICONERROR = 0x00000010
@@ -58,27 +57,32 @@ def ensure_template(folder: Path) -> Path:
 
 
 def run_generation(folder: Path):
+    service_order_path = find_service_order_file(folder)
+    section_list_path = find_section_list_file(folder)
     ensure_template(folder)
     return generate(
-        folder / "FY27 WP服务单.xlsx",
+        service_order_path,
         folder / "FY27+WP服务单汇总.xlsx",
+        section_list_path,
     )
 
 
 def interactive_main():
     folder = application_folder()
-    missing = [name for name in REQUIRED_FILES if not (folder / name).exists()]
-    if missing:
+    try:
+        service_order_path = find_service_order_file(folder)
+        section_list_path = find_section_list_file(folder)
+    except Exception as exc:
         message_box(
-            "缺少以下文件：\n\n"
-            + "\n".join(missing)
-            + "\n\n请将文件放在EXE所在文件夹后重试。",
+            str(exc) + "\n\n请将文件放在EXE所在文件夹后重试。",
             MB_OK | MB_ICONERROR,
         )
         return
 
     answer = message_box(
-        "已找到WP服务单和Section List。\n\n"
+        "已找到输入文件：\n\n"
+        f"WP服务单：{service_order_path.name}\n"
+        f"Section List：{section_list_path.name}\n\n"
         "点击“是”开始生成，通常需要10至30秒。",
         MB_YESNO | MB_ICONQUESTION,
     )

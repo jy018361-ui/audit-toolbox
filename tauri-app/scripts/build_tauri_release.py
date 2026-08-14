@@ -17,7 +17,7 @@ LEGACY_ROOT = ROOT.parent
 BUILD = ROOT / "build"
 DIST = ROOT / "dist"
 TAURI_TARGET = BUILD / "tauri-cargo-target"
-VERSION = "2.0.0-alpha.15"
+VERSION = "2.0.0-alpha.16"
 BUILD_ENV = os.environ.copy()
 
 
@@ -90,12 +90,22 @@ def build_desktop(npm: str, cargo: str, *, reuse_dependencies: bool = False) -> 
     source = TAURI_TARGET / "release" / "audit-toolbox.exe"
     if not source.is_file():
         raise RuntimeError(f"Tauri 构建后未找到 {source}")
+    installers = sorted((TAURI_TARGET / "release" / "bundle" / "nsis").glob("*-setup.exe"))
+    if not installers:
+        raise RuntimeError("Tauri 构建后未找到 NSIS 安装包。请确认 bundle.targets=nsis。")
     DIST.mkdir(parents=True, exist_ok=True)
-    target = DIST / f"E点通工具箱-v{VERSION}-win-x64.exe"
-    shutil.copy2(source, target)
-    digest = hashlib.sha256(target.read_bytes()).hexdigest()
-    target.with_suffix(target.suffix + ".sha256").write_text(f"{digest}  {target.name}\n", encoding="utf-8")
-    return target
+    runtime_target = DIST / f"E点通工具箱-v{VERSION}-runtime-win-x64.exe"
+    installer_target = DIST / f"E点通工具箱-v{VERSION}-win-x64-setup.exe"
+    shutil.copy2(source, runtime_target)
+    shutil.copy2(installers[0], installer_target)
+    signature = installers[0].with_suffix(installers[0].suffix + ".sig")
+    if signature.is_file():
+        shutil.copy2(signature, installer_target.with_suffix(installer_target.suffix + ".sig"))
+    digest = hashlib.sha256(installer_target.read_bytes()).hexdigest()
+    installer_target.with_suffix(installer_target.suffix + ".sha256").write_text(
+        f"{digest}  {installer_target.name}\n", encoding="utf-8"
+    )
+    return runtime_target
 
 
 def worker_events(result: subprocess.CompletedProcess[str]) -> list[dict]:
@@ -388,7 +398,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     if args.smoke_only:
-        target = DIST / f"E点通工具箱-v{VERSION}-win-x64.exe"
+        target = DIST / f"E点通工具箱-v{VERSION}-runtime-win-x64.exe"
         if not target.is_file():
             raise RuntimeError(f"未找到待验收程序：{target}")
         smoke_test_desktop(target)
@@ -406,7 +416,8 @@ def main() -> int:
         test_all(python, npm, cargo, legacy_regression=args.legacy_regression)
     target = build_desktop(npm, cargo, reuse_dependencies=args.reuse_dependencies)
     smoke_test_desktop(target)
-    print(f"\n构建完成: {target}\n体积: {target.stat().st_size / 1024 / 1024:.1f} MiB")
+    installer = DIST / f"E点通工具箱-v{VERSION}-win-x64-setup.exe"
+    print(f"\n构建完成: {installer}\n体积: {installer.stat().st_size / 1024 / 1024:.1f} MiB")
     return 0
 
 

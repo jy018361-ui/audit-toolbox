@@ -427,6 +427,9 @@ fn is_supported_job_method(method: &str) -> bool {
             | "fa.export"
             | "roll_forward.process"
             | "roll_forward.process_companies"
+            | "fx.fetch_rates"
+            | "fx.preview"
+            | "fx.export"
     )
 }
 
@@ -516,6 +519,8 @@ pub fn worker_main() -> i32 {
         crate::fa::run_job(&request.method, request.params, &progress, cancel, &pause)
     } else if request.method.starts_with("roll_forward.") {
         crate::roll_forward::run_job(&request.method, request.params, &progress, cancel, &pause)
+    } else if request.method.starts_with("fx.") {
+        crate::fx::run_job(&request.method, request.params, &progress, cancel, &pause)
     } else {
         crate::tabular::run_job(&request.method, request.params, &progress, cancel, &pause)
     };
@@ -607,6 +612,8 @@ fn tool_id(method: &str) -> &'static str {
         "fa_list"
     } else if method.starts_with("roll_forward.") {
         "audit_roll_forward"
+    } else if method.starts_with("fx.") {
+        "fx_audit"
     } else {
         "Excel_Merger"
     }

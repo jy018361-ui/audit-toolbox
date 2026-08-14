@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   BootstrapSchema,
   JobEventSchema,
@@ -147,4 +148,26 @@ export async function listenFileDrops(
   return listen<{ paths?: string[] }>("tauri://drag-drop", (event) =>
     callback(event.payload.paths ?? []),
   );
+}
+
+export type PositionedFileDrop = {
+  paths: string[];
+  /** Logical CSS-pixel coordinates relative to the webview. */
+  x: number;
+  y: number;
+};
+
+export async function listenPositionedFileDrops(
+  callback: (drop: PositionedFileDrop) => void,
+): Promise<UnlistenFn> {
+  if (!inTauri()) return () => undefined;
+  const scale = window.devicePixelRatio || 1;
+  return getCurrentWebview().onDragDropEvent((event) => {
+    if (event.payload.type !== "drop") return;
+    callback({
+      paths: event.payload.paths,
+      x: event.payload.position.x / scale,
+      y: event.payload.position.y / scale,
+    });
+  });
 }

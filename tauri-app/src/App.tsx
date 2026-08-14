@@ -35,7 +35,11 @@ import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
 import { ResultView } from "@/components/ResultView";
 import { RollForwardPage } from "./RollForwardPage";
+import { FxAuditPage } from "./FxAuditPage";
 import { applyReadableForegrounds } from "./theme";
+import { getVersion } from "@tauri-apps/api/app";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 
 const NAV = [
   { to: "/", label: "工作台" },
@@ -161,6 +165,7 @@ const TOOL_BADGE: Record<string, string> = {
   audipick: "AP",
   audit_roll_forward: "RF",
   wp_service_generator: "WP",
+  fx_audit: "汇",
 };
 
 export default function App() {
@@ -199,7 +204,7 @@ export default function App() {
         </nav>
         <div className="tool-nav">
           {[
-            { label: "审计工具", ids: ["fa_list", "kanzhang", "audipick", "audit_roll_forward"] },
+            { label: "审计工具", ids: ["fx_audit", "fa_list", "kanzhang", "audipick", "audit_roll_forward"] },
             { label: "效率工具", ids: ["Excel_Merger", "file_list_directory"] },
             { label: "运营工具", ids: ["ts_manager", "confirmation_progress", "wp_service_generator"] },
           ].map((group) => {
@@ -456,6 +461,7 @@ function ToolPage({ catalog }: { catalog: ToolManifest[] }) {
     return <FileListDirectoryPage tool={tool} />;
   if (tool.id === "kanzhang") return <KanzhangParityPage tool={tool} />;
   if (tool.id === "audit_roll_forward") return <RollForwardPage tool={tool} />;
+  if (tool.id === "fx_audit") return <FxAuditPage tool={tool} />;
   async function run(action: ActionDefinition) {
     setError("");
     setResult(undefined);
@@ -757,6 +763,11 @@ function Settings() {
     text: string;
   }>();
   const [backupPath, setBackupPath] = useState("");
+  const [appVersion, setAppVersion] = useState("读取中…");
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+  const [updateStatus, setUpdateStatus] = useState("");
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
   // 全局主题（data-theme 切换，默认深绿）
   const [theme, setTheme] = useState(
     () => document.documentElement.dataset.theme ?? "green-dark",
@@ -786,6 +797,44 @@ function Settings() {
     applyTheme(saved);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  useEffect(() => {
+    void getVersion().then(setAppVersion).catch(() => setAppVersion("未知"));
+  }, []);
+  async function checkForUpdates() {
+    setCheckingUpdate(true);
+    setUpdateStatus("正在检查 GitHub Release…");
+    try {
+      const update = await check();
+      setAvailableUpdate(update ?? null);
+      setUpdateStatus(
+        update
+          ? `发现新版本 ${update.version}。更新说明：${update.body || "暂无说明。"}`
+          : "当前已经是最新版本。",
+      );
+    } catch (e) {
+      setAvailableUpdate(null);
+      setUpdateStatus(`检查更新失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }
+  async function installUpdate() {
+    if (!availableUpdate) return;
+    setInstallingUpdate(true);
+    setUpdateStatus("正在下载并安装更新，请不要关闭工具箱…");
+    try {
+      await availableUpdate.downloadAndInstall((event) => {
+        if (event.event === "Progress") {
+          setUpdateStatus(`正在下载更新：${Math.round(event.data.chunkLength / 1024)} KB`);
+        }
+      });
+      setUpdateStatus("更新安装完成，正在重启工具箱…");
+      await relaunch();
+    } catch (e) {
+      setInstallingUpdate(false);
+      setUpdateStatus(`安装更新失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
   useEffect(() => {
     void settingsGet()
       .then((value) => {
@@ -882,6 +931,29 @@ function Settings() {
         detail="LLM 与 OCR 密钥由 Windows 凭据管理器保存，不写入 SQLite 或日志。"
       />
       <div className="settings-grid">
+        <section className="list-card">
+          <h2>软件更新</h2>
+          <p>当前版本：v{appVersion}</p>
+          <div className="actions">
+            <button
+              className="secondary"
+              disabled={checkingUpdate || installingUpdate}
+              onClick={() => void checkForUpdates()}
+            >
+              {checkingUpdate ? "检查中…" : "检查更新"}
+            </button>
+            {availableUpdate && (
+              <button
+                className="primary"
+                disabled={installingUpdate}
+                onClick={() => void installUpdate()}
+              >
+                {installingUpdate ? "安装中…" : `更新到 v${availableUpdate.version}`}
+              </button>
+            )}
+          </div>
+          {updateStatus && <div className="settings-test-result">{updateStatus}</div>}
+        </section>
         <section className="list-card">
           <h2>界面主题</h2>
           <div className="theme-picker">

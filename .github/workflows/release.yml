@@ -1,0 +1,72 @@
+name: Build and publish E点通工具箱
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tauri-app/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install frontend dependencies
+        working-directory: tauri-app
+        run: npm ci
+
+      - name: Sync version from Git tag
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $root = Join-Path $env:GITHUB_WORKSPACE 'tauri-app'
+          $package = Join-Path $root 'package.json'
+          $cargo = Join-Path $root 'src-tauri/Cargo.toml'
+          $config = Join-Path $root 'src-tauri/tauri.conf.json'
+          $script = Join-Path $root 'scripts/build_tauri_release.py'
+          $json = Get-Content $package -Raw | ConvertFrom-Json
+          $json.version = $version
+          $json | ConvertTo-Json -Depth 20 | Set-Content $package -Encoding utf8
+          $cargoText = Get-Content $cargo -Raw -Encoding utf8
+          $cargoText = [regex]::Replace($cargoText, '(?m)^version = "[^"]+"', "version = `"$version`"", 1)
+          Set-Content $cargo $cargoText -Encoding utf8
+          $configText = Get-Content $config -Raw -Encoding utf8
+          $configText = [regex]::Replace($configText, '"version": "[^"]+"', "`"version`": `"$version`"", 1)
+          Set-Content $config $configText -Encoding utf8
+          $scriptText = Get-Content $script -Raw -Encoding utf8
+          $scriptText = [regex]::Replace($scriptText, '(?m)^VERSION = "[^"]+"', "VERSION = `"$version`"", 1)
+          Set-Content $script $scriptText -Encoding utf8
+
+      - name: Build and publish NSIS updater artifacts
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: tauri-app
+          tagName: ${{ github.ref_name }}
+          releaseName: E点通工具箱 ${{ github.ref_name }}
+          releaseBody: 请查看本次 Release 的更新说明。
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+          args: --target x86_64-pc-windows-msvc

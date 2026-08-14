@@ -7,6 +7,10 @@ export type ToolDefinition = { intro: string; fields: FieldDefinition[]; actions
 
 const excel = ["xlsx", "xls", "xlsm", "csv"];
 export const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
+  fx_audit: {
+    intro: "使用官方人民币汇率中间价重算已实现及未实现汇兑损益，并生成可追踪审计底稿。",
+    fields: [], actions: [{label:"生成Excel底稿",method:"fx.export",mode:"job",tone:"primary"}]
+  },
   file_list_directory: {
     intro: "扫描文件夹层级，生成包含完整路径和可点击超链接的 Excel 清单。",
     fields: [

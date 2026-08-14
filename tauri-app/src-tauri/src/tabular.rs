@@ -1367,7 +1367,7 @@ fn ledger_id_indexes(headers: &[String], mapping: &LedgerMapping) -> Vec<usize> 
         .collect()
 }
 
-fn detect_loss_transfer_ids(
+pub(crate) fn detect_loss_transfer_ids(
     rows: &[Vec<String>],
     id_indexes: &[usize],
     account_indexes: &[usize],
@@ -2401,6 +2401,21 @@ fn load_table(path: &Path, sheet: Option<&str>, header_row: usize) -> Result<Tab
         encoding: None,
         delimiter: None,
     })
+}
+
+/// Narrow bridge used by the FX tool for formats whose decoding already lives
+/// here (notably parquet). FX keeps its own header detection and strict parser.
+pub(crate) fn fx_load_table_value(
+    path: &Path,
+    sheet: Option<&str>,
+    header_row: usize,
+) -> Result<Value, AppError> {
+    let table = load_table(path, sheet, header_row)?;
+    Ok(json!({
+        "path": table.path, "sheet": table.sheet, "sheets": table.sheets,
+        "headers": table.headers, "rows": table.rows,
+        "encoding": table.encoding, "delimiter": table.delimiter,
+    }))
 }
 
 /// Load the stable, full-column TS parquet when it is valid for the exact
@@ -3711,7 +3726,7 @@ fn apply_filters(table: &Table, filters: &[FilterSpec]) -> Vec<Vec<String>> {
 fn row_matches_accounts(row: &[String], indexes: &[usize], values: &HashSet<String>) -> bool {
     !values.is_empty() && values.contains(&normalize_account(&joined_account(row, indexes)))
 }
-fn voucher_key(row: &[String], indexes: &[usize]) -> String {
+pub(crate) fn voucher_key(row: &[String], indexes: &[usize]) -> String {
     indexes
         .iter()
         .map(|i| row.get(*i).map(String::as_str).unwrap_or(""))

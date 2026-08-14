@@ -326,6 +326,56 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
     Ok(value)
 }
 
+pub(crate) fn fx_mapping_llm_call(
+    method: &str,
+    params: &Value,
+    settings: &Value,
+) -> Result<Value, AppError> {
+    let llm = settings
+        .get("llm")
+        .ok_or_else(|| error("LLM_NOT_CONFIGURED", "请先在工具箱设置中配置 LLM。", None))?;
+    if !llm.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(error("LLM_DISABLED", "工具箱中的 LLM 尚未启用。", None));
+    }
+    let task = if method.ends_with("je_mapping") {
+        "fx_je_mapping"
+    } else {
+        "fx_tb_mapping"
+    };
+    let prompt = format!(
+        r#"你是汇兑损益审计工具的字段映射复核器，任务名为 {task}。只输出严格 JSON：{{"task":"{task}","changes":[{{"role":string,"currentColumn":string,"suggestedColumn":string,"confidence":number,"reason":string,"scheme":string}}]}}。只能使用输入 headers 中真实存在的列；不得编造角色。必须区分期初/期末、原币/本位币、余额/发生额、借方/贷方；entity 是记账主体而非交易对手方。金额方案仅可为 signed、direction、debit_credit。不要计算金额、汇率或业务分类。"#
+    );
+    let payload = params.get("payload").unwrap_or(params);
+    let content = request_llm(llm, &prompt, &payload.to_string(), None)?;
+    let value = parse_json_content(&content);
+    if !value.is_object() {
+        return Err(error(
+            "LLM_RESPONSE_INVALID",
+            "LLM 没有返回有效的结构化结果。",
+            None,
+        ));
+    }
+    Ok(value)
+}
+
+pub(crate) fn fx_source_llm_call(params: &Value, settings: &Value) -> Result<Value, AppError> {
+    let llm = settings
+        .get("llm")
+        .ok_or_else(|| error("LLM_NOT_CONFIGURED", "请先在工具箱设置中配置 LLM。", None))?;
+    if !llm.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(error("LLM_DISABLED", "工具箱中的 LLM 尚未启用。", None));
+    }
+    let prompt = "你是审计数据文件分类器。根据表头、样例和脚本评分判断文件属于JE凭证明细还是TB科目余额表。JE通常逐行包含凭证号、记账日期、科目及发生额；TB通常按科目包含期初、期末、累计或YTD余额。只输出严格JSON：{\"kind\":\"je\"|\"tb\",\"confidence\":number,\"reason\":string}。不得识别为其他类型，不得计算金额。";
+    let payload = params.get("payload").unwrap_or(params);
+    let content = request_llm(llm, prompt, &payload.to_string(), None)?;
+    let value = parse_json_content(&content);
+    let valid = value.get("kind").and_then(Value::as_str).is_some_and(|kind| matches!(kind, "je" | "tb"));
+    if !valid {
+        return Err(error("LLM_RESPONSE_INVALID", "LLM 没有返回有效的JE/TB分类结果。", None));
+    }
+    Ok(value)
+}
+
 fn kanzhang_mapping_prompt() -> &'static str {
     "你是会计凭证字段映射复核助手。输出严格 JSON：{scheme:\"A\"|\"B\"|\"\",schemeReason:string,fills:[{role:string,suggestedColumn:string,confidence:number,reason:string}],reviews:[{role:string,currentColumn:string,suggestedColumn:string,confidence:number,reason:string}]}。角色仅可为 id/account/entity/date/summary/amount/direction/debit/credit。entity 专指凭证所属的核算主体/记账主体（例如公司代码、公司名称、账套公司、法人实体、business unit、company code），用于区分这笔凭证记在哪个主体；entity 绝不是交易对手方、往来单位、客户、供应商、客商、收付款对象或对方户名。即使交易对手方列包含公司名称或企业名称，也不得映射为 entity；没有明确的核算主体列时应让 entity 保持空缺，不得用对手方字段凑数。方案A=金额列（可加方向）；方案B=借方和贷方两列。只可使用输入 headers 中的原始列名。"
 }

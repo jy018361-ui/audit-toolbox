@@ -1,4 +1,5 @@
 [
+  {"id":"fx_audit","name":"汇兑损益审计测算","description":"已实现与未实现汇兑损益重算、央行汇率及TB勾稽","route":"/tools/fx_audit","version":"1.0","capabilities":["inspect_je","inspect_tb","map","rates","realized","unrealized","reconcile","export"],"migrationStatus":"ready"},
   {"id":"fa_list","name":"FA List 匹配工具","description":"固定资产底稿双表匹配、透视与导出","route":"/tools/fa_list","version":"2.0","capabilities":["inspect","match","preview","export"],"migrationStatus":"ready"},
   {"id":"kanzhang","name":"看账小工具","description":"凭证导入、科目筛选、透视与导出","route":"/tools/kanzhang","version":"2.0","capabilities":["inspect","map","filter","pivot","export"],"migrationStatus":"ready"},
   {"id":"ts_manager","name":"TS 管理","description":"工时扫描、筛选、透视与导出","route":"/tools/ts_manager","version":"2.0","capabilities":["inspect","cache","filter","pivot","export"],"migrationStatus":"ready"},

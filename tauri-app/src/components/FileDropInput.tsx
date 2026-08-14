@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import type { Ref } from "react";
 
 export type FileDropInputProps = {
   /** 已选文件路径 */
@@ -13,6 +14,8 @@ export type FileDropInputProps = {
   highlight?: boolean;
   /** 清除已选 */
   onClear?: () => void;
+  /** DOM ref used by multi-slot pages to hit-test the native drop coordinates. */
+  containerRef?: Ref<HTMLDivElement>;
 };
 
 /**
@@ -31,9 +34,10 @@ export function FileDropInput({
   onDragStateChange,
   highlight,
   onClear,
+  containerRef,
 }: FileDropInputProps) {
   return (
-    <div className={cn("file-drop-input", highlight && "drag-hover")}>
+    <div ref={containerRef} className={cn("file-drop-input", highlight && "drag-hover")}>
       {value ? (
         <div className="file-drop-slot filled">
           <span className="file-drop-slot-label">{placeholder ?? "已选文件"}</span>

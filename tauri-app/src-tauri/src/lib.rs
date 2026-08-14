@@ -5,6 +5,7 @@ mod excel_com;
 mod excel_merger;
 mod fa;
 mod file_list;
+mod fx;
 mod roll_forward;
 mod storage;
 mod tabular;
@@ -147,6 +148,20 @@ async fn engine_call(
             .unwrap_or("");
         let path = params.get("path").and_then(Value::as_str).unwrap_or("");
         storage.audipick_document_import(project_id, Path::new(path))
+    } else if method == "fx.classify_source_llm" {
+        let settings = storage.settings_get()?;
+        tauri::async_runtime::spawn_blocking(move || {
+            audipick::fx_source_llm_call(&params, &settings)
+        })
+        .await
+        .map_err(|e| {
+            AppError::new(
+                "LLM_TASK_FAILED",
+                "LLM 文件分类异常结束。",
+                true,
+                Some(e.to_string()),
+            )
+        })?
     } else if matches!(
         method.as_str(),
         "audipick.config_status"
@@ -238,6 +253,34 @@ async fn engine_call(
                 Some(e.to_string()),
             )
         })?
+    } else if matches!(
+        method.as_str(),
+        "fx.review_je_mapping" | "fx.review_tb_mapping"
+    ) {
+        let settings = storage.settings_get()?;
+        tauri::async_runtime::spawn_blocking(move || {
+            audipick::fx_mapping_llm_call(&method, &params, &settings)
+        })
+        .await
+        .map_err(|e| {
+            AppError::new(
+                "LLM_TASK_FAILED",
+                "LLM 字段复核异常结束。",
+                true,
+                Some(e.to_string()),
+            )
+        })?
+    } else if method.starts_with("fx.") {
+        tauri::async_runtime::spawn_blocking(move || fx::call(&method, params))
+            .await
+            .map_err(|e| {
+                AppError::new(
+                    "RUST_TASK_FAILED",
+                    "汇兑损益审计任务异常结束。",
+                    true,
+                    Some(e.to_string()),
+                )
+            })?
     } else if method.starts_with("ts.") || method.starts_with("kanzhang.") {
         tauri::async_runtime::spawn_blocking(move || tabular::call(&method, params))
             .await
@@ -305,7 +348,7 @@ async fn job_start(
         }
         return excel_merger.start(&method, params);
     }
-    if method.starts_with("kanzhang.") {
+    if method.starts_with("kanzhang.") || method.starts_with("fx.") {
         if let Value::Object(ref mut map) = params {
             map.insert("__settings".into(), storage.settings_get()?);
         }
@@ -332,6 +375,7 @@ async fn job_start(
         || method == "excel_merger.merge"
         || method.starts_with("ts.")
         || method.starts_with("kanzhang.")
+        || matches!(method.as_str(), "fx.fetch_rates" | "fx.preview" | "fx.export")
     {
         return excel_merger.start(&method, params);
     }
@@ -681,7 +725,9 @@ pub fn run() {
     let engine_allowed = allowed.clone();
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init());
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build());
     // Development previews may run beside the user's installed release. Only
     // production builds enforce the single-instance hand-off.
     #[cfg(not(debug_assertions))]

@@ -63,7 +63,7 @@ jobs:
           Write-Host 'Updater signing private key is configured.'
 
       - name: Build and publish NSIS updater artifacts
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -78,6 +78,7 @@ jobs:
           releaseBody: 请查看本次 Release 的更新说明。
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
           updaterJsonPreferNsis: true
           tauriScript: npm run tauri --

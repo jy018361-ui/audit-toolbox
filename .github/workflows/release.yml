@@ -54,6 +54,16 @@ jobs:
           $scriptText = [regex]::Replace($scriptText, '(?m)^VERSION = "[^"]+"', "VERSION = `"$version`"", 1)
           Set-Content $script $scriptText -Encoding utf8
 
+      - name: Verify updater signing secret
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw '缺少仓库级 Actions Secret：TAURI_SIGNING_PRIVATE_KEY。请在 Settings → Secrets and variables → Actions → Repository secrets 中添加。'
+          }
+          Write-Host 'Updater signing private key is configured.'
+
       - name: Build and publish NSIS updater artifacts
         uses: tauri-apps/tauri-action@v0
         env:

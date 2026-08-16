@@ -8,7 +8,9 @@
 在 GitHub 仓库 `jy018361-ui/audit-toolbox` 的 Settings → Secrets and variables → Actions 中新增：
 
 - `TAURI_SIGNING_PRIVATE_KEY`：私钥文件的完整文本内容
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：本次密钥密码；当前密钥为空密码时填写空值即可
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：仅在私钥设置了密码时新增；当前私钥是空密码，不需要创建这个 Secret
+
+注意：必须添加在当前仓库的 **Repository secrets**，名称要与上面完全一致；不要添加到 Actions variables 或其他仓库。
 
 ## 发布版本
 
@@ -27,10 +29,10 @@
 
 ## 本地构建
 
-本地构建前设置签名私钥路径：
+本地构建前把私钥文件内容放入环境变量：
 
 ```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY_PATH = "$env:USERPROFILE\.tauri\audit-toolbox.key"
+$env:TAURI_SIGNING_PRIVATE_KEY = Get-Content "$env:USERPROFILE\.tauri\audit-toolbox.key" -Raw
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
 python scripts\build_tauri_release.py --reuse-dependencies --skip-tests
 ```

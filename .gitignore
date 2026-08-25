@@ -59,5 +59,8 @@ tauri-app/design-demos/
 tauri-app/tmp/
 *.bak-*
 
+# 客户及本地汇兑损益测试资料（严禁上传）
+/汇兑损益测试资料/
+
 # Local agent/editor settings
 **/.claude/settings.local.json

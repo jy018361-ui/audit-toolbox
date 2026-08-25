@@ -2,21 +2,25 @@
 //!
 //! Calculations, validation and rate normalization intentionally live here:
 //! neither the UI nor the LLM is trusted for arithmetic or classification.
+use crate::ledger_mapping;
 use crate::{AppError, excel_merger::PauseCheckpoint, tabular};
 use calamine::{Data, Reader, open_workbook_auto};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Utc};
 use directories::ProjectDirs;
 use reqwest::blocking::Client;
-use rust_xlsxwriter::{Format, FormatAlign, Formula, Workbook, Worksheet, XlsxError};
+use rust_xlsxwriter::{
+    DataValidation, Format, FormatAlign, Formula, Workbook, Worksheet, XlsxError,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
+    io::Read,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration as StdDuration,
@@ -24,34 +28,122 @@ use std::{
 
 const SAFE_URL: &str = "https://www.safe.gov.cn/AppStructured/hlw/RMBQuery.do";
 const RATE_SOURCE: &str = "国家外汇管理局人民币汇率中间价查询（数据由中国外汇交易中心公布）";
+static FX_PREVIEW_CACHE: OnceLock<Mutex<Option<(String, Value)>>> = OnceLock::new();
+static FX_TABLE_CACHE: OnceLock<Mutex<HashMap<String, Arc<FxTable>>>> = OnceLock::new();
+static FX_INSPECTION_CACHE: OnceLock<Mutex<HashMap<String, Arc<FxTable>>>> = OnceLock::new();
+static FX_RATE_INDEX: OnceLock<Mutex<Option<(String, HashMap<(String, String), RatePoint>)>>> =
+    OnceLock::new();
 
 fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppError {
     AppError::new(code, message, false, detail)
 }
 
+fn preview_cache_key(params: &Value) -> String {
+    let mut normalized = params.clone();
+    if let Some(object) = normalized.as_object_mut() {
+        // These fields are outputs or export-only destinations.  They do not
+        // change the accounting calculation represented by a preview.
+        for key in [
+            "outputPath",
+            "previewToken",
+            "rateSnapshot",
+            "accountTranslations",
+        ] {
+            object.remove(key);
+        }
+    }
+    let bytes = serde_json::to_vec(&normalized).unwrap_or_default();
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn cached_preview(token: &str) -> Option<Value> {
+    FX_PREVIEW_CACHE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|cache| {
+            cache
+                .as_ref()
+                .filter(|(cached_token, _)| cached_token == token)
+                .map(|(_, result)| result.clone())
+        })
+}
+
+fn store_preview(token: String, result: Value) {
+    if let Ok(mut cache) = FX_PREVIEW_CACHE.get_or_init(|| Mutex::new(None)).lock() {
+        *cache = Some((token, result));
+    }
+}
+
+fn fx_table_cache_key(source: &SourceSpec, path: &Path) -> Option<String> {
+    let metadata = fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(format!(
+        "{}|{}|{}|{}|{}|{}",
+        path.to_string_lossy(),
+        source.sheet,
+        source.header_row,
+        source.header_depth,
+        metadata.len(),
+        modified.as_nanos()
+    ))
+}
+
+fn cached_fx_table(key: &str) -> Option<Arc<FxTable>> {
+    FX_TABLE_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(key).cloned())
+}
+
+fn store_fx_table(key: Option<String>, table: &Arc<FxTable>) {
+    let Some(key) = key else { return };
+    if let Ok(mut cache) = FX_TABLE_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        if cache.len() >= 8 && !cache.contains_key(&key) {
+            cache.clear();
+        }
+        cache.insert(key, Arc::clone(table));
+    }
+}
+
+// SourceSpec/FxTable/load_fx_table/classify_source are shared with the deposit
+// interest tool so both tools detect sheets, header rows and JE-vs-TB kind with
+// exactly the same rules; only the role dictionaries differ per tool.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SourceSpec {
-    input_path: String,
+pub(crate) struct SourceSpec {
+    pub(crate) input_path: String,
     #[serde(default)]
-    sheet: String,
+    pub(crate) sheet: String,
     #[serde(default)]
-    header_row: usize,
+    pub(crate) header_row: usize,
     #[serde(default)]
-    header_depth: usize,
+    pub(crate) header_depth: usize,
 }
 
 #[derive(Clone, Debug)]
-struct FxTable {
-    path: PathBuf,
-    sheet: String,
-    sheets: Vec<String>,
-    header_row: usize,
-    header_depth: usize,
-    raw_headers: Vec<Vec<String>>,
-    headers: Vec<String>,
-    rows: Vec<Vec<String>>,
-    header_candidates: Vec<(usize, f64)>,
+pub(crate) struct FxTable {
+    pub(crate) path: PathBuf,
+    pub(crate) sheet: String,
+    pub(crate) sheets: Vec<String>,
+    pub(crate) header_row: usize,
+    pub(crate) header_depth: usize,
+    pub(crate) raw_headers: Vec<Vec<String>>,
+    pub(crate) headers: Vec<String>,
+    pub(crate) rows: Vec<Vec<String>>,
+    pub(crate) row_count: usize,
+    pub(crate) header_candidates: Vec<(usize, f64)>,
+    /// 大文件只解析了开头若干行。基于样本的推断（例如取最大日期当资产负债表日）
+    /// 在这种表上不成立，必须交给用户确认。
+    pub(crate) sampled: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -78,9 +170,13 @@ struct RateSnapshot {
 }
 
 #[derive(Clone, Debug)]
-struct RowRecord {
+/// 一行序时账／余额表，**借用**原表的表头与单元格，不复制。
+///
+/// 36 万行 × 46 列的 SAP 序时账，逐行克隆成 `HashMap<String,String>` 要上千万次
+/// 堆分配；而测算过程里 `records()` 会被反复调用好几遍。借用之后这部分开销归零。
+struct RowRecord<'a> {
     source_row: usize,
-    values: HashMap<String, String>,
+    values: HashMap<&'a str, &'a str>,
 }
 
 pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
@@ -89,9 +185,11 @@ pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
         "fx.inspect_je" => inspect(&params, "je"),
         "fx.inspect_tb" => inspect(&params, "tb"),
         "fx.validate_mapping" => validate_mapping(&params),
+        "fx.check_mapping_alignment" => check_mapping_alignment(&params),
         "fx.account_roles" => account_roles(&params),
         "fx.entities" => entities(&params),
         "fx.rate_status" => rate_status(&params),
+        "fx.import_classifications" => import_classifications(&params),
         _ => Err(error(
             "METHOD_NOT_FOUND",
             "未找到汇兑损益业务方法。",
@@ -100,48 +198,156 @@ pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
     }
 }
 
-fn classify_source(params: &Value) -> Result<Value, AppError> {
+fn import_classifications(params: &Value) -> Result<Value, AppError> {
+    let path = params
+        .get("inputPath")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| error("INVALID_PARAMS", "请选择包含分类调整页的Excel底稿。", None))?;
+    let mut book = open_workbook_auto(path).map_err(|e| {
+        error(
+            "SOURCE_READ_FAILED",
+            "无法读取分类调整底稿。",
+            Some(e.to_string()),
+        )
+    })?;
+    let range = book.worksheet_range("分类调整").map_err(|e| {
+        error(
+            "SOURCE_READ_FAILED",
+            "Excel中未找到“分类调整”页。",
+            Some(e.to_string()),
+        )
+    })?;
+    let mut rows = range.rows();
+    let headers = rows
+        .next()
+        .map(|row| row.iter().map(data_text).collect::<Vec<_>>())
+        .ok_or_else(|| error("SOURCE_READ_FAILED", "分类调整页为空。", None))?;
+    let column = |name: &str| {
+        headers
+            .iter()
+            .position(|header| header.trim() == name)
+            .ok_or_else(|| {
+                error(
+                    "SOURCE_READ_FAILED",
+                    format!("分类调整页缺少“{name}”列。"),
+                    None,
+                )
+            })
+    };
+    let classification_column = column("用户调整分类")?;
+    let voucher_ids_column = column("_凭证ID清单")?;
+    let mut classifications = Map::new();
+    for row in rows {
+        let classification = row
+            .get(classification_column)
+            .map(data_text)
+            .unwrap_or_default();
+        if !matches!(
+            classification.as_str(),
+            "已实现汇兑损益" | "未实现汇兑损益" | "待确认"
+        ) {
+            continue;
+        }
+        let ids = row
+            .get(voucher_ids_column)
+            .map(data_text)
+            .unwrap_or_default();
+        for id in ids.lines().map(str::trim).filter(|id| !id.is_empty()) {
+            classifications.insert(id.to_owned(), json!(classification));
+        }
+    }
+    Ok(json!({
+        "manualClassifications": classifications,
+        "voucherCount": classifications.len()
+    }))
+}
+
+pub(crate) fn classify_source(params: &Value) -> Result<Value, AppError> {
     let source: SourceSpec = serde_json::from_value(
-        params.get("source").cloned().unwrap_or_else(|| params.clone()),
-    ).map_err(|e| error("INVALID_PARAMS", "文件参数不完整。", Some(e.to_string())))?;
-    let table = load_fx_table(&source)?;
+        params
+            .get("source")
+            .cloned()
+            .unwrap_or_else(|| params.clone()),
+    )
+    .map_err(|e| error("INVALID_PARAMS", "文件参数不完整。", Some(e.to_string())))?;
+    let table = load_fx_inspection_table(&source)?;
     let je = suggest_mappings(&table, "je");
     let tb = suggest_mappings(&table, "tb");
     let mapped = |candidates: &BTreeMap<String, Vec<Candidate>>, role: &str, threshold: f64| {
-        candidates.get(role).and_then(|values| values.first()).is_some_and(|value| value.1 >= threshold)
+        candidates
+            .get(role)
+            .and_then(|values| values.first())
+            .is_some_and(|value| value.1 >= threshold)
     };
-    let normalized = table.headers.iter().map(|value| normalize_header(value)).collect::<Vec<_>>();
-    let header_has = |terms: &[&str]| normalized.iter().any(|header| {
-        terms.iter().any(|term| header.contains(&normalize_header(term)))
-    });
+    let normalized = table
+        .headers
+        .iter()
+        .map(|value| normalize_header(value))
+        .collect::<Vec<_>>();
+    let header_has = |terms: &[&str]| {
+        normalized.iter().any(|header| {
+            terms
+                .iter()
+                .any(|term| header.contains(&normalize_header(term)))
+        })
+    };
     let mut je_score = 0.0;
     let mut tb_score = 0.0;
     let mut je_reasons = Vec::new();
     let mut tb_reasons = Vec::new();
     for (role, weight, label) in [
-        ("id", 3.0, "凭证号"), ("date", 3.0, "记账日期"),
-        ("account", 2.0, "科目"), ("foreignAmount", 2.0, "原币发生额"),
+        ("id", 3.0, "凭证号"),
+        ("date", 3.0, "记账日期"),
+        ("accountCode", 2.0, "科目"),
+        ("foreignAmount", 2.0, "原币发生额"),
         ("functionalAmount", 2.0, "本位币发生额"),
     ] {
-        if mapped(&je, role, 0.55) { je_score += weight; je_reasons.push(label); }
+        if mapped(&je, role, 0.55) {
+            je_score += weight;
+            je_reasons.push(label);
+        }
     }
     if header_has(&["document type", "凭证类型", "voucher type"]) {
-        je_score += 1.0; je_reasons.push("凭证类型");
+        je_score += 1.0;
+        je_reasons.push("凭证类型");
     }
     for (role, weight, label) in [
-        ("account", 2.0, "科目"), ("entity", 1.0, "公司"),
-        ("currency", 1.0, "币种"), ("closingFunctionalAmount", 3.0, "期末/累计余额"),
+        ("accountCode", 2.0, "科目"),
+        ("entity", 1.0, "公司"),
+        ("currency", 1.0, "币种"),
+        ("closingFunctionalAmount", 3.0, "期末/累计余额"),
         ("openingFunctionalAmount", 2.0, "期初余额"),
     ] {
-        if mapped(&tb, role, 0.55) { tb_score += weight; tb_reasons.push(label); }
+        if mapped(&tb, role, 0.55) {
+            tb_score += weight;
+            tb_reasons.push(label);
+        }
     }
     if header_has(&["ytd", "trial balance", "期末余额", "年末余额", "科目余额"]) {
-        tb_score += 2.0; tb_reasons.push("余额表特征");
+        tb_score += 2.0;
+        tb_reasons.push("余额表特征");
     }
     let (kind, confidence, reasons) = if je_score >= tb_score {
-        ("je", if je_score == 0.0 { 0.0 } else { (je_score / 13.0_f64).min(1.0) }, je_reasons)
+        (
+            "je",
+            if je_score == 0.0 {
+                0.0
+            } else {
+                (je_score / 13.0_f64).min(1.0)
+            },
+            je_reasons,
+        )
     } else {
-        ("tb", if tb_score == 0.0 { 0.0 } else { (tb_score / 11.0_f64).min(1.0) }, tb_reasons)
+        (
+            "tb",
+            if tb_score == 0.0 {
+                0.0
+            } else {
+                (tb_score / 11.0_f64).min(1.0)
+            },
+            tb_reasons,
+        )
     };
     let needs_llm = je_score.max(tb_score) < 5.0 || (je_score - tb_score).abs() < 2.0;
     Ok(json!({
@@ -168,12 +374,77 @@ pub(crate) fn run_job(
             progress("rates", 2, 2, "汇率快照已锁定。");
             Ok(json!({"rateSnapshot": snapshot, "missing": snapshot.missing}))
         }
-        "fx.preview" => calculate(&params, progress, &cancel, pause),
+        "fx.preview" => {
+            let token = preview_cache_key(&params);
+            let mut result = calculate(&params, progress, &cancel, pause)?;
+            if let Some(object) = result.as_object_mut() {
+                object.insert("previewToken".into(), Value::String(token.clone()));
+            }
+            store_preview(token, result.clone());
+            // The full source/classification arrays are retained in the native cache for
+            // export. The preview UI consumes the compact controls and voucher detail, so
+            // avoid serializing tens of thousands of unused rows across the Tauri bridge.
+            if let Some(object) = result.as_object_mut() {
+                object.remove("jeDetail");
+                object.remove("classification");
+                object.remove("voucherDetail");
+                object.remove("realized");
+                object.remove("unrealized");
+                object.remove("unrealizedComparison");
+                object.remove("pendingReview");
+                object.remove("rateSnapshot");
+                object.insert("previewDataOmitted".into(), Value::Bool(true));
+            }
+            Ok(result)
+        }
         "fx.export" => {
-            let result = calculate(&params, progress, &cancel, pause)?;
+            let mut export_params = params;
+            if let Some(object) = export_params.as_object_mut() {
+                object.insert("translateTbAccountNames".into(), Value::Bool(true));
+            }
+            let expected_token = preview_cache_key(&export_params);
+            let supplied_token = export_params
+                .get("previewToken")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let mut result = if supplied_token == expected_token {
+                if let Some(result) = cached_preview(supplied_token) {
+                    progress("reuse_preview", 3, 5, "正在复用已完成的测算预览结果…");
+                    result
+                } else {
+                    progress(
+                        "calculate",
+                        1,
+                        5,
+                        "测算预览缓存已失效，正在重新执行汇兑损益测算…",
+                    );
+                    calculate(&export_params, progress, &cancel, pause)?
+                }
+            } else {
+                progress(
+                    "calculate",
+                    1,
+                    5,
+                    "数据或参数已发生变化，正在重新执行汇兑损益测算…",
+                );
+                calculate(&export_params, progress, &cancel, pause)?
+            };
+            checkpoint(&cancel, pause)?;
+            // 明细在测算阶段被跳过了（预览用不上），落表前补算。
+            if result
+                .get("jeDetail")
+                .and_then(Value::as_array)
+                .is_none_or(|all| all.is_empty())
+            {
+                progress("export", 3, 5, "正在整理JE完整明细…");
+                let detail = build_je_detail(&export_params)?;
+                if let Some(object) = result.as_object_mut() {
+                    object.insert("jeDetail".into(), Value::Array(detail));
+                }
+            }
             checkpoint(&cancel, pause)?;
             progress("export", 4, 5, "正在生成汇兑损益审计底稿…");
-            let output = export_workbook(&params, &result)?;
+            let output = export_workbook(&export_params, &result)?;
             progress("export", 5, 5, "审计底稿已生成。");
             Ok(json!({
                 "outputPaths": [output],
@@ -205,32 +476,132 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
             .unwrap_or_else(|| params.clone()),
     )
     .map_err(|e| error("INVALID_PARAMS", "文件参数不完整。", Some(e.to_string())))?;
-    let table = load_fx_table(&source)?;
-    let normalized_headers = table.headers.iter().map(|header| normalize_header(header)).collect::<Vec<_>>();
-    let has = |words: &[&str]| normalized_headers.iter().any(|header| words.iter().any(|word| header.contains(&normalize_header(word))));
-    if kind == "je" && has(&["期初余额借方", "期末余额借方", "本期发生借方"]) && !has(&["凭证号", "凭证号数", "凭证编号"]) {
-        return Err(error("SOURCE_KIND_MISMATCH", "该文件更像TB科目余额表，请拖放到TB区域。", Some(table.path.display().to_string())));
+    let table = load_fx_inspection_table(&source)?;
+    let normalized_headers = table
+        .headers
+        .iter()
+        .map(|header| normalize_header(header))
+        .collect::<Vec<_>>();
+    let has = |words: &[&str]| {
+        normalized_headers.iter().any(|header| {
+            words
+                .iter()
+                .any(|word| header.contains(&normalize_header(word)))
+        })
+    };
+    if kind == "je"
+        && has(&["期初余额借方", "期末余额借方", "本期发生借方"])
+        && !has(&["凭证号", "凭证号数", "凭证编号"])
+    {
+        return Err(error(
+            "SOURCE_KIND_MISMATCH",
+            "该文件更像TB科目余额表，请拖放到TB区域。",
+            Some(table.path.display().to_string()),
+        ));
     }
-    if kind == "tb" && has(&["凭证号", "凭证号数", "摘要"]) && !has(&["期初余额", "期末余额"]) {
-        return Err(error("SOURCE_KIND_MISMATCH", "该文件更像JE凭证明细，请拖放到JE区域。", Some(table.path.display().to_string())));
+    if kind == "tb" && has(&["凭证号", "凭证号数", "摘要"]) && !has(&["期初余额", "期末余额"])
+    {
+        return Err(error(
+            "SOURCE_KIND_MISMATCH",
+            "该文件更像JE凭证明细，请拖放到JE区域。",
+            Some(table.path.display().to_string()),
+        ));
     }
     let candidates = suggest_mappings(&table, kind);
-    let mapping = candidates.iter().filter_map(|(role, values)| {
-        if role == "account" {
-            let columns = values.iter().filter(|candidate| candidate.1 >= 0.85)
-                .map(|candidate| Value::String(candidate.0.clone())).collect::<Vec<_>>();
-            (!columns.is_empty()).then(|| (role.clone(), Value::Array(columns)))
-        } else {
-            values.first().filter(|candidate| candidate.1 >= 0.55)
-                .map(|candidate| (role.clone(), Value::String(candidate.0.clone())))
-        }
-    }).collect::<Map<_, _>>();
+    let mapping = candidates
+        .iter()
+        .filter_map(|(role, values)| {
+            // 可多列的角色（科目名称、凭证识别字段）收下所有高分列：
+            // Oracle 的凭证键要 Batch＋JE Name 两列组合，少一列就串号。
+            // auxiliary 同样多列——取数端 auxiliary_value 本来就按多列拼接，
+            // SAP 导出常把供应商、客户分成两列，限单列会把另一列丢在映射面板外。
+            // 它已收编进标准表并标为多列，不再需要在这里特判。
+            if ledger_mapping::role_of(kind, role).is_some_and(|r| r.multi) {
+                // 首选列按常规阈值收下——「凭证号码」这种靠包含命中的列
+                // 达不到 0.85，但它往往是唯一的候选，漏了就没凭证键了。
+                // 附加列才要求高置信度，避免把不相干的列一起卷进来。
+                let columns = values
+                    .iter()
+                    .enumerate()
+                    .filter(|(rank, candidate)| {
+                        candidate.1 >= if *rank == 0 { 0.55 } else { 0.85 }
+                    })
+                    .map(|(_, candidate)| Value::String(candidate.0.clone()))
+                    .collect::<Vec<_>>();
+                (!columns.is_empty()).then(|| (role.clone(), Value::Array(columns)))
+            } else {
+                values
+                    .first()
+                    .filter(|candidate| candidate.1 >= 0.55)
+                    .map(|candidate| (role.clone(), Value::String(candidate.0.clone())))
+            }
+        })
+        .collect::<Map<_, _>>();
+    // 币种列已经给出逐科目币种时，不需要再从文本里猜。
+    let mut mapping = mapping;
+    if kind == "tb" && mapping.contains_key("currency") {
+        mapping.remove("currencyText");
+    }
+    refine_layout(&table, kind, &mut mapping);
+    drop_column_conflicts(kind, &candidates, &mut mapping);
+    mark_account_name_as_currency_text(&table, kind, &mut mapping);
+    let foreign_currency_candidates = if kind == "tb" {
+        foreign_currency_columns(&table)
+            .into_iter()
+            .map(|(column, currencies)| {
+                let confidence = candidates
+                    .get("currency")
+                    .and_then(|values| values.iter().find(|candidate| candidate.0 == column))
+                    .map(|candidate| candidate.1)
+                    .unwrap_or(0.0);
+                json!({
+                    "column": column,
+                    "confidence": confidence,
+                    "foreignCurrencies": currencies.into_iter().collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let foreign_currency_needs_confirmation = foreign_currency_candidates.len() > 1;
+    // 币种列整列同值，说明它登记的是主体本位币而不是逐科目的交易币种
+    // （4800 的“货币”列整列 USD 就是这种）。把它回给前端当本位币预填值，
+    // 否则用户按默认 CNY 跑下去，全表科目都会被当成外币。
+    let uniform_currency = if kind == "tb" {
+        first_col(&mapping, "functionalCurrency")
+            .or_else(|| first_col(&mapping, "currency"))
+            .and_then(|column| table.headers.iter().position(|header| header == &column))
+            .and_then(|index| {
+                let values = table
+                    .rows
+                    .iter()
+                    .filter_map(|row| row.get(index))
+                    .map(|value| normalize_currency(value))
+                    .filter(|code| !code.is_empty())
+                    .collect::<BTreeSet<_>>();
+                (values.len() == 1)
+                    .then(|| values.into_iter().next().unwrap_or_default())
+                    .filter(|code| supported_currencies().contains(code.as_str()))
+            })
+    } else {
+        None
+    };
     let data_years = source_data_years(&table, kind, &mapping);
-    let suggested_balance_sheet_date = if kind == "je" {
-        first_col(&mapping, "date").and_then(|column| table.headers.iter().position(|header| header == &column))
-            .and_then(|index| table.rows.iter().filter_map(|row| row.get(index).and_then(|value| parse_date(value))).max())
+    let suggested_balance_sheet_date = if kind == "je" && !table.sampled {
+        first_col(&mapping, "date")
+            .and_then(|column| table.headers.iter().position(|header| header == &column))
+            .and_then(|index| {
+                table
+                    .rows
+                    .iter()
+                    .filter_map(|row| row.get(index).and_then(|value| parse_date(value)))
+                    .max()
+            })
             .map(|date| date.format("%Y-%m-%d").to_string())
-    } else { None };
+    } else {
+        None
+    };
     let close = table
         .header_candidates
         .get(1)
@@ -246,8 +617,13 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         },
         "rawHeaders": table.raw_headers, "headers": table.headers,
         "preview": table.rows.iter().take(8).collect::<Vec<_>>(),
-        "rowCount": table.rows.len(), "columnProfiles": column_profiles(&table),
+        "rowCount": table.row_count, "columnProfiles": column_profiles(&table),
         "mappingCandidates": candidate_json(&candidates), "suggestedMapping": mapping,
+        "formMatches": form_matches_json(kind, &mapping),
+        "foreignCurrencyCandidates": foreign_currency_candidates,
+        "foreignCurrencyNeedsConfirmation": foreign_currency_needs_confirmation,
+        "uniformCurrency": uniform_currency,
+        "sampledPreview": table.sampled,
         "entities": distinct_for_role(&table, &candidates, "entity"),
         "accounts": distinct_for_role(&table, &candidates, "account"),
         "currencies": distinct_for_role(&table, &candidates, "currency")
@@ -255,8 +631,27 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     }))
 }
 
-fn source_data_years(table: &FxTable, kind: &str, mapping: &Map<String, Value>) -> Vec<i32> {
-    let mut years = BTreeSet::new();
+/// 建议映射套进标准形态（TB 六型／JE 三型）的结果，按匹配度排序。
+/// 放进 inspect 输出，让映射面板在测算之前就能看到"这张表结构完整吗、缺哪列"，
+/// 不必等测算校验阶段才发现。
+fn form_matches_json(kind: &str, mapping: &Map<String, Value>) -> Value {
+    let mapped: HashSet<&str> = mapping
+        .keys()
+        .map(|key| ledger_mapping::migrate_role_name(kind, key))
+        .filter(|role| !role.is_empty())
+        .collect();
+    json!(ledger_mapping::match_forms(kind, &mapped)
+        .iter()
+        .map(|m| {
+            json!({
+                "form": m.form, "label": m.label, "complete": m.complete,
+                "missing": m.missing, "partialOptional": m.partial_optional,
+            })
+        })
+        .collect::<Vec<_>>())
+}
+
+fn source_data_years(table: &FxTable, kind: &str, mapping: &Map<String, Value>) -> Vec<i32> {    let mut years = BTreeSet::new();
     if kind == "je" {
         if let Some(column) = first_col(mapping, "date") {
             if let Some(index) = table.headers.iter().position(|header| header == &column) {
@@ -269,12 +664,16 @@ fn source_data_years(table: &FxTable, kind: &str, mapping: &Map<String, Value>) 
         }
     } else {
         for (index, header) in table.headers.iter().enumerate() {
-            if !normalize_header(header).contains("期间") { continue; }
+            if !normalize_header(header).contains("期间") {
+                continue;
+            }
             for value in table.rows.iter().filter_map(|row| row.get(index)) {
                 for token in value.split(|c: char| !c.is_ascii_digit()) {
                     if token.len() == 4 {
                         if let Ok(year) = token.parse::<i32>() {
-                            if (1900..=2200).contains(&year) { years.insert(year); }
+                            if (1900..=2200).contains(&year) {
+                                years.insert(year);
+                            }
                         }
                     }
                 }
@@ -284,7 +683,455 @@ fn source_data_years(table: &FxTable, kind: &str, mapping: &Map<String, Value>) 
     years.into_iter().collect()
 }
 
-fn load_fx_table(source: &SourceSpec) -> Result<FxTable, AppError> {
+fn xml_attribute(fragment: &str, name: &str) -> Option<String> {
+    let marker = format!("{name}=\"");
+    fragment
+        .split_once(&marker)
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(value, _)| xml_decode(value))
+}
+
+fn xml_decode(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+fn zip_text(path: &Path, entry: &str) -> Result<String, AppError> {
+    let file = fs::File::open(path).map_err(|e| {
+        error(
+            "WORKBOOK_READ_FAILED",
+            "无法打开工作簿。",
+            Some(e.to_string()),
+        )
+    })?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| {
+        error(
+            "WORKBOOK_READ_FAILED",
+            "工作簿压缩结构无效。",
+            Some(e.to_string()),
+        )
+    })?;
+    let mut item = archive.by_name(entry).map_err(|e| {
+        error(
+            "WORKBOOK_READ_FAILED",
+            format!("工作簿缺少 {entry}。"),
+            Some(e.to_string()),
+        )
+    })?;
+    let mut text = String::new();
+    item.read_to_string(&mut text).map_err(|e| {
+        error(
+            "WORKBOOK_READ_FAILED",
+            format!("无法读取 {entry}。"),
+            Some(e.to_string()),
+        )
+    })?;
+    Ok(text)
+}
+
+fn xlsx_shared_strings(path: &Path) -> Vec<String> {
+    let Ok(xml) = zip_text(path, "xl/sharedStrings.xml") else {
+        return Vec::new();
+    };
+    xml.split("<si>")
+        .skip(1)
+        .filter_map(|entry| entry.split_once("</si>").map(|(value, _)| value))
+        .map(|entry| {
+            entry
+                .split("<t")
+                .skip(1)
+                .filter_map(|run| run.split_once('>'))
+                .filter_map(|(_, text)| text.split_once("</t>").map(|(value, _)| value))
+                .map(xml_decode)
+                .collect::<String>()
+        })
+        .collect()
+}
+
+// 大文件走的是自己拆 XML 的轻量识别路径，它不像 calamine 那样懂单元格格式，
+// 于是真正的日期会以 45688 这样的序列号露出来，识别阶段既推不出资产负债表日，
+// 也会让日期列的自动打分失准。这里补上样式表解析，把日期格式的数字还原成日期。
+fn xlsx_builtin_format_is_date(id: usize) -> bool {
+    matches!(id, 14..=22 | 27..=36 | 45..=47 | 50..=58)
+}
+
+fn xlsx_date_styles(path: &Path) -> HashSet<usize> {
+    let Ok(xml) = zip_text(path, "xl/styles.xml") else {
+        return HashSet::new();
+    };
+    let mut date_formats = HashSet::new();
+    for fragment in xml.split("<numFmt ").skip(1) {
+        let (Some(id), Some(code)) = (
+            xml_attribute(fragment, "numFmtId").and_then(|value| value.parse::<usize>().ok()),
+            xml_attribute(fragment, "formatCode"),
+        ) else {
+            continue;
+        };
+        // 去掉方括号里的区域/颜色声明，再看是否含年月日时分标记。
+        let mut cleaned = String::new();
+        let mut skipping = false;
+        for character in xml_decode(&code).chars() {
+            match character {
+                '[' => skipping = true,
+                ']' => skipping = false,
+                value if !skipping => cleaned.push(value.to_ascii_lowercase()),
+                _ => {}
+            }
+        }
+        if cleaned.contains('y') || cleaned.contains('d') || cleaned.contains("mm") {
+            date_formats.insert(id);
+        }
+    }
+    let Some(section) = xml
+        .split_once("<cellXfs")
+        .and_then(|(_, rest)| rest.split_once("</cellXfs>"))
+        .map(|(value, _)| value)
+    else {
+        return HashSet::new();
+    };
+    section
+        .split("<xf ")
+        .skip(1)
+        .enumerate()
+        .filter_map(|(index, fragment)| {
+            let id = xml_attribute(fragment, "numFmtId")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            (xlsx_builtin_format_is_date(id) || date_formats.contains(&id)).then_some(index)
+        })
+        .collect()
+}
+
+fn xlsx_uses_1904_epoch(path: &Path) -> bool {
+    zip_text(path, "xl/workbook.xml").is_ok_and(|xml| {
+        xml.contains("date1904=\"1\"") || xml.contains("date1904=\"true\"")
+    })
+}
+
+fn excel_serial_to_text(serial: f64, epoch_1904: bool) -> Option<String> {
+    let base = if epoch_1904 {
+        NaiveDate::from_ymd_opt(1904, 1, 1)?
+    } else {
+        NaiveDate::from_ymd_opt(1899, 12, 30)?
+    };
+    let whole = serial.trunc();
+    // 1900 日期系统把不存在的 1900-02-29 也算作一天，序列号 60 之前要补回来。
+    let days = if !epoch_1904 && whole < 60.0 {
+        whole as i64 + 1
+    } else {
+        whole as i64
+    };
+    let seconds = ((serial - whole) * 86400.0).round() as i64;
+    base.checked_add_signed(Duration::days(days))?
+        .and_hms_opt(0, 0, 0)?
+        .checked_add_signed(Duration::seconds(seconds))
+        .map(|value| value.format("%Y-%m-%d %H:%M:%S").to_string())
+}
+
+fn xlsx_sheet_entries(path: &Path) -> Result<Vec<(String, String)>, AppError> {
+    let workbook = zip_text(path, "xl/workbook.xml")?;
+    let rels = zip_text(path, "xl/_rels/workbook.xml.rels")?;
+    let relationships = rels
+        .split("<Relationship ")
+        .skip(1)
+        .filter_map(|fragment| {
+            Some((
+                xml_attribute(fragment, "Id")?,
+                xml_attribute(fragment, "Target")?,
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    let sheets = workbook
+        .split("<sheet ")
+        .skip(1)
+        .filter_map(|fragment| {
+            let name = xml_attribute(fragment, "name")?;
+            let relation = xml_attribute(fragment, "r:id")?;
+            let target = relationships.get(&relation)?;
+            let entry = if let Some(value) = target.strip_prefix("/xl/") {
+                format!("xl/{value}")
+            } else if target.starts_with("xl/") {
+                target.clone()
+            } else {
+                format!("xl/{}", target.trim_start_matches('/'))
+            };
+            Some((name, entry))
+        })
+        .collect::<Vec<_>>();
+    if sheets.is_empty() {
+        return Err(error(
+            "WORKBOOK_READ_FAILED",
+            "工作簿中未找到可读取的Sheet。",
+            None,
+        ));
+    }
+    Ok(sheets)
+}
+
+fn xlsx_sheet_prefix(path: &Path, entry: &str, row_limit: usize) -> Result<String, AppError> {
+    let file = fs::File::open(path).map_err(|e| {
+        error(
+            "WORKBOOK_READ_FAILED",
+            "无法打开工作簿。",
+            Some(e.to_string()),
+        )
+    })?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| {
+        error(
+            "WORKBOOK_READ_FAILED",
+            "工作簿压缩结构无效。",
+            Some(e.to_string()),
+        )
+    })?;
+    let mut item = archive.by_name(entry).map_err(|e| {
+        error(
+            "WORKBOOK_READ_FAILED",
+            "无法读取工作表。",
+            Some(e.to_string()),
+        )
+    })?;
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = item.read(&mut buffer).map_err(|e| {
+            error(
+                "WORKBOOK_READ_FAILED",
+                "无法读取工作表数据。",
+                Some(e.to_string()),
+            )
+        })?;
+        if count == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+        if bytes.windows(6).filter(|value| *value == b"</row>").count() >= row_limit {
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn xlsx_column_index(reference: &str) -> Option<usize> {
+    let mut value = 0usize;
+    let mut found = false;
+    for character in reference
+        .chars()
+        .take_while(|value| value.is_ascii_alphabetic())
+    {
+        value = value * 26 + (character.to_ascii_uppercase() as usize - 'A' as usize + 1);
+        found = true;
+    }
+    found.then_some(value - 1)
+}
+
+fn xlsx_dimension(prefix: &str) -> (usize, usize) {
+    let Some(fragment) = prefix.split("<dimension ").nth(1) else {
+        return (0, 0);
+    };
+    let Some(reference) = xml_attribute(fragment, "ref") else {
+        return (0, 0);
+    };
+    let end = reference.split(':').next_back().unwrap_or(&reference);
+    let column = xlsx_column_index(end).map(|value| value + 1).unwrap_or(0);
+    let row = end
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect::<String>()
+        .parse::<usize>()
+        .unwrap_or(0);
+    (row, column)
+}
+
+fn xlsx_sample_rows(
+    prefix: &str,
+    shared: &[String],
+    dimension_width: usize,
+    date_styles: &HashSet<usize>,
+    epoch_1904: bool,
+) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    for fragment in prefix.split("<row ").skip(1) {
+        let Some((row_xml, _)) = fragment.split_once("</row>") else {
+            break;
+        };
+        let mut cells = Vec::<(usize, String)>::new();
+        for cell in row_xml.split("<c ").skip(1) {
+            let Some((cell_xml, _)) = cell.split_once("</c>") else {
+                continue;
+            };
+            let Some(reference) = xml_attribute(cell_xml, "r") else {
+                continue;
+            };
+            let Some(index) = xlsx_column_index(&reference) else {
+                continue;
+            };
+            let kind = xml_attribute(cell_xml, "t").unwrap_or_default();
+            let raw = cell_xml
+                .split_once("<v>")
+                .and_then(|(_, value)| value.split_once("</v>"))
+                .map(|(value, _)| value)
+                .or_else(|| {
+                    cell_xml
+                        .split("<t")
+                        .nth(1)
+                        .and_then(|value| value.split_once('>'))
+                        .and_then(|(_, value)| value.split_once("</t>"))
+                        .map(|(value, _)| value)
+                })
+                .unwrap_or("");
+            let styled_date = date_styles.contains(
+                &xml_attribute(cell_xml, "s")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(usize::MAX),
+            );
+            let value = if kind.is_empty() && styled_date {
+                raw.parse::<f64>()
+                    .ok()
+                    .and_then(|serial| excel_serial_to_text(serial, epoch_1904))
+                    .unwrap_or_else(|| xml_decode(raw))
+            } else if kind == "s" {
+                raw.parse::<usize>()
+                    .ok()
+                    .and_then(|value| shared.get(value))
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                xml_decode(raw)
+            };
+            cells.push((index, value));
+        }
+        let width =
+            dimension_width.max(cells.iter().map(|(index, _)| index + 1).max().unwrap_or(0));
+        let mut row = vec![String::new(); width];
+        for (index, value) in cells {
+            row[index] = value;
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+fn load_large_xlsx_inspection(source: &SourceSpec, path: &Path) -> Result<Arc<FxTable>, AppError> {
+    let sheets = xlsx_sheet_entries(path)?;
+    let shared = xlsx_shared_strings(path);
+    let date_styles = xlsx_date_styles(path);
+    let epoch_1904 = xlsx_uses_1904_epoch(path);
+    let selected = if source.sheet.trim().is_empty() {
+        None
+    } else {
+        sheets.iter().find(|(name, _)| name == &source.sheet)
+    };
+    let mut best: Option<(String, Vec<Vec<String>>, usize, f64)> = None;
+    for (name, entry) in selected
+        .into_iter()
+        .chain(sheets.iter())
+        .take(if selected.is_some() { 1 } else { sheets.len() })
+    {
+        let prefix = xlsx_sheet_prefix(path, entry, 256)?;
+        let (total_rows, width) = xlsx_dimension(&prefix);
+        let rows = xlsx_sample_rows(&prefix, &shared, width, &date_styles, epoch_1904);
+        if rows.is_empty() {
+            continue;
+        }
+        let score = (0..rows.len().min(30))
+            .map(|index| header_score(&rows, index))
+            .fold(0.0_f64, f64::max);
+        if best.as_ref().is_none_or(|current| score > current.3) {
+            best = Some((name.clone(), rows, total_rows, score));
+        }
+    }
+    let (sheet, all, total_rows, _) =
+        best.ok_or_else(|| error("SOURCE_EMPTY", "工作簿中没有可读取的数据Sheet。", None))?;
+    let mut scored = (0..all.len().min(30))
+        .map(|index| (index + 1, header_score(&all, index)))
+        .collect::<Vec<_>>();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let header_row = if source.header_row > 0 {
+        source.header_row
+    } else {
+        scored.first().map(|value| value.0).unwrap_or(1)
+    };
+    let h = header_row.saturating_sub(1);
+    let width = all.iter().map(Vec::len).max().unwrap_or(0);
+    let inferred_depth = if h + 1 < all.len()
+        && combined_semantic_score(&all[h], &all[h + 1]) > semantic_hits(&all[h]) + 2
+    {
+        2
+    } else {
+        1
+    };
+    let depth = if source.header_depth == 0 {
+        inferred_depth
+    } else {
+        source.header_depth.clamp(1, 2)
+    };
+    let raw_headers = all[h..(h + depth).min(all.len())]
+        .iter()
+        .map(|row| pad(row, width))
+        .collect::<Vec<_>>();
+    let headers = merge_headers(&raw_headers, width);
+    let rows = all[(h + depth).min(all.len())..]
+        .iter()
+        .filter(|row| row.iter().any(|value| !value.trim().is_empty()))
+        .map(|row| pad(row, width))
+        .collect::<Vec<_>>();
+    Ok(Arc::new(FxTable {
+        path: path.to_path_buf(),
+        sheet,
+        sheets: sheets.into_iter().map(|(name, _)| name).collect(),
+        header_row,
+        header_depth: depth,
+        raw_headers,
+        headers,
+        rows,
+        row_count: total_rows.saturating_sub(h + depth),
+        header_candidates: scored.into_iter().take(3).collect(),
+        sampled: true,
+    }))
+}
+
+fn load_fx_inspection_table(source: &SourceSpec) -> Result<Arc<FxTable>, AppError> {
+    let path = PathBuf::from(&source.input_path);
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let large_xlsx = matches!(extension.as_str(), "xlsx" | "xlsm")
+        && fs::metadata(&path).is_ok_and(|metadata| metadata.len() >= 8 * 1024 * 1024);
+    if !large_xlsx {
+        return load_fx_table(source);
+    }
+    let key = fx_table_cache_key(source, &path).map(|value| format!("inspection|{value}"));
+    if let Some(table) = key.as_ref().and_then(|value| {
+        FX_INSPECTION_CACHE
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(value).cloned())
+    }) {
+        return Ok(table);
+    }
+    let table = load_large_xlsx_inspection(source, &path)?;
+    if let (Some(key), Ok(mut cache)) = (
+        key,
+        FX_INSPECTION_CACHE
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock(),
+    ) {
+        if cache.len() >= 8 && !cache.contains_key(&key) {
+            cache.clear();
+        }
+        cache.insert(key, Arc::clone(&table));
+    }
+    Ok(table)
+}
+
+pub(crate) fn load_fx_table(source: &SourceSpec) -> Result<Arc<FxTable>, AppError> {
     let path = PathBuf::from(&source.input_path);
     if !path.is_file() {
         return Err(error(
@@ -292,6 +1139,10 @@ fn load_fx_table(source: &SourceSpec) -> Result<FxTable, AppError> {
             "找不到输入文件。",
             Some(source.input_path.clone()),
         ));
+    }
+    let cache_key = fx_table_cache_key(source, &path);
+    if let Some(table) = cache_key.as_deref().and_then(cached_fx_table) {
+        return Ok(table);
     }
     let ext = path
         .extension()
@@ -302,7 +1153,8 @@ fn load_fx_table(source: &SourceSpec) -> Result<FxTable, AppError> {
         let value = crate::tabular::fx_load_table_value(&path, None, 1)?;
         let headers = strings(value.get("headers"));
         let rows = string_rows(value.get("rows"));
-        return Ok(FxTable {
+        let row_count = rows.len();
+        let table = Arc::new(FxTable {
             path,
             sheet: "Parquet".into(),
             sheets: vec![],
@@ -311,8 +1163,12 @@ fn load_fx_table(source: &SourceSpec) -> Result<FxTable, AppError> {
             raw_headers: vec![headers.clone()],
             headers,
             rows,
+            row_count,
             header_candidates: vec![(1, 1.0)],
+            sampled: false,
         });
+        store_fx_table(cache_key, &table);
+        return Ok(table);
     }
     let (sheet, sheets, all) = if matches!(ext.as_str(), "csv" | "txt" | "tsv") {
         ("CSV".to_string(), vec![], read_text_rows(&path)?)
@@ -326,21 +1182,50 @@ fn load_fx_table(source: &SourceSpec) -> Result<FxTable, AppError> {
         })?;
         let sheets = book.sheet_names().to_vec();
         let (selected, all) = if !source.sheet.trim().is_empty() && sheets.contains(&source.sheet) {
-            let range = book.worksheet_range(&source.sheet).map_err(|e| error(
-                "WORKBOOK_READ_FAILED", "无法读取指定 Sheet。", Some(e.to_string())))?;
-            (source.sheet.clone(), range.rows().map(|r| r.iter().map(data_text).collect()).collect())
+            let range = book.worksheet_range(&source.sheet).map_err(|e| {
+                error(
+                    "WORKBOOK_READ_FAILED",
+                    "无法读取指定 Sheet。",
+                    Some(e.to_string()),
+                )
+            })?;
+            (
+                source.sheet.clone(),
+                range
+                    .rows()
+                    .map(|r| r.iter().map(data_text).collect())
+                    .collect(),
+            )
         } else {
             let mut best: Option<(String, Vec<Vec<String>>, f64)> = None;
             for name in &sheets {
-                let Ok(range) = book.worksheet_range(name) else { continue };
-                let values = range.rows().map(|r| r.iter().map(data_text).collect()).collect::<Vec<Vec<String>>>();
-                if values.iter().all(|row| row.iter().all(|value| value.trim().is_empty())) { continue; }
-                let header = (0..values.len().min(30)).map(|index| header_score(&values, index)).fold(0.0_f64, f64::max);
-                let populated = values.iter().filter(|row| row.iter().filter(|value| !value.trim().is_empty()).count() >= 2).count();
+                let Ok(range) = book.worksheet_range(name) else {
+                    continue;
+                };
+                let values = range
+                    .rows()
+                    .map(|r| r.iter().map(data_text).collect())
+                    .collect::<Vec<Vec<String>>>();
+                if values
+                    .iter()
+                    .all(|row| row.iter().all(|value| value.trim().is_empty()))
+                {
+                    continue;
+                }
+                let header = (0..values.len().min(30))
+                    .map(|index| header_score(&values, index))
+                    .fold(0.0_f64, f64::max);
+                let populated = values
+                    .iter()
+                    .filter(|row| row.iter().filter(|value| !value.trim().is_empty()).count() >= 2)
+                    .count();
                 let score = header + (populated.min(1000) as f64 / 1000.0) * 0.08;
-                if best.as_ref().is_none_or(|current| score > current.2) { best = Some((name.clone(), values, score)); }
+                if best.as_ref().is_none_or(|current| score > current.2) {
+                    best = Some((name.clone(), values, score));
+                }
             }
-            let (name, values, _) = best.ok_or_else(|| error("SOURCE_EMPTY", "工作簿中没有可读取的数据Sheet。", None))?;
+            let (name, values, _) =
+                best.ok_or_else(|| error("SOURCE_EMPTY", "工作簿中没有可读取的数据Sheet。", None))?;
             (name, values)
         };
         (selected, sheets, all)
@@ -383,8 +1268,9 @@ fn load_fx_table(source: &SourceSpec) -> Result<FxTable, AppError> {
         .iter()
         .filter(|r| r.iter().any(|v| !v.trim().is_empty()))
         .map(|r| pad(r, width))
-        .collect();
-    Ok(FxTable {
+        .collect::<Vec<_>>();
+    let row_count = rows.len();
+    let table = Arc::new(FxTable {
         path,
         sheet,
         sheets,
@@ -393,8 +1279,12 @@ fn load_fx_table(source: &SourceSpec) -> Result<FxTable, AppError> {
         raw_headers,
         headers,
         rows,
+        row_count,
         header_candidates: scored.into_iter().take(3).collect(),
-    })
+        sampled: false,
+    });
+    store_fx_table(cache_key, &table);
+    Ok(table)
 }
 
 fn read_text_rows(path: &Path) -> Result<Vec<Vec<String>>, AppError> {
@@ -451,7 +1341,10 @@ fn data_text(value: &Data) -> String {
         }
         Data::Int(v) => v.to_string(),
         Data::Bool(v) => v.to_string(),
-        Data::DateTime(v) => v.as_datetime().map(|date| date.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_else(|| v.to_string()),
+        Data::DateTime(v) => v
+            .as_datetime()
+            .map(|date| date.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| v.to_string()),
         Data::DateTimeIso(v) => v.clone(),
         Data::DurationIso(v) => v.clone(),
         Data::Error(v) => format!("{v:?}"),
@@ -478,7 +1371,7 @@ fn string_rows(v: Option<&Value>) -> Vec<Vec<String>> {
         .unwrap_or_default()
 }
 
-fn normalize_header(v: &str) -> String {
+pub(crate) fn normalize_header(v: &str) -> String {
     v.to_lowercase().replace(
         [
             ' ', '\n', '\r', '\t', '_', '-', '—', '/', '（', '）', '(', ')',
@@ -614,196 +1507,129 @@ fn merge_headers(raw: &[Vec<String>], width: usize) -> Vec<String> {
 
 type Candidate = (String, f64, Vec<String>, Vec<String>);
 
+/// 角色表来自统一内核，另加汇兑损益的专属角色。
+///
+/// 与旧版的两处实质差别：
+/// 1. **借贷方向只有一个 `direction`**，不再分原币/本位币——一条分录的借贷方向
+///    对两个口径必然相同，不存在原币记借方、本位币记贷方的情况；
+/// 2. TB 多了本年累计发生额与期初/期末方向列，覆盖实务里的六种余额表形态。
 fn roles(kind: &str) -> Vec<(&'static str, Vec<&'static str>, Vec<&'static str>)> {
-    if kind == "je" {
+    let mut out: Vec<(&'static str, Vec<&'static str>, Vec<&'static str>)> =
+        ledger_mapping::roles(kind)
+            .iter()
+            .map(|role| (role.name, role.aliases.to_vec(), role.conflicts.to_vec()))
+            .collect();
+    // 辅助核算只进余额键，影响 TB↔JE 勾稽的粒度；重估本身按科目＋币种做，
+    // 同一科目同一币种的余额拆成几个客户，乘的是同一个汇率，结果不变。
+    out.push((
+        "auxiliary",
         vec![
-            (
-                "id",
-                vec!["凭证号", "凭证号数", "凭证编号", "voucher", "documentno", "documentnumber", "belnr"],
-                vec!["行号"],
-            ),
-            (
-                "voucherType",
-                vec!["凭证类型", "凭证类别", "document type", "documenttype", "voucher type", "blart"],
-                vec![],
-            ),
-            (
-                "entity",
-                vec![
-                    "公司代码",
-                    "公司名称",
-                    "核算主体",
-                    "记账主体",
-                    "companycode",
-                    "bukrs",
-                ],
-                vec!["客户", "供应商", "对方", "currency"],
-            ),
-            (
-                "date",
-                vec!["日期", "记账日期", "过账日期", "凭证日期", "postingdate", "budat"],
-                vec!["期间"],
-            ),
-            (
-                "account",
-                vec!["科目编码", "科目名称", "总账科目", "g/l account", "glaccount", "account", "saknr"],
-                vec![],
-            ),
-            (
-                "currency",
-                vec!["交易币种", "原币币种", "币种", "document currency key", "documentcurrencykey", "currency", "waers"],
-                vec!["本位币", "companycodecurrency", "groupcurrency", "currencyvalue"],
-            ),
-            (
-                "summary",
-                vec!["摘要", "文本", "text", "description", "sgtxt"],
-                vec![],
-            ),
-            (
-                "auxiliary",
-                vec!["辅助核算", "客户", "供应商", "往来单位"],
-                vec![],
-            ),
-            (
-                "clearingId",
-                vec!["清账号", "核销号", "clearingdocument"],
-                vec![],
-            ),
-            (
-                "foreignAmount",
-                vec!["原币金额", "外币金额", "原币", "document currency value", "documentcurrencyvalue", "transactionamount"],
-                vec!["本位币"],
-            ),
-            (
-                "foreignDirection",
-                vec!["原币借贷方向", "外币借贷方向", "借贷方向", "方向"],
-                vec!["本位币"],
-            ),
-            (
-                "foreignDebit",
-                vec!["原币借方", "外币借方"],
-                vec!["贷方", "本位币"],
-            ),
-            (
-                "foreignCredit",
-                vec!["原币贷方", "外币贷方"],
-                vec!["借方", "本位币"],
-            ),
-            (
-                "functionalAmount",
-                vec!["本位币金额", "本币金额", "借正贷负", "company code currency value", "companycodecurrencyvalue", "localamount"],
-                vec!["原币", "外币"],
-            ),
-            (
-                "functionalDirection",
-                vec!["本位币借贷方向", "本币借贷方向"],
-                vec!["原币"],
-            ),
-            (
-                "functionalDebit",
-                vec!["本位币借方", "本币借方"],
-                vec!["贷方", "原币"],
-            ),
-            (
-                "functionalCredit",
-                vec!["本位币贷方", "本币贷方"],
-                vec!["借方", "原币"],
-            ),
-        ]
-    } else {
-        vec![
-            (
-                "entity",
-                vec!["公司代码", "公司名称", "核算主体", "company code", "companycode", "entity"],
-                vec!["客户", "供应商"],
-            ),
-            ("account", vec!["科目编码", "科目名称", "g/l account", "glaccount", "gl description", "gldescription", "account"], vec![]),
-            (
-                "currency",
-                vec!["币种", "原币币种", "currency"],
-                vec!["本位币"],
-            ),
-            (
-                "auxiliary",
-                vec!["辅助核算", "客户", "供应商", "明细账户"],
-                vec![],
-            ),
-            (
-                "functionalCurrency",
-                vec!["本位币", "功能货币", "functionalcurrency"],
-                vec!["金额"],
-            ),
-            (
-                "openingForeignAmount",
-                vec!["期初原币余额", "年初原币余额", "期初外币余额"],
-                vec!["期末", "本位币", "发生额"],
-            ),
-            (
-                "openingFunctionalAmount",
-                vec!["期初本位币余额", "年初本币余额", "期初本币余额"],
-                vec!["期末", "原币", "发生额"],
-            ),
-            (
-                "closingForeignAmount",
-                vec!["期末原币余额", "年末原币余额", "期末外币余额"],
-                vec!["期初", "本位币", "发生额"],
-            ),
-            (
-                "closingFunctionalAmount",
-                vec!["期末本位币余额", "年末本币余额", "期末本币余额", "ytd act (local curr)", "ytdactlocalcurr"],
-                vec!["期初", "原币", "发生额"],
-            ),
-            (
-                "openingForeignDebit",
-                vec!["期初原币借方余额"],
-                vec!["贷方", "期末", "本位币"],
-            ),
-            (
-                "openingForeignCredit",
-                vec!["期初原币贷方余额"],
-                vec!["借方", "期末", "本位币"],
-            ),
-            (
-                "openingFunctionalDebit",
-                vec!["期初余额借方", "期初本位币借方余额"],
-                vec!["贷方", "期末", "原币"],
-            ),
-            (
-                "openingFunctionalCredit",
-                vec!["期初余额贷方", "期初本位币贷方余额"],
-                vec!["借方", "期末", "原币"],
-            ),
-            (
-                "closingForeignDebit",
-                vec!["期末原币借方余额"],
-                vec!["贷方", "期初", "本位币"],
-            ),
-            (
-                "closingForeignCredit",
-                vec!["期末原币贷方余额"],
-                vec!["借方", "期初", "本位币"],
-            ),
-            (
-                "closingFunctionalDebit",
-                vec!["期末余额借方", "期末本位币借方余额"],
-                vec!["贷方", "期初", "原币"],
-            ),
-            (
-                "closingFunctionalCredit",
-                vec!["期末余额贷方", "期末本位币贷方余额"],
-                vec!["借方", "期初", "原币"],
-            ),
-            (
-                "periodFunctionalDebit",
-                vec!["本期发生借方", "本期借方发生额", "本期本位币借方发生额"],
-                vec!["贷方", "期初", "期末", "原币"],
-            ),
-            (
-                "periodFunctionalCredit",
-                vec!["本期发生贷方", "本期贷方发生额", "本期本位币贷方发生额"],
-                vec!["借方", "期初", "期末", "原币"],
-            ),
-        ]
+            "辅助核算", "辅助項", "辅助项", "往来单位", "往來單位", "客户", "客戶",
+            "供应商", "供應商", "银行账号", "counterparty",
+            "assignment", "profit center", "profitcenter",
+        ],
+        vec!["科目", "account", "金额", "amount"],
+    ));
+    out
+}
+
+/// 列名分不出「本年累计」与「本期发生」时，按金额量级重判：合计大的是本年累计。
+/// 本工具的候选打分带列画像加权，映射不是内核直接产出的，所以在成型之后再过一道。
+fn refine_layout(table: &FxTable, kind: &str, mapping: &mut Map<String, Value>) {
+    let current: Vec<(String, String)> = mapping
+        .iter()
+        .filter_map(|(role, value)| {
+            value.as_str().map(|column| (role.clone(), column.to_string()))
+        })
+        .collect();
+    for (role, column) in
+        ledger_mapping::recheck_cumulative(kind, &table.headers, &table.rows, &current)
+    {
+        match column {
+            Some(name) => {
+                mapping.insert(role.to_string(), Value::String(name));
+            }
+            None => {
+                mapping.remove(role);
+            }
+        }
+    }
+}
+
+/// 一列只承载一个语义：同一列被多个角色选中时，分数高的留下。
+///
+/// 可多列的角色（科目名称、凭证识别字段）逐列参与——被挤掉时只丢那一列，
+/// 丢光了才整个角色移除。
+fn drop_column_conflicts(
+    kind: &str,
+    candidates: &BTreeMap<String, Vec<Candidate>>,
+    mapping: &mut Map<String, Value>,
+) {
+    let score_of = |role: &str, column: &str| {
+        candidates
+            .get(role)
+            .and_then(|all| all.iter().find(|c| c.0 == column))
+            .map(|c| c.1)
+            .unwrap_or(0.0)
+    };
+    let mut picks: Vec<(String, String, f64)> = Vec::new();
+    for (role, value) in mapping.iter() {
+        match value {
+            Value::String(column) => {
+                picks.push((role.clone(), column.clone(), score_of(role, column)))
+            }
+            Value::Array(columns) => {
+                for column in columns.iter().filter_map(Value::as_str) {
+                    picks.push((role.clone(), column.to_string(), score_of(role, column)));
+                }
+            }
+            _ => {}
+        }
+    }
+    for (role, column) in ledger_mapping::conflicting_roles(kind, &picks) {
+        let drop_whole = match mapping.get_mut(&role) {
+            Some(Value::Array(columns)) => {
+                columns.retain(|x| x.as_str() != Some(column.as_str()));
+                columns.is_empty()
+            }
+            _ => true,
+        };
+        if drop_whole {
+            mapping.remove(&role);
+        }
+    }
+}
+
+/// 科目名称列同时就是币种线索列——两者可以重叠。
+///
+/// 很多余额表没有单独的文本列，账户币种就写在科目名称里（`银行存款-中行朝阳支行美元户`）。
+/// 取数时本来就会「先看币种线索列，没有就看科目名称」，但映射面板上不显示这层关系，
+/// 用户不知道币种是从哪认出来的。这里在科目名称**确实能抽出币种**时把它一并标上，
+/// 让这条线索在界面上看得见。抽不出币种就不标，免得凭空多一个空映射。
+fn mark_account_name_as_currency_text(table: &FxTable, kind: &str, mapping: &mut Map<String, Value>) {
+    if kind != "tb" || mapping.contains_key("currencyText") {
+        return;
+    }
+    let columns = mapped_cols(mapping, "accountName");
+    let indexes: Vec<usize> = columns
+        .iter()
+        .filter_map(|c| table.headers.iter().position(|h| h == c))
+        .collect();
+    if indexes.is_empty() {
+        return;
+    }
+    // 最明细的那一级科目名称最可能带账户币种，从后往前找第一个抽得出币种的列。
+    for (column, index) in columns.iter().zip(indexes.iter()).rev() {
+        let hit = table
+            .rows
+            .iter()
+            .take(2000)
+            .filter_map(|row| row.get(*index))
+            .any(|text| currency_from_text(text).is_some());
+        if hit {
+            mapping.insert("currencyText".into(), Value::String(column.clone()));
+            return;
+        }
     }
 }
 
@@ -817,9 +1643,20 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
             .enumerate()
             .map(|(i, h)| {
                 let n = normalize_header(h);
+                // 双语表头「科目描述 Description」整体不等于别名，但其中一段正好是，
+                // 与完全相等同等看待——否则它只能拿到「包含」那一档的低分。
                 let exact = aliases
                     .iter()
                     .filter(|a| n == normalize_header(a))
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>();
+                // 双语表头「科目描述 Description」整体不等于别名，但其中一段正好是。
+                // 比「表头包含别名」可信，又不该压过整体相等——否则
+                // `Company Code Currency Key`（段含 currency）会抢走
+                // `Document Currency Key`（整体就是这个别名）的位置。
+                let segment = aliases
+                    .iter()
+                    .filter(|a| ledger_mapping::segment_exact(h, a))
                     .map(|x| x.to_string())
                     .collect::<Vec<_>>();
                 let partial = aliases
@@ -837,6 +1674,8 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
                     .collect::<Vec<_>>();
                 let mut score: f64 = if !exact.is_empty() {
                     0.94
+                } else if !segment.is_empty() {
+                    0.88
                 } else if !partial.is_empty() {
                     0.72
                 } else {
@@ -849,6 +1688,38 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
                         .unwrap_or(0.0)
                         * 0.12;
                 }
+                // 币种角色的数据形态判定对两张表都适用：序时账里
+                // 「本位币」这种列名既像本位币标识又像本位币金额，看取值就能分开。
+                if matches!(role, "currency" | "functionalCurrency") {
+                    // 币种列到底是原币列还是本位币列，交给统一内核判：
+                    // **填满（没有空单元格）且只出现一种币种**才是本位币列，其余都是原币列。
+                    // 「只标外币」的写法（空白代表本位币、填了的才是外币）实务里最常见——
+                    // 9 份真实样例里有 4 份是这样，旧规则「只有一种币种就判本位币」会判反。
+                    let column = table
+                        .rows
+                        .iter()
+                        .map(|row| row.get(i).map(String::as_str).unwrap_or(""));
+                    match ledger_mapping::classify_currency_column(column) {
+                        ledger_mapping::CurrencyColumn::Unusable { .. } => {
+                            // 列名里带“货币”但一个币种代码都认不出（例如“期初金额-集团货币”）。
+                            score -= 0.6;
+                        }
+                        ledger_mapping::CurrencyColumn::Foreign { .. } => {
+                            if role == "currency" {
+                                score += 0.45;
+                            } else {
+                                score -= 0.6;
+                            }
+                        }
+                        ledger_mapping::CurrencyColumn::Functional { .. } => {
+                            if role == "functionalCurrency" {
+                                score += 0.62;
+                            } else {
+                                score -= 0.6;
+                            }
+                        }
+                    }
+                }
                 if role.to_lowercase().contains("amount")
                     || role.to_lowercase().contains("debit")
                     || role.to_lowercase().contains("credit")
@@ -859,18 +1730,32 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
                         .unwrap_or(0.0)
                         * 0.12;
                 }
-                score -= bad.len() as f64 * 0.35;
+                // 冲突词是排除条件，不是扣分项——「期初余额(借)」含「借」，
+                // 就不该再作为「期初净额」的候选，哪怕别名也命中了「期初余额」。
+                if !bad.is_empty() {
+                    score = 0.0;
+                }
                 (
                     h.clone(),
                     score.clamp(0.0, 1.0),
-                    if exact.is_empty() { partial } else { exact },
+                    if !exact.is_empty() {
+                        exact
+                    } else if !segment.is_empty() {
+                        segment
+                    } else {
+                        partial
+                    },
                     bad,
                 )
             })
             .filter(|x| x.1 > 0.15)
             .collect::<Vec<_>>();
         choices.sort_by(|a, b| b.1.total_cmp(&a.1));
-        choices.truncate(3);
+        choices.truncate(if kind == "tb" && role == "currency" {
+            8
+        } else {
+            3
+        });
         out.insert(role.into(), choices);
     }
     out
@@ -904,10 +1789,17 @@ fn semantic_role_score(role: &str, header: &str) -> f64 {
     } else {
         true
     };
+    // 方向列必须真的写着方向，不能因为列名带“期初”就算数。
+    let direction_role_ok = if role.ends_with("Direction") {
+        contains_any(&["方向", "借贷", "借贷方向", "drcr", "dccr"])
+    } else {
+        true
+    };
     if period_ok
         && currency_ok
         && direction_ok
         && value_ok
+        && direction_role_ok
         && (role.starts_with("opening") || role.starts_with("closing"))
     {
         0.82
@@ -961,22 +1853,57 @@ fn distinct_for_role(
     role: &str,
 ) -> Vec<String> {
     if role == "account" {
-        let columns = candidates.get(role).into_iter().flatten()
-            .filter(|candidate| candidate.1 >= 0.85)
-            .filter_map(|candidate| table.headers.iter().position(|header| header == &candidate.0))
+        let best = |role: &str, limit: usize| {
+            candidates
+                .get(role)
+                .into_iter()
+                .flatten()
+                .filter(|candidate| candidate.1 >= 0.85)
+                .take(limit)
+                .filter_map(|candidate| {
+                    table
+                        .headers
+                        .iter()
+                        .position(|header| header == &candidate.0)
+                })
+                .collect::<Vec<_>>()
+        };
+        let columns = best("accountCode", 1)
+            .into_iter()
+            .chain(best("accountName", usize::MAX))
             .collect::<Vec<_>>();
-        if columns.is_empty() { return vec![]; }
-        let mut values = table.rows.iter().map(|row| columns.iter()
-            .filter_map(|index| row.get(*index)).map(|value| value.trim())
-            .filter(|value| !value.is_empty()).collect::<Vec<_>>().join(" "))
-            .filter(|value| !value.is_empty()).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+        if columns.is_empty() {
+            return vec![];
+        }
+        let mut values = table
+            .rows
+            .iter()
+            .map(|row| {
+                columns
+                    .iter()
+                    .filter_map(|index| row.get(*index))
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|value| !value.is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         values.truncate(200);
         return values;
     }
     let Some(col) = candidates.get(role).and_then(|x| x.first()).map(|x| &x.0) else {
         return vec![];
     };
-    if candidates.get(role).and_then(|values| values.first()).is_none_or(|candidate| candidate.1 < 0.55) { return vec![]; }
+    if candidates
+        .get(role)
+        .and_then(|values| values.first())
+        .is_none_or(|candidate| candidate.1 < 0.55)
+    {
+        return vec![];
+    }
     let Some(i) = table.headers.iter().position(|h| h == col) else {
         return vec![];
     };
@@ -1028,44 +1955,400 @@ fn fixed_entity(params: &Value) -> &str {
 
 fn entity_for<'a>(row: &'a RowRecord, mapping: &Map<String, Value>, params: &'a Value) -> &'a str {
     let mapped = cell(row, mapping, "entity").trim();
-    if mapped.is_empty() { fixed_entity(params) } else { mapped }
+    if mapped.is_empty() {
+        fixed_entity(params)
+    } else {
+        mapped
+    }
+}
+
+// 很多科目余额表不设币种列，币种写在科目名称或科目文本里
+// （例如“银行存款-建行USD4150-4800”）。这里按词边界从自由文本抽取币种：
+// 命中唯一币种才返回，命中多个视为歧义，宁可交回上游按映射列处理。
+fn currency_text_aliases() -> &'static [(&'static str, &'static [&'static str])] {
+    &[
+        ("CNY", &["CNY", "RMB", "人民币"]),
+        ("USD", &["USD", "美元", "美金"]),
+        ("EUR", &["EUR", "欧元"]),
+        ("JPY", &["JPY", "日元", "日圆"]),
+        ("HKD", &["HKD", "港币", "港元"]),
+        ("GBP", &["GBP", "英镑"]),
+        ("AUD", &["AUD", "澳元", "澳大利亚元"]),
+        ("NZD", &["NZD", "新西兰元"]),
+        ("SGD", &["SGD", "新加坡元", "新币"]),
+        ("CHF", &["CHF", "瑞士法郎"]),
+        ("CAD", &["CAD", "加拿大元", "加元"]),
+        ("MOP", &["MOP", "澳门元", "澳门币"]),
+        ("MYR", &["MYR", "林吉特"]),
+        ("RUB", &["RUB", "卢布"]),
+        ("ZAR", &["ZAR", "兰特"]),
+        ("KRW", &["KRW", "韩元"]),
+        ("AED", &["AED", "迪拉姆"]),
+        ("SAR", &["SAR", "里亚尔"]),
+        ("HUF", &["HUF", "福林"]),
+        ("PLN", &["PLN", "兹罗提"]),
+        ("DKK", &["DKK", "丹麦克朗"]),
+        ("SEK", &["SEK", "瑞典克朗"]),
+        ("NOK", &["NOK", "挪威克朗"]),
+        ("TRY", &["TRY", "土耳其里拉"]),
+        ("MXN", &["MXN", "墨西哥比索"]),
+        ("THB", &["THB", "泰铢"]),
+    ]
 }
 
 fn currency_from_text(value: &str) -> Option<String> {
     let normalized = value.to_uppercase();
-    [
-        ("USD", ["USD", "美元"].as_slice()),
-        ("EUR", ["EUR", "欧元"].as_slice()),
-        ("JPY", ["JPY", "日元"].as_slice()),
-        ("HKD", ["HKD", "港币", "港元"].as_slice()),
-        ("GBP", ["GBP", "英镑"].as_slice()),
-        ("AUD", ["AUD", "澳元"].as_slice()),
-        ("SGD", ["SGD", "新加坡元"].as_slice()),
-        ("CAD", ["CAD", "加拿大元", "加元"].as_slice()),
-    ]
-    .into_iter()
-    .find(|(_, aliases)| aliases.iter().any(|alias| normalized.contains(alias)))
-    .map(|(code, _)| code.to_owned())
+    let bytes = normalized.as_bytes();
+    // 三字母代码必须独立成词，避免 “PLUSD”“USDT” 这类子串误命中。
+    let hit = |alias: &str| {
+        if !alias.is_ascii() {
+            return normalized.contains(alias);
+        }
+        normalized.match_indices(alias).any(|(index, _)| {
+            let before = index == 0 || !bytes[index - 1].is_ascii_alphabetic();
+            let end = index + alias.len();
+            let after = end >= bytes.len() || !bytes[end].is_ascii_alphabetic();
+            before && after
+        })
+    };
+    let mut found = currency_text_aliases()
+        .iter()
+        .filter(|(_, aliases)| aliases.iter().any(|alias| hit(alias)))
+        .map(|(code, _)| (*code).to_owned())
+        .collect::<Vec<_>>();
+    found.dedup();
+    (found.len() == 1).then(|| found.remove(0))
 }
 
-fn currency_for(row: &RowRecord, mapping: &Map<String, Value>, account: &str, params: &Value) -> String {
-    let mapped = normalize_currency(cell(row, mapping, "currency"));
-    let account_currency = params
+fn currency_text_hint(row: &RowRecord, mapping: &Map<String, Value>) -> Option<String> {
+    let text = mapped_cols(mapping, "currencyText")
+        .iter()
+        .filter_map(|column| row.values.get(column.as_str()))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!text.is_empty()).then(|| currency_from_text(&text)).flatten()
+}
+
+fn currency_for(
+    row: &RowRecord,
+    mapping: &Map<String, Value>,
+    account: &str,
+    params: &Value,
+) -> String {
+    // 用户为单个科目指定的币种是显式覆盖，永远最优先。
+    if let Some(override_currency) = params
         .get("accountCurrencies")
         .and_then(Value::as_object)
         .and_then(|values| values.get(account))
         .and_then(Value::as_str)
         .map(normalize_currency)
-        .or_else(|| currency_from_text(account));
-    if mapped.is_empty() || mapped == "CNY" {
-        if let Some(currency) = account_currency {
-            return currency;
-        }
+        .filter(|code| !code.is_empty())
+    {
+        return override_currency;
     }
+    // 其次是币种列。映射阶段已经把“整列同值”的列排除在交易币种之外，
+    // 所以这里映射上的币种列就是可信的逐科目币种。
+    let mapped = normalize_currency(cell(row, mapping, "currency"));
     if !mapped.is_empty() {
         return mapped;
     }
-    account_currency.unwrap_or_default()
+    // 没有币种列时才看科目名称/科目文本里的币种线索。
+    if let Some(hint) = currency_text_hint(row, mapping).or_else(|| currency_from_text(account)) {
+        return hint;
+    }
+    // 线索也没有，退回本位币列（整列同值的那一列），至少口径不会错。
+    normalize_currency(cell(row, mapping, "functionalCurrency"))
+}
+
+// TB 与 JE 共有的字段必须落在同一口径上：科目编码对科目编码、科目名称对
+// 科目名称。这里把两边映射列的实际取值收上来做交叉比对，专治“TB 的科目编码
+// 其实映射到了科目名称列”这类脚本和 LLM 都可能犯的错。
+fn source_spec(params: &Value, source_key: &str) -> Result<Option<SourceSpec>, AppError> {
+    let Some(source) = params.get(source_key) else {
+        return Ok(None);
+    };
+    serde_json::from_value(source.clone())
+        .map(Some)
+        .map_err(|e| error("INVALID_PARAMS", "来源参数无效。", Some(e.to_string())))
+}
+
+// 口径比对不需要全量数据：大文件先用识别用的样本表，比对不通过要去找替代列时
+// 再读全量。否则每点一次“复核映射”都要把三十多万行的凭证明细整份读一遍。
+fn load_side(
+    params: &Value,
+    mapping_key: &str,
+    source_key: &str,
+) -> Result<Option<(Arc<FxTable>, Map<String, Value>)>, AppError> {
+    let Some(spec) = source_spec(params, source_key)? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        load_fx_inspection_table(&spec)?,
+        mapping_obj(params, mapping_key),
+    )))
+}
+
+fn load_full_side(params: &Value, source_key: &str) -> Result<Option<Arc<FxTable>>, AppError> {
+    let Some(spec) = source_spec(params, source_key)? else {
+        return Ok(None);
+    };
+    load_fx_table(&spec).map(Some)
+}
+
+fn role_values(table: &FxTable, mapping: &Map<String, Value>, role: &str) -> Vec<String> {
+    let indexes = mapped_cols(mapping, role)
+        .iter()
+        .filter_map(|column| table.headers.iter().position(|header| header == column))
+        .collect::<Vec<_>>();
+    if indexes.is_empty() {
+        return Vec::new();
+    }
+    table
+        .rows
+        .iter()
+        .take(100_000)
+        .map(|row| {
+            indexes
+                .iter()
+                .filter_map(|index| row.get(*index))
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// 逐列收集去重取值。科目编码、科目名称都是“低基数”列（几十到几百个不同值），
+/// 凭证号、金额、日期、摘要则是高基数，超过上限就直接弃掉——这一条就把
+/// 需要两两比对的列压到个位数。
+fn low_cardinality_columns(table: &FxTable) -> Vec<(String, HashSet<String>)> {
+    const MAX_CARDINALITY: usize = 3000;
+    const MIN_CARDINALITY: usize = 5;
+    const MAX_ROWS: usize = 100_000;
+    let mut sets = (0..table.headers.len())
+        .map(|_| Some(HashSet::new()))
+        .collect::<Vec<_>>();
+    for row in table.rows.iter().take(MAX_ROWS) {
+        for (index, slot) in sets.iter_mut().enumerate() {
+            let Some(values) = slot.as_mut() else {
+                continue;
+            };
+            let Some(raw) = row.get(index) else {
+                continue;
+            };
+            let value = raw.trim();
+            if value.is_empty() {
+                continue;
+            }
+            values.insert(value.to_uppercase());
+            if values.len() > MAX_CARDINALITY {
+                *slot = None;
+            }
+        }
+    }
+    table
+        .headers
+        .iter()
+        .zip(sets)
+        .filter_map(|(header, values)| {
+            values
+                .filter(|set| set.len() >= MIN_CARDINALITY)
+                .map(|set| (header.clone(), set))
+        })
+        .collect()
+}
+
+fn looks_like_account_code(values: &HashSet<String>) -> bool {
+    let sample = values.iter().take(200).collect::<Vec<_>>();
+    if sample.is_empty() {
+        return false;
+    }
+    let coded = sample
+        .iter()
+        .filter(|value| {
+            value.chars().count() >= 2
+                && value.chars().count() <= 24
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        })
+        .count();
+    coded * 5 >= sample.len() * 4
+}
+
+/// 在两张表的低基数列之间找取值真正对得上的一对。want_code 决定找的是编码类
+/// 还是名称类，两类分别找一次，就实现了“优先两个都对上，否则择一”。
+fn best_column_pair(
+    je: &[(String, HashSet<String>)],
+    tb: &[(String, HashSet<String>)],
+    want_code: bool,
+) -> Option<(String, String, usize, f64)> {
+    let mut best: Option<(String, String, usize, f64)> = None;
+    for (je_header, je_values) in je {
+        if looks_like_account_code(je_values) != want_code {
+            continue;
+        }
+        for (tb_header, tb_values) in tb {
+            if looks_like_account_code(tb_values) != want_code {
+                continue;
+            }
+            let overlap = je_values.intersection(tb_values).count();
+            if overlap < 5 {
+                continue;
+            }
+            let ratio = overlap as f64 / je_values.len().min(tb_values.len()) as f64;
+            if ratio < 0.6 {
+                continue;
+            }
+            if best
+                .as_ref()
+                .is_none_or(|current| ratio > current.3 || (ratio == current.3 && overlap > current.2))
+            {
+                best = Some((je_header.clone(), tb_header.clone(), overlap, ratio));
+            }
+        }
+    }
+    best
+}
+
+fn overlap_ratio(je: &[String], tb: &[String]) -> Option<(usize, f64)> {
+    if je.is_empty() || tb.is_empty() {
+        return None;
+    }
+    let tb_set = tb
+        .iter()
+        .map(|value| value.trim().to_uppercase())
+        .collect::<HashSet<_>>();
+    let overlap = je
+        .iter()
+        .filter(|value| tb_set.contains(&value.trim().to_uppercase()))
+        .count();
+    Some((overlap, overlap as f64 / je.len() as f64))
+}
+
+// 抽首、中、末三个取值当证据，让用户一眼看出两边是不是同一种字段。
+fn three_samples(values: &[String]) -> String {
+    let last = values.len().saturating_sub(1);
+    [0usize, values.len() / 2, last]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|index| values.get(index).cloned())
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+// TB 与 JE 共有的字段必须落在同一口径上：科目编码对科目编码、科目名称对
+// 科目名称。先按当前映射比对；对不上就在两张表的所有低基数列之间自己找一组
+// 真正能对上的列，找到就作为修正建议回给前端直接套用。
+fn cross_table_alignment(
+    params: &Value,
+) -> Result<(Vec<String>, Vec<String>, Option<Value>), AppError> {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let (Some((je_table, je_mapping)), Some((tb_table, tb_mapping))) = (
+        load_side(params, "jeMapping", "jeSource")?,
+        load_side(params, "tbMapping", "tbSource")?,
+    ) else {
+        return Ok((errors, warnings, None));
+    };
+    let roles = [("accountCode", "科目编码"), ("accountName", "科目名称")];
+    let mut aligned = Vec::new();
+    let mut broken = Vec::new();
+    for (role, label) in roles {
+        let je_role = role_values(&je_table, &je_mapping, role);
+        let tb_role = role_values(&tb_table, &tb_mapping, role);
+        match overlap_ratio(&je_role, &tb_role) {
+            Some((overlap, ratio)) if overlap > 0 => {
+                aligned.push(label);
+                if ratio < 0.1 {
+                    warnings.push(format!(
+                        "JE与TB的{label}仅有 {overlap}/{} 项能对上，请复核两边映射是否同一口径。JE样例：{}；TB样例：{}。",
+                        je_role.len(),
+                        three_samples(&je_role),
+                        three_samples(&tb_role)
+                    ));
+                }
+            }
+            _ => broken.push((role, label, je_role, tb_role)),
+        }
+    }
+    // 币种口径也顺带核一下，但只提示不拦截：两张表的币种范围本来就可能不同。
+    if let Some((overlap, _)) = overlap_ratio(
+        &role_values(&je_table, &je_mapping, "currency"),
+        &role_values(&tb_table, &tb_mapping, "currency"),
+    ) {
+        if overlap == 0 {
+            warnings.push("JE与TB的币种没有任何交集，请确认两边映射的是同一种币种字段。".into());
+        }
+    }
+    if broken.is_empty() {
+        return Ok((errors, warnings, None));
+    }
+    // 有对不上的角色，就在两张表的低基数列之间自己找一组真正能对上的列。
+    // 这一步要看全量数据，样本里科目出现得太少会找不出重合。
+    let je_full = load_full_side(params, "jeSource")?.unwrap_or(je_table);
+    let tb_full = load_full_side(params, "tbSource")?.unwrap_or(tb_table);
+    let je_columns = low_cardinality_columns(&je_full);
+    let tb_columns = low_cardinality_columns(&tb_full);
+    let mut je_fix = Map::new();
+    let mut tb_fix = Map::new();
+    let mut unmatched = Vec::new();
+    for (role, label, je_role, tb_role) in broken {
+        match best_column_pair(&je_columns, &tb_columns, role == "accountCode") {
+            Some((je_header, tb_header, overlap, _)) => {
+                je_fix.insert(role.into(), json!(je_header));
+                tb_fix.insert(role.into(), json!(tb_header));
+                aligned.push(label);
+                warnings.push(format!(
+                    "JE与TB的{label}原映射对不上，已自动改用取值真正一致的列：JE“{je_header}”对 TB“{tb_header}”（{overlap} 项一致）。"
+                ));
+            }
+            None => unmatched.push((label, je_role, tb_role)),
+        }
+    }
+    // 科目编码和科目名称至少要有一个对得上；两个都对不上才是真的没法做。
+    if aligned.is_empty() {
+        let (_, je_role, tb_role) = unmatched
+            .first()
+            .cloned()
+            .unwrap_or(("科目编码", Vec::new(), Vec::new()));
+        errors.push(format!(
+            "JE与TB的科目编码和科目名称都对不上，两张表里也找不到取值能对上的列。JE样例：{}；TB样例：{}。请手工确认两边映射到的是同一套科目。",
+            three_samples(&je_role),
+            three_samples(&tb_role)
+        ));
+    } else {
+        for (label, _, _) in &unmatched {
+            warnings.push(format!(
+                "JE与TB的{label}对不上，也找不到可替代的列；已按{}继续匹配。",
+                aligned.join("、")
+            ));
+        }
+    }
+    let fix = (!je_fix.is_empty() || !tb_fix.is_empty()).then(|| {
+        json!({
+            "jeMapping": Value::Object(je_fix),
+            "tbMapping": Value::Object(tb_fix)
+        })
+    });
+    Ok((errors, warnings, fix))
+}
+
+fn check_mapping_alignment(params: &Value) -> Result<Value, AppError> {
+    let (errors, warnings, fix) = cross_table_alignment(params)?;
+    Ok(json!({
+        "aligned": errors.is_empty(),
+        "errors": errors,
+        "warnings": warnings,
+        "fix": fix
+    }))
 }
 
 fn validate_mapping(params: &Value) -> Result<Value, AppError> {
@@ -1075,8 +2358,11 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
         .unwrap_or("combined");
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
-    let report_year = params.get("reportEnd").and_then(Value::as_str)
-        .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()).map(|date| date.year());
+    let report_year = params
+        .get("reportEnd")
+        .and_then(Value::as_str)
+        .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())
+        .map(|date| date.year());
     if matches!(mode, "realized" | "combined") && params.get("jeSource").is_none() {
         errors.push("已实现测算必须上传JE".to_string());
     }
@@ -1092,10 +2378,18 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                 .map_err(|e| error("INVALID_PARAMS", "来源参数无效。", Some(e.to_string())))?;
             let table = load_fx_table(&spec)?;
             let mapping = mapping_obj(params, key);
-            let data_years = source_data_years(&table, if kind == "JE" { "je" } else { "tb" }, &mapping);
+            let data_years =
+                source_data_years(&table, if kind == "JE" { "je" } else { "tb" }, &mapping);
             if let Some(year) = report_year {
                 if !data_years.is_empty() && !data_years.contains(&year) {
-                    errors.push(format!("资产负债表日为{year}年，但{kind}数据期间为{}年", data_years.iter().map(ToString::to_string).collect::<Vec<_>>().join("、")));
+                    errors.push(format!(
+                        "资产负债表日为{year}年，但{kind}数据期间为{}年",
+                        data_years
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join("、")
+                    ));
                 }
             }
             for col in mapping.values().flat_map(|v| match v {
@@ -1112,22 +2406,79 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                 }
             }
             let required = if kind == "JE" {
-                vec!["id", "date", "account", "currency"]
+                vec!["id", "date", "accountCode", "currency"]
             } else {
-                vec!["account"]
+                vec!["accountCode"]
             };
             for role in required {
-                if mapped_cols(&mapping, role).is_empty() {
-                    errors.push(format!("{kind} 缺少必填字段：{role}"));
+                // 历史参数把科目编码和名称合并在 "account" 里，仍视为已映射。
+                let unmapped = if role == "accountCode" {
+                    account_columns(&mapping).is_empty()
+                } else {
+                    mapped_cols(&mapping, role).is_empty()
+                };
+                if unmapped {
+                    errors.push(format!(
+                        "{kind} 缺少必填字段：{}（{role}）",
+                        chinese_header(role)
+                    ));
                 }
+            }
+            if kind == "TB" && mapped_cols(&mapping, "currency").is_empty() {
+                // 没有交易币种列时，至少要能从科目名称或币种线索文本里认出
+                // 一个非本位币的科目，否则这张 TB 根本没有可测算的外币。
+                let readable = records(&table).iter().take(5000).any(|row| {
+                    let functional =
+                        normalize_currency(&functional_currency(entity_for(row, &mapping, params), params));
+                    currency_text_hint(row, &mapping)
+                        .or_else(|| currency_from_text(&account_name(row, &mapping)))
+                        .is_some_and(|code| code != functional)
+                });
+                if !readable {
+                    errors.push(
+                        "TB 认不出任何外币科目：请映射含两种以上币种的交易币种列；若币种写在科目名称里，请把那一列映射为“科目名称”或“币种线索文本”。"
+                            .to_string(),
+                    );
+                }
+            }
+            // 套一遍标准形态：命中说明这张表的余额与发生额结构完整，
+            // 没命中就指名道姓缺哪几列。先只提示不阻断——历史上能跑通的映射
+            // 不该因为多了一层校验就突然打不开。
+            {
+                let lower = if kind == "JE" { "je" } else { "tb" };
+                let mapped: HashSet<&str> = mapping
+                    .iter()
+                    .filter(|(_, v)| !matches!(v, Value::Null))
+                    .map(|(k, _)| ledger_mapping::migrate_role_name(lower, k))
+                    .filter(|role| !role.is_empty())
+                    .collect();
+                if let ledger_mapping::FormVerdict::Incomplete(m) =
+                    ledger_mapping::resolve_form(lower, &mapped)
+                {
+                    warnings.push(format!(
+                        "{kind} {}",
+                        ledger_mapping::describe_incomplete(lower, &m)
+                    ));
+                }
+            }
+            if !mapped_cols(&mapping, "accountCode").is_empty()
+                && mapped_cols(&mapping, "accountName").is_empty()
+            {
+                warnings.push(format!(
+                    "{kind} 未映射科目名称：底稿只能显示科目编码，科目角色也只能靠编码推断。"
+                ));
             }
             if kind == "JE" {
                 if mapped_cols(&mapping, "entity").is_empty() && fixed_entity(params).is_empty() {
                     errors.push("JE 缺少主体列时必须指定固定主体".to_string());
                 }
-                for prefix in ["foreign", "functional"] {
+                for (prefix, label) in [("foreign", "原币"), ("functional", "本位币")] {
                     if !amount_scheme_ok(&mapping, prefix) {
-                        errors.push(format!("JE {prefix} 金额方案不成立"));
+                        errors.push(format!(
+                            "JE {label}金额记法不成立：三种记法任选其一——只给「{label}净额」（借正贷负），\
+                             或「{label}借方」＋「{label}贷方」两列，或「{label}净额」＋「借贷方向」。\
+                             同时映射净额与借贷分列也可以，会优先按借贷分列取数。"
+                        ));
                     }
                 }
                 let id_columns = mapped_cols(&mapping, "id");
@@ -1143,7 +2494,11 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                             .map(|v| v.trim())
                             .unwrap_or("")
                     };
-                    let entity = if entity_column.is_some() { value(&entity_column) } else { fixed_entity(params) };
+                    let entity = if entity_column.is_some() {
+                        value(&entity_column)
+                    } else {
+                        fixed_entity(params)
+                    };
                     let parts = std::iter::once(entity.to_owned())
                         .chain(std::iter::once(value(&date_column).to_owned()))
                         .chain(id_columns.iter().map(|c| {
@@ -1179,22 +2534,34 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                 if mapped_cols(&mapping, "entity").is_empty() && fixed_entity(params).is_empty() {
                     errors.push("TB 缺少主体列时必须指定固定主体".to_string());
                 }
-                let has_je_back_calculation = params.get("jeSource").is_some();
-                let required_schemes: &[&str] = if has_je_back_calculation {
-                    &["closingFunctional"]
-                } else {
-                    &["openingForeign", "openingFunctional", "closingForeign", "closingFunctional"]
-                };
-                for prefix in required_schemes {
-                    if !amount_scheme_ok(&mapping, prefix) {
-                        errors.push(format!("TB {prefix} 余额方案不成立"));
-                    }
+                if foreign_currency_columns(&table).len() > 1
+                    && !params
+                        .get("tbForeignCurrencyConfirmed")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                {
+                    errors.push(
+                        "TB检测到多个包含非本位币的列，请确认系统预选的外币币种列".to_string(),
+                    );
                 }
-                if has_je_back_calculation && !amount_scheme_ok(&mapping, "openingForeign") {
-                    warnings.push("TB不含原币余额：将对正则/JE识别出的外币货币性科目按官方汇率倒算，并在底稿中标记为倒算口径。".to_string());
+                let opening_foreign = amount_scheme_ok(&mapping, "openingForeign");
+                let opening_functional = amount_scheme_ok(&mapping, "openingFunctional");
+                let closing_foreign = amount_scheme_ok(&mapping, "closingForeign");
+                let closing_functional = amount_scheme_ok(&mapping, "closingFunctional");
+                if !opening_foreign && !opening_functional {
+                    errors.push("TB 缺少期初余额：原币或本位币余额至少映射一组".to_string());
                 }
-                if has_je_back_calculation && !amount_scheme_ok(&mapping, "openingFunctional") {
-                    warnings.push("TB不含期初本位币余额：将以期末余额减去JE全年净变动倒推出期初余额。".to_string());
+                if !closing_foreign && !closing_functional {
+                    errors.push("TB 缺少期末余额：原币或本位币余额至少映射一组".to_string());
+                }
+                if params.get("jeSource").is_some()
+                    && !((opening_foreign && closing_foreign)
+                        || (opening_functional && closing_functional))
+                {
+                    errors.push("TB与JE强勾稽要求期初、期末至少有一组同口径余额：原币对原币，或本位币对本位币".to_string());
+                }
+                if !opening_foreign || !closing_foreign {
+                    warnings.push("TB缺少完整原币端点：官方汇率倒算值仅用于未实现测算，不参与TB与JE余额勾稽。".to_string());
                 }
                 for (a, b) in [
                     ("openingForeignAmount", "closingForeignAmount"),
@@ -1262,10 +2629,11 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                 let key_columns = ["entity", "currency"]
                     .into_iter()
                     .filter_map(|role| first_col(&mapping, role))
-                    .chain(mapped_cols(&mapping, "account"))
+                    .chain(account_columns(&mapping))
                     .chain(mapped_cols(&mapping, "auxiliary"))
                     .collect::<Vec<_>>();
                 let mut keys = HashSet::new();
+                let mut duplicate_rows: Vec<usize> = Vec::new();
                 for (row_index, row) in table.rows.iter().enumerate() {
                     let mut key = key_columns
                         .iter()
@@ -1286,30 +2654,208 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                         key = format!("{}\u{1f}{key}", fixed_entity(params));
                     }
                     if !keys.insert(key) {
-                        errors.push(format!(
-                            "TB 第{}行存在无法解释的重复余额键",
-                            table.header_row + table.header_depth + row_index
-                        ));
-                        break;
+                        duplicate_rows.push(table.header_row + table.header_depth + row_index);
                     }
+                }
+                // 同一余额键出现多行不是错误：客户常按费用性质、成本中心一类的核算
+                // 维度把一个科目拆开（3300 那份 TB 的 245 行对应 206 个科目）。
+                // 重估按科目＋币种做，这几行乘的是同一个汇率，合并求和与逐行重估
+                // 再相加完全等价，所以直接合并，只说明不拦截。
+                if !duplicate_rows.is_empty() {
+                    let shown = duplicate_rows
+                        .iter()
+                        .take(3)
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("、");
+                    warnings.push(format!(
+                        "TB 有 {} 行与其他行的余额键相同（主体＋科目＋币种），已按同一余额键合并期初与期末余额；如第{shown}行。若这些行本应各自独立，请把区分它们的那一列映射为辅助核算。",
+                        duplicate_rows.len()
+                    ));
                 }
             }
         }
     }
+    let (cross_errors, cross_warnings, _) = cross_table_alignment(params)?;
+    errors.extend(cross_errors);
+    warnings.extend(cross_warnings);
     if mode == "unrealized" && params.get("jeSource").is_none() {
         warnings.push("未上传JE：仅执行年初、年末两时点检查；仅年末差异作为建议调整。".to_string());
     }
     Ok(json!({"valid": errors.is_empty(), "errors": errors, "warnings": warnings}))
 }
 
+/// 借贷方向现在是两个币种口径共用的一个角色。历史保存的映射里可能还是
+/// `foreignDirection` / `functionalDirection`，两种都要能读出来。
+fn direction_column(mapping: &Map<String, Value>, prefix: &str) -> Option<String> {
+    if first_col(mapping, "direction").is_some() {
+        return Some("direction".to_string());
+    }
+    let legacy = format!("{prefix}Direction");
+    first_col(mapping, &legacy).map(|_| legacy)
+}
+
 fn amount_scheme_ok(mapping: &Map<String, Value>, prefix: &str) -> bool {
     let amount = first_col(mapping, &format!("{prefix}Amount")).is_some();
-    let direction = first_col(mapping, &format!("{prefix}Direction")).is_some();
+    let direction = direction_column(mapping, prefix).is_some();
     let debit = first_col(mapping, &format!("{prefix}Debit")).is_some();
     let credit = first_col(mapping, &format!("{prefix}Credit")).is_some();
     (amount && !debit && !credit)
         || (debit && credit && !amount)
         || (amount && direction && !debit && !credit)
+}
+
+fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError> {
+    let (Some(tb_source), Some(je_source)) = (params.get("tbSource"), params.get("jeSource"))
+    else {
+        return Ok(json!({"performed":false,"reason":"未同时上传TB和JE"}));
+    };
+    let tb_spec: SourceSpec = serde_json::from_value(tb_source.clone())
+        .map_err(|e| error("INVALID_PARAMS", "TB参数无效。", Some(e.to_string())))?;
+    let je_spec: SourceSpec = serde_json::from_value(je_source.clone())
+        .map_err(|e| error("INVALID_PARAMS", "JE参数无效。", Some(e.to_string())))?;
+    let tb_table = load_fx_table(&tb_spec)?;
+    let je_table = load_fx_table(&je_spec)?;
+    let tb_mapping = mapping_obj(params, "tbMapping");
+    let je_mapping = mapping_obj(params, "jeMapping");
+    let use_foreign = amount_scheme_ok(&tb_mapping, "openingForeign")
+        && amount_scheme_ok(&tb_mapping, "closingForeign");
+    let unit = if use_foreign { "foreign" } else { "functional" };
+    let opening_prefix = if use_foreign {
+        "openingForeign"
+    } else {
+        "openingFunctional"
+    };
+    let closing_prefix = if use_foreign {
+        "closingForeign"
+    } else {
+        "closingFunctional"
+    };
+    let report_start = params
+        .get("reportStart")
+        .and_then(Value::as_str)
+        .and_then(parse_date);
+    let report_end = params
+        .get("reportEnd")
+        .and_then(Value::as_str)
+        .and_then(parse_date);
+    let mut tb_balances = BTreeMap::<String, (String, String, String, String, f64, f64)>::new();
+    for row in records(&tb_table) {
+        let account = account_name(&row, &tb_mapping);
+        if !matches!(
+            role_for(&account, params).as_str(),
+            "cash" | "monetary_asset" | "monetary_liability"
+        ) {
+            continue;
+        }
+        let entity = entity_for(&row, &tb_mapping, params).to_owned();
+        let currency = currency_for(&row, &tb_mapping, &account, params);
+        let auxiliary = auxiliary_value(&row, &tb_mapping);
+        if currency.is_empty() || currency == functional_currency(&entity, params) {
+            continue;
+        }
+        let key = monetary_balance_key(&entity, &account, &currency, &auxiliary);
+        let opening = signed_amount(&row, &tb_mapping, opening_prefix).map_err(|detail| {
+            error("NUMERIC_PARSE_FAILED", "TB期初余额无法解析。", Some(detail))
+        })?;
+        let closing = signed_amount(&row, &tb_mapping, closing_prefix).map_err(|detail| {
+            error("NUMERIC_PARSE_FAILED", "TB期末余额无法解析。", Some(detail))
+        })?;
+        tb_balances.insert(
+            key,
+            (entity, account, currency, auxiliary, opening, closing),
+        );
+    }
+    let mut movements = HashMap::<String, f64>::new();
+    let mut je_keys = BTreeMap::<String, (String, String, String, String)>::new();
+    for row in records(&je_table) {
+        if !is_je_business_row(&row, &je_mapping) {
+            continue;
+        }
+        let Some(date) = parse_date(cell(&row, &je_mapping, "date")) else {
+            continue;
+        };
+        if report_start.is_some_and(|start| date < start)
+            || report_end.is_some_and(|end| date > end)
+        {
+            continue;
+        }
+        let account = account_name(&row, &je_mapping);
+        if !matches!(
+            role_for(&account, params).as_str(),
+            "cash" | "monetary_asset" | "monetary_liability"
+        ) {
+            continue;
+        }
+        let entity = entity_for(&row, &je_mapping, params).to_owned();
+        let currency = currency_for(&row, &je_mapping, &account, params);
+        let auxiliary = auxiliary_value(&row, &je_mapping);
+        if currency.is_empty() || currency == functional_currency(&entity, params) {
+            continue;
+        }
+        let key = monetary_balance_key(&entity, &account, &currency, &auxiliary);
+        *movements.entry(key.clone()).or_default() += signed_amount(&row, &je_mapping, unit)
+            .map_err(|detail| {
+                error(
+                    "NUMERIC_PARSE_FAILED",
+                    "JE余额滚动金额无法解析。",
+                    Some(detail),
+                )
+            })?;
+        je_keys
+            .entry(key)
+            .or_insert((entity, account, currency, auxiliary));
+    }
+    let mut issues = Vec::new();
+    for (key, (entity, account, currency, auxiliary, opening, closing)) in &tb_balances {
+        let movement = movements.get(key).copied().unwrap_or(0.0);
+        let derived = opening + movement;
+        let difference = derived - closing;
+        let tolerance = 0.01_f64.max(opening.abs().max(closing.abs()).max(derived.abs()) * 1e-8);
+        if difference.abs() > tolerance {
+            issues.push(json!({
+                "entity":entity,"account":account,"currency":currency,"auxiliary":auxiliary,
+                "unit":if use_foreign {"原币"} else {"本位币"},
+                "opening":opening,"jeMovement":movement,"derivedClosing":derived,
+                "tbClosing":closing,"difference":difference,"tolerance":tolerance
+            }));
+        }
+    }
+    for (key, (entity, account, currency, auxiliary)) in je_keys {
+        if !tb_balances.contains_key(&key) {
+            issues.push(json!({
+                "entity":entity,"account":account,"currency":currency,"auxiliary":auxiliary,
+                "unit":if use_foreign {"原币"} else {"本位币"},
+                "type":"JE余额键在TB中不存在","jeMovement":movements.get(&key).copied().unwrap_or(0.0)
+            }));
+        }
+    }
+    if !issues.is_empty() {
+        let first = &issues[0];
+        let summary = format!(
+            "{}个账户币种余额键未通过TB＋JE余额滚动校验。首项：{} / {} / {}，差异{}。请修正映射或源数据后重新测算。",
+            issues.len(),
+            first.get("entity").and_then(Value::as_str).unwrap_or(""),
+            first.get("account").and_then(Value::as_str).unwrap_or(""),
+            first.get("currency").and_then(Value::as_str).unwrap_or(""),
+            first
+                .get("difference")
+                .and_then(Value::as_f64)
+                .unwrap_or_else(|| first
+                    .get("jeMovement")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0))
+        );
+        return Err(error(
+            "TB_JE_ROLLFORWARD_MISMATCH",
+            summary,
+            Some(Value::Array(issues).to_string()),
+        ));
+    }
+    Ok(json!({
+        "performed":true,"unit":if use_foreign {"原币"} else {"本位币"},
+        "checkedBalanceKeys":tb_balances.len(),"passed":true
+    }))
 }
 
 fn strict_number(raw: &str) -> Result<Option<f64>, String> {
@@ -1347,7 +2893,7 @@ fn is_placeholder(s: &str) -> bool {
     matches!(s.trim(), "-" | "—" | "–" | "N/A" | "n/a" | "NA" | "无")
 }
 
-fn parse_date(s: &str) -> Option<NaiveDate> {
+pub(crate) fn parse_date(s: &str) -> Option<NaiveDate> {
     let text = s.trim();
     for format in ["%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d", "%d/%m/%Y"] {
         if let Ok(date) = NaiveDate::parse_from_str(text, format) {
@@ -1355,12 +2901,39 @@ fn parse_date(s: &str) -> Option<NaiveDate> {
         }
     }
     for format in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
-        if let Ok(value) = NaiveDateTime::parse_from_str(text, format) { return Some(value.date()); }
+        if let Ok(value) = NaiveDateTime::parse_from_str(text, format) {
+            return Some(value.date());
+        }
     }
     None
 }
 
-fn records(table: &FxTable) -> Vec<RowRecord> {
+/// 把序时账原样转成 JSON 行，供导出时写「JE完整明细」。
+///
+/// 单独成函数是因为它很贵：一份 36 万行、46 列的 SAP 序时账会产出上千万个
+/// JSON 字符串。只有真的要写进底稿时才调用。
+fn build_je_detail(params: &Value) -> Result<Vec<Value>, AppError> {
+    let Some(source) = params.get("jeSource") else {
+        return Ok(Vec::new());
+    };
+    let spec: SourceSpec = serde_json::from_value(source.clone())
+        .map_err(|e| error("INVALID_PARAMS", "JE参数无效。", Some(e.to_string())))?;
+    let table = load_fx_table(&spec)?;
+    Ok(records(&table)
+        .into_iter()
+        .map(|row| {
+            let mut value = row
+                .values
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), Value::String(value.to_string())))
+                .collect::<Map<_, _>>();
+            value.insert("sourceRow".into(), json!(row.source_row));
+            Value::Object(value)
+        })
+        .collect())
+}
+
+fn records(table: &FxTable) -> Vec<RowRecord<'_>> {
     table
         .rows
         .iter()
@@ -1370,8 +2943,8 @@ fn records(table: &FxTable) -> Vec<RowRecord> {
             values: table
                 .headers
                 .iter()
-                .cloned()
-                .zip(row.iter().cloned())
+                .map(String::as_str)
+                .zip(row.iter().map(String::as_str))
                 .collect(),
         })
         .collect()
@@ -1379,8 +2952,8 @@ fn records(table: &FxTable) -> Vec<RowRecord> {
 
 fn cell<'a>(row: &'a RowRecord, mapping: &Map<String, Value>, role: &str) -> &'a str {
     first_col(mapping, role)
-        .and_then(|c| row.values.get(&c))
-        .map(String::as_str)
+        .and_then(|c| row.values.get(c.as_str()))
+        .copied()
         .unwrap_or("")
 }
 
@@ -1394,13 +2967,15 @@ fn signed_amount(
         first_col(mapping, &format!("{prefix}Credit")),
     ) {
         return Ok(
-            strict_number(row.values.get(&debit).map(String::as_str).unwrap_or(""))?.unwrap_or(0.0)
-                - strict_number(row.values.get(&credit).map(String::as_str).unwrap_or(""))?
+            strict_number(row.values.get(debit.as_str()).copied().unwrap_or(""))?.unwrap_or(0.0)
+                - strict_number(row.values.get(credit.as_str()).copied().unwrap_or(""))?
                     .unwrap_or(0.0),
         );
     }
     let value = strict_number(cell(row, mapping, &format!("{prefix}Amount")))?.unwrap_or(0.0);
-    let direction = cell(row, mapping, &format!("{prefix}Direction")).to_ascii_uppercase();
+    let direction = direction_column(mapping, prefix)
+        .map(|role| cell(row, mapping, &role).to_ascii_uppercase())
+        .unwrap_or_default();
     Ok(if direction.contains("CR") || direction.contains('贷') {
         -value.abs()
     } else {
@@ -1417,7 +2992,7 @@ fn voucher_id(row: &RowRecord, mapping: &Map<String, Value>, params: &Value) -> 
     ];
     parts.extend(mapped_cols(mapping, "id").iter().map(|c| {
         row.values
-            .get(c)
+            .get(c.as_str())
             .map(|v| v.trim().to_owned())
             .unwrap_or_default()
     }));
@@ -1430,7 +3005,9 @@ fn display_voucher_id(id: &str) -> String {
 fn is_je_business_row(row: &RowRecord, mapping: &Map<String, Value>) -> bool {
     !cell(row, mapping, "date").trim().is_empty()
         || mapped_cols(mapping, "id").iter().any(|column| {
-            row.values.get(column).is_some_and(|value| !value.trim().is_empty())
+            row.values
+                .get(column.as_str())
+                .is_some_and(|value| !value.trim().is_empty())
         })
 }
 
@@ -1478,65 +3055,374 @@ fn account_roles(params: &Value) -> Result<Value, AppError> {
     }))
 }
 
+// 科目编码与科目名称是两个彼此独立的映射角色。旧版本把它们并进同一个
+// "account" 数组，这里仍然读得动历史参数，但新参数一律按编码在前、
+// 名称在后的顺序组合，保证 TB 与 JE 的科目口径完全一致。
+fn account_columns(mapping: &Map<String, Value>) -> Vec<String> {
+    let code = mapped_cols(mapping, "accountCode");
+    let name = mapped_cols(mapping, "accountName");
+    if code.is_empty() && name.is_empty() {
+        return mapped_cols(mapping, "account");
+    }
+    code.into_iter().chain(name).collect()
+}
+
 fn account_name(row: &RowRecord, mapping: &Map<String, Value>) -> String {
-    mapped_cols(mapping, "account")
+    account_columns(mapping)
         .iter()
-        .filter_map(|c| row.values.get(c))
+        .filter_map(|c| row.values.get(c.as_str()))
         .map(|v| v.trim())
         .filter(|v| !v.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
 }
 
-fn account_match_key(account: &str) -> &str {
-    account.split_whitespace().next().filter(|value| !value.is_empty()).unwrap_or(account.trim())
+fn account_code_and_name(row: &RowRecord, mapping: &Map<String, Value>) -> (String, String) {
+    let read = |columns: &[String]| {
+        columns
+            .iter()
+            .filter_map(|column| row.values.get(column.as_str()))
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let explicit_code = read(&mapped_cols(mapping, "accountCode"));
+    let explicit_name = read(&mapped_cols(mapping, "accountName"));
+    if !explicit_code.is_empty() || !explicit_name.is_empty() {
+        return (explicit_code, explicit_name);
+    }
+    let columns = mapped_cols(mapping, "account");
+    let values = columns
+        .iter()
+        .map(|column| {
+            (
+                column.as_str(),
+                row.values
+                    .get(column.as_str())
+                    .map(|value| value.trim())
+                    .unwrap_or(""),
+            )
+        })
+        .filter(|(_, value)| !value.is_empty())
+        .collect::<Vec<_>>();
+    let is_name = |column: &str| {
+        let value = normalize_header(column);
+        [
+            "科目名称",
+            "账户名称",
+            "accountname",
+            "accountdescription",
+            "gldescription",
+            "gltext",
+            "description",
+        ]
+        .iter()
+        .any(|token| value.contains(token))
+    };
+    let is_code = |column: &str| {
+        let value = normalize_header(column);
+        [
+            "科目编码",
+            "科目代码",
+            "账户编码",
+            "accountnumber",
+            "glaccount",
+            "g/laccount",
+            "saknr",
+        ]
+        .iter()
+        .any(|token| value.contains(token))
+    };
+    let name = values
+        .iter()
+        .find(|(column, _)| is_name(column))
+        .map(|(_, value)| (*value).to_owned())
+        .or_else(|| (values.len() > 1).then(|| values[1].1.to_owned()))
+        .unwrap_or_default();
+    let code = values
+        .iter()
+        .find(|(column, _)| is_code(column) && !is_name(column))
+        .map(|(_, value)| (*value).to_owned())
+        .or_else(|| values.first().map(|(_, value)| (*value).to_owned()))
+        .unwrap_or_default();
+    (code, name)
 }
 
-fn suggest_account_role(value: &str) -> String {
-    let normalized = value.to_lowercase();
-    if ["银行存款", "银行", "库存现金", "cash", "bank", "boc", "boa", "hsbc", "cmb"]
-        .iter()
-        .any(|x| normalized.contains(x))
-    {
-        "cash"
-    } else if ["应收", "receivable", "accts rec", "acct rec", "a/r", "interco cust"]
-        .iter()
-        .any(|x| normalized.contains(x))
-    {
-        "monetary_asset"
-    } else if ["应付", "payable", "accts pay", "acct pay", "a/p", "借款", "loan", "interco vend"]
-        .iter()
-        .any(|x| normalized.contains(x))
-    {
-        "monetary_liability"
-    } else if [
-        "汇兑损益", "汇率损益", "exchange gain", "exchange loss", "fx gain", "fx loss",
-        "cur remeasur g/l", "currency remeasur", "fx transl cogs", "foreign exch", "forex g/l",
-    ]
-        .iter()
-        .any(|x| normalized.contains(x))
-    {
-        "fx_gain_loss"
-    } else if ["预付", "预收"].iter().any(|x| normalized.contains(x)) {
-        "review"
-    } else {
-        "unassigned"
+fn tb_account_name_lookup(params: &Value) -> Result<HashMap<String, String>, AppError> {
+    let Some(source) = params.get("tbSource") else {
+        return Ok(HashMap::new());
+    };
+    let spec: SourceSpec = serde_json::from_value(source.clone())
+        .map_err(|e| error("INVALID_PARAMS", "TB参数无效。", Some(e.to_string())))?;
+    let table = load_fx_table(&spec)?;
+    let mapping = mapping_obj(params, "tbMapping");
+    let mut lookup = HashMap::new();
+    for row in records(&table) {
+        let (code, name) = account_code_and_name(&row, &mapping);
+        if !code.is_empty() && !name.is_empty() {
+            lookup.entry(code.trim().to_uppercase()).or_insert(name);
+        }
     }
-    .into()
+    Ok(lookup)
+}
+
+fn with_tb_account_names(params: &Value) -> Result<Value, AppError> {
+    let mut enriched = params.clone();
+    if let Some(object) = enriched.as_object_mut() {
+        object.insert(
+            "__tbAccountNames".into(),
+            json!(tb_account_name_lookup(params)?),
+        );
+    }
+    Ok(enriched)
+}
+
+fn is_english_account_name(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| character.is_ascii_alphabetic())
+        && !value
+            .chars()
+            .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character))
+}
+
+fn translate_tb_account_names(params: &Value) -> (HashMap<String, String>, bool, Option<String>) {
+    let message = |error: &AppError| {
+        serde_json::to_value(error)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("userMessage")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "LLM科目翻译失败".to_owned())
+    };
+    let requested = params
+        .get("translateTbAccountNames")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if let Some(cached) = params.get("accountTranslations").and_then(Value::as_object) {
+        let translations = cached
+            .iter()
+            .filter_map(|(code, name)| {
+                name.as_str()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| (code.to_owned(), value.to_owned()))
+            })
+            .collect::<HashMap<_, _>>();
+        if !translations.is_empty() {
+            return (translations, true, None);
+        }
+    }
+    let settings = params.get("__settings").unwrap_or(&Value::Null);
+    let llm_enabled = settings
+        .pointer("/llm/enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !requested || !llm_enabled {
+        return (HashMap::new(), false, None);
+    }
+    let original = match tb_account_name_lookup(params) {
+        Ok(value) => value,
+        Err(error) => return (HashMap::new(), false, Some(message(&error))),
+    };
+    let candidates = original
+        .into_iter()
+        .filter(|(_, name)| is_english_account_name(name))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return (HashMap::new(), false, None);
+    }
+    let mut translations = HashMap::new();
+    let mut failures = Vec::new();
+    for chunk in candidates.chunks(80) {
+        match crate::audipick::fx_account_translation_llm_call(chunk, settings) {
+            Ok(values) => translations.extend(values),
+            Err(error) => failures.push(message(&error)),
+        }
+    }
+    let enabled = !translations.is_empty();
+    let issue = (!failures.is_empty()).then(|| {
+        format!(
+            "部分或全部英文科目名称未能完成LLM翻译：{}；底稿仍保留原始科目名称。",
+            failures.join("；")
+        )
+    });
+    (translations, enabled, issue)
+}
+
+fn account_match_key(account: &str) -> &str {
+    account
+        .split_whitespace()
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(account.trim())
+}
+
+fn auxiliary_value(row: &RowRecord, mapping: &Map<String, Value>) -> String {
+    mapped_cols(mapping, "auxiliary")
+        .iter()
+        .filter_map(|column| row.values.get(column.as_str()))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn monetary_balance_key(entity: &str, account: &str, currency: &str, auxiliary: &str) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        entity.trim(),
+        account_match_key(account).trim().to_uppercase(),
+        normalize_currency(currency),
+        auxiliary.trim()
+    )
+}
+
+/// 科目角色分类：先看名称关键词，认不出再按科目编码兜底。
+///
+/// 名称优先是因为客户常把账户币种、用途写在名称里（`银行存款-中行朝阳支行美元户`），
+/// 比编码信息量大；编码兜底是因为《企业会计准则——会计科目和主要账务处理》
+/// 规定了前四位，客户自定义的明细挂在后面，前四位基本不动。
+///
+/// 只靠关键词时，实测 206 个科目有 112 个落到「未分配」——使用权资产、长期待摊费用、
+/// 长期股权投资、合同负债、应交税费全都认不出，其中「其他货币资金-保证金」
+/// 本该算现金却漏掉了，会直接少算一块外币重估。
+fn suggest_account_role(value: &str) -> String {
+    if let Some(role) = role_by_keyword(value) {
+        return role.into();
+    }
+    if let Some(role) = role_by_account_code(value) {
+        return role.into();
+    }
+    "unassigned".into()
+}
+
+fn role_by_keyword(value: &str) -> Option<&'static str> {
+    let normalized = value.to_lowercase();
+    let hit = |words: &[&str]| words.iter().any(|x| normalized.contains(x));
+    // 汇兑损益要放在最前面：「汇兑损益」这类科目名里常带「财务费用」，
+    // 而财务费用本身是损益类，判成非货币就丢了勾稽基准。
+    if hit(&[
+        "汇兑损益", "汇率损益", "汇兑收益", "汇兑差额", "exchange gain", "exchange loss",
+        "fx gain", "fx loss", "cur remeasur g/l", "currency remeasur", "fx transl cogs",
+        "foreign exch", "forex g/l",
+    ]) {
+        return Some("fx_gain_loss");
+    }
+    if hit(&[
+        "银行存款", "库存现金", "其他货币资金", "存放中央银行", "存放同业", "货币资金",
+        "cash", "bank", "boc", "boa", "hsbc", "cmb", "petty cash",
+    ]) {
+        return Some("cash");
+    }
+    // 预付/预收要在应收应付之前判——「预付账款」含「付」，会被应付抢走。
+    if hit(&["预付", "预收", "合同资产", "合同负债"]) {
+        return Some("review");
+    }
+    if hit(&[
+        "应收", "其他应收", "应收票据", "坏账准备", "押金", "保证金", "备用金",
+        "receivable", "accts rec", "acct rec", "a/r", "ar-trade", "interco cust",
+        "bad debt", "bd db", "deposit",
+    ]) {
+        return Some("monetary_asset");
+    }
+    if hit(&[
+        "应付", "其他应付", "应付票据", "应付职工薪酬", "应交税费", "借款", "应付债券",
+        "长期应付", "租赁负债", "一年内到期", "payable", "accts pay", "acct pay", "a/p",
+        "ap-trade", "loan", "borrowing", "lease liab", "interco vend", "gr/ir",
+        "frt pay", "accrued",
+    ]) {
+        return Some("monetary_liability");
+    }
+    if hit(&[
+        "存货", "库存商品", "原材料", "在产品", "半成品", "半产品", "发出商品", "周转材料",
+        "委托加工", "固定资产", "在建工程", "使用权资产", "无形资产", "长期待摊",
+        "累计折旧", "累计摊销", "股权投资", "权益工具投资", "投资性房地产", "商誉",
+        "递延所得税", "递延收益", "实收资本", "资本公积", "盈余公积", "未分配利润",
+        "inventory", "inven-", "inv-fp", "property, plant", "fixed asset", "intangible",
+        "right-of-use", "goodwill", "prepaid expense", "accum depr", "accum amort",
+    ]) {
+        return Some("non_monetary");
+    }
+    None
+}
+
+/// 按《企业会计准则》的科目编码前四位归类。
+///
+/// 取值里第一段连续数字就是科目编码——`1002030029 银行存款-招行RMB0702` 取 `1002`。
+/// 客户自定义的明细挂在四位之后，不影响判断。
+fn role_by_account_code(value: &str) -> Option<&'static str> {
+    let digits: String = value
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.len() < 4 {
+        return None;
+    }
+    let head: u32 = digits[..4].parse().ok()?;
+    Some(match head {
+        // 货币资金：库存现金、银行存款、存放中央银行、存放同业、其他货币资金
+        1001 | 1002 | 1003 | 1011 | 1012 => "cash",
+        // 应收款项与其他货币性资产（含坏账准备、应收利息股利）
+        1121 | 1122 | 1131 | 1132 | 1221 | 1231 => "monetary_asset",
+        // 预付账款：可能是采购定金也可能是待摊，交给用户确认
+        1123 => "review",
+        // 交易性金融资产、债权投资、长期股权投资、投资性房地产、其他权益工具投资
+        1101 | 1501 | 1503 | 1511 | 1521 | 1523 | 1524 => "non_monetary",
+        // 存货类（1401–1471，含跌价准备）
+        1401..=1471 => "non_monetary",
+        // 固定资产、在建工程、使用权资产、无形资产、长期待摊、递延所得税资产
+        1601..=1605 | 1701 | 1702 | 1711 | 1801 | 1811 => "non_monetary",
+        // 其他非流动资产：押金保证金居多，按货币性资产处理
+        1812 => "monetary_asset",
+        // 借款与应付款项
+        // 2251 一年内到期的非流动负债、2602 租赁负债：新租赁准则下外币租赁负债
+        // 同样要按期末汇率重估，归货币性负债。
+        2001 | 2201 | 2202 | 2211 | 2221 | 2231 | 2232 | 2241 | 2251 | 2501 | 2502
+        | 2602 | 2701 => "monetary_liability",
+        // 预收账款与合同负债：是否重估要看是否附带退款义务，交给用户确认
+        2203 | 2205 | 2206 => "review",
+        // 预计负债、递延收益、权益类
+        2801 | 2901 | 3001..=4999 => "non_monetary",
+        // 成本类与损益类：本身不是货币性项目，不参与重估
+        5001..=6999 => "non_monetary",
+        _ => return None,
+    })
 }
 
 fn role_for(account: &str, params: &Value) -> String {
     let roles = params.get("accountRoles").and_then(Value::as_object);
     if let Some(role) = roles.and_then(|m| m.get(account)).and_then(Value::as_str) {
-        if role != "unassigned" { return role.to_owned(); }
+        if role != "unassigned" {
+            return role.to_owned();
+        }
     }
     let key = account_match_key(account);
-    if let Some(role) = roles.and_then(|values| values.iter().find_map(|(candidate, role)| {
-        (account_match_key(candidate) == key)
-            .then(|| role.as_str())
-            .flatten()
-            .filter(|value| *value != "unassigned")
-    })) { return role.to_owned(); }
+    if let Some(role) = roles.and_then(|values| {
+        values.iter().find_map(|(candidate, role)| {
+            (account_match_key(candidate) == key)
+                .then(|| role.as_str())
+                .flatten()
+                .filter(|value| *value != "unassigned")
+        })
+    }) {
+        return role.to_owned();
+    }
+    if let Some(name) = params
+        .get("__tbAccountNames")
+        .and_then(Value::as_object)
+        .and_then(|names| names.get(&key.trim().to_uppercase()))
+        .and_then(Value::as_str)
+    {
+        let suggested = suggest_account_role(&format!("{account} {name}"));
+        if suggested != "unassigned" {
+            return suggested;
+        }
+    }
     suggest_account_role(account)
 }
 
@@ -1829,6 +3715,25 @@ fn supported_currencies() -> HashSet<&'static str> {
     .collect()
 }
 
+fn foreign_currency_columns(table: &FxTable) -> Vec<(String, BTreeSet<String>)> {
+    let supported = supported_currencies();
+    table
+        .headers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, header)| {
+            let currencies = table
+                .rows
+                .iter()
+                .filter_map(|row| row.get(index))
+                .map(|value| normalize_currency(value))
+                .filter(|code| code != "CNY" && supported.contains(code.as_str()))
+                .collect::<BTreeSet<_>>();
+            (!currencies.is_empty()).then(|| (header.clone(), currencies))
+        })
+        .collect()
+}
+
 fn functional_currency(entity: &str, params: &Value) -> String {
     params
         .get("entityCurrencies")
@@ -1846,14 +3751,29 @@ fn rate(
     functional: &str,
 ) -> Option<(f64, String)> {
     let requested = date.format("%Y-%m-%d").to_string();
-    let find = |code: &str| {
-        snapshot
+    let foreign_code = normalize_currency(currency);
+    let functional_code = normalize_currency(functional);
+    let mut cache = FX_RATE_INDEX.get_or_init(|| Mutex::new(None)).lock().ok()?;
+    let rebuild = cache
+        .as_ref()
+        .is_none_or(|(hash, _)| hash != &snapshot.response_hash);
+    if rebuild {
+        let index = snapshot
             .rates
             .iter()
-            .find(|r| r.requested_date == requested && r.currency == code)
-    };
-    let foreign = find(&normalize_currency(currency))?;
-    let functional_rate = find(&normalize_currency(functional))?;
+            .cloned()
+            .map(|point| {
+                (
+                    (point.requested_date.clone(), point.currency.clone()),
+                    point,
+                )
+            })
+            .collect();
+        *cache = Some((snapshot.response_hash.clone(), index));
+    }
+    let index = &cache.as_ref()?.1;
+    let foreign = index.get(&(requested.clone(), foreign_code))?;
+    let functional_rate = index.get(&(requested, functional_code))?;
     Some((
         foreign.cny_per_unit / functional_rate.cny_per_unit,
         foreign.published_date.clone(),
@@ -1878,38 +3798,30 @@ fn calculate(
             Some(validation.to_string()),
         ));
     }
+    let enriched_params = with_tb_account_names(params)?;
+    let params = &enriched_params;
+    let mode = params
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("combined");
+    let balance_rollforward_validation = if matches!(mode, "unrealized" | "combined") {
+        validate_tb_je_balance_rollforward(params)?
+    } else {
+        json!({"performed":false,"reason":"当前模式不包含未实现测算"})
+    };
     checkpoint(cancel, pause)?;
     progress("rates", 1, 4, "正在锁定官方汇率快照…");
     let snapshot = obtain_rates(params)?;
     checkpoint(cancel, pause)?;
     progress("calculate", 2, 4, "正在执行汇兑损益测算与分类…");
-    let mode = params
-        .get("mode")
-        .and_then(Value::as_str)
-        .unwrap_or("combined");
     let mut realized = Vec::new();
     let mut unrealized = Vec::new();
     let mut classification = Vec::new();
     let mut quality = Vec::new();
-    let je_detail = if let Some(source) = params.get("jeSource") {
-        let spec: SourceSpec = serde_json::from_value(source.clone())
-            .map_err(|e| error("INVALID_PARAMS", "JE参数无效。", Some(e.to_string())))?;
-        let table = load_fx_table(&spec)?;
-        records(&table)
-            .into_iter()
-            .map(|row| {
-                let mut value = row
-                    .values
-                    .into_iter()
-                    .map(|(key, value)| (key, Value::String(value)))
-                    .collect::<Map<_, _>>();
-                value.insert("sourceRow".into(), json!(row.source_row));
-                Value::Object(value)
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    // JE 完整明细只有导出时写「JE完整明细」那张 Sheet 才用得上，测算预览会把它整个丢掉。
+    // 36 万行 × 46 列转成 JSON 对象要几 GB 内存，还要跟着测算结果一起被克隆进预览缓存——
+    // 白算一遍。改为导出前按需构造（[`build_je_detail`]）。
+    let je_detail: Vec<Value> = Vec::new();
     if matches!(mode, "realized" | "combined") {
         let (calculation, classes, issues) = calculate_realized(params, &snapshot)?;
         realized = calculation;
@@ -1928,22 +3840,101 @@ fn calculate(
     let unrealized_total = unrealized
         .iter()
         .filter_map(|v| {
-            v.get("suggestedAdjustment")
-                .or_else(|| v.get("unrealizedGainLoss"))
+            v.get("unrealizedGainLoss")
+                .or_else(|| v.get("suggestedAdjustment"))
                 .and_then(Value::as_f64)
         })
         .sum::<f64>();
     let automatic_total = realized_total + unrealized_total;
     let bridge = build_review_bridge(params, &realized, &unrealized)?;
-    let pending_review = bridge.get("pendingReviews").and_then(Value::as_array).cloned().unwrap_or_default();
-    let pending_review_amount = bridge.get("pendingReviewAmount").and_then(Value::as_f64).unwrap_or(0.0);
-    let covered_book = bridge.get("coveredBookFxGainLoss").and_then(Value::as_f64).unwrap_or(0.0);
-    let provisional_total = automatic_total + pending_review_amount;
+    let classification_controls = bridge
+        .get("classificationControls")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let pending_review = bridge
+        .get("pendingReviews")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let pending_review_amount = bridge
+        .get("pendingReviewAmount")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let covered_book = bridge
+        .get("coveredBookFxGainLoss")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    // 待确认项目只披露，不进入审计测算。已实现按结算事件测算；
+    // 未实现按外币货币性项目余额测算，客户重估凭证只作为比较证据。
+    let provisional_total = automatic_total;
+    if params
+        .get("translateTbAccountNames")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && params
+            .pointer("/__settings/llm/enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        progress("translate_accounts", 2, 4, "正在翻译TB英文科目名称…");
+    }
+    let (account_translations, translation_enabled, translation_issue) =
+        translate_tb_account_names(params);
+    if let Some(detail) = translation_issue {
+        quality.push(json!({
+            "source":"LLM科目翻译", "type":"英文科目名称翻译未完全成功",
+            "severity":"提示", "detail":detail
+        }));
+    }
+    let voucher_detail = build_relevant_voucher_detail(
+        params,
+        &realized,
+        &unrealized,
+        &pending_review,
+        &account_translations,
+        translation_enabled,
+    )?;
+    let mut account_name_catalog = BTreeMap::<String, Value>::new();
+    for item in &voucher_detail {
+        let code = item
+            .get("accountCode")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_uppercase();
+        if code.is_empty() {
+            continue;
+        }
+        account_name_catalog.entry(code.clone()).or_insert_with(|| {
+            json!({
+                "accountCode": code,
+                "accountNameOriginal": item.get("accountNameOriginal").cloned().unwrap_or(Value::Null),
+                "accountNameChinese": item.get("accountNameChinese").cloned().unwrap_or(Value::Null)
+            })
+        });
+    }
+    let mut client_revaluation_map = BTreeMap::<String, Value>::new();
+    for detail in unrealized
+        .iter()
+        .filter_map(|item| {
+            item.get("clientRevaluationDetails")
+                .and_then(Value::as_array)
+        })
+        .flatten()
+    {
+        if let Some(id) = detail.get("voucherId").and_then(Value::as_str) {
+            client_revaluation_map
+                .entry(id.to_owned())
+                .or_insert_with(|| detail.clone());
+        }
+    }
+    let client_revaluation_vouchers = client_revaluation_map.into_values().collect::<Vec<_>>();
     for item in &pending_review {
         classification.push(json!({
             "voucherId": item.get("voucherId"), "classification":"待复核",
             "eventType": item.get("voucherType"), "realizedScore":0.0, "unrealizedScore":0.0,
-            "matchedRules":["未执行复杂多行分摊，按账面汇兑损益暂列待复核"],
+            "matchedRules":[item.get("pendingCategory")],
             "counterEvidence":[item.get("reviewReason")], "confidence":"待复核", "ruleConflict":false
         }));
     }
@@ -1951,15 +3942,47 @@ fn calculate(
     if let Some(object) = reconciliation.as_object_mut() {
         object.insert("coveredBookFxGainLoss".into(), json!(covered_book));
         object.insert("pendingReviewAmount".into(), json!(pending_review_amount));
-        object.insert("pendingReviewCount".into(), bridge.get("pendingReviewCount").cloned().unwrap_or(json!(0)));
-        object.insert("coverageDifference".into(), bridge.get("coverageDifference").cloned().unwrap_or(json!(0.0)));
+        object.insert(
+            "pendingReviewCount".into(),
+            bridge
+                .get("pendingReviewCount")
+                .cloned()
+                .unwrap_or(json!(0)),
+        );
+        object.insert(
+            "coverageDifference".into(),
+            bridge
+                .get("coverageDifference")
+                .cloned()
+                .unwrap_or(json!(0.0)),
+        );
     }
     let tb_fx = reconciliation.get("tbFxGainLoss").and_then(Value::as_f64);
+    let client_booked_unrealized = unrealized
+        .iter()
+        .filter_map(|item| {
+            item.get("clientBookedUnrealizedGainLoss")
+                .and_then(Value::as_f64)
+        })
+        .sum::<f64>();
+    // “已覆盖账面金额”已经排除了待确认凭证。再扣除客户已入账未实现
+    // 部分，得到与已实现审计测算同口径的账面已实现金额。
+    let covered_book_realized = covered_book - client_booked_unrealized;
+    let realized_difference = realized_total - covered_book_realized;
+    let unrealized_difference = unrealized_total - client_booked_unrealized;
     let difference = tb_fx.map(|value| provisional_total - value);
     let difference_ratio = tb_fx.and_then(|value| {
-        if value.abs() < 0.01 { None } else { Some((provisional_total - value).abs() / value.abs()) }
+        if value.abs() < 0.01 {
+            None
+        } else {
+            Some((provisional_total - value).abs() / value.abs())
+        }
     });
     let no_calculation_rows = realized.is_empty() && unrealized.is_empty();
+    let unrealized_missing_balance_keys = quality
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("未实现测算缺少TB余额基础"))
+        .count();
     if no_calculation_rows && !classification.is_empty() {
         quality.push(json!({
             "source":"系统诊断", "type":"外币数据未形成测算结果", "severity":"待复核",
@@ -1972,6 +3995,12 @@ fn calculate(
         "summary": {
             "realizedGainLoss": realized_total,
             "unrealizedAdjustment": unrealized_total,
+            "clientBookedUnrealizedGainLoss": client_booked_unrealized,
+            "coveredBookRealizedGainLoss": covered_book_realized,
+            "realizedMeasurementDifference": realized_difference,
+            "unrealizedMeasurementDifference": unrealized_difference,
+            "coveredMeasurementDifference": automatic_total - covered_book,
+            "uncoveredTbFxGainLoss": pending_review_amount,
             "automaticMeasuredFxGainLoss": automatic_total,
             "pendingReviewAmount": pending_review_amount,
             "pendingReviewCount": pending_review.len(),
@@ -1984,16 +4013,37 @@ fn calculate(
             "reconciliationPassed": difference_ratio.map(|value| value < 0.05),
             "realizedEvents": realized.len(),
             "unrealizedRows": unrealized.len(),
+            "unrealizedMissingBalanceKeys": unrealized_missing_balance_keys,
+            "unrealizedBalanceBasisComplete": unrealized_missing_balance_keys == 0,
+            "translatedAccountNames": account_translations.len(),
+            "accountTranslationEnabled": translation_enabled,
             "lowConfidenceEvents": classification.iter().filter(|v|
                 v.get("confidence").and_then(Value::as_str) == Some("低")
             ).count(),
             "needsZeroResultReview": no_calculation_rows && !classification.is_empty()
         },
         "realized": realized, "classification": classification, "jeDetail": je_detail,
-        "unrealized": unrealized, "pendingReview": pending_review,
+        "voucherDetail": voucher_detail, "classificationControls": classification_controls,
+        "accountNameCatalog": account_name_catalog.into_values().collect::<Vec<_>>(),
+        "accountTranslations": account_translations,
+        "unrealized": unrealized,
+        "unrealizedBalanceRollforward": unrealized,
+        "unrealizedComparison": unrealized,
+        "clientRevaluationVouchers": client_revaluation_vouchers,
+        "pendingReview": pending_review,
         "dataQuality": quality, "reconciliation": reconciliation,
+        "balanceRollforwardValidation": balance_rollforward_validation,
         "validation": validation, "rateSnapshot": snapshot
     }))
+}
+
+fn manual_classification<'a>(params: &'a Value, voucher_id: &str) -> Option<&'a str> {
+    params
+        .get("manualClassifications")
+        .and_then(Value::as_object)
+        .and_then(|items| items.get(voucher_id))
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "已实现汇兑损益" | "未实现汇兑损益" | "待确认"))
 }
 
 fn reconcile_fx_gain_loss(params: &Value) -> Result<Value, AppError> {
@@ -2004,39 +4054,56 @@ fn reconcile_fx_gain_loss(params: &Value) -> Result<Value, AppError> {
             .map_err(|e| error("INVALID_PARAMS", "TB参数无效。", Some(e.to_string())))?;
         let table = load_fx_table(&spec)?;
         let mapping = mapping_obj(params, "tbMapping");
-        let mut candidates = records(&table).into_iter().filter_map(|row| {
-            let account = account_name(&row, &mapping);
-            if role_for(&account, params) != "fx_gain_loss" { return None; }
-            let debit = first_col(&mapping, "periodFunctionalDebit")
-                .and_then(|column| row.values.get(&column))
-                .map(|value| strict_number(value).map(|v| v.unwrap_or(0.0)))
-                .transpose().ok().flatten();
-            let credit = first_col(&mapping, "periodFunctionalCredit")
-                .and_then(|column| row.values.get(&column))
-                .map(|value| strict_number(value).map(|v| v.unwrap_or(0.0)))
-                .transpose().ok().flatten();
-            let closing = first_col(&mapping, "closingFunctionalAmount")
-                .and_then(|column| row.values.get(&column))
-                .map(|value| strict_number(value).map(|v| v.unwrap_or(0.0)))
-                .transpose().ok().flatten();
-            // 发生额借、贷方案只有在两列同时映射时才成立。单边的LLM建议
-            // 不能覆盖更可靠的累计/期末净额列，否则SAP的MTD列会误替代YTD。
-            let split_period_scheme = first_col(&mapping, "periodFunctionalDebit").is_some()
-                && first_col(&mapping, "periodFunctionalCredit").is_some();
-            let amount = match (split_period_scheme, debit, credit) {
-                (true, Some(d), Some(c)) if (d - c).abs() < 0.01 && d.signum() == c.signum() => d,
-                (true, Some(d), Some(c)) => d - c,
-                _ => closing.unwrap_or(0.0),
-            };
-            Some((account, row.source_row, amount))
-        }).collect::<Vec<_>>();
+        let mut candidates = records(&table)
+            .into_iter()
+            .filter_map(|row| {
+                let account = account_name(&row, &mapping);
+                if role_for(&account, params) != "fx_gain_loss" {
+                    return None;
+                }
+                let debit = first_col(&mapping, "periodFunctionalDebit")
+                    .and_then(|column| row.values.get(column.as_str()))
+                    .map(|value| strict_number(value).map(|v| v.unwrap_or(0.0)))
+                    .transpose()
+                    .ok()
+                    .flatten();
+                let credit = first_col(&mapping, "periodFunctionalCredit")
+                    .and_then(|column| row.values.get(column.as_str()))
+                    .map(|value| strict_number(value).map(|v| v.unwrap_or(0.0)))
+                    .transpose()
+                    .ok()
+                    .flatten();
+                let closing = first_col(&mapping, "closingFunctionalAmount")
+                    .and_then(|column| row.values.get(column.as_str()))
+                    .map(|value| strict_number(value).map(|v| v.unwrap_or(0.0)))
+                    .transpose()
+                    .ok()
+                    .flatten();
+                // 发生额借、贷方案只有在两列同时映射时才成立。单边的LLM建议
+                // 不能覆盖更可靠的累计/期末净额列，否则SAP的MTD列会误替代YTD。
+                let split_period_scheme = first_col(&mapping, "periodFunctionalDebit").is_some()
+                    && first_col(&mapping, "periodFunctionalCredit").is_some();
+                let amount = match (split_period_scheme, debit, credit) {
+                    (true, Some(d), Some(c))
+                        if (d - c).abs() < 0.01 && d.signum() == c.signum() =>
+                    {
+                        d
+                    }
+                    (true, Some(d), Some(c)) => d - c,
+                    _ => closing.unwrap_or(0.0),
+                };
+                Some((account, row.source_row, amount))
+            })
+            .collect::<Vec<_>>();
         // Prefer detail accounts so a parent financial-expense row does not duplicate its child.
         candidates.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
         for (account, source_row, amount) in candidates {
             if tb_rows.iter().any(|value: &Value| {
                 let selected = value.get("account").and_then(Value::as_str).unwrap_or("");
                 selected != account && selected.starts_with(&account)
-            }) { continue; }
+            }) {
+                continue;
+            }
             tb_total += amount;
             tb_rows.push(json!({"account":account, "sourceRow":source_row, "amount":amount,
                 "scheme": if first_col(&mapping, "periodFunctionalDebit").is_some() && first_col(&mapping, "periodFunctionalCredit").is_some() {
@@ -2051,17 +4118,32 @@ fn reconcile_fx_gain_loss(params: &Value) -> Result<Value, AppError> {
             .map_err(|e| error("INVALID_PARAMS", "JE参数无效。", Some(e.to_string())))?;
         let table = load_fx_table(&spec)?;
         let mapping = mapping_obj(params, "jeMapping");
-        let id_indexes = std::iter::once(first_col(&mapping, "date")).flatten()
+        let id_indexes = std::iter::once(first_col(&mapping, "date"))
+            .flatten()
             .chain(mapped_cols(&mapping, "id"))
-            .filter_map(|name| table.headers.iter().position(|header| header == &name)).collect::<Vec<_>>();
-        let account_indexes = mapped_cols(&mapping, "account").iter()
-            .filter_map(|name| table.headers.iter().position(|header| header == name)).collect::<Vec<_>>();
-        let loss_keys = tabular::detect_loss_transfer_ids(&table.rows, &id_indexes, &account_indexes);
+            .filter_map(|name| table.headers.iter().position(|header| header == &name))
+            .collect::<Vec<_>>();
+        let account_indexes = account_columns(&mapping)
+            .iter()
+            .filter_map(|name| table.headers.iter().position(|header| header == name))
+            .collect::<Vec<_>>();
+        let loss_keys =
+            tabular::detect_loss_transfer_ids(&table.rows, &id_indexes, &account_indexes);
         for (row, raw) in records(&table).into_iter().zip(table.rows.iter()) {
-            if role_for(&account_name(&row, &mapping), params) != "fx_gain_loss" { continue; }
-            if loss_keys.contains(&tabular::voucher_key(raw, &id_indexes)) { excluded += 1; continue; }
-            je_total += signed_amount(&row, &mapping, "functional").map_err(|detail| error(
-                "NUMERIC_PARSE_FAILED", "JE汇兑损益金额无法解析。", Some(format!("第{}行：{detail}", row.source_row))))?;
+            if role_for(&account_name(&row, &mapping), params) != "fx_gain_loss" {
+                continue;
+            }
+            if loss_keys.contains(&tabular::voucher_key(raw, &id_indexes)) {
+                excluded += 1;
+                continue;
+            }
+            je_total += signed_amount(&row, &mapping, "functional").map_err(|detail| {
+                error(
+                    "NUMERIC_PARSE_FAILED",
+                    "JE汇兑损益金额无法解析。",
+                    Some(format!("第{}行：{detail}", row.source_row)),
+                )
+            })?;
         }
     }
     Ok(json!({"tbFxGainLoss":tb_total, "tbRows":tb_rows,
@@ -2069,33 +4151,114 @@ fn reconcile_fx_gain_loss(params: &Value) -> Result<Value, AppError> {
         "jeTbDifference":je_total-tb_total}))
 }
 
-fn build_review_bridge(params: &Value, realized: &[Value], unrealized: &[Value]) -> Result<Value, AppError> {
+fn voucher_account_pattern(
+    rows: &[RowRecord],
+    mapping: &Map<String, Value>,
+) -> (String, String, Vec<String>, Vec<String>) {
+    let mut debit = BTreeSet::new();
+    let mut credit = BTreeSet::new();
+    for row in rows {
+        let amount = signed_amount(row, mapping, "functional").unwrap_or(0.0);
+        if amount.abs() < 0.005 {
+            continue;
+        }
+        let (code, name) = account_code_and_name(row, mapping);
+        let raw_code = code.trim();
+        let leading_code = raw_code
+            .split_whitespace()
+            .next()
+            .filter(|value| value.chars().any(|character| character.is_ascii_digit()));
+        let account = if let Some(value) = leading_code {
+            value.to_uppercase()
+        } else if raw_code.is_empty() {
+            name.trim().to_owned()
+        } else {
+            raw_code.to_uppercase()
+        };
+        if account.is_empty() {
+            continue;
+        }
+        if amount > 0.0 {
+            debit.insert(account);
+        } else {
+            credit.insert(account);
+        }
+    }
+    let debit = debit.into_iter().collect::<Vec<_>>();
+    let credit = credit.into_iter().collect::<Vec<_>>();
+    let key = format!("D:{}|C:{}", debit.join("+"), credit.join("+"));
+    let debit_label = if debit.is_empty() {
+        "—".into()
+    } else {
+        debit.join("、")
+    };
+    let credit_label = if credit.is_empty() {
+        "—".into()
+    } else {
+        credit.join("、")
+    };
+    let label = format!("借：{debit_label}；贷：{credit_label}");
+    (key, label, debit, credit)
+}
+
+fn build_review_bridge(
+    params: &Value,
+    realized: &[Value],
+    unrealized: &[Value],
+) -> Result<Value, AppError> {
     let Some(source) = params.get("jeSource") else {
         return Ok(json!({
             "pendingReviews": [], "pendingReviewAmount": 0.0,
             "coveredBookFxGainLoss": 0.0, "jeFxGainLoss": null,
-            "automaticCoveredVouchers": 0, "pendingReviewCount": 0
+            "automaticCoveredVouchers": 0, "pendingReviewCount": 0,
+            "classificationControls": []
         }));
     };
     let spec: SourceSpec = serde_json::from_value(source.clone())
         .map_err(|e| error("INVALID_PARAMS", "JE参数无效。", Some(e.to_string())))?;
     let table = load_fx_table(&spec)?;
     let mapping = mapping_obj(params, "jeMapping");
-    let measured = realized.iter().chain(unrealized.iter())
+    let realized_measured = realized
+        .iter()
         .filter_map(|item| item.get("voucherId").and_then(Value::as_str))
-        .map(str::to_owned).collect::<HashSet<_>>();
-    let id_indexes = std::iter::once(first_col(&mapping, "date")).flatten()
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    let mut client_revaluation_recognized = HashSet::new();
+    for item in unrealized {
+        for id in item
+            .get("clientRevaluationVoucherIds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            client_revaluation_recognized.insert(id.to_owned());
+        }
+    }
+    let id_indexes = std::iter::once(first_col(&mapping, "date"))
+        .flatten()
         .chain(mapped_cols(&mapping, "id"))
-        .filter_map(|name| table.headers.iter().position(|header| header == &name)).collect::<Vec<_>>();
-    let account_indexes = mapped_cols(&mapping, "account").iter()
-        .filter_map(|name| table.headers.iter().position(|header| header == name)).collect::<Vec<_>>();
+        .filter_map(|name| table.headers.iter().position(|header| header == &name))
+        .collect::<Vec<_>>();
+    let account_indexes = account_columns(&mapping)
+        .iter()
+        .filter_map(|name| table.headers.iter().position(|header| header == name))
+        .collect::<Vec<_>>();
     let loss_keys = tabular::detect_loss_transfer_ids(&table.rows, &id_indexes, &account_indexes);
     let mut groups = BTreeMap::<String, Vec<RowRecord>>::new();
     for (row, raw) in records(&table).into_iter().zip(table.rows.iter()) {
-        if !is_je_business_row(&row, &mapping) || loss_keys.contains(&tabular::voucher_key(raw, &id_indexes)) { continue; }
-        groups.entry(voucher_id(&row, &mapping, params)).or_default().push(row);
+        if !is_je_business_row(&row, &mapping)
+            || loss_keys.contains(&tabular::voucher_key(raw, &id_indexes))
+        {
+            continue;
+        }
+        groups
+            .entry(voucher_id(&row, &mapping, params))
+            .or_default()
+            .push(row);
     }
     let mut pending = Vec::new();
+    let mut controls = Vec::new();
     let mut pending_amount = 0.0;
     let mut covered_book = 0.0;
     let mut je_total = 0.0;
@@ -2105,40 +4268,110 @@ fn build_review_bridge(params: &Value, realized: &[Value], unrealized: &[Value])
         let mut fx_accounts = BTreeSet::new();
         let mut all_accounts = BTreeSet::new();
         let mut currencies = BTreeSet::new();
+        let mut has_non_monetary = false;
         for row in &rows {
             let account = account_name(row, &mapping);
-            if !account.trim().is_empty() { all_accounts.insert(account.clone()); }
+            if !account.trim().is_empty() {
+                all_accounts.insert(account.clone());
+            }
             let currency = normalize_currency(cell(row, &mapping, "currency"));
-            if !currency.is_empty() { currencies.insert(currency); }
-            if role_for(&account, params) == "fx_gain_loss" {
+            if !currency.is_empty() {
+                currencies.insert(currency);
+            }
+            let role = role_for(&account, params);
+            has_non_monetary |= role == "non_monetary";
+            if role == "fx_gain_loss" {
                 fx_accounts.insert(account);
-                booked += signed_amount(row, &mapping, "functional").map_err(|detail| error(
-                    "NUMERIC_PARSE_FAILED", "JE汇兑损益金额无法解析。", Some(format!("第{}行：{detail}", row.source_row))))?;
+                booked += signed_amount(row, &mapping, "functional").map_err(|detail| {
+                    error(
+                        "NUMERIC_PARSE_FAILED",
+                        "JE汇兑损益金额无法解析。",
+                        Some(format!("第{}行：{detail}", row.source_row)),
+                    )
+                })?;
             }
         }
-        if booked.abs() < 0.005 { continue; }
-        je_total += booked;
-        let display_id = display_voucher_id(&id);
-        if measured.contains(&display_id) {
-            covered_book += booked;
-            covered_count += 1;
+        if booked.abs() < 0.005 {
             continue;
         }
-        let voucher_type = rows.iter().map(|row| cell(row, &mapping, "voucherType"))
-            .find(|value| !value.trim().is_empty()).unwrap_or_default().trim().to_uppercase();
-        let summary = rows.iter().map(|row| cell(row, &mapping, "summary"))
-            .filter(|value| !value.trim().is_empty()).collect::<Vec<_>>().join(" | ");
-        let reason = match voucher_type.as_str() {
-            "AB" => "手工调整、重分类或多行净额凭证，暂不执行复杂分摊",
-            "FX" => "重估影子科目、底层科目角色不明确或属于非货币性项目",
-            "DZ" | "ZE" => "收付款结构包含多个货币性项目，无法可靠一对一匹配",
-            _ => "结算或重估证据不足，无法可靠自动重算",
+        je_total += booked;
+        let display_id = display_voucher_id(&id);
+        let is_realized_measured = realized_measured.contains(&display_id);
+        let is_client_revaluation = client_revaluation_recognized.contains(&display_id);
+        let is_measured = is_realized_measured || is_client_revaluation;
+        let selected = manual_classification(params, &display_id).unwrap_or("待确认");
+        if is_measured {
+            covered_book += booked;
+            covered_count += 1;
+        }
+        let voucher_type = rows
+            .iter()
+            .map(|row| cell(row, &mapping, "voucherType"))
+            .find(|value| !value.trim().is_empty())
+            .unwrap_or_default()
+            .trim()
+            .to_uppercase();
+        let mut seen_summaries = HashSet::new();
+        let summary = rows
+            .iter()
+            .map(|row| cell(row, &mapping, "summary").trim().to_owned())
+            .filter(|value| !value.is_empty() && seen_summaries.insert(value.clone()))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let (category, reason) = if has_non_monetary {
+            (
+                "非货币性项目/异常复核",
+                "对方科目为存货、固定资产等非货币性项目，不应直接归入已实现或未实现汇兑损益",
+            )
+        } else {
+            match voucher_type.as_str() {
+                "AB" => (
+                    "手工调整/多行净额",
+                    "手工调整、重分类或多行净额凭证，暂不执行复杂分摊",
+                ),
+                "FX" => (
+                    "重估证据不足",
+                    "重估影子科目、底层科目角色不明确或属于非货币性项目",
+                ),
+                "DZ" | "ZE" => (
+                    "多对多结算",
+                    "收付款结构包含多个货币性项目，无法可靠一对一匹配",
+                ),
+                _ => ("结算或重估证据不足", "结算或重估证据不足，无法可靠自动重算"),
+            }
         };
+        let (pattern_key, pattern_label, debit_accounts, credit_accounts) =
+            voucher_account_pattern(&rows, &mapping);
+        if !is_measured || manual_classification(params, &display_id).is_some() {
+            controls.push(json!({
+                "voucherId": display_id.clone(),
+                "date": rows.iter().find_map(|row| parse_date(cell(row, &mapping, "date"))),
+                "voucherType": voucher_type.clone(),
+                "systemCategory": category,
+                "bookedFxGainLoss": booked,
+                "reviewReason": if is_client_revaluation {
+                    "该凭证属于客户已入账未实现汇兑损益或其冲回，仅作为比较证据；审计金额来自外币货币性项目余额滚动，不采用本凭证金额作为测算结果"
+                } else if selected != "待确认" && !is_measured {
+                    "用户已确认分类，但缺少执行相应重算所需的原币、账面价值或汇率证据；本凭证未进入测算结果"
+                } else { reason },
+                "classification": selected,
+                "measurementStatus": if is_client_revaluation {
+                    "已识别为未实现汇兑损益类凭证；审计金额按账户余额测算"
+                } else if is_realized_measured {"测算成功"} else if selected == "待确认" {"待确认"} else {"无法测算，未纳入结果"},
+                "patternKey": pattern_key, "patternLabel": pattern_label,
+                "debitAccounts": debit_accounts, "creditAccounts": credit_accounts,
+                "summary": summary.clone()
+            }));
+        }
+        if is_measured {
+            continue;
+        }
         pending_amount += booked;
         pending.push(json!({
             "voucherId": display_id,
             "date": rows.iter().find_map(|row| parse_date(cell(row, &mapping, "date"))),
             "voucherType": voucher_type, "classification": "待复核",
+            "pendingCategory": category,
             "bookedFxGainLoss": booked, "reviewReason": reason,
             "fxAccounts": fx_accounts.into_iter().collect::<Vec<_>>(),
             "accounts": all_accounts.into_iter().collect::<Vec<_>>(),
@@ -2146,14 +4379,155 @@ fn build_review_bridge(params: &Value, realized: &[Value], unrealized: &[Value])
             "evidence": summary
         }));
     }
+    let mut pattern_counts = HashMap::<String, usize>::new();
+    for item in &controls {
+        if let Some(key) = item.get("patternKey").and_then(Value::as_str) {
+            *pattern_counts.entry(key.to_owned()).or_default() += 1;
+        }
+    }
+    for item in &mut controls {
+        if let Some(object) = item.as_object_mut() {
+            let count = object
+                .get("patternKey")
+                .and_then(Value::as_str)
+                .and_then(|key| pattern_counts.get(key))
+                .copied()
+                .unwrap_or(1);
+            object.insert("patternVoucherCount".into(), json!(count));
+        }
+    }
     let pending_count = pending.len();
     Ok(json!({
         "pendingReviews": pending, "pendingReviewAmount": pending_amount,
         "coveredBookFxGainLoss": covered_book, "jeFxGainLoss": je_total,
         "automaticCoveredVouchers": covered_count,
         "pendingReviewCount": pending_count,
-        "coverageDifference": je_total - covered_book - pending_amount
+        "coverageDifference": je_total - covered_book - pending_amount,
+        "classificationControls": controls
     }))
+}
+
+fn build_relevant_voucher_detail(
+    params: &Value,
+    realized: &[Value],
+    unrealized: &[Value],
+    pending: &[Value],
+    account_translations: &HashMap<String, String>,
+    translation_enabled: bool,
+) -> Result<Vec<Value>, AppError> {
+    let Some(source) = params.get("jeSource") else {
+        return Ok(Vec::new());
+    };
+    let spec: SourceSpec = serde_json::from_value(source.clone())
+        .map_err(|e| error("INVALID_PARAMS", "JE参数无效。", Some(e.to_string())))?;
+    let table = load_fx_table(&spec)?;
+    let mapping = mapping_obj(params, "jeMapping");
+    let tb_names = tb_account_name_lookup(params)?;
+    let mut classes = HashMap::<String, (&str, String, String)>::new();
+    for item in realized {
+        if let Some(id) = item.get("voucherId").and_then(Value::as_str) {
+            classes.insert(id.to_owned(), ("已实现", String::new(), String::new()));
+        }
+    }
+    for item in unrealized {
+        if let Some(id) = item.get("voucherId").and_then(Value::as_str) {
+            classes
+                .entry(id.to_owned())
+                .or_insert(("未实现", String::new(), String::new()));
+        }
+        for id in item
+            .get("clientRevaluationVoucherIds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            classes
+                .entry(id.to_owned())
+                .or_insert(("未实现", String::new(), String::new()));
+        }
+    }
+    for item in pending {
+        if let Some(id) = item.get("voucherId").and_then(Value::as_str) {
+            classes.insert(
+                id.to_owned(),
+                (
+                    "待复核",
+                    item.get("pendingCategory")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned(),
+                    item.get("reviewReason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned(),
+                ),
+            );
+        }
+    }
+    let mut output = Vec::new();
+    for row in records(&table) {
+        if !is_je_business_row(&row, &mapping) {
+            continue;
+        }
+        let id = display_voucher_id(&voucher_id(&row, &mapping, params));
+        let Some((classification, category, reason)) = classes.get(&id) else {
+            continue;
+        };
+        let (account_code, je_account_name) = account_code_and_name(&row, &mapping);
+        let account_name = if je_account_name.is_empty() {
+            tb_names
+                .get(&account_code.trim().to_uppercase())
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            je_account_name
+        };
+        let foreign = signed_amount(&row, &mapping, "foreign").ok();
+        let functional = signed_amount(&row, &mapping, "functional").ok();
+        let mut value = Map::new();
+        value.insert("voucherId".into(), json!(id));
+        value.insert("classification".into(), json!(classification));
+        value.insert("pendingCategory".into(), json!(category));
+        value.insert("reviewReason".into(), json!(reason));
+        value.insert("sourceRow".into(), json!(row.source_row));
+        value.insert("date".into(), json!(cell(&row, &mapping, "date")));
+        value.insert("entity".into(), json!(entity_for(&row, &mapping, params)));
+        value.insert(
+            "voucherType".into(),
+            json!(cell(&row, &mapping, "voucherType")),
+        );
+        value.insert("summary".into(), json!(cell(&row, &mapping, "summary")));
+        value.insert("accountCode".into(), json!(account_code));
+        value.insert("accountNameOriginal".into(), json!(account_name));
+        if translation_enabled {
+            let chinese = if is_english_account_name(&account_name) {
+                account_translations
+                    .get(&account_code.trim().to_uppercase())
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                account_name.clone()
+            };
+            value.insert("accountNameChinese".into(), json!(chinese));
+        }
+        value.insert("currency".into(), json!(cell(&row, &mapping, "currency")));
+        value.insert(
+            "foreignAmount".into(),
+            foreign.map(Value::from).unwrap_or(Value::Null),
+        );
+        value.insert(
+            "functionalAmount".into(),
+            functional.map(Value::from).unwrap_or(Value::Null),
+        );
+        for (header, raw) in row.values {
+            value
+                .entry(format!("原始_{header}"))
+                .or_insert(Value::String(raw.to_string()));
+        }
+        output.push(Value::Object(value));
+    }
+    Ok(output)
 }
 
 fn calculate_realized(
@@ -2169,7 +4543,7 @@ fn calculate_realized(
         .chain(mapped_cols(&mapping, "id"))
         .filter_map(|name| table.headers.iter().position(|header| header == &name))
         .collect::<Vec<_>>();
-    let account_indexes = mapped_cols(&mapping, "account")
+    let account_indexes = account_columns(&mapping)
         .iter()
         .filter_map(|name| table.headers.iter().position(|header| header == name))
         .collect::<Vec<_>>();
@@ -2182,7 +4556,10 @@ fn calculate_realized(
         .collect::<HashSet<_>>();
     let mut groups: BTreeMap<String, Vec<RowRecord>> = BTreeMap::new();
     let mut quality = Vec::new();
-    for row in records(&table).into_iter().filter(|row| is_je_business_row(row, &mapping)) {
+    for row in records(&table)
+        .into_iter()
+        .filter(|row| is_je_business_row(row, &mapping))
+    {
         let id = voucher_id(&row, &mapping, params);
         if id.split('\u{1f}').any(|x| x.trim().is_empty()) {
             quality.push(json!({
@@ -2215,29 +4592,41 @@ fn calculate_realized(
         else {
             continue;
         };
+        let display_id = display_voucher_id(&id);
+        let manual = manual_classification(params, &display_id);
+        let manual_realized = manual == Some("已实现汇兑损益");
+        let manual_unrealized = manual == Some("未实现汇兑损益");
+        let manual_pending = manual == Some("待确认");
         let summary = rows
             .iter()
             .map(|r| cell(r, &mapping, "summary"))
             .collect::<Vec<_>>()
             .join(" ");
         let summary_lower = summary.to_lowercase();
-        let voucher_type_upper = rows.iter()
+        let voucher_type_upper = rows
+            .iter()
             .map(|r| cell(r, &mapping, "voucherType").trim())
             .find(|value| !value.is_empty())
             .unwrap_or("")
             .to_uppercase();
         let mut has_fx = false;
         let mut has_cash = false;
+        let mut has_foreign_currency = false;
         let mut settlement_targets = Vec::new();
         let mut monetary_counterparty_count = 0usize;
-        let mut monetary_foreign = 0.0;
-        let mut monetary_functional = 0.0;
+        let mut monetary_has_foreign_movement = false;
+        let mut monetary_has_functional_movement = false;
         let mut cash_settlements = HashMap::<String, (f64, f64)>::new();
         for row in &rows {
             let account = account_name(row, &mapping);
             let role = role_for(&account, params);
             has_fx |= role == "fx_gain_loss";
             has_cash |= role == "cash";
+            let entity = entity_for(row, &mapping, params);
+            let currency = normalize_currency(&currency_for(row, &mapping, &account, params));
+            let functional = normalize_currency(&functional_currency(entity, params));
+            has_foreign_currency |=
+                !currency.is_empty() && !functional.is_empty() && currency != functional;
             if matches!(
                 role.as_str(),
                 "monetary_asset" | "monetary_liability" | "cash"
@@ -2250,10 +4639,11 @@ fn calculate_realized(
                     )
                 })?;
                 let functional = signed_amount(row, &mapping, "functional").unwrap_or(0.0);
-                monetary_foreign += foreign;
-                monetary_functional += functional;
+                monetary_has_foreign_movement |= foreign.abs() >= 0.01;
+                monetary_has_functional_movement |= functional.abs() >= 0.01;
                 if role == "cash" && foreign.abs() >= 0.005 && functional.abs() >= 0.005 {
-                    let currency = normalize_currency(&currency_for(row, &mapping, &account, params));
+                    let currency =
+                        normalize_currency(&currency_for(row, &mapping, &account, params));
                     let item = cash_settlements.entry(currency).or_default();
                     item.0 += foreign;
                     item.1 += functional;
@@ -2264,33 +4654,103 @@ fn calculate_realized(
                 let terminates_asset = role == "monetary_asset" && foreign < -0.005;
                 let terminates_liability = role == "monetary_liability" && foreign > 0.005;
                 if terminates_asset || terminates_liability {
-                    settlement_targets.push((
-                        row,
-                        account,
-                        role,
-                        foreign,
-                        functional,
-                    ));
+                    settlement_targets.push((row, account, role, foreign, functional));
                 }
             }
         }
-        let revaluation_signal = voucher_type_upper == "FX"
-            || ["valuation", "revaluation", "translation", "重估", "评估"]
-                .iter().any(|value| summary_lower.contains(value));
+        // Some ERP exports use a credit-positive convention for both the cash
+        // and receivable/payable rows.  When a monetary row and a cash row in
+        // the same currency have opposite original-currency signs and closely
+        // matching amounts, the cash leg itself proves settlement direction.
+        // This avoids leaving clear customer receipts in manual review merely
+        // because the export sign convention differs from debit-positive JE.
+        for row in &rows {
+            let account = account_name(row, &mapping);
+            let role = role_for(&account, params);
+            if !matches!(role.as_str(), "monetary_asset" | "monetary_liability")
+                || settlement_targets
+                    .iter()
+                    .any(|(candidate, ..)| candidate.source_row == row.source_row)
+            {
+                continue;
+            }
+            let foreign = signed_amount(row, &mapping, "foreign").map_err(|e| {
+                error(
+                    "NUMERIC_PARSE_FAILED",
+                    "JE关键金额存在无法解析的非空值。",
+                    Some(format!("第{}行：{e}", row.source_row)),
+                )
+            })?;
+            let functional = signed_amount(row, &mapping, "functional").unwrap_or(0.0);
+            let currency = normalize_currency(&currency_for(row, &mapping, &account, params));
+            let cash_foreign = cash_settlements
+                .get(&currency)
+                .map(|(cash_foreign, _)| *cash_foreign)
+                .unwrap_or(0.0);
+            let comparable = foreign.abs().min(cash_foreign.abs())
+                / foreign.abs().max(cash_foreign.abs()).max(0.005);
+            if foreign * cash_foreign < 0.0 && comparable >= 0.5 {
+                settlement_targets.push((row, account, role, foreign, functional));
+            }
+        }
+        // “整张凭证原币净额为零”不能证明是重估：同币种收付款的现金与
+        // 应收/应付两边也会自然抵销。自动识别重估必须同时满足：
+        // 1) 含汇兑损益；2) 有重估类型/文字证据；3) 每一条货币性项目均
+        // 无原币发生额，但存在本位币变动。否则保留为结算或待确认事件。
+        let automatic_revaluation = has_fx
+            && !monetary_has_foreign_movement
+            && monetary_has_functional_movement
+            && (matches!(voucher_type_upper.as_str(), "FX" | "AB")
+                || [
+                    "valuation",
+                    "revaluation",
+                    "translation",
+                    "重估",
+                    "评估",
+                    "冲回",
+                ]
+                .iter()
+                .any(|value| summary_lower.contains(value)));
+        let revaluation_signal =
+            !manual_realized && !manual_pending && (manual_unrealized || automatic_revaluation);
         let text_settlement = [
-            "结算", "收款", "付款", "核销", "抵销", "偿还", "结售汇",
-            "settlement", "clearing", "payment", "receipt", "direct credit", "direct debit",
-        ].iter().any(|value| summary_lower.contains(value));
+            "结算",
+            "收款",
+            "付款",
+            "核销",
+            "抵销",
+            "偿还",
+            "结售汇",
+            "settlement",
+            "clearing",
+            "payment",
+            "receipt",
+            "direct credit",
+            "direct debit",
+        ]
+        .iter()
+        .any(|value| summary_lower.contains(value));
         let type_settlement = matches!(voucher_type_upper.as_str(), "DZ" | "ZE");
         let structural_settlement = has_cash && !settlement_targets.is_empty();
-        let has_settlement = text_settlement || type_settlement || structural_settlement;
+        let has_settlement =
+            manual_realized || text_settlement || type_settlement || structural_settlement;
+        // A functional-currency-only voucher without an FX gain/loss account is
+        // outside the FX audit population.  Do not present ordinary RMB JEs as
+        // unresolved FX events merely because their text resembles settlement.
+        if !has_fx && !has_foreign_currency {
+            continue;
+        }
         let simple_settlement = settlement_targets.len() == 1
             && monetary_counterparty_count == 1
             && voucher_type_upper != "AB"
             && !revaluation_signal;
-        let realized_hard = has_fx && has_settlement && simple_settlement;
-        let unrealized_hard = !realized_hard && revaluation_signal
-            && monetary_foreign.abs() < 0.01 && monetary_functional.abs() > 0.01;
+        let realized_hard = !manual_pending
+            && has_fx
+            && (manual_realized || (!manual_unrealized && has_settlement && simple_settlement));
+        let unrealized_hard = !realized_hard
+            && revaluation_signal
+            && (manual_unrealized
+                || (!monetary_has_foreign_movement && monetary_has_functional_movement));
         let realized_score: f64 = (if realized_hard { 0.75 } else { 0.0 })
             + (if has_fx { 0.15 } else { 0.0 })
             + (if has_settlement { 0.1 } else { 0.0 });
@@ -2313,10 +4773,14 @@ fn calculate_realized(
             "低"
         };
         classes.push(json!({
-            "voucherId": display_voucher_id(&id), "classification": class,
+            "voucherId": display_id, "classification": class,
             "eventType": if has_settlement {"结算/终止确认"} else {"重估/待复核"},
             "realizedScore": realized_score, "unrealizedScore": unrealized_score,
-            "matchedRules": [if realized_hard {
+            "matchedRules": [if manual_realized {
+                "用户按同借贷科目凭证类型确认为已实现；重新执行结算测算"
+            } else if manual_unrealized {
+                "用户按同借贷科目凭证类型确认为未实现；重新执行重估测算"
+            } else if realized_hard {
                 "货币性项目原币减少且存在结算/抵销/转换/终止确认"
             } else if unrealized_hard {
                 "本位币变化、原币净变动在容差内且无结算"
@@ -2324,6 +4788,13 @@ fn calculate_realized(
             "counterEvidence": if !has_settlement {vec!["未识别到结算证据"]} else {vec![]},
             "confidence": confidence, "ruleConflict": realized_hard && unrealized_hard
         }));
+        if manual_realized && settlement_targets.is_empty() {
+            quality.push(json!({
+                "source":"JE", "voucherId":display_voucher_id(&id),
+                "type":"用户确认已实现但无法重算", "severity":"待确认",
+                "detail":"完整凭证中未识别到可终止确认的外币货币性项目及其历史账面价值；未采用账面汇兑损益替代测算。"
+            }));
+        }
         if realized_hard && !has_fx {
             quality.push(json!({
                 "source": "JE", "voucherId": display_voucher_id(&id),
@@ -2342,25 +4813,28 @@ fn calculate_realized(
                     let settlement = foreign.abs();
                     let normalized_currency = normalize_currency(&currency);
                     let cash_pair = cash_settlements.get(&normalized_currency).copied();
-                    let cash_implied_rate = cash_pair.and_then(|(cash_foreign, cash_functional)| {
-                        if cash_foreign.abs() < 0.005 || cash_functional.abs() < 0.005 {
-                            None
-                        } else {
-                            let value = cash_functional.abs() / cash_foreign.abs();
-                            value.is_finite().then_some(value)
-                        }
-                    });
-                    // 对收付款结算，银行/现金行的本位币与原币金额形成实际结算汇率，
-                    // 这是已实现损益的首选计量依据；央行中间价作为基准比较和无现金
-                    // 结算时的后备汇率。这样不会把银行实际成交价差误报为会计错报。
-                    let settlement_rate = cash_implied_rate.unwrap_or(official_rate);
+                    let cash_implied_rate =
+                        cash_pair.and_then(|(cash_foreign, cash_functional)| {
+                            if cash_foreign.abs() < 0.005 || cash_functional.abs() < 0.005 {
+                                None
+                            } else {
+                                let value = cash_functional.abs() / cash_foreign.abs();
+                                value.is_finite().then_some(value)
+                            }
+                        });
+                    // 审计重算必须独立于客户JE。现金/银行行倒算汇率仅作为客户采用
+                    // 汇率披露，不得替代交易日官方汇率，否则会机械复刻客户入账结果。
+                    let settlement_rate = official_rate;
                     let translated = settlement * settlement_rate;
                     let official_benchmark = settlement * official_rate;
                     let carrying = functional.abs();
-                    // JE signed amounts use debit-positive convention. An asset
-                    // settlement loss is carrying value minus translated cash;
-                    // a liability settlement loss is translated cash minus carrying value.
-                    let gain_loss = if role == "monetary_liability" {
+                    // The sign of the derecognized foreign-currency row captures
+                    // the export's debit/credit convention.  A positive target
+                    // uses translated minus carrying; a negative target uses the
+                    // inverse.  This is equivalent to the asset/liability rule
+                    // under debit-positive JE, while also supporting credit-
+                    // positive SAP exports without reversing customer receipts.
+                    let gain_loss = if foreign > 0.0 {
                         translated - carrying
                     } else {
                         carrying - translated
@@ -2370,9 +4844,11 @@ fn calculate_realized(
                         "entity": entity, "account": account, "role": role,
                         "currency": currency, "functionalCurrency": functional_code,
                         "settlementForeign": settlement, "officialRate": official_rate,
+                        "targetForeignSigned": foreign,
                         "settlementRate": settlement_rate,
-                        "rateSource": if cash_implied_rate.is_some() {"JE现金/银行行实际结算汇率"} else {RATE_SOURCE},
-                        "calculationMethod": if cash_implied_rate.is_some() {"实际结算汇率法"} else {"央行交易日汇率法（无可用现金结算行）"},
+                        "customerAppliedRate": cash_implied_rate,
+                        "rateSource": RATE_SOURCE,
+                        "calculationMethod": "交易日官方汇率独立重算",
                         "publishedDate": published, "carryingFunctional": carrying,
                         "translatedFunctional": translated, "auditGainLoss": gain_loss,
                         "officialBenchmarkFunctional": official_benchmark,
@@ -2417,7 +4893,9 @@ fn calculate_unrealized(
     let has_foreign_balances = amount_scheme_ok(&mapping, "openingForeign")
         && amount_scheme_ok(&mapping, "closingForeign");
     if has_je && !has_foreign_balances {
-        return calculate_back_calculated_unrealized(params, snapshot, start, end, &table, &mapping);
+        return calculate_inferred_opening_unrealized(
+            params, snapshot, start, end, &table, &mapping,
+        );
     }
     let mut output = Vec::new();
     let mut quality = Vec::new();
@@ -2428,17 +4906,19 @@ fn calculate_unrealized(
         let currency = currency_for(&row, &mapping, &account, params);
         let auxiliary = mapped_cols(&mapping, "auxiliary")
             .iter()
-            .filter_map(|c| row.values.get(c))
+            .filter_map(|c| row.values.get(c.as_str()))
             .map(|v| v.trim())
             .collect::<Vec<_>>()
             .join("|");
         let key = format!("{entity}\u{1f}{account}\u{1f}{currency}\u{1f}{auxiliary}");
+        // 同一余额键的多行按各自的余额独立重估，结果自然相加——
+        // 旧版在这里直接 `continue` 丢掉后来的行，按费用性质拆行的 TB 会少算一大截。
         if !seen.insert(key.clone()) {
             quality.push(json!({
-                "source": "TB", "row": row.source_row, "type": "重复余额键",
-                "key": key, "severity": "阻断"
+                "source": "TB", "row": row.source_row, "type": "同一余额键多行",
+                "key": key, "severity": "合并",
+                "detail": "该行与前面某行的主体＋科目＋币种相同，已各自重估后合并计入。"
             }));
-            continue;
         }
         let role = role_for(&account, params);
         if matches!(role.as_str(), "non_monetary" | "excluded" | "unassigned") {
@@ -2508,6 +4988,172 @@ fn calculate_unrealized(
     }
 }
 
+fn calculate_inferred_opening_unrealized(
+    params: &Value,
+    snapshot: &RateSnapshot,
+    start: NaiveDate,
+    end: NaiveDate,
+    tb_table: &FxTable,
+    tb_mapping: &Map<String, Value>,
+) -> Result<(Vec<Value>, Vec<Value>), AppError> {
+    let je_spec: SourceSpec = serde_json::from_value(params.get("jeSource").cloned().unwrap())
+        .map_err(|e| error("INVALID_PARAMS", "JE参数无效。", Some(e.to_string())))?;
+    let je_table = load_fx_table(&je_spec)?;
+    let je_mapping = mapping_obj(params, "jeMapping");
+    let has_opening_local = amount_scheme_ok(tb_mapping, "openingFunctional");
+    let mut je_functional_movements = HashMap::<String, f64>::new();
+    let mut je_foreign_movements = HashMap::<String, f64>::new();
+    let mut account_currencies = HashMap::<String, BTreeSet<String>>::new();
+    for row in records(&je_table) {
+        if !is_je_business_row(&row, &je_mapping) {
+            continue;
+        }
+        let account = account_name(&row, &je_mapping);
+        if !matches!(
+            role_for(&account, params).as_str(),
+            "cash" | "monetary_asset" | "monetary_liability"
+        ) {
+            continue;
+        }
+        let entity = entity_for(&row, &je_mapping, params);
+        let currency = currency_for(&row, &je_mapping, &account, params);
+        let auxiliary = auxiliary_value(&row, &je_mapping);
+        if currency.is_empty() || currency == functional_currency(entity, params) {
+            continue;
+        }
+        let account_currency_key = format!(
+            "{entity}\u{1f}{}\u{1f}{auxiliary}",
+            account_match_key(&account)
+        );
+        account_currencies
+            .entry(account_currency_key)
+            .or_default()
+            .insert(normalize_currency(&currency));
+        let key = monetary_balance_key(entity, &account, &currency, &auxiliary);
+        *je_functional_movements.entry(key.clone()).or_default() +=
+            signed_amount(&row, &je_mapping, "functional").map_err(|detail| {
+                error(
+                    "NUMERIC_PARSE_FAILED",
+                    "JE本位币金额无法解析。",
+                    Some(format!("第{}行：{detail}", row.source_row)),
+                )
+            })?;
+        *je_foreign_movements.entry(key).or_default() +=
+            signed_amount(&row, &je_mapping, "foreign").map_err(|detail| {
+                error(
+                    "NUMERIC_PARSE_FAILED",
+                    "JE原币金额无法解析。",
+                    Some(format!("第{}行：{detail}", row.source_row)),
+                )
+            })?;
+    }
+
+    let mut endpoints = Vec::new();
+    let mut quality = vec![json!({
+        "source":"TB+JE", "type":"期初原币余额估算", "severity":"重要提示",
+        "detail":"TB未提供原币余额；系统以期初本位币余额÷期初官方汇率估算期初原币，再用JE原币发生额滚动。该结果属于受限测算，底稿单独披露，不以客户已入账未实现汇兑损益凭证倒算审计金额。"
+    })];
+    for row in records(tb_table) {
+        let account = account_name(&row, tb_mapping);
+        if !matches!(
+            role_for(&account, params).as_str(),
+            "cash" | "monetary_asset" | "monetary_liability"
+        ) {
+            continue;
+        }
+        let entity = entity_for(&row, tb_mapping, params);
+        let mapped_currency = currency_for(&row, tb_mapping, &account, params);
+        let auxiliary = auxiliary_value(&row, tb_mapping);
+        let functional = functional_currency(entity, params);
+        let account_currency_key = format!(
+            "{entity}\u{1f}{}\u{1f}{auxiliary}",
+            account_match_key(&account)
+        );
+        let inferred_currencies = account_currencies.get(&account_currency_key);
+        let currency = if !mapped_currency.is_empty() && mapped_currency != functional {
+            normalize_currency(&mapped_currency)
+        } else if let Some(values) = inferred_currencies.filter(|values| values.len() == 1) {
+            values.iter().next().cloned().unwrap_or_default()
+        } else {
+            if inferred_currencies.is_some_and(|values| values.len() > 1) {
+                quality.push(json!({
+                    "source":"TB+JE", "row":row.source_row,
+                    "type":"同一余额键存在多个外币", "account":account,
+                    "severity":"隔离",
+                    "detail":"TB未提供可唯一对应的原币币种，JE中该科目存在多个外币；未实现测算不作强行分摊。"
+                }));
+            }
+            continue;
+        };
+        let key = monetary_balance_key(entity, &account, &currency, &auxiliary);
+        let closing_local =
+            signed_amount(&row, tb_mapping, "closingFunctional").map_err(|detail| {
+                error(
+                    "NUMERIC_PARSE_FAILED",
+                    "TB期末本位币余额无法解析。",
+                    Some(format!("第{}行：{detail}", row.source_row)),
+                )
+            })?;
+        let opening_local = if has_opening_local {
+            signed_amount(&row, tb_mapping, "openingFunctional").map_err(|detail| {
+                error(
+                    "NUMERIC_PARSE_FAILED",
+                    "TB期初本位币余额无法解析。",
+                    Some(format!("第{}行：{detail}", row.source_row)),
+                )
+            })?
+        } else {
+            closing_local - je_functional_movements.get(&key).copied().unwrap_or(0.0)
+        };
+        let Some((opening_rate, opening_published)) = rate(snapshot, start, &currency, &functional)
+        else {
+            quality.push(json!({
+                "source":"TB", "row":row.source_row, "type":"期初汇率缺失",
+                "currency":currency, "severity":"隔离"
+            }));
+            continue;
+        };
+        if opening_rate.abs() < f64::EPSILON {
+            continue;
+        }
+        let has_closing_foreign = amount_scheme_ok(tb_mapping, "closingForeign");
+        let (inferred_opening_foreign, opening_foreign_source) = if has_closing_foreign {
+            let closing_foreign =
+                signed_amount(&row, tb_mapping, "closingForeign").map_err(|detail| {
+                    error(
+                        "NUMERIC_PARSE_FAILED",
+                        "TB期末原币余额无法解析。",
+                        Some(format!("第{}行：{detail}", row.source_row)),
+                    )
+                })?;
+            (
+                closing_foreign - je_foreign_movements.get(&key).copied().unwrap_or(0.0),
+                "TB期末原币余额－本期JE原币净变动倒推",
+            )
+        } else {
+            (
+                opening_local / opening_rate,
+                "期初本位币余额÷期初官方汇率估算",
+            )
+        };
+        let opening_audit_functional = inferred_opening_foreign * opening_rate;
+        endpoints.push(json!({
+            "entity":entity, "account":account, "auxiliary":auxiliary,
+            "currency":currency, "functionalCurrency":functional,
+            "openingForeign":inferred_opening_foreign,
+            "openingBookFunctional":opening_local,
+            "openingRate":opening_rate, "openingPublishedDate":opening_published,
+            "openingAuditFunctional":opening_audit_functional,
+            "closingBookFunctional":closing_local,
+            "openingForeignSource":opening_foreign_source,
+            "sourceRow":row.source_row
+        }));
+    }
+    let monthly =
+        calculate_monthly_unrealized(params, snapshot, start, end, &endpoints, &mut quality)?;
+    Ok((monthly, quality))
+}
+
 fn calculate_back_calculated_unrealized(
     params: &Value,
     snapshot: &RateSnapshot,
@@ -2526,20 +5172,38 @@ fn calculate_back_calculated_unrealized(
     for row in records(tb_table) {
         let account = account_name(&row, tb_mapping);
         let currency = currency_for(&row, tb_mapping, &account, params);
-        if currency.is_empty() || !matches!(role_for(&account, params).as_str(), "cash" | "monetary_asset" | "monetary_liability") {
+        if currency.is_empty()
+            || !matches!(
+                role_for(&account, params).as_str(),
+                "cash" | "monetary_asset" | "monetary_liability"
+            )
+        {
             continue;
         }
         let entity = entity_for(&row, tb_mapping, params);
-        let key = format!("{entity}\u{1f}{}\u{1f}{currency}", account_match_key(&account));
+        let key = format!(
+            "{entity}\u{1f}{}\u{1f}{currency}",
+            account_match_key(&account)
+        );
         if derive_opening {
-            let closing = signed_amount(&row, tb_mapping, "closingFunctional").map_err(|detail| {
-                error("NUMERIC_PARSE_FAILED", "TB期末本位币余额无法解析。", Some(format!("第{}行：{detail}", row.source_row)))
-            })?;
+            let closing =
+                signed_amount(&row, tb_mapping, "closingFunctional").map_err(|detail| {
+                    error(
+                        "NUMERIC_PARSE_FAILED",
+                        "TB期末本位币余额无法解析。",
+                        Some(format!("第{}行：{detail}", row.source_row)),
+                    )
+                })?;
             closing_balances.insert(key, closing);
         } else {
-            let opening = signed_amount(&row, tb_mapping, "openingFunctional").map_err(|detail| {
-                error("NUMERIC_PARSE_FAILED", "TB期初本位币余额无法解析。", Some(format!("第{}行：{detail}", row.source_row)))
-            })?;
+            let opening =
+                signed_amount(&row, tb_mapping, "openingFunctional").map_err(|detail| {
+                    error(
+                        "NUMERIC_PARSE_FAILED",
+                        "TB期初本位币余额无法解析。",
+                        Some(format!("第{}行：{detail}", row.source_row)),
+                    )
+                })?;
             balances.insert(key, opening);
         }
     }
@@ -2549,15 +5213,20 @@ fn calculate_back_calculated_unrealized(
         .chain(mapped_cols(&je_mapping, "id"))
         .filter_map(|name| je_table.headers.iter().position(|header| header == &name))
         .collect::<Vec<_>>();
-    let account_indexes = mapped_cols(&je_mapping, "account")
+    let account_indexes = account_columns(&je_mapping)
         .iter()
         .filter_map(|name| je_table.headers.iter().position(|header| header == name))
         .collect::<Vec<_>>();
-    let loss_keys = tabular::detect_loss_transfer_ids(&je_table.rows, &id_indexes, &account_indexes);
+    let loss_keys =
+        tabular::detect_loss_transfer_ids(&je_table.rows, &id_indexes, &account_indexes);
     let mut groups = BTreeMap::<(NaiveDate, String), Vec<RowRecord>>::new();
     for (row, raw) in records(&je_table).into_iter().zip(je_table.rows.iter()) {
-        if !is_je_business_row(&row, &je_mapping) { continue; }
-        let Some(date) = parse_date(cell(&row, &je_mapping, "date")) else { continue };
+        if !is_je_business_row(&row, &je_mapping) {
+            continue;
+        }
+        let Some(date) = parse_date(cell(&row, &je_mapping, "date")) else {
+            continue;
+        };
         let id = voucher_id(&row, &je_mapping, params);
         if !loss_keys.contains(&tabular::voucher_key(raw, &id_indexes)) {
             groups.entry((date, id)).or_default().push(row);
@@ -2569,16 +5238,37 @@ fn calculate_back_calculated_unrealized(
             for row in rows {
                 let account = account_name(row, &je_mapping);
                 let role = role_for(&account, params);
-                if !matches!(role.as_str(), "cash" | "monetary_asset" | "monetary_liability") { continue; }
+                if !matches!(
+                    role.as_str(),
+                    "cash" | "monetary_asset" | "monetary_liability"
+                ) {
+                    continue;
+                }
                 let entity = entity_for(row, &je_mapping, params);
                 let currency = currency_for(row, &je_mapping, &account, params);
-                if currency.is_empty() || currency == functional_currency(entity, params) { continue; }
-                let key = format!("{entity}\u{1f}{}\u{1f}{currency}", account_match_key(&account));
-                *movements.entry(key).or_default() += signed_amount(row, &je_mapping, "functional").map_err(|detail| error(
-                    "NUMERIC_PARSE_FAILED", "JE本位币金额无法解析。", Some(format!("第{}行：{detail}", row.source_row))))?;
+                if currency.is_empty() || currency == functional_currency(entity, params) {
+                    continue;
+                }
+                let key = format!(
+                    "{entity}\u{1f}{}\u{1f}{currency}",
+                    account_match_key(&account)
+                );
+                *movements.entry(key).or_default() += signed_amount(row, &je_mapping, "functional")
+                    .map_err(|detail| {
+                        error(
+                            "NUMERIC_PARSE_FAILED",
+                            "JE本位币金额无法解析。",
+                            Some(format!("第{}行：{detail}", row.source_row)),
+                        )
+                    })?;
             }
         }
-        for (key, closing) in closing_balances { balances.insert(key.clone(), closing - movements.get(&key).copied().unwrap_or(0.0)); }
+        for (key, closing) in closing_balances {
+            balances.insert(
+                key.clone(),
+                closing - movements.get(&key).copied().unwrap_or(0.0),
+            );
+        }
     }
     let mut output = Vec::new();
     let mut quality = vec![json!({
@@ -2587,42 +5277,94 @@ fn calculate_back_calculated_unrealized(
         "detail": "TB无原币余额；仅对科目名称/JE币种识别出的外币货币性项目，以月末官方汇率倒算原币，并用完整凭证识别客户重估。"
     })];
     for ((date, id), rows) in groups {
-        if date < start || date > end { continue; }
-        let summary = rows.iter().map(|row| cell(row, &je_mapping, "summary")).collect::<Vec<_>>().join(" ");
-        let voucher_type = rows.iter().map(|row| cell(row, &je_mapping, "voucherType")).collect::<Vec<_>>().join(" ");
+        if date < start || date > end {
+            continue;
+        }
+        let summary = rows
+            .iter()
+            .map(|row| cell(row, &je_mapping, "summary"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let voucher_type = rows
+            .iter()
+            .map(|row| cell(row, &je_mapping, "voucherType"))
+            .collect::<Vec<_>>()
+            .join(" ");
         let summary_lower = summary.to_lowercase();
-        let revaluation_signal = voucher_type.split_whitespace().any(|value| value.eq_ignore_ascii_case("fx"))
-            || ["valuation", "revaluation", "translation", "重估", "评估"]
-                .iter().any(|value| summary_lower.contains(value));
+        let display_id = display_voucher_id(&id);
+        let manual = manual_classification(params, &display_id);
+        let manual_realized = manual == Some("已实现汇兑损益");
+        let manual_pending = manual == Some("待确认");
+        let revaluation_signal = !manual_realized
+            && !manual_pending
+            && (voucher_type
+                .split_whitespace()
+                .any(|value| value.eq_ignore_ascii_case("fx") || value.eq_ignore_ascii_case("ab"))
+                || ["valuation", "revaluation", "translation", "重估", "评估"]
+                    .iter()
+                    .any(|value| summary_lower.contains(value)));
         let mut movements = BTreeMap::<String, (String, String, String, String, f64, f64)>::new();
         for row in &rows {
             let account = account_name(row, &je_mapping);
             let role = role_for(&account, params);
-            if !matches!(role.as_str(), "cash" | "monetary_asset" | "monetary_liability") { continue; }
+            let standard_monetary = matches!(
+                role.as_str(),
+                "cash" | "monetary_asset" | "monetary_liability"
+            );
+            if !standard_monetary {
+                continue;
+            }
             let entity = entity_for(row, &je_mapping, params).to_owned();
             let currency = currency_for(row, &je_mapping, &account, params);
-            if currency.is_empty() || currency == functional_currency(&entity, params) { continue; }
-            let foreign = signed_amount(row, &je_mapping, "foreign").map_err(|detail| error(
-                "NUMERIC_PARSE_FAILED", "JE原币金额无法解析。", Some(format!("第{}行：{detail}", row.source_row))))?;
-            let functional = signed_amount(row, &je_mapping, "functional").map_err(|detail| error(
-                "NUMERIC_PARSE_FAILED", "JE本位币金额无法解析。", Some(format!("第{}行：{detail}", row.source_row))))?;
-            let key = format!("{entity}\u{1f}{}\u{1f}{currency}", account_match_key(&account));
-            let item = movements.entry(key).or_insert((entity, account, role, currency, 0.0, 0.0));
+            if currency.is_empty() || currency == functional_currency(&entity, params) {
+                continue;
+            }
+            let foreign = signed_amount(row, &je_mapping, "foreign").map_err(|detail| {
+                error(
+                    "NUMERIC_PARSE_FAILED",
+                    "JE原币金额无法解析。",
+                    Some(format!("第{}行：{detail}", row.source_row)),
+                )
+            })?;
+            let functional = signed_amount(row, &je_mapping, "functional").map_err(|detail| {
+                error(
+                    "NUMERIC_PARSE_FAILED",
+                    "JE本位币金额无法解析。",
+                    Some(format!("第{}行：{detail}", row.source_row)),
+                )
+            })?;
+            let key = format!(
+                "{entity}\u{1f}{}\u{1f}{currency}",
+                account_match_key(&account)
+            );
+            let item = movements
+                .entry(key)
+                .or_insert((entity, account, role, currency, 0.0, 0.0));
             item.4 += foreign;
             item.5 += functional;
         }
-        for (key, (entity, account, role, currency, foreign_movement, functional_movement)) in movements {
+        for (key, (entity, account, role, currency, foreign_movement, functional_movement)) in
+            movements
+        {
             let before = balances.get(&key).copied().unwrap_or(0.0);
             let after = before + functional_movement;
-            let is_revaluation = revaluation_signal && foreign_movement.abs() < 0.01 && functional_movement.abs() >= 0.01;
+            let is_revaluation = revaluation_signal
+                && foreign_movement.abs() < 0.01
+                && functional_movement.abs() >= 0.01;
             if is_revaluation {
-                if let Some((official_rate, published_date)) = rate(snapshot, date, &currency, &functional_currency(&entity, params)) {
+                if let Some((official_rate, published_date)) = rate(
+                    snapshot,
+                    date,
+                    &currency,
+                    &functional_currency(&entity, params),
+                ) {
                     let inferred_foreign = after / official_rate;
                     let audit_closing = inferred_foreign * official_rate;
                     let pnl = -(audit_closing - before);
-                    let is_reversal = summary_lower.contains("reversal") || summary_lower.contains("冲回");
+                    let is_reversal =
+                        summary_lower.contains("reversal") || summary_lower.contains("冲回");
                     output.push(json!({
-                        "monthEnd": date, "voucherId": display_voucher_id(&id),
+                        "monthEnd": date, "voucherId": display_id.clone(),
                         "entity": entity, "account": account, "role": role,
                         "currency": currency, "functionalCurrency": functional_currency(&entity, params),
                         "preRevaluationFunctional": before,
@@ -2663,18 +5405,7 @@ fn calculate_monthly_unrealized(
     let table = load_fx_table(&spec)?;
     let mapping = mapping_obj(params, "jeMapping");
     let rows = records(&table);
-    // entity/account/currency is the common key available in both JE and TB.
-    // Auxiliary values remain in the source trace and duplicate TB keys are
-    // already blocked by validation/data-quality checks.
-    let key_for = |entity: &str, account: &str, currency: &str| {
-        format!(
-            "{}\u{1f}{}\u{1f}{}",
-            entity.trim(),
-            account.trim(),
-            normalize_currency(currency)
-        )
-    };
-    let mut state: BTreeMap<String, (String, String, String, f64, f64)> = BTreeMap::new();
+    let mut state: BTreeMap<String, (String, String, String, String, f64, f64)> = BTreeMap::new();
     let mut closing_book = HashMap::new();
     for endpoint in endpoints {
         let entity = endpoint.get("entity").and_then(Value::as_str).unwrap_or("");
@@ -2686,12 +5417,17 @@ fn calculate_monthly_unrealized(
             .get("currency")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let key = key_for(entity, account, currency);
+        let auxiliary = endpoint
+            .get("auxiliary")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let key = monetary_balance_key(entity, account, currency, auxiliary);
         state.insert(
             key.clone(),
             (
                 entity.into(),
                 account.into(),
+                auxiliary.into(),
                 currency.into(),
                 endpoint
                     .get("openingForeign")
@@ -2711,13 +5447,104 @@ fn calculate_monthly_unrealized(
                 .unwrap_or(0.0),
         );
     }
+
+    // 客户重估凭证只是比较证据，不是审计测算对象。先按完整凭证识别，
+    // 后续将其全部行从正常业务发生额中剔除；货币性项目行的本位币变化
+    // 仅作为客户已入账重估金额保留。
+    let mut voucher_rows = BTreeMap::<String, Vec<&RowRecord>>::new();
+    for row in &rows {
+        let Some(date) = parse_date(cell(row, &mapping, "date")) else {
+            continue;
+        };
+        if date < start || date > end {
+            continue;
+        }
+        let id = display_voucher_id(&voucher_id(row, &mapping, params));
+        voucher_rows.entry(id).or_default().push(row);
+    }
+    let mut revaluation_meta = HashMap::<String, Value>::new();
+    for (id, voucher) in &voucher_rows {
+        let manual = manual_classification(params, id);
+        let summary = voucher
+            .iter()
+            .map(|row| cell(row, &mapping, "summary"))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|value| !value.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let voucher_type = voucher
+            .iter()
+            .map(|row| cell(row, &mapping, "voucherType").trim().to_uppercase())
+            .find(|value| !value.is_empty())
+            .unwrap_or_default();
+        let mut has_fx = false;
+        let mut monetary_has_foreign_movement = false;
+        let mut monetary_has_functional_movement = false;
+        let mut booked_fx = 0.0;
+        for row in voucher {
+            let account = account_name(row, &mapping);
+            let role = role_for(&account, params);
+            let functional = signed_amount(row, &mapping, "functional").unwrap_or(0.0);
+            if role == "fx_gain_loss" {
+                has_fx = true;
+                booked_fx += functional;
+            }
+            if matches!(
+                role.as_str(),
+                "cash" | "monetary_asset" | "monetary_liability"
+            ) {
+                let foreign = signed_amount(row, &mapping, "foreign").unwrap_or(0.0);
+                monetary_has_foreign_movement |= foreign.abs() >= 0.01;
+                monetary_has_functional_movement |= functional.abs() >= 0.01;
+            }
+        }
+        let summary_lower = summary.to_lowercase();
+        let automatic_signal = has_fx
+            && !monetary_has_foreign_movement
+            && monetary_has_functional_movement
+            && (matches!(voucher_type.as_str(), "FX" | "AB")
+                || [
+                    "valuation",
+                    "revaluation",
+                    "translation",
+                    "重估",
+                    "评估",
+                    "冲回",
+                ]
+                .iter()
+                .any(|value| summary_lower.contains(value)));
+        let is_revaluation = match manual {
+            Some("未实现汇兑损益") => true,
+            Some("已实现汇兑损益" | "待确认") => false,
+            _ => automatic_signal,
+        };
+        if is_revaluation {
+            let date = voucher
+                .iter()
+                .find_map(|row| parse_date(cell(row, &mapping, "date")));
+            revaluation_meta.insert(
+                id.clone(),
+                json!({
+                    "voucherId": id, "date": date, "voucherType": voucher_type,
+                    "summary": summary, "bookedFxGainLoss": booked_fx,
+                    "identificationBasis": if manual == Some("未实现汇兑损益") {
+                        "用户按借贷科目组合确认为未实现汇兑损益类凭证"
+                    } else {"系统按完整凭证识别为未实现汇兑损益或其冲回凭证"}
+                }),
+            );
+        }
+    }
+
     let mut output = Vec::new();
+    let mut missing_balance_keys = BTreeSet::new();
     let mut previous = start - Duration::days(1);
     for month_end in date_points(start, end)
         .into_iter()
         .filter(|date| *date == end || (*date + Duration::days(1)).day() == 1)
     {
         let mut movement: HashMap<String, (f64, f64, f64)> = HashMap::new();
+        let mut revaluation_vouchers: HashMap<String, BTreeSet<String>> = HashMap::new();
         for row in &rows {
             let Some(date) = parse_date(cell(row, &mapping, "date")) else {
                 continue;
@@ -2727,15 +5554,32 @@ fn calculate_monthly_unrealized(
             }
             let account = account_name(row, &mapping);
             let role = role_for(&account, params);
-            if !matches!(
+            let display_id = display_voucher_id(&voucher_id(row, &mapping, params));
+            let standard_monetary = matches!(
                 role.as_str(),
                 "cash" | "monetary_asset" | "monetary_liability"
-            ) {
+            );
+            if !standard_monetary {
                 continue;
             }
-            let entity = cell(row, &mapping, "entity");
-            let currency = cell(row, &mapping, "currency");
-            let key = key_for(entity, &account, currency);
+            let entity = entity_for(row, &mapping, params);
+            let currency = currency_for(row, &mapping, &account, params);
+            let auxiliary = auxiliary_value(row, &mapping);
+            if currency.is_empty() || currency == functional_currency(entity, params) {
+                continue;
+            }
+            let key = monetary_balance_key(entity, &account, &currency, &auxiliary);
+            if !state.contains_key(&key) {
+                if missing_balance_keys.insert(key.clone()) {
+                    quality.push(json!({
+                        "source":"JE+TB", "type":"未实现测算缺少TB余额基础",
+                        "severity":"隔离", "entity":entity, "account":account,
+                        "auxiliary":auxiliary, "currency":normalize_currency(&currency),
+                        "detail":"该外币货币性项目在JE中存在发生额，但未取得可唯一对应的TB余额端点；系统不会再假设零期初，也不将其计入未实现测算。"
+                    }));
+                }
+                continue;
+            }
             let foreign = signed_amount(row, &mapping, "foreign").map_err(|e| {
                 error(
                     "NUMERIC_PARSE_FAILED",
@@ -2750,25 +5594,21 @@ fn calculate_monthly_unrealized(
                     Some(format!("第{}行：{e}", row.source_row)),
                 )
             })?;
-            let revaluation = foreign.abs() < 0.01 && functional.abs() >= 0.01;
             let item = movement.entry(key.clone()).or_insert((0.0, 0.0, 0.0));
-            item.0 += foreign;
-            if revaluation {
+            if revaluation_meta.contains_key(&display_id) {
                 item.2 += functional;
+                revaluation_vouchers
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(display_id);
             } else {
+                item.0 += foreign;
                 item.1 += functional;
             }
-            state.entry(key).or_insert_with(|| {
-                (
-                    entity.into(),
-                    account.clone(),
-                    normalize_currency(currency),
-                    0.0,
-                    0.0,
-                )
-            });
         }
-        for (key, (entity, account, currency, foreign_balance, prior_audit)) in state.clone() {
+        for (key, (entity, account, auxiliary, currency, foreign_balance, prior_audit)) in
+            state.clone()
+        {
             let (foreign_change, non_revaluation_change, client_revaluation) =
                 movement.get(&key).copied().unwrap_or((0.0, 0.0, 0.0));
             let closing_foreign = foreign_balance + foreign_change;
@@ -2784,31 +5624,53 @@ fn calculate_monthly_unrealized(
             };
             let pre_revaluation = prior_audit + non_revaluation_change;
             let audit_closing = closing_foreign * official_rate;
-            let unrealized = audit_closing - pre_revaluation;
+            let audit_balance_adjustment = audit_closing - pre_revaluation;
+            let audit_unrealized_pnl = -audit_balance_adjustment;
+            let client_booked_unrealized_pnl = -client_revaluation;
+            let measurement_difference = audit_unrealized_pnl - client_booked_unrealized_pnl;
             let tb_closing = if month_end == end {
                 closing_book.get(&key).copied()
             } else {
                 None
             };
+            let voucher_ids = revaluation_vouchers
+                .get(&key)
+                .map(|ids| ids.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let voucher_details = voucher_ids
+                .iter()
+                .filter_map(|id| revaluation_meta.get(id).cloned())
+                .collect::<Vec<_>>();
             output.push(json!({
                 "monthEnd": month_end, "entity": entity, "account": account,
-                "currency": currency, "functionalCurrency": functional,
-                "openingAuditFunctional": prior_audit,
-                "foreignMovement": foreign_change, "closingForeign": closing_foreign,
-                "nonRevaluationFunctionalMovement": non_revaluation_change,
-                "clientRevaluationExcluded": client_revaluation,
+                "auxiliary": auxiliary, "currency": currency, "functionalCurrency": functional,
+                "openingForeign": foreign_balance, "openingAuditFunctional": prior_audit,
+                "businessForeignMovement": foreign_change, "closingForeign": closing_foreign,
+                "businessFunctionalMovement": non_revaluation_change,
                 "preRevaluationFunctional": pre_revaluation,
                 "officialRate": official_rate, "publishedDate": published_date,
                 "auditClosingFunctional": audit_closing,
-                "unrealizedGainLoss": unrealized,
-                "suggestedAdjustment": unrealized,
+                "auditBalanceAdjustment": audit_balance_adjustment,
+                "unrealizedGainLoss": audit_unrealized_pnl,
+                "clientRevaluationBalanceAdjustment": client_revaluation,
+                "clientBookedUnrealizedGainLoss": client_booked_unrealized_pnl,
+                "suggestedAdjustment": measurement_difference,
                 "tbClosingFunctional": tb_closing,
                 "tbReconciliationDifference": tb_closing.map(|value| audit_closing - value),
-                "method": "月度滚动"
+                "method": "外币货币性项目月度余额滚动及月末官方汇率重估",
+                "clientRevaluationVoucherIds": voucher_ids,
+                "clientRevaluationDetails": voucher_details
             }));
             state.insert(
                 key,
-                (entity, account, currency, closing_foreign, audit_closing),
+                (
+                    entity,
+                    account,
+                    auxiliary,
+                    currency,
+                    closing_foreign,
+                    audit_closing,
+                ),
             );
         }
         previous = month_end;
@@ -2831,7 +5693,7 @@ fn export_workbook(params: &Value, result: &Value) -> Result<String, AppError> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
             source.parent().unwrap_or(Path::new(".")).join(format!(
-                "汇兑损益审计测算_{}.xlsx",
+                "汇兑损益测算_{}.xlsx",
                 Utc::now().format("%Y%m%d_%H%M%S")
             ))
         });
@@ -2849,6 +5711,7 @@ fn export_workbook(params: &Value, result: &Value) -> Result<String, AppError> {
     let mode = result.get("mode").and_then(Value::as_str).unwrap_or("");
     write_user_conclusion_sheet(&mut workbook, params, result)?;
     write_user_calculation_sheet(&mut workbook, result)?;
+    write_classification_adjustment_sheet(&mut workbook, result)?;
     write_kv_sheet(
         &mut workbook,
         "使用说明",
@@ -2946,13 +5809,25 @@ fn export_workbook(params: &Value, result: &Value) -> Result<String, AppError> {
             write_value_array_sheet(
                 &mut workbook,
                 "未实现凭证识别",
-                result.get("classification"),
+                result.get("clientRevaluationVouchers"),
+            )?;
+            write_value_array_sheet(
+                &mut workbook,
+                "外币余额滚动",
+                result.get("unrealizedBalanceRollforward"),
+            )?;
+            write_value_array_sheet(
+                &mut workbook,
+                "客户未实现损益比较",
+                result.get("unrealizedComparison"),
             )?;
             write_value_array_sheet(&mut workbook, "月度测算", result.get("unrealized"))?;
             let summary_row =
                 Value::Array(vec![result.get("summary").cloned().unwrap_or(Value::Null)]);
             write_value_array_sheet(&mut workbook, "全年汇总", Some(&summary_row))?;
-            let reconciliation_row = Value::Array(vec![result.get("reconciliation").cloned().unwrap_or(Value::Null)]);
+            let reconciliation_row = Value::Array(vec![
+                result.get("reconciliation").cloned().unwrap_or(Value::Null),
+            ]);
             write_value_array_sheet(&mut workbook, "TB勾稽", Some(&reconciliation_row))?;
         } else {
             write_value_array_sheet(&mut workbook, "TB余额明细", result.get("unrealized"))?;
@@ -2972,16 +5847,39 @@ fn export_workbook(params: &Value, result: &Value) -> Result<String, AppError> {
         }
     }
     for name in [
-        "使用说明", "执行摘要", "参数与口径", "JE字段映射", "TB字段映射", "数据质量", "待复核项目",
-        "科目角色", "央行汇率", "异常与限制", "_rate_snapshot", "_source_trace", "JE完整明细",
-        "事件分类", "已实现测算", "已实现汇总", "未实现凭证识别", "月度测算", "全年汇总",
-        "TB勾稽", "TB余额明细", "年初重估", "年末重估", "两时点分析",
+        "使用说明",
+        "执行摘要",
+        "参数与口径",
+        "JE字段映射",
+        "TB字段映射",
+        "数据质量",
+        "待复核项目",
+        "科目角色",
+        "央行汇率",
+        "异常与限制",
+        "_rate_snapshot",
+        "_source_trace",
+        "JE完整明细",
+        "事件分类",
+        "已实现测算",
+        "已实现汇总",
+        "未实现凭证识别",
+        "月度测算",
+        "全年汇总",
+        "TB勾稽",
+        "TB余额明细",
+        "年初重估",
+        "年末重估",
+        "两时点分析",
     ] {
         if let Ok(sheet) = workbook.worksheet_from_name(name) {
             sheet.set_hidden(true);
         }
     }
-    workbook.worksheet_from_name("审计结论").map_err(xlsx_err)?.set_active(true);
+    workbook
+        .worksheet_from_name("审计结论")
+        .map_err(xlsx_err)?
+        .set_active(true);
     workbook.save(&partial).map_err(xlsx_err)?;
     fs::rename(&partial, &output).map_err(|e| {
         error(
@@ -3001,20 +5899,47 @@ fn write_user_conclusion_sheet(
     let (header, _) = formats();
     let amount = Format::new().set_num_format("#,##0.00;[Red](#,##0.00);-");
     let percent = Format::new().set_num_format("0.00%");
-    let pass = Format::new().set_bold().set_font_color("#1B5E20").set_background_color("#E8F5E9");
+    let pass = Format::new()
+        .set_bold()
+        .set_font_color("#1B5E20")
+        .set_background_color("#E8F5E9");
     let sheet = workbook.add_worksheet();
     setup(sheet, "审计结论")?;
-    sheet.write_string_with_format(0, 0, "项目", &header).map_err(xlsx_err)?;
-    sheet.write_string_with_format(0, 1, "结果", &header).map_err(xlsx_err)?;
+    sheet
+        .write_string_with_format(0, 0, "项目", &header)
+        .map_err(xlsx_err)?;
+    sheet
+        .write_string_with_format(0, 1, "结果", &header)
+        .map_err(xlsx_err)?;
     let summary = result.get("summary").unwrap_or(&Value::Null);
     let text_rows = [
         ("公司/核算主体", fixed_entity(params)),
-        ("报告期间", &format!("{} 至 {}", params.get("reportStart").and_then(Value::as_str).unwrap_or(""), params.get("reportEnd").and_then(Value::as_str).unwrap_or(""))),
-        ("测算范围", localized_scalar(result.get("mode").and_then(Value::as_str).unwrap_or(""))),
+        (
+            "报告期间",
+            &format!(
+                "{} 至 {}",
+                params
+                    .get("reportStart")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+                params
+                    .get("reportEnd")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+            ),
+        ),
+        (
+            "测算范围",
+            localized_scalar(result.get("mode").and_then(Value::as_str).unwrap_or("")),
+        ),
     ];
     for (index, (label, value)) in text_rows.iter().enumerate() {
-        sheet.write_string((index + 1) as u32, 0, *label).map_err(xlsx_err)?;
-        sheet.write_string((index + 1) as u32, 1, *value).map_err(xlsx_err)?;
+        sheet
+            .write_string((index + 1) as u32, 0, *label)
+            .map_err(xlsx_err)?;
+        sheet
+            .write_string((index + 1) as u32, 1, *value)
+            .map_err(xlsx_err)?;
     }
     let amount_rows = [
         ("已实现汇兑损益测算", "realizedGainLoss"),
@@ -3029,40 +5954,100 @@ fn write_user_conclusion_sheet(
         let row = (offset + 4) as u32;
         sheet.write_string(row, 0, *label).map_err(xlsx_err)?;
         let cached = summary.get(*key).and_then(Value::as_f64).unwrap_or(0.0);
+        let gain_loss_column = if summary
+            .get("accountTranslationEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "Q"
+        } else {
+            "P"
+        };
         let formula = match *key {
-            "realizedGainLoss" => "SUMIF('汇兑损益测算'!$C:$C,\"已实现\",'汇兑损益测算'!$J:$J)",
-            "unrealizedAdjustment" => "SUMIF('汇兑损益测算'!$C:$C,\"未实现\",'汇兑损益测算'!$J:$J)",
-            "automaticMeasuredFxGainLoss" => "SUM(B5:B6)",
-            "pendingReviewAmount" => "SUMIF('汇兑损益测算'!$C:$C,\"待复核\",'汇兑损益测算'!$J:$J)",
-            "auditFxGainLoss" => "SUM('汇兑损益测算'!$J:$J)",
-            "difference" => "B9-B10",
-            _ => "",
+            "realizedGainLoss" => format!(
+                "SUMIF('汇兑损益测算'!$C:$C,\"已实现\",'汇兑损益测算'!${0}:${0})",
+                gain_loss_column
+            ),
+            "unrealizedAdjustment" => format!(
+                "SUMIF('汇兑损益测算'!$C:$C,\"未实现\",'汇兑损益测算'!${0}:${0})",
+                gain_loss_column
+            ),
+            "automaticMeasuredFxGainLoss" => "SUM(B5:B6)".to_owned(),
+            "pendingReviewAmount" => format!(
+                "SUMIF('汇兑损益测算'!$C:$C,\"待复核\",'汇兑损益测算'!${0}:${0})",
+                gain_loss_column
+            ),
+            "auditFxGainLoss" => "B7".to_owned(),
+            "difference" => "B9-B10".to_owned(),
+            _ => String::new(),
         };
         if formula.is_empty() {
-            sheet.write_number_with_format(row, 1, cached, &amount).map_err(xlsx_err)?;
+            sheet
+                .write_number_with_format(row, 1, cached, &amount)
+                .map_err(xlsx_err)?;
         } else {
-            sheet.write_formula_with_format(row, 1, Formula::new(formula).set_result(cached.to_string()), &amount).map_err(xlsx_err)?;
+            sheet
+                .write_formula_with_format(
+                    row,
+                    1,
+                    Formula::new(formula).set_result(cached.to_string()),
+                    &amount,
+                )
+                .map_err(xlsx_err)?;
         }
     }
     sheet.write_string(11, 0, "差异率").map_err(xlsx_err)?;
-    let ratio = summary.get("differenceRatio").and_then(Value::as_f64).unwrap_or(0.0);
-    sheet.write_formula_with_format(11, 1, Formula::new("IFERROR(ABS(B11/B10),0)").set_result(ratio.to_string()), &percent).map_err(xlsx_err)?;
+    let ratio = summary
+        .get("differenceRatio")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    sheet
+        .write_formula_with_format(
+            11,
+            1,
+            Formula::new("IFERROR(ABS(B11/B10),0)").set_result(ratio.to_string()),
+            &percent,
+        )
+        .map_err(xlsx_err)?;
     sheet.write_string(12, 0, "勾稽结果").map_err(xlsx_err)?;
-    let passed = summary.get("reconciliationPassed").and_then(Value::as_bool).unwrap_or(false);
-    sheet.write_string_with_format(12, 1, if passed { "通过" } else { "不通过" }, &pass).map_err(xlsx_err)?;
-    sheet.write_string_with_format(14, 0, "测算类型", &header).map_err(xlsx_err)?;
-    sheet.write_string_with_format(14, 1, "测算方法、公式及数据来源", &header).map_err(xlsx_err)?;
+    let passed = summary
+        .get("reconciliationPassed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    sheet
+        .write_string_with_format(12, 1, if passed { "通过" } else { "不通过" }, &pass)
+        .map_err(xlsx_err)?;
+    sheet
+        .write_string_with_format(14, 0, "测算类型", &header)
+        .map_err(xlsx_err)?;
+    sheet
+        .write_string_with_format(14, 1, "测算方法、公式及数据来源", &header)
+        .map_err(xlsx_err)?;
     let method_text = Format::new().set_text_wrap();
     let methods = [
-        ("已实现", "实际结算汇率法：实际结算汇率＝|JE现金/银行行本位币金额合计|÷|JE现金/银行行原币金额合计|；资产损益＝终止确认账面价值－结算原币×实际结算汇率；负债损益＝结算原币×实际结算汇率－终止确认账面价值。央行交易日中间价作为基准比较；无可用现金行时作为后备汇率。数据来源：完整JE凭证、央行汇率快照。"),
-        ("未实现", "有原币余额时：月末审计余额＝月末原币余额×央行月末汇率；未实现损益＝月末审计余额－重估前本位币余额。TB无原币余额时，不伪造独立重算：识别客户重估及冲回凭证，暂按账面重估金额复核，央行汇率仅用于倒算原币展示。数据来源：JE重估/冲回凭证、TB、央行汇率快照。"),
-        ("待复核", "无法可靠自动重算的复杂、多对多或科目角色不明凭证，暂按JE汇兑损益科目账面金额纳入暂估审计金额，并在隐藏明细中保留凭证号和待复核原因。"),
-        ("TB对比", "优先取TB累计/YTD本位币净额；只有借方发生额和贷方发生额两列同时映射时才采用借方减贷方。单边MTD字段不得覆盖YTD累计字段。数据来源：TB财务费用—汇兑损益明细科目。"),
+        (
+            "已实现",
+            "已实现独立重算：统一采用结算日官方汇率，不使用JE现金/银行行倒算汇率作为审计汇率。资产损益＝终止确认账面价值－结算原币×官方汇率；负债按相反方向。JE倒算汇率仅用于客户口径比较。数据来源：完整JE凭证、官方汇率快照。",
+        ),
+        (
+            "未实现",
+            "未实现账户余额法：按公司＋科目＋币种＋辅助核算，以期初外币余额加正常业务JE原币发生额滚动至月末；客户已入账未实现汇兑损益及其冲回从正常发生额中剔除。月末审计余额＝月末原币余额×月末官方汇率；审计未实现损益与客户已入账金额单独比较。TB无原币余额时，以期初本位币÷期初官方汇率估算期初原币并标记为受限测算。",
+        ),
+        (
+            "待确认",
+            "待确认项目仅披露，不进入审计测算。用户确认为已实现后，工具执行结算事件独立重算；确认为未实现后，该凭证仅作为客户已入账未实现汇兑损益或冲回证据，从正常JE发生额中剔除并用于账户级比较，不采用该凭证金额作为审计测算结果。Excel中的调整需导回工具后重算。",
+        ),
+        (
+            "TB对比",
+            "优先取TB累计/YTD本位币净额；只有借方发生额和贷方发生额两列同时映射时才采用借方减贷方。单边MTD字段不得覆盖YTD累计字段。数据来源：TB财务费用—汇兑损益明细科目。",
+        ),
     ];
     for (offset, (kind, detail)) in methods.iter().enumerate() {
         let row = (15 + offset) as u32;
         sheet.write_string(row, 0, *kind).map_err(xlsx_err)?;
-        sheet.write_string_with_format(row, 1, *detail, &method_text).map_err(xlsx_err)?;
+        sheet
+            .write_string_with_format(row, 1, *detail, &method_text)
+            .map_err(xlsx_err)?;
         sheet.set_row_height(row, 54).map_err(xlsx_err)?;
     }
     sheet.set_column_width(0, 32).map_err(xlsx_err)?;
@@ -3070,80 +6055,618 @@ fn write_user_conclusion_sheet(
     Ok(())
 }
 
+fn write_classification_adjustment_sheet(
+    workbook: &mut Workbook,
+    result: &Value,
+) -> Result<(), AppError> {
+    let (header, _) = formats();
+    let amount = Format::new().set_num_format("#,##0.00;[Red](#,##0.00);-");
+    let input = Format::new()
+        .set_font_color("#0000FF")
+        .set_background_color("#FFF2CC");
+    let wrap = Format::new().set_text_wrap();
+    let sheet = workbook.add_worksheet();
+    setup(sheet, "分类调整")?;
+    let headers = [
+        "凭证类型（借贷科目组合）",
+        "凭证数量",
+        "示例凭证号",
+        "导出时分类",
+        "借方科目（代码/英文名/中文名）",
+        "贷方科目（代码/英文名/中文名）",
+        "凭证摘要",
+        "用户调整分类",
+        "重算状态",
+        "账面汇兑损益（仅供参考）",
+        "使用说明",
+        "_凭证ID清单",
+        "_类型键",
+    ];
+    for (column, title) in headers.iter().enumerate() {
+        sheet
+            .write_string_with_format(0, column as u16, *title, &header)
+            .map_err(xlsx_err)?;
+    }
+    let controls = result
+        .get("classificationControls")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut account_names = HashMap::<String, BTreeSet<String>>::new();
+    for detail in result
+        .get("voucherDetail")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let code = detail
+            .get("accountCode")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_uppercase();
+        if code.is_empty() {
+            continue;
+        }
+        let names = account_names.entry(code).or_default();
+        for key in ["accountNameOriginal", "accountNameChinese"] {
+            if let Some(name) = detail.get(key).and_then(Value::as_str) {
+                if !name.trim().is_empty() {
+                    names.insert(name.trim().to_owned());
+                }
+            }
+        }
+    }
+    let render_accounts = |codes: &[String]| {
+        codes
+            .iter()
+            .map(|code| {
+                let names = account_names
+                    .get(&code.trim().to_uppercase())
+                    .map(|items| items.iter().cloned().collect::<Vec<_>>().join(" / "))
+                    .unwrap_or_default();
+                if names.is_empty() {
+                    code.clone()
+                } else {
+                    format!("{code} / {names}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("；")
+    };
+    let mut groups = BTreeMap::<String, Vec<&Value>>::new();
+    for item in &controls {
+        let key = item
+            .get("patternKey")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| item.get("voucherId").and_then(Value::as_str).unwrap_or(""));
+        groups.entry(key.to_owned()).or_default().push(item);
+    }
+    let validation = DataValidation::new()
+        .allow_list_strings(&["已实现汇兑损益", "未实现汇兑损益", "待确认"])
+        .map_err(xlsx_err)?;
+    for (index, (pattern_key, items)) in groups.iter().enumerate() {
+        let row = (index + 1) as u32;
+        let classifications = items
+            .iter()
+            .filter_map(|item| item.get("classification").and_then(Value::as_str))
+            .collect::<BTreeSet<_>>();
+        let classification = if classifications.len() == 1 {
+            classifications.iter().next().copied().unwrap_or("待确认")
+        } else {
+            "待确认"
+        };
+        let voucher_ids = items
+            .iter()
+            .filter_map(|item| item.get("voucherId").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        let summaries = items
+            .iter()
+            .filter_map(|item| item.get("summary").and_then(Value::as_str))
+            .filter(|value| !value.trim().is_empty())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .take(5)
+            .collect::<Vec<_>>()
+            .join("；");
+        let first = items[0];
+        let debit = first
+            .get("debitAccounts")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let credit = first
+            .get("creditAccounts")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let statuses = items
+            .iter()
+            .filter_map(|item| item.get("measurementStatus").and_then(Value::as_str))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join("；");
+        let booked = items
+            .iter()
+            .filter_map(|item| item.get("bookedFxGainLoss").and_then(Value::as_f64))
+            .sum::<f64>();
+        for (column, value) in [
+            (
+                0,
+                first
+                    .get("patternLabel")
+                    .and_then(Value::as_str)
+                    .unwrap_or(pattern_key),
+            ),
+            (
+                2,
+                &voucher_ids
+                    .iter()
+                    .take(5)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("、"),
+            ),
+            (3, classification),
+            (4, &render_accounts(&debit)),
+            (5, &render_accounts(&credit)),
+            (6, &summaries),
+            (8, &statuses),
+            (
+                10,
+                "在本页修改后，回到工具点击“导入Excel分类并重算”；Excel不使用账面汇兑损益替代审计测算。",
+            ),
+            (11, &voucher_ids.join("\n")),
+            (12, pattern_key),
+        ] {
+            sheet
+                .write_string_with_format(row, column, value, &wrap)
+                .map_err(xlsx_err)?;
+        }
+        sheet
+            .write_number(row, 1, items.len() as f64)
+            .map_err(xlsx_err)?;
+        sheet
+            .write_string_with_format(row, 7, classification, &input)
+            .map_err(xlsx_err)?;
+        sheet
+            .add_data_validation(row, 7, row, 7, &validation)
+            .map_err(xlsx_err)?;
+        sheet
+            .write_number_with_format(row, 9, booked, &amount)
+            .map_err(xlsx_err)?;
+    }
+    for (column, width) in [
+        (0, 42),
+        (1, 12),
+        (2, 34),
+        (3, 18),
+        (4, 48),
+        (5, 48),
+        (6, 56),
+        (7, 20),
+        (8, 24),
+        (9, 22),
+        (10, 56),
+    ] {
+        sheet.set_column_width(column, width).map_err(xlsx_err)?;
+    }
+    sheet.set_column_hidden(11).map_err(xlsx_err)?;
+    sheet.set_column_hidden(12).map_err(xlsx_err)?;
+    Ok(())
+}
+
 fn write_user_calculation_sheet(workbook: &mut Workbook, result: &Value) -> Result<(), AppError> {
-    let mut rows = Vec::new();
-    for item in result.get("realized").and_then(Value::as_array).into_iter().flatten() {
-        rows.push(json!({
+    let details = result
+        .get("voucherDetail")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let account_names = details
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row.get("accountCode")?.as_str()?.trim().to_uppercase(),
+                row.get("accountNameOriginal")?.as_str()?.trim().to_owned(),
+            ))
+        })
+        .filter(|(code, name)| !code.is_empty() && !name.is_empty())
+        .collect::<HashMap<_, _>>();
+    let account_parts = |value: &Value| {
+        let accounts = value
+            .as_array()
+            .map(|items| items.iter().collect::<Vec<_>>())
+            .unwrap_or_else(|| vec![value]);
+        let mut codes = Vec::new();
+        let mut names = Vec::new();
+        for account in accounts {
+            let text = localized_text("account", account);
+            let mut parts = text.splitn(2, char::is_whitespace);
+            let code = parts.next().unwrap_or("").trim().to_owned();
+            let inline_name = parts.next().unwrap_or("").trim().to_owned();
+            let name = if inline_name.is_empty() {
+                account_names
+                    .get(&code.to_uppercase())
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                inline_name
+            };
+            if !code.is_empty() {
+                codes.push(code);
+            }
+            if !name.is_empty() {
+                names.push(name);
+            }
+        }
+        (codes.join(" / "), names.join(" / "))
+    };
+    let mut measurements = Vec::new();
+    for item in result
+        .get("realized")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (account_code, account_name) =
+            account_parts(item.get("account").unwrap_or(&Value::Null));
+        measurements.push(json!({
             "date": item.get("date"), "voucherId": item.get("voucherId"), "calculationType": "已实现",
-            "account": item.get("account"), "currency": item.get("currency"),
+            "accountCode": account_code, "accountNameOriginal": account_name, "currency": item.get("currency"),
             "foreignAmount": item.get("settlementForeign"),
             "appliedRate": item.get("settlementRate").or_else(|| item.get("officialRate")),
             "bookAmount": item.get("carryingFunctional"), "auditAmount": item.get("translatedFunctional"),
-            "gainLoss": item.get("auditGainLoss"), "formulaDirection": if item.get("role").and_then(Value::as_str)==Some("monetary_liability") {"审计金额－账面金额"} else {"账面金额－审计金额"},
+            "gainLoss": item.get("auditGainLoss"), "formulaDirection": if item.get("targetForeignSigned").and_then(Value::as_f64).unwrap_or(-1.0)>0.0 {"审计金额－账面金额"} else {"账面金额－审计金额"},
+            "sourceRow": item.get("sourceRow"),
             "note": format!("{}；汇率来源：{}；央行交易日中间价：{:.6}",
                 item.get("calculationMethod").and_then(Value::as_str).unwrap_or("结算事件测算"),
                 item.get("rateSource").and_then(Value::as_str).unwrap_or(RATE_SOURCE),
                 item.get("officialRate").and_then(Value::as_f64).unwrap_or(0.0))
         }));
     }
-    for item in result.get("unrealized").and_then(Value::as_array).into_iter().flatten() {
-        rows.push(json!({
-            "date": item.get("monthEnd"), "voucherId": item.get("voucherId"), "calculationType": "未实现",
-            "account": item.get("account"), "currency": item.get("currency"),
-            "foreignAmount": item.get("inferredForeign").or_else(|| item.get("closingForeign")),
-            "appliedRate": item.get("officialRate").or_else(|| item.get("closingRate")),
-            "bookAmount": item.get("preRevaluationFunctional").or_else(|| item.get("closingBookFunctional")),
-            "auditAmount": item.get("auditClosingFunctional").or_else(|| item.get("closingAuditFunctional")),
-            "gainLoss": item.get("unrealizedGainLoss").or_else(|| item.get("suggestedAdjustment")),
-            "formulaDirection": if item.get("inferredForeign").is_some() {"账面金额－审计金额"} else {"审计金额－账面金额"},
-            "note": format!("{}；数据来源：JE重估/冲回凭证、TB及央行汇率快照",
-                item.get("method").and_then(Value::as_str).unwrap_or("未实现重估测算"))
-        }));
-    }
-    for item in result.get("pendingReview").and_then(Value::as_array).into_iter().flatten() {
-        rows.push(json!({
+    // 未实现损益的测算对象是账户月末余额，不是某一张客户重估凭证。
+    // 因此不再把账户级月度重估结果硬塞进“完整凭证+测算”表；相关过程
+    // 单独输出到“外币余额滚动”和“客户重估比较”模块。
+    for item in result
+        .get("pendingReview")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (account_code, account_name) =
+            account_parts(item.get("fxAccounts").unwrap_or(&Value::Null));
+        measurements.push(json!({
             "date": item.get("date"), "voucherId": item.get("voucherId"), "calculationType": "待复核",
-            "account": item.get("fxAccounts"), "currency": item.get("currencies"),
+            "pendingCategory":item.get("pendingCategory"), "accountCode": account_code,
+            "accountNameOriginal": account_name, "currency": item.get("currencies"),
             "foreignAmount": 0.0, "appliedRate": 0.0,
             "bookAmount": item.get("bookedFxGainLoss"), "auditAmount": null,
-            "gainLoss": item.get("bookedFxGainLoss"), "formulaDirection": "暂按账面金额保留",
+            "gainLoss": item.get("bookedFxGainLoss"), "formulaDirection": "账面金额仅供参考，不纳入审计测算",
             "note": item.get("reviewReason"), "pending": true
         }));
+    }
+    let mut assigned = HashSet::new();
+    let mut rows = Vec::new();
+    for detail in details {
+        let voucher = detail
+            .get("voucherId")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let source_row = detail.get("sourceRow").and_then(Value::as_u64);
+        let account = detail
+            .get("accountCode")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let matched = measurements
+            .iter()
+            .enumerate()
+            .find(|(index, item)| {
+                !assigned.contains(index)
+                    && item.get("voucherId").and_then(Value::as_str) == Some(voucher)
+                    && source_row.is_some()
+                    && item.get("sourceRow").and_then(Value::as_u64) == source_row
+            })
+            .or_else(|| {
+                measurements.iter().enumerate().find(|(index, item)| {
+                    !assigned.contains(index)
+                        && item.get("voucherId").and_then(Value::as_str) == Some(voucher)
+                        && item
+                            .get("accountCode")
+                            .and_then(Value::as_str)
+                            .is_some_and(|value| value.split(" / ").any(|code| code == account))
+                })
+            })
+            .or_else(|| {
+                measurements.iter().enumerate().find(|(index, item)| {
+                    !assigned.contains(index)
+                        && item.get("voucherId").and_then(Value::as_str) == Some(voucher)
+                })
+            });
+        let measurement = matched.map(|(index, item)| {
+            assigned.insert(index);
+            item.clone()
+        });
+        rows.push((detail, measurement));
+    }
+    for (index, measurement) in measurements.into_iter().enumerate() {
+        if !assigned.contains(&index) {
+            rows.push((Value::Object(Map::new()), Some(measurement)));
+        }
     }
     let (header, _) = formats();
     let amount = Format::new().set_num_format("#,##0.00;[Red](#,##0.00);-");
     let rate = Format::new().set_num_format("0.000000");
     let sheet = workbook.add_worksheet();
     setup(sheet, "汇兑损益测算")?;
-    for (column, title) in ["日期","凭证匹配ID","测算类型","科目","币种","原币金额","测算采用汇率","账面本位币金额","审计本位币金额","测算/待复核金额","计算逻辑","测算方法与数据来源"].iter().enumerate() {
-        sheet.write_string_with_format(0, column as u16, *title, &header).map_err(xlsx_err)?;
-        sheet.set_column_width(column as u16, if matches!(column,3|10|11) {36} else {18}).map_err(xlsx_err)?;
+    let translated = result
+        .pointer("/summary/accountTranslationEnabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let raw_headers = rows
+        .iter()
+        .flat_map(|(detail, _)| {
+            detail
+                .as_object()
+                .into_iter()
+                .flat_map(|object| object.keys())
+        })
+        .filter(|key| key.starts_with("原始_"))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut headers = [
+        "日期",
+        "凭证匹配ID",
+        "测算类型",
+        "待复核分路",
+        "摘要",
+        "科目代码",
+        "原始科目名称",
+    ]
+    .iter()
+    .map(|value| (*value).to_owned())
+    .collect::<Vec<_>>();
+    if translated {
+        headers.push("中文科目名称（LLM翻译）".into());
     }
-    for (index, row) in rows.iter().enumerate() {
+    headers.extend(
+        [
+            "币种",
+            "JE原币金额",
+            "JE本位币金额",
+            "是否测算行",
+            "测算原币金额",
+            "测算采用汇率",
+            "测算前账面金额",
+            "审计测算金额",
+            "测算/待复核金额",
+            "计算逻辑",
+            "测算方法与数据来源",
+            "JE源文件行号",
+        ]
+        .iter()
+        .map(|value| (*value).to_owned()),
+    );
+    headers.extend(
+        raw_headers
+            .iter()
+            .map(|value| value.trim_start_matches("原始_").to_owned()),
+    );
+    for (column, title) in headers.iter().enumerate() {
+        sheet
+            .write_string_with_format(0, column as u16, title, &header)
+            .map_err(xlsx_err)?;
+        sheet
+            .set_column_width(
+                column as u16,
+                if matches!(
+                    title.as_str(),
+                    "摘要"
+                        | "原始科目名称"
+                        | "中文科目名称（LLM翻译）"
+                        | "计算逻辑"
+                        | "测算方法与数据来源"
+                ) {
+                    36
+                } else {
+                    18
+                },
+            )
+            .map_err(xlsx_err)?;
+    }
+    for (index, (detail, measurement)) in rows.iter().enumerate() {
         let excel_row = index + 2;
         let output_row = (index + 1) as u32;
-        for (column, key) in ["date","voucherId","calculationType","account","currency"].iter().enumerate() {
-            sheet.write_string(output_row, column as u16, localized_text(key, row.get(key).unwrap_or(&Value::Null))).map_err(xlsx_err)?;
+        let from_detail = |key: &str| detail.get(key).unwrap_or(&Value::Null);
+        let source_or_measurement = |key: &str| {
+            detail
+                .get(key)
+                .filter(|value| !value.is_null())
+                .or_else(|| measurement.as_ref().and_then(|row| row.get(key)))
+                .unwrap_or(&Value::Null)
+        };
+        let calculation_type = measurement
+            .as_ref()
+            .and_then(|row| row.get("calculationType"))
+            .or_else(|| detail.get("classification"))
+            .unwrap_or(&Value::Null);
+        for (column, value) in [
+            source_or_measurement("date"),
+            source_or_measurement("voucherId"),
+            calculation_type,
+            source_or_measurement("pendingCategory"),
+            from_detail("summary"),
+            source_or_measurement("accountCode"),
+            source_or_measurement("accountNameOriginal"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            sheet
+                .write_string(output_row, column as u16, localized_text("", value))
+                .map_err(xlsx_err)?;
         }
-        let foreign = row.get("foreignAmount").and_then(Value::as_f64).unwrap_or(0.0);
-        let applied_rate = row.get("appliedRate").and_then(Value::as_f64).unwrap_or(0.0);
-        let book = row.get("bookAmount").and_then(Value::as_f64).unwrap_or(0.0);
-        let audit = row.get("auditAmount").and_then(Value::as_f64).unwrap_or(0.0);
-        let gain_loss = row.get("gainLoss").and_then(Value::as_f64).unwrap_or(0.0);
-        sheet.write_number_with_format(output_row, 5, foreign, &amount).map_err(xlsx_err)?;
-        sheet.write_number_with_format(output_row, 6, applied_rate, &rate).map_err(xlsx_err)?;
-        sheet.write_number_with_format(output_row, 7, book, &amount).map_err(xlsx_err)?;
-        let direction = row.get("formulaDirection").and_then(Value::as_str).unwrap_or("审计金额－账面金额");
-        let pending = row.get("pending").and_then(Value::as_bool).unwrap_or(false);
-        if pending {
-            sheet.write_blank(output_row, 8, &amount).map_err(xlsx_err)?;
+        let offset = u16::from(translated);
+        if translated {
+            sheet
+                .write_string(
+                    output_row,
+                    7,
+                    localized_text(
+                        "accountNameChinese",
+                        detail.get("accountNameChinese").unwrap_or(&Value::Null),
+                    ),
+                )
+                .map_err(xlsx_err)?;
+        }
+        sheet
+            .write_string(
+                output_row,
+                7 + offset,
+                localized_text("currency", source_or_measurement("currency")),
+            )
+            .map_err(xlsx_err)?;
+        for (column, key) in [
+            (8 + offset, "foreignAmount"),
+            (9 + offset, "functionalAmount"),
+        ] {
+            if let Some(value) = detail.get(key).and_then(Value::as_f64) {
+                sheet
+                    .write_number_with_format(output_row, column, value, &amount)
+                    .map_err(xlsx_err)?;
+            } else {
+                sheet
+                    .write_blank(output_row, column, &amount)
+                    .map_err(xlsx_err)?;
+            }
+        }
+        sheet
+            .write_string(
+                output_row,
+                10 + offset,
+                if measurement.is_some() { "是" } else { "否" },
+            )
+            .map_err(xlsx_err)?;
+        if let Some(row) = measurement {
+            let foreign = row
+                .get("foreignAmount")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let applied_rate = row
+                .get("appliedRate")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let book = row.get("bookAmount").and_then(Value::as_f64).unwrap_or(0.0);
+            let audit = row
+                .get("auditAmount")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let gain_loss = row.get("gainLoss").and_then(Value::as_f64).unwrap_or(0.0);
+            sheet
+                .write_number_with_format(output_row, 11 + offset, foreign, &amount)
+                .map_err(xlsx_err)?;
+            sheet
+                .write_number_with_format(output_row, 12 + offset, applied_rate, &rate)
+                .map_err(xlsx_err)?;
+            sheet
+                .write_number_with_format(output_row, 13 + offset, book, &amount)
+                .map_err(xlsx_err)?;
+            let direction = row
+                .get("formulaDirection")
+                .and_then(Value::as_str)
+                .unwrap_or("审计金额－账面金额");
+            let pending = row.get("pending").and_then(Value::as_bool).unwrap_or(false);
+            if pending {
+                sheet
+                    .write_blank(output_row, 14 + offset, &amount)
+                    .map_err(xlsx_err)?;
+            } else {
+                sheet
+                    .write_formula_with_format(
+                        output_row,
+                        14 + offset,
+                        Formula::new(if translated {
+                            format!("M{excel_row}*N{excel_row}")
+                        } else {
+                            format!("L{excel_row}*M{excel_row}")
+                        })
+                        .set_result(audit.to_string()),
+                        &amount,
+                    )
+                    .map_err(xlsx_err)?;
+            }
+            let formula = if pending {
+                if translated {
+                    format!("O{excel_row}")
+                } else {
+                    format!("N{excel_row}")
+                }
+            } else if direction.starts_with("账面") {
+                if translated {
+                    format!("O{excel_row}-P{excel_row}")
+                } else {
+                    format!("N{excel_row}-O{excel_row}")
+                }
+            } else {
+                if translated {
+                    format!("P{excel_row}-O{excel_row}")
+                } else {
+                    format!("O{excel_row}-N{excel_row}")
+                }
+            };
+            sheet
+                .write_formula_with_format(
+                    output_row,
+                    15 + offset,
+                    Formula::new(formula).set_result(gain_loss.to_string()),
+                    &amount,
+                )
+                .map_err(xlsx_err)?;
+            sheet
+                .write_string(output_row, 16 + offset, direction)
+                .map_err(xlsx_err)?;
+            sheet
+                .write_string(
+                    output_row,
+                    17 + offset,
+                    localized_text("note", row.get("note").unwrap_or(&Value::Null)),
+                )
+                .map_err(xlsx_err)?;
         } else {
-            sheet.write_formula_with_format(output_row, 8, Formula::new(format!("F{excel_row}*G{excel_row}")).set_result(audit.to_string()), &amount).map_err(xlsx_err)?;
+            for column in (11 + offset)..=(15 + offset) {
+                sheet
+                    .write_blank(output_row, column, &amount)
+                    .map_err(xlsx_err)?;
+            }
         }
-        let formula = if pending { format!("H{excel_row}") } else if direction.starts_with("账面") { format!("H{excel_row}-I{excel_row}") } else { format!("I{excel_row}-H{excel_row}") };
-        sheet.write_formula_with_format(output_row, 9, Formula::new(formula).set_result(gain_loss.to_string()), &amount).map_err(xlsx_err)?;
-        sheet.write_string(output_row, 10, direction).map_err(xlsx_err)?;
-        sheet.write_string(output_row, 11, localized_text("note", row.get("note").unwrap_or(&Value::Null))).map_err(xlsx_err)?;
+        if let Some(value) = detail.get("sourceRow").and_then(Value::as_u64) {
+            sheet
+                .write_number(output_row, 18 + offset, value as f64)
+                .map_err(xlsx_err)?;
+        }
+        let mut next_column = 19u16 + offset;
+        for key in &raw_headers {
+            sheet
+                .write_string(
+                    output_row,
+                    next_column,
+                    localized_text(key, detail.get(key).unwrap_or(&Value::Null)),
+                )
+                .map_err(xlsx_err)?;
+            next_column += 1;
+        }
     }
     Ok(())
 }
@@ -3202,17 +6725,35 @@ fn write_json_object_sheet(
     let percent_format = Format::new().set_num_format("0.00%");
     let worksheet = workbook.add_worksheet();
     setup(worksheet, name)?;
-    worksheet.write_string_with_format(0, 0, "项目", &header).map_err(xlsx_err)?;
-    worksheet.write_string_with_format(0, 1, "内容", &header).map_err(xlsx_err)?;
+    worksheet
+        .write_string_with_format(0, 0, "项目", &header)
+        .map_err(xlsx_err)?;
+    worksheet
+        .write_string_with_format(0, 1, "内容", &header)
+        .map_err(xlsx_err)?;
     for (index, (key, value)) in value.as_object().into_iter().flatten().enumerate() {
-        worksheet.write_string((index + 1) as u32, 0, chinese_header(key)).map_err(xlsx_err)?;
+        worksheet
+            .write_string((index + 1) as u32, 0, chinese_header(key))
+            .map_err(xlsx_err)?;
         match value {
-            Value::Number(value) => worksheet.write_number_with_format(
-                (index + 1) as u32, 1, value.as_f64().unwrap_or(0.0),
-                if key.to_lowercase().contains("ratio") { &percent_format } else { &number_format }
-            ).map_err(xlsx_err)?,
-            Value::Bool(value) => worksheet.write_string((index + 1) as u32, 1, if *value { "是" } else { "否" }).map_err(xlsx_err)?,
-            _ => worksheet.write_string((index + 1) as u32, 1, localized_text(key, value)).map_err(xlsx_err)?,
+            Value::Number(value) => worksheet
+                .write_number_with_format(
+                    (index + 1) as u32,
+                    1,
+                    value.as_f64().unwrap_or(0.0),
+                    if key.to_lowercase().contains("ratio") {
+                        &percent_format
+                    } else {
+                        &number_format
+                    },
+                )
+                .map_err(xlsx_err)?,
+            Value::Bool(value) => worksheet
+                .write_string((index + 1) as u32, 1, if *value { "是" } else { "否" })
+                .map_err(xlsx_err)?,
+            _ => worksheet
+                .write_string((index + 1) as u32, 1, localized_text(key, value))
+                .map_err(xlsx_err)?,
         };
     }
     worksheet.set_column_width(0, 28).map_err(xlsx_err)?;
@@ -3265,10 +6806,15 @@ fn write_value_array_sheet(
             .write_string_with_format(0, column as u16, chinese_header(key), &header)
             .map_err(xlsx_err)?;
         worksheet
-            .set_column_width(column as u16, match key.as_str() {
-                "account" => 38, "evidence" | "detail" | "matchedRules" | "counterEvidence" | "tbRows" => 50,
-                "method" | "summary" | "scheme" => 36, _ => 24,
-            })
+            .set_column_width(
+                column as u16,
+                match key.as_str() {
+                    "account" => 38,
+                    "evidence" | "detail" | "matchedRules" | "counterEvidence" | "tbRows" => 50,
+                    "method" | "summary" | "scheme" => 36,
+                    _ => 24,
+                },
+            )
             .map_err(xlsx_err)?;
     }
     for (row_index, row) in rows.iter().enumerate() {
@@ -3281,13 +6827,21 @@ fn write_value_array_sheet(
                                 (row_index + 1) as u32,
                                 column as u16,
                                 number.as_f64().unwrap_or(0.0),
-                                if key.to_lowercase().contains("ratio") { &percent_format } else { &number_format },
+                                if key.to_lowercase().contains("ratio") {
+                                    &percent_format
+                                } else {
+                                    &number_format
+                                },
                             )
                             .map_err(xlsx_err)?;
                     }
                     _ => {
                         worksheet
-                            .write_string((row_index + 1) as u32, column as u16, localized_text(key, value))
+                            .write_string(
+                                (row_index + 1) as u32,
+                                column as u16,
+                                localized_text(key, value),
+                            )
                             .map_err(xlsx_err)?;
                     }
                 }
@@ -3353,65 +6907,155 @@ fn json_text(value: &Value) -> String {
 
 fn chinese_header(key: &str) -> &str {
     match key {
-        "account" => "科目", "accountRoles" => "科目角色", "amount" => "金额",
+        "account" => "科目",
+        "accountCode" => "科目编码",
+        "accountName" => "科目名称",
+        "currencyText" => "币种线索文本",
+        "accountNameOriginal" => "原始科目名称",
+        "accountNameChinese" => "中文科目名称（LLM翻译）",
+        "accountRoles" => "科目角色",
+        "amount" => "金额",
         "automaticMeasuredFxGainLoss" => "自动测算合计",
-        "auditClosingFunctional" => "审计月末本位币余额", "auditFxGainLoss" => "审计测算汇兑损益",
-        "auditGainLoss" => "审计已实现汇兑损益", "auxiliary" => "辅助核算",
+        "auditClosingFunctional" => "审计月末本位币余额",
+        "auditFxGainLoss" => "审计测算汇兑损益",
+        "auditGainLoss" => "审计已实现汇兑损益",
+        "auxiliary" => "辅助核算",
         "bookedFxGainLoss" => "账面汇兑损益",
-        "carryingFunctional" => "终止确认账面本位币价值", "cashRequired" => "现金是否为必要条件",
-        "classification" => "分类", "clientRevaluationExcluded" => "已识别客户重估金额",
-        "closingAuditFunctional" => "年末审计本位币余额", "closingBookFunctional" => "年末账面本位币余额",
-        "closingDifference" => "年末重估差异", "closingForeign" => "年末原币余额",
-        "closingRate" => "年末汇率", "confidence" => "置信度", "counterEvidence" => "反向证据",
-        "coverageDifference" => "覆盖勾稽差异", "coveredBookFxGainLoss" => "自动测算覆盖的账面汇兑损益",
-        "currency" => "币种", "date" => "日期", "detail" => "说明", "difference" => "测算与TB差异",
-        "differenceRatio" => "差异率", "entity" => "公司/核算主体", "eventType" => "事件类型",
-        "evidence" => "识别证据", "excludedTransferRows" => "剔除损益结转行数",
-        "foreignMovement" => "原币变动", "functionalCurrency" => "本位币",
-        "inferredForeign" => "倒算原币余额", "jeFxGainLossAfterTransferExclusion" => "JE剔除损益结转后汇兑损益",
-        "jeTbDifference" => "JE与TB差异", "lowConfidenceEvents" => "低置信度事件数",
-        "matchedRules" => "命中规则", "measurementDifference" => "自动测算金额差异", "method" => "测算方法", "mode" => "测算模式",
+        "businessForeignMovement" => "正常业务原币发生额",
+        "businessFunctionalMovement" => "正常业务本位币发生额",
+        "carryingFunctional" => "终止确认账面本位币价值",
+        "cashRequired" => "现金是否为必要条件",
+        "classification" => "分类",
+        "clientRevaluationExcluded" => "客户已入账未实现汇兑损益",
+        "clientRevaluationBalanceAdjustment" => "客户未实现类凭证对货币性项目余额的调整",
+        "clientBookedUnrealizedGainLoss" => "客户已入账未实现汇兑损益",
+        "coveredBookRealizedGainLoss" => "已覆盖账面已实现汇兑损益",
+        "realizedMeasurementDifference" => "已实现测算差异",
+        "unrealizedMeasurementDifference" => "未实现测算差异",
+        "coveredMeasurementDifference" => "已覆盖项目测算差异",
+        "uncoveredTbFxGainLoss" => "未覆盖账面金额",
+        "clientRevaluationVoucherIds" => "未实现汇兑损益/冲回凭证号",
+        "clientRevaluationDetails" => "未实现汇兑损益类凭证信息",
+        "closingAuditFunctional" => "年末审计本位币余额",
+        "closingBookFunctional" => "年末账面本位币余额",
+        "closingDifference" => "年末折算差异",
+        "closingForeign" => "年末原币余额",
+        "closingRate" => "年末汇率",
+        "confidence" => "置信度",
+        "counterEvidence" => "反向证据",
+        "coverageDifference" => "覆盖勾稽差异",
+        "coveredBookFxGainLoss" => "自动测算覆盖的账面汇兑损益",
+        "currency" => "币种",
+        "date" => "日期",
+        "detail" => "说明",
+        "difference" => "测算与TB差异",
+        "differenceRatio" => "差异率",
+        "entity" => "公司/核算主体",
+        "eventType" => "事件类型",
+        "evidence" => "识别证据",
+        "excludedTransferRows" => "剔除损益结转行数",
+        "foreignMovement" => "原币变动",
+        "functionalCurrency" => "本位币",
+        "identificationBasis" => "识别依据",
+        "inferredForeign" => "倒算原币余额",
+        "jeFxGainLossAfterTransferExclusion" => "JE剔除损益结转后汇兑损益",
+        "jeTbDifference" => "JE与TB差异",
+        "lowConfidenceEvents" => "低置信度事件数",
+        "matchedRules" => "命中规则",
+        "measurementDifference" => "自动测算金额差异",
+        "method" => "测算方法",
+        "mode" => "测算模式",
         "needsZeroResultReview" => "零结果是否需要复核",
-        "monthEnd" => "月末/重估日期", "nonRevaluationFunctionalMovement" => "非重估本位币变动",
-        "officialRate" => "官方汇率", "openingAuditFunctional" => "年初审计本位币余额",
-        "openingBookFunctional" => "年初账面本位币余额", "openingDifference" => "年初重估差异",
-        "openingForeign" => "年初原币余额", "openingRate" => "年初汇率",
-        "pendingReviewAmount" => "待复核项目账面金额", "pendingReviewCount" => "待复核项目数",
-        "postRevaluationFunctional" => "重估后本位币余额", "preRevaluationFunctional" => "重估前本位币余额",
-        "publishedDate" => "汇率公布日期", "realizedEvents" => "已实现测算事件数",
-        "realizedGainLoss" => "已实现汇兑损益", "realizedScore" => "已实现得分",
-        "reconciliationPassed" => "勾稽是否通过", "requestedDate" => "请求日期",
-        "responseHash" => "汇率响应哈希", "reviewReason" => "待复核原因", "role" => "科目角色", "ruleConflict" => "规则冲突",
-        "scheme" => "金额口径", "settlementForeign" => "结算原币金额", "severity" => "严重程度",
-        "source" => "来源/识别方式", "sourceRow" => "源文件行号", "suggestedAdjustment" => "建议调整",
-        "summary" => "摘要", "tbClosingFunctional" => "TB年末本位币余额",
-        "tbFxGainLoss" => "TB汇兑损益发生额", "tbReconciliationDifference" => "TB勾稽差异",
-        "tbRows" => "TB汇兑损益取数明细", "translatedFunctional" => "按官方汇率折算本位币",
-        "twoPointChange" => "两时点差异变化", "type" => "异常/检查类型",
-        "unrealizedAdjustment" => "未实现汇兑损益", "unrealizedGainLoss" => "未实现汇兑损益",
-        "unrealizedRows" => "未实现测算行数", "unrealizedScore" => "未实现得分",
-        "voucherId" => "凭证匹配ID", "openingPublishedDate" => "年初汇率公布日期",
-        "fxAccounts" => "汇兑损益科目", "currencies" => "涉及币种",
-        "calculationType" => "测算类型", "bookAmount" => "测算前账面金额", "auditAmount" => "审计测算金额",
-        "gainLoss" => "汇兑损益", "included" => "是否纳入汇总", "note" => "备注",
-        "closingPublishedDate" => "年末汇率公布日期", "fetchedAt" => "汇率抓取时间",
-        "sourceUrl" => "汇率来源网址", "startDate" => "汇率快照开始日", "endDate" => "汇率快照结束日",
-        "rates" => "汇率明细", "missing" => "缺失币种/日期", "cnyPerUnit" => "每单位外币折合人民币",
-        "functionalAmount" => "本位币净额", "foreignAmount" => "原币净额", "foreignDirection" => "原币借贷方向",
-        "id" => "凭证识别字段", "voucherType" => "凭证类型", "date" => "记账日期", "account" => "科目编码/名称",
-        "currency" => "交易币种", "openingFunctionalDebit" => "年初本位币借方余额",
-        "openingFunctionalCredit" => "年初本位币贷方余额", "closingFunctionalDebit" => "年末本位币借方余额",
-        "closingFunctionalCredit" => "年末本位币贷方余额", "periodFunctionalDebit" => "本期本位币借方发生额",
-        "periodFunctionalCredit" => "本期本位币贷方发生额", _ => key,
+        "monthEnd" => "月末测算日期",
+        "nonRevaluationFunctionalMovement" => "正常业务本位币变动（剔除未实现类凭证）",
+        "officialRate" => "官方汇率",
+        "customerAppliedRate" => "客户JE倒算汇率（仅供比较）",
+        "openingAuditFunctional" => "年初审计本位币余额",
+        "openingBookFunctional" => "年初账面本位币余额",
+        "openingDifference" => "年初折算差异",
+        "openingForeign" => "年初原币余额",
+        "openingRate" => "年初汇率",
+        "accountTranslationEnabled" => "是否启用科目名称翻译",
+        "translatedAccountNames" => "已翻译英文科目数",
+        "pendingCategory" => "待复核分路",
+        "pendingReviewAmount" => "待复核项目账面金额",
+        "pendingReviewCount" => "待复核项目数",
+        "postRevaluationFunctional" => "计入客户未实现类凭证后本位币余额",
+        "preRevaluationFunctional" => "未实现损益测算前本位币余额",
+        "publishedDate" => "汇率公布日期",
+        "realizedEvents" => "已实现测算事件数",
+        "realizedGainLoss" => "已实现汇兑损益",
+        "realizedScore" => "已实现得分",
+        "reconciliationPassed" => "勾稽是否通过",
+        "requestedDate" => "请求日期",
+        "responseHash" => "汇率响应哈希",
+        "reviewReason" => "待复核原因",
+        "role" => "科目角色",
+        "ruleConflict" => "规则冲突",
+        "scheme" => "金额口径",
+        "settlementForeign" => "结算原币金额",
+        "severity" => "严重程度",
+        "source" => "来源/识别方式",
+        "sourceRow" => "源文件行号",
+        "suggestedAdjustment" => "建议调整",
+        "auditBalanceAdjustment" => "审计期末折算余额调整",
+        "summary" => "摘要",
+        "tbClosingFunctional" => "TB年末本位币余额",
+        "tbFxGainLoss" => "TB汇兑损益发生额",
+        "tbReconciliationDifference" => "TB勾稽差异",
+        "tbRows" => "TB汇兑损益取数明细",
+        "translatedFunctional" => "按官方汇率折算本位币",
+        "twoPointChange" => "两时点差异变化",
+        "type" => "异常/检查类型",
+        "unrealizedAdjustment" => "未实现汇兑损益",
+        "unrealizedGainLoss" => "未实现汇兑损益",
+        "unrealizedRows" => "未实现测算行数",
+        "unrealizedScore" => "未实现得分",
+        "voucherId" => "凭证匹配ID",
+        "openingPublishedDate" => "年初汇率公布日期",
+        "fxAccounts" => "汇兑损益科目",
+        "currencies" => "涉及币种",
+        "calculationType" => "测算类型",
+        "bookAmount" => "测算前账面金额",
+        "auditAmount" => "审计测算金额",
+        "gainLoss" => "汇兑损益",
+        "included" => "是否纳入汇总",
+        "note" => "备注",
+        "closingPublishedDate" => "年末汇率公布日期",
+        "fetchedAt" => "汇率抓取时间",
+        "sourceUrl" => "汇率来源网址",
+        "startDate" => "汇率快照开始日",
+        "endDate" => "汇率快照结束日",
+        "rates" => "汇率明细",
+        "missing" => "缺失币种/日期",
+        "cnyPerUnit" => "每单位外币折合人民币",
+        "functionalAmount" => "本位币净额",
+        "foreignAmount" => "原币净额",
+        "foreignDirection" => "原币借贷方向",
+        "id" => "凭证识别字段",
+        "voucherType" => "凭证类型",
+        "date" => "记账日期",
+        "account" => "科目编码/名称",
+        "currency" => "交易币种",
+        "openingFunctionalDebit" => "年初本位币借方余额",
+        "openingFunctionalCredit" => "年初本位币贷方余额",
+        "closingFunctionalDebit" => "年末本位币借方余额",
+        "closingFunctionalCredit" => "年末本位币贷方余额",
+        "periodFunctionalDebit" => "本期本位币借方发生额",
+        "periodFunctionalCredit" => "本期本位币贷方发生额",
+        _ => key,
     }
 }
 
 fn localized_text(_key: &str, value: &Value) -> String {
     fn localize(value: &Value) -> Value {
         match value {
-            Value::Object(object) => Value::Object(object.iter().map(|(key, value)| {
-                (chinese_header(key).to_owned(), localize(value))
-            }).collect()),
+            Value::Object(object) => Value::Object(
+                object
+                    .iter()
+                    .map(|(key, value)| (chinese_header(key).to_owned(), localize(value)))
+                    .collect(),
+            ),
             Value::Array(values) => Value::Array(values.iter().map(localize).collect()),
             Value::String(text) => Value::String(localized_scalar(text).to_owned()),
             Value::Bool(value) => Value::String(if *value { "是" } else { "否" }.to_owned()),
@@ -3426,11 +7070,20 @@ fn localized_text(_key: &str, value: &Value) -> String {
 
 fn localized_scalar(value: &str) -> &str {
     match value {
-        "realized" => "仅已实现", "unrealized" => "仅未实现", "combined" => "已实现＋未实现",
-        "cash" => "外币现金及银行", "monetary_asset" => "货币性资产",
-        "monetary_liability" => "货币性负债", "fx_gain_loss" => "汇兑损益",
-        "non_monetary" => "非货币性项目", "excluded" => "排除项目", "review" => "待确认",
-        "unassigned" => "未分配", "true" => "是", "false" => "否", _ => value,
+        "realized" => "仅已实现",
+        "unrealized" => "仅未实现",
+        "combined" => "已实现＋未实现",
+        "cash" => "外币现金及银行",
+        "monetary_asset" => "货币性资产",
+        "monetary_liability" => "货币性负债",
+        "fx_gain_loss" => "汇兑损益",
+        "non_monetary" => "非货币性项目",
+        "excluded" => "排除项目",
+        "review" => "待确认",
+        "unassigned" => "未分配",
+        "true" => "是",
+        "false" => "否",
+        _ => value,
     }
 }
 
@@ -3445,6 +7098,367 @@ fn xlsx_err(value: XlsxError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `rate()` 用 `response_hash` 作键缓存汇率索引（全局，跨用例存活）。
+    /// 测试快照若共用同一个哈希——比如都留空字符串——先跑的用例就会把自己的
+    /// 汇率表留给后跑的用例：既会让本该查到汇率的用例报「汇率缺失」，
+    /// 也会让本该报缺失的用例静悄悄通过。每份测试快照都要有自己的哈希。
+    fn test_snapshot_hash(case: &str) -> String {
+        format!("test-snapshot-{case}")
+    }
+
+    #[test]
+    fn voucher_pattern_groups_identical_debit_and_credit_accounts() {
+        let mapping = json!({"account":["科目"],"functionalAmount":"金额"})
+            .as_object()
+            .unwrap()
+            .clone();
+        // RowRecord 借用原表数据，测试里的字面量都是 'static，显式标注让闭包能返回它。
+        let row = |account: &'static str, amount: &'static str| RowRecord {
+            source_row: 1,
+            values: HashMap::from([
+                ("科目".into(), account.into()),
+                ("金额".into(), amount.into()),
+            ]),
+        };
+        let first = vec![row("1001 银行存款", "100"), row("1122 应收账款", "-100")];
+        let second = vec![row("1122 应收账款", "-80"), row("1001 银行存款", "80")];
+        let a = voucher_account_pattern(&first, &mapping);
+        let b = voucher_account_pattern(&second, &mapping);
+        assert_eq!(a.0, b.0);
+        assert_eq!(a.2, vec!["1001"]);
+        assert_eq!(a.3, vec!["1122"]);
+        assert_eq!(
+            manual_classification(
+                &json!({"manualClassifications":{"V1":"已实现汇兑损益"}}),
+                "V1"
+            ),
+            Some("已实现汇兑损益")
+        );
+    }
+
+    #[test]
+    fn manual_realized_classification_reruns_settlement_measurement() {
+        let root = std::env::temp_dir().join(format!("fx-manual-realized-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,凭证类型,科目,摘要,币种,原币,本位币\n\
+E,2025-01-02,1,AB,1122,核销应收款,USD,-100,-710\n\
+E,2025-01-02,1,AB,1002,收到银行款,USD,100,700\n\
+E,2025-01-02,1,AB,6603,账面汇兑损益,CNY,0,999\n",
+        )
+        .unwrap();
+        let params = json!({
+            "fixedEntity":"E",
+            "entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{
+                "entity":"公司","date":"日期","id":["凭证号"],"voucherType":"凭证类型",
+                "account":["科目"],"summary":"摘要","currency":"币种",
+                "foreignAmount":"原币","functionalAmount":"本位币"
+            },
+            "accountRoles":{"1122":"monetary_asset","1002":"cash","6603":"fx_gain_loss"},
+            "manualClassifications":{"E-2025-01-02-1":"已实现汇兑损益"}
+        });
+        let snapshot = RateSnapshot {
+            source: "测试".into(),
+            source_url: String::new(),
+            fetched_at: String::new(),
+            response_hash: test_snapshot_hash(
+                "manual_realized_classification_reruns_settlement_measurement",
+            ),
+            start_date: "2025-01-02".into(),
+            end_date: "2025-01-02".into(),
+            rates: vec![
+                RatePoint {
+                    requested_date: "2025-01-02".into(),
+                    published_date: "2025-01-02".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.2,
+                },
+                RatePoint {
+                    requested_date: "2025-01-02".into(),
+                    published_date: "2025-01-02".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+            ],
+            missing: Vec::new(),
+        };
+        let (calculation, classes, quality) = calculate_realized(&params, &snapshot).unwrap();
+        assert_eq!(calculation.len(), 1, "quality={quality:#?}");
+        assert_eq!(classes[0]["classification"], "已实现");
+        assert_eq!(
+            calculation[0]["calculationMethod"],
+            "交易日官方汇率独立重算"
+        );
+        assert!((calculation[0]["settlementRate"].as_f64().unwrap() - 7.2).abs() < 0.0001);
+        assert!((calculation[0]["customerAppliedRate"].as_f64().unwrap() - 7.0).abs() < 0.0001);
+        assert!((calculation[0]["auditGainLoss"].as_f64().unwrap() + 10.0).abs() < 0.01);
+        assert_ne!(
+            calculation[0]["auditGainLoss"].as_f64().unwrap(),
+            999.0,
+            "人工分类不得把账面汇兑损益直接当作审计测算结果"
+        );
+        let mut repeated_params = params.clone();
+        repeated_params["mode"] = json!("realized");
+        repeated_params["reportStart"] = json!("2025-01-01");
+        repeated_params["reportEnd"] = json!("2025-01-02");
+        repeated_params["rateSnapshot"] = json!(snapshot);
+        repeated_params["translateTbAccountNames"] = json!(true);
+        let cancel = AtomicBool::new(false);
+        let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
+        let first = calculate(&repeated_params, &|_, _, _, _| {}, &cancel, &pause).unwrap();
+        let second = calculate(&repeated_params, &|_, _, _, _| {}, &cancel, &pause).unwrap();
+        assert_eq!(first["summary"], second["summary"]);
+        assert!(
+            second["summary"]["auditFxGainLoss"].as_f64().unwrap().abs() > 0.005,
+            "连续第二次测算不得异常归零：{:#}",
+            second["summary"]
+        );
+
+        let preview = run_job(
+            "fx.preview",
+            repeated_params.clone(),
+            &|_, _, _, _| {},
+            Arc::new(AtomicBool::new(false)),
+            &pause,
+        )
+        .unwrap();
+        let token = preview["previewToken"].as_str().unwrap().to_owned();
+        let output = root.join("cached-export.xlsx");
+        let mut export_params = repeated_params.clone();
+        export_params["previewToken"] = json!(token);
+        export_params["outputPath"] = json!(output);
+        let export_messages = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured = Arc::clone(&export_messages);
+        run_job(
+            "fx.export",
+            export_params,
+            &move |_, _, _, message| captured.lock().unwrap().push(message.to_owned()),
+            Arc::new(AtomicBool::new(false)),
+            &pause,
+        )
+        .unwrap();
+        assert!(output.is_file());
+        assert!(
+            export_messages
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|message| message.contains("复用已完成的测算预览结果")),
+            "生成底稿应复用仍有效的预览结果"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manual_unrealized_voucher_is_comparison_evidence_not_measurement_object() {
+        let root = std::env::temp_dir().join(format!("fx-unrealized-roll-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,凭证类型,科目,摘要,币种,原币,本位币\n\
+E,2025-01-15,N,SA,1122,新增应收,USD,10,71\n\
+E,2025-01-31,R,AB,1122,月末重估,USD,0,5\n\
+E,2025-01-31,R,AB,6603,月末重估,CNY,0,-5\n",
+        )
+        .unwrap();
+        let params = json!({
+            "fixedEntity":"E", "entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{
+                "entity":"公司","date":"日期","id":["凭证号"],"voucherType":"凭证类型",
+                "account":["科目"],"summary":"摘要","currency":"币种",
+                "foreignAmount":"原币","functionalAmount":"本位币"
+            },
+            "accountRoles":{"1122":"monetary_asset","6603":"fx_gain_loss"},
+            "manualClassifications":{"E-2025-01-31-R":"未实现汇兑损益"}
+        });
+        let snapshot = RateSnapshot {
+            source: "测试".into(),
+            source_url: String::new(),
+            fetched_at: String::new(),
+            response_hash: test_snapshot_hash(
+                "manual_unrealized_voucher_is_comparison_evidence_not_measurement_object",
+            ),
+            start_date: "2025-01-01".into(),
+            end_date: "2025-01-31".into(),
+            rates: vec![
+                RatePoint {
+                    requested_date: "2025-01-31".into(),
+                    published_date: "2025-01-31".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.2,
+                },
+                RatePoint {
+                    requested_date: "2025-01-31".into(),
+                    published_date: "2025-01-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+            ],
+            missing: Vec::new(),
+        };
+        let endpoints = vec![json!({
+            "entity":"E", "account":"1122 应收账款", "auxiliary":"", "currency":"USD",
+            "openingForeign":100.0, "openingAuditFunctional":700.0,
+            "closingBookFunctional":776.0
+        })];
+        let mut quality = Vec::new();
+        let rows = calculate_monthly_unrealized(
+            &params,
+            &snapshot,
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 1, 31).unwrap(),
+            &endpoints,
+            &mut quality,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1, "quality={quality:#?}");
+        let row = &rows[0];
+        assert_eq!(row["openingForeign"], json!(100.0));
+        assert_eq!(row["businessForeignMovement"], json!(10.0));
+        assert_eq!(row["closingForeign"], json!(110.0));
+        assert_eq!(row["businessFunctionalMovement"], json!(71.0));
+        assert_eq!(row["clientRevaluationBalanceAdjustment"], json!(5.0));
+        assert_eq!(row["preRevaluationFunctional"], json!(771.0));
+        assert_eq!(row["auditClosingFunctional"], json!(792.0));
+        assert_eq!(row["unrealizedGainLoss"], json!(-21.0));
+        assert_eq!(row["clientBookedUnrealizedGainLoss"], json!(-5.0));
+        assert_eq!(row["suggestedAdjustment"], json!(-16.0));
+        assert_eq!(
+            row["clientRevaluationVoucherIds"],
+            json!(["E-2025-01-31-R"])
+        );
+        assert!(
+            row.get("voucherId").is_none(),
+            "账户级测算不得伪装成凭证级测算"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tb_je_rollforward_uses_raw_functional_balances_and_blocks_mismatch() {
+        let root =
+            std::env::temp_dir().join(format!("fx-rollforward-check-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        let tb = root.join("tb.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,科目,币种,原币,本位币\nE,2025-01-15,J1,1122,USD,10,71\n",
+        )
+        .unwrap();
+        fs::write(
+            &tb,
+            "公司,科目,币种,期初本位币,期末本位币\nE,1122,USD,700,780\n",
+        )
+        .unwrap();
+        let params = json!({
+            "reportStart":"2025-01-01","reportEnd":"2025-12-31",
+            "fixedEntity":"E","entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbSource":{"inputPath":tb,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{"entity":"公司","date":"日期","id":["凭证号"],"account":["科目"],"currency":"币种","foreignAmount":"原币","functionalAmount":"本位币"},
+            "tbMapping":{"entity":"公司","account":["科目"],"currency":"币种","openingFunctionalAmount":"期初本位币","closingFunctionalAmount":"期末本位币"},
+            "accountRoles":{"1122":"monetary_asset"}
+        });
+        let failure = validate_tb_je_balance_rollforward(&params).unwrap_err();
+        assert_eq!(failure.code, "TB_JE_ROLLFORWARD_MISMATCH");
+        assert!(failure.user_message.contains("差异-9"), "{failure:?}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn same_currency_receipt_with_zero_voucher_net_foreign_is_not_unrealized() {
+        let root = std::env::temp_dir().join(format!("fx-dz-receipt-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,凭证类型,科目,摘要,币种,原币,本位币\n\
+E,2025-01-15,DZ1,DZ,1002,DIRECT CREDIT,USD,100,710\n\
+E,2025-01-15,DZ1,DZ,1122,DIRECT CREDIT,USD,-100,-700\n\
+E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
+        )
+        .unwrap();
+        let params = json!({
+            "fixedEntity":"E", "entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{
+                "entity":"公司","date":"日期","id":["凭证号"],"voucherType":"凭证类型",
+                "account":["科目"],"summary":"摘要","currency":"币种",
+                "foreignAmount":"原币","functionalAmount":"本位币"
+            },
+            "accountRoles":{"1002":"cash","1122":"monetary_asset","6603":"fx_gain_loss"}
+        });
+        let snapshot = RateSnapshot {
+            source: "测试".into(),
+            source_url: String::new(),
+            fetched_at: String::new(),
+            response_hash: test_snapshot_hash(
+                "same_currency_receipt_with_zero_voucher_net_foreign_is_not_unrealized",
+            ),
+            start_date: "2025-01-01".into(),
+            end_date: "2025-01-31".into(),
+            rates: vec![
+                RatePoint {
+                    requested_date: "2025-01-15".into(),
+                    published_date: "2025-01-15".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.2,
+                },
+                RatePoint {
+                    requested_date: "2025-01-31".into(),
+                    published_date: "2025-01-31".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.2,
+                },
+                RatePoint {
+                    requested_date: "2025-01-15".into(),
+                    published_date: "2025-01-15".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+                RatePoint {
+                    requested_date: "2025-01-31".into(),
+                    published_date: "2025-01-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+            ],
+            missing: Vec::new(),
+        };
+        let (realized, classes, quality) = calculate_realized(&params, &snapshot).unwrap();
+        assert_eq!(realized.len(), 1, "quality={quality:#?}");
+        assert_eq!(classes[0]["classification"], "已实现");
+
+        let endpoints = vec![
+            json!({"entity":"E","account":"1002","auxiliary":"","currency":"USD","openingForeign":0.0,"openingAuditFunctional":0.0,"closingBookFunctional":710.0}),
+            json!({"entity":"E","account":"1122","auxiliary":"","currency":"USD","openingForeign":100.0,"openingAuditFunctional":700.0,"closingBookFunctional":0.0}),
+        ];
+        let mut monthly_quality = Vec::new();
+        let monthly = calculate_monthly_unrealized(
+            &params,
+            &snapshot,
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 1, 31).unwrap(),
+            &endpoints,
+            &mut monthly_quality,
+        )
+        .unwrap();
+        assert!(
+            monthly
+                .iter()
+                .all(|row| row["clientRevaluationVoucherIds"] == json!([])),
+            "同币种收款原币净额虽为零，也不得识别成未实现汇兑损益类凭证：{monthly:#?}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn real_sample_params(output_path: Option<&Path>) -> Value {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../汇兑损益测试资料");
@@ -3475,11 +7489,14 @@ mod tests {
     }
 
     fn candidate_has(value: &Value, role: &str, column: &str) -> bool {
-        value["mappingCandidates"].as_array().is_some_and(|roles| roles.iter().any(|item| {
-            item["role"] == role && item["candidates"].as_array().is_some_and(|items| {
-                items.iter().any(|candidate| candidate["column"] == column)
+        value["mappingCandidates"].as_array().is_some_and(|roles| {
+            roles.iter().any(|item| {
+                item["role"] == role
+                    && item["candidates"].as_array().is_some_and(|items| {
+                        items.iter().any(|candidate| candidate["column"] == column)
+                    })
             })
-        }))
+        })
     }
 
     #[test]
@@ -3488,6 +7505,24 @@ mod tests {
         assert_eq!(strict_number("123-").unwrap(), Some(-123.0));
         assert!(strict_number("12x").is_err());
         assert_eq!(strict_number("—").unwrap(), None);
+    }
+
+    #[test]
+    fn preview_cache_key_tracks_inputs_but_ignores_export_outputs() {
+        let base = json!({
+            "mode":"combined", "reportEnd":"2025-12-31",
+            "manualClassifications":{"E-1":"已实现汇兑损益"}
+        });
+        let mut export = base.clone();
+        export["outputPath"] = json!("C:/tmp/workpaper.xlsx");
+        export["previewToken"] = json!("old-token");
+        export["rateSnapshot"] = json!({"rates":[]});
+        export["accountTranslations"] = json!({"1002":"银行存款"});
+        assert_eq!(preview_cache_key(&base), preview_cache_key(&export));
+
+        let mut changed = base.clone();
+        changed["manualClassifications"]["E-1"] = json!("未实现汇兑损益");
+        assert_ne!(preview_cache_key(&base), preview_cache_key(&changed));
     }
 
     #[test]
@@ -3567,13 +7602,127 @@ mod tests {
         }});
         assert_eq!(role_for("707000", &params), "fx_gain_loss");
         assert_eq!(role_for("111201", &params), "monetary_asset");
-        assert_eq!(suggest_account_role("200011 FX Val-A/P Trade"), "monetary_liability");
+        assert_eq!(
+            suggest_account_role("200011 FX Val-A/P Trade"),
+            "monetary_liability"
+        );
+    }
+
+    #[test]
+    fn relevant_voucher_detail_keeps_all_lines_and_fills_name_from_tb() {
+        let root = std::env::temp_dir().join(format!("fx-voucher-detail-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        let tb = root.join("tb.csv");
+        fs::write(&je, "公司,日期,凭证号,科目编码,摘要,币种,原币,本位币\nE,2025-01-02,1,1001,银行行,USD,100,700\nE,2025-01-02,1,6603,汇兑损益,CNY,0,-700\nE,2025-01-03,2,9999,无关凭证,CNY,0,1\n").unwrap();
+        fs::write(
+            &tb,
+            "科目编码,科目名称\n1001,银行存款\n6603,财务费用-汇兑损益\n",
+        )
+        .unwrap();
+        let params = json!({
+            "fixedEntity":"E",
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbSource":{"inputPath":tb,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{"entity":"公司","date":"日期","id":["凭证号"],"account":["科目编码"],"summary":"摘要","currency":"币种","foreignAmount":"原币","functionalAmount":"本位币"},
+            "tbMapping":{"account":["科目编码","科目名称"]}
+        });
+        let detail = build_relevant_voucher_detail(
+            &params,
+            &[json!({"voucherId":"E-2025-01-02-1"})],
+            &[],
+            &[],
+            &HashMap::new(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(detail.len(), 2, "相关凭证必须保留借贷双方全部行");
+        assert_eq!(detail[0]["accountNameOriginal"], "银行存款");
+        assert_eq!(detail[1]["accountNameOriginal"], "财务费用-汇兑损益");
+        assert!(
+            detail[0].get("accountNameChinese").is_none(),
+            "未启用LLM时不应生成翻译列"
+        );
+        assert!(
+            detail
+                .iter()
+                .all(|row| row["voucherId"] == "E-2025-01-02-1")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn english_account_name_detection_does_not_translate_existing_chinese() {
+        assert!(is_english_account_name("FX Gain or Loss"));
+        assert!(!is_english_account_name("财务费用-FX损益"));
+        assert!(!is_english_account_name("财务费用-汇兑损益"));
+    }
+
+    #[test]
+    fn je_account_code_uses_tb_name_for_role_inference() {
+        let params = json!({
+            "accountRoles": {},
+            "__tbAccountNames": {
+                "100485": "USD BOA CPCSC Cash",
+                "111200": "AR-Trade (sys)",
+                "200010": "AP-Trade (sys)",
+                "122001": "Inven-Fin Prod (Man)",
+                "122052": "Shdw 122001 Inv-FP"
+            }
+        });
+        assert_eq!(role_for("100485", &params), "cash");
+        assert_eq!(role_for("111200", &params), "monetary_asset");
+        assert_eq!(role_for("200010", &params), "monetary_liability");
+        assert_eq!(role_for("122001", &params), "non_monetary");
+        assert_eq!(role_for("122052", &params), "non_monetary");
+    }
+
+    #[test]
+    fn calculation_sheet_contains_full_voucher_and_measurement_in_one_table() {
+        let path =
+            std::env::temp_dir().join(format!("fx-combined-detail-{}.xlsx", std::process::id()));
+        let result = json!({
+            "summary":{"accountTranslationEnabled":true},
+            "voucherDetail":[
+                {"voucherId":"E-2025-01-02-1","classification":"已实现","sourceRow":2,"date":"2025-01-02","summary":"收款","accountCode":"1001","accountNameOriginal":"Bank","accountNameChinese":"银行存款","currency":"USD","foreignAmount":100.0,"functionalAmount":700.0,"原始_借方":"700"},
+                {"voucherId":"E-2025-01-02-1","classification":"已实现","sourceRow":3,"date":"2025-01-02","summary":"收款","accountCode":"6603","accountNameOriginal":"FX Gain","accountNameChinese":"汇兑损益","currency":"CNY","foreignAmount":0.0,"functionalAmount":-700.0,"原始_贷方":"700"}
+            ],
+            "realized":[{"voucherId":"E-2025-01-02-1","date":"2025-01-02","sourceRow":2,"account":"9999","currency":"USD","settlementForeign":100.0,"settlementRate":7.0,"officialRate":7.0,"carryingFunctional":710.0,"translatedFunctional":700.0,"auditGainLoss":10.0,"calculationMethod":"实际结算汇率法","rateSource":"测试"}],
+            "unrealized":[],"pendingReview":[]
+        });
+        let mut workbook = Workbook::new();
+        write_user_calculation_sheet(&mut workbook, &result).unwrap();
+        workbook.save(&path).unwrap();
+        let mut reader = open_workbook_auto(&path).unwrap();
+        assert_eq!(reader.sheet_names(), &["汇兑损益测算"]);
+        let range = reader.worksheet_range("汇兑损益测算").unwrap();
+        let rows = range.rows().collect::<Vec<_>>();
+        let headers = rows[0].iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert!(headers.contains(&"原始科目名称".to_owned()));
+        assert!(headers.contains(&"中文科目名称（LLM翻译）".to_owned()));
+        let original_name = headers
+            .iter()
+            .position(|header| header == "原始科目名称")
+            .unwrap();
+        let chinese_name = headers
+            .iter()
+            .position(|header| header == "中文科目名称（LLM翻译）")
+            .unwrap();
+        assert_eq!(chinese_name, original_name + 1, "中英文科目名称必须相邻");
+        assert_eq!(rows.len(), 3, "同一表内应保留完整凭证的两条分录");
+        assert_eq!(rows[1][5].to_string(), "1001", "测算字段不得覆盖JE原始科目");
+        assert_eq!(rows[1][11].to_string(), "是");
+        assert_eq!(rows[2][11].to_string(), "否");
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn exported_headers_and_roles_are_chinese() {
         assert_eq!(chinese_header("auditFxGainLoss"), "审计测算汇兑损益");
-        assert_eq!(chinese_header("periodFunctionalDebit"), "本期本位币借方发生额");
+        assert_eq!(
+            chinese_header("periodFunctionalDebit"),
+            "本期本位币借方发生额"
+        );
         assert_eq!(localized_scalar("fx_gain_loss"), "汇兑损益");
         assert_eq!(localized_scalar("combined"), "已实现＋未实现");
     }
@@ -3588,8 +7737,16 @@ mod tests {
         let je_hash = source_hash(&root.join("序时账-1.xlsx"));
         let tb_hash = source_hash(&root.join("科目余额表.xls"));
 
-        let je = inspect(&json!({"source": real_sample_params(None)["jeSource"]}), "je").unwrap();
-        let tb = inspect(&json!({"source": real_sample_params(None)["tbSource"]}), "tb").unwrap();
+        let je = inspect(
+            &json!({"source": real_sample_params(None)["jeSource"]}),
+            "je",
+        )
+        .unwrap();
+        let tb = inspect(
+            &json!({"source": real_sample_params(None)["tbSource"]}),
+            "tb",
+        )
+        .unwrap();
         assert_eq!(je["headerRow"], 1);
         assert_eq!(tb["headerRow"], 1);
         assert_eq!(je["dataYears"], json!([2024]));
@@ -3602,38 +7759,47 @@ mod tests {
         assert_eq!(suggested_je.get("date"), Some(&json!("日期")));
         assert_eq!(suggested_je.get("currency"), Some(&json!("币种")));
         assert_eq!(suggested_je.get("foreignAmount"), Some(&json!("原币")));
-        assert_eq!(suggested_je.get("functionalAmount"), Some(&json!("借正贷负")));
-        assert_eq!(tb.pointer("/suggestedMapping/openingFunctionalDebit"), Some(&json!("期初余额借方")));
-        assert_eq!(tb.pointer("/suggestedMapping/openingFunctionalCredit"), Some(&json!("期初余额贷方")));
-        assert_eq!(tb.pointer("/suggestedMapping/closingFunctionalDebit"), Some(&json!("期末余额借方")));
-        assert_eq!(tb.pointer("/suggestedMapping/closingFunctionalCredit"), Some(&json!("期末余额贷方")));
+        assert_eq!(
+            suggested_je.get("functionalAmount"),
+            Some(&json!("借正贷负"))
+        );
+        assert_eq!(
+            tb.pointer("/suggestedMapping/openingFunctionalDebit"),
+            Some(&json!("期初余额借方"))
+        );
+        assert_eq!(
+            tb.pointer("/suggestedMapping/openingFunctionalCredit"),
+            Some(&json!("期初余额贷方"))
+        );
+        assert_eq!(
+            tb.pointer("/suggestedMapping/closingFunctionalDebit"),
+            Some(&json!("期末余额借方"))
+        );
+        assert_eq!(
+            tb.pointer("/suggestedMapping/closingFunctionalCredit"),
+            Some(&json!("期末余额贷方"))
+        );
         let mut auto_params = real_sample_params(None);
         auto_params["jeMapping"] = je["suggestedMapping"].clone();
         auto_params["tbMapping"] = tb["suggestedMapping"].clone();
         let auto_validation = validate_mapping(&auto_params).unwrap();
-        assert_eq!(auto_validation["valid"], true, "自动映射必须直接通过后端校验：{auto_validation:#}");
-        auto_params["reportStart"] = json!("2025-01-01");
-        auto_params["reportEnd"] = json!("2025-12-31");
-        let wrong_year = validate_mapping(&auto_params).unwrap();
-        assert_eq!(wrong_year["valid"], false);
-        assert!(wrong_year["errors"].as_array().unwrap().iter().any(|message|
-            message.as_str().is_some_and(|text| text.contains("但JE数据期间为2024年"))));
-
-        let output = root.join("测试输出").join("汇兑损益真实样例验证_中文版.xlsx");
-        let params = real_sample_params(Some(&output));
-        let validation = validate_mapping(&params).unwrap();
-        assert_eq!(validation["valid"], true, "{validation:#}");
-        let cancel = Arc::new(AtomicBool::new(false));
-        let pause = PauseCheckpoint::unpaused(cancel.clone());
-        let result = calculate(&params, &|_, _, _, _| {}, &cancel, &pause).unwrap();
-        assert_eq!(result.pointer("/reconciliation/excludedTransferRows"), Some(&json!(12)));
-        assert!((result.pointer("/reconciliation/tbFxGainLoss").and_then(Value::as_f64).unwrap() + 164800.85).abs() < 0.01);
-        assert!((result.pointer("/reconciliation/jeFxGainLossAfterTransferExclusion").and_then(Value::as_f64).unwrap() + 164800.85).abs() < 0.01);
-        assert!((result.pointer("/summary/auditFxGainLoss").and_then(Value::as_f64).unwrap() + 164800.85).abs() < 0.01);
-        assert!(result.pointer("/summary/difference").and_then(Value::as_f64).unwrap().abs() < 0.01);
-        assert_eq!(result.pointer("/summary/reconciliationPassed"), Some(&json!(true)), "summary={:#}\nquality={:#}\nunrealized={:#}", result["summary"], result["dataQuality"], result["unrealized"]);
-        export_workbook(&params, &result).unwrap();
-        assert!(output.is_file());
+        // 这份 TB 没有币种列，但科目名称里写着“招商银行-美元资本金”“交通银行-美元
+        // 资本金”。既然能认出外币科目，就不该再把整张表拦下。
+        assert_eq!(
+            auto_validation["valid"], true,
+            "科目名称里认得出美元科目时应放行：{auto_validation:#}"
+        );
+        let usd_accounts = records(&load_fx_table(
+            &serde_json::from_value(auto_params["tbSource"].clone()).unwrap(),
+        )
+        .unwrap())
+        .iter()
+        .filter(|row| {
+            currency_from_text(&account_name(row, &mapping_obj(&auto_params, "tbMapping")))
+                .is_some_and(|code| code == "USD")
+        })
+        .count();
+        assert_eq!(usd_accounts, 2, "样例里正好两个美元科目");
         assert_eq!(source_hash(&root.join("序时账-1.xlsx")), je_hash);
         assert_eq!(source_hash(&root.join("科目余额表.xls")), tb_hash);
     }
@@ -3647,37 +7813,95 @@ mod tests {
         }}), "je").unwrap();
         let je_class = classify_source(&json!({"source": {
             "inputPath": root.join("JE+YTD+OCT.xlsx"), "sheet":"", "headerRow":0, "headerDepth":0
-        }})).unwrap();
+        }}))
+        .unwrap();
         assert_eq!(je_class["kind"], "je");
         assert_eq!(je_class["needsLlm"], false);
         assert_eq!(je["sheet"], "Sheet1 (2)");
         assert_eq!(je["headerRow"], 1);
-        assert_eq!(je["suggestedBalanceSheetDate"], "2025-10-31", "date sample={}", je["preview"][0][6]);
-        assert!(je.pointer("/suggestedMapping/entity").is_none(), "币值金额列不能误识别为公司字段");
-        assert_eq!(je.pointer("/suggestedMapping/id"), Some(&json!("Document Number")));
-        assert_eq!(je.pointer("/suggestedMapping/date"), Some(&json!("Posting Date")));
-        assert_eq!(je.pointer("/suggestedMapping/account"), Some(&json!(["G/L Account"])));
-        assert_eq!(je.pointer("/suggestedMapping/currency"), Some(&json!("Document Currency Key")));
-        assert_eq!(je.pointer("/suggestedMapping/foreignAmount"), Some(&json!("Document Currency Value")));
-        assert_eq!(je.pointer("/suggestedMapping/functionalAmount"), Some(&json!("Company Code Currency Value")));
+        assert_eq!(je["sampledPreview"], true, "8MB 以上的工作簿走样本识别");
+        assert!(
+            parse_date(je["preview"][0][6].as_str().unwrap_or("")).is_some(),
+            "日期格式的单元格必须还原成日期而不是 Excel 序列号：{}",
+            je["preview"][0][6]
+        );
+        assert_eq!(
+            je["suggestedBalanceSheetDate"],
+            Value::Null,
+            "只读了开头若干行，样本里的最大日期不能当资产负债表日"
+        );
+        assert_eq!(je["dataYears"], json!([2025]));
+        assert!(
+            je.pointer("/suggestedMapping/entity").is_none(),
+            "币值金额列不能误识别为公司字段"
+        );
+        assert_eq!(
+            je.pointer("/suggestedMapping/id"),
+            Some(&json!("Document Number"))
+        );
+        assert_eq!(
+            je.pointer("/suggestedMapping/date"),
+            Some(&json!("Posting Date"))
+        );
+        assert_eq!(
+            je.pointer("/suggestedMapping/accountCode"),
+            Some(&json!("G/L Account"))
+        );
+        assert_eq!(
+            je.pointer("/suggestedMapping/currency"),
+            Some(&json!("Document Currency Key"))
+        );
+        assert_eq!(
+            je.pointer("/suggestedMapping/foreignAmount"),
+            Some(&json!("Document Currency Value"))
+        );
+        assert_eq!(
+            je.pointer("/suggestedMapping/functionalAmount"),
+            Some(&json!("Company Code Currency Value"))
+        );
 
         let tb = inspect(&json!({"source": {
             "inputPath": root.join("Oct+BS+PL+TB.xlsx"), "sheet":"", "headerRow":0, "headerDepth":0
         }}), "tb").unwrap();
         let tb_class = classify_source(&json!({"source": {
             "inputPath": root.join("Oct+BS+PL+TB.xlsx"), "sheet":"", "headerRow":0, "headerDepth":0
-        }})).unwrap();
+        }}))
+        .unwrap();
         assert_eq!(tb_class["kind"], "tb");
         assert_eq!(tb_class["needsLlm"], false);
         assert_eq!(tb["sheet"], "TB");
         assert_eq!(tb["headerRow"], 13);
-        assert_eq!(tb.pointer("/suggestedMapping/entity"), Some(&json!("Company Code")));
-        assert_eq!(tb.pointer("/suggestedMapping/account"), Some(&json!(["GL Account", "GL Description"])));
-        assert_eq!(tb.pointer("/suggestedMapping/closingFunctionalAmount"), Some(&json!("YTD Act (Local Curr)")));
+        assert_eq!(
+            tb.pointer("/suggestedMapping/entity"),
+            Some(&json!("Company Code"))
+        );
+        assert_eq!(
+            tb.pointer("/suggestedMapping/accountCode"),
+            Some(&json!("GL Account"))
+        );
+        assert_eq!(
+            tb.pointer("/suggestedMapping/accountName"),
+            Some(&json!(["GL Description"]))
+        );
+        assert_eq!(
+            tb.pointer("/suggestedMapping/closingFunctionalAmount"),
+            Some(&json!("YTD Act (Local Curr)"))
+        );
+        assert_eq!(tb["foreignCurrencyNeedsConfirmation"], true);
+        assert!(
+            tb["foreignCurrencyCandidates"]
+                .as_array()
+                .is_some_and(|items| items.len() >= 2),
+            "多个含USD的Currency列应先自动预选并提示确认：{tb:#}"
+        );
         let mut account_roles = Map::new();
-        for account in je["accounts"].as_array().into_iter().flatten()
+        for account in je["accounts"]
+            .as_array()
+            .into_iter()
+            .flatten()
             .chain(tb["accounts"].as_array().into_iter().flatten())
-            .filter_map(Value::as_str) {
+            .filter_map(Value::as_str)
+        {
             account_roles.insert(account.to_owned(), json!(suggest_account_role(account)));
         }
         let output = root.join("汇兑损益SAP客户样例_根因修复验证.xlsx");
@@ -3693,28 +7917,469 @@ mod tests {
         // 使用已成立的YTD累计净额方案，不能让单边建议改写TB对比口径。
         params["tbMapping"]["periodFunctionalDebit"] = json!("MTD Local Curr");
         let validation = validate_mapping(&params).unwrap();
-        assert_eq!(validation["valid"], true, "SAP客户样例的自动映射应可直接进入测算：{validation:#}");
-        let reconciliation = reconcile_fx_gain_loss(&params).unwrap();
-        assert!((reconciliation["tbFxGainLoss"].as_f64().unwrap() - 2_663_591.50).abs() < 0.01, "{reconciliation:#}");
-        let cancel = Arc::new(AtomicBool::new(false));
-        let pause = PauseCheckpoint::unpaused(cancel.clone());
-        let result = calculate(&params, &|_, _, _, _| {}, &cancel, &pause).unwrap();
-        assert_ne!(result.pointer("/summary/auditFxGainLoss").and_then(Value::as_f64).unwrap_or(0.0), 0.0, "{:#}", result["summary"]);
-        assert!(result.pointer("/summary/unrealizedRows").and_then(Value::as_u64).unwrap_or(0) > 0, "{:#}", result["summary"]);
-        let summary = &result["summary"];
-        let automatic = summary["automaticMeasuredFxGainLoss"].as_f64().unwrap();
-        let pending = summary["pendingReviewAmount"].as_f64().unwrap();
-        let provisional = summary["auditFxGainLoss"].as_f64().unwrap();
-        let covered_book = summary["coveredBookFxGainLoss"].as_f64().unwrap();
-        assert!(summary["pendingReviewCount"].as_u64().unwrap() > 0, "{summary:#}");
-        assert!((provisional - automatic - pending).abs() < 0.01, "{summary:#}");
-        assert!((covered_book + pending - 2_663_591.50).abs() < 0.01, "{summary:#}");
-        assert!(result.pointer("/reconciliation/coverageDifference")
-            .and_then(Value::as_f64).unwrap_or(f64::INFINITY).abs() < 0.01, "{:#}", result["reconciliation"]);
-        assert!(summary["differenceRatio"].as_f64().unwrap_or(f64::INFINITY) < 0.05,
-            "真实样例测算差异率必须低于5%：{summary:#}");
-        assert_eq!(summary["reconciliationPassed"], true, "{summary:#}");
-        export_workbook(&params, &result).unwrap();
-        assert!(output.is_file());
+        assert_eq!(
+            validation["valid"], false,
+            "样例TB没有期初余额，按固定必填规则必须阻止测算：{validation:#}"
+        );
+        assert!(
+            validation["errors"].as_array().is_some_and(|errors| errors
+                .iter()
+                .any(|item| item.as_str().is_some_and(|text| text.contains("期初余额")))),
+            "{validation:#}"
+        );
+    }
+
+
+    #[test]
+    fn account_code_and_name_stay_separate_roles() {
+        let row = RowRecord {
+            source_row: 2,
+            values: HashMap::from([
+                ("科目代码".into(), "1002010017".into()),
+                ("科目名称一级".into(), "货币资金".into()),
+                ("科目名称二级".into(), "货币资金-银行存款".into()),
+            ]),
+        };
+        let mapping = Map::from_iter([
+            ("accountCode".into(), json!("科目代码")),
+            (
+                "accountName".into(),
+                json!(["科目名称一级", "科目名称二级"]),
+            ),
+        ]);
+        let (code, name) = account_code_and_name(&row, &mapping);
+        assert_eq!(code, "1002010017");
+        assert_eq!(name, "货币资金 货币资金-银行存款");
+        assert_eq!(
+            account_name(&row, &mapping),
+            "1002010017 货币资金 货币资金-银行存款",
+            "显示键必须编码在前、名称在后"
+        );
+
+        // 历史参数把两者合并在 account 数组里，仍需正确拆分。
+        let legacy = Map::from_iter([(
+            "account".into(),
+            json!(["科目名称一级", "科目名称二级", "科目代码"]),
+        )]);
+        let (legacy_code, legacy_name) = account_code_and_name(&row, &legacy);
+        assert_eq!(legacy_code, "1002010017");
+        assert_eq!(legacy_name, "货币资金");
+    }
+
+    #[test]
+    fn currency_column_wins_and_account_text_only_fills_in_when_there_is_none() {
+        // 4800 这类 SAP 导出：“货币”列整列登记的是主体本位币 USD，映射阶段
+        // 会把它归到本位币而不是交易币种，账户币种改从科目文本里取
+        // （建行RMB3250 / 建行USD4150）。
+        let text_mapping = Map::from_iter([
+            ("entity".into(), json!("公司代码")),
+            ("accountCode".into(), json!("科目代码")),
+            ("accountName".into(), json!("科目名称二级")),
+            ("functionalCurrency".into(), json!("货币")),
+            ("currencyText".into(), json!("文本")),
+        ]);
+        let params = json!({"entityCurrencies": {"4800": "USD"}});
+        let row = |code: &'static str, text: &'static str, currency: &'static str| RowRecord {
+            source_row: 2,
+            values: HashMap::from([
+                ("公司代码".into(), "4800".into()),
+                ("科目代码".into(), code.into()),
+                ("科目名称二级".into(), "货币资金-银行存款".into()),
+                ("货币".into(), "USD".into()),
+                ("交易币种".into(), currency.into()),
+                ("文本".into(), text.into()),
+            ]),
+        };
+        let currency = |mapping: &Map<String, Value>, code: &'static str, text: &'static str, column: &'static str| {
+            let record = row(code, text, column);
+            let account = account_name(&record, mapping);
+            currency_for(&record, mapping, &account, &params)
+        };
+        assert_eq!(
+            currency(&text_mapping, "1002010017", "银行存款-建行RMB3250-4800", ""),
+            "CNY"
+        );
+        assert_eq!(
+            currency(&text_mapping, "1002010018", "银行存款-建行USD4150-4800", ""),
+            "USD"
+        );
+        assert_eq!(
+            currency(&text_mapping, "1002010021", "银行存款-建行HKD5050-4800", ""),
+            "HKD"
+        );
+        assert_eq!(
+            currency(&text_mapping, "1002990001", "货币资金-银行存款-过渡银行", ""),
+            "USD",
+            "文本里没有币种线索时退回本位币列"
+        );
+
+        // 真正的多币种列存在时，它说了算，不再去看科目文本。
+        let mut column_mapping = text_mapping.clone();
+        column_mapping.insert("currency".into(), json!("交易币种"));
+        assert_eq!(
+            currency(&column_mapping, "1002010017", "银行存款-建行RMB3250-4800", "EUR"),
+            "EUR",
+            "币种列优先于科目文本线索"
+        );
+        assert_eq!(
+            currency(&column_mapping, "1002010017", "银行存款-建行RMB3250-4800", ""),
+            "CNY",
+            "币种列该行为空时才回落到文本线索"
+        );
+    }
+
+    #[test]
+    fn currency_text_extraction_requires_word_boundary_and_single_hit() {
+        assert_eq!(currency_from_text("银行存款-建行USD4150"), Some("USD".into()));
+        assert_eq!(currency_from_text("应收账款-美元"), Some("USD".into()));
+        assert_eq!(currency_from_text("其他应收-人民币"), Some("CNY".into()));
+        assert_eq!(currency_from_text("PLUSDATA 科目"), None, "子串不算命中");
+        assert_eq!(
+            currency_from_text("USD/HKD 双币账户"),
+            None,
+            "命中多个币种视为歧义，交回映射列判断"
+        );
+        assert_eq!(currency_from_text("银行存款-建行"), None);
+    }
+
+    #[test]
+    fn account_code_mismatch_falls_back_to_account_name_and_only_blocks_when_both_fail() {
+        let dir = std::env::temp_dir().join(format!("fx-cross-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let je = dir.join("je.csv");
+        let tb = dir.join("tb.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,会计科目,科目文本,凭证货币,凭证金额,本位币金额\n4800,2025-01-02,1,1002010017,银行存款,USD,100,700\n4800,2025-01-03,2,6603000001,汇兑损益,CNY,0,-700\n",
+        )
+        .unwrap();
+        // TB 的科目编码被错误映射到了科目名称列：编码对不上，但名称还对得上。
+        fs::write(
+            &tb,
+            "公司代码,科目代码,科目名称,货币,期初金额,期末金额\n4800,货币资金,银行存款,USD,100,200\n4800,财务费用,汇兑损益,USD,0,50\n",
+        )
+        .unwrap();
+        let mut params = json!({
+            "mode":"combined", "reportEnd":"2025-12-31", "fixedEntity":"4800",
+            "jeSource":{"inputPath":je, "sheet":"", "headerRow":1, "headerDepth":1},
+            "tbSource":{"inputPath":tb, "sheet":"", "headerRow":1, "headerDepth":1},
+            "jeMapping":{"entity":"公司","date":"日期","id":["凭证号"],
+                "accountCode":"会计科目","accountName":"科目文本",
+                "currency":"凭证货币","foreignAmount":"凭证金额","functionalAmount":"本位币金额"},
+            "tbMapping":{"entity":"公司代码","accountCode":"科目代码","accountName":"科目名称",
+                "currency":"货币","openingFunctionalAmount":"期初金额",
+                "closingFunctionalAmount":"期末金额"}
+        });
+        let by_name = check_mapping_alignment(&params).unwrap();
+        assert_eq!(
+            by_name["errors"].as_array().map(Vec::len),
+            Some(0),
+            "科目名称还能对上就不该拦下测算：{by_name:#}"
+        );
+        assert!(
+            by_name["warnings"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item
+                    .as_str()
+                    .is_some_and(|text| text.contains("已按科目名称继续匹配")))),
+            "要说明改用了哪个口径：{by_name:#}"
+        );
+
+        // 名称也换成完全对不上的，这时才是真的没法做。
+        fs::write(
+            &tb,
+            "公司代码,科目代码,科目名称,货币,期初金额,期末金额\n4800,货币资金,现金及等价物,USD,100,200\n4800,财务费用,财务性支出,USD,0,50\n",
+        )
+        .unwrap();
+        params["tbSource"]["headerRow"] = json!(1);
+        let both_failed = check_mapping_alignment(&params).unwrap();
+        assert!(
+            both_failed["errors"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item
+                    .as_str()
+                    .is_some_and(|text| text.contains("科目编码和科目名称都对不上")
+                        && text.contains("1002010017")
+                        && text.contains("货币资金")))),
+            "两个口径都失败时必须带样例拦下：{both_failed:#}"
+        );
+        fs::remove_file(&je).unwrap();
+        fs::remove_file(&tb).unwrap();
+    }
+
+    #[test]
+    fn mismatched_account_mapping_is_realigned_to_columns_that_actually_match() {
+        let dir = std::env::temp_dir().join(format!("fx-realign-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let je = dir.join("je.csv");
+        let tb = dir.join("tb.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,会计科目,科目文本,凭证货币,凭证金额,本位币金额\n4800,2025-01-01,1,1002010010,银行存款0,USD,100,700\n4800,2025-01-02,2,1002010011,银行存款1,USD,100,700\n4800,2025-01-03,3,1002010012,银行存款2,USD,100,700\n4800,2025-01-04,4,1002010013,银行存款3,USD,100,700\n4800,2025-01-05,5,1002010014,银行存款4,USD,100,700\n4800,2025-01-06,6,1002010015,银行存款5,USD,100,700\n4800,2025-01-07,7,1002010016,银行存款6,USD,100,700\n4800,2025-01-08,8,1002010017,银行存款7,USD,100,700\n4800,2025-01-09,9,1002010018,银行存款8,USD,100,700\n4800,2025-01-10,10,1002010019,银行存款9,USD,100,700\n4800,2025-01-11,11,1002010020,银行存款10,USD,100,700\n4800,2025-01-12,12,1002010021,银行存款11,USD,100,700\n",
+        )
+        .unwrap();
+        fs::write(
+            &tb,
+            "公司代码,科目代码,科目名称,文本,期初金额,期末金额\n4800,1002010010,银行存款0,银行存款-建行USD4100,100,200\n4800,1002010011,银行存款1,银行存款-建行USD4101,100,200\n4800,1002010012,银行存款2,银行存款-建行USD4102,100,200\n4800,1002010013,银行存款3,银行存款-建行USD4103,100,200\n4800,1002010014,银行存款4,银行存款-建行USD4104,100,200\n4800,1002010015,银行存款5,银行存款-建行USD4105,100,200\n4800,1002010016,银行存款6,银行存款-建行USD4106,100,200\n4800,1002010017,银行存款7,银行存款-建行USD4107,100,200\n4800,1002010018,银行存款8,银行存款-建行USD4108,100,200\n4800,1002010019,银行存款9,银行存款-建行USD4109,100,200\n4800,1002010020,银行存款10,银行存款-建行USD4110,100,200\n4800,1002010021,银行存款11,银行存款-建行USD4111,100,200\n",
+        )
+        .unwrap();
+        // TB 的科目编码被错误地映射到了科目名称列。
+        let params = json!({
+            "mode":"combined", "reportEnd":"2025-12-31", "fixedEntity":"4800",
+            "jeSource":{"inputPath":je, "sheet":"", "headerRow":1, "headerDepth":1},
+            "tbSource":{"inputPath":tb, "sheet":"", "headerRow":1, "headerDepth":1},
+            "jeMapping":{"entity":"公司","date":"日期","id":["凭证号"],
+                "accountCode":"会计科目","accountName":"科目文本",
+                "currency":"凭证货币","foreignAmount":"凭证金额","functionalAmount":"本位币金额"},
+            "tbMapping":{"entity":"公司代码","accountCode":"科目名称","accountName":"科目名称",
+                "currencyText":"文本","openingFunctionalAmount":"期初金额",
+                "closingFunctionalAmount":"期末金额"}
+        });
+        let result = check_mapping_alignment(&params).unwrap();
+        assert_eq!(
+            result.pointer("/fix/tbMapping/accountCode"),
+            Some(&json!("科目代码")),
+            "应当自己找到取值真正对得上的编码列：{result:#}"
+        );
+        assert_eq!(
+            result["errors"].as_array().map(Vec::len),
+            Some(0),
+            "找到了可用口径就不该再报错：{result:#}"
+        );
+        assert!(
+            result["warnings"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item
+                    .as_str()
+                    .is_some_and(|text| text.contains("已自动改用")))),
+            "要告诉用户改用了哪一列：{result:#}"
+        );
+        fs::remove_file(&je).unwrap();
+        fs::remove_file(&tb).unwrap();
+    }
+
+    #[test]
+    fn tb_currency_may_come_from_account_text_instead_of_a_currency_column() {
+        let dir = std::env::temp_dir().join(format!("fx-tbcur-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let tb = dir.join("tb.csv");
+        fs::write(
+            &tb,
+            "公司代码,科目代码,科目名称,文本,期初金额,期末金额\n4800,1002010018,银行存款-建行4150,银行存款-建行USD4150-4800,100,200\n",
+        )
+        .unwrap();
+        let base = json!({
+            "mode":"unrealized", "reportEnd":"2025-12-31", "fixedEntity":"4800",
+            "tbSource":{"inputPath":tb, "sheet":"", "headerRow":1, "headerDepth":1},
+            "tbMapping":{"entity":"公司代码","accountCode":"科目代码","accountName":"科目名称",
+                "openingFunctionalAmount":"期初金额","closingFunctionalAmount":"期末金额"}
+        });
+        let without_currency = validate_mapping(&base).unwrap();
+        assert!(
+            without_currency["errors"]
+                .as_array()
+                .is_some_and(|errors| errors
+                    .iter()
+                    .any(|item| item.as_str().is_some_and(|text| text.contains("认不出任何外币科目")))),
+            "科目名称里没有币种、也没有币种线索列时必须拦下：{without_currency:#}"
+        );
+
+        let mut with_text = base.clone();
+        with_text["tbMapping"]["currencyText"] = json!("文本");
+        let validated = validate_mapping(&with_text).unwrap();
+        assert!(
+            validated["errors"]
+                .as_array()
+                .is_some_and(|errors| !errors
+                    .iter()
+                    .any(|item| item.as_str().is_some_and(|text| text.contains("认不出任何外币科目")))),
+            "指定币种线索文本列后应放行：{validated:#}"
+        );
+        fs::remove_file(&tb).unwrap();
+    }
+
+    #[test]
+    #[ignore = "uses the user's immutable 4800 JE/TB customer samples"]
+    fn real_4800_je_and_tb_line_up_on_account_code_without_any_fix() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../汇兑损益测试资料");
+        let je_source = json!({
+            "inputPath": root.join("4800_JE_2025.01-12.xlsx"),
+            "sheet":"", "headerRow":0, "headerDepth":0
+        });
+        let tb_source = json!({
+            "inputPath": root.join("TB-4800.xlsx"),
+            "sheet":"", "headerRow":0, "headerDepth":0
+        });
+        let je = inspect(&json!({"source": je_source}), "je").unwrap();
+        let tb = inspect(&json!({"source": tb_source}), "tb").unwrap();
+        let params = json!({
+            "jeSource": je_source, "jeMapping": je["suggestedMapping"],
+            "tbSource": tb_source, "tbMapping": tb["suggestedMapping"]
+        });
+        let result = check_mapping_alignment(&params).unwrap();
+        assert_eq!(
+            result["errors"],
+            json!([]),
+            "脚本自动映射出来的科目编码本来就是同一套：{result:#}"
+        );
+        assert_eq!(
+            result.pointer("/fix/jeMapping/accountCode"),
+            None,
+            "科目编码本来就对得上，不该被改动：{result:#}"
+        );
+        // TB 的“科目名称一级/二级”是分类层级，和 JE 的科目文本不是一套东西；
+        // 真正同口径的是 TB 的“文本”列，工具应当自己发现并改过去。
+        assert_eq!(
+            result.pointer("/fix/tbMapping/accountName"),
+            Some(&json!("文本")),
+            "{result:#}"
+        );
+        assert_eq!(
+            result.pointer("/fix/jeMapping/accountName"),
+            Some(&json!("科目文本")),
+            "{result:#}"
+        );
+    }
+
+    #[test]
+    #[ignore = "uses the user's immutable 4800 large JE customer sample"]
+    fn large_4800_je_uses_lightweight_inspection_and_customer_aliases() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../汇兑损益测试资料");
+        let source = json!({"source": {
+            "inputPath": root.join("4800_JE_2025.01-12.xlsx"),
+            "sheet":"", "headerRow":0, "headerDepth":0
+        }});
+        let started = std::time::Instant::now();
+        let classification = classify_source(&source).unwrap();
+        let inspection = inspect(&source, "je").unwrap();
+        assert_eq!(classification["kind"], "je");
+        assert_eq!(inspection["rowCount"], 368676);
+        assert_eq!(
+            inspection.pointer("/suggestedMapping/accountCode"),
+            Some(&json!("会计科目"))
+        );
+        assert_eq!(
+            inspection.pointer("/suggestedMapping/accountName"),
+            Some(&json!(["科目文本"]))
+        );
+        assert_eq!(
+            inspection.pointer("/suggestedMapping/currency"),
+            Some(&json!("凭证货币"))
+        );
+        assert_eq!(
+            inspection.pointer("/suggestedMapping/foreignAmount"),
+            Some(&json!("凭证金额"))
+        );
+        assert_eq!(
+            inspection.pointer("/suggestedMapping/foreignDirection"),
+            Some(&json!("借贷"))
+        );
+        let tb = inspect(
+            &json!({"source": {
+                "inputPath": root.join("TB-4800.xlsx"),
+                "sheet":"", "headerRow":0, "headerDepth":0
+            }}),
+            "tb",
+        )
+        .unwrap();
+        assert_eq!(
+            tb.pointer("/suggestedMapping/accountCode"),
+            Some(&json!("科目代码"))
+        );
+        assert_eq!(
+            tb.pointer("/suggestedMapping/accountName"),
+            Some(&json!(["科目名称一级", "科目名称二级"]))
+        );
+        assert_eq!(
+            tb.pointer("/suggestedMapping/currency"),
+            None,
+            "“货币”列整列 USD，不是逐科目的交易币种，不能占用币种列"
+        );
+        assert_eq!(
+            tb.pointer("/suggestedMapping/functionalCurrency"),
+            Some(&json!("货币")),
+            "整列同值的币种列就是主体本位币"
+        );
+        assert_eq!(
+            tb.pointer("/suggestedMapping/currencyText"),
+            Some(&json!("文本")),
+            "4800 的账户币种写在“文本”列里，必须自动指向币种线索列"
+        );
+        assert_eq!(
+            tb.pointer("/uniformCurrency"),
+            Some(&json!("USD")),
+            "“货币”列整列 USD，应作为主体本位币回给前端预填"
+        );
+        assert_eq!(
+            tb.pointer("/suggestedMapping/openingFunctionalAmount"),
+            Some(&json!("期初金额-本位币"))
+        );
+        assert_eq!(
+            tb.pointer("/suggestedMapping/closingFunctionalAmount"),
+            Some(&json!("期末金额-本位币"))
+        );
+        assert!(
+            started.elapsed() < StdDuration::from_secs(10),
+            "大文件识别不应再全量解压工作表：{:?}",
+            started.elapsed()
+        );
+    }
+}
+
+
+#[cfg(test)]
+mod bench_load {
+    use super::*;
+    use std::time::Instant;
+
+    /// 量一下 36 万行序时账各阶段的耗时，决定读表层要不要跟看账一样上 Parquet 缓存。
+    ///
+    /// ```text
+    /// cargo test --release --lib bench_load -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "依赖本机大样例，性能调查用"]
+    fn 大序时账各阶段耗时() {
+        // 样例目录用 LEDGER_SAMPLES 覆盖，默认取仓库同级的汇兑损益测试资料。
+        let dir = std::env::var("LEDGER_SAMPLES").unwrap_or_else(|_| {
+            let home = std::env::var("USERPROFILE").unwrap_or_default();
+            format!("{home}/Downloads/审计工具箱/audit-toolbox-main/汇兑损益测试资料")
+        });
+        let path = std::path::PathBuf::from(dir).join("4800_JE_2025.01-12.xlsx");
+        if !path.is_file() {
+            println!("BENCH 找不到样例");
+            return;
+        }
+        let spec = SourceSpec {
+            input_path: path.to_string_lossy().to_string(),
+            sheet: String::new(),
+            header_row: 0,
+            header_depth: 0,
+        };
+        let t = Instant::now();
+        let table = load_fx_table(&spec).expect("读表应当成功");
+        println!(
+            "BENCH 解析Excel(calamine): {:?}   {} 行 × {} 列",
+            t.elapsed(),
+            table.rows.len(),
+            table.headers.len()
+        );
+        let t = Instant::now();
+        let rows = records(&table);
+        println!("BENCH 建行记录(records): {:?}   {} 条", t.elapsed(), rows.len());
+        let mapping = json!({"date":"记帐日期","id":"凭证号码","accountCode":"会计科目"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let t = Instant::now();
+        let mut n = 0usize;
+        for row in &rows {
+            if !cell(row, &mapping, "date").is_empty() {
+                n += 1;
+            }
+            let _ = cell(row, &mapping, "accountCode");
+            let _ = voucher_id(row, &mapping, &Value::Null);
+        }
+        println!("BENCH 逐行取值×3: {:?}   有效 {n} 行", t.elapsed());
     }
 }

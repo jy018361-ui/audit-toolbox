@@ -22,12 +22,18 @@ impl Storage {
     pub fn new(data_dir: &Path) -> Result<Self, AppError> {
         fs::create_dir_all(data_dir).map_err(db_error)?;
         let conn = Connection::open(data_dir.join("audit-toolbox.db")).map_err(db_error)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
+        // busy_timeout：两列匹配的 worker 进程会拿独立连接并发写同一库文件
+        // （父进程同时在 UPSERT task_history），锁竞争时等待而不是立刻报
+        // SQLITE_BUSY。WAL 是库级持久设置，busy_timeout 是连接级的，
+        // 因此 fuzzy_match 里自开的连接也要各自设置。
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;
           CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS migrations(source TEXT PRIMARY KEY,completed_at TEXT NOT NULL,report_json TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS task_history(job_id TEXT PRIMARY KEY,tool_id TEXT NOT NULL,status TEXT NOT NULL,summary_json TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT);
           CREATE TABLE IF NOT EXISTS audipick_projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,data_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS audipick_documents(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,path TEXT NOT NULL,sha256 TEXT NOT NULL,data_json TEXT NOT NULL,FOREIGN KEY(project_id) REFERENCES audipick_projects(id));").map_err(db_error)?;
+          CREATE TABLE IF NOT EXISTS audipick_documents(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,path TEXT NOT NULL,sha256 TEXT NOT NULL,data_json TEXT NOT NULL,FOREIGN KEY(project_id) REFERENCES audipick_projects(id));
+          CREATE TABLE IF NOT EXISTS fuzzy_match_results(job_id TEXT NOT NULL,a_index INTEGER NOT NULL,a_value TEXT NOT NULL,level TEXT NOT NULL,match_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(job_id,a_index));
+          CREATE TABLE IF NOT EXISTS fuzzy_match_confirmations(job_id TEXT NOT NULL,a_index INTEGER NOT NULL,b_index INTEGER,action TEXT NOT NULL,note TEXT,confirmed_at TEXT NOT NULL,PRIMARY KEY(job_id,a_index));").map_err(db_error)?;
         let storage = Self {
             conn: Mutex::new(conn),
             data_dir: data_dir.to_path_buf(),
@@ -35,6 +41,11 @@ impl Storage {
         storage.import_legacy_defaults()?;
         storage.sanitize_roll_forward_settings()?;
         Ok(storage)
+    }
+    /// SQLite 库文件绝对路径：worker 进程拿不到 Tauri state，lib.rs 会在
+    /// job_start 分发前把它注入 params.__dbPath，worker 用它自开连接落库。
+    pub fn db_path(&self) -> PathBuf {
+        self.data_dir.join("audit-toolbox.db")
     }
     pub fn settings_get(&self) -> Result<Value, AppError> {
         let conn = self.conn.lock();

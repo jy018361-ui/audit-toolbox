@@ -72,6 +72,10 @@ export const openOutput = (path: string) =>
   inTauri()
     ? invoke<void>("open_output", { path })
     : Promise.reject(previewUnavailable("打开本地输出文件"));
+export const openReferenceUrl = (url: string) =>
+  inTauri()
+    ? invoke<void>("open_reference_url", { url })
+    : Promise.reject(previewUnavailable("打开官方网站"));
 export const settingsGet = () =>
   inTauri()
     ? invoke<Record<string, unknown>>("settings_get")

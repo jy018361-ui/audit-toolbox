@@ -1,11 +1,17 @@
 mod audipick;
 mod confirmation;
+mod deposit_interest;
 #[cfg(windows)]
 mod excel_com;
 mod excel_merger;
 mod fa;
+mod fa_subtools;
 mod file_list;
+mod fuzzy_match;
 mod fx;
+mod ledger_mapping;
+mod loan_interest;
+mod pdf_to_excel;
 mod roll_forward;
 mod storage;
 mod tabular;
@@ -26,6 +32,12 @@ use tauri_plugin_opener::OpenerExt;
 
 use excel_merger::ExcelMergerService;
 use storage::Storage;
+
+/// 集成测试（tests/fuzzy_roundtrip.rs）进程内直连任务方法的入口：
+/// 不启动 worker 子进程，也不对前端暴露。engine_call_for_test 只放行
+/// 只读/存储方法，任务方法（fuzzy.match / fuzzy.export）从这里进。
+#[doc(hidden)]
+pub use fuzzy_match::run_job_for_test;
 
 #[derive(Clone)]
 struct AllowedPaths(Arc<Mutex<HashSet<PathBuf>>>);
@@ -253,6 +265,25 @@ async fn engine_call(
                 Some(e.to_string()),
             )
         })?
+    } else if method == "ledger.review_mapping" {
+        let settings = storage.settings_get()?;
+        let kind = params
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("je")
+            .to_owned();
+        tauri::async_runtime::spawn_blocking(move || {
+            audipick::ledger_review_call(&kind, &params, &settings)
+        })
+        .await
+        .map_err(|e| {
+            AppError::new(
+                "LLM_TASK_FAILED",
+                "LLM 字段复核异常结束。",
+                true,
+                Some(e.to_string()),
+            )
+        })?
     } else if matches!(
         method.as_str(),
         "fx.review_je_mapping" | "fx.review_tb_mapping"
@@ -281,7 +312,37 @@ async fn engine_call(
                     Some(e.to_string()),
                 )
             })?
-    } else if method.starts_with("ts.") || method.starts_with("kanzhang.") {
+    } else if method.starts_with("deposit.") {
+        tauri::async_runtime::spawn_blocking(move || deposit_interest::call(&method, params))
+            .await
+            .map_err(|e| {
+                AppError::new(
+                    "RUST_TASK_FAILED",
+                    "存款利息审计任务异常结束。",
+                    true,
+                    Some(e.to_string()),
+                )
+            })?
+    } else if method.starts_with("loan.") {
+        tauri::async_runtime::spawn_blocking(move || loan_interest::call(&method, params))
+            .await
+            .map_err(|e| {
+                AppError::new(
+                    "RUST_TASK_FAILED",
+                    "借款利息审计任务异常结束。",
+                    true,
+                    Some(e.to_string()),
+                )
+            })?
+    } else if method.starts_with("fuzzy.") {
+        // fuzzy.get_results / fuzzy.save_confirm 需要本机结果库。照 audipick
+        // 分支同步调 Storage 方法：call_with_storage 按库文件自开连接，
+        // 不会长期占住 Storage 的全局连接锁（父进程还要 UPSERT task_history）。
+        fuzzy_match::call_with_storage(&storage, &method, params)
+    } else if method.starts_with("ts.")
+        || method.starts_with("kanzhang.")
+        || method.starts_with("cache.")
+    {
         tauri::async_runtime::spawn_blocking(move || tabular::call(&method, params))
             .await
             .map_err(|e| {
@@ -299,7 +360,7 @@ async fn engine_call(
             .map_err(|e| {
                 AppError::new(
                     "RUST_TASK_FAILED",
-                    "Rust Audit Roll Forward 任务异常结束。",
+                    "Rust WP Roll Forward 任务异常结束。",
                     true,
                     Some(e.to_string()),
                 )
@@ -348,9 +409,23 @@ async fn job_start(
         }
         return excel_merger.start(&method, params);
     }
-    if method.starts_with("kanzhang.") || method.starts_with("fx.") {
+    if method.starts_with("kanzhang.")
+        || method.starts_with("fx.")
+        || method.starts_with("loan.")
+        || method.starts_with("deposit.")
+    {
         if let Value::Object(ref mut map) = params {
             map.insert("__settings".into(), storage.settings_get()?);
+        }
+    }
+    if method.starts_with("fuzzy.") {
+        // worker 进程拿不到 Tauri state：把 SQLite 库文件绝对路径注入 params，
+        // fuzzy.match 落库 / fuzzy.export 读库都在 worker 里自开连接。
+        if let Value::Object(ref mut map) = params {
+            map.insert(
+                "__dbPath".into(),
+                Value::String(storage.db_path().to_string_lossy().into_owned()),
+            );
         }
     }
     if is_fa_job_method(&method) {
@@ -376,6 +451,11 @@ async fn job_start(
         || method.starts_with("ts.")
         || method.starts_with("kanzhang.")
         || matches!(method.as_str(), "fx.fetch_rates" | "fx.preview" | "fx.export")
+        || matches!(method.as_str(), "loan.preview" | "loan.export")
+        || matches!(method.as_str(), "deposit.preview" | "deposit.export")
+        || method == "pdf2excel.convert"
+        // 两列匹配：跑匹配要落结果库，导出要从结果库读回，都走任务通道。
+        || matches!(method.as_str(), "fuzzy.match" | "fuzzy.export")
     {
         return excel_merger.start(&method, params);
     }
@@ -386,7 +466,7 @@ async fn job_start(
     if method.starts_with("roll_forward.") {
         return Err(AppError::new(
             "METHOD_NOT_FOUND",
-            "未找到 Rust Audit Roll Forward 任务方法。",
+            "未找到 Rust WP Roll Forward 任务方法。",
             false,
             Some(method),
         ));
@@ -400,11 +480,17 @@ async fn job_start(
 }
 
 fn is_fa_llm_method(method: &str) -> bool {
-    matches!(method, "fa.review" | "fa.supplement_review")
+    matches!(
+        method,
+        "fa.review" | "fa.supplement_review" | "fa.dep_review"
+    )
 }
 
 fn is_fa_job_method(method: &str) -> bool {
-    matches!(method, "fa.match" | "fa.preview" | "fa.export")
+    matches!(
+        method,
+        "fa.match" | "fa.preview" | "fa.export" | "fa.dep_export" | "fa.policy_export"
+    )
 }
 
 fn is_roll_forward_job_method(method: &str) -> bool {
@@ -671,6 +757,30 @@ fn open_output(
         })
 }
 
+/// Opens one of the built-in official rate-lookup entry points in the system
+/// browser.  The URL must be on `deposit_interest::REFERENCE_LINKS`; the
+/// frontend cannot use this command to reach an arbitrary address, mirroring
+/// the AllowedPaths rule that governs local files.
+#[tauri::command]
+fn open_reference_url(app: tauri::AppHandle, url: String) -> Result<(), AppError> {
+    if !deposit_interest::is_reference_url(&url) {
+        return Err(AppError::new(
+            "URL_NOT_ALLOWED",
+            "只能打开工具内置的官方利率查询入口。",
+            false,
+            Some(url),
+        ));
+    }
+    app.opener().open_url(url, None::<&str>).map_err(|e| {
+        AppError::new(
+            "OPEN_URL_FAILED",
+            "无法打开浏览器。",
+            true,
+            Some(e.to_string()),
+        )
+    })
+}
+
 /// Normalizes the requested opening folder of a file dialog.  Blank/whitespace
 /// input means "let the system decide"; anything else is handed to the shell
 /// as-is, without touching the filesystem.
@@ -717,6 +827,68 @@ fn webview2_available() -> bool {
     false
 }
 
+/// 给集成测试用的同步调度入口：不经过 Tauri，直接按方法前缀分发到业务模块。
+/// 只暴露只读的识别类方法，不碰任务、文件写入与凭据。
+#[doc(hidden)]
+pub fn engine_call_for_test(
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(rest) = method.strip_prefix("fx.") {
+        if rest.starts_with("inspect")
+            || matches!(rest, "account_roles" | "validate_mapping" | "check_mapping_alignment")
+        {
+            return fx::call(method, params);
+        }
+        // LLM 映射复核也是只读识别类：不写文件、不动任务，
+        // 调查测试要用它逐份样例验证 LLM 推荐质量。API key 由
+        // request_llm 自行从凭据管理器读取。
+        if matches!(rest, "review_je_mapping" | "review_tb_mapping") {
+            let dirs = project_dirs()?;
+            let storage = Storage::new(dirs.data_local_dir())?;
+            let settings = storage.settings_get()?;
+            return audipick::fx_mapping_llm_call(method, &params, &settings);
+        }
+    }
+    if let Some(rest) = method.strip_prefix("deposit.") {
+        if rest.starts_with("inspect") || rest == "rate_tiers" {
+            return deposit_interest::call(method, params);
+        }
+    }
+    // 看账的只读识别类：不写文件、不动任务，调查测试用它量缓存效果。
+    if matches!(method, "kanzhang.inspect" | "kanzhang.accounts" | "kanzhang.map") {
+        return tabular::call(method, params);
+    }
+    // 两列匹配：inspect 只读；get_results/save_confirm 是集成测试
+    // （fuzzy_roundtrip）做 落库→取回→确认 往返的落点，测试用 params.__dbPath
+    // 指向临时库，不带时落本机数据目录。该入口不经前端（不在 invoke_handler
+    // 里），__dbPath 不会成为外部可控参数。
+    if let Some(rest) = method.strip_prefix("fuzzy.") {
+        if rest == "inspect" {
+            return fuzzy_match::call(method, params);
+        }
+        if matches!(rest, "get_results" | "save_confirm") {
+            let db = params
+                .get("__dbPath")
+                .and_then(Value::as_str)
+                .filter(|v| !v.trim().is_empty())
+                .map(PathBuf::from);
+            let path = match db {
+                Some(path) => path,
+                None => Storage::new(project_dirs()?.data_local_dir())?.db_path(),
+            };
+            return fuzzy_match::storage_call(&path, method, params);
+        }
+    }
+    Err(AppError {
+        code: "METHOD_NOT_FOUND".into(),
+        user_message: format!("测试入口不支持该方法：{method}"),
+        retryable: false,
+        diagnostic_id: String::new(),
+        detail: None,
+    })
+}
+
 pub fn run() {
     let dirs = project_dirs().expect("AuditToolbox data directory");
     std::fs::create_dir_all(dirs.data_local_dir()).expect("create data directory");
@@ -754,6 +926,7 @@ pub fn run() {
             job_start,
             job_cancel,
             job_pause,
+            open_reference_url,
             settings_get,
             settings_set,
             llm_test,
@@ -796,12 +969,12 @@ mod tests {
     }
 
     #[test]
-    fn bundled_catalog_contains_nine_unique_tools() {
+    fn bundled_catalog_contains_unique_tools() {
         let catalog = tool_catalog().unwrap();
         let rows = catalog.as_array().unwrap();
-        assert_eq!(rows.len(), 9);
+        assert_eq!(rows.len(), 17);
         let ids: HashSet<_> = rows.iter().filter_map(|row| row["id"].as_str()).collect();
-        assert_eq!(ids.len(), 9);
+        assert_eq!(ids.len(), 17);
         assert!(rows.iter().all(|row| row["route"].as_str().is_some()));
     }
 
@@ -809,12 +982,17 @@ mod tests {
     fn fa_native_route_contract_is_explicit() {
         assert!(is_fa_llm_method("fa.review"));
         assert!(is_fa_llm_method("fa.supplement_review"));
+        assert!(is_fa_llm_method("fa.dep_review"));
         assert!(!is_fa_llm_method("fa.inspect"));
+        assert!(!is_fa_llm_method("fa.dep_export"));
 
         assert!(is_fa_job_method("fa.match"));
         assert!(is_fa_job_method("fa.preview"));
         assert!(is_fa_job_method("fa.export"));
+        assert!(is_fa_job_method("fa.dep_export"));
+        assert!(is_fa_job_method("fa.policy_export"));
         assert!(!is_fa_job_method("fa.unknown"));
+        assert!(!is_fa_job_method("fa.dep_inspect"));
 
         let error = fa::call("fa.unknown", json!({})).unwrap_err();
         assert_eq!(error.code, "METHOD_NOT_FOUND");

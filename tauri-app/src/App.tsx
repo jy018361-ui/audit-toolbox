@@ -25,17 +25,25 @@ import type { Bootstrap, JobEvent, ToolManifest } from "./types";
 import { TsManagerParityPage } from "./TsManagerParityPage";
 import ConfirmationProgressPage from "./ConfirmationProgressPage";
 import FileListDirectoryPage from "./FileListDirectoryPage";
+import PdfToExcelPage from "./PdfToExcelPage";
 import { KanzhangParityPage } from "./KanzhangParityPage";
+import { JeSignMarkPage } from "./JeSignMarkPage";
 import { FaListPage } from "./FaListPage";
 import { ExcelMergerPage } from "./ExcelMergerPage";
 import { AudiPickPage } from "./AudiPickPage";
 import { WpServicePage } from "./WpServicePage";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageHeader } from "@/components/PageHeader";
+import { PersistentToolPages } from "@/components/PersistentToolPages";
 import { StepIndicator } from "@/components/StepIndicator";
 import { ResultView } from "@/components/ResultView";
 import { RollForwardPage } from "./RollForwardPage";
 import { FxAuditPage } from "./FxAuditPage";
+import { LoanInterestPage } from "./LoanInterestPage";
+import { DepositInterestPage } from "./DepositInterestPage";
+import { FuzzyMatchPage } from "./FuzzyMatchPage";
+import { FaDepCalcPage } from "./FaDepCalcPage";
+import { FaPolicyComparePage } from "./FaPolicyComparePage";
 import { applyReadableForegrounds } from "./theme";
 import { getVersion } from "@tauri-apps/api/app";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -153,19 +161,46 @@ const NAV_ICON: Record<string, ReactElement> = {
   "/diagnostics": <IconTerminal />,
 };
 
-// 九个工具固定不变（见 public/tool-catalog.json），用两字徽标代替千篇一律的纯文字列表，
+// 工具清单以 public/tool-catalog.json 为准，用简短徽标代替千篇一律的纯文字列表，
 // 方便在侧边栏一眼定位；不逐个配色，避免走回文件顶部注释警惕过的"173 种颜色"老路。
 const TOOL_BADGE: Record<string, string> = {
   fa_list: "FA",
+  fa_dep_calc: "折",
+  fa_policy_compare: "政",
   kanzhang: "账",
+  je_sign_mark: "±",
   ts_manager: "TS",
   confirmation_progress: "函",
   Excel_Merger: "合",
   file_list_directory: "夹",
+  pdf_to_excel: "函",
   audipick: "AP",
   audit_roll_forward: "RF",
   wp_service_generator: "WP",
   fx_audit: "汇",
+  loan_interest: "息",
+  deposit_interest: "存",
+  fuzzy_match: "模",
+};
+
+// 侧边栏可折叠子分组：分组头只是展开/收起的开关（不走路由），
+// 子项挂在竖线缩进下。新增子分组在这里登记，再往下面分组 ids 里放占位符。
+const TOOL_SUBGROUPS: Record<
+  string,
+  { key: string; label: string; badge: string; ids: string[] }
+> = {
+  __FA_GROUP__: {
+    key: "fa",
+    label: "FA底稿生成",
+    badge: "FA",
+    ids: ["fa_list", "fa_dep_calc", "fa_policy_compare"],
+  },
+  __KANZHANG_GROUP__: {
+    key: "kanzhang",
+    label: "看账工具",
+    badge: "账",
+    ids: ["kanzhang", "je_sign_mark"],
+  },
 };
 
 export default function App() {
@@ -174,6 +209,36 @@ export default function App() {
   const [jobs, setJobs] = useState<Record<string, JobEvent>>({});
   const [startupReady, setStartupReady] = useState(false);
   const [startupError, setStartupError] = useState("");
+  // 侧边栏子分组默认展开：折叠头不是路由入口，收着会让高频工具"消失"。
+  const [subgroupOpen, setSubgroupOpen] = useState<Record<string, boolean>>({
+    fa: true,
+    kanzhang: true,
+  });
+  // 缓存自动清理：启动时问一次，之后每小时问一次。
+  // 「够不够一个周期」由后端判断——那条判断只该有一处，散在两边迟早对不上。
+  useEffect(() => {
+    const sweep = async () => {
+      try {
+        const settings = await settingsGet();
+        const cache = (settings.cache ?? {}) as Record<string, unknown>;
+        const mode = String(cache.cleanup ?? "weekly");
+        if (mode === "off") return;
+        const result = (await engineCall("cache.sweep", {
+          mode,
+          lastCleanup: cache.lastCleanup ?? null,
+        })) as { skipped?: boolean; cleanedAt?: number };
+        // 真清理过才写回时间戳，跳过时不动——否则永远差一点到期。
+        if (!result.skipped && result.cleanedAt) {
+          await settingsSet({ cache: { cleanup: mode, lastCleanup: result.cleanedAt } });
+        }
+      } catch {
+        // 清理失败不该影响启动，缓存留着最多是占点磁盘。
+      }
+    };
+    void sweep();
+    const timer = setInterval(() => void sweep(), 60 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, []);
   useEffect(() => {
     void Promise.all([toolCatalog(), appBootstrap()])
       .then(([c, b]) => {
@@ -204,23 +269,72 @@ export default function App() {
         </nav>
         <div className="tool-nav">
           {[
-            { label: "审计工具", ids: ["fx_audit", "fa_list", "kanzhang", "audipick", "audit_roll_forward"] },
-            { label: "效率工具", ids: ["Excel_Merger", "file_list_directory"] },
+            // __*_GROUP__ 占位（见 TOOL_SUBGROUPS）：主工具在原位置展开为可折叠子分组，
+            // 看账与正负数凭证标记两个入口同组呈现。
+            { label: "审计工具", ids: ["fx_audit", "deposit_interest", "loan_interest", "__FA_GROUP__", "__KANZHANG_GROUP__", "audipick", "audit_roll_forward", "fuzzy_match"] },
+            { label: "效率工具", ids: ["Excel_Merger", "file_list_directory", "pdf_to_excel"] },
             { label: "运营工具", ids: ["ts_manager", "confirmation_progress", "wp_service_generator"] },
           ].map((group) => {
-            const tools = catalog.filter((t) => group.ids.includes(t.id));
-            if (!tools.length) return null;
+            const entries = group.ids.map((id) =>
+              TOOL_SUBGROUPS[id] ? id : (catalog.find((t) => t.id === id)?.id ?? null),
+            ).filter((id): id is string => Boolean(id));
+            if (!entries.length) return null;
             return (
               <div key={group.label} className="tool-group">
                 <div className="nav-caption">{group.label}</div>
-                {tools.map((t) => (
-                  <NavLink key={t.id} to={t.route}>
-                    <span className="tool-badge">
-                      {TOOL_BADGE[t.id] ?? t.name.slice(0, 1)}
-                    </span>
-                    {t.name}
-                  </NavLink>
-                ))}
+                {entries.map((entry) => {
+                  const subgroup = TOOL_SUBGROUPS[entry];
+                  if (subgroup) {
+                    const tools = subgroup.ids
+                      .map((id) => catalog.find((t) => t.id === id))
+                      .filter((t): t is ToolManifest => Boolean(t));
+                    if (!tools.length) return null;
+                    const open = subgroupOpen[subgroup.key] ?? false;
+                    return (
+                      <div key={entry} className="tool-subgroup">
+                        <button
+                          type="button"
+                          className="tool-subgroup-toggle"
+                          aria-expanded={open}
+                          onClick={() =>
+                            setSubgroupOpen((v) => ({ ...v, [subgroup.key]: !open }))
+                          }
+                        >
+                          <span className="tool-badge">{subgroup.badge}</span>
+                          {subgroup.label}
+                          <span
+                            className={`tool-subgroup-chevron${open ? " open" : ""}`}
+                            aria-hidden="true"
+                          >
+                            ▸
+                          </span>
+                        </button>
+                        {open && (
+                          <div className="tool-subgroup-items">
+                            {tools.map((t) => (
+                              <NavLink key={t.id} to={t.route} className="tool-subgroup-link">
+                                <span className="tool-badge">
+                                  {TOOL_BADGE[t.id] ?? t.name.slice(0, 1)}
+                                </span>
+                                {t.name}
+                              </NavLink>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+                  const tool = catalog.find((t) => t.id === entry);
+                  if (!tool) return null;
+                  return (
+                    <NavLink key={tool.id} to={tool.route}>
+                      <span className="tool-badge">
+                        {TOOL_BADGE[tool.id] ?? tool.name.slice(0, 1)}
+                      </span>
+                      {tool.name}
+                    </NavLink>
+                  );
+                })}
               </div>
             );
           })}
@@ -241,34 +355,40 @@ export default function App() {
             text={`${startupError} 请刷新后重试。`}
           />
         ) : (
-          <Routes>
-            <Route
-              path="/"
-              element={
-                <Dashboard catalog={catalog} jobs={Object.values(jobs)} />
-              }
+          <>
+            <Routes>
+              <Route
+                path="/"
+                element={
+                  <Dashboard catalog={catalog} jobs={Object.values(jobs)} />
+                }
+              />
+              {/* The visible tool is rendered by PersistentToolPages below so
+                  route changes hide it instead of destroying its local state. */}
+              <Route path="/tools/:toolId" element={null} />
+              <Route
+                path="/tasks"
+                element={<TaskCenter jobs={Object.values(jobs)} />}
+              />
+              <Route path="/history" element={<History />} />
+              <Route path="/settings" element={<Settings />} />
+              <Route
+                path="/diagnostics"
+                element={
+                  <SimplePage
+                    title="日志诊断"
+                    text="日志仅包含阶段、耗时和诊断编号，不记录客户数据或密钥。"
+                  />
+                }
+              />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+            <PersistentToolPages
+              renderPage={(toolId) => (
+                <ToolPage catalog={catalog} toolId={toolId} />
+              )}
             />
-            <Route
-              path="/tools/:toolId"
-              element={<ToolPage catalog={catalog} />}
-            />
-            <Route
-              path="/tasks"
-              element={<TaskCenter jobs={Object.values(jobs)} />}
-            />
-            <Route path="/history" element={<History />} />
-            <Route path="/settings" element={<Settings />} />
-            <Route
-              path="/diagnostics"
-              element={
-                <SimplePage
-                  title="日志诊断"
-                  text="日志仅包含阶段、耗时和诊断编号，不记录客户数据或密钥。"
-                />
-              }
-            />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
+          </>
         )}
       </main>
     </div>
@@ -403,8 +523,15 @@ function appErrorText(error: unknown): string {
   return "操作失败，请查看日志诊断。";
 }
 
-function ToolPage({ catalog }: { catalog: ToolManifest[] }) {
-  const { toolId = "" } = useParams();
+function ToolPage({
+  catalog,
+  toolId: explicitToolId,
+}: {
+  catalog: ToolManifest[];
+  toolId?: string;
+}) {
+  const { toolId: routeToolId = "" } = useParams();
+  const toolId = explicitToolId ?? routeToolId;
   const tool = catalog.find((t) => t.id === toolId);
   const def = TOOL_DEFINITIONS[toolId];
   const [values, setValues] = useState<Record<string, unknown>>({
@@ -459,9 +586,17 @@ function ToolPage({ catalog }: { catalog: ToolManifest[] }) {
     return <ConfirmationProgressPage tool={tool} />;
   if (tool.id === "file_list_directory")
     return <FileListDirectoryPage tool={tool} />;
+  if (tool.id === "pdf_to_excel") return <PdfToExcelPage tool={tool} />;
   if (tool.id === "kanzhang") return <KanzhangParityPage tool={tool} />;
+  if (tool.id === "je_sign_mark") return <JeSignMarkPage tool={tool} />;
   if (tool.id === "audit_roll_forward") return <RollForwardPage tool={tool} />;
   if (tool.id === "fx_audit") return <FxAuditPage tool={tool} />;
+  if (tool.id === "loan_interest") return <LoanInterestPage tool={tool} />;
+  if (tool.id === "deposit_interest") return <DepositInterestPage tool={tool} />;
+  if (tool.id === "fuzzy_match") return <FuzzyMatchPage tool={tool} />;
+  if (tool.id === "fa_dep_calc") return <FaDepCalcPage tool={tool} />;
+  if (tool.id === "fa_policy_compare")
+    return <FaPolicyComparePage tool={tool} />;
   async function run(action: ActionDefinition) {
     setError("");
     setResult(undefined);
@@ -742,6 +877,15 @@ function formatHistoryTime(value: unknown): string {
     ? "时间未知"
     : historyDateFormat.format(date);
 }
+/** 字节数按 KB/MB/GB 显示，缓存占用给人看的时候没人想数零。 */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / 1024 ** index;
+  return `${value >= 100 || index === 0 ? Math.round(value) : value.toFixed(1)} ${units[index]}`;
+}
+
 function Settings() {
   const [form, setForm] = useState({
     enabled: false,
@@ -763,7 +907,32 @@ function Settings() {
     text: string;
   }>();
   const [backupPath, setBackupPath] = useState("");
+  // 本地缓存：大表读一次就存一份 Parquet，之后每步都命中缓存。
+  // 它只增不减，所以要给用户一个看得见、清得掉的入口。
+  const [cacheStat, setCacheStat] = useState<{
+    files: number;
+    bytes: number;
+    oldestDays: number;
+    path: string;
+  }>();
+  const [cacheMode, setCacheMode] = useState<"daily" | "weekly" | "off">("weekly");
+  const [cacheBusy, setCacheBusy] = useState(false);
+  const [cacheMessage, setCacheMessage] = useState("");
+  const [cacheStatError, setCacheStatError] = useState("");
+  const refreshCacheStat = () =>
+    engineCall("cache.stat", {})
+      .then((v) => {
+        setCacheStat(v as typeof cacheStat);
+        setCacheStatError("");
+      })
+      .catch((e) => {
+        setCacheStat(undefined);
+        setCacheStatError(String(e));
+      });
   const [appVersion, setAppVersion] = useState("读取中…");
+  useEffect(() => {
+    void refreshCacheStat();
+  }, []);
   const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
   const [updateStatus, setUpdateStatus] = useState("");
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -851,6 +1020,9 @@ function Settings() {
           thinkingEnabled: Boolean(llm.thinking_enabled),
           ocrEngine: String(ocr.engine ?? x.ocrEngine),
         }));
+        const cache = (value.cache ?? {}) as Record<string, unknown>;
+        const mode = String(cache.cleanup ?? "weekly");
+        if (mode === "daily" || mode === "weekly" || mode === "off") setCacheMode(mode);
       })
       .catch(() => undefined);
   }, []);
@@ -909,6 +1081,7 @@ function Settings() {
           ...llmSettings(),
         },
         ocr: { engine: form.ocrEngine },
+        cache: { cleanup: cacheMode },
       });
       if (form.apiKey)
         await secretSet(
@@ -1111,6 +1284,59 @@ function Settings() {
           </div>
         </section>
       </div>
+      <section className="list-card" style={{ marginTop: 18 }}>
+        <h2>本地缓存</h2>
+        <p>
+          缓存读过的科目余额表与序时账，再次打开同一份文件直接命中，不必重新解析。
+        </p>
+        <p className="cache-usage">
+          {cacheStat
+            ? `已缓存 ${formatBytes(cacheStat.bytes)}`
+            : cacheStatError
+              ? "占用读取失败"
+              : "读取中…"}
+        </p>
+        <label className="field">
+          <span>自动清理</span>
+          <select
+            value={cacheMode}
+            onChange={(e) => setCacheMode(e.target.value as typeof cacheMode)}
+          >
+            {/* 说明写进选项本身：选「每天」不是每天清空，是每天清掉没再用过的。 */}
+            <option value="daily">每天清理未使用的缓存</option>
+            <option value="weekly">每周清理未使用的缓存</option>
+            <option value="off">不自动清理</option>
+          </select>
+        </label>
+        <div className="actions">
+          <button
+            className="secondary"
+            disabled={cacheBusy || cacheStat?.bytes === 0}
+            onClick={() => {
+              setCacheBusy(true);
+              setCacheMessage("");
+              void engineCall("cache.clear", {})
+                .then((v) => {
+                  const r = v as { removed: number; freed: number; failed: number };
+                  setCacheMessage(
+                    `已清理 ${r.removed} 个文件，释放 ${formatBytes(r.freed)}` +
+                      (r.failed ? `；${r.failed} 个正在使用，未清理` : ""),
+                  );
+                  return refreshCacheStat();
+                })
+                .catch((e) => setCacheMessage(String(e)))
+                .finally(() => setCacheBusy(false));
+            }}
+          >
+            {cacheBusy
+              ? "清理中…"
+              : cacheStat && cacheStat.bytes > 0
+                ? `立刻清理全部（${formatBytes(cacheStat.bytes)}）`
+                : "立刻清理全部"}
+          </button>
+        </div>
+        {cacheMessage && <p className="cache-result">{cacheMessage}</p>}
+      </section>
       <section className="list-card" style={{ marginTop: 18 }}>
         <h2>AudiPick 旧数据迁移</h2>
         <p>

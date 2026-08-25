@@ -1,6 +1,6 @@
 [package]
 name = "audit-toolbox"
-version = "2.0.0-alpha.21"
+version = "2.0.0-alpha.22"
 description = "统一的 Tauri 审计工具箱"
 authors = ["Audit Toolbox"]
 edition = "2024"
@@ -47,6 +47,8 @@ polars = { version = "=0.54.4", default-features = false, features = ["lazy", "p
 polars-io = { version = "=0.54.4", default-features = false, features = ["dtype-datetime"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 umya-spreadsheet = "=3.0.1"
+pdfplumber = "0.3"
+regex = "1"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant"] }
 
 [target.'cfg(windows)'.dependencies]

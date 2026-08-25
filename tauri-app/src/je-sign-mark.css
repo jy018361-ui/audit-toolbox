@@ -1,0 +1,149 @@
+/*
+ * 正负数智能标记：单页从上到下依次是加载、批次与目标科目、预览表、导出。
+ * 卡片、按钮、预览表都沿用 kanzhang-parity.css，这里只补批次条和科目选择器。
+ */
+.jm-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.jm-batches {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.jm-batch-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.jm-batch-row .kz-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin: 0;
+}
+.jm-batch-name {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-left: auto;
+  white-space: nowrap;
+}
+.jm-batch-name input {
+  width: 12rem;
+}
+.jm-account-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+}
+.jm-account-label {
+  font-weight: 600;
+}
+/* 科目选择器长得像下拉框，但点开的是与列头漏斗同一个筛选面板。 */
+.jm-account-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 12rem;
+  justify-content: space-between;
+  border: 1px solid var(--border);
+  background: var(--surface-sunken);
+  color: inherit;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.jm-account-picker:hover:not(:disabled),
+.jm-account-picker[aria-expanded="true"] {
+  border-color: var(--brand-link);
+}
+.jm-account-picker.active {
+  border-color: var(--brand-link);
+  font-weight: 600;
+}
+.jm-account-picker:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.jm-filter-note {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--ink-muted);
+  font-size: 0.85em;
+}
+/* 面板里提示该科目已在别的批次选过，防止无意重复选。 */
+.ts-filter-value .jm-value-note {
+  margin-left: auto;
+  padding-left: var(--sp-2);
+  color: var(--ink-muted);
+  font-size: 0.8em;
+  white-space: nowrap;
+}
+@media (max-width: 1100px) {
+  .jm-batch-name {
+    margin-left: 0;
+  }
+}
+
+/*
+ * 金额符号口径卡片：结论 + 依据 + 三档选择（自动 / 符号一样 / 已带符号）。
+ * 走了兜底、账被筛过或无法判定时整卡转警示底色，提醒用户确认。
+ */
+.jm-sign {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--sp-3);
+  background: var(--surface-sunken);
+}
+.jm-sign.warn {
+  border-color: var(--warning-dot);
+  background: var(--warning-bg);
+}
+.jm-sign-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.jm-sign-title {
+  font-weight: 600;
+}
+.jm-sign-choices {
+  display: inline-flex;
+  gap: var(--sp-1);
+  margin-left: auto;
+}
+.jm-sign-choices button {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: inherit;
+  padding: var(--sp-1) var(--sp-3);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.jm-sign-choices button.active {
+  border-color: var(--brand-link);
+  background: var(--brand-link);
+  color: var(--surface);
+}
+.jm-sign-applied {
+  font-weight: 600;
+}
+.jm-sign-basis {
+  color: var(--muted, #666);
+  font-size: 0.85rem;
+}
+.jm-sign-warning {
+  color: var(--warning-fg);
+  font-size: 0.85rem;
+  font-weight: 600;
+}

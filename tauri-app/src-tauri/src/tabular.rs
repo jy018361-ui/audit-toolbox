@@ -18,11 +18,16 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant, SystemTime},
 };
 
 use crate::AppError;
 use crate::excel_merger::PauseCheckpoint;
+use crate::ledger_mapping;
+use crate::ledger_mapping::{
+    SignConvention, SignEvidence, is_credit_direction, je_sign_evidence_amount_direction,
+    je_sign_evidence_debit_credit, je_sign_evidence_single,
+};
 
 const TS_MAX_PIVOT_COLUMN_VALUES: usize = 180;
 
@@ -76,18 +81,54 @@ struct TsJobParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-struct LedgerMapping {
+pub(crate) struct LedgerMapping {
     #[serde(default)]
-    id: Vec<String>,
+    pub(crate) id: Vec<String>,
+    /// 科目编码列。与科目名称拆成两个独立角色，跟汇兑损益、存款利息、借款利息
+    /// 共用的统一映射内核同口径——`会计科目` 这类编码列不该再顶着「科目名称」的名字。
     #[serde(default)]
-    account: Vec<String>,
-    entity: Option<String>,
-    date: Option<String>,
-    summary: Option<String>,
-    amount: Option<String>,
-    direction: Option<String>,
-    debit: Option<String>,
-    credit: Option<String>,
+    pub(crate) account_code: Option<String>,
+    /// 科目名称列，可多列（科目名称一级＋二级这种层级拆分）。
+    #[serde(default)]
+    pub(crate) account_name: Vec<String>,
+    /// 旧版把编码与名称混在一个 `account` 数组里。老草稿、老参数仍可能带它，
+    /// 这里照收，统一由 [`LedgerMapping::account_columns`] 兜底。
+    #[serde(default, rename = "account", skip_serializing_if = "Vec::is_empty")]
+    pub(crate) legacy_account: Vec<String>,
+    pub(crate) entity: Option<String>,
+    pub(crate) date: Option<String>,
+    pub(crate) summary: Option<String>,
+    /// 线上名统一到内核的标准角色名，Rust 字段名保持简写不动——
+    /// 28 处引用不用跟着改，`alias` 让历史保存的旧参数仍能读。
+    #[serde(rename = "functionalAmount", alias = "amount")]
+    pub(crate) amount: Option<String>,
+    pub(crate) direction: Option<String>,
+    #[serde(rename = "functionalDebit", alias = "debit")]
+    pub(crate) debit: Option<String>,
+    #[serde(rename = "functionalCredit", alias = "credit")]
+    pub(crate) credit: Option<String>,
+}
+
+impl LedgerMapping {
+    /// 组成科目键的列，顺序固定：**编码在前、名称在后**。下游按这个顺序用 `-`
+    /// 把几列拼成一个科目值，顺序一变，用户已经选好的目标科目就全部对不上。
+    /// 前端 `accountColumns` 必须保持同序。
+    pub(crate) fn account_columns(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for value in self
+            .account_code
+            .as_deref()
+            .into_iter()
+            .chain(self.account_name.iter().map(String::as_str))
+            .chain(self.legacy_account.iter().map(String::as_str))
+        {
+            let value = value.trim();
+            if !value.is_empty() && !out.contains(&value) {
+                out.push(value);
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,8 +151,6 @@ struct KanzhangParams {
     target_batches: Vec<LedgerBatch>,
     #[serde(default = "default_true")]
     mark_loss_transfer: bool,
-    #[serde(default = "default_true")]
-    enable_je_matching: bool,
     #[serde(default = "default_true")]
     include_voucher_types: bool,
     #[serde(default)]
@@ -152,9 +191,14 @@ pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
     match method {
         "ts.inspect" => inspect_ts(params),
         "ts.filter" => ts_filter_values(params),
+        "cache.stat" => cache_stat(params),
+        "cache.clear" => cache_clear(params),
+        "cache.sweep" => cache_sweep(params),
         "kanzhang.inspect" => inspect_kanzhang(params),
         "kanzhang.accounts" => kanzhang_account_values(params),
+        "kanzhang.column_values" => kanzhang_column_values(params),
         "kanzhang.map" => validate_kanzhang_mapping(params),
+        "kanzhang.mark_sign_report" => je_mark_sign_report(params),
         _ => Err(error(
             "METHOD_NOT_FOUND",
             "未找到 Rust Polars 表格方法。",
@@ -191,6 +235,14 @@ pub(crate) fn run_job(
         "kanzhang.map" => validate_kanzhang_mapping(params),
         "kanzhang.filter" => kanzhang_filter_preview(params, progress, &cancel),
         "kanzhang.pivot" | "kanzhang.export" => export_kanzhang(params, progress, &cancel),
+        // 正负数智能标记：读取与看账同一实现，只是要走自己的 toolId 才能被本页收到。
+        "kanzhang.mark_inspect" => {
+            progress("read", 0, 1, "正在读取凭证文件…");
+            let value = inspect_kanzhang(params);
+            check_cancel(&cancel)?;
+            value
+        }
+        "kanzhang.mark_export" => export_je_mark(params, progress, &cancel),
         _ => Err(error(
             "METHOD_NOT_FOUND",
             "未找到 Rust Polars 表格任务。",
@@ -229,28 +281,20 @@ fn inspect_ts(params: Value) -> Result<Value, AppError> {
 fn inspect_kanzhang(params: Value) -> Result<Value, AppError> {
     let source: SourceParams = parse(params, "看账参数不完整。")?;
     let started = Instant::now();
-    let table = load_table(
+    let table = load_ledger_cached(
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
     )?;
     let mapping = suggest_mapping(&table.headers);
-    let (accounts, account_count) = (!mapping.account.is_empty())
+    let (accounts, account_codes, account_count) = (!mapping.account_columns().is_empty())
         .then(|| {
-            let mut values = BTreeSet::new();
-            let indexes = mapping
-                .account
-                .iter()
-                .filter_map(|name| header_index(&table.headers, name))
-                .collect::<Vec<_>>();
-            for row in &table.rows {
-                let value = joined_account(row, &indexes);
-                if !value.trim().is_empty() {
-                    values.insert(value);
-                }
-            }
-            let total = values.len();
-            (values.into_iter().take(500).collect::<Vec<_>>(), total)
+            let (values, codes, total) = account_values(&table, &mapping, "", &[]);
+            (
+                values.into_iter().take(500).collect::<Vec<_>>(),
+                codes.into_iter().take(500).collect::<Vec<_>>(),
+                total,
+            )
         })
         .unwrap_or_default();
     Ok(json!({
@@ -259,13 +303,14 @@ fn inspect_kanzhang(params: Value) -> Result<Value, AppError> {
         "headers":table.headers, "preview":table.rows.iter().take(50).collect::<Vec<_>>(),
         "dimensions":{"rows":table.rows.len(),"columns":table.headers.len()},
         "encoding":table.encoding, "delimiter":table.delimiter.map(|v|v.to_string()),
-        "suggestedMapping":mapping, "accounts":accounts, "accountCount":account_count, "timings":{"readMs":started.elapsed().as_millis()}
+        "suggestedMapping":mapping, "accounts":accounts, "accountCodes":account_codes,
+        "accountCount":account_count, "timings":{"readMs":started.elapsed().as_millis()}
     }))
 }
 
 fn kanzhang_account_values(params: Value) -> Result<Value, AppError> {
     let source: SourceParams = parse(params.clone(), "看账参数不完整。")?;
-    let table = load_table(
+    let table = load_ledger_cached(
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
@@ -283,45 +328,43 @@ fn kanzhang_account_values(params: Value) -> Result<Value, AppError> {
             )
         })?
         .unwrap_or_else(|| suggest_mapping(&table.headers));
-    let indexes = mapping
-        .account
-        .iter()
-        .filter_map(|name| header_index(&table.headers, name))
-        .collect::<Vec<_>>();
-    if indexes.is_empty() {
+    if mapping.account_columns().is_empty() {
         return Err(error(
             "KANZHANG_MAPPING_INCOMPLETE",
-            "请先确认科目名称字段映射。",
+            "请先确认科目编码或科目名称字段映射。",
             None,
         ));
     }
     let keyword = params
         .get("keyword")
         .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
+        .unwrap_or("");
+    // 按科目编码前缀批量筛选：`6401,6603` 选出这两段下的全部明细科目。
+    let prefixes = parse_code_prefixes(
+        params
+            .get("codePrefixes")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
     let limit = params
         .get("limit")
         .and_then(Value::as_u64)
         .unwrap_or(1_000)
         .clamp(1, 20_000) as usize;
-    let mut values = BTreeSet::new();
-    for row in &table.rows {
-        let value = joined_account(row, &indexes);
-        if !value.is_empty() && (keyword.is_empty() || value.to_lowercase().contains(&keyword)) {
-            values.insert(value);
-        }
-    }
-    let total = values.len();
-    Ok(
-        json!({"engine":"rust-polars","values":values.into_iter().take(limit).collect::<Vec<_>>(),"total":total,"truncated":total>limit}),
-    )
+    let (values, codes, total) = account_values(&table, &mapping, keyword, &prefixes);
+    Ok(json!({
+        "engine":"rust-polars",
+        "values":values.into_iter().take(limit).collect::<Vec<_>>(),
+        // 与 values 同序一一对应，供前端按编码段做本地前缀匹配。
+        "codes":codes.into_iter().take(limit).collect::<Vec<_>>(),
+        "total":total,
+        "truncated":total>limit,
+    }))
 }
 
 fn validate_kanzhang_mapping(params: Value) -> Result<Value, AppError> {
     let source: SourceParams = parse(params.clone(), "看账参数不完整。")?;
-    let table = load_table(
+    let table = load_ledger_cached(
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
@@ -339,13 +382,15 @@ fn validate_kanzhang_mapping(params: Value) -> Result<Value, AppError> {
             )
         })?
         .unwrap_or_else(|| suggest_mapping(&table.headers));
-    let mut missing = Vec::new();
-    if mapping.id.is_empty() {
-        missing.push("唯一识别码");
-    }
-    if mapping.account.is_empty() {
-        missing.push("科目名称");
-    }
+    // 必填走统一判定：金标身份槽 ∪ 看账自己声明的角色 ∪ 金额形态槽。
+    let mut missing: Vec<&str> = crate::ledger_mapping::missing_required(
+        crate::ledger_mapping::Tool::Ledger,
+        "je",
+        &mapped_roles(&mapping),
+    )
+    .into_iter()
+    .map(|item| item.label)
+    .collect();
     let scheme = if mapping.debit.is_some() && mapping.credit.is_some() {
         "debit_credit_columns"
     } else if mapping.amount.is_some() {
@@ -353,7 +398,7 @@ fn validate_kanzhang_mapping(params: Value) -> Result<Value, AppError> {
     } else {
         "unknown"
     };
-    if scheme == "unknown" {
+    if scheme == "unknown" && !missing.iter().any(|m| m.contains("金额")) {
         missing.push("金额字段");
     }
     let mapped = mapping_columns(&mapping);
@@ -364,6 +409,37 @@ fn validate_kanzhang_mapping(params: Value) -> Result<Value, AppError> {
     Ok(
         json!({"engine":"rust-polars","valid":missing.is_empty()&&unknown.is_empty(),"scheme":scheme,"missing":missing,"unknownColumns":unknown,"normalizedMapping":mapping}),
     )
+}
+
+/// 符号口径检测报告：导出前把结论与依据亮给用户，映射变更后可随时重查。
+/// 与导出走同一套预处理和检测，保证「看到的口径 = 实际采用的口径」。
+fn je_mark_sign_report(params: Value) -> Result<Value, AppError> {
+    let source: SourceParams = parse(params.clone(), "看账参数不完整。")?;
+    let table = load_ledger_cached(
+        Path::new(&source.input_path),
+        source.sheet.as_deref(),
+        source.header_row,
+    )?;
+    let mapping = params
+        .get("mapping")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| {
+            error(
+                "INVALID_MAPPING",
+                "字段映射格式不正确。",
+                Some(e.to_string()),
+            )
+        })?
+        .unwrap_or_else(|| suggest_mapping(&table.headers));
+    let table = preprocess_ledger(table, &mapping, None)?;
+    let id_indexes = ledger_id_indexes(&table.headers, &mapping);
+    let report = detect_sign_convention(&table.rows, &table.headers, &mapping, &id_indexes);
+    Ok(json!({
+        "engine":"rust-polars",
+        "signConvention":serde_json::to_value(&report).unwrap_or_default(),
+    }))
 }
 
 fn ts_filter_values(params: Value) -> Result<Value, AppError> {
@@ -594,7 +670,7 @@ fn kanzhang_filter_preview(
 ) -> Result<Value, AppError> {
     let job: KanzhangParams = parse(params, "看账参数不完整。")?;
     progress("read", 0, 3, "正在读取凭证数据…");
-    let table = load_table(
+    let table = load_ledger_cached(
         Path::new(&job.input_path),
         job.sheet.as_deref(),
         job.header_row,
@@ -604,7 +680,7 @@ fn kanzhang_filter_preview(
         .clone()
         .unwrap_or_else(|| suggest_mapping(&table.headers));
     validate_mapping_required(&mapping)?;
-    let table = preprocess_ledger(table, &mapping)?;
+    let table = preprocess_ledger(table, &mapping, None)?;
     check_cancel(cancel)?;
     progress("filter", 1, 3, "Rust Polars 正在筛选目标科目和完整凭证…");
     let filtered = filter_ledger_rows(
@@ -627,7 +703,7 @@ fn export_kanzhang(
     let job: KanzhangParams = parse(params, "看账参数不完整。")?;
     let started = Instant::now();
     progress("read", 0, 6, "正在读取凭证数据…");
-    let table = load_table(
+    let table = load_ledger_cached(
         Path::new(&job.input_path),
         job.sheet.as_deref(),
         job.header_row,
@@ -637,7 +713,7 @@ fn export_kanzhang(
         .clone()
         .unwrap_or_else(|| suggest_mapping(&table.headers));
     validate_mapping_required(&mapping)?;
-    let table = preprocess_ledger(table, &mapping)?;
+    let table = preprocess_ledger(table, &mapping, None)?;
     check_cancel(cancel)?;
     let batches = normalized_batches(&job);
     let mut outputs = Vec::new();
@@ -699,9 +775,7 @@ fn export_kanzhang(
             "voucherRows":analysis.voucher_pivot.rows.len(),
             "voucherTypesLoose":analysis.voucher_type_loose.rows.len(),
             "voucherTypesStrict":analysis.voucher_type_strict.rows.len(),
-            "lossTransferVouchers":analysis.loss_count,
-            "jeMatchedPairs":analysis.je_pairs,
-            "jeCrossMatchedPairs":analysis.je_cross_pairs
+            "lossTransferVouchers":analysis.loss_count
         }));
     }
     Ok(json!({
@@ -761,7 +835,6 @@ struct VoucherInfo {
 #[derive(Debug)]
 struct LedgerAmounts {
     net: Vec<f64>,
-    matching: Vec<f64>,
     allow_cross_match: bool,
 }
 
@@ -954,8 +1027,8 @@ fn filter_ledger_rows(
     excludes: &[String],
 ) -> Result<Vec<Vec<String>>, AppError> {
     let account_indexes = mapping
-        .account
-        .iter()
+        .account_columns()
+        .into_iter()
         .filter_map(|name| header_index(&table.headers, name))
         .collect::<Vec<_>>();
     let mut id_indexes = Vec::new();
@@ -1019,8 +1092,8 @@ fn excluded_ledger_rows(
     excludes: &[String],
 ) -> Vec<Vec<String>> {
     let account_indexes = mapping
-        .account
-        .iter()
+        .account_columns()
+        .into_iter()
         .filter_map(|name| header_index(&table.headers, name))
         .collect::<Vec<_>>();
     let exclude_set = excludes
@@ -1039,11 +1112,15 @@ fn excluded_ledger_rows(
         .collect()
 }
 
-fn preprocess_ledger(mut table: Table, mapping: &LedgerMapping) -> Result<Table, AppError> {
+fn preprocess_ledger(
+    mut table: Table,
+    mapping: &LedgerMapping,
+    sign_override: Option<SignConvention>,
+) -> Result<Table, AppError> {
     let id_indexes = ledger_id_indexes(&table.headers, mapping);
     let account_indexes = mapping
-        .account
-        .iter()
+        .account_columns()
+        .into_iter()
         .filter_map(|name| header_index(&table.headers, name))
         .collect::<Vec<_>>();
     let amount_indexes = [
@@ -1109,7 +1186,7 @@ fn preprocess_ledger(mut table: Table, mapping: &LedgerMapping) -> Result<Table,
         .iter()
         .map(|(row, _)| row.clone())
         .collect::<Vec<_>>();
-    let amounts = ledger_amounts(&rows, &table.headers, mapping, &id_indexes);
+    let amounts = ledger_amounts(&rows, &table.headers, mapping, &id_indexes, sign_override);
     let mut balance = HashMap::<String, f64>::new();
     for (row, amount) in rows.iter().zip(amounts.net.iter()) {
         *balance.entry(voucher_key(row, &id_indexes)).or_default() += *amount;
@@ -1166,8 +1243,8 @@ fn analyze_ledger(
 ) -> Result<LedgerAnalysis, AppError> {
     let id_indexes = ledger_id_indexes(&table.headers, mapping);
     let account_indexes = mapping
-        .account
-        .iter()
+        .account_columns()
+        .into_iter()
         .filter_map(|name| header_index(&table.headers, name))
         .collect::<Vec<_>>();
     if id_indexes.is_empty() || account_indexes.is_empty() {
@@ -1182,39 +1259,18 @@ fn analyze_ledger(
         .map(|value| normalize_account(value))
         .filter(|value| !value.is_empty())
         .collect::<HashSet<_>>();
-    let amounts = ledger_amounts(rows, &table.headers, mapping, &id_indexes);
+    let amounts = ledger_amounts(rows, &table.headers, mapping, &id_indexes, None);
     let loss_ids = if job.mark_loss_transfer {
         detect_loss_transfer_ids(rows, &id_indexes, &account_indexes)
     } else {
         HashSet::new()
     };
-    let (je_status, je_pairs, je_cross_pairs) = if job.enable_je_matching {
-        match_je_rows(
-            rows,
-            &table.headers,
-            &amounts,
-            mapping,
-            &id_indexes,
-            &account_indexes,
-            &target_set,
-            &loss_ids,
-            cancel,
-        )?
-    } else {
-        (vec![String::new(); rows.len()], 0, 0)
-    };
     let excluded_rows = excluded_ledger_rows(table, mapping, &job.exclude_accounts);
 
-    // 旧版把辅助列放在最前面（绝对值、符号、匹配状态、损益结转），原始列在后；
-    // 迁移版原来追加在末尾，用户打开导出文件第一眼看到的东西完全不同。
-    let mut headers = Vec::with_capacity(table.headers.len() + 4);
-    if job.enable_je_matching {
-        headers.extend(
-            ["【辅助_绝对值】", "【辅助_符号】", "【智能匹配状态】"]
-                .into_iter()
-                .map(str::to_owned),
-        );
-    }
+    // 旧版把辅助列放在最前面，原始列在后；迁移版原来追加在末尾，
+    // 用户打开导出文件第一眼看到的东西完全不同。
+    // 绝对值/符号/智能匹配状态三列已随正负数智能标记一并移出本工具。
+    let mut headers = Vec::with_capacity(table.headers.len() + 1);
     if job.mark_loss_transfer {
         headers.push("【损益结转】".into());
     }
@@ -1225,26 +1281,7 @@ fn analyze_ledger(
             check_cancel(cancel)?;
         }
         let key = voucher_key(row, &id_indexes);
-        let amount = amounts.net.get(index).copied().unwrap_or(0.0);
         let mut output = Vec::with_capacity(headers.len());
-        if job.enable_je_matching {
-            // 旧版只对「目标科目行且非损益结转」填绝对值和符号，其余留空——
-            // 这两列是给 JE 对冲复核用的，铺满全表会让人以为每一行都参与了匹配。
-            // 匹配状态本身就只在这个范围内非空，直接以它为准，两列口径必然一致。
-            let status = je_status.get(index).cloned().unwrap_or_default();
-            if status.is_empty() {
-                output.push(String::new());
-                output.push(String::new());
-            } else {
-                output.push(format_number(amount.abs()));
-                output.push(if amount >= 0.0 {
-                    "正数".into()
-                } else {
-                    "负数".into()
-                });
-            }
-            output.push(status);
-        }
         if job.mark_loss_transfer {
             output.push(if loss_ids.contains(&key) {
                 "损益结转".into()
@@ -1328,7 +1365,11 @@ fn analyze_ledger(
             values.dedup();
             values
         },
-        account_headers: mapping.account.clone(),
+        account_headers: mapping
+            .account_columns()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
         amount_headers: [
             mapping.amount.as_deref(),
             mapping.debit.as_deref(),
@@ -1339,8 +1380,9 @@ fn analyze_ledger(
         .map(str::to_owned)
         .collect(),
         loss_count: loss_ids.len(),
-        je_pairs,
-        je_cross_pairs,
+        // 对冲配对属于正负数智能标记，看账不再统计。
+        je_pairs: 0,
+        je_cross_pairs: 0,
     })
 }
 
@@ -1410,7 +1452,10 @@ fn match_je_rows(
             if !target_set.is_empty() && !target_set.contains(&normalize_account(&account)) {
                 return None;
             }
-            let amount = round_money(amounts.matching.get(index).copied().unwrap_or(0.0));
+            // 直接配对与符号列、跨行匹配同用净额口径：已匹配行的借贷净额必须为 0。
+            // 旧口径（贷方记正数）会把"贷方结转"和"借方红字冲销"这类同向减少的
+            // 行配成一对，两行净额同号，筛"已匹配"后净额不为零。
+            let amount = round_money(amounts.net.get(index).copied().unwrap_or(0.0));
             if amount == 0 {
                 return None;
             }
@@ -2302,6 +2347,108 @@ fn classify_vouchers(infos: &[VoucherInfo], strict: bool) -> Vec<Vec<usize>> {
     groups
 }
 
+/// 科目清单：显示值（几列拼接）＋ 该行的科目编码原值。
+///
+/// 编码单独带出来，前端才能按**编码段**做前缀匹配。只把拼接串按第一个 `-`
+/// 切开是不行的——Oracle 的段式科目编码本身就含连字符（`01-1002-000`），
+/// 切出来的 `01` 毫无意义。
+fn account_values(
+    table: &Table,
+    mapping: &LedgerMapping,
+    keyword: &str,
+    prefixes: &[String],
+) -> (Vec<String>, Vec<String>, usize) {
+    let indexes = mapping
+        .account_columns()
+        .into_iter()
+        .filter_map(|name| header_index(&table.headers, name))
+        .collect::<Vec<_>>();
+    let code_index = mapping
+        .account_code
+        .as_deref()
+        .and_then(|name| header_index(&table.headers, name));
+    let mut pairs: BTreeMap<String, String> = BTreeMap::new();
+    for row in &table.rows {
+        let value = joined_account(row, &indexes);
+        if value.trim().is_empty() {
+            continue;
+        }
+        let code = code_index
+            .and_then(|index| row.get(index))
+            .map(|v| v.trim().to_owned())
+            .unwrap_or_default();
+        pairs.entry(value).or_insert(code);
+    }
+    let lower = keyword.trim().to_lowercase();
+    let filtered: Vec<(String, String)> = pairs
+        .into_iter()
+        .filter(|(value, code)| {
+            if !lower.is_empty() && !value.to_lowercase().contains(&lower) {
+                return false;
+            }
+            prefixes.is_empty() || matches_code_prefix(code, value, prefixes)
+        })
+        .collect();
+    let total = filtered.len();
+    let (values, codes): (Vec<String>, Vec<String>) = filtered.into_iter().unzip();
+    (values, codes, total)
+}
+
+/// 科目编码是否命中任一前缀。**只比编码，不比整个拼接串**——否则输入 `6401`
+/// 会把科目名称里恰好含 6401 的科目也拉进来。没有映射编码列时退回比对显示值
+/// 的开头，让只有名称列的账也能用这个筛选。
+pub(crate) fn matches_code_prefix(code: &str, display: &str, prefixes: &[String]) -> bool {
+    let target = if code.trim().is_empty() { display } else { code };
+    let target = target.trim().to_lowercase();
+    prefixes.iter().any(|prefix| {
+        let prefix = prefix.trim().to_lowercase();
+        !prefix.is_empty() && target.starts_with(&prefix)
+    })
+}
+
+/// 把用户输入的前缀串切成多个前缀：逗号、分号、空格、顿号都算分隔符。
+pub(crate) fn parse_code_prefixes(raw: &str) -> Vec<String> {
+    raw.split([',', '，', ';', '；', ' ', '\u{3000}', '、', '\n', '\t'])
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// 把看账的映射翻译成统一内核的角色集合，供必填判定使用。
+/// 看账只读序时账，用不到原币口径与余额类角色。
+fn mapped_roles(mapping: &LedgerMapping) -> std::collections::HashSet<&'static str> {
+    let mut out = std::collections::HashSet::new();
+    if !mapping.id.is_empty() {
+        out.insert("id");
+    }
+    if mapping.account_code.as_deref().is_some_and(|v| !v.trim().is_empty()) {
+        out.insert("accountCode");
+    }
+    if mapping.account_name.iter().any(|v| !v.trim().is_empty()) {
+        out.insert("accountName");
+    }
+    // 旧版把编码与名称混在一个数组里，两个角色都算到位，否则老参数会被判成缺列。
+    if !mapping.legacy_account.is_empty() {
+        out.insert("accountCode");
+        out.insert("accountName");
+    }
+    for (value, role) in [
+        (mapping.entity.as_deref(), "entity"),
+        (mapping.date.as_deref(), "date"),
+        (mapping.summary.as_deref(), "summary"),
+        (mapping.amount.as_deref(), "functionalAmount"),
+        (mapping.direction.as_deref(), "direction"),
+        (mapping.debit.as_deref(), "functionalDebit"),
+        (mapping.credit.as_deref(), "functionalCredit"),
+    ] {
+        if value.is_some_and(|v| !v.trim().is_empty()) {
+            out.insert(role);
+        }
+    }
+    out
+}
+
 fn joined_account(row: &[String], indexes: &[usize]) -> String {
     indexes
         .iter()
@@ -2423,6 +2570,20 @@ pub(crate) fn fx_load_table_value(
 /// requested, atomically cached. The cache key includes canonical path, size,
 /// mtime, sheet and header row, so UNC files and replaced files cannot reuse a
 /// stale frame.
+/// 看账与正负数凭证标记的读取入口：与 TS 共用同一套稳定 Parquet 缓存。
+///
+/// 此前这两个工具走的是裸 [`load_table`]，一份 36 万行的序时账在
+/// 读取、取科目、筛选、导出**每一步都要重新全量解析一遍**。
+/// 缓存键含源文件规范路径、大小、修改时间，与哪个工具在读无关——
+/// TS 和看账读同一份文件时还能命中彼此的缓存。
+fn load_ledger_cached(
+    path: &Path,
+    sheet: Option<&str>,
+    header_row: usize,
+) -> Result<Table, AppError> {
+    load_ts_cached(path, sheet, header_row, true).map(|(table, _, _)| table)
+}
+
 fn load_ts_cached(
     path: &Path,
     sheet: Option<&str>,
@@ -2473,6 +2634,8 @@ fn load_ts_cached(
                 table.path = path.to_path_buf();
                 table.sheet = selected_sheet;
                 table.sheets = sheets;
+                // 记下「这份缓存今天还在用」，按天扫除时才不会误删常用的。
+                touch_cache(&cache);
                 return Ok((table, true, cache));
             }
             Err(_) => {
@@ -3605,58 +3768,35 @@ fn ts_defaults(headers: &[String]) -> Value {
     json!({"filterField":if header_index(headers,"Department Name").is_some(){"Department Name"}else{""},"filterValue":if header_index(headers,"Department Name").is_some(){"ASU Delivery Center ZZ-WP"}else{""},"valueField":value,"columnField":column,"managerRowFields":manager,"projectRowFields":project})
 }
 
+/// 表头识别走统一映射内核，与汇兑损益、存款利息、借款利息共用同一份别名库。
+///
+/// 看账只读序时账，用不到原币口径与余额类角色，取内核结果里对应的那几个。
 fn suggest_mapping(headers: &[String]) -> LedgerMapping {
-    let find = |terms: &[&str]| find_header(headers, terms);
-    let mut mapping = LedgerMapping {
-        id: find(&[
-            "Je number",
-            "jenumber",
-            "凭证编号",
-            "凭证号",
-            "reference",
-            "单据号",
-        ])
-        .into_iter()
-        .collect(),
-        account: find(&[
-            "科目名称",
-            "科目描述",
-            "gl account name",
-            "account",
-            "总账科目",
-        ])
-        .into_iter()
-        .collect(),
-        entity: find(&[
-            "公司名称",
-            "公司",
-            "单位名称",
-            "单位",
-            "主体",
-            "entity",
-            "company",
-            "bukrs",
-            "co code",
-            "business unit",
-            "businessunit",
-        ]),
-        date: find(&["日期", "date", "过账日期", "posting date", "凭证日期"]),
-        summary: find(&["摘要", "描述", "行项目文本", "description", "text"]),
-        amount: find(&["functional amount", "本币金额", "金额", "amount"]),
-        direction: find(&["debit credit", "debit_credit", "方向", "借贷", "dc"]),
-        debit: find(&[
-            "functional debit amount",
-            "debit amount",
-            "借方金额",
-            "借方",
-        ]),
-        credit: find(&[
-            "functional credit amount",
-            "credit amount",
-            "贷方金额",
-            "贷方",
-        ]),
+    let roles = ledger_mapping::suggest_roles("je", headers);
+    let columns = |want: &str| -> Vec<String> {
+        roles
+            .iter()
+            .filter(|(_, role)| **role == want)
+            .filter_map(|(index, _)| headers.get(*index).cloned())
+            .collect()
     };
+    let one = |want: &str| columns(want).into_iter().next();
+    // 编码与名称各归各位，界面上是两个独立角色。两者都保留：只有编码时
+    // 「1002」看不出是银行存款，只有名称时又没法按科目号筛。
+    let mut mapping = LedgerMapping {
+        id: columns("id"),
+        account_code: one("accountCode"),
+        account_name: columns("accountName"),
+        entity: one("entity"),
+        date: one("date"),
+        summary: one("summary"),
+        amount: one("functionalAmount"),
+        direction: one("direction"),
+        debit: one("functionalDebit"),
+        credit: one("functionalCredit"),
+        ..Default::default()
+    };
+    // 一列同时被判成借方和贷方，说明它其实是「借/贷」标识列，不是金额列。
     if mapping.debit.is_some() && mapping.debit == mapping.credit {
         let combined = mapping.debit.take();
         mapping.credit = None;
@@ -3753,11 +3893,161 @@ fn voucher_key_label(headers: &[String], id_indexes: &[usize]) -> String {
     }
 }
 
+/// 符号口径判定已提升为公共内核（`ledger_mapping`）——看账原本是五个工具里
+/// 判定最完整的一套，现在由汇兑损益、存款利息、借款利息共用同一份实现。
+/// 这里只负责把映射好的列取出来交给内核。
+pub(crate) fn sign_evidence(
+    rows: &[Vec<String>],
+    headers: &[String],
+    mapping: &LedgerMapping,
+    id_indexes: &[usize],
+) -> SignEvidence {
+    let column = |name: &Option<String>| {
+        name.as_deref().and_then(|n| header_index(headers, n))
+    };
+    let numbers = |index: usize| {
+        rows.iter()
+            .map(|row| parse_number(row.get(index).map(String::as_str).unwrap_or("")))
+            .collect::<Vec<_>>()
+    };
+    let debit_column = column(&mapping.debit);
+    let credit_column = column(&mapping.credit);
+    let amount_column = column(&mapping.amount);
+    let direction_column = column(&mapping.direction);
+
+    if let (Some(dr), Some(cr)) = (debit_column, credit_column) {
+        // 方案 B：借贷分列。
+        return je_sign_evidence_debit_credit(
+            &numbers(dr),
+            &numbers(cr),
+            &group_vouchers(rows, id_indexes),
+        );
+    }
+
+    if let (Some(amount), Some(direction)) = (amount_column, direction_column) {
+        // 方案 A：金额＋方向列。方向为空的行既不算借也不算贷。
+        let is_credit = rows
+            .iter()
+            .map(|row| is_credit_direction(row.get(direction).map(String::as_str).unwrap_or("")))
+            .collect::<Vec<_>>();
+        let has_direction = rows
+            .iter()
+            .map(|row| !row_direction(row.get(direction)).is_empty())
+            .collect::<Vec<_>>();
+        return je_sign_evidence_amount_direction(
+            &numbers(amount),
+            &is_credit,
+            &has_direction,
+            &group_vouchers(rows, id_indexes),
+        );
+    }
+
+    if amount_column.is_some() {
+        return je_sign_evidence_single(group_vouchers(rows, id_indexes).len());
+    }
+
+    let mut evidence = je_sign_evidence_single(0);
+    evidence.scheme = "none";
+    evidence.convention = None;
+    evidence.note = Some("金额字段未映射，无法判定符号口径。".into());
+    evidence
+}
+
+/// 凭证按首现顺序分组；顺序稳定，统计与文案才稳定。
+fn group_vouchers(rows: &[Vec<String>], id_indexes: &[usize]) -> Vec<Vec<usize>> {
+    let mut vouchers: Vec<Vec<usize>> = Vec::new();
+    let mut slot_of: HashMap<String, usize> = HashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        let key = voucher_key(row, id_indexes);
+        match slot_of.get(&key) {
+            Some(&slot) => vouchers[slot].push(index),
+            None => {
+                let slot = vouchers.len();
+                slot_of.insert(key, slot);
+                vouchers.push(vec![index]);
+            }
+        }
+    }
+    vouchers
+}
+
+fn row_direction(value: Option<&String>) -> &str {
+    value.map(|text| text.trim()).unwrap_or("")
+}
+
+/// 检测报告：结论 + 中文依据 + 凭证完整性统计，序列化给前端直接展示。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SignReport {
+    scheme: &'static str,
+    /// "signed" / "unsigned"；null = 数据无法判定，需要用户指定。
+    detected: Option<&'static str>,
+    basis: String,
+    total_vouchers: usize,
+    balanced_vouchers: usize,
+    unbalanced_vouchers: usize,
+    /// 只有借方或只有贷方的凭证张数。
+    one_sided_vouchers: usize,
+    /// 单边凭证占多数——账多半是按科目筛选过后导出的。
+    filtered: bool,
+    /// 借贷齐全却两种口径都配不平的凭证占多——凭证识别字段可能组错。
+    key_suspect: bool,
+}
+
+impl SignReport {
+    fn detected_convention(&self) -> Option<SignConvention> {
+        match self.detected {
+            Some("signed") => Some(SignConvention::Signed),
+            Some("unsigned") => Some(SignConvention::Unsigned),
+            _ => None,
+        }
+    }
+}
+
+fn detect_sign_convention(
+    rows: &[Vec<String>],
+    headers: &[String],
+    mapping: &LedgerMapping,
+    id_indexes: &[usize],
+) -> SignReport {
+    let evidence = sign_evidence(rows, headers, mapping, id_indexes);
+    let votes = evidence.signed_votes + evidence.unsigned_votes;
+    let basis = if votes > 0 {
+        format!(
+            "{} 张借贷齐全的凭证中，{} 张按「已带符号」配平、{} 张按「借贷符号一样」配平，取多数。",
+            votes, evidence.signed_votes, evidence.unsigned_votes
+        )
+    } else {
+        evidence.note.clone().unwrap_or_else(|| "金额字段未映射。".into())
+    };
+    SignReport {
+        scheme: evidence.scheme,
+        detected: evidence.convention.map(|c| c.as_str()),
+        basis,
+        total_vouchers: evidence.total_vouchers,
+        balanced_vouchers: votes,
+        unbalanced_vouchers: evidence.unbalanced,
+        one_sided_vouchers: evidence.one_sided,
+        // 账被筛过 vs 凭证键组错：两者都会让凭证配不平，但成因完全不同，
+        // 提示语指错方向会让人去查一个不存在的映射问题。
+        // 判据是单边凭证的占比——按科目筛过的账里另一半分录被筛掉了，
+        // 单边占比会很高（实测约 89%）；键组错只是把凭证并粗，两边都在，
+        // 单边占比仍然很低（实测不到 1%）。
+        filtered: matches!(evidence.scheme, "A" | "B")
+            && evidence.total_vouchers > 0
+            && evidence.one_sided * 2 > evidence.total_vouchers,
+        key_suspect: evidence.unbalanced > votes
+            && evidence.unbalanced > 0
+            && evidence.one_sided * 2 <= evidence.total_vouchers,
+    }
+}
+
 fn ledger_amounts(
     rows: &[Vec<String>],
     headers: &[String],
     mapping: &LedgerMapping,
     id_indexes: &[usize],
+    sign_override: Option<SignConvention>,
 ) -> LedgerAmounts {
     if let (Some(dr_index), Some(cr_index)) = (
         mapping
@@ -3769,6 +4059,8 @@ fn ledger_amounts(
             .as_deref()
             .and_then(|name| header_index(headers, name)),
     ) {
+        let evidence = sign_evidence(rows, headers, mapping, id_indexes);
+        let signed = sign_override.or(evidence.convention) == Some(SignConvention::Signed);
         let debit = rows
             .iter()
             .map(|row| parse_number(row.get(dr_index).map(String::as_str).unwrap_or("")))
@@ -3777,57 +4069,25 @@ fn ledger_amounts(
             .iter()
             .map(|row| parse_number(row.get(cr_index).map(String::as_str).unwrap_or("")))
             .collect::<Vec<_>>();
-        let raw = debit
+        // 「符号一样」按借−贷折净额；「已带符号」取有值一侧原值
+        // （借贷同行的行两边相减，与两种口径都一致）。
+        let net = debit
             .iter()
             .zip(credit.iter())
             .map(|(dr, cr)| {
-                if *dr != 0.0 && *cr != 0.0 {
-                    dr - cr
-                } else if *dr != 0.0 {
-                    *dr
+                if signed && !(dr != &0.0 && cr != &0.0) {
+                    if *dr != 0.0 {
+                        *dr
+                    } else {
+                        *cr
+                    }
                 } else {
-                    *cr
+                    dr - cr
                 }
             })
-            .collect::<Vec<_>>();
-        let mut order = Vec::new();
-        let mut seen = HashSet::new();
-        for row in rows {
-            let id = voucher_key(row, id_indexes);
-            if seen.insert(id.clone()) {
-                order.push(id);
-            }
-        }
-        let sample = order.into_iter().find(|id| {
-            rows.iter()
-                .enumerate()
-                .any(|(index, row)| voucher_key(row, id_indexes) == *id && debit[index] != 0.0)
-                && rows
-                    .iter()
-                    .enumerate()
-                    .any(|(index, row)| voucher_key(row, id_indexes) == *id && credit[index] != 0.0)
-        });
-        let already_signed = sample.is_some_and(|id| {
-            let indexes = rows
-                .iter()
-                .enumerate()
-                .filter(|(_, row)| voucher_key(row, id_indexes) == id)
-                .map(|(index, _)| index)
-                .collect::<Vec<_>>();
-            indexes.len() > 1 && indexes.iter().map(|index| raw[*index]).sum::<f64>().abs() < 0.01
-        });
-        let net = if already_signed {
-            raw.clone()
-        } else {
-            debit
-                .iter()
-                .zip(credit.iter())
-                .map(|(dr, cr)| dr - cr)
-                .collect()
-        };
+            .collect();
         return LedgerAmounts {
             net,
-            matching: raw,
             allow_cross_match: true,
         };
     }
@@ -3848,54 +4108,15 @@ fn ledger_amounts(
         .as_deref()
         .and_then(|name| header_index(headers, name));
     if let Some(direction_index) = direction_index {
+        let evidence = sign_evidence(rows, headers, mapping, id_indexes);
+        let signed = sign_override.or(evidence.convention) == Some(SignConvention::Signed);
         let credit = rows
             .iter()
             .map(|row| {
                 is_credit_direction(row.get(direction_index).map(String::as_str).unwrap_or(""))
             })
             .collect::<Vec<_>>();
-        let mut order = Vec::new();
-        let mut seen = HashSet::new();
-        for row in rows {
-            let id = voucher_key(row, id_indexes);
-            if seen.insert(id.clone()) {
-                order.push(id);
-            }
-        }
-        let sample = order
-            .iter()
-            .find(|id| {
-                let mut has_credit = false;
-                let mut has_debit = false;
-                for (index, row) in rows
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, row)| voucher_key(row, id_indexes) == **id)
-                {
-                    let direction = row
-                        .get(direction_index)
-                        .map(|value| value.trim())
-                        .unwrap_or("");
-                    if credit[index] {
-                        has_credit = true
-                    } else if !direction.is_empty() {
-                        has_debit = true
-                    }
-                }
-                has_credit && has_debit
-            })
-            .cloned()
-            .or_else(|| order.first().cloned());
-        let already_signed = sample.is_some_and(|id| {
-            let indexes = rows
-                .iter()
-                .enumerate()
-                .filter(|(_, row)| voucher_key(row, id_indexes) == id)
-                .map(|(index, _)| index)
-                .collect::<Vec<_>>();
-            indexes.len() > 1 && indexes.iter().map(|index| raw[*index]).sum::<f64>().abs() < 0.01
-        });
-        let net = if already_signed {
+        let net = if signed {
             raw.clone()
         } else {
             raw.iter()
@@ -3907,45 +4128,22 @@ fn ledger_amounts(
                 .map(|(index, value)| if credit[index] { -*value } else { *value })
                 .collect()
         };
-        let matching = raw
-            .iter()
-            .enumerate()
-            .map(|(index, value)| {
-                if credit[index] && *value < 0.0 {
-                    value.abs()
-                } else {
-                    net[index]
-                }
-            })
-            .collect();
         LedgerAmounts {
             net,
-            matching,
             allow_cross_match: false,
         }
     } else {
         LedgerAmounts {
-            net: raw.clone(),
-            matching: raw,
+            net: raw,
             allow_cross_match: true,
         }
     }
 }
 
-fn is_credit_direction(value: &str) -> bool {
-    let trimmed = value.trim();
-    let lower = trimmed.to_lowercase();
-    trimmed.contains('贷')
-        || lower.contains("credit")
-        || matches!(lower.as_str(), "c" | "cr" | "h")
-        || trimmed.contains('-')
-        || trimmed.contains('−')
-}
-
 fn mapping_columns(m: &LedgerMapping) -> Vec<&str> {
     m.id.iter()
-        .chain(m.account.iter())
         .map(String::as_str)
+        .chain(m.account_columns())
         .chain(
             [
                 m.entity.as_deref(),
@@ -3963,7 +4161,7 @@ fn mapping_columns(m: &LedgerMapping) -> Vec<&str> {
 }
 fn validate_mapping_required(m: &LedgerMapping) -> Result<(), AppError> {
     if m.id.is_empty()
-        || m.account.is_empty()
+        || m.account_columns().is_empty()
         || !((m.debit.is_some() && m.credit.is_some()) || m.amount.is_some())
     {
         return Err(error(
@@ -4176,6 +4374,124 @@ fn fingerprint(path: &Path, sheet: &str, header_row: usize) -> Result<String, Ap
     h.update(b"rust-polars-v1");
     Ok(hex::encode(h.finalize()))
 }
+/// 缓存根目录：`%LOCALAPPDATA%/AuditToolbox/AuditToolbox/cache`。
+fn cache_root() -> Result<PathBuf, AppError> {
+    let dirs = ProjectDirs::from("com", "AuditToolbox", "AuditToolbox")
+        .ok_or_else(|| error("DATA_DIR_UNAVAILABLE", "无法确定缓存目录。", None))?;
+    Ok(dirs.cache_dir().to_path_buf())
+}
+
+/// 逐个缓存文件的路径与「最后一次用到」的时间。
+///
+/// 用 mtime 当最后使用时间：缓存命中时会 touch 一下（见 [`touch_cache`]），
+/// 所以它记的是「上次真正读到过」，而不是「什么时候写进来的」。
+/// Windows 默认不更新 atime，拿 atime 判反而会把常用缓存误删。
+fn cache_entries() -> Result<Vec<(PathBuf, SystemTime, u64)>, AppError> {
+    let root = cache_root()?;
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|v| v.to_str()) == Some("parquet") {
+                let used = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                out.push((path, used, meta.len()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// 缓存命中时把 mtime 推到当前时间，让「最后使用时间」保持真实。
+/// 失败不影响读取——最坏的结果只是这份缓存早一点被扫除。
+fn touch_cache(path: &Path) {
+    let _ = fs::File::options()
+        .append(true)
+        .open(path)
+        .and_then(|file| file.set_modified(SystemTime::now()));
+}
+
+/// 缓存占用概况：文件数、总字节、最早一次使用距今多少天。
+fn cache_stat(_params: Value) -> Result<Value, AppError> {
+    let entries = cache_entries()?;
+    let bytes: u64 = entries.iter().map(|(_, _, size)| size).sum();
+    let oldest_days = entries
+        .iter()
+        .filter_map(|(_, used, _)| used.elapsed().ok())
+        .map(|age| age.as_secs() / 86_400)
+        .max()
+        .unwrap_or(0);
+    Ok(json!({
+        "files": entries.len(),
+        "bytes": bytes,
+        "oldestDays": oldest_days,
+        "path": cache_root()?.display().to_string(),
+    }))
+}
+
+/// 清空全部缓存。删不掉的文件（正被占用）跳过并计数，不让一个文件挡住整次清理。
+fn cache_clear(_params: Value) -> Result<Value, AppError> {
+    let entries = cache_entries()?;
+    let mut removed = 0usize;
+    let mut freed = 0u64;
+    let mut failed = 0usize;
+    for (path, _, size) in entries {
+        if fs::remove_file(&path).is_ok() {
+            removed += 1;
+            freed += size;
+        } else {
+            failed += 1;
+        }
+    }
+    Ok(json!({"removed":removed,"freed":freed,"failed":failed}))
+}
+
+/// 按周期自动清理：`mode` 为 `daily`／`weekly`／`off`。
+///
+/// 到期与否在这里判，前端只负责按时来问一次、把返回的时间戳存回设置——
+/// 免得「多久算一天」这种判断散在两边各写一遍。
+///
+/// 清的是**超过一个周期没用过的**缓存，不是无差别清空：今天刚用过的表
+/// 明天大概率还要用，连它一起删等于把缓存关掉。
+fn cache_sweep(params: Value) -> Result<Value, AppError> {
+    let mode = params.get("mode").and_then(Value::as_str).unwrap_or("weekly");
+    let period_days = match mode {
+        "off" => {
+            return Ok(json!({"removed":0,"freed":0,"skipped":true,"reason":"已关闭自动清理"}));
+        }
+        "daily" => 1u64,
+        _ => 7u64,
+    };
+    let period = Duration::from_secs(period_days * 86_400);
+    // 距上次清理不足一个周期就不动手——前端每小时来问一次也只会真跑一次。
+    if let Some(last) = params.get("lastCleanup").and_then(Value::as_i64) {
+        if chrono::Utc::now().timestamp() - last < period.as_secs() as i64 {
+            return Ok(
+                json!({"removed":0,"freed":0,"skipped":true,"reason":"距上次清理不足一个周期"}),
+            );
+        }
+    }
+    let mut removed = 0usize;
+    let mut freed = 0u64;
+    for (path, used, size) in cache_entries()? {
+        let stale = used.elapsed().map(|age| age > period).unwrap_or(false);
+        if stale && fs::remove_file(&path).is_ok() {
+            removed += 1;
+            freed += size;
+        }
+    }
+    Ok(json!({
+        "removed":removed,"freed":freed,"skipped":false,"mode":mode,
+        "cleanedAt": chrono::Utc::now().timestamp(),
+    }))
+}
+
 fn cache_path(tool: &str, key: &str) -> Result<PathBuf, AppError> {
     let dirs = ProjectDirs::from("com", "AuditToolbox", "AuditToolbox")
         .ok_or_else(|| error("DATA_DIR_UNAVAILABLE", "无法确定缓存目录。", None))?;
@@ -4353,6 +4669,432 @@ fn xlsx_error(e: rust_xlsxwriter::XlsxError) -> AppError {
     )
 }
 
+// ---------------------------------------------------------------------------
+// 正负数智能标记
+//
+// 从看账小工具剪出来的独立工具：只做 JE 对冲标记，不做透视、套表和损益结转。
+// 加载、映射、科目取值三条通道与看账共用，标记算法即 `match_je_rows`，
+// 唯一差别是这里不把损益结转凭证挡在匹配之外——该识别已随功能一并移除。
+// ---------------------------------------------------------------------------
+
+/// 引擎用这个字面量表示"该列为空"，与 TS 的列筛选面板同一口径。
+const BLANK_VALUE_TOKEN: &str = "<空白>";
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ColumnFilter {
+    field: String,
+    #[serde(default)]
+    values: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JeMarkParams {
+    input_path: String,
+    sheet: Option<String>,
+    #[serde(default = "one")]
+    header_row: usize,
+    output_path: Option<String>,
+    mapping: Option<LedgerMapping>,
+    #[serde(default)]
+    target_batches: Vec<LedgerBatch>,
+    /// 非科目列的漏斗筛选。同列多值取「或」，跨列取「与」，与 TS 口径一致。
+    #[serde(default)]
+    column_filters: Vec<ColumnFilter>,
+    /// 金额符号口径：None/"auto" 自动检测，"signed" 已带符号，"unsigned" 借贷符号一样。
+    #[serde(default)]
+    sign_convention: Option<String>,
+    #[serde(default = "default_excel_chunk")]
+    rows_per_sheet: usize,
+}
+
+/// 解析前端传来的符号口径选择；非法取值直接报错，不静默回退。
+fn parse_sign_choice(value: Option<&str>) -> Result<Option<SignConvention>, AppError> {
+    match value {
+        None | Some("auto") => Ok(None),
+        Some("signed") => Ok(Some(SignConvention::Signed)),
+        Some("unsigned") => Ok(Some(SignConvention::Unsigned)),
+        Some(other) => Err(error(
+            "INVALID_PARAMS",
+            "符号口径只能是 auto / signed / unsigned。",
+            Some(other.into()),
+        )),
+    }
+}
+
+/// 任意一列的取值清单，供预览表头的漏斗面板按需读取。
+/// 与 `ts.filter` 同形，但走 `load_table` 而不是 TS 的 Parquet 缓存，
+/// 保证读到的表结构与看账/标记的其他步骤完全一致。
+fn kanzhang_column_values(params: Value) -> Result<Value, AppError> {
+    let source: SourceParams = parse(params.clone(), "参数不完整。")?;
+    let field = required_string(&params, "field")?;
+    let keyword = params
+        .get("keyword")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_lowercase();
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(1_000)
+        .clamp(1, 20_000) as usize;
+    let table = load_ledger_cached(
+        Path::new(&source.input_path),
+        source.sheet.as_deref(),
+        source.header_row,
+    )?;
+    let index = header_index(&table.headers, &field)
+        .ok_or_else(|| error("COLUMN_NOT_FOUND", "筛选字段不存在。", Some(field.clone())))?;
+    let mut values = BTreeSet::new();
+    for row in &table.rows {
+        let value = row.get(index).map(|value| value.trim()).unwrap_or("");
+        if keyword.is_empty() || value.to_lowercase().contains(&keyword) {
+            values.insert(if value.is_empty() {
+                BLANK_VALUE_TOKEN.to_owned()
+            } else {
+                value.to_owned()
+            });
+        }
+    }
+    let total = values.len();
+    Ok(
+        json!({"engine":"rust-polars","values":values.into_iter().take(limit).collect::<Vec<_>>(),"total":total,"truncated":total>limit}),
+    )
+}
+
+/// 按凭证套用非科目列的筛选：凭证里只要有一行同时满足所有已勾选的列条件，
+/// 整张凭证保留。按行裁会把凭证切碎，跨凭证配对算的净额随之失真。
+fn apply_column_filters(
+    mut table: Table,
+    mapping: &LedgerMapping,
+    filters: &[ColumnFilter],
+) -> Table {
+    let active = filters
+        .iter()
+        .filter_map(|filter| {
+            let index = header_index(&table.headers, &filter.field)?;
+            let chosen = filter
+                .values
+                .iter()
+                .map(|value| value.trim().to_owned())
+                .collect::<HashSet<_>>();
+            if chosen.is_empty() {
+                None
+            } else {
+                Some((index, chosen))
+            }
+        })
+        .collect::<Vec<_>>();
+    if active.is_empty() {
+        return table;
+    }
+    let id_indexes = ledger_id_indexes(&table.headers, mapping);
+    let mut keep = HashSet::new();
+    for row in &table.rows {
+        let hit = active.iter().all(|(index, chosen)| {
+            let value = row.get(*index).map(|value| value.trim()).unwrap_or("");
+            chosen.contains(if value.is_empty() {
+                BLANK_VALUE_TOKEN
+            } else {
+                value
+            })
+        });
+        if hit {
+            keep.insert(voucher_key(row, &id_indexes));
+        }
+    }
+    table
+        .rows
+        .retain(|row| keep.contains(&voucher_key(row, &id_indexes)));
+    table
+}
+
+/// 只算三列辅助列的精简分析：绝对值、符号、智能匹配状态。
+/// 套表、凭证类型、透视、LLM 分析都不属于这个工具，一律留空。
+/// `sign` 是导出前已定案的符号口径（用户指定或全表检测），各批次强制一致。
+fn analyze_je_mark(
+    table: &Table,
+    mapping: &LedgerMapping,
+    rows: &[Vec<String>],
+    targets: &[String],
+    sign: SignConvention,
+    cancel: &AtomicBool,
+) -> Result<LedgerAnalysis, AppError> {
+    let id_indexes = ledger_id_indexes(&table.headers, mapping);
+    let account_indexes = mapping
+        .account_columns()
+        .into_iter()
+        .filter_map(|name| header_index(&table.headers, name))
+        .collect::<Vec<_>>();
+    if id_indexes.is_empty() || account_indexes.is_empty() {
+        return Err(error(
+            "KANZHANG_MAPPING_INCOMPLETE",
+            "无法构造凭证唯一识别码或科目字段。",
+            None,
+        ));
+    }
+    let target_set = targets
+        .iter()
+        .map(|value| normalize_account(value))
+        .filter(|value| !value.is_empty())
+        .collect::<HashSet<_>>();
+    let amounts = ledger_amounts(rows, &table.headers, mapping, &id_indexes, Some(sign));
+    // 本工具不识别损益结转，结转凭证照常参与匹配。
+    let loss_ids = HashSet::new();
+    let (je_status, je_pairs, je_cross_pairs) = match_je_rows(
+        rows,
+        &table.headers,
+        &amounts,
+        mapping,
+        &id_indexes,
+        &account_indexes,
+        &target_set,
+        &loss_ids,
+        cancel,
+    )?;
+    // 辅助列摆在最前，与看账旧版的明细列序一致。
+    let mut headers = Vec::with_capacity(table.headers.len() + 3);
+    headers.extend(
+        ["【辅助_绝对值】", "【辅助_符号】", "【智能匹配状态】"]
+            .into_iter()
+            .map(str::to_owned),
+    );
+    headers.extend(table.headers.iter().cloned());
+    let mut enriched = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        if index % 2_000 == 0 {
+            check_cancel(cancel)?;
+        }
+        let amount = amounts.net.get(index).copied().unwrap_or(0.0);
+        let mut output = Vec::with_capacity(headers.len());
+        // 只有目标科目行参与配对，其余行三列留空——铺满全表会让人误以为
+        // 每一行都参与了匹配。匹配状态本身就只在这个范围内非空，以它为准。
+        let status = je_status.get(index).cloned().unwrap_or_default();
+        if status.is_empty() {
+            output.push(String::new());
+            output.push(String::new());
+        } else {
+            output.push(format_number(amount.abs()));
+            output.push(if amount >= 0.0 {
+                "正数".into()
+            } else {
+                "负数".into()
+            });
+        }
+        output.push(status);
+        output.extend(row.iter().cloned());
+        enriched.push(output);
+    }
+    let empty_pivot = || PivotResult {
+        headers: Vec::new(),
+        rows: Vec::new(),
+        row_field_count: 0,
+    };
+    Ok(LedgerAnalysis {
+        headers,
+        rows: enriched,
+        excluded_headers: Vec::new(),
+        excluded_rows: Vec::new(),
+        summary: empty_pivot(),
+        voucher_pivot: empty_pivot(),
+        voucher_type_loose: empty_pivot(),
+        voucher_type_strict: empty_pivot(),
+        custom_pivot: None,
+        llm_analysis: None,
+        target_accounts: {
+            let mut values = targets
+                .iter()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            values.sort();
+            values.dedup();
+            values
+        },
+        account_headers: mapping
+            .account_columns()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        amount_headers: [
+            mapping.amount.as_deref(),
+            mapping.debit.as_deref(),
+            mapping.credit.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::to_owned)
+        .collect(),
+        loss_count: 0,
+        je_pairs,
+        je_cross_pairs,
+    })
+}
+
+/// 多批次各出一个文件；命名规则与看账的多批次一致。
+fn je_mark_batch_output_path(
+    job: &JeMarkParams,
+    batch: &LedgerBatch,
+    index: usize,
+    total: usize,
+) -> Result<PathBuf, AppError> {
+    let suffix = sanitize_filename(&batch.name);
+    if let Some(value) = job
+        .output_path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let mut base = PathBuf::from(value);
+        if base.extension().is_none() {
+            base.set_extension("csv");
+        }
+        if total == 1 || index == 0 {
+            return output_path(&job.input_path, base.to_str(), "正负数标记", "csv");
+        }
+        let parent = base.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(parent).map_err(io_error)?;
+        let stem = base.file_stem().unwrap_or_default().to_string_lossy();
+        let extension = base
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("csv");
+        return Ok(parent.join(format!("{stem}_{}_{:02}.{extension}", suffix, index + 1)));
+    }
+    let base = output_path(&job.input_path, None, "正负数标记", "csv")?;
+    if total == 1 {
+        return Ok(base);
+    }
+    let parent = base.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let stem = base.file_stem().unwrap_or_default().to_string_lossy();
+    Ok(parent.join(format!("{stem}_{}_{:02}.csv", suffix, index + 1)))
+}
+
+fn export_je_mark(
+    params: Value,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<Value, AppError> {
+    let job: JeMarkParams = parse(params, "正负数标记参数不完整。")?;
+    let sign_choice = parse_sign_choice(job.sign_convention.as_deref())?;
+    let started = Instant::now();
+    progress("read", 0, 5, "正在读取凭证数据…");
+    let table = load_ledger_cached(
+        Path::new(&job.input_path),
+        job.sheet.as_deref(),
+        job.header_row,
+    )?;
+    let mapping = job
+        .mapping
+        .clone()
+        .unwrap_or_else(|| suggest_mapping(&table.headers));
+    validate_mapping_required(&mapping)?;
+    let table = preprocess_ledger(table, &mapping, sign_choice)?;
+    check_cancel(cancel)?;
+    // 口径在全表（列筛选前）定案一次：用户指定 > 凭证投票/列级兜底 > 默认符号一样。
+    // 各批次共用同一口径，检测依据也如实回显给前端。
+    let id_indexes = ledger_id_indexes(&table.headers, &mapping);
+    let report = detect_sign_convention(&table.rows, &table.headers, &mapping, &id_indexes);
+    let resolved = sign_choice
+        .or(report.detected_convention())
+        .unwrap_or(SignConvention::Unsigned);
+    progress("filter", 1, 5, "正在按列筛选条件收拢完整凭证…");
+    let table = apply_column_filters(table, &mapping, &job.column_filters);
+    let batches = je_mark_batches(&job)?;
+    let mut outputs = Vec::new();
+    let mut batch_results = Vec::new();
+    for (batch_index, batch) in batches.iter().enumerate() {
+        check_cancel(cancel)?;
+        progress(
+            "normalize",
+            2,
+            5,
+            &format!("正在处理批次 {}：{}…", batch_index + 1, batch.name),
+        );
+        let filtered = filter_ledger_rows(&table, &mapping, &batch.accounts, &[])?;
+        progress("match", 3, 5, "正在做正负数智能匹配…");
+        let analysis =
+            analyze_je_mark(&table, &mapping, &filtered, &batch.accounts, resolved, cancel)?;
+        let unmatched = analysis
+            .rows
+            .iter()
+            .filter(|row| row.get(2).is_some_and(|value| value == "未匹配"))
+            .count();
+        let output = je_mark_batch_output_path(&job, batch, batch_index, batches.len())?;
+        progress(
+            "write",
+            4,
+            5,
+            &format!("正在写出批次 {}：{}…", batch_index + 1, batch.name),
+        );
+        let partial = partial_path(&output);
+        if output
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("csv"))
+        {
+            write_csv_table(&partial, &analysis.headers, &analysis.rows, cancel)?;
+        } else {
+            write_kanzhang_detail_workbook(&partial, &analysis, job.rows_per_sheet, false, cancel)?;
+        }
+        replace_file(&partial, &output)?;
+        outputs.push(output.to_string_lossy().into_owned());
+        batch_results.push(json!({
+            "name":batch.name,
+            "accounts":batch.accounts,
+            "rows":analysis.rows.len(),
+            "matchedPairs":analysis.je_pairs,
+            "crossMatchedPairs":analysis.je_cross_pairs,
+            "unmatchedRows":unmatched
+        }));
+    }
+    Ok(json!({
+        "engine":"rust-polars",
+        "outputPaths":outputs,
+        "batchCount":batches.len(),
+        "batches":batch_results,
+        "mapping":mapping,
+        "signConvention":{
+            "choice":job.sign_convention.as_deref().unwrap_or("auto"),
+            "applied":resolved.as_str(),
+            "scheme":report.scheme,
+            "detected":report.detected,
+            "basis":report.basis,
+            "filtered":report.filtered,
+            "keySuspect":report.key_suspect,
+        },
+        "timings":{"totalMs":started.elapsed().as_millis()}
+    }))
+}
+
+/// 空批次直接跳过；一个有效批次都没有时不该猜用户想标全表。
+fn je_mark_batches(job: &JeMarkParams) -> Result<Vec<LedgerBatch>, AppError> {
+    let batches = job
+        .target_batches
+        .iter()
+        .filter_map(|batch| {
+            let name = batch.name.trim();
+            let accounts = dedup_strings(&batch.accounts);
+            if name.is_empty() || accounts.is_empty() {
+                None
+            } else {
+                Some(LedgerBatch {
+                    name: name.to_owned(),
+                    accounts,
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+    if batches.is_empty() {
+        return Err(error(
+            "JE_MARK_NO_TARGET",
+            "请至少为一个批次选择目标科目。",
+            None,
+        ));
+    }
+    Ok(batches)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4362,6 +5104,57 @@ mod tests {
         fs::create_dir_all(&path).unwrap();
         path
     }
+    /// 账被按科目筛过 vs 凭证识别字段组错——两种成因的提示语完全不同，
+    /// 指错方向会让人去查一个根本不存在的映射问题。判据是单边凭证占比。
+    #[test]
+    fn tells_a_filtered_ledger_apart_from_a_wrong_voucher_key() {
+        let headers: Vec<String> = ["凭证号", "科目", "借方", "贷方"]
+            .iter()
+            .map(|x| (*x).to_string())
+            .collect();
+        let mapping = LedgerMapping {
+            id: vec!["凭证号".into()],
+            account_name: vec!["科目".into()],
+            debit: Some("借方".into()),
+            credit: Some("贷方".into()),
+            ..Default::default()
+        };
+        let build = |rows: Vec<Vec<&str>>| {
+            let rows: Vec<Vec<String>> = rows
+                .into_iter()
+                .map(|row| row.into_iter().map(str::to_string).collect())
+                .collect();
+            detect_sign_convention(&rows, &headers, &mapping, &[0])
+        };
+
+        // 只导了银行存款科目：绝大多数凭证只剩单边，另一半被筛掉了。
+        let mut filtered_rows = vec![
+            vec!["V1", "银行存款", "100", "0"],
+            vec!["V1", "银行存款", "0", "100"],
+        ];
+        for _ in 0..8 {
+            filtered_rows.push(vec!["Vx", "银行存款", "50", "0"]);
+        }
+        let mut rows = filtered_rows.clone();
+        for (i, row) in rows.iter_mut().enumerate().skip(2) {
+            row[0] = Box::leak(format!("V{}", i + 10).into_boxed_str());
+        }
+        let report = build(rows);
+        assert!(report.filtered, "单边占多数时应判为账被筛过");
+        assert!(!report.key_suspect, "不能反过来怪凭证识别字段");
+
+        // 全量账、凭证键组错：凭证被并粗，两边分录都还在，单边极少。
+        let rows = vec![
+            vec!["V1", "银行存款", "100", "0"],
+            vec!["V1", "应收账款", "0", "90"],
+            vec!["V2", "银行存款", "0", "30"],
+            vec!["V2", "管理费用", "40", "0"],
+        ];
+        let report = build(rows);
+        assert!(!report.filtered, "两边分录都在，不是被筛过");
+        assert!(report.key_suspect, "配不平且几乎没有单边，应怀疑凭证识别字段");
+    }
+
     #[test]
     fn headers_are_stable_and_unique() {
         assert_eq!(
@@ -4378,9 +5171,136 @@ mod tests {
             "贷方金额".into(),
         ]);
         assert_eq!(m.id, vec!["凭证号"]);
-        assert_eq!(m.account, vec!["科目名称"]);
+        assert_eq!(m.account_name, vec!["科目名称"]);
+        assert!(m.account_code.is_none());
         assert!(m.debit.is_some() && m.credit.is_some());
     }
+    #[test]
+    fn 缓存清理按周期跳过与执行() {
+        // 关闭时什么都不做。
+        let off = cache_sweep(json!({"mode":"off"})).expect("off 不该报错");
+        assert_eq!(off["skipped"], true);
+        assert_eq!(off["removed"], 0);
+
+        // 距上次清理不足一个周期就跳过——前端每小时来问一次也只会真跑一次。
+        let just_now = chrono::Utc::now().timestamp();
+        let fresh = cache_sweep(json!({"mode":"daily","lastCleanup":just_now}))
+            .expect("daily 不该报错");
+        assert_eq!(fresh["skipped"], true, "{fresh:?}");
+
+        // 超过一个周期就执行，并回一个新的时间戳供前端存回设置。
+        let long_ago = just_now - 30 * 86_400;
+        let due = cache_sweep(json!({"mode":"weekly","lastCleanup":long_ago}))
+            .expect("weekly 不该报错");
+        assert_eq!(due["skipped"], false, "{due:?}");
+        assert!(due["cleanedAt"].as_i64().is_some_and(|v| v >= just_now));
+        // 认不出的模式按每周处理，不能因为设置里存了脏值就不清理。
+        let fallback = cache_sweep(json!({"mode":"随便","lastCleanup":long_ago}))
+            .expect("未知模式不该报错");
+        assert_eq!(fallback["mode"], "随便");
+        assert_eq!(fallback["skipped"], false);
+    }
+
+    #[test]
+    fn 缓存统计给出文件数与占用() {
+        let stat = cache_stat(json!({})).expect("统计不该报错");
+        assert!(stat["files"].as_u64().is_some());
+        assert!(stat["bytes"].as_u64().is_some());
+        // 路径要能显示给用户，让他知道清的是哪个目录。
+        assert!(!stat["path"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn 编码前缀只比编码段不比整串() {
+        // 关键的坑：科目值是「编码-名称」拼接串，按第一个连字符切开是不行的——
+        // Oracle 的段式科目编码本身就含连字符，切出来的 `01` 毫无意义。
+        assert!(matches_code_prefix("01-1002-000", "01-1002-000-银行存款", &["01-1002".into()]));
+        assert!(matches_code_prefix("6401050002", "6401050002-营业成本-运费", &["6401".into()]));
+        // 名称里含 6401 但编码不是 6401 开头的，不该被拉进来。
+        assert!(!matches_code_prefix("2241110001", "2241110001-其他应付款-6401专项", &["6401".into()]));
+        // 多个前缀任一命中即可，大小写不敏感。
+        assert!(matches_code_prefix("AR1001", "AR1001-应收", &["6603".into(), "ar10".into()]));
+        // 没有映射编码列时退回比对显示值开头，只有名称列的账也能用。
+        assert!(matches_code_prefix("", "银行存款-中行", &["银行".into()]));
+        assert!(!matches_code_prefix("", "应收账款-A公司", &["银行".into()]));
+    }
+
+    #[test]
+    fn 前缀串按多种分隔符切开() {
+        assert_eq!(parse_code_prefixes("6401,6603"), vec!["6401", "6603"]);
+        assert_eq!(parse_code_prefixes("6401，6603；1002 2241"), vec!["6401", "6603", "1002", "2241"]);
+        assert_eq!(parse_code_prefixes("  6401  "), vec!["6401"]);
+        assert!(parse_code_prefixes("  ,  ; ").is_empty());
+    }
+
+    #[test]
+    fn 科目清单带出编码供前端做前缀匹配() {
+        let table = Table {
+            path: PathBuf::new(),
+            sheet: "S".into(),
+            sheets: vec!["S".into()],
+            headers: vec!["会计科目".into(), "科目文本".into()],
+            rows: vec![
+                vec!["6401050002".into(), "营业成本-运费".into()],
+                vec!["6603080001".into(), "销售费用-仓储".into()],
+                vec!["6401050001".into(), "营业成本-生产".into()],
+            ],
+            encoding: None,
+            delimiter: None,
+        };
+        let mapping = LedgerMapping {
+            account_code: Some("会计科目".into()),
+            account_name: vec!["科目文本".into()],
+            ..Default::default()
+        };
+        let (values, codes, total) = account_values(&table, &mapping, "", &[]);
+        assert_eq!(total, 3);
+        assert_eq!(values.len(), codes.len(), "编码与显示值必须一一对应");
+        assert!(values.iter().all(|v| v.contains('-')));
+        // 按 6401 前缀批量筛出两个明细科目。
+        let (hit, _, count) = account_values(&table, &mapping, "", &["6401".into()]);
+        assert_eq!(count, 2, "{hit:?}");
+        assert!(hit.iter().all(|v| v.starts_with("6401")));
+        // 关键词与前缀可以叠加。
+        let (both, _, n) = account_values(&table, &mapping, "生产", &["6401".into()]);
+        assert_eq!(n, 1, "{both:?}");
+    }
+
+    #[test]
+    fn 科目编码与名称各归各位() {
+        // 4800 那份 SAP 序时账的真实表头：`会计科目` 是编码，`科目文本` 是名称，
+        // 拆开之前两列都顶着「科目名称」的角色名。
+        let m = suggest_mapping(&[
+            "凭证号码".into(),
+            "会计科目".into(),
+            "科目文本".into(),
+            "预算二级科目描述".into(),
+            "本位币金额".into(),
+        ]);
+        assert_eq!(m.account_code.as_deref(), Some("会计科目"));
+        assert_eq!(m.account_name, vec!["科目文本"]);
+        // 预算科目是冲突词挡下的，绝不能拼进科目键。
+        assert!(!m.account_name.iter().any(|v| v.contains("预算")));
+        // 科目键的顺序固定：编码在前、名称在后。
+        assert_eq!(m.account_columns(), vec!["会计科目", "科目文本"]);
+    }
+
+    #[test]
+    fn 旧版混在一起的account字段仍能读出科目键() {
+        // 老草稿、老任务参数里科目是一个混合数组，反序列化后必须还能拼出同样的科目键。
+        let legacy: LedgerMapping =
+            serde_json::from_value(json!({"id":["凭证号"],"account":["科目编码","科目名称"],"amount":"金额"}))
+                .expect("旧结构可解析");
+        assert_eq!(legacy.account_columns(), vec!["科目编码", "科目名称"]);
+        assert!(validate_mapping_required(&legacy).is_ok());
+        // 新旧字段同时出现时按编码、名称的顺序去重，不会拼出重复列。
+        let mixed: LedgerMapping = serde_json::from_value(
+            json!({"id":["凭证号"],"accountCode":"科目编码","accountName":["科目名称"],"account":["科目编码","科目名称"],"amount":"金额"}),
+        )
+        .expect("混合结构可解析");
+        assert_eq!(mixed.account_columns(), vec!["科目编码", "科目名称"]);
+    }
+
     #[test]
     fn mapping_recognizes_legacy_entity_headers() {
         for header in ["单位名称", "单位", "BUKRS", "Co Code", "BusinessUnit"] {
@@ -4566,7 +5486,8 @@ mod tests {
         ];
         let mapping = LedgerMapping {
             id: vec!["凭证号".into()],
-            account: vec!["科目编码".into(), "科目名称".into()],
+            account_code: Some("科目编码".into()),
+            account_name: vec!["科目名称".into()],
             amount: Some("金额".into()),
             ..Default::default()
         };
@@ -4637,10 +5558,297 @@ mod tests {
             vec!["1".into(), "B".into(), "0".into(), "100".into()],
         ];
         let mapping = suggest_mapping(&headers);
-        let values = ledger_amounts(&rows, &headers, &mapping, &[0]);
+        let values = ledger_amounts(&rows, &headers, &mapping, &[0], None);
         assert_eq!(values.net, vec![100.0, -100.0]);
-        assert_eq!(values.matching, vec![100.0, 100.0]);
         assert!(values.allow_cross_match);
+    }
+    #[test]
+    fn je_mark_matched_pairs_net_to_zero_on_positive_credit_ledgers() {
+        // 真实脱敏样例暴露的口径错位：借贷分列且贷方为正数时，旧直接配对
+        // 口径把贷方记正数——"贷方 100 结转"与"借方 -100 红字冲销"净额同号，
+        // 却被配成计提/冲销一对，筛"已匹配"后借贷净额合计 -200 不为零。
+        let headers = vec![
+            "凭证号".into(),
+            "科目名称".into(),
+            "借方金额".into(),
+            "贷方金额".into(),
+        ];
+        let rows = vec![
+            vec!["1".into(), "A".into(), "100".into(), "".into()],
+            vec!["2".into(), "A".into(), "".into(), "100".into()],
+            vec!["3".into(), "A".into(), "-100".into(), "".into()],
+        ];
+        let mapping = suggest_mapping(&headers);
+        let amounts = ledger_amounts(&rows, &headers, &mapping, &[0], None);
+        assert_eq!(amounts.net, vec![100.0, -100.0, -100.0]);
+        let (status, pairs, cross) = match_je_rows(
+            &rows,
+            &headers,
+            &amounts,
+            &mapping,
+            &[0],
+            &[1],
+            &HashSet::from(["a".into()]),
+            &HashSet::new(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!((pairs, cross), (1, 0));
+        assert_eq!(status[0], "已匹配-计提");
+        assert_eq!(status[1], "已匹配-冲销");
+        assert_eq!(status[2], "未匹配");
+        let matched_net: f64 = status
+            .iter()
+            .enumerate()
+            .filter(|(_, value)| value.contains("已匹配"))
+            .map(|(index, _)| amounts.net[index])
+            .sum();
+        assert!((matched_net - 0.0).abs() < 0.005);
+    }
+    #[test]
+    fn sign_detection_votes_across_all_balanced_vouchers() {
+        // 两张借贷齐全的凭证都按「符号一样」配平（Σ借=Σ贷）——投票判为 unsigned。
+        let headers = vec![
+            "凭证号".into(),
+            "科目名称".into(),
+            "借方金额".into(),
+            "贷方金额".into(),
+        ];
+        let rows = vec![
+            vec!["1".into(), "A".into(), "100".into(), "".into()],
+            vec!["1".into(), "B".into(), "".into(), "100".into()],
+            vec!["2".into(), "A".into(), "30".into(), "".into()],
+            vec!["2".into(), "B".into(), "70".into(), "".into()],
+            vec!["2".into(), "C".into(), "".into(), "100".into()],
+        ];
+        let mapping = suggest_mapping(&headers);
+        let report = detect_sign_convention(&rows, &headers, &mapping, &[0]);
+        assert_eq!(report.scheme, "B");
+        assert_eq!(report.detected, Some("unsigned"));
+        assert_eq!(report.balanced_vouchers, 2);
+        assert!(!report.filtered && !report.key_suspect);
+        let amounts = ledger_amounts(&rows, &headers, &mapping, &[0], None);
+        assert_eq!(amounts.net, vec![100.0, -100.0, 30.0, 70.0, -100.0]);
+    }
+    #[test]
+    fn sign_detection_votes_signed_when_credit_column_is_negative() {
+        // 借贷齐全且 Σ原值=0——贷方带负号，判为 signed，净额即原值。
+        let headers = vec![
+            "凭证号".into(),
+            "科目名称".into(),
+            "借方金额".into(),
+            "贷方金额".into(),
+        ];
+        let rows = vec![
+            vec!["1".into(), "A".into(), "100".into(), "".into()],
+            vec!["1".into(), "B".into(), "".into(), "-100".into()],
+        ];
+        let mapping = suggest_mapping(&headers);
+        let report = detect_sign_convention(&rows, &headers, &mapping, &[0]);
+        assert_eq!(report.detected, Some("signed"));
+        let amounts = ledger_amounts(&rows, &headers, &mapping, &[0], None);
+        assert_eq!(amounts.net, vec![100.0, -100.0]);
+    }
+    #[test]
+    fn sign_detection_falls_back_when_ledger_is_filtered() {
+        // 筛过的单边账：没有借贷齐全的凭证。贷方多数为负 → 推断已带符号。
+        let headers = vec![
+            "凭证号".into(),
+            "科目名称".into(),
+            "借方金额".into(),
+            "贷方金额".into(),
+        ];
+        let rows = vec![
+            vec!["1".into(), "A".into(), "100".into(), "".into()],
+            vec!["2".into(), "A".into(), "80".into(), "".into()],
+            vec!["3".into(), "A".into(), "".into(), "-100".into()],
+            vec!["4".into(), "A".into(), "".into(), "-80".into()],
+        ];
+        let mapping = suggest_mapping(&headers);
+        let report = detect_sign_convention(&rows, &headers, &mapping, &[0]);
+        assert_eq!(report.detected, Some("signed"));
+        assert!(report.filtered);
+        assert_eq!(report.balanced_vouchers, 0);
+        let amounts = ledger_amounts(&rows, &headers, &mapping, &[0], None);
+        assert_eq!(amounts.net, vec![100.0, 80.0, -100.0, -80.0]);
+    }
+    #[test]
+    fn sign_detection_filtered_positive_credit_ledger_stays_unsigned() {
+        // 同样是筛过的账，贷方全为正（正数账）→ 推断符号一样，净额=借−贷。
+        let headers = vec![
+            "凭证号".into(),
+            "科目名称".into(),
+            "借方金额".into(),
+            "贷方金额".into(),
+        ];
+        let rows = vec![
+            vec!["1".into(), "A".into(), "100".into(), "".into()],
+            vec!["2".into(), "A".into(), "".into(), "100".into()],
+        ];
+        let mapping = suggest_mapping(&headers);
+        let report = detect_sign_convention(&rows, &headers, &mapping, &[0]);
+        assert_eq!(report.detected, Some("unsigned"));
+        assert!(report.filtered);
+        let amounts = ledger_amounts(&rows, &headers, &mapping, &[0], None);
+        assert_eq!(amounts.net, vec![100.0, -100.0]);
+    }
+    #[test]
+    fn sign_detection_cross_checks_direction_column() {
+        // 方案 A：借贷齐全凭证 Σ金额=0 → signed；无凭证时看负数落点。
+        let headers = vec![
+            "凭证号".into(),
+            "科目名称".into(),
+            "金额".into(),
+            "方向".into(),
+        ];
+        let rows = vec![
+            vec!["1".into(), "A".into(), "100".into(), "借".into()],
+            vec!["1".into(), "B".into(), "-100".into(), "贷".into()],
+        ];
+        let mapping = suggest_mapping(&headers);
+        let report = detect_sign_convention(&rows, &headers, &mapping, &[0]);
+        assert_eq!(report.scheme, "A");
+        assert_eq!(report.detected, Some("signed"));
+        let amounts = ledger_amounts(&rows, &headers, &mapping, &[0], None);
+        assert_eq!(amounts.net, vec![100.0, -100.0]);
+        // 筛过的账：负数集中在借方向（红字）→ 金额为正数、方向列区分借贷。
+        let filtered_rows = vec![
+            vec!["1".into(), "A".into(), "100".into(), "借".into()],
+            vec!["2".into(), "A".into(), "-100".into(), "借".into()],
+        ];
+        let report = detect_sign_convention(&filtered_rows, &headers, &mapping, &[0]);
+        assert!(report.filtered);
+        assert_eq!(report.detected, Some("unsigned"));
+        let amounts = ledger_amounts(&filtered_rows, &headers, &mapping, &[0], None);
+        assert_eq!(amounts.net, vec![100.0, -100.0]);
+    }
+    #[test]
+    fn sign_detection_treats_single_amount_column_as_inherently_signed() {
+        let headers = vec!["凭证号".into(), "科目名称".into(), "金额".into()];
+        let rows = vec![vec!["1".into(), "A".into(), "100".into()]];
+        let mapping = suggest_mapping(&headers);
+        let report = detect_sign_convention(&rows, &headers, &mapping, &[0]);
+        assert_eq!(report.scheme, "single");
+        assert_eq!(report.detected, Some("signed"));
+    }
+    #[test]
+    fn sign_detection_flags_suspect_voucher_keys() {
+        // 同一凭证号下塞了两张不相关的凭证（键组错）：借贷齐全却怎么都配不平。
+        let headers = vec![
+            "凭证号".into(),
+            "科目名称".into(),
+            "借方金额".into(),
+            "贷方金额".into(),
+        ];
+        let rows = vec![
+            vec!["1".into(), "A".into(), "100".into(), "".into()],
+            vec!["1".into(), "B".into(), "".into(), "70".into()],
+        ];
+        let mapping = suggest_mapping(&headers);
+        let report = detect_sign_convention(&rows, &headers, &mapping, &[0]);
+        assert_eq!(report.unbalanced_vouchers, 1);
+        assert!(report.key_suspect);
+    }
+    #[test]
+    fn sign_override_beats_detection() {
+        // 正数账被用户指定为「已带符号」：净额不再做借−贷换算。
+        let headers = vec![
+            "凭证号".into(),
+            "科目名称".into(),
+            "借方金额".into(),
+            "贷方金额".into(),
+        ];
+        let rows = vec![
+            vec!["1".into(), "A".into(), "100".into(), "".into()],
+            vec!["1".into(), "B".into(), "".into(), "100".into()],
+        ];
+        let mapping = suggest_mapping(&headers);
+        let amounts = ledger_amounts(
+            &rows,
+            &headers,
+            &mapping,
+            &[0],
+            Some(SignConvention::Signed),
+        );
+        assert_eq!(amounts.net, vec![100.0, 100.0]);
+    }
+    #[test]
+    fn je_mark_export_detects_filtered_signed_ledger_and_echoes_convention() {
+        // 筛过的账：凭证全是单边行，贷方带负号。兜底判「已带符号」，
+        // 配对照常对平，结果里如实回显口径与"账被筛过"。
+        let root = temp_dir("je-mark-sign-filtered");
+        let input = root.join("ledger.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,借方金额,贷方金额
+1,预提费用,100,
+2,预提费用,80,
+3,预提费用,,-100
+4,预提费用,,-80
+",
+        )
+        .unwrap();
+        let output = root.join("marked.csv");
+        let value = export_je_mark(
+            json!({"inputPath":input,"outputPath":output,
+                "targetBatches":[{"name":"预提","accounts":["预提费用"]}]}),
+            &|_, _, _, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let sign = &value["signConvention"];
+        assert_eq!(sign["scheme"], "B");
+        assert_eq!(sign["choice"], "auto");
+        assert_eq!(sign["detected"], "signed");
+        assert_eq!(sign["applied"], "signed");
+        assert_eq!(sign["filtered"], true);
+        assert_eq!(value["batches"][0]["matchedPairs"], 2);
+        assert_eq!(value["batches"][0]["unmatchedRows"], 0);
+        let rows = read_marked_csv(&output);
+        // 核销口径与符号列一致：Σ(绝对值×符号)。「已带符号」的账上借贷两列
+        // 都带着负号，借−贷会把冲销行算两遍，不能用那个口径核对。
+        let matched_net: f64 = rows[1..]
+            .iter()
+            .filter(|row| row[2].contains("已匹配"))
+            .map(|row| {
+                let abs: f64 = row[0].trim().parse().unwrap_or(0.0);
+                if row[1] == "负数" {
+                    -abs
+                } else {
+                    abs
+                }
+            })
+            .sum();
+        assert!(matched_net.abs() < 0.005);
+    }
+    #[test]
+    fn je_mark_export_honors_manual_sign_convention() {
+        // 同一份筛过的账被指定「借贷符号一样」：贷方负数按借−贷折成正值，
+        // 全表无配平对，applied 如实回显用户的选择。
+        let root = temp_dir("je-mark-sign-override");
+        let input = root.join("ledger.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,借方金额,贷方金额
+1,预提费用,100,
+2,预提费用,,-100
+",
+        )
+        .unwrap();
+        let output = root.join("marked.csv");
+        let value = export_je_mark(
+            json!({"inputPath":input,"outputPath":output,"signConvention":"unsigned",
+                "targetBatches":[{"name":"预提","accounts":["预提费用"]}]}),
+            &|_, _, _, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let sign = &value["signConvention"];
+        assert_eq!(sign["choice"], "unsigned");
+        assert_eq!(sign["detected"], "signed");
+        assert_eq!(sign["applied"], "unsigned");
+        assert_eq!(value["batches"][0]["matchedPairs"], 0);
+        assert_eq!(value["batches"][0]["unmatchedRows"], 2);
     }
     #[test]
     fn loss_transfer_marks_whole_voucher_and_is_excluded_from_types() {
@@ -4812,14 +6020,13 @@ mod tests {
             .collect::<HashSet<_>>();
         let mapping = LedgerMapping {
             id: vec!["凭证号".into()],
-            account: vec!["科目名称".into()],
+            account_name: vec!["科目名称".into()],
             entity: Some("公司".into()),
             date: Some("记账日期".into()),
             summary: Some("ZY".into()),
-            amount: None,
-            direction: None,
             debit: Some("借方".into()),
             credit: Some("贷方".into()),
+            ..Default::default()
         };
         let infos = voucher_infos(
             &rows,
@@ -4970,14 +6177,11 @@ mod tests {
             .collect::<Vec<_>>();
         let mapping = LedgerMapping {
             id: vec!["凭证号".into()],
-            account: vec!["科目名称".into()],
-            entity: None,
-            date: None,
+            account_name: vec!["科目名称".into()],
             summary: Some("ZY".into()),
-            amount: None,
-            direction: None,
             debit: Some("借方".into()),
             credit: Some("贷方".into()),
+            ..Default::default()
         };
         let infos = voucher_infos(
             &rows,
@@ -5088,7 +6292,7 @@ mod tests {
             vec!["1".into(), "A".into(), "100".into()],
             vec!["2".into(), "A".into(), "-100".into()],
         ];
-        let direct_amounts = ledger_amounts(&direct_rows, &headers, &mapping, &[0]);
+        let direct_amounts = ledger_amounts(&direct_rows, &headers, &mapping, &[0], None);
         let (status, pairs, cross) = match_je_rows(
             &direct_rows,
             &headers,
@@ -5108,7 +6312,7 @@ mod tests {
             vec!["1".into(), "A".into(), "40".into()],
             vec!["2".into(), "A".into(), "-100".into()],
         ];
-        let cross_amounts = ledger_amounts(&cross_rows, &headers, &mapping, &[0]);
+        let cross_amounts = ledger_amounts(&cross_rows, &headers, &mapping, &[0], None);
         let (status, pairs, cross) = match_je_rows(
             &cross_rows,
             &headers,
@@ -5123,6 +6327,195 @@ mod tests {
         .unwrap();
         assert_eq!((pairs, cross), (0, 1));
         assert!(status.iter().all(|value| value.starts_with("跨行已匹配")));
+    }
+    /// 读回导出的 CSV：去掉 BOM，按行拆成单元格。
+    fn read_marked_csv(path: &Path) -> Vec<Vec<String>> {
+        let text = fs::read_to_string(path).unwrap();
+        let text = text.trim_start_matches('\u{feff}');
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| line.split(',').map(str::to_owned).collect())
+            .collect()
+    }
+    #[test]
+    fn je_mark_exports_whole_vouchers_and_marks_only_target_rows() {
+        let root = temp_dir("je-mark-detail");
+        let input = root.join("ledger.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,金额,部门
+1,预提费用,100,生产部
+1,银行存款,-100,生产部
+2,预提费用,-100,销售部
+2,银行存款,100,销售部
+",
+        )
+        .unwrap();
+        let output = root.join("marked.csv");
+        let value = export_je_mark(
+            json!({"inputPath":input,"outputPath":output,
+                "targetBatches":[{"name":"预提","accounts":["预提费用"]}]}),
+            &|_, _, _, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(value["batches"][0]["matchedPairs"], 1);
+        assert_eq!(value["batches"][0]["unmatchedRows"], 0);
+        let rows = read_marked_csv(&output);
+        // 辅助列在最前，损益结转列已随功能一并移除。
+        assert_eq!(
+            rows[0][..4].to_vec(),
+            vec![
+                "【辅助_绝对值】",
+                "【辅助_符号】",
+                "【智能匹配状态】",
+                "凭证号"
+            ]
+        );
+        // 对方科目行照常输出——凭证是完整的，只是三列留空。
+        assert_eq!(rows.len(), 5);
+        let by_account = |account: &str| {
+            rows.iter()
+                .filter(|row| row[4] == account)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let target = by_account("预提费用");
+        assert_eq!(target.len(), 2);
+        assert_eq!(target[0][1], "正数");
+        assert_eq!(target[0][2], "已匹配-计提");
+        assert_eq!(target[1][1], "负数");
+        assert_eq!(target[1][2], "已匹配-冲销");
+        let other = by_account("银行存款");
+        assert_eq!(other.len(), 2);
+        assert!(
+            other
+                .iter()
+                .all(|row| row[..3].iter().all(String::is_empty))
+        );
+    }
+    #[test]
+    fn je_mark_column_filters_keep_vouchers_whole() {
+        let root = temp_dir("je-mark-filter");
+        let input = root.join("ledger.csv");
+        // 对方科目行的部门留空：按行筛会把它裁掉、凭证失衡，按凭证筛则整张保留。
+        fs::write(
+            &input,
+            "凭证号,科目名称,金额,部门
+1,预提费用,100,生产部
+1,银行存款,-100,
+2,预提费用,-100,销售部
+2,银行存款,100,销售部
+",
+        )
+        .unwrap();
+        let output = root.join("marked.csv");
+        export_je_mark(
+            json!({"inputPath":input,"outputPath":output,
+                "targetBatches":[{"name":"预提","accounts":["预提费用"]}],
+                "columnFilters":[{"field":"部门","values":["生产部"]}]}),
+            &|_, _, _, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let rows = read_marked_csv(&output);
+        assert_eq!(rows.len(), 3, "只应保留凭证 1 的完整两行：{rows:?}");
+        assert!(rows[1..].iter().all(|row| row[3] == "1"));
+    }
+    #[test]
+    fn je_mark_does_not_exclude_profit_transfer_vouchers() {
+        let root = temp_dir("je-mark-loss");
+        let input = root.join("ledger.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,金额
+1,管理费用,100
+1,银行存款,-100
+2,管理费用,-100
+2,本年利润,100
+",
+        )
+        .unwrap();
+        let output = root.join("marked.csv");
+        let value = export_je_mark(
+            json!({"inputPath":input,"outputPath":output,
+                "targetBatches":[{"name":"管理费用","accounts":["管理费用"]}]}),
+            &|_, _, _, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        // 看账会把含本年利润的整张凭证挡在匹配外，这里照常配对——损益结转识别已移除。
+        assert_eq!(value["batches"][0]["matchedPairs"], 1);
+        let rows = read_marked_csv(&output);
+        let statuses = rows[1..]
+            .iter()
+            .filter(|row| row[4] == "管理费用")
+            .map(|row| row[2].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(statuses, vec!["已匹配-计提", "已匹配-冲销"]);
+    }
+    #[test]
+    fn je_mark_requires_a_target_batch() {
+        let root = temp_dir("je-mark-empty");
+        let input = root.join("ledger.csv");
+        fs::write(&input, "凭证号,科目名称,金额\n1,预提费用,100\n").unwrap();
+        let error = export_je_mark(
+            json!({"inputPath":input,"targetBatches":[{"name":"批次1","accounts":[]}]}),
+            &|_, _, _, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "JE_MARK_NO_TARGET");
+    }
+    #[test]
+    fn je_mark_multi_batches_write_one_file_each() {
+        let root = temp_dir("je-mark-batches");
+        let input = root.join("ledger.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,金额
+1,预提费用,100
+1,银行存款,-100
+2,应付账款,-50
+2,银行存款,50
+",
+        )
+        .unwrap();
+        let output = root.join("marked.csv");
+        let value = export_je_mark(
+            json!({"inputPath":input,"outputPath":output,
+                "targetBatches":[
+                    {"name":"预提","accounts":["预提费用"]},
+                    {"name":"应付","accounts":["应付账款"]}]}),
+            &|_, _, _, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let outputs = value["outputPaths"].as_array().unwrap();
+        assert_eq!(outputs.len(), 2, "{outputs:?}");
+        assert!(outputs[1].as_str().unwrap().contains("应付"));
+    }
+    #[test]
+    fn je_mark_column_values_lists_any_column() {
+        let root = temp_dir("je-mark-values");
+        let input = root.join("ledger.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,部门\n1,预提费用,生产部\n2,预提费用,\n3,预提费用,销售部\n",
+        )
+        .unwrap();
+        let value =
+            kanzhang_column_values(json!({"inputPath":input,"field":"部门","limit":10})).unwrap();
+        let values = value["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item.as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        // 空值以 <空白> 呈现，勾选它等价于筛空值行——与 TS 的列筛选同一口径。
+        assert!(values.contains(&"<空白>".to_owned()), "{values:?}");
+        assert!(values.contains(&"生产部".to_owned()));
+        assert_eq!(value["truncated"], false);
     }
     #[test]
     fn kanzhang_pivot_value_fields_are_selectable() {
@@ -5233,7 +6626,7 @@ mod tests {
         let input = root.join("ledger.csv");
         let output = root.join("result.xlsx");
         fs::write(&input,"凭证号,日期,摘要,科目名称,借方金额,贷方金额\n1,2026-01-10,销售,收入,100,0\n1,2026-01-10,销售,银行,0,100\n2,2026-02-10,采购,成本,50,0\n2,2026-02-10,采购,银行,0,50\n").unwrap();
-        let result=export_kanzhang(json!({"inputPath":input,"outputPath":output,"targetBatches":[{"name":"收入","accounts":["收入"]},{"name":"成本","accounts":["成本"]}],"excludeAccounts":["银行"],"includePivot":true,"includeVoucherTypes":true,"markLossTransfer":true,"enableJeMatching":true,"pivotRows":["科目名称"],"pivotColumns":["日期"]}),&|_,_,_,_|{},&AtomicBool::new(false)).unwrap();
+        let result=export_kanzhang(json!({"inputPath":input,"outputPath":output,"targetBatches":[{"name":"收入","accounts":["收入"]},{"name":"成本","accounts":["成本"]}],"excludeAccounts":["银行"],"includePivot":true,"includeVoucherTypes":true,"markLossTransfer":true,"pivotRows":["科目名称"],"pivotColumns":["日期"]}),&|_,_,_,_|{},&AtomicBool::new(false)).unwrap();
         assert_eq!(result["batchCount"], 2);
         assert!(output.exists());
         assert!(root.join("result_成本_02.xlsx").exists());
@@ -5263,7 +6656,7 @@ mod tests {
     }
 
     #[test]
-    fn kanzhang_detail_puts_aux_columns_first_and_only_fills_target_rows() {
+    fn kanzhang_detail_keeps_only_the_loss_transfer_aux_column() {
         let root = temp_dir("kanzhang-aux-columns");
         let input = root.join("ledger.csv");
         let output = root.join("out.csv");
@@ -5278,7 +6671,7 @@ mod tests {
             json!({"inputPath":input,"outputPath":output,
                 "targetBatches":[{"name":"收入","accounts":["收入"]}],
                 "includePivot":false,"includeVoucherTypes":false,
-                "markLossTransfer":true,"enableJeMatching":true,"llmAnalysis":false}),
+                "markLossTransfer":true,"llmAnalysis":false}),
             &|_, _, _, _| {},
             &AtomicBool::new(false),
         )
@@ -5286,26 +6679,22 @@ mod tests {
         let text = fs::read_to_string(root.join("out_凭证明细.csv")).unwrap();
         let mut lines = text.lines();
         let header = lines.next().unwrap().trim_start_matches('\u{feff}');
-        // 旧版辅助列在最前，顺序固定为 绝对值 / 符号 / 匹配状态 / 损益结转。
+        // 辅助列仍在最前，但绝对值/符号/智能匹配状态三列已剪到「正负数智能标记」，
+        // 看账只剩损益结转一列。
         assert!(
-            header.starts_with(
-                "【辅助_绝对值】,【辅助_符号】,【智能匹配状态】,【损益结转】,公司,记账日期,凭证号,科目名称"
-            ),
+            header.starts_with("【损益结转】,公司,记账日期,凭证号,科目名称"),
             "{header}"
         );
+        for column in ["【辅助_绝对值】", "【辅助_符号】", "【智能匹配状态】"]
+        {
+            assert!(!header.contains(column), "看账不该再有 {column}：{header}");
+        }
         let rows = lines
             .map(|line| line.split(',').map(str::to_owned).collect::<Vec<_>>())
             .collect::<Vec<_>>();
-        let target = rows.iter().find(|r| r[7] == "收入").unwrap();
-        let other = rows.iter().find(|r| r[7] == "银行").unwrap();
-        // 目标科目行有绝对值和符号；非目标科目行三列都留空，与旧版一致。
-        assert_eq!(&target[1], "负数", "{target:?}");
-        assert!(!target[0].is_empty() && !target[2].is_empty(), "{target:?}");
-        assert_eq!(
-            (&other[0][..], &other[1][..], &other[2][..]),
-            ("", "", ""),
-            "{other:?}"
-        );
+        // 命中目标科目的整张凭证照常输出，对方科目行也在。
+        assert!(rows.iter().any(|r| r[4] == "收入"));
+        assert!(rows.iter().any(|r| r[4] == "银行"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -5548,13 +6937,14 @@ mod tests {
             json!({"inputPath":input,"outputPath":output,
                 "targetBatches":[{"name":"成本","accounts":["主营业务成本_自营_收销成本_二手车代销成本_居间成本"]}],
                 "includePivot":false,"includeVoucherTypes":false,"llmAnalysis":false,
-                "markLossTransfer":true,"enableJeMatching":true}),
+                "markLossTransfer":true}),
             &|_, _, _, _| {},
             &AtomicBool::new(false),
         )
         .unwrap();
         let xml = read_sheet_xml(&output, "xl/worksheets/sheet1.xml");
-        // 列宽自适应：长科目名那一列（第 8 列，0 基第 7）应明显宽于默认
+        // 列宽自适应：长科目名那一列应明显宽于默认。辅助列只剩【损益结转】后
+        // 它落在第 5 列（1 基）。
         let widths = xml
             .split("<col ")
             .skip(1)
@@ -5576,7 +6966,7 @@ mod tests {
                 Some((min, width))
             })
             .collect::<Vec<_>>();
-        let account_width = widths.iter().find(|(min, _)| *min == 8).map(|(_, w)| *w);
+        let account_width = widths.iter().find(|(min, _)| *min == 5).map(|(_, w)| *w);
         assert!(
             account_width.is_some_and(|width| width > 40.0),
             "科目名称列应按内容加宽，实际 {widths:?}"

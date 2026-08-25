@@ -7,6 +7,18 @@ export type ToolDefinition = { intro: string; fields: FieldDefinition[]; actions
 
 const excel = ["xlsx", "xls", "xlsm", "csv"];
 export const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
+  deposit_interest: {
+    intro: "识别货币资金科目，按序时账还原逐月余额，以月均余额乘存款利率重算利息并与 TB 利息收入勾稽。",
+    fields: [], actions: [{label:"生成Excel底稿",method:"deposit.export",mode:"job",tone:"primary"}]
+  },
+  loan_interest: {
+    intro: "以完整借款台账或 TB＋JE 重建的本金变动表为基准，重新测算借款利息。",
+    fields: [], actions: [{label:"生成Excel底稿",method:"loan.export",mode:"job",tone:"primary"}]
+  },
+  fuzzy_match: {
+    intro: "对两列公司名称/人名/地址/通用文本做模糊匹配核对，高相似度自动采纳、疑似项人工确认后导出底稿。",
+    fields: [], actions: [{label:"导出Excel",method:"fuzzy.export",mode:"job",tone:"primary"}]
+  },
   fx_audit: {
     intro: "使用官方人民币汇率中间价重算已实现及未实现汇兑损益，并生成可追踪审计底稿。",
     fields: [], actions: [{label:"生成Excel底稿",method:"fx.export",mode:"job",tone:"primary"}]
@@ -19,6 +31,15 @@ export const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
     ], actions: [
       {label:"扫描预览",method:"file_list.scan",mode:"call",tone:"secondary"},
       {label:"生成文件清单",method:"file_list.export",mode:"job",tone:"primary"}
+    ]
+  },
+  pdf_to_excel: {
+    intro: "批量把文字版回函 PDF 逐行转成 Excel，并自动提取回函中的表格。",
+    fields: [
+      {key:"pdfPaths",label:"回函 PDF",kind:"files",required:true,extensions:["pdf"]},
+      {key:"outputDir",label:"输出文件夹",kind:"folder"}
+    ], actions: [
+      {label:"开始转换",method:"pdf2excel.convert",mode:"job",tone:"primary"}
     ]
   },
   wp_service_generator: {
@@ -59,6 +80,14 @@ export const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
       {key:"outputPath",label:"输出文件",kind:"save",extensions:["xlsx"]}
     ], actions:[{label:"读取结构",method:"fa.inspect",mode:"call",tone:"secondary"},{label:"匹配预览",method:"fa.match",mode:"job",tone:"primary"}]
   },
+  fa_dep_calc: {
+    intro: "上传期末固定资产清单，逐卡重算折旧并生成带活公式的折旧测算表。",
+    fields: [], actions: [{label:"生成折旧测算表",method:"fa.dep_export",mode:"job",tone:"primary"}]
+  },
+  fa_policy_compare: {
+    intro: "匹配期初与期末清单，对比两期折旧政策并附税法最低折旧年限参考。",
+    fields: [], actions: [{label:"生成折旧政策对比",method:"fa.policy_export",mode:"job",tone:"primary"}]
+  },
   ts_manager: {
     intro: "加载 Timesheet 数据，配置筛选条件并按经理、项目或自定义字段透视。",
     fields:[
@@ -75,6 +104,14 @@ export const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
       {key:"sheet",label:"Sheet",kind:"text"},{key:"headerRow",label:"标题行（从1开始）",kind:"text",placeholder:"1"},
       {key:"outputDir",label:"输出目录",kind:"folder"}
     ], actions:[{label:"读取并自动映射",method:"kanzhang.inspect",mode:"call",tone:"secondary"},{label:"生成预览",method:"kanzhang.filter",mode:"job",tone:"primary"}]
+  },
+  je_sign_mark: {
+    intro: "加载凭证、确认字段映射，按批次选定目标科目，导出带正负数智能匹配标记的完整凭证明细。",
+    fields:[
+      {key:"inputPath",label:"凭证文件",kind:"file",required:true,extensions:[...excel,"parquet","txt"]},
+      {key:"sheet",label:"Sheet",kind:"text"},{key:"headerRow",label:"标题行（从1开始）",kind:"text",placeholder:"1"},
+      {key:"outputPath",label:"输出文件",kind:"file"}
+    ], actions:[{label:"读取并自动映射",method:"kanzhang.mark_inspect",mode:"job",tone:"secondary"},{label:"标记并导出",method:"kanzhang.mark_export",mode:"job",tone:"primary"}]
   },
   audit_roll_forward: {
     intro: "将上年度标准底稿结转到本年度，迁移期初、公式、措辞和 CRA 信息。",

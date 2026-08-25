@@ -118,6 +118,14 @@
 .kz-search input {
   flex: 1;
 }
+.kz-search {
+  flex-wrap: wrap;
+}
+/* 编码前缀框装的是 6401,6603 这种短串，不该和关键词框平分宽度。 */
+.kz-search input.kz-code-prefix {
+  flex: 0 1 16rem;
+  min-width: 10rem;
+}
 .kz-two,
 .kz-map,
 .kz-options {

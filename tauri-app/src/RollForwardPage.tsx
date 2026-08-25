@@ -530,7 +530,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
   }
   async function exportProject() {
     if (!project) return;
-    const outputPath = await pickPath("save", "导出 Audit Roll Forward 项目", [
+    const outputPath = await pickPath("save", "导出 WP Roll Forward 项目", [
       "auditproj",
       "json",
     ]);

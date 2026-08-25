@@ -245,8 +245,16 @@ summary:focus-visible {
 .tool-nav {
   margin-top: var(--sp-5);
 }
-.nav-caption {
+/* 一级分组标题要"退后"：压暗颜色、缩小字号，让人一眼看出它是分区标签
+   而不是可点击的工具行。上方共享的 accent 绿只留给品牌区/页头用。 */
+.tool-nav .nav-caption {
   padding: 0 var(--sp-3) var(--sp-2);
+  color: var(--on-dark-faint);
+}
+/* 从第二个分组起，标题上方加一条细分隔线，强化分区感 */
+.tool-group + .tool-group .nav-caption {
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--sidebar-border);
 }
 .sidebar-footer {
   margin-top: auto;
@@ -1847,7 +1855,8 @@ summary:focus-visible {
   color: var(--label);
   padding: 0 var(--sp-1);
 }
-/* 已映射到角色的列下拉：高亮提示 */
+/* 已映射到角色的列下拉：高亮提示。一列可以承担多个语义
+   （科目名称同时是币种线索），合起来时下拉框里直接显示「A ＋ B」。 */
 .data-table-table th .dt-header-control select.mapped {
   border-color: var(--brand-accent);
   background: var(--success-bg);
@@ -2059,6 +2068,59 @@ summary:focus-visible {
   margin-top: var(--sp-4);
 }
 
+/* "FA底稿生成"可折叠子分组：分组头是按钮（加粗提亮区别于普通工具行），
+   子项整体缩进并挂在一条连续竖线下，从属关系一眼可辨 */
+.tool-subgroup {
+  display: grid;
+  gap: var(--sp-1);
+}
+.tool-subgroup-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-inverse);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tool-subgroup-toggle:hover {
+  background: var(--brand-soft);
+  color: var(--on-brand-soft, #fff);
+}
+.tool-subgroup-chevron {
+  margin-left: auto;
+  color: var(--on-dark-faint);
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+.tool-subgroup-chevron.open {
+  transform: rotate(90deg);
+}
+/* 子项容器：缩进到分组头徽标中心下方，左侧竖线把所有子项串成一支 */
+.tool-subgroup-items {
+  display: grid;
+  gap: var(--sp-1);
+  margin-left: 25px;
+  padding-left: var(--sp-2);
+  border-left: 2px solid var(--sidebar-border);
+}
+/* 子项比父级工具行小一号、颜色稍淡，表达层级从属 */
+.sidebar a.tool-subgroup-link {
+  font-size: var(--fs-sm);
+  color: var(--on-dark-muted);
+}
+.tool-subgroup-link .tool-badge {
+  width: 22px;
+  height: 22px;
+}
+
 /* AudiPick 处理工作日志 */
 .worklog-list {
   display: grid;
@@ -2191,4 +2253,14 @@ summary:focus-visible {
   .ap-template-lib > .form-card:last-child {
     position: static;
   }
+}
+
+/* ── 设置页 · 本地缓存 ─────────────────────────────── */
+.cache-usage {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.cache-result {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
 }

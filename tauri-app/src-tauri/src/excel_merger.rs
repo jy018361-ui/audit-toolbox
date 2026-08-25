@@ -85,7 +85,8 @@ impl PauseCheckpoint {
         }
     }
 
-    #[cfg(test)]
+    /// 永不暂停的检查点（标记文件指向绝不存在的随机临时路径）。
+    /// 单测与 fuzzy_match::run_job_for_test（集成测试进程内直连）共用。
     pub(crate) fn unpaused(cancel: Arc<AtomicBool>) -> Self {
         Self::new(
             std::env::temp_dir().join(format!(
@@ -232,6 +233,27 @@ impl ExcelMergerService {
                 .into_owned(),
         };
         let mut command = match std::env::current_exe() {
+            // 重任务靠"再启动一份自己"来跑。程序文件在运行期间被移走或重新构建过时
+            // （开发机上很常见），这里会失败——直接说清楚该怎么办，
+            // 否则用户只看到"无法启动"，无从下手。
+            Ok(exe) if !exe.is_file() => {
+                self.emit(event_for(
+                    worker_tool_id,
+                    &job_id,
+                    "failed",
+                    1,
+                    1,
+                    "程序文件已不在原位置，无法启动后台任务进程。这通常是应用运行期间被重新构建或移动过，请关闭并重新打开审计工具箱。",
+                    "error",
+                    Vec::new(),
+                    Some(json!({
+                        "code": "WORKER_EXE_MISSING",
+                        "detail": exe.to_string_lossy(),
+                    })),
+                ));
+                self.finish(&job_id, &cancel_path);
+                return;
+            }
             Ok(exe) => {
                 let mut command = Command::new(exe);
                 command.arg("--rust-table-worker");
@@ -421,15 +443,26 @@ fn is_supported_job_method(method: &str) -> bool {
             | "kanzhang.filter"
             | "kanzhang.pivot"
             | "kanzhang.export"
+            | "kanzhang.mark_inspect"
+            | "kanzhang.mark_export"
             | "audipick.batch_extract"
             | "fa.match"
             | "fa.preview"
             | "fa.export"
+            | "fa.dep_export"
+            | "fa.policy_export"
             | "roll_forward.process"
             | "roll_forward.process_companies"
             | "fx.fetch_rates"
             | "fx.preview"
             | "fx.export"
+            | "loan.preview"
+            | "loan.export"
+            | "deposit.preview"
+            | "deposit.export"
+            | "pdf2excel.convert"
+            | "fuzzy.match"
+            | "fuzzy.export"
     )
 }
 
@@ -480,10 +513,16 @@ pub fn worker_main() -> i32 {
         "Rust WP 服务单引擎正在生成…"
     } else if request.method == "confirmation.process" {
         "Rust 函证统计引擎正在处理…"
+    } else if request.method == "fa.dep_export" {
+        "Rust 固定资产折旧测算引擎正在处理…"
+    } else if request.method == "fa.policy_export" {
+        "Rust 固定资产折旧政策对比引擎正在处理…"
     } else if request.method.starts_with("fa.") {
         "Rust FA List 引擎正在处理…"
     } else if request.method.starts_with("roll_forward.") {
-        "Rust Audit Roll Forward 引擎正在处理…"
+        "Rust WP Roll Forward 引擎正在处理…"
+    } else if request.method.starts_with("fuzzy.") {
+        "Rust 两列匹配引擎正在处理…"
     } else {
         "Rust Polars 表格引擎正在处理…"
     };
@@ -521,6 +560,20 @@ pub fn worker_main() -> i32 {
         crate::roll_forward::run_job(&request.method, request.params, &progress, cancel, &pause)
     } else if request.method.starts_with("fx.") {
         crate::fx::run_job(&request.method, request.params, &progress, cancel, &pause)
+    } else if request.method.starts_with("deposit.") {
+        crate::deposit_interest::run_job(&request.method, request.params, &progress, cancel, &pause)
+    } else if request.method.starts_with("loan.") {
+        crate::loan_interest::run_job(&request.method, request.params, &progress, cancel, &pause)
+    } else if request.method.starts_with("pdf2excel.") {
+        crate::pdf_to_excel::run_job(&request.method, request.params, &progress, cancel, &pause)
+    } else if request.method.starts_with("fuzzy.") {
+        // 匹配结果按 jobId 落本机结果库（导出与跨会话恢复都靠它），worker 拿
+        // 不到 Tauri state，这里把 WorkerRequest 自带的 jobId 注入 params。
+        let mut params = request.params;
+        if let Value::Object(ref mut map) = params {
+            map.insert("__jobId".into(), json!(job_id));
+        }
+        crate::fuzzy_match::run_job(&request.method, params, &progress, cancel, &pause)
     } else {
         crate::tabular::run_job(&request.method, request.params, &progress, cancel, &pause)
     };
@@ -604,16 +657,30 @@ fn tool_id(method: &str) -> &'static str {
         "file_list_directory"
     } else if method.starts_with("ts.") {
         "ts_manager"
+    } else if method.starts_with("kanzhang.mark_") {
+        "je_sign_mark"
     } else if method.starts_with("kanzhang.") {
         "kanzhang"
     } else if method.starts_with("audipick.") {
         "audipick"
+    } else if method.starts_with("fa.dep_") {
+        "fa_dep_calc"
+    } else if method.starts_with("fa.policy_") {
+        "fa_policy_compare"
     } else if method.starts_with("fa.") {
         "fa_list"
     } else if method.starts_with("roll_forward.") {
         "audit_roll_forward"
     } else if method.starts_with("fx.") {
         "fx_audit"
+    } else if method.starts_with("deposit.") {
+        "deposit_interest"
+    } else if method.starts_with("loan.") {
+        "loan_interest"
+    } else if method.starts_with("pdf2excel.") {
+        "pdf_to_excel"
+    } else if method.starts_with("fuzzy.") {
+        "fuzzy_match"
     } else {
         "Excel_Merger"
     }
@@ -1956,6 +2023,33 @@ mod tests {
         }
         assert_eq!(tool_id("fa.unknown"), "fa_list");
         assert!(!is_supported_job_method("fa.unknown"));
+    }
+
+    /// 正负数智能标记复用 kanzhang. 前缀（读取、科目取值都是同一套），
+    /// 但它的 job 事件必须走自己的 toolId，否则会被看账页面接走。
+    #[test]
+    fn je_mark_jobs_route_to_their_own_tool() {
+        for method in ["kanzhang.mark_inspect", "kanzhang.mark_export"] {
+            assert_eq!(tool_id(method), "je_sign_mark");
+            assert!(is_supported_job_method(method));
+        }
+        // 看账自己的方法不能被 mark_ 分支顺手带走。
+        for method in ["kanzhang.inspect", "kanzhang.filter", "kanzhang.export"] {
+            assert_eq!(tool_id(method), "kanzhang");
+        }
+        assert!(!is_supported_job_method("kanzhang.mark_unknown"));
+    }
+
+    /// FA 子工具的 job 事件必须路由到各自的页面（useJobEvents 按 toolId 过滤），
+    /// 不能落进 fa. 前缀兜底被当成 fa_list。
+    #[test]
+    fn fa_subtool_jobs_route_to_their_own_tools() {
+        assert_eq!(tool_id("fa.dep_export"), "fa_dep_calc");
+        assert!(is_supported_job_method("fa.dep_export"));
+        assert_eq!(tool_id("fa.policy_export"), "fa_policy_compare");
+        assert!(is_supported_job_method("fa.policy_export"));
+        // 主工具路由不受影响。
+        assert_eq!(tool_id("fa.preview"), "fa_list");
     }
 
     #[test]

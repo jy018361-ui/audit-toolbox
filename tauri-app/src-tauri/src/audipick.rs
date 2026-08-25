@@ -2,7 +2,7 @@ use reqwest::blocking::Client;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -309,13 +309,34 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
         .and_then(Value::as_str)
         .unwrap_or("mapping");
     let payload = params.get("payload").cloned().unwrap_or_else(|| json!({}));
-    let prompt = if mode == "analysis" {
-        "你是审计看账分析助手。只依据输入的汇总数据，输出严格 JSON：{title:string,sections:[{heading:string,points:[{label:string,text:string}]}],review_notes:[string]}。范围仅限科目发生额、主要对方科目、凭证类型和月度波动；不得虚构凭证、金额或审计结论。"
+    const ANALYSIS: &str = "你是审计看账分析助手。只依据输入的汇总数据，输出严格 JSON：{title:string,sections:[{heading:string,points:[{label:string,text:string}]}],review_notes:[string]}。范围仅限科目发生额、主要对方科目、凭证类型和月度波动；不得虚构凭证、金额或审计结论。";
+    let mapping_prompt;
+    let prompt: &str = if mode == "analysis" {
+        ANALYSIS
     } else {
-        kanzhang_mapping_prompt()
+        mapping_prompt = kanzhang_mapping_prompt();
+        &mapping_prompt
+    };
+    // 看账只读序时账，也不看原币口径——把能用的角色写进 payload，
+    // 模型就不会建议 voucherType、foreignAmount 这些本工具消费不了的角色。
+    let payload = if mode == "analysis" {
+        payload
+    } else {
+        let mut value = payload;
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "availableRoles".into(),
+                json!([
+                    "id", "accountCode", "accountName", "entity", "date", "summary",
+                    "functionalAmount", "direction", "functionalDebit", "functionalCredit"
+                ]),
+            );
+        }
+        inject_current_form(&mut value, "je");
+        value
     };
     let content = request_llm(llm, prompt, &payload.to_string(), None)?;
-    let value = parse_json_content(&content);
+    let mut value = parse_json_content(&content);
     if !value.is_object() {
         return Err(error(
             "LLM_RESPONSE_INVALID",
@@ -323,7 +344,90 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
             None,
         ));
     }
+    if mode != "analysis" {
+        // 与汇兑损益共用同一套卫生过滤，不再各写一份。
+        sanitize_mapping_changes(&mut value, &payload, "je");
+    }
     Ok(value)
+}
+
+/// 两张表共用的复核纪律。**只放对 TB 与 JE 都成立的规则**——
+/// 各自的角色清单与形态规则分别放在 [`REVIEW_JE`] 与 [`REVIEW_TB`] 里，
+/// 免得复核一张表时眼前摆着另一张表的规矩。
+const REVIEW_COMMON: &str = "只能使用输入 availableRoles 中列出的角色——它是本工具启用的角色清单，没列出的角色即使表里有对应的列也不要提。输入的 currentForm 是脚本按整组匹配判出的账表形态。**complete 为 true 时，构成该形态的那些槽位已经成立，一律不要改动**——净额列里是正数还是自带正负号都不影响判定，借贷符号口径由数据配平判定，不由列名判定；表里另有一列看起来更像净额，也不构成改动理由。**两种映射都能成立时一律维持现状，不要为了让它更好看而改**。complete 为 false 时，优先补齐 currentForm.missingSlots 里点名缺失的槽位。除此之外，必须主动补齐 currentMapping 中缺失、但可由 headers 与 sampleRows 判断出来的角色，不得仅复核已有映射。只能使用输入 headers 中真实存在的列，不得虚构列名。双语表头（如「科目描述 Description」「过账日期 Posting Date」）按其中的中文段判断角色。一列只承载一个语义，绝不能把同一列同时映射到两个角色。判断依据必须落在 sampleRows 的实际取值上：每提出一个 change，先从 sampleRows 里随意取三五行看该列的真实内容，若这几行取值与该角色应有的形态不符（科目编码列应是稳定的数字或字母数字编码，科目名称列应是可读文本，币种列应是三位 ISO 代码，金额列应是数值），就不要提出该 change。accountCode 与 accountName 是两个彼此独立的角色，绝不能映射到同一列，也不能互换：编码给 accountCode，名称/文本给 accountName。科目余额表与序时账是同一套账，同名角色必须同口径——两边的 accountCode 必须是同一种科目编码，accountName 同理。entity 是记账主体（公司代码、核算主体、账套公司），绝不是交易对手方、往来单位（往來單位、Counterparty）、客户（客戶）、供应商（供應商）这类对手方字段，也不是制单人、录入人、审核人、过账人这类操作员；没有明确的主体列时让 entity 空缺，不得拿对手方字段凑数。集团货币／报告货币（Group Currency、集团货币金额）是第三套口径，既不是本位币也不是原币，对应的金额列与币种列一律不映射到任何角色。changes 数组只放需要修改或补充的条目：每条的 suggestedColumn 必须是输入 headers 中真实存在的列名，且与该角色当前的 currentColumn 不同（当前为空时是补缺）。只是确认现有映射正确、确认某列不存在、或没有实际变更的，一律不要输出该条——空缺本身就是正确状态，不要为了表态而造条目。suggestedColumn 为空或置信度低于 0.5 的条目没有意义，不要输出——拿不准就不输出。reason 与 suggestedColumn 必须指向同一个结论：reason 说该列不该映射，就不能输出把它映射上去的条目。同一列在 changes 里最多出现一次。『整列同值』的意思是全列每一行取值完全相同；只要出现两种以上取值，该列就在逐行区分交易或账户，绝不是本位币列。优先建议原始数据列：由其他列推算出的公式辅助列（如按方向列把金额改写成的「借正贷负」列、用日期与凭证号拼出的唯一码列）不要抢原始列的角色。不要计算金额、汇率或业务分类，只管映射。";
+
+/// 序时账专属：16 个角色，一行是一条分录。
+const REVIEW_JE: &str = "角色仅可为 entity、date、id、voucherType、accountCode、accountName、summary、currency、functionalCurrency、direction、functionalAmount、functionalDebit、functionalCredit、foreignAmount、foreignDebit、foreignCredit。id 与 accountName 可以映射多列：Oracle 的凭证键要 Batch＋JE Name 两列组合才唯一，少一列就串号；科目名称可能拆成一级、二级两列。其余角色各占一列。多列仅限上述两种真正的拆分：名称只组合科目名称自己的层级列（一级／二级／三级），凭证号只组合构成凭证键的列（如 Batch＋JE Name、凭证字＋凭证号）；冲销凭证号、被冲销凭证号记录的是「这张凭证冲掉了谁」，不是凭证键，预算科目、对方／往来科目也不是本方科目名称——这些列绝不并入多列。voucherType 只认独立成列的凭证类型（SAP 的 BLART、Document Type、凭证类别这类单独一列）；「凭证字＋号合成一列」（如 记-0001、记0001、记2025-0001）整列就是凭证识别字段 id，绝不要建议把这类合成列同时或改为映射 voucherType，也不要建议从中拆出类型。借贷方向只有 direction 一个角色，原币与本位币共用同一列——一条分录的借贷方向对两个口径必然相同，不存在原币记借方而本位币记贷方的情况。金额有三种记法，同一口径内只能成立一种：单列净额（借正贷负）、借方与贷方两列、净额加方向列。两个口径各自独立判定：原币可以是借贷分列而本位币是净额。借方与贷方两列已经成立时，不要再建议把借方或贷方列改映射为净额角色；净额列（无论正负号是否随方向列拆出）已经成立时，也不要建议把同一净额列同时映射为借方与贷方两个角色——三种记法互斥，多选反而破坏方案。币种分两种：currency 是这笔分录的交易币种（凭证货币、Document Currency Key、Enter Currency）；functionalCurrency 是公司的记账本位币（公司代码货币、Company Code Currency Key、Ledger Currency），它整列同值，不区分行。两者都存在时不要互换。常用表头示例：会计科目属于 accountCode，科目文本／科目名称一级／科目名称二级属于 accountName，凭证货币属于 currency，凭证金额属于 foreignAmount，本位币金额属于 functionalAmount，借贷属于 direction。金额方案仅可为 signed、direction、debit_credit。";
+
+/// 科目余额表专属：一行是一个科目在某时点的余额。角色清单以传入的 hardcodedCandidates 为准。
+const REVIEW_TB: &str = "角色共分七组：身份（entity、accountCode、accountName）；币种（currency 原币币种、currencyText 币种线索文本、functionalCurrency 本位币）；方向（openingDirection 期初方向、closingDirection 期末方向）；期初余额六件套（本位币净额/借方/贷方、原币净额/借方/贷方）；期末余额六件套（同上）；本年累计发生额（本位币借方/贷方、原币借方/贷方）；本期发生额（本位币净额/借方/贷方，次选口径）。accountName 可以映射多列（如科目名称一级＋二级），其余角色各占一列。多列仅限科目名称的层级列；预算科目、对方／往来、辅助核算等语义不同的列不得并入。余额有三种记法，期初与期末各自独立判定：单列净额（借正贷负）、借方与贷方两列、净额加方向列。没有方向列时净额必须自带正负号，不要为了凑形态硬给一个方向列。方向列的归属看位置：方向列紧邻在某个余额列的右侧（期初余额…方向 / 期末余额…方向）时属于那个余额，紧跟期初余额右侧的映射 openingDirection、紧跟期末余额右侧的映射 closingDirection；表里只有一列「方向」且不在任何余额列右侧时（常见于表头前部、科目信息旁边），它是余额方向，一律映射 closingDirection——即使它紧邻或位于期初余额列的左侧也不要映射为 openingDirection。发生额口径：列名没写明「本期」还是「本年」时一律按本年累计（审计取的是全年数）；若同一张表出现两列都叫「借方发生额」，金额合计大的是本年累计、小的是本期发生。币种列判定只看取值分布，与列名无关，按两条二选一，没有第三种情况：（1）整列几乎全填满（空白不到一成）且从头到尾只出现一种币种代码 → functionalCurrency，它登记的是主体本位币；（2）其余一切情形 → currency（原币币种列）。这包括出现两种以上币种代码，也包括「只标外币」写法——大部分行空白、只有外币科目行才填币种，空白行的含义是本位币，这恰恰是 currency 列的正常形态，绝不能因为空白多就把它判成本位币列。反例：某列八成行空白、只在美元户/欧元户行填 USD/EUR——它是 currency；整列二百多行全部填同一个币种代码、无一空白——才是 functionalCurrency。币种角色空缺是正常状态：判为原币币种列的只映射 currency，functionalCurrency 空着（很多表根本不单列本位币）；判为本位币列的只映射 functionalCurrency，currency 空着。绝不要因为某个角色还空着，就把已判给另一币种角色的列再塞给它。判定为 functionalCurrency 后，若科目名称/文本列写有账户币种（如「美元户」「ICBC USD」），把该列映射为 currencyText 供下游抽取；但表里另有真正的多币种列（含空白或多币种）时，以那一列为准。可以用勾稽等式验证映射是否成立：期末余额 = 期初余额 + 本年累计借方 − 本年累计贷方。若按当前映射大面积对不上，多半是把某一列映射错了口径，应指出来。";
+
+/// 把**脚本已经判出的账表形态**写进 payload。
+///
+/// 不给这个，模型就是在盲猜：实测「序时账-1」里它看到金额列全是正数、
+/// 另有一列「借正贷负」带正负号，就建议把本位币净额改指过去——它不知道脚本
+/// 已经判定 JE2（方向＋净额）完整成立，更不知道在 JE2 下净额列有没有正负号
+/// 根本不影响结果（符号口径由数据判定，不由列名判定）。
+///
+/// 告诉它形态，它才能在「两种映射都成立」时选择不动。
+fn inject_current_form(payload: &mut Value, kind: &str) {
+    let Some(mapping) = payload.get("currentMapping").and_then(Value::as_object) else {
+        return;
+    };
+    let filled = |value: &Value| match value {
+        Value::String(one) => !one.trim().is_empty(),
+        Value::Array(all) => all.iter().any(|x| x.as_str().is_some_and(|v| !v.trim().is_empty())),
+        _ => false,
+    };
+    let mapped: std::collections::HashSet<&'static str> = mapping
+        .iter()
+        .filter(|(_, value)| filled(value))
+        .map(|(role, _)| crate::ledger_mapping::migrate_role_name(kind, role))
+        .filter(|role| !role.is_empty())
+        .collect();
+    if mapped.is_empty() {
+        return;
+    }
+    let (form, complete, missing) = match crate::ledger_mapping::resolve_form(kind, &mapped) {
+        crate::ledger_mapping::FormVerdict::Matched(m) => (m, true, Vec::new()),
+        crate::ledger_mapping::FormVerdict::Incomplete(m) => {
+            let missing = m.missing.clone();
+            (m, false, missing)
+        }
+    };
+    let labels: Vec<&str> = missing
+        .iter()
+        .filter_map(|role| crate::ledger_mapping::role_of(kind, role).map(|r| r.label))
+        .collect();
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "currentForm".into(),
+            json!({
+                "id": form.form,
+                "label": form.label,
+                "complete": complete,
+                "missingSlots": labels,
+            }),
+        );
+    }
+}
+
+/// 五个工具共用的映射复核入口。
+///
+/// 此前汇兑损益走 `fx.review_*_mapping`、看账走 `kanzhang.llm_mapping`，
+/// 存款利息与借款利息一份都没有。规则统一之后只剩「看的是 TB 还是 JE」这一个分叉，
+/// 工具能用哪些角色由 payload 的 `availableRoles` 声明。
+pub(crate) fn ledger_review_call(
+    kind: &str,
+    params: &Value,
+    settings: &Value,
+) -> Result<Value, AppError> {
+    let method = if kind == "tb" {
+        "fx.review_tb_mapping"
+    } else {
+        "fx.review_je_mapping"
+    };
+    fx_mapping_llm_call(method, params, settings)
 }
 
 pub(crate) fn fx_mapping_llm_call(
@@ -342,12 +446,41 @@ pub(crate) fn fx_mapping_llm_call(
     } else {
         "fx_tb_mapping"
     };
+    let (table_name, specific) = if method.ends_with("je_mapping") {
+        ("序时账", REVIEW_JE)
+    } else {
+        ("科目余额表", REVIEW_TB)
+    };
     let prompt = format!(
-        r#"你是汇兑损益审计工具的字段映射复核器，任务名为 {task}。只输出严格 JSON：{{"task":"{task}","changes":[{{"role":string,"currentColumn":string,"suggestedColumn":string,"confidence":number,"reason":string,"scheme":string}}]}}。只能使用输入 headers 中真实存在的列；不得编造角色。必须区分期初/期末、原币/本位币、余额/发生额、借方/贷方；entity 是记账主体而非交易对手方。金额方案仅可为 signed、direction、debit_credit。不要计算金额、汇率或业务分类。"#
+        "你是汇兑损益审计工具的{table_name}字段映射复核器，任务名为 {task}。\
+         只输出严格 JSON：{{\"task\":\"{task}\",\"changes\":[{{\"role\":string,\
+         \"currentColumn\":string,\"suggestedColumn\":string,\"confidence\":number,\
+         \"reason\":string,\"scheme\":string}}]}}。{REVIEW_COMMON}{specific}"
     );
-    let payload = params.get("payload").unwrap_or(params);
+    let mut payload = params.get("payload").unwrap_or(params).clone();
+    // 汇兑损益前端传的是 hardcodedCandidates（带候选列与评分），规则文本改用
+    // 通用的 availableRoles 之后，这里就地把角色名提取出来补上，前端不用改。
+    if payload.get("availableRoles").is_none() {
+        if let Some(roles) = payload
+            .get("hardcodedCandidates")
+            .and_then(Value::as_array)
+            .map(|all| {
+                all.iter()
+                    .filter_map(|item| item.get("role").and_then(Value::as_str))
+                    .map(|role| Value::String(role.to_owned()))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|all| !all.is_empty())
+        {
+            if let Some(object) = payload.as_object_mut() {
+                object.insert("availableRoles".into(), Value::Array(roles));
+            }
+        }
+    }
+    inject_current_form(&mut payload, if method.ends_with("je_mapping") { "je" } else { "tb" });
+    let payload = &payload;
     let content = request_llm(llm, &prompt, &payload.to_string(), None)?;
-    let value = parse_json_content(&content);
+    let mut value = parse_json_content(&content);
     if !value.is_object() {
         return Err(error(
             "LLM_RESPONSE_INVALID",
@@ -355,7 +488,147 @@ pub(crate) fn fx_mapping_llm_call(
             None,
         ));
     }
+    sanitize_mapping_changes(&mut value, payload, if method.ends_with("je_mapping") { "je" } else { "tb" });
     Ok(value)
+}
+
+/// 复核结果的卫生过滤：模型偶尔会输出"确认行"——reason 说某列不该映射，
+/// change 却仍把它指过去，或复述 currentMapping 里已有的映射。这类行一旦
+/// 被前端当真应用，会把正确映射改坏。这里按 payload 里的 headers 与
+/// currentMapping 做机器可判的兜底，剩余的才交给前端。
+///
+/// 第三轮实测里模型最常见的毛病不是判断错（reason 基本都判对了），
+/// 而是接受不了"角色空缺是正常状态"：把已被 currency 占用的币种列
+/// 硬塞给空缺的 functionalCurrency，把被 auxiliary 占用的往来列塞给 entity。
+/// 所以核心规则是**目标列被谁占用**，以 currentMapping 为准，不信模型自报
+/// 的 currentColumn（它时常把已有映射报成空）。
+fn sanitize_mapping_changes(value: &mut Value, payload: &Value, kind: &str) {
+    // 汇兑损益输出 `changes`，看账与正负数凭证标记输出 `fills`／`reviews`——
+    // 结构不同，纪律相同，逐个字段过一遍同一套规则。
+    for key in ["changes", "fills", "reviews"] {
+        sanitize_change_list(value, payload, kind, key);
+    }
+}
+
+fn sanitize_change_list(value: &mut Value, payload: &Value, kind: &str, key: &str) {
+    let Some(changes) = value.get_mut(key).and_then(Value::as_array_mut) else {
+        return;
+    };
+    let headers: Vec<String> = payload
+        .get("headers")
+        .and_then(Value::as_array)
+        .map(|all| {
+            all.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let current_mapping = payload.get("currentMapping").cloned().unwrap_or(Value::Null);
+    // 某角色当前映射到的列集合（multi 角色是多列）。
+    let columns_of = |role: &str| -> Vec<String> {
+        current_mapping
+            .get(role)
+            .map(|value| match value {
+                Value::String(one) => vec![one.trim().to_owned()],
+                Value::Array(all) => all
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .unwrap_or_default()
+    };
+    // 挪移链：预收集"谁从哪列挪到哪列"——目标列被占用时，只有占用者
+    // 同时被挪去**另一列**，改指才成立（retain 闭包里不能再借用整个
+    // 数组，先算好）。挪到空列是清除，不是挪移，构不成配套——实测模型
+    // 会成对输出"currency 补货币列 + functionalCurrency 货币列→(空)"，
+    // 两条其实都是在硬表达同一个确认，都得拦。
+    let movers: Vec<(String, String)> = changes
+        .iter()
+        .filter_map(|change| {
+            let role = change.get("role").and_then(Value::as_str)?;
+            let from = change
+                .get("currentColumn")
+                .and_then(Value::as_str)
+                .map(str::trim)?;
+            let to = change
+                .get("suggestedColumn")
+                .and_then(Value::as_str)
+                .map(str::trim)?;
+            (!to.is_empty() && to != from).then(|| (role.to_owned(), from.to_owned()))
+        })
+        .collect();
+    let mut seen_columns: Vec<String> = Vec::new();
+    changes.retain(|change| {
+        let Some(suggested) = change.get("suggestedColumn").and_then(Value::as_str) else {
+            return false;
+        };
+        let suggested = suggested.trim();
+        let current = change
+            .get("currentColumn")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let role = change.get("role").and_then(Value::as_str).unwrap_or("").trim();
+        let confidence = change
+            .get("confidence")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        // 列名必须是表里真实存在的、置信够用、且全批里同一列只出现一次。
+        // 实测模型会输出"reason 说不该映射、置信 0.1 却仍然映射"的自相矛盾行，
+        // 低于 0.5 的建议没有应用价值，一并丢弃。
+        if role.is_empty()
+            || suggested.is_empty()
+            || !(headers.is_empty() || headers.iter().any(|header| header.trim() == suggested))
+            || confidence < 0.5
+            || seen_columns.iter().any(|column| column == suggested)
+        {
+            return false;
+        }
+        // 复述现状的两种形态都丢弃：与自报 currentColumn 相同，
+        // 或与 currentMapping 里该角色的现行列相同（模型自报常有偏差）。
+        if suggested == current || columns_of(role).iter().any(|column| column == suggested) {
+            return false;
+        }
+        // 别名库的冲突词是确定性否定：它已经明说这类列不属于该角色。
+        // 提示词讲过的纪律模型照样会犯——「预算二级科目描述」指给科目名称
+        // 是实测踩过的坑，拼进科目键会把同一个会计科目拆成好几行。
+        if crate::ledger_mapping::role_rejects_header(kind, role, suggested) {
+            return false;
+        }
+        // reason 以否定结论收尾（"不应映射""暂不映射"）的条目仍是映射建议——
+        // 实测四轮里这类行全是模型想表态"我确认过、维持空缺"的拧巴输出，
+        // 从没出现过合法建议用否定句式写 reason 的，宁可错杀。
+        let reason = change.get("reason").and_then(Value::as_str).unwrap_or("");
+        if ["不映射", "不应映射", "不應映射", "不該映射"].iter().any(|mark| reason.contains(mark)) {
+            return false;
+        }
+        // 目标列已被其他角色占用、且没有人配套地把那个角色挪走 →
+        // 应用它会造成一列两角色，丢弃。真要挪，得成对出现。
+        let occupied_elsewhere = current_mapping.as_object().is_some_and(|mapping| {
+            mapping.iter().any(|(other_role, other_value)| {
+                other_role != role
+                    && match other_value {
+                        Value::String(one) => one.trim() == suggested,
+                        Value::Array(all) => all
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .any(|column| column.trim() == suggested),
+                        _ => false,
+                    }
+                    && !movers
+                        .iter()
+                        .any(|(mover_role, mover_from)| mover_role == other_role && mover_from == suggested)
+            })
+        });
+        if occupied_elsewhere {
+            return false;
+        }
+        seen_columns.push(suggested.to_owned());
+        true
+    });
 }
 
 pub(crate) fn fx_source_llm_call(params: &Value, settings: &Value) -> Result<Value, AppError> {
@@ -369,15 +642,96 @@ pub(crate) fn fx_source_llm_call(params: &Value, settings: &Value) -> Result<Val
     let payload = params.get("payload").unwrap_or(params);
     let content = request_llm(llm, prompt, &payload.to_string(), None)?;
     let value = parse_json_content(&content);
-    let valid = value.get("kind").and_then(Value::as_str).is_some_and(|kind| matches!(kind, "je" | "tb"));
+    let valid = value
+        .get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| matches!(kind, "je" | "tb"));
     if !valid {
-        return Err(error("LLM_RESPONSE_INVALID", "LLM 没有返回有效的JE/TB分类结果。", None));
+        return Err(error(
+            "LLM_RESPONSE_INVALID",
+            "LLM 没有返回有效的JE/TB分类结果。",
+            None,
+        ));
     }
     Ok(value)
 }
 
-fn kanzhang_mapping_prompt() -> &'static str {
-    "你是会计凭证字段映射复核助手。输出严格 JSON：{scheme:\"A\"|\"B\"|\"\",schemeReason:string,fills:[{role:string,suggestedColumn:string,confidence:number,reason:string}],reviews:[{role:string,currentColumn:string,suggestedColumn:string,confidence:number,reason:string}]}。角色仅可为 id/account/entity/date/summary/amount/direction/debit/credit。entity 专指凭证所属的核算主体/记账主体（例如公司代码、公司名称、账套公司、法人实体、business unit、company code），用于区分这笔凭证记在哪个主体；entity 绝不是交易对手方、往来单位、客户、供应商、客商、收付款对象或对方户名。即使交易对手方列包含公司名称或企业名称，也不得映射为 entity；没有明确的核算主体列时应让 entity 保持空缺，不得用对手方字段凑数。方案A=金额列（可加方向）；方案B=借方和贷方两列。只可使用输入 headers 中的原始列名。"
+pub(crate) fn fx_account_translation_llm_call(
+    accounts: &[(String, String)],
+    settings: &Value,
+) -> Result<BTreeMap<String, String>, AppError> {
+    let llm = settings
+        .get("llm")
+        .ok_or_else(|| error("LLM_NOT_CONFIGURED", "请先在工具箱设置中配置 LLM。", None))?;
+    if !llm.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(error("LLM_DISABLED", "工具箱中的 LLM 尚未启用。", None));
+    }
+    if accounts.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let prompt = r#"你是审计底稿的会计科目翻译助手。把输入中的英文会计科目名称准确、简洁地翻译成中文，保留必要的产品名、主体名和缩写含义。只输出严格JSON：{"translations":[{"code":string,"originalName":string,"chineseName":string}]}。code和originalName必须逐字使用输入值，不得新增、删除或合并科目；不得计算金额、判断科目角色或修改原文。"#;
+    let payload = json!({"accounts": accounts.iter().map(|(code, name)| json!({
+        "code": code, "originalName": name
+    })).collect::<Vec<_>>()});
+    let content = request_llm(llm, prompt, &payload.to_string(), None)?;
+    let value = parse_json_content(&content);
+    let allowed = accounts.iter().cloned().collect::<BTreeMap<_, _>>();
+    let mut output = BTreeMap::new();
+    for item in value
+        .get("translations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let code = item
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let original = item
+            .get("originalName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        let chinese = item
+            .get("chineseName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if allowed
+            .get(code)
+            .is_some_and(|expected| expected.trim() == original)
+            && chinese
+                .chars()
+                .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character))
+        {
+            output.insert(code.to_owned(), chinese.to_owned());
+        }
+    }
+    if output.is_empty() {
+        return Err(error(
+            "LLM_RESPONSE_INVALID",
+            "LLM 未返回有效的中文科目翻译。",
+            None,
+        ));
+    }
+    Ok(output)
+}
+
+/// 看账与正负数凭证标记的复核提示词。
+///
+/// **规则文本不自带**——纪律取自 [`REVIEW_COMMON`] ＋ [`REVIEW_JE`]，与汇兑损益同一份。
+/// 差别只有两处：输出结构是 `fills`／`reviews`（这两个工具的前端按它消费），
+/// 以及金额方案用 A／B 表述。本工具能用哪些角色由 payload 的 `availableRoles` 声明。
+fn kanzhang_mapping_prompt() -> String {
+    format!(
+        "你是会计凭证字段映射复核助手。输出严格 JSON：\
+         {{scheme:\"A\"|\"B\"|\"\",schemeReason:string,\
+         fills:[{{role:string,suggestedColumn:string,confidence:number,reason:string}}],\
+         reviews:[{{role:string,currentColumn:string,suggestedColumn:string,confidence:number,reason:string}}]}}。\
+         方案A＝净额列（可加方向列）；方案B＝借方与贷方两列，二者互斥。\
+         {REVIEW_COMMON}{REVIEW_JE}"
+    )
 }
 
 fn ocr(params: &Value, settings: &Value) -> Result<Value, AppError> {
@@ -774,13 +1128,95 @@ mod tests {
         );
     }
     #[test]
-    fn kanzhang_entity_prompt_means_accounting_entity_not_counterparty() {
+    fn 卫生过滤对三种输出结构一视同仁() {
+        // 汇兑损益输出 changes，看账与正负数标记输出 fills／reviews。
+        // 结构不同、纪律相同，此前看账那条链路只有冲突词一条规则。
+        let payload = json!({
+            "headers": ["会计科目", "科目文本", "预算二级科目描述", "本位币金额"],
+            "currentMapping": {"accountCode": "会计科目", "accountName": "科目文本"},
+        });
+        let mut value = json!({
+            "fills": [
+                // 冲突词否定：预算科目不是科目名称，实测踩过的坑。
+                {"role": "accountName", "currentColumn": "", "suggestedColumn": "预算二级科目描述",
+                 "confidence": 0.9, "reason": "看着像科目描述"},
+                // 正常补充：本位币金额此前未映射。
+                {"role": "functionalAmount", "currentColumn": "", "suggestedColumn": "本位币金额",
+                 "confidence": 0.9, "reason": "净额列"},
+            ],
+            "reviews": [
+                // 复述现状：与 currentMapping 相同，没有可执行内容。
+                {"role": "accountCode", "currentColumn": "会计科目", "suggestedColumn": "会计科目",
+                 "confidence": 0.95, "reason": "确认正确"},
+                // 抢已占用的列：科目文本已归 accountName。
+                {"role": "summary", "currentColumn": "", "suggestedColumn": "科目文本",
+                 "confidence": 0.9, "reason": "当摘要用"},
+            ],
+        });
+        sanitize_mapping_changes(&mut value, &payload, "je");
+        let fills = value["fills"].as_array().expect("fills 还在");
+        assert_eq!(fills.len(), 1, "{fills:?}");
+        assert_eq!(fills[0]["suggestedColumn"], "本位币金额");
+        assert!(value["reviews"].as_array().expect("reviews 还在").is_empty());
+    }
+
+    #[test]
+    fn 形态已完整成立时把结论告诉模型() {
+        // 「序时账-1」的真实映射：方向 ＋ 金额，脚本判定 JE2 完整成立。
+        // 不告诉模型这一点，它就会盯着「金额列全是正数」自由发挥，
+        // 建议改指到旁边那列客户自己用公式算出来的「借正贷负」。
+        let mut payload = json!({
+            "headers": ["方向", "金额", "借正贷负"],
+            "currentMapping": {
+                "direction": "方向",
+                "functionalAmount": "金额",
+                "id": "凭证号数",
+                "accountCode": "科目编码",
+            },
+        });
+        inject_current_form(&mut payload, "je");
+        let form = &payload["currentForm"];
+        assert_eq!(form["id"], "JE2");
+        assert_eq!(form["complete"], true);
+        assert!(form["missingSlots"].as_array().expect("有该字段").is_empty());
+    }
+
+    #[test]
+    fn 形态没凑齐时点名缺哪个槽() {
+        // 只映射了净额、没有方向列也不是借贷分列——JE3 本该成立，
+        // 但这里连净额都没给，脚本要能说清差在哪，模型才知道该补什么。
+        let mut payload = json!({
+            "headers": ["借方金额", "贷方金额"],
+            "currentMapping": {"functionalDebit": "借方金额"},
+        });
+        inject_current_form(&mut payload, "je");
+        let form = &payload["currentForm"];
+        assert_eq!(form["complete"], false);
+        let missing = form["missingSlots"].as_array().expect("有该字段");
+        assert!(!missing.is_empty(), "{form}");
+    }
+
+    #[test]
+    fn 一个角色都没映射时不注入形态() {
+        // 刚读进文件、还没开始映射，报一个"最接近某型"只会误导模型。
+        let mut payload = json!({"headers": ["A"], "currentMapping": {}});
+        inject_current_form(&mut payload, "je");
+        assert!(payload.get("currentForm").is_none());
+    }
+
+    #[test]
+    fn 看账复核用共用纪律而不是自带一份() {
         let prompt = kanzhang_mapping_prompt();
-        assert!(prompt.contains("核算主体/记账主体"), "{prompt}");
+        // 纪律整段取自共用的两份，不再自带——改一处，五个工具同时生效。
+        // 此前看账那份是库里第三份抄本，措辞与汇兑损益的两份各不相同。
+        assert!(prompt.contains(REVIEW_COMMON), "{prompt}");
+        assert!(prompt.contains(REVIEW_JE), "{prompt}");
+        // entity 认成交易对手方是实测里模型最常犯的一条，确认纪律确实带到了。
         assert!(prompt.contains("绝不是交易对手方"), "{prompt}");
-        assert!(prompt.contains("客户"), "{prompt}");
-        assert!(prompt.contains("供应商"), "{prompt}");
-        assert!(prompt.contains("保持空缺"), "{prompt}");
+        assert!(prompt.contains("空缺"), "{prompt}");
+        // 只有输出结构与金额方案的表述是本工具自己的。
+        assert!(prompt.contains("fills"), "{prompt}");
+        assert!(prompt.contains("方案A"), "{prompt}");
     }
     #[test]
     fn rejects_missing_ocr_image() {
@@ -823,5 +1259,242 @@ mod tests {
             result["documents"][0]["error"]["code"],
             "AUDIPICK_TEXT_MISSING"
         );
+    }
+}
+
+#[cfg(test)]
+mod mapping_prompt_tests {
+    use super::*;
+
+    /// 两张表的复核提示词必须各管各的。
+    ///
+    /// 拆开之前是一整段同时讲 TB 与 JE，复核任一张表都要读另一张表的规矩——
+    /// 序时账的凭证类型、余额表的期初期末混在一起，既是干扰也容易串用角色。
+    #[test]
+    fn 两段提示词互不掺杂() {
+        assert!(
+            !REVIEW_JE.contains("期初") && !REVIEW_JE.contains("本年累计"),
+            "序时账段不该出现余额表的期初期末与本年累计"
+        );
+        assert!(
+            !REVIEW_TB.contains("voucherType") && !REVIEW_TB.contains("凭证键"),
+            "余额表段不该出现序时账的凭证类型与凭证键"
+        );
+    }
+
+    /// 共同段只放对两张表都成立的纪律，别把某一张表的规则漏写进去。
+    #[test]
+    fn 共同段不含任一表的专属规则() {
+        for word in ["期初", "期末", "凭证类型", "本年累计", "hardcodedCandidates"] {
+            assert!(
+                !REVIEW_COMMON.contains(word),
+                "共同段出现了专属规则「{word}」，应移到对应的分段里"
+            );
+        }
+    }
+
+    /// 角色名必须和统一映射内核对得上——提示词里写了内核没有的角色，
+    /// 模型提出来的建议下游就落不了地。
+    #[test]
+    fn 提示词里的角色名都真实存在() {
+        for (kind, text) in [("je", REVIEW_JE), ("tb", REVIEW_TB)] {
+            for word in text.split(|c: char| !c.is_ascii_alphanumeric()) {
+                // 驼峰英文单词才可能是角色名；中文与短词跳过。
+                if word.len() < 6 || !word.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
+                    continue;
+                }
+                if !word.chars().any(|c| c.is_ascii_uppercase()) {
+                    continue;
+                }
+                assert!(
+                    crate::ledger_mapping::role_of(kind, word).is_some()
+                        || matches!(word, "currentMapping" | "sampleRows" | "hardcodedCandidates"),
+                    "{kind} 提示词里的「{word}」不是内核里的角色名"
+                );
+            }
+        }
+    }
+
+    /// 复核结果的卫生过滤是前端应用建议前的最后一道闸，
+    /// 每条丢弃规则都对应真实样本里见过的模型行为。
+    #[test]
+    fn 复核建议的卫生过滤() {
+        let payload = json!({
+            "headers": ["科目编码", "科目名称", "币种", "方向"],
+        });
+        let mut value = json!({
+            "task": "fx_tb_mapping",
+            "changes": [
+                // 正常建议：保留。
+                {"role": "currency", "currentColumn": "", "suggestedColumn": "币种",
+                 "confidence": 0.9, "reason": "多币种取值", "scheme": ""},
+                // 复述现状：reason 在确认而不是变更，丢弃。
+                {"role": "currency", "currentColumn": "币种", "suggestedColumn": "币种",
+                 "confidence": 0.95, "reason": "该列是原币币种列", "scheme": ""},
+                // 虚构列名：表里没有，丢弃。
+                {"role": "accountCode", "currentColumn": "", "suggestedColumn": "科目代码",
+                 "confidence": 0.8, "reason": "应为编码", "scheme": ""},
+                // 零置信：模型自己都不信，丢弃。
+                {"role": "functionalCurrency", "currentColumn": "", "suggestedColumn": "科目编码",
+                 "confidence": 0.0, "reason": "没有本位币列", "scheme": ""},
+                // 与第三条同列的重复建议：一列一个语义，丢弃。
+                {"role": "accountName", "currentColumn": "", "suggestedColumn": "科目名称",
+                 "confidence": 0.7, "reason": "名称", "scheme": ""},
+                {"role": "closingDirection", "currentColumn": "", "suggestedColumn": "科目名称",
+                 "confidence": 0.7, "reason": "重复占列", "scheme": ""},
+            ],
+        });
+        sanitize_mapping_changes(&mut value, &payload, "tb");
+        let changes = value["changes"].as_array().unwrap();
+        // 留下 currency→币种 与 accountName→科目名称；同列的 closingDirection
+        // 在 accountName 之后出现，被"一列一次"规则丢弃。
+        let kept: Vec<(String, String)> = changes
+            .iter()
+            .map(|change| {
+                (
+                    change["role"].as_str().unwrap_or("").to_owned(),
+                    change["suggestedColumn"].as_str().unwrap_or("").to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            vec![
+                ("currency".to_owned(), "币种".to_owned()),
+                ("accountName".to_owned(), "科目名称".to_owned()),
+            ],
+            "{changes:?}"
+        );
+    }
+
+    /// headers 缺失（异常调用）时只做不依赖列名单的过滤，别把整包结果清空。
+    #[test]
+    fn 复核建议过滤在没有表头时仍保守() {
+        let mut value = json!({
+            "changes": [
+                {"role": "currency", "currentColumn": "旧列", "suggestedColumn": "新列",
+                 "confidence": 0.9, "reason": "", "scheme": ""},
+                {"role": "currency", "currentColumn": "同列", "suggestedColumn": "同列",
+                 "confidence": 0.9, "reason": "", "scheme": ""},
+            ],
+        });
+        sanitize_mapping_changes(&mut value, &json!({}), "tb");
+        assert_eq!(value["changes"].as_array().unwrap().len(), 1);
+    }
+
+    /// 拿真实复核最常见的坑当样例：模型给空缺角色硬塞已被占用的列。
+    /// 三轮实测里 functionalCurrency←币种列、entity←往来列全是这个形态。
+    #[test]
+    fn 复核建议不抢已占用的列() {
+        let payload = json!({
+            "headers": ["科目编码", "科目名称", "币种", "往來單位"],
+            "currentMapping": {
+                "accountCode": "科目编码",
+                "accountName": "科目名称",
+                "currency": "币种",
+                "auxiliary": "往來單位",
+            },
+        });
+        let mut value = json!({
+            "changes": [
+                // 硬凑空缺：currency 已占币种列，functionalCurrency 再指过去=一列两角色。
+                {"role": "functionalCurrency", "currentColumn": "", "suggestedColumn": "币种",
+                 "confidence": 0.95, "reason": "整列同值", "scheme": ""},
+                // 幻觉抢列：往來單位明明是 auxiliary，却说它是 entity。
+                {"role": "entity", "currentColumn": "", "suggestedColumn": "往來單位",
+                 "confidence": 0.9, "reason": "counterparty names", "scheme": ""},
+                // 半截改指：想给 accountCode 换列，但没人把占用者挪走。
+                {"role": "accountName", "currentColumn": "科目名称", "suggestedColumn": "科目编码",
+                 "confidence": 0.8, "reason": "", "scheme": ""},
+            ],
+        });
+        sanitize_mapping_changes(&mut value, &payload, "tb");
+        assert!(
+            value["changes"].as_array().unwrap().is_empty(),
+            "三条都该拦：{value:?}"
+        );
+    }
+
+    /// TB-3300 实测场景：currency 角色空缺、functionalCurrency 已占货币列，
+    /// 模型 reason 判对了货币列性质，却成对输出"currency 补货币列 +
+    /// functionalCurrency 从货币列挪去(空)"——两条都是同一句确认的拧巴
+    /// 表达，挪去空列不是挪移，构不成配套，两条都得拦。
+    #[test]
+    fn 复核建议不硬凑反向币种角色() {
+        let payload = json!({
+            "headers": ["科目代码", "货币", "文本"],
+            "currentMapping": {
+                "accountCode": "科目代码",
+                "functionalCurrency": "货币",
+                "currencyText": "文本",
+            },
+        });
+        let mut value = json!({
+            "changes": [
+                {"role": "currency", "currentColumn": "", "suggestedColumn": "货币",
+                 "confidence": 0.95, "reason": "符合本位币列特征",
+                 "scheme": "将货币列从currency改为functionalCurrency"},
+                {"role": "functionalCurrency", "currentColumn": "货币", "suggestedColumn": "",
+                 "confidence": 0.95, "reason": "符合本位币列特征", "scheme": ""},
+                {"role": "currencyText", "currentColumn": "文本", "suggestedColumn": "文本",
+                 "confidence": 0.9, "reason": "保留文本列映射为currencyText", "scheme": ""},
+            ],
+        });
+        sanitize_mapping_changes(&mut value, &payload, "tb");
+        assert!(
+            value["changes"].as_array().unwrap().is_empty(),
+            "货币列已被 functionalCurrency 占用：{value:?}"
+        );
+    }
+
+    /// 09 实测场景：reason 明说"暂不映射"，change 却仍把该列映射上去。
+    #[test]
+    fn 复核建议reason否定即弃() {
+        let payload = json!({
+            "headers": ["凭证号", "制单人"],
+            "currentMapping": {"id": "凭证号"},
+        });
+        let mut value = json!({
+            "changes": [
+                {"role": "entity", "currentColumn": "", "suggestedColumn": "制单人",
+                 "confidence": 0.6, "reason": "制单人列为操作员姓名，无其他主体列，暂不映射",
+                 "scheme": ""},
+            ],
+        });
+        sanitize_mapping_changes(&mut value, &payload, "tb");
+        assert!(value["changes"].as_array().unwrap().is_empty(), "{value:?}");
+    }
+
+    /// 成对挪移是合法修复：占用者同时被挪走时，改指应当放行。
+    /// 模型谎报 currentColumn（把已有映射报成空）也要靠 currentMapping 拦住。
+    #[test]
+    fn 复核建议放行成对挪移并识破谎报现状() {
+        let payload = json!({
+            "headers": ["科目编码", "科目名称", "科目描述"],
+            "currentMapping": {
+                "accountCode": "科目名称",   // coding 判反了
+                "accountName": "",
+            },
+        });
+        let mut value = json!({
+            "changes": [
+                // 谎报现状：模型把已有映射报成空，建议仍是现行列。
+                // 排在最前，确保拦它的是 currentMapping 对照而非同列去重。
+                {"role": "accountCode", "currentColumn": "", "suggestedColumn": "科目名称",
+                 "confidence": 0.95, "reason": "紧邻期初余额", "scheme": ""},
+                // 修复链：accountCode 挪去科目编码，accountName 补上科目名称。
+                {"role": "accountCode", "currentColumn": "科目名称", "suggestedColumn": "科目编码",
+                 "confidence": 0.9, "reason": "", "scheme": ""},
+                {"role": "accountName", "currentColumn": "", "suggestedColumn": "科目名称",
+                 "confidence": 0.9, "reason": "", "scheme": ""},
+            ],
+        });
+        sanitize_mapping_changes(&mut value, &payload, "tb");
+        let changes = value["changes"].as_array().unwrap();
+        assert_eq!(changes.len(), 2, "只留成对挪移的两条：{changes:?}");
+        assert!(changes
+            .iter()
+            .all(|change| change["suggestedColumn"].as_str() != Some("科目名称")
+                || change["role"].as_str() == Some("accountName")));
     }
 }

@@ -1,0 +1,451 @@
+//! 逐份跑真实样例的表头识别与映射，把 coding 侧的结论打印出来供人工验收。
+//!
+//! 这是一条**调查用**测试，默认不跑（`#[ignore]`），因为它依赖本机的样例目录：
+//!
+//! ```text
+//! cargo test --test mapping_survey -- --ignored --nocapture
+//! ```
+//!
+//! 样例目录可用环境变量覆盖：`LEDGER_SAMPLES`（分号分隔多个目录）。
+
+use std::path::{Path, PathBuf};
+
+fn sample_dirs() -> Vec<PathBuf> {
+    if let Ok(value) = std::env::var("LEDGER_SAMPLES") {
+        return value.split(';').map(PathBuf::from).collect();
+    }
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    vec![
+        PathBuf::from(&home).join("科目余额表与序时账测试集"),
+        PathBuf::from(&home).join("Downloads/审计工具箱/audit-toolbox-main/汇兑损益测试资料"),
+    ]
+}
+
+/// 文件名里带 TB / 科目余额 的当科目余额表，其余当序时账。
+fn kind_of(name: &str) -> &'static str {
+    let lower = name.to_lowercase();
+    if lower.contains("tb") || name.contains("科目余额") || name.contains("科目餘額") {
+        "tb"
+    } else {
+        "je"
+    }
+}
+
+fn describe(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(all) => all
+            .iter()
+            .filter_map(|x| x.as_str())
+            .collect::<Vec<_>>()
+            .join(" ＋ "),
+        other => other.to_string(),
+    }
+}
+
+/// 工具自己导出的底稿不是账表，扫它没有意义——映射结果只会是噪声。
+fn is_tool_output(name: &str) -> bool {
+    const MARKS: &[&str] = &["审计测算_", "根因修复验证", "测算结果", "_底稿", "底稿_"];
+    MARKS.iter().any(|mark| name.contains(mark))
+}
+
+fn survey_one(path: &Path) {
+    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    if name.starts_with("~$") || is_tool_output(&name) {
+        return;
+    }
+    let kind = kind_of(&name);
+    let params = serde_json::json!({"source": {"inputPath": path.to_string_lossy()}});
+    let method = if kind == "tb" { "fx.inspect_tb" } else { "fx.inspect_je" };
+    println!("\n══════ {name}  [{}]", kind.to_uppercase());
+    let result = match audit_toolbox_lib::engine_call_for_test(method, params) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("  读取失败：{e:?}");
+            return;
+        }
+    };
+    println!(
+        "  Sheet={} 标题行={} 表头层数={} 行数={}",
+        result["sheet"].as_str().unwrap_or("?"),
+        result["headerRow"],
+        result["headerDepth"],
+        result["rowCount"]
+    );
+    let headers: Vec<String> = result["headers"]
+        .as_array()
+        .map(|all| all.iter().filter_map(|x| x.as_str()).map(str::to_owned).collect())
+        .unwrap_or_default();
+    let mapping = result["suggestedMapping"].as_object().cloned().unwrap_or_default();
+    // 反查：每一列落到了哪个角色，没落上的也要看见。
+    let mut by_column: Vec<(String, String)> =
+        headers.iter().map(|h| (h.clone(), String::new())).collect();
+    for (role, value) in &mapping {
+        for column in describe(value).split(" ＋ ") {
+            if let Some(slot) = by_column.iter_mut().find(|(h, _)| h == column) {
+                if slot.1.is_empty() {
+                    slot.1 = role.clone();
+                } else {
+                    slot.1 = format!("{} / {role}", slot.1);
+                }
+            }
+        }
+    }
+    for (header, role) in &by_column {
+        let shown = header.replace('\n', " ");
+        if role.is_empty() {
+            println!("    {shown:<34} —");
+        } else {
+            println!("    {shown:<34} {role}");
+        }
+    }
+    // 形态判定：完整命中还是缺列，映射面板与调查输出保持同一口径。
+    if let Some(matches) = result["formMatches"].as_array() {
+        if let Some(best) = matches.first() {
+            let id = best["form"].as_str().unwrap_or("?");
+            let label = best["label"].as_str().unwrap_or("");
+            if best["complete"].as_bool() == Some(true) {
+                println!("  [形态] 完整命中 {id}（{label}）");
+            } else {
+                let missing: Vec<&str> = best["missing"]
+                    .as_array()
+                    .map(|all| all.iter().filter_map(|x| x.as_str()).collect())
+                    .unwrap_or_default();
+                let partial: Vec<&str> = best["partialOptional"]
+                    .as_array()
+                    .map(|all| all.iter().filter_map(|x| x.as_str()).collect())
+                    .unwrap_or_default();
+                println!("  [形态] 未完整命中：最接近 {id}（{label}），缺 {missing:?}，可选槽半拉子 {partial:?}");
+            }
+        }
+    }
+}
+
+/// 对单份样例跑 LLM 映射复核，打印模型提出的 changes 供人工与 coding 结论对照。
+fn review_one(path: &Path, kind: &str) {
+    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let params = serde_json::json!({"source": {"inputPath": path.to_string_lossy()}});
+    let method = if kind == "tb" { "fx.inspect_tb" } else { "fx.inspect_je" };
+    let Ok(inspection) = audit_toolbox_lib::engine_call_for_test(method, params) else {
+        println!("  {name}: inspect 失败，跳过 LLM 复核");
+        return;
+    };
+    let payload = serde_json::json!({
+        "headers": inspection["headers"],
+        "sampleRows": inspection["preview"],
+        "hardcodedCandidates": inspection["mappingCandidates"],
+        "currentMapping": inspection["suggestedMapping"],
+    });
+    let review_method = if kind == "tb" { "fx.review_tb_mapping" } else { "fx.review_je_mapping" };
+    println!("\n──── LLM 复核 {name}");
+    match audit_toolbox_lib::engine_call_for_test(
+        review_method,
+        serde_json::json!({ "payload": payload }),
+    ) {
+        Ok(value) => {
+            let changes: Vec<&serde_json::Value> = value
+                .get("changes")
+                .and_then(|c| c.as_array())
+                .map(|all| all.iter().collect())
+                .unwrap_or_default();
+            if changes.is_empty() {
+                println!("  （无修改建议）");
+            } else {
+                for change in changes {
+                    println!(
+                        "  {} {}→{} 置信{}：{}",
+                        change["role"].as_str().unwrap_or("?"),
+                        change["currentColumn"].as_str().unwrap_or("(空)"),
+                        change["suggestedColumn"].as_str().unwrap_or("?"),
+                        change["confidence"].as_f64().unwrap_or(0.0),
+                        change["reason"].as_str().unwrap_or("").chars().take(80).collect::<String>(),
+                    );
+                }
+            }
+        }
+        Err(e) => println!("  LLM 复核失败：{e:?}"),
+    }
+}
+
+#[test]
+#[ignore = "依赖本机样例目录，手工调查用"]
+fn survey_real_samples() {
+    let mut seen = 0usize;
+    for dir in sample_dirs() {
+        if !dir.is_dir() {
+            println!("（跳过不存在的目录：{}）", dir.display());
+            continue;
+        }
+        println!("\n########## {}", dir.display());
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "xlsx" || x == "xls"))
+            .collect();
+        files.sort();
+        for path in files {
+            survey_one(&path);
+            seen += 1;
+        }
+    }
+    assert!(seen > 0, "一份样例都没找到，请设置 LEDGER_SAMPLES");
+}
+
+/// 对样例目录逐份跑 LLM 映射复核（需要本机已配置并启用 LLM）。
+///
+/// ```text
+/// cargo test --test mapping_survey survey_llm_review -- --ignored --nocapture
+/// ```
+///
+/// 只扫 LEDGER_SAMPLES 的第一个目录，避免大范围消耗 API 额度。
+#[test]
+#[ignore = "调用外部 LLM，产生费用，手工调查用"]
+fn survey_llm_review() {
+    let dirs = sample_dirs();
+    let Some(dir) = dirs.first().filter(|d| d.is_dir()) else {
+        panic!("样例目录不存在，请设置 LEDGER_SAMPLES");
+    };
+    println!("\n########## LLM 复核 {}", dir.display());
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "xlsx" || x == "xls"))
+        .collect();
+    files.sort();
+    let mut seen = 0usize;
+    for path in files {
+        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        if name.starts_with("~$") || is_tool_output(&name) {
+            continue;
+        }
+        // 大文件（几十万行）的 LLM 复核一次就要把 8 行样例发出去，够用；
+        // 但调查聚焦表头映射，跳过超大文件节省额度，coding 侧已覆盖。
+        if path.metadata().map(|m| m.len() > 5_000_000).unwrap_or(false) {
+            println!("（跳过大文件：{name}）");
+            continue;
+        }
+        review_one(&path, kind_of(&name));
+        seen += 1;
+    }
+    assert!(seen > 0, "一份样例都没找到");
+}
+
+/// 用真实 TB 跑一遍科目角色分类，看哪些科目落到了「未分配」。
+#[test]
+#[ignore = "依赖本机样例目录，手工调查用"]
+fn survey_account_roles() {
+    let dirs = sample_dirs();
+    for dir in dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        for name in ["TB-3300.xlsx", "TB-4800.xlsx"] {
+            let path = dir.join(name);
+            if !path.is_file() {
+                continue;
+            }
+            let source = serde_json::json!({"inputPath": path.to_string_lossy()});
+            let Ok(inspection) = audit_toolbox_lib::engine_call_for_test(
+                "fx.inspect_tb",
+                serde_json::json!({"source": source.clone()}),
+            ) else {
+                continue;
+            };
+            let mapping = inspection["suggestedMapping"].clone();
+            println!("\n══════ {name} 科目角色");
+            println!("  accountName 映射到：{}", mapping["accountName"]);
+            let Ok(roles) = audit_toolbox_lib::engine_call_for_test(
+                "fx.account_roles",
+                serde_json::json!({"tbSource": source, "tbMapping": mapping}),
+            ) else {
+                println!("  分类失败");
+                continue;
+            };
+            let all = roles["accounts"].as_array().cloned().unwrap_or_default();
+            let mut unassigned = 0usize;
+            let mut by_role: std::collections::BTreeMap<String, usize> = Default::default();
+            for item in &all {
+                let account = item["account"].as_str().unwrap_or("");
+                let role = item["suggestedRole"].as_str().unwrap_or("");
+                *by_role.entry(role.to_string()).or_default() += 1;
+                if role == "unassigned" {
+                    unassigned += 1;
+                }
+                if role == "unassigned" || account.contains("汇兑") {
+                    println!("    [{role}] {account}");
+                }
+            }
+            println!("  共 {} 个科目，未分配 {unassigned} 个；分布 {by_role:?}", all.len());
+        }
+    }
+}
+
+/// 量一下 36 万行的序时账到底慢在哪：读文件、建行记录、逐行取值各占多少。
+///
+/// ```text
+/// cargo test --release --test mapping_survey bench_large_journal -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "依赖本机大样例，性能调查用"]
+fn bench_ledger_cache() {
+    use std::time::Instant;
+    for dir in sample_dirs() {
+        let path = dir.join("4800_JE_2025.01-12.xlsx");
+        if !path.is_file() {
+            continue;
+        }
+        let params = serde_json::json!({
+            "inputPath": path.to_string_lossy(),
+            "headerRow": 1,
+        });
+        // 第一次读要解析源文件并写缓存；后面每一步都该命中缓存。
+        let t0 = Instant::now();
+        let first = audit_toolbox_lib::engine_call_for_test("kanzhang.inspect", params.clone())
+            .expect("首次读取应当成功");
+        let cold = t0.elapsed();
+        let t1 = Instant::now();
+        audit_toolbox_lib::engine_call_for_test("kanzhang.inspect", params.clone())
+            .expect("二次读取应当成功");
+        let warm = t1.elapsed();
+        println!("
+══════ 看账读取缓存 · {}", path.display());
+        println!("  行数 {} 列数 {}",
+            first["dimensions"]["rows"],
+            first["headers"].as_array().map(|a| a.len()).unwrap_or(0));
+        println!("  首次（解析源文件＋写缓存）: {cold:?}");
+        println!("  再次（命中缓存）        : {warm:?}");
+        if warm < cold {
+            let ratio = cold.as_secs_f64() / warm.as_secs_f64().max(1e-9);
+            println!("  提速 {ratio:.1}×");
+        }
+        return;
+    }
+    println!("（没找到 4800_JE 样例）");
+}
+
+#[test]
+#[ignore = "依赖本机大样例，性能调查用"]
+fn bench_large_journal() {
+    use std::time::Instant;
+    let dirs = sample_dirs();
+    for dir in dirs {
+        let path = dir.join("4800_JE_2025.01-12.xlsx");
+        if !path.is_file() {
+            continue;
+        }
+        let t0 = Instant::now();
+        let inspection = audit_toolbox_lib::engine_call_for_test(
+            "fx.inspect_je",
+            serde_json::json!({"source": {"inputPath": path.to_string_lossy()}}),
+        )
+        .expect("inspect 应当成功");
+        println!("  inspect（含读表样本）: {:?}", t0.elapsed());
+        println!("    行数 {} 列数 {}",
+            inspection["rowCount"],
+            inspection["headers"].as_array().map(|a| a.len()).unwrap_or(0));
+        return;
+    }
+    println!("（没找到 4800_JE 样例）");
+}
+
+/// 拿真实的 3300 / 4800 跑一遍映射校验，把拦下测算的具体理由打出来。
+#[test]
+#[ignore = "依赖本机样例目录，手工调查用"]
+fn survey_validate() {
+    for dir in sample_dirs() {
+        if !dir.is_dir() {
+            continue;
+        }
+        for (tb_name, je_name) in [
+            ("TB-3300.xlsx", "3300_JE_2025.01-12.xlsx"),
+            ("TB-4800.xlsx", "4800_JE_2025.01-12.xlsx"),
+        ] {
+            let tb_path = dir.join(tb_name);
+            let je_path = dir.join(je_name);
+            if !tb_path.is_file() || !je_path.is_file() {
+                continue;
+            }
+            println!("\n══════ {tb_name} + {je_name}");
+            let mut params = serde_json::Map::new();
+            for (kind, path, src_key, map_key) in [
+                ("tb", &tb_path, "tbSource", "tbMapping"),
+                ("je", &je_path, "jeSource", "jeMapping"),
+            ] {
+                let source = serde_json::json!({"inputPath": path.to_string_lossy()});
+                let inspection = audit_toolbox_lib::engine_call_for_test(
+                    &format!("fx.inspect_{kind}"),
+                    serde_json::json!({"source": source.clone()}),
+                )
+                .expect("inspect 应当成功");
+                params.insert(src_key.into(), source);
+                params.insert(map_key.into(), inspection["suggestedMapping"].clone());
+            }
+            params.insert("mode".into(), serde_json::json!("combined"));
+            params.insert("reportEnd".into(), serde_json::json!("2025-12-31"));
+            params.insert("fixedEntity".into(), serde_json::json!("3300"));
+            match audit_toolbox_lib::engine_call_for_test(
+                "fx.validate_mapping",
+                serde_json::Value::Object(params),
+            ) {
+                Ok(v) => {
+                    let list = |k: &str| {
+                        v[k].as_array()
+                            .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>())
+                            .unwrap_or_default()
+                    };
+                    for e in list("errors") {
+                        println!("  [错误] {e}");
+                    }
+                    for w in list("warnings") {
+                        println!("  [提示] {w}");
+                    }
+                    if list("errors").is_empty() {
+                        println!("  校验通过");
+                    }
+                }
+                Err(e) => println!("  调用失败: {e:?}"),
+            }
+        }
+    }
+}
+
+/// 存款利息对同一批 TB/JE 的识别情况，看它与汇兑损益是否同口径。
+#[test]
+#[ignore = "依赖本机样例目录，手工调查用"]
+fn survey_deposit() {
+    for dir in sample_dirs() {
+        if !dir.is_dir() {
+            continue;
+        }
+        for name in ["TB-3300.xlsx", "TB-4800.xlsx"] {
+            let path = dir.join(name);
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(v) = audit_toolbox_lib::engine_call_for_test(
+                "deposit.inspect_tb",
+                serde_json::json!({"source": {"inputPath": path.to_string_lossy()}}),
+            ) else {
+                println!("\n══════ {name}：deposit.inspect 调用失败");
+                continue;
+            };
+            let m = v["suggestedMapping"].as_object().cloned().unwrap_or_default();
+            println!("\n══════ {name} 存款利息的 TB 映射");
+            let mut roles: Vec<&String> = m.keys().collect();
+            roles.sort();
+            for role in roles {
+                println!("    {role:<28} {}", m[role]);
+            }
+            let roles_map = v["suggestedAccountRoles"].as_object().cloned().unwrap_or_default();
+            let mut by_role: std::collections::BTreeMap<&str, usize> = Default::default();
+            for value in roles_map.values() {
+                *by_role.entry(value.as_str().unwrap_or("?")).or_default() += 1;
+            }
+            println!("    科目角色分布 {by_role:?}");
+        }
+    }
+}

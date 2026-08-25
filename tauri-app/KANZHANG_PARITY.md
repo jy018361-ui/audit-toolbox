@@ -2,6 +2,24 @@
 
 基线：`tools/kanzhang/kanzhang_app.py`（4,958 行）。目标：React/Tauri + Rust Polars，生产流程不再调用 Python Polars。
 
+## 科目字段：编码与名称已拆成两个角色（2026-08-24）
+
+此前界面上只有一个可多选的「科目名称」槽，编码列（`会计科目`、`科目代码`）和名称列
+（`科目文本`）都落在里面，下拉里根本选不到「科目编码」——统一映射内核明明分得出这两个
+角色，是看账取结果时把它们合并了。现在两个角色各自独立：
+
+- **必填口径变了**：不再要求「科目名称」，改为**编码与名称至少映射一列**
+  （`missingKanzhangRequiredRoles` / `validate_kanzhang_mapping` 同口径）。
+- **科目键不变**：`account_columns()` 按**编码在前、名称在后**拼接，与拆分前
+  `suggest_mapping` 产出的列顺序一致，已有的目标科目选择不会因此对不上。
+- **旧参数仍可读**：`LedgerMapping` 保留 `account` 字段做反序列化兼容，老草稿、
+  老任务参数拼出的科目键与拆分前相同；前端草稿缓存键升到 `v3`。
+- **LLM 复核**：提示词改用 `accountCode` / `accountName`，模型沿用旧名 `account`
+  时前端归到科目编码；另新增一道冲突词过滤（`role_rejects_header`），模型把
+  `预算二级科目描述` 这类列指给科目名称的建议会在应用前被丢弃。
+
+拆分只动角色划分与界面，不改导出口径——下游一切按 `account_columns()` 拼出的科目值走。
+
 | 旧版功能 | Rust/Tauri 对应 | 自动验证 | 状态 |
 | --- | --- | --- | --- |
 | XLSX/XLS/CSV/TXT/Parquet、Sheet、标题行 | `kanzhang.inspect` / `load_table` | Rust 表格测试 | 已接入 |
@@ -9,6 +27,7 @@
 | 预览、右键重设标题行 | React 标题行输入 + 重新读取 | 前端构建 | 等价交互 |
 | 本地字段自动映射、A/B 金额方案互斥 | `suggest_mapping` / `validate_kanzhang_mapping` | 借贷分列、Debit_Credit 测试 | 已修正 |
 | 多列凭证 ID、多列科目组合 | `ledger_id_indexes` / `joined_account` | 组合科目精确匹配测试 | 已修正 |
+| 科目编码与科目名称是两个独立角色 | `LedgerMapping::account_code` / `account_name` + `account_columns` | 科目角色拆分测试（Rust + 前端） | 2026-08-24 拆分 |
 | 映射字段前向填充、异常候选行余额清理 | `preprocess_ledger` | 导出集成测试 | 已接入 |
 | 全凭证扩展筛选 | `filter_ledger_rows` | 完整凭证测试 | 已接入 |
 | 目标科目搜索与穿梭 | `kanzhang.accounts` + `KanzhangParityPage` | `filterAccounts` 前端测试 | 已修正（改为即时过滤） |
@@ -21,9 +40,9 @@
 | 日期月度分布（8 位、Excel 序列、普通日期） | `parse_month` / 类型月度列 | 日期格式测试 | 已接入 |
 | 自定义透视行/列，日期自动按月 | `build_custom_ledger_pivot` | 导出集成测试 | 已接入 |
 | 损益结转整凭证标记并排除分析 | `detect_loss_transfer_ids` | 损益结转测试 | 已接入 |
-| JE 同额正负匹配 | `match_je_rows` | 直接匹配测试 | 已接入 |
-| JE 跨行、跨凭证净额匹配 | `match_je_rows` 第二阶段 | 跨行匹配测试 | 已接入 |
-| 公司/主体参与 JE 分组 | `entity_index` | JE 测试结构覆盖 | 已接入 |
+| JE 同额正负匹配 | 已移出本工具 | — | 见 [JE_SIGN_MARK_PARITY.md](JE_SIGN_MARK_PARITY.md) |
+| JE 跨行、跨凭证净额匹配 | 已移出本工具 | — | 同上 |
+| 公司/主体参与 JE 分组 | 已移出本工具 | — | 同上 |
 | 仅导出部分列 | `exportColumns` | 导出集成测试 | 已接入 |
 | 任务进度、协作取消 | Tauri 任务事件 / `check_cancel` | Rust 任务测试 | 已接入 |
 | Excel 冻结、筛选、金额格式、列宽 | `write_kanzhang_detail_workbook` / `write_pivot_sheet` | 工作簿 Sheet 测试 | 已接入 |
@@ -313,3 +332,24 @@
 
 **验证**（vite dev + 浏览器实测，非仅靠推理）：单击选中、Ctrl 加选后整批拖动、
 从目标区拖回待选、拖到空白处不动、贴边自动滚屏后成功落入目标区，逐项确认通过。
+
+## 2026-08-21 正负数智能标记剪出为独立工具
+
+「启用正负数智能标记」开关连同它产出的三列辅助列
+（【辅助_绝对值】【辅助_符号】【智能匹配状态】）已从本工具**剪除**，
+迁至独立工具「正负数智能标记」（`je_sign_mark`）。
+
+看账这边的变化，逐项列明：
+
+- 导出设置只剩「标记损益结转凭证」一个勾选项；
+- 凭证明细的辅助列只剩【损益结转】一列，原来的三列不再出现，
+  科目名称等原始列相应前移；
+- 每批次结果摘要不再有「JE 直接/跨行 X/Y 对」；
+- `KanzhangParams` 去掉 `enable_je_matching`，`analyze_ledger` 不再调用 `match_je_rows`，
+  `LedgerAnalysis.je_pairs` / `je_cross_pairs` 在看账路径上恒为 0。
+
+**未变**：损益结转识别、凭证透视、宽松/严格凭证类型、自定义透视、剔除明细、
+LLM 分析、两阶段导出与全部命名规则。
+
+这是一次不可逆的口径变更——2026-08-21 之前用看账导出的底稿带那三列，之后不带。
+需要对冲标记请改用「正负数智能标记」。

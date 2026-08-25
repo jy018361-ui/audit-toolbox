@@ -28,13 +28,13 @@ use crate::excel_merger::PauseCheckpoint;
 pub(crate) type Progress<'a> = &'a dyn Fn(&str, usize, usize, &str);
 
 #[derive(Clone, Debug)]
-struct Table {
-    path: PathBuf,
-    sheet: Option<String>,
-    sheets: Vec<String>,
-    header_row: usize,
-    headers: Vec<String>,
-    rows: Vec<Vec<String>>,
+pub(crate) struct Table {
+    pub(crate) path: PathBuf,
+    pub(crate) sheet: Option<String>,
+    pub(crate) sheets: Vec<String>,
+    pub(crate) header_row: usize,
+    pub(crate) headers: Vec<String>,
+    pub(crate) rows: Vec<Vec<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -52,8 +52,10 @@ enum Cell {
     Number(f64),
 }
 
+/// `fa_subtools` 以不透明引用消费合并结果（折旧政策对比复用折旧期间逻辑），
+/// 字段保持模块私有。
 #[derive(Clone, Debug)]
-struct MergeResult {
+pub(crate) struct MergeResult {
     begin: Table,
     end: Table,
     rows: Vec<JoinedRow>,
@@ -71,6 +73,9 @@ pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
         "fa.supplement_inspect" => supplement_inspect(params),
         "fa.review" => llm_review(params, false),
         "fa.supplement_review" => llm_review(params, true),
+        // FA 子工具的短任务在独立模块实现，但分发契约保持在这里：未知
+        // 方法仍然必须报 METHOD_NOT_FOUND。
+        "fa.dep_inspect" | "fa.dep_review" => crate::fa_subtools::call(method, params),
         _ => Err(error(
             "METHOD_NOT_FOUND",
             "未找到 Rust FA List 方法。",
@@ -95,6 +100,11 @@ pub(crate) fn run_job(
         }
         "fa.export" => {
             let result = export(params, progress, cancel, pause);
+            pause.wait()?;
+            result
+        }
+        "fa.dep_export" | "fa.policy_export" => {
+            let result = crate::fa_subtools::run_job(method, params, progress, cancel, pause);
             pause.wait()?;
             result
         }
@@ -369,7 +379,7 @@ fn llm_review(params: Value, supplement: bool) -> Result<Value, AppError> {
     let system = if supplement {
         "你是固定资产审计补充清单映射复核助手。只能使用 payload.headers 中的原始列名。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"新增方式\"}，禁止返回字符串。新增清单角色仅 addition_method/addition_date，file_side=file1；处置清单角色仅 disposal_method/disposal_date/disposal_orig/disposal_dep，file_side=file2。action 只能 fill/review/keep。"
     } else {
-        "你是固定资产清单字段和组合匹配键复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/review/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。"
+        "你是固定资产清单字段和组合匹配键复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/review/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。已映射角色同样必须逐项核对：不得仅凭列名相似判定无需调整，必须结合 samples 中该列的样例核对数据形态——类别列应为少量重复的分类文本，原值/折旧/残值率应为数值，日期列为日期，寿命为月数；若当前映射列的形态不符且 headers 中另有形态更符合的列，必须返回 action=review 的 fieldReviews 建议。payload 中的 suspectMappings 是本地规则发现的疑似错配，必须优先复核。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。"
     };
     let content = request_fa_llm(&settings, system, &payload.to_string())?;
     let parsed = parse_llm_json(&content).ok_or_else(|| {
@@ -408,6 +418,28 @@ fn finalize_llm_review(parsed: Value, payload: Value, supplement: bool) -> Value
         })
         .collect::<Vec<_>>();
     for fallback in local_unmapped_suggestions(&payload) {
+        let role = fallback.get("role").and_then(Value::as_str).unwrap_or("");
+        let side = fallback
+            .get("file_side")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let already_reviewed = suggestions
+            .iter()
+            .chain(reviews.iter())
+            .any(|item| llm_item_targets(item, role, side));
+        if !already_reviewed {
+            suggestions.push(fallback);
+        }
+    }
+    // 本地类别错配检测：LLM 漏报时兜底注入，confidence 0.9 + action review
+    // 会走下方分流进入 fieldReviews，由前端自动应用并进变更清单（可撤销）。
+    // supplement payload 没有该字段，自然跳过。
+    for fallback in payload
+        .get("suspectMappings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
         let role = fallback.get("role").and_then(Value::as_str).unwrap_or("");
         let side = fallback
             .get("file_side")
@@ -466,7 +498,7 @@ fn llm_item_targets(item: &Value, role: &str, side: &str) -> bool {
             .is_some_and(|mapping| mapping.contains_key(side))
 }
 
-fn local_unmapped_suggestions(payload: &Value) -> Vec<Value> {
+pub(crate) fn local_unmapped_suggestions(payload: &Value) -> Vec<Value> {
     ["file1", "file2"]
         .into_iter()
         .flat_map(|side| {
@@ -493,7 +525,159 @@ fn local_unmapped_suggestions(payload: &Value) -> Vec<Value> {
         .collect()
 }
 
-fn sanitize_llm_review_item(item: &mut Value, payload: &Value) {
+/// 类别语义列：列名带 类型/类别/分类/大类 的列即使同时长得像"名称"列
+/// （如“资产类型描述”），也是类别候选，不按名称列排除。
+fn looks_like_category_text(header: &str) -> bool {
+    let normalized = normalize_header(header);
+    ["类型", "类别", "分类", "大类"]
+        .iter()
+        .any(|token| normalized.contains(&normalize_header(token)))
+}
+
+/// 收集某列的去重值：只扫前 2000 行、最多 200 个去重值，控制大表开销。
+/// 列不存在于表头时返回 None。
+fn column_value_set(table: &Table, column: &str) -> Option<std::collections::BTreeSet<String>> {
+    let index = table
+        .headers
+        .iter()
+        .position(|header| header.trim() == column.trim())?;
+    let mut values = std::collections::BTreeSet::new();
+    for row in table.rows.iter().take(2000) {
+        let text = cell(row, index).trim();
+        if !text.is_empty() {
+            values.insert(text.to_owned());
+            if values.len() >= 200 {
+                break;
+            }
+        }
+    }
+    Some(values)
+}
+
+/// 重叠率 = 交集 / min(|A|,|B|)。任一侧为空集时返回 0（没有证据视为不重叠）。
+fn value_overlap_ratio(a: &std::collections::BTreeSet<String>, b: &std::collections::BTreeSet<String>) -> f64 {
+    let smaller = a.len().min(b.len());
+    if smaller == 0 {
+        return 0.0;
+    }
+    let shared = a.intersection(b).count();
+    shared as f64 / smaller as f64
+}
+
+fn mapping_column(mapping: Option<&Value>, key: &str) -> Option<String> {
+    let column = mapping?.get(key).and_then(Value::as_str)?;
+    let trimmed = column.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+fn key_columns(keys: Option<&Value>) -> std::collections::BTreeSet<String> {
+    keys.and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 在表里找与基准类别集重叠率最高的替代列。跳过当前列、匹配键列、
+/// 编码列（looks_like_id）；名称列（looks_like_name）也跳过，但列名本身
+/// 带类别语义的（如“资产类型描述”）除外。重叠率 ≥ 0.5 才算候选。
+fn best_replacement_category_column(
+    table: &Table,
+    current: &str,
+    keys: &std::collections::BTreeSet<String>,
+    reference: &std::collections::BTreeSet<String>,
+) -> Option<(String, f64)> {
+    let mut best: Option<(String, f64)> = None;
+    for header in &table.headers {
+        if header.trim() == current.trim() || keys.contains(header.trim()) {
+            continue;
+        }
+        if looks_like_id(header) || (looks_like_name(header) && !looks_like_category_text(header)) {
+            continue;
+        }
+        let Some(values) = column_value_set(table, header) else {
+            continue;
+        };
+        let ratio = value_overlap_ratio(&values, reference);
+        if ratio >= 0.5 && best.as_ref().is_none_or(|(_, best_ratio)| ratio > *best_ratio) {
+            best = Some((header.clone(), ratio));
+        }
+    }
+    best
+}
+
+/// 本地"类别疑似错配"检测：存量固定资产的类别取值跨年不变，两期清单的
+/// 类别列去重值应当高度重叠。当前类别列与对侧几乎不重叠、且本文件里
+/// 存在与对侧高度重叠的替代列时，产出一条 review 建议交由复核链路呈现。
+/// 阈值从保守（重叠 < 0.2 才触发、替代列 ≥ 0.5 才算候选、基准去重值
+/// 至少 3 个），宁可漏报不可误报。
+fn local_category_mismatch_suggestions(
+    begin: &Table,
+    begin_mapping: Option<&Value>,
+    begin_keys: Option<&Value>,
+    end: &Table,
+    end_mapping: Option<&Value>,
+    end_keys: Option<&Value>,
+) -> Vec<Value> {
+    let mut result = Vec::new();
+    let (Some(begin_col), Some(end_col)) = (
+        mapping_column(begin_mapping, "category"),
+        mapping_column(end_mapping, "category"),
+    ) else {
+        return result;
+    };
+    let (Some(begin_values), Some(end_values)) = (
+        column_value_set(begin, &begin_col),
+        column_value_set(end, &end_col),
+    ) else {
+        return result;
+    };
+    if begin_values.len() < 3 {
+        return result;
+    }
+    if value_overlap_ratio(&end_values, &begin_values) < 0.2 {
+        let end_keys = key_columns(end_keys);
+        if let Some((column, _)) =
+            best_replacement_category_column(end, &end_col, &end_keys, &begin_values)
+        {
+            result.push(json!({
+                "role": "category",
+                "file_side": "file2",
+                "suggested_column": column,
+                "confidence": 0.9,
+                "action": "review",
+                "reason": format!("期初与期末当前类别列取值几乎不重叠，而“{column}”与期初类别高度一致，疑似期末类别映射错列。")
+            }));
+        }
+    }
+    // 对称检查期初侧：期末类别集做基准，期初文件里找替代列。
+    if end_values.len() >= 3 && value_overlap_ratio(&begin_values, &end_values) < 0.2 {
+        let begin_keys = key_columns(begin_keys);
+        if let Some((column, _)) =
+            best_replacement_category_column(begin, &begin_col, &begin_keys, &end_values)
+        {
+            result.push(json!({
+                "role": "category",
+                "file_side": "file1",
+                "suggested_column": column,
+                "confidence": 0.9,
+                "action": "review",
+                "reason": format!("期初与期末当前类别列取值几乎不重叠，而“{column}”与期末类别高度一致，疑似期初类别映射错列。")
+            }));
+        }
+    }
+    result
+}
+
+pub(crate) fn sanitize_llm_review_item(item: &mut Value, payload: &Value) {
     let Some(object) = item.as_object_mut() else {
         return;
     };
@@ -639,6 +823,14 @@ fn main_llm_payload(params: &Value) -> Result<Value, AppError> {
         optional_header(params, "endHeaderRow")?,
         false,
     )?;
+    let suspect_mappings = local_category_mismatch_suggestions(
+        &begin,
+        params.get("beginMapping"),
+        params.get("beginKeys"),
+        &end,
+        params.get("endMapping"),
+        params.get("endKeys"),
+    );
     Ok(json!({
         "file1": main_llm_side_payload(
             &begin,
@@ -651,7 +843,8 @@ fn main_llm_payload(params: &Value) -> Result<Value, AppError> {
             params.get("endMapping"),
             params.get("endKeys"),
             true,
-        )
+        ),
+        "suspectMappings": suspect_mappings
     }))
 }
 
@@ -720,7 +913,7 @@ fn supplement_llm_payload(params: &Value) -> Result<Value, AppError> {
     );
     Ok(Value::Object(payload))
 }
-fn sample_columns(table: &Table) -> Value {
+pub(crate) fn sample_columns(table: &Table) -> Value {
     let mut map = Map::new();
     for (i, h) in table.headers.iter().enumerate() {
         let values = table
@@ -735,7 +928,7 @@ fn sample_columns(table: &Table) -> Value {
     Value::Object(map)
 }
 
-fn request_fa_llm(config: &Value, prompt: &str, text: &str) -> Result<String, AppError> {
+pub(crate) fn request_fa_llm(config: &Value, prompt: &str, text: &str) -> Result<String, AppError> {
     let api_type = config
         .get("apiType")
         .or_else(|| config.get("api_type"))
@@ -855,7 +1048,7 @@ fn fa_llm_error_message(value: &Value) -> String {
         .take(300)
         .collect()
 }
-fn parse_llm_json(content: &str) -> Option<Value> {
+pub(crate) fn parse_llm_json(content: &str) -> Option<Value> {
     let text = content
         .trim()
         .trim_start_matches("```json")
@@ -1025,7 +1218,7 @@ fn export(
     )
 }
 
-fn merge(
+pub(crate) fn merge(
     params: &Value,
     progress: Progress<'_>,
     cancel: &AtomicBool,
@@ -1390,11 +1583,11 @@ fn load_supplement(config: &Value) -> Result<Table, AppError> {
     )
 }
 
-fn table_inspection(table: &Table) -> Value {
+pub(crate) fn table_inspection(table: &Table) -> Value {
     json!({"path":table.path.to_string_lossy(),"kind":if table.sheets.is_empty(){"text"}else{"excel"},"sheets":table.sheets,"selectedSheet":table.sheet,"displayName":match &table.sheet{Some(s)=>format!("{} & {}",table.path.file_name().unwrap_or_default().to_string_lossy(),s),None=>table.path.file_name().unwrap_or_default().to_string_lossy().into_owned()},"detectedHeaderRow":table.header_row,"headerMode":"auto","headers":table.headers,"preview":table.rows.iter().take(12).collect::<Vec<_>>(),"dimensions":{"rows":table.rows.len(),"columns":table.headers.len()}})
 }
 
-fn suggest_mapping(table: &Table) -> Map<String, Value> {
+pub(crate) fn suggest_mapping(table: &Table) -> Map<String, Value> {
     let h = &table.headers;
     let mut m = Map::new();
     let rules: [(&str, &[&str]); 16] = [
@@ -1746,7 +1939,7 @@ fn sheet_name_affinity(path: &Path, sheet: &str) -> i32 {
     score
 }
 
-fn load_table(
+pub(crate) fn load_table(
     path: &Path,
     requested_sheet: Option<&str>,
     header: Option<usize>,
@@ -2280,7 +2473,7 @@ fn numeric_text(value: &str) -> Option<f64> {
 
 /// Header fill used by the legacy exporter.  Kept as a constant because the
 /// guide sheet, the business sheets and the summary sheet must all match.
-const LEGACY_HEADER_FILL: &str = "#E9EEF5";
+pub(crate) const LEGACY_HEADER_FILL: &str = "#E9EEF5";
 
 /// Grey tint applied to every file2 (期末) column on 合并数据.
 const LEGACY_FILE2_FILL: &str = "#E6E6E6";
@@ -2333,7 +2526,10 @@ fn legacy_display_len(value: &str, header: &str) -> usize {
 }
 
 fn legacy_column_width(sheet: &str, longest: usize) -> f64 {
-    let max_width = if matches!(sheet, "合并数据" | "数据透视表" | "折旧期间") {
+    let max_width = if matches!(
+        sheet,
+        "合并数据" | "数据透视表" | "折旧期间" | "折旧政策对比"
+    ) {
         26.0
     } else {
         45.0
@@ -2537,7 +2733,7 @@ fn write_xlsx(
     check_cancel(cancel)?;
     write_business_sheets(&mut wb, result, params, &header, cancel)?;
     check_cancel(cancel)?;
-    write_depreciation_period_sheet(&mut wb, result, params, &header, cancel)?;
+    write_depreciation_period_sheet(&mut wb, result, params, &header, cancel, "折旧期间")?;
     check_cancel(cancel)?;
     if fa_llm_enabled(params) {
         write_llm_analysis(&mut wb, result, params)?;
@@ -3463,12 +3659,13 @@ fn write_pivot_sheet(
     )
 }
 
-fn write_depreciation_period_sheet(
+pub(crate) fn write_depreciation_period_sheet(
     wb: &mut Workbook,
     result: &MergeResult,
     params: &Value,
     header: &Format,
     cancel: &AtomicBool,
+    sheet_name: &str,
 ) -> Result<(), AppError> {
     // Legacy titled the paired columns with the mapped source column of each
     // workbook, and spelled the formula out in the last header.
@@ -3487,7 +3684,7 @@ fn write_depreciation_period_sheet(
     ];
     write_string_sheet_labelled(
         wb,
-        "折旧期间",
+        sheet_name,
         &headers.iter().map(String::as_str).collect::<Vec<_>>(),
         &build_depreciation_period(result, params),
         header,
@@ -3531,7 +3728,7 @@ fn write_anomaly_sheet(
 /// ≤12月卡片明细.  Mirrors legacy `parse_life_months_value`: 年 is deliberately
 /// absent from the suffix list, because legacy left "5年" unparsed rather than
 /// guess a month count from it.
-fn parse_life_cell(value: &str) -> Option<f64> {
+pub(crate) fn parse_life_cell(value: &str) -> Option<f64> {
     let cleaned = value
         .chars()
         .filter(|c| !c.is_whitespace() && *c != ',' && *c != '，')
@@ -3573,7 +3770,7 @@ fn parse_life_cell(value: &str) -> Option<f64> {
 /// value profile.  A per-row "value <= 50 means years" rule looks equivalent but
 /// is not: it turns a genuine 12-month tooling column into 144 months, and it
 /// reacts differently to two cards in the same column.
-fn life_scale_for_column(header: &str, values: &[f64]) -> f64 {
+pub(crate) fn life_scale_for_column(header: &str, values: &[f64]) -> f64 {
     let name = header
         .replace("_文件1", "")
         .replace("_文件2", "")
@@ -3670,7 +3867,7 @@ fn mapped_life(result: &MergeResult, row: &JoinedRow, params: &Value, side: u8, 
     }
 }
 
-fn parse_fa_date(value: &str) -> Option<NaiveDate> {
+pub(crate) fn parse_fa_date(value: &str) -> Option<NaiveDate> {
     let text = value
         .trim()
         .split([' ', 'T'])
@@ -3697,7 +3894,7 @@ fn parse_fa_date(value: &str) -> Option<NaiveDate> {
 /// `write_string_sheet`, which then stamps it with the money format.
 /// Anything that is not a recognisable date is passed through untouched, so
 /// placeholders like "[新增时间?]" survive.
-fn display_date(value: &str) -> String {
+pub(crate) fn display_date(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -3743,7 +3940,7 @@ fn period_label(date: &str, params: &Value, current: &str, outside: &str) -> Str
     }
 }
 
-fn residual_rate(raw: f64, original: f64) -> f64 {
+pub(crate) fn residual_rate(raw: f64, original: f64) -> f64 {
     if raw.abs() <= f64::EPSILON {
         0.0
     } else if raw > 100.0 && original.abs() > f64::EPSILON {
@@ -4548,7 +4745,7 @@ fn write_string_sheet(
 /// sheets gets annotated 期初, which on an audit schedule reads as a claim about
 /// where the figure came from.
 #[allow(clippy::too_many_arguments)]
-fn write_string_sheet_labelled(
+pub(crate) fn write_string_sheet_labelled(
     wb: &mut Workbook,
     name: &str,
     headers: &[&str],
@@ -4647,7 +4844,7 @@ fn write_string_sheet_labelled(
         && headers.iter().any(|header| *header == "处置时间")
         && headers.iter().any(|header| *header == "处置原值")
         && headers.iter().any(|header| *header == "处置折旧");
-    if name == "FA List" || mapped_disposal_measurement {
+    if name == "FA List" || name == "折旧测算" || mapped_disposal_measurement {
         append_depreciation_formulas(
             ws,
             name,
@@ -4756,7 +4953,7 @@ fn field_source_for_header(
                 "根据期初卡片聚合"
             }
         }
-        "折旧期间" => {
+        "折旧期间" | "折旧政策对比" => {
             if header.contains("判断") {
                 return "逻辑判断";
             }
@@ -4769,6 +4966,12 @@ fn field_source_for_header(
                 "根据期初卡片聚合"
             }
         }
+        "折旧测算" => match header {
+            "使用寿命(月)" | "残值率" => "期末映射/换算",
+            _ => "取自期末清单",
+        },
+        // 税法最低折旧年限参考：fa_subtools::write_tax_reference_sheet 专用写表器
+        // 负责（含政策原文列与官方链接），不再经过本函数。
         "异常清单" => match header {
             "资产类别" | "资产编码" | "资产名称" | "期末原值" => "取自期末卡片",
             "原始行号" | "行内容" => "取自合并数据",
@@ -4808,7 +5011,7 @@ fn append_depreciation_formulas(
     header_format: &Format,
     source_format: &Format,
 ) -> Result<(), AppError> {
-    let required = if sheet_name == "FA List" {
+    let required = if matches!(sheet_name, "FA List" | "折旧测算") {
         [
             "入账开始日期",
             "使用寿命(月)",
@@ -4834,10 +5037,13 @@ fn append_depreciation_formulas(
     else {
         return Ok(());
     };
-    let start = headers
-        .len()
-        .max(if sheet_name == "FA List" { 12 } else { 15 })
-        + 1;
+    // FA List 保持旧版 N..U 列位（至少 12 列起步）；处置清单_BKD 同理 15 列。
+    // 折旧测算页固定 8 列映射字段，公式块紧随其后（中间保留一格间隔列）。
+    let start = match sheet_name {
+        "FA List" => headers.len().max(12) + 1,
+        "处置清单_BKD" => headers.len().max(15) + 1,
+        _ => headers.len() + 1,
+    };
     let output = [
         "月折旧额",
         "本年应计提折旧月份",
@@ -5055,7 +5261,7 @@ fn round_money(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
-fn display_number(value: f64) -> String {
+pub(crate) fn display_number(value: f64) -> String {
     if value.abs() < f64::EPSILON {
         "0".into()
     } else if value.fract().abs() < f64::EPSILON {
@@ -5154,6 +5360,18 @@ fn sheet_explanation(name: &str) -> (&'static str, &'static str, &'static str) {
             "根据期初卡片和期末卡片字段聚合，并由工具计算影响金额。",
             "关注判断结果为不一致、待确认或影响金额较大的项目。",
         ),
+        "折旧政策对比" => (
+            "按类别、寿命和残值率比较期初与期末折旧政策，测算当年折旧影响。",
+            "根据期初卡片和期末卡片字段聚合，并由工具计算影响金额。",
+            "关注判断结果为不一致、待确认或影响金额较大的项目，并与税法最低折旧年限参考页对照。",
+        ),
+        "折旧测算" => (
+            "以期末固定资产清单为基础生成折旧测算表，逐卡重算月折旧额与累计折旧。",
+            "基础字段取自上传的期末清单；测算与差异字段由 Excel 公式实时计算。",
+            "关注入账开始日期与使用寿命的完整性，以及测算折旧与账面折旧的差异。",
+        ),
+        // 税法最低折旧年限参考：说明文字由 fa_subtools::write_tax_reference_sheet
+        // 内联维护（含官方原文链接提示），不再经过本函数。
         "LLM分析" => (
             "将套表中的关键变动和异常以文字方式汇总。",
             "变动金额、笔数和示例由工具根据套表结果计算；LLM 仅用于辅助表述，需结合底稿和原始卡片复核。",
@@ -5617,7 +5835,7 @@ fn write_unmatched(path: &Path, result: &MergeResult, cancel: &AtomicBool) -> Re
     replace_output(&partial, path)
 }
 
-fn replace_output(partial: &Path, output: &Path) -> Result<(), AppError> {
+pub(crate) fn replace_output(partial: &Path, output: &Path) -> Result<(), AppError> {
     if !output.exists() {
         return fs::rename(partial, output).map_err(io_error);
     }
@@ -5679,7 +5897,7 @@ fn output_path(params: &Value, end: &Path) -> Result<PathBuf, AppError> {
         )))
     }
 }
-fn required_path(params: &Value, name: &str) -> Result<PathBuf, AppError> {
+pub(crate) fn required_path(params: &Value, name: &str) -> Result<PathBuf, AppError> {
     let value = params
         .get(name)
         .and_then(Value::as_str)
@@ -5696,7 +5914,7 @@ fn required_path(params: &Value, name: &str) -> Result<PathBuf, AppError> {
         Ok(path)
     }
 }
-fn optional_header(params: &Value, name: &str) -> Result<Option<usize>, AppError> {
+pub(crate) fn optional_header(params: &Value, name: &str) -> Result<Option<usize>, AppError> {
     match params.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(v)) if v.trim().is_empty() || v == "auto" || v == "自动" => Ok(None),
@@ -5736,7 +5954,7 @@ fn required_strings(
         Ok(values)
     }
 }
-fn strings(value: Option<&Value>) -> Vec<String> {
+pub(crate) fn strings(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
         .map(|a| {
@@ -5753,10 +5971,10 @@ fn index_opt(table: &Table, value: Option<&Value>) -> Option<usize> {
         .and_then(Value::as_str)
         .and_then(|v| table.headers.iter().position(|h| h == v))
 }
-fn cell(row: &[String], index: usize) -> &str {
+pub(crate) fn cell(row: &[String], index: usize) -> &str {
     row.get(index).map(String::as_str).unwrap_or("")
 }
-fn number(v: &str) -> f64 {
+pub(crate) fn number(v: &str) -> f64 {
     v.trim()
         .trim_end_matches('%')
         .replace(',', "")
@@ -5776,13 +5994,13 @@ fn json_cell(value: Option<&Value>) -> String {
         Some(v) => v.to_string(),
     }
 }
-fn normalize_header(v: &str) -> String {
+pub(crate) fn normalize_header(v: &str) -> String {
     v.chars()
         .filter(|c| !c.is_whitespace() && !"_-()/（）[]【】".contains(*c))
         .flat_map(char::to_lowercase)
         .collect()
 }
-fn check_cancel(cancel: &AtomicBool) -> Result<(), AppError> {
+pub(crate) fn check_cancel(cancel: &AtomicBool) -> Result<(), AppError> {
     if cancel.load(Ordering::Relaxed) {
         Err(error("JOB_CANCELLED", "任务已取消。", None))
     } else {
@@ -5792,7 +6010,7 @@ fn check_cancel(cancel: &AtomicBool) -> Result<(), AppError> {
 fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppError {
     AppError::new(code, message, false, detail)
 }
-fn io_error(e: std::io::Error) -> AppError {
+pub(crate) fn io_error(e: std::io::Error) -> AppError {
     if e.raw_os_error() == Some(32) {
         return AppError::new(
             "FA_OUTPUT_IN_USE",
@@ -6337,6 +6555,152 @@ mod tests {
             value["fieldReviews"][0]["suggested_mapping"],
             json!({"file1":"期末原值","file2":"资产原值"})
         );
+    }
+    #[test]
+    fn local_category_mismatch_flags_end_side_when_values_do_not_overlap() {
+        let begin = in_memory_table(
+            &["coding", "固定资产类别", "固定资产名称"],
+            &[
+                &["B001", "房屋及建筑物", "冷量台土建工程"],
+                &["B002", "机器设备", "高速冲床"],
+                &["B003", "运输工具", "商务车"],
+                &["B004", "电子设备", "服务器"],
+            ],
+        );
+        let end = in_memory_table(
+            &["资产编码", "资产分类", "资产类型描述"],
+            &[
+                &["E001", "C-01", "房屋及建筑物"],
+                &["E002", "C-02", "机器设备"],
+                &["E003", "C-03", "运输工具"],
+                &["E004", "C-04", "电子设备"],
+            ],
+        );
+        let suggestions = local_category_mismatch_suggestions(
+            &begin,
+            Some(&json!({"category": "固定资产类别"})),
+            Some(&json!(["coding"])),
+            &end,
+            Some(&json!({"category": "资产分类"})),
+            Some(&json!(["资产编码"])),
+        );
+        assert_eq!(suggestions.len(), 1);
+        let item = &suggestions[0];
+        assert_eq!(item["role"], "category");
+        assert_eq!(item["file_side"], "file2");
+        assert_eq!(item["suggested_column"], "资产类型描述");
+        assert_eq!(item["action"], "review");
+        assert!(item["reason"].as_str().unwrap().contains("疑似期末类别映射错列"));
+    }
+    #[test]
+    fn local_category_mismatch_keeps_quiet_when_categories_overlap() {
+        let begin = in_memory_table(
+            &["coding", "固定资产类别"],
+            &[
+                &["B001", "房屋及建筑物"],
+                &["B002", "机器设备"],
+                &["B003", "运输工具"],
+            ],
+        );
+        let end = in_memory_table(
+            &["资产编码", "资产分类"],
+            &[
+                &["E001", "房屋及建筑物"],
+                &["E002", "机器设备"],
+                &["E003", "运输工具"],
+            ],
+        );
+        let suggestions = local_category_mismatch_suggestions(
+            &begin,
+            Some(&json!({"category": "固定资产类别"})),
+            None,
+            &end,
+            Some(&json!({"category": "资产分类"})),
+            None,
+        );
+        assert!(suggestions.is_empty());
+    }
+    #[test]
+    fn local_category_mismatch_requires_enough_distinct_categories() {
+        let begin = in_memory_table(
+            &["coding", "固定资产类别"],
+            &[&["B001", "房屋及建筑物"], &["B002", "机器设备"]],
+        );
+        let end = in_memory_table(
+            &["资产编码", "资产分类"],
+            &[&["E001", "C-01"], &["E002", "C-02"]],
+        );
+        let suggestions = local_category_mismatch_suggestions(
+            &begin,
+            Some(&json!({"category": "固定资产类别"})),
+            None,
+            &end,
+            Some(&json!({"category": "资产分类"})),
+            None,
+        );
+        assert!(suggestions.is_empty());
+    }
+    #[test]
+    fn finalize_injects_local_suspect_mapping_when_llm_missed_it() {
+        let value = finalize_llm_review(
+            json!({"suggestions":[],"fieldReviews":[],"matchReview":{"action":"keep"}}),
+            json!({
+                "file1":{"headers":["固定资产类别"]},
+                "file2":{"headers":["资产分类","资产类型描述"]},
+                "suspectMappings":[{
+                    "role":"category",
+                    "file_side":"file2",
+                    "suggested_column":"资产类型描述",
+                    "confidence":0.9,
+                    "action":"review",
+                    "reason":"期初与期末当前类别列取值几乎不重叠，疑似期末类别映射错列。"
+                }]
+            }),
+            false,
+        );
+        let reviews = value["fieldReviews"].as_array().unwrap();
+        assert!(reviews.iter().any(|item| {
+            item["role"] == "category"
+                && item["file_side"] == "file2"
+                && item["suggested_column"] == "资产类型描述"
+        }));
+    }
+    #[test]
+    fn finalize_does_not_duplicate_suspect_mapping_llm_already_returned() {
+        let value = finalize_llm_review(
+            json!({
+                "suggestions":[{
+                    "role":"category",
+                    "file_side":"file2",
+                    "suggested_column":"资产类型描述",
+                    "confidence":0.9,
+                    "action":"review",
+                    "reason":"数据形态与类别不符"
+                }],
+                "fieldReviews":[],
+                "matchReview":{"action":"keep"}
+            }),
+            json!({
+                "file1":{"headers":["固定资产类别"]},
+                "file2":{"headers":["资产分类","资产类型描述"]},
+                "suspectMappings":[{
+                    "role":"category",
+                    "file_side":"file2",
+                    "suggested_column":"资产类型描述",
+                    "confidence":0.9,
+                    "action":"review",
+                    "reason":"本地规则兜底"
+                }]
+            }),
+            false,
+        );
+        let count = value["fieldReviews"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["role"] == "category" && item["file_side"] == "file2")
+            .count();
+        assert_eq!(count, 1);
     }
     #[test]
     fn llm_noop_message_matches_ui_contract() {

@@ -93,6 +93,11 @@ def build_desktop(npm: str, cargo: str, *, reuse_dependencies: bool = False) -> 
     installers = sorted((TAURI_TARGET / "release" / "bundle" / "nsis").glob("*-setup.exe"))
     if not installers:
         raise RuntimeError("Tauri 构建后未找到 NSIS 安装包。请确认 bundle.targets=nsis。")
+    # bundle/nsis 会累积历史版本的安装包，必须按本次 VERSION 精确匹配，
+    # 不能取 sorted[0]（否则会拿到字母序最前的旧版本安装包拷进 dist）。
+    installers = [p for p in installers if f"_{VERSION}_" in p.name]
+    if not installers:
+        raise RuntimeError(f"Tauri 构建后未找到 v{VERSION} 的 NSIS 安装包。")
     DIST.mkdir(parents=True, exist_ok=True)
     runtime_target = DIST / f"E点通工具箱-v{VERSION}-runtime-win-x64.exe"
     installer_target = DIST / f"E点通工具箱-v{VERSION}-win-x64-setup.exe"

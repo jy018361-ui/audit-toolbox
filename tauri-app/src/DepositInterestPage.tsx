@@ -458,6 +458,8 @@ function RateTierCard({tiers, custom, onChange, onReset}: {
   tiers?: RateTiers; custom: Record<string, number>;
   onChange: (key: string, rate: number) => void; onReset: () => void;
 }) {
+  // 默认只展示前两档（活期/协定），其余折叠；useState 必须在下方 !tiers 提前返回之前调用
+  const [folded, setFolded] = useState(true);
   const pct = (value: number | null | undefined, fallback = "—") =>
     value == null ? fallback : `${(value * 100).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}%`;
   if (!tiers) {
@@ -482,7 +484,7 @@ function RateTierCard({tiers, custom, onChange, onReset}: {
         <th>大行挂牌<small>{tiers.listedDate}</small></th>
         <th>实务常见区间</th><th>本次采用（%，可修改）</th><th>实务说明</th>
       </tr></thead>
-      <tbody>{tiers.tiers.map((tier) => {
+      <tbody id="deposit-rate-tier-rows">{(folded ? tiers.tiers.slice(0, 2) : tiers.tiers).map((tier) => {
         const applied = depositEffectiveTierRate(tier, custom);
         const overridden = custom[tier.key] !== undefined;
         return <tr key={tier.key} className={applied === undefined ? "deposit-tier-unset" : undefined}>
@@ -499,7 +501,12 @@ function RateTierCard({tiers, custom, onChange, onReset}: {
           <td className="deposit-tier-note">{tier.practiceNote}</td>
         </tr>;
       })}</tbody>
-    </table></div>
+    </table>
+    {tiers.tiers.length > 2 && <button type="button" className="deposit-tier-fold"
+      aria-controls="deposit-rate-tier-rows" aria-expanded={!folded}
+      onClick={() => setFolded((f) => !f)}>
+      {folded ? `展开其余 ${tiers.tiers.length - 2} 个档位 ▾` : "收起，只保留前两档 ▴"}
+    </button>}</div>
     {changed > 0 && <p className="deposit-tier-actions">
       已改写 {changed} 档默认利率。<button type="button" onClick={onReset}>全部恢复内置默认值</button>
     </p>}

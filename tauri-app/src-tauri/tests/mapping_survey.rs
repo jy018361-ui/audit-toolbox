@@ -50,13 +50,21 @@ fn is_tool_output(name: &str) -> bool {
 }
 
 fn survey_one(path: &Path) {
-    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     if name.starts_with("~$") || is_tool_output(&name) {
         return;
     }
     let kind = kind_of(&name);
     let params = serde_json::json!({"source": {"inputPath": path.to_string_lossy()}});
-    let method = if kind == "tb" { "fx.inspect_tb" } else { "fx.inspect_je" };
+    let method = if kind == "tb" {
+        "fx.inspect_tb"
+    } else {
+        "fx.inspect_je"
+    };
     println!("\n══════ {name}  [{}]", kind.to_uppercase());
     let result = match audit_toolbox_lib::engine_call_for_test(method, params) {
         Ok(v) => v,
@@ -74,9 +82,17 @@ fn survey_one(path: &Path) {
     );
     let headers: Vec<String> = result["headers"]
         .as_array()
-        .map(|all| all.iter().filter_map(|x| x.as_str()).map(str::to_owned).collect())
+        .map(|all| {
+            all.iter()
+                .filter_map(|x| x.as_str())
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default();
-    let mapping = result["suggestedMapping"].as_object().cloned().unwrap_or_default();
+    let mapping = result["suggestedMapping"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
     // 反查：每一列落到了哪个角色，没落上的也要看见。
     let mut by_column: Vec<(String, String)> =
         headers.iter().map(|h| (h.clone(), String::new())).collect();
@@ -115,7 +131,9 @@ fn survey_one(path: &Path) {
                     .as_array()
                     .map(|all| all.iter().filter_map(|x| x.as_str()).collect())
                     .unwrap_or_default();
-                println!("  [形态] 未完整命中：最接近 {id}（{label}），缺 {missing:?}，可选槽半拉子 {partial:?}");
+                println!(
+                    "  [形态] 未完整命中：最接近 {id}（{label}），缺 {missing:?}，可选槽半拉子 {partial:?}"
+                );
             }
         }
     }
@@ -123,9 +141,17 @@ fn survey_one(path: &Path) {
 
 /// 对单份样例跑 LLM 映射复核，打印模型提出的 changes 供人工与 coding 结论对照。
 fn review_one(path: &Path, kind: &str) {
-    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     let params = serde_json::json!({"source": {"inputPath": path.to_string_lossy()}});
-    let method = if kind == "tb" { "fx.inspect_tb" } else { "fx.inspect_je" };
+    let method = if kind == "tb" {
+        "fx.inspect_tb"
+    } else {
+        "fx.inspect_je"
+    };
     let Ok(inspection) = audit_toolbox_lib::engine_call_for_test(method, params) else {
         println!("  {name}: inspect 失败，跳过 LLM 复核");
         return;
@@ -136,7 +162,11 @@ fn review_one(path: &Path, kind: &str) {
         "hardcodedCandidates": inspection["mappingCandidates"],
         "currentMapping": inspection["suggestedMapping"],
     });
-    let review_method = if kind == "tb" { "fx.review_tb_mapping" } else { "fx.review_je_mapping" };
+    let review_method = if kind == "tb" {
+        "fx.review_tb_mapping"
+    } else {
+        "fx.review_je_mapping"
+    };
     println!("\n──── LLM 复核 {name}");
     match audit_toolbox_lib::engine_call_for_test(
         review_method,
@@ -158,7 +188,12 @@ fn review_one(path: &Path, kind: &str) {
                         change["currentColumn"].as_str().unwrap_or("(空)"),
                         change["suggestedColumn"].as_str().unwrap_or("?"),
                         change["confidence"].as_f64().unwrap_or(0.0),
-                        change["reason"].as_str().unwrap_or("").chars().take(80).collect::<String>(),
+                        change["reason"]
+                            .as_str()
+                            .unwrap_or("")
+                            .chars()
+                            .take(80)
+                            .collect::<String>(),
                     );
                 }
             }
@@ -218,13 +253,21 @@ fn survey_llm_review() {
     files.sort();
     let mut seen = 0usize;
     for path in files {
-        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         if name.starts_with("~$") || is_tool_output(&name) {
             continue;
         }
         // 大文件（几十万行）的 LLM 复核一次就要把 8 行样例发出去，够用；
         // 但调查聚焦表头映射，跳过超大文件节省额度，coding 侧已覆盖。
-        if path.metadata().map(|m| m.len() > 5_000_000).unwrap_or(false) {
+        if path
+            .metadata()
+            .map(|m| m.len() > 5_000_000)
+            .unwrap_or(false)
+        {
             println!("（跳过大文件：{name}）");
             continue;
         }
@@ -279,8 +322,77 @@ fn survey_account_roles() {
                     println!("    [{role}] {account}");
                 }
             }
-            println!("  共 {} 个科目，未分配 {unassigned} 个；分布 {by_role:?}", all.len());
+            println!(
+                "  共 {} 个科目，未分配 {unassigned} 个；分布 {by_role:?}",
+                all.len()
+            );
         }
+    }
+}
+
+/// 对全部原始 TB 打印货币性科目和低置信建议，用于把规则调优与人工基准逐项对照。
+#[test]
+#[ignore = "依赖本机样例目录，手工调查用"]
+fn survey_account_role_details() {
+    let Some(dir) = sample_dirs().into_iter().find(|path| path.is_dir()) else {
+        panic!("样例目录不存在");
+    };
+    for name in [
+        "TB-3300.xlsx",
+        "TB-4800.xlsx",
+        "Oct+BS+PL+TB.xlsx",
+        "科目余额表.xls",
+    ] {
+        let path = dir.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        let source = serde_json::json!({"inputPath": path.to_string_lossy()});
+        let inspection = audit_toolbox_lib::engine_call_for_test(
+            "fx.inspect_tb",
+            serde_json::json!({"source": source.clone()}),
+        )
+        .expect("TB 应当可读取");
+        let roles = audit_toolbox_lib::engine_call_for_test(
+            "fx.account_roles",
+            serde_json::json!({"tbSource": source, "tbMapping": inspection["suggestedMapping"]}),
+        )
+        .expect("科目应当可分类");
+        let all = roles["accounts"].as_array().cloned().unwrap_or_default();
+        let mut by_role = std::collections::BTreeMap::<String, usize>::new();
+        let mut review = 0usize;
+        println!("\n══════ {name} 分类明细");
+        for item in &all {
+            let account = item["account"].as_str().unwrap_or("");
+            let role = item["suggestedRole"].as_str().unwrap_or("");
+            *by_role.entry(role.to_owned()).or_default() += 1;
+            let needs = item["needsConfirmation"].as_bool().unwrap_or(false);
+            if needs {
+                review += 1;
+            }
+            if name.starts_with("Oct")
+                || name == "科目余额表.xls"
+                || account.contains("保证金")
+                || needs
+                || matches!(
+                    role,
+                    "monetary_asset" | "monetary_liability" | "fx_gain_loss"
+                )
+            {
+                println!(
+                    "  [{}{}] {}｜{}",
+                    role,
+                    if needs { "·建议复核" } else { "" },
+                    account,
+                    item["reason"].as_str().unwrap_or("")
+                );
+            }
+        }
+        println!(
+            "  合计 {}；建议复核 {}；分布 {by_role:?}",
+            all.len(),
+            review
+        );
     }
 }
 
@@ -311,11 +423,16 @@ fn bench_ledger_cache() {
         audit_toolbox_lib::engine_call_for_test("kanzhang.inspect", params.clone())
             .expect("二次读取应当成功");
         let warm = t1.elapsed();
-        println!("
-══════ 看账读取缓存 · {}", path.display());
-        println!("  行数 {} 列数 {}",
+        println!(
+            "
+══════ 看账读取缓存 · {}",
+            path.display()
+        );
+        println!(
+            "  行数 {} 列数 {}",
             first["dimensions"]["rows"],
-            first["headers"].as_array().map(|a| a.len()).unwrap_or(0));
+            first["headers"].as_array().map(|a| a.len()).unwrap_or(0)
+        );
         println!("  首次（解析源文件＋写缓存）: {cold:?}");
         println!("  再次（命中缓存）        : {warm:?}");
         if warm < cold {
@@ -344,9 +461,14 @@ fn bench_large_journal() {
         )
         .expect("inspect 应当成功");
         println!("  inspect（含读表样本）: {:?}", t0.elapsed());
-        println!("    行数 {} 列数 {}",
+        println!(
+            "    行数 {} 列数 {}",
             inspection["rowCount"],
-            inspection["headers"].as_array().map(|a| a.len()).unwrap_or(0));
+            inspection["headers"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0)
+        );
         return;
     }
     println!("（没找到 4800_JE 样例）");
@@ -433,14 +555,20 @@ fn survey_deposit() {
                 println!("\n══════ {name}：deposit.inspect 调用失败");
                 continue;
             };
-            let m = v["suggestedMapping"].as_object().cloned().unwrap_or_default();
+            let m = v["suggestedMapping"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
             println!("\n══════ {name} 存款利息的 TB 映射");
             let mut roles: Vec<&String> = m.keys().collect();
             roles.sort();
             for role in roles {
                 println!("    {role:<28} {}", m[role]);
             }
-            let roles_map = v["suggestedAccountRoles"].as_object().cloned().unwrap_or_default();
+            let roles_map = v["suggestedAccountRoles"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
             let mut by_role: std::collections::BTreeMap<&str, usize> = Default::default();
             for value in roles_map.values() {
                 *by_role.entry(value.as_str().unwrap_or("?")).or_default() += 1;
@@ -476,10 +604,14 @@ fn survey_rollforward() {
             "tbMapping": tb_i["suggestedMapping"],
             "jeMapping": je_i["suggestedMapping"],
         });
-        println!("
-══════ 4800 TB+JE 余额滚动校验");
-        println!("  JE 映射 direction={} functionalAmount={}",
-            je_i["suggestedMapping"]["direction"], je_i["suggestedMapping"]["functionalAmount"]);
+        println!(
+            "
+══════ 4800 TB+JE 余额滚动校验"
+        );
+        println!(
+            "  JE 映射 direction={} functionalAmount={}",
+            je_i["suggestedMapping"]["direction"], je_i["suggestedMapping"]["functionalAmount"]
+        );
         if let Ok(sc) = audit_toolbox_lib::engine_call_for_test(
             "fx.sign_probe",
             serde_json::json!({
@@ -531,28 +663,47 @@ fn survey_unrealized() {
             "tbMapping": tb_i["suggestedMapping"],
             "jeMapping": je_i["suggestedMapping"],
         });
-        println!("
-══════ 4800 完整测算");
-        println!("  TB uniformCurrency（本位币预填值）= {}", tb_i["uniformCurrency"]);
-        println!("  TB functionalCurrency 映射到 = {}", tb_i["suggestedMapping"]["functionalCurrency"]);
-        println!("  TB currency 映射到 = {}", tb_i["suggestedMapping"]["currency"]);
+        println!(
+            "
+══════ 4800 完整测算"
+        );
+        println!(
+            "  TB uniformCurrency（本位币预填值）= {}",
+            tb_i["uniformCurrency"]
+        );
+        println!(
+            "  TB functionalCurrency 映射到 = {}",
+            tb_i["suggestedMapping"]["functionalCurrency"]
+        );
+        println!(
+            "  TB currency 映射到 = {}",
+            tb_i["suggestedMapping"]["currency"]
+        );
         match audit_toolbox_lib::engine_call_for_test("fx.preview_probe", params) {
             Ok(v) => {
                 let s = &v["summary"];
-                println!("  未实现缺少TB余额基础的键数: {}", s["unrealizedMissingBalanceKeys"]);
+                println!(
+                    "  未实现缺少TB余额基础的键数: {}",
+                    s["unrealizedMissingBalanceKeys"]
+                );
                 println!("  余额基础完整: {}", s["unrealizedBalanceBasisComplete"]);
                 println!("  已实现: {}", s["realizedGainLoss"]);
                 println!("  未实现: {}", s["unrealizedAdjustment"]);
                 println!("  TB汇兑损益: {}", s["tbFxGainLoss"]);
                 println!("  差异率: {}", s["differenceRatio"]);
-                println!("  滚动校验通过: {} 失配 {}", s["rollforwardPassed"], s["rollforwardIssueCount"]);
+                println!(
+                    "  滚动校验通过: {} 失配 {}",
+                    s["rollforwardPassed"], s["rollforwardIssueCount"]
+                );
                 // 缺少 TB 余额基础的账户明细
-                if let Some(q) = v["quality"].as_array() {
+                if let Some(q) = v["dataQuality"].as_array() {
                     let mut shown = 0;
                     for item in q {
                         if item["type"] == "未实现测算缺少TB余额基础" && shown < 6 {
-                            println!("    缺基础: {} / {} / {}",
-                                item["entity"], item["account"], item["currency"]);
+                            println!(
+                                "    缺基础: {} / {} / {}",
+                                item["entity"], item["account"], item["currency"]
+                            );
                             shown += 1;
                         }
                     }
@@ -561,12 +712,17 @@ fn survey_unrealized() {
                 if let Some(c) = v["classificationControls"].as_array() {
                     let mut counts = std::collections::BTreeMap::<String, usize>::new();
                     for item in c {
-                        *counts.entry(item["classification"].as_str().unwrap_or("?").into()).or_default() += 1;
+                        *counts
+                            .entry(item["classification"].as_str().unwrap_or("?").into())
+                            .or_default() += 1;
                     }
                     println!("  凭证分类分布: {counts:?}");
                 }
             }
-            Err(e) => println!("  失败：{}", format!("{e:?}").chars().take(400).collect::<String>()),
+            Err(e) => println!(
+                "  失败：{}",
+                format!("{e:?}").chars().take(400).collect::<String>()
+            ),
         }
         return;
     }
@@ -587,12 +743,23 @@ fn survey_uniform_currency() {
             serde_json::json!({"source": {"inputPath": tb.to_string_lossy()}}),
         )
         .expect("inspect 应当成功");
-        println!("
-══════ TB-4800 本位币识别");
+        println!(
+            "
+══════ TB-4800 本位币识别"
+        );
         println!("  uniformCurrency（前端预填值）= {}", v["uniformCurrency"]);
-        println!("  functionalCurrency 映射列   = {}", v["suggestedMapping"]["functionalCurrency"]);
-        println!("  currency 映射列             = {}", v["suggestedMapping"]["currency"]);
-        println!("  currencyText 映射列         = {}", v["suggestedMapping"]["currencyText"]);
+        println!(
+            "  functionalCurrency 映射列   = {}",
+            v["suggestedMapping"]["functionalCurrency"]
+        );
+        println!(
+            "  currency 映射列             = {}",
+            v["suggestedMapping"]["currency"]
+        );
+        println!(
+            "  currencyText 映射列         = {}",
+            v["suggestedMapping"]["currencyText"]
+        );
         return;
     }
     println!("（没找到 TB-4800）");

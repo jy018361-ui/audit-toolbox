@@ -48,6 +48,10 @@
 .deposit-tier-note{max-width:52ch;white-space:normal;color:var(--muted-foreground);font-size:12px}
 .deposit-tier-actions{margin:10px 0 0;color:var(--muted-foreground);font-size:13px}
 .deposit-tier-actions button{margin-left:6px;padding:3px 10px;border:1px solid var(--border);border-radius:7px;background:var(--background);color:var(--foreground);cursor:pointer;font-size:12px}
+/* 档位表折叠开关：默认只展示前两档，此按钮贴在表格底部作尾行，点击展开/收起其余档位 */
+.deposit-tier-fold{display:block;width:100%;padding:8px 10px;border:0;background:var(--muted);color:var(--muted-foreground);cursor:pointer;font-size:12px;text-align:center;white-space:nowrap}
+.deposit-tier-fold:hover{color:var(--foreground);background:color-mix(in srgb,var(--muted) 70%,var(--foreground) 6%)}
+.deposit-tier-fold:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
 .deposit-tier-source{margin-top:14px}
 .deposit-tier-source summary{cursor:pointer;color:var(--muted-foreground);font-size:13px}
 .deposit-tier-source ul{margin:10px 0;padding-left:20px;color:var(--muted-foreground);font-size:13px;line-height:1.7}

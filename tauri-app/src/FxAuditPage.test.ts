@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { fxAllowedModes, fxApplyJobResult, fxDefaultMode, fxDropTargetAt, fxMergeJobResult, fxMissingRequired, fxPreviewTokenFor, fxReportStart, fxRunMappingReviews, fxAttachRole, fxDetachRole} from "./FxAuditPage";
+import {
+  fxAllowedModes,
+  fxApplyJobResult,
+  fxAttachRole,
+  fxDefaultMode,
+  fxDetachRole,
+  fxDropTargetAt,
+  fxMergeJobResult,
+  fxMissingRequired,
+  fxPreviewTokenFor,
+  fxReportStart,
+  fxResolveAccountRoles,
+  fxRunMappingReviews,
+  uncoveredDetail,
+} from "./FxAuditPage";
 describe("fx audit mode selection",()=>{
   it("uses two-point unrealized mode for TB only",()=>{expect(fxDefaultMode(false,true)).toBe("unrealized");expect(fxAllowedModes(false,true)).toEqual(["unrealized"])});
   it("uses realized mode for JE only",()=>expect(fxDefaultMode(true,false)).toBe("realized"));
@@ -13,6 +27,18 @@ describe("fx audit upload and mapping parity",()=>{
   it("accepts a currency clue column when the TB has no currency column",()=>{expect(fxMissingRequired("tb",{accountCode:"科目编码",accountName:"科目名称",currencyText:"文本",openingFunctionalAmount:"期初本币",closingFunctionalAmount:"期末本币",ytdFunctionalDebit:"借方",ytdFunctionalCredit:"贷方"},true,"默认主体")).toEqual([])});
   it("still accepts the legacy combined account mapping",()=>{expect(fxMissingRequired("tb",{account:["科目代码","科目名称"],currency:"币种",openingFunctionalAmount:"期初本币",closingFunctionalAmount:"期末本币",ytdFunctionalDebit:"借方",ytdFunctionalCredit:"贷方"},true,"默认主体")).toEqual([])});
   it("prompts when neither ytd nor period debit/credit pairs are complete",()=>{const ytdOnlyDebit={accountCode:"科目编码",accountName:"科目名称",currency:"币种",openingFunctionalAmount:"期初本币",closingFunctionalAmount:"期末本币",ytdFunctionalDebit:"借方"};expect(fxMissingRequired("tb",ytdOnlyDebit,true,"默认主体")).toEqual(["本年累计（或本期）借/贷方发生额"]);const periodOk={...ytdOnlyDebit,periodFunctionalDebit:"本期借方",periodFunctionalCredit:"本期贷方"};expect(fxMissingRequired("tb",periodOk,true,"默认主体")).toEqual([])});
+  it("未覆盖凭证把待确认与无法测算分开说", () => {
+    // 用户实测的困惑：界面说「359 张待确认或无法测算」，可下面列出的凭证
+    // 全都已经分好类了。两类的处理方式完全不同，合成一句会自相矛盾。
+    expect(uncoveredDetail({pendingReviewCount:359,pendingUnclassifiedCount:0,pendingUnmeasurableCount:359}))
+      .toBe("359 张已分类但缺重算证据");
+    expect(uncoveredDetail({pendingReviewCount:10,pendingUnclassifiedCount:4,pendingUnmeasurableCount:6}))
+      .toBe("4 张待确认分类；6 张已分类但缺重算证据");
+    expect(uncoveredDetail({pendingReviewCount:0})).toBe("全部凭证均已纳入测算");
+    // 旧结果没有拆分字段时退回总数，不假装知道构成。
+    expect(uncoveredDetail({pendingReviewCount:7})).toBe("7 张未纳入测算");
+  });
+
   it("derives the audit year start from the balance sheet date",()=>expect(fxReportStart("2024-12-31")).toBe("2024-01-01"));
   it("starts JE and TB mapping reviews from one action",async()=>{const started:string[]=[];const pending:Record<string,()=>void>={};const task=fxRunMappingReviews(kind=>new Promise<void>(resolve=>{started.push(kind);pending[kind]=resolve}));expect(started).toEqual(["je","tb"]);pending.je();pending.tb();await task});
   it("keeps preview data when export adds an output path",()=>{const preview={summary:{difference:12},voucherDetail:[{voucherId:"1"}]};const exported={summary:{difference:12},outputPaths:["workpaper.xlsx"]};expect(fxMergeJobResult(preview,exported)).toEqual({...preview,...exported})});
@@ -20,6 +46,21 @@ describe("fx audit upload and mapping parity",()=>{
   it("accepts a preview result before the completed event",()=>{const preview={summary:{difference:12}};expect(fxApplyJobResult(undefined,preview,"fx.preview")).toEqual(preview)});
   it("merges export output into the visible preview instead of replacing it",()=>{const preview={summary:{difference:12},voucherDetail:[{voucherId:"1"}]};expect(fxApplyJobResult(preview,{outputPaths:["workpaper.xlsx"]},"fx.export")).toEqual({...preview,outputPaths:["workpaper.xlsx"]})});
   it("passes a real preview token only to export",()=>{const result={previewToken:"preview-123"};expect(fxPreviewTokenFor("fx.export",result)).toBe("preview-123");expect(fxPreviewTokenFor("fx.preview",result)).toBeUndefined();expect(fxPreviewTokenFor("fx.export",{})).toBeUndefined()});
+  it("uses backend TB classification by code and preserves only manual overrides",()=>{
+    const accounts=["1003 其他货币资金","6703 信用减值损失-应收账款","2602 租赁负债"];
+    const resolved=fxResolveAccountRoles(
+      accounts,
+      {"1003 Other cash":"monetary_asset","6703 Credit impairment":"other_pnl"},
+      {"2602 租赁负债":"monetary_liability"},
+      {"2602 租赁负债":"non_monetary"},
+      {"2602 租赁负债":true},
+    );
+    expect(resolved).toEqual({
+      "1003 其他货币资金":"monetary_asset",
+      "6703 信用减值损失-应收账款":"other_pnl",
+      "2602 租赁负债":"non_monetary",
+    });
+  });
 });
 
 describe("同一列的多重映射", () => {

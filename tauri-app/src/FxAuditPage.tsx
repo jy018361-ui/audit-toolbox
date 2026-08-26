@@ -24,6 +24,8 @@ type Inspection = {
   foreignCurrencyCandidates?: Array<{column:string;confidence:number;foreignCurrencies:string[]}>;
   uniformCurrency?: string|null;
   sampledPreview?: boolean;
+  accountRoleSuggestions?: Record<string,string>;
+  accountRoleDetails?: Record<string,{role:string;confidence:number;needsConfirmation:boolean;reason:string;subtype?:string|null}>;
 };
 type SourceClassification = {kind:"je"|"tb";confidence:number;needsLlm:boolean;scores:{je:number;tb:number};reasons:string[];headers:string[];preview:string[][];sheet:string;headerRow:number;headerDepth:number};
 type VoucherClassification = "已实现汇兑损益"|"未实现汇兑损益"|"待确认";
@@ -83,11 +85,30 @@ const ROLE_GROUPS: Record<"je"|"tb", Array<{title:string; roles:string[]}>> = {
 };
 
 const ROLE_OPTIONS = [
-  ["cash","外币现金及银行"],["monetary_asset","应收/其他货币性资产"],
-  ["monetary_liability","应付/借款/其他货币性负债"],["fx_gain_loss","汇兑损益"],
-  ["non_monetary","非货币性项目"],["excluded","排除项目"],["review","待确认（预付/预收等）"],
-  ["unassigned","未分配"],
+  ["monetary_asset","货币性资产"],["monetary_liability","货币性负债"],
+  ["non_monetary","非货币性项目"],["fx_gain_loss","汇兑损益"],
+  ["other_pnl","其他损益/成本科目"],
 ];
+
+export function fxResolveAccountRoles(
+  accounts:string[],
+  jeSuggestions:Record<string,string>={},
+  tbSuggestions:Record<string,string>={},
+  current:Record<string,string>={},
+  touched:Record<string,boolean>={},
+){
+  const exact={...jeSuggestions,...tbSuggestions};
+  const byCode=new Map<string,string>();
+  for(const [account,role] of Object.entries(jeSuggestions))byCode.set(account.trim().split(/\s+/)[0],role);
+  // TB 是科目主数据，编码相同时优先使用 TB 的名称与分类结论。
+  for(const [account,role] of Object.entries(tbSuggestions))byCode.set(account.trim().split(/\s+/)[0],role);
+  return Object.fromEntries(accounts.map(account=>[
+    account,
+    touched[account]&&current[account]
+      ?current[account]
+      :exact[account]??byCode.get(account.trim().split(/\s+/)[0])??"non_monetary",
+  ]));
+}
 
 export function fxDefaultMode(hasJe: boolean, hasTb: boolean): Mode {
   if (hasJe && hasTb) return "combined";
@@ -101,6 +122,25 @@ export function fxReportStart(balanceSheetDate:string){return /^\d{4}-\d{2}-\d{2
 export function fxDropTargetAt(x:number,y:number,jeRect:Pick<DOMRect,"left"|"right"|"top"|"bottom">|undefined,tbRect:Pick<DOMRect,"left"|"right"|"top"|"bottom">|undefined):"je"|"tb"|undefined{const hit=(rect:typeof jeRect)=>Boolean(rect&&x>=rect.left&&x<=rect.right&&y>=rect.top&&y<=rect.bottom);return hit(jeRect)?"je":hit(tbRect)?"tb":undefined}
 export async function fxRunMappingReviews<T>(run:(kind:"je"|"tb")=>Promise<T>):Promise<[T,T]>{const [je,tb]=await Promise.all([run("je"),run("tb")]);return [je,tb]}
 export function fxMergeJobResult(current:Record<string,unknown>|undefined,next:Record<string,unknown>){return{...current,...next}}
+/**
+ * 未覆盖凭证的说明文字。**待确认与无法测算必须分开说**——
+ * 前者等人判断，后者是已经分好类、但缺原币/账面价值/汇率证据算不出来。
+ * 合成一句「N 张待确认或无法测算」，会让用户对着一屏已分好类的凭证发懵：
+ * 明明都分类了，怎么还说待确认。
+ */
+export function uncoveredDetail(summary:Record<string,unknown>):string{
+  const total=Number(summary.pendingReviewCount??0);
+  const unclassified=Number(summary.pendingUnclassifiedCount??0);
+  const unmeasurable=Number(summary.pendingUnmeasurableCount??0);
+  if(!total)return "全部凭证均已纳入测算";
+  // 旧结果没有拆分字段时退回总数，不假装知道构成。
+  if(!unclassified&&!unmeasurable)return `${total} 张未纳入测算`;
+  const parts=[];
+  if(unclassified)parts.push(`${unclassified} 张待确认分类`);
+  if(unmeasurable)parts.push(`${unmeasurable} 张已分类但缺重算证据`);
+  return parts.join("；");
+}
+
 export function fxApplyJobResult(current:Record<string,unknown>|undefined,next:unknown,method:"fx.preview"|"fx.export"){
   if(!next||typeof next!=="object"||Array.isArray(next))return current;
   return method==="fx.export"?fxMergeJobResult(current,next as Record<string,unknown>):next as Record<string,unknown>;
@@ -125,6 +165,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   const [entityCurrencies,setEntityCurrencies] = useState<Record<string,string>>({});
   const [fixedEntity,setFixedEntity] = useState("默认主体");
   const [accountRoles,setAccountRoles] = useState<Record<string,string>>({});
+  const [accountRolesTouched,setAccountRolesTouched] = useState<Record<string,boolean>>({});
   const [manualClassifications,setManualClassifications] = useState<Record<string,VoucherClassification>>({});
   const [classificationDrafts,setClassificationDrafts] = useState<Record<string,VoucherClassification>>({});
   const [tbCurrencyConfirmed,setTbCurrencyConfirmed] = useState(false);
@@ -161,7 +202,9 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     ])));
   },[entities,tb,currencyTouched]);
   useEffect(()=>{if(entities.length===1)setFixedEntity(entities[0])},[entities]);
-  useEffect(()=>setAccountRoles(v=>Object.fromEntries(accounts.map(account=>{const direct=suggestRole(account);const code=account.trim().split(/\s+/)[0];const related=direct==="unassigned"?accounts.map(suggestRole).find((role,index)=>role!=="unassigned"&&accounts[index].trim().split(/\s+/)[0]===code):undefined;return[account,v[account]??related??direct]}))),[accounts]);
+  useEffect(()=>setAccountRoles(current=>fxResolveAccountRoles(
+    accounts,je?.accountRoleSuggestions,tb?.accountRoleSuggestions,current,accountRolesTouched,
+  )),[accounts,je?.accountRoleSuggestions,tb?.accountRoleSuggestions,accountRolesTouched]);
   useEffect(()=>{
     const drops=listenPositionedFileDrops(({paths,x,y})=>{const rect=uploadDropRef.current?.getBoundingClientRect();if(!rect||x<rect.left||x>rect.right||y<rect.top||y>rect.bottom)return;void classifyAndInspect(paths);});
     const jobs=listenJobEvents(event=>{if(event.jobId!==activeJob.current)return;setJob(event);if(event.result)setResult(current=>fxApplyJobResult(current,event.result,activeJobMethod.current));if(event.phase==="completed"){setBusy(false);setActiveStage(undefined);if(event.result)setCompletedStage(activeJobMethod.current);else{setCompletedStage(undefined);setError("任务进程已结束，但系统未收到测算结果。请重新测算；若再次出现，结果传输诊断会保留此异常。")}}else if(event.phase==="failed"||event.phase==="cancelled"){setBusy(false);setActiveStage(undefined);setCompletedStage(undefined);const p=event.result as {error?:{userMessage?:string}}|undefined;setError(p?.error?.userMessage??event.message)}});
@@ -170,7 +213,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
 
   async function browse(){const picked=await pickPath("files","选择JE或TB文件",["xlsx","xls","xlsm","csv","txt","tsv","parquet"]);if(!picked)return;void classifyAndInspect(Array.isArray(picked)?picked:[picked])}
   async function classifyAndInspect(paths:string[]){const files=paths.filter(p=>/\.(xlsx?|xlsm|csv|txt|tsv|parquet)$/i.test(p));if(!files.length)return;setBusy(true);setError("");setSourceStatus("正在识别文件类型、表头和字段…");const failures:string[]=[];try{for(const path of files){try{const scripted=await engineCall("fx.classify_source",{source:{inputPath:path,sheet:"",headerRow:0,headerDepth:0}}) as SourceClassification;let kind=scripted.kind;let source="脚本";if(scripted.needsLlm){const llm=await engineCall("fx.classify_source_llm",{payload:{path,headers:scripted.headers,sampleRows:scripted.preview,scriptScores:scripted.scores}}) as {kind?:"je"|"tb"};if(llm.kind)kind=llm.kind;source="脚本无法确定，已由LLM"}const response=await engineCall("fx.inspect_"+kind,{source:{inputPath:path,sheet:scripted.sheet,headerRow:scripted.headerRow,headerDepth:scripted.headerDepth}}) as Inspection;applyInspection(kind,path,response);setSourceStatus(`${files.length} 个文件已识别；${kind.toUpperCase()} 由${source}判定。`)}catch(e){failures.push(`${fileName(path)}：${errorText(e)}`)}}if(failures.length)setError(failures.join("；"))}finally{setBusy(false)}}
-  function applyInspection(kind:"je"|"tb",path:string,response:Inspection){if(response.suggestedBalanceSheetDate)setReportEnd(response.suggestedBalanceSheetDate);else if(response.dataYears?.length===1)setReportEnd(`${response.dataYears[0]}-12-31`);setReviewStatus(v=>({...v,[kind]:""}));if(kind==="je"){setManualClassifications({});setClassificationDrafts({});setJePath(path);setJe(response);setJeMapping(response.suggestedMapping)}else{setTbPath(path);setTb(response);setTbMapping(response.suggestedMapping);setTbCurrencyConfirmed(!response.foreignCurrencyNeedsConfirmation)}}
+  function applyInspection(kind:"je"|"tb",path:string,response:Inspection){if(response.suggestedBalanceSheetDate)setReportEnd(response.suggestedBalanceSheetDate);else if(response.dataYears?.length===1)setReportEnd(`${response.dataYears[0]}-12-31`);setReviewStatus(v=>({...v,[kind]:""}));setAccountRoles({});setAccountRolesTouched({});if(kind==="je"){setManualClassifications({});setClassificationDrafts({});setJePath(path);setJe(response);setJeMapping(response.suggestedMapping)}else{setTbPath(path);setTb(response);setTbMapping(response.suggestedMapping);setTbCurrencyConfirmed(!response.foreignCurrencyNeedsConfirmation)}}
   async function inspect(kind:"je"|"tb",over?:Partial<{sheet:string;headerRow:number;headerDepth:number}>){
     setBusy(true);setError("");try{const current=kind==="je"?je:tb;const response=await engineCall("fx.inspect_"+kind,{source:{inputPath:kind==="je"?jePath:tbPath,sheet:over?.sheet??current?.sheet??"",headerRow:over?.headerRow??current?.headerRow??0,headerDepth:over?.headerDepth??current?.headerDepth??0}}) as Inspection;
       applyInspection(kind,kind==="je"?jePath:tbPath,response)
@@ -238,7 +281,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     <PageHeader eyebrow="外币审计" title={tool.name} detail="按凭证识别结算事件，按官方人民币汇率中间价重算，并生成可追踪Excel底稿。" />
     <ErrorBox error={error} onDismiss={()=>setError("")}/>
     <section className="fx-mode-bar">{([["realized","仅已实现"],["unrealized","仅未实现"],["combined","已实现＋未实现"]] as Array<[Mode,string]>).map(([value,label])=><button key={value} type="button" className={mode===value?"active":""} disabled={!allowedModes.includes(value)} onClick={()=>setMode(value)}>{label}</button>)}</section>
-    <Card><CardHeader><CardTitle>上传审计数据</CardTitle></CardHeader><CardContent><p className="fx-hint">JE和TB使用同一入口；系统先按表格结构自动识别，无法确定时再调用LLM。</p><FileDropInput containerRef={uploadDropRef} value={[jePath&&`JE：${fileName(jePath)}`,tbPath&&`TB：${fileName(tbPath)}`].filter(Boolean).join("；")} disabled={busy||reviewingAny} placeholder="拖放或选择JE、TB文件（可同时选择）" onBrowse={()=>void browse()} onDragStateChange={()=>{}} onClear={()=>{setJePath("");setTbPath("");setJe(undefined);setTb(undefined);setJeMapping({});setTbMapping({});setManualClassifications({});setClassificationDrafts({});setSourceStatus("")}}/>{sourceStatus&&<p className="fx-source-status" aria-live="polite">{sourceStatus}</p>}</CardContent></Card>
+    <Card><CardHeader><CardTitle>上传审计数据</CardTitle></CardHeader><CardContent><p className="fx-hint">JE和TB使用同一入口；系统先按表格结构自动识别，无法确定时再调用LLM。</p><FileDropInput containerRef={uploadDropRef} value={[jePath&&`JE：${fileName(jePath)}`,tbPath&&`TB：${fileName(tbPath)}`].filter(Boolean).join("；")} disabled={busy||reviewingAny} placeholder="拖放或选择JE、TB文件（可同时选择）" onBrowse={()=>void browse()} onDragStateChange={()=>{}} onClear={()=>{setJePath("");setTbPath("");setJe(undefined);setTb(undefined);setJeMapping({});setTbMapping({});setAccountRoles({});setAccountRolesTouched({});setManualClassifications({});setClassificationDrafts({});setSourceStatus("")}}/>{sourceStatus&&<p className="fx-source-status" aria-live="polite">{sourceStatus}</p>}</CardContent></Card>
     <div className="fx-source-grid">
       {jePath&&<SourceCard title="已识别：JE 凭证明细" hint="已实现测算及月度未实现重估识别的数据源" path={jePath} inspection={je} disabled={busy||reviewingAny} onClear={()=>{setJePath("");setJe(undefined);setJeMapping({})}} onInspect={()=>void inspect("je")} onHeaderChange={(headerRow,headerDepth,sheet)=>void inspect("je",{headerRow,headerDepth,sheet})}/>}
       {tbPath&&<SourceCard title="已识别：TB 科目余额表" hint="未实现测算和财务费用—汇兑损益勾稽的数据源" path={tbPath} inspection={tb} disabled={busy||reviewingAny} onClear={()=>{setTbPath("");setTb(undefined);setTbMapping({})}} onInspect={()=>void inspect("tb")} onHeaderChange={(headerRow,headerDepth,sheet)=>void inspect("tb",{headerRow,headerDepth,sheet})}/>}
@@ -251,7 +294,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     </div>
     {(je||tb)&&<div className="fx-source-grid">
       <Card><CardHeader><CardTitle>公司本位币</CardTitle></CardHeader><CardContent className="fx-list">{tb?.uniformCurrency&&<p className="fx-hint">TB 的币种列整列都是 {tb.uniformCurrency}，已按主体本位币预填；账户币种改从科目名称/文本识别。若该列确实是交易币种，请在此改回。</p>}{entities.length?entities.map(entity=><label key={entity}><span>{entity}</span><input value={entityCurrencies[entity]??defaultFunctionalCurrency} maxLength={3} onChange={e=>setEntityCurrency(entity,e.target.value)}/></label>):<><label><span>文件无主体列，固定主体</span><input value={fixedEntity} onChange={e=>setFixedEntity(e.target.value)}/></label><label><span>本位币</span><input value={entityCurrencies[fixedEntity]??defaultFunctionalCurrency} maxLength={3} onChange={e=>setEntityCurrency(fixedEntity,e.target.value)}/></label></>}</CardContent></Card>
-      <Card><CardHeader><CardTitle>高级设置</CardTitle></CardHeader><CardContent><details><summary>科目分类（通常无需修改）</summary><div className="fx-list fx-accounts">{accounts.map(account=><label key={account}><span title={account}>{account}</span><select value={accountRoles[account]??"unassigned"} onChange={e=>setAccountRoles(v=>({...v,[account]:e.target.value}))}>{ROLE_OPTIONS.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>)}</div></details></CardContent></Card>
+      <Card><CardHeader><CardTitle>高级设置</CardTitle></CardHeader><CardContent><details><summary>科目分类（通常无需修改）</summary><p className="fx-hint">系统按统一词典和科目编码归入五类；低置信项目仍有默认类别，仅提示复核，不会显示“未分配”。</p><div className="fx-list fx-accounts">{accounts.map(account=>{const detail=tb?.accountRoleDetails?.[account]??je?.accountRoleDetails?.[account];return <label key={account}><span title={detail?`${account}\n${detail.reason}（置信度 ${Math.round(detail.confidence*100)}%）`:account}>{account}{detail?.needsConfirmation&&<small> 建议复核</small>}</span><select value={accountRoles[account]??"non_monetary"} onChange={e=>{setAccountRolesTouched(v=>({...v,[account]:true}));setAccountRoles(v=>({...v,[account]:e.target.value}))}}>{ROLE_OPTIONS.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>})}</div></details></CardContent></Card>
     </div>}
     <Card><CardHeader><CardTitle>测算与底稿</CardTitle></CardHeader><CardContent>
       <div className="fx-run-grid"><label>资产负债表日<input type="date" value={reportEnd} onChange={e=>setReportEnd(e.target.value)}/></label><label>输出文件<input value={outputPath} readOnly placeholder="默认保存到源文件目录"/></label><Button variant="secondary" onClick={async()=>{const path=await pickPath("save","保存审计底稿",["xlsx"],"汇兑损益测算.xlsx");if(typeof path==="string")setOutputPath(path)}}>选择位置</Button></div>
@@ -423,12 +466,11 @@ function FxResult({result,busy,classificationDrafts,onClassificationChange,onRec
     {summary.unrealizedBalanceBasisComplete===false&&<p className="fa-missing-hint">未实现测算余额基础不完整：{String(summary.unrealizedMissingBalanceKeys??0)} 个账户币种余额键未取得可唯一对应的TB端点，已隔离且未按零期初测算。当前结果属于受限结果。</p>}
     <div className="fx-bridge-step"><div className="fx-step-label"><b>1</b><span>形成自动测算</span></div><div className="fx-bridge-equation">{metric("已实现汇兑损益",summary.realizedGainLoss)}<span className="fx-operator" aria-hidden="true">＋</span>{metric("未实现汇兑损益",summary.unrealizedAdjustment)}<span className="fx-operator" aria-hidden="true">＝</span>{metric("自动测算合计",summary.automaticMeasuredFxGainLoss,undefined,"total")}</div></div>
     <div className="fx-bridge-step"><div className="fx-step-label"><b>2</b><span>先比较已覆盖项目</span></div><div className="fx-bridge-equation">{metric("自动测算合计",summary.automaticMeasuredFxGainLoss)}<span className="fx-operator compare" aria-hidden="true">对比</span>{metric("已覆盖凭证账面金额",summary.coveredBookFxGainLoss,`已实现差异 ${amount(summary.realizedMeasurementDifference)}；未实现差异 ${amount(summary.unrealizedMeasurementDifference)}`)}<span className="fx-operator" aria-hidden="true">＝</span>{metric("已覆盖项目测算差异",summary.coveredMeasurementDifference,undefined,"total")}</div></div>
-    <div className="fx-bridge-step comparison"><div className="fx-step-label"><b>3</b><span>解释完整TB差异</span></div><div className="fx-bridge-equation">{metric("已覆盖项目测算差异",summary.coveredMeasurementDifference)}<span className="fx-operator" aria-hidden="true">－</span>{metric("未覆盖账面金额",summary.uncoveredTbFxGainLoss,`${String(summary.pendingReviewCount??0)} 张待确认或无法测算凭证`)}<span className="fx-operator" aria-hidden="true">＝</span>{metric("完整TB总差异",tbKnown?(summary.difference??0):"无法比较",tbKnown?`TB汇兑损益 ${amount(summary.tbFxGainLoss)}；差异率 ${percent(summary.differenceRatio)}`:undefined,tbKnown?(passed?"pass":"warning"):"warning")}</div></div>
+    <div className="fx-bridge-step comparison"><div className="fx-step-label"><b>3</b><span>解释完整TB差异</span></div><div className="fx-bridge-equation">{metric("已覆盖项目测算差异",summary.coveredMeasurementDifference)}<span className="fx-operator" aria-hidden="true">－</span>{metric("未覆盖账面金额",summary.uncoveredTbFxGainLoss,uncoveredDetail(summary))}<span className="fx-operator" aria-hidden="true">＝</span>{metric("完整TB总差异",tbKnown?(summary.difference??0):"无法比较",tbKnown?`TB汇兑损益 ${amount(summary.tbFxGainLoss)}；差异率 ${percent(summary.differenceRatio)}`:undefined,tbKnown?(passed?"pass":"warning"):"warning")}</div></div>
     {rollforward.length>0&&<section className="fx-unrealized-module"><div><h4>外币货币性项目余额滚动与未实现损益测算</h4><p>期初余额＋正常业务JE发生额－客户已入账未实现损益及其冲回＝计算前余额；月末原币余额×官方汇率形成审计余额。被分类为“未实现汇兑损益”的凭证只用于账面比较，不作为审计测算金额。</p></div><div className="fx-unrealized-metrics">{metric("月度账户测算行",rollforward.length)}{metric("已识别未实现类凭证",clientRevaluations.length)}{metric("审计未实现汇兑损益",summary.unrealizedAdjustment)}{metric("与客户入账差异",unrealizedComparisonDifference,undefined,"warning")}</div></section>}
     {groups.length>0&&<div className="fx-classification-review"><div className="fx-classification-heading"><div><h4>按借贷科目组合批量确认</h4><p>分类仍只有“已实现汇兑损益”“未实现汇兑损益”和“待确认”。未实现类凭证会从正常JE发生额中剔除，并在账户余额测算完成后与审计结果比较；不会直接采用该凭证金额作为测算结果。</p></div><Button disabled={busy} onClick={()=>void onRecalculate()}>{busy?"重新测算中…":"重新测算"}</Button></div><div className="fx-classification-list">{groups.map(group=>{const selected=[...new Set(group.items.map(item=>classificationDrafts[item.voucherId]??item.classification))];const value=selected.length===1?selected[0]:"待确认";const amount=group.items.reduce((sum,item)=>sum+Number(item.bookedFxGainLoss??0),0);const failed=group.items.filter(item=>item.measurementStatus?.startsWith("无法测算")).length;const first=group.items[0];return <label key={group.key}><span><b>{group.label}</b><div className="fx-pattern-names">{accountSide("借方科目",first.debitAccounts)}{accountSide("贷方科目",first.creditAccounts)}</div><small>{group.items.length} 张凭证；账面汇兑损益 {amount.toLocaleString("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2})}{failed?`；${failed} 张缺少重算证据`:""}</small></span><select disabled={busy} value={value} onChange={e=>onClassificationChange(group.items.map(item=>item.voucherId),e.target.value as VoucherClassification)}><option>已实现汇兑损益</option><option>未实现汇兑损益</option><option>待确认</option></select></label>})}</div></div>}
   </section>
 }
-function suggestRole(account:string){if(/银行|现金|bank|cash|\b(boc|boa|hsbc|cmb)\b/i.test(account))return"cash";if(/应收|receivable|accts?\s*rec|a\/r|interco cust/i.test(account))return"monetary_asset";if(/应付|借款|payable|accts?\s*pay|a\/p|loan|interco vend/i.test(account))return"monetary_liability";if(/汇兑|汇率|exchange\s*(gain|loss)|fx\s*(gain|loss)|cur\s*remeasur\s*g\/l|currency\s*remeasur|fx\s*transl\s*cogs|foreign\s*exch|forex\s*g\/l/i.test(account))return"fx_gain_loss";if(/预付|预收|prepaid|advance/i.test(account))return"review";return"unassigned"}
 function fileName(path:string){return path.split(/[\\/]/).pop()??path}
 function outputsFrom(value:Record<string,unknown>|undefined){return(value?.outputPaths??[]) as string[]}
 function errorText(value:unknown){if(typeof value==="string")return value;if(value&&typeof value==="object"){const v=value as Record<string,unknown>;return String(v.userMessage??v.message??v.detail??"处理失败，请重试。")}return"处理失败，请重试。"}

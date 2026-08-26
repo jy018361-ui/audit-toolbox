@@ -362,8 +362,15 @@ fn calculate_tb(params: &Value) -> Result<Vec<LoanRow>, AppError> {
     let rate_source = optional_source(params, "rateLedgerSource")?;
     // 贷方列写的是绝对值还是已带负号，全表判一次，不逐行猜。
     let tb_convention = tb_sign_convention(&tb, &tm);
+    let je_convention = je_sign_convention(&je, &jm);
+    let tb_leaf = ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| {
+        mapped_names(&tm, "tb", role)
+    });
     let mut out = vec![];
-    for row in &tb.rows {
+    for (row_index, row) in tb.rows.iter().enumerate() {
+        if !tb_leaf[row_index] {
+            continue;
+        }
         let account = account_text(&tb, row, &tm, "tb");
         let id = text(&tb, row, &tm, "loanId");
         if id.is_empty() || account.is_empty() {
@@ -392,38 +399,32 @@ fn calculate_tb(params: &Value) -> Result<Vec<LoanRow>, AppError> {
                 continue;
             }
             matched += 1;
-            let debit = num_role(&je, jr, &jm, "je", "functionalDebit");
-            let credit = num_role(&je, jr, &jm, "je", "functionalCredit");
-            if debit != 0.0 || credit != 0.0 {
-                reductions += debit.abs();
-                additions += credit.abs();
+            let net = ledger_mapping::signed_amount(
+                &je_amount_inputs(&je, jr, &jm),
+                je_convention,
+            );
+            if net > 0.0 {
+                reductions += net;
+            } else if net < 0.0 {
+                additions += -net;
+            }
+            if net != 0.0 {
                 if let Some(value) = row_date(&je, jr, &jm, "date") {
-                    if credit != 0.0 {
-                        events.push((value, credit.abs()));
-                    }
-                    if debit != 0.0 {
-                        events.push((value, -debit.abs()));
-                    }
-                }
-            } else {
-                let amount = num_role(&je, jr, &jm, "je", "functionalAmount");
-                let direction = text(&je, jr, &jm, "direction");
-                if direction.contains('借') || amount < 0.0 {
-                    reductions += amount.abs();
-                    if let Some(value) = row_date(&je, jr, &jm, "date") {
-                        events.push((value, -amount.abs()));
-                    }
-                } else {
-                    additions += amount.abs();
-                    if let Some(value) = row_date(&je, jr, &jm, "date") {
-                        events.push((value, amount.abs()));
-                    }
+                    // 借款本金台账以贷方增加为正，正好是公共“借正贷负”净额的反号。
+                    events.push((value, -net));
                 }
             }
         }
         if matched == 0 {
-            additions = num_role(&tb, row, &tm, "tb", "ytdFunctionalCredit");
-            reductions = num_role(&tb, row, &tm, "tb", "ytdFunctionalDebit")
+            let net = ledger_mapping::signed_amount(
+                &amount_inputs(&tb, row, &tm, "ytd"),
+                tb_convention,
+            );
+            if net > 0.0 {
+                reductions = net;
+            } else if net < 0.0 {
+                additions = -net;
+            }
         }
         let mut rate_type = "fixed".into();
         let (mut fixed, mut benchmark, mut bps) = (None, None, None);
@@ -1046,6 +1047,18 @@ fn slot<'a>(m: &'a Map<String, Value>, kind: &str, role: &str) -> Option<&'a Val
         .map(|(_, v)| v)
 }
 
+fn mapped_names(m: &Map<String, Value>, kind: &str, role: &str) -> Vec<String> {
+    match slot(m, kind, role) {
+        Some(Value::String(name)) => vec![name.clone()],
+        Some(Value::Array(names)) => names
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        _ => vec![],
+    }
+}
+
 fn text(table: &Table, row: &[String], m: &Map<String, Value>, role: &str) -> String {
     m.get(role)
         .and_then(Value::as_str)
@@ -1183,8 +1196,8 @@ fn date(params: &Value, key: &str) -> Result<NaiveDate, AppError> {
 }
 /// 按标准角色名取数（旧名也能命中）。
 fn num_role(table: &Table, row: &[String], m: &Map<String, Value>, kind: &str, role: &str) -> f64 {
-    slot(m, kind, role)
-        .and_then(Value::as_str)
+    mapped_names(m, kind, role)
+        .first()
         .and_then(|h| table.headers.iter().position(|x| x == h))
         .and_then(|i| row.get(i))
         .map(|v| parse_num(v))
@@ -1199,14 +1212,14 @@ fn role_text(
     kind: &str,
     role: &str,
 ) -> String {
-    slot(m, kind, role)
-        .and_then(Value::as_str)
-        .and_then(|h| table.headers.iter().position(|x| x == h))
-        .and_then(|i| row.get(i))
-        .cloned()
-        .unwrap_or_default()
-        .trim()
-        .to_string()
+    mapped_names(m, kind, role)
+        .iter()
+        .filter_map(|h| table.headers.iter().position(|x| x == h))
+        .filter_map(|i| row.get(i))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// 科目文本＝编码＋名称拼起来；历史映射把两者混在一个 account 格子里时，
@@ -1251,6 +1264,40 @@ fn amount_inputs(
             .and_then(|i| row.get(i))
             .cloned(),
     }
+}
+
+fn je_amount_inputs(
+    table: &Table,
+    row: &[String],
+    m: &Map<String, Value>,
+) -> ledger_mapping::AmountInputs {
+    let has = |role: &str| !mapped_names(m, "je", role).is_empty();
+    if has("functionalDebit") && has("functionalCredit") {
+        ledger_mapping::AmountInputs {
+            debit: Some(num_role(table, row, m, "je", "functionalDebit")),
+            credit: Some(num_role(table, row, m, "je", "functionalCredit")),
+            ..Default::default()
+        }
+    } else {
+        ledger_mapping::AmountInputs {
+            amount: has("functionalAmount")
+                .then(|| num_role(table, row, m, "je", "functionalAmount")),
+            direction: has("direction").then(|| role_text(table, row, m, "je", "direction")),
+            ..Default::default()
+        }
+    }
+}
+
+fn je_sign_convention(
+    table: &Table,
+    m: &Map<String, Value>,
+) -> ledger_mapping::SignConvention {
+    let evidence = ledger_mapping::detect_sign_convention(&table.headers, &table.rows, &|role| {
+        mapped_names(m, "je", role)
+    });
+    evidence
+        .convention
+        .unwrap_or(ledger_mapping::SignConvention::Unsigned)
 }
 
 /// 全表判一次贷方列的符号口径。
@@ -1684,6 +1731,23 @@ mod tests {
         assert_eq!(account_text(&table, row, &m, "je"), "2202 短期借款");
         assert_eq!(num_role(&table, row, &m, "je", "functionalDebit"), 1000.0);
         assert_eq!(num_role(&table, row, &m, "je", "functionalCredit"), 2000.0);
+    }
+
+    #[test]
+    fn tbje模式贷方红字通过公共引擎归一() {
+        let table = je_table(&["金额", "方向"], &["-500", "贷"]);
+        let m: Map<String, Value> = [
+            ("functionalAmount", "金额"),
+            ("direction", "方向"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+        .collect();
+        let net = ledger_mapping::signed_amount(
+            &je_amount_inputs(&table, &table.rows[0], &m),
+            ledger_mapping::SignConvention::Unsigned,
+        );
+        assert_eq!(net, 500.0, "贷方红字应成为本金减少，不能取负绝对值");
     }
 
     #[test]

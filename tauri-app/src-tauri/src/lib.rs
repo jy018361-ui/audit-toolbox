@@ -872,6 +872,17 @@ pub fn engine_call_for_test(
     }
     // 看账的只读识别类：不写文件、不动任务，调查测试用它量缓存效果。
     // 余额滚动校验是只读的，调查测试用它拿真实样例定位失配。
+    if method == "fx.preview_probe" {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pause = excel_merger::PauseCheckpoint::unpaused(cancel.clone());
+        return fx::run_job(
+            "fx.preview",
+            params,
+            &|_, _, _, _| {},
+            cancel,
+            &pause,
+        );
+    }
     if method == "fx.sign_probe" {
         return fx::sign_probe_for_test(&params);
     }

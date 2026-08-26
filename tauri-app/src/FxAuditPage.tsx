@@ -143,7 +143,23 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   const currencyConfirmationMissing=Boolean(tb&&mode!=="realized"&&tb.foreignCurrencyNeedsConfirmation&&!tbCurrencyConfirmed);
 
   useEffect(()=>setMode(fxDefaultMode(Boolean(jePath),Boolean(tbPath))),[jePath,tbPath]);
-  useEffect(()=>setEntityCurrencies(v=>Object.fromEntries(entities.map(e=>[e,v[e]??tb?.uniformCurrency??"CNY"]))),[entities,tb]);
+  // 只有用户手工改过的主体才不许自动预填覆盖。
+  // 之前这里写的是 `v[e] ?? uniformCurrency ?? "CNY"`：JE 比 TB 先解析完时，
+  // entities 已经有值而 tb 还是空，先被填成 CNY；等 TB 的 uniformCurrency 到了，
+  // `v[e] ??` 发现已有值就跳过——**一旦落成 CNY 就再也改不回来**，
+  // 4800 这种本位币是 USD 的账会把全表科目都当成外币。
+  const [currencyTouched,setCurrencyTouched]=useState<Record<string,boolean>>({});
+  const setEntityCurrency=(entity:string,value:string)=>{
+    setCurrencyTouched(v=>({...v,[entity]:true}));
+    setEntityCurrencies(v=>({...v,[entity]:value.toUpperCase()}));
+  };
+  useEffect(()=>{
+    const detected=tb?.uniformCurrency;
+    setEntityCurrencies(v=>Object.fromEntries(entities.map(entity=>[
+      entity,
+      currencyTouched[entity]?(v[entity]??"CNY"):(detected??v[entity]??"CNY"),
+    ])));
+  },[entities,tb,currencyTouched]);
   useEffect(()=>{if(entities.length===1)setFixedEntity(entities[0])},[entities]);
   useEffect(()=>setAccountRoles(v=>Object.fromEntries(accounts.map(account=>{const direct=suggestRole(account);const code=account.trim().split(/\s+/)[0];const related=direct==="unassigned"?accounts.map(suggestRole).find((role,index)=>role!=="unassigned"&&accounts[index].trim().split(/\s+/)[0]===code):undefined;return[account,v[account]??related??direct]}))),[accounts]);
   useEffect(()=>{
@@ -234,7 +250,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       {tb&&<><section className="kz-card"><h2>TB 字段映射复核</h2><p aria-live="polite">{reviewing.tb?"正在复核字段映射；复核期间字段映射暂时锁定。":reviewStatus.tb||"脚本已自动映射，可直接核对或使用LLM复核。"}</p>{tb.foreignCurrencyNeedsConfirmation&&<div className="fx-currency-confirm"><div><strong>检测到多个外币币种候选</strong><p>系统已预选“{String(tbMapping.currency??"—")}”。候选：{(tb.foreignCurrencyCandidates??[]).map(item=>`${item.column}（${item.foreignCurrencies.join("/")}）`).join("、")}。请核对预览后确认。</p></div><Button variant="secondary" disabled={busy||reviewing.tb||tbCurrencyConfirmed} onClick={()=>setTbCurrencyConfirmed(true)}>{tbCurrencyConfirmed?"已确认外币列":"确认当前外币列"}</Button></div>}<div className="kz-actions"><Button variant="secondary" disabled={busy||reviewing.tb} onClick={()=>void reviewOne("tb")}>{reviewing.tb?"LLM复核中…":"单独复核 TB"}</Button></div></section><FxPreview title="TB 文件预览" kind="tb" inspection={tb} mapping={tbMapping} labels={TB_LABELS} missing={fxMissingRequired("tb",tbMapping,Boolean(je),fixedEntity)} onMappingChange={action=>{setTbCurrencyConfirmed(false);setTbMapping(action)}} reviewBusy={reviewing.tb}/></>}
     </div>
     {(je||tb)&&<div className="fx-source-grid">
-      <Card><CardHeader><CardTitle>公司本位币</CardTitle></CardHeader><CardContent className="fx-list">{tb?.uniformCurrency&&<p className="fx-hint">TB 的币种列整列都是 {tb.uniformCurrency}，已按主体本位币预填；账户币种改从科目名称/文本识别。若该列确实是交易币种，请在此改回。</p>}{entities.length?entities.map(entity=><label key={entity}><span>{entity}</span><input value={entityCurrencies[entity]??defaultFunctionalCurrency} maxLength={3} onChange={e=>setEntityCurrencies(v=>({...v,[entity]:e.target.value.toUpperCase()}))}/></label>):<><label><span>文件无主体列，固定主体</span><input value={fixedEntity} onChange={e=>setFixedEntity(e.target.value)}/></label><label><span>本位币</span><input value={entityCurrencies[fixedEntity]??defaultFunctionalCurrency} maxLength={3} onChange={e=>setEntityCurrencies(v=>({...v,[fixedEntity]:e.target.value.toUpperCase()}))}/></label></>}</CardContent></Card>
+      <Card><CardHeader><CardTitle>公司本位币</CardTitle></CardHeader><CardContent className="fx-list">{tb?.uniformCurrency&&<p className="fx-hint">TB 的币种列整列都是 {tb.uniformCurrency}，已按主体本位币预填；账户币种改从科目名称/文本识别。若该列确实是交易币种，请在此改回。</p>}{entities.length?entities.map(entity=><label key={entity}><span>{entity}</span><input value={entityCurrencies[entity]??defaultFunctionalCurrency} maxLength={3} onChange={e=>setEntityCurrency(entity,e.target.value)}/></label>):<><label><span>文件无主体列，固定主体</span><input value={fixedEntity} onChange={e=>setFixedEntity(e.target.value)}/></label><label><span>本位币</span><input value={entityCurrencies[fixedEntity]??defaultFunctionalCurrency} maxLength={3} onChange={e=>setEntityCurrency(fixedEntity,e.target.value)}/></label></>}</CardContent></Card>
       <Card><CardHeader><CardTitle>高级设置</CardTitle></CardHeader><CardContent><details><summary>科目分类（通常无需修改）</summary><div className="fx-list fx-accounts">{accounts.map(account=><label key={account}><span title={account}>{account}</span><select value={accountRoles[account]??"unassigned"} onChange={e=>setAccountRoles(v=>({...v,[account]:e.target.value}))}>{ROLE_OPTIONS.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>)}</div></details></CardContent></Card>
     </div>}
     <Card><CardHeader><CardTitle>测算与底稿</CardTitle></CardHeader><CardContent>

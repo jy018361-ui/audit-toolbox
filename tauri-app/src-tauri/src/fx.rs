@@ -2880,7 +2880,7 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
     let mut tb_balances = BTreeMap::<String, (String, String, String, String, f64, f64)>::new();
     // TB 侧认定要校验的余额键。JE 侧照它收行，保证两边口径一致。
     let mut wanted = HashSet::<String>::new();
-    for row in records(&tb_table) {
+    for row in tb_leaf_records(&tb_table, &tb_mapping) {
         let account = account_name(&row, &tb_mapping);
         if !matches!(
             role_for(&account, params).as_str(),
@@ -3091,6 +3091,18 @@ fn records(table: &FxTable) -> Vec<RowRecord<'_>> {
                 .zip(row.iter().map(String::as_str))
                 .collect(),
         })
+        .collect()
+}
+
+/// TB 业务计算统一只读取末级明细科目；层级判断由公共账表引擎负责。
+fn tb_leaf_records<'a>(table: &'a FxTable, mapping: &Map<String, Value>) -> Vec<RowRecord<'a>> {
+    let mask = ledger_mapping::tb_leaf_mask(&table.headers, &table.rows, &|role| {
+        mapped_cols(mapping, role)
+    });
+    records(table)
+        .into_iter()
+        .zip(mask)
+        .filter_map(|(row, leaf)| leaf.then_some(row))
         .collect()
 }
 
@@ -3540,14 +3552,17 @@ fn balance_match_key(entity: &str, account: &str, auxiliary: &str, use_auxiliary
     }
 }
 
+/// 未实现测算的余额键。**与 TB＋JE 对账用的是同一口径**：公司 ＋ 科目编码。
+///
+/// 曾经这里还拼上币种与辅助核算，结果两边天生对不上——TB 端点的币种是从科目
+/// 文本里抽的（抽不出就退回本位币列），辅助核算 TB 根本没有这一列恒为空；
+/// 而 JE 侧逐行读凭证货币、带着供应商与客户。四段里有两段对不上，
+/// 实测 4800 有 286 个账户因此找不到 TB 期初余额端点，被判为「缺少余额基础」。
+///
+/// 重估仍然按币种做——币种保存在端点自身的字段里，不需要挤进匹配键。
 fn monetary_balance_key(entity: &str, account: &str, currency: &str, auxiliary: &str) -> String {
-    format!(
-        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
-        entity.trim(),
-        account_match_key(account).trim().to_uppercase(),
-        normalize_currency(currency),
-        auxiliary.trim()
-    )
+    let _ = (currency, auxiliary);
+    balance_match_key(entity, account, "", false)
 }
 
 /// 科目角色分类：先看名称关键词，认不出再按科目编码兜底。
@@ -4316,6 +4331,39 @@ fn calculate(
     }))
 }
 
+/// 从汇兑损益科目的名称判断这张凭证属于已实现还是未实现。
+///
+/// 客户的科目表通常把两者分开设科目并写进名称——4800 就是
+/// 「财务费用-汇兑收益-未实现」「财务费用-汇兑损失-已实现-银行存款\现金」这样。
+/// 此前分类只认用户手工指定，没指定一律「待确认」，这些名称里写得明明白白的凭证
+/// 也要人一张张点：实测 4800 有 7600 万的未实现评估调整凭证因此排除在测算之外，
+/// 测算结果几乎为零，而 TB 上的汇兑损益有 385 万。
+///
+/// 只在**科目名称明确写了**的时候下结论；同一张凭证同时出现两种字样时
+/// 保持「待确认」交给人判断，不猜。
+fn classify_by_account_names<'a, I>(accounts: I) -> Option<&'static str>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut unrealized = false;
+    let mut realized = false;
+    for account in accounts {
+        // 「未实现」要先判：「已实现」是它的子串反过来不成立，
+        // 但两个词都可能出现在同一个科目全名里（如「汇兑损益-未实现」）。
+        if account.contains("未实现") || account.contains("未實現") {
+            unrealized = true;
+        } else if account.contains("已实现") || account.contains("已實現") {
+            realized = true;
+        }
+    }
+    match (unrealized, realized) {
+        (true, false) => Some("未实现汇兑损益"),
+        (false, true) => Some("已实现汇兑损益"),
+        // 都没写，或者两种都出现——交给人判断。
+        _ => None,
+    }
+}
+
 fn manual_classification<'a>(params: &'a Value, voucher_id: &str) -> Option<&'a str> {
     params
         .get("manualClassifications")
@@ -4333,7 +4381,7 @@ fn reconcile_fx_gain_loss(params: &Value) -> Result<Value, AppError> {
             .map_err(|e| error("INVALID_PARAMS", "TB参数无效。", Some(e.to_string())))?;
         let table = load_fx_table(&spec)?;
         let mapping = mapping_obj(params, "tbMapping");
-        let mut candidates = records(&table)
+        let candidates = tb_leaf_records(&table, &mapping)
             .into_iter()
             .filter_map(|row| {
                 let account = account_name(&row, &mapping);
@@ -4358,20 +4406,48 @@ fn reconcile_fx_gain_loss(params: &Value) -> Result<Value, AppError> {
                     .transpose()
                     .ok()
                     .flatten();
-                // 发生额借、贷方案只有在两列同时映射时才成立。单边的LLM建议
-                // 不能覆盖更可靠的累计/期末净额列，否则SAP的MTD列会误替代YTD。
-                let split_period_scheme = first_col(&mapping, "periodFunctionalDebit").is_some()
-                    && first_col(&mapping, "periodFunctionalCredit").is_some();
-                let amount = match (split_period_scheme, debit, credit) {
-                    (true, Some(d), Some(c))
-                        if (d - c).abs() < 0.01 && d.signum() == c.signum() =>
-                    {
-                        d
-                    }
-                    (true, Some(d), Some(c)) => d - c,
-                    _ => closing.unwrap_or(0.0),
+                Some((account, row.source_row, closing, debit, credit))
+            })
+            .collect::<Vec<_>>();
+        // **整表统一口径**：要么所有科目都取期末余额，要么都取借贷发生额。
+        //
+        // 逐科目各判各的（这个有余额就取余额、那个余额为零就取发生额）会让一张表
+        // 里混着两种口径，各科目的数不可比，加总也没有会计意义。
+        //
+        // 选法：损益科目期末结转到未分配利润后余额归零，这时整表余额都是 0，
+        // 只能走发生额；余额不为零说明未结转，余额本身就是本期累计发生额，
+        // 比发生额列更可靠——发生额列可能是 MTD（本月）而不是 YTD（本年累计）。
+        //
+        // 发生额借、贷方案只有两列同时映射才成立：单边的 LLM 建议不能覆盖净额列。
+        let split_period_scheme = first_col(&mapping, "periodFunctionalDebit").is_some()
+            && first_col(&mapping, "periodFunctionalCredit").is_some();
+        let any_closing = candidates
+            .iter()
+            .any(|(_, _, closing, _, _)| closing.is_some_and(|value| value.abs() >= 0.01));
+        let basis = if any_closing {
+            "期末余额"
+        } else if split_period_scheme {
+            "本期借贷发生额"
+        } else {
+            "期末余额"
+        };
+        let movement_of = |debit: Option<f64>, credit: Option<f64>| match (debit, credit) {
+            // 借贷两列填了同一个数且同号，是「本期发生额」单列被拆着填，取其一即可。
+            (Some(d), Some(c)) if (d - c).abs() < 0.01 && d.signum() == c.signum() => d,
+            (Some(d), Some(c)) => d - c,
+            (Some(d), None) => d,
+            (None, Some(c)) => -c,
+            (None, None) => 0.0,
+        };
+        let mut candidates = candidates
+            .into_iter()
+            .map(|(account, source_row, closing, debit, credit)| {
+                let amount = if basis == "期末余额" {
+                    closing.unwrap_or_else(|| movement_of(debit, credit))
+                } else {
+                    movement_of(debit, credit)
                 };
-                Some((account, row.source_row, amount))
+                (account, source_row, amount)
             })
             .collect::<Vec<_>>();
         // Prefer detail accounts so a parent financial-expense row does not duplicate its child.
@@ -4385,6 +4461,7 @@ fn reconcile_fx_gain_loss(params: &Value) -> Result<Value, AppError> {
             }
             tb_total += amount;
             tb_rows.push(json!({"account":account, "sourceRow":source_row, "amount":amount,
+                "basis": basis,
                 "scheme": if first_col(&mapping, "periodFunctionalDebit").is_some() && first_col(&mapping, "periodFunctionalCredit").is_some() {
                     "ERP借贷同额带符号时取单列，否则借方减贷方"
                 } else { "TB未提供发生额时，取累计本位币金额" }}));
@@ -4578,7 +4655,10 @@ fn build_review_bridge(
         let is_realized_measured = realized_measured.contains(&display_id);
         let is_client_revaluation = client_revaluation_recognized.contains(&display_id);
         let is_measured = is_realized_measured || is_client_revaluation;
-        let selected = manual_classification(params, &display_id).unwrap_or("待确认");
+        // 手工指定永远优先；没指定就看汇兑损益科目名称里写没写「已实现／未实现」。
+        let selected = manual_classification(params, &display_id)
+            .or_else(|| classify_by_account_names(fx_accounts.iter().map(String::as_str)))
+            .unwrap_or("待确认");
         if is_measured {
             covered_book += booked;
             covered_count += 1;
@@ -4745,7 +4825,7 @@ fn build_relevant_voucher_detail(
         }
     }
     let mut output = Vec::new();
-    for row in records(&table) {
+    for row in tb_leaf_records(&table, &mapping) {
         if !is_je_business_row(&row, &mapping) {
             continue;
         }
@@ -5189,7 +5269,9 @@ fn calculate_unrealized(
             .map(|v| v.trim())
             .collect::<Vec<_>>()
             .join("|");
-        let key = format!("{entity}\u{1f}{account}\u{1f}{currency}\u{1f}{auxiliary}");
+        // 去重键与匹配键同口径：同一公司同一科目下的多行（按币种或费用性质拆行）
+        // 会各自重估后相加，这里只用来提示「同一余额键有多行」。
+        let key = format!("{}\u{1f}{currency}", balance_match_key(entity, &account, "", false));
         // 同一余额键的多行按各自的余额独立重估，结果自然相加——
         // 旧版在这里直接 `continue` 丢掉后来的行，按费用性质拆行的 TB 会少算一大截。
         if !seen.insert(key.clone()) {
@@ -5300,10 +5382,9 @@ fn calculate_inferred_opening_unrealized(
         if currency.is_empty() || currency == functional_currency(entity, params) {
             continue;
         }
-        let account_currency_key = format!(
-            "{entity}\u{1f}{}\u{1f}{auxiliary}",
-            account_match_key(&account)
-        );
+        // 走统一匹配键：辅助核算不进键——TB 常常没有这一列而 JE 按往来单位
+        // 拆行，手工拼进去会让两边全盘失配。
+        let account_currency_key = balance_match_key(entity, &account, "", false);
         account_currencies
             .entry(account_currency_key)
             .or_default()
@@ -5332,7 +5413,7 @@ fn calculate_inferred_opening_unrealized(
         "source":"TB+JE", "type":"期初原币余额估算", "severity":"重要提示",
         "detail":"TB未提供原币余额；系统以期初本位币余额÷期初官方汇率估算期初原币，再用JE原币发生额滚动。该结果属于受限测算，底稿单独披露，不以客户已入账未实现汇兑损益凭证倒算审计金额。"
     })];
-    for row in records(tb_table) {
+    for row in tb_leaf_records(tb_table, tb_mapping) {
         let account = account_name(&row, tb_mapping);
         if !matches!(
             role_for(&account, params).as_str(),
@@ -5344,10 +5425,9 @@ fn calculate_inferred_opening_unrealized(
         let mapped_currency = currency_for(&row, tb_mapping, &account, params);
         let auxiliary = auxiliary_value(&row, tb_mapping);
         let functional = functional_currency(entity, params);
-        let account_currency_key = format!(
-            "{entity}\u{1f}{}\u{1f}{auxiliary}",
-            account_match_key(&account)
-        );
+        // 走统一匹配键：辅助核算不进键——TB 常常没有这一列而 JE 按往来单位
+        // 拆行，手工拼进去会让两边全盘失配。
+        let account_currency_key = balance_match_key(entity, &account, "", false);
         let inferred_currencies = account_currencies.get(&account_currency_key);
         let currency = if !mapped_currency.is_empty() && mapped_currency != functional {
             normalize_currency(&mapped_currency)
@@ -5448,7 +5528,7 @@ fn calculate_back_calculated_unrealized(
     let derive_opening = !amount_scheme_ok(tb_mapping, "openingFunctional");
     let mut balances = HashMap::<String, f64>::new();
     let mut closing_balances = HashMap::<String, f64>::new();
-    for row in records(tb_table) {
+    for row in tb_leaf_records(tb_table, tb_mapping) {
         let account = account_name(&row, tb_mapping);
         let currency = currency_for(&row, tb_mapping, &account, params);
         if currency.is_empty()
@@ -5460,10 +5540,9 @@ fn calculate_back_calculated_unrealized(
             continue;
         }
         let entity = entity_for(&row, tb_mapping, params);
-        let key = format!(
-            "{entity}\u{1f}{}\u{1f}{currency}",
-            account_match_key(&account)
-        );
+        // 走统一匹配键：币种在两边来源不同（TB 从科目文本抽、JE 读凭证货币列），
+        // 进键会让同一账户被判成两个。重估仍按币种做，币种在端点字段里。
+        let key = balance_match_key(entity, &account, "", false);
         if derive_opening {
             let closing =
                 signed_amount(&row, tb_mapping, "closingFunctional").map_err(|detail| {
@@ -5528,10 +5607,9 @@ fn calculate_back_calculated_unrealized(
                 if currency.is_empty() || currency == functional_currency(entity, params) {
                     continue;
                 }
-                let key = format!(
-                    "{entity}\u{1f}{}\u{1f}{currency}",
-                    account_match_key(&account)
-                );
+                // 走统一匹配键：币种在两边来源不同（TB 从科目文本抽、JE 读凭证货币列），
+                // 进键会让同一账户被判成两个。重估仍按币种做，币种在端点字段里。
+                let key = balance_match_key(entity, &account, "", false);
                 *movements.entry(key).or_default() += signed_amount(row, &je_mapping, "functional")
                     .map_err(|detail| {
                         error(
@@ -5612,10 +5690,9 @@ fn calculate_back_calculated_unrealized(
                     Some(format!("第{}行：{detail}", row.source_row)),
                 )
             })?;
-            let key = format!(
-                "{entity}\u{1f}{}\u{1f}{currency}",
-                account_match_key(&account)
-            );
+            // 走统一匹配键：币种在两边来源不同（TB 从科目文本抽、JE 读凭证货币列），
+            // 进键会让同一账户被判成两个。重估仍按币种做，币种在端点字段里。
+            let key = balance_match_key(&entity, &account, "", false);
             let item = movements
                 .entry(key)
                 .or_insert((entity, account, role, currency, 0.0, 0.0));
@@ -7618,6 +7695,92 @@ E,2025-01-31,R,AB,6603,月末重估,CNY,0,-5\n",
             "账户级测算不得伪装成凭证级测算"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 损益类科目整表用同一个取数口径() {
+        // 逐科目各判各的会让一张表里混着两种口径，各科目的数不可比。
+        // 规则：整表有余额就都取余额；余额全为零（已结转）才都走发生额。
+        let root = std::env::temp_dir().join(format!("fx-basis-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+
+        // 甲：未结转，余额非零——两个科目都该取余额，不许其中一个改走发生额。
+        let tb1 = root.join("tb1.csv");
+        fs::write(
+            &tb1,
+            "公司,科目,币种,期末本位币,本期借方,本期贷方
+             E,6701090001 财务费用-汇兑收益-未实现,USD,3882018.16,76071645.13,72189626.97
+             E,6701120001 财务费用-汇兑损失-未实现,USD,-31169.71,920973.76,952143.47
+",
+        )
+        .unwrap();
+        let mapping = json!({
+            "entity":"公司","account":["科目"],"currency":"币种",
+            "closingFunctionalAmount":"期末本位币",
+            "periodFunctionalDebit":"本期借方","periodFunctionalCredit":"本期贷方"
+        });
+        let params = json!({
+            "tbSource":{"inputPath":tb1,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbMapping":mapping,
+            "accountRoles":{"6701090001 财务费用-汇兑收益-未实现":"fx_gain_loss",
+                            "6701120001 财务费用-汇兑损失-未实现":"fx_gain_loss"}
+        });
+        let out = reconcile_fx_gain_loss(&params).expect("应当能取数");
+        let rows = out["tbRows"].as_array().expect("有明细行");
+        assert!(rows.iter().all(|r| r["basis"] == json!("期末余额")), "{rows:?}");
+        // 3882018.16 + (−31169.71) = 3850848.45
+        assert!((out["tbFxGainLoss"].as_f64().unwrap_or(0.0) - 3850848.45).abs() < 0.01, "{out}");
+
+        // 乙：已结转，余额全为零——整表都该退到发生额。
+        let tb2 = root.join("tb2.csv");
+        fs::write(
+            &tb2,
+            "公司,科目,币种,期末本位币,本期借方,本期贷方
+             E,6701090001 财务费用-汇兑收益-未实现,USD,0,76071645.13,72189626.97
+             E,6701120001 财务费用-汇兑损失-未实现,USD,0,920973.76,952143.47
+",
+        )
+        .unwrap();
+        let params2 = json!({
+            "tbSource":{"inputPath":tb2,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbMapping":mapping,
+            "accountRoles":{"6701090001 财务费用-汇兑收益-未实现":"fx_gain_loss",
+                            "6701120001 财务费用-汇兑损失-未实现":"fx_gain_loss"}
+        });
+        let out2 = reconcile_fx_gain_loss(&params2).expect("应当能取数");
+        let rows2 = out2["tbRows"].as_array().expect("有明细行");
+        assert!(rows2.iter().all(|r| r["basis"] == json!("本期借贷发生额")), "{rows2:?}");
+        assert!((out2["tbFxGainLoss"].as_f64().unwrap_or(0.0) - 3850848.45).abs() < 0.01, "{out2}");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 科目名称写明已实现未实现时不再要人逐张点() {
+        // 全部取自 4800 的真实科目名。此前这些凭证一律落到「待确认」，
+        // 7600 万的未实现评估调整因此排除在测算之外。
+        assert_eq!(
+            classify_by_account_names(["财务费用-汇兑收益-未实现", "财务费用-汇兑损失-未实现"]),
+            Some("未实现汇兑损益")
+        );
+        assert_eq!(
+            classify_by_account_names(["财务费用-汇兑收益-已实现-其他"]),
+            Some("已实现汇兑损益")
+        );
+        assert_eq!(
+            classify_by_account_names([r"财务费用-汇兑损失-已实现-银行存款\现金"]),
+            Some("已实现汇兑损益")
+        );
+        // 繁体同样认。
+        assert_eq!(classify_by_account_names(["財務費用-匯兌收益-未實現"]), Some("未实现汇兑损益"));
+        // 名称里没写的，保持「待确认」交给人判断，不猜。
+        assert_eq!(classify_by_account_names(["财务费用-汇兑损益"]), None);
+        assert_eq!(classify_by_account_names([]), None);
+        // 一张凭证里两种字样都出现时也不猜。
+        assert_eq!(
+            classify_by_account_names(["财务费用-汇兑收益-未实现", "财务费用-汇兑损失-已实现-其他"]),
+            None
+        );
     }
 
     #[test]

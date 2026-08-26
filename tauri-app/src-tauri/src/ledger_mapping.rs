@@ -598,6 +598,71 @@ pub(crate) fn credit_positive(signed: f64) -> f64 {
     -signed
 }
 
+/// 标记 TB 中的末级明细科目。返回值与 `rows` 一一对应：`true` 表示该行是末级。
+///
+/// 科目层级只按**同一主体内的科目编码前缀**判断：若 `1002` 与 `10020001`
+/// 同时存在，前者是汇总行、后者是末级行；不同主体之间互不影响。同一编码因币种、
+/// 辅助核算等维度出现多行时不会互相判成上下级。没有映射科目编码时不擅自删行。
+///
+/// 所有读取 TB 的工具都必须调用这里，业务模块不得各自实现一份“末级科目”规则。
+pub(crate) fn tb_leaf_mask(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<bool> {
+    let indexes = |role: &str| {
+        column_of(role)
+            .iter()
+            .filter_map(|name| header_index(headers, name))
+            .collect::<Vec<_>>()
+    };
+    let mut account_indexes = indexes("accountCode");
+    if account_indexes.is_empty() {
+        // 兼容历史映射：旧版把编码与名称一起放在 `account` 多列角色里，
+        // 第一列按既有约定是编码列。
+        account_indexes = indexes("account");
+        account_indexes.truncate(1);
+    }
+    if account_indexes.is_empty() {
+        return vec![true; rows.len()];
+    }
+    let entity_indexes = indexes("entity");
+    let joined = |row: &[String], positions: &[usize]| {
+        positions
+            .iter()
+            .filter_map(|index| row.get(*index))
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join("\u{1f}")
+            .to_uppercase()
+    };
+    let identities = rows
+        .iter()
+        .map(|row| (joined(row, &entity_indexes), joined(row, &account_indexes)))
+        .collect::<Vec<_>>();
+
+    let mut by_entity = BTreeMap::<String, BTreeSet<String>>::new();
+    for (entity, code) in &identities {
+        if !code.is_empty() {
+            by_entity.entry(entity.clone()).or_default().insert(code.clone());
+        }
+    }
+    let mut parents = HashSet::<(String, String)>::new();
+    for (entity, codes) in by_entity {
+        let codes = codes.into_iter().collect::<Vec<_>>();
+        for pair in codes.windows(2) {
+            if pair[1].len() > pair[0].len() && pair[1].starts_with(&pair[0]) {
+                parents.insert((entity.clone(), pair[0].clone()));
+            }
+        }
+    }
+    identities
+        .iter()
+        .map(|identity| identity.1.is_empty() || !parents.contains(identity))
+        .collect()
+}
+
 // ────────────────────────────── 旧角色名迁移 ──────────────────────────────
 
 /// 四个工具此前各用各的角色名。统一到标准名之后，**历史保存的映射仍要能读**——
@@ -1406,7 +1471,7 @@ pub(crate) fn is_credit_direction(value: &str) -> bool {
     trimmed.contains('贷')
         || trimmed.contains('貸')
         || lower.contains("credit")
-        || matches!(lower.as_str(), "c" | "cr" | "h")
+        || matches!(lower.as_str(), "c" | "cr" | "h" | "k")
         || trimmed.contains('-')
         || trimmed.contains('\u{2212}')
 }
@@ -2512,6 +2577,41 @@ mod tests {
         assert_eq!(signed_amount(&debit, SignConvention::Unsigned), -30.0);
         // 已带符号的账不看方向列，直接取原值。
         assert_eq!(signed_amount(&reversal, SignConvention::Signed), -50.0);
+    }
+
+    #[test]
+    fn tb只保留同一主体内的末级科目() {
+        let headers = vec!["主体".into(), "科目编码".into(), "科目名称".into()];
+        let rows = vec![
+            vec!["A".into(), "1002".into(), "银行存款".into()],
+            vec!["A".into(), "10020001".into(), "基本户".into()],
+            vec!["A".into(), "10020002".into(), "一般户".into()],
+            vec!["B".into(), "1002".into(), "银行存款".into()],
+            // 同一末级编码按币种拆成两行，两行都应保留。
+            vec!["A".into(), "10020002".into(), "一般户-USD".into()],
+        ];
+        let columns = |role: &str| match role {
+            "entity" => vec!["主体".into()],
+            "accountCode" => vec!["科目编码".into()],
+            _ => vec![],
+        };
+        assert_eq!(
+            tb_leaf_mask(&headers, &rows, &columns),
+            vec![false, true, true, true, true]
+        );
+    }
+
+    #[test]
+    fn tb末级规则兼容分段编码和无编码映射() {
+        let headers = vec!["科目".into()];
+        let rows = vec![
+            vec!["01-1002".into()],
+            vec!["01-1002-0001".into()],
+            vec!["02-1002".into()],
+        ];
+        let legacy = |role: &str| (role == "account").then(|| vec!["科目".into()]).unwrap_or_default();
+        assert_eq!(tb_leaf_mask(&headers, &rows, &legacy), vec![false, true, true]);
+        assert_eq!(tb_leaf_mask(&headers, &rows, &|_| vec![]), vec![true; 3]);
     }
 
     #[test]

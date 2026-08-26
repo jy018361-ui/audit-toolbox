@@ -1248,7 +1248,16 @@ fn calculate(
             None,
         ));
     }
-    for row in &tb.rows {
+    let tb_leaf = ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| {
+        column_indexes(&tb, &tb_map, role)
+            .into_iter()
+            .filter_map(|index| tb.headers.get(index).cloned())
+            .collect()
+    });
+    for (row_index, row) in tb.rows.iter().enumerate() {
+        if !tb_leaf[row_index] {
+            continue;
+        }
         let account = join_columns(row, &account_cols);
         if account.is_empty() {
             continue;
@@ -1868,63 +1877,31 @@ impl AmountScheme {
                 .and_then(|text| parse_number(text))
                 .unwrap_or(0.0)
         };
-        match self.scheme {
-            "B" => {
-                let debit = value(self.debit);
-                let credit = value(self.credit);
-                if self.signed {
-                    // 贷方列本身是负数，两列不能相减，否则等于加了一遍。
-                    if debit != 0.0 && credit != 0.0 {
-                        debit - credit
-                    } else if debit != 0.0 {
-                        debit
-                    } else {
-                        credit
-                    }
-                } else {
-                    debit - credit
-                }
-            }
-            "A" => {
-                let amount = value(self.amount);
-                if self.signed {
-                    amount
-                } else {
-                    let direction = self
-                        .direction
-                        .and_then(|i| row.get(i))
-                        .map(String::as_str)
-                        .unwrap_or("");
-                    match direction_is_credit(direction) {
-                        Some(true) => -amount.abs(),
-                        Some(false) => amount.abs(),
-                        None => amount,
-                    }
-                }
-            }
-            // 单一金额列必然已带符号，否则凭证无法配平。
-            "single" => value(self.amount),
-            _ => 0.0,
-        }
-    }
-}
-
-fn direction_is_credit(direction: &str) -> Option<bool> {
-    let value = direction.trim();
-    if value.is_empty() {
-        return None;
-    }
-    if value.contains('贷') {
-        return Some(true);
-    }
-    if value.contains('借') {
-        return Some(false);
-    }
-    // SAP 用德语记号：H = Haben（贷），S = Soll（借）。
-    match value.to_ascii_uppercase().as_str() {
-        "C" | "CR" | "H" | "K" => Some(true),
-        "D" | "DR" | "S" => Some(false),
-        _ => None,
+        let inputs = match self.scheme {
+            "B" => ledger_mapping::AmountInputs {
+                debit: Some(value(self.debit)),
+                credit: Some(value(self.credit)),
+                ..Default::default()
+            },
+            "A" => ledger_mapping::AmountInputs {
+                amount: Some(value(self.amount)),
+                direction: self.direction.and_then(|i| row.get(i)).cloned(),
+                ..Default::default()
+            },
+            "single" => ledger_mapping::AmountInputs {
+                amount: Some(value(self.amount)),
+                ..Default::default()
+            },
+            _ => return 0.0,
+        };
+        ledger_mapping::signed_amount(
+            &inputs,
+            if self.signed {
+                ledger_mapping::SignConvention::Signed
+            } else {
+                ledger_mapping::SignConvention::Unsigned
+            },
+        )
     }
 }
 
@@ -2726,6 +2703,39 @@ mod tests {
             .parent()
             .and_then(Path::parent)
             .map(|root| root.join("汇兑损益测试资料"))
+    }
+
+    #[test]
+    fn 用友真实样例只取末级科目且红字冲销后全部勾稽() {
+        let Some(base) = sample_dir() else { return };
+        let tb_path = base.join("科目余额表.xls");
+        let je_path = base.join("序时账-1.xlsx");
+        if !tb_path.is_file() || !je_path.is_file() {
+            eprintln!("跳过：未找到用友真实样例");
+            return;
+        }
+        let tb = inspect(&json!({"source": {"inputPath": tb_path.to_string_lossy()}}), "tb").unwrap();
+        let je = inspect(&json!({"source": {"inputPath": je_path.to_string_lossy()}}), "je").unwrap();
+        assert_eq!(je["suggestedMapping"]["functionalAmount"], "金额");
+        let params = json!({
+            "reportStart": "2024-01-01", "reportEnd": "2024-12-31", "dayBasis": "month12",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()}, "tbMapping": tb["suggestedMapping"],
+            "jeSource": {"inputPath": je_path.to_string_lossy()}, "jeMapping": je["suggestedMapping"]
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap();
+        let rows = result["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 11, "1002 汇总行不得与 11 个末级账户重复进入测算");
+        assert!(rows.iter().all(|row| row["account"].as_str().unwrap_or("") != "1002 银行存款"));
+        for row in rows {
+            assert!(
+                row["reconciliationDiff"].as_f64().unwrap().abs() < 0.01,
+                "{} 未勾稽：{}",
+                row["account"],
+                row["reconciliationDiff"]
+            );
+        }
     }
 
     fn rows_of<'a>(result: &'a Value, needle: &str) -> &'a Value {

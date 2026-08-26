@@ -196,6 +196,51 @@ summary:focus-visible {
   color: var(--on-dark-muted);
   margin: 0 0 var(--sp-5);
 }
+/* ---- 无边框窗口（decorations: false）----
+ * 右上角只保留最小化/最大化/关闭；拖动窗口靠品牌区与页头的
+ * data-tauri-drag-region。按钮固定压在主区顶部留白上，
+ * 所以 .frameless .main 要加出一截顶部内边距（见 .main 处）。
+ * 层级取 800：高于侧边栏(20)，低于 ts-filter-menu(1000)，
+ * 下拉菜单能盖住按钮，但按钮不会反过来挡菜单。 */
+.window-controls {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 800;
+  display: flex;
+}
+.window-controls button {
+  width: 44px;
+  height: 34px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  /* 窗口控制按钮按 Windows 习惯保持箭头光标，不用手型 */
+  cursor: default;
+}
+.window-controls button:hover {
+  background: var(--surface-muted);
+  color: var(--ink);
+}
+.window-controls button:active {
+  background: var(--border-soft);
+}
+.window-controls .window-controls-close:hover {
+  background: #e81123;
+  color: #fff;
+}
+.window-controls .window-controls-close:active {
+  background: #c50f1f;
+  color: #fff;
+}
+/* 品牌区与页头现在是拖拽手柄（双击=最大化），拖动时选中文字只会闪一下，关掉 */
+.brand,
+.page-header {
+  user-select: none;
+}
 .sidebar nav,
 .tool-nav {
   display: grid;
@@ -224,6 +269,20 @@ summary:focus-visible {
 .sidebar a:hover .nav-icon,
 .sidebar a.active .nav-icon {
   color: var(--on-brand-soft, #fff);
+}
+.nav-update-dot {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  margin-left: auto;
+  border: 2px solid var(--brand-deep);
+  border-radius: 50%;
+  background: var(--warning-dot);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning-dot) 28%, transparent);
+}
+.sidebar a:hover .nav-update-dot,
+.sidebar a.active .nav-update-dot {
+  border-color: var(--brand-soft);
 }
 .tool-badge {
   flex: 0 0 auto;
@@ -271,6 +330,11 @@ summary:focus-visible {
   min-width: 0;
   width: 100%;
   overflow-x: clip;
+}
+/* 无边框窗口：顶部为右上角的窗口按钮留出高度（34px 按钮 + 一点余量），
+   避免页面右上角的操作按钮被压住。浏览器预览没有这个标记，保持原样。 */
+.frameless .main {
+  padding-top: 44px;
 }
 .app-loading {
   min-height: 260px;

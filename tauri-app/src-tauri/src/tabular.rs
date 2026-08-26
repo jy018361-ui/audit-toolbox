@@ -25,7 +25,7 @@ use crate::AppError;
 use crate::excel_merger::PauseCheckpoint;
 use crate::ledger_mapping;
 use crate::ledger_mapping::{
-    SignConvention, SignEvidence, header_index, is_credit_direction, normalize_name,
+    SignConvention, SignEvidence, header_index, normalize_name,
 };
 
 const TS_MAX_PIVOT_COLUMN_VALUES: usize = 180;
@@ -4029,7 +4029,9 @@ fn ledger_amounts(
             .and_then(|name| header_index(headers, name)),
     ) {
         let evidence = sign_evidence(rows, headers, mapping, id_indexes);
-        let signed = sign_override.or(evidence.convention) == Some(SignConvention::Signed);
+        let convention = sign_override
+            .or(evidence.convention)
+            .unwrap_or(SignConvention::Unsigned);
         let debit = rows
             .iter()
             .map(|row| parse_number(row.get(dr_index).map(String::as_str).unwrap_or("")))
@@ -4038,21 +4040,18 @@ fn ledger_amounts(
             .iter()
             .map(|row| parse_number(row.get(cr_index).map(String::as_str).unwrap_or("")))
             .collect::<Vec<_>>();
-        // 「符号一样」按借−贷折净额；「已带符号」取有值一侧原值
-        // （借贷同行的行两边相减，与两种口径都一致）。
         let net = debit
             .iter()
             .zip(credit.iter())
-            .map(|(dr, cr)| {
-                if signed && !(dr != &0.0 && cr != &0.0) {
-                    if *dr != 0.0 {
-                        *dr
-                    } else {
-                        *cr
-                    }
-                } else {
-                    dr - cr
-                }
+            .map(|(debit, credit)| {
+                ledger_mapping::signed_amount(
+                    &ledger_mapping::AmountInputs {
+                        debit: Some(*debit),
+                        credit: Some(*credit),
+                        ..Default::default()
+                    },
+                    convention,
+                )
             })
             .collect();
         return LedgerAmounts {
@@ -4078,25 +4077,23 @@ fn ledger_amounts(
         .and_then(|name| header_index(headers, name));
     if let Some(direction_index) = direction_index {
         let evidence = sign_evidence(rows, headers, mapping, id_indexes);
-        let signed = sign_override.or(evidence.convention) == Some(SignConvention::Signed);
-        let credit = rows
+        let convention = sign_override
+            .or(evidence.convention)
+            .unwrap_or(SignConvention::Unsigned);
+        let net = rows
             .iter()
-            .map(|row| {
-                is_credit_direction(row.get(direction_index).map(String::as_str).unwrap_or(""))
+            .zip(raw.iter())
+            .map(|(row, amount)| {
+                ledger_mapping::signed_amount(
+                    &ledger_mapping::AmountInputs {
+                        amount: Some(*amount),
+                        direction: row.get(direction_index).cloned(),
+                        ..Default::default()
+                    },
+                    convention,
+                )
             })
-            .collect::<Vec<_>>();
-        let net = if signed {
-            raw.clone()
-        } else {
-            raw.iter()
-                .enumerate()
-                // Legacy multiplies credit rows by -1 and keeps the original
-                // sign.  Forcing `-abs()` here would turn a red-letter reversal
-                // (credit row already negative) into another negative amount,
-                // so the reversing voucher would no longer net to zero.
-                .map(|(index, value)| if credit[index] { -*value } else { *value })
-                .collect()
-        };
+            .collect();
         LedgerAmounts {
             net,
             allow_cross_match: false,

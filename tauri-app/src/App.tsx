@@ -34,6 +34,7 @@ import { AudiPickPage } from "./AudiPickPage";
 import { WpServicePage } from "./WpServicePage";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageHeader } from "@/components/PageHeader";
+import { WindowControls } from "@/components/WindowControls";
 import { PersistentToolPages } from "@/components/PersistentToolPages";
 import { StepIndicator } from "@/components/StepIndicator";
 import { ResultView } from "@/components/ResultView";
@@ -207,8 +208,10 @@ export default function App() {
   const [catalog, setCatalog] = useState<ToolManifest[]>([]);
   const [bootstrap, setBootstrap] = useState<Bootstrap>();
   const [jobs, setJobs] = useState<Record<string, JobEvent>>({});
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
   const [startupReady, setStartupReady] = useState(false);
   const [startupError, setStartupError] = useState("");
+  const automaticUpdateCheckStarted = useRef(false);
   // 侧边栏子分组默认展开：折叠头不是路由入口，收着会让高频工具"消失"。
   const [subgroupOpen, setSubgroupOpen] = useState<Record<string, boolean>>({
     fa: true,
@@ -251,19 +254,38 @@ export default function App() {
       () => undefined,
     );
   }, []);
+  useEffect(() => {
+    if (automaticUpdateCheckStarted.current) return;
+    automaticUpdateCheckStarted.current = true;
+    void check()
+      .then((update) => setAvailableUpdate(update ?? null))
+      .catch(() => {
+        // 启动时的检查保持静默；断网不该打断用户工作，仍可在设置页手动重试。
+      });
+  }, []);
   return (
     <div className="app-shell">
+      <WindowControls />
       <aside className="sidebar">
-        <div className="brand">
-          <span>AUDIT TOOLKIT</span>
-          <h1>E点通工具箱</h1>
-          <p>统一、安全、可追踪的审计作业工作台</p>
+        <div className="brand" data-tauri-drag-region>
+          {/* drag-region 只对本元素生效、不继承，所以每个文字节点都要带上 */}
+          <span data-tauri-drag-region>AUDIT TOOLKIT</span>
+          <h1 data-tauri-drag-region>E点通工具箱</h1>
+          <p data-tauri-drag-region>统一、安全、可追踪的审计作业工作台</p>
         </div>
         <nav>
           {NAV.map((x) => (
             <NavLink key={x.to} to={x.to} end={x.to === "/"}>
               <span className="nav-icon">{NAV_ICON[x.to]}</span>
-              {x.label}
+              <span>{x.label}</span>
+              {x.to === "/settings" && availableUpdate && (
+                <span
+                  className="nav-update-dot"
+                  role="status"
+                  aria-label={`发现新版本 ${availableUpdate.version}`}
+                  title={`发现新版本 ${availableUpdate.version}`}
+                />
+              )}
             </NavLink>
           ))}
         </nav>
@@ -371,7 +393,15 @@ export default function App() {
                 element={<TaskCenter jobs={Object.values(jobs)} />}
               />
               <Route path="/history" element={<History />} />
-              <Route path="/settings" element={<Settings />} />
+              <Route
+                path="/settings"
+                element={
+                  <Settings
+                    availableUpdate={availableUpdate}
+                    onAvailableUpdateChange={setAvailableUpdate}
+                  />
+                }
+              />
               <Route
                 path="/diagnostics"
                 element={
@@ -886,7 +916,21 @@ export function formatBytes(bytes: number): string {
   return `${value >= 100 || index === 0 ? Math.round(value) : value.toFixed(1)} ${units[index]}`;
 }
 
-function Settings() {
+export function formatUpdateProgress(downloaded: number, total?: number): string {
+  if (!total || !Number.isFinite(total) || total <= 0) {
+    return `正在下载更新：已下载 ${formatBytes(downloaded)}`;
+  }
+  const percentage = Math.min(100, Math.round((downloaded / total) * 100));
+  return `正在下载更新：${formatBytes(downloaded)} / ${formatBytes(total)}（${percentage}%）`;
+}
+
+function Settings({
+  availableUpdate,
+  onAvailableUpdateChange,
+}: {
+  availableUpdate: Update | null;
+  onAvailableUpdateChange: (update: Update | null) => void;
+}) {
   const [form, setForm] = useState({
     enabled: false,
     apiType: "openai",
@@ -933,7 +977,6 @@ function Settings() {
   useEffect(() => {
     void refreshCacheStat();
   }, []);
-  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
   const [updateStatus, setUpdateStatus] = useState("");
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
@@ -969,19 +1012,25 @@ function Settings() {
   useEffect(() => {
     void getVersion().then(setAppVersion).catch(() => setAppVersion("未知"));
   }, []);
+  useEffect(() => {
+    if (availableUpdate && !updateStatus) {
+      setUpdateStatus(
+        `发现新版本 ${availableUpdate.version}。更新说明：${availableUpdate.body || "暂无说明。"}`,
+      );
+    }
+  }, [availableUpdate, updateStatus]);
   async function checkForUpdates() {
     setCheckingUpdate(true);
     setUpdateStatus("正在检查 GitHub Release…");
     try {
       const update = await check();
-      setAvailableUpdate(update ?? null);
+      onAvailableUpdateChange(update ?? null);
       setUpdateStatus(
         update
           ? `发现新版本 ${update.version}。更新说明：${update.body || "暂无说明。"}`
           : "当前已经是最新版本。",
       );
     } catch (e) {
-      setAvailableUpdate(null);
       setUpdateStatus(`检查更新失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setCheckingUpdate(false);
@@ -991,10 +1040,22 @@ function Settings() {
     if (!availableUpdate) return;
     setInstallingUpdate(true);
     setUpdateStatus("正在下载并安装更新，请不要关闭工具箱…");
+    let downloadedBytes = 0;
+    let totalBytes: number | undefined;
     try {
       await availableUpdate.downloadAndInstall((event) => {
-        if (event.event === "Progress") {
-          setUpdateStatus(`正在下载更新：${Math.round(event.data.chunkLength / 1024)} KB`);
+        if (event.event === "Started") {
+          totalBytes = event.data.contentLength;
+          setUpdateStatus(
+            totalBytes
+              ? `准备下载更新：共 ${formatBytes(totalBytes)}`
+              : "准备下载更新…",
+          );
+        } else if (event.event === "Progress") {
+          downloadedBytes += event.data.chunkLength;
+          setUpdateStatus(formatUpdateProgress(downloadedBytes, totalBytes));
+        } else if (event.event === "Finished") {
+          setUpdateStatus("更新下载完成，正在安装，请不要关闭工具箱…");
         }
       });
       setUpdateStatus("更新安装完成，正在重启工具箱…");

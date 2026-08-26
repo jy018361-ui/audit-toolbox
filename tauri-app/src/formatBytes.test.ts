@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatBytes } from "./App";
+import { formatBytes, formatUpdateProgress } from "./App";
 
 describe("缓存占用的字节格式化", () => {
   it("按量级选单位，缓存占用不该让人数零", () => {
@@ -28,5 +28,23 @@ describe("缓存占用的字节格式化", () => {
 
   it("超出 GB 仍按 GB 计，不会掉出单位表", () => {
     expect(formatBytes(5000 * 1024 ** 3)).toBe("5000 GB");
+  });
+});
+
+describe("更新下载进度", () => {
+  it("有总大小时显示累计下载量和百分比", () => {
+    expect(formatUpdateProgress(6.3 * 1024 * 1024, 12.6 * 1024 * 1024)).toBe(
+      "正在下载更新：6.3 MB / 12.6 MB（50%）",
+    );
+  });
+
+  it("服务器未提供总大小时仍显示累计下载量", () => {
+    expect(formatUpdateProgress(2 * 1024)).toBe("正在下载更新：已下载 2.0 KB");
+  });
+
+  it("下载量偶尔超过响应总大小时百分比不超过 100", () => {
+    expect(formatUpdateProgress(13 * 1024 * 1024, 12.6 * 1024 * 1024)).toBe(
+      "正在下载更新：13.0 MB / 12.6 MB（100%）",
+    );
   });
 });

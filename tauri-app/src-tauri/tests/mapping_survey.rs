@@ -500,3 +500,100 @@ fn survey_rollforward() {
     }
     println!("（没找到 4800 样例）");
 }
+
+/// 用真实 4800 跑完整测算，看未实现测算的余额基础是否完整。
+#[test]
+#[ignore = "依赖本机样例目录，手工调查用"]
+fn survey_unrealized() {
+    for dir in sample_dirs() {
+        let tb = dir.join("TB-4800.xlsx");
+        let je = dir.join("4800_JE_2025.01-12.xlsx");
+        if !tb.is_file() || !je.is_file() {
+            continue;
+        }
+        let insp = |path: &PathBuf, method: &str| {
+            audit_toolbox_lib::engine_call_for_test(
+                method,
+                serde_json::json!({"source": {"inputPath": path.to_string_lossy()}}),
+            )
+            .expect("inspect 应当成功")
+        };
+        let tb_i = insp(&tb, "fx.inspect_tb");
+        let je_i = insp(&je, "fx.inspect_je");
+        let params = serde_json::json!({
+            "mode": "combined",
+            // 与前端同口径：本位币取 TB 判出的 uniformCurrency 预填值。
+            // 直接调后端而不传这一项，会落到默认的 CNY，全表科目都被当成外币。
+            "entityCurrencies": {"4800": tb_i["uniformCurrency"].as_str().unwrap_or("CNY")},
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31", "balanceSheetDate": "2025-12-31",
+            "tbSource": {"inputPath": tb.to_string_lossy(), "sheet": tb_i["sheet"], "headerRow": tb_i["headerRow"], "headerDepth": 1},
+            "jeSource": {"inputPath": je.to_string_lossy(), "sheet": je_i["sheet"], "headerRow": je_i["headerRow"], "headerDepth": 1},
+            "tbMapping": tb_i["suggestedMapping"],
+            "jeMapping": je_i["suggestedMapping"],
+        });
+        println!("
+══════ 4800 完整测算");
+        println!("  TB uniformCurrency（本位币预填值）= {}", tb_i["uniformCurrency"]);
+        println!("  TB functionalCurrency 映射到 = {}", tb_i["suggestedMapping"]["functionalCurrency"]);
+        println!("  TB currency 映射到 = {}", tb_i["suggestedMapping"]["currency"]);
+        match audit_toolbox_lib::engine_call_for_test("fx.preview_probe", params) {
+            Ok(v) => {
+                let s = &v["summary"];
+                println!("  未实现缺少TB余额基础的键数: {}", s["unrealizedMissingBalanceKeys"]);
+                println!("  余额基础完整: {}", s["unrealizedBalanceBasisComplete"]);
+                println!("  已实现: {}", s["realizedGainLoss"]);
+                println!("  未实现: {}", s["unrealizedAdjustment"]);
+                println!("  TB汇兑损益: {}", s["tbFxGainLoss"]);
+                println!("  差异率: {}", s["differenceRatio"]);
+                println!("  滚动校验通过: {} 失配 {}", s["rollforwardPassed"], s["rollforwardIssueCount"]);
+                // 缺少 TB 余额基础的账户明细
+                if let Some(q) = v["quality"].as_array() {
+                    let mut shown = 0;
+                    for item in q {
+                        if item["type"] == "未实现测算缺少TB余额基础" && shown < 6 {
+                            println!("    缺基础: {} / {} / {}",
+                                item["entity"], item["account"], item["currency"]);
+                            shown += 1;
+                        }
+                    }
+                }
+                // 分类分布：看自动分类生效没有
+                if let Some(c) = v["classificationControls"].as_array() {
+                    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+                    for item in c {
+                        *counts.entry(item["classification"].as_str().unwrap_or("?").into()).or_default() += 1;
+                    }
+                    println!("  凭证分类分布: {counts:?}");
+                }
+            }
+            Err(e) => println!("  失败：{}", format!("{e:?}").chars().take(400).collect::<String>()),
+        }
+        return;
+    }
+    println!("（没找到 4800 样例）");
+}
+
+/// 只读：看 TB 的本位币预填值判出来没有。
+#[test]
+#[ignore = "依赖本机样例目录，手工调查用"]
+fn survey_uniform_currency() {
+    for dir in sample_dirs() {
+        let tb = dir.join("TB-4800.xlsx");
+        if !tb.is_file() {
+            continue;
+        }
+        let v = audit_toolbox_lib::engine_call_for_test(
+            "fx.inspect_tb",
+            serde_json::json!({"source": {"inputPath": tb.to_string_lossy()}}),
+        )
+        .expect("inspect 应当成功");
+        println!("
+══════ TB-4800 本位币识别");
+        println!("  uniformCurrency（前端预填值）= {}", v["uniformCurrency"]);
+        println!("  functionalCurrency 映射列   = {}", v["suggestedMapping"]["functionalCurrency"]);
+        println!("  currency 映射列             = {}", v["suggestedMapping"]["currency"]);
+        println!("  currencyText 映射列         = {}", v["suggestedMapping"]["currencyText"]);
+        return;
+    }
+    println!("（没找到 TB-4800）");
+}

@@ -221,3 +221,5 @@
 
 .fx-accounts label{grid-template-columns:minmax(120px,1fr) 150px 148px}.fx-accounts select.fx-currency-override{border-color:var(--primary);font-weight:600}
 .fx-accounts select.fx-currency-risky{border-color:#c2410c;color:#c2410c;font-weight:600}
+/* 科目名与凭证结构判定冲突的提示行：结构为准，科目名只做交叉验证。 */
+.fx-conflict-hint{color:#8a5700!important;font-weight:600}

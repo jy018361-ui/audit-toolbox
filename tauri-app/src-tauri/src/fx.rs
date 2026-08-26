@@ -4247,7 +4247,9 @@ fn rate_cache_dir() -> Result<PathBuf, AppError> {
 }
 fn rate_cache_key(start: &str, end: &str) -> String {
     let mut hash = Sha256::new();
-    hash.update(format!("safe-v1|{start}|{end}"));
+    // safe-v2：快照的牌价点从「报告期逐日」扩为「报告期前推35天起逐日」，
+    // 已实现测算的月初牌价（上月末重估点）必须能精确命中，旧缓存里没有这些点。
+    hash.update(format!("safe-v2|{start}|{end}"));
     hex::encode(hash.finalize())[..20].to_owned()
 }
 
@@ -4321,8 +4323,10 @@ fn fetch_safe_rates(start: &str, end: &str) -> Result<RateSnapshot, AppError> {
             None,
         ));
     }
-    // Include a 14-day lookback so holidays at the period start can safely use
-    // the nearest prior publication without ever using a future rate.
+    // Include a 35-day lookback so holidays at the period start can safely use
+    // the nearest prior publication without ever using a future rate, and so
+    // the previous month-end rate (the month-opening basis for realized FX
+    // measurement) is available even when the report period starts mid-month.
     let client = Client::builder()
         .timeout(StdDuration::from_secs(45))
         .build()
@@ -4360,7 +4364,7 @@ fn fetch_safe_rates(start: &str, end: &str) -> Result<RateSnapshot, AppError> {
                 )
             })
     };
-    let lookback = fetch(start_date - Duration::days(14), start_date)?;
+    let lookback = fetch(start_date - Duration::days(35), start_date)?;
     let period = fetch(start_date, end_date)?;
     let mut digest = Sha256::new();
     digest.update(&lookback);
@@ -4382,7 +4386,9 @@ fn fetch_safe_rates(start: &str, end: &str) -> Result<RateSnapshot, AppError> {
         "ZAR", "KRW", "AED", "SAR", "HUF", "PLN", "DKK", "SEK", "NOK", "TRY", "MXN", "THB",
     ];
     let mut rates = Vec::new();
-    for requested in date_points(start_date, end_date) {
+    // 牌价点从报告期前推35天开始逐日生成：报告期从月中开始时，上月末
+    // （月初牌价的取数点）也必须是一个可精确命中的 requested 点。
+    for requested in date_points(start_date - Duration::days(35), end_date) {
         for (i, currency) in currencies.iter().enumerate() {
             if let Some((published, values)) = raw
                 .iter()
@@ -4566,6 +4572,36 @@ fn rate(
     ))
 }
 
+/// 月初牌价：已实现汇兑损益 = (记账日官方牌价 − 月初牌价) × 终止确认原币。
+/// 月初牌价必须与上月末重估同一快照点——取凭证所在月第一天的前一天
+/// （上月最后一日）。该日期往前 7 天内最近的可命中牌价点即为结果
+/// （月末日通常直接命中；个别币种缺发布时退到最近的前一个发布点）。
+/// 若之前完全无数据（报告期数据缺口），退回当月内最早的牌价点并标记
+/// `is_fallback = true` 供测算结果披露口径差异；两者皆无 → None（隔离该腿）。
+fn month_opening_rate(
+    snapshot: &RateSnapshot,
+    within_date: NaiveDate,
+    currency: &str,
+    functional: &str,
+) -> Option<(f64, String, bool)> {
+    let first_of_month = NaiveDate::from_ymd_opt(within_date.year(), within_date.month(), 1)?;
+    let mut probe = first_of_month - Duration::days(1);
+    for _ in 0..7 {
+        if let Some((value, published)) = rate(snapshot, probe, currency, functional) {
+            return Some((value, published, false));
+        }
+        probe -= Duration::days(1);
+    }
+    let mut probe = first_of_month;
+    while probe < within_date {
+        if let Some((value, published)) = rate(snapshot, probe, currency, functional) {
+            return Some((value, published, true));
+        }
+        probe += Duration::days(1);
+    }
+    None
+}
+
 fn calculate(
     params: &Value,
     progress: &dyn Fn(&str, usize, usize, &str),
@@ -4622,6 +4658,9 @@ fn calculate(
         unrealized = calculation;
         quality.extend(issues);
     }
+    // 新已实现口径（记账日牌价−月初牌价）的前置假设体检：入账口径恒定性
+    // 与每月重估存在性。只提示不阻断，缺 jeSource 时自动跳过。
+    quality.extend(month_start_rate_assumption_checks(params, &snapshot));
     let realized_total = realized
         .iter()
         .filter_map(|v| v.get("auditGainLoss").and_then(Value::as_f64))
@@ -5207,6 +5246,12 @@ fn build_review_bridge(
         let mut has_fx = false;
         let mut monetary_has_foreign_movement = false;
         let mut monetary_has_functional_movement = false;
+        // 结构判定所需证据：非现金货币性项目是否被终止确认（原币减少）、
+        // 外币现金与本位币现金是否对转（外币兑换）。
+        let mut noncash_monetary_decrease = false;
+        let mut noncash_foreign_movement = false;
+        let mut cash_foreign_movement = false;
+        let mut cash_functional_movement = false;
         for row in &rows {
             let account = account_name(row, &mapping);
             if !account.trim().is_empty() {
@@ -5227,7 +5272,7 @@ fn build_review_bridge(
             })?;
             if role == "fx_gain_loss" {
                 has_fx = true;
-                fx_accounts.insert(account);
+                fx_accounts.insert(account.clone());
                 booked += functional;
             }
             if matches!(
@@ -5243,6 +5288,21 @@ fn build_review_bridge(
                 })?;
                 monetary_has_foreign_movement |= foreign.abs() >= 0.01;
                 monetary_has_functional_movement |= functional.abs() >= 0.01;
+                let entity = entity_for(row, &mapping, params);
+                let row_currency = normalize_currency(&currency_for(row, &mapping, &account, params));
+                let entity_currency = normalize_currency(&functional_currency(entity, params));
+                let is_cash_row = role == "cash" || is_cash_account(&account, params);
+                if is_cash_row {
+                    if row_currency.is_empty() || row_currency == entity_currency {
+                        cash_functional_movement |= functional.abs() >= 0.01;
+                    } else {
+                        cash_foreign_movement |= foreign.abs() >= 0.01;
+                    }
+                } else {
+                    noncash_foreign_movement |= foreign.abs() >= 0.01;
+                    noncash_monetary_decrease |= (role == "monetary_asset" && foreign < -0.005)
+                        || (role == "monetary_liability" && foreign > 0.005);
+                }
             }
         }
         if booked.abs() < 0.005 {
@@ -5271,20 +5331,40 @@ fn build_review_bridge(
             .filter(|value| !value.is_empty() && seen_summaries.insert(value.clone()))
             .collect::<Vec<_>>()
             .join(" | ");
-        // 界面与月度未实现引擎必须共用完整凭证证据，不能一边已识别重估，
-        // 另一边仍把同一凭证显示为“待确认”。
+        // 分类以凭证结构为准，与已实现/月度引擎同口径：
+        // 非现金货币性项目原币减少（终止确认）或外币兑换 → 已实现；
+        // 原币不动而本位币变动且带重估证据 → 未实现；其余待确认。
+        // 科目名里的「已实现/未实现」是客户自己的口径，不再参与定性，
+        // 只做交叉验证——与结构冲突时提示用户复核。
+        let conversion_pattern = has_fx
+            && cash_foreign_movement
+            && cash_functional_movement
+            && !noncash_foreign_movement;
+        let structural_class = if !has_fx {
+            None
+        } else if noncash_monetary_decrease || conversion_pattern {
+            Some("已实现汇兑损益")
+        } else if has_unrealized_voucher_evidence(
+            &summary,
+            &voucher_type,
+            has_fx,
+            monetary_has_foreign_movement,
+            monetary_has_functional_movement,
+        ) {
+            Some("未实现汇兑损益")
+        } else {
+            None
+        };
+        let name_class = classify_by_account_names(fx_accounts.iter().map(String::as_str));
+        let classification_conflict = match name_class {
+            Some(name) if Some(name) != structural_class => Some(format!(
+                "科目名称指向「{name}」，但凭证结构判定为「{}」；以结构为准，请复核客户科目使用是否恰当",
+                structural_class.unwrap_or("待确认")
+            )),
+            _ => None,
+        };
         let selected = manual_classification(params, &display_id)
-            .or_else(|| classify_by_account_names(fx_accounts.iter().map(String::as_str)))
-            .or_else(|| {
-                has_unrealized_voucher_evidence(
-                    &summary,
-                    &voucher_type,
-                    has_fx,
-                    monetary_has_foreign_movement,
-                    monetary_has_functional_movement,
-                )
-                .then_some("未实现汇兑损益")
-            })
+            .or(structural_class)
             .unwrap_or("待确认");
         let (category, reason) = if has_non_monetary {
             (
@@ -5323,6 +5403,7 @@ fn build_review_bridge(
                     "用户已确认分类，但缺少执行相应重算所需的原币、账面价值或汇率证据；本凭证未进入测算结果"
                 } else { reason },
                 "classification": selected,
+                "classificationConflict": classification_conflict,
                 "measurementStatus": if is_client_revaluation {
                     "已识别为未实现汇兑损益类凭证；审计金额按账户余额测算"
                 } else if is_realized_measured {"测算成功"} else if selected == "待确认" {"待确认"} else {"无法测算，未纳入结果"},
@@ -5586,10 +5667,13 @@ fn calculate_realized(
             .unwrap_or("")
             .to_uppercase();
         let mut has_fx = false;
-        let mut has_cash = false;
         let mut has_foreign_currency = false;
         let mut settlement_targets = Vec::new();
-        let mut monetary_counterparty_count = 0usize;
+        // 外币兑换证据：外币现金行、本位币现金腿合计金额。
+        let mut cash_foreign_rows = Vec::new();
+        let mut cash_functional_movement = false;
+        let mut cash_foreign_movement = false;
+        let mut noncash_foreign_movement = false;
         let mut monetary_has_foreign_movement = false;
         let mut monetary_has_functional_movement = false;
         let mut cash_settlements = HashMap::<String, (f64, f64)>::new();
@@ -5598,7 +5682,6 @@ fn calculate_realized(
             let role = role_for(&account, params);
             has_fx |= role == "fx_gain_loss";
             let is_cash = role == "cash" || is_cash_account(&account, params);
-            has_cash |= is_cash;
             let entity = entity_for(row, &mapping, params);
             let currency = normalize_currency(&currency_for(row, &mapping, &account, params));
             let functional = normalize_currency(&functional_currency(entity, params));
@@ -5625,8 +5708,26 @@ fn calculate_realized(
                     item.0 += foreign;
                     item.1 += functional;
                 }
-                if !is_cash && matches!(role.as_str(), "monetary_asset" | "monetary_liability") {
-                    monetary_counterparty_count += 1;
+                let entity_currency = normalize_currency(&functional_currency(entity, params));
+                if is_cash {
+                    if currency.is_empty() || currency == entity_currency {
+                        cash_functional_movement |= functional.abs() >= 0.01;
+                    } else {
+                        cash_foreign_movement |= foreign.abs() >= 0.01;
+                        // 只有外币现金「减少」方向（卖出外币/兑换出外币）构成
+                        // 终止确认；买入外币是新增敞口，不产生已实现损益。
+                        if foreign < -0.005 {
+                            cash_foreign_rows.push((
+                                row,
+                                account.clone(),
+                                role.clone(),
+                                foreign,
+                                functional,
+                            ));
+                        }
+                    }
+                } else {
+                    noncash_foreign_movement |= foreign.abs() >= 0.01;
                 }
                 let terminates_asset = !is_cash && role == "monetary_asset" && foreign < -0.005;
                 let terminates_liability = role == "monetary_liability" && foreign > 0.005;
@@ -5703,7 +5804,17 @@ fn calculate_realized(
         .iter()
         .any(|value| summary_lower.contains(value));
         let type_settlement = matches!(voucher_type_upper.as_str(), "DZ" | "ZE");
-        let structural_settlement = has_cash && !settlement_targets.is_empty();
+        // 外币兑换：外币货币资金与本位币货币资金对转、差额进汇兑损益，
+        // 同样构成已实现结算证据；此时无终止确认行，以外币现金行为重算对象。
+        let conversion_pattern = has_fx
+            && cash_foreign_movement
+            && cash_functional_movement
+            && !noncash_foreign_movement
+            && settlement_targets.is_empty();
+        // 结构判定取代此前「终止确认行恰好一条且对方货币性行恰好一条」的
+        // 门槛：批量付款一张凭证结清多张发票是常态，应逐条终止确认行重算、
+        // 有几条算几条，而不是整张放弃推进待复核。
+        let structural_settlement = !settlement_targets.is_empty() || conversion_pattern;
         let has_settlement =
             manual_realized || text_settlement || type_settlement || structural_settlement;
         // A functional-currency-only voucher without an FX gain/loss account is
@@ -5712,13 +5823,9 @@ fn calculate_realized(
         if !has_fx && !has_foreign_currency {
             continue;
         }
-        let simple_settlement = settlement_targets.len() == 1
-            && monetary_counterparty_count == 1
-            && voucher_type_upper != "AB"
-            && !revaluation_signal;
         let realized_hard = !manual_pending
             && has_fx
-            && (manual_realized || (!manual_unrealized && has_settlement && simple_settlement));
+            && (manual_realized || (!manual_unrealized && structural_settlement));
         let unrealized_hard = !realized_hard
             && revaluation_signal
             && (manual_unrealized
@@ -5753,14 +5860,18 @@ fn calculate_realized(
             } else if manual_unrealized {
                 "用户按同借贷科目凭证类型确认为未实现；重新执行重估测算"
             } else if realized_hard {
-                "货币性项目原币减少且存在结算/抵销/转换/终止确认"
+                if conversion_pattern {
+                    "外币兑换：外币货币资金与本位币货币资金对转"
+                } else {
+                    "货币性项目原币减少（终止确认），逐条结算行独立重算"
+                }
             } else if unrealized_hard {
                 "本位币变化、原币净变动在容差内且无结算"
             } else {"证据评分"}],
             "counterEvidence": if !has_settlement {vec!["未识别到结算证据"]} else {vec![]},
             "confidence": confidence, "ruleConflict": realized_hard && unrealized_hard
         }));
-        if manual_realized && settlement_targets.is_empty() {
+        if manual_realized && settlement_targets.is_empty() && !conversion_pattern {
             quality.push(json!({
                 "source":"JE", "voucherId":display_voucher_id(&id),
                 "type":"用户确认已实现但无法重算", "severity":"待确认",
@@ -5775,12 +5886,19 @@ fn calculate_realized(
             }));
         }
         if realized_hard {
-            for (row, account, role, foreign, functional) in settlement_targets {
+            let mut targets = settlement_targets.clone();
+            if conversion_pattern {
+                targets.extend(cash_foreign_rows.clone());
+            }
+            for (row, account, role, foreign, functional) in targets {
                 let entity = entity_for(row, &mapping, params);
                 let currency = currency_for(row, &mapping, &account, params);
                 let functional_code = functional_currency(entity, params);
-                if let Some((official_rate, published)) =
-                    rate(snapshot, date, &currency, &functional_code)
+                let day_rate = rate(snapshot, date, &currency, &functional_code);
+                let opening = month_opening_rate(snapshot, date, &currency, &functional_code);
+                let day_missing = day_rate.is_none();
+                if let (Some((official_rate, published)), Some((opening_rate, opening_published, opening_fallback))) =
+                    (day_rate, opening)
                 {
                     let settlement = foreign.abs();
                     let normalized_currency = normalize_currency(&currency);
@@ -5794,18 +5912,18 @@ fn calculate_realized(
                                 value.is_finite().then_some(value)
                             }
                         });
-                    // 审计重算必须独立于客户JE。现金/银行行倒算汇率仅作为客户采用
-                    // 汇率披露，不得替代交易日官方汇率，否则会机械复刻客户入账结果。
-                    let settlement_rate = official_rate;
-                    let translated = settlement * settlement_rate;
-                    let official_benchmark = settlement * official_rate;
-                    let carrying = functional.abs();
+                    // 测算完全独立于客户JE：账面＝终止确认原币×月初牌价（上月末
+                    // 重估同一快照点），折算＝原币×记账日官方牌价。现金/银行行
+                    // 倒算汇率仅作客户采用汇率披露；JE本位币金额仅作并列比对，
+                    // 都不参与损益计算。
+                    let carrying = settlement * opening_rate;
+                    let translated = settlement * official_rate;
                     // The sign of the derecognized foreign-currency row captures
                     // the export's debit/credit convention.  A positive target
-                    // uses translated minus carrying; a negative target uses the
-                    // inverse.  This is equivalent to the asset/liability rule
-                    // under debit-positive JE, while also supporting credit-
-                    // positive SAP exports without reversing customer receipts.
+                    // (liability decrease) uses translated minus carrying; a
+                    // negative target (asset decrease) uses the inverse.  The
+                    // result keeps the FX-account debit-positive sign convention
+                    // while also supporting credit-positive SAP exports.
                     let gain_loss = if foreign > 0.0 {
                         translated - carrying
                     } else {
@@ -5817,20 +5935,41 @@ fn calculate_realized(
                         "currency": currency, "functionalCurrency": functional_code,
                         "settlementForeign": settlement, "officialRate": official_rate,
                         "targetForeignSigned": foreign,
-                        "settlementRate": settlement_rate,
                         "customerAppliedRate": cash_implied_rate,
                         "rateSource": RATE_SOURCE,
-                        "calculationMethod": "交易日官方汇率独立重算",
-                        "publishedDate": published, "carryingFunctional": carrying,
+                        "calculationMethod": if conversion_pattern {
+                            "外币兑换：月初牌价与交易日官方牌价独立重算"
+                        } else {
+                            "终止确认：月初牌价与交易日官方牌价独立重算"
+                        },
+                        "publishedDate": published,
+                        "monthOpeningRate": opening_rate,
+                        "monthOpeningRateDate": opening_published,
+                        "monthOpeningRateFallback": opening_fallback,
+                        "carryingFunctional": carrying,
+                        "carryingBookFunctional": functional.abs(),
                         "translatedFunctional": translated, "auditGainLoss": gain_loss,
-                        "officialBenchmarkFunctional": official_benchmark,
-                        "officialBenchmarkDifference": translated - official_benchmark,
+                        "carryingBasisDifference": carrying - functional.abs(),
                         "cashRequired": false, "sourceRow": row.source_row
                     }));
+                    if opening_fallback {
+                        quality.push(json!({
+                            "source": "JE", "voucherId": display_voucher_id(&id),
+                            "row": row.source_row, "type": "月初牌价口径回退",
+                            "currency": currency, "severity": "提示",
+                            "detail": "上月末未取到该币种牌价，月初牌价回退为当月最早牌价，与月末重估口径不完全一致；请复核数据来源。"
+                        }));
+                    }
                 } else {
                     quality.push(json!({
-                        "source": "JE", "row": row.source_row, "type": "汇率缺失",
-                        "currency": currency, "severity": "隔离"
+                        "source": "JE", "row": row.source_row,
+                        "type": if day_missing { "汇率缺失" } else { "月初牌价缺失" },
+                        "currency": currency, "severity": "隔离",
+                        "detail": if day_missing {
+                            Value::Null
+                        } else {
+                            json!("无法取得该币种月初（上月末）牌价，本腿不计入自动测算。")
+                        }
                     }));
                 }
             }
@@ -6560,14 +6699,12 @@ fn calculate_monthly_unrealized(
         let mut monetary_has_foreign_movement = false;
         let mut monetary_has_functional_movement = false;
         let mut booked_fx = 0.0;
-        let mut fx_account_names = BTreeSet::<String>::new();
         for row in voucher {
             let account = account_name(row, &mapping);
             let role = role_for(&account, params);
             let functional = signed_amount(row, &mapping, "functional").unwrap_or(0.0);
             if role == "fx_gain_loss" {
                 has_fx = true;
-                fx_account_names.insert(account.clone());
                 booked_fx += functional;
             }
             if matches!(
@@ -6579,23 +6716,17 @@ fn calculate_monthly_unrealized(
                 monetary_has_functional_movement |= functional.abs() >= 0.01;
             }
         }
-        // 科目名本身写明「未实现」时，它比摘要措辞更可靠——很多账套的摘要是空的
-        // 或只写单号，重估信息全在科目名里（如「财务费用-汇兑损失-未实现」）。
-        //
-        // 这一条此前缺失，造成界面与引擎两套口径：界面的分类走
-        // `manual ?? classify_by_account_names ?? 待确认`，认科目名；而这里只认
-        // `manual`，科目名判定被无视。于是同一张凭证界面显示「未实现汇兑损益」、
-        // 引擎却当它没分类，落进「待确认或无法测算」——用户看到的正是这个矛盾。
-        let name_signal = classify_by_account_names(fx_account_names.iter().map(String::as_str))
-            == Some("未实现汇兑损益");
-        let automatic_signal = name_signal
-            || has_unrealized_voucher_evidence(
-                &summary,
-                &voucher_type,
-                has_fx,
-                monetary_has_foreign_movement,
-                monetary_has_functional_movement,
-            );
+        // 与界面分类、已实现引擎同口径：只认结构证据。科目名含「未实现」
+        // 不再使凭证按重估处理——原币减少的凭证是结算/终止确认，其发生额
+        // 必须留在正常业务余额滚动里；结构上原币不动而本位币变动、且带
+        // 重估证据的，才作为客户重估凭证从正常发生额中剔除。
+        let automatic_signal = has_unrealized_voucher_evidence(
+            &summary,
+            &voucher_type,
+            has_fx,
+            monetary_has_foreign_movement,
+            monetary_has_functional_movement,
+        );
         let is_revaluation = match manual {
             Some("未实现汇兑损益") => true,
             Some("已实现汇兑损益" | "待确认") => false,
@@ -7987,6 +8118,251 @@ fn json_text(value: &Value) -> String {
     }
 }
 
+/// 新已实现测算体系入账假设的前置验证：只输出数据质量提示，**不阻断测算**。
+///
+/// 新已实现口径是「每条终止确认腿 × (记账日官方牌价 − 当月月初牌价)」，
+/// 前提是客户账套「按当月月初汇率入账 + 每月月末重估」。本函数对 JE 数据做两组检查：
+///
+/// 1. **入账口径恒定性**：对货币性项目角色且原币发生额 |≥0.01、币种≠本位币的行，
+///    按「公司+币种+月份」分组倒算入账汇率（|本位币金额|÷|原币金额|）。组内不恒定
+///    （极差≥0.005）→「待复核」；恒定但与当月月初牌价偏离>0.01 →「提示」。
+///    每组最多一条，不逐行刷屏；非 CNY 本位币经 `month_opening_rate` 同日交叉折算
+///    后同样参与对比。
+/// 2. **每月重估存在性**：某公司某月有外币货币性项目发生额、却未识别到任何客户
+///    月末重估凭证 →「提示」，跨月结算项目的账面汇率可能不等于当月月初牌价。
+///    每公司每月最多一条。
+///
+/// 重估凭证识别与 `calculate_monthly_unrealized` 的 revaluation_meta 判定同一口径
+/// （manual_classification 优先，科目名/摘要/凭证类型信号兜底），直接复用现有函数，
+/// 不另起第二套。参数或读表失败时静默返回空列表——本检查是提示性质，硬错误由
+/// 主测算路径统一报告。
+pub(crate) fn month_start_rate_assumption_checks(
+    params: &Value,
+    snapshot: &RateSnapshot,
+) -> Vec<Value> {
+    let mut output = Vec::new();
+    let Some(spec) = params
+        .get("jeSource")
+        .and_then(|source| serde_json::from_value::<SourceSpec>(source.clone()).ok())
+    else {
+        return output;
+    };
+    let Ok(table) = load_fx_table(&spec) else {
+        return output;
+    };
+    let mapping = mapping_obj(params, "jeMapping");
+    let rows = records(&table);
+
+    // 按完整凭证分组（与 build_review_bridge / calculate_monthly_unrealized 同一口径）：
+    // 重估证据要看整张凭证的科目组合，单行看不出来。
+    let mut voucher_rows: BTreeMap<String, Vec<&RowRecord>> = BTreeMap::new();
+    for row in &rows {
+        if !is_je_business_row(row, &mapping) || parse_date(cell(row, &mapping, "date")).is_none()
+        {
+            continue;
+        }
+        voucher_rows
+            .entry(voucher_id(row, &mapping, params))
+            .or_default()
+            .push(row);
+    }
+
+    // (公司, 币种, 年月) → 组内各行倒算出的入账汇率
+    let mut implied_rates: BTreeMap<(String, String, (i32, u32)), Vec<f64>> = BTreeMap::new();
+    // 存在外币货币性项目发生额的（公司, 年月）
+    let mut activity_months: BTreeSet<(String, (i32, u32))> = BTreeSet::new();
+    // 已被识别为客户月末重估凭证覆盖的（公司, 年月）
+    let mut revaluation_months: BTreeSet<(String, (i32, u32))> = BTreeSet::new();
+
+    for (raw_id, voucher) in &voucher_rows {
+        let display_id = display_voucher_id(raw_id);
+        let mut summaries = BTreeSet::new();
+        let mut voucher_type = String::new();
+        let mut entities: BTreeSet<String> = BTreeSet::new();
+        let mut has_fx = false;
+        let mut fx_account_names: BTreeSet<String> = BTreeSet::new();
+        let mut monetary_has_foreign_movement = false;
+        let mut monetary_has_functional_movement = false;
+        for row in voucher {
+            let account = account_name(row, &mapping);
+            let role = role_for(&account, params);
+            let entity = entity_for(row, &mapping, params).to_owned();
+            let functional = functional_currency(&entity, params);
+            entities.insert(entity.clone());
+            let summary = cell(row, &mapping, "summary").trim();
+            if !summary.is_empty() {
+                summaries.insert(summary.to_owned());
+            }
+            if voucher_type.is_empty() {
+                let candidate = cell(row, &mapping, "voucherType").trim().to_uppercase();
+                if !candidate.is_empty() {
+                    voucher_type = candidate;
+                }
+            }
+            // 金额解析失败不在本函数报错（约定是不阻断测算）：跳过该行金额信号，
+            // 硬错误由主测算路径统一报告。
+            let functional_amount = signed_amount(row, &mapping, "functional").ok();
+            let foreign_amount = signed_amount(row, &mapping, "foreign").ok();
+            if role == "fx_gain_loss" {
+                has_fx = true;
+                fx_account_names.insert(account.clone());
+            }
+            if !matches!(
+                role.as_str(),
+                "cash" | "monetary_asset" | "monetary_liability"
+            ) {
+                continue;
+            }
+            if let (Some(foreign), Some(functional_value)) = (foreign_amount, functional_amount) {
+                monetary_has_foreign_movement |= foreign.abs() >= 0.01;
+                monetary_has_functional_movement |= functional_value.abs() >= 0.01;
+            }
+            let currency = currency_for(row, &mapping, &account, params);
+            if currency.is_empty() || currency == functional {
+                continue;
+            }
+            let Some(foreign) = foreign_amount else {
+                continue;
+            };
+            if foreign.abs() < 0.01 {
+                continue;
+            }
+            let Some(date) = parse_date(cell(row, &mapping, "date")) else {
+                continue;
+            };
+            let month = (date.year(), date.month());
+            activity_months.insert((entity.clone(), month));
+            // 本位币金额接近零的行除不出有效汇率，只制造假「不恒定」噪声，跳过。
+            if let Some(functional_value) = functional_amount {
+                if functional_value.abs() >= 0.005 {
+                    implied_rates
+                        .entry((entity, normalize_currency(&currency), month))
+                        .or_default()
+                        .push(functional_value.abs() / foreign.abs());
+                }
+            }
+        }
+        let summary = summaries.into_iter().collect::<Vec<_>>().join(" | ");
+        // 与 calculate_monthly_unrealized 的 revaluation_meta 判定保持同一口径：
+        // 人工分类优先；无人工分类时科目名写明「未实现」或完整凭证具备重估特征均可认领。
+        let name_signal = classify_by_account_names(fx_account_names.iter().map(String::as_str))
+            == Some("未实现汇兑损益");
+        let automatic_signal = name_signal
+            || has_unrealized_voucher_evidence(
+                &summary,
+                &voucher_type,
+                has_fx,
+                monetary_has_foreign_movement,
+                monetary_has_functional_movement,
+            );
+        let is_revaluation = match manual_classification(params, &display_id) {
+            Some("未实现汇兑损益") => true,
+            Some("已实现汇兑损益" | "待确认") => false,
+            _ => automatic_signal,
+        };
+        if is_revaluation {
+            if let Some(date) = voucher
+                .iter()
+                .find_map(|row| parse_date(cell(row, &mapping, "date")))
+            {
+                let month = (date.year(), date.month());
+                for entity in &entities {
+                    revaluation_months.insert((entity.clone(), month));
+                }
+            }
+        }
+    }
+
+    // —— 检查一：入账口径恒定性与月初牌价对比（每「公司+币种+月份」最多一条）——
+    for ((entity, currency, (year, month)), rates) in &implied_rates {
+        let month_text = format!("{year:04}-{month:02}");
+        let mut min_rate = f64::INFINITY;
+        let mut max_rate = f64::NEG_INFINITY;
+        for rate in rates {
+            min_rate = min_rate.min(*rate);
+            max_rate = max_rate.max(*rate);
+        }
+        if max_rate - min_rate >= 0.005 {
+            output.push(json!({
+                "source": "JE", "type": "当月入账汇率不恒定",
+                "severity": "待复核", "entity": entity, "currency": currency,
+                "month": month_text, "minImpliedRate": min_rate, "maxImpliedRate": max_rate,
+                "detail": format!(
+                    "{entity} {currency} 币种 {month_text} 的JE倒算入账汇率组内不一致\
+                     （最低 {min_rate:.4}、最高 {max_rate:.4}，极差 {:.4}），\
+                     可能按交易日即期汇率逐笔入账，「按当月月初汇率入账」的假设不成立，\
+                     新已实现测算体系对当月 {currency} 项目将产生相应系统性差异。",
+                    max_rate - min_rate
+                )
+            }));
+            continue;
+        }
+        let representative = min_rate;
+        let Some(month_first_day) = NaiveDate::from_ymd_opt(*year, *month, 1) else {
+            continue;
+        };
+        let functional = functional_currency(entity, params);
+        match month_opening_rate(snapshot, month_first_day, currency, &functional) {
+            None => {
+                output.push(json!({
+                    "source": "JE+汇率快照", "type": "当月月初牌价缺失",
+                    "severity": "提示", "entity": entity, "currency": currency,
+                    "month": month_text, "impliedRate": representative,
+                    "detail": format!(
+                        "{entity} {currency} 币种 {month_text} 的入账汇率恒定为 {representative:.4}，\
+                         但汇率快照既无上月末牌价、也无当月最早牌价，\
+                         无法验证「按当月月初汇率入账」的假设，请补充汇率区间后复核。"
+                    )
+                }));
+            }
+            Some((opening_rate, published, is_fallback)) => {
+                let deviation = (representative - opening_rate).abs();
+                if deviation > 0.01 {
+                    let fallback_note = if is_fallback {
+                        "，快照无上月末牌价，回退取当月最早"
+                    } else {
+                        ""
+                    };
+                    output.push(json!({
+                        "source": "JE+汇率快照", "type": "入账汇率偏离当月月初牌价",
+                        "severity": "提示", "entity": entity, "currency": currency,
+                        "month": month_text, "impliedRate": representative,
+                        "monthOpeningRate": opening_rate,
+                        "monthOpeningRateDate": published,
+                        "monthOpeningRateFallback": is_fallback,
+                        "detail": format!(
+                            "{entity} {currency} 币种 {month_text} 的入账汇率恒定为 {representative:.4}，\
+                             与当月月初基准牌价 {opening_rate:.4}（{published} 公布{fallback_note}）偏离 {deviation:.4}；\
+                             新已实现测算体系以「记账日官方牌价−当月月初牌价」为基准，\
+                             该假设下会产生相应系统性差异。"
+                        )
+                    }));
+                }
+                // 偏离 ≤ 0.01：该月假设成立，不出条目。
+            }
+        }
+    }
+
+    // —— 检查二：每月重估存在性（每公司每月最多一条）——
+    for (entity, year_month) in &activity_months {
+        if revaluation_months.contains(&(entity.clone(), *year_month)) {
+            continue;
+        }
+        let month_text = format!("{:04}-{:02}", year_month.0, year_month.1);
+        output.push(json!({
+            "source": "JE", "type": "当月未见月末重估凭证",
+            "severity": "提示", "entity": entity, "month": month_text,
+            "detail": format!(
+                "{entity} 在 {month_text} 存在外币货币性项目发生额，\
+                 但未识别到当月客户月末重估（未实现汇兑损益）凭证；\
+                 若客户并非每月重估，跨月结算项目的账面汇率可能不等于当月月初牌价，\
+                 读取新已实现测算结果时请注意该口径。"
+            )
+        }));
+    }
+    output
+}
+
 fn chinese_header(key: &str) -> &str {
     match key {
         "account" => "科目",
@@ -8005,7 +8381,12 @@ fn chinese_header(key: &str) -> &str {
         "bookedFxGainLoss" => "账面汇兑损益",
         "businessForeignMovement" => "正常业务原币发生额",
         "businessFunctionalMovement" => "正常业务本位币发生额",
-        "carryingFunctional" => "终止确认账面本位币价值",
+        "carryingFunctional" => "月初牌价重置账面本位币价值",
+        "carryingBookFunctional" => "客户JE终止确认本位币账面（仅比对）",
+        "carryingBasisDifference" => "账面基础差异（月初牌价－客户JE）",
+        "monthOpeningRate" => "月初牌价（上月末）",
+        "monthOpeningRateDate" => "月初牌价发布日期",
+        "monthOpeningRateFallback" => "月初牌价是否口径回退",
         "cashRequired" => "现金是否为必要条件",
         "classification" => "分类",
         "clientRevaluationExcluded" => "客户已入账未实现汇兑损益",
@@ -8040,6 +8421,9 @@ fn chinese_header(key: &str) -> &str {
         "functionalCurrency" => "本位币",
         "identificationBasis" => "识别依据",
         "inferredForeign" => "倒算原币余额",
+        "impliedRate" => "JE倒算入账汇率",
+        "minImpliedRate" => "组内最低倒算入账汇率",
+        "maxImpliedRate" => "组内最高倒算入账汇率",
         "jeFxGainLossAfterTransferExclusion" => "JE剔除损益结转后汇兑损益",
         "jeTbDifference" => "JE与TB差异",
         "lowConfidenceEvents" => "低置信度事件数",
@@ -8048,6 +8432,7 @@ fn chinese_header(key: &str) -> &str {
         "method" => "测算方法",
         "mode" => "测算模式",
         "needsZeroResultReview" => "零结果是否需要复核",
+        "month" => "月份",
         "monthEnd" => "月末测算日期",
         "nonRevaluationFunctionalMovement" => "正常业务本位币变动（剔除未实现类凭证）",
         "officialRate" => "官方汇率",
@@ -8098,6 +8483,8 @@ fn chinese_header(key: &str) -> &str {
         "fxAccounts" => "汇兑损益科目",
         "currencies" => "涉及币种",
         "calculationType" => "测算类型",
+        "classificationConflict" => "分类冲突提示",
+        "selectedClassification" => "当前分类（结构判定）",
         "bookAmount" => "测算前账面金额",
         "auditAmount" => "审计测算金额",
         "gainLoss" => "汇兑损益",
@@ -8191,6 +8578,96 @@ mod tests {
     }
 
     #[test]
+    fn month_opening_rate_matches_month_end_revaluation_point() {
+        // 已实现的月初牌价与未实现的月末重估必须取同一个牌价点：
+        // 2月凭证的月初牌价 = 1月31日点 = 1月月末重估牌价。
+        // 跨口径不一致会让「已实现＋各月未实现」的年度勾稽天然对不上。
+        let snapshot = RateSnapshot {
+            source: "测试".into(),
+            source_url: String::new(),
+            fetched_at: String::new(),
+            response_hash: test_snapshot_hash("month_opening_consistency"),
+            start_date: "2025-01-01".into(),
+            end_date: "2025-02-28".into(),
+            rates: vec![
+                RatePoint {
+                    requested_date: "2025-01-31".into(),
+                    published_date: "2025-01-30".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.1,
+                },
+                RatePoint {
+                    requested_date: "2025-01-31".into(),
+                    published_date: "2025-01-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+                RatePoint {
+                    requested_date: "2025-02-14".into(),
+                    published_date: "2025-02-14".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.25,
+                },
+                RatePoint {
+                    requested_date: "2025-02-14".into(),
+                    published_date: "2025-02-14".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+            ],
+            missing: Vec::new(),
+        };
+        let feb_voucher = NaiveDate::from_ymd_opt(2025, 2, 14).unwrap();
+        let (opening, published, fallback) =
+            month_opening_rate(&snapshot, feb_voucher, "USD", "CNY").unwrap();
+        assert!((opening - 7.1).abs() < 1e-9, "月初牌价应取1月31日点：{opening}");
+        assert_eq!(published, "2025-01-30");
+        assert!(!fallback);
+        let month_end = NaiveDate::from_ymd_opt(2025, 1, 31).unwrap();
+        let (reval, _) = rate(&snapshot, month_end, "USD", "CNY").unwrap();
+        assert!(
+            (opening - reval).abs() < 1e-12,
+            "月初牌价({opening})与上月末重估牌价({reval})必须同点"
+        );
+    }
+
+    #[test]
+    fn month_opening_rate_falls_back_to_earliest_in_month_with_disclosure() {
+        // 上月末与月内更早日期都没有牌价点时，回退当月最早牌价并标记，
+        // 供测算结果披露口径差异；当月内完全没有点则返回 None 隔离。
+        let snapshot = RateSnapshot {
+            source: "测试".into(),
+            source_url: String::new(),
+            fetched_at: String::new(),
+            response_hash: test_snapshot_hash("month_opening_fallback"),
+            start_date: "2025-01-01".into(),
+            end_date: "2025-01-31".into(),
+            rates: vec![
+                RatePoint {
+                    requested_date: "2025-01-05".into(),
+                    published_date: "2025-01-05".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.05,
+                },
+                RatePoint {
+                    requested_date: "2025-01-05".into(),
+                    published_date: "2025-01-05".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+            ],
+            missing: Vec::new(),
+        };
+        let voucher_date = NaiveDate::from_ymd_opt(2025, 1, 15).unwrap();
+        let (opening, _, fallback) =
+            month_opening_rate(&snapshot, voucher_date, "USD", "CNY").unwrap();
+        assert!((opening - 7.05).abs() < 1e-9);
+        assert!(fallback, "当月最早牌价回退必须带标记");
+        // CNY 之外没有牌价点的币种（EUR）→ None，由调用方隔离该腿。
+        assert!(month_opening_rate(&snapshot, voucher_date, "EUR", "CNY").is_none());
+    }
+
+    #[test]
     fn voucher_pattern_groups_identical_debit_and_credit_accounts() {
         let mapping = json!({"account":["科目"],"functionalAmount":"金额"})
             .as_object()
@@ -8256,6 +8733,18 @@ E,2025-01-02,1,AB,6603,账面汇兑损益,CNY,0,999\n",
             end_date: "2025-01-02".into(),
             rates: vec![
                 RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.15,
+                },
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+                RatePoint {
                     requested_date: "2025-01-02".into(),
                     published_date: "2025-01-02".into(),
                     currency: "USD".into(),
@@ -8275,11 +8764,16 @@ E,2025-01-02,1,AB,6603,账面汇兑损益,CNY,0,999\n",
         assert_eq!(classes[0]["classification"], "已实现");
         assert_eq!(
             calculation[0]["calculationMethod"],
-            "交易日官方汇率独立重算"
+            "终止确认：月初牌价与交易日官方牌价独立重算"
         );
-        assert!((calculation[0]["settlementRate"].as_f64().unwrap() - 7.2).abs() < 0.0001);
+        assert!((calculation[0]["officialRate"].as_f64().unwrap() - 7.2).abs() < 0.0001);
         assert!((calculation[0]["customerAppliedRate"].as_f64().unwrap() - 7.0).abs() < 0.0001);
-        assert!((calculation[0]["auditGainLoss"].as_f64().unwrap() + 10.0).abs() < 0.01);
+        // 账面＝100×月初牌价7.15＝715；折算＝100×记账日牌价7.2＝720；
+        // 资产减少方向 → 损益 = 715 − 720 = −5，完全独立于客户JE本位币710。
+        assert!(
+            (calculation[0]["monthOpeningRate"].as_f64().unwrap() - 7.15).abs() < 0.0001
+        );
+        assert!((calculation[0]["auditGainLoss"].as_f64().unwrap() + 5.0).abs() < 0.01);
         assert_ne!(
             calculation[0]["auditGainLoss"].as_f64().unwrap(),
             999.0,
@@ -8333,6 +8827,220 @@ E,2025-01-02,1,AB,6603,账面汇兑损益,CNY,0,999\n",
                 .iter()
                 .any(|message| message.contains("复用已完成的测算预览结果")),
             "生成底稿应复用仍有效的预览结果"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_payment_with_multiple_settlement_targets_measures_each_row() {
+        let root = std::env::temp_dir().join(format!("fx-batch-payment-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,凭证类型,科目,摘要,币种,原币,本位币\n\
+E,2025-01-02,1,DZ,2202,批量付款,USD,10000,71000\n\
+E,2025-01-02,1,DZ,2202,批量付款,USD,20000,143000\n\
+E,2025-01-02,1,DZ,2202,批量付款,USD,5000,36250\n\
+E,2025-01-02,1,DZ,1002,银行付款,USD,-35000,-251300\n\
+E,2025-01-02,1,DZ,6603,汇兑损失,CNY,0,1050\n",
+        )
+        .unwrap();
+        let params = json!({
+            "fixedEntity":"E",
+            "entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{
+                "entity":"公司","date":"日期","id":["凭证号"],"voucherType":"凭证类型",
+                "account":["科目"],"summary":"摘要","currency":"币种",
+                "foreignAmount":"原币","functionalAmount":"本位币"
+            },
+            "accountRoles":{"2202":"monetary_liability","1002":"cash","6603":"fx_gain_loss"}
+        });
+        let snapshot = RateSnapshot {
+            source: "测试".into(),
+            source_url: String::new(),
+            fetched_at: String::new(),
+            response_hash: test_snapshot_hash("batch_payment_measures_each_row"),
+            start_date: "2025-01-02".into(),
+            end_date: "2025-01-02".into(),
+            rates: vec![
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.1,
+                },
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+                RatePoint {
+                    requested_date: "2025-01-02".into(),
+                    published_date: "2025-01-02".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.2,
+                },
+                RatePoint {
+                    requested_date: "2025-01-02".into(),
+                    published_date: "2025-01-02".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+            ],
+            missing: Vec::new(),
+        };
+        let (calculation, classes, _quality) = calculate_realized(&params, &snapshot).unwrap();
+        // 一张凭证结清三张发票：逐条终止确认行重算，有几条算几条，
+        // 不再因「终止确认行不恰好一条」整张推进待复核。
+        assert_eq!(
+            calculation.len(),
+            3,
+            "应逐条重算三条终止确认行：{calculation:#?}"
+        );
+        assert_eq!(classes[0]["classification"], "已实现");
+        let total: f64 = calculation
+            .iter()
+            .map(|row| row["auditGainLoss"].as_f64().unwrap())
+            .sum();
+        // 负债减少方向：各腿损益＝原币×(记账日7.2−月初7.1)＝0.1×原币，
+        // 10000→1000、20000→2000、5000→500，合计 3500；
+        // 客户三条腿各自隐含的入账汇率（7.10/7.15/7.25）不参与测算。
+        assert!(
+            (total - 3500.0).abs() < 0.01,
+            "审计合计应为 1000+2000+500=3500，实际 {total}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn currency_conversion_between_cash_legs_is_realized_and_measured() {
+        let root = std::env::temp_dir().join(format!("fx-conversion-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,凭证类型,科目,摘要,币种,原币,本位币\n\
+E,2025-01-02,2,AB,1002,结汇,USD,-100000,-715000\n\
+E,2025-01-02,2,AB,1002,结汇,CNY,0,718000\n\
+E,2025-01-02,2,AB,6603,汇兑收益,CNY,0,-3000\n",
+        )
+        .unwrap();
+        let params = json!({
+            "fixedEntity":"E",
+            "entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{
+                "entity":"公司","date":"日期","id":["凭证号"],"voucherType":"凭证类型",
+                "account":["科目"],"summary":"摘要","currency":"币种",
+                "foreignAmount":"原币","functionalAmount":"本位币"
+            },
+            "accountRoles":{"1002":"cash","6603":"fx_gain_loss"}
+        });
+        let snapshot = RateSnapshot {
+            source: "测试".into(),
+            source_url: String::new(),
+            fetched_at: String::new(),
+            response_hash: test_snapshot_hash("currency_conversion_measured"),
+            start_date: "2025-01-02".into(),
+            end_date: "2025-01-02".into(),
+            rates: vec![
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.15,
+                },
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+                RatePoint {
+                    requested_date: "2025-01-02".into(),
+                    published_date: "2025-01-02".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.2,
+                },
+                RatePoint {
+                    requested_date: "2025-01-02".into(),
+                    published_date: "2025-01-02".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+            ],
+            missing: Vec::new(),
+        };
+        let (calculation, classes, _quality) = calculate_realized(&params, &snapshot).unwrap();
+        // 外币兑换：外币现金与本位币现金对转。统一公式下审计损益
+        // ＝外币腿×(记账日7.2−月初7.15)＝100000×0.05＝5,000（负号＝收益）。
+        // 客户按银行实际牌价收到 718,000 与账面 715,000 的差 −3,000，
+        // 两口径之差（点差与月初基础差）自然落入审计与账面的比较披露。
+        assert_eq!(calculation.len(), 1, "{calculation:#?}");
+        assert_eq!(classes[0]["classification"], "已实现");
+        assert_eq!(
+            calculation[0]["calculationMethod"],
+            "外币兑换：月初牌价与交易日官方牌价独立重算"
+        );
+        assert!(
+            (calculation[0]["monthOpeningRate"].as_f64().unwrap() - 7.15).abs() < 0.0001
+        );
+        assert!((calculation[0]["auditGainLoss"].as_f64().unwrap() + 5000.0).abs() < 0.01);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn structural_classification_overrides_account_names_with_conflict_notice() {
+        let root = std::env::temp_dir().join(format!("fx-conflict-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,凭证类型,科目,摘要,币种,原币,本位币\n\
+E,2025-01-02,3,FX,2202-应付账款,期末调汇,USD,0,500\n\
+E,2025-01-02,3,FX,6701-汇兑收益-已实现,期末调汇,USD,0,-500\n\
+E,2025-01-02,4,DZ,1122-应收账款,收款核销,USD,-100,-710\n\
+E,2025-01-02,4,DZ,1002-银行存款,收款核销,USD,100,715\n\
+E,2025-01-02,4,DZ,6702-汇兑损失-未实现,收款核销,CNY,0,5\n",
+        )
+        .unwrap();
+        let params = json!({
+            "fixedEntity":"E",
+            "entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{
+                "entity":"公司","date":"日期","id":["凭证号"],"voucherType":"凭证类型",
+                "account":["科目"],"summary":"摘要","currency":"币种",
+                "foreignAmount":"原币","functionalAmount":"本位币"
+            }
+        });
+        let bridge = build_review_bridge(&params, &[], &[]).unwrap();
+        let controls = bridge["classificationControls"].as_array().unwrap();
+        let find = |voucher: &str| {
+            controls
+                .iter()
+                .find(|item| item["voucherId"] == json!(voucher))
+                .unwrap_or_else(|| panic!("缺少凭证 {voucher}：{controls:#?}"))
+                .clone()
+        };
+        // 科目名写「已实现」但结构是原币不动、本位币变动的重估 → 判未实现并提示冲突。
+        let reval = find("E-2025-01-02-3");
+        assert_eq!(reval["classification"], "未实现汇兑损益");
+        let conflict = reval["classificationConflict"].as_str().unwrap_or_default();
+        assert!(
+            conflict.contains("科目名称指向「已实现汇兑损益」"),
+            "应提示科目名与结构冲突：{conflict}"
+        );
+        // 科目名写「未实现」但结构是应收账款原币减少（收款核销）→ 判已实现并提示冲突。
+        let settled = find("E-2025-01-02-4");
+        assert_eq!(settled["classification"], "已实现汇兑损益");
+        let conflict = settled["classificationConflict"].as_str().unwrap_or_default();
+        assert!(
+            conflict.contains("科目名称指向「未实现汇兑损益」"),
+            "应提示科目名与结构冲突：{conflict}"
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -8425,16 +9133,17 @@ E,2025-01-31,R,AB,6603,月末重估,CNY,0,-5\n",
     }
 
     #[test]
-    fn 科目名写明未实现的凭证不必等人工确认就能被引擎认领() {
-        // 用户实测的矛盾：界面把凭证显示为「未实现汇兑损益」，同一批凭证却被计入
-        // 「359 张待确认或无法测算」。成因是两套口径——
-        //   界面分类走 `manual ?? classify_by_account_names ?? 待确认`（认科目名）；
-        //   引擎判重估凭证只认 `manual`，科目名判定被无视，退回摘要／凭证类型信号。
-        // 这份账的摘要不写重估、凭证类型也不是 FX/AB，于是引擎当它没分类。
-        //
+    fn 科目名写明未实现但缺结构证据时不再被认领且界面提示冲突() {
+        // 口径沿革（两次反转，都有用户实测背景）：
+        // 1) 最初界面认科目名、引擎只认摘要/类型，两边口径打架——同一张凭证
+        //    界面显示「未实现」、却被计入「待确认或无法测算」；
+        // 2) 于是改成两边都认科目名（上一版本测试锁定的行为）；
+        // 3) 用户复核后拍板：科目名是客户自己的口径，不能当审计定性依据——
+        //    统一改为两边都只认结构证据（原币不动+本位币变动+重估类型/文字），
+        //    科目名降级为交叉验证，与结构冲突时提示复核。
         // 本测试刻意**不设** accountRoles 与 manualClassifications：
-        // 前者验证「汇兑损失」能靠关键词判成 fx_gain_loss（此前漏词，会掉成非货币性项目），
-        // 后者验证无需人工点一遍，科目名写明「未实现」就足以被认领。
+        // 前者仍隐式验证「汇兑损失」能靠关键词判成 fx_gain_loss，
+        // 后者验证摘要不写重估、类型也不是 FX/AB 时，仅科目名不足以认领。
         let root = std::env::temp_dir().join(format!("fx-name-signal-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let je = root.join("je.csv");
@@ -8458,7 +9167,7 @@ E,2025-01-31,V001,SA,6701120001 财务费用-汇兑损失-未实现,INV-20250131
             source: "测试".into(),
             source_url: String::new(),
             fetched_at: String::new(),
-            response_hash: test_snapshot_hash("科目名写明未实现的凭证不必等人工确认就能被引擎认领"),
+            response_hash: test_snapshot_hash("科目名写明未实现但缺结构证据时不再被认领且界面提示冲突"),
             start_date: "2025-01-01".into(),
             end_date: "2025-01-31".into(),
             rates: vec![
@@ -8495,15 +9204,23 @@ E,2025-01-31,V001,SA,6701120001 财务费用-汇兑损失-未实现,INV-20250131
         .unwrap();
         assert_eq!(rows.len(), 1, "quality={quality:#?}");
         let row = &rows[0];
-        // 认领成功：这张凭证进了客户重估凭证清单，不再落进「待确认或无法测算」。
-        assert_eq!(
-            row["clientRevaluationVoucherIds"],
-            json!(["E-2025-01-31-V001"]),
-            "科目名写明未实现却没被认领：{row}"
+        // 结构证据不足（摘要不写重估、类型 SA），科目名不足以认领：
+        // 该凭证不进客户重估清单，本位币变动留在正常业务发生额里。
+        assert_eq!(row["clientRevaluationVoucherIds"], json!([]), "{row}");
+        assert_eq!(row["businessFunctionalMovement"], json!(-20.0), "{row}");
+        // 界面侧同口径：分类为待确认，并提示科目名与结构判定冲突。
+        let bridge = build_review_bridge(&params, &[], &[]).unwrap();
+        let controls = bridge["classificationControls"].as_array().unwrap();
+        let item = controls
+            .iter()
+            .find(|item| item["voucherId"] == json!("E-2025-01-31-V001"))
+            .unwrap_or_else(|| panic!("缺少凭证：{controls:#?}"));
+        assert_eq!(item["classification"], "待确认");
+        let conflict = item["classificationConflict"].as_str().unwrap_or_default();
+        assert!(
+            conflict.contains("科目名称指向「未实现汇兑损益」"),
+            "应提示科目名与结构冲突：{conflict}"
         );
-        // 认领之后它的本位币变动算作客户已入账重估，不再混进正常业务发生额。
-        assert_eq!(row["clientRevaluationBalanceAdjustment"], json!(-20.0));
-        assert_eq!(row["businessFunctionalMovement"], json!(0.0));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -9035,6 +9752,18 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             end_date: "2025-01-31".into(),
             rates: vec![
                 RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.1,
+                },
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+                RatePoint {
                     requested_date: "2025-01-15".into(),
                     published_date: "2025-01-15".into(),
                     currency: "USD".into(),
@@ -9064,6 +9793,8 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
         let (realized, classes, quality) = calculate_realized(&params, &snapshot).unwrap();
         assert_eq!(realized.len(), 1, "quality={quality:#?}");
         assert_eq!(classes[0]["classification"], "已实现");
+        // 资产减少：损益＝原币×(月初7.1−记账日7.2)＝100×(−0.1)＝−10（收益）。
+        assert!((realized[0]["auditGainLoss"].as_f64().unwrap() + 10.0).abs() < 0.01);
 
         let endpoints = vec![
             json!({"entity":"E","account":"1002","auxiliary":"","currency":"USD","openingForeign":0.0,"openingAuditFunctional":0.0,"closingBookFunctional":710.0}),
@@ -10277,6 +11008,202 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             "大文件识别不应再全量解压工作表：{:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn 月初牌价假设检查_恒定且每月重估时不出提示() {
+        // 前置假设成立的干净账：同月两笔美元业务都按当月月初牌价 7.2 入账，
+        // 月末有一张 FX 重估凭证（外币不动、只调本位币、对方是汇兑损益科目）。
+        // 两组检查都应当安静通过——不出任何条目。
+        let root = std::env::temp_dir().join(format!("fx-assume-ok-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,凭证类型,科目,摘要,币种,原币,本位币\n\
+E,2025-01-10,B1,SA,1002 银行存款-美元户,收美元货款,USD,100,720\n\
+E,2025-01-20,B2,SA,1122 应收账款-美元户,确认美元应收,USD,50,360\n\
+E,2025-01-31,R1,FX,1002 银行存款-美元户,月末重估,USD,0,5\n\
+E,2025-01-31,R1,FX,6603 财务费用-汇兑损失,月末重估,CNY,0,-5\n",
+        )
+        .unwrap();
+        let params = json!({
+            "fixedEntity":"E", "entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{
+                "entity":"公司","date":"日期","id":["凭证号"],"voucherType":"凭证类型",
+                "account":["科目"],"summary":"摘要","currency":"币种",
+                "foreignAmount":"原币","functionalAmount":"本位币"
+            },
+            "accountRoles":{
+                "1002 银行存款-美元户":"cash", "1122 应收账款-美元户":"monetary_asset",
+                "6603 财务费用-汇兑损失":"fx_gain_loss"
+            }
+        });
+        // 月初牌价优先取上月末牌价点（2024-12-31），1 月两笔业务都按它入账。
+        // month_opening_rate 走 rate() 交叉折算，快照必须同时有 CNY 点。
+        let snapshot = RateSnapshot {
+            source: "测试".into(),
+            source_url: String::new(),
+            fetched_at: String::new(),
+            response_hash: test_snapshot_hash("月初牌价假设检查_恒定且每月重估时不出提示"),
+            start_date: "2024-12-31".into(),
+            end_date: "2025-01-31".into(),
+            rates: vec![
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.2,
+                },
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+            ],
+            missing: Vec::new(),
+        };
+        let items = month_start_rate_assumption_checks(&params, &snapshot);
+        assert!(items.is_empty(), "假设成立时不应有任何提示：{items:#?}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 月初牌价假设检查_组内入账汇率不恒定出待复核() {
+        // 同月两笔美元业务：一笔按月初牌价 7.2、一笔按当日即期 7.0 入账，
+        // 极差 0.2 ≥ 0.005 → 整组一条「待复核」，不能逐行刷屏。
+        // 月末重估凭证照常存在，检查二不应出条目——两条断言互不干扰。
+        let root = std::env::temp_dir().join(format!("fx-assume-mixed-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,凭证类型,科目,摘要,币种,原币,本位币\n\
+E,2025-01-10,B1,SA,1002 银行存款-美元户,收美元货款,USD,100,720\n\
+E,2025-01-20,B2,SA,1002 银行存款-美元户,收美元货款,USD,100,700\n\
+E,2025-01-31,R1,FX,1002 银行存款-美元户,月末重估,USD,0,5\n\
+E,2025-01-31,R1,FX,6603 财务费用-汇兑损失,月末重估,CNY,0,-5\n",
+        )
+        .unwrap();
+        let params = json!({
+            "fixedEntity":"E", "entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{
+                "entity":"公司","date":"日期","id":["凭证号"],"voucherType":"凭证类型",
+                "account":["科目"],"summary":"摘要","currency":"币种",
+                "foreignAmount":"原币","functionalAmount":"本位币"
+            },
+            "accountRoles":{
+                "1002 银行存款-美元户":"cash",
+                "6603 财务费用-汇兑损失":"fx_gain_loss"
+            }
+        });
+        let snapshot = RateSnapshot {
+            source: "测试".into(),
+            source_url: String::new(),
+            fetched_at: String::new(),
+            response_hash: test_snapshot_hash("月初牌价假设检查_组内入账汇率不恒定出待复核"),
+            start_date: "2024-12-31".into(),
+            end_date: "2025-01-31".into(),
+            rates: vec![
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.2,
+                },
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+            ],
+            missing: Vec::new(),
+        };
+        let items = month_start_rate_assumption_checks(&params, &snapshot);
+        assert_eq!(items.len(), 1, "每组「公司+币种+月份」最多一条：{items:#?}");
+        assert_eq!(items[0]["severity"], json!("待复核"));
+        assert_eq!(items[0]["type"], json!("当月入账汇率不恒定"));
+        assert_eq!(items[0]["entity"], json!("E"));
+        assert_eq!(items[0]["currency"], json!("USD"));
+        assert_eq!(items[0]["month"], json!("2025-01"));
+        assert!((items[0]["minImpliedRate"].as_f64().unwrap() - 7.0).abs() < 1e-9);
+        assert!((items[0]["maxImpliedRate"].as_f64().unwrap() - 7.2).abs() < 1e-9);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 月初牌价假设检查_缺当月重估凭证时按月出提示() {
+        // 一、二月都有外币发生额、都没有月末重估凭证 → 每公司每月一条「提示」。
+        // 入账汇率分别等于各月月初牌价，检查一保持安静，断言只针对重估缺失。
+        let root = std::env::temp_dir().join(format!("fx-assume-noreval-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,凭证类型,科目,摘要,币种,原币,本位币\n\
+E,2025-01-10,B1,SA,1002 银行存款-美元户,收美元货款,USD,100,720\n\
+E,2025-02-10,B2,SA,1002 银行存款-美元户,收美元货款,USD,50,355\n",
+        )
+        .unwrap();
+        let params = json!({
+            "fixedEntity":"E", "entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{
+                "entity":"公司","date":"日期","id":["凭证号"],"voucherType":"凭证类型",
+                "account":["科目"],"summary":"摘要","currency":"币种",
+                "foreignAmount":"原币","functionalAmount":"本位币"
+            },
+            "accountRoles":{"1002 银行存款-美元户":"cash"}
+        });
+        let snapshot = RateSnapshot {
+            source: "测试".into(),
+            source_url: String::new(),
+            fetched_at: String::new(),
+            response_hash: test_snapshot_hash("月初牌价假设检查_缺当月重估凭证时按月出提示"),
+            start_date: "2024-12-31".into(),
+            end_date: "2025-02-28".into(),
+            rates: vec![
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.2,
+                },
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+                RatePoint {
+                    requested_date: "2025-01-31".into(),
+                    published_date: "2025-01-31".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.1,
+                },
+                RatePoint {
+                    requested_date: "2025-01-31".into(),
+                    published_date: "2025-01-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+            ],
+            missing: Vec::new(),
+        };
+        let items = month_start_rate_assumption_checks(&params, &snapshot);
+        assert_eq!(items.len(), 2, "每公司每月最多一条：{items:#?}");
+        assert_eq!(items[0]["month"], json!("2025-01"));
+        assert_eq!(items[1]["month"], json!("2025-02"));
+        for item in &items {
+            assert_eq!(item["severity"], json!("提示"));
+            assert_eq!(item["type"], json!("当月未见月末重估凭证"));
+            assert_eq!(item["entity"], json!("E"));
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 }
 

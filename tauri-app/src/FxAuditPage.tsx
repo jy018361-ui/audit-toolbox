@@ -34,7 +34,7 @@ const CURRENCY_OPTIONS = ["CNY","USD","HKD","EUR","JPY","GBP","AUD","SGD","CHF",
 
 type SourceClassification = {kind:"je"|"tb";confidence:number;needsLlm:boolean;scores:{je:number;tb:number};reasons:string[];headers:string[];preview:string[][];sheet:string;headerRow:number;headerDepth:number};
 type VoucherClassification = "已实现汇兑损益"|"未实现汇兑损益"|"待确认";
-type ClassificationControl = {voucherId:string;date?:string;voucherType?:string;systemCategory?:string;reviewReason?:string;bookedFxGainLoss?:number;classification:VoucherClassification;measurementStatus?:string;patternKey?:string;patternLabel?:string;debitAccounts?:string[];creditAccounts?:string[];summary?:string};
+type ClassificationControl = {voucherId:string;date?:string;voucherType?:string;systemCategory?:string;reviewReason?:string;bookedFxGainLoss?:number;classification:VoucherClassification;measurementStatus?:string;patternKey?:string;patternLabel?:string;debitAccounts?:string[];creditAccounts?:string[];summary?:string;classificationConflict?:string};
 type VoucherDetail = {accountCode?:string;accountNameOriginal?:string;accountNameChinese?:string};
 
 const JE_LABELS: Record<string, string> = {
@@ -670,12 +670,14 @@ function FxResult({result,busy,classificationDrafts,onClassificationChange,onRec
     const value=selected.length===1?selected[0]:"待确认";
     const booked=group.items.reduce((sum,item)=>sum+Number(item.bookedFxGainLoss??0),0);
     const failed=group.items.filter(item=>item.measurementStatus?.startsWith("无法测算")).length;
+    const conflicts=group.items.filter(item=>item.classificationConflict);
     const first=group.items[0];
     return <label key={group.key}>
       <span>
         <b>{group.label}</b>
         <div className="fx-pattern-names">{accountSide("借方科目",first.debitAccounts)}{accountSide("贷方科目",first.creditAccounts)}</div>
         <small>{group.items.length} 张凭证；账面汇兑损益 {booked.toLocaleString("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2})}{failed?`；${failed} 张缺少重算证据`:""}</small>
+        {conflicts.length>0&&<small className="fx-conflict-hint">分类冲突（{conflicts.length} 张）：{conflicts[0].classificationConflict}</small>}
       </span>
       <select disabled={busy} value={value} onChange={e=>onClassificationChange(group.items.map(item=>item.voucherId),e.target.value as VoucherClassification)}>
         <option>已实现汇兑损益</option><option>未实现汇兑损益</option><option>待确认</option>

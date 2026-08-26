@@ -4940,21 +4940,27 @@ where
     }
 }
 
-/// 判断完整凭证是否具有客户月末外币重估（未实现汇兑损益）特征。
+/// 判断完整凭证是否具有客户月末外币重估（未实现汇兑损益）的**结构特征**：
+/// 含汇兑损益科目，且所有货币性项目原币不动而本位币变化。
 ///
-/// 只有同时满足“含汇兑损益科目、外币货币性项目原币不动而本位币变化”时，
-/// 才使用凭证类型或摘要信号。这样“期间损益结转”以及普通结算凭证不会因为
-/// 单独出现“结转”二字被误判。
-fn has_unrealized_voucher_evidence(
-    summary: &str,
-    voucher_type: &str,
+/// 结构满足即认定为重估凭证——该组合高度特异（结算凭证必有原币发生额，
+/// 期间损益结转没有本位币变化）。凭证类型/摘要文字不再作硬门槛，只用于
+/// 分层提示（见 `has_revaluation_text_evidence`），避免重估凭证因摘要
+/// 五花八门漏进待确认。未实现审计金额按余额滚动独立测算，凭证金额仅作
+/// 比较证据，放宽识别不影响测算数。
+fn has_unrealized_voucher_structure(
     has_fx: bool,
     monetary_has_foreign_movement: bool,
     monetary_has_functional_movement: bool,
 ) -> bool {
-    if !has_fx || monetary_has_foreign_movement || !monetary_has_functional_movement {
-        return false;
-    }
+    has_fx && !monetary_has_foreign_movement && monetary_has_functional_movement
+}
+
+/// 凭证类型或摘要中的重估**文字证据**。
+///
+/// 结构满足但文字证据缺失时，重估认定照常生效，另出非阻断「提示」
+/// 供抽查（防差错更正凭证、原币列缺失的导出被误认成重估）。
+fn has_revaluation_text_evidence(summary: &str, voucher_type: &str) -> bool {
     let summary = summary.to_lowercase();
     matches!(voucher_type, "FX" | "AB")
         || [
@@ -5344,9 +5350,7 @@ fn build_review_bridge(
             None
         } else if noncash_monetary_decrease || conversion_pattern {
             Some("已实现汇兑损益")
-        } else if has_unrealized_voucher_evidence(
-            &summary,
-            &voucher_type,
+        } else if has_unrealized_voucher_structure(
             has_fx,
             monetary_has_foreign_movement,
             monetary_has_functional_movement,
@@ -5671,6 +5675,11 @@ fn calculate_realized(
         let mut settlement_targets = Vec::new();
         // 外币兑换证据：外币现金行、本位币现金腿合计金额。
         let mut cash_foreign_rows = Vec::new();
+        // 购汇（外币现金「增加」方向）腿：不适用持有释放公式，单独按
+        // 成交汇率与记账日官方牌价的价差测算已实现损益（CAS 19 购汇价差）。
+        let mut cash_purchase_rows = Vec::new();
+        // 本位币现金腿发生额合计，用于倒算购汇成交汇率（支付本位币÷买入外币）。
+        let mut entity_cash_functional_total = 0.0;
         let mut cash_functional_movement = false;
         let mut cash_foreign_movement = false;
         let mut noncash_foreign_movement = false;
@@ -5712,10 +5721,13 @@ fn calculate_realized(
                 if is_cash {
                     if currency.is_empty() || currency == entity_currency {
                         cash_functional_movement |= functional.abs() >= 0.01;
+                        entity_cash_functional_total += functional;
                     } else {
                         cash_foreign_movement |= foreign.abs() >= 0.01;
-                        // 只有外币现金「减少」方向（卖出外币/兑换出外币）构成
-                        // 终止确认；买入外币是新增敞口，不产生已实现损益。
+                        // 外币现金「减少」方向（卖出外币/兑换出外币）构成终止
+                        // 确认，适用持有释放公式（月初牌价 vs 记账日牌价）；
+                        // 「增加」方向（购汇）是新增敞口，不适用该公式，
+                        // 但其银行价差是已实现损益，单独收集按价差口径测算。
                         if foreign < -0.005 {
                             cash_foreign_rows.push((
                                 row,
@@ -5723,6 +5735,15 @@ fn calculate_realized(
                                 role.clone(),
                                 foreign,
                                 functional,
+                            ));
+                        } else if foreign > 0.005 {
+                            cash_purchase_rows.push((
+                                row,
+                                account.clone(),
+                                role.clone(),
+                                foreign,
+                                functional,
+                                currency.clone(),
                             ));
                         }
                     }
@@ -5772,14 +5793,13 @@ fn calculate_realized(
                 settlement_targets.push((row, account, role, foreign, functional));
             }
         }
-        // “整张凭证原币净额为零”不能证明是重估：同币种收付款的现金与
-        // 应收/应付两边也会自然抵销。自动识别重估必须同时满足：
-        // 1) 含汇兑损益；2) 有重估类型/文字证据；3) 每一条货币性项目均
-        // 无原币发生额，但存在本位币变动。否则保留为结算或待确认事件。
+        // 自动识别重估看结构：含汇兑损益＋每一条货币性项目均无原币发生额
+        // ＋存在本位币变动。重估类型/文字证据不再作门槛，只用于在缺失时
+        // 出非阻断提示供抽查（差错更正凭证、原币列缺失的导出是主要风险源）。
         let summary_lower = summary.to_lowercase();
-        let automatic_revaluation = has_unrealized_voucher_evidence(
-            &summary,
-            &voucher_type_upper,
+        let revaluation_text_evidence =
+            has_revaluation_text_evidence(&summary, &voucher_type_upper);
+        let automatic_revaluation = has_unrealized_voucher_structure(
             has_fx,
             monetary_has_foreign_movement,
             monetary_has_functional_movement,
@@ -5871,6 +5891,13 @@ fn calculate_realized(
             "counterEvidence": if !has_settlement {vec!["未识别到结算证据"]} else {vec![]},
             "confidence": confidence, "ruleConflict": realized_hard && unrealized_hard
         }));
+        if unrealized_hard && !manual_unrealized && !revaluation_text_evidence {
+            quality.push(json!({
+                "source":"JE", "voucherId": display_voucher_id(&id),
+                "type":"重估凭证无文字证据", "severity":"提示",
+                "detail":"凭证结构符合月末重估（含汇兑损益科目、原币不动、本位币变化），但凭证类型与摘要均无重估字样；已按未实现重估处理，建议抽查是否为差错更正或原币列缺失。"
+            }));
+        }
         if manual_realized && settlement_targets.is_empty() && !conversion_pattern {
             quality.push(json!({
                 "source":"JE", "voucherId":display_voucher_id(&id),
@@ -5971,6 +5998,79 @@ fn calculate_realized(
                             json!("无法取得该币种月初（上月末）牌价，本腿不计入自动测算。")
                         }
                     }));
+                }
+            }
+        }
+        // 购汇价差测算：买入腿不适用持有释放公式（月初牌价 vs 记账日牌价），
+        // 其已实现损益 = 银行实际成交汇率与记账日官方牌价的价差 × 买入原币
+        // （CAS 19：买入外币按交易日即期汇率折算，实际支付额与折算额的差额
+        // 计入汇兑差额）。成交汇率从凭证倒算：本位币现金支付合计 ÷ 买入外币
+        // 合计。无法倒算（缺本位币支付腿、或一张凭证买入多种外币）时隔离，
+        // 不用客户账面汇兑损益替代测算。
+        if realized_hard && !cash_purchase_rows.is_empty() {
+            let mut bought_by_currency: HashMap<String, f64> = HashMap::new();
+            for (_, _, _, foreign, _, currency) in &cash_purchase_rows {
+                *bought_by_currency.entry(currency.clone()).or_default() += foreign;
+            }
+            let deal_rate_by_currency: HashMap<String, f64> = bought_by_currency
+                .iter()
+                .filter_map(|(currency, bought)| {
+                    let paid = entity_cash_functional_total.abs();
+                    if paid >= 0.005 && bought_by_currency.len() == 1 {
+                        let rate = paid / bought.abs();
+                        rate.is_finite().then(|| (currency.clone(), rate))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for (row, account, role, foreign, functional, currency) in &cash_purchase_rows {
+                let entity = entity_for(row, &mapping, params);
+                let functional_code = functional_currency(entity, params);
+                let deal_rate = deal_rate_by_currency.get(currency);
+                let day_rate = rate(snapshot, date, currency, &functional_code);
+                let day_missing = day_rate.is_none();
+                match (deal_rate, day_rate) {
+                    (Some(deal), Some((official_rate, published))) => {
+                        // 买入原币为正；成交价高于官方中间价即真实价差损失，
+                        // 与汇兑账户「借方为正」的符号约定一致。
+                        let bought = foreign.abs();
+                        let gain_loss = (deal - official_rate) * bought;
+                        let customer_applied = if functional.abs() >= 0.005 && bought >= 0.005 {
+                            Some(functional.abs() / bought)
+                        } else {
+                            None
+                        };
+                        calculation.push(json!({
+                            "voucherId": display_voucher_id(&id), "date": date,
+                            "entity": entity, "account": account, "role": role,
+                            "currency": currency, "functionalCurrency": functional_code,
+                            "settlementForeign": bought, "officialRate": official_rate,
+                            "targetForeignSigned": foreign,
+                            "impliedDealRate": deal,
+                            "customerAppliedRate": customer_applied,
+                            "rateSource": RATE_SOURCE,
+                            "calculationMethod": "购汇价差：倒算成交汇率与记账日官方牌价重算",
+                            "publishedDate": published,
+                            "spreadRate": deal - official_rate,
+                            "auditGainLoss": gain_loss,
+                            "carryingBookFunctional": functional.abs(),
+                            "cashRequired": false, "sourceRow": row.source_row
+                        }));
+                    }
+                    _ => {
+                        quality.push(json!({
+                            "source": "JE", "voucherId": display_voucher_id(&id),
+                            "row": row.source_row, "currency": currency,
+                            "type": if day_missing { "汇率缺失" } else { "无法倒算成交汇率" },
+                            "severity": "隔离",
+                            "detail": if day_missing {
+                                Value::Null
+                            } else {
+                                json!("购汇腿缺少可配对的本位币现金支付腿，或一张凭证买入多种外币，无法倒算成交汇率；本腿不计入自动测算。")
+                            }
+                        }));
+                    }
                 }
             }
         }
@@ -6718,11 +6818,9 @@ fn calculate_monthly_unrealized(
         }
         // 与界面分类、已实现引擎同口径：只认结构证据。科目名含「未实现」
         // 不再使凭证按重估处理——原币减少的凭证是结算/终止确认，其发生额
-        // 必须留在正常业务余额滚动里；结构上原币不动而本位币变动、且带
-        // 重估证据的，才作为客户重估凭证从正常发生额中剔除。
-        let automatic_signal = has_unrealized_voucher_evidence(
-            &summary,
-            &voucher_type,
+        // 必须留在正常业务余额滚动里；结构上原币不动而本位币变动的，作为
+        // 客户重估凭证从正常发生额中剔除（文字证据只作提示分层，不作门槛）。
+        let automatic_signal = has_unrealized_voucher_structure(
             has_fx,
             monetary_has_foreign_movement,
             monetary_has_functional_movement,
@@ -8244,13 +8342,12 @@ pub(crate) fn month_start_rate_assumption_checks(
         }
         let summary = summaries.into_iter().collect::<Vec<_>>().join(" | ");
         // 与 calculate_monthly_unrealized 的 revaluation_meta 判定保持同一口径：
-        // 人工分类优先；无人工分类时科目名写明「未实现」或完整凭证具备重估特征均可认领。
+        // 人工分类优先；无人工分类时科目名写明「未实现」或完整凭证具备重估
+        // 结构特征（原币不动、本位币变化）均可认领，文字证据不作门槛。
         let name_signal = classify_by_account_names(fx_account_names.iter().map(String::as_str))
             == Some("未实现汇兑损益");
         let automatic_signal = name_signal
-            || has_unrealized_voucher_evidence(
-                &summary,
-                &voucher_type,
+            || has_unrealized_voucher_structure(
                 has_fx,
                 monetary_has_foreign_movement,
                 monetary_has_functional_movement,
@@ -8436,6 +8533,8 @@ fn chinese_header(key: &str) -> &str {
         "monthEnd" => "月末测算日期",
         "nonRevaluationFunctionalMovement" => "正常业务本位币变动（剔除未实现类凭证）",
         "officialRate" => "官方汇率",
+        "impliedDealRate" => "倒算成交汇率（支付本位币÷买入外币）",
+        "spreadRate" => "购汇价差（成交−官方）",
         "customerAppliedRate" => "客户JE倒算汇率（仅供比较）",
         "openingAuditFunctional" => "年初审计本位币余额",
         "openingBookFunctional" => "年初账面本位币余额",
@@ -9133,17 +9232,19 @@ E,2025-01-31,R,AB,6603,月末重估,CNY,0,-5\n",
     }
 
     #[test]
-    fn 科目名写明未实现但缺结构证据时不再被认领且界面提示冲突() {
-        // 口径沿革（两次反转，都有用户实测背景）：
+    fn 结构满足即认领未实现_科目名一致时不提示冲突() {
+        // 口径沿革（三次演进，都有用户实测背景）：
         // 1) 最初界面认科目名、引擎只认摘要/类型，两边口径打架——同一张凭证
         //    界面显示「未实现」、却被计入「待确认或无法测算」；
-        // 2) 于是改成两边都认科目名（上一版本测试锁定的行为）；
-        // 3) 用户复核后拍板：科目名是客户自己的口径，不能当审计定性依据——
-        //    统一改为两边都只认结构证据（原币不动+本位币变动+重估类型/文字），
-        //    科目名降级为交叉验证，与结构冲突时提示复核。
+        // 2) 于是改成两边都认科目名；
+        // 3) 用户复核后拍板：科目名是客户自己的口径，不能当审计定性依据，
+        //    降级为交叉验证；未实现定性只看结构证据。此后再放宽一步：
+        //    结构=原币不动+本位币变动即定性为重估，重估类型/文字证据
+        //    不再是门槛，只在质量提示里提醒抽查（另有专项测试覆盖）。
         // 本测试刻意**不设** accountRoles 与 manualClassifications：
         // 前者仍隐式验证「汇兑损失」能靠关键词判成 fx_gain_loss，
-        // 后者验证摘要不写重估、类型也不是 FX/AB 时，仅科目名不足以认领。
+        // 后者验证摘要不写重估、类型也不是 FX/AB 时，结构满足即认领，
+        // 科目名与结构方向一致时不再提示冲突。
         let root = std::env::temp_dir().join(format!("fx-name-signal-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let je = root.join("je.csv");
@@ -9167,7 +9268,7 @@ E,2025-01-31,V001,SA,6701120001 财务费用-汇兑损失-未实现,INV-20250131
             source: "测试".into(),
             source_url: String::new(),
             fetched_at: String::new(),
-            response_hash: test_snapshot_hash("科目名写明未实现但缺结构证据时不再被认领且界面提示冲突"),
+            response_hash: test_snapshot_hash("结构满足即认领未实现_科目名一致时不提示冲突"),
             start_date: "2025-01-01".into(),
             end_date: "2025-01-31".into(),
             rates: vec![
@@ -9204,22 +9305,34 @@ E,2025-01-31,V001,SA,6701120001 财务费用-汇兑损失-未实现,INV-20250131
         .unwrap();
         assert_eq!(rows.len(), 1, "quality={quality:#?}");
         let row = &rows[0];
-        // 结构证据不足（摘要不写重估、类型 SA），科目名不足以认领：
-        // 该凭证不进客户重估清单，本位币变动留在正常业务发生额里。
-        assert_eq!(row["clientRevaluationVoucherIds"], json!([]), "{row}");
-        assert_eq!(row["businessFunctionalMovement"], json!(-20.0), "{row}");
-        // 界面侧同口径：分类为待确认，并提示科目名与结构判定冲突。
+        // 结构满足（原币不动+本位币变动），即使摘要不写重估、类型是 SA，
+        // 也认领为客户重估凭证：本位币变动从正常业务发生额转入重估调整。
+        assert_eq!(
+            row["clientRevaluationVoucherIds"],
+            json!(["E-2025-01-31-V001"]),
+            "{row}"
+        );
+        assert_eq!(row["businessFunctionalMovement"], json!(0.0), "{row}");
+        assert_eq!(row["clientRevaluationBalanceAdjustment"], json!(-20.0), "{row}");
+        assert_eq!(row["clientBookedUnrealizedGainLoss"], json!(20.0), "{row}");
+        let details = row["clientRevaluationDetails"].as_array().unwrap();
+        assert_eq!(details.len(), 1, "{row}");
+        assert_eq!(details[0]["voucherId"], json!("E-2025-01-31-V001"));
+        assert_eq!(
+            details[0]["identificationBasis"],
+            json!("系统按完整凭证识别为未实现汇兑损益或其冲回凭证")
+        );
+        // 界面侧同口径：结构满足即判未实现；科目名方向一致，不再提示冲突。
         let bridge = build_review_bridge(&params, &[], &[]).unwrap();
         let controls = bridge["classificationControls"].as_array().unwrap();
         let item = controls
             .iter()
             .find(|item| item["voucherId"] == json!("E-2025-01-31-V001"))
             .unwrap_or_else(|| panic!("缺少凭证：{controls:#?}"));
-        assert_eq!(item["classification"], "待确认");
-        let conflict = item["classificationConflict"].as_str().unwrap_or_default();
+        assert_eq!(item["classification"], "未实现汇兑损益");
         assert!(
-            conflict.contains("科目名称指向「未实现汇兑损益」"),
-            "应提示科目名与结构冲突：{conflict}"
+            item["classificationConflict"].is_null(),
+            "名称与结构方向一致时不应提示冲突：{item}"
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -9409,30 +9522,21 @@ E,2025-01-31,V001,SA,6701120001 财务费用-汇兑损失-未实现,INV-20250131
     }
 
     #[test]
-    fn 月末汇兑损益结转按完整凭证证据识别为未实现() {
-        assert!(has_unrealized_voucher_evidence(
-            "OP-FO-2401汇兑损益结转",
-            "",
-            true,
-            false,
-            true,
-        ));
+    fn 月末重估识别_结构满足即成立_文字证据仅作分层() {
+        // 结构满足（含汇兑科目、原币不动、本位币变化）即认定为重估，
+        // 不再要求凭证类型或摘要里有重估字样。
+        assert!(has_unrealized_voucher_structure(true, false, true));
         // 期间损益结转没有外币货币性项目本位币变化，不得误判为重估。
-        assert!(!has_unrealized_voucher_evidence(
-            "期间损益结转",
-            "",
-            true,
-            false,
-            false,
-        ));
-        // 原币发生变化的是结算/正常业务，不属于未实现硬规则。
-        assert!(!has_unrealized_voucher_evidence(
-            "汇兑损益结转",
-            "",
-            true,
-            true,
-            true,
-        ));
+        assert!(!has_unrealized_voucher_structure(true, false, false));
+        // 原币发生变化的是结算/正常业务，不属于未实现。
+        assert!(!has_unrealized_voucher_structure(true, true, true));
+        // 无汇兑损益科目不进汇兑人口。
+        assert!(!has_unrealized_voucher_structure(false, false, true));
+        // 文字证据分层：有则不提示，无则出非阻断提示供抽查。
+        assert!(has_revaluation_text_evidence("OP-FO-2401汇兑损益结转", ""));
+        assert!(has_revaluation_text_evidence("", "FX"));
+        assert!(has_revaluation_text_evidence("", "AB"));
+        assert!(!has_revaluation_text_evidence("调整", "记"));
     }
 
     #[test]
@@ -11203,6 +11307,137 @@ E,2025-02-10,B2,SA,1002 银行存款-美元户,收美元货款,USD,50,355\n",
             assert_eq!(item["type"], json!("当月未见月末重估凭证"));
             assert_eq!(item["entity"], json!("E"));
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 购汇价差按倒算成交汇率与官方牌价测算为已实现() {
+        // 借：美元户 10000（客户按 7.20 折算 72000）
+        // 借：汇兑损失 300（银行卖出价 7.23 与记账汇率 7.20 的价差）
+        // 贷：人民币户 72300
+        // 审计口径：倒算成交汇率 = 72300 ÷ 10000 = 7.23；官方牌价 7.20；
+        // 已实现损失 = (7.23 − 7.20) × 10000 = +300（汇兑账户借方为正），
+        // 完全独立于客户账面的 300，也独立于客户入账采用的 7.20。
+        let root = std::env::temp_dir().join(format!("fx-purchase-spread-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,凭证类型,科目,摘要,币种,原币,本位币\n\
+E,2025-01-10,3,AB,1002,购汇,USD,10000,72000\n\
+E,2025-01-10,3,AB,1002,购汇,CNY,0,-72300\n\
+E,2025-01-10,3,AB,6603,汇兑损失,CNY,0,300\n",
+        )
+        .unwrap();
+        let params = json!({
+            "fixedEntity":"E", "entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{
+                "entity":"公司","date":"日期","id":["凭证号"],"voucherType":"凭证类型",
+                "account":["科目"],"summary":"摘要","currency":"币种",
+                "foreignAmount":"原币","functionalAmount":"本位币"
+            },
+            "accountRoles":{"1002":"cash","6603":"fx_gain_loss"}
+        });
+        let snapshot = RateSnapshot {
+            source: "测试".into(),
+            source_url: String::new(),
+            fetched_at: String::new(),
+            response_hash: test_snapshot_hash("购汇价差按倒算成交汇率与官方牌价测算为已实现"),
+            start_date: "2025-01-10".into(),
+            end_date: "2025-01-10".into(),
+            rates: vec![
+                RatePoint {
+                    requested_date: "2025-01-10".into(),
+                    published_date: "2025-01-10".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.2,
+                },
+                RatePoint {
+                    requested_date: "2025-01-10".into(),
+                    published_date: "2025-01-10".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+            ],
+            missing: Vec::new(),
+        };
+        let (calculation, classes, quality) = calculate_realized(&params, &snapshot).unwrap();
+        assert_eq!(classes[0]["classification"], "已实现");
+        assert_eq!(calculation.len(), 1, "quality={quality:#?}");
+        let row = &calculation[0];
+        assert_eq!(row["calculationMethod"], "购汇价差：倒算成交汇率与记账日官方牌价重算");
+        assert!((row["impliedDealRate"].as_f64().unwrap() - 7.23).abs() < 0.0001);
+        assert!((row["officialRate"].as_f64().unwrap() - 7.2).abs() < 0.0001);
+        assert!((row["spreadRate"].as_f64().unwrap() - 0.03).abs() < 0.0001);
+        assert!((row["auditGainLoss"].as_f64().unwrap() - 300.0).abs() < 0.01);
+        assert!((row["customerAppliedRate"].as_f64().unwrap() - 7.2).abs() < 0.0001);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 无重估文字证据但结构符合的凭证按未实现处理并提示() {
+        // 凭证4：类型「记」、摘要「调整」，无任何重估字样；但结构上原币
+        // 不动、本位币变化、含汇兑科目 → 直接按未实现识别，另出非阻断
+        // 「重估凭证无文字证据」提示供抽查。
+        // 凭证5：同样结构但类型是 FX → 同样按未实现识别，且不出提示。
+        let root = std::env::temp_dir().join(format!("fx-no-text-reval-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,凭证类型,科目,摘要,币种,原币,本位币\n\
+E,2025-01-31,4,记,1002,调整,USD,0,-500\n\
+E,2025-01-31,4,记,6603,调整,CNY,0,-500\n\
+E,2025-01-31,5,FX,1002,期末重估,USD,0,-300\n\
+E,2025-01-31,5,FX,6603,期末重估,CNY,0,-300\n",
+        )
+        .unwrap();
+        let params = json!({
+            "fixedEntity":"E", "entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{
+                "entity":"公司","date":"日期","id":["凭证号"],"voucherType":"凭证类型",
+                "account":["科目"],"summary":"摘要","currency":"币种",
+                "foreignAmount":"原币","functionalAmount":"本位币"
+            },
+            "accountRoles":{"1002":"cash","6603":"fx_gain_loss"}
+        });
+        let snapshot = RateSnapshot {
+            source: "测试".into(),
+            source_url: String::new(),
+            fetched_at: String::new(),
+            response_hash: test_snapshot_hash("无重估文字证据但结构符合的凭证按未实现处理并提示"),
+            start_date: "2025-01-31".into(),
+            end_date: "2025-01-31".into(),
+            rates: vec![
+                RatePoint {
+                    requested_date: "2025-01-31".into(),
+                    published_date: "2025-01-31".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.1,
+                },
+                RatePoint {
+                    requested_date: "2025-01-31".into(),
+                    published_date: "2025-01-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+            ],
+            missing: Vec::new(),
+        };
+        let (calculation, classes, quality) = calculate_realized(&params, &snapshot).unwrap();
+        assert!(calculation.is_empty(), "未实现凭证不进已实现测算：{calculation:#?}");
+        for class in &classes {
+            assert_eq!(class["classification"], "未实现", "{class:#?}");
+        }
+        let no_text: Vec<&Value> = quality
+            .iter()
+            .filter(|q| q["type"] == "重估凭证无文字证据")
+            .collect();
+        assert_eq!(no_text.len(), 1, "只有凭证4出提示：{quality:#?}");
+        assert_eq!(no_text[0]["severity"], json!("提示"));
+        assert!(no_text[0]["voucherId"].as_str().unwrap().contains('4'));
         fs::remove_dir_all(root).unwrap();
     }
 }

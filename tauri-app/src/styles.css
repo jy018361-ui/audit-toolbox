@@ -1265,11 +1265,6 @@ summary:focus-visible {
   align-items: center;
   gap: var(--sp-3);
 }
-.job-banner .job-phase {
-  flex: 1 1 auto;
-  color: var(--text-muted);
-  font-size: var(--fs-xs);
-}
 .job-banner .job-pct {
   flex: 0 0 auto;
   color: var(--label);
@@ -1794,6 +1789,13 @@ summary:focus-visible {
 .ts-filter-blank {
   color: var(--text-muted);
   font-style: italic;
+}
+/* 科目清单里的编码段：等宽对齐、颜色退后，只帮眼睛定位，不与名称抢焦点。 */
+.ts-filter-code {
+  flex: none;
+  color: var(--text-muted);
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: var(--fs-xs);
 }
 .ts-filter-empty,
 .ts-filter-note {

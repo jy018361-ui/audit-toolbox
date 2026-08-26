@@ -7,7 +7,7 @@ describe("fx audit mode selection",()=>{
 });
 describe("fx audit upload and mapping parity",()=>{
   it("routes native drops by actual drop coordinates",()=>{const je={left:0,right:400,top:100,bottom:200};const tb={left:500,right:900,top:100,bottom:200};expect(fxDropTargetAt(200,150,je,tb)).toBe("je");expect(fxDropTargetAt(700,150,je,tb)).toBe("tb");expect(fxDropTargetAt(450,150,je,tb)).toBeUndefined()});
-  it("shows missing required mappings like kanzhang",()=>{expect(fxMissingRequired("je",{},false,"默认主体")).toEqual(["记账日期","凭证识别字段","科目编码","科目名称","摘要","交易币种","原币金额方案","本位币金额方案"])});
+  it("shows missing required mappings like kanzhang",()=>{expect(fxMissingRequired("je",{},false,"默认主体")).toEqual(["记账日期","凭证识别字段","科目编码","科目名称","摘要","原币币种","原币金额方案","本位币金额方案"])});
   it("limits TB missing prompts to the fixed required field set",()=>{expect(fxMissingRequired("tb",{},true,"默认主体")).toEqual(["科目编码","科目名称","币种列或币种线索文本","期初原币或本位币余额","期末原币或本位币余额","本年累计（或本期）借/贷方发生额"])});
   it("accepts either original or functional TB balances at each endpoint",()=>{expect(fxMissingRequired("tb",{accountCode:"科目编码",accountName:"科目名称",currency:"币种",openingFunctionalAmount:"期初本币",closingForeignAmount:"期末原币",ytdFunctionalDebit:"借方",ytdFunctionalCredit:"贷方"},true,"默认主体")).toEqual([])});
   it("accepts a currency clue column when the TB has no currency column",()=>{expect(fxMissingRequired("tb",{accountCode:"科目编码",accountName:"科目名称",currencyText:"文本",openingFunctionalAmount:"期初本币",closingFunctionalAmount:"期末本币",ytdFunctionalDebit:"借方",ytdFunctionalCredit:"贷方"},true,"默认主体")).toEqual([])});

@@ -63,6 +63,25 @@ TB 要求科目编码与名称齐备——缺一项就拦。今天能跑的账�
 LEDGER_SAMPLES=<样例目录> cargo test --manifest-path src-tauri/Cargo.toml   --test mapping_survey bench_ledger_cache -- --ignored --nocapture
 ```
 
+### 币种一律分两列（2026-08-25）
+
+金标的两张类型表这天补齐为 `原币currency` ＋ `本位币currency`——TB 本来就分两列，
+JE 那栏此前只写了一个 `currency`。核对代码后确认**内核一直是分两列的**
+（JE 与 TB 都有 `currency` ＋ `functionalCurrency`，汇兑损益也逐行在读本位币币种列），
+但有两处没跟上：
+
+| 问题 | 说明 |
+|---|---|
+| **JE 面板选不到本位币币种** | `JE_LABELS` 里没有 `functionalCurrency`，映射面板的「币种」组只列了一项。后端认得、界面给不了——序时账上用户根本没法指定本位币币种列，只有科目余额表能选。已补 |
+| **同一角色两套中文标签** | `currency` 在 JE 叫「交易币种」、在 TB 叫「原币币种」。已统一为「原币币种」 |
+
+`functionalCurrency` 的标签同时从「本位币」改为「**本位币币种**」：它存的是 CNY／USD
+这类三位代码，原来的叫法容易和「本位币金额」混淆。LLM 的 JE 币种段也按两列重写，
+点明两者都是**币种代码列**而非金额列，并补上只有一列时按取值分布判定的规则。
+
+实测 SAP 序时账（`JE+YTD+OCT.xlsx`）：`Document Currency Key` → 原币币种、
+`Company Code Currency Key` → 本位币币种、`Group Currency Key` 正确排除。
+
 ### LLM 复核实测（2026-08-25）
 
 对 `汇兑损益测试资料` 逐份跑真实复核（跳过三份几十万行的大文件，表头映射用不到它们）。

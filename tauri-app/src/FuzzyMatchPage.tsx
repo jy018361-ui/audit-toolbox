@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { JobEvent, ToolManifest } from "./types";
-import { engineCall, jobCancel, jobStart, listenJobEvents, openOutput, pickPath } from "./api";
+import { engineCall, jobCancel, jobStart, listenJobEvents, listenPositionedFileDrops, openOutput, pickPath } from "./api";
 import { PageHeader } from "@/components/PageHeader";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
@@ -9,6 +9,13 @@ import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import "./fuzzy-match.css";
+
+/** 命中测试：拖放坐标（CSS 像素）是否落在元素框内。导出供测试。 */
+export function rectHit(x: number, y: number, el: HTMLElement | null): boolean {
+  if (!el) return false;
+  const r = el.getBoundingClientRect();
+  return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+}
 
 /**
  * 两列模糊匹配。方法名与参数名和 Rust 侧 fuzzy 模块的接口契约一一对应，
@@ -200,7 +207,13 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   const [autoThreshold, setAutoThreshold] = useState(90);
   const [suspectThreshold, setSuspectThreshold] = useState(70);
   const [topK, setTopK] = useState(3);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusyState] = useState(false);
+  // 拖放回调在 effect 闭包里读不到最新 busy state，用 ref 镜像一份。
+  const busyRef = useRef(false);
+  const setBusy = (v: boolean) => {
+    busyRef.current = v;
+    setBusyState(v);
+  };
   const [error, setError] = useState("");
   const [job, setJob] = useState<JobEvent>();
   const [jobKind, setJobKind] = useState<"match" | "export">("match");
@@ -215,6 +228,8 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   const [notice, setNotice] = useState("");
   const [restoreNote, setRestoreNote] = useState("");
   const [exportOutputs, setExportOutputs] = useState<string[]>([]);
+  // 双来源卡内容区的 DOM ref：拖放坐标命中测试（同存款利息的 uploadDropRef 模式）。
+  const cardRefs = useRef<Record<Kind, HTMLElement | null>>({ a: null, b: null });
   const activeJob = useRef("");
   const activeMethod = useRef<"match" | "export">("match");
 
@@ -324,6 +339,32 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
     await inspect(kind, { path: picked, sheet: "", headerRow: 1 });
   }
 
+  /** 拖放落地：取第一个表格类文件投给命中的来源卡，非表格文件忽略。 */
+  async function dropInto(kind: Kind, paths: string[]) {
+    const file = paths.find((p) => /\.(xlsx?|csv)$/i.test(p));
+    if (!file) return;
+    setSource(kind, { path: file, inspection: undefined, mapping: {} });
+    await inspect(kind, { path: file, sheet: "", headerRow: 1 });
+  }
+
+  useEffect(() => {
+    // 拖放到窗口由 Tauri 统一接收（FileDropInput 本身不监听拖放）：按坐标
+    // 命中 A/B 卡片的内容区；两张卡都不命中则忽略——宁可让用户再拖一次，
+    // 也不投错清单。读取进行中（busyRef）不接受新拖放，避免两次 inspect 交叉。
+    const stop = listenPositionedFileDrops(({ paths, x, y }) => {
+      if (busyRef.current) return;
+      for (const kind of ["a", "b"] as Kind[]) {
+        if (rectHit(x, y, cardRefs.current[kind])) {
+          void dropInto(kind, paths);
+          return;
+        }
+      }
+    });
+    return () => {
+      void stop.then((unlisten) => unlisten());
+    };
+  }, []);
+
   async function start() {
     setError("");
     if (!sources.a.inspection || !sources.b.inspection) return setError("请先选择并读取来源 A、来源 B 两个表格文件。");
@@ -421,6 +462,11 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                 <CardTitle>{SOURCE_LABEL[kind]}{kind === "a" ? "（待核对清单）" : "（基准清单）"}</CardTitle>
               </CardHeader>
               <CardContent>
+                <div
+                  ref={(el) => {
+                    cardRefs.current[kind] = el;
+                  }}
+                >
                 <p className="fx-hint">{SOURCE_HINT[kind]}</p>
                 <FileDropInput
                   value={s.path}
@@ -473,6 +519,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                     onChange={(next) => setSource(kind, { mapping: next })}
                   />
                 )}
+                </div>
               </CardContent>
             </Card>
           );

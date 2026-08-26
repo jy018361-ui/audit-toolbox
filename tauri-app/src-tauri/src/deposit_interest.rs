@@ -433,19 +433,45 @@ pub(crate) fn suggest_account_role(account: &str) -> &'static str {
     let code = account_code(account);
     let has = |words: &[&str]| words.iter().any(|word| value.contains(word));
 
-    // 利息收入：中国科目表 6051，SAP 常见 "Int Income" / "Interest Income"。
-    if code.starts_with("6051")
+    // 只因名字含"利息收入"就当勾稽基准会认错两类科目，都要先挡掉：
+    //
+    // 1. **投资收益**（6111）核算的是金融资产投资的回报，不是存款利息。存款利息
+    //    对企业而言记在财务费用里，挂投资收益的（理财、结构性存款）其本金也不在
+    //    货币资金，两边都不该进这个测算。
+    // 2. **内部／关联方利息**是资金拆借的往来利息；往来科目在存款侧已被排除，
+    //    收入侧再计入，估算与基准覆盖的就不是同一批科目，必然对不上。
+    //
+    // 真实 4800 账套里「投资收益-内部利息收入」两条都占，把基准撑大了 62,337.51。
+    // 资金池等确需纳入的情形，用户在科目分类里逐个改回即可。
+    let not_deposit_interest = code.starts_with("6111")
         || has(&[
-            "利息收入",
-            "利息收益",
-            "存款利息",
-            "interestincome",
-            "intincome",
-            "interestinc",
-            "interestrevenue",
-            "intinc-",
-            "interestearned",
-        ])
+            "投资收益",
+            "投資收益",
+            "内部",
+            "關聯",
+            "关联",
+            "拆借",
+            "委托贷款",
+            "委託貸款",
+            "intercompany",
+            "intragroup",
+            "relatedparty",
+        ]);
+
+    // 利息收入：中国科目表 6051，SAP 常见 "Int Income" / "Interest Income"。
+    if !not_deposit_interest
+        && (code.starts_with("6051")
+            || has(&[
+                "利息收入",
+                "利息收益",
+                "存款利息",
+                "interestincome",
+                "intincome",
+                "interestinc",
+                "interestrevenue",
+                "intinc-",
+                "interestearned",
+            ]))
     {
         return "interest_income";
     }
@@ -2750,7 +2776,10 @@ mod tests {
         assert_eq!(role_of("1002010017"), "deposit");
         assert_eq!(role_of("1003010003"), "other_monetary");
         assert_eq!(role_of("6701030001"), "interest_income", "财务费用-利息收入应作勾稽基准");
-        assert_eq!(role_of("6111020001"), "interest_income", "投资收益-内部利息收入");
+        // 内部利息收入来自关联方往来，而往来科目在存款侧已被排除在计息范围外；
+        // 收入侧再把它算进基准，估算与基准覆盖的科目就不是同一批，必然对不上。
+        // 资金池等确需纳入的情形，用户在科目分类里逐个改回即可。
+        assert_eq!(role_of("6111020001"), "excluded", "投资收益-内部利息收入不是存款利息");
         // 过渡户、现流调整户、应收利息都不是可计息存款。
         assert_eq!(role_of("1002990001"), "excluded");
         assert_eq!(role_of("1002980001"), "excluded");
@@ -2779,9 +2808,10 @@ mod tests {
         // 期初余额直接来自 TB，不再倒推。
         assert_eq!(summary["openingSource"], "TB 年初余额");
         assert!(summary["hasInterestIncomeAccount"].as_bool().unwrap());
-        // 财务费用-利息收入 78,564.20 ＋ 投资收益-内部利息收入 62,337.51。
+        // 只取 财务费用-利息收入 78,564.20；投资收益-内部利息收入 62,337.51 属关联方
+        // 往来利息，往来科目在存款侧已被排除，收入侧再计入就会凭空撑出 6 万多的假差异。
         assert!(
-            (summary["bookedInterestIncome"].as_f64().unwrap() - 140_901.71).abs() < 1.0,
+            (summary["bookedInterestIncome"].as_f64().unwrap() - 78_564.20).abs() < 1.0,
             "账面利息收入取数不对: {}", summary["bookedInterestIncome"]
         );
         // 最有力的证据：13 个账户全部由序时账逐月还原后，期末余额与 TB 分毫不差。
@@ -2977,6 +3007,26 @@ mod tests {
             "interest_income"
         );
         assert_eq!(suggest_account_role("1122 应收账款"), "excluded");
+        // 投资收益核算金融资产投资回报，不是损益口径的存款利息收入，一律不作基准
+        // ——哪怕名字里写着"利息收入"（真实 4800 账套的「投资收益-内部利息收入」
+        // 就是这样被带进基准的），也哪怕是理财、结构性存款这类看着像存款的。
+        assert_eq!(
+            suggest_account_role("6111020001 投资收益-内部利息收入"),
+            "excluded"
+        );
+        assert_eq!(
+            suggest_account_role("6111010001 投资收益-结构性存款利息收入"),
+            "excluded"
+        );
+        // 内部／关联方拆借利息是往来利息，往来科目在存款侧已被排除。
+        assert_eq!(
+            suggest_account_role("6051020001 利息收入-关联方拆借"),
+            "excluded"
+        );
+        assert_eq!(
+            suggest_account_role("6111030001 投资收益-委托贷款利息收入"),
+            "excluded"
+        );
         // 科目名称的证据优先于编码前缀：SAP 的六位编码 100332 恰好以 1003
         // 开头，但名称里的 BOC 说明它是银行存款，不是其他货币资金。
         assert_eq!(suggest_account_role("100332 USD BOC-CPCSC-SH"), "deposit");

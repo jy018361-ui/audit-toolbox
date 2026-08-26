@@ -25,8 +25,7 @@ use crate::AppError;
 use crate::excel_merger::PauseCheckpoint;
 use crate::ledger_mapping;
 use crate::ledger_mapping::{
-    SignConvention, SignEvidence, is_credit_direction, je_sign_evidence_amount_direction,
-    je_sign_evidence_debit_credit, je_sign_evidence_single,
+    SignConvention, SignEvidence, header_index, is_credit_direction, normalize_name,
 };
 
 const TS_MAX_PIVOT_COLUMN_VALUES: usize = 180;
@@ -2383,7 +2382,11 @@ fn account_values(
     let filtered: Vec<(String, String)> = pairs
         .into_iter()
         .filter(|(value, code)| {
-            if !lower.is_empty() && !value.to_lowercase().contains(&lower) {
+            // 关键词既搜名称也搜编码——面板显示「编码 名称」后，按编码找是主路径。
+            if !lower.is_empty()
+                && !value.to_lowercase().contains(&lower)
+                && !code.to_lowercase().contains(&lower)
+            {
                 return false;
             }
             prefixes.is_empty() || matches_code_prefix(code, value, prefixes)
@@ -3896,61 +3899,27 @@ fn voucher_key_label(headers: &[String], id_indexes: &[usize]) -> String {
 /// 符号口径判定已提升为公共内核（`ledger_mapping`）——看账原本是五个工具里
 /// 判定最完整的一套，现在由汇兑损益、存款利息、借款利息共用同一份实现。
 /// 这里只负责把映射好的列取出来交给内核。
+/// 看账的符号口径判定：**整个流程走统一内核**，这里只回答「角色对应哪一列」。
+///
+/// 此前这里是本模块自己的一份流程（取列、分组凭证、按记法选投票函数），
+/// 汇兑损益、存款、借款各有各的写法，改一处别处不会跟着变。
 pub(crate) fn sign_evidence(
     rows: &[Vec<String>],
     headers: &[String],
     mapping: &LedgerMapping,
     id_indexes: &[usize],
 ) -> SignEvidence {
-    let column = |name: &Option<String>| {
-        name.as_deref().and_then(|n| header_index(headers, n))
-    };
-    let numbers = |index: usize| {
-        rows.iter()
-            .map(|row| parse_number(row.get(index).map(String::as_str).unwrap_or("")))
-            .collect::<Vec<_>>()
-    };
-    let debit_column = column(&mapping.debit);
-    let credit_column = column(&mapping.credit);
-    let amount_column = column(&mapping.amount);
-    let direction_column = column(&mapping.direction);
-
-    if let (Some(dr), Some(cr)) = (debit_column, credit_column) {
-        // 方案 B：借贷分列。
-        return je_sign_evidence_debit_credit(
-            &numbers(dr),
-            &numbers(cr),
-            &group_vouchers(rows, id_indexes),
-        );
-    }
-
-    if let (Some(amount), Some(direction)) = (amount_column, direction_column) {
-        // 方案 A：金额＋方向列。方向为空的行既不算借也不算贷。
-        let is_credit = rows
-            .iter()
-            .map(|row| is_credit_direction(row.get(direction).map(String::as_str).unwrap_or("")))
-            .collect::<Vec<_>>();
-        let has_direction = rows
-            .iter()
-            .map(|row| !row_direction(row.get(direction)).is_empty())
-            .collect::<Vec<_>>();
-        return je_sign_evidence_amount_direction(
-            &numbers(amount),
-            &is_credit,
-            &has_direction,
-            &group_vouchers(rows, id_indexes),
-        );
-    }
-
-    if amount_column.is_some() {
-        return je_sign_evidence_single(group_vouchers(rows, id_indexes).len());
-    }
-
-    let mut evidence = je_sign_evidence_single(0);
-    evidence.scheme = "none";
-    evidence.convention = None;
-    evidence.note = Some("金额字段未映射，无法判定符号口径。".into());
-    evidence
+    let _ = id_indexes;
+    ledger_mapping::detect_sign_convention(headers, rows, &|role| match role {
+        "id" => mapping.id.clone(),
+        "entity" => mapping.entity.clone().into_iter().collect(),
+        "date" => mapping.date.clone().into_iter().collect(),
+        "functionalDebit" => mapping.debit.clone().into_iter().collect(),
+        "functionalCredit" => mapping.credit.clone().into_iter().collect(),
+        "functionalAmount" => mapping.amount.clone().into_iter().collect(),
+        "direction" => mapping.direction.clone().into_iter().collect(),
+        _ => Vec::new(),
+    })
 }
 
 /// 凭证按首现顺序分组；顺序稳定，统计与文案才稳定。
@@ -4184,19 +4153,8 @@ fn validate_mapping_required(m: &LedgerMapping) -> Result<(), AppError> {
     }
     Ok(())
 }
-fn normalize_name(value: &str) -> String {
-    value
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-fn header_index(headers: &[String], name: &str) -> Option<usize> {
-    headers.iter().position(|v| v == name).or_else(|| {
-        let n = normalize_name(name);
-        headers.iter().position(|v| normalize_name(v) == n)
-    })
-}
+
+
 fn normalize_headers(row: &[String], width: usize) -> Vec<String> {
     let mut used = HashMap::<String, usize>::new();
     (0..width)
@@ -4322,12 +4280,16 @@ fn parse_month(value: &str) -> Option<String> {
     }
     None
 }
+/// 取数用的数值解析，**能力走统一内核**。
+///
+/// 本工具的策略是读不出按 0 处理、继续往下跑——看账要容忍脏账，
+/// 一个坏格子不该让整次导出失败。但**能力**必须和别的工具一致：
+/// 此前这里只去引号和千分位，`(500)`、`1,234CR`、全角逗号一律静默变成 0，
+/// 金额无声无息地丢掉。
 fn parse_number(value: &str) -> f64 {
-    value
-        .trim()
-        .trim_matches('"')
-        .replace(',', "")
-        .parse()
+    ledger_mapping::parse_amount(value)
+        .ok()
+        .flatten()
         .unwrap_or(0.0)
 }
 fn format_number(value: f64) -> String {
@@ -5264,6 +5226,10 @@ mod tests {
         // 关键词与前缀可以叠加。
         let (both, _, n) = account_values(&table, &mapping, "生产", &["6401".into()]);
         assert_eq!(n, 1, "{both:?}");
+        // 关键词按编码也能命中——面板把编码拆出来显示后，按编码找是主路径之一。
+        let (by_code, _, c) = account_values(&table, &mapping, "660308", &[]);
+        assert_eq!(c, 1, "{by_code:?}");
+        assert_eq!(by_code, vec!["6603080001-销售费用-仓储".to_string()]);
     }
 
     #[test]

@@ -9,11 +9,29 @@ import {
   inScoreBand,
   mergeConfirmations,
   parseDraft,
+  rectHit,
   rowLevel,
   validateThresholds,
   type Confirmation,
   type FuzzyResultRow,
 } from "./FuzzyMatchPage";
+
+describe("拖放命中测试", () => {
+  it("坐标落在元素框内（含边界）命中，框外或元素缺失不命中", () => {
+    // 纯函数测试跑在 node 环境（无 document），rectHit 只依赖
+    // getBoundingClientRect，用模拟对象即可。
+    const el = {
+      getBoundingClientRect: () =>
+        ({ left: 100, right: 300, top: 50, bottom: 250, width: 200, height: 200, x: 100, y: 50, toJSON: () => ({}) }),
+    } as unknown as HTMLElement;
+    expect(rectHit(200, 150, el)).toBe(true);
+    expect(rectHit(100, 50, el)).toBe(true); // 左上角边界
+    expect(rectHit(300, 250, el)).toBe(true); // 右下角边界
+    expect(rectHit(99, 150, el)).toBe(false); // 左侧差 1px
+    expect(rectHit(200, 251, el)).toBe(false); // 下方超出
+    expect(rectHit(200, 150, null)).toBe(false); // 卡片未挂载
+  });
+});
 
 const candidate = (bIndex: number, bValue: string, level: "auto" | "suspect", total: number) => ({
   bIndex,

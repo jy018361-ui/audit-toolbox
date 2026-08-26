@@ -5,7 +5,7 @@
 use crate::ledger_mapping;
 use crate::{AppError, excel_merger::PauseCheckpoint, tabular};
 use calamine::{Data, Reader, open_workbook_auto};
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Utc};
+use chrono::{Datelike, Duration, NaiveDate, Utc};
 use directories::ProjectDirs;
 use reqwest::blocking::Client;
 use rust_xlsxwriter::{
@@ -376,6 +376,8 @@ pub(crate) fn run_job(
         }
         "fx.preview" => {
             let token = preview_cache_key(&params);
+            let mut params = params;
+            detect_and_inject_sign_conventions(&mut params);
             let mut result = calculate(&params, progress, &cancel, pause)?;
             if let Some(object) = result.as_object_mut() {
                 object.insert("previewToken".into(), Value::String(token.clone()));
@@ -2392,7 +2394,12 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                     ));
                 }
             }
-            for col in mapping.values().flat_map(|v| match v {
+            // `__` 开头的是内部键（符号口径等），不是角色，不该拿去表头里找列。
+            for col in mapping
+                .iter()
+                .filter(|(role, _)| !role.starts_with("__"))
+                .map(|(_, value)| value)
+                .flat_map(|v| match v {
                 Value::String(s) => vec![s.clone()],
                 Value::Array(a) => a
                     .iter()
@@ -2673,6 +2680,88 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                         duplicate_rows.len()
                     ));
                 }
+                // ── TB 自身逐行勾稽：期初＋本年累计借方−本年累计贷方＝期末 ──
+                //
+                // 只提示不拦截：实务余额表常见尾差、审计调整前后口径差异都会造成
+                // 个别行不平，单行交给用户判断。这条检查的价值在于把「期初/期末列
+                // 映射反了、借贷列拿错」这类系统性错误在上传阶段就暴露出来——那类
+                // 错误几乎会让所有行都差出同一个量级。金额沿用 signed_amount 的
+                // 借正贷负规则，借贷方向列与借贷双栏两种记法都适用；原币、本位币
+                // 两个口径各自独立验一遍，四样字段不齐的口径跳过。
+                let row_records = records(&table);
+                for (opening_prefix, closing_prefix, ytd_debit, ytd_credit, unit) in [
+                    (
+                        "openingFunctional",
+                        "closingFunctional",
+                        "ytdFunctionalDebit",
+                        "ytdFunctionalCredit",
+                        "本位币",
+                    ),
+                    (
+                        "openingForeign",
+                        "closingForeign",
+                        "ytdForeignDebit",
+                        "ytdForeignCredit",
+                        "原币",
+                    ),
+                ] {
+                    let (Some(debit_col), Some(credit_col)) = (
+                        first_col(&mapping, ytd_debit),
+                        first_col(&mapping, ytd_credit),
+                    ) else {
+                        continue;
+                    };
+                    if !amount_scheme_ok(&mapping, opening_prefix)
+                        || !amount_scheme_ok(&mapping, closing_prefix)
+                    {
+                        continue;
+                    }
+                    let mut checked = 0usize;
+                    let mut mismatched: Vec<(usize, String, f64)> = Vec::new();
+                    for row in &row_records {
+                        // 四个数里解析失败或借贷发生额缺失的行跳过——坏列由上面的
+                        // 「有效数值比例低于99%」负责拦截，这里不重复报。
+                        let (Ok(opening), Ok(closing), Ok(Some(debit)), Ok(Some(credit))) = (
+                            signed_amount(&row, &mapping, opening_prefix),
+                            signed_amount(&row, &mapping, closing_prefix),
+                            strict_number(
+                                row.values.get(debit_col.as_str()).copied().unwrap_or("")
+                            ),
+                            strict_number(
+                                row.values.get(credit_col.as_str()).copied().unwrap_or("")
+                            ),
+                        ) else {
+                            continue;
+                        };
+                        if opening == 0.0 && closing == 0.0 && debit == 0.0 && credit == 0.0 {
+                            continue;
+                        }
+                        checked += 1;
+                        let derived = opening + debit - credit;
+                        let difference = derived - closing;
+                        let tolerance = 0.01_f64
+                            .max(opening.abs().max(closing.abs().max(derived.abs())) * 1e-8);
+                        if difference.abs() > tolerance {
+                            mismatched
+                                .push((row.source_row, account_name(&row, &mapping), difference));
+                        }
+                    }
+                    if !mismatched.is_empty() {
+                        let shown = mismatched
+                            .iter()
+                            .take(3)
+                            .map(|(row, account, difference)| {
+                                format!("第{row}行（{account}，差{difference:.2}）")
+                            })
+                            .collect::<Vec<_>>()
+                            .join("、");
+                        warnings.push(format!(
+                            "TB 自身勾稽（{unit}口径）：{} / {}行不满足 期初＋本年累计借方−本年累计贷方＝期末，如{shown}。请检查期初/期末/借贷方向列是否映射正确或数据是否存在尾差；本提示不拦截测算。",
+                            mismatched.len(),
+                            checked
+                        ));
+                    }
+                }
             }
         }
     }
@@ -2705,6 +2794,32 @@ fn amount_scheme_ok(mapping: &Map<String, Value>, prefix: &str) -> bool {
         || (amount && direction && !debit && !credit)
 }
 
+/// 调查测试入口：只读，看某份表被判成哪种符号口径。
+pub(crate) fn sign_probe_for_test(params: &Value) -> Result<Value, AppError> {
+    let spec: SourceSpec = serde_json::from_value(params["source"].clone())
+        .map_err(|e| error("INVALID_PARAMS", "来源无效。", Some(e.to_string())))?;
+    let table = load_fx_table(&spec)?;
+    let mapping = params["mapping"].as_object().cloned().unwrap_or_default();
+    let column_of = |role: &str| -> Vec<String> { mapped_cols(&mapping, role) };
+    let evidence = ledger_mapping::detect_sign_convention(&table.headers, &table.rows, &column_of);
+    Ok(json!({
+        "convention": evidence.convention.map(|c| c.as_str()),
+        "scheme": evidence.scheme,
+        "signedVotes": evidence.signed_votes,
+        "unsignedVotes": evidence.unsigned_votes,
+        "unbalanced": evidence.unbalanced,
+        "oneSided": evidence.one_sided,
+        "totalVouchers": evidence.total_vouchers,
+        "trustworthy": ledger_mapping::sign_is_trustworthy(&evidence),
+        "note": evidence.note,
+    }))
+}
+
+/// 调查测试入口：只读，拿真实样例定位余额滚动失配。
+pub(crate) fn rollforward_check_for_test(params: &Value) -> Result<Value, AppError> {
+    validate_tb_je_balance_rollforward(params)
+}
+
 fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError> {
     let (Some(tb_source), Some(je_source)) = (params.get("tbSource"), params.get("jeSource"))
     else {
@@ -2716,8 +2831,24 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
         .map_err(|e| error("INVALID_PARAMS", "JE参数无效。", Some(e.to_string())))?;
     let tb_table = load_fx_table(&tb_spec)?;
     let je_table = load_fx_table(&je_spec)?;
-    let tb_mapping = mapping_obj(params, "tbMapping");
-    let je_mapping = mapping_obj(params, "jeMapping");
+    let mut tb_mapping = mapping_obj(params, "tbMapping");
+    let mut je_mapping = mapping_obj(params, "jeMapping");
+    // 符号口径必须在这里也判一次。此前只有 `fx.preview` 入口注入了它，
+    // 余额滚动校验是独立入口，拿到的映射没有口径标记，一律按「贷方记正数」折算——
+    // 实测 4800 的序时账是「已带符号」（26314 张凭证投票，0 张反对），
+    // 贷方行被再乘一次 −1，差异正好是贷方发生额的两倍。
+    for (table, mapping, kind) in [
+        (&tb_table, &mut tb_mapping, "tb"),
+        (&je_table, &mut je_mapping, "je"),
+    ] {
+        if let Some(convention) = detect_sign_convention(table, mapping, kind) {
+            mapping.insert(
+                SIGN_CONVENTION_KEY.into(),
+                Value::String(convention.as_str().to_owned()),
+            );
+        }
+    }
+    let (tb_mapping, je_mapping) = (tb_mapping, je_mapping);
     let use_foreign = amount_scheme_ok(&tb_mapping, "openingForeign")
         && amount_scheme_ok(&tb_mapping, "closingForeign");
     let unit = if use_foreign { "foreign" } else { "functional" };
@@ -2739,7 +2870,16 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
         .get("reportEnd")
         .and_then(Value::as_str)
         .and_then(parse_date);
+    // 辅助核算是可选的细化维度：**两边都映射了才启用**。启用后如果匹配不上，
+    // 下面会自动退回粗粒度重跑一次——宁可粗一点也不要因为两边写法或粒度不同
+    // 而全盘失配（实测 4800：TB 无辅助核算列、JE 按供应商客户拆行，332 个键全丢）。
+    let both_have_auxiliary = !mapped_cols(&tb_mapping, "auxiliary").is_empty()
+        && !mapped_cols(&je_mapping, "auxiliary").is_empty();
+    let mut use_auxiliary = both_have_auxiliary;
+    let mut attempt = |use_auxiliary: bool| -> Result<RollforwardAttempt, AppError> {
     let mut tb_balances = BTreeMap::<String, (String, String, String, String, f64, f64)>::new();
+    // TB 侧认定要校验的余额键。JE 侧照它收行，保证两边口径一致。
+    let mut wanted = HashSet::<String>::new();
     for row in records(&tb_table) {
         let account = account_name(&row, &tb_mapping);
         if !matches!(
@@ -2754,17 +2894,26 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
         if currency.is_empty() || currency == functional_currency(&entity, params) {
             continue;
         }
-        let key = monetary_balance_key(&entity, &account, &currency, &auxiliary);
+        let key = balance_match_key(&entity, &account, &auxiliary, use_auxiliary);
+        // 记下这个键要校验，JE 侧据此决定收哪些行——两边必须按同一个口径取数。
+        wanted.insert(key.clone());
         let opening = signed_amount(&row, &tb_mapping, opening_prefix).map_err(|detail| {
             error("NUMERIC_PARSE_FAILED", "TB期初余额无法解析。", Some(detail))
         })?;
         let closing = signed_amount(&row, &tb_mapping, closing_prefix).map_err(|detail| {
             error("NUMERIC_PARSE_FAILED", "TB期末余额无法解析。", Some(detail))
         })?;
-        tb_balances.insert(
-            key,
-            (entity, account, currency, auxiliary, opening, closing),
-        );
+        // 键的粒度比源表粗时，同一个键会收到多行——必须累加而不是覆盖，
+        // 否则同一科目下的其余币种/明细余额会被后来的行吃掉。
+        let slot = tb_balances.entry(key).or_insert_with(|| {
+            (entity.clone(), account.clone(), currency.clone(), auxiliary.clone(), 0.0, 0.0)
+        });
+        // 展示用的币种：同一键下出现第二种币种时标注出来，免得报告里只显示其中一种。
+        if slot.2 != currency && !currency.is_empty() {
+            slot.2 = "多币种".to_string();
+        }
+        slot.4 += opening;
+        slot.5 += closing;
     }
     let mut movements = HashMap::<String, f64>::new();
     let mut je_keys = BTreeMap::<String, (String, String, String, String)>::new();
@@ -2790,10 +2939,18 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
         let entity = entity_for(&row, &je_mapping, params).to_owned();
         let currency = currency_for(&row, &je_mapping, &account, params);
         let auxiliary = auxiliary_value(&row, &je_mapping);
-        if currency.is_empty() || currency == functional_currency(&entity, params) {
+        let key = balance_match_key(&entity, &account, &auxiliary, use_auxiliary);
+        // **不按行的币种过滤**。TB 那一行是这个科目的全额余额（科目文本抽不出
+        // 币种时，整个科目退回按本位币列判一个币种），JE 若只收「非本位币」的行，
+        // 两边就不是同一批数据。实测 4800 的 1002990001 过渡银行：TB 全年轧平为 0，
+        // JE 四种货币合计也是 0，但只收非本位币行就剩 −75,938,346.45——
+        // 报错里那个差异数正是被切掉的本币交易。
+        //
+        // 本位币口径下这本来也没有意义：本位币金额是所有交易的统一计量，不分币种。
+        // 该不该校验这个账户，由 TB 侧判定并写进 `wanted`，JE 侧只管按科目收全。
+        if !wanted.contains(&key) {
             continue;
         }
-        let key = monetary_balance_key(&entity, &account, &currency, &auxiliary);
         *movements.entry(key.clone()).or_default() += signed_amount(&row, &je_mapping, unit)
             .map_err(|detail| {
                 error(
@@ -2830,6 +2987,20 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
             }));
         }
     }
+        Ok(RollforwardAttempt { issues, checked: tb_balances.len() })
+    };
+
+    let mut outcome = attempt(use_auxiliary)?;
+    // 「能匹配上」才算数：带辅助核算反而对不上时，退回公司＋科目编码重来一次。
+    if use_auxiliary && !outcome.issues.is_empty() {
+        let coarse = attempt(false)?;
+        if coarse.issues.len() < outcome.issues.len() {
+            use_auxiliary = false;
+            outcome = coarse;
+        }
+    }
+    let checked_keys = outcome.checked;
+    let issues = outcome.issues;
     if !issues.is_empty() {
         let first = &issues[0];
         let summary = format!(
@@ -2846,66 +3017,39 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
                     .and_then(Value::as_f64)
                     .unwrap_or(0.0))
         );
-        return Err(error(
-            "TB_JE_ROLLFORWARD_MISMATCH",
-            summary,
-            Some(Value::Array(issues).to_string()),
-        ));
+        // **提示，不阻断。** TB 与 JE 对不上多半是账本身的问题（取数期间不一致、
+        // 某笔计提只记在一边），不该让整个测算跑不出来。失配明细原样带出去，
+        // 界面上逐条列给用户看。
+        //
+        // 只有**按月推算余额**真正依赖 JE 的完整性——那部分自己看 `passed`
+        // 决定要不要标成受限结果，见 `unrealizedBalanceBasisComplete`。
+        return Ok(json!({
+            "performed":true,"unit":if use_foreign {"原币"} else {"本位币"},
+            "checkedBalanceKeys":checked_keys,"passed":false,"auxiliaryInKey":use_auxiliary,
+            "summary":summary,"issues":issues
+        }));
     }
     Ok(json!({
         "performed":true,"unit":if use_foreign {"原币"} else {"本位币"},
-        "checkedBalanceKeys":tb_balances.len(),"passed":true
+        "checkedBalanceKeys":checked_keys,"passed":true,"auxiliaryInKey":use_auxiliary,
+        "issues":[]
     }))
 }
 
+/// 取数用的严格数值解析，**能力走统一内核**。
+/// 本工具的策略是读不出就报错中断——错误处理归自己，解析能力不再自带一份。
 fn strict_number(raw: &str) -> Result<Option<f64>, String> {
-    let mut s = raw.trim().replace([',', '，', ' ', '\u{a0}'], "");
-    if s.is_empty() || is_placeholder(&s) {
-        return Ok(None);
-    }
-    let mut sign = 1.0;
-    if s.starts_with('(') && s.ends_with(')') {
-        sign = -1.0;
-        s = s[1..s.len() - 1].to_owned();
-    }
-    if s.ends_with('-') {
-        sign *= -1.0;
-        s.pop();
-    }
-    if s.to_ascii_uppercase().ends_with("CR") {
-        sign *= -1.0;
-        s.truncate(s.len() - 2);
-    } else if s.to_ascii_uppercase().ends_with("DR") {
-        s.truncate(s.len() - 2);
-    }
-    if s.ends_with('贷') {
-        sign *= -1.0;
-        s.pop();
-    } else if s.ends_with('借') {
-        s.pop();
-    }
-    s.parse::<f64>()
-        .map(|v| Some(sign * v))
-        .map_err(|_| format!("无法解析数值：{raw}"))
+    ledger_mapping::parse_amount(raw)
 }
 
 fn is_placeholder(s: &str) -> bool {
     matches!(s.trim(), "-" | "—" | "–" | "N/A" | "n/a" | "NA" | "无")
 }
 
+/// 日期解析，**走统一内核**。内核那份合并了本工具与借款利息两边的覆盖面：
+/// 多了英文月份缩写 `10-Jan-2023`，也会先切掉 `2023-01-10 00:00:00` 的时间段。
 pub(crate) fn parse_date(s: &str) -> Option<NaiveDate> {
-    let text = s.trim();
-    for format in ["%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d", "%d/%m/%Y"] {
-        if let Ok(date) = NaiveDate::parse_from_str(text, format) {
-            return Some(date);
-        }
-    }
-    for format in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"] {
-        if let Ok(value) = NaiveDateTime::parse_from_str(text, format) {
-            return Some(value.date());
-        }
-    }
-    None
+    ledger_mapping::parse_date(s)
 }
 
 /// 把序时账原样转成 JSON 行，供导出时写「JE完整明细」。
@@ -2957,30 +3101,120 @@ fn cell<'a>(row: &'a RowRecord, mapping: &Map<String, Value>, role: &str) -> &'a
         .unwrap_or("")
 }
 
+/// 检测两侧账表的符号口径，把结论写回参数里的映射。
+///
+/// 折算函数散在三十处调用点上，全都从 `params` 里取映射——在任务入口检测一次、
+/// 写回参数，下游就无需逐个传参。检测本身走统一内核：JE 拿整张凭证配平投票，
+/// TB 用勾稽等式投票，与看账、存款、借款判的是同一套。
+///
+/// 判不出来时不写，[`sign_convention_of`] 会按「贷方记正数」兜底，与历史行为一致。
+fn detect_and_inject_sign_conventions(params: &mut Value) {
+    for (source_key, mapping_key, kind) in [
+        ("jeSource", "jeMapping", "je"),
+        ("tbSource", "tbMapping", "tb"),
+    ] {
+        let Some(spec) = params.get(source_key).cloned() else {
+            continue;
+        };
+        let Ok(spec) = serde_json::from_value::<SourceSpec>(spec) else {
+            continue;
+        };
+        let Ok(table) = load_fx_table(&spec) else {
+            continue;
+        };
+        let mapping = mapping_obj(params, mapping_key);
+        let Some(convention) = detect_sign_convention(&table, &mapping, kind) else {
+            continue;
+        };
+        if let Some(object) = params
+            .get_mut(mapping_key)
+            .and_then(Value::as_object_mut)
+        {
+            object.insert(
+                SIGN_CONVENTION_KEY.into(),
+                Value::String(convention.as_str().to_owned()),
+            );
+        }
+    }
+}
+
+/// 判定这份表的符号口径：**整个流程走统一内核**，这里只回答「角色对应哪一列」。
+///
+/// 上一轮我在这里另写了一份流程（取列、按凭证分组、按记法选投票函数），
+/// 那是第五份重复实现——内核改了它不会跟着变，等于没统一。现已删除。
+fn detect_sign_convention(
+    table: &FxTable,
+    mapping: &Map<String, Value>,
+    kind: &str,
+) -> Option<ledger_mapping::SignConvention> {
+    let headers = table.headers.clone();
+    let rows: Vec<Vec<String>> = table.rows.clone();
+    let column_of = |role: &str| -> Vec<String> { mapped_cols(mapping, role) };
+    let evidence = if kind == "tb" {
+        ledger_mapping::detect_tb_sign_convention(&headers, &rows, &column_of)
+    } else {
+        ledger_mapping::detect_sign_convention(&headers, &rows, &column_of)
+    };
+    if !ledger_mapping::sign_is_trustworthy(&evidence) {
+        return None;
+    }
+    evidence.convention
+}
+
+/// 映射里存放本表符号口径的键。
+///
+/// 折算函数散在三十处调用点上，每处都已经拿着 mapping——把口径塞进映射本身，
+/// 就不必逐个改签名。键名带 `__` 前缀，与真实角色区分开。
+const SIGN_CONVENTION_KEY: &str = "__signConvention";
+
+/// 读取本表的符号口径。没检测过时按「贷方记正数」处理，与历史行为一致。
+fn sign_convention_of(mapping: &Map<String, Value>) -> ledger_mapping::SignConvention {
+    match mapping.get(SIGN_CONVENTION_KEY).and_then(Value::as_str) {
+        Some("signed") => ledger_mapping::SignConvention::Signed,
+        _ => ledger_mapping::SignConvention::Unsigned,
+    }
+}
+
+/// 折算成有符号净额（借正贷负），**走统一内核**。
+///
+/// 此前这里是本模块自己的一份实现，硬编码「贷方取负绝对值」且不判符号口径。
+/// 红字冲销的贷方行本身记负数，取负绝对值会让冲销凭证永远抵不平；
+/// 方向列的取值判定也只认 `CR` 和「贷」两种写法，认不出「Credit」「贷方」等。
 fn signed_amount(
     row: &RowRecord,
     mapping: &Map<String, Value>,
     prefix: &str,
 ) -> Result<f64, String> {
-    if let (Some(debit), Some(credit)) = (
+    // 借贷分列只在两列都映射时才成立——沿用本模块原有语义，
+    // 只映射了一侧时按净额列处理，不要当成分列。
+    let pair = match (
         first_col(mapping, &format!("{prefix}Debit")),
         first_col(mapping, &format!("{prefix}Credit")),
     ) {
-        return Ok(
-            strict_number(row.values.get(debit.as_str()).copied().unwrap_or(""))?.unwrap_or(0.0)
-                - strict_number(row.values.get(credit.as_str()).copied().unwrap_or(""))?
+        (Some(debit), Some(credit)) => Some((debit, credit)),
+        _ => None,
+    };
+    let inputs = if let Some((debit, credit)) = pair {
+        ledger_mapping::AmountInputs {
+            debit: Some(
+                strict_number(row.values.get(debit.as_str()).copied().unwrap_or(""))?
                     .unwrap_or(0.0),
-        );
-    }
-    let value = strict_number(cell(row, mapping, &format!("{prefix}Amount")))?.unwrap_or(0.0);
-    let direction = direction_column(mapping, prefix)
-        .map(|role| cell(row, mapping, &role).to_ascii_uppercase())
-        .unwrap_or_default();
-    Ok(if direction.contains("CR") || direction.contains('贷') {
-        -value.abs()
+            ),
+            credit: Some(
+                strict_number(row.values.get(credit.as_str()).copied().unwrap_or(""))?
+                    .unwrap_or(0.0),
+            ),
+            ..Default::default()
+        }
     } else {
-        value
-    })
+        ledger_mapping::AmountInputs {
+            amount: Some(strict_number(cell(row, mapping, &format!("{prefix}Amount")))?.unwrap_or(0.0)),
+            direction: direction_column(mapping, prefix)
+                .map(|role| cell(row, mapping, &role).to_owned()),
+            ..Default::default()
+        }
+    };
+    Ok(ledger_mapping::signed_amount(&inputs, sign_convention_of(mapping)))
 }
 
 fn voucher_id(row: &RowRecord, mapping: &Map<String, Value>, params: &Value) -> String {
@@ -3269,6 +3503,41 @@ fn auxiliary_value(row: &RowRecord, mapping: &Map<String, Value>) -> String {
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>()
         .join("|")
+}
+
+/// 一次余额滚动比对的结果。辅助核算粒度要试两次，用它承载每次的产出。
+struct RollforwardAttempt {
+    issues: Vec<Value>,
+    checked: usize,
+}
+
+/// TB 与 JE 对账用的余额键：**公司 ＋ 科目编码**必填，**辅助核算可选**。
+///
+/// 三个字段的定位不同，不能一股脑拼进键：
+///
+/// - **科目编码**是这套账里科目的唯一标识，两边必然一致，是匹配的锚点；
+/// - **科目名称**同一编码在两边写法经常不同——实测 4800 的编码 `1002010017`，
+///   TB 记作「货币资金-银行存款-建设银行」（标准科目表名称），
+///   JE 记作「银行存款-建行RMB3250-4800」（带账号的账户全称）。
+///   把它拼进键，同一个科目会被判成两个，一条都匹配不上。
+///   因此名称只在**编码缺失时**兜底当标识用；
+/// - **辅助核算是可选的细化维度**：只有两边都映射了才启用，启用后若匹配不上
+///   还会自动退回粗粒度（见 [`validate_tb_je_balance_rollforward`]）。TB 常常
+///   根本没有这一列而 JE 按供应商、客户拆行，硬进键会让所有余额键失配——
+///   实测 4800 就是这么丢掉 332 个键的；
+/// - **币种不进键**：两边来源不同（TB 从科目文本抽、JE 读凭证货币列），
+///   同一个账户算出的币种字符串对不上。
+fn balance_match_key(entity: &str, account: &str, auxiliary: &str, use_auxiliary: bool) -> String {
+    let base = format!(
+        "{}\u{1f}{}",
+        entity.trim(),
+        account_match_key(account).trim().to_uppercase()
+    );
+    if use_auxiliary && !auxiliary.trim().is_empty() {
+        format!("{base}\u{1f}{}", auxiliary.trim().to_uppercase())
+    } else {
+        base
+    }
 }
 
 fn monetary_balance_key(entity: &str, account: &str, currency: &str, auxiliary: &str) -> String {
@@ -3689,21 +3958,17 @@ fn strip_tags(value: &str) -> String {
     output.replace("&nbsp;", "").trim().to_owned()
 }
 
+/// 币种归一化，**走统一内核**。
+///
+/// 此前这里是本模块自己的一张表，只认九种简体写法：繁体的「港幣」「歐元」「日圓」、
+/// 以及 `¥` `€` 这类符号一律认不出来，繁体账的币种会原样落到下游当成不同的币种。
+/// 内核那张表覆盖二十余种并含繁体与符号，与看账、存款、借款共用。
+///
+/// 认不出时沿用原有行为：返回去空格转大写后的原文，让下游按未知币种处理。
 fn normalize_currency(value: &str) -> String {
-    let normalized = value.trim().to_uppercase();
-    match normalized.as_str() {
-        "人民币" | "RMB" => "CNY",
-        "美元" => "USD",
-        "欧元" => "EUR",
-        "日元" => "JPY",
-        "港币" | "港元" => "HKD",
-        "英镑" => "GBP",
-        "澳元" => "AUD",
-        "新加坡元" => "SGD",
-        "加拿大元" | "加元" => "CAD",
-        _ => normalized.as_str(),
-    }
-    .to_owned()
+    ledger_mapping::normalize_currency_code(value)
+        .map(str::to_owned)
+        .unwrap_or_else(|| value.trim().to_uppercase())
 }
 
 fn supported_currencies() -> HashSet<&'static str> {
@@ -3805,6 +4070,9 @@ fn calculate(
         .and_then(Value::as_str)
         .unwrap_or("combined");
     let balance_rollforward_validation = if matches!(mode, "unrealized" | "combined") {
+        // 校验本身出错（读不出表、解析不了金额）仍然要中断；
+        // 只有「对不上」不再中断——结论与逐条明细挂在 `balanceRollforwardValidation`
+        // 上带给前端展示。
         validate_tb_je_balance_rollforward(params)?
     } else {
         json!({"performed":false,"reason":"当前模式不包含未实现测算"})
@@ -4015,6 +4283,17 @@ fn calculate(
             "unrealizedRows": unrealized.len(),
             "unrealizedMissingBalanceKeys": unrealized_missing_balance_keys,
             "unrealizedBalanceBasisComplete": unrealized_missing_balance_keys == 0,
+            // 按月推算余额依赖 JE 的完整性：TB＋JE 对不上时，未实现那部分是受限结果。
+            // 已实现汇兑损益按逐笔结算算，不受影响，所以只标未实现。
+            "rollforwardPassed": balance_rollforward_validation
+                .get("passed")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            "rollforwardIssueCount": balance_rollforward_validation
+                .get("issues")
+                .and_then(Value::as_array)
+                .map(|all| all.len())
+                .unwrap_or(0),
             "translatedAccountNames": account_translations.len(),
             "accountTranslationEnabled": translation_enabled,
             "lowConfidenceEvents": classification.iter().filter(|v|
@@ -7342,7 +7621,229 @@ E,2025-01-31,R,AB,6603,月末重估,CNY,0,-5\n",
     }
 
     #[test]
-    fn tb_je_rollforward_uses_raw_functional_balances_and_blocks_mismatch() {
+    fn 余额滚动校验必须自己判符号口径() {
+        // 实测 4800 踩到的坑：符号口径检测判得对（26314 张凭证投「已带符号」），
+        // 但结论只注入了 fx.preview 入口，余额滚动校验是独立入口拿不到，
+        // 于是把已经带负号的贷方又乘一次 −1，差异正好是贷方发生额的两倍。
+        let root = std::env::temp_dir().join(format!("fx-sign-roll-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        let tb = root.join("tb.csv");
+        // 本位币金额已带符号（借正贷负），方向列用 SAP 的 S／H 写法。
+        // 每张凭证自身净额为 0，是「已带符号」的铁证。
+        fs::write(
+            &je,
+            "公司,日期,凭证号,科目,币种,借贷,原币,本位币
+             E,2025-01-15,J1,1122,USD,S,100,700
+             E,2025-01-15,J1,2202,USD,H,-100,-700
+             E,2025-02-15,J2,1122,USD,H,-20,-140
+             E,2025-02-15,J2,2202,USD,S,20,140
+",
+        )
+        .unwrap();
+        // 1122 全年净增 700 − 140 = 560。
+        fs::write(
+            &tb,
+            "公司,科目,币种,期初本位币,期末本位币
+E,1122,USD,1000,1560
+",
+        )
+        .unwrap();
+        let params = json!({
+            "reportStart":"2025-01-01","reportEnd":"2025-12-31",
+            "fixedEntity":"E","entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbSource":{"inputPath":tb,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{"entity":"公司","date":"日期","id":["凭证号"],"account":["科目"],"currency":"币种","direction":"借贷","foreignAmount":"原币","functionalAmount":"本位币"},
+            "tbMapping":{"entity":"公司","account":["科目"],"currency":"币种","openingFunctionalAmount":"期初本位币","closingFunctionalAmount":"期末本位币"},
+            "accountRoles":{"1122":"monetary_asset","2202":"monetary_liability"}
+        });
+        let ok = validate_tb_je_balance_rollforward(&params)
+            .expect("已带符号的账不该被再乘一次 −1");
+        assert_eq!(ok["performed"], json!(true), "{ok}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 辅助核算两边都映射且对得上时进入匹配键() {
+        // TB 与 JE 都按往来单位拆行、且取值一致：细粒度成立，用它匹配更准。
+        let root = std::env::temp_dir().join(format!("fx-aux-fine-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        let tb = root.join("tb.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,科目,币种,往来单位,原币,本位币
+             E,2025-01-15,J1,1122,USD,甲,10,50
+             E,2025-02-15,J2,1122,USD,乙,6,30
+",
+        )
+        .unwrap();
+        fs::write(
+            &tb,
+            "公司,科目,币种,往来单位,期初本位币,期末本位币
+             E,1122,USD,甲,400,450
+E,1122,USD,乙,300,330
+",
+        )
+        .unwrap();
+        let params = json!({
+            "reportStart":"2025-01-01","reportEnd":"2025-12-31",
+            "fixedEntity":"E","entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbSource":{"inputPath":tb,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{"entity":"公司","date":"日期","id":["凭证号"],"account":["科目"],"currency":"币种","auxiliary":["往来单位"],"foreignAmount":"原币","functionalAmount":"本位币"},
+            "tbMapping":{"entity":"公司","account":["科目"],"currency":"币种","auxiliary":["往来单位"],"openingFunctionalAmount":"期初本位币","closingFunctionalAmount":"期末本位币"},
+            "accountRoles":{"1122":"monetary_asset"}
+        });
+        let ok = validate_tb_je_balance_rollforward(&params).expect("细粒度应当勾稽得上");
+        assert_eq!(ok["auxiliaryInKey"], json!(true), "两边都有且对得上，应进入键");
+        assert_eq!(ok["checkedBalanceKeys"], json!(2), "应按两个往来单位分别校验");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 辅助核算对不上时自动退回公司加科目() {
+        // JE 按往来单位拆行，TB 也有这一列但写法不同（甲 ／ 供应商甲）。
+        // 细粒度会全盘失配，必须退回粗粒度——这正是「能匹配上才算数」。
+        let root = std::env::temp_dir().join(format!("fx-aux-fallback-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        let tb = root.join("tb.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,科目,币种,往来单位,原币,本位币
+             E,2025-01-15,J1,1122,USD,甲,10,50
+             E,2025-02-15,J2,1122,USD,乙,6,30
+",
+        )
+        .unwrap();
+        fs::write(
+            &tb,
+            "公司,科目,币种,往来单位,期初本位币,期末本位币
+             E,1122,USD,供应商甲,400,450
+E,1122,USD,供应商乙,300,330
+",
+        )
+        .unwrap();
+        let params = json!({
+            "reportStart":"2025-01-01","reportEnd":"2025-12-31",
+            "fixedEntity":"E","entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbSource":{"inputPath":tb,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{"entity":"公司","date":"日期","id":["凭证号"],"account":["科目"],"currency":"币种","auxiliary":["往来单位"],"foreignAmount":"原币","functionalAmount":"本位币"},
+            "tbMapping":{"entity":"公司","account":["科目"],"currency":"币种","auxiliary":["往来单位"],"openingFunctionalAmount":"期初本位币","closingFunctionalAmount":"期末本位币"},
+            "accountRoles":{"1122":"monetary_asset"}
+        });
+        let ok = validate_tb_je_balance_rollforward(&params).expect("退回粗粒度后应当勾稽得上");
+        assert_eq!(ok["auxiliaryInKey"], json!(false), "对不上就该退回");
+        assert_eq!(ok["checkedBalanceKeys"], json!(1), "退回后合并为一个科目键");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 匹配键只认公司与科目编码() {
+        // TB 与 JE 同一编码的科目名称写法常常不同——实测 4800 的 1002010017：
+        // TB 记「货币资金-银行存款-建设银行」，JE 记「银行存款-建行RMB3250-4800」。
+        // 名称拼进键会把同一个科目判成两个，所以以编码为锚点。
+        let tb = balance_match_key("4800", "1002010017 货币资金-银行存款-建设银行", "", false);
+        let je = balance_match_key("4800", "1002010017 银行存款-建行RMB3250-4800", "", false);
+        assert_eq!(tb, je, "同一编码不同名称必须匹配得上");
+        // 公司不同不匹配。
+        assert_ne!(tb, balance_match_key("3300", "1002010017 货币资金-银行存款-建设银行", "", false));
+        // 编码不同不匹配。
+        assert_ne!(tb, balance_match_key("4800", "1002010018 货币资金-银行存款-建设银行", "", false));
+        // 没有编码列时退回用名称当标识，只有名称的账也能对账。
+        let only_name = balance_match_key("4800", "银行存款-建设银行", "", false);
+        assert_eq!(only_name, balance_match_key("4800", "银行存款-建设银行", "", false));
+        assert_ne!(only_name, balance_match_key("4800", "银行存款-浦发银行", "", false));
+    }
+
+    #[test]
+    fn 辅助核算与币种不参与tbje匹配键() {
+        // 复现 4800 的真实场景：TB 没有辅助核算列，JE 按供应商/客户拆成多行。
+        // 键里带辅助核算时，TB 的每个余额键都找不到对应的 JE 发生额，
+        // 332 个键全部失配、差异等于全年发生额。
+        let root = std::env::temp_dir().join(format!("fx-key-aux-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        let tb = root.join("tb.csv");
+        // 同一科目同一币种，JE 按两个往来单位拆行；合计发生额 80。
+        fs::write(
+            &je,
+            "公司,日期,凭证号,科目,币种,往来单位,原币,本位币
+             E,2025-01-15,J1,1122,USD,供应商甲,10,50
+             E,2025-02-15,J2,1122,USD,客户乙,6,30
+",
+        )
+        .unwrap();
+        // TB 只有一行，没有往来单位列：期初 700 ＋ 发生 80 ＝ 期末 780，应当勾稽通过。
+        fs::write(
+            &tb,
+            "公司,科目,币种,期初本位币,期末本位币
+E,1122,USD,700,780
+",
+        )
+        .unwrap();
+        let params = json!({
+            "reportStart":"2025-01-01","reportEnd":"2025-12-31",
+            "fixedEntity":"E","entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbSource":{"inputPath":tb,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{"entity":"公司","date":"日期","id":["凭证号"],"account":["科目"],"currency":"币种","auxiliary":["往来单位"],"foreignAmount":"原币","functionalAmount":"本位币"},
+            "tbMapping":{"entity":"公司","account":["科目"],"currency":"币种","openingFunctionalAmount":"期初本位币","closingFunctionalAmount":"期末本位币"},
+            "accountRoles":{"1122":"monetary_asset"}
+        });
+        let ok = validate_tb_je_balance_rollforward(&params)
+            .expect("辅助核算不进匹配键，两边应当勾稽得上");
+        assert_eq!(ok["performed"], json!(true), "{ok}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 本位币口径下多币种余额按科目合并匹配() {
+        // 4800 的另一半：TB 把「货币」列判成本位币币种、账户币种要从文本列抽，
+        // 而 JE 直接读凭证货币列，同一账户两边算出的币种字符串对不上。
+        // 本位币口径下各币种金额都是记账本位币，按科目合并相加即可对上。
+        let root = std::env::temp_dir().join(format!("fx-key-ccy-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        let tb = root.join("tb.csv");
+        // JE：同一科目下 USD 与 EUR 两个币种，本位币发生额合计 80。
+        fs::write(
+            &je,
+            "公司,日期,凭证号,科目,币种,原币,本位币
+             E,2025-01-15,J1,1122,USD,10,50
+             E,2025-02-15,J2,1122,EUR,4,30
+",
+        )
+        .unwrap();
+        // TB：同一科目两行，期初合计 700、期末合计 780。
+        fs::write(
+            &tb,
+            "公司,科目,币种,期初本位币,期末本位币
+             E,1122,USD,500,550
+E,1122,EUR,200,230
+",
+        )
+        .unwrap();
+        let params = json!({
+            "reportStart":"2025-01-01","reportEnd":"2025-12-31",
+            "fixedEntity":"E","entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbSource":{"inputPath":tb,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{"entity":"公司","date":"日期","id":["凭证号"],"account":["科目"],"currency":"币种","foreignAmount":"原币","functionalAmount":"本位币"},
+            "tbMapping":{"entity":"公司","account":["科目"],"currency":"币种","openingFunctionalAmount":"期初本位币","closingFunctionalAmount":"期末本位币"},
+            "accountRoles":{"1122":"monetary_asset"}
+        });
+        let ok = validate_tb_je_balance_rollforward(&params)
+            .expect("本位币口径下按科目合并应当勾稽得上");
+        assert_eq!(ok["performed"], json!(true), "{ok}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn tb_je_rollforward_reports_mismatch_without_blocking() {
         let root =
             std::env::temp_dir().join(format!("fx-rollforward-check-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
@@ -7367,9 +7868,18 @@ E,2025-01-31,R,AB,6603,月末重估,CNY,0,-5\n",
             "tbMapping":{"entity":"公司","account":["科目"],"currency":"币种","openingFunctionalAmount":"期初本位币","closingFunctionalAmount":"期末本位币"},
             "accountRoles":{"1122":"monetary_asset"}
         });
-        let failure = validate_tb_je_balance_rollforward(&params).unwrap_err();
-        assert_eq!(failure.code, "TB_JE_ROLLFORWARD_MISMATCH");
-        assert!(failure.user_message.contains("差异-9"), "{failure:?}");
+        // 对不上**提示但不阻断**：校验照常返回，差异挂在结论里交给界面展示。
+        // 期初 700 ＋ JE 发生 71 ＝ 771，TB 期末写的是 780，差 −9。
+        let outcome = validate_tb_je_balance_rollforward(&params).expect("不该中断测算");
+        assert_eq!(outcome["passed"], json!(false), "{outcome}");
+        assert!(
+            outcome["summary"].as_str().unwrap_or("").contains("差异-9"),
+            "{outcome}"
+        );
+        let issues = outcome["issues"].as_array().expect("要带上逐条明细");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0]["difference"], json!(-9.0));
+        assert_eq!(issues[0]["tbClosing"], json!(780.0));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -8194,6 +8704,105 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
                     .iter()
                     .any(|item| item.as_str().is_some_and(|text| text.contains("认不出任何外币科目")))),
             "指定币种线索文本列后应放行：{validated:#}"
+        );
+        fs::remove_file(&tb).unwrap();
+    }
+
+    #[test]
+    fn tb_self_rollforward_is_a_warning_never_a_block() {
+        let dir = std::env::temp_dir().join(format!("fx-tbselftie-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let tb = dir.join("tb.csv");
+        // 第2行平衡；第3行是借贷方向记法的负债科目（带符号 期初-100＋借0−贷50＝期末-150，
+        // 也平衡）；第4行故意不平——期初＋借−贷＝120，期末却写着60，模拟期初/期末列拿反。
+        fs::write(
+            &tb,
+            "公司代码,科目代码,科目名称,币种,方向,期初余额,本年累计借方,本年累计贷方,期末余额\n\
+             E,1002,银行存款,USD,借,100,50,20,130\n\
+             E,2202,应付账款,USD,贷,100,0,50,150\n\
+             E,1122,应收账款,USD,借,100,30,10,60\n",
+        )
+        .unwrap();
+        let params = json!({
+            "mode":"unrealized", "reportEnd":"2025-12-31", "fixedEntity":"E",
+            "tbSource":{"inputPath":tb, "sheet":"", "headerRow":1, "headerDepth":1},
+            "tbMapping":{
+                "entity":"公司代码","accountCode":"科目代码","accountName":"科目名称",
+                "currency":"币种","direction":"方向",
+                "openingFunctionalAmount":"期初余额",
+                "ytdFunctionalDebit":"本年累计借方",
+                "ytdFunctionalCredit":"本年累计贷方",
+                "closingFunctionalAmount":"期末余额"
+            }
+        });
+        let result = validate_mapping(&params).unwrap();
+        let warnings: Vec<&str> = result["warnings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        let tie_out = warnings
+            .iter()
+            .find(|text| text.contains("TB 自身勾稽"))
+            .expect("不平的行必须产生提示");
+        assert!(
+            tie_out.contains("1 / 3行") && tie_out.contains("第4行") && tie_out.contains("1122 应收账款"),
+            "只报不平的那一行，带行号与科目：{tie_out}"
+        );
+        assert!(
+            !tie_out.contains("第2行") && !tie_out.contains("第3行"),
+            "平衡行与借贷方向记法不得误报：{tie_out}"
+        );
+        assert_eq!(
+            result["valid"], json!(true),
+            "自勾稽只提示不拦截：{result:#}"
+        );
+        assert!(
+            result["errors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .all(|text| !text.contains("TB 自身勾稽")),
+            "提示不得混进错误清单：{result:#}"
+        );
+        fs::remove_file(&tb).unwrap();
+    }
+
+    #[test]
+    fn tb_self_rollforward_skips_incomplete_schemes() {
+        let dir = std::env::temp_dir().join(format!("fx-tbselftie2-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let tb = dir.join("tb.csv");
+        // 没映射本年累计借贷列，或只有单边借方——四样不齐就不做自勾稽，
+        // 否则会把“期初=期末”当成勾稽失败大面积误报。
+        fs::write(
+            &tb,
+            "公司代码,科目代码,科目名称,币种,期初余额,期末金额,本年累计借方\n\
+             E,1002,银行存款,USD,100,60,30\n",
+        )
+        .unwrap();
+        let params = json!({
+            "mode":"unrealized", "reportEnd":"2025-12-31", "fixedEntity":"E",
+            "tbSource":{"inputPath":tb, "sheet":"", "headerRow":1, "headerDepth":1},
+            "tbMapping":{
+                "entity":"公司代码","accountCode":"科目代码","accountName":"科目名称",
+                "currency":"币种",
+                "openingFunctionalAmount":"期初余额",
+                "closingFunctionalAmount":"期末金额",
+                "ytdFunctionalDebit":"本年累计借方"
+            }
+        });
+        let result = validate_mapping(&params).unwrap();
+        assert!(
+            !result["warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .any(|text| text.contains("TB 自身勾稽")),
+            "借贷发生额缺一边时必须跳过自勾稽：{result:#}"
         );
         fs::remove_file(&tb).unwrap();
     }

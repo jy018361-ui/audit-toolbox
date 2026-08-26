@@ -482,7 +482,6 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
           <>
             <div className={`job-banner ${job.severity}`}>
               <strong>{job.message}</strong>
-              <span>{job.phase}</span>
             </div>
             <progress
               max={Math.max(job.total, 1)}

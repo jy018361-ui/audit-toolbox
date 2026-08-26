@@ -422,6 +422,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
           };
       const value = (await engineCall(method, params)) as {
         values: string[];
+        codes?: string[];
         total?: number;
         truncated?: boolean;
       };
@@ -430,6 +431,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         ...current,
         [field]: {
           values: value.values,
+          // 科目清单带编码（与取值同序），面板据此显示「编码 名称」。
+          ...(isAccountMenu(field) && Array.isArray(value.codes) ? { codes: value.codes } : {}),
           total,
           truncated: value.truncated ?? total > value.values.length,
           keyword,
@@ -743,20 +746,21 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         setMap={setMap}
         llmBusy={llmBusy}
         headerExtras={(header) => {
-          const account = isAccountColumn(draft.mapping, header);
-          const field = account ? ACCOUNT_MENU : header;
-          const chosen = account ? batch.accounts : (draft.columnFilters[header] ?? []);
+          // 科目的选择入口只留批次区上方那一个按钮；预览表头的科目列
+          // 不再重复挂漏斗，避免两个入口指到同一个面板。
+          if (isAccountColumn(draft.mapping, header)) return null;
+          const chosen = draft.columnFilters[header] ?? [];
           return (
             <ColumnFilterTrigger
-              field={account ? accountFilterTitle(draft.mapping) : header}
+              field={header}
               chosen={chosen}
-              expanded={menu?.field === field}
+              expanded={menu?.field === header}
               onToggle={(anchor) => {
                 if (!anchor) {
                   setMenu(undefined);
                   return;
                 }
-                openMenu(field, anchor);
+                openMenu(header, anchor);
               }}
             />
           );
@@ -821,6 +825,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
           onSearch={(keyword) => void loadValues(menu.field, keyword)}
           onApply={(checked) => applyMenu(menu.field, checked)}
           onClose={() => setMenu(undefined)}
+          searchPlaceholder={isAccountMenu(menu.field) ? "搜索科目编码或名称" : undefined}
+          splitCode={isAccountMenu(menu.field)}
           valueNote={
             isAccountMenu(menu.field)
               ? (value) => {

@@ -1,7 +1,7 @@
 {
   "name": "audit-toolbox-tauri",
   "private": true,
-  "version": "2.0.0-alpha.22",
+  "version": "2.0.0-alpha.23",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -21,6 +21,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.30.0",
+    "playwright-core": "^1.62.1",
     "radix-ui": "^1.6.7",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",

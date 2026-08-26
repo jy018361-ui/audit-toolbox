@@ -38,7 +38,8 @@ npx vitest run src/jeSignMarkUi.test.ts
 | --- | --- | --- |
 | 单页流程（无步骤条） | `JeSignMarkPage` | 前端构建 |
 | 批次条：新增/删除/改名，各批一套目标科目 | `jeSignMarkUi.addBatch` / `removeBatch` | 批次单测 |
-| 目标科目下拉多选（列头漏斗 + 常驻入口） | `ColumnFilterMenu` + `accountFilterColumn` | 科目列定位单测 |
+| 目标科目下拉多选（仅批次区常驻入口；预览表头的科目列漏斗与其重复，已移除） | `ColumnFilterMenu` + `JeSignMarkPage` 批次区按钮 | 页面单测 |
+| 科目面板把「编码-名称」拼接串拆两段展示（编码灰色等宽），值无编码时用引擎返回的编码补显；搜索同时匹配编码与名称 | `ColumnFilterMenu.splitCode` + `account_values` keyword | 页面单测 + `科目清单带出编码供前端做前缀匹配` |
 | 科目多列时按拼接值选，标题注明来源 | `accountFilterTitle` | 科目列定位单测 |
 | 跨批次重复提示「已在批次1」 | `batchesContaining` + `ColumnFilterMenu.valueNote` | 批次单测 |
 | 科目映射变更即清空已选并提示 | `clearAccountsOnMappingChange` / `accountMappingKey` | 科目字段变更单测 |

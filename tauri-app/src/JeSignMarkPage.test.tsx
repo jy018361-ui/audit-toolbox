@@ -151,4 +151,32 @@ describe("JeSignMarkPage", () => {
       screen.queryByRole("button", { name: "借贷符号一样" }),
     ).not.toBeInTheDocument();
   });
+
+  // 科目的选择入口只留批次区那一个：预览表头的科目列不挂漏斗，
+  // 其他列的数据筛选漏斗不受影响。科目面板把值拆成「编码 名称」两段展示。
+  it("keeps account picking off preview headers and shows code with name", async () => {
+    seedLoadedDraft();
+    const { engineCall } = await import("./api");
+    vi.mocked(engineCall).mockResolvedValue({
+      // 编码与名称列分开映射时，科目值是「编码-名称」拼接串（与真实账一致）。
+      values: ["6602050001-管理费用-办公费", "1122-应收账款"],
+      codes: ["6602050001", "1122"],
+      total: 2,
+    });
+    render(<JeSignMarkPage tool={tool} />);
+
+    expect(
+      screen.queryByRole("button", { name: "筛选 科目" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "筛选 金额" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("点击选择目标科目"));
+    await waitFor(() =>
+      expect(screen.getByText("6602050001")).toBeInTheDocument(),
+    );
+    // 编码段拆开后，名称段不再以编码开头；悬停提示仍是完整值。
+    expect(screen.getByText("管理费用-办公费")).toBeInTheDocument();
+    expect(screen.getByTitle("1122 应收账款")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("搜索科目编码或名称")).toBeInTheDocument();
+  });
 });

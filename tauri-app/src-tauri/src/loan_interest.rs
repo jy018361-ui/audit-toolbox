@@ -1068,36 +1068,10 @@ fn row_date(
     parse_date(&text(table, row, mapping, role))
 }
 /// 宽容日期解析：覆盖台账里常见的文本写法、日期时间串与 Excel 序列号。
+/// 日期解析，**走统一内核**。本模块原有的英文月份缩写与「先切时间段」两项能力
+/// 已经并进内核，汇兑损益的 ISO `T` 分隔写法也一并覆盖。
 fn parse_date(s: &str) -> Option<NaiveDate> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    // calamine 把真日期读成 "2023-01-10 00:00:00" 之类，取日期段。
-    let head = s.split_whitespace().next().unwrap_or(s);
-    for f in [
-        "%Y-%m-%d",
-        "%Y/%m/%d",
-        "%Y.%m.%d",
-        "%d/%m/%Y",
-        "%d-%b-%Y",
-        "%Y%m%d",
-    ] {
-        if let Ok(d) = NaiveDate::parse_from_str(head, f) {
-            return Some(d);
-        }
-    }
-    if let Some(d) = parse_cn_date(s) {
-        return Some(d);
-    }
-    // Excel 日期序列号（约 2009-2064 年）。
-    if let Ok(n) = head.parse::<i64>() {
-        if (40000..=60000).contains(&n) {
-            return NaiveDate::from_ymd_opt(1899, 12, 30)
-                .and_then(|b| b.checked_add_signed(chrono::Duration::days(n)));
-        }
-    }
-    None
+    ledger_mapping::parse_date(s)
 }
 /// 中文日期："2024年3月5日"、"25年1月10日"（两位年按 20xx）。
 fn parse_cn_date(s: &str) -> Option<NaiveDate> {

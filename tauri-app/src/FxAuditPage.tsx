@@ -32,7 +32,9 @@ type VoucherDetail = {accountCode?:string;accountNameOriginal?:string;accountNam
 
 const JE_LABELS: Record<string, string> = {
   id:"凭证识别字段",voucherType:"凭证类型",entity:"公司/核算主体",date:"记账日期",
-  accountCode:"科目编码",accountName:"科目名称",currency:"交易币种",
+  accountCode:"科目编码",accountName:"科目名称",
+  // 币种分两列，与科目余额表同口径：原币币种逐行可变，本位币币种整列同值。
+  currency:"原币币种",functionalCurrency:"本位币币种",
   summary:"摘要",auxiliary:"辅助核算",
   direction:"借贷方向（原币与本位币共用）",
   foreignAmount:"原币净额",foreignDebit:"原币借方",foreignCredit:"原币贷方",
@@ -40,8 +42,8 @@ const JE_LABELS: Record<string, string> = {
 };
 const TB_LABELS: Record<string, string> = {
   entity:"公司/核算主体",accountCode:"科目编码",accountName:"科目名称",
-  currency:"交易币种列",currencyText:"币种线索文本",
-  auxiliary:"辅助核算",functionalCurrency:"本位币",
+  currency:"原币币种列",currencyText:"币种线索文本",
+  auxiliary:"辅助核算",functionalCurrency:"本位币币种",
   openingDirection:"期初方向",closingDirection:"期末方向",
   openingFunctionalAmount:"期初本位币净额",openingFunctionalDebit:"期初本位币借方",
   openingFunctionalCredit:"期初本位币贷方",
@@ -66,7 +68,7 @@ const ROLE_GROUPS: Record<"je"|"tb", Array<{title:string; roles:string[]}>> = {
   je: [
     {title:"科目与主体　科目编码必填", roles:["entity","accountCode","accountName","summary","auxiliary","voucherType"]},
     {title:"凭证与日期　必填", roles:["id","date"]},
-    {title:"币种　必填", roles:["currency"]},
+    {title:"币种　原币币种必填，本位币币种可选", roles:["currency","functionalCurrency"]},
     {title:"本位币金额　必填，三种记法选一种", roles:["functionalAmount","functionalDebit","functionalCredit","direction"]},
     {title:"原币金额　必填，三种记法选一种", roles:["foreignAmount","foreignDebit","foreignCredit"]},
   ],
@@ -108,7 +110,7 @@ export function fxPreviewTokenFor(method:"fx.preview"|"fx.export",result:Record<
   return method==="fx.export"&&typeof token==="string"&&token.trim()?token:undefined;
 }
 export function fxMissingRequired(kind:"je"|"tb",mapping:Record<string,string|string[]>,_hasJe:boolean,fixedEntity:string):string[]{return [...new Set(fxMissingRaw(kind,mapping,_hasJe,fixedEntity))]}
-function fxMissingRaw(kind:"je"|"tb",mapping:Record<string,string|string[]>,_hasJe:boolean,fixedEntity:string):string[]{const has=(role:string)=>{const value=mapping[role];return Array.isArray(value)?value.some(item=>item.trim()):Boolean(value?.trim())};const scheme=(prefix:string)=>has(`${prefix}Amount`)||(has(`${prefix}Debit`)&&has(`${prefix}Credit`))||(has(`${prefix}Amount`)&&(has("direction")||has(`${prefix}Direction`)));const missing:string[]=missingGoldIdentity(kind,role=>role==="accountCode"||role==="accountName"?has(role)||has("account"):has(role));if(!has("entity")&&!fixedEntity.trim())missing.push("公司/核算主体（或固定主体）");if(kind==="je"){if(!has("currency"))missing.push("交易币种");if(!scheme("foreign"))missing.push("原币金额方案");if(!scheme("functional"))missing.push("本位币金额方案")}else{if(!has("currency")&&!has("currencyText"))missing.push("币种列或币种线索文本");if(!scheme("openingForeign")&&!scheme("openingFunctional"))missing.push("期初原币或本位币余额");if(!scheme("closingForeign")&&!scheme("closingFunctional"))missing.push("期末原币或本位币余额");
+function fxMissingRaw(kind:"je"|"tb",mapping:Record<string,string|string[]>,_hasJe:boolean,fixedEntity:string):string[]{const has=(role:string)=>{const value=mapping[role];return Array.isArray(value)?value.some(item=>item.trim()):Boolean(value?.trim())};const scheme=(prefix:string)=>has(`${prefix}Amount`)||(has(`${prefix}Debit`)&&has(`${prefix}Credit`))||(has(`${prefix}Amount`)&&(has("direction")||has(`${prefix}Direction`)));const missing:string[]=missingGoldIdentity(kind,role=>role==="accountCode"||role==="accountName"?has(role)||has("account"):has(role));if(!has("entity")&&!fixedEntity.trim())missing.push("公司/核算主体（或固定主体）");if(kind==="je"){if(!has("currency"))missing.push("原币币种");if(!scheme("foreign"))missing.push("原币金额方案");if(!scheme("functional"))missing.push("本位币金额方案")}else{if(!has("currency")&&!has("currencyText"))missing.push("币种列或币种线索文本");if(!scheme("openingForeign")&&!scheme("openingFunctional"))missing.push("期初原币或本位币余额");if(!scheme("closingForeign")&&!scheme("closingFunctional"))missing.push("期末原币或本位币余额");
 // 本年累计借/贷是 TB 六型的必填组（整组匹配缺一不可）；表里只有本期
 // 发生时本期借/贷作次选兜底，两组都不齐就提示。
 const ytdOk=has("ytdFunctionalDebit")&&has("ytdFunctionalCredit");const periodOk=has("periodFunctionalDebit")&&has("periodFunctionalCredit");if(!ytdOk&&!periodOk)missing.push("本年累计（或本期）借/贷方发生额")}return missing}
@@ -347,6 +349,43 @@ function FxPreview(props:{title:string;kind:"je"|"tb";inspection:Inspection;mapp
     onChange={()=>{/* toggle 模式下改动全部走 onToggle */}}
   />;
 }
+/** TB＋JE 余额滚动失配清单：**提示但不阻断**，逐条列出差在哪，用户自己判断。 */
+function RollforwardIssues({validation}:{validation?:Record<string,unknown>}){
+  const [open,setOpen]=useState(false);
+  const issues=(validation?.issues??[]) as Array<Record<string,unknown>>;
+  if(!issues.length)return null;
+  const money=(value:unknown)=>new Intl.NumberFormat("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2}).format(Number(value??0));
+  const unit=String(validation?.unit??"本位币");
+  return <section className="fx-rollforward-issues">
+    <div className="fx-rollforward-head">
+      <div>
+        <strong>TB ＋ JE 余额滚动有 {issues.length} 个账户对不上</strong>
+        <small>按「期初 ＋ JE 发生额 ＝ 期末」逐个账户核对（{unit}口径）。测算照常完成，
+          但按月推算余额依赖 JE 的完整性，这部分结果需要你自行判断可用性。</small>
+      </div>
+      <Button variant="secondary" size="sm" onClick={()=>setOpen(v=>!v)}>
+        {open?"收起明细":"查看明细"}
+      </Button>
+    </div>
+    {open&&<div className="fx-rollforward-table"><table>
+      <thead><tr>
+        <th>主体</th><th>科目</th><th>币种</th>
+        <th>期初</th><th>JE 发生额</th><th>推算期末</th><th>TB 期末</th><th>差异</th>
+      </tr></thead>
+      <tbody>{issues.map((item,index)=><tr key={index}>
+        <td>{String(item.entity??"")}</td>
+        <td title={String(item.account??"")}>{String(item.account??"")}</td>
+        <td>{String(item.currency??"")}</td>
+        <td>{item.type?"—":money(item.opening)}</td>
+        <td>{money(item.jeMovement)}</td>
+        <td>{item.type?"—":money(item.derivedClosing)}</td>
+        <td>{item.type?"—":money(item.tbClosing)}</td>
+        <td className="fx-rollforward-diff">{item.type?String(item.type):money(item.difference)}</td>
+      </tr>)}</tbody>
+    </table></div>}
+  </section>;
+}
+
 function FxResult({result,busy,classificationDrafts,onClassificationChange,onRecalculate}:{result:Record<string,unknown>;busy:boolean;classificationDrafts:Record<string,VoucherClassification>;onClassificationChange:(voucherIds:string[],classification:VoucherClassification)=>void;onRecalculate:()=>Promise<void>}){
   const summary=(result.summary??{}) as Record<string,unknown>;const outputs=(result.outputPaths??[]) as string[];
   const controls=(result.classificationControls??[]) as ClassificationControl[];
@@ -364,6 +403,7 @@ function FxResult({result,busy,classificationDrafts,onClassificationChange,onRec
   return <section className="fx-result" aria-labelledby="fx-result-title">
     <div className="fx-result-heading"><div><h3 id="fx-result-title">汇兑损益测算结果</h3><p>按计算顺序查看金额如何形成，并与TB完成比较。</p></div>{outputs.map(path=><Button key={path} variant="secondary" onClick={()=>void openOutput(path)}>打开Excel底稿</Button>)}</div>
     {Boolean(summary.needsZeroResultReview)&&<p className="fa-missing-hint">已读取外币凭证，但没有事件进入自动测算；相关金额已归入待复核项目，不会再被当作正常“0”。</p>}
+    <RollforwardIssues validation={result.balanceRollforwardValidation as Record<string,unknown>|undefined}/>
     {summary.unrealizedBalanceBasisComplete===false&&<p className="fa-missing-hint">未实现测算余额基础不完整：{String(summary.unrealizedMissingBalanceKeys??0)} 个账户币种余额键未取得可唯一对应的TB端点，已隔离且未按零期初测算。当前结果属于受限结果。</p>}
     <div className="fx-bridge-step"><div className="fx-step-label"><b>1</b><span>形成自动测算</span></div><div className="fx-bridge-equation">{metric("已实现汇兑损益",summary.realizedGainLoss)}<span className="fx-operator" aria-hidden="true">＋</span>{metric("未实现汇兑损益",summary.unrealizedAdjustment)}<span className="fx-operator" aria-hidden="true">＝</span>{metric("自动测算合计",summary.automaticMeasuredFxGainLoss,undefined,"total")}</div></div>
     <div className="fx-bridge-step"><div className="fx-step-label"><b>2</b><span>先比较已覆盖项目</span></div><div className="fx-bridge-equation">{metric("自动测算合计",summary.automaticMeasuredFxGainLoss)}<span className="fx-operator compare" aria-hidden="true">对比</span>{metric("已覆盖凭证账面金额",summary.coveredBookFxGainLoss,`已实现差异 ${amount(summary.realizedMeasurementDifference)}；未实现差异 ${amount(summary.unrealizedMeasurementDifference)}`)}<span className="fx-operator" aria-hidden="true">＝</span>{metric("已覆盖项目测算差异",summary.coveredMeasurementDifference,undefined,"total")}</div></div>

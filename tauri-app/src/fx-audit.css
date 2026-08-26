@@ -13,3 +13,57 @@
 .fx-currency-confirm{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:14px 0;padding:14px 16px;border:1px solid #e2a83b;border-radius:12px;background:#fff8e8}.fx-currency-confirm p{margin:4px 0 0;color:#596b6d;line-height:1.55}.fx-currency-confirm strong{color:#8a5700}
 
 .fx-alignment ul{margin:8px 0 0;padding-left:20px;display:grid;gap:6px;color:#8a5700;font-size:13px;line-height:1.55}.fx-alignment h2{margin:0;font-size:16px}
+
+/* TB＋JE 余额滚动失配清单：提示但不阻断，默认收起，展开看逐条明细。 */
+.fx-rollforward-issues {
+  border: 1px solid var(--warning-border, #e0b884);
+  background: var(--warning-bg, #fdf6ec);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.fx-rollforward-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.fx-rollforward-head strong { display: block; }
+.fx-rollforward-head small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted-foreground, #6b6257);
+  line-height: 1.6;
+}
+.fx-rollforward-table {
+  overflow-x: auto;
+  margin-top: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.fx-rollforward-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.fx-rollforward-table th,
+.fx-rollforward-table td {
+  padding: 6px 10px;
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border, #e6ded2);
+}
+.fx-rollforward-table th:nth-child(-n + 3),
+.fx-rollforward-table td:nth-child(-n + 3) { text-align: left; }
+.fx-rollforward-table td:nth-child(2) {
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fx-rollforward-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--warning-bg, #fdf6ec);
+}
+.fx-rollforward-diff { font-weight: 600; }

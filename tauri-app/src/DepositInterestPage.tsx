@@ -418,19 +418,25 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         {jePath && (() => {
           const layout = depositJeLayout(jeMapping);
           const options = depositSignOptions(layout);
+          // 布局提示不放在格子里：它比别的格子多一行，会把整格顶高、
+          // 与相邻格错位。改成表格下方的说明行，所有格子结构一致。
           return <label>
             序时账金额记法
             {options.length ? <select value={signOverride} onChange={(e) => setSignOverride(e.target.value as SignChoice)}>
               <option value="auto">自动识别</option>
               {options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select> : <input value={layout === "single" ? "单一金额列，必然已带正负号" : "请先映射金额字段"} readOnly />}
-            <small className="deposit-layout">当前布局：{JE_LAYOUT_LABEL[layout]}（由你映射的列决定）</small>
           </label>;
         })()}
         <label className="deposit-check"><input type="checkbox" checked={includeCashOnHand} onChange={(e) => setIncludeCashOnHand(e.target.checked)} />库存现金也计息</label>
-        <label>输出文件<input value={outputPath} readOnly placeholder="默认保存到源文件目录" /></label>
-        <Button variant="secondary" onClick={async () => { const path = await pickPath("save", "保存审计底稿", ["xlsx"], "存款利息收入测算.xlsx"); if (typeof path === "string") setOutputPath(path) }}>选择位置</Button>
+        <label>输出文件
+          <span className="deposit-output-row">
+            <input value={outputPath} readOnly placeholder="默认保存到源文件目录" />
+            <Button variant="secondary" onClick={async () => { const path = await pickPath("save", "保存审计底稿", ["xlsx"], "存款利息收入测算.xlsx"); if (typeof path === "string") setOutputPath(path) }}>选择位置</Button>
+          </span>
+        </label>
       </div>
+      {jePath && <p className="deposit-layout">当前序时账布局：{JE_LAYOUT_LABEL[depositJeLayout(jeMapping)]}（由你映射的列决定）</p>}
       <p className="fx-rate-note">
         只有<b>活期</b>自动套用挂牌默认利率——对公活期没有议价空间。协定、通知、定期、大额存单的利率是逐笔合同约定的，
         默认留空，填入实际利率后才计入测算合计。央行基准只作合理性上限参照，不参与测算。

@@ -335,10 +335,25 @@ async fn engine_call(
                 )
             })?
     } else if method.starts_with("fuzzy.") {
-        // fuzzy.get_results / fuzzy.save_confirm 需要本机结果库。照 audipick
-        // 分支同步调 Storage 方法：call_with_storage 按库文件自开连接，
-        // 不会长期占住 Storage 的全局连接锁（父进程还要 UPSERT task_history）。
-        fuzzy_match::call_with_storage(&storage, &method, params)
+        // 只有存取结果库的两个方法需要 Storage（照 audipick 分支同步调：
+        // call_with_storage 按库文件自开连接，不占全局连接锁，父进程还要
+        // UPSERT task_history）。其余 fuzzy.*（fuzzy.inspect 等无状态读文件）
+        // 与 deposit/loan 同款 spawn_blocking 直调 call——不能落进
+        // call_with_storage，那里对未知方法一律报 METHOD_NOT_FOUND。
+        if matches!(method.as_str(), "fuzzy.get_results" | "fuzzy.save_confirm") {
+            fuzzy_match::call_with_storage(&storage, &method, params)
+        } else {
+            tauri::async_runtime::spawn_blocking(move || fuzzy_match::call(&method, params))
+                .await
+                .map_err(|e| {
+                    AppError::new(
+                        "RUST_TASK_FAILED",
+                        "两列匹配任务异常结束。",
+                        true,
+                        Some(e.to_string()),
+                    )
+                })?
+        }
     } else if method.starts_with("ts.")
         || method.starts_with("kanzhang.")
         || method.starts_with("cache.")
@@ -856,6 +871,13 @@ pub fn engine_call_for_test(
         }
     }
     // 看账的只读识别类：不写文件、不动任务，调查测试用它量缓存效果。
+    // 余额滚动校验是只读的，调查测试用它拿真实样例定位失配。
+    if method == "fx.sign_probe" {
+        return fx::sign_probe_for_test(&params);
+    }
+    if method == "fx.rollforward_check" {
+        return fx::rollforward_check_for_test(&params);
+    }
     if matches!(method, "kanzhang.inspect" | "kanzhang.accounts" | "kanzhang.map") {
         return tabular::call(method, params);
     }

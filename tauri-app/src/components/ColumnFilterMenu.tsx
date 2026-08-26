@@ -10,6 +10,8 @@ export const VALUE_LIMIT = 20000;
 /** 一列取值的读取结果（引擎按关键词返回，超过上限会截断）。 */
 export type ColumnFilterValues = {
   values: string[];
+  /** 科目清单专用：与 values 同序一一对应的科目编码，用于「编码 名称」展示。 */
+  codes?: string[];
   total: number;
   truncated: boolean;
   keyword: string;
@@ -32,6 +34,8 @@ export function ColumnFilterMenu({
   onApply,
   onClose,
   valueNote,
+  searchPlaceholder,
+  splitCode,
 }: {
   field: string;
   anchor: DOMRect;
@@ -43,6 +47,10 @@ export function ColumnFilterMenu({
   onClose: () => void;
   /** 给单个取值挂一句灰字说明，例如"已在批次1"。返回空则不显示。 */
   valueNote?: (value: string) => string | undefined;
+  /** 搜索框提示语，默认「搜索取值，回车重新读取」；科目面板传"可搜编码或名称"。 */
+  searchPlaceholder?: string;
+  /** 科目面板专用：把「编码-名称」拼接串拆成两段展示；其余列不拆。 */
+  splitCode?: boolean;
 }) {
   const [keyword, setKeyword] = useState(data?.keyword ?? "");
   const [checked, setChecked] = useState<Set<string>>(() => new Set(selected));
@@ -113,7 +121,7 @@ export function ColumnFilterMenu({
       <div className="ts-filter-menu-search">
         <input
           value={keyword}
-          placeholder="搜索取值，回车重新读取"
+          placeholder={searchPlaceholder ?? "搜索取值，回车重新读取"}
           onChange={(event) => setKeyword(event.target.value)}
           onKeyDown={(event) => {
             if (event.key !== "Enter") return;
@@ -158,22 +166,36 @@ export function ColumnFilterMenu({
         ) : !values.length ? (
           <div className="ts-filter-empty">没有匹配的取值</div>
         ) : (
-          values.map((value) => (
-            <label className="ts-filter-value" key={value} title={value}>
-              <input
-                type="checkbox"
-                checked={checked.has(value)}
-                onChange={() => toggle(value)}
-              />
-              <span className={value === BLANK_TOKEN ? "ts-filter-blank" : undefined}>
-                {value}
-              </span>
-              {(() => {
-                const note = valueNote?.(value);
-                return note ? <span className="jm-value-note">{note}</span> : null;
-              })()}
-            </label>
-          ))
+          values.map((value, index) => {
+            // 科目面板把值拆成「编码 名称」两段：拼接串按首段编码拆开；值里没有
+            // 编码（纯名称）而引擎另给了编码时补在前面。编码只作展示，勾选提交的
+            // 仍是原值，后端按原值匹配，口径不变。
+            const split = splitCode ? splitAccountCode(value) : undefined;
+            const fallback = split ? "" : (data?.codes?.[index]?.trim() ?? "");
+            const code = split?.code || (fallback && fallback !== value ? fallback : "");
+            const name = split ? split.name : value;
+            return (
+              <label
+                className="ts-filter-value"
+                key={value}
+                title={code ? `${code} ${name}` : value}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked.has(value)}
+                  onChange={() => toggle(value)}
+                />
+                {code && <span className="ts-filter-code">{code}</span>}
+                <span className={value === BLANK_TOKEN ? "ts-filter-blank" : undefined}>
+                  {name}
+                </span>
+                {(() => {
+                  const note = valueNote?.(value);
+                  return note ? <span className="jm-value-note">{note}</span> : null;
+                })()}
+              </label>
+            );
+          })
         )}
       </div>
       {data?.truncated && (
@@ -210,6 +232,20 @@ export function ColumnFilterMenu({
     </div>,
     document.body,
   );
+}
+
+/**
+ * 「编码-名称」拼接串（如 `1403.01-原材料 - 原材料`）拆成两段供展示。
+ * 首段只认数字/字母/点组成的编码样式，名称自带的连字符（`原材料-原材料`）
+ * 不会被误拆。拆不开返回 undefined。
+ */
+function splitAccountCode(value: string): { code: string; name: string } | undefined {
+  const dash = value.indexOf("-");
+  if (dash <= 0 || dash === value.length - 1) return undefined;
+  const code = value.slice(0, dash).trim();
+  const name = value.slice(dash + 1).trim();
+  if (!/^[0-9A-Za-z][0-9A-Za-z._]*$/.test(code) || !name) return undefined;
+  return { code, name };
 }
 
 /** 预览表头里的漏斗按钮：已筛选的显示勾中个数，再次点击收起面板。 */

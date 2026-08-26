@@ -271,8 +271,8 @@ export default function App() {
           {[
             // __*_GROUP__ 占位（见 TOOL_SUBGROUPS）：主工具在原位置展开为可折叠子分组，
             // 看账与正负数凭证标记两个入口同组呈现。
-            { label: "审计工具", ids: ["fx_audit", "deposit_interest", "loan_interest", "__FA_GROUP__", "__KANZHANG_GROUP__", "audipick", "audit_roll_forward", "fuzzy_match"] },
-            { label: "效率工具", ids: ["Excel_Merger", "file_list_directory", "pdf_to_excel"] },
+            { label: "审计工具", ids: ["fx_audit", "deposit_interest", "loan_interest", "__FA_GROUP__", "__KANZHANG_GROUP__", "audipick", "audit_roll_forward"] },
+            { label: "效率工具", ids: ["Excel_Merger", "file_list_directory", "pdf_to_excel", "fuzzy_match"] },
             { label: "运营工具", ids: ["ts_manager", "confirmation_progress", "wp_service_generator"] },
           ].map((group) => {
             const entries = group.ids.map((id) =>

@@ -449,3 +449,54 @@ fn survey_deposit() {
         }
     }
 }
+
+/// 用真实的 4800 TB＋JE 跑一遍余额滚动校验，把失配明细打出来。
+#[test]
+#[ignore = "依赖本机样例目录，手工调查用"]
+fn survey_rollforward() {
+    for dir in sample_dirs() {
+        let tb = dir.join("TB-4800.xlsx");
+        let je = dir.join("4800_JE_2025.01-12.xlsx");
+        if !tb.is_file() || !je.is_file() {
+            continue;
+        }
+        let insp = |path: &PathBuf, method: &str| {
+            audit_toolbox_lib::engine_call_for_test(
+                method,
+                serde_json::json!({"source": {"inputPath": path.to_string_lossy()}}),
+            )
+            .expect("inspect 应当成功")
+        };
+        let tb_i = insp(&tb, "fx.inspect_tb");
+        let je_i = insp(&je, "fx.inspect_je");
+        let params = serde_json::json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+            "tbSource": {"inputPath": tb.to_string_lossy(), "sheet": tb_i["sheet"], "headerRow": tb_i["headerRow"], "headerDepth": 1},
+            "jeSource": {"inputPath": je.to_string_lossy(), "sheet": je_i["sheet"], "headerRow": je_i["headerRow"], "headerDepth": 1},
+            "tbMapping": tb_i["suggestedMapping"],
+            "jeMapping": je_i["suggestedMapping"],
+        });
+        println!("
+══════ 4800 TB+JE 余额滚动校验");
+        println!("  JE 映射 direction={} functionalAmount={}",
+            je_i["suggestedMapping"]["direction"], je_i["suggestedMapping"]["functionalAmount"]);
+        if let Ok(sc) = audit_toolbox_lib::engine_call_for_test(
+            "fx.sign_probe",
+            serde_json::json!({
+                "source": {"inputPath": je.to_string_lossy(), "sheet": je_i["sheet"], "headerRow": je_i["headerRow"], "headerDepth": 1},
+                "mapping": je_i["suggestedMapping"],
+            }),
+        ) {
+            println!("  JE 符号口径判定：{sc}");
+        }
+        match audit_toolbox_lib::engine_call_for_test("fx.rollforward_check", params) {
+            Ok(v) => println!("  通过：{}", serde_json::to_string(&v).unwrap_or_default()),
+            Err(e) => {
+                let shown: String = format!("{e:?}").chars().take(1600).collect();
+                println!("  {shown}");
+            }
+        }
+        return;
+    }
+    println!("（没找到 4800 样例）");
+}

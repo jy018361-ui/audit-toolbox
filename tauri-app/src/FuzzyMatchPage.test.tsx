@@ -16,6 +16,7 @@ vi.mock("./api", () => ({
     hooks.listeners.push(cb);
     return () => undefined;
   }),
+  listenPositionedFileDrops: vi.fn(async () => () => undefined),
   openOutput: vi.fn(),
   pickPath: vi.fn(async () => null),
 }));

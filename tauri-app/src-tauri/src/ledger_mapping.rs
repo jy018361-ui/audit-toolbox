@@ -9,6 +9,7 @@
 //!
 //! 设计依据与实测样例见 `LEDGER_MAPPING_UNIFICATION.md`。
 
+use chrono::{NaiveDate, NaiveDateTime};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 // ────────────────────────────── 角色词汇表 ──────────────────────────────
@@ -102,10 +103,10 @@ static JE_ROLES: &[Role] = &[
         // 「文本」是 SAP（SGTXT 行项目文本）与 AX/D365 对摘要的叫法；
         // 「抬头」冲突词挡住「凭证抬头文本」——那是单据号不是行摘要。
         r("summary", "摘要", &["摘要", "摘要说明", "说明", "說明", "备注", "備註", "文本", "entry item", "line description", "sgtxt"], &["科目", "account", "凭证", "憑證", "抬头", "抬頭"]),
-        r("currency", "交易币种", &["币种", "幣種", "币别", "幣別", "货币", "貨幣", "货币代码", "貨幣代碼", "原币币种", "交易币种", "凭证货币", "currency", "currencycode", "entercurrency", "documentcurrencykey", "waers"], AMT),
+        r("currency", "原币币种", &["币种", "幣種", "币别", "幣別", "货币", "貨幣", "货币代码", "貨幣代碼", "原币币种", "交易币种", "凭证货币", "currency", "currencycode", "entercurrency", "documentcurrencykey", "waers"], AMT),
         // SAP 的 `Company Code Currency Key` 记的是公司本位币，不是这笔分录的交易币种。
         // 缺了这个角色，它就会去抢 currency，把真正的 `Document Currency Key` 挤掉。
-        r("functionalCurrency", "本位币", &["本位币", "本位幣", "公司代码货币", "记账本位币", "companycodecurrency", "ledgercurrency", "functionalcurrency", "localcurrency"], AMT),
+        r("functionalCurrency", "本位币币种", &["本位币", "本位幣", "公司代码货币", "记账本位币", "companycodecurrency", "ledgercurrency", "functionalcurrency", "localcurrency"], AMT),
         r("direction", "借贷方向", &["方向", "借贷方向", "借貸方向", "借贷", "借貸", "drcr", "dccr", "debitcredit"], &["金额", "amount", "usd", "cny", "hkd", "eur"]),
         r("functionalAmount", "本位币净额", &["本位币金额", "本位幣金額", "本币金额", "本位币", "本位幣", "借正贷负", "借正貸負", "金额", "金額", "companycodecurrencyvalue", "functionalamount"], &["原币", "原幣", "外币", "外幣", "借方", "贷方", "貸方", "debit", "credit"]),
         r("functionalDebit", "本位币借方", &["本位币借方", "本位幣借方", "借方金额", "借方金額", "借方发生额", "借方", "debits", "debit"], &["原币", "原幣", "外币", "外幣", "贷", "貸", "credit"]),
@@ -132,7 +133,7 @@ static TB_ROLES: &[Role] = &[
         rm("accountName", "科目名称", &["科目名称", "科目名稱", "科目名称一级", "科目名称二级", "科目名称三级", "科目全称", "科目描述", "科目文本", "账户名称", "帳戶名稱", "accountname", "accountdesc", "accountdescription", "gldescription", "slaccountdesc"], NOT_NAME),
         r("currency", "原币币种", &["币种", "幣種", "币别", "幣別", "货币", "貨幣", "原币币种", "交易币种", "currency", "ccy", "currencycode"], AMT),
         r("currencyText", "币种线索文本", &["文本", "科目文本", "账户文本", "帳戶文本", "说明", "說明", "备注", "備註", "描述"], &["金额", "余额", "amount", "balance"]),
-        r("functionalCurrency", "本位币", &["本位币", "本位幣", "功能货币", "记账本位币", "functionalcurrency", "ledgercurrency"], AMT),
+        r("functionalCurrency", "本位币币种", &["本位币", "本位幣", "功能货币", "记账本位币", "functionalcurrency", "ledgercurrency"], AMT),
         r("openingDirection", "期初方向", &["期初方向", "年初方向", "期初余额方向", "openingdrcr"], &["期末", "本期", "本年"]),
         r("closingDirection", "期末方向", &["期末方向", "年末方向", "期末余额方向", "方向", "closingdrcr", "drcr"], &["期初", "年初"]),
         r("openingFunctionalAmount", "期初本位币余额", &["期初本位币余额", "期初余额", "期初餘額", "期初金额", "期初金額", "年初余额", "年初金额", "beginbalance", "beginningbalance", "openingbalance", "opening"], &["借", "贷", "貸", "原币", "原幣", "外币", "外幣", "期末", "方向", "debit", "credit"]),
@@ -578,12 +579,14 @@ pub(crate) fn signed_amount(v: &AmountInputs, convention: SignConvention) -> f64
     }
     let amount = v.amount.unwrap_or(0.0);
     match (&v.direction, convention) {
+        // 贷方行**乘 −1，保留原符号**，不能写成 `-abs()`。
+        //
+        // 红字冲销的贷方行本身就记负数（贷 −50 表示冲掉之前那笔贷 50）：
+        // 乘 −1 得 +50，与原来那笔 −50 相加归零，冲销凭证才平得掉；
+        // 写成 `-abs()` 会得到 −50，和被冲的那笔同号，两笔永远抵不掉。
+        // 这是看账小工具当年踩过的坑，统一时以它的写法为准。
         (Some(d), SignConvention::Unsigned) if !d.trim().is_empty() => {
-            if is_credit_direction(d) {
-                -amount.abs()
-            } else {
-                amount.abs()
-            }
+            if is_credit_direction(d) { -amount } else { amount }
         }
         _ => amount,
     }
@@ -660,6 +663,91 @@ pub(crate) fn role_rejects_header(kind: &str, role: &str, header: &str) -> bool 
     role.conflicts
         .iter()
         .any(|c| n.contains(&normalize_header(c)))
+}
+
+// ────────────────────────────── 取值解析 ──────────────────────────────
+//
+// 金额与日期的写法各家系统不同，解析能力必须只有一份，否则「这个格子读不读得出来」
+// 会随工具而变。**错误处理策略仍归各工具自己**：汇兑损益读不出就报错中断，
+// 看账读不出按 0 处理继续——那是业务取舍，不是解析能力的差别。
+
+/// 占位符：这些写法表示「此处无值」，不是解析失败。
+fn is_placeholder(s: &str) -> bool {
+    matches!(s.trim(), "-" | "—" | "–" | "N/A" | "n/a" | "NA" | "无")
+}
+
+/// 把单元格文本读成金额。`None` 表示空值或占位符，`Err` 表示确实读不出来。
+///
+/// 认得实务里的各种写法：千分位（含全角逗号与不间断空格）、括号负数 `(500)`、
+/// 尾部负号 `800-`、`CR`／`DR` 后缀、中文「借」「贷」后缀。
+///
+/// 此前看账那份只去引号和千分位、失败一律返回 0——`(500)`、`1,234CR` 全都
+/// 静默变成 0，金额无声无息地丢掉。能力沉到这里之后三个工具共用同一套。
+pub(crate) fn parse_amount(raw: &str) -> Result<Option<f64>, String> {
+    let mut s = raw.trim().trim_matches('"').replace([',', '，', ' ', '\u{a0}'], "");
+    if s.is_empty() || is_placeholder(&s) {
+        return Ok(None);
+    }
+    let mut sign = 1.0;
+    if s.starts_with('(') && s.ends_with(')') {
+        sign = -1.0;
+        s = s[1..s.len() - 1].to_owned();
+    }
+    if s.ends_with('-') {
+        sign *= -1.0;
+        s.pop();
+    }
+    let upper = s.to_ascii_uppercase();
+    if upper.ends_with("CR") {
+        sign *= -1.0;
+        s.truncate(s.len() - 2);
+    } else if upper.ends_with("DR") {
+        s.truncate(s.len() - 2);
+    }
+    if s.ends_with('贷') {
+        sign *= -1.0;
+        s.pop();
+    } else if s.ends_with('借') {
+        s.pop();
+    }
+    if s.trim().is_empty() {
+        return Ok(None);
+    }
+    s.trim()
+        .parse::<f64>()
+        .map(|v| Some(sign * v))
+        .map_err(|_| format!("无法解析数值：{raw}"))
+}
+
+/// 把单元格文本读成日期。
+///
+/// 合并了汇兑损益与借款利息两份实现的覆盖面：**先按空格切出日期段**
+/// （calamine 会把真日期读成 `2023-01-10 00:00:00`），再逐个格式试；
+/// 格式表含英文月份缩写 `10-Jan-2023` 与 ISO 的 `T` 分隔写法。
+pub(crate) fn parse_date(raw: &str) -> Option<NaiveDate> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    const DATE_FORMATS: &[&str] = &[
+        "%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d", "%d/%m/%Y", "%d-%m-%Y", "%d-%b-%Y", "%d %b %Y",
+    ];
+    const DATETIME_FORMATS: &[&str] = &["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y/%m/%d %H:%M:%S"];
+    for format in DATETIME_FORMATS {
+        if let Ok(value) = NaiveDateTime::parse_from_str(text, format) {
+            return Some(value.date());
+        }
+    }
+    // 带时间的写法先切掉时间段，剩下的按日期格式试。
+    let head = text.split_whitespace().next().unwrap_or(text);
+    for candidate in [text, head] {
+        for format in DATE_FORMATS {
+            if let Ok(date) = NaiveDate::parse_from_str(candidate, format) {
+                return Some(date);
+            }
+        }
+    }
+    None
 }
 
 /// 抽查多少行来比较列的量级。扫到 200 行足以让本年累计与本期发生分出高下，
@@ -1569,6 +1657,178 @@ pub(crate) fn tb_sign_evidence(rows: &[BalanceRow]) -> SignEvidence {
     evidence
 }
 
+/// 在表头里找某个列名的位置：先精确匹配，再按「只留字母数字、转小写」宽松匹配。
+///
+/// 宽松匹配是必需的——映射里存的列名可能带空格、括号或大小写差异，
+/// 与表头原文对不上。此前这个函数只存在于看账模块，别的工具用不到它，
+/// 内核也因此没法按列名取数。
+pub(crate) fn header_index(headers: &[String], name: &str) -> Option<usize> {
+    headers.iter().position(|v| v == name).or_else(|| {
+        let n = normalize_name(name);
+        headers.iter().position(|v| normalize_name(v) == n)
+    })
+}
+
+/// 列名的宽松归一：只保留字母数字并转小写。
+///
+/// 与 [`normalize_header`] 的区别：那个是**别名匹配**用的，只去分隔符、
+/// 保留中文与符号；这个是**找列**用的，把所有非字母数字统统丢掉。
+pub(crate) fn normalize_name(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// 从一整张表算出它的借贷符号口径。**五个工具共用这一个入口。**
+///
+/// 此前内核只提供投票函数这类**原料**（[`je_sign_evidence_debit_credit`] 等），
+/// 「怎么从一张表算出口径」的**流程**却由各工具各写一份：看账一份、存款调看账的、
+/// 借款自己拼原料、汇兑损益又是一份。改一处不会让别处跟着变，正是要消除的分裂。
+///
+/// 各工具的映射结构互不相同（有的是强类型结构体，有的是 JSON 字典），所以这里
+/// 不接受映射本身——调用方只需回答**「某个角色对应哪一列」**，取列、分组、投票
+/// 全在内核完成。
+///
+/// `column_of` 传入标准角色名，返回列名；多列角色（凭证识别字段）返回全部列。
+pub(crate) fn detect_sign_convention(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> SignEvidence {
+    detect_convention(false, headers, rows, column_of)
+}
+
+/// 科目余额表侧的入口：没有凭证可配平，改用勾稽等式投票。
+pub(crate) fn detect_tb_sign_convention(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> SignEvidence {
+    detect_convention(true, headers, rows, column_of)
+}
+
+fn detect_convention(
+    is_tb: bool,
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> SignEvidence {
+    let index_of = |role: &str| -> Option<usize> {
+        column_of(role)
+            .into_iter()
+            .find_map(|name| header_index(headers, &name))
+    };
+    let numbers = |index: usize| -> Vec<f64> {
+        rows.iter()
+            .map(|row| {
+                parse_amount(row.get(index).map(String::as_str).unwrap_or(""))
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0.0)
+            })
+            .collect()
+    };
+
+    if is_tb {
+        // 科目余额表没有凭证可配平，改用勾稽等式：期初 ＋ 借 − 贷 ＝ 期末。
+        let opening = index_of("openingFunctionalAmount");
+        let closing = index_of("closingFunctionalAmount");
+        let debit = index_of("ytdFunctionalDebit");
+        let credit = index_of("ytdFunctionalCredit");
+        let (Some(opening), Some(closing), Some(debit), Some(credit)) =
+            (opening, closing, debit, credit)
+        else {
+            let mut evidence = SignEvidence::blank("tb");
+            evidence.convention = None;
+            evidence.note = Some("余额或发生额未映射齐全，无法用勾稽等式判定符号口径。".into());
+            return evidence;
+        };
+        let (opening, closing) = (numbers(opening), numbers(closing));
+        let (debit, credit) = (numbers(debit), numbers(credit));
+        let balances: Vec<BalanceRow> = (0..rows.len())
+            .map(|i| BalanceRow {
+                opening: opening[i],
+                debit: debit[i],
+                credit: credit[i],
+                closing: closing[i],
+            })
+            .collect();
+        return tb_sign_evidence(&balances);
+    }
+
+    // 序时账：先按凭证分组，整张凭证借贷配平才是铁证。
+    let vouchers = group_vouchers_by_roles(headers, rows, column_of);
+    let debit = index_of("functionalDebit");
+    let credit = index_of("functionalCredit");
+    let amount = index_of("functionalAmount");
+    let direction = index_of("direction");
+
+    if let (Some(dr), Some(cr)) = (debit, credit) {
+        return je_sign_evidence_debit_credit(&numbers(dr), &numbers(cr), &vouchers);
+    }
+    if let (Some(amount), Some(direction)) = (amount, direction) {
+        // 方向为空的行既不算借也不算贷，不能拿它去凑配平。
+        let raw: Vec<&str> = rows
+            .iter()
+            .map(|row| row.get(direction).map(String::as_str).unwrap_or("").trim())
+            .collect();
+        let is_credit: Vec<bool> = raw.iter().map(|v| is_credit_direction(v)).collect();
+        let has_direction: Vec<bool> = raw.iter().map(|v| !v.is_empty()).collect();
+        return je_sign_evidence_amount_direction(
+            &numbers(amount),
+            &is_credit,
+            &has_direction,
+            &vouchers,
+        );
+    }
+    if amount.is_some() {
+        // 只有一列净额时借正贷负是它成立的前提，没有可投票的证据。
+        return je_sign_evidence_single(vouchers.len());
+    }
+    let mut evidence = je_sign_evidence_single(0);
+    evidence.scheme = "none";
+    evidence.convention = None;
+    evidence.note = Some("金额字段未映射，无法判定符号口径。".into());
+    evidence
+}
+
+/// 按主体＋日期＋凭证识别字段把行分组成凭证。
+///
+/// 凭证键的口径必须和取数端一致，否则配平投票会因为分组不同而失真。
+fn group_vouchers_by_roles(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<Vec<usize>> {
+    let mut indexes: Vec<usize> = Vec::new();
+    for role in ["entity", "date", "id"] {
+        for name in column_of(role) {
+            if let Some(index) = header_index(headers, &name) {
+                if !indexes.contains(&index) {
+                    indexes.push(index);
+                }
+            }
+        }
+    }
+    if indexes.is_empty() {
+        // 没有凭证键就没法分组——每行自成一"张凭证"，配平投票拿不到证据，
+        // 后续会退到列级兜底，不会硬猜。
+        return (0..rows.len()).map(|i| vec![i]).collect();
+    }
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (position, row) in rows.iter().enumerate() {
+        let key = indexes
+            .iter()
+            .map(|i| row.get(*i).map(String::as_str).unwrap_or("").trim())
+            .collect::<Vec<_>>()
+            .join("\u{1f}");
+        groups.entry(key).or_default().push(position);
+    }
+    groups.into_values().collect()
+}
+
 /// 判定是否可信：两种口径都大面积不成立时，说明表本身勾稽不上，
 /// 应报错让用户查，而不是硬选一个假设。
 pub(crate) const SIGN_CONFIDENCE_FLOOR: f64 = 0.95;
@@ -2044,7 +2304,7 @@ mod tests {
         let mapped: HashSet<&str> = ["accountCode"].into_iter().collect();
         let missing = missing_required_labels(Tool::FxAudit, "je", &mapped);
         assert!(missing.contains(&"记账日期"), "{missing:?}");
-        assert!(missing.contains(&"交易币种"), "{missing:?}");
+        assert!(missing.contains(&"原币币种"), "{missing:?}");
         assert!(!missing.contains(&"科目编码"));
         // 金标身份槽也在并集里：科目名称、摘要、凭证识别字段都要补。
         assert!(missing.contains(&"科目名称"), "{missing:?}");
@@ -2225,6 +2485,36 @@ mod tests {
     }
 
     #[test]
+    fn 红字冲销的贷方行乘负一而不是取负绝对值() {
+        // 贷方记 −50，表示冲掉之前那笔贷方 50。两笔相加必须归零，
+        // 否则冲销凭证在净额上永远平不掉——看账当年踩过这个坑。
+        let reversal = AmountInputs {
+            amount: Some(-50.0),
+            direction: Some("贷".into()),
+            ..Default::default()
+        };
+        let original = AmountInputs {
+            amount: Some(50.0),
+            direction: Some("贷".into()),
+            ..Default::default()
+        };
+        let a = signed_amount(&original, SignConvention::Unsigned);
+        let b = signed_amount(&reversal, SignConvention::Unsigned);
+        assert_eq!(a, -50.0);
+        assert_eq!(b, 50.0, "红字冲销的贷方行应翻正，取负绝对值会得到 -50");
+        assert_eq!(a + b, 0.0, "冲销凭证必须净额归零");
+        // 借方行照常取原值，红字借方同理保号。
+        let debit = AmountInputs {
+            amount: Some(-30.0),
+            direction: Some("借".into()),
+            ..Default::default()
+        };
+        assert_eq!(signed_amount(&debit, SignConvention::Unsigned), -30.0);
+        // 已带符号的账不看方向列，直接取原值。
+        assert_eq!(signed_amount(&reversal, SignConvention::Signed), -50.0);
+    }
+
+    #[test]
     fn 净额加方向列折算() {
         let v = AmountInputs {
             amount: Some(500.0),
@@ -2374,6 +2664,52 @@ mod tests {
         // 维持别名判定：只有一列拿到本年累计，另一列留空等用户处理。
         assert_eq!(m.values().filter(|r| **r == "ytdFunctionalDebit").count(), 1);
         assert_eq!(m.values().filter(|r| **r == "periodFunctionalDebit").count(), 0);
+    }
+
+    #[test]
+    fn 金额解析认得实务里的各种写法() {
+        let ok = |raw: &str| parse_amount(raw).expect("可解析").expect("有值");
+        // 千分位：半角、全角、不间断空格。
+        assert_eq!(ok("1,234.56"), 1234.56);
+        assert_eq!(ok("1，234.56"), 1234.56);
+        assert_eq!(ok("1\u{a0}234"), 1234.0);
+        // 括号负数、尾部负号。
+        assert_eq!(ok("(500)"), -500.0);
+        assert_eq!(ok("800-"), -800.0);
+        // 借贷后缀：CR 转负、DR 保持正，中文同理。
+        assert_eq!(ok("1234CR"), -1234.0);
+        assert_eq!(ok("1234DR"), 1234.0);
+        assert_eq!(ok("1234贷"), -1234.0);
+        assert_eq!(ok("1234借"), 1234.0);
+        // 带引号的 CSV 单元格。
+        assert_eq!(ok("\"1,234\""), 1234.0);
+        // 空值与占位符不是解析失败。
+        for blank in ["", "  ", "-", "—", "N/A", "无"] {
+            assert_eq!(parse_amount(blank).expect("占位符不算失败"), None, "{blank}");
+        }
+        // 真读不出来才报错，交给调用方决定是中断还是按 0 继续。
+        assert!(parse_amount("待补").is_err());
+    }
+
+    #[test]
+    fn 日期解析合并了两个工具的覆盖面() {
+        let d = |raw: &str| parse_date(raw).unwrap_or_else(|| panic!("{raw} 应能解析"));
+        let expect = NaiveDate::from_ymd_opt(2023, 1, 10).expect("合法日期");
+        // 常见分隔写法。
+        for raw in ["2023-01-10", "2023/01/10", "2023.01.10", "20230110"] {
+            assert_eq!(d(raw), expect, "{raw}");
+        }
+        // calamine 把真日期读成带时间的文本，要先切掉时间段。
+        for raw in ["2023-01-10 00:00:00", "2023/01/10 08:30:00", "2023-01-10T00:00:00"] {
+            assert_eq!(d(raw), expect, "{raw}");
+        }
+        // 英文月份缩写：借款台账里的常见写法。
+        assert_eq!(d("10-Jan-2023"), expect);
+        assert_eq!(d("10 Jan 2023"), expect);
+        // 日在前的欧洲写法。
+        assert_eq!(d("10/01/2023"), expect);
+        assert!(parse_date("").is_none());
+        assert!(parse_date("待定").is_none());
     }
 
     #[test]

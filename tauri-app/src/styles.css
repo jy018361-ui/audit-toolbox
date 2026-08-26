@@ -386,8 +386,8 @@ summary:focus-visible {
 .form-card,
 .result-card,
 .list-card {
+  /* 卡片外壳不描边：浅灰细线在灰底上只显脏，层次交给投影。 */
   background: var(--surface);
-  border: 1px solid var(--border);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-card);
 }
@@ -735,7 +735,6 @@ summary:focus-visible {
 }
 .history-card {
   margin-top: var(--sp-5);
-  border-color: var(--border);
   background: var(--surface);
   box-shadow: var(--shadow-card);
 }
@@ -918,9 +917,8 @@ summary:focus-visible {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  /* 与配置卡片统一的卡片外壳：白底 + 圆角 + 描边 + 投影 + 内边距 */
+  /* 与配置卡片统一的卡片外壳：白底 + 圆角 + 投影 + 内边距（不描边） */
   background: var(--surface);
-  border: 1px solid var(--border);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-card);
   padding: var(--sp-5);

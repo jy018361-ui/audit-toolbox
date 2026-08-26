@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  fxAccountCurrencyDetail,
+  fxAccountCurrencyOverrides,
   fxAllowedModes,
   fxApplyJobResult,
   fxAttachRole,
@@ -12,6 +14,10 @@ import {
   fxReportStart,
   fxResolveAccountRoles,
   fxRunMappingReviews,
+  granularityLabel,
+  splitClassificationGroups,
+  summarizeQuality,
+  validationDetail,
   uncoveredDetail,
 } from "./FxAuditPage";
 describe("fx audit mode selection",()=>{
@@ -60,6 +66,16 @@ describe("fx audit upload and mapping parity",()=>{
       "6703 信用减值损失-应收账款":"other_pnl",
       "2602 租赁负债":"non_monetary",
     });
+  });
+  it("replaces a stale automatic FX role with the latest backend cost-account role",()=>{
+    const account="6401011101 营业成本-芯片-发票校验与收货差异";
+    expect(fxResolveAccountRoles(
+      [account],
+      {[account]:"other_pnl"},
+      {},
+      {[account]:"fx_gain_loss"},
+      {},
+    )).toEqual({[account]:"other_pnl"});
   });
 });
 
@@ -123,5 +139,156 @@ describe("跨表对齐后的币种线索", () => {
       openingFunctionalAmount: "期初金额-本位币",
       closingFunctionalAmount: "期末金额-本位币",
     }, false, "3300")).not.toContain("币种列或币种线索文本");
+  });
+});
+
+describe("TB 粒度不足提示", () => {
+  it("按隔离类型给出用户看得懂的原因", () => {
+    expect(granularityLabel("科目余额混合本位币与外币"))
+      .toBe("科目余额里既有本位币又有外币，拆不开");
+    expect(granularityLabel("同一科目存在多种外币敞口"))
+      .toBe("同一科目持有多种外币，TB 只有合计数");
+    expect(granularityLabel("无外币敞口的评估调整科目"))
+      .toBe("评估调整科目，本身不持有外币");
+    // 历史结果里的旧类型名也要有兜底，不能显示成空白。
+    expect(granularityLabel("同一余额键存在多个外币"))
+      .toBe("TB 未提供可唯一对应的原币币种");
+    expect(granularityLabel(undefined)).toBe("TB 未提供可唯一对应的原币币种");
+  });
+});
+
+describe("逐行数据质量归并", () => {
+  it("按严重度排序并合并同类，隔离排在提示前面", () => {
+    const groups = summarizeQuality([
+      {type: "汇率缺失", severity: "提示", row: 5},
+      {type: "同一科目存在多种外币敞口", severity: "隔离", row: 10, detail: "拆不出来"},
+      {type: "同一科目存在多种外币敞口", severity: "隔离", row: 11},
+      {type: "汇率缺失", severity: "提示", row: 6},
+      {type: "汇率缺失", severity: "提示", row: 7},
+    ]);
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toMatchObject({
+      severity: "隔离", type: "同一科目存在多种外币敞口", count: 2, detail: "拆不出来",
+    });
+    expect(groups[0].rows).toEqual([10, 11]);
+    expect(groups[1]).toMatchObject({severity: "提示", type: "汇率缺失", count: 3});
+  });
+  it("示例行号最多留 5 个，不把几百行铺开", () => {
+    const many = Array.from({length: 200}, (_, i) => ({type: "汇率缺失", severity: "隔离", row: i}));
+    const [group] = summarizeQuality(many);
+    expect(group.count).toBe(200);
+    expect(group.rows).toHaveLength(5);
+  });
+  it("没有严重度或行号时不崩", () => {
+    const [group] = summarizeQuality([{type: "未知"}]);
+    expect(group).toMatchObject({severity: "提示", count: 1});
+    expect(group.rows).toEqual([]);
+  });
+});
+
+describe("凭证分类分两段", () => {
+  const group = (key: string, items: Array<{voucherId: string; classification: string; measurementStatus?: string}>) =>
+    ({key, label: key, items});
+  it("组内还有待确认的归入『等你确认』，其余归入『算不出金额』", () => {
+    const {undecided, unmeasurable} = splitClassificationGroups([
+      group("A", [{voucherId: "1", classification: "待确认"}]),
+      group("B", [{voucherId: "2", classification: "未实现汇兑损益", measurementStatus: "无法测算，未纳入结果"}]),
+    ], {});
+    expect(undecided.map(g => g.key)).toEqual(["A"]);
+    expect(unmeasurable.map(g => g.key)).toEqual(["B"]);
+  });
+  it("用户改过的分类立刻生效——草稿优先于后端给的分类", () => {
+    const groups = [group("A", [{voucherId: "1", classification: "待确认"}])];
+    expect(splitClassificationGroups(groups, {"1": "已实现汇兑损益"}).undecided).toHaveLength(0);
+    expect(splitClassificationGroups(groups, {"1": "已实现汇兑损益"}).unmeasurable).toHaveLength(1);
+    // 反过来：后端判好了，用户手动改回待确认，就该重新进入待办
+    const decided = [group("B", [{voucherId: "2", classification: "未实现汇兑损益"}])];
+    expect(splitClassificationGroups(decided, {"2": "待确认"}).undecided).toHaveLength(1);
+  });
+  it("4800 的形态：360 张全部已分类，待确认段为空", () => {
+    const many = Array.from({length: 12}, (_, i) =>
+      group(`P${i}`, [{voucherId: `v${i}`, classification: "未实现汇兑损益", measurementStatus: "无法测算，未纳入结果"}]));
+    const {undecided, unmeasurable} = splitClassificationGroups(many, {});
+    expect(undecided).toHaveLength(0);
+    expect(unmeasurable).toHaveLength(12);
+  });
+});
+
+describe("校验未通过时展开具体原因", () => {
+  it("把 detail 里的 errors 列成编号句子", () => {
+    const detail = JSON.stringify({
+      valid: false,
+      errors: ["TB 缺少期初余额：原币或本位币余额至少映射一组", "JE 缺少主体列时必须指定固定主体"],
+      warnings: ["无关紧要"],
+    });
+    expect(validationDetail(detail)).toBe(
+      "具体是：1. TB 缺少期初余额：原币或本位币余额至少映射一组；2. JE 缺少主体列时必须指定固定主体",
+    );
+  });
+  it("不是校验错误、解析失败或 errors 为空时不硬凑", () => {
+    expect(validationDetail(undefined)).toBe("");
+    expect(validationDetail("普通的错误描述")).toBe("");
+    expect(validationDetail('{"errors":[]}')).toBe("");
+    expect(validationDetail('{"errors": 这不是JSON')).toBe("");
+  });
+});
+
+describe("科目币种覆盖", () => {
+  const je = {
+    "1002990001 过渡银行": { detected: "HKD", source: "币种列", seen: ["HKD", "JPY"], needsConfirmation: false },
+  };
+  const tb = {
+    "1002990001 过渡银行": { detected: "USD", source: "本位币列", seen: ["USD"], needsConfirmation: true },
+    "1122010001 应收账款": { detected: "USD", source: "本位币列", seen: ["USD"], needsConfirmation: true },
+  };
+
+  it("JE 的逐行币种优先于 TB 的单行结论，seen 取两边并集", () => {
+    const detail = fxAccountCurrencyDetail("1002990001 过渡银行", je, tb);
+    expect(detail.detected).toBe("HKD");
+    expect(detail.source).toBe("币种列");
+    expect(detail.seen).toEqual(["HKD", "JPY", "USD"]);
+    expect(detail.fellBack).toBe(false);
+  });
+
+  it("只有 TB 且依据是本位币列时标记为未识别", () => {
+    const detail = fxAccountCurrencyDetail("1122010001 应收账款", je, tb);
+    expect(detail.detected).toBe("USD");
+    expect(detail.fellBack).toBe(true);
+  });
+
+  it("两侧都没有该科目时视为未识别，不假装有结论", () => {
+    const detail = fxAccountCurrencyDetail("9999 未知", je, tb);
+    expect(detail.detected).toBe("");
+    expect(detail.seen).toEqual([]);
+    expect(detail.fellBack).toBe(true);
+  });
+
+  it("科目在数据里出现过多种币种时标记出来，防止被当成单币种指定", () => {
+    expect(fxAccountCurrencyDetail("1002990001 过渡银行", je, tb).multiCurrency).toBe(true);
+    expect(fxAccountCurrencyDetail("1122010001 应收账款", je, tb).multiCurrency).toBe(false);
+    expect(fxAccountCurrencyDetail("9999 未知", je, tb).multiCurrency).toBe(false);
+  });
+
+  it("TB 与 JE 科目名拼法不同时按科目编码对上，JE 的真实币种传得到 TB 那一行", () => {
+    // 4800 的实况：TB「1002990001 货币资金 货币资金-银行存款-过渡银行」，
+    // JE「1002990001 过渡银行」，两边全名不同、编码相同。
+    const detail = fxAccountCurrencyDetail(
+      "1002990001 货币资金 货币资金-银行存款-过渡银行",
+      je,
+      tb,
+    );
+    expect(detail.detected).toBe("HKD");
+    expect(detail.source).toBe("币种列");
+    expect(detail.seen).toEqual(["HKD", "JPY", "USD"]);
+  });
+
+  it("留空的选择不进 payload，只传用户真正改过的", () => {
+    expect(
+      fxAccountCurrencyOverrides({ A: "", B: "hkd", C: "  ", D: " usd " }),
+    ).toEqual({ B: "HKD", D: "USD" });
+  });
+
+  it("没有任何选择时传空对象，不影响后端自动识别", () => {
+    expect(fxAccountCurrencyOverrides({})).toEqual({});
   });
 });

@@ -67,3 +67,157 @@
   background: var(--warning-bg, #fdf6ec);
 }
 .fx-rollforward-diff { font-weight: 600; }
+
+/* TB 粒度不足：外币敞口是「科目×币种」粒度，TB 只给到科目粒度时无法测算。
+   用户能做的动作很具体——换一份余额表，所以这条要比普通提示更显眼。 */
+.fx-granularity-notice {
+  border: 1px solid var(--destructive-border, #d98b8b);
+  background: var(--destructive-bg, #fdf1f1);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.fx-granularity-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.fx-granularity-head strong { display: block; }
+.fx-granularity-head small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted-foreground, #6b6257);
+  line-height: 1.6;
+}
+.fx-granularity-action {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--card, #fff);
+  border: 1px solid var(--border, #e6ded2);
+  line-height: 1.6;
+}
+.fx-granularity-table {
+  overflow-x: auto;
+  margin-top: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.fx-granularity-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.fx-granularity-table th,
+.fx-granularity-table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border, #e6ded2);
+  vertical-align: top;
+}
+.fx-granularity-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--destructive-bg, #fdf1f1);
+  white-space: nowrap;
+}
+.fx-granularity-table td:last-child {
+  min-width: 20rem;
+  color: var(--muted-foreground, #6b6257);
+}
+
+/* 检查与勾稽：默认折叠，用户想追到「哪一步没通过」时展开。 */
+.fx-checks {
+  border: 1px solid var(--border, #e6ded2);
+  border-radius: 8px;
+  margin: 12px 0;
+  background: var(--card, #fff);
+}
+.fx-checks > summary {
+  cursor: pointer;
+  padding: 10px 14px;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  user-select: none;
+}
+.fx-checks > summary span {
+  color: var(--muted-foreground, #6b6257);
+  font-size: 13px;
+}
+.fx-checks-body { padding: 0 14px 14px; }
+.fx-checks-body section { margin-top: 14px; }
+.fx-checks-body h5 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+.fx-checks-body p {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--muted-foreground, #6b6257);
+  line-height: 1.6;
+}
+.fx-checks-list {
+  margin: 0;
+  padding-left: 1.2rem;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.fx-checks-table {
+  overflow-x: auto;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.fx-checks-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.fx-checks-table th,
+.fx-checks-table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border, #e6ded2);
+  vertical-align: top;
+}
+.fx-checks-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--card, #fff);
+  white-space: nowrap;
+}
+.fx-checks-number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.fx-checks-table td:last-child { color: var(--muted-foreground, #6b6257); }
+.fx-severity {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--muted, #f2ede5);
+  white-space: nowrap;
+}
+.fx-severity.blocking {
+  background: var(--destructive-bg, #fdf1f1);
+  color: var(--destructive, #a63d3d);
+}
+
+/* 凭证分类复核分两段：等你定分类 / 已定分类但算不出金额。 */
+.fx-classification-section { margin-top: 16px; }
+.fx-classification-section h5 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+.fx-classification-section > p {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--muted-foreground, #6b6257);
+  line-height: 1.7;
+}
+
+.fx-accounts label{grid-template-columns:minmax(120px,1fr) 150px 148px}.fx-accounts select.fx-currency-override{border-color:var(--primary);font-weight:600}
+.fx-accounts select.fx-currency-risky{border-color:#c2410c;color:#c2410c;font-weight:600}

@@ -162,15 +162,10 @@ fn review_one(path: &Path, kind: &str) {
         "hardcodedCandidates": inspection["mappingCandidates"],
         "currentMapping": inspection["suggestedMapping"],
     });
-    let review_method = if kind == "tb" {
-        "fx.review_tb_mapping"
-    } else {
-        "fx.review_je_mapping"
-    };
     println!("\n──── LLM 复核 {name}");
     match audit_toolbox_lib::engine_call_for_test(
-        review_method,
-        serde_json::json!({ "payload": payload }),
+        "ledger.review_mapping",
+        serde_json::json!({ "kind": kind, "payload": payload }),
     ) {
         Ok(value) => {
             let changes: Vec<&serde_json::Value> = value
@@ -763,4 +758,153 @@ fn survey_uniform_currency() {
         return;
     }
     println!("（没找到 TB-4800）");
+}
+
+/// 跑一遍真实 4800 TB＋JE 的完整测算，把「未覆盖账面金额」拆开看是哪些凭证、
+/// 为什么没进测算，以及 TB 勾稽与余额滚动校验的结论。
+///
+/// ```text
+/// cargo test --release --test mapping_survey survey_4800_preview -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "依赖本机样例目录与汇率缓存，手工调查用"]
+fn survey_4800_preview() {
+    use std::collections::BTreeMap;
+    let Some(dir) = sample_dirs().into_iter().find(|d| d.join("TB-4800.xlsx").is_file()) else {
+        println!("（没找到 TB-4800 样例）");
+        return;
+    };
+    let tb_path = dir.join("TB-4800.xlsx");
+    let je_path = dir.join("4800_JE_2025.01-12.xlsx");
+    let mut params = serde_json::Map::new();
+    let mut accounts: Vec<String> = Vec::new();
+    for (kind, path, src_key, map_key) in [
+        ("tb", &tb_path, "tbSource", "tbMapping"),
+        ("je", &je_path, "jeSource", "jeMapping"),
+    ] {
+        let source = serde_json::json!({"inputPath": path.to_string_lossy()});
+        let inspection = audit_toolbox_lib::engine_call_for_test(
+            &format!("fx.inspect_{kind}"),
+            serde_json::json!({"source": source.clone()}),
+        )
+        .expect("inspect 应当成功");
+        params.insert(src_key.into(), source);
+        params.insert(map_key.into(), inspection["suggestedMapping"].clone());
+        for a in inspection["accounts"].as_array().into_iter().flatten() {
+            if let Some(a) = a.as_str() {
+                accounts.push(a.to_owned());
+            }
+        }
+    }
+    params.insert("mode".into(), serde_json::json!("combined"));
+    params.insert("reportStart".into(), serde_json::json!("2025-01-01"));
+    params.insert("reportEnd".into(), serde_json::json!("2025-12-31"));
+    params.insert("fixedEntity".into(), serde_json::json!("4800"));
+    params.insert(
+        "entityCurrencies".into(),
+        serde_json::json!({"4800": "USD"}),
+    );
+    let result = match audit_toolbox_lib::engine_call_for_test(
+        "fx.preview_probe",
+        serde_json::Value::Object(params),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("测算失败：{e:?}");
+            return;
+        }
+    };
+    println!("\n══════ 4800 测算摘要");
+    if let Some(summary) = result["summary"].as_object() {
+        let mut keys: Vec<&String> = summary.keys().collect();
+        keys.sort();
+        for key in keys {
+            println!("    {key:<38} {}", summary[key]);
+        }
+    }
+    println!("\n══════ 未覆盖凭证（classificationControls）");
+    let controls = result["classificationControls"].as_array().cloned().unwrap_or_default();
+    println!("  共 {} 条", controls.len());
+    let mut by_class: BTreeMap<String, (usize, f64)> = Default::default();
+    let mut by_status: BTreeMap<String, usize> = Default::default();
+    let mut by_category: BTreeMap<String, (usize, f64)> = Default::default();
+    for item in &controls {
+        let booked = item["bookedFxGainLoss"].as_f64().unwrap_or(0.0);
+        let e = by_class
+            .entry(item["classification"].as_str().unwrap_or("?").to_owned())
+            .or_default();
+        e.0 += 1;
+        e.1 += booked;
+        *by_status
+            .entry(item["measurementStatus"].as_str().unwrap_or("?").to_owned())
+            .or_default() += 1;
+        let c = by_category
+            .entry(item["systemCategory"].as_str().unwrap_or("?").to_owned())
+            .or_default();
+        c.0 += 1;
+        c.1 += booked;
+    }
+    println!("  按分类：");
+    for (k, (n, amount)) in &by_class {
+        println!("    {k:<24} {n:>5} 张   账面 {amount:>18.2}");
+    }
+    println!("  按测算状态：");
+    for (k, n) in &by_status {
+        println!("    {k:<52} {n:>5} 张");
+    }
+    println!("  按系统归因：");
+    for (k, (n, amount)) in &by_category {
+        println!("    {k:<24} {n:>5} 张   账面 {amount:>18.2}");
+    }
+    println!("  前 3 条样例：");
+    for item in controls.iter().take(3) {
+        println!("    {}", serde_json::to_string(item).unwrap_or_default());
+    }
+    println!("\n══════ 客户重估凭证识别");
+    let crv = result["clientRevaluationVouchers"].as_array().cloned().unwrap_or_default();
+    println!("  clientRevaluationVouchers 共 {} 条", crv.len());
+    for item in crv.iter().take(3) {
+        println!("    {}", serde_json::to_string(item).unwrap_or_default());
+    }
+    println!("\n══════ TB 勾稽 reconciliation");
+    println!("  {}", serde_json::to_string_pretty(&result["reconciliation"]).unwrap_or_default().chars().take(3000).collect::<String>());
+    println!("\n══════ 余额滚动校验 balanceRollforwardValidation");
+    let brv = &result["balanceRollforwardValidation"];
+    println!("  passed={} issues={}",
+        brv["passed"], brv["issues"].as_array().map(|a| a.len()).unwrap_or(0));
+    for item in brv["issues"].as_array().into_iter().flatten().take(5) {
+        println!("    {}", serde_json::to_string(item).unwrap_or_default());
+    }
+    println!("\n══════ validation（映射与数据质量校验）");
+    println!("  {}", serde_json::to_string_pretty(&result["validation"]).unwrap_or_default().chars().take(2000).collect::<String>());
+    println!("\n══════ dataQuality 前 10 类");
+    let mut quality_types: BTreeMap<String, usize> = Default::default();
+    for item in result["dataQuality"].as_array().into_iter().flatten() {
+        *quality_types
+            .entry(format!("{}/{}",
+                item["type"].as_str().unwrap_or("?"),
+                item["severity"].as_str().unwrap_or("?")))
+            .or_default() += 1;
+    }
+    for (k, n) in quality_types.iter().take(10) {
+        println!("    {k:<44} {n:>6}");
+    }
+    println!("
+══════ TB 粒度不足清单（界面会显著提示这一块）");
+    for item in result["tbGranularityBlocked"].as_array().into_iter().flatten() {
+        println!("    [{}] {}  币种 {}",
+            item["type"].as_str().unwrap_or("?"),
+            item["account"].as_str().unwrap_or(""),
+            item["currencies"]);
+    }
+    println!("
+══════ 被隔离的科目明细");
+    for item in result["dataQuality"].as_array().into_iter().flatten() {
+        if item["severity"].as_str() == Some("隔离") {
+            println!("    [{}] 第{}行 {}",
+                item["type"].as_str().unwrap_or("?"),
+                item["row"],
+                item["account"].as_str().unwrap_or(""));
+        }
+    }
 }

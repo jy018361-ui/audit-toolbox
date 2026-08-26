@@ -412,26 +412,18 @@ fn inject_current_form(payload: &mut Value, kind: &str) {
     }
 }
 
-/// 五个工具共用的映射复核入口。
-///
-/// 此前汇兑损益走 `fx.review_*_mapping`、看账走 `kanzhang.llm_mapping`，
-/// 存款利息与借款利息一份都没有。规则统一之后只剩「看的是 TB 还是 JE」这一个分叉，
+/// 所有 TB/JE 工具共用的唯一映射复核入口。
 /// 工具能用哪些角色由 payload 的 `availableRoles` 声明。
 pub(crate) fn ledger_review_call(
     kind: &str,
     params: &Value,
     settings: &Value,
 ) -> Result<Value, AppError> {
-    let method = if kind == "tb" {
-        "fx.review_tb_mapping"
-    } else {
-        "fx.review_je_mapping"
-    };
-    fx_mapping_llm_call(method, params, settings)
+    ledger_mapping_llm_call(kind, params, settings)
 }
 
-pub(crate) fn fx_mapping_llm_call(
-    method: &str,
+fn ledger_mapping_llm_call(
+    kind: &str,
     params: &Value,
     settings: &Value,
 ) -> Result<Value, AppError> {
@@ -441,25 +433,21 @@ pub(crate) fn fx_mapping_llm_call(
     if !llm.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
         return Err(error("LLM_DISABLED", "工具箱中的 LLM 尚未启用。", None));
     }
-    let task = if method.ends_with("je_mapping") {
-        "fx_je_mapping"
-    } else {
-        "fx_tb_mapping"
-    };
-    let (table_name, specific) = if method.ends_with("je_mapping") {
-        ("序时账", REVIEW_JE)
-    } else {
+    let is_tb = kind == "tb";
+    let task = if is_tb { "ledger_tb_mapping" } else { "ledger_je_mapping" };
+    let (table_name, specific) = if is_tb {
         ("科目余额表", REVIEW_TB)
+    } else {
+        ("序时账", REVIEW_JE)
     };
     let prompt = format!(
-        "你是汇兑损益审计工具的{table_name}字段映射复核器，任务名为 {task}。\
+        "你是审计工具箱公共 TB/JE 引擎的{table_name}字段映射复核器，任务名为 {task}。\
          只输出严格 JSON：{{\"task\":\"{task}\",\"changes\":[{{\"role\":string,\
          \"currentColumn\":string,\"suggestedColumn\":string,\"confidence\":number,\
          \"reason\":string,\"scheme\":string}}]}}。{REVIEW_COMMON}{specific}"
     );
     let mut payload = params.get("payload").unwrap_or(params).clone();
-    // 汇兑损益前端传的是 hardcodedCandidates（带候选列与评分），规则文本改用
-    // 通用的 availableRoles 之后，这里就地把角色名提取出来补上，前端不用改。
+    // 兼容旧版 FX 请求携带的 hardcodedCandidates。
     if payload.get("availableRoles").is_none() {
         if let Some(roles) = payload
             .get("hardcodedCandidates")
@@ -477,7 +465,7 @@ pub(crate) fn fx_mapping_llm_call(
             }
         }
     }
-    inject_current_form(&mut payload, if method.ends_with("je_mapping") { "je" } else { "tb" });
+    inject_current_form(&mut payload, if is_tb { "tb" } else { "je" });
     let payload = &payload;
     let content = request_llm(llm, &prompt, &payload.to_string(), None)?;
     let mut value = parse_json_content(&content);
@@ -488,7 +476,7 @@ pub(crate) fn fx_mapping_llm_call(
             None,
         ));
     }
-    sanitize_mapping_changes(&mut value, payload, if method.ends_with("je_mapping") { "je" } else { "tb" });
+    sanitize_mapping_changes(&mut value, payload, if is_tb { "tb" } else { "je" });
     Ok(value)
 }
 

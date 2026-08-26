@@ -7,7 +7,7 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { missingGoldIdentity } from "@/ledgerMapping";
+import { applyLedgerReviewToDict, missingGoldIdentity } from "@/ledgerMapping";
 import { MappingPanel } from "@/components/MappingPanel";
 import "./fx-audit.css";
 
@@ -26,7 +26,12 @@ type Inspection = {
   sampledPreview?: boolean;
   accountRoleSuggestions?: Record<string,string>;
   accountRoleDetails?: Record<string,{role:string;confidence:number;needsConfirmation:boolean;reason:string;subtype?:string|null}>;
+  accountCurrencyDetails?: Record<string,{detected:string;source:string;seen:string[];needsConfirmation:boolean}>;
 };
+// 下拉框的常备币种。检测到的币种会另行并进选项，所以这里只列常见的，
+// 不求穷尽——真遇到冷门币种，检测结果本身就会把它带出来。
+const CURRENCY_OPTIONS = ["CNY","USD","HKD","EUR","JPY","GBP","AUD","SGD","CHF","CAD","TWD","KRW","MYR","THB","NZD"];
+
 type SourceClassification = {kind:"je"|"tb";confidence:number;needsLlm:boolean;scores:{je:number;tb:number};reasons:string[];headers:string[];preview:string[][];sheet:string;headerRow:number;headerDepth:number};
 type VoucherClassification = "已实现汇兑损益"|"未实现汇兑损益"|"待确认";
 type ClassificationControl = {voucherId:string;date?:string;voucherType?:string;systemCategory?:string;reviewReason?:string;bookedFxGainLoss?:number;classification:VoucherClassification;measurementStatus?:string;patternKey?:string;patternLabel?:string;debitAccounts?:string[];creditAccounts?:string[];summary?:string};
@@ -89,6 +94,59 @@ const ROLE_OPTIONS = [
   ["non_monetary","非货币性项目"],["fx_gain_loss","汇兑损益"],
   ["other_pnl","其他损益/成本科目"],
 ];
+
+/** 合并 TB 与 JE 两侧对同一科目的币种识别结果，供「外币」列展示。 */
+export function fxAccountCurrencyDetail(
+  account:string,
+  jeDetails:Record<string,{detected:string;source:string;seen:string[];needsConfirmation:boolean}>={},
+  tbDetails:Record<string,{detected:string;source:string;seen:string[];needsConfirmation:boolean}>={},
+){
+  // JE 逐行读凭证货币，比只有一行的 TB 更能反映该科目实际用过哪些币种，
+  // 所以主结论优先取 JE；seen 取两边并集，让下拉框把见过的币种都列出来。
+  //
+  // 精确名取不到就按科目编码取：TB 与 JE 的科目名拼法常常不同——4800 上
+  // TB 写「1002010017 货币资金 货币资金-银行存款-建设银行」、JE 写
+  // 「1002010017 银行存款-建行RMB3250-4800」，**两边全名完全相同的是 0 个**，
+  // 按编码却能对上 54 个。只按全名查，JE 侧识别出的真实币种就传不到 TB 那一行，
+  // 同一个科目会一行显示 HKD、另一行显示「USD（按本位币）」。
+  // 与后端 `currency_for` 的覆盖回退是同一套规则。
+  const pick=(details:Record<string,{detected:string;source:string;seen:string[];needsConfirmation:boolean}>)=>{
+    const exact=details[account];
+    if(exact)return exact;
+    const code=account.trim().split(/\s+/)[0];
+    return Object.entries(details).find(([candidate])=>candidate.trim().split(/\s+/)[0]===code)?.[1];
+  };
+  const je=pick(jeDetails);const tb=pick(tbDetails);
+  const primary=je??tb;
+  const seen=[...new Set([...(je?.seen??[]),...(tb?.seen??[])])];
+  return {
+    detected:primary?.detected??"",
+    source:primary?.source??"",
+    seen,
+    // 两侧都没给出真凭据时才算「没识别出来」，界面标注「按本位币」。
+    fellBack:primary?primary.needsConfirmation:true,
+    // 同一科目下挂了多种币种：TB 往往只给这个科目一个**合计**余额，
+    // 这时把它指定成单一币种，等于拿一种汇率去重估几种币种的合计数。
+    // 实测 4800 的「过渡银行」有 CNY／HKD／JPY／USD 四种、合计恰好为零，
+    // 指定成 CNY 后未实现从 -3,395 跳到 7,613 万——全是假数。
+    multiCurrency:seen.length>1,
+  };
+}
+
+/**
+ * 只有用户真正选过的币种才作为覆盖传给后端。
+ *
+ * 留空表示「按系统识别的来」——**刻意不预填检测值**：一旦预填，就再也分不清
+ * 「用户确认过 USD」和「系统猜了 USD」，日后改进识别逻辑也推不动已落盘的值。
+ * 主体本位币那一处就是预填踩出来的坑（见下方 entityCurrencies 的注释）。
+ */
+export function fxAccountCurrencyOverrides(selections:Record<string,string>){
+  return Object.fromEntries(
+    Object.entries(selections)
+      .map(([account,code])=>[account,code.trim().toUpperCase()] as const)
+      .filter(([,code])=>code!==""),
+  );
+}
 
 export function fxResolveAccountRoles(
   accounts:string[],
@@ -166,6 +224,9 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   const [fixedEntity,setFixedEntity] = useState("默认主体");
   const [accountRoles,setAccountRoles] = useState<Record<string,string>>({});
   const [accountRolesTouched,setAccountRolesTouched] = useState<Record<string,boolean>>({});
+  // 币种覆盖刻意**不预填**：空字符串就是「按系统识别的来」，只有用户手工选过的
+  // 才进 payload。主体本位币那一处预填踩过时序的坑（见下方注释），这里不重蹈。
+  const [accountCurrencies,setAccountCurrencies] = useState<Record<string,string>>({});
   const [manualClassifications,setManualClassifications] = useState<Record<string,VoucherClassification>>({});
   const [classificationDrafts,setClassificationDrafts] = useState<Record<string,VoucherClassification>>({});
   const [tbCurrencyConfirmed,setTbCurrencyConfirmed] = useState(false);
@@ -225,16 +286,10 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     if(clearError)setError("");
     setReviewing(v=>({...v,[kind]:true}));setReviewStatus(v=>({...v,[kind]:"正在复核字段映射…"}));
     try{
-      const response=await engineCall("fx.review_"+kind+"_mapping",{payload:{headers:inspection.headers,sampleRows:inspection.preview,hardcodedCandidates:inspection.mappingCandidates,currentMapping:base}}) as {changes?:Array<{role:string;suggestedColumn:string;confidence:number}>};
       const labels=kind==="je"?JE_LABELS:TB_LABELS;const setter=kind==="je"?setJeMapping:setTbMapping;
-      const next={...base};let applied=0;
-      for(const c of response.changes??[]){
-        const candidate=inspection.mappingCandidates.find(x=>x.role===c.role)?.candidates.find(x=>x.column===c.suggestedColumn);
-        const duplicate=Object.entries(next).some(([role,column])=>role!==c.role&&column===c.suggestedColumn);
-        if(c.confidence>=.6&&c.role in labels&&inspection.headers.includes(c.suggestedColumn)&&(candidate?.conflictTerms.length??0)===0&&!duplicate){next[c.role]=c.suggestedColumn;applied+=1}
-      }
+      const {mapping:next,applied}=await applyLedgerReviewToDict(engineCall,kind,inspection.headers,inspection.preview,base,labels);
       setter(next);
-      setReviewStatus(v=>({...v,[kind]:applied?`复核完成，已应用 ${applied} 项建议。`:"复核完成，当前映射无需调整。"}));
+      setReviewStatus(v=>({...v,[kind]:applied.length?`复核完成，已应用 ${applied.length} 项建议。`:"复核完成，当前映射无需调整。"}));
       return next;
     }catch(e){
       setReviewStatus(v=>({...v,[kind]:"复核失败，可继续手工映射。"}));
@@ -272,7 +327,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     }catch(e){setAlignment([`口径核对未能完成：${errorText(e)}`])}
   }
 
-  function payload(method:"fx.preview"|"fx.export",overrides=manualClassifications){const effectiveEntities=entities.length?entityCurrencies:{[fixedEntity]:entityCurrencies[fixedEntity]??defaultFunctionalCurrency};const start=fxReportStart(reportEnd);const snapshot=result?.rateSnapshot as {startDate?:string;endDate?:string}|undefined;const reusableSnapshot=snapshot?.startDate===start&&snapshot?.endDate===reportEnd?snapshot:undefined;const cachedTranslations=(result?.accountTranslations??{}) as Record<string,string>;const previewToken=fxPreviewTokenFor(method,result);return{mode,reportStart:start,reportEnd,fixedEntity,tbForeignCurrencyConfirmed:!tb?.foreignCurrencyNeedsConfirmation||tbCurrencyConfirmed,...(je?{jeSource:{inputPath:jePath,sheet:je.sheet,headerRow:je.headerRow,headerDepth:je.headerDepth},jeMapping}:{}),...(tb?{tbSource:{inputPath:tbPath,sheet:tb.sheet,headerRow:tb.headerRow,headerDepth:tb.headerDepth},tbMapping}:{}),entityCurrencies:effectiveEntities,accountRoles,manualClassifications:overrides,translateTbAccountNames:true,...(Object.keys(cachedTranslations).length?{accountTranslations:cachedTranslations}:{}),...(reusableSnapshot?{rateSnapshot:reusableSnapshot}:{}),...(previewToken?{previewToken}:{}),...(outputPath?{outputPath}:{})}}
+  function payload(method:"fx.preview"|"fx.export",overrides=manualClassifications){const effectiveEntities=entities.length?entityCurrencies:{[fixedEntity]:entityCurrencies[fixedEntity]??defaultFunctionalCurrency};const start=fxReportStart(reportEnd);const snapshot=result?.rateSnapshot as {startDate?:string;endDate?:string}|undefined;const reusableSnapshot=snapshot?.startDate===start&&snapshot?.endDate===reportEnd?snapshot:undefined;const cachedTranslations=(result?.accountTranslations??{}) as Record<string,string>;const previewToken=fxPreviewTokenFor(method,result);return{mode,reportStart:start,reportEnd,fixedEntity,tbForeignCurrencyConfirmed:!tb?.foreignCurrencyNeedsConfirmation||tbCurrencyConfirmed,...(je?{jeSource:{inputPath:jePath,sheet:je.sheet,headerRow:je.headerRow,headerDepth:je.headerDepth},jeMapping}:{}),...(tb?{tbSource:{inputPath:tbPath,sheet:tb.sheet,headerRow:tb.headerRow,headerDepth:tb.headerDepth},tbMapping}:{}),entityCurrencies:effectiveEntities,accountRoles,accountCurrencies:fxAccountCurrencyOverrides(accountCurrencies),manualClassifications:overrides,translateTbAccountNames:true,...(Object.keys(cachedTranslations).length?{accountTranslations:cachedTranslations}:{}),...(reusableSnapshot?{rateSnapshot:reusableSnapshot}:{}),...(previewToken?{previewToken}:{}),...(outputPath?{outputPath}:{})}}
   async function run(method:"fx.preview"|"fx.export",overrides=manualClassifications){setError("");if(!reportEnd)return setError("请选择资产负债表日。");if((mode==="realized"||mode==="combined")&&!je)return setError("已实现测算需先上传并识别JE。");if((mode==="unrealized"||mode==="combined")&&!tb)return setError("未实现测算需先上传并识别TB。");const jeMissing=je&&mode!=="unrealized"?fxMissingRequired("je",jeMapping,true,fixedEntity):[];if(jeMissing.length)return setError(`JE尚未映射：${jeMissing.join("、")}。请先在预览表头完成字段映射。`);const tbMissing=tb&&mode!=="realized"?fxMissingRequired("tb",tbMapping,Boolean(je),fixedEntity):[];if(tbMissing.length)return setError(`TB尚未映射：${tbMissing.join("、")}。请先在预览表头完成字段映射。`);if(currencyConfirmationMissing)return setError("TB检测到多个外币币种候选，请确认系统预选的外币币种列。");if(entities.some(e=>!entityCurrencies[e]))return setError("请为每个公司选择ISO本位币。");setBusy(true);setJob(undefined);setCompletedStage(undefined);setActiveStage(method);activeJobMethod.current=method;try{activeJob.current=await jobStart(method,payload(method,overrides))}catch(e){setBusy(false);setActiveStage(undefined);setError(errorText(e))}}
   function stageVoucherClassifications(voucherIds:string[],classification:VoucherClassification){setClassificationDrafts(current=>{const next={...current};for(const voucherId of voucherIds)next[voucherId]=classification;return next})}
   async function recalculateClassifications(){const next={...manualClassifications,...classificationDrafts};setManualClassifications(next);await run("fx.preview",next)}
@@ -294,7 +349,15 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     </div>
     {(je||tb)&&<div className="fx-source-grid">
       <Card><CardHeader><CardTitle>公司本位币</CardTitle></CardHeader><CardContent className="fx-list">{tb?.uniformCurrency&&<p className="fx-hint">TB 的币种列整列都是 {tb.uniformCurrency}，已按主体本位币预填；账户币种改从科目名称/文本识别。若该列确实是交易币种，请在此改回。</p>}{entities.length?entities.map(entity=><label key={entity}><span>{entity}</span><input value={entityCurrencies[entity]??defaultFunctionalCurrency} maxLength={3} onChange={e=>setEntityCurrency(entity,e.target.value)}/></label>):<><label><span>文件无主体列，固定主体</span><input value={fixedEntity} onChange={e=>setFixedEntity(e.target.value)}/></label><label><span>本位币</span><input value={entityCurrencies[fixedEntity]??defaultFunctionalCurrency} maxLength={3} onChange={e=>setEntityCurrency(fixedEntity,e.target.value)}/></label></>}</CardContent></Card>
-      <Card><CardHeader><CardTitle>高级设置</CardTitle></CardHeader><CardContent><details><summary>科目分类（通常无需修改）</summary><p className="fx-hint">系统按统一词典和科目编码归入五类；低置信项目仍有默认类别，仅提示复核，不会显示“未分配”。</p><div className="fx-list fx-accounts">{accounts.map(account=>{const detail=tb?.accountRoleDetails?.[account]??je?.accountRoleDetails?.[account];return <label key={account}><span title={detail?`${account}\n${detail.reason}（置信度 ${Math.round(detail.confidence*100)}%）`:account}>{account}{detail?.needsConfirmation&&<small> 建议复核</small>}</span><select value={accountRoles[account]??"non_monetary"} onChange={e=>{setAccountRolesTouched(v=>({...v,[account]:true}));setAccountRoles(v=>({...v,[account]:e.target.value}))}}>{ROLE_OPTIONS.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>})}</div></details></CardContent></Card>
+      <Card><CardHeader><CardTitle>高级设置</CardTitle></CardHeader><CardContent><details><summary>科目分类（通常无需修改）</summary><p className="fx-hint">系统按统一词典和科目编码归入五类；低置信项目仍有默认类别，仅提示复核，不会显示“未分配”。<br/>「外币」列是系统识别出的账户币种。TB 只有一列货币且整列同值时，它登记的是<strong>主体本位币</strong>而不是账户币种，这类科目标注为「按本位币」——若该科目实际持有外币，请在这里手工指定，否则测算时会因缺少外币余额基础而被隔离。</p><div className="fx-list fx-accounts">{accounts.map(account=>{const detail=tb?.accountRoleDetails?.[account]??je?.accountRoleDetails?.[account];
+        // 两边都看：JE 逐行读凭证货币，比只有一行的 TB 更能反映该科目实际用过哪些币种。
+        const {detected,source,seen,fellBack,multiCurrency}=fxAccountCurrencyDetail(account,je?.accountCurrencyDetails,tb?.accountCurrencyDetails);
+        // 多币种科目被指定成单一币种：TB 多半只有一个合计余额，这么重估必然是假数。
+        const currencyRisk=multiCurrency&&Boolean(accountCurrencies[account]);
+        return <label key={account}><span title={detail?`${account}\n${detail.reason}（置信度 ${Math.round(detail.confidence*100)}%）`:account}>{account}{detail?.needsConfirmation&&<small> 建议复核</small>}{multiCurrency&&<small title={`该科目出现过 ${seen.join("、")}`}> {seen.length}种币种</small>}</span><select value={accountRoles[account]??"non_monetary"} onChange={e=>{setAccountRolesTouched(v=>({...v,[account]:true}));setAccountRoles(v=>({...v,[account]:e.target.value}))}}>{ROLE_OPTIONS.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select><select className={currencyRisk?"fx-currency-risky":accountCurrencies[account]?"fx-currency-override":undefined} title={currencyRisk?`该科目在数据里出现过 ${seen.join("、")} 共 ${seen.length} 种币种。
+科目余额表若只给出这个科目的合计余额，指定单一币种等于拿一种汇率去重估几种币种的合计数，结果不可用。
+正确做法是改用按币种拆分的科目余额表。`:detected?`系统识别：${detected}（依据${source}）${seen.length>1?`
+该科目出现过：${seen.join("、")}`:""}`:"系统未识别到该科目的币种，请手工指定"} value={accountCurrencies[account]??""} onChange={e=>setAccountCurrencies(v=>({...v,[account]:e.target.value}))}><option value="">{detected?`自动：${detected}${fellBack?"（按本位币）":""}`:"自动：未识别"}</option>{[...new Set([...seen,...CURRENCY_OPTIONS])].map(code=><option key={code} value={code}>{code}</option>)}</select></label>})}</div></details></CardContent></Card>
     </div>}
     <Card><CardHeader><CardTitle>测算与底稿</CardTitle></CardHeader><CardContent>
       <div className="fx-run-grid"><label>资产负债表日<input type="date" value={reportEnd} onChange={e=>setReportEnd(e.target.value)}/></label><label>输出文件<input value={outputPath} readOnly placeholder="默认保存到源文件目录"/></label><Button variant="secondary" onClick={async()=>{const path=await pickPath("save","保存审计底稿",["xlsx"],"汇兑损益测算.xlsx");if(typeof path==="string")setOutputPath(path)}}>选择位置</Button></div>
@@ -408,6 +471,150 @@ function FxPreview(props:{title:string;kind:"je"|"tb";inspection:Inspection;mapp
     onChange={()=>{/* toggle 模式下改动全部走 onToggle */}}
   />;
 }
+/** 凭证组分两类：**等你定分类** 和 **已定分类但算不出金额**。
+ *
+ *  这两件事性质完全不同：前者要人动手，后者要么补资料要么修工具。
+ *  以前混在一个「批量确认」列表里，4800 实测 360 张全都是后者——用户看到
+ *  一屏下拉框都已经选好了却还挂在「待确认」标题下，只会以为工具在自相矛盾。 */
+export function splitClassificationGroups<T extends {voucherId:string;classification:string;measurementStatus?:string}>(
+  groups:Array<{key:string;label:string;items:T[]}>,
+  drafts:Record<string,string>,
+){
+  const undecided:typeof groups=[];const unmeasurable:typeof groups=[];
+  for(const group of groups){
+    const pending=group.items.some(item=>(drafts[item.voucherId]??item.classification)==="待确认");
+    (pending?undecided:unmeasurable).push(group);
+  }
+  return {undecided,unmeasurable};
+}
+/** 逐行数据质量按「问题类型 ＋ 严重度」归并，同类几百行不必逐条铺开。 */
+export function summarizeQuality(items:Array<Record<string,unknown>>){
+  const order:Record<string,number>={阻断:0,隔离:1,重要提示:2,待复核:3,合并:4,提示:5};
+  const groups=new Map<string,{type:string;severity:string;count:number;detail:string;rows:number[]}>();
+  for(const item of items){
+    const type=String(item.type??"未分类");
+    const severity=String(item.severity??"提示");
+    const key=`${severity} ${type}`;
+    const group=groups.get(key)??{type,severity,count:0,detail:"",rows:[]};
+    group.count+=1;
+    if(!group.detail&&item.detail)group.detail=String(item.detail);
+    const row=Number(item.row??item.sourceRow??NaN);
+    if(Number.isFinite(row)&&group.rows.length<5)group.rows.push(row);
+    groups.set(key,group);
+  }
+  return [...groups.values()].sort((a,b)=>
+    (order[a.severity]??9)-(order[b.severity]??9)||b.count-a.count);
+}
+/** 测算跑完后的全部检查结论。
+ *
+ *  这些结论一直都在算，但以前只写进 Excel 底稿的「数据质量 / 异常与限制 /
+ *  TB勾稽」几个 Sheet，界面上一个字都不显示——用户看到一个对不上的差异率，
+ *  却没有任何线索说明哪一步没通过、被隔离了多少行、TB 那个数是从哪几个
+ *  科目取的。这里把三块摊开：校验提示、逐行数据质量、TB 汇兑损益取数。 */
+function FxChecks({result}:{result:Record<string,unknown>}){
+  const validation=(result.validation??{}) as Record<string,unknown>;
+  const warnings=(validation.warnings??[]) as string[];
+  const quality=(result.dataQuality??[]) as Array<Record<string,unknown>>;
+  const reconciliation=(result.reconciliation??{}) as Record<string,unknown>;
+  const tbRows=(reconciliation.tbRows??[]) as Array<Record<string,unknown>>;
+  const groups=summarizeQuality(quality);
+  if(!warnings.length&&!groups.length&&!tbRows.length)return null;
+  const money=(value:unknown)=>new Intl.NumberFormat("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2}).format(Number(value??0));
+  const isolated=groups.filter(g=>g.severity==="隔离"||g.severity==="阻断")
+    .reduce((sum,g)=>sum+g.count,0);
+  const headline=[
+    warnings.length?`${warnings.length} 项校验提示`:"",
+    isolated?`${isolated} 行被隔离`:"",
+    tbRows.length?`TB 取数 ${tbRows.length} 个科目`:"",
+  ].filter(Boolean).join(" · ")||"全部检查通过";
+  return <details className="fx-checks">
+    <summary><strong>检查与勾稽</strong><span>{headline}</span></summary>
+    <div className="fx-checks-body">
+      {warnings.length>0&&<section>
+        <h5>映射与数据质量校验</h5>
+        <p>测算前跑的校验。出现错误会直接拦下测算；下面这些是<b>通过但需要你知道</b>的提示。</p>
+        <ul className="fx-checks-list">{warnings.map((text,index)=><li key={index}>{text}</li>)}</ul>
+      </section>}
+      {groups.length>0&&<section>
+        <h5>逐行数据质量</h5>
+        <p>测算过程中逐行记录的问题。<b>隔离</b>表示该行没有进入测算结果，
+          <b>合并</b>表示已并入其他行，<b>提示</b>不影响结果。</p>
+        <div className="fx-checks-table"><table>
+          <thead><tr><th>严重度</th><th>问题</th><th>行数</th><th>示例行号</th><th>说明</th></tr></thead>
+          <tbody>{groups.map((group,index)=><tr key={index}>
+            <td><span className={`fx-severity ${group.severity==="隔离"||group.severity==="阻断"?"blocking":""}`}>{group.severity}</span></td>
+            <td>{group.type}</td>
+            <td className="fx-checks-number">{group.count}</td>
+            <td>{group.rows.length?group.rows.join("、"):"—"}</td>
+            <td>{group.detail||"—"}</td>
+          </tr>)}</tbody>
+        </table></div>
+      </section>}
+      {tbRows.length>0&&<section>
+        <h5>TB 汇兑损益取数</h5>
+        <p>用来和测算结果比较的那个「TB汇兑损益」，是从下面这几个科目取的。
+          序时账同口径合计 {money(reconciliation.jeFxGainLossAfterTransferExclusion)}，
+          与 TB 相差 {money(reconciliation.jeTbDifference)}。</p>
+        <div className="fx-checks-table"><table>
+          <thead><tr><th>科目</th><th>金额</th><th>取数口径</th><th>源文件行</th></tr></thead>
+          <tbody>{tbRows.map((row,index)=><tr key={index}>
+            <td>{String(row.account??"")}</td>
+            <td className="fx-checks-number">{money(row.amount)}</td>
+            <td>{String(row.basis??"")}</td>
+            <td className="fx-checks-number">{String(row.sourceRow??"")}</td>
+          </tr>)}</tbody>
+        </table></div>
+      </section>}
+    </div>
+  </details>;
+}
+/** 一句话说清这条隔离属于哪种粒度问题，用户不必读完整段 detail。 */
+export function granularityLabel(type:unknown):string{
+  switch(String(type??"")){
+    case "科目余额混合本位币与外币":return "科目余额里既有本位币又有外币，拆不开";
+    case "同一科目存在多种外币敞口":return "同一科目持有多种外币，TB 只有合计数";
+    case "无外币敞口的评估调整科目":return "评估调整科目，本身不持有外币";
+    default:return "TB 未提供可唯一对应的原币币种";
+  }
+}
+/** TB 粒度不足：外币敞口是「科目×币种」粒度，TB 只给到科目粒度就测不了。
+ *  这类科目会整块掉出测算结果，必须显式告诉用户原因和该补什么资料——
+ *  以前只写进底稿的「数据质量」Sheet，界面上什么都不显示，用户只会
+ *  看到一个对不上的差异率，误以为是工具算错了。 */
+function TbGranularityNotice({items}:{items:Array<Record<string,unknown>>}){
+  const [open,setOpen]=useState(false);
+  if(!items.length)return null;
+  return <section className="fx-granularity-notice">
+    <div className="fx-granularity-head">
+      <div>
+        <strong>TB 粒度不足：{items.length} 个科目无法测算未实现汇兑损益</strong>
+        <small>外币敞口要按「科目 ＋ 币种」才算得出来，而当前这份科目余额表只给到「科目」一级。
+          这些科目的余额里混了多种币别或本位币，工具无法拆分，已整块排除在测算之外——
+          它们的账面金额会出现在上面的「未覆盖账面金额」里。</small>
+        <div className="fx-granularity-action">
+          <b>要做什么：</b>请客户从 ERP 重新导出<b>按币种拆分</b>的科目余额表
+          （SAP 一般是在余额表里加上「货币」维度，使同一科目的不同币别各占一行），
+          替换当前 TB 后重新测算。
+        </div>
+      </div>
+      <Button variant="secondary" size="sm" onClick={()=>setOpen(v=>!v)}>
+        {open?"收起科目":"查看科目"}
+      </Button>
+    </div>
+    {open&&<div className="fx-granularity-table"><table>
+      <thead><tr><th>科目</th><th>币种</th><th>原因</th><th>说明</th></tr></thead>
+      <tbody>{items.map((item,index)=>{
+        const currencies=item.currencies;
+        const shown=Array.isArray(currencies)?currencies.join("、"):String(currencies??"—");
+        return <tr key={index}>
+          <td>{String(item.account??"")}</td>
+          <td>{shown||"—"}</td>
+          <td>{granularityLabel(item.type)}</td>
+          <td>{String(item.detail??"")}</td>
+        </tr>})}</tbody>
+    </table></div>}
+  </section>;
+}
 /** TB＋JE 余额滚动失配清单：**提示但不阻断**，逐条列出差在哪，用户自己判断。 */
 function RollforwardIssues({validation}:{validation?:Record<string,unknown>}){
   const [open,setOpen]=useState(false);
@@ -453,24 +660,90 @@ function FxResult({result,busy,classificationDrafts,onClassificationChange,onRec
   const clientRevaluations=(result.clientRevaluationVouchers??[]) as Array<Record<string,unknown>>;
   const unrealizedComparisonDifference=rollforward.reduce((sum,item)=>sum+Number(item.suggestedAdjustment??0),0);
   const groups=Object.values(controls.reduce<Record<string,{key:string;label:string;items:ClassificationControl[]}>>((all,item)=>{const key=item.patternKey||item.voucherId;const group=all[key]??{key,label:item.patternLabel||key,items:[]};group.items.push(item);all[key]=group;return all},{}));
+  const {undecided,unmeasurable}=splitClassificationGroups(groups,classificationDrafts);
   const accountNames=details.reduce<Record<string,{english:Set<string>;chinese:Set<string>}>>((all,item)=>{const code=String(item.accountCode??"").trim().toUpperCase();if(!code)return all;const names=all[code]??{english:new Set<string>(),chinese:new Set<string>()};const original=String(item.accountNameOriginal??"").trim();const chinese=String(item.accountNameChinese??"").trim();if(original){if(/[\u4e00-\u9fff]/.test(original))names.chinese.add(original);else names.english.add(original)}if(chinese)names.chinese.add(chinese);all[code]=names;return all},{});
   const accountSide=(title:string,codes:string[]|undefined)=><div className="fx-pattern-side"><strong>{title}</strong><div>{(codes??[]).map(code=>{const names=accountNames[code.trim().toUpperCase()];const english=names?[...names.english].join(" / "):"";const chinese=names?[...names.chinese].join(" / "):"";return <span key={code}><b>{code}</b><small>英文：{english||"—"}</small><small>中文：{chinese||"—"}</small></span>})}</div></div>;
   const amount=(value:unknown)=>{const number=Number(value??0);return new Intl.NumberFormat("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2}).format(Object.is(number,-0)||Math.abs(number)<0.005?0:number)};
   const percent=(value:unknown)=>value==null?"无法计算":new Intl.NumberFormat("zh-CN",{style:"percent",minimumFractionDigits:2,maximumFractionDigits:2}).format(Number(value));
+  const renderGroup=(group:{key:string;label:string;items:ClassificationControl[]})=>{
+    const selected=[...new Set(group.items.map(item=>classificationDrafts[item.voucherId]??item.classification))];
+    const value=selected.length===1?selected[0]:"待确认";
+    const booked=group.items.reduce((sum,item)=>sum+Number(item.bookedFxGainLoss??0),0);
+    const failed=group.items.filter(item=>item.measurementStatus?.startsWith("无法测算")).length;
+    const first=group.items[0];
+    return <label key={group.key}>
+      <span>
+        <b>{group.label}</b>
+        <div className="fx-pattern-names">{accountSide("借方科目",first.debitAccounts)}{accountSide("贷方科目",first.creditAccounts)}</div>
+        <small>{group.items.length} 张凭证；账面汇兑损益 {booked.toLocaleString("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2})}{failed?`；${failed} 张缺少重算证据`:""}</small>
+      </span>
+      <select disabled={busy} value={value} onChange={e=>onClassificationChange(group.items.map(item=>item.voucherId),e.target.value as VoucherClassification)}>
+        <option>已实现汇兑损益</option><option>未实现汇兑损益</option><option>待确认</option>
+      </select>
+    </label>;
+  };
   const tbKnown=summary.tbFxGainLoss!=null;const passed=summary.reconciliationPassed===true;
   const metric=(label:string,value:unknown,detail?:string,tone="")=><div className={`fx-bridge-metric ${tone}`.trim()}><span>{label}</span><strong>{typeof value==="string"?value:amount(value)}</strong>{detail&&<small>{detail}</small>}</div>;
   return <section className="fx-result" aria-labelledby="fx-result-title">
     <div className="fx-result-heading"><div><h3 id="fx-result-title">汇兑损益测算结果</h3><p>按计算顺序查看金额如何形成，并与TB完成比较。</p></div>{outputs.map(path=><Button key={path} variant="secondary" onClick={()=>void openOutput(path)}>打开Excel底稿</Button>)}</div>
     {Boolean(summary.needsZeroResultReview)&&<p className="fa-missing-hint">已读取外币凭证，但没有事件进入自动测算；相关金额已归入待复核项目，不会再被当作正常“0”。</p>}
+    <TbGranularityNotice items={(result.tbGranularityBlocked??[]) as Array<Record<string,unknown>>}/>
     <RollforwardIssues validation={result.balanceRollforwardValidation as Record<string,unknown>|undefined}/>
     {summary.unrealizedBalanceBasisComplete===false&&<p className="fa-missing-hint">未实现测算余额基础不完整：{String(summary.unrealizedMissingBalanceKeys??0)} 个账户币种余额键未取得可唯一对应的TB端点，已隔离且未按零期初测算。当前结果属于受限结果。</p>}
     <div className="fx-bridge-step"><div className="fx-step-label"><b>1</b><span>形成自动测算</span></div><div className="fx-bridge-equation">{metric("已实现汇兑损益",summary.realizedGainLoss)}<span className="fx-operator" aria-hidden="true">＋</span>{metric("未实现汇兑损益",summary.unrealizedAdjustment)}<span className="fx-operator" aria-hidden="true">＝</span>{metric("自动测算合计",summary.automaticMeasuredFxGainLoss,undefined,"total")}</div></div>
     <div className="fx-bridge-step"><div className="fx-step-label"><b>2</b><span>先比较已覆盖项目</span></div><div className="fx-bridge-equation">{metric("自动测算合计",summary.automaticMeasuredFxGainLoss)}<span className="fx-operator compare" aria-hidden="true">对比</span>{metric("已覆盖凭证账面金额",summary.coveredBookFxGainLoss,`已实现差异 ${amount(summary.realizedMeasurementDifference)}；未实现差异 ${amount(summary.unrealizedMeasurementDifference)}`)}<span className="fx-operator" aria-hidden="true">＝</span>{metric("已覆盖项目测算差异",summary.coveredMeasurementDifference,undefined,"total")}</div></div>
     <div className="fx-bridge-step comparison"><div className="fx-step-label"><b>3</b><span>解释完整TB差异</span></div><div className="fx-bridge-equation">{metric("已覆盖项目测算差异",summary.coveredMeasurementDifference)}<span className="fx-operator" aria-hidden="true">－</span>{metric("未覆盖账面金额",summary.uncoveredTbFxGainLoss,uncoveredDetail(summary))}<span className="fx-operator" aria-hidden="true">＝</span>{metric("完整TB总差异",tbKnown?(summary.difference??0):"无法比较",tbKnown?`TB汇兑损益 ${amount(summary.tbFxGainLoss)}；差异率 ${percent(summary.differenceRatio)}`:undefined,tbKnown?(passed?"pass":"warning"):"warning")}</div></div>
+    <FxChecks result={result}/>
     {rollforward.length>0&&<section className="fx-unrealized-module"><div><h4>外币货币性项目余额滚动与未实现损益测算</h4><p>期初余额＋正常业务JE发生额－客户已入账未实现损益及其冲回＝计算前余额；月末原币余额×官方汇率形成审计余额。被分类为“未实现汇兑损益”的凭证只用于账面比较，不作为审计测算金额。</p></div><div className="fx-unrealized-metrics">{metric("月度账户测算行",rollforward.length)}{metric("已识别未实现类凭证",clientRevaluations.length)}{metric("审计未实现汇兑损益",summary.unrealizedAdjustment)}{metric("与客户入账差异",unrealizedComparisonDifference,undefined,"warning")}</div></section>}
-    {groups.length>0&&<div className="fx-classification-review"><div className="fx-classification-heading"><div><h4>按借贷科目组合批量确认</h4><p>分类仍只有“已实现汇兑损益”“未实现汇兑损益”和“待确认”。未实现类凭证会从正常JE发生额中剔除，并在账户余额测算完成后与审计结果比较；不会直接采用该凭证金额作为测算结果。</p></div><Button disabled={busy} onClick={()=>void onRecalculate()}>{busy?"重新测算中…":"重新测算"}</Button></div><div className="fx-classification-list">{groups.map(group=>{const selected=[...new Set(group.items.map(item=>classificationDrafts[item.voucherId]??item.classification))];const value=selected.length===1?selected[0]:"待确认";const amount=group.items.reduce((sum,item)=>sum+Number(item.bookedFxGainLoss??0),0);const failed=group.items.filter(item=>item.measurementStatus?.startsWith("无法测算")).length;const first=group.items[0];return <label key={group.key}><span><b>{group.label}</b><div className="fx-pattern-names">{accountSide("借方科目",first.debitAccounts)}{accountSide("贷方科目",first.creditAccounts)}</div><small>{group.items.length} 张凭证；账面汇兑损益 {amount.toLocaleString("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2})}{failed?`；${failed} 张缺少重算证据`:""}</small></span><select disabled={busy} value={value} onChange={e=>onClassificationChange(group.items.map(item=>item.voucherId),e.target.value as VoucherClassification)}><option>已实现汇兑损益</option><option>未实现汇兑损益</option><option>待确认</option></select></label>})}</div></div>}
+    {groups.length>0&&<div className="fx-classification-review">
+      <div className="fx-classification-heading">
+        <div>
+          <h4>凭证分类复核</h4>
+          <p>分类只有“已实现汇兑损益”“未实现汇兑损益”和“待确认”三种。未实现类凭证会从正常JE发生额中剔除，
+            并在账户余额测算完成后与审计结果比较；不会直接采用该凭证金额作为测算结果。
+            借贷科目组合相同的凭证归成一组，可一次性改一整组。</p>
+        </div>
+        <Button disabled={busy} onClick={()=>void onRecalculate()}>{busy?"重新测算中…":"重新测算"}</Button>
+      </div>
+      {undecided.length>0&&<section className="fx-classification-section">
+        <h5>等你确认分类（{undecided.reduce((n,g)=>n+g.items.length,0)} 张）</h5>
+        <p>工具没能从科目名称判断这些凭证属于已实现还是未实现，需要你选一个。选完点「重新测算」。</p>
+        <div className="fx-classification-list">{undecided.map(renderGroup)}</div>
+      </section>}
+      {unmeasurable.length>0&&<section className="fx-classification-section">
+        <h5>已分好类，但工具算不出审计金额（{unmeasurable.reduce((n,g)=>n+g.items.length,0)} 张）</h5>
+        <p>这些凭证的分类已经确定（多数是按科目名称自动判的），<b>不需要你再确认</b>。
+          它们没进测算结果，是因为缺少重算所需的原币余额或汇率证据——账面金额已计入上面的
+          「未覆盖账面金额」。<b>常见原因是科目余额表粒度不够</b>，参见页首的提示。
+          如果你认为某一组的分类判错了，仍可在这里改。</p>
+        <div className="fx-classification-list">{unmeasurable.map(renderGroup)}</div>
+      </section>}
+    </div>}
   </section>
 }
 function fileName(path:string){return path.split(/[\\/]/).pop()??path}
 function outputsFrom(value:Record<string,unknown>|undefined){return(value?.outputPaths??[]) as string[]}
-function errorText(value:unknown){if(typeof value==="string")return value;if(value&&typeof value==="object"){const v=value as Record<string,unknown>;return String(v.userMessage??v.message??v.detail??"处理失败，请重试。")}return"处理失败，请重试。"}
+/** 校验未通过时，把后端塞在 detail 里的那段 JSON 拆成人话。
+ *
+ *  `MAPPING_INVALID` 的 detail 是 validate_mapping 的完整结果，直接显示就是
+ *  一串花括号。用户实测遇到过：界面只说「字段映射或数据质量校验未通过」，
+ *  到底哪一条不通过要靠猜——而后端其实已经把原因写得很清楚了。 */
+export function validationDetail(detail:unknown):string{
+  if(typeof detail!=="string"||!detail.includes("errors"))return"";
+  try{
+    const parsed=JSON.parse(detail) as {errors?:unknown};
+    const texts=((parsed.errors??[]) as unknown[]).filter((x):x is string=>typeof x==="string");
+    if(!texts.length)return"";
+    return `具体是：${texts.map((text,index)=>`${index+1}. ${text}`).join("；")}`;
+  }catch{return""}
+}
+function errorText(value:unknown){
+  if(typeof value==="string")return value;
+  if(value&&typeof value==="object"){
+    const v=value as Record<string,unknown>;
+    const detailed=validationDetail(v.detail);
+    if(detailed)return `${String(v.userMessage??"校验未通过。")}${detailed}`;
+    return String(v.userMessage??v.message??v.detail??"处理失败，请重试。");
+  }
+  return"处理失败，请重试。";
+}

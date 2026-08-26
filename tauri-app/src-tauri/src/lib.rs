@@ -288,9 +288,11 @@ async fn engine_call(
         method.as_str(),
         "fx.review_je_mapping" | "fx.review_tb_mapping"
     ) {
+        // 旧方法名只作兼容转发；实际规则、提示词和卫生过滤都走公共 TB/JE 引擎。
         let settings = storage.settings_get()?;
+        let kind = if method.contains("tb") { "tb" } else { "je" }.to_owned();
         tauri::async_runtime::spawn_blocking(move || {
-            audipick::fx_mapping_llm_call(&method, &params, &settings)
+            audipick::ledger_review_call(&kind, &params, &settings)
         })
         .await
         .map_err(|e| {
@@ -849,6 +851,16 @@ pub fn engine_call_for_test(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, AppError> {
+    if method == "ledger.review_mapping" {
+        let dirs = project_dirs()?;
+        let storage = Storage::new(dirs.data_local_dir())?;
+        let settings = storage.settings_get()?;
+        let kind = params
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("je");
+        return audipick::ledger_review_call(kind, &params, &settings);
+    }
     if let Some(rest) = method.strip_prefix("fx.") {
         if rest.starts_with("inspect")
             || matches!(rest, "account_roles" | "validate_mapping" | "check_mapping_alignment")
@@ -862,7 +874,8 @@ pub fn engine_call_for_test(
             let dirs = project_dirs()?;
             let storage = Storage::new(dirs.data_local_dir())?;
             let settings = storage.settings_get()?;
-            return audipick::fx_mapping_llm_call(method, &params, &settings);
+            let kind = if rest.contains("tb") { "tb" } else { "je" };
+            return audipick::ledger_review_call(kind, &params, &settings);
         }
     }
     if let Some(rest) = method.strip_prefix("deposit.") {

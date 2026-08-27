@@ -219,6 +219,34 @@ fn probe_custom_dataset() {
         .cloned()
         .unwrap_or_default();
     println!("== classificationControls 共 {} 条", controls.len());
+    // FX_CLASSIFY=1：打印全部凭证级分类明细（诊断漏认领用）。
+    if std::env::var("FX_CLASSIFY").ok().as_deref() == Some("1") {
+        if let Some(all) = v["classification"].as_array() {
+            println!("== classification 共 {} 条", all.len());
+            let mut by_class = std::collections::BTreeMap::<String, usize>::new();
+            for item in all {
+                let class = item["classification"].as_str().unwrap_or("?").to_string();
+                *by_class.entry(class.clone()).or_default() += 1;
+                let voucher = item["voucherId"].as_str().unwrap_or("");
+                let summary_hit = all
+                    .iter()
+                    .any(|x| x["voucherId"].as_str().unwrap_or("").contains(voucher));
+                let _ = summary_hit;
+                if class != "未实现" && class != "损益结转剔除" {
+                    println!(
+                        "   {} [{}] 事件={} 证据={} 反证={:?} 置信={}",
+                        voucher,
+                        class,
+                        item["eventType"].as_str().unwrap_or("?"),
+                        item["matchedRules"][0].as_str().unwrap_or("?"),
+                        item["counterEvidence"],
+                        item["confidence"].as_str().unwrap_or("?"),
+                    );
+                }
+            }
+            println!("   分类分布: {by_class:?}");
+        }
+    }
     let mut by_class = std::collections::BTreeMap::<String, usize>::new();
     let mut by_status = std::collections::BTreeMap::<String, usize>::new();
     let mut by_reason = std::collections::BTreeMap::<String, usize>::new();

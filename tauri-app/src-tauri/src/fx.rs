@@ -5633,6 +5633,9 @@ fn calculate_realized(
     }
     let mut calculation = Vec::new();
     let mut classes = Vec::new();
+    // 仅剩候选证据的外币业务凭证（投资款、外币收息等）：不构成汇兑事项、
+    // 原币已进余额滚动，但此前完全不可见——聚合一条提示让复核看得到。
+    let mut candidate_vouchers: Vec<String> = Vec::new();
     for (id, rows) in groups {
         if loss_ids.contains(&id) {
             classes.push(json!({
@@ -5677,6 +5680,9 @@ fn calculate_realized(
         // 本位币现金腿合计金额。
         let mut cash_foreign_rows = Vec::new();
         let mut cash_functional_movement = false;
+        // 本位币现金腿的合计金额：兑换凭证的金额配比判断要用（见下方
+        // conversion_pairing_ok），只判真假不够。
+        let mut cash_functional_total = 0.0_f64;
         let mut cash_foreign_movement = false;
         let mut noncash_foreign_movement = false;
         let mut monetary_has_foreign_movement = false;
@@ -5717,6 +5723,7 @@ fn calculate_realized(
                 if is_cash {
                     if currency.is_empty() || currency == entity_currency {
                         cash_functional_movement |= functional.abs() >= 0.01;
+                        cash_functional_total += functional;
                     } else {
                         cash_foreign_movement |= foreign.abs() >= 0.01;
                         // 外币现金行不论方向都收集：结汇（减少）与购汇（增加）
@@ -5810,9 +5817,41 @@ fn calculate_realized(
         .iter()
         .any(|value| summary_lower.contains(value));
         let type_settlement = matches!(voucher_type_upper.as_str(), "DZ" | "ZE");
+        // 无汇兑损益科目行的兑换凭证：客户把价差埋在成交价里、凭证里没有
+        // 损益行（用友结汇常见），这恰是审计必须独立重算的对象——此前被
+        // has_fx 门槛静默放过（2024 用友真实样例：50 万美元结汇零测算）。
+        // 放开门槛但要求两条现金腿金额配比：本位币现金腿 ≈ 外币现金腿 ×
+        // 记账日官方牌价（5% 容差）。配比是把「外币收息＋本币收息」这类
+        // 同凭证并排业务排除在外的关键——外币腿折算值与本币腿金额差着
+        // 两个数量级，不可能配对成功。
+        let conversion_pairing_ok = !has_fx
+            && cash_foreign_movement
+            && cash_functional_movement
+            && !noncash_foreign_movement
+            && settlement_targets.is_empty()
+            && cash_settlements.len() == 1
+            && cash_foreign_rows.first().is_some_and(|(row, ..)| {
+                let entity = entity_for(row, &mapping, params);
+                let functional_code = functional_currency(&entity, params);
+                cash_settlements.iter().next().is_some_and(
+                    |(currency, (foreign_sum, _))| {
+                        rate(snapshot, date, currency, &functional_code).is_some_and(
+                            |(official, _)| {
+                                let expected = foreign_sum.abs() * official;
+                                let actual = cash_functional_total.abs();
+                                expected > 0.005
+                                    && actual > 0.005
+                                    && (actual - expected).abs()
+                                        / expected.max(actual)
+                                        <= 0.05
+                            },
+                        )
+                    },
+                )
+            });
         // 外币兑换：外币货币资金与本位币货币资金对转、差额进汇兑损益，
         // 同样构成已实现结算证据；此时无终止确认行，以外币现金行为重算对象。
-        let conversion_pattern = has_fx
+        let conversion_pattern = (has_fx || conversion_pairing_ok)
             && cash_foreign_movement
             && cash_functional_movement
             && !noncash_foreign_movement
@@ -5830,7 +5869,10 @@ fn calculate_realized(
             continue;
         }
         let realized_hard = !manual_pending
-            && has_fx
+            // 兑换结构（外币现金↔本位币现金配比对转）本身即已实现证据，
+            // 凭证里没有汇兑损益行同样要重算；终止确认路径仍要求 has_fx，
+            // 保留「缺少历史账面价值证据」的保护。
+            && (has_fx || conversion_pattern)
             && (manual_realized || (!manual_unrealized && structural_settlement));
         let unrealized_hard = !realized_hard
             && revaluation_signal
@@ -5884,6 +5926,9 @@ fn calculate_realized(
                 "detail":"凭证结构符合月末重估（含汇兑损益科目、原币不动、本位币变化），但凭证类型与摘要均无重估字样；已按未实现重估处理，建议抽查是否为差错更正或原币列缺失。"
             }));
         }
+        if !realized_hard && !unrealized_hard && !has_settlement && has_foreign_currency {
+            candidate_vouchers.push(display_voucher_id(&id));
+        }
         if manual_realized && settlement_targets.is_empty() && !conversion_pattern {
             quality.push(json!({
                 "source":"JE", "voucherId":display_voucher_id(&id),
@@ -5891,7 +5936,7 @@ fn calculate_realized(
                 "detail":"完整凭证中未识别到可终止确认的外币货币性项目及其历史账面价值；未采用账面汇兑损益替代测算。"
             }));
         }
-        if realized_hard && !has_fx {
+        if realized_hard && !has_fx && !conversion_pattern {
             quality.push(json!({
                 "source": "JE", "voucherId": display_voucher_id(&id),
                 "type": "已实现候选缺少历史账面价值证据", "severity": "待复核",
@@ -5987,6 +6032,26 @@ fn calculate_realized(
                 }
             }
         }
+    }
+    if !candidate_vouchers.is_empty() {
+        let shown = candidate_vouchers
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("、");
+        let hidden = candidate_vouchers.len().saturating_sub(5);
+        quality.push(json!({
+            "source": "JE",
+            "type": "外币业务凭证不构成汇兑事项",
+            "severity": "提示",
+            "detail": format!(
+                "共{}张外币凭证未识别到结算或兑换结构（如{}{}），其原币变动已按月纳入外币余额滚动，不属于已实现或未实现汇兑损益；若其中实际存在结汇/购汇业务，请核对两条现金腿金额是否在同一凭证内。",
+                candidate_vouchers.len(),
+                shown,
+                if hidden > 0 { format!(" 等，另{}张", hidden) } else { String::new() }
+            )
+        }));
     }
     Ok((calculation, classes, quality))
 }
@@ -11786,6 +11851,109 @@ E,2025-01-10,3,AB,6603,汇兑损失,CNY,0,300\n",
         assert!((row["auditGainLoss"].as_f64().unwrap() - 500.0).abs() < 0.01);
         assert!((row["customerAppliedRate"].as_f64().unwrap() - 7.2).abs() < 0.0001);
         assert!((row["carryingBasisDifference"].as_f64().unwrap() + 500.0).abs() < 0.01);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 无汇兑损益行的结汇凭证按金额配比认领为已实现() {
+        // 用友真实形态：结汇凭证四行全现金、没有汇兑损益科目行，价差埋在
+        // 成交价里（2024 真实样例：卖 50 万美元按 7.1907，官方中间价
+        // 7.1174，月初牌价 7.0827）。放开 has_fx 门槛后按配比认领：
+        // 账面＝500000×7.0827＝3541350，折算＝500000×7.1174＝3558700，
+        // 资产减少方向 gain_loss＝carrying−translated＝−17350。
+        // 同凭证并排的外币收息（外币腿折算 230 vs 本币腿 46445）配比失败，
+        // 不认领；投资款本位币腿是非现金权益科目，同样不认领。
+        let root = std::env::temp_dir().join(format!("fx-no-line-conversion-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,凭证类型,科目,摘要,币种,原币,本位币\n\
+E,2024-01-18,6,记,1002,结汇01.18(USD/CNY7.1907),USD,-500000,-3595350\n\
+E,2024-01-18,6,记,1001,结汇01.18(USD/CNY7.1907),CNY,0,3595350\n\
+E,2024-03-21,7,记,1002,招行美元户结息,USD,32.42,229.99\n\
+E,2024-03-21,7,记,1001,招行基本户结息,CNY,0,46445.85\n\
+E,2024-05-09,8,记,1002,收到股东投资款,USD,1000,7100\n\
+E,2024-05-09,8,记,4001,收到股东投资款,CNY,0,-7100\n",
+        )
+        .unwrap();
+        let params = json!({
+            "fixedEntity":"E", "entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{
+                "entity":"公司","date":"日期","id":["凭证号"],"voucherType":"凭证类型",
+                "account":["科目"],"summary":"摘要","currency":"币种",
+                "foreignAmount":"原币","functionalAmount":"本位币"
+            },
+            "accountRoles":{"1002":"cash","1001":"cash","4001":"non_monetary"}
+        });
+        let snapshot = RateSnapshot {
+            source: "测试".into(),
+            source_url: String::new(),
+            fetched_at: String::new(),
+            response_hash: test_snapshot_hash("无汇兑损益行的结汇凭证按金额配比认领为已实现"),
+            start_date: "2023-12-31".into(),
+            end_date: "2024-05-09".into(),
+            rates: vec![
+                RatePoint {
+                    requested_date: "2023-12-31".into(),
+                    published_date: "2023-12-31".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.0827,
+                },
+                RatePoint {
+                    requested_date: "2023-12-31".into(),
+                    published_date: "2023-12-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+                RatePoint {
+                    requested_date: "2024-01-18".into(),
+                    published_date: "2024-01-18".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.1174,
+                },
+                RatePoint {
+                    requested_date: "2024-01-18".into(),
+                    published_date: "2024-01-18".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+            ],
+            missing: Vec::new(),
+        };
+        let (calculation, classes, quality) = calculate_realized(&params, &snapshot).unwrap();
+        assert_eq!(calculation.len(), 1, "只应认领结汇凭证：{calculation:#?}");
+        let row = &calculation[0];
+        assert_eq!(
+            row["calculationMethod"],
+            "外币兑换：月初牌价与交易日官方牌价独立重算"
+        );
+        assert!((row["officialRate"].as_f64().unwrap() - 7.1174).abs() < 0.0001);
+        assert!((row["monthOpeningRate"].as_f64().unwrap() - 7.0827).abs() < 0.0001);
+        assert!((row["carryingFunctional"].as_f64().unwrap() - 3541350.0).abs() < 1.0);
+        assert!((row["translatedFunctional"].as_f64().unwrap() - 3558700.0).abs() < 1.0);
+        assert!((row["auditGainLoss"].as_f64().unwrap() + 17350.0).abs() < 1.0);
+        assert!((row["customerAppliedRate"].as_f64().unwrap() - 7.1907).abs() < 0.0001);
+        let class_of = |voucher: &str| {
+            classes
+                .iter()
+                .find(|item| {
+                    item["voucherId"]
+                        .as_str()
+                        .is_some_and(|id| id.ends_with(voucher))
+                })
+                .and_then(|item| item["classification"].as_str())
+                .unwrap_or("?")
+        };
+        assert_eq!(class_of("6"), "已实现");
+        assert_eq!(class_of("7"), "已实现候选", "并排结息不得被认领为兑换");
+        assert_eq!(class_of("8"), "已实现候选", "投资款本位币腿非现金，不得认领");
+        assert!(
+            quality.iter().any(|item| item["type"]
+                == "外币业务凭证不构成汇兑事项"),
+            "剩余候选凭证应有聚合提示：{quality:#?}"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

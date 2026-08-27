@@ -4654,7 +4654,7 @@ fn calculate(
         quality.extend(issues);
     }
     if matches!(mode, "unrealized" | "combined") {
-        let (calculation, issues) = calculate_unrealized(params, &snapshot)?;
+        let (calculation, issues) = calculate_unrealized(params, &snapshot, &realized)?;
         unrealized = calculation;
         quality.extend(issues);
     }
@@ -6059,6 +6059,7 @@ fn calculate_realized(
 fn calculate_unrealized(
     params: &Value,
     snapshot: &RateSnapshot,
+    realized: &[Value],
 ) -> Result<(Vec<Value>, Vec<Value>), AppError> {
     let spec: SourceSpec = serde_json::from_value(params.get("tbSource").cloned().unwrap())
         .map_err(|e| error("INVALID_PARAMS", "TB参数无效。", Some(e.to_string())))?;
@@ -6083,7 +6084,7 @@ fn calculate_unrealized(
         && amount_scheme_ok(&mapping, "closingForeign");
     if has_je && !has_foreign_balances {
         return calculate_inferred_opening_unrealized(
-            params, snapshot, start, end, &table, &mapping,
+            params, snapshot, start, end, &table, &mapping, realized,
         );
     }
     let mut output = Vec::new();
@@ -6177,8 +6178,9 @@ fn calculate_unrealized(
         }));
     }
     if has_je {
-        let monthly =
-            calculate_monthly_unrealized(params, snapshot, start, end, &output, &mut quality)?;
+        let monthly = calculate_monthly_unrealized(
+            params, snapshot, start, end, &output, &mut quality, realized,
+        )?;
         Ok((monthly, quality))
     } else {
         Ok((output, quality))
@@ -6192,6 +6194,7 @@ fn calculate_inferred_opening_unrealized(
     end: NaiveDate,
     tb_table: &FxTable,
     tb_mapping: &Map<String, Value>,
+    realized: &[Value],
 ) -> Result<(Vec<Value>, Vec<Value>), AppError> {
     let je_spec: SourceSpec = serde_json::from_value(params.get("jeSource").cloned().unwrap())
         .map_err(|e| error("INVALID_PARAMS", "JE参数无效。", Some(e.to_string())))?;
@@ -6284,7 +6287,7 @@ fn calculate_inferred_opening_unrealized(
     let mut endpoints = Vec::new();
     let mut quality = vec![json!({
         "source":"TB+JE", "type":"期初原币余额估算", "severity":"重要提示",
-        "detail":"TB未提供原币余额；系统以期初本位币余额÷期初官方汇率估算期初原币，再用JE原币发生额滚动。该结果属于受限测算，底稿单独披露，不以客户已入账未实现汇兑损益凭证倒算审计金额。"
+        "detail":"TB未提供原币余额；系统以期初本位币余额÷期初官方汇率估算期初原币，再用JE原币发生额滚动。该结果属于受限测算，底稿单独披露，不以客户已入账未实现汇兑损益凭证倒算审计金额。未实现测算的精度直接依赖该估算值（已实现测算不受影响），建议以银行对账单或函证确认年初外币余额后重算。"
     })];
     for row in tb_leaf_records(tb_table, tb_mapping) {
         let account = account_name(&row, tb_mapping);
@@ -6447,8 +6450,9 @@ fn calculate_inferred_opening_unrealized(
             "sourceRow":row.source_row
         }));
     }
-    let monthly =
-        calculate_monthly_unrealized(params, snapshot, start, end, &endpoints, &mut quality)?;
+    let monthly = calculate_monthly_unrealized(
+        params, snapshot, start, end, &endpoints, &mut quality, realized,
+    )?;
     Ok((monthly, quality))
 }
 
@@ -6694,6 +6698,7 @@ fn calculate_monthly_unrealized(
     end: NaiveDate,
     endpoints: &[Value],
     quality: &mut Vec<Value>,
+    realized: &[Value],
 ) -> Result<Vec<Value>, AppError> {
     let spec: SourceSpec = serde_json::from_value(params.get("jeSource").cloned().unwrap())
         .map_err(|e| error("INVALID_PARAMS", "JE参数无效。", Some(e.to_string())))?;
@@ -6825,6 +6830,27 @@ fn calculate_monthly_unrealized(
         }
     }
 
+    // 已实现重算过的腿（按源文件行号索引）：滚动里的本位币发生额必须改用
+    // 审计口径（原币×月初牌价），否则已实现损益先在重算里计一次、又混进
+    // 月末重估残差里计第二次（2024 用友真实样例实测：50 万美元结汇的
+    // 17,350 重复计、36,650 价差被错穿「未实现」外衣）。客户账面与审计
+    // 口径的差额单独披露为「已实现腿入账基础差异」。
+    let mut realized_legs = HashMap::<u64, f64>::new();
+    for item in realized {
+        if let (Some(row), Some(signed), Some(carrying)) = (
+            item.get("sourceRow").and_then(Value::as_u64),
+            item.get("targetForeignSigned").and_then(Value::as_f64),
+            item.get("carryingFunctional").and_then(Value::as_f64),
+        ) {
+            let audit_functional = if signed < 0.0 {
+                -carrying
+            } else {
+                carrying
+            };
+            realized_legs.insert(row, audit_functional);
+        }
+    }
+
     let mut output = Vec::new();
     let mut missing_balance_keys = BTreeSet::new();
     let mut previous = start - Duration::days(1);
@@ -6832,7 +6858,7 @@ fn calculate_monthly_unrealized(
         .into_iter()
         .filter(|date| *date == end || (*date + Duration::days(1)).day() == 1)
     {
-        let mut movement: HashMap<String, (f64, f64, f64)> = HashMap::new();
+        let mut movement: HashMap<String, (f64, f64, f64, f64)> = HashMap::new();
         let mut revaluation_vouchers: HashMap<String, BTreeSet<String>> = HashMap::new();
         for row in &rows {
             let Some(date) = parse_date(cell(row, &mapping, "date")) else {
@@ -6883,13 +6909,19 @@ fn calculate_monthly_unrealized(
                     Some(format!("第{}行：{e}", row.source_row)),
                 )
             })?;
-            let item = movement.entry(key.clone()).or_insert((0.0, 0.0, 0.0));
+            let item = movement.entry(key.clone()).or_insert((0.0, 0.0, 0.0, 0.0));
             if revaluation_meta.contains_key(&display_id) {
                 item.2 += functional;
                 revaluation_vouchers
                     .entry(key.clone())
                     .or_default()
                     .insert(display_id);
+            } else if let Some(audit_functional) =
+                realized_legs.get(&(row.source_row as u64))
+            {
+                item.0 += foreign;
+                item.1 += *audit_functional;
+                item.3 += functional - *audit_functional;
             } else {
                 item.0 += foreign;
                 item.1 += functional;
@@ -6898,8 +6930,8 @@ fn calculate_monthly_unrealized(
         for (key, (entity, account, auxiliary, currency, foreign_balance, prior_audit)) in
             state.clone()
         {
-            let (foreign_change, non_revaluation_change, client_revaluation) =
-                movement.get(&key).copied().unwrap_or((0.0, 0.0, 0.0));
+            let (foreign_change, non_revaluation_change, client_revaluation, realized_basis_difference) =
+                movement.get(&key).copied().unwrap_or((0.0, 0.0, 0.0, 0.0));
             let closing_foreign = foreign_balance + foreign_change;
             let functional = functional_currency(&entity, params);
             let Some((official_rate, published_date)) =
@@ -6936,6 +6968,7 @@ fn calculate_monthly_unrealized(
                 "openingForeign": foreign_balance, "openingAuditFunctional": prior_audit,
                 "businessForeignMovement": foreign_change, "closingForeign": closing_foreign,
                 "businessFunctionalMovement": non_revaluation_change,
+                "realizedLegBasisDifference": realized_basis_difference,
                 "preRevaluationFunctional": pre_revaluation,
                 "officialRate": official_rate, "publishedDate": published_date,
                 "auditClosingFunctional": audit_closing,
@@ -8169,6 +8202,9 @@ fn write_value_array_sheet(
 /// 审计结论页的未实现公式直接 SUM 该 L 列，打开 Excel 重算仍能复现，
 /// 任意一行都能用同行原币与汇率手工验算。此前用按键名排序的通用转储，
 /// 结论页公式引用不到数据，重算后全部归零（曾显示为占位横线）。
+/// 注意：S 列业务本位币发生额对已实现重算过的腿是审计口径
+/// （原币×月初牌价），与客户账面之差在末列「已实现腿入账基础差异」披露，
+/// 避免已实现损益在月末重估残差里被重复计算。
 fn write_unrealized_rollforward_sheet(
     workbook: &mut Workbook,
     value: Option<&Value>,
@@ -8208,6 +8244,7 @@ fn write_unrealized_rollforward_sheet(
         ("auditBalanceAdjustment", "审计期末折算余额调整"),
         ("tbClosingFunctional", "TB年末本位币余额"),
         ("tbReconciliationDifference", "TB勾稽差异"),
+        ("realizedLegBasisDifference", "已实现腿入账基础差异（账面−审计）"),
     ];
     for (column, (_, title)) in COLUMNS.iter().enumerate() {
         sheet
@@ -8262,6 +8299,7 @@ fn write_unrealized_rollforward_sheet(
         //   M 建议调整       = L重估损益 − N客户已入账未实现
         //   U 审计折算调整   = J审计折算 − K测算前
         //   W TB勾稽差异     = J审计折算 − V年末本位币（仅年末行有 V）
+        //   X 已实现腿入账基础差异 = 静态披露列（客户账面−审计口径）
         for (column, key, format) in [
             (8u16, "officialRate", &rate_format),
             (13, "clientBookedUnrealizedGainLoss", &amount),
@@ -8271,6 +8309,7 @@ fn write_unrealized_rollforward_sheet(
             (18, "businessFunctionalMovement", &amount),
             (19, "clientRevaluationBalanceAdjustment", &amount),
             (21, "tbClosingFunctional", &amount),
+            (23, "realizedLegBasisDifference", &amount),
         ] {
             if let Some(value) = number(key) {
                 sheet
@@ -8877,6 +8916,7 @@ fn chinese_header(key: &str) -> &str {
         "preRevaluationFunctional" => "未实现损益测算前本位币余额",
         "publishedDate" => "汇率公布日期",
         "realizedEvents" => "已实现测算事件数",
+        "realizedLegBasisDifference" => "已实现腿入账基础差异（账面−审计）",
         "realizedGainLoss" => "已实现汇兑损益",
         "realizedScore" => "已实现得分",
         "reconciliationPassed" => "勾稽是否通过",
@@ -9533,6 +9573,7 @@ E,2025-01-31,R,AB,6603,月末重估,CNY,0,-5\n",
             NaiveDate::from_ymd_opt(2025, 1, 31).unwrap(),
             &endpoints,
             &mut quality,
+            &[],
         )
         .unwrap();
         assert_eq!(rows.len(), 1, "quality={quality:#?}");
@@ -9555,6 +9596,106 @@ E,2025-01-31,R,AB,6603,月末重估,CNY,0,-5\n",
             row.get("voucherId").is_none(),
             "账户级测算不得伪装成凭证级测算"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 已实现腿在余额滚动中按月初牌价入账并披露基础差异() {
+        // 结汇 100 美元：客户按成交价 7.1907 入账 −719.07；审计口径出账
+        // = 100×月初牌价 7.15 = −715。滚动发生额取审计口径，月末重估 =
+        // (7150−715) − 900×7.10 = 6435−6390 = +45（客户账面口径会算出
+        // 6430.93−6390 = 40.93，把已实现与价差混进未实现残差）。
+        // 账面−审计的 −4.07 单独披露在「已实现腿入账基础差异」。
+        let root = std::env::temp_dir().join(format!("fx-audit-basis-roll-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let je = root.join("je.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,凭证类型,科目,摘要,币种,原币,本位币\n\
+E,2025-01-10,1,记,1002,结汇,USD,-100,-719.07\n\
+E,2025-01-10,1,记,1001,结汇,CNY,0,719.07\n",
+        )
+        .unwrap();
+        let params = json!({
+            "fixedEntity":"E", "entityCurrencies":{"E":"CNY"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{
+                "entity":"公司","date":"日期","id":["凭证号"],"voucherType":"凭证类型",
+                "account":["科目"],"summary":"摘要","currency":"币种",
+                "foreignAmount":"原币","functionalAmount":"本位币"
+            },
+            "accountRoles":{"1002":"cash","1001":"cash"}
+        });
+        let snapshot = RateSnapshot {
+            source: "测试".into(),
+            source_url: String::new(),
+            fetched_at: String::new(),
+            response_hash: test_snapshot_hash("已实现腿在余额滚动中按月初牌价入账并披露基础差异"),
+            start_date: "2024-12-31".into(),
+            end_date: "2025-01-31".into(),
+            rates: vec![
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.15,
+                },
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+                RatePoint {
+                    requested_date: "2025-01-31".into(),
+                    published_date: "2025-01-31".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.10,
+                },
+                RatePoint {
+                    requested_date: "2025-01-31".into(),
+                    published_date: "2025-01-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
+            ],
+            missing: Vec::new(),
+        };
+        let endpoints = vec![json!({
+            "entity":"E", "account":"1002 银行存款-美元户", "auxiliary":"", "currency":"USD",
+            "openingForeign":1000.0, "openingAuditFunctional":7150.0,
+            "closingBookFunctional":6430.93
+        })];
+        let realized = vec![json!({
+            "voucherId":"E-2025-01-10-1", "sourceRow":2,
+            "targetForeignSigned":-100.0, "carryingFunctional":715.0
+        })];
+        let mut quality = Vec::new();
+        let rows = calculate_monthly_unrealized(
+            &params,
+            &snapshot,
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 1, 31).unwrap(),
+            &endpoints,
+            &mut quality,
+            &realized,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1, "quality={quality:#?}");
+        let row = &rows[0];
+        assert_eq!(row["businessForeignMovement"], json!(-100.0));
+        assert_eq!(
+            row["businessFunctionalMovement"], json!(-715.0),
+            "已实现腿的本位币发生额必须按月初牌价入账，不得用客户成交价账面数"
+        );
+        assert!(
+            (row["realizedLegBasisDifference"].as_f64().unwrap() + 4.07).abs() < 0.001,
+            "入账基础差异 = 账面(−719.07) − 审计(−715) = −4.07，实际 {:?}",
+            row["realizedLegBasisDifference"]
+        );
+        assert_eq!(row["preRevaluationFunctional"], json!(6435.0));
+        assert_eq!(row["auditClosingFunctional"], json!(6390.0));
+        assert_eq!(row["unrealizedGainLoss"], json!(45.0));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -9628,6 +9769,7 @@ E,2025-01-31,V001,SA,6701120001 财务费用-汇兑损失-未实现,INV-20250131
             NaiveDate::from_ymd_opt(2025, 1, 31).unwrap(),
             &endpoints,
             &mut quality,
+            &[],
         )
         .unwrap();
         assert_eq!(rows.len(), 1, "quality={quality:#?}");
@@ -10239,6 +10381,7 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             NaiveDate::from_ymd_opt(2025, 1, 31).unwrap(),
             &endpoints,
             &mut monthly_quality,
+            &realized,
         )
         .unwrap();
         assert!(
@@ -11354,6 +11497,7 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             NaiveDate::from_ymd_opt(2025, 12, 31).unwrap(),
             &tb_table,
             &tb_mapping,
+            &[],
         )
         .unwrap();
         // 按「科目＋问题类型」精确查，不能只按科目——同一个科目在后续的月度

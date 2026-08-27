@@ -8188,21 +8188,24 @@ fn write_unrealized_rollforward_sheet(
                 .write_string(output_row, 1, localized_text("account", value))
                 .map_err(xlsx_err)?;
         }
-        // 数值静态列：H 原币、I 汇率之外的全部输入项。
+        // 数值输入列（来自 TB/JE 的原始事实，表内无法推导）：保持静态。
+        // 其余全部按引擎同款算式写成行内公式，打开即可验算：
+        //   H 月末原币余额   = P期初原币 + R业务原币发生
+        //   K 测算前本位币   = Q期初审计折算 + S业务本位币发生
+        //   J 审计折算余额   = H原币 × I月末中间价
+        //   L 月末重估损益   = K测算前 − J审计折算
+        //   M 建议调整       = L重估损益 − N客户已入账未实现
+        //   U 审计折算调整   = J审计折算 − K测算前
+        //   W TB勾稽差异     = J审计折算 − V年末本位币（仅年末行有 V）
         for (column, key, format) in [
-            (7u16, "closingForeign", &amount),
-            (8, "officialRate", &rate_format),
-            (10, "preRevaluationFunctional", &amount),
-            (12, "suggestedAdjustment", &amount),
+            (8u16, "officialRate", &rate_format),
             (13, "clientBookedUnrealizedGainLoss", &amount),
             (15, "openingForeign", &amount),
             (16, "openingAuditFunctional", &amount),
             (17, "businessForeignMovement", &amount),
             (18, "businessFunctionalMovement", &amount),
             (19, "clientRevaluationBalanceAdjustment", &amount),
-            (20, "auditBalanceAdjustment", &amount),
             (21, "tbClosingFunctional", &amount),
-            (22, "tbReconciliationDifference", &amount),
         ] {
             if let Some(value) = number(key) {
                 sheet
@@ -8210,8 +8213,63 @@ fn write_unrealized_rollforward_sheet(
                     .map_err(xlsx_err)?;
             }
         }
-        // 公式列：J=H×I（原币×月末中间价），L=K−J（测算前−审计折算）。
-        // 上游字段缺失时不写公式，避免留下一个看似可信的错误数字。
+        // 公式写入约定：算式的两个输入都在才写公式（缓存值仍取引擎结果，
+        // 保证预览器与重算一致）；任一缺失则回退静态值或留空，避免留下
+        // 看似可信的错误数字。
+
+        // H = P + R（月末原币余额 = 期初原币 + 业务原币发生）
+        match (
+            number("openingForeign"),
+            number("businessForeignMovement"),
+            number("closingForeign"),
+        ) {
+            (Some(_opening), Some(movement), Some(closing)) => {
+                sheet
+                    .write_formula_with_format(
+                        output_row,
+                        7,
+                        Formula::new(format!("P{excel_row}+R{excel_row}"))
+                            .set_result(closing.to_string()),
+                        &amount,
+                    )
+                    .map_err(xlsx_err)?;
+            }
+            (_, _, Some(closing)) => {
+                sheet
+                    .write_number_with_format(output_row, 7, closing, &amount)
+                    .map_err(xlsx_err)?;
+            }
+            _ => {}
+        }
+        // I 官方中间价已在上方静态列写出。
+
+        // K = Q + S
+        match (
+            row.get("openingAuditFunctional").and_then(Value::as_f64),
+            row.get("businessFunctionalMovement").and_then(Value::as_f64),
+            row.get("preRevaluationFunctional").and_then(Value::as_f64),
+        ) {
+            (Some(_prior), Some(change), Some(pre)) => {
+                sheet
+                    .write_formula_with_format(
+                        output_row,
+                        10,
+                        Formula::new(format!("Q{excel_row}+S{excel_row}")).set_result(
+                            pre.to_string(),
+                        ),
+                        &amount,
+                    )
+                    .map_err(xlsx_err)?;
+            }
+            (_, _, Some(pre)) => {
+                sheet
+                    .write_number_with_format(output_row, 10, pre, &amount)
+                    .map_err(xlsx_err)?;
+            }
+            _ => {}
+        }
+
+        // J = H × I
         if let (Some(closing), Some(rate)) = (number("closingForeign"), number("officialRate")) {
             let cached = row
                 .get("auditClosingFunctional")
@@ -8232,8 +8290,10 @@ fn write_unrealized_rollforward_sheet(
                 .write_number_with_format(output_row, 9, cached, &amount)
                 .map_err(xlsx_err)?;
         }
+
+        // L = K − J
         if let (Some(pre), Some(audit)) = (
-            number("preRevaluationFunctional"),
+            row.get("preRevaluationFunctional").and_then(Value::as_f64),
             row.get("auditClosingFunctional").and_then(Value::as_f64),
         ) {
             sheet
@@ -8250,6 +8310,85 @@ fn write_unrealized_rollforward_sheet(
             sheet
                 .write_number_with_format(output_row, 11, gain_loss, &amount)
                 .map_err(xlsx_err)?;
+        }
+
+        // M = L − N（audit 未实现损益 − 客户已入账，即建议调整分录方向）
+        match (
+            row.get("unrealizedGainLoss").and_then(Value::as_f64),
+            row.get("clientBookedUnrealizedGainLoss").and_then(Value::as_f64),
+            row.get("suggestedAdjustment").and_then(Value::as_f64),
+        ) {
+            (Some(gain_loss), Some(booked), Some(suggested)) => {
+                sheet
+                    .write_formula_with_format(
+                        output_row,
+                        12,
+                        Formula::new(format!("L{excel_row}-N{excel_row}")).set_result(
+                            suggested.to_string(),
+                        ),
+                        &amount,
+                    )
+                    .map_err(xlsx_err)?;
+            }
+            (_, _, Some(suggested)) => {
+                sheet
+                    .write_number_with_format(output_row, 12, suggested, &amount)
+                    .map_err(xlsx_err)?;
+            }
+            _ => {}
+        }
+
+        // U = J − K（审计折算后账面需要补记的调整额；L 是它的相反数）
+        match (
+            row.get("auditClosingFunctional").and_then(Value::as_f64),
+            row.get("preRevaluationFunctional").and_then(Value::as_f64),
+            row.get("auditBalanceAdjustment").and_then(Value::as_f64),
+        ) {
+            (Some(audit), Some(pre), Some(adjustment)) => {
+                sheet
+                    .write_formula_with_format(
+                        output_row,
+                        20,
+                        Formula::new(format!("J{excel_row}-K{excel_row}")).set_result(
+                            adjustment.to_string(),
+                        ),
+                        &amount,
+                    )
+                    .map_err(xlsx_err)?;
+            }
+            (_, _, Some(adjustment)) => {
+                sheet
+                    .write_number_with_format(output_row, 20, adjustment, &amount)
+                    .map_err(xlsx_err)?;
+            }
+            _ => {}
+        }
+
+        // W = J − V，仅年末行有 TB 期末数可比；其余月份该列为空。
+        match (
+            row.get("auditClosingFunctional").and_then(Value::as_f64),
+            row.get("tbClosingFunctional").and_then(Value::as_f64),
+            row.get("tbReconciliationDifference").and_then(Value::as_f64),
+        ) {
+            (Some(audit), Some(tb), difference) => {
+                let cached = difference.unwrap_or(audit - tb);
+                sheet
+                    .write_formula_with_format(
+                        output_row,
+                        22,
+                        Formula::new(format!("J{excel_row}-V{excel_row}")).set_result(
+                            cached.to_string(),
+                        ),
+                        &amount,
+                    )
+                    .map_err(xlsx_err)?;
+            }
+            (_, None, Some(difference)) => {
+                sheet
+                    .write_number_with_format(output_row, 22, difference, &amount)
+                    .map_err(xlsx_err)?;
+            }
+            _ => {}
         }
         // 客户重估凭证：凭证号＋摘要合并为一段可读文本。
         let mut vouchers = Vec::new();
@@ -10400,21 +10539,38 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             "voucherDetail": [], "classification": [],
             "realized": [], "unrealized": [], "pendingReview": [],
             "clientRevaluationVouchers": [],
-            "unrealizedBalanceRollforward": [{
-                "entity": "4800", "account": "2211020001 应付职工薪酬",
-                "currency": "HKD", "functionalCurrency": "USD",
-                "monthEnd": "2025-05-31", "publishedDate": "2025-05-30",
-                "closingForeign": closing_foreign, "officialRate": official_rate,
-                "auditClosingFunctional": audit_closing,
-                "preRevaluationFunctional": pre_revaluation,
-                "unrealizedGainLoss": unrealized,
-                "suggestedAdjustment": -3745.27,
-                "clientBookedUnrealizedGainLoss": 0.05,
-                "clientRevaluationVoucherIds": ["E-V001"],
-                "clientRevaluationDetails": [
-                    {"voucherId": "E-V001", "summary": "调整汇差", "bookedFxGainLoss": 0.05}
-                ]
-            }]
+            "unrealizedBalanceRollforward": [
+                {
+                    "entity": "4800", "account": "2211020001 应付职工薪酬",
+                    "currency": "HKD", "functionalCurrency": "USD",
+                    "monthEnd": "2025-05-31", "publishedDate": "2025-05-30",
+                    "closingForeign": closing_foreign, "officialRate": official_rate,
+                    "auditClosingFunctional": audit_closing,
+                    "preRevaluationFunctional": pre_revaluation,
+                    "unrealizedGainLoss": unrealized,
+                    "suggestedAdjustment": -3745.27,
+                    "clientBookedUnrealizedGainLoss": 0.05,
+                    "clientRevaluationVoucherIds": ["E-V001"],
+                    "clientRevaluationDetails": [
+                        {"voucherId": "E-V001", "summary": "调整汇差", "bookedFxGainLoss": 0.05}
+                    ]
+                },
+                {
+                    "entity": "4800", "account": "10020002 招商银行-美元资本金",
+                    "currency": "USD", "functionalCurrency": "CNY",
+                    "monthEnd": "2025-12-31", "publishedDate": "2025-12-31",
+                    "openingForeign": 80.0, "businessForeignMovement": -10.0,
+                    "closingForeign": 70.0, "officialRate": 0.9,
+                    "openingAuditFunctional": 500.0, "businessFunctionalMovement": 229.99,
+                    "preRevaluationFunctional": 729.99,
+                    "auditClosingFunctional": 63.0,
+                    "unrealizedGainLoss": 666.99,
+                    "clientBookedUnrealizedGainLoss": 600.0,
+                    "suggestedAdjustment": 66.99,
+                    "auditBalanceAdjustment": -666.99,
+                    "tbClosingFunctional": 60.5
+                }
+            ]
         });
         let params = json!({
             "reportStart": "2025-01-01", "reportEnd": "2025-05-31",
@@ -10470,6 +10626,19 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             rolls.iter().any(|t| t.contains("K2-J2")),
             "月末重估损益列应为 K−J 公式，实际 {rolls:?}"
         );
+        // 第二行（带 TB 年末数的示例）：全部行内算式均可验算。
+        for (needle, what) in [
+            ("P3+R3", "月末原币余额=期初+业务发生"),
+            ("Q3+S3", "测算前本位币=期初审计折算+业务本位币发生"),
+            ("L3-N3", "建议调整=重估损益−客户已入账"),
+            ("J3-K3", "审计折算调整=审计折算−测算前"),
+            ("J3-V3", "TB勾稽差异=审计折算−TB年末本位币"),
+        ] {
+            assert!(
+                rolls.iter().any(|t| t.contains(needle)),
+                "滚动页缺少公式 {what}（{needle}），实际 {rolls:?}"
+            );
+        }
 
         fs::remove_file(path).unwrap();
     }

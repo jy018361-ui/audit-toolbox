@@ -4,7 +4,7 @@
 //! neither the UI nor the LLM is trusted for arithmetic or classification.
 use crate::ledger_mapping;
 use crate::{AppError, excel_merger::PauseCheckpoint, tabular};
-use calamine::{Data, Reader, open_workbook_auto};
+use calamine::{Data, DataType, Reader, open_workbook_auto};
 use chrono::{Datelike, Duration, NaiveDate, Utc};
 use directories::ProjectDirs;
 use reqwest::blocking::Client;
@@ -7035,9 +7035,8 @@ fn export_workbook(params: &Value, result: &Value) -> Result<String, AppError> {
                 "未实现凭证识别",
                 result.get("clientRevaluationVouchers"),
             )?;
-            write_value_array_sheet(
+            write_unrealized_rollforward_sheet(
                 &mut workbook,
-                "外币余额滚动",
                 result.get("unrealizedBalanceRollforward"),
             )?;
             write_value_array_sheet(
@@ -7127,6 +7126,10 @@ fn write_user_conclusion_sheet(
         .set_bold()
         .set_font_color("#1B5E20")
         .set_background_color("#E8F5E9");
+    let fail = Format::new()
+        .set_bold()
+        .set_font_color("#B71C1C")
+        .set_background_color("#FDECEA");
     let sheet = workbook.add_worksheet();
     setup(sheet, "审计结论")?;
     sheet
@@ -7165,6 +7168,9 @@ fn write_user_conclusion_sheet(
             .write_string((index + 1) as u32, 1, *value)
             .map_err(xlsx_err)?;
     }
+    // 「外币余额滚动」页只在带 JE 的模式下生成；无 JE 时结论退回静态数，
+    // 避免引用一个不存在的 Sheet 让 Excel 打开就报 #REF!。
+    let has_rollforward_sheet = params.get("jeSource").is_some();
     let amount_rows = [
         ("已实现汇兑损益测算", "realizedGainLoss"),
         ("未实现汇兑损益测算", "unrealizedAdjustment"),
@@ -7192,10 +7198,16 @@ fn write_user_conclusion_sheet(
                 "SUMIF('汇兑损益测算'!$C:$C,\"已实现\",'汇兑损益测算'!${0}:${0})",
                 gain_loss_column
             ),
-            "unrealizedAdjustment" => format!(
-                "SUMIF('汇兑损益测算'!$C:$C,\"未实现\",'汇兑损益测算'!${0}:${0})",
-                gain_loss_column
-            ),
+            // 未实现的逐月重估不落在「汇兑损益测算」页（那张表只有凭证级
+            // 的已实现与待复核行），必须 SUM 滚动页的「月末重估损益」公式列，
+            // 否则 Excel 打开重算时该公式取到 0，结论页金额全部归零。
+            "unrealizedAdjustment" => {
+                if has_rollforward_sheet {
+                    "SUM('外币余额滚动'!$L:$L)".to_owned()
+                } else {
+                    String::new()
+                }
+            }
             "automaticMeasuredFxGainLoss" => "SUM(B5:B6)".to_owned(),
             "pendingReviewAmount" => format!(
                 "SUMIF('汇兑损益测算'!$C:$C,\"待复核\",'汇兑损益测算'!${0}:${0})",
@@ -7238,8 +7250,19 @@ fn write_user_conclusion_sheet(
         .get("reconciliationPassed")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // 与引擎判定一致：|TB|<0.01 无法计算差异率视为不通过；否则差异率<5% 通过。
+    // 必须是活公式——此前写死「通过」，数字归零后出现“差异率 100% 仍显示通过”。
     sheet
-        .write_string_with_format(12, 1, if passed { "通过" } else { "不通过" }, &pass)
+        .write_formula_with_format(
+            12,
+            1,
+            Formula::new(concat!(
+                "IF(ABS(B10)<0.01,\"不通过\",",
+                "IF(ABS(B11/B10)<0.05,\"通过\",\"不通过\"))"
+            ))
+            .set_result(if passed { "通过" } else { "不通过" }),
+            if passed { &pass } else { &fail },
+        )
         .map_err(xlsx_err)?;
     sheet
         .write_string_with_format(14, 0, "测算类型", &header)
@@ -8072,6 +8095,195 @@ fn write_value_array_sheet(
             }
         }
     }
+    Ok(())
+}
+
+/// 「外币余额滚动」专属导出器：固定列序并写入活公式，保证底稿可追溯——
+/// 审计月末本位币余额 = 月末原币余额 × 月末官方中间价（J 列），
+/// 月末重估损益 = 测算前本位币余额 − 审计月末本位币余额（L 列）。
+/// 审计结论页的未实现公式直接 SUM 该 L 列，打开 Excel 重算仍能复现，
+/// 任意一行都能用同行原币与汇率手工验算。此前用按键名排序的通用转储，
+/// 结论页公式引用不到数据，重算后全部归零（曾显示为占位横线）。
+fn write_unrealized_rollforward_sheet(
+    workbook: &mut Workbook,
+    value: Option<&Value>,
+) -> Result<(), AppError> {
+    let rows = value.and_then(Value::as_array).cloned().unwrap_or_default();
+    let (header, _) = formats();
+    let amount = Format::new().set_num_format("#,##0.00;[Red](#,##0.00);-");
+    let rate_format = Format::new().set_num_format("0.00000000");
+    let wrap = Format::new().set_text_wrap();
+    let sheet = workbook.add_worksheet();
+    setup(sheet, "外币余额滚动")?;
+    // (key, 中文表头, 数字格式)
+    const COLUMNS: &[(&str, &str)] = &[
+        ("entity", "主体"),
+        ("account", "科目"),
+        ("auxiliary", "辅助核算"),
+        ("currency", "币种"),
+        ("functionalCurrency", "本位币"),
+        ("monthEnd", "月末测算日期"),
+        ("publishedDate", "汇率公布日"),
+        ("closingForeign", "月末原币余额"),
+        ("officialRate", "月末官方中间价"),
+        ("auditClosingFunctional", "审计月末本位币余额"),
+        ("preRevaluationFunctional", "测算前本位币余额"),
+        ("unrealizedGainLoss", "月末重估损益"),
+        ("suggestedAdjustment", "建议调整"),
+        ("clientBookedUnrealizedGainLoss", "客户已入账未实现损益"),
+        ("clientRevaluationVouchers", "客户重估凭证"),
+        ("openingForeign", "期初原币余额"),
+        ("openingAuditFunctional", "年初审计本位币余额"),
+        ("businessForeignMovement", "正常业务原币发生额"),
+        ("businessFunctionalMovement", "正常业务本位币发生额"),
+        (
+            "clientRevaluationBalanceAdjustment",
+            "客户凭证对货币性项目余额的调整",
+        ),
+        ("auditBalanceAdjustment", "审计期末折算余额调整"),
+        ("tbClosingFunctional", "TB年末本位币余额"),
+        ("tbReconciliationDifference", "TB勾稽差异"),
+    ];
+    for (column, (_, title)) in COLUMNS.iter().enumerate() {
+        sheet
+            .write_string_with_format(0, column as u16, *title, &header)
+            .map_err(xlsx_err)?;
+        sheet
+            .set_column_width(
+                column as u16,
+                match *title {
+                    "科目" => 38,
+                    "客户重估凭证" => 46,
+                    _ => 24,
+                },
+            )
+            .map_err(xlsx_err)?;
+    }
+    for (index, row) in rows.iter().enumerate() {
+        let output_row = (index + 1) as u32;
+        let excel_row = index + 2;
+        let number = |key: &str| row.get(key).and_then(Value::as_f64);
+        // 文本列：主体、辅助核算、币种、本位币、两个日期。
+        for (column, key) in [
+            (0u16, "entity"),
+            (2, "auxiliary"),
+            (3, "currency"),
+            (4, "functionalCurrency"),
+            (5, "monthEnd"),
+            (6, "publishedDate"),
+        ] {
+            let text = row
+                .get(key)
+                .map(|value| localized_text(key, value))
+                .unwrap_or_default();
+            if !text.is_empty() {
+                sheet
+                    .write_string(output_row, column, text)
+                    .map_err(xlsx_err)?;
+            }
+        }
+        // 科目单独走宽度友好的通用本地化。
+        if let Some(value) = row.get("account") {
+            sheet
+                .write_string(output_row, 1, localized_text("account", value))
+                .map_err(xlsx_err)?;
+        }
+        // 数值静态列：H 原币、I 汇率之外的全部输入项。
+        for (column, key, format) in [
+            (7u16, "closingForeign", &amount),
+            (8, "officialRate", &rate_format),
+            (10, "preRevaluationFunctional", &amount),
+            (12, "suggestedAdjustment", &amount),
+            (13, "clientBookedUnrealizedGainLoss", &amount),
+            (15, "openingForeign", &amount),
+            (16, "openingAuditFunctional", &amount),
+            (17, "businessForeignMovement", &amount),
+            (18, "businessFunctionalMovement", &amount),
+            (19, "clientRevaluationBalanceAdjustment", &amount),
+            (20, "auditBalanceAdjustment", &amount),
+            (21, "tbClosingFunctional", &amount),
+            (22, "tbReconciliationDifference", &amount),
+        ] {
+            if let Some(value) = number(key) {
+                sheet
+                    .write_number_with_format(output_row, column, value, format)
+                    .map_err(xlsx_err)?;
+            }
+        }
+        // 公式列：J=H×I（原币×月末中间价），L=K−J（测算前−审计折算）。
+        // 上游字段缺失时不写公式，避免留下一个看似可信的错误数字。
+        if let (Some(closing), Some(rate)) = (number("closingForeign"), number("officialRate")) {
+            let cached = row
+                .get("auditClosingFunctional")
+                .and_then(Value::as_f64)
+                .unwrap_or(closing * rate);
+            sheet
+                .write_formula_with_format(
+                    output_row,
+                    9,
+                    Formula::new(format!("H{excel_row}*I{excel_row}")).set_result(
+                        cached.to_string(),
+                    ),
+                    &amount,
+                )
+                .map_err(xlsx_err)?;
+        } else if let Some(cached) = number("auditClosingFunctional") {
+            sheet
+                .write_number_with_format(output_row, 9, cached, &amount)
+                .map_err(xlsx_err)?;
+        }
+        if let (Some(pre), Some(audit)) = (
+            number("preRevaluationFunctional"),
+            row.get("auditClosingFunctional").and_then(Value::as_f64),
+        ) {
+            sheet
+                .write_formula_with_format(
+                    output_row,
+                    11,
+                    Formula::new(format!("K{excel_row}-J{excel_row}")).set_result(
+                        (pre - audit).to_string(),
+                    ),
+                    &amount,
+                )
+                .map_err(xlsx_err)?;
+        } else if let Some(gain_loss) = number("unrealizedGainLoss") {
+            sheet
+                .write_number_with_format(output_row, 11, gain_loss, &amount)
+                .map_err(xlsx_err)?;
+        }
+        // 客户重估凭证：凭证号＋摘要合并为一段可读文本。
+        let mut vouchers = Vec::new();
+        for voucher in row
+            .get("clientRevaluationVoucherIds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            vouchers.push(voucher.as_str().unwrap_or_default().to_owned());
+        }
+        for detail in row
+            .get("clientRevaluationDetails")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let summary = detail.get("summary").and_then(Value::as_str).unwrap_or("");
+            let booked = detail.get("bookedFxGainLoss").and_then(Value::as_f64);
+            if !summary.is_empty() {
+                vouchers.push(if let Some(booked) = booked {
+                    format!("{}（{:.2}）", summary, booked)
+                } else {
+                    summary.to_owned()
+                });
+            }
+        }
+        if !vouchers.is_empty() {
+            sheet
+                .write_string_with_format(output_row, 14, vouchers.join("；"), &wrap)
+                .map_err(xlsx_err)?;
+        }
+    }
+    sheet.set_freeze_panes(1, 0).map_err(xlsx_err)?;
     Ok(())
 }
 
@@ -10158,6 +10370,108 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
         );
         assert_eq!(localized_scalar("fx_gain_loss"), "汇兑损益");
         assert_eq!(localized_scalar("combined"), "已实现＋未实现");
+    }
+
+    // 回归：Excel 打开时会全量重算（rust_xlsxwriter 默认 fullCalcOnLoad），
+    // 结论页公式必须能在明细页里找到数据，否则写死的缓存值一打开就归零，
+    // 出现「界面通过、Excel 里差异率 100%」的自相矛盾底稿。
+    #[test]
+    fn conclusion_formulas_recalculate_from_visible_sheets() {
+        let path =
+            std::env::temp_dir().join(format!("fx-traceable-conclusion-{}.xlsx", std::process::id()));
+        let closing_foreign = -1168109.2415139726;
+        let official_rate = 0.12754982741342835;
+        let audit_closing = -148992.1321551379;
+        let pre_revaluation = -152737.3524326747;
+        let unrealized = pre_revaluation - audit_closing;
+        let result = json!({
+            "mode": "combined",
+            "summary": {
+                "accountTranslationEnabled": false,
+                "realizedGainLoss": 0.0,
+                "unrealizedAdjustment": unrealized,
+                "automaticMeasuredFxGainLoss": unrealized,
+                "pendingReviewAmount": 0.0,
+                "auditFxGainLoss": unrealized,
+                "tbFxGainLoss": unrealized * 40.0,
+                "differenceRatio": 0.02,
+                "reconciliationPassed": true
+            },
+            "voucherDetail": [], "classification": [],
+            "realized": [], "unrealized": [], "pendingReview": [],
+            "clientRevaluationVouchers": [],
+            "unrealizedBalanceRollforward": [{
+                "entity": "4800", "account": "2211020001 应付职工薪酬",
+                "currency": "HKD", "functionalCurrency": "USD",
+                "monthEnd": "2025-05-31", "publishedDate": "2025-05-30",
+                "closingForeign": closing_foreign, "officialRate": official_rate,
+                "auditClosingFunctional": audit_closing,
+                "preRevaluationFunctional": pre_revaluation,
+                "unrealizedGainLoss": unrealized,
+                "suggestedAdjustment": -3745.27,
+                "clientBookedUnrealizedGainLoss": 0.05,
+                "clientRevaluationVoucherIds": ["E-V001"],
+                "clientRevaluationDetails": [
+                    {"voucherId": "E-V001", "summary": "调整汇差", "bookedFxGainLoss": 0.05}
+                ]
+            }]
+        });
+        let params = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-05-31",
+            "jeSource": {"inputPath": "je.xlsx"}, "tbSource": {"inputPath": "tb.xlsx"},
+            "outputPath": path.to_string_lossy()
+        });
+        export_workbook(&params, &result).unwrap();
+
+        let mut reader = open_workbook_auto(&path).unwrap();
+        let names = reader.sheet_names().clone();
+        assert!(names.contains(&"外币余额滚动".to_owned()), "{names:?}");
+        assert!(names.contains(&"审计结论".to_owned()), "{names:?}");
+
+        // 缓存值（给不重算的预览器用）与引擎一致。
+        let conclusions = reader
+            .worksheet_range("审计结论")
+            .unwrap();
+        assert!(
+            (conclusions.get_value((5, 1)).and_then(Data::as_f64).unwrap_or(f64::NAN)
+                - unrealized)
+                .abs()
+                < 1e-6,
+            "结论页未实现缓存值应为 {unrealized}，实际 {:?}",
+            conclusions.get_value((5, 1))
+        );
+
+        // 结论页公式：未实现 SUM 滚动页 L 列；勾稽结果是按差异率判定的活公式。
+        let conclusion_formulas = reader.worksheet_formula("审计结论").unwrap();
+        let texts = conclusion_formulas
+            .cells()
+            .map(|(_, _, text)| text.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            texts.iter().any(|t| t.contains("$L:$L") && t.contains("外币余额滚动")),
+            "未实现公式应引用外币余额滚动!$L:$L，实际 {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("ABS(B11/B10)") && t.contains("<0.05")),
+            "勾稽结果应为差异率<5% 的活公式，实际 {texts:?}"
+        );
+
+        // 滚动页逐行可手工验算：J=原币×中间价，L=测算前−审计折算。
+        let rollforward_formulas = reader.worksheet_formula("外币余额滚动").unwrap();
+        let rolls = rollforward_formulas
+            .cells()
+            .map(|(_, _, text)| text.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            rolls.iter().any(|t| t.contains("H2*I2")),
+            "审计折算余额列应为 H×I 公式，实际 {rolls:?}"
+        );
+        assert!(
+            rolls.iter().any(|t| t.contains("K2-J2")),
+            "月末重估损益列应为 K−J 公式，实际 {rolls:?}"
+        );
+
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

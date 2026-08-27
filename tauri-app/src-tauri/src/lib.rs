@@ -896,6 +896,17 @@ pub fn engine_call_for_test(
             &pause,
         );
     }
+    if method == "fx.export_probe" {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pause = excel_merger::PauseCheckpoint::unpaused(cancel.clone());
+        return fx::run_job(
+            "fx.export",
+            params,
+            &|_, _, _, _| {},
+            cancel,
+            &pause,
+        );
+    }
     if method == "fx.sign_probe" {
         return fx::sign_probe_for_test(&params);
     }

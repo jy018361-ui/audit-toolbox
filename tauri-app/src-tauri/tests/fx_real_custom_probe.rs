@@ -180,6 +180,23 @@ fn probe_custom_dataset() {
         params["balanceSheetDate"] = serde_json::json!(end);
     }
     let t0 = std::time::Instant::now();
+    // FX_EXPORT=1 时直接走导出（内部自行完整测算），并打印产物路径；
+    // 否则跑预览，打印各分布供人工核对。
+    if std::env::var("FX_EXPORT").ok().as_deref() == Some("1") {
+        let out = base.join("汇兑损益审计测算_探针导出.xlsx");
+        params["outputPath"] = serde_json::json!(out.to_string_lossy());
+        match audit_toolbox_lib::engine_call_for_test("fx.export_probe", params) {
+            Ok(v) => println!(
+                "== 导出完成 {}",
+                v["outputPath"].as_str().unwrap_or("(未知路径)")
+            ),
+            Err(e) => println!(
+                "导出失败：{}",
+                format!("{e:?}").chars().take(1200).collect::<String>()
+            ),
+        }
+        return;
+    }
     let v = match audit_toolbox_lib::engine_call_for_test("fx.preview_probe", params) {
         Ok(v) => v,
         Err(e) => {

@@ -5673,13 +5673,9 @@ fn calculate_realized(
         let mut has_fx = false;
         let mut has_foreign_currency = false;
         let mut settlement_targets = Vec::new();
-        // 外币兑换证据：外币现金行、本位币现金腿合计金额。
+        // 外币兑换证据：外币现金行（结汇=减少、购汇=增加两个方向都收）、
+        // 本位币现金腿合计金额。
         let mut cash_foreign_rows = Vec::new();
-        // 购汇（外币现金「增加」方向）腿：不适用持有释放公式，单独按
-        // 成交汇率与记账日官方牌价的价差测算已实现损益（CAS 19 购汇价差）。
-        let mut cash_purchase_rows = Vec::new();
-        // 本位币现金腿发生额合计，用于倒算购汇成交汇率（支付本位币÷买入外币）。
-        let mut entity_cash_functional_total = 0.0;
         let mut cash_functional_movement = false;
         let mut cash_foreign_movement = false;
         let mut noncash_foreign_movement = false;
@@ -5721,29 +5717,19 @@ fn calculate_realized(
                 if is_cash {
                     if currency.is_empty() || currency == entity_currency {
                         cash_functional_movement |= functional.abs() >= 0.01;
-                        entity_cash_functional_total += functional;
                     } else {
                         cash_foreign_movement |= foreign.abs() >= 0.01;
-                        // 外币现金「减少」方向（卖出外币/兑换出外币）构成终止
-                        // 确认，适用持有释放公式（月初牌价 vs 记账日牌价）；
-                        // 「增加」方向（购汇）是新增敞口，不适用该公式，
-                        // 但其银行价差是已实现损益，单独收集按价差口径测算。
-                        if foreign < -0.005 {
+                        // 外币现金行不论方向都收集：结汇（减少）与购汇（增加）
+                        // 都属外币兑换，统一按月初牌价与交易日官方牌价测算；
+                        // 方向差异由下方符号约定吸收，客户实际成交价差则
+                        // 落入「审计 vs 账面」比较披露，不进损益公式。
+                        if foreign.abs() >= 0.005 {
                             cash_foreign_rows.push((
                                 row,
                                 account.clone(),
                                 role.clone(),
                                 foreign,
                                 functional,
-                            ));
-                        } else if foreign > 0.005 {
-                            cash_purchase_rows.push((
-                                row,
-                                account.clone(),
-                                role.clone(),
-                                foreign,
-                                functional,
-                                currency.clone(),
                             ));
                         }
                     }
@@ -5998,79 +5984,6 @@ fn calculate_realized(
                             json!("无法取得该币种月初（上月末）牌价，本腿不计入自动测算。")
                         }
                     }));
-                }
-            }
-        }
-        // 购汇价差测算：买入腿不适用持有释放公式（月初牌价 vs 记账日牌价），
-        // 其已实现损益 = 银行实际成交汇率与记账日官方牌价的价差 × 买入原币
-        // （CAS 19：买入外币按交易日即期汇率折算，实际支付额与折算额的差额
-        // 计入汇兑差额）。成交汇率从凭证倒算：本位币现金支付合计 ÷ 买入外币
-        // 合计。无法倒算（缺本位币支付腿、或一张凭证买入多种外币）时隔离，
-        // 不用客户账面汇兑损益替代测算。
-        if realized_hard && !cash_purchase_rows.is_empty() {
-            let mut bought_by_currency: HashMap<String, f64> = HashMap::new();
-            for (_, _, _, foreign, _, currency) in &cash_purchase_rows {
-                *bought_by_currency.entry(currency.clone()).or_default() += foreign;
-            }
-            let deal_rate_by_currency: HashMap<String, f64> = bought_by_currency
-                .iter()
-                .filter_map(|(currency, bought)| {
-                    let paid = entity_cash_functional_total.abs();
-                    if paid >= 0.005 && bought_by_currency.len() == 1 {
-                        let rate = paid / bought.abs();
-                        rate.is_finite().then(|| (currency.clone(), rate))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for (row, account, role, foreign, functional, currency) in &cash_purchase_rows {
-                let entity = entity_for(row, &mapping, params);
-                let functional_code = functional_currency(entity, params);
-                let deal_rate = deal_rate_by_currency.get(currency);
-                let day_rate = rate(snapshot, date, currency, &functional_code);
-                let day_missing = day_rate.is_none();
-                match (deal_rate, day_rate) {
-                    (Some(deal), Some((official_rate, published))) => {
-                        // 买入原币为正；成交价高于官方中间价即真实价差损失，
-                        // 与汇兑账户「借方为正」的符号约定一致。
-                        let bought = foreign.abs();
-                        let gain_loss = (deal - official_rate) * bought;
-                        let customer_applied = if functional.abs() >= 0.005 && bought >= 0.005 {
-                            Some(functional.abs() / bought)
-                        } else {
-                            None
-                        };
-                        calculation.push(json!({
-                            "voucherId": display_voucher_id(&id), "date": date,
-                            "entity": entity, "account": account, "role": role,
-                            "currency": currency, "functionalCurrency": functional_code,
-                            "settlementForeign": bought, "officialRate": official_rate,
-                            "targetForeignSigned": foreign,
-                            "impliedDealRate": deal,
-                            "customerAppliedRate": customer_applied,
-                            "rateSource": RATE_SOURCE,
-                            "calculationMethod": "购汇价差：倒算成交汇率与记账日官方牌价重算",
-                            "publishedDate": published,
-                            "spreadRate": deal - official_rate,
-                            "auditGainLoss": gain_loss,
-                            "carryingBookFunctional": functional.abs(),
-                            "cashRequired": false, "sourceRow": row.source_row
-                        }));
-                    }
-                    _ => {
-                        quality.push(json!({
-                            "source": "JE", "voucherId": display_voucher_id(&id),
-                            "row": row.source_row, "currency": currency,
-                            "type": if day_missing { "汇率缺失" } else { "无法倒算成交汇率" },
-                            "severity": "隔离",
-                            "detail": if day_missing {
-                                Value::Null
-                            } else {
-                                json!("购汇腿缺少可配对的本位币现金支付腿，或一张凭证买入多种外币，无法倒算成交汇率；本腿不计入自动测算。")
-                            }
-                        }));
-                    }
                 }
             }
         }
@@ -8533,8 +8446,6 @@ fn chinese_header(key: &str) -> &str {
         "monthEnd" => "月末测算日期",
         "nonRevaluationFunctionalMovement" => "正常业务本位币变动（剔除未实现类凭证）",
         "officialRate" => "官方汇率",
-        "impliedDealRate" => "倒算成交汇率（支付本位币÷买入外币）",
-        "spreadRate" => "购汇价差（成交−官方）",
         "customerAppliedRate" => "客户JE倒算汇率（仅供比较）",
         "openingAuditFunctional" => "年初审计本位币余额",
         "openingBookFunctional" => "年初账面本位币余额",
@@ -11311,14 +11222,17 @@ E,2025-02-10,B2,SA,1002 银行存款-美元户,收美元货款,USD,50,355\n",
     }
 
     #[test]
-    fn 购汇价差按倒算成交汇率与官方牌价测算为已实现() {
+    fn 购汇与结汇统一按月初牌价与交易日官方牌价测算() {
         // 借：美元户 10000（客户按 7.20 折算 72000）
         // 借：汇兑损失 300（银行卖出价 7.23 与记账汇率 7.20 的价差）
         // 贷：人民币户 72300
-        // 审计口径：倒算成交汇率 = 72300 ÷ 10000 = 7.23；官方牌价 7.20；
-        // 已实现损失 = (7.23 − 7.20) × 10000 = +300（汇兑账户借方为正），
-        // 完全独立于客户账面的 300，也独立于客户入账采用的 7.20。
-        let root = std::env::temp_dir().join(format!("fx-purchase-spread-{}", std::process::id()));
+        // 统一口径（与结汇方向完全一致，用户拍板所有已实现类凭证同公式）：
+        // 账面＝买入原币×月初牌价 7.15＝71500，折算＝买入原币×记账日官方
+        // 牌价 7.20＝72000，已实现损失＝72000−71500＝+500（借方为正）。
+        // 客户账面只确认 300（按 7.20 入账仅反映价差），审计与账面之差 200
+        // 经比较列披露；客户成交价 7.23 与官方 7.20 的点差不进损益公式，
+        // 与结汇方向的点差处理对称。
+        let root = std::env::temp_dir().join(format!("fx-purchase-unified-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let je = root.join("je.csv");
         fs::write(
@@ -11343,10 +11257,22 @@ E,2025-01-10,3,AB,6603,汇兑损失,CNY,0,300\n",
             source: "测试".into(),
             source_url: String::new(),
             fetched_at: String::new(),
-            response_hash: test_snapshot_hash("购汇价差按倒算成交汇率与官方牌价测算为已实现"),
-            start_date: "2025-01-10".into(),
+            response_hash: test_snapshot_hash("购汇与结汇统一按月初牌价与交易日官方牌价测算"),
+            start_date: "2024-12-31".into(),
             end_date: "2025-01-10".into(),
             rates: vec![
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "USD".into(),
+                    cny_per_unit: 7.15,
+                },
+                RatePoint {
+                    requested_date: "2024-12-31".into(),
+                    published_date: "2024-12-31".into(),
+                    currency: "CNY".into(),
+                    cny_per_unit: 1.0,
+                },
                 RatePoint {
                     requested_date: "2025-01-10".into(),
                     published_date: "2025-01-10".into(),
@@ -11366,12 +11292,17 @@ E,2025-01-10,3,AB,6603,汇兑损失,CNY,0,300\n",
         assert_eq!(classes[0]["classification"], "已实现");
         assert_eq!(calculation.len(), 1, "quality={quality:#?}");
         let row = &calculation[0];
-        assert_eq!(row["calculationMethod"], "购汇价差：倒算成交汇率与记账日官方牌价重算");
-        assert!((row["impliedDealRate"].as_f64().unwrap() - 7.23).abs() < 0.0001);
+        assert_eq!(
+            row["calculationMethod"],
+            "外币兑换：月初牌价与交易日官方牌价独立重算"
+        );
+        assert!((row["monthOpeningRate"].as_f64().unwrap() - 7.15).abs() < 0.0001);
         assert!((row["officialRate"].as_f64().unwrap() - 7.2).abs() < 0.0001);
-        assert!((row["spreadRate"].as_f64().unwrap() - 0.03).abs() < 0.0001);
-        assert!((row["auditGainLoss"].as_f64().unwrap() - 300.0).abs() < 0.01);
+        assert!((row["carryingFunctional"].as_f64().unwrap() - 71500.0).abs() < 0.01);
+        assert!((row["translatedFunctional"].as_f64().unwrap() - 72000.0).abs() < 0.01);
+        assert!((row["auditGainLoss"].as_f64().unwrap() - 500.0).abs() < 0.01);
         assert!((row["customerAppliedRate"].as_f64().unwrap() - 7.2).abs() < 0.0001);
+        assert!((row["carryingBasisDifference"].as_f64().unwrap() + 500.0).abs() < 0.01);
         fs::remove_dir_all(root).unwrap();
     }
 

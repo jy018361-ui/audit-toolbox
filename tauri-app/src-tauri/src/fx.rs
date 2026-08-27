@@ -5970,12 +5970,33 @@ fn calculate_realized(
                                 value.is_finite().then_some(value)
                             }
                         });
-                    // 测算完全独立于客户JE：账面＝终止确认原币×月初牌价（上月末
-                    // 重估同一快照点），折算＝原币×记账日官方牌价。现金/银行行
-                    // 倒算汇率仅作客户采用汇率披露；JE本位币金额仅作并列比对，
-                    // 都不参与损益计算。
+                    // 已实现公式分两类（用户拍板：成交价差属已实现汇兑损益）：
+                    // ①外币兑换——真实银行成交价存在，已实现＝（成交价−月初
+                    // 牌价）×原币，成交价按本位币现金腿合计÷外币现金腿倒算
+                    // 全口径实付（含损益行，SAP 分离入账也能还原 7.23 这类
+                    // 全成本价）；②终止确认（应收/应付核销，无货币兑换）——
+                    // 没有成交价，维持官方牌价独立重算，客户入账价不得反向
+                    // 污染审计口径。官方牌价在兑换路径只作对照披露。
+                    let conversion_deal_rate = if conversion_pattern {
+                        cash_settlements.iter().next().and_then(|(_, (foreign_sum, _))| {
+                            if foreign_sum.abs() >= 0.005
+                                && cash_functional_total.abs() >= 0.005
+                            {
+                                let rate = cash_functional_total.abs() / foreign_sum.abs();
+                                rate.is_finite().then_some(rate)
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                    let (applied_rate, applied_basis) = match conversion_deal_rate {
+                        Some(rate) => (rate, "实际成交价"),
+                        None => (official_rate, "记账日官方牌价"),
+                    };
                     let carrying = settlement * opening_rate;
-                    let translated = settlement * official_rate;
+                    let translated = settlement * applied_rate;
                     // The sign of the derecognized foreign-currency row captures
                     // the export's debit/credit convention.  A positive target
                     // (liability decrease) uses translated minus carrying; a
@@ -5987,6 +6008,14 @@ fn calculate_realized(
                     } else {
                         carrying - translated
                     };
+                    if conversion_pattern && conversion_deal_rate.is_none() {
+                        quality.push(json!({
+                            "source": "JE", "voucherId": display_voucher_id(&id),
+                            "row": row.source_row, "type": "兑换成交价不可倒算",
+                            "currency": currency, "severity": "提示",
+                            "detail": "凭证被识别为外币兑换但现金腿金额不完整，无法倒算实际成交价，本次以记账日官方牌价测算；请结合银行回单复核。"
+                        }));
+                    }
                     calculation.push(json!({
                         "voucherId": display_voucher_id(&id), "date": date,
                         "entity": entity, "account": account, "role": role,
@@ -5994,9 +6023,10 @@ fn calculate_realized(
                         "settlementForeign": settlement, "officialRate": official_rate,
                         "targetForeignSigned": foreign,
                         "customerAppliedRate": cash_implied_rate,
+                        "appliedRate": applied_rate, "rateBasis": applied_basis,
                         "rateSource": RATE_SOURCE,
                         "calculationMethod": if conversion_pattern {
-                            "外币兑换：月初牌价与交易日官方牌价独立重算"
+                            "外币兑换：月初牌价与实际成交价重算（官方牌价对照）"
                         } else {
                             "终止确认：月初牌价与交易日官方牌价独立重算"
                         },
@@ -7372,7 +7402,7 @@ fn write_user_conclusion_sheet(
     let methods = [
         (
             "已实现",
-            "已实现独立重算：统一采用结算日官方汇率，不使用JE现金/银行行倒算汇率作为审计汇率。资产损益＝终止确认账面价值－结算原币×官方汇率；负债按相反方向。JE倒算汇率仅用于客户口径比较。数据来源：完整JE凭证、官方汇率快照。",
+            "已实现独立重算：已实现损益＝（实际成交价－月初牌价）×原币。成交价优于官方牌价的价差随兑换即已实现，属已实现损益的组成部分；成交价按凭证两条现金腿倒算（银行回单事实），取不到时以记账日官方牌价替代并提示。账面＝原币×月初牌价（上月末重估同一快照点），资产减少方向损益＝账面－成交折算，负债相反。官方牌价全程仅作对照披露。数据来源：完整JE凭证、官方汇率快照。",
         ),
         (
             "未实现",
@@ -7672,7 +7702,10 @@ fn write_user_calculation_sheet(workbook: &mut Workbook, result: &Value) -> Resu
             "date": item.get("date"), "voucherId": item.get("voucherId"), "calculationType": "已实现",
             "accountCode": account_code, "accountNameOriginal": account_name, "currency": item.get("currency"),
             "foreignAmount": item.get("settlementForeign"),
-            "appliedRate": item.get("settlementRate").or_else(|| item.get("officialRate")),
+            "appliedRate": item
+                .get("appliedRate")
+                .or_else(|| item.get("settlementRate"))
+                .or_else(|| item.get("officialRate")),
             "bookAmount": item.get("carryingFunctional"), "auditAmount": item.get("translatedFunctional"),
             "gainLoss": item.get("auditGainLoss"), "formulaDirection": if item.get("targetForeignSigned").and_then(Value::as_f64).unwrap_or(-1.0)>0.0 {"审计金额－账面金额"} else {"账面金额－审计金额"},
             "sourceRow": item.get("sourceRow"),
@@ -8937,7 +8970,9 @@ fn chinese_header(key: &str) -> &str {
         "tbFxGainLoss" => "TB汇兑损益发生额",
         "tbReconciliationDifference" => "TB勾稽差异",
         "tbRows" => "TB汇兑损益取数明细",
-        "translatedFunctional" => "按官方汇率折算本位币",
+        "translatedFunctional" => "按成交价折算本位币",
+        "appliedRate" => "测算采用成交价",
+        "rateBasis" => "汇率口径",
         "twoPointChange" => "两时点差异变化",
         "type" => "异常/检查类型",
         "unrealizedAdjustment" => "未实现汇兑损益",
@@ -9913,6 +9948,32 @@ E,2025-01-31,V001,SA,6701120001 财务费用-汇兑损失-未实现,INV-20250131
             suggest_account_role("6701010001 财务费用-利息支出"),
             "fx_gain_loss"
         );
+    }
+
+    /// 与存款利息同一口径的回归：界面科目清单包含非末级汇总行而测算只读
+    /// 末级。自动识别只剩低置信兜底（词典与编码都没实质命中）时，末级
+    /// 继承用户在上级科目上的手工分类；有实质结论的科目不被上级覆盖。
+    #[test]
+    fn 上级科目的手工分类由末级在自动识别拿不准时继承() {
+        let loose = json!({
+            "accountRoles": {"1901 某往来": "monetary_asset"},
+            // __tbAccountNames 按 TB 行建立编码→名称，汇总行与末级行都在。
+            "__tbAccountNames": {"1901": "某往来", "19010999": "某往来"}
+        });
+        // 1901 落在「未识别的资产类编码，保守归为非货币性」（0.58 兜底），
+        // 用户在汇总行 1901 上指定的角色应落到末级 19010999。
+        assert_eq!(role_for("19010999 某往来-明细", &loose), "monetary_asset");
+        // 同码不同拼法（编码回退此前已有，顺带锁住不回退）。
+        assert_eq!(role_for("19010999 另一种拼法", &loose), "monetary_asset");
+        // 自动识别给出过实质结论的科目不被上级指定覆盖：
+        // 1401..=1471 命中存货编码（0.94 non_monetary）。
+        let strict = json!({
+            "accountRoles": {"1405 某存货": "monetary_asset"},
+            "__tbAccountNames": {"1405": "某存货"}
+        });
+        assert_eq!(role_for("140501 某存货-明细", &strict), "non_monetary");
+        // 上级键与末级编码没有前缀关系时不继承（1901 不是 140501 的前缀）。
+        assert_eq!(role_for("140501 某存货-明细", &loose), "non_monetary");
     }
 
     #[test]
@@ -11914,16 +11975,16 @@ E,2025-02-10,B2,SA,1002 银行存款-美元户,收美元货款,USD,50,355\n",
     }
 
     #[test]
-    fn 购汇与结汇统一按月初牌价与交易日官方牌价测算() {
+    fn 购汇与结汇统一按月初牌价与实际成交价测算() {
         // 借：美元户 10000（客户按 7.20 折算 72000）
         // 借：汇兑损失 300（银行卖出价 7.23 与记账汇率 7.20 的价差）
         // 贷：人民币户 72300
-        // 统一口径（与结汇方向完全一致，用户拍板所有已实现类凭证同公式）：
-        // 账面＝买入原币×月初牌价 7.15＝71500，折算＝买入原币×记账日官方
-        // 牌价 7.20＝72000，已实现损失＝72000−71500＝+500（借方为正）。
-        // 客户账面只确认 300（按 7.20 入账仅反映价差），审计与账面之差 200
-        // 经比较列披露；客户成交价 7.23 与官方 7.20 的点差不进损益公式，
-        // 与结汇方向的点差处理对称。
+        // 统一口径（与结汇方向完全一致，用户拍板成交价差属已实现损益）：
+        // 账面＝买入原币×月初牌价 7.15＝71500；成交价＝本位币现金腿合计
+        // ÷外币现金腿＝72300÷10000＝7.23（全口径实付，含损益行）；折算＝
+        // 10000×7.23＝72300，已实现损失＝72300−71500＝+800（借方为正）。
+        // 客户账面确认 300，审计与账面之差 500 经比较列披露；官方牌价 7.20
+        // 仅作对照，不进损益公式。
         let root = std::env::temp_dir().join(format!("fx-purchase-unified-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let je = root.join("je.csv");
@@ -11986,13 +12047,15 @@ E,2025-01-10,3,AB,6603,汇兑损失,CNY,0,300\n",
         let row = &calculation[0];
         assert_eq!(
             row["calculationMethod"],
-            "外币兑换：月初牌价与交易日官方牌价独立重算"
+            "外币兑换：月初牌价与实际成交价重算（官方牌价对照）"
         );
         assert!((row["monthOpeningRate"].as_f64().unwrap() - 7.15).abs() < 0.0001);
         assert!((row["officialRate"].as_f64().unwrap() - 7.2).abs() < 0.0001);
+        assert!((row["appliedRate"].as_f64().unwrap() - 7.23).abs() < 0.0001);
+        assert_eq!(row["rateBasis"], "实际成交价");
         assert!((row["carryingFunctional"].as_f64().unwrap() - 71500.0).abs() < 0.01);
-        assert!((row["translatedFunctional"].as_f64().unwrap() - 72000.0).abs() < 0.01);
-        assert!((row["auditGainLoss"].as_f64().unwrap() - 500.0).abs() < 0.01);
+        assert!((row["translatedFunctional"].as_f64().unwrap() - 72300.0).abs() < 0.01);
+        assert!((row["auditGainLoss"].as_f64().unwrap() - 800.0).abs() < 0.01);
         assert!((row["customerAppliedRate"].as_f64().unwrap() - 7.2).abs() < 0.0001);
         assert!((row["carryingBasisDifference"].as_f64().unwrap() + 500.0).abs() < 0.01);
         fs::remove_dir_all(root).unwrap();
@@ -12003,8 +12066,9 @@ E,2025-01-10,3,AB,6603,汇兑损失,CNY,0,300\n",
         // 用友真实形态：结汇凭证四行全现金、没有汇兑损益科目行，价差埋在
         // 成交价里（2024 真实样例：卖 50 万美元按 7.1907，官方中间价
         // 7.1174，月初牌价 7.0827）。放开 has_fx 门槛后按配比认领：
-        // 账面＝500000×7.0827＝3541350，折算＝500000×7.1174＝3558700，
-        // 资产减少方向 gain_loss＝carrying−translated＝−17350。
+        // 账面＝500000×7.0827＝3541350；成交价＝3595350÷500000＝7.1907；
+        // 折算＝500000×7.1907＝3595350，资产减少方向 gain_loss＝carrying−
+        // translated＝−54000＝−(17350官方牌价口径＋36650成交价差)。
         // 同凭证并排的外币收息（外币腿折算 230 vs 本币腿 46445）配比失败，
         // 不认领；投资款本位币腿是非现金权益科目，同样不认领。
         let root = std::env::temp_dir().join(format!("fx-no-line-conversion-{}", std::process::id()));
@@ -12071,13 +12135,14 @@ E,2024-05-09,8,记,4001,收到股东投资款,CNY,0,-7100\n",
         let row = &calculation[0];
         assert_eq!(
             row["calculationMethod"],
-            "外币兑换：月初牌价与交易日官方牌价独立重算"
+            "外币兑换：月初牌价与实际成交价重算（官方牌价对照）"
         );
         assert!((row["officialRate"].as_f64().unwrap() - 7.1174).abs() < 0.0001);
         assert!((row["monthOpeningRate"].as_f64().unwrap() - 7.0827).abs() < 0.0001);
+        assert!((row["appliedRate"].as_f64().unwrap() - 7.1907).abs() < 0.0001);
         assert!((row["carryingFunctional"].as_f64().unwrap() - 3541350.0).abs() < 1.0);
-        assert!((row["translatedFunctional"].as_f64().unwrap() - 3558700.0).abs() < 1.0);
-        assert!((row["auditGainLoss"].as_f64().unwrap() + 17350.0).abs() < 1.0);
+        assert!((row["translatedFunctional"].as_f64().unwrap() - 3595350.0).abs() < 1.0);
+        assert!((row["auditGainLoss"].as_f64().unwrap() + 54000.0).abs() < 1.0);
         assert!((row["customerAppliedRate"].as_f64().unwrap() - 7.1907).abs() < 0.0001);
         let class_of = |voucher: &str| {
             classes

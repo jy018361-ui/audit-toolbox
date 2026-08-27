@@ -24,6 +24,18 @@ use windows::{
 
 use crate::AppError;
 
+/// Excel 的 COM 接口（Workbooks.Open / SaveAs）不接受 Windows 规范化路径
+/// 自带的 `\\?\` 前缀，原样传入会报 0x800A03EC「找不到文件」。
+/// 规范化只为消掉 `.`/`..` 拿到绝对路径，传给 Excel 前必须剥掉前缀。
+fn excel_friendly_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CopySheet {
     pub source_path: PathBuf,
@@ -90,7 +102,7 @@ unsafe fn run_copy(
             let source = object_method(
                 &workbooks,
                 "Open",
-                vec![source_path.to_string_lossy().as_ref().into()],
+                vec![excel_friendly_path(&source_path).as_str().into()],
             )?;
             let copy_result = (|| -> Result<(), AppError> {
                 let worksheets = get_object(&source, "Worksheets")?;
@@ -124,7 +136,7 @@ unsafe fn run_copy(
             &destination,
             "SaveAs",
             DISPATCH_METHOD,
-            vec![output.to_string_lossy().as_ref().into(), 51i32.into()],
+            vec![excel_friendly_path(&output).as_str().into(), 51i32.into()],
         )?;
         Ok(destination)
     })();
@@ -292,4 +304,30 @@ fn missing_variant() -> VARIANT {
 
 fn com_error(message: &str, detail: Option<String>) -> AppError {
     AppError::new("EXCEL_COM_FAILED", message, true, detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::excel_friendly_path;
+    use std::path::Path;
+
+    #[test]
+    fn excel_paths_strip_verbatim_prefix() {
+        // std::fs::canonicalize 在 Windows 上返回 `\\?\` 前缀路径，
+        // Excel COM 原样打开会报 0x800A03EC，必须剥掉前缀再传。
+        assert_eq!(
+            excel_friendly_path(Path::new(
+                r"\\?\C:\Users\lenovo\AppData\Local\Temp\甲.xlsx"
+            )),
+            r"C:\Users\lenovo\AppData\Local\Temp\甲.xlsx"
+        );
+        assert_eq!(
+            excel_friendly_path(Path::new(r"\\?\UNC\server\share\乙.xlsx")),
+            r"\\server\share\乙.xlsx"
+        );
+        assert_eq!(
+            excel_friendly_path(Path::new(r"C:\普通路径.xlsx")),
+            r"C:\普通路径.xlsx"
+        );
+    }
 }

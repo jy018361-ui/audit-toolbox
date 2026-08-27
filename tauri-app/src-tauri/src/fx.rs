@@ -7116,6 +7116,10 @@ fn export_workbook(params: &Value, result: &Value) -> Result<String, AppError> {
         "央行汇率",
         result.pointer("/rateSnapshot/rates"),
     )?;
+    // 「汇率表」是全簿官方牌价的单一来源：行=日期、列=币种，数值就是
+    // 引擎测算实际采用的逐日牌价（非公布日沿用最近公布日，与测算同口径）。
+    // 各表的汇率单元格用 INDEX/MATCH 链接过来，改一处汇率全簿联动重算。
+    let rate_index = write_rate_matrix_sheet(&mut workbook, result)?;
     write_value_array_sheet(&mut workbook, "异常与限制", result.get("dataQuality"))?;
     write_json_object_sheet(
         &mut workbook,
@@ -7166,6 +7170,7 @@ fn export_workbook(params: &Value, result: &Value) -> Result<String, AppError> {
             write_unrealized_rollforward_sheet(
                 &mut workbook,
                 result.get("unrealizedBalanceRollforward"),
+                &rate_index,
             )?;
             write_value_array_sheet(
                 &mut workbook,
@@ -8238,9 +8243,75 @@ fn write_value_array_sheet(
 /// 注意：S 列业务本位币发生额对已实现重算过的腿是审计口径
 /// （原币×月初牌价），与客户账面之差在末列「已实现腿入账基础差异」披露，
 /// 避免已实现损益在月末重估残差里被重复计算。
+/// 写「汇率表」矩阵（行=请求日期，列=币种），返回可用的 (日期, 币种) 索引，
+/// 供其他 Sheet 判断能否用公式链接（不在矩阵里的组合回退静态值，不留 #N/A）。
+fn write_rate_matrix_sheet(
+    workbook: &mut Workbook,
+    result: &Value,
+) -> Result<std::collections::HashSet<(String, String)>, AppError> {
+    let (header, _) = formats();
+    let rate_format = Format::new().set_num_format("0.00000000");
+    let mut index = std::collections::HashSet::new();
+    let mut matrix: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    for point in result
+        .pointer("/rateSnapshot/rates")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (Some(date), Some(currency), Some(rate)) = (
+            point.get("requestedDate").and_then(Value::as_str),
+            point.get("currency").and_then(Value::as_str),
+            point.get("cnyPerUnit").and_then(Value::as_f64),
+        ) else {
+            continue;
+        };
+        matrix
+            .entry(date.to_owned())
+            .or_default()
+            .insert(currency.to_owned(), rate);
+    }
+    let currencies = matrix
+        .values()
+        .flat_map(|row| row.keys().cloned())
+        .collect::<BTreeSet<_>>();
+    let sheet = workbook.add_worksheet();
+    setup(sheet, "汇率表")?;
+    sheet
+        .write_string_with_format(0, 0, "日期", &header)
+        .map_err(xlsx_err)?;
+    for (column, currency) in currencies.iter().enumerate() {
+        sheet
+            .write_string_with_format(0, (column + 1) as u16, currency, &header)
+            .map_err(xlsx_err)?;
+    }
+    for (row_index, (date, row)) in matrix.iter().enumerate() {
+        let excel_row = (row_index + 1) as u32;
+        sheet
+            .write_string(excel_row, 0, date)
+            .map_err(xlsx_err)?;
+        for (column, currency) in currencies.iter().enumerate() {
+            if let Some(rate) = row.get(currency) {
+                sheet
+                    .write_number_with_format(excel_row, (column + 1) as u16, *rate, &rate_format)
+                    .map_err(xlsx_err)?;
+                index.insert((date.clone(), currency.clone()));
+            }
+        }
+    }
+    sheet.set_column_width(0, 14).map_err(xlsx_err)?;
+    for column in 0..currencies.len() {
+        sheet
+            .set_column_width((column + 1) as u16, 12)
+            .map_err(xlsx_err)?;
+    }
+    Ok(index)
+}
+
 fn write_unrealized_rollforward_sheet(
     workbook: &mut Workbook,
     value: Option<&Value>,
+    rate_index: &std::collections::HashSet<(String, String)>,
 ) -> Result<(), AppError> {
     let rows = value.and_then(Value::as_array).cloned().unwrap_or_default();
     let (header, _) = formats();
@@ -8333,8 +8404,8 @@ fn write_unrealized_rollforward_sheet(
         //   U 审计折算调整   = J审计折算 − K测算前
         //   W TB勾稽差异     = J审计折算 − V年末本位币（仅年末行有 V）
         //   X 已实现腿入账基础差异 = 静态披露列（客户账面−审计口径）
+        //   I 月末官方中间价   = 链接「汇率表」单一来源（INDEX/MATCH）
         for (column, key, format) in [
-            (8u16, "officialRate", &rate_format),
             (13, "clientBookedUnrealizedGainLoss", &amount),
             (15, "openingForeign", &amount),
             (16, "openingAuditFunctional", &amount),
@@ -8347,6 +8418,33 @@ fn write_unrealized_rollforward_sheet(
             if let Some(value) = number(key) {
                 sheet
                     .write_number_with_format(output_row, column, value, format)
+                    .map_err(xlsx_err)?;
+            }
+        }
+        // I 列月末官方中间价链接「汇率表」（行=日期、列=币种）：复核只需
+        // 核一张牌价表，改一处汇率全簿联动重算；矩阵缺该组合时回退静态。
+        if let Some(rate) = number("officialRate") {
+            let date = row.get("monthEnd").and_then(Value::as_str).unwrap_or("");
+            let currency = row.get("currency").and_then(Value::as_str).unwrap_or("");
+            if !date.is_empty()
+                && !currency.is_empty()
+                && rate_index.contains(&(date.to_owned(), currency.to_owned()))
+            {
+                sheet
+                    .write_formula_with_format(
+                        output_row,
+                        8,
+                        Formula::new(format!(
+                            "INDEX('汇率表'!$A:$XFD,MATCH(F{excel_row},'汇率表'!$A:$A,0),\
+                             MATCH(D{excel_row},'汇率表'!$1:$1,0))"
+                        ))
+                        .set_result(rate.to_string()),
+                        &rate_format,
+                    )
+                    .map_err(xlsx_err)?;
+            } else {
+                sheet
+                    .write_number_with_format(output_row, 8, rate, &rate_format)
                     .map_err(xlsx_err)?;
             }
         }
@@ -9476,20 +9574,23 @@ E,2025-01-02,2,AB,6603,汇兑收益,CNY,0,-3000\n",
             missing: Vec::new(),
         };
         let (calculation, classes, _quality) = calculate_realized(&params, &snapshot).unwrap();
-        // 外币兑换：外币现金与本位币现金对转。统一公式下审计损益
-        // ＝外币腿×(记账日7.2−月初7.15)＝100000×0.05＝5,000（负号＝收益）。
-        // 客户按银行实际牌价收到 718,000 与账面 715,000 的差 −3,000，
-        // 两口径之差（点差与月初基础差）自然落入审计与账面的比较披露。
+        // 外币兑换：外币现金与本位币现金对转。成交价口径（用户拍板成交价差
+        // 属已实现损益）：成交价＝本位币现金腿÷外币现金腿＝718000÷100000
+        // ＝7.18；账面＝100000×月初牌价7.15＝715000；资产减少方向损益＝
+        // 715000−718000＝−3,000——与客户按实际牌价入账的汇兑收益一致。
+        // 官方牌价 7.2 仅作对照（若按官方口径会算出 −5,000）。
         assert_eq!(calculation.len(), 1, "{calculation:#?}");
         assert_eq!(classes[0]["classification"], "已实现");
         assert_eq!(
             calculation[0]["calculationMethod"],
-            "外币兑换：月初牌价与交易日官方牌价独立重算"
+            "外币兑换：月初牌价与实际成交价重算（官方牌价对照）"
         );
         assert!(
             (calculation[0]["monthOpeningRate"].as_f64().unwrap() - 7.15).abs() < 0.0001
         );
-        assert!((calculation[0]["auditGainLoss"].as_f64().unwrap() + 5000.0).abs() < 0.01);
+        assert!((calculation[0]["appliedRate"].as_f64().unwrap() - 7.18).abs() < 0.0001);
+        assert!((calculation[0]["officialRate"].as_f64().unwrap() - 7.2).abs() < 0.0001);
+        assert!((calculation[0]["auditGainLoss"].as_f64().unwrap() + 3000.0).abs() < 0.01);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -10808,6 +10909,14 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             "voucherDetail": [], "classification": [],
             "realized": [], "unrealized": [], "pendingReview": [],
             "clientRevaluationVouchers": [],
+            "rateSnapshot": {"rates": [
+                {"requestedDate": "2025-05-31", "publishedDate": "2025-05-30",
+                 "currency": "HKD", "cnyPerUnit": 0.12754982741342835},
+                {"requestedDate": "2025-12-31", "publishedDate": "2025-12-31",
+                 "currency": "USD", "cnyPerUnit": 0.9},
+                {"requestedDate": "2025-12-31", "publishedDate": "2025-12-31",
+                 "currency": "CNY", "cnyPerUnit": 1.0}
+            ]},
             "unrealizedBalanceRollforward": [
                 {
                     "entity": "4800", "account": "2211020001 应付职工薪酬",
@@ -10852,6 +10961,7 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
         let names = reader.sheet_names().clone();
         assert!(names.contains(&"外币余额滚动".to_owned()), "{names:?}");
         assert!(names.contains(&"审计结论".to_owned()), "{names:?}");
+        assert!(names.contains(&"汇率表".to_owned()), "{names:?}");
 
         // 缓存值（给不重算的预览器用）与引擎一致。
         let conclusions = reader
@@ -10895,6 +11005,18 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             rolls.iter().any(|t| t.contains("K2-J2")),
             "月末重估损益列应为 K−J 公式，实际 {rolls:?}"
         );
+        // 月末官方中间价必须链接「汇率表」单一来源，不得写死。
+        assert!(
+            rolls
+                .iter()
+                .any(|t| t.contains("汇率表") && t.contains("INDEX") && t.contains("MATCH")),
+            "月末官方中间价应链接汇率表（INDEX/MATCH），实际 {rolls:?}"
+        );
+        // 汇率表本身：日期×币种矩阵含滚动页用到的组合。
+        let rate_range = reader.worksheet_range("汇率表").unwrap();
+        let rate_headers = rate_range.rows().next().unwrap().to_owned();
+        assert!(rate_headers.contains(&Data::String("日期".into())), "{rate_headers:?}");
+        assert!(rate_headers.contains(&Data::String("HKD".into())), "{rate_headers:?}");
         // 第二行（带 TB 年末数的示例）：全部行内算式均可验算。
         for (needle, what) in [
             ("P3+R3", "月末原币余额=期初+业务发生"),

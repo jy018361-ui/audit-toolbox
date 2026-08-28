@@ -4881,6 +4881,11 @@ fn calculate(
             "pendingReviewCount": pending_review.len(),
             "pendingUnclassifiedCount": bridge.get("pendingUnclassifiedCount").cloned().unwrap_or(json!(0)),
             "pendingUnmeasurableCount": bridge.get("pendingUnmeasurableCount").cloned().unwrap_or(json!(0)),
+            "notFxEventCount": bridge.get("notFxEventCount").cloned().unwrap_or(json!(0)),
+            "notFxEventAmount": bridge
+                .get("notFxEventAmount")
+                .cloned()
+                .unwrap_or(json!(0.0)),
             "coveredBookFxGainLoss": covered_book,
             "measurementDifference": automatic_total - covered_book,
             "auditFxGainLoss": provisional_total,
@@ -5207,6 +5212,7 @@ fn build_review_bridge(
         return Ok(json!({
             "pendingReviews": [], "pendingReviewAmount": 0.0,
             "pendingUnclassifiedCount": 0, "pendingUnmeasurableCount": 0,
+            "notFxEventCount": 0, "notFxEventAmount": 0.0,
             "coveredBookFxGainLoss": 0.0, "jeFxGainLoss": null,
             "automaticCoveredVouchers": 0, "pendingReviewCount": 0,
             "classificationControls": []
@@ -5265,6 +5271,7 @@ fn build_review_bridge(
     // 「不构成汇兑事项」是结构与口径结论，披露即可；「已分类但缺重算证据」
     // 是工具算不了——两者混在一起显示会让用户误以为前者也在等确认。
     let mut not_fx_count = 0usize;
+    let mut not_fx_amount = 0.0_f64;
     let mut unmeasurable_count = 0usize;
     for (id, rows) in groups {
         let mut booked = 0.0;
@@ -5465,6 +5472,7 @@ fn build_review_bridge(
         // 不构成汇兑事项的凭证既非待人也非算不出，单独计数披露。
         if selected == "不构成汇兑事项" {
             not_fx_count += 1;
+            not_fx_amount += booked;
         } else {
             unmeasurable_count += 1;
         }
@@ -5507,6 +5515,7 @@ fn build_review_bridge(
         "pendingUnclassifiedCount": 0,
         "pendingUnmeasurableCount": unmeasurable_count,
         "notFxEventCount": not_fx_count,
+        "notFxEventAmount": not_fx_amount,
         "coverageDifference": je_total - covered_book - pending_amount,
         "classificationControls": controls
     }))
@@ -7308,6 +7317,7 @@ fn export_workbook(params: &Value, result: &Value) -> Result<String, AppError> {
     }
     // 面向用户的复核页放在测算页之后；技术证据页仍保留但统一隐藏。
     write_classification_adjustment_sheet(&mut workbook, result)?;
+    write_not_fx_event_sheet(&mut workbook, result)?;
     for name in [
         "使用说明",
         "执行摘要",
@@ -7556,9 +7566,24 @@ fn write_user_conclusion_sheet(
         .get("rollforwardPassed")
         .and_then(Value::as_bool)
         .unwrap_or(true);
+    let not_fx_count = summary
+        .get("notFxEventCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let not_fx_amount = summary
+        .get("notFxEventAmount")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let not_fx_note = if not_fx_count > 0 {
+        format!(
+            "其中不构成汇兑事项 {not_fx_count} 张、账面汇差 {not_fx_amount:.2}（结构上不含外币货币性项目，详见「不构成汇兑事项」页，属科目使用问题，建议重分类复核）；"
+        )
+    } else {
+        String::new()
+    };
     let limitation = if pending_count > 0 {
         format!(
-            "尚有{pending_count}张凭证待复核，账面金额见B{pending_amount_excel_row}；详见“分类复核”。"
+            "尚有{pending_count}张凭证待复核，{not_fx_note}账面金额见B{pending_amount_excel_row}；详见“分类复核”。"
         )
     } else if !rollforward_passed {
         "TB＋JE余额滚动未完全勾稽，未实现测算属于受限结果。".to_owned()
@@ -7574,6 +7599,105 @@ fn write_user_conclusion_sheet(
     sheet.set_row_height(next_row, 36).map_err(xlsx_err)?;
     sheet.set_column_width(0, 42).map_err(xlsx_err)?;
     sheet.set_column_width(1, 62).map_err(xlsx_err)?;
+    Ok(())
+}
+
+/// 「不构成汇兑事项」明细页：账面挂在汇兑损益科目、但结构上不含外币
+/// 货币性项目（资金池本位币账户互转）或对手为非货币性项目（预付款等）
+/// 的凭证。这些金额已从测算总体剔除，单独成页供 TB 勾稽时作「其中」
+/// 披露与重分类建议。
+fn write_not_fx_event_sheet(
+    workbook: &mut Workbook,
+    result: &Value,
+) -> Result<(), AppError> {
+    let (header, _) = formats();
+    let amount = Format::new().set_num_format("#,##0.00;[Red](#,##0.00);-");
+    let wrap = Format::new().set_text_wrap();
+    let items: Vec<&Value> = result
+        .get("classificationControls")
+        .and_then(Value::as_array)
+        .map(|all| {
+            all.iter()
+                .filter(|item| item.get("classification").and_then(Value::as_str) == Some("不构成汇兑事项"))
+                .collect()
+        })
+        .unwrap_or_default();
+    let sheet = workbook.add_worksheet();
+    setup(sheet, "不构成汇兑事项")?;
+    let headers = [
+        "日期",
+        "凭证号",
+        "凭证类型",
+        "借贷科目组合",
+        "账面汇兑损益",
+        "系统归类",
+        "剔除理由",
+        "凭证摘要",
+    ];
+    for (column, title) in headers.iter().enumerate() {
+        sheet
+            .write_string_with_format(0, column as u16, *title, &header)
+            .map_err(xlsx_err)?;
+    }
+    let mut total = 0.0_f64;
+    for (index, item) in items.iter().enumerate() {
+        let row = (index + 1) as u32;
+        sheet
+            .write_string(row, 0, item.get("date").and_then(Value::as_str).unwrap_or(""))
+            .map_err(xlsx_err)?;
+        sheet
+            .write_string(row, 1, item.get("voucherId").and_then(Value::as_str).unwrap_or(""))
+            .map_err(xlsx_err)?;
+        sheet
+            .write_string(row, 2, item.get("voucherType").and_then(Value::as_str).unwrap_or(""))
+            .map_err(xlsx_err)?;
+        sheet
+            .write_string_with_format(
+                row,
+                3,
+                item.get("patternLabel").and_then(Value::as_str).unwrap_or(""),
+                &wrap,
+            )
+            .map_err(xlsx_err)?;
+        let booked = item.get("bookedFxGainLoss").and_then(Value::as_f64).unwrap_or(0.0);
+        total += booked;
+        sheet
+            .write_number_with_format(row, 4, booked, &amount)
+            .map_err(xlsx_err)?;
+        sheet
+            .write_string(row, 5, item.get("systemCategory").and_then(Value::as_str).unwrap_or(""))
+            .map_err(xlsx_err)?;
+        sheet
+            .write_string_with_format(
+                row,
+                6,
+                item.get("reviewReason").and_then(Value::as_str).unwrap_or(""),
+                &wrap,
+            )
+            .map_err(xlsx_err)?;
+        sheet
+            .write_string_with_format(
+                row,
+                7,
+                item.get("summary").and_then(Value::as_str).unwrap_or(""),
+                &wrap,
+            )
+            .map_err(xlsx_err)?;
+    }
+    let total_row = (items.len() + 1) as u32;
+    sheet
+        .write_string_with_format(total_row, 0, &format!("合计 {} 张", items.len()), &header)
+        .map_err(xlsx_err)?;
+    sheet
+        .write_number_with_format(total_row, 4, total, &amount)
+        .map_err(xlsx_err)?;
+    sheet.set_column_width(1, 30).map_err(xlsx_err)?;
+    sheet.set_column_width(3, 44).map_err(xlsx_err)?;
+    sheet.set_column_width(6, 44).map_err(xlsx_err)?;
+    sheet.set_column_width(7, 40).map_err(xlsx_err)?;
+    sheet
+        .set_freeze_panes(1, 0)
+        .map_err(xlsx_err)?;
     Ok(())
 }
 
@@ -11198,6 +11322,22 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
         );
         assert!(names.contains(&"审计结论".to_owned()), "{names:?}");
         assert!(names.contains(&"汇率表".to_owned()), "{names:?}");
+        // 「不构成汇兑事项」独立披露页：无该类凭证时也生成（合计 0 张），
+        // 保证勾稽「其中」披露的落点页始终存在。
+        assert!(names.contains(&"不构成汇兑事项".to_owned()), "{names:?}");
+        let not_fx = reader.worksheet_range("不构成汇兑事项").unwrap();
+        let not_fx_total = not_fx
+            .get_value((1, 4))
+            .and_then(Data::as_f64)
+            .unwrap_or(f64::NAN);
+        assert!(
+            not_fx_total.abs() < 1e-9,
+            "无该类凭证时合计金额应为 0，实际 {not_fx_total}"
+        );
+        assert_eq!(
+            not_fx.get_value((1, 0)).and_then(Data::as_string),
+            Some("合计 0 张".to_owned())
+        );
 
         // 缓存值（给不重算的预览器用）与引擎一致。
         let conclusions = reader.worksheet_range("审计结论").unwrap();

@@ -19,7 +19,10 @@ import {
   summarizeQuality,
   validationDetail,
   uncoveredDetail,
+  uncoveredBreakdown,
+  uncoveredMetricDetail,
 } from "./FxAuditPage";
+import type React from "react";
 describe("fx audit mode selection",()=>{
   it("uses two-point unrealized mode for TB only",()=>{expect(fxDefaultMode(false,true)).toBe("unrealized");expect(fxAllowedModes(false,true)).toEqual(["unrealized"])});
   it("uses realized mode for JE only",()=>expect(fxDefaultMode(true,false)).toBe("realized"));
@@ -43,6 +46,44 @@ describe("fx audit upload and mapping parity",()=>{
     expect(uncoveredDetail({pendingReviewCount:0})).toBe("全部凭证均已纳入测算");
     // 旧结果没有拆分字段时退回总数，不假装知道构成。
     expect(uncoveredDetail({pendingReviewCount:7})).toBe("7 张未纳入测算");
+  });
+  it("「其中」拆分：不构成事项的金额在前，缺证据的余额是剩余", () => {
+    // 4800 实测形态：82 张不构成 +5,309.22，其余 361 张挂缺证据。
+    const breakdown = uncoveredBreakdown({uncoveredTbFxGainLoss:3856606.17,notFxEventCount:82,notFxEventAmount:5309.22,pendingUnmeasurableCount:361});
+    expect(breakdown.notFxCount).toBe(82);
+    expect(breakdown.notFxAmount).toBeCloseTo(5309.22, 2);
+    expect(breakdown.restAmount).toBeCloseTo(3851296.95, 2);
+    expect(breakdown.unmeasurable).toBe(361);
+    // 2024 用友形态：全覆盖，拆分为零。
+    const clean = uncoveredBreakdown({});
+    expect(clean.notFxCount).toBe(0);
+    expect(clean.restAmount).toBe(0);
+  });
+  it("勾稽第 3 步的「其中」行带 ? 图标注释", () => {
+    const collectText=(node:unknown):string=>{
+      if(node==null||typeof node==="boolean")return "";
+      if(typeof node==="string"||typeof node==="number")return String(node);
+      if(Array.isArray(node))return node.map(collectText).join("");
+      if(typeof node==="object"&&"props" in (node as Record<string,unknown>))return collectText((node as {props:{children?:unknown}}).props.children);
+      return "";
+    };
+    const amount = (value:unknown)=>String(value);
+    const countHints=(node:unknown):number=>{
+      if(node==null||typeof node==="boolean"||typeof node==="string"||typeof node==="number")return 0;
+      if(Array.isArray(node))return node.reduce((sum,item)=>sum+countHints(item),0);
+      const element=node as {type?:{name?:string};props?:{children?:unknown}};
+      const self=typeof element.type==="function"&&element.type.name==="InfoHint"?1:0;
+      return self+countHints(element.props?.children);
+    };
+    const detail = uncoveredMetricDetail({uncoveredTbFxGainLoss:100,notFxEventCount:3,notFxEventAmount:20,pendingUnmeasurableCount:2}, amount);
+    const text = collectText(detail);
+    expect(text).toContain("其中：不构成汇兑事项 20（3 张）");
+    expect(text).toContain("已分类但缺重算证据 80（2 张）");
+    // 两行各带一个 ? 图标。
+    expect(countHints(detail)).toBeGreaterThanOrEqual(2);
+    // 两类都没有时退回纯文字（不带图标）。
+    const fallback = uncoveredMetricDetail({pendingReviewCount:7}, amount);
+    expect(fallback).toBe("7 张未纳入测算");
   });
 
   it("derives the audit year start from the balance sheet date",()=>expect(fxReportStart("2024-12-31")).toBe("2024-01-01"));

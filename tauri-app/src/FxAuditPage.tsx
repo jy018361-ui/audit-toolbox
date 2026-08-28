@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { ToolManifest, JobEvent } from "./types";
 import { engineCall, jobCancel, jobStart, listenPositionedFileDrops, listenJobEvents, openOutput, pickPath } from "./api";
 import { PageHeader } from "@/components/PageHeader";
@@ -198,6 +199,28 @@ export function uncoveredDetail(summary:Record<string,unknown>):string{
   if(unclassified)parts.push(`${unclassified} 张待确认分类`);
   if(unmeasurable)parts.push(`${unmeasurable} 张已分类但缺重算证据`);
   return parts.join("；");
+}
+/** 未覆盖金额的「其中」拆分：不构成汇兑事项的金额张数在前，缺重算证据的余额在后。 */
+export function uncoveredBreakdown(summary:Record<string,unknown>){
+  const total=Number(summary.uncoveredTbFxGainLoss??0);
+  const notFxCount=Number(summary.notFxEventCount??0);
+  const notFxAmount=Number(summary.notFxEventAmount??0);
+  const unmeasurable=Number(summary.pendingUnmeasurableCount??0);
+  return {notFxCount,notFxAmount,unmeasurable,restAmount:total-notFxAmount};
+}
+export const NOT_FX_EVENT_HINT="这些凭证的货币性腿全部为本位币账户（如集团资金池美元↔美元划转），或对手科目为预付款、存货等非货币性项目——按准则不产生外币汇兑损益。账面汇差已从测算总体剔除，属客户科目使用问题，建议重分类复核；明细见底稿「不构成汇兑事项」页。";
+export const UNMEASURABLE_HINT="这些凭证已明确归类为已实现/未实现，但缺少独立重算所需的原币余额、历史账面价值或汇率证据——常见原因是科目余额表未按币种拆分。审计金额暂未测出，账面金额挂在未覆盖里；需向客户补要资料后重跑。";
+/** 「?」圆形图标：鼠标移上去（或键盘聚焦）显示口径注释。 */
+export function InfoHint({text}:{text:string}){
+  return <span className="fx-info-hint" tabIndex={0} role="note" aria-label={text}>?<span className="fx-info-hint-tip">{text}</span></span>;
+}
+/** 勾稽第 3 步「未覆盖账面金额」下的「其中」拆分行：不构成事项与缺重算证据
+ *  各自成行、各带 ? 图标注释；两者都没有时退回纯文字说明。 */
+export function uncoveredMetricDetail(summary:Record<string,unknown>,amount:(value:unknown)=>string):ReactNode{
+  const {notFxCount,notFxAmount,unmeasurable,restAmount}=uncoveredBreakdown(summary);
+  if(!notFxCount&&!unmeasurable)return uncoveredDetail(summary);
+  return <>{notFxCount>0&&<span className="fx-metric-line">其中：不构成汇兑事项 {amount(notFxAmount)}（{notFxCount} 张）<InfoHint text={NOT_FX_EVENT_HINT}/></span>}
+  {unmeasurable>0&&<span className="fx-metric-line">已分类但缺重算证据 {amount(restAmount)}（{unmeasurable} 张）<InfoHint text={UNMEASURABLE_HINT}/></span>}</>;
 }
 
 export function fxApplyJobResult(current:Record<string,unknown>|undefined,next:unknown,method:"fx.preview"|"fx.export"){
@@ -686,7 +709,7 @@ function FxResult({result,busy,classificationDrafts,onClassificationChange,onRec
     </label>;
   };
   const tbKnown=summary.tbFxGainLoss!=null;const passed=summary.reconciliationPassed===true;
-  const metric=(label:string,value:unknown,detail?:string,tone="")=><div className={`fx-bridge-metric ${tone}`.trim()}><span>{label}</span><strong>{typeof value==="string"?value:amount(value)}</strong>{detail&&<small>{detail}</small>}</div>;
+  const metric=(label:string,value:unknown,detail?:ReactNode,tone="")=><div className={`fx-bridge-metric ${tone}`.trim()}><span>{label}</span><strong>{typeof value==="string"?value:amount(value)}</strong>{detail!=null&&detail!==""&&<small>{detail}</small>}</div>;
   return <section className="fx-result" aria-labelledby="fx-result-title">
     <div className="fx-result-heading"><div><h3 id="fx-result-title">汇兑损益测算结果</h3><p>按计算顺序查看金额如何形成，并与TB完成比较。</p></div>{outputs.map(path=><Button key={path} variant="secondary" onClick={()=>void openOutput(path)}>打开Excel底稿</Button>)}</div>
     {Boolean(summary.needsZeroResultReview)&&<p className="fa-missing-hint">已读取外币凭证，但没有事件进入自动测算；相关金额已归入待复核项目，不会再被当作正常“0”。</p>}
@@ -695,7 +718,7 @@ function FxResult({result,busy,classificationDrafts,onClassificationChange,onRec
     {summary.unrealizedBalanceBasisComplete===false&&<p className="fa-missing-hint">未实现测算余额基础不完整：{String(summary.unrealizedMissingBalanceKeys??0)} 个账户币种余额键未取得可唯一对应的TB端点，已隔离且未按零期初测算。当前结果属于受限结果。</p>}
     <div className="fx-bridge-step"><div className="fx-step-label"><b>1</b><span>形成自动测算</span></div><div className="fx-bridge-equation">{metric("已实现汇兑损益",summary.realizedGainLoss)}<span className="fx-operator" aria-hidden="true">＋</span>{metric("未实现汇兑损益",summary.unrealizedAdjustment)}<span className="fx-operator" aria-hidden="true">＝</span>{metric("自动测算合计",summary.automaticMeasuredFxGainLoss,undefined,"total")}</div></div>
     <div className="fx-bridge-step"><div className="fx-step-label"><b>2</b><span>先比较已覆盖项目</span></div><div className="fx-bridge-equation">{metric("自动测算合计",summary.automaticMeasuredFxGainLoss)}<span className="fx-operator compare" aria-hidden="true">对比</span>{metric("已覆盖凭证账面金额",summary.coveredBookFxGainLoss,`已实现差异 ${amount(summary.realizedMeasurementDifference)}；未实现差异 ${amount(summary.unrealizedMeasurementDifference)}`)}<span className="fx-operator" aria-hidden="true">＝</span>{metric("已覆盖项目测算差异",summary.coveredMeasurementDifference,undefined,"total")}</div></div>
-    <div className="fx-bridge-step comparison"><div className="fx-step-label"><b>3</b><span>解释完整TB差异</span></div><div className="fx-bridge-equation">{metric("已覆盖项目测算差异",summary.coveredMeasurementDifference)}<span className="fx-operator" aria-hidden="true">－</span>{metric("未覆盖账面金额",summary.uncoveredTbFxGainLoss,uncoveredDetail(summary))}<span className="fx-operator" aria-hidden="true">＝</span>{metric("完整TB总差异",tbKnown?(summary.difference??0):"无法比较",tbKnown?`TB汇兑损益 ${amount(summary.tbFxGainLoss)}；差异率 ${percent(summary.differenceRatio)}`:undefined,tbKnown?(passed?"pass":"warning"):"warning")}</div></div>
+    <div className="fx-bridge-step comparison"><div className="fx-step-label"><b>3</b><span>解释完整TB差异</span></div><div className="fx-bridge-equation">{metric("已覆盖项目测算差异",summary.coveredMeasurementDifference)}<span className="fx-operator" aria-hidden="true">－</span>{metric("未覆盖账面金额",summary.uncoveredTbFxGainLoss,uncoveredMetricDetail(summary,amount))}<span className="fx-operator" aria-hidden="true">＝</span>{metric("完整TB总差异",tbKnown?(summary.difference??0):"无法比较",tbKnown?`TB汇兑损益 ${amount(summary.tbFxGainLoss)}；差异率 ${percent(summary.differenceRatio)}`:undefined,tbKnown?(passed?"pass":"warning"):"warning")}</div></div>
     <FxChecks result={result}/>
     {rollforward.length>0&&<section className="fx-unrealized-module"><div><h4>外币货币性项目余额滚动与未实现损益测算</h4><p>期初余额＋正常业务JE发生额－客户已入账未实现损益及其冲回＝计算前余额；月末原币余额×官方汇率形成审计余额。被分类为“未实现汇兑损益”的凭证只用于账面比较，不作为审计测算金额。</p></div><div className="fx-unrealized-metrics">{metric("月度账户测算行",rollforward.length)}{metric("已识别未实现类凭证",clientRevaluations.length)}{metric("审计未实现汇兑损益",summary.unrealizedAdjustment)}{metric("与客户入账差异",unrealizedComparisonDifference,undefined,"warning")}</div></section>}
     {groups.length>0&&<div className="fx-classification-review">

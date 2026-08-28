@@ -223,3 +223,11 @@
 .fx-accounts select.fx-currency-risky{border-color:#c2410c;color:#c2410c;font-weight:600}
 /* 科目名与凭证结构判定冲突的提示行：结构为准，科目名只做交叉验证。 */
 .fx-conflict-hint{color:#8a5700!important;font-weight:600}
+
+/* 「?」圆形图标注释：鼠标移上去或键盘聚焦显示口径说明。 */
+.fx-info-hint{position:relative;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;margin-left:4px;border:1px solid var(--muted-foreground);border-radius:50%;font-size:10px;font-weight:600;line-height:1;color:var(--muted-foreground);cursor:help;user-select:none;vertical-align:middle}
+.fx-info-hint:hover,.fx-info-hint:focus-visible{border-color:var(--primary);color:var(--primary);outline:none}
+.fx-info-hint-tip{display:none;position:absolute;left:50%;bottom:calc(100% + 8px);transform:translateX(-50%);width:280px;padding:9px 11px;border:1px solid var(--border);border-radius:8px;background:var(--popover,#222);color:var(--popover-foreground,#eee);font-size:12px;font-weight:400;line-height:1.6;text-align:left;white-space:normal;z-index:40;box-shadow:0 6px 18px rgba(0,0,0,.28)}
+.fx-info-hint:hover .fx-info-hint-tip,.fx-info-hint:focus-visible .fx-info-hint-tip{display:block}
+/* 勾稽指标下的「其中」拆分行：各占一行、可带 ? 图标。 */
+.fx-metric-line{display:block;line-height:1.7}

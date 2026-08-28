@@ -33,13 +33,13 @@ describe("fx audit upload and mapping parity",()=>{
   it("accepts a currency clue column when the TB has no currency column",()=>{expect(fxMissingRequired("tb",{accountCode:"科目编码",accountName:"科目名称",currencyText:"文本",openingFunctionalAmount:"期初本币",closingFunctionalAmount:"期末本币",ytdFunctionalDebit:"借方",ytdFunctionalCredit:"贷方"},true,"默认主体")).toEqual([])});
   it("still accepts the legacy combined account mapping",()=>{expect(fxMissingRequired("tb",{account:["科目代码","科目名称"],currency:"币种",openingFunctionalAmount:"期初本币",closingFunctionalAmount:"期末本币",ytdFunctionalDebit:"借方",ytdFunctionalCredit:"贷方"},true,"默认主体")).toEqual([])});
   it("prompts when neither ytd nor period debit/credit pairs are complete",()=>{const ytdOnlyDebit={accountCode:"科目编码",accountName:"科目名称",currency:"币种",openingFunctionalAmount:"期初本币",closingFunctionalAmount:"期末本币",ytdFunctionalDebit:"借方"};expect(fxMissingRequired("tb",ytdOnlyDebit,true,"默认主体")).toEqual(["本年累计（或本期）借/贷方发生额"]);const periodOk={...ytdOnlyDebit,periodFunctionalDebit:"本期借方",periodFunctionalCredit:"本期贷方"};expect(fxMissingRequired("tb",periodOk,true,"默认主体")).toEqual([])});
-  it("未覆盖凭证把待确认与无法测算分开说", () => {
-    // 用户实测的困惑：界面说「359 张待确认或无法测算」，可下面列出的凭证
-    // 全都已经分好类了。两类的处理方式完全不同，合成一句会自相矛盾。
+  it("未覆盖凭证把不构成与无法测算分开说", () => {
+    // 分类二元化后「待确认」废止：未覆盖的只剩「不构成汇兑事项」与
+    // 「已分类但缺重算证据」两种，合成一句会自相矛盾。
     expect(uncoveredDetail({pendingReviewCount:359,pendingUnclassifiedCount:0,pendingUnmeasurableCount:359}))
       .toBe("359 张已分类但缺重算证据");
-    expect(uncoveredDetail({pendingReviewCount:10,pendingUnclassifiedCount:4,pendingUnmeasurableCount:6}))
-      .toBe("4 张待确认分类；6 张已分类但缺重算证据");
+    expect(uncoveredDetail({pendingReviewCount:90,notFxEventCount:80,pendingUnmeasurableCount:10}))
+      .toBe("80 张不构成汇兑事项；10 张已分类但缺重算证据");
     expect(uncoveredDetail({pendingReviewCount:0})).toBe("全部凭证均已纳入测算");
     // 旧结果没有拆分字段时退回总数，不假装知道构成。
     expect(uncoveredDetail({pendingReviewCount:7})).toBe("7 张未纳入测算");
@@ -189,21 +189,21 @@ describe("逐行数据质量归并", () => {
 describe("凭证分类分两段", () => {
   const group = (key: string, items: Array<{voucherId: string; classification: string; measurementStatus?: string}>) =>
     ({key, label: key, items});
-  it("组内还有待确认的归入『等你确认』，其余归入『算不出金额』", () => {
+  it("组内还有不构成汇兑事项的归入『不构成』，其余归入『算不出金额』", () => {
     const {undecided, unmeasurable} = splitClassificationGroups([
-      group("A", [{voucherId: "1", classification: "待确认"}]),
+      group("A", [{voucherId: "1", classification: "不构成汇兑事项"}]),
       group("B", [{voucherId: "2", classification: "未实现汇兑损益", measurementStatus: "无法测算，未纳入结果"}]),
     ], {});
     expect(undecided.map(g => g.key)).toEqual(["A"]);
     expect(unmeasurable.map(g => g.key)).toEqual(["B"]);
   });
   it("用户改过的分类立刻生效——草稿优先于后端给的分类", () => {
-    const groups = [group("A", [{voucherId: "1", classification: "待确认"}])];
+    const groups = [group("A", [{voucherId: "1", classification: "不构成汇兑事项"}])];
     expect(splitClassificationGroups(groups, {"1": "已实现汇兑损益"}).undecided).toHaveLength(0);
     expect(splitClassificationGroups(groups, {"1": "已实现汇兑损益"}).unmeasurable).toHaveLength(1);
-    // 反过来：后端判好了，用户手动改回待确认，就该重新进入待办
+    // 反过来：后端判好了，用户手动改成不构成，就该重新进入待办
     const decided = [group("B", [{voucherId: "2", classification: "未实现汇兑损益"}])];
-    expect(splitClassificationGroups(decided, {"2": "待确认"}).undecided).toHaveLength(1);
+    expect(splitClassificationGroups(decided, {"2": "不构成汇兑事项"}).undecided).toHaveLength(1);
   });
   it("4800 的形态：360 张全部已分类，待确认段为空", () => {
     const many = Array.from({length: 12}, (_, i) =>

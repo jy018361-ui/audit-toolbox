@@ -33,7 +33,7 @@ type Inspection = {
 const CURRENCY_OPTIONS = ["CNY","USD","HKD","EUR","JPY","GBP","AUD","SGD","CHF","CAD","TWD","KRW","MYR","THB","NZD"];
 
 type SourceClassification = {kind:"je"|"tb";confidence:number;needsLlm:boolean;scores:{je:number;tb:number};reasons:string[];headers:string[];preview:string[][];sheet:string;headerRow:number;headerDepth:number};
-type VoucherClassification = "已实现汇兑损益"|"未实现汇兑损益"|"待确认";
+type VoucherClassification = "已实现汇兑损益"|"未实现汇兑损益"|"不构成汇兑事项";
 type ClassificationControl = {voucherId:string;date?:string;voucherType?:string;systemCategory?:string;reviewReason?:string;bookedFxGainLoss?:number;classification:VoucherClassification;measurementStatus?:string;patternKey?:string;patternLabel?:string;debitAccounts?:string[];creditAccounts?:string[];summary?:string;classificationConflict?:string};
 type VoucherDetail = {accountCode?:string;accountNameOriginal?:string;accountNameChinese?:string};
 
@@ -181,19 +181,20 @@ export function fxDropTargetAt(x:number,y:number,jeRect:Pick<DOMRect,"left"|"rig
 export async function fxRunMappingReviews<T>(run:(kind:"je"|"tb")=>Promise<T>):Promise<[T,T]>{const [je,tb]=await Promise.all([run("je"),run("tb")]);return [je,tb]}
 export function fxMergeJobResult(current:Record<string,unknown>|undefined,next:Record<string,unknown>){return{...current,...next}}
 /**
- * 未覆盖凭证的说明文字。**待确认与无法测算必须分开说**——
- * 前者等人判断，后者是已经分好类、但缺原币/账面价值/汇率证据算不出来。
- * 合成一句「N 张待确认或无法测算」，会让用户对着一屏已分好类的凭证发懵：
- * 明明都分类了，怎么还说待确认。
+ * 未覆盖凭证的说明文字。**「待确认」已废止（分类二元化）**——带外币的
+ * 凭证必落已实现/未实现之一；不构成汇兑事项的（本位币账户间划转、非货币
+ * 性对手）单独披露。剩余未覆盖的只有「已分类但缺重算证据」一种。
  */
 export function uncoveredDetail(summary:Record<string,unknown>):string{
   const total=Number(summary.pendingReviewCount??0);
   const unclassified=Number(summary.pendingUnclassifiedCount??0);
   const unmeasurable=Number(summary.pendingUnmeasurableCount??0);
+  const notFx=Number(summary.notFxEventCount??0);
   if(!total)return "全部凭证均已纳入测算";
   // 旧结果没有拆分字段时退回总数，不假装知道构成。
-  if(!unclassified&&!unmeasurable)return `${total} 张未纳入测算`;
+  if(!unclassified&&!unmeasurable&&!notFx)return `${total} 张未纳入测算`;
   const parts=[];
+  if(notFx)parts.push(`${notFx} 张不构成汇兑事项`);
   if(unclassified)parts.push(`${unclassified} 张待确认分类`);
   if(unmeasurable)parts.push(`${unmeasurable} 张已分类但缺重算证据`);
   return parts.join("；");
@@ -471,18 +472,18 @@ function FxPreview(props:{title:string;kind:"je"|"tb";inspection:Inspection;mapp
     onChange={()=>{/* toggle 模式下改动全部走 onToggle */}}
   />;
 }
-/** 凭证组分两类：**等你定分类** 和 **已定分类但算不出金额**。
+/** 凭证组分两类：**不构成汇兑事项（披露即可）** 和 **已定分类但算不出金额**。
  *
- *  这两件事性质完全不同：前者要人动手，后者要么补资料要么修工具。
- *  以前混在一个「批量确认」列表里，4800 实测 360 张全都是后者——用户看到
- *  一屏下拉框都已经选好了却还挂在「待确认」标题下，只会以为工具在自相矛盾。 */
+ *  这两件事性质完全不同：前者是二元分类的口径结论（本位币账户间划转、
+ *  非货币性对手），后者要么补资料要么修工具。分类已二元化，「待确认」
+ *  不再作为分类值出现。 */
 export function splitClassificationGroups<T extends {voucherId:string;classification:string;measurementStatus?:string}>(
   groups:Array<{key:string;label:string;items:T[]}>,
   drafts:Record<string,string>,
 ){
   const undecided:typeof groups=[];const unmeasurable:typeof groups=[];
   for(const group of groups){
-    const pending=group.items.some(item=>(drafts[item.voucherId]??item.classification)==="待确认");
+    const pending=group.items.some(item=>(drafts[item.voucherId]??item.classification)==="不构成汇兑事项");
     (pending?undecided:unmeasurable).push(group);
   }
   return {undecided,unmeasurable};
@@ -667,7 +668,7 @@ function FxResult({result,busy,classificationDrafts,onClassificationChange,onRec
   const percent=(value:unknown)=>value==null?"无法计算":new Intl.NumberFormat("zh-CN",{style:"percent",minimumFractionDigits:2,maximumFractionDigits:2}).format(Number(value));
   const renderGroup=(group:{key:string;label:string;items:ClassificationControl[]})=>{
     const selected=[...new Set(group.items.map(item=>classificationDrafts[item.voucherId]??item.classification))];
-    const value=selected.length===1?selected[0]:"待确认";
+    const value=selected.length===1?selected[0]:"不构成汇兑事项";
     const booked=group.items.reduce((sum,item)=>sum+Number(item.bookedFxGainLoss??0),0);
     const failed=group.items.filter(item=>item.measurementStatus?.startsWith("无法测算")).length;
     const conflicts=group.items.filter(item=>item.classificationConflict);
@@ -680,7 +681,7 @@ function FxResult({result,busy,classificationDrafts,onClassificationChange,onRec
         {conflicts.length>0&&<small className="fx-conflict-hint">分类冲突（{conflicts.length} 张）：{conflicts[0].classificationConflict}</small>}
       </span>
       <select disabled={busy} value={value} onChange={e=>onClassificationChange(group.items.map(item=>item.voucherId),e.target.value as VoucherClassification)}>
-        <option>已实现汇兑损益</option><option>未实现汇兑损益</option><option>待确认</option>
+        <option>已实现汇兑损益</option><option>未实现汇兑损益</option><option>不构成汇兑事项</option>
       </select>
     </label>;
   };
@@ -701,20 +702,22 @@ function FxResult({result,busy,classificationDrafts,onClassificationChange,onRec
       <div className="fx-classification-heading">
         <div>
           <h4>凭证分类复核</h4>
-          <p>分类只有“已实现汇兑损益”“未实现汇兑损益”和“待确认”三种。未实现类凭证会从正常JE发生额中剔除，
+          <p>分类只有“已实现汇兑损益”“未实现汇兑损益”两种（外加结构判定的“不构成汇兑事项”）。未实现类凭证会从正常JE发生额中剔除，
             并在账户余额测算完成后与审计结果比较；不会直接采用该凭证金额作为测算结果。
             借贷科目组合相同的凭证归成一组，可一次性改一整组。</p>
         </div>
         <Button disabled={busy} onClick={()=>void onRecalculate()}>{busy?"重新测算中…":"重新测算"}</Button>
       </div>
       {undecided.length>0&&<section className="fx-classification-section">
-        <h5>等你确认分类（{undecided.reduce((n,g)=>n+g.items.length,0)} 张）</h5>
-        <p>工具没能从科目名称判断这些凭证属于已实现还是未实现，需要你选一个。选完点「重新测算」。</p>
+        <h5>不构成汇兑事项（{undecided.reduce((n,g)=>n+g.items.length,0)} 张）</h5>
+        <p>这些凭证的货币性腿全部为本位币账户（如集团资金池美元↔美元划转），或对手科目为
+          预付款等非货币性项目——结构上不产生外币汇兑损益，账面汇差已从测算总体剔除并计入
+          「未覆盖账面金额」。若你判断其中某组确属已实现/未实现，仍可在这里改，选完点「重新测算」。</p>
         <div className="fx-classification-list">{undecided.map(renderGroup)}</div>
       </section>}
       {unmeasurable.length>0&&<section className="fx-classification-section">
         <h5>已分好类，但工具算不出审计金额（{unmeasurable.reduce((n,g)=>n+g.items.length,0)} 张）</h5>
-        <p>这些凭证的分类已经确定（多数是按科目名称自动判的），<b>不需要你再确认</b>。
+        <p>这些凭证的分类已经确定，<b>不需要你再确认</b>。
           它们没进测算结果，是因为缺少重算所需的原币余额或汇率证据——账面金额已计入上面的
           「未覆盖账面金额」。<b>常见原因是科目余额表粒度不够</b>，参见页首的提示。
           如果你认为某一组的分类判错了，仍可在这里改。</p>

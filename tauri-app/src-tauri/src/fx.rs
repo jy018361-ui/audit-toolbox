@@ -425,6 +425,11 @@ pub(crate) fn run_job(
                 object.insert("translateTbAccountNames".into(), Value::Bool(true));
             }
             let expected_token = preview_cache_key(&export_params);
+            // 直接导出（无预览缓存可用）时的重算路径同样要先检测符号口径：
+            // 「已带符号」账簿（4800 用友）漏检会按「贷方记正」兜底解析，
+            // 金额正负全翻、借贷组合全挤到借方。token 必须在注入前计算，
+            // 否则注入的口径键会让缓存永远对不上号。
+            detect_and_inject_sign_conventions(&mut export_params);
             let supplied_token = export_params
                 .get("previewToken")
                 .and_then(Value::as_str)

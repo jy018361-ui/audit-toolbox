@@ -13,8 +13,8 @@
 
 - **汇兑损益测算**（`fx_audit`）：已实现与未实现汇兑损益重算、央行汇率及 TB 勾稽。
 - **存款利息收入测算**（`deposit_interest`）：识别货币资金科目，按序时账还原逐月余额，以月均余额×存款利率重算利息并与 TB 利息收入勾稽。
-- **借款利息测算**（`loan_interest`）：借款台账直接重算，或以 TB＋JE 还原本金变动并补充固定/浮动利率。
-- **FA 底稿生成**（可折叠子组）：**FA List 匹配工具**（`fa_list`，双表匹配、透视与导出）、**折旧测算**（`fa_dep_calc`）、**折旧政策对比**（`fa_policy_compare`，含税法最低折旧年限参考）。
+- **借款利息测算**（`loan_interest`）：借款台账直接重算，或以 TB＋JE 还原本金变动并补充固定/浮动利率；已有数值执行利率默认固定，用户明确切换浮动后才改按独立基准或 LPR＋加减点测算。
+- **FA 底稿生成**（可折叠子组）：**FA List 匹配工具**（`fa_list`）保留两期卡片匹配模式，并新增 TB＋JE 变动表模式，输出固定资产汇总变动表、新增清单、处置清单、相关 JE 完整明细和对方科目汇总表；另含**折旧测算**（`fa_dep_calc`）与**折旧政策对比**（`fa_policy_compare`，含税法最低折旧年限参考）。
 - **看账工具**（可折叠子组）：**看账**（`kanzhang`，凭证导入、科目筛选、透视与导出）、**正负数凭证标记**（`je_sign_mark`，按批次标记目标科目的计提与冲销对冲）。
 - **AudiPick 智能合同审阅**（`audipick`）：合同 OCR、条款提取、PDF 定位与收入底稿。
 - **WP Roll Forward**（`audit_roll_forward`）：标准审计底稿跨年度结转与 CRA 信息迁移。
@@ -58,7 +58,7 @@ React 页面 → src/api.ts → Tauri invoke → src-tauri/src/lib.rs（命令�
 | 汇兑损益（`fx_audit`） | [tauri-app/src/FxAuditPage.tsx](tauri-app/src/FxAuditPage.tsx) | [tauri-app/src-tauri/src/fx.rs](tauri-app/src-tauri/src/fx.rs) |
 | 存款利息（`deposit_interest`） | [tauri-app/src/DepositInterestPage.tsx](tauri-app/src/DepositInterestPage.tsx) | [tauri-app/src-tauri/src/deposit_interest.rs](tauri-app/src-tauri/src/deposit_interest.rs) |
 | 借款利息（`loan_interest`） | [tauri-app/src/LoanInterestPage.tsx](tauri-app/src/LoanInterestPage.tsx) | [tauri-app/src-tauri/src/loan_interest.rs](tauri-app/src-tauri/src/loan_interest.rs) |
-| FA List（`fa_list`） | [tauri-app/src/FaListPage.tsx](tauri-app/src/FaListPage.tsx) · [tauri-app/src/faListUi.ts](tauri-app/src/faListUi.ts) | [tauri-app/src-tauri/src/fa.rs](tauri-app/src-tauri/src/fa.rs) |
+| FA List（`fa_list`，含 TB＋JE 模式） | [tauri-app/src/FaListPage.tsx](tauri-app/src/FaListPage.tsx) · [tauri-app/src/FaTbJePage.tsx](tauri-app/src/FaTbJePage.tsx) · [tauri-app/src/faListUi.ts](tauri-app/src/faListUi.ts) | [tauri-app/src-tauri/src/fa.rs](tauri-app/src-tauri/src/fa.rs) · [tauri-app/src-tauri/src/fa_tbje.rs](tauri-app/src-tauri/src/fa_tbje.rs) |
 | 折旧测算（`fa_dep_calc`） | [tauri-app/src/FaDepCalcPage.tsx](tauri-app/src/FaDepCalcPage.tsx) · [tauri-app/src/faSubtoolsUi.ts](tauri-app/src/faSubtoolsUi.ts) | [tauri-app/src-tauri/src/fa_subtools.rs](tauri-app/src-tauri/src/fa_subtools.rs)（`fa.dep_*` 方法） |
 | 折旧政策对比（`fa_policy_compare`） | [tauri-app/src/FaPolicyComparePage.tsx](tauri-app/src/FaPolicyComparePage.tsx) · [tauri-app/src/faSubtoolsUi.ts](tauri-app/src/faSubtoolsUi.ts) | [tauri-app/src-tauri/src/fa_subtools.rs](tauri-app/src-tauri/src/fa_subtools.rs)（`fa.policy_*` 方法） |
 | 看账（`kanzhang`） | [tauri-app/src/KanzhangParityPage.tsx](tauri-app/src/KanzhangParityPage.tsx) | [tauri-app/src-tauri/src/tabular.rs](tauri-app/src-tauri/src/tabular.rs)（`kanzhang.*` 方法） |
@@ -103,6 +103,8 @@ cargo test --manifest-path src-tauri/Cargo.toml fa::           # 单个模块
 # Excel COM 相关测试默认忽略，需加 -- --ignored
 ```
 
+Windows 上全量 Rust 测试会同时链接 Polars、Excel 与 Tauri 依赖，页面文件不足可能出现 `os error 1455` 或依赖元数据无法映射。此类错误不是测试断言失败：先停止并行的 Cargo 进程、释放内存，必要时增大 Windows 页面文件，再以单任务重跑（PowerShell：`$env:CARGO_BUILD_JOBS="1"`）。不要通过删除测试或放宽断言绕过。
+
 ---
 
 # 贡献规范
@@ -139,7 +141,7 @@ cargo test --manifest-path src-tauri/Cargo.toml fa::           # 单个模块
 
 **这条是强制的。** 任何需要读试算平衡表（TB）或序时账（JE）的功能，**不允许自带表头识别、字段映射或借贷方向判定**。
 
-内核在 [tauri-app/src-tauri/src/ledger_mapping.rs](tauri-app/src-tauri/src/ledger_mapping.rs)，前端面板是 [tauri-app/src/components/MappingPanel.tsx](tauri-app/src/components/MappingPanel.tsx)。汇兑损益、存款利息、借款利息、看账、正负数标记五个工具已经全部收敛到它上面，方案与踩坑记录见 [tauri-app/LEDGER_MAPPING_UNIFICATION.md](tauri-app/LEDGER_MAPPING_UNIFICATION.md)。
+内核在 [tauri-app/src-tauri/src/ledger_mapping.rs](tauri-app/src-tauri/src/ledger_mapping.rs)，公共复核组件是 [tauri-app/src/components/LedgerReviewAll.tsx](tauri-app/src/components/LedgerReviewAll.tsx)，前端映射面板是 [tauri-app/src/components/MappingPanel.tsx](tauri-app/src/components/MappingPanel.tsx)。汇兑损益、存款利息、借款利息、看账、正负数标记和 FA TB＋JE 已全部收敛到同一套入口，方案与踩坑记录见 [tauri-app/LEDGER_MAPPING_UNIFICATION.md](tauri-app/LEDGER_MAPPING_UNIFICATION.md)。
 
 **接进来能白拿到的东西**：
 
@@ -154,6 +156,7 @@ cargo test --manifest-path src-tauri/Cargo.toml fa::           # 单个模块
 **规矩**：
 
 - 工具只**声明自己要哪几个角色**（`availableRoles`），不复制任何映射代码，也不自带私有角色表。
+- FA TB＋JE 前端直接调用既有 `deposit.classify_source` / `deposit.inspect_tb` / `deposit.inspect_je`，后端复用公共读取、末级科目、标准净额、符号方向、Net=0 与逐凭证科目净额函数；只允许在 `fa_tbje.rs` 保留固定资产角色、类别归属、变动分类、对方科目规则和底稿导出业务层。
 - 角色的中文标签由后端随识别结果下发，前端不要各自硬编码。
 - 需要工具特有的别名写法（例如存款利息把"文本／科目文本"也算辅助核算），**在自己模块里追加，不要改标准表**——标准表保持保守，否则会抢走别的工具的列。
 - ⚠️ **例外：业务台账不走共用读表。** 共用的表头探测内置了账表语义先验（按科目、金额、日期这类词打分），拿它扫借款登记簿这类业务台账会把数据行当表头（实测某份台账被判到第 9 行，整张表识别不出一笔借款）。**TB / JE 必须走内核；业务台账保留本模块自己的表头探测。**

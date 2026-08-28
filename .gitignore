@@ -64,3 +64,9 @@ tauri-app/tmp/
 
 # Local agent/editor settings
 **/.claude/settings.local.json
+
+# 会话临时工作区（编译缓存、截图、抓取的日志，动辄数十 GB）
+**/.codex-tmp/
+patch_e2e.py
+# Windows 快捷方式误存进仓库
+*.lnk

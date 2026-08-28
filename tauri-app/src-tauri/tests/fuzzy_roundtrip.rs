@@ -166,7 +166,10 @@ fn fuzzy_match_confirm_export_roundtrip() {
     assert_eq!(confirmations[0]["bIndex"], 4);
     assert_eq!(confirmations[0]["action"], "accept");
     let suspect_row = &back["rows"][3];
-    assert_eq!(suspect_row["aValue"].as_str().unwrap(), "北京星辰科技有限公司");
+    assert_eq!(
+        suspect_row["aValue"].as_str().unwrap(),
+        "北京星辰科技有限公司"
+    );
     assert_eq!(
         suspect_row["matches"][0]["bValue"].as_str().unwrap(),
         "上海星辰科技有限公司"
@@ -186,27 +189,45 @@ fn fuzzy_match_confirm_export_roundtrip() {
     assert_eq!(outputs.len(), 1, "worker 事件协议要 outputPaths 数组");
     assert!(output_path.is_file());
 
-    let mut names = open_workbook_auto(&output_path).unwrap().sheet_names().to_vec();
+    let mut names = open_workbook_auto(&output_path)
+        .unwrap()
+        .sheet_names()
+        .to_vec();
     names.sort();
     assert_eq!(names, vec!["全部结果", "未匹配清单", "疑似确认记录"]);
     let all_rows = sheet_rows(&output_path, "全部结果");
     // 表头 + 每行至少占 1 行（有候选按候选数展开）≥ 10 行数据。
-    assert!(all_rows.len() >= 11, "全部结果应至少含表头+10 行：{}", all_rows.len());
+    assert!(
+        all_rows.len() >= 11,
+        "全部结果应至少含表头+10 行：{}",
+        all_rows.len()
+    );
     let accepted = all_rows
         .iter()
         .find(|r| r.len() > 11 && r[1] == "4")
         .expect("应含 A 行号 4 的导出行");
-    assert_eq!(accepted[11], "已确认", "采纳的候选应带确认标记：{accepted:?}");
+    assert_eq!(
+        accepted[11], "已确认",
+        "采纳的候选应带确认标记：{accepted:?}"
+    );
     let auto_row = all_rows
         .iter()
         .find(|r| r.len() > 11 && r[1] == "1")
         .expect("应含 A 行号 1 的导出行");
     assert_eq!(auto_row[11], "未确认");
     let suspect_sheet = sheet_rows(&output_path, "疑似确认记录");
-    assert_eq!(suspect_sheet.len(), 2, "疑似 Sheet 应只有表头 + 1 行：{suspect_sheet:?}");
+    assert_eq!(
+        suspect_sheet.len(),
+        2,
+        "疑似 Sheet 应只有表头 + 1 行：{suspect_sheet:?}"
+    );
     assert_eq!(suspect_sheet[1][5], "疑似匹配");
     let unmatched_sheet = sheet_rows(&output_path, "未匹配清单");
-    assert_eq!(unmatched_sheet.len(), 7, "未匹配清单应为表头 + 6 行：{unmatched_sheet:?}");
+    assert_eq!(
+        unmatched_sheet.len(),
+        7,
+        "未匹配清单应为表头 + 6 行：{unmatched_sheet:?}"
+    );
 
     let _ = fs::remove_dir_all(root);
 }

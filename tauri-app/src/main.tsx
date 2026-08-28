@@ -5,6 +5,7 @@ import App from "./App";
 import "./styles.css";
 import "./settings.css";
 import "./merger.css";
+import "./fa-dep-calc.css";
 import { restoreSavedTheme } from "./theme";
 
 // Before the first paint, so the window never flashes the default theme.

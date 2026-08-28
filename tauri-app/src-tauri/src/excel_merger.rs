@@ -451,6 +451,8 @@ fn is_supported_job_method(method: &str) -> bool {
             | "fa.export"
             | "fa.dep_export"
             | "fa.policy_export"
+            | "fa.tbje_preview"
+            | "fa.tbje_export"
             | "roll_forward.process"
             | "roll_forward.process_companies"
             | "fx.fetch_rates"
@@ -2017,7 +2019,13 @@ mod tests {
 
     #[test]
     fn fa_jobs_have_a_dedicated_native_tool_id() {
-        for method in ["fa.match", "fa.preview", "fa.export"] {
+        for method in [
+            "fa.match",
+            "fa.preview",
+            "fa.export",
+            "fa.tbje_preview",
+            "fa.tbje_export",
+        ] {
             assert_eq!(tool_id(method), "fa_list");
             assert!(is_supported_job_method(method));
         }

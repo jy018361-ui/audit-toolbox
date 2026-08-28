@@ -106,7 +106,10 @@ fn probe_4800_full_year() {
         serde_json::to_string_pretty(&v["summary"]).unwrap_or_default()
     );
 
-    let controls = v["classificationControls"].as_array().cloned().unwrap_or_default();
+    let controls = v["classificationControls"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     println!("== classificationControls 共 {} 条", controls.len());
     let mut by_class = std::collections::BTreeMap::<String, usize>::new();
     let mut by_status = std::collections::BTreeMap::<String, usize>::new();
@@ -133,15 +136,54 @@ fn probe_4800_full_year() {
                     .collect::<String>(),
             )
             .or_default() += 1;
-        *booked_by_class
-            .entry(class)
-            .or_insert_with(|| 0.0)
-            += item["bookedFxGainLoss"].as_f64().unwrap_or(0.0);
+        *booked_by_class.entry(class).or_insert_with(|| 0.0) +=
+            item["bookedFxGainLoss"].as_f64().unwrap_or(0.0);
     }
     println!("   按分类: {by_class:?}");
     println!("   按测算状态: {by_status:?}");
     println!("   按复核原因: {by_reason:?}");
     println!("   按分类的账面汇兑损益合计: {booked_by_class:?}");
+    // FX_PENDING=1：逐张列待确认凭证（盘类别用）。
+    if std::env::var("FX_PENDING").ok().as_deref() == Some("1") {
+        let pending: Vec<&serde_json::Value> = controls
+            .iter()
+            .filter(|item| item["classification"].as_str() == Some("待确认"))
+            .collect();
+        println!("== 待确认凭证明细 共 {} 张", pending.len());
+        for item in &pending {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                item["date"].as_str().unwrap_or(""),
+                item["voucherType"].as_str().unwrap_or(""),
+                item["systemCategory"].as_str().unwrap_or(""),
+                item["patternLabel"].as_str().unwrap_or(""),
+                item["bookedFxGainLoss"],
+                item["summary"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(36)
+                    .collect::<String>(),
+                item["voucherId"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(28)
+                    .collect::<String>(),
+            );
+        }
+        println!("== 借贷科目组合分布（待确认）");
+        let mut by_pattern = std::collections::BTreeMap::<String, (usize, f64)>::new();
+        for item in &pending {
+            let key = item["patternLabel"].as_str().unwrap_or("?").to_string();
+            let entry = by_pattern.entry(key).or_insert((0, 0.0));
+            entry.0 += 1;
+            entry.1 += item["bookedFxGainLoss"].as_f64().unwrap_or(0.0);
+        }
+        for (pattern, (count, amount)) in by_pattern {
+            println!("   {count:>3} 张 {amount:>14.2}  {pattern}");
+        }
+    }
 
     if let Some(revals) = v["clientRevaluationVouchers"].as_array() {
         println!("== 客户重估凭证（认领为未实现）共 {} 张", revals.len());
@@ -154,14 +196,15 @@ fn probe_4800_full_year() {
             total += item["unrealizedGainLoss"].as_f64().unwrap_or(0.0);
             suggested += item["suggestedAdjustment"].as_f64().unwrap_or(0.0);
         }
-        println!("== 未实现余额滚动 {} 行，unrealizedGainLoss 合计 {total:.2}，suggestedAdjustment 合计 {suggested:.2}", all.len());
+        println!(
+            "== 未实现余额滚动 {} 行，unrealizedGainLoss 合计 {total:.2}，suggestedAdjustment 合计 {suggested:.2}",
+            all.len()
+        );
         let mut top: Vec<&serde_json::Value> = all
             .iter()
             .filter(|item| item["unrealizedGainLoss"].as_f64().unwrap_or(0.0).abs() > 0.01)
             .collect();
-        top.sort_by_key(|item| {
-            -(item["unrealizedGainLoss"].as_f64().unwrap_or(0.0).abs() as i64)
-        });
+        top.sort_by_key(|item| -(item["unrealizedGainLoss"].as_f64().unwrap_or(0.0).abs() as i64));
         println!("   金额前 10 行：");
         for item in top.into_iter().take(10) {
             println!(
@@ -196,8 +239,7 @@ fn probe_4800_full_year() {
                             .take(40)
                             .collect::<String>(),
                     )
-                    .or_insert_with(|| 0.0)
-                    += item["unrealizedGainLoss"].as_f64().unwrap_or(0.0);
+                    .or_insert_with(|| 0.0) += item["unrealizedGainLoss"].as_f64().unwrap_or(0.0);
             }
             let mut ranked: Vec<(String, f64)> = by_account.into_iter().collect();
             ranked.sort_by_key(|(_, value)| -(value.abs() as i64));
@@ -237,7 +279,11 @@ fn probe_4800_full_year() {
         for item in issues.iter().take(5) {
             println!(
                 "   {}",
-                serde_json::to_string(item).unwrap_or_default().chars().take(400).collect::<String>()
+                serde_json::to_string(item)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(400)
+                    .collect::<String>()
             );
         }
     }

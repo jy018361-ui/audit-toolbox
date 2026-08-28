@@ -9,6 +9,13 @@ export type DataTableProps = {
   emptyText?: string;
   /** 每列表头上方渲染的控件（如映射下拉），长度须与 columns 一致 */
   headerControls?: ReactNode[];
+  /**
+   * 数据列之后追加的列：表格里**没有**这一列的数据，由调用方逐行渲染控件。
+   *
+   * 借款台账要在预览区逐行确认利率口径（固定/浮动、上浮下浮点数），
+   * 那两列不来自台账文件，是用户填的。
+   */
+  trailingColumns?: { key: string; title: ReactNode; render: (rowIndex: number) => ReactNode }[];
 };
 
 /**
@@ -22,6 +29,7 @@ export function DataTable({
   maxHeight = 430,
   emptyText = "暂无数据",
   headerControls,
+  trailingColumns,
 }: DataTableProps) {
   return (
     <div className="data-table">
@@ -39,6 +47,11 @@ export function DataTable({
                     <span>{col}</span>
                   </th>
                 ))}
+                {trailingColumns?.map((col) => (
+                  <th key={col.key} className="data-table-trailing">
+                    <span>{col.title}</span>
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -53,6 +66,11 @@ export function DataTable({
                       </td>
                     );
                   })}
+                  {trailingColumns?.map((col) => (
+                    <td key={col.key} className="data-table-trailing">
+                      {col.render(rowIndex)}
+                    </td>
+                  ))}
                 </tr>
               ))}
             </tbody>

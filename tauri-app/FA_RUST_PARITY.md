@@ -180,3 +180,30 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 - 仅合成样例；真实两期卡片上「资产分类=编码、资产类型描述=类别文本」的原始文件未入库回归，结论待脱敏样例验收。
 - 替代列排除规则对「类别列同时长得像名称列」的其他命名变体（如「资产类别说明」）覆盖面未逐一验证。
+
+---
+
+## 2026-08-28 FA TB＋JE 变动表模式
+
+- 现有两期卡片模式保留；`fa.tbje_preview` / `fa.tbje_export` 仅承接固定资产业务分类与五表输出。
+- 上传分类、Sheet/合并表头识别和读取直接调用 `fx` 公共实现；前端直接调用既有 `deposit.classify_source`、`deposit.inspect_tb`、`deposit.inspect_je` 与 `LedgerReviewAll`，未增加 FA 专属识别或 LLM 映射提示词。
+- TB/JE 末级科目、标准净额与符号口径来自 `ledger_mapping`。正负数 Net=0 通过 `tabular::net_zero_view` 调用看账原有 `match_je_rows`，只抽取公共返回视图，未复制配对算法、精度或状态名。
+- 新业务层仅处理用户确认的原值/累计折旧角色和类别，按完整凭证归集新增、处置、计提/其他、未归属及跨类别重分类；对方科目使用完整凭证逐科目净额并执行确定性方式规则。
+- 导出顺序固定为五张可见表加隐藏 `_TB规范数据`；TB 期初/期末、JE 变动金额、清单金额和对方科目金额均保留公式及缓存结果。
+- 合成测试覆盖公共 Net=0 排除、基础新增/处置/折旧计提、跨类别重分类、多主体同编码、字母数字科目编码、无编码名称唯一回退与重名阻断、未归属折旧、方向性对方科目、陈旧余额映射阻断、Sheet 顺序、隐藏页、公式及缓存结果。
+- 公共账表一致性测试把同一组 TB/JE 同时送入汇兑、存款、看账和 FA 实际复用的入口，核对 Sheet、标题行、字段映射、标准净额、符号结论及 Net=0 逐行状态；FA 仍直接复用存款入口，没有增加包装识别方法。
+- 真实 ERP 多 Sheet、跨主体名称碰撞及异常编码形态仍需脱敏样例验收；合成测试通过不替代真实样例验收。
+
+验收命令：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml fa_tbje --lib
+cargo test --manifest-path src-tauri/Cargo.toml ledger_engine_parity_tests --lib
+npx vitest run src/FaTbJePage.test.ts
+```
+
+## 2026-08-28 折旧测算导航统一
+
+- 标题下方使用公共 `StepIndicator`：导入清单 → 核对映射 → 生成底稿；不再把步骤编号分散到多个卡片中。侧栏固定资产总分折叠结构保留。
+- 上传识别成功后进入映射，必填映射缺失时不可进入导出；返回修改保留映射，清空文件重置导航，生成进度在步骤区域外持续显示。
+- `FaDepCalcPage.test.tsx` 验证导航顺序、禁用条件、映射保留、导出请求与清空重置。此轮未改折旧金额算法，浏览器预览不等同于真实清单的 Rust 导出验收。

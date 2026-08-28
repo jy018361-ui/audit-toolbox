@@ -30,6 +30,18 @@ export type MappingPanelProps = {
   shareable?: Set<string>;
   /** 尚未映射的必填项，直接展示给用户。 */
   missing?: string[];
+  /**
+   * 某个角色在**当前命中的形态**下是必填还是选填。
+   *
+   * 借款台账的必填项随命中的型号变（类型1 要到期日、类型2 要期限、
+   * 类型3／5 要期间发生额），不是一张固定清单，所以由调用方按型号回答，
+   * 下拉里逐项标注。返回 `undefined` 表示与形态无关，不标注。
+   */
+  requirementOf?: (role: string) => "required" | "optional" | undefined;
+  /** 形态判定结论，如「已识别为 A 型（起始日＋到期日）」。 */
+  formNote?: React.ReactNode;
+  /** 数据列之后追加的、由调用方逐行渲染控件的列（如逐行利率口径）。 */
+  trailingColumns?: { key: string; title: React.ReactNode; render: (rowIndex: number) => React.ReactNode }[];
   onChange: (next: MappingDict) => void;
   /** 表头下拉右侧的附加控件，如列筛选漏斗。 */
   headerExtras?: (header: string) => React.ReactNode;
@@ -82,6 +94,12 @@ export function MappingPanel(props: MappingPanelProps) {
     props.onChange(next);
   };
 
+  // 必填／选填的标注跟在标签后面。下拉的 <option> 没法上样式，只能用文字标。
+  const mark = (role: string) => {
+    const need = props.requirementOf?.(role);
+    return need === "required" ? "＊" : need === "optional" ? "（选填）" : "";
+  };
+
   const option = (role: string, label: string, current: string) => {
     const taken = used.has(role) && role !== current && !isMulti(role);
     const disabled = locked(role);
@@ -89,6 +107,7 @@ export function MappingPanel(props: MappingPanelProps) {
     return (
       <option key={role} value={role} className={taken || disabled ? "dt-role-taken" : undefined}>
         {label}
+        {mark(role)}
         {suffix}
       </option>
     );
@@ -105,6 +124,7 @@ export function MappingPanel(props: MappingPanelProps) {
     return (
       <option key={role} value={role} className={taken || disabled ? "dt-role-taken" : undefined}>
         {chosen ? `✓ ${label}` : label}
+        {mark(role)}
         {chosen ? "（再点取消）" : taken ? "（已用）" : disabled ? "（与已选记法冲突）" : ""}
       </option>
     );
@@ -165,6 +185,7 @@ export function MappingPanel(props: MappingPanelProps) {
         </div>
         {props.toolbar ? <div className="mapping-panel-toolbar">{props.toolbar}</div> : null}
       </div>
+      {props.formNote ? <p className="mapping-form-note">{props.formNote}</p> : null}
       {props.missing && props.missing.length > 0 && (
         <p className="fa-missing-hint">尚未映射：{props.missing.join("、")}</p>
       )}
@@ -172,6 +193,7 @@ export function MappingPanel(props: MappingPanelProps) {
         columns={headers}
         rows={rows}
         headerControls={controls}
+        trailingColumns={props.trailingColumns}
         maxHeight={props.maxHeight ?? 380}
       />
     </section>

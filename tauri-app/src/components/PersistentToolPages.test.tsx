@@ -13,7 +13,7 @@ describe("PersistentToolPages", () => {
   it("recognizes only complete tool routes", () => {
     expect(toolIdFromPathname("/tools/fx_audit")).toBe("fx_audit");
     expect(toolIdFromPathname("/tools/fx_audit/")).toBe("fx_audit");
-    expect(toolIdFromPathname("/tasks")).toBeUndefined();
+    expect(toolIdFromPathname("/settings")).toBeUndefined();
     expect(toolIdFromPathname("/tools/a/more")).toBeUndefined();
   });
 
@@ -34,11 +34,11 @@ describe("PersistentToolPages", () => {
         <nav>
           <NavLink to="/tools/a">A</NavLink>
           <NavLink to="/tools/b">B</NavLink>
-          <NavLink to="/tasks">Tasks</NavLink>
+          <NavLink to="/settings">Settings</NavLink>
         </nav>
         <Routes>
           <Route path="/tools/:toolId" element={null} />
-          <Route path="/tasks" element={<p>task center</p>} />
+          <Route path="/settings" element={<p>settings</p>} />
         </Routes>
         <PersistentToolPages
           renderPage={(toolId) => <StatefulPage id={toolId} />}
@@ -63,8 +63,8 @@ describe("PersistentToolPages", () => {
     fireEvent.click(screen.getByRole("link", { name: "A" }));
     expect(screen.getByRole("button", { name: "a:1" })).toBeVisible();
 
-    fireEvent.click(screen.getByRole("link", { name: "Tasks" }));
-    expect(screen.getByText("task center")).toBeVisible();
+    fireEvent.click(screen.getByRole("link", { name: "Settings" }));
+    expect(screen.getByText("settings")).toBeVisible();
     expect(pageA).toHaveAttribute("hidden");
     expect(pageB).toHaveAttribute("hidden");
     expect(cleanup).not.toHaveBeenCalled();

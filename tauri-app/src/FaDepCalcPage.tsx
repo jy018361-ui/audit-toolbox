@@ -9,6 +9,7 @@ import {
 } from "./api";
 import type { ToolManifest } from "./types";
 import { errorText } from "@/lib/errors";
+import { StepIndicator } from "@/components/StepIndicator";
 import { PageHeader } from "@/components/PageHeader";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
@@ -17,12 +18,7 @@ import { FileInput } from "@/components/FileInput";
 import { FileDropInput } from "@/components/FileDropInput";
 import { DataTable } from "@/components/DataTable";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { LlmReview } from "@/components/LlmReview";
 import { useJobEvents } from "@/hooks/useJobEvents";
@@ -59,6 +55,7 @@ type FaLlmReview = {
   fieldReviews: unknown[];
 };
 type DepDraft = {
+  step?: number;
   path: string;
   sheet: string;
   headerRow: string;
@@ -76,6 +73,7 @@ let faDepDraftCache: DepDraft | undefined;
 /// 交互均复制 FA 主工具；导出为单页"折旧测算"Excel（活公式，可审计）。
 export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
   const draft = faDepDraftCache;
+  const [step, setStep] = useState(draft?.step ?? 0);
   const [path, setPath] = useState(draft?.path ?? "");
   const [sheet, setSheet] = useState(draft?.sheet ?? "");
   const [headerRow, setHeaderRow] = useState(draft?.headerRow ?? "");
@@ -111,6 +109,9 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
   const [dragHover, setDragHover] = useState(false);
   const applyPathRef = useRef<(value: string) => void>(() => {});
   applyPathRef.current = (value: string) => {
+    setStep(0);
+    reviewGeneration.current += 1;
+    setLlmBusy(false);
     setOutputPathTouched(false);
     setPath(value);
     setSheet("");
@@ -146,6 +147,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
   }, []);
   useEffect(() => {
     faDepDraftCache = {
+      step,
       path,
       sheet,
       headerRow,
@@ -162,7 +164,11 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
     setOutputPath(path ? faDepDefaultOutputPath(path) : "");
   }, [path, outputPathTouched]);
 
-  async function inspect(overrides?: { path?: string; sheet?: string; headerRow?: string }) {
+  async function inspect(overrides?: {
+    path?: string;
+    sheet?: string;
+    headerRow?: string;
+  }) {
     const target = overrides?.path ?? path;
     if (!target) {
       setError("请先选择期末固定资产清单。");
@@ -177,7 +183,8 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
         headerRow: Number(overrides?.headerRow ?? headerRow) || undefined,
       })) as DepInspection;
       setInspection(value);
-      setSheet(value.selectedSheet ?? (overrides?.sheet ?? sheet));
+      setStep(1);
+      setSheet(value.selectedSheet ?? overrides?.sheet ?? sheet);
       setHeaderRow(String(value.detectedHeaderRow ?? ""));
       const suggested: DepMapping = {};
       for (const [key] of DEP_MAPPING_ROLES) {
@@ -217,7 +224,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
     try {
       const value = (await engineCall("fa.dep_review", {
         path: reviewPath,
-        sheet: (sheetOverride || sheet) || undefined,
+        sheet: sheetOverride || sheet || undefined,
         headerRow: headerRowOverride ?? (Number(headerRow) || 1),
         mapping: mappingOverride ?? mapping,
       })) as FaLlmReview;
@@ -270,12 +277,18 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
         },
       },
     ]);
-    setMapping((current) => ({ ...current, [item.apply.key]: item.apply.value }));
+    setMapping((current) => ({
+      ...current,
+      [item.apply.key]: item.apply.value,
+    }));
     setLlmPending((current) => current.filter((value) => value.id !== item.id));
   }
 
   function undoChange(change: DepMappingChange) {
-    setMapping((current) => ({ ...current, [change.restore.key]: change.restore.value }));
+    setMapping((current) => ({
+      ...current,
+      [change.restore.key]: change.restore.value,
+    }));
     setLlmChanges((current) => current.filter((item) => item.id !== change.id));
   }
 
@@ -371,12 +384,17 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
   }
 
   const missing = depMissingRoles(mapping);
+  const activeStep = !inspection ? 0 : step === 2 && missing.length ? 1 : step;
   const optionalMissing = inspection ? depMissingOptionalRoles(mapping) : [];
   // 每列顶部的角色映射下拉（复制 FA 主工具的列头映射交互）。
   const columnControls = inspection
     ? inspection.headers.map((header) => {
         const column = header.trim();
-        const mapped = faMappedRolesForColumn(column, DEP_MAPPING_ROLES, mapping);
+        const mapped = faMappedRolesForColumn(
+          column,
+          DEP_MAPPING_ROLES,
+          mapping,
+        );
         const usedRoles = new Set(
           DEP_MAPPING_ROLES.filter(([key]) =>
             Boolean(String(mapping[key] ?? "").trim()),
@@ -393,7 +411,8 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
             >
               <option value="">—</option>
               {DEP_MAPPING_ROLES.map(([key, label]) => {
-                const taken = usedRoles.has(key) && !mapped.some(([k]) => k === key);
+                const taken =
+                  usedRoles.has(key) && !mapped.some(([k]) => k === key);
                 return (
                   <option
                     key={key}
@@ -416,227 +435,209 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
       : [];
 
   return (
-    <>
+    <div className="fa-dep-page">
       <PageHeader
         eyebrow="固定资产折旧测算"
         title={tool.name}
         detail="上传期末固定资产清单，逐卡重算月折旧额、当年与累计折旧，并输出带活公式的折旧测算表。"
       />
-      <div className="fa-stack">
-        <Card>
-          <CardHeader>
-            <CardTitle>1. 上传期末清单并映射</CardTitle>
-            <Badge className="badge-ready">已就绪</Badge>
-          </CardHeader>
-          <CardContent>
-            <ErrorBox error={error} onDismiss={() => setError("")} />
-            {job && job.phase !== "completed" && (
-              <JobProgress
-                job={job}
-                onCancel={(jobId) => {
-                  void jobCancel(jobId);
-                  setBusy(false);
-                }}
-                cancelLabel="取消任务"
-              />
-            )}
-            <div className="form-grid">
-              <Field label="期末清单" required>
-                <div ref={uploadDropRef}>
-                  <FileDropInput
-                    value={path}
-                    placeholder="拖放或点击选择期末固定资产清单"
-                    onBrowse={() => void chooseFile()}
-                    onDragStateChange={setDragHover}
-                    highlight={dragHover}
-                    disabled={busy}
-                    onClear={
-                      path && !busy
-                        ? () => applyPathRef.current("")
-                        : undefined
-                    }
-                  />
-                </div>
-              </Field>
-              <Field label="Sheet">
-                {inspection?.sheets.length ? (
-                  <select
-                    value={sheet}
-                    disabled={busy}
-                    onChange={(e) => {
-                      setSheet(e.target.value);
-                      setHeaderRow("");
-                      void inspect({ sheet: e.target.value, headerRow: "" });
-                    }}
-                  >
-                    {inspection.sheets.map((value) => (
-                      <option key={value}>{value}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    value={sheet}
-                    disabled={busy}
-                    onChange={(e) => setSheet(e.target.value)}
-                  />
-                )}
-              </Field>
-              <Field label="标题行（留空自动识别）">
-                <input
-                  value={headerRow}
-                  placeholder="自动"
-                  disabled={busy}
-                  onChange={(e) => setHeaderRow(e.target.value)}
-                  onBlur={() => {
-                    if (path && inspection) void inspect();
-                  }}
-                />
-              </Field>
-            </div>
-            <div className="actions">
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled={busy || !path}
-                onClick={() => void inspect()}
+
+      <StepIndicator
+        steps={[
+          { key: "source", label: "导入清单", disabled: busy },
+          { key: "mapping", label: "核对映射", disabled: !inspection || busy },
+          {
+            key: "export",
+            label: "生成底稿",
+            disabled: !inspection || missing.length > 0 || busy || llmBusy,
+          },
+        ]}
+        current={activeStep}
+        onStepClick={setStep}
+      />
+      <ErrorBox error={error} onDismiss={() => setError("")} />
+      {job && job.phase !== "completed" && (
+        <JobProgress
+          job={job}
+          onCancel={(jobId) => {
+            void jobCancel(jobId);
+            setBusy(false);
+          }}
+          cancelLabel="取消任务"
+        />
+      )}
+      <div className="dep-workbench">
+        {activeStep === 0 && (
+          <Card className="dep-source-card">
+            <CardHeader className="dep-card-header">
+              <div>
+                <CardTitle>导入期末固定资产清单</CardTitle>
+                <p>选择文件后自动识别 Sheet、标题行并启动字段复核。</p>
+              </div>
+              <Badge
+                className={inspection ? "badge-ready" : "dep-badge-neutral"}
               >
-                {busy ? "正在读取表格…" : "读取表格 + LLM 复核"}
-              </Button>
-              {inspection && (
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={busy || llmBusy || !path}
-                  onClick={() => void review()}
-                >
-                  {llmBusy ? "LLM 正在复核…" : "LLM 重新复核"}
-                </Button>
-              )}
-            </div>
-            {(llmBusy || llmReview) && (
-              <LlmReview
-                title="LLM 映射复核"
-                busy={llmBusy}
-                passed={llmReview?.passed}
-                enabled={llmReview?.enabled}
-                failed={llmReview?.failed}
-                message={llmReview && !llmBusy ? llmReview.message : undefined}
-                detail={llmReview?.detail}
-                changes={llmChanges}
-                pending={llmPending}
-                onUndo={(change) => undoChange(change as DepMappingChange)}
-                onAccept={(item) => acceptPending(item as DepPendingSuggestion)}
-                onKeep={(item) =>
-                  setLlmPending((current) =>
-                    current.filter((value) => value.id !== item.id),
-                  )
-                }
-                onSkip={() => {
-                  reviewGeneration.current += 1;
-                  setLlmBusy(false);
-                  setLlmReview((current) =>
-                    current
-                      ? {
-                          ...current,
-                          failed: false,
-                          passed: true,
-                          message:
-                            "已按用户选择跳过本次 LLM 复核，保留当前字段映射。",
-                        }
-                      : current,
-                  );
-                }}
-              />
-            )}
-          </CardContent>
-        </Card>
-        {inspection && (
-          <Card>
-            <CardHeader>
-              <CardTitle>2. 导出设置</CardTitle>
+                {busy ? "正在读取" : inspection ? "已读取" : "等待文件"}
+              </Badge>
             </CardHeader>
             <CardContent>
-              <div className="form-grid">
-                <Field label="资产负债表日" required>
-                  <input
-                    type="date"
-                    value={balanceSheetDate}
-                    onChange={(e) => setBalanceSheetDate(e.target.value)}
-                  />
+              <div className="dep-source-grid">
+                <Field label="期末清单" required className="dep-upload-field">
+                  <div ref={uploadDropRef}>
+                    <FileDropInput
+                      value={path}
+                      placeholder="拖放或点击选择期末固定资产清单"
+                      onBrowse={() => void chooseFile()}
+                      onDragStateChange={setDragHover}
+                      highlight={dragHover}
+                      disabled={busy}
+                      onClear={
+                        path && !busy
+                          ? () => applyPathRef.current("")
+                          : undefined
+                      }
+                    />
+                  </div>
+                  <small className="dep-field-note">
+                    支持 Excel、CSV 与文本清单；选择后会立即读取。
+                  </small>
                 </Field>
-                <Field label="输出文件">
-                  <FileInput
-                    value={outputPath}
-                    placeholder="选择清单后自动填入默认保存位置"
-                    onBrowse={() => void chooseOutput()}
-                    onClear={
-                      outputPathTouched
-                        ? () => {
-                            setOutputPathTouched(false);
-                            setOutputPath(path ? faDepDefaultOutputPath(path) : "");
-                          }
-                        : undefined
-                    }
-                    browseLabel="选择"
-                    clearLabel="恢复默认"
-                  />
-                </Field>
-              </div>
-              <p className="hint">
-                {outputPathTouched
-                  ? "已指定保存位置，导出会写入上面这个文件。"
-                  : "默认保存到清单所在目录，文件名为 折旧测算_<日期>_<时间>.xlsx（导出时按当前时间生成）。"}
-              </p>
-              {!!outputPaths.length && (
-                <div className="fa-result-summary">
-                  <strong>折旧测算表已生成</strong>
-                  {outputPaths.map((output) => (
-                    <Button
-                      key={output}
-                      variant="default"
-                      onClick={() => void openOutput(output)}
-                    >
-                      打开结果：{output}
-                    </Button>
-                  ))}
+                <div className="dep-source-options">
+                  <Field label="工作表 Sheet">
+                    {inspection?.sheets.length ? (
+                      <select
+                        value={sheet}
+                        disabled={busy}
+                        onChange={(e) => {
+                          setSheet(e.target.value);
+                          setHeaderRow("");
+                          void inspect({
+                            sheet: e.target.value,
+                            headerRow: "",
+                          });
+                        }}
+                      >
+                        {inspection.sheets.map((value) => (
+                          <option key={value}>{value}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        value={sheet}
+                        placeholder="自动选择"
+                        disabled={busy}
+                        onChange={(e) => setSheet(e.target.value)}
+                      />
+                    )}
+                  </Field>
+                  <Field label="标题行">
+                    <input
+                      value={headerRow}
+                      placeholder="自动识别"
+                      disabled={busy}
+                      onChange={(e) => setHeaderRow(e.target.value)}
+                      onBlur={() => {
+                        if (path && inspection) void inspect();
+                      }}
+                    />
+                  </Field>
                 </div>
-              )}
-              <div className="actions">
-                {busy && job ? (
+              </div>
+              <div className="actions dep-source-actions">
+                {inspection && (
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() => void jobCancel(job.jobId)}
+                    disabled={busy || llmBusy || !path}
+                    onClick={() => void review()}
                   >
-                    停止
-                  </Button>
-                ) : (
-                  <Button
-                    variant="default"
-                    disabled={!inspection || Boolean(missing.length)}
-                    onClick={() => void startExport()}
-                  >
-                    生成折旧测算表
+                    {llmBusy ? "LLM 正在复核…" : "重新复核映射"}
                   </Button>
                 )}
+                {inspection && (
+                  <Button variant="secondary" onClick={() => setStep(1)}>
+                    下一步：核对映射
+                  </Button>
+                )}
+                <Button
+                  variant="default"
+                  disabled={busy || !path}
+                  onClick={() => void inspect()}
+                >
+                  {busy
+                    ? "正在读取表格…"
+                    : inspection
+                      ? "重新读取表格"
+                      : "读取并复核字段"}
+                </Button>
               </div>
             </CardContent>
           </Card>
         )}
-        {inspection ? (
-          <Card className="fa-result-workspace">
-            <CardHeader>
-              <CardTitle>清单预览与字段映射</CardTitle>
+        {activeStep === 1 && inspection && (
+          <Card className="fa-result-workspace dep-preview-card">
+            <CardHeader className="dep-card-header">
+              <div>
+                <CardTitle>核对字段映射</CardTitle>
+                <p>在每列表头选择字段角色；必填项齐全后即可生成底稿。</p>
+              </div>
+              <Badge
+                className={missing.length ? "dep-badge-warning" : "badge-ready"}
+              >
+                {missing.length ? `待补 ${missing.length} 项` : "映射完整"}
+              </Badge>
             </CardHeader>
             <CardContent>
+              {(llmBusy || llmReview) && (
+                <LlmReview
+                  title="LLM 映射复核"
+                  busy={llmBusy}
+                  passed={llmReview?.passed}
+                  enabled={llmReview?.enabled}
+                  failed={llmReview?.failed}
+                  message={
+                    llmReview && !llmBusy ? llmReview.message : undefined
+                  }
+                  detail={llmReview?.detail}
+                  changes={llmChanges}
+                  pending={llmPending}
+                  onUndo={(change) => undoChange(change as DepMappingChange)}
+                  onAccept={(item) =>
+                    acceptPending(item as DepPendingSuggestion)
+                  }
+                  onKeep={(item) =>
+                    setLlmPending((current) =>
+                      current.filter((value) => value.id !== item.id),
+                    )
+                  }
+                  onSkip={() => {
+                    reviewGeneration.current += 1;
+                    setLlmBusy(false);
+                    setLlmReview((current) =>
+                      current
+                        ? {
+                            ...current,
+                            failed: false,
+                            passed: true,
+                            message:
+                              "已按用户选择跳过本次 LLM 复核，保留当前字段映射。",
+                          }
+                        : current,
+                    );
+                  }}
+                />
+              )}
+
               <DataTable
                 columns={inspection.headers}
                 rows={inspection.preview}
                 caption={
                   <div className="fa-table-caption">
                     <strong>
-                      {inspection.displayName ?? inspection.selectedSheet ?? "清单"} ·{" "}
-                      {inspection.dimensions?.rows ?? 0} 行 ×{" "}
+                      {inspection.displayName ??
+                        inspection.selectedSheet ??
+                        "清单"}{" "}
+                      · {inspection.dimensions?.rows ?? 0} 行 ×{" "}
                       {inspection.dimensions?.columns ?? 0} 列
                     </strong>
                     {missing.length > 0 && (
@@ -657,21 +658,118 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                 maxHeight={430}
                 headerControls={columnControls}
               />
-            </CardContent>
-          </Card>
-        ) : (
-          <Card className="fa-result-workspace">
-            <CardHeader>
-              <CardTitle>清单预览与字段映射</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="empty">
-                选择期末清单并读取结构后，在此显示表格内容，并在各列顶部下拉中选择对应字段。
+              <div className="actions">
+                <Button variant="secondary" onClick={() => setStep(0)}>
+                  返回导入
+                </Button>
+                <Button
+                  disabled={missing.length > 0 || busy || llmBusy}
+                  onClick={() => setStep(2)}
+                >
+                  下一步：生成底稿
+                </Button>
               </div>
             </CardContent>
           </Card>
         )}
+
+        {activeStep === 2 && inspection && (
+          <Card className="dep-export-card">
+            <CardHeader className="dep-card-header">
+              <div>
+                <CardTitle>设置并生成折旧底稿</CardTitle>
+                <p>输出文件保留活公式，便于复核计算过程与后续调整。</p>
+              </div>
+              <Badge
+                className={
+                  outputPaths.length ? "badge-ready" : "dep-badge-neutral"
+                }
+              >
+                {outputPaths.length ? "已生成" : "待生成"}
+              </Badge>
+            </CardHeader>
+            <CardContent>
+              <div className="dep-export-grid">
+                <Field label="资产负债表日" required>
+                  <input
+                    type="date"
+                    value={balanceSheetDate}
+                    onChange={(e) => setBalanceSheetDate(e.target.value)}
+                  />
+                </Field>
+                <Field label="输出文件">
+                  <FileInput
+                    value={outputPath}
+                    placeholder="选择清单后自动填入默认保存位置"
+                    onBrowse={() => void chooseOutput()}
+                    onClear={
+                      outputPathTouched
+                        ? () => {
+                            setOutputPathTouched(false);
+                            setOutputPath(
+                              path ? faDepDefaultOutputPath(path) : "",
+                            );
+                          }
+                        : undefined
+                    }
+                    browseLabel="选择"
+                    clearLabel="恢复默认"
+                  />
+                </Field>
+                <div className="dep-export-action">
+                  {busy && job ? (
+                    <Button
+                      variant="secondary"
+                      onClick={() => void jobCancel(job.jobId)}
+                    >
+                      停止任务
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="default"
+                      disabled={
+                        busy ||
+                        llmBusy ||
+                        !inspection ||
+                        Boolean(missing.length)
+                      }
+                      onClick={() => void startExport()}
+                    >
+                      生成折旧测算表
+                    </Button>
+                  )}
+                </div>
+              </div>
+              <Button
+                variant="secondary"
+                disabled={busy}
+                onClick={() => setStep(1)}
+              >
+                返回核对映射
+              </Button>
+              <p className="dep-output-note">
+                {outputPathTouched
+                  ? "已使用自定义保存位置。"
+                  : "默认保存到清单所在目录，并按导出时间自动命名。"}
+              </p>
+              {!!outputPaths.length && (
+                <div className="fa-result-summary dep-result-summary">
+                  <strong>折旧测算表已生成</strong>
+                  {outputPaths.map((output) => (
+                    <Button
+                      key={output}
+                      variant="default"
+                      onClick={() => void openOutput(output)}
+                    >
+                      打开结果：{output}
+                    </Button>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
       </div>
-    </>
+    </div>
   );
 }

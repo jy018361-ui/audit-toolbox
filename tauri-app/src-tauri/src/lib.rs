@@ -6,15 +6,20 @@ mod excel_com;
 mod excel_merger;
 mod fa;
 mod fa_subtools;
+mod fa_tbje;
 mod file_list;
 mod fuzzy_match;
 mod fx;
+#[cfg(test)]
+mod ledger_engine_parity_tests;
 mod ledger_mapping;
 mod loan_interest;
+mod lpr;
 mod pdf_to_excel;
 mod roll_forward;
 mod storage;
 mod tabular;
+mod update_notes;
 mod wp;
 
 use directories::ProjectDirs;
@@ -90,6 +95,24 @@ fn app_bootstrap() -> Result<Value, AppError> {
         "engine": {"available": true, "version": env!("CARGO_PKG_VERSION"), "mode": "rust-native"},
         "dataDir": dirs.data_local_dir().to_string_lossy(), "migrationRequired": Storage::legacy_paths_exist()
     }))
+}
+
+#[tauri::command]
+async fn update_release_notes(
+    target_version: Option<String>,
+) -> Result<update_notes::ReleaseNotes, AppError> {
+    let current = env!("CARGO_PKG_VERSION");
+    let target = target_version.unwrap_or_else(|| current.to_string());
+    tauri::async_runtime::spawn_blocking(move || update_notes::load(current, &target))
+        .await
+        .map_err(|_| {
+            AppError::new(
+                "UPDATE_NOTES_UNAVAILABLE",
+                "读取更新说明失败，请重试。",
+                true,
+                None,
+            )
+        })?
 }
 
 #[tauri::command]
@@ -506,7 +529,13 @@ fn is_fa_llm_method(method: &str) -> bool {
 fn is_fa_job_method(method: &str) -> bool {
     matches!(
         method,
-        "fa.match" | "fa.preview" | "fa.export" | "fa.dep_export" | "fa.policy_export"
+        "fa.match"
+            | "fa.preview"
+            | "fa.export"
+            | "fa.dep_export"
+            | "fa.policy_export"
+            | "fa.tbje_preview"
+            | "fa.tbje_export"
     )
 }
 
@@ -863,7 +892,10 @@ pub fn engine_call_for_test(
     }
     if let Some(rest) = method.strip_prefix("fx.") {
         if rest.starts_with("inspect")
-            || matches!(rest, "account_roles" | "validate_mapping" | "check_mapping_alignment")
+            || matches!(
+                rest,
+                "account_roles" | "validate_mapping" | "check_mapping_alignment"
+            )
         {
             return fx::call(method, params);
         }
@@ -888,24 +920,12 @@ pub fn engine_call_for_test(
     if method == "fx.preview_probe" {
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let pause = excel_merger::PauseCheckpoint::unpaused(cancel.clone());
-        return fx::run_job(
-            "fx.preview",
-            params,
-            &|_, _, _, _| {},
-            cancel,
-            &pause,
-        );
+        return fx::run_job("fx.preview", params, &|_, _, _, _| {}, cancel, &pause);
     }
     if method == "fx.export_probe" {
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let pause = excel_merger::PauseCheckpoint::unpaused(cancel.clone());
-        return fx::run_job(
-            "fx.export",
-            params,
-            &|_, _, _, _| {},
-            cancel,
-            &pause,
-        );
+        return fx::run_job("fx.export", params, &|_, _, _, _| {}, cancel, &pause);
     }
     if method == "fx.sign_probe" {
         return fx::sign_probe_for_test(&params);
@@ -913,7 +933,10 @@ pub fn engine_call_for_test(
     if method == "fx.rollforward_check" {
         return fx::rollforward_check_for_test(&params);
     }
-    if matches!(method, "kanzhang.inspect" | "kanzhang.accounts" | "kanzhang.map") {
+    if matches!(
+        method,
+        "kanzhang.inspect" | "kanzhang.accounts" | "kanzhang.map"
+    ) {
         return tabular::call(method, params);
     }
     // 两列匹配：inspect 只读；get_results/save_confirm 是集成测试
@@ -978,6 +1001,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_bootstrap,
+            update_release_notes,
             tool_catalog,
             engine_call,
             job_start,
@@ -1048,6 +1072,8 @@ mod tests {
         assert!(is_fa_job_method("fa.export"));
         assert!(is_fa_job_method("fa.dep_export"));
         assert!(is_fa_job_method("fa.policy_export"));
+        assert!(is_fa_job_method("fa.tbje_preview"));
+        assert!(is_fa_job_method("fa.tbje_export"));
         assert!(!is_fa_job_method("fa.unknown"));
         assert!(!is_fa_job_method("fa.dep_inspect"));
 

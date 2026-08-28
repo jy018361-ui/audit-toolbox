@@ -177,33 +177,165 @@ const FALLBACK_NORMALIZE_MAP: &[(&str, &str)] = &[
 ];
 /// 内置兜底：行政区划（省级 + 常见市级，含常用简称）。
 const FALLBACK_REGIONS: &[&str] = &[
-    "黑龙江省", "乌鲁木齐市", "呼和浩特市", "石家庄市", "哈尔滨市",
-    "内蒙古自治区", "广西壮族自治区", "宁夏回族自治区", "新疆维吾尔自治区", "西藏自治区",
-    "香港特别行政区", "澳门特别行政区",
-    "石家庄", "哈尔滨", "乌鲁木齐", "呼和浩特",
-    "山西", "辽宁", "吉林", "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南",
-    "湖北", "湖南", "广东", "海南", "四川", "贵州", "云南", "陕西", "甘肃", "青海",
-    "台湾", "内蒙", "广西", "西藏", "宁夏", "新疆", "香港", "澳门", "河北",
-    "太原", "沈阳", "长春", "南京", "杭州", "合肥", "福州", "南昌", "济南", "郑州",
-    "武汉", "长沙", "广州", "海口", "成都", "贵阳", "昆明", "西安", "兰州", "西宁",
-    "拉萨", "银川", "南宁", "深圳", "大连", "青岛", "宁波", "厦门", "苏州", "无锡",
-    "佛山", "东莞", "珠海", "温州", "泉州", "烟台", "唐山",
-    "北京市", "天津市", "上海市", "重庆市",
-    "北京", "天津", "上海", "重庆",
+    "黑龙江省",
+    "乌鲁木齐市",
+    "呼和浩特市",
+    "石家庄市",
+    "哈尔滨市",
+    "内蒙古自治区",
+    "广西壮族自治区",
+    "宁夏回族自治区",
+    "新疆维吾尔自治区",
+    "西藏自治区",
+    "香港特别行政区",
+    "澳门特别行政区",
+    "石家庄",
+    "哈尔滨",
+    "乌鲁木齐",
+    "呼和浩特",
+    "山西",
+    "辽宁",
+    "吉林",
+    "江苏",
+    "浙江",
+    "安徽",
+    "福建",
+    "江西",
+    "山东",
+    "河南",
+    "湖北",
+    "湖南",
+    "广东",
+    "海南",
+    "四川",
+    "贵州",
+    "云南",
+    "陕西",
+    "甘肃",
+    "青海",
+    "台湾",
+    "内蒙",
+    "广西",
+    "西藏",
+    "宁夏",
+    "新疆",
+    "香港",
+    "澳门",
+    "河北",
+    "太原",
+    "沈阳",
+    "长春",
+    "南京",
+    "杭州",
+    "合肥",
+    "福州",
+    "南昌",
+    "济南",
+    "郑州",
+    "武汉",
+    "长沙",
+    "广州",
+    "海口",
+    "成都",
+    "贵阳",
+    "昆明",
+    "西安",
+    "兰州",
+    "西宁",
+    "拉萨",
+    "银川",
+    "南宁",
+    "深圳",
+    "大连",
+    "青岛",
+    "宁波",
+    "厦门",
+    "苏州",
+    "无锡",
+    "佛山",
+    "东莞",
+    "珠海",
+    "温州",
+    "泉州",
+    "烟台",
+    "唐山",
+    "北京市",
+    "天津市",
+    "上海市",
+    "重庆市",
+    "北京",
+    "天津",
+    "上海",
+    "重庆",
 ];
 /// 内置兜底：繁→简常用字对（正常路径走 OpenCC TSCharacters 全表）。
 const FALLBACK_T2S_CHARS: &[(char, char)] = &[
-    ('萬', '万'), ('華', '华'), ('東', '东'), ('車', '车'), ('馬', '马'), ('鳥', '鸟'),
-    ('龍', '龙'), ('鳳', '凤'), ('龜', '龟'), ('門', '门'), ('問', '问'), ('開', '开'),
-    ('關', '关'), ('長', '长'), ('烏', '乌'), ('魚', '鱼'), ('貝', '贝'), ('見', '见'),
-    ('買', '买'), ('賣', '卖'), ('貸', '贷'), ('貿', '贸'), ('費', '费'), ('賀', '贺'),
-    ('資', '资'), ('賬', '账'), ('質', '质'), ('領', '领'), ('頭', '头'), ('額', '额'),
-    ('顧', '顾'), ('風', '风'), ('飛', '飞'), ('飯', '饭'), ('養', '养'), ('餘', '余'),
-    ('館', '馆'), ('廠', '厂'), ('廢', '废'), ('區', '区'), ('產', '产'), ('礦', '矿'),
-    ('於', '于'), ('會', '会'), ('個', '个'), ('們', '们'), ('億', '亿'), ('償', '偿'),
-    ('儀', '仪'), ('備', '备'), ('債', '债'), ('傳', '传'), ('傷', '伤'), ('價', '价'),
-    ('儲', '储'), ('兒', '儿'), ('內', '内'), ('兩', '两'), ('冊', '册'), ('來', '来'),
-    ('況', '况'), ('刪', '删'), ('別', '别'), ('劃', '划'), ('劉', '刘'), ('則', '则'),
+    ('萬', '万'),
+    ('華', '华'),
+    ('東', '东'),
+    ('車', '车'),
+    ('馬', '马'),
+    ('鳥', '鸟'),
+    ('龍', '龙'),
+    ('鳳', '凤'),
+    ('龜', '龟'),
+    ('門', '门'),
+    ('問', '问'),
+    ('開', '开'),
+    ('關', '关'),
+    ('長', '长'),
+    ('烏', '乌'),
+    ('魚', '鱼'),
+    ('貝', '贝'),
+    ('見', '见'),
+    ('買', '买'),
+    ('賣', '卖'),
+    ('貸', '贷'),
+    ('貿', '贸'),
+    ('費', '费'),
+    ('賀', '贺'),
+    ('資', '资'),
+    ('賬', '账'),
+    ('質', '质'),
+    ('領', '领'),
+    ('頭', '头'),
+    ('額', '额'),
+    ('顧', '顾'),
+    ('風', '风'),
+    ('飛', '飞'),
+    ('飯', '饭'),
+    ('養', '养'),
+    ('餘', '余'),
+    ('館', '馆'),
+    ('廠', '厂'),
+    ('廢', '废'),
+    ('區', '区'),
+    ('產', '产'),
+    ('礦', '矿'),
+    ('於', '于'),
+    ('會', '会'),
+    ('個', '个'),
+    ('們', '们'),
+    ('億', '亿'),
+    ('償', '偿'),
+    ('儀', '仪'),
+    ('備', '备'),
+    ('債', '债'),
+    ('傳', '传'),
+    ('傷', '伤'),
+    ('價', '价'),
+    ('儲', '储'),
+    ('兒', '儿'),
+    ('內', '内'),
+    ('兩', '两'),
+    ('冊', '册'),
+    ('來', '来'),
+    ('況', '况'),
+    ('刪', '删'),
+    ('別', '别'),
+    ('劃', '划'),
+    ('劉', '刘'),
+    ('則', '则'),
 ];
 /// 内置兜底：繁→简词组对（正常路径走 OpenCC TSPhrases 全表）。
 const FALLBACK_T2S_PHRASES: &[(&str, &str)] = &[
@@ -215,22 +347,120 @@ const FALLBACK_T2S_PHRASES: &[(&str, &str)] = &[
 /// 行业词表（长度降序）：从字号后的剩余里剥行业词，剩余≥2 字才剥。
 /// assets 目录暂无对应文件，此表为本模块内置。
 const INDUSTRY_WORDS: &[&str] = &[
-    "供应链管理", "资产管理", "房地产开发", "网络科技", "信息科技", "新能源科技",
-    "实业发展", "科技发展", "投资管理", "企业管理", "文化传播",
-    "商贸", "贸易", "实业", "投资", "科技", "技术", "信息", "网络", "数据", "智能",
-    "软件", "通信", "通讯", "电子", "电气", "机械", "设备", "建材", "建筑", "装饰",
-    "装修", "工程", "咨询", "服务", "传媒", "广告", "文化", "教育", "培训", "医疗",
-    "医药", "生物", "能源", "环保", "物流", "运输", "仓储", "地产", "置业", "金融",
-    "保险", "证券", "基金", "农业", "林业", "矿业", "化工", "纺织", "服饰", "食品",
-    "餐饮", "酒店", "旅游", "娱乐", "零售", "批发", "航空", "航天", "船舶", "汽车",
-    "交通", "安防", "光电", "照明",
+    "供应链管理",
+    "资产管理",
+    "房地产开发",
+    "网络科技",
+    "信息科技",
+    "新能源科技",
+    "实业发展",
+    "科技发展",
+    "投资管理",
+    "企业管理",
+    "文化传播",
+    "商贸",
+    "贸易",
+    "实业",
+    "投资",
+    "科技",
+    "技术",
+    "信息",
+    "网络",
+    "数据",
+    "智能",
+    "软件",
+    "通信",
+    "通讯",
+    "电子",
+    "电气",
+    "机械",
+    "设备",
+    "建材",
+    "建筑",
+    "装饰",
+    "装修",
+    "工程",
+    "咨询",
+    "服务",
+    "传媒",
+    "广告",
+    "文化",
+    "教育",
+    "培训",
+    "医疗",
+    "医药",
+    "生物",
+    "能源",
+    "环保",
+    "物流",
+    "运输",
+    "仓储",
+    "地产",
+    "置业",
+    "金融",
+    "保险",
+    "证券",
+    "基金",
+    "农业",
+    "林业",
+    "矿业",
+    "化工",
+    "纺织",
+    "服饰",
+    "食品",
+    "餐饮",
+    "酒店",
+    "旅游",
+    "娱乐",
+    "零售",
+    "批发",
+    "航空",
+    "航天",
+    "船舶",
+    "汽车",
+    "交通",
+    "安防",
+    "光电",
+    "照明",
 ];
 /// 人名称谓后缀（长度降序）：person 类型归一化末尾剥离，剩余≥2 字才剥。
 const PERSON_TITLES: &[&str] = &[
-    "副总经理", "董事长", "总经理", "工程师", "会计师", "先生们",
-    "先生", "女士", "小姐", "同志", "经理", "总监", "总裁", "博士", "教授", "老师",
-    "律师", "医师", "大夫", "护士", "警官", "警察", "书记", "主任", "科长", "处长",
-    "局长", "部长", "厂长", "委员", "代表", "董事", "监事", "主管", "职员", "员工",
+    "副总经理",
+    "董事长",
+    "总经理",
+    "工程师",
+    "会计师",
+    "先生们",
+    "先生",
+    "女士",
+    "小姐",
+    "同志",
+    "经理",
+    "总监",
+    "总裁",
+    "博士",
+    "教授",
+    "老师",
+    "律师",
+    "医师",
+    "大夫",
+    "护士",
+    "警官",
+    "警察",
+    "书记",
+    "主任",
+    "科长",
+    "处长",
+    "局长",
+    "部长",
+    "厂长",
+    "委员",
+    "代表",
+    "董事",
+    "监事",
+    "主管",
+    "职员",
+    "员工",
     "师傅",
 ];
 
@@ -271,7 +501,10 @@ fn suffix_table() -> &'static SuffixTable {
             _ => {
                 // 词表文件缺失/损坏：降级内置表（词组覆盖面小，但不阻塞任务）。
                 SuffixTable {
-                    strip: FALLBACK_STRIP_SUFFIXES.iter().map(|s| (*s).into()).collect(),
+                    strip: FALLBACK_STRIP_SUFFIXES
+                        .iter()
+                        .map(|s| (*s).into())
+                        .collect(),
                     normalize: FALLBACK_NORMALIZE_MAP
                         .iter()
                         .map(|(k, v)| (base_normalize(k), base_normalize(v)))
@@ -458,7 +691,10 @@ fn base_normalize(raw: &str) -> String {
 fn push_normalized_char(out: &mut String, c: char) {
     // 零宽字符（含零宽空格/连接符/软连字符/BOM）全部视为空白丢弃。
     if c.is_whitespace()
-        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{FEFF}' | '\u{2060}' | '\u{00AD}')
+        || matches!(
+            c,
+            '\u{200B}'..='\u{200F}' | '\u{FEFF}' | '\u{2060}' | '\u{00AD}'
+        )
     {
         return;
     }
@@ -785,8 +1021,7 @@ fn score_pair(
     let char_sim = levenshtein_ratio(a_chars, b_chars);
     let lcs_sim = lcs_ratio(a_chars, b_chars);
     let token_overlap = bigram_dice(a_chars, b_chars);
-    let mut total =
-        100.0 * (W_CHAR * char_sim + W_LCS * lcs_sim + W_TOKEN * token_overlap);
+    let mut total = 100.0 * (W_CHAR * char_sim + W_LCS * lcs_sim + W_TOKEN * token_overlap);
     let mut reasons: Vec<String> = vec![];
     if opts.match_type == "company" {
         let brand_a = a_seg.map(|s| s.brand.as_str()).unwrap_or(a_norm);
@@ -966,9 +1201,7 @@ fn match_options(params: &Value) -> Result<MatchOptions, AppError> {
         return Err(error("INVALID_PARAMS", "阈值必须在 0 到 100 之间。", None));
     }
     if suspect >= auto {
-        return Err(
-            error("INVALID_PARAMS", "疑似阈值必须低于自动阈值。", None),
-        );
+        return Err(error("INVALID_PARAMS", "疑似阈值必须低于自动阈值。", None));
     }
     let top_k = params
         .get("topK")
@@ -1145,8 +1378,19 @@ fn inspect(params: &Value) -> Result<Value, AppError> {
 /// 建议匹配列：首个含名称类关键词的表头（公司/单位/客户/户名/姓名等）。
 fn suggested_column(headers: &[String]) -> Option<String> {
     const KEYWORDS: &[&str] = &[
-        "公司", "单位", "客户", "供应商", "名称", "户名", "姓名", "对手", "交易方",
-        "vendor", "customer", "name", "counterparty",
+        "公司",
+        "单位",
+        "客户",
+        "供应商",
+        "名称",
+        "户名",
+        "姓名",
+        "对手",
+        "交易方",
+        "vendor",
+        "customer",
+        "name",
+        "counterparty",
     ];
     headers
         .iter()
@@ -1182,7 +1426,11 @@ fn export_flow(params: &Value) -> Result<Value, AppError> {
         None => {
             let job_id = required_job_id(params)?;
             let db = injected(params, "__dbPath").ok_or_else(|| {
-                error("INVALID_PARAMS", "缺少本机结果库路径，无法读取匹配结果。", None)
+                error(
+                    "INVALID_PARAMS",
+                    "缺少本机结果库路径，无法读取匹配结果。",
+                    None,
+                )
             })?;
             let conn = open_db(Path::new(db))?;
             let mut loaded = load_result_rows(&conn, &job_id)?;
@@ -1237,8 +1485,18 @@ fn export_workbook(rows: &[Value], path: &Path) -> Result<PathBuf, AppError> {
         let ws = wb.add_worksheet_with_constant_memory();
         ws.set_name("全部结果").map_err(xlsx)?;
         let headers = [
-            "序号", "A行号", "A列原始值", "B行号", "B列匹配值", "匹配级别", "总分",
-            "字符相似", "最长公共子序列", "词组重叠", "判定原因", "确认标记",
+            "序号",
+            "A行号",
+            "A列原始值",
+            "B行号",
+            "B列匹配值",
+            "匹配级别",
+            "总分",
+            "字符相似",
+            "最长公共子序列",
+            "词组重叠",
+            "判定原因",
+            "确认标记",
         ];
         for (c, h) in headers.iter().enumerate() {
             ws.write_string_with_format(0, c as u16, *h, &header)
@@ -1272,7 +1530,9 @@ fn export_workbook(rows: &[Value], path: &Path) -> Result<PathBuf, AppError> {
                             .join("；")
                     })
                     .unwrap_or_default();
-                write_match_row(ws, y, seq, a_index, a_value, 0, "", level, None, &reasons, "")?;
+                write_match_row(
+                    ws, y, seq, a_index, a_value, 0, "", level, None, &reasons, "",
+                )?;
                 y += 1;
                 continue;
             }
@@ -1297,9 +1557,7 @@ fn export_workbook(rows: &[Value], path: &Path) -> Result<PathBuf, AppError> {
                                 .join("；")
                         })
                         .unwrap_or_default(),
-                    m.get("confirmed")
-                        .map(confirmed_cn)
-                        .unwrap_or("未确认"),
+                    m.get("confirmed").map(confirmed_cn).unwrap_or("未确认"),
                 )?;
                 y += 1;
             }
@@ -1311,8 +1569,18 @@ fn export_workbook(rows: &[Value], path: &Path) -> Result<PathBuf, AppError> {
         let ws = wb.add_worksheet_with_constant_memory();
         ws.set_name("疑似确认记录").map_err(xlsx)?;
         let headers = [
-            "序号", "A行号", "A列原始值", "B行号", "B列匹配值", "匹配级别", "总分",
-            "字符相似", "最长公共子序列", "词组重叠", "判定原因", "确认标记",
+            "序号",
+            "A行号",
+            "A列原始值",
+            "B行号",
+            "B列匹配值",
+            "匹配级别",
+            "总分",
+            "字符相似",
+            "最长公共子序列",
+            "词组重叠",
+            "判定原因",
+            "确认标记",
         ];
         for (c, h) in headers.iter().enumerate() {
             ws.write_string_with_format(0, c as u16, *h, &header)
@@ -1444,7 +1712,8 @@ fn write_match_row(
     ws.write_number(y, 6, num(&bd["total"])).map_err(xlsx)?;
     ws.write_number(y, 7, num(&bd["charSim"])).map_err(xlsx)?;
     ws.write_number(y, 8, num(&bd["lcsSim"])).map_err(xlsx)?;
-    ws.write_number(y, 9, num(&bd["tokenOverlap"])).map_err(xlsx)?;
+    ws.write_number(y, 9, num(&bd["tokenOverlap"]))
+        .map_err(xlsx)?;
     ws.write_string(y, 10, reasons).map_err(xlsx)?;
     if !confirmed.is_empty() {
         ws.write_string(y, 11, confirmed).map_err(xlsx)?;
@@ -1524,7 +1793,11 @@ fn persist_if_wired(params: &Value, result: &Value) -> Result<(), AppError> {
 /// worker 落库与父进程 UPSERT task_history 并发写时等待而不是立刻报错。
 fn open_db(db_path: &Path) -> Result<Connection, AppError> {
     let open_error = |e: rusqlite::Error| {
-        error("STORAGE_ERROR", "本机数据存储操作失败。", Some(e.to_string()))
+        error(
+            "STORAGE_ERROR",
+            "本机数据存储操作失败。",
+            Some(e.to_string()),
+        )
     };
     let conn = Connection::open(db_path).map_err(open_error)?;
     conn.execute_batch(
@@ -1549,17 +1822,30 @@ fn required_job_id(params: &Value) -> Result<String, AppError> {
 /// 存该行 matches 数组序列化），同 jobId 重跑时先清旧行与旧确认。
 fn persist_results(db_path: &Path, job_id: &str, result: &Value) -> Result<(), AppError> {
     let write_error = |e: rusqlite::Error| {
-        error("STORAGE_ERROR", "匹配结果保存到本机失败。", Some(e.to_string()))
+        error(
+            "STORAGE_ERROR",
+            "匹配结果保存到本机失败。",
+            Some(e.to_string()),
+        )
     };
     let rows = result
         .get("rows")
         .and_then(Value::as_array)
-        .ok_or_else(|| error("STORAGE_ERROR", "匹配结果缺少行数据，无法保存到本机。", None))?;
+        .ok_or_else(|| {
+            error(
+                "STORAGE_ERROR",
+                "匹配结果缺少行数据，无法保存到本机。",
+                None,
+            )
+        })?;
     let mut conn = open_db(db_path)?;
     let tx = conn.transaction().map_err(write_error)?;
     let now = Utc::now().to_rfc3339();
-    tx.execute("DELETE FROM fuzzy_match_results WHERE job_id=?1", params![job_id])
-        .map_err(write_error)?;
+    tx.execute(
+        "DELETE FROM fuzzy_match_results WHERE job_id=?1",
+        params![job_id],
+    )
+    .map_err(write_error)?;
     tx.execute(
         "DELETE FROM fuzzy_match_confirmations WHERE job_id=?1",
         params![job_id],
@@ -1619,7 +1905,13 @@ fn load_result_rows(conn: &Connection, job_id: &str) -> Result<Vec<Value>, AppEr
             "SELECT a_index,a_value,level,match_json FROM fuzzy_match_results
              WHERE job_id=?1 ORDER BY a_index",
         )
-        .map_err(|e| error("STORAGE_ERROR", "本机数据存储操作失败。", Some(e.to_string())))?;
+        .map_err(|e| {
+            error(
+                "STORAGE_ERROR",
+                "本机数据存储操作失败。",
+                Some(e.to_string()),
+            )
+        })?;
     let queried = stmt
         .query_map([job_id], |r| {
             Ok((
@@ -1629,11 +1921,22 @@ fn load_result_rows(conn: &Connection, job_id: &str) -> Result<Vec<Value>, AppEr
                 r.get::<_, String>(3)?,
             ))
         })
-        .map_err(|e| error("STORAGE_ERROR", "本机数据存储操作失败。", Some(e.to_string())))?;
+        .map_err(|e| {
+            error(
+                "STORAGE_ERROR",
+                "本机数据存储操作失败。",
+                Some(e.to_string()),
+            )
+        })?;
     let mut out = Vec::new();
     for row in queried {
-        let (a_index, a_value, level, match_json) = row
-            .map_err(|e| error("STORAGE_ERROR", "本机数据存储操作失败。", Some(e.to_string())))?;
+        let (a_index, a_value, level, match_json) = row.map_err(|e| {
+            error(
+                "STORAGE_ERROR",
+                "本机数据存储操作失败。",
+                Some(e.to_string()),
+            )
+        })?;
         let matches: Value = serde_json::from_str(&match_json).unwrap_or_else(|_| json!([]));
         let reasons = if level == "invalid" {
             json!(["无效值（空值、纯数字或单字符）"])
@@ -1658,7 +1961,13 @@ fn load_confirmations(conn: &Connection, job_id: &str) -> Result<Vec<Value>, App
             "SELECT a_index,b_index,action,note FROM fuzzy_match_confirmations
              WHERE job_id=?1 ORDER BY a_index",
         )
-        .map_err(|e| error("STORAGE_ERROR", "本机数据存储操作失败。", Some(e.to_string())))?;
+        .map_err(|e| {
+            error(
+                "STORAGE_ERROR",
+                "本机数据存储操作失败。",
+                Some(e.to_string()),
+            )
+        })?;
     let queried = stmt
         .query_map([job_id], |r| {
             Ok((
@@ -1668,11 +1977,22 @@ fn load_confirmations(conn: &Connection, job_id: &str) -> Result<Vec<Value>, App
                 r.get::<_, Option<String>>(3)?,
             ))
         })
-        .map_err(|e| error("STORAGE_ERROR", "本机数据存储操作失败。", Some(e.to_string())))?;
+        .map_err(|e| {
+            error(
+                "STORAGE_ERROR",
+                "本机数据存储操作失败。",
+                Some(e.to_string()),
+            )
+        })?;
     let mut out = Vec::new();
     for row in queried {
-        let (a_index, b_index, action, note) = row
-            .map_err(|e| error("STORAGE_ERROR", "本机数据存储操作失败。", Some(e.to_string())))?;
+        let (a_index, b_index, action, note) = row.map_err(|e| {
+            error(
+                "STORAGE_ERROR",
+                "本机数据存储操作失败。",
+                Some(e.to_string()),
+            )
+        })?;
         out.push(json!({
             "aIndex": a_index,
             "bIndex": b_index.map(Value::from).unwrap_or(Value::Null),
@@ -1713,10 +2033,7 @@ fn save_confirm(db_path: &Path, params: &Value) -> Result<Value, AppError> {
                 Some(action.into()),
             ));
         }
-        let b_index = item
-            .get("bIndex")
-            .and_then(Value::as_u64)
-            .map(|v| v as i64);
+        let b_index = item.get("bIndex").and_then(Value::as_u64).map(|v| v as i64);
         let note = item
             .get("note")
             .and_then(Value::as_str)
@@ -1783,9 +2100,9 @@ fn apply_confirmations(rows: &mut [Value], confirmations: &[Value]) {
     for row in rows.iter_mut() {
         let a_index = row.get("aIndex").and_then(Value::as_u64);
         let Some(a_index) = a_index else { continue };
-        let decision = confirmations.iter().find(|c| {
-            c.get("aIndex").and_then(Value::as_u64) == Some(a_index)
-        });
+        let decision = confirmations
+            .iter()
+            .find(|c| c.get("aIndex").and_then(Value::as_u64) == Some(a_index));
         let Some(decision) = decision else { continue };
         let accept_target = match decision.get("action").and_then(Value::as_str) {
             Some("accept") => decision.get("bIndex").and_then(Value::as_u64),
@@ -1883,17 +2200,17 @@ fn pick_column(spec: &SourceSpec, table: &Table) -> Result<usize, AppError> {
             return Ok(n - 1);
         }
     }
-    Err(error(
-        "NO_COLUMN",
-        format!("未找到匹配列「{col}」。"),
-        None,
-    ))
+    Err(error("NO_COLUMN", format!("未找到匹配列「{col}」。"), None))
 }
 
 fn load_table(spec: &SourceSpec) -> Result<Table, AppError> {
     let path = PathBuf::from(&spec.path);
     if !path.is_file() {
-        return Err(error("PATH_NOT_FOUND", "找不到输入文件。", Some(spec.path.clone())));
+        return Err(error(
+            "PATH_NOT_FOUND",
+            "找不到输入文件。",
+            Some(spec.path.clone()),
+        ));
     }
     let ext = path
         .extension()
@@ -1903,8 +2220,13 @@ fn load_table(spec: &SourceSpec) -> Result<Table, AppError> {
     let (sheet, sheets, all) = if matches!(ext.as_str(), "csv" | "txt" | "tsv") {
         ("CSV".into(), vec!["CSV".into()], read_text(&path)?)
     } else {
-        let mut book = open_workbook_auto(&path)
-            .map_err(|e| error("WORKBOOK_READ_FAILED", "无法读取工作簿。", Some(e.to_string())))?;
+        let mut book = open_workbook_auto(&path).map_err(|e| {
+            error(
+                "WORKBOOK_READ_FAILED",
+                "无法读取工作簿。",
+                Some(e.to_string()),
+            )
+        })?;
         let sheets = book.sheet_names().to_vec();
         let selected = if !spec.sheet.is_empty() && sheets.contains(&spec.sheet) {
             spec.sheet.clone()
@@ -1915,7 +2237,11 @@ fn load_table(spec: &SourceSpec) -> Result<Table, AppError> {
                 .ok_or_else(|| error("SOURCE_EMPTY", "工作簿没有 Sheet。", None))?
         };
         let range = book.worksheet_range(&selected).map_err(|e| {
-            error("WORKBOOK_READ_FAILED", "无法读取 Sheet。", Some(e.to_string()))
+            error(
+                "WORKBOOK_READ_FAILED",
+                "无法读取 Sheet。",
+                Some(e.to_string()),
+            )
         })?;
         (
             selected,
@@ -1963,7 +2289,11 @@ fn load_table(spec: &SourceSpec) -> Result<Table, AppError> {
 
 fn read_text(path: &Path) -> Result<Vec<Vec<String>>, AppError> {
     let bytes = fs::read(path).map_err(|e| {
-        error("SOURCE_READ_FAILED", "无法读取文本文件。", Some(e.to_string()))
+        error(
+            "SOURCE_READ_FAILED",
+            "无法读取文本文件。",
+            Some(e.to_string()),
+        )
     })?;
     let text = String::from_utf8(bytes.clone())
         .unwrap_or_else(|_| encoding_rs::GBK.decode(&bytes).0.into_owned());
@@ -2001,8 +2331,25 @@ fn detect_header(rows: &[Vec<String>]) -> usize {
 
 fn header_cell_hit(v: &str) -> bool {
     const KEYWORDS: &[&str] = &[
-        "名称", "公司", "单位", "客户", "供应商", "编号", "序号", "户名", "姓名", "地址",
-        "金额", "数量", "日期", "备注", "对手", "code", "name", "no", "id",
+        "名称",
+        "公司",
+        "单位",
+        "客户",
+        "供应商",
+        "编号",
+        "序号",
+        "户名",
+        "姓名",
+        "地址",
+        "金额",
+        "数量",
+        "日期",
+        "备注",
+        "对手",
+        "code",
+        "name",
+        "no",
+        "id",
     ];
     let s = v.trim().to_lowercase();
     !s.is_empty() && s.chars().count() <= 12 && KEYWORDS.iter().any(|k| s.contains(k))
@@ -2028,7 +2375,11 @@ fn data_text(v: &Data) -> String {
 }
 
 fn xlsx(e: rust_xlsxwriter::XlsxError) -> AppError {
-    error("EXPORT_FAILED", "无法生成 Excel 结果文件。", Some(e.to_string()))
+    error(
+        "EXPORT_FAILED",
+        "无法生成 Excel 结果文件。",
+        Some(e.to_string()),
+    )
 }
 
 fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppError {
@@ -2061,11 +2412,7 @@ mod tests {
     }
 
     /// 与 run_job("fuzzy.match") 等价的核心路径，用内存列代替读文件。
-    fn match_columns(
-        a: Vec<&str>,
-        b: Vec<&str>,
-        options: &MatchOptions,
-    ) -> Value {
+    fn match_columns(a: Vec<&str>, b: Vec<&str>, options: &MatchOptions) -> Value {
         let a_rows: Vec<SideRow> = a.iter().map(|v| prepare_row(v, options)).collect();
         let b_rows: Vec<SideRow> = b.iter().map(|v| prepare_row(v, options)).collect();
         let index = build_index(&b_rows);
@@ -2089,20 +2436,34 @@ mod tests {
             for (_, j) in cands {
                 let b = &b_rows[j as usize];
                 let sc = score_pair(
-                    &row.norm, &row.chars, row.segments.as_ref(),
-                    &b.norm, &b.chars, b.segments.as_ref(), options,
+                    &row.norm,
+                    &row.chars,
+                    row.segments.as_ref(),
+                    &b.norm,
+                    &b.chars,
+                    b.segments.as_ref(),
+                    options,
                 );
                 if sc.total >= options.suspect_threshold {
                     scored.push((j, sc));
                 }
             }
             scored.sort_by(|x, y| {
-                y.1.total.partial_cmp(&x.1.total).unwrap().then(x.0.cmp(&y.0))
+                y.1.total
+                    .partial_cmp(&x.1.total)
+                    .unwrap()
+                    .then(x.0.cmp(&y.0))
             });
             scored.truncate(options.top_k);
             let level = scored
                 .first()
-                .map(|(_, sc)| if sc.total >= options.auto_threshold { "auto" } else { "suspect" })
+                .map(|(_, sc)| {
+                    if sc.total >= options.auto_threshold {
+                        "auto"
+                    } else {
+                        "suspect"
+                    }
+                })
                 .unwrap_or("unmatched");
             match level {
                 "auto" => auto_count += 1,
@@ -2153,11 +2514,20 @@ mod tests {
 
     #[test]
     fn 顿号逗号空白与零宽统一() {
-        assert_eq!(normalize("上海市、浦东新区", "generic"), normalize("上海市，浦东新区", "generic"));
+        assert_eq!(
+            normalize("上海市、浦东新区", "generic"),
+            normalize("上海市，浦东新区", "generic")
+        );
         assert_eq!(normalize("张 三", "person"), normalize("张三", "person"));
         // 零宽空格（U+200B）与 BOM 视为空白丢弃。
-        assert_eq!(normalize("张\u{200B}三", "person"), normalize("张三", "person"));
-        assert_eq!(normalize("华\u{FEFF}为", "company"), normalize("华为", "company"));
+        assert_eq!(
+            normalize("张\u{200B}三", "person"),
+            normalize("张三", "person")
+        );
+        assert_eq!(
+            normalize("华\u{FEFF}为", "company"),
+            normalize("华为", "company")
+        );
     }
 
     #[test]
@@ -2185,7 +2555,10 @@ mod tests {
     fn 繁体转简体() {
         assert_eq!(traditional_to_simplified("聯想集團"), "联想集团");
         assert_eq!(traditional_to_simplified("萬科企業"), "万科企业");
-        assert_eq!(normalize("華為技術有限公司", "company"), normalize("华为技术有限公司", "company"));
+        assert_eq!(
+            normalize("華為技術有限公司", "company"),
+            normalize("华为技术有限公司", "company")
+        );
     }
 
     #[test]
@@ -2331,16 +2704,15 @@ mod tests {
         let row = &result["rows"][0];
         assert_eq!(row["level"].as_str().unwrap(), "suspect");
         let total = row["matches"][0]["total"].as_f64().unwrap();
-        assert!((70.0..90.0).contains(&total), "一字之差应落在疑似档，实际 {total}");
+        assert!(
+            (70.0..90.0).contains(&total),
+            "一字之差应落在疑似档，实际 {total}"
+        );
     }
 
     #[test]
     fn 同字号不同城市强制疑似() {
-        let result = match_columns(
-            vec!["北京华辰科技"],
-            vec!["上海华辰科技"],
-            &opts("company"),
-        );
+        let result = match_columns(vec!["北京华辰科技"], vec!["上海华辰科技"], &opts("company"));
         let row = &result["rows"][0];
         assert_eq!(row["level"].as_str().unwrap(), "suspect");
         let m = &row["matches"][0];
@@ -2366,17 +2738,18 @@ mod tests {
             &opts("person"),
         );
         for i in 0..3 {
-            assert_eq!(first_level(&result, i), "auto", "第 {} 行应为自动匹配", i + 1);
+            assert_eq!(
+                first_level(&result, i),
+                "auto",
+                "第 {} 行应为自动匹配",
+                i + 1
+            );
         }
     }
 
     #[test]
     fn 无效值跳过比对() {
-        let result = match_columns(
-            vec!["", "12345", "华为"],
-            vec!["华为"],
-            &opts("company"),
-        );
+        let result = match_columns(vec!["", "12345", "华为"], vec!["华为"], &opts("company"));
         assert_eq!(first_level(&result, 0), "invalid");
         assert_eq!(first_level(&result, 1), "invalid");
         assert_eq!(first_level(&result, 2), "auto");
@@ -2390,16 +2763,8 @@ mod tests {
         let mut strict = opts("company");
         strict.auto_threshold = 95.0;
         strict.suspect_threshold = 80.0;
-        let default = match_columns(
-            vec!["华为技术有限公司"],
-            vec!["华为"],
-            &opts("company"),
-        );
-        let strict_result = match_columns(
-            vec!["华为技术有限公司"],
-            vec!["华为"],
-            &strict,
-        );
+        let default = match_columns(vec!["华为技术有限公司"], vec!["华为"], &opts("company"));
+        let strict_result = match_columns(vec!["华为技术有限公司"], vec!["华为"], &strict);
         assert_eq!(first_level(&default, 0), "auto");
         assert_eq!(first_level(&strict_result, 0), "suspect");
 
@@ -2446,12 +2811,12 @@ mod tests {
             &o,
         );
         let matches = result["rows"][0]["matches"].as_array().unwrap();
-        assert!(matches.len() >= 2, "疑似确认应展示多个候选，实际 {matches:?}");
+        assert!(
+            matches.len() >= 2,
+            "疑似确认应展示多个候选，实际 {matches:?}"
+        );
         // 候选按总分降序。
-        let totals: Vec<f64> = matches
-            .iter()
-            .filter_map(|m| m["total"].as_f64())
-            .collect();
+        let totals: Vec<f64> = matches.iter().filter_map(|m| m["total"].as_f64()).collect();
         let mut sorted = totals.clone();
         sorted.sort_by(|x, y| y.partial_cmp(x).unwrap());
         assert_eq!(totals, sorted);
@@ -2462,15 +2827,26 @@ mod tests {
     #[test]
     fn assets词表正常加载() {
         let suffixes = suffix_table();
-        assert!(suffixes.strip.len() >= 100, "公司后缀词表应加载 assets 完整版");
+        assert!(
+            suffixes.strip.len() >= 100,
+            "公司后缀词表应加载 assets 完整版"
+        );
         assert!(suffixes.normalize.len() >= 40);
         assert!(suffixes.strip.iter().any(|w| w == "有限公司"));
         let regions = region_table();
-        assert!(regions.len() >= 300, "行政区划应含省市两级全量，实际 {len}", len = regions.len());
+        assert!(
+            regions.len() >= 300,
+            "行政区划应含省市两级全量，实际 {len}",
+            len = regions.len()
+        );
         assert!(regions.iter().any(|w| w == "上海"));
         assert!(regions.iter().any(|w| w == "石家庄"));
         let t = t2s();
-        assert!(t.chars.len() >= 4000, "繁简单字表应加载 OpenCC 全量，实际 {len}", len = t.chars.len());
+        assert!(
+            t.chars.len() >= 4000,
+            "繁简单字表应加载 OpenCC 全量，实际 {len}",
+            len = t.chars.len()
+        );
         assert!(!t.phrases.is_empty());
         assert!(t.max_phrase_chars >= 2);
     }
@@ -2518,8 +2894,16 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let a_path = dir.join("a侧.xlsx");
         let b_path = dir.join("b侧.xlsx");
-        write_fixture(&a_path, &["公司名称"], &[&["华为技术有限公司"], &["北京华辰科技"]]);
-        write_fixture(&b_path, &["公司名称"], &[&["华为"], &["上海华辰科技"], &["12345"]]);
+        write_fixture(
+            &a_path,
+            &["公司名称"],
+            &[&["华为技术有限公司"], &["北京华辰科技"]],
+        );
+        write_fixture(
+            &b_path,
+            &["公司名称"],
+            &[&["华为"], &["上海华辰科技"], &["12345"]],
+        );
         let params = json!({
             "sourceA": {"path": a_path.to_string_lossy(), "column": "公司名称"},
             "sourceB": {"path": b_path.to_string_lossy(), "column": "公司名称"},
@@ -2580,7 +2964,10 @@ mod tests {
             .filter_map(Value::as_str)
             .collect();
         assert_eq!(headers, vec!["序号", "公司名称", "金额"]);
-        assert_eq!(v["suggestedMapping"]["column"].as_str().unwrap(), "公司名称");
+        assert_eq!(
+            v["suggestedMapping"]["column"].as_str().unwrap(),
+            "公司名称"
+        );
         assert_eq!(v["rowCount"].as_u64().unwrap(), 2);
         assert_eq!(v["headerRow"].as_u64().unwrap(), 1);
         // 参数不完整应报中文错误。
@@ -2612,22 +2999,38 @@ mod tests {
         let mut book = open_workbook_auto(&path).unwrap();
         let names = book.sheet_names().to_vec();
         assert_eq!(names, vec!["全部结果", "疑似确认记录", "未匹配清单"]);
-        let all: Vec<Vec<String>> = book.worksheet_range("全部结果").unwrap()
-            .rows().map(|r| r.iter().map(data_text).collect()).collect();
+        let all: Vec<Vec<String>> = book
+            .worksheet_range("全部结果")
+            .unwrap()
+            .rows()
+            .map(|r| r.iter().map(data_text).collect())
+            .collect();
         // 表头 1 行 + 华为 1 候选 + 华辰 1 候选 + 无关行 1 + 空值 1 + 纯数字 1 = 6。
         assert_eq!(all.len(), 6);
-        let suspect: Vec<Vec<String>> = book.worksheet_range("疑似确认记录").unwrap()
-            .rows().map(|r| r.iter().map(data_text).collect()).collect();
+        let suspect: Vec<Vec<String>> = book
+            .worksheet_range("疑似确认记录")
+            .unwrap()
+            .rows()
+            .map(|r| r.iter().map(data_text).collect())
+            .collect();
         assert_eq!(suspect.len(), 2); // 表头 + 北京华辰科技
-        let unmatched: Vec<Vec<String>> = book.worksheet_range("未匹配清单").unwrap()
-            .rows().map(|r| r.iter().map(data_text).collect()).collect();
+        let unmatched: Vec<Vec<String>> = book
+            .worksheet_range("未匹配清单")
+            .unwrap()
+            .rows()
+            .map(|r| r.iter().map(data_text).collect())
+            .collect();
         assert_eq!(unmatched.len(), 4); // 表头 + 未匹配 1 + 无效 2
         // 全部结果表头。
         assert_eq!(all[0][2], "A列原始值");
         assert_eq!(all[0][5], "匹配级别");
         // 疑似行原因列应含行政区域不一致，且级别列正确。
         assert_eq!(suspect[1][5], "疑似匹配");
-        assert!(suspect[1][10].contains("行政区域不一致"), "实际：{:?}", suspect[1]);
+        assert!(
+            suspect[1][10].contains("行政区域不一致"),
+            "实际：{:?}",
+            suspect[1]
+        );
     }
 
     // ---------- 粗筛正确性 ----------
@@ -2688,11 +3091,10 @@ mod tests {
     #[test]
     fn 性能冒烟_2000乘2000() {
         const POOL: &[&str] = &[
-            "华", "辰", "星", "衡", "鑫", "达", "瑞", "泰", "恒", "信",
-            "中", "和", "嘉", "润", "宏", "远", "天", "正", "德", "同",
-            "金", "海", "川", "林", "森", "宇", "宸", "烨", "霖", "锋",
-            "航", "拓", "睿", "坤", "旭", "晟", "昊", "彦", "骏", "麟",
-            "涛", "维", "诚", "源", "悦", "启", "明", "蔚", "临", "歌",
+            "华", "辰", "星", "衡", "鑫", "达", "瑞", "泰", "恒", "信", "中", "和", "嘉", "润",
+            "宏", "远", "天", "正", "德", "同", "金", "海", "川", "林", "森", "宇", "宸", "烨",
+            "霖", "锋", "航", "拓", "睿", "坤", "旭", "晟", "昊", "彦", "骏", "麟", "涛", "维",
+            "诚", "源", "悦", "启", "明", "蔚", "临", "歌",
         ];
         const SUFFIXES: &[&str] = &["有限公司", "股份有限公司", "有限责任公司", "集团"];
         const N: usize = 2000;
@@ -2750,7 +3152,11 @@ mod tests {
         let rows = result["rows"].as_array().unwrap();
         for i in [1usize, 3, 5, 7, 9] {
             let row = &rows[i];
-            assert_eq!(row["level"].as_str().unwrap(), "auto", "未扰动行 {i} 应自动匹配");
+            assert_eq!(
+                row["level"].as_str().unwrap(),
+                "auto",
+                "未扰动行 {i} 应自动匹配"
+            );
             assert_eq!(
                 row["matches"][0]["bIndex"].as_u64().unwrap(),
                 (i + 1) as u64,
@@ -2772,13 +3178,17 @@ mod tests {
         }
         // 扰动行字号已变（囧），不应触发字号包含提分到 93。
         let disturbed_total = rows[0]["matches"][0]["total"].as_f64().unwrap();
-        assert!(disturbed_total < 90.0, "字号错别字不应自动匹配，实际 {disturbed_total}");
+        assert!(
+            disturbed_total < 90.0,
+            "字号错别字不应自动匹配，实际 {disturbed_total}"
+        );
     }
 
     // ---------- 接线层：落库、取回与确认 ----------
 
     fn temp_db(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("fuzzy_db_{tag}_{}", uuid::Uuid::new_v4().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("fuzzy_db_{tag}_{}", uuid::Uuid::new_v4().simple()));
         fs::create_dir_all(&dir).unwrap();
         (dir.join("test.db"), dir)
     }
@@ -2802,11 +3212,7 @@ mod tests {
         write_fixture(
             &b_path,
             &["公司名称"],
-            &[
-                &["ABC(上海)有限公司"],
-                &["华为"],
-                &["上海华辰科技"],
-            ],
+            &[&["ABC(上海)有限公司"], &["华为"], &["上海华辰科技"]],
         );
         json!({
             "sourceA": {"path": a_path.to_string_lossy(), "column": "公司名称"},
@@ -2835,7 +3241,10 @@ mod tests {
             .iter()
             .map(|r| r["level"].as_str().unwrap())
             .collect();
-        assert_eq!(expected_levels, vec!["auto", "auto", "suspect", "unmatched"]);
+        assert_eq!(
+            expected_levels,
+            vec!["auto", "auto", "suspect", "unmatched"]
+        );
 
         // 临时库没有 task_history → summary 走行级统计重建路径。
         let back = storage_call(&db, "fuzzy.get_results", json!({"jobId": "job-r1"})).unwrap();
@@ -2875,11 +3284,12 @@ mod tests {
         .unwrap();
         let back2 = storage_call(&db, "fuzzy.get_results", json!({"jobId": "job-r1"})).unwrap();
         let confirms = back2["confirmations"].as_array().unwrap();
-        assert_eq!(confirms.len(), 2, "同 aIndex 应覆盖而不是追加：{confirms:?}");
-        let row3 = confirms
-            .iter()
-            .find(|c| c["aIndex"] == 3)
-            .unwrap();
+        assert_eq!(
+            confirms.len(),
+            2,
+            "同 aIndex 应覆盖而不是追加：{confirms:?}"
+        );
+        let row3 = confirms.iter().find(|c| c["aIndex"] == 3).unwrap();
         assert_eq!(row3["action"], "reject");
         assert_eq!(row3["bIndex"], Value::Null);
         assert_eq!(row3["note"].as_str().unwrap(), "非同一主体");
@@ -3043,9 +3453,7 @@ mod tests {
         let read_elapsed = t1.elapsed();
         assert_eq!(back["rows"].as_array().unwrap().len(), N);
         assert_eq!(back["summary"]["rowsA"], N);
-        println!(
-            "fuzzy.get_results 5万行：写库 {write_elapsed:?}，读回+重建 {read_elapsed:?}"
-        );
+        println!("fuzzy.get_results 5万行：写库 {write_elapsed:?}，读回+重建 {read_elapsed:?}");
         assert!(
             read_elapsed.as_secs() < 30,
             "5 万行读回异常缓慢：{read_elapsed:?}"

@@ -571,7 +571,9 @@ fn norm_cell(text: Option<&str>) -> String {
         .collect();
     if segments.len() >= 2
         && segments.iter().all(|seg| is_code_segment(seg))
-        && segments.iter().any(|seg| seg.chars().any(|c| c.is_ascii_digit()))
+        && segments
+            .iter()
+            .any(|seg| seg.chars().any(|c| c.is_ascii_digit()))
     {
         segments.concat()
     } else {
@@ -656,12 +658,7 @@ fn write_flow(flow: &[FlowItem], output: &Path) -> Result<(), AppError> {
                 if !cont && !table.header.is_empty() {
                     for (column, value) in table.header.iter().enumerate() {
                         sheet
-                            .write_string_with_format(
-                                row,
-                                column as u16,
-                                value,
-                                &header_format,
-                            )
+                            .write_string_with_format(row, column as u16, value, &header_format)
                             .map_err(xlsx_error)?;
                     }
                     row += 1;
@@ -717,7 +714,10 @@ fn write_manifest(records: &[Value], output: &Path) -> Result<(), AppError> {
     let sheet = workbook.add_worksheet();
     sheet.set_name("处理清单").map_err(xlsx_error)?;
     let header_format = Format::new().set_bold().set_background_color("#DDEBF7");
-    for (column, width) in [38.0, 8.0, 8.0, 10.0, 8.0, 12.0, 50.0, 40.0].iter().enumerate() {
+    for (column, width) in [38.0, 8.0, 8.0, 10.0, 8.0, 12.0, 50.0, 40.0]
+        .iter()
+        .enumerate()
+    {
         sheet
             .set_column_width(column as u16, *width)
             .map_err(xlsx_error)?;
@@ -749,11 +749,15 @@ fn write_manifest(records: &[Value], output: &Path) -> Result<(), AppError> {
         sheet
             .write_string(row, 1, record["status"].as_str().unwrap_or(""))
             .map_err(xlsx_error)?;
-        sheet.write_number(row, 2, pages as f64).map_err(xlsx_error)?;
+        sheet
+            .write_number(row, 2, pages as f64)
+            .map_err(xlsx_error)?;
         sheet
             .write_number(row, 3, text_rows as f64)
             .map_err(xlsx_error)?;
-        sheet.write_number(row, 4, tables as f64).map_err(xlsx_error)?;
+        sheet
+            .write_number(row, 4, tables as f64)
+            .map_err(xlsx_error)?;
         sheet
             .write_number(row, 5, table_rows as f64)
             .map_err(xlsx_error)?;
@@ -837,12 +841,16 @@ mod tests {
     #[test]
     fn 金额转数值且前导零保持文本() {
         assert!(matches!(to_value("1,334.50"), CellValue::Number(v) if (v - 1334.5).abs() < 1e-9));
-        assert!(matches!(to_value("(1,234.00)"), CellValue::Number(v) if (v + 1234.0).abs() < 1e-9));
+        assert!(
+            matches!(to_value("(1,234.00)"), CellValue::Number(v) if (v + 1234.0).abs() < 1e-9)
+        );
         assert!(matches!(to_value("-982.25"), CellValue::Number(v) if (v + 982.25).abs() < 1e-9));
         assert!(matches!(to_value("0.00"), CellValue::Number(v) if v == 0.0));
         // 账号 0100684742 的前导零必须保持文本
         assert!(matches!(to_value("0100684742"), CellValue::Text(t) if t == "0100684742"));
-        assert!(matches!(to_value("CURRENT ACCOUNT"), CellValue::Text(t) if t == "CURRENT ACCOUNT"));
+        assert!(
+            matches!(to_value("CURRENT ACCOUNT"), CellValue::Text(t) if t == "CURRENT ACCOUNT")
+        );
         assert!(matches!(to_value("US912810RJ97"), CellValue::Text(t) if t == "US912810RJ97"));
     }
 
@@ -851,7 +859,10 @@ mod tests {
         assert!(MONEY_RE.is_match("1,334.50"));
         assert!(MONEY_RE.is_match("(1,234.00)"));
         assert!(MONEY_RE.is_match("-1,234.00"));
-        assert!(MONEY_RE.is_match("0.00"), "无千分位的两位小数同样匹配（与独立版一致）");
+        assert!(
+            MONEY_RE.is_match("0.00"),
+            "无千分位的两位小数同样匹配（与独立版一致）"
+        );
         assert!(!MONEY_RE.is_match("0100684742"));
         assert!(!MONEY_RE.is_match("1,334.5"), "一位小数不匹配");
         assert!(!MONEY_RE.is_match("1,33"));
@@ -886,11 +897,7 @@ mod tests {
 
     #[test]
     fn 表头签名忽略空列与尾空白() {
-        let a = header_sig(&[
-            "Account No".into(),
-            "".into(),
-            "Currency ".into(),
-        ]);
+        let a = header_sig(&["Account No".into(), "".into(), "Currency ".into()]);
         let b = header_sig(&["Account No".into(), "Currency".into()]);
         assert_eq!(a, b);
     }
@@ -931,7 +938,10 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, "PDF_OPEN_FAILED");
         let detail = err.detail.unwrap_or_default();
-        assert!(detail.contains("样例回函.pdf"), "明细应包含文件名：{detail}");
+        assert!(
+            detail.contains("样例回函.pdf"),
+            "明细应包含文件名：{detail}"
+        );
     }
 
     #[test]
@@ -959,10 +969,7 @@ mod tests {
         let flow = vec![
             FlowItem::Text("回函正文第一行".to_string()),
             FlowItem::Text("Item #1: Deposits,".to_string()),
-            FlowItem::Table {
-                cont: false,
-                table,
-            },
+            FlowItem::Table { cont: false, table },
         ];
         write_flow(&flow, &output).unwrap();
         assert!(output.exists());
@@ -1026,7 +1033,6 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-
     /// 真实 298 页渣打银行回函（本机 Downloads 下）的端到端验收。
     /// 基准数字来自本机实跑。Rust 版对越界矩形的处理与独立 Python 版不同：crop 采用对象
     /// 中心点判定，表格回到真实边界，正文逐行干净——修正了独立版"整页巨行"与"信头混入数据
@@ -1062,8 +1068,7 @@ mod tests {
         let range = workbook.worksheet_range("回函内容").unwrap();
         assert!(!range.is_empty(), "工作表应有内容");
         // 账号应原样保留为文本（不被数值化剥掉前导零），且与独立版种类数一致
-        static ACCOUNT_RE: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"\b\d{10}\b").unwrap());
+        static ACCOUNT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d{10}\b").unwrap());
         let mut accounts: HashSet<&str> = HashSet::new();
         for row in range.rows() {
             for cell in row {

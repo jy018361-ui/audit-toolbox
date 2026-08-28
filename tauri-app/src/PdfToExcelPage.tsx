@@ -145,7 +145,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
   return (
     <>
       <PageHeader
-        eyebrow="回函整理"
+        eyebrow="PDF 整理"
         title={tool.name}
         detail="把文字版回函逐行转成 Excel，自动提取回函中的表格，支持批量处理。"
       />

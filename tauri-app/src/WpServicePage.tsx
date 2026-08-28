@@ -15,7 +15,7 @@ function wpErrorText(error: unknown) {
   if (error && typeof error === "object") {
     const value = error as Record<string, unknown>;
     return String(
-      value.userMessage ?? value.message ?? value.detail ?? "操作失败，请查看日志诊断。",
+      value.userMessage ?? value.message ?? value.detail ?? "操作失败，请检查输入后重试。",
     );
   }
   return String(error);

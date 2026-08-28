@@ -75,7 +75,7 @@ jobs:
           projectPath: tauri-app
           tagName: ${{ github.ref_name }}
           releaseName: E点通工具箱 ${{ github.ref_name }}
-          releaseBody: 请查看本次 Release 的更新说明。
+          generateReleaseNotes: true
           releaseDraft: false
           prerelease: false
           uploadUpdaterJson: true

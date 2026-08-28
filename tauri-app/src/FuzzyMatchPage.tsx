@@ -589,7 +589,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
               </Button>
             </div>
             {jobKind === "match" && job && <JobProgress job={job} onCancel={busy ? (id) => void jobCancel(id) : undefined} />}
-            <p className="fx-hint">离开本页后任务仍在后台运行，可在任务中心查看进度；完成后回到本页继续确认。</p>
+            <p className="fx-hint">离开本页后任务仍在后台运行，回到本页可查看进度并继续确认。</p>
           </div>
         </CardContent>
       </Card>

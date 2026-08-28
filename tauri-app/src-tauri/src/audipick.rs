@@ -327,8 +327,16 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
             object.insert(
                 "availableRoles".into(),
                 json!([
-                    "id", "accountCode", "accountName", "entity", "date", "summary",
-                    "functionalAmount", "direction", "functionalDebit", "functionalCredit"
+                    "id",
+                    "accountCode",
+                    "accountName",
+                    "entity",
+                    "date",
+                    "summary",
+                    "functionalAmount",
+                    "direction",
+                    "functionalDebit",
+                    "functionalCredit"
                 ]),
             );
         }
@@ -376,7 +384,9 @@ fn inject_current_form(payload: &mut Value, kind: &str) {
     };
     let filled = |value: &Value| match value {
         Value::String(one) => !one.trim().is_empty(),
-        Value::Array(all) => all.iter().any(|x| x.as_str().is_some_and(|v| !v.trim().is_empty())),
+        Value::Array(all) => all
+            .iter()
+            .any(|x| x.as_str().is_some_and(|v| !v.trim().is_empty())),
         _ => false,
     };
     let mapped: std::collections::HashSet<&'static str> = mapping
@@ -434,7 +444,11 @@ fn ledger_mapping_llm_call(
         return Err(error("LLM_DISABLED", "工具箱中的 LLM 尚未启用。", None));
     }
     let is_tb = kind == "tb";
-    let task = if is_tb { "ledger_tb_mapping" } else { "ledger_je_mapping" };
+    let task = if is_tb {
+        "ledger_tb_mapping"
+    } else {
+        "ledger_je_mapping"
+    };
     let (table_name, specific) = if is_tb {
         ("科目余额表", REVIEW_TB)
     } else {
@@ -512,7 +526,10 @@ fn sanitize_change_list(value: &mut Value, payload: &Value, kind: &str, key: &st
                 .collect()
         })
         .unwrap_or_default();
-    let current_mapping = payload.get("currentMapping").cloned().unwrap_or(Value::Null);
+    let current_mapping = payload
+        .get("currentMapping")
+        .cloned()
+        .unwrap_or(Value::Null);
     // 某角色当前映射到的列集合（multi 角色是多列）。
     let columns_of = |role: &str| -> Vec<String> {
         current_mapping
@@ -559,7 +576,11 @@ fn sanitize_change_list(value: &mut Value, payload: &Value, kind: &str, key: &st
             .and_then(Value::as_str)
             .unwrap_or("")
             .trim();
-        let role = change.get("role").and_then(Value::as_str).unwrap_or("").trim();
+        let role = change
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
         let confidence = change
             .get("confidence")
             .and_then(Value::as_f64)
@@ -590,7 +611,10 @@ fn sanitize_change_list(value: &mut Value, payload: &Value, kind: &str, key: &st
         // 实测四轮里这类行全是模型想表态"我确认过、维持空缺"的拧巴输出，
         // 从没出现过合法建议用否定句式写 reason 的，宁可错杀。
         let reason = change.get("reason").and_then(Value::as_str).unwrap_or("");
-        if ["不映射", "不应映射", "不應映射", "不該映射"].iter().any(|mark| reason.contains(mark)) {
+        if ["不映射", "不应映射", "不應映射", "不該映射"]
+            .iter()
+            .any(|mark| reason.contains(mark))
+        {
             return false;
         }
         // 目标列已被其他角色占用、且没有人配套地把那个角色挪走 →
@@ -606,9 +630,9 @@ fn sanitize_change_list(value: &mut Value, payload: &Value, kind: &str, key: &st
                             .any(|column| column.trim() == suggested),
                         _ => false,
                     }
-                    && !movers
-                        .iter()
-                        .any(|(mover_role, mover_from)| mover_role == other_role && mover_from == suggested)
+                    && !movers.iter().any(|(mover_role, mover_from)| {
+                        mover_role == other_role && mover_from == suggested
+                    })
             })
         });
         if occupied_elsewhere {
@@ -1145,7 +1169,12 @@ mod tests {
         let fills = value["fills"].as_array().expect("fills 还在");
         assert_eq!(fills.len(), 1, "{fills:?}");
         assert_eq!(fills[0]["suggestedColumn"], "本位币金额");
-        assert!(value["reviews"].as_array().expect("reviews 还在").is_empty());
+        assert!(
+            value["reviews"]
+                .as_array()
+                .expect("reviews 还在")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1166,7 +1195,12 @@ mod tests {
         let form = &payload["currentForm"];
         assert_eq!(form["id"], "JE2");
         assert_eq!(form["complete"], true);
-        assert!(form["missingSlots"].as_array().expect("有该字段").is_empty());
+        assert!(
+            form["missingSlots"]
+                .as_array()
+                .expect("有该字段")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1273,7 +1307,13 @@ mod mapping_prompt_tests {
     /// 共同段只放对两张表都成立的纪律，别把某一张表的规则漏写进去。
     #[test]
     fn 共同段不含任一表的专属规则() {
-        for word in ["期初", "期末", "凭证类型", "本年累计", "hardcodedCandidates"] {
+        for word in [
+            "期初",
+            "期末",
+            "凭证类型",
+            "本年累计",
+            "hardcodedCandidates",
+        ] {
             assert!(
                 !REVIEW_COMMON.contains(word),
                 "共同段出现了专属规则「{word}」，应移到对应的分段里"
@@ -1296,7 +1336,10 @@ mod mapping_prompt_tests {
                 }
                 assert!(
                     crate::ledger_mapping::role_of(kind, word).is_some()
-                        || matches!(word, "currentMapping" | "sampleRows" | "hardcodedCandidates"),
+                        || matches!(
+                            word,
+                            "currentMapping" | "sampleRows" | "hardcodedCandidates"
+                        ),
                     "{kind} 提示词里的「{word}」不是内核里的角色名"
                 );
             }
@@ -1480,9 +1523,11 @@ mod mapping_prompt_tests {
         sanitize_mapping_changes(&mut value, &payload, "tb");
         let changes = value["changes"].as_array().unwrap();
         assert_eq!(changes.len(), 2, "只留成对挪移的两条：{changes:?}");
-        assert!(changes
-            .iter()
-            .all(|change| change["suggestedColumn"].as_str() != Some("科目名称")
-                || change["role"].as_str() == Some("accountName")));
+        assert!(
+            changes.iter().all(
+                |change| change["suggestedColumn"].as_str() != Some("科目名称")
+                    || change["role"].as_str() == Some("accountName")
+            )
+        );
     }
 }

@@ -39,7 +39,10 @@ fn measure_4800() {
     let v = match audit_toolbox_lib::engine_call_for_test("fx.preview_probe", params) {
         Ok(v) => v,
         Err(e) => {
-            println!("失败：{}", format!("{e:?}").chars().take(400).collect::<String>());
+            println!(
+                "失败：{}",
+                format!("{e:?}").chars().take(400).collect::<String>()
+            );
             return;
         }
     };
@@ -58,7 +61,11 @@ fn measure_4800() {
         for item in all.iter().take(12) {
             println!(
                 "  {}",
-                serde_json::to_string(item).unwrap_or_default().chars().take(240).collect::<String>()
+                serde_json::to_string(item)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(240)
+                    .collect::<String>()
             );
         }
     }

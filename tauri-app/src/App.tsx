@@ -15,7 +15,10 @@ import {
   settingsGet,
   settingsSet,
   toolCatalog,
+  updateReleaseNotes,
 } from "./api";
+import type { ReleaseNotes } from "./updateNotes";
+import { Button } from "@/components/ui/button";
 import {
   TOOL_DEFINITIONS,
   type ActionDefinition,
@@ -52,10 +55,8 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 
 const NAV = [
   { to: "/", label: "工作台" },
-  { to: "/tasks", label: "任务中心" },
   { to: "/history", label: "历史记录" },
   { to: "/settings", label: "设置" },
-  { to: "/diagnostics", label: "日志诊断" },
 ];
 
 function IconHome() {
@@ -73,26 +74,6 @@ function IconHome() {
     >
       <path d="M3 10.5 12 3l9 7.5" />
       <path d="M5 9.5V20a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V9.5" />
-    </svg>
-  );
-}
-function IconTasks() {
-  return (
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M3.5 5.5 5 7l2.5-2.5" />
-      <path d="M3.5 11.5 5 13l2.5-2.5" />
-      <path d="M3.5 17.5 5 19l2.5-2.5" />
-      <path d="M11 6h10M11 12h10M11 18h10" />
     </svg>
   );
 }
@@ -135,31 +116,10 @@ function IconSettings() {
     </svg>
   );
 }
-function IconTerminal() {
-  return (
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <polyline points="4 17 10 11 4 5" />
-      <line x1="12" y1="19" x2="20" y2="19" />
-    </svg>
-  );
-}
-
 const NAV_ICON: Record<string, ReactElement> = {
   "/": <IconHome />,
-  "/tasks": <IconTasks />,
   "/history": <IconHistory />,
   "/settings": <IconSettings />,
-  "/diagnostics": <IconTerminal />,
 };
 
 // 工具清单以 public/tool-catalog.json 为准，用简短徽标代替千篇一律的纯文字列表，
@@ -174,7 +134,7 @@ const TOOL_BADGE: Record<string, string> = {
   confirmation_progress: "函",
   Excel_Merger: "合",
   file_list_directory: "夹",
-  pdf_to_excel: "函",
+  pdf_to_excel: "PDF",
   audipick: "AP",
   audit_roll_forward: "RF",
   wp_service_generator: "WP",
@@ -232,7 +192,9 @@ export default function App() {
         })) as { skipped?: boolean; cleanedAt?: number };
         // 真清理过才写回时间戳，跳过时不动——否则永远差一点到期。
         if (!result.skipped && result.cleanedAt) {
-          await settingsSet({ cache: { cleanup: mode, lastCleanup: result.cleanedAt } });
+          await settingsSet({
+            cache: { cleanup: mode, lastCleanup: result.cleanedAt },
+          });
         }
       } catch {
         // 清理失败不该影响启动，缓存留着最多是占点磁盘。
@@ -293,13 +255,43 @@ export default function App() {
           {[
             // __*_GROUP__ 占位（见 TOOL_SUBGROUPS）：主工具在原位置展开为可折叠子分组，
             // 看账与正负数凭证标记两个入口同组呈现。
-            { label: "审计工具", ids: ["fx_audit", "deposit_interest", "loan_interest", "__FA_GROUP__", "__KANZHANG_GROUP__", "audipick", "audit_roll_forward"] },
-            { label: "效率工具", ids: ["Excel_Merger", "file_list_directory", "pdf_to_excel", "fuzzy_match"] },
-            { label: "运营工具", ids: ["ts_manager", "confirmation_progress", "wp_service_generator"] },
+            {
+              label: "审计工具",
+              ids: [
+                "fx_audit",
+                "deposit_interest",
+                "loan_interest",
+                "__FA_GROUP__",
+                "__KANZHANG_GROUP__",
+                "audipick",
+                "audit_roll_forward",
+              ],
+            },
+            {
+              label: "效率工具",
+              ids: [
+                "Excel_Merger",
+                "file_list_directory",
+                "pdf_to_excel",
+                "fuzzy_match",
+              ],
+            },
+            {
+              label: "运营工具",
+              ids: [
+                "ts_manager",
+                "confirmation_progress",
+                "wp_service_generator",
+              ],
+            },
           ].map((group) => {
-            const entries = group.ids.map((id) =>
-              TOOL_SUBGROUPS[id] ? id : (catalog.find((t) => t.id === id)?.id ?? null),
-            ).filter((id): id is string => Boolean(id));
+            const entries = group.ids
+              .map((id) =>
+                TOOL_SUBGROUPS[id]
+                  ? id
+                  : (catalog.find((t) => t.id === id)?.id ?? null),
+              )
+              .filter((id): id is string => Boolean(id));
             if (!entries.length) return null;
             return (
               <div key={group.label} className="tool-group">
@@ -319,7 +311,10 @@ export default function App() {
                           className="tool-subgroup-toggle"
                           aria-expanded={open}
                           onClick={() =>
-                            setSubgroupOpen((v) => ({ ...v, [subgroup.key]: !open }))
+                            setSubgroupOpen((v) => ({
+                              ...v,
+                              [subgroup.key]: !open,
+                            }))
                           }
                         >
                           <span className="tool-badge">{subgroup.badge}</span>
@@ -334,7 +329,11 @@ export default function App() {
                         {open && (
                           <div className="tool-subgroup-items">
                             {tools.map((t) => (
-                              <NavLink key={t.id} to={t.route} className="tool-subgroup-link">
+                              <NavLink
+                                key={t.id}
+                                to={t.route}
+                                className="tool-subgroup-link"
+                              >
                                 <span className="tool-badge">
                                   {TOOL_BADGE[t.id] ?? t.name.slice(0, 1)}
                                 </span>
@@ -388,10 +387,6 @@ export default function App() {
               {/* The visible tool is rendered by PersistentToolPages below so
                   route changes hide it instead of destroying its local state. */}
               <Route path="/tools/:toolId" element={null} />
-              <Route
-                path="/tasks"
-                element={<TaskCenter jobs={Object.values(jobs)} />}
-              />
               <Route path="/history" element={<History />} />
               <Route
                 path="/settings"
@@ -399,15 +394,6 @@ export default function App() {
                   <Settings
                     availableUpdate={availableUpdate}
                     onAvailableUpdateChange={setAvailableUpdate}
-                  />
-                }
-              />
-              <Route
-                path="/diagnostics"
-                element={
-                  <SimplePage
-                    title="日志诊断"
-                    text="日志仅包含阶段、耗时和诊断编号，不记录客户数据或密钥。"
                   />
                 }
               />
@@ -547,10 +533,10 @@ function appErrorText(error: unknown): string {
       value.userMessage ??
         value.message ??
         value.detail ??
-        "操作失败，请查看日志诊断。",
+        "操作失败，请检查输入后重试。",
     );
   }
-  return "操作失败，请查看日志诊断。";
+  return "操作失败，请检查输入后重试。";
 }
 
 function ToolPage({
@@ -622,7 +608,8 @@ function ToolPage({
   if (tool.id === "audit_roll_forward") return <RollForwardPage tool={tool} />;
   if (tool.id === "fx_audit") return <FxAuditPage tool={tool} />;
   if (tool.id === "loan_interest") return <LoanInterestPage tool={tool} />;
-  if (tool.id === "deposit_interest") return <DepositInterestPage tool={tool} />;
+  if (tool.id === "deposit_interest")
+    return <DepositInterestPage tool={tool} />;
   if (tool.id === "fuzzy_match") return <FuzzyMatchPage tool={tool} />;
   if (tool.id === "fa_dep_calc") return <FaDepCalcPage tool={tool} />;
   if (tool.id === "fa_policy_compare")
@@ -654,7 +641,11 @@ function ToolPage({
   }
   return (
     <>
-      <PageHeader eyebrow="WP 服务单生成" title={tool.name} detail={def.intro} />
+      <PageHeader
+        eyebrow="WP 服务单生成"
+        title={tool.name}
+        detail={def.intro}
+      />
       <StepIndicator
         steps={[
           { key: "1", label: "任务配置", disabled: true },
@@ -704,7 +695,7 @@ function ToolPage({
             <ResultView value={result} />
           ) : (
             <div className="empty">
-              先检查输入，再启动任务。任务离开页面后仍会在任务中心运行。
+              先检查输入，再启动任务。离开页面后任务仍在后台运行，可回到工具页查看进度。
             </div>
           )}
         </section>
@@ -712,7 +703,6 @@ function ToolPage({
     </>
   );
 }
-
 
 function errorText(error: unknown) {
   if (error && typeof error === "object" && "userMessage" in error)
@@ -801,40 +791,6 @@ function normalizeValues(values: Record<string, unknown>) {
   return out;
 }
 
-function TaskCenter({ jobs }: { jobs: JobEvent[] }) {
-  return (
-    <>
-      <PageHeader
-        eyebrow="运行状态"
-        title="任务中心"
-        detail="长任务可离开工具页面继续运行。"
-      />
-      <div className="list-card">
-        {jobs.length ? (
-          jobs.map((j) => (
-            <div className="task-row" key={j.jobId}>
-              <div>
-                <strong>{j.toolId}</strong>
-                <p>{j.message}</p>
-              </div>
-              <progress max={Math.max(j.total, 1)} value={j.current} />
-              {j.severity === "info" && (
-                <button
-                  className="secondary"
-                  onClick={() => void jobCancel(j.jobId)}
-                >
-                  取消
-                </button>
-              )}
-            </div>
-          ))
-        ) : (
-          <div className="empty">当前没有运行中的任务。</div>
-        )}
-      </div>
-    </>
-  );
-}
 function History() {
   const [rows, setRows] = useState<Array<Record<string, unknown>>>([]);
   const [loading, setLoading] = useState(true);
@@ -860,7 +816,7 @@ function History() {
             </div>
           ) : error ? (
             <div className="error-box" role="alert">
-              {error} 请前往“日志诊断”查看详情后重试。
+              {error} 请稍后重试。
             </div>
           ) : rows.length ? (
             rows.map((row, index) => (
@@ -911,12 +867,18 @@ function formatHistoryTime(value: unknown): string {
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
-  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const index = Math.min(
+    units.length - 1,
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+  );
   const value = bytes / 1024 ** index;
   return `${value >= 100 || index === 0 ? Math.round(value) : value.toFixed(1)} ${units[index]}`;
 }
 
-export function formatUpdateProgress(downloaded: number, total?: number): string {
+export function formatUpdateProgress(
+  downloaded: number,
+  total?: number,
+): string {
   if (!total || !Number.isFinite(total) || total <= 0) {
     return `正在下载更新：已下载 ${formatBytes(downloaded)}`;
   }
@@ -924,13 +886,16 @@ export function formatUpdateProgress(downloaded: number, total?: number): string
   return `正在下载更新：${formatBytes(downloaded)} / ${formatBytes(total)}（${percentage}%）`;
 }
 
-function Settings({
+export function Settings({
   availableUpdate,
   onAvailableUpdateChange,
 }: {
   availableUpdate: Update | null;
   onAvailableUpdateChange: (update: Update | null) => void;
 }) {
+  const [section, setSection] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [saveFailed, setSaveFailed] = useState(false);
   const [form, setForm] = useState({
     enabled: false,
     apiType: "openai",
@@ -959,7 +924,9 @@ function Settings({
     oldestDays: number;
     path: string;
   }>();
-  const [cacheMode, setCacheMode] = useState<"daily" | "weekly" | "off">("weekly");
+  const [cacheMode, setCacheMode] = useState<"daily" | "weekly" | "off">(
+    "weekly",
+  );
   const [cacheBusy, setCacheBusy] = useState(false);
   const [cacheMessage, setCacheMessage] = useState("");
   const [cacheStatError, setCacheStatError] = useState("");
@@ -978,6 +945,12 @@ function Settings({
     void refreshCacheStat();
   }, []);
   const [updateStatus, setUpdateStatus] = useState("");
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [releaseNotes, setReleaseNotes] = useState<ReleaseNotes>();
+  const [notesError, setNotesError] = useState("");
+  const [fallbackNotes, setFallbackNotes] = useState("");
+  const [checkedUpdateVersion, setCheckedUpdateVersion] = useState<string>();
+  const updateCheckLock = useRef(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
   // 全局主题（data-theme 切换，默认深绿）
@@ -1010,34 +983,65 @@ function Settings({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
-    void getVersion().then(setAppVersion).catch(() => setAppVersion("未知"));
+    void getVersion()
+      .then(setAppVersion)
+      .catch(() => setAppVersion("未知"));
   }, []);
-  useEffect(() => {
-    if (availableUpdate && !updateStatus) {
-      setUpdateStatus(
-        `发现新版本 ${availableUpdate.version}。更新说明：${availableUpdate.body || "暂无说明。"}`,
-      );
-    }
-  }, [availableUpdate, updateStatus]);
   async function checkForUpdates() {
+    if (updateCheckLock.current || installingUpdate) return;
+    updateCheckLock.current = true;
+    setUpdateOpen(true);
     setCheckingUpdate(true);
+    setReleaseNotes(undefined);
+    setNotesError("");
+    setFallbackNotes("");
+    setCheckedUpdateVersion(undefined);
     setUpdateStatus("正在检查 GitHub Release…");
     try {
-      const update = await check();
+      const update = await check({ timeout: 15000 });
       onAvailableUpdateChange(update ?? null);
       setUpdateStatus(
         update
-          ? `发现新版本 ${update.version}。更新说明：${update.body || "暂无说明。"}`
-          : "当前已经是最新版本。",
+          ? `发现新版本 v${update.version}，正在读取跨版本更新说明…`
+          : "当前没有可安装的新版本，正在读取本版更新说明…",
+      );
+      try {
+        const notes = await updateReleaseNotes(update?.version);
+        setReleaseNotes(notes);
+        setAppVersion(notes.currentVersion);
+        if (notes.releases.length === 0 && update?.body)
+          setFallbackNotes(update.body);
+      } catch (e) {
+        setNotesError(
+          `更新说明读取失败：${appErrorText(e)}。可以重新检查；未将读取失败视为没有变更。`,
+        );
+        setFallbackNotes(update?.body ?? "");
+      }
+      setCheckedUpdateVersion(update?.version);
+      setUpdateStatus(
+        update
+          ? `可从当前版本升级到 v${update.version}。请先查看下方更新内容，再确认安装。`
+          : "当前没有可安装的新版本。以下展示本版发布说明（如有）。",
       );
     } catch (e) {
-      setUpdateStatus(`检查更新失败：${e instanceof Error ? e.message : String(e)}`);
+      setUpdateStatus(
+        typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window)
+          ? "浏览器预览模式不能检查或安装更新，请在桌面应用中使用软件更新。"
+          : `检查更新失败：${appErrorText(e)}`,
+      );
     } finally {
       setCheckingUpdate(false);
+      updateCheckLock.current = false;
     }
   }
   async function installUpdate() {
-    if (!availableUpdate) return;
+    if (
+      !availableUpdate ||
+      checkingUpdate ||
+      installingUpdate ||
+      checkedUpdateVersion !== availableUpdate.version
+    )
+      return;
     setInstallingUpdate(true);
     setUpdateStatus("正在下载并安装更新，请不要关闭工具箱…");
     let downloadedBytes = 0;
@@ -1062,7 +1066,9 @@ function Settings({
       await relaunch();
     } catch (e) {
       setInstallingUpdate(false);
-      setUpdateStatus(`安装更新失败：${e instanceof Error ? e.message : String(e)}`);
+      setUpdateStatus(
+        `安装更新失败：${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   }
   useEffect(() => {
@@ -1083,7 +1089,8 @@ function Settings({
         }));
         const cache = (value.cache ?? {}) as Record<string, unknown>;
         const mode = String(cache.cleanup ?? "weekly");
-        if (mode === "daily" || mode === "weekly" || mode === "off") setCacheMode(mode);
+        if (mode === "daily" || mode === "weekly" || mode === "off")
+          setCacheMode(mode);
       })
       .catch(() => undefined);
   }, []);
@@ -1135,6 +1142,9 @@ function Settings({
     }
   }
   async function save() {
+    if (saving) return;
+    setSaving(true);
+    setSaveFailed(false);
     setMessage("");
     try {
       await settingsSet({
@@ -1152,298 +1162,461 @@ function Settings({
       if (form.ocrApiKey) await secretSet("baidu_ocr_key", form.ocrApiKey);
       if (form.ocrSecret) await secretSet("baidu_ocr_secret", form.ocrSecret);
       setForm((x) => ({ ...x, apiKey: "", ocrApiKey: "", ocrSecret: "" }));
-      setMessage("配置已保存。AudiPick 会直接使用这里的 LLM 配置。");
+      setMessage("配置已保存，相关工具会使用这些设置。");
     } catch (e) {
-      setMessage(e instanceof Error ? e.message : String(e));
+      setSaveFailed(true);
+      setMessage(appErrorText(e));
+    } finally {
+      setSaving(false);
     }
   }
   return (
-    <>
+    <div className="settings-page">
       <PageHeader
         eyebrow="本机配置"
         title="设置"
-        detail="LLM 与 OCR 密钥由 Windows 凭据管理器保存，不写入 SQLite 或日志。"
+        detail="按用途管理工具箱配置；密钥保存在本机凭据管理器。"
+        actions={
+          <Button
+            variant="secondary"
+            onClick={() => void checkForUpdates()}
+            disabled={checkingUpdate || installingUpdate}
+            aria-expanded={updateOpen}
+            aria-controls="settings-update-panel"
+          >
+            {checkingUpdate
+              ? "检查中…"
+              : installingUpdate
+                ? "安装中…"
+                : availableUpdate
+                  ? `软件更新 · v${availableUpdate.version}`
+                  : "软件更新"}
+          </Button>
+        }
       />
-      <div className="settings-grid">
-        <section className="list-card">
-          <h2>软件更新</h2>
-          <p>当前版本：v{appVersion}</p>
+      {updateOpen && (
+        <section
+          className="list-card settings-update-panel"
+          id="settings-update-panel"
+          aria-labelledby="settings-update-title"
+        >
+          <div className="settings-update-heading">
+            <div>
+              <h2 id="settings-update-title">软件更新</h2>
+              <p className="settings-note">
+                当前版本：v{appVersion} · 来源：GitHub Releases
+              </p>
+            </div>
+            <Button
+              variant="ghost"
+              disabled={installingUpdate}
+              onClick={() => setUpdateOpen(false)}
+            >
+              收起
+            </Button>
+          </div>
+          <p role="status" aria-live="polite">
+            {updateStatus}
+          </p>
+          {notesError && (
+            <p role="alert" className="settings-test-result failed">
+              {notesError}
+            </p>
+          )}
+          {releaseNotes && (
+            <div className="settings-release-notes">
+              <p>
+                {releaseNotes.currentVersion === releaseNotes.targetVersion
+                  ? `本版说明 · v${releaseNotes.currentVersion}`
+                  : `更新范围：v${releaseNotes.currentVersion} → v${releaseNotes.targetVersion}`}
+              </p>
+              {releaseNotes.warnings.map((warning, i) => (
+                <p className="settings-note" key={i}>
+                  {warning}
+                </p>
+              ))}
+              {releaseNotes.releases.map((release) => (
+                <article
+                  key={release.version}
+                  className="settings-release-entry"
+                >
+                  <h3>
+                    v{release.version} · {release.title}
+                  </h3>
+                  {release.publishedAt && (
+                    <p className="settings-note">
+                      发布时间：{release.publishedAt.slice(0, 10)}
+                    </p>
+                  )}
+                  <div className="settings-release-body">
+                    {release.body || "此版本未填写更新说明。"}
+                  </div>
+                </article>
+              ))}
+              {releaseNotes.commits.length > 0 && (
+                <article className="settings-release-entry">
+                  <h3>升级区间提交记录</h3>
+                  <ul>
+                    {releaseNotes.commits.map((message, i) => (
+                      <li key={i}>{message}</li>
+                    ))}
+                  </ul>
+                </article>
+              )}
+            </div>
+          )}
+          {fallbackNotes && (
+            <article className="settings-release-entry">
+              <h3>更新包附带说明（仅目标版本，非完整区间）</h3>
+              <div className="settings-release-body">{fallbackNotes}</div>
+            </article>
+          )}
           <div className="actions">
-            <button
-              className="secondary"
+            <Button
+              variant="secondary"
               disabled={checkingUpdate || installingUpdate}
               onClick={() => void checkForUpdates()}
             >
-              {checkingUpdate ? "检查中…" : "检查更新"}
-            </button>
-            {availableUpdate && (
-              <button
-                className="primary"
-                disabled={installingUpdate}
-                onClick={() => void installUpdate()}
-              >
-                {installingUpdate ? "安装中…" : `更新到 v${availableUpdate.version}`}
-              </button>
-            )}
-          </div>
-          {updateStatus && <div className="settings-test-result">{updateStatus}</div>}
-        </section>
-        <section className="list-card">
-          <h2>界面主题</h2>
-          <div className="theme-picker">
-            {[
-              { id: "green-dark", name: "深绿" },
-              { id: "classic-dark", name: "经典黄黑" },
-              { id: "yellow-light", name: "明亮黄白" },
-              { id: "blue-white", name: "专业蓝白" },
-              { id: "red-white", name: "利落红白" },
-              { id: "yellow-blue", name: "醒目黄蓝" },
-              { id: "red-yellow-ivory", name: "红黄米白" },
-              { id: "yellow-green", name: "清新黄绿" },
-              { id: "teal-dark", name: "深色青绿" },
-            ].map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                className={`theme-option ${theme === t.id ? "active" : ""}`}
-                onClick={() => applyTheme(t.id)}
-              >
-                {t.name}
-              </button>
-            ))}
+              重新检查
+            </Button>
+            {availableUpdate &&
+              checkedUpdateVersion === availableUpdate.version && (
+                <Button
+                  disabled={checkingUpdate || installingUpdate}
+                  onClick={() => void installUpdate()}
+                >
+                  {installingUpdate
+                    ? "安装中…"
+                    : `确认更新到 v${availableUpdate.version}`}
+                </Button>
+              )}
           </div>
         </section>
-        <section className="list-card">
-          <h2>统一 LLM 配置</h2>
-          <div className="form-grid">
-            <label className="field">
-              <span>启用 LLM</span>
-              <input
-                type="checkbox"
-                checked={form.enabled}
-                onChange={(e) => set("enabled", e.target.checked)}
-              />
-            </label>
-            <label className="field">
-              <span>接口类型</span>
-              <select
-                value={form.apiType}
-                onChange={(e) => set("apiType", e.target.value)}
-              >
-                <option value="openai">OpenAI 兼容接口</option>
-                <option value="dify_chat">Dify Chat App</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Base URL</span>
-              <input
-                value={form.baseUrl}
-                onChange={(e) => set("baseUrl", e.target.value)}
-              />
-            </label>
-            <label className="field">
-              <span>模型</span>
-              <input
-                value={form.model}
-                onChange={(e) => set("model", e.target.value)}
-                placeholder="Dify 可留空"
-              />
-            </label>
-            <label className="field">
-              <span>API Key</span>
-              <input
-                type="password"
-                value={form.apiKey}
-                onChange={(e) => set("apiKey", e.target.value)}
-                placeholder="留空表示不修改"
-              />
-            </label>
-            <label className="field">
-              <span>鉴权方式</span>
-              <select
-                value={form.authMode}
-                onChange={(e) => set("authMode", e.target.value)}
-              >
-                <option value="bearer">Bearer Token</option>
-                <option value="raw">直接使用 API Key</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>超时秒数</span>
-              <input
-                value={form.timeout}
-                onChange={(e) => set("timeout", e.target.value)}
-              />
-              <small>
-                连接测试只发一句话，很快就能返回；FA List
-                的字段映射复核要把所有列名和样例值发给模型，慢得多。 建议 120
-                秒以上，改完记得点下方保存。
-              </small>
-            </label>
-            <label className="field">
-              <span>思考模式</span>
-              <input
-                type="checkbox"
-                checked={form.thinkingEnabled}
-                onChange={(e) => set("thinkingEnabled", e.target.checked)}
-              />
-            </label>
-          </div>
-          <div className="settings-test-row">
-            <button
-              className="secondary"
-              disabled={testingLlm}
-              onClick={() => void testConnection()}
-            >
-              {testingLlm ? "正在测试…" : "测试 LLM 连接"}
-            </button>
-            <span>
-              API Key
-              留空时使用已保存的密钥；测试成功后仍需点击页面底部“保存配置”。
-            </span>
-          </div>
-          {llmTestResult && (
-            <div
-              className={`settings-test-result ${llmTestResult.ok ? "success" : "failed"}`}
-            >
-              {llmTestResult.text}
+      )}
+      <StepIndicator
+        steps={[
+          { key: "ai", label: "AI 与 OCR" },
+          { key: "theme", label: "界面主题" },
+          { key: "data", label: "缓存清理" },
+        ]}
+        current={section}
+        onStepClick={setSection}
+        showCompleted={false}
+      />
+      <div className="settings-panels">
+        <div hidden={section !== 0} className="settings-group">
+          <section className="list-card">
+            <h2>统一 LLM 配置</h2>
+            <p className="settings-note">
+              供各工具的字段复核与智能分析共用。密钥留空表示保留已保存值。
+            </p>
+            <div className="form-grid">
+              <label className="field settings-toggle">
+                <span>启用 LLM</span>
+                <input
+                  type="checkbox"
+                  checked={form.enabled}
+                  onChange={(e) => set("enabled", e.target.checked)}
+                />
+              </label>
+              <label className="field">
+                <span>接口类型</span>
+                <select
+                  value={form.apiType}
+                  onChange={(e) => set("apiType", e.target.value)}
+                >
+                  <option value="openai">OpenAI 兼容接口</option>
+                  <option value="dify_chat">Dify Chat App</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>Base URL</span>
+                <input
+                  value={form.baseUrl}
+                  onChange={(e) => set("baseUrl", e.target.value)}
+                />
+              </label>
+              <label className="field">
+                <span>模型</span>
+                <input
+                  value={form.model}
+                  onChange={(e) => set("model", e.target.value)}
+                  placeholder="Dify 可留空"
+                />
+              </label>
+              <label className="field">
+                <span>API Key</span>
+                <input
+                  type="password"
+                  value={form.apiKey}
+                  onChange={(e) => set("apiKey", e.target.value)}
+                  placeholder="留空表示不修改"
+                />
+              </label>
             </div>
-          )}
-        </section>
-        <section className="list-card">
-          <h2>AudiPick OCR 配置</h2>
-          <div className="form-grid">
-            <label className="field">
-              <span>OCR 引擎</span>
-              <select
-                value={form.ocrEngine}
-                onChange={(e) => set("ocrEngine", e.target.value)}
+            <details className="settings-advanced">
+              <summary>高级连接选项</summary>
+              <div className="form-grid">
+                <label className="field">
+                  <span>鉴权方式</span>
+                  <select
+                    value={form.authMode}
+                    onChange={(e) => set("authMode", e.target.value)}
+                  >
+                    <option value="bearer">Bearer Token</option>
+                    <option value="raw">直接使用 API Key</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>超时秒数</span>
+                  <input
+                    value={form.timeout}
+                    onChange={(e) => set("timeout", e.target.value)}
+                  />
+                  <small>字段复核可能耗时较长，建议设置为 120 秒以上。</small>
+                </label>
+                <label className="field settings-toggle">
+                  <span>思考模式</span>
+                  <input
+                    type="checkbox"
+                    checked={form.thinkingEnabled}
+                    onChange={(e) => set("thinkingEnabled", e.target.checked)}
+                  />
+                </label>
+              </div>
+            </details>
+            <div className="settings-test-row">
+              <button
+                className="secondary"
+                disabled={testingLlm}
+                onClick={() => void testConnection()}
               >
-                <option value="ai">使用统一 AI</option>
-                <option value="baidu">百度 OCR</option>
-                <option value="local">本机 OCR 服务</option>
+                {testingLlm ? "正在测试…" : "测试 LLM 连接"}
+              </button>
+              <span>
+                API Key
+                留空时使用已保存的密钥；测试成功后仍需点击页面底部“保存配置”。
+              </span>
+            </div>
+            {llmTestResult && (
+              <div
+                className={`settings-test-result ${llmTestResult.ok ? "success" : "failed"}`}
+              >
+                {llmTestResult.text}
+              </div>
+            )}
+          </section>
+          <section className="list-card">
+            <h2>AudiPick OCR 配置</h2>
+            <p className="settings-note">
+              仅用于 AudiPick 扫描件文字识别，按所选引擎显示配置。
+            </p>
+            <div className="form-grid">
+              <label className="field">
+                <span>OCR 引擎</span>
+                <select
+                  value={form.ocrEngine}
+                  onChange={(e) => set("ocrEngine", e.target.value)}
+                >
+                  <option value="ai">使用统一 AI</option>
+                  <option value="baidu">百度 OCR</option>
+                  <option value="local">本机 OCR 服务</option>
+                </select>
+              </label>
+              {form.ocrEngine === "baidu" && (
+                <>
+                  {" "}
+                  <label className="field">
+                    <span>百度 API Key</span>
+                    <input
+                      type="password"
+                      value={form.ocrApiKey}
+                      onChange={(e) => set("ocrApiKey", e.target.value)}
+                      placeholder="留空表示不修改"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>百度 Secret Key</span>
+                    <input
+                      type="password"
+                      value={form.ocrSecret}
+                      onChange={(e) => set("ocrSecret", e.target.value)}
+                      placeholder="留空表示不修改"
+                    />
+                  </label>
+                </>
+              )}
+            </div>
+            {form.ocrEngine === "ai" && (
+              <p className="settings-note">
+                沿用上方统一 LLM 配置，无需额外密钥。
+              </p>
+            )}
+            {form.ocrEngine === "local" && (
+              <p className="settings-note">请先启动已配置的本机 OCR 服务。</p>
+            )}
+          </section>
+        </div>
+        <div hidden={section !== 1} className="settings-group">
+          <section className="list-card">
+            <h2>界面主题</h2>
+            <p className="settings-note">
+              选择后立即生效并自动保存，无需再点击保存配置。
+            </p>
+            <div className="theme-picker">
+              {[
+                { id: "green-dark", name: "深绿" },
+                { id: "classic-dark", name: "经典黄黑" },
+                { id: "yellow-light", name: "明亮黄白" },
+                { id: "blue-white", name: "专业蓝白" },
+                { id: "red-white", name: "利落红白" },
+                { id: "yellow-blue", name: "醒目黄蓝" },
+                { id: "red-yellow-ivory", name: "红黄米白" },
+                { id: "yellow-green", name: "清新黄绿" },
+                { id: "teal-dark", name: "深色青绿" },
+              ].map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  className={`theme-option ${theme === t.id ? "active" : ""}`}
+                  aria-pressed={theme === t.id}
+                  onClick={() => applyTheme(t.id)}
+                >
+                  {t.name}
+                </button>
+              ))}
+            </div>
+          </section>
+        </div>
+        <div hidden={section !== 2} className="settings-group">
+          <section className="list-card">
+            <h2>本地缓存</h2>
+            <p>
+              缓存读过的科目余额表与序时账，再次打开同一份文件直接命中，不必重新解析。
+            </p>
+            <p className="cache-usage">
+              {cacheStat
+                ? `已缓存 ${formatBytes(cacheStat.bytes)}`
+                : cacheStatError
+                  ? "占用读取失败"
+                  : "读取中…"}
+            </p>
+            <label className="field">
+              <span>自动清理</span>
+              <select
+                value={cacheMode}
+                onChange={(e) =>
+                  setCacheMode(e.target.value as typeof cacheMode)
+                }
+              >
+                {/* 说明写进选项本身：选「每天」不是每天清空，是每天清掉没再用过的。 */}
+                <option value="daily">每天清理未使用的缓存</option>
+                <option value="weekly">每周清理未使用的缓存</option>
+                <option value="off">不自动清理</option>
               </select>
             </label>
-            <label className="field">
-              <span>百度 API Key</span>
+            <div className="actions">
+              <button
+                className="secondary"
+                disabled={cacheBusy || cacheStat?.bytes === 0}
+                onClick={() => {
+                  setCacheBusy(true);
+                  setCacheMessage("");
+                  void engineCall("cache.clear", {})
+                    .then((v) => {
+                      const r = v as {
+                        removed: number;
+                        freed: number;
+                        failed: number;
+                      };
+                      setCacheMessage(
+                        `已清理 ${r.removed} 个文件，释放 ${formatBytes(r.freed)}` +
+                          (r.failed ? `；${r.failed} 个正在使用，未清理` : ""),
+                      );
+                      return refreshCacheStat();
+                    })
+                    .catch((e) => setCacheMessage(String(e)))
+                    .finally(() => setCacheBusy(false));
+                }}
+              >
+                {cacheBusy
+                  ? "清理中…"
+                  : cacheStat && cacheStat.bytes > 0
+                    ? `立刻清理全部（${formatBytes(cacheStat.bytes)}）`
+                    : "立刻清理全部"}
+              </button>
+            </div>
+            {cacheMessage && <p className="cache-result">{cacheMessage}</p>}
+          </section>
+          <details className="list-card settings-advanced">
+            <summary>AudiPick 旧数据迁移（按需使用）</summary>
+            <p>
+              先在旧 AudiPick 配置页导出迁移备份，再在这里导入。导入按项目 ID
+              去重，不会删除旧数据。
+            </p>
+            <div className="input-with-button">
               <input
-                type="password"
-                value={form.ocrApiKey}
-                onChange={(e) => set("ocrApiKey", e.target.value)}
-                placeholder="留空表示不修改"
+                value={backupPath}
+                readOnly
+                placeholder="选择 AudiPick迁移备份.json"
               />
-            </label>
-            <label className="field">
-              <span>百度 Secret Key</span>
-              <input
-                type="password"
-                value={form.ocrSecret}
-                onChange={(e) => set("ocrSecret", e.target.value)}
-                placeholder="留空表示不修改"
-              />
-            </label>
-          </div>
-        </section>
+              <button
+                className="browse"
+                onClick={() =>
+                  void pickPath("file", "选择 AudiPick 迁移备份", [
+                    "json",
+                  ]).then((v) => setBackupPath(typeof v === "string" ? v : ""))
+                }
+              >
+                浏览
+              </button>
+            </div>
+            <div className="actions">
+              <button
+                className="secondary"
+                disabled={!backupPath}
+                onClick={() =>
+                  void legacyImport(backupPath)
+                    .then((r) => {
+                      setSaveFailed(false);
+                      setMessage(JSON.stringify(r));
+                    })
+                    .catch((e) => {
+                      setSaveFailed(true);
+                      setMessage(appErrorText(e));
+                    })
+                }
+              >
+                导入并校验
+              </button>
+            </div>
+          </details>
+        </div>
       </div>
-      <section className="list-card" style={{ marginTop: 18 }}>
-        <h2>本地缓存</h2>
-        <p>
-          缓存读过的科目余额表与序时账，再次打开同一份文件直接命中，不必重新解析。
-        </p>
-        <p className="cache-usage">
-          {cacheStat
-            ? `已缓存 ${formatBytes(cacheStat.bytes)}`
-            : cacheStatError
-              ? "占用读取失败"
-              : "读取中…"}
-        </p>
-        <label className="field">
-          <span>自动清理</span>
-          <select
-            value={cacheMode}
-            onChange={(e) => setCacheMode(e.target.value as typeof cacheMode)}
-          >
-            {/* 说明写进选项本身：选「每天」不是每天清空，是每天清掉没再用过的。 */}
-            <option value="daily">每天清理未使用的缓存</option>
-            <option value="weekly">每周清理未使用的缓存</option>
-            <option value="off">不自动清理</option>
-          </select>
-        </label>
-        <div className="actions">
+      {message && (
+        <div
+          role={saveFailed ? "alert" : "status"}
+          className={`settings-test-result ${saveFailed ? "failed" : "success"}`}
+        >
+          {message}
+        </div>
+      )}
+      {(section === 0 || section === 2) && (
+        <div className="settings-save-bar">
+          <span>配置修改后需保存；测试连接不会自动保存。</span>
           <button
-            className="secondary"
-            disabled={cacheBusy || cacheStat?.bytes === 0}
-            onClick={() => {
-              setCacheBusy(true);
-              setCacheMessage("");
-              void engineCall("cache.clear", {})
-                .then((v) => {
-                  const r = v as { removed: number; freed: number; failed: number };
-                  setCacheMessage(
-                    `已清理 ${r.removed} 个文件，释放 ${formatBytes(r.freed)}` +
-                      (r.failed ? `；${r.failed} 个正在使用，未清理` : ""),
-                  );
-                  return refreshCacheStat();
-                })
-                .catch((e) => setCacheMessage(String(e)))
-                .finally(() => setCacheBusy(false));
-            }}
+            className="primary"
+            disabled={saving || testingLlm}
+            onClick={() => void save()}
           >
-            {cacheBusy
-              ? "清理中…"
-              : cacheStat && cacheStat.bytes > 0
-                ? `立刻清理全部（${formatBytes(cacheStat.bytes)}）`
-                : "立刻清理全部"}
+            {saving ? "保存中…" : "保存配置"}
           </button>
         </div>
-        {cacheMessage && <p className="cache-result">{cacheMessage}</p>}
-      </section>
-      <section className="list-card" style={{ marginTop: 18 }}>
-        <h2>AudiPick 旧数据迁移</h2>
-        <p>
-          先在旧 AudiPick 配置页导出迁移备份，再在这里导入。导入按项目 ID
-          去重，不会删除旧数据。
-        </p>
-        <div className="input-with-button">
-          <input
-            value={backupPath}
-            readOnly
-            placeholder="选择 AudiPick迁移备份.json"
-          />
-          <button
-            className="browse"
-            onClick={() =>
-              void pickPath("file", "选择 AudiPick 迁移备份", ["json"]).then(
-                (v) => setBackupPath(typeof v === "string" ? v : ""),
-              )
-            }
-          >
-            浏览
-          </button>
-        </div>
-        <div className="actions">
-          <button
-            className="secondary"
-            disabled={!backupPath}
-            onClick={() =>
-              void legacyImport(backupPath)
-                .then((r) => setMessage(JSON.stringify(r)))
-                .catch((e) => setMessage(String(e)))
-            }
-          >
-            导入并校验
-          </button>
-        </div>
-      </section>
-      {message && <div className="error-box">{message}</div>}
-      <div className="actions">
-        <button className="primary" onClick={() => void save()}>
-          保存配置
-        </button>
-      </div>
-    </>
+      )}
+    </div>
   );
 }
+
 function SimplePage({ title, text }: { title: string; text: string }) {
   return (
     <>

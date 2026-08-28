@@ -316,9 +316,7 @@ mod tests {
         // std::fs::canonicalize 在 Windows 上返回 `\\?\` 前缀路径，
         // Excel COM 原样打开会报 0x800A03EC，必须剥掉前缀再传。
         assert_eq!(
-            excel_friendly_path(Path::new(
-                r"\\?\C:\Users\lenovo\AppData\Local\Temp\甲.xlsx"
-            )),
+            excel_friendly_path(Path::new(r"\\?\C:\Users\lenovo\AppData\Local\Temp\甲.xlsx")),
             r"C:\Users\lenovo\AppData\Local\Temp\甲.xlsx"
         );
         assert_eq!(

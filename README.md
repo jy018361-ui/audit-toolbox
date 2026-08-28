@@ -13,7 +13,7 @@
 
 - **汇兑损益测算**（`fx_audit`）：已实现与未实现汇兑损益重算、央行汇率及 TB 勾稽。
 - **存款利息收入测算**（`deposit_interest`）：识别货币资金科目，按序时账还原逐月余额，以月均余额×存款利率重算利息并与 TB 利息收入勾稽。
-- **借款利息审计测算**（`loan_interest`）：借款台账直接重算，或以 TB＋JE 还原本金变动并补充固定/浮动利率。
+- **借款利息测算**（`loan_interest`）：借款台账直接重算，或以 TB＋JE 还原本金变动并补充固定/浮动利率。
 - **FA 底稿生成**（可折叠子组）：**FA List 匹配工具**（`fa_list`，双表匹配、透视与导出）、**折旧测算**（`fa_dep_calc`）、**折旧政策对比**（`fa_policy_compare`，含税法最低折旧年限参考）。
 - **看账工具**（可折叠子组）：**看账**（`kanzhang`，凭证导入、科目筛选、透视与导出）、**正负数凭证标记**（`je_sign_mark`，按批次标记目标科目的计提与冲销对冲）。
 - **AudiPick 智能合同审阅**（`audipick`）：合同 OCR、条款提取、PDF 定位与收入底稿。
@@ -24,7 +24,7 @@
 
 - **Excel 批量合并**（`Excel_Merger`）：文件/文件夹队列、纵横合并、多 Sheet 工作簿与格式保留。
 - **文件夹超链接清单**（`file_list_directory`）：导出分层目录与可点击文件超链接。
-- **回函 PDF 转 Excel**（`pdf_to_excel`）：文字版回函逐行转 Excel、表格自动提取、支持批量处理。
+- **PDF 转 Excel**（`pdf_to_excel`）：文字版回函逐行转 Excel、表格自动提取、支持批量处理。
 
 **运营工具**
 
@@ -34,7 +34,7 @@
 
 **公共能力**
 
-- **统一 Hub**：一个入口启动各子工具，统一的侧边栏导航、状态反馈、错误提示和任务中心。
+- **统一 Hub**：一个入口启动各子工具，统一的侧边栏导航、状态反馈、错误提示和工具内任务进度。
 - **统一账表引擎**：TB / JE 的表头识别、角色映射、形态判定、借贷方向与 LLM 复核共用一套内核（见下方「涉及 TB / JE 的功能」）。
 - **LLM 辅助能力**：可选配置 OpenAI 兼容接口，用于字段映射建议、映射复核和导出结果分析。
 
@@ -67,7 +67,7 @@ React 页面 → src/api.ts → Tauri invoke → src-tauri/src/lib.rs（命令�
 | 函证进度（`confirmation_progress`） | [tauri-app/src/ConfirmationProgressPage.tsx](tauri-app/src/ConfirmationProgressPage.tsx) | [tauri-app/src-tauri/src/confirmation.rs](tauri-app/src-tauri/src/confirmation.rs) |
 | Excel 合并（`Excel_Merger`） | [tauri-app/src/ExcelMergerPage.tsx](tauri-app/src/ExcelMergerPage.tsx) | [tauri-app/src-tauri/src/excel_merger.rs](tauri-app/src-tauri/src/excel_merger.rs) |
 | 文件目录（`file_list_directory`） | [tauri-app/src/FileListDirectoryPage.tsx](tauri-app/src/FileListDirectoryPage.tsx) · [tauri-app/src/fileListUi.ts](tauri-app/src/fileListUi.ts) | [tauri-app/src-tauri/src/file_list.rs](tauri-app/src-tauri/src/file_list.rs) |
-| 回函 PDF 转 Excel（`pdf_to_excel`） | [tauri-app/src/PdfToExcelPage.tsx](tauri-app/src/PdfToExcelPage.tsx) · [tauri-app/src/pdfToExcelUi.ts](tauri-app/src/pdfToExcelUi.ts) | [tauri-app/src-tauri/src/pdf_to_excel.rs](tauri-app/src-tauri/src/pdf_to_excel.rs) |
+| PDF 转 Excel（`pdf_to_excel`） | [tauri-app/src/PdfToExcelPage.tsx](tauri-app/src/PdfToExcelPage.tsx) · [tauri-app/src/pdfToExcelUi.ts](tauri-app/src/pdfToExcelUi.ts) | [tauri-app/src-tauri/src/pdf_to_excel.rs](tauri-app/src-tauri/src/pdf_to_excel.rs) |
 | AudiPick（`audipick`） | [tauri-app/src/AudiPickPage.tsx](tauri-app/src/AudiPickPage.tsx) · [tauri-app/src/audipickUi.ts](tauri-app/src/audipickUi.ts) | [tauri-app/src-tauri/src/audipick.rs](tauri-app/src-tauri/src/audipick.rs) |
 | Roll Forward（`audit_roll_forward`） | [tauri-app/src/RollForwardPage.tsx](tauri-app/src/RollForwardPage.tsx) · [tauri-app/src/rollForwardUi.ts](tauri-app/src/rollForwardUi.ts) | [tauri-app/src-tauri/src/roll_forward.rs](tauri-app/src-tauri/src/roll_forward.rs) |
 | WP 服务单（`wp_service_generator`） | [tauri-app/src/WpServicePage.tsx](tauri-app/src/WpServicePage.tsx) | [tauri-app/src-tauri/src/wp.rs](tauri-app/src-tauri/src/wp.rs) |
@@ -179,6 +179,10 @@ cargo test --manifest-path src-tauri/Cargo.toml fa::           # 单个模块
 - **阻断式校验的文案要说清"为什么不能继续"和"回到哪里处理"**（现有写法是"无法进入下一步／无法导出" + 指明区域），不要只弹一句"失败"。
 - **可选步骤要标明可选**，避免用户误以为必须完成。
 - **UI 调整原则**：优先改善信息层级、状态反馈、错误提示、窗口伸缩和操作效率，不改变既有业务流程。
+- **页面骨架**：独立工具页使用 `tool-page fx-page`，页头复用 `PageHeader`；同级功能区使用公共 `Card`，不要为单个页面另造一套页头或重复步骤导航。
+- **页内步骤导航**：多步工具在 `PageHeader` 下方统一使用 `StepIndicator` 横条（参照看账工具），不得以卡片上的“第一步／第二步”标签代替导航；侧栏总分折叠结构独立保留。
+- **同级卡片布局**：桌面宽度下，两块同级、短内容的输入或配置卡片优先左右双列排列（参照“两列模糊匹配”）；窄屏自动降为上下单列，阅读与操作顺序保持一致。
+- **宽内容独占整行**：数据预览、字段映射、结果表格和导出区域需要横向空间，应跨满整行，不挤进半宽卡片。
 
 ## 五、提交前自查清单
 
@@ -211,6 +215,14 @@ cargo test --manifest-path src-tauri/Cargo.toml fa::           # 单个模块
 > 写 `*_PARITY.md` 有两条从教训里来的约定：**不要在文档里写死测试数量**（写运行命令，每加一个测试就过期一次）；**不要把"已实现"写成"已保留全部行为"**（拿不准就逐项列"保留了什么／没保留什么"）。
 
 ## 打包发布
+
+### 设置页与更新说明
+
+- 设置分为「AI 与 OCR」「界面主题」「缓存清理」；「软件更新」入口位于设置标题右侧，每次点击都会重新检查。
+- 可安装版本仍由 Tauri updater 的 `latest.json` 判断并验证签名；更新说明由 Rust 只读访问同一仓库的 GitHub Releases，按语义版本汇总 `(当前版本, 目标版本]` 内全部已发布说明。没有可安装新版本时显示当前版本说明。
+- GitHub Release 缺失说明或只有占位文案时，补充整个升级区间的提交标题并标注来源；网络失败、限流、标签不存在、分页上限均明确提示，不视为「没有变更」。无需配置 GitHub Token，也不上传客户文件或本机设置。
+- `.github/workflows/release.yml` 使用 GitHub 自动生成发布说明；发布者仍应提供有意义的 PR/提交标题或人工补充 Release 内容。不会由 LLM 猜测更新了什么，旧版未写的功能说明不能凭空还原。
+- 验证：`npx vitest run src/AppNavigationSettings.test.tsx src/api.test.ts --exclude='**/.claude/**'`；`cargo test --manifest-path src-tauri/Cargo.toml update_notes:: --lib`。只读联网测试另加 `github_live_release_notes -- --ignored`；下载安装需使用签名发布版单独验收。
 
 一键打包（推荐，已修复可直接使用）：
 

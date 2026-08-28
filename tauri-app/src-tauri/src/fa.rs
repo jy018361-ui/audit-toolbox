@@ -93,6 +93,9 @@ pub(crate) fn run_job(
 ) -> Result<Value, AppError> {
     pause.wait()?;
     match method {
+        "fa.tbje_preview" | "fa.tbje_export" => {
+            return crate::fa_tbje::run_job(method, params, progress, cancel, pause);
+        }
         "fa.match" | "fa.preview" => {
             let result = preview(params, progress, cancel, pause);
             pause.wait()?;
@@ -555,7 +558,10 @@ fn column_value_set(table: &Table, column: &str) -> Option<std::collections::BTr
 }
 
 /// 重叠率 = 交集 / min(|A|,|B|)。任一侧为空集时返回 0（没有证据视为不重叠）。
-fn value_overlap_ratio(a: &std::collections::BTreeSet<String>, b: &std::collections::BTreeSet<String>) -> f64 {
+fn value_overlap_ratio(
+    a: &std::collections::BTreeSet<String>,
+    b: &std::collections::BTreeSet<String>,
+) -> f64 {
     let smaller = a.len().min(b.len());
     if smaller == 0 {
         return 0.0;
@@ -607,7 +613,11 @@ fn best_replacement_category_column(
             continue;
         };
         let ratio = value_overlap_ratio(&values, reference);
-        if ratio >= 0.5 && best.as_ref().is_none_or(|(_, best_ratio)| ratio > *best_ratio) {
+        if ratio >= 0.5
+            && best
+                .as_ref()
+                .is_none_or(|(_, best_ratio)| ratio > *best_ratio)
+        {
             best = Some((header.clone(), ratio));
         }
     }
@@ -6590,7 +6600,12 @@ mod tests {
         assert_eq!(item["file_side"], "file2");
         assert_eq!(item["suggested_column"], "资产类型描述");
         assert_eq!(item["action"], "review");
-        assert!(item["reason"].as_str().unwrap().contains("疑似期末类别映射错列"));
+        assert!(
+            item["reason"]
+                .as_str()
+                .unwrap()
+                .contains("疑似期末类别映射错列")
+        );
     }
     #[test]
     fn local_category_mismatch_keeps_quiet_when_categories_overlap() {

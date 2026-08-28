@@ -6,6 +6,7 @@ import {
   pickPath,
   settingsGet,
   settingsSet,
+  updateReleaseNotes,
 } from "./api";
 
 describe("browser preview API fallbacks", () => {
@@ -21,5 +22,8 @@ describe("browser preview API fallbacks", () => {
     await expect(historyGet()).resolves.toEqual([]);
     await expect(jobCancel("preview-job")).resolves.toBe(false);
     await expect(pickPath("file", "选择文件")).resolves.toBeNull();
+    await expect(updateReleaseNotes()).rejects.toThrow(
+      "浏览器预览模式不能读取版本更新说明",
+    );
   });
 });

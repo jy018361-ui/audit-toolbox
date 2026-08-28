@@ -40,10 +40,7 @@ fn probe_custom_dataset() {
     let je_i = insp(&je, "fx.inspect_je");
     println!(
         "JE {} sheet={} headerRow={} headerDepth={}",
-        je_name,
-        je_i["sheet"],
-        je_i["headerRow"],
-        je_i["headerDepth"]
+        je_name, je_i["sheet"], je_i["headerRow"], je_i["headerDepth"]
     );
     println!(
         "JE 表头: {}",
@@ -61,11 +58,7 @@ fn probe_custom_dataset() {
     }
     println!(
         "TB {} sheet={} headerRow={} headerDepth={} uniformCurrency={}",
-        tb_name,
-        tb_i["sheet"],
-        tb_i["headerRow"],
-        tb_i["headerDepth"],
-        tb_i["uniformCurrency"]
+        tb_name, tb_i["sheet"], tb_i["headerRow"], tb_i["headerDepth"], tb_i["uniformCurrency"]
     );
     println!(
         "TB 表头: {}",
@@ -97,10 +90,7 @@ fn probe_custom_dataset() {
     // 用友导出的凭证号（记-0001）每月重复，必须用含日期的唯一码当凭证标识，
     // 否则跨月同号凭证会被并成一张，凭证结构识别全错。
     let je_headers = je_i["headers"].as_array().cloned().unwrap_or_default();
-    if je_headers
-        .iter()
-        .any(|h| h.as_str() == Some("唯一码"))
-    {
+    if je_headers.iter().any(|h| h.as_str() == Some("唯一码")) {
         je_map["id"] = serde_json::json!(["唯一码"]);
     }
     // 公司代码：优先从 JE 预览行的映射列取值；取不到就退回 TB 的 entity 映射值。
@@ -108,10 +98,18 @@ fn probe_custom_dataset() {
     if let Some(cols) = je_map["entity"].as_array() {
         let idx = cols[0]
             .as_str()
-            .and_then(|name| je_i["headers"].as_array().map(|h| h.iter().position(|x| x == name)))
+            .and_then(|name| {
+                je_i["headers"]
+                    .as_array()
+                    .map(|h| h.iter().position(|x| x == name))
+            })
             .and_then(|p| p);
         if let (Some(preview), Some(idx)) = (je_i["preview"].as_array(), idx) {
-            if let Some(value) = preview.first().and_then(|r| r.get(idx)).and_then(Value::as_str) {
+            if let Some(value) = preview
+                .first()
+                .and_then(|r| r.get(idx))
+                .and_then(Value::as_str)
+            {
                 entity_code = value.trim().to_string();
             }
         }
@@ -120,7 +118,11 @@ fn probe_custom_dataset() {
             .as_array()
             .and_then(|h| h.iter().position(|x| x.as_str() == Some(value)));
         if let (Some(preview), Some(idx)) = (je_i["preview"].as_array(), idx) {
-            if let Some(value) = preview.first().and_then(|r| r.get(idx)).and_then(Value::as_str) {
+            if let Some(value) = preview
+                .first()
+                .and_then(|r| r.get(idx))
+                .and_then(Value::as_str)
+            {
                 entity_code = value.trim().to_string();
             }
         }
@@ -131,7 +133,11 @@ fn probe_custom_dataset() {
                 .as_array()
                 .and_then(|h| h.iter().position(|x| x.as_str() == Some(value)));
             if let (Some(preview), Some(idx)) = (tb_i["preview"].as_array(), idx) {
-                if let Some(v) = preview.first().and_then(|r| r.get(idx)).and_then(Value::as_str) {
+                if let Some(v) = preview
+                    .first()
+                    .and_then(|r| r.get(idx))
+                    .and_then(Value::as_str)
+                {
                     entity_code = v.trim().to_string();
                 }
             }
@@ -272,10 +278,8 @@ fn probe_custom_dataset() {
                     .collect::<String>(),
             )
             .or_default() += 1;
-        *booked_by_class
-            .entry(class)
-            .or_insert_with(|| 0.0)
-            += item["bookedFxGainLoss"].as_f64().unwrap_or(0.0);
+        *booked_by_class.entry(class).or_insert_with(|| 0.0) +=
+            item["bookedFxGainLoss"].as_f64().unwrap_or(0.0);
     }
     println!("   按分类: {by_class:?}");
     println!("   按测算状态: {by_status:?}");
@@ -301,9 +305,7 @@ fn probe_custom_dataset() {
             .iter()
             .filter(|item| item["unrealizedGainLoss"].as_f64().unwrap_or(0.0).abs() > 0.01)
             .collect();
-        top.sort_by_key(|item| {
-            -(item["unrealizedGainLoss"].as_f64().unwrap_or(0.0).abs() as i64)
-        });
+        top.sort_by_key(|item| -(item["unrealizedGainLoss"].as_f64().unwrap_or(0.0).abs() as i64));
         println!("   金额前 10 行：");
         for item in top.into_iter().take(10) {
             println!(
@@ -326,8 +328,7 @@ fn probe_custom_dataset() {
                         .take(40)
                         .collect::<String>(),
                 )
-                .or_insert_with(|| 0.0)
-                += item["unrealizedGainLoss"].as_f64().unwrap_or(0.0);
+                .or_insert_with(|| 0.0) += item["unrealizedGainLoss"].as_f64().unwrap_or(0.0);
         }
         let mut ranked: Vec<(String, f64)> = by_account.into_iter().collect();
         ranked.sort_by_key(|(_, value)| -(value.abs() as i64));

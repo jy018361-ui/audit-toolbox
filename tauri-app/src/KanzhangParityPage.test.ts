@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   accountColumns,
   activeAmountScheme,
+  applyAllPrimaryAccountBatches,
+  applyAuditFocusPresetBatches,
   applyLedgerReviews,
   asShuttleZone,
   defaultKanzhangOutputName,
@@ -383,6 +385,68 @@ describe("金额口径方案互斥", () => {
 });
 
 describe("看账其他交互口径", () => {
+  it("审计关注预设排除货币资金并按名称正则和独立编码列生成八个批次", () => {
+    const values = [
+      "1002010001-银行存款-美元户", "1601010001-固定资产-设备", "1701010001-Intangible software",
+      "1801000001-长期待摊费用-装修", "6602050001-管理费用-差旅", "6601050001-Selling expense",
+      "6603010001-财务费用-利息", "2202010001-应付账款-A供应商", "2001010001-短期借款-银行",
+      // 名称没有关键词，仍应只凭独立编码列命中；显示文本里的 2202 不可影响别项。
+      "客户备注-2202专项", "其他科目",
+    ];
+    const codes = ["1002010001", "1601010001", "1701010001", "1801000001", "6602050001", "6601050001", "6603010001", "2202010001", "2001010001", "9999", ""];
+    const applied = applyAuditFocusPresetBatches([{ name: "人工批次", accounts: ["其他科目"] }], values, codes, []);
+    expect(applied.batches).toHaveLength(9);
+    expect(applied.batches[0]).toEqual({ name: "人工批次", accounts: ["其他科目"] });
+    expect(Object.fromEntries(applied.batches.slice(1).map(batch => [batch.presetId, batch.accounts]))).toEqual({
+      fixed_assets: [values[1]], intangible_assets: [values[2]], long_term_prepaid: [values[3]],
+      administrative_expense: [values[4]], selling_expense: [values[5]], financial_expense: [values[6]],
+      accounts_payable: [values[7]], short_term_loans: [values[8]],
+    });
+  });
+
+  it("重复套用更新预设、保留人工批次并尊重剔除项", () => {
+    const first = applyAuditFocusPresetBatches([{ name: "人工批次", accounts: ["人工科目"] }], ["银行存款-A", "应付账款-A"], ["1002", "2202"], ["应付账款-A"]);
+    const second = applyAuditFocusPresetBatches(first.batches, ["银行存款-B"], ["1002"], []);
+    expect(second.batches).toHaveLength(9);
+    expect(second.summary.created).toBe(0);
+    expect(second.summary.updated).toBe(8);
+    expect(second.batches[0]).toEqual({ name: "人工批次", accounts: ["人工科目"] });
+    expect(second.batches.some(batch => batch.accounts.includes("银行存款-B"))).toBe(false);
+    expect(first.summary.skippedExcludes).toEqual(["应付账款-A"]);
+    expect(first.batches.find(batch => batch.presetId === "accounts_payable")?.accounts).toEqual([]);
+  });
+
+  it("全科目口径按一级科目分批并排除货币资金", () => {
+    const values = ["100201-货币资金-银行存款", "160101-固定资产-机器", "160102-固定资产-车辆", "220201-应付账款-A", "660201-管理费用-差旅"];
+    const codes = ["100201", "160101", "160102", "220201", "660201"];
+    const primaryNames = ["货币资金", "固定资产", "固定资产", "应付账款", "管理费用"];
+    const applied = applyAllPrimaryAccountBatches([{name:"人工",accounts:["自选"]}], values, codes, primaryNames, []);
+    expect(applied.batches[0]).toEqual({name:"人工",accounts:["自选"]});
+    expect(applied.summary.groups.map(group=>[group.name,group.accounts.length])).toEqual([
+      ["全科目｜固定资产",2], ["全科目｜管理费用",1], ["全科目｜应付账款",1],
+    ]);
+    expect(applied.summary.skippedCash).toEqual([values[0]]);
+    expect(applied.batches.some(batch=>batch.accounts.includes(values[0]))).toBe(false);
+  });
+
+  it("重复生成全科目口径会刷新并移除过期的自动批次", () => {
+    const first=applyAllPrimaryAccountBatches([], ["160101-固定资产", "220201-应付账款"], ["160101", "220201"], ["固定资产", "应付账款"], []);
+    const second=applyAllPrimaryAccountBatches([...first.batches,{name:"人工",accounts:["自选"]}], ["160102-固定资产"], ["160102"], ["固定资产"], []);
+    expect(second.summary).toMatchObject({created:0,updated:1,removed:1});
+    expect(second.batches.find(batch=>batch.presetId==="all_primary:固定资产")?.accounts).toEqual(["160102-固定资产"]);
+    expect(second.batches.some(batch=>batch.presetId==="all_primary:应付账款")).toBe(false);
+    expect(second.batches.some(batch=>batch.name==="人工")).toBe(true);
+  });
+
+  it("关注科目与全科目是互斥口径，切换时只保留手工批次", () => {
+    const focus=applyAuditFocusPresetBatches([{name:"人工",accounts:["自选"]}], ["固定资产"], ["1601"], []);
+    const all=applyAllPrimaryAccountBatches(focus.batches, ["固定资产", "应付账款"], ["1601", "2202"], ["固定资产", "应付账款"], []);
+    expect(all.batches.some(batch=>batch.presetId==="fixed_assets")).toBe(false);
+    const focusAgain=applyAuditFocusPresetBatches(all.batches, ["固定资产"], ["1601"], []);
+    expect(focusAgain.batches.some(batch=>batch.presetId?.startsWith("all_primary:"))).toBe(false);
+    expect(focusAgain.batches.some(batch=>batch.name==="人工")).toBe(true);
+  });
+
   it("变更清单用中文角色名，不暴露内部键名", () => {
     expect(KZ_ROLE_LABELS.summary).toBe("摘要");
     expect(KZ_ROLE_LABELS.direction).toBe("方案A-方向");

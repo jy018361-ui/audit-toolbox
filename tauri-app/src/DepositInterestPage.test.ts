@@ -3,7 +3,7 @@ import {
   depositAutoRate, depositDropTargetInside, depositEffectiveTierRate, depositFirstTierOf,
   depositMissingRequired, depositMonthlyAverage, depositMonthlyInterest, depositRateAboveBenchmark,
   depositPercentToRate, depositRateOutOfPractice, depositRateToPercent, depositReportStart,
-  depositTermsOf, depositJeLayout, depositSignOptions, JE_LAYOUT_LABEL,
+  depositTermsOf, depositJeLayout, JE_LAYOUT_LABEL,
 } from "./DepositInterestPage";
 
 describe("deposit interest upload and mapping parity", () => {
@@ -164,9 +164,9 @@ describe("rates are shown as percentages, stored as decimals", () => {
   });
 });
 
-describe("序时账的 5 种金额形态", () => {
-  // 布局由映射了哪几列决定，不是用户选的；符号记法才是可选项。
-  // 两者相乘就是看账工具说的 5 种：借贷分列×2、金额＋方向×2、单一金额列×1。
+describe("序时账的金额形态", () => {
+  // 布局由映射了哪几列决定，不是用户选的；符号记法也不再让用户选——
+  // 后端按凭证配平等数据形态自动判定，判定结论与依据写进测算结果。
   it("按映射的列判断布局", () => {
     // 角色名与统一映射内核一致（4800 样例就是 金额＋方向列）。
     expect(depositJeLayout({functionalDebit: "借方金额", functionalCredit: "贷方金额"})).toBe("split");
@@ -174,32 +174,10 @@ describe("序时账的 5 种金额形态", () => {
     expect(depositJeLayout({functionalAmount: "本位币金额"})).toBe("single");
     expect(depositJeLayout({date: "记账日期"})).toBe("none");
   });
-  it("借贷分列时只谈两列的正负，不提方向列", () => {
-    const options = depositSignOptions("split");
-    expect(options.map(([value]) => value)).toEqual(["unsigned", "signed"]);
-    expect(options[0][1]).toContain("两列都是正数");
-    expect(options[1][1]).toContain("贷方列是负数");
-    expect(options.every(([, label]) => !label.includes("方向"))).toBe(true);
-  });
-  it("金额＋方向列时措辞要提方向列，不能说成借贷分列", () => {
-    const options = depositSignOptions("directed");
-    expect(options.map(([value]) => value)).toEqual(["unsigned", "signed"]);
-    expect(options[0][1]).toContain("借贷方向列");
-    expect(options.every(([, label]) => !label.includes("借贷分列"))).toBe(true);
-  });
-  it("单一金额列没得选：不带符号就配不出借贷", () => {
-    expect(depositSignOptions("single")).toEqual([]);
-    expect(depositSignOptions("none")).toEqual([]);
-  });
-  it("三种布局各有中文名，合起来 5 种形态", () => {
+  it("三种布局各有中文名", () => {
     expect(JE_LAYOUT_LABEL.split).toBe("借贷分列");
     expect(JE_LAYOUT_LABEL.directed).toBe("金额＋方向列");
     expect(JE_LAYOUT_LABEL.single).toBe("单一金额列");
-    const forms = (["split", "directed", "single"] as const)
-      .flatMap((layout) => {
-        const options = depositSignOptions(layout);
-        return options.length ? options.map(([value]) => `${layout}:${value}`) : [`${layout}:signed`];
-      });
-    expect(forms).toHaveLength(5);
+    expect(JE_LAYOUT_LABEL.none).toBe("尚未映射金额字段");
   });
 });

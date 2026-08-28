@@ -24,9 +24,7 @@ use std::{
 use crate::AppError;
 use crate::excel_merger::PauseCheckpoint;
 use crate::ledger_mapping;
-use crate::ledger_mapping::{
-    SignConvention, SignEvidence, header_index, normalize_name,
-};
+use crate::ledger_mapping::{SignConvention, SignEvidence, header_index, normalize_name};
 
 const TS_MAX_PIVOT_COLUMN_VALUES: usize = 180;
 
@@ -334,10 +332,7 @@ fn kanzhang_account_values(params: Value) -> Result<Value, AppError> {
             None,
         ));
     }
-    let keyword = params
-        .get("keyword")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let keyword = params.get("keyword").and_then(Value::as_str).unwrap_or("");
     // 按科目编码前缀批量筛选：`6401,6603` 选出这两段下的全部明细科目。
     let prefixes = parse_code_prefixes(
         params
@@ -351,14 +346,51 @@ fn kanzhang_account_values(params: Value) -> Result<Value, AppError> {
         .unwrap_or(1_000)
         .clamp(1, 20_000) as usize;
     let (values, codes, total) = account_values(&table, &mapping, keyword, &prefixes);
+    let primary_names = primary_account_names(&table, &mapping, &values);
+    // 预设批次需要在一次点击中覆盖全部唯一科目；普通列表仍保留 20,000 的保护上限。
+    let all = params.get("all").and_then(Value::as_bool).unwrap_or(false);
+    let take = if all { total } else { limit };
     Ok(json!({
         "engine":"rust-polars",
-        "values":values.into_iter().take(limit).collect::<Vec<_>>(),
+        "values":values.into_iter().take(take).collect::<Vec<_>>(),
         // 与 values 同序一一对应，供前端按编码段做本地前缀匹配。
-        "codes":codes.into_iter().take(limit).collect::<Vec<_>>(),
+        "codes":codes.into_iter().take(take).collect::<Vec<_>>(),
+        "primaryNames":primary_names.into_iter().take(take).collect::<Vec<_>>(),
         "total":total,
-        "truncated":total>limit,
+        "truncated":total>take,
     }))
+}
+
+/// 与显示科目一一对应的一级科目名称。多级名称映射时取第一列；只有一列时
+/// 仍把原值交给前端，再由前端按常见层级分隔符取一级名称。
+fn primary_account_names(table: &Table, mapping: &LedgerMapping, values: &[String]) -> Vec<String> {
+    let indexes = mapping
+        .account_columns()
+        .into_iter()
+        .filter_map(|name| header_index(&table.headers, name))
+        .collect::<Vec<_>>();
+    let primary_index = mapping
+        .account_name
+        .first()
+        .and_then(|name| header_index(&table.headers, name));
+    let mut names = HashMap::<String, String>::new();
+    if let Some(primary_index) = primary_index {
+        for row in &table.rows {
+            let value = joined_account(row, &indexes);
+            if value.trim().is_empty() {
+                continue;
+            }
+            let primary = row
+                .get(primary_index)
+                .map(|value| value.trim().to_owned())
+                .unwrap_or_default();
+            names.entry(value).or_insert(primary);
+        }
+    }
+    values
+        .iter()
+        .map(|value| names.get(value).cloned().unwrap_or_default())
+        .collect()
 }
 
 fn validate_kanzhang_mapping(params: Value) -> Result<Value, AppError> {
@@ -1561,6 +1593,87 @@ fn match_je_rows(
     Ok((status, direct_pairs, cross_pairs))
 }
 
+/// 固定资产 TB+JE 模式复用的公共视图。这里只是把「正负数智能标记」
+/// 已有的金额规范化和 `match_je_rows` 暴露给其他业务模块，不另写匹配规则。
+#[derive(Debug)]
+pub(crate) struct NetZeroView {
+    pub(crate) net: Vec<f64>,
+    pub(crate) status: Vec<String>,
+    pub(crate) direct_pairs: usize,
+    pub(crate) cross_pairs: usize,
+    pub(crate) sign_basis: String,
+}
+
+pub(crate) fn net_zero_view(
+    rows: &[Vec<String>],
+    headers: &[String],
+    mapping: &LedgerMapping,
+    targets: &[String],
+    cancel: &AtomicBool,
+) -> Result<NetZeroView, AppError> {
+    validate_mapping_required(mapping)?;
+    let id_indexes = ledger_id_indexes(headers, mapping);
+    let account_indexes = mapping
+        .account_columns()
+        .into_iter()
+        .filter_map(|name| header_index(headers, name))
+        .collect::<Vec<_>>();
+    let report = detect_sign_convention(rows, headers, mapping, &id_indexes);
+    let convention = report.detected_convention().ok_or_else(|| {
+        error(
+            "AMOUNT_SCHEME_UNDETERMINED",
+            format!("无法自动判断序时账金额记法：{}", report.basis),
+            None,
+        )
+    })?;
+    let amounts = ledger_amounts(rows, headers, mapping, &id_indexes, Some(convention));
+    let target_set = targets
+        .iter()
+        .map(|value| normalize_account(value))
+        .filter(|value| !value.is_empty())
+        .collect::<HashSet<_>>();
+    let (status, direct_pairs, cross_pairs) = match_je_rows(
+        rows,
+        headers,
+        &amounts,
+        mapping,
+        &id_indexes,
+        &account_indexes,
+        &target_set,
+        &HashSet::new(),
+        cancel,
+    )?;
+    Ok(NetZeroView {
+        net: amounts.net,
+        status,
+        direct_pairs,
+        cross_pairs,
+        sign_basis: report.basis,
+    })
+}
+
+/// 与看账输出完全相同的凭证键和科目键，避免 FA 业务层自行拼接。
+pub(crate) fn ledger_row_keys(
+    rows: &[Vec<String>],
+    headers: &[String],
+    mapping: &LedgerMapping,
+) -> (Vec<String>, Vec<String>) {
+    let id_indexes = ledger_id_indexes(headers, mapping);
+    let account_indexes = mapping
+        .account_columns()
+        .into_iter()
+        .filter_map(|name| header_index(headers, name))
+        .collect::<Vec<_>>();
+    (
+        rows.iter()
+            .map(|row| voucher_key(row, &id_indexes))
+            .collect(),
+        rows.iter()
+            .map(|row| joined_account(row, &account_indexes))
+            .collect(),
+    )
+}
+
 fn voucher_infos(
     rows: &[Vec<String>],
     headers: &[String],
@@ -1574,7 +1687,10 @@ fn voucher_infos(
     // 凭证按「在底稿里第一次出现」的顺序排列，不能用 BTreeMap 的字典序：
     // 旧版的归类是两阶段并查集，谁先出现谁就当基准组的种子，顺序会直接改变归并结果。
     let mut order = Vec::<String>::new();
-    let mut vouchers = HashMap::<String, BTreeMap<String, f64>>::new();
+    let mut voucher_keys = Vec::new();
+    let mut account_keys = Vec::new();
+    let mut kept_amounts = Vec::new();
+    let mut seen = HashSet::new();
     let mut summaries = HashMap::<String, Vec<String>>::new();
     let mut month_nets = HashMap::<String, BTreeMap<String, BTreeMap<String, f64>>>::new();
     let summary_index = mapping
@@ -1591,11 +1707,12 @@ fn voucher_infos(
             continue;
         }
         let account = joined_account(row, account_indexes);
-        let bucket = vouchers.entry(id.clone()).or_insert_with(|| {
+        if seen.insert(id.clone()) {
             order.push(id.clone());
-            BTreeMap::new()
-        });
-        *bucket.entry(account.clone()).or_default() += *amount;
+        }
+        voucher_keys.push(id.clone());
+        account_keys.push(account.clone());
+        kept_amounts.push(*amount);
         if let Some(index) = summary_index {
             let value = row.get(index).map(|value| value.trim()).unwrap_or("");
             let bucket = summaries.entry(id.clone()).or_default();
@@ -1616,6 +1733,7 @@ fn voucher_infos(
                 .or_default() += *amount;
         }
     }
+    let mut vouchers = voucher_account_nets(&voucher_keys, &account_keys, &kept_amounts);
     order
         .into_iter()
         .filter_map(|id| {
@@ -1651,6 +1769,23 @@ fn voucher_infos(
             })
         })
         .collect()
+}
+
+/// 看账与固定资产共用的完整凭证逐科目净额。保留零净额，保持输入累加顺序。
+pub(crate) fn voucher_account_nets(
+    voucher_keys: &[String],
+    account_keys: &[String],
+    amounts: &[f64],
+) -> HashMap<String, BTreeMap<String, f64>> {
+    let mut vouchers = HashMap::<String, BTreeMap<String, f64>>::new();
+    for ((id, account), amount) in voucher_keys.iter().zip(account_keys).zip(amounts) {
+        *vouchers
+            .entry(id.clone())
+            .or_default()
+            .entry(account.clone())
+            .or_default() += *amount;
+    }
+    vouchers
 }
 
 fn build_voucher_pivot_rust(
@@ -2401,7 +2536,11 @@ fn account_values(
 /// 会把科目名称里恰好含 6401 的科目也拉进来。没有映射编码列时退回比对显示值
 /// 的开头，让只有名称列的账也能用这个筛选。
 pub(crate) fn matches_code_prefix(code: &str, display: &str, prefixes: &[String]) -> bool {
-    let target = if code.trim().is_empty() { display } else { code };
+    let target = if code.trim().is_empty() {
+        display
+    } else {
+        code
+    };
     let target = target.trim().to_lowercase();
     prefixes.iter().any(|prefix| {
         let prefix = prefix.trim().to_lowercase();
@@ -2425,7 +2564,11 @@ fn mapped_roles(mapping: &LedgerMapping) -> std::collections::HashSet<&'static s
     if !mapping.id.is_empty() {
         out.insert("id");
     }
-    if mapping.account_code.as_deref().is_some_and(|v| !v.trim().is_empty()) {
+    if mapping
+        .account_code
+        .as_deref()
+        .is_some_and(|v| !v.trim().is_empty())
+    {
         out.insert("accountCode");
     }
     if mapping.account_name.iter().any(|v| !v.trim().is_empty()) {
@@ -3987,7 +4130,10 @@ fn detect_sign_convention(
             votes, evidence.signed_votes, evidence.unsigned_votes
         )
     } else {
-        evidence.note.clone().unwrap_or_else(|| "金额字段未映射。".into())
+        evidence
+            .note
+            .clone()
+            .unwrap_or_else(|| "金额字段未映射。".into())
     };
     SignReport {
         scheme: evidence.scheme,
@@ -4150,7 +4296,6 @@ fn validate_mapping_required(m: &LedgerMapping) -> Result<(), AppError> {
     }
     Ok(())
 }
-
 
 fn normalize_headers(row: &[String], width: usize) -> Vec<String> {
     let mut used = HashMap::<String, usize>::new();
@@ -4419,7 +4564,10 @@ fn cache_clear(_params: Value) -> Result<Value, AppError> {
 /// 清的是**超过一个周期没用过的**缓存，不是无差别清空：今天刚用过的表
 /// 明天大概率还要用，连它一起删等于把缓存关掉。
 fn cache_sweep(params: Value) -> Result<Value, AppError> {
-    let mode = params.get("mode").and_then(Value::as_str).unwrap_or("weekly");
+    let mode = params
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("weekly");
     let period_days = match mode {
         "off" => {
             return Ok(json!({"removed":0,"freed":0,"skipped":true,"reason":"已关闭自动清理"}));
@@ -4972,8 +5120,14 @@ fn export_je_mark(
         );
         let filtered = filter_ledger_rows(&table, &mapping, &batch.accounts, &[])?;
         progress("match", 3, 5, "正在做正负数智能匹配…");
-        let analysis =
-            analyze_je_mark(&table, &mapping, &filtered, &batch.accounts, resolved, cancel)?;
+        let analysis = analyze_je_mark(
+            &table,
+            &mapping,
+            &filtered,
+            &batch.accounts,
+            resolved,
+            cancel,
+        )?;
         let unmatched = analysis
             .rows
             .iter()
@@ -5111,7 +5265,10 @@ mod tests {
         ];
         let report = build(rows);
         assert!(!report.filtered, "两边分录都在，不是被筛过");
-        assert!(report.key_suspect, "配不平且几乎没有单边，应怀疑凭证识别字段");
+        assert!(
+            report.key_suspect,
+            "配不平且几乎没有单边，应怀疑凭证识别字段"
+        );
     }
 
     #[test]
@@ -5143,19 +5300,19 @@ mod tests {
 
         // 距上次清理不足一个周期就跳过——前端每小时来问一次也只会真跑一次。
         let just_now = chrono::Utc::now().timestamp();
-        let fresh = cache_sweep(json!({"mode":"daily","lastCleanup":just_now}))
-            .expect("daily 不该报错");
+        let fresh =
+            cache_sweep(json!({"mode":"daily","lastCleanup":just_now})).expect("daily 不该报错");
         assert_eq!(fresh["skipped"], true, "{fresh:?}");
 
         // 超过一个周期就执行，并回一个新的时间戳供前端存回设置。
         let long_ago = just_now - 30 * 86_400;
-        let due = cache_sweep(json!({"mode":"weekly","lastCleanup":long_ago}))
-            .expect("weekly 不该报错");
+        let due =
+            cache_sweep(json!({"mode":"weekly","lastCleanup":long_ago})).expect("weekly 不该报错");
         assert_eq!(due["skipped"], false, "{due:?}");
         assert!(due["cleanedAt"].as_i64().is_some_and(|v| v >= just_now));
         // 认不出的模式按每周处理，不能因为设置里存了脏值就不清理。
-        let fallback = cache_sweep(json!({"mode":"随便","lastCleanup":long_ago}))
-            .expect("未知模式不该报错");
+        let fallback =
+            cache_sweep(json!({"mode":"随便","lastCleanup":long_ago})).expect("未知模式不该报错");
         assert_eq!(fallback["mode"], "随便");
         assert_eq!(fallback["skipped"], false);
     }
@@ -5173,12 +5330,28 @@ mod tests {
     fn 编码前缀只比编码段不比整串() {
         // 关键的坑：科目值是「编码-名称」拼接串，按第一个连字符切开是不行的——
         // Oracle 的段式科目编码本身就含连字符，切出来的 `01` 毫无意义。
-        assert!(matches_code_prefix("01-1002-000", "01-1002-000-银行存款", &["01-1002".into()]));
-        assert!(matches_code_prefix("6401050002", "6401050002-营业成本-运费", &["6401".into()]));
+        assert!(matches_code_prefix(
+            "01-1002-000",
+            "01-1002-000-银行存款",
+            &["01-1002".into()]
+        ));
+        assert!(matches_code_prefix(
+            "6401050002",
+            "6401050002-营业成本-运费",
+            &["6401".into()]
+        ));
         // 名称里含 6401 但编码不是 6401 开头的，不该被拉进来。
-        assert!(!matches_code_prefix("2241110001", "2241110001-其他应付款-6401专项", &["6401".into()]));
+        assert!(!matches_code_prefix(
+            "2241110001",
+            "2241110001-其他应付款-6401专项",
+            &["6401".into()]
+        ));
         // 多个前缀任一命中即可，大小写不敏感。
-        assert!(matches_code_prefix("AR1001", "AR1001-应收", &["6603".into(), "ar10".into()]));
+        assert!(matches_code_prefix(
+            "AR1001",
+            "AR1001-应收",
+            &["6603".into(), "ar10".into()]
+        ));
         // 没有映射编码列时退回比对显示值开头，只有名称列的账也能用。
         assert!(matches_code_prefix("", "银行存款-中行", &["银行".into()]));
         assert!(!matches_code_prefix("", "应收账款-A公司", &["银行".into()]));
@@ -5187,7 +5360,10 @@ mod tests {
     #[test]
     fn 前缀串按多种分隔符切开() {
         assert_eq!(parse_code_prefixes("6401,6603"), vec!["6401", "6603"]);
-        assert_eq!(parse_code_prefixes("6401，6603；1002 2241"), vec!["6401", "6603", "1002", "2241"]);
+        assert_eq!(
+            parse_code_prefixes("6401，6603；1002 2241"),
+            vec!["6401", "6603", "1002", "2241"]
+        );
         assert_eq!(parse_code_prefixes("  6401  "), vec!["6401"]);
         assert!(parse_code_prefixes("  ,  ; ").is_empty());
     }
@@ -5230,6 +5406,36 @@ mod tests {
     }
 
     #[test]
+    fn 多级科目清单带出一级科目名称() {
+        let table = Table {
+            path: PathBuf::new(),
+            sheet: "S".into(),
+            sheets: vec!["S".into()],
+            headers: vec![
+                "科目代码".into(),
+                "科目名称一级".into(),
+                "科目名称二级".into(),
+            ],
+            rows: vec![
+                vec!["160101".into(), "固定资产".into(), "机器设备".into()],
+                vec!["160102".into(), "固定资产".into(), "运输工具".into()],
+            ],
+            encoding: None,
+            delimiter: None,
+        };
+        let mapping = LedgerMapping {
+            account_code: Some("科目代码".into()),
+            account_name: vec!["科目名称一级".into(), "科目名称二级".into()],
+            ..Default::default()
+        };
+        let (values, _, _) = account_values(&table, &mapping, "", &[]);
+        assert_eq!(
+            primary_account_names(&table, &mapping, &values),
+            vec!["固定资产", "固定资产"]
+        );
+    }
+
+    #[test]
     fn 科目编码与名称各归各位() {
         // 4800 那份 SAP 序时账的真实表头：`会计科目` 是编码，`科目文本` 是名称，
         // 拆开之前两列都顶着「科目名称」的角色名。
@@ -5251,9 +5457,10 @@ mod tests {
     #[test]
     fn 旧版混在一起的account字段仍能读出科目键() {
         // 老草稿、老任务参数里科目是一个混合数组，反序列化后必须还能拼出同样的科目键。
-        let legacy: LedgerMapping =
-            serde_json::from_value(json!({"id":["凭证号"],"account":["科目编码","科目名称"],"amount":"金额"}))
-                .expect("旧结构可解析");
+        let legacy: LedgerMapping = serde_json::from_value(
+            json!({"id":["凭证号"],"account":["科目编码","科目名称"],"amount":"金额"}),
+        )
+        .expect("旧结构可解析");
         assert_eq!(legacy.account_columns(), vec!["科目编码", "科目名称"]);
         assert!(validate_mapping_required(&legacy).is_ok());
         // 新旧字段同时出现时按编码、名称的顺序去重，不会拼出重复列。
@@ -5775,11 +5982,7 @@ mod tests {
             .filter(|row| row[2].contains("已匹配"))
             .map(|row| {
                 let abs: f64 = row[0].trim().parse().unwrap_or(0.0);
-                if row[1] == "负数" {
-                    -abs
-                } else {
-                    abs
-                }
+                if row[1] == "负数" { -abs } else { abs }
             })
             .sum();
         assert!(matched_net.abs() < 0.005);

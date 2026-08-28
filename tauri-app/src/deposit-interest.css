@@ -91,5 +91,5 @@
 @media(max-width:820px){.deposit-links li{flex-direction:column;gap:3px}.deposit-link-hint{flex:none}}
 .deposit-scheme{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin:8px 0 0;color:var(--muted-foreground);font-size:12px}
 .deposit-scheme b{color:var(--foreground)}
-/* 布局提示是表格下方的独立说明行，不再挤在「序时账金额记法」格子里。 */
+/* 布局提示是表格下方的独立说明行：布局由映射的列决定，符号记法自动识别。 */
 .deposit-layout{margin:8px 0 0;color:var(--muted-foreground);font-size:12px}

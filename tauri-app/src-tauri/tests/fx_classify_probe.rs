@@ -28,7 +28,10 @@ fn probe_xu_shi_zhang_1() {
     };
     let tb_i = insp(&tb, "fx.inspect_tb");
     let je_i = insp(&je, "fx.inspect_je");
-    println!("JE 映射: {}", serde_json::to_string(&je_i["suggestedMapping"]).unwrap());
+    println!(
+        "JE 映射: {}",
+        serde_json::to_string(&je_i["suggestedMapping"]).unwrap()
+    );
     println!("TB uniformCurrency = {}", tb_i["uniformCurrency"]);
 
     // 前端上唯一码才是凭证号；自动建议落到「凭证号数」会跨月重号。
@@ -47,7 +50,10 @@ fn probe_xu_shi_zhang_1() {
     let v = match audit_toolbox_lib::engine_call_for_test("fx.preview_probe", params) {
         Ok(v) => v,
         Err(e) => {
-            println!("失败：{}", format!("{e:?}").chars().take(600).collect::<String>());
+            println!(
+                "失败：{}",
+                format!("{e:?}").chars().take(600).collect::<String>()
+            );
             return;
         }
     };
@@ -55,31 +61,70 @@ fn probe_xu_shi_zhang_1() {
     if let Some(o) = v.as_object() {
         println!("顶层字段: {:?}", o.keys().collect::<Vec<_>>());
     }
-    println!("summary: {}", serde_json::to_string(&v["summary"]).unwrap_or_default().chars().take(1500).collect::<String>());
-    println!("classification 条数: {}", v["classification"].as_array().map(|a| a.len()).unwrap_or(0));
+    println!(
+        "summary: {}",
+        serde_json::to_string(&v["summary"])
+            .unwrap_or_default()
+            .chars()
+            .take(1500)
+            .collect::<String>()
+    );
+    println!(
+        "classification 条数: {}",
+        v["classification"].as_array().map(|a| a.len()).unwrap_or(0)
+    );
     if let Some(a) = v["classification"].as_array() {
         for item in a.iter().take(4) {
-            println!("  cls {}", serde_json::to_string(item).unwrap_or_default().chars().take(400).collect::<String>());
+            println!(
+                "  cls {}",
+                serde_json::to_string(item)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(400)
+                    .collect::<String>()
+            );
         }
     }
-    println!("voucherDetail 条数: {}", v["voucherDetail"].as_array().map(|a| a.len()).unwrap_or(0));
+    println!(
+        "voucherDetail 条数: {}",
+        v["voucherDetail"].as_array().map(|a| a.len()).unwrap_or(0)
+    );
     println!("── dataQuality");
     if let Some(a) = v["dataQuality"].as_array() {
         for item in a.iter().take(10) {
-            println!("  {}", serde_json::to_string(item).unwrap_or_default().chars().take(420).collect::<String>());
+            println!(
+                "  {}",
+                serde_json::to_string(item)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(420)
+                    .collect::<String>()
+            );
         }
     }
     println!("── unrealizedBalanceRollforward 前 6 行");
     if let Some(a) = v["unrealizedBalanceRollforward"].as_array() {
         println!("  共 {} 行", a.len());
         for item in a.iter().take(6) {
-            println!("  {}", serde_json::to_string(item).unwrap_or_default().chars().take(900).collect::<String>());
+            println!(
+                "  {}",
+                serde_json::to_string(item)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(900)
+                    .collect::<String>()
+            );
         }
     }
-    let controls = v["classificationControls"].as_array().cloned().unwrap_or_default();
+    let controls = v["classificationControls"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let mut counts = std::collections::BTreeMap::<String, usize>::new();
     for item in &controls {
-        *counts.entry(item["classification"].as_str().unwrap_or("?").into()).or_default() += 1;
+        *counts
+            .entry(item["classification"].as_str().unwrap_or("?").into())
+            .or_default() += 1;
     }
     println!("凭证分类分布: {counts:?}");
 
@@ -100,6 +145,8 @@ fn probe_xu_shi_zhang_1() {
         println!("角色查询 {account}");
     }
     if let Some(roles) = v["accountRoles"].as_array() {
-        for r in roles.iter().take(0) { println!("{r}"); }
+        for r in roles.iter().take(0) {
+            println!("{r}");
+        }
     }
 }

@@ -12,7 +12,7 @@ type UseJobEventsOptions = {
  *
  * 对比各页面前置实现的关键改进：同时记录当前激活的 jobId，事件到达时
  * 既匹配 toolId 也匹配 activeJobId——避免只按 toolId 过滤时，用户从
- * 任务中心启动的另一个同名任务的事件串进当前页面（竞态隐患）。
+ * 其他页面启动的另一个同名任务的事件串进当前页面（竞态隐患）。
  */
 export function useJobEvents({
   toolId,

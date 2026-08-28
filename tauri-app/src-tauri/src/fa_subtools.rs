@@ -542,16 +542,14 @@ const TAX_URL_ANNOUNCEMENT_2014_64: &str =
     "https://fgk.chinatax.gov.cn/zcfgk/c100012/c5194499/content.html";
 /// 财税〔2015〕106 号（四领域加速折旧）未入总局法规库检索，链接用广东局政策文件页。
 /// 注意文号是 106：常被误写为 116（116 号是技术转让所得文件）。
-const TAX_URL_CAISHUI_2015_106: &str =
-    "https://guangdong.chinatax.gov.cn/gdsw/zjfg/2015-10/08/content_b250576dc1c04b02b212041a32dac263.shtml";
+const TAX_URL_CAISHUI_2015_106: &str = "https://guangdong.chinatax.gov.cn/gdsw/zjfg/2015-10/08/content_b250576dc1c04b02b212041a32dac263.shtml";
 
 /// 实施条例第六十条：固定资产五类最低折旧年限。
 const TAX_TEXT_ARTICLE_60: &str = "除国务院财政、税务主管部门另有规定外，固定资产计算折旧的最低年限如下：（一）房屋、建筑物，为20年；（二）飞机、火车、轮船、机器、机械和其他生产设备，为10年；（三）与生产经营活动有关的器具、工具、家具等，为5年；（四）飞机、火车、轮船以外的运输工具，为4年；（五）电子设备，为3年。";
 /// 实施条例第六十七条：无形资产摊销。
 const TAX_TEXT_ARTICLE_67: &str = "无形资产按照直线法计算的摊销费用，准予扣除。无形资产的摊销年限不得低于10年。作为投资或者受让的无形资产，有关法律规定或者合同约定了使用年限的，可以按照规定或者约定的使用年限分期摊销。外购商誉的支出，在企业整体转让或者清算时，准予扣除。";
 /// 财税〔2012〕27 号第七条：外购软件。
-const TAX_TEXT_CS27_ARTICLE_7: &str =
-    "企业外购的软件，凡符合固定资产或无形资产确认条件的，可以按照固定资产或无形资产进行核算，其折旧或摊销年限可以适当缩短，最短可为2年（含）。";
+const TAX_TEXT_CS27_ARTICLE_7: &str = "企业外购的软件，凡符合固定资产或无形资产确认条件的，可以按照固定资产或无形资产进行核算，其折旧或摊销年限可以适当缩短，最短可为2年（含）。";
 /// 财税〔2012〕27 号第八条：集成电路生产设备。
 const TAX_TEXT_CS27_ARTICLE_8: &str =
     "集成电路生产企业的生产设备，经主管税务机关核准，其折旧年限可以适当缩短，最短可为3年（含）。";
@@ -560,8 +558,7 @@ const TAX_TEXT_CS54_ARTICLE_1: &str = "企业在2018年1月1日至2020年12月31
 /// 实施条例第五十九条：直线法折旧与预计净残值（残值率两期对比的政策依据）。
 const TAX_TEXT_ARTICLE_59: &str = "固定资产按照直线法计算的折旧，准予扣除。企业应当自固定资产投入使用月份的次月起计算折旧；停止使用的固定资产，应当自停止使用月份的次月起停止计算折旧。企业应当根据固定资产的性质和使用情况，合理确定固定资产的预计净残值。固定资产的预计净残值一经确定，不得变更。";
 /// 实施条例第六十四条：生产性生物资产最低折旧年限。
-const TAX_TEXT_ARTICLE_64: &str =
-    "生产性生物资产计算折旧的最低年限如下：（一）林木类生产性生物资产，为10年；（二）畜类生产性生物资产，为3年。";
+const TAX_TEXT_ARTICLE_64: &str = "生产性生物资产计算折旧的最低年限如下：（一）林木类生产性生物资产，为10年；（二）畜类生产性生物资产，为3年。";
 /// 实施条例第九十八条：加速折旧的一般规定（60% 底线与两种加速方法）。
 const TAX_TEXT_ARTICLE_98: &str = "企业所得税法第三十二条规定的可以采取缩短折旧年限或者加速折旧方法的固定资产，包括：（一）由于技术进步等原因，确需加速折旧的固定资产；（二）常年处于强震动、高腐蚀状态的固定资产。采取缩短折旧年限方法的，最低折旧年限不得低于本条例第六十条规定折旧年限的60%；采取加速折旧方法的，可以采取双倍余额递减法或者年数总和法。";
 /// 财税〔2014〕75 号第一条：六大行业加速折旧与小微研发共用仪器设备一次性扣除。
@@ -921,10 +918,9 @@ fn write_tax_reference_sheet(wb: &mut Workbook, header: &Format) -> Result<(), A
             (own as f64 * 15.0 + 11.0).max(26.0)
         })
         .collect();
-    for (start, end) in consecutive_runs(
-        rows,
-        |a, b| a.regulation == b.regulation && a.article == b.article,
-    ) {
+    for (start, end) in consecutive_runs(rows, |a, b| {
+        a.regulation == b.regulation && a.article == b.article
+    }) {
         let r1 = first_data_row + start as u32;
         let r2 = first_data_row + end as u32;
         if r2 > r1 {
@@ -938,8 +934,7 @@ fn write_tax_reference_sheet(wb: &mut Workbook, header: &Format) -> Result<(), A
             ws.write_string_with_format(r1, 4, rows[start].text, &cell_format)
                 .map_err(xlsx_error)?;
         }
-        let needed =
-            wrapped_lines(rows[start].text, WIDTHS[4]) as f64 * 15.0 + 12.0;
+        let needed = wrapped_lines(rows[start].text, WIDTHS[4]) as f64 * 15.0 + 12.0;
         let per_row = (needed / (end - start + 1) as f64).ceil();
         for r in r1..=r2 {
             heights[(r - first_data_row) as usize] =
@@ -1450,13 +1445,7 @@ mod tests {
         // 生产性生物资产（第六十四条）占 D9:D10 与 E9:E10，27 号文两行占
         // C13:C14（第七/第八条各自不合并），75 号文三行占 C16:C18。
         for merged in [
-            "C3:C12",
-            "D3:D7",
-            "E3:E7",
-            "D9:D10",
-            "E9:E10",
-            "C13:C14",
-            "C16:C18",
+            "C3:C12", "D3:D7", "E3:E7", "D9:D10", "E9:E10", "C13:C14", "C16:C18",
         ] {
             assert!(
                 tax.contains(&format!("ref=\"{merged}\"")),

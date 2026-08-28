@@ -68,7 +68,47 @@ export async function applyLedgerReviewToDict(
   return {mapping:next,applied};
 }
 
-export const ledgerErrorText=(error:unknown)=>{if(error instanceof Error)return error.message;if(error&&typeof error==="object"){const value=error as Record<string,unknown>;return String(value.userMessage??value.message??value.detail??"操作失败，请查看日志诊断。");}return String(error);};
+export const ledgerErrorText=(error:unknown)=>{if(error instanceof Error)return error.message;if(error&&typeof error==="object"){const value=error as Record<string,unknown>;return String(value.userMessage??value.message??value.detail??"操作失败，请检查输入后重试。");}return String(error);};
+
+/** 一键复核里单个文件需要的全部输入。 */
+export type LedgerReviewTarget={
+  headers:string[];
+  preview:string[][];
+  mapping:Record<string,string|string[]>;
+  labels:Record<string,string>;
+};
+/** 一键复核里单个文件的结果：应用后的映射、采纳的建议数与失败原因。 */
+export type LedgerReviewOutcome={
+  mapping:Record<string,string|string[]>;
+  appliedCount:number;
+  failed:boolean;
+  error:string;
+};
+/**
+ * 一键复核 TB＋JE 的共享引擎。汇兑损益与存款利息此前各写一套复核入口，
+ * 改一处漏一处；现在两个页面都调这里。已上传哪个文件就复核哪个，两边
+ * 并行、结果各自汇报；单个文件失败只记在它自己的 outcome 里，不阻塞
+ * 另一个文件，也不抛出——沿用「复核失败不阻塞」的既有口径。
+ */
+export async function applyLedgerReviewsTogether(
+  call:(method:string,params:Record<string,unknown>)=>Promise<unknown>,
+  targets:Partial<Record<"je"|"tb",LedgerReviewTarget>>,
+):Promise<Partial<Record<"je"|"tb",LedgerReviewOutcome>>>{
+  const kinds=(["je","tb"] as const).filter(kind=>targets[kind]);
+  const outcomes=await Promise.all(kinds.map(async kind=>{
+    const target=targets[kind]!;
+    try{
+      const {mapping,applied}=await applyLedgerReviewToDict(
+        call,kind,target.headers,target.preview,target.mapping,target.labels,
+      );
+      return [kind,{mapping,appliedCount:applied.length,failed:false,error:""}] as const;
+    }catch(e){
+      // 复核失败不阻塞：映射原样退回，另一个文件照常复核、照常应用建议。
+      return [kind,{mapping:target.mapping,appliedCount:0,failed:true,error:ledgerErrorText(e)}] as const;
+    }
+  }));
+  return Object.fromEntries(outcomes);
+}
 
 export function setKanzhangMapping(current:Mapping,key:keyof Mapping,value:string|string[]):Mapping{const next={...current,[key]:value||undefined};if(key==="functionalAmount"||key==="direction"){next.functionalDebit=undefined;next.functionalCredit=undefined;}if(key==="functionalDebit"||key==="functionalCredit"){next.functionalAmount=undefined;next.direction=undefined;}return next;}
 

@@ -4233,13 +4233,34 @@ fn role_for(account: &str, params: &Value) -> String {
         .and_then(|names| names.get(&key.trim().to_uppercase()))
         .and_then(Value::as_str)
     {
-        let suggested = suggest_account_role(&format!("{account} {name}"));
-        if suggested != "unassigned" {
-            return suggested;
+        let detail = suggest_account_role_detail(&format!("{account} {name}"));
+        // 名称补全后仍只有低置信兜底时，先继承上级科目的手工分类：界面
+        // 科目清单包含非末级汇总行而测算只读末级，在汇总行上的指定要靠
+        // 编码前缀继承才能落到末级行上（与存款利息同一口径）。自动识别
+        // 给出过实质结论的科目不受影响。
+        if detail.confidence < ROLE_INHERIT_MAX_CONFIDENCE {
+            if let Some(role) = ledger_mapping::inherited_role_by_code_prefix(
+                key,
+                roles
+                    .into_iter()
+                    .flat_map(|values| values.iter())
+                    .filter_map(|(candidate, role)| {
+                        role.as_str().map(|value| (candidate.as_str(), value))
+                    }),
+                account_match_key,
+            ) {
+                return role;
+            }
         }
+        return detail.role.to_owned();
     }
     suggest_account_role(account)
 }
+
+/// 自动识别只剩低置信兜底（词典与科目编码都没给出实质结论）时，才允许
+/// 继承上级科目的手工分类。0.65 低于任何词典或编码命中的置信度，
+/// 只放行「未识别资产/负债，保守按……」这类兜底档。
+const ROLE_INHERIT_MAX_CONFIDENCE: f64 = 0.65;
 
 fn rate_status(params: &Value) -> Result<Value, AppError> {
     let start = params
@@ -5782,8 +5803,7 @@ fn calculate_realized(
                         Some(format!("第{}行：{e}", row.source_row)),
                     )
                 })?;
-                let functional_amount =
-                    signed_amount(row, &mapping, "functional").unwrap_or(0.0);
+                let functional_amount = signed_amount(row, &mapping, "functional").unwrap_or(0.0);
                 monetary_has_foreign_movement |= foreign.abs() >= 0.01;
                 monetary_has_functional_movement |= functional_amount.abs() >= 0.01;
                 // 行级外币判定：币种与本位币不同的货币性行，原币有发生才算
@@ -5883,8 +5903,7 @@ fn calculate_realized(
             monetary_has_foreign_movement,
             monetary_has_functional_movement,
         );
-        let revaluation_signal =
-            !manual_realized && (manual_unrealized || automatic_revaluation);
+        let revaluation_signal = !manual_realized && (manual_unrealized || automatic_revaluation);
         // 无汇兑损益科目行的兑换凭证：客户把价差埋在成交价里、凭证里没有
         // 损益行（用友结汇常见），这恰是审计必须独立重算的对象——此前被
         // has_fx 门槛静默放过（2024 用友真实样例：50 万美元结汇零测算）。
@@ -5941,8 +5960,7 @@ fn calculate_realized(
         // ③货币性腿全为本位币（如资金池美元↔美元划转）、或对手科目全为
         //   非货币性项目（预付账款等）→ 不构成汇兑事项，账面汇差剔除并披露
         let realized_structure = manual_realized
-            || (!manual_unrealized
-                && (structural_settlement || foreign_monetary_movement));
+            || (!manual_unrealized && (structural_settlement || foreign_monetary_movement));
         let realized_hard =
             // 兑换结构（外币现金↔本位币现金配比对转）本身即已实现证据，
             // 凭证里没有汇兑损益行同样要重算；终止确认路径仍要求 has_fx，
@@ -7611,10 +7629,7 @@ fn write_user_conclusion_sheet(
 /// 货币性项目（资金池本位币账户互转）或对手为非货币性项目（预付款等）
 /// 的凭证。这些金额已从测算总体剔除，单独成页供 TB 勾稽时作「其中」
 /// 披露与重分类建议。
-fn write_not_fx_event_sheet(
-    workbook: &mut Workbook,
-    result: &Value,
-) -> Result<(), AppError> {
+fn write_not_fx_event_sheet(workbook: &mut Workbook, result: &Value) -> Result<(), AppError> {
     let (header, _) = formats();
     let amount = Format::new().set_num_format("#,##0.00;[Red](#,##0.00);-");
     let wrap = Format::new().set_text_wrap();
@@ -7623,7 +7638,9 @@ fn write_not_fx_event_sheet(
         .and_then(Value::as_array)
         .map(|all| {
             all.iter()
-                .filter(|item| item.get("classification").and_then(Value::as_str) == Some("不构成汇兑事项"))
+                .filter(|item| {
+                    item.get("classification").and_then(Value::as_str) == Some("不构成汇兑事项")
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -7648,35 +7665,62 @@ fn write_not_fx_event_sheet(
     for (index, item) in items.iter().enumerate() {
         let row = (index + 1) as u32;
         sheet
-            .write_string(row, 0, item.get("date").and_then(Value::as_str).unwrap_or(""))
+            .write_string(
+                row,
+                0,
+                item.get("date").and_then(Value::as_str).unwrap_or(""),
+            )
             .map_err(xlsx_err)?;
         sheet
-            .write_string(row, 1, item.get("voucherId").and_then(Value::as_str).unwrap_or(""))
+            .write_string(
+                row,
+                1,
+                item.get("voucherId").and_then(Value::as_str).unwrap_or(""),
+            )
             .map_err(xlsx_err)?;
         sheet
-            .write_string(row, 2, item.get("voucherType").and_then(Value::as_str).unwrap_or(""))
+            .write_string(
+                row,
+                2,
+                item.get("voucherType")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            )
             .map_err(xlsx_err)?;
         sheet
             .write_string_with_format(
                 row,
                 3,
-                item.get("patternLabel").and_then(Value::as_str).unwrap_or(""),
+                item.get("patternLabel")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
                 &wrap,
             )
             .map_err(xlsx_err)?;
-        let booked = item.get("bookedFxGainLoss").and_then(Value::as_f64).unwrap_or(0.0);
+        let booked = item
+            .get("bookedFxGainLoss")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
         total += booked;
         sheet
             .write_number_with_format(row, 4, booked, &amount)
             .map_err(xlsx_err)?;
         sheet
-            .write_string(row, 5, item.get("systemCategory").and_then(Value::as_str).unwrap_or(""))
+            .write_string(
+                row,
+                5,
+                item.get("systemCategory")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            )
             .map_err(xlsx_err)?;
         sheet
             .write_string_with_format(
                 row,
                 6,
-                item.get("reviewReason").and_then(Value::as_str).unwrap_or(""),
+                item.get("reviewReason")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
                 &wrap,
             )
             .map_err(xlsx_err)?;
@@ -7700,9 +7744,7 @@ fn write_not_fx_event_sheet(
     sheet.set_column_width(3, 44).map_err(xlsx_err)?;
     sheet.set_column_width(6, 44).map_err(xlsx_err)?;
     sheet.set_column_width(7, 40).map_err(xlsx_err)?;
-    sheet
-        .set_freeze_panes(1, 0)
-        .map_err(xlsx_err)?;
+    sheet.set_freeze_panes(1, 0).map_err(xlsx_err)?;
     Ok(())
 }
 
@@ -7745,8 +7787,7 @@ fn write_classification_adjustment_sheet(
             items
                 .iter()
                 .filter(|item| {
-                    item.get("classification").and_then(Value::as_str)
-                        == Some("不构成汇兑事项")
+                    item.get("classification").and_then(Value::as_str) == Some("不构成汇兑事项")
                         || item
                             .get("classificationConflict")
                             .and_then(Value::as_str)
@@ -7755,7 +7796,8 @@ fn write_classification_adjustment_sheet(
                             .get("measurementStatus")
                             .and_then(Value::as_str)
                             .is_some_and(|value| {
-                                value.starts_with("无法测算") || value == "不构成汇兑事项，账面汇差已剔除"
+                                value.starts_with("无法测算")
+                                    || value == "不构成汇兑事项，账面汇差已剔除"
                             })
                 })
                 .cloned()
@@ -10382,6 +10424,31 @@ E,2025-01-31,V001,SA,6701120001 财务费用-汇兑损失-未实现,INV-20250131
         );
     }
 
+    /// 与存款利息同一口径的回归：界面科目清单包含非末级汇总行而测算只读
+    /// 末级。自动识别只剩低置信兜底（词典与编码都没实质命中）时，末级
+    /// 继承用户在上级科目上的手工分类；有实质结论的科目不被上级覆盖。
+    #[test]
+    fn 上级科目的手工分类由末级在自动识别拿不准时继承() {
+        let loose = json!({
+            "accountRoles": {"1901 某往来": "monetary_asset"},
+            // __tbAccountNames 按 TB 行建立编码→名称，汇总行与末级行都在。
+            "__tbAccountNames": {"1901": "某往来", "19010999": "某往来"}
+        });
+        // 1901 落在「未识别的资产类编码，保守归为非货币性」（0.58 兜底），
+        // 用户在汇总行 1901 上指定的角色应落到末级 19010999。
+        assert_eq!(role_for("19010999 某往来-明细", &loose), "monetary_asset");
+        // 同码不同拼法（编码回退此前已有，顺带锁住不回退）。
+        assert_eq!(role_for("19010999 另一种拼法", &loose), "monetary_asset");
+        // 自动识别给出过实质结论的科目不被上级指定覆盖：
+        // 1401..=1471 命中存货编码（0.94 non_monetary）。
+        let strict = json!({
+            "accountRoles": {"1405 某存货": "monetary_asset"},
+            "__tbAccountNames": {"1405": "某存货"}
+        });
+        assert_eq!(role_for("140501 某存货-明细", &strict), "non_monetary");
+        // 上级键与末级编码没有前缀关系时不继承（1901 不是 140501 的前缀）。
+        assert_eq!(role_for("140501 某存货-明细", &loose), "non_monetary");
+    }
 
     #[test]
     fn 科目词典归入五个主类别且待确认只是状态() {
@@ -12745,9 +12812,7 @@ E,2025-01-31,5,FX,6603,期末重估,CNY,0,-300\n",
             assert_eq!(class["classification"], "未实现", "{class:#?}");
         }
         assert!(
-            !quality
-                .iter()
-                .any(|q| q["type"] == "重估凭证无文字证据"),
+            !quality.iter().any(|q| q["type"] == "重估凭证无文字证据"),
             "摘要文字提示已废止：{quality:#?}"
         );
         fs::remove_dir_all(root).unwrap();

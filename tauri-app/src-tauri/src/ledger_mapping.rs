@@ -35,7 +35,13 @@ const fn r(
     aliases: &'static [&'static str],
     conflicts: &'static [&'static str],
 ) -> Role {
-    Role { name, label, aliases, conflicts, multi: false }
+    Role {
+        name,
+        label,
+        aliases,
+        conflicts,
+        multi: false,
+    }
 }
 
 const fn rm(
@@ -44,7 +50,13 @@ const fn rm(
     aliases: &'static [&'static str],
     conflicts: &'static [&'static str],
 ) -> Role {
-    Role { name, label, aliases, conflicts, multi: true }
+    Role {
+        name,
+        label,
+        aliases,
+        conflicts,
+        multi: true,
+    }
 }
 
 /// 金额列的通用冲突词：挡住"本位币""原币"这类短别名去吃金额列。
@@ -56,36 +68,91 @@ const AMT: &[&str] = &[
     "value",
 ];
 /// 科目编码的冲突词：挡住 `Account` 去吃 `Account Desc`、`Accounting Flexfield`。
-const NOT_CODE: &[&str] = &["desc", "description", "名称", "名稱", "文本", "flexfield", "segment"];
+const NOT_CODE: &[&str] = &[
+    "desc",
+    "description",
+    "名称",
+    "名稱",
+    "文本",
+    "flexfield",
+    "segment",
+];
 /// 科目名称的冲突词。预算／对方是真实踩坑（4800 序时账的「预算二级科目描述」
 /// 包含"科目描述"、「对方科目名称」包含"科目名称"），放进来会把账面科目名
 /// 拼成对不上 TB 的长串。
-const NOT_NAME: &[&str] = &["flexfield", "segment", "code", "编码", "編碼", "代码", "代碼", "预算", "預算", "对方", "對方"];
+const NOT_NAME: &[&str] = &[
+    "flexfield",
+    "segment",
+    "code",
+    "编码",
+    "編碼",
+    "代码",
+    "代碼",
+    "预算",
+    "預算",
+    "对方",
+    "對方",
+];
 /// 辅助核算的别名。**只收汇兑损益那一份**——存款利息另有一份把「文本／科目文本／
 /// 账户文本」也算辅助核算（它靠这些列认存款档次），并进来会把科目名称抢走。
 /// 工具需要额外写法时在自己那边追加，标准表保持保守。
 const AUX: &[&str] = &[
-    "辅助核算", "輔助核算", "辅助項", "辅助项", "往来单位", "往來單位", "客户", "客戶",
-    "供应商", "供應商", "银行账号", "银行帐号", "明细项", "明細項",
-    "counterparty", "assignment", "profit center", "profitcenter",
+    "辅助核算",
+    "輔助核算",
+    "辅助項",
+    "辅助项",
+    "往来单位",
+    "往來單位",
+    "客户",
+    "客戶",
+    "供应商",
+    "供應商",
+    "银行账号",
+    "银行帐号",
+    "明细项",
+    "明細項",
+    "counterparty",
+    "assignment",
+    "profit center",
+    "profitcenter",
 ];
 /// 辅助核算的冲突词：挡住它去吃科目类与金额类的列。
 const NOT_AUX: &[&str] = &["科目", "account", "金额", "amount", "余额", "balance"];
 /// 借款明细标识。别名刻意取**特异写法**：`辅助`、`明细`、`客户` 这类泛词留给
 /// [`AUX`]，否则同一列谁抢到全看分数，两个工具的结果会分叉。
 const LOAN_ID: &[&str] = &[
-    "合同编号", "合同編號", "借款编号", "借款編號", "借据", "借據", "借据号", "借款合同号",
-    "登记编号", "合同号", "合同號", "loanid", "contractno",
+    "合同编号",
+    "合同編號",
+    "借款编号",
+    "借款編號",
+    "借据",
+    "借據",
+    "借据号",
+    "借款合同号",
+    "登记编号",
+    "合同号",
+    "合同號",
+    "loanid",
+    "contractno",
 ];
 
 /// 集团货币／报告货币是**第三套口径**，既不是本位币也不是原币。
 /// SAP 那份 TB 就同时给了本位币与集团货币两套金额，集团货币的数字往往大出几倍——
 /// 拿它跟本位币比量级会把本年累计判到错的那一列上。所有金额角色一律排除它。
 const NOT_GROUP: &[&str] = &[
-    "集团货币", "集團貨幣", "集团币", "集團幣", "报告货币", "報告貨幣",
+    "集团货币",
+    "集團貨幣",
+    "集团币",
+    "集團幣",
+    "报告货币",
+    "報告貨幣",
     // `Grp Curr` 是 SAP 的实际缩写写法（`MTD Grp Curr`、`YTD Act (Grp Curr)`），
     // 实测样例 Oct+BS+PL+TB.xlsx 里就是这么写的，`groupcurr` 匹配不到它。
-    "groupcurrency", "reportingcurrency", "groupcurr", "grpcurr", "grpcurrency",
+    "groupcurrency",
+    "reportingcurrency",
+    "groupcurr",
+    "grpcurr",
+    "grpcurrency",
 ];
 
 /// 序时账角色。一行是一条分录。
@@ -94,32 +161,349 @@ pub(crate) fn je_roles() -> &'static [Role] {
 }
 
 static JE_ROLES: &[Role] = &[
-        r("entity", "公司/核算主体", &["公司代码", "公司代碼", "公司名称", "单位名称", "核算主体", "主体", "公司", "单位", "company", "companycode", "cocode", "businessunit", "breaksegment", "entity", "bukrs"], &["科目", "account", "金额", "amount", "辅助", "往来", "对方", "对手", "供应商", "客户", "value", "currency", "币种", "货币"]),
-        r("date", "记账日期", &["日期", "记账日期", "記賬日期", "记帐日期", "过账日期", "过帐日期", "過賬日期", "凭证日期", "憑證日期", "业务日期", "gldate", "postingdate", "entrydate", "budat"], &["期间", "period", "年", "月"]),
-        rm("id", "凭证识别字段", &["凭证号", "憑證號", "凭证号数", "凭证编号", "憑證編號", "凭证字", "憑證字", "凭证字号", "凭证名", "voucher", "voucherno", "documentno", "documentnumber", "batchname", "jebatch", "je批名", "jename", "belnr"], &["行号", "行號", "行项目", "行項目", "分录号", "分錄號", "line", "item", "冲销", "沖銷", "反冲", "反沖", "reversed", "reversal"]),
-        r("voucherType", "凭证类型", &["凭证类型", "憑證類型", "凭证类别", "憑證類別", "单据类型", "category", "document type", "documenttype", "blart"], &[]),
-        r("accountCode", "科目编码", &["科目编码", "科目編碼", "科目代码", "科目代碼", "科目号", "科目編號", "会计科目", "會計科目", "总账科目", "總賬科目", "账户", "帳戶", "account", "glaccount", "accountcode", "saknr"], NOT_CODE),
-        rm("accountName", "科目名称", &["科目名称", "科目名稱", "科目描述", "科目文本", "科目全名", "账户名称", "帳戶名稱", "accountname", "accountdesc", "accountdescription", "gldescription", "childdescription"], NOT_NAME),
-        // 「文本」是 SAP（SGTXT 行项目文本）与 AX/D365 对摘要的叫法；
-        // 「抬头」冲突词挡住「凭证抬头文本」——那是单据号不是行摘要。
-        r("summary", "摘要", &["摘要", "摘要说明", "说明", "說明", "备注", "備註", "文本", "entry item", "line description", "sgtxt"], &["科目", "account", "凭证", "憑證", "抬头", "抬頭"]),
-        r("currency", "原币币种", &["币种", "幣種", "币别", "幣別", "货币", "貨幣", "货币代码", "貨幣代碼", "原币币种", "交易币种", "凭证货币", "currency", "currencycode", "entercurrency", "documentcurrencykey", "waers"], AMT),
-        // SAP 的 `Company Code Currency Key` 记的是公司本位币，不是这笔分录的交易币种。
-        // 缺了这个角色，它就会去抢 currency，把真正的 `Document Currency Key` 挤掉。
-        r("functionalCurrency", "本位币币种", &["本位币", "本位幣", "公司代码货币", "记账本位币", "companycodecurrency", "ledgercurrency", "functionalcurrency", "localcurrency"], AMT),
-        r("direction", "借贷方向", &["方向", "借贷方向", "借貸方向", "借贷", "借貸", "drcr", "dccr", "debitcredit"], &["金额", "amount", "usd", "cny", "hkd", "eur"]),
-        r("functionalAmount", "本位币净额", &["本位币金额", "本位幣金額", "本币金额", "本位币", "本位幣", "借正贷负", "借正貸負", "金额", "金額", "companycodecurrencyvalue", "functionalamount"], &["原币", "原幣", "外币", "外幣", "借方", "贷方", "貸方", "debit", "credit"]),
-        r("functionalDebit", "本位币借方", &["本位币借方", "本位幣借方", "借方金额", "借方金額", "借方发生额", "借方", "debits", "debit"], &["原币", "原幣", "外币", "外幣", "贷", "貸", "credit"]),
-        r("functionalCredit", "本位币贷方", &["本位币贷方", "本位幣貸方", "贷方金额", "貸方金額", "贷方发生额", "贷方", "貸方", "credits", "credit"], &["原币", "原幣", "外币", "外幣", "借", "debit"]),
-        r("foreignAmount", "原币净额", &["原币金额", "原幣金額", "外币金额", "外幣金額", "凭证金额", "憑證金額", "原币", "原幣", "documentcurrencyvalue", "foreignamount"], &["本位币", "本位幣", "借方", "贷方", "貸方", "debit", "credit"]),
-        r("foreignDebit", "原币借方", &["原币借方", "原幣借方", "外币借方", "货币借方金额", "貨幣借方金額", "enterdebits"], &["本位币", "本位幣", "贷", "貸"]),
-        r("foreignCredit", "原币贷方", &["原币贷方", "原幣貸方", "外币贷方", "货币贷方金额", "貨幣貸方金額", "entercredits"], &["本位币", "本位幣", "借"]),
-        // 辅助核算此前不在标准表里，汇兑损益靠一行 `role == "auxiliary"` 特判把它
-        // 当多列角色用。TB-4800 的类型表把「辅助信息」列为账表的正式组成部分，
-        // 据此收编——SAP 导出常把供应商、客户分成两列，必须可多列。
-        rm("auxiliary", "辅助核算", AUX, NOT_AUX),
-        // 借款明细标识：借款利息此前按关键词临时找，不在标准表里。
-        r("loanId", "借款明细", LOAN_ID, &["金额", "amount", "余额", "balance"]),
+    r(
+        "entity",
+        "公司/核算主体",
+        &[
+            "公司代码",
+            "公司代碼",
+            "公司名称",
+            "单位名称",
+            "核算主体",
+            "主体",
+            "公司",
+            "单位",
+            "company",
+            "companycode",
+            "cocode",
+            "businessunit",
+            "breaksegment",
+            "entity",
+            "bukrs",
+        ],
+        &[
+            "科目",
+            "account",
+            "金额",
+            "amount",
+            "辅助",
+            "往来",
+            "对方",
+            "对手",
+            "供应商",
+            "客户",
+            "value",
+            "currency",
+            "币种",
+            "货币",
+        ],
+    ),
+    r(
+        "date",
+        "记账日期",
+        &[
+            "日期",
+            "记账日期",
+            "記賬日期",
+            "记帐日期",
+            "过账日期",
+            "过帐日期",
+            "過賬日期",
+            "凭证日期",
+            "憑證日期",
+            "业务日期",
+            "gldate",
+            "postingdate",
+            "entrydate",
+            "budat",
+        ],
+        &["期间", "period", "年", "月"],
+    ),
+    rm(
+        "id",
+        "凭证识别字段",
+        &[
+            "凭证号",
+            "憑證號",
+            "凭证号数",
+            "凭证编号",
+            "憑證編號",
+            "凭证字",
+            "憑證字",
+            "凭证字号",
+            "凭证名",
+            "voucher",
+            "voucherno",
+            "documentno",
+            "documentnumber",
+            "batchname",
+            "jebatch",
+            "je批名",
+            "jename",
+            "belnr",
+        ],
+        &[
+            "行号",
+            "行號",
+            "行项目",
+            "行項目",
+            "分录号",
+            "分錄號",
+            "line",
+            "item",
+            "冲销",
+            "沖銷",
+            "反冲",
+            "反沖",
+            "reversed",
+            "reversal",
+        ],
+    ),
+    r(
+        "voucherType",
+        "凭证类型",
+        &[
+            "凭证类型",
+            "憑證類型",
+            "凭证类别",
+            "憑證類別",
+            "单据类型",
+            "category",
+            "document type",
+            "documenttype",
+            "blart",
+        ],
+        &[],
+    ),
+    r(
+        "accountCode",
+        "科目编码",
+        &[
+            "科目编码",
+            "科目編碼",
+            "科目代码",
+            "科目代碼",
+            "科目号",
+            "科目編號",
+            "会计科目",
+            "會計科目",
+            "总账科目",
+            "總賬科目",
+            "账户",
+            "帳戶",
+            "account",
+            "glaccount",
+            "accountcode",
+            "saknr",
+        ],
+        NOT_CODE,
+    ),
+    rm(
+        "accountName",
+        "科目名称",
+        &[
+            "科目名称",
+            "科目名稱",
+            "科目描述",
+            "科目文本",
+            "科目全名",
+            "账户名称",
+            "帳戶名稱",
+            "accountname",
+            "accountdesc",
+            "accountdescription",
+            "gldescription",
+            "childdescription",
+        ],
+        NOT_NAME,
+    ),
+    // 「文本」是 SAP（SGTXT 行项目文本）与 AX/D365 对摘要的叫法；
+    // 「抬头」冲突词挡住「凭证抬头文本」——那是单据号不是行摘要。
+    r(
+        "summary",
+        "摘要",
+        &[
+            "摘要",
+            "摘要说明",
+            "说明",
+            "說明",
+            "备注",
+            "備註",
+            "文本",
+            "entry item",
+            "line description",
+            "sgtxt",
+        ],
+        &["科目", "account", "凭证", "憑證", "抬头", "抬頭"],
+    ),
+    r(
+        "currency",
+        "原币币种",
+        &[
+            "币种",
+            "幣種",
+            "币别",
+            "幣別",
+            "货币",
+            "貨幣",
+            "货币代码",
+            "貨幣代碼",
+            "原币币种",
+            "交易币种",
+            "凭证货币",
+            "currency",
+            "currencycode",
+            "entercurrency",
+            "documentcurrencykey",
+            "waers",
+        ],
+        AMT,
+    ),
+    // SAP 的 `Company Code Currency Key` 记的是公司本位币，不是这笔分录的交易币种。
+    // 缺了这个角色，它就会去抢 currency，把真正的 `Document Currency Key` 挤掉。
+    r(
+        "functionalCurrency",
+        "本位币币种",
+        &[
+            "本位币",
+            "本位幣",
+            "公司代码货币",
+            "记账本位币",
+            "companycodecurrency",
+            "ledgercurrency",
+            "functionalcurrency",
+            "localcurrency",
+        ],
+        AMT,
+    ),
+    r(
+        "direction",
+        "借贷方向",
+        &[
+            "方向",
+            "借贷方向",
+            "借貸方向",
+            "借贷",
+            "借貸",
+            "drcr",
+            "dccr",
+            "debitcredit",
+        ],
+        &["金额", "amount", "usd", "cny", "hkd", "eur"],
+    ),
+    r(
+        "functionalAmount",
+        "本位币净额",
+        &[
+            "本位币金额",
+            "本位幣金額",
+            "本币金额",
+            "本位币",
+            "本位幣",
+            "借正贷负",
+            "借正貸負",
+            "金额",
+            "金額",
+            "companycodecurrencyvalue",
+            "functionalamount",
+        ],
+        &[
+            "原币", "原幣", "外币", "外幣", "借方", "贷方", "貸方", "debit", "credit",
+        ],
+    ),
+    r(
+        "functionalDebit",
+        "本位币借方",
+        &[
+            "本位币借方",
+            "本位幣借方",
+            "借方金额",
+            "借方金額",
+            "借方发生额",
+            "借方",
+            "debits",
+            "debit",
+        ],
+        &["原币", "原幣", "外币", "外幣", "贷", "貸", "credit"],
+    ),
+    r(
+        "functionalCredit",
+        "本位币贷方",
+        &[
+            "本位币贷方",
+            "本位幣貸方",
+            "贷方金额",
+            "貸方金額",
+            "贷方发生额",
+            "贷方",
+            "貸方",
+            "credits",
+            "credit",
+        ],
+        &["原币", "原幣", "外币", "外幣", "借", "debit"],
+    ),
+    r(
+        "foreignAmount",
+        "原币净额",
+        &[
+            "原币金额",
+            "原幣金額",
+            "外币金额",
+            "外幣金額",
+            "凭证金额",
+            "憑證金額",
+            "原币",
+            "原幣",
+            "documentcurrencyvalue",
+            "foreignamount",
+        ],
+        &[
+            "本位币",
+            "本位幣",
+            "借方",
+            "贷方",
+            "貸方",
+            "debit",
+            "credit",
+        ],
+    ),
+    r(
+        "foreignDebit",
+        "原币借方",
+        &[
+            "原币借方",
+            "原幣借方",
+            "外币借方",
+            "货币借方金额",
+            "貨幣借方金額",
+            "enterdebits",
+        ],
+        &["本位币", "本位幣", "贷", "貸"],
+    ),
+    r(
+        "foreignCredit",
+        "原币贷方",
+        &[
+            "原币贷方",
+            "原幣貸方",
+            "外币贷方",
+            "货币贷方金额",
+            "貨幣貸方金額",
+            "entercredits",
+        ],
+        &["本位币", "本位幣", "借"],
+    ),
+    // 辅助核算此前不在标准表里，汇兑损益靠一行 `role == "auxiliary"` 特判把它
+    // 当多列角色用。TB-4800 的类型表把「辅助信息」列为账表的正式组成部分，
+    // 据此收编——SAP 导出常把供应商、客户分成两列，必须可多列。
+    rm("auxiliary", "辅助核算", AUX, NOT_AUX),
+    // 借款明细标识：借款利息此前按关键词临时找，不在标准表里。
+    r(
+        "loanId",
+        "借款明细",
+        LOAN_ID,
+        &["金额", "amount", "余额", "balance"],
+    ),
 ];
 
 /// 科目余额表角色。一行是一个科目在某时点的余额。
@@ -128,39 +512,806 @@ pub(crate) fn tb_roles() -> &'static [Role] {
 }
 
 static TB_ROLES: &[Role] = &[
-        r("entity", "公司/核算主体", &["公司代码", "公司代碼", "公司名称", "核算主体", "主体", "company", "companycode", "break segment"], &["科目", "account"]),
-        r("accountCode", "科目编码", &["科目编码", "科目編碼", "科目代码", "科目代碼", "科目号", "科目編號", "会计科目", "會計科目", "总账科目", "科目段组合", "account", "glaccount", "slaccount", "accountcode", "accountcombination"], NOT_CODE),
-        rm("accountName", "科目名称", &["科目名称", "科目名稱", "科目名称一级", "科目名称二级", "科目名称三级", "科目全称", "科目描述", "科目文本", "账户名称", "帳戶名稱", "accountname", "accountdesc", "accountdescription", "gldescription", "slaccountdesc"], NOT_NAME),
-        r("currency", "原币币种", &["币种", "幣種", "币别", "幣別", "货币", "貨幣", "原币币种", "交易币种", "currency", "ccy", "currencycode"], AMT),
-        r("currencyText", "币种线索文本", &["文本", "科目文本", "账户文本", "帳戶文本", "说明", "說明", "备注", "備註", "描述"], &["金额", "余额", "amount", "balance"]),
-        r("functionalCurrency", "本位币币种", &["本位币", "本位幣", "功能货币", "记账本位币", "functionalcurrency", "ledgercurrency"], AMT),
-        r("openingDirection", "期初方向", &["期初方向", "年初方向", "期初余额方向", "openingdrcr"], &["期末", "本期", "本年"]),
-        r("closingDirection", "期末方向", &["期末方向", "年末方向", "期末余额方向", "方向", "closingdrcr", "drcr"], &["期初", "年初"]),
-        r("openingFunctionalAmount", "期初本位币余额", &["期初本位币余额", "期初余额", "期初餘額", "期初金额", "期初金額", "年初余额", "年初金额", "beginbalance", "beginningbalance", "openingbalance", "opening"], &["借", "贷", "貸", "原币", "原幣", "外币", "外幣", "期末", "方向", "debit", "credit"]),
-        r("openingFunctionalDebit", "期初借方本位币余额", &["期初借方本位币余额", "期初余额借方", "期初借方余额", "期初借方", "年初余额借方", "年初借方", "openingdr", "openingdebit"], &["贷", "貸", "原币", "原幣", "外币", "期末", "credit"]),
-        r("openingFunctionalCredit", "期初贷方本位币余额", &["期初贷方本位币余额", "期初余额贷方", "期初贷方余额", "期初贷方", "年初余额贷方", "年初贷方", "openingcr", "openingcredit"], &["借", "原币", "原幣", "外币", "期末", "debit"]),
-        r("openingForeignAmount", "期初原币余额", &["期初原币余额", "期初原幣餘額", "期初外币余额", "期初余额原币", "期初餘額原幣", "期初原币", "期初原幣", "openingfcy"], &["借", "贷", "貸", "本位币", "本位幣", "期末"]),
-        r("openingForeignDebit", "期初借方原币余额", &["期初借方原币余额", "期初借方原币", "期初原币借方"], &["贷", "貸", "本位币", "本位幣", "期末"]),
-        r("openingForeignCredit", "期初贷方原币余额", &["期初贷方原币余额", "期初贷方原币", "期初原币贷方"], &["借", "本位币", "本位幣", "期末"]),
-        r("closingFunctionalAmount", "期末本位币余额", &["期末本位币余额", "期末余额", "期末餘額", "期末金额", "期末金額", "年末余额", "年末金额", "endbalance", "endingbalance", "closingbalance", "ytdact", "closing"], &["借", "贷", "貸", "原币", "原幣", "外币", "外幣", "期初", "方向", "debit", "credit"]),
-        r("closingFunctionalDebit", "期末借方本位币余额", &["期末借方本位币余额", "期末余额借方", "期末借方余额", "期末借方", "年末余额借方", "年末借方", "closingdr", "closingdebit"], &["贷", "貸", "原币", "原幣", "外币", "期初", "credit"]),
-        r("closingFunctionalCredit", "期末贷方本位币余额", &["期末贷方本位币余额", "期末余额贷方", "期末贷方余额", "期末贷方", "年末余额贷方", "年末贷方", "closingcr", "closingcredit"], &["借", "原币", "原幣", "外币", "期初", "debit"]),
-        r("closingForeignAmount", "期末原币余额", &["期末原币余额", "期末原幣餘額", "期末外币余额", "期末余额原币", "期末餘額原幣", "期末原币", "期末原幣", "原币期末余额", "origclosing", "closingfcy"], &["借", "贷", "貸", "本位币", "本位幣", "期初"]),
-        r("closingForeignDebit", "期末借方原币余额", &["期末借方原币余额", "期末借方原币", "期末原币借方"], &["贷", "貸", "本位币", "本位幣", "期初"]),
-        r("closingForeignCredit", "期末贷方原币余额", &["期末贷方原币余额", "期末贷方原币", "期末原币贷方"], &["借", "本位币", "本位幣", "期初"]),
-        r("ytdFunctionalDebit", "本年累计本位币借方发生额", &["本年本位币累计借方发生额", "本年累计借方", "本年累计借方发生额", "本年借方发生额", "累计借方", "借方发生额", "借方发生", "借方發生", "借方金额", "ytddebit", "ytddr", "perioddr", "perioddebit"], &["贷", "貸", "原币", "原幣", "外币", "外幣", "本期", "期初", "期末", "credit"]),
-        r("ytdFunctionalCredit", "本年累计本位币贷方发生额", &["本年本位币累计贷方发生额", "本年累计贷方", "本年累计贷方发生额", "本年贷方发生额", "累计贷方", "贷方发生额", "贷方发生", "貸方發生", "贷方金额", "ytdcredit", "ytdcr", "periodcr", "periodcredit"], &["借", "原币", "原幣", "外币", "外幣", "本期", "期初", "期末", "debit"]),
-        r("ytdForeignDebit", "本年累计原币借方发生额", &["本年原币累计借方发生额", "本年累计原币借方", "借方发生原币", "借方發生原幣", "原币借方发生额", "借方发生额原币"], &["贷", "貸", "本位币", "本位幣", "本期", "期初", "期末"]),
-        r("ytdForeignCredit", "本年累计原币贷方发生额", &["本年原币累计贷方发生额", "本年累计原币贷方", "贷方发生原币", "貸方發生原幣", "原币贷方发生额", "贷方发生额原币"], &["借", "本位币", "本位幣", "本期", "期初", "期末"]),
-        // SAP 报表型导出只给 MTD（本月）与 YTD（本年）两个净额，没有借贷分列。
-        r("periodFunctionalAmount", "本期本位币净发生额", &["本期净发生", "本期发生额", "本月发生额", "periodactivity", "mtd", "mtdlocalcurr"], &["借", "贷", "貸", "原币", "原幣", "外币", "外幣", "期初", "期末", "本年", "累计", "debit", "credit"]),
-        r("periodFunctionalDebit", "本期本位币借方发生额", &["本期发生借方", "本期借方发生额", "本期本位币借方发生额", "本期借方", "本月借方", "mtddebit"], &["贷", "貸", "原币", "原幣", "外币", "期初", "期末", "本年", "累计", "credit"]),
-        rm("auxiliary", "辅助核算", AUX, NOT_AUX),
-        r("loanId", "借款明细", LOAN_ID, &["金额", "amount", "余额", "balance"]),
-        // 会计期间只在科目余额表上有用：没有日期列时靠它取年份。
-        // 序时账侧一律走 date 列，所以 JE 表里没有这个角色。
-        r("period", "会计期间", &["会计期间", "會計期間", "期间", "期間", "所属期间", "年月", "period", "fiscalperiod"], &["金额", "余额", "amount", "balance"]),
-        r("periodFunctionalCredit", "本期本位币贷方发生额", &["本期发生贷方", "本期贷方发生额", "本期本位币贷方发生额", "本期贷方", "本月贷方", "mtdcredit"], &["借", "原币", "原幣", "外币", "期初", "期末", "本年", "累计", "debit"]),
+    r(
+        "entity",
+        "公司/核算主体",
+        &[
+            "公司代码",
+            "公司代碼",
+            "公司名称",
+            "核算主体",
+            "主体",
+            "company",
+            "companycode",
+            "break segment",
+        ],
+        &["科目", "account"],
+    ),
+    r(
+        "accountCode",
+        "科目编码",
+        &[
+            "科目编码",
+            "科目編碼",
+            "科目代码",
+            "科目代碼",
+            "科目号",
+            "科目編號",
+            "会计科目",
+            "會計科目",
+            "总账科目",
+            "科目段组合",
+            "account",
+            "glaccount",
+            "slaccount",
+            "accountcode",
+            "accountcombination",
+        ],
+        NOT_CODE,
+    ),
+    rm(
+        "accountName",
+        "科目名称",
+        &[
+            "科目名称",
+            "科目名稱",
+            "科目名称一级",
+            "科目名称二级",
+            "科目名称三级",
+            "科目全称",
+            "科目描述",
+            "科目文本",
+            "账户名称",
+            "帳戶名稱",
+            "accountname",
+            "accountdesc",
+            "accountdescription",
+            "gldescription",
+            "slaccountdesc",
+        ],
+        NOT_NAME,
+    ),
+    r(
+        "currency",
+        "原币币种",
+        &[
+            "币种",
+            "幣種",
+            "币别",
+            "幣別",
+            "货币",
+            "貨幣",
+            "原币币种",
+            "交易币种",
+            "currency",
+            "ccy",
+            "currencycode",
+        ],
+        AMT,
+    ),
+    r(
+        "currencyText",
+        "币种线索文本",
+        &[
+            "文本",
+            "科目文本",
+            "账户文本",
+            "帳戶文本",
+            "说明",
+            "說明",
+            "备注",
+            "備註",
+            "描述",
+        ],
+        &["金额", "余额", "amount", "balance"],
+    ),
+    r(
+        "functionalCurrency",
+        "本位币币种",
+        &[
+            "本位币",
+            "本位幣",
+            "功能货币",
+            "记账本位币",
+            "functionalcurrency",
+            "ledgercurrency",
+        ],
+        AMT,
+    ),
+    r(
+        "openingDirection",
+        "期初方向",
+        &["期初方向", "年初方向", "期初余额方向", "openingdrcr"],
+        &["期末", "本期", "本年"],
+    ),
+    r(
+        "closingDirection",
+        "期末方向",
+        &[
+            "期末方向",
+            "年末方向",
+            "期末余额方向",
+            "方向",
+            "closingdrcr",
+            "drcr",
+        ],
+        &["期初", "年初"],
+    ),
+    r(
+        "openingFunctionalAmount",
+        "期初本位币余额",
+        &[
+            "期初本位币余额",
+            "期初余额",
+            "期初餘額",
+            "期初金额",
+            "期初金額",
+            "年初余额",
+            "年初金额",
+            "beginbalance",
+            "beginningbalance",
+            "openingbalance",
+            "opening",
+        ],
+        &[
+            "借", "贷", "貸", "原币", "原幣", "外币", "外幣", "期末", "方向", "debit", "credit",
+        ],
+    ),
+    r(
+        "openingFunctionalDebit",
+        "期初借方本位币余额",
+        &[
+            "期初借方本位币余额",
+            "期初余额借方",
+            "期初借方余额",
+            "期初借方",
+            "年初余额借方",
+            "年初借方",
+            "openingdr",
+            "openingdebit",
+        ],
+        &["贷", "貸", "原币", "原幣", "外币", "期末", "credit"],
+    ),
+    r(
+        "openingFunctionalCredit",
+        "期初贷方本位币余额",
+        &[
+            "期初贷方本位币余额",
+            "期初余额贷方",
+            "期初贷方余额",
+            "期初贷方",
+            "年初余额贷方",
+            "年初贷方",
+            "openingcr",
+            "openingcredit",
+        ],
+        &["借", "原币", "原幣", "外币", "期末", "debit"],
+    ),
+    r(
+        "openingForeignAmount",
+        "期初原币余额",
+        &[
+            "期初原币余额",
+            "期初原幣餘額",
+            "期初外币余额",
+            "期初余额原币",
+            "期初餘額原幣",
+            "期初原币",
+            "期初原幣",
+            "openingfcy",
+        ],
+        &["借", "贷", "貸", "本位币", "本位幣", "期末"],
+    ),
+    r(
+        "openingForeignDebit",
+        "期初借方原币余额",
+        &["期初借方原币余额", "期初借方原币", "期初原币借方"],
+        &["贷", "貸", "本位币", "本位幣", "期末"],
+    ),
+    r(
+        "openingForeignCredit",
+        "期初贷方原币余额",
+        &["期初贷方原币余额", "期初贷方原币", "期初原币贷方"],
+        &["借", "本位币", "本位幣", "期末"],
+    ),
+    r(
+        "closingFunctionalAmount",
+        "期末本位币余额",
+        &[
+            "期末本位币余额",
+            "期末余额",
+            "期末餘額",
+            "期末金额",
+            "期末金額",
+            "年末余额",
+            "年末金额",
+            "endbalance",
+            "endingbalance",
+            "closingbalance",
+            "ytdact",
+            "closing",
+        ],
+        &[
+            "借", "贷", "貸", "原币", "原幣", "外币", "外幣", "期初", "方向", "debit", "credit",
+        ],
+    ),
+    r(
+        "closingFunctionalDebit",
+        "期末借方本位币余额",
+        &[
+            "期末借方本位币余额",
+            "期末余额借方",
+            "期末借方余额",
+            "期末借方",
+            "年末余额借方",
+            "年末借方",
+            "closingdr",
+            "closingdebit",
+        ],
+        &["贷", "貸", "原币", "原幣", "外币", "期初", "credit"],
+    ),
+    r(
+        "closingFunctionalCredit",
+        "期末贷方本位币余额",
+        &[
+            "期末贷方本位币余额",
+            "期末余额贷方",
+            "期末贷方余额",
+            "期末贷方",
+            "年末余额贷方",
+            "年末贷方",
+            "closingcr",
+            "closingcredit",
+        ],
+        &["借", "原币", "原幣", "外币", "期初", "debit"],
+    ),
+    r(
+        "closingForeignAmount",
+        "期末原币余额",
+        &[
+            "期末原币余额",
+            "期末原幣餘額",
+            "期末外币余额",
+            "期末余额原币",
+            "期末餘額原幣",
+            "期末原币",
+            "期末原幣",
+            "原币期末余额",
+            "origclosing",
+            "closingfcy",
+        ],
+        &["借", "贷", "貸", "本位币", "本位幣", "期初"],
+    ),
+    r(
+        "closingForeignDebit",
+        "期末借方原币余额",
+        &["期末借方原币余额", "期末借方原币", "期末原币借方"],
+        &["贷", "貸", "本位币", "本位幣", "期初"],
+    ),
+    r(
+        "closingForeignCredit",
+        "期末贷方原币余额",
+        &["期末贷方原币余额", "期末贷方原币", "期末原币贷方"],
+        &["借", "本位币", "本位幣", "期初"],
+    ),
+    r(
+        "ytdFunctionalDebit",
+        "本年累计本位币借方发生额",
+        &[
+            "本年本位币累计借方发生额",
+            "本年累计借方",
+            "本年累计借方发生额",
+            "本年借方发生额",
+            "累计借方",
+            "借方发生额",
+            "借方发生",
+            "借方發生",
+            "借方金额",
+            "ytddebit",
+            "ytddr",
+            "perioddr",
+            "perioddebit",
+        ],
+        &[
+            "贷", "貸", "原币", "原幣", "外币", "外幣", "本期", "期初", "期末", "credit",
+        ],
+    ),
+    r(
+        "ytdFunctionalCredit",
+        "本年累计本位币贷方发生额",
+        &[
+            "本年本位币累计贷方发生额",
+            "本年累计贷方",
+            "本年累计贷方发生额",
+            "本年贷方发生额",
+            "累计贷方",
+            "贷方发生额",
+            "贷方发生",
+            "貸方發生",
+            "贷方金额",
+            "ytdcredit",
+            "ytdcr",
+            "periodcr",
+            "periodcredit",
+        ],
+        &[
+            "借", "原币", "原幣", "外币", "外幣", "本期", "期初", "期末", "debit",
+        ],
+    ),
+    r(
+        "ytdForeignDebit",
+        "本年累计原币借方发生额",
+        &[
+            "本年原币累计借方发生额",
+            "本年累计原币借方",
+            "借方发生原币",
+            "借方發生原幣",
+            "原币借方发生额",
+            "借方发生额原币",
+        ],
+        &["贷", "貸", "本位币", "本位幣", "本期", "期初", "期末"],
+    ),
+    r(
+        "ytdForeignCredit",
+        "本年累计原币贷方发生额",
+        &[
+            "本年原币累计贷方发生额",
+            "本年累计原币贷方",
+            "贷方发生原币",
+            "貸方發生原幣",
+            "原币贷方发生额",
+            "贷方发生额原币",
+        ],
+        &["借", "本位币", "本位幣", "本期", "期初", "期末"],
+    ),
+    // SAP 报表型导出只给 MTD（本月）与 YTD（本年）两个净额，没有借贷分列。
+    r(
+        "periodFunctionalAmount",
+        "本期本位币净发生额",
+        &[
+            "本期净发生",
+            "本期发生额",
+            "本月发生额",
+            "periodactivity",
+            "mtd",
+            "mtdlocalcurr",
+        ],
+        &[
+            "借", "贷", "貸", "原币", "原幣", "外币", "外幣", "期初", "期末", "本年", "累计",
+            "debit", "credit",
+        ],
+    ),
+    r(
+        "periodFunctionalDebit",
+        "本期本位币借方发生额",
+        &[
+            "本期发生借方",
+            "本期借方发生额",
+            "本期本位币借方发生额",
+            "本期借方",
+            "本月借方",
+            "mtddebit",
+        ],
+        &[
+            "贷", "貸", "原币", "原幣", "外币", "期初", "期末", "本年", "累计", "credit",
+        ],
+    ),
+    rm("auxiliary", "辅助核算", AUX, NOT_AUX),
+    r(
+        "loanId",
+        "借款明细",
+        LOAN_ID,
+        &["金额", "amount", "余额", "balance"],
+    ),
+    // 会计期间只在科目余额表上有用：没有日期列时靠它取年份。
+    // 序时账侧一律走 date 列，所以 JE 表里没有这个角色。
+    r(
+        "period",
+        "会计期间",
+        &[
+            "会计期间",
+            "會計期間",
+            "期间",
+            "期間",
+            "所属期间",
+            "年月",
+            "period",
+            "fiscalperiod",
+        ],
+        &["金额", "余额", "amount", "balance"],
+    ),
+    r(
+        "periodFunctionalCredit",
+        "本期本位币贷方发生额",
+        &[
+            "本期发生贷方",
+            "本期贷方发生额",
+            "本期本位币贷方发生额",
+            "本期贷方",
+            "本月贷方",
+            "mtdcredit",
+        ],
+        &[
+            "借", "原币", "原幣", "外币", "期初", "期末", "本年", "累计", "debit",
+        ],
+    ),
+];
+
+// ────────────────────────────── 借款台账角色 ──────────────────────────────
+
+/// 起算额三兄弟的公共冲突词：挡住授信额度、利息、月供这些**不是占用本金**的金额列。
+/// 05 金陵润庭同时有「授信金额 120000 / 已提款金额 90000」——认错列会按授信额计息。
+const NOT_PRINCIPAL: &[&str] = &[
+    "授信",
+    "额度",
+    "額度",
+    "剩余",
+    "剩餘",
+    "利息",
+    "利率",
+    "月供",
+    "手续费",
+    "保证金",
+    "比例",
+];
+/// 利率列的冲突词：`利率类型` `定价方式` 不是利率值；`利息支出/费用/应付利息` 是账面数不是利率。
+const NOT_RATE: &[&str] = &[
+    "类型", "類型", "形式", "方式", "定价", "定價", "调整", "調整", "支出", "费用", "費用", "应付",
+    "應付", "预提", "預提", "金额", "金額",
+];
+
+/// 借款台账角色。一行是一笔借款。
+///
+/// 这些角色**不进 TB／JE 标准表**（见 `LEDGER_MAPPING_UNIFICATION.md` §3.7）：
+/// 台账不是账表，没有科目、没有借贷方向。但它复用同一套匹配机制
+/// （[`alias_score`] 取最长命中、冲突词一票否决），以及同一套形态整组匹配。
+pub(crate) fn loan_roles() -> &'static [Role] {
+    LOAN_ROLES
+}
+
+static LOAN_ROLES: &[Role] = &[
+    // —— 起算额：三者任一到位即可起算（见 [`Form::any_of`]）——
+    r(
+        "principal",
+        "本金",
+        &[
+            "借款本金",
+            "借款金额",
+            "借款金額",
+            "放款金额",
+            "放款金額",
+            "已提款金额",
+            "已提款",
+            "提款金额",
+            "票面金额",
+            "票面金額",
+            "合同金额",
+            "合同金額",
+            "原币金额",
+            "原幣金額",
+            "借款额",
+            "放款额",
+            "本金",
+            "金额",
+            "金額",
+            "amount",
+            "principal",
+        ],
+        NOT_PRINCIPAL,
+    ),
+    r(
+        "openingPrincipal",
+        "期初余额",
+        &[
+            "期初本金",
+            "期初余额",
+            "期初餘額",
+            "年初余额",
+            "年初餘額",
+            "年初本金",
+            "期初金额",
+            "期初数",
+            "期初",
+        ],
+        &[
+            "期末", "年末", "新增", "归还", "歸還", "减少", "減少", "利息", "利率",
+        ],
+    ),
+    r(
+        "closingPrincipal",
+        "期末余额",
+        &[
+            "期末未偿还本金",
+            "未偿还本金",
+            "未償還本金",
+            "期末余额",
+            "期末餘額",
+            "年末余额",
+            "年末餘額",
+            "未还余额",
+            "未還餘額",
+            "未偿余额",
+            "贷款余额",
+            "貸款餘額",
+            "借款余额",
+            "期末本金",
+            "期末金额",
+            "期末数",
+            "余额",
+            "餘額",
+        ],
+        &["期初", "年初", "利息", "利率"],
+    ),
+    // —— 期间 ——
+    r(
+        "startDate",
+        "起始日",
+        &[
+            "借款起始日",
+            "放款起始日",
+            "放款日期",
+            "放款日",
+            "起息日",
+            "起始日",
+            "借款时间",
+            "借款時間",
+            "借款日期",
+            "起租日",
+            "借款日",
+            "提款日",
+            "开票日",
+            "開票日",
+            "drawdown",
+            "startdate",
+        ],
+        &[
+            "到期",
+            "结束",
+            "結束",
+            "还款",
+            "還款",
+            "归还",
+            "歸還",
+            "重定价",
+            "重定價",
+            "付息",
+        ],
+    ),
+    r(
+        "endDate",
+        "到期日",
+        &[
+            "到期日期",
+            "贷款到期日",
+            "貸款到期日",
+            "到期日",
+            "到期时间",
+            "到期時間",
+            "届满日",
+            "屆滿日",
+            "结束日",
+            "結束日",
+            "maturity",
+            "enddate",
+        ],
+        &["起始", "放款", "起息", "剩余", "剩餘"],
+    ),
+    r(
+        "term",
+        "期限",
+        &[
+            "借款期限",
+            "贷款期限",
+            "貸款期限",
+            "期限",
+            "期数",
+            "期數",
+            "term",
+        ],
+        &["剩余", "剩餘", "天数", "天數", "日期", "起始", "到期"],
+    ),
+    // —— 利率 ——
+    r(
+        "rate",
+        "利率",
+        &[
+            "执行年利率",
+            "執行年利率",
+            "折算年利率",
+            "执行利率",
+            "執行利率",
+            "合同利率",
+            "固定利率",
+            "年利率",
+            "贴现率",
+            "貼現率",
+            "利率",
+            "利息",
+            "rate",
+        ],
+        NOT_RATE,
+    ),
+    r(
+        "rateType",
+        "利率类型",
+        &["利率类型", "利率類型", "利率形式", "定价方式", "定價方式"],
+        &[],
+    ),
+    // —— 期间发生额 ——
+    r(
+        "drawdownAmount",
+        "本期新增",
+        &[
+            "本期新增",
+            "本年新增",
+            "新增本金",
+            "新增借款",
+            "本期增加",
+            "本期借款",
+            "借款增加",
+        ],
+        &["日期", "归还", "歸還", "减少", "減少", "期初", "期末"],
+    ),
+    r(
+        "repaymentAmount",
+        "本期归还",
+        &[
+            "累计归还本金",
+            "累計歸還本金",
+            "累计归还",
+            "本期归还",
+            "本期歸還",
+            "本年归还",
+            "还款本金",
+            "還款本金",
+            "归还本金",
+            "本期减少",
+            "本期減少",
+            "归还",
+            "歸還",
+            "已还",
+            "已還",
+            "偿还",
+            "償還",
+        ],
+        &["日期", "方式", "安排", "新增", "增加", "利息"],
+    ),
+    // —— 以下角色不参与形态判定，但可以映射：出表、复核提示、利率推算要用 ——
+    r(
+        "loanId",
+        "借款标识",
+        &[
+            "借款合同编号",
+            "借款合同号",
+            "合同编号",
+            "合同編號",
+            "借款编号",
+            "借款編號",
+            "借据号",
+            "借據號",
+            "登记编号",
+            "登記編號",
+            "合同号",
+            "合同號",
+            "编号",
+            "編號",
+            "loanid",
+            "contractno",
+        ],
+        &["序号", "序號", "行号", "行號"],
+    ),
+    r(
+        "lender",
+        "贷款方",
+        &[
+            "贷款银行",
+            "貸款銀行",
+            "放款银行",
+            "放款銀行",
+            "贷款机构",
+            "貸款機構",
+            "贷款人",
+            "貸款人",
+            "债权人",
+            "債權人",
+            "出借方",
+            "金融机构",
+            "金融機構",
+            "交易对手",
+            "交易對手",
+            "承兑行",
+            "承兌行",
+            "贷款方",
+            "貸款方",
+            "银行",
+            "銀行",
+            "lender",
+        ],
+        &["金额", "金額", "余额", "餘額", "利率", "日期"],
+    ),
+    r(
+        "currency",
+        "币种",
+        &["币种", "幣種", "币别", "幣別", "货币", "貨幣", "currency"],
+        &["金额", "金額", "余额", "餘額", "汇率", "匯率"],
+    ),
+    r(
+        "drawdownDate",
+        "新增借款日期",
+        &["新增借款日期", "新增日期", "提款日期"],
+        &["金额", "金額"],
+    ),
+    r(
+        "repaymentDate",
+        "还款日期",
+        &[
+            "还款日期",
+            "還款日期",
+            "归还日期",
+            "歸還日期",
+            "还款日",
+            "還款日",
+            "归还日",
+            "歸還日",
+        ],
+        &["金额", "金額", "方式"],
+    ),
+    r(
+        "repaymentMethod",
+        "还本方式",
+        &[
+            "还本付息方式",
+            "还本方式",
+            "還本方式",
+            "还款方式",
+            "還款方式",
+            "还本安排",
+            "還本安排",
+        ],
+        &["日期", "金额", "金額"],
+    ),
+    r(
+        "loanStatus",
+        "借款状态",
+        &[
+            "借款状态",
+            "借款狀態",
+            "合同状态",
+            "合同狀態",
+            "存续状态",
+            "存續狀態",
+            "状态",
+            "狀態",
+        ],
+        &[],
+    ),
+    r(
+        "benchmarkRate",
+        "基准利率",
+        &["基准利率", "基準利率", "定价基准", "定價基準", "lpr"],
+        &["加点", "加點", "类型", "類型"],
+    ),
+    r(
+        "spreadBps",
+        "加/减点（BP）",
+        &[
+            "加减点",
+            "加減點",
+            "加点",
+            "加點",
+            "基点",
+            "基點",
+            "bp",
+            "bps",
+        ],
+        &["基准", "基準", "利率类型"],
+    ),
+    r(
+        "remark",
+        "备注",
+        &["备注", "備註", "说明", "說明", "摘要", "remark"],
+        &["金额", "金額", "日期"],
+    ),
 ];
 
 /// 按标准名取角色定义。
@@ -168,18 +1319,26 @@ pub(crate) fn role_of(kind: &str, name: &str) -> Option<&'static Role> {
     roles(kind).iter().find(|x| x.name == name)
 }
 
-/// `kind` 只接受 `"je"` 与 `"tb"`，其余一律当作 TB——调用方都是内部代码，
+/// `kind` 接受 `"je"`、`"tb"`、`"loan"`，其余一律当作 TB——调用方都是内部代码，
 /// 静默兜底比 panic 安全。
 pub(crate) fn roles(kind: &str) -> &'static [Role] {
-    if kind == "je" { je_roles() } else { tb_roles() }
+    match kind {
+        "je" => je_roles(),
+        "loan" => loan_roles(),
+        _ => tb_roles(),
+    }
 }
 
 // ────────────────────────────── 表头归一化与匹配 ──────────────────────────────
 
 /// 表头归一化：去掉空白与各类分隔符，转小写。与 `fx::normalize_header` 行为一致。
 pub(crate) fn normalize_header(v: &str) -> String {
-    v.to_lowercase()
-        .replace([' ', '\n', '\r', '\t', '_', '-', '—', '/', '\\', '（', '）', '(', ')', '．', '.'], "")
+    v.to_lowercase().replace(
+        [
+            ' ', '\n', '\r', '\t', '_', '-', '—', '/', '\\', '（', '）', '(', ')', '．', '.',
+        ],
+        "",
+    )
 }
 
 /// 把表头切成语义段。双语表头（`科目描述 Description`、`过账日期\nPosting Date`）
@@ -223,7 +1382,11 @@ pub(crate) fn alias_score(role: &Role, header: &str) -> Option<f64> {
     if n.is_empty() {
         return None;
     }
-    if role.conflicts.iter().any(|c| n.contains(&normalize_header(c))) {
+    if role
+        .conflicts
+        .iter()
+        .any(|c| n.contains(&normalize_header(c)))
+    {
         return None;
     }
     // 金额角色只认本位币与原币两套口径，集团货币那一套整体排除。
@@ -265,7 +1428,9 @@ fn disambiguate_directions(
     headers: &[String],
     assigned: &mut BTreeMap<usize, &'static str>,
 ) {
-    if kind == "je" {
+    // 方向列是 TB 独有的。序时账没有期初/期末方向；借款台账根本没有方向概念，
+    // 掉进来会把「利率类型」这类列按位置硬派成方向列。
+    if kind != "tb" {
         return;
     }
     let opening = role_of("tb", "openingDirection").expect("角色存在");
@@ -316,7 +1481,11 @@ pub(crate) fn suggest_roles(kind: &str, headers: &[String]) -> BTreeMap<usize, &
         }
     }
     // 高分优先占位，低分让路。
-    hits.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+    hits.sort_by(|a, b| {
+        b.2.partial_cmp(&a.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
     let mut used: HashSet<&'static str> = HashSet::new();
     let mut out = BTreeMap::new();
     for (i, name, _) in hits {
@@ -365,7 +1534,12 @@ pub(crate) fn score_columns(
                 })
                 .copied()
                 .collect();
-            list.push(Candidate { column: i, header: h.clone(), score, hits });
+            list.push(Candidate {
+                column: i,
+                header: h.clone(),
+                score,
+                hits,
+            });
         }
         list.sort_by(|a, b| {
             b.score
@@ -466,6 +1640,10 @@ impl Tool {
 /// `entity` 是可选：金标 2026-08-24 修订时把它从 required 降为可选，
 /// 汇兑损益仍然自己要求它（或用固定主体顶替），那是工具层加严。
 pub(crate) fn identity_required(kind: &str) -> &'static [&'static str] {
+    // 借款台账不是账表，没有金标身份槽——必填全部由形态（[`loan_forms`]）决定。
+    if kind == "loan" {
+        return &[];
+    }
     if kind == "je" {
         &["date", "id", "accountCode", "accountName", "summary"]
     } else {
@@ -495,7 +1673,11 @@ pub(crate) fn missing_required(tool: Tool, kind: &str, mapped: &HashSet<&str>) -
             return;
         }
         if let Some(r) = role_of(kind, role) {
-            out.push(MissingRole { role, label: r.label, from_gold });
+            out.push(MissingRole {
+                role,
+                label: r.label,
+                from_gold,
+            });
         }
     };
     for role in identity_required(kind) {
@@ -586,7 +1768,11 @@ pub(crate) fn signed_amount(v: &AmountInputs, convention: SignConvention) -> f64
         // 写成 `-abs()` 会得到 −50，和被冲的那笔同号，两笔永远抵不掉。
         // 这是看账小工具当年踩过的坑，统一时以它的写法为准。
         (Some(d), SignConvention::Unsigned) if !d.trim().is_empty() => {
-            if is_credit_direction(d) { -amount } else { amount }
+            if is_credit_direction(d) {
+                -amount
+            } else {
+                amount
+            }
         }
         _ => amount,
     }
@@ -596,6 +1782,35 @@ pub(crate) fn signed_amount(v: &AmountInputs, convention: SignConvention) -> f64
 /// 业务层拿到有符号净额后用它翻个面，不必各自记住符号。
 pub(crate) fn credit_positive(signed: f64) -> f64 {
     -signed
+}
+
+/// 界面的科目分类清单按整行取值生成，天然包含非末级汇总科目；而 TB 业务
+/// 计算只读末级行（见 [`tb_leaf_mask`]）。用户在「6603 财务费用」这样的汇总
+/// 行上手工指定的角色，靠**编码前缀继承**落到末级行：找编码是本科目严格
+/// 前缀的最近上级，取最长前缀（最具体的上级优先）。
+///
+/// 仅限**纯数字编码**参与：科目首词是普通文本时，`starts_with` 的偶然前缀
+/// （「利息」不是「利息收入」的上级）会误继承。也只应在自动识别给不出结论
+/// 时调用——自动有结论的科目不该被上级的指定覆盖。
+pub(crate) fn inherited_role_by_code_prefix<'a>(
+    code: &str,
+    roles: impl Iterator<Item = (&'a str, &'a str)>,
+    key_of: impl Fn(&str) -> &str,
+) -> Option<String> {
+    if code.is_empty() || !code.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    roles
+        .filter_map(|(candidate, role)| {
+            let parent = key_of(candidate);
+            let usable = !parent.is_empty()
+                && parent.chars().all(|c| c.is_ascii_digit())
+                && parent.len() < code.len()
+                && code.starts_with(parent);
+            (usable && !role.is_empty() && role != "unassigned").then_some((parent, role))
+        })
+        .max_by(|(a, _), (b, _)| a.len().cmp(&b.len()))
+        .map(|(_, role)| role.to_owned())
 }
 
 /// 标记 TB 中的末级明细科目。返回值与 `rows` 一一对应：`true` 表示该行是末级。
@@ -645,7 +1860,10 @@ pub(crate) fn tb_leaf_mask(
     let mut by_entity = BTreeMap::<String, BTreeSet<String>>::new();
     for (entity, code) in &identities {
         if !code.is_empty() {
-            by_entity.entry(entity.clone()).or_default().insert(code.clone());
+            by_entity
+                .entry(entity.clone())
+                .or_default()
+                .insert(code.clone());
         }
     }
     let mut parents = HashSet::<(String, String)>::new();
@@ -673,6 +1891,19 @@ pub(crate) fn migrate_role_name(kind: &str, old: &str) -> &'static str {
     // 先看是不是已经是标准名。
     if let Some(role) = role_of(kind, old) {
         return role.name;
+    }
+    // 借款台账自成一套旧名。前端面板此前用的角色名（maturityDate / fixedRate …）
+    // 与引擎实际识别出来的（endDate / rate …）根本不是一套，映射建议落不进格子——
+    // 统一到台账角色表之后，历史保存的映射靠这里读回来。
+    if kind == "loan" {
+        return match old {
+            "outstanding" => "closingPrincipal", // 「未偿还本金」= 期末余额
+            "maturityDate" => "endDate",
+            "fixedRate" => "rate",
+            "benchmark" => "benchmarkRate",
+            "account" => "loanId",
+            _ => "",
+        };
     }
     let je = kind == "je";
     match (old, je) {
@@ -749,7 +1980,10 @@ fn is_placeholder(s: &str) -> bool {
 /// 此前看账那份只去引号和千分位、失败一律返回 0——`(500)`、`1,234CR` 全都
 /// 静默变成 0，金额无声无息地丢掉。能力沉到这里之后三个工具共用同一套。
 pub(crate) fn parse_amount(raw: &str) -> Result<Option<f64>, String> {
-    let mut s = raw.trim().trim_matches('"').replace([',', '，', ' ', '\u{a0}'], "");
+    let mut s = raw
+        .trim()
+        .trim_matches('"')
+        .replace([',', '，', ' ', '\u{a0}'], "");
     if s.is_empty() || is_placeholder(&s) {
         return Ok(None);
     }
@@ -795,9 +2029,14 @@ pub(crate) fn parse_date(raw: &str) -> Option<NaiveDate> {
         return None;
     }
     const DATE_FORMATS: &[&str] = &[
-        "%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d", "%d/%m/%Y", "%d-%m-%Y", "%d-%b-%Y", "%d %b %Y",
+        "%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d", "%d/%m/%Y", "%d-%m-%Y", "%d-%b-%Y",
+        "%d %b %Y",
     ];
-    const DATETIME_FORMATS: &[&str] = &["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y/%m/%d %H:%M:%S"];
+    const DATETIME_FORMATS: &[&str] = &[
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+    ];
     for format in DATETIME_FORMATS {
         if let Ok(value) = NaiveDateTime::parse_from_str(text, format) {
             return Some(value.date());
@@ -847,7 +2086,9 @@ fn column_magnitude(rows: &[Vec<String>], column: usize) -> Option<f64> {
     let mut total = 0.0;
     let mut seen = 0usize;
     for row in rows.iter().take(MAGNITUDE_SAMPLE_ROWS) {
-        let Some(text) = row.get(column) else { continue };
+        let Some(text) = row.get(column) else {
+            continue;
+        };
         if let Some(v) = cell_number(text) {
             if v != 0.0 {
                 total += v.abs();
@@ -875,11 +2116,14 @@ pub(crate) fn disambiguate_cumulative(
     rows: &[Vec<String>],
     assigned: &mut BTreeMap<usize, &'static str>,
 ) {
-    if kind == "je" || rows.is_empty() {
+    // 本年累计与本期发生的区分只有 TB 才有。
+    if kind != "tb" || rows.is_empty() {
         return;
     }
     for (ytd_name, period_name) in CUMULATIVE_PAIRS {
-        let Some(ytd) = role_of("tb", ytd_name) else { continue };
+        let Some(ytd) = role_of("tb", ytd_name) else {
+            continue;
+        };
         // 候选：能匹配本年累计角色，且没有被别的角色占走的列。
         let mut candidates: Vec<(usize, f64)> = headers
             .iter()
@@ -994,6 +2238,12 @@ pub(crate) struct Form {
     pub(crate) label: &'static str,
     /// 必填槽。每个槽是一组角色，组内全部到齐才算该槽满足。
     pub(crate) required: &'static [&'static [&'static str]],
+    /// 必填「任一即可」槽：组内**至少一个**到位即满足。
+    ///
+    /// 借款台账的起算额（本金｜期初余额｜期末余额）是这种槽——三者都是"某个时点的
+    /// 占用本金"，在"全期恒定"的假设下给任意一个都能起算，不必同时给。
+    /// TB／JE 没有这种槽，两张表的 [`Form`] 里一律留空。
+    pub(crate) any_of: &'static [&'static [&'static str]],
     /// 可选槽。**同样整组**：要么整组给全，要么整组不给；只给一半算无效。
     pub(crate) optional: &'static [&'static [&'static str]],
 }
@@ -1008,62 +2258,90 @@ pub(crate) fn tb_forms() -> &'static [Form] {
 }
 
 static TB_FORMS: &[Form] = &[
-        Form {
-            id: "TB1",
-            label: "本位币净额",
-            required: &[&["openingFunctionalAmount"], &["closingFunctionalAmount"], YTD_F],
-            optional: &[YTD_X],
-        },
-        Form {
-            id: "TB2",
-            label: "方向＋本位币净额",
-            required: &[
-                &["openingDirection", "openingFunctionalAmount"],
-                &["closingDirection", "closingFunctionalAmount"],
-                YTD_F,
+    Form {
+        id: "TB1",
+        label: "本位币净额",
+        any_of: &[],
+        required: &[
+            &["openingFunctionalAmount"],
+            &["closingFunctionalAmount"],
+            YTD_F,
+        ],
+        optional: &[YTD_X],
+    },
+    Form {
+        id: "TB2",
+        label: "方向＋本位币净额",
+        any_of: &[],
+        required: &[
+            &["openingDirection", "openingFunctionalAmount"],
+            &["closingDirection", "closingFunctionalAmount"],
+            YTD_F,
+        ],
+        optional: &[YTD_X],
+    },
+    Form {
+        id: "TB3",
+        label: "本位币借贷分列",
+        any_of: &[],
+        required: &[
+            &["openingFunctionalDebit", "openingFunctionalCredit"],
+            &["closingFunctionalDebit", "closingFunctionalCredit"],
+            YTD_F,
+        ],
+        optional: &[YTD_X],
+    },
+    Form {
+        id: "TB4",
+        label: "本位币净额＋原币净额",
+        any_of: &[],
+        required: &[
+            &["openingFunctionalAmount", "openingForeignAmount"],
+            &["closingFunctionalAmount", "closingForeignAmount"],
+            YTD_F,
+        ],
+        optional: &[YTD_X],
+    },
+    Form {
+        id: "TB5",
+        label: "方向＋本位币净额＋原币净额",
+        any_of: &[],
+        required: &[
+            &[
+                "openingDirection",
+                "openingFunctionalAmount",
+                "openingForeignAmount",
             ],
-            optional: &[YTD_X],
-        },
-        Form {
-            id: "TB3",
-            label: "本位币借贷分列",
-            required: &[
-                &["openingFunctionalDebit", "openingFunctionalCredit"],
-                &["closingFunctionalDebit", "closingFunctionalCredit"],
-                YTD_F,
+            &[
+                "closingDirection",
+                "closingFunctionalAmount",
+                "closingForeignAmount",
             ],
-            optional: &[YTD_X],
-        },
-        Form {
-            id: "TB4",
-            label: "本位币净额＋原币净额",
-            required: &[
-                &["openingFunctionalAmount", "openingForeignAmount"],
-                &["closingFunctionalAmount", "closingForeignAmount"],
-                YTD_F,
+            YTD_F,
+        ],
+        optional: &[YTD_X],
+    },
+    Form {
+        id: "TB6",
+        label: "本位币与原币双借贷分列",
+        any_of: &[],
+        required: &[
+            &[
+                "openingFunctionalDebit",
+                "openingFunctionalCredit",
+                "openingForeignDebit",
+                "openingForeignCredit",
             ],
-            optional: &[YTD_X],
-        },
-        Form {
-            id: "TB5",
-            label: "方向＋本位币净额＋原币净额",
-            required: &[
-                &["openingDirection", "openingFunctionalAmount", "openingForeignAmount"],
-                &["closingDirection", "closingFunctionalAmount", "closingForeignAmount"],
-                YTD_F,
+            &[
+                "closingFunctionalDebit",
+                "closingFunctionalCredit",
+                "closingForeignDebit",
+                "closingForeignCredit",
             ],
-            optional: &[YTD_X],
-        },
-        Form {
-            id: "TB6",
-            label: "本位币与原币双借贷分列",
-            required: &[
-                &["openingFunctionalDebit", "openingFunctionalCredit", "openingForeignDebit", "openingForeignCredit"],
-                &["closingFunctionalDebit", "closingFunctionalCredit", "closingForeignDebit", "closingForeignCredit"],
-                YTD_F,
-            ],
-            optional: &[YTD_X],
-        },
+            YTD_F,
+        ],
+        optional: &[YTD_X],
+    },
 ];
 
 /// JE 三型。
@@ -1076,31 +2354,94 @@ pub(crate) fn je_forms() -> &'static [Form] {
 // 三型同时成立时该认最强的那个——借贷分列能推出净额，反之不行；
 // 有方向列就该判方向型，判成纯净额型会与金标的类型表对不上。
 static JE_FORMS: &[Form] = &[
-        Form {
-            id: "JE3",
-            label: "本位币净额（借正贷负）",
-            required: &[&["functionalAmount"]],
-            optional: &[&["foreignAmount"]],
-        },
-        Form {
-            id: "JE2",
-            label: "方向＋本位币净额",
-            required: &[&["direction", "functionalAmount"]],
-            optional: &[&["foreignAmount"]],
-        },
-        Form {
-            id: "JE1",
-            label: "本位币借贷分列",
-            // 借贷分列本身已表达方向，不再要求方向列——实测 9 份序时账里
-            // 借贷分列的那 6 份**没有一份带方向列**，金标 2026-08-24 修订时
-            // 也把型一的方向列去掉了。有方向列时它只作校验。
-            required: &[&["functionalDebit", "functionalCredit"]],
-            optional: &[&["foreignDebit", "foreignCredit"]],
-        },
+    Form {
+        id: "JE3",
+        label: "本位币净额（借正贷负）",
+        any_of: &[],
+        required: &[&["functionalAmount"]],
+        optional: &[&["foreignAmount"]],
+    },
+    Form {
+        id: "JE2",
+        label: "方向＋本位币净额",
+        any_of: &[],
+        required: &[&["direction", "functionalAmount"]],
+        optional: &[&["foreignAmount"]],
+    },
+    Form {
+        id: "JE1",
+        label: "本位币借贷分列",
+        // 借贷分列本身已表达方向，不再要求方向列——实测 9 份序时账里
+        // 借贷分列的那 6 份**没有一份带方向列**，金标 2026-08-24 修订时
+        // 也把型一的方向列去掉了。有方向列时它只作校验。
+        any_of: &[],
+        required: &[&["functionalDebit", "functionalCredit"]],
+        optional: &[&["foreignDebit", "foreignCredit"]],
+    },
+];
+
+/// 借款台账四型：A／B／C／D。
+///
+/// 四型的共同点：起算额（[`Form::any_of`]）、起始日、利率三样必给；
+/// 区别只在**怎么确定计息终点**——到期日（A 型）、期限（B 型），
+/// 或者靠期间发生额还原本金变动（C 型从期初推、D 型从期末推）。
+///
+/// **无固定期限借款不纳入**：只有起算额＋起始日＋利率、既无到期日期限也无
+/// 期间发生额的那一类（股东借款、关联方拆借、集团资金池、循环贷、永续债），
+/// 当前不在测算范围内。它落在「最接近 A 型、缺到期日」的未命中态，
+/// 不静默当成某一型放行。以后要纳入直接往表里加一型即可。
+pub(crate) fn loan_forms() -> &'static [Form] {
+    LOAN_FORMS
+}
+
+// 数组顺序同样是**从弱到强**（后定义的型在同分时优先）：A ＞ B ＞ C ＞ D。
+// 到期日是直接列示的，比拿期限推算准，所以两者都在时认 A 型；
+// 既有到期日又有期间发生额时（04 深圳前湾）也认 A 型，四栏转为勾稽校验。
+static LOAN_FORMS: &[Form] = &[
+    Form {
+        id: "D",
+        label: "期末余额＋期间发生额",
+        required: &[
+            &["startDate"],
+            &["rate"],
+            &["drawdownAmount", "repaymentAmount"],
+        ],
+        any_of: &[&["closingPrincipal", "principal"]],
+        optional: &[&["rateType"]],
+    },
+    Form {
+        id: "C",
+        label: "期初余额＋期间发生额",
+        required: &[
+            &["startDate"],
+            &["rate"],
+            &["drawdownAmount", "repaymentAmount"],
+        ],
+        any_of: &[&["openingPrincipal", "principal"]],
+        optional: &[&["rateType"]],
+    },
+    Form {
+        id: "B",
+        label: "起始日＋期限",
+        required: &[&["startDate"], &["term"], &["rate"]],
+        any_of: &[&["principal", "openingPrincipal"]],
+        optional: &[&["rateType"]],
+    },
+    Form {
+        id: "A",
+        label: "起始日＋到期日",
+        required: &[&["startDate"], &["endDate"], &["rate"]],
+        any_of: &[&["principal", "openingPrincipal"]],
+        optional: &[&["rateType"]],
+    },
 ];
 
 pub(crate) fn forms(kind: &str) -> &'static [Form] {
-    if kind == "je" { je_forms() } else { tb_forms() }
+    match kind {
+        "je" => je_forms(),
+        "loan" => loan_forms(),
+        _ => tb_forms(),
+    }
 }
 
 /// 一次形态匹配的结果。
@@ -1110,6 +2451,8 @@ pub(crate) struct FormMatch {
     pub(crate) label: &'static str,
     /// 必填槽缺失的角色。空即完整命中。
     pub(crate) missing: Vec<&'static str>,
+    /// 「任一即可」槽一个都没给：整组列出来，提示语要说「至少映射一个」。
+    pub(crate) missing_any: Vec<&'static [&'static str]>,
     /// 可选槽给了一半的角色——**这是错误不是缺省**，要告警。
     pub(crate) partial_optional: Vec<&'static str>,
     /// 完整命中：必填槽全满，且可选槽没有半拉子。
@@ -1152,6 +2495,13 @@ pub(crate) fn match_forms(kind: &str, mapped: &HashSet<&str>) -> Vec<FormMatch> 
         {
             missing.clear();
         }
+        // 「任一即可」槽：组内一个都没给才算缺，给了任意一个就满足。
+        let mut missing_any: Vec<&'static [&'static str]> = Vec::new();
+        for slot in f.any_of {
+            if !slot.iter().any(|role| mapped.contains(role)) {
+                missing_any.push(slot);
+            }
+        }
         let mut partial = Vec::new();
         for slot in f.optional {
             let (hit, miss) = slot_state(slot, mapped);
@@ -1159,12 +2509,13 @@ pub(crate) fn match_forms(kind: &str, mapped: &HashSet<&str>) -> Vec<FormMatch> 
                 partial.extend(miss);
             }
         }
-        let complete = missing.is_empty() && partial.is_empty();
+        let complete = missing.is_empty() && missing_any.is_empty() && partial.is_empty();
         out.push((
             FormMatch {
                 form: f.id,
                 label: f.label,
                 missing,
+                missing_any,
                 partial_optional: partial,
                 complete,
             },
@@ -1176,7 +2527,10 @@ pub(crate) fn match_forms(kind: &str, mapped: &HashSet<&str>) -> Vec<FormMatch> 
     out.sort_by(|a, b| {
         b.0.complete
             .cmp(&a.0.complete)
-            .then(a.0.missing.len().cmp(&b.0.missing.len()))
+            .then(
+                (a.0.missing.len() + a.0.missing_any.len())
+                    .cmp(&(b.0.missing.len() + b.0.missing_any.len())),
+            )
             .then(a.0.partial_optional.len().cmp(&b.0.partial_optional.len()))
             .then(b.1.cmp(&a.1))
     });
@@ -1198,6 +2552,7 @@ pub(crate) fn resolve_form(kind: &str, mapped: &HashSet<&str>) -> FormVerdict {
         form: "",
         label: "",
         missing: Vec::new(),
+        missing_any: Vec::new(),
         partial_optional: Vec::new(),
         complete: false,
     });
@@ -1219,6 +2574,10 @@ pub(crate) fn describe_incomplete(kind: &str, m: &FormMatch) -> String {
     if !m.missing.is_empty() {
         let names: Vec<String> = m.missing.iter().map(|x| label(x)).collect();
         parts.push(format!("缺少「{}」", names.join("」「")));
+    }
+    for slot in &m.missing_any {
+        let names: Vec<String> = slot.iter().map(|x| label(x)).collect();
+        parts.push(format!("「{}」至少映射一个", names.join("」「")));
     }
     if !m.partial_optional.is_empty() {
         let names: Vec<String> = m.partial_optional.iter().map(|x| label(x)).collect();
@@ -1350,7 +2709,10 @@ where
         let code = *codes.iter().next().expect("codes 非空");
         return CurrencyColumn::Functional { code };
     }
-    CurrencyColumn::Foreign { codes, has_blank: blank > 0 }
+    CurrencyColumn::Foreign {
+        codes,
+        has_blank: blank > 0,
+    }
 }
 
 /// 本位币被用户改掉之后的反判。
@@ -1366,7 +2728,10 @@ pub(crate) fn reclassify_against_functional(
             if f != code {
                 let mut codes = BTreeSet::new();
                 codes.insert(code);
-                return CurrencyColumn::Foreign { codes, has_blank: false };
+                return CurrencyColumn::Foreign {
+                    codes,
+                    has_blank: false,
+                };
             }
         }
         return CurrencyColumn::Functional { code };
@@ -1746,6 +3111,37 @@ pub(crate) fn normalize_name(value: &str) -> String {
         .collect()
 }
 
+/// 仅允许同主体、两张账表都存在且各自唯一的科目名称作为缺失编码的回退键。
+/// 输入编码必须来自已确认映射列，不能从名称中猜测；不用于模糊匹配。
+pub(crate) fn validated_account_name_keys(
+    tb: &[(String, String, String)],
+    je: &[(String, String, String)],
+) -> std::collections::HashSet<(String, String)> {
+    let collect = |rows: &[(String, String, String)]| {
+        let mut index =
+            std::collections::HashMap::<(String, String), std::collections::HashSet<String>>::new();
+        for (entity, code, name) in rows {
+            let name = normalize_name(name);
+            if !name.is_empty() {
+                index
+                    .entry((entity.trim().to_owned(), name))
+                    .or_default()
+                    .insert(code.trim().to_owned());
+            }
+        }
+        index
+    };
+    let left = collect(tb);
+    let right = collect(je);
+    left.into_iter()
+        .filter_map(|(key, codes)| {
+            let other = right.get(&key)?;
+            (codes.len() == 1 && other.len() == 1 && (codes.contains("") || other.contains("")))
+                .then_some(key)
+        })
+        .collect()
+}
+
 /// 从一整张表算出它的借贷符号口径。**五个工具共用这一个入口。**
 ///
 /// 此前内核只提供投票函数这类**原料**（[`je_sign_evidence_debit_credit`] 等），
@@ -1917,88 +3313,436 @@ pub(crate) fn sign_is_trustworthy(e: &SignEvidence) -> bool {
 // 新收到一种形态就往这里加一条——准确率掉了就说明别名或冲突词要补。
 
 /// (名称, 表头, 期望角色对照)。`""` 表示这一列不该映射到任何角色。
-type Fixture = (&'static str, &'static [&'static str], &'static [&'static str]);
+type Fixture = (
+    &'static str,
+    &'static [&'static str],
+    &'static [&'static str],
+);
 
 const TB_FIXTURES: &[Fixture] = &[
     (
         "01 北重精工（用友，只标外币）",
-        &["科目编码", "科目名称", "辅助核算", "币种", "方向", "期初余额(原币)", "期初余额", "借方发生额", "贷方发生额", "期末余额(原币)", "期末余额"],
-        &["accountCode", "accountName", "auxiliary", "currency", "closingDirection", "openingForeignAmount", "openingFunctionalAmount", "ytdFunctionalDebit", "ytdFunctionalCredit", "closingForeignAmount", "closingFunctionalAmount"],
+        &[
+            "科目编码",
+            "科目名称",
+            "辅助核算",
+            "币种",
+            "方向",
+            "期初余额(原币)",
+            "期初余额",
+            "借方发生额",
+            "贷方发生额",
+            "期末余额(原币)",
+            "期末余额",
+        ],
+        &[
+            "accountCode",
+            "accountName",
+            "auxiliary",
+            "currency",
+            "closingDirection",
+            "openingForeignAmount",
+            "openingFunctionalAmount",
+            "ytdFunctionalDebit",
+            "ytdFunctionalCredit",
+            "closingForeignAmount",
+            "closingFunctionalAmount",
+        ],
     ),
     (
         "02 泓源化工（用友，纯本币）",
-        &["科目代码", "科目名称", "方向", "期初余额", "借方发生额", "贷方发生额", "期末余额"],
-        &["accountCode", "accountName", "closingDirection", "openingFunctionalAmount", "ytdFunctionalDebit", "ytdFunctionalCredit", "closingFunctionalAmount"],
+        &[
+            "科目代码",
+            "科目名称",
+            "方向",
+            "期初余额",
+            "借方发生额",
+            "贷方发生额",
+            "期末余额",
+        ],
+        &[
+            "accountCode",
+            "accountName",
+            "closingDirection",
+            "openingFunctionalAmount",
+            "ytdFunctionalDebit",
+            "ytdFunctionalCredit",
+            "closingFunctionalAmount",
+        ],
     ),
     (
         "03 陇能建设（方向列在末尾）",
-        &["科目编码", "科目名称", "期初余额", "借方发生额", "贷方发生额", "期末余额", "方向"],
-        &["accountCode", "accountName", "openingFunctionalAmount", "ytdFunctionalDebit", "ytdFunctionalCredit", "closingFunctionalAmount", "closingDirection"],
+        &[
+            "科目编码",
+            "科目名称",
+            "期初余额",
+            "借方发生额",
+            "贷方发生额",
+            "期末余额",
+            "方向",
+        ],
+        &[
+            "accountCode",
+            "accountName",
+            "openingFunctionalAmount",
+            "ytdFunctionalDebit",
+            "ytdFunctionalCredit",
+            "closingFunctionalAmount",
+            "closingDirection",
+        ],
     ),
     (
         "04 恒澜重工（SAP，借贷分列＋原币期末）",
-        &["公司代码 Company", "科目 Account", "科目描述 Description", "期初余额(借) Opening Dr", "期初余额(贷) Opening Cr", "借方发生 Debit", "贷方发生 Credit", "期末余额(借) Closing Dr", "期末余额(贷) Closing Cr", "币种 Ccy", "原币期末余额 Orig Closing", "记账汇率 Rate"],
-        &["entity", "accountCode", "accountName", "openingFunctionalDebit", "openingFunctionalCredit", "ytdFunctionalDebit", "ytdFunctionalCredit", "closingFunctionalDebit", "closingFunctionalCredit", "currency", "closingForeignAmount", ""],
+        &[
+            "公司代码 Company",
+            "科目 Account",
+            "科目描述 Description",
+            "期初余额(借) Opening Dr",
+            "期初余额(贷) Opening Cr",
+            "借方发生 Debit",
+            "贷方发生 Credit",
+            "期末余额(借) Closing Dr",
+            "期末余额(贷) Closing Cr",
+            "币种 Ccy",
+            "原币期末余额 Orig Closing",
+            "记账汇率 Rate",
+        ],
+        &[
+            "entity",
+            "accountCode",
+            "accountName",
+            "openingFunctionalDebit",
+            "openingFunctionalCredit",
+            "ytdFunctionalDebit",
+            "ytdFunctionalCredit",
+            "closingFunctionalDebit",
+            "closingFunctionalCredit",
+            "currency",
+            "closingForeignAmount",
+            "",
+        ],
     ),
     (
         "06 艾维特苏州（Oracle EBS，两列同名方向）",
-        &["科目段组合 Account Combination", "科目描述 Description", "期初余额 Opening", "方向 Dr/Cr", "借方发生 Debits", "贷方发生 Credits", "期末余额 Closing", "方向 Dr/Cr", "币种 Ccy", "原币期末余额 Orig Closing", "记账汇率 Rate"],
-        &["accountCode", "accountName", "openingFunctionalAmount", "openingDirection", "ytdFunctionalDebit", "ytdFunctionalCredit", "closingFunctionalAmount", "closingDirection", "currency", "closingForeignAmount", ""],
+        &[
+            "科目段组合 Account Combination",
+            "科目描述 Description",
+            "期初余额 Opening",
+            "方向 Dr/Cr",
+            "借方发生 Debits",
+            "贷方发生 Credits",
+            "期末余额 Closing",
+            "方向 Dr/Cr",
+            "币种 Ccy",
+            "原币期末余额 Orig Closing",
+            "记账汇率 Rate",
+        ],
+        &[
+            "accountCode",
+            "accountName",
+            "openingFunctionalAmount",
+            "openingDirection",
+            "ytdFunctionalDebit",
+            "ytdFunctionalCredit",
+            "closingFunctionalAmount",
+            "closingDirection",
+            "currency",
+            "closingForeignAmount",
+            "",
+        ],
     ),
     (
         "07 南嶺實業香港（繁体，原币本位币双列）",
-        &["科目編號 Account Code", "科目名稱 Account Name", "幣種 Ccy", "匯率 Rate", "期初餘額-原幣 Ob. (Fcy)", "期初餘額-本位幣 Ob. (HKD)", "借方發生-原幣 Dr (Fcy)", "借方發生-本位幣 Dr (HKD)", "貸方發生-原幣 Cr (Fcy)", "貸方發生-本位幣 Cr (HKD)", "期末餘額-原幣 End. (Fcy)", "期末餘額-本位幣 End. (HKD)", "方向 Dir"],
-        &["accountCode", "accountName", "currency", "", "openingForeignAmount", "openingFunctionalAmount", "ytdForeignDebit", "ytdFunctionalDebit", "ytdForeignCredit", "ytdFunctionalCredit", "closingForeignAmount", "closingFunctionalAmount", "closingDirection"],
+        &[
+            "科目編號 Account Code",
+            "科目名稱 Account Name",
+            "幣種 Ccy",
+            "匯率 Rate",
+            "期初餘額-原幣 Ob. (Fcy)",
+            "期初餘額-本位幣 Ob. (HKD)",
+            "借方發生-原幣 Dr (Fcy)",
+            "借方發生-本位幣 Dr (HKD)",
+            "貸方發生-原幣 Cr (Fcy)",
+            "貸方發生-本位幣 Cr (HKD)",
+            "期末餘額-原幣 End. (Fcy)",
+            "期末餘額-本位幣 End. (HKD)",
+            "方向 Dir",
+        ],
+        &[
+            "accountCode",
+            "accountName",
+            "currency",
+            "",
+            "openingForeignAmount",
+            "openingFunctionalAmount",
+            "ytdForeignDebit",
+            "ytdFunctionalDebit",
+            "ytdForeignCredit",
+            "ytdFunctionalCredit",
+            "closingForeignAmount",
+            "closingFunctionalAmount",
+            "closingDirection",
+        ],
     ),
     (
         "09 澄宇结算中心（原币本位币全借贷分列）",
-        &["科目编码", "科目名称", "币种", "汇率", "期初借方-原币", "期初借方-本位币", "期初贷方-原币", "期初贷方-本位币", "借方发生-原币", "借方发生-本位币", "贷方发生-原币", "贷方发生-本位币", "期末借方-原币", "期末借方-本位币", "期末贷方-原币", "期末贷方-本位币", "方向"],
-        &["accountCode", "accountName", "currency", "", "openingForeignDebit", "openingFunctionalDebit", "openingForeignCredit", "openingFunctionalCredit", "ytdForeignDebit", "ytdFunctionalDebit", "ytdForeignCredit", "ytdFunctionalCredit", "closingForeignDebit", "closingFunctionalDebit", "closingForeignCredit", "closingFunctionalCredit", "closingDirection"],
+        &[
+            "科目编码",
+            "科目名称",
+            "币种",
+            "汇率",
+            "期初借方-原币",
+            "期初借方-本位币",
+            "期初贷方-原币",
+            "期初贷方-本位币",
+            "借方发生-原币",
+            "借方发生-本位币",
+            "贷方发生-原币",
+            "贷方发生-本位币",
+            "期末借方-原币",
+            "期末借方-本位币",
+            "期末贷方-原币",
+            "期末贷方-本位币",
+            "方向",
+        ],
+        &[
+            "accountCode",
+            "accountName",
+            "currency",
+            "",
+            "openingForeignDebit",
+            "openingFunctionalDebit",
+            "openingForeignCredit",
+            "openingFunctionalCredit",
+            "ytdForeignDebit",
+            "ytdFunctionalDebit",
+            "ytdForeignCredit",
+            "ytdFunctionalCredit",
+            "closingForeignDebit",
+            "closingFunctionalDebit",
+            "closingForeignCredit",
+            "closingFunctionalCredit",
+            "closingDirection",
+        ],
     ),
     (
         "SAP 科目明细（汇兑损益测试资料，TB-4800）",
-        &["科目名称一级", "科目名称二级", "科目代码", "公司代码", "货币", "文本", "期初金额-本位币", "借方金额-本位币", "贷方金额-本位币", "期末金额-本位币"],
-        &["accountName", "accountName", "accountCode", "entity", "currency", "currencyText", "openingFunctionalAmount", "ytdFunctionalDebit", "ytdFunctionalCredit", "closingFunctionalAmount"],
+        &[
+            "科目名称一级",
+            "科目名称二级",
+            "科目代码",
+            "公司代码",
+            "货币",
+            "文本",
+            "期初金额-本位币",
+            "借方金额-本位币",
+            "贷方金额-本位币",
+            "期末金额-本位币",
+        ],
+        &[
+            "accountName",
+            "accountName",
+            "accountCode",
+            "entity",
+            "currency",
+            "currencyText",
+            "openingFunctionalAmount",
+            "ytdFunctionalDebit",
+            "ytdFunctionalCredit",
+            "closingFunctionalAmount",
+        ],
     ),
 ];
 
 const JE_FIXTURES: &[Fixture] = &[
     (
         "01 北重精工（用友，借贷分列＋原币）",
-        &["日期", "凭证字号", "摘要", "科目编码", "科目名称", "借方金额", "贷方金额", "币种", "原币金额", "辅助核算"],
-        &["date", "id", "summary", "accountCode", "accountName", "functionalDebit", "functionalCredit", "currency", "foreignAmount", "auxiliary"],
+        &[
+            "日期",
+            "凭证字号",
+            "摘要",
+            "科目编码",
+            "科目名称",
+            "借方金额",
+            "贷方金额",
+            "币种",
+            "原币金额",
+            "辅助核算",
+        ],
+        &[
+            "date",
+            "id",
+            "summary",
+            "accountCode",
+            "accountName",
+            "functionalDebit",
+            "functionalCredit",
+            "currency",
+            "foreignAmount",
+            "auxiliary",
+        ],
     ),
     (
         "02 泓源化工（用友，纯本币）",
-        &["日期", "凭证字号", "摘要", "科目代码", "科目名称", "借方金额", "贷方金额"],
-        &["date", "id", "summary", "accountCode", "accountName", "functionalDebit", "functionalCredit"],
+        &[
+            "日期",
+            "凭证字号",
+            "摘要",
+            "科目代码",
+            "科目名称",
+            "借方金额",
+            "贷方金额",
+        ],
+        &[
+            "date",
+            "id",
+            "summary",
+            "accountCode",
+            "accountName",
+            "functionalDebit",
+            "functionalCredit",
+        ],
     ),
     (
         "04 恒澜重工（SAP，双语表头）",
-        &["过账日期 Posting Date", "凭证号 Document No.", "行项目 Item", "科目 Account", "科目描述 Description", "摘要 Narrative", "借方(本位币) Debit", "贷方(本位币) Credit", "币种 Ccy", "汇率 Rate", "原币金额 Orig Amt", "统驭对象/参考 Reference"],
-        &["date", "id", "", "accountCode", "accountName", "summary", "functionalDebit", "functionalCredit", "currency", "", "foreignAmount", ""],
+        &[
+            "过账日期 Posting Date",
+            "凭证号 Document No.",
+            "行项目 Item",
+            "科目 Account",
+            "科目描述 Description",
+            "摘要 Narrative",
+            "借方(本位币) Debit",
+            "贷方(本位币) Credit",
+            "币种 Ccy",
+            "汇率 Rate",
+            "原币金额 Orig Amt",
+            "统驭对象/参考 Reference",
+        ],
+        &[
+            "date",
+            "id",
+            "",
+            "accountCode",
+            "accountName",
+            "summary",
+            "functionalDebit",
+            "functionalCredit",
+            "currency",
+            "",
+            "foreignAmount",
+            "",
+        ],
     ),
     (
         "06 艾维特苏州（Oracle，Batch＋JE Name 组合键）",
-        &["JE批名 Batch", "凭证名 JE Name", "行号 Line", "日期 GL Date", "科目段 Account", "科目描述 Description", "摘要 Narrative", "借方 Debit", "贷方 Credit", "币种 Ccy", "汇率 Rate", "原币金额 Orig Amt", "参考 Reference"],
-        &["id", "id", "", "date", "accountCode", "accountName", "summary", "functionalDebit", "functionalCredit", "currency", "", "foreignAmount", ""],
+        &[
+            "JE批名 Batch",
+            "凭证名 JE Name",
+            "行号 Line",
+            "日期 GL Date",
+            "科目段 Account",
+            "科目描述 Description",
+            "摘要 Narrative",
+            "借方 Debit",
+            "贷方 Credit",
+            "币种 Ccy",
+            "汇率 Rate",
+            "原币金额 Orig Amt",
+            "参考 Reference",
+        ],
+        &[
+            "id",
+            "id",
+            "",
+            "date",
+            "accountCode",
+            "accountName",
+            "summary",
+            "functionalDebit",
+            "functionalCredit",
+            "currency",
+            "",
+            "foreignAmount",
+            "",
+        ],
     ),
     (
         "07 南嶺實業香港（繁体，原币本位币双借贷）",
-        &["憑證日期 Date", "憑證字 V-Type", "憑證號 V-No", "摘要 Description", "科目編號 Account Code", "科目名稱 Account Name", "幣種 Ccy", "匯率 Rate", "原幣借方 Dr (Fcy)", "原幣貸方 Cr (Fcy)", "本位幣借方 Dr (HKD)", "本位幣貸方 Cr (HKD)", "往來單位 Counterparty"],
-        &["date", "id", "id", "summary", "accountCode", "accountName", "currency", "", "foreignDebit", "foreignCredit", "functionalDebit", "functionalCredit", "auxiliary"],
+        &[
+            "憑證日期 Date",
+            "憑證字 V-Type",
+            "憑證號 V-No",
+            "摘要 Description",
+            "科目編號 Account Code",
+            "科目名稱 Account Name",
+            "幣種 Ccy",
+            "匯率 Rate",
+            "原幣借方 Dr (Fcy)",
+            "原幣貸方 Cr (Fcy)",
+            "本位幣借方 Dr (HKD)",
+            "本位幣貸方 Cr (HKD)",
+            "往來單位 Counterparty",
+        ],
+        &[
+            "date",
+            "id",
+            "id",
+            "summary",
+            "accountCode",
+            "accountName",
+            "currency",
+            "",
+            "foreignDebit",
+            "foreignCredit",
+            "functionalDebit",
+            "functionalCredit",
+            "auxiliary",
+        ],
     ),
     (
         "09 澄宇结算中心（原币本位币双借贷＋辅助核算）",
-        &["日期", "凭证字号", "摘要", "科目编码", "科目名称", "币种", "原币借方", "原币贷方", "汇率", "本位币借方", "本位币贷方", "辅助核算-往来单位", "制单人"],
-        &["date", "id", "summary", "accountCode", "accountName", "currency", "foreignDebit", "foreignCredit", "", "functionalDebit", "functionalCredit", "auxiliary", ""],
+        &[
+            "日期",
+            "凭证字号",
+            "摘要",
+            "科目编码",
+            "科目名称",
+            "币种",
+            "原币借方",
+            "原币贷方",
+            "汇率",
+            "本位币借方",
+            "本位币贷方",
+            "辅助核算-往来单位",
+            "制单人",
+        ],
+        &[
+            "date",
+            "id",
+            "summary",
+            "accountCode",
+            "accountName",
+            "currency",
+            "foreignDebit",
+            "foreignCredit",
+            "",
+            "functionalDebit",
+            "functionalCredit",
+            "auxiliary",
+            "",
+        ],
     ),
 ];
 
 fn check_fixtures(kind: &str, fixtures: &[Fixture]) -> Vec<String> {
     let mut problems = Vec::new();
     for (name, headers, expected) in fixtures {
-        assert_eq!(headers.len(), expected.len(), "{name}：表头与期望列数不一致");
+        assert_eq!(
+            headers.len(),
+            expected.len(),
+            "{name}：表头与期望列数不一致"
+        );
         let owned: Vec<String> = headers.iter().map(|x| x.to_string()).collect();
         let got = suggest_roles(kind, &owned);
         for (i, want) in expected.iter().enumerate() {
@@ -2009,7 +3753,11 @@ fn check_fixtures(kind: &str, fixtures: &[Fixture]) -> Vec<String> {
                     i + 1,
                     headers[i],
                     if want.is_empty() { "不映射" } else { want },
-                    if actual.is_empty() { "不映射" } else { actual },
+                    if actual.is_empty() {
+                        "不映射"
+                    } else {
+                        actual
+                    },
                 ));
             }
         }
@@ -2045,8 +3793,14 @@ mod tests {
         // 拉进 id／accountName 的多列集合——但冲销号记录的是"这张凭证冲掉了谁"，
         // 预算／对方科目也不是本方科目，混进去会直接破坏 TB↔JE 对账。
         let headers: Vec<String> = [
-            "凭证号码", "冲销凭证号", "被冲销凭证号", "会计科目", "科目文本",
-            "预算二级科目描述", "对方科目名称", "往来单位名称",
+            "凭证号码",
+            "冲销凭证号",
+            "被冲销凭证号",
+            "会计科目",
+            "科目文本",
+            "预算二级科目描述",
+            "对方科目名称",
+            "往来单位名称",
         ]
         .iter()
         .map(|x| x.to_string())
@@ -2078,8 +3832,16 @@ mod tests {
     fn sap科目明细完整命中tb1() {
         // 汇兑损益测试资料里那份真实 SAP 导出（TB-4800 Sheet1）。
         let headers: Vec<String> = [
-            "科目名称一级", "科目名称二级", "科目代码", "公司代码", "货币", "文本",
-            "期初金额-本位币", "借方金额-本位币", "贷方金额-本位币", "期末金额-本位币",
+            "科目名称一级",
+            "科目名称二级",
+            "科目代码",
+            "公司代码",
+            "货币",
+            "文本",
+            "期初金额-本位币",
+            "借方金额-本位币",
+            "贷方金额-本位币",
+            "期末金额-本位币",
         ]
         .iter()
         .map(|x| x.to_string())
@@ -2239,9 +4001,24 @@ mod tests {
     #[test]
     fn tb贷方写绝对值时判为符号一样() {
         let rows = vec![
-            BalanceRow { opening: 100.0, debit: 50.0, credit: 30.0, closing: 120.0 },
-            BalanceRow { opening: 0.0, debit: 10.0, credit: 4.0, closing: 6.0 },
-            BalanceRow { opening: -20.0, debit: 0.0, credit: 5.0, closing: -25.0 },
+            BalanceRow {
+                opening: 100.0,
+                debit: 50.0,
+                credit: 30.0,
+                closing: 120.0,
+            },
+            BalanceRow {
+                opening: 0.0,
+                debit: 10.0,
+                credit: 4.0,
+                closing: 6.0,
+            },
+            BalanceRow {
+                opening: -20.0,
+                debit: 0.0,
+                credit: 5.0,
+                closing: -25.0,
+            },
         ];
         let e = tb_sign_evidence(&rows);
         assert_eq!(e.convention, Some(SignConvention::Unsigned));
@@ -2252,8 +4029,18 @@ mod tests {
     #[test]
     fn tb贷方已带负号时判为已带符号() {
         let rows = vec![
-            BalanceRow { opening: 100.0, debit: 50.0, credit: -30.0, closing: 120.0 },
-            BalanceRow { opening: 0.0, debit: 10.0, credit: -4.0, closing: 6.0 },
+            BalanceRow {
+                opening: 100.0,
+                debit: 50.0,
+                credit: -30.0,
+                closing: 120.0,
+            },
+            BalanceRow {
+                opening: 0.0,
+                debit: 10.0,
+                credit: -4.0,
+                closing: 6.0,
+            },
         ];
         let e = tb_sign_evidence(&rows);
         assert_eq!(e.convention, Some(SignConvention::Signed));
@@ -2262,7 +4049,12 @@ mod tests {
 
     #[test]
     fn tb贷方全零时退到列级兜底() {
-        let rows = vec![BalanceRow { opening: 10.0, debit: 0.0, credit: 0.0, closing: 10.0 }];
+        let rows = vec![BalanceRow {
+            opening: 10.0,
+            debit: 0.0,
+            credit: 0.0,
+            closing: 10.0,
+        }];
         let e = tb_sign_evidence(&rows);
         assert_eq!(e.signed_votes + e.unsigned_votes, 0, "无票");
         assert!(e.note.is_some(), "应给出兜底说明");
@@ -2272,9 +4064,24 @@ mod tests {
     #[test]
     fn tb勾稽不上时判定不可信() {
         let rows = vec![
-            BalanceRow { opening: 100.0, debit: 50.0, credit: 30.0, closing: 999.0 },
-            BalanceRow { opening: 0.0, debit: 10.0, credit: 4.0, closing: 777.0 },
-            BalanceRow { opening: 5.0, debit: 1.0, credit: 1.0, closing: 5.0 },
+            BalanceRow {
+                opening: 100.0,
+                debit: 50.0,
+                credit: 30.0,
+                closing: 999.0,
+            },
+            BalanceRow {
+                opening: 0.0,
+                debit: 10.0,
+                credit: 4.0,
+                closing: 777.0,
+            },
+            BalanceRow {
+                opening: 5.0,
+                debit: 1.0,
+                credit: 1.0,
+                closing: 5.0,
+            },
         ];
         let e = tb_sign_evidence(&rows);
         assert!(e.unbalanced >= 2, "{e:?}");
@@ -2423,7 +4230,9 @@ mod tests {
     #[test]
     fn 必填是金标身份槽与工具声明的并集() {
         // 看账只声明了凭证识别字段与科目编码，金标另要求日期、科目名称、摘要。
-        let mapped: HashSet<&str> = ["id", "accountCode", "functionalAmount"].into_iter().collect();
+        let mapped: HashSet<&str> = ["id", "accountCode", "functionalAmount"]
+            .into_iter()
+            .collect();
         let missing = missing_required(Tool::Ledger, "je", &mapped);
         let roles: Vec<&str> = missing.iter().map(|m| m.role).collect();
         assert!(roles.contains(&"date"), "{roles:?}");
@@ -2435,18 +4244,33 @@ mod tests {
         assert!(!roles.contains(&"functionalAmount"));
         // 每条都要说得清是谁在要求。
         assert!(missing.iter().all(|m| !m.label.is_empty()));
-        assert!(missing.iter().find(|m| m.role == "summary").expect("有摘要").from_gold);
+        assert!(
+            missing
+                .iter()
+                .find(|m| m.role == "summary")
+                .expect("有摘要")
+                .from_gold
+        );
     }
 
     #[test]
     fn 缺失项能分辨金标要求还是工具要求() {
         // 交易币种只有汇兑损益要，不是金标身份槽——被拦下时用户该知道换个工具就不需要。
-        let mapped: HashSet<&str> =
-            ["date", "id", "accountCode", "accountName", "summary", "functionalAmount"]
-                .into_iter()
-                .collect();
+        let mapped: HashSet<&str> = [
+            "date",
+            "id",
+            "accountCode",
+            "accountName",
+            "summary",
+            "functionalAmount",
+        ]
+        .into_iter()
+        .collect();
         let missing = missing_required(Tool::FxAudit, "je", &mapped);
-        let currency = missing.iter().find(|m| m.role == "currency").expect("缺交易币种");
+        let currency = missing
+            .iter()
+            .find(|m| m.role == "currency")
+            .expect("缺交易币种");
         assert!(!currency.from_gold, "交易币种是工具要求，不是金标");
         // 看账不要币种，同样的映射对它就是齐的。
         assert!(missing_required(Tool::Ledger, "je", &mapped).is_empty());
@@ -2542,10 +4366,18 @@ mod tests {
 
     #[test]
     fn 借贷分列折算成有符号净额() {
-        let v = AmountInputs { debit: Some(100.0), credit: Some(30.0), ..Default::default() };
+        let v = AmountInputs {
+            debit: Some(100.0),
+            credit: Some(30.0),
+            ..Default::default()
+        };
         assert_eq!(signed_amount(&v, SignConvention::Unsigned), 70.0);
         // 已带符号时贷方本身是负数。
-        let v = AmountInputs { debit: Some(0.0), credit: Some(-30.0), ..Default::default() };
+        let v = AmountInputs {
+            debit: Some(0.0),
+            credit: Some(-30.0),
+            ..Default::default()
+        };
         assert_eq!(signed_amount(&v, SignConvention::Signed), -30.0);
     }
 
@@ -2609,8 +4441,15 @@ mod tests {
             vec!["01-1002-0001".into()],
             vec!["02-1002".into()],
         ];
-        let legacy = |role: &str| (role == "account").then(|| vec!["科目".into()]).unwrap_or_default();
-        assert_eq!(tb_leaf_mask(&headers, &rows, &legacy), vec![false, true, true]);
+        let legacy = |role: &str| {
+            (role == "account")
+                .then(|| vec!["科目".into()])
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            tb_leaf_mask(&headers, &rows, &legacy),
+            vec![false, true, true]
+        );
         assert_eq!(tb_leaf_mask(&headers, &rows, &|_| vec![]), vec![true; 3]);
     }
 
@@ -2639,9 +4478,15 @@ mod tests {
 
     #[test]
     fn 纯净额直接取原值() {
-        let v = AmountInputs { amount: Some(-120.0), ..Default::default() };
+        let v = AmountInputs {
+            amount: Some(-120.0),
+            ..Default::default()
+        };
         assert_eq!(signed_amount(&v, SignConvention::Signed), -120.0);
-        assert_eq!(credit_positive(signed_amount(&v, SignConvention::Signed)), 120.0);
+        assert_eq!(
+            credit_positive(signed_amount(&v, SignConvention::Signed)),
+            120.0
+        );
     }
 
     #[test]
@@ -2650,11 +4495,17 @@ mod tests {
         assert_eq!(migrate_role_name("je", "account"), "accountCode");
         assert_eq!(migrate_role_name("je", "amount"), "functionalAmount");
         assert_eq!(migrate_role_name("je", "foreignDirection"), "direction");
-        assert_eq!(migrate_role_name("tb", "openingPrincipal"), "openingFunctionalAmount");
+        assert_eq!(
+            migrate_role_name("tb", "openingPrincipal"),
+            "openingFunctionalAmount"
+        );
         assert_eq!(migrate_role_name("tb", "periodDebit"), "ytdFunctionalDebit");
         // 标准名原样返回。
         assert_eq!(migrate_role_name("je", "accountCode"), "accountCode");
-        assert_eq!(migrate_role_name("tb", "closingForeignAmount"), "closingForeignAmount");
+        assert_eq!(
+            migrate_role_name("tb", "closingForeignAmount"),
+            "closingForeignAmount"
+        );
         // 认不出的退回空串。
         assert_eq!(migrate_role_name("tb", "不存在的角色"), "");
     }
@@ -2662,7 +4513,12 @@ mod tests {
     #[test]
     fn 集团货币口径的列不给任何金额角色() {
         // 实测 Oct+BS+PL+TB.xlsx：SAP 用 `Grp Curr` 缩写，`groupcurr` 匹配不到。
-        for header in ["MTD Grp Curr", "YTD Act (Grp Curr)", "集团货币金额", "Group Currency Value"] {
+        for header in [
+            "MTD Grp Curr",
+            "YTD Act (Grp Curr)",
+            "集团货币金额",
+            "Group Currency Value",
+        ] {
             assert!(
                 role_rejects_header("tb", "ytdFunctionalCredit", header),
                 "TB 本年累计贷方不该收下 {header}"
@@ -2673,7 +4529,11 @@ mod tests {
             );
         }
         // 本位币与原币口径不受影响。
-        assert!(!role_rejects_header("tb", "ytdFunctionalCredit", "本年累计贷方"));
+        assert!(!role_rejects_header(
+            "tb",
+            "ytdFunctionalCredit",
+            "本年累计贷方"
+        ));
         assert!(!role_rejects_header("je", "functionalAmount", "本位币金额"));
         // 非金额角色不套这条规则。
         assert!(!role_rejects_header("tb", "entity", "MTD Grp Curr"));
@@ -2709,7 +4569,11 @@ mod tests {
         // 别名库不认识的列不算否定——那正是留给 LLM 补充的空间。
         assert!(!role_rejects_header("je", "accountName", "科目文本"));
         assert!(!role_rejects_header("je", "accountCode", "会计科目"));
-        assert!(!role_rejects_header("je", "accountName", "Cost Center Desc"));
+        assert!(!role_rejects_header(
+            "je",
+            "accountName",
+            "Cost Center Desc"
+        ));
         // 认不出的角色名一律不拦。
         assert!(!role_rejects_header("je", "不存在的角色", "随便一列"));
     }
@@ -2762,8 +4626,16 @@ mod tests {
         ];
         let m = suggest_roles_with_data("tb", &headers, &rows);
         // 维持别名判定：只有一列拿到本年累计，另一列留空等用户处理。
-        assert_eq!(m.values().filter(|r| **r == "ytdFunctionalDebit").count(), 1);
-        assert_eq!(m.values().filter(|r| **r == "periodFunctionalDebit").count(), 0);
+        assert_eq!(
+            m.values().filter(|r| **r == "ytdFunctionalDebit").count(),
+            1
+        );
+        assert_eq!(
+            m.values()
+                .filter(|r| **r == "periodFunctionalDebit")
+                .count(),
+            0
+        );
     }
 
     #[test]
@@ -2785,7 +4657,11 @@ mod tests {
         assert_eq!(ok("\"1,234\""), 1234.0);
         // 空值与占位符不是解析失败。
         for blank in ["", "  ", "-", "—", "N/A", "无"] {
-            assert_eq!(parse_amount(blank).expect("占位符不算失败"), None, "{blank}");
+            assert_eq!(
+                parse_amount(blank).expect("占位符不算失败"),
+                None,
+                "{blank}"
+            );
         }
         // 真读不出来才报错，交给调用方决定是中断还是按 0 继续。
         assert!(parse_amount("待补").is_err());
@@ -2800,7 +4676,11 @@ mod tests {
             assert_eq!(d(raw), expect, "{raw}");
         }
         // calamine 把真日期读成带时间的文本，要先切掉时间段。
-        for raw in ["2023-01-10 00:00:00", "2023/01/10 08:30:00", "2023-01-10T00:00:00"] {
+        for raw in [
+            "2023-01-10 00:00:00",
+            "2023/01/10 08:30:00",
+            "2023-01-10T00:00:00",
+        ] {
             assert_eq!(d(raw), expect, "{raw}");
         }
         // 英文月份缩写：借款台账里的常见写法。

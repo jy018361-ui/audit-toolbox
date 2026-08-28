@@ -105,26 +105,40 @@
   cursor: not-allowed;
   opacity: 1;
 }
+/*
+ * 按钮组统一加 wrap：Button 组件自带 shrink-0 + whitespace-nowrap，
+ * 每个按钮都不可收缩也不换字，一行放不下时若容器不许换行就会把
+ * 面板横向撑爆（目标批次的预设/新增/删除按钮行就是这么溢出的）。
+ * 改成空间不足时整组换行，按钮永远保持完整可点。
+ */
 .kz-path,
 .kz-row,
 .kz-search,
 .kz-actions,
 .kz-source-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--sp-2);
   align-items: center;
 }
 .kz-path input,
 .kz-search input {
-  flex: 1;
+  /* 有初始 basis 才能参与换行判定；min-width:0 允许真正收缩 */
+  flex: 1 1 11rem;
+  min-width: 0;
 }
-.kz-search {
-  flex-wrap: wrap;
+.kz-search button {
+  flex-shrink: 0;
 }
-/* 编码前缀框装的是 6401,6603 这种短串，不该和关键词框平分宽度。 */
+/*
+ * 编码前缀框装的是 6401,6603 这种短串，不该和关键词框平分宽度：basis 略短、
+ * 只收不伸。旧的 min-width:10rem 硬下限在窄面板下顶住收缩，是"筛选条件"行
+ * 挤压和 placeholder 截断的直接原因——现在允许收到 0，空间真不够时整行
+ * 优雅换行（上方组选择器已带 wrap），而不是把内容截掉。
+ */
 .kz-search input.kz-code-prefix {
-  flex: 0 1 16rem;
-  min-width: 10rem;
+  flex: 0 1 14rem;
+  min-width: 0;
 }
 .kz-two,
 .kz-map,

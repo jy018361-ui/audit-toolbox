@@ -53,6 +53,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useJobEvents } from "@/hooks/useJobEvents";
+import { FaTbJePage } from "./FaTbJePage";
 type FaMapping = {
   matchKey?: string;
   matchKeys?: string[];
@@ -195,6 +196,7 @@ function faMatchStatsFromResult(value: unknown): FaMatchStats | undefined {
 // wizard in memory for the lifetime of the app so returning to FA List does
 // not force the user to select and map the files again.
 let faListDraftCache: FaListDraft | undefined;
+let faListModeCache: "cards" | "tbje" = "tbje";
 
 /// Legacy named the workbook FA_List_<yyyymmdd>_<hhmmss>.xlsx without asking.
 /// The Rust build kept the save dialog but left the name blank, so every export
@@ -202,6 +204,33 @@ let faListDraftCache: FaListDraft | undefined;
 const defaultExportName = faDefaultOutputName;
 
 export function FaListPage({ tool }: { tool: ToolManifest }) {
+  const [mode, setModeState] = useState<"cards" | "tbje">(faListModeCache);
+  const setMode = (nextMode: "cards" | "tbje") => {
+    faListModeCache = nextMode;
+    setModeState(nextMode);
+  };
+  return <div className="tool-page fx-page fa-list-shell">
+    <PageHeader
+      eyebrow={mode === "tbje" ? "固定资产审计" : "固定资产清单匹配"}
+      title={mode === "tbje" ? "固定资产 TB＋JE 变动表" : tool.name}
+      detail={mode === "tbje"
+        ? "公共 TB/JE 引擎识别与映射；固定资产业务层生成变动汇总、新增、处置、JE底表和对方科目汇总。"
+        : "按期初、期末两份固定资产表按组合键匹配，生成 FA List、变动与汇总底稿。"}
+    />
+    <StepIndicator
+      steps={[
+        { key: "tbje", label: "TB＋JE 变动表" },
+        { key: "cards", label: "两期固定资产清单" },
+      ]}
+      current={mode === "tbje" ? 0 : 1}
+      onStepClick={(index) => setMode(index === 0 ? "tbje" : "cards")}
+      showCompleted={false}
+    />
+    {mode === "cards" ? <FaCardListPage /> : <FaTbJePage />}
+  </div>;
+}
+
+function FaCardListPage() {
   const draft = faListDraftCache;
   const empty: FaMapping = {};
   const [step, setStep] = useState<1 | 2 | 3>(draft?.step ?? 1);
@@ -1780,11 +1809,6 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
   );
   return (
     <>
-      <PageHeader
-        eyebrow="固定资产清单匹配"
-        title={tool.name}
-        detail="按期初、期末两份固定资产表按组合键匹配，生成 FA List、变动与汇总底稿。"
-      />
       <StepIndicator
         steps={[
           { key: "1", label: "文件与匹配" },

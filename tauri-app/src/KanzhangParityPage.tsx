@@ -65,7 +65,7 @@ export {
 } from "./ledgerMapping";
 export type { Mapping, MappingChange, MappingChangeSource } from "./ledgerMapping";
 
-export type Batch = { name: string; accounts: string[] };
+export type Batch = { name: string; accounts: string[]; presetId?: string };
 export type KanzhangDraft = { inputPath: string; sheet: string; knownSheets:string[]; headerRow: number; inspect?: Inspect; mapping: Mapping; batches: Batch[]; activeBatch: number; excludes: string[]; outputPath: string; outputTouched: boolean; includePivot: boolean; includeVoucherTypes: boolean; markLossTransfer: boolean; llmAnalysis:boolean; pivotRows: string[]; pivotColumns: string[]; pivotValues: string[]; step: number };
 const EMPTY: KanzhangDraft = { inputPath:"",sheet:"",knownSheets:[],headerRow:1,mapping:EMPTY_MAPPING,batches:[{name:"批次1",accounts:[]}],activeBatch:0,excludes:[],outputPath:"",outputTouched:false,includePivot:true,includeVoucherTypes:true,markLossTransfer:true,llmAnalysis:true,pivotRows:[],pivotColumns:[],pivotValues:[],step:1 };
 const CACHE="audit-toolbox.kanzhang.draft.v4";
@@ -91,6 +91,63 @@ export function filterByCodePrefix(values:string[],codes:string[],prefixes:strin
     const target=(code||value).toLowerCase();
     return lower.some(prefix=>target.startsWith(prefix));
   });
+}
+
+// 与 TB 科目余额表调整的“名称词典优先、标准科目编码兜底”保持同一口径。
+// 编码永远只读独立的科目编码列，不能在显示名称中猜数字，以免误把摘要式名称选进来。
+export type AuditFocusPresetId="fixed_assets"|"intangible_assets"|"long_term_prepaid"|"administrative_expense"|"selling_expense"|"financial_expense"|"accounts_payable"|"short_term_loans";
+type AuditFocusPreset={id:AuditFocusPresetId;name:string;pattern:RegExp;codePrefixes:string[]};
+const CASH_PRESET_RULE={pattern:/货币资金|银行存款|库存现金|其他货币资金|存放中央银行|存放同业|\bcash\b|\bbank\b|\bbnk\b|\bboc\b|\bboa\b|\bhsbc\b|\bcmb\b|petty\s+cash/i,codePrefixes:["1001","1002","1003","1011","1012"]};
+export const AUDIT_FOCUS_PRESETS:AuditFocusPreset[]=[
+  {id:"fixed_assets",name:"预设｜固定资产",pattern:/固定资产|property\s*,?\s*plant|fixed\s*asset/i,codePrefixes:["1601","1602","1603","1604","1605"]},
+  {id:"intangible_assets",name:"预设｜无形资产",pattern:/无形资产|intangible|accum\s*amort/i,codePrefixes:["1701","1702"]},
+  {id:"long_term_prepaid",name:"预设｜长期待摊费用",pattern:/长期待摊|long[ -]?term\s+prepaid|prepaid\s+expense/i,codePrefixes:["1801"]},
+  {id:"administrative_expense",name:"预设｜管理费用",pattern:/管理费用|administrative\s+expense|operating\s+expense/i,codePrefixes:["6602"]},
+  {id:"selling_expense",name:"预设｜销售费用",pattern:/销售费用|selling\s+expense/i,codePrefixes:["6601"]},
+  {id:"financial_expense",name:"预设｜财务费用",pattern:/财务费用|finance\s+expense|interest\s+expense/i,codePrefixes:["6603"]},
+  {id:"accounts_payable",name:"预设｜应付账款",pattern:/应付账款|accounts?\s+payable|accts?\s+pay|\ba\/p\b|ap[ -]?trade/i,codePrefixes:["2202"]},
+  {id:"short_term_loans",name:"预设｜短期借款",pattern:/短期借款|short[ -]?term\s+(loan|borrow)|short\s+borrowing/i,codePrefixes:["2001"]},
+];
+export type PresetMatch={preset:AuditFocusPreset;accounts:string[]};
+export type PresetApplySummary={matches:PresetMatch[];skippedExcludes:string[];created:number;updated:number};
+export const matchAuditFocusPresets=(values:string[],codes:string[]):PresetMatch[]=>AUDIT_FOCUS_PRESETS.map(preset=>({preset,accounts:values.filter((value,index)=>preset.pattern.test(value)||preset.codePrefixes.some(prefix=>(codes[index]??"").trim().startsWith(prefix)))}));
+export function applyAuditFocusPresetBatches(batches:Batch[],values:string[],codes:string[],excludes:string[]):{batches:Batch[];summary:PresetApplySummary}{
+  const excluded=new Set(excludes);
+  const matches=matchAuditFocusPresets(values,codes);
+  const skippedExcludes=[...new Set(matches.flatMap(match=>match.accounts.filter(account=>excluded.has(account))) )];
+  let created=0;let updated=0;
+  // 两种自动口径互斥；历史版本可能已留下 cash 预设，也在这里迁移掉。手工批次不动。
+  const next=batches.filter(batch=>batch.presetId!=="cash"&&!batch.presetId?.startsWith("all_primary:"));
+  for(const match of matches){
+    const accounts=[...new Set(match.accounts.filter(account=>!excluded.has(account)))];
+    const index=next.findIndex(batch=>batch.presetId===match.preset.id);
+    if(index<0){next.push({name:match.preset.name,presetId:match.preset.id,accounts});created+=1;}
+    else {next[index]={...next[index],name:match.preset.name,accounts};updated+=1;}
+  }
+  return {batches:next,summary:{matches,skippedExcludes,created,updated}};
+}
+export type PrimaryPresetSummary={groups:{name:string;accounts:string[]}[];skippedCash:string[];skippedExcludes:string[];created:number;updated:number;removed:number};
+const primaryCode=(code:string)=>{const digits=code.trim().match(/^\d{4}/)?.[0];return digits??"";};
+const primaryLabel=(value:string,code:string,primaryName:string)=>{
+  const preferred=primaryName.trim();
+  if(preferred)return preferred.split(/[-—–>／/|]/)[0].trim()||preferred;
+  let display=value.trim();const exactCode=code.trim();
+  if(exactCode&&display.startsWith(exactCode))display=display.slice(exactCode.length).replace(/^[-—–>／/|\s]+/,"");
+  return display.split(/[-—–>／/|]/)[0].trim()||primaryCode(code)||"未命名科目";
+};
+export function applyAllPrimaryAccountBatches(batches:Batch[],values:string[],codes:string[],primaryNames:string[],excludes:string[]):{batches:Batch[];summary:PrimaryPresetSummary}{
+  const excluded=new Set(excludes);const groups=new Map<string,{name:string;accounts:string[]}>();const skippedCash:string[]=[];const skippedExcludes:string[]=[];
+  values.forEach((value,index)=>{
+    const code=(codes[index]??"").trim();const name=primaryNames[index]??"";
+    const cash=CASH_PRESET_RULE.pattern.test(`${name} ${value}`)||CASH_PRESET_RULE.codePrefixes.some(prefix=>code.startsWith(prefix));
+    if(cash){skippedCash.push(value);return;}if(excluded.has(value)){skippedExcludes.push(value);return;}
+    const label=primaryLabel(value,code,name);const key=name.trim()?label.toLowerCase():primaryCode(code)||label.toLowerCase();
+    const current=groups.get(key)??{name:`全科目｜${label}`,accounts:[]};current.accounts.push(value);groups.set(key,current);
+  });
+  const auditIds=new Set<string>(AUDIT_FOCUS_PRESETS.map(preset=>preset.id));
+  const managed=batches.filter(batch=>!batch.presetId||(!batch.presetId.startsWith("all_primary:")&&!auditIds.has(batch.presetId)&&batch.presetId!=="cash"));const previous=new Map(batches.filter(batch=>batch.presetId?.startsWith("all_primary:")).map(batch=>[batch.presetId,batch]));
+  let created=0;let updated=0;const generated=[...groups.entries()].sort(([a],[b])=>a.localeCompare(b,"zh-Hans-CN")).map(([key,group])=>{const presetId=`all_primary:${key}`;if(previous.has(presetId))updated+=1;else created+=1;return{name:group.name,accounts:[...new Set(group.accounts)],presetId};});
+  return {batches:[...managed,...generated],summary:{groups:generated,skippedCash:[...new Set(skippedCash)],skippedExcludes:[...new Set(skippedExcludes)],created,updated,removed:Math.max(0,previous.size-updated)}};
 }
 // 与旧版 _build_default_save_name 一致：看账导出_<源文件名>[_工作表<Sheet>]_<时间戳>.csv
 export function defaultKanzhangOutputName(inputPath:string,sheet:string,now=new Date()):string{
@@ -144,8 +201,10 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const [changes,setChanges]=useState<MappingChange[]>([]);const [pending,setPending]=useState<Review[]>([]);const [llmStatus,setLlmStatus]=useState("");
   const [llmBusy,setLlmBusy]=useState(false);const [llmFailed,setLlmFailed]=useState(false);const llmGeneration=useRef(0);
   const [busy,setBusy]=useState(false); const [error,setError]=useState(""); const [job,setJob]=useState<JobEvent>(); const [result,setResult]=useState<unknown>();
+  const [presetSummary,setPresetSummary]=useState<PresetApplySummary>();
+  const [primaryPresetSummary,setPrimaryPresetSummary]=useState<PrimaryPresetSummary>();
   const patch=(value:Partial<KanzhangDraft>)=>setDraft(current=>({...current,...value}));
-  const clearAll=()=>{llmGeneration.current+=1;setDraft({...EMPTY,batches:[{name:"批次1",accounts:[]}]});setAccounts([]);setAccountCodes([]);setCodePrefix("");setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setQuery("");setResult(undefined);setChanges([]);setPending([]);setLlmStatus("");setLlmBusy(false);setLlmFailed(false);};
+  const clearAll=()=>{llmGeneration.current+=1;setDraft({...EMPTY,batches:[{name:"批次1",accounts:[]}]});setAccounts([]);setAccountCodes([]);setCodePrefix("");setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setQuery("");setResult(undefined);setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setChanges([]);setPending([]);setLlmStatus("");setLlmBusy(false);setLlmFailed(false);};
   const [dragHover,setDragHover]=useState(false);
   useEffect(()=>{if(typeof window==="undefined"||!("__TAURI_INTERNALS__" in window))return;let off:()=>void=()=>{};void getCurrentWebview().onDragDropEvent((event)=>{const p=event.payload;if(p.type==="over"||p.type==="enter"){setDragHover(true);}else if(p.type==="drop"){setDragHover(false);if(p.paths.length)patch({inputPath:p.paths[0],inspect:undefined,knownSheets:[],sheet:"",step:1});}else if(p.type==="leave"){setDragHover(false);}}).then((fn)=>{off=fn;});return ()=>off();},[]);
   useEffect(()=>{sessionStorage.setItem(CACHE,JSON.stringify(draft));},[draft]);
@@ -292,14 +351,40 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   moveRef.current=moveAccounts;
   const addBatch=()=>patch({batches:[...draft.batches,{name:`批次${draft.batches.length+1}`,accounts:[]}],activeBatch:draft.batches.length});
   const deleteBatch=()=>{if(draft.batches.length===1){updateBatch({accounts:[]});return;}const next=draft.batches.filter((_,index)=>index!==draft.activeBatch);patch({batches:next,activeBatch:Math.max(0,draft.activeBatch-1)});};
+  async function applyAuditFocusPresets(){
+    setAccountsBusy(true);setError("");
+    try{
+      // 列表界面可能为性能而截断；预设必须基于全量唯一科目，不可只套用前 20,000 项。
+      const source=truncated?await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,mapping:draft.mapping,keyword:"",limit:1,all:true}) as {values:string[];codes?:string[]}: {values:accounts,codes:accountCodes};
+      const applied=applyAuditFocusPresetBatches(draft.batches,source.values,source.codes??[],draft.excludes);
+      const firstPreset=applied.batches.findIndex(value=>value.presetId===AUDIT_FOCUS_PRESETS[0].id);
+      const outputPath=!draft.outputTouched&&draft.inputPath?defaultKanzhangOutputPath(draft.inputPath,draft.sheet).replace(/\.csv$/i,".xlsx"):draft.outputPath;
+      patch({batches:applied.batches,activeBatch:firstPreset>=0?firstPreset:draft.activeBatch,outputPath});
+      setPresetSummary(applied.summary);setPrimaryPresetSummary(undefined);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);
+    }catch(e){setError(kanzhangErrorText(e));}
+    finally{setAccountsBusy(false);}
+  }
+  async function applyAllPrimaryAccounts(){
+    setAccountsBusy(true);setError("");
+    try{
+      const source=await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,mapping:draft.mapping,keyword:"",limit:1,all:true}) as {values:string[];codes?:string[];primaryNames?:string[]};
+      const applied=applyAllPrimaryAccountBatches(draft.batches,source.values,source.codes??[],source.primaryNames??[],draft.excludes);
+      const firstPreset=applied.batches.findIndex(value=>value.presetId?.startsWith("all_primary:"));
+      const outputPath=!draft.outputTouched&&draft.inputPath?defaultKanzhangOutputPath(draft.inputPath,draft.sheet).replace(/\.csv$/i,".xlsx"):draft.outputPath;
+      patch({batches:applied.batches,activeBatch:firstPreset>=0?firstPreset:draft.activeBatch,outputPath});
+      setPrimaryPresetSummary(applied.summary);setPresetSummary(undefined);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);
+    }catch(e){setError(kanzhangErrorText(e));}
+    finally{setAccountsBusy(false);}
+  }
   async function chooseOutput(){const value=await pickPath("save","保存看账结果（可选 CSV 或 XLSX）",["csv","xlsx"],defaultKanzhangOutputName(draft.inputPath,draft.sheet));if(typeof value==="string")patch({outputPath:value,outputTouched:true});}
   // 恢复默认：回到"凭证文件旁 + 旧版默认命名"，时间戳按当前时间重算。
-  function resetOutput(){autoOutputKey.current="";patch({outputTouched:false,outputPath:draft.inputPath?defaultKanzhangOutputPath(draft.inputPath,draft.sheet):""});}
+  function resetOutput(){autoOutputKey.current="";let outputPath=draft.inputPath?defaultKanzhangOutputPath(draft.inputPath,draft.sheet):"";if(draft.batches.some(batch=>batch.presetId))outputPath=outputPath.replace(/\.csv$/i,".xlsx");patch({outputTouched:false,outputPath});}
   async function start(method:"kanzhang.filter"|"kanzhang.export"){const valid=validKanzhangBatches(draft.batches);if(!valid.length){setError("请至少为一个有效批次选择目标科目。若需分析全部科目，请在目标批次中全选科目。");patch({step:2});return;}setBusy(true);setError("");
     // 默认落点的时间戳按"开始导出"的时刻刷新，免得停留在选文件的时间。
     let target=draft.outputPath;
     if(method==="kanzhang.export"&&!draft.outputTouched&&draft.inputPath){
       target=defaultKanzhangOutputPath(draft.inputPath,draft.sheet);
+      if(valid.some(batch=>batch.presetId))target=target.replace(/\.csv$/i,".xlsx");
       autoOutputKey.current=`${draft.inputPath}|${draft.sheet}`;
       patch({outputPath:target});
     }
@@ -334,8 +419,8 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
       </>}
       </LedgerSourceCard>
       <LedgerMappingPreview inspect={draft.inspect} mapping={draft.mapping} setMap={setMap} llmBusy={llmBusy}/></div>}
-    {draft.step===2&&<div className="kz-grid kz-filter-grid"><section className="kz-card"><h2>目标批次</h2><div className="kz-row"><Button variant="secondary" size="sm" onClick={addBatch}>新增批次</Button><Button variant="secondary" size="sm" onClick={deleteBatch}>删除批次</Button></div><div className="kz-tabs">{draft.batches.map((value,index)=><button className={index===draft.activeBatch?"active":""} onClick={()=>patch({activeBatch:index})} key={`${value.name}-${index}`}>{value.name} ({value.accounts.length})</button>)}</div><label>批次名称<input value={batch.name} onChange={e=>updateBatch({name:e.target.value})}/></label>
-      <div className="kz-search"><input className="kz-code-prefix" value={codePrefix} placeholder="按科目编码段筛选，如 6401,6603" onChange={e=>setCodePrefix(e.target.value)}/><input value={query} placeholder="输入关键词即时过滤科目" onChange={e=>setQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&truncated)void searchAccounts();}}/>{truncated&&<Button variant="secondary" size="sm" onClick={searchAccounts}>到全库检索</Button>}<Button variant="secondary" size="sm" onClick={()=>{setQuery("");setCodePrefix("");setSearchResults([]);}}>清除</Button></div>
+    {draft.step===2&&<div className="kz-grid kz-filter-grid"><section className="kz-card"><h2>目标批次</h2><div className="kz-row"><Button variant="secondary" size="sm" disabled={accountsBusy||!accounts.length} onClick={()=>void applyAuditFocusPresets()}>{accountsBusy?"正在生成批次…":"套用审计关注科目预设（8类）"}</Button><Button variant="secondary" size="sm" disabled={accountsBusy||!accounts.length} onClick={()=>void applyAllPrimaryAccounts()}>按一级科目生成全科目批次（不含货币资金）</Button><Button variant="secondary" size="sm" onClick={addBatch}>新增批次</Button><Button variant="secondary" size="sm" onClick={deleteBatch}>删除批次</Button></div>{presetSummary&&<PresetSummary summary={presetSummary}/>} {primaryPresetSummary&&<PrimaryPresetSummary summary={primaryPresetSummary}/>}<div className="kz-tabs">{draft.batches.map((value,index)=><button className={index===draft.activeBatch?"active":""} onClick={()=>patch({activeBatch:index})} key={`${value.presetId??value.name}-${index}`}>{value.name} ({value.accounts.length})</button>)}</div><label>批次名称<input value={batch.name} onChange={e=>updateBatch({name:e.target.value})}/></label>
+      <div className="kz-search"><input className="kz-code-prefix" value={codePrefix} placeholder="按科目编码段筛选，如 6401,660" title="按科目编码段筛选，如 6401,6603" onChange={e=>setCodePrefix(e.target.value)}/><input value={query} placeholder="输入关键词即时过滤科目" onChange={e=>setQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&truncated)void searchAccounts();}}/>{truncated&&<Button variant="secondary" size="sm" onClick={searchAccounts}>到全库检索</Button>}<Button variant="secondary" size="sm" onClick={()=>{setQuery("");setCodePrefix("");setSearchResults([]);}}>清除</Button></div>
       <div className="kz-source-panel"><h3>待选科目 ({available.length}{truncated?` / 共 ${accountTotal}`:""})</h3>{accountsBusy&&<p className="kz-hint">正在载入全部科目…</p>}{truncated&&<p className="kz-hint">科目过多，仅载入前 {accounts.length} 个；未命中时回车或点"到全库检索"。</p>}
         <ShuttleList zone="source" values={available} selected={selectedAvailable} onSelect={setSelectedAvailable} onDragBegin={beginDrag} drag={drag} emptyText="没有匹配的科目。"/>
         <small>单击选中、Ctrl 加选、Shift 连选、Ctrl+A 全选；选好后直接拖到右侧任一列表，或用下面的按钮。</small>
@@ -351,7 +436,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
         迁移版多出来的勾选项既不是旧行为，也只会让人犹豫该不该勾。
         正负数凭证标记连同它的三列辅助列已剪到独立工具，这里不再有那个开关。
       */}
-      <div className="kz-options"><Check label="标记损益结转凭证" value={draft.markLossTransfer} onChange={value=>patch({markLossTransfer:value})}/></div><label>输出文件<div className="kz-path"><input readOnly value={draft.outputPath} title={draft.outputPath} placeholder="选择凭证文件后自动填入默认保存位置"/><Button variant="secondary" size="sm" onClick={chooseOutput}>选择</Button>{draft.outputTouched&&<Button variant="secondary" size="sm" onClick={resetOutput}>恢复默认</Button>}</div></label><p className="kz-hint">{draft.outputTouched?"已指定保存位置，导出会以这个文件名为基准。":"默认保存到凭证文件所在目录，文件名为「看账导出_源文件名[_工作表]_<时间戳>.csv」（导出时按当前时间生成）。"}与旧版一致的两阶段导出：明细单独一个文件（选 .csv 出 CSV，选 .xlsx 出工作簿），凭证/透视/凭证类型另出一个「_套表.xlsx」；有剔除科目时再多一个剔除明细。需要正负数对冲标记请用「正负数凭证标记」工具。</p><div className="kz-actions"><Button variant="secondary" size="sm" onClick={()=>patch({step:2})}>返回筛选</Button>{busy&&job?<Button variant="secondary" size="sm" onClick={()=>jobCancel(job.jobId)}>停止</Button>:<Button variant="default" onClick={()=>void start("kanzhang.export")}>导出结果</Button>}</div></section></div><Result job={job} result={result}/></>}
+      <div className="kz-options"><Check label="标记损益结转凭证" value={draft.markLossTransfer} onChange={value=>patch({markLossTransfer:value})}/></div><label>输出文件<div className="kz-path"><input readOnly value={draft.outputPath} title={draft.outputPath} placeholder="选择凭证文件后自动填入默认保存位置"/><Button variant="secondary" size="sm" onClick={chooseOutput}>选择</Button>{draft.outputTouched&&<Button variant="secondary" size="sm" onClick={resetOutput}>恢复默认</Button>}</div></label><p className="kz-hint">{draft.outputTouched?"已指定保存位置，导出会以这个文件名为基准。":draft.batches.some(batch=>batch.presetId)?"预设批次默认导出为 XLSX；每个有效批次使用独立文件名。":"默认保存到凭证文件所在目录，文件名为「看账导出_源文件名[_工作表]_<时间戳>.csv」（导出时按当前时间生成）。"}两阶段导出中，每批次的明细单独一个文件，凭证/透视/凭证类型另出该批次对应的「_套表.xlsx」；有剔除科目时再输出剔除明细。需要正负数对冲标记请用「正负数凭证标记」工具。</p><div className="kz-actions"><Button variant="secondary" size="sm" onClick={()=>patch({step:2})}>返回筛选</Button>{busy&&job?<Button variant="secondary" size="sm" onClick={()=>jobCancel(job.jobId)}>停止</Button>:<Button variant="default" onClick={()=>void start("kanzhang.export")}>导出结果</Button>}</div></section></div><Result job={job} result={result}/></>}
     {drag&&<div className="kz-drag-ghost" style={{left:drag.x,top:drag.y}}>{drag.values.length===1?drag.values[0]:`${drag.values.length} 个科目`}</div>}
   </div>;
 }
@@ -450,4 +535,6 @@ function ShuttleList({zone,values,selected,onSelect,onDragBegin,drag,emptyText}:
   </div>;
 }
 function Check({label,value,onChange}:{label:string;value:boolean;onChange:(value:boolean)=>void}){return <label><input type="checkbox" checked={value} onChange={e=>onChange(e.target.checked)}/>{label}</label>}
+function PresetSummary({summary}:{summary:PresetApplySummary}){const empty=summary.matches.filter(value=>!value.accounts.length);return <div className="kz-hint" role="status"><b>预设已套用：</b>新增 {summary.created} 个、更新 {summary.updated} 个预设批次。{summary.matches.map(value=><span key={value.preset.id}> {value.preset.name.replace("预设｜","")} {value.accounts.length} 个；</span>)}{empty.length>0&&<span>未命中：{empty.map(value=>value.preset.name.replace("预设｜","")).join("、")}。</span>}{summary.skippedExcludes.length>0&&<span> 已在剔除/例外中而未加入：{summary.skippedExcludes.join("、")}。</span>}</div>}
+function PrimaryPresetSummary({summary}:{summary:PrimaryPresetSummary}){return <div className="kz-hint" role="status"><b>全科目批次已生成：</b>共 {summary.groups.length} 个一级科目；新增 {summary.created} 个、更新 {summary.updated} 个、移除 {summary.removed} 个旧的全科目预设批次。已排除货币资金 {summary.skippedCash.length} 个科目{summary.skippedExcludes.length>0&&`，另跳过剔除/例外 ${summary.skippedExcludes.length} 个科目`}。</div>}
 function Result({job,result}:{job?:JobEvent;result?:unknown}){const object=result&&typeof result==="object"?result as Record<string,unknown>:undefined;const paths=[...new Set([...(job?.outputPaths??[]),...(Array.isArray(object?.outputPaths)?object.outputPaths.filter((value):value is string=>typeof value==="string"):[])])];const batches=Array.isArray(object?.batches)?object.batches as Record<string,unknown>[]:[];const rows=typeof object?.rows==="number"?object.rows:undefined;const showProgress=shouldShowKanzhangJobProgress(job?.phase);return <Card className="kz-result"><CardHeader><CardTitle>预览与结果</CardTitle></CardHeader><CardContent>{job&&showProgress&&<JobProgress job={job} onCancel={(jobId)=>void jobCancel(jobId)} cancelLabel="取消任务"/>}{rows!==undefined&&<p>筛选后共 <b>{rows}</b> 行，可继续调整科目或进入导出。</p>}{paths.length>0&&<div className="kz-outputs">{paths.map(path=><Button key={path} variant="secondary" size="sm" title={path} onClick={()=>void openOutput(path)}><span>打开：</span><span>{path.split(/[\\/]/).pop()}</span></Button>)}</div>}{batches.length>0&&<div className="kz-summary">{batches.map((batch,index)=><div key={index}><b>{String(batch.name??`批次${index+1}`)}</b><span>明细 {String(batch.rows??0)} 行</span><span>损益结转 {String(batch.lossTransferVouchers??0)} 笔</span></div>)}</div>}{!result&&!showProgress&&<p>执行筛选或导出后显示结果。</p>}</CardContent></Card>}

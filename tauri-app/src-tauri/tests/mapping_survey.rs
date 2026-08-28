@@ -770,7 +770,10 @@ fn survey_uniform_currency() {
 #[ignore = "依赖本机样例目录与汇率缓存，手工调查用"]
 fn survey_4800_preview() {
     use std::collections::BTreeMap;
-    let Some(dir) = sample_dirs().into_iter().find(|d| d.join("TB-4800.xlsx").is_file()) else {
+    let Some(dir) = sample_dirs()
+        .into_iter()
+        .find(|d| d.join("TB-4800.xlsx").is_file())
+    else {
         println!("（没找到 TB-4800 样例）");
         return;
     };
@@ -823,7 +826,10 @@ fn survey_4800_preview() {
         }
     }
     println!("\n══════ 未覆盖凭证（classificationControls）");
-    let controls = result["classificationControls"].as_array().cloned().unwrap_or_default();
+    let controls = result["classificationControls"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     println!("  共 {} 条", controls.len());
     let mut by_class: BTreeMap<String, (usize, f64)> = Default::default();
     let mut by_status: BTreeMap<String, usize> = Default::default();
@@ -861,50 +867,84 @@ fn survey_4800_preview() {
         println!("    {}", serde_json::to_string(item).unwrap_or_default());
     }
     println!("\n══════ 客户重估凭证识别");
-    let crv = result["clientRevaluationVouchers"].as_array().cloned().unwrap_or_default();
+    let crv = result["clientRevaluationVouchers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     println!("  clientRevaluationVouchers 共 {} 条", crv.len());
     for item in crv.iter().take(3) {
         println!("    {}", serde_json::to_string(item).unwrap_or_default());
     }
     println!("\n══════ TB 勾稽 reconciliation");
-    println!("  {}", serde_json::to_string_pretty(&result["reconciliation"]).unwrap_or_default().chars().take(3000).collect::<String>());
+    println!(
+        "  {}",
+        serde_json::to_string_pretty(&result["reconciliation"])
+            .unwrap_or_default()
+            .chars()
+            .take(3000)
+            .collect::<String>()
+    );
     println!("\n══════ 余额滚动校验 balanceRollforwardValidation");
     let brv = &result["balanceRollforwardValidation"];
-    println!("  passed={} issues={}",
-        brv["passed"], brv["issues"].as_array().map(|a| a.len()).unwrap_or(0));
+    println!(
+        "  passed={} issues={}",
+        brv["passed"],
+        brv["issues"].as_array().map(|a| a.len()).unwrap_or(0)
+    );
     for item in brv["issues"].as_array().into_iter().flatten().take(5) {
         println!("    {}", serde_json::to_string(item).unwrap_or_default());
     }
     println!("\n══════ validation（映射与数据质量校验）");
-    println!("  {}", serde_json::to_string_pretty(&result["validation"]).unwrap_or_default().chars().take(2000).collect::<String>());
+    println!(
+        "  {}",
+        serde_json::to_string_pretty(&result["validation"])
+            .unwrap_or_default()
+            .chars()
+            .take(2000)
+            .collect::<String>()
+    );
     println!("\n══════ dataQuality 前 10 类");
     let mut quality_types: BTreeMap<String, usize> = Default::default();
     for item in result["dataQuality"].as_array().into_iter().flatten() {
         *quality_types
-            .entry(format!("{}/{}",
+            .entry(format!(
+                "{}/{}",
                 item["type"].as_str().unwrap_or("?"),
-                item["severity"].as_str().unwrap_or("?")))
+                item["severity"].as_str().unwrap_or("?")
+            ))
             .or_default() += 1;
     }
     for (k, n) in quality_types.iter().take(10) {
         println!("    {k:<44} {n:>6}");
     }
-    println!("
-══════ TB 粒度不足清单（界面会显著提示这一块）");
-    for item in result["tbGranularityBlocked"].as_array().into_iter().flatten() {
-        println!("    [{}] {}  币种 {}",
+    println!(
+        "
+══════ TB 粒度不足清单（界面会显著提示这一块）"
+    );
+    for item in result["tbGranularityBlocked"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        println!(
+            "    [{}] {}  币种 {}",
             item["type"].as_str().unwrap_or("?"),
             item["account"].as_str().unwrap_or(""),
-            item["currencies"]);
+            item["currencies"]
+        );
     }
-    println!("
-══════ 被隔离的科目明细");
+    println!(
+        "
+══════ 被隔离的科目明细"
+    );
     for item in result["dataQuality"].as_array().into_iter().flatten() {
         if item["severity"].as_str() == Some("隔离") {
-            println!("    [{}] 第{}行 {}",
+            println!(
+                "    [{}] 第{}行 {}",
                 item["type"].as_str().unwrap_or("?"),
                 item["row"],
-                item["account"].as_str().unwrap_or(""));
+                item["account"].as_str().unwrap_or("")
+            );
         }
     }
 }

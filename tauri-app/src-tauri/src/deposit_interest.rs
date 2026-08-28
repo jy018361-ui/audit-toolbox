@@ -536,7 +536,13 @@ pub(crate) fn suggest_account_role(account: &str) -> &'static str {
     ]) {
         return "other_monetary";
     }
-    if has(&["库存现金", "现金账户", "cashonhand", "cashinhand", "pettycash"]) {
+    if has(&[
+        "库存现金",
+        "现金账户",
+        "cashonhand",
+        "cashinhand",
+        "pettycash",
+    ]) {
         return "cash_on_hand";
     }
     if has(&[
@@ -598,17 +604,55 @@ fn account_code(account: &str) -> &str {
 }
 
 fn role_for(account: &str, params: &Value) -> String {
-    if let Some(role) = params
-        .get("accountRoles")
+    // 新版 UI 把自动预设与人工决定分开传入；只有人工决定才可挡住父项继承。
+    // 旧任务没有 overrides 时仍将 accountRoles 视为人工决定，保留历史排除。
+    let roles = params
+        .get("accountRoleOverrides")
         .and_then(Value::as_object)
-        .and_then(|roles| roles.get(account))
+        .or_else(|| params.get("accountRoles").and_then(Value::as_object));
+    if let Some(role) = roles
+        .and_then(|values| values.get(account))
         .and_then(Value::as_str)
     {
         if role != "unassigned" {
             return role.to_owned();
         }
     }
-    suggest_account_role(account).to_owned()
+    // 科目清单是识别时的快照，与测算行有两类天然错位：界面把 TB 与序时账
+    // 两套拼法并进同一张分类表（4800 实况是两边全名相同的科目为 0），以及
+    // 用户事后改过科目编码/名称的映射列。精确名对不上时按科目编码回退，
+    // 与 `fx::role_for` 同一口径——否则用户在科目分类里手工指定的利息收入
+    // 科目在测算时被悄悄丢掉，基准数又变回「未识别」。
+    let code = account_code(account);
+    if let Some(role) = roles.and_then(|values| {
+        values.iter().find_map(|(candidate, role)| {
+            (account_code(candidate) == code)
+                .then(|| role.as_str())
+                .flatten()
+                .filter(|value| *value != "unassigned")
+        })
+    }) {
+        return role.to_owned();
+    }
+    // 自动识别有结论（名称关键词或编码前缀命中）时相信它；判成 excluded 时
+    // 再给一次「上级科目继承」：界面科目清单包含非末级汇总行，而测算只读
+    // 末级——用户在「6603 财务费用」上选了利息收入，末级「66030101 …」
+    // 应当继承，否则人工分类永远落空。
+    let suggested = suggest_account_role(account);
+    if suggested != "excluded" {
+        return suggested.to_owned();
+    }
+    if let Some(role) = ledger_mapping::inherited_role_by_code_prefix(
+        code,
+        roles
+            .into_iter()
+            .flat_map(|values| values.iter())
+            .filter_map(|(candidate, role)| role.as_str().map(|value| (candidate.as_str(), value))),
+        account_code,
+    ) {
+        return role;
+    }
+    suggested.to_owned()
 }
 
 fn is_deposit_role(role: &str) -> bool {
@@ -642,9 +686,20 @@ fn roles(kind: &str) -> Vec<(&'static str, Vec<&'static str>, Vec<&'static str>)
     out.push((
         "auxiliary",
         vec![
-            "辅助核算", "银行账号", "银行帐号", "账户", "明细项", "往来单位",
-            "文本", "科目文本", "账户文本",
-            "assignment", "profit center", "profitcenter", "成本中心", "财务项目",
+            "辅助核算",
+            "银行账号",
+            "银行帐号",
+            "账户",
+            "明细项",
+            "往来单位",
+            "文本",
+            "科目文本",
+            "账户文本",
+            "assignment",
+            "profit center",
+            "profitcenter",
+            "成本中心",
+            "财务项目",
         ],
         vec!["科目编码", "科目代码", "科目名称"],
     ));
@@ -660,7 +715,14 @@ fn roles(kind: &str) -> Vec<(&'static str, Vec<&'static str>, Vec<&'static str>)
         // 序时账侧一律走 date 列，所以标准表里没有这个角色。
         out.push((
             "period",
-            vec!["会计期间", "期间", "所属期间", "年月", "period", "fiscalperiod"],
+            vec![
+                "会计期间",
+                "期间",
+                "所属期间",
+                "年月",
+                "period",
+                "fiscalperiod",
+            ],
             vec!["金额", "余额", "amount", "balance"],
         ));
     }
@@ -690,7 +752,9 @@ fn refine_layout(table: &FxTable, kind: &str, mapping: &mut Map<String, Value>) 
     let current: Vec<(String, String)> = mapping
         .iter()
         .filter_map(|(role, value)| {
-            value.as_str().map(|column| (role.clone(), column.to_string()))
+            value
+                .as_str()
+                .map(|column| (role.clone(), column.to_string()))
         })
         .collect();
     for (role, column) in
@@ -807,10 +871,7 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
                 if role == "date" {
                     score += dated[index] * 0.12;
                 }
-                if role.contains("Amount")
-                    || role.contains("Debit")
-                    || role.contains("Credit")
-                {
+                if role.contains("Amount") || role.contains("Debit") || role.contains("Credit") {
                     score += numeric[index] * 0.12;
                 }
                 // 冲突词是排除条件，不是扣分项——与内核和汇兑损益同口径：
@@ -1267,30 +1328,34 @@ fn calculate(
             // 利息收入是损益类贷方科目：优先用本期发生额净额，
             // 只有余额可用时退回期末余额净额。
             // 发生额口径：本年累计优先，表里只给本期时退而求其次。
-            let net = signed(&tb, row, &tb_map, "ytdFunctionalCredit", "ytdFunctionalDebit")
-                .or_else(|| {
-                    signed(
-                        &tb,
-                        row,
-                        &tb_map,
-                        "periodFunctionalCredit",
-                        "periodFunctionalDebit",
-                    )
-                })
-                .filter(|value| value.abs() > 0.0)
-                .or_else(|| {
-                    signed(
-                        &tb,
-                        row,
-                        &tb_map,
-                        "closingFunctionalCredit",
-                        "closingFunctionalDebit",
-                    )
-                })
-                .or_else(|| {
-                    cell_number(&tb, row, &tb_map, "closingFunctionalAmount").map(|x| -x)
-                })
-                .unwrap_or(0.0);
+            let net = signed(
+                &tb,
+                row,
+                &tb_map,
+                "ytdFunctionalCredit",
+                "ytdFunctionalDebit",
+            )
+            .or_else(|| {
+                signed(
+                    &tb,
+                    row,
+                    &tb_map,
+                    "periodFunctionalCredit",
+                    "periodFunctionalDebit",
+                )
+            })
+            .filter(|value| value.abs() > 0.0)
+            .or_else(|| {
+                signed(
+                    &tb,
+                    row,
+                    &tb_map,
+                    "closingFunctionalCredit",
+                    "closingFunctionalDebit",
+                )
+            })
+            .or_else(|| cell_number(&tb, row, &tb_map, "closingFunctionalAmount").map(|x| -x))
+            .unwrap_or(0.0);
             booked_interest += net;
             booked_interest_rows.push(json!({
                 "entity": cell_text(&tb, row, &tb_map, "entity"),
@@ -1324,7 +1389,7 @@ fn calculate(
             "closingFunctionalCredit",
         )
         .or_else(|| cell_number(&tb, row, &tb_map, "closingFunctionalAmount"))
-            .unwrap_or(0.0);
+        .unwrap_or(0.0);
         let (tier, matched_by) = suggest_tier(&format!("{account} {auxiliary}"));
         let meta = find_tier(tier);
         accounts.push(AccountRow {
@@ -1497,7 +1562,7 @@ fn calculate(
             notes.push("未提供序时账，月末余额按年初到年末直线推算，月均余额仅供参考。".into());
         } else if account.reconciliation_diff.abs() >= 0.01 {
             notes.push(format!(
-                "序时账还原的年末余额与 TB 相差 {:.2}，请确认科目/辅助核算是否完整匹配。",
+                "JE 推导的年末余额与 TB 相差 {:.2}，请确认科目/辅助核算是否完整匹配。",
                 account.reconciliation_diff
             ));
         }
@@ -1551,7 +1616,6 @@ fn calculate(
             "monthlySource": if has_je { "序时账逐月还原" } else { "期初/期末两点法" },
             "amountScheme": amount_scheme,
             "amountEvidence": amount_evidence,
-            "signOverride": params.get("signOverride").and_then(Value::as_str).unwrap_or("auto"),
             "openingSource": if accounts.iter().all(|a| a.opening_from_tb) {
                 "TB 年初余额"
             } else if accounts.iter().any(|a| a.opening_from_tb) {
@@ -1697,11 +1761,7 @@ fn monthly_movements(
             .or_default()
             .push(index);
     }
-    let scheme = detect_amount_scheme(
-        &je,
-        &je_map,
-        params.get("signOverride").and_then(Value::as_str),
-    )?;
+    let scheme = detect_amount_scheme(&je, &je_map)?;
     let mut series: MonthlySeries = accounts
         .iter()
         .map(|account| (account.key.clone(), [(0.0, 0.0); 12]))
@@ -1785,7 +1845,6 @@ struct AmountScheme {
 fn detect_amount_scheme(
     table: &FxTable,
     mapping: &Map<String, Value>,
-    override_choice: Option<&str>,
 ) -> Result<AmountScheme, AppError> {
     let column = |role: &str| mapping.get(role).and_then(Value::as_str).map(str::to_owned);
     let ledger = crate::tabular::LedgerMapping {
@@ -1803,39 +1862,39 @@ fn detect_amount_scheme(
     let id_indexes = column_indexes(table, mapping, "id");
     let evidence = crate::tabular::sign_evidence(&table.rows, &table.headers, &ledger, &id_indexes);
 
-    // 用户手工指定优先；否则用检测结论。检测走两步：先拿借贷齐全的凭证配平，
-    // 配不出来就退到看列的形状（贷方列出现负数即已带符号）——单边账走的就是
-    // 第二步，同样是确定的答案。
-    let (signed, basis) = match override_choice {
-        Some("signed") => (true, "用户手工指定".to_string()),
-        Some("unsigned") => (false, "用户手工指定".to_string()),
-        _ => match evidence.convention {
-            Some(convention) => {
-                let signed = convention.as_str() == "signed";
-                let basis = if evidence.signed_votes + evidence.unsigned_votes > 0 {
-                    format!(
-                        "{} 张借贷齐全的凭证按此口径配平",
-                        evidence.signed_votes.max(evidence.unsigned_votes)
-                    )
-                } else {
+    // 记法一律自动判定，界面不再提供人工选择：检测走两步，先拿借贷齐全的
+    // 凭证配平投票，配不出来就退到看列的形状（贷方列出现负数即已带符号）——
+    // 单边账走的就是第二步，同样是确定的答案。
+    let (signed, basis) = match evidence.convention {
+        Some(convention) => {
+            let signed = convention.as_str() == "signed";
+            let basis = if evidence.signed_votes + evidence.unsigned_votes > 0 {
+                format!(
+                    "{} 张借贷齐全的凭证按此口径配平",
+                    evidence.signed_votes.max(evidence.unsigned_votes)
+                )
+            } else {
+                evidence
+                    .note
+                    .clone()
+                    .unwrap_or_else(|| "按金额列的正负形状判定".into())
+            };
+            (signed, basis)
+        }
+        None => {
+            return Err(error(
+                "AMOUNT_SCHEME_UNDETERMINED",
+                format!(
+                    "无法自动判断序时账的金额记法：{}这份序时账的借贷记法两种解释都说得通，为避免算错已停止测算；请让客户重新导出借贷方向明确的序时账，或移除序时账、改用期初/期末两点法。",
                     evidence
                         .note
                         .clone()
-                        .unwrap_or_else(|| "按金额列的正负形状判定".into())
-                };
-                (signed, basis)
-            }
-            None => {
-                return Err(error(
-                    "AMOUNT_SCHEME_UNDETERMINED",
-                    format!(
-                        "无法判断序时账的金额记法：{}请在「序时账金额记法」里手工选择【借贷分列，都是正数】或【已带符号，借正贷负】后重试。",
-                        evidence.note.clone().map(|x| format!("{x}。")).unwrap_or_default()
-                    ),
-                    None,
-                ));
-            }
-        },
+                        .map(|x| format!("{x}。"))
+                        .unwrap_or_default()
+                ),
+                None,
+            ));
+        }
     };
     Ok(AmountScheme {
         scheme: evidence.scheme,
@@ -2117,7 +2176,7 @@ fn write_summary(
         "年利率（可修改）",
         "年初余额",
         "年末余额(TB)",
-        "年末余额(还原)",
+        "年末余额(JE推导)",
         "勾稽差异",
         "月均余额(年平均)",
         "测算利息",
@@ -2714,8 +2773,16 @@ mod tests {
             eprintln!("跳过：未找到用友真实样例");
             return;
         }
-        let tb = inspect(&json!({"source": {"inputPath": tb_path.to_string_lossy()}}), "tb").unwrap();
-        let je = inspect(&json!({"source": {"inputPath": je_path.to_string_lossy()}}), "je").unwrap();
+        let tb = inspect(
+            &json!({"source": {"inputPath": tb_path.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
+        let je = inspect(
+            &json!({"source": {"inputPath": je_path.to_string_lossy()}}),
+            "je",
+        )
+        .unwrap();
         assert_eq!(je["suggestedMapping"]["functionalAmount"], "金额");
         let params = json!({
             "reportStart": "2024-01-01", "reportEnd": "2024-12-31", "dayBasis": "month12",
@@ -2726,8 +2793,15 @@ mod tests {
         let pause = PauseCheckpoint::unpaused(cancel.clone());
         let result = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap();
         let rows = result["rows"].as_array().unwrap();
-        assert_eq!(rows.len(), 11, "1002 汇总行不得与 11 个末级账户重复进入测算");
-        assert!(rows.iter().all(|row| row["account"].as_str().unwrap_or("") != "1002 银行存款"));
+        assert_eq!(
+            rows.len(),
+            11,
+            "1002 汇总行不得与 11 个末级账户重复进入测算"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row["account"].as_str().unwrap_or("") != "1002 银行存款")
+        );
         for row in rows {
             assert!(
                 row["reconciliationDiff"].as_f64().unwrap().abs() < 0.01,
@@ -2758,11 +2832,18 @@ mod tests {
             eprintln!("跳过：未找到 4800 样例文件");
             return;
         }
-        let tb = inspect(&json!({"source": {"inputPath": tb_path.to_string_lossy()}}), "tb").unwrap();
+        let tb = inspect(
+            &json!({"source": {"inputPath": tb_path.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
         let tb_map = &tb["suggestedMapping"];
         let account_cols = account_columns_of(tb_map);
         // 科目名称必须一起进来，否则分类只看到 "6701030001" 这串数字。
-        assert!(account_cols.iter().any(|x| x == "科目代码"), "{account_cols:?}");
+        assert!(
+            account_cols.iter().any(|x| x == "科目代码"),
+            "{account_cols:?}"
+        );
         assert!(
             account_cols.iter().any(|x| x == "科目名称二级"),
             "{account_cols:?}"
@@ -2785,20 +2866,40 @@ mod tests {
         };
         assert_eq!(role_of("1002010017"), "deposit");
         assert_eq!(role_of("1003010003"), "other_monetary");
-        assert_eq!(role_of("6701030001"), "interest_income", "财务费用-利息收入应作勾稽基准");
+        assert_eq!(
+            role_of("6701030001"),
+            "interest_income",
+            "财务费用-利息收入应作勾稽基准"
+        );
         // 内部利息收入来自关联方往来，而往来科目在存款侧已被排除在计息范围外；
         // 收入侧再把它算进基准，估算与基准覆盖的科目就不是同一批，必然对不上。
         // 资金池等确需纳入的情形，用户在科目分类里逐个改回即可。
-        assert_eq!(role_of("6111020001"), "excluded", "投资收益-内部利息收入不是存款利息");
+        assert_eq!(
+            role_of("6111020001"),
+            "excluded",
+            "投资收益-内部利息收入不是存款利息"
+        );
         // 过渡户、现流调整户、应收利息都不是可计息存款。
         assert_eq!(role_of("1002990001"), "excluded");
         assert_eq!(role_of("1002980001"), "excluded");
         assert_eq!(role_of("1004010001"), "excluded");
 
-        let je = inspect(&json!({"source": {"inputPath": je_path.to_string_lossy()}}), "je").unwrap();
+        let je = inspect(
+            &json!({"source": {"inputPath": je_path.to_string_lossy()}}),
+            "je",
+        )
+        .unwrap();
         let je_map = &je["suggestedMapping"];
-        assert_eq!(je_map["date"], json!("记帐日期"), "不能错选录入用的“输入日期”");
-        assert_eq!(je_map["functionalAmount"], json!("本位币金额"), "不能错选凭证货币或集团货币");
+        assert_eq!(
+            je_map["date"],
+            json!("记帐日期"),
+            "不能错选录入用的“输入日期”"
+        );
+        assert_eq!(
+            je_map["functionalAmount"],
+            json!("本位币金额"),
+            "不能错选凭证货币或集团货币"
+        );
         assert_eq!(je_map["direction"], json!("借贷"));
 
         let params = json!({
@@ -2813,7 +2914,10 @@ mod tests {
         let pause = PauseCheckpoint::unpaused(cancel.clone());
         let result = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap();
         let summary = &result["summary"];
-        eprintln!("4800 测算结果: {}", serde_json::to_string_pretty(summary).unwrap());
+        eprintln!(
+            "4800 测算结果: {}",
+            serde_json::to_string_pretty(summary).unwrap()
+        );
 
         // 期初余额直接来自 TB，不再倒推。
         assert_eq!(summary["openingSource"], "TB 年初余额");
@@ -2822,14 +2926,18 @@ mod tests {
         // 往来利息，往来科目在存款侧已被排除，收入侧再计入就会凭空撑出 6 万多的假差异。
         assert!(
             (summary["bookedInterestIncome"].as_f64().unwrap() - 78_564.20).abs() < 1.0,
-            "账面利息收入取数不对: {}", summary["bookedInterestIncome"]
+            "账面利息收入取数不对: {}",
+            summary["bookedInterestIncome"]
         );
         // 最有力的证据：13 个账户全部由序时账逐月还原后，期末余额与 TB 分毫不差。
         // 之前把带符号金额取绝对值时，这里会差出几千万。
         assert_eq!(result["rows"].as_array().unwrap().len(), 13);
         for row in result["rows"].as_array().unwrap() {
             let account = row["account"].as_str().unwrap_or("");
-            assert!(row["openingFromTb"].as_bool().unwrap(), "{account} 期初应直接取自 TB");
+            assert!(
+                row["openingFromTb"].as_bool().unwrap(),
+                "{account} 期初应直接取自 TB"
+            );
             assert!(
                 row["reconciliationDiff"].as_f64().unwrap().abs() < 1.0,
                 "{account} 序时账还原的期末余额与 TB 对不上: {}",
@@ -2850,12 +2958,14 @@ mod tests {
         assert!((rmb["tbClosingBalance"].as_f64().unwrap() - 12_599.46).abs() < 0.01);
         assert!(
             rmb["reconciliationDiff"].as_f64().unwrap().abs() < 1.0,
-            "序时账还原的期末余额应与 TB 勾稽: {}", rmb["reconciliationDiff"]
+            "序时账还原的期末余额应与 TB 勾稽: {}",
+            rmb["reconciliationDiff"]
         );
         // 测算利息必须为正——负利息说明余额还原反了。
         assert!(
             summary["calculatedInterest"].as_f64().unwrap() > 0.0,
-            "测算利息为负: {}", summary["calculatedInterest"]
+            "测算利息为负: {}",
+            summary["calculatedInterest"]
         );
     }
 
@@ -2885,7 +2995,7 @@ mod tests {
     fn covers_all_five_journal_amount_layouts() {
         let bank_net = |table: &FxTable, mapping: Value| {
             let mapping = mapping.as_object().unwrap().clone();
-            let scheme = detect_amount_scheme(table, &mapping, None).unwrap();
+            let scheme = detect_amount_scheme(table, &mapping).unwrap();
             let account = table.headers.iter().position(|h| h == "科目").unwrap();
             let net: f64 = table
                 .rows
@@ -2906,7 +3016,8 @@ mod tests {
                 &["V2", "管理费用", "30", "0"],
             ],
         );
-        let split = json!({"id": "凭证号", "functionalDebit": "借方金额", "functionalCredit": "贷方金额"});
+        let split =
+            json!({"id": "凭证号", "functionalDebit": "借方金额", "functionalCredit": "贷方金额"});
         assert_eq!(bank_net(&table, split.clone()), ("B", false, 70.0));
 
         // 方案B ＋ 已带符号：贷方列是负数。若照搬"借减贷"会算成 130。
@@ -2960,9 +3071,10 @@ mod tests {
         assert_eq!(bank_net(&table, single), ("single", true, 70.0));
     }
 
-    /// 判不出来就明确报错并点名要用户选，而不是拿一个含糊的结论继续算。
+    /// 判不出来就明确报错停下来，而不是拿一个含糊的结论继续算。
+    /// 人工选择记法已从界面移除，报错只指向换数据或改用两点法。
     #[test]
-    fn asks_the_user_when_the_layout_cannot_be_decided() {
+    fn stops_when_the_layout_cannot_be_decided_automatically() {
         // 借贷分列，但贷方列正负各半，两种记法都说得通。
         let table = scheme_table(
             &["凭证号", "科目", "借方金额", "贷方金额"],
@@ -2973,27 +3085,29 @@ mod tests {
                 &["V2", "管理费用", "30", "0"],
             ],
         );
-        let mapping = json!({"id": "凭证号", "functionalDebit": "借方金额", "functionalCredit": "贷方金额"})
-            .as_object()
-            .unwrap()
-            .clone();
-        let err = detect_amount_scheme(&table, &mapping, None).unwrap_err();
+        let mapping =
+            json!({"id": "凭证号", "functionalDebit": "借方金额", "functionalCredit": "贷方金额"})
+                .as_object()
+                .unwrap()
+                .clone();
+        let err = detect_amount_scheme(&table, &mapping).unwrap_err();
         assert_eq!(err.code, "AMOUNT_SCHEME_UNDETERMINED");
-        assert!(err.user_message.contains("手工选择"));
-
-        // 用户指定后照常测算，两种指定各按各的算法走。
-        let unsigned = detect_amount_scheme(&table, &mapping, Some("unsigned")).unwrap();
-        assert!(!unsigned.signed);
-        assert_eq!(unsigned.evidence, "用户手工指定");
-        let signed = detect_amount_scheme(&table, &mapping, Some("signed")).unwrap();
-        assert!(signed.signed);
+        assert!(err.user_message.contains("无法自动判断"));
+        assert!(!err.user_message.contains("手工选择"));
+        assert!(err.user_message.contains("两点法"));
     }
 
     #[test]
     fn extracts_the_account_code_from_a_multi_column_label() {
         // 多列映射的拼接顺序不固定，编码可能在最前也可能在最后。
-        assert_eq!(account_code("1002010017 货币资金 银行存款-建设银行"), "1002010017");
-        assert_eq!(account_code("货币资金 货币资金-银行存款-建设银行 1002010017"), "1002010017");
+        assert_eq!(
+            account_code("1002010017 货币资金 银行存款-建设银行"),
+            "1002010017"
+        );
+        assert_eq!(
+            account_code("货币资金 货币资金-银行存款-建设银行 1002010017"),
+            "1002010017"
+        );
         assert_eq!(account_code("100332 USD BOC-CPCSC-SH"), "100332");
         assert_eq!(account_code("1002.01 银行存款"), "1002.01");
         // 认不出编码时退回第一个词，行为与从前一致。
@@ -3048,8 +3162,14 @@ mod tests {
         assert_eq!(suggest_account_role("1003990001"), "other_monetary");
         assert_eq!(suggest_account_role("1002990002"), "deposit");
         // 负债、损益类科目不可能是存款，哪怕名字里带"保证金""银行"。
-        assert_eq!(suggest_account_role("2241120001 其他应付款-销售保证金"), "excluded");
-        assert_eq!(suggest_account_role("709002 Bank Service Charges"), "excluded");
+        assert_eq!(
+            suggest_account_role("2241120001 其他应付款-销售保证金"),
+            "excluded"
+        );
+        assert_eq!(
+            suggest_account_role("709002 Bank Service Charges"),
+            "excluded"
+        );
     }
 
     #[test]
@@ -3328,6 +3448,115 @@ mod tests {
     fn rejects_unknown_methods() {
         let err = call("deposit.unknown", json!({})).unwrap_err();
         assert_eq!(err.code, "METHOD_NOT_FOUND");
+    }
+
+    /// 人工科目分类必须在复测时生效。用户实测的坑：词典没认出利息收入
+    /// 科目，人工在界面科目分类里补选「利息收入（勾稽基准）」后点复测，
+    /// 基准数仍显示「未识别」——科目清单是识别时的快照，与测算行有两类
+    /// 错位：界面把 TB 与序时账两套拼法并进同一张分类表（同编码不同全名），
+    /// 以及清单里包含非末级汇总行而测算只读末级。前者按编码回退，后者由
+    /// 末级继承汇总行上的指定。
+    #[test]
+    fn manual_account_roles_survive_snapshot_and_leaf_mismatches() {
+        let dir = std::env::temp_dir().join(format!("deposit-roles-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb_path = dir.join("tb.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec![
+                    "科目编码",
+                    "科目名称",
+                    "年初余额借方",
+                    "期末余额借方",
+                    "本期借方发生额",
+                    "本期贷方发生额",
+                ],
+                vec!["1002", "银行存款", "1200000", "2400000", "1200000", "0"],
+                // 名称没有利息关键词、损益类编码：自动识别判 excluded，
+                // 正是需要人工补选的形态。
+                vec!["660299", "财务费用-融资成本", "0", "0", "0", "888"],
+                // 汇总行与末级行并存：测算只读末级，但界面清单两者都有。
+                vec!["6603", "财务费用", "0", "0", "0", "0"],
+                vec!["66030101", "财务费用-手续及利息户", "0", "0", "0", "777"],
+            ],
+        );
+        let tb = inspect(
+            &json!({"source": {"inputPath": tb_path.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
+        let params = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": tb["suggestedMapping"],
+            // 真实页面会把全部自动预设一起传入；excluded 不能冒充手工排除。
+            "accountRoles": tb["suggestedAccountRoles"],
+            "accountRoleOverrides": {
+                "1002 银行存款": "deposit",
+                // 序时账侧的拼法：同编码、不同全名，精确匹配必然落空。
+                "660299 财务费用-融资成本 CPCSC": "interest_income",
+                // 汇总行上的指定要落到末级 66030101 上。
+                "6603 财务费用": "interest_income"
+            }
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap();
+        let summary = &result["summary"];
+        assert!(
+            summary["hasInterestIncomeAccount"].as_bool().unwrap(),
+            "人工指定的利息收入科目应进入基准数: {summary}"
+        );
+        assert!(
+            (summary["bookedInterestIncome"].as_f64().unwrap() - (888.0 + 777.0)).abs() < 0.01,
+            "两条人工指定的利息收入都应抓到: {summary}"
+        );
+        assert_eq!(
+            result["bookedInterestRows"].as_array().unwrap().len(),
+            2,
+            "汇总行本身不进入测算，末级行继承其分类"
+        );
+        // 自动识别有结论的科目不被上级指定覆盖：1002 仍按存款测算，
+        // 而 6603 汇总行不在结果里。
+        let rows = result["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0]["account"].as_str().unwrap().contains("银行存款"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manual_leaf_exclusion_wins_over_parent_and_automatic_exclusion_does_not() {
+        let leaf = "66030101 财务费用-其他";
+        let mut params = json!({
+            "accountRoles": {leaf: "excluded", "6603 财务费用": "interest_income"},
+            "accountRoleOverrides": {"6603 财务费用": "interest_income"}
+        });
+        assert_eq!(role_for(leaf, &params), "interest_income");
+        params["accountRoleOverrides"][leaf] = json!("excluded");
+        assert_eq!(role_for(leaf, &params), "excluded");
+        params["accountRoleOverrides"]
+            .as_object_mut()
+            .unwrap()
+            .remove(leaf);
+        assert_eq!(role_for(leaf, &params), "interest_income");
+        // 自动有明确分类的银行存款不因上级误选而变成利息收入。
+        assert_eq!(
+            role_for(
+                "100201 银行存款",
+                &json!({
+                    "accountRoleOverrides": {"1002 银行存款": "interest_income"}
+                })
+            ),
+            "deposit"
+        );
+        // 旧任务没有 provenance，保留原先明确传入的叶子排除口径。
+        params
+            .as_object_mut()
+            .unwrap()
+            .remove("accountRoleOverrides");
+        assert_eq!(role_for(leaf, &params), "excluded");
     }
 
     fn write_fixture(path: &Path, rows: &[Vec<&str>]) {

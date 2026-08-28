@@ -11,6 +11,8 @@ export type StepIndicatorProps = {
   /** 0-based 当前步 */
   current: number;
   onStepClick?: (index: number) => void;
+  /** 模式导航不是顺序流程，切换到后项时不应把前项显示成已完成。 */
+  showCompleted?: boolean;
 };
 
 /**
@@ -21,11 +23,11 @@ export type StepIndicatorProps = {
  * 禁用只由调用方传入的 step.disabled 决定：FA 的步骤 2/3 在匹配完成后
  * 应可点击进入，不能因"非当前步且未完成"被自动禁用。
  */
-export function StepIndicator({ steps, current, onStepClick }: StepIndicatorProps) {
+export function StepIndicator({ steps, current, onStepClick, showCompleted = true }: StepIndicatorProps) {
   return (
     <div className="step-indicator">
       {steps.map((step, index) => {
-        const done = index < current;
+        const done = showCompleted && index < current;
         const active = index === current;
         // disabled 只由外部传入的 step.disabled 决定。
         // 不能用 (!done && !active) 自动禁用：FA 的步骤 2/3 的可用性由

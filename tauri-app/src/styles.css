@@ -82,7 +82,8 @@
   --sp-6: 32px;
   --sp-7: 48px;
 
-  --shadow-card: 0 7px 24px rgba(22, 56, 56, 0.06);
+  /* 卡片不使用投影：浅色投影在白底上会被感知为一圈细边框。 */
+  --shadow-card: none;
 
   /* ShadCN semantic tokens map to the existing audit-toolbox palette. */
   --background: var(--surface-page);
@@ -1940,6 +1941,19 @@ summary:focus-visible {
   color: var(--danger-fg) !important;
   background: var(--danger-bg);
   border: 1px solid var(--danger-border);
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm) !important;
+}
+
+
+/* 形态判定结论：「已识别为 类型1（起始日＋到期日）」/「最接近 …，还缺 …」。
+   与未映射提示区分开——这条是结论不是错误，用中性底色。 */
+.mapping-form-note {
+  margin-top: var(--sp-2) !important;
+  color: var(--text-muted) !important;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-soft);
   border-radius: var(--r-sm);
   padding: var(--sp-2) var(--sp-3);
   font-size: var(--fs-sm) !important;

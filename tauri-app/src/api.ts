@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { ReleaseNotesSchema } from "./updateNotes";
 import {
   BootstrapSchema,
   JobEventSchema,
@@ -80,6 +81,12 @@ export const settingsGet = () =>
   inTauri()
     ? invoke<Record<string, unknown>>("settings_get")
     : Promise.resolve({ ...previewSettings });
+export async function updateReleaseNotes(targetVersion?: string) {
+  if (!inTauri()) throw previewUnavailable("读取版本更新说明");
+  return ReleaseNotesSchema.parse(
+    await invoke("update_release_notes", { targetVersion }),
+  );
+}
 export const historyGet = () =>
   inTauri()
     ? invoke<Array<Record<string, unknown>>>("history_get")

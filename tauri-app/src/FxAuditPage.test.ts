@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   fxAccountCurrencyDetail,
+  fxCurrencySourceLabel,
+  fxFallbackFunctional,
   fxAccountCurrencyOverrides,
   fxAllowedModes,
   fxApplyJobResult,
@@ -13,7 +15,6 @@ import {
   fxPreviewTokenFor,
   fxReportStart,
   fxResolveAccountRoles,
-  fxRunMappingReviews,
   granularityLabel,
   splitClassificationGroups,
   summarizeQuality,
@@ -22,6 +23,7 @@ import {
   uncoveredBreakdown,
   uncoveredMetricDetail,
 } from "./FxAuditPage";
+import { applyLedgerReviewsTogether } from "./ledgerMapping";
 import type React from "react";
 describe("fx audit mode selection",()=>{
   it("uses two-point unrealized mode for TB only",()=>{expect(fxDefaultMode(false,true)).toBe("unrealized");expect(fxAllowedModes(false,true)).toEqual(["unrealized"])});
@@ -87,7 +89,39 @@ describe("fx audit upload and mapping parity",()=>{
   });
 
   it("derives the audit year start from the balance sheet date",()=>expect(fxReportStart("2024-12-31")).toBe("2024-01-01"));
-  it("starts JE and TB mapping reviews from one action",async()=>{const started:string[]=[];const pending:Record<string,()=>void>={};const task=fxRunMappingReviews(kind=>new Promise<void>(resolve=>{started.push(kind);pending[kind]=resolve}));expect(started).toEqual(["je","tb"]);pending.je();pending.tb();await task});
+  it("一键复核从一次动作同时启动 JE 与 TB 两个复核，单个失败不阻塞另一个",async()=>{
+    const started:string[]=[];
+    const call=async(_method:string,params:Record<string,unknown>)=>{
+      const kind=String((params as {kind?:unknown}).kind);
+      started.push(kind);
+      if(kind==="je")throw new Error("LLM 暂不可用");
+      return {changes:[{role:"accountCode",suggestedColumn:"科目编码",confidence:0.9}]};
+    };
+    const target={headers:["科目编码"],preview:[["1002"]],mapping:{},labels:{accountCode:"科目编码"}};
+    const outcomes=await applyLedgerReviewsTogether(call,{je:target,tb:target});
+    expect(started.sort()).toEqual(["je","tb"]);
+    // JE 失败：映射原样退回、failed 标记，错误文本可供界面展示。
+    expect(outcomes.je?.failed).toBe(true);
+    expect(outcomes.je?.mapping).toEqual({});
+    expect(outcomes.je?.error).toContain("LLM 暂不可用");
+    // TB 照常完成并应用建议，不受 JE 失败影响。
+    expect(outcomes.tb?.failed).toBe(false);
+    expect(outcomes.tb?.appliedCount).toBe(1);
+    expect(outcomes.tb?.mapping.accountCode).toBe("科目编码");
+  });
+  it("只复核已上传的文件，未上传的不产生结果",async()=>{
+    const started:string[]=[];
+    const call=async(_method:string,params:Record<string,unknown>)=>{
+      started.push(String((params as {kind?:unknown}).kind));
+      return {changes:[]};
+    };
+    const outcomes=await applyLedgerReviewsTogether(call,{
+      tb:{headers:["科目编码"],preview:[["1002"]],mapping:{},labels:{accountCode:"科目编码"}},
+    });
+    expect(started).toEqual(["tb"]);
+    expect(outcomes.je).toBeUndefined();
+    expect(outcomes.tb?.appliedCount).toBe(0);
+  });
   it("keeps preview data when export adds an output path",()=>{const preview={summary:{difference:12},voucherDetail:[{voucherId:"1"}]};const exported={summary:{difference:12},outputPaths:["workpaper.xlsx"]};expect(fxMergeJobResult(preview,exported)).toEqual({...preview,...exported})});
   it("keeps the last preview when a completion event has no result payload",()=>{const preview={summary:{difference:12}};expect(fxApplyJobResult(preview,undefined,"fx.preview")).toBe(preview)});
   it("accepts a preview result before the completed event",()=>{const preview={summary:{difference:12}};expect(fxApplyJobResult(undefined,preview,"fx.preview")).toEqual(preview)});
@@ -287,13 +321,24 @@ describe("科目币种覆盖", () => {
     const detail = fxAccountCurrencyDetail("1002990001 过渡银行", je, tb);
     expect(detail.detected).toBe("HKD");
     expect(detail.source).toBe("币种列");
+    expect(detail.side).toBe("JE");
     expect(detail.seen).toEqual(["HKD", "JPY", "USD"]);
     expect(detail.fellBack).toBe(false);
+  });
+
+  it("界面括号里标出币种是怎么取到的，含来自 TB 还是 JE", () => {
+    expect(fxCurrencySourceLabel("JE", "币种列")).toBe("JE币种列");
+    expect(fxCurrencySourceLabel("TB", "币种列")).toBe("TB币种列");
+    expect(fxCurrencySourceLabel("TB", "科目文本")).toBe("TB科目名");
+    // 退回本位币列等于没认出账户币种，不必再区分来自哪份文件。
+    expect(fxCurrencySourceLabel("TB", "本位币列")).toBe("按本位币");
+    expect(fxCurrencySourceLabel("", "")).toBe("按本位币");
   });
 
   it("只有 TB 且依据是本位币列时标记为未识别", () => {
     const detail = fxAccountCurrencyDetail("1122010001 应收账款", je, tb);
     expect(detail.detected).toBe("USD");
+    expect(detail.side).toBe("TB");
     expect(detail.fellBack).toBe(true);
   });
 
@@ -321,6 +366,17 @@ describe("科目币种覆盖", () => {
     expect(detail.detected).toBe("HKD");
     expect(detail.source).toBe("币种列");
     expect(detail.seen).toEqual(["HKD", "JPY", "USD"]);
+  });
+
+  it("三层依据全空时按界面填写的本位币兜底，界面据此显示「按本位币」", () => {
+    // 有主体列：取各主体的本位币，一致时给出唯一兜底币种。
+    expect(fxFallbackFunctional(["A", "B"], { A: "CNY", B: "CNY" }, "默认主体", "CNY")).toBe("CNY");
+    // 无主体列：取固定主体那一格。
+    expect(fxFallbackFunctional([], { 默认主体: "usd" }, "默认主体", "CNY")).toBe("USD");
+    // 没填过就用默认值（TB 整列同值时是那个值，否则 CNY）。
+    expect(fxFallbackFunctional(["A"], {}, "默认主体", "USD")).toBe("USD");
+    // 多主体本位币不一致时无法给出唯一兜底，仍显示「未识别」。
+    expect(fxFallbackFunctional(["A", "B"], { A: "CNY", B: "USD" }, "默认主体", "CNY")).toBe("");
   });
 
   it("留空的选择不进 payload，只传用户真正改过的", () => {

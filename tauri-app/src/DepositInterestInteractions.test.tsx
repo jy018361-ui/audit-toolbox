@@ -91,7 +91,16 @@ beforeEach(() => {
   mock.engineCall.mockImplementation(async (method: string) => {
     if (method === "deposit.rate_tiers") return undefined;
     if (method === "deposit.classify_source")
-      return { kind: "tb", sheet: "TB", headerRow: 1, headerDepth: 1 };
+      return {
+        kind: "tb",
+        scores: { je: 1, tb: 10 },
+        headers: inspection.headers,
+        preview: inspection.preview,
+        sheet: "TB",
+        headerRow: 1,
+        headerDepth: 1,
+      };
+    if (method === "deposit.classify_source_llm") return { kind: "tb" };
     if (method === "deposit.inspect_tb") return inspection;
     throw new Error(`unexpected ${method}`);
   });
@@ -109,6 +118,10 @@ describe("存款科目手工分类请求", () => {
     const parentInput = await screen.findByRole("combobox", {
       name: `${parent}的分类`,
     });
+    expect(mock.engineCall).toHaveBeenCalledWith(
+      "deposit.classify_source_llm",
+      expect.objectContaining({ payload: expect.any(Object) }),
+    );
     const leafInput = screen.getByRole("combobox", { name: `${leaf}的分类` });
     expect(leafInput).toHaveValue("");
     fireEvent.change(parentInput, { target: { value: "interest_income" } });

@@ -104,12 +104,13 @@ it("groups settings, preserves draft across sections, and saves via the existing
   fireEvent.change(screen.getByLabelText("百度 API Key"), {
     target: { value: "test-placeholder" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "3 缓存清理" }));
+  fireEvent.click(screen.getByRole("button", { name: "2 基本设置" }));
   expect(screen.getByRole("heading", { name: "本地缓存" })).toBeVisible();
+  expect(screen.getByRole("heading", { name: "界面主题" })).toBeVisible();
   fireEvent.change(screen.getByLabelText("自动清理"), {
     target: { value: "off" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "1 AI 与 OCR" }));
+  fireEvent.click(screen.getByRole("button", { name: "1 API 配置" }));
   expect(screen.getByLabelText("模型")).toHaveValue("draft-model");
   fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
   await screen.findByRole("status");
@@ -122,14 +123,12 @@ it("groups settings, preserves draft across sections, and saves via the existing
   );
   expect(secretSet).toHaveBeenCalledWith("baidu_ocr_key", "test-placeholder");
   expect(screen.getByLabelText("百度 API Key")).toHaveValue("");
-  fireEvent.click(screen.getByRole("button", { name: "2 界面主题" }));
+  fireEvent.click(screen.getByRole("button", { name: "2 基本设置" }));
   expect(screen.getByRole("button", { name: "深绿" })).toBeVisible();
-  expect(
-    screen.queryByRole("button", { name: "保存配置" }),
-  ).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "保存配置" })).toBeVisible();
   const updateButton = screen.getByRole("button", { name: "软件更新" });
   expect(updateButton.closest(".page-header-actions")).not.toBeNull();
-  expect(document.querySelectorAll(".step-indicator button")).toHaveLength(3);
+  expect(document.querySelectorAll(".step-indicator button")).toHaveLength(2);
   fireEvent.click(updateButton);
   await waitFor(() =>
     expect(updateReleaseNotes).toHaveBeenCalledWith(undefined),

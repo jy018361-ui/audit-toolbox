@@ -171,6 +171,7 @@ fn loan_form_catalog() -> Value {
             .map(|f| {
                 json!({
                     "id": f.id,
+                    "display": f.display,
                     "label": f.label,
                     "anyOf": f.any_of,
                     "required": f.required,

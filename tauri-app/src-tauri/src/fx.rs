@@ -300,6 +300,16 @@ pub(crate) fn classify_source(params: &Value) -> Result<Value, AppError> {
             .and_then(|values| values.first())
             .is_some_and(|value| value.1 >= threshold)
     };
+    let mapped_any =
+        |candidates: &BTreeMap<String, Vec<Candidate>>, roles: &[&str], threshold: f64| {
+            roles.iter().any(|role| mapped(candidates, role, threshold))
+        };
+    let mapped_pair = |candidates: &BTreeMap<String, Vec<Candidate>>,
+                       debit: &str,
+                       credit: &str,
+                       threshold: f64| {
+        mapped(candidates, debit, threshold) && mapped(candidates, credit, threshold)
+    };
     let normalized = table
         .headers
         .iter()
@@ -320,13 +330,22 @@ pub(crate) fn classify_source(params: &Value) -> Result<Value, AppError> {
         ("id", 3.0, "凭证号"),
         ("date", 3.0, "记账日期"),
         ("accountCode", 2.0, "科目"),
-        ("foreignAmount", 2.0, "原币发生额"),
-        ("functionalAmount", 2.0, "本位币发生额"),
     ] {
         if mapped(&je, role, 0.55) {
             je_score += weight;
             je_reasons.push(label);
         }
+    }
+    if mapped(&je, "foreignAmount", 0.55) || mapped_pair(&je, "foreignDebit", "foreignCredit", 0.55)
+    {
+        je_score += 2.0;
+        je_reasons.push("原币发生额");
+    }
+    if mapped(&je, "functionalAmount", 0.55)
+        || mapped_pair(&je, "functionalDebit", "functionalCredit", 0.55)
+    {
+        je_score += 2.0;
+        je_reasons.push("本位币发生额");
     }
     if header_has(&["document type", "凭证类型", "voucher type"]) {
         je_score += 1.0;
@@ -336,19 +355,69 @@ pub(crate) fn classify_source(params: &Value) -> Result<Value, AppError> {
         ("accountCode", 2.0, "科目"),
         ("entity", 1.0, "公司"),
         ("currency", 1.0, "币种"),
-        ("closingFunctionalAmount", 3.0, "期末/累计余额"),
-        ("openingFunctionalAmount", 2.0, "期初余额"),
     ] {
         if mapped(&tb, role, 0.55) {
             tb_score += weight;
             tb_reasons.push(label);
         }
     }
-    if header_has(&["ytd", "trial balance", "期末余额", "年末余额", "科目余额"]) {
+    let closing_balance =
+        mapped_any(
+            &tb,
+            &["closingFunctionalAmount", "closingForeignAmount"],
+            0.55,
+        ) || mapped_pair(
+            &tb,
+            "closingFunctionalDebit",
+            "closingFunctionalCredit",
+            0.55,
+        ) || mapped_pair(&tb, "closingForeignDebit", "closingForeignCredit", 0.55);
+    if closing_balance {
+        tb_score += 3.0;
+        tb_reasons.push("期末余额");
+    }
+    let opening_balance =
+        mapped_any(
+            &tb,
+            &["openingFunctionalAmount", "openingForeignAmount"],
+            0.55,
+        ) || mapped_pair(
+            &tb,
+            "openingFunctionalDebit",
+            "openingFunctionalCredit",
+            0.55,
+        ) || mapped_pair(&tb, "openingForeignDebit", "openingForeignCredit", 0.55);
+    if opening_balance {
+        tb_score += 2.0;
+        tb_reasons.push("期初余额");
+    }
+    let balance_movement = mapped_pair(&tb, "ytdFunctionalDebit", "ytdFunctionalCredit", 0.55)
+        || mapped_pair(&tb, "periodFunctionalDebit", "periodFunctionalCredit", 0.55);
+    if balance_movement {
+        tb_score += 2.0;
+        tb_reasons.push("余额表发生额");
+    }
+    let tb_header_signature = header_has(&[
+        "ytd",
+        "trial balance",
+        "期末余额",
+        "期末借方",
+        "期末贷方",
+        "年末余额",
+        "科目余额",
+        "期初借方",
+        "期初贷方",
+    ]);
+    if tb_header_signature {
         tb_score += 2.0;
         tb_reasons.push("余额表特征");
     }
-    let (kind, confidence, reasons) = if je_score >= tb_score {
+    // 平分时不再无条件偏向 JE：只要存在期初/期末/累计发生额等余额表
+    // 结构，就应归 TB；这正是存款利息过去把各种 TB 都吞进 JE 槽的根因。
+    let prefer_tb = tb_score > je_score
+        || (tb_score == je_score
+            && (opening_balance || closing_balance || balance_movement || tb_header_signature));
+    let (kind, confidence, reasons) = if !prefer_tb {
         (
             "je",
             if je_score == 0.0 {
@@ -1101,18 +1170,17 @@ fn load_large_xlsx_inspection(source: &SourceSpec, path: &Path) -> Result<Arc<Fx
     }
     let (sheet, all, total_rows, _) =
         best.ok_or_else(|| error("SOURCE_EMPTY", "工作簿中没有可读取的数据Sheet。", None))?;
-    let mut scored = (0..all.len().min(30))
-        .map(|index| (index + 1, header_score(&all, index)))
-        .collect::<Vec<_>>();
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let (auto_header_row, auto_header_depth, scored) = infer_header_layout(&all);
     let header_row = if source.header_row > 0 {
         source.header_row
     } else {
-        scored.first().map(|value| value.0).unwrap_or(1)
+        auto_header_row
     };
     let h = header_row.saturating_sub(1);
     let width = all.iter().map(Vec::len).max().unwrap_or(0);
-    let inferred_depth = if h + 1 < all.len()
+    let inferred_depth = if source.header_row == 0 {
+        auto_header_depth
+    } else if h + 1 < all.len()
         && combined_semantic_score(&all[h], &all[h + 1]) > semantic_hits(&all[h]) + 2
     {
         2
@@ -1288,21 +1356,20 @@ pub(crate) fn load_fx_table(source: &SourceSpec) -> Result<Arc<FxTable>, AppErro
     if all.is_empty() {
         return Err(error("SOURCE_EMPTY", "文件中没有可读取的数据。", None));
     }
-    let mut scored = (0..all.len().min(30))
-        .map(|i| (i + 1, header_score(&all, i)))
-        .collect::<Vec<_>>();
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let (auto_header_row, auto_header_depth, scored) = infer_header_layout(&all);
     let header_row = if source.header_row > 0 {
         source.header_row
     } else {
-        scored.first().map(|x| x.0).unwrap_or(1)
+        auto_header_row
     };
     if header_row > all.len() {
         return Err(error("HEADER_ROW_INVALID", "标题行超出数据范围。", None));
     }
     let h = header_row - 1;
     let width = all.iter().map(Vec::len).max().unwrap_or(0);
-    let inferred_depth = if h + 1 < all.len()
+    let inferred_depth = if source.header_row == 0 {
+        auto_header_depth
+    } else if h + 1 < all.len()
         && combined_semantic_score(&all[h], &all[h + 1]) > semantic_hits(&all[h]) + 2
     {
         2
@@ -1516,6 +1583,46 @@ fn combined_semantic_score(a: &[String], b: &[String]) -> usize {
             })
             .collect::<Vec<_>>(),
     )
+}
+
+/// Jointly infer the first header row and its depth. A two-row TB header must
+/// compete as one candidate; otherwise its lower `借方/贷方` row can win alone.
+fn infer_header_layout(all: &[Vec<String>]) -> (usize, usize, Vec<(usize, f64)>) {
+    let limit = all.len().min(30);
+    let mut row_scores = (0..limit)
+        .map(|index| (index + 1, header_score(all, index)))
+        .collect::<Vec<_>>();
+    row_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut best = row_scores
+        .first()
+        .map(|(row, score)| (*row, 1usize, *score))
+        .unwrap_or((1, 1, 0.0));
+    for index in 0..limit.saturating_sub(1) {
+        let first_hits = semantic_hits(&all[index]);
+        let second_hits = semantic_hits(&all[index + 1]);
+        let combined_hits = combined_semantic_score(&all[index], &all[index + 1]);
+        if second_hits == 0 || combined_hits <= first_hits + 2 {
+            continue;
+        }
+        // 只有一格有字的上一行是**标题行**（「序时账」「XX公司科目余额表」），不是分组表头。
+        // [`merge_headers`] 会把它顺延到每一列，于是每个列名都被冠上标题前缀
+        // （「序时账-公司代码」），既污染映射标签，也与看账那侧的单行读取对不上。
+        // 真正的两行表头（期初｜期末 覆在 借方｜贷方 上）上一行至少有两格有字。
+        if all[index].iter().filter(|cell| !cell.trim().is_empty()).count() < 2 {
+            continue;
+        }
+        let width = all[index].len().max(all[index + 1].len());
+        let merged = merge_headers(&all[index..=index + 1], width);
+        let mut synthetic = vec![merged];
+        if let Some(data) = all.get(index + 2) {
+            synthetic.push(data.clone());
+        }
+        let pair_score = header_score(&synthetic, 0) + (combined_hits.min(16) as f64 / 16.0) * 0.10;
+        if pair_score > best.2 {
+            best = (index + 1, 2, pair_score);
+        }
+    }
+    (best.0, best.1, row_scores)
 }
 
 fn merge_headers(raw: &[Vec<String>], width: usize) -> Vec<String> {
@@ -2017,12 +2124,23 @@ fn first_col(mapping: &Map<String, Value>, role: &str) -> Option<String> {
     mapped_cols(mapping, role).first().cloned()
 }
 
+/// 表里没有主体列时，全表统一挂在这个名字下。
+///
+/// 主体是**选填**角色：没映射也没填名字时不拦，用这个默认名兜底即可。
+/// 真正必填的是本位币——它按主体挂，所以主体至少要有个名字当挂载点。
+pub(crate) const DEFAULT_ENTITY: &str = "默认主体";
+
 fn fixed_entity(params: &Value) -> &str {
-    params
+    let given = params
         .get("fixedEntity")
         .and_then(Value::as_str)
         .map(str::trim)
-        .unwrap_or("")
+        .unwrap_or("");
+    if given.is_empty() {
+        DEFAULT_ENTITY
+    } else {
+        given
+    }
 }
 
 fn entity_for<'a>(row: &'a RowRecord, mapping: &Map<String, Value>, params: &'a Value) -> &'a str {
@@ -2632,9 +2750,6 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                 ));
             }
             if kind == "JE" {
-                if mapped_cols(&mapping, "entity").is_empty() && fixed_entity(params).is_empty() {
-                    errors.push("JE 缺少主体列时必须指定固定主体".to_string());
-                }
                 for (prefix, label) in [("foreign", "原币"), ("functional", "本位币")] {
                     if !amount_scheme_ok(&mapping, prefix) {
                         errors.push(format!(
@@ -2694,9 +2809,6 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                     }
                 }
             } else {
-                if mapped_cols(&mapping, "entity").is_empty() && fixed_entity(params).is_empty() {
-                    errors.push("TB 缺少主体列时必须指定固定主体".to_string());
-                }
                 if foreign_currency_columns(&table).len() > 1
                     && !params
                         .get("tbForeignCurrencyConfirmed")
@@ -9534,6 +9646,75 @@ fn xlsx_err(value: XlsxError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_grouped_tb_header_as_two_rows() {
+        let rows = vec![
+            vec!["科目余额表".into()],
+            vec![
+                "科目编码".into(),
+                "科目名称".into(),
+                "期初余额".into(),
+                "".into(),
+                "本期发生".into(),
+                "".into(),
+                "期末余额".into(),
+                "".into(),
+            ],
+            vec![
+                "".into(),
+                "".into(),
+                "借方".into(),
+                "贷方".into(),
+                "借方".into(),
+                "贷方".into(),
+                "借方".into(),
+                "贷方".into(),
+            ],
+            vec![
+                "1002".into(),
+                "银行存款".into(),
+                "100".into(),
+                "".into(),
+                "10".into(),
+                "2".into(),
+                "108".into(),
+                "".into(),
+            ],
+        ];
+        let (row, depth, _) = infer_header_layout(&rows);
+        assert_eq!((row, depth), (2, 2));
+        let headers = merge_headers(&rows[1..=2], 8);
+        assert_eq!(headers[2], "期初余额-借方");
+        assert_eq!(headers[7], "期末余额-贷方");
+    }
+
+    /// 只有一格有字的上一行是标题行，不是分组表头：合并它会把标题冠到每一列头上
+    /// （「序时账-公司代码」），既污染映射标签，也和看账那侧的单行读取对不上。
+    #[test]
+    fn title_line_above_headers_is_not_merged_into_them() {
+        let rows = vec![
+            vec!["序时账".into()],
+            vec![
+                "公司代码".into(),
+                "记账日期".into(),
+                "凭证号".into(),
+                "科目编码".into(),
+                "科目名称".into(),
+                "本位币金额".into(),
+            ],
+            vec![
+                "A".into(),
+                "2025-01-01".into(),
+                "001".into(),
+                "1601".into(),
+                "固定资产".into(),
+                "100".into(),
+            ],
+        ];
+        let (row, depth, _) = infer_header_layout(&rows);
+        assert_eq!((row, depth), (2, 1));
+    }
 
     /// `rate()` 用 `response_hash` 作键缓存汇率索引（全局，跨用例存活）。
     /// 测试快照若共用同一个哈希——比如都留空字符串——先跑的用例就会把自己的

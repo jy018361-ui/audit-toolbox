@@ -11,26 +11,9 @@
   </head>
   <body>
     <div id="root"></div>
-    <script src="/audipick-pdfjs/legacy/build/pdf.min.js"></script>
-    <!-- revenue_workpaper.js publishes REVENUE_WORKPAPER_QUESTIONS, which its
-         prompt reads at load time to build the workpaper question catalogue.
-         Keep it ahead of the prompts, the order audipick.html uses. -->
-    <script src="/audipick-rules/revenue_workpaper.js"></script>
-    <script src="/audipick-rules/prompts/loan_covenant.js"></script>
-    <script src="/audipick-rules/prompts/loan_general.js"></script>
-    <script src="/audipick-rules/prompts/revenue.js"></script>
-    <script src="/audipick-rules/prompts/revenue_workpaper.js"></script>
-    <script src="/audipick-rules/prompts/procurement.js"></script>
-    <script src="/audipick-rules/prompts/invoicing_agreement.js"></script>
-    <script src="/audipick-rules/prompts/statement.js"></script>
-    <script src="/audipick-rules/prompts/invoice.js"></script>
-    <script src="/audipick-rules/prompts/warehouse_io.js"></script>
-    <script src="/audipick-rules/prompts/account_opening.js"></script>
-    <script src="/audipick-rules/prompts/tax_declaration.js"></script>
-    <script src="/audipick-rules/prompts/credit_report.js"></script>
-    <script src="/audipick-rules/prompts/tax_audit_report.js"></script>
-    <script src="/audipick-rules/registry.js"></script>
-    <script src="/audipick-rules/fieldset.js"></script>
+    <!-- AudiPick 的 PDF 引擎与规则脚本不在这里同步加载：它们只有 AudiPick
+         一个工具用，放在这里会让其余工具的首屏白等一次执行。改由
+         src/audipickAssets.ts 在进入 AudiPick 页面时按原顺序注入。 -->
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

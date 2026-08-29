@@ -11,6 +11,7 @@ import {
   settingsSet,
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { audipickAssetsReady, loadAudipickAssets } from "./audipickAssets";
 import { errorText } from "@/lib/errors";
 import { ResultView } from "@/components/ResultView";
 import { PageHeader } from "@/components/PageHeader";
@@ -74,7 +75,61 @@ type AudiPickDocument = {
   status: string;
 };
 
+/**
+ * AudiPick 的 PDF 引擎与规则脚本不再随 index.html 同步加载（那会拖慢每个工具
+ * 的首屏），改由这层外壳在进入页面时注入。正文里到处是 `window.RuleEngine?.`
+ * 这类全局读取，就绪之前渲染会读到空规则列表，所以加载完成前不挂载正文。
+ */
 export function AudiPickPage({ tool }: { tool: ToolManifest }) {
+  const [ready, setReady] = useState(audipickAssetsReady());
+  const [loadError, setLoadError] = useState("");
+  useEffect(() => {
+    if (ready) return;
+    let cancelled = false;
+    void loadAudipickAssets()
+      .then(() => {
+        if (!cancelled) setReady(true);
+      })
+      .catch((error) => {
+        if (!cancelled) setLoadError(errorText(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ready]);
+  if (loadError) {
+    return (
+      <>
+        <PageHeader
+          eyebrow="合同审阅管理"
+          title={tool.name}
+          detail="本地 PDF 组件加载失败。"
+        />
+        <section className="form-card">
+          <div className="error-box">{loadError}</div>
+          <p>请重新进入本页面重试；若反复失败，请重装工具箱。</p>
+        </section>
+      </>
+    );
+  }
+  if (!ready) {
+    return (
+      <>
+        <PageHeader
+          eyebrow="合同审阅管理"
+          title={tool.name}
+          detail="正在加载本地 PDF 引擎与审计模板库…"
+        />
+        <section className="form-card">
+          <p>首次进入本页面需要加载本地 PDF 组件，请稍候。</p>
+        </section>
+      </>
+    );
+  }
+  return <AudiPickPageInner tool={tool} />;
+}
+
+function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   const [projects, setProjects] = useState<AudiPickProjectData[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [documents, setDocuments] = useState<AudiPickDocument[]>([]);

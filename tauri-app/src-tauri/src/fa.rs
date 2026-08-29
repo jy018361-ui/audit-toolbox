@@ -1028,13 +1028,15 @@ pub(crate) fn request_fa_llm(config: &Value, prompt: &str, text: &str) -> Result
     // 旧版每次结构化调用都发这两个参数，迁移时漏掉了，代价是推理型模型
     // （用户实测的 DeepSeek 就是）会先跑一大段思维链再吐 JSON，几十秒过去
     // 请求已经超时；返回的内容也常带着解释文字，解析同样容易失败。
+    let json_prompt = crate::audipick::json_response_prompt(base, prompt);
+    let system_prompt = json_prompt.as_deref().unwrap_or(prompt);
     let mut body = json!({
         "model": config.get("model").and_then(Value::as_str).unwrap_or(""),
         "temperature": 0,
-        "messages": [{"role":"system","content":prompt},{"role":"user","content":text}],
+        "messages": [{"role":"system","content":system_prompt},{"role":"user","content":text}],
         "thinking": {"type": if thinking_enabled(config) { "enabled" } else { "disabled" }},
     });
-    if wants_json_response(base) {
+    if json_prompt.is_some() {
         body["response_format"] = json!({"type": "json_object"});
     }
     let response = request
@@ -1079,12 +1081,6 @@ fn thinking_enabled(config: &Value) -> bool {
         .or_else(|| config.get("thinkingEnabled"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
-}
-
-/// DeepSeek 支持 JSON 输出模式；其余端点未必认这个字段，贸然下发会被拒。
-/// 与旧版按主机名判断的口径保持一致。
-fn wants_json_response(base: &str) -> bool {
-    base.to_ascii_lowercase().contains("api.deepseek.com")
 }
 
 fn llm_network(e: reqwest::Error, timeout: u64) -> AppError {

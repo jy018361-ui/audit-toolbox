@@ -377,4 +377,43 @@ fn probe_custom_dataset() {
     }
 }
 
+#[test]
+#[ignore]
+fn probe_ledger_folder_classification() {
+    let folder = PathBuf::from(std::env::var("TB_FOLDER").expect("请设置 TB_FOLDER"));
+    let mut checked = 0usize;
+    for entry in std::fs::read_dir(folder).expect("目录应可读取").flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
+        let lower = name.to_ascii_lowercase();
+        if !matches!(
+            path.extension()
+                .and_then(|v| v.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str(),
+            "xls" | "xlsx" | "xlsm" | "csv" | "tsv"
+        ) {
+            continue;
+        }
+        let expected = if name.contains("余额") || lower.contains("tb") {
+            "tb"
+        } else {
+            "je"
+        };
+        let result = audit_toolbox_lib::engine_call_for_test(
+            "deposit.classify_source",
+            serde_json::json!({"source":{"inputPath":path.to_string_lossy(),"headerRow":0,"headerDepth":0}}),
+        )
+        .unwrap_or_else(|error| panic!("{name} 分类失败：{error:?}"));
+        println!(
+            "{name}: kind={} scores={} headerRow={} depth={}",
+            result["kind"], result["scores"], result["headerRow"], result["headerDepth"]
+        );
+        assert_eq!(result["kind"], expected, "{name} 被脚本误判");
+        checked += 1;
+    }
+    assert!(checked > 0, "目录中没有找到 TB 文件");
+}
+
 use serde_json::Value;

@@ -200,9 +200,13 @@ export default function App() {
         // 清理失败不该影响启动，缓存留着最多是占点磁盘。
       }
     };
-    void sweep();
+    // 首次清理同样延后：它要遍历缓存目录删文件，和首屏抢磁盘。
+    const first = setTimeout(() => void sweep(), 3000);
     const timer = setInterval(() => void sweep(), 60 * 60 * 1000);
-    return () => clearInterval(timer);
+    return () => {
+      clearTimeout(first);
+      clearInterval(timer);
+    };
   }, []);
   useEffect(() => {
     void Promise.all([toolCatalog(), appBootstrap()])
@@ -219,11 +223,16 @@ export default function App() {
   useEffect(() => {
     if (automaticUpdateCheckStarted.current) return;
     automaticUpdateCheckStarted.current = true;
-    void check()
-      .then((update) => setAvailableUpdate(update ?? null))
-      .catch(() => {
-        // 启动时的检查保持静默；断网不该打断用户工作，仍可在设置页手动重试。
-      });
+    // 延后再查更新：这条要连 GitHub，国内网络经常一路等到超时，和首屏抢
+    // 网络与 CPU 会让刚出来的界面发木。晚几秒不影响任何用户可见行为。
+    const timer = setTimeout(() => {
+      void check()
+        .then((update) => setAvailableUpdate(update ?? null))
+        .catch(() => {
+          // 启动时的检查保持静默；断网不该打断用户工作，仍可在设置页手动重试。
+        });
+    }, 5000);
+    return () => clearTimeout(timer);
   }, []);
   return (
     <div className="app-shell">
@@ -1295,9 +1304,8 @@ export function Settings({
       )}
       <StepIndicator
         steps={[
-          { key: "ai", label: "AI 与 OCR" },
-          { key: "theme", label: "界面主题" },
-          { key: "data", label: "缓存清理" },
+          { key: "api", label: "API 配置" },
+          { key: "basic", label: "基本设置" },
         ]}
         current={section}
         onStepClick={setSection}
@@ -1487,8 +1495,6 @@ export function Settings({
               ))}
             </div>
           </section>
-        </div>
-        <div hidden={section !== 2} className="settings-group">
           <section className="list-card">
             <h2>本地缓存</h2>
             <p>
@@ -1601,7 +1607,7 @@ export function Settings({
           {message}
         </div>
       )}
-      {(section === 0 || section === 2) && (
+      {(section === 0 || section === 1) && (
         <div className="settings-save-bar">
           <span>配置修改后需保存；测试连接不会自动保存。</span>
           <button

@@ -56,15 +56,30 @@ const audipickRules = () => ({
     const target = resolve("dist-web/audipick-rules");
     mkdirSync(target, { recursive: true });
     cpSync(resolve("assets/audipick/rules"), target, { recursive: true });
-    cpSync(
-      resolve("assets/audipick/pdfjs"),
-      resolve("dist-web/audipick-pdfjs"),
-      { recursive: true },
-    );
+    // vendor 目录整拷会把 13MB 的调试件也塞进 EXE：未压缩的 pdf.js /
+    // pdf.worker.js、从未加载的 pdf.sandbox.*、以及一批 .map（pdf.worker.js.map
+    // 一个就 5.2MB）。运行时只用到 build 下的两个 .min.js 加 cmaps /
+    // standard_fonts 两个数据目录（见 AudiPickPage.openDocument）。
+    // 源目录保持完整，只在产物侧过滤，开发模式仍能用全部文件调试。
+    const pdfjsRoot = resolve("assets/audipick/pdfjs");
+    const runtimeBuildFiles = new Set(["pdf.min.js", "pdf.worker.min.js"]);
+    cpSync(pdfjsRoot, resolve("dist-web/audipick-pdfjs"), {
+      recursive: true,
+      filter: (source) => {
+        if (!source.startsWith(pdfjsRoot)) return false;
+        const relative = source.slice(pdfjsRoot.length).replace(/\\/g, "/");
+        // 目录一律放行，由其中的文件各自判断。
+        if (!/\.[^/]+$/.test(relative)) return true;
+        if (relative.startsWith("/legacy/build/")) {
+          return runtimeBuildFiles.has(relative.split("/").pop() ?? "");
+        }
+        return !relative.endsWith(".map");
+      },
+    });
   },
 });
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [react(), tailwindcss(), audipickRules()],
   resolve: {
     alias: {
@@ -74,5 +89,12 @@ export default defineConfig({
   clearScreen: false,
   server: { port: 1420, strictPort: true },
   envPrefix: ["VITE_", "TAURI_"],
-  build: { target: "chrome110", sourcemap: true, outDir: "dist-web" },
-});
+  // sourcemap 不进生产包：开着会把 3.6MB 的 .map 一起嵌进 EXE，而发布包里
+  // 没有 devtools 去读它，纯占体积、拖慢冷启动读盘与杀软扫描。
+  // 要调试打包产物时用 `vite build --mode development` 仍能拿到。
+  build: {
+    target: "chrome110",
+    sourcemap: mode !== "production",
+    outDir: "dist-web",
+  },
+}));

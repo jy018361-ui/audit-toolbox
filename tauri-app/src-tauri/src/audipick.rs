@@ -643,14 +643,32 @@ fn sanitize_change_list(value: &mut Value, payload: &Value, kind: &str, key: &st
     });
 }
 
-pub(crate) fn fx_source_llm_call(params: &Value, settings: &Value) -> Result<Value, AppError> {
+fn ledger_source_classification_prompt(tool: &str) -> &'static str {
+    match tool {
+        "deposit_interest" => {
+            r#"你是存款利息收入测算工具的账表分类复核员。输入包含脚本初判、候选Sheet、自动识别后的完整表头和样例行。判断文件属于JE序时账还是TB科目余额表。JE应是逐笔凭证明细，通常含日期、凭证号、摘要、科目以及借贷或发生金额；TB应是按科目/银行账户/辅助核算汇总的余额表，重点识别期初余额、期末余额、本期或本年累计借贷发生额。文件里出现银行存款或利息收入科目不能单独证明它是JE；以行粒度和余额结构为准。脚本结论仅供参考，必须独立复核。只输出严格JSON：{"kind":"je"|"tb","confidence":number,"reason":string}。不得计算利息或金额。"#
+        }
+        "fa_tbje" => {
+            r#"你是固定资产底稿生成工具的账表分类复核员。输入包含脚本初判、候选Sheet、完整表头和样例行。判断文件属于JE序时账还是TB科目余额表。JE是逐笔凭证明细，用于识别固定资产新增、处置、折旧等变动，通常含日期、凭证号、摘要、科目和借贷发生额；TB是按科目及辅助核算汇总的余额表，通常包含期初、期末、本期或累计借贷余额/发生额。出现固定资产或累计折旧科目不能单独决定类型，必须依据数据粒度和余额结构判断。脚本结论仅供参考，必须独立复核。只输出严格JSON：{"kind":"je"|"tb","confidence":number,"reason":string}。不得进行资产分类或金额计算。"#
+        }
+        _ => {
+            r#"你是汇兑损益测算工具的账表分类复核员。输入包含脚本初判、候选Sheet、完整表头和样例行。判断文件属于JE凭证明细还是TB科目余额表。JE是逐笔凭证明细，通常含记账日期、凭证号、摘要、科目、币种、原币金额及本位币借贷发生额；TB是按科目、主体、币种或辅助核算汇总的余额表，通常包含期初、期末、本期或YTD借贷余额/发生额。币种列在JE和TB中都可能存在，不能单独决定类型；以行粒度和余额结构为准。脚本结论仅供参考，必须独立复核。只输出严格JSON：{"kind":"je"|"tb","confidence":number,"reason":string}。不得计算汇兑损益或金额。"#
+        }
+    }
+}
+
+pub(crate) fn ledger_source_llm_call(
+    tool: &str,
+    params: &Value,
+    settings: &Value,
+) -> Result<Value, AppError> {
     let llm = settings
         .get("llm")
         .ok_or_else(|| error("LLM_NOT_CONFIGURED", "请先在工具箱设置中配置 LLM。", None))?;
     if !llm.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
         return Err(error("LLM_DISABLED", "工具箱中的 LLM 尚未启用。", None));
     }
-    let prompt = "你是审计数据文件分类器。根据表头、样例和脚本评分判断文件属于JE凭证明细还是TB科目余额表。JE通常逐行包含凭证号、记账日期、科目及发生额；TB通常按科目包含期初、期末、累计或YTD余额。只输出严格JSON：{\"kind\":\"je\"|\"tb\",\"confidence\":number,\"reason\":string}。不得识别为其他类型，不得计算金额。";
+    let prompt = ledger_source_classification_prompt(tool);
     let payload = params.get("payload").unwrap_or(params);
     let content = request_llm(llm, prompt, &payload.to_string(), None)?;
     let value = parse_json_content(&content);
@@ -897,13 +915,15 @@ fn request_llm_with_key(
     }
     // 同 fa.rs：旧版每次调用都关闭思维链、对 DeepSeek 打开 JSON 输出模式，
     // 迁移时两个参数都漏了。
+    let json_prompt = json_response_prompt(base, prompt);
+    let system_prompt = json_prompt.as_deref().unwrap_or(prompt);
     let mut body = json!({
         "model": config.get("model").and_then(Value::as_str).unwrap_or(""),
         "temperature": 0,
-        "messages": [{"role":"system","content":prompt},{"role":"user","content":user_content}],
+        "messages": [{"role":"system","content":system_prompt},{"role":"user","content":user_content}],
         "thinking": {"type": if thinking_enabled(config) { "enabled" } else { "disabled" }},
     });
-    if wants_json_response(base) {
+    if json_prompt.is_some() {
         body["response_format"] = json!({"type": "json_object"});
     }
     let response = request.json(&body).send().map_err(network_error)?;
@@ -1052,6 +1072,14 @@ fn thinking_enabled(config: &Value) -> bool {
 
 fn wants_json_response(base: &str) -> bool {
     base.to_ascii_lowercase().contains("api.deepseek.com")
+}
+
+/// DeepSeek 的兼容接口只有在提示词明确包含小写 `json` 时才接受
+/// `response_format=json_object`。同时，连接测试、OCR 等纯文本任务不能被
+/// 强行切到 JSON 模式。所有使用公共 LLM 请求器的工具统一从这里决定。
+pub(crate) fn json_response_prompt(base: &str, prompt: &str) -> Option<String> {
+    (wants_json_response(base) && prompt.to_ascii_lowercase().contains("json"))
+        .then(|| format!("{prompt}\n\n返回内容必须是一个有效的 json 对象。"))
 }
 
 fn body_snippet(body: &str) -> String {
@@ -1261,6 +1289,22 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, "LLM_URL_INVALID");
     }
+
+    #[test]
+    fn deepseek_json_mode_requires_a_structured_prompt_and_adds_lowercase_keyword() {
+        let base = "https://api.deepseek.com";
+        assert!(json_response_prompt(base, "这是连接测试。请只回复 OK。").is_none());
+
+        let prompt = json_response_prompt(base, "只输出严格 JSON：{\"ok\":true}")
+            .expect("结构化任务应启用 JSON 输出模式");
+        assert!(prompt.contains("json"), "{prompt}");
+        assert!(prompt.contains("有效的 json 对象"), "{prompt}");
+
+        assert!(
+            json_response_prompt("https://example.com/v1", "只输出严格 JSON").is_none(),
+            "未知兼容端点不得贸然发送 response_format"
+        );
+    }
     #[test]
     fn batch_keeps_per_document_failures() {
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1287,6 +1331,19 @@ mod tests {
 #[cfg(test)]
 mod mapping_prompt_tests {
     use super::*;
+
+    #[test]
+    fn 各工具账表分类提示词保持独立业务口径() {
+        let fx = ledger_source_classification_prompt("fx");
+        let deposit = ledger_source_classification_prompt("deposit_interest");
+        let fa = ledger_source_classification_prompt("fa_tbje");
+        assert!(fx.contains("汇兑损益") && fx.contains("原币金额"));
+        assert!(deposit.contains("存款利息") && deposit.contains("银行账户"));
+        assert!(fa.contains("固定资产") && fa.contains("累计折旧"));
+        assert_ne!(fx, deposit);
+        assert_ne!(deposit, fa);
+        assert_ne!(fa, fx);
+    }
 
     /// 两张表的复核提示词必须各管各的。
     ///

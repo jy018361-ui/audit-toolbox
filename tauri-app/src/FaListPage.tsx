@@ -217,15 +217,10 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
         ? "公共 TB/JE 引擎识别与映射；固定资产业务层生成变动汇总、新增、处置、JE底表和对方科目汇总。"
         : "按期初、期末两份固定资产表按组合键匹配，生成 FA List、变动与汇总底稿。"}
     />
-    <StepIndicator
-      steps={[
-        { key: "tbje", label: "TB＋JE 变动表" },
-        { key: "cards", label: "两期固定资产清单" },
-      ]}
-      current={mode === "tbje" ? 0 : 1}
-      onStepClick={(index) => setMode(index === 0 ? "tbje" : "cards")}
-      showCompleted={false}
-    />
+    <div className="fx-mode-bar fa-mode-tabs" role="tablist" aria-label="固定资产底稿模式">
+      <button type="button" role="tab" aria-selected={mode === "tbje"} className={mode === "tbje" ? "active" : undefined} onClick={() => setMode("tbje")}>TB＋JE 变动表</button>
+      <button type="button" role="tab" aria-selected={mode === "cards"} className={mode === "cards" ? "active" : undefined} onClick={() => setMode("cards")}>两期固定资产清单</button>
+    </div>
     {mode === "cards" ? <FaCardListPage /> : <FaTbJePage />}
   </div>;
 }

@@ -2235,6 +2235,9 @@ pub(crate) fn suggest_roles_with_data(
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Form {
     pub(crate) id: &'static str,
+    /// 给用户看的型号名（`TB-类型C`）。`id` 只在代码、测试与金标表里用，
+    /// 界面与提示语一律用这个——用户读不出 `TB3` 是第几型。
+    pub(crate) display: &'static str,
     pub(crate) label: &'static str,
     /// 必填槽。每个槽是一组角色，组内全部到齐才算该槽满足。
     pub(crate) required: &'static [&'static [&'static str]],
@@ -2260,6 +2263,7 @@ pub(crate) fn tb_forms() -> &'static [Form] {
 static TB_FORMS: &[Form] = &[
     Form {
         id: "TB1",
+        display: "TB-类型A",
         label: "本位币净额",
         any_of: &[],
         required: &[
@@ -2271,6 +2275,7 @@ static TB_FORMS: &[Form] = &[
     },
     Form {
         id: "TB2",
+        display: "TB-类型B",
         label: "方向＋本位币净额",
         any_of: &[],
         required: &[
@@ -2282,6 +2287,7 @@ static TB_FORMS: &[Form] = &[
     },
     Form {
         id: "TB3",
+        display: "TB-类型C",
         label: "本位币借贷分列",
         any_of: &[],
         required: &[
@@ -2293,6 +2299,7 @@ static TB_FORMS: &[Form] = &[
     },
     Form {
         id: "TB4",
+        display: "TB-类型D",
         label: "本位币净额＋原币净额",
         any_of: &[],
         required: &[
@@ -2304,6 +2311,7 @@ static TB_FORMS: &[Form] = &[
     },
     Form {
         id: "TB5",
+        display: "TB-类型E",
         label: "方向＋本位币净额＋原币净额",
         any_of: &[],
         required: &[
@@ -2323,6 +2331,7 @@ static TB_FORMS: &[Form] = &[
     },
     Form {
         id: "TB6",
+        display: "TB-类型F",
         label: "本位币与原币双借贷分列",
         any_of: &[],
         required: &[
@@ -2356,6 +2365,7 @@ pub(crate) fn je_forms() -> &'static [Form] {
 static JE_FORMS: &[Form] = &[
     Form {
         id: "JE3",
+        display: "JE-类型C",
         label: "本位币净额（借正贷负）",
         any_of: &[],
         required: &[&["functionalAmount"]],
@@ -2363,6 +2373,7 @@ static JE_FORMS: &[Form] = &[
     },
     Form {
         id: "JE2",
+        display: "JE-类型B",
         label: "方向＋本位币净额",
         any_of: &[],
         required: &[&["direction", "functionalAmount"]],
@@ -2370,6 +2381,7 @@ static JE_FORMS: &[Form] = &[
     },
     Form {
         id: "JE1",
+        display: "JE-类型A",
         label: "本位币借贷分列",
         // 借贷分列本身已表达方向，不再要求方向列——实测 9 份序时账里
         // 借贷分列的那 6 份**没有一份带方向列**，金标 2026-08-24 修订时
@@ -2400,6 +2412,7 @@ pub(crate) fn loan_forms() -> &'static [Form] {
 static LOAN_FORMS: &[Form] = &[
     Form {
         id: "D",
+        display: "台账-类型D",
         label: "期末余额＋期间发生额",
         required: &[
             &["startDate"],
@@ -2411,6 +2424,7 @@ static LOAN_FORMS: &[Form] = &[
     },
     Form {
         id: "C",
+        display: "台账-类型C",
         label: "期初余额＋期间发生额",
         required: &[
             &["startDate"],
@@ -2422,6 +2436,7 @@ static LOAN_FORMS: &[Form] = &[
     },
     Form {
         id: "B",
+        display: "台账-类型B",
         label: "起始日＋期限",
         required: &[&["startDate"], &["term"], &["rate"]],
         any_of: &[&["principal", "openingPrincipal"]],
@@ -2429,6 +2444,7 @@ static LOAN_FORMS: &[Form] = &[
     },
     Form {
         id: "A",
+        display: "台账-类型A",
         label: "起始日＋到期日",
         required: &[&["startDate"], &["endDate"], &["rate"]],
         any_of: &[&["principal", "openingPrincipal"]],
@@ -2448,6 +2464,8 @@ pub(crate) fn forms(kind: &str) -> &'static [Form] {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FormMatch {
     pub(crate) form: &'static str,
+    /// 型号的用户可见名，见 [`Form::display`]。
+    pub(crate) display: &'static str,
     pub(crate) label: &'static str,
     /// 必填槽缺失的角色。空即完整命中。
     pub(crate) missing: Vec<&'static str>,
@@ -2513,6 +2531,7 @@ pub(crate) fn match_forms(kind: &str, mapped: &HashSet<&str>) -> Vec<FormMatch> 
         out.push((
             FormMatch {
                 form: f.id,
+                display: f.display,
                 label: f.label,
                 missing,
                 missing_any,
@@ -2550,6 +2569,7 @@ pub(crate) fn resolve_form(kind: &str, mapped: &HashSet<&str>) -> FormVerdict {
     let ranked = match_forms(kind, mapped);
     let best = ranked.into_iter().next().unwrap_or(FormMatch {
         form: "",
+        display: "",
         label: "",
         missing: Vec::new(),
         missing_any: Vec::new(),
@@ -2587,9 +2607,9 @@ pub(crate) fn describe_incomplete(kind: &str, m: &FormMatch) -> String {
         ));
     }
     if parts.is_empty() {
-        return format!("表结构无法匹配任何已知形态（最接近 {}）", m.form);
+        return format!("表结构无法匹配任何已知形态（最接近 {}）", m.display);
     }
-    format!("按 {}（{}）匹配，{}", m.form, m.label, parts.join("；"))
+    format!("按 {}（{}）匹配，{}", m.display, m.label, parts.join("；"))
 }
 
 // ────────────────────────────── 币种归一化与列判定 ──────────────────────────────

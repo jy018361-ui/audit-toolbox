@@ -16,8 +16,19 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { missingGoldIdentity } from "@/ledgerMapping";
+import {
+  missingGoldIdentity,
+  resolveLedgerPairKinds,
+  reviewLedgerSourceClassification,
+} from "@/ledgerMapping";
 import { MappingPanel } from "@/components/MappingPanel";
+import {
+  describeForm,
+  formGroups,
+  resolveForm,
+  roleRequirement,
+  useLedgerForms,
+} from "@/ledgerForms";
 import {
   LedgerReviewAll,
   useLedgerDictReviews,
@@ -516,7 +527,12 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     setError("");
     setSourceStatus("正在识别文件类型、表头和字段…");
     const failures: string[] = [];
+    let llmFallbacks = 0;
     try {
+      const classifiedFiles: Array<{
+        path: string;
+        classification: SourceClassification;
+      }> = [];
       for (const path of files) {
         try {
           const scripted = (await engineCall("deposit.classify_source", {
@@ -527,25 +543,45 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               headerDepth: 0,
             },
           })) as SourceClassification;
-          const response = (await engineCall(
-            `deposit.inspect_${scripted.kind}`,
-            {
-              source: {
-                inputPath: path,
-                sheet: scripted.sheet,
-                headerRow: scripted.headerRow,
-                headerDepth: scripted.headerDepth,
-              },
-            },
-          )) as Inspection;
-          applyInspection(scripted.kind, path, response);
-          setSourceStatus(
-            `${files.length} 个文件已识别；${scripted.kind === "tb" ? "TB 科目余额表" : "JE 序时账"}由脚本判定。`,
+          const reviewed = await reviewLedgerSourceClassification(
+            engineCall,
+            "deposit.classify_source_llm",
+            path,
+            scripted,
           );
+          if (!reviewed.reviewed) llmFallbacks += 1;
+          classifiedFiles.push({
+            path,
+            classification: reviewed.classification,
+          });
         } catch (e) {
           failures.push(`${fileName(path)}：${errorText(e)}`);
         }
       }
+      const resolvedKinds = resolveLedgerPairKinds(
+        classifiedFiles.map((item) => item.classification),
+      );
+      for (const [index, item] of classifiedFiles.entries()) {
+        try {
+          const kind = resolvedKinds[index];
+          const response = (await engineCall(`deposit.inspect_${kind}`, {
+            source: {
+              inputPath: item.path,
+              sheet: item.classification.sheet,
+              headerRow: item.classification.headerRow,
+              headerDepth: item.classification.headerDepth,
+            },
+          })) as Inspection;
+          applyInspection(kind, item.path, response);
+        } catch (e) {
+          failures.push(`${fileName(item.path)}：${errorText(e)}`);
+        }
+      }
+      setSourceStatus(
+        llmFallbacks
+          ? `${classifiedFiles.length} 个文件已识别；LLM 复核不可用的文件已保留脚本结果，JE 与 TB 已按固定槽位分配。`
+          : `${classifiedFiles.length} 个文件已完成脚本识别与存款利息专用 LLM 复核；JE 与 TB 已按固定槽位分配。`,
+      );
       if (failures.length) setError(failures.join("；"));
     } finally {
       setBusy(false);
@@ -756,46 +792,76 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       </Card>
 
       <div className="fx-source-grid">
-        {tbPath && (
-          <SourceCard
-            title="已识别：TB 科目余额表"
-            hint="年初/年末余额与利息收入勾稽的数据源"
-            path={tbPath}
-            inspection={tb}
-            disabled={busy}
-            onClear={() => {
-              reviews.clearReview("tb");
-              setAccountRoleOverrides({});
-              setTbPath("");
-              setTb(undefined);
-              setTbMapping({});
-            }}
-            onInspect={() => void inspect("tb")}
-            onHeaderChange={(row, depth, sheet) =>
-              void inspect("tb", { headerRow: row, headerDepth: depth, sheet })
-            }
-          />
-        )}
-        {jePath && (
-          <SourceCard
-            title="已识别：序时账明细"
-            hint="逐月余额波动的数据源；不上传则退回年初/年末两点法"
-            path={jePath}
-            inspection={je}
-            disabled={busy}
-            onClear={() => {
-              reviews.clearReview("je");
-              setAccountRoleOverrides({});
-              setJePath("");
-              setJe(undefined);
-              setJeMapping({});
-            }}
-            onInspect={() => void inspect("je")}
-            onHeaderChange={(row, depth, sheet) =>
-              void inspect("je", { headerRow: row, headerDepth: depth, sheet })
-            }
-          />
-        )}
+        <div className="fx-source-slot fx-source-slot-je">
+          {jePath ? (
+            <SourceCard
+              title="已识别：JE 序时账"
+              hint="逐月余额波动的数据源；不上传则退回年初/年末两点法"
+              path={jePath}
+              inspection={je}
+              disabled={busy}
+              onClear={() => {
+                reviews.clearReview("je");
+                setAccountRoleOverrides({});
+                setJePath("");
+                setJe(undefined);
+                setJeMapping({});
+              }}
+              onInspect={() => void inspect("je")}
+              onHeaderChange={(row, depth, sheet) =>
+                void inspect("je", {
+                  headerRow: row,
+                  headerDepth: depth,
+                  sheet,
+                })
+              }
+            />
+          ) : tbPath ? (
+            <Card className="fx-source-empty">
+              <CardHeader>
+                <CardTitle>JE 序时账</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p>未上传 JE；当前将使用 TB 两点法。</p>
+              </CardContent>
+            </Card>
+          ) : null}
+        </div>
+        <div className="fx-source-slot fx-source-slot-tb">
+          {tbPath ? (
+            <SourceCard
+              title="已识别：TB 科目余额表"
+              hint="年初/年末余额与利息收入勾稽的数据源"
+              path={tbPath}
+              inspection={tb}
+              disabled={busy}
+              onClear={() => {
+                reviews.clearReview("tb");
+                setAccountRoleOverrides({});
+                setTbPath("");
+                setTb(undefined);
+                setTbMapping({});
+              }}
+              onInspect={() => void inspect("tb")}
+              onHeaderChange={(row, depth, sheet) =>
+                void inspect("tb", {
+                  headerRow: row,
+                  headerDepth: depth,
+                  sheet,
+                })
+              }
+            />
+          ) : jePath ? (
+            <Card className="fx-source-empty">
+              <CardHeader>
+                <CardTitle>TB 科目余额表</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p>未识别到 TB；请补充上传或检查文件表头。</p>
+              </CardContent>
+            </Card>
+          ) : null}
+        </div>
       </div>
 
       {(tb || je) && (
@@ -1413,6 +1479,11 @@ function MappingPreview(props: {
 }) {
   // 复核按钮已上移为「一键复核 TB＋JE」（页面级 LedgerReviewAll），
   // 这里只负责展示与锁定：复核期间该文件的字段映射不可编辑。
+  const roles = Object.entries(props.labels);
+  const forms = useLedgerForms(props.kind);
+  const formMatch = forms.length
+    ? resolveForm(props.kind, forms, props.mapping)
+    : undefined;
   return (
     <MappingPanel
       title={props.title}
@@ -1420,7 +1491,10 @@ function MappingPreview(props: {
       headers={props.inspection.headers}
       rows={props.inspection.preview}
       mapping={props.mapping}
-      roles={Object.entries(props.labels)}
+      roles={roles}
+      groups={formGroups(props.kind, roles, forms, formMatch)}
+      requirementOf={(role) => roleRequirement(formMatch, role)}
+      formNote={describeForm(formMatch, (role) => props.labels[role] ?? role)}
       multi={DEPOSIT_MULTI}
       missing={props.missing}
       busy={props.reviewBusy}

@@ -183,10 +183,19 @@ async fn engine_call(
             .unwrap_or("");
         let path = params.get("path").and_then(Value::as_str).unwrap_or("");
         storage.audipick_document_import(project_id, Path::new(path))
-    } else if method == "fx.classify_source_llm" {
+    } else if matches!(
+        method.as_str(),
+        "fx.classify_source_llm" | "deposit.classify_source_llm" | "fa_tbje.classify_source_llm"
+    ) {
         let settings = storage.settings_get()?;
+        let tool = match method.as_str() {
+            "deposit.classify_source_llm" => "deposit_interest",
+            "fa_tbje.classify_source_llm" => "fa_tbje",
+            _ => "fx",
+        }
+        .to_owned();
         tauri::async_runtime::spawn_blocking(move || {
-            audipick::fx_source_llm_call(&params, &settings)
+            audipick::ledger_source_llm_call(&tool, &params, &settings)
         })
         .await
         .map_err(|e| {
@@ -288,6 +297,10 @@ async fn engine_call(
                 Some(e.to_string()),
             )
         })?
+    } else if method == "ledger.forms" {
+        Ok(ledger_form_catalog(
+            params.get("kind").and_then(Value::as_str).unwrap_or("tb"),
+        ))
     } else if method == "ledger.review_mapping" {
         let settings = storage.settings_get()?;
         let kind = params
@@ -873,6 +886,29 @@ fn webview2_available() -> bool {
     false
 }
 
+/// TB 六型／JE 三型／台账四型的槽位定义下发给前端。
+///
+/// 型号的**唯一定义在 Rust**（`ledger_mapping::forms`）；前端据此判断当前映射
+/// 命中哪一型、哪些角色在这一型里必填，不再各自抄一份。台账那份随
+/// `loan.inspect` 一起下发，形状与这里一致。
+fn ledger_form_catalog(kind: &str) -> Value {
+    Value::Array(
+        ledger_mapping::forms(kind)
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "id": f.id,
+                    "display": f.display,
+                    "label": f.label,
+                    "anyOf": f.any_of,
+                    "required": f.required,
+                    "optional": f.optional,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// 给集成测试用的同步调度入口：不经过 Tauri，直接按方法前缀分发到业务模块。
 /// 只暴露只读的识别类方法，不碰任务、文件写入与凭据。
 #[doc(hidden)]
@@ -880,6 +916,14 @@ pub fn engine_call_for_test(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, AppError> {
+    if method == "ledger.forms" {
+        return Ok(ledger_form_catalog(
+            params
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("tb"),
+        ));
+    }
     if method == "ledger.review_mapping" {
         let dirs = project_dirs()?;
         let storage = Storage::new(dirs.data_local_dir())?;
@@ -891,7 +935,8 @@ pub fn engine_call_for_test(
         return audipick::ledger_review_call(kind, &params, &settings);
     }
     if let Some(rest) = method.strip_prefix("fx.") {
-        if rest.starts_with("inspect")
+        if rest == "classify_source"
+            || rest.starts_with("inspect")
             || matches!(
                 rest,
                 "account_roles" | "validate_mapping" | "check_mapping_alignment"
@@ -911,7 +956,7 @@ pub fn engine_call_for_test(
         }
     }
     if let Some(rest) = method.strip_prefix("deposit.") {
-        if rest.starts_with("inspect") || rest == "rate_tiers" {
+        if rest == "classify_source" || rest.starts_with("inspect") || rest == "rate_tiers" {
             return deposit_interest::call(method, params);
         }
     }
@@ -1030,6 +1075,41 @@ pub fn run_excel_merger_worker() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 前端按型号分组、按型号标必填，全靠这份下发的槽位定义；型号名也必须是
+    /// 用户读得懂的那个（`TB-类型C`），而不是内部 id。
+    #[test]
+    fn ledger_form_catalog_ships_slots_and_display_names() {
+        let tb = ledger_form_catalog("tb");
+        let items = tb.as_array().expect("形态表应是数组");
+        assert_eq!(items.len(), 6);
+        assert_eq!(items[0]["id"], "TB1");
+        assert_eq!(items[0]["display"], "TB-类型A");
+        assert_eq!(items[5]["display"], "TB-类型F");
+        // 本年累计借贷是六型共有的必填槽，缺了前端要能指名道姓。
+        assert!(items.iter().all(|form| {
+            form["required"]
+                .as_array()
+                .expect("必填槽")
+                .iter()
+                .any(|slot| {
+                    slot.as_array()
+                        .expect("槽是角色数组")
+                        .contains(&serde_json::json!("ytdFunctionalDebit"))
+                })
+        }));
+        let je = ledger_form_catalog("je");
+        let je_items = je.as_array().expect("形态表应是数组");
+        assert_eq!(je_items.len(), 3);
+        assert!(je_items.iter().all(|form| {
+            form["display"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("JE-类型")
+        }));
+        let loan = ledger_form_catalog("loan");
+        assert_eq!(loan.as_array().map(Vec::len), Some(4));
+    }
 
     #[test]
     fn app_error_uses_public_contract_field_names() {

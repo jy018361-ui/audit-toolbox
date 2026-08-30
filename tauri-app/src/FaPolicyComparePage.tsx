@@ -150,6 +150,9 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
   const [dragHover, setDragHover] = useState<"begin" | "end" | null>(null);
   const applyPathRef = useRef<(side: "begin" | "end", value: string) => void>(() => {});
   applyPathRef.current = (side, value) => {
+    // 换源时先废止仍在途的 LLM 复核，旧请求不得回写新文件。
+    reviewGeneration.current += 1;
+    setLlmBusy(false);
     if (side === "begin") {
       setBeginPath(value);
       setBeginSheet("");

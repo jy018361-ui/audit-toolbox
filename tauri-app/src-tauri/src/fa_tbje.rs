@@ -378,6 +378,19 @@ fn normalize_tb(
     Ok(out)
 }
 
+/// 序时账实际覆盖的记账年度，用于把"期间选错了"讲清楚。
+fn je_years(table: &FxTable, map: &Map<String, Value>) -> Vec<String> {
+    table
+        .rows
+        .iter()
+        .filter_map(|row| parse_date(&text(table, row, map, "date")))
+        .map(|date| date.year())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|year| year.to_string())
+        .collect()
+}
+
 fn normalize_je(
     table: &FxTable,
     map: &Map<String, Value>,
@@ -406,6 +419,24 @@ fn normalize_je(
         })
         .map(|(_, row)| row.clone())
         .collect();
+    // 期间过滤把整本序时账滤空时必须当场报错。此前只是安静地往下走，
+    // 导出的新增／处置／JE 明细全是空表，用户以为"JE 没匹配上"，
+    // 实际是报告截止日的年度和账套年度对不上。
+    if period_table.rows.is_empty() && !table.rows.is_empty() {
+        let years = je_years(table, map);
+        let detail = if years.is_empty() {
+            "序时账里没有能解析出来的记账日期。".to_owned()
+        } else {
+            format!("序时账的数据年度是 {} 年。", years.join("、"))
+        };
+        return Err(error(
+            "FA_TBJE_PERIOD_EMPTY",
+            format!(
+                "报告期间 {start} 至 {end} 内没有任何序时账凭证，无法生成底稿。{detail}请把报告截止日改到账套所属年度后重试。"
+            ),
+            None,
+        ));
+    }
     let table = &period_table;
     let ledger = ledger_mapping_for(map);
     let (voucher_keys, accounts) = tabular::ledger_row_keys(&table.rows, &table.headers, &ledger);
@@ -1808,6 +1839,18 @@ mod tests {
             deposit_interest::call("deposit.classify_source", request.clone()).unwrap();
         let direct_shared_engine = crate::fx::classify_source(&request).unwrap();
         assert_eq!(through_existing_deposit_entry, direct_shared_engine);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 报告期间与账套年度错位时当场报错而不是导出空表() {
+        // 前端此前把报告截止日默认成"当前年 12-31"，账套只要不是本年度的，
+        // 期间过滤会滤空整本序时账，导出的新增／处置／JE 明细全是空表。
+        let (dir, _, mut params) = fixture();
+        params["reportEnd"] = json!("2030-12-31");
+        let err = analyze(&params, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(err.code, "FA_TBJE_PERIOD_EMPTY");
+        assert!(err.user_message.contains("2025"), "{}", err.user_message);
         let _ = std::fs::remove_dir_all(dir);
     }
 

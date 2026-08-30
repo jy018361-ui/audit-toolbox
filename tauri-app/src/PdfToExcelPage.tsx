@@ -44,7 +44,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<PdfConvertResult>();
-  const { job, setJob } = useJobEvents({
+  const { job, setJob, activeJobId } = useJobEvents({
     toolId: "pdf_to_excel",
     onEvent: (event) => {
       setBusy(!["completed", "failed", "cancelled"].includes(event.phase));
@@ -59,6 +59,14 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
       }
     },
   });
+
+  // 批量输入集合发生任何变化时，旧转换结果已不再对应当前列表。
+  // 同时用哨兵 jobId 拒绝已失效任务的迟到事件。
+  useEffect(() => {
+    setResult(undefined);
+    setJob(undefined);
+    activeJobId.current = "__input_changed__";
+  }, [pdfPaths, setJob, activeJobId]);
 
   // 拖放：一次可拖入多份 PDF 或整个文件夹，展开后只保留 PDF。
   useEffect(() => {
@@ -118,6 +126,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
         pdfPaths,
         outputDir: outputDir.trim(),
       });
+      activeJobId.current = jobId;
       setJob({
         jobId,
         toolId: "pdf_to_excel",

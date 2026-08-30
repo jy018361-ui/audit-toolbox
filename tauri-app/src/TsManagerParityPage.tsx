@@ -280,6 +280,8 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
   function resetForNewSource(value: Partial<TsDraft>) {
     setMenu(undefined);
     setValueCache({});
+    setJob(undefined);
+    setError("");
     setState((current) => ({
       ...current,
       inspect: undefined,

@@ -164,6 +164,149 @@ fn 红字冲销留在本侧不翻到对面() {
 }
 
 #[test]
+fn 已带符号的je贷方先统一方向再与tb比较() {
+    let dir = fixture("signed-credit");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,0,500,300,200\n\
+         2202,应付账款,0,300,500,-200\n",
+    )
+    .unwrap();
+    // 04 号样例的口径：JE 借方为正、贷方为负。贷方不能直接拿负数与
+    // TB 的正数贷方相减，否则 500 - (-500) 会被错误叠加成 1,000。
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-03-01,V1,1001,库存现金,500,0\n\
+         2025-03-01,V1,2202,应付账款,0,-500\n\
+         2025-06-01,V2,2202,应付账款,300,0\n\
+         2025-06-01,V2,1001,库存现金,0,-300\n",
+    )
+    .unwrap();
+    let result = run(&params(&dir, true), &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["tbVsJe"]["mismatched"], json!(0), "{result:#}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 三三零零口径按原始方向汇总且红字不跨侧() {
+    let dir = fixture("3300-signed-redletter");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1002030016,银行存款,18874512.24,168732359.09,184631853.23,2975018.10\n\
+         9999,对方科目,-18874512.24,184631853.23,168732359.09,-2975018.10\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,方向,本位币金额\n\
+         2025-01-01,V1,1002030016,银行存款,S,178835062.87\n\
+         2025-01-01,V1,9999,对方科目,H,-178835062.87\n\
+         2025-02-01,V2,1002030016,银行存款,S,-10102703.78\n\
+         2025-02-01,V2,9999,对方科目,H,10102703.78\n\
+         2025-03-01,V3,1002030016,银行存款,H,-184664743.69\n\
+         2025-03-01,V3,9999,对方科目,S,184664743.69\n\
+         2025-04-01,V4,1002030016,银行存款,H,32890.46\n\
+         2025-04-01,V4,9999,对方科目,S,-32890.46\n",
+    )
+    .unwrap();
+    let mut value = params(&dir, true);
+    value["jeMapping"] = json!({
+        "id": "凭证号",
+        "date": "日期",
+        "accountCode": "科目编码",
+        "accountName": "科目名称",
+        "direction": "方向",
+        "functionalAmount": "本位币金额",
+    });
+
+    let result = run(&value, &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["tbVsJe"]["mismatched"], json!(0), "{result:#}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[ignore = "读取仓库内 23 万行真实样例，按需回归"]
+fn 真实三三零零科目一零零二零三零零一六精确对上tb() {
+    let sample_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("汇兑损益测试资料");
+    let tb_source = json!({"inputPath": sample_dir.join("TB-3300.xlsx")});
+    let je_source = json!({"inputPath": sample_dir.join("3300_JE_2025.01-12.xlsx")});
+    let tb_inspection = fx::call("fx.inspect_tb", json!({"source": tb_source.clone()})).unwrap();
+    let je_inspection = fx::call("fx.inspect_je", json!({"source": je_source.clone()})).unwrap();
+    let tb_headers = tb_inspection["headers"].as_array().unwrap();
+    let je_headers = je_inspection["headers"].as_array().unwrap();
+    let tb_header = |index: usize| tb_headers[index].as_str().unwrap();
+    let je_header = |index: usize| je_headers[index].as_str().unwrap();
+    let value = json!({
+        "tbSource": tb_source,
+        "tbMapping": {
+            "accountCode": tb_header(2),
+            "entity": tb_header(3),
+            "accountName": tb_header(5),
+            "openingFunctionalAmount": tb_header(8),
+            "ytdFunctionalDebit": tb_header(9),
+            "ytdFunctionalCredit": tb_header(10),
+            "closingFunctionalAmount": tb_header(11),
+        },
+        "tbFixedEntity": "3300",
+        "jeSource": je_source,
+        "jeMapping": {
+            "entity": je_header(1),
+            "id": je_header(3),
+            "date": je_header(10),
+            "accountCode": je_header(15),
+            "accountName": je_header(16),
+            "direction": je_header(25),
+            "functionalAmount": je_header(28),
+        },
+        "jeFixedEntity": "3300",
+    });
+
+    let prepared = prepare(&value).unwrap();
+    let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
+    let items = result["tbVsJe"]["items"].as_array().unwrap();
+    let sample_codes = items
+        .iter()
+        .take(8)
+        .map(|item| item["code"].clone())
+        .collect::<Vec<_>>();
+    let item = items
+        .iter()
+        .find(|item| item["code"] == json!("1002030016"))
+        .unwrap_or_else(|| {
+            panic!(
+                "真实 3300 结果中应包含科目 1002030016；账户数={}，样例编码={sample_codes:?}，核对结果={}",
+                items.len(),
+                result["tbVsJe"]
+            )
+        });
+    let close = |actual: f64, expected: f64| (actual - expected).abs() < 0.005;
+    assert!(
+        close(item["jeDebit"].as_f64().unwrap(), 168_732_359.09),
+        "{item:#}"
+    );
+    assert!(
+        close(item["jeCredit"].as_f64().unwrap(), 184_631_853.23),
+        "{item:#}"
+    );
+    assert!(
+        close(item["debitDifference"].as_f64().unwrap(), 0.0),
+        "{item:#}"
+    );
+    assert!(
+        close(item["creditDifference"].as_f64().unwrap(), 0.0),
+        "{item:#}"
+    );
+}
+
+#[test]
 fn 序时账只覆盖部分期间时判为整体性差异() {
     let dir = fixture("systematic");
     // 六个科目，序时账只给了其中的上半年——绝大多数科目都对不上，
@@ -316,13 +459,14 @@ fn 未上传序时账时第二条明确跳过而不是报不平() {
 }
 
 #[test]
-fn 导出的工作簿按三条各出一张表() {
+fn 导出的工作簿固定三页并保留全量行与公式() {
     let dir = fixture("export");
     平的账(&dir);
     let mut value = params(&dir, true);
     value["outputPath"] = json!(dir.join("核对.xlsx").to_string_lossy());
-    let result = run(&value, &AtomicBool::new(false)).unwrap();
-    let path = export(&value, &result).unwrap();
+    let prepared = prepare(&value).unwrap();
+    let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
+    let path = export(&value, &result, &prepared).unwrap();
     assert!(path.exists());
     let book = umya_spreadsheet::reader::xlsx::read(&path).unwrap();
     let names: Vec<String> = book
@@ -332,13 +476,27 @@ fn 导出的工作簿按三条各出一张表() {
         .collect();
     assert_eq!(
         names,
-        vec![
-            "TB发生额与余额勾稽",
-            "TB与JE发生额勾稽",
-            "BS与PL勾稽",
-            "BS与PL待分类"
-        ]
+        vec!["TB发生额与余额勾稽", "TB与JE发生额勾稽", "BS与PL勾稽"]
     );
+    let rollforward = book.get_sheet_by_name("TB发生额与余额勾稽").unwrap();
+    let tbje = book.get_sheet_by_name("TB与JE发生额勾稽").unwrap();
+    let equation = book.get_sheet_by_name("BS与PL勾稽").unwrap();
+    // 平账也必须导出证据行，不能再只剩表头。
+    assert!(rollforward.get_highest_row() >= 8);
+    assert!(tbje.get_highest_row() >= 8);
+    assert!(equation.get_highest_row() >= 20);
+    assert!(
+        !rollforward
+            .get_cell((8, 7))
+            .unwrap()
+            .get_formula()
+            .is_empty()
+    );
+    assert!(!tbje.get_cell((7, 7)).unwrap().get_formula().is_empty());
+    assert!(!equation.get_cell((3, 7)).unwrap().get_formula().is_empty());
+    if let Ok(output) = std::env::var("TBJE_EXPORT_TEST_OUTPUT") {
+        std::fs::copy(&path, output).unwrap();
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
 

@@ -66,6 +66,7 @@ describe("TbjeCheckPage", () => {
     ]);
     vi.mocked(engineCall).mockImplementation(
       async (method: string, params: unknown) => {
+        if (method === "ledger.forms") return [];
         const source = (params as { source: { inputPath: string } }).source;
         const isTb = source.inputPath.includes("TB");
         if (method === "deposit.classify_source") {
@@ -99,6 +100,16 @@ describe("TbjeCheckPage", () => {
       ).toBeInTheDocument(),
     );
     expect(screen.getByLabelText("为第 1 组选择序时账")).toBeInTheDocument();
+    const tbMapping = screen.getByRole("button", { name: "TB 映射" });
+    const jeMapping = screen.getByRole("button", { name: "JE 映射" });
+    expect(tbMapping).toBeEnabled();
+    expect(jeMapping).toBeEnabled();
+    fireEvent.click(tbMapping);
+    expect(screen.getByText("科目余额表字段映射")).toBeVisible();
+    expect(screen.queryByText("序时账字段映射")).not.toBeInTheDocument();
+    fireEvent.click(jeMapping);
+    expect(screen.getByText("序时账字段映射")).toBeVisible();
+    expect(screen.queryByText("科目余额表字段映射")).not.toBeInTheDocument();
     const steps = container.querySelector(".step-indicator") as HTMLElement;
     expect(
       within(steps).getByRole("button", { name: /确认配对/ }),
@@ -169,12 +180,57 @@ describe("TbjeCheckPage", () => {
     ]) {
       expect(within(table).getByRole("columnheader", { name })).toBeVisible();
     }
-    expect(within(table).getByText("待补充分类")).toBeVisible();
+    expect(within(table).getByText("分类待确认")).toBeVisible();
     expect(
-      within(table).getByText("已归类科目合计 0.00 · 6 个科目待分类"),
+      within(table).getByText("已归类科目合计 0.00 · 6 个科目未纳入勾稽"),
     ).toBeVisible();
     const preview = within(table).getByRole("button", { name: "预览明细" });
     expect(preview).toHaveAttribute("data-variant", "default");
     expect(container).not.toHaveTextContent("① 勾稽");
+  });
+
+  it("removes one group without deleting the source files", async () => {
+    const { engineCall, pickPath } = await import("./api");
+    vi.mocked(pickPath).mockResolvedValue([
+      "C:/samples/01TB.xlsx",
+      "C:/samples/01JE.xlsx",
+    ]);
+    vi.mocked(engineCall).mockImplementation(
+      async (method: string, params: unknown) => {
+        if (method === "ledger.forms") return [];
+        const source = (params as { source: { inputPath: string } }).source;
+        const isTb = source.inputPath.includes("TB");
+        if (method === "deposit.classify_source") {
+          return {
+            kind: isTb ? "tb" : "je",
+            sheet: "Sheet1",
+            headerRow: 1,
+            headerDepth: 1,
+          };
+        }
+        return {
+          sheet: "Sheet1",
+          headerRow: 1,
+          headerDepth: 1,
+          headers: ["科目编码"],
+          preview: [],
+          entities: ["主体 A"],
+          suggestedMapping: {},
+        };
+      },
+    );
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<TbjeCheckPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
+    );
+    await screen.findByRole("button", { name: "移除本组" });
+    fireEvent.click(screen.getByRole("button", { name: "移除本组" }));
+
+    expect(screen.queryByText("01TB.xlsx")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { level: 2, name: /确认配对/ }),
+    ).not.toBeInTheDocument();
   });
 });

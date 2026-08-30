@@ -181,7 +181,7 @@ export function reassignJe(
     ? groups.find((group) => group.je?.path === jePath)
     : undefined;
   const previous = target.je;
-  return groups.map((group) => {
+  const next = groups.map((group) => {
     if (group.id === groupId) {
       const je = jePath
         ? (incoming?.je ?? group.je)
@@ -203,4 +203,19 @@ export function reassignJe(
     }
     return group;
   });
+  // 「不配对」只解除关系，不能让刚才那份 JE 从页面状态里消失。TB 组清空
+  // 后把原 JE 留成待配对组；对调产生的空壳组则直接去掉。
+  if (!jePath && previous && target.tb) {
+    next.push({
+      id: previous.path,
+      label: makeLabel(
+        leadingNumber(previous.path) ?? stem(previous.path),
+        periodTag(previous.path),
+      ),
+      je: previous,
+      reasons: ["已解除与科目余额表的配对"],
+      needsReview: true,
+    });
+  }
+  return next.filter((group) => group.tb || group.je);
 }

@@ -141,9 +141,12 @@ export default function ConfirmationProgressPage({
             setDragHover(false);
             const picked = payload.paths.find((path) => /\.xlsx?$/i.test(path));
             if (picked) {
+              activeJob.current = "";
               setInputPath(picked);
               setInspection(undefined);
               setResult(undefined);
+              setJob(undefined);
+              setBusy(false);
               setError("");
               setStep(1);
             }
@@ -165,9 +168,12 @@ export default function ConfirmationProgressPage({
       "xls",
     ]);
     if (typeof value !== "string") return;
+    activeJob.current = "";
     setInputPath(value);
     setInspection(undefined);
     setResult(undefined);
+    setJob(undefined);
+    setBusy(false);
     setError("");
     setStep(1);
   }

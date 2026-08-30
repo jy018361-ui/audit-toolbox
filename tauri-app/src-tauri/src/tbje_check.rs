@@ -18,7 +18,7 @@
 //! 三条都建立在「只算末级科目」之上。父子科目混排的余额表不做末级过滤，
 //! 光第 3 条就能差出几亿——那纯粹是父行子行各加了一遍。
 
-use rust_xlsxwriter::{Format, Workbook};
+use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Formula, Workbook, Worksheet};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -72,10 +72,11 @@ pub(crate) fn run_job(
         "tbje_check.export" => {
             progress("read", 1, 3, "正在读取科目余额表与序时账…");
             pause.wait()?;
-            let result = run(&params, &cancel)?;
+            let prepared = prepare(&params)?;
+            let result = evaluate(&prepared, &cancel, true)?;
             pause.wait()?;
             progress("write", 2, 3, "正在写出核对明细…");
-            let path = export(&params, &result)?;
+            let path = export(&params, &result, &prepared)?;
             progress("done", 3, 3, "明细已导出。");
             Ok(json!({ "outputPath": path.to_string_lossy(), "result": result }))
         }
@@ -182,17 +183,23 @@ fn load(
     load_fx_table(&spec).map(Some)
 }
 
-// ────────────────────────────── 三条核对 ──────────────────────────────
-
-const TOLERANCE: f64 = 0.01;
-
-/// 差异是否超出容差。账面金额都是两位小数，一分钱以内当尾差。
-fn beyond(difference: f64, scale: f64) -> bool {
-    difference.abs() > TOLERANCE.max(scale.abs() * 1e-8)
+struct PreparedCheck {
+    tb: Arc<FxTable>,
+    je: Option<Arc<FxTable>>,
+    tb_map: Map<String, Value>,
+    je_map: Map<String, Value>,
+    tb_fixed: String,
+    je_fixed: String,
 }
 
-pub(crate) fn run(params: &Value, cancel: &AtomicBool) -> Result<Value, AppError> {
-    let tb = load(params, "tbSource", "TB")?;
+fn prepare(params: &Value) -> Result<PreparedCheck, AppError> {
+    let tb = load(params, "tbSource", "TB")?.ok_or_else(|| {
+        error(
+            "TBJE_CHECK_NO_TB",
+            "请先上传科目余额表——三条核对都以它为准。",
+            None,
+        )
+    })?;
     let je = load(params, "jeSource", "JE")?;
     let mut tb_map = mapping_of(params, "tbMapping");
     let mut je_map = mapping_of(params, "jeMapping");
@@ -209,32 +216,59 @@ pub(crate) fn run(params: &Value, cancel: &AtomicBool) -> Result<Value, AppError
         .trim()
         .to_owned();
 
-    let Some(tb) = tb else {
-        return Err(error(
-            "TBJE_CHECK_NO_TB",
-            "请先上传科目余额表——三条核对都以它为准。",
-            None,
-        ));
-    };
-
-    // 符号口径判一次、写进映射，三条核对都从映射里读同一个结论。
-    // 自己现算会与勾稽那条分叉——实测 04 号样例上勾稽用 Signed、恒等式现算成
-    // Unsigned，负债被再乘一次 −1，合计差出两倍资产。
     fx::ensure_sign_convention(&tb, &mut tb_map, "tb");
     if let Some(je) = je.as_deref() {
         fx::ensure_sign_convention(je, &mut je_map, "je");
     }
+    Ok(PreparedCheck {
+        tb,
+        je,
+        tb_map,
+        je_map,
+        tb_fixed,
+        je_fixed,
+    })
+}
 
-    let rollforward = check_rollforward(&tb, &tb_map);
+// ────────────────────────────── 三条核对 ──────────────────────────────
+
+const TOLERANCE: f64 = 0.01;
+
+/// 差异是否超出容差。账面金额都是两位小数，一分钱以内当尾差。
+fn beyond(difference: f64, scale: f64) -> bool {
+    difference.abs() > TOLERANCE.max(scale.abs() * 1e-8)
+}
+
+pub(crate) fn run(params: &Value, cancel: &AtomicBool) -> Result<Value, AppError> {
+    let prepared = prepare(params)?;
+    evaluate(&prepared, cancel, false)
+}
+
+fn evaluate(
+    prepared: &PreparedCheck,
+    cancel: &AtomicBool,
+    include_all_accounts: bool,
+) -> Result<Value, AppError> {
+    // 符号口径在 `prepare` 中判一次并写进映射，三条核对与正式导出共用。
+    let rollforward = check_rollforward(&prepared.tb, &prepared.tb_map);
     if cancel.load(Ordering::Relaxed) {
         return Err(error("JOB_CANCELLED", "任务已取消。", None));
     }
-    let equation = check_equation(&tb, &tb_map, &tb_fixed);
+    let equation = check_equation(&prepared.tb, &prepared.tb_map, &prepared.tb_fixed);
     if cancel.load(Ordering::Relaxed) {
         return Err(error("JOB_CANCELLED", "任务已取消。", None));
     }
-    let tb_vs_je = match je.as_deref() {
-        Some(je) => check_tb_vs_je(&tb, &tb_map, &tb_fixed, je, &je_map, &je_fixed, cancel)?,
+    let tb_vs_je = match prepared.je.as_deref() {
+        Some(je) => check_tb_vs_je(
+            &prepared.tb,
+            &prepared.tb_map,
+            &prepared.tb_fixed,
+            je,
+            &prepared.je_map,
+            &prepared.je_fixed,
+            cancel,
+            include_all_accounts,
+        )?,
         None => json!({
             "performed": false,
             "reason": "未上传序时账，跳过发生额核对。"
@@ -329,190 +363,663 @@ fn xlsx(e: rust_xlsxwriter::XlsxError) -> AppError {
     error("EXPORT_FAILED", "写出核对明细失败。", Some(e.to_string()))
 }
 
-fn cell(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
+const EXPORT_HEADER_ROW: u32 = 5;
+const EXPORT_DATA_ROW: u32 = 6;
+
+fn title_format() -> Format {
+    Format::new()
+        .set_font_name("Arial")
+        .set_font_size(15)
+        .set_bold()
+        .set_font_color("#1E2A32")
+        .set_background_color("#FFE600")
 }
 
-/// 把三条核对的差异明细写成一个工作簿，每条一张表。
-///
-/// 页面上只给结论和前几条；科目多的时候（实测有几百个科目对不上的）得靠这个
-/// 工作簿逐条查，所以每张表都带上两侧的原始数字和差额，而不只是「不平」二字。
-fn export(params: &Value, result: &Value) -> Result<PathBuf, AppError> {
-    let path = output_path(params)?;
-    let mut workbook = Workbook::new();
-    let header = Format::new().set_bold().set_background_color(0xEFEFEF);
-    let money = Format::new().set_num_format("#,##0.00");
+fn header_format() -> Format {
+    Format::new()
+        .set_font_name("Arial")
+        .set_bold()
+        .set_align(FormatAlign::Center)
+        .set_font_color("#FFFFFF")
+        .set_background_color("#126E72")
+        .set_border(FormatBorder::Thin)
+}
 
-    let mut write = |title: &str,
-                     columns: &[&str],
-                     rows: &[Vec<Value>],
-                     numeric_from: usize|
-     -> Result<(), AppError> {
-        let sheet = workbook.add_worksheet();
-        sheet.set_name(title).map_err(xlsx)?;
-        for (index, name) in columns.iter().enumerate() {
-            sheet
-                .write_string_with_format(0, index as u16, *name, &header)
-                .map_err(xlsx)?;
-        }
-        for (r, row) in rows.iter().enumerate() {
-            for (c, value) in row.iter().enumerate() {
-                let (r, c) = (r as u32 + 1, c as u16);
-                match value.as_f64() {
-                    Some(number) if c as usize >= numeric_from => sheet
-                        .write_number_with_format(r, c, number, &money)
-                        .map_err(xlsx)?,
-                    _ => sheet.write_string(r, c, cell(value)).map_err(xlsx)?,
-                };
-            }
-        }
-        sheet.set_freeze_panes(1, 0).map_err(xlsx)?;
-        Ok(())
-    };
+fn input_text_format() -> Format {
+    Format::new()
+        .set_font_name("Arial")
+        .set_font_color("#0000FF")
+}
 
-    // TB 发生额与余额勾稽不平的行
-    let mut rows = Vec::new();
-    for unit in result
-        .pointer("/rollforward/units")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-    {
-        let label = unit["unit"].as_str().unwrap_or("").to_owned();
-        for item in unit["items"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default()
+fn input_money_format() -> Format {
+    input_text_format().set_num_format("#,##0.00;[Red](#,##0.00);-")
+}
+
+fn formula_money_format() -> Format {
+    Format::new()
+        .set_font_name("Arial")
+        .set_num_format("#,##0.00;[Red](#,##0.00);-")
+}
+
+fn formula_text_format() -> Format {
+    Format::new().set_font_name("Arial")
+}
+
+fn write_intro(
+    sheet: &mut Worksheet,
+    title: &str,
+    note: &str,
+    source: &str,
+    last_column: u16,
+) -> Result<(), AppError> {
+    sheet
+        .merge_range(0, 0, 0, last_column, title, &title_format())
+        .map_err(xlsx)?;
+    sheet.write_string(1, 0, "核对说明").map_err(xlsx)?;
+    sheet.write_string(1, 1, note).map_err(xlsx)?;
+    sheet.write_string(2, 0, "容差").map_err(xlsx)?;
+    sheet
+        .write_number_with_format(
+            2,
+            1,
+            TOLERANCE,
+            &Format::new()
+                .set_font_name("Arial")
+                .set_background_color("#FFF9D6")
+                .set_num_format("0.00"),
+        )
+        .map_err(xlsx)?;
+    sheet.write_string(3, 0, "数据来源").map_err(xlsx)?;
+    sheet.write_string(3, 1, source).map_err(xlsx)?;
+    Ok(())
+}
+
+fn finish_sheet(sheet: &mut Worksheet, widths: &[f64], last_row: u32) -> Result<(), AppError> {
+    for (column, width) in widths.iter().enumerate() {
+        sheet
+            .set_column_width(column as u16, *width)
+            .map_err(xlsx)?;
+    }
+    sheet
+        .set_landscape()
+        .set_paper_size(9)
+        .set_print_fit_to_pages(1, 0)
+        .set_margins(0.25, 0.25, 0.35, 0.35, 0.2, 0.2);
+    sheet.set_freeze_panes(EXPORT_DATA_ROW, 0).map_err(xlsx)?;
+    if last_row >= EXPORT_HEADER_ROW {
+        sheet
+            .autofilter(
+                EXPORT_HEADER_ROW,
+                0,
+                last_row.max(EXPORT_DATA_ROW),
+                widths.len() as u16 - 1,
+            )
+            .map_err(xlsx)?;
+    }
+    Ok(())
+}
+
+fn has_balance_scheme(map: &Map<String, Value>, prefix: &str) -> bool {
+    !columns(map, &format!("{prefix}Amount")).is_empty()
+        || (!columns(map, &format!("{prefix}Debit")).is_empty()
+            && !columns(map, &format!("{prefix}Credit")).is_empty())
+}
+
+fn write_rollforward_sheet(
+    workbook: &mut Workbook,
+    prepared: &PreparedCheck,
+) -> Result<(), AppError> {
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("TB发生额与余额勾稽").map_err(xlsx)?;
+    let headers = [
+        "口径",
+        "源表行号",
+        "科目编码",
+        "科目名称",
+        "期初余额",
+        "TB借方发生额",
+        "TB贷方发生额",
+        "公式期末",
+        "TB期末余额",
+        "差异",
+        "结论",
+    ];
+    write_intro(
+        sheet,
+        "TB 发生额与余额勾稽",
+        "逐科目验证：期初余额＋借方发生额－贷方发生额＝期末余额。",
+        &prepared.tb.path.to_string_lossy(),
+        headers.len() as u16 - 1,
+    )?;
+    for (column, title) in headers.iter().enumerate() {
+        sheet
+            .write_string_with_format(EXPORT_HEADER_ROW, column as u16, *title, &header_format())
+            .map_err(xlsx)?;
+    }
+
+    let junk = ledger_mapping::ledger_junk_mask(&prepared.tb.headers, &prepared.tb.rows, &|role| {
+        columns(&prepared.tb_map, role)
+    });
+    let records = fx::records(&prepared.tb);
+    let mut output_row = EXPORT_DATA_ROW;
+    for (opening, closing, debit_role, credit_role, unit) in [
+        (
+            "openingFunctional",
+            "closingFunctional",
+            "ytdFunctionalDebit",
+            "ytdFunctionalCredit",
+            "本位币",
+        ),
+        (
+            "openingForeign",
+            "closingForeign",
+            "ytdForeignDebit",
+            "ytdForeignCredit",
+            "原币",
+        ),
+    ] {
+        if !has_balance_scheme(&prepared.tb_map, opening)
+            || !has_balance_scheme(&prepared.tb_map, closing)
+            || columns(&prepared.tb_map, debit_role).is_empty()
+            || columns(&prepared.tb_map, credit_role).is_empty()
         {
-            rows.push(vec![
-                json!(label),
-                item["sourceRow"].clone(),
-                item["account"].clone(),
-                item["opening"].clone(),
-                item["debit"].clone(),
-                item["credit"].clone(),
-                item["derived"].clone(),
-                item["closing"].clone(),
-                item["difference"].clone(),
-            ]);
+            continue;
+        }
+        for (index, row) in prepared.tb.rows.iter().enumerate() {
+            if !junk.get(index).copied().unwrap_or(true) {
+                continue;
+            }
+            let Some(record) = records.get(index) else {
+                continue;
+            };
+            let (Ok(open), Ok(close), Some(debit), Some(credit)) = (
+                fx::signed_amount(record, &prepared.tb_map, opening),
+                fx::signed_amount(record, &prepared.tb_map, closing),
+                number(&prepared.tb, row, &prepared.tb_map, debit_role),
+                number(&prepared.tb, row, &prepared.tb_map, credit_role),
+            ) else {
+                continue;
+            };
+            if open == 0.0 && close == 0.0 && debit == 0.0 && credit == 0.0 {
+                continue;
+            }
+            let (_, code) = identity(&prepared.tb, row, &prepared.tb_map, &prepared.tb_fixed);
+            let name = display_name(&prepared.tb, row, &prepared.tb_map);
+            let source_row = prepared.tb.header_row + prepared.tb.header_depth + index + 1;
+            let excel_row = output_row + 1;
+            let derived = open + debit - credit;
+            let difference = derived - close;
+            let verdict = if beyond(difference, open.abs().max(close.abs().max(derived.abs()))) {
+                "差异"
+            } else {
+                "通过"
+            };
+            for (column, value) in [unit, "", &code, &name].iter().enumerate() {
+                if column == 1 {
+                    sheet
+                        .write_number_with_format(
+                            output_row,
+                            1,
+                            source_row as f64,
+                            &input_text_format(),
+                        )
+                        .map_err(xlsx)?;
+                } else {
+                    sheet
+                        .write_string_with_format(
+                            output_row,
+                            column as u16,
+                            *value,
+                            &input_text_format(),
+                        )
+                        .map_err(xlsx)?;
+                }
+            }
+            for (column, value) in [(4, open), (5, debit), (6, credit), (8, close)] {
+                sheet
+                    .write_number_with_format(output_row, column, value, &input_money_format())
+                    .map_err(xlsx)?;
+            }
+            sheet
+                .write_formula_with_format(
+                    output_row,
+                    7,
+                    Formula::new(format!("E{excel_row}+F{excel_row}-G{excel_row}"))
+                        .set_result(derived.to_string()),
+                    &formula_money_format(),
+                )
+                .map_err(xlsx)?;
+            sheet
+                .write_formula_with_format(
+                    output_row,
+                    9,
+                    Formula::new(format!("H{excel_row}-I{excel_row}"))
+                        .set_result(difference.to_string()),
+                    &formula_money_format(),
+                )
+                .map_err(xlsx)?;
+            sheet
+                .write_formula_with_format(
+                    output_row,
+                    10,
+                    Formula::new(format!(
+                        "IF(ABS(J{excel_row})<=MAX($B$3,MAX(ABS(E{excel_row}),ABS(H{excel_row}),ABS(I{excel_row}))*1E-8),\"通过\",\"差异\")"
+                    ))
+                    .set_result(verdict),
+                    &formula_text_format(),
+                )
+                .map_err(xlsx)?;
+            output_row += 1;
         }
     }
-    write(
-        "TB发生额与余额勾稽",
+    finish_sheet(
+        sheet,
         &[
-            "口径",
-            "源表行号",
-            "科目",
-            "期初",
-            "本年借方",
-            "本年贷方",
-            "期初+借-贷",
-            "期末",
-            "差额",
+            10.0, 12.0, 16.0, 28.0, 16.0, 17.0, 17.0, 16.0, 16.0, 15.0, 10.0,
         ],
-        &rows,
-        3,
-    )?;
+        output_row.saturating_sub(1),
+    )
+}
 
-    // TB 与 JE 发生额对不上的科目
-    let rows = result
+fn write_tbje_sheet(
+    workbook: &mut Workbook,
+    result: &Value,
+    prepared: &PreparedCheck,
+) -> Result<(), AppError> {
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("TB与JE发生额勾稽").map_err(xlsx)?;
+    let headers = [
+        "主体",
+        "科目编码",
+        "科目名称",
+        "出现在",
+        "TB借方",
+        "JE借方",
+        "借方差异",
+        "TB贷方",
+        "JE贷方（已统一方向）",
+        "贷方差异",
+        "结论",
+    ];
+    write_intro(
+        sheet,
+        "TB 与 JE 发生额勾稽",
+        "借、贷两侧分别对比；JE 贷方统一为正常贷方为正、红字冲销为负。",
+        prepared
+            .je
+            .as_ref()
+            .map(|je| je.path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "未提供序时账".to_owned())
+            .as_str(),
+        headers.len() as u16 - 1,
+    )?;
+    for (column, title) in headers.iter().enumerate() {
+        sheet
+            .write_string_with_format(EXPORT_HEADER_ROW, column as u16, *title, &header_format())
+            .map_err(xlsx)?;
+    }
+    let items = result
         .pointer("/tbVsJe/items")
         .and_then(Value::as_array)
         .map(Vec::as_slice)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    for (index, item) in items.iter().enumerate() {
+        let output_row = EXPORT_DATA_ROW + index as u32;
+        let excel_row = output_row + 1;
+        let presence = match item["presence"].as_str() {
+            Some("tbOnly") => "仅余额表有",
+            Some("jeOnly") => "仅序时账有",
+            _ => "两边都有",
+        };
+        for (column, value) in [
+            item["entity"].as_str().unwrap_or(""),
+            item["code"].as_str().unwrap_or(""),
+            item["name"].as_str().unwrap_or(""),
+            presence,
+        ]
         .iter()
-        .map(|item| {
-            vec![
-                item["entity"].clone(),
-                item["code"].clone(),
-                item["name"].clone(),
-                json!(match item["presence"].as_str() {
-                    Some("tbOnly") => "仅余额表有",
-                    Some("jeOnly") => "仅序时账有",
-                    _ => "两边都有",
-                }),
-                item["tbDebit"].clone(),
-                item["jeDebit"].clone(),
-                item["debitDifference"].clone(),
-                item["tbCredit"].clone(),
-                item["jeCredit"].clone(),
-                item["creditDifference"].clone(),
-            ]
-        })
-        .collect::<Vec<_>>();
-    write(
-        "TB与JE发生额勾稽",
+        .enumerate()
+        {
+            sheet
+                .write_string_with_format(output_row, column as u16, *value, &input_text_format())
+                .map_err(xlsx)?;
+        }
+        let tb_debit = item["tbDebit"].as_f64().unwrap_or(0.0);
+        let je_debit = item["jeDebit"].as_f64().unwrap_or(0.0);
+        let tb_credit = item["tbCredit"].as_f64().unwrap_or(0.0);
+        let je_credit = item["jeCredit"].as_f64().unwrap_or(0.0);
+        for (column, value) in [(4, tb_debit), (5, je_debit), (7, tb_credit), (8, je_credit)] {
+            sheet
+                .write_number_with_format(output_row, column, value, &input_money_format())
+                .map_err(xlsx)?;
+        }
+        let debit_difference = tb_debit - je_debit;
+        let credit_difference = tb_credit - je_credit;
+        let off = beyond(debit_difference, tb_debit.max(je_debit))
+            || beyond(credit_difference, tb_credit.max(je_credit));
+        sheet
+            .write_formula_with_format(
+                output_row,
+                6,
+                Formula::new(format!("E{excel_row}-F{excel_row}"))
+                    .set_result(debit_difference.to_string()),
+                &formula_money_format(),
+            )
+            .map_err(xlsx)?;
+        sheet
+            .write_formula_with_format(
+                output_row,
+                9,
+                Formula::new(format!("H{excel_row}-I{excel_row}"))
+                    .set_result(credit_difference.to_string()),
+                &formula_money_format(),
+            )
+            .map_err(xlsx)?;
+        sheet
+            .write_formula_with_format(
+                output_row,
+                10,
+                Formula::new(format!(
+                    "IF(OR(ABS(G{excel_row})>MAX($B$3,MAX(ABS(E{excel_row}),ABS(F{excel_row}))*1E-8),ABS(J{excel_row})>MAX($B$3,MAX(ABS(H{excel_row}),ABS(I{excel_row}))*1E-8)),\"差异\",\"通过\")"
+                ))
+                .set_result(if off { "差异" } else { "通过" }),
+                &formula_text_format(),
+            )
+            .map_err(xlsx)?;
+    }
+    finish_sheet(
+        sheet,
         &[
-            "主体",
-            "科目编码",
-            "科目名称",
-            "出现在",
-            "TB借方",
-            "JE借方",
-            "借方差额",
-            "TB贷方",
-            "JE贷方",
-            "贷方差额",
+            18.0, 16.0, 28.0, 15.0, 16.0, 16.0, 15.0, 16.0, 23.0, 15.0, 10.0,
         ],
-        &rows,
-        4,
-    )?;
+        EXPORT_DATA_ROW + items.len().saturating_sub(1) as u32,
+    )
+}
 
-    // BS 与 PL 勾稽：两个时点各按要素类别列一遍，外加认不出类别的科目
-    let mut rows = Vec::new();
-    for (label, key) in [("年初", "opening"), ("年末", "closing")] {
-        let Some(side) = result.pointer(&format!("/equation/{key}")) else {
+struct EquationDetail {
+    period: &'static str,
+    source_row: usize,
+    code: String,
+    name: String,
+    category: String,
+    amount: f64,
+    included: bool,
+}
+
+fn equation_details(prepared: &PreparedCheck) -> Vec<EquationDetail> {
+    let records = fx::records(&prepared.tb);
+    let leaf = ledger_mapping::tb_leaf_mask(&prepared.tb.headers, &prepared.tb.rows, &|role| {
+        columns(&prepared.tb_map, role)
+    });
+    let mut details = Vec::new();
+    for (index, row) in prepared.tb.rows.iter().enumerate() {
+        if !leaf.get(index).copied().unwrap_or(true) {
+            continue;
+        }
+        let (_, code) = identity(&prepared.tb, row, &prepared.tb_map, &prepared.tb_fixed);
+        if code.is_empty() {
+            continue;
+        }
+        let Some(record) = records.get(index) else {
             continue;
         };
-        if side.is_null() {
-            continue;
+        let category = ledger_mapping::account_category(&code);
+        let name = display_name(&prepared.tb, row, &prepared.tb_map);
+        let source_row = prepared.tb.header_row + prepared.tb.header_depth + index + 1;
+        for (period, prefix) in [("年初", "openingFunctional"), ("年末", "closingFunctional")] {
+            details.push(EquationDetail {
+                period,
+                source_row,
+                code: code.clone(),
+                name: name.clone(),
+                category: category
+                    .map(AccountCategory::label)
+                    .unwrap_or("未分类")
+                    .to_owned(),
+                amount: fx::signed_amount(record, &prepared.tb_map, prefix).unwrap_or(0.0),
+                included: category.is_some(),
+            });
         }
-        for item in side["byCategory"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-        {
-            rows.push(vec![
-                json!(label),
-                item["category"].clone(),
-                item["amount"].clone(),
-            ]);
-        }
-        rows.push(vec![
-            json!(label),
-            json!("合计（应为 0）"),
-            side["total"].clone(),
-        ]);
     }
-    write("BS与PL勾稽", &["时点", "会计要素", "金额"], &rows, 2)?;
+    details
+}
 
-    let rows = result
-        .pointer("/equation/unclassified")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-        .iter()
-        .map(|item| {
-            vec![
-                item["sourceRow"].clone(),
-                item["code"].clone(),
-                item["name"].clone(),
-                item["opening"].clone(),
-                item["closing"].clone(),
-            ]
-        })
-        .collect::<Vec<_>>();
-    write(
-        "BS与PL待分类",
-        &["源表行号", "科目编码", "科目名称", "年初", "年末"],
-        &rows,
-        3,
+fn write_equation_sheet(workbook: &mut Workbook, prepared: &PreparedCheck) -> Result<(), AppError> {
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("BS与PL勾稽").map_err(xlsx)?;
+    let summary_headers = [
+        "时点",
+        "会计要素",
+        "归类金额",
+        "平衡差异",
+        "金额结论",
+        "分类结论",
+        "说明",
+        "",
+    ];
+    write_intro(
+        sheet,
+        "BS 与 PL 勾稽",
+        "按会计要素汇总带符号余额；金额是否为 0 与科目是否全部完成分类分别给结论。",
+        &prepared.tb.path.to_string_lossy(),
+        summary_headers.len() as u16 - 1,
     )?;
+    for (column, title) in summary_headers.iter().enumerate() {
+        sheet
+            .write_string_with_format(EXPORT_HEADER_ROW, column as u16, *title, &header_format())
+            .map_err(xlsx)?;
+    }
 
+    let details = equation_details(prepared);
+    let detail_header_row = EXPORT_DATA_ROW + 15;
+    let detail_data_row = detail_header_row + 1;
+    let detail_last_row = detail_data_row + details.len().saturating_sub(1) as u32;
+    let categories = ["资产", "负债", "共同", "所有者权益", "成本", "损益"];
+    let mut summary_row = EXPORT_DATA_ROW;
+    for period in ["年初", "年末"] {
+        let period_first_row = summary_row;
+        for category in categories {
+            let excel_row = summary_row + 1;
+            let first_detail = detail_data_row + 1;
+            let last_detail = detail_last_row.max(detail_data_row) + 1;
+            let amount: f64 = details
+                .iter()
+                .filter(|item| item.period == period && item.category == category && item.included)
+                .map(|item| item.amount)
+                .sum();
+            sheet
+                .write_string_with_format(summary_row, 0, period, &input_text_format())
+                .map_err(xlsx)?;
+            sheet
+                .write_string_with_format(summary_row, 1, category, &input_text_format())
+                .map_err(xlsx)?;
+            sheet
+                .write_formula_with_format(
+                    summary_row,
+                    2,
+                    Formula::new(format!(
+                        "SUMIFS($F${first_detail}:$F${last_detail},$A${first_detail}:$A${last_detail},A{excel_row},$E${first_detail}:$E${last_detail},B{excel_row},$G${first_detail}:$G${last_detail},\"是\")"
+                    ))
+                    .set_result(amount.to_string()),
+                    &formula_money_format(),
+                )
+                .map_err(xlsx)?;
+            summary_row += 1;
+        }
+        let excel_row = summary_row + 1;
+        let first_excel = period_first_row + 1;
+        let last_excel = summary_row;
+        let total: f64 = details
+            .iter()
+            .filter(|item| item.period == period && item.included)
+            .map(|item| item.amount)
+            .sum();
+        let unclassified = details.iter().any(|item| !item.included);
+        sheet
+            .write_string_with_format(summary_row, 0, period, &header_format())
+            .map_err(xlsx)?;
+        sheet
+            .write_string_with_format(summary_row, 1, "合计（应为 0）", &header_format())
+            .map_err(xlsx)?;
+        sheet
+            .write_formula_with_format(
+                summary_row,
+                2,
+                Formula::new(format!("SUM(C{first_excel}:C{last_excel})"))
+                    .set_result(total.to_string()),
+                &formula_money_format()
+                    .set_bold()
+                    .set_background_color("#E7F2F1"),
+            )
+            .map_err(xlsx)?;
+        sheet
+            .write_formula_with_format(
+                summary_row,
+                3,
+                Formula::new(format!("C{excel_row}")).set_result(total.to_string()),
+                &formula_money_format()
+                    .set_bold()
+                    .set_background_color("#E7F2F1"),
+            )
+            .map_err(xlsx)?;
+        sheet
+            .write_formula_with_format(
+                summary_row,
+                4,
+                Formula::new(format!(
+                    "IF(ABS(D{excel_row})<=MAX($B$3,ABS(C{excel_row})*1E-8),\"通过\",\"差异\")"
+                ))
+                .set_result(if beyond(total, total) {
+                    "差异"
+                } else {
+                    "通过"
+                }),
+                &formula_text_format()
+                    .set_bold()
+                    .set_background_color("#E7F2F1"),
+            )
+            .map_err(xlsx)?;
+        let first_detail = detail_data_row + 1;
+        let last_detail = detail_last_row.max(detail_data_row) + 1;
+        sheet
+            .write_formula_with_format(
+                summary_row,
+                5,
+                Formula::new(format!(
+                    "IF(COUNTIF($G${first_detail}:$G${last_detail},\"否\")=0,\"完整\",\"待确认\")"
+                ))
+                .set_result(if unclassified { "待确认" } else { "完整" }),
+                &formula_text_format()
+                    .set_bold()
+                    .set_background_color("#E7F2F1"),
+            )
+            .map_err(xlsx)?;
+        sheet
+            .write_string_with_format(
+                summary_row,
+                6,
+                "金额平衡与分类完整性分开判断",
+                &formula_text_format()
+                    .set_bold()
+                    .set_background_color("#E7F2F1"),
+            )
+            .map_err(xlsx)?;
+        summary_row += 1;
+    }
+
+    let detail_headers = [
+        "时点",
+        "源表行号",
+        "科目编码",
+        "科目名称",
+        "会计要素",
+        "带符号余额",
+        "是否纳入勾稽",
+        "分类说明",
+    ];
+    for (column, title) in detail_headers.iter().enumerate() {
+        sheet
+            .write_string_with_format(detail_header_row, column as u16, *title, &header_format())
+            .map_err(xlsx)?;
+    }
+    for (index, item) in details.iter().enumerate() {
+        let row = detail_data_row + index as u32;
+        for (column, value) in [
+            item.period,
+            "",
+            item.code.as_str(),
+            item.name.as_str(),
+            item.category.as_str(),
+        ]
+        .iter()
+        .enumerate()
+        {
+            if column == 1 {
+                sheet
+                    .write_number_with_format(row, 1, item.source_row as f64, &input_text_format())
+                    .map_err(xlsx)?;
+            } else {
+                sheet
+                    .write_string_with_format(row, column as u16, *value, &input_text_format())
+                    .map_err(xlsx)?;
+            }
+        }
+        sheet
+            .write_number_with_format(row, 5, item.amount, &input_money_format())
+            .map_err(xlsx)?;
+        sheet
+            .write_string_with_format(
+                row,
+                6,
+                if item.included { "是" } else { "否" },
+                &input_text_format(),
+            )
+            .map_err(xlsx)?;
+        sheet
+            .write_string_with_format(
+                row,
+                7,
+                if item.included {
+                    "按科目编码首位识别"
+                } else {
+                    "编码无法自动归入会计要素"
+                },
+                &input_text_format(),
+            )
+            .map_err(xlsx)?;
+    }
+    for (column, width) in [18.0, 13.0, 17.0, 28.0, 16.0, 17.0, 17.0, 34.0]
+        .iter()
+        .enumerate()
+    {
+        sheet
+            .set_column_width(column as u16, *width)
+            .map_err(xlsx)?;
+    }
+    sheet
+        .set_landscape()
+        .set_paper_size(9)
+        .set_print_fit_to_pages(1, 0)
+        .set_margins(0.25, 0.25, 0.35, 0.35, 0.2, 0.2);
+    sheet.set_freeze_panes(EXPORT_DATA_ROW, 0).map_err(xlsx)?;
+    sheet
+        .autofilter(
+            detail_header_row,
+            0,
+            detail_last_row.max(detail_data_row),
+            detail_headers.len() as u16 - 1,
+        )
+        .map_err(xlsx)?;
+    Ok(())
+}
+
+/// 正式工作底稿固定为三页：每页保留全量取数证据，并用 Excel 公式重算差异与结论。
+fn export(params: &Value, result: &Value, prepared: &PreparedCheck) -> Result<PathBuf, AppError> {
+    let path = output_path(params)?;
+    let mut workbook = Workbook::new();
+    write_rollforward_sheet(&mut workbook, prepared)?;
+    write_tbje_sheet(&mut workbook, result, prepared)?;
+    write_equation_sheet(&mut workbook, prepared)?;
     workbook.save(&path).map_err(xlsx)?;
     Ok(path)
 }
@@ -691,6 +1198,7 @@ fn check_tb_vs_je(
     je_map: &Map<String, Value>,
     je_fixed: &str,
     cancel: &AtomicBool,
+    include_all_accounts: bool,
 ) -> Result<Value, AppError> {
     let tb_debit = columns(tb_map, "ytdFunctionalDebit");
     let tb_credit = columns(tb_map, "ytdFunctionalCredit");
@@ -781,11 +1289,10 @@ fn check_tb_vs_je(
         let credit_diff = t.credit - j.credit;
         let off =
             beyond(debit_diff, t.debit.max(j.debit)) || beyond(credit_diff, t.credit.max(j.credit));
-        if !off {
-            continue;
+        if off {
+            mismatched += 1;
         }
-        mismatched += 1;
-        if items.len() < 500 {
+        if (include_all_accounts || off) && (include_all_accounts || items.len() < 500) {
             items.push(json!({
                 "entity": key.0,
                 "code": key.1,

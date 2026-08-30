@@ -100,30 +100,150 @@ export function faTbJeMissingMappings(kind: Kind, mapping: Mapping): string[] {
   return missing;
 }
 
-export function suggestFaAccount(account: string): Assignment {
-  const depreciation =
-    /累计折旧|accumulated\s+depreciation|accum\.?\s*dep/i.test(account);
-  const cost =
-    !depreciation &&
-    /固定资产|房屋|建筑物|机器|设备|运输工具|电子设备|办公设备|fixture|equipment|building|vehicle/i.test(
-      account,
-    );
-  const role: AccountRole = depreciation
-    ? "depreciation"
-    : cost
-      ? "cost"
-      : "excluded";
-  const category =
-    account
-      .replace(/^\s*\d+[\s._-]*/, "")
+/**
+ * 把「16020002 机械设备」「16010004-数据处理设备」拆成编码与名称。
+ *
+ * 编码在串**首**或串**尾**都要认得：科目串由映射到的科目列按列序拼成，
+ * SAP 型余额表的列序是「名称一级 名称二级 代码」，编码落在最后
+ * （`固定资产 固定资产-累计折旧-计算机及硬件设备 1601140001`）。认不出编码，
+ * 编码就会被当成名称的一部分带进资产类别——原值那侧带 1601040001、累计折旧
+ * 那侧带 1601140001，两个类别永远配不上对，整片折旧都会报「无法归属到原值类别」。
+ *
+ * 编码必须含数字，否则整串按名称处理——`Accumulated Depreciation` 这种
+ * 纯英文名不能把首个单词当成科目编码。
+ */
+export function splitFaAccount(account: string): { code: string; name: string } {
+  const value = account.trim();
+  const head = /^([0-9A-Za-z][0-9A-Za-z._]*)\s*[\s:：\-—/\\|]\s*(.*)$/.exec(value);
+  if (head && /\d/.test(head[1]))
+    return { code: head[1], name: head[2].trim() };
+  const tail = /^(.*?)\s*[\s:：\-—/\\|]\s*([0-9][0-9A-Za-z._]*)$/.exec(value);
+  if (tail && tail[1].trim()) return { code: tail[2], name: tail[1].trim() };
+  if (/^[0-9A-Za-z._]+$/.test(value) && /\d/.test(value))
+    return { code: value, name: "" };
+  return { code: "", name: value };
+}
+
+/**
+ * 一级科目编码 → 科目是否进本表、以及默认角色。
+ *
+ * 1603 减值准备／1604 在建工程／1605 工程物资或使用权资产／1606 固定资产清理都不进本表口径；
+ * 1602 整支是累计折旧；1601 整支进表，原值还是折旧再由科目名称定（见 `suggestFaAccounts`）。
+ *
+ * 数字编码不以 1 打头的一律排除：会计科目表 1 资产／2 负债／3 共同／4 权益／
+ * 5 成本／6 损益，固定资产只可能在资产类。`6601090401 折旧费-固定资产-计算机及硬件设备`
+ * 是损益类折旧费用，名称里带「固定资产」「设备」，只看名称必然被当成原值捞进来。
+ * 字母开头的自定义编码（`FA01`）不适用本规则，继续按名称判。
+ */
+function roleFromCode(code: string): AccountRole | undefined {
+  if (/^1601/.test(code)) return "cost";
+  if (/^1602/.test(code)) return "depreciation";
+  if (/^160\d/.test(code)) return "excluded";
+  if (/^\d/.test(code) && !/^1/.test(code)) return "excluded";
+  return undefined;
+}
+
+const SAYS_DEPRECIATION =
+  /累计折旧|累計折舊|accumulated\s+depreciation|accum\.?\s*dep/i;
+/** 名称一出现就不是原值：减值准备、清理清算过渡户、折旧费／摊销／租赁费等费用科目。 */
+const SAYS_NOT_COST =
+  /减值准备|減值準備|impairment|清理|清算|折旧费|折舊費|摊销|攤銷|租赁费|租賃費/i;
+const SAYS_FIXED_ASSET =
+  /固定资产|固定資產|房屋|建筑物|建築物|机器|機器|机械|機械|设备|設備|运输工具|運輸工具|电子设备|办公设备|fixture|equipment|building|vehicle/i;
+
+function roleFromName(name: string): AccountRole {
+  if (SAYS_DEPRECIATION.test(name)) return "depreciation";
+  if (SAYS_NOT_COST.test(name)) return "excluded";
+  return SAYS_FIXED_ASSET.test(name) ? "cost" : "excluded";
+}
+
+function faCategory(name: string): string {
+  return (
+    name
       .replace(
-        /累计折旧|固定资产|accumulated\s+depreciation|property[,\s]*plant\s*(and|&)\s*equipment|ppe/gi,
+        /累计折旧|累計折舊|固定资产|固定資產|accumulated\s+depreciation|property[,\s]*plant\s*(and|&)\s*equipment|ppe/gi,
         "",
       )
-      .replace(/^[-—:：\s]+|[-—:：\s]+$/g, "") ||
-    (role === "excluded" ? "" : "固定资产");
-  return { account, role, category };
+      .replace(/^[-—:：\s]+|[-—:：\s]+$/g, "") || "固定资产"
+  );
 }
+
+/** 在科目表里找 `code` 最近的上级科目编码（真前缀，长的优先）。 */
+function nearestParent(chart: Map<string, string>, code: string): string {
+  for (let length = code.length - 1; length > 0; length -= 1) {
+    const prefix = code.slice(0, length);
+    if (chart.has(prefix)) return prefix;
+  }
+  return "";
+}
+
+/**
+ * 整张科目表一起分类。逐个科目单看名称是分不清的——`机械设备` 既可能挂在
+ * 1601 原值下，也可能挂在 1602 累计折旧下，`直接投入-仪器设备维护费` 更是
+ * 研发费用。
+ *
+ * 两层判定，顺序不能反：
+ *
+ * 1. **在不在本表口径内**，由「上级科目 → 一级编码 → 名称关键词」决定，上级科目的
+ *    结论一路继承给下级。`1604 在建工程`、`1605 使用权资产`、`5301 研发支出`、
+ *    `6601 运营费用` 整枝排除。
+ * 2. **在口径内的再分原值还是折旧**，科目名称写了「累计折旧」就是折旧——
+ *    SAP 型科目表把累计折旧挂在 1601 底下，只认编码会整片判成原值；
+ *    国标科目表（1602 整支折旧）则靠编码，因为明细科目只写「机械设备」不写折旧。
+ *    名称写了「减值准备」「清理」「折旧费」的一律排除，不能混进原值。
+ *
+ * **结论按科目编码归一**：同一个科目在 TB 与 JE 里可能拼出两种科目串
+ * （列序不同、名称取的列也不同），角色按信息最全的那个名称判，资产类别取
+ * 首次出现的那个（科目串按 TB 在前、JE 在后传入，即以余额表的科目名为准）。
+ * 不归一的话，同一科目的两条分类会带着不同的资产类别送进引擎，
+ * 轻则原值与累计折旧配不上对，重则直接触发科目分类冲突。
+ */
+export function suggestFaAccounts(accounts: string[]): Assignment[] {
+  const parts = accounts.map((account) => ({
+    account,
+    ...splitFaAccount(account),
+  }));
+  const chart = new Map<string, string>();
+  const firstName = new Map<string, string>();
+  for (const { code, name } of parts) {
+    if (!code) continue;
+    if (!firstName.has(code)) firstName.set(code, name);
+    if ((chart.get(code) ?? "").length < name.length) chart.set(code, name);
+  }
+  const resolved = new Map<string, AccountRole>();
+  const roleOf = (code: string, depth: number): AccountRole => {
+    const cached = resolved.get(code);
+    if (cached) return cached;
+    const name = chart.get(code) ?? "";
+    const parent = depth < 32 ? nearestParent(chart, code) : "";
+    const base = parent
+      ? roleOf(parent, depth + 1)
+      : (roleFromCode(code) ?? roleFromName(name || code));
+    let role = base;
+    if (base !== "excluded") {
+      if (SAYS_DEPRECIATION.test(name)) role = "depreciation";
+      else if (SAYS_NOT_COST.test(name)) role = "excluded";
+    }
+    resolved.set(code, role);
+    return role;
+  };
+  return parts.map(({ account, code, name }) => ({
+    account,
+    role: code ? roleOf(code, 0) : roleFromName(name),
+    category: faCategory((code ? firstName.get(code) : name) || account),
+  }));
+}
+
+export function suggestFaAccount(account: string): Assignment {
+  return suggestFaAccounts([account])[0];
+}
+
+/** 显示顺序：原值 → 累计折旧 → 其余科目垫底，按自动分类排，用户改角色后不跳行。 */
+const ROLE_ORDER: Record<AccountRole, number> = {
+  cost: 0,
+  depreciation: 1,
+  excluded: 2,
+};
 
 export function faAssignmentsForEntities(
   accounts: string[],
@@ -131,13 +251,25 @@ export function faAssignmentsForEntities(
   current: Assignment[],
 ): Assignment[] {
   const effectiveEntities = entities.length ? entities : [DEFAULT_ENTITY];
+  const suggested = new Map(
+    suggestFaAccounts(accounts).map((item) => [item.account, item]),
+  );
+  const ordered = [...accounts].sort(
+    (a, b) =>
+      ROLE_ORDER[suggested.get(a)?.role ?? "excluded"] -
+      ROLE_ORDER[suggested.get(b)?.role ?? "excluded"],
+  );
   return effectiveEntities.flatMap((entity) =>
-    accounts.map(
+    ordered.map(
       (account) =>
         current.find(
           (item) => item.account === account && item.entity === entity,
-        ) ?? { ...suggestFaAccount(account), entity },
+        ) ?? {
+          ...(suggested.get(account) ?? suggestFaAccount(account)),
+          entity,
+        },
     ),
+
   );
 }
 
@@ -177,8 +309,12 @@ export function FaTbJePage() {
   const [sourceStatus, setSourceStatus] = useState("");
   const [result, setResult] = useState<unknown>();
   const [accountQuery, setAccountQuery] = useState("");
+  // 科目复核默认铺开全部科目：只列固定资产候选的话，被自动分类漏判的科目
+  // 连露面的机会都没有，用户也就无从纠正。
   const [assignmentFilter, setAssignmentFilter] =
-    useState<AssignmentFilter>("candidate");
+    useState<AssignmentFilter>("all");
+  // 科目复核是必经步骤，用户在第三步按过"继续"才算复核过。
+  const [accountsReviewed, setAccountsReviewed] = useState(false);
   const [assignmentPage, setAssignmentPage] = useState(0);
   const [bulkCategory, setBulkCategory] = useState("");
   const uploadDropRef = useRef<HTMLDivElement>(null);
@@ -276,6 +412,14 @@ export function FaTbJePage() {
     assignmentPage * PAGE_SIZE,
     (assignmentPage + 1) * PAGE_SIZE,
   );
+  // JE 的数据年度由引擎在识别阶段一并下发；报告期间落在数据之外时，
+  // 期间过滤会把整本序时账滤空，导出的 JE 相关表就全是空表。
+  const reportPeriodMismatch = useMemo(() => {
+    const years = inspects.je?.dataYears ?? [];
+    const year = Number(reportEnd.slice(0, 4));
+    if (!years.length || !year || years.includes(year)) return "";
+    return `报告截止日在 ${year} 年，但序时账的数据年度是 ${years.join("、")} 年。按当前设置生成，新增、处置与 JE 明细都会是空表，请先改成账套所属年度。`;
+  }, [inspects.je, reportEnd]);
   const roleCounts = assignments.reduce(
     (counts, item) => ({ ...counts, [item.role]: counts[item.role] + 1 }),
     { cost: 0, depreciation: 0, excluded: 0 } as Record<AccountRole, number>,
@@ -284,6 +428,7 @@ export function FaTbJePage() {
     setAssignments((current) =>
       faAssignmentsForEntities(accounts, entities, current),
     );
+    setAccountsReviewed(false);
   }, [accounts, entities]);
   useEffect(() => setAssignmentPage(0), [accountQuery, assignmentFilter]);
   useEffect(() => {
@@ -325,8 +470,22 @@ export function FaTbJePage() {
       /\.(xlsx?|xlsm|csv|txt|tsv|parquet)$/i.test(path),
     );
     if (!files.length) return;
+    // 这里是“重新选择一组 TB/JE”，不是增量追加。先使旧文件的映射、
+    // LLM 复核、科目确认与预览失效，避免只换一侧时另一侧仍沿用旧账套。
     reviews.clearReview("tb");
     reviews.clearReview("je");
+    setPaths({ tb: "", je: "" });
+    setInspects({});
+    setMappings({ tb: {}, je: {} });
+    setAssignments([]);
+    setAccountsReviewed(false);
+    setAccountQuery("");
+    setAssignmentFilter("all");
+    setAssignmentPage(0);
+    setBulkCategory("");
+    setResult(undefined);
+    setOutputPath("");
+    setReportEnd("");
     setStep(1);
     setBusy(true);
     setError("");
@@ -398,8 +557,14 @@ export function FaTbJePage() {
           [item.kind]: item.inspected.suggestedMapping,
         }));
         reviews.clearReview(item.kind);
-        if (item.kind === "je")
+        if (item.kind === "je") {
           setOutputPath((current) => current || defaultOutput(item.path));
+          // 报告截止日必须落在 JE 的数据年度上。默认取"当年 12-31"时，只要
+          // 账套不是本年度的，期间过滤会把整本序时账滤空，导出的 JE 相关表
+          // 全是空表——识别出数据年度就直接用它。
+          if (item.inspected.suggestedBalanceSheetDate)
+            setReportEnd(item.inspected.suggestedBalanceSheetDate);
+        }
       }
       setSourceStatus(
         recognized.length
@@ -451,6 +616,8 @@ export function FaTbJePage() {
         ...value,
         [kind]: inspected.suggestedMapping,
       }));
+      if (kind === "je" && inspected.suggestedBalanceSheetDate)
+        setReportEnd(inspected.suggestedBalanceSheetDate);
       reviews.clearReview(kind);
     } catch (e) {
       setError(errorText(e));
@@ -505,6 +672,11 @@ export function FaTbJePage() {
       setStep(3);
       return;
     }
+    if (!accountsReviewed) {
+      setError("请先完成科目复核：确认每个科目的角色与资产类别后再生成底稿。");
+      setStep(3);
+      return;
+    }
     if (method.endsWith("export") && !outputPath) {
       setError("请选择输出路径。");
       return;
@@ -531,12 +703,23 @@ export function FaTbJePage() {
     }
   }
 
+  // 同一个科目在 TB 与 JE 里可能拼成两种科目串（列序不同，编码一头一尾），
+  // 两行分别参与两侧匹配、缺一不可。用户只改其中一行的话，引擎会按
+  // FA_TBJE_ACCOUNT_ASSIGNMENT_CONFLICT 拒绝导出——所以改动按「主体＋科目编码」同步。
   function updateAssignment(index: number, patch: Partial<Assignment>) {
-    setAssignments((rows) =>
-      rows.map((row, rowIndex) =>
-        rowIndex === index ? { ...row, ...patch } : row,
-      ),
-    );
+    setAssignments((rows) => {
+      const target = rows[index];
+      if (!target) return rows;
+      const code = splitFaAccount(target.account).code;
+      return rows.map((row, rowIndex) =>
+        rowIndex === index ||
+        (Boolean(code) &&
+          row.entity === target.entity &&
+          splitFaAccount(row.account).code === code)
+          ? { ...row, ...patch }
+          : row,
+      );
+    });
   }
 
   function applyRoleToFiltered(role: AccountRole) {
@@ -571,10 +754,14 @@ export function FaTbJePage() {
           },
           {
             key: "accounts",
-            label: "科目复核（可选）",
+            label: "科目复核",
             disabled: !mappingsReady || !entitiesReady,
           },
-          { key: "output", label: "预览与导出", disabled: !assignmentsReady },
+          {
+            key: "output",
+            label: "预览与导出",
+            disabled: !assignmentsReady || !accountsReviewed,
+          },
         ]}
         current={step - 1}
         onStepClick={(index) => setStep((index + 1) as 1 | 2 | 3 | 4)}
@@ -747,9 +934,9 @@ export function FaTbJePage() {
             </span>
             <Button
               disabled={!mappingsReady || reviewing || busy}
-              onClick={() => setStep(assignmentsReady ? 4 : 3)}
+              onClick={() => setStep(3)}
             >
-              {assignmentsReady ? "使用自动分类并继续" : "复核科目分类"}
+              复核科目分类
             </Button>
           </div>
         </div>
@@ -761,7 +948,7 @@ export function FaTbJePage() {
             <div>
               <CardTitle>复核固定资产科目与资产类别</CardTitle>
               <p>
-                系统已根据映射后的科目编码和名称自动分类。本步仅用于调整例外，默认只显示固定资产候选。
+                系统按「上级科目 → 一级编码 → 名称」自动分类，默认列出全部科目；固定资产原值与累计折旧排在前面，其余科目标记为「排除」垫底。请逐一复核后再进入下一步。
               </p>
             </div>
             <div className="fa-tbje-counts">
@@ -769,6 +956,7 @@ export function FaTbJePage() {
               <Badge variant="secondary">
                 累计折旧 {roleCounts.depreciation}
               </Badge>
+              <Badge variant="outline">排除 {roleCounts.excluded}</Badge>
               <Badge
                 variant={
                   unresolvedAssignments.length ? "destructive" : "outline"
@@ -801,11 +989,11 @@ export function FaTbJePage() {
                     setAssignmentFilter(event.target.value as AssignmentFilter)
                   }
                 >
+                  <option value="all">全部科目</option>
                   <option value="candidate">固定资产候选</option>
                   <option value="cost">固定资产原值</option>
                   <option value="depreciation">累计折旧</option>
                   <option value="excluded">已排除</option>
-                  <option value="all">全部科目</option>
                 </select>
               </label>
               <div
@@ -897,18 +1085,22 @@ export function FaTbJePage() {
                         </select>
                       </td>
                       <td>
-                        <input
-                          aria-label={`${item.account}的资产类别`}
-                          name={`category-${index}`}
-                          autoComplete="off"
-                          value={item.category}
-                          disabled={busy || item.role === "excluded"}
-                          onChange={(event) =>
-                            updateAssignment(index, {
-                              category: event.target.value,
-                            })
-                          }
-                        />
+                        {item.role === "excluded" ? (
+                          <span className="fa-tbje-category-na">—</span>
+                        ) : (
+                          <input
+                            aria-label={`${item.account}的资产类别`}
+                            name={`category-${index}`}
+                            autoComplete="off"
+                            value={item.category}
+                            disabled={busy}
+                            onChange={(event) =>
+                              updateAssignment(index, {
+                                category: event.target.value,
+                              })
+                            }
+                          />
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -962,9 +1154,12 @@ export function FaTbJePage() {
               </span>
               <Button
                 disabled={!assignmentsReady || busy}
-                onClick={() => setStep(4)}
+                onClick={() => {
+                  setAccountsReviewed(true);
+                  setStep(4);
+                }}
               >
-                继续预览与导出
+                确认复核并继续
               </Button>
             </div>
           </CardContent>
@@ -1020,8 +1215,17 @@ export function FaTbJePage() {
                     value={reportEnd}
                     onChange={(event) => setReportEnd(event.target.value)}
                   />
+                  <small>
+                    统计期间为 {reportEnd.slice(0, 4)}-01-01 至{" "}
+                    {reportEnd || "—"}，落在期间外的凭证不会进入底稿。
+                  </small>
                 </label>
               </div>
+              {reportPeriodMismatch && (
+                <p className="fa-tbje-period-warning" role="alert">
+                  {reportPeriodMismatch}
+                </p>
+              )}
               <label>
                 输出路径
                 <FileInput

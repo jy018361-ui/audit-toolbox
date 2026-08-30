@@ -98,8 +98,17 @@
   font-size: var(--fs-sm);
 }
 
-.tbje-group-row button {
+.tbje-group-buttons {
   grid-area: action;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--sp-1);
+}
+
+.tbje-group-buttons .tbje-remove-group {
+  color: var(--danger-fg);
 }
 
 .tbje-group-reason {
@@ -113,6 +122,20 @@
   margin-top: var(--sp-3);
   padding-top: var(--sp-3);
   border-top: 1px solid var(--border-soft);
+}
+
+@media (max-width: 840px) {
+  .tbje-group-row {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      "label file"
+      "arrow select"
+      "action action";
+  }
+
+  .tbje-group-buttons {
+    justify-content: flex-start;
+  }
 }
 
 .tbje-actions {

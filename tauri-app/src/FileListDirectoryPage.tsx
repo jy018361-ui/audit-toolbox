@@ -100,9 +100,11 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
         } else if (payload.type === "drop") {
           setDragHover(false);
           if (payload.paths.length) {
+            setActiveJobId("__source_changed__");
             setSourceDir(payload.paths[0]);
             setOutputPath("");
             setScan(undefined);
+            setJob(undefined);
             setStep(1);
             void inspect(payload.paths[0]);
           }
@@ -137,9 +139,11 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
   async function chooseSource() {
     const value = await pickPath("folder", "选择要生成清单的文件夹", []);
     if (typeof value !== "string") return;
+    setActiveJobId("__source_changed__");
     setSourceDir(value);
     setOutputPath("");
     setScan(undefined);
+    setJob(undefined);
     setStep(1);
     await inspect(value);
   }

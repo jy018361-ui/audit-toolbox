@@ -218,3 +218,35 @@ describe("存款科目手工分类请求", () => {
     });
   });
 });
+
+/** 手填利率的回归：受控输入若每敲一个字符就"数字→文本"来回转，
+ *  敲到「0.0」时会被改写回「0」，小数点连着后面的位数一起被吞，
+ *  用户永远填不进 0.05%。编辑期间必须原样保留用户敲的文本。 */
+describe("利率手工填写", () => {
+  it("逐字符敲 0.05 不会被输入框吞掉小数位，并按 0.0005 提交", async () => {
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "拖放或选择 TB、序时账文件（可同时选择）",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled(),
+    );
+    goToStep(STEP2);
+    const box = await screen.findByRole("spinbutton", {
+      name: "活期存款的采用利率",
+    });
+    for (const text of ["0", "0.0", "0.05"]) {
+      fireEvent.change(box, { target: { value: text } });
+      expect(box).toHaveValue(Number(text));
+      expect((box as HTMLInputElement).value).toBe(text);
+    }
+    goToStep(STEP3);
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+    expect(mock.jobStart.mock.calls[0][1]).toMatchObject({
+      tierRates: { demand: 0.0005 },
+    });
+  });
+});

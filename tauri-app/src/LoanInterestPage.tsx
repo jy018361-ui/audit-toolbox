@@ -25,13 +25,16 @@ import {
   type LoanRole,
 } from "@/loanForms";
 import {
+  loanBps,
   loanRateDefaults,
   loanRateOverrides,
+  loanRateValue,
   loanReportStart,
   resolveLoanRates,
   type LoanRateSetting,
 } from "@/loanRateTypes";
 import { MappingPanel } from "@/components/MappingPanel";
+import { NumberInput } from "@/components/NumberInput";
 import { errorText } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -259,9 +262,11 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     Record<string, ResultRateEdit>
   >({});
   const invalidateResults = () => {
+    activeJob.current = "";
     setRows([]);
     setResult(undefined);
     setResultRateEdits({});
+    setJob(undefined);
   };
   const setSource = (kind: Kind, next: Partial<Source>) => {
     invalidateResults();
@@ -317,13 +322,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       title: "上浮(+)/下浮(-) BP",
       render: (i: number) =>
         rateRows[i]?.rateType === "floating" ? (
-          <input
+          <NumberInput
+            label={`第 ${i + 1} 行的上浮下浮点数`}
             className="loan-rate-bps"
-            type="number"
             step="1"
             disabled={busy}
             value={rateRows[i]?.spreadBps ?? 0}
-            onChange={(e) => editRate(i, { spreadBps: Number(e.target.value) })}
+            onCommit={(text) => editRate(i, { spreadBps: loanBps(text) })}
           />
         ) : (
           <span className="loan-rate-na">—</span>
@@ -884,31 +889,34 @@ function Results({
                   </select>
                 </td>
                 <td>
-                  <input
-                    type="number"
+                  <NumberInput
+                    label={`${r.loanId}的${
+                      r.rateType === "fixed" ? "固定利率" : "基准利率"
+                    }`}
                     step=".0001"
                     value={
                       r.rateType === "fixed"
                         ? (r.fixedRate ?? "")
                         : (r.benchmarkRate ?? "")
                     }
-                    onChange={(e) =>
+                    onCommit={(text) =>
                       editRate(
                         i,
                         r.rateType === "fixed"
-                          ? { fixedRate: Number(e.target.value) }
-                          : { benchmarkRate: Number(e.target.value) },
+                          ? { fixedRate: loanRateValue(text) }
+                          : { benchmarkRate: loanRateValue(text) },
                       )
                     }
                   />
                 </td>
                 <td>
-                  <input
-                    type="number"
+                  <NumberInput
+                    label={`${r.loanId}的加点 BP`}
+                    step="1"
                     disabled={r.rateType !== "floating"}
                     value={r.spreadBps ?? 0}
-                    onChange={(e) =>
-                      editRate(i, { spreadBps: Number(e.target.value) })
+                    onCommit={(text) =>
+                      editRate(i, { spreadBps: loanBps(text) })
                     }
                   />
                 </td>

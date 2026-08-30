@@ -4,6 +4,8 @@ import {
   isNumericRateCell,
   loanRateDefaults,
   loanRateOverrides,
+  loanBps,
+  loanRateValue,
   loanSpreadBps,
   loanReportStart,
   resolveLoanRates,
@@ -134,5 +136,21 @@ describe("测算期间", () => {
   it("日期没填时返回空串，由调用方拦下", () => {
     expect(loanReportStart("")).toBe("");
     expect(loanReportStart("2025/12/31")).toBe("");
+  });
+});
+
+describe("手工填进格子的利率与 BP", () => {
+  it("BP 清空或敲到一半都当不浮动", () => {
+    expect(loanBps("90")).toBe(90);
+    expect(loanBps("-25")).toBe(-25);
+    // type=number 的格子在敲「0.」这类中间态时给出的就是空串。
+    expect(loanBps("")).toBe(0);
+    expect(loanBps("  ")).toBe(0);
+  });
+
+  it("利率清空回到未填，不当成 0% 悄悄算出零利息", () => {
+    expect(loanRateValue("0.0435")).toBeCloseTo(0.0435);
+    expect(loanRateValue("0")).toBe(0);
+    expect(loanRateValue("")).toBeUndefined();
   });
 });

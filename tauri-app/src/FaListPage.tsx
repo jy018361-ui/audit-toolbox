@@ -529,6 +529,19 @@ function FaCardListPage() {
   ]);
   // 把选中的路径应用到期初/期末（点击选择与拖拽上传共用）。
   function applyPath(side: "begin" | "end", value: string) {
+    // 点击选择和拖拽共用本入口；换主文件时旧 LLM/补充清单状态都失效。
+    llmReviewGeneration.current += 1;
+    supplementReviewGeneration.current += 1;
+    setLlmBusy(false);
+    setSupplementLlmBusy(false);
+    setLlmReview(undefined);
+    setSupplementLlmReview(undefined);
+    setLlmChanges([]);
+    setLlmPending([]);
+    setAddition(emptyFaSupplement());
+    setDisposal(emptyFaSupplement());
+    setAdditionInspect(undefined);
+    setDisposalInspect(undefined);
     // 换了源文件就放弃上次手选的保存位置，让默认落点跟着新文件重新算。
     const previousSource = side === "begin" ? beginPath : endPath;
     if (previousSource !== value) setOutputPathTouched(false);

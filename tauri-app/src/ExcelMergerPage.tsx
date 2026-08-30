@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   engineCall,
   jobCancel,
@@ -41,6 +41,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
   const [job, setJob] = useState<JobEvent>();
   const [error, setError] = useState("");
   const [result, setResult] = useState<unknown>();
+  const activeJobId = useRef("");
   const addPaths = (incoming: string[]) =>
     setPaths((current) => [
       ...current,
@@ -68,6 +69,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     let off: () => void = () => {};
     void listenJobEvents((event) => {
       if (event.toolId === "Excel_Merger") {
+        if (!activeJobId.current || event.jobId !== activeJobId.current) return;
         setJob(event);
         // A failed job also carries a result payload; rendering it produced a
         // green "处理完成。" directly under the red failure banner.
@@ -90,6 +92,9 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     setFiles([]);
     setAvailableSheets([]);
     setTargetSheets([]);
+    setResult(undefined);
+    setJob(undefined);
+    activeJobId.current = "";
   }, [paths]);
   useEffect(() => {
     if (!outputDirectoryTouched)
@@ -169,6 +174,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         targetSheets,
         addHyperlinks,
       });
+      activeJobId.current = jobId;
       setJob({
         jobId,
         toolId: "Excel_Merger",

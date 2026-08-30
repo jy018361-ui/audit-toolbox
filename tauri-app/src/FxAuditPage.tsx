@@ -432,11 +432,7 @@ export function fxMergeJobResult(
 ) {
   return { ...current, ...next };
 }
-/**
- * 未覆盖凭证的说明文字。**「待确认」已废止（分类二元化）**——带外币的
- * 凭证必落已实现/未实现之一；不构成汇兑事项的（本位币账户间划转、非货币
- * 性对手）单独披露。剩余未覆盖的只有「已分类但缺重算证据」一种。
- */
+/** 未覆盖凭证按结构结论与已分类但缺少重算证据分别披露。 */
 export function uncoveredDetail(summary: Record<string, unknown>): string {
   const total = Number(summary.pendingReviewCount ?? 0);
   const unclassified = Number(summary.pendingUnclassifiedCount ?? 0);
@@ -465,7 +461,7 @@ export function uncoveredBreakdown(summary: Record<string, unknown>) {
   };
 }
 export const NOT_FX_EVENT_HINT =
-  "这些凭证的货币性腿全部为本位币账户（如集团资金池美元↔美元划转），或对手科目为预付款、存货等非货币性项目——按准则不产生外币汇兑损益。账面汇差已从测算总体剔除，属客户科目使用问题，建议重分类复核；明细见底稿「不构成汇兑事项」页。";
+  "这些凭证既不满足“货币资金净额非零且对方货币性项目净额非零”的已实现结构，也不满足“外币原币净额为零且本位币净额非零”的未实现结构。账面汇差已从测算总体剔除；明细见底稿「不构成汇兑事项」页。";
 export const UNMEASURABLE_HINT =
   "这些凭证已明确归类为已实现/未实现，但缺少独立重算所需的原币余额、历史账面价值或汇率证据——常见原因是科目余额表未按币种拆分。审计金额暂未测出；需向客户补要资料后重跑。";
 /** 「?」圆形图标：鼠标移上去（或键盘聚焦）显示口径注释。 */
@@ -810,8 +806,26 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       /\.(xlsx?|xlsm|csv|txt|tsv|parquet)$/i.test(p),
     );
     if (!files.length) return;
+    // 新一轮上传不得沿用上一批数据的测算结果、跨表复核提示或手工口径。
+    // 特别是 currencyTouched：旧账套手工选过的币种不能压住新 TB
+    // 识别出的公司本位币。3300 的 TB 本位币列是 CNY；账户文本里出现
+    // USD 只是原币线索，不能反过来把公司本位币改成 USD。
     reviews.clearReview("je");
     reviews.clearReview("tb");
+    setAlignment([]);
+    setResult(undefined);
+    setJob(undefined);
+    setCompletedStage(undefined);
+    setActiveStage(undefined);
+    setManualClassifications({});
+    setClassificationDrafts({});
+    setAccountRoles({});
+    setAccountRolesTouched({});
+    setAccountCurrencies({});
+    setEntityCurrencies({});
+    setCurrencyTouched({});
+    setTbCurrencyConfirmed(false);
+    setReportEnd("");
     setBusy(true);
     setError("");
     setSourceStatus("正在识别文件类型、表头和字段…");
@@ -1214,8 +1228,18 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
               setTbMapping({});
               setAccountRoles({});
               setAccountRolesTouched({});
+              setAccountCurrencies({});
+              setEntityCurrencies({});
+              setCurrencyTouched({});
               setManualClassifications({});
               setClassificationDrafts({});
+              setTbCurrencyConfirmed(false);
+              setAlignment([]);
+              setResult(undefined);
+              setJob(undefined);
+              setCompletedStage(undefined);
+              setActiveStage(undefined);
+              setReportEnd("");
               setSourceStatus("");
             }}
           />
@@ -1308,6 +1332,52 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
           </ul>
         </section>
       )}
+      {(je || tb) && (
+        <Card>
+          <CardHeader>
+            <CardTitle>公司本位币</CardTitle>
+          </CardHeader>
+          <CardContent className="fx-list">
+            {tb?.uniformCurrency ? (
+              <p className="fx-hint">
+                TB 的本位币币种列整列都是 {tb.uniformCurrency}
+                ，已自动预填。这与“原币币种”是两个独立口径：原币为
+                USD 不代表公司本位币也是 USD。
+              </p>
+            ) : (
+              <p className="fx-hint">
+                未从 TB 识别到单一的本位币币种，暂按 CNY 预填。请在核对
+                JE 字段映射前确认；“原币币种”不会被当作公司本位币。
+              </p>
+            )}
+            {entities.length ? (
+              entities.map((entity) => (
+                <label key={entity}>
+                  <span>{entity}</span>
+                  <input
+                    value={entityCurrencies[entity] ?? defaultFunctionalCurrency}
+                    maxLength={3}
+                    onChange={(e) => setEntityCurrency(entity, e.target.value)}
+                  />
+                </label>
+              ))
+            ) : (
+              <label>
+                <span>本位币（全表）</span>
+                <input
+                  value={
+                    entityCurrencies[fixedEntity] ?? defaultFunctionalCurrency
+                  }
+                  maxLength={3}
+                  onChange={(e) =>
+                    setEntityCurrency(fixedEntity, e.target.value)
+                  }
+                />
+              </label>
+            )}
+          </CardContent>
+        </Card>
+      )}
       <div className="fx-preview-stack">
         {je && (
           <FxPreview
@@ -1397,52 +1467,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       {step === 1 && (
         <>
       {(je || tb) && (
-        <div className="fx-settings-grid">
-          <Card>
-            <CardHeader>
-              <CardTitle>公司本位币</CardTitle>
-            </CardHeader>
-            <CardContent className="fx-list">
-              {tb?.uniformCurrency && (
-                <p className="fx-hint">
-                  TB 的币种列整列都是 {tb.uniformCurrency}
-                  ，已按主体本位币预填；账户币种改从科目名称/文本识别。若该列确实是交易币种，请在此改回。
-                </p>
-              )}
-              {entities.length ? (
-                entities.map((entity) => (
-                  <label key={entity}>
-                    <span>{entity}</span>
-                    <input
-                      value={
-                        entityCurrencies[entity] ?? defaultFunctionalCurrency
-                      }
-                      maxLength={3}
-                      onChange={(e) =>
-                        setEntityCurrency(entity, e.target.value)
-                      }
-                    />
-                  </label>
-                ))
-              ) : (
-                <>
-                  <label>
-                    <span>本位币（全表）</span>
-                    <input
-                      value={
-                        entityCurrencies[fixedEntity] ??
-                        defaultFunctionalCurrency
-                      }
-                      maxLength={3}
-                      onChange={(e) =>
-                        setEntityCurrency(fixedEntity, e.target.value)
-                      }
-                    />
-                  </label>
-                </>
-              )}
-            </CardContent>
-          </Card>
+        <div>
           <Card>
             <CardHeader>
               <CardTitle>TB科目类型确认</CardTitle>
@@ -2777,7 +2802,7 @@ function FxResult({
             <div>
               <h4>凭证分类复核</h4>
               <p>
-                分类只有“已实现汇兑损益”“未实现汇兑损益”两种（外加结构判定的“不构成汇兑事项”）。未实现类凭证会从正常JE发生额中剔除，
+                系统仅在单张凭证内按公司、币种和货币性科目汇总净额：货币资金及其对方货币性项目净额均不为零时判为已实现；否则，外币原币净额为零而本位币净额不为零时判为未实现。未实现类凭证会从正常JE发生额中剔除，
                 并在账户余额测算完成后与审计结果比较；不会直接采用该凭证金额作为测算结果。
                 借贷科目组合相同的凭证归成一组，可一次性改一整组。
               </p>
@@ -2793,8 +2818,7 @@ function FxResult({
                 {undecided.reduce((n, g) => n + g.items.length, 0)} 张）
               </h5>
               <p>
-                这些凭证的货币性腿全部为本位币账户（如集团资金池美元↔美元划转），或对手科目为
-                预付款等非货币性项目——结构上不产生外币汇兑损益，账面汇差已从测算总体剔除并计入
+                这些凭证没有同时出现净额非零的货币资金和对方货币性项目，也不符合原币净额为零、本位币净额非零的未实现结构；账面汇差已从测算总体剔除并计入
                 「数据质量检查」。若你判断其中某组确属已实现/未实现，仍可在这里改，选完点「重新测算」。
               </p>
               <div className="fx-classification-list">

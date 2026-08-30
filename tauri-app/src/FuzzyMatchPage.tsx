@@ -312,6 +312,23 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   const setSource = (kind: Kind, next: Partial<SourceState>) =>
     setSources((v) => ({ ...v, [kind]: { ...v[kind], ...next } }));
 
+  function invalidateMatchResult() {
+    activeJob.current = "";
+    setJob(undefined);
+    setJobId("");
+    setSummary(undefined);
+    setRows([]);
+    setConfirmations([]);
+    setStatusFilter("all");
+    setBand("all");
+    setOnlyPending(false);
+    setBatchOpen(false);
+    setNotice("");
+    setRestoreNote("");
+    setExportOutputs([]);
+    sessionStorage.removeItem(DRAFT_KEY);
+  }
+
   async function inspect(kind: Kind, over: { path?: string; sheet?: string; headerRow?: number }) {
     const current = sources[kind];
     const path = over.path ?? current.path;
@@ -336,6 +353,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   async function browse(kind: Kind) {
     const picked = await pickPath("file", `选择${SOURCE_LABEL[kind]}表格文件`, ["xlsx", "xls", "csv"]);
     if (typeof picked !== "string") return;
+    invalidateMatchResult();
     setSource(kind, { path: picked, inspection: undefined, mapping: {} });
     await inspect(kind, { path: picked, sheet: "", headerRow: 1 });
   }
@@ -344,6 +362,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   async function dropInto(kind: Kind, paths: string[]) {
     const file = paths.find((p) => /\.(xlsx?|csv)$/i.test(p));
     if (!file) return;
+    invalidateMatchResult();
     setSource(kind, { path: file, inspection: undefined, mapping: {} });
     await inspect(kind, { path: file, sheet: "", headerRow: 1 });
   }
@@ -475,7 +494,10 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                   placeholder={`选择${SOURCE_LABEL[kind]} 文件`}
                   onBrowse={() => void browse(kind)}
                   onDragStateChange={() => {}}
-                  onClear={() => setSource(kind, emptySource())}
+                  onClear={() => {
+                    invalidateMatchResult();
+                    setSource(kind, emptySource());
+                  }}
                 />
                 {s.inspection && (
                   <div className="fuzzy-source-meta">

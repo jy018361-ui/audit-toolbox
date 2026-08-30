@@ -2012,7 +2012,8 @@ pub(crate) fn signed_balance(
 /// 本侧冲减，与在 Excel 里对列求和看到的口径一致。
 ///
 /// 1. 借贷分列 → 各归各侧；「已带符号」口径下贷方列记的是借正贷负值，翻回正数；
-/// 2. 净额＋方向（符号一样）→ 方向定侧，红字负数留在本侧；
+/// 2. 净额＋方向 → 原始方向定侧，红字只在原侧冲减；已带符号口径仅把贷方
+///    换算成「正常贷方为正、贷方红字为负」，绝不按金额正负改判借贷；
 /// 3. 净额且没有方向列 → 只剩符号这一条线索，按正负归侧。
 pub(crate) fn side_amounts(v: &AmountInputs, convention: SignConvention) -> (f64, f64) {
     if v.debit.is_some() || v.credit.is_some() {
@@ -2024,10 +2025,14 @@ pub(crate) fn side_amounts(v: &AmountInputs, convention: SignConvention) -> (f64
         };
     }
     let amount = v.amount.unwrap_or(0.0);
-    match (&v.direction, convention) {
-        (Some(d), SignConvention::Unsigned) if !d.trim().is_empty() => {
+    match &v.direction {
+        Some(d) if !d.trim().is_empty() => {
             if is_credit_direction(d) {
-                (0.0, amount)
+                let credit = match convention {
+                    SignConvention::Unsigned => amount,
+                    SignConvention::Signed => -amount,
+                };
+                (0.0, credit)
             } else {
                 (amount, 0.0)
             }
@@ -3014,9 +3019,12 @@ pub(crate) fn plan_combined_account_fill(
 ) -> CombinedAccountFill {
     const WEAK_RIVALS: &[&str] = &["auxiliary", "currencyText"];
     let combined = |header: &str| -> bool {
-        headers.iter().position(|h| h == header).is_some_and(|index| {
-            is_combined_account_column(rows.iter().filter_map(|row| row.get(index)).cloned())
-        })
+        headers
+            .iter()
+            .position(|h| h == header)
+            .is_some_and(|index| {
+                is_combined_account_column(rows.iter().filter_map(|row| row.get(index)).cloned())
+            })
     };
     let legacy_account = !claimed("account").is_empty();
     let mapped_code = claimed("accountCode");
@@ -3041,13 +3049,11 @@ pub(crate) fn plan_combined_account_fill(
                     && combined(header)
             })
             .or_else(|| {
-                headers
-                    .iter()
-                    .find(|header| {
-                        weak.contains(header.as_str())
-                            && !strong.contains(header.as_str())
-                            && combined(header)
-                    })
+                headers.iter().find(|header| {
+                    weak.contains(header.as_str())
+                        && !strong.contains(header.as_str())
+                        && combined(header)
+                })
             })
             .cloned()
     };
@@ -3154,7 +3160,10 @@ pub(crate) fn header_semantic_hits(row: &[String]) -> usize {
     row.iter()
         .map(|value| {
             let normalized = normalize_header(value);
-            WORDS.iter().filter(|word| normalized.contains(*word)).count()
+            WORDS
+                .iter()
+                .filter(|word| normalized.contains(*word))
+                .count()
         })
         .sum()
 }
@@ -4395,10 +4404,7 @@ fn detect_convention(
             // 余额一致，可直接下「借贷符号一样」的无争议结论，不必判「无法判定」。
             // 与 [`fallback_by_credit_column`] 的 (0, 0) 分支同一口径；借款侧收口
             // 前自拼原料投票落到的也是它。
-            if debit.is_none()
-                && credit.is_none()
-                && (opening.is_some() || closing.is_some())
-            {
+            if debit.is_none() && credit.is_none() && (opening.is_some() || closing.is_some()) {
                 let mut evidence = SignEvidence::blank("tb");
                 evidence.convention = Some(SignConvention::Unsigned);
                 evidence.note = Some(
@@ -5057,12 +5063,8 @@ mod tests {
             vec![String::new(), "3".to_string()],
         ];
         let keep = vec![true, false, true];
-        let filled = forward_fill_columns_skipping(
-            &headers,
-            &mut rows,
-            &["科目".to_string()],
-            &keep,
-        );
+        let filled =
+            forward_fill_columns_skipping(&headers, &mut rows, &["科目".to_string()], &keep);
         assert_eq!(filled, 1);
         // 第 2 行拿到的是第 0 行的 1001，不是噪声行的 2002。
         assert_eq!(rows[2][0], "1001");
@@ -5367,7 +5369,12 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         let rows = vec![
-            vec!["2001".into(), "贷".into(), "1000000".into(), "900000".into()],
+            vec![
+                "2001".into(),
+                "贷".into(),
+                "1000000".into(),
+                "900000".into(),
+            ],
             vec!["1001".into(), "借".into(), "5000".into(), "6000".into()],
         ];
         let column_of = |role: &str| -> Vec<String> {
@@ -5503,6 +5510,32 @@ mod tests {
         for v in ["借", "Debit", "DR", "d", "S", ""] {
             assert!(!is_credit_direction(v), "{v} 不该判为贷方");
         }
+    }
+
+    #[test]
+    fn 已带符号金额仍由原始方向定侧且红字留在本侧() {
+        let amount = |value: f64, direction: &str| AmountInputs {
+            amount: Some(value),
+            direction: Some(direction.to_owned()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            side_amounts(&amount(178_835_062.87, "S"), SignConvention::Signed),
+            (178_835_062.87, 0.0)
+        );
+        assert_eq!(
+            side_amounts(&amount(-10_102_703.78, "S"), SignConvention::Signed),
+            (-10_102_703.78, 0.0)
+        );
+        assert_eq!(
+            side_amounts(&amount(-184_664_743.69, "H"), SignConvention::Signed),
+            (0.0, 184_664_743.69)
+        );
+        assert_eq!(
+            side_amounts(&amount(32_890.46, "H"), SignConvention::Signed),
+            (0.0, -32_890.46)
+        );
     }
 
     #[test]

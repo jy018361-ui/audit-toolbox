@@ -29,7 +29,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Download, Eye } from "lucide-react";
+import { Download, Eye, Trash2 } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -175,7 +175,7 @@ function EquationVerdict({ equation }: { equation?: CheckResult["equation"] }) {
   if (!classificationComplete)
     return (
       <Badge variant="outline" className="badge-warning">
-        待补充分类
+        分类待确认
       </Badge>
     );
   return (
@@ -374,8 +374,12 @@ function OutcomeDetail({ result }: { result: CheckResult }) {
       {unclassified.length > 0 && (
         <div className="tbje-preview-block">
           <h4>
-            {CHECK_NAMES.equation}：待补充分类 {unclassified.length} 个科目
+            {CHECK_NAMES.equation}：{unclassified.length} 个科目无法自动分类
           </h4>
+          <p className="fx-hint">
+            这些科目未按科目编码识别为资产、负债、权益、成本或损益，暂未纳入
+            BS 与 PL 勾稽；请核对科目编码或后续补充分类。
+          </p>
           <div className="tbje-preview-scroll">
             <Table className="tbje-preview-table">
               <TableHeader>
@@ -416,7 +420,9 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const [inspects, setInspects] = useState<Record<string, Inspection>>({});
   const [mappings, setMappings] = useState<Record<string, Mapping>>({});
   const [groups, setGroups] = useState<PairedGroup[]>([]);
-  const [expanded, setExpanded] = useState<string | undefined>();
+  const [expanded, setExpanded] = useState<
+    { groupId: string; kind: LedgerKind } | undefined
+  >();
   const [detail, setDetail] = useState<string | undefined>();
   const [outcomes, setOutcomes] = useState<GroupOutcome[]>([]);
   const [status, setStatus] = useState("");
@@ -473,7 +479,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     const files = selected.filter((path) => /\.(xlsx?|xlsm|csv)$/i.test(path));
     if (!files.length) return;
     setError("");
-    setOutcomes([]);
+    invalidateResults();
     setBusy(true);
     const failures: string[] = [];
     const recognized: PairingFile[] = [];
@@ -538,6 +544,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         ...current,
         [path]: inspected.suggestedMapping,
       }));
+      invalidateResults();
     } catch (e) {
       setError(`${fileName(path)}：${errorText(e)}`);
     } finally {
@@ -555,6 +562,45 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
 
   const runnable = groups.filter((group) => group.tb);
   const currentStep = outcomes.length > 0 ? 2 : groups.length > 0 ? 1 : 0;
+
+  function invalidateResults() {
+    activeJobId.current = "__inputs_changed__";
+    setOutcomes([]);
+    setDetail(undefined);
+    setExported("");
+    setJob(undefined);
+  }
+
+  function removeGroup(group: PairedGroup) {
+    if (
+      !window.confirm(
+        `确认移除第 ${group.label} 组？只会从本次核对中清除，不会删除原文件。`,
+      )
+    )
+      return;
+    const paths = [group.tb?.path, group.je?.path].filter(Boolean) as string[];
+    setGroups((current) => current.filter((item) => item.id !== group.id));
+    setInspects((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([path]) => !paths.includes(path)),
+      ),
+    );
+    setMappings((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([path]) => !paths.includes(path)),
+      ),
+    );
+    setExpanded((current) =>
+      current?.groupId === group.id ? undefined : current,
+    );
+    invalidateResults();
+  }
+
+  function selectJe(groupId: string, path?: string) {
+    setGroups((current) => reassignJe(current, groupId, path));
+    setExpanded(undefined);
+    invalidateResults();
+  }
 
   const goToStep = (index: number) => {
     [intakeSectionRef, pairingSectionRef, resultSectionRef][
@@ -754,13 +800,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                         value={group.je?.path ?? ""}
                         disabled={busy}
                         onChange={(event) =>
-                          setGroups((current) =>
-                            reassignJe(
-                              current,
-                              group.id,
-                              event.target.value || undefined,
-                            ),
-                          )
+                          selectJe(group.id, event.target.value || undefined)
                         }
                       >
                         <option value="">（不配对序时账）</option>
@@ -773,20 +813,43 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                           </option>
                         ))}
                       </select>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        disabled={busy}
-                        aria-expanded={expanded === group.id}
-                        aria-controls={`tbje-mapping-${group.id}`}
-                        onClick={() =>
-                          setExpanded(
-                            expanded === group.id ? undefined : group.id,
-                          )
-                        }
-                      >
-                        {expanded === group.id ? "收起映射" : "映射"}
-                      </Button>
+                      <div className="tbje-group-buttons">
+                        {(["tb", "je"] as LedgerKind[]).map((kind) => {
+                          const active =
+                            expanded?.groupId === group.id &&
+                            expanded.kind === kind;
+                          const available = kind === "tb" ? group.tb : group.je;
+                          return (
+                            <Button
+                              key={kind}
+                              type="button"
+                              variant={active ? "secondary" : "ghost"}
+                              size="sm"
+                              disabled={busy || !available}
+                              aria-expanded={active}
+                              aria-controls={`tbje-mapping-${group.id}-${kind}`}
+                              onClick={() =>
+                                setExpanded(
+                                  active ? undefined : { groupId: group.id, kind },
+                                )
+                              }
+                            >
+                              {kind.toUpperCase()} 映射
+                            </Button>
+                          );
+                        })}
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={busy}
+                          className="tbje-remove-group"
+                          onClick={() => removeGroup(group)}
+                        >
+                          <Trash2 aria-hidden="true" />
+                          移除本组
+                        </Button>
+                      </div>
                     </div>
                     <div className="tbje-group-reason">
                       {group.reasons.join(" · ")}
@@ -834,29 +897,31 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                           );
                         })}
                     </div>
-                    {expanded === group.id && (
+                    {expanded?.groupId === group.id && (
                       <div
-                        id={`tbje-mapping-${group.id}`}
+                        id={`tbje-mapping-${group.id}-${expanded.kind}`}
                         className="tbje-group-mapping"
                       >
-                        {([group.tb, group.je] as (PairingFile | undefined)[])
-                          .filter(Boolean)
-                          .map((file) => (
+                        {(() => {
+                          const file =
+                            expanded.kind === "tb" ? group.tb : group.je;
+                          if (!file) return null;
+                          return (
                             <LedgerMappingPanel
-                              key={file!.path}
-                              kind={file!.kind}
-                              inspection={inspects[file!.path]}
-                              mapping={
-                                (mappings[file!.path] ?? {}) as MappingDict
-                              }
-                              onChange={(next) =>
+                              key={file.path}
+                              kind={file.kind}
+                              inspection={inspects[file.path]}
+                              mapping={(mappings[file.path] ?? {}) as MappingDict}
+                              onChange={(next) => {
                                 setMappings((current) => ({
                                   ...current,
-                                  [file!.path]: next,
-                                }))
-                              }
+                                  [file.path]: next,
+                                }));
+                                invalidateResults();
+                              }}
                             />
-                          ))}
+                          );
+                        })()}
                       </div>
                     )}
                   </div>
@@ -963,7 +1028,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                     )}
                                     {(outcome.result.equation.unclassified
                                       ?.length ?? 0) > 0 &&
-                                      ` · ${outcome.result!.equation.unclassified!.length} 个科目待分类`}
+                                      ` · ${outcome.result!.equation.unclassified!.length} 个科目未纳入勾稽`}
                                   </span>
                                 ) : null}
                               </TableCell>

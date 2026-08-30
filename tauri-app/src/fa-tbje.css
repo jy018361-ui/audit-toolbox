@@ -353,6 +353,20 @@
   }
 }
 
+/* 排除项没有资产类别可填，占位符替掉禁用输入框，避免"看得见却改不动"。 */
+.fa-tbje-category-na {
+  color: var(--text-muted);
+}
+
+.fa-tbje-period-warning {
+  margin: 0;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--warning-border, var(--border-soft));
+  border-radius: var(--r-md);
+  background: var(--warning-surface, var(--surface-sunken));
+  color: var(--text);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .fa-tbje-page * {
     scroll-behavior: auto;

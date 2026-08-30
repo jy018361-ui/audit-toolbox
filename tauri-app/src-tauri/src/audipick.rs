@@ -612,7 +612,9 @@ fn sanitize_change_list(value: &mut Value, payload: &Value, kind: &str, key: &st
         // （03 号样例就叫「项目编码、文本/科目编码、文本」），冲突词挡的
         // 是「只有编码的列」，挡不住这一列同时挂两个角色。
         let combined_pair = matches!(role, "accountName" | "accountCode")
-            && combined_account_columns.iter().any(|column| column == suggested)
+            && combined_account_columns
+                .iter()
+                .any(|column| column == suggested)
             && columns_of(if role == "accountName" {
                 "accountCode"
             } else {
@@ -1383,11 +1385,39 @@ mod tests {
         // 03 号样例实测：模型把「过账代码」（取值 40/50）指给借贷方向。
         // 列名冲突词拦一道，样例取值再拦一道——取值不是 S/H、借/贷这类
         // 方向标志的列不能放行。取值真像方向列时不能误伤。
-        let headers = ["凭证编号", "过账代码", "借贷标志", "本币", "总账科目", "会计科目"];
+        let headers = [
+            "凭证编号",
+            "过账代码",
+            "借贷标志",
+            "本币",
+            "总账科目",
+            "会计科目",
+        ];
         let sample = [
-            ["6000000028", "50", "S", "CNY", "1001010000", "库存现金-人民币"],
-            ["6000000029", "50", "H", "CNY", "1001010000", "库存现金-人民币"],
-            ["6000000037", "40", "S", "CNY", "1001010000", "库存现金-人民币"],
+            [
+                "6000000028",
+                "50",
+                "S",
+                "CNY",
+                "1001010000",
+                "库存现金-人民币",
+            ],
+            [
+                "6000000029",
+                "50",
+                "H",
+                "CNY",
+                "1001010000",
+                "库存现金-人民币",
+            ],
+            [
+                "6000000037",
+                "40",
+                "S",
+                "CNY",
+                "1001010000",
+                "库存现金-人民币",
+            ],
         ];
         let payload = json!({
             "headers": headers,
@@ -1401,7 +1431,11 @@ mod tests {
         ]});
         sanitize_change_list(&mut review, &payload, "je", "changes");
         let changes = review["changes"].as_array().expect("changes");
-        assert_eq!(changes.len(), 1, "过账代码与被占用的本币列都要拦：{review:#}");
+        assert_eq!(
+            changes.len(),
+            1,
+            "过账代码与被占用的本币列都要拦：{review:#}"
+        );
         assert_eq!(changes[0]["suggestedColumn"], "借贷标志");
     }
 
@@ -1426,7 +1460,11 @@ mod tests {
         ]});
         sanitize_change_list(&mut review, &payload, "tb", "changes");
         let changes = review["changes"].as_array().expect("changes");
-        assert_eq!(changes.len(), 1, "混写列上编码与名称共列不算冲突：{review:#}");
+        assert_eq!(
+            changes.len(),
+            1,
+            "混写列上编码与名称共列不算冲突：{review:#}"
+        );
     }
 
     #[test]

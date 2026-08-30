@@ -2402,10 +2402,7 @@ mod loan_form_tests {
             "tb",
         );
         assert_eq!(m.get("loanId").and_then(Value::as_str), Some("合同编号"));
-        assert_eq!(
-            m.get("auxiliary").and_then(Value::as_str),
-            Some("辅助核算")
-        );
+        assert_eq!(m.get("auxiliary").and_then(Value::as_str), Some("辅助核算"));
     }
 
     #[test]
@@ -3080,10 +3077,7 @@ mod tests {
     }
 
     /// 引擎统一入口在此映射下的完整证据（口径＋说明＋票数）。
-    fn engine_tb_evidence(
-        table: &Table,
-        m: &Map<String, Value>,
-    ) -> ledger_mapping::SignEvidence {
+    fn engine_tb_evidence(table: &Table, m: &Map<String, Value>) -> ledger_mapping::SignEvidence {
         ledger_mapping::detect_tb_sign_convention(&table.headers, &table.rows, &|role| {
             mapped_names(m, "tb", role)
         })
@@ -3116,7 +3110,10 @@ mod tests {
         );
         let evidence = engine_tb_evidence(&net_only, &net_only_map);
         // 收口前是 None（「余额或发生额未映射齐全」）；降级分支给出明确结论。
-        assert_eq!(evidence.convention, Some(ledger_mapping::SignConvention::Unsigned));
+        assert_eq!(
+            evidence.convention,
+            Some(ledger_mapping::SignConvention::Unsigned)
+        );
         assert!(evidence.note.as_deref().unwrap_or("").contains("本年累计"));
 
         // 完整 TB1（净额＋ytd 借贷分列）：勾稽等式投票，两版历来一致。

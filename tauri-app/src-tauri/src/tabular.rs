@@ -1,4 +1,4 @@
-use calamine::{open_workbook_auto, Data, Reader, Sheets};
+use calamine::{Data, Reader, Sheets, open_workbook_auto};
 use chrono::Local;
 use directories::ProjectDirs;
 use encoding_rs::{GBK, UTF_16BE, UTF_16LE};
@@ -7,7 +7,7 @@ use rust_xlsxwriter::{
     ConditionalFormatFormula, Format, FormatAlign, FormatBorder, Workbook, Worksheet,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -16,16 +16,16 @@ use std::{
     io::BufReader,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant, SystemTime},
 };
 
+use crate::AppError;
 use crate::excel_merger::PauseCheckpoint;
 use crate::ledger_mapping;
-use crate::ledger_mapping::{header_index, normalize_name, SignConvention, SignEvidence};
-use crate::AppError;
+use crate::ledger_mapping::{SignConvention, SignEvidence, header_index, normalize_name};
 
 const TS_MAX_PIVOT_COLUMN_VALUES: usize = 180;
 
@@ -933,11 +933,7 @@ fn pivot_rows(
         .map(|row| {
             let value = row.get(value_index).map(String::as_str).unwrap_or("");
             if agg == "count" {
-                if value.trim().is_empty() {
-                    0.0
-                } else {
-                    1.0
-                }
+                if value.trim().is_empty() { 0.0 } else { 1.0 }
             } else {
                 parse_number(value)
             }
@@ -2618,11 +2614,7 @@ fn normalize_account_text(value: &str) -> String {
 /// 四舍五入到分，并把 -0.0 归一成 0.0——否则 `format_number` 会写出 "-0"。
 fn round_to_cent(value: f64) -> f64 {
     let rounded = (value * 100.0).round() / 100.0;
-    if rounded == 0.0 {
-        0.0
-    } else {
-        rounded
-    }
+    if rounded == 0.0 { 0.0 } else { rounded }
 }
 
 fn round_money(value: f64) -> i64 {
@@ -6051,9 +6043,11 @@ mod tests {
                 .len(),
             2
         );
-        assert!(filter_ledger_rows(&table, &mapping, &["收入".into()], &[])
-            .unwrap()
-            .is_empty());
+        assert!(
+            filter_ledger_rows(&table, &mapping, &["收入".into()], &[])
+                .unwrap()
+                .is_empty()
+        );
     }
     #[test]
     fn legacy_date_forms_convert_to_month() {
@@ -6352,11 +6346,7 @@ mod tests {
             .filter(|row| row[2].contains("已匹配"))
             .map(|row| {
                 let abs: f64 = row[0].trim().parse().unwrap_or(0.0);
-                if row[1] == "负数" {
-                    -abs
-                } else {
-                    abs
-                }
+                if row[1] == "负数" { -abs } else { abs }
             })
             .sum();
         assert!(matched_net.abs() < 0.005);
@@ -6437,11 +6427,13 @@ mod tests {
             2
         );
         assert_eq!(analysis.voucher_type_loose.rows.len(), 2);
-        assert!(analysis
-            .voucher_type_loose
-            .rows
-            .iter()
-            .all(|row| row[1].contains('2')));
+        assert!(
+            analysis
+                .voucher_type_loose
+                .rows
+                .iter()
+                .all(|row| row[1].contains('2'))
+        );
     }
     /// 造一张凭证：`accounts` 是「科目 -> 净额」，`targets` 是其中哪些算目标科目。
     fn voucher_info(
@@ -6926,9 +6918,11 @@ mod tests {
         assert_eq!(target[1][2], "已匹配-冲销");
         let other = by_account("银行存款");
         assert_eq!(other.len(), 2);
-        assert!(other
-            .iter()
-            .all(|row| row[..3].iter().all(String::is_empty)));
+        assert!(
+            other
+                .iter()
+                .all(|row| row[..3].iter().all(String::is_empty))
+        );
     }
     #[test]
     fn je_mark_column_filters_keep_vouchers_whole() {

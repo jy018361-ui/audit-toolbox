@@ -138,12 +138,16 @@ describe("改配对", () => {
     expect(全部).toContain(原五);
   });
 
-  it("选不配对时把这一组的序时账清空并标为待确认", () => {
+  it("选不配对时解除关系但保留原序时账", () => {
     const groups = pairLedgerFiles(样例文件());
     const 第四组 = groups.find((group) => group.label === "4")!;
     const next = reassignJe(groups, 第四组.id, undefined);
     const 新四 = next.find((group) => group.id === 第四组.id)!;
     expect(新四.je).toBeUndefined();
     expect(新四.needsReview).toBe(true);
+    const 待配对 = next.find((group) => group.id === 第四组.je!.path)!;
+    expect(待配对.je?.path).toBe(第四组.je!.path);
+    expect(待配对.tb).toBeUndefined();
+    expect(待配对.needsReview).toBe(true);
   });
 });

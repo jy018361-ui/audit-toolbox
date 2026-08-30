@@ -18,6 +18,7 @@ import { JobProgress } from "@/components/JobProgress";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StepIndicator } from "@/components/StepIndicator";
+import { NumberInput } from "@/components/NumberInput";
 import {
   missingGoldIdentity,
   resolveLedgerPairKinds,
@@ -541,8 +542,27 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       /\.(xlsx?|xlsm|csv|txt|tsv|parquet)$/i.test(p),
     );
     if (!files.length) return;
+    // 新来源开始识别时，上一批文件产生的复核、测算和手工覆盖全部失效。
+    // 利率档位字典属于工具长期配置，保留；逐账户选择属于文件派生状态，清空。
     reviews.clearReview("tb");
     reviews.clearReview("je");
+    setJePath("");
+    setTbPath("");
+    setJe(undefined);
+    setTb(undefined);
+    setJeMapping({});
+    setTbMapping({});
+    setAccountRoles({});
+    setAccountRoleOverrides({});
+    setAccountTierOverrides({});
+    setRateOverrides({});
+    setRows([]);
+    setExpanded("");
+    setResult(undefined);
+    setJob(undefined);
+    setOutputPath("");
+    setReportEnd("");
+    setStep(0);
     setBusy(true);
     setError("");
     setSourceStatus("正在识别文件类型、表头和字段…");
@@ -1377,8 +1397,8 @@ function RateTierCard({
                     </td>
                     <td>
                       <span className="deposit-pct">
-                        <input
-                          type="number"
+                        <NumberInput
+                          label={`${tier.label}的采用利率`}
                           step="0.01"
                           min="0"
                           max="20"
@@ -1387,11 +1407,8 @@ function RateTierCard({
                           }
                           value={depositRateToPercent(applied)}
                           placeholder={tier.autoApply ? "" : "需填"}
-                          onChange={(e) =>
-                            onChange(
-                              tier.key,
-                              depositPercentToRate(e.target.value),
-                            )
+                          onCommit={(text) =>
+                            onChange(tier.key, depositPercentToRate(text))
                           }
                         />
                         <b>%</b>
@@ -1910,8 +1927,8 @@ function Results({
                   </td>
                   <td>
                     <span className="deposit-pct">
-                      <input
-                        type="number"
+                      <NumberInput
+                        label={`${row.account}的年利率`}
                         step="0.01"
                         min="0"
                         max="20"
@@ -1924,9 +1941,9 @@ function Results({
                             : ""
                         }
                         placeholder="需填"
-                        onChange={(e) =>
+                        onCommit={(text) =>
                           onOverride(row.key, {
-                            annualRate: depositPercentToRate(e.target.value),
+                            annualRate: depositPercentToRate(text),
                           })
                         }
                       />

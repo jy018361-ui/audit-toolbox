@@ -196,6 +196,19 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   }, []);
 
   function resetSource(path: string) {
+    llmGeneration.current += 1;
+    signGeneration.current += 1;
+    setLlmBusy(false);
+    setLlmFailed(false);
+    setLlmStatus("");
+    setChanges([]);
+    setPending([]);
+    setResult(undefined);
+    setJob(undefined);
+    setSignReport(undefined);
+    setSignLoading(false);
+    setSignError("");
+    setError("");
     setValueCache({});
     setMenu(undefined);
     patch({
@@ -203,8 +216,12 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       inspect: undefined,
       knownSheets: [],
       sheet: "",
+      headerRow: 0,
+      mapping: EMPTY_MAPPING,
       batches: clearAccountsOnMappingChange(draft.batches),
       columnFilters: {},
+      outputPath: "",
+      outputTouched: false,
     });
   }
 

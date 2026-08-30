@@ -205,8 +205,9 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const [primaryPresetSummary,setPrimaryPresetSummary]=useState<PrimaryPresetSummary>();
   const patch=(value:Partial<KanzhangDraft>)=>setDraft(current=>({...current,...value}));
   const clearAll=()=>{llmGeneration.current+=1;setDraft({...EMPTY,batches:[{name:"批次1",accounts:[]}]});setAccounts([]);setAccountCodes([]);setCodePrefix("");setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setQuery("");setResult(undefined);setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setChanges([]);setPending([]);setLlmStatus("");setLlmBusy(false);setLlmFailed(false);};
+  const resetSource=(inputPath:string)=>{llmGeneration.current+=1;setDraft({...EMPTY,inputPath,batches:[{name:"批次1",accounts:[]}]});setAccounts([]);setAccountCodes([]);setCodePrefix("");setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");setResult(undefined);setJob(undefined);setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setChanges([]);setPending([]);setLlmStatus("");setLlmBusy(false);setLlmFailed(false);setError("");};
   const [dragHover,setDragHover]=useState(false);
-  useEffect(()=>{if(typeof window==="undefined"||!("__TAURI_INTERNALS__" in window))return;let off:()=>void=()=>{};void getCurrentWebview().onDragDropEvent((event)=>{const p=event.payload;if(p.type==="over"||p.type==="enter"){setDragHover(true);}else if(p.type==="drop"){setDragHover(false);if(p.paths.length)patch({inputPath:p.paths[0],inspect:undefined,knownSheets:[],sheet:"",step:1});}else if(p.type==="leave"){setDragHover(false);}}).then((fn)=>{off=fn;});return ()=>off();},[]);
+  useEffect(()=>{if(typeof window==="undefined"||!("__TAURI_INTERNALS__" in window))return;let off:()=>void=()=>{};void getCurrentWebview().onDragDropEvent((event)=>{const p=event.payload;if(p.type==="over"||p.type==="enter"){setDragHover(true);}else if(p.type==="drop"){setDragHover(false);if(p.paths.length)resetSource(p.paths[0]);}else if(p.type==="leave"){setDragHover(false);}}).then((fn)=>{off=fn;});return ()=>off();},[]);
   useEffect(()=>{sessionStorage.setItem(CACHE,JSON.stringify(draft));},[draft]);
   // 没手选过保存位置时，输出框跟着凭证文件和 Sheet 走，显示这次会写到哪。
   // 只在来源变化时重算——默认文件名带时间戳，每次渲染都算会把自己重新触发一遍。
@@ -234,7 +235,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const available=useMemo(()=>pool.filter(value=>!batch.accounts.includes(value)&&!draft.excludes.includes(value)),[pool,batch.accounts,draft.excludes]);
   const truncated=accountTotal>accounts.length;
   const setMap=(key:keyof Mapping,value:string|string[])=>patch({mapping:setKanzhangMapping(draft.mapping,key,value)});
-  async function chooseInput(){const value=await pickPath("file","选择凭证文件",["xlsx","xls","xlsm","csv","txt","parquet"]);if(typeof value==="string")patch({inputPath:value,inspect:undefined,knownSheets:[],sheet:"",step:1});}
+  async function chooseInput(){const value=await pickPath("file","选择凭证文件",["xlsx","xls","xlsm","csv","txt","parquet"]);if(typeof value==="string")resetSource(value);}
   async function inspect(){if(!draft.inputPath){setError("请选择凭证文件。");return;}setBusy(true);setError("");try{await jobStart("kanzhang.inspect",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow});return;}catch(e){setError(kanzhangErrorText(e));setBusy(false);}}
   // 读取任务回来后套用表结构；改走任务通道是为了让大凭证文件的读取能报进度、能取消。
   // 透视默认只按科目名称分行——旧版就是这个口径。之前把公司也塞进行字段，

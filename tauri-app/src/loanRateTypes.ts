@@ -109,6 +109,28 @@ export function loanSpreadBps(spreadCell: string, rateCell: string): number {
   return hit ? Number(hit[1].replace(/\s/g, "")) : 0;
 }
 
+/**
+ * 手工填进 BP 格子的取值。
+ *
+ * 格子空着（也包括小数还没敲完时浏览器给出的空串）一律当 0——BP 是"在基准上
+ * 浮动多少"，没填就是不浮动；留成空值反而会让有效利率算不出来。
+ */
+export function loanBps(text: string): number {
+  const value = Number(text);
+  return text.trim() !== "" && Number.isFinite(value) ? value : 0;
+}
+
+/**
+ * 手工填进利率格子的取值。
+ *
+ * 与 BP 相反，清空利率要回到"这一行还没给利率"（`undefined`），
+ * 界面照旧显示空、浮动行提示"请再次测算"；当成 0% 会悄悄算出一笔零利息。
+ */
+export function loanRateValue(text: string): number | undefined {
+  const value = Number(text);
+  return text.trim() !== "" && Number.isFinite(value) ? value : undefined;
+}
+
 /** 保留行号，未修改的行传 null，不能将预览默认值作为覆盖指令。 */
 export function loanRateOverrides(
   defaults: LoanRateSetting[],

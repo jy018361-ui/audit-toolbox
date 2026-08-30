@@ -323,11 +323,18 @@ fn find_tier(key: &str) -> Option<&'static Tier> {
     RATE_TIERS.iter().find(|tier| tier.key == key)
 }
 
+/// 认不出的档位键一律按活期兜底——活期是货币资金里占比最高、也最保守的一档；
+/// 兜到"自定义"只会让界面上冒出一个用户没选过的大类。
+fn tier_or_demand(key: &str) -> &'static Tier {
+    find_tier(key).unwrap_or(&RATE_TIERS[0])
+}
+
 pub(crate) fn tier_label(key: &str) -> String {
-    match find_tier(key) {
-        Some(tier) if tier.term_label.is_empty() => tier.category_label.to_string(),
-        Some(tier) => format!("{}（{}）", tier.category_label, tier.term_label),
-        None => "自定义（按存款协议）".to_string(),
+    let tier = tier_or_demand(key);
+    if tier.term_label.is_empty() {
+        tier.category_label.to_string()
+    } else {
+        format!("{}（{}）", tier.category_label, tier.term_label)
     }
 }
 
@@ -365,12 +372,13 @@ pub(crate) fn detect_foreign_currency(text: &str) -> Option<&'static str> {
 
 pub(crate) fn suggest_tier(text: &str) -> (&'static str, String) {
     // 外币存款不适用人民币挂牌档位——美元户按 0.05% 人民币活期算会严重低估。
-    // 直接落到"自定义"，逼着用户填对账单上的实际利率。
+    // 大类仍按活期兜底（认不出类型时统一落活期），但 [`resolve_rate`] 不会
+    // 给外币户自动套用人民币挂牌利率，必须由用户填对账单上的实际利率。
     if let Some(code) = detect_foreign_currency(text) {
         return (
-            "custom",
+            "demand",
             format!(
-                "科目为 {} 外币户，人民币挂牌档位不适用",
+                "科目为 {} 外币户，人民币挂牌利率不适用，大类按活期兜底，请按对账单填实际利率",
                 code.to_uppercase()
             ),
         );
@@ -1486,7 +1494,7 @@ fn calculate(
             role,
             tier: tier.into(),
             tier_label: tier_label(tier),
-            category: meta.map(|x| x.category).unwrap_or("custom").into(),
+            category: meta.map(|x| x.category).unwrap_or("demand").into(),
             term_label: meta.map(|x| x.term_label).unwrap_or("").into(),
             tier_matched_by: matched_by,
             rate_source: String::new(),
@@ -1552,7 +1560,7 @@ fn calculate(
         account.tier_label = tier_label(&tier);
         account.category = find_tier(&tier)
             .map(|x| x.category)
-            .unwrap_or("custom")
+            .unwrap_or("demand")
             .into();
         account.term_label = find_tier(&tier).map(|x| x.term_label).unwrap_or("").into();
         account.annual_rate = rate;
@@ -1774,7 +1782,14 @@ fn resolve_rate(
     {
         return done(rate, "自定义档位利率");
     }
-    match auto_rate(&tier) {
+    // 外币户即便落在活期档，也不能自动套人民币挂牌利率（0.05% 会严重低估
+    // 美元存款利息）——留空逼着用户按对账单填。用户手工填的利率在上面已经返回。
+    let foreign = detect_foreign_currency(&format!(
+        "{} {} {}",
+        account.account, account.auxiliary, account.currency
+    ))
+    .is_some();
+    match auto_rate(&tier).filter(|_| !foreign) {
         Some(rate) => done(rate, "活期挂牌默认值"),
         None => ResolvedRate {
             tier,
@@ -2335,13 +2350,8 @@ fn signed(
 pub(crate) fn parse_number(raw: &str) -> Option<f64> {
     let percent = raw.contains('%');
     let normalized = raw.replace('。', ".");
-    ledger_mapping::parse_amount_lenient(&normalized).map(|value| {
-        if percent {
-            value / 100.0
-        } else {
-            value
-        }
-    })
+    ledger_mapping::parse_amount_lenient(&normalized)
+        .map(|value| if percent { value / 100.0 } else { value })
 }
 
 fn date_param(params: &Value, key: &str) -> Result<NaiveDate, AppError> {
@@ -3002,13 +3012,13 @@ mod tests {
             "账面利息收入应取自 520000"
         );
         // 全部落活期档，自动套用 0.05%，所以一定测得出数且没有待填利率。
-        // 三个美元户（USD BOC / USD BOA / HSBC USD）不能套人民币活期挂牌，
-        // 必须落到待填利率，否则会把美元存款利息严重低估。
+        // 三个美元户（USD BOC / USD BOA / HSBC USD）大类同样兜底为活期，
+        // 但不自动套人民币挂牌利率，必须落到待填，否则会把美元存款利息严重低估。
         assert_eq!(summary["missingRateCount"], json!(3));
-        assert_eq!(summary["missingRateTiers"], json!(["自定义（按存款协议）"]));
+        assert_eq!(summary["missingRateTiers"], json!(["活期存款"]));
         assert!(summary["calculatedInterest"].as_f64().unwrap() > 0.0);
         let usd = rows_of(&result, "USD BOA");
-        assert_eq!(usd["tier"], "custom");
+        assert_eq!(usd["tier"], "demand");
         assert!(!usd["rateResolved"].as_bool().unwrap());
         assert!(usd["tierMatchedBy"].as_str().unwrap().contains("USD"));
         let rmb = rows_of(&result, "RMB CMB");
@@ -3218,9 +3228,9 @@ mod tests {
                 "{account} 不该被当成可计息存款"
             );
         }
-        // 10 个外币户（USD/HKD）不套人民币活期挂牌，落到待填利率。
+        // 10 个外币户（USD/HKD）大类兜底为活期，但不套人民币活期挂牌，落到待填利率。
         assert_eq!(summary["missingRateCount"], json!(10));
-        assert_eq!(summary["missingRateTiers"], json!(["自定义（按存款协议）"]));
+        assert_eq!(summary["missingRateTiers"], json!(["活期存款"]));
         // 建行 RMB3250 户：期初 255.21 ＋ 借 143,172.03 － 贷 130,827.78 ＝ 期末 12,599.46。
         let rmb = rows_of(&result, "1002010017");
         assert!((rmb["openingBalance"].as_f64().unwrap() - 255.21).abs() < 0.01);
@@ -3454,6 +3464,33 @@ mod tests {
         assert_eq!(key("协定存款账户"), "agreement");
         assert_eq!(key("大额存单"), "cd_1y");
         assert_eq!(key("3年期大额存单"), "cd_3y");
+    }
+
+    /// 外币户：大类同样兜底为活期（认不出类型一律落活期），
+    /// 但人民币挂牌利率不会被自动套用，必须由用户按对账单填。
+    #[test]
+    fn foreign_currency_falls_back_to_demand_but_never_auto_fills_rmb_rate() {
+        let (tier, reason) = suggest_tier("100332 USD BOC-CPCSC-SH");
+        assert_eq!(tier, "demand");
+        assert!(reason.contains("USD") && reason.contains("活期"));
+        let row = AccountRow {
+            account: "100332 USD BOC-CPCSC-SH".into(),
+            tier: "demand".into(),
+            ..blank_row()
+        };
+        let resolved = resolve_rate(&row, None, None);
+        assert!(!resolved.resolved && resolved.rate == 0.0);
+        assert_eq!(resolved.source, "需填写实际利率");
+        // 人民币户不受影响，仍自动套活期挂牌。
+        let rmb = AccountRow {
+            account: "100201 RMB CMB-CPCSC-SH".into(),
+            tier: "demand".into(),
+            ..blank_row()
+        };
+        assert!(resolve_rate(&rmb, None, None).resolved);
+        // 认不出的档位键也回落活期，不再冒出"自定义"。
+        assert_eq!(RATE_TIERS[0].key, "demand", "第一档必须是活期，兜底靠它");
+        assert_eq!(tier_label("不存在的档位"), "活期存款");
     }
 
     #[test]
@@ -3922,8 +3959,7 @@ mod tests {
     /// 前端据此渲染中文角色名，不再自持会过期的对照表。
     #[test]
     fn inspect下发引擎角色标签表() {
-        let dir =
-            std::env::temp_dir().join(format!("deposit-role-labels-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("deposit-role-labels-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("tb.xlsx");
         write_fixture(
@@ -3963,7 +3999,9 @@ mod tests {
                 );
                 assert_eq!(
                     label,
-                    ledger_mapping::role_of(kind, name).map(|x| x.label).unwrap_or(""),
+                    ledger_mapping::role_of(kind, name)
+                        .map(|x| x.label)
+                        .unwrap_or(""),
                     "标签必须取自引擎 Role 表: {name}"
                 );
             }
@@ -4010,7 +4048,15 @@ mod tests {
                 "借方金额",
                 "贷方金额",
             ],
-            vec!["2025-01-15", "记-1", "1002", "银行存款", "收款", "100000", "0"],
+            vec![
+                "2025-01-15",
+                "记-1",
+                "1002",
+                "银行存款",
+                "收款",
+                "100000",
+                "0",
+            ],
             vec!["合计", "", "", "", "合计", "100000", "0"],
         ];
         write_fixture(&je_path, &je_refs);
@@ -4064,7 +4110,12 @@ mod tests {
         write_fixture(
             &tb_path,
             &[
-                vec!["科目编码", "期末余额借方", "本期借方发生额", "本期贷方发生额"],
+                vec![
+                    "科目编码",
+                    "期末余额借方",
+                    "本期借方发生额",
+                    "本期贷方发生额",
+                ],
                 vec!["1002", "2000", "1000", "0"],
             ],
         );
@@ -4137,8 +4188,24 @@ mod tests {
                 "借方金额",
                 "贷方金额",
             ],
-            vec!["2025-01-15", "记-1", "1002", "银行存款", "收款", "25000", "0"],
-            vec!["2025-02-15", "记-2", "1002", "银行存款", "收款", "25000", "0"],
+            vec![
+                "2025-01-15",
+                "记-1",
+                "1002",
+                "银行存款",
+                "收款",
+                "25000",
+                "0",
+            ],
+            vec![
+                "2025-02-15",
+                "记-2",
+                "1002",
+                "银行存款",
+                "收款",
+                "25000",
+                "0",
+            ],
         ];
         write_fixture(&je_path, &je_refs);
         let tb = inspect(
@@ -4159,8 +4226,14 @@ mod tests {
             "tbSource": {"inputPath": tb_path.to_string_lossy()},
             "tbMapping": tb["suggestedMapping"]
         });
-        let err = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel.clone(), &pause)
-            .unwrap_err();
+        let err = run_job(
+            "deposit.preview",
+            params,
+            &|_, _, _, _| {},
+            cancel.clone(),
+            &pause,
+        )
+        .unwrap_err();
         assert_eq!(err.code, "MAPPING_INCOMPLETE");
         assert!(
             err.user_message.contains("期初"),

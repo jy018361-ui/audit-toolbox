@@ -31,7 +31,9 @@ import { errorText } from "@/lib/errors";
 import {
   DEFAULT_ENTITY,
   resolveLedgerPairKinds,
+  resolveRoleLabels,
   reviewLedgerSourceClassification,
+  type EngineRoleLabels,
 } from "@/ledgerMapping";
 import {
   describeForm,
@@ -40,6 +42,7 @@ import {
   roleRequirement,
   useLedgerForms,
 } from "@/ledgerForms";
+import "./fx-audit.css";
 import "./fa-tbje.css";
 
 type Kind = "tb" | "je";
@@ -117,7 +120,8 @@ export function suggestFaAccount(account: string): Assignment {
         /累计折旧|固定资产|accumulated\s+depreciation|property[,\s]*plant\s*(and|&)\s*equipment|ppe/gi,
         "",
       )
-      .replace(/^[-—:：\s]+|[-—:：\s]+$/g, "") || "未分类";
+      .replace(/^[-—:：\s]+|[-—:：\s]+$/g, "") ||
+    (role === "excluded" ? "" : "固定资产");
   return { account, role, category };
 }
 
@@ -126,7 +130,8 @@ export function faAssignmentsForEntities(
   entities: string[],
   current: Assignment[],
 ): Assignment[] {
-  return entities.flatMap((entity) =>
+  const effectiveEntities = entities.length ? entities : [DEFAULT_ENTITY];
+  return effectiveEntities.flatMap((entity) =>
     accounts.map(
       (account) =>
         current.find(
@@ -166,8 +171,6 @@ export function FaTbJePage() {
   const [reportEnd, setReportEnd] = useState(
     `${new Date().getFullYear()}-12-31`,
   );
-  const [tbFixedEntity, setTbFixedEntity] = useState("");
-  const [jeFixedEntity, setJeFixedEntity] = useState("");
   const [outputPath, setOutputPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -213,25 +216,19 @@ export function FaTbJePage() {
     ],
     [inspects],
   );
-  const needsTbFixedEntity = Boolean(
-    inspects.tb && inspects.tb.entities.length === 0,
-  );
-  const needsJeFixedEntity = Boolean(
-    inspects.je && inspects.je.entities.length === 0,
-  );
-  // 主体列缺失时允许按公共默认主体继续，手工填写只是覆盖默认值。
+  // 主体是公共映射字段；源表没有主体列时由引擎统一使用默认主体。
   const entitiesReady = Boolean(inspects.tb && inspects.je);
   const entities = useMemo(
-    () =>
-      [
+    () => {
+      const detected = [
         ...new Set([
           ...(inspects.tb?.entities ?? []),
           ...(inspects.je?.entities ?? []),
-          tbFixedEntity.trim(),
-          jeFixedEntity.trim(),
         ]),
-      ].filter(Boolean),
-    [inspects, tbFixedEntity, jeFixedEntity],
+      ].filter(Boolean);
+      return detected.length ? detected : [DEFAULT_ENTITY];
+    },
+    [inspects],
   );
   const missingMappings = {
     tb: faTbJeMissingMappings("tb", mappings.tb),
@@ -401,16 +398,12 @@ export function FaTbJePage() {
           [item.kind]: item.inspected.suggestedMapping,
         }));
         reviews.clearReview(item.kind);
-        if (item.inspected.entities?.length) {
-          if (item.kind === "tb") setTbFixedEntity("");
-          else setJeFixedEntity("");
-        }
         if (item.kind === "je")
           setOutputPath((current) => current || defaultOutput(item.path));
       }
       setSourceStatus(
         recognized.length
-          ? `${recognized.length} 个文件完成脚本识别与${llmFallbacks ? "可用时的" : "固定资产专用"} LLM 复核：${recognized
+          ? `${recognized.length} 个文件完成公共账表引擎识别与${llmFallbacks ? "可用时的" : ""} LLM 复核：${recognized
               .map(
                 ({ kind, path }) =>
                   `${kind.toUpperCase()}「${fileName(path)}」`,
@@ -429,8 +422,6 @@ export function FaTbJePage() {
     setPaths((current) => ({ ...current, [kind]: "" }));
     setInspects((current) => ({ ...current, [kind]: undefined }));
     setMappings((current) => ({ ...current, [kind]: {} }));
-    if (kind === "tb") setTbFixedEntity("");
-    else setJeFixedEntity("");
     setAssignments([]);
     setResult(undefined);
     setSourceStatus(`${kind.toUpperCase()} 已清除，请重新上传。`);
@@ -485,8 +476,8 @@ export function FaTbJePage() {
       jeMapping: mappings.je,
       accountAssignments: assignments,
       reportEnd,
-      tbFixedEntity: tbFixedEntity.trim() || DEFAULT_ENTITY,
-      jeFixedEntity: jeFixedEntity.trim() || DEFAULT_ENTITY,
+      tbFixedEntity: DEFAULT_ENTITY,
+      jeFixedEntity: DEFAULT_ENTITY,
       outputPath,
     };
   }
@@ -580,7 +571,7 @@ export function FaTbJePage() {
           },
           {
             key: "accounts",
-            label: "科目分类",
+            label: "科目复核（可选）",
             disabled: !mappingsReady || !entitiesReady,
           },
           { key: "output", label: "预览与导出", disabled: !assignmentsReady },
@@ -591,202 +582,76 @@ export function FaTbJePage() {
       <ErrorBox error={error} onDismiss={() => setError("")} />
 
       {step === 1 && (
-        <Card>
-          <CardHeader className="fa-tbje-card-head">
-            <div>
-              <CardTitle>上传并确认账表来源</CardTitle>
-              <p>
-                可同时拖入 1 份 TB 和 1 份完整期间
-                JE，公共引擎自动识别文件类型。
+        <div className="fa-tbje-step-stack">
+          <Card>
+            <CardHeader>
+              <CardTitle>上传审计数据</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="fx-hint">
+                TB 和序时账使用同一入口，可一次拖入两个文件；公共账表引擎自动判定类型、标题行和字段映射。
               </p>
-            </div>
-            <Badge variant={paths.tb && paths.je ? "default" : "outline"}>
-              {[paths.tb, paths.je].filter(Boolean).length}/2 已就绪
-            </Badge>
-          </CardHeader>
-          <CardContent className="form-stack">
             <FileDropInput
               containerRef={uploadDropRef}
-              value=""
+              value={(["tb", "je"] as const)
+                .filter((kind) => paths[kind])
+                .map((kind) => `${kind.toUpperCase()}：${fileName(paths[kind])}`)
+                .join("；")}
               disabled={busy}
               placeholder={
                 busy ? "正在识别文件…" : "拖放或选择 TB、JE 文件（可同时选择）"
               }
               onBrowse={() => void browse()}
               onDragStateChange={() => {}}
+              onClear={() => {
+                clearSource("tb");
+                clearSource("je");
+                setSourceStatus("");
+              }}
             />
             {sourceStatus && (
-              <p className="fa-tbje-live-status" aria-live="polite">
+              <p className="fx-source-status" aria-live="polite">
                 {sourceStatus}
               </p>
             )}
-            {(paths.tb || paths.je) && (
-              <div className="fa-tbje-source-grid">
-                {(["tb", "je"] as const)
-                  .filter((kind) => paths[kind] && inspects[kind])
-                  .map((kind) => {
-                    const inspected = inspects[kind];
-                    const path = paths[kind];
-                    const needsFixed =
-                      kind === "tb" ? needsTbFixedEntity : needsJeFixedEntity;
-                    const fixedValue =
-                      kind === "tb" ? tbFixedEntity : jeFixedEntity;
-                    return (
-                      <section
-                        className={`fa-tbje-source-card ${path ? "ready" : ""}`}
-                        key={kind}
-                      >
-                        <div className="fa-tbje-source-title">
-                          <div>
-                            <span>{kind.toUpperCase()}</span>
-                            <strong>
-                              {kind === "tb" ? "科目余额表" : "序时账"}
-                            </strong>
-                          </div>
-                          <Badge variant={path ? "secondary" : "outline"}>
-                            {path ? "已识别" : "待上传"}
-                          </Badge>
-                        </div>
-                        {path && inspected ? (
-                          <>
-                            <p className="fa-tbje-file-name" title={path}>
-                              {fileName(path)}
-                            </p>
-                            <div className="fa-tbje-source-facts">
-                              <span>
-                                {inspected.rowCount.toLocaleString("zh-CN")} 行
-                              </span>
-                              <span>{inspected.headers.length} 列</span>
-                              <span>
-                                {inspected.entities.length
-                                  ? `${inspected.entities.length} 个主体`
-                                  : "无主体列"}
-                              </span>
-                            </div>
-                            <div className="fa-tbje-source-controls">
-                              <label>
-                                Sheet
-                                <select
-                                  name={`${kind}-sheet`}
-                                  autoComplete="off"
-                                  disabled={busy}
-                                  value={inspected.sheet}
-                                  onChange={(event) =>
-                                    void reinspect(kind, {
-                                      sheet: event.target.value,
-                                      headerRow: 0,
-                                      headerDepth: 0,
-                                    })
-                                  }
-                                >
-                                  {(inspected.sheets.length
-                                    ? inspected.sheets
-                                    : [inspected.sheet]
-                                  ).map((sheet) => (
-                                    <option key={sheet}>{sheet}</option>
-                                  ))}
-                                </select>
-                              </label>
-                              <label>
-                                标题行
-                                <input
-                                  name={`${kind}-header-row`}
-                                  autoComplete="off"
-                                  disabled={busy}
-                                  type="number"
-                                  min={1}
-                                  value={inspected.headerRow}
-                                  onChange={(event) =>
-                                    void reinspect(kind, {
-                                      headerRow: Number(event.target.value),
-                                    })
-                                  }
-                                />
-                              </label>
-                              <label>
-                                表头层数
-                                <select
-                                  name={`${kind}-header-depth`}
-                                  autoComplete="off"
-                                  disabled={busy}
-                                  value={inspected.headerDepth}
-                                  onChange={(event) =>
-                                    void reinspect(kind, {
-                                      headerDepth: Number(event.target.value),
-                                    })
-                                  }
-                                >
-                                  <option value={1}>1 层</option>
-                                  <option value={2}>2 层</option>
-                                </select>
-                              </label>
-                            </div>
-                            {inspected.headerDetection.needsConfirmation && (
-                              <p className="fa-tbje-inline-warning">
-                                标题候选得分接近，请核对标题行。
-                              </p>
-                            )}
-                            {needsFixed ? (
-                              <label className="fa-tbje-fixed-entity">
-                                固定主体名称（选填）
-                                <input
-                                  name={`${kind}-fixed-entity`}
-                                  autoComplete="organization"
-                                  value={fixedValue}
-                                  placeholder="例如：上海示例公司…"
-                                  onChange={(event) =>
-                                    kind === "tb"
-                                      ? setTbFixedEntity(event.target.value)
-                                      : setJeFixedEntity(event.target.value)
-                                  }
-                                />
-                                <small>
-                                  该账表没有主体列。主体是选填项，留空按「
-                                  {DEFAULT_ENTITY}」处理。
-                                </small>
-                              </label>
-                            ) : (
-                              <p className="fa-tbje-entity-note">
-                                主体：{inspected.entities.join("、")}
-                              </p>
-                            )}
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              disabled={busy}
-                              onClick={() => clearSource(kind)}
-                            >
-                              清除并重选
-                            </Button>
-                          </>
-                        ) : (
-                          <p className="fa-tbje-empty-source">
-                            尚未识别到{kind.toUpperCase()}
-                            ，可继续拖入或选择文件。
-                          </p>
-                        )}
-                      </section>
-                    );
-                  })}
-              </div>
-            )}
-            {needsTbFixedEntity && needsJeFixedEntity && (
-              <Button
-                type="button"
-                variant="secondary"
-                disabled={!tbFixedEntity.trim()}
-                onClick={() => setJeFixedEntity(tbFixedEntity)}
-              >
-                TB 与 JE 使用同一主体
-              </Button>
-            )}
+            </CardContent>
+          </Card>
+          {(paths.tb || paths.je) && (
+            <div className="fx-source-grid">
+              {(["je", "tb"] as const).map((kind) => (
+                <div className={`fx-source-slot fx-source-slot-${kind}`} key={kind}>
+                  {paths[kind] && inspects[kind] ? (
+                    <FaLedgerSourceCard
+                      kind={kind}
+                      path={paths[kind]}
+                      inspection={inspects[kind]!}
+                      disabled={busy}
+                      onClear={() => clearSource(kind)}
+                      onHeaderChange={(over) => void reinspect(kind, over)}
+                    />
+                  ) : (
+                    <Card className="fx-source-empty">
+                      <CardHeader>
+                        <CardTitle>
+                          {kind === "tb" ? "TB 科目余额表" : "JE 序时账"}
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <p>未识别到 {kind.toUpperCase()}，请继续上传。</p>
+                      </CardContent>
+                    </Card>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          <Card>
+            <CardContent>
             <div className="fa-tbje-step-actions">
               <span>
                 {!paths.tb || !paths.je
                   ? "请补齐 TB 与 JE。"
-                  : !entitiesReady
-                    ? "请确认无主体列账表的固定主体。"
-                    : "文件与主体已就绪。"}
+                  : "文件已就绪，主体按映射字段自动读取。"}
               </span>
               <Button
                 disabled={!paths.tb || !paths.je || !entitiesReady || busy}
@@ -795,8 +660,9 @@ export function FaTbJePage() {
                 继续核对字段
               </Button>
             </div>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        </div>
       )}
 
       {step === 2 && (
@@ -820,9 +686,14 @@ export function FaTbJePage() {
                       headers: inspects.tb.headers,
                       preview: inspects.tb.preview,
                       mapping: mappings.tb,
-                      labels: TB_LABELS,
+                      labels: resolveRoleLabels(
+                        inspects.tb.roles,
+                        TB_LABELS,
+                      ),
                       onApplied: (next) =>
                         setMappings((value) => ({ ...value, tb: next })),
+                      missingAfter: (mapping) =>
+                        faTbJeMissingMappings("tb", mapping),
                     }
                   : undefined,
                 je: inspects.je
@@ -830,9 +701,14 @@ export function FaTbJePage() {
                       headers: inspects.je.headers,
                       preview: inspects.je.preview,
                       mapping: mappings.je,
-                      labels: JE_LABELS,
+                      labels: resolveRoleLabels(
+                        inspects.je.roles,
+                        JE_LABELS,
+                      ),
                       onApplied: (next) =>
                         setMappings((value) => ({ ...value, je: next })),
+                      missingAfter: (mapping) =>
+                        faTbJeMissingMappings("je", mapping),
                     }
                   : undefined,
               })
@@ -846,6 +722,7 @@ export function FaTbJePage() {
                   kind={kind}
                   headers={inspects[kind]!.headers}
                   rows={inspects[kind]!.preview}
+                  engineRoles={inspects[kind]!.roles}
                   mapping={mappings[kind]}
                   missing={missingMappings[kind]}
                   busy={reviews.reviewing[kind] || busy}
@@ -870,9 +747,9 @@ export function FaTbJePage() {
             </span>
             <Button
               disabled={!mappingsReady || reviewing || busy}
-              onClick={() => setStep(3)}
+              onClick={() => setStep(assignmentsReady ? 4 : 3)}
             >
-              继续确认科目
+              {assignmentsReady ? "使用自动分类并继续" : "复核科目分类"}
             </Button>
           </div>
         </div>
@@ -882,9 +759,9 @@ export function FaTbJePage() {
         <Card>
           <CardHeader className="fa-tbje-card-head">
             <div>
-              <CardTitle>确认固定资产科目与资产类别</CardTitle>
+              <CardTitle>复核固定资产科目与资产类别</CardTitle>
               <p>
-                默认只显示公共引擎识别后的固定资产候选；可搜索或切换筛选查看全部科目。
+                系统已根据映射后的科目编码和名称自动分类。本步仅用于调整例外，默认只显示固定资产候选。
               </p>
             </div>
             <div className="fa-tbje-counts">
@@ -1121,7 +998,7 @@ export function FaTbJePage() {
                   </small>
                 </div>
                 <div>
-                  <span>科目分类</span>
+                  <span>自动科目分类</span>
                   <strong>
                     {roleCounts.cost} 个原值 · {roleCounts.depreciation} 个折旧
                   </strong>
@@ -1163,7 +1040,7 @@ export function FaTbJePage() {
               </label>
               <div className="fa-tbje-step-actions">
                 <Button variant="secondary" onClick={() => setStep(3)}>
-                  返回科目分类
+                  返回科目复核
                 </Button>
                 <span>
                   {outputPath
@@ -1202,6 +1079,101 @@ export function FaTbJePage() {
   );
 }
 
+function FaLedgerSourceCard(props: {
+  kind: Kind;
+  path: string;
+  inspection: Inspection;
+  disabled: boolean;
+  onClear: () => void;
+  onHeaderChange: (
+    over: Partial<Pick<Inspection, "sheet" | "headerRow" | "headerDepth">>,
+  ) => void;
+}) {
+  const { kind, inspection } = props;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>
+          已识别：{kind === "tb" ? "TB 科目余额表" : "JE 序时账"}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="fx-hint">
+          {kind === "tb"
+            ? "期初、期末余额和年末勾稽的数据源"
+            : "新增、处置、折旧及对方科目的完整期间数据源"}
+        </p>
+        <div className="fx-detected-file">
+          <span title={props.path}>{props.path}</span>
+          <button type="button" disabled={props.disabled} onClick={props.onClear}>
+            移除
+          </button>
+        </div>
+        <div className="fx-source-meta">
+          <span>{inspection.rowCount.toLocaleString("zh-CN")} 行</span>
+          <label>
+            Sheet
+            <select
+              name={`${kind}-sheet`}
+              autoComplete="off"
+              disabled={props.disabled}
+              value={inspection.sheet}
+              onChange={(event) =>
+                props.onHeaderChange({
+                  sheet: event.target.value,
+                  headerRow: 0,
+                  headerDepth: 0,
+                })
+              }
+            >
+              {(inspection.sheets.length ? inspection.sheets : [inspection.sheet]).map(
+                (sheet) => <option key={sheet}>{sheet}</option>,
+              )}
+            </select>
+          </label>
+          <label>
+            标题行
+            <input
+              name={`${kind}-header-row`}
+              autoComplete="off"
+              disabled={props.disabled}
+              type="number"
+              min={1}
+              value={inspection.headerRow}
+              onChange={(event) =>
+                props.onHeaderChange({ headerRow: Number(event.target.value) })
+              }
+            />
+          </label>
+          <label>
+            表头层数
+            <select
+              name={`${kind}-header-depth`}
+              autoComplete="off"
+              disabled={props.disabled}
+              value={inspection.headerDepth}
+              onChange={(event) =>
+                props.onHeaderChange({ headerDepth: Number(event.target.value) })
+              }
+            >
+              <option value={1}>1层</option>
+              <option value={2}>2层</option>
+            </select>
+          </label>
+          {inspection.headerDetection.needsConfirmation && (
+            <strong className="fx-warning">标题候选得分接近，请确认标题行</strong>
+          )}
+        </div>
+        <p className="fa-tbje-entity-note">
+          {inspection.entities.length
+            ? `主体：${inspection.entities.join("、")}`
+            : `未检出主体列，按公共引擎的「${DEFAULT_ENTITY}」处理。`}
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 /**
  * TB／JE 字段映射面板：下拉分组与必填标记都跟着**当前命中的型**走
  * （TB 六型／JE 三型，定义在 Rust，由 `ledger.forms` 下发）。
@@ -1210,13 +1182,18 @@ function FaTbJeMappingPanel(props: {
   kind: Kind;
   headers: string[];
   rows: string[][];
+  /** 引擎随识别结果下发的角色标签（deposit.inspect_* 响应）；未下发时回落本地标签表。 */
+  engineRoles?: EngineRoleLabels;
   mapping: Mapping;
   missing: string[];
   busy: boolean;
   note: string;
   onChange: (next: MappingDict) => void;
 }) {
-  const labels = props.kind === "tb" ? TB_LABELS : JE_LABELS;
+  const labels = resolveRoleLabels(
+    props.engineRoles,
+    props.kind === "tb" ? TB_LABELS : JE_LABELS,
+  );
   const roles = Object.entries(labels);
   const forms = useLedgerForms(props.kind);
   const match = forms.length

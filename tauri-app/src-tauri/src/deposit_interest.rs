@@ -17,7 +17,7 @@ use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Formula, Workbook, Work
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -655,6 +655,32 @@ fn role_for(account: &str, params: &Value) -> String {
     suggested.to_owned()
 }
 
+/// 科目确认页上的存款类型覆盖。全文因 TB/JE 拼法不同而对不上时按科目编码
+/// 回退；没有人工覆盖时仍按科目名称/辅助核算预判，无法判断则默认活期。
+fn tier_for<'a>(account: &str, auxiliary: &str, params: &'a Value) -> (&'a str, String) {
+    let overrides = params
+        .get("accountTierOverrides")
+        .and_then(Value::as_object);
+    let selected = overrides
+        .and_then(|values| values.get(account))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            let code = account_code(account);
+            overrides.and_then(|values| {
+                values.iter().find_map(|(candidate, tier)| {
+                    (account_code(candidate) == code)
+                        .then(|| tier.as_str())
+                        .flatten()
+                })
+            })
+        });
+    if let Some(tier) = selected.filter(|tier| find_tier(tier).is_some()) {
+        return (tier, "用户在科目分类中指定存款类型".into());
+    }
+    let (tier, reason) = suggest_tier(&format!("{account} {auxiliary}"));
+    (tier, reason)
+}
+
 fn is_deposit_role(role: &str) -> bool {
     matches!(role, "deposit" | "other_monetary" | "cash_on_hand")
 }
@@ -815,6 +841,7 @@ fn drop_column_conflicts(
     }
 }
 
+/// 一个角色映射到的列名集合（单列是字符串、多列是数组，两种形状都收）。
 fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candidate>> {
     let numeric = table
         .headers
@@ -946,6 +973,25 @@ fn candidate_json(all: &BTreeMap<String, Vec<Candidate>>) -> Value {
     )
 }
 
+/// inspect 响应里的角色标签表：引擎当前认识的全部角色（标准名＋中文标签）。
+///
+/// 前端要把 `mappingCandidates`／`suggestedMapping` 里的英文标准名渲染成中文，
+/// 此前只能自持一份「标准名→中文」对照表——引擎每加一个角色它就静默过期。
+/// 这里把 [`ledger_mapping::roles`] 的全量快照直接下发，标签与
+/// `missing_required` 返回的 `MissingRole.label` 同源（同一张 Role 表的
+/// label 字段），本模块不自抄一份。注意两点口径：
+///
+/// 1. **全量不筛选**：本工具识别时会滤掉原币/币种线索角色，但标签表只做
+///    查询用，多发几个用不到的角色无害，少了才是坑；
+/// 2. 本工具自扩的 auxiliary／quantity／period 不在引擎表里、没有引擎标签，
+///    不混进来——需要展示的由前端按自己的扩展角色处理。
+fn engine_role_labels(kind: &str) -> Vec<Value> {
+    ledger_mapping::roles(kind)
+        .iter()
+        .map(|role| json!({ "name": role.name, "label": role.label }))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // 命令入口
 // ---------------------------------------------------------------------------
@@ -1075,7 +1121,7 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     let mapping = candidates
         .iter()
         .filter_map(|(role, choices)| {
-            if role == "accountName" || role == "account" {
+            if ledger_mapping::role_of(kind, role).is_some_and(|item| item.multi) {
                 // 首选列按常规阈值收下，附加列才要求高置信度。
                 let columns = choices
                     .iter()
@@ -1095,6 +1141,9 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     let mut mapping = mapping;
     refine_layout(&table, kind, &mut mapping);
     drop_column_conflicts(kind, &candidates, &mut mapping);
+    // 合并科目列的兜底与汇兑损益共用同一份（判定在公共引擎、套用在 fx 侧），
+    // 存款利息不再自持一份近似实现。
+    crate::fx::fill_combined_account_column(kind, &table, &mut mapping);
     let mapping = mapping;
     let accounts = distinct_accounts(&table, &mapping);
     let entities = distinct_values(&table, &mapping, "entity");
@@ -1116,10 +1165,17 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         "preview": table.rows.iter().take(8).collect::<Vec<_>>(),
         "rowCount": table.rows.len(),
         "mappingCandidates": candidate_json(&candidates), "suggestedMapping": mapping,
+        // 角色标签表与映射建议并列下发：前端用它把英文标准名渲染成中文，
+        // 不再自持会过期的对照表（标签与引擎 MissingRole.label 同源）。
+        "roles": engine_role_labels(kind),
         "entities": entities, "accounts": accounts,
         "suggestedAccountRoles": accounts.iter().map(|account|
             (account.clone(), Value::String(suggest_account_role(account).into()))
         ).collect::<Map<_, _>>(),
+        "suggestedAccountTiers": accounts.iter().map(|account| {
+            let (tier, _) = suggest_tier(account);
+            (account.clone(), Value::String(tier.into()))
+        }).collect::<Map<_, _>>(),
         "dataYears": years,
         "suggestedBalanceSheetDate": years.last().map(|year| format!("{year}-12-31"))
     }))
@@ -1297,6 +1353,10 @@ fn calculate(
     let (basis_key, basis_label) = day_basis(params);
 
     let (tb, tb_map) = table_for(params, "tbSource", "tbMapping")?;
+    // 必填校验放在一切计算之前：缺金标身份就报错，不沉默算错账。
+    // 有序时账时年初余额可缺（倒推），与前端判定同口径。
+    let has_je = params.get("jeSource").is_some_and(|value| !value.is_null());
+    require_mappings("tb", &tb_map, has_je)?;
     let mut accounts: Vec<AccountRow> = vec![];
     let mut booked_interest_rows: Vec<Value> = vec![];
     let mut booked_interest = 0.0;
@@ -1315,6 +1375,31 @@ fn calculate(
             .filter_map(|index| tb.headers.get(index).cloned())
             .collect()
     });
+    // TB 余额的符号口径与「整列是否自带符号」全表各判一次，判据与汇兑损益、
+    // 借款利息、FA TBJE 共用——此前这里直接取净额原值、完全不看方向列，
+    // 贷方余额的货币资金科目（如银行透支）会少一个负号。
+    let tb_columns = |role: &str| -> Vec<String> {
+        column_indexes(&tb, &tb_map, role)
+            .into_iter()
+            .filter_map(|index| tb.headers.get(index).cloned())
+            .collect()
+    };
+    let tb_convention =
+        ledger_mapping::detect_tb_sign_convention(&tb.headers, &tb.rows, &tb_columns)
+            .convention
+            .unwrap_or(ledger_mapping::SignConvention::Unsigned);
+    let opening_self_signed = ledger_mapping::balance_self_signed(
+        &tb.headers,
+        &tb.rows,
+        &tb_columns,
+        "openingFunctional",
+    );
+    let closing_self_signed = ledger_mapping::balance_self_signed(
+        &tb.headers,
+        &tb.rows,
+        &tb_columns,
+        "closingFunctional",
+    );
     for (row_index, row) in tb.rows.iter().enumerate() {
         if !tb_leaf[row_index] {
             continue;
@@ -1373,24 +1458,24 @@ fn calculate(
         let auxiliary = cell_text(&tb, row, &tb_map, "auxiliary");
         let currency = cell_text(&tb, row, &tb_map, "currency");
         // 货币资金是借方余额资产，净额一律按"借方－贷方"。
-        let opening = signed(
+        let opening = tb_balance(
             &tb,
             row,
             &tb_map,
-            "openingFunctionalDebit",
-            "openingFunctionalCredit",
-        )
-        .or_else(|| cell_number(&tb, row, &tb_map, "openingFunctionalAmount"));
-        let closing = signed(
+            "openingFunctional",
+            tb_convention,
+            opening_self_signed,
+        );
+        let closing = tb_balance(
             &tb,
             row,
             &tb_map,
-            "closingFunctionalDebit",
-            "closingFunctionalCredit",
+            "closingFunctional",
+            tb_convention,
+            closing_self_signed,
         )
-        .or_else(|| cell_number(&tb, row, &tb_map, "closingFunctionalAmount"))
         .unwrap_or(0.0);
-        let (tier, matched_by) = suggest_tier(&format!("{account} {auxiliary}"));
+        let (tier, matched_by) = tier_for(&account, &auxiliary, params);
         let meta = find_tier(tier);
         accounts.push(AccountRow {
             key: account_key(&entity, &account, &auxiliary),
@@ -1732,6 +1817,8 @@ fn monthly_movements(
             None,
         ));
     }
+    // 序时账只在提供时校验（与前端一致）；年初余额的放松只对 TB 一侧有意义。
+    require_mappings("je", &je_map, false)?;
     let date_index = column_index(&je, &je_map, "date").ok_or_else(|| {
         error(
             "MAPPING_INCOMPLETE",
@@ -1762,12 +1849,25 @@ fn monthly_movements(
             .push(index);
     }
     let scheme = detect_amount_scheme(&je, &je_map)?;
+    // 垃圾行剔除走引擎一份规则（`ledger_junk_mask`）：合计行、表尾手工草稿、
+    // 游离数字行在此显式挡掉。此前这些行进不来靠的是「日期读不出／科目对不上」
+    // 的间接效果——哪天循环放宽了其中一个条件它们就会漏进来，把合计翻倍。
+    // 掩码语义是 `true` 表示该行要算。
+    let keep = ledger_mapping::ledger_junk_mask(&je.headers, &je.rows, &|role| {
+        column_indexes(&je, &je_map, role)
+            .into_iter()
+            .filter_map(|index| je.headers.get(index).cloned())
+            .collect()
+    });
     let mut series: MonthlySeries = accounts
         .iter()
         .map(|account| (account.key.clone(), [(0.0, 0.0); 12]))
         .collect();
     let mut matched = 0usize;
-    for row in &je.rows {
+    for (row_index, row) in je.rows.iter().enumerate() {
+        if !keep.get(row_index).copied().unwrap_or(true) {
+            continue;
+        }
         let Some(date) = row.get(date_index).and_then(|value| parse_date(value)) else {
             continue;
         };
@@ -1976,6 +2076,124 @@ fn account_key(entity: &str, account: &str, auxiliary: &str) -> String {
 // 取数辅助
 // ---------------------------------------------------------------------------
 
+/// 把映射里已填的角色收成集合，供引擎的必填判定用。
+/// 历史保存的映射把科目编码与名称合在一个 `account` 里，判定时一并认——
+/// 与前端 `depositMissingRequired` 的兼容口径是同一条。
+fn mapped_roles(mapping: &Map<String, Value>) -> HashSet<&str> {
+    let mut out = HashSet::new();
+    for (role, value) in mapping {
+        let filled = match value {
+            Value::String(one) => !one.trim().is_empty(),
+            Value::Array(all) => all
+                .iter()
+                .any(|item| item.as_str().is_some_and(|s| !s.trim().is_empty())),
+            _ => false,
+        };
+        if filled {
+            out.insert(role.as_str());
+        }
+    }
+    if out.contains("account") {
+        out.insert("accountCode");
+        out.insert("accountName");
+    }
+    out
+}
+
+/// 必填映射的 Rust 侧硬校验：金标身份槽 ∪ 金额形态槽 ∪ 工具自己声明的角色，
+/// 判定只有引擎（[`ledger_mapping::missing_required`]）一份。
+///
+/// 此前必填只在前端 `depositMissingRequired` 手写，worker 路径不拦，缺映射的
+/// 参数会一路算到底、给出沉默的错误合计。本工具不重写判定，只声明**豁免**——
+/// 把豁免的角色预填进 `mapped`，让引擎把它们当作已映射；角色名、中文标签、
+/// 形态匹配逻辑全部留在引擎里。豁免清单与前端 `depositMissingRequired` 同口径，
+/// 都是存款利息自己的业务决定：
+///
+/// 1. **有序时账时年初余额槽整槽豁免**——按「期末余额 − 期间内发生额」倒推
+///    （SAP 的 Trial Balance LC/GC 就没有年初余额列）；
+/// 2. **本年累计／本期发生额槽豁免**——金标把它列为 TB 必填槽是给六型余额表的
+///    通用要求，但净额式余额表（SAP）没有借贷发生额列，账面利息收入取不到
+///    发生额时本工具退回期末净额，照样算得出；
+/// 3. **余额槽按「任一即可」放行**——期初／期末家族里映射了任意一列就算整槽
+///    到齐。只映射借方一列的余额表（贷方全表为空）真实存在，前端判的也是
+///    「净额｜借方｜贷方三选一」；
+/// 4. **序时账的科目名称／摘要豁免**——逐月余额还原只依赖日期、科目编码与
+///    金额方案；真实 SAP 导出（`G/L Account`＋`Text`）就没有这两列，前端在
+///    界面上仍按金标拦，worker 路径维持旧版放行。
+///
+/// 其余一律硬拦：TB 科目编码／科目名称、期末余额槽、无序时账时的期初余额槽、
+/// 序时账的记账日期与科目编码、金额方案，报错指名道姓缺哪个角色。
+fn require_mappings(
+    kind: &str,
+    mapping: &Map<String, Value>,
+    has_je: bool,
+) -> Result<(), AppError> {
+    let mut mapped = mapped_roles(mapping);
+    // 豁免 2：本年累计／本期发生额不硬性要求。
+    for role in [
+        "ytdFunctionalDebit",
+        "ytdFunctionalCredit",
+        "periodFunctionalDebit",
+        "periodFunctionalCredit",
+    ] {
+        mapped.insert(role);
+    }
+    // 豁免 3：余额槽家族任一即可——家族里有一列就把整槽补齐。
+    const OPENING: &[&str] = &[
+        "openingFunctionalAmount",
+        "openingFunctionalDebit",
+        "openingFunctionalCredit",
+    ];
+    const CLOSING: &[&str] = &[
+        "closingFunctionalAmount",
+        "closingFunctionalDebit",
+        "closingFunctionalCredit",
+    ];
+    for family in [OPENING, CLOSING] {
+        if family.iter().any(|role| mapped.contains(*role)) {
+            for role in family {
+                mapped.insert(role);
+            }
+        }
+    }
+    // 豁免 1：有序时账时年初余额整槽豁免（期末倒推）。
+    if has_je {
+        for role in OPENING {
+            mapped.insert(role);
+        }
+    }
+    if kind == "je" {
+        // 豁免 4：序时账的科目名称／摘要不作硬性要求。
+        mapped.insert("accountName");
+        mapped.insert("summary");
+        // JE 金额方案同样是「净额｜借方｜贷方任一即可」，借方一列也能算
+        // （净额 = 借 − 贷，贷方缺列按 0 处理）。
+        const AMOUNTS: &[&str] = &["functionalAmount", "functionalDebit", "functionalCredit"];
+        if AMOUNTS.iter().any(|role| mapped.contains(*role)) {
+            for role in AMOUNTS {
+                mapped.insert(role);
+            }
+        }
+    }
+    let missing: Vec<&str> =
+        ledger_mapping::missing_required(ledger_mapping::Tool::DepositInterest, kind, &mapped)
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(error(
+        "MAPPING_INCOMPLETE",
+        format!(
+            "{}尚未映射：{}。请回到第一步，在预览表头完成字段映射。",
+            if kind == "je" { "序时账" } else { "TB" },
+            missing.join("、")
+        ),
+        None,
+    ))
+}
+
 fn table_for(
     params: &Value,
     source_key: &str,
@@ -1996,7 +2214,13 @@ fn table_for(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    Ok((load_fx_table(&spec)?, mapping))
+    let table = load_fx_table(&spec)?;
+    let table = if source_key.eq_ignore_ascii_case("jeSource") {
+        crate::fx::forward_filled_je_table(&table, &mapping)
+    } else {
+        table
+    };
+    Ok((table, mapping))
 }
 
 fn column_indexes(table: &FxTable, mapping: &Map<String, Value>, role: &str) -> Vec<usize> {
@@ -2046,6 +2270,44 @@ fn cell_number(
     parse_number(row.get(index)?)
 }
 
+/// TB 的一格余额。借贷分列、净额＋方向、单列净额三种形态由公共内核吸收；
+/// 「整列自带符号」由 [`ledger_mapping::balance_self_signed`] 判定后传进来。
+fn tb_balance(
+    table: &FxTable,
+    row: &[String],
+    mapping: &Map<String, Value>,
+    prefix: &str,
+    convention: ledger_mapping::SignConvention,
+    self_signed: bool,
+) -> Option<f64> {
+    let debit = cell_number(table, row, mapping, &format!("{prefix}Debit"));
+    let credit = cell_number(table, row, mapping, &format!("{prefix}Credit"));
+    let amount = cell_number(table, row, mapping, &format!("{prefix}Amount"));
+    if debit.is_none() && credit.is_none() && amount.is_none() {
+        return None;
+    }
+    let direction = cell_text(
+        table,
+        row,
+        mapping,
+        if prefix.starts_with("opening") {
+            "openingDirection"
+        } else {
+            "closingDirection"
+        },
+    );
+    Some(ledger_mapping::signed_balance(
+        &ledger_mapping::AmountInputs {
+            amount,
+            debit,
+            credit,
+            direction: (!direction.is_empty()).then_some(direction),
+        },
+        convention,
+        self_signed,
+    ))
+}
+
 fn signed(
     table: &FxTable,
     row: &[String],
@@ -2058,23 +2320,28 @@ fn signed(
     (plus.is_some() || minus.is_some()).then(|| plus.unwrap_or(0.0) - minus.unwrap_or(0.0))
 }
 
-/// 支持千分位、货币符号、百分号和会计负数括号。
+/// 金额文本读取：引擎 [`ledger_mapping::parse_amount_lenient`] 的薄包装。
+///
+/// 千分位、货币符号、括号负数、占位符（`-`／`—`／`N/A`）与尾部负号、
+/// `CR/DR`、借贷后缀都由引擎一份口径认，本模块不再自持规则。包装只补两件
+/// 引擎刻意留给调用方的事：
+///
+/// 1. **百分号换算**：引擎只剥符号（`3.5%` 读作 3.5，换算与否是调用方的业务），
+///    存款利息的利率列要的是小数，这里统一除以一百；
+/// 2. **全角句点**「。」转半角——旧版本地实现就认，保持不变。
+///
+/// 读不出一律 `None`（含占位符），与旧版一致，调用方把读不出当缺省处理。
+/// fa_tbje 也借用这份口径，可见性保持 `pub(crate)` 不动。
 pub(crate) fn parse_number(raw: &str) -> Option<f64> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed == "-" || trimmed == "—" {
-        return None;
-    }
-    let percent = trimmed.contains('%');
-    let negative = trimmed.starts_with('(') && trimmed.ends_with(')');
-    let cleaned = trimmed
-        .replace([',', '，', '¥', '￥', '$', ' ', '(', ')', '%'], "")
-        .replace('。', ".");
-    if cleaned.is_empty() {
-        return None;
-    }
-    let value = cleaned.parse::<f64>().ok()?;
-    let value = if negative { -value } else { value };
-    Some(if percent { value / 100.0 } else { value })
+    let percent = raw.contains('%');
+    let normalized = raw.replace('。', ".");
+    ledger_mapping::parse_amount_lenient(&normalized).map(|value| {
+        if percent {
+            value / 100.0
+        } else {
+            value
+        }
+    })
 }
 
 fn date_param(params: &Value, key: &str) -> Result<NaiveDate, AppError> {
@@ -2695,7 +2962,8 @@ mod tests {
             json!("Company Code Currency Value"),
             "本位币金额应避开 Group/Document Currency Value"
         );
-        assert_eq!(je_map["id"], json!("Document Number"));
+        // 凭证号是 multi 角色（可能拆「凭证字＋凭证号」两列），映射值统一为数组形状。
+        assert_eq!(je_map["id"], json!(["Document Number"]));
 
         // 完整跑一遍：TB 只出到 010 期间且没有年初余额列，两条路径都要走通。
         let params = json!({
@@ -2854,7 +3122,8 @@ mod tests {
         assert_eq!(tb_map["openingFunctionalAmount"], json!("期初金额-本位币"));
         assert_eq!(tb_map["ytdFunctionalDebit"], json!("借方金额-本位币"));
         assert_eq!(tb_map["ytdFunctionalCredit"], json!("贷方金额-本位币"));
-        assert_eq!(tb_map["auxiliary"], json!("文本"));
+        // 辅助核算同样是 multi 角色，命中一列时也用单元素数组。
+        assert_eq!(tb_map["auxiliary"], json!(["文本"]));
 
         let roles = tb["suggestedAccountRoles"].as_object().unwrap();
         let role_of = |needle: &str| -> String {
@@ -3197,6 +3466,26 @@ mod tests {
     }
 
     #[test]
+    fn account_type_override_reaches_calculation_and_defaults_to_demand() {
+        let params = json!({
+            "accountTierOverrides": {
+                "100201 银行存款-定期户（分类快照）": "term_1y"
+            }
+        });
+        let selected = tier_for("100201 银行存款（TB末级）", "", &params);
+        assert_eq!(selected.0, "term_1y");
+        assert!(selected.1.contains("用户"));
+        assert_eq!(
+            tier_for("100202 银行存款-基本户", "", &json!({})).0,
+            "demand"
+        );
+        assert_eq!(
+            tier_for("100203 银行存款-通知存款", "", &json!({})).0,
+            "notice_7d"
+        );
+    }
+
+    #[test]
     fn every_tier_belongs_to_a_category_and_labels_cleanly() {
         for tier in RATE_TIERS {
             assert!(!tier.category.is_empty() && !tier.category_label.is_empty());
@@ -3420,6 +3709,28 @@ mod tests {
         assert_eq!(parse_number("  -  "), None);
     }
 
+    /// 金额解析收编到引擎宽松口径后的新旧对齐：旧版能读的原样保留，
+    /// 引擎补的能力（尾部负号）按引擎算，垃圾文本一律 None。
+    #[test]
+    fn 金额解析与引擎宽松口径对齐() {
+        // 旧版本地实现就支持的写法——换引擎后必须原样保留。
+        assert_eq!(parse_number("3.5%"), Some(0.035));
+        assert_eq!(parse_number("-3.5%"), Some(-0.035));
+        assert_eq!(parse_number("(1,234.56)"), Some(-1234.56));
+        assert_eq!(parse_number("¥1,200"), Some(1200.0));
+        assert_eq!(parse_number("1,234。56"), Some(1234.56));
+        // 引擎补的能力：尾部负号按会计负数读（旧版读不出，返回 None）。
+        assert_eq!(parse_number("¥800-"), Some(-800.0));
+        // 垃圾文本、占位符与空值一律 None，绝不猜数。
+        assert_eq!(parse_number("见备注"), None);
+        assert_eq!(parse_number(""), None);
+        assert_eq!(parse_number("  -  "), None);
+        assert_eq!(parse_number("—"), None);
+        assert_eq!(parse_number("N/A"), None);
+        assert_eq!(parse_number("%"), None);
+        assert_eq!(parse_number("1,2)3"), None);
+    }
+
     #[test]
     fn month12_basis_keeps_one_twelfth_per_month() {
         let start = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
@@ -3522,6 +3833,355 @@ mod tests {
         let rows = result["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
         assert!(rows[0]["account"].as_str().unwrap().contains("银行存款"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 整表只有一列科目、编码＋名称挤在一格（03 号样例形态）时，
+    /// 列名判不出科目编码，靠引擎的合并列探测把它建议为 accountCode。
+    #[test]
+    fn 合并科目列在编码空缺时顶上() {
+        let dir = std::env::temp_dir().join(format!("deposit-combined-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 表头带「文本」：会被存款扩展的 auxiliary 别名抢走，而「项目编码」
+        // 又不是科目编码的别名——按列名科目身份两头落空，只能看数据。
+        let path = dir.join("tb.xlsx");
+        write_fixture(
+            &path,
+            &[
+                vec![
+                    "项目编码、文本",
+                    "年初余额借方",
+                    "期末余额借方",
+                    "本期借方发生额",
+                    "本期贷方发生额",
+                ],
+                vec!["1002010000:银行存款-工商银行", "1000", "2000", "1000", "0"],
+                vec!["1002020000:银行存款-建设银行", "1100", "2100", "1000", "0"],
+                vec!["1002030000:银行存款-农业银行", "1200", "2200", "1000", "0"],
+                vec!["1002040000:银行存款-中国银行", "1300", "2300", "1000", "0"],
+            ],
+        );
+        let inspected = inspect(
+            &json!({"source": {"inputPath": path.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
+        let mapping = &inspected["suggestedMapping"];
+        assert_eq!(
+            mapping["accountCode"],
+            json!("项目编码、文本"),
+            "合并列应由数据形态兜底为科目编码"
+        );
+        // 编码与名称在同一格里，科目名称同列兼挂，界面不必再提示缺映射。
+        assert_eq!(mapping["accountName"], json!(["项目编码、文本"]));
+        // 身份列不能兼任辅助核算：整列科目全称当成银行账号会污染分摊。
+        assert!(
+            mapping.get("auxiliary").is_none(),
+            "合并列应从 auxiliary 让位: {mapping}"
+        );
+        let accounts = inspected["accounts"].as_array().unwrap();
+        assert!(
+            accounts
+                .iter()
+                .any(|x| x == &json!("1002010000:银行存款-工商银行")),
+            "科目清单应按合并列原文识别: {accounts:?}"
+        );
+        assert_eq!(
+            inspected["suggestedAccountRoles"]["1002010000:银行存款-工商银行"],
+            json!("deposit")
+        );
+
+        // 裸表头「科目」本身就是科目编码的别名，编码能按列名映射；
+        // 此时编码列是合并列而名称空缺，应同列补挂科目名称。
+        let single = dir.join("single.xlsx");
+        write_fixture(
+            &single,
+            &[
+                vec!["科目", "期末余额借方", "本期借方发生额", "本期贷方发生额"],
+                vec!["1002010000:银行存款-工商银行", "2000", "1000", "0"],
+                vec!["1002020000:银行存款-建设银行", "2100", "1000", "0"],
+                vec!["1002030000:银行存款-农业银行", "2200", "1000", "0"],
+                vec!["1002040000:银行存款-中国银行", "2300", "1000", "0"],
+            ],
+        );
+        let inspected = inspect(
+            &json!({"source": {"inputPath": single.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
+        let mapping = &inspected["suggestedMapping"];
+        assert_eq!(mapping["accountCode"], json!("科目"));
+        assert_eq!(mapping["accountName"], json!(["科目"]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// inspect 下发的 `roles` 角色标签表与引擎 Role 表逐条同源：全量、
+    /// name/label 齐全、标签就是引擎那份（与 MissingRole.label 同一张表），
+    /// 前端据此渲染中文角色名，不再自持会过期的对照表。
+    #[test]
+    fn inspect下发引擎角色标签表() {
+        let dir =
+            std::env::temp_dir().join(format!("deposit-role-labels-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tb.xlsx");
+        write_fixture(
+            &path,
+            &[
+                vec![
+                    "科目编码",
+                    "科目名称",
+                    "期末余额借方",
+                    "本期借方发生额",
+                    "本期贷方发生额",
+                ],
+                vec!["1002", "银行存款", "2000", "1000", "0"],
+            ],
+        );
+        let empty: Vec<Value> = vec![];
+        for kind in ["tb", "je"] {
+            let inspected = inspect(
+                &json!({"source": {"inputPath": path.to_string_lossy()}}),
+                kind,
+            )
+            .unwrap();
+            let roles = inspected["roles"].as_array().unwrap_or(&empty);
+            let engine = ledger_mapping::roles(kind);
+            assert!(!roles.is_empty(), "{kind} 的角色标签表不应为空");
+            assert_eq!(
+                roles.len(),
+                engine.len(),
+                "{kind} 应全量下发引擎当前认识的角色"
+            );
+            for item in roles {
+                let name = item["name"].as_str().unwrap_or_default();
+                let label = item["label"].as_str().unwrap_or_default();
+                assert!(
+                    !name.is_empty() && !label.is_empty(),
+                    "每个角色都应同时携带标准名与中文标签: {item}"
+                );
+                assert_eq!(
+                    label,
+                    ledger_mapping::role_of(kind, name).map(|x| x.label).unwrap_or(""),
+                    "标签必须取自引擎 Role 表: {name}"
+                );
+            }
+            // 锁一个前端直接要用的形状：标准名渲染成中文。
+            let code = roles
+                .iter()
+                .find(|x| x["name"] == json!("accountCode"))
+                .unwrap();
+            assert_eq!(code["label"], json!("科目编码"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 序时账里的「合计」行由引擎垃圾行规则显式剔除，不进入逐月余额还原。
+    #[test]
+    fn 序时账合计行不进入利息测算() {
+        let dir = std::env::temp_dir().join(format!("deposit-junk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb_path = dir.join("tb.xlsx");
+        let je_path = dir.join("je.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec![
+                    "科目编码",
+                    "科目名称",
+                    "年初余额借方",
+                    "期末余额借方",
+                    "本期借方发生额",
+                    "本期贷方发生额",
+                ],
+                vec!["1002", "银行存款", "0", "100000", "100000", "0"],
+            ],
+        );
+        // 合计行的身份列只写着「合计」（引擎把它当汇总标签，不算身份），
+        // 金额却是全表合计——进到测算里发生额会翻倍。
+        let je_refs: Vec<Vec<&str>> = vec![
+            vec![
+                "记账日期",
+                "凭证号",
+                "科目编码",
+                "科目名称",
+                "摘要",
+                "借方金额",
+                "贷方金额",
+            ],
+            vec!["2025-01-15", "记-1", "1002", "银行存款", "收款", "100000", "0"],
+            vec!["合计", "", "", "", "合计", "100000", "0"],
+        ];
+        write_fixture(&je_path, &je_refs);
+        let tb = inspect(
+            &json!({"source": {"inputPath": tb_path.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
+        let je = inspect(
+            &json!({"source": {"inputPath": je_path.to_string_lossy()}}),
+            "je",
+        )
+        .unwrap();
+        let params = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31", "dayBasis": "month12",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()}, "tbMapping": tb["suggestedMapping"],
+            "jeSource": {"inputPath": je_path.to_string_lossy()}, "jeMapping": je["suggestedMapping"]
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap();
+        let rows = result["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        // 全年只有 1 月那笔 100,000 的发生额；合计行不重复计入。
+        assert_eq!(row["months"][0]["debit"].as_f64().unwrap(), 100000.0);
+        let mut total_debit = 0.0;
+        for month in row["months"].as_array().unwrap() {
+            total_debit += month["debit"].as_f64().unwrap();
+        }
+        assert!(
+            (total_debit - 100000.0).abs() < 0.01,
+            "合计行不得计入发生额: {row}"
+        );
+        assert!(
+            (row["derivedClosingBalance"].as_f64().unwrap() - 100000.0).abs() < 0.01,
+            "JE 推导的年末余额应与 TB 勾稽: {row}"
+        );
+        assert!(row["reconciliationDiff"].as_f64().unwrap().abs() < 0.01);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rust 侧必填硬校验：缺金标身份（科目名称）指名道姓报中文错，
+    /// 而不是沉默算错账。此前必填只在前端手写，worker 路径不拦。
+    #[test]
+    fn 必填映射缺失时指名道姓报错() {
+        let dir = std::env::temp_dir().join(format!("deposit-required-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb_path = dir.join("tb.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec!["科目编码", "期末余额借方", "本期借方发生额", "本期贷方发生额"],
+                vec!["1002", "2000", "1000", "0"],
+            ],
+        );
+        let tb = inspect(
+            &json!({"source": {"inputPath": tb_path.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
+        assert!(
+            tb["suggestedMapping"].get("accountName").is_none(),
+            "样例本身就没有科目名称列"
+        );
+        let params = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": tb["suggestedMapping"]
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let err = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap_err();
+        assert_eq!(err.code, "MAPPING_INCOMPLETE");
+        assert!(
+            err.user_message.contains("科目名称"),
+            "报错要说清缺哪个角色: {}",
+            err.user_message
+        );
+        assert!(
+            err.user_message.contains("期初"),
+            "无序时账时年初余额方案必填: {}",
+            err.user_message
+        );
+        assert!(
+            err.user_message.contains("TB尚未映射"),
+            "报错应说明是哪一侧: {}",
+            err.user_message
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 有序时账时年初余额可缺（期末倒推，SAP Trial Balance 形态）；
+    /// 不给序时账时年初余额回到必填——与前端 depositMissingRequired 同口径。
+    #[test]
+    fn 有序时账时年初余额可缺无序时账时必填() {
+        let dir = std::env::temp_dir().join(format!("deposit-opening-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb_path = dir.join("tb.xlsx");
+        let je_path = dir.join("je.xlsx");
+        // 没有年初余额列：这正是 SAP Trial Balance 的形态。
+        write_fixture(
+            &tb_path,
+            &[
+                vec![
+                    "科目编码",
+                    "科目名称",
+                    "期末余额借方",
+                    "本期借方发生额",
+                    "本期贷方发生额",
+                ],
+                vec!["1002", "银行存款", "50000", "50000", "0"],
+            ],
+        );
+        let je_refs: Vec<Vec<&str>> = vec![
+            vec![
+                "记账日期",
+                "凭证号",
+                "科目编码",
+                "科目名称",
+                "摘要",
+                "借方金额",
+                "贷方金额",
+            ],
+            vec!["2025-01-15", "记-1", "1002", "银行存款", "收款", "25000", "0"],
+            vec!["2025-02-15", "记-2", "1002", "银行存款", "收款", "25000", "0"],
+        ];
+        write_fixture(&je_path, &je_refs);
+        let tb = inspect(
+            &json!({"source": {"inputPath": tb_path.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
+        let je = inspect(
+            &json!({"source": {"inputPath": je_path.to_string_lossy()}}),
+            "je",
+        )
+        .unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        // 无序时账：年初余额必填，报错指名「期初」。
+        let params = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": tb["suggestedMapping"]
+        });
+        let err = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel.clone(), &pause)
+            .unwrap_err();
+        assert_eq!(err.code, "MAPPING_INCOMPLETE");
+        assert!(
+            err.user_message.contains("期初"),
+            "缺年初余额应报期初方案: {}",
+            err.user_message
+        );
+        // 有序时账：年初倒推，正常放行且勾稽通过。
+        let params = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": tb["suggestedMapping"],
+            "jeSource": {"inputPath": je_path.to_string_lossy()},
+            "jeMapping": je["suggestedMapping"]
+        });
+        let result = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap();
+        let rows = result["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            (rows[0]["derivedClosingBalance"].as_f64().unwrap() - 50000.0).abs() < 0.01,
+            "年初倒推后年末余额应与 TB 勾稽: {rows:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

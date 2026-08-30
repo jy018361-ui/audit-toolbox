@@ -3,7 +3,6 @@ import {
   audipickPdfBytes,
   engineCall,
   jobCancel,
-  jobPause,
   jobStart,
   listenJobEvents,
   pickPath,
@@ -12,6 +11,7 @@ import {
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
 import { audipickAssetsReady, loadAudipickAssets } from "./audipickAssets";
+import { useJobPause } from "@/components/JobDialog";
 import { errorText } from "@/lib/errors";
 import { ResultView } from "@/components/ResultView";
 import { PageHeader } from "@/components/PageHeader";
@@ -158,7 +158,8 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     new Map<string, Array<Record<string, unknown>>>(),
   );
   const [batchJob, setBatchJob] = useState<JobEvent>();
-  const [batchPaused, setBatchPaused] = useState(false);
+  // 暂停开关与全局进度弹窗共用一份状态，避免两处各记各的对不上。
+  const { isPaused: isJobPaused, togglePause: toggleJobPause } = useJobPause();
   const [pdfDocument, setPdfDocument] = useState<any>();
   const [pdfPage, setPdfPage] = useState(1);
   const [pdfPages, setPdfPages] = useState(0);
@@ -1288,7 +1289,6 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     }
     const prompt = `${window.RuleEngine?.getRulePrompt(ruleId) ?? ""}\n\n本次仅返回这些字段：${activeFieldKeys.join(", ")}`;
     setError("");
-    setBatchPaused(false);
     try {
       const jobId = await jobStart("audipick.batch_extract", {
         ruleId,
@@ -1745,12 +1745,9 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               <>
                 <button
                   className="secondary"
-                  onClick={() => {
-                    void jobPause(batchJob.jobId, !batchPaused);
-                    setBatchPaused(!batchPaused);
-                  }}
+                  onClick={() => toggleJobPause(batchJob.jobId)}
                 >
-                  {batchPaused ? "继续" : "暂停"}
+                  {isJobPaused(batchJob.jobId) ? "继续" : "暂停"}
                 </button>
                 <button
                   className="secondary"
@@ -1782,7 +1779,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               {batchFailures.slice(0, 10).map((item, index) => (
                 <p key={String(item.id ?? index)}>
                   {String(item.name ?? item.id ?? "")}：
-                  {String(item.error?.userMessage ?? "提取失败")}
+                  {item.error ? errorText(item.error) : "提取失败"}
                 </p>
               ))}
               {batchFailures.length > 10 && (

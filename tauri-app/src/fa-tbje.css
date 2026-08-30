@@ -109,8 +109,15 @@
   color: var(--text-muted);
 }
 
-.fa-tbje-page input,
-.fa-tbje-page select {
+.fa-tbje-source-controls input,
+.fa-tbje-source-controls select,
+.fa-tbje-fixed-entity input,
+.fa-tbje-account-toolbar input,
+.fa-tbje-account-toolbar select,
+.fa-tbje-bulk-category input,
+.fa-tbje-account-table select,
+.fa-tbje-page .form-grid input,
+.fa-tbje-page .form-grid select {
   width: 100%;
   min-width: 0;
   min-height: 2.5rem;
@@ -121,14 +128,28 @@
   color: var(--text);
 }
 
-.fa-tbje-page input:focus-visible,
-.fa-tbje-page select:focus-visible {
+.fa-tbje-source-controls input:focus-visible,
+.fa-tbje-source-controls select:focus-visible,
+.fa-tbje-fixed-entity input:focus-visible,
+.fa-tbje-account-toolbar input:focus-visible,
+.fa-tbje-account-toolbar select:focus-visible,
+.fa-tbje-bulk-category input:focus-visible,
+.fa-tbje-account-table select:focus-visible,
+.fa-tbje-page .form-grid input:focus-visible,
+.fa-tbje-page .form-grid select:focus-visible {
   outline: 2px solid var(--brand);
   outline-offset: 2px;
 }
 
-.fa-tbje-page input:disabled,
-.fa-tbje-page select:disabled {
+.fa-tbje-source-controls input:disabled,
+.fa-tbje-source-controls select:disabled,
+.fa-tbje-fixed-entity input:disabled,
+.fa-tbje-account-toolbar input:disabled,
+.fa-tbje-account-toolbar select:disabled,
+.fa-tbje-bulk-category input:disabled,
+.fa-tbje-account-table select:disabled,
+.fa-tbje-page .form-grid input:disabled,
+.fa-tbje-page .form-grid select:disabled {
   cursor: not-allowed;
   opacity: 0.65;
   background: var(--surface-muted);

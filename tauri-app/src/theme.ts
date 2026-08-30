@@ -17,6 +17,7 @@ const INK_ON_DARK = "#ffffff";
 /// Theme background -> the variable holding text drawn on top of it.
 const CONTRAST_PAIRS: ReadonlyArray<readonly [string, string]> = [
   ["--brand", "--on-brand"],
+  ["--brand-link", "--on-brand-link"],
   ["--brand-deep", "--on-brand-deep"],
   ["--brand-soft", "--on-brand-soft"],
   ["--accent", "--on-accent"],

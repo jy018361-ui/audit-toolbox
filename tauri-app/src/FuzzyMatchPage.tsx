@@ -8,6 +8,7 @@ import { JobProgress } from "@/components/JobProgress";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { errorText } from "@/lib/errors";
 import "./fuzzy-match.css";
 
 /** 命中测试：拖放坐标（CSS 像素）是否落在元素框内。导出供测试。 */
@@ -267,7 +268,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
       } else if (e.phase === "failed" || e.phase === "cancelled") {
         setBusy(false);
         const p = e.result as { error?: { userMessage?: string } } | undefined;
-        setError(p?.error?.userMessage ?? e.message);
+        setError(p?.error ? errorText(p.error) : e.message);
       }
     });
     return () => {
@@ -849,14 +850,4 @@ function ConfirmQueue(props: {
       </div>
     </section>
   );
-}
-
-function errorText(value: unknown) {
-  if (typeof value === "string") return value;
-  if (value instanceof Error) return value.message;
-  if (value && typeof value === "object") {
-    const v = value as Record<string, unknown>;
-    return String(v.userMessage ?? v.message ?? v.detail ?? "处理失败，请重试。");
-  }
-  return "处理失败，请重试。";
 }

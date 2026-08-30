@@ -153,4 +153,66 @@ describe("共享账表复核生命周期", () => {
     expect(await pending).toEqual({});
     expect(applied).not.toHaveBeenCalled();
   });
+
+  it("没有建议但必填字段仍缺时，结论不许说无需调整", async () => {
+    const request = deferred();
+    const { result } = renderHook(() =>
+      useLedgerDictReviews(() => request.promise),
+    );
+    let pending!: ReturnType<typeof result.current.reviewAll>;
+    act(() => {
+      pending = result.current.reviewAll({
+        je: {
+          ...slot(),
+          missingAfter: () => ["原币币种", "原币金额方案"],
+        },
+      });
+    });
+    await act(async () => {
+      request.resolve({ changes: [] });
+      await pending;
+    });
+    expect(result.current.status.je).toContain("LLM 未提出调整建议");
+    expect(result.current.status.je).toContain(
+      "仍有未映射：原币币种、原币金额方案",
+    );
+    expect(result.current.status.je).not.toContain("无需调整");
+  });
+
+  it("已应用建议但仍有缺口的，结论要把剩余缺口一并交代", async () => {
+    const request = deferred();
+    const applied = vi.fn();
+    const { result } = renderHook(() =>
+      useLedgerDictReviews(() => request.promise),
+    );
+    let pending!: ReturnType<typeof result.current.reviewAll>;
+    act(() => {
+      pending = result.current.reviewAll({
+        tb: {
+          headers: ["A编码", "B编码"],
+          preview: [],
+          mapping: { accountCode: "A编码" },
+          labels: { accountCode: "科目编码" },
+          onApplied: applied,
+          missingAfter: (mapping) =>
+            mapping.accountCode ? ["期初余额"] : [],
+        },
+      });
+    });
+    await act(async () => {
+      request.resolve({
+        changes: [
+          {
+            role: "accountCode",
+            suggestedColumn: "B编码",
+            confidence: 0.9,
+          },
+        ],
+      });
+      await pending;
+    });
+    expect(applied).toHaveBeenCalledWith({ accountCode: "B编码" });
+    expect(result.current.status.tb).toContain("已应用 1 项建议");
+    expect(result.current.status.tb).toContain("仍有未映射：期初余额");
+  });
 });

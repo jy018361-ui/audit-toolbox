@@ -133,7 +133,7 @@
 .jm-sign-choices button.active {
   border-color: var(--brand-link);
   background: var(--brand-link);
-  color: var(--surface);
+  color: var(--on-brand-link, #fff);
 }
 .jm-sign-applied {
   font-weight: 600;

@@ -74,6 +74,18 @@ describe("共用字段映射面板", () => {
     expect(screen.getByText(/尚未映射：记账日期、摘要/)).toBeTruthy();
   });
 
+  it("有形态要求时解释必填、选填和无标记字段", () => {
+    const { selects } = panel({
+      requirementOf: (role: string) =>
+        role === "functionalAmount" ? "required" : role === "currencyText" ? "optional" : undefined,
+    });
+    expect(screen.getByText(/当前识别形态必填/)).toHaveTextContent(
+      "＊ 当前识别形态必填；（选填）为可补充字段；未标记字段不属于当前形态要求。",
+    );
+    expect(selects[0].querySelector('option[value="functionalAmount"]')).toHaveTextContent("本位币净额＊");
+    expect(selects[0].querySelector('option[value="currencyText"]')).toHaveTextContent("币种线索文本（选填）");
+  });
+
   it("给了分组就按组渲染下拉", () => {
     const { selects } = panel({
       groups: [{ title: "科目与主体", roles: ["accountCode", "accountName"] }],

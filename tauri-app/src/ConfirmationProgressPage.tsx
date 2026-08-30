@@ -26,6 +26,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { errorText } from "@/lib/errors";
 
 export type ConfirmationMode = "both" | "bank" | "trade";
 
@@ -82,16 +83,6 @@ export function readConfirmationCache(): {
   }
 }
 
-function errorText(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
-  if (error && typeof error === "object") {
-    const value = error as { userMessage?: unknown; message?: unknown };
-    return String(value.userMessage ?? value.message ?? "发生未预期错误。");
-  }
-  return "发生未预期错误。";
-}
-
 const CONFIRMATION_MODE_OPTIONS: Array<{
   value: ConfirmationMode;
   label: string;
@@ -135,7 +126,7 @@ export default function ConfirmationProgressPage({
         setBusy(false);
         const payload = event.result as
           { error?: { userMessage?: string } } | undefined;
-        setError(payload?.error?.userMessage ?? event.message);
+        setError(payload?.error ? errorText(payload.error) : event.message);
       }
     });
     const stopDrops = (() => {

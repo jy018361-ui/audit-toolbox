@@ -23,7 +23,7 @@
   --ink-strong: #173a3e;
   --ink-inverse: #eef6f2;
   --label: #4c605d;
-  --text-muted: #687977;
+  --text-muted: #5d706d;
   --muted-soft: #83908e;
 
   /* 主色 */
@@ -93,7 +93,7 @@
   --popover: var(--surface);
   --popover-foreground: var(--ink);
   --primary: var(--brand);
-  --primary-foreground: var(--ink-inverse);
+  --primary-foreground: var(--on-brand, var(--ink-inverse));
   --secondary: var(--surface-muted);
   --secondary-foreground: var(--ink-strong);
   --muted: var(--surface-muted);
@@ -112,9 +112,9 @@
   --sidebar: var(--brand-deep);
   --sidebar-foreground: var(--on-dark);
   --sidebar-primary: var(--brand-soft);
-  --sidebar-primary-foreground: #ffffff;
+  --sidebar-primary-foreground: var(--on-brand-soft, #ffffff);
   --sidebar-accent: var(--brand-soft);
-  --sidebar-accent-foreground: #ffffff;
+  --sidebar-accent-foreground: var(--on-brand-soft, #ffffff);
   --sidebar-border: rgba(255, 255, 255, 0.12);
   --sidebar-ring: var(--brand-accent);
 }
@@ -180,12 +180,17 @@ summary:focus-visible {
   overflow: auto;
 }
 .brand span,
-.page-header > span,
 .nav-caption {
   font-size: var(--fs-xs);
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--brand-accent);
+}
+.page-header > span {
+  font-size: var(--fs-xs);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--brand-link);
 }
 .brand h1 {
   font-size: var(--fs-2xl);
@@ -302,6 +307,30 @@ summary:focus-visible {
   background: rgba(255, 255, 255, 0.18);
   color: var(--on-brand-soft, #fff);
 }
+.tool-nav-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-status-badge {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 2px var(--sp-2);
+  border: 1px solid color-mix(in srgb, var(--warning-dot) 72%, var(--brand-deep));
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--warning-dot) 18%, var(--brand-deep));
+  color: var(--on-dark);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+.sidebar a:hover .tool-status-badge,
+.sidebar a.active .tool-status-badge {
+  border-color: var(--warning-dot);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
 .tool-nav {
   margin-top: var(--sp-5);
 }
@@ -403,7 +432,7 @@ summary:focus-visible {
   display: block;
   font-size: var(--fs-xl);
   margin-top: var(--sp-2);
-  color: var(--brand-soft);
+  color: var(--brand-link);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -429,7 +458,7 @@ summary:focus-visible {
   border: 1px solid var(--border);
   border-radius: var(--r-pill);
   background: var(--surface);
-  color: var(--brand-soft);
+  color: var(--brand-link);
   font-size: var(--fs-sm);
   text-decoration: none;
 }
@@ -623,10 +652,11 @@ summary:focus-visible {
 }
 .primary:hover:not(:disabled) {
   background: var(--brand-link);
+  color: var(--on-brand-link, var(--on-brand, #fff));
 }
 .secondary {
   background: var(--surface);
-  color: var(--brand-soft);
+  color: var(--brand-link);
   border: 1px solid var(--border) !important;
 }
 .secondary:hover:not(:disabled) {
@@ -1343,9 +1373,15 @@ summary:focus-visible {
   accent-color: var(--brand-accent);
   border-radius: var(--r-pill);
 }
-.job-progress progress.progress-tone-warning { accent-color: var(--warning-dot); }
-.job-progress progress.progress-tone-error { accent-color: var(--danger-fg); }
-.job-progress progress.progress-tone-success { accent-color: var(--success-fg); }
+.job-progress progress.progress-tone-warning {
+  accent-color: var(--warning-dot);
+}
+.job-progress progress.progress-tone-error {
+  accent-color: var(--danger-fg);
+}
+.job-progress progress.progress-tone-success {
+  accent-color: var(--success-fg);
+}
 
 /* ErrorBox：统一错误提示 */
 .error-box-actions {
@@ -1367,9 +1403,15 @@ summary:focus-visible {
   gap: var(--sp-3);
   margin: var(--sp-4) 0;
 }
-.stat-grid--2 { grid-template-columns: repeat(2, 1fr); }
-.stat-grid--3 { grid-template-columns: repeat(3, 1fr); }
-.stat-grid--4 { grid-template-columns: repeat(4, 1fr); }
+.stat-grid--2 {
+  grid-template-columns: repeat(2, 1fr);
+}
+.stat-grid--3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+.stat-grid--4 {
+  grid-template-columns: repeat(4, 1fr);
+}
 .stat-cell {
   background: var(--surface-muted);
   border-radius: var(--r-md);
@@ -1383,7 +1425,7 @@ summary:focus-visible {
 }
 .stat-value {
   font-size: var(--fs-xl);
-  color: var(--brand-soft);
+  color: var(--brand-link);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1409,7 +1451,7 @@ summary:focus-visible {
   border-radius: var(--r-sm);
   padding: var(--sp-2);
   background: var(--surface-sunken);
-  color: var(--text-muted);
+  color: var(--label);
   cursor: pointer;
   font-size: var(--fs-md);
 }
@@ -1435,8 +1477,8 @@ summary:focus-visible {
   color: var(--on-brand, var(--surface));
 }
 .step-indicator-item.done {
-  border-color: var(--success-bg);
-  background: var(--surface-muted);
+  border-color: var(--border);
+  background: var(--surface);
   color: var(--brand);
 }
 .step-indicator-item.disabled {
@@ -1618,7 +1660,7 @@ summary:focus-visible {
 .fa-side-title {
   margin: 0;
   font-size: var(--fs-lg);
-  color: var(--brand-soft);
+  color: var(--brand-link);
 }
 
 /* FA 流程操作按钮（读取结构/LLM复核/执行合并）：始终一行，不换行。
@@ -1663,7 +1705,7 @@ summary:focus-visible {
 .fa-map-col-title {
   font-size: var(--fs-md);
   font-weight: 600;
-  color: var(--brand-soft);
+  color: var(--brand-link);
 }
 /* 映射块内部的字段：空间不够时先让这里塌成一列，
    把宽度留给外层的期初/期末并排——两侧对照才是这个工具的主线。 */
@@ -1765,7 +1807,7 @@ summary:focus-visible {
 .ts-filter-trigger.active {
   border-color: var(--brand-accent);
   background: var(--success-bg);
-  color: var(--brand-soft);
+  color: var(--success-fg);
 }
 .ts-filter-icon {
   font-size: 10px;
@@ -1885,7 +1927,7 @@ summary:focus-visible {
   border: 1px solid var(--brand-accent);
   border-radius: 999px;
   background: var(--success-bg);
-  color: var(--brand-soft);
+  color: var(--success-fg);
   font-size: var(--fs-xs);
 }
 .ts-filter-chip strong,
@@ -1925,7 +1967,7 @@ summary:focus-visible {
 .data-table-table th .dt-header-control select.mapped {
   border-color: var(--brand-accent);
   background: var(--success-bg);
-  color: var(--brand-soft);
+  color: var(--success-fg);
   font-weight: 600;
 }
 
@@ -1946,7 +1988,6 @@ summary:focus-visible {
   font-size: var(--fs-sm) !important;
 }
 
-
 /* 形态判定结论：「已识别为 类型1（起始日＋到期日）」/「最接近 …，还缺 …」。
    与未映射提示区分开——这条是结论不是错误，用中性底色。 */
 .mapping-form-note {
@@ -1958,7 +1999,6 @@ summary:focus-visible {
   padding: var(--sp-2) var(--sp-3);
   font-size: var(--fs-sm) !important;
 }
-
 
 /* 每个文件预览标题：标题 + 未映射提示 */
 .fa-table-caption {
@@ -2016,103 +2056,310 @@ summary:focus-visible {
    data-theme 属性切换。默认 green-dark（深绿，即现有风格）。 */
 [data-theme="green-dark"] {
   /* 默认深绿主题：与 :root 默认值一致，显式声明便于 data-theme 统一 */
-  --brand: #1e6267; --brand-deep: #14353a; --brand-soft: #245158;
-  --brand-link: #1d6e75; --brand-accent: #78b7ad;
-  --ink: #182626; --ink-strong: #173a3e; --ink-inverse: #eef6f2;
-  --label: #4c605d; --text-muted: #687977; --muted-soft: #83908e;
-  --surface: #ffffff; --surface-sunken: #fbfcfb; --surface-muted: #eef4f1;
-  --surface-page: #edf1ee; --surface-code: #13282b;
-  --border: #cbd7d2; --border-soft: #e4e9e7; --border-strong: #76a8a1;
-  --on-dark: #c6dad6; --on-dark-muted: #aac4c0; --on-dark-faint: #82a39e;
-  --accent: #dcebe6; --accent-foreground: #245158;
+  --brand: #1e6267;
+  --brand-deep: #14353a;
+  --brand-soft: #245158;
+  --brand-link: #1d6e75;
+  --brand-accent: #78b7ad;
+  --ink: #182626;
+  --ink-strong: #173a3e;
+  --ink-inverse: #eef6f2;
+  --label: #4c605d;
+  --text-muted: #5d706d;
+  --muted-soft: #83908e;
+  --surface: #ffffff;
+  --surface-sunken: #fbfcfb;
+  --surface-muted: #eef4f1;
+  --surface-page: #edf1ee;
+  --surface-code: #13282b;
+  --border: #cbd7d2;
+  --border-soft: #e4e9e7;
+  --border-strong: #76a8a1;
+  --on-dark: #c6dad6;
+  --on-dark-muted: #aac4c0;
+  --on-dark-faint: #82a39e;
+  --accent: #dcebe6;
+  --accent-foreground: #245158;
 }
 [data-theme="classic-dark"] {
-  --brand: #b8a200; --brand-deep: #1a1a1a; --brand-soft: #2d2d2d;
-  --brand-link: #c9b000; --brand-accent: #ffcc00;
-  --ink: #f7f7f7; --ink-strong: #ffffff; --ink-inverse: #171717;
-  --label: #c5cbd3; --text-muted: #c5cbd3; --muted-soft: #a0a8b0;
-  --surface: #222222; --surface-sunken: #1a1a1a; --surface-muted: #2a2a2a;
-  --surface-page: #1a1a1a; --surface-code: #000000;
-  --border: #333333; --border-soft: #2a2a2a; --border-strong: #ffcc00;
-  --on-dark: #f7f7f7; --on-dark-muted: #c5cbd3; --on-dark-faint: #a0a8b0;
-  --accent: #ffcc00; --accent-foreground: #171717;
+  --brand: #c4933b;
+  --brand-deep: #141617;
+  --brand-soft: #35312a;
+  --brand-link: #d3a853;
+  --brand-accent: #d8b66b;
+  --ink: #edf0ed;
+  --ink-strong: #fbfcfa;
+  --ink-inverse: #171816;
+  --label: #c5cac5;
+  --text-muted: #aeb5af;
+  --muted-soft: #89918b;
+  --surface: #1d1f20;
+  --surface-sunken: #181a1b;
+  --surface-muted: #272a2b;
+  --surface-page: #121415;
+  --surface-code: #0c0d0e;
+  --border: #3a3e3e;
+  --border-soft: #2b2e2f;
+  --border-strong: #7e704f;
+  --on-dark: #edf0ed;
+  --on-dark-muted: #b8beb8;
+  --on-dark-faint: #8d958f;
+  --accent: #3a3324;
+  --accent-foreground: #e8c779;
+  --success-bg: #18352a;
+  --success-fg: #a7ddbf;
+  --success-dot: #5ca981;
+  --warning-bg: #3a301c;
+  --warning-fg: #e5c178;
+  --warning-dot: #b8903f;
+  --danger-bg: #3b2221;
+  --danger-fg: #efaaa3;
+  --danger-border: #70403c;
 }
 [data-theme="yellow-light"] {
-  --brand: #f2c200; --brand-deep: #ffffff; --brand-soft: #e6d78a;
-  --brand-link: #b89a00; --brand-accent: #f2c200;
-  --ink: #171a1f; --ink-strong: #0d0e10; --ink-inverse: #171717;
-  --label: #4b5563; --text-muted: #4b5563; --muted-soft: #6b7280;
-  --surface: #ffffff; --surface-sunken: #f6f7f9; --surface-muted: #f0f1f3;
-  --surface-page: #f6f7f9; --surface-code: #171a1f;
-  --border: #e5e7eb; --border-soft: #eee; --border-strong: #f2c200;
-  --on-dark: #171a1f; --on-dark-muted: #4b5563; --on-dark-faint: #6b7280;
-  --accent: #f2c200; --accent-foreground: #171717;
+  --brand: #8f6819;
+  --brand-deep: #433923;
+  --brand-soft: #665633;
+  --brand-link: #68490f;
+  --brand-accent: #d8b05a;
+  --ink: #29261f;
+  --ink-strong: #181610;
+  --ink-inverse: #fffaf0;
+  --label: #5d584d;
+  --text-muted: #6b6559;
+  --muted-soft: #8a8375;
+  --surface: #fffcf5;
+  --surface-sunken: #f7f2e8;
+  --surface-muted: #ede5d4;
+  --surface-page: #f3eee3;
+  --surface-code: #2c2922;
+  --border: #d9cfba;
+  --border-soft: #e9e1d2;
+  --border-strong: #a8894b;
+  --on-dark: #fff8e9;
+  --on-dark-muted: #e3d6bc;
+  --on-dark-faint: #bdae91;
+  --accent: #f0e2bf;
+  --accent-foreground: #604816;
+  --success-bg: #e6f1e5;
+  --success-fg: #356642;
+  --success-dot: #7ba884;
+  --warning-bg: #f7ead0;
+  --warning-fg: #765414;
+  --warning-dot: #c79a42;
+  --danger-bg: #f8e4df;
+  --danger-fg: #8f4037;
+  --danger-border: #dfb3aa;
 }
 [data-theme="blue-white"] {
-  --brand: #1d4ed8; --brand-deep: #16324f; --brand-soft: #1e40af;
-  --brand-link: #2563eb; --brand-accent: #93c5fd;
-  --ink: #172033; --ink-strong: #0f172a; --ink-inverse: #ffffff;
-  --label: #4b5563; --text-muted: #4b5563; --muted-soft: #6b7280;
-  --surface: #ffffff; --surface-sunken: #f1f5f9; --surface-muted: #e2e8f0;
-  --surface-page: #f1f5f9; --surface-code: #172033;
-  --border: #d1d5db; --border-soft: #e5e7eb; --border-strong: #1d4ed8;
-  --on-dark: #ffffff; --on-dark-muted: #c7d5e4; --on-dark-faint: #93a5b8;
-  --accent: #1d4ed8; --accent-foreground: #ffffff;
+  --brand: #315d83;
+  --brand-deep: #20384c;
+  --brand-soft: #34536a;
+  --brand-link: #244b6c;
+  --brand-accent: #83a9c5;
+  --ink: #24313b;
+  --ink-strong: #14212b;
+  --ink-inverse: #f7fbfd;
+  --label: #53636f;
+  --text-muted: #5d6c77;
+  --muted-soft: #82909a;
+  --surface: #fbfdfe;
+  --surface-sunken: #f4f7f9;
+  --surface-muted: #e4ebf0;
+  --surface-page: #edf2f5;
+  --surface-code: #1b2d3b;
+  --border: #cbd6dd;
+  --border-soft: #e0e7eb;
+  --border-strong: #7898ad;
+  --on-dark: #f1f7fa;
+  --on-dark-muted: #c8d8e2;
+  --on-dark-faint: #9eb4c2;
+  --accent: #dce8ef;
+  --accent-foreground: #294f6d;
+  --success-bg: #e1f0e9;
+  --success-fg: #2e684b;
+  --success-dot: #70aa8d;
+  --warning-bg: #f8ecd3;
+  --warning-fg: #795617;
+  --warning-dot: #c69b4e;
+  --danger-bg: #f7e3e1;
+  --danger-fg: #8f433e;
+  --danger-border: #deb5b1;
 }
 [data-theme="red-white"] {
-  --brand: #c62828; --brand-deep: #ffffff; --brand-soft: #ef9a9a;
-  --brand-link: #b91c1c; --brand-accent: #ef5350;
-  --ink: #25201f; --ink-strong: #171311; --ink-inverse: #ffffff;
-  --label: #514b49; --text-muted: #514b49; --muted-soft: #7a7470;
-  --surface: #ffffff; --surface-sunken: #f7f7f8; --surface-muted: #f0f0f1;
-  --surface-page: #f7f7f8; --surface-code: #25201f;
-  --border: #e0dcd9; --border-soft: #eee; --border-strong: #c62828;
-  --on-dark: #25201f; --on-dark-muted: #514b49; --on-dark-faint: #7a7470;
-  --accent: #c62828; --accent-foreground: #ffffff;
+  --brand: #9b4b45;
+  --brand-deep: #49302f;
+  --brand-soft: #6f4542;
+  --brand-link: #843e39;
+  --brand-accent: #d39a91;
+  --ink: #302725;
+  --ink-strong: #1f1817;
+  --ink-inverse: #fffafa;
+  --label: #625553;
+  --text-muted: #716361;
+  --muted-soft: #90817e;
+  --surface: #fffdfb;
+  --surface-sunken: #f8f5f3;
+  --surface-muted: #eee7e4;
+  --surface-page: #f3efed;
+  --surface-code: #302524;
+  --border: #d9cfcb;
+  --border-soft: #ebe3df;
+  --border-strong: #b17872;
+  --on-dark: #fff6f3;
+  --on-dark-muted: #e7ccc7;
+  --on-dark-faint: #c09f9a;
+  --accent: #f1deda;
+  --accent-foreground: #753a35;
+  --success-bg: #e4f0e7;
+  --success-fg: #356845;
+  --success-dot: #78aa87;
+  --warning-bg: #f7ead4;
+  --warning-fg: #765518;
+  --warning-dot: #c49a4d;
+  --danger-bg: #f5dfdc;
+  --danger-fg: #873d37;
+  --danger-border: #d9aaa4;
 }
 [data-theme="yellow-blue"] {
-  --brand: #f3c300; --brand-deep: #102a43; --brand-soft: #155e75;
-  --brand-link: #d9b000; --brand-accent: #f3c300;
-  --ink: #102a43; --ink-strong: #0b1e31; --ink-inverse: #102a43;
-  --label: #425b70; --text-muted: #425b70; --muted-soft: #64748b;
-  --surface: #ffffff; --surface-sunken: #eaf1f7; --surface-muted: #dbe8f2;
-  --surface-page: #eaf1f7; --surface-code: #102a43;
-  --border: #cbd5e1; --border-soft: #dce5ee; --border-strong: #f3c300;
-  --on-dark: #ffffff; --on-dark-muted: #d7e3ee; --on-dark-faint: #a9bfd0;
-  --accent: #f3c300; --accent-foreground: #102a43;
+  --brand: #a97925;
+  --brand-deep: #1c3348;
+  --brand-soft: #2e5369;
+  --brand-link: #8e641d;
+  --brand-accent: #caa358;
+  --ink: #243441;
+  --ink-strong: #142431;
+  --ink-inverse: #fffaf0;
+  --label: #536673;
+  --text-muted: #5a6b76;
+  --muted-soft: #83929b;
+  --surface: #fcfdfc;
+  --surface-sunken: #f3f6f6;
+  --surface-muted: #e3eaeb;
+  --surface-page: #ebf0f1;
+  --surface-code: #172b3d;
+  --border: #c8d3d6;
+  --border-soft: #dfe6e7;
+  --border-strong: #9f8a61;
+  --on-dark: #f6fafb;
+  --on-dark-muted: #cfdee4;
+  --on-dark-faint: #a3bac4;
+  --accent: #eee1c4;
+  --accent-foreground: #654b1b;
+  --success-bg: #e0efe8;
+  --success-fg: #306849;
+  --success-dot: #72a98a;
+  --warning-bg: #f5e7ca;
+  --warning-fg: #745116;
+  --warning-dot: #bd9140;
+  --danger-bg: #f5e2df;
+  --danger-fg: #8c413b;
+  --danger-border: #dcb0aa;
 }
 [data-theme="red-yellow-ivory"] {
-  --brand: #e0a800; --brand-deep: #8f2424; --brand-soft: #a5322f;
-  --brand-link: #c99900; --brand-accent: #ffd55a;
-  --ink: #3b2520; --ink-strong: #2a1a16; --ink-inverse: #ffffff;
-  --label: #62504a; --text-muted: #62504a; --muted-soft: #8a7870;
-  --surface: #fffdf7; --surface-sunken: #f6f0e2; --surface-muted: #efe6d3;
-  --surface-page: #f6f0e2; --surface-code: #3b2520;
-  --border: #e5d8c2; --border-soft: #efe6d3; --border-strong: #e0a800;
-  --on-dark: #ffffff; --on-dark-muted: #f4d6ce; --on-dark-faint: #d9b8ae;
-  --accent: #e0a800; --accent-foreground: #2d1c16;
+  --brand: #a04a3f;
+  --brand-deep: #67352f;
+  --brand-soft: #82463d;
+  --brand-link: #893e35;
+  --brand-accent: #d7b46d;
+  --ink: #352721;
+  --ink-strong: #241914;
+  --ink-inverse: #fffaf0;
+  --label: #66564e;
+  --text-muted: #74645b;
+  --muted-soft: #948178;
+  --surface: #fffaf0;
+  --surface-sunken: #f8f1e4;
+  --surface-muted: #eee2cf;
+  --surface-page: #f3eadb;
+  --surface-code: #36251f;
+  --border: #ddcfb9;
+  --border-soft: #ebe0cf;
+  --border-strong: #b58c56;
+  --on-dark: #fff5e9;
+  --on-dark-muted: #efd4c6;
+  --on-dark-faint: #cda99a;
+  --accent: #ead8b3;
+  --accent-foreground: #624718;
+  --success-bg: #e5efe2;
+  --success-fg: #3c6844;
+  --success-dot: #7da482;
+  --warning-bg: #f4e4c5;
+  --warning-fg: #735016;
+  --warning-dot: #bb8d3d;
+  --danger-bg: #f4ded8;
+  --danger-fg: #873d34;
+  --danger-border: #d7aaa0;
 }
 [data-theme="yellow-green"] {
-  --brand: #f0c419; --brand-deep: #24513f; --brand-soft: #2e6b53;
-  --brand-link: #d9ae00; --brand-accent: #f0c419;
-  --ink: #173a2b; --ink-strong: #0f2a1e; --ink-inverse: #173a2b;
-  --label: #465e53; --text-muted: #465e53; --muted-soft: #6a8075;
-  --surface: #ffffff; --surface-sunken: #eef4ea; --surface-muted: #ddebe0;
-  --surface-page: #eef4ea; --surface-code: #173a2b;
-  --border: #c9dac2; --border-soft: #ddebe0; --border-strong: #f0c419;
-  --on-dark: #ffffff; --on-dark-muted: #d6e8df; --on-dark-faint: #a9c4b5;
-  --accent: #f0c419; --accent-foreground: #173a2b;
+  --brand: #68782d;
+  --brand-deep: #30483b;
+  --brand-soft: #456451;
+  --brand-link: #5e6d27;
+  --brand-accent: #b1bf78;
+  --ink: #28352d;
+  --ink-strong: #18271e;
+  --ink-inverse: #f8fbf4;
+  --label: #536258;
+  --text-muted: #607066;
+  --muted-soft: #829087;
+  --surface: #fbfdf8;
+  --surface-sunken: #f4f7ef;
+  --surface-muted: #e4eadc;
+  --surface-page: #edf1e7;
+  --surface-code: #22352b;
+  --border: #ccd6c5;
+  --border-soft: #e0e6dc;
+  --border-strong: #8d9c68;
+  --on-dark: #f5faf4;
+  --on-dark-muted: #d2e0d5;
+  --on-dark-faint: #a8bcae;
+  --accent: #e2e8c9;
+  --accent-foreground: #4e5d20;
+  --success-bg: #dfeddf;
+  --success-fg: #336543;
+  --success-dot: #74a77f;
+  --warning-bg: #f3ead0;
+  --warning-fg: #705419;
+  --warning-dot: #b99a4d;
+  --danger-bg: #f5e2df;
+  --danger-fg: #8b433c;
+  --danger-border: #dcb3ad;
 }
 [data-theme="teal-dark"] {
-  --brand: #2dd4bf; --brand-deep: #07110f; --brand-soft: #0f2e29;
-  --brand-link: #5eead4; --brand-accent: #2dd4bf;
-  --ink: #f1f8f6; --ink-strong: #ffffff; --ink-inverse: #062620;
-  --label: #b9cbc6; --text-muted: #b9cbc6; --muted-soft: #8aa49c;
-  --surface: #182422; --surface-sunken: #101817; --surface-muted: #1f302d;
-  --surface-page: #101817; --surface-code: #000000;
-  --border: #2b3d39; --border-soft: #22312e; --border-strong: #2dd4bf;
-  --on-dark: #f5faf8; --on-dark-muted: #adc3bd; --on-dark-faint: #7e9b93;
-  --accent: #2dd4bf; --accent-foreground: #062620;
+  --brand: #5aa99b;
+  --brand-deep: #0e2525;
+  --brand-soft: #1d4542;
+  --brand-link: #85cabd;
+  --brand-accent: #78b7aa;
+  --ink: #eaf3f0;
+  --ink-strong: #f8fcfa;
+  --ink-inverse: #102321;
+  --label: #bdceca;
+  --text-muted: #aabdb8;
+  --muted-soft: #839c96;
+  --surface: #162b2b;
+  --surface-sunken: #112323;
+  --surface-muted: #1d3433;
+  --surface-page: #0c1c1d;
+  --surface-code: #081516;
+  --border: #344b49;
+  --border-soft: #263d3b;
+  --border-strong: #5d8e86;
+  --on-dark: #edf6f3;
+  --on-dark-muted: #b9cfca;
+  --on-dark-faint: #8eaaa4;
+  --accent: #244a46;
+  --accent-foreground: #a7d4cb;
+  --success-bg: #173a30;
+  --success-fg: #9bd7bb;
+  --success-dot: #57a784;
+  --warning-bg: #3b311f;
+  --warning-fg: #e3c17d;
+  --warning-dot: #b68f46;
+  --danger-bg: #3a2423;
+  --danger-fg: #eda9a2;
+  --danger-border: #6b413e;
 }
 
 /* 设置页主题选择器 */
@@ -2122,18 +2369,35 @@ summary:focus-visible {
   gap: var(--sp-2);
 }
 .theme-option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   background: var(--surface-sunken);
-  color: var(--text-muted);
+  color: var(--label);
   padding: var(--sp-2) var(--sp-3);
   cursor: pointer;
   font-size: var(--fs-sm);
 }
+.theme-option-swatches {
+  display: inline-flex;
+  align-items: center;
+}
+.theme-option-swatches > span {
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgb(0 0 0 / 14%);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 22%);
+}
+.theme-option-swatches > span + span {
+  margin-left: -4px;
+}
 .theme-option.active {
   border-color: var(--brand);
   background: var(--brand);
-  color: var(--surface);
+  color: var(--on-brand, var(--surface));
   font-weight: 600;
 }
 
@@ -2161,7 +2425,7 @@ summary:focus-visible {
   border: none;
   border-radius: var(--r-sm);
   background: transparent;
-  color: var(--ink-inverse);
+  color: var(--on-dark);
   font-size: var(--fs-md);
   font-weight: 600;
   font-family: inherit;
@@ -2219,7 +2483,7 @@ summary:focus-visible {
   color: var(--ink-strong);
 }
 .worklog-step {
-  color: var(--brand-soft);
+  color: var(--brand-link);
   font-weight: 600;
 }
 .worklog-detail {
@@ -2275,7 +2539,7 @@ summary:focus-visible {
 .ap-template-tabs button.active {
   border-color: var(--brand);
   background: var(--brand);
-  color: var(--surface);
+  color: var(--on-brand, var(--surface));
   font-weight: 600;
 }
 .ap-template-list {
@@ -2307,7 +2571,7 @@ summary:focus-visible {
   word-break: break-word;
 }
 .ap-template-kind {
-  color: var(--brand-soft);
+  color: var(--brand-link);
   font-size: var(--fs-xs);
   font-weight: 600;
 }
@@ -2341,4 +2605,144 @@ summary:focus-visible {
 .cache-result {
   font-size: 13px;
   font-variant-numeric: tabular-nums;
+}
+
+/* 任务进度弹窗：任何后台任务运行时由 JobDialog 弹出，
+   支持暂停/继续/停止；最小化后收成右下角一条常驻小窗。 */
+.job-dialog {
+  width: min(520px, calc(100vw - 2 * var(--sp-5)));
+}
+
+/* 字段后的星号跟随当前识别出的 TB/JE 形态，而不是固定字段字典。
+   在所有共用 MappingPanel 的工具中用同一条说明，避免用户猜测标记含义。 */
+.mapping-requirement-legend {
+  margin: var(--sp-2) 0 0 !important;
+  color: var(--text-muted) !important;
+  font-size: var(--fs-xs) !important;
+}
+.job-dialog-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.job-dialog-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.job-dialog-row-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.job-dialog-message {
+  margin: 0;
+  color: var(--label);
+  font-size: var(--fs-sm);
+}
+.job-dialog-row progress {
+  width: 100%;
+  height: 6px;
+  accent-color: var(--brand-accent);
+  border-radius: var(--r-pill);
+}
+.job-dialog-row progress.progress-tone-warning {
+  accent-color: var(--warning-dot);
+}
+.job-dialog-row progress.progress-tone-danger {
+  accent-color: var(--danger-fg);
+}
+.job-dialog-row progress.progress-tone-success {
+  accent-color: var(--success-fg);
+}
+.job-dialog-row-actions,
+.job-dialog-footer {
+  display: flex;
+  gap: var(--sp-2);
+}
+.job-dialog-footer {
+  justify-content: flex-end;
+}
+/* 最小化后的常驻小条。固定在右下角，点击展开回弹窗。 */
+.job-dialog-pill {
+  position: fixed;
+  right: var(--sp-5);
+  bottom: var(--sp-5);
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--card);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 12%);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.job-dialog-pill:hover {
+  border-color: var(--brand-accent);
+}
+.job-dialog-pill-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--r-pill);
+  background: var(--brand-accent);
+  animation: job-dialog-pulse 1.4s ease-in-out infinite;
+}
+@keyframes job-dialog-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+/* 开发版徽标：开发窗口与安装版界面完全一致，不打标会分不清哪个窗口带着最新代码 */
+.dev-build-badge {
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: rgba(245, 158, 11, 0.22);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  color: #fbbf24;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+/* 同步操作等待窗（导入/OCR 这类一口气完成的调用），比任务弹窗更轻 */
+.sync-busy-dialog {
+  width: min(430px, calc(100vw - 48px));
+}
+.sync-busy-body {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+}
+.sync-busy-spinner {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin-top: 2px;
+  border-radius: 50%;
+  border: 3px solid var(--surface-muted);
+  border-top-color: var(--brand);
+  animation: sync-busy-spin 0.8s linear infinite;
+}
+@keyframes sync-busy-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.sync-busy-text {
+  min-width: 0;
+}
+.sync-busy-list {
+  margin: var(--sp-1) 0 0;
+  padding-left: var(--sp-4);
+}
+.sync-busy-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--sp-3);
 }

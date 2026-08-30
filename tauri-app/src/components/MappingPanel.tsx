@@ -31,6 +31,13 @@ export type MappingPanelProps = {
   /** 尚未映射的必填项，直接展示给用户。 */
   missing?: string[];
   /**
+   * 表格上方的附加提示区：复核状态、大文件抽样警告、需要用户确认的选项等。
+   *
+   * 这些内容原先各自占一张卡片，与紧挨着的预览表分成两块，界面很碎。
+   * 收进面板里跟着同一份数据走，用户不必在两张卡片之间来回对照。
+   */
+  banner?: React.ReactNode;
+  /**
    * 某个角色在**当前命中的形态**下是必填还是选填。
    *
    * 借款台账的必填项随命中的型号变（类型1 要到期日、类型2 要期限、
@@ -186,9 +193,15 @@ export function MappingPanel(props: MappingPanelProps) {
         {props.toolbar ? <div className="mapping-panel-toolbar">{props.toolbar}</div> : null}
       </div>
       {props.formNote ? <p className="mapping-form-note">{props.formNote}</p> : null}
+      {props.requirementOf ? (
+        <p className="mapping-requirement-legend">
+          ＊ 当前识别形态必填；（选填）为可补充字段；未标记字段不属于当前形态要求。
+        </p>
+      ) : null}
       {props.missing && props.missing.length > 0 && (
         <p className="fa-missing-hint">尚未映射：{props.missing.join("、")}</p>
       )}
+      {props.banner}
       <DataTable
         columns={headers}
         rows={rows}

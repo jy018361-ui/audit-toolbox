@@ -3194,11 +3194,12 @@ mod tests {
     }
 
     fn wired_match_params(db: &Path, job_id: &str) -> Value {
-        // 文件名独立于其他测试的同目录样例，cargo test 并行执行时互不覆盖。
+        // 文件名带 jobId：本辅助函数被多个测试并行调用，固定名会在「一个测试
+        // 还在写 xlsx、另一个已开读」的瞬间交出半个 zip（EOCD 缺失）。
         let dir = std::env::temp_dir().join("fuzzy_match_tests");
         fs::create_dir_all(&dir).unwrap();
-        let a_path = dir.join("接线a侧.xlsx");
-        let b_path = dir.join("接线b侧.xlsx");
+        let a_path = dir.join(format!("接线a侧-{job_id}.xlsx"));
+        let b_path = dir.join(format!("接线b侧-{job_id}.xlsx"));
         write_fixture(
             &a_path,
             &["公司名称"],

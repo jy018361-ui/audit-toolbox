@@ -36,13 +36,46 @@ export async function appBootstrap() {
 }
 
 export async function toolCatalog() {
-  const data = inTauri()
-    ? await invoke("tool_catalog")
-    : await fetch("/tool-catalog.json").then((response) => {
-        if (!response.ok) throw new Error("工具目录加载失败，请刷新后重试。");
-        return response.json();
-      });
+  // 正式版继续读取 Rust 编译时内嵌的清单，保证离线可用且内容固定。
+  // 开发版直接读取 Vite 的 public 文件，否则 include_str! 只有重编 Rust
+  // 才会更新，前端热更新后仍会看到旧的 migrationStatus。
+  const useLiveCatalog = import.meta.env.DEV || !inTauri();
+  const data = useLiveCatalog
+    ? await fetch("/tool-catalog.json", { cache: "no-store" }).then(
+        (response) => {
+          if (!response.ok) throw new Error("工具目录加载失败，请刷新后重试。");
+          return response.json();
+        },
+      )
+    : await invoke("tool_catalog");
   return ToolManifestSchema.array().parse(data);
+}
+
+// —— 同步调用的全局等待提示 ——
+// engine_call 类操作（导入文档、OCR 识别、读取大表）没有事件流可听，各页面
+// 只能在按钮上转圈，用户不知道要等多久、甚至以为卡死。这里把进行中的调用
+// 集中广播出去，App 层统一弹「正在处理」等待窗（见 SyncBusyDialog）。
+export type SyncBusyEntry = { id: number; method: string };
+
+const syncBusyListeners = new Set<(entries: SyncBusyEntry[]) => void>();
+let syncBusySeq = 0;
+const syncBusyActive = new Map<number, string>();
+
+function syncBusySnapshot(): SyncBusyEntry[] {
+  return [...syncBusyActive].map(([id, method]) => ({ id, method }));
+}
+
+function notifySyncBusy() {
+  for (const listener of syncBusyListeners) listener(syncBusySnapshot());
+}
+
+/** 订阅进行中的同步调用；返回退订函数。订阅时会立刻收到当前快照。 */
+export function onSyncBusyChange(
+  listener: (entries: SyncBusyEntry[]) => void,
+): () => void {
+  syncBusyListeners.add(listener);
+  listener(syncBusySnapshot());
+  return () => syncBusyListeners.delete(listener);
 }
 
 export async function engineCall(
@@ -51,7 +84,15 @@ export async function engineCall(
 ) {
   if (!inTauri())
     throw new Error("浏览器预览模式不能处理本地文件，请使用 Tauri 应用。 ");
-  return invoke<unknown>("engine_call", { method, params });
+  const id = ++syncBusySeq;
+  syncBusyActive.set(id, method);
+  notifySyncBusy();
+  try {
+    return await invoke<unknown>("engine_call", { method, params });
+  } finally {
+    syncBusyActive.delete(id);
+    notifySyncBusy();
+  }
 }
 
 export async function jobStart(

@@ -11,15 +11,19 @@ import {
   pickPath,
 } from "./api";
 import { PageHeader } from "@/components/PageHeader";
+import { errorText } from "@/lib/errors";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { StepIndicator } from "@/components/StepIndicator";
 import {
   missingGoldIdentity,
   resolveLedgerPairKinds,
+  resolveRoleLabels,
   reviewLedgerSourceClassification,
+  type EngineRoleLabels,
 } from "@/ledgerMapping";
 import { MappingPanel } from "@/components/MappingPanel";
 import {
@@ -56,7 +60,10 @@ export type Inspection = {
   entities: string[];
   accounts: string[];
   suggestedMapping: Record<string, string | string[]>;
+  /** 引擎随识别结果全量下发的角色标签（`{name,label}`）；缺失时回落本页的标签表。 */
+  roles?: EngineRoleLabels;
   suggestedAccountRoles: Record<string, string>;
+  suggestedAccountTiers?: Record<string, string>;
   mappingCandidates: Array<{
     role: string;
     candidates: Array<{
@@ -392,6 +399,14 @@ export function depositRateOutOfPractice(
   return rate < tier.practiceLow || rate > tier.practiceHigh;
 }
 
+function HelpTip({ text }: { text: string }) {
+  return (
+    <span className="deposit-help" title={text} aria-label={text} tabIndex={0}>
+      ⓘ
+    </span>
+  );
+}
+
 export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const [jePath, setJePath] = useState("");
   const [tbPath, setTbPath] = useState("");
@@ -405,6 +420,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   );
   const [accountRoles, setAccountRoles] = useState<Record<string, string>>({});
   const [accountRoleOverrides, setAccountRoleOverrides] = useState<
+    Record<string, string>
+  >({});
+  const [accountTierOverrides, setAccountTierOverrides] = useState<
     Record<string, string>
   >({});
   const [accountFilter, setAccountFilter] = useState("");
@@ -422,6 +440,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const [outputPath, setOutputPath] = useState("");
   const [sourceStatus, setSourceStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  // 三步导引，与汇兑损益／FA 一致：上传识别 → 科目分类 → 测算与底稿。
+  const [step, setStep] = useState(0);
   const [error, setError] = useState("");
   const [job, setJob] = useState<JobEvent>();
   const activeJob = useRef("");
@@ -494,7 +514,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         setBusy(false);
         const payload = event.result as
           { error?: { userMessage?: string } } | undefined;
-        setError(payload?.error?.userMessage ?? event.message);
+        setError(payload?.error ? errorText(payload.error) : event.message);
       }
     });
     return () => {
@@ -657,6 +677,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         : {}),
       accountRoles,
       accountRoleOverrides,
+      accountTierOverrides,
       rateOverrides,
       tierRates,
       ...(outputPath ? { outputPath } : {}),
@@ -737,388 +758,534 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     );
   }
 
+  // 测算前还缺什么：TB 没传或必填映射没齐都列在这里，第三步直接提示并
+  // 拦下测算按钮，不用等点了按钮才从报错里猜（与汇兑损益同一待遇）。
+  const requiredMappingsMissing = [
+    ...(!tbPath
+      ? ["TB 未上传"]
+      : depositMissingRequired("tb", tbMapping, Boolean(jePath)).map(
+          (item) => `TB ${item}`,
+        )),
+    ...(jePath
+      ? depositMissingRequired("je", jeMapping).map((item) => `序时账 ${item}`)
+      : []),
+  ];
+  const accountTier = (account: string) =>
+    accountTierOverrides[account] ??
+    tb?.suggestedAccountTiers?.[account] ??
+    je?.suggestedAccountTiers?.[account] ??
+    "demand";
+  const accountCategory = (account: string) =>
+    tiers?.tiers.find((tier) => tier.key === accountTier(account))?.category ??
+    "demand";
+
   return (
     <main className="tool-page fx-page deposit-page">
       <PageHeader
         eyebrow="货币资金审计"
         title={tool.name}
-        detail="识别货币资金科目，按序时账还原逐月余额，以（月初＋月末）÷2 的月均余额乘存款利率重算利息，并与 TB 利息收入勾稽。"
+        detail="按月均余额重算存款利息，并与 TB 勾稽。"
       />
       <ErrorBox error={error} onDismiss={() => setError("")} />
-
-      <Card>
-        <CardHeader>
-          <CardTitle>上传审计数据</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="fx-hint">
-            TB
-            和序时账使用同一入口，可一次拖入两个文件；系统按表格结构自动判定类型、标题行和字段映射。TB
-            必传，序时账用于还原每月余额波动。
-          </p>
-          <FileDropInput
-            containerRef={uploadDropRef}
-            value={[
-              tbPath && `TB：${fileName(tbPath)}`,
-              jePath && `序时账：${fileName(jePath)}`,
-            ]
-              .filter(Boolean)
-              .join("；")}
-            disabled={busy}
-            placeholder="拖放或选择 TB、序时账文件（可同时选择）"
-            onBrowse={() => void browse()}
-            onDragStateChange={() => {}}
-            onClear={() => {
-              reviews.clearReview("je");
-              reviews.clearReview("tb");
-              setAccountRoleOverrides({});
-              setJePath("");
-              setTbPath("");
-              setJe(undefined);
-              setTb(undefined);
-              setJeMapping({});
-              setTbMapping({});
-              setRows([]);
-              setResult(undefined);
-              setSourceStatus("");
-            }}
-          />
-          {sourceStatus && (
-            <p className="fx-source-status" aria-live="polite">
-              {sourceStatus}
-            </p>
-          )}
-        </CardContent>
-      </Card>
-
-      <div className="fx-source-grid">
-        <div className="fx-source-slot fx-source-slot-je">
-          {jePath ? (
-            <SourceCard
-              title="已识别：JE 序时账"
-              hint="逐月余额波动的数据源；不上传则退回年初/年末两点法"
-              path={jePath}
-              inspection={je}
-              disabled={busy}
-              onClear={() => {
-                reviews.clearReview("je");
-                setAccountRoleOverrides({});
-                setJePath("");
-                setJe(undefined);
-                setJeMapping({});
-              }}
-              onInspect={() => void inspect("je")}
-              onHeaderChange={(row, depth, sheet) =>
-                void inspect("je", {
-                  headerRow: row,
-                  headerDepth: depth,
-                  sheet,
-                })
-              }
-            />
-          ) : tbPath ? (
-            <Card className="fx-source-empty">
-              <CardHeader>
-                <CardTitle>JE 序时账</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p>未上传 JE；当前将使用 TB 两点法。</p>
-              </CardContent>
-            </Card>
-          ) : null}
-        </div>
-        <div className="fx-source-slot fx-source-slot-tb">
-          {tbPath ? (
-            <SourceCard
-              title="已识别：TB 科目余额表"
-              hint="年初/年末余额与利息收入勾稽的数据源"
-              path={tbPath}
-              inspection={tb}
-              disabled={busy}
-              onClear={() => {
-                reviews.clearReview("tb");
-                setAccountRoleOverrides({});
-                setTbPath("");
-                setTb(undefined);
-                setTbMapping({});
-              }}
-              onInspect={() => void inspect("tb")}
-              onHeaderChange={(row, depth, sheet) =>
-                void inspect("tb", {
-                  headerRow: row,
-                  headerDepth: depth,
-                  sheet,
-                })
-              }
-            />
-          ) : jePath ? (
-            <Card className="fx-source-empty">
-              <CardHeader>
-                <CardTitle>TB 科目余额表</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p>未识别到 TB；请补充上传或检查文件表头。</p>
-              </CardContent>
-            </Card>
-          ) : null}
-        </div>
-      </div>
-
-      {(tb || je) && (
-        <LedgerReviewAll
-          present={tb && je ? ["tb", "je"] : tb ? ["tb"] : ["je"]}
-          names={{ tb: "TB", je: "序时账" }}
-          reviewing={reviews.reviewing}
-          status={reviews.status}
-          disabled={busy}
-          onReviewAll={() =>
-            void reviews.reviewAll({
-              tb: tb
-                ? {
-                    headers: tb.headers,
-                    preview: tb.preview,
-                    mapping: tbMapping,
-                    labels: TB_LABELS,
-                    onApplied: setTbMapping,
-                  }
-                : undefined,
-              je: je
-                ? {
-                    headers: je.headers,
-                    preview: je.preview,
-                    mapping: jeMapping,
-                    labels: JE_LABELS,
-                    onApplied: setJeMapping,
-                  }
-                : undefined,
-            })
-          }
-        />
-      )}
-
-      <div className="fx-preview-stack">
-        {tb && (
-          <MappingPreview
-            title="TB 文件预览"
-            kind="tb"
-            inspection={tb}
-            mapping={tbMapping}
-            labels={TB_LABELS}
-            missing={depositMissingRequired("tb", tbMapping, Boolean(jePath))}
-            onMappingChange={setTbMapping}
-            reviewBusy={reviews.reviewing.tb}
-          />
-        )}
-        {je && (
-          <MappingPreview
-            title="序时账文件预览"
-            kind="je"
-            inspection={je}
-            mapping={jeMapping}
-            labels={JE_LABELS}
-            missing={depositMissingRequired("je", jeMapping)}
-            onMappingChange={setJeMapping}
-            reviewBusy={reviews.reviewing.je}
-          />
-        )}
-      </div>
-
-      {accounts.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>科目分类</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="fx-hint">
-              已识别计息货币资金科目 <b>{depositAccounts.length}</b>{" "}
-              个、利息收入科目 <b>{interestAccounts.length}</b> 个。
-              利息收入科目是测算结果的比较基准，没有它就只能得到测算值、无法勾稽。
-            </p>
-            <details open={!interestAccounts.length}>
-              <summary>逐个核对科目分类</summary>
-              <KeywordFilter
-                value={accountFilter}
-                onChange={setAccountFilter}
-                ariaLabel="筛选科目"
-                placeholder="输入科目编码或名称关键词，即时过滤（多个词用空格分隔）"
-                matched={visibleAccounts.length}
-                total={accounts.length}
+      <StepIndicator
+        steps={[
+          { key: "source", label: "上传与识别" },
+          // 利率档位与官方查询入口是参考资料，没上传文件也该看得到，
+          // 所以第二步始终可进；测算那步没数据可跑，没传文件时置灰。
+          { key: "accounts", label: "科目与利率确认" },
+          { key: "run", label: "测算与底稿", disabled: !tb && !je },
+        ]}
+        current={step}
+        onStepClick={setStep}
+      />
+      {step === 0 && (
+        <>
+          <Card>
+            <CardHeader>
+              <CardTitle>
+                上传审计数据
+                <HelpTip text="TB 必传；序时账选传，用于还原每月余额。可一次拖入两个文件，系统会自动判断类型、标题行和字段。" />
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <FileDropInput
+                containerRef={uploadDropRef}
+                value={[
+                  tbPath && `TB：${fileName(tbPath)}`,
+                  jePath && `序时账：${fileName(jePath)}`,
+                ]
+                  .filter(Boolean)
+                  .join("；")}
+                disabled={busy}
+                placeholder="拖放或选择 TB、序时账文件（可同时选择）"
+                onBrowse={() => void browse()}
+                onDragStateChange={() => {}}
+                onClear={() => {
+                  reviews.clearReview("je");
+                  reviews.clearReview("tb");
+                  setAccountRoleOverrides({});
+                  setJePath("");
+                  setTbPath("");
+                  setJe(undefined);
+                  setTb(undefined);
+                  setJeMapping({});
+                  setTbMapping({});
+                  setRows([]);
+                  setResult(undefined);
+                  setSourceStatus("");
+                }}
               />
-              <div className="fx-list fx-accounts">
-                {visibleAccounts.map((account) => (
-                  <label key={account}>
-                    <span title={account}>{account}</span>
-                    <select
-                      aria-label={`${account}的分类`}
-                      value={accountRoleOverrides[account] ?? ""}
-                      onChange={(e) => {
-                        const value = e.target.value;
-                        setAccountRoleOverrides((current) => {
-                          const next = { ...current };
-                          if (value) next[account] = value;
-                          else delete next[account];
-                          return next;
-                        });
-                      }}
-                    >
-                      <option value="">
-                        自动（
-                        {
-                          ROLE_OPTIONS.find(
-                            ([role]) =>
-                              role ===
-                              (tb?.suggestedAccountRoles?.[account] ??
-                                je?.suggestedAccountRoles?.[account] ??
-                                "excluded"),
-                          )?.[1]
-                        }
-                        ）
-                      </option>
-                      {ROLE_OPTIONS.map(([value, label]) => (
-                        <option key={value} value={value}>
-                          {label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ))}
-              </div>
-              {accounts.length > 0 && visibleAccounts.length === 0 && (
-                <p className="fx-hint">
-                  没有匹配「{accountFilter.trim()}」的科目。
+              {sourceStatus && (
+                <p className="fx-source-status" aria-live="polite">
+                  {sourceStatus}
                 </p>
               )}
-            </details>
-            <p className="fx-hint">
-              自动分类不等同于手工排除；上级科目的手工分类会用于自动未识别的末级。手工指定末级优先，选择“自动”可撤销指定。重新识别文件后需重新核对分类。
-            </p>
-          </CardContent>
-        </Card>
-      )}
+            </CardContent>
+          </Card>
 
-      <RateTierCard
-        tiers={tiers}
-        custom={tierRates}
-        onChange={(key, rate) =>
-          setTierRates((current) => {
-            const next = { ...current };
-            if (Number.isFinite(rate)) next[key] = rate;
-            else delete next[key];
-            return next;
-          })
-        }
-        onReset={() => setTierRates({})}
-      />
-
-      <Card>
-        <CardHeader>
-          <CardTitle>测算与底稿</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="deposit-run-grid">
-            <label>
-              资产负债表日
-              <input
-                type="date"
-                value={reportEnd}
-                onChange={(e) => setReportEnd(e.target.value)}
-              />
-            </label>
-            <label>
-              计息口径
-              <select
-                value={dayBasis}
-                onChange={(e) => setDayBasis(e.target.value as DayBasis)}
-              >
-                {DAY_BASIS_OPTIONS.map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="deposit-check">
-              <input
-                type="checkbox"
-                checked={includeCashOnHand}
-                onChange={(e) => setIncludeCashOnHand(e.target.checked)}
-              />
-              库存现金也计息
-            </label>
-            <label>
-              输出文件
-              <span className="deposit-output-row">
-                <input
-                  value={outputPath}
-                  readOnly
-                  placeholder="默认保存到源文件目录"
-                />
-                <Button
-                  variant="secondary"
-                  onClick={async () => {
-                    const path = await pickPath(
-                      "save",
-                      "保存审计底稿",
-                      ["xlsx"],
-                      "存款利息收入测算.xlsx",
-                    );
-                    if (typeof path === "string") setOutputPath(path);
+          <div className="fx-source-grid">
+            <div className="fx-source-slot fx-source-slot-je">
+              {jePath ? (
+                <SourceCard
+                  title="已识别：JE 序时账"
+                  hint="逐月余额波动的数据源；不上传则退回年初/年末两点法"
+                  path={jePath}
+                  inspection={je}
+                  disabled={busy}
+                  onClear={() => {
+                    reviews.clearReview("je");
+                    setAccountRoleOverrides({});
+                    setJePath("");
+                    setJe(undefined);
+                    setJeMapping({});
                   }}
-                >
-                  选择位置
-                </Button>
-              </span>
-            </label>
+                  onInspect={() => void inspect("je")}
+                  onHeaderChange={(row, depth, sheet) =>
+                    void inspect("je", {
+                      headerRow: row,
+                      headerDepth: depth,
+                      sheet,
+                    })
+                  }
+                />
+              ) : tbPath ? (
+                <Card className="fx-source-empty">
+                  <CardHeader>
+                    <CardTitle>JE 序时账</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p>未上传 JE；当前将使用 TB 两点法。</p>
+                  </CardContent>
+                </Card>
+              ) : null}
+            </div>
+            <div className="fx-source-slot fx-source-slot-tb">
+              {tbPath ? (
+                <SourceCard
+                  title="已识别：TB 科目余额表"
+                  hint="年初/年末余额与利息收入勾稽的数据源"
+                  path={tbPath}
+                  inspection={tb}
+                  disabled={busy}
+                  onClear={() => {
+                    reviews.clearReview("tb");
+                    setAccountRoleOverrides({});
+                    setTbPath("");
+                    setTb(undefined);
+                    setTbMapping({});
+                  }}
+                  onInspect={() => void inspect("tb")}
+                  onHeaderChange={(row, depth, sheet) =>
+                    void inspect("tb", {
+                      headerRow: row,
+                      headerDepth: depth,
+                      sheet,
+                    })
+                  }
+                />
+              ) : jePath ? (
+                <Card className="fx-source-empty">
+                  <CardHeader>
+                    <CardTitle>TB 科目余额表</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p>未识别到 TB；请补充上传或检查文件表头。</p>
+                  </CardContent>
+                </Card>
+              ) : null}
+            </div>
           </div>
-          {jePath && (
-            <p className="deposit-layout">
-              当前序时账布局：{JE_LAYOUT_LABEL[depositJeLayout(jeMapping)]}
-              （由你映射的列决定）；金额符号记法由系统按凭证配平自动识别，测算结果中会披露判定依据。
-            </p>
-          )}
-          <p className="fx-rate-note">
-            只有<b>活期</b>
-            自动套用挂牌默认利率——对公活期没有议价空间。协定、通知、定期、大额存单的利率是逐笔合同约定的，
-            默认留空，填入实际利率后才计入测算合计。央行基准只作合理性上限参照，不参与测算。
-          </p>
-          <p className="fx-rate-note">
-            未上传序时账时，月末余额按年初到年末直线推算，月均余额仅供参考，底稿会标注为“两点法推算”。
-          </p>
-          <div className="fx-actions">
-            <Button
-              variant="secondary"
-              disabled={busy || reviewingAny}
-              onClick={() => void run("deposit.preview")}
-            >
-              测算预览
-            </Button>
-            <Button
-              disabled={busy || reviewingAny}
-              onClick={() => void run("deposit.export")}
-            >
-              生成 Excel 底稿
-            </Button>
-          </div>
-          {job && (
-            <JobProgress
-              job={job}
-              onCancel={busy ? (id) => void jobCancel(id) : undefined}
+
+          {(tb || je) && (
+            <LedgerReviewAll
+              present={tb && je ? ["tb", "je"] : tb ? ["tb"] : ["je"]}
+              names={{ tb: "TB", je: "序时账" }}
+              reviewing={reviews.reviewing}
+              status={reviews.status}
+              disabled={busy}
+              onReviewAll={() =>
+                void reviews.reviewAll({
+                  tb: tb
+                    ? {
+                        headers: tb.headers,
+                        preview: tb.preview,
+                        mapping: tbMapping,
+                        labels: resolveRoleLabels(tb.roles, TB_LABELS),
+                        onApplied: setTbMapping,
+                        missingAfter: (mapping) =>
+                          depositMissingRequired(
+                            "tb",
+                            mapping,
+                            Boolean(jePath),
+                          ),
+                      }
+                    : undefined,
+                  je: je
+                    ? {
+                        headers: je.headers,
+                        preview: je.preview,
+                        mapping: jeMapping,
+                        labels: resolveRoleLabels(je.roles, JE_LABELS),
+                        onApplied: setJeMapping,
+                        missingAfter: (mapping) =>
+                          depositMissingRequired("je", mapping),
+                      }
+                    : undefined,
+                })
+              }
             />
           )}
-        </CardContent>
-      </Card>
 
-      {rows.length > 0 && (
-        <Results
-          rows={rows}
-          result={result}
-          tiers={tiers}
-          expanded={expanded}
-          onExpand={setExpanded}
-          onOverride={overrideRow}
-          onRecalculate={() => void run("deposit.preview")}
-          busy={busy}
-        />
+          <div className="fx-preview-stack">
+            {tb && (
+              <MappingPreview
+                title="TB 文件预览与字段映射"
+                kind="tb"
+                inspection={tb}
+                mapping={tbMapping}
+                labels={TB_LABELS}
+                missing={depositMissingRequired(
+                  "tb",
+                  tbMapping,
+                  Boolean(jePath),
+                )}
+                banner={
+                  <p aria-live="polite" className="fx-hint">
+                    {reviews.reviewing.tb
+                      ? "正在复核字段映射；复核期间暂时锁定。"
+                      : reviews.status.tb ||
+                        "脚本已自动映射，可直接核对，或用上方一键复核。"}
+                  </p>
+                }
+                onMappingChange={setTbMapping}
+                reviewBusy={reviews.reviewing.tb}
+              />
+            )}
+            {je && (
+              <MappingPreview
+                title="序时账文件预览与字段映射"
+                kind="je"
+                inspection={je}
+                mapping={jeMapping}
+                labels={JE_LABELS}
+                missing={depositMissingRequired("je", jeMapping)}
+                banner={
+                  <p aria-live="polite" className="fx-hint">
+                    {reviews.reviewing.je
+                      ? "正在复核字段映射；复核期间暂时锁定。"
+                      : reviews.status.je ||
+                        "脚本已自动映射，可直接核对，或用上方一键复核。"}
+                  </p>
+                }
+                onMappingChange={setJeMapping}
+                reviewBusy={reviews.reviewing.je}
+              />
+            )}
+          </div>
+          <div className="fx-step-actions">
+            <Button onClick={() => setStep(1)}>下一步：科目与利率确认</Button>
+          </div>
+        </>
+      )}
+      {step === 1 && (
+        <>
+          {accounts.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle>科目分类</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="deposit-account-summary">
+                  计息科目 <b>{depositAccounts.length}</b> · 利息收入{" "}
+                  <b>{interestAccounts.length}</b>
+                  <HelpTip text="利息收入是 TB 比较基准；未设置时仍可测算，但不能勾稽。存款类型关联下方利率档位；名称无法判断时默认活期。" />
+                </p>
+                <details open={!interestAccounts.length}>
+                  <summary>逐个核对科目分类</summary>
+                  <KeywordFilter
+                    value={accountFilter}
+                    onChange={setAccountFilter}
+                    ariaLabel="筛选科目"
+                    placeholder="输入科目编码或名称关键词，即时过滤（多个词用空格分隔）"
+                    matched={visibleAccounts.length}
+                    total={accounts.length}
+                  />
+                  <div className="fx-list fx-accounts deposit-account-list">
+                    <div className="deposit-account-head" aria-hidden="true">
+                      <span>科目</span>
+                      <span>分类</span>
+                      <span>存款类型</span>
+                    </div>
+                    {visibleAccounts.map((account) => (
+                      <label key={account}>
+                        <span title={account}>{account}</span>
+                        <select
+                          aria-label={`${account}的分类`}
+                          value={accountRoleOverrides[account] ?? ""}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setAccountRoleOverrides((current) => {
+                              const next = { ...current };
+                              if (value) next[account] = value;
+                              else delete next[account];
+                              return next;
+                            });
+                          }}
+                        >
+                          <option value="">
+                            自动（
+                            {
+                              ROLE_OPTIONS.find(
+                                ([role]) =>
+                                  role ===
+                                  (tb?.suggestedAccountRoles?.[account] ??
+                                    je?.suggestedAccountRoles?.[account] ??
+                                    "excluded"),
+                              )?.[1]
+                            }
+                            ）
+                          </option>
+                          {ROLE_OPTIONS.map(([value, label]) => (
+                            <option key={value} value={value}>
+                              {label}
+                            </option>
+                          ))}
+                        </select>
+                        {["deposit", "other_monetary", "cash_on_hand"].includes(
+                          accountRoles[account] ?? "",
+                        ) ? (
+                          <div className="deposit-account-tier">
+                            <select
+                              aria-label={`${account}的存款类型`}
+                              value={accountCategory(account)}
+                              onChange={(e) =>
+                                setAccountTierOverrides((current) => ({
+                                  ...current,
+                                  [account]: depositFirstTierOf(
+                                    tiers,
+                                    e.target.value,
+                                  ),
+                                }))
+                              }
+                            >
+                              {(tiers?.categories ?? []).map((category) => (
+                                <option key={category.key} value={category.key}>
+                                  {category.label}
+                                </option>
+                              ))}
+                            </select>
+                            {depositTermsOf(tiers, accountCategory(account))
+                              .length > 0 && (
+                              <select
+                                aria-label={`${account}的存款期限`}
+                                value={accountTier(account)}
+                                onChange={(e) =>
+                                  setAccountTierOverrides((current) => ({
+                                    ...current,
+                                    [account]: e.target.value,
+                                  }))
+                                }
+                              >
+                                {depositTermsOf(
+                                  tiers,
+                                  accountCategory(account),
+                                ).map((term) => (
+                                  <option key={term.key} value={term.key}>
+                                    {term.label}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="deposit-account-na">—</span>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                  {accounts.length > 0 && visibleAccounts.length === 0 && (
+                    <p className="fx-hint">
+                      没有匹配「{accountFilter.trim()}」的科目。
+                    </p>
+                  )}
+                </details>
+              </CardContent>
+            </Card>
+          )}
+
+          <RateTierCard
+            tiers={tiers}
+            custom={tierRates}
+            onChange={(key, rate) =>
+              setTierRates((current) => {
+                const next = { ...current };
+                if (Number.isFinite(rate)) next[key] = rate;
+                else delete next[key];
+                return next;
+              })
+            }
+            onReset={() => setTierRates({})}
+          />
+
+          <div className="fx-step-actions">
+            <Button variant="secondary" onClick={() => setStep(0)}>
+              返回上传与识别
+            </Button>
+            <Button onClick={() => setStep(2)}>下一步：测算与底稿</Button>
+          </div>
+        </>
+      )}
+      {step === 2 && (
+        <>
+          <Card>
+            <CardHeader>
+              <CardTitle>
+                测算与底稿
+                <HelpTip text="仅活期自动使用默认利率；其他类型须填写协议利率。未上传序时账时采用期初/期末两点法。" />
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="deposit-run-grid">
+                <label>
+                  资产负债表日
+                  <input
+                    type="date"
+                    value={reportEnd}
+                    onChange={(e) => setReportEnd(e.target.value)}
+                  />
+                </label>
+                <label>
+                  计息口径
+                  <select
+                    value={dayBasis}
+                    onChange={(e) => setDayBasis(e.target.value as DayBasis)}
+                  >
+                    {DAY_BASIS_OPTIONS.map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="deposit-check">
+                  <input
+                    type="checkbox"
+                    checked={includeCashOnHand}
+                    onChange={(e) => setIncludeCashOnHand(e.target.checked)}
+                  />
+                  库存现金也计息
+                </label>
+                <label>
+                  输出文件
+                  <span className="deposit-output-row">
+                    <input
+                      value={outputPath}
+                      readOnly
+                      placeholder="默认保存到源文件目录"
+                    />
+                    <Button
+                      variant="secondary"
+                      onClick={async () => {
+                        const path = await pickPath(
+                          "save",
+                          "保存审计底稿",
+                          ["xlsx"],
+                          "存款利息收入测算.xlsx",
+                        );
+                        if (typeof path === "string") setOutputPath(path);
+                      }}
+                    >
+                      选择位置
+                    </Button>
+                  </span>
+                </label>
+              </div>
+              {jePath && (
+                <p className="deposit-layout">
+                  当前序时账布局：{JE_LAYOUT_LABEL[depositJeLayout(jeMapping)]}
+                  （由你映射的列决定）；金额符号记法由系统按凭证配平自动识别，测算结果中会披露判定依据。
+                </p>
+              )}
+              {requiredMappingsMissing.length > 0 && (
+                <p className="fx-warning" aria-live="polite">
+                  还不能测算：{requiredMappingsMissing.join("、")}。请回到
+                  <button
+                    type="button"
+                    className="fx-link-button"
+                    onClick={() => setStep(0)}
+                  >
+                    上传与识别
+                  </button>
+                  补齐。
+                </p>
+              )}
+              <div className="fx-actions">
+                <Button
+                  variant="secondary"
+                  disabled={
+                    busy || reviewingAny || requiredMappingsMissing.length > 0
+                  }
+                  onClick={() => void run("deposit.preview")}
+                >
+                  测算预览
+                </Button>
+                <Button
+                  disabled={
+                    busy || reviewingAny || requiredMappingsMissing.length > 0
+                  }
+                  onClick={() => void run("deposit.export")}
+                >
+                  生成 Excel 底稿
+                </Button>
+              </div>
+              {job && (
+                <JobProgress
+                  job={job}
+                  onCancel={busy ? (id) => void jobCancel(id) : undefined}
+                />
+              )}
+            </CardContent>
+          </Card>
+
+          {rows.length > 0 && (
+            <Results
+              rows={rows}
+              result={result}
+              tiers={tiers}
+              expanded={expanded}
+              onExpand={setExpanded}
+              onOverride={overrideRow}
+              onRecalculate={() => void run("deposit.preview")}
+              busy={busy}
+            />
+          )}
+
+          <div className="fx-step-actions">
+            <Button variant="secondary" onClick={() => setStep(1)}>
+              返回科目与利率确认
+            </Button>
+          </div>
+        </>
       )}
     </main>
   );
@@ -1159,19 +1326,18 @@ function RateTierCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>存款利率档位</CardTitle>
+        <CardTitle>
+          存款利率档位
+          <HelpTip text="科目类型会关联这里的档位。活期自动采用默认利率；协定、通知、定期及大额存单须按协议填写。账户级改写优先。" />
+        </CardTitle>
       </CardHeader>
       <CardContent>
         {tiers.ratesStale && (
-          <p className="deposit-stale">
-            <b>内置挂牌利率可能已过期</b>
+          <details className="deposit-stale">
+            <summary>内置挂牌利率可能已过期</summary>
             <span>{tiers.staleMessage}</span>
-          </p>
+          </details>
         )}
-        <p className="fx-hint">{tiers.autoApplyPolicy}</p>
-        <p className="fx-hint">
-          在「本次采用」里填一次，就会应用到所有归入该档的账户；单个账户还可以在下方测算结果里单独改，单户改写优先于这里。
-        </p>
         <div className="deposit-tier-table">
           <table>
             <thead>
@@ -1472,6 +1638,8 @@ function MappingPreview(props: {
   mapping: Record<string, string | string[]>;
   labels: Record<string, string>;
   missing: string[];
+  /** 复核状态等提示，并进预览面板顶部——不再单独飘一条（与汇兑损益一致）。 */
+  banner?: React.ReactNode;
   onMappingChange: React.Dispatch<
     React.SetStateAction<Record<string, string | string[]>>
   >;
@@ -1479,7 +1647,9 @@ function MappingPreview(props: {
 }) {
   // 复核按钮已上移为「一键复核 TB＋JE」（页面级 LedgerReviewAll），
   // 这里只负责展示与锁定：复核期间该文件的字段映射不可编辑。
-  const roles = Object.entries(props.labels);
+  // 标签优先取引擎随识别结果下发的 roles，未下发（或没有该角色）回落本地表。
+  const labels = resolveRoleLabels(props.inspection.roles, props.labels);
+  const roles = Object.entries(labels);
   const forms = useLedgerForms(props.kind);
   const formMatch = forms.length
     ? resolveForm(props.kind, forms, props.mapping)
@@ -1494,9 +1664,10 @@ function MappingPreview(props: {
       roles={roles}
       groups={formGroups(props.kind, roles, forms, formMatch)}
       requirementOf={(role) => roleRequirement(formMatch, role)}
-      formNote={describeForm(formMatch, (role) => props.labels[role] ?? role)}
+      formNote={describeForm(formMatch, (role) => labels[role] ?? role)}
       multi={DEPOSIT_MULTI}
       missing={props.missing}
+      banner={props.banner}
       busy={props.reviewBusy}
       onChange={(next) =>
         props.onMappingChange(next as Record<string, string | string[]>)
@@ -1862,14 +2033,4 @@ function Results({
 
 function fileName(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
-}
-function errorText(value: unknown) {
-  if (typeof value === "string") return value;
-  if (value && typeof value === "object") {
-    const v = value as Record<string, unknown>;
-    return String(
-      v.userMessage ?? v.message ?? v.detail ?? "处理失败，请重试。",
-    );
-  }
-  return "处理失败，请重试。";
 }

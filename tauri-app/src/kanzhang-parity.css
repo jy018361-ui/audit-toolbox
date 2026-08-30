@@ -18,7 +18,7 @@
 .kz-steps .active,
 .kz-tabs .active {
   background: var(--brand-link);
-  color: var(--surface);
+  color: var(--on-brand-link, #fff);
 }
 /*
  * 列宽一律用 minmax(0, …)：原来的 px 下限（540+520、680+420）加上 270px 侧边栏
@@ -88,12 +88,12 @@
   border-radius: var(--r-sm);
   padding: var(--sp-2) var(--sp-3);
   background: var(--border-soft);
-  color: var(--brand-soft);
+  color: var(--brand-link);
   cursor: pointer;
 }
 .kz-card button.primary {
   background: var(--brand);
-  color: var(--surface);
+  color: var(--on-brand, #fff);
 }
 .kz-card button:disabled {
   opacity: 0.5;
@@ -265,7 +265,7 @@
  */
 .kz-card .fa-llm-review button {
   background: var(--surface);
-  color: var(--brand-soft);
+  color: var(--brand-link);
 }
 .kz-card .fa-llm-review button:hover:not(:disabled) {
   background: var(--surface-muted);
@@ -319,7 +319,7 @@
 }
 .kz-shuttle-item.selected {
   background: var(--brand-link);
-  color: var(--surface);
+  color: var(--on-brand-link, #fff);
 }
 .kz-shuttle-item:active {
   cursor: grabbing;

@@ -75,7 +75,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
           setResult(undefined);
           const payload = event.result as
             { error?: { userMessage?: string } } | undefined;
-          setError(payload?.error?.userMessage ?? event.message);
+          setError(payload?.error ? errorText(payload.error) : event.message);
         } else if (event.result) {
           setResult(event.result);
         }

@@ -9,6 +9,12 @@ import {
 /** 一键复核里单个文件的输入＋把应用后的映射写回页面 state 的回写函数。 */
 export type LedgerReviewSlot = LedgerReviewTarget & {
   onApplied: (next: Record<string, string | string[]>) => void;
+  /**
+   * 复核结束后按**应用建议后的映射**重算仍缺的必填字段（中文标签）。
+   * 画面上明明挂着"尚未映射"的红色清单时，结论不许说"当前映射无需
+   * 调整"——那是在告诉用户一切正常，实际上不映射就测不了算。
+   */
+  missingAfter?: (mapping: Record<string, string | string[]>) => string[];
 };
 
 /**
@@ -83,13 +89,25 @@ export function useLedgerDictReviews(
         const outcome = outcomes[kind]!;
         currentOutcomes[kind] = outcome;
         if (!outcome.failed) slots[kind]!.onApplied(outcome.mapping);
+        // 结论必须与画面上的"尚未映射"清单一致：还缺着必填字段时，
+        // "无需调整"就是在替 LLM 拍胸脯，用户却被必填校验拦着测不了算。
+        const missing = outcome.failed
+          ? []
+          : [...new Set(slots[kind]!.missingAfter?.(outcome.mapping) ?? [])];
+        const missingNote = missing.length
+          ? `仍有未映射：${missing.join("、")}，请手工指定。`
+          : "";
         setStatus((current) => ({
           ...current,
           [kind]: outcome.failed
             ? `复核失败：${outcome.error} 可继续手工映射。`
             : outcome.appliedCount
-              ? `复核完成，已应用 ${outcome.appliedCount} 项建议。`
-              : "复核完成，当前映射无需调整。",
+              ? missingNote
+                ? `复核完成，已应用 ${outcome.appliedCount} 项建议；${missingNote}`
+                : `复核完成，已应用 ${outcome.appliedCount} 项建议。`
+              : missingNote
+                ? `复核完成，LLM 未提出调整建议；${missingNote}`
+                : "复核完成，当前映射无需调整。",
         }));
         setReviewing((current) => ({ ...current, [kind]: false }));
       }
@@ -138,9 +156,9 @@ export function LedgerReviewAll(props: {
         <p>
           点击一次，
           {both
-            ? `同时复核 ${subject} 两个文件的字段映射，两个文件的结果各自汇报，单个失败不影响另一个`
+            ? `同时复核 ${subject} 两个文件的字段映射`
             : `复核 ${subject} 的字段映射`}
-          ；复核期间字段映射暂时锁定。
+          。
         </p>
         <div className="fx-review-states" aria-live="polite">
           {props.present.map((kind) => (

@@ -423,49 +423,57 @@ impl ExcelMergerService {
     }
 }
 
+/// 走任务通道的方法全集。
+///
+/// **提成常量数组而不是写在 `matches!` 里**：`lib.rs` 的 `job_start` 另有一份
+/// 分发白名单，两处必须同步。此前 `file_list.scan`、`tbje_check.*` 都栽在
+/// 「只登记了一处」上——前端点下去只报「未找到对应的 Rust 任务方法」。
+/// 现在有了这个数组，一致性可以直接用测试断言。
+pub(crate) const SUPPORTED_JOB_METHODS: &[&str] = &[
+    "wp.generate",
+    "confirmation.process",
+    "file_list.export",
+    "file_list.scan",
+    "ts.inspect",
+    "kanzhang.inspect",
+    "excel_merger.merge",
+    "ts.cache",
+    "ts.filter",
+    "ts.pivot",
+    "ts.export",
+    "kanzhang.map",
+    "kanzhang.filter",
+    "kanzhang.pivot",
+    "kanzhang.export",
+    "kanzhang.mark_inspect",
+    "kanzhang.mark_export",
+    "audipick.batch_extract",
+    "fa.match",
+    "fa.preview",
+    "fa.export",
+    "fa.dep_export",
+    "fa.policy_export",
+    "fa.tbje_preview",
+    "fa.tbje_export",
+    "roll_forward.process",
+    "roll_forward.process_companies",
+    "fx.fetch_rates",
+    "fx.preview",
+    "fx.export",
+    "loan.preview",
+    "loan.export",
+    "deposit.preview",
+    "deposit.export",
+    "pdf2excel.convert",
+    "fuzzy.match",
+    "fuzzy.export",
+    "tbje_check.run",
+    "tbje_check.run_batch",
+    "tbje_check.export",
+];
+
 fn is_supported_job_method(method: &str) -> bool {
-    matches!(
-        method,
-        "wp.generate"
-            | "confirmation.process"
-            | "file_list.export"
-            // 读取/扫描原本走短任务通道，天生没有进度也无法取消：误选一个大目录
-            // 或网络盘上的大文件，用户只能干等或杀进程。
-            | "file_list.scan"
-            | "ts.inspect"
-            | "kanzhang.inspect"
-            | "excel_merger.merge"
-            | "ts.cache"
-            | "ts.filter"
-            | "ts.pivot"
-            | "ts.export"
-            | "kanzhang.map"
-            | "kanzhang.filter"
-            | "kanzhang.pivot"
-            | "kanzhang.export"
-            | "kanzhang.mark_inspect"
-            | "kanzhang.mark_export"
-            | "audipick.batch_extract"
-            | "fa.match"
-            | "fa.preview"
-            | "fa.export"
-            | "fa.dep_export"
-            | "fa.policy_export"
-            | "fa.tbje_preview"
-            | "fa.tbje_export"
-            | "roll_forward.process"
-            | "roll_forward.process_companies"
-            | "fx.fetch_rates"
-            | "fx.preview"
-            | "fx.export"
-            | "loan.preview"
-            | "loan.export"
-            | "deposit.preview"
-            | "deposit.export"
-            | "pdf2excel.convert"
-            | "fuzzy.match"
-            | "fuzzy.export"
-    )
+    SUPPORTED_JOB_METHODS.contains(&method)
 }
 
 pub fn worker_main() -> i32 {
@@ -523,6 +531,8 @@ pub fn worker_main() -> i32 {
         "Rust FA List 引擎正在处理…"
     } else if request.method.starts_with("roll_forward.") {
         "Rust WP Roll Forward 引擎正在处理…"
+    } else if request.method.starts_with("tbje_check.") {
+        "Rust TBJE 完整性核对引擎正在处理…"
     } else if request.method.starts_with("fuzzy.") {
         "Rust 两列匹配引擎正在处理…"
     } else {
@@ -568,6 +578,8 @@ pub fn worker_main() -> i32 {
         crate::loan_interest::run_job(&request.method, request.params, &progress, cancel, &pause)
     } else if request.method.starts_with("pdf2excel.") {
         crate::pdf_to_excel::run_job(&request.method, request.params, &progress, cancel, &pause)
+    } else if request.method.starts_with("tbje_check.") {
+        crate::tbje_check::run_job(&request.method, request.params, &progress, cancel, &pause)
     } else if request.method.starts_with("fuzzy.") {
         // 匹配结果按 jobId 落本机结果库（导出与跨会话恢复都靠它），worker 拿
         // 不到 Tauri state，这里把 WorkerRequest 自带的 jobId 注入 params。
@@ -665,6 +677,8 @@ fn tool_id(method: &str) -> &'static str {
         "kanzhang"
     } else if method.starts_with("audipick.") {
         "audipick"
+    } else if method.starts_with("tbje_check.") {
+        "tbje_check"
     } else if method.starts_with("fa.dep_") {
         "fa_dep_calc"
     } else if method.starts_with("fa.policy_") {

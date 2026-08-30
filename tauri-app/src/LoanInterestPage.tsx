@@ -12,7 +12,11 @@ import { PageHeader } from "@/components/PageHeader";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
-import { applyLedgerReviewToDict, missingGoldIdentity } from "@/ledgerMapping";
+import {
+  applyLedgerReviewToDict,
+  missingGoldIdentity,
+  resolveRoleLabels,
+} from "@/ledgerMapping";
 import {
   describeLoanForm,
   loanRoleRequirement,
@@ -28,6 +32,7 @@ import {
   type LoanRateSetting,
 } from "@/loanRateTypes";
 import { MappingPanel } from "@/components/MappingPanel";
+import { errorText } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import "./loan-interest.css";
@@ -243,7 +248,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       } else if (e.phase === "failed" || e.phase === "cancelled") {
         setBusy(false);
         const p = e.result as { error?: { userMessage?: string } } | undefined;
-        setError(p?.error?.userMessage ?? e.message);
+        setError(p?.error ? errorText(p.error) : e.message);
       }
     });
     return () => {
@@ -353,7 +358,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           inputPath: path,
           sheet: over?.sheet ?? old?.sheet ?? "",
           headerRow: over?.headerRow ?? old?.headerRow ?? 0,
-          headerDepth: 1,
+          // 0 = 让引擎自动判定层数（TB/JE 走 fx 内核推断；台账固定单层）。
+          headerDepth: over?.headerDepth ?? old?.headerDepth ?? 0,
         },
       })) as Inspection;
       setSource(kind, { path, inspection: x, mapping: x.suggestedMapping });
@@ -372,7 +378,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
             inputPath: x.path,
             sheet: x.inspection?.sheet ?? "",
             headerRow: x.inspection?.headerRow ?? 1,
-            headerDepth: 1,
+            headerDepth: x.inspection?.headerDepth ?? 1,
           },
           mapping: x.mapping,
         }
@@ -488,8 +494,12 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               source={sources[k]}
               busy={busy}
               change={(mapping) => setSource(k, { mapping })}
-              header={(sheet, row) =>
-                void inspect(k, undefined, { sheet, headerRow: row })
+              header={(sheet, row, depth) =>
+                void inspect(k, undefined, {
+                  sheet,
+                  headerRow: row,
+                  headerDepth: depth,
+                })
               }
               trailing={k === "ledger" ? rateColumns : undefined}
             />
@@ -520,8 +530,12 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           source={sources.rateLedger}
           busy={busy}
           change={(mapping) => setSource("rateLedger", { mapping })}
-          header={(sheet, row) =>
-            void inspect("rateLedger", undefined, { sheet, headerRow: row })
+          header={(sheet, row, depth) =>
+            void inspect("rateLedger", undefined, {
+              sheet,
+              headerRow: row,
+              headerDepth: depth,
+            })
           }
         />
       )}
@@ -642,7 +656,7 @@ function Mapping({
   source: Source;
   busy: boolean;
   change: (m: Record<string, string>) => void;
-  header: (s: string, r: number) => void;
+  header: (s: string, r: number, d: number) => void;
   trailing?: {
     key: string;
     title: React.ReactNode;
@@ -650,6 +664,9 @@ function Mapping({
   }[];
 }) {
   const x = source.inspection!;
+  // 角色标签统一走共享解析：引擎下发的 roles（台账）优先，TB/JE 与浏览器预览
+  // 模式没有 roles，回落本页标签表——清单与顺序仍由本页兜底表定。
+  const labels = resolveRoleLabels(x.roles, LABELS[kind]);
   // TB/JE 走共用的映射复核；借款台账与利率台账不是账表，没有对应的复核规则。
   const [review, setReview] = useState("");
   const [reviewing, setReviewing] = useState(false);
@@ -664,7 +681,7 @@ function Mapping({
         x.headers,
         x.preview,
         source.mapping,
-        LABELS[kind],
+        labels,
       );
       change(mapping as Record<string, string>);
       setReview(
@@ -684,17 +701,16 @@ function Mapping({
       : kind === "rateLedger"
         ? "利率台账"
         : kind.toUpperCase();
-  // 台账的角色清单以引擎下发的为准（顺序即下拉顺序）；TB/JE 仍用本页的标签表。
-  const roleList: [string, string][] = x.roles?.length
-    ? x.roles.map((r) => [r.name, r.label])
-    : Object.entries(LABELS[kind]);
+  // 角色清单与标签：台账兜底表与引擎的 loan_roles 同名同序，合并后下拉顺序不变；
+  // 引擎标签与本地不一致时以引擎为准（唯一定义在 Rust）。
+  const roleList: [string, string][] = Object.entries(labels);
   // 借款台账按四型判定：命中哪一型决定哪些字段必填。利率台账不判型。
   const hit =
     kind === "ledger" && x.forms?.length
       ? resolveLoanForm(x.forms, source.mapping)
       : undefined;
   const formNote = hit
-    ? describeLoanForm(hit, (role) => LOAN_ROLE_FALLBACK[role] ?? role)
+    ? describeLoanForm(hit, (role) => labels[role] ?? role)
     : undefined;
   return (
     <>
@@ -719,7 +735,7 @@ function Mapping({
               Sheet
               <select
                 value={x.sheet}
-                onChange={(e) => header(e.target.value, 0)}
+                onChange={(e) => header(e.target.value, 0, 0)}
               >
                 {x.sheets.map((s) => (
                   <option key={s}>{s}</option>
@@ -732,9 +748,27 @@ function Mapping({
                 type="number"
                 min={1}
                 value={x.headerRow}
-                onChange={(e) => header(x.sheet, Number(e.target.value))}
+                onChange={(e) =>
+                  header(x.sheet, Number(e.target.value), x.headerDepth)
+                }
               />
             </label>
+            {/* 表头层数只有 TB/JE 需要（「金额」下再分借方/贷方的两层表头）； */}
+            {/* 台账固定单层，引擎也不支持多级表头，不给这个控件。 */}
+            {reviewable && (
+              <label>
+                表头层数
+                <select
+                  value={x.headerDepth}
+                  onChange={(e) =>
+                    header(x.sheet, x.headerRow, Number(e.target.value))
+                  }
+                >
+                  <option value={1}>1层</option>
+                  <option value={2}>2层</option>
+                </select>
+              </label>
+            )}
             {reviewable && (
               <Button
                 variant="secondary"
@@ -910,13 +944,4 @@ function Results({
       </p>
     </section>
   );
-}
-function errorText(v: unknown) {
-  if (v instanceof Error) return v.message;
-  if (typeof v === "string") return v;
-  if (v && typeof v === "object") {
-    const x = v as Record<string, unknown>;
-    return String(x.userMessage ?? x.message ?? x.detail ?? "处理失败。");
-  }
-  return "处理失败。";
 }

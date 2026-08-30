@@ -19,6 +19,7 @@ mod pdf_to_excel;
 mod roll_forward;
 mod storage;
 mod tabular;
+mod tbje_check;
 mod update_notes;
 mod wp;
 
@@ -350,6 +351,17 @@ async fn engine_call(
                     Some(e.to_string()),
                 )
             })?
+    } else if method.starts_with("tbje_check.") {
+        tauri::async_runtime::spawn_blocking(move || tbje_check::call(&method, params))
+            .await
+            .map_err(|e| {
+                AppError::new(
+                    "RUST_TASK_FAILED",
+                    "TBJE 完整性核对任务异常结束。",
+                    true,
+                    Some(e.to_string()),
+                )
+            })?
     } else if method.starts_with("deposit.") {
         tauri::async_runtime::spawn_blocking(move || deposit_interest::call(&method, params))
             .await
@@ -428,6 +440,33 @@ async fn engine_call(
     }
 }
 
+/// `job_start` 里直接转给任务通道的方法。
+///
+/// 与 [`excel_merger::SUPPORTED_JOB_METHODS`] 是两份清单，必须同步——
+/// 只登记一处的后果是前端点下去报「未找到对应的 Rust 任务方法」，
+/// `file_list.scan` 与 `tbje_check.*` 都这么栽过。测试里有一致性断言。
+fn is_direct_job_method(method: &str) -> bool {
+    method == "wp.generate"
+        || method == "confirmation.process"
+        // 扫描与导出共用同一条任务通道，两者都必须登记；此前只登记了
+        // export，前端拖放文件夹自动扫描时命中兜底报"未找到对应的 Rust
+        // 任务方法"。excel_merger::is_supported_job_method 里两者都在。
+        || method == "file_list.export"
+        || method == "file_list.scan"
+        || method == "excel_merger.merge"
+        || method.starts_with("ts.")
+        || method.starts_with("kanzhang.")
+        || matches!(method, "fx.fetch_rates" | "fx.preview" | "fx.export")
+        || matches!(method, "loan.preview" | "loan.export")
+        || matches!(method, "deposit.preview" | "deposit.export")
+        || method == "pdf2excel.convert"
+        // 两列匹配：跑匹配要落结果库，导出要从结果库读回，都走任务通道。
+        || matches!(method, "fuzzy.match" | "fuzzy.export")
+        // TBJE 完整性核对：单组、多组、导出三条都走任务通道——序时账动辄
+        // 几十万行，读取与汇总都得能报进度、能取消。
+        || method.starts_with("tbje_check.")
+}
+
 #[tauri::command]
 async fn job_start(
     excel_merger: State<'_, ExcelMergerService>,
@@ -493,23 +532,7 @@ async fn job_start(
             Some(method),
         ));
     }
-    if method == "wp.generate"
-        || method == "confirmation.process"
-        // 扫描与导出共用同一条任务通道，两者都必须登记；此前只登记了
-        // export，前端拖放文件夹自动扫描时命中兜底报"未找到对应的 Rust
-        // 任务方法"。excel_merger::is_supported_job_method 里两者都在。
-        || method == "file_list.export"
-        || method == "file_list.scan"
-        || method == "excel_merger.merge"
-        || method.starts_with("ts.")
-        || method.starts_with("kanzhang.")
-        || matches!(method.as_str(), "fx.fetch_rates" | "fx.preview" | "fx.export")
-        || matches!(method.as_str(), "loan.preview" | "loan.export")
-        || matches!(method.as_str(), "deposit.preview" | "deposit.export")
-        || method == "pdf2excel.convert"
-        // 两列匹配：跑匹配要落结果库，导出要从结果库读回，都走任务通道。
-        || matches!(method.as_str(), "fuzzy.match" | "fuzzy.export")
-    {
+    if is_direct_job_method(&method) {
         return excel_merger.start(&method, params);
     }
     if is_roll_forward_job_method(&method) {
@@ -1133,10 +1156,45 @@ mod tests {
     fn bundled_catalog_contains_unique_tools() {
         let catalog = tool_catalog().unwrap();
         let rows = catalog.as_array().unwrap();
-        assert_eq!(rows.len(), 17);
+        assert_eq!(rows.len(), 18);
         let ids: HashSet<_> = rows.iter().filter_map(|row| row["id"].as_str()).collect();
-        assert_eq!(ids.len(), 17);
+        assert_eq!(ids.len(), 18);
         assert!(rows.iter().all(|row| row["route"].as_str().is_some()));
+    }
+
+    /// 任务通道的方法白名单分散在两处：`excel_merger::SUPPORTED_JOB_METHODS`
+    /// 决定 worker 认不认，`is_direct_job_method` 决定 `job_start` 转不转。
+    /// 只登记一处的后果是前端点下去报「未找到对应的 Rust 任务方法」——
+    /// `file_list.scan` 与 `tbje_check.*` 都这么栽过，这条断言堵住它。
+    #[test]
+    fn 任务通道的两份白名单必须一致() {
+        // 这些在 job_start 里走专属分支：转出去之前要先注入设置或文档路径，
+        // 所以不经 is_direct_job_method。
+        const 专属分支: &[&str] = &["audipick.batch_extract"];
+        for method in excel_merger::SUPPORTED_JOB_METHODS {
+            assert!(
+                is_direct_job_method(method)
+                    || is_fa_job_method(method)
+                    || is_roll_forward_job_method(method)
+                    || 专属分支.contains(method),
+                "{method} 登记在 worker 白名单里，但 job_start 不会把它转过去"
+            );
+        }
+    }
+
+    #[test]
+    fn tbje核对的三条任务方法都能进任务通道() {
+        for method in [
+            "tbje_check.run",
+            "tbje_check.run_batch",
+            "tbje_check.export",
+        ] {
+            assert!(is_direct_job_method(method), "{method}");
+            assert!(
+                excel_merger::SUPPORTED_JOB_METHODS.contains(&method),
+                "{method}"
+            );
+        }
     }
 
     #[test]

@@ -49,12 +49,19 @@ const tool: ToolManifest = {
   route: "/tools/deposit_interest", version: "test", capabilities: [], migrationStatus: "ready",
 };
 
+/** 利率档位与官方查询入口在第二步「科目与利率确认」里，渲染后先切过去。 */
+function openRunStep() {
+  // 步骤按钮的可访问名带序号（「2 科目与利率确认」），按序号锚定匹配。
+  fireEvent.click(screen.getByRole("button", { name: /^2\s*科目与利率确认/ }));
+}
+
 describe("官方利率查询入口", () => {
   // 这个文件里多次 render 同一个页面，不清理会出现重名元素。
   afterEach(cleanup);
   it("首行只露出官方渠道，其余收进折叠区", async () => {
     engineCall.mockResolvedValue(tiers);
     render(<DepositInterestPage tool={tool} />);
+    openRunStep();
     const section = await screen.findByRole("region", {name: "官方利率查询入口"});
     // 首行 = 标题 + 3 个官方渠道按钮，没有别的。
     const row = section.querySelector(".deposit-link-row") as HTMLElement;
@@ -73,6 +80,7 @@ describe("官方利率查询入口", () => {
     engineCall.mockResolvedValue(tiers);
     openReferenceUrl.mockClear().mockResolvedValue(undefined);
     render(<DepositInterestPage tool={tool} />);
+    openRunStep();
     const button = await screen.findByRole("button", {name: /中国货币网/});
     fireEvent.click(button);
     await waitFor(() => expect(openReferenceUrl).toHaveBeenCalledWith("https://www.chinamoney.com.cn/"));
@@ -84,6 +92,7 @@ describe("官方利率查询入口", () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, {clipboard: {writeText}});
     render(<DepositInterestPage tool={tool} />);
+    openRunStep();
     fireEvent.click(await screen.findByRole("button", {name: /中国人民银行/}));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("http://www.pbc.gov.cn/"));
     expect(await screen.findByText(/已把网址复制到剪贴板/)).toBeInTheDocument();
@@ -92,6 +101,7 @@ describe("官方利率查询入口", () => {
   it("引擎不可用时给出说明而不是空白", async () => {
     engineCall.mockRejectedValue(new Error("预览模式"));
     render(<DepositInterestPage tool={tool} />);
+    openRunStep();
     expect(await screen.findByText(/浏览器预览模式下不可用/)).toBeInTheDocument();
   });
 });

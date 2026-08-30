@@ -18,7 +18,7 @@ use std::{
 };
 
 use crate::{
-    AppError, deposit_interest,
+    AppError,
     excel_merger::PauseCheckpoint,
     fx::{FxTable, SourceSpec, load_fx_table, parse_date},
     ledger_mapping::{self, AmountInputs, SignConvention},
@@ -177,7 +177,7 @@ fn analyze(params: &Value, cancel: &AtomicBool) -> Result<Analysis, AppError> {
     let je_map = mapping(params, "jeMapping");
     validate_required(&tb_map, &je_map)?;
     let tb = load_fx_table(&tb_spec)?;
-    let je = load_fx_table(&je_spec)?;
+    let je = crate::fx::forward_filled_je_table(&load_fx_table(&je_spec)?, &je_map);
     for (kind, table, map) in [("TB", &tb, &tb_map), ("JE", &je, &je_map)] {
         for role in map.keys() {
             if mapped_columns(map, role)
@@ -266,33 +266,52 @@ fn analyze(params: &Value, cancel: &AtomicBool) -> Result<Analysis, AppError> {
     })
 }
 
+/// 必填口径走公共引擎：金标身份槽 ∪ 金额／余额形态槽（TB1–TB6／JE1–JE3）∪
+/// `Tool::FaTbje` 自己声明的角色，三者取并集（[`ledger_mapping::missing_required`]），
+/// 本模块不再自持一份规则。报错用标签版（`missing_required_labels`），
+/// 把缺的角色逐个说给用户听。
 fn validate_required(tb: &Map<String, Value>, je: &Map<String, Value>) -> Result<(), AppError> {
-    let has = |m: &Map<String, Value>, role: &str| !mapped_columns(m, role).is_empty();
-    if !(has(tb, "accountCode") || has(tb, "accountName") || has(tb, "account"))
-        || !(has(tb, "openingFunctionalAmount")
-            || (has(tb, "openingFunctionalDebit") && has(tb, "openingFunctionalCredit")))
-        || !(has(tb, "closingFunctionalAmount")
-            || (has(tb, "closingFunctionalDebit") && has(tb, "closingFunctionalCredit")))
-    {
-        return Err(error(
-            "FA_TBJE_TB_MAPPING_INCOMPLETE",
-            "TB 必须映射科目、期初余额和期末余额。",
-            None,
-        ));
-    }
-    if mapped_columns(je, "id").is_empty()
-        || !(has(je, "accountCode") || has(je, "accountName") || has(je, "account"))
-        || !has(je, "date")
-        || !(has(je, "functionalAmount")
-            || (has(je, "functionalDebit") && has(je, "functionalCredit")))
-    {
-        return Err(error(
-            "FA_TBJE_JE_MAPPING_INCOMPLETE",
-            "JE 必须映射凭证号、日期、科目和金额方案。",
-            None,
-        ));
+    for (kind, map, code, subject) in [
+        ("tb", tb, "FA_TBJE_TB_MAPPING_INCOMPLETE", "TB"),
+        ("je", je, "FA_TBJE_JE_MAPPING_INCOMPLETE", "JE"),
+    ] {
+        let missing = ledger_mapping::missing_required_labels(
+            ledger_mapping::Tool::FaTbje,
+            kind,
+            &mapped_roles(kind, map),
+        );
+        if !missing.is_empty() {
+            return Err(error(
+                code,
+                format!("{subject} 必填字段未映射：{}。", missing.join("、")),
+                None,
+            ));
+        }
     }
     Ok(())
+}
+
+/// 把 TB／JE 映射翻译成引擎的标准角色集合（与 `tabular::mapped_roles` 同一职责）。
+///
+/// 唯一的本地归并在**科目身份槽**：本工具的科目键一直是「编码｜名称｜旧版混合列」
+/// 三槽兜底（见 [`account_indexes`]），名称兜底是既定业务——编码缺失时靠名称做
+/// 受唯一性校验的匹配（错误码 `FA_TBJE_ACCOUNT_NAME_UNVERIFIED`）。因此三者任一
+/// 到位，就把金标的「科目编码」「科目名称」两个槽都视作已满足；金标槽缺谁报谁
+/// 的其余判定（日期、凭证识别字段、摘要、期初／期末／金额形态）全部交给引擎。
+fn mapped_roles(kind: &str, map: &Map<String, Value>) -> HashSet<&'static str> {
+    let mut out: HashSet<&'static str> = ledger_mapping::roles(kind)
+        .iter()
+        .filter(|role| !mapped_columns(map, role.name).is_empty())
+        .map(|role| role.name)
+        .collect();
+    if out.contains("accountCode")
+        || out.contains("accountName")
+        || !mapped_columns(map, "account").is_empty()
+    {
+        out.insert("accountCode");
+        out.insert("accountName");
+    }
+    out
 }
 
 fn normalize_tb(
@@ -309,6 +328,19 @@ fn normalize_tb(
             mapped_columns(map, role)
         });
     let convention = evidence.convention.unwrap_or(SignConvention::Unsigned);
+    // 余额列是否整列自带符号，期初期末各判一次——两列的写法可以不一致。
+    let self_signed = |prefix: &str| {
+        ledger_mapping::balance_self_signed(
+            &table.headers,
+            &table.rows,
+            &|role| mapped_columns(map, role),
+            prefix,
+        )
+    };
+    let (opening_self_signed, closing_self_signed) = (
+        self_signed("openingFunctional"),
+        self_signed("closingFunctional"),
+    );
     let identities = account_identities(table, map, params, "tbFixedEntity");
     let mut out = Vec::new();
     for (index, row) in table.rows.iter().enumerate() {
@@ -324,8 +356,22 @@ fn normalize_tb(
             account: identity.display.clone(),
             role: assigned.role.clone(),
             category: category_of(assigned),
-            opening: balance(table, row, map, "openingFunctional", convention),
-            closing: balance(table, row, map, "closingFunctional", convention),
+            opening: balance(
+                table,
+                row,
+                map,
+                "openingFunctional",
+                convention,
+                opening_self_signed,
+            ),
+            closing: balance(
+                table,
+                row,
+                map,
+                "closingFunctional",
+                convention,
+                closing_self_signed,
+            ),
             source_row: table.header_row + index + 2,
         });
     }
@@ -341,16 +387,24 @@ fn normalize_je(
     cancel: &AtomicBool,
 ) -> Result<(Vec<JeLine>, usize, usize, String), AppError> {
     // 期间过滤先于公共 Net=0 匹配，避免未来期间的冲销消掉报告期内变动。
+    // 噪声行再先于期间过滤：SAP 的 ALV 分组小计、合计行下面的手工草稿都没有
+    // 日期，眼下靠日期解析失败被顺带滤掉——那是副作用，不是判据。按公共引擎
+    // 显式剔一次，日期口径将来怎么变都不会把它们放进来。
+    let junk = ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
+        mapped_columns(map, role)
+    });
     let start = NaiveDate::from_ymd_opt(end.year(), 1, 1).unwrap();
     let mut period_table = table.clone();
     period_table.rows = table
         .rows
         .iter()
-        .filter(|row| {
-            parse_date(&text(table, row, map, "date"))
-                .is_some_and(|date| date >= start && date <= end)
+        .enumerate()
+        .filter(|(index, row)| {
+            junk.get(*index).copied().unwrap_or(true)
+                && parse_date(&text(table, row, map, "date"))
+                    .is_some_and(|date| date >= start && date <= end)
         })
-        .cloned()
+        .map(|(_, row)| row.clone())
         .collect();
     let table = &period_table;
     let ledger = ledger_mapping_for(map);
@@ -1329,6 +1383,7 @@ fn balance(
     map: &Map<String, Value>,
     prefix: &str,
     convention: SignConvention,
+    self_signed: bool,
 ) -> f64 {
     let debit = number(table, row, map, &format!("{prefix}Debit"));
     let credit = number(table, row, map, &format!("{prefix}Credit"));
@@ -1343,7 +1398,9 @@ fn balance(
             "closingDirection"
         },
     );
-    ledger_mapping::signed_amount(
+    // 余额列走 `signed_balance`：整列自带符号时并排的方向列是冗余标注，
+    // 再按它翻一次号，负债与权益会整片变正。判定见 `balance_self_signed`。
+    ledger_mapping::signed_balance(
         &AmountInputs {
             amount,
             debit,
@@ -1351,6 +1408,7 @@ fn balance(
             direction: (!direction.is_empty()).then_some(direction),
         },
         convention,
+        self_signed,
     )
 }
 fn ledger_mapping_for(map: &Map<String, Value>) -> LedgerMapping {
@@ -1387,9 +1445,19 @@ fn account_identities(
         .enumerate()
         .map(|(i, row)| {
             let entity = text(table, row, map, "entity");
+            let raw_code = text(table, row, map, "accountCode");
             let mut name = join(row, &indexes(table, map, "accountName"));
             if name.is_empty() {
                 name = join(row, &indexes(table, map, "account"));
+            }
+            // 编码与名称混写在一格：03 号样例整张表只有一列科目
+            // （`1001010000:库存现金-人民币`），名称只能从编码那一格里取。
+            // 08 号样例反过来——名称列写成 `10020101\银行存款\…`，编码在
+            // 前面，得把它切掉，否则和序时账那侧的纯名称对不上。
+            if name.is_empty() {
+                name = ledger_mapping::account_name_of(&raw_code);
+            } else {
+                name = ledger_mapping::account_name_of(&name);
             }
             AccountIdentity {
                 entity: if entity.is_empty() {
@@ -1397,7 +1465,7 @@ fn account_identities(
                 } else {
                     entity
                 },
-                code: text(table, row, map, "accountCode"),
+                code: ledger_mapping::account_code_of(&raw_code),
                 name,
                 display: display[i].clone(),
                 legacy_display: join(row, &account_indexes(table, map)),
@@ -1462,7 +1530,10 @@ fn assignment_index(
             if !id.code.is_empty() {
                 insert_assignment(
                     &mut out.codes,
-                    (id.entity.clone(), id.code.clone()),
+                    (
+                        id.entity.clone(),
+                        ledger_mapping::normalize_account_code(&id.code),
+                    ),
                     &assigned,
                 )?;
             }
@@ -1495,7 +1566,10 @@ fn insert_assignment(
 
 fn find_assignment<'a>(map: &'a AssignmentIndex, id: &AccountIdentity) -> Option<&'a Assigned> {
     map.codes
-        .get(&(id.entity.clone(), id.code.clone()))
+        .get(&(
+            id.entity.clone(),
+            ledger_mapping::normalize_account_code(&id.code),
+        ))
         .or_else(|| {
             map.names
                 .get(&(id.entity.clone(), ledger_mapping::normalize_name(&id.name)))
@@ -1565,7 +1639,10 @@ fn text(table: &FxTable, row: &[String], map: &Map<String, Value>, role: &str) -
         .unwrap_or_default()
 }
 fn number(table: &FxTable, row: &[String], map: &Map<String, Value>, role: &str) -> Option<f64> {
-    deposit_interest::parse_number(&text(table, row, map, role))
+    // 金额读取走公共引擎的宽松口径：`%`／货币符号／括号负数先剥掉，尾部负号、
+    // CR/DR、「借／贷」后缀由 `parse_amount` 认；读不出一律 `None`。余额槽位
+    // `None` 即未映射，下游 `signed_balance` 按 0 兜底，与切换前的缺省语义一致。
+    ledger_mapping::parse_amount_lenient(&text(table, row, map, role))
 }
 fn parse_param<T: for<'de> Deserialize<'de>>(
     params: &Value,
@@ -1608,8 +1685,50 @@ fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppE
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 存款入口仅测试还在借道（分类器/识别器的公共入口对照），业务代码已不再
+    // 依赖它的解析实现。
+    use crate::deposit_interest;
     use calamine::{DataType, Reader, open_workbook_auto};
     use std::io::Read;
+
+    /// 本机 PBC 回归入口。夹具不进仓库，通过环境变量指向 TBJEPBC 目录。
+    /// 跑法：$env:FA_TBJE_PBC_DIR='...\\TBJEPBC'; cargo test pbc10 -- --ignored --nocapture
+    #[test]
+    #[ignore = "requires the local TBJEPBC fixture directory"]
+    fn pbc10_uses_the_public_classifier_and_mapping_engine() {
+        let dir = PathBuf::from(std::env::var("FA_TBJE_PBC_DIR").expect("FA_TBJE_PBC_DIR"));
+        for (name, expected) in [("10科目余额表.xlsx", "tb"), ("10序时账 (2).xlsx", "je")] {
+            let path = dir.join(name);
+            let classified = deposit_interest::call(
+                "deposit.classify_source",
+                json!({"source":{"inputPath":path}}),
+            )
+            .unwrap();
+            assert_eq!(classified["kind"], expected, "{name}: {classified}");
+            let inspected = deposit_interest::call(
+                &format!("deposit.inspect_{expected}"),
+                json!({"source":{
+                    "inputPath":path,
+                    "sheet":classified["sheet"],
+                    "headerRow":classified["headerRow"],
+                    "headerDepth":classified["headerDepth"]
+                }}),
+            )
+            .unwrap();
+            assert!(
+                inspected["headers"]
+                    .as_array()
+                    .is_some_and(|v| !v.is_empty())
+            );
+            if expected == "je" {
+                assert_eq!(
+                    inspected.pointer("/suggestedMapping/id"),
+                    Some(&json!(["凭证字", "凭证号"])),
+                    "公共引擎必须用凭证字＋凭证号组成完整凭证键"
+                );
+            }
+        }
+    }
 
     fn fixture() -> (PathBuf, PathBuf, Value) {
         let dir = std::env::temp_dir().join(format!("fa-tbje-{}", uuid::Uuid::new_v4()));
@@ -1895,6 +2014,31 @@ mod tests {
     }
 
     #[test]
+    fn 序时账补零编码与余额表去零编码视为同一科目() {
+        // 05 号样例：SAP 序时账把科目补零到十位（`0000943100`），同一套账的
+        // 余额表导出时去掉了前导零（`943100`）。不归一化的话这批科目在
+        // TB 与 JE 之间对不上，而且不报错——只会安静地少算一批变动。
+        let (dir, _, mut params) = fixture();
+        std::fs::write(
+            dir.join("tb.csv"),
+            "主体,科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\nA,943100,固定资产,0,100,0,100\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("je.csv"),
+            "主体,日期,凭证号,科目编码,科目名称,摘要,借方,贷方\nA,2025-01-01,V1,0000943100,固定资产,购置,100,0\nA,2025-01-01,V1,2202,应付账款,购置,0,100\n",
+        )
+        .unwrap();
+        // 用户在科目分类区只会看到并选中其中一种写法，另一侧要靠归一化跟上。
+        params["accountAssignments"] =
+            json!([{"entity":"A","account":"943100 固定资产","role":"cost","category":"机器"}]);
+        let a = analyze(&params, &AtomicBool::new(false)).unwrap();
+        assert_eq!(a.totals[&("A".into(), "机器".into())].additions, 100.0);
+        assert_eq!(preview_json(&a)["reconciliationDifferences"], 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn name_only_fallback_requires_public_engine_unique_correspondence() {
         let (dir, _, mut params) = fixture();
         params["jeMapping"]
@@ -2007,6 +2151,73 @@ mod tests {
             analyze(&params, &AtomicBool::new(false)).unwrap_err().code,
             "FA_TBJE_MAPPING_STALE"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 必填校验走引擎并集且名称兜底不收紧() {
+        let (dir, _, mut params) = fixture();
+        // TB 缺期初槽：形态槽（TB1–TB6）拦下，报错要点名缺的角色。
+        params["tbMapping"]
+            .as_object_mut()
+            .unwrap()
+            .remove("openingFunctionalAmount");
+        let err = analyze(&params, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(err.code, "FA_TBJE_TB_MAPPING_INCOMPLETE");
+        assert!(err.user_message.contains("期初"), "{}", err.user_message);
+        params["tbMapping"]["openingFunctionalAmount"] = json!("期初余额");
+
+        // JE 缺凭证识别字段：金标身份槽拦下。
+        params["jeMapping"].as_object_mut().unwrap().remove("id");
+        let err = analyze(&params, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(err.code, "FA_TBJE_JE_MAPPING_INCOMPLETE");
+        assert!(
+            err.user_message.contains("凭证识别字段"),
+            "{}",
+            err.user_message
+        );
+        params["jeMapping"]["id"] = json!(["凭证号"]);
+
+        // 金额方案两头落空（净额与借贷分列都没有）：形态槽拦下。
+        let je = params["jeMapping"].as_object_mut().unwrap();
+        je.remove("functionalDebit");
+        je.remove("functionalCredit");
+        let err = analyze(&params, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(err.code, "FA_TBJE_JE_MAPPING_INCOMPLETE");
+        assert!(
+            err.user_message.contains("本位币净额"),
+            "{}",
+            err.user_message
+        );
+        params["jeMapping"]["functionalDebit"] = json!("借方");
+        params["jeMapping"]["functionalCredit"] = json!("贷方");
+
+        // 科目只有名称、没有编码：不在此处拦——名称兜底是既定业务，
+        // 交给后续 FA_TBJE_ACCOUNT_NAME_UNVERIFIED 的唯一性校验。
+        params["jeMapping"]
+            .as_object_mut()
+            .unwrap()
+            .remove("accountCode");
+        assert!(analyze(&params, &AtomicBool::new(false)).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn 金额读取走引擎的宽松口径() {
+        let (dir, _, params) = fixture();
+        // 千分位、括号负数、尾部负号——旧路径借用的存款 parse_number 认不全
+        // （尾部负号直接读丢成 None），引擎 parse_amount_lenient 必须全读得出。
+        std::fs::write(
+            dir.join("tb.csv"),
+            "主体,科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\nA,1601,机器设备,\"1,000\",500,200,\"1,300\"\nA,1602,累计折旧,(200),50,100,250-\n",
+        )
+        .unwrap();
+        let a = analyze(&params, &AtomicBool::new(false)).unwrap();
+        let totals = &a.totals[&(String::from("A"), String::from("机器设备"))];
+        assert_eq!(totals.opening_cost, 1000.0); // 千分位
+        assert_eq!(totals.closing_cost, 1300.0);
+        assert_eq!(totals.opening_dep, 200.0); // (200) 读成 -200，折旧取反
+        assert_eq!(totals.closing_dep, 250.0); // 250- 读成 -250，折旧取反
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -1,0 +1,556 @@
+//! TBJE 完整性核对的回归测试。
+//!
+//! 三条核对的样例都照着真实账的形态构造：余额已带符号、父子科目混排、
+//! 序时账里混着合计行——这些都是十套实测样例里真实存在的写法。
+
+use super::*;
+use serde_json::json;
+use std::sync::atomic::AtomicBool;
+
+fn fixture(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("tbje-check-{}-{}", std::process::id(), name));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn tb_mapping() -> Value {
+    json!({
+        "accountCode": "科目编码",
+        "accountName": "科目名称",
+        "openingFunctionalAmount": "期初余额",
+        "ytdFunctionalDebit": "本年借方",
+        "ytdFunctionalCredit": "本年贷方",
+        "closingFunctionalAmount": "期末余额",
+    })
+}
+
+fn je_mapping() -> Value {
+    json!({
+        "id": "凭证号",
+        "date": "日期",
+        "accountCode": "科目编码",
+        "accountName": "科目名称",
+        "functionalDebit": "借方",
+        "functionalCredit": "贷方",
+    })
+}
+
+fn params(dir: &std::path::Path, with_je: bool) -> Value {
+    let mut value = json!({
+        "tbSource": {"inputPath": dir.join("tb.csv"), "sheet": "", "headerRow": 0, "headerDepth": 0},
+        "tbMapping": tb_mapping(),
+    });
+    if with_je {
+        value["jeSource"] =
+            json!({"inputPath": dir.join("je.csv"), "sheet": "", "headerRow": 0, "headerDepth": 0});
+        value["jeMapping"] = je_mapping();
+    }
+    value
+}
+
+/// 一套自洽的账：勾稽成立、恒等式成立、TB 与 JE 完全对得上。
+fn 平的账(dir: &std::path::Path) {
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,100,500,300,300\n\
+         2202,应付账款,-100,300,500,-300\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-03-01,V1,1001,库存现金,500,0\n\
+         2025-03-01,V1,2202,应付账款,0,500\n\
+         2025-06-01,V2,2202,应付账款,300,0\n\
+         2025-06-01,V2,1001,库存现金,0,300\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn 三条核对都通过时不报任何差异() {
+    let dir = fixture("clean");
+    平的账(&dir);
+    let result = run(&params(&dir, true), &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["rollforward"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["equation"]["passed"], json!(true), "{result:#}");
+    assert_eq!(
+        result["equation"]["opening"]["total"].as_f64().unwrap(),
+        0.0
+    );
+    assert_eq!(
+        result["equation"]["closing"]["total"].as_f64().unwrap(),
+        0.0
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 期末余额被改动时勾稽报出那一行() {
+    let dir = fixture("rollforward");
+    平的账(&dir);
+    // 把库存现金的期末改成 400——期初 100 ＋ 借 500 − 贷 300 应当是 300。
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,100,500,300,400\n\
+         2202,应付账款,-100,300,500,-300\n",
+    )
+    .unwrap();
+    let result = run(&params(&dir, false), &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["rollforward"]["passed"], json!(false));
+    assert_eq!(result["rollforward"]["mismatched"], json!(1));
+    let item = &result["rollforward"]["units"][0]["items"][0];
+    assert_eq!(item["difference"].as_f64().unwrap(), -100.0);
+    assert!(item["account"].as_str().unwrap().contains("库存现金"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 借贷两侧分开比才抓得住双向虚增() {
+    let dir = fixture("bothsides");
+    平的账(&dir);
+    // 序时账多记一笔一借一贷的对倒：净额没变，借贷两侧各多 1000。
+    // 只比净额（期初＋JE净额＝期末）这一笔完全查不出来。
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-03-01,V1,1001,库存现金,500,0\n\
+         2025-03-01,V1,2202,应付账款,0,500\n\
+         2025-06-01,V2,2202,应付账款,300,0\n\
+         2025-06-01,V2,1001,库存现金,0,300\n\
+         2025-09-01,V3,1001,库存现金,1000,0\n\
+         2025-09-01,V3,1001,库存现金,0,1000\n",
+    )
+    .unwrap();
+    let result = run(&params(&dir, true), &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["passed"], json!(false), "{result:#}");
+    let item = &result["tbVsJe"]["items"][0];
+    assert_eq!(item["code"], json!("1001"));
+    assert_eq!(item["debitDifference"].as_f64().unwrap(), -1000.0);
+    assert_eq!(item["creditDifference"].as_f64().unwrap(), -1000.0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 红字冲销留在本侧不翻到对面() {
+    let dir = fixture("redletter");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,0,500,300,200\n\
+         2202,应付账款,0,300,500,-200\n",
+    )
+    .unwrap();
+    // 序时账里有一对红字：贷 −70 冲掉之前多记的贷 370、借 −70 冲平对方科目。
+    // 余额表按列直加（1001 贷方 370−70=300），核对必须同口径——
+    // 按净额符号归侧会把 −70 翻进对面，两侧各虚增 70（08 号样例实测差 467.02×2）。
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-03-01,V1,1001,库存现金,500,0\n\
+         2025-03-01,V1,2202,应付账款,0,500\n\
+         2025-06-01,V2,1001,库存现金,0,370\n\
+         2025-06-01,V2,2202,应付账款,370,0\n\
+         2025-06-02,V3,1001,库存现金,0,-70\n\
+         2025-06-02,V3,2202,应付账款,-70,0\n",
+    )
+    .unwrap();
+    let result = run(&params(&dir, true), &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 序时账只覆盖部分期间时判为整体性差异() {
+    let dir = fixture("systematic");
+    // 六个科目，序时账只给了其中的上半年——绝大多数科目都对不上，
+    // 这是「少传了一段期间」不是「账错了」，要能区分开。
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,0,200,100,100\n\
+         1002,银行存款,0,200,100,100\n\
+         1122,应收账款,0,200,100,100\n\
+         2202,应付账款,0,100,200,-100\n\
+         2241,其他应付款,0,100,200,-100\n\
+         6602,管理费用,0,100,200,-100\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-01-01,V1,1001,库存现金,100,0\n\
+         2025-01-01,V1,2202,应付账款,0,100\n",
+    )
+    .unwrap();
+    let result = run(&params(&dir, true), &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["systematic"], json!(true), "{result:#}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 损益类未结转时恒等式仍然成立() {
+    let dir = fixture("equation");
+    // 04 号样例的形态：年末损益类还没结转到未分配利润，
+    // 资产 − 负债 − 权益 差出来的正是损益类的余额。
+    // 按「资产＝负债＋权益」会把这套平的账报成不平；全类别加总才是 0。
+    // 损益类要留下**净额不为零**的余额（本年利润未结转），否则演示不出问题：
+    // 收入 500 贷方、费用 200 借方，净留 300 的贷方余额。
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,700,300,0,1000\n\
+         2202,应付账款,-400,0,0,-400\n\
+         4001,实收资本,-300,0,0,-300\n\
+         6001,主营业务收入,0,0,500,-500\n\
+         6601,销售费用,0,200,0,200\n",
+    )
+    .unwrap();
+    let result = run(&params(&dir, false), &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["equation"]["passed"], json!(true), "{result:#}");
+    assert_eq!(
+        result["equation"]["closing"]["total"].as_f64().unwrap(),
+        0.0
+    );
+    // 资产减负债减权益并不为零——正是这一点让「资产＝负债＋权益」不能用。
+    let by: std::collections::BTreeMap<String, f64> = result["equation"]["closing"]["byCategory"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["category"].as_str().unwrap().to_owned(),
+                item["amount"].as_f64().unwrap(),
+            )
+        })
+        .collect();
+    let bs = by["资产"] + by["负债"] + by["所有者权益"];
+    assert_ne!(bs, 0.0, "损益未结转时资产−负债−权益本就不为零：{by:?}");
+    assert_eq!(bs + by["损益"], 0.0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 父子科目混排时只算末级() {
+    let dir = fixture("leaf");
+    // 08 号样例的形态：父行与子行并列，父行金额是子行之和。
+    // 不做末级过滤，全类别加总会差出一整个父行的量级。
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1002,银行存款,1000,0,0,1000\n\
+         100201,银行存款-基本户,600,0,0,600\n\
+         100202,银行存款-一般户,400,0,0,400\n\
+         2202,应付账款,-1000,0,0,-1000\n",
+    )
+    .unwrap();
+    let result = run(&params(&dir, false), &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["equation"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["equation"]["accounts"], json!(3), "父行不该计入");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 认不出会计要素的科目单独列出不并入任何一类() {
+    let dir = fixture("unclassified");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,1000,0,0,1000\n\
+         2202,应付账款,-1000,0,0,-1000\n\
+         X001,自定义科目,500,0,0,500\n",
+    )
+    .unwrap();
+    let result = run(&params(&dir, false), &AtomicBool::new(false)).unwrap();
+    // 前两个科目本身是平的，但有一个科目没算进去——不能报「通过」。
+    assert_eq!(result["equation"]["passed"], json!(false), "{result:#}");
+    assert_eq!(result["equation"]["balancePassed"], json!(true));
+    assert_eq!(result["equation"]["classificationComplete"], json!(false));
+    assert_eq!(
+        result["equation"]["closing"]["total"].as_f64().unwrap(),
+        0.0
+    );
+    let unclassified = result["equation"]["unclassified"].as_array().unwrap();
+    assert_eq!(unclassified.len(), 1);
+    assert_eq!(unclassified[0]["code"], json!("X001"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 序时账的合计行不计入发生额() {
+    let dir = fixture("junk");
+    平的账(&dir);
+    // 10 号样例的形态：合计行没有凭证号、没有科目，只有金额；
+    // 后面还跟着手工草稿。收进来会让所有科目都对不上。
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-03-01,V1,1001,库存现金,500,0\n\
+         2025-03-01,V1,2202,应付账款,0,500\n\
+         2025-06-01,V2,2202,应付账款,300,0\n\
+         2025-06-01,V2,1001,库存现金,0,300\n\
+         合计,,,,800,800\n",
+    )
+    .unwrap();
+    let result = run(&params(&dir, true), &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 未上传序时账时第二条明确跳过而不是报不平() {
+    let dir = fixture("nojr");
+    平的账(&dir);
+    let result = run(&params(&dir, false), &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["performed"], json!(false));
+    assert!(
+        result["tbVsJe"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("未上传序时账")
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 导出的工作簿按三条各出一张表() {
+    let dir = fixture("export");
+    平的账(&dir);
+    let mut value = params(&dir, true);
+    value["outputPath"] = json!(dir.join("核对.xlsx").to_string_lossy());
+    let result = run(&value, &AtomicBool::new(false)).unwrap();
+    let path = export(&value, &result).unwrap();
+    assert!(path.exists());
+    let book = umya_spreadsheet::reader::xlsx::read(&path).unwrap();
+    let names: Vec<String> = book
+        .get_sheet_collection()
+        .iter()
+        .map(|sheet| sheet.get_name().to_owned())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "TB发生额与余额勾稽",
+            "TB与JE发生额勾稽",
+            "BS与PL勾稽",
+            "BS与PL待分类"
+        ]
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 对本机真实样例跑三条核对，把结论打印出来供人工验收。
+///
+/// 与映射调查同属**调查用**测试，默认不跑：
+///
+/// ```text
+/// LEDGER_SAMPLES=<目录> cargo test --manifest-path src-tauri/Cargo.toml --lib 真实样例的三条核对 -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "依赖本机样例目录"]
+fn 真实样例的三条核对() {
+    let Ok(dirs) = std::env::var("LEDGER_SAMPLES") else {
+        println!("未设置 LEDGER_SAMPLES，跳过");
+        return;
+    };
+    for dir in dirs.split(';') {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut files: Vec<std::path::PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.extension()
+                    .and_then(|x| x.to_str())
+                    .is_some_and(|x| matches!(x.to_ascii_lowercase().as_str(), "xlsx" | "xls"))
+            })
+            .filter(|p| {
+                let name = p.file_name().unwrap_or_default().to_string_lossy();
+                !name.starts_with("~$")
+                    && (name.to_lowercase().contains("tb") || name.contains("科目余额"))
+            })
+            .collect();
+        files.sort();
+        for tb_path in files {
+            let name = tb_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let source = json!({"inputPath": tb_path.to_string_lossy(), "sheet":"", "headerRow":0, "headerDepth":0});
+            let Ok(inspected) =
+                crate::engine_call_for_test("fx.inspect_tb", json!({ "source": source }))
+            else {
+                println!("\n══════ {name}：识别失败");
+                continue;
+            };
+            let params = json!({
+                "tbSource": source,
+                "tbMapping": inspected["suggestedMapping"],
+            });
+            match run(&params, &AtomicBool::new(false)) {
+                Ok(result) => {
+                    let verdict = |key: &str| {
+                        let node = &result[key];
+                        if node["performed"].as_bool() != Some(true) {
+                            format!("跳过（{}）", node["reason"].as_str().unwrap_or(""))
+                        } else if node["passed"].as_bool() == Some(true) {
+                            "通过".to_owned()
+                        } else {
+                            format!(
+                                "有差异 {}/{}",
+                                node["mismatched"].as_i64().unwrap_or(0),
+                                node["checked"]
+                                    .as_i64()
+                                    .or_else(|| node["accounts"].as_i64())
+                                    .unwrap_or(0)
+                            )
+                        }
+                    };
+                    println!("\n══════ {name}");
+                    println!("  ①勾稽    {}", verdict("rollforward"));
+                    println!("  ③恒等式  {}", verdict("equation"));
+                    for (label, key) in [("年初", "opening"), ("年末", "closing")] {
+                        if let Some(total) = result["equation"][key]["total"].as_f64() {
+                            println!("      {label}全类别合计 {total:>18.2}");
+                        }
+                    }
+                    println!(
+                        "      符号口径  {}",
+                        result["equation"]["signConvention"].as_str().unwrap_or("?")
+                    );
+                    if let Some(cats) = result["equation"]["closing"]["byCategory"].as_array() {
+                        let line = cats
+                            .iter()
+                            .map(|c| {
+                                format!(
+                                    "{}={:.0}",
+                                    c["category"].as_str().unwrap_or(""),
+                                    c["amount"].as_f64().unwrap_or(0.0)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("  ");
+                        println!("      年末分类  {line}");
+                    }
+                    let unclassified = result["equation"]["unclassified"]
+                        .as_array()
+                        .map(Vec::len)
+                        .unwrap_or(0);
+                    if unclassified > 0 {
+                        println!("      认不出会计要素的科目 {unclassified} 个");
+                    }
+                }
+                Err(e) => println!("\n══════ {name}：{}", e.user_message),
+            }
+        }
+    }
+}
+
+/// 真实样例的②发生额核对：按文件名开头的编号把余额表和序时账配成对。
+///
+/// ```text
+/// LEDGER_SAMPLES=<目录> cargo test --manifest-path src-tauri/Cargo.toml --lib 真实样例的发生额核对 -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "依赖本机样例目录"]
+fn 真实样例的发生额核对() {
+    let Ok(dirs) = std::env::var("LEDGER_SAMPLES") else {
+        println!("未设置 LEDGER_SAMPLES，跳过");
+        return;
+    };
+    let leading =
+        |name: &str| -> String { name.chars().take_while(|c| c.is_ascii_digit()).collect() };
+    for dir in dirs.split(';') {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut tbs = Vec::new();
+        let mut jes = Vec::new();
+        for entry in entries.filter_map(|e| e.ok().map(|e| e.path())) {
+            let name = entry
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase();
+            if name.starts_with("~$")
+                || name.contains("完整性核对")
+                || !matches!(name.rsplit('.').next(), Some("xlsx" | "xls"))
+            {
+                continue;
+            }
+            if name.contains("tb") || name.contains("科目余额") {
+                tbs.push(entry);
+            } else if name.contains("序时账") || name.contains("je") {
+                jes.push(entry);
+            }
+        }
+        for tb_path in tbs {
+            let tb_name = tb_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let Some(je_path) = jes
+                .iter()
+                .find(|p| {
+                    leading(&p.file_name().unwrap_or_default().to_string_lossy())
+                        == leading(&tb_name)
+                        && !leading(&tb_name).is_empty()
+                })
+                .cloned()
+            else {
+                continue;
+            };
+            let source = |path: &std::path::Path| json!({"inputPath": path.to_string_lossy(), "sheet":"", "headerRow":0, "headerDepth":0});
+            let Ok(tb_inspect) =
+                crate::engine_call_for_test("fx.inspect_tb", json!({ "source": source(&tb_path) }))
+            else {
+                println!("\n══════ {tb_name}：识别失败");
+                continue;
+            };
+            let Ok(je_inspect) =
+                crate::engine_call_for_test("fx.inspect_je", json!({ "source": source(&je_path) }))
+            else {
+                println!("\n══════ {tb_name}：序时账识别失败");
+                continue;
+            };
+            let params = json!({
+                "tbSource": source(&tb_path),
+                "tbMapping": tb_inspect["suggestedMapping"],
+                "jeSource": source(&je_path),
+                "jeMapping": je_inspect["suggestedMapping"],
+            });
+            match run(&params, &AtomicBool::new(false)) {
+                Ok(result) => {
+                    let node = &result["tbVsJe"];
+                    let accounts = node["accounts"].as_i64().unwrap_or(0);
+                    let mismatched = node["mismatched"].as_i64().unwrap_or(0);
+                    println!(
+                        "\n══════ {tb_name} ↔ {}",
+                        je_path.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                    println!(
+                        "  ②发生额  有差异 {mismatched}/{accounts}（sheet：TB={}，JE={}）",
+                        tb_inspect["sheet"].as_str().unwrap_or("?"),
+                        je_inspect["sheet"].as_str().unwrap_or("?"),
+                    );
+                    for item in node["items"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+                        println!(
+                            "      {}  TB借{:.2} JE借{:.2}  TB贷{:.2} JE贷{:.2}",
+                            item["code"].as_str().unwrap_or("?"),
+                            item["tbDebit"].as_f64().unwrap_or(0.0),
+                            item["jeDebit"].as_f64().unwrap_or(0.0),
+                            item["tbCredit"].as_f64().unwrap_or(0.0),
+                            item["jeCredit"].as_f64().unwrap_or(0.0),
+                        );
+                    }
+                }
+                Err(e) => println!("\n══════ {tb_name}：{}", e.user_message),
+            }
+        }
+    }
+}

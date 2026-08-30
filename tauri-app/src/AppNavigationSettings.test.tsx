@@ -81,6 +81,34 @@ it.each(["/tasks", "/diagnostics"])(
   },
 );
 
+it("marks preview tools as developing in the sidebar without disabling them", async () => {
+  render(
+    <MemoryRouter initialEntries={["/"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  await screen.findByRole("heading", { name: "选择一个工具开始处理" });
+  const sidebar = within(
+    document.querySelector("aside.sidebar")! as HTMLElement,
+  );
+
+  for (const name of ["AudiPick 智能合同审阅", "WP Roll Forward"]) {
+    const link = sidebar.getByRole("link", {
+      name: new RegExp(`${name}.*开发中.*结果请复核`),
+    });
+    expect(link).toBeVisible();
+    expect(link).toHaveAttribute(
+      "title",
+      "开发中：功能仍在完善，使用结果请复核。",
+    );
+    expect(within(link).getByText("开发中")).toBeVisible();
+  }
+
+  expect(
+    sidebar.getByRole("link", { name: /汇兑损益测算/ }),
+  ).not.toHaveAttribute("title");
+});
+
 it("groups settings, preserves draft across sections, and saves via the existing APIs", async () => {
   render(
     <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />,
@@ -107,6 +135,12 @@ it("groups settings, preserves draft across sections, and saves via the existing
   fireEvent.click(screen.getByRole("button", { name: "2 基本设置" }));
   expect(screen.getByRole("heading", { name: "本地缓存" })).toBeVisible();
   expect(screen.getByRole("heading", { name: "界面主题" })).toBeVisible();
+  const themeButtons = screen
+    .getAllByRole("button")
+    .map((button) => button.textContent?.trim());
+  expect(themeButtons.indexOf("清新黄绿")).toBeLessThan(
+    themeButtons.indexOf("红黄米白"),
+  );
   fireEvent.change(screen.getByLabelText("自动清理"), {
     target: { value: "off" },
   });

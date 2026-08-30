@@ -968,3 +968,20 @@
   display: block;
   line-height: 1.7;
 }
+
+/* 三步导引下的步骤切换按钮：与 FA TBJE 的步骤按钮同一形态。 */
+.fx-step-actions {
+  display: flex;
+  gap: 10px;
+  margin: 16px 0 4px;
+}
+/* 提示语里的「回到上一步」：是按钮，但读起来该像正文里的链接。 */
+.fx-link-button {
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--primary, #0f766e);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}

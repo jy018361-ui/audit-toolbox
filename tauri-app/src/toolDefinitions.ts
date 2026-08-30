@@ -88,6 +88,13 @@ export const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
     intro: "匹配期初与期末清单，对比两期折旧政策并附税法最低折旧年限参考。",
     fields: [], actions: [{label:"生成折旧政策对比",method:"fa.policy_export",mode:"job",tone:"primary"}]
   },
+  // 页面完全自绘（TbjeCheckPage）：批量拖入、自动配对、逐组核对，
+  // 通用 ToolPage 的表单驱动撑不起这套流程。与存款利息、汇兑损益同例，
+  // 这里仍登记主方法，供任务中心与历史记录识别。
+  tbje_check: {
+    intro: "把多组科目余额表与序时账一起拖进来，自动配对后逐组核对勾稽关系、发生额一致性与会计恒等式。",
+    fields: [], actions: [{label:"核对并导出明细",method:"tbje_check.export",mode:"job",tone:"primary"}]
+  },
   ts_manager: {
     intro: "加载 Timesheet 数据，配置筛选条件并按经理、项目或自定义字段透视。",
     fields:[

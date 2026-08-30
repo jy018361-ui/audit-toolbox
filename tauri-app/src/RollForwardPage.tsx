@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   engineCall,
   jobCancel,
-  jobPause,
   jobStart,
   listenJobEvents,
   openOutput,
@@ -12,6 +11,7 @@ import {
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
 import { errorText } from "@/lib/errors";
+import { useJobPause } from "@/components/JobDialog";
 import { parseRollForwardCraRatio, rollForwardCraWriteRecords } from "./rollForwardUi";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
@@ -144,7 +144,9 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
     rememberLastProject: true,
   });
   const [busy, setBusy] = useState(false);
-  const [paused, setPaused] = useState(false);
+  // 暂停状态取自全局进度弹窗：这里和弹窗里的按钮是同一个开关，
+  // 各记各的会出现「弹窗里暂停了、页面按钮还写着暂停」。
+  const { isPaused, togglePause } = useJobPause();
   const [job, setJob] = useState<JobEvent>();
   const [validation, setValidation] = useState<unknown>();
   const [error, setError] = useState("");
@@ -264,7 +266,6 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
       if (event.result) setValidation(event.result);
       setBusy(!["completed", "failed", "cancelled"].includes(event.phase));
       if (["completed", "failed", "cancelled"].includes(event.phase)) {
-        setPaused(false);
         const target = jobCompanyRef.current;
         if (target) {
           const status =
@@ -1322,12 +1323,9 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
           {job && busy && (
             <button
               className="secondary"
-              onClick={() => {
-                const next = !paused;
-                void jobPause(job.jobId, next).then(() => setPaused(next));
-              }}
+              onClick={() => togglePause(job.jobId)}
             >
-              {paused ? "继续" : "安全暂停"}
+              {isPaused(job.jobId) ? "继续" : "安全暂停"}
             </button>
           )}
           {job && busy && (

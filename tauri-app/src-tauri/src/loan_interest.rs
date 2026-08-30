@@ -36,6 +36,9 @@ struct Table {
     sheet: String,
     sheets: Vec<String>,
     header_row: usize,
+    /// TB/JE 可能有「金额→借方/贷方」两层表头，层数由 fx 内核判定后带回；
+    /// 台账固定单层（1）。inspect 要把它原样回传，前端才能让用户改。
+    header_depth: usize,
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
 }
@@ -141,7 +144,7 @@ fn inspect(params: &Value) -> Result<Value, AppError> {
     } else {
         8
     };
-    let mut out = json!({"headers":table.headers,"preview":table.rows.iter().take(preview_rows).collect::<Vec<_>>(),"rowCount":table.rows.len(),"sheet":table.sheet,"sheets":table.sheets,"headerRow":table.header_row,"headerDepth":1,"suggestedMapping":suggested});
+    let mut out = json!({"headers":table.headers,"preview":table.rows.iter().take(preview_rows).collect::<Vec<_>>(),"rowCount":table.rows.len(),"sheet":table.sheet,"sheets":table.sheets,"headerRow":table.header_row,"headerDepth":table.header_depth,"suggestedMapping":suggested});
     // 台账的角色表与形态表随识别结果一起下发：前端据此渲染下拉、判定命中哪一型、
     // 区分 required／optional。**只有 Rust 这一份定义**，前端不再自己抄一遍。
     if kind == "ledger" || kind == "rateLedger" {
@@ -315,6 +318,7 @@ fn calculate_ledger(params: &Value) -> Result<Vec<LoanRow>, AppError> {
                 sheet: table.sheet.clone(),
                 sheets: table.sheets.clone(),
                 header_row: table.header_row,
+                header_depth: table.header_depth,
                 headers: seg_headers,
                 rows: seg_rows,
             };
@@ -520,6 +524,20 @@ fn calculate_tb(params: &Value) -> Result<Vec<LoanRow>, AppError> {
     let rate_source = optional_source(params, "rateLedgerSource")?;
     // 贷方列写的是绝对值还是已带负号，全表判一次，不逐行猜。
     let tb_convention = tb_sign_convention(&tb, &tm);
+    // 余额列另判一次：整列自带符号时并排的方向列是冗余标注，按它再翻一次
+    // 负债就成了正数。判据与另外三个读 TB 的工具共用。
+    let balance_self_signed = |prefix: &str| {
+        ledger_mapping::balance_self_signed(
+            &tb.headers,
+            &tb.rows,
+            &|role| mapped_names(&tm, "tb", role),
+            prefix,
+        )
+    };
+    let (opening_self_signed, closing_self_signed) = (
+        balance_self_signed("openingFunctional"),
+        balance_self_signed("closingFunctional"),
+    );
     let je_convention = je_sign_convention(&je, &jm);
     let tb_leaf =
         ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| mapped_names(&tm, "tb", role));
@@ -534,13 +552,15 @@ fn calculate_tb(params: &Value) -> Result<Vec<LoanRow>, AppError> {
             continue;
         }
         // 借款是负债类科目，贷方为正。六种 TB 形态的差异由内核吸收。
-        let opening = ledger_mapping::credit_positive(ledger_mapping::signed_amount(
+        let opening = ledger_mapping::credit_positive(ledger_mapping::signed_balance(
             &amount_inputs(&tb, row, &tm, "opening"),
             tb_convention,
+            opening_self_signed,
         ));
-        let closing = ledger_mapping::credit_positive(ledger_mapping::signed_amount(
+        let closing = ledger_mapping::credit_positive(ledger_mapping::signed_balance(
             &amount_inputs(&tb, row, &tm, "closing"),
             tb_convention,
+            closing_self_signed,
         ));
         let mut additions = 0.0;
         let mut reductions = 0.0;
@@ -1128,7 +1148,48 @@ fn source(params: &Value, key: &str) -> Result<(Table, Map<String, Value>), AppE
     } else {
         mapping
     };
-    Ok((load(&spec, kind)?, mapping))
+    let mut table = load(&spec, kind)?;
+    if kind == "je" {
+        let columns = mapping
+            .iter()
+            .filter(|(role, _)| {
+                !matches!(
+                    ledger_mapping::migrate_role_name("je", role),
+                    "functionalAmount"
+                        | "functionalDebit"
+                        | "functionalCredit"
+                        | "foreignAmount"
+                        | "foreignDebit"
+                        | "foreignCredit"
+                )
+            })
+            .flat_map(|(_, value)| match value {
+                Value::String(column) => vec![column.clone()],
+                Value::Array(values) => values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        // 顺序不能反：先按公共引擎剔噪声行（合计行、无身份的游离金额行、表尾
+        // 草稿），再做非金额列的向下填充——填充会把上一行的科目/凭证号带给
+        // 空白格，垃圾行被填上身份后就再也认不出来了。正常分录行不受影响：
+        // 每行科目必非空，不会因「无身份＋有金额」被误伤（TBJE 勾稽同序）。
+        let keep = ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
+            mapped_names(&mapping, "je", role)
+        });
+        let mut kept_rows = Vec::with_capacity(table.rows.len());
+        for (index, row) in table.rows.iter().enumerate() {
+            if keep.get(index).copied().unwrap_or(true) {
+                kept_rows.push(row.clone());
+            }
+        }
+        table.rows = kept_rows;
+        ledger_mapping::forward_fill_columns(&table.headers, &mut table.rows, &columns);
+    }
+    Ok((table, mapping))
 }
 /// 台账映射的旧角色名 → 标准名。认不出的旧名原样保留（用户手工填的自定义键不该被吞掉）。
 fn normalize_loan_mapping(m: Map<String, Value>) -> Map<String, Value> {
@@ -1171,6 +1232,7 @@ fn load(spec: &SourceSpec, kind: &str) -> Result<Table, AppError> {
             sheet: table.sheet.clone(),
             sheets: table.sheets.clone(),
             header_row: table.header_row,
+            header_depth: table.header_depth,
             headers: table.headers.clone(),
             rows: table.rows.clone(),
         });
@@ -1259,6 +1321,7 @@ fn load_ledger_table(spec: &SourceSpec) -> Result<Table, AppError> {
         sheet,
         sheets,
         header_row,
+        header_depth: 1,
         headers,
         rows,
     })
@@ -1387,12 +1450,17 @@ fn suggest_with_rows(headers: &[String], kind: &str, rows: &[Vec<String>]) -> Ma
                 out.insert((*role).into(), Value::String(header.clone()));
             }
         }
-        // 借款标识是本工具专属角色，不在标准表里，仍按关键词找。
-        let loan_id = ["辅助", "明细", "客户"]
-            .iter()
-            .find_map(|w| headers.iter().find(|h| norm(h).contains(&norm(w))));
-        if let Some(h) = loan_id {
-            out.insert("loanId".into(), Value::String(h.clone()));
+        // 借款标识：内核标准表已有 `loanId` 角色（按「合同编号/借据号/登记编号」
+        // 这类**特异写法**认列，泛词刻意留给辅助核算角色）。引擎判中特异列时不
+        // 覆盖；只有引擎没给 loanId 时，才退回用泛词（辅助/明细/客户）补位——
+        // 表里同时有「合同编号」与「辅助核算」时必须落在前者。
+        if !out.contains_key("loanId") {
+            let loan_id = ["辅助", "明细", "客户"]
+                .iter()
+                .find_map(|w| headers.iter().find(|h| norm(h).contains(&norm(w))));
+            if let Some(h) = loan_id {
+                out.insert("loanId".into(), Value::String(h.clone()));
+            }
         }
         return out;
     }
@@ -1409,129 +1477,11 @@ fn suggest_with_rows(headers: &[String], kind: &str, rows: &[Vec<String>]) -> Ma
         }
         return out;
     }
-    let rules: &[(&str, &[&str])] = match kind {
-        _ => &[
-            (
-                "loanId",
-                &[
-                    "合同编号",
-                    "借款编号",
-                    "借据",
-                    "登记编号",
-                    "合同号",
-                    "编号",
-                    "ref",
-                ],
-            ),
-            (
-                "lender",
-                &[
-                    "贷款银行",
-                    "贷款方",
-                    "债权人",
-                    "贷款人",
-                    "贷款机构",
-                    "金融机构",
-                    "交易对手",
-                    "承兑行",
-                    "银行",
-                    "lender",
-                ],
-            ),
-            (
-                "principal",
-                &[
-                    "借款本金",
-                    "借款金额",
-                    "放款金额",
-                    "已提款",
-                    "提款",
-                    "票面金额",
-                    "合同金额",
-                    "原币金额",
-                    "本金",
-                    "金额",
-                    "amount",
-                ],
-            ),
-            (
-                "startDate",
-                &[
-                    "借款起始日",
-                    "放款起始日",
-                    "放款日期",
-                    "放款日",
-                    "起息日",
-                    "起始日",
-                    "借款时间",
-                    "起租日",
-                    "借款日",
-                    "drawdown",
-                ],
-            ),
-            (
-                "endDate",
-                &["到期日期", "贷款到期日", "到期日", "到期时间", "maturity"],
-            ),
-            ("term", &["期限", "term"]),
-            (
-                "rate",
-                &[
-                    "执行利率",
-                    "折算年利率",
-                    "年利率",
-                    "固定利率",
-                    "贴现率",
-                    "利率",
-                    "利息",
-                    "rate",
-                ],
-            ),
-            ("rateType", &["利率类型", "利率形式"]),
-            ("benchmarkRate", &["基准利率", "lpr"]),
-            ("spreadBps", &["加点", "bp"]),
-            (
-                "outstanding",
-                &[
-                    "未偿还本金",
-                    "未还余额",
-                    "期末余额",
-                    "贷款余额",
-                    "期末本金",
-                    "余额",
-                ],
-            ),
-            ("openingPrincipal", &["期初本金", "期初余额", "年初余额"]),
-            ("drawdownAmount", &["本期新增", "新增本金", "借款增加"]),
-            ("drawdownDate", &["新增借款日期"]),
-            (
-                "repaymentAmount",
-                &["本期归还", "还款本金", "本期减少", "归还", "已还"],
-            ),
-            ("repaymentMethod", &["还本方式", "还款方式", "还本安排"]),
-            ("repaymentDate", &["还款日期", "归还日"]),
-        ],
-    };
-    let mut out = Map::new();
-    for (role, words) in rules {
-        // 词为外层循环：特异词（如"执行利率"）优先于泛化词（如"利率"）；
-        // 个别角色需排除易混淆列（"利率类型"不是利率值，"剩余天数"不是期限）。
-        let exclude: &[&str] = match *role {
-            "rate" => &["类型", "方式", "定价", "调整"],
-            "term" => &["剩余", "天数"],
-            _ => &[],
-        };
-        let hit = words.iter().find_map(|w| {
-            headers.iter().find(|h| {
-                let nh = norm(h);
-                !exclude.iter().any(|x| nh.contains(x)) && nh.contains(&norm(w))
-            })
-        });
-        if let Some(h) = hit {
-            out.insert((*role).into(), Value::String(h.clone()));
-        }
-    }
-    out
+    // 四种 kind（tb/je/ledger/rateLedger）在上面全部提前 return，走不到这里。
+    // 此后缘还挂着一份约 120 行的平铺关键词表做兜底——它认出的角色名与前端
+    // 面板根本不是一套，永远轮不到执行，确认无引用后已删除；未登记的 kind
+    // 不给任何建议，也不许再造一份私有别名库。
+    Map::new()
 }
 /// 历史保存的映射用的是旧角色名（`account`、`voucherId`、`openingPrincipal`…），
 /// 读取时统一迁移到标准名，两种都能命中。
@@ -1709,15 +1659,12 @@ fn source_rate_type(t: &Table, r: &[String], m: &Map<String, Value>) -> String {
         explicit
     })
 }
+/// 金额解析走统一内核的宽松版 [`ledger_mapping::parse_amount_lenient`]：认千分位、
+/// 货币符号、百分号、括号负数，也认尾部负号与 CR/DR／借贷后缀（收编后新增的
+/// 覆盖面）。「解析失败按 0」与「百分号除以一百」是本模块的取数语义，留在包装层。
 fn parse_num(s: &str) -> f64 {
-    let percent = s.contains('%');
-    let clean = s
-        .replace([',', '¥', '￥', ' '], "")
-        .replace('%', "")
-        .replace('(', "-")
-        .replace(')', "");
-    let n = clean.parse::<f64>().unwrap_or(0.0);
-    if percent { n / 100.0 } else { n }
+    let n = ledger_mapping::parse_amount_lenient(s).unwrap_or(0.0);
+    if s.contains('%') { n / 100.0 } else { n }
 }
 fn normalize_rate(x: f64) -> f64 {
     if x.abs() > 1.0 { x / 100.0 } else { x }
@@ -1853,27 +1800,16 @@ fn je_sign_convention(table: &Table, m: &Map<String, Value>) -> ledger_mapping::
         .unwrap_or(ledger_mapping::SignConvention::Unsigned)
 }
 
-/// 全表判一次贷方列的符号口径。
+/// 全表判一次贷方列的符号口径。**走统一入口**：此前这里自己拼 BalanceRow 原料
+/// （缺的发生额列记 0 仍参与投票），与其他读 TB 的工具各持一份流程；现在取列、
+/// 投票、兜底全在内核完成。净额形态（只有期初/期末净额＋方向列、无本年累计
+/// 发生额）由内核的降级分支给出「借贷符号一样」的结论，判不出时按 Unsigned。
 fn tb_sign_convention(table: &Table, m: &Map<String, Value>) -> ledger_mapping::SignConvention {
-    let rows: Vec<ledger_mapping::BalanceRow> = table
-        .rows
-        .iter()
-        .map(|row| ledger_mapping::BalanceRow {
-            opening: ledger_mapping::signed_amount(
-                &amount_inputs(table, row, m, "opening"),
-                ledger_mapping::SignConvention::Unsigned,
-            ),
-            debit: num_role(table, row, m, "tb", "ytdFunctionalDebit"),
-            credit: num_role(table, row, m, "tb", "ytdFunctionalCredit"),
-            closing: ledger_mapping::signed_amount(
-                &amount_inputs(table, row, m, "closing"),
-                ledger_mapping::SignConvention::Unsigned,
-            ),
-        })
-        .collect();
-    ledger_mapping::tb_sign_evidence(&rows)
-        .convention
-        .unwrap_or(ledger_mapping::SignConvention::Unsigned)
+    ledger_mapping::detect_tb_sign_convention(&table.headers, &table.rows, &|role| {
+        mapped_names(m, "tb", role)
+    })
+    .convention
+    .unwrap_or(ledger_mapping::SignConvention::Unsigned)
 }
 
 fn norm(s: &str) -> String {
@@ -2450,6 +2386,36 @@ mod loan_form_tests {
     }
 
     #[test]
+    fn 引擎判中特异列时泛词不覆盖借款标识() {
+        // 表里同时有「合同编号」与「辅助核算」：内核标准表按特异写法把前者判给
+        // loanId、后者判给辅助核算。泛词（辅助/明细/客户）此前无条件覆盖 loanId，
+        // 特异列会被抢走；现在只准在引擎没给 loanId 时补位。
+        let m = suggest(
+            &h(&[
+                "科目编码",
+                "科目名称",
+                "合同编号",
+                "辅助核算",
+                "期初余额",
+                "期末余额",
+            ]),
+            "tb",
+        );
+        assert_eq!(m.get("loanId").and_then(Value::as_str), Some("合同编号"));
+        assert_eq!(
+            m.get("auxiliary").and_then(Value::as_str),
+            Some("辅助核算")
+        );
+    }
+
+    #[test]
+    fn 引擎没给借款标识时泛词补位() {
+        // 只有「客户」这类泛词列、没有特异写法时，仍按泛词补位——保持旧工具行为。
+        let m = suggest(&h(&["科目编码", "科目名称", "客户", "期初余额"]), "tb");
+        assert_eq!(m.get("loanId").and_then(Value::as_str), Some("客户"));
+    }
+
+    #[test]
     fn 旧角色名映射仍然可读() {
         // 前端面板此前用 maturityDate／fixedRate，引擎识别出来的是 endDate／rate。
         let mut old = Map::new();
@@ -2668,6 +2634,23 @@ mod tests {
     fn percent_normalization() {
         assert_eq!(normalize_rate(4.2), 0.042);
         assert_eq!(parse_num("4.2%"), 0.042)
+    }
+
+    #[test]
+    fn 金额解析走内核宽松版() {
+        // 千分位、货币符号、括号负数与百分号是收编前的既有覆盖面。
+        assert_eq!(parse_num("1,234.5"), 1234.5);
+        assert_eq!(parse_num("(50.00)"), -50.0);
+        assert_eq!(parse_num("¥1,000"), 1000.0);
+        assert_eq!(parse_num("4.2%"), 0.042);
+        // 尾部负号与 CR/DR／借贷后缀是内核宽松版带来的新增覆盖面，
+        // 此前这些写法一律静默按 0。
+        assert_eq!(parse_num("800-"), -800.0);
+        assert_eq!(parse_num("1,234CR"), -1234.0);
+        assert_eq!(parse_num("500贷"), -500.0);
+        // 解析失败按 0 的取数语义留在包装层。
+        assert_eq!(parse_num("abc"), 0.0);
+        assert_eq!(parse_num(""), 0.0);
     }
 
     /// 测试集驱动入口：返回测试集目录（9 份借款台账 + 3 份子代理标准答案）。
@@ -3067,9 +3050,113 @@ mod tests {
             sheet: "Sheet1".into(),
             sheets: vec!["Sheet1".into()],
             header_row: 1,
+            header_depth: 1,
             headers: headers.iter().map(|h| h.to_string()).collect(),
             rows: vec![row.iter().map(|v| v.to_string()).collect()],
         }
+    }
+
+    /// 多行版 [`je_table`]：TB 符号判定要看全表勾稽，单行看不出差异。
+    fn rows_table(headers: &[&str], rows: &[&[&str]]) -> Table {
+        Table {
+            path: PathBuf::new(),
+            sheet: "Sheet1".into(),
+            sheets: vec!["Sheet1".into()],
+            header_row: 1,
+            header_depth: 1,
+            headers: headers.iter().map(|h| h.to_string()).collect(),
+            rows: rows
+                .iter()
+                .map(|r| r.iter().map(|v| v.to_string()).collect())
+                .collect(),
+        }
+    }
+
+    fn map_of(pairs: &[(&str, &str)]) -> Map<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), Value::String((*v).to_string())))
+            .collect()
+    }
+
+    /// 引擎统一入口在此映射下的完整证据（口径＋说明＋票数）。
+    fn engine_tb_evidence(
+        table: &Table,
+        m: &Map<String, Value>,
+    ) -> ledger_mapping::SignEvidence {
+        ledger_mapping::detect_tb_sign_convention(&table.headers, &table.rows, &|role| {
+            mapped_names(m, "tb", role)
+        })
+    }
+
+    /// 收口前后对比的固化结论：净额形态（无 ytd 发生额列）下，借款侧此前自拼
+    /// 原料投票落到「没有贷方数值，两种口径算出的净额一致」的 Unsigned 兜底；
+    /// 引擎统一入口收口前在此形态直接判「无法判定」，靠调用方 unwrap_or 落到
+    /// 同一枚举值。内核加净额口径降级分支后，引擎直接给出 Unsigned 结论。
+    #[test]
+    fn tb符号判定_净额形态下引擎降级结论与收口前一致() {
+        // TB2 形态砍掉 ytd：期初/期末净额＋方向列，没有本年累计借贷发生额。
+        let net_only = rows_table(
+            &["科目编码", "方向", "期初余额", "期末余额"],
+            &[
+                &["2001", "贷", "1000000", "900000"],
+                &["1001", "借", "5000", "6000"],
+            ],
+        );
+        let net_only_map = map_of(&[
+            ("accountCode", "科目编码"),
+            ("openingDirection", "方向"),
+            ("openingFunctionalAmount", "期初余额"),
+            ("closingDirection", "方向"),
+            ("closingFunctionalAmount", "期末余额"),
+        ]);
+        assert_eq!(
+            tb_sign_convention(&net_only, &net_only_map),
+            ledger_mapping::SignConvention::Unsigned
+        );
+        let evidence = engine_tb_evidence(&net_only, &net_only_map);
+        // 收口前是 None（「余额或发生额未映射齐全」）；降级分支给出明确结论。
+        assert_eq!(evidence.convention, Some(ledger_mapping::SignConvention::Unsigned));
+        assert!(evidence.note.as_deref().unwrap_or("").contains("本年累计"));
+
+        // 完整 TB1（净额＋ytd 借贷分列）：勾稽等式投票，两版历来一致。
+        let full_tb1 = rows_table(
+            &["科目编码", "期初余额", "本年借方", "本年贷方", "期末余额"],
+            &[
+                &["1001", "1000", "500", "200", "1300"],
+                &["2001", "2000", "300", "600", "2300"],
+            ],
+        );
+        let full_tb1_map = map_of(&[
+            ("accountCode", "科目编码"),
+            ("openingFunctionalAmount", "期初余额"),
+            ("ytdFunctionalDebit", "本年借方"),
+            ("ytdFunctionalCredit", "本年贷方"),
+            ("closingFunctionalAmount", "期末余额"),
+        ]);
+        assert_eq!(
+            tb_sign_convention(&full_tb1, &full_tb1_map),
+            ledger_mapping::SignConvention::Unsigned
+        );
+        // 贷方列带负号的表（已带符号口径）：勾稽投票判出 Signed。
+        let signed_tb = rows_table(
+            &["科目编码", "期初余额", "本年借方", "本年贷方", "期末余额"],
+            &[
+                &["1001", "1000", "500", "-200", "1300"],
+                &["2001", "2000", "300", "-600", "2300"],
+            ],
+        );
+        let signed_map = map_of(&[
+            ("accountCode", "科目编码"),
+            ("openingFunctionalAmount", "期初余额"),
+            ("ytdFunctionalDebit", "本年借方"),
+            ("ytdFunctionalCredit", "本年贷方"),
+            ("closingFunctionalAmount", "期末余额"),
+        ]);
+        assert_eq!(
+            tb_sign_convention(&signed_tb, &signed_map),
+            ledger_mapping::SignConvention::Signed
+        );
     }
 
     #[test]
@@ -3108,6 +3195,62 @@ mod tests {
             ledger_mapping::SignConvention::Unsigned,
         );
         assert_eq!(net, 500.0, "贷方红字应成为本金减少，不能取负绝对值");
+    }
+
+    #[test]
+    fn 序时账的合计行不产生本金变动() {
+        // 10 号样例的形态：合计行没有日期、科目、借款标识，只有金额。收进来
+        // 本金变动会被翻一遍。此前靠「匹配不上自然跳过」兜着，现在按公共引擎
+        // 的垃圾行剔除显式跳过——合计行科目列一旦被导出工具填上就不再是自然跳过。
+        let fixture = SyntheticLedger::new(&[["4.2%", "", "", ""]]);
+        let mut book = Workbook::new();
+        for (name, data) in [
+            (
+                "TB",
+                vec![
+                    vec!["编码", "科目", "借款", "期初贷", "期末贷"],
+                    vec!["2001", "短期借款", "SYN-1", "1000000", "900000"],
+                ],
+            ),
+            (
+                "JE",
+                vec![
+                    vec!["编码", "科目", "借款", "日期", "借方", "贷方"],
+                    vec!["2001", "短期借款", "SYN-1", "2025-03-01", "0", "100000"],
+                    vec!["2001", "短期借款", "SYN-1", "2025-06-01", "200000", "0"],
+                    vec!["", "", "", "合计", "200000", "100000"],
+                ],
+            ),
+        ] {
+            let sheet = book.add_worksheet();
+            sheet.set_name(name).unwrap();
+            for (r, row) in data.iter().enumerate() {
+                for (c, v) in row.iter().enumerate() {
+                    sheet.write_string(r as u32, c as u16, *v).unwrap();
+                }
+            }
+        }
+        let path = fixture.dir.join("tbje-junk.xlsx");
+        book.save(&path).unwrap();
+        let mut params = fixture.params();
+        params["mode"] = json!("tb");
+        params["tbSource"] = json!({"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","loanId":"借款","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷"}});
+        params["jeSource"] = json!({"source":{"inputPath":path,"sheet":"JE","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","loanId":"借款","date":"日期","functionalDebit":"借方","functionalCredit":"贷方"}});
+        let result = run_preview(&params).unwrap();
+        let row = &result["rows"][0];
+        // 两条明细：贷 10 万（新增）、借 20 万（归还）；合计行的 20/10 万不得再计。
+        assert_eq!(row["additions"].as_f64().unwrap(), 100000.0, "{result:#?}");
+        assert_eq!(row["reductions"].as_f64().unwrap(), 200000.0, "{result:#?}");
+        assert!(
+            row["matchBasis"]
+                .as_str()
+                .unwrap()
+                .starts_with("科目＋明细/摘要模糊匹配 2 条 JE"),
+            "{}",
+            row["matchBasis"]
+        );
+        // 期初 100 万 ＋ 新增 10 万 − 归还 20 万 ＝ 期末 90 万，本金变动勾稽平。
+        // matchStatus 另由利率复核改写（本测试未配利率台账），不在断言范围。
     }
 
     #[test]

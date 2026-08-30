@@ -104,6 +104,61 @@ describe("fx audit upload and mapping parity", () => {
       "本位币金额方案",
     ]);
   });
+  it("仅未实现模式下JE不再要求原币币种与原币金额", () => {
+    // 本位币记账的序时账没有外币列是常态：TB 才有外币信息，用户手动选
+    // 「仅未实现」时 JE 不该再被原币两件套拦住。
+    expect(
+      fxMissingRequired(
+        "je",
+        {
+          date: "记账日期",
+          id: "凭证号",
+          accountCode: "科目编码",
+          accountName: "科目名称",
+          summary: "摘要",
+          functionalAmount: "本币金额",
+        },
+        true,
+        "默认主体",
+        "unrealized",
+      ),
+    ).toEqual([]);
+    // 币种已映射时原币金额记法仍要提示——月度测算会把外币变动当 0。
+    expect(
+      fxMissingRequired(
+        "je",
+        {
+          date: "记账日期",
+          id: "凭证号",
+          accountCode: "科目编码",
+          accountName: "科目名称",
+          summary: "摘要",
+          functionalAmount: "本币金额",
+          currency: "货币",
+        },
+        true,
+        "默认主体",
+        "unrealized",
+      ),
+    ).toEqual(["原币金额方案"]);
+    // 其他模式下口径不变。
+    expect(
+      fxMissingRequired(
+        "je",
+        {
+          date: "记账日期",
+          id: "凭证号",
+          accountCode: "科目编码",
+          accountName: "科目名称",
+          summary: "摘要",
+          functionalAmount: "本币金额",
+        },
+        true,
+        "默认主体",
+        "combined",
+      ),
+    ).toEqual(["原币币种", "原币金额方案"]);
+  });
   it("limits TB missing prompts to the fixed required field set", () => {
     expect(fxMissingRequired("tb", {}, true, "默认主体")).toEqual([
       "科目编码",
@@ -332,6 +387,51 @@ describe("fx audit upload and mapping parity", () => {
     expect(started).toEqual(["tb"]);
     expect(outcomes.je).toBeUndefined();
     expect(outcomes.tb?.appliedCount).toBe(0);
+  });
+  it("公共 LLM 复核会保留凭证字与凭证号组成的多列凭证键", async () => {
+    const call = async () => ({
+      changes: [
+        { role: "id", suggestedColumn: "凭证号", confidence: 0.94 },
+      ],
+    });
+    const outcomes = await applyLedgerReviewsTogether(call, {
+      je: {
+        headers: ["凭证字", "凭证号", "摘要"],
+        preview: [["记", "1", "采购设备"]],
+        mapping: { id: ["凭证字"] },
+        labels: { id: "凭证识别字段", summary: "摘要" },
+      },
+    });
+    expect(outcomes.je?.failed).toBe(false);
+    expect(outcomes.je?.mapping.id).toEqual(["凭证字", "凭证号"]);
+    expect(outcomes.je?.appliedCount).toBe(1);
+  });
+  it("复核建议允许科目名称与编码共用混写列（03号样例形态）", async () => {
+    // 科目编码与名称写在同一格（1001010000:库存现金-人民币），自动映射
+    // 已把该列挂到 accountCode；LLM 复核建议 accountName 也指这一列时，
+    // 「同列已被占用就跳过」必须放行——这列本该两个角色共用。
+    const combined = "项目编码、文本/科目编码、文本";
+    const call = async () => ({
+      changes: [
+        { role: "accountName", suggestedColumn: combined, confidence: 0.9 },
+      ],
+    });
+    const outcomes = await applyLedgerReviewsTogether(call, {
+      tb: {
+        headers: [combined, "货币", "期初", "期末余额"],
+        preview: [
+          ["1001/库存现金", "CNY", "984.3", "-984.3"],
+          ["1001010000:库存现金-人民币", "CNY", "984.3", "-984.3"],
+          ["1002/银行存款", "CNY", "22222745.07", "-8724703.77"],
+          ["1002101001:银行存款-建行新乡", "CNY", "14075.88", "28185.73"],
+        ],
+        mapping: { accountCode: combined },
+        labels: { accountCode: "科目编码", accountName: "科目名称" },
+      },
+    });
+    expect(outcomes.tb?.failed).toBe(false);
+    expect(outcomes.tb?.appliedCount).toBe(1);
+    expect(outcomes.tb?.mapping.accountName).toEqual([combined]);
   });
   it("keeps preview data when export adds an output path", () => {
     const preview = {

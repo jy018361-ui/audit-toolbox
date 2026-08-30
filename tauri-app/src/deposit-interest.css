@@ -1,95 +1,552 @@
-.deposit-page{padding-bottom:40px}
+.deposit-page {
+  padding-bottom: 40px;
+}
+.deposit-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 7px;
+  color: var(--muted-foreground);
+  cursor: help;
+  font-size: 14px;
+  font-weight: 400;
+}
+.deposit-help:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: 50%;
+}
+.deposit-account-summary {
+  display: flex;
+  align-items: center;
+  margin: 0 0 10px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.deposit-account-summary b {
+  margin: 0 2px;
+  color: var(--foreground);
+}
+.deposit-account-list label,
+.deposit-account-head {
+  grid-template-columns: minmax(180px, 1fr) 220px minmax(220px, 300px);
+}
+.deposit-account-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: grid;
+  gap: 12px;
+  padding: 4px 0 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--card);
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.deposit-account-tier {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+.deposit-account-tier select {
+  min-width: 0;
+  flex: 1 1 0;
+}
+.deposit-account-na {
+  color: var(--muted-foreground);
+  text-align: center;
+}
+@media (max-width: 900px) {
+  .deposit-account-list label,
+  .deposit-account-head {
+    grid-template-columns: minmax(140px, 1fr) 190px minmax(180px, 240px);
+  }
+}
 /* 六个参数在窄一点的窗口里放不下一行，交给 auto-fit 自己换行，
    避免卡片内部出现横向滚动。 */
-.deposit-run-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;align-items:end}
+.deposit-run-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
 /* min-width:0 不能省：网格项默认 min-width:auto，长选项文案（如
    「年利率÷12（按月平均）」）会把下拉框撑出自己那一格、压到右边邻格上。 */
-.deposit-run-grid label{display:grid;gap:5px;min-width:0;color:var(--muted-foreground);font-size:12px}
-.deposit-run-grid input,.deposit-run-grid select{min-width:0;min-height:34px;padding:6px 9px;border:1px solid var(--border);border-radius:8px;background:var(--background);color:var(--foreground)}
-.deposit-run-grid .deposit-check{display:flex;flex-direction:row;align-items:center;gap:7px;min-height:34px;white-space:nowrap}
-.deposit-run-grid .deposit-check input{min-height:0;width:16px;height:16px;padding:0}
+.deposit-run-grid label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.deposit-run-grid input,
+.deposit-run-grid select {
+  min-width: 0;
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--foreground);
+}
+.deposit-run-grid .deposit-check {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  white-space: nowrap;
+}
+.deposit-run-grid .deposit-check input {
+  min-height: 0;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
 /* 输出文件格子里输入框和"选择位置"按钮并排，按钮不单独占一格，
    否则 auto-fit 换行时它会孤零零掉到下一行最左边。 */
-.deposit-run-grid .deposit-output-row{display:flex;gap:6px;align-items:center}
-.deposit-run-grid .deposit-output-row input{flex:1 1 auto;min-width:0}
-.deposit-run-grid .deposit-output-row button{flex:0 0 auto;white-space:nowrap}
-.deposit-result{gap:16px}
-.deposit-rate-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;padding-top:14px;border-top:1px dashed var(--border)}
-.deposit-rate-head h4,.deposit-rate-head p{margin:0}
-.deposit-rate-head p{margin-top:5px;color:var(--muted-foreground);font-size:13px;max-width:80ch}
-.deposit-table{overflow:auto;border:1px solid var(--border);border-radius:10px}
-.deposit-table>table{width:100%;min-width:1420px;border-collapse:collapse}
-.deposit-table th,.deposit-table td{padding:9px 10px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
-.deposit-table th{position:sticky;top:0;z-index:1;background:var(--muted);font-size:12px}
-.deposit-table th:nth-child(-n+4),.deposit-table td:nth-child(-n+4),.deposit-table th:nth-child(6),.deposit-table td:nth-child(6),.deposit-table th:last-child,.deposit-table td:last-child{text-align:left}
-.deposit-table td:nth-child(2){max-width:260px;overflow:hidden;text-overflow:ellipsis}
-.deposit-table select,.deposit-table input{min-height:32px;padding:5px 8px;border:1px solid var(--border);border-radius:7px;background:var(--background);color:var(--foreground)}
-.deposit-table input{width:104px;text-align:right}
-.deposit-review-row{background:color-mix(in srgb,#dfbd77 12%,transparent)}
-.deposit-ok,.deposit-warn{padding:3px 7px;border-radius:999px;font-size:11px}
-.deposit-ok{background:#e8f5ee;color:#17663d}
-.deposit-warn{background:#fff1cf;color:#855400}
-.deposit-expand{padding:4px 10px;border:1px solid var(--border);border-radius:7px;background:var(--background);color:var(--foreground);cursor:pointer;font-size:12px}
-.deposit-expand:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
-.deposit-month-row>td{padding:0 0 0 24px;background:var(--muted)}
-.deposit-month-table{width:auto;min-width:820px;border-collapse:collapse;margin:8px 0}
-.deposit-month-table th,.deposit-month-table td{padding:6px 12px;border-bottom:1px solid var(--border);text-align:right;font-size:12px}
-.deposit-month-table th:first-child,.deposit-month-table td:first-child{text-align:left}
-@media(max-width:1100px){.deposit-rate-head{align-items:flex-start;flex-direction:column}}
-@media(max-width:640px){.deposit-run-grid{grid-template-columns:1fr}}
-.deposit-tier-table{overflow:auto;border:1px solid var(--border);border-radius:10px}
-.deposit-tier-table>table{width:100%;min-width:1080px;border-collapse:collapse}
-.deposit-tier-table th,.deposit-tier-table td{padding:8px 10px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
-.deposit-tier-table th{background:var(--muted);font-size:12px;vertical-align:bottom}
-.deposit-tier-table th small{display:block;color:var(--muted-foreground);font-size:10px;font-weight:400}
-.deposit-tier-table th:nth-child(-n+2),.deposit-tier-table td:nth-child(-n+2),.deposit-tier-table th:last-child,.deposit-tier-table td:last-child{text-align:left}
-.deposit-tier-table input{width:106px;min-height:30px;padding:4px 8px;border:1px solid var(--border);border-radius:7px;background:var(--background);color:var(--foreground);text-align:right}
-.deposit-tier-table input.deposit-tier-changed{border-color:#c08a1e;background:#fff8e8;font-weight:600}
-.deposit-tier-note{max-width:52ch;white-space:normal;color:var(--muted-foreground);font-size:12px}
-.deposit-tier-actions{margin:10px 0 0;color:var(--muted-foreground);font-size:13px}
-.deposit-tier-actions button{margin-left:6px;padding:3px 10px;border:1px solid var(--border);border-radius:7px;background:var(--background);color:var(--foreground);cursor:pointer;font-size:12px}
+.deposit-run-grid .deposit-output-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.deposit-run-grid .deposit-output-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.deposit-run-grid .deposit-output-row button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.deposit-result {
+  gap: 16px;
+}
+.deposit-rate-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--border);
+}
+.deposit-rate-head h4,
+.deposit-rate-head p {
+  margin: 0;
+}
+.deposit-rate-head p {
+  margin-top: 5px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  max-width: 80ch;
+}
+.deposit-table {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.deposit-table > table {
+  width: 100%;
+  min-width: 1420px;
+  border-collapse: collapse;
+}
+.deposit-table th,
+.deposit-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.deposit-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--muted);
+  font-size: 12px;
+}
+.deposit-table th:nth-child(-n + 4),
+.deposit-table td:nth-child(-n + 4),
+.deposit-table th:nth-child(6),
+.deposit-table td:nth-child(6),
+.deposit-table th:last-child,
+.deposit-table td:last-child {
+  text-align: left;
+}
+.deposit-table td:nth-child(2) {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.deposit-table select,
+.deposit-table input {
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--background);
+  color: var(--foreground);
+}
+.deposit-table input {
+  width: 104px;
+  text-align: right;
+}
+.deposit-review-row {
+  background: color-mix(in srgb, #dfbd77 12%, transparent);
+}
+.deposit-ok,
+.deposit-warn {
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+.deposit-ok {
+  background: #e8f5ee;
+  color: #17663d;
+}
+.deposit-warn {
+  background: #fff1cf;
+  color: #855400;
+}
+.deposit-expand {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--background);
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 12px;
+}
+.deposit-expand:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.deposit-month-row > td {
+  padding: 0 0 0 24px;
+  background: var(--muted);
+}
+.deposit-month-table {
+  width: auto;
+  min-width: 820px;
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+.deposit-month-table th,
+.deposit-month-table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  font-size: 12px;
+}
+.deposit-month-table th:first-child,
+.deposit-month-table td:first-child {
+  text-align: left;
+}
+@media (max-width: 1100px) {
+  .deposit-rate-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+@media (max-width: 640px) {
+  .deposit-run-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.deposit-tier-table {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.deposit-tier-table > table {
+  width: 100%;
+  min-width: 1080px;
+  border-collapse: collapse;
+}
+.deposit-tier-table th,
+.deposit-tier-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.deposit-tier-table th {
+  background: var(--muted);
+  font-size: 12px;
+  vertical-align: bottom;
+}
+.deposit-tier-table th small {
+  display: block;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 400;
+}
+.deposit-tier-table th:nth-child(-n + 2),
+.deposit-tier-table td:nth-child(-n + 2),
+.deposit-tier-table th:last-child,
+.deposit-tier-table td:last-child {
+  text-align: left;
+}
+.deposit-tier-table input {
+  width: 106px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--background);
+  color: var(--foreground);
+  text-align: right;
+}
+.deposit-tier-table input.deposit-tier-changed {
+  border-color: #c08a1e;
+  background: #fff8e8;
+  font-weight: 600;
+}
+.deposit-tier-note {
+  max-width: 52ch;
+  white-space: normal;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.deposit-tier-actions {
+  margin: 10px 0 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.deposit-tier-actions button {
+  margin-left: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--background);
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 12px;
+}
 /* 档位表折叠开关：默认只展示前两档，此按钮贴在表格底部作尾行，点击展开/收起其余档位 */
-.deposit-tier-fold{display:block;width:100%;padding:8px 10px;border:0;background:var(--muted);color:var(--muted-foreground);cursor:pointer;font-size:12px;text-align:center;white-space:nowrap}
-.deposit-tier-fold:hover{color:var(--foreground);background:color-mix(in srgb,var(--muted) 70%,var(--foreground) 6%)}
-.deposit-tier-fold:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
-.deposit-tier-source{margin-top:14px}
-.deposit-tier-source summary{cursor:pointer;color:var(--muted-foreground);font-size:13px}
-.deposit-tier-source ul{margin:10px 0;padding-left:20px;color:var(--muted-foreground);font-size:13px;line-height:1.7}
-.deposit-tier-actions button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
-.deposit-tier-picker{display:flex;gap:6px}
-.deposit-tier-picker select{min-width:104px}
-.deposit-stale{display:grid;gap:5px;margin:0 0 14px;padding:13px 16px;border:1px solid #dfbd77;border-radius:10px;background:#fff8e8;color:#6f4b08}
-.deposit-stale b{font-size:14px}
-.deposit-stale span{font-size:13px;line-height:1.6}
-.deposit-tier-unset td{color:var(--muted-foreground)}
-.deposit-tier-table tr.deposit-tier-unset input::placeholder{color:#a8761a}
-.deposit-table input.deposit-rate-missing{border-color:#c08a1e;background:#fff8e8}
-.deposit-table input.deposit-rate-missing::placeholder{color:#a8761a}
-.deposit-missing{padding:3px 7px;border-radius:999px;font-size:11px;background:#fde8d6;color:#8a3d09}
-.deposit-pct{display:inline-flex;align-items:center;gap:4px}
-.deposit-pct b{color:var(--muted-foreground);font-weight:500;font-size:12px}
-.deposit-table .deposit-pct input{width:78px}
-.deposit-tier-table .deposit-pct input{width:82px}
-.deposit-links{margin-top:16px;padding:16px 18px;border:1px solid var(--border);border-radius:10px;background:var(--muted)}
-.deposit-links h4{margin:0;flex:none;font-size:14px}
-.deposit-link-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
-.deposit-link-more{margin-top:12px}
-.deposit-link-more summary{cursor:pointer;color:var(--muted-foreground);font-size:12px}
-.deposit-link-more ul{margin-top:8px}
-.deposit-link-group-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin:0 0 8px}
-.deposit-link-group-head b{font-size:13px}
-.deposit-link-group-head span{color:var(--muted-foreground);font-size:12px}
-.deposit-links ul{display:grid;gap:7px;margin:0;padding:0;list-style:none}
-.deposit-links li{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px}
-.deposit-links button{display:inline-flex;align-items:baseline;gap:4px;flex:none;padding:4px 11px;border:1px solid var(--primary);border-radius:7px;background:var(--background);color:var(--primary);cursor:pointer;font-size:12px}
-.deposit-links button:hover{background:color-mix(in srgb,var(--primary) 10%,var(--background))}
-.deposit-links button:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
-.deposit-links button span{font-size:10px}
-.deposit-link-hint{flex:1 1 220px;min-width:0;color:var(--muted-foreground);font-size:12px}
-.deposit-links code{flex:none;color:var(--muted-foreground);font-size:11px;overflow-wrap:anywhere}
-.deposit-link-note{margin:12px 0 0;padding:8px 11px;border-radius:7px;background:#fff8e8;color:#6f4b08;font-size:12px;overflow-wrap:anywhere}
-@media(max-width:820px){.deposit-links li{flex-direction:column;gap:3px}.deposit-link-hint{flex:none}}
-.deposit-scheme{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin:8px 0 0;color:var(--muted-foreground);font-size:12px}
-.deposit-scheme b{color:var(--foreground)}
+.deposit-tier-fold {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-size: 12px;
+  text-align: center;
+  white-space: nowrap;
+}
+.deposit-tier-fold:hover {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--muted) 70%, var(--foreground) 6%);
+}
+.deposit-tier-fold:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+.deposit-tier-source {
+  margin-top: 14px;
+}
+.deposit-tier-source summary {
+  cursor: pointer;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.deposit-tier-source ul {
+  margin: 10px 0;
+  padding-left: 20px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.deposit-tier-actions button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.deposit-tier-picker {
+  display: flex;
+  gap: 6px;
+}
+.deposit-tier-picker select {
+  min-width: 104px;
+}
+.deposit-stale {
+  display: grid;
+  gap: 5px;
+  margin: 0 0 14px;
+  padding: 13px 16px;
+  border: 1px solid #dfbd77;
+  border-radius: 10px;
+  background: #fff8e8;
+  color: #6f4b08;
+}
+.deposit-stale b {
+  font-size: 14px;
+}
+.deposit-stale span {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.deposit-tier-unset td {
+  color: var(--muted-foreground);
+}
+.deposit-tier-table tr.deposit-tier-unset input::placeholder {
+  color: #a8761a;
+}
+.deposit-table input.deposit-rate-missing {
+  border-color: #c08a1e;
+  background: #fff8e8;
+}
+.deposit-table input.deposit-rate-missing::placeholder {
+  color: #a8761a;
+}
+.deposit-missing {
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: #fde8d6;
+  color: #8a3d09;
+}
+.deposit-pct {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.deposit-pct b {
+  color: var(--muted-foreground);
+  font-weight: 500;
+  font-size: 12px;
+}
+.deposit-table .deposit-pct input {
+  width: 78px;
+}
+.deposit-tier-table .deposit-pct input {
+  width: 82px;
+}
+.deposit-links {
+  margin-top: 16px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--muted);
+}
+.deposit-links h4 {
+  margin: 0;
+  flex: none;
+  font-size: 14px;
+}
+.deposit-link-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.deposit-link-more {
+  margin-top: 12px;
+}
+.deposit-link-more summary {
+  cursor: pointer;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.deposit-link-more ul {
+  margin-top: 8px;
+}
+.deposit-link-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+.deposit-link-group-head b {
+  font-size: 13px;
+}
+.deposit-link-group-head span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.deposit-links ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.deposit-links li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+.deposit-links button {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  flex: none;
+  padding: 4px 11px;
+  border: 1px solid var(--primary);
+  border-radius: 7px;
+  background: var(--background);
+  color: var(--primary);
+  cursor: pointer;
+  font-size: 12px;
+}
+.deposit-links button:hover {
+  background: color-mix(in srgb, var(--primary) 10%, var(--background));
+}
+.deposit-links button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.deposit-links button span {
+  font-size: 10px;
+}
+.deposit-link-hint {
+  flex: 1 1 220px;
+  min-width: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.deposit-links code {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.deposit-link-note {
+  margin: 12px 0 0;
+  padding: 8px 11px;
+  border-radius: 7px;
+  background: #fff8e8;
+  color: #6f4b08;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 820px) {
+  .deposit-links li {
+    flex-direction: column;
+    gap: 3px;
+  }
+  .deposit-link-hint {
+    flex: none;
+  }
+}
+.deposit-scheme {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 8px 0 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.deposit-scheme b {
+  color: var(--foreground);
+}
 /* 布局提示是表格下方的独立说明行：布局由映射的列决定，符号记法自动识别。 */
-.deposit-layout{margin:8px 0 0;color:var(--muted-foreground);font-size:12px}
+.deposit-layout {
+  margin: 8px 0 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}

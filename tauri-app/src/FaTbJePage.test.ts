@@ -67,9 +67,19 @@ describe("FA TB+JE account role presets", () => {
     ).toEqual([]);
   });
 
-  it("does not create hundreds of unassigned-entity rows before entity confirmation", () => {
-    expect(
-      faAssignmentsForEntities(["1601 固定资产", "1602 累计折旧"], [], []),
-    ).toEqual([]);
+  it("uses the public default entity when neither ledger has an entity column", () => {
+    const rows = faAssignmentsForEntities(
+      ["1601 固定资产", "1602 累计折旧"],
+      [],
+      [],
+    );
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map((row) => row.entity))).toEqual(
+      new Set(["默认主体"]),
+    );
+    expect(rows.map((row) => [row.role, row.category])).toEqual([
+      ["cost", "固定资产"],
+      ["depreciation", "固定资产"],
+    ]);
   });
 });

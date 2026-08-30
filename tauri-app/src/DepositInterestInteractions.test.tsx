@@ -80,6 +80,7 @@ const inspection = {
     [parent]: "excluded",
     [leaf]: "excluded",
   },
+  suggestedAccountTiers: { [bank]: "demand" },
   mappingCandidates: [],
   headerDetection: { needsConfirmation: false, candidates: [] },
   dataYears: [2025],
@@ -89,7 +90,44 @@ beforeEach(() => {
   mock.pickPath.mockResolvedValue("fixture-tb.xlsx");
   mock.jobStart.mockResolvedValue("deposit-job");
   mock.engineCall.mockImplementation(async (method: string) => {
-    if (method === "deposit.rate_tiers") return undefined;
+    if (method === "deposit.rate_tiers")
+      return {
+        categories: [
+          {
+            key: "demand",
+            label: "活期存款",
+            terms: [{ key: "demand", label: "" }],
+          },
+          {
+            key: "term",
+            label: "定期存款",
+            terms: [{ key: "term_1y", label: "1年" }],
+          },
+        ],
+        tiers: [
+          {
+            key: "demand",
+            category: "demand",
+            categoryLabel: "活期存款",
+            termLabel: "",
+            label: "活期存款",
+            autoApply: true,
+            listedRate: 0.0005,
+          },
+          {
+            key: "term_1y",
+            category: "term",
+            categoryLabel: "定期存款",
+            termLabel: "1年",
+            label: "定期存款（1年）",
+            autoApply: false,
+            listedRate: 0.0095,
+          },
+        ],
+        ratesStale: false,
+        links: [],
+        linkGroups: [],
+      };
     if (method === "deposit.classify_source")
       return {
         kind: "tb",
@@ -107,6 +145,14 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+/** 三步导引：科目与利率在第二步、测算按钮在第三步。步骤按钮的可访问名带序号
+ *  （「2 科目与利率确认」），走完再回看时序号变成「✓」——两种都要认；
+ *  按开头锚定是为了避开「下一步：测算与底稿」这类导航按钮（撞名会直接抛错）。 */
+const STEP2 = /^(?:2|✓)\s*科目与利率确认/;
+const STEP3 = /^3\s*测算与底稿/;
+const goToStep = (label: RegExp) =>
+  fireEvent.click(screen.getByRole("button", { name: label }));
+
 describe("存款科目手工分类请求", () => {
   it("真实页面区分默认excluded和手工排除，并支持撤销手工选择", async () => {
     render(<DepositInterestPage tool={tool} />);
@@ -115,6 +161,10 @@ describe("存款科目手工分类请求", () => {
         name: "拖放或选择 TB、序时账文件（可同时选择）",
       }),
     );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled(),
+    );
+    goToStep(STEP2);
     const parentInput = await screen.findByRole("combobox", {
       name: `${parent}的分类`,
     });
@@ -125,17 +175,30 @@ describe("存款科目手工分类请求", () => {
     const leafInput = screen.getByRole("combobox", { name: `${leaf}的分类` });
     expect(leafInput).toHaveValue("");
     fireEvent.change(parentInput, { target: { value: "interest_income" } });
+    fireEvent.change(
+      screen.getByRole("combobox", { name: `${bank}的存款类型` }),
+      {
+        target: { value: "term" },
+      },
+    );
+    goToStep(STEP3);
     fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
     await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
     expect(mock.jobStart.mock.calls[0][1]).toMatchObject({
       accountRoles: { [parent]: "interest_income", [leaf]: "excluded" },
       accountRoleOverrides: { [parent]: "interest_income" },
+      accountTierOverrides: { [bank]: "term_1y" },
     });
     expect(
       mock.jobStart.mock.calls[0][1].accountRoleOverrides,
     ).not.toHaveProperty(leaf);
     act(() => mock.event?.(complete));
-    fireEvent.change(leafInput, { target: { value: "excluded" } });
+    goToStep(STEP2);
+    // 切换步骤会卸载重挂这张卡片，先前抓的引用已脱离文档，必须重新查。
+    fireEvent.change(screen.getByRole("combobox", { name: `${leaf}的分类` }), {
+      target: { value: "excluded" },
+    });
+    goToStep(STEP3);
     fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
     await waitFor(() => expect(mock.jobStart).toHaveBeenCalledTimes(2));
     expect(mock.jobStart.mock.calls[1][1].accountRoleOverrides).toEqual({
@@ -143,7 +206,11 @@ describe("存款科目手工分类请求", () => {
       [leaf]: "excluded",
     });
     act(() => mock.event?.(complete));
-    fireEvent.change(leafInput, { target: { value: "" } });
+    goToStep(STEP2);
+    fireEvent.change(screen.getByRole("combobox", { name: `${leaf}的分类` }), {
+      target: { value: "" },
+    });
+    goToStep(STEP3);
     fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
     await waitFor(() => expect(mock.jobStart).toHaveBeenCalledTimes(3));
     expect(mock.jobStart.mock.calls[2][1].accountRoleOverrides).toEqual({

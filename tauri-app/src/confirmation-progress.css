@@ -209,7 +209,7 @@
   margin-top: var(--sp-4);
 }
 .confirmation-output h3 {
-  color: var(--brand-soft);
+  color: var(--brand-link);
 }
 .output-link {
   width: 100%;

@@ -1,0 +1,180 @@
+// @vitest-environment jsdom
+import "@testing-library/jest-dom/vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { TbjeCheckPage } from "./TbjeCheckPage";
+import type { ToolManifest } from "./types";
+
+vi.mock("./api", () => ({
+  engineCall: vi.fn(),
+  jobCancel: vi.fn(),
+  jobStart: vi.fn(async () => "job-1"),
+  listenJobEvents: vi.fn(async () => () => undefined),
+  listenPositionedFileDrops: vi.fn(async () => () => undefined),
+  openOutput: vi.fn(),
+  pickPath: vi.fn(async () => null),
+}));
+
+const tool: ToolManifest = {
+  id: "tbje_check",
+  name: "TB/JE 完整性检查",
+  description: "",
+  route: "/tools/tbje_check",
+  version: "test",
+  capabilities: [],
+  migrationStatus: "ready",
+};
+
+describe("TbjeCheckPage", () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it("uses the shared page header and three-step workflow", () => {
+    const { container } = render(<TbjeCheckPage tool={tool} />);
+
+    expect(
+      screen.getByRole("heading", { level: 1, name: tool.name }),
+    ).toBeInTheDocument();
+    expect(container.querySelector(".fx-head")).toBeNull();
+
+    const steps = container.querySelector(".step-indicator");
+    expect(steps).not.toBeNull();
+    const buttons = within(steps as HTMLElement).getAllByRole("button");
+    expect(buttons).toHaveLength(3);
+    expect(buttons[0]).toHaveTextContent("添加文件");
+    expect(buttons[1]).toBeDisabled();
+    expect(buttons[2]).toBeDisabled();
+    expect(
+      screen.getByRole("heading", { level: 2, name: "1. 添加 TB 与 JE 文件" }),
+    ).toBeInTheDocument();
+  });
+
+  it("enables pairing and gives every JE selector an accessible name", async () => {
+    const { engineCall, pickPath } = await import("./api");
+    vi.mocked(pickPath).mockResolvedValue([
+      "C:/samples/01TB.xlsx",
+      "C:/samples/01JE.xlsx",
+    ]);
+    vi.mocked(engineCall).mockImplementation(
+      async (method: string, params: unknown) => {
+        const source = (params as { source: { inputPath: string } }).source;
+        const isTb = source.inputPath.includes("TB");
+        if (method === "deposit.classify_source") {
+          return {
+            kind: isTb ? "tb" : "je",
+            sheet: "Sheet1",
+            headerRow: 1,
+            headerDepth: 1,
+          };
+        }
+        return {
+          sheet: "Sheet1",
+          headerRow: 1,
+          headerDepth: 1,
+          headers: isTb ? ["科目编码", "期末余额"] : ["科目编码", "借方金额"],
+          preview: [],
+          entities: ["主体 A"],
+          suggestedMapping: {},
+        };
+      },
+    );
+
+    const { container } = render(<TbjeCheckPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText("为第 1 组选择序时账")).toBeInTheDocument();
+    const steps = container.querySelector(".step-indicator") as HTMLElement;
+    expect(
+      within(steps).getByRole("button", { name: /确认配对/ }),
+    ).toBeEnabled();
+  });
+
+  it("keeps result columns aligned and explains a zero balance with unclassified accounts", async () => {
+    const { listenJobEvents } = await import("./api");
+    vi.mocked(listenJobEvents).mockImplementation(async (callback) => {
+      callback({
+        jobId: "job-result",
+        toolId: "tbje_check",
+        phase: "done",
+        current: 1,
+        total: 1,
+        message: "核对完成",
+        severity: "success",
+        outputPaths: [],
+        result: {
+          groups: [
+            {
+              label: "5",
+              ok: true,
+              result: {
+                rollforward: {
+                  performed: true,
+                  passed: true,
+                  checked: 12,
+                  mismatched: 0,
+                },
+                tbVsJe: {
+                  performed: true,
+                  passed: false,
+                  accounts: 383,
+                  mismatched: 175,
+                },
+                equation: {
+                  performed: true,
+                  passed: false,
+                  balancePassed: true,
+                  classificationComplete: false,
+                  closing: { byCategory: [], total: 0, balanced: true },
+                  unclassified: Array.from({ length: 6 }, (_, index) => ({
+                    sourceRow: index + 1,
+                    code: `X${index}`,
+                    name: "自定义科目",
+                    opening: 0,
+                    closing: 0,
+                  })),
+                },
+              },
+            },
+          ],
+        },
+      });
+      return () => undefined;
+    });
+
+    const { container } = render(<TbjeCheckPage tool={tool} />);
+
+    await screen.findByRole("heading", { level: 2, name: "3. 查看核对结果" });
+    const table = screen.getByRole("table", { name: "TB/JE 完整性核对结果" });
+    expect(table.querySelectorAll("colgroup col")).toHaveLength(5);
+    for (const name of [
+      "TB 发生额与余额勾稽",
+      "TB 与 JE 发生额勾稽",
+      "BS 与 PL 勾稽",
+    ]) {
+      expect(within(table).getByRole("columnheader", { name })).toBeVisible();
+    }
+    expect(within(table).getByText("待补充分类")).toBeVisible();
+    expect(
+      within(table).getByText("已归类科目合计 0.00 · 6 个科目待分类"),
+    ).toBeVisible();
+    const preview = within(table).getByRole("button", { name: "预览明细" });
+    expect(preview).toHaveAttribute("data-variant", "default");
+    expect(container).not.toHaveTextContent("① 勾稽");
+  });
+});

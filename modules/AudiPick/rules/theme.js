@@ -6,51 +6,51 @@
   var themes = [
     {
       id: 'classic-dark', name: '经典黄黑', shortName: '黄黑',
-      description: '当前经典深色界面',
-      swatches: ['#050505', '#1A1A1A', '#FFCC00'],
-      palette: { appBg: '#1A1A1A', surface: '#222222', text: '#F7F7F7', muted: '#C5CBD3', accent: '#FFCC00', accentText: '#171717', accentInk: '#FFCC00', sidebar: '#050505', sidebarText: '#F7F7F7', sidebarMuted: '#B8C0CB', sidebarAccent: '#FFCC00' }
+      description: '暖炭黑底配低饱和黄铜',
+      swatches: ['#141617', '#1D1F20', '#C4933B'],
+      palette: { appBg: '#121415', surface: '#1D1F20', text: '#EDF0ED', muted: '#AEB5AF', accent: '#C4933B', accentText: '#171816', accentInk: '#D3A853', sidebar: '#141617', sidebarText: '#EDF0ED', sidebarMuted: '#B8BEB8', sidebarAccent: '#D8B66B' }
     },
     {
       id: 'yellow-light', name: '明亮黄白', shortName: '黄白',
-      description: '白色界面配黄色强调',
-      swatches: ['#FFFFFF', '#F6F7F9', '#F2C200'],
-      palette: { appBg: '#F6F7F9', surface: '#FFFFFF', text: '#171A1F', muted: '#4B5563', accent: '#F2C200', accentText: '#171717', accentInk: '#765E00', sidebar: '#FFFFFF', sidebarText: '#171A1F', sidebarMuted: '#4B5563', sidebarAccent: '#765E00' }
+      description: '暖纸白底配克制琥珀',
+      swatches: ['#433923', '#FFFCF5', '#8F6819'],
+      palette: { appBg: '#F3EEE3', surface: '#FFFCF5', text: '#29261F', muted: '#6B6559', accent: '#8F6819', accentText: '#FFFFFF', accentInk: '#68490F', sidebar: '#433923', sidebarText: '#FFF8E9', sidebarMuted: '#E3D6BC', sidebarAccent: '#D8B05A' }
     },
     {
       id: 'blue-white', name: '专业蓝白', shortName: '蓝白',
-      description: '沉稳蓝色导航与浅色内容区',
-      swatches: ['#16324F', '#FFFFFF', '#1D4ED8'],
-      palette: { appBg: '#F1F5F9', surface: '#FFFFFF', text: '#172033', muted: '#4B5563', accent: '#1D4ED8', accentText: '#FFFFFF', accentInk: '#1D4ED8', sidebar: '#16324F', sidebarText: '#FFFFFF', sidebarMuted: '#C7D5E4', sidebarAccent: '#93C5FD' }
+      description: '雾蓝灰层级配沉稳海军蓝',
+      swatches: ['#20384C', '#FBFDFE', '#315D83'],
+      palette: { appBg: '#EDF2F5', surface: '#FBFDFE', text: '#24313B', muted: '#5D6C77', accent: '#315D83', accentText: '#FFFFFF', accentInk: '#244B6C', sidebar: '#20384C', sidebarText: '#F1F7FA', sidebarMuted: '#C8D8E2', sidebarAccent: '#83A9C5' }
     },
     {
       id: 'red-white', name: '利落红白', shortName: '红白',
-      description: '白色底面配稳重红色',
-      swatches: ['#FFFFFF', '#F7F7F8', '#C62828'],
-      palette: { appBg: '#F7F7F8', surface: '#FFFFFF', text: '#25201F', muted: '#514B49', accent: '#C62828', accentText: '#FFFFFF', accentInk: '#B91C1C', sidebar: '#FFFFFF', sidebarText: '#25201F', sidebarMuted: '#5E5754', sidebarAccent: '#B91C1C' }
+      description: '暖灰白底配克制陶红',
+      swatches: ['#49302F', '#FFFDFB', '#9B4B45'],
+      palette: { appBg: '#F3EFED', surface: '#FFFDFB', text: '#302725', muted: '#716361', accent: '#9B4B45', accentText: '#FFFFFF', accentInk: '#843E39', sidebar: '#49302F', sidebarText: '#FFF6F3', sidebarMuted: '#E7CCC7', sidebarAccent: '#D39A91' }
     },
     {
       id: 'yellow-blue', name: '醒目黄蓝', shortName: '黄蓝',
-      description: '深蓝导航配明快黄色',
-      swatches: ['#102A43', '#EAF1F7', '#F3C300'],
-      palette: { appBg: '#EAF1F7', surface: '#FFFFFF', text: '#102A43', muted: '#425B70', accent: '#F3C300', accentText: '#102A43', accentInk: '#6B5600', sidebar: '#102A43', sidebarText: '#FFFFFF', sidebarMuted: '#D7E3EE', sidebarAccent: '#F3C300' }
-    },
-    {
-      id: 'red-yellow-ivory', name: '红黄米白', shortName: '红黄米白',
-      description: '暖米白底配砖红和金黄',
-      swatches: ['#8F2424', '#FFFDF7', '#E0A800'],
-      palette: { appBg: '#F6F0E2', surface: '#FFFDF7', text: '#3B2520', muted: '#62504A', accent: '#E0A800', accentText: '#2D1C16', accentInk: '#765700', sidebar: '#8F2424', sidebarText: '#FFFFFF', sidebarMuted: '#F4D6CE', sidebarAccent: '#FFD55A' }
+      description: '冷雾蓝底配海军蓝与黄铜',
+      swatches: ['#1C3348', '#FCFDFC', '#A97925'],
+      palette: { appBg: '#EBF0F1', surface: '#FCFDFC', text: '#243441', muted: '#5A6B76', accent: '#A97925', accentText: '#171816', accentInk: '#8E641D', sidebar: '#1C3348', sidebarText: '#F6FAFB', sidebarMuted: '#CFDEE4', sidebarAccent: '#CAA358' }
     },
     {
       id: 'yellow-green', name: '清新黄绿', shortName: '黄绿',
-      description: '墨绿导航配清爽黄绿色',
-      swatches: ['#24513F', '#EEF4EA', '#F0C419'],
-      palette: { appBg: '#EEF4EA', surface: '#FFFFFF', text: '#173A2B', muted: '#465E53', accent: '#F0C419', accentText: '#173A2B', accentInk: '#6B5600', sidebar: '#24513F', sidebarText: '#FFFFFF', sidebarMuted: '#D6E8DF', sidebarAccent: '#F0C419' }
+      description: '鼠尾草浅底配森林绿',
+      swatches: ['#30483B', '#FBFDF8', '#68782D'],
+      palette: { appBg: '#EDF1E7', surface: '#FBFDF8', text: '#28352D', muted: '#607066', accent: '#68782D', accentText: '#FFFFFF', accentInk: '#5E6D27', sidebar: '#30483B', sidebarText: '#F5FAF4', sidebarMuted: '#D2E0D5', sidebarAccent: '#B1BF78' }
+    },
+    {
+      id: 'red-yellow-ivory', name: '红黄米白', shortName: '红黄米白',
+      description: '宣纸米白配朱砂与哑金',
+      swatches: ['#67352F', '#FFFAF0', '#A04A3F'],
+      palette: { appBg: '#F3EADB', surface: '#FFFAF0', text: '#352721', muted: '#74645B', accent: '#A04A3F', accentText: '#FFFFFF', accentInk: '#893E35', sidebar: '#67352F', sidebarText: '#FFF5E9', sidebarMuted: '#EFD4C6', sidebarAccent: '#D7B46D' }
     },
     {
       id: 'teal-dark', name: '深色青绿', shortName: '深色青绿',
-      description: '深色底面配高对比青绿',
-      swatches: ['#07110F', '#182422', '#2DD4BF'],
-      palette: { appBg: '#101817', surface: '#182422', text: '#F1F8F6', muted: '#B9CBC6', accent: '#2DD4BF', accentText: '#062620', accentInk: '#5EEAD4', sidebar: '#07110F', sidebarText: '#F5FAF8', sidebarMuted: '#ADC3BD', sidebarAccent: '#5EEAD4' }
+      description: '深海青底配柔和青玉',
+      swatches: ['#0E2525', '#162B2B', '#5AA99B'],
+      palette: { appBg: '#0C1C1D', surface: '#162B2B', text: '#EAF3F0', muted: '#AABDB8', accent: '#5AA99B', accentText: '#102321', accentInk: '#85CABD', sidebar: '#0E2525', sidebarText: '#EDF6F3', sidebarMuted: '#B9CFCA', sidebarAccent: '#78B7AA' }
     }
   ];
 

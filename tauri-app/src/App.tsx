@@ -19,6 +19,7 @@ import {
 } from "./api";
 import type { ReleaseNotes } from "./updateNotes";
 import { Button } from "@/components/ui/button";
+import { errorText } from "@/lib/errors";
 import {
   TOOL_DEFINITIONS,
   type ActionDefinition,
@@ -26,6 +27,7 @@ import {
 } from "./toolDefinitions";
 import type { Bootstrap, JobEvent, ToolManifest } from "./types";
 import { TsManagerParityPage } from "./TsManagerParityPage";
+import { TbjeCheckPage } from "./TbjeCheckPage";
 import ConfirmationProgressPage from "./ConfirmationProgressPage";
 import FileListDirectoryPage from "./FileListDirectoryPage";
 import PdfToExcelPage from "./PdfToExcelPage";
@@ -39,6 +41,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { PageHeader } from "@/components/PageHeader";
 import { WindowControls } from "@/components/WindowControls";
 import { PersistentToolPages } from "@/components/PersistentToolPages";
+import { JobDialogProvider } from "@/components/JobDialog";
+import { SyncBusyDialog } from "@/components/SyncBusyDialog";
 import { StepIndicator } from "@/components/StepIndicator";
 import { ResultView } from "@/components/ResultView";
 import { RollForwardPage } from "./RollForwardPage";
@@ -50,6 +54,7 @@ import { FaDepCalcPage } from "./FaDepCalcPage";
 import { FaPolicyComparePage } from "./FaPolicyComparePage";
 import { applyReadableForegrounds } from "./theme";
 import { getVersion } from "@tauri-apps/api/app";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
@@ -142,6 +147,7 @@ const TOOL_BADGE: Record<string, string> = {
   loan_interest: "息",
   deposit_interest: "存",
   fuzzy_match: "模",
+  tbje_check: "核",
 };
 
 // 侧边栏可折叠子分组：分组头只是展开/收起的开关（不走路由），
@@ -163,6 +169,44 @@ const TOOL_SUBGROUPS: Record<
     ids: ["kanzhang", "je_sign_mark"],
   },
 };
+
+const DEVELOPMENT_HINT = "功能仍在完善，使用结果请复核。";
+
+/**
+ * 侧边栏工具入口统一消费清单里的 migrationStatus。
+ * preview 工具仍可进入，但必须在点击前让用户知道它还在开发中；状态不写死
+ * 在具体工具名上，后续工具转正只需修改 tool-catalog.json。
+ */
+function SidebarToolLink({
+  tool,
+  className,
+}: {
+  tool: ToolManifest;
+  className?: string;
+}) {
+  const developing = tool.migrationStatus === "preview";
+  const accessibleName = developing
+    ? `${tool.name}，开发中。${DEVELOPMENT_HINT}`
+    : undefined;
+  return (
+    <NavLink
+      to={tool.route}
+      className={className}
+      title={developing ? `开发中：${DEVELOPMENT_HINT}` : undefined}
+      aria-label={accessibleName}
+    >
+      <span className="tool-badge">
+        {TOOL_BADGE[tool.id] ?? tool.name.slice(0, 1)}
+      </span>
+      <span className="tool-nav-label">{tool.name}</span>
+      {developing && (
+        <span className="tool-status-badge" aria-hidden="true">
+          开发中
+        </span>
+      )}
+    </NavLink>
+  );
+}
 
 export default function App() {
   const [catalog, setCatalog] = useState<ToolManifest[]>([]);
@@ -220,6 +264,17 @@ export default function App() {
       () => undefined,
     );
   }, []);
+  // 开发窗口和安装版界面完全一样，曾在验证新功能时被误认（拿了没有新代码的
+  // 安装版当开发窗口测）。开发模式下把窗口标题和侧边栏都打上「开发版」标记。
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    document.title = "审计工具箱（开发版）";
+    // 浏览器/测试环境没有原生窗口，只有 Tauri 里才改标题。
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    void getCurrentWebviewWindow()
+      .setTitle("审计工具箱（开发版）")
+      .catch(() => undefined);
+  }, []);
   useEffect(() => {
     if (automaticUpdateCheckStarted.current) return;
     automaticUpdateCheckStarted.current = true;
@@ -235,188 +290,197 @@ export default function App() {
     return () => clearTimeout(timer);
   }, []);
   return (
-    <div className="app-shell">
-      <WindowControls />
-      <aside className="sidebar">
-        <div className="brand" data-tauri-drag-region>
-          {/* drag-region 只对本元素生效、不继承，所以每个文字节点都要带上 */}
-          <span data-tauri-drag-region>AUDIT TOOLKIT</span>
-          <h1 data-tauri-drag-region>E点通工具箱</h1>
-          <p data-tauri-drag-region>统一、安全、可追踪的审计作业工作台</p>
-        </div>
-        <nav>
-          {NAV.map((x) => (
-            <NavLink key={x.to} to={x.to} end={x.to === "/"}>
-              <span className="nav-icon">{NAV_ICON[x.to]}</span>
-              <span>{x.label}</span>
-              {x.to === "/settings" && availableUpdate && (
-                <span
-                  className="nav-update-dot"
-                  role="status"
-                  aria-label={`发现新版本 ${availableUpdate.version}`}
-                  title={`发现新版本 ${availableUpdate.version}`}
-                />
-              )}
-            </NavLink>
-          ))}
-        </nav>
-        <div className="tool-nav">
-          {[
-            // __*_GROUP__ 占位（见 TOOL_SUBGROUPS）：主工具在原位置展开为可折叠子分组，
-            // 看账与正负数凭证标记两个入口同组呈现。
-            {
-              label: "审计工具",
-              ids: [
-                "fx_audit",
-                "deposit_interest",
-                "loan_interest",
-                "__FA_GROUP__",
-                "__KANZHANG_GROUP__",
-                "audipick",
-                "audit_roll_forward",
-              ],
-            },
-            {
-              label: "效率工具",
-              ids: [
-                "Excel_Merger",
-                "file_list_directory",
-                "pdf_to_excel",
-                "fuzzy_match",
-              ],
-            },
-            {
-              label: "运营工具",
-              ids: [
-                "ts_manager",
-                "confirmation_progress",
-                "wp_service_generator",
-              ],
-            },
-          ].map((group) => {
-            const entries = group.ids
-              .map((id) =>
-                TOOL_SUBGROUPS[id]
-                  ? id
-                  : (catalog.find((t) => t.id === id)?.id ?? null),
-              )
-              .filter((id): id is string => Boolean(id));
-            if (!entries.length) return null;
-            return (
-              <div key={group.label} className="tool-group">
-                <div className="nav-caption">{group.label}</div>
-                {entries.map((entry) => {
-                  const subgroup = TOOL_SUBGROUPS[entry];
-                  if (subgroup) {
-                    const tools = subgroup.ids
-                      .map((id) => catalog.find((t) => t.id === id))
-                      .filter((t): t is ToolManifest => Boolean(t));
-                    if (!tools.length) return null;
-                    const open = subgroupOpen[subgroup.key] ?? false;
-                    return (
-                      <div key={entry} className="tool-subgroup">
-                        <button
-                          type="button"
-                          className="tool-subgroup-toggle"
-                          aria-expanded={open}
-                          onClick={() =>
-                            setSubgroupOpen((v) => ({
-                              ...v,
-                              [subgroup.key]: !open,
-                            }))
-                          }
-                        >
-                          <span className="tool-badge">{subgroup.badge}</span>
-                          {subgroup.label}
-                          <span
-                            className={`tool-subgroup-chevron${open ? " open" : ""}`}
-                            aria-hidden="true"
-                          >
-                            ▸
-                          </span>
-                        </button>
-                        {open && (
-                          <div className="tool-subgroup-items">
-                            {tools.map((t) => (
-                              <NavLink
-                                key={t.id}
-                                to={t.route}
-                                className="tool-subgroup-link"
-                              >
-                                <span className="tool-badge">
-                                  {TOOL_BADGE[t.id] ?? t.name.slice(0, 1)}
-                                </span>
-                                {t.name}
-                              </NavLink>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  }
-                  const tool = catalog.find((t) => t.id === entry);
-                  if (!tool) return null;
-                  return (
-                    <NavLink key={tool.id} to={tool.route}>
-                      <span className="tool-badge">
-                        {TOOL_BADGE[tool.id] ?? tool.name.slice(0, 1)}
-                      </span>
-                      {tool.name}
-                    </NavLink>
-                  );
-                })}
-              </div>
-            );
-          })}
-        </div>
-        <div className="sidebar-footer">
-          <span>v{bootstrap?.appVersion ?? "…"}</span>
-          <span>
-            {bootstrap?.engine.available ? "Rust 核心正常" : "Rust 核心待连接"}
-          </span>
-        </div>
-      </aside>
-      <main className="main">
-        {!startupReady ? (
-          <AppLoading />
-        ) : startupError ? (
-          <SimplePage
-            title="启动失败"
-            text={`${startupError} 请刷新后重试。`}
-          />
-        ) : (
-          <>
-            <Routes>
-              <Route
-                path="/"
-                element={
-                  <Dashboard catalog={catalog} jobs={Object.values(jobs)} />
-                }
-              />
-              {/* The visible tool is rendered by PersistentToolPages below so
-                  route changes hide it instead of destroying its local state. */}
-              <Route path="/tools/:toolId" element={null} />
-              <Route path="/history" element={<History />} />
-              <Route
-                path="/settings"
-                element={
-                  <Settings
-                    availableUpdate={availableUpdate}
-                    onAvailableUpdateChange={setAvailableUpdate}
+    <JobDialogProvider
+      jobs={Object.values(jobs)}
+      nameOf={(toolId) =>
+        catalog.find((tool) => tool.id === toolId)?.name ?? toolId
+      }
+    >
+      <SyncBusyDialog />
+      <div className="app-shell">
+        <WindowControls />
+        <aside className="sidebar">
+          <div className="brand" data-tauri-drag-region>
+            {/* drag-region 只对本元素生效、不继承，所以每个文字节点都要带上 */}
+            <span data-tauri-drag-region>AUDIT TOOLKIT</span>
+            <h1 data-tauri-drag-region>E点通工具箱</h1>
+            <p data-tauri-drag-region>统一、安全、可追踪的审计作业工作台</p>
+          </div>
+          <nav>
+            {NAV.map((x) => (
+              <NavLink key={x.to} to={x.to} end={x.to === "/"}>
+                <span className="nav-icon">{NAV_ICON[x.to]}</span>
+                <span>{x.label}</span>
+                {x.to === "/settings" && availableUpdate && (
+                  <span
+                    className="nav-update-dot"
+                    role="status"
+                    aria-label={`发现新版本 ${availableUpdate.version}`}
+                    title={`发现新版本 ${availableUpdate.version}`}
                   />
-                }
-              />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-            <PersistentToolPages
-              renderPage={(toolId) => (
-                <ToolPage catalog={catalog} toolId={toolId} />
-              )}
+                )}
+              </NavLink>
+            ))}
+          </nav>
+          <div className="tool-nav">
+            {[
+              // __*_GROUP__ 占位（见 TOOL_SUBGROUPS）：主工具在原位置展开为可折叠子分组，
+              // 看账与正负数凭证标记两个入口同组呈现。
+              {
+                label: "审计工具",
+                ids: [
+                  // 排在最前：这是动手做底稿之前的前置体检，
+                  // 账本身有没有问题应当先于任何测算看到。
+                  "tbje_check",
+                  "fx_audit",
+                  "deposit_interest",
+                  "loan_interest",
+                  "__FA_GROUP__",
+                  "__KANZHANG_GROUP__",
+                  "audipick",
+                  "audit_roll_forward",
+                ],
+              },
+              {
+                label: "效率工具",
+                ids: [
+                  "Excel_Merger",
+                  "file_list_directory",
+                  "pdf_to_excel",
+                  "fuzzy_match",
+                ],
+              },
+              {
+                label: "运营工具",
+                ids: [
+                  "ts_manager",
+                  "confirmation_progress",
+                  "wp_service_generator",
+                ],
+              },
+            ].map((group) => {
+              const entries = group.ids
+                .map((id) =>
+                  TOOL_SUBGROUPS[id]
+                    ? id
+                    : (catalog.find((t) => t.id === id)?.id ?? null),
+                )
+                .filter((id): id is string => Boolean(id));
+              if (!entries.length) return null;
+              return (
+                <div key={group.label} className="tool-group">
+                  <div className="nav-caption">{group.label}</div>
+                  {entries.map((entry) => {
+                    const subgroup = TOOL_SUBGROUPS[entry];
+                    if (subgroup) {
+                      const tools = subgroup.ids
+                        .map((id) => catalog.find((t) => t.id === id))
+                        .filter((t): t is ToolManifest => Boolean(t));
+                      if (!tools.length) return null;
+                      const open = subgroupOpen[subgroup.key] ?? false;
+                      return (
+                        <div key={entry} className="tool-subgroup">
+                          <button
+                            type="button"
+                            className="tool-subgroup-toggle"
+                            aria-expanded={open}
+                            onClick={() =>
+                              setSubgroupOpen((v) => ({
+                                ...v,
+                                [subgroup.key]: !open,
+                              }))
+                            }
+                          >
+                            <span className="tool-badge">{subgroup.badge}</span>
+                            {subgroup.label}
+                            <span
+                              className={`tool-subgroup-chevron${open ? " open" : ""}`}
+                              aria-hidden="true"
+                            >
+                              ▸
+                            </span>
+                          </button>
+                          {open && (
+                            <div className="tool-subgroup-items">
+                              {tools.map((t) => (
+                                <SidebarToolLink
+                                  key={t.id}
+                                  tool={t}
+                                  className="tool-subgroup-link"
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    }
+                    const tool = catalog.find((t) => t.id === entry);
+                    if (!tool) return null;
+                    return <SidebarToolLink key={tool.id} tool={tool} />;
+                  })}
+                </div>
+              );
+            })}
+          </div>
+          <div className="sidebar-footer">
+            {import.meta.env.DEV && (
+              <span
+                className="dev-build-badge"
+                title="开发版窗口：运行的是本机最新代码，新功能先在这里出现"
+              >
+                开发版
+              </span>
+            )}
+            <span>v{bootstrap?.appVersion ?? "…"}</span>
+            <span>
+              {bootstrap?.engine.available
+                ? "Rust 核心正常"
+                : "Rust 核心待连接"}
+            </span>
+          </div>
+        </aside>
+        <main className="main">
+          {!startupReady ? (
+            <AppLoading />
+          ) : startupError ? (
+            <SimplePage
+              title="启动失败"
+              text={`${startupError} 请刷新后重试。`}
             />
-          </>
-        )}
-      </main>
-    </div>
+          ) : (
+            <>
+              <Routes>
+                <Route
+                  path="/"
+                  element={
+                    <Dashboard catalog={catalog} jobs={Object.values(jobs)} />
+                  }
+                />
+                {/* The visible tool is rendered by PersistentToolPages below so
+                  route changes hide it instead of destroying its local state. */}
+                <Route path="/tools/:toolId" element={null} />
+                <Route path="/history" element={<History />} />
+                <Route
+                  path="/settings"
+                  element={
+                    <Settings
+                      availableUpdate={availableUpdate}
+                      onAvailableUpdateChange={setAvailableUpdate}
+                    />
+                  }
+                />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+              <PersistentToolPages
+                renderPage={(toolId) => (
+                  <ToolPage catalog={catalog} toolId={toolId} />
+                )}
+              />
+            </>
+          )}
+        </main>
+      </div>
+    </JobDialogProvider>
   );
 }
 
@@ -593,7 +657,7 @@ function ToolPage({
         setResult(undefined);
         const payload = event.result as
           { error?: { userMessage?: string } } | undefined;
-        setError(payload?.error?.userMessage ?? event.message);
+        setError(payload?.error ? errorText(payload.error) : event.message);
       }
     });
     return () => {
@@ -607,6 +671,7 @@ function ToolPage({
   if (tool.id === "fa_list") return <FaListPage tool={tool} />;
   if (tool.id === "audipick") return <AudiPickPage tool={tool} />;
   if (tool.id === "ts_manager") return <TsManagerParityPage tool={tool} />;
+  if (tool.id === "tbje_check") return <TbjeCheckPage tool={tool} />;
   if (tool.id === "confirmation_progress")
     return <ConfirmationProgressPage tool={tool} />;
   if (tool.id === "file_list_directory")
@@ -713,11 +778,6 @@ function ToolPage({
   );
 }
 
-function errorText(error: unknown) {
-  if (error && typeof error === "object" && "userMessage" in error)
-    return String((error as { userMessage: unknown }).userMessage);
-  return error instanceof Error ? error.message : String(error);
-}
 function Field({
   field,
   value,
@@ -1473,15 +1533,51 @@ export function Settings({
             </p>
             <div className="theme-picker">
               {[
-                { id: "green-dark", name: "深绿" },
-                { id: "classic-dark", name: "经典黄黑" },
-                { id: "yellow-light", name: "明亮黄白" },
-                { id: "blue-white", name: "专业蓝白" },
-                { id: "red-white", name: "利落红白" },
-                { id: "yellow-blue", name: "醒目黄蓝" },
-                { id: "red-yellow-ivory", name: "红黄米白" },
-                { id: "yellow-green", name: "清新黄绿" },
-                { id: "teal-dark", name: "深色青绿" },
+                {
+                  id: "green-dark",
+                  name: "深绿",
+                  colors: ["#14353a", "#ffffff", "#1e6267"],
+                },
+                {
+                  id: "classic-dark",
+                  name: "经典黄黑",
+                  colors: ["#141617", "#1d1f20", "#c4933b"],
+                },
+                {
+                  id: "yellow-light",
+                  name: "明亮黄白",
+                  colors: ["#433923", "#fffcf5", "#8f6819"],
+                },
+                {
+                  id: "blue-white",
+                  name: "专业蓝白",
+                  colors: ["#20384c", "#fbfdfe", "#315d83"],
+                },
+                {
+                  id: "red-white",
+                  name: "利落红白",
+                  colors: ["#49302f", "#fffdfb", "#9b4b45"],
+                },
+                {
+                  id: "yellow-blue",
+                  name: "醒目黄蓝",
+                  colors: ["#1c3348", "#fcfdfc", "#a97925"],
+                },
+                {
+                  id: "yellow-green",
+                  name: "清新黄绿",
+                  colors: ["#30483b", "#fbfdf8", "#68782d"],
+                },
+                {
+                  id: "red-yellow-ivory",
+                  name: "红黄米白",
+                  colors: ["#67352f", "#fffaf0", "#a04a3f"],
+                },
+                {
+                  id: "teal-dark",
+                  name: "深色青绿",
+                  colors: ["#0e2525", "#162b2b", "#5aa99b"],
+                },
               ].map((t) => (
                 <button
                   key={t.id}
@@ -1490,7 +1586,12 @@ export function Settings({
                   aria-pressed={theme === t.id}
                   onClick={() => applyTheme(t.id)}
                 >
-                  {t.name}
+                  <span className="theme-option-swatches" aria-hidden="true">
+                    {t.colors.map((color) => (
+                      <span key={color} style={{ background: color }} />
+                    ))}
+                  </span>
+                  <span>{t.name}</span>
                 </button>
               ))}
             </div>

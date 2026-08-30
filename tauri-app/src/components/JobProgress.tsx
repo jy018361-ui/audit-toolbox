@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { useJobOwnedByDialog } from "@/components/JobDialog";
 import type { JobEvent } from "@/types";
 
 export type JobProgressProps = {
@@ -21,6 +22,9 @@ export function JobProgress({
   cancelLabel = "取消任务",
   compact = false,
 }: JobProgressProps) {
+  // 进度弹窗正展示同一个任务时这里让位，免得一个任务看着像跑了两遍。
+  // 弹窗最小化后 owned 转 false，内联进度条回到页面上。
+  const owned = useJobOwnedByDialog(job.jobId);
   const max = Math.max(job.total, 1);
   const value = Math.min(job.current, max);
   const pct = Math.round((value / max) * 100);
@@ -32,6 +36,8 @@ export function JobProgress({
         : job.severity === "success"
           ? "success"
           : "info";
+
+  if (owned) return null;
 
   return (
     <div className={`job-progress ${compact ? "job-progress--compact" : ""}`}>
@@ -50,11 +56,7 @@ export function JobProgress({
           </Button>
         )}
       </div>
-      <progress
-        className={`progress-tone-${tone}`}
-        max={max}
-        value={value}
-      />
+      <progress className={`progress-tone-${tone}`} max={max} value={value} />
     </div>
   );
 }

@@ -148,6 +148,34 @@ export function missingGoldIdentity(
     .map((role) => GOLD_LABELS[role] ?? role);
 }
 
+/** 引擎随识别结果下发的角色标签：`name` 是统一内核的标准角色名，`label` 是中文标签。 */
+export type EngineRoleLabels = Array<{ name: string; label: string }>;
+
+/**
+ * 统一的角色标签表：后端下发的 `roles` 优先（按 name 查 label），查不到回落
+ * 页面本地表——五个账表工具的下拉、形态提示、复核提示从这里取标签，不再各抄一份。
+ *
+ * 角色清单与顺序仍以页面本地表为准：引擎下发的是**全量**标签表（各工具用不到的
+ * 原币、币种线索角色也在里面，多了不碍事），每个工具只展示自己的角色子集；
+ * 这里只把**文案来源**换成引擎，页面手里的手抄表退化为「引擎未下发时的回落」。
+ * 两边都没有的角色不进表，由调用方兜底（通常直接显示角色名）。
+ */
+export function resolveRoleLabels(
+  roles: EngineRoleLabels | undefined,
+  local: Record<string, string>,
+): Record<string, string> {
+  const fromEngine = new Map<string, string>();
+  for (const role of roles ?? []) {
+    if (role?.name && role.label) fromEngine.set(role.name, role.label);
+  }
+  return Object.fromEntries(
+    Object.entries(local).map(([role, label]) => [
+      role,
+      fromEngine.get(role) ?? label,
+    ]),
+  );
+}
+
 /** 统一复核入口返回的一条建议。 */
 export type LedgerChange = {
   role: string;
@@ -155,6 +183,58 @@ export type LedgerChange = {
   suggestedColumn: string;
   confidence?: number;
   reason?: string;
+};
+
+/**
+ * 公共账表引擎中允许由多列共同组成的角色。
+ *
+ * `id` 尤其不能按单列覆盖：不少财务系统用“凭证字＋凭证号”共同构成
+ * 凭证键。映射复核若只留下其中一列，会把不同凭证串在一起。
+ * 这里供所有使用字典型映射的工具共用，不在 FA 页面另设口径。
+ */
+export const LEDGER_MULTI_COLUMN_ROLES = new Set([
+  "id",
+  "accountName",
+  "auxiliary",
+]);
+
+const appendMappingColumn = (
+  value: string | string[] | undefined,
+  column: string,
+): string[] => {
+  const current = Array.isArray(value) ? value : value ? [value] : [];
+  return [...current, column].filter(
+    (item, index, all) => Boolean(item?.trim()) && all.indexOf(item) === index,
+  );
+};
+
+/** 一段文本像不像科目编码（与 Rust 内核 looks_like_account_code 同口径）。 */
+const looksLikeAccountCode = (value: string): boolean =>
+  value.length > 0 &&
+  value.length <= 24 &&
+  /[0-9]/.test(value) &&
+  /^[0-9A-Za-z.-]+$/.test(value);
+
+/**
+ * 一列取值是否整体呈「编码＋名称混写」形态（如 `1001010000:库存现金-人民币`），
+ * 与 Rust 内核 is_combined_account_column 同阈值。这种列允许科目编码与科目
+ * 名称两个角色共用——映射复核把其中一个角色指到这种列上时不算「一列两语义」。
+ */
+export const isCombinedAccountValues = (values: string[]): boolean => {
+  let total = 0;
+  let split = 0;
+  for (const raw of values) {
+    const value = raw.trim();
+    if (!value) continue;
+    total += 1;
+    const at = value.search(/[/:_\\|]/);
+    if (at > 0) {
+      const code = value.slice(0, at).trim();
+      const name = value.slice(at + 1).trim();
+      if (looksLikeAccountCode(code) && name) split += 1;
+    }
+  }
+  return total >= 4 && split * 4 >= total * 3;
 };
 /**
  * 调用共用的映射复核，把够把握的建议应用到通用字典型映射上。
@@ -186,6 +266,11 @@ export async function applyLedgerReviewToDict(
   })) as { changes?: LedgerChange[] };
   const next = { ...current };
   const applied: LedgerChange[] = [];
+  // 「编码＋名称混写」的列允许科目编码与科目名称共用（与后端同口径豁免）。
+  const combinedOf = (column: string): boolean => {
+    const index = headers.indexOf(column);
+    return index >= 0 && isCombinedAccountValues(sampleRows.map((row) => row[index] ?? ""));
+  };
   for (const change of response.changes ?? []) {
     const column = change?.suggestedColumn?.trim();
     if (!column || !(change.role in labels) || !headers.includes(column))
@@ -196,11 +281,20 @@ export async function applyLedgerReviewToDict(
       Object.entries(next).some(
         ([role, value]) =>
           role !== change.role &&
-          (Array.isArray(value) ? value.includes(column) : value === column),
+          (Array.isArray(value) ? value.includes(column) : value === column) &&
+          !(
+            ((change.role === "accountName" && role === "accountCode") ||
+              (change.role === "accountCode" && role === "accountName")) &&
+            combinedOf(column)
+          ),
       )
     )
       continue;
-    next[change.role] = column;
+    // 多列角色是“追加组成键”，不是“建议一次覆盖一次”。例如目标 JE 的
+    // 「凭证字」「凭证号」都属于 id；LLM 分两条返回时两列必须同时保留。
+    next[change.role] = LEDGER_MULTI_COLUMN_ROLES.has(change.role)
+      ? appendMappingColumn(next[change.role], column)
+      : column;
     applied.push(change);
   }
   return { mapping: next, applied };

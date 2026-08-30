@@ -212,7 +212,13 @@ fn survey_real_samples() {
             .flatten()
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "xlsx" || x == "xls"))
+            .filter(|p| {
+                // 扩展名可能是大写（`04TB.XLSX`），不区分大小写才不会漏样例。
+                p.extension().and_then(|x| x.to_str()).is_some_and(|x| {
+                    let x = x.to_ascii_lowercase();
+                    x == "xlsx" || x == "xls"
+                })
+            })
             .collect();
         files.sort();
         for path in files {
@@ -243,7 +249,13 @@ fn survey_llm_review() {
         .flatten()
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "xlsx" || x == "xls"))
+        .filter(|p| {
+            // 扩展名可能是大写（`04TB.XLSX`），不区分大小写才不会漏样例。
+            p.extension().and_then(|x| x.to_str()).is_some_and(|x| {
+                let x = x.to_ascii_lowercase();
+                x == "xlsx" || x == "xls"
+            })
+        })
         .collect();
     files.sort();
     let mut seen = 0usize;

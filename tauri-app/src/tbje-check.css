@@ -1,0 +1,347 @@
+/* TB/JE 完整性核对：沿用全局页面骨架、设计变量和状态语义。 */
+
+.tbje-page {
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.tbje-page .step-indicator {
+  margin-block: var(--sp-1) var(--sp-2);
+}
+
+.tbje-section {
+  min-width: 0;
+  scroll-margin-top: var(--sp-5);
+}
+
+.tbje-section-title {
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  text-wrap: balance;
+}
+
+.tbje-count {
+  font-size: var(--fs-sm);
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.tbje-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: var(--sp-3) 0;
+}
+
+.tbje-group {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--sp-3);
+  background: var(--surface);
+}
+
+.tbje-group-review {
+  border-color: var(--warning-dot);
+  background: var(--warning-bg);
+}
+
+.tbje-group-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "label file action"
+    "arrow select select";
+  align-items: center;
+  gap: var(--sp-2) var(--sp-3);
+  min-width: 0;
+  font-size: var(--fs-sm);
+}
+
+.tbje-group-label {
+  grid-area: label;
+  min-width: 68px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.tbje-group-review .tbje-group-label {
+  color: var(--warning-fg);
+}
+
+.tbje-group-file {
+  grid-area: file;
+  min-width: 0;
+  color: var(--ink-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tbje-group-arrow {
+  grid-area: arrow;
+  justify-self: center;
+  color: var(--text-muted);
+}
+
+.tbje-group-row select {
+  grid-area: select;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: var(--fs-sm);
+}
+
+.tbje-group-row button {
+  grid-area: action;
+}
+
+.tbje-group-reason {
+  margin-top: var(--sp-2);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+.tbje-group-mapping {
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border-soft);
+}
+
+.tbje-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-top: var(--sp-4);
+}
+
+.tbje-status {
+  margin: var(--sp-3) 0 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  background: var(--surface-muted);
+  color: var(--label);
+  font-size: var(--fs-sm);
+}
+
+.tbje-detail {
+  display: block;
+  margin-top: var(--sp-1);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.tbje-failed {
+  color: var(--danger-fg);
+}
+
+.tbje-result-table-wrap {
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.tbje-result-table-wrap > [data-slot="table-container"] {
+  overflow-x: auto;
+}
+
+.tbje-result-table {
+  width: 100%;
+  min-width: 1080px;
+  margin: 0;
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+
+.tbje-col-group {
+  width: 8%;
+}
+
+.tbje-col-check {
+  width: 21%;
+}
+
+.tbje-col-actions {
+  width: 29%;
+}
+
+.tbje-result-table [data-slot="table-head"],
+.tbje-result-table [data-slot="table-cell"] {
+  padding: var(--sp-3);
+  border-bottom: 1px solid var(--border-soft);
+  text-align: left;
+  vertical-align: top;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.tbje-result-table [data-slot="table-head"] {
+  background: var(--surface-sunken);
+  color: var(--ink-strong);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.tbje-result-table [data-slot="table-row"]:last-child [data-slot="table-cell"] {
+  border-bottom: 0;
+}
+
+.tbje-group-result {
+  color: var(--ink-strong);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.tbje-exported {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  min-width: 0;
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  border-radius: var(--r-md);
+  background: var(--success-bg);
+  color: var(--success-fg);
+}
+
+.tbje-exported span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 每组的 sheet 选择行：识别默认挑内容最多的表，换哪个由用户定。 */
+.tbje-group-sheets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+  margin-top: var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.tbje-sheet-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.tbje-sheet-picker select {
+  min-width: 0;
+  max-width: 180px;
+  height: 26px;
+  padding: 0 var(--sp-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: var(--fs-xs);
+}
+
+.tbje-sheet-name {
+  color: var(--ink-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 结果表的展开预览行。 */
+.tbje-detail-actions {
+  white-space: normal;
+}
+
+.tbje-action-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.tbje-detail-row > td {
+  padding: var(--sp-3) !important;
+  background: var(--surface-muted);
+}
+
+.tbje-preview {
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.tbje-preview-block {
+  min-width: 0;
+}
+
+.tbje-preview-block h4 {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink-strong);
+}
+
+.tbje-preview-scroll {
+  max-width: 100%;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+
+.tbje-preview-scroll > [data-slot="table-container"] {
+  overflow: visible;
+}
+
+.tbje-preview-table {
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+  border-collapse: collapse;
+  font-size: var(--fs-xs);
+}
+
+.tbje-preview-table [data-slot="table-head"],
+.tbje-preview-table [data-slot="table-cell"] {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-soft);
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.tbje-preview-table [data-slot="table-head"] {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-sunken);
+  color: var(--ink-strong);
+  font-weight: 600;
+}
+
+.tbje-preview-table .tbje-text-cell {
+  min-width: 14rem;
+  max-width: 28rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.tbje-preview-table .tbje-number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.tbje-preview-block .fx-hint {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
+}

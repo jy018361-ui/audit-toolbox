@@ -136,7 +136,10 @@ fn inspect(params: &Value) -> Result<Value, AppError> {
         serde_json::from_value(params.get("source").cloned().unwrap_or(Value::Null))
             .map_err(|e| error("INVALID_PARAMS", "文件参数不完整。", Some(e.to_string())))?;
     let table = load(&spec, kind)?;
-    let suggested = suggest_with_rows(&table.headers, kind, &table.rows);
+    let mut suggested = suggest_with_rows(&table.headers, kind, &table.rows);
+    if kind == "tb" {
+        crate::fx::promote_period_movement_rows(&table.headers, &table.rows, &mut suggested);
+    }
     // 台账要在预览区逐行确认利率口径，只给 8 行的话第 9 行往后就没法设置了。
     // 台账普遍几十行，整表下发；上限 2000 行防止误选超大表把界面拖垮。
     let preview_rows = if kind == "ledger" || kind == "rateLedger" {

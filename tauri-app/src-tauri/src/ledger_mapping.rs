@@ -3477,17 +3477,6 @@ pub(crate) fn match_forms(kind: &str, mapped: &HashSet<&str>) -> Vec<FormMatch> 
             let (_, miss) = slot_state(slot, mapped);
             missing.extend(miss);
         }
-        // 本年累计发生额缺失、而本期发生额借贷齐全时按次选口径放行。
-        // 金标的类型表只写了本年累计，但实测样例里确有只给本期的余额表
-        // （用友导出的「本期发生借方／贷方」），汇兑损益的必填校验本来也接受
-        // 「本年累计（或本期）」——形态判定跟它对齐，否则那三个本期角色形同虚设。
-        if !missing.is_empty()
-            && missing.iter().all(|r| r.starts_with("ytdFunctional"))
-            && mapped.contains("periodFunctionalDebit")
-            && mapped.contains("periodFunctionalCredit")
-        {
-            missing.clear();
-        }
         // 「任一即可」槽：组内一个都没给才算缺，给了任意一个就满足。
         let mut missing_any: Vec<&'static [&'static str]> = Vec::new();
         for slot in f.any_of {
@@ -5723,9 +5712,7 @@ mod tests {
     }
 
     #[test]
-    fn 只给本期发生额的余额表按次选口径放行() {
-        // 实测样例「科目余额表.xls」（用友导出）只有本期发生借方／贷方，
-        // 没有本年累计。金标的类型表没写这种情况，但它真实存在。
+    fn 本期发生额未经勾稽提升不能让形态放行() {
         let mut mapped: HashSet<&str> = [
             "accountCode",
             "accountName",
@@ -5738,14 +5725,10 @@ mod tests {
         .collect();
         // 两种发生额都没有：拦。
         assert!(!missing_required(Tool::DepositInterest, "tb", &mapped).is_empty());
-        // 只给本期：放行。
+        // 只给本期：仍然拦截；导入层勾稽通过后会把它提升为 YTD 角色。
         mapped.insert("periodFunctionalDebit");
         mapped.insert("periodFunctionalCredit");
-        assert!(
-            missing_required(Tool::DepositInterest, "tb", &mapped).is_empty(),
-            "{:?}",
-            missing_required(Tool::DepositInterest, "tb", &mapped)
-        );
+        assert!(!missing_required(Tool::DepositInterest, "tb", &mapped).is_empty());
         // 只给半边本期发生额不算数。
         let mut half = mapped.clone();
         half.remove("periodFunctionalCredit");

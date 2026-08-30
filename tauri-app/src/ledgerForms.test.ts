@@ -88,7 +88,7 @@ describe("按型号判定", () => {
     ]);
   });
 
-  it("本年累计缺失、本期借贷齐全时按次选口径放行（与 Rust 同一条规则）", () => {
+  it("本期借贷不经勾稽提升时不能代替本年累计", () => {
     const periodOnly = {
       ...debitCreditMapping,
       ytdFunctionalDebit: "",
@@ -96,14 +96,7 @@ describe("按型号判定", () => {
       periodFunctionalDebit: "本期借",
       periodFunctionalCredit: "本期贷",
     };
-    expect(resolveForm("tb", TB_FORMS, periodOnly)?.complete).toBe(true);
-    // 只给本期借方不算齐全。
-    expect(
-      resolveForm("tb", TB_FORMS, {
-        ...periodOnly,
-        periodFunctionalCredit: "",
-      })?.complete,
-    ).toBe(false);
+    expect(resolveForm("tb", TB_FORMS, periodOnly)?.complete).toBe(false);
   });
 
   it("必填标记跟着当前命中的型走，不是一张固定清单", () => {
@@ -116,43 +109,47 @@ describe("按型号判定", () => {
 });
 
 describe("下拉分组", () => {
-  it("身份类在前，槽位逐组列出，别的型的记法收进其他记法", () => {
-    const match = resolveForm("tb", TB_FORMS, debitCreditMapping);
-    const groups = formGroups("tb", TB_ROLES, TB_FORMS, match);
+  it("公共必填单独置顶，每个形态独立显示适配状态", () => {
+    const groups = formGroups("tb", TB_ROLES, TB_FORMS, debitCreditMapping);
     expect(groups.map((group) => group.title)).toEqual([
-      "科目、主体与币种",
-      "期初余额",
-      "期末余额",
-      "本年累计发生额",
-      "本期发生额（本年累计缺失时的次选）",
-      "其他记法（TB-类型C 用不到）",
+      "公共必填字段",
+      "公共选填字段",
+      "TB-类型A（本位币净额）",
+      "TB-类型C（本位币借贷分列）",
+      "本期发生额（通过勾稽后自动提升）",
     ]);
-    expect(groups[0].roles).toEqual([
-      "entity",
-      "accountCode",
-      "accountName",
-      "currency",
-    ]);
-    expect(groups[1].roles).toEqual([
+    expect(groups[0].roles).toEqual(["accountCode", "accountName"]);
+    expect(groups[0].required).toEqual(["accountCode", "accountName"]);
+    expect(groups[1].roles).toEqual(["entity", "currency"]);
+    expect(groups[2].status).toBe("未适配");
+    expect(groups[3].status).toBe("已适配");
+    expect(groups[3].roles).toEqual([
       "openingFunctionalDebit",
       "openingFunctionalCredit",
+      "closingFunctionalDebit",
+      "closingFunctionalCredit",
+      "ytdFunctionalDebit",
+      "ytdFunctionalCredit",
     ]);
-    // 净额列在这一型用不到，但仍然选得到——用户要换记法时靠它。
-    expect(groups[5].roles).toContain("openingFunctionalAmount");
   });
 
   it("拿不到型号定义时退回一组平铺，不影响映射", () => {
-    expect(formGroups("tb", TB_ROLES, [], undefined)).toEqual([
+    expect(formGroups("tb", TB_ROLES, [], {})).toEqual([
       {
-        title: "科目、主体与币种",
-        roles: ["entity", "accountCode", "accountName", "currency"],
+        title: "公共必填字段",
+        roles: ["accountCode", "accountName"],
+        required: ["accountCode", "accountName"],
       },
       {
-        title: "本期发生额（本年累计缺失时的次选）",
+        title: "公共选填字段",
+        roles: ["entity", "currency"],
+      },
+      {
+        title: "本期发生额（通过勾稽后自动提升）",
         roles: ["periodFunctionalDebit", "periodFunctionalCredit"],
       },
       {
-        title: "其他记法",
+        title: "金额字段",
         roles: [
           "openingFunctionalAmount",
           "openingFunctionalDebit",

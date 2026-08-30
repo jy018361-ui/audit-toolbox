@@ -211,7 +211,7 @@ it("shows the full release range on every check and installs only after explicit
   render(<UpdateSettings />);
   fireEvent.click(screen.getByRole("button", { name: "软件更新" }));
   await screen.findByText("修复导航");
-  expect(screen.getByText("更新范围：v1.0.0 → v1.0.2")).toBeVisible();
+  expect(screen.getByText("本次更新说明")).toBeVisible();
   expect(
     screen.getByText("<script>不执行发布说明中的脚本</script>"),
   ).toBeVisible();
@@ -280,7 +280,7 @@ it("shows this version's notes when up to date and refreshes on reopening", asyn
 it("does not offer a stale update when a fresh check fails", async () => {
   vi.mocked(check).mockRejectedValue(new Error("network"));
   render(<UpdateSettings initial={{ version: "1.0.1" } as Update} />);
-  fireEvent.click(screen.getByRole("button", { name: "软件更新 · v1.0.1" }));
+  fireEvent.click(screen.getByRole("button", { name: "发现新版本 v1.0.1" }));
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "重新检查" })).toBeEnabled(),
   );

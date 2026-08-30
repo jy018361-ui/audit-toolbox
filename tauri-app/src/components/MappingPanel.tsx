@@ -11,6 +11,13 @@ import { DataTable } from "@/components/DataTable";
  * 已经统一到内核，这里不需要再为谁做适配。
  */
 export type MappingDict = Record<string, string | string[] | undefined>;
+export type MappingGroup = {
+  title: string;
+  roles: string[];
+  required?: string[];
+  optional?: string[];
+  status?: "已适配" | "可适配" | "未适配";
+};
 
 export type MappingPanelProps = {
   /** 面板标题，如「序时账文件预览」。 */
@@ -21,7 +28,7 @@ export type MappingPanelProps = {
   /** 角色清单：`[角色名, 中文标签]`，顺序即下拉里的顺序。 */
   roles: [string, string][];
   /** 可选的分组标题。给了就按组渲染 `<optgroup>`，没给就平铺。 */
-  groups?: { title: string; roles: string[] }[];
+  groups?: MappingGroup[];
   /** 可以一个角色对应多列的角色（凭证识别字段、科目名称、辅助核算）。 */
   multi?: Set<string>;
   /** 被金额方案互斥锁定的角色——显示为「已停用」且不可选。 */
@@ -48,7 +55,11 @@ export type MappingPanelProps = {
   /** 形态判定结论，如「已识别为 A 型（起始日＋到期日）」。 */
   formNote?: React.ReactNode;
   /** 数据列之后追加的、由调用方逐行渲染控件的列（如逐行利率口径）。 */
-  trailingColumns?: { key: string; title: React.ReactNode; render: (rowIndex: number) => React.ReactNode }[];
+  trailingColumns?: {
+    key: string;
+    title: React.ReactNode;
+    render: (rowIndex: number) => React.ReactNode;
+  }[];
   onChange: (next: MappingDict) => void;
   /** 表头下拉右侧的附加控件，如列筛选漏斗。 */
   headerExtras?: (header: string) => React.ReactNode;
@@ -72,7 +83,11 @@ export type MappingPanelProps = {
 };
 
 const asColumns = (value: string | string[] | undefined): string[] =>
-  Array.isArray(value) ? value.filter(Boolean) : value?.trim() ? [value.trim()] : [];
+  Array.isArray(value)
+    ? value.filter(Boolean)
+    : value?.trim()
+      ? [value.trim()]
+      : [];
 
 export function MappingPanel(props: MappingPanelProps) {
   const { headers, rows, mapping, roles, multi, shareable, busy } = props;
@@ -82,9 +97,16 @@ export function MappingPanel(props: MappingPanelProps) {
   // 某一列当前落在哪个角色上。可共用一列的角色不参与判定——否则币种线索
   // 文本会把科目名称的标记抢走，用户看到的下拉就跟实际映射对不上。
   const roleOf = (column: string) =>
-    roles.find(([role]) => !shareable?.has(role) && asColumns(mapping[role]).includes(column))?.[0] ?? "";
+    roles.find(
+      ([role]) =>
+        !shareable?.has(role) && asColumns(mapping[role]).includes(column),
+    )?.[0] ?? "";
 
-  const used = new Set(roles.filter(([role]) => asColumns(mapping[role]).length > 0).map(([role]) => role));
+  const used = new Set(
+    roles
+      .filter(([role]) => asColumns(mapping[role]).length > 0)
+      .map(([role]) => role),
+  );
 
   const update = (column: string, role: string) => {
     const next: MappingDict = { ...mapping };
@@ -102,19 +124,30 @@ export function MappingPanel(props: MappingPanelProps) {
   };
 
   // 必填／选填的标注跟在标签后面。下拉的 <option> 没法上样式，只能用文字标。
-  const mark = (role: string) => {
+  const mark = (role: string, group?: MappingGroup) => {
+    if (group?.required?.includes(role)) return "＊";
+    if (group?.optional?.includes(role)) return "（选填）";
     const need = props.requirementOf?.(role);
     return need === "required" ? "＊" : need === "optional" ? "（选填）" : "";
   };
 
-  const option = (role: string, label: string, current: string) => {
+  const option = (
+    role: string,
+    label: string,
+    current: string,
+    group?: MappingGroup,
+  ) => {
     const taken = used.has(role) && role !== current && !isMulti(role);
     const disabled = locked(role);
     const suffix = taken ? "（已用）" : disabled ? "（已停用）" : "";
     return (
-      <option key={role} value={role} className={taken || disabled ? "dt-role-taken" : undefined}>
+      <option
+        key={role}
+        value={role}
+        className={taken || disabled ? "dt-role-taken" : undefined}
+      >
         {label}
-        {mark(role)}
+        {mark(role, group)}
         {suffix}
       </option>
     );
@@ -124,15 +157,30 @@ export function MappingPanel(props: MappingPanelProps) {
   const labelOf = new Map(roles);
 
   // toggle 模式：合起来时显示这一列已承担的全部语义，展开后逐项勾选。
-  const toggleOption = (role: string, label: string, held: string[]) => {
+  const toggleOption = (
+    role: string,
+    label: string,
+    held: string[],
+    group?: MappingGroup,
+  ) => {
     const chosen = held.includes(role);
     const taken = used.has(role) && !chosen && !isMulti(role);
     const disabled = locked(role);
     return (
-      <option key={role} value={role} className={taken || disabled ? "dt-role-taken" : undefined}>
+      <option
+        key={role}
+        value={role}
+        className={taken || disabled ? "dt-role-taken" : undefined}
+      >
         {chosen ? `✓ ${label}` : label}
-        {mark(role)}
-        {chosen ? "（再点取消）" : taken ? "（已用）" : disabled ? "（与已选记法冲突）" : ""}
+        {mark(role, group)}
+        {chosen
+          ? "（再点取消）"
+          : taken
+            ? "（已用）"
+            : disabled
+              ? "（与已选记法冲突）"
+              : ""}
       </option>
     );
   };
@@ -146,13 +194,25 @@ export function MappingPanel(props: MappingPanelProps) {
       ? held.map((role) => labelOf.get(role) ?? role).join(" ＋ ")
       : "— 选择字段";
     const renderOption = toggleMode
-      ? (role: string, label: string) => toggleOption(role, label, held)
-      : (role: string, label: string) => option(role, label, current);
+      ? (role: string, label: string, group?: MappingGroup) =>
+          toggleOption(role, label, held, group)
+      : (role: string, label: string, group?: MappingGroup) =>
+          option(role, label, current, group);
     return (
       <label className="dt-header-control" key={header}>
         <select
-          className={toggleMode ? (held.length ? "mapped" : undefined) : current && !locked(current) ? "mapped" : undefined}
-          disabled={busy || (!toggleMode && Boolean(current) && locked(current))}
+          className={
+            toggleMode
+              ? held.length
+                ? "mapped"
+                : undefined
+              : current && !locked(current)
+                ? "mapped"
+                : undefined
+          }
+          disabled={
+            busy || (!toggleMode && Boolean(current) && locked(current))
+          }
           value={toggleMode ? "" : current}
           title={toggleMode && held.length ? summary : undefined}
           onChange={(e) => {
@@ -166,10 +226,21 @@ export function MappingPanel(props: MappingPanelProps) {
           <option value="">{toggleMode ? summary : "—"}</option>
           {props.groups
             ? props.groups.map((group) => (
-                <optgroup key={group.title} label={group.title}>
+                <optgroup
+                  key={group.title}
+                  label={`${group.title}${group.status ? ` · ${group.status}` : ""}`}
+                  disabled={group.status === "未适配"}
+                  className={
+                    group.status === "未适配"
+                      ? "dt-group-unavailable"
+                      : undefined
+                  }
+                >
                   {group.roles
                     .filter((role) => byRole.has(role))
-                    .map((role) => renderOption(role, byRole.get(role) ?? role))}
+                    .map((role) =>
+                      renderOption(role, byRole.get(role) ?? role, group),
+                    )}
                 </optgroup>
               ))
             : roles.map(([role, label]) => renderOption(role, label))}
@@ -186,16 +257,19 @@ export function MappingPanel(props: MappingPanelProps) {
           <h2>{props.title}</h2>
           <p>
             {rows.length ? `${rows.length} 行预览 · ` : ""}
-            {headers.length} 列
-            {props.note ? <> · {props.note}</> : null}
+            {headers.length} 列{props.note ? <> · {props.note}</> : null}
           </p>
         </div>
-        {props.toolbar ? <div className="mapping-panel-toolbar">{props.toolbar}</div> : null}
+        {props.toolbar ? (
+          <div className="mapping-panel-toolbar">{props.toolbar}</div>
+        ) : null}
       </div>
-      {props.formNote ? <p className="mapping-form-note">{props.formNote}</p> : null}
+      {props.formNote ? (
+        <p className="mapping-form-note">{props.formNote}</p>
+      ) : null}
       {props.requirementOf ? (
         <p className="mapping-requirement-legend">
-          ＊ 当前识别形态必填；（选填）为可补充字段；未标记字段不属于当前形态要求。
+          ＊ 为必填字段；（选填）须按当前分组的整组规则补充。
         </p>
       ) : null}
       {props.missing && props.missing.length > 0 && (

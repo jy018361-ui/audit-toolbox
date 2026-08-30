@@ -1410,7 +1410,7 @@ function FaTbJeMappingPanel(props: {
       rows={props.rows}
       mapping={props.mapping}
       roles={roles}
-      groups={formGroups(props.kind, roles, forms, match)}
+      groups={formGroups(props.kind, roles, forms, props.mapping)}
       requirementOf={(role) => roleRequirement(match, role)}
       formNote={describeForm(match, (role) => labels[role] ?? role)}
       multi={MULTI}

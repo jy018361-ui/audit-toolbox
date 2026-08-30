@@ -641,6 +641,9 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     fill_combined_account_column(kind, &table, &mut mapping);
     fill_account_name_from_code_alias(&table, &candidates, &mut mapping);
     pick_currency_text_column(&table, kind, &mut mapping);
+    if kind == "tb" {
+        promote_period_movement(&table, &mut mapping);
+    }
     let foreign_currency_candidates = if kind == "tb" {
         foreign_currency_columns(&table)
             .into_iter()
@@ -3292,6 +3295,142 @@ fn amount_scheme_ok(mapping: &Map<String, Value>, prefix: &str) -> bool {
     (amount && !debit && !credit)
         || (debit && credit && !amount)
         || (amount && direction && !debit && !credit)
+}
+
+/// 只有「本期借／贷」而没有「本年累计借／贷」时，用 TB 自身勾稽
+/// `期初 + 本期借 - 本期贷 = 期末` 验证这两列是否覆盖了期初到期末的
+/// 全部发生额。通过后把它们提升到标准 YTD 角色，下游不再保留一套
+/// 「本期也算完整」的例外。
+///
+/// 自动通过阈值：3–9 个有效区分行必须 100% 成立；10 行及以上成立率
+/// 不低于 95%；少于 3 行不自动提升。贷方为零时无法区分加减口径，
+/// 不计入有效行。
+pub(crate) fn promote_period_movement(table: &FxTable, mapping: &mut Map<String, Value>) -> bool {
+    promote_period_movement_rows(&table.headers, &table.rows, mapping)
+}
+
+/// [`promote_period_movement`] 的无表结构入口。借款工具使用自己的轻量
+/// `Table`，但 TB 自动提升必须与其他工具共用同一份规则，不为转换结构
+/// 克隆整张大表。
+pub(crate) fn promote_period_movement_rows(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &mut Map<String, Value>,
+) -> bool {
+    if first_col(mapping, "ytdFunctionalDebit").is_some()
+        || first_col(mapping, "ytdFunctionalCredit").is_some()
+    {
+        return false;
+    }
+    let (Some(debit_column), Some(credit_column)) = (
+        first_col(mapping, "periodFunctionalDebit"),
+        first_col(mapping, "periodFunctionalCredit"),
+    ) else {
+        return false;
+    };
+    if !amount_scheme_ok(mapping, "openingFunctional")
+        || !amount_scheme_ok(mapping, "closingFunctional")
+    {
+        return false;
+    }
+
+    let column_of = |role: &str| mapped_cols(mapping, role);
+    let index_of = |role: &str| {
+        column_of(role)
+            .into_iter()
+            .find_map(|name| ledger_mapping::header_index(headers, &name))
+    };
+    let (Some(debit_index), Some(credit_index)) = (
+        ledger_mapping::header_index(headers, &debit_column),
+        ledger_mapping::header_index(headers, &credit_column),
+    ) else {
+        return false;
+    };
+    let opening_self_signed =
+        ledger_mapping::balance_self_signed(headers, rows, &column_of, "openingFunctional");
+    let closing_self_signed =
+        ledger_mapping::balance_self_signed(headers, rows, &column_of, "closingFunctional");
+    let balance_at = |row: &[String], prefix: &str, self_signed: bool| -> Result<f64, String> {
+        if let (Some(debit), Some(credit)) = (
+            index_of(&format!("{prefix}Debit")),
+            index_of(&format!("{prefix}Credit")),
+        ) {
+            let debit =
+                ledger_mapping::parse_amount(row.get(debit).map(String::as_str).unwrap_or(""))?
+                    .unwrap_or(0.0);
+            let credit =
+                ledger_mapping::parse_amount(row.get(credit).map(String::as_str).unwrap_or(""))?
+                    .unwrap_or(0.0);
+            return Ok(debit - credit);
+        }
+        let Some(amount) = index_of(&format!("{prefix}Amount")) else {
+            return Err("余额列未映射".into());
+        };
+        let amount =
+            ledger_mapping::parse_amount(row.get(amount).map(String::as_str).unwrap_or(""))?
+                .unwrap_or(0.0);
+        let base = prefix
+            .strip_suffix("Functional")
+            .or_else(|| prefix.strip_suffix("Foreign"))
+            .unwrap_or(prefix);
+        let direction = index_of(&format!("{base}Direction"))
+            .or_else(|| index_of("direction"))
+            .and_then(|index| row.get(index))
+            .map(String::as_str)
+            .unwrap_or("");
+        if self_signed || direction.trim().is_empty() {
+            Ok(amount)
+        } else if ledger_mapping::is_credit_direction(direction) {
+            Ok(-amount)
+        } else {
+            Ok(amount)
+        }
+    };
+    let junk = ledger_mapping::ledger_junk_mask(headers, rows, &column_of);
+    let mut eligible = 0usize;
+    let mut passed = 0usize;
+    for (index, row) in rows.iter().enumerate() {
+        if !junk.get(index).copied().unwrap_or(true) {
+            continue;
+        }
+        let (Ok(opening), Ok(closing), Ok(Some(debit)), Ok(Some(credit))) = (
+            balance_at(row, "openingFunctional", opening_self_signed),
+            balance_at(row, "closingFunctional", closing_self_signed),
+            ledger_mapping::parse_amount(row.get(debit_index).map(String::as_str).unwrap_or("")),
+            ledger_mapping::parse_amount(row.get(credit_index).map(String::as_str).unwrap_or("")),
+        ) else {
+            continue;
+        };
+        if credit.abs() <= f64::EPSILON {
+            continue;
+        }
+        eligible += 1;
+        let derived = opening + debit - credit;
+        let difference = derived - closing;
+        let scale = opening
+            .abs()
+            .max(closing.abs())
+            .max(debit.abs())
+            .max(credit.abs())
+            .max(derived.abs());
+        let tolerance = 0.01_f64.max(scale * 1e-8);
+        if difference.abs() <= tolerance {
+            passed += 1;
+        }
+    }
+    let accepted = match eligible {
+        0..=2 => false,
+        3..=9 => passed == eligible,
+        _ => passed * 100 >= eligible * 95,
+    };
+    if !accepted {
+        return false;
+    }
+    mapping.insert("ytdFunctionalDebit".into(), Value::String(debit_column));
+    mapping.insert("ytdFunctionalCredit".into(), Value::String(credit_column));
+    mapping.remove("periodFunctionalDebit");
+    mapping.remove("periodFunctionalCredit");
+    true
 }
 
 /// 调查测试入口：只读，看某份表被判成哪种符号口径。
@@ -9949,6 +10088,81 @@ fn xlsx_err(value: XlsxError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn period_promotion_table(rows: usize, broken: Option<usize>) -> FxTable {
+        let headers = vec![
+            "科目编码".into(),
+            "期初余额".into(),
+            "本期借方".into(),
+            "本期贷方".into(),
+            "期末余额".into(),
+        ];
+        let values = (0..rows)
+            .map(|index| {
+                let opening = 100.0 + index as f64;
+                let debit = 10.0;
+                let credit = 5.0;
+                let closing = if broken == Some(index) {
+                    opening + debit - credit + 1.0
+                } else {
+                    opening + debit - credit
+                };
+                vec![
+                    format!("1001{index:02}"),
+                    opening.to_string(),
+                    debit.to_string(),
+                    credit.to_string(),
+                    closing.to_string(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        FxTable {
+            path: PathBuf::new(),
+            sheet: "TB".into(),
+            sheets: vec!["TB".into()],
+            header_row: 1,
+            header_depth: 1,
+            raw_headers: vec![headers.clone()],
+            headers,
+            row_count: values.len(),
+            rows: values,
+            header_candidates: vec![],
+            sampled: false,
+        }
+    }
+
+    fn period_promotion_mapping() -> Map<String, Value> {
+        json!({
+            "accountCode": "科目编码",
+            "openingFunctionalAmount": "期初余额",
+            "periodFunctionalDebit": "本期借方",
+            "periodFunctionalCredit": "本期贷方",
+            "closingFunctionalAmount": "期末余额"
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    #[test]
+    fn 本期发生额在二十行中百分之九十五勾稽成立时自动提升() {
+        let table = period_promotion_table(20, Some(0));
+        let mut mapping = period_promotion_mapping();
+        assert!(promote_period_movement(&table, &mut mapping));
+        assert_eq!(mapping["ytdFunctionalDebit"], "本期借方");
+        assert_eq!(mapping["ytdFunctionalCredit"], "本期贷方");
+        assert!(!mapping.contains_key("periodFunctionalDebit"));
+        assert!(!mapping.contains_key("periodFunctionalCredit"));
+    }
+
+    #[test]
+    fn 本期发生额少于十行时必须全部勾稽成立() {
+        let table = period_promotion_table(9, Some(0));
+        let mut mapping = period_promotion_mapping();
+        assert!(!promote_period_movement(&table, &mut mapping));
+        assert!(!mapping.contains_key("ytdFunctionalDebit"));
+        assert_eq!(mapping["periodFunctionalDebit"], "本期借方");
+    }
 
     #[test]
     fn 混写科目单元格按角色拆出编码和名称() {

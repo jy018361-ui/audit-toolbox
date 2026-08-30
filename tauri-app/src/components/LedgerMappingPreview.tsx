@@ -26,7 +26,7 @@ export function LedgerMappingPreview({inspect,mapping,setMap,llmBusy,headerExtra
     rows={inspect.preview}
     mapping={(mapping??{}) as MappingDict}
     roles={roles}
-    groups={formGroups("je",roles,forms,match)}
+    groups={formGroups("je",roles,forms,mapping??{})}
     requirementOf={role=>roleRequirement(match,role)}
     formNote={describeForm(match,role=>labelOf.get(role)??role)}
     multi={MULTI}

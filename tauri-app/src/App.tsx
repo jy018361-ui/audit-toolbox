@@ -313,11 +313,13 @@ export default function App() {
                 <span>{x.label}</span>
                 {x.to === "/settings" && availableUpdate && (
                   <span
-                    className="nav-update-dot"
+                    className="nav-update-badge"
                     role="status"
                     aria-label={`发现新版本 ${availableUpdate.version}`}
                     title={`发现新版本 ${availableUpdate.version}`}
-                  />
+                  >
+                    更新
+                  </span>
                 )}
               </NavLink>
             ))}
@@ -1248,6 +1250,7 @@ export function Settings({
         actions={
           <Button
             variant="secondary"
+            className={`settings-update-trigger${availableUpdate ? " has-update" : ""}`}
             onClick={() => void checkForUpdates()}
             disabled={checkingUpdate || installingUpdate}
             aria-expanded={updateOpen}
@@ -1258,7 +1261,7 @@ export function Settings({
               : installingUpdate
                 ? "安装中…"
                 : availableUpdate
-                  ? `软件更新 · v${availableUpdate.version}`
+                  ? `发现新版本 v${availableUpdate.version}`
                   : "软件更新"}
           </Button>
         }
@@ -1271,9 +1274,15 @@ export function Settings({
         >
           <div className="settings-update-heading">
             <div>
-              <h2 id="settings-update-title">软件更新</h2>
+              <h2 id="settings-update-title">
+                {availableUpdate
+                  ? `可更新至 v${availableUpdate.version}`
+                  : "软件更新"}
+              </h2>
               <p className="settings-note">
-                当前版本：v{appVersion} · 来源：GitHub Releases
+                {availableUpdate
+                  ? `当前 v${appVersion} → 新版 v${availableUpdate.version}`
+                  : `当前版本：v${appVersion} · 来源：GitHub Releases`}
               </p>
             </div>
             <Button
@@ -1284,9 +1293,11 @@ export function Settings({
               收起
             </Button>
           </div>
-          <p role="status" aria-live="polite">
-            {updateStatus}
-          </p>
+          {updateStatus && (
+            <p role="status" aria-live="polite" className="settings-update-status">
+              {updateStatus}
+            </p>
+          )}
           {notesError && (
             <p role="alert" className="settings-test-result failed">
               {notesError}
@@ -1297,7 +1308,7 @@ export function Settings({
               <p>
                 {releaseNotes.currentVersion === releaseNotes.targetVersion
                   ? `本版说明 · v${releaseNotes.currentVersion}`
-                  : `更新范围：v${releaseNotes.currentVersion} → v${releaseNotes.targetVersion}`}
+                  : `本次更新说明`}
               </p>
               {releaseNotes.warnings.map((warning, i) => (
                 <p className="settings-note" key={i}>
@@ -1310,7 +1321,9 @@ export function Settings({
                   className="settings-release-entry"
                 >
                   <h3>
-                    v{release.version} · {release.title}
+                    {release.title === `E点通工具箱 v${release.version}`
+                      ? `v${release.version}`
+                      : `v${release.version} · ${release.title}`}
                   </h3>
                   {release.publishedAt && (
                     <p className="settings-note">

@@ -26,6 +26,18 @@
   margin-bottom: var(--sp-4);
 }
 
+.settings-page .settings-update-trigger.has-update {
+  border-color: color-mix(in srgb, var(--warning-dot) 80%, var(--border));
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  font-weight: 700;
+}
+
+.settings-page .settings-update-trigger.has-update:hover:not(:disabled) {
+  border-color: var(--warning-dot);
+  background: color-mix(in srgb, var(--warning-bg) 78%, var(--surface));
+}
+
 .settings-update-heading {
   display: flex;
   align-items: center;
@@ -37,6 +49,12 @@
   margin-top: var(--sp-4);
   max-height: 50vh;
   overflow-y: auto;
+}
+
+.settings-update-status {
+  margin: var(--sp-3) 0 0;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
 }
 
 .settings-release-entry {

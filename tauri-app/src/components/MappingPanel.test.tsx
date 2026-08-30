@@ -28,7 +28,10 @@ function panel(overrides: Record<string, unknown> = {}) {
       {...overrides}
     />,
   );
-  return { onChange, selects: screen.getAllByRole("combobox") as HTMLSelectElement[] };
+  return {
+    onChange,
+    selects: screen.getAllByRole("combobox") as HTMLSelectElement[],
+  };
 }
 
 const pick = (select: HTMLSelectElement, role: string) =>
@@ -43,7 +46,9 @@ describe("共用字段映射面板", () => {
   });
 
   it("换一列承担某角色时，原来那列自动让出", () => {
-    const { onChange, selects } = panel({ mapping: { accountCode: "会计科目" } });
+    const { onChange, selects } = panel({
+      mapping: { accountCode: "会计科目" },
+    });
     pick(selects[1], "accountCode");
     expect(onChange).toHaveBeenCalledWith({ accountCode: "科目文本" });
   });
@@ -54,11 +59,15 @@ describe("共用字段映射面板", () => {
       multi: new Set(["accountName"]),
     });
     pick(selects[0], "accountName");
-    expect(onChange).toHaveBeenCalledWith({ accountName: ["科目文本", "会计科目"] });
+    expect(onChange).toHaveBeenCalledWith({
+      accountName: ["科目文本", "会计科目"],
+    });
   });
 
   it("被方案互斥锁定的角色标为已停用", () => {
-    const { selects } = panel({ isLocked: (role: string) => role === "functionalAmount" });
+    const { selects } = panel({
+      isLocked: (role: string) => role === "functionalAmount",
+    });
     const option = selects[0].querySelector('option[value="functionalAmount"]');
     expect(option?.textContent).toContain("已停用");
   });
@@ -77,20 +86,50 @@ describe("共用字段映射面板", () => {
   it("有形态要求时解释必填、选填和无标记字段", () => {
     const { selects } = panel({
       requirementOf: (role: string) =>
-        role === "functionalAmount" ? "required" : role === "currencyText" ? "optional" : undefined,
+        role === "functionalAmount"
+          ? "required"
+          : role === "currencyText"
+            ? "optional"
+            : undefined,
     });
-    expect(screen.getByText(/当前识别形态必填/)).toHaveTextContent(
-      "＊ 当前识别形态必填；（选填）为可补充字段；未标记字段不属于当前形态要求。",
+    expect(screen.getByText(/为必填字段/)).toHaveTextContent(
+      "＊ 为必填字段；（选填）须按当前分组的整组规则补充。",
     );
-    expect(selects[0].querySelector('option[value="functionalAmount"]')).toHaveTextContent("本位币净额＊");
-    expect(selects[0].querySelector('option[value="currencyText"]')).toHaveTextContent("币种线索文本（选填）");
+    expect(
+      selects[0].querySelector('option[value="functionalAmount"]'),
+    ).toHaveTextContent("本位币净额＊");
+    expect(
+      selects[0].querySelector('option[value="currencyText"]'),
+    ).toHaveTextContent("币种线索文本（选填）");
   });
 
   it("给了分组就按组渲染下拉", () => {
     const { selects } = panel({
       groups: [{ title: "科目与主体", roles: ["accountCode", "accountName"] }],
     });
-    expect(selects[0].querySelector("optgroup")?.getAttribute("label")).toBe("科目与主体");
+    expect(selects[0].querySelector("optgroup")?.getAttribute("label")).toBe(
+      "科目与主体",
+    );
+  });
+
+  it("公共必填在分组内标星，未适配形态整组禁用", () => {
+    const { selects } = panel({
+      groups: [
+        {
+          title: "公共必填字段",
+          roles: ["accountCode"],
+          required: ["accountCode"],
+        },
+        { title: "JE-类型A", roles: ["functionalAmount"], status: "未适配" },
+      ],
+    });
+    const groups = selects[0].querySelectorAll("optgroup");
+    expect(groups[0].label).toBe("公共必填字段");
+    expect(
+      groups[0].querySelector('option[value="accountCode"]'),
+    ).toHaveTextContent("科目编码＊");
+    expect(groups[1].label).toContain("未适配");
+    expect(groups[1]).toBeDisabled();
   });
 
   it("toggle 模式下一列可以叠加多个角色，并显示已承担的语义", () => {
@@ -105,15 +144,21 @@ describe("共用字段映射面板", () => {
         mapping={{ accountName: ["科目文本"], currencyText: "科目文本" }}
         roles={ROLES}
         mode="toggle"
-        rolesOf={(header) => (header === "科目文本" ? ["accountName", "currencyText"] : [])}
+        rolesOf={(header) =>
+          header === "科目文本" ? ["accountName", "currencyText"] : []
+        }
         onToggle={onToggle}
         onChange={() => {}}
       />,
     );
     const selects = screen.getAllByRole("combobox") as HTMLSelectElement[];
-    expect(selects[1].querySelector("option")?.textContent).toBe("科目名称 ＋ 币种线索文本");
+    expect(selects[1].querySelector("option")?.textContent).toBe(
+      "科目名称 ＋ 币种线索文本",
+    );
     // 已承担的角色带勾，再点一次是取消。
-    expect(selects[1].querySelector('option[value="accountName"]')?.textContent).toContain("✓");
+    expect(
+      selects[1].querySelector('option[value="accountName"]')?.textContent,
+    ).toContain("✓");
     pick(selects[1], "accountCode");
     expect(onToggle).toHaveBeenCalledWith("科目文本", "accountCode");
   });

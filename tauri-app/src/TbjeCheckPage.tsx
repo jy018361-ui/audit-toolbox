@@ -187,6 +187,7 @@ function EquationVerdict({ equation }: { equation?: CheckResult["equation"] }) {
 
 /** 预览截断的行数。几百条差异全塞进页面没法看——预览管定位，导出管全量。 */
 const PREVIEW_CAP = 100;
+const MULTI_COLUMN_ROLES = new Set(["id", "accountName", "auxiliary"]);
 
 const presenceLabel = (presence: string) =>
   presence === "tbOnly"
@@ -377,8 +378,8 @@ function OutcomeDetail({ result }: { result: CheckResult }) {
             {CHECK_NAMES.equation}：{unclassified.length} 个科目无法自动分类
           </h4>
           <p className="fx-hint">
-            这些科目未按科目编码识别为资产、负债、权益、成本或损益，暂未纳入
-            BS 与 PL 勾稽；请核对科目编码或后续补充分类。
+            这些科目未按科目编码识别为资产、负债、权益、成本或损益，暂未纳入 BS
+            与 PL 勾稽；请核对科目编码或后续补充分类。
           </p>
           <div className="tbje-preview-scroll">
             <Table className="tbje-preview-table">
@@ -830,7 +831,9 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                               aria-controls={`tbje-mapping-${group.id}-${kind}`}
                               onClick={() =>
                                 setExpanded(
-                                  active ? undefined : { groupId: group.id, kind },
+                                  active
+                                    ? undefined
+                                    : { groupId: group.id, kind },
                                 )
                               }
                             >
@@ -911,7 +914,9 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                               key={file.path}
                               kind={file.kind}
                               inspection={inspects[file.path]}
-                              mapping={(mappings[file.path] ?? {}) as MappingDict}
+                              mapping={
+                                (mappings[file.path] ?? {}) as MappingDict
+                              }
                               onChange={(next) => {
                                 setMappings((current) => ({
                                   ...current,
@@ -1151,9 +1156,10 @@ function LedgerMappingPanel(props: {
       rows={props.inspection.preview ?? []}
       mapping={props.mapping}
       roles={roles}
-      groups={formGroups(props.kind, roles, forms, match)}
+      groups={formGroups(props.kind, roles, forms, props.mapping)}
       requirementOf={(role) => roleRequirement(match, role)}
       formNote={describeForm(match, (role) => labels[role] ?? role)}
+      multi={MULTI_COLUMN_ROLES}
       onChange={props.onChange}
     />
   );

@@ -2032,7 +2032,7 @@ function FxPreview(props: {
     );
   // 下拉分组按**当前命中的型**排：身份类在前，然后逐个槽位，最后是这一型
   // 用不到的其他记法。必填标记也跟着型走，不再写死在分组标题里。
-  const groups = formGroups(props.kind, roles, forms, formMatch);
+  const groups = formGroups(props.kind, roles, forms, props.mapping);
   /** 点一下就切换：没选上就加上，已选上就摘掉。 */
   const toggle = (header: string, role: string) => {
     if (!role) return;

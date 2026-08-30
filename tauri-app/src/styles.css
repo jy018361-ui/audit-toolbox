@@ -1977,6 +1977,14 @@ summary:focus-visible {
   background: var(--surface-muted);
 }
 
+/* 当前映射已与该形态冲突：整组保留在下拉中供用户理解，
+   但灰化并禁止选择。原生 optgroup 在不同 WebView 的着色有差异，
+   disabled 是行为保证，颜色是辅助提示。 */
+.data-table-table th .dt-header-control select optgroup.dt-group-unavailable {
+  color: var(--muted-soft);
+  background: var(--surface-muted);
+}
+
 /* 未映射字段提示 */
 .fa-missing-hint {
   margin-top: var(--sp-2) !important;

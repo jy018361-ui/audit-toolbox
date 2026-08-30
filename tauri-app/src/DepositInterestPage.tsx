@@ -1679,7 +1679,7 @@ function MappingPreview(props: {
       rows={props.inspection.preview}
       mapping={props.mapping}
       roles={roles}
-      groups={formGroups(props.kind, roles, forms, formMatch)}
+      groups={formGroups(props.kind, roles, forms, props.mapping)}
       requirementOf={(role) => roleRequirement(formMatch, role)}
       formNote={describeForm(formMatch, (role) => labels[role] ?? role)}
       multi={DEPOSIT_MULTI}

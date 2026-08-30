@@ -1152,6 +1152,9 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     // 合并科目列的兜底与汇兑损益共用同一份（判定在公共引擎、套用在 fx 侧），
     // 存款利息不再自持一份近似实现。
     crate::fx::fill_combined_account_column(kind, &table, &mut mapping);
+    if kind == "tb" {
+        crate::fx::promote_period_movement(&table, &mut mapping);
+    }
     let mapping = mapping;
     let accounts = distinct_accounts(&table, &mapping);
     let entities = distinct_values(&table, &mapping, "entity");

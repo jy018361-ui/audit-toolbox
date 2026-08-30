@@ -10,6 +10,7 @@
  */
 import { useEffect, useState } from "react";
 import { engineCall } from "@/api";
+import { GOLD_IDENTITY } from "@/ledgerMapping";
 
 export type LedgerFormKind = "tb" | "je" | "loan";
 
@@ -39,7 +40,9 @@ export type LedgerFormMatch = {
 };
 
 const filled = (value?: string | string[]) =>
-  Array.isArray(value) ? value.some((x) => Boolean(x?.trim())) : Boolean(value?.trim());
+  Array.isArray(value)
+    ? value.some((x) => Boolean(x?.trim()))
+    : Boolean(value?.trim());
 
 /** 型号的用户可见名。 */
 export const formName = (form: LedgerForm) => form.display || form.id;
@@ -52,24 +55,20 @@ export function matchForms(
 ): LedgerFormMatch[] {
   const has = (role: string) => filled(mapping[role]);
   const ranked = forms.map((form, index) => {
-    let missing = form.required.flatMap((slot) => slot.filter((role) => !has(role)));
-    // 与 Rust 同一条次选口径：本年累计缺失、而本期借贷齐全时放行。
-    // 金标的类型表只写本年累计，实测用友导出只给「本期发生借方／贷方」。
-    if (
-      kind === "tb" &&
-      missing.length > 0 &&
-      missing.every((role) => role.startsWith("ytdFunctional")) &&
-      has("periodFunctionalDebit") &&
-      has("periodFunctionalCredit")
-    )
-      missing = [];
+    let missing = form.required.flatMap((slot) =>
+      slot.filter((role) => !has(role)),
+    );
     const missingAny = form.anyOf.filter((slot) => !slot.some(has));
     const partialOptional = form.optional.flatMap((slot) => {
       const miss = slot.filter((role) => !has(role));
       return miss.length && miss.length < slot.length ? miss : [];
     });
-    const complete = !missing.length && !missingAny.length && !partialOptional.length;
-    return { match: { form, missing, missingAny, partialOptional, complete }, index };
+    const complete =
+      !missing.length && !missingAny.length && !partialOptional.length;
+    return {
+      match: { form, missing, missingAny, partialOptional, complete },
+      index,
+    };
   });
   // 与 Rust 同序：完整命中在前；其次缺得少的在前；同分时**后定义的型优先**。
   ranked.sort((a, b) => {
@@ -104,9 +103,11 @@ export function roleRequirement(
   role: string,
 ): "required" | "optional" | undefined {
   if (!match) return undefined;
-  if (match.form.required.some((slot) => slot.includes(role))) return "required";
+  if (match.form.required.some((slot) => slot.includes(role)))
+    return "required";
   if (match.form.anyOf.some((slot) => slot.includes(role))) return "required";
-  if (match.form.optional.some((slot) => slot.includes(role))) return "optional";
+  if (match.form.optional.some((slot) => slot.includes(role)))
+    return "optional";
   return undefined;
 }
 
@@ -119,11 +120,14 @@ export function describeForm(
   const head = `${formName(match.form)}（${match.form.label}）`;
   if (match.complete) return `已识别为 ${head}`;
   const parts: string[] = [];
-  if (match.missing.length) parts.push(`缺少「${match.missing.map(labelOf).join("」「")}」`);
+  if (match.missing.length)
+    parts.push(`缺少「${match.missing.map(labelOf).join("」「")}」`);
   for (const slot of match.missingAny)
     parts.push(`「${slot.map(labelOf).join("」「")}」至少映射一个`);
   if (match.partialOptional.length)
-    parts.push(`可选字段只映射了一半，「${match.partialOptional.map(labelOf).join("」「")}」也必须一并映射`);
+    parts.push(
+      `可选字段只映射了一半，「${match.partialOptional.map(labelOf).join("」「")}」也必须一并映射`,
+    );
   return `最接近 ${head}：${parts.join("；")}`;
 }
 
@@ -134,7 +138,8 @@ export function describeForm(
  * 必填标记由面板逐项跟着当前型走（[`roleRequirement`]）。
  */
 export function slotTitle(slot: string[]): string {
-  const every = (prefix: string) => slot.every((role) => role.startsWith(prefix));
+  const every = (prefix: string) =>
+    slot.every((role) => role.startsWith(prefix));
   const some = (prefix: string) => slot.some((role) => role.startsWith(prefix));
   if (every("opening")) return "期初余额";
   if (every("closing")) return "期末余额";
@@ -155,54 +160,100 @@ export function formGroups(
   kind: LedgerFormKind,
   roles: [string, string][],
   forms: LedgerForm[],
-  match: LedgerFormMatch | undefined,
-): { title: string; roles: string[] }[] {
+  mapping: Record<string, string | string[] | undefined>,
+): {
+  title: string;
+  roles: string[];
+  required?: string[];
+  optional?: string[];
+  status?: "已适配" | "可适配" | "未适配";
+}[] {
   const names = new Set(roles.map(([role]) => role));
   const inAnyForm = new Set(
-    forms.flatMap((form) => [...form.required, ...form.anyOf, ...form.optional].flat()),
+    forms.flatMap((form) =>
+      [...form.required, ...form.anyOf, ...form.optional].flat(),
+    ),
   );
   // 本期发生额不进任何一型的槽（金标只写本年累计，它是次选口径），但它显然
   // 不是身份字段——按名字认出金额类角色，免得掉进"科目与主体"那一组里。
   // `functionalCurrency` 是币种代码列不是金额列，按后缀排除。
   const isAmountRole = (role: string) =>
     !/Currency$/.test(role) &&
-    (/^(opening|closing|ytd|period|foreign|functional)/.test(role) || role === "direction");
+    (/^(opening|closing|ytd|period|foreign|functional)/.test(role) ||
+      role === "direction");
   const identity = roles
     .map(([role]) => role)
     .filter((role) => !inAnyForm.has(role) && !isAmountRole(role));
-  const groups: { title: string; roles: string[] }[] = [];
-  if (identity.length)
+  const groups: {
+    title: string;
+    roles: string[];
+    required?: string[];
+    optional?: string[];
+    status?: "已适配" | "可适配" | "未适配";
+  }[] = [];
+  const publicRequired = GOLD_IDENTITY[kind === "je" ? "je" : "tb"].filter(
+    (role) => names.has(role),
+  );
+  if (publicRequired.length)
     groups.push({
-      title: kind === "je" ? "科目、凭证与币种" : "科目、主体与币种",
-      roles: identity,
+      title: "公共必填字段",
+      roles: publicRequired,
+      required: publicRequired,
     });
-  const used = new Set<string>();
-  const push = (slot: string[], suffix = "") => {
-    const items = slot.filter((role) => names.has(role));
-    if (!items.length) return;
-    items.forEach((role) => used.add(role));
-    const title = `${slotTitle(items)}${suffix}`;
-    const existing = groups.find((group) => group.title === title);
-    if (existing) existing.roles.push(...items);
-    else groups.push({ title, roles: items });
-  };
-  if (match) {
-    for (const slot of match.form.required) push(slot);
-    for (const slot of match.form.anyOf) push(slot);
-    for (const slot of match.form.optional) push(slot, "（选填，给就整组给）");
-  }
-  const leftover = roles
+  const publicOptional = identity.filter(
+    (role) => !publicRequired.includes(role),
+  );
+  if (publicOptional.length)
+    groups.push({ title: "公共选填字段", roles: publicOptional });
+
+  const matches = new Map(
+    matchForms(kind, forms, mapping).map((match) => [match.form.id, match]),
+  );
+  const mappedAmountRoles = roles
     .map(([role]) => role)
-    .filter((role) => (inAnyForm.has(role) || isAmountRole(role)) && !used.has(role));
-  const period = leftover.filter((role) => role.startsWith("period"));
-  const others = leftover.filter((role) => !role.startsWith("period"));
-  if (period.length)
-    groups.push({ title: "本期发生额（本年累计缺失时的次选）", roles: period });
-  if (others.length)
+    .filter(
+      (role) =>
+        isAmountRole(role) &&
+        filled(mapping[role]) &&
+        !role.startsWith("period"),
+    );
+  for (const form of forms) {
+    const formRoles = Array.from(
+      new Set(
+        [...form.required, ...form.anyOf, ...form.optional]
+          .flat()
+          .filter((role) => names.has(role)),
+      ),
+    );
+    if (!formRoles.length) continue;
+    const allowed = new Set(formRoles);
+    const incompatible = mappedAmountRoles.some((role) => !allowed.has(role));
+    const match = matches.get(form.id);
+    const status = incompatible
+      ? "未适配"
+      : match?.complete
+        ? "已适配"
+        : "可适配";
     groups.push({
-      title: match ? `其他记法（${formName(match.form)} 用不到）` : "其他记法",
-      roles: others,
+      title: `${formName(form)}（${form.label}）`,
+      roles: formRoles,
+      required: Array.from(new Set([...form.required, ...form.anyOf].flat())),
+      optional: Array.from(new Set(form.optional.flat())),
+      status,
     });
+  }
+
+  const period = roles
+    .map(([role]) => role)
+    .filter((role) => role.startsWith("period"));
+  if (period.length)
+    groups.push({ title: "本期发生额（通过勾稽后自动提升）", roles: period });
+  if (!forms.length) {
+    const amounts = roles
+      .map(([role]) => role)
+      .filter((role) => isAmountRole(role) && !role.startsWith("period"));
+    if (amounts.length) groups.push({ title: "金额字段", roles: amounts });
+  }
   return groups;
 }
 

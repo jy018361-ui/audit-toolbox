@@ -347,6 +347,39 @@ fn 真实第一组关键同编码汇总不重复累计() {
 }
 
 #[test]
+#[ignore = "读取本机TBJEPBC第三组大文件，验证轻量预览与正式读取表头一致"]
+fn 真实第三组本位币净额映射进入正式核对() {
+    let sample_dir = std::path::PathBuf::from(r"C:\Users\lenovo\Downloads\TBJEPBC");
+    let je_path = sample_dir.join("03序时账 (2).xlsx");
+    let je_inspection =
+        fx::call("fx.inspect_je", json!({"source": {"inputPath": je_path}})).unwrap();
+    assert_eq!(je_inspection["headerRow"], json!(6));
+    assert_eq!(
+        je_inspection["suggestedMapping"]["functionalAmount"],
+        json!("本币金额")
+    );
+    let source = |path: &std::path::Path, inspection: &Value| {
+        json!({
+            "inputPath": path,
+            "sheet": inspection["sheet"],
+            "headerRow": inspection["headerRow"],
+            "headerDepth": inspection["headerDepth"],
+        })
+    };
+    let je_source = source(&je_path, &je_inspection);
+    let je_spec: SourceSpec = serde_json::from_value(je_source).unwrap();
+    let je_table = load_fx_table(&je_spec).unwrap();
+    assert!(je_table.headers.iter().any(|header| header == "本币金额"));
+    assert!(!je_table.headers.iter().any(|header| header == "Column_1"));
+    let mut je_mapping = je_inspection["suggestedMapping"]
+        .as_object()
+        .cloned()
+        .unwrap();
+    fx::ensure_sign_convention(&je_table, &mut je_mapping, "je").unwrap();
+    assert_eq!(je_mapping["__signConvention"], json!("signed"));
+}
+
+#[test]
 fn 绝大多数科目不一致时只提示大范围差异不猜测期间原因() {
     let dir = fixture("systematic");
     // 六个科目中绝大多数对不上；没有TB期间字段作为直接证据时，只能客观

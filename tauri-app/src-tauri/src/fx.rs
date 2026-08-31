@@ -1081,18 +1081,29 @@ fn xlsx_dimension(prefix: &str) -> (usize, usize) {
     (row, column)
 }
 
+#[derive(Clone, Debug)]
+struct XlsxSampleRow {
+    /// Excel 工作表中的物理行号（1 基）。大文件轻量读取不能把缺失的空白
+    /// `<row>` 压掉后再用 Vec 下标冒充行号，否则正式 Polars 读取会错一行。
+    number: usize,
+    cells: Vec<String>,
+}
+
 fn xlsx_sample_rows(
     prefix: &str,
     shared: &[String],
     dimension_width: usize,
     date_styles: &HashSet<usize>,
     epoch_1904: bool,
-) -> Vec<Vec<String>> {
+) -> Vec<XlsxSampleRow> {
     let mut rows = Vec::new();
     for fragment in prefix.split("<row ").skip(1) {
         let Some((row_xml, _)) = fragment.split_once("</row>") else {
             break;
         };
+        let number = xml_attribute(fragment, "r")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or_else(|| rows.last().map_or(1, |row: &XlsxSampleRow| row.number + 1));
         let mut cells = Vec::<(usize, String)>::new();
         for cell in row_xml.split("<c ").skip(1) {
             let Some((cell_xml, _)) = cell.split_once("</c>") else {
@@ -1145,9 +1156,69 @@ fn xlsx_sample_rows(
         for (index, value) in cells {
             row[index] = value;
         }
-        rows.push(row);
+        rows.push(XlsxSampleRow { number, cells: row });
     }
     rows
+}
+
+/// 大文件预览直接在工作表物理行号上推断表头。
+///
+/// XLSX 可以完全省略整行空白的 `<row>` 节点。旧实现先把存在的节点压成 Vec，
+/// 再把 Vec 下标当作 Excel 行号；第三组样例的第 5 行为空、第 6 行是表头，因而
+/// 被错误回传为第 5 行。正式 Polars 读取按物理第 5 行取表头后只得到
+/// `Column_1…Column_23`。这里保留稀疏行号，不靠“补空行”猜位置。
+fn infer_xlsx_header_layout(all: &[XlsxSampleRow]) -> (usize, usize, Vec<(usize, f64)>) {
+    let limit = all.len().min(30);
+    let compact = all
+        .iter()
+        .take(limit)
+        .map(|row| row.cells.clone())
+        .collect::<Vec<_>>();
+    let mut row_scores = (0..limit)
+        .map(|index| {
+            (
+                all[index].number,
+                ledger_mapping::header_row_score(&compact, index),
+            )
+        })
+        .collect::<Vec<_>>();
+    row_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut best = row_scores
+        .first()
+        .map(|(row, score)| (*row, 1usize, *score))
+        .unwrap_or((1, 1, 0.0));
+    for index in 0..limit.saturating_sub(1) {
+        // 双层表头必须是工作表中真正相邻的两行；中间缺失的空白行不能被压缩掉。
+        if all[index + 1].number != all[index].number + 1 {
+            continue;
+        }
+        let first_hits = ledger_mapping::header_semantic_hits(&compact[index]);
+        let second_hits = ledger_mapping::header_semantic_hits(&compact[index + 1]);
+        let combined_hits = combined_semantic_score(&compact[index], &compact[index + 1]);
+        if second_hits == 0 || combined_hits <= first_hits + 2 {
+            continue;
+        }
+        if compact[index]
+            .iter()
+            .filter(|cell| !cell.trim().is_empty())
+            .count()
+            < 2
+        {
+            continue;
+        }
+        let width = compact[index].len().max(compact[index + 1].len());
+        let merged = merge_headers(&compact[index..=index + 1], width);
+        let mut synthetic = vec![merged];
+        if let Some(next) = compact.get(index + 2) {
+            synthetic.push(next.clone());
+        }
+        let pair_score = ledger_mapping::header_row_score(&synthetic, 0)
+            + (combined_hits.min(16) as f64 / 16.0) * 0.10;
+        if pair_score > best.2 {
+            best = (all[index].number, 2, pair_score);
+        }
+    }
+    (best.0, best.1, row_scores)
 }
 
 fn load_large_xlsx_inspection(source: &SourceSpec, path: &Path) -> Result<Arc<FxTable>, AppError> {
@@ -1160,7 +1231,7 @@ fn load_large_xlsx_inspection(source: &SourceSpec, path: &Path) -> Result<Arc<Fx
     } else {
         sheets.iter().find(|(name, _)| name == &source.sheet)
     };
-    let mut best: Option<(String, Vec<Vec<String>>, usize, f64)> = None;
+    let mut best: Option<(String, Vec<XlsxSampleRow>, usize, f64)> = None;
     for (name, entry) in selected
         .into_iter()
         .chain(sheets.iter())
@@ -1172,8 +1243,13 @@ fn load_large_xlsx_inspection(source: &SourceSpec, path: &Path) -> Result<Arc<Fx
         if rows.is_empty() {
             continue;
         }
-        let header = (0..rows.len().min(30))
-            .map(|index| ledger_mapping::header_row_score(&rows, index))
+        let compact = rows
+            .iter()
+            .take(30)
+            .map(|row| row.cells.clone())
+            .collect::<Vec<_>>();
+        let header = (0..compact.len())
+            .map(|index| ledger_mapping::header_row_score(&compact, index))
             .fold(0.0_f64, f64::max);
         let score = ledger_mapping::sheet_score(header, total_rows, name);
         if best.as_ref().is_none_or(|current| score > current.3) {
@@ -1182,19 +1258,23 @@ fn load_large_xlsx_inspection(source: &SourceSpec, path: &Path) -> Result<Arc<Fx
     }
     let (sheet, all, total_rows, _) =
         best.ok_or_else(|| error("SOURCE_EMPTY", "工作簿中没有可读取的数据Sheet。", None))?;
-    let (auto_header_row, auto_header_depth, scored) = infer_header_layout(&all);
+    let (auto_header_row, auto_header_depth, scored) = infer_xlsx_header_layout(&all);
     let header_row = if source.header_row > 0 {
         source.header_row
     } else {
         auto_header_row
     };
-    let h = header_row.saturating_sub(1);
-    let width = all.iter().map(Vec::len).max().unwrap_or(0);
+    let width = all.iter().map(|row| row.cells.len()).max().unwrap_or(0);
     let inferred_depth = if source.header_row == 0 {
         auto_header_depth
-    } else if h + 1 < all.len()
-        && combined_semantic_score(&all[h], &all[h + 1])
-            > ledger_mapping::header_semantic_hits(&all[h]) + 2
+    } else if all
+        .iter()
+        .find(|row| row.number == header_row)
+        .zip(all.iter().find(|row| row.number == header_row + 1))
+        .is_some_and(|(first, second)| {
+            combined_semantic_score(&first.cells, &second.cells)
+                > ledger_mapping::header_semantic_hits(&first.cells) + 2
+        })
     {
         2
     } else {
@@ -1205,13 +1285,19 @@ fn load_large_xlsx_inspection(source: &SourceSpec, path: &Path) -> Result<Arc<Fx
     } else {
         source.header_depth.clamp(1, 2)
     };
-    let raw_headers = all[h..(h + depth).min(all.len())]
-        .iter()
-        .map(|row| pad(row, width))
+    let raw_headers = (0..depth)
+        .map(|offset| {
+            all.iter()
+                .find(|row| row.number == header_row + offset)
+                .map(|row| pad(&row.cells, width))
+                .unwrap_or_else(|| vec![String::new(); width])
+        })
         .collect::<Vec<_>>();
     let headers = merge_headers(&raw_headers, width);
-    let rows = all[(h + depth).min(all.len())..]
+    let rows = all
         .iter()
+        .filter(|row| row.number >= header_row + depth)
+        .map(|row| &row.cells)
         .filter(|row| row.iter().any(|value| !value.trim().is_empty()))
         .map(|row| pad(row, width))
         .collect::<Vec<_>>();
@@ -1224,7 +1310,7 @@ fn load_large_xlsx_inspection(source: &SourceSpec, path: &Path) -> Result<Arc<Fx
         raw_headers,
         headers,
         rows,
-        row_count: total_rows.saturating_sub(h + depth),
+        row_count: total_rows.saturating_sub(header_row.saturating_sub(1) + depth),
         header_candidates: scored.into_iter().take(3).collect(),
         sampled: true,
     }))
@@ -10261,6 +10347,32 @@ fn xlsx_err(value: XlsxError) -> AppError {
 mod tests {
     use super::*;
 
+    #[test]
+    fn 大文件轻量预览保留被省略空白行后的物理表头行号() {
+        let xml = r#"<worksheet><dimension ref="A1:E7"/><sheetData>
+            <row r="1"><c r="A1" t="inlineStr"><is><t>总账科目</t></is></c></row>
+            <row r="2"><c r="A2" t="inlineStr"><is><t>公司代码</t></is></c></row>
+            <row r="3"><c r="A3" t="inlineStr"><is><t>分类账</t></is></c></row>
+            <row r="4"><c r="A4" t="inlineStr"><is><t></t></is></c></row>
+            <row r="6">
+              <c r="A6" t="inlineStr"><is><t>凭证编号</t></is></c>
+              <c r="B6" t="inlineStr"><is><t>凭证日期</t></is></c>
+              <c r="C6" t="inlineStr"><is><t>本币金额</t></is></c>
+              <c r="D6" t="inlineStr"><is><t>总账科目</t></is></c>
+              <c r="E6" t="inlineStr"><is><t>会计科目</t></is></c>
+            </row>
+            <row r="7"><c r="A7" t="inlineStr"><is><t>6000000028</t></is></c></row>
+          </sheetData></worksheet>"#;
+        let rows = xlsx_sample_rows(xml, &[], 5, &HashSet::new(), false);
+        assert_eq!(
+            rows.iter().map(|row| row.number).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 6, 7]
+        );
+        let (header_row, depth, _) = infer_xlsx_header_layout(&rows);
+        assert_eq!(header_row, 6);
+        assert_eq!(depth, 1);
+    }
+
     fn period_promotion_table(rows: usize, broken: Option<usize>) -> FxTable {
         let headers = vec![
             "科目编码".into(),
@@ -13234,6 +13346,7 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
         .unwrap();
         let je_mapping = &je["suggestedMapping"];
         println!("03 JE 表头行 {} 映射：{je_mapping:#}", je["headerRow"]);
+        assert_eq!(je["headerRow"], json!(6));
         assert_eq!(je_mapping.get("accountCode"), Some(&json!("总账科目")));
         assert_eq!(je_mapping.get("accountName"), Some(&json!("会计科目")));
         assert_eq!(je_mapping.get("functionalCurrency"), Some(&json!("本币")));

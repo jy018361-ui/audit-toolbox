@@ -942,6 +942,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               names={{ tb: "TB", je: "序时账" }}
               reviewing={reviews.reviewing}
               status={reviews.status}
+              results={reviews.results}
               disabled={busy}
               onReviewAll={() =>
                 void reviews.reviewAll({
@@ -951,6 +952,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                         preview: tb.preview,
                         mapping: tbMapping,
                         labels: resolveRoleLabels(tb.roles, TB_LABELS),
+                        tool: "deposit_interest",
                         onApplied: setTbMapping,
                         missingAfter: (mapping) =>
                           depositMissingRequired(
@@ -966,6 +968,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                         preview: je.preview,
                         mapping: jeMapping,
                         labels: resolveRoleLabels(je.roles, JE_LABELS),
+                        tool: "deposit_interest",
                         onApplied: setJeMapping,
                         missingAfter: (mapping) =>
                           depositMissingRequired("je", mapping),
@@ -973,6 +976,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     : undefined,
                 })
               }
+              onUndo={reviews.undoChange}
+              onAccept={reviews.acceptPending}
             />
           )}
 

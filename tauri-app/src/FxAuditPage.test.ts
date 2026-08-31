@@ -338,14 +338,15 @@ describe("fx audit upload and mapping parity", () => {
 
   it("derives the audit year start from the balance sheet date", () =>
     expect(fxReportStart("2024-12-31")).toBe("2024-01-01"));
-  it("一键复核从一次动作同时启动 JE 与 TB 两个复核，单个失败不阻塞另一个", async () => {
-    const started: string[] = [];
-    const call = async (_method: string, params: Record<string, unknown>) => {
-      const kind = String((params as { kind?: unknown }).kind);
-      started.push(kind);
-      if (kind === "je") throw new Error("LLM 暂不可用");
+  it("一键复核用一次联合请求同时复核 JE 与 TB", async () => {
+    const started: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const call = async (method: string, params: Record<string, unknown>) => {
+      started.push({ method, params });
       return {
-        changes: [
+        jeChanges: [
+          { role: "accountCode", suggestedColumn: "科目编码", confidence: 0.9 },
+        ],
+        tbChanges: [
           { role: "accountCode", suggestedColumn: "科目编码", confidence: 0.9 },
         ],
       };
@@ -360,12 +361,13 @@ describe("fx audit upload and mapping parity", () => {
       je: target,
       tb: target,
     });
-    expect(started.sort()).toEqual(["je", "tb"]);
-    // JE 失败：映射原样退回、failed 标记，错误文本可供界面展示。
-    expect(outcomes.je?.failed).toBe(true);
-    expect(outcomes.je?.mapping).toEqual({});
-    expect(outcomes.je?.error).toContain("LLM 暂不可用");
-    // TB 照常完成并应用建议，不受 JE 失败影响。
+    expect(started).toHaveLength(1);
+    expect(started[0].method).toBe("ledger.review_pair_mapping");
+    const payload = started[0].params.payload as Record<string, unknown>;
+    expect(payload.tb).toBeTruthy();
+    expect(payload.je).toBeTruthy();
+    expect(outcomes.je?.failed).toBe(false);
+    expect(outcomes.je?.mapping.accountCode).toBe("科目编码");
     expect(outcomes.tb?.failed).toBe(false);
     expect(outcomes.tb?.appliedCount).toBe(1);
     expect(outcomes.tb?.mapping.accountCode).toBe("科目编码");

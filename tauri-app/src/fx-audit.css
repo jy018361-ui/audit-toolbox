@@ -214,6 +214,53 @@
   background: #fff3d6;
   color: #855400;
 }
+.ledger-review-compact {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+.ledger-review-side {
+  display: grid;
+  gap: 5px;
+}
+.ledger-review-side > strong {
+  color: var(--foreground);
+  font-size: 12px;
+}
+.ledger-review-change {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-height: 26px;
+  color: var(--foreground);
+  font-size: 13px;
+}
+.ledger-review-change em {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #fff3d6;
+  color: #855400;
+  font-size: 11px;
+  font-style: normal;
+}
+.ledger-review-change.pending em {
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+.ledger-review-change button {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.ledger-review-change button:hover {
+  text-decoration: underline;
+}
 .fx-result {
   display: grid;
   gap: 14px;

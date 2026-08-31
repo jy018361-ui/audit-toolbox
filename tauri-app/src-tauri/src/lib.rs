@@ -325,6 +325,20 @@ async fn engine_call(
                 Some(e.to_string()),
             )
         })?
+    } else if method == "ledger.review_pair_mapping" {
+        let settings = storage.settings_get()?;
+        tauri::async_runtime::spawn_blocking(move || {
+            audipick::ledger_pair_review_call(&params, &settings)
+        })
+        .await
+        .map_err(|e| {
+            AppError::new(
+                "LLM_TASK_FAILED",
+                "LLM 联合字段复核异常结束。",
+                true,
+                Some(e.to_string()),
+            )
+        })?
     } else if matches!(
         method.as_str(),
         "fx.review_je_mapping" | "fx.review_tb_mapping"
@@ -959,10 +973,13 @@ pub fn engine_call_for_test(
     if method == "ledger.check_mapping_alignment" {
         return fx::check_mapping_alignment(&params);
     }
-    if method == "ledger.review_mapping" {
+    if method == "ledger.review_mapping" || method == "ledger.review_pair_mapping" {
         let dirs = project_dirs()?;
         let storage = Storage::new(dirs.data_local_dir())?;
         let settings = storage.settings_get()?;
+        if method == "ledger.review_pair_mapping" {
+            return audipick::ledger_pair_review_call(&params, &settings);
+        }
         let kind = params
             .get("kind")
             .and_then(serde_json::Value::as_str)

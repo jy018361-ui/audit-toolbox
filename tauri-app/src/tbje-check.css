@@ -36,6 +36,34 @@
   border-radius: var(--r-md);
   background: var(--surface);
 }
+.tbje-llm-action {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+.tbje-llm-action span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.tbje-group-llm-result {
+  display: grid;
+  gap: 4px;
+  padding: 9px 14px 10px 154px;
+  border-top: 1px dashed var(--border);
+  background: color-mix(in srgb, var(--primary) 3%, var(--card));
+  font-size: 12px;
+}
+.tbje-group-llm-result > span {
+  color: var(--muted-foreground);
+}
+.tbje-group-llm-result > span.failed {
+  color: var(--destructive);
+}
+.tbje-group-llm-result .ledger-review-compact {
+  margin-top: 3px;
+}
 
 .tbje-pairing-head,
 .tbje-group-row {

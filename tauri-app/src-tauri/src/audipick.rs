@@ -362,7 +362,7 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
 /// 两张表共用的复核纪律。**只放对 TB 与 JE 都成立的规则**——
 /// 各自的角色清单与形态规则分别放在 [`REVIEW_JE`] 与 [`REVIEW_TB`] 里，
 /// 免得复核一张表时眼前摆着另一张表的规矩。
-const REVIEW_COMMON: &str = "只能使用输入 availableRoles 中列出的角色——它是本工具启用的角色清单，没列出的角色即使表里有对应的列也不要提。输入的 currentForm 是脚本按整组匹配判出的账表形态。**complete 为 true 时，构成该形态的那些槽位已经成立，一律不要改动**——净额列里是正数还是自带正负号都不影响判定，借贷符号口径由数据配平判定，不由列名判定；表里另有一列看起来更像净额，也不构成改动理由。**两种映射都能成立时一律维持现状，不要为了让它更好看而改**。complete 只说明该形态自身的槽位成立，不代表整张表的映射已经完备——availableRoles 里本工具需要、currentMapping 还缺着的角色（比如原币币种、原币净额），仍必须照样补齐。complete 为 false 时，优先补齐 currentForm.missingSlots 里点名缺失的槽位。除此之外，必须主动补齐 currentMapping 中缺失、但可由 headers 与 sampleRows 判断出来的角色，不得仅复核已有映射。只能使用输入 headers 中真实存在的列，不得虚构列名。双语表头（如「科目描述 Description」「过账日期 Posting Date」）按其中的中文段判断角色。一列只承载一个语义，不能把同一列同时映射到两个角色——唯一的例外是下述「编码与名称写在同一格」的科目列。判断依据必须落在 sampleRows 的实际取值上：每提出一个 change，先从 sampleRows 里随意取三五行看该列的真实内容，若这几行取值与该角色应有的形态不符（科目编码列应是稳定的数字或字母数字编码，科目名称列应是可读文本，币种列应是三位 ISO 代码，金额列应是数值），就不要提出该 change。accountCode 与 accountName 是两个彼此独立的角色，不能互换：编码给 accountCode，名称/文本给 accountName。**编码与名称写在同一格**是例外情形（`1001010000:库存现金-人民币`、`1001/库存现金`、`1001_现金`，也有编码后面接反斜杠再接多级名称的写法——分隔符是斜杠、冒号、下划线、反斜杠、竖线之一，前半段是一串数字或字母数字编码）：这一列应**同时映射为 accountCode 与 accountName 两个角色**（脚本自动映射正是这么做的），既不要因为这列里有名称就改判成纯 accountName，也不要把其中任何一个角色挪走或删掉。务必与**层级名称拼接**区分开——`交易性金融资产_结构性存款`、`管理费用_研发费用_水电气费`，以及用反斜杠拼起来的「银行存款、在财务公司存款、活期」这种，前半段是上级科目名不是编码，这些整列属于 accountName。科目余额表与序时账是同一套账，同名角色必须同口径——两边的 accountCode 必须是同一种科目编码，accountName 同理。`抵销科目`、`统驭科目`、`对方科目`、`往来科目`、`预算科目` 记的是对手方或参考科目，取值同样是一串科目编码，跟本方科目长得一模一样，但它们绝不是 accountCode，也不是 accountName。entity 是记账主体（公司代码、核算主体、账套公司），绝不是交易对手方、往来单位（往來單位、Counterparty）、客户（客戶）、供应商（供應商）这类对手方字段，也不是制单人、录入人、审核人、过账人这类操作员；没有明确的主体列时让 entity 空缺，不得拿对手方字段凑数。集团货币／报告货币（Group Currency、集团货币金额）是第三套口径，既不是本位币也不是原币，对应的金额列与币种列一律不映射到任何角色。changes 数组只放需要修改或补充的条目：每条的 suggestedColumn 必须是输入 headers 中真实存在的列名，且与该角色当前的 currentColumn 不同（当前为空时是补缺）。只是确认现有映射正确、确认某列不存在、或没有实际变更的，一律不要输出该条——空缺本身就是正确状态，不要为了表态而造条目。suggestedColumn 为空或置信度低于 0.5 的条目没有意义，不要输出——拿不准就不输出。reason 与 suggestedColumn 必须指向同一个结论：reason 说该列不该映射，就不能输出把它映射上去的条目。同一列在 changes 里最多出现一次。『整列同值』的意思是全列每一行取值完全相同；只要出现两种以上取值，该列就在逐行区分交易或账户，绝不是本位币列。优先建议原始数据列：由其他列推算出的公式辅助列（如按方向列把金额改写成的「借正贷负」列、用日期与凭证号拼出的唯一码列）不要抢原始列的角色。不要计算金额、汇率或业务分类，只管映射。";
+const REVIEW_COMMON: &str = "只能使用输入 availableRoles 中列出的角色——它是本工具启用的角色清单，没列出的角色即使表里有对应的列也不要提。输入的 currentForm 是脚本按整组匹配判出的账表形态。**complete 为 true 时，构成该形态的那些槽位已经成立，一律不要改动**——净额列里是正数还是自带正负号都不影响判定，借贷符号口径由数据配平判定，不由列名判定；表里另有一列看起来更像净额，也不构成改动理由。**两种映射都能成立时一律维持现状，不要为了让它更好看而改**。complete 只说明该形态自身的槽位成立，不代表整张表的映射已经完备——availableRoles 里本工具需要、currentMapping 还缺着的角色（比如原币币种、原币净额），仍必须照样补齐。complete 为 false 时，优先补齐 currentForm.missingSlots 里点名缺失的槽位。除此之外，必须主动补齐 currentMapping 中缺失、但可由 headers 与 sampleRows 判断出来的角色，不得仅复核已有映射。只能使用输入 headers 中真实存在的列，不得虚构列名。双语表头（如「科目描述 Description」「过账日期 Posting Date」）按其中的中文段判断角色。一列只承载一个语义，不能把同一列同时映射到两个角色——唯一的例外是下述「编码与名称写在同一格」的科目列。判断依据必须落在 sampleRows 的实际取值上：每提出一个 change，先从 sampleRows 里随意取三五行看该列的真实内容，若这几行取值与该角色应有的形态不符（科目编码列应是稳定的数字或字母数字编码，科目名称列应是可读文本，币种列应是三位 ISO 代码，金额列应是数值），就不要提出该 change。accountCode 与 accountName 是两个彼此独立的角色，不能互换：编码给 accountCode，名称/文本给 accountName。**编码与名称写在同一格**是例外情形（`1001010000:库存现金-人民币`、`1001/库存现金`、`1001_现金`，也有编码后面接反斜杠再接多级名称的写法——分隔符是斜杠、冒号、下划线、反斜杠、竖线之一，前半段是一串数字或字母数字编码）：这一列应**同时映射为 accountCode 与 accountName 两个角色**（脚本自动映射正是这么做的），既不要因为这列里有名称就改判成纯 accountName，也不要把其中任何一个角色挪走或删掉。务必与**层级名称拼接**区分开——`交易性金融资产_结构性存款`、`管理费用_研发费用_水电气费`，以及用反斜杠拼起来的「银行存款、在财务公司存款、活期」这种，前半段是上级科目名不是编码，这些整列属于 accountName。科目余额表与序时账是同一套账，同名角色必须同口径——两边的 accountCode 必须是同一种科目编码，accountName 同理。`抵销科目`、`统驭科目`、`对方科目`、`往来科目`、`预算科目` 记的是对手方或参考科目，取值同样是一串科目编码，跟本方科目长得一模一样，但它们绝不是 accountCode，也不是 accountName。entity 是记账主体（公司代码、核算主体、账套公司），绝不是交易对手方、往来单位（往來單位、Counterparty）、客户（客戶）、供应商（供應商）这类对手方字段，也不是制单人、录入人、审核人、过账人这类操作员；没有明确的主体列时让 entity 空缺，不得拿对手方字段凑数。集团货币／报告货币（Group Currency、集团货币金额）是第三套口径，既不是本位币也不是原币，对应的金额列与币种列一律不映射到任何角色。changes 数组只放需要修改或补充的条目：每条的 suggestedColumn 必须是输入 headers 中真实存在的列名，且与该角色当前的 currentColumn 不同（当前为空时是补缺）。只是确认现有映射正确、确认某列不存在、或没有实际变更的，一律不要输出该条——空缺本身就是正确状态，不要为了表态而造条目。suggestedColumn 为空的条目不要输出；低于 0.6 的有效建议可以输出供人工确认，但绝不能表述成确定结论。reason 与 suggestedColumn 必须指向同一个结论：reason 说该列不该映射，就不能输出把它映射上去的条目。同一列在 changes 里最多出现一次。『整列同值』的意思是全列每一行取值完全相同；只要出现两种以上取值，该列就在逐行区分交易或账户，绝不是本位币列。优先建议原始数据列：由其他列推算出的公式辅助列（如按方向列把金额改写成的「借正贷负」列、用日期与凭证号拼出的唯一码列）不要抢原始列的角色。不要计算金额、汇率或业务分类，只管映射。";
 
 /// 序时账专属：16 个角色，一行是一条分录。
 const REVIEW_JE: &str = "角色仅可为 entity、date、id、voucherType、accountCode、accountName、summary、currency、functionalCurrency、direction、functionalAmount、functionalDebit、functionalCredit、foreignAmount、foreignDebit、foreignCredit。id 与 accountName 可以映射多列：Oracle 的凭证键要 Batch＋JE Name 两列组合才唯一，少一列就串号；科目名称可能拆成一级、二级两列。其余角色各占一列。多列仅限上述两种真正的拆分：名称只组合科目名称自己的层级列（一级／二级／三级），凭证号只组合构成凭证键的列（如 Batch＋JE Name、凭证字＋凭证号）；冲销凭证号、被冲销凭证号记录的是「这张凭证冲掉了谁」，不是凭证键，预算科目、对方／往来科目也不是本方科目名称——这些列绝不并入多列。voucherType 只认独立成列的凭证类型（SAP 的 BLART、Document Type、凭证类别这类单独一列）；「凭证字＋号合成一列」（如 记-0001、记0001、记2025-0001）整列就是凭证识别字段 id，绝不要建议把这类合成列同时或改为映射 voucherType，也不要建议从中拆出类型。借贷方向只有 direction 一个角色，原币与本位币共用同一列——一条分录的借贷方向对两个口径必然相同，不存在原币记借方而本位币记贷方的情况。金额有三种记法，同一口径内只能成立一种：单列净额（借正贷负）、借方与贷方两列、净额加方向列。两个口径各自独立判定：原币可以是借贷分列而本位币是净额。借方与贷方两列已经成立时，不要再建议把借方或贷方列改映射为净额角色；净额列（无论正负号是否随方向列拆出）已经成立时，也不要建议把同一净额列同时映射为借方与贷方两个角色——三种记法互斥，多选反而破坏方案。币种**一律分两列判定，与科目余额表同口径**：currency 是原币币种，登记这笔分录按什么币记账（凭证货币、Document Currency Key、Enter Currency），逐行可变；functionalCurrency 是本位币币种，登记主体的记账本位币（公司代码货币、Company Code Currency Key、Ledger Currency），整列同值、不区分行。两者都是**币种代码列**（存 CNY／USD 这类三位代码），不是金额列，别跟本位币金额、原币金额混。两者都存在时不要互换。只有一列时先看列名：凭证货币命名的列（货币、凭证货币、交易币种、Document Currency、Enter Currency）就是 currency——整列只剩一种代码只是「整本账都是本币业务」的正常形态，不是本位币列的证据；本位币命名的列（本位币、本币、公司代码货币、总账货币、Ledger Currency、Company Code Currency）才是 functionalCurrency，整列同一个代码的「本币」「本币币种」列绝不能指给 currency。列名两头都不沾的，再按取值分布判：整列同一个代码且几乎不空的是 functionalCurrency，出现两种以上代码或大量空白的是 currency。常用表头示例：会计科目、总账科目、总帐科目（「帐」是「账」的异体字，两种写法都有）属于 accountCode，科目文本／科目全名／科目名称一级／科目名称二级属于 accountName，借贷标志（取值 S／H）属于 direction，唯一码（日期与凭证号已经拼好的一列）属于 id，凭证货币属于 currency，凭证金额、凭证货币金额属于 foreignAmount，本位币金额属于 functionalAmount，借贷属于 direction。列名只是线索、取值才是判据：「会计科目」「总账科目」命名的列在某些导出里放的是名称文本（如 库存现金-人民币），这时它是 accountName；取值是纯编码时才是 accountCode。过账代码（Posting Key，取值 40、50、01 这类数字过账码）不是借贷方向——统驭过账码没有借贷含义，绝不能映射为 direction。金额方案仅可为 signed、direction、debit_credit。";
@@ -432,6 +432,147 @@ pub(crate) fn ledger_review_call(
     ledger_mapping_llm_call(kind, params, settings)
 }
 
+/// 真正的 TB＋JE 联合映射复核。旧的 `ledger_review_call` 继续服务只上传一侧的
+/// 页面和兼容入口；同时存在 TB、JE 时，公共前端统一走这里，让模型在一次请求里
+/// 看到同一账套两边的字段、样例、当前形态与 Coding 已验证的处理事实。
+pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Result<Value, AppError> {
+    let llm = settings
+        .get("llm")
+        .ok_or_else(|| error("LLM_NOT_CONFIGURED", "请先在工具箱设置中配置 LLM。", None))?;
+    if !llm.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(error("LLM_DISABLED", "工具箱中的 LLM 尚未启用。", None));
+    }
+    let root = params.get("payload").unwrap_or(params);
+    let mut tb = root.get("tb").cloned().unwrap_or(Value::Null);
+    let mut je = root.get("je").cloned().unwrap_or(Value::Null);
+    if !tb.is_object() && !je.is_object() {
+        return Err(error(
+            "LLM_PAYLOAD_INVALID",
+            "联合复核至少需要一份 TB 或 JE 字段信息。",
+            None,
+        ));
+    }
+    if tb.is_object() {
+        inject_current_form(&mut tb, "tb");
+        inject_engine_facts(&mut tb);
+    }
+    if je.is_object() {
+        inject_current_form(&mut je, "je");
+        inject_engine_facts(&mut je);
+    }
+    let prompt = format!(
+        "你是审计工具箱公共 TB＋JE 联合字段映射复核器。TB 与 JE 属于同一账套，必须在一次判断中同时复核。\
+         只输出严格 JSON：{{\"task\":\"ledger_pair_mapping\",\"tbChanges\":[{{\"role\":string,\"currentColumn\":string,\"suggestedColumn\":string,\"confidence\":number,\"reason\":string}}],\
+         \"jeChanges\":[{{\"role\":string,\"currentColumn\":string,\"suggestedColumn\":string,\"confidence\":number,\"reason\":string}}],\
+         \"pairFindings\":[{{\"type\":string,\"confidence\":number,\"reason\":string}}],\"summary\":string}}。\
+         TB 建议只能使用 tb.availableRoles 与 tb.headers，JE 建议只能使用 je.availableRoles 与 je.headers。\
+         两侧 engineFacts 是 Coding 根据样例验证的处理事实；protected=true 的事实不得修改。\
+         同一源列可合法承担 engineFacts.mappedRoles 中列出的多个角色，Coding 会在后续完成拆分、组合或标准化。\
+         联合比较 accountCode/accountName 的标题语义、样例形态与两侧口径；证据接近时维持当前映射，不要为了换成看起来更好的列而改。\
+         changes 只放真实调整，确认现状正确不要造条目。{REVIEW_COMMON}\
+         对 TB：{REVIEW_TB}\
+         对 JE：{REVIEW_JE}"
+    );
+    let payload = json!({
+        "tool": root.get("tool").cloned().unwrap_or_else(|| json!("ledger")),
+        "pairLabel": root.get("pairLabel").cloned().unwrap_or(Value::Null),
+        "tb": tb,
+        "je": je,
+    });
+    let content = request_llm(llm, &prompt, &payload.to_string(), None)?;
+    let parsed = parse_json_content(&content);
+    if !parsed.is_object() {
+        return Err(error(
+            "LLM_RESPONSE_INVALID",
+            "LLM 没有返回有效的 TB＋JE 联合复核结果。",
+            None,
+        ));
+    }
+    let mut output = json!({
+        "task": "ledger_pair_mapping",
+        "tbChanges": [],
+        "jeChanges": [],
+        "pairFindings": parsed.get("pairFindings")
+            .or_else(|| parsed.get("pair_findings"))
+            .cloned().unwrap_or_else(|| json!([])),
+        "summary": parsed.get("summary").cloned().unwrap_or_else(|| json!("")),
+    });
+    for (key, aliases, side, kind) in [
+        (
+            "tbChanges",
+            ["tbChanges", "tb_changes"],
+            payload.get("tb"),
+            "tb",
+        ),
+        (
+            "jeChanges",
+            ["jeChanges", "je_changes"],
+            payload.get("je"),
+            "je",
+        ),
+    ] {
+        let Some(side) = side.filter(|value| value.is_object()) else {
+            continue;
+        };
+        let changes = aliases
+            .iter()
+            .find_map(|alias| parsed.get(alias))
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        let mut wrapper = json!({"changes": changes});
+        sanitize_mapping_changes(&mut wrapper, side, kind);
+        output[key] = wrapper["changes"].clone();
+    }
+    Ok(output)
+}
+
+/// 把 Coding 已验证的复合列能力写成结构化事实。LLM 得到的是稳定业务合同而不是
+/// Rust 源码；卫生过滤稍后也读取同一事实，模型即便违反提示也改不动保护映射。
+fn inject_engine_facts(payload: &mut Value) {
+    let headers: Vec<String> = payload
+        .get("headers")
+        .and_then(Value::as_array)
+        .map(|all| {
+            all.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let rows = sample_rows_of(payload);
+    let combined = combined_account_headers(&headers, rows.as_deref());
+    let mapping = payload.get("currentMapping").and_then(Value::as_object);
+    let mapped_to = |role: &str, column: &str| {
+        mapping
+            .and_then(|value| value.get(role))
+            .is_some_and(|value| match value {
+                Value::String(one) => one.trim() == column,
+                Value::Array(all) => all
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|one| one.trim() == column),
+                _ => false,
+            })
+    };
+    let facts: Vec<Value> = combined
+        .into_iter()
+        .filter(|column| mapped_to("accountCode", column) && mapped_to("accountName", column))
+        .map(|column| {
+            json!({
+                "sourceColumn": column,
+                "strategy": "split_account_code_and_name",
+                "mappedRoles": ["accountCode", "accountName"],
+                "verified": true,
+                "protected": true,
+                "explanation": "该列由 Coding 拆分为科目编码和科目名称，两个角色合法共用同一原始列"
+            })
+        })
+        .collect();
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("engineFacts".into(), Value::Array(facts));
+    }
+}
+
 fn ledger_mapping_llm_call(
     kind: &str,
     params: &Value,
@@ -480,6 +621,7 @@ fn ledger_mapping_llm_call(
         }
     }
     inject_current_form(&mut payload, if is_tb { "tb" } else { "je" });
+    inject_engine_facts(&mut payload);
     let payload = &payload;
     let content = request_llm(llm, &prompt, &payload.to_string(), None)?;
     let mut value = parse_json_content(&content);
@@ -569,6 +711,26 @@ fn sanitize_change_list(value: &mut Value, payload: &Value, kind: &str, key: &st
     // 样例里判得出的「编码＋名称混写」列：这些列允许 accountCode 与
     // accountName 共用（见下方 occupied 检查的豁免）。
     let combined_account_columns = combined_account_headers(&headers, sample_rows.as_deref());
+    let protected_sources: Vec<(String, String)> = payload
+        .get("engineFacts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|fact| fact.get("protected").and_then(Value::as_bool) == Some(true))
+        .flat_map(|fact| {
+            let source = fact
+                .get("sourceColumn")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            fact.get("mappedRoles")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(move |role| (role.to_owned(), source.clone()))
+        })
+        .collect();
     let mut seen_columns: Vec<String> = Vec::new();
     changes.retain(|change| {
         let Some(suggested) = change.get("suggestedColumn").and_then(Value::as_str) else {
@@ -589,13 +751,23 @@ fn sanitize_change_list(value: &mut Value, payload: &Value, kind: &str, key: &st
             .get("confidence")
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
-        // 列名必须是表里真实存在的、置信够用、且全批里同一列只出现一次。
+        // Coding 已验证并保护的映射属于引擎事实。模型可以在 pairFindings 里提示，
+        // 但不能把其中任一角色从受保护源列挪走。
+        if protected_sources.iter().any(|(protected_role, source)| {
+            protected_role == role
+                && suggested != source
+                && columns_of(role).iter().any(|column| column == source)
+        }) {
+            return false;
+        }
+        // 列名必须是表里真实存在的、有有效置信度、且全批里同一列只出现一次。
         // 实测模型会输出"reason 说不该映射、置信 0.1 却仍然映射"的自相矛盾行，
-        // 低于 0.5 的建议没有应用价值，一并丢弃。
+        // 0～0.59 的有效建议要留给前端人工确认；零值或越界值才是无效输出。
         if role.is_empty()
             || suggested.is_empty()
             || !(headers.is_empty() || headers.iter().any(|header| header.trim() == suggested))
-            || confidence < 0.5
+            || confidence <= 0.0
+            || confidence > 1.0
             || seen_columns.iter().any(|column| column == suggested)
         {
             return false;
@@ -1807,5 +1979,61 @@ mod mapping_prompt_tests {
                     || change["role"].as_str() == Some("accountName")
             )
         );
+    }
+
+    #[test]
+    fn coding识别的编码名称合并列会成为受保护引擎事实() {
+        let mut payload = json!({
+            "headers": ["会计科目", "科目描述"],
+            "sampleRows": [
+                ["1001/库存现金", "库存现金"],
+                ["1002/银行存款", "银行存款"],
+                ["1122/应收账款", "应收账款"],
+                ["2202/应付账款", "应付账款"]
+            ],
+            "currentMapping": {
+                "accountCode": "会计科目",
+                "accountName": "会计科目"
+            }
+        });
+
+        inject_engine_facts(&mut payload);
+
+        let fact = &payload["engineFacts"][0];
+        assert_eq!(fact["strategy"], "split_account_code_and_name");
+        assert_eq!(fact["sourceColumn"], "会计科目");
+        assert_eq!(fact["protected"], true);
+        assert_eq!(fact["verified"], true);
+    }
+
+    #[test]
+    fn llm不能挪走coding保护的编码名称合并列() {
+        let mut payload = json!({
+            "headers": ["会计科目", "科目描述"],
+            "sampleRows": [
+                ["1001/库存现金", "库存现金"],
+                ["1002/银行存款", "银行存款"],
+                ["1122/应收账款", "应收账款"],
+                ["2202/应付账款", "应付账款"]
+            ],
+            "currentMapping": {
+                "accountCode": "会计科目",
+                "accountName": "会计科目"
+            }
+        });
+        inject_engine_facts(&mut payload);
+        let mut value = json!({
+            "changes": [{
+                "role": "accountName",
+                "currentColumn": "会计科目",
+                "suggestedColumn": "科目描述",
+                "confidence": 0.99,
+                "reason": "科目描述更像名称"
+            }]
+        });
+
+        sanitize_mapping_changes(&mut value, &payload, "tb");
+
+        assert!(value["changes"].as_array().unwrap().is_empty(), "{value:?}");
     }
 }

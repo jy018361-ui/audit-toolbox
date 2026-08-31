@@ -185,6 +185,20 @@ export type LedgerChange = {
   reason?: string;
 };
 
+export type LedgerPairFinding = {
+  type?: string;
+  confidence?: number;
+  reason?: string;
+};
+
+export type LedgerPlannedChange = LedgerChange & {
+  /** 页面展示与撤销使用实际映射值，不信任模型自报的 currentColumn。 */
+  currentColumn: string;
+  attention: boolean;
+  beforeValue?: string | string[];
+  label: string;
+};
+
 /**
  * 公共账表引擎中允许由多列共同组成的角色。
  *
@@ -253,7 +267,8 @@ export async function applyLedgerReviewToDict(
   labels: Record<string, string>,
 ): Promise<{
   mapping: Record<string, string | string[]>;
-  applied: LedgerChange[];
+  applied: LedgerPlannedChange[];
+  pending: LedgerPlannedChange[];
 }> {
   const response = (await call("ledger.review_mapping", {
     kind,
@@ -264,18 +279,50 @@ export async function applyLedgerReviewToDict(
       availableRoles: Object.keys(labels),
     },
   })) as { changes?: LedgerChange[] };
+  return planLedgerChanges(headers, sampleRows, current, labels, response.changes ?? []);
+}
+
+const ledgerMappingText = (value: string | string[] | undefined): string =>
+  Array.isArray(value) ? value.filter(Boolean).join("＋") : value?.trim() || "未映射";
+
+/** 后端完成提示词与硬规则过滤后，前端统一执行 60% 应用、待确认与撤销计划。 */
+export function planLedgerChanges(
+  headers: string[],
+  sampleRows: string[][],
+  current: Record<string, string | string[]>,
+  labels: Record<string, string>,
+  changes: LedgerChange[],
+): {
+  mapping: Record<string, string | string[]>;
+  applied: LedgerPlannedChange[];
+  pending: LedgerPlannedChange[];
+} {
   const next = { ...current };
-  const applied: LedgerChange[] = [];
+  const applied: LedgerPlannedChange[] = [];
+  const pending: LedgerPlannedChange[] = [];
   // 「编码＋名称混写」的列允许科目编码与科目名称共用（与后端同口径豁免）。
   const combinedOf = (column: string): boolean => {
     const index = headers.indexOf(column);
     return index >= 0 && isCombinedAccountValues(sampleRows.map((row) => row[index] ?? ""));
   };
-  for (const change of response.changes ?? []) {
+  for (const change of changes) {
     const column = change?.suggestedColumn?.trim();
     if (!column || !(change.role in labels) || !headers.includes(column))
       continue;
-    if ((change.confidence ?? 1) < AUTO_APPLY_MIN) continue;
+    const beforeValue = next[change.role];
+    const planned: LedgerPlannedChange = {
+      ...change,
+      suggestedColumn: column,
+      currentColumn: ledgerMappingText(beforeValue),
+      beforeValue: Array.isArray(beforeValue) ? [...beforeValue] : beforeValue,
+      attention:
+        change.confidence !== undefined && change.confidence < 0.7,
+      label: labels[change.role] ?? change.role,
+    };
+    if (change.confidence === undefined || change.confidence < AUTO_APPLY_MIN) {
+      pending.push(planned);
+      continue;
+    }
     // 同一列已被别的角色占用就跳过——一列只承载一个语义。
     if (
       Object.entries(next).some(
@@ -295,9 +342,9 @@ export async function applyLedgerReviewToDict(
     next[change.role] = LEDGER_MULTI_COLUMN_ROLES.has(change.role)
       ? appendMappingColumn(next[change.role], column)
       : column;
-    applied.push(change);
+    applied.push(planned);
   }
-  return { mapping: next, applied };
+  return { mapping: next, applied, pending };
 }
 
 export const ledgerErrorText = (error: unknown) => {
@@ -320,6 +367,8 @@ export type LedgerReviewTarget = {
   preview: string[][];
   mapping: Record<string, string | string[]>;
   labels: Record<string, string>;
+  tool?: string;
+  pairLabel?: string;
 };
 /** 一键复核里单个文件的结果：应用后的映射、采纳的建议数与失败原因。 */
 export type LedgerReviewOutcome = {
@@ -327,6 +376,9 @@ export type LedgerReviewOutcome = {
   appliedCount: number;
   failed: boolean;
   error: string;
+  applied: LedgerPlannedChange[];
+  pending: LedgerPlannedChange[];
+  pairFindings: LedgerPairFinding[];
 };
 /**
  * 一键复核 TB＋JE 的共享引擎。汇兑损益与存款利息此前各写一套复核入口，
@@ -339,37 +391,92 @@ export async function applyLedgerReviewsTogether(
   targets: Partial<Record<"je" | "tb", LedgerReviewTarget>>,
 ): Promise<Partial<Record<"je" | "tb", LedgerReviewOutcome>>> {
   const kinds = (["je", "tb"] as const).filter((kind) => targets[kind]);
-  const outcomes = await Promise.all(
-    kinds.map(async (kind) => {
-      const target = targets[kind]!;
-      try {
-        const { mapping, applied } = await applyLedgerReviewToDict(
-          call,
-          kind,
-          target.headers,
-          target.preview,
-          target.mapping,
-          target.labels,
-        );
-        return [
-          kind,
-          { mapping, appliedCount: applied.length, failed: false, error: "" },
-        ] as const;
-      } catch (e) {
-        // 复核失败不阻塞：映射原样退回，另一个文件照常复核、照常应用建议。
-        return [
-          kind,
-          {
-            mapping: target.mapping,
-            appliedCount: 0,
-            failed: true,
-            error: ledgerErrorText(e),
+  if (kinds.length === 2) {
+    try {
+      const response = (await call("ledger.review_pair_mapping", {
+        payload: {
+          tool: targets.tb?.tool ?? targets.je?.tool ?? "ledger",
+          pairLabel: targets.tb?.pairLabel ?? targets.je?.pairLabel,
+          tb: {
+            headers: targets.tb!.headers,
+            sampleRows: targets.tb!.preview.slice(0, 8),
+            currentMapping: targets.tb!.mapping,
+            availableRoles: Object.keys(targets.tb!.labels),
           },
-        ] as const;
-      }
-    }),
-  );
-  return Object.fromEntries(outcomes);
+          je: {
+            headers: targets.je!.headers,
+            sampleRows: targets.je!.preview.slice(0, 8),
+            currentMapping: targets.je!.mapping,
+            availableRoles: Object.keys(targets.je!.labels),
+          },
+        },
+      })) as {
+        tbChanges?: LedgerChange[];
+        jeChanges?: LedgerChange[];
+        pairFindings?: LedgerPairFinding[];
+      };
+      const findings = response.pairFindings ?? [];
+      return Object.fromEntries(
+        kinds.map((kind) => {
+          const target = targets[kind]!;
+          const plan = planLedgerChanges(
+            target.headers,
+            target.preview,
+            target.mapping,
+            target.labels,
+            kind === "tb" ? response.tbChanges ?? [] : response.jeChanges ?? [],
+          );
+          return [kind, {
+            mapping: plan.mapping,
+            appliedCount: plan.applied.length,
+            failed: false,
+            error: "",
+            applied: plan.applied,
+            pending: plan.pending,
+            pairFindings: findings,
+          }] as const;
+        }),
+      );
+    } catch (e) {
+      const error = ledgerErrorText(e);
+      return Object.fromEntries(kinds.map((kind) => [kind, {
+        mapping: targets[kind]!.mapping,
+        appliedCount: 0,
+        failed: true,
+        error,
+        applied: [],
+        pending: [],
+        pairFindings: [],
+      }]));
+    }
+  }
+  const kind = kinds[0];
+  if (!kind) return {};
+  const target = targets[kind]!;
+  try {
+    const { mapping, applied, pending } = await applyLedgerReviewToDict(
+      call, kind, target.headers, target.preview, target.mapping, target.labels,
+    );
+    return { [kind]: {
+      mapping,
+      appliedCount: applied.length,
+      failed: false,
+      error: "",
+      applied,
+      pending,
+      pairFindings: [],
+    } };
+  } catch (e) {
+    return { [kind]: {
+      mapping: target.mapping,
+      appliedCount: 0,
+      failed: true,
+      error: ledgerErrorText(e),
+      applied: [],
+      pending: [],
+      pairFindings: [],
+    } };
+  }
 }
 
 export function setKanzhangMapping(

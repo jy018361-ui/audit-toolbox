@@ -865,6 +865,7 @@ export function FaTbJePage() {
             names={{ tb: "TB", je: "JE" }}
             reviewing={reviews.reviewing}
             status={reviews.status}
+            results={reviews.results}
             disabled={busy}
             onReviewAll={() =>
               void reviews.reviewAll({
@@ -877,6 +878,7 @@ export function FaTbJePage() {
                         inspects.tb.roles,
                         TB_LABELS,
                       ),
+                      tool: "fa_tbje",
                       onApplied: (next) =>
                         setMappings((value) => ({ ...value, tb: next })),
                       missingAfter: (mapping) =>
@@ -892,6 +894,7 @@ export function FaTbJePage() {
                         inspects.je.roles,
                         JE_LABELS,
                       ),
+                      tool: "fa_tbje",
                       onApplied: (next) =>
                         setMappings((value) => ({ ...value, je: next })),
                       missingAfter: (mapping) =>
@@ -900,6 +903,8 @@ export function FaTbJePage() {
                   : undefined,
               })
             }
+            onUndo={reviews.undoChange}
+            onAccept={reviews.acceptPending}
           />
           {(["tb", "je"] as const).map(
             (kind) =>

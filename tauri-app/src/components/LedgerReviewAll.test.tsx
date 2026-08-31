@@ -82,11 +82,8 @@ describe("共享账表复核生命周期", () => {
   });
 
   it("移除一个文件只丢弃该文件结果，另一文件仍可完成", async () => {
-    const je = deferred(),
-      tb = deferred();
-    const call = vi.fn((_method, params) =>
-      params.kind === "je" ? je.promise : tb.promise,
-    );
+    const pair = deferred();
+    const call = vi.fn(() => pair.promise);
     const jeApplied = vi.fn(),
       tbApplied = vi.fn();
     const { result, rerender } = renderHook(
@@ -102,8 +99,7 @@ describe("共享账表复核生命周期", () => {
     });
     rerender({ source: "" });
     await act(async () => {
-      je.resolve({ changes: [] });
-      tb.resolve({ changes: [] });
+      pair.resolve({ jeChanges: [], tbChanges: [] });
       await pending;
     });
     expect(jeApplied).not.toHaveBeenCalled();
@@ -111,12 +107,9 @@ describe("共享账表复核生命周期", () => {
     expect(Object.keys(await pending)).toEqual(["tb"]);
   });
 
-  it("单边失败不还原映射，不影响另一边成功", async () => {
-    const je = deferred(),
-      tb = deferred();
-    const call = vi.fn((_method, params) =>
-      params.kind === "je" ? je.promise : tb.promise,
-    );
+  it("联合请求失败时两边都保留 Coding 映射且不阻塞页面", async () => {
+    const pair = deferred();
+    const call = vi.fn(() => pair.promise);
     const jeApplied = vi.fn(),
       tbApplied = vi.fn();
     const { result } = renderHook(() => useLedgerDictReviews(call));
@@ -128,14 +121,51 @@ describe("共享账表复核生命周期", () => {
       });
     });
     await act(async () => {
-      je.reject(new Error("复核不可用"));
-      tb.resolve({ changes: [] });
+      pair.reject(new Error("复核不可用"));
       await pending;
     });
     expect(jeApplied).not.toHaveBeenCalled();
-    expect(tbApplied).toHaveBeenCalledOnce();
+    expect(tbApplied).not.toHaveBeenCalled();
     expect(result.current.status.je).toContain("复核不可用");
+    expect(result.current.status.tb).toContain("复核不可用");
     expect(result.current.reviewing).toEqual({ je: false, tb: false });
+  });
+
+  it("TB 与 JE 同时存在时只发一次真正的联合请求", async () => {
+    const call = vi.fn().mockResolvedValue({
+      tbChanges: [{
+        role: "accountCode",
+        suggestedColumn: "TB新编码",
+        confidence: 0.82,
+      }],
+      jeChanges: [{
+        role: "accountCode",
+        suggestedColumn: "JE新编码",
+        confidence: 0.65,
+      }],
+    });
+    const tbApplied = vi.fn(), jeApplied = vi.fn();
+    const { result } = renderHook(() => useLedgerDictReviews(call));
+    await act(async () => {
+      await result.current.reviewAll({
+        tb: {
+          ...slot(tbApplied, "TB旧编码"),
+          headers: ["TB旧编码", "TB新编码"],
+        },
+        je: {
+          ...slot(jeApplied, "JE旧编码"),
+          headers: ["JE旧编码", "JE新编码"],
+        },
+      });
+    });
+    expect(call).toHaveBeenCalledOnce();
+    expect(call).toHaveBeenCalledWith(
+      "ledger.review_pair_mapping",
+      expect.objectContaining({ payload: expect.objectContaining({ tb: expect.any(Object), je: expect.any(Object) }) }),
+    );
+    expect(tbApplied).toHaveBeenCalledWith({ accountCode: "TB新编码" });
+    expect(jeApplied).toHaveBeenCalledWith({ accountCode: "JE新编码" });
+    expect(result.current.results.je?.applied[0].attention).toBe(true);
   });
 
   it("组件卸载后不调用页面回写，也不返回可供二次回写的旧结果", async () => {

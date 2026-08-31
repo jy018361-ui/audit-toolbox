@@ -14,6 +14,7 @@ import {
   TB_LABELS,
 } from "./DepositInterestPage";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
+import { LedgerReviewCompact } from "@/components/LedgerReviewAll";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
@@ -40,8 +41,11 @@ import {
 import { useJobEvents } from "@/hooks/useJobEvents";
 import { errorText } from "@/lib/errors";
 import {
+  applyLedgerReviewsTogether,
+  LEDGER_MULTI_COLUMN_ROLES,
   resolveLedgerPairKinds,
   resolveRoleLabels,
+  type LedgerReviewOutcome,
   type LedgerSourceClassification,
 } from "@/ledgerMapping";
 import {
@@ -64,6 +68,7 @@ import "./fx-audit.css";
 import "./tbje-check.css";
 
 type Mapping = MappingDict;
+type GroupLedgerReview = Partial<Record<LedgerKind, LedgerReviewOutcome>>;
 
 type Verdict = { performed: boolean; passed?: boolean; reason?: string };
 
@@ -488,6 +493,9 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [dropActive, setDropActive] = useState(false);
+  const [llmReviewBusy, setLlmReviewBusy] = useState(false);
+  const [llmReviewStatus, setLlmReviewStatus] = useState("");
+  const [llmReviews, setLlmReviews] = useState<Record<string, GroupLedgerReview>>({});
   const [exported, setExported] = useState<
     { path: string; batch: boolean } | undefined
   >();
@@ -627,12 +635,16 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const runnable = groups.filter((group) => group.tb);
   const currentStep = outcomes.length > 0 ? 2 : groups.length > 0 ? 1 : 0;
 
-  function invalidateResults() {
+  function invalidateResults(clearLlm = true) {
     activeJobId.current = "__inputs_changed__";
     setOutcomes([]);
     setDetail(undefined);
     setExported(undefined);
     setJob(undefined);
+    if (clearLlm) {
+      setLlmReviews({});
+      setLlmReviewStatus("");
+    }
   }
 
   function removeGroup(group: PairedGroup) {
@@ -673,6 +685,136 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       block: "start",
     });
   };
+
+  const reviewTargetsOf = (group: PairedGroup) => {
+    const target = (kind: LedgerKind, file?: PairingFile) => {
+      if (!file) return undefined;
+      const inspection = inspects[file.path];
+      if (!inspection) return undefined;
+      return {
+        headers: inspection.headers,
+        preview: inspection.preview ?? [],
+        mapping: Object.fromEntries(
+          Object.entries(mappings[file.path] ?? {}).filter(
+            ([, value]) => typeof value === "string" || Array.isArray(value),
+          ),
+        ) as Record<string, string | string[]>,
+        labels: resolveRoleLabels(
+          inspection.roles,
+          kind === "tb" ? TB_LABELS : JE_LABELS,
+        ),
+        tool: "tbje_check",
+        pairLabel: group.label,
+      };
+    };
+    return { tb: target("tb", group.tb), je: target("je", group.je) };
+  };
+
+  /** 页面级一键复核：每组一次真正的 TB＋JE 联合请求，最多并发两组。 */
+  async function reviewAllGroups() {
+    const candidates = groups.filter((group) => {
+      const targets = reviewTargetsOf(group);
+      return targets.tb || targets.je;
+    });
+    if (!candidates.length || llmReviewBusy) return;
+    invalidateResults(false);
+    setError("");
+    setBusy(true);
+    setLlmReviewBusy(true);
+    setLlmReviewStatus(`正在联合复核 0 / ${candidates.length} 组…`);
+    let cursor = 0;
+    let completed = 0;
+    let failed = 0;
+    const worker = async () => {
+      while (cursor < candidates.length) {
+        const group = candidates[cursor++];
+        const result = await applyLedgerReviewsTogether(
+          engineCall,
+          reviewTargetsOf(group),
+        );
+        if (Object.values(result).some((item) => item?.failed)) failed += 1;
+        setLlmReviews((current) => ({ ...current, [group.id]: result }));
+        setMappings((current) => {
+          const next = { ...current };
+          if (group.tb && result.tb && !result.tb.failed)
+            next[group.tb.path] = result.tb.mapping;
+          if (group.je && result.je && !result.je.failed)
+            next[group.je.path] = result.je.mapping;
+          return next;
+        });
+        completed += 1;
+        setLlmReviewStatus(
+          `正在联合复核 ${completed} / ${candidates.length} 组…`,
+        );
+      }
+    };
+    try {
+      await Promise.all(Array.from({ length: Math.min(2, candidates.length) }, worker));
+      setLlmReviewStatus(
+        failed
+          ? `联合复核完成：${candidates.length - failed} 组成功，${failed} 组失败；失败组保留 Coding 映射。`
+          : `联合复核完成：已复核 ${candidates.length} 组。`,
+      );
+    } finally {
+      setBusy(false);
+      setLlmReviewBusy(false);
+    }
+  }
+
+  function undoGroupReview(group: PairedGroup, kind: LedgerKind, index: number) {
+    const file = kind === "tb" ? group.tb : group.je;
+    const outcome = llmReviews[group.id]?.[kind];
+    const change = outcome?.applied[index];
+    if (!file || !outcome || !change) return;
+    const mapping = { ...outcome.mapping };
+    if (change.beforeValue === undefined) delete mapping[change.role];
+    else mapping[change.role] = Array.isArray(change.beforeValue)
+      ? [...change.beforeValue]
+      : change.beforeValue;
+    const applied = outcome.applied.filter((_, at) => at !== index);
+    setMappings((current) => ({ ...current, [file.path]: mapping }));
+    setLlmReviews((current) => ({
+      ...current,
+      [group.id]: {
+        ...current[group.id],
+        [kind]: { ...outcome, mapping, applied, appliedCount: applied.length },
+      },
+    }));
+    invalidateResults(false);
+  }
+
+  function acceptGroupPending(group: PairedGroup, kind: LedgerKind, index: number) {
+    const file = kind === "tb" ? group.tb : group.je;
+    const outcome = llmReviews[group.id]?.[kind];
+    const change = outcome?.pending[index];
+    if (!file || !outcome || !change) return;
+    const mapping = { ...outcome.mapping };
+    const beforeValue = mapping[change.role];
+    mapping[change.role] = LEDGER_MULTI_COLUMN_ROLES.has(change.role)
+      ? [...new Set([
+          ...(Array.isArray(beforeValue) ? beforeValue : beforeValue ? [beforeValue] : []),
+          change.suggestedColumn,
+        ])]
+      : change.suggestedColumn;
+    const pending = outcome.pending.filter((_, at) => at !== index);
+    const applied = [...outcome.applied, {
+      ...change,
+      beforeValue: Array.isArray(beforeValue) ? [...beforeValue] : beforeValue,
+      currentColumn: Array.isArray(beforeValue)
+        ? beforeValue.join("＋")
+        : beforeValue || "未映射",
+      attention: true,
+    }];
+    setMappings((current) => ({ ...current, [file.path]: mapping }));
+    setLlmReviews((current) => ({
+      ...current,
+      [group.id]: {
+        ...current[group.id],
+        [kind]: { ...outcome, mapping, applied, pending, appliedCount: applied.length },
+      },
+    }));
+    invalidateResults(false);
+  }
 
   function paramsOf(group: PairedGroup) {
     const source = (file?: PairingFile) => {
@@ -913,6 +1055,21 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
               <CardDescription>
                 配对仅依据文件名和识别出的主体信息；待确认项目需要在核对前人工检查。
               </CardDescription>
+              <div className="tbje-llm-action">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={busy || !groups.length}
+                  onClick={() => void reviewAllGroups()}
+                >
+                  {llmReviewBusy
+                    ? "LLM 联合复核中…"
+                    : `LLM 一键联合复核 ${groups.length} 组`}
+                </Button>
+                <span aria-live="polite">
+                  {llmReviewStatus || "每组 TB＋JE 同时复核；Coding 已验证的映射受保护。"}
+                </span>
+              </div>
             </CardHeader>
             <CardContent>
               <div className="tbje-pairing-list">
@@ -1093,6 +1250,41 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                         </Button>
                       </div>
                     </div>
+                    {llmReviews[group.id] &&
+                      (() => {
+                        const review = llmReviews[group.id];
+                        const present = (["tb", "je"] as LedgerKind[]).filter(
+                          (kind) => review[kind],
+                        );
+                        const failed = present.some((kind) => review[kind]?.failed);
+                        const changed = present.some(
+                          (kind) =>
+                            (review[kind]?.applied.length ?? 0) > 0 ||
+                            (review[kind]?.pending.length ?? 0) > 0,
+                        );
+                        return (
+                          <div className="tbje-group-llm-result" aria-live="polite">
+                            <span className={failed ? "failed" : undefined}>
+                              {failed
+                                ? "LLM 联合复核失败，已保留 Coding 映射。"
+                                : changed
+                                  ? "LLM 联合复核完成"
+                                  : "LLM 联合复核完成，当前映射无需调整。"}
+                            </span>
+                            <LedgerReviewCompact
+                              present={present}
+                              names={{ tb: "TB", je: "JE" }}
+                              results={review}
+                              onUndo={(kind, index) =>
+                                undoGroupReview(group, kind, index)
+                              }
+                              onAccept={(kind, index) =>
+                                acceptGroupPending(group, kind, index)
+                              }
+                            />
+                          </div>
+                        );
+                      })()}
                     {expanded?.groupId === group.id && (
                       <div
                         id={`tbje-mapping-${group.id}-${expanded.kind}`}

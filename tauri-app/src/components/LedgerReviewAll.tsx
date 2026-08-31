@@ -2,6 +2,7 @@ import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   applyLedgerReviewsTogether,
+  LEDGER_MULTI_COLUMN_ROLES,
   type LedgerReviewOutcome,
   type LedgerReviewTarget,
 } from "@/ledgerMapping";
@@ -35,7 +36,11 @@ export function useLedgerDictReviews(
     je: "",
     tb: "",
   });
+  const [results, setResults] = useState<
+    Partial<Record<"je" | "tb", LedgerReviewOutcome>>
+  >({});
   const generation = useRef({ je: 0, tb: 0 });
+  const slotsRef = useRef<Partial<Record<"je" | "tb", LedgerReviewSlot>>>({});
   const mounted = useRef(true);
   const previousSources = useRef(sourceKeys);
   /** 开始换文件/重新识别时即调用；旧请求仍可结束，但不得再回写。 */
@@ -44,6 +49,7 @@ export function useLedgerDictReviews(
     if (!mounted.current) return;
     setReviewing((current) => ({ ...current, [kind]: false }));
     setStatus((current) => ({ ...current, [kind]: "" }));
+    setResults((current) => ({ ...current, [kind]: undefined }));
   }, []);
   useLayoutEffect(() => {
     mounted.current = true;
@@ -80,6 +86,7 @@ export function useLedgerDictReviews(
       const targets = Object.fromEntries(
         kinds.map((kind) => [kind, slots[kind]!]),
       ) as Partial<Record<"je" | "tb", LedgerReviewTarget>>;
+      for (const kind of kinds) slotsRef.current[kind] = slots[kind];
       const outcomes = await applyLedgerReviewsTogether(call, targets);
       const currentOutcomes: Partial<Record<"je" | "tb", LedgerReviewOutcome>> =
         {};
@@ -88,6 +95,7 @@ export function useLedgerDictReviews(
           continue;
         const outcome = outcomes[kind]!;
         currentOutcomes[kind] = outcome;
+        setResults((current) => ({ ...current, [kind]: outcome }));
         if (!outcome.failed) slots[kind]!.onApplied(outcome.mapping);
         // 结论必须与画面上的"尚未映射"清单一致：还缺着必填字段时，
         // "无需调整"就是在替 LLM 拍胸脯，用户却被必填校验拦着测不了算。
@@ -124,7 +132,70 @@ export function useLedgerDictReviews(
       snapshot.je === generation.current.je &&
       snapshot.tb === generation.current.tb;
   }, []);
-  return { reviewing, status, reviewAll, clearReview, currentGuard };
+  const undoChange = useCallback((kind: "je" | "tb", index: number) => {
+    setResults((current) => {
+      const outcome = current[kind];
+      const change = outcome?.applied[index];
+      const slot = slotsRef.current[kind];
+      if (!outcome || !change || !slot) return current;
+      const mapping = { ...outcome.mapping };
+      if (change.beforeValue === undefined) delete mapping[change.role];
+      else mapping[change.role] = Array.isArray(change.beforeValue)
+        ? [...change.beforeValue]
+        : change.beforeValue;
+      slot.onApplied(mapping);
+      const applied = outcome.applied.filter((_, at) => at !== index);
+      return { ...current, [kind]: {
+        ...outcome,
+        mapping,
+        applied,
+        appliedCount: applied.length,
+      } };
+    });
+  }, []);
+  const acceptPending = useCallback((kind: "je" | "tb", index: number) => {
+    setResults((current) => {
+      const outcome = current[kind];
+      const change = outcome?.pending[index];
+      const slot = slotsRef.current[kind];
+      if (!outcome || !change || !slot) return current;
+      const mapping = { ...outcome.mapping };
+      const beforeValue = mapping[change.role];
+      mapping[change.role] = LEDGER_MULTI_COLUMN_ROLES.has(change.role)
+        ? [...new Set([
+            ...(Array.isArray(beforeValue) ? beforeValue : beforeValue ? [beforeValue] : []),
+            change.suggestedColumn,
+          ])]
+        : change.suggestedColumn;
+      slot.onApplied(mapping);
+      const pending = outcome.pending.filter((_, at) => at !== index);
+      const applied = [...outcome.applied, {
+        ...change,
+        beforeValue: Array.isArray(beforeValue) ? [...beforeValue] : beforeValue,
+        currentColumn: Array.isArray(beforeValue)
+          ? beforeValue.join("＋")
+          : beforeValue || "未映射",
+        attention: true,
+      }];
+      return { ...current, [kind]: {
+        ...outcome,
+        mapping,
+        applied,
+        pending,
+        appliedCount: applied.length,
+      } };
+    });
+  }, []);
+  return {
+    reviewing,
+    status,
+    results,
+    reviewAll,
+    clearReview,
+    currentGuard,
+    undoChange,
+    acceptPending,
+  };
 }
 
 /**
@@ -140,9 +211,12 @@ export function LedgerReviewAll(props: {
   names: Record<"je" | "tb", string>;
   reviewing: Record<"je" | "tb", boolean>;
   status: Record<"je" | "tb", string>;
+  results?: Partial<Record<"je" | "tb", LedgerReviewOutcome>>;
   /** 页面级忙碌（测算等任务进行中）时一并禁用。 */
   disabled?: boolean;
   onReviewAll: () => void;
+  onUndo?: (kind: "je" | "tb", index: number) => void;
+  onAccept?: (kind: "je" | "tb", index: number) => void;
 }) {
   const reviewingAny = props.present.some((kind) => props.reviewing[kind]);
   const both = props.present.length > 1;
@@ -170,6 +244,13 @@ export function LedgerReviewAll(props: {
             </span>
           ))}
         </div>
+        <LedgerReviewCompact
+          present={props.present}
+          names={props.names}
+          results={props.results}
+          onUndo={props.onUndo}
+          onAccept={props.onAccept}
+        />
       </div>
       <Button
         disabled={props.disabled || reviewingAny}
@@ -178,5 +259,49 @@ export function LedgerReviewAll(props: {
         {reviewingAny ? "复核中…" : `一键复核 ${subject}`}
       </Button>
     </section>
+  );
+}
+
+/** 简约结果：只把真实标题的“原列 → 新列”摆在主界面，理由留在模型响应与日志。 */
+export function LedgerReviewCompact(props: {
+  present: Array<"je" | "tb">;
+  names: Record<"je" | "tb", string>;
+  results?: Partial<Record<"je" | "tb", LedgerReviewOutcome>>;
+  onUndo?: (kind: "je" | "tb", index: number) => void;
+  onAccept?: (kind: "je" | "tb", index: number) => void;
+}) {
+  if (!props.present.some((kind) => props.results?.[kind])) return null;
+  return (
+    <div className="ledger-review-compact">
+      {props.present.map((kind) => {
+        const result = props.results?.[kind];
+        if (!result || result.failed) return null;
+        return (
+          <div className="ledger-review-side" key={kind}>
+            {(result.applied.length > 0 || result.pending.length > 0) && (
+              <strong>{props.names[kind]}</strong>
+            )}
+            {result.applied.map((change, index) => (
+              <div className="ledger-review-change" key={`a-${change.role}-${index}`}>
+                <span>{change.label}：{change.currentColumn} → {change.suggestedColumn}</span>
+                {change.attention && <em>重点核对</em>}
+                {props.onUndo && (
+                  <button type="button" onClick={() => props.onUndo?.(kind, index)}>撤销</button>
+                )}
+              </div>
+            ))}
+            {result.pending.map((change, index) => (
+              <div className="ledger-review-change pending" key={`p-${change.role}-${index}`}>
+                <span>{change.label}：{change.currentColumn} → {change.suggestedColumn}</span>
+                <em>{Math.round((change.confidence ?? 0) * 100)}% 待确认</em>
+                {props.onAccept && (
+                  <button type="button" onClick={() => props.onAccept?.(kind, index)}>采纳</button>
+                )}
+              </div>
+            ))}
+          </div>
+        );
+      })}
+    </div>
   );
 }

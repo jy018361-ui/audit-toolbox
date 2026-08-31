@@ -951,6 +951,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
             preview: je.preview,
             mapping: jeMapping,
             labels: resolveRoleLabels(je.roles, JE_LABELS),
+            tool: "fx_audit",
             onApplied: setJeMapping,
             missingAfter: (mapping) =>
               fxMissingRequired("je", mapping, true, fixedEntity, mode),
@@ -962,6 +963,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
             preview: tb.preview,
             mapping: tbMapping,
             labels: resolveRoleLabels(tb.roles, TB_LABELS),
+            tool: "fx_audit",
             onApplied: setTbMapping,
             missingAfter: (mapping) =>
               fxMissingRequired("tb", mapping, Boolean(je), fixedEntity),
@@ -1318,8 +1320,11 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
           names={{ je: "JE", tb: "TB" }}
           reviewing={reviewing}
           status={reviewStatus}
+          results={reviews.results}
           disabled={busy}
           onReviewAll={() => void reviewBoth()}
+          onUndo={reviews.undoChange}
+          onAccept={reviews.acceptPending}
         />
       )}
       {je && tb && alignment.length > 0 && (

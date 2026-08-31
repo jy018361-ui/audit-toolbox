@@ -29,7 +29,7 @@ impl Storage {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;
           CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS migrations(source TEXT PRIMARY KEY,completed_at TEXT NOT NULL,report_json TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS task_history(job_id TEXT PRIMARY KEY,tool_id TEXT NOT NULL,status TEXT NOT NULL,summary_json TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT);
+          CREATE TABLE IF NOT EXISTS task_history(job_id TEXT PRIMARY KEY,tool_id TEXT NOT NULL,status TEXT NOT NULL,summary_json TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,message TEXT,output_paths_json TEXT NOT NULL DEFAULT '[]');
           CREATE TABLE IF NOT EXISTS audipick_projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,data_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS audipick_documents(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,path TEXT NOT NULL,sha256 TEXT NOT NULL,data_json TEXT NOT NULL,FOREIGN KEY(project_id) REFERENCES audipick_projects(id));
           CREATE TABLE IF NOT EXISTS fuzzy_match_results(job_id TEXT NOT NULL,a_index INTEGER NOT NULL,a_value TEXT NOT NULL,level TEXT NOT NULL,match_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(job_id,a_index));
@@ -38,6 +38,7 @@ impl Storage {
             conn: Mutex::new(conn),
             data_dir: data_dir.to_path_buf(),
         };
+        storage.migrate_task_history_summaries()?;
         storage.import_legacy_defaults()?;
         storage.sanitize_roll_forward_settings()?;
         Ok(storage)
@@ -94,31 +95,144 @@ impl Storage {
         let now = Utc::now().to_rfc3339();
         let finished =
             matches!(status, "completed" | "failed" | "cancelled").then_some(now.clone());
-        self.conn.lock().execute("INSERT INTO task_history(job_id,tool_id,status,summary_json,started_at,finished_at)VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(job_id)DO UPDATE SET status=excluded.status,summary_json=excluded.summary_json,finished_at=excluded.finished_at",params![job,tool,status,event.to_string(),now,finished]).map_err(db_error)?;
+        let message = event.get("message").and_then(Value::as_str);
+        let output_paths = event
+            .get("outputPaths")
+            .filter(|value| value.is_array())
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        // History is an activity log, not a second result store.  Completed
+        // FX/ledger events can contain tens of megabytes under `result`; keeping
+        // that payload here made every dashboard visit deserialize the lot.
+        let summary = json!({"message": message, "outputPaths": output_paths});
+        self.conn.lock().execute(
+            "INSERT INTO task_history(job_id,tool_id,status,summary_json,started_at,finished_at,message,output_paths_json)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+             ON CONFLICT(job_id)DO UPDATE SET
+               status=excluded.status,summary_json=excluded.summary_json,
+               finished_at=excluded.finished_at,message=excluded.message,
+               output_paths_json=excluded.output_paths_json",
+            params![
+                job,
+                tool,
+                status,
+                summary.to_string(),
+                now,
+                finished,
+                message,
+                output_paths.to_string()
+            ],
+        ).map_err(db_error)?;
         Ok(())
     }
     pub fn history_get(&self) -> Result<Value, AppError> {
         let conn = self.conn.lock();
-        let mut stmt=conn.prepare("SELECT job_id,tool_id,status,summary_json,started_at,finished_at FROM task_history ORDER BY started_at DESC LIMIT 200").map_err(db_error)?;
+        let mut stmt=conn.prepare("SELECT job_id,tool_id,status,message,output_paths_json,started_at,finished_at FROM task_history ORDER BY started_at DESC LIMIT 200").map_err(db_error)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })
             .map_err(db_error)?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, tool, status, summary, started, finished) = row.map_err(db_error)?;
-            let detail: Value = serde_json::from_str(&summary).unwrap_or(json!({}));
-            out.push(json!({"jobId":id,"toolId":tool,"status":status,"message":detail.get("message").cloned().unwrap_or(Value::Null),"outputPaths":detail.get("outputPaths").cloned().unwrap_or(json!([])),"startedAt":started,"finishedAt":finished}));
+            let (id, tool, status, message, output_paths, started, finished) =
+                row.map_err(db_error)?;
+            let output_paths = serde_json::from_str::<Value>(&output_paths)
+                .ok()
+                .filter(Value::is_array)
+                .unwrap_or_else(|| json!([]));
+            out.push(json!({"jobId":id,"toolId":tool,"status":status,"message":message,"outputPaths":output_paths,"startedAt":started,"finishedAt":finished}));
         }
         Ok(Value::Array(out))
+    }
+
+    pub fn history_clear(&self) -> Result<Value, AppError> {
+        let conn = self.conn.lock();
+        let removed = conn
+            .execute("DELETE FROM task_history", [])
+            .map_err(db_error)?;
+        // DELETE makes the rows unavailable; VACUUM returns the disk space too.
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")
+            .map_err(db_error)?;
+        Ok(json!({"removed": removed}))
+    }
+
+    /// Upgrade databases created before history had dedicated summary columns.
+    /// The migration deliberately discards `result`: task_history was always
+    /// documented as metadata-only, while durable fuzzy results live in their
+    /// own row-level tables and can rebuild their summary when needed.
+    fn migrate_task_history_summaries(&self) -> Result<(), AppError> {
+        let mut conn = self.conn.lock();
+        let has_message: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_history') WHERE name='message')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if !has_message {
+            conn.execute("ALTER TABLE task_history ADD COLUMN message TEXT", [])
+                .map_err(db_error)?;
+        }
+        let has_output_paths: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_history') WHERE name='output_paths_json')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if !has_output_paths {
+            conn.execute(
+                "ALTER TABLE task_history ADD COLUMN output_paths_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )
+            .map_err(db_error)?;
+        }
+        let migrated: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM migrations WHERE source='task_history_summary_v1')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if migrated {
+            return Ok(());
+        }
+        let tx = conn.transaction().map_err(db_error)?;
+        let changed = tx
+            .execute(
+                "UPDATE task_history SET
+                   message=CASE WHEN json_valid(summary_json) THEN CAST(json_extract(summary_json,'$.message') AS TEXT) ELSE NULL END,
+                   output_paths_json=CASE
+                     WHEN json_valid(summary_json) AND json_type(summary_json,'$.outputPaths')='array'
+                     THEN json_extract(summary_json,'$.outputPaths') ELSE '[]' END,
+                   summary_json='{}'",
+                [],
+            )
+            .map_err(db_error)?;
+        tx.execute(
+            "INSERT INTO migrations(source,completed_at,report_json) VALUES(?1,?2,?3)",
+            params![
+                "task_history_summary_v1",
+                Utc::now().to_rfc3339(),
+                json!({"slimmedRows": changed}).to_string()
+            ],
+        )
+        .map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+        if changed > 0 {
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")
+                .map_err(db_error)?;
+        }
+        Ok(())
     }
     pub fn audipick_projects(&self) -> Result<Value, AppError> {
         let conn = self.conn.lock();
@@ -982,6 +1096,92 @@ mod tests {
             value.pointer("/custom/url").and_then(Value::as_str),
             Some("https://example.com")
         );
+    }
+
+    #[test]
+    fn history_stores_only_metadata_and_can_be_cleared() {
+        let root = test_root();
+        let storage = Storage::new(&root).unwrap();
+        storage
+            .record_job_event(&json!({
+                "jobId":"job-1",
+                "toolId":"fx_audit",
+                "phase":"completed",
+                "message":"处理完成",
+                "outputPaths":["C:\\result.xlsx"],
+                "result":{"jeDetail":"x".repeat(1_000_000)}
+            }))
+            .unwrap();
+
+        let summary_size: usize = storage
+            .conn
+            .lock()
+            .query_row(
+                "SELECT length(summary_json) FROM task_history WHERE job_id='job-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(summary_size < 1_000);
+        let history = storage.history_get().unwrap();
+        assert_eq!(history[0]["message"], "处理完成");
+        assert_eq!(history[0]["outputPaths"][0], "C:\\result.xlsx");
+        assert_eq!(storage.history_clear().unwrap()["removed"], 1);
+        assert!(
+            storage
+                .history_get()
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrates_legacy_full_history_payloads() {
+        let root = test_root();
+        let path = root.join("audit-toolbox.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE migrations(source TEXT PRIMARY KEY,completed_at TEXT NOT NULL,report_json TEXT NOT NULL);
+             CREATE TABLE task_history(job_id TEXT PRIMARY KEY,tool_id TEXT NOT NULL,status TEXT NOT NULL,summary_json TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT);",
+        )
+        .unwrap();
+        let legacy = json!({
+            "message":"旧任务完成",
+            "outputPaths":["C:\\old.xlsx"],
+            "result":{"rows":"x".repeat(100_000)}
+        });
+        conn.execute(
+            "INSERT INTO task_history VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                "legacy-1",
+                "fx_audit",
+                "completed",
+                legacy.to_string(),
+                "2026-01-01",
+                "2026-01-01"
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let storage = Storage::new(&root).unwrap();
+        let history = storage.history_get().unwrap();
+        assert_eq!(history[0]["message"], "旧任务完成");
+        assert_eq!(history[0]["outputPaths"][0], "C:\\old.xlsx");
+        let summary: String = storage
+            .conn
+            .lock()
+            .query_row(
+                "SELECT summary_json FROM task_history WHERE job_id='legacy-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(summary, "{}");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

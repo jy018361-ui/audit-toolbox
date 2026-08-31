@@ -2711,7 +2711,22 @@ fn cross_table_alignment(
     let mut tb_fix = Map::new();
     let mut unmatched = Vec::new();
     for (role, label, je_role, tb_role) in broken {
-        match best_column_pair(&je_columns, &tb_columns, role == "accountCode") {
+        let shared_code = (role == "accountCode")
+            .then(|| {
+                ledger_mapping::align_account_code_columns(
+                    &je_full.headers,
+                    &je_full.rows,
+                    &tb_full.headers,
+                    &tb_full.rows,
+                )
+            })
+            .flatten()
+            .map(|item| (item.je_column, item.tb_column, item.overlap, item.ratio));
+        match shared_code.or_else(|| {
+            (role != "accountCode")
+                .then(|| best_column_pair(&je_columns, &tb_columns, false))
+                .flatten()
+        }) {
             Some((je_header, tb_header, overlap, _)) => {
                 je_fix.insert(role.into(), json!(je_header));
                 tb_fix.insert(role.into(), json!(tb_header));
@@ -2752,7 +2767,7 @@ fn cross_table_alignment(
     Ok((errors, warnings, fix))
 }
 
-fn check_mapping_alignment(params: &Value) -> Result<Value, AppError> {
+pub(crate) fn check_mapping_alignment(params: &Value) -> Result<Value, AppError> {
     let (errors, warnings, fix) = cross_table_alignment(params)?;
     Ok(json!({
         "aligned": errors.is_empty(),
@@ -3201,7 +3216,9 @@ pub(crate) struct RollforwardUnit {
 
 /// TB 自身逐行勾稽：**期初 ＋ 本年累计借方 − 本年累计贷方 ＝ 期末**。
 ///
-/// 金额沿用 [`signed_amount`] 的借正贷负规则，借贷方向列与借贷双栏两种记法都适用；
+/// 余额沿用 [`signed_amount`] 的借正贷负规则，发生额走 [`side_amounts`]，把
+/// “贷方列为负数”的已带符号口径统一翻回贷方侧后再套等式；
+/// 借贷方向列与借贷双栏两种记法都适用；
 /// 原币、本位币两个口径各自独立验一遍，四样字段不齐的口径跳过。
 ///
 /// 汇总行**不排除**——父科目行的期初＋发生额同样应当等于期末，它不平一样是问题。
@@ -3211,15 +3228,27 @@ pub(crate) fn tb_self_rollforward(
     table: &FxTable,
     mapping: &Map<String, Value>,
 ) -> Vec<RollforwardUnit> {
+    tb_self_rollforward_with_mask(table, mapping, None)
+}
+
+/// [`tb_self_rollforward`] 的本位币行范围入口。`functional_row_mask` 与数据行
+/// 一一对应，`true` 才参与本位币勾稽；明确映射的原币金额仍核对全量行，
+/// 二者都不改变源行号。
+pub(crate) fn tb_self_rollforward_with_mask(
+    table: &FxTable,
+    mapping: &Map<String, Value>,
+    functional_row_mask: Option<&[bool]>,
+) -> Vec<RollforwardUnit> {
     let junk = ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
         mapped_cols(mapping, role)
     });
     let row_records = records(table);
     let mut out = Vec::new();
-    for (opening_prefix, closing_prefix, ytd_debit, ytd_credit, unit) in [
+    for (opening_prefix, closing_prefix, movement_prefix, ytd_debit, ytd_credit, unit) in [
         (
             "openingFunctional",
             "closingFunctional",
+            "ytdFunctional",
             "ytdFunctionalDebit",
             "ytdFunctionalCredit",
             "本位币",
@@ -3227,17 +3256,15 @@ pub(crate) fn tb_self_rollforward(
         (
             "openingForeign",
             "closingForeign",
+            "ytdForeign",
             "ytdForeignDebit",
             "ytdForeignCredit",
             "原币",
         ),
     ] {
-        let (Some(debit_col), Some(credit_col)) = (
-            first_col(mapping, ytd_debit),
-            first_col(mapping, ytd_credit),
-        ) else {
+        if first_col(mapping, ytd_debit).is_none() || first_col(mapping, ytd_credit).is_none() {
             continue;
-        };
+        }
         if !amount_scheme_ok(mapping, opening_prefix) || !amount_scheme_ok(mapping, closing_prefix)
         {
             continue;
@@ -3245,16 +3272,21 @@ pub(crate) fn tb_self_rollforward(
         let mut checked = 0usize;
         let mut issues = Vec::new();
         for (index, row) in row_records.iter().enumerate() {
+            if unit == "本位币"
+                && functional_row_mask
+                    .is_some_and(|mask| !mask.get(index).copied().unwrap_or(false))
+            {
+                continue;
+            }
             if !junk.get(index).copied().unwrap_or(true) {
                 continue;
             }
             // 四个数里解析失败或借贷发生额缺失的行跳过——坏列由「有效数值比例
             // 低于99%」负责拦截，这里不重复报。
-            let (Ok(opening), Ok(closing), Ok(Some(debit)), Ok(Some(credit))) = (
+            let (Ok(opening), Ok(closing), Ok((debit, credit))) = (
                 signed_amount(row, mapping, opening_prefix),
                 signed_amount(row, mapping, closing_prefix),
-                strict_number(row.values.get(debit_col.as_str()).copied().unwrap_or("")),
-                strict_number(row.values.get(credit_col.as_str()).copied().unwrap_or("")),
+                side_amounts(row, mapping, movement_prefix),
             ) else {
                 continue;
             };
@@ -13502,6 +13534,62 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
                 .all(|text| !text.contains("TB 自身勾稽")),
             "提示不得混进错误清单：{result:#}"
         );
+        fs::remove_file(&tb).unwrap();
+    }
+
+    #[test]
+    fn tb_self_rollforward_reuses_signed_side_amounts_and_honours_row_mask() {
+        let dir = std::env::temp_dir().join(format!("fx-tbselfsign-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let tb = dir.join("tb.csv");
+        fs::write(
+            &tb,
+            "科目编码,科目名称,期初借方,期初贷方,本年借方,本年贷方,期末借方,期末贷方,原币期初借方,原币期初贷方,原币本年借方,原币本年贷方,原币期末借方,原币期末贷方\n\
+             1001,库存现金,984.30,0,76361.92,-77346.22,0,0,10,0,5,-2,13,0\n\
+             1002,银行存款,100,0,20,-30,80,0,20,0,1,-1,20,0\n",
+        )
+        .unwrap();
+        let source: SourceSpec = serde_json::from_value(json!({
+            "inputPath": tb,
+            "sheet": "",
+            "headerRow": 1,
+            "headerDepth": 1
+        }))
+        .unwrap();
+        let table = load_fx_table(&source).unwrap();
+        let mapping = json!({
+            "accountCode":"科目编码",
+            "accountName":"科目名称",
+            "openingFunctionalDebit":"期初借方",
+            "openingFunctionalCredit":"期初贷方",
+            "ytdFunctionalDebit":"本年借方",
+            "ytdFunctionalCredit":"本年贷方",
+            "closingFunctionalDebit":"期末借方",
+            "closingFunctionalCredit":"期末贷方",
+            "openingForeignDebit":"原币期初借方",
+            "openingForeignCredit":"原币期初贷方",
+            "ytdForeignDebit":"原币本年借方",
+            "ytdForeignCredit":"原币本年贷方",
+            "closingForeignDebit":"原币期末借方",
+            "closingForeignCredit":"原币期末贷方",
+            "__signConvention":"signed"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let all = tb_self_rollforward(&table, &mapping);
+        assert_eq!(all[0].checked, 2);
+        assert_eq!(all[0].issues.len(), 1);
+        assert_eq!(all[0].issues[0].source_row, 3);
+        assert_eq!(all[0].issues[0].credit, 30.0);
+
+        let filtered = tb_self_rollforward_with_mask(&table, &mapping, Some(&[true, false]));
+        assert_eq!(filtered[0].checked, 1);
+        assert!(filtered[0].issues.is_empty());
+        assert_eq!(filtered[1].unit, "原币");
+        assert_eq!(filtered[1].checked, 2, "本位币 mask 不得过滤原币勾稽");
+        assert!(filtered[1].issues.is_empty());
         fs::remove_file(&tb).unwrap();
     }
 

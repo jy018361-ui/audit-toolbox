@@ -6,6 +6,7 @@ import { MemoryRouter, NavLink, Route, Routes } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import {
   PersistentToolPages,
+  retainedToolIds,
   toolIdFromPathname,
 } from "./PersistentToolPages";
 
@@ -71,5 +72,18 @@ describe("PersistentToolPages", () => {
 
     view.unmount();
     expect(cleanup).toHaveBeenCalledTimes(2);
+  });
+
+  it("caps recent hidden pages but never evicts an active job", () => {
+    const running = new Set(["a"]);
+    expect(retainedToolIds(["a", "b", "c"], "d", running, 2)).toEqual([
+      "a",
+      "c",
+      "d",
+    ]);
+    expect(retainedToolIds(["a", "c", "d"], undefined, running, 2)).toEqual([
+      "a",
+      "d",
+    ]);
   });
 });

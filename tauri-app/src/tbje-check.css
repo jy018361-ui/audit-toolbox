@@ -173,6 +173,25 @@
   border-radius: var(--r-md);
 }
 
+.tbje-result-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin: 0 0 var(--sp-3);
+}
+
+.tbje-result-toolbar .fx-hint {
+  margin: 0;
+}
+
+@media (max-width: 720px) {
+  .tbje-result-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 .tbje-result-table-wrap > [data-slot="table-container"] {
   overflow-x: auto;
 }

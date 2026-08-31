@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -67,6 +68,8 @@ describe("TbjeCheckPage", () => {
     vi.mocked(engineCall).mockImplementation(
       async (method: string, params: unknown) => {
         if (method === "ledger.forms") return [];
+        if (method === "ledger.check_mapping_alignment")
+          return { aligned: true, warnings: [] };
         const source = (params as { source: { inputPath: string } }).source;
         const isTb = source.inputPath.includes("TB");
         if (method === "deposit.classify_source") {
@@ -143,8 +146,11 @@ describe("TbjeCheckPage", () => {
                 tbVsJe: {
                   performed: true,
                   passed: false,
+                  sidePassed: false,
+                  netPassed: true,
                   accounts: 383,
                   mismatched: 175,
+                  netMismatched: 0,
                 },
                 equation: {
                   performed: true,
@@ -181,12 +187,113 @@ describe("TbjeCheckPage", () => {
       expect(within(table).getByRole("columnheader", { name })).toBeVisible();
     }
     expect(within(table).getByText("分类待确认")).toBeVisible();
+    expect(within(table).getByText("净额通过，单边发生额有差异")).toBeVisible();
     expect(
       within(table).getByText("已归类科目合计 0.00 · 6 个科目未纳入勾稽"),
     ).toBeVisible();
     const preview = within(table).getByRole("button", { name: "预览明细" });
     expect(preview).toHaveAttribute("data-variant", "default");
     expect(container).not.toHaveTextContent("① 勾稽");
+  });
+
+  it("exports every successful result with one folder selection", async () => {
+    const { engineCall, jobStart, listenJobEvents, pickPath } =
+      await import("./api");
+    vi.mocked(pickPath)
+      .mockResolvedValueOnce(["C:/samples/01TB.xlsx", "C:/samples/01JE.xlsx"])
+      .mockResolvedValueOnce("C:/exports/tbje");
+    vi.mocked(engineCall).mockImplementation(
+      async (method: string, params: unknown) => {
+        if (method === "ledger.forms") return [];
+        if (method === "ledger.check_mapping_alignment")
+          return { aligned: true, warnings: [] };
+        const source = (params as { source: { inputPath: string } }).source;
+        const isTb = source.inputPath.includes("TB");
+        if (method === "deposit.classify_source") {
+          return {
+            kind: isTb ? "tb" : "je",
+            sheet: "Sheet1",
+            headerRow: 1,
+            headerDepth: 1,
+          };
+        }
+        return {
+          sheet: "Sheet1",
+          headerRow: 1,
+          headerDepth: 1,
+          headers: ["科目编码"],
+          preview: [],
+          entities: ["主体 A"],
+          suggestedMapping: { accountCode: "科目编码" },
+        };
+      },
+    );
+    let emit: ((event: never) => void) | undefined;
+    vi.mocked(listenJobEvents).mockImplementation(async (callback) => {
+      emit = callback as (event: never) => void;
+      return () => undefined;
+    });
+
+    render(<TbjeCheckPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
+    );
+    await screen.findByText("01TB.xlsx");
+    await waitFor(() => expect(emit).toBeTypeOf("function"));
+    act(() => {
+      emit?.({
+        jobId: "__inputs_changed__",
+        toolId: "tbje_check",
+        phase: "completed",
+        current: 1,
+        total: 1,
+        message: "核对完成",
+        severity: "success",
+        outputPaths: [],
+        result: {
+          groups: [
+            {
+              label: "1",
+              ok: true,
+              result: {
+                rollforward: { performed: true, passed: true },
+                tbVsJe: { performed: true, passed: true },
+                equation: { performed: true, passed: true },
+              },
+            },
+          ],
+        },
+      } as never);
+    });
+    const button = await screen.findByRole("button", {
+      name: "导出全部结果",
+    });
+    fireEvent.click(button);
+
+    await waitFor(() =>
+      expect(jobStart).toHaveBeenCalledWith("tbje_check.export_batch", {
+        groups: [
+          {
+            label: "1",
+            tbSource: {
+              inputPath: "C:/samples/01TB.xlsx",
+              sheet: "Sheet1",
+              headerRow: 1,
+              headerDepth: 1,
+            },
+            tbMapping: { accountCode: "科目编码" },
+            jeSource: {
+              inputPath: "C:/samples/01JE.xlsx",
+              sheet: "Sheet1",
+              headerRow: 1,
+              headerDepth: 1,
+            },
+            jeMapping: { accountCode: "科目编码" },
+          },
+        ],
+        outputDirectory: "C:/exports/tbje",
+      }),
+    );
   });
 
   it("removes one group without deleting the source files", async () => {
@@ -198,6 +305,8 @@ describe("TbjeCheckPage", () => {
     vi.mocked(engineCall).mockImplementation(
       async (method: string, params: unknown) => {
         if (method === "ledger.forms") return [];
+        if (method === "ledger.check_mapping_alignment")
+          return { aligned: true, warnings: [] };
         const source = (params as { source: { inputPath: string } }).source;
         const isTb = source.inputPath.includes("TB");
         if (method === "deposit.classify_source") {

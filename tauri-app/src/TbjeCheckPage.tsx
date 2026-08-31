@@ -94,9 +94,12 @@ type CheckResult = {
     }[];
   };
   tbVsJe: Verdict & {
+    sidePassed?: boolean;
+    netPassed?: boolean;
     accounts?: number;
     mismatched?: number;
-    systematic?: boolean;
+    netMismatched?: number;
+    widespread?: boolean;
     items?: {
       entity: string;
       code: string;
@@ -108,6 +111,11 @@ type CheckResult = {
       tbCredit: number;
       jeCredit: number;
       creditDifference: number;
+      tbNet?: number;
+      jeNet?: number;
+      netDifference?: number;
+      netPassed?: boolean;
+      overallVerdict?: string;
     }[];
   };
   equation: Verdict & {
@@ -124,6 +132,12 @@ type CheckResult = {
       opening: number;
       closing: number;
     }[];
+  };
+  mappingWarnings?: string[];
+  currencyScope?: {
+    functionalCurrency?: string | null;
+    includedRows: number;
+    excludedForeignRows: number;
   };
 };
 
@@ -185,6 +199,24 @@ function EquationVerdict({ equation }: { equation?: CheckResult["equation"] }) {
   );
 }
 
+function TbJeVerdict({ check }: { check?: CheckResult["tbVsJe"] }) {
+  if (!check?.performed) return <VerdictBadge verdict={check} />;
+  const sidePassed = check.sidePassed ?? check.passed === true;
+  const netPassed = check.netPassed ?? check.passed === true;
+  if (!netPassed) return <Badge variant="destructive">不通过</Badge>;
+  if (!sidePassed)
+    return (
+      <Badge variant="outline" className="badge-warning">
+        净额通过，单边发生额有差异
+      </Badge>
+    );
+  return (
+    <Badge variant="outline" className="badge-ready">
+      通过
+    </Badge>
+  );
+}
+
 /** 预览截断的行数。几百条差异全塞进页面没法看——预览管定位，导出管全量。 */
 const PREVIEW_CAP = 100;
 const MULTI_COLUMN_ROLES = new Set(["id", "accountName", "auxiliary"]);
@@ -216,6 +248,11 @@ function OutcomeDetail({ result }: { result: CheckResult }) {
     !equationSides.some(([, side]) => !side!.balanced);
   return (
     <div className="tbje-preview">
+      {(result.mappingWarnings ?? []).map((warning) => (
+        <p className="fx-hint" key={warning}>
+          {warning}
+        </p>
+      ))}
       {nothing && <p className="fx-hint">无差异明细。</p>}
       {rollforwardUnits.map((unit) => (
         <div key={unit.unit} className="tbje-preview-block">
@@ -293,6 +330,10 @@ function OutcomeDetail({ result }: { result: CheckResult }) {
                   <TableHead>TB 贷方</TableHead>
                   <TableHead>JE 贷方</TableHead>
                   <TableHead>贷方差额</TableHead>
+                  <TableHead>TB 净额</TableHead>
+                  <TableHead>JE 净额</TableHead>
+                  <TableHead>净额差异</TableHead>
+                  <TableHead>净额结论</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -320,6 +361,23 @@ function OutcomeDetail({ result }: { result: CheckResult }) {
                     </TableCell>
                     <TableCell className="tbje-number">
                       {money(item.creditDifference)}
+                    </TableCell>
+                    <TableCell className="tbje-number">
+                      {money(item.tbNet ?? item.tbDebit - item.tbCredit)}
+                    </TableCell>
+                    <TableCell className="tbje-number">
+                      {money(item.jeNet ?? item.jeDebit - item.jeCredit)}
+                    </TableCell>
+                    <TableCell className="tbje-number">
+                      {money(
+                        item.netDifference ??
+                          item.tbDebit -
+                            item.tbCredit -
+                            (item.jeDebit - item.jeCredit),
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      {item.netPassed === false ? "不通过" : "通过"}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -430,7 +488,9 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [dropActive, setDropActive] = useState(false);
-  const [exported, setExported] = useState("");
+  const [exported, setExported] = useState<
+    { path: string; batch: boolean } | undefined
+  >();
   const dropRef = useRef<HTMLDivElement | null>(null);
   const intakeSectionRef = useRef<HTMLElement | null>(null);
   const pairingSectionRef = useRef<HTMLElement | null>(null);
@@ -443,7 +503,10 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       if (payload?.groups) setOutcomes(payload.groups);
       const single = event.result as { outputPath?: string } | undefined;
       if (typeof single?.outputPath === "string")
-        setExported(single.outputPath);
+        setExported({ path: single.outputPath, batch: false });
+      const batch = event.result as { outputDirectory?: string } | undefined;
+      if (typeof batch?.outputDirectory === "string")
+        setExported({ path: batch.outputDirectory, batch: true });
       if (["completed", "failed", "cancelled"].includes(event.phase))
         setBusy(false);
       if (event.phase === "failed") setError(event.message);
@@ -498,7 +561,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         };
         const kind = (resolveLedgerPairKinds([classified])[0] ??
           classified.kind) as LedgerKind;
-        const inspected = (await engineCall(`deposit.inspect_${kind}`, {
+        const inspected = (await engineCall(`fx.inspect_${kind}`, {
           source: {
             inputPath: path,
             sheet: classified.sheet,
@@ -537,7 +600,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     setBusy(true);
     setError("");
     try {
-      const inspected = (await engineCall(`deposit.inspect_${kind}`, {
+      const inspected = (await engineCall(`fx.inspect_${kind}`, {
         source: { inputPath: path, sheet, headerRow: 0, headerDepth: 0 },
       })) as Inspection;
       setInspects((current) => ({ ...current, [path]: inspected }));
@@ -568,7 +631,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     activeJobId.current = "__inputs_changed__";
     setOutcomes([]);
     setDetail(undefined);
-    setExported("");
+    setExported(undefined);
     setJob(undefined);
   }
 
@@ -668,14 +731,88 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
+  /** 一次选目录，把所有成功核对的组分别导出为完整工作簿。 */
+  async function exportAll() {
+    const successful = runnable.filter((group) =>
+      outcomes.some((outcome) => outcome.label === group.label && outcome.ok),
+    );
+    if (!successful.length) return;
+    const picked = await pickPath("folder", "选择全部核对结果的导出文件夹", []);
+    if (!picked || typeof picked !== "string") return;
+    setError("");
+    setExported(undefined);
+    setBusy(true);
+    try {
+      const id = await jobStart("tbje_check.export_batch", {
+        groups: successful.map(paramsOf),
+        outputDirectory: picked,
+      });
+      activeJobId.current = id;
+      setJob({
+        jobId: id,
+        toolId: "tbje_check",
+        phase: "running",
+        message: `正在导出全部 ${successful.length} 组核对结果…`,
+      } as never);
+    } catch (e) {
+      setError(errorText(e));
+      setBusy(false);
+    }
+  }
+
   async function runAll() {
     if (!runnable.length) return;
     setError("");
     setOutcomes([]);
     setBusy(true);
     try {
+      const alignedGroups: Record<string, unknown>[] = [];
+      const correctedMappings: Record<string, Mapping> = {};
+      const alignmentWarnings: string[] = [];
+      for (const group of runnable) {
+        const groupParams = paramsOf(group);
+        if (group.je) {
+          const alignment = (await engineCall(
+            "ledger.check_mapping_alignment",
+            groupParams,
+          )) as {
+            aligned?: boolean;
+            errors?: string[];
+            warnings?: string[];
+            fix?: {
+              jeMapping?: Mapping;
+              tbMapping?: Mapping;
+            };
+          };
+          if (alignment.aligned === false) {
+            throw new Error(
+              alignment.errors?.[0] ?? "TB与JE的科目字段无法对齐。",
+            );
+          }
+          if (alignment.fix?.tbMapping && group.tb) {
+            groupParams.tbMapping = {
+              ...(groupParams.tbMapping as Mapping),
+              ...alignment.fix.tbMapping,
+            };
+            correctedMappings[group.tb.path] = groupParams.tbMapping as Mapping;
+          }
+          if (alignment.fix?.jeMapping) {
+            groupParams.jeMapping = {
+              ...(groupParams.jeMapping as Mapping),
+              ...alignment.fix.jeMapping,
+            };
+            correctedMappings[group.je.path] = groupParams.jeMapping as Mapping;
+          }
+          alignmentWarnings.push(...(alignment.warnings ?? []));
+        }
+        alignedGroups.push(groupParams);
+      }
+      if (Object.keys(correctedMappings).length) {
+        setMappings((current) => ({ ...current, ...correctedMappings }));
+      }
+      if (alignmentWarnings.length) setStatus(alignmentWarnings[0]);
       const id = await jobStart("tbje_check.run_batch", {
-        groups: runnable.map(paramsOf),
+        groups: alignedGroups,
       });
       activeJobId.current = id;
       setJob({
@@ -967,6 +1104,21 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
               </CardDescription>
             </CardHeader>
             <CardContent>
+              <div className="tbje-result-toolbar">
+                <span className="fx-hint">
+                  已完成 {outcomes.filter((outcome) => outcome.ok).length} 组；
+                  可逐组预览，或一次导出全部成功结果。
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={busy || !outcomes.some((outcome) => outcome.ok)}
+                  onClick={() => void exportAll()}
+                >
+                  <Download aria-hidden="true" />
+                  导出全部结果
+                </Button>
+              </div>
               <div className="tbje-result-table-wrap">
                 <Table className="tbje-result-table">
                   <caption className="sr-only">TB/JE 完整性核对结果</caption>
@@ -1009,15 +1161,16 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                 ) : null}
                               </TableCell>
                               <TableCell>
-                                <VerdictBadge
-                                  verdict={outcome.result?.tbVsJe}
-                                />
+                                <TbJeVerdict check={outcome.result?.tbVsJe} />
                                 {outcome.result?.tbVsJe.mismatched ? (
                                   <span className="tbje-detail">
                                     {outcome.result.tbVsJe.mismatched} /{" "}
                                     {outcome.result.tbVsJe.accounts} 科目
-                                    {outcome.result.tbVsJe.systematic &&
-                                      " · 疑似期间不匹配"}
+                                    {(outcome.result.tbVsJe.netMismatched ??
+                                      0) > 0 &&
+                                      ` · ${outcome.result.tbVsJe.netMismatched} 个科目净额不通过`}
+                                    {outcome.result.tbVsJe.widespread &&
+                                      " · 大范围差异"}
                                   </span>
                                 ) : null}
                               </TableCell>
@@ -1101,22 +1254,25 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
               </div>
               {exported && (
                 <div className="tbje-exported" role="status" aria-live="polite">
-                  <span title={exported}>明细已导出：{fileName(exported)}</span>
+                  <span title={exported.path}>
+                    {exported.batch ? "全部结果已导出至：" : "明细已导出："}
+                    {fileName(exported.path)}
+                  </span>
                   <Button
                     type="button"
                     variant="secondary"
-                    onClick={() => void openOutput(exported)}
+                    onClick={() => void openOutput(exported.path)}
                   >
-                    打开导出文件
+                    {exported.batch ? "打开导出文件夹" : "打开导出文件"}
                   </Button>
                 </div>
               )}
               {outcomes.some(
-                (outcome) => outcome.result?.tbVsJe.systematic,
+                (outcome) => outcome.result?.tbVsJe.widespread,
               ) && (
                 <p className="fx-hint">
-                  有组的绝大多数科目都对不上——先确认那一组的序时账是不是只覆盖了一部分期间，
-                  这种情况多半不是账错了。
+                  有组的绝大多数科目存在单边发生额差异，请依次复核字段映射、金额口径与期间范围；
+                  只有日期或会计期间字段提供直接证据时，工具才会提示期间不匹配。
                 </p>
               )}
             </CardContent>

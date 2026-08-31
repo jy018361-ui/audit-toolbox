@@ -1787,11 +1787,17 @@ fn resolve_rate(
     }
     // 外币户即便落在活期档，也不能自动套人民币挂牌利率（0.05% 会严重低估
     // 美元存款利息）——留空逼着用户按对账单填。用户手工填的利率在上面已经返回。
-    let foreign = detect_foreign_currency(&format!(
-        "{} {} {}",
-        account.account, account.auxiliary, account.currency
-    ))
-    .is_some();
+    let identity = format!("{} {}", account.account, account.auxiliary);
+    let normalized_identity = normalize_header(&identity);
+    // 科目/辅助核算中明写 RMB、CNY 或人民币时，这是账户级证据，
+    // 优先级高于可能是公司或集团默认币种的单独币种列。4800 样例的
+    // 币种列全表为 USD，但辅助核算明确写着 RMB，不能把人民币户误判为外币户。
+    let explicitly_domestic = ["rmb", "cny", "人民币"]
+        .iter()
+        .any(|token| normalized_identity.contains(token));
+    let foreign = !explicitly_domestic
+        && (detect_foreign_currency(&identity).is_some()
+            || detect_foreign_currency(&account.currency).is_some());
     match auto_rate(&tier).filter(|_| !foreign) {
         Some(rate) => done(rate, "活期挂牌默认值"),
         None => ResolvedRate {
@@ -3200,7 +3206,6 @@ mod tests {
             "4800 测算结果: {}",
             serde_json::to_string_pretty(summary).unwrap()
         );
-
         // 期初余额直接来自 TB，不再倒推。
         assert_eq!(summary["openingSource"], "TB 年初余额");
         assert!(summary["hasInterestIncomeAccount"].as_bool().unwrap());
@@ -3487,6 +3492,9 @@ mod tests {
         // 人民币户不受影响，仍自动套活期挂牌。
         let rmb = AccountRow {
             account: "100201 RMB CMB-CPCSC-SH".into(),
+            // 一些 SAP 导出的独立币种列是公司默认币种，可能整列写 USD；
+            // 账户名上明确的 RMB 必须优先，否则人民币户也会被强制待填利率。
+            currency: "USD".into(),
             tier: "demand".into(),
             ..blank_row()
         };

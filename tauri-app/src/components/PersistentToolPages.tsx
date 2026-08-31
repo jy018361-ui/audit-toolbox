@@ -13,36 +13,54 @@ export function toolIdFromPathname(pathname: string): string | undefined {
 
 type PersistentToolPagesProps = {
   renderPage: (toolId: string) => ReactNode;
+  /** Running jobs remain mounted even when the normal hidden-page cap is hit. */
+  keepAliveToolIds?: string[];
+  maxHiddenPages?: number;
 };
 
 /**
- * Keeps every visited tool mounted for the lifetime of the app.
+ * Keeps a small LRU set of visited tools mounted.
  *
  * Tool pages own sizeable upload, mapping and job state. Replacing the child of
- * `/tools/:toolId` destroyed that state and detached its job listeners. Hidden
- * pages use both `hidden` and `inert`: effects can keep following their running
- * jobs, while their DOM cannot receive focus, pointer or keyboard interaction.
+ * `/tools/:toolId` immediately destroyed that state. Retaining every page,
+ * however, accumulated large tables and listeners for the whole app lifetime.
+ * The active page, two recent hidden pages, and pages with running jobs survive.
  */
-export function PersistentToolPages({ renderPage }: PersistentToolPagesProps) {
+export function PersistentToolPages({
+  renderPage,
+  keepAliveToolIds = [],
+  maxHiddenPages = 2,
+}: PersistentToolPagesProps) {
   const { pathname } = useLocation();
   const activeToolId = toolIdFromPathname(pathname);
   const [visitedToolIds, setVisitedToolIds] = useState<string[]>([]);
   const wrappers = useRef(new Map<string, HTMLDivElement>());
+  const keepAliveKey = [...new Set(keepAliveToolIds)].sort().join("\0");
+  const keepAlive = useMemo(
+    () => new Set(keepAliveKey ? keepAliveKey.split("\0") : []),
+    [keepAliveKey],
+  );
 
   useEffect(() => {
-    if (!activeToolId) return;
-    setVisitedToolIds((current) =>
-      current.includes(activeToolId) ? current : [...current, activeToolId],
-    );
-  }, [activeToolId]);
+    setVisitedToolIds((current) => {
+      const next = retainedToolIds(
+        current,
+        activeToolId,
+        keepAlive,
+        maxHiddenPages,
+      );
+      return arraysEqual(current, next) ? current : next;
+    });
+  }, [activeToolId, keepAlive, maxHiddenPages]);
 
   const mountedToolIds = useMemo(() => {
-    if (!activeToolId || visitedToolIds.includes(activeToolId))
-      return visitedToolIds;
-    // Render a directly opened tool immediately; the effect above then commits
-    // it to the persistent list for subsequent route changes.
-    return [...visitedToolIds, activeToolId];
-  }, [activeToolId, visitedToolIds]);
+    return retainedToolIds(
+      visitedToolIds,
+      activeToolId,
+      keepAlive,
+      maxHiddenPages,
+    );
+  }, [activeToolId, keepAlive, maxHiddenPages, visitedToolIds]);
 
   useEffect(() => {
     const focused = document.activeElement;
@@ -77,5 +95,36 @@ export function PersistentToolPages({ renderPage }: PersistentToolPagesProps) {
         );
       })}
     </>
+  );
+}
+
+export function retainedToolIds(
+  current: string[],
+  activeToolId: string | undefined,
+  keepAlive: ReadonlySet<string>,
+  maxHiddenPages: number,
+): string[] {
+  const next = [...new Set(current)];
+  if (activeToolId) {
+    const previous = next.indexOf(activeToolId);
+    if (previous >= 0) next.splice(previous, 1);
+    next.push(activeToolId);
+  }
+  const limit = Math.max(0, maxHiddenPages) + (activeToolId ? 1 : 0);
+  for (let index = 0; next.length > limit && index < next.length;) {
+    const toolId = next[index];
+    if (toolId === activeToolId || keepAlive.has(toolId)) {
+      index += 1;
+    } else {
+      next.splice(index, 1);
+    }
+  }
+  return next;
+}
+
+function arraysEqual(left: string[], right: string[]) {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
   );
 }

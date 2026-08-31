@@ -223,7 +223,7 @@ export function MappingPanel(props: MappingPanelProps) {
             } else update(column, role);
           }}
         >
-          <option value="">{toggleMode ? summary : "—"}</option>
+          <option value="">{toggleMode ? summary : "— 选择字段"}</option>
           {props.groups
             ? props.groups.map((group) => (
                 <optgroup

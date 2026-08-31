@@ -302,6 +302,10 @@ async fn engine_call(
         Ok(ledger_form_catalog(
             params.get("kind").and_then(Value::as_str).unwrap_or("tb"),
         ))
+    } else if method == "ledger.check_mapping_alignment" {
+        // TB与JE的跨表对齐是公共账表能力。`fx.*` 旧入口仍保留
+        // 兼容，新工具必须从 ledger 命名空间调用。
+        fx::check_mapping_alignment(&params)
     } else if method == "ledger.review_mapping" {
         let settings = storage.settings_get()?;
         let kind = params
@@ -692,6 +696,11 @@ fn history_get(storage: State<'_, Storage>) -> Result<Value, AppError> {
 }
 
 #[tauri::command]
+fn history_clear(storage: State<'_, Storage>) -> Result<Value, AppError> {
+    storage.history_clear()
+}
+
+#[tauri::command]
 fn audipick_pdf_bytes(
     storage: State<'_, Storage>,
     document_id: String,
@@ -947,6 +956,9 @@ pub fn engine_call_for_test(
                 .unwrap_or("tb"),
         ));
     }
+    if method == "ledger.check_mapping_alignment" {
+        return fx::check_mapping_alignment(&params);
+    }
     if method == "ledger.review_mapping" {
         let dirs = project_dirs()?;
         let storage = Storage::new(dirs.data_local_dir())?;
@@ -1080,6 +1092,7 @@ pub fn run() {
             settings_set,
             llm_test,
             history_get,
+            history_clear,
             audipick_pdf_bytes,
             secret_set,
             secret_delete,
@@ -1183,11 +1196,12 @@ mod tests {
     }
 
     #[test]
-    fn tbje核对的三条任务方法都能进任务通道() {
+    fn tbje核对的四条任务方法都能进任务通道() {
         for method in [
             "tbje_check.run",
             "tbje_check.run_batch",
             "tbje_check.export",
+            "tbje_check.export_batch",
         ] {
             assert!(is_direct_job_method(method), "{method}");
             assert!(

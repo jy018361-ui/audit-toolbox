@@ -470,6 +470,7 @@ pub(crate) const SUPPORTED_JOB_METHODS: &[&str] = &[
     "tbje_check.run",
     "tbje_check.run_batch",
     "tbje_check.export",
+    "tbje_check.export_batch",
 ];
 
 fn is_supported_job_method(method: &str) -> bool {

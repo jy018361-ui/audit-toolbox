@@ -124,10 +124,50 @@
   font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
   color: var(--ink);
   background: var(--surface-page);
+  color-scheme: light;
+  --scrollbar-track: var(--surface-page);
+  --scrollbar-thumb: color-mix(in srgb, var(--text-muted) 48%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--brand-accent) 78%, transparent);
   font-synthesis: none;
 }
 * {
   box-sizing: border-box;
+}
+
+/* WebView2 的 Windows 原生轨道默认是白色。显式让轨道借用所在界面
+   的背景色，并把滑块收为无边细圆角，避免主题之间出现突兀的白色沟槽。 */
+html,
+body,
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background-color: var(--scrollbar-track);
+  border: 0;
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 36px;
+  border: 3px solid transparent;
+  border-radius: var(--r-pill);
+  background-color: var(--scrollbar-thumb);
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
 }
 /*
  * 这里原来挂着 overflow-x: hidden。它不是"防止出横向滚动条"，而是把超出视口的内容
@@ -176,6 +216,9 @@ summary:focus-visible {
   flex-direction: column;
   padding: var(--sp-5) var(--sp-4);
   background: var(--brand-deep);
+  --scrollbar-track: var(--brand-deep);
+  --scrollbar-thumb: color-mix(in srgb, var(--on-dark-muted) 54%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--on-dark) 74%, transparent);
   color: var(--on-brand-deep, var(--ink-inverse));
   overflow: auto;
 }
@@ -2090,6 +2133,7 @@ summary:focus-visible {
   --accent-foreground: #245158;
 }
 [data-theme="classic-dark"] {
+  color-scheme: dark;
   --brand: #c4933b;
   --brand-deep: #141617;
   --brand-soft: #35312a;
@@ -2335,6 +2379,7 @@ summary:focus-visible {
   --danger-border: #dcb3ad;
 }
 [data-theme="teal-dark"] {
+  color-scheme: dark;
   --brand: #5aa99b;
   --brand-deep: #0e2525;
   --brand-soft: #1d4542;

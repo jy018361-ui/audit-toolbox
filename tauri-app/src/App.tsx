@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, ReactElement } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, ComponentType, ReactElement } from "react";
 import { NavLink, Navigate, Route, Routes, useParams } from "react-router-dom";
 import {
   appBootstrap,
   engineCall,
   historyGet,
+  historyClear,
+  invalidateHistoryCache,
   jobCancel,
   jobStart,
   legacyImport,
@@ -26,17 +28,6 @@ import {
   type FieldDefinition,
 } from "./toolDefinitions";
 import type { Bootstrap, JobEvent, ToolManifest } from "./types";
-import { TsManagerParityPage } from "./TsManagerParityPage";
-import { TbjeCheckPage } from "./TbjeCheckPage";
-import ConfirmationProgressPage from "./ConfirmationProgressPage";
-import FileListDirectoryPage from "./FileListDirectoryPage";
-import PdfToExcelPage from "./PdfToExcelPage";
-import { KanzhangParityPage } from "./KanzhangParityPage";
-import { JeSignMarkPage } from "./JeSignMarkPage";
-import { FaListPage } from "./FaListPage";
-import { ExcelMergerPage } from "./ExcelMergerPage";
-import { AudiPickPage } from "./AudiPickPage";
-import { WpServicePage } from "./WpServicePage";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageHeader } from "@/components/PageHeader";
 import { WindowControls } from "@/components/WindowControls";
@@ -45,18 +36,94 @@ import { JobDialogProvider } from "@/components/JobDialog";
 import { SyncBusyDialog } from "@/components/SyncBusyDialog";
 import { StepIndicator } from "@/components/StepIndicator";
 import { ResultView } from "@/components/ResultView";
-import { RollForwardPage } from "./RollForwardPage";
-import { FxAuditPage } from "./FxAuditPage";
-import { LoanInterestPage } from "./LoanInterestPage";
-import { DepositInterestPage } from "./DepositInterestPage";
-import { FuzzyMatchPage } from "./FuzzyMatchPage";
-import { FaDepCalcPage } from "./FaDepCalcPage";
-import { FaPolicyComparePage } from "./FaPolicyComparePage";
 import { applyReadableForegrounds } from "./theme";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
+
+const TsManagerParityPage = lazy(() =>
+  import("./TsManagerParityPage").then((m) => ({
+    default: m.TsManagerParityPage,
+  })),
+);
+const TbjeCheckPage = lazy(() =>
+  import("./TbjeCheckPage").then((m) => ({ default: m.TbjeCheckPage })),
+);
+const ConfirmationProgressPage = lazy(
+  () => import("./ConfirmationProgressPage"),
+);
+const FileListDirectoryPage = lazy(() => import("./FileListDirectoryPage"));
+const PdfToExcelPage = lazy(() => import("./PdfToExcelPage"));
+const KanzhangParityPage = lazy(() =>
+  import("./KanzhangParityPage").then((m) => ({
+    default: m.KanzhangParityPage,
+  })),
+);
+const JeSignMarkPage = lazy(() =>
+  import("./JeSignMarkPage").then((m) => ({ default: m.JeSignMarkPage })),
+);
+const FaListPage = lazy(() =>
+  import("./FaListPage").then((m) => ({ default: m.FaListPage })),
+);
+const ExcelMergerPage = lazy(() =>
+  import("./ExcelMergerPage").then((m) => ({ default: m.ExcelMergerPage })),
+);
+const AudiPickPage = lazy(() =>
+  import("./AudiPickPage").then((m) => ({ default: m.AudiPickPage })),
+);
+const WpServicePage = lazy(() =>
+  import("./WpServicePage").then((m) => ({ default: m.WpServicePage })),
+);
+const RollForwardPage = lazy(() =>
+  import("./RollForwardPage").then((m) => ({ default: m.RollForwardPage })),
+);
+const FxAuditPage = lazy(() =>
+  import("./FxAuditPage").then((m) => ({ default: m.FxAuditPage })),
+);
+const LoanInterestPage = lazy(() =>
+  import("./LoanInterestPage").then((m) => ({ default: m.LoanInterestPage })),
+);
+const DepositInterestPage = lazy(() =>
+  import("./DepositInterestPage").then((m) => ({
+    default: m.DepositInterestPage,
+  })),
+);
+const FuzzyMatchPage = lazy(() =>
+  import("./FuzzyMatchPage").then((m) => ({ default: m.FuzzyMatchPage })),
+);
+const FaDepCalcPage = lazy(() =>
+  import("./FaDepCalcPage").then((m) => ({ default: m.FaDepCalcPage })),
+);
+const FaPolicyComparePage = lazy(() =>
+  import("./FaPolicyComparePage").then((m) => ({
+    default: m.FaPolicyComparePage,
+  })),
+);
+
+const DEDICATED_TOOL_PAGES: Record<
+  string,
+  ComponentType<{ tool: ToolManifest }>
+> = {
+  Excel_Merger: ExcelMergerPage,
+  wp_service_generator: WpServicePage,
+  fa_list: FaListPage,
+  audipick: AudiPickPage,
+  ts_manager: TsManagerParityPage,
+  tbje_check: TbjeCheckPage,
+  confirmation_progress: ConfirmationProgressPage,
+  file_list_directory: FileListDirectoryPage,
+  pdf_to_excel: PdfToExcelPage,
+  kanzhang: KanzhangParityPage,
+  je_sign_mark: JeSignMarkPage,
+  audit_roll_forward: RollForwardPage,
+  fx_audit: FxAuditPage,
+  loan_interest: LoanInterestPage,
+  deposit_interest: DepositInterestPage,
+  fuzzy_match: FuzzyMatchPage,
+  fa_dep_calc: FaDepCalcPage,
+  fa_policy_compare: FaPolicyComparePage,
+};
 
 const NAV = [
   { to: "/", label: "工作台" },
@@ -260,9 +327,10 @@ export default function App() {
       })
       .catch((error) => setStartupError(appErrorText(error)))
       .finally(() => setStartupReady(true));
-    void listenJobEvents((e) => setJobs((v) => ({ ...v, [e.jobId]: e }))).catch(
-      () => undefined,
-    );
+    void listenJobEvents((e) => {
+      invalidateHistoryCache();
+      setJobs((v) => ({ ...v, [e.jobId]: e }));
+    }).catch(() => undefined);
   }, []);
   // 开发窗口和安装版界面完全一样，曾在验证新功能时被误认（拿了没有新代码的
   // 安装版当开发窗口测）。开发模式下把窗口标题和侧边栏都打上「开发版」标记。
@@ -474,6 +542,12 @@ export default function App() {
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
               <PersistentToolPages
+                keepAliveToolIds={Object.values(jobs)
+                  .filter(
+                    (job) =>
+                      !["completed", "failed", "cancelled"].includes(job.phase),
+                  )
+                  .map((job) => job.toolId)}
                 renderPage={(toolId) => (
                   <ToolPage catalog={catalog} toolId={toolId} />
                 )}
@@ -493,6 +567,18 @@ function AppLoading() {
       <div>
         <strong>正在准备审计工具箱…</strong>
         <p>正在连接工具目录与本地运行环境。</p>
+      </div>
+    </div>
+  );
+}
+
+function ToolPageLoading() {
+  return (
+    <div className="app-loading" role="status" aria-live="polite">
+      <span className="loading-dot" aria-hidden="true" />
+      <div>
+        <strong>正在打开工具…</strong>
+        <p>首次使用时加载对应模块，之后会直接复用。</p>
       </div>
     </div>
   );
@@ -668,28 +754,13 @@ function ToolPage({
   }, []);
   if (!tool || !def)
     return <SimplePage title="工具不存在" text="工具登记信息尚未加载。" />;
-  if (tool.id === "Excel_Merger") return <ExcelMergerPage tool={tool} />;
-  if (tool.id === "wp_service_generator") return <WpServicePage tool={tool} />;
-  if (tool.id === "fa_list") return <FaListPage tool={tool} />;
-  if (tool.id === "audipick") return <AudiPickPage tool={tool} />;
-  if (tool.id === "ts_manager") return <TsManagerParityPage tool={tool} />;
-  if (tool.id === "tbje_check") return <TbjeCheckPage tool={tool} />;
-  if (tool.id === "confirmation_progress")
-    return <ConfirmationProgressPage tool={tool} />;
-  if (tool.id === "file_list_directory")
-    return <FileListDirectoryPage tool={tool} />;
-  if (tool.id === "pdf_to_excel") return <PdfToExcelPage tool={tool} />;
-  if (tool.id === "kanzhang") return <KanzhangParityPage tool={tool} />;
-  if (tool.id === "je_sign_mark") return <JeSignMarkPage tool={tool} />;
-  if (tool.id === "audit_roll_forward") return <RollForwardPage tool={tool} />;
-  if (tool.id === "fx_audit") return <FxAuditPage tool={tool} />;
-  if (tool.id === "loan_interest") return <LoanInterestPage tool={tool} />;
-  if (tool.id === "deposit_interest")
-    return <DepositInterestPage tool={tool} />;
-  if (tool.id === "fuzzy_match") return <FuzzyMatchPage tool={tool} />;
-  if (tool.id === "fa_dep_calc") return <FaDepCalcPage tool={tool} />;
-  if (tool.id === "fa_policy_compare")
-    return <FaPolicyComparePage tool={tool} />;
+  const DedicatedPage = DEDICATED_TOOL_PAGES[tool.id];
+  if (DedicatedPage)
+    return (
+      <Suspense fallback={<ToolPageLoading />}>
+        <DedicatedPage tool={tool} />
+      </Suspense>
+    );
   async function run(action: ActionDefinition) {
     setError("");
     setResult(undefined);
@@ -1001,6 +1072,7 @@ export function Settings({
   const [cacheBusy, setCacheBusy] = useState(false);
   const [cacheMessage, setCacheMessage] = useState("");
   const [cacheStatError, setCacheStatError] = useState("");
+  const [clearHistoryWithCache, setClearHistoryWithCache] = useState(false);
   const refreshCacheStat = () =>
     engineCall("cache.stat", {})
       .then((v) => {
@@ -1294,7 +1366,11 @@ export function Settings({
             </Button>
           </div>
           {updateStatus && (
-            <p role="status" aria-live="polite" className="settings-update-status">
+            <p
+              role="status"
+              aria-live="polite"
+              className="settings-update-status"
+            >
               {updateStatus}
             </p>
           )}
@@ -1635,35 +1711,63 @@ export function Settings({
                 <option value="off">不自动清理</option>
               </select>
             </label>
+            <label className="field checkbox-field">
+              <span>清理范围</span>
+              <span>
+                <input
+                  type="checkbox"
+                  checked={clearHistoryWithCache}
+                  onChange={(event) =>
+                    setClearHistoryWithCache(event.target.checked)
+                  }
+                />{" "}
+                同时清除历史记录
+              </span>
+            </label>
             <div className="actions">
               <button
                 className="secondary"
-                disabled={cacheBusy || cacheStat?.bytes === 0}
+                disabled={
+                  cacheBusy ||
+                  ((cacheStat?.bytes ?? 0) === 0 && !clearHistoryWithCache)
+                }
                 onClick={() => {
                   setCacheBusy(true);
                   setCacheMessage("");
-                  void engineCall("cache.clear", {})
-                    .then((v) => {
-                      const r = v as {
-                        removed: number;
-                        freed: number;
-                        failed: number;
-                      };
-                      setCacheMessage(
-                        `已清理 ${r.removed} 个文件，释放 ${formatBytes(r.freed)}` +
-                          (r.failed ? `；${r.failed} 个正在使用，未清理` : ""),
-                      );
-                      return refreshCacheStat();
-                    })
-                    .catch((e) => setCacheMessage(String(e)))
-                    .finally(() => setCacheBusy(false));
+                  void (async () => {
+                    try {
+                      let text = "";
+                      if ((cacheStat?.bytes ?? 0) > 0) {
+                        const r = (await engineCall("cache.clear", {})) as {
+                          removed: number;
+                          freed: number;
+                          failed: number;
+                        };
+                        text =
+                          `已清理 ${r.removed} 个缓存文件，释放 ${formatBytes(r.freed)}` +
+                          (r.failed ? `；${r.failed} 个正在使用，未清理` : "");
+                      }
+                      if (clearHistoryWithCache) {
+                        const history = await historyClear();
+                        text += `${text ? "；" : ""}已清除 ${history.removed} 条历史记录`;
+                      }
+                      setCacheMessage(text || "没有需要清理的数据。");
+                      await refreshCacheStat();
+                    } catch (error) {
+                      setCacheMessage(appErrorText(error));
+                    } finally {
+                      setCacheBusy(false);
+                    }
+                  })();
                 }}
               >
                 {cacheBusy
                   ? "清理中…"
-                  : cacheStat && cacheStat.bytes > 0
-                    ? `立刻清理全部（${formatBytes(cacheStat.bytes)}）`
-                    : "立刻清理全部"}
+                  : clearHistoryWithCache
+                    ? `清理缓存和历史记录${cacheStat && cacheStat.bytes > 0 ? `（缓存 ${formatBytes(cacheStat.bytes)}）` : ""}`
+                    : cacheStat && cacheStat.bytes > 0
+                      ? `立刻清理全部缓存（${formatBytes(cacheStat.bytes)}）`
+                      : "立刻清理全部缓存"}
               </button>
             </div>
             {cacheMessage && <p className="cache-result">{cacheMessage}</p>}

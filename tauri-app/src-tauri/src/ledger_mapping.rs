@@ -12,6 +12,102 @@
 use chrono::{NaiveDate, NaiveDateTime};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+/// TB与JE跨表对齐的公共结论。这是账表引擎能力，不属于汇兑损益业务。
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AccountColumnAlignment {
+    pub(crate) je_column: String,
+    pub(crate) tb_column: String,
+    pub(crate) overlap: usize,
+    pub(crate) ratio: f64,
+}
+
+fn account_values(rows: &[Vec<String>], index: usize, limit: usize) -> HashSet<String> {
+    rows.iter()
+        .take(limit)
+        .filter_map(|row| row.get(index))
+        .map(|value| account_code_of(value).trim().to_uppercase())
+        .filter(|value| {
+            value.len() >= 3
+                && value.len() <= 24
+                && value.chars().any(|c| c.is_ascii_digit())
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        })
+        .collect()
+}
+
+/// 在两张账表中找出取值真正能对上的科目编码列。
+///
+/// 列名只能说明“像什么”；真正的科目列还必须有足够的非空编码，
+/// 并且与另一张表有显著交集。混写的 `1001:库存现金` 会先拆出编码再比。
+pub(crate) fn align_account_code_columns(
+    je_headers: &[String],
+    je_rows: &[Vec<String>],
+    tb_headers: &[String],
+    tb_rows: &[Vec<String>],
+) -> Option<AccountColumnAlignment> {
+    const MAX_ROWS: usize = 100_000;
+    let je = je_headers
+        .iter()
+        .enumerate()
+        .map(|(index, header)| (header, account_values(je_rows, index, MAX_ROWS)))
+        .filter(|(_, values)| values.len() >= 2)
+        .collect::<Vec<_>>();
+    let tb = tb_headers
+        .iter()
+        .enumerate()
+        .map(|(index, header)| (header, account_values(tb_rows, index, MAX_ROWS)))
+        .filter(|(_, values)| values.len() >= 2)
+        .collect::<Vec<_>>();
+    let mut best: Option<AccountColumnAlignment> = None;
+    for (je_header, je_values) in &je {
+        for (tb_header, tb_values) in &tb {
+            let overlap = je_values.intersection(tb_values).count();
+            if overlap < 2 {
+                continue;
+            }
+            let ratio = overlap as f64 / je_values.len().min(tb_values.len()) as f64;
+            // 大表要求足够交集；小账套只有少量科目时允许两个编码举证。
+            if ratio < 0.60 {
+                continue;
+            }
+            let candidate = AccountColumnAlignment {
+                je_column: (*je_header).clone(),
+                tb_column: (*tb_header).clone(),
+                overlap,
+                ratio,
+            };
+            if best.as_ref().is_none_or(|current| {
+                candidate.ratio > current.ratio
+                    || (candidate.ratio == current.ratio && candidate.overlap > current.overlap)
+            }) {
+                best = Some(candidate);
+            }
+        }
+    }
+    best
+}
+
+pub(crate) fn mapped_account_overlap(
+    je_headers: &[String],
+    je_rows: &[Vec<String>],
+    je_column: &str,
+    tb_headers: &[String],
+    tb_rows: &[Vec<String>],
+    tb_column: &str,
+) -> (usize, usize, usize) {
+    let Some(je_index) = je_headers.iter().position(|header| header == je_column) else {
+        return (0, 0, 0);
+    };
+    let Some(tb_index) = tb_headers.iter().position(|header| header == tb_column) else {
+        return (0, 0, 0);
+    };
+    let je = account_values(je_rows, je_index, 100_000);
+    let tb = account_values(tb_rows, tb_index, 100_000);
+    (je.intersection(&tb).count(), je.len(), tb.len())
+}
+
 // ────────────────────────────── 角色词汇表 ──────────────────────────────
 
 /// 一个业务字段在映射面板上的完整定义。
@@ -2165,7 +2261,7 @@ const TB_AMOUNT_ROLES: &[&str] = &[
 
 /// 汇总行勾稽向前／向后最多扫描多少行。一个一级科目下的明细行数远小于这个数，
 /// 放大只会增加「偶然凑出相等」的机会。
-const ROLLUP_SCAN_LIMIT: usize = 256;
+const ROLLUP_SCAN_LIMIT: usize = 4096;
 
 /// 金额相等的判定。TB 金额都是两位小数，半分钱的容差足够吸收浮点误差，
 /// 又不会把真实差异（最小 0.01）判成相等。
@@ -2329,18 +2425,17 @@ pub(crate) fn ledger_junk_mask(
 ///
 /// 汇总行有三条互补的识别路径，缺一条就会有一类样例静默算重：
 ///
-/// 1. **编码前缀**：同一主体内 `1002` 与 `10020001` 并存时前者是汇总行。
-///    这是最可靠的一条，但只在父子编码写在同一列时成立。
+/// 1. **编码层级**：同一主体内 `1002` 与 `10020001` 并存时形成父子候选，
+///    但只有期初、期末、借方、贷方的语义金额都可靠勾稽才排除父项。
 /// 2. **合计标签**：科目编码列或名称列整格写着「合计」「损益小计」。
 /// 3. **金额勾稽**：某行在**所有**已映射金额列上都等于相邻连续若干行之和。
 ///    这条覆盖前两条都够不着的形态——父行与辅助核算明细行**编码完全相同**
 ///    （`1121.01` 既是银行承兑汇票汇总行，也是它下面每个客户的明细行）、
 ///    父子编码分列写、小计行编码列留空。
 ///
-/// 勾稽成立时**剔除没有科目编码的那一侧**：核算维度明细行没有编码、
-/// 对不上序时账，留有编码的父行才有用；反过来小计行没有编码而明细行有，
-/// 那就删小计行。同一编码因币种拆成多行时谁也不等于另几行之和，勾稽不触发，
-/// 三行都留下。
+/// 勾稽成立时，同编码的汇总／辅助明细保留汇总行；核算维度明细没有编码时
+/// 同样保留有编码的父行；反过来小计行没有编码而明细行有，就删小计行。
+/// 同一编码因币种拆成多行时按币种隔离，互不构成汇总关系。
 ///
 /// 所有读取 TB 的工具都必须调用这里，业务模块不得各自实现一份“末级科目”规则。
 pub(crate) fn tb_leaf_mask(
@@ -2397,6 +2492,23 @@ pub(crate) fn tb_leaf_mask(
             )
         })
         .collect::<Vec<_>>();
+    // 有些 ERP 的上级科目编码并不是下级编码的字面前缀（真实 03 号样例：
+    // 一级 `5302` 对应二级 `5301020000`），但表内另有可靠的「级次」列。
+    // 级次仅作为父子结构证据，仍须所有语义金额完整勾稽才会排除汇总行。
+    let level_index = headers.iter().position(|header| {
+        matches!(
+            normalize_header(header).as_str(),
+            "级次" | "科目级次" | "层级" | "科目层级" | "级别" | "科目级别"
+        )
+    });
+    let levels = rows
+        .iter()
+        .map(|row| {
+            level_index
+                .and_then(|index| row.get(index))
+                .and_then(|value| value.trim().parse::<u32>().ok())
+        })
+        .collect::<Vec<_>>();
 
     // ⓪ 没有身份的噪声行先剔掉，再谈层级——否则表尾那串只有金额的草稿行
     // 会混进勾稽，凑出根本不存在的父子关系。
@@ -2405,30 +2517,9 @@ pub(crate) fn tb_leaf_mask(
         .map(|keep| !keep)
         .collect::<Vec<bool>>();
 
-    // ① 编码前缀。同一主体内按编码排序后，上下级必然相邻出现。
-    let mut by_entity = BTreeMap::<String, BTreeSet<String>>::new();
-    for (entity, code) in &identities {
-        if !code.is_empty() {
-            by_entity
-                .entry(entity.clone())
-                .or_default()
-                .insert(code.clone());
-        }
-    }
-    let mut parents = HashSet::<(String, String)>::new();
-    for (entity, codes) in by_entity {
-        let codes = codes.into_iter().collect::<Vec<_>>();
-        for pair in codes.windows(2) {
-            if is_ancestor_code(&pair[0], &pair[1]) {
-                parents.insert((entity.clone(), pair[0].clone()));
-            }
-        }
-    }
-    for (index, identity) in identities.iter().enumerate() {
-        if !identity.1.is_empty() && parents.contains(identity) {
-            rollup[index] = true;
-        }
-    }
+    // ① 编码前缀只作为后面金额勾稽的结构证据，不能在这里直接删除父项。
+    // 03 号样例的 `5302` 父项自身有余额而下级全为零：看到更长编码就剔除父项，
+    // 会把真实余额静默丢掉并制造 BS/PL 不平。金额无法完整勾稽时必须原样保留。
 
     // ② 合计标签。编码列与名称列都看——各家系统把「合计」写在哪一列全凭喜好。
     let label_indexes = {
@@ -2448,20 +2539,11 @@ pub(crate) fn tb_leaf_mask(
         }
     }
 
-    // ③ 金额勾稽。至少要有两列金额才做——单列相等太容易撞上。
+    // ③ 金额勾稽。余额必须先折成借正贷负的净额再比较，发生额仍按借、贷
+    // 两侧分别比较。01 号样例的父行把期初 150 借 / 50 贷净额列成 100 借，
+    // 辅助核算明细却保留两侧毛额；逐原始列比较会漏掉这层汇总并把发生额算重。
     if amount_indexes.len() >= 2 {
-        let values = amount_indexes
-            .iter()
-            .map(|index| {
-                rows.iter()
-                    .map(|row| {
-                        row.get(*index)
-                            .and_then(|v| parse_amount(v).ok().flatten())
-                            .unwrap_or(0.0)
-                    })
-                    .collect::<Vec<f64>>()
-            })
-            .collect::<Vec<_>>();
+        let values = rollup_value_columns(headers, rows, column_of);
         // 同一科目按币种拆成多行时，各行之间是**平行**关系，不是父子。02 号样例
         // 有一批科目的 CNY 行与 USD 行四个金额列数值完全相同（只有方向列一个
         // 记贷一个记借），光比金额会把 CNY 行判成 USD 行的汇总。
@@ -2479,10 +2561,203 @@ pub(crate) fn tb_leaf_mask(
             .iter()
             .map(|row| joined(row, &currency_indexes))
             .collect::<Vec<_>>();
-        mark_rollup_by_sum(&identities, &currencies, &values, &mut rollup);
+        if values.len() >= 2 {
+            // 全零的父科目即使不等于下级发生额之和，排除它也不会造成
+            // 任何金额丢失。存款利息等只需末级科目的工具依赖这条：
+            // `6603` 零值汇总行不进测算，`66030101` 末级行仍保留。
+            mark_zero_value_parents(&identities, &currencies, &levels, &values, &mut rollup);
+            mark_rollup_by_sum(&identities, &currencies, &levels, &values, &mut rollup);
+            // 真实TB常有多层结构：辅助明细先汇成末级科目，末级科目再汇成上级。
+            // 第一轮先锁住同编码的局部关系；随后仅拿仍保留的行再勾稽，由内向外
+            // 折叠。每轮都映射回原始行号，源数据和导出行号不变。
+            for _ in 0..4 {
+                let kept = rollup
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, excluded)| (!*excluded).then_some(index))
+                    .collect::<Vec<_>>();
+                if kept.len() < 2 {
+                    break;
+                }
+                let compact_identities = kept
+                    .iter()
+                    .map(|index| identities[*index].clone())
+                    .collect::<Vec<_>>();
+                let compact_currencies = kept
+                    .iter()
+                    .map(|index| currencies[*index].clone())
+                    .collect::<Vec<_>>();
+                let compact_levels = kept.iter().map(|index| levels[*index]).collect::<Vec<_>>();
+                let compact_values = values
+                    .iter()
+                    .map(|column| kept.iter().map(|index| column[*index]).collect::<Vec<_>>())
+                    .collect::<Vec<_>>();
+                let mut compact_rollup = vec![false; kept.len()];
+                mark_rollup_by_sum(
+                    &compact_identities,
+                    &compact_currencies,
+                    &compact_levels,
+                    &compact_values,
+                    &mut compact_rollup,
+                );
+                let removed = compact_rollup.iter().filter(|value| **value).count();
+                if removed == 0 {
+                    break;
+                }
+                for (compact_index, excluded) in compact_rollup.into_iter().enumerate() {
+                    if excluded {
+                        rollup[kept[compact_index]] = true;
+                    }
+                }
+            }
+        }
     }
 
     rollup.iter().map(|v| !v).collect()
+}
+
+fn mark_zero_value_parents(
+    identities: &[(String, String)],
+    currencies: &[String],
+    levels: &[Option<u32>],
+    values: &[Vec<f64>],
+    rollup: &mut [bool],
+) {
+    for anchor in 0..rollup.len() {
+        if rollup[anchor]
+            || identities[anchor].1.is_empty()
+            || !values.iter().all(|column| column[anchor].abs() <= 0.005)
+        {
+            continue;
+        }
+        let parent_code = &identities[anchor].1;
+        for cursor in (anchor + 1)..rollup.len().min(anchor + 1 + ROLLUP_SCAN_LIMIT) {
+            if identities[cursor].0 != identities[anchor].0
+                || currencies[cursor] != currencies[anchor]
+            {
+                break;
+            }
+            let child_code = &identities[cursor].1;
+            let by_code = !child_code.is_empty() && is_ancestor_code(parent_code, child_code);
+            let by_level = matches!(
+                (levels[anchor], levels[cursor]),
+                (Some(parent), Some(child)) if child > parent
+            );
+            if by_code || by_level {
+                rollup[anchor] = true;
+                break;
+            }
+            if !child_code.is_empty() {
+                break;
+            }
+        }
+    }
+}
+
+/// 把 TB 的金额形态规范成汇总勾稽需要的业务口径：期初／期末余额各一列净额，
+/// 本年／本期发生额各保留借贷两列。这里直接复用公共符号与余额方向内核，避免
+/// 汇总识别再维护一套“贷方到底加还是减”的猜测。
+fn rollup_value_columns(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<Vec<f64>> {
+    let index_of = |role: &str| {
+        column_of(role)
+            .iter()
+            .find_map(|name| header_index(headers, name))
+    };
+    let convention = detect_tb_sign_convention(headers, rows, column_of)
+        .convention
+        .unwrap_or(SignConvention::Unsigned);
+    let number = |row: &[String], index: usize| {
+        row.get(index)
+            .and_then(|value| parse_amount(value).ok().flatten())
+            .unwrap_or(0.0)
+    };
+    let direction_index = |prefix: &str| {
+        let base = prefix
+            .strip_suffix("Functional")
+            .or_else(|| prefix.strip_suffix("Foreign"))
+            .unwrap_or(prefix);
+        index_of(&format!("{base}Direction")).or_else(|| index_of("direction"))
+    };
+
+    let mut values = Vec::<Vec<f64>>::new();
+    for prefix in [
+        "openingFunctional",
+        "openingForeign",
+        "closingFunctional",
+        "closingForeign",
+    ] {
+        let debit = index_of(&format!("{prefix}Debit"));
+        let credit = index_of(&format!("{prefix}Credit"));
+        let amount = index_of(&format!("{prefix}Amount"));
+        let direction = direction_index(prefix);
+        let self_signed = balance_self_signed(headers, rows, column_of, prefix);
+        let column = match (debit, credit, amount) {
+            (Some(debit), Some(credit), _) => Some(
+                rows.iter()
+                    .map(|row| {
+                        let input = AmountInputs {
+                            debit: Some(number(row, debit)),
+                            credit: Some(number(row, credit)),
+                            ..Default::default()
+                        };
+                        signed_balance(&input, convention, false)
+                    })
+                    .collect(),
+            ),
+            (_, _, Some(amount)) => Some(
+                rows.iter()
+                    .map(|row| {
+                        let input = AmountInputs {
+                            amount: Some(number(row, amount)),
+                            direction: direction.and_then(|index| row.get(index).cloned()),
+                            ..Default::default()
+                        };
+                        signed_balance(&input, convention, self_signed)
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        };
+        if let Some(column) = column {
+            values.push(column);
+        }
+    }
+
+    for prefix in ["ytdFunctional", "ytdForeign", "periodFunctional"] {
+        let debit = index_of(&format!("{prefix}Debit"));
+        let credit = index_of(&format!("{prefix}Credit"));
+        let amount = index_of(&format!("{prefix}Amount"));
+        let direction = direction_index(prefix);
+        if debit.is_none() && credit.is_none() && amount.is_none() {
+            continue;
+        }
+        let sides = rows
+            .iter()
+            .map(|row| {
+                let input = match (debit, credit, amount) {
+                    (Some(debit), Some(credit), _) => AmountInputs {
+                        debit: Some(number(row, debit)),
+                        credit: Some(number(row, credit)),
+                        ..Default::default()
+                    },
+                    (_, _, Some(amount)) => AmountInputs {
+                        amount: Some(number(row, amount)),
+                        direction: direction.and_then(|index| row.get(index).cloned()),
+                        ..Default::default()
+                    },
+                    _ => AmountInputs::default(),
+                };
+                side_amounts(&input, convention)
+            })
+            .collect::<Vec<_>>();
+        values.push(sides.iter().map(|(debit, _)| *debit).collect());
+        values.push(sides.iter().map(|(_, credit)| *credit).collect());
+    }
+    values
 }
 
 /// 金额勾稽：找出「本行 = 相邻连续若干行之和」的行组，剔除其中一侧。
@@ -2492,21 +2767,32 @@ pub(crate) fn tb_leaf_mask(
 fn mark_rollup_by_sum(
     identities: &[(String, String)],
     currencies: &[String],
+    levels: &[Option<u32>],
     values: &[Vec<f64>],
     rollup: &mut [bool],
 ) {
     let len = rollup.len();
-    // 该行在所有金额列上是否全为零。全零行既不该当汇总行，也不该当被加数——
-    // 否则空行会和空行互相勾稽成立。
+    // 该行在所有金额列上是否全为零。全零行不能当汇总锚点，否则空行会和
+    // 空行互相勾稽成立。
     let all_zero = |index: usize| values.iter().all(|column| column[index].abs() <= 0.005);
+    #[derive(Clone)]
+    struct Candidate {
+        anchor: usize,
+        members: Vec<usize>,
+        same_code: bool,
+        single_same_code: bool,
+    }
+    let original_rollup = rollup.to_vec();
+    let mut candidates = Vec::<Candidate>::new();
     for forward in [true, false] {
         for step in 0..len {
             let anchor = if forward { step } else { len - 1 - step };
-            if rollup[anchor] || all_zero(anchor) {
+            if original_rollup[anchor] || all_zero(anchor) {
                 continue;
             }
             let mut sums = vec![0.0; values.len()];
             let mut taken = 0usize;
+            let mut best = None::<Candidate>;
             for offset in 1..=ROLLUP_SCAN_LIMIT {
                 let Some(cursor) = (if forward {
                     anchor.checked_add(offset).filter(|c| *c < len)
@@ -2515,10 +2801,26 @@ fn mark_rollup_by_sum(
                 }) else {
                     break;
                 };
-                // 跨主体、跨币种、或撞上另一个已判定的汇总行，就不再是同一组了。
+                // 跨主体或跨币种就不再是同一组。已经带“小计/合计”标签的行仍可
+                // 作为上层汇总的成员：真实TB会同时列“科目总计、方向小计、辅助
+                // 明细”，若在方向小计处直接截断，三行金额本可完整勾稽却会被漏掉。
                 if identities[cursor].0 != identities[anchor].0
                     || currencies[cursor] != currencies[anchor]
-                    || rollup[cursor]
+                {
+                    break;
+                }
+                let anchor_code = &identities[anchor].1;
+                let cursor_code = &identities[cursor].1;
+                let explicit_child = matches!(
+                    (levels.get(anchor).copied().flatten(), levels.get(cursor).copied().flatten()),
+                    (Some(parent), Some(child)) if child > parent
+                );
+                if !anchor_code.is_empty()
+                    && !cursor_code.is_empty()
+                    && cursor_code != anchor_code
+                    && !is_ancestor_code(anchor_code, cursor_code)
+                    && !is_ancestor_code(cursor_code, anchor_code)
+                    && !explicit_child
                 {
                     break;
                 }
@@ -2536,37 +2838,99 @@ fn mark_rollup_by_sum(
                 if !matched {
                     continue;
                 }
-                // 只累加了一行时「A = B」这个证据太弱：一借一贷金额相同在会计里
-                // 是常态。02 号样例真实踩到——`交易性金融资产-成本` 12 万借方与
-                // `交易性金融资产-公允价值变动` 12 万贷方是**两个平级科目**，
-                // 四个金额列一模一样。这时要求两行编码相同（同一科目的汇总行与
-                // 辅助核算明细行）或确有上下级关系，才认这条勾稽。
-                let single = if forward { anchor + 1 } else { anchor - 1 };
-                if taken == 1 {
-                    let (a, b) = (&identities[anchor].1, &identities[single].1);
-                    if a != b && !is_ancestor_code(a, b) && !is_ancestor_code(b, a) {
-                        continue;
-                    }
-                }
-                // 勾稽成立。剔除没有科目编码的那一侧：核算维度明细行没有编码、
-                // 对不上序时账，这时要留下有编码的汇总行；小计行没有编码而
-                // 明细行有，那就删小计行。两侧都有编码时删汇总行。
                 let members = if forward {
-                    (anchor + 1)..=(anchor + taken)
+                    ((anchor + 1)..=(anchor + taken)).collect::<Vec<_>>()
                 } else {
-                    (anchor - taken)..=(anchor - 1)
+                    ((anchor - taken)..=(anchor - 1)).collect::<Vec<_>>()
                 };
-                let anchor_has_code = !identities[anchor].1.is_empty();
-                let members_have_code = members.clone().any(|i| !identities[i].1.is_empty());
-                if anchor_has_code && !members_have_code {
-                    for i in members {
-                        rollup[i] = true;
-                    }
-                } else {
-                    rollup[anchor] = true;
+                let anchor_code = &identities[anchor].1;
+                let member_codes = members
+                    .iter()
+                    .map(|index| identities[*index].1.as_str())
+                    .filter(|code| !code.is_empty())
+                    .collect::<Vec<_>>();
+                let blank_side = anchor_code.is_empty() || member_codes.is_empty();
+                let same_code = !anchor_code.is_empty()
+                    && !member_codes.is_empty()
+                    && member_codes.iter().all(|code| *code == anchor_code);
+                let hierarchy = !anchor_code.is_empty()
+                    && !member_codes.is_empty()
+                    && member_codes.iter().all(|code| {
+                        is_ancestor_code(anchor_code, code) || is_ancestor_code(code, anchor_code)
+                    });
+                let level_hierarchy = levels.get(anchor).copied().flatten().is_some_and(|parent| {
+                    members.iter().all(|index| {
+                        levels
+                            .get(*index)
+                            .copied()
+                            .flatten()
+                            .is_some_and(|child| child > parent)
+                    })
+                });
+                if !(blank_side || hierarchy || same_code || level_hierarchy) {
+                    continue;
                 }
-                break;
+                best = Some(Candidate {
+                    anchor,
+                    members,
+                    same_code,
+                    single_same_code: same_code && taken == 1,
+                });
             }
+            if let Some(candidate) = best {
+                candidates.push(candidate);
+            }
+        }
+    }
+
+    // 两条同编码、金额完全相同的行单独看无法判断谁是汇总；但同一张TB若已存在
+    // “一条同编码汇总 = 两条以上辅助明细之和”的强证据，就说明该系统确实采用
+    // 同编码的汇总/辅助混排格式。此时同表内的一对一完整勾稽也按相同结构处理。
+    // 孤立的一对相等行仍原样保留，不凭巧合静默删除。
+    let same_code_structure_confirmed = candidates
+        .iter()
+        .any(|candidate| candidate.same_code && candidate.members.len() >= 2);
+    candidates.retain(|candidate| !candidate.single_same_code || same_code_structure_confirmed);
+
+    // 先采用覆盖范围最大的完整关系，再锁住整组。候选收集阶段不修改 mask，
+    // 因而正扫、反扫看到的是同一份原始数据；锁定后任何重叠的小候选都不能
+    // 二次删除组内行。
+    candidates.sort_by(|a, b| {
+        // 同编码组比宽泛的父子前缀候选更具体、也更可靠；先锁住局部完整关系，
+        // 避免一个跨很多行的父科目候选占住这些行，却又无法决定保留哪一侧。
+        b.same_code
+            .cmp(&a.same_code)
+            .then_with(|| b.members.len().cmp(&a.members.len()))
+            .then_with(|| a.anchor.cmp(&b.anchor))
+    });
+    let mut claimed = vec![false; len];
+    for candidate in candidates {
+        if claimed[candidate.anchor] || candidate.members.iter().any(|index| claimed[*index]) {
+            continue;
+        }
+        claimed[candidate.anchor] = true;
+        for index in &candidate.members {
+            claimed[*index] = true;
+        }
+        let anchor_code = &identities[candidate.anchor].1;
+        let coded_members = candidate
+            .members
+            .iter()
+            .filter(|index| !identities[**index].1.is_empty())
+            .collect::<Vec<_>>();
+        // 同编码的辅助核算组优先保留父／汇总行；无编码的核算维度同理。
+        // 小计行无编码或父子编码不同，则保留可用于按科目核对的明细。
+        let keep_anchor = !anchor_code.is_empty()
+            && (coded_members.is_empty()
+                || coded_members
+                    .iter()
+                    .all(|index| identities[**index].1 == *anchor_code));
+        if keep_anchor {
+            for index in candidate.members {
+                rollup[index] = true;
+            }
+        } else {
+            rollup[candidate.anchor] = true;
         }
     }
 }
@@ -5903,7 +6267,8 @@ mod tests {
         };
         assert_eq!(
             tb_leaf_mask(&headers, &rows, &columns),
-            vec![false, true, true, true, true]
+            vec![true, true, true, true, true],
+            "没有金额证据时不能只凭编码前缀静默排除父项"
         );
     }
 
@@ -5922,7 +6287,7 @@ mod tests {
         };
         assert_eq!(
             tb_leaf_mask(&headers, &rows, &legacy),
-            vec![false, true, true]
+            vec![true, true, true]
         );
         assert_eq!(tb_leaf_mask(&headers, &rows, &|_| vec![]), vec![true; 3]);
     }
@@ -5971,8 +6336,167 @@ mod tests {
         ];
         assert_eq!(
             tb_leaf_mask(&余额表表头(), &rows, &余额表映射),
+            vec![true, false, false]
+        );
+    }
+
+    #[test]
+    fn tb同编码汇总余额按净额比较且整组只处理一次() {
+        // 01 号真实形态的缩小版：汇总行把期初借150/贷50列成借方净额100，
+        // 两条辅助明细仍保留借贷毛额；发生额两侧分别都能完整勾稽。
+        let headers: Vec<String> = [
+            "科目编码",
+            "科目名称",
+            "期初借方",
+            "期初贷方",
+            "借方发生额",
+            "贷方发生额",
+            "期末借方",
+            "期末贷方",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let rows = vec![
+            vec!["5001.01", "生产成本", "100", "0", "1000", "800", "300", "0"],
+            vec!["5001.01", "部门A", "150", "0", "600", "300", "450", "0"],
+            vec!["5001.01", "部门B", "0", "50", "400", "500", "0", "150"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(String::from).collect())
+        .collect::<Vec<Vec<String>>>();
+        let columns = |role: &str| match role {
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "openingFunctionalDebit" => vec!["期初借方".into()],
+            "openingFunctionalCredit" => vec!["期初贷方".into()],
+            "ytdFunctionalDebit" => vec!["借方发生额".into()],
+            "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+            "closingFunctionalDebit" => vec!["期末借方".into()],
+            "closingFunctionalCredit" => vec!["期末贷方".into()],
+            _ => vec![],
+        };
+        assert_eq!(
+            tb_leaf_mask(&headers, &rows, &columns),
+            vec![true, false, false],
+            "余额净额一致时保留一套汇总金额，不能把汇总和辅助明细一起累计"
+        );
+    }
+
+    #[test]
+    fn tb同编码单行相等不构成可确认汇总关系() {
+        // 01 号 2241.02 的辅助明细中存在金额恰好相同的相邻行。仅凭 A=B
+        // 无法判断哪一行是汇总；旧版正反扫描会把正常明细二次误删。
+        let rows = vec![
+            行("2241.02", "客户A", ["10", "20", "5", "25"]),
+            行("2241.02", "客户B", ["10", "20", "5", "25"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&余额表表头(), &rows, &余额表映射),
+            vec![true, true]
+        );
+    }
+
+    #[test]
+    fn tb已确认同编码混排格式后同表一对一完整勾稽也只计一次() {
+        let rows = vec![
+            行("1121.01", "应收票据", ["100", "300", "50", "350"]),
+            行("1121.01", "客户A", ["60", "200", "30", "230"]),
+            行("1121.01", "客户B", ["40", "100", "20", "120"]),
+            行("1122.09", "应收账款_未开票", ["0", "20", "0", "20"]),
+            行("1122.09", "客户C", ["0", "20", "0", "20"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&余额表表头(), &rows, &余额表映射),
+            vec![true, false, false, true, false]
+        );
+    }
+
+    #[test]
+    fn tb方向小计夹在科目总计与辅助明细之间仍能完整勾稽() {
+        let rows = vec![
+            行("2241.06.09", "应付账款", ["-100", "100", "50", "-50"]),
+            行("2241.06.09", "小计", ["-100", "0", "-50", "-150"]),
+            行("2241.06.09", "未开票", ["0", "100", "100", "100"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&余额表表头(), &rows, &余额表映射),
+            vec![true, false, false]
+        );
+    }
+
+    #[test]
+    fn tb前缀父项只有四项金额都被子项覆盖时才排除() {
+        let tied = vec![
+            行("5302", "研发支出", ["100", "300", "50", "350"]),
+            行("530201", "费用化支出", ["60", "200", "30", "230"]),
+            行("530202", "资本化支出", ["40", "100", "20", "120"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&余额表表头(), &tied, &余额表映射),
             vec![false, true, true]
         );
+
+        // 03 号样例：父项有真实余额，下级没有完整覆盖。即便编码层级明确，
+        // 也必须保留父项；否则该余额会从 BS/PL 勾稽中凭空消失。
+        let not_tied = vec![
+            行("5302", "研发支出", ["100", "300", "50", "350"]),
+            行("530201", "费用化支出", ["0", "200", "30", "170"]),
+            行("530202", "资本化支出", ["0", "100", "20", "80"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&余额表表头(), &not_tied, &余额表映射),
+            vec![true, true, true]
+        );
+
+        // 父项所有金额都为零时，排除它不会丢金额，应只保留有值末级行。
+        let zero_parent = vec![
+            行("6603", "财务费用", ["0", "0", "0", "0"]),
+            行("66030101", "财务费用-利息支出", ["0", "0", "777", "-777"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&余额表表头(), &zero_parent, &余额表映射),
+            vec![false, true]
+        );
+    }
+
+    #[test]
+    fn tb编码不成前缀时可用级次确认完整勾稽的父子行() {
+        // 03 号样例的一级 `5302` 与二级 `5301020000` 不是字面前缀，
+        // 但级次和全部语义金额都证明前者是后者的汇总行。
+        let headers = vec![
+            "级次".into(),
+            "科目编码".into(),
+            "科目名称".into(),
+            "期初余额".into(),
+            "本年借方".into(),
+            "本年贷方".into(),
+            "期末余额".into(),
+        ];
+        let rows = vec![
+            vec!["1", "5302", "中方资本金", "663", "80", "4", "739"],
+            vec![
+                "2",
+                "5301020000",
+                "中方资本金-明细",
+                "663",
+                "80",
+                "4",
+                "739",
+            ],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(String::from).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+        let mapping = |role: &str| match role {
+            "accountCode" => vec!["科目编码".into()],
+            "openingFunctionalAmount" => vec!["期初余额".into()],
+            "ytdFunctionalDebit" => vec!["本年借方".into()],
+            "ytdFunctionalCredit" => vec!["本年贷方".into()],
+            "closingFunctionalAmount" => vec!["期末余额".into()],
+            _ => Vec::new(),
+        };
+        assert_eq!(tb_leaf_mask(&headers, &rows, &mapping), vec![false, true]);
     }
 
     #[test]
@@ -6991,5 +7515,30 @@ mod tests {
         assert!(is_auxiliary_sheet_name("TB 备份 2026"));
         assert!(is_auxiliary_sheet_name("Pivot Table"));
         assert!(!is_auxiliary_sheet_name("Sheet1"));
+    }
+
+    #[test]
+    fn 跨表对齐会跳过空的伪科目列并选中真实编码() {
+        let je_headers = vec![
+            "总账科目/未过账科目".into(),
+            "总账科目".into(),
+            "会计科目".into(),
+        ];
+        let je_rows = vec![
+            vec!["".into(), "1001010000".into(), "库存现金".into()],
+            vec!["".into(), "1002101001".into(), "银行存款".into()],
+            vec!["".into(), "6603010000".into(), "利息支出".into()],
+        ];
+        let tb_headers = vec!["科目".into(), "余额".into()];
+        let tb_rows = vec![
+            vec!["1001010000:库存现金".into(), "1".into()],
+            vec!["1002101001:银行存款".into(), "2".into()],
+            vec!["6603010000:利息支出".into(), "3".into()],
+        ];
+        let aligned =
+            align_account_code_columns(&je_headers, &je_rows, &tb_headers, &tb_rows).unwrap();
+        assert_eq!(aligned.je_column, "总账科目");
+        assert_eq!(aligned.tb_column, "科目");
+        assert_eq!(aligned.overlap, 3);
     }
 }

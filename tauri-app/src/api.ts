@@ -128,10 +128,41 @@ export async function updateReleaseNotes(targetVersion?: string) {
     await invoke("update_release_notes", { targetVersion }),
   );
 }
-export const historyGet = () =>
-  inTauri()
-    ? invoke<Array<Record<string, unknown>>>("history_get")
-    : Promise.resolve([]);
+type HistoryRow = Record<string, unknown>;
+let historyCache: HistoryRow[] | undefined;
+let historyRequest: Promise<HistoryRow[]> | undefined;
+let historyGeneration = 0;
+
+/** Dashboard and History share one snapshot instead of repeating the same IPC query. */
+export function historyGet(): Promise<HistoryRow[]> {
+  if (!inTauri()) return Promise.resolve([]);
+  if (historyCache) return Promise.resolve(historyCache);
+  if (historyRequest) return historyRequest;
+  const generation = historyGeneration;
+  const request = invoke<HistoryRow[]>("history_get")
+    .then((rows) => {
+      if (generation === historyGeneration) historyCache = rows;
+      return rows;
+    })
+    .finally(() => {
+      if (historyRequest === request) historyRequest = undefined;
+    });
+  historyRequest = request;
+  return request;
+}
+
+export function invalidateHistoryCache() {
+  historyGeneration += 1;
+  historyCache = undefined;
+  historyRequest = undefined;
+}
+
+export async function historyClear(): Promise<{ removed: number }> {
+  if (!inTauri()) return { removed: 0 };
+  const result = await invoke<{ removed: number }>("history_clear");
+  invalidateHistoryCache();
+  return result;
+}
 export const settingsSet = (settings: Record<string, unknown>) => {
   if (inTauri()) return invoke<void>("settings_set", { settings });
   previewSettings = { ...previewSettings, ...settings };

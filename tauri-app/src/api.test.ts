@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   historyGet,
+  historyClear,
   jobCancel,
   pickPath,
   settingsGet,
@@ -20,6 +21,7 @@ describe("browser preview API fallbacks", () => {
 
   it("returns safe empty states for history and task cancellation", async () => {
     await expect(historyGet()).resolves.toEqual([]);
+    await expect(historyClear()).resolves.toEqual({ removed: 0 });
     await expect(jobCancel("preview-job")).resolves.toBe(false);
     await expect(pickPath("file", "选择文件")).resolves.toBeNull();
     await expect(updateReleaseNotes()).rejects.toThrow(

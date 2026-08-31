@@ -28,78 +28,196 @@
   color: var(--text-muted);
 }
 
-.tbje-groups {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
+.tbje-pairing-list {
+  max-width: 100%;
   margin: var(--sp-3) 0;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.tbje-pairing-head,
+.tbje-group-row {
+  display: grid;
+  grid-template-columns:
+    100px minmax(220px, 1fr) 170px minmax(250px, 1.08fr)
+    190px;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 1080px;
+}
+
+.tbje-pairing-head {
+  min-height: 40px;
+  padding: 0 var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
 }
 
 .tbje-group {
   min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  padding: var(--sp-3);
+  border-bottom: 1px solid var(--border-soft);
   background: var(--surface);
 }
 
+.tbje-group:last-child {
+  border-bottom: 0;
+}
+
 .tbje-group-review {
-  border-color: var(--warning-dot);
-  background: var(--warning-bg);
+  background: linear-gradient(
+    90deg,
+    var(--warning-bg),
+    color-mix(in srgb, var(--warning-bg) 28%, var(--surface)) 34%,
+    var(--surface) 72%
+  );
 }
 
 .tbje-group-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-areas:
-    "label file action"
-    "arrow select select";
-  align-items: center;
-  gap: var(--sp-2) var(--sp-3);
-  min-width: 0;
+  min-height: 82px;
+  padding: var(--sp-3);
   font-size: var(--fs-sm);
 }
 
-.tbje-group-label {
-  grid-area: label;
-  min-width: 68px;
+.tbje-group-identity {
+  display: grid;
+  gap: var(--sp-1);
+  align-content: center;
+}
+
+.tbje-group-identity strong {
   font-weight: 600;
   white-space: nowrap;
 }
 
-.tbje-group-review .tbje-group-label {
+.tbje-pair-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: max-content;
+  color: var(--success-fg);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.tbje-pair-status i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.tbje-pair-status.review {
   color: var(--warning-fg);
 }
 
+.tbje-file-cell {
+  display: grid;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.tbje-file-line {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.tbje-kind-tag {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--success-bg);
+  color: var(--success-fg);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.tbje-kind-tag.je {
+  background: var(--info-bg, var(--surface-muted));
+  color: var(--info-fg, var(--label));
+}
+
 .tbje-group-file {
-  grid-area: file;
   min-width: 0;
   color: var(--ink-strong);
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.tbje-group-arrow {
-  grid-area: arrow;
-  justify-self: center;
+.tbje-match-cell {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
   color: var(--text-muted);
+  font-size: var(--fs-xs);
+  text-align: center;
 }
 
-.tbje-group-row select {
-  grid-area: select;
+.tbje-match-cell::before {
+  content: "";
+  position: absolute;
+  top: 14px;
+  left: 6px;
+  right: 6px;
+  height: 1px;
+  background: var(--border);
+}
+
+.tbje-match-cell > span:last-child {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tbje-match-mark {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--success-border, var(--border));
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--success-fg);
+  font-weight: 700;
+}
+
+.tbje-group-review .tbje-match-mark {
+  border-color: var(--warning-dot);
+  color: var(--warning-fg);
+}
+
+.tbje-je-select {
   width: 100%;
   min-width: 0;
-  height: 32px;
+  height: 30px;
+  padding: 0 var(--sp-2);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
-  background: var(--surface);
+  background: var(--surface-muted);
   color: var(--ink);
   font-size: var(--fs-sm);
 }
 
 .tbje-group-buttons {
-  grid-area: action;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -111,31 +229,18 @@
   color: var(--danger-fg);
 }
 
-.tbje-group-reason {
-  margin-top: var(--sp-2);
-  color: var(--text-muted);
-  font-size: var(--fs-xs);
-  line-height: 1.6;
-}
-
 .tbje-group-mapping {
-  margin-top: var(--sp-3);
-  padding-top: var(--sp-3);
+  min-width: 1080px;
+  max-height: 560px;
+  overflow: auto;
+  padding: var(--sp-3) var(--sp-3) var(--sp-4) 116px;
   border-top: 1px solid var(--border-soft);
+  background: var(--surface-sunken);
 }
 
-@media (max-width: 840px) {
-  .tbje-group-row {
-    grid-template-columns: auto minmax(0, 1fr);
-    grid-template-areas:
-      "label file"
-      "arrow select"
-      "action action";
-  }
-
-  .tbje-group-buttons {
-    justify-content: flex-start;
-  }
+.tbje-group-mapping .kz-card {
+  margin: 0;
+  box-shadow: none;
 }
 
 .tbje-actions {
@@ -263,31 +368,26 @@
   white-space: nowrap;
 }
 
-/* 每组的 sheet 选择行：识别默认挑内容最多的表，换哪个由用户定。 */
-.tbje-group-sheets {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-2) var(--sp-4);
-  margin-top: var(--sp-2);
-  font-size: var(--fs-xs);
-  color: var(--text-muted);
-}
-
+/* 文件下方的 Sheet 选择：识别默认挑内容最多的表，用户仍可调整。 */
 .tbje-sheet-picker {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
+  width: max-content;
+  max-width: 100%;
   min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
 }
 
 .tbje-sheet-picker select {
   min-width: 0;
   max-width: 180px;
   height: 26px;
-  padding: 0 var(--sp-1);
+  padding: 0 var(--sp-2);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
-  background: var(--surface);
+  background: var(--surface-muted);
   color: var(--ink);
   font-size: var(--fs-xs);
 }

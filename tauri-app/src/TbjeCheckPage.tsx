@@ -915,42 +915,144 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="tbje-groups">
+              <div className="tbje-pairing-list">
+                <div className="tbje-pairing-head" aria-hidden="true">
+                  <span>配对组</span>
+                  <span>科目余额表 TB</span>
+                  <span>配对依据</span>
+                  <span>序时账 JE</span>
+                  <span>字段映射</span>
+                </div>
                 {groups.map((group) => (
                   <div
                     key={group.id}
                     className={`tbje-group${group.needsReview ? " tbje-group-review" : ""}`}
                   >
                     <div className="tbje-group-row">
-                      <span className="tbje-group-label">
-                        {group.needsReview ? "待确认" : `第 ${group.label} 组`}
-                      </span>
-                      <span className="tbje-group-file">
-                        {group.tb
-                          ? fileName(group.tb.path)
-                          : "（缺科目余额表）"}
-                      </span>
-                      <span className="tbje-group-arrow" aria-hidden="true">
-                        ↔
-                      </span>
-                      <select
-                        aria-label={`为第 ${group.label} 组选择序时账`}
-                        value={group.je?.path ?? ""}
-                        disabled={busy}
-                        onChange={(event) =>
-                          selectJe(group.id, event.target.value || undefined)
-                        }
-                      >
-                        <option value="">（不配对序时账）</option>
-                        {unusedJe.map((item) => (
-                          <option key={item.path} value={item.path}>
-                            {fileName(item.path)}
-                            {item.path === group.je?.path
-                              ? ""
-                              : ` · 现属第 ${item.owner} 组`}
-                          </option>
-                        ))}
-                      </select>
+                      <div className="tbje-group-identity">
+                        <strong>第 {group.label} 组</strong>
+                        <span
+                          className={`tbje-pair-status${group.needsReview ? " review" : ""}`}
+                        >
+                          <i aria-hidden="true" />
+                          {group.needsReview ? "待确认" : "已识别"}
+                        </span>
+                      </div>
+                      <div className="tbje-file-cell">
+                        <div className="tbje-file-line">
+                          <span className="tbje-kind-tag">TB</span>
+                          <span className="tbje-group-file">
+                            {group.tb
+                              ? fileName(group.tb.path)
+                              : "（缺科目余额表）"}
+                          </span>
+                        </div>
+                        {group.tb &&
+                          (() => {
+                            const inspected = inspects[group.tb.path];
+                            if (!inspected) return null;
+                            const sheets = inspected.sheets ?? [];
+                            return (
+                              <label className="tbje-sheet-picker">
+                                <span>工作表</span>
+                                {sheets.length > 1 ? (
+                                  <select
+                                    aria-label="余额表使用的工作表"
+                                    value={inspected.sheet}
+                                    disabled={busy}
+                                    onChange={(event) =>
+                                      void switchSheet(
+                                        group.tb!.path,
+                                        "tb",
+                                        event.target.value,
+                                      )
+                                    }
+                                  >
+                                    {sheets.map((name) => (
+                                      <option key={name} value={name}>
+                                        {name}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <span className="tbje-sheet-name">
+                                    {inspected.sheet || "（自动）"}
+                                  </span>
+                                )}
+                              </label>
+                            );
+                          })()}
+                      </div>
+                      <div className="tbje-match-cell">
+                        <span className="tbje-match-mark" aria-hidden="true">
+                          {group.needsReview ? "?" : "✓"}
+                        </span>
+                        <span title={group.reasons.join(" · ")}>
+                          {group.reasons.join(" · ")}
+                        </span>
+                      </div>
+                      <div className="tbje-file-cell">
+                        <div className="tbje-file-line">
+                          <span className="tbje-kind-tag je">JE</span>
+                          <select
+                            className="tbje-je-select"
+                            aria-label={`为第 ${group.label} 组选择序时账`}
+                            value={group.je?.path ?? ""}
+                            disabled={busy}
+                            onChange={(event) =>
+                              selectJe(
+                                group.id,
+                                event.target.value || undefined,
+                              )
+                            }
+                          >
+                            <option value="">（不配对序时账）</option>
+                            {unusedJe.map((item) => (
+                              <option key={item.path} value={item.path}>
+                                {fileName(item.path)}
+                                {item.path === group.je?.path
+                                  ? ""
+                                  : ` · 现属第 ${item.owner} 组`}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        {group.je &&
+                          (() => {
+                            const inspected = inspects[group.je.path];
+                            if (!inspected) return null;
+                            const sheets = inspected.sheets ?? [];
+                            return (
+                              <label className="tbje-sheet-picker">
+                                <span>工作表</span>
+                                {sheets.length > 1 ? (
+                                  <select
+                                    aria-label="序时账使用的工作表"
+                                    value={inspected.sheet}
+                                    disabled={busy}
+                                    onChange={(event) =>
+                                      void switchSheet(
+                                        group.je!.path,
+                                        "je",
+                                        event.target.value,
+                                      )
+                                    }
+                                  >
+                                    {sheets.map((name) => (
+                                      <option key={name} value={name}>
+                                        {name}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <span className="tbje-sheet-name">
+                                    {inspected.sheet || "（自动）"}
+                                  </span>
+                                )}
+                              </label>
+                            );
+                          })()}
+                      </div>
                       <div className="tbje-group-buttons">
                         {(["tb", "je"] as LedgerKind[]).map((kind) => {
                           const active =
@@ -974,7 +1076,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                 )
                               }
                             >
-                              {kind.toUpperCase()} 映射
+                              {active ? "收起" : `${kind.toUpperCase()} 映射`}
                             </Button>
                           );
                         })}
@@ -990,52 +1092,6 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                           移除本组
                         </Button>
                       </div>
-                    </div>
-                    <div className="tbje-group-reason">
-                      {group.reasons.join(" · ")}
-                    </div>
-                    <div className="tbje-group-sheets">
-                      {([group.tb, group.je] as (PairingFile | undefined)[])
-                        .filter(Boolean)
-                        .map((file) => {
-                          const inspected = inspects[file!.path];
-                          if (!inspected) return null;
-                          const sheets = inspected.sheets ?? [];
-                          const which =
-                            file!.kind === "tb" ? "余额表" : "序时账";
-                          return (
-                            <span
-                              key={file!.path}
-                              className="tbje-sheet-picker"
-                            >
-                              {which}工作表：
-                              {sheets.length > 1 ? (
-                                <select
-                                  aria-label={`${which}使用的工作表`}
-                                  value={inspected.sheet}
-                                  disabled={busy}
-                                  onChange={(event) =>
-                                    void switchSheet(
-                                      file!.path,
-                                      file!.kind,
-                                      event.target.value,
-                                    )
-                                  }
-                                >
-                                  {sheets.map((name) => (
-                                    <option key={name} value={name}>
-                                      {name}
-                                    </option>
-                                  ))}
-                                </select>
-                              ) : (
-                                <span className="tbje-sheet-name">
-                                  {inspected.sheet || "（自动）"}
-                                </span>
-                              )}
-                            </span>
-                          );
-                        })}
                     </div>
                     {expanded?.groupId === group.id && (
                       <div

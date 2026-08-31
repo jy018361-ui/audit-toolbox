@@ -102,6 +102,12 @@ describe("TbjeCheckPage", () => {
         screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
       ).toBeInTheDocument(),
     );
+    const pairingList = container.querySelector(".tbje-pairing-list");
+    expect(pairingList).not.toBeNull();
+    expect(pairingList).toHaveTextContent("科目余额表 TB");
+    expect(pairingList).toHaveTextContent("配对依据");
+    expect(pairingList).toHaveTextContent("序时账 JE");
+    expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1);
     expect(screen.getByLabelText("为第 1 组选择序时账")).toBeInTheDocument();
     const tbMapping = screen.getByRole("button", { name: "TB 映射" });
     const jeMapping = screen.getByRole("button", { name: "JE 映射" });

@@ -105,7 +105,7 @@ describe("TbjeCheckPage", () => {
     const pairingList = container.querySelector(".tbje-pairing-list");
     expect(pairingList).not.toBeNull();
     expect(pairingList).toHaveTextContent("科目余额表 TB");
-    expect(pairingList).toHaveTextContent("配对依据");
+    expect(pairingList).not.toHaveTextContent("配对依据");
     expect(pairingList).toHaveTextContent("序时账 JE");
     expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1);
     expect(screen.getByLabelText("为第 1 组选择序时账")).toBeInTheDocument();
@@ -123,6 +123,85 @@ describe("TbjeCheckPage", () => {
     expect(
       within(steps).getByRole("button", { name: /确认配对/ }),
     ).toBeEnabled();
+  });
+
+  it("keeps a signed functional amount mapping after a no-op pair review", async () => {
+    const { engineCall, jobStart, pickPath } = await import("./api");
+    vi.mocked(pickPath).mockResolvedValue([
+      "C:/samples/03科目余额表.xlsx",
+      "C:/samples/03序时账 (2).xlsx",
+    ]);
+    vi.mocked(engineCall).mockImplementation(
+      async (method: string, params: unknown) => {
+        if (method === "ledger.forms") return [];
+        if (method === "ledger.review_pair_mapping")
+          return { tbChanges: [], jeChanges: [], pairFindings: [] };
+        if (method === "ledger.check_mapping_alignment")
+          return { aligned: true, warnings: [] };
+        const source = (params as { source: { inputPath: string } }).source;
+        const isTb = source.inputPath.includes("科目余额表");
+        if (method === "deposit.classify_source") {
+          return {
+            kind: isTb ? "tb" : "je",
+            sheet: "Sheet1",
+            headerRow: isTb ? 2 : 5,
+            headerDepth: 1,
+          };
+        }
+        return {
+          sheet: "Sheet1",
+          headerRow: isTb ? 2 : 5,
+          headerDepth: 1,
+          headers: isTb
+            ? ["项目编码、文本/科目编码、文本", "本年金额-期初", "本年金额-借方发生", "本年金额-贷方发生", "期末余额"]
+            : ["凭证编号", "凭证日期", "本币金额", "总账科目", "会计科目"],
+          preview: [],
+          entities: [],
+          suggestedMapping: isTb
+            ? {
+                accountCode: "项目编码、文本/科目编码、文本",
+                accountName: ["项目编码、文本/科目编码、文本"],
+                openingFunctionalAmount: "本年金额-期初",
+                ytdFunctionalDebit: "本年金额-借方发生",
+                ytdFunctionalCredit: "本年金额-贷方发生",
+                closingFunctionalAmount: "期末余额",
+              }
+            : {
+                id: ["凭证编号"],
+                date: "凭证日期",
+                functionalAmount: "本币金额",
+                accountCode: "总账科目",
+                accountName: ["会计科目"],
+              },
+        };
+      },
+    );
+
+    render(<TbjeCheckPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
+    );
+    await screen.findByText("03科目余额表.xlsx");
+    fireEvent.click(
+      screen.getByRole("button", { name: "LLM 一键联合复核 1 组" }),
+    );
+    await screen.findByText("联合复核完成：已复核 1 组。");
+    fireEvent.click(screen.getByRole("button", { name: "开始核对 1 组" }));
+
+    await waitFor(() =>
+      expect(jobStart).toHaveBeenCalledWith(
+        "tbje_check.run_batch",
+        expect.objectContaining({
+          groups: [
+            expect.objectContaining({
+              jeMapping: expect.objectContaining({
+                functionalAmount: "本币金额",
+              }),
+            }),
+          ],
+        }),
+      ),
+    );
   });
 
   it("keeps result columns aligned and explains a zero balance with unclassified accounts", async () => {

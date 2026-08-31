@@ -471,6 +471,25 @@ fn prepare(params: &Value) -> Result<PreparedCheck, AppError> {
         let analysis = ledger_mapping::analyze_ledger_rows(&je.headers, &je.rows, &|role| {
             columns(&je_map, role)
         });
+        if !analysis.invalid_account_code_rows.is_empty() {
+            let rows = analysis
+                .invalid_account_code_rows
+                .iter()
+                .take(20)
+                .map(|(index, value)| {
+                    format!(
+                        "{}（{}）",
+                        je.header_row + je.header_depth + index + 1,
+                        value
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("、");
+            mapping_warnings.push(format!(
+                "JE存在不符合科目编码格式的行，已排除且未猜测继承编码：工作表“{}”，源表行 {rows}。",
+                je.sheet
+            ));
+        }
         if !analysis.missing_account_name_rows.is_empty() {
             let rows = analysis
                 .missing_account_name_rows
@@ -490,6 +509,27 @@ fn prepare(params: &Value) -> Result<PreparedCheck, AppError> {
     } else {
         None
     };
+    let tb_analysis =
+        ledger_mapping::analyze_ledger_rows(&tb.headers, &tb.rows, &|role| columns(&tb_map, role));
+    if !tb_analysis.invalid_account_code_rows.is_empty() {
+        let rows = tb_analysis
+            .invalid_account_code_rows
+            .iter()
+            .take(20)
+            .map(|(index, value)| {
+                format!(
+                    "{}（{}）",
+                    tb.header_row + tb.header_depth + index + 1,
+                    value
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("、");
+        mapping_warnings.push(format!(
+            "TB存在不符合科目编码格式的行，已排除且未猜测继承编码：工作表“{}”，源表行 {rows}。",
+            tb.sheet
+        ));
+    }
     let tb_rows_to_validate =
         ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| columns(&tb_map, role));
     validate_amount_columns("TB", "tb", &tb, &tb_map, Some(&tb_rows_to_validate))?;
@@ -990,9 +1030,6 @@ fn write_rollforward_sheet(
     let junk = ledger_mapping::ledger_junk_mask(&prepared.tb.headers, &prepared.tb.rows, &|role| {
         columns(&prepared.tb_map, role)
     });
-    let leaf = ledger_mapping::tb_leaf_mask(&prepared.tb.headers, &prepared.tb.rows, &|role| {
-        columns(&prepared.tb_map, role)
-    });
     let records = fx::records(&prepared.tb);
     let mut output_row = EXPORT_DATA_ROW;
     for (opening, closing, debit_role, credit_role, unit) in [
@@ -1029,9 +1066,6 @@ fn write_rollforward_sheet(
                 continue;
             }
             if !junk.get(index).copied().unwrap_or(true) {
-                continue;
-            }
-            if !leaf.get(index).copied().unwrap_or(true) {
                 continue;
             }
             let Some(record) = records.get(index) else {

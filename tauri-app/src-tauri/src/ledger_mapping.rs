@@ -2394,6 +2394,8 @@ pub(crate) struct LedgerRowAnalysis {
     /// 「JE 必要字段不完整」。位于整行空白分隔符之后、尚未重新进入正文的草稿行
     /// 不在此列——它们本来就不是正文。
     pub(crate) missing_account_name_rows: Vec<usize>,
+    /// 映射到科目编码列、但取值不符合编码语法的正文行（0 基下标、原始值）。
+    pub(crate) invalid_account_code_rows: Vec<(usize, String)>,
 }
 
 /// 分析序时账正文边界与必要字段完整性。
@@ -2435,6 +2437,7 @@ pub(crate) fn analyze_ledger_rows(
         return LedgerRowAnalysis {
             keep: vec![true; rows.len()],
             missing_account_name_rows: Vec::new(),
+            invalid_account_code_rows: Vec::new(),
         };
     }
     // 合计标签不是身份。各家把「合计」写在哪一列全凭喜好——10 号样例写在日期列，
@@ -2539,9 +2542,32 @@ pub(crate) fn analyze_ledger_rows(
         }
     }
 
+    // 科目编码必须是含数字的 ASCII 字母数字串，可用点号或连字符分级。
+    // `下·` 这类版式标签不能成为科目，更不能进入勾稽或导出；混写的
+    // `1001/库存现金` 先拆出编码再校验。
+    let mut invalid_account_code_rows = Vec::new();
+    if let Some(code_index) = account_code_indexes.first().copied() {
+        for (index, row) in rows.iter().enumerate() {
+            if !keep.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+            let raw = row.get(code_index).map(String::as_str).unwrap_or("").trim();
+            if raw.is_empty() || is_rollup_label(raw) || is_formula_error(raw) {
+                continue;
+            }
+            let code = account_code_of(raw);
+            if !looks_like_account_code(&code) {
+                keep[index] = false;
+                invalid_account_code_rows.push((index, raw.to_owned()));
+            }
+        }
+    }
+    missing_account_name_rows.retain(|index| keep.get(*index).copied().unwrap_or(false));
+
     LedgerRowAnalysis {
         keep,
         missing_account_name_rows,
+        invalid_account_code_rows,
     }
 }
 
@@ -3548,6 +3574,91 @@ pub(crate) fn disambiguate_cumulative(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum BalancePeriodScope {
+    Annual,
+    CurrentPeriod,
+}
+
+fn header_period_scope(header: &str) -> Option<BalancePeriodScope> {
+    let normalized = normalize_header(header);
+    if normalized.contains("本年") || normalized.contains("年度") || normalized.contains("年累计")
+    {
+        Some(BalancePeriodScope::Annual)
+    } else if normalized.contains("本期") {
+        Some(BalancePeriodScope::CurrentPeriod)
+    } else {
+        None
+    }
+}
+
+/// LLM 只能补充别名，不能把已经成套的本年/本期发生额与另一期间的期初列混搭。
+pub(crate) fn opening_period_scope_conflicts(
+    kind: &str,
+    role: &str,
+    suggested: &str,
+    movement_columns: &[String],
+) -> bool {
+    if kind != "tb" || role != "openingFunctionalAmount" {
+        return false;
+    }
+    let movement_scopes = movement_columns
+        .iter()
+        .filter_map(|column| header_period_scope(column))
+        .collect::<BTreeSet<_>>();
+    movement_scopes.len() == 1
+        && header_period_scope(suggested)
+            .zip(movement_scopes.iter().next().copied())
+            .is_some_and(|(suggested, movement)| suggested != movement)
+}
+
+/// 同一张 TB 同时列示“本年”和“本期”时，期初余额必须与当前发生额口径成套。
+/// 这里只处理表头已经明确写出期间的确定性场景；没有“本年/本期”字样时不猜。
+fn align_opening_period_scope(
+    kind: &str,
+    headers: &[String],
+    assigned: &mut BTreeMap<usize, &'static str>,
+) {
+    if kind != "tb" {
+        return;
+    }
+    let movement_scopes = assigned
+        .iter()
+        .filter(|(_, role)| matches!(**role, "ytdFunctionalDebit" | "ytdFunctionalCredit"))
+        .filter_map(|(index, _)| headers.get(*index).and_then(|h| header_period_scope(h)))
+        .collect::<BTreeSet<_>>();
+    if movement_scopes.len() != 1 {
+        return;
+    }
+    let scope = *movement_scopes.iter().next().expect("one movement scope");
+    let Some(role) = role_of("tb", "openingFunctionalAmount") else {
+        return;
+    };
+    let candidate = headers
+        .iter()
+        .enumerate()
+        .filter(|(_, header)| header_period_scope(header) == Some(scope))
+        .filter(|(_, header)| {
+            let normalized = normalize_header(header);
+            normalized.contains("期初") || normalized.contains("年初")
+        })
+        .filter_map(|(index, header)| alias_score(role, header).map(|score| (index, score)))
+        .max_by(|left, right| {
+            left.1
+                .partial_cmp(&right.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| right.0.cmp(&left.0))
+        })
+        .map(|(index, _)| index);
+    let Some(candidate) = candidate else {
+        return;
+    };
+    assigned.retain(|index, mapped_role| {
+        *mapped_role != "openingFunctionalAmount" || *index == candidate
+    });
+    assigned.insert(candidate, "openingFunctionalAmount");
+}
+
 /// 把「角色 → 列名」的映射重新过一遍两条数据形态规则：
 /// **本年累计与本期发生按金额量级分配**，**期初与期末方向按列位置分配**。
 ///
@@ -3572,6 +3683,7 @@ pub(crate) fn recheck_cumulative(
     }
     let before = assigned.clone();
     disambiguate_cumulative(kind, headers, rows, &mut assigned);
+    align_opening_period_scope(kind, headers, &mut assigned);
     disambiguate_directions(kind, headers, &mut assigned);
     if before == assigned {
         return Vec::new();
@@ -3581,6 +3693,7 @@ pub(crate) fn recheck_cumulative(
         touched.push(ytd);
         touched.push(period);
     }
+    touched.push("openingFunctionalAmount");
     touched.push("openingDirection");
     touched.push("closingDirection");
     let mut out: Vec<(&'static str, Option<String>)> = Vec::new();
@@ -3620,6 +3733,7 @@ pub(crate) fn suggest_roles_with_data(
         }
     }
     disambiguate_cumulative(kind, headers, rows, &mut out);
+    align_opening_period_scope(kind, headers, &mut out);
     fill_combined_account_column(rows, &mut out, headers.len());
     out
 }
@@ -4836,7 +4950,7 @@ pub(crate) fn currency_from_text(value: &str) -> Option<String> {
 /// 要求是**含数字的 ASCII 字母数字串**，可以带点号分级。这一条是
 /// [`split_code_and_name`] 的守门人：06 号样例的 `交易性金融资产_结构性存款`
 /// 也带下划线，但首段是中文，不是编码。
-fn looks_like_account_code(value: &str) -> bool {
+pub(crate) fn looks_like_account_code(value: &str) -> bool {
     let count = value.chars().count();
     count > 0
         && count <= 24
@@ -7406,6 +7520,34 @@ mod tests {
     }
 
     #[test]
+    fn 非法科目编码行排除且保留源值() {
+        let headers: Vec<String> = ["科目编码", "科目名称", "金额"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let rows = vec![
+            vec!["1001", "库存现金", "10"],
+            vec!["下·", "固定资产_已使用固定资产", "10"],
+            vec!["1002.01-A", "银行存款", "20"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(String::from).collect())
+        .collect::<Vec<Vec<String>>>();
+        let columns = |role: &str| match role {
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "functionalAmount" => vec!["金额".into()],
+            _ => vec![],
+        };
+        let analysis = analyze_ledger_rows(&headers, &rows, &columns);
+        assert_eq!(analysis.keep, vec![true, false, true]);
+        assert_eq!(
+            analysis.invalid_account_code_rows,
+            vec![(1, "下·".to_owned())]
+        );
+    }
+
+    #[test]
     fn 上级编码必须落在分隔符边界上() {
         // 点号分级的账里 `1002.1` 与 `1002.10` 是同级的两个科目，
         // 裸 `starts_with` 会把前者判成后者的上级。
@@ -7575,6 +7717,64 @@ mod tests {
         let m = suggest_roles_with_data("tb", &headers, &rows);
         assert_eq!(m.get(&1), Some(&"periodFunctionalDebit"));
         assert_eq!(m.get(&2), Some(&"ytdFunctionalDebit"));
+    }
+
+    #[test]
+    fn 本年发生额必须配本年期初() {
+        let headers: Vec<String> = [
+            "科目编码",
+            "本年金额-期初",
+            "本期金额-本期期初",
+            "本年金额-借方发生",
+            "本年金额-贷方发生",
+            "本期金额-借方发生",
+            "本期金额-贷方发生",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let rows = vec![
+            vec!["1001", "10", "20", "100", "80", "30", "10"],
+            vec!["1002", "20", "30", "200", "160", "60", "20"],
+            vec!["1003", "30", "40", "300", "240", "90", "30"],
+            vec!["1004", "40", "50", "400", "320", "120", "40"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(String::from).collect())
+        .collect::<Vec<Vec<String>>>();
+        let mapping = suggest_roles_with_data("tb", &headers, &rows);
+        assert_eq!(mapping.get(&1), Some(&"openingFunctionalAmount"));
+        assert_ne!(mapping.get(&2), Some(&"openingFunctionalAmount"));
+    }
+
+    #[test]
+    fn 显式本期发生额必须配本期期初() {
+        let headers: Vec<String> = [
+            "本年金额-期初",
+            "本期金额-本期期初",
+            "本期金额-借方发生",
+            "本期金额-贷方发生",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let rows = vec![vec!["10", "20", "30", "10"]]
+            .into_iter()
+            .map(|row| row.into_iter().map(String::from).collect())
+            .collect::<Vec<Vec<String>>>();
+        let changes = recheck_cumulative(
+            "tb",
+            &headers,
+            &rows,
+            &[
+                ("openingFunctionalAmount".into(), "本年金额-期初".into()),
+                ("ytdFunctionalDebit".into(), "本期金额-借方发生".into()),
+                ("ytdFunctionalCredit".into(), "本期金额-贷方发生".into()),
+            ],
+        );
+        assert!(changes.iter().any(|(role, column)| {
+            *role == "openingFunctionalAmount" && column.as_deref() == Some("本期金额-本期期初")
+        }));
     }
 
     #[test]

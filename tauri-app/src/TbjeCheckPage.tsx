@@ -1076,7 +1076,6 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                 <div className="tbje-pairing-head" aria-hidden="true">
                   <span>配对组</span>
                   <span>科目余额表 TB</span>
-                  <span>配对依据</span>
                   <span>序时账 JE</span>
                   <span>字段映射</span>
                 </div>
@@ -1139,14 +1138,6 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                               </label>
                             );
                           })()}
-                      </div>
-                      <div className="tbje-match-cell">
-                        <span className="tbje-match-mark" aria-hidden="true">
-                          {group.needsReview ? "?" : "✓"}
-                        </span>
-                        <span title={group.reasons.join(" · ")}>
-                          {group.reasons.join(" · ")}
-                        </span>
                       </div>
                       <div className="tbje-file-cell">
                         <div className="tbje-file-line">

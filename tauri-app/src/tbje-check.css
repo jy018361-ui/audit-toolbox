@@ -69,11 +69,10 @@
 .tbje-group-row {
   display: grid;
   grid-template-columns:
-    100px minmax(220px, 1fr) 170px minmax(250px, 1.08fr)
-    190px;
+    100px minmax(250px, 1fr) minmax(280px, 1.08fr) 190px;
   align-items: center;
   gap: var(--sp-3);
-  min-width: 1080px;
+  min-width: 900px;
 }
 
 .tbje-pairing-head {
@@ -186,53 +185,6 @@
   white-space: nowrap;
 }
 
-.tbje-match-cell {
-  position: relative;
-  display: grid;
-  justify-items: center;
-  gap: var(--sp-1);
-  min-width: 0;
-  color: var(--text-muted);
-  font-size: var(--fs-xs);
-  text-align: center;
-}
-
-.tbje-match-cell::before {
-  content: "";
-  position: absolute;
-  top: 14px;
-  left: 6px;
-  right: 6px;
-  height: 1px;
-  background: var(--border);
-}
-
-.tbje-match-cell > span:last-child {
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tbje-match-mark {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--success-border, var(--border));
-  border-radius: 50%;
-  background: var(--surface);
-  color: var(--success-fg);
-  font-weight: 700;
-}
-
-.tbje-group-review .tbje-match-mark {
-  border-color: var(--warning-dot);
-  color: var(--warning-fg);
-}
-
 .tbje-je-select {
   width: 100%;
   min-width: 0;
@@ -258,7 +210,7 @@
 }
 
 .tbje-group-mapping {
-  min-width: 1080px;
+  min-width: 900px;
   max-height: 560px;
   overflow: auto;
   padding: var(--sp-3) var(--sp-3) var(--sp-4) 116px;

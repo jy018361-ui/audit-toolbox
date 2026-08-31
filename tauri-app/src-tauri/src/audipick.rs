@@ -797,6 +797,18 @@ fn sanitize_change_list(value: &mut Value, payload: &Value, kind: &str, key: &st
         if !combined_pair && crate::ledger_mapping::role_rejects_header(kind, role, suggested) {
             return false;
         }
+        let movement_columns = columns_of("ytdFunctionalDebit")
+            .into_iter()
+            .chain(columns_of("ytdFunctionalCredit"))
+            .collect::<Vec<_>>();
+        if crate::ledger_mapping::opening_period_scope_conflicts(
+            kind,
+            role,
+            suggested,
+            &movement_columns,
+        ) {
+            return false;
+        }
         // 方向角色的取值形态校验：方向列写的应是 S/H、借/贷、Dr/Cr 这类方向
         // 标志。SAP 的过账代码（40/50/01）虽然也分借贷，但统驭过账码没有
         // 借贷含义——03 号样例就被模型指给过 direction。样例行里出现一个

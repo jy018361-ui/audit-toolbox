@@ -778,6 +778,53 @@ fn 导出的工作簿固定三页并保留全量行与公式() {
 }
 
 #[test]
+fn 发生额余额勾稽的界面与导出采用同一行范围() {
+    let dir = fixture("rollforward-same-scope");
+    let tb_path = dir.join("tb.csv");
+    std::fs::write(
+        &tb_path,
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,10,100,50,60\n\
+         100101,库存现金明细,5,20,10,15\n\
+         下·,固定资产_已使用固定资产,0,10,0,10\n",
+    )
+    .unwrap();
+    let value = json!({
+        "tbSource": {"inputPath": tb_path},
+        "tbMapping": {
+            "accountCode": "科目编码", "accountName": "科目名称",
+            "openingFunctionalAmount": "期初余额",
+            "ytdFunctionalDebit": "本年借方", "ytdFunctionalCredit": "本年贷方",
+            "closingFunctionalAmount": "期末余额"
+        },
+        "outputPath": dir.join("核对.xlsx")
+    });
+    let prepared = prepare(&value).unwrap();
+    let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
+    assert_eq!(result["rollforward"]["checked"], json!(2), "{result:#}");
+    assert!(
+        result["mappingWarnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning.as_str().unwrap_or("").contains("下·"))
+    );
+
+    let path = export(&value, &result, &prepared).unwrap();
+    let book = umya_spreadsheet::reader::xlsx::read(&path).unwrap();
+    let sheet = book.get_sheet_by_name("TB发生额与余额勾稽").unwrap();
+    let exported = (7..=sheet.get_highest_row())
+        .filter(|row| {
+            sheet
+                .get_cell((2, *row))
+                .is_some_and(|cell| !cell.get_value().trim().is_empty())
+        })
+        .count();
+    assert_eq!(exported, 2, "导出必须与界面 checked 行数一致");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn 一键导出全部结果时每组生成独立工作簿() {
     let dir = fixture("export-batch");
     平的账(&dir);

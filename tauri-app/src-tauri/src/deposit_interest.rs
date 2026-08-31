@@ -2239,7 +2239,28 @@ fn table_for(
         .cloned()
         .unwrap_or_default();
     let table = load_fx_table(&spec)?;
-    let table = if source_key.eq_ignore_ascii_case("jeSource") {
+    let kind = if source_key.eq_ignore_ascii_case("jeSource") {
+        "je"
+    } else {
+        "tb"
+    };
+    let keep = if kind == "je" {
+        ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
+            crate::fx::mapped_cols(&mapping, role)
+        })
+    } else {
+        ledger_mapping::tb_leaf_mask(&table.headers, &table.rows, &|role| {
+            crate::fx::mapped_cols(&mapping, role)
+        })
+    };
+    crate::fx::validate_mapped_amount_values(
+        &table,
+        &mapping,
+        kind,
+        if kind == "je" { "JE" } else { "TB" },
+        Some(&keep),
+    )?;
+    let table = if kind == "je" {
         crate::fx::forward_filled_je_table(&table, &mapping)
     } else {
         table

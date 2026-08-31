@@ -2356,6 +2356,20 @@ fn is_formula_error(value: &str) -> bool {
     )
 }
 
+fn is_report_footer_value(value: &str) -> bool {
+    let compact = value.trim().replace(' ', "");
+    [
+        "核算单位：",
+        "核算单位:",
+        "制单人：",
+        "制单人:",
+        "打印时间：",
+        "打印时间:",
+    ]
+    .iter()
+    .any(|prefix| compact.starts_with(prefix))
+}
+
 /// 标记账表里**没有身份的噪声行**。返回值与 `rows` 一一对应：`true` 表示该行要算。
 ///
 /// 剔两类，都是实测样例里静默污染合计的：
@@ -2368,11 +2382,31 @@ fn is_formula_error(value: &str) -> bool {
 ///    序时账在合计行后面还跟着十五行审计人手工草稿（最后一行是 `#REF!`），
 ///    09 号样例合计行后面是「制单人 / 打印时间」页脚。**只从表尾扫**——
 ///    06 号样例的 `-小计` 就在表体中间，从中间截断会把后面的账全丢掉。
-pub(crate) fn ledger_junk_mask(
+/// 3. **空行后的非正文**：只有整行全空才形成分隔；分隔后必须等到科目编码、
+///    科目名称与可解析金额三项齐备，才重新进入正文。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LedgerRowAnalysis {
+    /// 与源表数据行一一对应；`true` 表示该行属于正文，应交给业务模块继续处理。
+    pub(crate) keep: Vec<bool>,
+    /// 正文中同时有科目编码和可解析金额、但缺科目名称的数据行（0 基）。
+    ///
+    /// 这些行不能当页脚静默过滤；调用方应带上工作表名和源表行号，向用户报告
+    /// 「JE 必要字段不完整」。位于整行空白分隔符之后、尚未重新进入正文的草稿行
+    /// 不在此列——它们本来就不是正文。
+    pub(crate) missing_account_name_rows: Vec<usize>,
+}
+
+/// 分析序时账正文边界与必要字段完整性。
+///
+/// 整行全空才构成正文分隔符。出现分隔符后，只有同时具备科目编码、科目名称和
+/// 至少一个可解析金额（借方、贷方或单一金额）的行，才能重新开启下一段正文。
+/// 这样既能截掉 10 号样例尾部错位进科目列的 `2556.54`，也不会把表体中仅仅
+/// 少了日期或凭证号的真实分录误当页脚。
+pub(crate) fn analyze_ledger_rows(
     headers: &[String],
     rows: &[Vec<String>],
     column_of: &dyn Fn(&str) -> Vec<String>,
-) -> Vec<bool> {
+) -> LedgerRowAnalysis {
     let indexes = |roles: &[&str]| {
         let mut v = roles
             .iter()
@@ -2385,18 +2419,35 @@ pub(crate) fn ledger_junk_mask(
     };
     let identity_indexes = indexes(IDENTITY_ROLES);
     let amount_indexes = indexes(&[TB_AMOUNT_ROLES, JE_AMOUNT_ROLES].concat());
+    let je_amount_indexes = indexes(JE_AMOUNT_ROLES);
+    let mut account_code_indexes = indexes(&["accountCode"]);
+    let mut account_name_indexes = indexes(&["accountName"]);
+    // 兼容历史映射：旧版把编码与名称依次放进 `account` 多列角色。
+    let legacy_account_indexes = indexes(&["account"]);
+    if account_code_indexes.is_empty() {
+        account_code_indexes.extend(legacy_account_indexes.first().copied());
+    }
+    if account_name_indexes.is_empty() {
+        account_name_indexes.extend(legacy_account_indexes.iter().skip(1).copied());
+    }
     // 身份列都没映射就无从判断，一行不删。
     if identity_indexes.is_empty() {
-        return vec![true; rows.len()];
+        return LedgerRowAnalysis {
+            keep: vec![true; rows.len()],
+            missing_account_name_rows: Vec::new(),
+        };
     }
     // 合计标签不是身份。各家把「合计」写在哪一列全凭喜好——10 号样例写在日期列，
     // 07 号样例写在科目编码列。认它作身份，表尾倒扫就会停在合计行上，
     // 后面那串手工草稿反而留下来了。
     let has_identity = |row: &Vec<String>| {
         identity_indexes.iter().any(|index| {
-            row.get(*index)
-                .map(|v| v.trim())
-                .is_some_and(|v| !v.is_empty() && !is_formula_error(v) && !is_rollup_label(v))
+            row.get(*index).map(|v| v.trim()).is_some_and(|v| {
+                !v.is_empty()
+                    && !is_formula_error(v)
+                    && !is_rollup_label(v)
+                    && !is_report_footer_value(v)
+            })
         })
     };
     let has_amount = |row: &Vec<String>| {
@@ -2418,7 +2469,88 @@ pub(crate) fn ledger_junk_mask(
         }
         keep[index] = false;
     }
-    keep
+
+    let has_field = |row: &[String], positions: &[usize]| {
+        positions.iter().any(|index| {
+            row.get(*index)
+                .map(|value| value.trim())
+                .is_some_and(|value| {
+                    !value.is_empty() && !is_formula_error(value) && !is_rollup_label(value)
+                })
+        })
+    };
+    let has_parseable_je_amount = |row: &[String]| {
+        je_amount_indexes.iter().any(|index| {
+            row.get(*index).is_some_and(|value| {
+                !value.trim().is_empty() && parse_amount(value).is_ok_and(|amount| amount.is_some())
+            })
+        })
+    };
+
+    // 只有 JE 三类必要角色都已映射时才启用正文重入门槛。TB 也共用
+    // `ledger_junk_mask`，不能拿 JE 的正文协议去截余额表。
+    let boundary_enabled = !account_code_indexes.is_empty()
+        && !account_name_indexes.is_empty()
+        && !je_amount_indexes.is_empty();
+    let mut outside_body = false;
+    if boundary_enabled {
+        for (index, row) in rows.iter().enumerate() {
+            // 必须是整行全空；单独某个已映射字段为空不能截断正文。
+            if row.iter().all(|value| value.trim().is_empty()) {
+                keep[index] = false;
+                outside_body = true;
+                continue;
+            }
+            if outside_body {
+                let complete_entry = has_field(row, &account_code_indexes)
+                    && has_field(row, &account_name_indexes)
+                    && has_parseable_je_amount(row);
+                keep[index] = complete_entry;
+                if complete_entry {
+                    outside_body = false;
+                }
+            }
+        }
+    }
+
+    // 正文内「有编码、有金额、缺名称」是必要字段错误，不是垃圾行。保留该行并把
+    // 位置交给调用方报错；分隔符后尚未重新进入正文的草稿不参与检查。
+    let mut missing_account_name_rows = Vec::new();
+    if boundary_enabled {
+        let mut outside_body = false;
+        for (index, row) in rows.iter().enumerate() {
+            if row.iter().all(|value| value.trim().is_empty()) {
+                outside_body = true;
+                continue;
+            }
+            let has_code = has_field(row, &account_code_indexes);
+            let has_name = has_field(row, &account_name_indexes);
+            let has_money = has_parseable_je_amount(row);
+            if outside_body {
+                if has_code && has_name && has_money {
+                    outside_body = false;
+                } else {
+                    continue;
+                }
+            }
+            if keep.get(index).copied().unwrap_or(false) && has_code && has_money && !has_name {
+                missing_account_name_rows.push(index);
+            }
+        }
+    }
+
+    LedgerRowAnalysis {
+        keep,
+        missing_account_name_rows,
+    }
+}
+
+pub(crate) fn ledger_junk_mask(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<bool> {
+    analyze_ledger_rows(headers, rows, column_of).keep
 }
 
 /// 标记 TB 中应当计入的明细行。返回值与 `rows` 一一对应：`true` 表示该行要算。
@@ -3026,6 +3158,176 @@ fn is_placeholder(s: &str) -> bool {
     matches!(s.trim(), "-" | "—" | "–" | "N/A" | "n/a" | "NA" | "无")
 }
 
+/// 一条已经映射到金额角色、但非空值无法解析的单元格。
+/// `row_index` 是 `rows` 内的零基下标，调用方可结合标题行换算源表行号。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AmountParseIssue {
+    pub(crate) role: &'static str,
+    pub(crate) label: &'static str,
+    pub(crate) column: String,
+    pub(crate) row_index: usize,
+    pub(crate) value: String,
+}
+
+fn is_amount_value_role(role: &str) -> bool {
+    let lower = role.to_ascii_lowercase();
+    lower.contains("amount")
+        || lower.contains("debit")
+        || lower.contains("credit")
+        || matches!(role, "principal" | "openingPrincipal" | "closingPrincipal")
+}
+
+/// 校验已映射金额列的所有非空值均可由公共金额解析器读取。
+///
+/// 空白与横杠占位符是合法的零/缺省表达；其他非空文本必须解析为数值。所有工具
+/// 都可在业务计算前调用这一个入口，避免各自把坏值静默改成零。
+pub(crate) fn mapped_amount_parse_issues(
+    kind: &str,
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<AmountParseIssue> {
+    let mut issues = Vec::new();
+    let mut visited = HashSet::<(&'static str, usize)>::new();
+    for definition in roles(kind)
+        .iter()
+        .filter(|definition| is_amount_value_role(definition.name))
+    {
+        for column in column_of(definition.name) {
+            let Some(index) = header_index(headers, &column) else {
+                continue;
+            };
+            if !visited.insert((definition.name, index)) {
+                continue;
+            }
+            for (row_index, row) in rows.iter().enumerate() {
+                let raw = row.get(index).map(String::as_str).unwrap_or("");
+                let trimmed = raw.trim();
+                if trimmed.is_empty() || matches!(trimmed, "-" | "—" | "–") {
+                    continue;
+                }
+                if parse_amount(raw).is_ok_and(|value| value.is_some()) {
+                    continue;
+                }
+                issues.push(AmountParseIssue {
+                    role: definition.name,
+                    label: definition.label,
+                    column: column.clone(),
+                    row_index,
+                    value: raw.to_owned(),
+                });
+            }
+        }
+    }
+    issues
+}
+
+fn normalized_unit_value(raw: &str) -> String {
+    raw.trim()
+        .to_uppercase()
+        .replace([' ', '.', '_', '-'], "")
+        .replace('㎡', "M2")
+        .replace('㎥', "M3")
+}
+
+fn is_measurement_unit_value(raw: &str) -> bool {
+    matches!(
+        normalized_unit_value(raw).as_str(),
+        "KG" | "G"
+            | "MG"
+            | "T"
+            | "TON"
+            | "LB"
+            | "EA"
+            | "PC"
+            | "PCS"
+            | "BOX"
+            | "COL"
+            | "M"
+            | "M2"
+            | "M3"
+            | "CM"
+            | "MM"
+            | "L"
+            | "ML"
+            | "SET"
+            | "BAG"
+            | "ROLL"
+            | "CASE"
+            | "PAL"
+            | "UNIT"
+            | "H"
+            | "HR"
+            | "DAY"
+            | "个"
+            | "件"
+            | "箱"
+            | "盒"
+            | "千克"
+            | "公斤"
+            | "克"
+            | "吨"
+            | "米"
+            | "平方米"
+            | "立方米"
+            | "升"
+            | "套"
+            | "台"
+            | "只"
+            | "卷"
+            | "袋"
+    )
+}
+
+fn column_is_measurement_unit(headers: &[String], rows: &[Vec<String>], index: usize) -> bool {
+    let header = headers
+        .get(index)
+        .map(|value| normalize_header(value))
+        .unwrap_or_default();
+    let explicit_unit_header = header.contains("计量单位")
+        || header.contains("数量单位")
+        || header.contains("物料单位")
+        || matches!(header.as_str(), "uom" | "unitofmeasure");
+    if explicit_unit_header {
+        return true;
+    }
+    let ambiguous_unit_header = header == "单位";
+    let values = rows
+        .iter()
+        .take(10_000)
+        .filter_map(|row| row.get(index))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return false;
+    }
+    let unit_count = values
+        .iter()
+        .filter(|value| is_measurement_unit_value(value))
+        .count();
+    let distinct = values
+        .iter()
+        .map(|value| normalized_unit_value(value))
+        .collect::<HashSet<_>>()
+        .len();
+    let ratio = unit_count as f64 / values.len() as f64;
+    // 裸「单位」仍可能真的是公司，必须同时有取值证据；没有单位型表头时则
+    // 要求更多样本和更高占比，避免把恰好叫 EA 的单一公司代码误伤。
+    (ambiguous_unit_header && unit_count >= 2 && ratio >= 0.60)
+        || (!ambiguous_unit_header && unit_count >= 5 && distinct >= 2 && ratio >= 0.90)
+}
+
+/// 已映射的主体列是否实际是一列计量单位。
+pub(crate) fn entity_column_is_measurement_unit(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column: &str,
+) -> bool {
+    header_index(headers, column)
+        .is_some_and(|index| column_is_measurement_unit(headers, rows, index))
+}
+
 /// 把单元格文本读成金额。`None` 表示空值或占位符，`Err` 表示确实读不出来。
 ///
 /// 认得实务里的各种写法：千分位（含全角逗号与不间断空格）、括号负数 `(500)`、
@@ -3305,6 +3607,18 @@ pub(crate) fn suggest_roles_with_data(
     rows: &[Vec<String>],
 ) -> BTreeMap<usize, &'static str> {
     let mut out = suggest_roles(kind, headers);
+    // 「单位」既可能指公司，也可能指物料计量单位。若取值明显是 KG／EA／BOX，
+    // 就撤销主体建议，避免它进入凭证键后拆散同一张凭证的借贷两边。
+    if kind == "je" {
+        if let Some(index) = out
+            .iter()
+            .find_map(|(index, role)| (*role == "entity").then_some(*index))
+        {
+            if column_is_measurement_unit(headers, rows, index) {
+                out.remove(&index);
+            }
+        }
+    }
     disambiguate_cumulative(kind, headers, rows, &mut out);
     fill_combined_account_column(rows, &mut out, headers.len());
     out
@@ -4832,6 +5146,11 @@ fn group_vouchers_by_roles(
     for role in ["entity", "date", "id"] {
         for name in column_of(role) {
             if let Some(index) = header_index(headers, &name) {
+                // 已保存或人工映射也可能把「单位」指给主体。即使上游没有重新
+                // 自动识别，方向引擎也不能让它参与凭证分组。
+                if role == "entity" && column_is_measurement_unit(headers, rows, index) {
+                    continue;
+                }
                 if !indexes.contains(&index) {
                     indexes.push(index);
                 }
@@ -6990,6 +7309,103 @@ mod tests {
     }
 
     #[test]
+    fn 整行空白后的草稿不能伪装成新正文() {
+        let headers: Vec<String> = ["科目编码", "科目名称", "借方金额", "贷方金额", "备注"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let rows = vec![
+            vec![
+                "1001".into(),
+                "库存现金".into(),
+                "100".into(),
+                "0".into(),
+                "".into(),
+            ],
+            // 正文中缺名称的真实分录要保留，并交给调用方报必要字段错误。
+            vec![
+                "1002".into(),
+                "".into(),
+                "0".into(),
+                "100".into(),
+                "".into(),
+            ],
+            // 只有整行全空才构成边界。
+            vec!["".into(), "".into(), "".into(), "".into(), "".into()],
+            // 10 号样例尾部的错位金额：有一个像编码的值，但没有名称和金额结构。
+            vec![
+                "2556.54".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "账面补提".into(),
+            ],
+            // 分隔后的普通说明也不能重新开启正文。
+            vec![
+                "".into(),
+                "以前年度损益".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+            ],
+            // 三项齐备才重新进入正文；金额为 0 也属于可解析金额。
+            vec![
+                "6602".into(),
+                "管理费用".into(),
+                "0".into(),
+                "0".into(),
+                "".into(),
+            ],
+            // 已重新进入正文，后续缺名称行仍须保留并报告。
+            vec![
+                "2202".into(),
+                "".into(),
+                "0".into(),
+                "100".into(),
+                "".into(),
+            ],
+        ];
+        let columns = |role: &str| match role {
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "functionalDebit" => vec!["借方金额".into()],
+            "functionalCredit" => vec!["贷方金额".into()],
+            _ => vec![],
+        };
+
+        let analysis = analyze_ledger_rows(&headers, &rows, &columns);
+        assert_eq!(
+            analysis.keep,
+            vec![true, true, false, false, false, true, true]
+        );
+        assert_eq!(analysis.missing_account_name_rows, vec![1, 6]);
+    }
+
+    #[test]
+    fn 单个映射字段空白不会截断正文() {
+        let headers: Vec<String> = ["科目编码", "科目名称", "金额", "备注"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let rows = vec![
+            vec!["1001".into(), "库存现金".into(), "10".into(), "".into()],
+            // 科目名称虽然空，但整行并非空白，不能被误认成正文分隔符。
+            vec!["1002".into(), "".into(), "20".into(), "".into()],
+            vec!["1003".into(), "银行存款".into(), "30".into(), "".into()],
+        ];
+        let columns = |role: &str| match role {
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "functionalAmount" => vec!["金额".into()],
+            _ => vec![],
+        };
+
+        let analysis = analyze_ledger_rows(&headers, &rows, &columns);
+        assert_eq!(analysis.keep, vec![true, true, true]);
+        assert_eq!(analysis.missing_account_name_rows, vec![1]);
+    }
+
+    #[test]
     fn 上级编码必须落在分隔符边界上() {
         // 点号分级的账里 `1002.1` 与 `1002.10` 是同级的两个科目，
         // 裸 `starts_with` 会把前者判成后者的上级。
@@ -7213,6 +7629,82 @@ mod tests {
         }
         // 真读不出来才报错，交给调用方决定是中断还是按 0 继续。
         assert!(parse_amount("待补").is_err());
+    }
+
+    #[test]
+    fn 金额角色的非空坏值由公共校验拦截() {
+        let headers = vec!["借方金额".into(), "贷方金额".into(), "净额".into()];
+        let rows = vec![
+            vec!["1,000".into(), "—".into(), "".into()],
+            vec!["待补".into(), "(50)".into(), "950".into()],
+            vec!["无".into(), "-".into(), "0".into()],
+        ];
+        let column_of = |role: &str| match role {
+            "functionalDebit" => vec!["借方金额".into()],
+            "functionalCredit" => vec!["贷方金额".into()],
+            "functionalAmount" => vec!["净额".into()],
+            _ => Vec::new(),
+        };
+        let issues = mapped_amount_parse_issues("je", &headers, &rows, &column_of);
+        assert_eq!(
+            issues.len(),
+            2,
+            "只有空白和横杠合法，其他非数值文本应被拦截"
+        );
+        assert_eq!(issues[0].role, "functionalDebit");
+        assert_eq!(issues[0].row_index, 1);
+        assert_eq!(issues[0].value, "待补");
+        assert_eq!(issues[1].value, "无");
+    }
+
+    #[test]
+    fn 计量单位不得自动识别为主体() {
+        let headers = vec![
+            "凭证编号".into(),
+            "日期".into(),
+            "单位".into(),
+            "借方金额".into(),
+            "贷方金额".into(),
+        ];
+        let rows = vec![
+            vec![
+                "1".into(),
+                "2025-01-01".into(),
+                "EA".into(),
+                "100".into(),
+                "".into(),
+            ],
+            vec![
+                "1".into(),
+                "2025-01-01".into(),
+                "KG".into(),
+                "".into(),
+                "-100".into(),
+            ],
+        ];
+        assert!(entity_column_is_measurement_unit(&headers, &rows, "单位"));
+        let suggested = suggest_roles_with_data("je", &headers, &rows);
+        assert!(
+            !suggested.values().any(|role| *role == "entity"),
+            "KG/EA 列不能成为主体：{suggested:?}"
+        );
+    }
+
+    #[test]
+    fn 计量单位映射不会拆碎凭证分组() {
+        let headers = vec!["单位".into(), "日期".into(), "凭证编号".into()];
+        let rows = vec![
+            vec!["EA".into(), "2025-01-01".into(), "1".into()],
+            vec!["KG".into(), "2025-01-01".into(), "1".into()],
+        ];
+        let column_of = |role: &str| match role {
+            "entity" => vec!["单位".into()],
+            "date" => vec!["日期".into()],
+            "id" => vec!["凭证编号".into()],
+            _ => Vec::new(),
+        };
+        let groups = group_vouchers_by_roles(&headers, &rows, &column_of);
+        assert_eq!(groups, vec![vec![0, 1]]);
     }
 
     #[test]

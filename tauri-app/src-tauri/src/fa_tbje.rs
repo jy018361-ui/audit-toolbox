@@ -177,7 +177,16 @@ fn analyze(params: &Value, cancel: &AtomicBool) -> Result<Analysis, AppError> {
     let je_map = mapping(params, "jeMapping");
     validate_required(&tb_map, &je_map)?;
     let tb = load_fx_table(&tb_spec)?;
-    let je = crate::fx::forward_filled_je_table(&load_fx_table(&je_spec)?, &je_map);
+    let raw_je = load_fx_table(&je_spec)?;
+    let tb_keep = ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| {
+        crate::fx::mapped_cols(&tb_map, role)
+    });
+    crate::fx::validate_mapped_amount_values(&tb, &tb_map, "tb", "TB", Some(&tb_keep))?;
+    let je_keep = ledger_mapping::ledger_junk_mask(&raw_je.headers, &raw_je.rows, &|role| {
+        crate::fx::mapped_cols(&je_map, role)
+    });
+    crate::fx::validate_mapped_amount_values(&raw_je, &je_map, "je", "JE", Some(&je_keep))?;
+    let je = crate::fx::forward_filled_je_table(&raw_je, &je_map);
     for (kind, table, map) in [("TB", &tb, &tb_map), ("JE", &je, &je_map)] {
         for role in map.keys() {
             if mapped_columns(map, role)

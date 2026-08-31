@@ -1192,6 +1192,53 @@ fn source(params: &Value, key: &str) -> Result<(Table, Map<String, Value>), AppE
         table.rows = kept_rows;
         ledger_mapping::forward_fill_columns(&table.headers, &mut table.rows, &columns);
     }
+    let validation_kind = if matches!(kind, "tb" | "je") {
+        kind
+    } else {
+        "loan"
+    };
+    let keep = if kind == "tb" {
+        Some(ledger_mapping::tb_leaf_mask(
+            &table.headers,
+            &table.rows,
+            &|role| mapped_names(&mapping, "tb", role),
+        ))
+    } else {
+        None
+    };
+    let issues = ledger_mapping::mapped_amount_parse_issues(
+        validation_kind,
+        &table.headers,
+        &table.rows,
+        &|role| mapped_names(&mapping, validation_kind, role),
+    )
+    .into_iter()
+    .filter(|issue| {
+        keep.as_deref()
+            .is_none_or(|mask| mask.get(issue.row_index).copied().unwrap_or(false))
+    })
+    .collect::<Vec<_>>();
+    if let Some(issue) = issues.first() {
+        return Err(error(
+            "AMOUNT_VALUE_INVALID",
+            format!(
+                "{}金额列存在非空但无法解析为数值的单元格，请修正后重试。",
+                kind.to_uppercase()
+            ),
+            Some(format!(
+                "{}（{}）第{}行=“{}”{}",
+                issue.column,
+                issue.label,
+                table.header_row + table.header_depth + issue.row_index,
+                issue.value,
+                if issues.len() > 1 {
+                    format!("；另有{}处。", issues.len() - 1)
+                } else {
+                    String::new()
+                }
+            )),
+        ));
+    }
     Ok((table, mapping))
 }
 /// 台账映射的旧角色名 → 标准名。认不出的旧名原样保留（用户手工填的自定义键不该被吞掉）。

@@ -433,13 +433,14 @@ fn validate_kanzhang_mapping(params: Value) -> Result<Value, AppError> {
     if scheme == "unknown" && !missing.iter().any(|m| m.contains("金额")) {
         missing.push("金额字段");
     }
+    let amount_issues = ledger_amount_parse_issues(&table, &mapping);
     let mapped = mapping_columns(&mapping);
     let unknown = mapped
         .into_iter()
         .filter(|name| header_index(&table.headers, name).is_none())
         .collect::<Vec<_>>();
     Ok(
-        json!({"engine":"rust-polars","valid":missing.is_empty()&&unknown.is_empty(),"scheme":scheme,"missing":missing,"unknownColumns":unknown,"normalizedMapping":mapping}),
+        json!({"engine":"rust-polars","valid":missing.is_empty()&&unknown.is_empty()&&amount_issues.is_empty(),"scheme":scheme,"missing":missing,"unknownColumns":unknown,"amountIssues":amount_issues,"normalizedMapping":mapping}),
     )
 }
 
@@ -712,6 +713,7 @@ fn kanzhang_filter_preview(
         .clone()
         .unwrap_or_else(|| suggest_mapping(&table.headers, &table.rows));
     validate_mapping_required(&mapping)?;
+    validate_ledger_amounts(&table, &mapping, job.header_row)?;
     let table = preprocess_ledger(table, &mapping, None)?;
     check_cancel(cancel)?;
     progress("filter", 1, 3, "Rust Polars 正在筛选目标科目和完整凭证…");
@@ -745,6 +747,7 @@ fn export_kanzhang(
         .clone()
         .unwrap_or_else(|| suggest_mapping(&table.headers, &table.rows));
     validate_mapping_required(&mapping)?;
+    validate_ledger_amounts(&table, &mapping, job.header_row)?;
     let table = preprocess_ledger(table, &mapping, None)?;
     check_cancel(cancel)?;
     let batches = normalized_batches(&job);
@@ -4406,6 +4409,70 @@ fn mapping_columns(m: &LedgerMapping) -> Vec<&str> {
         )
         .collect()
 }
+
+fn ledger_columns_for_role(mapping: &LedgerMapping, role: &str) -> Vec<String> {
+    match role {
+        "functionalAmount" => mapping.amount.iter().cloned().collect(),
+        "functionalDebit" => mapping.debit.iter().cloned().collect(),
+        "functionalCredit" => mapping.credit.iter().cloned().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn ledger_amount_parse_issues(table: &Table, mapping: &LedgerMapping) -> Vec<Value> {
+    ledger_mapping::mapped_amount_parse_issues("je", &table.headers, &table.rows, &|role| {
+        ledger_columns_for_role(mapping, role)
+    })
+    .into_iter()
+    .take(20)
+    .map(|issue| {
+        json!({
+            "rowIndex": issue.row_index,
+            "column": issue.column,
+            "role": issue.role,
+            "label": issue.label,
+            "value": issue.value,
+        })
+    })
+    .collect()
+}
+
+fn validate_ledger_amounts(
+    table: &Table,
+    mapping: &LedgerMapping,
+    header_row: usize,
+) -> Result<(), AppError> {
+    let issues =
+        ledger_mapping::mapped_amount_parse_issues("je", &table.headers, &table.rows, &|role| {
+            ledger_columns_for_role(mapping, role)
+        });
+    if issues.is_empty() {
+        return Ok(());
+    }
+    let detail = issues
+        .iter()
+        .take(20)
+        .map(|issue| {
+            format!(
+                "{}（{}）第{}行=“{}”",
+                issue.column,
+                issue.label,
+                header_row + issue.row_index + 1,
+                issue.value
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("；");
+    Err(error(
+        "KANZHANG_AMOUNT_VALUE_INVALID",
+        "金额列存在非空但无法解析为数值的单元格，请修正后重试。",
+        Some(if issues.len() > 20 {
+            format!("{detail}；另有{}处未列出。", issues.len() - 20)
+        } else {
+            detail
+        }),
+    ))
+}
 fn validate_mapping_required(m: &LedgerMapping) -> Result<(), AppError> {
     if m.id.is_empty()
         || m.account_columns().is_empty()
@@ -4454,15 +4521,13 @@ fn normalize_headers(row: &[String], width: usize) -> Vec<String> {
 }
 fn normalize_rows(rows: &[Vec<String>], width: usize) -> Vec<Vec<String>> {
     rows.iter()
-        .filter_map(|row| {
+        .map(|row| {
             let mut r = row.clone();
             r.resize(width, String::new());
             r.truncate(width);
-            if r.iter().all(|v| v.trim().is_empty()) {
-                None
-            } else {
-                Some(r)
-            }
+            // 内部整行空白是账表的结构信息：TBJE 用它区分正文与表尾手工
+            // 草稿。不能在公共 Polars 缓存前删掉，否则下游再也无法恢复边界。
+            r
         })
         .collect()
 }
@@ -4610,7 +4675,8 @@ fn fingerprint(path: &Path, sheet: &str, header_row: usize) -> Result<String, Ap
     h.update(modified.to_le_bytes());
     h.update(sheet.as_bytes());
     h.update(header_row.to_le_bytes());
-    h.update(b"rust-polars-v1");
+    // v2 开始保留表内整行空白，用于正文/附注边界判断；不能复用删过空行的旧缓存。
+    h.update(b"rust-polars-v2");
     Ok(hex::encode(h.finalize()))
 }
 /// 缓存根目录：`%LOCALAPPDATA%/AuditToolbox/AuditToolbox/cache`。
@@ -5236,6 +5302,7 @@ fn export_je_mark(
         .clone()
         .unwrap_or_else(|| suggest_mapping(&table.headers, &table.rows));
     validate_mapping_required(&mapping)?;
+    validate_ledger_amounts(&table, &mapping, job.header_row)?;
     let table = preprocess_ledger(table, &mapping, sign_choice)?;
     check_cancel(cancel)?;
     // 口径在全表（列筛选前）定案一次：用户指定 > 凭证投票/列级兜底 > 默认符号一样。
@@ -5655,6 +5722,34 @@ mod tests {
         )
         .expect("混合结构可解析");
         assert_eq!(mixed.account_columns(), vec!["科目编码", "科目名称"]);
+    }
+
+    #[test]
+    fn 看账公共入口拦截金额列非数值() {
+        let table = Table {
+            path: PathBuf::new(),
+            sheet: "Sheet1".to_owned(),
+            headers: vec!["凭证号".into(), "科目".into(), "借方".into(), "贷方".into()],
+            rows: vec![vec![
+                "V1".into(),
+                "1001".into(),
+                "100".into(),
+                "待确认".into(),
+            ]],
+            sheets: vec![],
+            encoding: None,
+            delimiter: None,
+        };
+        let mapping = LedgerMapping {
+            id: vec!["凭证号".into()],
+            legacy_account: vec!["科目".into()],
+            debit: Some("借方".into()),
+            credit: Some("贷方".into()),
+            ..Default::default()
+        };
+        let error = validate_ledger_amounts(&table, &mapping, 1).unwrap_err();
+        assert_eq!(error.code, "KANZHANG_AMOUNT_VALUE_INVALID");
+        assert!(error.detail.as_deref().unwrap_or("").contains("待确认"));
     }
 
     #[test]

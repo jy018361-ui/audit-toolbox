@@ -485,6 +485,78 @@ fn 序时账的合计行不计入发生额() {
 }
 
 #[test]
+fn je正文有编码和金额但缺名称时明确报必要字段错误() {
+    let dir = fixture("missing-account-name");
+    平的账(&dir);
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-03-01,V1,1001,库存现金,500,0\n\
+         2025-03-01,V1,2202,,0,500\n",
+    )
+    .unwrap();
+    let error = run(&params(&dir, true), &AtomicBool::new(false)).unwrap_err();
+    assert_eq!(error.code, "JE_REQUIRED_FIELD_MISSING");
+    assert!(error.user_message.contains("缺少科目名称"));
+    assert!(error.detail.as_deref().unwrap_or("").contains("源表行"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn tbje入口会拦截金额列中的非数值() {
+    let dir = fixture("invalid-amount");
+    平的账(&dir);
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-03-01,V1,1001,库存现金,500,0\n\
+         2025-03-01,V1,2202,应付账款,0,待确认\n\
+         2025-06-01,V2,2202,应付账款,300,0\n\
+         2025-06-01,V2,1001,库存现金,0,300\n",
+    )
+    .unwrap();
+    let error = run(&params(&dir, true), &AtomicBool::new(false)).unwrap_err();
+    assert_eq!(error.code, "AMOUNT_VALUE_INVALID");
+    assert!(error.user_message.contains("无法解析为数值"));
+    assert!(error.detail.as_deref().unwrap_or("").contains("待确认"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn je计量单位误映射为主体时移除后再判方向() {
+    let dir = fixture("unit-as-entity");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "公司,科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         A公司,1001,库存现金,100,500,300,300\n\
+         A公司,2202,应付账款,-100,300,500,-300\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,单位,借方,贷方\n\
+         2025-03-01,V1,1001,库存现金,KG,500,0\n\
+         2025-03-01,V1,2202,应付账款,EA,0,-500\n\
+         2025-06-01,V2,2202,应付账款,BOX,300,0\n\
+         2025-06-01,V2,1001,库存现金,COL,0,-300\n",
+    )
+    .unwrap();
+    let mut value = params(&dir, true);
+    value["tbMapping"]["entity"] = json!("公司");
+    value["jeMapping"]["entity"] = json!("单位");
+    let result = run(&value, &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    assert!(
+        result["mappingWarnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning.as_str().unwrap_or("").contains("计量单位"))
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn 未上传序时账时第二条明确跳过而不是报不平() {
     let dir = fixture("nojr");
     平的账(&dir);
@@ -537,7 +609,116 @@ fn tb按币种拆行而je无币种列时仅用tb本位币行核对() {
     let result = run(&value, &AtomicBool::new(false)).unwrap();
     assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
     assert_eq!(result["currencyScope"]["functionalCurrency"], json!("CNY"));
+    assert_eq!(result["currencyScope"]["mode"], json!("functionalCurrency"));
     assert_eq!(result["currencyScope"]["excludedForeignRows"], json!(2));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 情形c的je无币种和独立原币金额时tb按全部币种汇总() {
+    let dir = fixture("mixed-currency-scope");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,币种,期初余额,本年借方,本年贷方,期末余额\n\
+         1001,现金,CNY,0,100,0,100\n\
+         1001,现金,USD,0,20,0,20\n\
+         2202,应付账款,CNY,0,0,100,-100\n\
+         2202,应付账款,USD,0,0,20,-20\n",
+    )
+    .unwrap();
+    // JE 没有币种，也没有独立原币金额列；同一个金额口径中已经同时包含
+    // 本位币与原币行。按 CNY 单独比较会差 20，情形 C 应汇总 TB 全币种。
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-01-01,V1,1001,现金,120,0\n\
+         2025-01-01,V1,2202,应付账款,0,120\n",
+    )
+    .unwrap();
+    let value = json!({
+        "tbSource": {"inputPath": dir.join("tb.csv")},
+        "tbMapping": {
+            "accountCode": "科目编码", "accountName": "科目名称", "currencyText": "币种",
+            "openingFunctionalAmount": "期初余额", "ytdFunctionalDebit": "本年借方",
+            "ytdFunctionalCredit": "本年贷方", "closingFunctionalAmount": "期末余额"
+        },
+        "jeSource": {"inputPath": dir.join("je.csv")},
+        "jeMapping": {
+            "date": "日期", "id": "凭证号", "accountCode": "科目编码",
+            "accountName": "科目名称", "functionalDebit": "借方",
+            "functionalCredit": "贷方"
+        }
+    });
+    let result = run(&value, &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    assert_eq!(
+        result["tbVsJe"]["currencyScope"],
+        json!("allCurrenciesMixedJe")
+    );
+    assert_eq!(result["currencyScope"]["includedRows"], json!(4));
+    assert_eq!(result["currencyScope"]["excludedForeignRows"], json!(0));
+    assert!(
+        result["tbVsJe"]["currencyScopeNote"]
+            .as_str()
+            .unwrap()
+            .contains("情形C")
+    );
+    assert!(
+        result["mappingWarnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning.as_str().unwrap_or("").contains("情形C"))
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn tb非完整自然年只提示且不自动切换发生额列() {
+    let dir = fixture("partial-period-warning");
+    let tb_path = dir.join("TB_2024.4-12.csv");
+    std::fs::write(
+        &tb_path,
+        "科目编码,科目名称,期初余额,本期借方,本期贷方,本年借方,本年贷方,期末余额\n\
+         1001,现金,0,50,30,500,300,200\n\
+         2202,应付账款,0,30,50,300,500,-200\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2024-04-01,V1,1001,现金,50,0\n\
+         2024-04-01,V1,2202,应付账款,0,50\n\
+         2024-05-01,V2,2202,应付账款,30,0\n\
+         2024-05-01,V2,1001,现金,0,30\n",
+    )
+    .unwrap();
+    let value = json!({
+        "tbSource": {"inputPath": tb_path},
+        "tbMapping": {
+            "accountCode": "科目编码", "accountName": "科目名称",
+            "openingFunctionalAmount": "期初余额",
+            "periodFunctionalDebit": "本期借方", "periodFunctionalCredit": "本期贷方",
+            "ytdFunctionalDebit": "本年借方", "ytdFunctionalCredit": "本年贷方",
+            "closingFunctionalAmount": "期末余额"
+        },
+        "jeSource": {"inputPath": dir.join("je.csv")},
+        "jeMapping": je_mapping()
+    });
+    let result = run(&value, &AtomicBool::new(false)).unwrap();
+    // 如果系统擅自切到“本期”50/30，这里会通过；保持用户映射的本年累计
+    // 500/300 才会如实报告差异。
+    assert_eq!(result["tbVsJe"]["passed"], json!(false), "{result:#}");
+    assert!(
+        result["mappingWarnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| {
+                let warning = warning.as_str().unwrap_or("");
+                warning.contains("不是完整自然年") && warning.contains("不会自动切换")
+            })
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -780,6 +961,12 @@ fn 真实样例的发生额核对() {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
+            if std::env::var("LEDGER_SAMPLE_PREFIX")
+                .ok()
+                .is_some_and(|prefix| leading(&tb_name) != prefix)
+            {
+                continue;
+            }
             let Some(je_path) = jes
                 .iter()
                 .find(|p| {
@@ -826,6 +1013,12 @@ fn 真实样例的发生额核对() {
                         je_inspect["sheet"].as_str().unwrap_or("?"),
                     );
                     println!("      币种范围  {}", result["currencyScope"]);
+                    if !result["mappingWarnings"]
+                        .as_array()
+                        .is_none_or(Vec::is_empty)
+                    {
+                        println!("      映射提示  {}", result["mappingWarnings"]);
+                    }
                     for item in node["items"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
                         if item["netPassed"].as_bool() == Some(true) {
                             continue;
@@ -841,7 +1034,14 @@ fn 真实样例的发生额核对() {
                         );
                     }
                 }
-                Err(e) => println!("\n══════ {tb_name}：{}", e.user_message),
+                Err(e) => println!(
+                    "\n══════ {tb_name}：{}{}",
+                    e.user_message,
+                    e.detail
+                        .as_deref()
+                        .map(|detail| format!("（{detail}）"))
+                        .unwrap_or_default()
+                ),
             }
         }
     }

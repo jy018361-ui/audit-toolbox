@@ -1096,6 +1096,10 @@ export function Settings({
   const updateCheckLock = useRef(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<{
+    downloaded: number;
+    total?: number;
+  }>();
   // 全局主题（data-theme 切换，默认深绿）
   const [theme, setTheme] = useState(
     () => document.documentElement.dataset.theme ?? "green-dark",
@@ -1139,6 +1143,7 @@ export function Settings({
     setNotesError("");
     setFallbackNotes("");
     setCheckedUpdateVersion(undefined);
+    setDownloadProgress(undefined);
     setUpdateStatus("正在检查 GitHub Release…");
     try {
       const update = await check({ timeout: 15000 });
@@ -1186,6 +1191,7 @@ export function Settings({
     )
       return;
     setInstallingUpdate(true);
+    setDownloadProgress({ downloaded: 0 });
     setUpdateStatus("正在下载并安装更新，请不要关闭工具箱…");
     let downloadedBytes = 0;
     let totalBytes: number | undefined;
@@ -1193,6 +1199,7 @@ export function Settings({
       await availableUpdate.downloadAndInstall((event) => {
         if (event.event === "Started") {
           totalBytes = event.data.contentLength;
+          setDownloadProgress({ downloaded: 0, total: totalBytes });
           setUpdateStatus(
             totalBytes
               ? `准备下载更新：共 ${formatBytes(totalBytes)}`
@@ -1200,8 +1207,16 @@ export function Settings({
           );
         } else if (event.event === "Progress") {
           downloadedBytes += event.data.chunkLength;
+          setDownloadProgress({
+            downloaded: downloadedBytes,
+            total: totalBytes,
+          });
           setUpdateStatus(formatUpdateProgress(downloadedBytes, totalBytes));
         } else if (event.event === "Finished") {
+          setDownloadProgress({
+            downloaded: totalBytes ?? downloadedBytes,
+            total: totalBytes,
+          });
           setUpdateStatus("更新下载完成，正在安装，请不要关闭工具箱…");
         }
       });
@@ -1209,6 +1224,7 @@ export function Settings({
       await relaunch();
     } catch (e) {
       setInstallingUpdate(false);
+      setDownloadProgress(undefined);
       setUpdateStatus(
         `安装更新失败：${e instanceof Error ? e.message : String(e)}`,
       );
@@ -1339,13 +1355,18 @@ export function Settings({
         }
       />
       {updateOpen && (
+        /*
+         * UI v1：让用户先确认版本，再看状态，最后按需阅读说明。
+         * 提交记录默认折叠，避免实现细节压过面向用户的更新内容。
+         */
         <section
           className="list-card settings-update-panel"
           id="settings-update-panel"
           aria-labelledby="settings-update-title"
         >
           <div className="settings-update-heading">
-            <div>
+            <div className="settings-update-title-block">
+              <span className="settings-update-kicker">软件更新</span>
               <h2 id="settings-update-title">
                 {availableUpdate
                   ? `可更新至 v${availableUpdate.version}`
@@ -1357,22 +1378,83 @@ export function Settings({
                   : `当前版本：v${appVersion} · 来源：GitHub Releases`}
               </p>
             </div>
-            <Button
-              variant="ghost"
-              disabled={installingUpdate}
-              onClick={() => setUpdateOpen(false)}
-            >
-              收起
-            </Button>
+            <div className="settings-update-heading-actions">
+              <span
+                className={`settings-update-badge${availableUpdate ? " is-available" : ""}`}
+              >
+                {installingUpdate
+                  ? "正在安装"
+                  : checkingUpdate
+                    ? "正在检查"
+                    : availableUpdate
+                      ? "可安装"
+                      : "已是最新"}
+              </span>
+              <Button
+                variant="ghost"
+                disabled={installingUpdate}
+                onClick={() => setUpdateOpen(false)}
+              >
+                收起
+              </Button>
+            </div>
           </div>
           {updateStatus && (
-            <p
+            <div
               role="status"
               aria-live="polite"
               className="settings-update-status"
             >
-              {updateStatus}
-            </p>
+              <div className="settings-update-status-line">
+                <span>{updateStatus}</span>
+                {installingUpdate && downloadProgress?.total ? (
+                  <strong>
+                    {Math.min(
+                      100,
+                      Math.round(
+                        (downloadProgress.downloaded / downloadProgress.total) *
+                          100,
+                      ),
+                    )}
+                    %
+                  </strong>
+                ) : null}
+              </div>
+              {installingUpdate && (
+                <div
+                  className="settings-update-progress"
+                  role="progressbar"
+                  aria-label="更新下载进度"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={
+                    downloadProgress?.total
+                      ? Math.min(
+                          100,
+                          Math.round(
+                            (downloadProgress.downloaded /
+                              downloadProgress.total) *
+                              100,
+                          ),
+                        )
+                      : undefined
+                  }
+                >
+                  <span
+                    style={{
+                      width: downloadProgress?.total
+                        ? `${Math.min(
+                            100,
+                            (downloadProgress.downloaded /
+                              downloadProgress.total) *
+                              100,
+                          )}%`
+                        : "32%",
+                    }}
+                  />
+                </div>
+              )}
+            </div>
           )}
           {notesError && (
             <p role="alert" className="settings-test-result failed">
@@ -1381,13 +1463,16 @@ export function Settings({
           )}
           {releaseNotes && (
             <div className="settings-release-notes">
-              <p>
-                {releaseNotes.currentVersion === releaseNotes.targetVersion
-                  ? `本版说明 · v${releaseNotes.currentVersion}`
-                  : `本次更新说明`}
-              </p>
+              <div className="settings-release-notes-heading">
+                <h3>
+                  {releaseNotes.currentVersion === releaseNotes.targetVersion
+                    ? `本版说明 · v${releaseNotes.currentVersion}`
+                    : `本次更新说明`}
+                </h3>
+                <span>{releaseNotes.releases.length} 个版本</span>
+              </div>
               {releaseNotes.warnings.map((warning, i) => (
-                <p className="settings-note" key={i}>
+                <p className="settings-release-warning" key={i}>
                   {warning}
                 </p>
               ))}
@@ -1412,14 +1497,17 @@ export function Settings({
                 </article>
               ))}
               {releaseNotes.commits.length > 0 && (
-                <article className="settings-release-entry">
-                  <h3>升级区间提交记录</h3>
+                <details className="settings-release-commits">
+                  <summary>
+                    升级区间提交记录
+                    <span>{releaseNotes.commits.length} 条</span>
+                  </summary>
                   <ul>
                     {releaseNotes.commits.map((message, i) => (
                       <li key={i}>{message}</li>
                     ))}
                   </ul>
-                </article>
+                </details>
               )}
             </div>
           )}
@@ -1429,7 +1517,7 @@ export function Settings({
               <div className="settings-release-body">{fallbackNotes}</div>
             </article>
           )}
-          <div className="actions">
+          <div className="actions settings-update-actions">
             <Button
               variant="secondary"
               disabled={checkingUpdate || installingUpdate}

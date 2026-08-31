@@ -466,7 +466,7 @@ pub(crate) fn run_job(
         "fx.preview" => {
             let token = preview_cache_key(&params);
             let mut params = params;
-            detect_and_inject_sign_conventions(&mut params);
+            detect_and_inject_sign_conventions(&mut params)?;
             let mut result = calculate(&params, progress, &cancel, pause)?;
             if let Some(object) = result.as_object_mut() {
                 object.insert("previewToken".into(), Value::String(token.clone()));
@@ -498,7 +498,7 @@ pub(crate) fn run_job(
             // 「已带符号」账簿（4800 用友）漏检会按「贷方记正」兜底解析，
             // 金额正负全翻、借贷组合全挤到借方。token 必须在注入前计算，
             // 否则注入的口径键会让缓存永远对不上号。
-            detect_and_inject_sign_conventions(&mut export_params);
+            detect_and_inject_sign_conventions(&mut export_params)?;
             let supplied_token = export_params
                 .get("previewToken")
                 .and_then(Value::as_str)
@@ -1434,7 +1434,7 @@ pub(crate) fn load_fx_table(source: &SourceSpec) -> Result<Arc<FxTable>, AppErro
     let headers = merge_headers(&raw_headers, width);
     let rows = all[(h + depth).min(all.len())..]
         .iter()
-        .filter(|r| r.iter().any(|v| !v.trim().is_empty()))
+        // 整行空白是正文与表尾手工草稿的边界，必须保留给公共账表清洗器。
         .map(|r| pad(r, width))
         .collect::<Vec<_>>();
     let row_count = rows.len();
@@ -1932,6 +1932,15 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
                     Some(_) => 0.72,
                     None => semantic_role_score(role, &n),
                 };
+                if role == "entity"
+                    && ledger_mapping::entity_column_is_measurement_unit(
+                        &table.headers,
+                        &table.rows,
+                        h,
+                    )
+                {
+                    score = 0.0;
+                }
                 if role == "date" {
                     score += profiles[i]
                         .get("dateRatio")
@@ -2202,7 +2211,7 @@ fn mapping_obj(params: &Value, key: &str) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-fn mapped_cols(mapping: &Map<String, Value>, role: &str) -> Vec<String> {
+pub(crate) fn mapped_cols(mapping: &Map<String, Value>, role: &str) -> Vec<String> {
     match mapping.get(role) {
         Some(Value::String(s)) if !s.trim().is_empty() => vec![s.clone()],
         Some(Value::Array(a)) => a
@@ -2811,6 +2820,48 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
             } else {
                 raw_table
             };
+            let lower = if kind == "JE" { "je" } else { "tb" };
+            let column_of = |role: &str| {
+                mapping
+                    .iter()
+                    .filter(|(mapped_role, _)| {
+                        ledger_mapping::migrate_role_name(lower, mapped_role) == role
+                    })
+                    .flat_map(|(mapped_role, _)| mapped_cols(&mapping, mapped_role))
+                    .collect::<Vec<_>>()
+            };
+            let amount_issues = ledger_mapping::mapped_amount_parse_issues(
+                lower,
+                &table.headers,
+                &table.rows,
+                &column_of,
+            );
+            for issue in amount_issues.iter().take(5) {
+                let source_row = table.header_row + table.header_depth + issue.row_index;
+                errors.push(format!(
+                    "{kind} 金额列“{}”（{}）第{source_row}行必须解析为数值，实际为“{}”。",
+                    issue.column, issue.label, issue.value
+                ));
+            }
+            if amount_issues.len() > 5 {
+                errors.push(format!(
+                    "{kind} 另有 {} 个金额单元格无法解析为数值。",
+                    amount_issues.len() - 5
+                ));
+            }
+            if kind == "JE" {
+                if let Some(entity_column) = first_col(&mapping, "entity") {
+                    if ledger_mapping::entity_column_is_measurement_unit(
+                        &table.headers,
+                        &table.rows,
+                        &entity_column,
+                    ) {
+                        errors.push(format!(
+                            "JE 主体字段“{entity_column}”的取值是 KG、EA、BOX 等计量单位，不能作为公司/核算主体；请清除或改正主体映射。"
+                        ));
+                    }
+                }
+            }
             let data_years =
                 source_data_years(&table, if kind == "JE" { "je" } else { "tb" }, &mapping);
             if let Some(year) = report_year {
@@ -3512,12 +3563,12 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
         (&tb_table, &mut tb_mapping, "tb"),
         (&je_table, &mut je_mapping, "je"),
     ] {
-        if let Some(convention) = detect_sign_convention(table, mapping, kind) {
-            mapping.insert(
-                SIGN_CONVENTION_KEY.into(),
-                Value::String(convention.as_str().to_owned()),
-            );
-        }
+        let convention = detect_sign_convention(table, mapping, kind)
+            .map_err(|message| error("SIGN_CONVENTION_UNCERTAIN", &message, None))?;
+        mapping.insert(
+            SIGN_CONVENTION_KEY.into(),
+            Value::String(convention.as_str().to_owned()),
+        );
     }
     let (tb_mapping, je_mapping) = (tb_mapping, je_mapping);
     let use_foreign = amount_scheme_ok(&tb_mapping, "openingForeign")
@@ -3799,8 +3850,8 @@ fn cell<'a>(row: &'a RowRecord, mapping: &Map<String, Value>, role: &str) -> &'a
 /// 写回参数，下游就无需逐个传参。检测本身走统一内核：JE 拿整张凭证配平投票，
 /// TB 用勾稽等式投票，与看账、存款、借款判的是同一套。
 ///
-/// 判不出来时不写，[`sign_convention_of`] 会按「贷方记正数」兜底，与历史行为一致。
-fn detect_and_inject_sign_conventions(params: &mut Value) {
+/// 判不出来时必须中断并要求复核，不能静默套用「贷方记正数」。
+fn detect_and_inject_sign_conventions(params: &mut Value) -> Result<(), AppError> {
     for (source_key, mapping_key, kind) in [
         ("jeSource", "jeMapping", "je"),
         ("tbSource", "tbMapping", "tb"),
@@ -3808,15 +3859,18 @@ fn detect_and_inject_sign_conventions(params: &mut Value) {
         let Some(spec) = params.get(source_key).cloned() else {
             continue;
         };
-        let Ok(spec) = serde_json::from_value::<SourceSpec>(spec) else {
-            continue;
-        };
-        let Ok(table) = load_fx_table(&spec) else {
-            continue;
-        };
+        let spec = serde_json::from_value::<SourceSpec>(spec)
+            .map_err(|e| error("INVALID_PARAMS", "来源参数无效。", Some(e.to_string())))?;
+        let table = load_fx_table(&spec)?;
         let mapping = mapping_obj(params, mapping_key);
-        let Some(convention) = detect_sign_convention(&table, &mapping, kind) else {
-            continue;
+        let convention = match detect_sign_convention(&table, &mapping, kind) {
+            Ok(convention) => convention,
+            // TB 可能本身存在勾稽差异，不能因为源表不平而阻断完整性核对；
+            // 保留历史的借贷分列口径。JE 则必须有凭证配平证据，不能静默猜方向。
+            Err(_) if kind == "tb" => ledger_mapping::SignConvention::Unsigned,
+            Err(message) => {
+                return Err(error("SIGN_CONVENTION_UNCERTAIN", &message, None));
+            }
         };
         if let Some(object) = params.get_mut(mapping_key).and_then(Value::as_object_mut) {
             object.insert(
@@ -3825,6 +3879,7 @@ fn detect_and_inject_sign_conventions(params: &mut Value) {
             );
         }
     }
+    Ok(())
 }
 
 /// 判定这份表的符号口径：**整个流程走统一内核**，这里只回答「角色对应哪一列」。
@@ -3835,7 +3890,7 @@ fn detect_sign_convention(
     table: &FxTable,
     mapping: &Map<String, Value>,
     kind: &str,
-) -> Option<ledger_mapping::SignConvention> {
+) -> Result<ledger_mapping::SignConvention, String> {
     let headers = table.headers.clone();
     let rows: Vec<Vec<String>> = table.rows.clone();
     let column_of = |role: &str| -> Vec<String> { mapped_cols(mapping, role) };
@@ -3844,10 +3899,48 @@ fn detect_sign_convention(
     } else {
         ledger_mapping::detect_sign_convention(&headers, &rows, &column_of)
     };
-    if !ledger_mapping::sign_is_trustworthy(&evidence) {
-        return None;
+    let direction_votes = evidence.signed_votes + evidence.unsigned_votes;
+    let je_direction_is_trustworthy = if direction_votes == 0 {
+        ledger_mapping::sign_is_trustworthy(&evidence)
+    } else {
+        let winner = evidence.signed_votes.max(evidence.unsigned_votes) as f64;
+        let all_vouchers = direction_votes + evidence.unbalanced;
+        // 不平凭证可能来自取数范围（例如只导出部分行），它们不能参与“哪种符号
+        // 口径胜出”的分母。只要至少半数凭证能配平，且配平票对一种口径形成
+        // 95% 以上的一致意见，就足以判断方向；否则仍然明确报错。
+        winner / direction_votes as f64 >= ledger_mapping::SIGN_CONFIDENCE_FLOOR
+            && direction_votes as f64 / all_vouchers.max(1) as f64 >= 0.50
+    };
+    let trustworthy = if kind == "je" {
+        je_direction_is_trustworthy
+    } else {
+        ledger_mapping::sign_is_trustworthy(&evidence)
+    };
+    if !trustworthy {
+        return Err(format!(
+            "{}借贷方向无法可靠判断：凭证配平证据不足（已带符号 {} 票、借贷均为正 {} 票、未配平 {} 张）。请复核主体、日期、凭证号、方向及金额映射。{}",
+            if kind == "je" { "JE" } else { "TB" },
+            evidence.signed_votes,
+            evidence.unsigned_votes,
+            evidence.unbalanced,
+            evidence
+                .note
+                .as_deref()
+                .map(|note| format!(" {note}"))
+                .unwrap_or_default()
+        ));
     }
-    evidence.convention
+    evidence.convention.ok_or_else(|| {
+        format!(
+            "{}借贷方向无法可靠判断：{}请复核方向及金额映射。",
+            if kind == "je" { "JE" } else { "TB" },
+            evidence
+                .note
+                .as_deref()
+                .map(|note| format!("{note}；"))
+                .unwrap_or_default()
+        )
+    })
 }
 
 /// 映射里存放本表符号口径的键。
@@ -3866,19 +3959,66 @@ pub(crate) fn ensure_sign_convention(
     table: &FxTable,
     mapping: &mut Map<String, Value>,
     kind: &str,
-) {
+) -> Result<(), String> {
     if mapping.contains_key(SIGN_CONVENTION_KEY) {
-        return;
+        return Ok(());
     }
-    if let Some(convention) = detect_sign_convention(table, mapping, kind) {
-        mapping.insert(
-            SIGN_CONVENTION_KEY.into(),
-            Value::String(convention.as_str().to_owned()),
-        );
-    }
+    let convention = match detect_sign_convention(table, mapping, kind) {
+        Ok(convention) => convention,
+        Err(_) if kind == "tb" => ledger_mapping::SignConvention::Unsigned,
+        Err(message) => return Err(message),
+    };
+    mapping.insert(
+        SIGN_CONVENTION_KEY.into(),
+        Value::String(convention.as_str().to_owned()),
+    );
     if kind == "tb" {
         ensure_balance_sign_mode(table, mapping);
     }
+    Ok(())
+}
+
+/// 各账表工具共用的金额值门禁：已映射金额列的非空业务单元格必须能解析为数字。
+pub(crate) fn validate_mapped_amount_values(
+    table: &FxTable,
+    mapping: &Map<String, Value>,
+    kind: &str,
+    label: &str,
+    keep: Option<&[bool]>,
+) -> Result<(), AppError> {
+    let issues =
+        ledger_mapping::mapped_amount_parse_issues(kind, &table.headers, &table.rows, &|role| {
+            mapped_cols(mapping, role)
+        })
+        .into_iter()
+        .filter(|issue| keep.is_none_or(|mask| mask.get(issue.row_index).copied().unwrap_or(false)))
+        .collect::<Vec<_>>();
+    if issues.is_empty() {
+        return Ok(());
+    }
+    let detail = issues
+        .iter()
+        .take(20)
+        .map(|issue| {
+            format!(
+                "{}（{}）第{}行=“{}”",
+                issue.column,
+                issue.label,
+                table.header_row + table.header_depth + issue.row_index,
+                issue.value
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("；");
+    Err(error(
+        "AMOUNT_VALUE_INVALID",
+        &format!("{label}金额列存在非空但无法解析为数值的单元格，请修正后重试。"),
+        Some(if issues.len() > 20 {
+            format!("{detail}；另有{}处未列出。", issues.len() - 20)
+        } else {
+            detail
+        }),
+    ))
 }
 
 /// 读取映射里的符号口径。与 [`ensure_sign_convention`] 配套。

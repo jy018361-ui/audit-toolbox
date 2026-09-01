@@ -518,7 +518,7 @@ fn 序时账的合计行不计入发生额() {
 }
 
 #[test]
-fn je正文有编码和金额但缺名称时明确报必要字段错误() {
+fn je业务行按映射后的编码名称金额三项识别() {
     let dir = fixture("missing-account-name");
     平的账(&dir);
     std::fs::write(
@@ -528,10 +528,10 @@ fn je正文有编码和金额但缺名称时明确报必要字段错误() {
          2025-03-01,V1,2202,,0,500\n",
     )
     .unwrap();
-    let error = run(&params(&dir, true), &AtomicBool::new(false)).unwrap_err();
-    assert_eq!(error.code, "JE_REQUIRED_FIELD_MISSING");
-    assert!(error.user_message.contains("缺少科目名称"));
-    assert!(error.detail.as_deref().unwrap_or("").contains("源表行"));
+    let result = run(&params(&dir, true), &AtomicBool::new(false)).unwrap();
+    // 第二行缺少映射后的科目名称，不属于 JE 业务行；其他列有值也不能放行。
+    assert_eq!(result["tbVsJe"]["passed"], json!(false), "{result:#}");
+    assert_eq!(result["tbVsJe"]["accounts"], json!(2));
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -641,6 +641,8 @@ fn tb按币种拆行而je无币种列时仅用tb本位币行核对() {
     });
     let result = run(&value, &AtomicBool::new(false)).unwrap();
     assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    // TB 自勾稽按币种拆行逐行检查，不只保留推断出的 CNY 行。
+    assert_eq!(result["rollforward"]["checked"], json!(4));
     assert_eq!(result["currencyScope"]["functionalCurrency"], json!("CNY"));
     assert_eq!(result["currencyScope"]["mode"], json!("functionalCurrency"));
     assert_eq!(result["currencyScope"]["excludedForeignRows"], json!(2));
@@ -703,6 +705,16 @@ fn 情形c的je无币种和独立原币金额时tb按全部币种汇总() {
             .iter()
             .any(|warning| warning.as_str().unwrap_or("").contains("情形C"))
     );
+    let prepared = prepare(&value).unwrap();
+    let all = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
+    let cash = all["tbVsJe"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["code"] == json!("1001"))
+        .unwrap();
+    assert_eq!(cash["tbIncludedCurrencies"], json!("CNY、USD"));
+    assert_eq!(cash["tbIncludedRows"], json!(2));
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -789,15 +801,17 @@ fn 导出的工作簿固定三页并保留全量行与公式() {
             .get_formula()
             .is_empty()
     );
-    assert!(!tbje.get_cell((7, 7)).unwrap().get_formula().is_empty());
-    for column in 11..=15 {
+    assert!(!tbje.get_cell((8, 7)).unwrap().get_formula().is_empty());
+    assert!(!tbje.get_cell((11, 7)).unwrap().get_formula().is_empty());
+    for column in 12..=16 {
         assert!(
             !tbje.get_cell((column, 7)).unwrap().get_formula().is_empty(),
             "TBJE 新增净额及结论列必须保留公式，第 {column} 列为空"
         );
     }
-    assert_eq!(tbje.get_cell((11, 6)).unwrap().get_value(), "TB净额");
-    assert_eq!(tbje.get_cell((14, 6)).unwrap().get_value(), "净额结论");
+    assert_eq!(tbje.get_cell((5, 6)).unwrap().get_value(), "TB纳入币种");
+    assert_eq!(tbje.get_cell((12, 6)).unwrap().get_value(), "TB净额");
+    assert_eq!(tbje.get_cell((15, 6)).unwrap().get_value(), "净额结论");
     assert_eq!(
         equation.get_cell((3, 6)).unwrap().get_value(),
         "带符号归类金额"

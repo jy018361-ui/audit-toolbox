@@ -161,6 +161,19 @@ fn display_name(table: &FxTable, row: &[String], map: &Map<String, Value>) -> St
     }
 }
 
+/// TB 行自身标注的币种。不同币种拆成多行时必须把每一行的币种证据保留下来；
+/// 同一行另有原币、本位币金额列时，金额选择仍由映射角色决定，不在这里混算。
+fn tb_row_currency(table: &FxTable, row: &[String], map: &Map<String, Value>) -> String {
+    for role in ["currency", "functionalCurrency"] {
+        let value = text(table, row, map, role);
+        if let Some(code) = ledger_mapping::normalize_currency_code(&value) {
+            return code.to_owned();
+        }
+    }
+    let hint = text(table, row, map, "currencyText");
+    ledger_mapping::currency_from_text(&hint).unwrap_or_default()
+}
+
 fn load(
     params: &Value,
     key: &str,
@@ -490,21 +503,6 @@ fn prepare(params: &Value) -> Result<PreparedCheck, AppError> {
                 je.sheet
             ));
         }
-        if !analysis.missing_account_name_rows.is_empty() {
-            let rows = analysis
-                .missing_account_name_rows
-                .iter()
-                .take(20)
-                .map(|index| je.header_row + je.header_depth + index)
-                .map(|row| row.to_string())
-                .collect::<Vec<_>>()
-                .join("、");
-            return Err(error(
-                "JE_REQUIRED_FIELD_MISSING",
-                "JE正文中存在有科目编码和金额、但缺少科目名称的业务行，请补充必要字段后重试。",
-                Some(format!("工作表“{}”，源表行：{rows}", je.sheet)),
-            ));
-        }
         Some(analysis.keep)
     } else {
         None
@@ -650,8 +648,7 @@ fn evaluate(
     include_all_accounts: bool,
 ) -> Result<Value, AppError> {
     // 符号口径在 `prepare` 中判一次并写进映射，三条核对与正式导出共用。
-    let rollforward =
-        check_rollforward(&prepared.tb, &prepared.tb_map, &prepared.tb_functional_rows);
+    let rollforward = check_rollforward(&prepared.tb, &prepared.tb_map);
     if cancel.load(Ordering::Relaxed) {
         return Err(error("JOB_CANCELLED", "任务已取消。", None));
     }
@@ -1002,7 +999,7 @@ fn write_rollforward_sheet(
     let sheet = workbook.add_worksheet();
     sheet.set_name("TB发生额与余额勾稽").map_err(xlsx)?;
     let headers = [
-        "口径",
+        "TB纳入币种",
         "源表行号",
         "科目编码",
         "科目名称",
@@ -1017,7 +1014,7 @@ fn write_rollforward_sheet(
     write_intro(
         sheet,
         "TB 发生额与余额勾稽",
-        "逐科目验证：期初余额＋借方发生额－贷方发生额＝期末余额。",
+        "按TB每个币种行分别验证：期初余额＋借方发生额－贷方发生额＝期末余额；同一行另有原币金额列时只核对本位币金额列。",
         &prepared.tb.path.to_string_lossy(),
         headers.len() as u16 - 1,
     )?;
@@ -1032,22 +1029,12 @@ fn write_rollforward_sheet(
     });
     let records = fx::records(&prepared.tb);
     let mut output_row = EXPORT_DATA_ROW;
-    for (opening, closing, debit_role, credit_role, unit) in [
-        (
-            "openingFunctional",
-            "closingFunctional",
-            "ytdFunctionalDebit",
-            "ytdFunctionalCredit",
-            "本位币",
-        ),
-        (
-            "openingForeign",
-            "closingForeign",
-            "ytdForeignDebit",
-            "ytdForeignCredit",
-            "原币",
-        ),
-    ] {
+    for (opening, closing, debit_role, credit_role) in [(
+        "openingFunctional",
+        "closingFunctional",
+        "ytdFunctionalDebit",
+        "ytdFunctionalCredit",
+    )] {
         if !has_balance_scheme(&prepared.tb_map, opening)
             || !has_balance_scheme(&prepared.tb_map, closing)
             || columns(&prepared.tb_map, debit_role).is_empty()
@@ -1056,30 +1043,16 @@ fn write_rollforward_sheet(
             continue;
         }
         for (index, row) in prepared.tb.rows.iter().enumerate() {
-            if unit == "本位币"
-                && !prepared
-                    .tb_functional_rows
-                    .get(index)
-                    .copied()
-                    .unwrap_or(true)
-            {
-                continue;
-            }
             if !junk.get(index).copied().unwrap_or(true) {
                 continue;
             }
             let Some(record) = records.get(index) else {
                 continue;
             };
-            let side_prefix = if unit == "本位币" {
-                "ytdFunctional"
-            } else {
-                "ytdForeign"
-            };
             let (Ok(open), Ok(close), Ok((debit, credit))) = (
                 fx::signed_amount(record, &prepared.tb_map, opening),
                 fx::signed_amount(record, &prepared.tb_map, closing),
-                fx::side_amounts(record, &prepared.tb_map, side_prefix),
+                fx::side_amounts(record, &prepared.tb_map, "ytdFunctional"),
             ) else {
                 continue;
             };
@@ -1088,6 +1061,10 @@ fn write_rollforward_sheet(
             }
             let (_, code) = identity(&prepared.tb, row, &prepared.tb_map, &prepared.tb_fixed);
             let name = display_name(&prepared.tb, row, &prepared.tb_map);
+            let currency = match tb_row_currency(&prepared.tb, row, &prepared.tb_map) {
+                value if value.is_empty() => "未标明".to_owned(),
+                value => value,
+            };
             let source_row = prepared.tb.header_row + prepared.tb.header_depth + index + 1;
             let excel_row = output_row + 1;
             let derived = open + debit - credit;
@@ -1097,7 +1074,7 @@ fn write_rollforward_sheet(
             } else {
                 "通过"
             };
-            for (column, value) in [unit, "", &code, &name].iter().enumerate() {
+            for (column, value) in [&currency, "", &code, &name].iter().enumerate() {
                 if column == 1 {
                     sheet
                         .write_number_with_format(
@@ -1176,6 +1153,7 @@ fn write_tbje_sheet(
         "科目编码",
         "科目名称",
         "出现在",
+        "TB纳入币种",
         "TB借方",
         "JE借方",
         "借方差异",
@@ -1218,11 +1196,22 @@ fn write_tbje_sheet(
             Some("jeOnly") => "仅序时账有",
             _ => "两边都有",
         };
+        let tb_scope = match item["tbIncludedRows"].as_u64().unwrap_or(0) {
+            0 => String::new(),
+            rows => {
+                let currencies = item["tbIncludedCurrencies"]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("未标明");
+                format!("{currencies}（{rows}行）")
+            }
+        };
         for (column, value) in [
             item["entity"].as_str().unwrap_or(""),
             item["code"].as_str().unwrap_or(""),
             item["name"].as_str().unwrap_or(""),
             presence,
+            tb_scope.as_str(),
         ]
         .iter()
         .enumerate()
@@ -1235,7 +1224,7 @@ fn write_tbje_sheet(
         let je_debit = item["jeDebit"].as_f64().unwrap_or(0.0);
         let tb_credit = item["tbCredit"].as_f64().unwrap_or(0.0);
         let je_credit = item["jeCredit"].as_f64().unwrap_or(0.0);
-        for (column, value) in [(4, tb_debit), (5, je_debit), (7, tb_credit), (8, je_credit)] {
+        for (column, value) in [(5, tb_debit), (6, je_debit), (8, tb_credit), (9, je_credit)] {
             sheet
                 .write_number_with_format(output_row, column, value, &input_money_format())
                 .map_err(xlsx)?;
@@ -1251,8 +1240,8 @@ fn write_tbje_sheet(
         sheet
             .write_formula_with_format(
                 output_row,
-                6,
-                Formula::new(format!("E{excel_row}-F{excel_row}"))
+                7,
+                Formula::new(format!("F{excel_row}-G{excel_row}"))
                     .set_result(debit_difference.to_string()),
                 &formula_money_format(),
             )
@@ -1260,8 +1249,8 @@ fn write_tbje_sheet(
         sheet
             .write_formula_with_format(
                 output_row,
-                9,
-                Formula::new(format!("H{excel_row}-I{excel_row}"))
+                10,
+                Formula::new(format!("I{excel_row}-J{excel_row}"))
                     .set_result(credit_difference.to_string()),
                 &formula_money_format(),
             )
@@ -1269,16 +1258,8 @@ fn write_tbje_sheet(
         sheet
             .write_formula_with_format(
                 output_row,
-                10,
-                Formula::new(format!("E{excel_row}-H{excel_row}")).set_result(tb_net.to_string()),
-                &formula_money_format(),
-            )
-            .map_err(xlsx)?;
-        sheet
-            .write_formula_with_format(
-                output_row,
                 11,
-                Formula::new(format!("F{excel_row}-I{excel_row}")).set_result(je_net.to_string()),
+                Formula::new(format!("F{excel_row}-I{excel_row}")).set_result(tb_net.to_string()),
                 &formula_money_format(),
             )
             .map_err(xlsx)?;
@@ -1286,8 +1267,7 @@ fn write_tbje_sheet(
             .write_formula_with_format(
                 output_row,
                 12,
-                Formula::new(format!("K{excel_row}-L{excel_row}"))
-                    .set_result(net_difference.to_string()),
+                Formula::new(format!("G{excel_row}-J{excel_row}")).set_result(je_net.to_string()),
                 &formula_money_format(),
             )
             .map_err(xlsx)?;
@@ -1295,8 +1275,17 @@ fn write_tbje_sheet(
             .write_formula_with_format(
                 output_row,
                 13,
+                Formula::new(format!("L{excel_row}-M{excel_row}"))
+                    .set_result(net_difference.to_string()),
+                &formula_money_format(),
+            )
+            .map_err(xlsx)?;
+        sheet
+            .write_formula_with_format(
+                output_row,
+                14,
                 Formula::new(format!(
-                    "IF(ABS(M{excel_row})<=MAX($B$3,MAX(ABS(K{excel_row}),ABS(L{excel_row}))*1E-8),\"通过\",\"不通过\")"
+                    "IF(ABS(N{excel_row})<=MAX($B$3,MAX(ABS(L{excel_row}),ABS(M{excel_row}))*1E-8),\"通过\",\"不通过\")"
                 ))
                 .set_result(if net_off { "不通过" } else { "通过" }),
                 &formula_text_format(),
@@ -1312,9 +1301,9 @@ fn write_tbje_sheet(
         sheet
             .write_formula_with_format(
                 output_row,
-                14,
+                15,
                 Formula::new(format!(
-                    "IF(N{excel_row}=\"不通过\",\"不通过\",IF(OR(ABS(G{excel_row})>MAX($B$3,MAX(ABS(E{excel_row}),ABS(F{excel_row}))*1E-8),ABS(J{excel_row})>MAX($B$3,MAX(ABS(H{excel_row}),ABS(I{excel_row}))*1E-8)),\"净额通过，单边发生额有差异\",\"通过\"))"
+                    "IF(O{excel_row}=\"不通过\",\"不通过\",IF(OR(ABS(H{excel_row})>MAX($B$3,MAX(ABS(F{excel_row}),ABS(G{excel_row}))*1E-8),ABS(K{excel_row})>MAX($B$3,MAX(ABS(I{excel_row}),ABS(J{excel_row}))*1E-8)),\"净额通过，单边发生额有差异\",\"通过\"))"
                 ))
                 .set_result(overall),
                 &formula_text_format(),
@@ -1324,8 +1313,8 @@ fn write_tbje_sheet(
     finish_sheet(
         sheet,
         &[
-            18.0, 16.0, 28.0, 15.0, 16.0, 16.0, 15.0, 16.0, 23.0, 15.0, 16.0, 16.0, 15.0, 12.0,
-            30.0,
+            18.0, 16.0, 28.0, 15.0, 22.0, 16.0, 16.0, 15.0, 16.0, 23.0, 15.0, 16.0, 16.0, 15.0,
+            12.0, 30.0,
         ],
         EXPORT_DATA_ROW + items.len().saturating_sub(1) as u32,
     )
@@ -1617,8 +1606,13 @@ fn export(params: &Value, result: &Value, prepared: &PreparedCheck) -> Result<Pa
 }
 
 /// TB 发生额与余额勾稽。
-fn check_rollforward(tb: &FxTable, map: &Map<String, Value>, functional_rows: &[bool]) -> Value {
-    let units = fx::tb_self_rollforward_with_mask(tb, map, Some(functional_rows));
+fn check_rollforward(tb: &FxTable, map: &Map<String, Value>) -> Value {
+    // TB 按币种拆成多行时，每行都要独立验证，不能只留下推断出的本位币行。
+    // 若同一行映射了原币和本位币两套金额列，本工具只核对本位币金额角色。
+    let units = fx::tb_self_rollforward_with_mask(tb, map, None)
+        .into_iter()
+        .filter(|unit| unit.unit == "本位币")
+        .collect::<Vec<_>>();
     if units.is_empty() {
         return json!({
             "performed": false,
@@ -1629,22 +1623,33 @@ fn check_rollforward(tb: &FxTable, map: &Map<String, Value>, functional_rows: &[
         .iter()
         .map(|unit| {
             json!({
-                "unit": unit.unit,
+                "unit": "TB逐行币种",
                 "checked": unit.checked,
                 "mismatched": unit.issues.len(),
                 "items": unit
                     .issues
                     .iter()
-                    .map(|issue| json!({
-                        "sourceRow": issue.source_row,
-                        "account": issue.account,
-                        "opening": issue.opening,
-                        "debit": issue.debit,
-                        "credit": issue.credit,
-                        "closing": issue.closing,
-                        "derived": issue.opening + issue.debit - issue.credit,
-                        "difference": issue.difference,
-                    }))
+                    .map(|issue| {
+                        let index = issue
+                            .source_row
+                            .saturating_sub(tb.header_row + tb.header_depth);
+                        let currency = tb
+                            .rows
+                            .get(index)
+                            .map(|row| tb_row_currency(tb, row, map))
+                            .unwrap_or_default();
+                        json!({
+                            "sourceRow": issue.source_row,
+                            "account": issue.account,
+                            "currency": currency,
+                            "opening": issue.opening,
+                            "debit": issue.debit,
+                            "credit": issue.credit,
+                            "closing": issue.closing,
+                            "derived": issue.opening + issue.debit - issue.credit,
+                            "difference": issue.difference,
+                        })
+                    })
                     .collect::<Vec<_>>(),
             })
         })
@@ -1826,6 +1831,8 @@ fn check_tb_vs_je(
     }
     let mut tb_totals = BTreeMap::<(String, String), Side>::new();
     let mut names = BTreeMap::<(String, String), String>::new();
+    let mut tb_currencies = BTreeMap::<(String, String), BTreeSet<String>>::new();
+    let mut tb_row_counts = BTreeMap::<(String, String), usize>::new();
 
     // TB 侧：只收末级行，汇总行的发生额是下级之和，收进来就翻倍。
     let leaf = ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| columns(tb_map, role));
@@ -1849,6 +1856,14 @@ fn check_tb_vs_je(
         let entry = tb_totals.entry(key.clone()).or_default();
         entry.debit += debit;
         entry.credit += credit;
+        *tb_row_counts.entry(key.clone()).or_default() += 1;
+        let currency = tb_row_currency(tb, row, tb_map);
+        if !currency.is_empty() {
+            tb_currencies
+                .entry(key.clone())
+                .or_default()
+                .insert(currency);
+        }
         names
             .entry(key)
             .or_insert_with(|| display_name(tb, row, tb_map));
@@ -1902,6 +1917,11 @@ fn check_tb_vs_je(
         let tb_net = t.debit - t.credit;
         let je_net = j.debit - j.credit;
         let net_diff = tb_net - je_net;
+        let included_currencies = tb_currencies
+            .get(&key)
+            .map(|values| values.iter().cloned().collect::<Vec<_>>().join("、"))
+            .unwrap_or_default();
+        let included_rows = tb_row_counts.get(&key).copied().unwrap_or(0);
         let off =
             beyond(debit_diff, t.debit.max(j.debit)) || beyond(credit_diff, t.credit.max(j.credit));
         let net_off = beyond(net_diff, tb_net.abs().max(je_net.abs()));
@@ -1924,6 +1944,8 @@ fn check_tb_vs_je(
                 },
                 "tbDebit": t.debit, "jeDebit": j.debit, "debitDifference": debit_diff,
                 "tbCredit": t.credit, "jeCredit": j.credit, "creditDifference": credit_diff,
+                "tbIncludedCurrencies": included_currencies,
+                "tbIncludedRows": included_rows,
                 "tbNet": tb_net, "jeNet": je_net, "netDifference": net_diff,
                 "netPassed": !net_off,
                 "overallVerdict": if net_off {

@@ -2388,12 +2388,6 @@ fn is_report_footer_value(value: &str) -> bool {
 pub(crate) struct LedgerRowAnalysis {
     /// 与源表数据行一一对应；`true` 表示该行属于正文，应交给业务模块继续处理。
     pub(crate) keep: Vec<bool>,
-    /// 正文中同时有科目编码和可解析金额、但缺科目名称的数据行（0 基）。
-    ///
-    /// 这些行不能当页脚静默过滤；调用方应带上工作表名和源表行号，向用户报告
-    /// 「JE 必要字段不完整」。位于整行空白分隔符之后、尚未重新进入正文的草稿行
-    /// 不在此列——它们本来就不是正文。
-    pub(crate) missing_account_name_rows: Vec<usize>,
     /// 映射到科目编码列、但取值不符合编码语法的正文行（0 基下标、原始值）。
     pub(crate) invalid_account_code_rows: Vec<(usize, String)>,
 }
@@ -2436,7 +2430,6 @@ pub(crate) fn analyze_ledger_rows(
     if identity_indexes.is_empty() {
         return LedgerRowAnalysis {
             keep: vec![true; rows.len()],
-            missing_account_name_rows: Vec::new(),
             invalid_account_code_rows: Vec::new(),
         };
     }
@@ -2490,55 +2483,24 @@ pub(crate) fn analyze_ledger_rows(
         })
     };
 
-    // 只有 JE 三类必要角色都已映射时才启用正文重入门槛。TB 也共用
-    // `ledger_junk_mask`，不能拿 JE 的正文协议去截余额表。
+    // 只有 JE 三类必要角色都已映射时才启用业务行协议。TB 也共用
+    // `ledger_junk_mask`，不能拿 JE 的业务行协议去截余额表。
+    //
+    // 是否属于 JE 只看映射列：科目编码、科目名称和至少一个可解析金额三项
+    // 齐备才纳入。凭证号、备注、任意其他列有值都不能把残留行放进正文；整行
+    // 空白仍是明确的段落分隔符，分隔后同样按这三项重新识别。
     let boundary_enabled = !account_code_indexes.is_empty()
         && !account_name_indexes.is_empty()
         && !je_amount_indexes.is_empty();
-    let mut outside_body = false;
     if boundary_enabled {
         for (index, row) in rows.iter().enumerate() {
-            // 必须是整行全空；单独某个已映射字段为空不能截断正文。
             if row.iter().all(|value| value.trim().is_empty()) {
                 keep[index] = false;
-                outside_body = true;
                 continue;
             }
-            if outside_body {
-                let complete_entry = has_field(row, &account_code_indexes)
-                    && has_field(row, &account_name_indexes)
-                    && has_parseable_je_amount(row);
-                keep[index] = complete_entry;
-                if complete_entry {
-                    outside_body = false;
-                }
-            }
-        }
-    }
-
-    // 正文内「有编码、有金额、缺名称」是必要字段错误，不是垃圾行。保留该行并把
-    // 位置交给调用方报错；分隔符后尚未重新进入正文的草稿不参与检查。
-    let mut missing_account_name_rows = Vec::new();
-    if boundary_enabled {
-        let mut outside_body = false;
-        for (index, row) in rows.iter().enumerate() {
-            if row.iter().all(|value| value.trim().is_empty()) {
-                outside_body = true;
-                continue;
-            }
-            let has_code = has_field(row, &account_code_indexes);
-            let has_name = has_field(row, &account_name_indexes);
-            let has_money = has_parseable_je_amount(row);
-            if outside_body {
-                if has_code && has_name && has_money {
-                    outside_body = false;
-                } else {
-                    continue;
-                }
-            }
-            if keep.get(index).copied().unwrap_or(false) && has_code && has_money && !has_name {
-                missing_account_name_rows.push(index);
-            }
+            keep[index] = has_field(row, &account_code_indexes)
+                && has_field(row, &account_name_indexes)
+                && has_parseable_je_amount(row);
         }
     }
 
@@ -2562,11 +2524,8 @@ pub(crate) fn analyze_ledger_rows(
             }
         }
     }
-    missing_account_name_rows.retain(|index| keep.get(*index).copied().unwrap_or(false));
-
     LedgerRowAnalysis {
         keep,
-        missing_account_name_rows,
         invalid_account_code_rows,
     }
 }
@@ -7470,7 +7429,7 @@ mod tests {
                 "0".into(),
                 "".into(),
             ],
-            // 已重新进入正文，后续缺名称行仍须保留并报告。
+            // 已重新进入正文，后续缺名称行仍不满足业务行三项条件。
             vec![
                 "2202".into(),
                 "".into(),
@@ -7490,20 +7449,19 @@ mod tests {
         let analysis = analyze_ledger_rows(&headers, &rows, &columns);
         assert_eq!(
             analysis.keep,
-            vec![true, true, false, false, false, true, true]
+            vec![true, false, false, false, false, true, false]
         );
-        assert_eq!(analysis.missing_account_name_rows, vec![1, 6]);
     }
 
     #[test]
-    fn 单个映射字段空白不会截断正文() {
+    fn 单个必要映射字段空白时该行不属于业务行() {
         let headers: Vec<String> = ["科目编码", "科目名称", "金额", "备注"]
             .into_iter()
             .map(String::from)
             .collect();
         let rows = vec![
             vec!["1001".into(), "库存现金".into(), "10".into(), "".into()],
-            // 科目名称虽然空，但整行并非空白，不能被误认成正文分隔符。
+            // 科目名称为空；即使其他列有值，也不能成为业务行。
             vec!["1002".into(), "".into(), "20".into(), "".into()],
             vec!["1003".into(), "银行存款".into(), "30".into(), "".into()],
         ];
@@ -7515,8 +7473,7 @@ mod tests {
         };
 
         let analysis = analyze_ledger_rows(&headers, &rows, &columns);
-        assert_eq!(analysis.keep, vec![true, true, true]);
-        assert_eq!(analysis.missing_account_name_rows, vec![1]);
+        assert_eq!(analysis.keep, vec![true, false, true]);
     }
 
     #[test]

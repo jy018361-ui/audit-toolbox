@@ -89,6 +89,7 @@ type CheckResult = {
       items: {
         sourceRow: number;
         account: string;
+        currency?: string;
         opening: number;
         debit: number;
         credit: number;
@@ -110,6 +111,8 @@ type CheckResult = {
       code: string;
       name: string;
       presence: "both" | "tbOnly" | "jeOnly";
+      tbIncludedCurrencies?: string;
+      tbIncludedRows?: number;
       tbDebit: number;
       jeDebit: number;
       debitDifference: number;
@@ -271,6 +274,7 @@ function OutcomeDetail({ result }: { result: CheckResult }) {
                 <TableRow>
                   <TableHead>源表行</TableHead>
                   <TableHead>科目</TableHead>
+                  <TableHead>TB币种</TableHead>
                   <TableHead>期初</TableHead>
                   <TableHead>本年借方</TableHead>
                   <TableHead>本年贷方</TableHead>
@@ -286,6 +290,7 @@ function OutcomeDetail({ result }: { result: CheckResult }) {
                     <TableCell className="tbje-text-cell">
                       {item.account}
                     </TableCell>
+                    <TableCell>{item.currency || "未标明"}</TableCell>
                     <TableCell className="tbje-number">
                       {money(item.opening)}
                     </TableCell>
@@ -329,6 +334,7 @@ function OutcomeDetail({ result }: { result: CheckResult }) {
                   <TableHead>科目编码</TableHead>
                   <TableHead>科目名称</TableHead>
                   <TableHead>出现在</TableHead>
+                  <TableHead>TB纳入币种</TableHead>
                   <TableHead>TB 借方</TableHead>
                   <TableHead>JE 借方</TableHead>
                   <TableHead>借方差额</TableHead>
@@ -349,6 +355,11 @@ function OutcomeDetail({ result }: { result: CheckResult }) {
                       {item.name}
                     </TableCell>
                     <TableCell>{presenceLabel(item.presence)}</TableCell>
+                    <TableCell>
+                      {item.tbIncludedRows
+                        ? `${item.tbIncludedCurrencies || "未标明"}（${item.tbIncludedRows}行）`
+                        : "—"}
+                    </TableCell>
                     <TableCell className="tbje-number">
                       {money(item.tbDebit)}
                     </TableCell>

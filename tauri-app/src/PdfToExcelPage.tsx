@@ -16,12 +16,7 @@ import { JobProgress } from "@/components/JobProgress";
 import { Field } from "@/components/Field";
 import { FileDropInput } from "@/components/FileDropInput";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useJobEvents } from "@/hooks/useJobEvents";
 import {
@@ -53,8 +48,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
       }
       if (event.phase === "failed" || event.phase === "cancelled") {
         const payload = event.result as
-          | { error?: { userMessage?: string } }
-          | undefined;
+          { error?: { userMessage?: string } } | undefined;
         setError(payload?.error ? errorText(payload.error) : event.message);
       }
     },
@@ -88,7 +82,9 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
       })) as { inputPaths?: string[] };
       const pdfs = filterPdfPaths(value.inputPaths ?? incoming);
       if (!pdfs.length) {
-        setError("拖入的内容里没有 PDF 文件，请拖入回函 PDF 或包含回函的文件夹。");
+        setError(
+          "拖入的内容里没有 PDF 文件，请拖入回函 PDF 或包含回函的文件夹。",
+        );
         return;
       }
       setPdfPaths((current) => dedupePdfPaths([...current, ...pdfs]));
@@ -181,13 +177,28 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
               onClick={() => void chooseFiles()}
             >
               <strong>拖放回函 PDF 或文件夹到窗口</strong>
-              <span>可一次拖入多份；拖入文件夹会自动找出其中的全部 PDF，也可点击选择文件</span>
+              <span>
+                可一次拖入多份；拖入文件夹会自动找出其中的全部
+                PDF，也可点击选择文件
+              </span>
             </button>
             <div className="merger-toolbar">
-              <Button type="button" variant="secondary" size="sm" disabled={busy} onClick={() => void chooseFiles()}>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={busy}
+                onClick={() => void chooseFiles()}
+              >
                 选择文件
               </Button>
-              <Button type="button" variant="secondary" size="sm" disabled={busy} onClick={() => void chooseFolder()}>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={busy}
+                onClick={() => void chooseFolder()}
+              >
                 选择文件夹
               </Button>
               <Button
@@ -206,7 +217,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                   <div className="file-item" key={path}>
                     <div>
                       <strong>{pdfFileName(path)}</strong>
-                      <span>{path}</span>
+                      <span>{pdfFileName(path)}</span>
                     </div>
                     <div>
                       <button
@@ -249,7 +260,8 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
               />
             </Field>
             <p className="hint">
-              留空则输出到每份 PDF 所在文件夹，文件名自动生成；另会生成一份“处理清单”汇总全部结果。
+              留空则输出到每份 PDF
+              所在文件夹，文件名自动生成；另会生成一份“处理清单”汇总全部结果。
             </p>
             <div className="actions">
               {busy && job ? (
@@ -272,7 +284,9 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                 </Button>
               )}
             </div>
-            {!pdfPaths.length && <p className="hint">请先添加回函 PDF，再开始转换。</p>}
+            {!pdfPaths.length && (
+              <p className="hint">请先添加回函 PDF，再开始转换。</p>
+            )}
           </CardContent>
         </Card>
 
@@ -338,7 +352,9 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                 )}
               </>
             ) : (
-              !job && <div className="empty">转换进度和逐份结果会在这里显示。</div>
+              !job && (
+                <div className="empty">转换进度和逐份结果会在这里显示。</div>
+              )
             )}
           </CardContent>
         </Card>

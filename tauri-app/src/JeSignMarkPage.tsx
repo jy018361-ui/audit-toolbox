@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { engineCall, jobCancel, jobStart, listenJobEvents, openOutput, pickPath } from "./api";
+import {
+  engineCall,
+  jobCancel,
+  jobStart,
+  listenJobEvents,
+  openOutput,
+  pickPath,
+} from "./api";
 import type { JobEvent, ToolManifest } from "./types";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "./kanzhang-parity.css";
@@ -12,6 +19,7 @@ import { JobProgress } from "@/components/JobProgress";
 import { LedgerSourceCard } from "@/components/LedgerSourceCard";
 import { LedgerLlmReview } from "@/components/LedgerLlmReview";
 import { LedgerMappingPreview } from "@/components/LedgerMappingPreview";
+import { displayFileName } from "@/fileDisplay";
 import {
   ColumnFilterMenu,
   ColumnFilterTrigger,
@@ -117,18 +125,26 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   const [result, setResult] = useState<unknown>();
   const [dragHover, setDragHover] = useState(false);
   const [menu, setMenu] = useState<{ field: string; anchor: DOMRect }>();
-  const [valueCache, setValueCache] = useState<Record<string, ColumnFilterValues>>({});
+  const [valueCache, setValueCache] = useState<
+    Record<string, ColumnFilterValues>
+  >({});
   const [valuesLoading, setValuesLoading] = useState(false);
   const [signReport, setSignReport] = useState<SignReport>();
   const [signLoading, setSignLoading] = useState(false);
   const [signError, setSignError] = useState("");
   const signGeneration = useRef(0);
 
-  const patch = (value: Partial<JeMarkDraft>) => setDraft((current) => ({ ...current, ...value }));
+  const patch = (value: Partial<JeMarkDraft>) =>
+    setDraft((current) => ({ ...current, ...value }));
   const batch = draft.batches[draft.activeBatch] ?? draft.batches[0];
   const scheme = activeAmountScheme(draft.mapping);
   const missingRequired = missingKanzhangRequiredRoles(draft.mapping);
-  const showReview = llmBusy || llmFailed || Boolean(llmStatus) || changes.length > 0 || pending.length > 0;
+  const showReview =
+    llmBusy ||
+    llmFailed ||
+    Boolean(llmStatus) ||
+    changes.length > 0 ||
+    pending.length > 0;
   const ready = Boolean(draft.inspect) && missingRequired.length === 0;
   const validBatches = validJeMarkBatches(draft.batches);
 
@@ -146,12 +162,14 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   }
 
   useEffect(() => {
-    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
+    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window))
+      return;
     let off: () => void = () => {};
     void getCurrentWebview()
       .onDragDropEvent((event) => {
         const payload = event.payload;
-        if (payload.type === "over" || payload.type === "enter") setDragHover(true);
+        if (payload.type === "over" || payload.type === "enter")
+          setDragHover(true);
         else if (payload.type === "drop") {
           setDragHover(false);
           if (payload.paths.length) resetSource(payload.paths[0]);
@@ -175,7 +193,11 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     const key = `${draft.inputPath}|${draft.sheet}`;
     if (autoOutputKey.current === key && draft.outputPath) return;
     autoOutputKey.current = key;
-    patch({ outputPath: draft.inputPath ? defaultJeMarkOutputPath(draft.inputPath, draft.sheet) : "" });
+    patch({
+      outputPath: draft.inputPath
+        ? defaultJeMarkOutputPath(draft.inputPath, draft.sheet)
+        : "",
+    });
   }, [draft.inputPath, draft.sheet, draft.outputTouched, draft.outputPath]);
 
   useEffect(() => {
@@ -186,7 +208,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       if (event.result) {
         setResult(event.result);
         const payload = event.result as Inspect | undefined;
-        if (event.phase === "completed" && Array.isArray(payload?.headers)) applyInspect(payload);
+        if (event.phase === "completed" && Array.isArray(payload?.headers))
+          applyInspect(payload);
       }
       const done = ["completed", "failed", "cancelled"].includes(event.phase);
       setBusy(!done);
@@ -226,11 +249,20 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   }
 
   async function chooseInput() {
-    const value = await pickPath("file", "选择凭证文件", ["xlsx", "xls", "xlsm", "csv", "txt", "parquet"]);
+    const value = await pickPath("file", "选择凭证文件", [
+      "xlsx",
+      "xls",
+      "xlsm",
+      "csv",
+      "txt",
+      "parquet",
+    ]);
     if (typeof value === "string") resetSource(value);
   }
 
-  function invalidate(change: Partial<Pick<JeMarkDraft, "sheet" | "headerRow">>) {
+  function invalidate(
+    change: Partial<Pick<JeMarkDraft, "sheet" | "headerRow">>,
+  ) {
     setValueCache({});
     setMenu(undefined);
     setDraft((current) => ({
@@ -289,7 +321,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     const chosen = draft.batches.some((item) => item.accounts.length);
     setValueCache((current) => {
       const next = { ...current };
-      for (const key of Object.keys(next)) if (key.startsWith("#account")) delete next[key];
+      for (const key of Object.keys(next))
+        if (key.startsWith("#account")) delete next[key];
       return next;
     });
     if (!chosen) return;
@@ -332,7 +365,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     })
       .then((value) => {
         if (generation !== signGeneration.current) return;
-        const report = (value as { signConvention?: SignReport }).signConvention;
+        const report = (value as { signConvention?: SignReport })
+          .signConvention;
         if (report && typeof report.basis === "string") {
           setSignReport(report);
           setSignError("");
@@ -371,10 +405,18 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     try {
       const value = (await engineCall("kanzhang.llm_mapping", {
         mode: "mapping",
-        payload: { headers: target.headers, samples: target.preview.slice(0, 8), currentMapping: source },
+        payload: {
+          headers: target.headers,
+          samples: target.preview.slice(0, 8),
+          currentMapping: source,
+        },
       })) as LedgerReviewResponse;
       if (generation !== llmGeneration.current) return;
-      const { mapping, changes: merged, pending: rest } = applyLedgerReviews(source, value);
+      const {
+        mapping,
+        changes: merged,
+        pending: rest,
+      } = applyLedgerReviews(source, value);
       patch({ mapping });
       setChanges(merged);
       setPending(rest);
@@ -396,7 +438,9 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   };
   const acceptPending = (item: Review) => {
     const before = draft.mapping[item.role];
-    const after = isMultiRole(item.role) ? [item.suggestedColumn.trim()] : item.suggestedColumn.trim();
+    const after = isMultiRole(item.role)
+      ? [item.suggestedColumn.trim()]
+      : item.suggestedColumn.trim();
     setMap(item.role, after);
     setChanges((values) => [
       ...values,
@@ -419,7 +463,9 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     if (!draft.inputPath) return;
     setValuesLoading(true);
     try {
-      const method = isAccountMenu(field) ? "kanzhang.accounts" : "kanzhang.column_values";
+      const method = isAccountMenu(field)
+        ? "kanzhang.accounts"
+        : "kanzhang.column_values";
       const params = isAccountMenu(field)
         ? {
             inputPath: draft.inputPath,
@@ -449,7 +495,9 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         [field]: {
           values: value.values,
           // 科目清单带编码（与取值同序），面板据此显示「编码 名称」。
-          ...(isAccountMenu(field) && Array.isArray(value.codes) ? { codes: value.codes } : {}),
+          ...(isAccountMenu(field) && Array.isArray(value.codes)
+            ? { codes: value.codes }
+            : {}),
           total,
           truncated: value.truncated ?? total > value.values.length,
           keyword,
@@ -496,13 +544,16 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       ["csv", "xlsx"],
       defaultJeMarkOutputName(draft.inputPath, draft.sheet),
     );
-    if (typeof value === "string") patch({ outputPath: value, outputTouched: true });
+    if (typeof value === "string")
+      patch({ outputPath: value, outputTouched: true });
   }
   function resetOutput() {
     autoOutputKey.current = "";
     patch({
       outputTouched: false,
-      outputPath: draft.inputPath ? defaultJeMarkOutputPath(draft.inputPath, draft.sheet) : "",
+      outputPath: draft.inputPath
+        ? defaultJeMarkOutputPath(draft.inputPath, draft.sheet)
+        : "",
     });
   }
 
@@ -527,7 +578,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         mapping: draft.mapping,
         targetBatches: validBatches,
         columnFilters: activeColumnFilters(draft.columnFilters),
-        signConvention: draft.signChoice === "auto" ? undefined : draft.signChoice,
+        signConvention:
+          draft.signChoice === "auto" ? undefined : draft.signChoice,
         outputPath: target || undefined,
       });
       setJob({
@@ -555,7 +607,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     unsigned: "借贷符号一样",
     signed: "已带符号（借正贷负）",
   };
-  const signAllowsChoice = signReport?.scheme === "A" || signReport?.scheme === "B";
+  const signAllowsChoice =
+    signReport?.scheme === "A" || signReport?.scheme === "B";
   const signApplied =
     draft.signChoice === "auto"
       ? signReport?.detected === "signed"
@@ -614,7 +667,11 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                 onSkip={skipReview}
                 onUndo={undoChange}
                 onAccept={acceptPending}
-                onKeep={(item) => setPending((values) => values.filter((value) => value !== item))}
+                onKeep={(item) =>
+                  setPending((values) =>
+                    values.filter((value) => value !== item),
+                  )
+                }
               />
             )}
             {scheme && (
@@ -628,17 +685,25 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                 <div className="jm-sign-head">
                   <span className="jm-sign-title">金额符号口径</span>
                   {signAllowsChoice && (
-                    <span className="jm-sign-choices" role="group" aria-label="金额符号口径选择">
-                      {(["auto", "unsigned", "signed"] as const).map((value) => (
-                        <button
-                          key={value}
-                          type="button"
-                          className={draft.signChoice === value ? "active" : ""}
-                          onClick={() => patch({ signChoice: value })}
-                        >
-                          {signLabels[value]}
-                        </button>
-                      ))}
+                    <span
+                      className="jm-sign-choices"
+                      role="group"
+                      aria-label="金额符号口径选择"
+                    >
+                      {(["auto", "unsigned", "signed"] as const).map(
+                        (value) => (
+                          <button
+                            key={value}
+                            type="button"
+                            className={
+                              draft.signChoice === value ? "active" : ""
+                            }
+                            onClick={() => patch({ signChoice: value })}
+                          >
+                            {signLabels[value]}
+                          </button>
+                        ),
+                      )}
                     </span>
                   )}
                 </div>
@@ -661,11 +726,17 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             )}
             {missingRequired.length > 0 && (
               <p className="fa-missing-hint">
-                尚未映射：{missingRequired.join("、")}（请在各列顶部的下拉框中选择对应字段）
+                尚未映射：{missingRequired.join("、")}
+                （请在各列顶部的下拉框中选择对应字段）
               </p>
             )}
             <div className="kz-actions">
-              <Button variant="secondary" size="sm" disabled={busy || llmBusy} onClick={() => void reviewMapping()}>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={busy || llmBusy}
+                onClick={() => void reviewMapping()}
+              >
                 {llmBusy ? "LLM 正在复核…" : "重新进行 LLM 复核"}
               </Button>
             </div>
@@ -700,7 +771,9 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             <Button
               variant="secondary"
               size="sm"
-              onClick={() => patch(removeBatch(draft.batches, draft.activeBatch))}
+              onClick={() =>
+                patch(removeBatch(draft.batches, draft.activeBatch))
+              }
             >
               删除批次
             </Button>
@@ -711,7 +784,9 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                 onChange={(e) =>
                   patch({
                     batches: draft.batches.map((value, index) =>
-                      index === draft.activeBatch ? { ...value, name: e.target.value } : value,
+                      index === draft.activeBatch
+                        ? { ...value, name: e.target.value }
+                        : value,
                     ),
                   })
                 }
@@ -719,7 +794,9 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             </label>
           </div>
           <div className="jm-account-row">
-            <span className="jm-account-label">{accountFilterTitle(draft.mapping)}</span>
+            <span className="jm-account-label">
+              {accountFilterTitle(draft.mapping)}
+            </span>
             <button
               type="button"
               data-ts-filter-trigger=""
@@ -731,7 +808,10 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                   setMenu(undefined);
                   return;
                 }
-                openMenu(ACCOUNT_MENU, event.currentTarget.getBoundingClientRect());
+                openMenu(
+                  ACCOUNT_MENU,
+                  event.currentTarget.getBoundingClientRect(),
+                );
               }}
             >
               {llmBusy
@@ -744,14 +824,19 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             {filterCount > 0 && (
               <span className="jm-filter-note">
                 另有 {filterCount} 列设了筛选条件，对所有批次一致生效
-                <Button variant="secondary" size="sm" onClick={() => patch({ columnFilters: {} })}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => patch({ columnFilters: {} })}
+                >
                   清除列筛选
                 </Button>
               </span>
             )}
           </div>
           <p className="kz-note">
-            <b>目标科目</b>决定哪些行打标记，按批次各选一套；<b>其他列的漏斗</b>是数据过滤，按凭证生效——
+            <b>目标科目</b>决定哪些行打标记，按批次各选一套；<b>其他列的漏斗</b>
+            是数据过滤，按凭证生效——
             凭证里只要有一行命中，整张凭证保留，标记只落在目标科目行上。
           </p>
         </section>
@@ -792,8 +877,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             <div className="kz-path">
               <input
                 readOnly
-                value={draft.outputPath}
-                title={draft.outputPath}
+                value={displayFileName(draft.outputPath)}
                 placeholder="选择凭证文件后自动填入默认保存位置"
               />
               <Button variant="secondary" size="sm" onClick={chooseOutput}>
@@ -810,22 +894,33 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             {draft.outputTouched
               ? "已指定保存位置，导出会以这个文件名为基准。"
               : "默认保存到凭证文件所在目录，文件名为「正负数标记_源文件名[_工作表]_<时间戳>.csv」（导出时按当前时间生成）。"}
-            每个批次单独出一个文件，选 .csv 出 CSV、选 .xlsx 出工作簿；明细最前面是
+            每个批次单独出一个文件，选 .csv 出 CSV、选 .xlsx
+            出工作簿；明细最前面是
             【辅助_绝对值】【辅助_符号】【智能匹配状态】三列，后接原始列。
           </p>
           <div className="kz-actions">
             {busy && job ? (
-              <Button variant="secondary" size="sm" onClick={() => void jobCancel(job.jobId)}>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void jobCancel(job.jobId)}
+              >
                 停止
               </Button>
             ) : (
-              <Button variant="default" disabled={!ready || !validBatches.length} onClick={() => void start()}>
+              <Button
+                variant="default"
+                disabled={!ready || !validBatches.length}
+                onClick={() => void start()}
+              >
                 标记并导出
               </Button>
             )}
           </div>
           {!validBatches.length && (
-            <p className="fa-missing-hint">还没有为任何批次选择目标科目，导出前请先选。</p>
+            <p className="fa-missing-hint">
+              还没有为任何批次选择目标科目，导出前请先选。
+            </p>
           )}
           <Result job={job} result={result} />
         </section>
@@ -834,7 +929,11 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       {menu && (
         <ColumnFilterMenu
           key={menu.field}
-          field={isAccountMenu(menu.field) ? accountFilterTitle(draft.mapping) : menu.field}
+          field={
+            isAccountMenu(menu.field)
+              ? accountFilterTitle(draft.mapping)
+              : menu.field
+          }
           anchor={menu.anchor}
           loading={valuesLoading}
           data={valueCache[menu.field]}
@@ -842,12 +941,18 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
           onSearch={(keyword) => void loadValues(menu.field, keyword)}
           onApply={(checked) => applyMenu(menu.field, checked)}
           onClose={() => setMenu(undefined)}
-          searchPlaceholder={isAccountMenu(menu.field) ? "搜索科目编码或名称" : undefined}
+          searchPlaceholder={
+            isAccountMenu(menu.field) ? "搜索科目编码或名称" : undefined
+          }
           splitCode={isAccountMenu(menu.field)}
           valueNote={
             isAccountMenu(menu.field)
               ? (value) => {
-                  const others = batchesContaining(draft.batches, draft.activeBatch, value);
+                  const others = batchesContaining(
+                    draft.batches,
+                    draft.activeBatch,
+                    value,
+                  );
                   return others.length ? `已在${others.join("、")}` : undefined;
                 }
               : undefined
@@ -859,16 +964,23 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
 }
 
 function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
-  const object = result && typeof result === "object" ? (result as Record<string, unknown>) : undefined;
+  const object =
+    result && typeof result === "object"
+      ? (result as Record<string, unknown>)
+      : undefined;
   const paths = [
     ...new Set([
       ...(job?.outputPaths ?? []),
       ...(Array.isArray(object?.outputPaths)
-        ? object.outputPaths.filter((value): value is string => typeof value === "string")
+        ? object.outputPaths.filter(
+            (value): value is string => typeof value === "string",
+          )
         : []),
     ]),
   ];
-  const batches = Array.isArray(object?.batches) ? (object.batches as Record<string, unknown>[]) : [];
+  const batches = Array.isArray(object?.batches)
+    ? (object.batches as Record<string, unknown>[])
+    : [];
   const sign =
     object?.signConvention && typeof object.signConvention === "object"
       ? (object.signConvention as {
@@ -885,14 +997,23 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
       </CardHeader>
       <CardContent>
         {job && showProgress && (
-          <JobProgress job={job} onCancel={(jobId) => void jobCancel(jobId)} cancelLabel="取消任务" />
+          <JobProgress
+            job={job}
+            onCancel={(jobId) => void jobCancel(jobId)}
+            cancelLabel="取消任务"
+          />
         )}
         {paths.length > 0 && (
           <div className="kz-outputs">
             {paths.map((path) => (
-              <Button key={path} variant="secondary" size="sm" title={path} onClick={() => void openOutput(path)}>
+              <Button
+                key={path}
+                variant="secondary"
+                size="sm"
+                onClick={() => void openOutput(path)}
+              >
                 <span>打开：</span>
-                <span>{path.split(/[\\/]/).pop()}</span>
+                <span>{displayFileName(path)}</span>
               </Button>
             ))}
           </div>
@@ -912,7 +1033,10 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
         )}
         {sign?.applied && (
           <p className="kz-hint">
-            本次导出金额符号口径：{sign.applied === "signed" ? "已带符号（借正贷负）" : "借贷符号一样（正数）"}
+            本次导出金额符号口径：
+            {sign.applied === "signed"
+              ? "已带符号（借正贷负）"
+              : "借贷符号一样（正数）"}
             {sign.choice && sign.choice !== "auto" ? "（手动指定）" : ""}
             {sign.basis ? `。依据：${sign.basis}` : ""}
           </p>

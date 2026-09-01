@@ -104,6 +104,12 @@ describe("TbjeCheckPage", () => {
     );
     const pairingList = container.querySelector(".tbje-pairing-list");
     expect(pairingList).not.toBeNull();
+    expect(
+      screen.queryByRole("heading", {
+        level: 2,
+        name: "1. 添加 TB 与 JE 文件",
+      }),
+    ).not.toBeInTheDocument();
     expect(pairingList).toHaveTextContent("科目余额表 TB");
     expect(pairingList).not.toHaveTextContent("配对依据");
     expect(pairingList).toHaveTextContent("序时账 JE");
@@ -123,6 +129,13 @@ describe("TbjeCheckPage", () => {
     expect(
       within(steps).getByRole("button", { name: /确认配对/ }),
     ).toBeEnabled();
+    fireEvent.click(within(steps).getByRole("button", { name: /添加文件/ }));
+    expect(
+      screen.getByRole("heading", { level: 2, name: "1. 添加 TB 与 JE 文件" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps a signed functional amount mapping after a no-op pair review", async () => {
@@ -153,7 +166,13 @@ describe("TbjeCheckPage", () => {
           headerRow: isTb ? 2 : 5,
           headerDepth: 1,
           headers: isTb
-            ? ["项目编码、文本/科目编码、文本", "本年金额-期初", "本年金额-借方发生", "本年金额-贷方发生", "期末余额"]
+            ? [
+                "项目编码、文本/科目编码、文本",
+                "本年金额-期初",
+                "本年金额-借方发生",
+                "本年金额-贷方发生",
+                "期末余额",
+              ]
             : ["凭证编号", "凭证日期", "本币金额", "总账科目", "会计科目"],
           preview: [],
           entities: [],
@@ -381,7 +400,7 @@ describe("TbjeCheckPage", () => {
     );
   });
 
-  it("removes one group without deleting the source files", async () => {
+  it("removes all groups with one action without deleting the source files", async () => {
     const { engineCall, pickPath } = await import("./api");
     vi.mocked(pickPath).mockResolvedValue([
       "C:/samples/01TB.xlsx",
@@ -419,10 +438,13 @@ describe("TbjeCheckPage", () => {
     fireEvent.click(
       screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
     );
-    await screen.findByRole("button", { name: "移除本组" });
-    fireEvent.click(screen.getByRole("button", { name: "移除本组" }));
+    await screen.findByRole("button", { name: "移除全部" });
+    fireEvent.click(screen.getByRole("button", { name: "移除全部" }));
 
     expect(screen.queryByText("01TB.xlsx")).not.toBeInTheDocument();
+    expect(window.confirm).toHaveBeenCalledWith(
+      "确认移除全部 1 组？只会清空本次核对，不会删除原文件。",
+    );
     expect(
       screen.queryByRole("heading", { level: 2, name: /确认配对/ }),
     ).not.toBeInTheDocument();

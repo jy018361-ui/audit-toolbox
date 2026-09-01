@@ -12,7 +12,11 @@ import {
 import type { JobEvent, ToolManifest } from "./types";
 import { errorText } from "@/lib/errors";
 import { useJobPause } from "@/components/JobDialog";
-import { parseRollForwardCraRatio, rollForwardCraWriteRecords } from "./rollForwardUi";
+import {
+  parseRollForwardCraRatio,
+  rollForwardCraWriteRecords,
+} from "./rollForwardUi";
+import { displayFileName } from "@/fileDisplay";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
 import { ErrorBox } from "@/components/ErrorBox";
@@ -1349,7 +1353,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
                 className="ghost"
                 onClick={() => void openOutput(path)}
               >
-                {path}
+                {displayFileName(path)}
               </button>
             ))}
           </>
@@ -1385,7 +1389,7 @@ function RollForwardResult({ value }: { value: unknown }) {
             </strong>
             <span>{row.templateReady ? "模板就绪" : "缺少模板"}</span>
             <span>{row.priorReady ? "已匹配上年底稿" : "未找到上年底稿"}</span>
-            <small>{String(row.priorPath ?? "")}</small>
+            <small>{displayFileName(String(row.priorPath ?? ""))}</small>
           </div>
         ))}
       </div>
@@ -1442,7 +1446,7 @@ function RollForwardResult({ value }: { value: unknown }) {
               ) : null}
               {priorPath ? (
                 <small>
-                  使用上年底稿：{priorPath}
+                  使用上年底稿：{displayFileName(priorPath)}
                   {priorSize > 0
                     ? `（${(priorSize / 1024 / 1024).toFixed(1)} MB）`
                     : ""}

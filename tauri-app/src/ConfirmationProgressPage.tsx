@@ -16,15 +16,11 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { Field } from "@/components/Field";
 import { FileDropInput } from "@/components/FileDropInput";
+import { displayFileName } from "@/fileDisplay";
 import { DataTable } from "@/components/DataTable";
 import { StatGrid } from "@/components/StatGrid";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { errorText } from "@/lib/errors";
 
@@ -88,8 +84,16 @@ const CONFIRMATION_MODE_OPTIONS: Array<{
   label: string;
   detail: string;
 }> = [
-  { value: "both", label: "银行 + 往来", detail: "与原工具一致，一次生成两类报告" },
-  { value: "bank", label: "仅银行函证", detail: "含项目、发函单位及分基准日统计" },
+  {
+    value: "both",
+    label: "银行 + 往来",
+    detail: "与原工具一致，一次生成两类报告",
+  },
+  {
+    value: "bank",
+    label: "仅银行函证",
+    detail: "含项目、发函单位及分基准日统计",
+  },
   { value: "trade", label: "仅往来函证", detail: "含项目及发函单位统计" },
 ];
 
@@ -259,7 +263,9 @@ export default function ConfirmationProgressPage({
     ? (result.reports as Array<Record<string, unknown>>)
     : [];
   const generateReady = canGenerateConfirmation(inputPath, inspection) && !busy;
-  const scopeSummary = CONFIRMATION_MODE_OPTIONS.find((value) => value.value === mode);
+  const scopeSummary = CONFIRMATION_MODE_OPTIONS.find(
+    (value) => value.value === mode,
+  );
 
   return (
     <>
@@ -272,7 +278,11 @@ export default function ConfirmationProgressPage({
         steps={[
           { key: "1", label: "选择清单" },
           { key: "2", label: "报告范围", disabled: !inspection },
-          { key: "3", label: "生成报告", disabled: !canGenerateConfirmation(inputPath, inspection) },
+          {
+            key: "3",
+            label: "生成报告",
+            disabled: !canGenerateConfirmation(inputPath, inspection),
+          },
         ]}
         current={step - 1}
         onStepClick={(index) => setStep((index + 1) as 1 | 2 | 3)}
@@ -291,13 +301,14 @@ export default function ConfirmationProgressPage({
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
-            {job && !["completed", "failed", "cancelled"].includes(job.phase) && (
-              <JobProgress
-                job={job}
-                onCancel={() => void cancel()}
-                cancelLabel="取消任务"
-              />
-            )}
+            {job &&
+              !["completed", "failed", "cancelled"].includes(job.phase) && (
+                <JobProgress
+                  job={job}
+                  onCancel={() => void cancel()}
+                  cancelLabel="取消任务"
+                />
+              )}
             {step === 1 && (
               <>
                 <Field label="函证清单" required>
@@ -311,12 +322,26 @@ export default function ConfirmationProgressPage({
                     disabled={busy}
                   />
                 </Field>
-                <p className="hint">支持 XLSX、XLS；选择后点击「检查数据」读取表头、数量与必需字段。</p>
+                <p className="hint">
+                  支持
+                  XLSX、XLS；选择后点击「检查数据」读取表头、数量与必需字段。
+                </p>
                 <div className="actions">
-                  <Button type="button" variant="secondary" size="sm" disabled={!inputPath || busy} onClick={() => void inspect()}>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    disabled={!inputPath || busy}
+                    onClick={() => void inspect()}
+                  >
                     {busy && !job ? "正在读取…" : "检查数据"}
                   </Button>
-                  <Button type="button" variant="default" disabled={!inspection || busy} onClick={() => setStep(2)}>
+                  <Button
+                    type="button"
+                    variant="default"
+                    disabled={!inspection || busy}
+                    onClick={() => setStep(2)}
+                  >
                     下一步：报告范围
                   </Button>
                 </div>
@@ -327,7 +352,10 @@ export default function ConfirmationProgressPage({
                 <h3>报告范围</h3>
                 <div className="confirmation-modes">
                   {CONFIRMATION_MODE_OPTIONS.map(({ value, label, detail }) => (
-                    <label className={mode === value ? "selected" : ""} key={value}>
+                    <label
+                      className={mode === value ? "selected" : ""}
+                      key={value}
+                    >
                       <input
                         type="radio"
                         name="confirmation-mode"
@@ -343,16 +371,32 @@ export default function ConfirmationProgressPage({
                 </div>
                 {inspection?.missingColumns.length ? (
                   <div className="confirmation-error">
-                    缺少原处理逻辑必需字段：{inspection.missingColumns.join("、")}
+                    缺少原处理逻辑必需字段：
+                    {inspection.missingColumns.join("、")}
                   </div>
                 ) : inspection ? (
                   <div className="confirmation-success">
-                    字段检查通过，报告将保存到：{inspection.outputDirectory}
+                    字段检查通过，报告将保存到：
+                    {displayFileName(inspection.outputDirectory)}
                   </div>
                 ) : null}
                 <div className="actions">
-                  <Button type="button" variant="secondary" size="sm" onClick={() => setStep(1)}>上一步</Button>
-                  <Button type="button" variant="default" disabled={!canGenerateConfirmation(inputPath, inspection) || busy} onClick={() => setStep(3)}>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setStep(1)}
+                  >
+                    上一步
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="default"
+                    disabled={
+                      !canGenerateConfirmation(inputPath, inspection) || busy
+                    }
+                    onClick={() => setStep(3)}
+                  >
                     下一步：生成报告
                   </Button>
                 </div>
@@ -362,11 +406,13 @@ export default function ConfirmationProgressPage({
               <>
                 {inspection?.missingColumns.length ? (
                   <div className="confirmation-error">
-                    缺少原处理逻辑必需字段：{inspection.missingColumns.join("、")}
+                    缺少原处理逻辑必需字段：
+                    {inspection.missingColumns.join("、")}
                   </div>
                 ) : inspection ? (
                   <div className="confirmation-success">
-                    字段检查通过，报告将保存到：{inspection.outputDirectory}
+                    字段检查通过，报告将保存到：
+                    {displayFileName(inspection.outputDirectory)}
                   </div>
                 ) : null}
                 <p className="hint">
@@ -374,8 +420,20 @@ export default function ConfirmationProgressPage({
                   {scopeSummary ? ` ${scopeSummary.detail}。` : ""}
                 </p>
                 <div className="actions">
-                  <Button type="button" variant="secondary" size="sm" onClick={() => setStep(2)}>上一步</Button>
-                  <Button type="button" variant="default" disabled={!generateReady} onClick={() => void generate()}>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setStep(2)}
+                  >
+                    上一步
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="default"
+                    disabled={!generateReady}
+                    onClick={() => void generate()}
+                  >
                     生成进度报告
                   </Button>
                 </div>
@@ -402,7 +460,10 @@ export default function ConfirmationProgressPage({
                     { label: "总行数", value: inspection.statistics.total },
                     { label: "银行函证", value: inspection.statistics.bank },
                     { label: "往来函证", value: inspection.statistics.trade },
-                    { label: "项目 / 单位", value: `${inspection.statistics.projects} / ${inspection.statistics.units}` },
+                    {
+                      label: "项目 / 单位",
+                      value: `${inspection.statistics.projects} / ${inspection.statistics.units}`,
+                    },
                   ]}
                 />
                 {inspection.statistics.baseDates.length > 0 && (
@@ -413,7 +474,9 @@ export default function ConfirmationProgressPage({
                 <DataTable
                   columns={inspection.headers}
                   rows={inspection.preview}
-                  caption={<strong>函证清单前 {inspection.preview.length} 行</strong>}
+                  caption={
+                    <strong>函证清单前 {inspection.preview.length} 行</strong>
+                  }
                   maxHeight={430}
                 />
               </>
@@ -453,7 +516,7 @@ export default function ConfirmationProgressPage({
                     key={path}
                     onClick={() => void openOutput(path)}
                   >
-                    打开：{path}
+                    打开：{displayFileName(path)}
                   </Button>
                 ))}
               </div>

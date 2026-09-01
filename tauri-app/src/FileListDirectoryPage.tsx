@@ -16,17 +16,13 @@ import {
 import "./file-list.css";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
+import { displayFileName } from "@/fileDisplay";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { Field } from "@/components/Field";
 import { FileDropInput } from "@/components/FileDropInput";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
 const CACHE_KEY = "audit-toolbox:file-list-directory:v1";
@@ -38,7 +34,11 @@ function messageOf(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) {
+export default function FileListDirectoryPage({
+  tool,
+}: {
+  tool: ToolManifest;
+}) {
   const [sourceDir, setSourceDir] = useState("");
   const [outputPath, setOutputPath] = useState("");
   const [scan, setScan] = useState<FileListScan>();
@@ -51,7 +51,9 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
 
   useEffect(() => {
     try {
-      const cached = JSON.parse(sessionStorage.getItem(CACHE_KEY) ?? "null") as {
+      const cached = JSON.parse(
+        sessionStorage.getItem(CACHE_KEY) ?? "null",
+      ) as {
         sourceDir?: string;
         outputPath?: string;
         scan?: unknown;
@@ -65,7 +67,10 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
   }, []);
 
   useEffect(() => {
-    sessionStorage.setItem(CACHE_KEY, JSON.stringify({ sourceDir, outputPath, scan }));
+    sessionStorage.setItem(
+      CACHE_KEY,
+      JSON.stringify({ sourceDir, outputPath, scan }),
+    );
   }, [sourceDir, outputPath, scan]);
 
   useEffect(() => {
@@ -83,7 +88,9 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
       if (["completed", "failed", "cancelled"].includes(event.phase)) {
         setBusy(false);
       }
-    }).then((stop) => { unlisten = stop; });
+    }).then((stop) => {
+      unlisten = stop;
+    });
     return () => unlisten?.();
   }, [activeJobId]);
 
@@ -112,7 +119,9 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
           setDragHover(false);
         }
       })
-      .then((fn) => { off = fn; })
+      .then((fn) => {
+        off = fn;
+      })
       .catch((e) => console.error("[file-list] drag listener error:", e));
     return () => off();
   }, []);
@@ -191,7 +200,8 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
     }
   }
 
-  const terminal = job && ["completed", "failed", "cancelled"].includes(job.phase);
+  const terminal =
+    job && ["completed", "failed", "cancelled"].includes(job.phase);
   return (
     <>
       <PageHeader
@@ -211,9 +221,7 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
         <Card>
           <CardHeader>
             <CardTitle>
-              {step === 1
-                ? "1. 选择扫描范围"
-                : "2. 确认输出并生成"}
+              {step === 1 ? "1. 选择扫描范围" : "2. 确认输出并生成"}
             </CardTitle>
             <Badge className="badge-ready">已就绪</Badge>
           </CardHeader>
@@ -232,12 +240,25 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
                     disabled={busy}
                   />
                 </Field>
-                <p className="hint">选择文件夹后会自动扫描；大目录扫描需要几分钟，可随时取消。</p>
+                <p className="hint">
+                  选择文件夹后会自动扫描；大目录扫描需要几分钟，可随时取消。
+                </p>
                 <div className="actions">
-                  <Button type="button" variant="secondary" size="sm" disabled={busy || !sourceDir} onClick={() => void inspect()}>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    disabled={busy || !sourceDir}
+                    onClick={() => void inspect()}
+                  >
                     {busy && !scan ? "正在扫描…" : "重新扫描"}
                   </Button>
-                  <Button type="button" variant="default" disabled={!scan || busy} onClick={() => setStep(2)}>
+                  <Button
+                    type="button"
+                    variant="default"
+                    disabled={!scan || busy}
+                    onClick={() => setStep(2)}
+                  >
                     下一步：输出文件
                   </Button>
                 </div>
@@ -247,17 +268,49 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
               <>
                 <Field label="输出 Excel 文件" required>
                   <div className="input-with-button">
-                    <input value={outputPath} onChange={(event) => setOutputPath(event.target.value)} placeholder="默认保存到源文件夹的上一级目录" />
-                    <Button type="button" variant="secondary" size="sm" onClick={() => void chooseOutput()}>选择</Button>
+                    <input
+                      value={outputPath}
+                      onChange={(event) => setOutputPath(event.target.value)}
+                      placeholder="默认保存到源文件夹的上一级目录"
+                    />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void chooseOutput()}
+                    >
+                      选择
+                    </Button>
                   </div>
                 </Field>
-                <p className="hint">默认文件名与旧版一致：“文件夹名List-年月日时分.xlsx”。文件数量多时导出需要几分钟，中途可随时取消。</p>
+                <p className="hint">
+                  默认文件名与旧版一致：“文件夹名List-年月日时分.xlsx”。文件数量多时导出需要几分钟，中途可随时取消。
+                </p>
                 <div className="actions">
-                  <Button type="button" variant="secondary" size="sm" onClick={() => setStep(1)}>上一步</Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setStep(1)}
+                  >
+                    上一步
+                  </Button>
                   {busy && activeJobId && !terminal ? (
-                    <Button type="button" variant="secondary" size="sm" onClick={() => void jobCancel(activeJobId)}>取消{job?.phase === "scan" || !scan ? "扫描" : "导出"}</Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void jobCancel(activeJobId)}
+                    >
+                      取消{job?.phase === "scan" || !scan ? "扫描" : "导出"}
+                    </Button>
                   ) : (
-                    <Button type="button" variant="default" disabled={!fileListCanExport(sourceDir, outputPath)} onClick={() => void start()}>
+                    <Button
+                      type="button"
+                      variant="default"
+                      disabled={!fileListCanExport(sourceDir, outputPath)}
+                      onClick={() => void start()}
+                    >
                       生成文件清单
                     </Button>
                   )}
@@ -272,31 +325,71 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
             <CardTitle>扫描预览</CardTitle>
           </CardHeader>
           <CardContent>
-            {!scan ? <div className="empty">选择文件夹后，这里会显示前 50 个文件及层级。</div> : scan.fileCount === 0 ? (
-              <div className="empty">该文件夹中没有可列出的文件，仍可生成只含标题的清单。</div>
+            {!scan ? (
+              <div className="empty">
+                选择文件夹后，这里会显示前 50 个文件及层级。
+              </div>
+            ) : scan.fileCount === 0 ? (
+              <div className="empty">
+                该文件夹中没有可列出的文件，仍可生成只含标题的清单。
+              </div>
             ) : (
               <>
-                <p className="hint">{scan.fileCount} 个文件 · {scan.maxDepth + 1} 级目录列</p>
+                <p className="hint">
+                  {scan.fileCount} 个文件 · {scan.maxDepth + 1} 级目录列
+                </p>
                 <div className="file-list-table-wrap">
                   <table className="file-list-table">
-                    <thead><tr>
-                      {Array.from({ length: scan.maxDepth + 1 }, (_, index) => <th key={index}>{index + 1}级文件夹</th>)}
-                      <th>文件名称</th><th>相对路径</th>
-                    </tr></thead>
-                    <tbody>{scan.preview.map((row) => <tr key={row.fullPath}>
-                      {Array.from({ length: scan.maxDepth + 1 }, (_, index) => <td key={index}>{row.levels[index] ?? ""}</td>)}
-                      <td title={row.name}>{row.name}</td><td title={row.relativePath}>{row.relativePath}</td>
-                    </tr>)}</tbody>
+                    <thead>
+                      <tr>
+                        {Array.from(
+                          { length: scan.maxDepth + 1 },
+                          (_, index) => (
+                            <th key={index}>{index + 1}级文件夹</th>
+                          ),
+                        )}
+                        <th>文件名称</th>
+                        <th>相对路径</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {scan.preview.map((row) => (
+                        <tr key={row.fullPath}>
+                          {Array.from(
+                            { length: scan.maxDepth + 1 },
+                            (_, index) => (
+                              <td key={index}>{row.levels[index] ?? ""}</td>
+                            ),
+                          )}
+                          <td>{row.name}</td>
+                          <td>{displayFileName(row.relativePath)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
                   </table>
                 </div>
               </>
             )}
-            {scan && scan.fileCount > scan.preview.length && <p className="hint">预览仅显示前 {scan.preview.length} 项；导出会包含全部 {scan.fileCount} 个文件。</p>}
+            {scan && scan.fileCount > scan.preview.length && (
+              <p className="hint">
+                预览仅显示前 {scan.preview.length} 项；导出会包含全部{" "}
+                {scan.fileCount} 个文件。
+              </p>
+            )}
             {!!scan?.skippedPaths?.length && (
               <div className="warning-box">
-                <strong>以下 {scan.skippedPaths.length} 个路径无法访问，已跳过（清单中不含其内容）</strong>
-                <ul>{scan.skippedPaths.slice(0, 20).map((path) => <li key={path}>{path}</li>)}</ul>
-                {scan.skippedPaths.length > 20 && <p>另有 {scan.skippedPaths.length - 20} 项未显示。</p>}
+                <strong>
+                  以下 {scan.skippedPaths.length}{" "}
+                  个路径无法访问，已跳过（清单中不含其内容）
+                </strong>
+                <ul>
+                  {scan.skippedPaths.slice(0, 20).map((path) => (
+                    <li key={path}>{displayFileName(path)}</li>
+                  ))}
+                </ul>
+                {scan.skippedPaths.length > 20 && (
+                  <p>另有 {scan.skippedPaths.length - 20} 项未显示。</p>
+                )}
               </div>
             )}
             {job && (
@@ -309,8 +402,14 @@ export default function FileListDirectoryPage({ tool }: { tool: ToolManifest }) 
             {job && job.outputPaths.length > 0 && (
               <div className="output-list">
                 {job.outputPaths.map((path) => (
-                  <Button type="button" variant="secondary" size="sm" key={path} onClick={() => void openOutput(path)}>
-                    打开结果：{path}
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    key={path}
+                    onClick={() => void openOutput(path)}
+                  >
+                    打开结果：{displayFileName(path)}
                   </Button>
                 ))}
               </div>

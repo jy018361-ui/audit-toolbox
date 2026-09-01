@@ -112,9 +112,14 @@ export function faTbJeMissingMappings(kind: Kind, mapping: Mapping): string[] {
  * 编码必须含数字，否则整串按名称处理——`Accumulated Depreciation` 这种
  * 纯英文名不能把首个单词当成科目编码。
  */
-export function splitFaAccount(account: string): { code: string; name: string } {
+export function splitFaAccount(account: string): {
+  code: string;
+  name: string;
+} {
   const value = account.trim();
-  const head = /^([0-9A-Za-z][0-9A-Za-z._]*)\s*[\s:：\-—/\\|]\s*(.*)$/.exec(value);
+  const head = /^([0-9A-Za-z][0-9A-Za-z._]*)\s*[\s:：\-—/\\|]\s*(.*)$/.exec(
+    value,
+  );
   if (head && /\d/.test(head[1]))
     return { code: head[1], name: head[2].trim() };
   const tail = /^(.*?)\s*[\s:：\-—/\\|]\s*([0-9][0-9A-Za-z._]*)$/.exec(value);
@@ -269,7 +274,6 @@ export function faAssignmentsForEntities(
           entity,
         },
     ),
-
   );
 }
 
@@ -354,18 +358,15 @@ export function FaTbJePage() {
   );
   // 主体是公共映射字段；源表没有主体列时由引擎统一使用默认主体。
   const entitiesReady = Boolean(inspects.tb && inspects.je);
-  const entities = useMemo(
-    () => {
-      const detected = [
-        ...new Set([
-          ...(inspects.tb?.entities ?? []),
-          ...(inspects.je?.entities ?? []),
-        ]),
-      ].filter(Boolean);
-      return detected.length ? detected : [DEFAULT_ENTITY];
-    },
-    [inspects],
-  );
+  const entities = useMemo(() => {
+    const detected = [
+      ...new Set([
+        ...(inspects.tb?.entities ?? []),
+        ...(inspects.je?.entities ?? []),
+      ]),
+    ].filter(Boolean);
+    return detected.length ? detected : [DEFAULT_ENTITY];
+  }, [inspects]);
   const missingMappings = {
     tb: faTbJeMissingMappings("tb", mappings.tb),
     je: faTbJeMissingMappings("je", mappings.je),
@@ -776,37 +777,45 @@ export function FaTbJePage() {
             </CardHeader>
             <CardContent>
               <p className="fx-hint">
-                TB 和序时账使用同一入口，可一次拖入两个文件；公共账表引擎自动判定类型、标题行和字段映射。
+                TB
+                和序时账使用同一入口，可一次拖入两个文件；公共账表引擎自动判定类型、标题行和字段映射。
               </p>
-            <FileDropInput
-              containerRef={uploadDropRef}
-              value={(["tb", "je"] as const)
-                .filter((kind) => paths[kind])
-                .map((kind) => `${kind.toUpperCase()}：${fileName(paths[kind])}`)
-                .join("；")}
-              disabled={busy}
-              placeholder={
-                busy ? "正在识别文件…" : "拖放或选择 TB、JE 文件（可同时选择）"
-              }
-              onBrowse={() => void browse()}
-              onDragStateChange={() => {}}
-              onClear={() => {
-                clearSource("tb");
-                clearSource("je");
-                setSourceStatus("");
-              }}
-            />
-            {sourceStatus && (
-              <p className="fx-source-status" aria-live="polite">
-                {sourceStatus}
-              </p>
-            )}
+              <FileDropInput
+                containerRef={uploadDropRef}
+                value={(["tb", "je"] as const)
+                  .filter((kind) => paths[kind])
+                  .map(
+                    (kind) => `${kind.toUpperCase()}：${fileName(paths[kind])}`,
+                  )
+                  .join("；")}
+                disabled={busy}
+                placeholder={
+                  busy
+                    ? "正在识别文件…"
+                    : "拖放或选择 TB、JE 文件（可同时选择）"
+                }
+                onBrowse={() => void browse()}
+                onDragStateChange={() => {}}
+                onClear={() => {
+                  clearSource("tb");
+                  clearSource("je");
+                  setSourceStatus("");
+                }}
+              />
+              {sourceStatus && (
+                <p className="fx-source-status" aria-live="polite">
+                  {sourceStatus}
+                </p>
+              )}
             </CardContent>
           </Card>
           {(paths.tb || paths.je) && (
             <div className="fx-source-grid">
               {(["je", "tb"] as const).map((kind) => (
-                <div className={`fx-source-slot fx-source-slot-${kind}`} key={kind}>
+                <div
+                  className={`fx-source-slot fx-source-slot-${kind}`}
+                  key={kind}
+                >
                   {paths[kind] && inspects[kind] ? (
                     <FaLedgerSourceCard
                       kind={kind}
@@ -834,19 +843,19 @@ export function FaTbJePage() {
           )}
           <Card>
             <CardContent>
-            <div className="fa-tbje-step-actions">
-              <span>
-                {!paths.tb || !paths.je
-                  ? "请补齐 TB 与 JE。"
-                  : "文件已就绪，主体按映射字段自动读取。"}
-              </span>
-              <Button
-                disabled={!paths.tb || !paths.je || !entitiesReady || busy}
-                onClick={() => setStep(2)}
-              >
-                继续核对字段
-              </Button>
-            </div>
+              <div className="fa-tbje-step-actions">
+                <span>
+                  {!paths.tb || !paths.je
+                    ? "请补齐 TB 与 JE。"
+                    : "文件已就绪，主体按映射字段自动读取。"}
+                </span>
+                <Button
+                  disabled={!paths.tb || !paths.je || !entitiesReady || busy}
+                  onClick={() => setStep(2)}
+                >
+                  继续核对字段
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </div>
@@ -874,10 +883,7 @@ export function FaTbJePage() {
                       headers: inspects.tb.headers,
                       preview: inspects.tb.preview,
                       mapping: mappings.tb,
-                      labels: resolveRoleLabels(
-                        inspects.tb.roles,
-                        TB_LABELS,
-                      ),
+                      labels: resolveRoleLabels(inspects.tb.roles, TB_LABELS),
                       tool: "fa_tbje",
                       onApplied: (next) =>
                         setMappings((value) => ({ ...value, tb: next })),
@@ -890,10 +896,7 @@ export function FaTbJePage() {
                       headers: inspects.je.headers,
                       preview: inspects.je.preview,
                       mapping: mappings.je,
-                      labels: resolveRoleLabels(
-                        inspects.je.roles,
-                        JE_LABELS,
-                      ),
+                      labels: resolveRoleLabels(inspects.je.roles, JE_LABELS),
                       tool: "fa_tbje",
                       onApplied: (next) =>
                         setMappings((value) => ({ ...value, je: next })),
@@ -953,7 +956,8 @@ export function FaTbJePage() {
             <div>
               <CardTitle>复核固定资产科目与资产类别</CardTitle>
               <p>
-                系统按「上级科目 → 一级编码 → 名称」自动分类，默认列出全部科目；固定资产原值与累计折旧排在前面，其余科目标记为「排除」垫底。请逐一复核后再进入下一步。
+                系统按「上级科目 → 一级编码 →
+                名称」自动分类，默认列出全部科目；固定资产原值与累计折旧排在前面，其余科目标记为「排除」垫底。请逐一复核后再进入下一步。
               </p>
             </div>
             <div className="fa-tbje-counts">
@@ -1313,8 +1317,12 @@ function FaLedgerSourceCard(props: {
             : "新增、处置、折旧及对方科目的完整期间数据源"}
         </p>
         <div className="fx-detected-file">
-          <span title={props.path}>{props.path}</span>
-          <button type="button" disabled={props.disabled} onClick={props.onClear}>
+          <span>{fileName(props.path)}</span>
+          <button
+            type="button"
+            disabled={props.disabled}
+            onClick={props.onClear}
+          >
             移除
           </button>
         </div>
@@ -1335,9 +1343,12 @@ function FaLedgerSourceCard(props: {
                 })
               }
             >
-              {(inspection.sheets.length ? inspection.sheets : [inspection.sheet]).map(
-                (sheet) => <option key={sheet}>{sheet}</option>,
-              )}
+              {(inspection.sheets.length
+                ? inspection.sheets
+                : [inspection.sheet]
+              ).map((sheet) => (
+                <option key={sheet}>{sheet}</option>
+              ))}
             </select>
           </label>
           <label>
@@ -1362,7 +1373,9 @@ function FaLedgerSourceCard(props: {
               disabled={props.disabled}
               value={inspection.headerDepth}
               onChange={(event) =>
-                props.onHeaderChange({ headerDepth: Number(event.target.value) })
+                props.onHeaderChange({
+                  headerDepth: Number(event.target.value),
+                })
               }
             >
               <option value={1}>1层</option>
@@ -1370,7 +1383,9 @@ function FaLedgerSourceCard(props: {
             </select>
           </label>
           {inspection.headerDetection.needsConfirmation && (
-            <strong className="fx-warning">标题候选得分接近，请确认标题行</strong>
+            <strong className="fx-warning">
+              标题候选得分接近，请确认标题行
+            </strong>
           )}
         </div>
         <p className="fa-tbje-entity-note">

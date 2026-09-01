@@ -84,6 +84,9 @@
 
   /* 卡片不使用投影：浅色投影在白底上会被感知为一圈细边框。 */
   --shadow-card: none;
+  /* 数据预览是可滚动、可编辑的工作区，不是普通信息卡片；用克制的阴影
+     与明确描边把它从页面底色中抬起，避免表格和背景融成一层。 */
+  --shadow-preview: 0 12px 30px rgb(20 53 58 / 10%);
 
   /* ShadCN semantic tokens map to the existing audit-toolbox palette. */
   --background: var(--surface-page);
@@ -127,7 +130,11 @@
   color-scheme: light;
   --scrollbar-track: var(--surface-page);
   --scrollbar-thumb: color-mix(in srgb, var(--text-muted) 48%, transparent);
-  --scrollbar-thumb-hover: color-mix(in srgb, var(--brand-accent) 78%, transparent);
+  --scrollbar-thumb-hover: color-mix(
+    in srgb,
+    var(--brand-accent) 78%,
+    transparent
+  );
   font-synthesis: none;
 }
 * {
@@ -360,7 +367,8 @@ summary:focus-visible {
   flex: 0 0 auto;
   margin-left: auto;
   padding: 2px var(--sp-2);
-  border: 1px solid color-mix(in srgb, var(--warning-dot) 72%, var(--brand-deep));
+  border: 1px solid
+    color-mix(in srgb, var(--warning-dot) 72%, var(--brand-deep));
   border-radius: var(--r-pill);
   background: color-mix(in srgb, var(--warning-dot) 18%, var(--brand-deep));
   color: var(--on-dark);
@@ -1546,6 +1554,7 @@ summary:focus-visible {
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: var(--r-md);
+  background: var(--surface);
 }
 .data-table-table {
   width: 100%;
@@ -1576,6 +1585,125 @@ summary:focus-visible {
 }
 .data-table-table tbody tr:hover td {
   background: var(--surface-sunken);
+}
+
+/* 共用字段映射预览：所有账表工具统一使用一个清晰的三层结构——
+   带色标题区、状态/说明区、白底数据表。页面不得再各自复制这套外壳。 */
+.mapping-panel.kz-card {
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-preview);
+}
+.mapping-panel > .loan-map-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin: 0;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-muted) 76%, var(--surface));
+}
+.mapping-panel > .loan-map-head h2 {
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: var(--fs-lg);
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+}
+.mapping-panel > .loan-map-head p {
+  margin: var(--sp-1) 0 0;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.mapping-panel-toolbar {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.mapping-panel-toolbar label {
+  display: grid;
+  gap: var(--sp-1);
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+.mapping-panel-toolbar input,
+.mapping-panel-toolbar select {
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background-color: var(--surface);
+  color: var(--ink);
+}
+.mapping-panel-toolbar input:focus-visible,
+.mapping-panel-toolbar select:focus-visible,
+.mapping-panel .dt-header-control select:focus-visible {
+  outline: 2px solid var(--brand-accent);
+  outline-offset: 2px;
+}
+.mapping-panel > .mapping-form-note,
+.mapping-panel > .mapping-requirement-legend,
+.mapping-panel > .fa-missing-hint,
+.mapping-panel > .fx-hint,
+.mapping-panel > .fx-currency-confirm {
+  margin-right: var(--sp-5) !important;
+  margin-left: var(--sp-5) !important;
+}
+.mapping-panel > .mapping-form-note {
+  border-color: color-mix(in srgb, var(--brand-accent) 38%, var(--border));
+  background: color-mix(in srgb, var(--success-bg) 52%, var(--surface));
+  color: var(--success-fg) !important;
+  font-weight: 600;
+}
+.mapping-panel > .data-table {
+  margin-top: var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+.mapping-panel > .data-table .data-table-scroll {
+  border: 0;
+  border-radius: 0;
+}
+.mapping-panel .data-table-table thead th {
+  padding-top: 10px;
+  background: color-mix(in srgb, var(--surface-muted) 82%, var(--surface));
+}
+.mapping-panel .data-table-table tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--surface-sunken) 72%, var(--surface));
+}
+.mapping-panel .data-table-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--success-bg) 48%, var(--surface));
+}
+.mapping-panel-empty.kz-card {
+  min-height: 150px;
+  padding: var(--sp-5);
+}
+.mapping-panel-empty h2,
+.mapping-panel-empty p {
+  margin: 0;
+}
+.mapping-panel-empty p {
+  margin-top: var(--sp-2);
+  color: var(--text-muted);
+}
+
+/* 不是 MappingPanel 的大型预览工作区也使用同一层级信号。 */
+.fa-preview-workspace,
+.dep-preview-card {
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow-preview);
+}
+@media (max-width: 720px) {
+  .mapping-panel > .loan-map-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 
 /* ResultCard footer */
@@ -2009,9 +2137,20 @@ summary:focus-visible {
    （科目名称同时是币种线索），合起来时下拉框里直接显示「A ＋ B」。 */
 .data-table-table th .dt-header-control select.mapped {
   border-color: var(--brand-accent);
-  background: var(--success-bg);
+  background-color: var(--success-bg) !important;
   color: var(--success-fg);
   font-weight: 600;
+  box-shadow: inset 0 0 0 1px
+    color-mix(in srgb, var(--success-fg) 20%, transparent);
+}
+.data-table-table
+  th
+  .dt-header-control
+  select.mapped
+  option.dt-current-mapping {
+  background: var(--success-bg);
+  color: var(--success-fg);
+  font-weight: 700;
 }
 
 /* 已被其他列占用的角色选项：弱化提示 */
@@ -2026,6 +2165,19 @@ summary:focus-visible {
 .data-table-table th .dt-header-control select optgroup.dt-group-unavailable {
   color: var(--muted-soft);
   background: var(--surface-muted);
+}
+
+/* 分组状态直接进入下拉视觉语义：已适配为绿色，可适配保持品牌色，
+   未适配继续灰化。原生 WebView 对 optgroup 支持不完全，文字前缀与颜色共同兜底。 */
+.data-table-table th .dt-header-control select optgroup.dt-group-adapted {
+  color: var(--success-fg);
+  background: var(--success-bg);
+  font-weight: 700;
+}
+.data-table-table th .dt-header-control select optgroup.dt-group-available {
+  color: var(--brand);
+  background: var(--surface);
+  font-weight: 600;
 }
 
 /* 未映射字段提示 */

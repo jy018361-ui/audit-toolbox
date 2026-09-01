@@ -339,7 +339,8 @@ describe("fx audit upload and mapping parity", () => {
   it("derives the audit year start from the balance sheet date", () =>
     expect(fxReportStart("2024-12-31")).toBe("2024-01-01"));
   it("一键复核用一次联合请求同时复核 JE 与 TB", async () => {
-    const started: Array<{ method: string; params: Record<string, unknown> }> = [];
+    const started: Array<{ method: string; params: Record<string, unknown> }> =
+      [];
     const call = async (method: string, params: Record<string, unknown>) => {
       started.push({ method, params });
       return {
@@ -392,9 +393,7 @@ describe("fx audit upload and mapping parity", () => {
   });
   it("公共 LLM 复核会保留凭证字与凭证号组成的多列凭证键", async () => {
     const call = async () => ({
-      changes: [
-        { role: "id", suggestedColumn: "凭证号", confidence: 0.94 },
-      ],
+      changes: [{ role: "id", suggestedColumn: "凭证号", confidence: 0.94 }],
     });
     const outcomes = await applyLedgerReviewsTogether(call, {
       je: {
@@ -752,13 +751,60 @@ describe("科目币种覆盖", () => {
     },
   };
 
-  it("JE 的逐行币种优先于 TB 的单行结论，seen 取两边并集", () => {
+  it("JE 同一科目出现多币种时不自动采纳，seen 仍取两边并集", () => {
     const detail = fxAccountCurrencyDetail("1002990001 过渡银行", je, tb);
-    expect(detail.detected).toBe("HKD");
+    expect(detail.detected).toBe("USD");
+    expect(detail.source).toBe("本位币列");
+    expect(detail.side).toBe("TB");
+    expect(detail.seen).toEqual(["HKD", "JPY", "USD"]);
+    expect(detail.fellBack).toBe(true);
+    expect(detail.jeMultiCurrency).toBe(true);
+  });
+
+  it("2301 科目名称币种优先于币种一致的 JE 币种列", () => {
+    const account = "10020002 招商银行-美元资本金（2301）";
+    const detail = fxAccountCurrencyDetail(
+      account,
+      {
+        [account]: {
+          detected: "USD",
+          source: "币种列",
+          seen: ["USD"],
+          columnSeen: ["USD"],
+          columnDetected: "USD",
+          needsConfirmation: false,
+        },
+      },
+      {
+        [account]: {
+          detected: "USD",
+          source: "科目文本",
+          seen: ["USD"],
+          textDetected: "USD",
+          needsConfirmation: false,
+        },
+      },
+    );
+    expect(detail.detected).toBe("USD");
+    expect(detail.source).toBe("科目文本");
+    expect(detail.side).toBe("TB");
+    expect(detail.fellBack).toBe(false);
+    expect(detail.jeMultiCurrency).toBe(false);
+  });
+
+  it("没有 TB 币种列和科目名线索时才采纳币种一致的 JE 币种列", () => {
+    const detail = fxAccountCurrencyDetail("1133 其他应收款", {
+      "1133 其他应收款": {
+        detected: "EUR",
+        source: "币种列",
+        seen: ["EUR"],
+        needsConfirmation: false,
+      },
+    });
+    expect(detail.detected).toBe("EUR");
     expect(detail.source).toBe("币种列");
     expect(detail.side).toBe("JE");
-    expect(detail.seen).toEqual(["HKD", "JPY", "USD"]);
-    expect(detail.fellBack).toBe(false);
+    expect(detail.jeMultiCurrency).toBe(false);
   });
 
   it("界面括号里标出币种是怎么取到的，含来自 TB 还是 JE", () => {
@@ -796,7 +842,7 @@ describe("科目币种覆盖", () => {
     );
   });
 
-  it("TB 与 JE 科目名拼法不同时按科目编码对上，JE 的真实币种传得到 TB 那一行", () => {
+  it("TB 与 JE 科目名拼法不同时按科目编码对上，但多币种 JE 不自动覆盖", () => {
     // 4800 的实况：TB「1002990001 货币资金 货币资金-银行存款-过渡银行」，
     // JE「1002990001 过渡银行」，两边全名不同、编码相同。
     const detail = fxAccountCurrencyDetail(
@@ -804,8 +850,8 @@ describe("科目币种覆盖", () => {
       je,
       tb,
     );
-    expect(detail.detected).toBe("HKD");
-    expect(detail.source).toBe("币种列");
+    expect(detail.detected).toBe("USD");
+    expect(detail.source).toBe("本位币列");
     expect(detail.seen).toEqual(["HKD", "JPY", "USD"]);
   });
 

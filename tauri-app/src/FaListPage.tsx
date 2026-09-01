@@ -1,14 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
-import {
-  engineCall,
-  jobCancel,
-  jobStart,
-  openOutput,
-  pickPath,
-} from "./api";
+import { engineCall, jobCancel, jobStart, openOutput, pickPath } from "./api";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { displayFileName } from "@/fileDisplay";
 import { faDropSlotAtPosition, type FaDropSlot } from "./faDropTarget";
 import {
   type FaMappingChange,
@@ -45,12 +40,7 @@ import { StepIndicator } from "@/components/StepIndicator";
 import { StatGrid } from "@/components/StatGrid";
 import { DataTable } from "@/components/DataTable";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useJobEvents } from "@/hooks/useJobEvents";
 import { FaTbJePage } from "./FaTbJePage";
@@ -209,20 +199,44 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
     faListModeCache = nextMode;
     setModeState(nextMode);
   };
-  return <div className="tool-page fx-page fa-list-shell">
-    <PageHeader
-      eyebrow={mode === "tbje" ? "固定资产审计" : "固定资产清单匹配"}
-      title={mode === "tbje" ? "固定资产 TB＋JE 变动表" : tool.name}
-      detail={mode === "tbje"
-        ? "公共 TB/JE 引擎识别与映射；固定资产业务层生成变动汇总、新增、处置、JE底表和对方科目汇总。"
-        : "按期初、期末两份固定资产表按组合键匹配，生成 FA List、变动与汇总底稿。"}
-    />
-    <div className="fx-mode-bar fa-mode-tabs" role="tablist" aria-label="固定资产底稿模式">
-      <button type="button" role="tab" aria-selected={mode === "tbje"} className={mode === "tbje" ? "active" : undefined} onClick={() => setMode("tbje")}>TB＋JE 变动表</button>
-      <button type="button" role="tab" aria-selected={mode === "cards"} className={mode === "cards" ? "active" : undefined} onClick={() => setMode("cards")}>两期固定资产清单</button>
+  return (
+    <div className="tool-page fx-page fa-list-shell">
+      <PageHeader
+        eyebrow={mode === "tbje" ? "固定资产审计" : "固定资产清单匹配"}
+        title={mode === "tbje" ? "固定资产 TB＋JE 变动表" : tool.name}
+        detail={
+          mode === "tbje"
+            ? "公共 TB/JE 引擎识别与映射；固定资产业务层生成变动汇总、新增、处置、JE底表和对方科目汇总。"
+            : "按期初、期末两份固定资产表按组合键匹配，生成 FA List、变动与汇总底稿。"
+        }
+      />
+      <div
+        className="fx-mode-bar fa-mode-tabs"
+        role="tablist"
+        aria-label="固定资产底稿模式"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === "tbje"}
+          className={mode === "tbje" ? "active" : undefined}
+          onClick={() => setMode("tbje")}
+        >
+          TB＋JE 变动表
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === "cards"}
+          className={mode === "cards" ? "active" : undefined}
+          onClick={() => setMode("cards")}
+        >
+          两期固定资产清单
+        </button>
+      </div>
+      {mode === "cards" ? <FaCardListPage /> : <FaTbJePage />}
     </div>
-    {mode === "cards" ? <FaCardListPage /> : <FaTbJePage />}
-  </div>;
+  );
 }
 
 function FaCardListPage() {
@@ -312,7 +326,9 @@ function FaCardListPage() {
   // 命中实际上传框，不能用窗口左右/上下中线猜测。
   const dragTargetRef = useRef<FaDropSlot | null>(null);
   const [dragHover, setDragHover] = useState<FaDropSlot | null>(null);
-  const applyPathRef = useRef<(side: FaDropSlot, value: string) => void>(() => {});
+  const applyPathRef = useRef<(side: FaDropSlot, value: string) => void>(
+    () => {},
+  );
   const beginDropRef = useRef<HTMLDivElement>(null);
   const endDropRef = useRef<HTMLDivElement>(null);
   const additionDropRef = useRef<HTMLDivElement>(null);
@@ -379,7 +395,10 @@ function FaCardListPage() {
     dragTargetRef.current = active ? target : null;
     setDragHover(active ? target : null);
   };
-  const setSupplementDragTarget = (kind: "addition" | "disposal", active: boolean) => {
+  const setSupplementDragTarget = (
+    kind: "addition" | "disposal",
+    active: boolean,
+  ) => {
     dragTargetRef.current = active ? kind : null;
     setDragHover(active ? kind : null);
   };
@@ -1250,8 +1269,9 @@ function FaCardListPage() {
     const missing: string[] = [];
     for (const [key, label] of REQUIRED_ROLES) {
       const v = mapping[key];
-      const has =
-        Array.isArray(v) ? v.length > 0 : Boolean(v && String(v).trim());
+      const has = Array.isArray(v)
+        ? v.length > 0
+        : Boolean(v && String(v).trim());
       if (!has) missing.push(label);
     }
     return missing;
@@ -1349,7 +1369,9 @@ function FaCardListPage() {
                 <option value="">不映射</option>
                 {headers.map((header, index) => {
                   const option = faHeaderOption(header);
-                  const isUsed = usedHeaders.has(option.value) && option.value !== currentValue;
+                  const isUsed =
+                    usedHeaders.has(option.value) &&
+                    option.value !== currentValue;
                   return (
                     <option
                       key={`${header}-${index}`}
@@ -1385,8 +1407,9 @@ function FaCardListPage() {
       const colValue = header.trim();
       for (const [key] of roleOptions) {
         const v = mapping[key];
-        const occupied =
-          Array.isArray(v) ? v.includes(colValue) : String(v ?? "") === colValue;
+        const occupied = Array.isArray(v)
+          ? v.includes(colValue)
+          : String(v ?? "") === colValue;
         if (occupied) usedRoles.add(key);
       }
     }
@@ -1396,7 +1419,11 @@ function FaCardListPage() {
       const colValue = header.trim();
       // 同一列可以同时承担组合匹配键、资产名称等多个角色。原先用 find
       // 只显示第一个，复核时看不到完整关系；这里保留全部角色并合并展示。
-      const mappedRoles = faMappedRolesForColumn(colValue, roleOptions, mapping);
+      const mappedRoles = faMappedRolesForColumn(
+        colValue,
+        roleOptions,
+        mapping,
+      );
       const mappedRole = mappedRoles[0];
       const multipleValue = `__multiple__:${colValue}`;
       mappedFlags.push(mappedRoles.length > 0);
@@ -1405,15 +1432,27 @@ function FaCardListPage() {
           <select
             className={mappedRoles.length ? "mapped" : undefined}
             disabled={llmBusy}
-            title={mappedRoles.map(([, label]) => label).join(" + ") || "未映射"}
-            value={mappedRoles.length > 1 ? multipleValue : mappedRole ? mappedRole[0] : ""}
+            title={
+              mappedRoles.map(([, label]) => label).join(" + ") || "未映射"
+            }
+            value={
+              mappedRoles.length > 1
+                ? multipleValue
+                : mappedRole
+                  ? mappedRole[0]
+                  : ""
+            }
             onChange={(e) => {
               const role = e.target.value as keyof FaMapping;
               // 清除旧映射：先把该列从原角色移除（如果是多选且该角色值恰为此列）
               for (const [k] of roleOptions) {
                 const v = mapping[k];
                 if (Array.isArray(v) && v.includes(colValue)) {
-                  setMapping(side, k, v.filter((x) => x !== colValue));
+                  setMapping(
+                    side,
+                    k,
+                    v.filter((x) => x !== colValue),
+                  );
                 } else if (String(v ?? "") === colValue) {
                   setMapping(side, k, "");
                 }
@@ -1439,10 +1478,16 @@ function FaCardListPage() {
             )}
             {roleOptions.map(([key, label]) => {
               // 已被其他列占用的角色：标记"已用"，但当前列已选的除外
-              const mappedHere = mappedRoles.some(([mappedKey]) => mappedKey === key);
+              const mappedHere = mappedRoles.some(
+                ([mappedKey]) => mappedKey === key,
+              );
               const takenByOther = usedRoles.has(key) && !mappedHere;
               return (
-                <option key={key} value={key} className={takenByOther ? "dt-role-taken" : undefined}>
+                <option
+                  key={key}
+                  value={key}
+                  className={takenByOther ? "dt-role-taken" : undefined}
+                >
                   {label}
                   {takenByOther ? "（已用）" : ""}
                 </option>
@@ -1506,7 +1551,8 @@ function FaCardListPage() {
                   }
                 }
                 if (field === "keys") {
-                  if (!next.keys.includes(colValue)) next.keys = [...next.keys, colValue];
+                  if (!next.keys.includes(colValue))
+                    next.keys = [...next.keys, colValue];
                 } else if (field) {
                   (next as Record<string, unknown>)[field] = colValue;
                 }
@@ -1531,14 +1577,23 @@ function FaCardListPage() {
     title: string,
     mapping?: FaMapping,
     side?: "begin" | "end",
-    supplement?: { kind: "addition" | "disposal"; config: FaSupplementConfig; setter: React.Dispatch<React.SetStateAction<FaSupplementConfig>> },
+    supplement?: {
+      kind: "addition" | "disposal";
+      config: FaSupplementConfig;
+      setter: React.Dispatch<React.SetStateAction<FaSupplementConfig>>;
+    },
   ) => {
     const hasControls = Boolean(mapping && side) || Boolean(supplement);
     let controls: React.ReactNode[] | undefined;
     if (mapping && side) {
       controls = columnMappingControls(side, inspect, mapping).controls;
     } else if (supplement) {
-      controls = supplementColumnControls(supplement.kind, inspect, supplement.config, supplement.setter);
+      controls = supplementColumnControls(
+        supplement.kind,
+        inspect,
+        supplement.config,
+        supplement.setter,
+      );
     }
     // 每个文件预览标题旁的"未映射"提示。分两档：
     // 必填缺失是红的、会拦住流程；选填缺失是黄的、只是告知，留空照样能合并。
@@ -1555,7 +1610,8 @@ function FaCardListPage() {
         const v = supplement.config[field];
         return Array.isArray(v) ? v.length === 0 : !String(v ?? "").trim();
       });
-      if (missing.length) missingHint = `尚未映射：${missing.map((x) => x.label).join("、")}`;
+      if (missing.length)
+        missingHint = `尚未映射：${missing.map((x) => x.label).join("、")}`;
     }
     return (
       <DataTable
@@ -1564,10 +1620,14 @@ function FaCardListPage() {
         caption={
           <div className="fa-table-caption">
             <strong>
-              {title} · {inspect.displayName ?? inspect.selectedSheet ?? "数据预览"} ·{" "}
-              {inspect.dimensions?.rows ?? 0} 行 × {inspect.dimensions?.columns ?? 0} 列
+              {title} ·{" "}
+              {inspect.displayName ?? inspect.selectedSheet ?? "数据预览"} ·{" "}
+              {inspect.dimensions?.rows ?? 0} 行 ×{" "}
+              {inspect.dimensions?.columns ?? 0} 列
             </strong>
-            {missingHint && <span className="fa-caption-missing">{missingHint}</span>}
+            {missingHint && (
+              <span className="fa-caption-missing">{missingHint}</span>
+            )}
             {optionalHint && (
               <span
                 className="fa-caption-optional"
@@ -1600,8 +1660,14 @@ function FaCardListPage() {
               value={config.path}
               placeholder={title}
               onBrowse={() => void chooseSupplement(kind)}
-              onClear={config.path && !busy && !supplementLlmBusy ? () => clearSupplement(kind) : undefined}
-              onDragStateChange={(active) => setSupplementDragTarget(kind, active)}
+              onClear={
+                config.path && !busy && !supplementLlmBusy
+                  ? () => clearSupplement(kind)
+                  : undefined
+              }
+              onDragStateChange={(active) =>
+                setSupplementDragTarget(kind, active)
+              }
               highlight={dragHover === kind}
               disabled={supplementLlmBusy}
             />
@@ -1788,7 +1854,7 @@ function FaCardListPage() {
               variant="default"
               onClick={() => void openOutput(path)}
             >
-              打开结果：{path}
+              打开结果：{displayFileName(path)}
             </Button>
           ))}
           {warnings.map((warning) => (
@@ -1839,617 +1905,637 @@ function FaCardListPage() {
             <Badge className="badge-ready">已就绪</Badge>
           </CardHeader>
           <CardContent>
-          <ErrorBox error={error} onDismiss={() => setError("")} />
-          {/* The result pane only exists on step 3, so a merge started from
+            <ErrorBox error={error} onDismiss={() => setError("")} />
+            {/* The result pane only exists on step 3, so a merge started from
               step 1 used to run with no visible progress at all. */}
-          {job && job.phase !== "completed" && (
-            <JobProgress
-              job={job}
-              onCancel={(jobId) => {
-                void jobCancel(jobId);
-                setBusy(false);
-              }}
-              cancelLabel="取消任务"
-            />
-          )}
-          {step === 1 && (
-            <>
-              <div className="fa-sides">
-                <div className="fa-side fa-side-begin">
-                  <h3 className="fa-side-title">期初（年初）</h3>
-                  <Field label="年初文件" required>
-                    <div ref={beginDropRef}>
-                      <FileDropInput
-                        value={beginPath}
-                        placeholder="拖放或点击选择年初清单"
-                        onBrowse={() => void choose("begin")}
-                        onClear={beginPath && !busy ? () => clearMainFile("begin") : undefined}
-                        onDragStateChange={(active) => setDragTarget("begin", active)}
-                        highlight={dragHover === "begin"}
-                        disabled={busy}
-                      />
-                    </div>
-                  </Field>
-                  <Field label="Sheet">
-                    {inspection?.begin.sheets.length ? (
-                      <select
-                        value={beginSheet}
-                        onChange={(e) => {
-                          setBeginSheet(e.target.value);
-                          setBeginHeaderRow("");
-                        }}
-                      >
-                        {inspection.begin.sheets.map((value) => (
-                          <option key={value}>{value}</option>
-                        ))}
-                      </select>
-                    ) : (
+            {job && job.phase !== "completed" && (
+              <JobProgress
+                job={job}
+                onCancel={(jobId) => {
+                  void jobCancel(jobId);
+                  setBusy(false);
+                }}
+                cancelLabel="取消任务"
+              />
+            )}
+            {step === 1 && (
+              <>
+                <div className="fa-sides">
+                  <div className="fa-side fa-side-begin">
+                    <h3 className="fa-side-title">期初（年初）</h3>
+                    <Field label="年初文件" required>
+                      <div ref={beginDropRef}>
+                        <FileDropInput
+                          value={beginPath}
+                          placeholder="拖放或点击选择年初清单"
+                          onBrowse={() => void choose("begin")}
+                          onClear={
+                            beginPath && !busy
+                              ? () => clearMainFile("begin")
+                              : undefined
+                          }
+                          onDragStateChange={(active) =>
+                            setDragTarget("begin", active)
+                          }
+                          highlight={dragHover === "begin"}
+                          disabled={busy}
+                        />
+                      </div>
+                    </Field>
+                    <Field label="Sheet">
+                      {inspection?.begin.sheets.length ? (
+                        <select
+                          value={beginSheet}
+                          onChange={(e) => {
+                            setBeginSheet(e.target.value);
+                            setBeginHeaderRow("");
+                          }}
+                        >
+                          {inspection.begin.sheets.map((value) => (
+                            <option key={value}>{value}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          value={beginSheet}
+                          onChange={(e) => {
+                            setBeginSheet(e.target.value);
+                            setBeginHeaderRow("");
+                          }}
+                        />
+                      )}
+                    </Field>
+                    <Field label="标题行（留空自动识别）">
                       <input
-                        value={beginSheet}
-                        onChange={(e) => {
-                          setBeginSheet(e.target.value);
-                          setBeginHeaderRow("");
-                        }}
+                        value={beginHeaderRow}
+                        placeholder="自动"
+                        onChange={(e) => setBeginHeaderRow(e.target.value)}
                       />
-                    )}
-                  </Field>
-                  <Field label="标题行（留空自动识别）">
-                    <input
-                      value={beginHeaderRow}
-                      placeholder="自动"
-                      onChange={(e) => setBeginHeaderRow(e.target.value)}
-                    />
-                  </Field>
-                </div>
-                <div className="fa-side fa-side-end">
-                  <h3 className="fa-side-title">期末（年末）</h3>
-                  <Field label="年末文件" required>
-                    <div ref={endDropRef}>
-                      <FileDropInput
-                        value={endPath}
-                        placeholder="拖放或点击选择年末清单"
-                        onBrowse={() => void choose("end")}
-                        onClear={endPath && !busy ? () => clearMainFile("end") : undefined}
-                        onDragStateChange={(active) => setDragTarget("end", active)}
-                        highlight={dragHover === "end"}
-                        disabled={busy}
-                      />
-                    </div>
-                  </Field>
-                  <Field label="Sheet">
-                    {inspection?.end.sheets.length ? (
-                      <select
-                        value={endSheet}
-                        onChange={(e) => {
-                          setEndSheet(e.target.value);
-                          setEndHeaderRow("");
-                        }}
-                      >
-                        {inspection.end.sheets.map((value) => (
-                          <option key={value}>{value}</option>
-                        ))}
-                      </select>
-                    ) : (
+                    </Field>
+                  </div>
+                  <div className="fa-side fa-side-end">
+                    <h3 className="fa-side-title">期末（年末）</h3>
+                    <Field label="年末文件" required>
+                      <div ref={endDropRef}>
+                        <FileDropInput
+                          value={endPath}
+                          placeholder="拖放或点击选择年末清单"
+                          onBrowse={() => void choose("end")}
+                          onClear={
+                            endPath && !busy
+                              ? () => clearMainFile("end")
+                              : undefined
+                          }
+                          onDragStateChange={(active) =>
+                            setDragTarget("end", active)
+                          }
+                          highlight={dragHover === "end"}
+                          disabled={busy}
+                        />
+                      </div>
+                    </Field>
+                    <Field label="Sheet">
+                      {inspection?.end.sheets.length ? (
+                        <select
+                          value={endSheet}
+                          onChange={(e) => {
+                            setEndSheet(e.target.value);
+                            setEndHeaderRow("");
+                          }}
+                        >
+                          {inspection.end.sheets.map((value) => (
+                            <option key={value}>{value}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          value={endSheet}
+                          onChange={(e) => {
+                            setEndSheet(e.target.value);
+                            setEndHeaderRow("");
+                          }}
+                        />
+                      )}
+                    </Field>
+                    <Field label="标题行（留空自动识别）">
                       <input
-                        value={endSheet}
-                        onChange={(e) => {
-                          setEndSheet(e.target.value);
-                          setEndHeaderRow("");
-                        }}
+                        value={endHeaderRow}
+                        placeholder="自动"
+                        onChange={(e) => setEndHeaderRow(e.target.value)}
                       />
-                    )}
-                  </Field>
-                  <Field label="标题行（留空自动识别）">
-                    <input
-                      value={endHeaderRow}
-                      placeholder="自动"
-                      onChange={(e) => setEndHeaderRow(e.target.value)}
-                    />
-                  </Field>
+                    </Field>
+                  </div>
                 </div>
-              </div>
-              <div className="actions fa-flow-actions">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => void inspect()}
-                >
-                  {busy ? "正在读取表格…" : "读取表格 + LLM 复核"}
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={!inspection || busy || llmBusy}
-                  onClick={() => void reviewLlm()}
-                >
-                  {llmBusy ? "LLM 正在复核…" : "LLM 重新复核"}
-                </Button>
-                {busy && job ? (
+                <div className="actions fa-flow-actions">
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() => void jobCancel(job.jobId)}
+                    disabled={busy}
+                    onClick={() => void inspect()}
                   >
-                    停止
+                    {busy ? "正在读取表格…" : "读取表格 + LLM 复核"}
                   </Button>
-                ) : !faStats ? (
                   <Button
-                    variant="default"
-                    disabled={
-                      isFaMatchDisabled(Boolean(inspection), busy) ||
-                      missingRoles("begin").length > 0 ||
-                      missingRoles("end").length > 0
-                    }
-                    onClick={() => void start("fa.match")}
+                    variant="secondary"
+                    size="sm"
+                    disabled={!inspection || busy || llmBusy}
+                    onClick={() => void reviewLlm()}
                   >
-                    下一步
+                    {llmBusy ? "LLM 正在复核…" : "LLM 重新复核"}
                   </Button>
-                ) : (
-                  <>
-                    <Button variant="secondary" size="sm" onClick={() => setStep(2)}>
-                      有，进入补充清单
-                    </Button>
-                    <Button variant="default" onClick={() => setStep(3)}>
-                      没有，直接导出
-                    </Button>
-                  </>
-                )}
-              </div>
-              {inspection && (
-                <>
-                  {(llmBusy || llmReview) && (
-                    <div
-                      className={`fa-llm-review ${
-                        llmReview?.passed === false ? "warning" : ""
-                      }`}
+                  {busy && job ? (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void jobCancel(job.jobId)}
                     >
-                      <div className="section-title">
-                        <h3>LLM 映射复核</h3>
-                        <span
-                          className={`pill ${
-                            llmBusy
-                              ? "preview"
-                              : llmReview?.passed === false
-                                ? "warning"
-                                : llmReview?.enabled
-                                  ? "ready"
-                                  : ""
-                          }`}
-                        >
-                          {llmBusy
-                            ? "复核中"
-                            : llmReview?.failed
-                              ? "失败（不阻塞）"
-                              : llmReview?.passed === false
-                                ? "需人工复核"
-                                : llmReview?.enabled
-                                  ? "已完成"
-                                  : "未启用"}
-                        </span>
-                      </div>
-                    {llmBusy && (
-                      <p>复核期间匹配键与字段映射已暂时锁定。</p>
-                    )}
-                      {llmReview?.detail ? (
-                        <details className="fa-llm-detail">
-                          <summary>技术详情（排查用）</summary>
-                          <p>{llmReview.detail}</p>
-                        </details>
-                      ) : null}
-                      {llmReview && !llmBusy ? (
-                        <div className="fa-review-conclusion" role="status">
-                          <strong>复核结论</strong>
-                          <p>
-                            {faReviewNarrative(
-                              llmReview.message,
-                              llmChanges.length,
-                              llmPending.length,
-                            )}
-                          </p>
-                          {llmChanges.length === 0 &&
-                            llmPending.length === 0 &&
-                            faReviewReasons(
-                              llmReview.autoApplied,
-                              llmReview.fieldReviews,
-                              llmReview.matchReview?.reasons,
-                            ).length > 0 && (
-                            <ul>
-                              {faReviewReasons(
+                      停止
+                    </Button>
+                  ) : !faStats ? (
+                    <Button
+                      variant="default"
+                      disabled={
+                        isFaMatchDisabled(Boolean(inspection), busy) ||
+                        missingRoles("begin").length > 0 ||
+                        missingRoles("end").length > 0
+                      }
+                      onClick={() => void start("fa.match")}
+                    >
+                      下一步
+                    </Button>
+                  ) : (
+                    <>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => setStep(2)}
+                      >
+                        有，进入补充清单
+                      </Button>
+                      <Button variant="default" onClick={() => setStep(3)}>
+                        没有，直接导出
+                      </Button>
+                    </>
+                  )}
+                </div>
+                {inspection && (
+                  <>
+                    {(llmBusy || llmReview) && (
+                      <div
+                        className={`fa-llm-review ${
+                          llmReview?.passed === false ? "warning" : ""
+                        }`}
+                      >
+                        <div className="section-title">
+                          <h3>LLM 映射复核</h3>
+                          <span
+                            className={`pill ${
+                              llmBusy
+                                ? "preview"
+                                : llmReview?.passed === false
+                                  ? "warning"
+                                  : llmReview?.enabled
+                                    ? "ready"
+                                    : ""
+                            }`}
+                          >
+                            {llmBusy
+                              ? "复核中"
+                              : llmReview?.failed
+                                ? "失败（不阻塞）"
+                                : llmReview?.passed === false
+                                  ? "需人工复核"
+                                  : llmReview?.enabled
+                                    ? "已完成"
+                                    : "未启用"}
+                          </span>
+                        </div>
+                        {llmBusy && <p>复核期间匹配键与字段映射已暂时锁定。</p>}
+                        {llmReview?.detail ? (
+                          <details className="fa-llm-detail">
+                            <summary>技术详情（排查用）</summary>
+                            <p>{llmReview.detail}</p>
+                          </details>
+                        ) : null}
+                        {llmReview && !llmBusy ? (
+                          <div className="fa-review-conclusion" role="status">
+                            <strong>复核结论</strong>
+                            <p>
+                              {faReviewNarrative(
+                                llmReview.message,
+                                llmChanges.length,
+                                llmPending.length,
+                              )}
+                            </p>
+                            {llmChanges.length === 0 &&
+                              llmPending.length === 0 &&
+                              faReviewReasons(
                                 llmReview.autoApplied,
                                 llmReview.fieldReviews,
                                 llmReview.matchReview?.reasons,
-                              ).map((reason) => <li key={reason}>{reason}</li>)}
-                            </ul>
-                          )}
-                        </div>
-                      ) : null}
-                      {(llmBusy || llmReview?.failed) && (
-                        <div className="actions compact">
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={() => {
-                              llmReviewGeneration.current += 1;
-                              setLlmBusy(false);
-                              setLlmBypassed(true);
-                              setLlmReview((current) => ({
-                                enabled: true,
-                                passed: true,
-                                message:
-                                  "已按用户选择跳过本次 LLM 复核，保留当前字段和匹配 ID。",
-                                autoApplied: current?.autoApplied ?? [],
-                                fieldReviews: current?.fieldReviews ?? [],
-                                matchReview: current?.matchReview,
-                              }));
-                            }}
+                              ).length > 0 && (
+                                <ul>
+                                  {faReviewReasons(
+                                    llmReview.autoApplied,
+                                    llmReview.fieldReviews,
+                                    llmReview.matchReview?.reasons,
+                                  ).map((reason) => (
+                                    <li key={reason}>{reason}</li>
+                                  ))}
+                                </ul>
+                              )}
+                          </div>
+                        ) : null}
+                        {(llmBusy || llmReview?.failed) && (
+                          <div className="actions compact">
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => {
+                                llmReviewGeneration.current += 1;
+                                setLlmBusy(false);
+                                setLlmBypassed(true);
+                                setLlmReview((current) => ({
+                                  enabled: true,
+                                  passed: true,
+                                  message:
+                                    "已按用户选择跳过本次 LLM 复核，保留当前字段和匹配 ID。",
+                                  autoApplied: current?.autoApplied ?? [],
+                                  fieldReviews: current?.fieldReviews ?? [],
+                                  matchReview: current?.matchReview,
+                                }));
+                              }}
+                            >
+                              {llmBusy ? "停止并继续主流程" : "关闭失败提示"}
+                            </Button>
+                          </div>
+                        )}
+                        {llmChanges.map((change) => (
+                          <div
+                            className={`fa-review-item fa-change${change.attention ? " attention" : ""}`}
+                            key={change.id}
                           >
-                            {llmBusy ? "停止并继续主流程" : "关闭失败提示"}
-                          </Button>
-                        </div>
-                      )}
-                      {llmChanges.map((change) => (
-                        <div
-                          className={`fa-review-item fa-change${change.attention ? " attention" : ""}`}
-                          key={change.id}
-                        >
-                          <strong>{change.label}</strong>
-                          <span className="fa-change-diff">
-                            {change.before} → {change.after}
-                          </span>
-                          {!!change.reason && (
-                            <span>
-                              {change.reason}
-                              {change.confidence
-                                ? `（把握 ${Math.round(change.confidence * 100)}%）`
-                                : ""}
+                            <strong>{change.label}</strong>
+                            <span className="fa-change-diff">
+                              {change.before} → {change.after}
                             </span>
-                          )}
-                          <div className="actions compact">
-                            <Button
-                              variant="secondary"
-                              size="sm"
-                              disabled={llmBusy}
-                              onClick={() => undoLlmChange(change)}
-                            >
-                              撤销
-                            </Button>
+                            {!!change.reason && (
+                              <span>
+                                {change.reason}
+                                {change.confidence
+                                  ? `（把握 ${Math.round(change.confidence * 100)}%）`
+                                  : ""}
+                              </span>
+                            )}
+                            <div className="actions compact">
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                disabled={llmBusy}
+                                onClick={() => undoLlmChange(change)}
+                              >
+                                撤销
+                              </Button>
+                            </div>
                           </div>
-                        </div>
-                      ))}
-                      {llmPending.map((item) => (
-                        <div
-                          className="fa-review-item fa-pending"
-                          key={item.id}
-                        >
-                          <strong>
-                            {item.label}
-                            <em>把握不足，未改动</em>
-                          </strong>
-                          <span className="fa-change-diff">
-                            {item.current} → {item.suggested}
-                          </span>
-                          {!!item.reason && (
-                            <span>
-                              {item.reason}
-                              {item.confidence
-                                ? `（把握 ${Math.round(item.confidence * 100)}%）`
-                                : ""}
+                        ))}
+                        {llmPending.map((item) => (
+                          <div
+                            className="fa-review-item fa-pending"
+                            key={item.id}
+                          >
+                            <strong>
+                              {item.label}
+                              <em>把握不足，未改动</em>
+                            </strong>
+                            <span className="fa-change-diff">
+                              {item.current} → {item.suggested}
                             </span>
-                          )}
-                          <div className="actions compact">
-                            <Button
-                              variant="secondary"
-                              size="sm"
-                              disabled={llmBusy}
-                              onClick={() => acceptLlmPending(item)}
-                            >
-                              采纳
-                            </Button>
-                            <Button
-                              variant="secondary"
-                              size="sm"
-                              disabled={llmBusy}
-                              onClick={() =>
-                                setLlmPending((current) =>
-                                  current.filter(
-                                    (value) => value.id !== item.id,
-                                  ),
-                                )
-                              }
-                            >
-                              保留当前
-                            </Button>
+                            {!!item.reason && (
+                              <span>
+                                {item.reason}
+                                {item.confidence
+                                  ? `（把握 ${Math.round(item.confidence * 100)}%）`
+                                  : ""}
+                              </span>
+                            )}
+                            <div className="actions compact">
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                disabled={llmBusy}
+                                onClick={() => acceptLlmPending(item)}
+                              >
+                                采纳
+                              </Button>
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                disabled={llmBusy}
+                                onClick={() =>
+                                  setLlmPending((current) =>
+                                    current.filter(
+                                      (value) => value.id !== item.id,
+                                    ),
+                                  )
+                                }
+                              >
+                                保留当前
+                              </Button>
+                            </div>
                           </div>
-                        </div>
-                      ))}
-                    </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+                {faStats && (
+                  <div className="fa-next-choice">
+                    <strong>
+                      合并完成：共 {faStats.rows ?? 0} 行，期初期末均有{" "}
+                      {faStats.both ?? 0} 行。
+                    </strong>
+                    <span>是否有新增清单或处置清单需要补充映射？</span>
+                  </div>
+                )}
+              </>
+            )}
+            {step === 2 && (
+              <>
+                <h3>3. 本期变动清单</h3>
+                {supplementLlmBusy && (
+                  <p className="hint">
+                    补充清单 LLM
+                    复核进行中，匹配键与字段映射已暂时锁定；复核结束或点下方"停止并继续主流程"后即可调整。
+                  </p>
+                )}
+                <div className="fa-sides">
+                  {supplementEditor(
+                    "addition",
+                    addition,
+                    additionInspect,
+                    setAddition,
                   )}
-                </>
-              )}
-              {faStats && (
-                <div className="fa-next-choice">
-                  <strong>
-                    合并完成：共 {faStats.rows ?? 0} 行，期初期末均有{" "}
-                    {faStats.both ?? 0} 行。
-                  </strong>
-                  <span>是否有新增清单或处置清单需要补充映射？</span>
+                  {supplementEditor(
+                    "disposal",
+                    disposal,
+                    disposalInspect,
+                    setDisposal,
+                  )}
                 </div>
-              )}
-            </>
-          )}
-          {step === 2 && (
-            <>
-              <h3>3. 本期变动清单</h3>
-              {supplementLlmBusy && (
-                <p className="hint">
-                  补充清单 LLM
-                  复核进行中，匹配键与字段映射已暂时锁定；复核结束或点下方"停止并继续主流程"后即可调整。
-                </p>
-              )}
-              <div className="fa-sides">
-                {supplementEditor(
-                  "addition",
-                  addition,
-                  additionInspect,
-                  setAddition,
+                {(addition.path || disposal.path) && (
+                  <div className="actions">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={supplementLlmBusy || !supplementsReadyForReview}
+                      onClick={() => void reviewSupplements()}
+                    >
+                      {supplementLlmBusy
+                        ? "补充清单 LLM 复核中…"
+                        : "重新复核补充清单"}
+                    </Button>
+                  </div>
                 )}
-                {supplementEditor(
-                  "disposal",
-                  disposal,
-                  disposalInspect,
-                  setDisposal,
-                )}
-              </div>
-              {(addition.path || disposal.path) && (
+                {(addition.path || disposal.path) &&
+                  !supplementsReadyForReview && (
+                    <p className="hint">
+                      请先分别选择新增清单、处置清单及其工作表；两张表都读取完成后，系统才会统一进行一次
+                      LLM 复核。
+                    </p>
+                  )}
                 <div className="actions">
                   <Button
                     variant="secondary"
                     size="sm"
-                    disabled={supplementLlmBusy || !supplementsReadyForReview}
-                    onClick={() => void reviewSupplements()}
+                    onClick={() => setStep(1)}
                   >
-                    {supplementLlmBusy
-                      ? "补充清单 LLM 复核中…"
-                      : "重新复核补充清单"}
+                    返回上一步
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      supplementReviewGeneration.current += 1;
+                      setSupplementLlmBusy(false);
+                      setAddition(emptyFaSupplement());
+                      setDisposal(emptyFaSupplement());
+                      setAdditionInspect(undefined);
+                      setDisposalInspect(undefined);
+                      setSupplementLlmReview(undefined);
+                      setSupplementLlmBypassed(false);
+                      setSupplementAutoHandled(true);
+                      setError("");
+                      setStep(3);
+                    }}
+                  >
+                    无补充清单，跳过
+                  </Button>
+                  <Button
+                    variant="default"
+                    disabled={
+                      supplementLlmBusy ||
+                      !canApplyFaSupplements(
+                        addition.path,
+                        disposal.path,
+                        endMapping.additionMethod,
+                      )
+                    }
+                    onClick={() => setStep(3)}
+                  >
+                    应用补充映射并继续
                   </Button>
                 </div>
-              )}
-              {(addition.path || disposal.path) &&
-                !supplementsReadyForReview && (
-                  <p className="hint">
-                    请先分别选择新增清单、处置清单及其工作表；两张表都读取完成后，系统才会统一进行一次
-                    LLM 复核。
-                  </p>
-                )}
-              <div className="actions">
-                <Button variant="secondary" size="sm" onClick={() => setStep(1)}>
-                  返回上一步
-                </Button>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => {
-                    supplementReviewGeneration.current += 1;
-                    setSupplementLlmBusy(false);
-                    setAddition(emptyFaSupplement());
-                    setDisposal(emptyFaSupplement());
-                    setAdditionInspect(undefined);
-                    setDisposalInspect(undefined);
-                    setSupplementLlmReview(undefined);
-                    setSupplementLlmBypassed(false);
-                    setSupplementAutoHandled(true);
-                    setError("");
-                    setStep(3);
-                  }}
-                >
-                  无补充清单，跳过
-                </Button>
-                <Button
-                  variant="default"
-                  disabled={
-                    supplementLlmBusy ||
-                    !canApplyFaSupplements(
-                      addition.path,
-                      disposal.path,
-                      endMapping.additionMethod,
-                    )
-                  }
-                  onClick={() => setStep(3)}
-                >
-                  应用补充映射并继续
-                </Button>
-              </div>
-              {(supplementLlmBusy || supplementLlmReview) && (
-                <div
-                  className={`fa-llm-review ${
-                    supplementLlmReview?.passed === false ? "warning" : ""
-                  }`}
-                >
-                  <div className="section-title">
-                    <h3>LLM 复核</h3>
-                    <span
-                      className={`pill ${supplementLlmBusy ? "preview" : "ready"}`}
-                    >
-                      {supplementLlmBusy
-                        ? "复核中"
-                        : supplementLlmReview?.enabled
-                          ? "已完成"
-                          : "未启用"}
-                    </span>
-                  </div>
-                  {supplementLlmBusy && (
-                    <p>
-                      正在核对补充清单字段和第一步匹配 ID 口径。
-                    </p>
-                  )}
-                  {supplementLlmReview && !supplementLlmBusy ? (
-                    <div className="fa-review-conclusion" role="status">
-                      <strong>复核结论</strong>
-                      <p>
-                        {faReviewNarrative(
-                          supplementLlmReview.message,
-                          supplementLlmChanges.length,
-                          supplementLlmPending.length,
-                        )}
-                      </p>
-                      {supplementLlmChanges.length === 0 &&
-                        supplementLlmPending.length === 0 &&
-                        faReviewReasons(
-                          supplementLlmReview.autoApplied,
-                          supplementLlmReview.fieldReviews,
-                          supplementLlmReview.matchReview?.reasons,
-                        ).length > 0 && (
-                        <ul>
-                          {faReviewReasons(
+                {(supplementLlmBusy || supplementLlmReview) && (
+                  <div
+                    className={`fa-llm-review ${
+                      supplementLlmReview?.passed === false ? "warning" : ""
+                    }`}
+                  >
+                    <div className="section-title">
+                      <h3>LLM 复核</h3>
+                      <span
+                        className={`pill ${supplementLlmBusy ? "preview" : "ready"}`}
+                      >
+                        {supplementLlmBusy
+                          ? "复核中"
+                          : supplementLlmReview?.enabled
+                            ? "已完成"
+                            : "未启用"}
+                      </span>
+                    </div>
+                    {supplementLlmBusy && (
+                      <p>正在核对补充清单字段和第一步匹配 ID 口径。</p>
+                    )}
+                    {supplementLlmReview && !supplementLlmBusy ? (
+                      <div className="fa-review-conclusion" role="status">
+                        <strong>复核结论</strong>
+                        <p>
+                          {faReviewNarrative(
+                            supplementLlmReview.message,
+                            supplementLlmChanges.length,
+                            supplementLlmPending.length,
+                          )}
+                        </p>
+                        {supplementLlmChanges.length === 0 &&
+                          supplementLlmPending.length === 0 &&
+                          faReviewReasons(
                             supplementLlmReview.autoApplied,
                             supplementLlmReview.fieldReviews,
                             supplementLlmReview.matchReview?.reasons,
-                          ).map((reason) => <li key={reason}>{reason}</li>)}
-                        </ul>
-                      )}
-                    </div>
-                  ) : null}
-                  {supplementLlmChanges.map((change) => (
-                    <div
-                      className={`fa-review-item fa-change${change.attention ? " attention" : ""}`}
-                      key={change.id}
-                    >
-                      <strong>{change.label}</strong>
-                      <span className="fa-change-diff">
-                        {change.before} → {change.after}
-                      </span>
-                      {!!change.reason && (
-                        <span>
-                          {change.reason}
-                          {change.confidence
-                            ? `（把握 ${Math.round(change.confidence * 100)}%）`
-                            : ""}
-                        </span>
-                      )}
-                      <div className="actions compact">
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => undoSupplementLlmChange(change)}
-                        >
-                          撤销
-                        </Button>
+                          ).length > 0 && (
+                            <ul>
+                              {faReviewReasons(
+                                supplementLlmReview.autoApplied,
+                                supplementLlmReview.fieldReviews,
+                                supplementLlmReview.matchReview?.reasons,
+                              ).map((reason) => (
+                                <li key={reason}>{reason}</li>
+                              ))}
+                            </ul>
+                          )}
                       </div>
-                    </div>
-                  ))}
-                  {supplementLlmPending.map((item) => (
-                    <div className="fa-review-item fa-pending" key={item.id}>
-                      <strong>
-                        {item.label}
-                        <em>把握不足，未改动</em>
-                      </strong>
-                      <span className="fa-change-diff">
-                        {item.current} → {item.suggested}
-                      </span>
-                      {!!item.reason && (
-                        <span>
-                          {item.reason}
-                          {item.confidence
-                            ? `（把握 ${Math.round(item.confidence * 100)}%）`
-                            : ""}
+                    ) : null}
+                    {supplementLlmChanges.map((change) => (
+                      <div
+                        className={`fa-review-item fa-change${change.attention ? " attention" : ""}`}
+                        key={change.id}
+                      >
+                        <strong>{change.label}</strong>
+                        <span className="fa-change-diff">
+                          {change.before} → {change.after}
                         </span>
-                      )}
-                      <div className="actions compact">
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => acceptSupplementLlmPending(item)}
-                        >
-                          采纳
-                        </Button>
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() =>
-                            setSupplementLlmPending((current) =>
-                              current.filter((value) => value.id !== item.id),
-                            )
-                          }
-                        >
-                          保留当前
-                        </Button>
+                        {!!change.reason && (
+                          <span>
+                            {change.reason}
+                            {change.confidence
+                              ? `（把握 ${Math.round(change.confidence * 100)}%）`
+                              : ""}
+                          </span>
+                        )}
+                        <div className="actions compact">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => undoSupplementLlmChange(change)}
+                          >
+                            撤销
+                          </Button>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                    {supplementLlmPending.map((item) => (
+                      <div className="fa-review-item fa-pending" key={item.id}>
+                        <strong>
+                          {item.label}
+                          <em>把握不足，未改动</em>
+                        </strong>
+                        <span className="fa-change-diff">
+                          {item.current} → {item.suggested}
+                        </span>
+                        {!!item.reason && (
+                          <span>
+                            {item.reason}
+                            {item.confidence
+                              ? `（把握 ${Math.round(item.confidence * 100)}%）`
+                              : ""}
+                          </span>
+                        )}
+                        <div className="actions compact">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => acceptSupplementLlmPending(item)}
+                          >
+                            采纳
+                          </Button>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() =>
+                              setSupplementLlmPending((current) =>
+                                current.filter((value) => value.id !== item.id),
+                              )
+                            }
+                          >
+                            保留当前
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+            {step === 3 && (
+              <>
+                <h3>4. 输出</h3>
+                <div className="form-grid">
+                  <Field label="期初显示名称">
+                    <input
+                      value={beginDisplayName}
+                      onChange={(e) => setBeginDisplayName(e.target.value)}
+                    />
+                  </Field>
+                  <Field label="期末显示名称">
+                    <input
+                      value={endDisplayName}
+                      onChange={(e) => setEndDisplayName(e.target.value)}
+                    />
+                  </Field>
+                  <Field label="资产负债表日">
+                    <input
+                      type="date"
+                      value={balanceSheetDate}
+                      onChange={(e) => setBalanceSheetDate(e.target.value)}
+                    />
+                  </Field>
                 </div>
-              )}
-            </>
-          )}
-          {step === 3 && (
-            <>
-              <h3>4. 输出</h3>
-              <div className="form-grid">
-                <Field label="期初显示名称">
-                  <input
-                    value={beginDisplayName}
-                    onChange={(e) => setBeginDisplayName(e.target.value)}
+                <Field label="输出文件">
+                  <FileInput
+                    value={outputPath}
+                    placeholder="选择期末文件后自动填入默认保存位置"
+                    onBrowse={() => void chooseOutput()}
+                    onClear={outputPathTouched ? resetOutputPath : undefined}
+                    browseLabel="选择"
+                    clearLabel="恢复默认"
                   />
                 </Field>
-                <Field label="期末显示名称">
-                  <input
-                    value={endDisplayName}
-                    onChange={(e) => setEndDisplayName(e.target.value)}
-                  />
-                </Field>
-                <Field label="资产负债表日">
-                  <input
-                    type="date"
-                    value={balanceSheetDate}
-                    onChange={(e) => setBalanceSheetDate(e.target.value)}
-                  />
-                </Field>
-              </div>
-              <Field label="输出文件">
-                <FileInput
-                  value={outputPath}
-                  placeholder="选择期末文件后自动填入默认保存位置"
-                  onBrowse={() => void chooseOutput()}
-                  onClear={outputPathTouched ? resetOutputPath : undefined}
-                  browseLabel="选择"
-                  clearLabel="恢复默认"
-                />
-              </Field>
-              <p className="hint">
-                {outputPathTouched
-                  ? "已指定保存位置，导出会写入上面这个文件。"
-                  : "默认保存到期末文件所在目录，文件名为 FA_List_<日期>_<时间>.xlsx（导出时按当前时间生成）。"}
-              </p>
-              <div className="actions">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => setStep(2)}
-                >
-                  返回上一步
-                </Button>
-                {busy && job ? (
+                <p className="hint">
+                  {outputPathTouched
+                    ? "已指定保存位置，导出会写入上面这个文件。"
+                    : "默认保存到期末文件所在目录，文件名为 FA_List_<日期>_<时间>.xlsx（导出时按当前时间生成）。"}
+                </p>
+                <div className="actions">
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() => void jobCancel(job.jobId)}
+                    disabled={busy}
+                    onClick={() => setStep(2)}
                   >
-                    停止
+                    返回上一步
                   </Button>
-                ) : (
-                  <Button
-                    variant="default"
-                    disabled={!inspection}
-                    onClick={() => void start("fa.export")}
-                  >
-                    生成 FA List 底稿
-                  </Button>
-                )}
-              </div>
-            </>
-          )}
+                  {busy && job ? (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void jobCancel(job.jobId)}
+                    >
+                      停止
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="default"
+                      disabled={!inspection}
+                      onClick={() => void start("fa.export")}
+                    >
+                      生成 FA List 底稿
+                    </Button>
+                  )}
+                </div>
+              </>
+            )}
           </CardContent>
         </Card>
         {showPreviewWorkspace ? (
@@ -2458,19 +2544,22 @@ function FaCardListPage() {
               <div>
                 <h2>文件预览</h2>
                 <p>预览区已锁定；各文件可独立纵向、横向滚动。</p>
-                {step === 1 && inspection && (
+                {step === 1 &&
+                  inspection &&
                   (() => {
                     const beginMissing = missingRoles("begin");
                     const endMissing = missingRoles("end");
-                    const allMissing = [...new Set([...beginMissing, ...endMissing])];
+                    const allMissing = [
+                      ...new Set([...beginMissing, ...endMissing]),
+                    ];
                     if (!allMissing.length) return null;
                     return (
                       <p className="fa-missing-hint">
-                        尚未映射：{allMissing.join("、")}（请在各列顶部的下拉框中选择对应字段）
+                        尚未映射：{allMissing.join("、")}
+                        （请在各列顶部的下拉框中选择对应字段）
                       </p>
                     );
-                  })()
-                )}
+                  })()}
               </div>
               <Badge className="badge-preview">
                 {step === 1 ? "导入文件" : "补充清单"}
@@ -2479,8 +2568,18 @@ function FaCardListPage() {
             <div className="fa-preview-stack">
               {step === 1 && inspection ? (
                 <>
-                  {previewTable(inspection.begin, "期初文件预览", beginMapping, "begin")}
-                  {previewTable(inspection.end, "期末文件预览", endMapping, "end")}
+                  {previewTable(
+                    inspection.begin,
+                    "期初文件预览",
+                    beginMapping,
+                    "begin",
+                  )}
+                  {previewTable(
+                    inspection.end,
+                    "期末文件预览",
+                    endMapping,
+                    "end",
+                  )}
                 </>
               ) : step === 1 ? (
                 <>
@@ -2501,11 +2600,17 @@ function FaCardListPage() {
                 <>
                   {additionInspect &&
                   (!additionInspect.sheets.length || addition.sheet) ? (
-                    previewTable(additionInspect, "新增清单预览", undefined, undefined, {
-                      kind: "addition",
-                      config: addition,
-                      setter: setAddition,
-                    })
+                    previewTable(
+                      additionInspect,
+                      "新增清单预览",
+                      undefined,
+                      undefined,
+                      {
+                        kind: "addition",
+                        config: addition,
+                        setter: setAddition,
+                      },
+                    )
                   ) : (
                     <section className="fa-preview fa-preview-empty-card">
                       <header>新增清单预览</header>
@@ -2516,11 +2621,17 @@ function FaCardListPage() {
                   )}
                   {disposalInspect &&
                   (!disposalInspect.sheets.length || disposal.sheet) ? (
-                    previewTable(disposalInspect, "处置清单预览", undefined, undefined, {
-                      kind: "disposal",
-                      config: disposal,
-                      setter: setDisposal,
-                    })
+                    previewTable(
+                      disposalInspect,
+                      "处置清单预览",
+                      undefined,
+                      undefined,
+                      {
+                        kind: "disposal",
+                        config: disposal,
+                        setter: setDisposal,
+                      },
+                    )
                   ) : (
                     <section className="fa-preview fa-preview-empty-card">
                       <header>处置清单预览</header>

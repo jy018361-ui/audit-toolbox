@@ -40,6 +40,9 @@ const pick = (select: HTMLSelectElement, role: string) =>
 describe("共用字段映射面板", () => {
   it("每一列给一个角色下拉，选中后回写映射", () => {
     const { onChange, selects } = panel();
+    expect(screen.getByText("文件预览").closest("section")).toHaveClass(
+      "mapping-panel",
+    );
     expect(selects).toHaveLength(HEADERS.length);
     pick(selects[0], "accountCode");
     expect(onChange).toHaveBeenCalledWith({ accountCode: "会计科目" });
@@ -132,6 +135,25 @@ describe("共用字段映射面板", () => {
     expect(groups[1]).toBeDisabled();
   });
 
+  it("已适配分组使用绿色状态类，已选字段控件保持映射态", () => {
+    const { selects } = panel({
+      mapping: { accountName: ["科目文本"] },
+      multi: new Set(["accountName"]),
+      groups: [
+        {
+          title: "已命中方案",
+          roles: ["accountName"],
+          status: "已适配",
+        },
+      ],
+    });
+    expect(selects[1]).toHaveClass("mapped");
+    expect(selects[1]).toHaveAttribute("data-mapped", "true");
+    expect(selects[1].querySelector("optgroup")).toHaveClass(
+      "dt-group-adapted",
+    );
+  });
+
   it("toggle 模式下一列可以叠加多个角色，并显示已承担的语义", () => {
     // 汇兑损益的场景：账户币种写在科目名称里（银行存款-中行朝阳支行美元户），
     // 那一列同时是科目名称与币种线索文本。按「一列一角色」会丢掉这个能力。
@@ -155,6 +177,10 @@ describe("共用字段映射面板", () => {
     expect(selects[1].querySelector("option")?.textContent).toBe(
       "科目名称 ＋ 币种线索文本",
     );
+    expect(selects[1].querySelector("option")).toHaveClass(
+      "dt-current-mapping",
+    );
+    expect(selects[1]).toHaveClass("mapped");
     // 已承担的角色带勾，再点一次是取消。
     expect(
       selects[1].querySelector('option[value="accountName"]')?.textContent,

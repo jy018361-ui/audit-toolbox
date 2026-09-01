@@ -207,13 +207,8 @@
   justify-content: flex-end;
   margin-top: var(--sp-4);
 }
-.kz-preview > div {
-  overflow: auto;
+.kz-preview .data-table-scroll {
   width: 100%;
-  max-height: 68vh;
-  /* The table already has cell separators; an extra pale frame around the
-     entire preview only creates the global "box inside a card" artifact. */
-  border: 0;
 }
 .kz-preview table {
   border-collapse: collapse;

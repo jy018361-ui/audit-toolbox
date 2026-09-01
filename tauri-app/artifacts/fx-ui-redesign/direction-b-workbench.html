@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>汇兑损益审计工作台 · 方向 B</title>
+  <style>
+    :root {
+      --ink: #173f3a;
+      --ink-2: #3c5d58;
+      --muted: #718984;
+      --brand: #0f6963;
+      --brand-2: #0a514d;
+      --brand-soft: #dcefeb;
+      --mint: #eff7f4;
+      --canvas: #e9f1ee;
+      --surface: #ffffff;
+      --line: #ceddd8;
+      --line-strong: #a8c4bd;
+      --danger: #a34234;
+      --danger-soft: #fff0ed;
+      --warn: #8a5d0a;
+      --warn-soft: #fff7df;
+      --info: #35616e;
+      --info-soft: #edf6f7;
+      --success: #287052;
+      --success-soft: #e9f6ee;
+      --shadow: 0 10px 30px rgba(30, 70, 62, .08);
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: var(--canvas); color: var(--ink); }
+    body { font: 16px/1.55 "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif; }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid rgba(15,105,99,.24); outline-offset: 2px; }
+    .app { min-height: 100vh; display: grid; grid-template-rows: 68px 1fr; }
+    .topbar { background: #0c3f3c; color: white; display: flex; align-items: center; padding: 0 24px; justify-content: space-between; box-shadow: 0 2px 12px rgba(8,48,44,.18); position: sticky; top: 0; z-index: 20; }
+    .brand { display: flex; align-items: center; gap: 13px; }
+    .brand-mark { width: 34px; height: 34px; border: 1px solid rgba(255,255,255,.44); border-radius: 9px; display: grid; place-items: center; font-weight: 800; letter-spacing: -.04em; }
+    .brand-title { font-weight: 750; letter-spacing: .02em; }
+    .brand-sub { color: #b9d5cf; font-size: 13px; margin-left: 12px; padding-left: 12px; border-left: 1px solid rgba(255,255,255,.2); }
+    .top-actions { display: flex; align-items: center; gap: 10px; }
+    .top-state { font-size: 13px; color: #cce1dc; }
+    .icon-btn { min-width: 44px; height: 44px; border: 0; color: #e6f3ef; background: transparent; border-radius: 8px; }
+    .icon-btn:hover { background: rgba(255,255,255,.09); }
+
+    .shell { display: grid; grid-template-columns: 238px minmax(560px, 1fr) 326px; min-height: 0; }
+    .left { background: #f5faf8; border-right: 1px solid var(--line); padding: 24px 18px; }
+    .left small { display: block; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .1em; margin: 0 10px 14px; }
+    .steps { display: grid; gap: 7px; }
+    .step { min-height: 58px; border: 0; background: transparent; color: var(--ink-2); border-radius: 10px; text-align: left; padding: 8px 10px; display: grid; grid-template-columns: 34px 1fr; gap: 10px; align-items: center; width: 100%; }
+    .step:hover { background: #e9f4f0; }
+    .step.active { background: var(--brand-soft); color: var(--brand-2); }
+    .step-num { width: 32px; height: 32px; border: 1px solid var(--line-strong); border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 750; background: white; }
+    .step.active .step-num { background: var(--brand); border-color: var(--brand); color: white; }
+    .step.done .step-num { color: transparent; position: relative; background: var(--success-soft); border-color: #85b49d; }
+    .step.done .step-num::after { content: "✓"; color: var(--success); position: absolute; }
+    .step-label { font-weight: 700; line-height: 1.25; }
+    .step-desc { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .left-help { margin-top: 28px; padding: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+    .left-help strong { color: var(--ink); display: block; margin-bottom: 4px; }
+
+    .workspace { min-width: 0; padding: 30px 32px 80px; overflow: auto; }
+    .page-head { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 22px; }
+    .eyebrow { color: var(--brand); font-size: 13px; font-weight: 800; letter-spacing: .08em; margin-bottom: 5px; }
+    h1 { margin: 0; font-size: 27px; line-height: 1.25; letter-spacing: -.02em; }
+    .page-desc { color: var(--ink-2); margin: 8px 0 0; max-width: 720px; }
+    .scope { white-space: nowrap; border: 1px solid var(--line); background: rgba(255,255,255,.65); padding: 8px 11px; border-radius: 9px; color: var(--ink-2); font-size: 13px; }
+
+    .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 18px; overflow: hidden; }
+    .panel-head { padding: 20px 22px 15px; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+    .panel-head h2 { font-size: 18px; margin: 0 0 4px; }
+    .panel-head p { margin: 0; color: var(--muted); font-size: 14px; }
+    .panel-body { padding: 0 22px 22px; }
+    .coach { background: linear-gradient(90deg, #e5f3ef, #f4faf8); border: 1px solid #bbd8d0; border-radius: 11px; padding: 13px 15px; display: flex; gap: 11px; color: var(--ink-2); margin-bottom: 18px; font-size: 14px; }
+    .coach b { color: var(--brand-2); }
+    .coach-mark { width: 24px; height: 24px; flex: 0 0 24px; border-radius: 50%; background: var(--brand); color: white; display: grid; place-items: center; font-size: 13px; font-weight: 800; }
+
+    .upload-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .file-card { border: 1px solid var(--line); border-radius: 11px; padding: 17px; min-height: 156px; position: relative; }
+    .file-card.ready { border-color: #91bdb2; background: #fbfefd; }
+    .file-role { font-size: 12px; font-weight: 800; color: var(--muted); letter-spacing: .08em; }
+    .file-name { font-size: 16px; font-weight: 750; color: var(--ink); margin: 7px 0 3px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .file-meta { color: var(--muted); font-size: 13px; }
+    .file-ok { position: absolute; right: 14px; top: 14px; background: var(--success-soft); color: var(--success); padding: 4px 8px; border-radius: 999px; font-size: 12px; font-weight: 750; }
+    .mini-rule { margin-top: 15px; padding-top: 12px; border-top: 1px solid #e5eeeb; font-size: 13px; color: var(--ink-2); display: flex; justify-content: space-between; }
+    .text-link { border: 0; background: transparent; color: var(--brand); min-height: 44px; padding: 0 4px; font-weight: 700; }
+    .dropzone { border: 1.5px dashed #87afa5; border-radius: 11px; min-height: 150px; display: grid; place-items: center; text-align: center; padding: 20px; color: var(--ink-2); background: #f9fcfb; }
+    .dropzone strong { display: block; color: var(--brand-2); margin-bottom: 4px; }
+    .hidden { display: none !important; }
+
+    .engine-rule { display: grid; grid-template-columns: 1fr auto 1fr; align-items: stretch; gap: 10px; margin-top: 15px; }
+    .rule-box { background: var(--mint); border: 1px solid #d3e6e0; border-radius: 10px; padding: 14px; }
+    .rule-box b { display: block; font-size: 14px; margin-bottom: 3px; }
+    .rule-box span { font-size: 13px; color: var(--muted); }
+    .rule-arrow { display: grid; place-items: center; color: var(--brand); font-weight: 800; }
+    .subhead { display: flex; align-items: center; justify-content: space-between; margin: 20px 0 10px; }
+    .subhead h3 { margin: 0; font-size: 15px; }
+    .subhead span { color: var(--muted); font-size: 13px; }
+
+    .status-list { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+    .status-row { display: grid; grid-template-columns: 94px 1fr auto; gap: 12px; align-items: center; min-height: 60px; padding: 10px 13px; border-bottom: 1px solid #e5eeeb; }
+    .status-row:last-child { border: 0; }
+    .badge { display: inline-flex; align-items: center; justify-content: center; width: max-content; min-height: 28px; border-radius: 999px; padding: 3px 9px; font-size: 12px; font-weight: 800; }
+    .badge.block { color: var(--danger); background: var(--danger-soft); }
+    .badge.confirm { color: var(--warn); background: var(--warn-soft); }
+    .badge.note { color: var(--info); background: var(--info-soft); }
+    .badge.ok { color: var(--success); background: var(--success-soft); }
+    .status-title { font-weight: 700; font-size: 14px; }
+    .status-copy { color: var(--muted); font-size: 13px; margin-top: 2px; }
+    .status-action { min-height: 44px; border: 1px solid var(--line-strong); color: var(--brand); background: white; border-radius: 8px; padding: 0 13px; font-weight: 700; }
+    .status-action:hover { border-color: var(--brand); background: var(--mint); }
+
+    .toolbar { display: flex; gap: 8px; justify-content: space-between; align-items: center; margin-bottom: 11px; }
+    .filters { display: flex; gap: 7px; flex-wrap: wrap; }
+    .filter { min-height: 40px; border: 1px solid var(--line); background: white; color: var(--ink-2); border-radius: 8px; padding: 0 11px; }
+    .filter.active { color: white; background: var(--brand); border-color: var(--brand); }
+    .search { height: 42px; min-width: 230px; border: 1px solid var(--line); border-radius: 8px; padding: 0 12px; color: var(--ink); }
+    .table-wrap { border: 1px solid var(--line); border-radius: 10px; overflow: auto; }
+    table { border-collapse: collapse; width: 100%; min-width: 760px; }
+    th { background: #f3f8f6; color: var(--muted); font-size: 12px; text-align: left; padding: 11px 13px; border-bottom: 1px solid var(--line); letter-spacing: .03em; }
+    td { padding: 13px; border-bottom: 1px solid #e7efed; vertical-align: top; font-size: 14px; }
+    tr:last-child td { border-bottom: 0; }
+    tr:hover td { background: #fbfdfc; }
+    .code { font-family: ui-monospace, Consolas, monospace; font-weight: 700; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .decision { display: flex; gap: 7px; flex-wrap: wrap; }
+    .choice { min-height: 38px; border: 1px solid var(--line); color: var(--ink-2); background: white; border-radius: 8px; padding: 0 10px; }
+    .choice.selected { color: var(--brand-2); border-color: var(--brand); background: var(--brand-soft); font-weight: 750; }
+    .match-detail { margin-top: 6px; color: var(--muted); font-size: 12px; }
+    .resolve-box { padding: 15px; background: #fbfdfc; border: 1px solid var(--line); border-radius: 10px; margin-top: 12px; display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; }
+
+    .form-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    label.field { display: grid; gap: 6px; color: var(--ink-2); font-size: 13px; font-weight: 700; }
+    .field input, .field select { height: 44px; border: 1px solid var(--line); border-radius: 8px; background: white; padding: 0 11px; color: var(--ink); }
+    .recon { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-top: 16px; }
+    .metric { background: white; padding: 16px; }
+    .metric-label { color: var(--muted); font-size: 12px; }
+    .metric-value { font-size: 22px; font-weight: 780; margin-top: 4px; font-variant-numeric: tabular-nums; }
+    .metric-note { color: var(--muted); font-size: 12px; }
+    .action-row { display: flex; align-items: center; justify-content: space-between; margin-top: 18px; gap: 12px; }
+    .action-note { color: var(--muted); font-size: 13px; }
+    .primary { min-height: 46px; border: 0; background: var(--brand); color: white; border-radius: 9px; padding: 0 20px; font-weight: 750; box-shadow: 0 6px 14px rgba(15,105,99,.18); }
+    .primary:hover { background: var(--brand-2); }
+    .primary:disabled { background: #9ab3ad; cursor: not-allowed; box-shadow: none; }
+    .secondary { min-height: 44px; border: 1px solid var(--line-strong); background: white; color: var(--brand); border-radius: 9px; padding: 0 16px; font-weight: 700; }
+
+    .progress { height: 8px; border-radius: 999px; background: #dce8e4; overflow: hidden; margin: 16px 0 8px; }
+    .progress > i { display: block; height: 100%; width: 0; background: var(--brand); transition: width .45s ease; }
+    .result-hero { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; }
+    .result-main { background: #0d4c47; color: white; border-radius: 12px; padding: 22px; }
+    .result-main .caption { color: #bcd8d2; font-size: 13px; }
+    .result-main .amount { font-size: 34px; font-weight: 800; margin: 5px 0; font-variant-numeric: tabular-nums; }
+    .result-main .delta { color: #d5ebe6; font-size: 13px; }
+    .result-side { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .result-chip { border: 1px solid var(--line); border-radius: 10px; padding: 14px; background: #fbfdfc; }
+    .result-chip b { display: block; font-size: 18px; margin-top: 4px; }
+
+    .right { background: #f2f7f5; border-left: 1px solid var(--line); padding: 24px 20px; position: sticky; top: 68px; height: calc(100vh - 68px); overflow: auto; }
+    .right h2 { font-size: 16px; margin: 0 0 4px; }
+    .right-intro { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+    .readiness { background: white; border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+    .ready-score { display: flex; align-items: center; gap: 13px; padding-bottom: 14px; border-bottom: 1px solid #e3ece9; }
+    .ring { width: 48px; height: 48px; border-radius: 50%; background: conic-gradient(var(--brand) 0 270deg, #dce8e4 270deg); display: grid; place-items: center; position: relative; }
+    .ring::after { content: ""; width: 34px; height: 34px; background: white; border-radius: 50%; position: absolute; }
+    .ring span { position: relative; z-index: 1; font-size: 12px; font-weight: 800; }
+    .ready-score b { display: block; font-size: 15px; }
+    .ready-score small { color: var(--muted); }
+    .check-list { display: grid; gap: 0; margin-top: 7px; }
+    .check { display: grid; grid-template-columns: 18px 1fr auto; gap: 8px; padding: 10px 0; border-bottom: 1px solid #edf2f0; align-items: center; font-size: 13px; }
+    .check:last-child { border: 0; }
+    .dot { width: 16px; height: 16px; border-radius: 50%; background: var(--success-soft); border: 1px solid #88b59f; position: relative; }
+    .dot::after { content: "✓"; position: absolute; inset: -3px 0 0 2px; color: var(--success); font-size: 12px; font-weight: 800; }
+    .dot.warn { background: var(--warn-soft); border-color: #d2ac5b; }
+    .dot.warn::after { content: "!"; color: var(--warn); inset: -2px 0 0 5px; }
+    .check em { color: var(--muted); font-style: normal; font-size: 12px; }
+    .issue-summary { margin-top: 16px; }
+    .issue-summary h3, .trail h3 { font-size: 14px; margin: 0 0 8px; }
+    .issue-count { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); background: white; border-radius: 10px; overflow: hidden; }
+    .count { padding: 10px 5px; text-align: center; border-right: 1px solid var(--line); }
+    .count:last-child { border: 0; }
+    .count b { display: block; font-size: 18px; }
+    .count span { font-size: 11px; color: var(--muted); }
+    .trail { margin-top: 18px; }
+    .trail-item { display: grid; grid-template-columns: 8px 1fr; gap: 9px; margin: 10px 0; }
+    .trail-dot { width: 7px; height: 7px; border-radius: 50%; background: #89aaa2; margin-top: 7px; }
+    .trail-item b { display: block; font-size: 12px; }
+    .trail-item span { color: var(--muted); font-size: 12px; }
+    .right-foot { margin-top: 20px; color: var(--muted); font-size: 12px; }
+
+    .toast { position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 20px); background: #153f3b; color: white; padding: 12px 17px; border-radius: 9px; box-shadow: 0 10px 24px rgba(0,0,0,.2); opacity: 0; pointer-events: none; transition: .22s ease; z-index: 40; }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+    .view { display: none; }
+    .view.active { display: block; animation: enter .18s ease; }
+    @keyframes enter { from { opacity: 0; transform: translateY(4px); } }
+    @media (max-width: 1180px) { .shell { grid-template-columns: 210px 1fr; } .right { display: none; } }
+    @media (max-width: 760px) { .shell { display: block; } .left { display: none; } .workspace { padding: 22px 16px 60px; } .upload-grid, .form-grid, .result-hero { grid-template-columns: 1fr; } .brand-sub, .scope { display: none; } }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">审</div>
+        <div class="brand-title">审计工具箱</div>
+        <div class="brand-sub">汇兑损益审计工作台 · 交互原型</div>
+      </div>
+      <div class="top-actions">
+        <span class="top-state">项目：4800 · 2025 年度审计</span>
+        <button class="icon-btn" type="button" aria-label="帮助" onclick="toast('操作说明已在当前步骤内展开')">帮助</button>
+      </div>
+    </header>
+
+    <div class="shell">
+      <aside class="left">
+        <small>工作流程</small>
+        <nav class="steps" aria-label="汇兑损益审计步骤">
+          <button class="step active" data-step="1" onclick="go(1)"><span class="step-num">1</span><span><span class="step-label">数据准备</span><span class="step-desc">上传并识别 JE、TB</span></span></button>
+          <button class="step" data-step="2" onclick="go(2)"><span class="step-num">2</span><span><span class="step-label">异常复核</span><span class="step-desc">仅处理需要判断的事项</span></span></button>
+          <button class="step" data-step="3" onclick="go(3)"><span class="step-num">3</span><span><span class="step-label">科目类型确认</span><span class="step-desc">确认货币性项目范围</span></span></button>
+          <button class="step" data-step="4" onclick="go(4)"><span class="step-num">4</span><span><span class="step-label">执行测算</span><span class="step-desc">设置口径并运行</span></span></button>
+          <button class="step" data-step="5" onclick="go(5)"><span class="step-num">5</span><span><span class="step-label">结果与底稿</span><span class="step-desc">复核结论并导出</span></span></button>
+        </nav>
+        <div class="left-help">
+          <strong>首次使用也不必逐项检查</strong>
+          系统会收起已自动确认的内容，只把需要判断的事项留给你。
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <section class="view active" data-view="1">
+          <div class="page-head"><div><div class="eyebrow">步骤 1 / 5</div><h1>准备测算数据</h1><p class="page-desc">上传凭证与科目余额表。系统将使用 TB/JE 公共引擎完成识别、标准化和匹配。</p></div><div class="scope">测算范围：已实现＋未实现</div></div>
+          <div class="panel">
+            <div class="panel-head"><div><h2>数据文件</h2><p>已自动识别文件角色、工作表和标题行</p></div><button class="text-link" onclick="toggleUpload()">更换文件</button></div>
+            <div class="panel-body">
+              <div class="coach"><span class="coach-mark">1</span><div><b>先确认文件是否正确。</b> 字段映射和格式差异由系统处理；只有无法可靠判断的项目会进入下一步。</div></div>
+              <div id="files" class="upload-grid">
+                <article class="file-card ready"><span class="file-ok">识别完成</span><div class="file-role">JE · 凭证明细</div><div class="file-name">4800_JE_2025.01-12.xlsx</div><div class="file-meta">JE 工作表 · 368,676 行 · 标题行 1</div><div class="mini-rule"><span>借贷方向与本位币净额已识别</span><button class="text-link" onclick="toast('已展开 JE 字段映射：46 列均已确认')">查看映射</button></div></article>
+                <article class="file-card ready"><span class="file-ok">识别完成</span><div class="file-role">TB · 科目余额表</div><div class="file-name">TB-4800.xlsx</div><div class="file-meta">Sheet1 · 229 行 · 标题行 1</div><div class="mini-rule"><span>期初、期末及币种列已识别</span><button class="text-link" onclick="toast('已展开 TB 字段映射：当前无需调整')">查看映射</button></div></article>
+              </div>
+              <div id="upload" class="dropzone hidden"><div><strong>拖放或选择 JE、TB 文件</strong><span>支持同时选择两个 Excel 文件</span><br><button class="secondary" style="margin-top:14px" onclick="toggleUpload()">使用示例文件</button></div></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><div><h2>公共引擎匹配口径</h2><p>匹配规则对所有使用 TB/JE 的工具保持一致</p></div><span class="badge ok">已应用</span></div>
+            <div class="panel-body">
+              <div class="engine-rule"><div class="rule-box"><b>第一步：标准化科目代码</b><span>统一文本与数字格式，消除前导零造成的差异，例如 001001 与 1001。</span></div><div class="rule-arrow">→</div><div class="rule-box"><b>第二步：消除歧义</b><span>代码唯一时按代码匹配；代码不唯一时使用“科目代码＋科目名称”。</span></div></div>
+              <div class="subhead"><h3>本次识别摘要</h3><span>自动确认项默认收起</span></div>
+              <div class="status-list">
+                <div class="status-row"><span class="badge ok">已完成</span><div><div class="status-title">字段映射</div><div class="status-copy">JE 46 列、TB 12 列均已确定口径</div></div><button class="status-action" onclick="toast('字段明细已记录在审计轨迹')">查看</button></div>
+                <div class="status-row"><span class="badge confirm">待确认</span><div><div class="status-title">发现 2 组重复科目代码</div><div class="status-copy">公共引擎已改用“代码＋名称”匹配，需在下一步确认结果</div></div><button class="status-action" onclick="go(2)">去复核</button></div>
+                <div class="status-row"><span class="badge note">提示</span><div><div class="status-title">本位币推断为 USD</div><div class="status-copy">TB 的本位币与列整列均为 USD；这不等同于原币种</div></div><button class="status-action" onclick="toast('公司本位币可在执行测算步骤调整')">了解</button></div>
+              </div>
+              <div class="action-row"><span class="action-note">下一步只需处理 2 项待确认事项</span><button class="primary" onclick="go(2)">进入异常复核</button></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="view" data-view="2">
+          <div class="page-head"><div><div class="eyebrow">步骤 2 / 5</div><h1>复核需要判断的事项</h1><p class="page-desc">系统已自动确认其余项目。这里按影响程度区分阻断、待确认和提示。</p></div><div class="scope">待处理：2 项</div></div>
+          <div class="panel"><div class="panel-head"><div><h2>异常清单</h2><p>先处理阻断项，再确认可能影响测算口径的项目</p></div></div><div class="panel-body">
+            <div class="coach"><span class="coach-mark">2</span><div><b>当前没有阻断项。</b> 两组重复代码已由公共引擎使用科目名称消除歧义，你只需确认对应关系。</div></div>
+            <div class="toolbar"><div class="filters"><button class="filter active" onclick="filterRows(this,'all')">全部 3</button><button class="filter" onclick="filterRows(this,'confirm')">待确认 2</button><button class="filter" onclick="filterRows(this,'note')">提示 1</button></div><input id="search" class="search" placeholder="搜索科目代码或名称" oninput="searchRows()" /></div>
+            <div class="table-wrap"><table><thead><tr><th>状态</th><th>JE 科目</th><th>TB 匹配结果</th><th>判断依据</th><th>处理</th></tr></thead><tbody id="issueRows">
+              <tr data-kind="confirm" data-search="6603 汇兑损益 财务费用"><td><span class="badge confirm">待确认</span></td><td><span class="code">6603</span><br>汇兑损益</td><td><span class="code">6603</span><br>财务费用—汇兑损益</td><td>代码重复；名称相似度最高<div class="match-detail">已完成前导零归一化</div></td><td><button class="choice selected" onclick="confirmMatch(this)">确认匹配</button></td></tr>
+              <tr data-kind="confirm" data-search="100201 中国银行美元户 银行存款"><td><span class="badge confirm">待确认</span></td><td><span class="code">00100201</span><br>中国银行美元户</td><td><span class="code">100201</span><br>银行存款—中行美元户</td><td>代码标准化后唯一<div class="match-detail">00100201 → 100201</div></td><td><button class="choice selected" onclick="confirmMatch(this)">确认匹配</button></td></tr>
+              <tr data-kind="note" data-search="美元 USD 本位币"><td><span class="badge note">提示</span></td><td>TB 本位币列</td><td>USD</td><td>整列一致，已自动预填</td><td><button class="choice" onclick="toast('可在步骤 4 修改本位币')">查看设置</button></td></tr>
+            </tbody></table></div>
+            <div class="resolve-box"><div><b>确认后如何处理？</b><div class="muted">本次判断会写入审计轨迹；公共引擎规则不被项目级操作覆盖。</div></div><button id="resolveBtn" class="primary" onclick="resolveIssues()">确认 2 项匹配</button></div>
+          </div></div>
+        </section>
+
+        <section class="view" data-view="3">
+          <div class="page-head"><div><div class="eyebrow">步骤 3 / 5</div><h1>确认 TB 科目类型</h1><p class="page-desc">货币性项目需要期末折算；非货币性项目通常不参与未实现汇兑损益测算。</p></div><div class="scope">229 个科目 · 6 个需确认</div></div>
+          <div class="panel"><div class="panel-head"><div><h2>需要确认的科目</h2><p>223 个高置信度科目已自动归类并收起</p></div><button class="text-link" onclick="toast('已自动归类：货币性 87 个，非货币性 136 个')">查看已确认科目</button></div><div class="panel-body">
+            <div class="coach"><span class="coach-mark">3</span><div><b>判断提示：</b> 未来以固定或可确定金额收取或支付的项目通常属于货币性项目。请结合合同与会计政策确认。</div></div>
+            <div class="table-wrap"><table><thead><tr><th>科目代码</th><th>科目名称</th><th>期末原币余额</th><th>系统建议</th><th>你的确认</th></tr></thead><tbody>
+              <tr><td class="code">112301</td><td>长期应收款—工程款</td><td>待接入 TB 原币余额</td><td><span class="badge confirm">建议货币性</span><div class="match-detail">固定金额收款</div></td><td><div class="decision"><button class="choice selected" onclick="pick(this)">货币性</button><button class="choice" onclick="pick(this)">非货币性</button></div></td></tr>
+              <tr><td class="code">220501</td><td>合同负债—服务款</td><td>待接入 TB 原币余额</td><td><span class="badge confirm">需结合合同</span><div class="match-detail">可能以服务履约</div></td><td><div class="decision"><button class="choice" onclick="pick(this)">货币性</button><button class="choice selected" onclick="pick(this)">非货币性</button></div></td></tr>
+              <tr><td class="code">224102</td><td>其他应付款—关联方</td><td>待接入 TB 原币余额</td><td><span class="badge confirm">建议货币性</span><div class="match-detail">固定金额付款</div></td><td><div class="decision"><button class="choice selected" onclick="pick(this)">货币性</button><button class="choice" onclick="pick(this)">非货币性</button></div></td></tr>
+            </tbody></table></div>
+            <div class="action-row"><span class="action-note">其余 3 个科目已沿用同类科目判断</span><button class="primary" onclick="completeThree()">保存分类并继续</button></div>
+          </div></div>
+        </section>
+
+        <section class="view" data-view="4">
+          <div class="page-head"><div><div class="eyebrow">步骤 4 / 5</div><h1>执行汇兑损益测算</h1><p class="page-desc">最后确认报告期、本位币及汇率来源。测算将同时覆盖已实现和未实现部分。</p></div><div class="scope">运行就绪</div></div>
+          <div class="panel"><div class="panel-head"><div><h2>测算口径</h2><p>参数变更会记录在审计轨迹中</p></div><span class="badge ok">检查通过</span></div><div class="panel-body">
+            <div class="form-grid"><label class="field">报告期末<input value="2025-12-31" /></label><label class="field">公司本位币<select><option>USD</option><option>CNY</option><option>HKD</option></select></label><label class="field">测算范围<select><option>已实现＋未实现</option><option>仅已实现</option><option>仅未实现</option></select></label></div>
+            <div class="subhead"><h3>汇率与勾稽</h3><span>汇率表：2025_FX_rates.xlsx</span></div>
+            <div class="status-list">
+              <div class="status-row"><span class="badge ok">已通过</span><div><div class="status-title">期末汇率完整</div><div class="status-copy">USD、CNY、HKD、EUR 均已覆盖</div></div><button class="status-action" onclick="toast('已展示 4 个币种的期末汇率明细')">查看</button></div>
+              <div class="status-row"><span class="badge ok">已通过</span><div><div class="status-title">TB 余额勾稽</div><div class="status-copy">货币性科目期末余额与测算输入一致</div></div><button class="status-action" onclick="toast('正式数据接入后展示勾稽差异明细')">查看</button></div>
+              <div class="status-row"><span class="badge note">提示</span><div><div class="status-title">汇率来源</div><div class="status-copy">客户提供；执行人需在底稿中保留来源凭证</div></div><button class="status-action" onclick="toast('来源说明已纳入底稿封面')">了解</button></div>
+            </div>
+            <div id="runArea" class="action-row"><span class="action-note">预计生成汇总、科目明细和异常索引</span><button id="runBtn" class="primary" onclick="runCalc()">开始测算</button></div>
+            <div id="running" class="hidden"><div class="progress"><i id="bar"></i></div><div class="muted" id="runText">正在标准化科目与币种口径…</div></div>
+          </div></div>
+        </section>
+
+        <section class="view" data-view="5">
+          <div class="page-head"><div><div class="eyebrow">步骤 5 / 5</div><h1>查看测算结果并生成底稿</h1><p class="page-desc">先复核总体结论和异常明细，再导出包含审计轨迹的 Excel 底稿。</p></div><div class="scope">测算完成 · 2026-09-01 16:42</div></div>
+          <div class="panel"><div class="panel-head"><div><h2>测算结论</h2><p>本位币：USD · 报告期末：2025-12-31</p></div><span class="badge ok">结果可导出</span></div><div class="panel-body">
+            <div class="result-hero"><div class="result-main"><div class="caption">汇兑损益测算调整额</div><div class="amount">等待正式测算</div><div class="delta">正式版将显示测算金额与账面金额的差额，并提示结合重要性水平判断是否调整</div></div><div class="result-side"><div class="result-chip"><span class="muted">已实现</span><b>待接入</b></div><div class="result-chip"><span class="muted">未实现</span><b>待接入</b></div><div class="result-chip"><span class="muted">覆盖科目</span><b>待接入</b></div><div class="result-chip"><span class="muted">待关注</span><b>待接入</b></div></div></div>
+            <div class="subhead"><h3>需要关注的结果</h3><span>不阻止生成底稿</span></div>
+            <div class="status-list"><div class="status-row"><span class="badge confirm">待关注</span><div><div class="status-title">测算后列示差异较集中的科目</div><div class="status-copy">正式版将显示调整额贡献并建议定位入账汇率异常</div></div><button class="status-action" onclick="toast('正式数据接入后可打开科目测算明细')">查看明细</button></div><div class="status-row"><span class="badge note">提示</span><div><div class="status-title">测算后识别汇率使用异常</div><div class="status-copy">如凭证使用月末汇率，将提示核对交易日即期汇率政策</div></div><button class="status-action" onclick="toast('正式数据接入后可定位相关凭证行')">定位凭证</button></div></div>
+            <div class="action-row"><button class="secondary" onclick="go(4)">修改参数并重新测算</button><button class="primary" onclick="exportFile()">生成 Excel 审计底稿</button></div>
+          </div></div>
+        </section>
+      </main>
+
+      <aside class="right">
+        <h2>运行就绪度</h2><div class="right-intro">随当前操作实时更新，优先显示会影响测算的事项。</div>
+        <div class="readiness"><div class="ready-score"><div class="ring" id="ring"><span id="score">75%</span></div><div><b id="readyTitle">还需确认 2 项</b><small id="readySub">没有阻断测算的问题</small></div></div><div class="check-list">
+          <div class="check"><span class="dot"></span><span>JE / TB 文件</span><em>已识别</em></div>
+          <div class="check"><span class="dot warn" id="matchDot"></span><span>科目匹配</span><em id="matchText">2 项待确认</em></div>
+          <div class="check"><span class="dot"></span><span>公司本位币</span><em>USD</em></div>
+          <div class="check"><span class="dot"></span><span>报告期末</span><em>2025-12-31</em></div>
+        </div></div>
+        <div class="issue-summary"><h3>事项分级</h3><div class="issue-count"><div class="count"><b style="color:var(--danger)">0</b><span>阻断</span></div><div class="count"><b id="confirmCount" style="color:var(--warn)">2</b><span>待确认</span></div><div class="count"><b style="color:var(--info)">1</b><span>提示</span></div></div></div>
+        <div class="trail"><h3>审计轨迹</h3><div class="trail-item"><span class="trail-dot"></span><div><b>公共引擎完成字段识别</b><span>JE 46 列、TB 12 列</span></div></div><div class="trail-item"><span class="trail-dot"></span><div><b>科目代码已标准化</b><span>保留原值并生成标准化键</span></div></div><div class="trail-item"><span class="trail-dot"></span><div><b>重复代码启用组合匹配</b><span>科目代码＋科目名称</span></div></div></div>
+        <div class="right-foot">所有自动判断、人工确认与参数变更都会写入最终底稿。</div>
+      </aside>
+    </div>
+  </div>
+  <div id="toast" class="toast" role="status"></div>
+
+  <script>
+    let current = 1;
+    let resolved = false;
+    function go(n) {
+      current = n;
+      document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', Number(v.dataset.view) === n));
+      document.querySelectorAll('.step').forEach(s => {
+        const k = Number(s.dataset.step);
+        s.classList.toggle('active', k === n);
+        s.classList.toggle('done', k < n);
+      });
+      document.querySelector('.workspace').scrollTo({top:0, behavior:'smooth'});
+    }
+    function toast(message) {
+      const el = document.getElementById('toast');
+      el.textContent = message; el.classList.add('show');
+      clearTimeout(window.toastTimer); window.toastTimer = setTimeout(() => el.classList.remove('show'), 2300);
+    }
+    function toggleUpload() {
+      document.getElementById('files').classList.toggle('hidden');
+      document.getElementById('upload').classList.toggle('hidden');
+    }
+    function filterRows(button, kind) {
+      document.querySelectorAll('.filter').forEach(b => b.classList.remove('active')); button.classList.add('active');
+      document.querySelectorAll('#issueRows tr').forEach(r => r.classList.toggle('hidden', kind !== 'all' && r.dataset.kind !== kind));
+    }
+    function searchRows() {
+      const q = document.getElementById('search').value.trim().toLowerCase();
+      document.querySelectorAll('#issueRows tr').forEach(r => r.classList.toggle('hidden', q && !r.dataset.search.toLowerCase().includes(q)));
+    }
+    function confirmMatch(button) {
+      button.classList.toggle('selected');
+      button.textContent = button.classList.contains('selected') ? '确认匹配' : '未确认';
+    }
+    function resolveIssues() {
+      resolved = true;
+      document.querySelectorAll('#issueRows tr[data-kind="confirm"] .badge').forEach(b => { b.className='badge ok'; b.textContent='已确认'; });
+      document.querySelectorAll('#issueRows tr[data-kind="confirm"] .choice').forEach(b => { b.textContent='已确认'; b.disabled=true; });
+      document.getElementById('resolveBtn').textContent='继续确认科目类型';
+      document.getElementById('resolveBtn').onclick=()=>go(3);
+      document.getElementById('confirmCount').textContent='0';
+      document.getElementById('matchText').textContent='已确认';
+      document.getElementById('matchDot').classList.remove('warn');
+      document.getElementById('score').textContent='100%';
+      document.getElementById('ring').style.background='conic-gradient(var(--brand) 0 360deg, #dce8e4 360deg)';
+      document.getElementById('readyTitle').textContent='数据已准备就绪';
+      document.getElementById('readySub').textContent='可继续确认测算范围';
+      toast('2 项匹配已确认并写入审计轨迹');
+    }
+    function pick(button) {
+      button.parentElement.querySelectorAll('.choice').forEach(b => b.classList.remove('selected')); button.classList.add('selected');
+    }
+    function completeThree() { toast('科目类型已保存'); setTimeout(()=>go(4), 350); }
+    function runCalc() {
+      document.getElementById('runArea').classList.add('hidden'); document.getElementById('running').classList.remove('hidden');
+      const bar=document.getElementById('bar'), txt=document.getElementById('runText');
+      const stages=[[22,'正在标准化科目与币种口径…'],[49,'正在测算已实现汇兑损益…'],[74,'正在测算未实现汇兑损益…'],[94,'正在执行余额勾稽…'],[100,'测算完成，正在整理结果…']];
+      stages.forEach((s,i)=>setTimeout(()=>{bar.style.width=s[0]+'%';txt.textContent=s[1]; if(i===stages.length-1)setTimeout(()=>go(5),550)},i*520));
+    }
+    function exportFile() { toast('Excel 审计底稿已生成：4800_汇兑损益测算_2025.xlsx'); }
+  </script>
+</body>
+</html>

@@ -16,6 +16,7 @@ import { JobProgress } from "@/components/JobProgress";
 import { Field } from "@/components/Field";
 import { FileDropInput } from "@/components/FileDropInput";
 import { FileInput } from "@/components/FileInput";
+import { displayFileName } from "@/fileDisplay";
 import { DataTable } from "@/components/DataTable";
 import {
   BLANK_TOKEN,
@@ -26,12 +27,7 @@ import {
 } from "@/components/ColumnFilterMenu";
 import { StatGrid } from "@/components/StatGrid";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
 type TsInspect = {
@@ -201,7 +197,9 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
   const [error, setError] = useState("");
   const [dragHover, setDragHover] = useState(false);
   const [menu, setMenu] = useState<{ field: string; anchor: DOMRect }>();
-  const [valueCache, setValueCache] = useState<Record<string, ColumnFilterValues>>({});
+  const [valueCache, setValueCache] = useState<
+    Record<string, ColumnFilterValues>
+  >({});
   const [valuesLoading, setValuesLoading] = useState(false);
 
   useEffect(() => {
@@ -221,7 +219,10 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
       // 只有 ts.inspect 会返回工作表清单和默认字段。
       if (Array.isArray(payload.sheets) || payload.defaults) {
         applyInspect(payload as TsInspect);
-      } else if (Array.isArray(payload.preview) && typeof payload.rows === "number") {
+      } else if (
+        Array.isArray(payload.preview) &&
+        typeof payload.rows === "number"
+      ) {
         setState((current) => ({
           ...current,
           filtered: {
@@ -429,7 +430,9 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
   }
 
   async function chooseOutput() {
-    const selected = await pickPath("save", "保存 Timesheet 默认双 Sheet", ["xlsx"]);
+    const selected = await pickPath("save", "保存 Timesheet 默认双 Sheet", [
+      "xlsx",
+    ]);
     if (typeof selected === "string") patch({ outputPath: selected });
   }
 
@@ -518,9 +521,13 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
   )
     .filter(([, value]) => typeof value === "number")
     .map(([label, value]) => ({ label, value: Number(value) }));
-  const elapsed = (exportResult.timings as { totalMs?: number } | undefined)?.totalMs;
+  const elapsed = (exportResult.timings as { totalMs?: number } | undefined)
+    ?.totalMs;
   if (typeof elapsed === "number")
-    exportSummary.push({ label: "耗时(秒)", value: Math.round(elapsed / 100) / 10 });
+    exportSummary.push({
+      label: "耗时(秒)",
+      value: Math.round(elapsed / 100) / 10,
+    });
   const totalRows = state.inspect?.dimensions?.rows ?? 0;
   const shownRows = state.filtered?.rows ?? totalRows;
   return (
@@ -553,13 +560,14 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
-            {job && !["completed", "failed", "cancelled"].includes(job.phase) && (
-              <JobProgress
-                job={job}
-                onCancel={(jobId) => void jobCancel(jobId)}
-                cancelLabel="取消任务"
-              />
-            )}
+            {job &&
+              !["completed", "failed", "cancelled"].includes(job.phase) && (
+                <JobProgress
+                  job={job}
+                  onCancel={(jobId) => void jobCancel(jobId)}
+                  cancelLabel="取消任务"
+                />
+              )}
             {step === 1 && (
               <>
                 <Field label="目标文件" required>
@@ -576,39 +584,64 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                 <div className="form-grid">
                   <Field label="Sheet">
                     {state.inspect?.sheets?.length ? (
-                      <select value={state.sheet} onChange={(event) => {
-                        const sheet = event.target.value;
-                        setMenu(undefined);
-                        setValueCache({});
-                        patch({
-                          sheet,
-                          inspect: switchSheetInspect(state.inspect, sheet),
-                          selections: {},
-                          filtered: undefined,
-                          result: undefined,
-                        });
-                        setStep(1);
-                      }}>
-                        {state.inspect.sheets.map((name) => <option key={name}>{name}</option>)}
+                      <select
+                        value={state.sheet}
+                        onChange={(event) => {
+                          const sheet = event.target.value;
+                          setMenu(undefined);
+                          setValueCache({});
+                          patch({
+                            sheet,
+                            inspect: switchSheetInspect(state.inspect, sheet),
+                            selections: {},
+                            filtered: undefined,
+                            result: undefined,
+                          });
+                          setStep(1);
+                        }}
+                      >
+                        {state.inspect.sheets.map((name) => (
+                          <option key={name}>{name}</option>
+                        ))}
                       </select>
                     ) : (
-                      <input value={state.sheet} onChange={(event) => {
-                        patch({ sheet: event.target.value });
-                        setStep(1);
-                      }} />
+                      <input
+                        value={state.sheet}
+                        onChange={(event) => {
+                          patch({ sheet: event.target.value });
+                          setStep(1);
+                        }}
+                      />
                     )}
                   </Field>
                   <Field label="标题行（默认 1）">
-                    <input type="number" min={1} max={50} value={state.headerRow} onChange={(event) => {
-                      resetForNewSource({ headerRow: event.target.value });
-                    }} />
+                    <input
+                      type="number"
+                      min={1}
+                      max={50}
+                      value={state.headerRow}
+                      onChange={(event) => {
+                        resetForNewSource({ headerRow: event.target.value });
+                      }}
+                    />
                   </Field>
                 </div>
                 <div className="actions">
-                  <Button type="button" variant="secondary" size="sm" disabled={busy || !state.inputPath} onClick={() => void inspect()}>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    disabled={busy || !state.inputPath}
+                    onClick={() => void inspect()}
+                  >
                     加载文件
                   </Button>
-                  <Button type="button" variant="default" disabled={!state.inspect} onClick={() => setStep(2)}>
+                  <Button
+                    type="button"
+                    variant="default"
+                    disabled={!state.inspect}
+                    onClick={() => setStep(2)}
+                  >
                     下一步：条件筛选
                   </Button>
                 </div>
@@ -617,11 +650,15 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
             {step === 2 && (
               <>
                 <p className="hint">
-                  筛选在下方「文件预览」里做：点表头第一行的 ▼ 打开取值清单，勾选后点「应用」。
-                  同一列勾多个取值是「或」，不同列之间是「且」——和 Excel 的自动筛选一致。
+                  筛选在下方「文件预览」里做：点表头第一行的 ▼
+                  打开取值清单，勾选后点「应用」。
+                  同一列勾多个取值是「或」，不同列之间是「且」——和 Excel
+                  的自动筛选一致。
                 </p>
                 {filters.length === 0 ? (
-                  <div className="empty">当前没有筛选条件，导出会包含全部 {totalRows} 行。</div>
+                  <div className="empty">
+                    当前没有筛选条件，导出会包含全部 {totalRows} 行。
+                  </div>
                 ) : (
                   <>
                     <div className="chip-list">
@@ -649,9 +686,31 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   </>
                 )}
                 <div className="actions">
-                  <Button type="button" variant="secondary" size="sm" disabled={!filters.length} onClick={clearAllFilters}>清除全部筛选</Button>
-                  <Button type="button" variant="secondary" size="sm" onClick={() => setStep(1)}>上一步</Button>
-                  <Button type="button" variant="default" disabled={!headers.length} onClick={() => setStep(3)}>下一步：导出</Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    disabled={!filters.length}
+                    onClick={clearAllFilters}
+                  >
+                    清除全部筛选
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setStep(1)}
+                  >
+                    上一步
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="default"
+                    disabled={!headers.length}
+                    onClick={() => setStep(3)}
+                  >
+                    下一步：导出
+                  </Button>
                 </div>
               </>
             )}
@@ -662,18 +721,43 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                     value={state.outputPath}
                     placeholder="请选择导出文件的保存路径"
                     onBrowse={() => void chooseOutput()}
-                    onClear={state.outputPath ? () => patch({ outputPath: "" }) : undefined}
+                    onClear={
+                      state.outputPath
+                        ? () => patch({ outputPath: "" })
+                        : undefined
+                    }
                   />
                 </Field>
                 <p className="hint">
                   将按 {filters.length} 个筛选条件导出，命中 {shownRows} 行。
                 </p>
                 <div className="actions">
-                  <Button type="button" variant="secondary" size="sm" onClick={() => setStep(2)}>上一步</Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setStep(2)}
+                  >
+                    上一步
+                  </Button>
                   {busy && job ? (
-                    <Button type="button" variant="secondary" size="sm" onClick={() => void jobCancel(job.jobId)}>取消</Button>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void jobCancel(job.jobId)}
+                    >
+                      取消
+                    </Button>
                   ) : (
-                    <Button type="button" variant="default" disabled={!canStartTsExport(headers, state.outputPath)} onClick={() => void startExport()}>导出默认双 Sheet</Button>
+                    <Button
+                      type="button"
+                      variant="default"
+                      disabled={!canStartTsExport(headers, state.outputPath)}
+                      onClick={() => void startExport()}
+                    >
+                      导出默认双 Sheet
+                    </Button>
                   )}
                 </div>
               </>
@@ -692,9 +776,14 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                 items={[
                   {
                     label: "数据行",
-                    value: filters.length ? `${shownRows} / ${totalRows}` : totalRows,
+                    value: filters.length
+                      ? `${shownRows} / ${totalRows}`
+                      : totalRows,
                   },
-                  { label: "字段数", value: state.inspect.dimensions?.columns ?? headers.length },
+                  {
+                    label: "字段数",
+                    value: state.inspect.dimensions?.columns ?? headers.length,
+                  },
                   { label: "Sheet", value: state.sheet || "CSV" },
                   { label: "有效筛选", value: filters.length },
                 ]}
@@ -704,7 +793,9 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                 first sheet reads a cover page as if it were the data. */}
             {(state.inspect?.sheets?.length ?? 0) > 1 && (
               <div className="warning-box">
-                该工作簿共有 {state.inspect?.sheets?.length} 个工作表，当前使用「{state.sheet || state.inspect?.selectedSheet}」。
+                该工作簿共有 {state.inspect?.sheets?.length}{" "}
+                个工作表，当前使用「
+                {state.sheet || state.inspect?.selectedSheet}」。
                 如果数据不在这一张，请在上方切换 Sheet 后重新加载。
               </div>
             )}
@@ -734,19 +825,32 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
             {exportSummary.length > 0 && (
               <StatGrid
                 columns={3}
-                items={exportSummary.map((item) => ({ label: item.label, value: item.value }))}
+                items={exportSummary.map((item) => ({
+                  label: item.label,
+                  value: item.value,
+                }))}
               />
             )}
             {outputPaths.length > 0 && (
               <div className="output-list">
                 {outputPaths.map((path) => (
-                  <Button type="button" variant="secondary" size="sm" key={path} onClick={() => void openOutput(path)}>
-                    打开：{path}
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    key={path}
+                    onClick={() => void openOutput(path)}
+                  >
+                    打开：{displayFileName(path)}
                   </Button>
                 ))}
               </div>
             )}
-            {!state.inspect && !job && <div className="empty">加载文件后可核对表头、前 20 行，并在表头按列筛选。</div>}
+            {!state.inspect && !job && (
+              <div className="empty">
+                加载文件后可核对表头、前 20 行，并在表头按列筛选。
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>

@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { displayFileName } from "@/fileDisplay";
 import type { Ref } from "react";
 
 export type FileDropInputProps = {
@@ -37,13 +38,16 @@ export function FileDropInput({
   containerRef,
 }: FileDropInputProps) {
   return (
-    <div ref={containerRef} className={cn("file-drop-input", highlight && "drag-hover")}>
+    <div
+      ref={containerRef}
+      className={cn("file-drop-input", highlight && "drag-hover")}
+    >
       {value ? (
         <div className="file-drop-slot filled">
-          <span className="file-drop-slot-label">{placeholder ?? "已选文件"}</span>
-          <span className="file-drop-slot-value" title={value}>
-            {value}
+          <span className="file-drop-slot-label">
+            {placeholder ?? "已选文件"}
           </span>
+          <span className="file-drop-slot-value">{displayFileName(value)}</span>
           {onClear && (
             <button
               type="button"

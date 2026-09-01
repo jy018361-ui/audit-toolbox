@@ -42,6 +42,7 @@ import {
   keywordFilterPredicate,
 } from "@/components/KeywordFilter";
 import "./fx-audit.css";
+import { displayFileName } from "./fileDisplay";
 
 type Mode = "realized" | "unrealized" | "combined";
 type Inspection = {
@@ -97,6 +98,10 @@ type Inspection = {
       source: string;
       seen: string[];
       needsConfirmation: boolean;
+      columnSeen?: string[];
+      columnDetected?: string;
+      textDetected?: string;
+      functionalDetected?: string;
     }
   >;
 };
@@ -230,6 +235,10 @@ export function fxAccountCurrencyDetail(
       source: string;
       seen: string[];
       needsConfirmation: boolean;
+      columnSeen?: string[];
+      columnDetected?: string;
+      textDetected?: string;
+      functionalDetected?: string;
     }
   > = {},
   tbDetails: Record<
@@ -239,11 +248,16 @@ export function fxAccountCurrencyDetail(
       source: string;
       seen: string[];
       needsConfirmation: boolean;
+      columnSeen?: string[];
+      columnDetected?: string;
+      textDetected?: string;
+      functionalDetected?: string;
     }
   > = {},
 ) {
-  // JE 逐行读凭证货币，比只有一行的 TB 更能反映该科目实际用过哪些币种，
-  // 所以主结论优先取 JE；seen 取两边并集，让下拉框把见过的币种都列出来。
+  // 账户币种用于 TB 余额重估，证据顺序必须是：TB 原币币种列 ＞ 科目名称
+  // 币种线索 ＞ JE 币种列。JE 还是逐笔交易明细，只有同一科目所有 JE 行币种
+  // 完全一致时才可把它提升为账户币种；出现多币种只能列入 seen 供人工复核。
   //
   // 精确名取不到就按科目编码取：TB 与 JE 的科目名拼法常常不同——4800 上
   // TB 写「1002010017 货币资金 货币资金-银行存款-建设银行」、JE 写
@@ -259,6 +273,10 @@ export function fxAccountCurrencyDetail(
         source: string;
         seen: string[];
         needsConfirmation: boolean;
+        columnSeen?: string[];
+        columnDetected?: string;
+        textDetected?: string;
+        functionalDetected?: string;
       }
     >,
   ) => {
@@ -271,22 +289,93 @@ export function fxAccountCurrencyDetail(
   };
   const je = pick(jeDetails);
   const tb = pick(tbDetails);
-  const primary = je ?? tb;
-  const seen = [...new Set([...(je?.seen ?? []), ...(tb?.seen ?? [])])];
+  const columnSeen = (detail: typeof je) =>
+    detail?.columnSeen ?? (detail?.source === "币种列" ? detail.seen : []);
+  const textCurrency = (detail: typeof je) =>
+    detail?.textDetected ??
+    (detail?.source === "科目文本" ? detail.detected : "");
+  const functionalCurrency = (detail: typeof je) =>
+    detail?.functionalDetected ??
+    (detail?.source === "本位币列" ? detail.detected : "");
+  const tbColumns = columnSeen(tb);
+  const jeColumns = columnSeen(je);
+  const selected = tbColumns.length
+    ? {
+        detected: tb?.columnDetected || tb?.detected || tbColumns[0],
+        source: "币种列",
+        side: "TB" as const,
+        fellBack: false,
+      }
+    : textCurrency(tb)
+      ? {
+          detected: textCurrency(tb),
+          source: "科目文本",
+          side: "TB" as const,
+          fellBack: false,
+        }
+      : textCurrency(je)
+        ? {
+            detected: textCurrency(je),
+            source: "科目文本",
+            side: "JE" as const,
+            fellBack: false,
+          }
+        : jeColumns.length === 1
+          ? {
+              detected: je?.columnDetected || jeColumns[0],
+              source: "币种列",
+              side: "JE" as const,
+              fellBack: false,
+            }
+          : functionalCurrency(tb)
+            ? {
+                detected: functionalCurrency(tb),
+                source: "本位币列",
+                side: "TB" as const,
+                fellBack: true,
+              }
+            : functionalCurrency(je)
+              ? {
+                  detected: functionalCurrency(je),
+                  source: "本位币列",
+                  side: "JE" as const,
+                  fellBack: true,
+                }
+              : {
+                  detected: "",
+                  source: "",
+                  side: "" as const,
+                  fellBack: true,
+                };
+  const seen = [
+    ...new Set(
+      [
+        ...(je?.seen ?? []),
+        ...(tb?.seen ?? []),
+        ...jeColumns,
+        ...tbColumns,
+        textCurrency(je),
+        textCurrency(tb),
+      ].filter(Boolean),
+    ),
+  ];
   return {
-    detected: primary?.detected ?? "",
-    source: primary?.source ?? "",
+    detected: selected.detected,
+    source: selected.source,
     // 结论取自哪份文件——界面在「外币」列直接标出来，用户不必悬浮才知道
     // 这个 USD 是 TB 上写着的还是从 JE 凭证里推出来的。
-    side: (je ? "JE" : tb ? "TB" : "") as "JE" | "TB" | "",
+    side: selected.side,
     seen,
     // 两侧都没给出真凭据时才算「没识别出来」，界面标注「按本位币」。
-    fellBack: primary ? primary.needsConfirmation : true,
+    fellBack: selected.fellBack,
     // 同一科目下挂了多种币种：TB 往往只给这个科目一个**合计**余额，
     // 这时把它指定成单一币种，等于拿一种汇率去重估几种币种的合计数。
     // 实测 4800 的「过渡银行」有 CNY／HKD／JPY／USD 四种、合计恰好为零，
     // 指定成 CNY 后未实现从 -3,395 跳到 7,613 万——全是假数。
     multiCurrency: seen.length > 1,
+    // JE 是逐笔明细；同一科目在 JE 币种列出现多个币种时，应在测算前立即
+    // 提醒用户复核 TB 是否按币种拆行，不能等用户手工选了单一币种才告警。
+    jeMultiCurrency: jeColumns.length > 1,
   };
 }
 
@@ -319,8 +408,8 @@ export function fxAccountFilterText(
 /**
  * 「外币」列括号里的来源短标签——告诉用户这个币种是**怎么取到的**。
  *
- * 依据强度从高到低：币种列（表里白纸黑字写着）＞科目名（从「美元户」这类
- * 文本里抽出来的）＞按本位币（什么线索都没有，只能退回本位币列，等于没认出来）。
+ * 依据强度从高到低：TB 币种列＞科目名（从「美元户」这类文本里抽出来的）
+ * ＞同一科目全部行一致的 JE 币种列＞按本位币。JE 币种列出现多币种时不自动采纳。
  * 前两种再标出来自 TB 还是 JE：同一个科目 TB 只有一行合计、JE 有逐笔凭证，
  * 用户判断可信度时这个区别很重要。
  */
@@ -998,7 +1087,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     if (!je || !tb) return;
     const isCurrent = reviews.currentGuard();
     try {
-      const response = (await engineCall("fx.check_mapping_alignment", {
+      const response = (await engineCall("ledger.check_mapping_alignment", {
         jeSource: {
           inputPath: jePath,
           sheet: je.sheet,
@@ -1179,291 +1268,298 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       />
       {step === 0 && (
         <>
-      <section className="fx-mode-bar">
-        {(
-          [
-            ["realized", "仅已实现"],
-            ["unrealized", "仅未实现"],
-            ["combined", "已实现＋未实现"],
-          ] as Array<[Mode, string]>
-        ).map(([value, label]) => (
-          <button
-            key={value}
-            type="button"
-            className={mode === value ? "active" : ""}
-            disabled={!allowedModes.includes(value)}
-            onClick={() => setMode(value)}
-          >
-            {label}
-          </button>
-        ))}
-      </section>
-      <Card>
-        <CardHeader>
-          <CardTitle>上传审计数据</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="fx-hint">
-            JE和TB使用同一入口；系统先按表格结构自动识别，再由汇兑损益专用 LLM
-            复核，LLM 不可用时保留脚本结果。
-          </p>
-          <FileDropInput
-            containerRef={uploadDropRef}
-            value={[
-              jePath && `JE：${fileName(jePath)}`,
-              tbPath && `TB：${fileName(tbPath)}`,
-            ]
-              .filter(Boolean)
-              .join("；")}
-            disabled={busy || reviewingAny}
-            placeholder="拖放或选择JE、TB文件（可同时选择）"
-            onBrowse={() => void browse()}
-            onDragStateChange={() => {}}
-            onClear={() => {
-              reviews.clearReview("je");
-              reviews.clearReview("tb");
-              setJePath("");
-              setTbPath("");
-              setJe(undefined);
-              setTb(undefined);
-              setJeMapping({});
-              setTbMapping({});
-              setAccountRoles({});
-              setAccountRolesTouched({});
-              setAccountCurrencies({});
-              setEntityCurrencies({});
-              setCurrencyTouched({});
-              setManualClassifications({});
-              setClassificationDrafts({});
-              setTbCurrencyConfirmed(false);
-              setAlignment([]);
-              setResult(undefined);
-              setJob(undefined);
-              setCompletedStage(undefined);
-              setActiveStage(undefined);
-              setReportEnd("");
-              setSourceStatus("");
-            }}
-          />
-          {sourceStatus && (
-            <p className="fx-source-status" aria-live="polite">
-              {sourceStatus}
-            </p>
-          )}
-        </CardContent>
-      </Card>
-      <div className="fx-source-grid">
-        <div className="fx-source-slot fx-source-slot-je">
-          {jePath ? (
-            <SourceCard
-              title="已识别：JE 凭证明细"
-              hint="已实现测算及月度未实现重估识别的数据源"
-              path={jePath}
-              inspection={je}
-              disabled={busy || reviewingAny}
-              onClear={() => {
-                reviews.clearReview("je");
-                setJePath("");
-                setJe(undefined);
-                setJeMapping({});
-              }}
-              onInspect={() => void inspect("je")}
-              onHeaderChange={(headerRow, headerDepth, sheet) =>
-                void inspect("je", { headerRow, headerDepth, sheet })
-              }
-            />
-          ) : tbPath ? (
-            <Card className="fx-source-empty">
-              <CardHeader>
-                <CardTitle>JE 凭证明细</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p>未识别到 JE；请补充上传或检查文件表头。</p>
-              </CardContent>
-            </Card>
-          ) : null}
-        </div>
-        <div className="fx-source-slot fx-source-slot-tb">
-          {tbPath ? (
-            <SourceCard
-              title="已识别：TB 科目余额表"
-              hint="未实现测算和财务费用—汇兑损益勾稽的数据源"
-              path={tbPath}
-              inspection={tb}
-              disabled={busy || reviewingAny}
-              onClear={() => {
-                reviews.clearReview("tb");
-                setTbPath("");
-                setTb(undefined);
-                setTbMapping({});
-              }}
-              onInspect={() => void inspect("tb")}
-              onHeaderChange={(headerRow, headerDepth, sheet) =>
-                void inspect("tb", { headerRow, headerDepth, sheet })
-              }
-            />
-          ) : jePath ? (
-            <Card className="fx-source-empty">
-              <CardHeader>
-                <CardTitle>TB 科目余额表</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p>未识别到 TB；请补充上传或检查文件表头。</p>
-              </CardContent>
-            </Card>
-          ) : null}
-        </div>
-      </div>
-      {(je || tb) && (
-        <LedgerReviewAll
-          present={je && tb ? ["je", "tb"] : je ? ["je"] : ["tb"]}
-          names={{ je: "JE", tb: "TB" }}
-          reviewing={reviewing}
-          status={reviewStatus}
-          results={reviews.results}
-          disabled={busy}
-          onReviewAll={() => void reviewBoth()}
-          onUndo={reviews.undoChange}
-          onAccept={reviews.acceptPending}
-        />
-      )}
-      {je && tb && alignment.length > 0 && (
-        <section className="kz-card fx-alignment" aria-live="polite">
-          <h2>TB 与 JE 口径核对</h2>
-          <ul>
-            {alignment.map((item) => (
-              <li key={item}>{item}</li>
+          <section className="fx-mode-bar">
+            {(
+              [
+                ["realized", "仅已实现"],
+                ["unrealized", "仅未实现"],
+                ["combined", "已实现＋未实现"],
+              ] as Array<[Mode, string]>
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                className={mode === value ? "active" : ""}
+                disabled={!allowedModes.includes(value)}
+                onClick={() => setMode(value)}
+              >
+                {label}
+              </button>
             ))}
-          </ul>
-        </section>
-      )}
-      {(je || tb) && (
-        <Card>
-          <CardHeader>
-            <CardTitle>公司本位币</CardTitle>
-          </CardHeader>
-          <CardContent className="fx-list">
-            {tb?.uniformCurrency ? (
-              <p className="fx-hint">
-                TB 的本位币币种列整列都是 {tb.uniformCurrency}
-                ，已自动预填。这与“原币币种”是两个独立口径：原币为
-                USD 不代表公司本位币也是 USD。
-              </p>
-            ) : (
-              <p className="fx-hint">
-                未从 TB 识别到单一的本位币币种，暂按 CNY 预填。请在核对
-                JE 字段映射前确认；“原币币种”不会被当作公司本位币。
-              </p>
-            )}
-            {entities.length ? (
-              entities.map((entity) => (
-                <label key={entity}>
-                  <span>{entity}</span>
-                  <input
-                    value={entityCurrencies[entity] ?? defaultFunctionalCurrency}
-                    maxLength={3}
-                    onChange={(e) => setEntityCurrency(entity, e.target.value)}
-                  />
-                </label>
-              ))
-            ) : (
-              <label>
-                <span>本位币（全表）</span>
-                <input
-                  value={
-                    entityCurrencies[fixedEntity] ?? defaultFunctionalCurrency
-                  }
-                  maxLength={3}
-                  onChange={(e) =>
-                    setEntityCurrency(fixedEntity, e.target.value)
+          </section>
+          <Card>
+            <CardHeader>
+              <CardTitle>上传审计数据</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <FileDropInput
+                containerRef={uploadDropRef}
+                value={[
+                  jePath && `JE：${fileName(jePath)}`,
+                  tbPath && `TB：${fileName(tbPath)}`,
+                ]
+                  .filter(Boolean)
+                  .join("；")}
+                disabled={busy || reviewingAny}
+                placeholder="拖放或选择JE、TB文件（可同时选择）"
+                onBrowse={() => void browse()}
+                onDragStateChange={() => {}}
+                onClear={() => {
+                  reviews.clearReview("je");
+                  reviews.clearReview("tb");
+                  setJePath("");
+                  setTbPath("");
+                  setJe(undefined);
+                  setTb(undefined);
+                  setJeMapping({});
+                  setTbMapping({});
+                  setAccountRoles({});
+                  setAccountRolesTouched({});
+                  setAccountCurrencies({});
+                  setEntityCurrencies({});
+                  setCurrencyTouched({});
+                  setManualClassifications({});
+                  setClassificationDrafts({});
+                  setTbCurrencyConfirmed(false);
+                  setAlignment([]);
+                  setResult(undefined);
+                  setJob(undefined);
+                  setCompletedStage(undefined);
+                  setActiveStage(undefined);
+                  setReportEnd("");
+                  setSourceStatus("");
+                }}
+              />
+              {sourceStatus && (
+                <p className="fx-source-status" aria-live="polite">
+                  {sourceStatus}
+                </p>
+              )}
+            </CardContent>
+          </Card>
+          <div className="fx-source-grid">
+            <div className="fx-source-slot fx-source-slot-je">
+              {jePath ? (
+                <SourceCard
+                  title="已识别：JE 凭证明细"
+                  path={jePath}
+                  inspection={je}
+                  disabled={busy || reviewingAny}
+                  onClear={() => {
+                    reviews.clearReview("je");
+                    setJePath("");
+                    setJe(undefined);
+                    setJeMapping({});
+                  }}
+                  onInspect={() => void inspect("je")}
+                  onHeaderChange={(headerRow, headerDepth, sheet) =>
+                    void inspect("je", { headerRow, headerDepth, sheet })
                   }
                 />
-              </label>
-            )}
-          </CardContent>
-        </Card>
-      )}
-      <div className="fx-preview-stack">
-        {je && (
-          <FxPreview
-            title="JE 文件预览与字段映射"
-            kind="je"
-            inspection={je}
-            mapping={jeMapping}
-            labels={JE_LABELS}
-            missing={fxMissingRequired("je", jeMapping, true, fixedEntity, mode)}
-            banner={
-              <p aria-live="polite" className="fx-hint">
-                {reviewing.je
-                  ? "正在复核字段映射；复核期间暂时锁定。"
-                  : reviewStatus.je ||
-                    "脚本已自动映射，可直接核对，或用上方一键复核。"}
-              </p>
-            }
-            onMappingChange={setJeMapping}
-            reviewBusy={reviewing.je}
-          />
-        )}
-        {tb && (
-          <FxPreview
-            title="TB 文件预览与字段映射"
-            kind="tb"
-            inspection={tb}
-            mapping={tbMapping}
-            labels={TB_LABELS}
-            missing={fxMissingRequired(
-              "tb",
-              tbMapping,
-              Boolean(je),
-              fixedEntity,
-            )}
-            banner={
-              <>
-                <p aria-live="polite" className="fx-hint">
-                  {reviewing.tb
-                    ? "正在复核字段映射；复核期间暂时锁定。"
-                    : reviewStatus.tb ||
-                      "脚本已自动映射，可直接核对，或用上方一键复核。"}
-                </p>
-                {tb.foreignCurrencyNeedsConfirmation && (
-                  <div className="fx-currency-confirm">
-                    <div>
-                      <strong>检测到多个外币币种候选</strong>
-                      <p>
-                        系统已预选“{String(tbMapping.currency ?? "—")}”。候选：
-                        {(tb.foreignCurrencyCandidates ?? [])
-                          .map(
-                            (item) =>
-                              `${item.column}（${item.foreignCurrencies.join("/")}）`,
-                          )
-                          .join("、")}
-                        。请核对预览后确认。
-                      </p>
-                    </div>
-                    <Button
-                      variant="secondary"
-                      disabled={busy || reviewing.tb || tbCurrencyConfirmed}
-                      onClick={() => setTbCurrencyConfirmed(true)}
-                    >
-                      {tbCurrencyConfirmed ? "已确认外币列" : "确认当前外币列"}
-                    </Button>
-                  </div>
+              ) : tbPath ? (
+                <Card className="fx-source-empty">
+                  <CardHeader>
+                    <CardTitle>JE 凭证明细</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p>未识别到 JE；请补充上传或检查文件表头。</p>
+                  </CardContent>
+                </Card>
+              ) : null}
+            </div>
+            <div className="fx-source-slot fx-source-slot-tb">
+              {tbPath ? (
+                <SourceCard
+                  title="已识别：TB 科目余额表"
+                  path={tbPath}
+                  inspection={tb}
+                  disabled={busy || reviewingAny}
+                  onClear={() => {
+                    reviews.clearReview("tb");
+                    setTbPath("");
+                    setTb(undefined);
+                    setTbMapping({});
+                  }}
+                  onInspect={() => void inspect("tb")}
+                  onHeaderChange={(headerRow, headerDepth, sheet) =>
+                    void inspect("tb", { headerRow, headerDepth, sheet })
+                  }
+                />
+              ) : jePath ? (
+                <Card className="fx-source-empty">
+                  <CardHeader>
+                    <CardTitle>TB 科目余额表</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p>未识别到 TB；请补充上传或检查文件表头。</p>
+                  </CardContent>
+                </Card>
+              ) : null}
+            </div>
+          </div>
+          {(je || tb) && (
+            <LedgerReviewAll
+              present={je && tb ? ["je", "tb"] : je ? ["je"] : ["tb"]}
+              names={{ je: "JE", tb: "TB" }}
+              reviewing={reviewing}
+              status={reviewStatus}
+              results={reviews.results}
+              disabled={busy}
+              onReviewAll={() => void reviewBoth()}
+              onUndo={reviews.undoChange}
+              onAccept={reviews.acceptPending}
+            />
+          )}
+          {je && tb && alignment.length > 0 && (
+            <section className="kz-card fx-alignment" aria-live="polite">
+              <h2>TB 与 JE 口径核对</h2>
+              <ul>
+                {alignment.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </section>
+          )}
+          {(je || tb) && (
+            <Card>
+              <CardHeader>
+                <CardTitle>公司本位币</CardTitle>
+              </CardHeader>
+              <CardContent className="fx-list">
+                {tb?.uniformCurrency ? (
+                  <p className="fx-hint">
+                    TB 的本位币币种列整列都是 {tb.uniformCurrency}
+                    ，已自动预填。这与“原币币种”是两个独立口径：原币为 USD
+                    不代表公司本位币也是 USD。
+                  </p>
+                ) : (
+                  <p className="fx-hint">
+                    未从 TB 识别到单一的本位币币种，暂按 CNY 预填。请在核对 JE
+                    字段映射前确认；“原币币种”不会被当作公司本位币。
+                  </p>
                 )}
-              </>
-            }
-            onMappingChange={(action) => {
-              setTbCurrencyConfirmed(false);
-              setTbMapping(action);
-            }}
-            reviewBusy={reviewing.tb}
-          />
-        )}
-      </div>
+                {entities.length ? (
+                  entities.map((entity) => (
+                    <label key={entity}>
+                      <span>{entity}</span>
+                      <input
+                        value={
+                          entityCurrencies[entity] ?? defaultFunctionalCurrency
+                        }
+                        maxLength={3}
+                        onChange={(e) =>
+                          setEntityCurrency(entity, e.target.value)
+                        }
+                      />
+                    </label>
+                  ))
+                ) : (
+                  <label>
+                    <span>本位币（全表）</span>
+                    <input
+                      value={
+                        entityCurrencies[fixedEntity] ??
+                        defaultFunctionalCurrency
+                      }
+                      maxLength={3}
+                      onChange={(e) =>
+                        setEntityCurrency(fixedEntity, e.target.value)
+                      }
+                    />
+                  </label>
+                )}
+              </CardContent>
+            </Card>
+          )}
+          <div className="fx-preview-stack">
+            {je && (
+              <FxPreview
+                title="JE 文件预览与字段映射"
+                kind="je"
+                inspection={je}
+                mapping={jeMapping}
+                labels={JE_LABELS}
+                missing={fxMissingRequired(
+                  "je",
+                  jeMapping,
+                  true,
+                  fixedEntity,
+                  mode,
+                )}
+                banner={
+                  reviewing.je || reviewStatus.je ? (
+                    <p aria-live="polite" className="fx-hint">
+                      {reviewing.je
+                        ? "正在复核字段映射；复核期间暂时锁定。"
+                        : reviewStatus.je}
+                    </p>
+                  ) : null
+                }
+                onMappingChange={setJeMapping}
+                reviewBusy={reviewing.je}
+              />
+            )}
+            {tb && (
+              <FxPreview
+                title="TB 文件预览与字段映射"
+                kind="tb"
+                inspection={tb}
+                mapping={tbMapping}
+                labels={TB_LABELS}
+                missing={fxMissingRequired(
+                  "tb",
+                  tbMapping,
+                  Boolean(je),
+                  fixedEntity,
+                )}
+                banner={
+                  <>
+                    {reviewing.tb || reviewStatus.tb ? (
+                      <p aria-live="polite" className="fx-hint">
+                        {reviewing.tb
+                          ? "正在复核字段映射；复核期间暂时锁定。"
+                          : reviewStatus.tb}
+                      </p>
+                    ) : null}
+                    {tb.foreignCurrencyNeedsConfirmation && (
+                      <div className="fx-currency-confirm">
+                        <div>
+                          <strong>检测到多个外币币种候选</strong>
+                          <p>
+                            系统已预选“{String(tbMapping.currency ?? "—")}
+                            ”。候选：
+                            {(tb.foreignCurrencyCandidates ?? [])
+                              .map(
+                                (item) =>
+                                  `${item.column}（${item.foreignCurrencies.join("/")}）`,
+                              )
+                              .join("、")}
+                            。请核对预览后确认。
+                          </p>
+                        </div>
+                        <Button
+                          variant="secondary"
+                          disabled={busy || reviewing.tb || tbCurrencyConfirmed}
+                          onClick={() => setTbCurrencyConfirmed(true)}
+                        >
+                          {tbCurrencyConfirmed
+                            ? "已确认外币列"
+                            : "确认当前外币列"}
+                        </Button>
+                      </div>
+                    )}
+                  </>
+                }
+                onMappingChange={(action) => {
+                  setTbCurrencyConfirmed(false);
+                  setTbMapping(action);
+                }}
+                reviewBusy={reviewing.tb}
+              />
+            )}
+          </div>
           <div className="fx-step-actions">
-            <Button
-              disabled={!je && !tb}
-              onClick={() => setStep(1)}
-            >
+            <Button disabled={!je && !tb} onClick={() => setStep(1)}>
               下一步：确认TB科目类型
             </Button>
           </div>
@@ -1471,169 +1567,184 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       )}
       {step === 1 && (
         <>
-      {(je || tb) && (
-        <div>
-          <Card>
-            <CardHeader>
-              <CardTitle>TB科目类型确认</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="fx-accounts-block">
-                <p className="fx-hint">
-                  系统已按科目名称和编码判好每个科目属于哪一类、用的什么币，通常不用改。
-                  「外币」显示认出的账户币种，括号里是依据：
-                  <strong>币种列</strong>最准，<strong>科目名</strong>次之，
-                  <strong>按本位币</strong>表示没认出——这类科目不参与重估，
-                  实际持有外币的请在这里手工指定币种。
-                </p>
-                <details className="fx-hint fx-accounts-more">
-                  <summary>识别规则详解</summary>
-                  <p>
-                    分类按词典和科目编码归入五类；把握不大的也给默认类别并标「建议复核」，不会留空。
-                  </p>
-                  <p>
-                    账户币种按三级取：币种列 → 科目名／科目文本里的币种线索 →
-                    都没有就按本位币（取 TB 的本位币列，没有则取上面填的公司本位币）。
-                  </p>
-                  <p>只有多个主体、本位币又互不相同时，才会显示「未识别」。</p>
-                </details>
-                <KeywordFilter
-                  value={accountFilter}
-                  onChange={setAccountFilter}
-                  ariaLabel="筛选科目"
-                  placeholder="输入科目编码、名称或币种（如 USD）关键词，即时过滤"
-                  matched={visibleAccounts.length}
-                  total={accounts.length}
-                />
-                <div className="fx-list fx-accounts">
-                  <div className="fx-accounts-head">
-                    <span>科目</span>
-                    <span>分类</span>
-                    <span>外币</span>
-                  </div>
-                  {visibleAccounts.map((account) => {
-                    const detail =
-                      tb?.accountRoleDetails?.[account] ??
-                      je?.accountRoleDetails?.[account];
-                    // 两边都看：JE 逐行读凭证货币，比只有一行的 TB 更能反映该科目实际用过哪些币种。
-                    const {
-                      detected,
-                      source,
-                      side,
-                      seen,
-                      fellBack,
-                      multiCurrency,
-                    } = fxAccountCurrencyDetail(
-                      account,
-                      je?.accountCurrencyDetails,
-                      tb?.accountCurrencyDetails,
-                    );
-                    // 多币种科目被指定成单一币种：TB 多半只有一个合计余额，这么重估必然是假数。
-                    const currencyRisk =
-                      multiCurrency && Boolean(accountCurrencies[account]);
-                    return (
-                      <label key={account}>
-                        <span
-                          title={
-                            detail
-                              ? `${account}\n${detail.reason}（置信度 ${Math.round(detail.confidence * 100)}%）`
-                              : account
-                          }
-                        >
-                          {account}
-                          {detail?.needsConfirmation && (
-                            <small> 建议复核</small>
-                          )}
-                          {multiCurrency && (
-                            <small title={`该科目出现过 ${seen.join("、")}`}>
-                              {" "}
-                              {seen.length}种币种
-                            </small>
-                          )}
-                        </span>
-                        <select
-                          value={accountRoles[account] ?? "non_monetary"}
-                          onChange={(e) => {
-                            setAccountRolesTouched((v) => ({
-                              ...v,
-                              [account]: true,
-                            }));
-                            setAccountRoles((v) => ({
-                              ...v,
-                              [account]: e.target.value,
-                            }));
-                          }}
-                        >
-                          {ROLE_OPTIONS.map(([value, label]) => (
-                            <option key={value} value={value}>
-                              {label}
-                            </option>
-                          ))}
-                        </select>
-                        <select
-                          className={
-                            currencyRisk
-                              ? "fx-currency-risky"
-                              : accountCurrencies[account]
-                                ? "fx-currency-override"
-                                : fellBack
-                                  ? "fx-currency-unknown"
-                                  : undefined
-                          }
-                          title={
-                            currencyRisk
-                              ? `该科目在数据里出现过 ${seen.join("、")} 共 ${seen.length} 种币种。
-科目余额表若只给出这个科目的合计余额，指定单一币种等于拿一种汇率去重估几种币种的合计数，结果不可用。
+          {(je || tb) && (
+            <div>
+              <Card>
+                <CardHeader>
+                  <CardTitle>TB科目类型确认</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="fx-accounts-block">
+                    <p className="fx-hint">
+                      系统已按科目名称和编码判好每个科目属于哪一类、用的什么币，通常不用改。
+                      「外币」显示认出的账户币种，括号里是依据：
+                      <strong>TB币种列</strong>最准，<strong>科目名</strong>
+                      次之；
+                      JE币种列只有该科目全部明细币种一致时才作为后备依据。
+                      <strong>按本位币</strong>表示没认出——这类科目不参与重估，
+                      实际持有外币的请在这里手工指定币种。
+                    </p>
+                    <details className="fx-hint fx-accounts-more">
+                      <summary>识别规则详解</summary>
+                      <p>
+                        分类按词典和科目编码归入五类；把握不大的也给默认类别并标「建议复核」，不会留空。
+                      </p>
+                      <p>
+                        账户币种依次取：TB原币币种列 →
+                        科目名／科目文本里的币种线索 → 全部明细一致的JE币种列 →
+                        都没有就按本位币（取 TB
+                        的本位币列，没有则取上面填的公司本位币）。
+                      </p>
+                      <p>
+                        只有多个主体、本位币又互不相同时，才会显示「未识别」。
+                      </p>
+                    </details>
+                    <KeywordFilter
+                      value={accountFilter}
+                      onChange={setAccountFilter}
+                      ariaLabel="筛选科目"
+                      placeholder="输入科目编码、名称或币种（如 USD）关键词，即时过滤"
+                      matched={visibleAccounts.length}
+                      total={accounts.length}
+                    />
+                    <div className="fx-list fx-accounts">
+                      <div className="fx-accounts-head">
+                        <span>科目</span>
+                        <span>分类</span>
+                        <span>外币</span>
+                      </div>
+                      {visibleAccounts.map((account) => {
+                        const detail =
+                          tb?.accountRoleDetails?.[account] ??
+                          je?.accountRoleDetails?.[account];
+                        // 两边都看：JE 逐行读凭证货币，比只有一行的 TB 更能反映该科目实际用过哪些币种。
+                        const {
+                          detected,
+                          source,
+                          side,
+                          seen,
+                          fellBack,
+                          multiCurrency,
+                          jeMultiCurrency,
+                        } = fxAccountCurrencyDetail(
+                          account,
+                          je?.accountCurrencyDetails,
+                          tb?.accountCurrencyDetails,
+                        );
+                        // JE 已证明同科目存在多币种时，TB 若只给一行合计余额就无法
+                        // 重估；无需等用户手工指定币种才提示。
+                        const currencyRisk = jeMultiCurrency;
+                        return (
+                          <label key={account}>
+                            <span
+                              title={
+                                detail
+                                  ? `${account}\n${detail.reason}（置信度 ${Math.round(detail.confidence * 100)}%）`
+                                  : account
+                              }
+                            >
+                              {account}
+                              {detail?.needsConfirmation && (
+                                <small> 建议复核</small>
+                              )}
+                              {multiCurrency && (
+                                <small
+                                  title={
+                                    jeMultiCurrency
+                                      ? `JE中该科目出现 ${seen.join("、")} 等多个币种；请复核TB是否按币种拆分。`
+                                      : `该科目出现过 ${seen.join("、")}`
+                                  }
+                                >
+                                  {" "}
+                                  {jeMultiCurrency
+                                    ? "JE多币种·复核TB"
+                                    : `${seen.length}种币种`}
+                                </small>
+                              )}
+                            </span>
+                            <select
+                              value={accountRoles[account] ?? "non_monetary"}
+                              onChange={(e) => {
+                                setAccountRolesTouched((v) => ({
+                                  ...v,
+                                  [account]: true,
+                                }));
+                                setAccountRoles((v) => ({
+                                  ...v,
+                                  [account]: e.target.value,
+                                }));
+                              }}
+                            >
+                              {ROLE_OPTIONS.map(([value, label]) => (
+                                <option key={value} value={value}>
+                                  {label}
+                                </option>
+                              ))}
+                            </select>
+                            <select
+                              className={
+                                currencyRisk
+                                  ? "fx-currency-risky"
+                                  : accountCurrencies[account]
+                                    ? "fx-currency-override"
+                                    : fellBack
+                                      ? "fx-currency-unknown"
+                                      : undefined
+                              }
+                              title={
+                                currencyRisk
+                                  ? `JE中该科目出现过 ${seen.join("、")} 等多个币种，说明该科目可能同时持有多币种敞口。
+请复核TB是否按币种拆分；若TB只给该科目一行合计余额，就无法用单一汇率可靠重估。
 正确做法是改用按币种拆分的科目余额表。`
-                              : detected
-                                ? `系统识别：${detected}（依据${source}）${
-                                    seen.length > 1
-                                      ? `
+                                  : detected
+                                    ? `系统识别：${detected}（依据${source}）${
+                                        seen.length > 1
+                                          ? `
 该科目出现过：${seen.join("、")}`
-                                      : ""
-                                  }`
-                                : fallbackFunctional
-                                  ? `系统未识别到该科目的币种，按界面填写的本位币 ${fallbackFunctional} 处理，不参与重估。
+                                          : ""
+                                      }`
+                                    : fallbackFunctional
+                                      ? `系统未识别到该科目的币种，按界面填写的本位币 ${fallbackFunctional} 处理，不参与重估。
 若该科目实际持有外币，请在此手工指定。`
-                                  : "系统未识别到该科目的币种，请手工指定"
-                          }
-                          value={accountCurrencies[account] ?? ""}
-                          onChange={(e) =>
-                            setAccountCurrencies((v) => ({
-                              ...v,
-                              [account]: e.target.value,
-                            }))
-                          }
-                        >
-                          <option value="">
-                            {detected
-                              ? `自动：${detected}（${fxCurrencySourceLabel(side, source)}）`
-                              : fallbackFunctional
-                                ? `自动：${fallbackFunctional}（按本位币）`
-                                : "自动：未识别"}
-                          </option>
-                          {[...new Set([...seen, ...CURRENCY_OPTIONS])].map(
-                            (code) => (
-                              <option key={code} value={code}>
-                                {code}
+                                      : "系统未识别到该科目的币种，请手工指定"
+                              }
+                              value={accountCurrencies[account] ?? ""}
+                              onChange={(e) =>
+                                setAccountCurrencies((v) => ({
+                                  ...v,
+                                  [account]: e.target.value,
+                                }))
+                              }
+                            >
+                              <option value="">
+                                {detected
+                                  ? `自动：${detected}（${fxCurrencySourceLabel(side, source)}）`
+                                  : fallbackFunctional
+                                    ? `自动：${fallbackFunctional}（按本位币）`
+                                    : "自动：未识别"}
                               </option>
-                            ),
-                          )}
-                        </select>
-                      </label>
-                    );
-                  })}
-                </div>
-                {accounts.length > 0 && visibleAccounts.length === 0 && (
-                  <p className="fx-hint">
-                    没有匹配「{accountFilter.trim()}」的科目。
-                  </p>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
+                              {[...new Set([...seen, ...CURRENCY_OPTIONS])].map(
+                                (code) => (
+                                  <option key={code} value={code}>
+                                    {code}
+                                  </option>
+                                ),
+                              )}
+                            </select>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    {accounts.length > 0 && visibleAccounts.length === 0 && (
+                      <p className="fx-hint">
+                        没有匹配「{accountFilter.trim()}」的科目。
+                      </p>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          )}
           <div className="fx-step-actions">
             <Button variant="secondary" onClick={() => setStep(0)}>
               返回上传与识别
@@ -1649,145 +1760,147 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
               返回科目类型确认
             </Button>
           </div>
-      <Card>
-        <CardHeader>
-          <CardTitle>测算与底稿</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="fx-run-grid">
-            <label>
-              资产负债表日
-              <input
-                type="date"
-                value={reportEnd}
-                onChange={(e) => setReportEnd(e.target.value)}
-              />
-            </label>
-            <label>
-              输出文件
-              <input
-                value={outputPath}
-                readOnly
-                placeholder="默认保存到源文件目录"
-              />
-            </label>
-            <Button
-              variant="secondary"
-              onClick={async () => {
-                const path = await pickPath(
-                  "save",
-                  "保存审计底稿",
-                  ["xlsx"],
-                  "汇兑损益测算.xlsx",
-                );
-                if (typeof path === "string") setOutputPath(path);
-              }}
-            >
-              选择位置
-            </Button>
-          </div>
-          <p className="fx-rate-note">汇率取自中国人民银行。</p>
-          {(requiredMappingsMissing.length > 0 ||
-            currencyConfirmationMissing) && (
-            <p className="fx-warning" aria-live="polite">
-              还不能测算：
-              {[
-                ...requiredMappingsMissing,
-                ...(currencyConfirmationMissing
-                  ? ["TB 外币币种列待确认"]
-                  : []),
-              ].join("、")}
-              。请回到
-              <button
-                type="button"
-                className="fx-link-button"
-                onClick={() => setStep(0)}
-              >
-                上传与识别
-              </button>
-              补齐字段映射。
-            </p>
-          )}
-          <p className="fx-stage-note">
-            “测算预览”会执行完整汇兑损益测算并在下方展示结果；修改凭证分类后点击“重新测算”。“生成Excel底稿”只生成并保存当前口径的底稿，不会清空已显示的预览结果。
-          </p>
-          <div className="fx-actions">
-            <Button
-              variant="secondary"
-              disabled={
-                busy ||
-                reviewingAny ||
-                requiredMappingsMissing.length > 0 ||
-                currencyConfirmationMissing
-              }
-              onClick={() => void run("fx.preview")}
-            >
-              {activeStage === "fx.preview" ? "测算中…" : "测算预览"}
-            </Button>
-            <Button
-              variant="secondary"
-              disabled={
-                busy ||
-                reviewingAny ||
-                !je ||
-                !result ||
-                requiredMappingsMissing.length > 0 ||
-                currencyConfirmationMissing
-              }
-              onClick={() => void recalculateClassifications()}
-            >
-              {activeStage === "fx.preview" && busy
-                ? "重新测算中…"
-                : "重新测算"}
-            </Button>
-            <Button
-              disabled={
-                busy ||
-                reviewingAny ||
-                !result ||
-                requiredMappingsMissing.length > 0 ||
-                currencyConfirmationMissing
-              }
-              onClick={() => void run("fx.export")}
-            >
-              {activeStage === "fx.export" ? "正在生成底稿…" : "生成Excel底稿"}
-            </Button>
-          </div>
-          {activeJobMethod.current === "fx.export" ? (
-            busy ? (
-              <div className="fx-export-stage" role="status">
-                <strong>正在生成Excel底稿</strong>
-                <span>
-                  测算预览已经完成；当前步骤仅整理并保存底稿，页面上的测算结果会继续保留。
-                </span>
+          <Card>
+            <CardHeader>
+              <CardTitle>测算与底稿</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="fx-run-grid">
+                <label>
+                  资产负债表日
+                  <input
+                    type="date"
+                    value={reportEnd}
+                    onChange={(e) => setReportEnd(e.target.value)}
+                  />
+                </label>
+                <label>
+                  输出文件
+                  <input
+                    value={displayFileName(outputPath)}
+                    readOnly
+                    placeholder="默认保存到源文件目录"
+                  />
+                </label>
+                <Button
+                  variant="secondary"
+                  onClick={async () => {
+                    const path = await pickPath(
+                      "save",
+                      "保存审计底稿",
+                      ["xlsx"],
+                      "汇兑损益测算.xlsx",
+                    );
+                    if (typeof path === "string") setOutputPath(path);
+                  }}
+                >
+                  选择位置
+                </Button>
               </div>
-            ) : (
-              completedStage === "fx.export" &&
-              outputsFrom(result).length > 0 && (
-                <p className="fx-export-complete" role="status">
-                  Excel底稿已生成；测算预览结果已保留在下方。
+              <p className="fx-rate-note">汇率取自中国人民银行。</p>
+              {(requiredMappingsMissing.length > 0 ||
+                currencyConfirmationMissing) && (
+                <p className="fx-warning" aria-live="polite">
+                  还不能测算：
+                  {[
+                    ...requiredMappingsMissing,
+                    ...(currencyConfirmationMissing
+                      ? ["TB 外币币种列待确认"]
+                      : []),
+                  ].join("、")}
+                  。请回到
+                  <button
+                    type="button"
+                    className="fx-link-button"
+                    onClick={() => setStep(0)}
+                  >
+                    上传与识别
+                  </button>
+                  补齐字段映射。
                 </p>
-              )
-            )
-          ) : (
-            job && (
-              <JobProgress
-                job={job}
-                onCancel={busy ? (id) => void jobCancel(id) : undefined}
-              />
-            )
-          )}
-          {result && (
-            <FxResult
-              result={result}
-              busy={busy}
-              classificationDrafts={classificationDrafts}
-              onClassificationChange={stageVoucherClassifications}
-              onRecalculate={recalculateClassifications}
-            />
-          )}
-        </CardContent>
-      </Card>
+              )}
+              <p className="fx-stage-note">
+                “测算预览”会执行完整汇兑损益测算并在下方展示结果；修改凭证分类后点击“重新测算”。“生成Excel底稿”只生成并保存当前口径的底稿，不会清空已显示的预览结果。
+              </p>
+              <div className="fx-actions">
+                <Button
+                  variant="secondary"
+                  disabled={
+                    busy ||
+                    reviewingAny ||
+                    requiredMappingsMissing.length > 0 ||
+                    currencyConfirmationMissing
+                  }
+                  onClick={() => void run("fx.preview")}
+                >
+                  {activeStage === "fx.preview" ? "测算中…" : "测算预览"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  disabled={
+                    busy ||
+                    reviewingAny ||
+                    !je ||
+                    !result ||
+                    requiredMappingsMissing.length > 0 ||
+                    currencyConfirmationMissing
+                  }
+                  onClick={() => void recalculateClassifications()}
+                >
+                  {activeStage === "fx.preview" && busy
+                    ? "重新测算中…"
+                    : "重新测算"}
+                </Button>
+                <Button
+                  disabled={
+                    busy ||
+                    reviewingAny ||
+                    !result ||
+                    requiredMappingsMissing.length > 0 ||
+                    currencyConfirmationMissing
+                  }
+                  onClick={() => void run("fx.export")}
+                >
+                  {activeStage === "fx.export"
+                    ? "正在生成底稿…"
+                    : "生成Excel底稿"}
+                </Button>
+              </div>
+              {activeJobMethod.current === "fx.export" ? (
+                busy ? (
+                  <div className="fx-export-stage" role="status">
+                    <strong>正在生成Excel底稿</strong>
+                    <span>
+                      测算预览已经完成；当前步骤仅整理并保存底稿，页面上的测算结果会继续保留。
+                    </span>
+                  </div>
+                ) : (
+                  completedStage === "fx.export" &&
+                  outputsFrom(result).length > 0 && (
+                    <p className="fx-export-complete" role="status">
+                      Excel底稿已生成；测算预览结果已保留在下方。
+                    </p>
+                  )
+                )
+              ) : (
+                job && (
+                  <JobProgress
+                    job={job}
+                    onCancel={busy ? (id) => void jobCancel(id) : undefined}
+                  />
+                )
+              )}
+              {result && (
+                <FxResult
+                  result={result}
+                  busy={busy}
+                  classificationDrafts={classificationDrafts}
+                  onClassificationChange={stageVoucherClassifications}
+                  onRecalculate={recalculateClassifications}
+                />
+              )}
+            </CardContent>
+          </Card>
         </>
       )}
     </main>
@@ -1796,7 +1909,6 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
 
 function SourceCard(props: {
   title: string;
-  hint: string;
   path: string;
   inspection?: Inspection;
   disabled: boolean;
@@ -1805,14 +1917,13 @@ function SourceCard(props: {
   onHeaderChange: (row: number, depth: number, sheet: string) => void;
 }) {
   return (
-    <Card>
+    <Card className="fx-source-card">
       <CardHeader>
         <CardTitle>{props.title}</CardTitle>
       </CardHeader>
       <CardContent>
-        <p className="fx-hint">{props.hint}</p>
         <div className="fx-detected-file">
-          <span title={props.path}>{props.path}</span>
+          <span>{displayFileName(props.path)}</span>
           <button
             type="button"
             disabled={props.disabled}
@@ -1967,10 +2078,7 @@ function FxPreview(props: {
   const formMatch = forms.length
     ? resolveForm(props.kind, forms, props.mapping)
     : undefined;
-  const formNote = describeForm(
-    formMatch,
-    (role) => labels[role] ?? role,
-  );
+  const formNote = describeForm(formMatch, (role) => labels[role] ?? role);
   // 一列可以同时承担多个语义：科目名称里往往就写着账户币种
   // （`银行存款-中行朝阳支行美元户`），它既是科目名称也是币种线索文本。
   const mappedRoles = (header: string) =>

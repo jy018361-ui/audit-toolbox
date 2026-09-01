@@ -16,6 +16,7 @@ import { JobProgress } from "@/components/JobProgress";
 import { Field } from "@/components/Field";
 import { FileInput } from "@/components/FileInput";
 import { FileDropInput } from "@/components/FileDropInput";
+import { displayFileName } from "@/fileDisplay";
 import { DataTable } from "@/components/DataTable";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -761,7 +762,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                       variant="default"
                       onClick={() => void openOutput(output)}
                     >
-                      打开结果：{output}
+                      打开结果：{displayFileName(output)}
                     </Button>
                   ))}
                 </div>

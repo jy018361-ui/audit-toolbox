@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { displayFileName } from "@/fileDisplay";
 
 export type FileInputProps = {
   value: string;
@@ -33,12 +34,18 @@ export function FileInput({
   return (
     <div className="input-with-button">
       <Input
-        value={value}
+        value={value ? displayFileName(value) : ""}
         placeholder={placeholder}
         readOnly={readOnly}
         disabled={disabled}
       />
-      <Button type="button" variant="secondary" size="sm" onClick={onBrowse} disabled={disabled}>
+      <Button
+        type="button"
+        variant="secondary"
+        size="sm"
+        onClick={onBrowse}
+        disabled={disabled}
+      >
         {browseLabel}
       </Button>
       {extraActions}

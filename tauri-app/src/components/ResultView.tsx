@@ -1,4 +1,5 @@
 import { openOutput } from "@/api";
+import { displayFileName } from "@/fileDisplay";
 
 const RESULT_COUNT_LABELS: Record<string, string> = {
   rows: "处理行数",
@@ -85,7 +86,7 @@ export function ResultView({ value }: { value: unknown }) {
           <strong>需要注意（{warnings.length}）</strong>
           <ul>
             {warnings.map((item) => (
-              <li key={item}>{item}</li>
+              <li key={item}>{displayFileName(item)}</li>
             ))}
           </ul>
         </div>
@@ -135,7 +136,7 @@ export function ResultView({ value }: { value: unknown }) {
           key={p}
           onClick={() => void openOutput(p)}
         >
-          {p}
+          {displayFileName(p)}
         </button>
       ))}
     </div>

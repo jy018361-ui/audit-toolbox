@@ -214,6 +214,9 @@ export function MappingPanel(props: MappingPanelProps) {
             busy || (!toggleMode && Boolean(current) && locked(current))
           }
           value={toggleMode ? "" : current}
+          data-mapped={
+            toggleMode ? held.length > 0 : Boolean(current && !locked(current))
+          }
           title={toggleMode && held.length ? summary : undefined}
           onChange={(e) => {
             const role = e.target.value;
@@ -223,7 +226,12 @@ export function MappingPanel(props: MappingPanelProps) {
             } else update(column, role);
           }}
         >
-          <option value="">{toggleMode ? summary : "— 选择字段"}</option>
+          <option
+            value=""
+            className={held.length ? "dt-current-mapping" : undefined}
+          >
+            {toggleMode ? summary : "— 选择字段"}
+          </option>
           {props.groups
             ? props.groups.map((group) => (
                 <optgroup
@@ -233,7 +241,11 @@ export function MappingPanel(props: MappingPanelProps) {
                   className={
                     group.status === "未适配"
                       ? "dt-group-unavailable"
-                      : undefined
+                      : group.status === "已适配"
+                        ? "dt-group-adapted"
+                        : group.status === "可适配"
+                          ? "dt-group-available"
+                          : undefined
                   }
                 >
                   {group.roles
@@ -251,7 +263,7 @@ export function MappingPanel(props: MappingPanelProps) {
   });
 
   return (
-    <section className="kz-card kz-preview">
+    <section className="kz-card kz-preview mapping-panel">
       <div className="loan-map-head">
         <div>
           <h2>{props.title}</h2>

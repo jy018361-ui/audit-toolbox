@@ -506,7 +506,10 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const [dropActive, setDropActive] = useState(false);
   const [llmReviewBusy, setLlmReviewBusy] = useState(false);
   const [llmReviewStatus, setLlmReviewStatus] = useState("");
-  const [llmReviews, setLlmReviews] = useState<Record<string, GroupLedgerReview>>({});
+  const [llmReviews, setLlmReviews] = useState<
+    Record<string, GroupLedgerReview>
+  >({});
+  const [currentStep, setCurrentStep] = useState(0);
   const [exported, setExported] = useState<
     { path: string; batch: boolean } | undefined
   >();
@@ -519,7 +522,10 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     toolId: "tbje_check",
     onEvent: (event) => {
       const payload = event.result as { groups?: GroupOutcome[] } | undefined;
-      if (payload?.groups) setOutcomes(payload.groups);
+      if (payload?.groups) {
+        setOutcomes(payload.groups);
+        setCurrentStep(2);
+      }
       const single = event.result as { outputPath?: string } | undefined;
       if (typeof single?.outputPath === "string")
         setExported({ path: single.outputPath, batch: false });
@@ -605,7 +611,9 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     );
     setInspects(nextInspects);
     setMappings(nextMappings);
-    setGroups(pairLedgerFiles(merged));
+    const paired = pairLedgerFiles(merged);
+    setGroups(paired);
+    if (paired.length > 0) setCurrentStep(1);
     setStatus(
       failures.length ? `${failures.length} 份文件没读成：${failures[0]}` : "",
     );
@@ -644,8 +652,6 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   );
 
   const runnable = groups.filter((group) => group.tb);
-  const currentStep = outcomes.length > 0 ? 2 : groups.length > 0 ? 1 : 0;
-
   function invalidateResults(clearLlm = true) {
     activeJobId.current = "__inputs_changed__";
     setOutcomes([]);
@@ -680,6 +686,25 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     setExpanded((current) =>
       current?.groupId === group.id ? undefined : current,
     );
+    if (groups.length === 1) setCurrentStep(0);
+    invalidateResults();
+  }
+
+  function removeAllGroups() {
+    if (
+      !window.confirm(
+        `确认移除全部 ${groups.length} 组？只会清空本次核对，不会删除原文件。`,
+      )
+    )
+      return;
+    setGroups([]);
+    setInspects({});
+    setMappings({});
+    setExpanded(undefined);
+    setLlmReviews({});
+    setLlmReviewStatus("");
+    setStatus("");
+    setCurrentStep(0);
     invalidateResults();
   }
 
@@ -690,11 +715,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   }
 
   const goToStep = (index: number) => {
-    [intakeSectionRef, pairingSectionRef, resultSectionRef][
-      index
-    ]?.current?.scrollIntoView({
-      block: "start",
-    });
+    setCurrentStep(index);
   };
 
   const reviewTargetsOf = (group: PairedGroup) => {
@@ -760,7 +781,9 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       }
     };
     try {
-      await Promise.all(Array.from({ length: Math.min(2, candidates.length) }, worker));
+      await Promise.all(
+        Array.from({ length: Math.min(2, candidates.length) }, worker),
+      );
       setLlmReviewStatus(
         failed
           ? `联合复核完成：${candidates.length - failed} 组成功，${failed} 组失败；失败组保留 Coding 映射。`
@@ -772,16 +795,21 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
-  function undoGroupReview(group: PairedGroup, kind: LedgerKind, index: number) {
+  function undoGroupReview(
+    group: PairedGroup,
+    kind: LedgerKind,
+    index: number,
+  ) {
     const file = kind === "tb" ? group.tb : group.je;
     const outcome = llmReviews[group.id]?.[kind];
     const change = outcome?.applied[index];
     if (!file || !outcome || !change) return;
     const mapping = { ...outcome.mapping };
     if (change.beforeValue === undefined) delete mapping[change.role];
-    else mapping[change.role] = Array.isArray(change.beforeValue)
-      ? [...change.beforeValue]
-      : change.beforeValue;
+    else
+      mapping[change.role] = Array.isArray(change.beforeValue)
+        ? [...change.beforeValue]
+        : change.beforeValue;
     const applied = outcome.applied.filter((_, at) => at !== index);
     setMappings((current) => ({ ...current, [file.path]: mapping }));
     setLlmReviews((current) => ({
@@ -794,7 +822,11 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     invalidateResults(false);
   }
 
-  function acceptGroupPending(group: PairedGroup, kind: LedgerKind, index: number) {
+  function acceptGroupPending(
+    group: PairedGroup,
+    kind: LedgerKind,
+    index: number,
+  ) {
     const file = kind === "tb" ? group.tb : group.je;
     const outcome = llmReviews[group.id]?.[kind];
     const change = outcome?.pending[index];
@@ -802,26 +834,43 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     const mapping = { ...outcome.mapping };
     const beforeValue = mapping[change.role];
     mapping[change.role] = LEDGER_MULTI_COLUMN_ROLES.has(change.role)
-      ? [...new Set([
-          ...(Array.isArray(beforeValue) ? beforeValue : beforeValue ? [beforeValue] : []),
-          change.suggestedColumn,
-        ])]
+      ? [
+          ...new Set([
+            ...(Array.isArray(beforeValue)
+              ? beforeValue
+              : beforeValue
+                ? [beforeValue]
+                : []),
+            change.suggestedColumn,
+          ]),
+        ]
       : change.suggestedColumn;
     const pending = outcome.pending.filter((_, at) => at !== index);
-    const applied = [...outcome.applied, {
-      ...change,
-      beforeValue: Array.isArray(beforeValue) ? [...beforeValue] : beforeValue,
-      currentColumn: Array.isArray(beforeValue)
-        ? beforeValue.join("＋")
-        : beforeValue || "未映射",
-      attention: true,
-    }];
+    const applied = [
+      ...outcome.applied,
+      {
+        ...change,
+        beforeValue: Array.isArray(beforeValue)
+          ? [...beforeValue]
+          : beforeValue,
+        currentColumn: Array.isArray(beforeValue)
+          ? beforeValue.join("＋")
+          : beforeValue || "未映射",
+        attention: true,
+      },
+    ];
     setMappings((current) => ({ ...current, [file.path]: mapping }));
     setLlmReviews((current) => ({
       ...current,
       [group.id]: {
         ...current[group.id],
-        [kind]: { ...outcome, mapping, applied, pending, appliedCount: applied.length },
+        [kind]: {
+          ...outcome,
+          mapping,
+          applied,
+          pending,
+          appliedCount: applied.length,
+        },
       },
     }));
     invalidateResults(false);
@@ -1009,43 +1058,45 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         />
       )}
 
-      <section
-        ref={intakeSectionRef}
-        className="tbje-section"
-        aria-labelledby="tbje-files-title"
-      >
-        <Card>
-          <CardHeader>
-            <CardTitle>
-              <h2 id="tbje-files-title" className="tbje-section-title">
-                1. 添加 TB 与 JE 文件
-              </h2>
-            </CardTitle>
-            <CardDescription>
-              把多组科目余额表和序时账一起加入。系统先识别文件类型，再按文件名与主体信息自动配对。
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div ref={dropRef}>
-              <FileDropInput
-                value=""
-                placeholder="把多组 TB 与 JE 一起拖进来，或点击选择"
-                disabled={busy}
-                onBrowse={() => void browse()}
-                onDragStateChange={setDropActive}
-                highlight={dropActive}
-              />
-            </div>
-            {status && (
-              <p className="tbje-status" role="status" aria-live="polite">
-                {status}
-              </p>
-            )}
-          </CardContent>
-        </Card>
-      </section>
+      {currentStep === 0 && (
+        <section
+          ref={intakeSectionRef}
+          className="tbje-section"
+          aria-labelledby="tbje-files-title"
+        >
+          <Card>
+            <CardHeader>
+              <CardTitle>
+                <h2 id="tbje-files-title" className="tbje-section-title">
+                  1. 添加 TB 与 JE 文件
+                </h2>
+              </CardTitle>
+              <CardDescription>
+                把多组科目余额表和序时账一起加入。系统先识别文件类型，再按文件名与主体信息自动配对。
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div ref={dropRef}>
+                <FileDropInput
+                  value=""
+                  placeholder="把多组 TB 与 JE 一起拖进来，或点击选择"
+                  disabled={busy}
+                  onBrowse={() => void browse()}
+                  onDragStateChange={setDropActive}
+                  highlight={dropActive}
+                />
+              </div>
+              {status && (
+                <p className="tbje-status" role="status" aria-live="polite">
+                  {status}
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        </section>
+      )}
 
-      {groups.length > 0 && (
+      {currentStep === 1 && groups.length > 0 && (
         <section
           ref={pairingSectionRef}
           className="tbje-section"
@@ -1077,9 +1128,19 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                     ? "LLM 联合复核中…"
                     : `LLM 一键联合复核 ${groups.length} 组`}
                 </Button>
-                <span aria-live="polite">
-                  {llmReviewStatus || "每组 TB＋JE 同时复核；Coding 已验证的映射受保护。"}
-                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={busy || !groups.length}
+                  className="tbje-remove-all"
+                  onClick={removeAllGroups}
+                >
+                  <Trash2 aria-hidden="true" />
+                  移除全部
+                </Button>
+                {llmReviewStatus && (
+                  <span aria-live="polite">{llmReviewStatus}</span>
+                )}
               </div>
             </CardHeader>
             <CardContent>
@@ -1088,7 +1149,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   <span>配对组</span>
                   <span>科目余额表 TB</span>
                   <span>序时账 JE</span>
-                  <span>字段映射</span>
+                  <span>映射与操作</span>
                 </div>
                 {groups.map((group) => (
                   <div
@@ -1258,14 +1319,19 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                         const present = (["tb", "je"] as LedgerKind[]).filter(
                           (kind) => review[kind],
                         );
-                        const failed = present.some((kind) => review[kind]?.failed);
+                        const failed = present.some(
+                          (kind) => review[kind]?.failed,
+                        );
                         const changed = present.some(
                           (kind) =>
                             (review[kind]?.applied.length ?? 0) > 0 ||
                             (review[kind]?.pending.length ?? 0) > 0,
                         );
                         return (
-                          <div className="tbje-group-llm-result" aria-live="polite">
+                          <div
+                            className="tbje-group-llm-result"
+                            aria-live="polite"
+                          >
                             <span className={failed ? "failed" : undefined}>
                               {failed
                                 ? "LLM 联合复核失败，已保留 Coding 映射。"
@@ -1327,16 +1393,13 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                 >
                   开始核对 {runnable.length} 组
                 </Button>
-                <span className="fx-hint">
-                  系统按组依次核对；运行中的任务可在统一进度窗口暂停或停止。
-                </span>
               </div>
             </CardContent>
           </Card>
         </section>
       )}
 
-      {outcomes.length > 0 && (
+      {currentStep === 2 && outcomes.length > 0 && (
         <section
           ref={resultSectionRef}
           className="tbje-section"
@@ -1349,9 +1412,6 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   3. 查看核对结果
                 </h2>
               </CardTitle>
-              <CardDescription>
-                差异用于提示复核，不会阻止后续操作；请结合尾差、期间范围和账套口径判断。
-              </CardDescription>
             </CardHeader>
             <CardContent>
               <div className="tbje-result-toolbar">
@@ -1504,7 +1564,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
               </div>
               {exported && (
                 <div className="tbje-exported" role="status" aria-live="polite">
-                  <span title={exported.path}>
+                  <span>
                     {exported.batch ? "全部结果已导出至：" : "明细已导出："}
                     {fileName(exported.path)}
                   </span>

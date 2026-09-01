@@ -47,6 +47,9 @@
   color: var(--muted-foreground);
   font-size: 12px;
 }
+.tbje-llm-action .tbje-remove-all {
+  color: var(--danger-fg);
+}
 .tbje-group-llm-result {
   display: grid;
   gap: 4px;
@@ -68,8 +71,7 @@
 .tbje-pairing-head,
 .tbje-group-row {
   display: grid;
-  grid-template-columns:
-    100px minmax(250px, 1fr) minmax(280px, 1.08fr) 190px;
+  grid-template-columns: 100px minmax(250px, 1fr) minmax(280px, 1.08fr) 190px;
   align-items: center;
   gap: var(--sp-3);
   min-width: 900px;
@@ -83,6 +85,10 @@
   color: var(--text-muted);
   font-size: var(--fs-xs);
   font-weight: 600;
+}
+
+.tbje-pairing-head > span:last-child {
+  text-align: left;
 }
 
 .tbje-group {
@@ -201,7 +207,7 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: var(--sp-1);
 }
 
@@ -220,7 +226,23 @@
 
 .tbje-group-mapping .kz-card {
   margin: 0;
-  box-shadow: none;
+  box-shadow: var(--shadow-preview);
+}
+
+/* 映射下拉、原始列名和数据共用同一左边线；列名统一占两行高度，
+   避免长短标题把相邻列的内容顶得参差不齐。 */
+.tbje-group-mapping .data-table-table th > span {
+  display: flex;
+  align-items: flex-start;
+  min-height: 2.5em;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.tbje-group-mapping .data-table-table th,
+.tbje-group-mapping .data-table-table td {
+  padding-inline: var(--sp-2);
+  text-align: left;
 }
 
 .tbje-actions {

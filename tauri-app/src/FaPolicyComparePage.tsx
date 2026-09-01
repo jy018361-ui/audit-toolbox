@@ -16,14 +16,10 @@ import { Field } from "@/components/Field";
 import { FileInput } from "@/components/FileInput";
 import { FileDropInput } from "@/components/FileDropInput";
 import { DataTable } from "@/components/DataTable";
+import { displayFileName } from "@/fileDisplay";
 import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { LlmReview } from "@/components/LlmReview";
 import { useJobEvents } from "@/hooks/useJobEvents";
@@ -107,7 +103,9 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
   const [endPath, setEndPath] = useState(draft?.endPath ?? "");
   const [beginSheet, setBeginSheet] = useState(draft?.beginSheet ?? "");
   const [endSheet, setEndSheet] = useState(draft?.endSheet ?? "");
-  const [beginHeaderRow, setBeginHeaderRow] = useState(draft?.beginHeaderRow ?? "");
+  const [beginHeaderRow, setBeginHeaderRow] = useState(
+    draft?.beginHeaderRow ?? "",
+  );
   const [endHeaderRow, setEndHeaderRow] = useState(draft?.endHeaderRow ?? "");
   const [inspection, setInspection] = useState<PolicyInspection | undefined>(
     draft?.inspection,
@@ -117,7 +115,9 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
   const [beginMapping, setBeginMapping] = useState<PolicyMapping>(
     draft?.beginMapping ?? {},
   );
-  const [endMapping, setEndMapping] = useState<PolicyMapping>(draft?.endMapping ?? {});
+  const [endMapping, setEndMapping] = useState<PolicyMapping>(
+    draft?.endMapping ?? {},
+  );
   const [beginDisplayName, setBeginDisplayName] = useState(
     draft?.beginDisplayName ?? "期初",
   );
@@ -148,7 +148,9 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
   const beginDropRef = useRef<HTMLDivElement>(null);
   const endDropRef = useRef<HTMLDivElement>(null);
   const [dragHover, setDragHover] = useState<"begin" | "end" | null>(null);
-  const applyPathRef = useRef<(side: "begin" | "end", value: string) => void>(() => {});
+  const applyPathRef = useRef<(side: "begin" | "end", value: string) => void>(
+    () => {},
+  );
   applyPathRef.current = (side, value) => {
     // 换源时先废止仍在途的 LLM 复核，旧请求不得回写新文件。
     reviewGeneration.current += 1;
@@ -176,7 +178,8 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
     setStep(1);
     const nextBegin = side === "begin" ? value : beginPath;
     const nextEnd = side === "end" ? value : endPath;
-    if (nextBegin && nextEnd) void inspect({ beginPath: nextBegin, endPath: nextEnd });
+    if (nextBegin && nextEnd)
+      void inspect({ beginPath: nextBegin, endPath: nextEnd });
   };
   useEffect(() => {
     const inTauriEnv =
@@ -266,7 +269,9 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
       const suggestedEnd = trim(value.suggestedMapping.end ?? {});
       const asKeys = (value: string | string[] | undefined): string[] =>
         Array.isArray(value) ? value : [];
-      const suggestedBeginKeys = asKeys(value.suggestedMapping.begin?.matchKeys);
+      const suggestedBeginKeys = asKeys(
+        value.suggestedMapping.begin?.matchKeys,
+      );
       const suggestedEndKeys = asKeys(value.suggestedMapping.end?.matchKeys);
       setBeginMapping(suggestedBegin);
       setEndMapping(suggestedEnd);
@@ -323,9 +328,12 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
         endPath: ePath,
         beginSheet: override.beginSheet ?? beginSheet,
         endSheet: override.endSheet ?? endSheet,
-        beginHeaderRow: override.beginHeaderRow ?? (Number(beginHeaderRow) || 1),
+        beginHeaderRow:
+          override.beginHeaderRow ?? (Number(beginHeaderRow) || 1),
         endHeaderRow: override.endHeaderRow ?? (Number(endHeaderRow) || 1),
-        beginMapping: sanitizeFaBeginMapping(override.beginMapping ?? beginMapping),
+        beginMapping: sanitizeFaBeginMapping(
+          override.beginMapping ?? beginMapping,
+        ),
         endMapping: override.endMapping ?? endMapping,
         beginKeys: override.beginKeys ?? beginKeys,
         endKeys: override.endKeys ?? endKeys,
@@ -454,7 +462,11 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
 
   /// 设置映射。matchKeys 是数组角色，同时写映射对象与影子 keys 状态
   /// （Rust payload 契约读 beginKeys/endKeys）。
-  function setMapping(side: "begin" | "end", key: string, value: string | string[]) {
+  function setMapping(
+    side: "begin" | "end",
+    key: string,
+    value: string | string[],
+  ) {
     if (side === "begin") {
       setBeginMapping((current) => ({ ...current, [key]: value || undefined }));
       if (key === "matchKeys") setBeginKeys(Array.isArray(value) ? value : []);
@@ -615,7 +627,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
             className={mapped.length ? "mapped" : undefined}
             disabled={llmBusy}
             title={mapped.map(([, label]) => label).join(" + ") || "未映射"}
-            value={mapped.length > 1 ? multipleValue : mapped[0]?.[0] ?? ""}
+            value={mapped.length > 1 ? multipleValue : (mapped[0]?.[0] ?? "")}
             onChange={(e) => {
               const role = e.target.value;
               // 先清掉本列占用的旧角色
@@ -645,7 +657,9 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
               </option>
             )}
             {roleOptions.map(([key, label]) => {
-              const mappedHere = mapped.some(([mappedKey]) => mappedKey === key);
+              const mappedHere = mapped.some(
+                ([mappedKey]) => mappedKey === key,
+              );
               const takenByOther = usedRoles.has(key) && !mappedHere;
               return (
                 <option
@@ -673,10 +687,13 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
             <strong>
               {side === "begin" ? "期初" : "期末"} ·{" "}
               {inspect.displayName ?? inspect.selectedSheet ?? "数据预览"} ·{" "}
-              {inspect.dimensions?.rows ?? 0} 行 × {inspect.dimensions?.columns ?? 0} 列
+              {inspect.dimensions?.rows ?? 0} 行 ×{" "}
+              {inspect.dimensions?.columns ?? 0} 列
             </strong>
             {missing.length > 0 && (
-              <span className="fa-caption-missing">尚未映射：{missing.join("、")}</span>
+              <span className="fa-caption-missing">
+                尚未映射：{missing.join("、")}
+              </span>
             )}
             {optional.length > 0 && (
               <span
@@ -742,7 +759,10 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                       <h3 className="fa-side-title">
                         {side === "begin" ? "期初（年初）" : "期末（年末）"}
                       </h3>
-                      <Field label={side === "begin" ? "年初文件" : "年末文件"} required>
+                      <Field
+                        label={side === "begin" ? "年初文件" : "年末文件"}
+                        required
+                      >
                         <div ref={side === "begin" ? beginDropRef : endDropRef}>
                           <FileDropInput
                             value={side === "begin" ? beginPath : endPath}
@@ -771,7 +791,8 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                             value={side === "begin" ? beginSheet : endSheet}
                             disabled={busy}
                             onChange={(e) => {
-                              if (side === "begin") setBeginSheet(e.target.value);
+                              if (side === "begin")
+                                setBeginSheet(e.target.value);
                               else setEndSheet(e.target.value);
                               if (side === "begin") setBeginHeaderRow("");
                               else setEndHeaderRow("");
@@ -786,7 +807,8 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                             value={side === "begin" ? beginSheet : endSheet}
                             disabled={busy}
                             onChange={(e) => {
-                              if (side === "begin") setBeginSheet(e.target.value);
+                              if (side === "begin")
+                                setBeginSheet(e.target.value);
                               else setEndSheet(e.target.value);
                             }}
                           />
@@ -794,11 +816,14 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                       </Field>
                       <Field label="标题行（留空自动识别）">
                         <input
-                          value={side === "begin" ? beginHeaderRow : endHeaderRow}
+                          value={
+                            side === "begin" ? beginHeaderRow : endHeaderRow
+                          }
                           placeholder="自动"
                           disabled={busy}
                           onChange={(e) => {
-                            if (side === "begin") setBeginHeaderRow(e.target.value);
+                            if (side === "begin")
+                              setBeginHeaderRow(e.target.value);
                             else setEndHeaderRow(e.target.value);
                           }}
                           onBlur={() => {
@@ -843,12 +868,16 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                     passed={llmReview?.passed}
                     enabled={llmReview?.enabled}
                     failed={llmReview?.failed}
-                    message={llmReview && !llmBusy ? llmReview.message : undefined}
+                    message={
+                      llmReview && !llmBusy ? llmReview.message : undefined
+                    }
                     detail={llmReview?.detail}
                     changes={llmChanges}
                     pending={llmPending}
                     onUndo={(change) => undoChange(change as FaMappingChange)}
-                    onAccept={(item) => acceptPending(item as FaPendingSuggestion)}
+                    onAccept={(item) =>
+                      acceptPending(item as FaPendingSuggestion)
+                    }
                     onKeep={(item) =>
                       setLlmPending((current) =>
                         current.filter((value) => value.id !== item.id),
@@ -909,11 +938,16 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                   />
                 </Field>
                 <p className="hint">
-                  导出为一个 Excel：第 1 页折旧政策对比（类别/寿命/残值率两期对比、
+                  导出为一个 Excel：第 1
+                  页折旧政策对比（类别/寿命/残值率两期对比、
                   判断结果与影响金额），第 2 页税法最低折旧年限参考。
                 </p>
                 <div className="actions">
-                  <Button variant="secondary" size="sm" onClick={() => setStep(1)}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setStep(1)}
+                  >
                     返回上一步
                   </Button>
                   {busy && job ? (
@@ -925,7 +959,11 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                       停止
                     </Button>
                   ) : (
-                    <Button variant="default" disabled={!readyToExport} onClick={() => void startExport()}>
+                    <Button
+                      variant="default"
+                      disabled={!readyToExport}
+                      onClick={() => void startExport()}
+                    >
                       生成折旧政策对比
                     </Button>
                   )}
@@ -936,8 +974,12 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
               <div className="fa-result-summary">
                 <strong>折旧政策对比已生成</strong>
                 {outputPaths.map((output) => (
-                  <Button key={output} variant="default" onClick={() => void openOutput(output)}>
-                    打开结果：{output}
+                  <Button
+                    key={output}
+                    variant="default"
+                    onClick={() => void openOutput(output)}
+                  >
+                    打开结果：{displayFileName(output)}
                   </Button>
                 ))}
               </div>
@@ -956,7 +998,12 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
             <div className="fa-preview-stack">
               {inspection ? (
                 <>
-                  {sidePanel("begin", inspection.begin, beginKeys, beginMapping)}
+                  {sidePanel(
+                    "begin",
+                    inspection.begin,
+                    beginKeys,
+                    beginMapping,
+                  )}
                   {sidePanel("end", inspection.end, endKeys, endMapping)}
                 </>
               ) : (

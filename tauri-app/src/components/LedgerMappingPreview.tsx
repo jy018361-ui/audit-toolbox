@@ -17,7 +17,7 @@ export function LedgerMappingPreview({inspect,mapping,setMap,llmBusy,headerExtra
   const roles:[string,string][]=LEDGER_ROLES.map(([key,label])=>[key,label]);
   const labelOf=new Map(roles);
   const match=forms.length&&mapping?resolveForm("je",forms,mapping as Record<string,string|string[]|undefined>):undefined;
-  if(!inspect)return <section className="kz-card kz-preview"><h2>文件预览</h2><p>读取后显示前 50 行。</p></section>;
+  if(!inspect)return <section className="kz-card kz-preview mapping-panel mapping-panel-empty"><h2>文件预览</h2><p>读取后显示前 50 行。</p></section>;
   const editable=Boolean(mapping&&setMap);
   return <MappingPanel
     title="文件预览"

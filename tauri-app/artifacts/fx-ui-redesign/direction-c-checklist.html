@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>汇兑损益审计 · 任务清单方向</title>
+  <!--
+    设计假设
+    1. 用户是第一次使用汇兑损益工具，但了解 JE、TB、科目代码等审计术语。
+    2. 该原型展示完整流程，所有数据均来自用户截图或明确标注为示例，不代表真实测算结论。
+    3. 视觉沿用浅绿色品牌，方向 C 用发丝网格与任务清单替代大圆角卡片。
+    4. 公共引擎规则：先规范化科目代码（含前导零）；代码唯一时按代码匹配，代码不唯一时使用代码＋科目名称。
+  -->
+  <style>
+    :root {
+      --ink:#142421; --muted:#61706c; --soft:#8a9894;
+      --paper:#f5f9f7; --panel:#fbfdfc; --line:#cfdcd7; --line-strong:#9fb8af;
+      --green:#14685f; --green-2:#0f574f; --mint:#dceee8; --mint-2:#edf7f3;
+      --amber:#9a5b08; --amber-bg:#fff5df; --red:#a03935; --red-bg:#fff0ef;
+      --shadow:0 12px 34px rgba(22,67,58,.08);
+    }
+    *{box-sizing:border-box}
+    html{background:var(--paper);color:var(--ink);font-family:"Microsoft YaHei UI","PingFang SC","Noto Sans CJK SC",sans-serif;font-size:16px}
+    body{margin:0;min-width:1180px;min-height:100vh;background:
+      linear-gradient(var(--line) 1px,transparent 1px),
+      linear-gradient(90deg,var(--line) 1px,transparent 1px),var(--paper);
+      background-size:32px 32px;background-position:-1px -1px}
+    button,input,select{font:inherit;color:inherit}
+    button{min-height:44px;border:1px solid var(--line-strong);background:var(--panel);padding:0 16px;cursor:pointer}
+    button:hover{border-color:var(--green);background:var(--mint-2)}
+    button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid rgba(20,104,95,.25);outline-offset:2px}
+    .primary{background:var(--green);border-color:var(--green);color:#fff;font-weight:700}
+    .primary:hover{background:var(--green-2);color:#fff}
+    .primary[disabled]{background:#a9bbb6;border-color:#a9bbb6;cursor:not-allowed}
+    .ghost{border-color:transparent;background:transparent}
+    .app{min-height:100vh;display:grid;grid-template-rows:68px 1fr}
+    .topbar{position:sticky;top:0;z-index:10;background:rgba(251,253,252,.96);border-bottom:1px solid var(--line-strong);display:grid;grid-template-columns:320px 1fr auto;align-items:center;padding:0 28px;backdrop-filter:blur(12px)}
+    .brand{display:flex;align-items:center;gap:12px;font-weight:800;letter-spacing:.01em}
+    .brand-mark{width:24px;height:24px;border:2px solid var(--green);position:relative}
+    .brand-mark:after{content:"";position:absolute;left:5px;top:5px;width:10px;height:10px;background:var(--green)}
+    .case{font-size:14px;color:var(--muted);text-align:center}
+    .case strong{color:var(--ink);font-weight:700}
+    .top-actions{display:flex;gap:8px}
+    .shell{display:grid;grid-template-columns:292px minmax(560px,1fr) 322px;min-height:calc(100vh - 68px);background:rgba(245,249,247,.82)}
+    .sidebar,.inspector{background:rgba(251,253,252,.94);position:sticky;top:68px;height:calc(100vh - 68px);overflow:auto}
+    .sidebar{border-right:1px solid var(--line-strong)}
+    .inspector{border-left:1px solid var(--line-strong)}
+    .side-head,.inspect-head{padding:22px 20px 16px;border-bottom:1px solid var(--line)}
+    .eyebrow{font-family:Consolas,"SFMono-Regular",monospace;font-size:13px;letter-spacing:.08em;color:var(--green);text-transform:uppercase}
+    h1,h2,h3,p{margin:0;text-wrap:pretty}
+    h1{font-size:24px;line-height:1.35;margin-top:6px}
+    h2{font-size:22px;line-height:1.4}
+    h3{font-size:17px;line-height:1.5}
+    .side-note{margin-top:10px;color:var(--muted);font-size:14px;line-height:1.6}
+    .progress-line{height:3px;background:#dfe8e5;margin-top:16px}
+    .progress-line i{display:block;height:100%;width:25%;background:var(--green);transition:width .35s}
+    .task-list{list-style:none;padding:0;margin:0}
+    .task{border-bottom:1px solid var(--line);min-height:82px;display:grid;grid-template-columns:34px 1fr 18px;gap:10px;align-items:start;padding:16px 16px 14px 20px;cursor:pointer;background:transparent}
+    .task:hover{background:var(--mint-2)}
+    .task.active{background:var(--mint);box-shadow:inset 3px 0 var(--green)}
+    .task-index{font-family:Consolas,monospace;font-size:13px;color:var(--soft);padding-top:3px}
+    .task-title{font-weight:700;line-height:1.45}
+    .task-sub{font-size:13px;color:var(--muted);line-height:1.5;margin-top:4px}
+    .state-dot{width:9px;height:9px;border-radius:50%;margin-top:7px;background:#a9b5b1;box-shadow:0 0 0 4px #eef2f0}
+    .task.done .state-dot{background:var(--green);box-shadow:0 0 0 4px var(--mint)}
+    .task.issue .state-dot{background:var(--amber);box-shadow:0 0 0 4px var(--amber-bg)}
+    .main{padding:34px 38px 80px;min-width:0}
+    .main-head{display:flex;justify-content:space-between;align-items:end;gap:30px;margin-bottom:24px}
+    .main-head p{color:var(--muted);line-height:1.7;margin-top:8px;max-width:720px}
+    .step-count{font-family:Consolas,monospace;font-size:14px;color:var(--green);white-space:nowrap}
+    .view{display:none}.view.active{display:block;animation:enter .22s ease-out}
+    @keyframes enter{from{opacity:.4;transform:translateY(5px)}to{opacity:1;transform:none}}
+    .section{border-top:1px solid var(--line-strong);background:rgba(251,253,252,.82);margin-bottom:20px}
+    .section-title{min-height:58px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 18px}
+    .section-title small{color:var(--muted);font-size:13px;font-weight:400}
+    .section-body{padding:20px}
+    .scope-tabs{display:grid;grid-template-columns:repeat(3,1fr);border:1px solid var(--line-strong)}
+    .scope-tabs button{border:0;border-right:1px solid var(--line);background:transparent;min-height:54px}
+    .scope-tabs button:last-child{border-right:0}.scope-tabs button.on{background:var(--mint);color:var(--green);font-weight:800}
+    .dropzone{margin-top:18px;border:1px dashed var(--line-strong);min-height:134px;display:grid;place-items:center;text-align:center;background:#f9fcfb}
+    .dropzone strong{display:block;margin-bottom:8px}.dropzone p{font-size:14px;color:var(--muted);line-height:1.6}
+    .file-grid{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line-strong);margin-top:18px}
+    .file-row{padding:17px 18px;min-height:116px}.file-row+ .file-row{border-left:1px solid var(--line-strong)}
+    .file-label{display:flex;justify-content:space-between;font-size:13px;color:var(--muted)}
+    .file-name{font-weight:700;margin-top:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .file-meta{font-size:13px;color:var(--muted);margin-top:8px}
+    .rule{display:grid;grid-template-columns:120px 1fr;gap:20px;padding:15px 0;border-bottom:1px solid var(--line)}
+    .rule:last-child{border-bottom:0}.rule b{font-size:14px}.rule p{color:var(--muted);line-height:1.7}
+    .code{font-family:Consolas,"SFMono-Regular",monospace;color:var(--green);background:var(--mint-2);padding:2px 5px}
+    .actionbar{display:flex;align-items:center;justify-content:space-between;gap:18px;border-top:1px solid var(--line-strong);padding-top:20px;margin-top:24px}
+    .actionbar p{font-size:14px;color:var(--muted)}
+    .stack-actions{display:flex;gap:10px}
+    .filterbar{display:grid;grid-template-columns:1fr auto auto;border:1px solid var(--line-strong);margin-bottom:16px}
+    .filterbar input{border:0;border-right:1px solid var(--line);min-height:48px;padding:0 14px;background:#fff}
+    .filterbar button{border:0;border-right:1px solid var(--line);min-height:48px}.filterbar button:last-child{border-right:0}
+    .filterbar button.on{background:var(--mint);font-weight:700;color:var(--green)}
+    .exception{display:grid;grid-template-columns:8px minmax(0,1fr) auto;border:1px solid var(--line-strong);border-bottom:0;background:#fff}
+    .exception:last-child{border-bottom:1px solid var(--line-strong)}
+    .severity{background:var(--amber)}.exception.block .severity{background:var(--red)}
+    .ex-content{padding:18px}.ex-content p{color:var(--muted);margin-top:7px;line-height:1.65;font-size:14px}
+    .ex-meta{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}.tag{font-size:12px;border:1px solid var(--line);padding:4px 7px;background:#f7faf9}
+    .tag.warn{color:var(--amber);border-color:#e8c891;background:var(--amber-bg)}
+    .tag.bad{color:var(--red);border-color:#e7b7b4;background:var(--red-bg)}
+    .ex-action{padding:16px;display:flex;align-items:center}.ex-action button{white-space:nowrap}
+    .exception.resolved{opacity:.55}.exception.resolved .severity{background:var(--green)}
+    .table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--line-strong)}
+    .table th,.table td{border-bottom:1px solid var(--line);padding:13px 12px;text-align:left;vertical-align:middle}
+    .table th{font-size:13px;color:var(--muted);font-weight:600;background:#f3f8f6}.table td{font-size:14px}
+    .table tr:last-child td{border-bottom:0}.table select{min-height:44px;border:1px solid var(--line-strong);background:#fff;padding:0 32px 0 10px}
+    .explain{border:1px solid var(--line-strong);background:var(--mint-2);padding:16px 18px;line-height:1.7;margin-bottom:18px}
+    .explain b{color:var(--green)}
+    .form-grid{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line-strong);background:#fff}
+    .field{padding:16px 18px}.field:nth-child(even){border-left:1px solid var(--line)}.field:nth-child(n+3){border-top:1px solid var(--line)}
+    .field label{display:block;font-size:13px;color:var(--muted);margin-bottom:9px}.field input,.field select{width:100%;min-height:48px;border:1px solid var(--line-strong);padding:0 12px;background:#fff}
+    .run-panel{text-align:center;padding:44px 30px;border:1px solid var(--line-strong);background:#fff}
+    .run-panel h3{font-size:24px}.run-panel p{max-width:560px;margin:10px auto 22px;color:var(--muted);line-height:1.7}
+    .meter{height:6px;background:#dfe8e5;max-width:520px;margin:18px auto 0;overflow:hidden}.meter i{display:block;height:100%;width:0;background:var(--green);transition:width .4s}
+    .result-summary{display:grid;grid-template-columns:1.3fr 1fr 1fr;border:1px solid var(--line-strong);background:#fff}
+    .metric{padding:22px;border-right:1px solid var(--line)}.metric:last-child{border-right:0}.metric label{display:block;color:var(--muted);font-size:13px}.metric strong{display:block;font-size:23px;margin-top:9px;font-variant-numeric:tabular-nums}.metric small{display:block;color:var(--muted);margin-top:7px}
+    .inspect-status{padding:20px;border-bottom:1px solid var(--line)}
+    .ready-score{font-size:34px;font-weight:800;color:var(--green);font-variant-numeric:tabular-nums}.ready-score small{font-size:14px;color:var(--muted);font-weight:500}
+    .inspect-list{list-style:none;margin:0;padding:0}.inspect-list li{display:grid;grid-template-columns:18px 1fr auto;gap:10px;padding:15px 20px;border-bottom:1px solid var(--line);align-items:start}
+    .check{width:15px;height:15px;border:1px solid var(--line-strong);margin-top:3px;position:relative}.ok .check{background:var(--green);border-color:var(--green)}.ok .check:after{content:"";position:absolute;width:7px;height:4px;border-left:2px solid white;border-bottom:2px solid white;transform:rotate(-45deg);left:3px;top:3px}
+    .inspect-list b{font-size:14px}.inspect-list p{font-size:13px;color:var(--muted);margin-top:4px;line-height:1.45}.inspect-list em{font-style:normal;font-size:12px;color:var(--soft)}
+    .blocker{margin:18px 20px;border:1px solid #e5c18a;background:var(--amber-bg);padding:14px;line-height:1.6;font-size:14px}.blocker strong{display:block;color:var(--amber);margin-bottom:4px}
+    .guide{padding:18px 20px}.guide h3{margin-bottom:9px}.guide p{color:var(--muted);font-size:14px;line-height:1.7}.guide button{width:100%;margin-top:14px}
+    .toast{position:fixed;right:24px;bottom:24px;z-index:30;background:var(--ink);color:#fff;padding:14px 18px;box-shadow:var(--shadow);opacity:0;transform:translateY(12px);pointer-events:none;transition:.25s}.toast.show{opacity:1;transform:none}
+    .hidden{display:none!important}
+    @media(max-width:1250px){.shell{grid-template-columns:260px 1fr}.inspector{display:none}.main{padding:30px}.topbar{grid-template-columns:280px 1fr auto}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true"></span>汇兑损益审计 · 交互原型</div>
+    <div class="case">当前项目：<strong>4800 · 2025 年度</strong>　报告期末：2025-12-31</div>
+    <div class="top-actions"><button class="ghost" onclick="toast('已保存当前进度')">保存进度</button><button onclick="resetDemo()">重置演示</button></div>
+  </header>
+
+  <div class="shell">
+    <nav class="sidebar" aria-label="汇兑损益任务清单">
+      <div class="side-head">
+        <div class="eyebrow">Audit checklist</div>
+        <h1>完成 4 项即可生成底稿</h1>
+        <p class="side-note" id="sideHint">先确认文件范围，系统随后自动识别字段与科目。</p>
+        <div class="progress-line"><i id="progressBar"></i></div>
+      </div>
+      <ol class="task-list">
+        <li class="task active" data-view="prepare" onclick="go('prepare')"><span class="task-index">01</span><div><div class="task-title">准备 JE 与 TB</div><div class="task-sub">选择范围并执行公共引擎识别</div></div><span class="state-dot"></span></li>
+        <li class="task issue" data-view="exceptions" onclick="go('exceptions')"><span class="task-index">02</span><div><div class="task-title">只审异常</div><div class="task-sub" id="exceptionSub">2 项待处理，其中 1 项阻断</div></div><span class="state-dot"></span></li>
+        <li class="task" data-view="accounts" onclick="go('accounts')"><span class="task-index">03</span><div><div class="task-title">确认科目类型</div><div class="task-sub">确认货币资金及损益类科目</div></div><span class="state-dot"></span></li>
+        <li class="task" data-view="calculate" onclick="go('calculate')"><span class="task-index">04</span><div><div class="task-title">执行测算</div><div class="task-sub">设置期末日与汇率口径</div></div><span class="state-dot"></span></li>
+        <li class="task" data-view="result" onclick="go('result')"><span class="task-index">05</span><div><div class="task-title">检查结果并导出</div><div class="task-sub">测算后开放</div></div><span class="state-dot"></span></li>
+      </ol>
+    </nav>
+
+    <main class="main">
+      <section class="view active" id="view-prepare">
+        <div class="main-head"><div><div class="eyebrow">Step 01 · data preparation</div><h2>准备数据，系统会告诉你还缺什么</h2><p>上传后先由公共引擎统一识别字段和科目，再把真正需要判断的事项送入异常清单。</p></div><div class="step-count">01 / 05</div></div>
+        <div class="section">
+          <div class="section-title"><h3>本次测算范围</h3><small>首次使用建议保持默认</small></div>
+          <div class="section-body"><div class="scope-tabs"><button onclick="scope(this)">仅已实现</button><button onclick="scope(this)">仅未实现</button><button class="on" onclick="scope(this)">已实现＋未实现</button></div></div>
+        </div>
+        <div class="section">
+          <div class="section-title"><h3>数据文件</h3><small id="fileStatus">已放入 2 个示例文件</small></div>
+          <div class="section-body">
+            <div class="dropzone" onclick="toast('原型演示：已使用截图中的示例文件')"><div><strong>拖放或选择 JE、TB 文件</strong><p>可同时选择两个文件；系统会自动判断文件类型。<br>支持 Excel 工作簿，原文件不会被修改。</p></div></div>
+            <div class="file-grid">
+              <div class="file-row"><div class="file-label"><span>JE · 凭证明细</span><span>待识别</span></div><div class="file-name">4800_JE_2025.01-12.xlsx</div><div class="file-meta">Sheet「JE」 · 示例数据 368,676 行</div></div>
+              <div class="file-row"><div class="file-label"><span>TB · 科目余额表</span><span>待识别</span></div><div class="file-name">TB-4800.xlsx</div><div class="file-meta">Sheet「Sheet1」 · 示例数据 229 行</div></div>
+            </div>
+          </div>
+        </div>
+        <div class="section">
+          <div class="section-title"><h3>公共引擎如何匹配科目</h3><small>统一规则</small></div>
+          <div class="section-body">
+            <div class="rule"><b>先规范代码</b><p>按文本读取科目代码并识别前导零，例如 <span class="code">001001</span> 与 <span class="code">1001</span> 会进入同一规范化校验，不直接当作两个不同科目。</p></div>
+            <div class="rule"><b>代码唯一</b><p>在规范化后的科目代码唯一时，使用科目代码匹配 JE 与 TB。</p></div>
+            <div class="rule"><b>代码不唯一</b><p>发现重复代码时，自动升级为 <span class="code">科目代码＋科目名称</span> 组合匹配；无法唯一确认的项目进入异常清单。</p></div>
+          </div>
+        </div>
+        <div class="actionbar"><p>下一步将执行字段识别、前导零检查和科目匹配。</p><button class="primary" id="scanBtn" onclick="scan()">使用公共引擎识别</button></div>
+      </section>
+
+      <section class="view" id="view-exceptions">
+        <div class="main-head"><div><div class="eyebrow">Step 02 · exception only</div><h2>正常项已收起，只处理影响结论的事项</h2><p>先解决红色阻断项；黄色项目可根据审计判断确认。每项都说明原因与系统建议。</p></div><div class="step-count">02 / 05</div></div>
+        <div class="filterbar"><input aria-label="搜索异常" placeholder="搜索科目代码或名称"><button class="on">待处理 2</button><button>已解决</button></div>
+        <div id="exceptionList">
+          <article class="exception block" id="ex1"><span class="severity"></span><div class="ex-content"><h3>同一科目代码对应多个科目名称</h3><p>规范化代码 <span class="code">100201</span> 在 JE 中对应「银行存款－美元户」与「银行存款－一般户」。仅按代码无法唯一匹配，公共引擎已切换为“代码＋名称”。</p><div class="ex-meta"><span class="tag bad">阻断测算</span><span class="tag">JE / TB 科目口径</span><span class="tag">前导零已检查</span></div></div><div class="ex-action"><button onclick="resolve('ex1')">接受组合匹配</button></div></article>
+          <article class="exception" id="ex2"><span class="severity"></span><div class="ex-content"><h3>TB 本位币与原币字段内容一致</h3><p>两个字段均为 USD。原币为 USD 不代表公司本位币一定为 USD，请确认本位币后再继续。</p><div class="ex-meta"><span class="tag warn">需要确认</span><span class="tag">公司本位币</span></div></div><div class="ex-action"><button onclick="resolve('ex2')">确认本位币为 USD</button></div></article>
+        </div>
+        <div class="actionbar"><p id="exceptionHint">还需处理 2 项，完成后才能进入科目类型确认。</p><button class="primary" id="exceptionNext" disabled onclick="completeExceptions()">进入科目类型确认</button></div>
+      </section>
+
+      <section class="view" id="view-accounts">
+        <div class="main-head"><div><div class="eyebrow">Step 03 · account classification</div><h2>确认需要参与测算的科目类型</h2><p>系统已按科目名称给出建议。首次使用只需核对“需要人工确认”的行，已确认项可展开抽查。</p></div><div class="step-count">03 / 05</div></div>
+        <div class="explain"><b>为什么需要这一步：</b>不同科目使用的汇率和重估逻辑不同。请重点确认货币资金、往来科目及汇兑损益科目是否分类正确。</div>
+        <table class="table">
+          <thead><tr><th>科目代码</th><th>科目名称</th><th>币种</th><th>系统建议</th><th>你的确认</th></tr></thead>
+          <tbody>
+            <tr><td class="code">100201</td><td>银行存款－美元户</td><td>USD</td><td>货币资金</td><td><select class="account-type"><option>货币资金</option><option>往来科目</option><option>其他</option></select></td></tr>
+            <tr><td class="code">112201</td><td>应收账款－海外客户</td><td>USD</td><td>往来科目</td><td><select class="account-type"><option>往来科目</option><option>货币资金</option><option>其他</option></select></td></tr>
+            <tr><td class="code">660301</td><td>财务费用－汇兑损益</td><td>CNY</td><td>汇兑损益</td><td><select class="account-type"><option>汇兑损益</option><option>损益类其他</option><option>不参与测算</option></select></td></tr>
+          </tbody>
+        </table>
+        <div class="actionbar"><p>示例展示 3 个需关注科目；其余自动确认项默认收起。</p><button class="primary" onclick="completeAccounts()">确认分类并继续</button></div>
+      </section>
+
+      <section class="view" id="view-calculate">
+        <div class="main-head"><div><div class="eyebrow">Step 04 · calculation</div><h2>核对测算口径，然后执行一次完整测算</h2><p>所有前置检查通过后，主按钮才可用。修改科目分类或汇率口径后，需要重新测算。</p></div><div class="step-count">04 / 05</div></div>
+        <div class="section"><div class="section-title"><h3>测算参数</h3><small>请在工作底稿中留存汇率来源</small></div><div class="section-body"><div class="form-grid"><div class="field"><label>报告期末</label><input value="2025-12-31"></div><div class="field"><label>公司本位币</label><select><option>USD</option><option>CNY</option></select></div><div class="field"><label>期末汇率来源</label><input value="企业提供汇率表（待审计复核）"></div><div class="field"><label>测算范围</label><input value="已实现＋未实现" readonly></div></div></div></div>
+        <div class="run-panel"><h3 id="runTitle">前置检查已完成</h3><p id="runCopy">系统将按已确认的科目映射、科目类型和汇率口径计算，并保留逐笔追溯关系。</p><button class="primary" id="runBtn" onclick="runCalc()">开始测算</button><div class="meter"><i id="runMeter"></i></div></div>
+      </section>
+
+      <section class="view" id="view-result">
+        <div class="main-head"><div><div class="eyebrow">Step 05 · result & export</div><h2>先看结论与例外，再导出审计底稿</h2><p>下列金额仅用于界面演示，不代表真实审计测算结果。正式产品应从测算引擎读取。</p></div><div class="step-count">05 / 05</div></div>
+        <div class="result-summary"><div class="metric"><label>测算状态</label><strong>已完成</strong><small>按当前参数生成</small></div><div class="metric"><label>阻断异常</label><strong>0</strong><small>所有阻断项已处理</small></div><div class="metric"><label>底稿状态</label><strong>待导出</strong><small>包含匹配与判断留痕</small></div></div>
+        <div class="section" style="margin-top:20px"><div class="section-title"><h3>导出内容</h3><small>Excel 工作底稿</small></div><div class="section-body"><div class="rule"><b>测算明细</b><p>逐笔展示 JE/TB 来源、币种、采用汇率及汇兑损益测算过程。</p></div><div class="rule"><b>异常处理记录</b><p>保留科目代码前导零检查、代码＋名称组合匹配及人工确认结论。</p></div><div class="rule"><b>参数与说明</b><p>记录报告期末、本位币、汇率来源和科目分类判断。</p></div></div></div>
+        <div class="actionbar"><button onclick="go('calculate')">返回修改参数</button><div class="stack-actions"><button onclick="toast('已打开底稿保存位置选择器（原型演示）')">选择保存位置</button><button class="primary" onclick="exportFile()">生成 Excel 底稿</button></div></div>
+      </section>
+    </main>
+
+    <aside class="inspector">
+      <div class="inspect-head"><div class="eyebrow">Readiness</div><h2>运行就绪度</h2></div>
+      <div class="inspect-status"><div class="ready-score" id="readyScore">1 / 5 <small>项已完成</small></div></div>
+      <ul class="inspect-list">
+        <li id="ready-files"><span class="check"></span><div><b>JE 与 TB 已识别</b><p>公共引擎字段与科目匹配</p></div><em>待完成</em></li>
+        <li id="ready-ex"><span class="check"></span><div><b>异常已清零</b><p>阻断项必须处理</p></div><em>2 项</em></li>
+        <li id="ready-account"><span class="check"></span><div><b>科目类型已确认</b><p>决定汇率与重估逻辑</p></div><em>待完成</em></li>
+        <li class="ok"><span class="check"></span><div><b>报告期末已填写</b><p>2025-12-31</p></div><em>完成</em></li>
+        <li id="ready-run"><span class="check"></span><div><b>测算已执行</b><p>结果与底稿尚未生成</p></div><em>待执行</em></li>
+      </ul>
+      <div class="blocker" id="blocker"><strong>当前还不能测算</strong><span id="blockerText">请先使用公共引擎识别 JE 与 TB。</span></div>
+      <div class="guide"><h3>第一次使用？</h3><p id="guideText">从左侧第 1 项开始。每完成一步，系统会自动带你进入下一项；有问题时这里只显示最先需要处理的原因。</p><button onclick="go(currentView)">定位当前任务</button></div>
+    </aside>
+  </div>
+</div>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+  const state={scan:false,resolved:0,accounts:false,run:false};
+  let currentView='prepare';
+  function toast(msg){const el=document.getElementById('toast');el.textContent=msg;el.classList.add('show');clearTimeout(window.__t);window.__t=setTimeout(()=>el.classList.remove('show'),2300)}
+  function go(name){
+    if(name==='result'&&!state.run){toast('请先完成测算');name='calculate'}
+    document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.id==='view-'+name));
+    document.querySelectorAll('.task').forEach(t=>t.classList.toggle('active',t.dataset.view===name));
+    currentView=name;window.scrollTo({top:0,behavior:'smooth'});
+  }
+  function scope(btn){btn.parentElement.querySelectorAll('button').forEach(b=>b.classList.remove('on'));btn.classList.add('on');toast('已更新本次测算范围')}
+  function mark(view,status='done'){
+    const t=document.querySelector('.task[data-view="'+view+'"]');t.classList.remove('issue','done');t.classList.add(status);
+  }
+  function scan(){
+    const btn=document.getElementById('scanBtn');btn.disabled=true;btn.textContent='正在识别…';
+    setTimeout(()=>{state.scan=true;btn.textContent='识别完成';mark('prepare');document.getElementById('ready-files').classList.add('ok');document.querySelector('#ready-files em').textContent='完成';update();toast('识别完成：2 项需要人工判断');go('exceptions')},850)
+  }
+  function resolve(id){
+    const el=document.getElementById(id);if(el.classList.contains('resolved'))return;el.classList.add('resolved');el.querySelector('button').textContent='已确认';el.querySelector('button').disabled=true;state.resolved++;update();
+    if(state.resolved===2){document.getElementById('exceptionNext').disabled=false;document.getElementById('exceptionHint').textContent='异常已处理完毕，可以继续。';mark('exceptions','done');document.getElementById('exceptionSub').textContent='所有异常已处理';document.getElementById('ready-ex').classList.add('ok');document.querySelector('#ready-ex em').textContent='完成';toast('异常已清零')}
+  }
+  function completeExceptions(){go('accounts')}
+  function completeAccounts(){state.accounts=true;mark('accounts');document.getElementById('ready-account').classList.add('ok');document.querySelector('#ready-account em').textContent='完成';update();toast('科目类型已确认');go('calculate')}
+  function runCalc(){
+    if(!state.scan||state.resolved<2||!state.accounts){toast('仍有前置事项未完成');return}
+    const btn=document.getElementById('runBtn'),meter=document.getElementById('runMeter');btn.disabled=true;btn.textContent='测算中…';meter.style.width='72%';document.getElementById('runTitle').textContent='正在执行测算';document.getElementById('runCopy').textContent='正在建立逐笔追溯关系并生成异常处理记录，请勿关闭页面。';
+    setTimeout(()=>{meter.style.width='100%';state.run=true;mark('calculate');mark('result');document.getElementById('ready-run').classList.add('ok');document.querySelector('#ready-run em').textContent='完成';update();toast('测算完成');go('result')},1200)
+  }
+  function exportFile(){toast('Excel 底稿已生成（原型演示）')}
+  function update(){
+    const completed=1+(state.scan?1:0)+(state.resolved===2?1:0)+(state.accounts?1:0)+(state.run?1:0);
+    document.getElementById('readyScore').innerHTML=completed+' / 5 <small>项已完成</small>';
+    document.getElementById('progressBar').style.width=(completed/5*100)+'%';
+    let text='';if(!state.scan)text='请先使用公共引擎识别 JE 与 TB。';else if(state.resolved<2)text='异常清单还有 '+(2-state.resolved)+' 项待处理。';else if(!state.accounts)text='请确认需要参与测算的科目类型。';else if(!state.run)text='前置事项已完成，可以开始测算。';else text='测算完成，可以检查结果并导出底稿。';
+    document.getElementById('blockerText').textContent=text;
+    document.querySelector('#blocker strong').textContent=state.run?'可以导出底稿':(state.accounts&&state.resolved===2&&state.scan?'已经可以测算':'当前还不能测算');
+    document.getElementById('sideHint').textContent=state.run?'流程已完成，请检查结果并导出。':text;
+  }
+  function resetDemo(){location.reload()}
+  update();
+</script>
+</body>
+</html>

@@ -12,6 +12,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
+import { StepIndicator } from "@/components/StepIndicator";
 import {
   applyLedgerReviewToDict,
   missingGoldIdentity,
@@ -237,6 +238,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const [result, setResult] = useState<Record<string, unknown>>();
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [step, setStep] = useState(0);
   const [job, setJob] = useState<JobEvent>();
   const activeJob = useRef("");
   useEffect(() => {
@@ -274,6 +276,17 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     setSources((v) => ({ ...v, [kind]: { ...v[kind], ...next } }));
   };
   const activeKinds: Kind[] = mode === "ledger" ? ["ledger"] : ["tb", "je"];
+  const sourcesReady = activeKinds.every((kind) => sources[kind].inspection);
+  const mappingsReady =
+    sourcesReady &&
+    activeKinds.every(
+      (kind) =>
+        loanMissing(
+          kind,
+          sources[kind].mapping,
+          sources[kind].inspection?.forms,
+        ).length === 0,
+    );
   // 逐行利率口径：默认值由台账的「利率」「利率类型」两列现算（改映射立刻跟着变），
   // 用户的手工改动单独存在 rateEdits 里叠上去，两者互不覆盖。
   const ledgerInspection = sources.ledger.inspection;
@@ -296,45 +309,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     );
     setResultRateEdits((v) => ({ ...v, [id]: { ...v[id], ...patch } }));
   };
-  // 台账预览区追加的两列：利率类型下拉；选了浮动才让填上浮(+)/下浮(-)点数。
-  const rateColumns = [
-    {
-      key: "rateType",
-      title: "利率类型",
-      render: (i: number) => (
-        <select
-          className="loan-rate-pick"
-          disabled={busy}
-          value={rateRows[i]?.rateType ?? "fixed"}
-          onChange={(e) =>
-            editRate(i, {
-              rateType: e.target.value as LoanRateSetting["rateType"],
-            })
-          }
-        >
-          <option value="fixed">固定</option>
-          <option value="floating">浮动</option>
-        </select>
-      ),
-    },
-    {
-      key: "spreadBps",
-      title: "上浮(+)/下浮(-) BP",
-      render: (i: number) =>
-        rateRows[i]?.rateType === "floating" ? (
-          <NumberInput
-            label={`第 ${i + 1} 行的上浮下浮点数`}
-            className="loan-rate-bps"
-            step="1"
-            disabled={busy}
-            value={rateRows[i]?.spreadBps ?? 0}
-            onCommit={(text) => editRate(i, { spreadBps: loanBps(text) })}
-          />
-        ) : (
-          <span className="loan-rate-na">—</span>
-        ),
-    },
-  ];
   async function browse(kind: Kind) {
     const picked = await pickPath("file", "选择表格文件", [
       "xlsx",
@@ -438,175 +412,220 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         detail="从完整借款台账直接重算，或以 TB＋JE 模糊还原逐笔本金变动后测算利息。"
       />
       <ErrorBox error={error} onDismiss={() => setError("")} />
-      <section className="fx-mode-bar">
-        <button
-          className={mode === "ledger" ? "active" : ""}
-          onClick={() => {
-            setMode("ledger");
-            setRows([]);
-          }}
-        >
-          以借款台账为基准
-        </button>
-        <button
-          className={mode === "tb" ? "active" : ""}
-          onClick={() => {
-            setMode("tb");
-            setRows([]);
-          }}
-        >
-          以 TB 为基准
-        </button>
-      </section>
-      {mode === "tb" && (
-        <section className="loan-warning">
-          <strong>TB＋JE 生成的是待复核的推算台账</strong>
-          <span>
-            系统按借款科目、辅助明细、摘要和记账日期模糊匹配本金新增/减少；请核对匹配依据、日期和勾稽差异。
-          </span>
-        </section>
-      )}
-      <Card>
-        <CardHeader>
-          <CardTitle>
-            {mode === "ledger" ? "上传完整借款台账" : "上传 TB 与 JE"}
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="fx-hint">
-            上传、表头识别和字段映射沿用汇兑损益测算的交互方式。
-          </p>
-          <div className="loan-upload-grid">
-            {activeKinds.map((k) => (
-              <Upload
-                key={k}
-                kind={k}
-                source={sources[k]}
-                busy={busy}
-                browse={() => void browse(k)}
-                clear={() => setSource(k, empty())}
-              />
-            ))}
+      <StepIndicator
+        steps={[
+          { key: "source", label: "上传与识别" },
+          { key: "rates", label: "利率确认", disabled: !sourcesReady },
+          { key: "run", label: "测算与底稿", disabled: !mappingsReady },
+        ]}
+        current={step}
+        onStepClick={setStep}
+      />
+
+      {step === 0 && (
+        <>
+          <section className="fx-mode-bar">
+            <button
+              className={mode === "ledger" ? "active" : ""}
+              onClick={() => {
+                invalidateResults();
+                setMode("ledger");
+              }}
+            >
+              完整借款台账
+            </button>
+            <button
+              className={mode === "tb" ? "active" : ""}
+              onClick={() => {
+                invalidateResults();
+                setMode("tb");
+              }}
+            >
+              TB＋JE
+            </button>
+          </section>
+          {mode === "tb" && (
+            <section className="loan-warning">
+              <strong>TB＋JE 将生成待复核的推算台账</strong>
+              <span>请重点核对本金变动、匹配依据和勾稽差异。</span>
+            </section>
+          )}
+          <Card>
+            <CardHeader>
+              <CardTitle>
+                {mode === "ledger" ? "上传完整借款台账" : "上传 TB 与 JE"}
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="loan-upload-grid">
+                {activeKinds.map((kind) => (
+                  <Upload
+                    key={kind}
+                    kind={kind}
+                    source={sources[kind]}
+                    busy={busy}
+                    browse={() => void browse(kind)}
+                    clear={() => setSource(kind, empty())}
+                  />
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+          {activeKinds.map(
+            (kind) =>
+              sources[kind].inspection && (
+                <Mapping
+                  key={kind}
+                  kind={kind}
+                  source={sources[kind]}
+                  busy={busy}
+                  change={(mapping) => setSource(kind, { mapping })}
+                  header={(sheet, row, depth) =>
+                    void inspect(kind, undefined, {
+                      sheet,
+                      headerRow: row,
+                      headerDepth: depth,
+                    })
+                  }
+                />
+              ),
+          )}
+          <div className="fx-step-actions">
+            <Button disabled={!sourcesReady} onClick={() => setStep(1)}>
+              下一步：利率确认
+            </Button>
           </div>
-        </CardContent>
-      </Card>
-      {activeKinds.map(
-        (k) =>
-          sources[k].inspection && (
-            <Mapping
-              key={k}
-              kind={k}
-              source={sources[k]}
+        </>
+      )}
+
+      {step === 1 && (
+        <>
+          {mode === "ledger" ? (
+            <LedgerRateConfirmation
+              inspection={ledgerInspection!}
+              mapping={sources.ledger.mapping}
+              rates={rateRows}
               busy={busy}
-              change={(mapping) => setSource(k, { mapping })}
+              onEdit={editRate}
+            />
+          ) : (
+            <Card>
+              <CardHeader>
+                <CardTitle>补充借款利率（可选）</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="fx-hint">
+                  可上传借款台账自动补充；未匹配项可在测算结果中逐笔填写。
+                </p>
+                <Upload
+                  kind="rateLedger"
+                  source={sources.rateLedger}
+                  busy={busy}
+                  browse={() => void browse("rateLedger")}
+                  clear={() => setSource("rateLedger", empty())}
+                />
+              </CardContent>
+            </Card>
+          )}
+          {mode === "tb" && sources.rateLedger.inspection && (
+            <Mapping
+              kind="rateLedger"
+              source={sources.rateLedger}
+              busy={busy}
+              change={(mapping) => setSource("rateLedger", { mapping })}
               header={(sheet, row, depth) =>
-                void inspect(k, undefined, {
+                void inspect("rateLedger", undefined, {
                   sheet,
                   headerRow: row,
                   headerDepth: depth,
                 })
               }
-              trailing={k === "ledger" ? rateColumns : undefined}
-            />
-          ),
-      )}
-      {mode === "tb" && (
-        <Card>
-          <CardHeader>
-            <CardTitle>补充借款利率（可选）</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="fx-hint">
-              可上传客户借款台账自动补充；未匹配利率可在变动表中逐笔手工填写。
-            </p>
-            <Upload
-              kind="rateLedger"
-              source={sources.rateLedger}
-              busy={busy}
-              browse={() => void browse("rateLedger")}
-              clear={() => setSource("rateLedger", empty())}
-            />
-          </CardContent>
-        </Card>
-      )}
-      {sources.rateLedger.inspection && (
-        <Mapping
-          kind="rateLedger"
-          source={sources.rateLedger}
-          busy={busy}
-          change={(mapping) => setSource("rateLedger", { mapping })}
-          header={(sheet, row, depth) =>
-            void inspect("rateLedger", undefined, {
-              sheet,
-              headerRow: row,
-              headerDepth: depth,
-            })
-          }
-        />
-      )}
-      <Card>
-        <CardHeader>
-          <CardTitle>测算与底稿</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="loan-run-grid">
-            <label>
-              资产负债表日
-              <input
-                type="date"
-                value={reportEnd}
-                onChange={(e) => setReportEnd(e.target.value)}
-              />
-            </label>
-            <label>
-              输出文件
-              <input
-                value={outputPath}
-                readOnly
-                placeholder="默认保存到源文件目录"
-              />
-            </label>
-            <Button
-              variant="secondary"
-              onClick={async () => {
-                const p = await pickPath(
-                  "save",
-                  "保存底稿",
-                  ["xlsx"],
-                  "借款利息测算.xlsx",
-                );
-                if (typeof p === "string") setOutputPath(p);
-              }}
-            >
-              选择位置
-            </Button>
-          </div>
-          <p className="fx-rate-note">
-            测算期间为资产负债表日所属年度的 1 月 1
-            日至该日。浮动利率按“基准利率＋上浮/下浮点数（BP÷10,000）”换算有效年利率。
-          </p>
-          <div className="fx-actions">
-            <Button
-              variant="secondary"
-              disabled={busy}
-              onClick={() => void run("loan.preview")}
-            >
-              {mode === "tb" ? "生成并复核借款变动表" : "测算预览"}
-            </Button>
-            <Button disabled={busy} onClick={() => void run("loan.export")}>
-              生成 Excel 底稿
-            </Button>
-          </div>
-          {job && (
-            <JobProgress
-              job={job}
-              onCancel={busy ? (id) => void jobCancel(id) : undefined}
             />
           )}
-        </CardContent>
-      </Card>
-      {rows.length > 0 && (
-        <Results rows={rows} editRate={editResultRate} result={result} />
+          <div className="fx-step-actions">
+            <Button variant="secondary" onClick={() => setStep(0)}>
+              返回上传与识别
+            </Button>
+            <Button disabled={!mappingsReady} onClick={() => setStep(2)}>
+              下一步：测算与底稿
+            </Button>
+          </div>
+        </>
+      )}
+
+      {step === 2 && (
+        <>
+          <Card>
+            <CardHeader>
+              <CardTitle>测算与底稿</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="loan-run-grid">
+                <label>
+                  资产负债表日
+                  <input
+                    type="date"
+                    value={reportEnd}
+                    onChange={(e) => setReportEnd(e.target.value)}
+                  />
+                </label>
+                <label>
+                  输出文件
+                  <span className="loan-output-row">
+                    <input
+                      value={outputPath}
+                      readOnly
+                      placeholder="默认保存到源文件目录"
+                    />
+                    <Button
+                      variant="secondary"
+                      onClick={async () => {
+                        const path = await pickPath(
+                          "save",
+                          "保存底稿",
+                          ["xlsx"],
+                          "借款利息测算.xlsx",
+                        );
+                        if (typeof path === "string") setOutputPath(path);
+                      }}
+                    >
+                      选择位置
+                    </Button>
+                  </span>
+                </label>
+              </div>
+              <p className="fx-rate-note">
+                浮动利率按“基准利率＋加减点（BP÷10,000）”换算有效年利率。
+              </p>
+              <div className="fx-actions">
+                <Button
+                  variant="secondary"
+                  disabled={busy}
+                  onClick={() => void run("loan.preview")}
+                >
+                  {mode === "tb" ? "生成并复核借款变动表" : "测算预览"}
+                </Button>
+                <Button disabled={busy} onClick={() => void run("loan.export")}>
+                  生成 Excel 底稿
+                </Button>
+              </div>
+              {job && (
+                <JobProgress
+                  job={job}
+                  onCancel={busy ? (id) => void jobCancel(id) : undefined}
+                />
+              )}
+            </CardContent>
+          </Card>
+          {rows.length > 0 && (
+            <Results rows={rows} editRate={editResultRate} result={result} />
+          )}
+          <div className="fx-step-actions">
+            <Button variant="secondary" onClick={() => setStep(1)}>
+              返回利率确认
+            </Button>
+          </div>
+        </>
       )}
     </main>
   );
@@ -643,7 +662,8 @@ function Upload({
       />
       {source.inspection && (
         <small>
-          已识别 {source.inspection.rowCount} 行 · {source.inspection.sheet}
+          已识别 {source.inspection.rowCount.toLocaleString()} 行 ×{" "}
+          {source.inspection.headers.length} 列
         </small>
       )}
     </div>
@@ -655,18 +675,12 @@ function Mapping({
   busy,
   change,
   header,
-  trailing,
 }: {
   kind: Kind;
   source: Source;
   busy: boolean;
   change: (m: Record<string, string>) => void;
   header: (s: string, r: number, d: number) => void;
-  trailing?: {
-    key: string;
-    title: React.ReactNode;
-    render: (rowIndex: number) => React.ReactNode;
-  }[];
 }) {
   const x = source.inspection!;
   // 角色标签统一走共享解析：引擎下发的 roles（台账）优先，TB/JE 与浏览器预览
@@ -721,7 +735,6 @@ function Mapping({
     <>
       <MappingPanel
         title={`${name}字段映射`}
-        note={`${x.rowCount} 行 × ${x.headers.length} 列`}
         headers={x.headers}
         rows={x.preview}
         mapping={source.mapping}
@@ -729,7 +742,6 @@ function Mapping({
         requirementOf={
           hit ? (role) => loanRoleRequirement(hit, role) : undefined
         }
-        trailingColumns={trailing}
         formNote={formNote}
         missing={loanMissing(kind, source.mapping, x.forms)}
         busy={busy || reviewing}
@@ -792,6 +804,100 @@ function Mapping({
     </>
   );
 }
+
+function LedgerRateConfirmation({
+  inspection,
+  mapping,
+  rates,
+  busy,
+  onEdit,
+}: {
+  inspection: Inspection;
+  mapping: Record<string, string>;
+  rates: LoanRateSetting[];
+  busy: boolean;
+  onEdit: (index: number, patch: Partial<LoanRateSetting>) => void;
+}) {
+  const valueAt = (row: string[], role: string) => {
+    const index = inspection.headers.indexOf(mapping[role] ?? "");
+    return index >= 0 ? (row[index] ?? "") : "";
+  };
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>借款利率确认</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="loan-rate-confirmation">
+          <table>
+            <thead>
+              <tr>
+                <th>借款标识</th>
+                <th>台账利率</th>
+                <th>利率类型</th>
+                <th>加减点（BP）</th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              {inspection.preview.map((row, index) => {
+                const sourceRate = valueAt(row, "rate");
+                const loanId =
+                  valueAt(row, "loanId") ||
+                  valueAt(row, "lender") ||
+                  `第 ${index + 1} 行`;
+                const rate = rates[index] ?? {
+                  rateType: "fixed",
+                  spreadBps: 0,
+                };
+                return (
+                  <tr key={`${loanId}-${index}`}>
+                    <td title={loanId}>{loanId}</td>
+                    <td>{sourceRate || "—"}</td>
+                    <td>
+                      <select
+                        className="loan-rate-pick"
+                        disabled={busy}
+                        value={rate.rateType}
+                        onChange={(event) =>
+                          onEdit(index, {
+                            rateType: event.target
+                              .value as LoanRateSetting["rateType"],
+                          })
+                        }
+                      >
+                        <option value="fixed">固定</option>
+                        <option value="floating">浮动</option>
+                      </select>
+                    </td>
+                    <td>
+                      <NumberInput
+                        label={`${loanId}的加减点`}
+                        className="loan-rate-bps"
+                        step="1"
+                        disabled={busy || rate.rateType !== "floating"}
+                        value={rate.spreadBps}
+                        onCommit={(text) =>
+                          onEdit(index, { spreadBps: loanBps(text) })
+                        }
+                      />
+                    </td>
+                    <td>
+                      <span className={sourceRate ? "loan-ok" : "loan-review"}>
+                        {sourceRate ? "已识别" : "待补充"}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function Results({
   rows,
   editRate,
@@ -802,6 +908,26 @@ function Results({
   result?: Record<string, unknown>;
 }) {
   const total = rows.reduce((s, r) => s + Number(r.calculatedInterest ?? 0), 0);
+  const totals = rows.reduce(
+    (sum, row) => ({
+      opening: sum.opening + Number(row.openingPrincipal),
+      additions: sum.additions + Number(row.additions),
+      reductions: sum.reductions + Number(row.reductions),
+      closing: sum.closing + Number(row.closingPrincipal),
+    }),
+    { opening: 0, additions: 0, reductions: 0, closing: 0 },
+  );
+  const amount = (value: number) =>
+    value.toLocaleString("zh-CN", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  const metric = (label: string, value: number | string) => (
+    <div className="fx-bridge-metric">
+      <span>{label}</span>
+      <strong>{typeof value === "number" ? amount(value) : value}</strong>
+    </div>
+  );
   return (
     <section className="loan-results">
       <div className="fx-result-heading">
@@ -819,22 +945,40 @@ function Results({
           </Button>
         ))}
       </div>
-      <div className="loan-summary">
-        <span>
-          借款笔数<strong>{rows.length}</strong>
-        </span>
-        <span>
-          测算利息合计
-          <strong>
-            {total.toLocaleString("zh-CN", { minimumFractionDigits: 2 })}
-          </strong>
-        </span>
-        <span>
-          待复核
-          <strong>
-            {rows.filter((r) => r.matchStatus !== "已匹配").length}
-          </strong>
-        </span>
+      <div className="fx-bridge-step">
+        <div className="fx-step-label">
+          <b>1</b>
+          <span>本金变动</span>
+        </div>
+        <div className="loan-bridge-equation">
+          {metric("期初本金", totals.opening)}
+          <span className="fx-operator" aria-hidden="true">
+            ＋
+          </span>
+          {metric("本期增加", totals.additions)}
+          <span className="fx-operator" aria-hidden="true">
+            －
+          </span>
+          {metric("本期减少", totals.reductions)}
+          <span className="fx-operator" aria-hidden="true">
+            ＝
+          </span>
+          {metric("期末本金", totals.closing)}
+        </div>
+      </div>
+      <div className="fx-bridge-step comparison">
+        <div className="fx-step-label">
+          <b>2</b>
+          <span>测算结果</span>
+        </div>
+        <div className="loan-result-summary">
+          {metric("借款笔数", `${rows.length} 笔`)}
+          {metric("测算利息合计", total)}
+          {metric(
+            "待复核",
+            `${rows.filter((row) => row.matchStatus !== "已匹配").length} 笔`,
+          )}
+        </div>
       </div>
       <div className="loan-rate-table">
         <table>

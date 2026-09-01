@@ -44,6 +44,7 @@ const METHOD_LABELS: Record<string, string> = {
   "deposit.rate_tiers": "读取利率档次",
   "fx.classify_source": "识别外汇来源",
   "fx.check_mapping_alignment": "核对字段映射",
+  "ledger.check_mapping_alignment": "核对字段映射",
   "loan.inspect": "读取借款数据",
   "fuzzy.inspect": "读取匹配数据",
   // Roll Forward / WP

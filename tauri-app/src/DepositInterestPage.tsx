@@ -429,7 +429,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const [accountFilter, setAccountFilter] = useState("");
   const [reportEnd, setReportEnd] = useState("");
   const [dayBasis, setDayBasis] = useState<DayBasis>("month12");
-  const [includeCashOnHand, setIncludeCashOnHand] = useState(false);
   const [tiers, setTiers] = useState<RateTiers>();
   const [tierRates, setTierRates] = useState<Record<string, number>>({});
   const [rows, setRows] = useState<AccountRow[]>([]);
@@ -676,7 +675,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       reportStart: depositReportStart(reportEnd),
       reportEnd,
       dayBasis,
-      includeCashOnHand,
+      // 库存现金不参与存款利息测算；保留字段仅用于兼容现有引擎入参。
+      includeCashOnHand: false,
       tbSource: {
         inputPath: tbPath,
         sheet: tb?.sheet ?? "",
@@ -868,7 +868,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               {jePath ? (
                 <SourceCard
                   title="已识别：JE 序时账"
-                  hint="逐月余额波动的数据源；不上传则退回年初/年末两点法"
                   path={jePath}
                   inspection={je}
                   disabled={busy}
@@ -880,13 +879,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     setJeMapping({});
                   }}
                   onInspect={() => void inspect("je")}
-                  onHeaderChange={(row, depth, sheet) =>
-                    void inspect("je", {
-                      headerRow: row,
-                      headerDepth: depth,
-                      sheet,
-                    })
-                  }
                 />
               ) : tbPath ? (
                 <Card className="fx-source-empty">
@@ -903,7 +895,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               {tbPath ? (
                 <SourceCard
                   title="已识别：TB 科目余额表"
-                  hint="年初/年末余额与利息收入勾稽的数据源"
                   path={tbPath}
                   inspection={tb}
                   disabled={busy}
@@ -915,13 +906,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     setTbMapping({});
                   }}
                   onInspect={() => void inspect("tb")}
-                  onHeaderChange={(row, depth, sheet) =>
-                    void inspect("tb", {
-                      headerRow: row,
-                      headerDepth: depth,
-                      sheet,
-                    })
-                  }
                 />
               ) : jePath ? (
                 <Card className="fx-source-empty">
@@ -995,14 +979,22 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   Boolean(jePath),
                 )}
                 banner={
-                  <p aria-live="polite" className="fx-hint">
-                    {reviews.reviewing.tb
-                      ? "正在复核字段映射；复核期间暂时锁定。"
-                      : reviews.status.tb ||
-                        "脚本已自动映射，可直接核对，或用上方一键复核。"}
-                  </p>
+                  reviews.reviewing.tb || reviews.status.tb ? (
+                    <p aria-live="polite" className="fx-hint">
+                      {reviews.reviewing.tb
+                        ? "正在复核字段映射；复核期间暂时锁定。"
+                        : reviews.status.tb}
+                    </p>
+                  ) : null
                 }
                 onMappingChange={setTbMapping}
+                onHeaderChange={(row, depth, sheet) =>
+                  void inspect("tb", {
+                    headerRow: row,
+                    headerDepth: depth,
+                    sheet,
+                  })
+                }
                 reviewBusy={reviews.reviewing.tb}
               />
             )}
@@ -1015,14 +1007,22 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                 labels={JE_LABELS}
                 missing={depositMissingRequired("je", jeMapping)}
                 banner={
-                  <p aria-live="polite" className="fx-hint">
-                    {reviews.reviewing.je
-                      ? "正在复核字段映射；复核期间暂时锁定。"
-                      : reviews.status.je ||
-                        "脚本已自动映射，可直接核对，或用上方一键复核。"}
-                  </p>
+                  reviews.reviewing.je || reviews.status.je ? (
+                    <p aria-live="polite" className="fx-hint">
+                      {reviews.reviewing.je
+                        ? "正在复核字段映射；复核期间暂时锁定。"
+                        : reviews.status.je}
+                    </p>
+                  ) : null
                 }
                 onMappingChange={setJeMapping}
+                onHeaderChange={(row, depth, sheet) =>
+                  void inspect("je", {
+                    headerRow: row,
+                    headerDepth: depth,
+                    sheet,
+                  })
+                }
                 reviewBusy={reviews.reviewing.je}
               />
             )}
@@ -1211,14 +1211,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                       </option>
                     ))}
                   </select>
-                </label>
-                <label className="deposit-check">
-                  <input
-                    type="checkbox"
-                    checked={includeCashOnHand}
-                    onChange={(e) => setIncludeCashOnHand(e.target.checked)}
-                  />
-                  库存现金也计息
                 </label>
                 <label>
                   输出文件
@@ -1558,23 +1550,20 @@ function ReferenceLinks({ tiers }: { tiers: RateTiers }) {
 
 function SourceCard(props: {
   title: string;
-  hint: string;
   path: string;
   inspection?: Inspection;
   disabled: boolean;
   onClear: () => void;
   onInspect: () => void;
-  onHeaderChange: (row: number, depth: number, sheet: string) => void;
 }) {
   return (
-    <Card>
+    <Card className="fx-source-card">
       <CardHeader>
         <CardTitle>{props.title}</CardTitle>
       </CardHeader>
       <CardContent>
-        <p className="fx-hint">{props.hint}</p>
         <div className="fx-detected-file">
-          <span title={props.path}>{props.path}</span>
+          <span>{fileName(props.path)}</span>
           <button
             type="button"
             disabled={props.disabled}
@@ -1594,53 +1583,10 @@ function SourceCard(props: {
         )}
         {props.inspection && (
           <div className="fx-source-meta">
-            <span>{props.inspection.rowCount.toLocaleString()} 行</span>
-            <label>
-              Sheet
-              <select
-                value={props.inspection.sheet}
-                onChange={(e) => props.onHeaderChange(0, 0, e.target.value)}
-              >
-                {props.inspection.sheets.length ? (
-                  props.inspection.sheets.map((s) => (
-                    <option key={s}>{s}</option>
-                  ))
-                ) : (
-                  <option>{props.inspection.sheet}</option>
-                )}
-              </select>
-            </label>
-            <label>
-              标题行
-              <input
-                type="number"
-                min={1}
-                value={props.inspection.headerRow}
-                onChange={(e) =>
-                  props.onHeaderChange(
-                    Number(e.target.value),
-                    props.inspection!.headerDepth,
-                    props.inspection!.sheet,
-                  )
-                }
-              />
-            </label>
-            <label>
-              表头层数
-              <select
-                value={props.inspection.headerDepth}
-                onChange={(e) =>
-                  props.onHeaderChange(
-                    props.inspection!.headerRow,
-                    Number(e.target.value),
-                    props.inspection!.sheet,
-                  )
-                }
-              >
-                <option value={1}>1层</option>
-                <option value={2}>2层</option>
-              </select>
-            </label>
+            <span>
+              {props.inspection.rowCount.toLocaleString()} 行 ×{" "}
+              {props.inspection.headers.length} 列
+            </span>
             {props.inspection.headerDetection.needsConfirmation && (
               <strong className="fx-warning">
                 标题候选得分接近，请确认标题行
@@ -1665,6 +1611,7 @@ function MappingPreview(props: {
   onMappingChange: React.Dispatch<
     React.SetStateAction<Record<string, string | string[]>>
   >;
+  onHeaderChange: (row: number, depth: number, sheet: string) => void;
   reviewBusy: boolean;
 }) {
   // 复核按钮已上移为「一键复核 TB＋JE」（页面级 LedgerReviewAll），
@@ -1679,7 +1626,6 @@ function MappingPreview(props: {
   return (
     <MappingPanel
       title={props.title}
-      note={`${props.inspection.rowCount} 行 × ${props.inspection.headers.length} 列`}
       headers={props.inspection.headers}
       rows={props.inspection.preview}
       mapping={props.mapping}
@@ -1691,6 +1637,55 @@ function MappingPreview(props: {
       missing={props.missing}
       banner={props.banner}
       busy={props.reviewBusy}
+      toolbar={
+        <>
+          <label>
+            Sheet
+            <select
+              value={props.inspection.sheet}
+              onChange={(e) => props.onHeaderChange(0, 0, e.target.value)}
+            >
+              {(props.inspection.sheets.length
+                ? props.inspection.sheets
+                : [props.inspection.sheet]
+              ).map((sheet) => (
+                <option key={sheet}>{sheet}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            标题行
+            <input
+              type="number"
+              min={1}
+              value={props.inspection.headerRow}
+              onChange={(e) =>
+                props.onHeaderChange(
+                  Number(e.target.value),
+                  props.inspection.headerDepth,
+                  props.inspection.sheet,
+                )
+              }
+            />
+          </label>
+          <label>
+            表头层数
+            <select
+              value={props.inspection.headerDepth}
+              onChange={(e) =>
+                props.onHeaderChange(
+                  props.inspection.headerRow,
+                  Number(e.target.value),
+                  props.inspection.sheet,
+                )
+              }
+            >
+              <option value={1}>1层</option>
+              <option value={2}>2层</option>
+            </select>
+          </label>
+        </>
+      }
       onChange={(next) =>
         props.onMappingChange(next as Record<string, string | string[]>)
       }
@@ -1823,9 +1818,20 @@ function Results({
           的比较仍是上一次测算的结果，点“按新利率重算”后同步。
         </p>
       )}
-      <div className="fx-bridge-step comparison">
+      <div className="fx-bridge-step">
         <div className="fx-step-label">
           <b>1</b>
+          <span>形成测算</span>
+        </div>
+        <div className="deposit-result-summary">
+          {metric("计息账户", `${rows.length} 户`)}
+          {metric("测算月份", `${String(summary.monthCount ?? "—")} 个月`)}
+          {metric("审计测算存款利息", summary.calculatedInterest)}
+        </div>
+      </div>
+      <div className="fx-bridge-step comparison">
+        <div className="fx-step-label">
+          <b>2</b>
           <span>与 TB 比较</span>
         </div>
         <div className="fx-bridge-equation">

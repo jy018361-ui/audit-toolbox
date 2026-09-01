@@ -134,13 +134,13 @@ fn joined(table: &FxTable, row: &[String], map: &Map<String, Value>, role: &str)
         .join(" ")
 }
 
-/// 科目身份：主体 ＋ 归一化编码。编码与名称混写在一格时先拆开。
-fn identity(
+/// 科目身份原料：主体、归一化编码、名称。编码与名称混写在一格时先拆开。
+fn identity_parts(
     table: &FxTable,
     row: &[String],
     map: &Map<String, Value>,
     fixed: &str,
-) -> (String, String) {
+) -> (String, String, String) {
     let entity = text(table, row, map, "entity");
     let entity = if entity.is_empty() {
         fixed.to_owned()
@@ -149,7 +149,31 @@ fn identity(
     };
     let raw = text(table, row, map, "accountCode");
     let code = ledger_mapping::account_code_of(&raw);
-    (entity, ledger_mapping::normalize_account_code(&code))
+    let name = display_name(table, row, map);
+    (entity, ledger_mapping::normalize_account_code(&code), name)
+}
+
+/// 不需要跨表消歧的分类、展示路径仍取主体＋编码。
+fn identity(
+    table: &FxTable,
+    row: &[String],
+    map: &Map<String, Value>,
+    fixed: &str,
+) -> (String, String) {
+    let (entity, code, _) = identity_parts(table, row, map, fixed);
+    (entity, code)
+}
+
+fn matched_identity(
+    table: &FxTable,
+    row: &[String],
+    map: &Map<String, Value>,
+    fixed: &str,
+    policy: &ledger_mapping::AccountMatchPolicy,
+) -> (String, String) {
+    let (entity, code, name) = identity_parts(table, row, map, fixed);
+    let account = policy.account_key(&entity, &code, &name);
+    (entity, account)
 }
 
 fn display_name(table: &FxTable, row: &[String], map: &Map<String, Value>) -> String {
@@ -1836,6 +1860,23 @@ fn check_tb_vs_je(
 
     // TB 侧：只收末级行，汇总行的发生额是下级之和，收进来就翻倍。
     let leaf = ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| columns(tb_map, role));
+    let tb_identities = tb
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| functional_rows.get(*index).copied().unwrap_or(true))
+        .filter(|(index, _)| leaf.get(*index).copied().unwrap_or(true))
+        .map(|(_, row)| identity_parts(tb, row, tb_map, tb_fixed))
+        .collect::<Vec<_>>();
+    let je_identities = je
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| je_rows.get(*index).copied().unwrap_or(true))
+        .map(|(_, row)| identity_parts(je, row, je_map, je_fixed))
+        .collect::<Vec<_>>();
+    let account_policy =
+        ledger_mapping::AccountMatchPolicy::from_sides(&tb_identities, &je_identities);
     let tb_records = fx::records(tb);
     for (index, row) in tb.rows.iter().enumerate() {
         if !functional_rows.get(index).copied().unwrap_or(true) {
@@ -1844,7 +1885,7 @@ fn check_tb_vs_je(
         if !leaf.get(index).copied().unwrap_or(true) {
             continue;
         }
-        let key = identity(tb, row, tb_map, tb_fixed);
+        let key = matched_identity(tb, row, tb_map, tb_fixed, &account_policy);
         if key.1.is_empty() {
             continue;
         }
@@ -1879,7 +1920,7 @@ fn check_tb_vs_je(
         if !je_rows.get(index).copied().unwrap_or(true) {
             continue;
         }
-        let key = identity(je, row, je_map, je_fixed);
+        let key = matched_identity(je, row, je_map, je_fixed, &account_policy);
         if key.1.is_empty() {
             continue;
         }
@@ -1934,7 +1975,7 @@ fn check_tb_vs_je(
         if (include_all_accounts || off) && (include_all_accounts || items.len() < 500) {
             items.push(json!({
                 "entity": key.0,
-                "code": key.1,
+                "code": key.1.split('\u{1f}').next().unwrap_or(&key.1),
                 "name": names.get(&key).cloned().unwrap_or_default(),
                 "presence": match (tb_side.is_some(), je_side.is_some()) {
                     (true, true) => "both",
@@ -1972,6 +2013,12 @@ fn check_tb_vs_je(
         "widespread": widespread,
         "currencyScope": currency_scope,
         "currencyScopeNote": currency_scope_note,
+        "accountMatchMode": if account_policy.ambiguous_count() > 0 {
+            "codeAndNameWhenAmbiguous"
+        } else {
+            "code"
+        },
+        "ambiguousAccountCodes": account_policy.ambiguous_count(),
         "items": items,
     }))
 }

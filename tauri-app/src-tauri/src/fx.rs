@@ -2437,25 +2437,31 @@ fn detect_account_currencies(
     table: &FxTable,
     mapping: &Map<String, Value>,
 ) -> BTreeMap<String, Value> {
-    // 每个科目记：各币种出现次数 ＋ 见过的最强一条依据。
-    let mut tally: BTreeMap<String, (BTreeMap<String, usize>, u8)> = BTreeMap::new();
+    // 每个科目既保留旧的综合结论，也分别保存币种列、科目文本和本位币列证据。
+    // 跨 TB／JE 合并时三类证据的优先级不同，若在这里提前压成一个 detected，
+    // 前端就无法实现“TB 币种列＞科目名＞单一 JE 币种列”的业务规则。
+    type CurrencyTally = (
+        BTreeMap<String, usize>,
+        u8,
+        BTreeMap<String, usize>,
+        BTreeMap<String, usize>,
+        BTreeMap<String, usize>,
+    );
+    let mut tally: BTreeMap<String, CurrencyTally> = BTreeMap::new();
     for row in records(table) {
         let account = account_name(&row, mapping);
         if account.is_empty() || is_summary_account(&account) {
             continue;
         }
         let mapped = normalize_currency(cell(&row, mapping, "currency"));
+        let text = currency_text_hint(&row, mapping).or_else(|| currency_from_text(&account));
+        let functional = normalize_currency(cell(&row, mapping, "functionalCurrency"));
         let (currency, rank) = if !mapped.is_empty() {
-            (mapped, 3u8)
-        } else if let Some(hint) =
-            currency_text_hint(&row, mapping).or_else(|| currency_from_text(&account))
-        {
-            (hint, 2)
+            (mapped.clone(), 3u8)
+        } else if let Some(hint) = &text {
+            (hint.clone(), 2)
         } else {
-            (
-                normalize_currency(cell(&row, mapping, "functionalCurrency")),
-                1,
-            )
+            (functional.clone(), 1)
         };
         if currency.is_empty() {
             continue;
@@ -2463,32 +2469,50 @@ fn detect_account_currencies(
         let entry = tally.entry(account).or_default();
         *entry.0.entry(currency).or_default() += 1;
         entry.1 = entry.1.max(rank);
+        if !mapped.is_empty() {
+            *entry.2.entry(mapped).or_default() += 1;
+        }
+        if let Some(text) = text.filter(|value| !value.is_empty()) {
+            *entry.3.entry(text).or_default() += 1;
+        }
+        if !functional.is_empty() {
+            *entry.4.entry(functional).or_default() += 1;
+        }
     }
+    let most_common = |counts: &BTreeMap<String, usize>| {
+        counts
+            .iter()
+            .max_by_key(|(_, count)| **count)
+            .map(|(currency, _)| currency.clone())
+            .unwrap_or_default()
+    };
     tally
         .into_iter()
-        .map(|(account, (counts, rank))| {
-            // 一个科目下挂多种币种时取出现最多的那个当主币种；
-            // 全部币种都放进 seen，界面把它们列进下拉框，用户不必凭记忆输。
-            let detected = counts
-                .iter()
-                .max_by_key(|(_, count)| **count)
-                .map(|(currency, _)| currency.clone())
-                .unwrap_or_default();
-            (
-                account,
-                json!({
-                    "detected": detected,
-                    "source": match rank {
-                        3 => "币种列",
-                        2 => "科目文本",
-                        _ => "本位币列",
-                    },
-                    "seen": counts.keys().cloned().collect::<Vec<_>>(),
-                    // 只有退回本位币列的才是「没真识别出来」，这些要提示人确认。
-                    "needsConfirmation": rank <= 1,
-                }),
-            )
-        })
+        .map(
+            |(account, (counts, rank, column_counts, text_counts, functional_counts))| {
+                // 一个科目下挂多种币种时取出现最多的那个当主币种；
+                // 全部币种都放进 seen，界面把它们列进下拉框，用户不必凭记忆输。
+                let detected = most_common(&counts);
+                (
+                    account,
+                    json!({
+                        "detected": detected,
+                        "source": match rank {
+                            3 => "币种列",
+                            2 => "科目文本",
+                            _ => "本位币列",
+                        },
+                        "seen": counts.keys().cloned().collect::<Vec<_>>(),
+                        "columnSeen": column_counts.keys().cloned().collect::<Vec<_>>(),
+                        "columnDetected": most_common(&column_counts),
+                        "textDetected": most_common(&text_counts),
+                        "functionalDetected": most_common(&functional_counts),
+                        // 只有退回本位币列的才是「没真识别出来」，这些要提示人确认。
+                        "needsConfirmation": rank <= 1,
+                    }),
+                )
+            },
+        )
         .collect()
 }
 
@@ -2588,6 +2612,13 @@ fn role_values(table: &FxTable, mapping: &Map<String, Value>, role: &str) -> Vec
                 .iter()
                 .filter_map(|index| row.get(*index))
                 .map(|value| normalized_account_role_value(value.trim(), role))
+                .map(|value| {
+                    if role == "accountCode" {
+                        ledger_mapping::normalize_account_code(value)
+                    } else {
+                        value.trim().to_uppercase()
+                    }
+                })
                 .filter(|value| !value.is_empty())
                 .collect::<Vec<_>>()
                 .join(" ")
@@ -2595,6 +2626,61 @@ fn role_values(table: &FxTable, mapping: &Map<String, Value>, role: &str) -> Vec
         .filter(|value| !value.is_empty())
         .collect::<BTreeSet<_>>()
         .into_iter()
+        .collect()
+}
+
+/// 逐行取得公共匹配策略需要的（主体、编码、名称）。这里只读已确认映射列，
+/// 不从别的文本列猜编码；混写列则由公共内核拆分。
+fn account_identity_rows(
+    table: &FxTable,
+    mapping: &Map<String, Value>,
+) -> Vec<(String, String, String)> {
+    let code_indexes = mapped_cols(mapping, "accountCode")
+        .iter()
+        .filter_map(|column| ledger_mapping::header_index(&table.headers, column))
+        .collect::<Vec<_>>();
+    let name_indexes = mapped_cols(mapping, "accountName")
+        .iter()
+        .filter_map(|column| ledger_mapping::header_index(&table.headers, column))
+        .collect::<Vec<_>>();
+    table
+        .rows
+        .iter()
+        .take(100_000)
+        .map(|row| {
+            let joined = |indexes: &[usize]| {
+                indexes
+                    .iter()
+                    .filter_map(|index| row.get(*index))
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let raw_code = joined(&code_indexes);
+            let raw_name = joined(&name_indexes);
+            let code = ledger_mapping::account_code_of(&raw_code);
+            let name = if raw_name.is_empty() {
+                ledger_mapping::account_name_of(&raw_code)
+            } else {
+                ledger_mapping::account_name_of(&raw_name)
+            };
+            // 字段口径核对只判断两列是不是同一种科目身份；主体列可能只在
+            // 一侧存在，不能让它干扰科目列本身的判断。正式业务汇总仍按主体建键。
+            (String::new(), code, name)
+        })
+        .filter(|(_, code, name)| !code.is_empty() || !name.is_empty())
+        .collect()
+}
+
+fn ambiguous_account_identity_keys(
+    rows: &[(String, String, String)],
+    policy: &ledger_mapping::AccountMatchPolicy,
+) -> HashSet<String> {
+    rows.iter()
+        .filter(|(entity, code, _)| policy.is_ambiguous(entity, code))
+        .map(|(entity, code, name)| policy.account_key(entity, code, name))
+        .filter(|key| !key.is_empty())
         .collect()
 }
 
@@ -2763,27 +2849,6 @@ fn cross_table_alignment(
     ) else {
         return Ok((errors, warnings, None));
     };
-    let roles = [("accountCode", "科目编码"), ("accountName", "科目名称")];
-    let mut aligned = Vec::new();
-    let mut broken = Vec::new();
-    for (role, label) in roles {
-        let je_role = role_values(&je_table, &je_mapping, role);
-        let tb_role = role_values(&tb_table, &tb_mapping, role);
-        match overlap_ratio(&je_role, &tb_role) {
-            Some((overlap, ratio)) if overlap > 0 => {
-                aligned.push(label);
-                if ratio < 0.1 {
-                    warnings.push(format!(
-                        "JE与TB的{label}仅有 {overlap}/{} 项能对上，请复核两边映射是否同一口径。JE样例：{}；TB样例：{}。",
-                        je_role.len(),
-                        three_samples(&je_role),
-                        three_samples(&tb_role)
-                    ));
-                }
-            }
-            _ => broken.push((role, label, je_role, tb_role)),
-        }
-    }
     // 币种口径也顺带核一下，但只提示不拦截：两张表的币种范围本来就可能不同。
     if let Some((overlap, _)) = overlap_ratio(
         &role_values(&je_table, &je_mapping, "currency"),
@@ -2793,73 +2858,123 @@ fn cross_table_alignment(
             warnings.push("JE与TB的币种没有任何交集，请确认两边映射的是同一种币种字段。".into());
         }
     }
-    if broken.is_empty() {
-        return Ok((errors, warnings, None));
-    }
-    // 有对不上的角色，就在两张表的低基数列之间自己找一组真正能对上的列。
-    // 这一步要看全量数据，样本里科目出现得太少会找不出重合。
-    let je_full = load_full_side(params, "jeSource")?.unwrap_or(je_table);
-    let tb_full = load_full_side(params, "tbSource")?.unwrap_or(tb_table);
-    let je_columns = low_cardinality_columns(&je_full);
-    let tb_columns = low_cardinality_columns(&tb_full);
-    let mut je_fix = Map::new();
-    let mut tb_fix = Map::new();
-    let mut unmatched = Vec::new();
-    for (role, label, je_role, tb_role) in broken {
-        let shared_code = (role == "accountCode")
-            .then(|| {
-                ledger_mapping::align_account_code_columns(
-                    &je_full.headers,
-                    &je_full.rows,
-                    &tb_full.headers,
-                    &tb_full.rows,
-                )
-            })
-            .flatten()
-            .map(|item| (item.je_column, item.tb_column, item.overlap, item.ratio));
-        match shared_code.or_else(|| {
-            (role != "accountCode")
-                .then(|| best_column_pair(&je_columns, &tb_columns, false))
-                .flatten()
-        }) {
-            Some((je_header, tb_header, overlap, _)) => {
-                je_fix.insert(role.into(), json!(je_header));
-                tb_fix.insert(role.into(), json!(tb_header));
-                aligned.push(label);
+    let je_codes = role_values(&je_table, &je_mapping, "accountCode");
+    let tb_codes = role_values(&tb_table, &tb_mapping, "accountCode");
+    if let Some((overlap, ratio)) = overlap_ratio(&je_codes, &tb_codes) {
+        if overlap > 0 {
+            if ratio < 0.1 {
                 warnings.push(format!(
-                    "JE与TB的{label}原映射对不上，已自动改用取值真正一致的列：JE“{je_header}”对 TB“{tb_header}”（{overlap} 项一致）。"
+                    "JE与TB的科目编码仅有 {overlap}/{} 项能对上，请复核两边映射是否同一口径。JE样例：{}；TB样例：{}。",
+                    je_codes.len().min(tb_codes.len()),
+                    three_samples(&je_codes),
+                    three_samples(&tb_codes)
                 ));
             }
-            None => unmatched.push((label, je_role, tb_role)),
-        }
-    }
-    // 科目编码和科目名称至少要有一个对得上；两个都对不上才是真的没法做。
-    if aligned.is_empty() {
-        let (_, je_role, tb_role) =
-            unmatched
-                .first()
-                .cloned()
-                .unwrap_or(("科目编码", Vec::new(), Vec::new()));
-        errors.push(format!(
-            "JE与TB的科目编码和科目名称都对不上，两张表里也找不到取值能对上的列。JE样例：{}；TB样例：{}。请手工确认两边映射到的是同一套科目。",
-            three_samples(&je_role),
-            three_samples(&tb_role)
-        ));
-    } else {
-        for (label, _, _) in &unmatched {
-            warnings.push(format!(
-                "JE与TB的{label}对不上，也找不到可替代的列；已按{}继续匹配。",
-                aligned.join("、")
+            let je_identities = account_identity_rows(&je_table, &je_mapping);
+            let tb_identities = account_identity_rows(&tb_table, &tb_mapping);
+            let policy =
+                ledger_mapping::AccountMatchPolicy::from_sides(&tb_identities, &je_identities);
+            if policy.ambiguous_count() == 0 {
+                // 编码已经可靠且一一对应时，名称只是展示文本。TB 常用标准科目名，
+                // JE 常用带账号的账户全称，强制名称相等只会制造无意义的纠偏提示。
+                return Ok((errors, warnings, None));
+            }
+            let je_keys = ambiguous_account_identity_keys(&je_identities, &policy);
+            let tb_keys = ambiguous_account_identity_keys(&tb_identities, &policy);
+            let composite_overlap = je_keys.intersection(&tb_keys).count();
+            let composite_base = je_keys.len().min(tb_keys.len());
+            if composite_overlap > 0
+                && composite_base > 0
+                && composite_overlap * 5 >= composite_base * 3
+            {
+                warnings.push(format!(
+                    "检测到 {} 个科目编码对应多个名称，公共引擎已按“科目编码＋科目名称”匹配（其中 {composite_overlap}/{composite_base} 个复合科目一致）。",
+                    policy.ambiguous_count()
+                ));
+                return Ok((errors, warnings, None));
+            }
+
+            // 编码确有歧义但当前名称不足以消歧时，尝试从全表找到真正一致的名称列。
+            let je_full = load_full_side(params, "jeSource")?.unwrap_or(je_table);
+            let tb_full = load_full_side(params, "tbSource")?.unwrap_or(tb_table);
+            let je_columns = low_cardinality_columns(&je_full);
+            let tb_columns = low_cardinality_columns(&tb_full);
+            if let Some((je_header, tb_header, name_overlap, _)) =
+                best_column_pair(&je_columns, &tb_columns, false)
+            {
+                warnings.push(format!(
+                    "科目编码存在一对多，当前名称无法消歧；已自动改用取值一致的名称列：JE“{je_header}”对 TB“{tb_header}”（{name_overlap} 项一致），后续按科目编码＋科目名称匹配。"
+                ));
+                return Ok((
+                    errors,
+                    warnings,
+                    Some(json!({
+                        "jeMapping": {"accountName": je_header},
+                        "tbMapping": {"accountName": tb_header}
+                    })),
+                ));
+            }
+            errors.push(format!(
+                "检测到同一科目编码对应多个名称，但JE与TB的科目名称无法形成可靠的复合匹配。编码样例：{}；请确认两边科目名称映射后重试。",
+                three_samples(&je_codes)
             ));
+            return Ok((errors, warnings, None));
         }
     }
-    let fix = (!je_fix.is_empty() || !tb_fix.is_empty()).then(|| {
-        json!({
-            "jeMapping": Value::Object(je_fix),
-            "tbMapping": Value::Object(tb_fix)
-        })
-    });
-    Ok((errors, warnings, fix))
+
+    // 当前编码列对不上时，优先在全量数据中纠正编码映射；编码始终是第一选择。
+    let je_full = load_full_side(params, "jeSource")?.unwrap_or(je_table);
+    let tb_full = load_full_side(params, "tbSource")?.unwrap_or(tb_table);
+    if let Some(aligned) = ledger_mapping::align_account_code_columns(
+        &je_full.headers,
+        &je_full.rows,
+        &tb_full.headers,
+        &tb_full.rows,
+    ) {
+        warnings.push(format!(
+            "JE与TB的科目编码原映射对不上，已自动改用取值真正一致的列：JE“{}”对 TB“{}”（{} 项一致）。",
+            aligned.je_column, aligned.tb_column, aligned.overlap
+        ));
+        return Ok((
+            errors,
+            warnings,
+            Some(json!({
+                "jeMapping": {"accountCode": aligned.je_column},
+                "tbMapping": {"accountCode": aligned.tb_column}
+            })),
+        ));
+    }
+
+    // 没有可用编码时才退到名称；名称必须在两侧有真实取值交集。
+    let je_names = role_values(&je_full, &je_mapping, "accountName");
+    let tb_names = role_values(&tb_full, &tb_mapping, "accountName");
+    if overlap_ratio(&je_names, &tb_names).is_some_and(|(overlap, _)| overlap > 0) {
+        warnings.push("JE与TB没有可可靠对齐的科目编码，已按科目名称继续匹配。".into());
+        return Ok((errors, warnings, None));
+    }
+    let je_columns = low_cardinality_columns(&je_full);
+    let tb_columns = low_cardinality_columns(&tb_full);
+    if let Some((je_header, tb_header, overlap, _)) =
+        best_column_pair(&je_columns, &tb_columns, false)
+    {
+        warnings.push(format!(
+            "JE与TB的科目名称原映射对不上，已自动改用取值真正一致的列：JE“{je_header}”对 TB“{tb_header}”（{overlap} 项一致）。"
+        ));
+        return Ok((
+            errors,
+            warnings,
+            Some(json!({
+                "jeMapping": {"accountName": je_header},
+                "tbMapping": {"accountName": tb_header}
+            })),
+        ));
+    }
+    errors.push(format!(
+        "JE与TB的科目编码和科目名称都对不上，两张表里也找不到取值能对上的列。JE编码样例：{}；TB编码样例：{}。请手工确认两边映射到的是同一套科目。",
+        three_samples(&je_codes),
+        three_samples(&tb_codes)
+    ));
+    Ok((errors, warnings, None))
 }
 
 pub(crate) fn check_mapping_alignment(params: &Value) -> Result<Value, AppError> {
@@ -3678,6 +3793,10 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
         .get("reportEnd")
         .and_then(Value::as_str)
         .and_then(parse_date);
+    let tb_identities = account_identities_for_matching(&tb_table, &tb_mapping, params);
+    let je_identities = account_identities_for_matching(&je_table, &je_mapping, params);
+    let account_policy =
+        ledger_mapping::AccountMatchPolicy::from_sides(&tb_identities, &je_identities);
     // 辅助核算是可选的细化维度：**两边都映射了才启用**。启用后如果匹配不上，
     // 下面会自动退回粗粒度重跑一次——宁可粗一点也不要因为两边写法或粒度不同
     // 而全盘失配（实测 4800：TB 无辅助核算列、JE 按供应商客户拆行，332 个键全丢）。
@@ -3697,12 +3816,20 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
                 continue;
             }
             let entity = entity_for(&row, &tb_mapping, params).to_owned();
+            let (account_code, account_only_name) = account_code_and_name(&row, &tb_mapping);
             let currency = currency_for(&row, &tb_mapping, &account, params);
             let auxiliary = auxiliary_value(&row, &tb_mapping);
             if currency.is_empty() || currency == functional_currency(&entity, params) {
                 continue;
             }
-            let key = balance_match_key(&entity, &account, &auxiliary, use_auxiliary);
+            let key = balance_match_key_with_policy(
+                &entity,
+                &account_code,
+                &account_only_name,
+                &auxiliary,
+                use_auxiliary,
+                &account_policy,
+            );
             // 记下这个键要校验，JE 侧据此决定收哪些行——两边必须按同一个口径取数。
             wanted.insert(key.clone());
             let opening = signed_amount(&row, &tb_mapping, opening_prefix).map_err(|detail| {
@@ -3752,9 +3879,17 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
                 continue;
             }
             let entity = entity_for(&row, &je_mapping, params).to_owned();
+            let (account_code, account_only_name) = account_code_and_name(&row, &je_mapping);
             let currency = currency_for(&row, &je_mapping, &account, params);
             let auxiliary = auxiliary_value(&row, &je_mapping);
-            let key = balance_match_key(&entity, &account, &auxiliary, use_auxiliary);
+            let key = balance_match_key_with_policy(
+                &entity,
+                &account_code,
+                &account_only_name,
+                &auxiliary,
+                use_auxiliary,
+                &account_policy,
+            );
             // **不按行的币种过滤**。TB 那一行是这个科目的全额余额（科目文本抽不出
             // 币种时，整个科目退回按本位币列判一个币种），JE 若只收「非本位币」的行，
             // 两边就不是同一批数据。实测 4800 的 1002990001 过渡银行：TB 全年轧平为 0，
@@ -4435,6 +4570,59 @@ fn account_code_and_name(row: &RowRecord, mapping: &Map<String, Value>) -> (Stri
     (code, name)
 }
 
+fn account_identities_for_matching(
+    table: &FxTable,
+    mapping: &Map<String, Value>,
+    params: &Value,
+) -> Vec<(String, String, String)> {
+    records(table)
+        .into_iter()
+        .map(|row| {
+            let entity = entity_for(&row, mapping, params).to_owned();
+            let (code, name) = account_code_and_name(&row, mapping);
+            (entity, code, name)
+        })
+        .filter(|(_, code, name)| !code.trim().is_empty() || !name.trim().is_empty())
+        .collect()
+}
+
+fn account_match_policy(params: &Value) -> Result<ledger_mapping::AccountMatchPolicy, AppError> {
+    let Some(tb_source) = params.get("tbSource") else {
+        return Ok(ledger_mapping::AccountMatchPolicy::default());
+    };
+    let Some(je_source) = params.get("jeSource") else {
+        return Ok(ledger_mapping::AccountMatchPolicy::default());
+    };
+    let tb_spec: SourceSpec = serde_json::from_value(tb_source.clone())
+        .map_err(|e| error("INVALID_PARAMS", "TB参数无效。", Some(e.to_string())))?;
+    let je_spec: SourceSpec = serde_json::from_value(je_source.clone())
+        .map_err(|e| error("INVALID_PARAMS", "JE参数无效。", Some(e.to_string())))?;
+    let tb_table = load_fx_table(&tb_spec)?;
+    let je_mapping = mapping_obj(params, "jeMapping");
+    let je_table = forward_filled_je_table(&load_fx_table(&je_spec)?, &je_mapping);
+    let tb_rows =
+        account_identities_for_matching(&tb_table, &mapping_obj(params, "tbMapping"), params);
+    let je_rows = account_identities_for_matching(&je_table, &je_mapping, params);
+    Ok(ledger_mapping::AccountMatchPolicy::from_sides(
+        &tb_rows, &je_rows,
+    ))
+}
+
+fn account_code_name_from_display(account: &str) -> (String, String) {
+    if let Some((code, name)) = ledger_mapping::split_code_and_name(account) {
+        return (code, name);
+    }
+    let trimmed = account.trim();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let first = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("").trim();
+    if ledger_mapping::looks_like_account_code(first) {
+        (first.to_owned(), rest.to_owned())
+    } else {
+        (String::new(), trimmed.to_owned())
+    }
+}
+
 fn tb_account_name_lookup(params: &Value) -> Result<HashMap<String, String>, AppError> {
     let Some(source) = params.get("tbSource") else {
         return Ok(HashMap::new());
@@ -4615,17 +4803,35 @@ fn balance_match_key(entity: &str, account: &str, auxiliary: &str, use_auxiliary
     }
 }
 
-/// 未实现测算的余额键。**与 TB＋JE 对账用的是同一口径**：公司 ＋ 科目编码。
-///
-/// 曾经这里还拼上币种与辅助核算，结果两边天生对不上——TB 端点的币种是从科目
-/// 文本里抽的（抽不出就退回本位币列），辅助核算 TB 根本没有这一列恒为空；
-/// 而 JE 侧逐行读凭证货币、带着供应商与客户。四段里有两段对不上，
-/// 实测 4800 有 286 个账户因此找不到 TB 期初余额端点，被判为「缺少余额基础」。
-///
-/// 重估仍然按币种做——币种保存在端点自身的字段里，不需要挤进匹配键。
-fn monetary_balance_key(entity: &str, account: &str, currency: &str, auxiliary: &str) -> String {
-    let _ = (currency, auxiliary);
-    balance_match_key(entity, account, "", false)
+fn balance_match_key_with_policy(
+    entity: &str,
+    code: &str,
+    name: &str,
+    auxiliary: &str,
+    use_auxiliary: bool,
+    policy: &ledger_mapping::AccountMatchPolicy,
+) -> String {
+    let base = format!(
+        "{}\u{1f}{}",
+        entity.trim(),
+        policy.account_key(entity, code, name)
+    );
+    if use_auxiliary && !auxiliary.trim().is_empty() {
+        format!("{base}\u{1f}{}", auxiliary.trim().to_uppercase())
+    } else {
+        base
+    }
+}
+
+fn balance_match_key_for_account(
+    entity: &str,
+    account: &str,
+    auxiliary: &str,
+    use_auxiliary: bool,
+    policy: &ledger_mapping::AccountMatchPolicy,
+) -> String {
+    let (code, name) = account_code_name_from_display(account);
+    balance_match_key_with_policy(entity, &code, &name, auxiliary, use_auxiliary, policy)
 }
 
 /// 科目角色分类：先看名称关键词，认不出再按科目编码兜底。
@@ -7095,6 +7301,7 @@ fn calculate_unrealized(
         .map_err(|e| error("INVALID_PARAMS", "TB参数无效。", Some(e.to_string())))?;
     let table = load_fx_table(&spec)?;
     let mapping = mapping_obj(params, "tbMapping");
+    let account_policy = account_match_policy(params)?;
     let start = parse_date(
         params
             .get("reportStart")
@@ -7114,7 +7321,14 @@ fn calculate_unrealized(
         && amount_scheme_ok(&mapping, "closingForeign");
     if has_je && !has_foreign_balances {
         return calculate_inferred_opening_unrealized(
-            params, snapshot, start, end, &table, &mapping, realized,
+            params,
+            snapshot,
+            start,
+            end,
+            &table,
+            &mapping,
+            realized,
+            &account_policy,
         );
     }
     let mut output = Vec::new();
@@ -7134,7 +7348,7 @@ fn calculate_unrealized(
         // 会各自重估后相加，这里只用来提示「同一余额键有多行」。
         let key = format!(
             "{}\u{1f}{currency}",
-            balance_match_key(entity, &account, "", false)
+            balance_match_key_for_account(entity, &account, "", false, &account_policy)
         );
         // 同一余额键的多行按各自的余额独立重估，结果自然相加——
         // 旧版在这里直接 `continue` 丢掉后来的行，按费用性质拆行的 TB 会少算一大截。
@@ -7237,6 +7451,7 @@ fn calculate_inferred_opening_unrealized(
     tb_table: &FxTable,
     tb_mapping: &Map<String, Value>,
     realized: &[Value],
+    account_policy: &ledger_mapping::AccountMatchPolicy,
 ) -> Result<(Vec<Value>, Vec<Value>), AppError> {
     let (je_table, je_mapping) = load_mapped_je_table(params)?;
     let has_opening_local = amount_scheme_ok(tb_mapping, "openingFunctional");
@@ -7273,7 +7488,8 @@ fn calculate_inferred_opening_unrealized(
         }
         // 走统一匹配键：辅助核算不进键——TB 常常没有这一列而 JE 按往来单位
         // 拆行，手工拼进去会让两边全盘失配。
-        let account_currency_key = balance_match_key(entity, &account, "", false);
+        let account_currency_key =
+            balance_match_key_for_account(entity, &account, "", false, account_policy);
         let functional_of_row =
             signed_amount(&row, &je_mapping, "functional").map_err(|detail| {
                 error(
@@ -7307,7 +7523,8 @@ fn calculate_inferred_opening_unrealized(
             .entry(account_currency_key)
             .or_default()
             .insert(code);
-        let key = monetary_balance_key(entity, &account, &currency, &auxiliary);
+        let key =
+            balance_match_key_for_account(entity, &account, &auxiliary, false, account_policy);
         *je_functional_movements.entry(key.clone()).or_default() += functional_of_row;
         *je_foreign_movements.entry(key).or_default() += foreign_of_row;
     }
@@ -7343,7 +7560,8 @@ fn calculate_inferred_opening_unrealized(
         let functional = functional_currency(entity, params);
         // 走统一匹配键：辅助核算不进键——TB 常常没有这一列而 JE 按往来单位
         // 拆行，手工拼进去会让两边全盘失配。
-        let account_currency_key = balance_match_key(entity, &account, "", false);
+        let account_currency_key =
+            balance_match_key_for_account(entity, &account, "", false, account_policy);
         let inferred_currencies = account_currencies.get(&account_currency_key);
         // TB 只给到「科目」粒度，而外币敞口是「科目×币种」粒度的。能不能把
         // 科目级余额整体归给某一种外币，取决于三件事，缺一不可：
@@ -7426,7 +7644,8 @@ fn calculate_inferred_opening_unrealized(
             }
             continue;
         };
-        let key = monetary_balance_key(entity, &account, &currency, &auxiliary);
+        let key =
+            balance_match_key_for_account(entity, &account, &auxiliary, false, account_policy);
         let closing_local =
             signed_amount(&row, tb_mapping, "closingFunctional").map_err(|detail| {
                 error(
@@ -7511,6 +7730,7 @@ fn calculate_back_calculated_unrealized(
     tb_mapping: &Map<String, Value>,
 ) -> Result<(Vec<Value>, Vec<Value>), AppError> {
     let (je_table, je_mapping) = load_mapped_je_table(params)?;
+    let account_policy = account_match_policy(params)?;
     let derive_opening = !amount_scheme_ok(tb_mapping, "openingFunctional");
     let mut balances = HashMap::<String, f64>::new();
     let mut closing_balances = HashMap::<String, f64>::new();
@@ -7528,7 +7748,7 @@ fn calculate_back_calculated_unrealized(
         let entity = entity_for(&row, tb_mapping, params);
         // 走统一匹配键：币种在两边来源不同（TB 从科目文本抽、JE 读凭证货币列），
         // 进键会让同一账户被判成两个。重估仍按币种做，币种在端点字段里。
-        let key = balance_match_key(entity, &account, "", false);
+        let key = balance_match_key_for_account(entity, &account, "", false, &account_policy);
         if derive_opening {
             let closing =
                 signed_amount(&row, tb_mapping, "closingFunctional").map_err(|detail| {
@@ -7595,7 +7815,8 @@ fn calculate_back_calculated_unrealized(
                 }
                 // 走统一匹配键：币种在两边来源不同（TB 从科目文本抽、JE 读凭证货币列），
                 // 进键会让同一账户被判成两个。重估仍按币种做，币种在端点字段里。
-                let key = balance_match_key(entity, &account, "", false);
+                let key =
+                    balance_match_key_for_account(entity, &account, "", false, &account_policy);
                 *movements.entry(key).or_default() += signed_amount(row, &je_mapping, "functional")
                     .map_err(|detail| {
                         error(
@@ -7666,7 +7887,7 @@ fn calculate_back_calculated_unrealized(
             })?;
             // 走统一匹配键：币种在两边来源不同（TB 从科目文本抽、JE 读凭证货币列），
             // 进键会让同一账户被判成两个。重估仍按币种做，币种在端点字段里。
-            let key = balance_match_key(&entity, &account, "", false);
+            let key = balance_match_key_for_account(&entity, &account, "", false, &account_policy);
             let item = movements
                 .entry(key)
                 .or_insert((entity, account, role, currency, 0.0, 0.0));
@@ -7726,6 +7947,7 @@ fn calculate_monthly_unrealized(
     realized: &[Value],
 ) -> Result<Vec<Value>, AppError> {
     let (table, mapping) = load_mapped_je_table(params)?;
+    let account_policy = account_match_policy(params)?;
     let rows = records(&table);
     let mut state: BTreeMap<String, (String, String, String, String, f64, f64)> = BTreeMap::new();
     let mut closing_book = HashMap::new();
@@ -7743,7 +7965,7 @@ fn calculate_monthly_unrealized(
             .get("auxiliary")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let key = monetary_balance_key(entity, account, currency, auxiliary);
+        let key = balance_match_key_for_account(entity, account, auxiliary, false, &account_policy);
         state.insert(
             key.clone(),
             (
@@ -7884,7 +8106,8 @@ fn calculate_monthly_unrealized(
             if currency.is_empty() || currency == functional_currency(entity, params) {
                 continue;
             }
-            let key = monetary_balance_key(entity, &account, &currency, &auxiliary);
+            let key =
+                balance_match_key_for_account(entity, &account, &auxiliary, false, &account_policy);
             if !state.contains_key(&key) {
                 if missing_balance_keys.insert(key.clone()) {
                     quality.push(json!({
@@ -13935,6 +14158,7 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             &tb_table,
             &tb_mapping,
             &[],
+            &account_match_policy(&params).unwrap(),
         )
         .unwrap();
         // 按「科目＋问题类型」精确查，不能只按科目——同一个科目在后续的月度

@@ -13,6 +13,8 @@ fn probe_account_currencies() {
     let base =
         PathBuf::from(&home).join("Downloads/审计工具箱/audit-toolbox-main/汇兑损益测试资料");
     for (name, method) in [
+        ("TB-3300.xlsx", "fx.inspect_tb"),
+        ("3300_JE_2025.01-12.xlsx", "fx.inspect_je"),
         ("TB-4800.xlsx", "fx.inspect_tb"),
         ("科目余额表.xls", "fx.inspect_tb"),
         ("序时账-1.xlsx", "fx.inspect_je"),
@@ -69,13 +71,14 @@ fn probe_account_currencies() {
         }
         // 截图里那两个银行科目
         for (account, d) in &details {
-            if account.contains("10020002")
+            if account.contains("100200002")
+                || account.contains("10020002")
                 || account.contains("2241170003")
                 || account.contains("1002990001")
             {
                 println!(
-                    "  样例: {account} -> {} 依据 {} seen {}",
-                    d["detected"], d["source"], d["seen"]
+                    "  样例: {account} -> {} 依据 {} seen {} / 科目文本 {} / 币种列 {}",
+                    d["detected"], d["source"], d["seen"], d["textDetected"], d["columnSeen"]
                 );
             }
         }

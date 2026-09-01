@@ -5048,6 +5048,80 @@ pub(crate) fn normalize_account_code(value: &str) -> String {
     }
 }
 
+/// TB/JE 共用的科目匹配策略。
+///
+/// 普通科目以「主体＋归一化科目编码」为键；只有同一主体下同一编码在任一侧
+/// 实际对应多个不同名称时，才把规范化名称追加到键中。这里判断的是
+/// 「一个编码对应几个不同名称」，不是一张序时账里同一编码出现了多少行——
+/// 后者只是正常的多笔分录，不能误判成编码不唯一。
+///
+/// 编码在统计歧义前先走 [`normalize_account_code`]，所以 `0000943100` 与
+/// `943100` 被视为同一个编码。名称只在确有编码歧义时参与匹配；普通情况下
+/// TB 的标准科目名与 JE 的账户全称即使写法不同，也不会把同一科目拆开。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AccountMatchPolicy {
+    ambiguous_codes: HashSet<(String, String)>,
+}
+
+impl AccountMatchPolicy {
+    /// 每行依次为（主体、科目编码、科目名称）。两侧分开统计，避免仅仅因为
+    /// TB 与 JE 对同一科目采用不同名称，就把原本唯一的编码误判为歧义。
+    pub(crate) fn from_sides(
+        tb: &[(String, String, String)],
+        je: &[(String, String, String)],
+    ) -> Self {
+        let collect = |rows: &[(String, String, String)]| {
+            let mut index = HashMap::<(String, String), HashSet<String>>::new();
+            for (entity, raw_code, raw_name) in rows {
+                let code = normalize_account_code(&account_code_of(raw_code));
+                let name = normalize_name(&account_name_of(raw_name));
+                if code.is_empty() || name.is_empty() {
+                    continue;
+                }
+                index
+                    .entry((entity.trim().to_uppercase(), code))
+                    .or_default()
+                    .insert(name);
+            }
+            index
+        };
+        let tb_index = collect(tb);
+        let je_index = collect(je);
+        let ambiguous_codes = tb_index
+            .iter()
+            .chain(je_index.iter())
+            .filter_map(|(key, names)| (names.len() > 1).then_some(key.clone()))
+            .collect();
+        Self { ambiguous_codes }
+    }
+
+    pub(crate) fn is_ambiguous(&self, entity: &str, raw_code: &str) -> bool {
+        let key = (
+            entity.trim().to_uppercase(),
+            normalize_account_code(&account_code_of(raw_code)),
+        );
+        self.ambiguous_codes.contains(&key)
+    }
+
+    /// 返回可直接作为公共汇总键中「科目」一段的稳定值。
+    pub(crate) fn account_key(&self, entity: &str, raw_code: &str, raw_name: &str) -> String {
+        let code = normalize_account_code(&account_code_of(raw_code));
+        let name = normalize_name(&account_name_of(raw_name));
+        if code.is_empty() {
+            return name;
+        }
+        if self.is_ambiguous(entity, &code) && !name.is_empty() {
+            format!("{code}\u{1f}{name}")
+        } else {
+            code
+        }
+    }
+
+    pub(crate) fn ambiguous_count(&self) -> usize {
+        self.ambiguous_codes.len()
+    }
+}
+
 /// 仅允许同主体、两张账表都存在且各自唯一的科目名称作为缺失编码的回退键。
 /// 输入编码必须来自已确认映射列，不能从名称中猜测；不用于模糊匹配。
 pub(crate) fn validated_account_name_keys(
@@ -5131,20 +5205,68 @@ fn detect_convention(
 
     if is_tb {
         // 科目余额表没有凭证可配平，改用勾稽等式：期初 ＋ 借 − 贷 ＝ 期末。
-        let opening = index_of("openingFunctionalAmount");
-        let closing = index_of("closingFunctionalAmount");
-        let debit = index_of("ytdFunctionalDebit");
-        let credit = index_of("ytdFunctionalCredit");
-        let (Some(opening), Some(closing), Some(debit), Some(credit)) =
-            (opening, closing, debit, credit)
-        else {
+        // 期初、期末本身也有三种记法。不能只找净额列：TB3／TB6 的余额是
+        // 借贷分列，字段映射虽然完整，旧逻辑却会误报“余额未映射齐全”。先把
+        // 每个端点统一折成借正贷负净额，再把发生额贷方的符号留给等式投票裁决。
+        let balance_values = |prefix: &str| -> Option<Vec<f64>> {
+            let amount = index_of(&format!("{prefix}Amount"));
+            let debit = index_of(&format!("{prefix}Debit"));
+            let credit = index_of(&format!("{prefix}Credit"));
+            if amount.is_none() && !(debit.is_some() && credit.is_some()) {
+                return None;
+            }
+            let base = prefix
+                .strip_suffix("Functional")
+                .or_else(|| prefix.strip_suffix("Foreign"))
+                .unwrap_or(prefix);
+            let direction = index_of(&format!("{base}Direction")).or_else(|| index_of("direction"));
+            let self_signed = balance_self_signed(headers, rows, column_of, prefix);
+            Some(
+                rows.iter()
+                    .map(|row| {
+                        let number = |index: Option<usize>| {
+                            index
+                                .and_then(|i| row.get(i))
+                                .and_then(|value| parse_amount(value).ok().flatten())
+                        };
+                        let inputs = AmountInputs {
+                            amount: number(amount),
+                            debit: number(debit),
+                            credit: number(credit),
+                            direction: direction.and_then(|i| row.get(i)).map(ToOwned::to_owned),
+                        };
+                        signed_balance(&inputs, SignConvention::Unsigned, self_signed)
+                    })
+                    .collect(),
+            )
+        };
+        let complete_unit = ["Functional", "Foreign"].into_iter().find_map(|unit| {
+            let opening = balance_values(&format!("opening{unit}"))?;
+            let closing = balance_values(&format!("closing{unit}"))?;
+            let debit = index_of(&format!("ytd{unit}Debit"))?;
+            let credit = index_of(&format!("ytd{unit}Credit"))?;
+            Some((opening, closing, debit, credit))
+        });
+        let Some((opening, closing, debit, credit)) = complete_unit else {
+            let has_opening = ["Functional", "Foreign"]
+                .into_iter()
+                .any(|unit| balance_values(&format!("opening{unit}")).is_some());
+            let has_closing = ["Functional", "Foreign"]
+                .into_iter()
+                .any(|unit| balance_values(&format!("closing{unit}")).is_some());
+            let has_any_debit = ["ytdFunctionalDebit", "ytdForeignDebit"]
+                .into_iter()
+                .any(|role| index_of(role).is_some());
+            let has_any_credit = ["ytdFunctionalCredit", "ytdForeignCredit"]
+                .into_iter()
+                .any(|role| index_of(role).is_some());
             // 净额口径降级：本年累计借贷发生额一列都没有（借款利息的 TB 常见形态
             // ——只给期初/期末净额＋方向列）时，勾稽等式无从谈起，但符号口径
             // 只影响**贷方发生额**怎么并进净额——没有发生额列，两种口径算出的
             // 余额一致，可直接下「借贷符号一样」的无争议结论，不必判「无法判定」。
             // 与 [`fallback_by_credit_column`] 的 (0, 0) 分支同一口径；借款侧收口
             // 前自拼原料投票落到的也是它。
-            if debit.is_none() && credit.is_none() && (opening.is_some() || closing.is_some()) {
+            if !has_any_debit && !has_any_credit && (has_opening || has_closing) {
                 let mut evidence = SignEvidence::blank("tb");
                 evidence.convention = Some(SignConvention::Unsigned);
                 evidence.note = Some(
@@ -5158,7 +5280,6 @@ fn detect_convention(
             evidence.note = Some("余额或发生额未映射齐全，无法用勾稽等式判定符号口径。".into());
             return evidence;
         };
-        let (opening, closing) = (numbers(opening), numbers(closing));
         let (debit, credit) = (numbers(debit), numbers(credit));
         let balances: Vec<BalanceRow> = (0..rows.len())
             .map(|i| BalanceRow {
@@ -5731,6 +5852,57 @@ mod tests {
     }
 
     #[test]
+    fn 公共科目匹配仅在编码真实一对多时追加名称() {
+        let tb = vec![
+            ("A".into(), "943100".into(), "现金".into()),
+            ("A".into(), "943100".into(), "银行存款".into()),
+        ];
+        let je = vec![
+            ("A".into(), "0000943100".into(), "现金".into()),
+            // 同一科目重复多笔分录，不应额外增加歧义计数。
+            ("A".into(), "0000943100".into(), "现金".into()),
+            ("A".into(), "0000943100".into(), "银行存款".into()),
+        ];
+        let policy = AccountMatchPolicy::from_sides(&tb, &je);
+        assert_eq!(policy.ambiguous_count(), 1);
+        assert_eq!(
+            policy.account_key("A", "943100", "现金"),
+            policy.account_key("A", "0000943100", "现金")
+        );
+        assert_ne!(
+            policy.account_key("A", "943100", "现金"),
+            policy.account_key("A", "0000943100", "银行存款")
+        );
+    }
+
+    #[test]
+    fn 两侧名称写法不同不会把唯一编码误判为歧义() {
+        let tb = vec![(
+            "4800".into(),
+            "1002010017".into(),
+            "货币资金-银行存款-建设银行".into(),
+        )];
+        let je = vec![
+            (
+                "4800".into(),
+                "1002010017".into(),
+                "银行存款-建行RMB3250-4800".into(),
+            ),
+            (
+                "4800".into(),
+                "1002010017".into(),
+                "银行存款-建行RMB3250-4800".into(),
+            ),
+        ];
+        let policy = AccountMatchPolicy::from_sides(&tb, &je);
+        assert_eq!(policy.ambiguous_count(), 0);
+        assert_eq!(
+            policy.account_key("4800", "1002010017", &tb[0].2),
+            policy.account_key("4800", "1002010017", &je[0].2)
+        );
+    }
+
+    #[test]
     fn 合并科目列两级挑选并让弱角色出让() {
         // 03 号样例形态：整表只有一列科目，编码与名称挤在一格。列名带「文本」
         // 两个字，辅助核算会先把它兜底占走——科目本体比辅助核算重要，要抢回来。
@@ -6138,6 +6310,43 @@ mod tests {
             "{e:?}"
         );
         assert!(sign_is_trustworthy(&e), "无争议结论不应被可信度门槛否决");
+    }
+
+    #[test]
+    fn tb借贷分列余额也能走勾稽等式判定符号() {
+        let headers: Vec<String> = [
+            "期初借方",
+            "期初贷方",
+            "本年借方",
+            "本年贷方",
+            "期末借方",
+            "期末贷方",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let rows = vec![
+            vec!["100", "0", "50", "30", "120", "0"],
+            vec!["0", "20", "0", "5", "0", "25"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(str::to_string).collect())
+        .collect::<Vec<Vec<String>>>();
+        let column_of = |role: &str| -> Vec<String> {
+            match role {
+                "openingFunctionalDebit" => vec!["期初借方".into()],
+                "openingFunctionalCredit" => vec!["期初贷方".into()],
+                "ytdFunctionalDebit" => vec!["本年借方".into()],
+                "ytdFunctionalCredit" => vec!["本年贷方".into()],
+                "closingFunctionalDebit" => vec!["期末借方".into()],
+                "closingFunctionalCredit" => vec!["期末贷方".into()],
+                _ => vec![],
+            }
+        };
+        let e = detect_tb_sign_convention(&headers, &rows, &column_of);
+        assert_eq!(e.convention, Some(SignConvention::Unsigned), "{e:?}");
+        assert_eq!(e.unsigned_votes, 2, "{e:?}");
+        assert!(sign_is_trustworthy(&e), "完整借贷分列映射不应被误报缺列");
     }
 
     #[test]

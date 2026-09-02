@@ -118,8 +118,16 @@
   flex: 0 0 auto;
   white-space: nowrap;
 }
+/* 结果区直接铺在页面底色（--surface-page）上时，指标卡的 --muted 底色
+   与页面底色几乎同色，卡片会"融进"背景。与借款利息 .loan-results、
+   模糊匹配 .fuzzy-result 一致：整节套一层白底描边容器，指标卡落在
+   --card 上才能显出层次。 */
 .deposit-result {
   gap: 16px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card);
 }
 .deposit-result-summary {
   display: grid;

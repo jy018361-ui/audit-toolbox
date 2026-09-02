@@ -1842,6 +1842,12 @@ function Results({
           {metric(
             "TB 账面利息收入",
             booked ? summary.bookedInterestIncome : "未识别",
+            booked && summary.bookedNote
+              ? String(summary.bookedNote)
+              : undefined,
+            booked && Number(summary.bookedInterestIncome) < 0
+              ? "warning"
+              : "",
           )}
           <span className="fx-operator" aria-hidden="true">
             ＝

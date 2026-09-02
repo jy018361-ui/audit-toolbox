@@ -2673,15 +2673,50 @@ fn account_identity_rows(
         .collect()
 }
 
-fn ambiguous_account_identity_keys(
-    rows: &[(String, String, String)],
+/// 跨表匹配只关心**两侧都出现**的歧义编码的复合键。
+///
+/// 歧义集合按两侧并集统计（`AccountMatchPolicy::from_sides`），但一侧内部
+/// 把某编码拆成多个名称（TB 按币种/辅助核算分行）而另一侧根本不用该编码时，
+/// 这个歧义不影响两表按编码匹配——此前把它一并算进复合核对，JE 侧永远凑不出
+/// 对应键，合法账套（仅未实现模式、本位币序时账）被整体拦下。
+fn shared_ambiguous_account_keys(
+    je: &[(String, String, String)],
+    tb: &[(String, String, String)],
     policy: &ledger_mapping::AccountMatchPolicy,
-) -> HashSet<String> {
-    rows.iter()
-        .filter(|(entity, code, _)| policy.is_ambiguous(entity, code))
-        .map(|(entity, code, name)| policy.account_key(entity, code, name))
-        .filter(|key| !key.is_empty())
-        .collect()
+) -> (HashSet<String>, HashSet<String>) {
+    let normalized_codes = |rows: &[(String, String, String)]| {
+        rows.iter()
+            .map(|(entity, code, _)| {
+                (
+                    entity.trim().to_uppercase(),
+                    ledger_mapping::normalize_account_code(&ledger_mapping::account_code_of(
+                        code,
+                    )),
+                )
+            })
+            .collect::<HashSet<_>>()
+    };
+    let je_side = normalized_codes(je);
+    let tb_side = normalized_codes(tb);
+    let shared = je_side
+        .intersection(&tb_side)
+        .cloned()
+        .collect::<HashSet<_>>();
+    let keys = |rows: &[(String, String, String)]| {
+        rows.iter()
+            .filter(|(entity, code, _)| {
+                shared.contains(&(
+                    entity.trim().to_uppercase(),
+                    ledger_mapping::normalize_account_code(&ledger_mapping::account_code_of(
+                        code,
+                    )),
+                )) && policy.is_ambiguous(entity, code)
+            })
+            .map(|(entity, code, name)| policy.account_key(entity, code, name))
+            .filter(|key| !key.is_empty())
+            .collect::<HashSet<String>>()
+    };
+    (keys(je), keys(tb))
 }
 
 /// TB 常把“科目编码:科目名称”或“上级编码/名称”放在同一格。
@@ -2879,8 +2914,16 @@ fn cross_table_alignment(
                 // JE 常用带账号的账户全称，强制名称相等只会制造无意义的纠偏提示。
                 return Ok((errors, warnings, None));
             }
-            let je_keys = ambiguous_account_identity_keys(&je_identities, &policy);
-            let tb_keys = ambiguous_account_identity_keys(&tb_identities, &policy);
+            let (je_keys, tb_keys) =
+                shared_ambiguous_account_keys(&je_identities, &tb_identities, &policy);
+            if je_keys.is_empty() && tb_keys.is_empty() {
+                // 歧义编码只在单侧出现：另一侧不用它，按编码匹配不受影响。
+                warnings.push(format!(
+                    "检测到 {} 个科目编码在单侧对应多个名称（另一侧未使用该编码），不影响两表按科目编码匹配。",
+                    policy.ambiguous_count()
+                ));
+                return Ok((errors, warnings, None));
+            }
             let composite_overlap = je_keys.intersection(&tb_keys).count();
             let composite_base = je_keys.len().min(tb_keys.len());
             if composite_overlap > 0

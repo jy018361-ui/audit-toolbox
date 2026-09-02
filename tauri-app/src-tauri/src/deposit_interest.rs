@@ -1411,6 +1411,20 @@ fn calculate(
         &tb_columns,
         "closingFunctional",
     );
+    // 科目登记方向推断要查上级科目名：把全表「编码→名称」收一份（含非
+    // 末级汇总行——方向信息恰恰在 `6603 财务费用` 这类父行上）。
+    let tb_account_names: BTreeMap<String, String> = tb
+        .rows
+        .iter()
+        .map(|row| {
+            let text = join_columns(row, &account_cols);
+            (
+                ledger_mapping::account_code_of(&text),
+                ledger_mapping::account_name_of(&text),
+            )
+        })
+        .filter(|(code, name)| !code.is_empty() && !name.is_empty() && code != name)
+        .collect();
     for (row_index, row) in tb.rows.iter().enumerate() {
         if !tb_leaf[row_index] {
             continue;
@@ -1421,41 +1435,33 @@ fn calculate(
         }
         let role = role_for(&account, params);
         if role == "interest_income" {
-            // 利息收入是损益类贷方科目：优先用本期发生额净额，
-            // 只有余额可用时退回期末余额净额。
-            // 发生额口径：本年累计优先，表里只给本期时退而求其次。
-            let net = signed(
-                &tb,
-                row,
-                &tb_map,
-                "ytdFunctionalCredit",
-                "ytdFunctionalDebit",
-            )
-            .or_else(|| {
-                signed(
-                    &tb,
-                    row,
-                    &tb_map,
-                    "periodFunctionalCredit",
-                    "periodFunctionalDebit",
-                )
-            })
-            .filter(|value| value.abs() > 0.0)
-            .or_else(|| {
-                signed(
-                    &tb,
-                    row,
-                    &tb_map,
-                    "closingFunctionalCredit",
-                    "closingFunctionalDebit",
-                )
-            })
-            .or_else(|| cell_number(&tb, row, &tb_map, "closingFunctionalAmount").map(|x| -x))
-            .unwrap_or(0.0);
+            // 利息收入是损益类贷方科目：优先用本期发生额净额，只有余额
+            // 可用时退回期末余额净额。已结转形态（借贷同额）按红字与
+            // 科目登记方向定收入/费用符号——费用性质的科目计入负数，
+            // 冲减勾稽基准，而不是冒充一笔利息收入。
+            let direction = registered_direction(&account, &tb_account_names);
+            let (net, note) = match booked_occurrence(&tb, row, &tb_map, tb_convention, direction)
+            {
+                Some((net, note)) => (net, note),
+                None => (
+                    signed(
+                        &tb,
+                        row,
+                        &tb_map,
+                        "closingFunctionalCredit",
+                        "closingFunctionalDebit",
+                    )
+                    .or_else(|| {
+                        cell_number(&tb, row, &tb_map, "closingFunctionalAmount").map(|x| -x)
+                    })
+                    .unwrap_or(0.0),
+                    "期末余额净额".into(),
+                ),
+            };
             booked_interest += net;
             booked_interest_rows.push(json!({
                 "entity": cell_text(&tb, row, &tb_map, "entity"),
-                "account": account, "bookedAmount": net
+                "account": account, "bookedAmount": net, "note": note
             }));
             continue;
         }
@@ -1686,9 +1692,17 @@ fn calculate(
         all.sort();
         all
     };
-    let booked = booked_interest.abs();
+    // 基准数保持符号：负数＝账面是净利息支出（费用性科目计入负数）。
+    // 此前对合计取绝对值是为迁就用友符号惯例，但会把费用翻成一笔正的
+    // 利息收入，差异方向失真；符号已在逐行按口径归一，合计不再翻正。
+    let booked = booked_interest;
     let difference = calculated - booked;
-    let ratio = (booked.abs() > 0.005).then(|| difference / booked);
+    let ratio = (booked.abs() > 0.005).then(|| difference / booked.abs());
+    let booked_note = if booked < -0.005 {
+        "账面利息收入合计为负（净利息支出），请复核科目分类里的利息收入科目。"
+    } else {
+        ""
+    };
     let review = accounts.iter().filter(|a| a.status != "已勾稽").count();
     let stale_months = listed_rate_age_months();
     let rates_stale = stale_months > RATE_STALE_AFTER_MONTHS;
@@ -1700,6 +1714,7 @@ fn calculate(
             "calculatedInterest": calculated,
             "bookedInterestIncome": booked,
             "bookedInterestRaw": booked_interest,
+            "bookedNote": booked_note,
             "difference": difference,
             "differenceRatio": ratio,
             // 还有账户没填利率时，测算合计本身就不完整，谈不上勾稽通过。
@@ -2365,6 +2380,150 @@ fn signed(
     (plus.is_some() || minus.is_some()).then(|| plus.unwrap_or(0.0) - minus.unwrap_or(0.0))
 }
 
+/// 利息收入科目的登记方向（正常发生额记借还是记贷）。
+///
+/// 已结转的损益科目借贷同额、期末为零，收入还是费用只能按「活动落在
+/// 登记方向的哪一侧」判：红字（负数）＝与登记方向相反的活动。登记方向
+/// 本身不在余额表里，只能从科目身份推——**费用类关键词优先于收入类**，
+/// 且自身名称与 TB 里的上级科目名都查：`财务费用-利息收入` 挂在费用
+/// 科目下，真实登记方向是借，利息收入以红字借方冲减费用，这正是用友
+/// 等账套的标准记法；反之 `6051 其他业务收入` 这类独立收入科目按贷方向。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AccountDirection {
+    Debit,
+    Credit,
+    Unknown,
+}
+
+const EXPENSE_DIRECTION_KEYWORDS: &[&str] = &[
+    "费用", "手续费", "支出", "损失", "expense", "charge", "fee", "cost",
+];
+const INCOME_DIRECTION_KEYWORDS: &[&str] = &["收入", "收益", "income"];
+
+fn registered_direction(
+    account: &str,
+    tb_accounts: &BTreeMap<String, String>,
+) -> AccountDirection {
+    let code = ledger_mapping::account_code_of(account);
+    let name = ledger_mapping::account_name_of(account);
+    let lower = name.to_lowercase();
+    // 由近及远走编码前缀查上级科目；只认纯数字编码（字节切片安全）。
+    let ancestor_hits = |keywords: &[&str]| -> bool {
+        if code.len() < 2 || !code.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        (1..code.len())
+            .rev()
+            .filter_map(|length| tb_accounts.get(&code[..length]))
+            .any(|parent| {
+                keywords
+                    .iter()
+                    .any(|k| parent.to_lowercase().contains(k))
+            })
+    };
+    if EXPENSE_DIRECTION_KEYWORDS.iter().any(|k| lower.contains(k))
+        || ancestor_hits(EXPENSE_DIRECTION_KEYWORDS)
+    {
+        return AccountDirection::Debit;
+    }
+    if INCOME_DIRECTION_KEYWORDS.iter().any(|k| lower.contains(k))
+        || ancestor_hits(INCOME_DIRECTION_KEYWORDS)
+    {
+        return AccountDirection::Credit;
+    }
+    AccountDirection::Unknown
+}
+
+/// 已结转形态（借贷发生同额、净额为 0）下的账面利息收入取数。
+/// 返回（金额, 口径说明）。
+///
+/// - **Unsigned 表**（负数＝红字，经济上归属对面一侧）：红字对＝与登记
+///   方向相反的活动。费用方向科目＋红字对＝冲减费用＝收入（用友记法的
+///   `财务费用-利息` 即此）；费用方向科目＋正常对＝活动在借方，这不是
+///   利息收入而是费用，计负数冲减基准。收入方向科目对称相反。
+/// - **Signed 表**（贷方列本身借正贷负）：导出口径已把红字与正常抹平，
+///   只能按登记方向定符号。
+fn closed_pair_baseline(
+    convention: ledger_mapping::SignConvention,
+    direction: AccountDirection,
+    credit: f64,
+    debit: f64,
+) -> (f64, &'static str) {
+    let magnitude = credit.abs().max(debit.abs());
+    let red = credit < 0.0 || debit < 0.0;
+    match (convention, direction) {
+        (ledger_mapping::SignConvention::Unsigned, AccountDirection::Debit) => {
+            if red {
+                (magnitude, "已结转·红字冲减费用，按收入计入")
+            } else {
+                (-magnitude, "已结转·费用性质，按负数计入")
+            }
+        }
+        (ledger_mapping::SignConvention::Unsigned, AccountDirection::Credit) => {
+            if red {
+                (-magnitude, "已结转·红字冲减收入，按负数计入")
+            } else {
+                (magnitude, "已结转·按贷方全额计入")
+            }
+        }
+        (_, AccountDirection::Debit) => (
+            -magnitude,
+            "已结转·费用性质，按负数计入（表为借正贷负口径）",
+        ),
+        (_, AccountDirection::Credit) => (
+            magnitude,
+            "已结转·按贷方全额计入（表为借正贷负口径）",
+        ),
+        (_, AccountDirection::Unknown) => (
+            magnitude,
+            "已结转·科目方向未识别，按全额计入，请复核红字方向",
+        ),
+    }
+}
+
+/// 账面利息收入的发生额口径：本年累计优先，表里只给本期时退而求其次。
+/// 返回（金额, 口径说明）；`None` 表示该口径下没有可用数据（借贷均未
+/// 映射或全为 0），让调用方退到期末余额。
+///
+/// 金额一律折成「贷方正」的经济净额：Unsigned 表的负数是红字（经济上
+/// 归属对面一侧），净额 `贷－借` 天然正确；Signed 表贷方列本身借正贷负，
+/// 净额要按 `－贷－借` 折——此前不分口径一律 `贷－借`，Signed 表的
+/// 已结转行会算出 2 倍金额的双倍净额。
+fn booked_occurrence(
+    table: &FxTable,
+    row: &[String],
+    mapping: &Map<String, Value>,
+    convention: ledger_mapping::SignConvention,
+    direction: AccountDirection,
+) -> Option<(f64, String)> {
+    for (credit_role, debit_role) in [
+        ("ytdFunctionalCredit", "ytdFunctionalDebit"),
+        ("periodFunctionalCredit", "periodFunctionalDebit"),
+    ] {
+        let credit = cell_number(table, row, mapping, credit_role);
+        let debit = cell_number(table, row, mapping, debit_role);
+        if credit.is_none() && debit.is_none() {
+            continue;
+        }
+        let (cr, dr) = (credit.unwrap_or(0.0), debit.unwrap_or(0.0));
+        let net = match convention {
+            ledger_mapping::SignConvention::Unsigned => cr - dr,
+            ledger_mapping::SignConvention::Signed => -cr - dr,
+        };
+        if net.abs() > 0.005 {
+            return Some((net, "发生额净额".into()));
+        }
+        // 年末已结转的损益科目：结转分录使借贷发生同额，净额恒为 0，
+        // 期末余额也是 0。此时按红字与科目登记方向定收入/费用符号。
+        if cr.abs() <= 0.005 && dr.abs() <= 0.005 {
+            return None;
+        }
+        let (amount, note) = closed_pair_baseline(convention, direction, cr, dr);
+        return Some((amount, note.into()));
+    }
+    None
+}
+
 /// 金额文本读取：引擎 [`ledger_mapping::parse_amount_lenient`] 的薄包装。
 ///
 /// 千分位、货币符号、括号负数、占位符（`-`／`—`／`N/A`）与尾部负号、
@@ -2718,6 +2877,16 @@ fn write_reconciliation(
             .map_err(xlsx)?;
         y += 1;
     }
+    if summary["bookedNote"].as_str().is_some_and(|note| !note.is_empty()) {
+        sheet
+            .write_string(
+                y,
+                0,
+                format!("提示：{}", summary["bookedNote"].as_str().unwrap_or("")),
+            )
+            .map_err(xlsx)?;
+        y += 1;
+    }
     let missing = summary["missingRateCount"].as_u64().unwrap_or(0);
     if missing > 0 {
         let tiers = summary["missingRateTiers"]
@@ -2746,7 +2915,7 @@ fn write_reconciliation(
         .write_string_with_format(y, 0, "账面利息收入科目明细", &bold)
         .map_err(xlsx)?;
     y += 1;
-    for (column, title) in ["核算主体", "科目", "账面金额"].iter().enumerate() {
+    for (column, title) in ["核算主体", "科目", "账面金额", "口径"].iter().enumerate() {
         sheet
             .write_string_with_format(y, column as u16, *title, &header_format())
             .map_err(xlsx)?;
@@ -2762,6 +2931,9 @@ fn write_reconciliation(
             .map_err(xlsx)?;
         sheet
             .write_number_with_format(y, 2, item["bookedAmount"].as_f64().unwrap_or(0.0), &amount)
+            .map_err(xlsx)?;
+        sheet
+            .write_string(y, 3, item["note"].as_str().unwrap_or(""))
             .map_err(xlsx)?;
     }
     sheet.set_column_width(0, 42).map_err(xlsx)?;
@@ -3904,6 +4076,262 @@ mod tests {
         assert!(rows[0]["account"].as_str().unwrap().contains("银行存款"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 年末已结转的损益科目（用友等账套）：结转分录使借贷发生额同额、
+    /// 期末余额为 0，发生净额恒为 0。用户实测：科目分类里已人工指定
+    /// 「利息收入（勾稽基准）」，基准数仍显示 0——净额口径在这种形态下
+    /// 必须退到发生全额，否则勾稽差异整体失真。且费用类科目下的红字对
+    /// ＝冲减费用＝收入，取正数计入（真实用户文件实测 923,800.50）。
+    #[test]
+    fn closed_pl_occurrence_uses_gross_credit_as_baseline() {
+        let dir = std::env::temp_dir().join(format!("deposit-closed-pl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb_path = dir.join("tb.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec![
+                    "科目编码",
+                    "科目名称",
+                    "期初余额借方",
+                    "期初余额贷方",
+                    "本期发生借方",
+                    "本期发生贷方",
+                    "期末余额借方",
+                    "期末余额贷方",
+                ],
+                vec!["1002", "银行存款", "1200000", "0", "1200000", "0", "2400000", "0"],
+                // 汇总行：登记方向推断靠它把「66030002 利息」认成费用方向。
+                vec!["6603", "财务费用", "0", "0", "0", "0", "0", "0"],
+                // 用友形态：利息收入以红字借方冲减费用，结转对应红字贷方，
+                // 借贷两列同额同负。
+                vec!["66030002", "利息", "0", "0", "-923800.50", "-923800.50", "0", "0"],
+            ],
+        );
+        let tb = inspect(
+            &json!({"source": {"inputPath": tb_path.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
+        let params = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": tb["suggestedMapping"],
+            "accountRoles": tb["suggestedAccountRoles"],
+            "accountRoleOverrides": {"66030002 利息": "interest_income"}
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap();
+        let summary = &result["summary"];
+        assert!(summary["hasInterestIncomeAccount"].as_bool().unwrap());
+        assert!(
+            (summary["bookedInterestIncome"].as_f64().unwrap() - 923_800.50).abs() < 0.01,
+            "费用类科目下的红字对是冲减费用的利息收入，应按正数计入: {summary}"
+        );
+        assert!(
+            !summary["bookedNote"].as_str().unwrap_or("").contains("净利息支出"),
+            "红字收入不是净支出，不应出负数提示: {summary}"
+        );
+        let rows = result["bookedInterestRows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "汇总行不进基准: {rows:?}");
+        assert!(
+            rows[0]["note"].as_str().unwrap_or("").contains("红字"),
+            "口径说明应写明红字: {rows:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同一张已结转的表，费用性科目（手续费）被选成利息收入基准时，
+    /// 正常对（借贷同正）表示活动在借方——这不是利息收入而是费用，
+    /// 必须按负数计入基准，否则一笔费用被冒充成收入。
+    #[test]
+    fn closed_expense_baseline_counts_negative() {
+        let dir = std::env::temp_dir().join(format!("deposit-closed-fee-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb_path = dir.join("tb.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec![
+                    "科目编码", "科目名称", "期初余额借方", "期初余额贷方",
+                    "本期发生借方", "本期发生贷方", "期末余额借方", "期末余额贷方",
+                ],
+                vec!["1002", "银行存款", "1200000", "0", "1200000", "0", "2400000", "0"],
+                vec!["6603", "财务费用", "0", "0", "0", "0", "0", "0"],
+                vec!["66030001", "手续费", "0", "0", "4429.49", "4429.49", "0", "0"],
+            ],
+        );
+        let tb = inspect(
+            &json!({"source": {"inputPath": tb_path.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
+        let params = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": tb["suggestedMapping"],
+            "accountRoles": tb["suggestedAccountRoles"],
+            "accountRoleOverrides": {"66030001 手续费": "interest_income"}
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap();
+        let summary = &result["summary"];
+        assert!(
+            (summary["bookedInterestIncome"].as_f64().unwrap() + 4_429.49).abs() < 0.01,
+            "费用性质科目应按负数冲减基准: {summary}"
+        );
+        assert!(
+            summary["bookedNote"].as_str().unwrap_or("").contains("净利息支出"),
+            "合计为负时应提示净利息支出: {summary}"
+        );
+        let rows = result["bookedInterestRows"].as_array().unwrap();
+        assert!(
+            rows[0]["note"].as_str().unwrap_or("").contains("费用"),
+            "口径说明应写明费用性质: {rows:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 独立收入类科目（6051 其他业务收入）的已结转正常对：活动在贷方，
+    /// 按正数计入。名称自身的「收入」关键词足以定方向，不依赖父行。
+    #[test]
+    fn closed_revenue_baseline_stays_positive() {
+        let dir = std::env::temp_dir().join(format!("deposit-closed-rev-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb_path = dir.join("tb.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec![
+                    "科目编码", "科目名称", "期初余额借方", "期初余额贷方",
+                    "本期发生借方", "本期发生贷方", "期末余额借方", "期末余额贷方",
+                ],
+                vec!["1002", "银行存款", "1200000", "0", "1200000", "0", "2400000", "0"],
+                vec!["6051", "其他业务收入", "0", "0", "16534.97", "16534.97", "0", "0"],
+            ],
+        );
+        let tb = inspect(
+            &json!({"source": {"inputPath": tb_path.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
+        let params = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": tb["suggestedMapping"],
+            "accountRoles": tb["suggestedAccountRoles"],
+            "accountRoleOverrides": {"6051 其他业务收入": "interest_income"}
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap();
+        let summary = &result["summary"];
+        assert!(
+            (summary["bookedInterestIncome"].as_f64().unwrap() - 16_534.97).abs() < 0.01,
+            "收入类科目的正常对应按贷方全额计入: {summary}"
+        );
+        assert!(
+            result["bookedInterestRows"][0]["note"]
+                .as_str()
+                .unwrap_or("")
+                .contains("贷方全额"),
+            "口径说明应写明贷方全额: {}",
+            result["bookedInterestRows"]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 方向推断与已结转取数的单元口径。Signed 表（贷方列借正贷负）的
+    /// 已结转行借贷列互为相反数，旧逻辑不分口径算 `贷－借` 会得到 2 倍
+    /// 金额——这是必须守住的双倍计入防线。
+    #[test]
+    fn direction_inference_and_signed_closed_pair() {
+        use std::collections::BTreeMap;
+        let mut tb_accounts = BTreeMap::new();
+        tb_accounts.insert("6603".to_string(), "财务费用".to_string());
+        // 费用类优先于收入类：挂在费用科目下的「利息收入」登记方向是借。
+        assert_eq!(
+            registered_direction("66030002 财务费用-利息收入", &tb_accounts),
+            AccountDirection::Debit
+        );
+        // 自身名称无关键词时走上级科目。
+        assert_eq!(
+            registered_direction("66030002 利息", &tb_accounts),
+            AccountDirection::Debit
+        );
+        // 独立收入科目按贷方向。
+        assert_eq!(
+            registered_direction("6051 其他业务收入", &BTreeMap::new()),
+            AccountDirection::Credit
+        );
+        // 无任何线索时保持未知，交给默认口径＋复核提示。
+        assert_eq!(
+            registered_direction("66030002 利息", &BTreeMap::new()),
+            AccountDirection::Unknown
+        );
+        assert_eq!(
+            registered_direction("66030001 手续费", &BTreeMap::new()),
+            AccountDirection::Debit
+        );
+
+        // Unsigned 红字对（用户文件形态）：费用方向 → 收入正数。
+        assert_eq!(
+            closed_pair_baseline(
+                ledger_mapping::SignConvention::Unsigned,
+                AccountDirection::Debit,
+                -923_800.50,
+                -923_800.50
+            )
+            .0,
+            923_800.50
+        );
+        // Unsigned 正常对：费用方向 → 负数（费用冲减基准）。
+        assert_eq!(
+            closed_pair_baseline(
+                ledger_mapping::SignConvention::Unsigned,
+                AccountDirection::Debit,
+                4_429.49,
+                4_429.49
+            )
+            .0,
+            -4_429.49
+        );
+        // Signed 已结转行（贷方列已是负数）：按单一金额计入，绝不双倍。
+        assert_eq!(
+            closed_pair_baseline(
+                ledger_mapping::SignConvention::Signed,
+                AccountDirection::Credit,
+                -900.0,
+                900.0
+            )
+            .0,
+            900.0
+        );
+        assert_eq!(
+            closed_pair_baseline(
+                ledger_mapping::SignConvention::Signed,
+                AccountDirection::Debit,
+                -900.0,
+                900.0
+            )
+            .0,
+            -900.0
+        );
+        // 方向未知：尊重科目分类里「利息收入」的指定，按正数计入并提示复核。
+        let (amount, note) = closed_pair_baseline(
+            ledger_mapping::SignConvention::Unsigned,
+            AccountDirection::Unknown,
+            -500.0,
+            -500.0,
+        );
+        assert_eq!(amount, 500.0);
+        assert!(note.contains("复核"));
     }
 
     /// 整表只有一列科目、编码＋名称挤在一格（03 号样例形态）时，

@@ -4926,7 +4926,9 @@ pub(crate) fn looks_like_account_code(value: &str) -> bool {
 /// 对科目。04／05 号写作 `1001_现金`，08 号写作
 /// `10020101\银行存款\在财务公司存款\活期`（编码后面跟着多级名称）。
 ///
-/// 分隔符只认 `/ : _ \ |`。**绝不认 `-` 和空格**——`银行存款-人民币-中国银行`、
+/// 分隔符认 `/ : _ \ |`，外加一种受限的空格边界：首 token 本身是足位数
+/// ASCII 编码时（`6701090001 财务费用-汇兑收益`）。**绝不认 `-`**，也绝不
+/// 在首 token 不是编码时按空格拆——`银行存款-人民币-中国银行`、
 /// `应付账款 - 应付暂估款` 是名称自己的分段，按它们拆会把科目名切碎。
 pub(crate) fn split_code_and_name(value: &str) -> Option<(String, String)> {
     let (code, name) = split_code_and_name_ref(value)?;
@@ -4938,11 +4940,24 @@ pub(crate) fn split_code_and_name(value: &str) -> Option<(String, String)> {
 pub(crate) fn split_code_and_name_ref(value: &str) -> Option<(&str, &str)> {
     const SEPARATORS: [char; 5] = ['/', ':', '_', '\\', '|'];
     let trimmed = value.trim();
-    let position = trimmed.find(SEPARATORS)?;
-    let code = trimmed[..position].trim();
-    // 分隔符都是单字节 ASCII，跳过它是安全的。
-    let name = trimmed[position + 1..].trim();
-    (looks_like_account_code(code) && !name.is_empty()).then_some((code, name))
+    if let Some(position) = trimmed.find(SEPARATORS) {
+        let code = trimmed[..position].trim();
+        // 分隔符都是单字节 ASCII，跳过它是安全的。
+        let name = trimmed[position + 1..].trim();
+        if looks_like_account_code(code) && !name.is_empty() {
+            return Some((code, name));
+        }
+    }
+    // 空格边界：`6701090001 财务费用-汇兑收益-未实现`（用友导出、审计底稿
+    // 的常见写法）。仅当首 token 本身是**足位数**的 ASCII 编码时才拆——
+    // `应付账款 - 应付暂估款`、`3 个月定期` 这类名称自带空格的首段不是编码，
+    // 绝不能拆。alpha.39 的正文行编码校验按拆出的编码判合法性，拆不开时
+    // 整格都过不了 `looks_like_account_code`，合并列的正文行会被整批当垃圾
+    // 剔掉（fx 损益取数返回空集即此回归）。
+    let (first, rest) = trimmed.split_once(char::is_whitespace)?;
+    let digits = first.chars().filter(|c| c.is_ascii_digit()).count();
+    (looks_like_account_code(first) && digits >= 3 && !rest.trim().is_empty())
+        .then_some((first, rest.trim()))
 }
 
 /// 整列是不是「编码+名称」混写的科目列。
@@ -7284,6 +7299,30 @@ mod tests {
         );
         assert_eq!(split_code_and_name("应付账款 - 应付暂估款"), None);
         assert_eq!(split_code_and_name("库存现金"), None);
+    }
+
+    /// 「编码＋空格＋名称」混写（用友导出、审计底稿常见）。alpha.39 起
+    /// 正文行按拆出的编码判合法性，拆不开时整格过不了 `looks_like_account_code`，
+    /// 合并列的正文行会被整批当垃圾剔掉——fx 损益取数返回空集即此回归。
+    #[test]
+    fn 编码加空格加名称的混写在首段是编码时拆开() {
+        assert_eq!(
+            split_code_and_name("6701090001 财务费用-汇兑收益-未实现"),
+            Some((
+                "6701090001".into(),
+                "财务费用-汇兑收益-未实现".into()
+            ))
+        );
+        assert_eq!(
+            split_code_and_name("1002.01 招商银行-基本户"),
+            Some(("1002.01".into(), "招商银行-基本户".into()))
+        );
+        // 首段不是足位数编码时绝不拆：名称自带空格、短数字打头的名称段。
+        assert_eq!(split_code_and_name("应付账款 - 应付暂估款"), None);
+        assert_eq!(split_code_and_name("3 个月定期存款"), None);
+        assert_eq!(split_code_and_name("库存 现金"), None);
+        // 纯编码（无名称半段）不构成拆分。
+        assert_eq!(split_code_and_name("1002"), None);
     }
 
     #[test]

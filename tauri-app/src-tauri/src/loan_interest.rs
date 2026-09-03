@@ -16,6 +16,15 @@ use std::{
     },
 };
 
+/// 一段计息区间：起日与止日**均含当天**（天数＝止日－起日＋1），
+/// 本金在该区间内恒定。底稿「计息分段明细」按段展示计算过程。
+#[derive(Clone, Debug)]
+struct InterestSeg {
+    from: NaiveDate,
+    to_incl: NaiveDate,
+    principal: f64,
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SourceSpec {
@@ -92,6 +101,9 @@ struct LoanRow {
     /// 台账原始单元格（与 source_columns 按位对应，未改动前的原行）。
     #[serde(skip)]
     source_cells: Vec<String>,
+    /// 计息分段（起止均含当天）：底稿据此逐段展示本金×天数×利率的计算过程。
+    #[serde(skip)]
+    segments: Vec<InterestSeg>,
 }
 
 pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
@@ -418,6 +430,7 @@ fn calculate_ledger(params: &Value) -> Result<Vec<LoanRow>, AppError> {
             },
             source_columns: table.headers.clone(),
             source_cells: row.clone(),
+            segments: Vec::new(),
         })
     }
     if out.is_empty() {
@@ -551,6 +564,15 @@ fn contract_rows(
                     (op_col, "", false)
                 } else if repaid > 0.0 {
                     (outstanding + repaid, "；期初按期末余额＋本期归还推回", false)
+                } else if end.is_some_and(|e| e > period.0 && e <= period.1) {
+                    // 台账有到期日（或期限推得）：到期日落在报告期内的借款，
+                    // 当期减少＝合同金额－期末余额是日期锚定的确定口径（期末为 0
+                    // 即到期全额结清），不是跨年猜测——不标待复核。
+                    (
+                        principal,
+                        "；期内到期，按到期日推算当期减少＝合同金额－期末余额",
+                        false,
+                    )
                 } else if (principal - outstanding).abs() > 0.01 {
                     (
                         principal,
@@ -633,6 +655,7 @@ fn contract_rows(
             ledger_closing,
             source_columns: table.headers.clone(),
             source_cells,
+            segments: Vec::new(),
         });
     }
 }
@@ -771,6 +794,7 @@ fn calculate_tb(params: &Value) -> Result<Vec<LoanRow>, AppError> {
             ledger_closing: Some(closing),
             source_columns: Vec::new(),
             source_cells: Vec::new(),
+            segments: Vec::new(),
         })
     }
     if out.is_empty() {
@@ -935,6 +959,9 @@ fn calculate_interest(rows: &mut [LoanRow], params: &Value) -> Result<(), AppErr
                     true,
                 ));
             }
+            // (本金, 起日含, 止日不含, 止于报告期末则当天计息) → 分段（起止均含当天）。
+            // 分段落进行上，底稿「计息分段明细」逐段展示本金×天数×利率。
+            let mut segments: Vec<InterestSeg> = vec![];
             let mut interest = 0.0;
             let mut days_total = 0i64;
             let mut principal_days = 0.0;
@@ -945,12 +972,24 @@ fn calculate_interest(rows: &mut [LoanRow], params: &Value) -> Result<(), AppErr
                     t
                 };
                 let d = (to_ex - f).num_days().max(0);
+                if d > 0 {
+                    if let Some(to_incl) = to_ex.pred_opt() {
+                        if to_incl >= f {
+                            segments.push(InterestSeg {
+                                from: f,
+                                to_incl,
+                                principal: p,
+                            });
+                        }
+                    }
+                }
                 interest += p * row.effective_rate * d as f64 / 365.0;
                 principal_days += p * d as f64;
                 days_total += d;
             }
             row.calculated_interest = interest;
             row.principal_days = principal_days;
+            row.segments = segments;
             row.match_basis
                 .push_str(&format!("；按合同期间计息{days_total}天/365"));
             // 存续但期末余额低于期初/合同额（年内归还、时点未列示）：计息口径
@@ -966,16 +1005,23 @@ fn calculate_interest(rows: &mut [LoanRow], params: &Value) -> Result<(), AppErr
             }
             continue;
         }
+        // 无合同起止日的行（变动表模式）：同样产出分段，明细表口径统一。
         if row.events.is_empty() {
             let average = (row.opening_principal + row.closing_principal) / 2.0;
             row.calculated_interest = average * row.effective_rate * days as f64 / 365.0;
             row.principal_days = average * days as f64;
+            row.segments = vec![InterestSeg {
+                from: start,
+                to_incl: end,
+                principal: average,
+            }];
             row.match_basis.push_str("；无逐笔日期，按平均本金粗算");
         } else {
             row.events.sort_by_key(|event| event.0);
             let mut principal = row.opening_principal;
             let mut cursor = start;
             let mut principal_days = 0.0;
+            let mut segments: Vec<InterestSeg> = vec![];
             for (event_date, change) in &row.events {
                 if *event_date < start {
                     principal += change;
@@ -984,13 +1030,34 @@ fn calculate_interest(rows: &mut [LoanRow], params: &Value) -> Result<(), AppErr
                 if *event_date > end {
                     break;
                 }
-                principal_days += principal * (*event_date - cursor).num_days() as f64;
+                let d = (*event_date - cursor).num_days().max(0);
+                principal_days += principal * d as f64;
+                if d > 0 {
+                    if let Some(to_incl) = event_date.pred_opt() {
+                        if to_incl >= cursor {
+                            segments.push(InterestSeg {
+                                from: cursor,
+                                to_incl,
+                                principal,
+                            });
+                        }
+                    }
+                }
                 principal += change;
                 cursor = *event_date;
             }
-            principal_days += principal * ((end - cursor).num_days() + 1) as f64;
+            let tail_days = ((end - cursor).num_days() + 1).max(0);
+            principal_days += principal * tail_days as f64;
+            if tail_days > 0 {
+                segments.push(InterestSeg {
+                    from: cursor,
+                    to_incl: end,
+                    principal,
+                });
+            }
             row.calculated_interest = principal_days * row.effective_rate / 365.0;
             row.principal_days = principal_days;
+            row.segments = segments;
             row.match_basis.push_str("；按记账日逐日加权计息");
         }
     }
@@ -1048,7 +1115,7 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
         "基准利率",
         "加/减点BP",
         "有效年利率",
-        "计息积数（元·天）",
+        "计息天数",
         "测算利息",
         "匹配状态",
         "匹配依据",
@@ -1182,16 +1249,32 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
             &percent,
         )
         .map_err(xlsx)?;
-        // 计息积数（Σ本金×天数，元·天）只能是数值：分段计息里每段的本金和天数
-        // 都不同（年内到期分两段、分期还本按期中切一刀），落不成单格公式。
-        // 但利率是常数，所以利息那一列仍可由它算出来。
-        ws.write_number_with_format(y, 14, row.principal_days, &integer)
-            .map_err(xlsx)?;
+        // 计息天数与测算利息都指向「计息分段明细」的 SUMIF：明细里每段的
+        // 本金×天数×利率逐段可查，主表只做按借款标识汇总；明细改动即时联动。
+        let seg_days: i64 = row
+            .segments
+            .iter()
+            .map(|seg| (seg.to_incl - seg.from).num_days() + 1)
+            .sum();
+        ws.write_formula_with_format(
+            y,
+            14,
+            Formula::new(format!(
+                "=SUMIF('{sheet}'!$A:$A,A{excel_row},'{sheet}'!$F:$F)",
+                sheet = SEG_SHEET,
+            ))
+            .set_result(seg_days.to_string()),
+            &integer,
+        )
+        .map_err(xlsx)?;
         ws.write_formula_with_format(
             y,
             15,
-            Formula::new(format!("=O{excel_row}*N{excel_row}/365"))
-                .set_result(row.calculated_interest.to_string()),
+            Formula::new(format!(
+                "=SUMIF('{sheet}'!$A:$A,A{excel_row},'{sheet}'!$I:$I)",
+                sheet = SEG_SHEET,
+            ))
+            .set_result(row.calculated_interest.to_string()),
             &amount,
         )
         .map_err(xlsx)?;
@@ -1236,7 +1319,11 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
                         .ledger_closing
                         .map(|lc| row.opening_principal + row.additions - row.reductions - lc)
                         .unwrap_or(0.0),
-                    14 => row.principal_days,
+                    14 => row
+                        .segments
+                        .iter()
+                        .map(|seg| ((seg.to_incl - seg.from).num_days() + 1) as f64)
+                        .sum(),
                     15 => row.calculated_interest,
                     _ => 0.0,
                 })
@@ -1261,6 +1348,7 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
             .map_err(xlsx)?;
     }
     ws.autofit();
+    write_segments_sheet(&mut wb, rows)?;
     write_lpr_sheet(&mut wb, &header, &date_fmt)?;
     wb.save(&path).map_err(xlsx)?;
     Ok(path)
@@ -1271,6 +1359,122 @@ const LPR_SHEET: &str = "LPR报价表";
 /// 报价数据从第几行开始（前面是标题与来源说明）。公式的 INDEX/MATCH 区间据此算。
 const LPR_FIRST_DATA_ROW: usize = 5;
 
+/// 底稿里「计息分段明细」Sheet 的名字。主表的计息天数与测算利息按它 SUMIF。
+const SEG_SHEET: &str = "计息分段明细";
+
+/// 写「计息分段明细」：计息过程逐段落行展示。每段的起日、止日（含当天）、
+/// 计息本金是引擎算出的段切分；天数＝止日－起日＋1、积数＝本金×天数、
+/// 适用年利率＝主表有效年利率（其再引用 LPR 报价表）、段利息＝本金×利率×天数÷365
+/// 全是活公式——复核时改分段日期或本金，主表 SUMIF 即时联动。
+fn write_segments_sheet(wb: &mut Workbook, rows: &[LoanRow]) -> Result<(), AppError> {
+    let ws = wb.add_worksheet();
+    ws.set_name(SEG_SHEET).map_err(xlsx)?;
+    let header = Format::new()
+        .set_bold()
+        .set_align(FormatAlign::Center)
+        .set_border(FormatBorder::Thin)
+        .set_background_color("#D9EAD3");
+    let date_fmt = Format::new().set_num_format("yyyy-mm-dd");
+    let percent = Format::new().set_num_format("0.0000%");
+    let amount = Format::new().set_num_format("#,##0.00;[Red](#,##0.00);-");
+    let integer = Format::new().set_num_format("#,##0");
+    let headers = [
+        "借款标识",
+        "段号",
+        "起日",
+        "止日（含当天）",
+        "计息本金",
+        "天数",
+        "积数（本金×天）",
+        "适用年利率",
+        "段利息",
+    ];
+    for (c, h) in headers.iter().enumerate() {
+        ws.write_string_with_format(0, c as u16, *h, &header)
+            .map_err(xlsx)?;
+    }
+    let mut y = 1u32;
+    for (r, row) in rows.iter().enumerate() {
+        // 主表第 r 笔在 Excel 的行号（第 1 行是表头），利率引用那一格。
+        let main_row = (r + 2).to_string();
+        for (i, seg) in row.segments.iter().enumerate() {
+            let excel_row = y + 1;
+            let days = (seg.to_incl - seg.from).num_days() + 1;
+            ws.write_string(y, 0, &row.loan_id).map_err(xlsx)?;
+            ws.write_number(y, 1, (i + 1) as f64).map_err(xlsx)?;
+            ws.write_date_with_format(y, 2, &seg.from, &date_fmt)
+                .map_err(xlsx)?;
+            ws.write_date_with_format(y, 3, &seg.to_incl, &date_fmt)
+                .map_err(xlsx)?;
+            ws.write_number_with_format(y, 4, seg.principal, &amount)
+                .map_err(xlsx)?;
+            ws.write_formula_with_format(
+                y,
+                5,
+                Formula::new(format!("=D{excel_row}-C{excel_row}+1"))
+                    .set_result(days.to_string()),
+                &integer,
+            )
+            .map_err(xlsx)?;
+            ws.write_formula_with_format(
+                y,
+                6,
+                Formula::new(format!("=E{excel_row}*F{excel_row}"))
+                    .set_result((seg.principal * days as f64).to_string()),
+                &integer,
+            )
+            .map_err(xlsx)?;
+            ws.write_formula_with_format(
+                y,
+                7,
+                Formula::new(format!("='借款变动与利息测算'!N{main_row}"))
+                    .set_result(row.effective_rate.to_string()),
+                &percent,
+            )
+            .map_err(xlsx)?;
+            ws.write_formula_with_format(
+                y,
+                8,
+                Formula::new(format!("=E{excel_row}*H{excel_row}*F{excel_row}/365"))
+                    .set_result(
+                        (seg.principal * row.effective_rate * days as f64 / 365.0).to_string(),
+                    ),
+                &amount,
+            )
+            .map_err(xlsx)?;
+            y += 1;
+        }
+    }
+    if y > 1 {
+        let last = y - 1;
+        let total = Format::new()
+            .set_bold()
+            .set_border_top(FormatBorder::Thin)
+            .set_num_format("#,##0.00;[Red](#,##0.00);-");
+        ws.write_string_with_format(y, 0, "合计", &Format::new().set_bold())
+            .map_err(xlsx)?;
+        for col in [6u16, 8] {
+            let letter = char::from(b'A' + col as u8);
+            let cached: f64 = match col {
+                6 => 0.0, // 积数合计由公式现算，缓存值只给查看器显示
+                _ => 0.0,
+            };
+            ws.write_formula_with_format(
+                y,
+                col,
+                Formula::new(format!("=SUM({letter}2:{letter}{last})"))
+                    .set_result(cached.to_string()),
+                &total,
+            )
+            .map_err(xlsx)?;
+        }
+    }
+    // 显式定宽，避免 autofit 被长借款标识或文本撑爆。
+    for (col, width) in [(0u16, 16.0), (1, 6.0), (2, 12.0), (3, 14.0), (4, 15.0), (5, 8.0), (6, 18.0), (7, 12.0), (8, 15.0)] {
+        ws.set_column_width(col, width).map_err(xlsx)?;
+    }
+    Ok(())
+}
 /// 写「LPR报价表」Sheet。
 ///
 /// 这张表是**给用户改的**：主表的基准利率、有效年利率、测算利息三列都引用它，
@@ -2617,9 +2821,27 @@ mod loan_form_tests {
             base.contains("MATCH(J2"),
             "应按定价基准日那一格查表：{base}"
         );
-        // M 列有效年利率、O 列测算利息同样是公式。
+        // N 列有效年利率是公式；O 计息天数与 P 测算利息都按分段明细 SUMIF。
         assert!(formulas.get_value((1, 13)).unwrap().contains("L2+M2/10000"));
-        assert_eq!(formulas.get_value((1, 15)).unwrap(), "O2*N2/365");
+        assert_eq!(
+            formulas.get_value((1, 14)).unwrap(),
+            "SUMIF('计息分段明细'!$A:$A,A2,'计息分段明细'!$F:$F)"
+        );
+        assert_eq!(
+            formulas.get_value((1, 15)).unwrap(),
+            "SUMIF('计息分段明细'!$A:$A,A2,'计息分段明细'!$I:$I)"
+        );
+        // 分段明细：天数/积数/利率/段利息四列全是活公式，利率引用主表。
+        let seg_names = calamine::Reader::sheet_names(&book).to_vec();
+        assert!(seg_names.iter().any(|n| n == "计息分段明细"), "{seg_names:?}");
+        let seg_formulas = calamine::Reader::worksheet_formula(&mut book, "计息分段明细").unwrap();
+        assert_eq!(seg_formulas.get_value((1, 5)).unwrap(), "D2-C2+1");
+        assert_eq!(seg_formulas.get_value((1, 6)).unwrap(), "E2*F2");
+        assert_eq!(
+            seg_formulas.get_value((1, 7)).unwrap(),
+            "'借款变动与利息测算'!N2"
+        );
+        assert_eq!(seg_formulas.get_value((1, 8)).unwrap(), "E2*H2*F2/365");
         // F 列勾稽差异：复核时常直接在底稿上改期初/期末，差异必须跟着动。
         assert_eq!(
             formulas.get_value((1, 6)).unwrap(),
@@ -3295,6 +3517,9 @@ mod tests {
         assert_eq!(c["openingPrincipal"].as_f64().unwrap(), 8_000_000.0);
         assert_eq!(c["reductions"].as_f64().unwrap(), 8_000_000.0);
         assert_eq!(c["closingPrincipal"].as_f64().unwrap(), 0.0);
+        // 到期日落在报告期内：减少＝合同金额是日期锚定的确定口径，不标待复核。
+        assert_eq!(c["matchStatus"].as_str().unwrap(), "已匹配");
+        assert!(c["matchBasis"].as_str().unwrap().contains("期内到期"));
         assert!((c["calculatedInterest"].as_f64().unwrap() - 8_000_000.0 * 0.031 * 34.0 / 365.0).abs() < 0.01);
         // 期前结清：四栏全零、不计息。
         let dd = by_id("D-期前结清");

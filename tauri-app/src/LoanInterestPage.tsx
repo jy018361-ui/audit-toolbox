@@ -72,6 +72,8 @@ type LoanRow = {
   additions: number;
   reductions: number;
   closingPrincipal: number;
+  /** 台账期末余额原值；无期末列或期外借款为 null，此时推算期末即全部信息。 */
+  ledgerClosing?: number | null;
   rateType: "fixed" | "floating";
   fixedRate?: number;
   benchmarkRate?: number;
@@ -158,10 +160,17 @@ export function loanEffectiveRate(
 export function loanEquation(
   r: Pick<
     LoanRow,
-    "openingPrincipal" | "additions" | "reductions" | "closingPrincipal"
+    "openingPrincipal" | "additions" | "reductions" | "closingPrincipal" | "ledgerClosing"
   >,
 ) {
-  return r.openingPrincipal + r.additions - r.reductions - r.closingPrincipal;
+  // 差异＝推算期末（期初＋增加－减少）－台账期末；台账无期末列时无从对照，
+  // 退回推算值自身（差异恒 0）。有账面数的行差异是真实的独立勾稽。
+  return (
+    r.openingPrincipal +
+    r.additions -
+    r.reductions -
+    (r.ledgerClosing ?? r.closingPrincipal)
+  );
 }
 /** TB/JE 的余额与科目走统一角色名，同一语义有几种写法时任一到位即可。 */
 const ANY_OF: Record<string, string[][]> = {
@@ -960,10 +969,11 @@ function Results({
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     });
-  const metric = (label: string, value: number | string) => (
+  const metric = (label: string, value: number | string, detail?: string) => (
     <div className="fx-bridge-metric">
       <span>{label}</span>
       <strong>{typeof value === "number" ? amount(value) : value}</strong>
+      {detail && <small>{detail}</small>}
     </div>
   );
   return (
@@ -1015,6 +1025,7 @@ function Results({
           {metric(
             "待复核",
             `${rows.filter((row) => row.matchStatus !== "已匹配").length} 笔`,
+            "推算行：期初/减少或归还时点系推算，悬停状态列看依据",
           )}
         </div>
       </div>
@@ -1026,7 +1037,8 @@ function Results({
               <th>期初</th>
               <th>增加</th>
               <th>减少</th>
-              <th>期末</th>
+              <th>期末（台账）</th>
+              <th>期末（推算）</th>
               <th>勾稽差异</th>
               <th>利率类型</th>
               <th>固定/基准利率</th>
@@ -1044,10 +1056,13 @@ function Results({
                   r.openingPrincipal,
                   r.additions,
                   r.reductions,
+                  r.ledgerClosing ?? null,
                   r.closingPrincipal,
                   loanEquation(r),
                 ].map((n, j) => (
-                  <td key={j}>{Number(n).toLocaleString()}</td>
+                  <td key={j}>
+                    {n == null ? "—" : Number(n).toLocaleString()}
+                  </td>
                 ))}
                 <td>
                   <select
@@ -1120,6 +1135,7 @@ function Results({
                     className={
                       r.matchStatus === "已匹配" ? "loan-ok" : "loan-review"
                     }
+                    title={r.matchBasis}
                   >
                     {r.matchStatus ?? "—"}
                   </span>

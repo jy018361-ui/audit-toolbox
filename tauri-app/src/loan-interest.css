@@ -215,3 +215,16 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 汇总卡口径说明（不依赖 fx-audit.css 是否已随其他页面加载）。 */
+.loan-result-summary .fx-bridge-metric,
+.loan-bridge-equation .fx-bridge-metric {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.loan-result-summary .fx-bridge-metric small,
+.loan-bridge-equation .fx-bridge-metric small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.4;
+}

@@ -82,6 +82,16 @@ struct LoanRow {
     /// 为 0、期前结清为 0），两者语义不同，混用会把新放款算成零利息。
     #[serde(skip)]
     contract_opening: f64,
+    /// 台账期末余额原值：台账有期末列且该笔属于本期时为 `Some`；
+    /// 无期末列（按期初＋新增－归还推算）或期外借款为 `None`。
+    /// 「期末余额（推算）＝期初＋增加－减少」与它对照即勾稽差异。
+    ledger_closing: Option<f64>,
+    /// 台账原始列名（该行所属段/表的表头）——底稿据此保留输入文件全部信息。
+    #[serde(skip)]
+    source_columns: Vec<String>,
+    /// 台账原始单元格（与 source_columns 按位对应，未改动前的原行）。
+    #[serde(skip)]
+    source_cells: Vec<String>,
 }
 
 pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
@@ -401,6 +411,13 @@ fn calculate_ledger(params: &Value) -> Result<Vec<LoanRow>, AppError> {
             repaid: 0.0,
             repayment_method: String::new(),
             contract_opening: 0.0,
+            ledger_closing: if mapping.contains_key("closingPrincipal") {
+                Some(closing)
+            } else {
+                None
+            },
+            source_columns: table.headers.clone(),
+            source_cells: row.clone(),
         })
     }
     if out.is_empty() {
@@ -576,6 +593,20 @@ fn contract_rows(
         };
         let mut basis = basis;
         basis.push_str(&note);
+        // 台账期末原值：期末列在账且该笔属于本期才列示；期外（放款晚于期末或
+        // 报告期前已结清）与无期末列的行为空，原值随台账原始信息区保留。
+        // 与推算期末（期初＋增加－减少）对照即勾稽差异。
+        let ledger_closing = if mapping.contains_key("closingPrincipal")
+            && !start.is_some_and(|s| s > period.1)
+            && !(outstanding <= 0.0 && end.is_some_and(|e| e < period.0))
+        {
+            Some(outstanding * unit)
+        } else {
+            None
+        };
+        // 原始信息：按未纠偏的原行保留输入文件全部列（纠偏只影响取数，不动原文）。
+        let mut source_cells = row_orig.to_vec();
+        source_cells.resize(table.headers.len().max(source_cells.len()), String::new());
         out.push(LoanRow {
             loan_id: id,
             opening_principal: opening * unit,
@@ -599,6 +630,9 @@ fn contract_rows(
             repaid: repaid * unit,
             repayment_method: text(table, row, mapping, "repaymentMethod"),
             contract_opening: contract_opening * unit,
+            ledger_closing,
+            source_columns: table.headers.clone(),
+            source_cells,
         });
     }
 }
@@ -734,6 +768,9 @@ fn calculate_tb(params: &Value) -> Result<Vec<LoanRow>, AppError> {
             repaid: 0.0,
             repayment_method: String::new(),
             contract_opening: 0.0,
+            ledger_closing: Some(closing),
+            source_columns: Vec::new(),
+            source_cells: Vec::new(),
         })
     }
     if out.is_empty() {
@@ -993,14 +1030,16 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
     let percent = Format::new().set_num_format("0.0000%");
     let amount = Format::new().set_num_format("#,##0.00;[Red](#,##0.00);-");
     // 列序与下面的公式一一对应，改这里必须同步改 `LPR_SHEET` 那几条公式。
-    // A借款标识 B期初 C增加 D减少 E期末 F差异 G利率类型 H固定利率 I定价基准日
-    // J LPR品种 K基准利率 L加减点 M有效年利率 N计息本金天数 O测算利息 P状态 Q依据
+    // A借款标识 B期初 C增加 D减少 E期末余额(台账) F期末余额(推算) G勾稽差异
+    // H利率类型 I固定利率 J定价基准日 K LPR品种 L基准利率 M加减点 N有效年利率
+    // O计息积数(元·天) P测算利息 Q状态 R依据 S..台账原始列
     let headers = [
         "借款标识",
         "期初本金",
         "本期增加",
         "本期减少",
-        "期末本金",
+        "期末余额（台账）",
+        "期末余额（推算）",
         "勾稽差异",
         "利率类型",
         "固定/执行利率",
@@ -1009,7 +1048,7 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
         "基准利率",
         "加/减点BP",
         "有效年利率",
-        "计息本金天数",
+        "计息积数（元·天）",
         "测算利息",
         "匹配状态",
         "匹配依据",
@@ -1018,64 +1057,96 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
         ws.write_string_with_format(0, c as u16, *h, &header)
             .map_err(xlsx)?;
     }
+    // 台账原始信息：各段/各表表头的并集（按首次出现顺序），行值按列名对齐。
+    // 底稿必须保留输入文件的全部信息——复核时对照贷款银行、担保、用途等原文。
+    let source_columns: Vec<String> = {
+        let mut seen: Vec<String> = Vec::new();
+        for row in rows {
+            for name in &row.source_columns {
+                if !name.trim().is_empty() && !seen.contains(name) {
+                    seen.push(name.clone());
+                }
+            }
+        }
+        seen
+    };
+    for (i, name) in source_columns.iter().enumerate() {
+        ws.write_string_with_format(0, (headers.len() + i) as u16, name, &header)
+            .map_err(xlsx)?;
+    }
+    let integer = Format::new().set_num_format("#,##0");
     for (r, row) in rows.iter().enumerate() {
         let y = (r + 1) as u32;
         let excel_row = y + 1; // Excel 行号从 1 起，且第 1 行是表头
         ws.write_string(y, 0, &row.loan_id).map_err(xlsx)?;
-        for (c, n) in [
-            row.opening_principal,
-            row.additions,
-            row.reductions,
-            row.closing_principal,
-        ]
-        .iter()
-        .enumerate()
+        for (c, n) in [row.opening_principal, row.additions, row.reductions]
+            .iter()
+            .enumerate()
         {
             ws.write_number_with_format(y, (c + 1) as u16, *n, &amount)
                 .map_err(xlsx)?;
         }
-        // 勾稽差异写成公式：复核时常直接在底稿上改期初/增加/减少/期末，
-        // 差异是死数的话改完还显示平，等于把勾稽这道关废掉。
+        // 期末余额拆两列对照：台账原值（无期末列/期外借款为空）与推算值
+        // （期初＋增加－减少）。勾稽差异＝推算－台账，复核时直接在底稿上改
+        // 期初/增加/减少，两列与差异都是活公式，跟着重算。
+        match row.ledger_closing {
+            Some(v) => {
+                ws.write_number_with_format(y, 4, v, &amount).map_err(xlsx)?;
+            }
+            None => {
+                ws.write_blank(y, 4, &amount).map_err(xlsx)?;
+            }
+        }
         ws.write_formula_with_format(
             y,
             5,
-            Formula::new(format!(
-                "=B{excel_row}+C{excel_row}-D{excel_row}-E{excel_row}"
-            ))
-            .set_result(
-                (row.opening_principal + row.additions - row.reductions - row.closing_principal)
-                    .to_string(),
-            ),
+            Formula::new(format!("=B{excel_row}+C{excel_row}-D{excel_row}"))
+                .set_result(row.closing_principal.to_string()),
+            &amount,
+        )
+        .map_err(xlsx)?;
+        let diff_cached = row
+            .ledger_closing
+            .map(|lc| row.opening_principal + row.additions - row.reductions - lc)
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        let diff_formula = format!(
+            "=IF(E{excel_row}=\"\",\"\",B{excel_row}+C{excel_row}-D{excel_row}-E{excel_row})"
+        );
+        ws.write_formula_with_format(
+            y,
+            6,
+            Formula::new(diff_formula).set_result(diff_cached),
             &amount,
         )
         .map_err(xlsx)?;
         let floating = row.rate_type == "floating";
-        ws.write_string(y, 6, if floating { "浮动" } else { "固定" })
+        ws.write_string(y, 7, if floating { "浮动" } else { "固定" })
             .map_err(xlsx)?;
         if let Some(rate) = row.fixed_rate {
-            ws.write_number_with_format(y, 7, rate, &percent)
+            ws.write_number_with_format(y, 8, rate, &percent)
                 .map_err(xlsx)?;
         } else {
-            ws.write_blank(y, 7, &percent).map_err(xlsx)?;
+            ws.write_blank(y, 8, &percent).map_err(xlsx)?;
         }
         // 定价基准日：只有走内置 LPR 的行才有。它是基准利率公式引用的那一格——
         // 改日期就换一期报价，这是给用户的第一个可调旋钮。
         match (&row.rate_basis_date, row.lpr_term.as_str()) {
             (Some(date), term) if !term.is_empty() => {
                 if let Ok(parsed) = NaiveDate::parse_from_str(date, "%Y-%m-%d") {
-                    ws.write_date_with_format(y, 8, &parsed, &date_fmt)
+                    ws.write_date_with_format(y, 9, &parsed, &date_fmt)
                         .map_err(xlsx)?;
                 } else {
-                    ws.write_string(y, 8, date.as_str()).map_err(xlsx)?;
+                    ws.write_string(y, 9, date.as_str()).map_err(xlsx)?;
                 }
-                ws.write_string(y, 9, term).map_err(xlsx)?;
+                ws.write_string(y, 10, term).map_err(xlsx)?;
                 // 基准利率 = 在 LPR 报价表里取「不晚于定价基准日的最近一次调整」。
                 // MATCH 的第三参数 1 要求查找列升序——报价表就是按日期升序写的。
                 ws.write_formula_with_format(
                     y,
-                    10,
+                    11,
                     Formula::new(format!(
-                        "=INDEX('{sheet}'!$B${first}:$C${last},MATCH(I{excel_row},'{sheet}'!$A${first}:$A${last},1),{col})/100",
+                        "=INDEX('{sheet}'!$B${first}:$C${last},MATCH(J{excel_row},'{sheet}'!$A${first}:$A${last},1),{col})/100",
                         sheet = LPR_SHEET,
                         first = LPR_FIRST_DATA_ROW,
                         last = LPR_FIRST_DATA_ROW + lpr::quotes().len() - 1,
@@ -1087,42 +1158,57 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
                 .map_err(xlsx)?;
             }
             _ => {
-                ws.write_blank(y, 8, &date_fmt).map_err(xlsx)?;
-                ws.write_string(y, 9, "").map_err(xlsx)?;
+                ws.write_blank(y, 9, &date_fmt).map_err(xlsx)?;
+                ws.write_string(y, 10, "").map_err(xlsx)?;
                 if let Some(rate) = row.benchmark_rate {
-                    ws.write_number_with_format(y, 10, rate, &percent)
+                    ws.write_number_with_format(y, 11, rate, &percent)
                         .map_err(xlsx)?;
                 } else {
-                    ws.write_blank(y, 10, &percent).map_err(xlsx)?;
+                    ws.write_blank(y, 11, &percent).map_err(xlsx)?;
                 }
             }
         }
-        ws.write_number(y, 11, row.spread_bps.unwrap_or(0.0))
+        ws.write_number(y, 12, row.spread_bps.unwrap_or(0.0))
             .map_err(xlsx)?;
         // 有效年利率与测算利息都写成公式：改了基准利率或加点，两者跟着重算。
-        // 利息 = Σ(本金×天数) × 年利率 ÷ 365——分段计息里利率是常数，可以先加总本金天数。
+        // 利息 = Σ(本金×天数) × 年利率 ÷ 365——分段计息里利率是常数，可以先加总积数。
+        let effective_formula = format!(
+            "=IF(AND(H{excel_row}=\"浮动\",ISNUMBER(L{excel_row})),L{excel_row}+M{excel_row}/10000,IF(ISNUMBER(I{excel_row}),I{excel_row},L{excel_row}+M{excel_row}/10000))"
+        );
         ws.write_formula_with_format(
             y,
-            12,
-            Formula::new(format!("=IF(AND(G{excel_row}=\"浮动\",ISNUMBER(K{excel_row})),K{excel_row}+L{excel_row}/10000,IF(ISNUMBER(H{excel_row}),H{excel_row},K{excel_row}+L{excel_row}/10000))"))
-                .set_result(row.effective_rate.to_string()),
+            13,
+            Formula::new(effective_formula).set_result(row.effective_rate.to_string()),
             &percent,
         )
         .map_err(xlsx)?;
-        // 计息本金天数只能是数值：分段计息里每段的本金和天数都不同
-        // （年内到期分两段、分期还本按期中切一刀），Σ(本金ᵢ×天数ᵢ) 落不成单格公式。
+        // 计息积数（Σ本金×天数，元·天）只能是数值：分段计息里每段的本金和天数
+        // 都不同（年内到期分两段、分期还本按期中切一刀），落不成单格公式。
         // 但利率是常数，所以利息那一列仍可由它算出来。
-        ws.write_number(y, 13, row.principal_days).map_err(xlsx)?;
+        ws.write_number_with_format(y, 14, row.principal_days, &integer)
+            .map_err(xlsx)?;
         ws.write_formula_with_format(
             y,
-            14,
-            Formula::new(format!("=N{excel_row}*M{excel_row}/365"))
+            15,
+            Formula::new(format!("=O{excel_row}*N{excel_row}/365"))
                 .set_result(row.calculated_interest.to_string()),
             &amount,
         )
         .map_err(xlsx)?;
-        ws.write_string(y, 15, &row.match_status).map_err(xlsx)?;
-        ws.write_string(y, 16, &row.match_basis).map_err(xlsx)?;
+        ws.write_string(y, 16, &row.match_status).map_err(xlsx)?;
+        ws.write_string(y, 17, &row.match_basis).map_err(xlsx)?;
+        // 台账原始列：按列名对齐（多段台账各段列布局不同，未出现的列留空）。
+        for (i, name) in source_columns.iter().enumerate() {
+            let value = row
+                .source_columns
+                .iter()
+                .position(|h| h == name)
+                .and_then(|idx| row.source_cells.get(idx))
+                .map(|v| v.as_str())
+                .unwrap_or("");
+            ws.write_string(y, (headers.len() + i) as u16, value)
+                .map_err(xlsx)?;
+        }
     }
     // 合计行。审计底稿的合计如果是死数，明细一改就对不上——这里一律 SUM。
     // 利率类的列（固定利率、基准利率、加减点、有效年利率）不合计，加总没有意义。
@@ -1136,7 +1222,7 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
             .set_num_format("#,##0.00;[Red](#,##0.00);-");
         ws.write_string_with_format(y, 0, "合计", &Format::new().set_bold())
             .map_err(xlsx)?;
-        for col in [1u16, 2, 3, 4, 5, 13, 14] {
+        for col in [1u16, 2, 3, 4, 5, 6, 14, 15] {
             let letter = char::from(b'A' + col as u8);
             let cached: f64 = rows
                 .iter()
@@ -1144,14 +1230,14 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
                     1 => row.opening_principal,
                     2 => row.additions,
                     3 => row.reductions,
-                    4 => row.closing_principal,
-                    5 => {
-                        row.opening_principal + row.additions
-                            - row.reductions
-                            - row.closing_principal
-                    }
-                    13 => row.principal_days,
-                    14 => row.calculated_interest,
+                    4 => row.ledger_closing.unwrap_or(0.0),
+                    5 => row.closing_principal,
+                    6 => row
+                        .ledger_closing
+                        .map(|lc| row.opening_principal + row.additions - row.reductions - lc)
+                        .unwrap_or(0.0),
+                    14 => row.principal_days,
+                    15 => row.calculated_interest,
                     _ => 0.0,
                 })
                 .sum();
@@ -1164,6 +1250,15 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
             )
             .map_err(xlsx)?;
         }
+    }
+    ws.autofit();
+    // autofit 会被「匹配依据」这类长文本撑到一两百字符宽（首屏只见一两个巨列，
+    // 其余像消失了一样）——长文本列与原始信息区定宽，其余列交给 autofit。
+    ws.set_column_width(17, 60).map_err(xlsx)?;
+    if !source_columns.is_empty() {
+        let last_col = (headers.len() + source_columns.len() - 1) as u16;
+        ws.set_column_range_width(headers.len() as u16, last_col, 24)
+            .map_err(xlsx)?;
     }
     ws.autofit();
     write_lpr_sheet(&mut wb, &header, &date_fmt)?;
@@ -1220,7 +1315,11 @@ fn write_lpr_sheet(wb: &mut Workbook, header: &Format, date_fmt: &Format) -> Res
         ws.write_number(y, 1, q.one_year).map_err(xlsx)?;
         ws.write_number(y, 2, q.over_five_year).map_err(xlsx)?;
     }
-    ws.autofit();
+    // 不能 autofit：第 2/3 行的说明文字会把 A 列撑到两百多字符宽，
+    // 日期右对齐后落在首屏之外，看起来像 A 列全空。显式定宽。
+    ws.set_column_width(0, 16).map_err(xlsx)?;
+    ws.set_column_width(1, 12).map_err(xlsx)?;
+    ws.set_column_width(2, 14).map_err(xlsx)?;
     Ok(())
 }
 
@@ -1979,7 +2078,6 @@ fn data_text(v: &Data) -> String {
             .map(|v| v.format("%Y-%m-%d %H:%M:%S").to_string())
             .unwrap_or_else(|| d.to_string()),
         Data::DateTimeIso(s) | Data::DurationIso(s) => s.clone(),
-        Data::DateTimeIso(s) | Data::DurationIso(s) => s.clone(),
         Data::Error(e) => format!("{e:?}"),
     }
 }
@@ -2189,6 +2287,33 @@ mod loan_form_tests {
         assert_eq!(col(S01, "term"), "期限(月)");
     }
 
+    #[test]
+    fn 四型选填槽覆盖合同台账常见列() {
+        // 期末余额/归还/新增/期限列在账时不得落进任何一型的槽外——
+        // 前端分组把槽外的金额列当“记法冲突”判未适配、整组禁用，
+        // 必填星号随之失效（01 号实测：A 型被禁用）。选填槽单独成组，
+        // 映射其一不要求其余。
+        let forms = ledger_mapping::loan_forms();
+        let of = |id: &str| forms.iter().find(|f| f.id == id).unwrap();
+        for (id, role) in [
+            ("A", "closingPrincipal"),
+            ("A", "repaymentAmount"),
+            ("A", "term"),
+            ("B", "endDate"),
+            ("B", "closingPrincipal"),
+            ("C", "closingPrincipal"),
+            ("C", "endDate"),
+            ("D", "openingPrincipal"),
+            ("D", "endDate"),
+        ] {
+            let form = of(id);
+            assert!(
+                form.optional.iter().any(|slot| slot.contains(&role)),
+                "{id} 型选填槽应含 {role}：{:?}",
+                form.optional
+            );
+        }
+    }
     #[test]
     fn 到期日与期间发生额并存时认A型() {
         // 04 深圳前湾四栏俱全，但它也有到期日——认 A 型，四栏留作勾稽校验。
@@ -2486,26 +2611,38 @@ mod loan_form_tests {
         let formulas =
             calamine::Reader::worksheet_formula(&mut book, "借款变动与利息测算").unwrap();
         // K 列基准利率：INDEX/MATCH 指向报价表，按 I 列的定价基准日取那一期。
-        let base = formulas.get_value((1, 10)).cloned().unwrap_or_default();
+        let base = formulas.get_value((1, 11)).cloned().unwrap_or_default();
         assert!(base.contains("LPR报价表"), "基准利率应引用报价表：{base}");
         assert!(
-            base.contains("MATCH(I2"),
+            base.contains("MATCH(J2"),
             "应按定价基准日那一格查表：{base}"
         );
         // M 列有效年利率、O 列测算利息同样是公式。
-        assert!(formulas.get_value((1, 12)).unwrap().contains("K2+L2/10000"));
-        assert_eq!(formulas.get_value((1, 14)).unwrap(), "N2*M2/365");
+        assert!(formulas.get_value((1, 13)).unwrap().contains("L2+M2/10000"));
+        assert_eq!(formulas.get_value((1, 15)).unwrap(), "O2*N2/365");
         // F 列勾稽差异：复核时常直接在底稿上改期初/期末，差异必须跟着动。
-        assert_eq!(formulas.get_value((1, 5)).unwrap(), "B2+C2-D2-E2");
+        assert_eq!(
+            formulas.get_value((1, 6)).unwrap(),
+            "IF(E2=\"\",\"\",B2+C2-D2-E2)"
+        );
         // 合计行：金额与利息一律 SUM，且区间不含合计行自身。
         let total_row = rows.len() + 1;
         assert_eq!(
             formulas.get_value((total_row as u32, 1)).unwrap(),
             &format!("SUM(B2:B{})", rows.len() + 1)
         );
+        // 期末余额（台账）与（推算）两列都要进合计。
         assert_eq!(
-            formulas.get_value((total_row as u32, 14)).unwrap(),
-            &format!("SUM(O2:O{})", rows.len() + 1)
+            formulas.get_value((total_row as u32, 4)).unwrap(),
+            &format!("SUM(E2:E{})", rows.len() + 1)
+        );
+        assert_eq!(
+            formulas.get_value((total_row as u32, 5)).unwrap(),
+            &format!("SUM(F2:F{})", rows.len() + 1)
+        );
+        assert_eq!(
+            formulas.get_value((total_row as u32, 15)).unwrap(),
+            &format!("SUM(P2:P{})", rows.len() + 1)
         );
         let values = calamine::Reader::worksheet_range(&mut book, "借款变动与利息测算").unwrap();
         assert_eq!(
@@ -2516,6 +2653,17 @@ mod loan_form_tests {
         assert_eq!(
             formulas.get_value((total_row as u32, 12)),
             Some(&String::new())
+        );
+        // 台账期末与推算期末两列：floating_row 无台账期末（E 留空），
+        // 推算期末公式缓存值＝期初＋增加－减少＝1,000,000。
+        let values2 = calamine::Reader::worksheet_range(&mut book, "借款变动与利息测算").unwrap();
+        assert!(matches!(
+            values2.get_value((1, 4)),
+            Some(calamine::Data::Empty) | None
+        ));
+        assert_eq!(
+            values2.get_value((1, 5)).unwrap().to_string(),
+            "1000000"
         );
         let _ = std::fs::remove_file(&out);
     }
@@ -2685,10 +2833,10 @@ mod tests {
         let out = export(&rows, &params).unwrap();
         let mut book = open_workbook_auto(&out).unwrap();
         let values = book.worksheet_range("借款变动与利息测算").unwrap();
-        assert_eq!(values.get_value((1, 10)).unwrap().to_string(), "0.031");
+        assert_eq!(values.get_value((1, 11)).unwrap().to_string(), "0.031");
         assert!(
             (values
-                .get_value((1, 12))
+                .get_value((1, 13))
                 .unwrap()
                 .to_string()
                 .parse::<f64>()
@@ -2697,12 +2845,12 @@ mod tests {
                 .abs()
                 < 1e-12
         );
-        assert_eq!(values.get_value((1, 14)).unwrap().to_string(), "40000");
-        assert_eq!(values.get_value((2, 14)).unwrap().to_string(), "40000");
+        assert_eq!(values.get_value((1, 15)).unwrap().to_string(), "40000");
+        assert_eq!(values.get_value((2, 15)).unwrap().to_string(), "40000");
         let formulas = book.worksheet_formula("借款变动与利息测算").unwrap();
         assert_eq!(
-            formulas.get_value((1, 12)).unwrap(),
-            "IF(AND(G2=\"浮动\",ISNUMBER(K2)),K2+L2/10000,IF(ISNUMBER(H2),H2,K2+L2/10000))"
+            formulas.get_value((1, 13)).unwrap(),
+            "IF(AND(H2=\"浮动\",ISNUMBER(L2)),L2+M2/10000,IF(ISNUMBER(I2),I2,L2+M2/10000))"
         );
     }
 
@@ -3155,7 +3303,46 @@ mod tests {
         }
         assert_eq!(dd["calculatedInterest"].as_f64().unwrap(), 0.0);
         assert!(dd["matchBasis"].as_str().unwrap().contains("报告期前已结清"));
-        // 逐行「期初＋增加－减少＝期末」。
+        // 台账期末原值：在账的行 Some、期前结清行 None（不属于本期）。
+        assert_eq!(a["ledgerClosing"].as_f64().map(|v| v as i64), Some(80_000_000));
+        assert_eq!(dd["ledgerClosing"].as_f64().map(|v| v as i64), None);
+        // 导出底稿保留台账原始列：表头行应含输入文件全部列名，数据行带原值。
+        // 注意必须用内存行导出——JSON 结果不含 #[serde(skip)] 的原始列。
+        let mut params = preview_params(&path, header_row, insp["suggestedMapping"].clone());
+        let mut rows_mem = calculate(&mut params).unwrap();
+        apply_overrides(&mut rows_mem, &params);
+        calculate_interest(&mut rows_mem, &params).unwrap();
+        let out_path = dir.join("restate-export.xlsx");
+        export(
+            &rows_mem,
+            &json!({"outputPath": out_path.to_string_lossy()}),
+        )
+        .expect("导出失败");
+        let mut book = open_workbook_auto(&out_path).unwrap();
+        let sheet = calamine::Reader::worksheet_range(&mut book, "借款变动与利息测算").unwrap();
+        let header_row: Vec<String> = (0..sheet.width())
+            .map(|c| sheet.get_value((0, c as u32)).unwrap().to_string())
+            .collect();
+        for name in ["合同编号", "借款金额", "起始日", "到期日", "利率", "期末余额"] {
+            assert!(header_row.contains(&name.to_string()), "底稿缺台账原始列 {name}");
+        }
+        let id_col = header_row.iter().position(|h| h == "合同编号").unwrap();
+        assert_eq!(
+            sheet.get_value((1, id_col as u32)).unwrap().to_string(),
+            "A-存续部分归还"
+        );
+        // 期末两列：台账列写原值，推算列是活公式（缓存值＝期初＋增加－减少）。
+        let cell = |col: u32| {
+            sheet
+                .get_value((1, col))
+                .unwrap()
+                .to_string()
+                .parse::<f64>()
+                .unwrap() as i64
+        };
+        assert_eq!(cell(4), 80_000_000);
+        assert_eq!(cell(5), 80_000_000);
+                // 逐行「期初＋增加－减少＝期末」。
         for r in rows {
             let eq = r["openingPrincipal"].as_f64().unwrap()
                 + r["additions"].as_f64().unwrap()
@@ -3494,5 +3681,25 @@ mod tests {
         assert_eq!(account_text(&table, row, &m, "je"), "2202 短期借款");
         assert_eq!(num_role(&table, row, &m, "je", "functionalDebit"), 1000.0);
         assert_eq!(num_role(&table, row, &m, "je", "functionalCredit"), 2000.0);
+    }
+}
+
+#[cfg(test)]
+mod zz_debug2 {
+    use super::*;
+    use super::tests::{inspect_params, preview_params, run_preview, testset_dir};
+    #[test]
+    #[ignore = "debug"]
+    fn zz_dump_01_clean() {
+        let path = testset_dir().join("01-华辰重型装备集团有限公司-借款合同台账.xlsx");
+        let insp = inspect(&inspect_params(&path, 0)).unwrap();
+        let header_row = insp["headerRow"].as_u64().unwrap_or(1) as usize;
+        let result = run_preview(&preview_params(&path, header_row, insp["suggestedMapping"].clone())).unwrap();
+        for r in result["rows"].as_array().unwrap().iter().take(3) {
+            println!("{} | fixed={:?} bench={:?} bps={:?} eff={} status={} | {}",
+                r["loanId"].as_str().unwrap_or(""), r["fixedRate"], r["benchmarkRate"], r["spreadBps"],
+                r["effectiveRate"].as_f64().unwrap_or(0.0), r["matchStatus"].as_str().unwrap_or(""),
+                r["matchBasis"].as_str().unwrap_or(""));
+        }
     }
 }

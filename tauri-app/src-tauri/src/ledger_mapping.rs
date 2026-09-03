@@ -4179,7 +4179,12 @@ static LOAN_FORMS: &[Form] = &[
             &["drawdownAmount", "repaymentAmount"],
         ],
         any_of: &[&["closingPrincipal", "principal"]],
-        optional: &[&["rateType"]],
+        optional: &[
+            &["rateType"],
+            &["openingPrincipal"],
+            &["endDate"],
+            &["term"],
+        ],
     },
     Form {
         id: "C",
@@ -4191,7 +4196,12 @@ static LOAN_FORMS: &[Form] = &[
             &["drawdownAmount", "repaymentAmount"],
         ],
         any_of: &[&["openingPrincipal", "principal"]],
-        optional: &[&["rateType"]],
+        optional: &[
+            &["rateType"],
+            &["closingPrincipal"],
+            &["endDate"],
+            &["term"],
+        ],
     },
     Form {
         id: "B",
@@ -4199,7 +4209,13 @@ static LOAN_FORMS: &[Form] = &[
         label: "起始日＋期限",
         required: &[&["startDate"], &["term"], &["rate"]],
         any_of: &[&["principal", "openingPrincipal"]],
-        optional: &[&["rateType"]],
+        optional: &[
+            &["rateType"],
+            &["endDate"],
+            &["closingPrincipal"],
+            &["repaymentAmount"],
+            &["drawdownAmount"],
+        ],
     },
     Form {
         id: "A",
@@ -4207,7 +4223,13 @@ static LOAN_FORMS: &[Form] = &[
         label: "起始日＋到期日",
         required: &[&["startDate"], &["endDate"], &["rate"]],
         any_of: &[&["principal", "openingPrincipal"]],
-        optional: &[&["rateType"]],
+        optional: &[
+            &["rateType"],
+            &["term"],
+            &["closingPrincipal"],
+            &["repaymentAmount"],
+            &["drawdownAmount"],
+        ],
     },
 ];
 

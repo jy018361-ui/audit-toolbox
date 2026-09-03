@@ -276,14 +276,18 @@ export function MappingPanel(props: MappingPanelProps) {
           <div className="mapping-panel-toolbar">{props.toolbar}</div>
         ) : null}
       </div>
-      {props.formNote ? (
-        <p className="mapping-form-note">{props.formNote}</p>
-      ) : null}
-      {props.requirementOf ? (
-        <p className="mapping-requirement-legend">
-          ＊ 为必填字段；（选填）须按当前分组的整组规则补充。
+      {(props.formNote || props.requirementOf) && (
+        <p className="mapping-meta-row">
+          {props.formNote ? (
+            <span className="mapping-form-note">{props.formNote}</span>
+          ) : null}
+          {props.requirementOf ? (
+            <span className="mapping-requirement-legend">
+              ＊ 为必填字段；（选填）须按当前分组的整组规则补充。
+            </span>
+          ) : null}
         </p>
-      ) : null}
+      )}
       {props.missing && props.missing.length > 0 && (
         <p className="fa-missing-hint">尚未映射：{props.missing.join("、")}</p>
       )}

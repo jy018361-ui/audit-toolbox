@@ -186,3 +186,32 @@
     min-height: 24px;
   }
 }
+/* 导出完成反馈：文件名＋打开按钮，完整路径放悬浮提示。 */
+.loan-export-done {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 11px 14px;
+  border: 1px solid #b7dfc6;
+  border-radius: 10px;
+  background: #f0f9f3;
+  color: #17663d;
+}
+.loan-export-done > strong {
+  flex: 0 0 auto;
+}
+.loan-export-path {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.loan-export-file {
+  overflow: hidden;
+  max-width: 320px;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

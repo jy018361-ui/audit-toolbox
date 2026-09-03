@@ -3418,7 +3418,40 @@ pub(crate) fn parse_date(raw: &str) -> Option<NaiveDate> {
             }
         }
     }
+    // 中文日期：“2024年3月5日”“25年1月10日”（两位年按 20xx）——借款台账
+    // 的常见手写体，此前只存在借款模块一份未接线的实现，内核认不出来。
+    if let Some(date) = parse_cn_date(text) {
+        return Some(date);
+    }
+    // Excel 序列号（5 位纯数字，约 1954～2119 年）：有人把日期粘贴成数值，
+    // 单元格类型是数字而非日期，读取侧只能拿到 "45662" 这样的文本——
+    // Excel 序列 1 即 1900-01-01（1900 闰年 bug 后与 1899-12-30 基准一致）。
+    if text.len() == 5 && text.chars().all(|c| c.is_ascii_digit()) {
+        if let Ok(serial) = text.parse::<i64>() {
+            if (20000..80000).contains(&serial) {
+                return NaiveDate::from_ymd_opt(1899, 12, 30)
+                    .and_then(|epoch| epoch.checked_add_signed(chrono::Duration::days(serial)));
+            }
+        }
+    }
     None
+}
+
+/// 中文年月日写法：年（四位或两位，两位按 20xx）＋月＋日，日后的“日”字可省。
+fn parse_cn_date(text: &str) -> Option<NaiveDate> {
+    let i_nian = text.find('年')?;
+    let y_str = &text[..i_nian];
+    let y = if y_str.chars().count() <= 2 {
+        2000 + y_str.parse::<i32>().ok()?
+    } else {
+        y_str.parse::<i32>().ok()?
+    };
+    let rest = &text[i_nian + '年'.len_utf8()..];
+    let i_yue = rest.find('月')?;
+    let m = rest[..i_yue].parse::<u32>().ok()?;
+    let d_part = &rest[i_yue + '月'.len_utf8()..];
+    let d = d_part.trim_end_matches('日').trim().parse::<u32>().ok()?;
+    NaiveDate::from_ymd_opt(y, m, d)
 }
 
 /// 抽查多少行来比较列的量级。扫到 200 行足以让本年累计与本期发生分出高下，
@@ -8133,6 +8166,11 @@ mod tests {
         assert_eq!(d("10 Jan 2023"), expect);
         // 日在前的欧洲写法。
         assert_eq!(d("10/01/2023"), expect);
+        // 中文日期：借款台账的手写体，两位年按 20xx。
+        assert_eq!(d("2023年1月10日"), expect);
+        assert_eq!(d("23年1月10日"), expect);
+        // Excel 序列号：日期被粘贴成数值的写法（44936 = 2023-01-10）。
+        assert_eq!(d("44936"), expect);
         assert!(parse_date("").is_none());
         assert!(parse_date("待定").is_none());
     }

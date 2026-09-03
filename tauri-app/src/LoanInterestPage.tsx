@@ -26,6 +26,11 @@ import {
   type LoanRole,
 } from "@/loanForms";
 import {
+  formGroups,
+  useLedgerForms,
+  type LedgerFormKind,
+} from "@/ledgerForms";
+import {
   loanBps,
   loanRateDefaults,
   loanRateOverrides,
@@ -136,6 +141,10 @@ const LABELS: Record<Kind, Record<string, string>> = {
   },
   rateLedger: LOAN_ROLE_FALLBACK,
 };
+/** 底稿反馈里只展示文件名，完整路径放 title 悬浮提示。 */
+function fileNameOf(path: string) {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
 export function loanEffectiveRate(
   type: string,
   fixed?: number,
@@ -404,6 +413,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       setError(errorText(e));
     }
   }
+  // 导出完成后除结果区的打开按钮外，测算卡里也要有明确的「已生成＋文件名＋打开」
+  // 反馈——此前唯一反馈是结果区标题旁悄悄出现的小按钮，用户感知不到已导出。
+  const exported = ((result?.outputPaths ?? []) as string[]).filter(Boolean);
   return (
     <main className="tool-page fx-page loan-page">
       <PageHeader
@@ -609,6 +621,25 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                   生成 Excel 底稿
                 </Button>
               </div>
+              {!busy && exported.length > 0 && (
+                <div className="loan-export-done" role="status">
+                  <strong>Excel 底稿已生成</strong>
+                  {exported.map((p) => (
+                    <span key={p} className="loan-export-path">
+                      <span className="loan-export-file" title={p}>
+                        {fileNameOf(p)}
+                      </span>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => void openOutput(p)}
+                      >
+                        打开底稿
+                      </Button>
+                    </span>
+                  ))}
+                </div>
+              )}
               {job && (
                 <JobProgress
                   job={job}
@@ -723,6 +754,12 @@ function Mapping({
   // 角色清单与标签：台账兜底表与引擎的 loan_roles 同名同序，合并后下拉顺序不变；
   // 引擎标签与本地不一致时以引擎为准（唯一定义在 Rust）。
   const roleList: [string, string][] = Object.entries(labels);
+  // 下拉分组与其他账表工具一致：借款/利率台账用引擎随识别下发的形态表，
+  // TB/JE 用共享内核的形态表（formGroups 已支持 loan）。
+  const groupKind: LedgerFormKind = kind === "tb" || kind === "je" ? kind : "loan";
+  const fetchedForms = useLedgerForms(groupKind);
+  const forms =
+    groupKind === "loan" && x.forms?.length ? x.forms : fetchedForms;
   // 借款台账按四型判定：命中哪一型决定哪些字段必填。利率台账不判型。
   const hit =
     kind === "ledger" && x.forms?.length
@@ -739,6 +776,7 @@ function Mapping({
         rows={x.preview}
         mapping={source.mapping}
         roles={roleList}
+        groups={formGroups(groupKind, roleList, forms, source.mapping)}
         requirementOf={
           hit ? (role) => loanRoleRequirement(hit, role) : undefined
         }

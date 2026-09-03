@@ -77,6 +77,11 @@ struct LoanRow {
     repaid: f64,
     #[serde(skip)]
     repayment_method: String,
+    /// 合同口径的期初本金（期初列优先，否则合同金额）。**计息分段只用它**；
+    /// [`LoanRow::opening_principal`] 是按报告期重述后的四栏口径（年内新放款
+    /// 为 0、期前结清为 0），两者语义不同，混用会把新放款算成零利息。
+    #[serde(skip)]
+    contract_opening: f64,
 }
 
 pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
@@ -287,6 +292,8 @@ fn calculate_ledger(params: &Value) -> Result<Vec<LoanRow>, AppError> {
     let overrides = rate_overrides(params);
     let mut out = vec![];
     if contract_mode {
+        // 四栏重述需要报告期口径；日期无效在计算阶段就报出来（与测算阶段同一条错误）。
+        let period = (date(params, "reportStart")?, date(params, "reportEnd")?);
         // 同一 Sheet 可能拼接多套台账（各段表头、单位、口径不同）：
         // 探测主表头之后的表头特征行，逐段用各自表头重新映射；多段时金额统一折算为元。
         let segs = detect_segments(&table);
@@ -333,6 +340,7 @@ fn calculate_ledger(params: &Value) -> Result<Vec<LoanRow>, AppError> {
                 multi,
                 seg.start,
                 &overrides,
+                period,
                 &mut out,
             );
         }
@@ -392,6 +400,7 @@ fn calculate_ledger(params: &Value) -> Result<Vec<LoanRow>, AppError> {
             contract_end: None,
             repaid: 0.0,
             repayment_method: String::new(),
+            contract_opening: 0.0,
         })
     }
     if out.is_empty() {
@@ -401,6 +410,9 @@ fn calculate_ledger(params: &Value) -> Result<Vec<LoanRow>, AppError> {
 }
 /// 合同模式逐行解析一段台账：本金、利率、起止日/期限。
 /// unit 为该段金额折算为元的系数（单段台账恒为 1，保持原单位输出）。
+/// period 为报告期（起，止）：合同台账通常没有期间发生额列，四栏
+/// （期初/增加/减少/期末）按起止日与期末余额折算成报告期口径，让
+/// 「期初＋增加－减少＝期末」逐行成立；折算不出的行在匹配依据里说明并标待复核。
 fn contract_rows(
     table: &Table,
     mapping: &Map<String, Value>,
@@ -410,6 +422,7 @@ fn contract_rows(
     // row_offset：本段首行在整张表里的行序，逐行利率口径按整表行序对齐。
     row_offset: usize,
     overrides: &[Option<RateOverride>],
+    period: (NaiveDate, NaiveDate),
     out: &mut Vec<LoanRow>,
 ) {
     let has_id = mapping.contains_key("loanId");
@@ -470,13 +483,86 @@ fn contract_rows(
         });
         let outstanding = num(table, row, mapping, "closingPrincipal");
         let repaid = num(table, row, mapping, "repaymentAmount");
+        let drawdown = num(table, row, mapping, "drawdownAmount");
         if principal == 0.0 {
             continue; // 金额为空的行（小计/备注行）不生成借款记录
         }
-        // 期初余额列（变动表）优先作为年初占用本金；无该列时用合同本金
-        let opening = {
-            let op = num(table, row, mapping, "openingPrincipal");
-            if op > 0.0 { op } else { principal }
+        // 计息口径的期初：账面期初列优先，否则合同金额（分段计息的历史口径）。
+        let op_col = num(table, row, mapping, "openingPrincipal");
+        let contract_opening = if op_col > 0.0 { op_col } else { principal };
+        // —— 报告期四栏重述 ——
+        // 账面有数（期初/期末/期间发生额列）优先用账面数，账面勾稽不平就
+        // 把差额摆在勾稽差异里并标待复核；账面没有的按起止日推算，
+        // 推算依据写进匹配依据，涉及跨年度归还等拿不准的一律标待复核。
+        let mut note = String::new();
+        let mut inferred = false;
+        let (opening, additions, reductions, closing) = if start.is_some_and(|s| s > period.1) {
+            note.push_str("；放款日晚于资产负债表日，整笔不属于本期");
+            (0.0, 0.0, 0.0, 0.0)
+        } else if mapping.contains_key("closingPrincipal")
+            && (mapping.contains_key("drawdownAmount") || mapping.contains_key("repaymentAmount"))
+        {
+            // 期末余额与期间发生额都在账：四栏直接用账面数。
+            // 期初列在账时 0 也是有效数（年内新放款期初即 0），按列在不在判定。
+            let op = if mapping.contains_key("openingPrincipal") {
+                op_col
+            } else {
+                note.push_str("；无期初列，期初按期末余额＋归还－新增推回");
+                inferred = true;
+                outstanding + repaid - drawdown
+            };
+            if (op + drawdown - repaid - outstanding).abs() > 0.01 {
+                note.push_str("；期间发生额与余额勾稽不平，请复核台账");
+                inferred = true;
+            }
+            (op, drawdown, repaid, outstanding)
+        } else if mapping.contains_key("closingPrincipal") {
+            // 只有期末余额在账：按起止日推算期间口径。
+            if outstanding <= 0.0 && end.is_some_and(|e| e < period.0) {
+                note.push_str("；报告期前已结清，不纳入本期");
+                (0.0, 0.0, 0.0, 0.0)
+            } else if start.is_some_and(|s| s > period.0) {
+                // 年内新放款：期初为 0，增加＝合同额，归还按差额推算。
+                let red = principal - outstanding;
+                if red > 0.0 {
+                    note.push_str("；年内新放款，归还额按合同金额与期末余额的差额推算");
+                    inferred = true;
+                }
+                (0.0, principal, red.max(0.0), outstanding)
+            } else {
+                let (op, op_note, op_inferred) = if mapping.contains_key("openingPrincipal") {
+                    (op_col, "", false)
+                } else if repaid > 0.0 {
+                    (outstanding + repaid, "；期初按期末余额＋本期归还推回", false)
+                } else if (principal - outstanding).abs() > 0.01 {
+                    (
+                        principal,
+                        "；台账无期初/归还列：期初按合同金额、减少＝合同金额－期末余额（含以前年度归还），请结合还款记录复核",
+                        true,
+                    )
+                } else {
+                    (principal, "", false)
+                };
+                if start.is_none() {
+                    note.push_str("；起始日未能解析，本金变动无法按报告期重述，请修正台账日期写法");
+                    inferred = true;
+                }
+                note.push_str(op_note);
+                inferred |= op_inferred;
+                if op >= outstanding {
+                    (op, 0.0, op - outstanding, outstanding)
+                } else {
+                    note.push_str("；期末高于期初，差额视同年内新增");
+                    (op, outstanding - op, 0.0, outstanding)
+                }
+            }
+        } else {
+            // 期末余额也不在账：期末按期初＋新增－归还推算（利息分段同口径）。
+            let op = contract_opening;
+            let close = op + drawdown - repaid;
+            note.push_str("；台账无期末余额列，期末按期初＋新增－归还推算");
+            inferred = true;
+            (op, drawdown, repaid, close)
         };
         let basis = if multi && unit != 1.0 {
             format!(
@@ -488,12 +574,14 @@ fn contract_rows(
         } else {
             "借款合同台账（合同模式）".to_string()
         };
+        let mut basis = basis;
+        basis.push_str(&note);
         out.push(LoanRow {
             loan_id: id,
             opening_principal: opening * unit,
-            additions: 0.0,
-            reductions: repaid * unit,
-            closing_principal: outstanding * unit,
+            additions: additions * unit,
+            reductions: reductions * unit,
+            closing_principal: closing * unit,
             rate_type: rate_type_final,
             fixed_rate: fixed,
             benchmark_rate: benchmark,
@@ -503,13 +591,14 @@ fn contract_rows(
             principal_days: 0.0,
             rate_basis_date: None,
             lpr_term: String::new(),
-            match_status: "已匹配".into(),
+            match_status: if inferred { "待复核".into() } else { "已匹配".into() },
             match_basis: basis,
             events: vec![],
             contract_start: start,
             contract_end: end,
             repaid: repaid * unit,
             repayment_method: text(table, row, mapping, "repaymentMethod"),
+            contract_opening: contract_opening * unit,
         });
     }
 }
@@ -644,6 +733,7 @@ fn calculate_tb(params: &Value) -> Result<Vec<LoanRow>, AppError> {
             contract_end: None,
             repaid: 0.0,
             repayment_method: String::new(),
+            contract_opening: 0.0,
         })
     }
     if out.is_empty() {
@@ -774,35 +864,35 @@ fn calculate_interest(rows: &mut [LoanRow], params: &Value) -> Result<(), AppErr
             if row.repayment_method.contains("分期")
                 && row.repaid > 0.0
                 && row.closing_principal > 0.0
-                && row.closing_principal < row.opening_principal
+                && row.closing_principal < row.contract_opening
             {
                 // 台账注明“分期还本”但无逐期还款日期：视同归还集中于期中发生——
                 // 期初占用计至期中，期末余额自期中次日计至报告期末
-                segs.push((row.opening_principal, from, mid, false));
+                segs.push((row.contract_opening, from, mid, false));
                 let mid_next = mid.succ_opt().unwrap_or(mid);
                 let seg2_from = if from > mid_next { from } else { mid_next };
                 segs.push((row.closing_principal, seg2_from, end, true));
             } else if row.closing_principal > 0.0 {
-                if settled && row.closing_principal < row.opening_principal {
-                    segs.push((row.opening_principal, from, ce, false));
+                if settled && row.closing_principal < row.contract_opening {
+                    segs.push((row.contract_opening, from, ce, false));
                     segs.push((row.closing_principal, ce, end, true));
                 } else {
                     segs.push((row.closing_principal, from, end, true));
                 }
             } else if settled {
                 // 年内到期（含年内放款年内到期）：视同到期结清，全额计至到期日
-                segs.push((row.opening_principal, from, ce, ce == end));
+                segs.push((row.contract_opening, from, ce, ce == end));
             } else if cs > start {
                 // 年内新放款且存续：本金=放款额-已还，自放款日起算至年末
                 segs.push((
-                    (row.opening_principal - row.repaid).max(0.0),
+                    (row.contract_opening - row.repaid).max(0.0),
                     from,
                     end,
                     true,
                 ));
             } else {
                 segs.push((
-                    (row.opening_principal - row.repaid).max(0.0),
+                    (row.contract_opening - row.repaid).max(0.0),
                     from,
                     end,
                     true,
@@ -826,11 +916,14 @@ fn calculate_interest(rows: &mut [LoanRow], params: &Value) -> Result<(), AppErr
             row.principal_days = principal_days;
             row.match_basis
                 .push_str(&format!("；按合同期间计息{days_total}天/365"));
-            // 存续但期末余额低于期初/合同额（年内归还、时点未列示）：提示结合备注复核
+            // 存续但期末余额低于期初/合同额（年内归还、时点未列示）：计息口径
+            // 建立在“归还视同期初发生”的假设上，属于需要人判断的推算——
+            // 不能只在小字里提示，状态列也要亮待复核。
             if !settled
                 && row.closing_principal > 0.0
-                && row.closing_principal < row.opening_principal
+                && row.closing_principal < row.contract_opening
             {
+                row.match_status = "待复核".into();
                 row.match_basis
                     .push_str("；年内有归还且时点未列示，按期末余额恒定测算，建议结合备注复核");
             }
@@ -1206,15 +1299,28 @@ fn source(params: &Value, key: &str) -> Result<(Table, Map<String, Value>), AppE
     } else {
         None
     };
+    // 多段台账的主表头映射只描述第一段。后续各段列布局不同（09 号草稿里
+    // 段2的“业务品种”恰好落在主映射的金额列上），拿主映射校验全表必然误报，
+    // 整张表被拦下。后续段由引擎按各自表头自动映射、逐行金额守卫兜底，
+    // 金额列校验只做第一段。
+    let first_seg_end = if validation_kind == "loan" {
+        detect_segments(&table)
+            .first()
+            .map(|seg| seg.end)
+            .unwrap_or(table.rows.len())
+    } else {
+        table.rows.len()
+    };
     let issues = ledger_mapping::mapped_amount_parse_issues(
         validation_kind,
         &table.headers,
-        &table.rows,
+        &table.rows[..first_seg_end],
         &|role| mapped_names(&mapping, validation_kind, role),
     )
     .into_iter()
     .filter(|issue| {
-        keep.as_deref()
+        keep
+            .as_deref()
             .is_none_or(|mask| mask.get(issue.row_index).copied().unwrap_or(false))
     })
     .collect::<Vec<_>>();
@@ -1584,22 +1690,6 @@ fn row_date(
 fn parse_date(s: &str) -> Option<NaiveDate> {
     ledger_mapping::parse_date(s)
 }
-/// 中文日期："2024年3月5日"、"25年1月10日"（两位年按 20xx）。
-fn parse_cn_date(s: &str) -> Option<NaiveDate> {
-    let i_nian = s.find('年')?;
-    let y_str = &s[..i_nian];
-    let y = if y_str.chars().count() <= 2 {
-        2000 + y_str.parse::<i32>().ok()?
-    } else {
-        y_str.parse::<i32>().ok()?
-    };
-    let rest = &s[i_nian + '年'.len_utf8()..];
-    let i_yue = rest.find('月')?;
-    let m = rest[..i_yue].parse::<u32>().ok()?;
-    let d_part = &rest[i_yue + '月'.len_utf8()..];
-    let d = d_part.trim_end_matches('日').trim().parse::<u32>().ok()?;
-    NaiveDate::from_ymd_opt(y, m, d)
-}
 /// 期限解析为月数："12个月"、"3年"、"一年"、"17个月（含展期）"、"12"。
 fn parse_term_months(s: &str) -> Option<u32> {
     let t = s.trim();
@@ -1881,7 +1971,14 @@ fn data_text(v: &Data) -> String {
         }
         Data::Int(n) => n.to_string(),
         Data::Bool(b) => b.to_string(),
-        Data::DateTime(d) => d.to_string(),
+        // calamine 0.36 的 `ExcelDateTime` Display 打印的是**原始序列号**（如
+        // "44936"），直接透传会让所有真日期单元格解析失败——起止日全空、利息
+        // 退化成平均本金粗算、已结清旧借款照计全年息。必须转成日历文本。
+        Data::DateTime(d) => d
+            .as_datetime()
+            .map(|v| v.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| d.to_string()),
+        Data::DateTimeIso(s) | Data::DurationIso(s) => s.clone(),
         Data::DateTimeIso(s) | Data::DurationIso(s) => s.clone(),
         Data::Error(e) => format!("{e:?}"),
     }
@@ -2987,6 +3084,88 @@ mod tests {
             &[],
         );
     }
+    #[test]
+    fn 合同模式四栏按报告期重述且真日期单元格可用() {
+        // 真实 Excel 日期单元格（calamine 读回 Data::DateTime，序列号修复的回归）
+        // ＋合同台账四种典型行：期初/增加/减少必须重述成报告期口径、逐行勾稽平，
+        // 推算行标待复核并写明依据。
+        let dir = std::env::temp_dir().join(format!("loan-restate-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("contract-dates.xlsx");
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet();
+        let headers = ["合同编号", "借款金额", "起始日", "到期日", "利率", "期末余额"];
+        for (c, h) in headers.iter().enumerate() {
+            sheet.write_string(0, c as u16, *h).unwrap();
+        }
+        let d = |y: i32, m: u32, day: u32| NaiveDate::from_ymd_opt(y, m, day).unwrap();
+        let rows: [(&str, f64, NaiveDate, NaiveDate, f64, f64); 4] = [
+            ("A-存续部分归还", 100_000_000.0, d(2023, 1, 10), d(2028, 1, 9), 0.0385, 80_000_000.0),
+            ("B-年内新放款", 50_000_000.0, d(2025, 3, 1), d(2026, 2, 28), 0.0435, 50_000_000.0),
+            ("C-年内到期结清", 8_000_000.0, d(2024, 2, 5), d(2025, 2, 4), 0.031, 0.0),
+            ("D-期前结清", 29_800_000.0, d(2023, 4, 20), d(2024, 4, 19), 0.033, 0.0),
+        ];
+        let date_fmt = Format::new().set_num_format("yyyy-mm-dd");
+        for (i, (id, amt, s, e, r, close)) in rows.iter().enumerate() {
+            let y = i as u32 + 1;
+            sheet.write_string(y, 0, *id).unwrap();
+            sheet.write_number(y, 1, *amt).unwrap();
+            sheet.write_date_with_format(y, 2, s, &date_fmt).unwrap();
+            sheet.write_date_with_format(y, 3, e, &date_fmt).unwrap();
+            sheet.write_number(y, 4, *r).unwrap();
+            sheet.write_number(y, 5, *close).unwrap();
+        }
+        book.save(&path).unwrap();
+        let insp = inspect(&inspect_params(&path, 0)).unwrap();
+        let header_row = insp["headerRow"].as_u64().unwrap_or(1) as usize;
+        let out = run_preview(&preview_params(&path, header_row, insp["suggestedMapping"].clone()))
+            .unwrap();
+        let rows = out["rows"].as_array().unwrap();
+        let by_id = |id: &str| {
+            rows.iter()
+                .find(|r| r["loanId"].as_str() == Some(id))
+                .unwrap_or_else(|| panic!("缺行 {id}"))
+        };
+        // 存续部分归还：期初＝合同额、减少＝合同额－期末（含以前年度归还，待复核）。
+        let a = by_id("A-存续部分归还");
+        assert_eq!(a["openingPrincipal"].as_f64().unwrap(), 100_000_000.0);
+        assert_eq!(a["additions"].as_f64().unwrap(), 0.0);
+        assert_eq!(a["reductions"].as_f64().unwrap(), 20_000_000.0);
+        assert_eq!(a["closingPrincipal"].as_f64().unwrap(), 80_000_000.0);
+        assert_eq!(a["matchStatus"].as_str().unwrap(), "待复核");
+        assert!(a["matchBasis"].as_str().unwrap().contains("以前年度归还"));
+        // 利息按期末余额恒定：80M×3.85%×365/365。
+        assert!((a["calculatedInterest"].as_f64().unwrap() - 3_080_000.0).abs() < 0.01);
+        // 年内新放款：期初为 0、增加＝合同额。
+        let b = by_id("B-年内新放款");
+        assert_eq!(b["openingPrincipal"].as_f64().unwrap(), 0.0);
+        assert_eq!(b["additions"].as_f64().unwrap(), 50_000_000.0);
+        assert_eq!(b["reductions"].as_f64().unwrap(), 0.0);
+        assert_eq!(b["matchStatus"].as_str().unwrap(), "已匹配");
+        // 年内到期结清：减少＝全额，利息计至到期日（算头不算尾 34 天）。
+        let c = by_id("C-年内到期结清");
+        assert_eq!(c["openingPrincipal"].as_f64().unwrap(), 8_000_000.0);
+        assert_eq!(c["reductions"].as_f64().unwrap(), 8_000_000.0);
+        assert_eq!(c["closingPrincipal"].as_f64().unwrap(), 0.0);
+        assert!((c["calculatedInterest"].as_f64().unwrap() - 8_000_000.0 * 0.031 * 34.0 / 365.0).abs() < 0.01);
+        // 期前结清：四栏全零、不计息。
+        let dd = by_id("D-期前结清");
+        for key in ["openingPrincipal", "additions", "reductions", "closingPrincipal"] {
+            assert_eq!(dd[key].as_f64().unwrap(), 0.0, "D 行 {key}");
+        }
+        assert_eq!(dd["calculatedInterest"].as_f64().unwrap(), 0.0);
+        assert!(dd["matchBasis"].as_str().unwrap().contains("报告期前已结清"));
+        // 逐行「期初＋增加－减少＝期末」。
+        for r in rows {
+            let eq = r["openingPrincipal"].as_f64().unwrap()
+                + r["additions"].as_f64().unwrap()
+                - r["reductions"].as_f64().unwrap()
+                - r["closingPrincipal"].as_f64().unwrap();
+            assert!(eq.abs() < 0.01, "{:?} 勾稽不平：{eq}", r["loanId"]);
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     #[ignore = "仅本机客户样例验收，需 AUDIT_LOAN_TESTSET_DIR；CI 使用合成台账"]
     fn harness_compare_02() {

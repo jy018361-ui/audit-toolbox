@@ -372,3 +372,36 @@
     scroll-behavior: auto;
   }
 }
+
+/* 2026-09-03 科目复核密度收紧：工具栏控件并拢、表格行高与内边距压缩、
+   加斑马纹，单屏可见行数明显增多（用户走查：筛选行松散、行高过大）。 */
+.fa-tbje-account-toolbar {
+  grid-template-columns: minmax(13rem, 1fr) minmax(9rem, auto);
+  gap: var(--sp-2) var(--sp-3);
+}
+
+.fa-tbje-bulk-actions,
+.fa-tbje-bulk-category {
+  gap: var(--sp-2) var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.fa-tbje-account-table th,
+.fa-tbje-account-table td {
+  padding: var(--sp-1) var(--sp-2);
+}
+
+.fa-tbje-account-table select,
+.fa-tbje-account-toolbar input,
+.fa-tbje-account-toolbar select,
+.fa-tbje-bulk-category input {
+  min-height: 2.25rem;
+}
+
+.fa-tbje-account-table tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--surface-muted) 45%, var(--surface));
+}
+
+.fa-tbje-account-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--brand-accent) 8%, var(--surface));
+}

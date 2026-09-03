@@ -37,7 +37,8 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   grid-template-areas: "je tb";
   gap: 16px;
-  align-items: start;
+  /* stretch：左右两张识别卡等高，避免内容行数不同导致底部参差。 */
+  align-items: stretch;
 }
 .fx-source-card {
   overflow: hidden;
@@ -58,6 +59,9 @@
   grid-area: tb;
 }
 .fx-source-empty {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
   min-height: 148px;
   border: 0 !important;
   box-shadow: none !important;

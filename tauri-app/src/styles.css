@@ -1649,17 +1649,37 @@ summary:focus-visible {
 }
 .mapping-panel > .mapping-form-note,
 .mapping-panel > .mapping-requirement-legend,
+.mapping-panel > .mapping-meta-row,
 .mapping-panel > .fa-missing-hint,
 .mapping-panel > .fx-hint,
 .mapping-panel > .fx-currency-confirm {
   margin-right: var(--sp-5) !important;
   margin-left: var(--sp-5) !important;
 }
-.mapping-panel > .mapping-form-note {
+/* 形态结论与星号说明合并成一行：形态是胶囊标签，星号说明跟随其后，
+   不再各自独占一行把预览表往下推。 */
+.mapping-meta-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  margin-top: var(--sp-2) !important;
+  margin-bottom: var(--sp-2) !important;
+}
+.mapping-panel .mapping-form-note {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 !important;
   border-color: color-mix(in srgb, var(--brand-accent) 38%, var(--border));
   background: color-mix(in srgb, var(--success-bg) 52%, var(--surface));
   color: var(--success-fg) !important;
   font-weight: 600;
+  padding: 1px var(--sp-3);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.mapping-panel .mapping-requirement-legend {
+  margin: 0 !important;
 }
 .mapping-panel > .data-table {
   margin-top: var(--sp-4);

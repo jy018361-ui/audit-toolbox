@@ -49,7 +49,6 @@ import "./fx-audit.css";
 import "./deposit-interest.css";
 
 type Kind = "je" | "tb";
-type DayBasis = "month12" | "actual360" | "actual365";
 export type Inspection = {
   headers: string[];
   sheet: string;
@@ -213,11 +212,6 @@ const ROLE_OPTIONS: Array<[string, string]> = [
   ["cash_on_hand", "库存现金（默认不计息）"],
   ["interest_income", "利息收入（勾稽基准）"],
   ["excluded", "不参与测算"],
-];
-const DAY_BASIS_OPTIONS: Array<[DayBasis, string]> = [
-  ["month12", "年利率÷12（按月平均）"],
-  ["actual360", "实际天数÷360（银行计息惯例）"],
-  ["actual365", "实际天数÷365"],
 ];
 
 /** 上传的 TB 至少要能取出年初和年末余额；序时账只在提供时才校验。 */
@@ -428,7 +422,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   >({});
   const [accountFilter, setAccountFilter] = useState("");
   const [reportEnd, setReportEnd] = useState("");
-  const [dayBasis, setDayBasis] = useState<DayBasis>("month12");
   const [tiers, setTiers] = useState<RateTiers>();
   const [tierRates, setTierRates] = useState<Record<string, number>>({});
   const [rows, setRows] = useState<AccountRow[]>([]);
@@ -564,9 +557,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     setStep(0);
     setBusy(true);
     setError("");
-    setSourceStatus("正在识别文件类型、表头和字段…");
+    setSourceStatus("正在识别文件…");
     const failures: string[] = [];
-    let llmFallbacks = 0;
     try {
       const classifiedFiles: Array<{
         path: string;
@@ -588,7 +580,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
             path,
             scripted,
           );
-          if (!reviewed.reviewed) llmFallbacks += 1;
           classifiedFiles.push({
             path,
             classification: reviewed.classification,
@@ -616,11 +607,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
           failures.push(`${fileName(item.path)}：${errorText(e)}`);
         }
       }
-      setSourceStatus(
-        llmFallbacks
-          ? `${classifiedFiles.length} 个文件已识别；LLM 复核不可用的文件已保留脚本结果，JE 与 TB 已按固定槽位分配。`
-          : `${classifiedFiles.length} 个文件已完成脚本识别与存款利息专用 LLM 复核；JE 与 TB 已按固定槽位分配。`,
-      );
+      setSourceStatus("");
       if (failures.length) setError(failures.join("；"));
     } finally {
       setBusy(false);
@@ -674,7 +661,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     return {
       reportStart: depositReportStart(reportEnd),
       reportEnd,
-      dayBasis,
+      // 计息口径固定按月平均（年利率÷12）：选项对用户没有实际意义，已从界面移除。
+      dayBasis: "month12",
       // 库存现金不参与存款利息测算；保留字段仅用于兼容现有引擎入参。
       includeCashOnHand: false,
       tbSource: {
@@ -830,12 +818,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
             <CardContent>
               <FileDropInput
                 containerRef={uploadDropRef}
-                value={[
-                  tbPath && `TB：${fileName(tbPath)}`,
-                  jePath && `序时账：${fileName(jePath)}`,
-                ]
-                  .filter(Boolean)
-                  .join("；")}
+                value=""
                 disabled={busy}
                 placeholder="拖放或选择 TB、序时账文件（可同时选择）"
                 onBrowse={() => void browse()}
@@ -857,6 +840,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               />
               {sourceStatus && (
                 <p className="fx-source-status" aria-live="polite">
+                  <i aria-hidden="true" />
                   {sourceStatus}
                 </p>
               )}
@@ -1045,7 +1029,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   <b>{interestAccounts.length}</b>
                   <HelpTip text="利息收入是 TB 比较基准；未设置时仍可测算，但不能勾稽。存款类型关联下方利率档位；名称无法判断时默认活期。" />
                 </p>
-                <details open={!interestAccounts.length}>
+                <details open>
                   <summary>逐个核对科目分类</summary>
                   <KeywordFilter
                     value={accountFilter}
@@ -1198,19 +1182,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     value={reportEnd}
                     onChange={(e) => setReportEnd(e.target.value)}
                   />
-                </label>
-                <label>
-                  计息口径
-                  <select
-                    value={dayBasis}
-                    onChange={(e) => setDayBasis(e.target.value as DayBasis)}
-                  >
-                    {DAY_BASIS_OPTIONS.map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
                 </label>
                 <label>
                   输出文件
@@ -1440,23 +1411,12 @@ function RateTierCard({
           </p>
         )}
         <ReferenceLinks tiers={tiers} />
-        <details className="deposit-tier-source">
-          <summary>利率来源与口径说明</summary>
-          <ul>
-            <li>
-              <b>央行基准</b>：{tiers.benchmarkSource}
-            </li>
-            <li>
-              <b>大行挂牌</b>：{tiers.listedSource}
-            </li>
-            <li>
-              <b>实务常见区间</b>：{tiers.practiceSource}
-            </li>
-            <li>
-              <b>审计依据</b>：{tiers.authority}
-            </li>
-          </ul>
-        </details>
+        <p className="deposit-tier-note">
+          利率来源与口径说明
+          <HelpTip
+            text={`央行基准：${tiers.benchmarkSource}；大行挂牌：${tiers.listedSource}；实务常见区间：${tiers.practiceSource}；审计依据：${tiers.authority}`}
+          />
+        </p>
       </CardContent>
     </Card>
   );
@@ -1770,14 +1730,18 @@ function Results({
     <section className="fx-result deposit-result">
       <div className="fx-result-heading">
         <div>
-          <h3>存款利息测算结果</h3>
-          <p>
-            月均余额＝（月初余额＋月末余额）÷2；月度余额来源：
-            {String(summary.monthlySource ?? "—")}； 期初余额来源：
-            {String(summary.openingSource ?? "—")}；测算月份：
-            {String(summary.monthCount ?? "—")} 个月； 计息口径：
-            {String(summary.dayBasisLabel ?? "—")}。
-          </p>
+          <h3>
+            存款利息测算结果
+            <HelpTip
+              text={`月均余额＝（月初余额＋月末余额）÷2；月度余额来源：${String(
+                summary.monthlySource ?? "—",
+              )}；期初余额来源：${String(
+                summary.openingSource ?? "—",
+              )}；测算月份：${String(summary.monthCount ?? "—")} 个月；计息口径：${String(
+                summary.dayBasisLabel ?? "—",
+              )}。`}
+            />
+          </h3>
           {Boolean(summary.amountScheme) && (
             <p
               className="deposit-scheme"

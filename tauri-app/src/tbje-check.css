@@ -254,12 +254,20 @@
 }
 
 .tbje-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: max-content;
   margin: var(--sp-3) 0 0;
-  padding: var(--sp-2) var(--sp-3);
-  border-radius: var(--r-sm);
-  background: var(--surface-muted);
   color: var(--label);
   font-size: var(--fs-sm);
+}
+.tbje-status i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
 }
 
 .tbje-detail {

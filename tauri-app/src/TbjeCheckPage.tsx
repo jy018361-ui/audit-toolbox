@@ -1088,6 +1088,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
               </div>
               {status && (
                 <p className="tbje-status" role="status" aria-live="polite">
+                  <i aria-hidden="true" />
                   {status}
                 </p>
               )}

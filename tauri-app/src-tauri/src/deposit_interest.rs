@@ -2579,9 +2579,13 @@ fn export(params: &Value, result: &Value) -> Result<PathBuf, AppError> {
         ranges.push((cursor, cursor + span - 1));
         cursor += span;
     }
-    write_summary(workbook.add_worksheet(), &rows, &ranges)?;
-    write_monthly(workbook.add_worksheet(), &rows)?;
-    write_reconciliation(workbook.add_worksheet(), &rows, summary, result)?;
+    // 勾稽比较直接接在汇总表下方：单独一张 sheet 只有一屏数据，
+    // 翻页反而割裂；同 sheet 还让「审计测算存款利息」能直接引用 N 列合计。
+    let day_basis = summary["dayBasis"].as_str().unwrap_or("month12");
+    let summary_sheet = workbook.add_worksheet();
+    write_summary(summary_sheet, &rows, &ranges)?;
+    write_reconciliation(summary_sheet, &rows, summary, result, rows.len() as u32 + 2)?;
+    write_monthly(workbook.add_worksheet(), &rows, day_basis)?;
     write_rate_tiers(workbook.add_worksheet(), params)?;
     write_parameters(workbook.add_worksheet(), summary, &rows)?;
     workbook.save(&path).map_err(xlsx)?;
@@ -2678,7 +2682,6 @@ fn write_summary(
             row.opening_balance,
             row.tb_closing_balance,
             row.derived_closing_balance,
-            row.reconciliation_diff,
         ]
         .iter()
         .enumerate()
@@ -2687,6 +2690,17 @@ fn write_summary(
                 .write_number_with_format(y, 8 + offset as u16, *value, &amount)
                 .map_err(xlsx)?;
         }
+        // 勾稽差异必须是活公式（JE 推导 − TB）：写死数的话，用户在月度表
+        // 调整数据后这一列不会跟着变，底稿里就留着过期差异冒充结论。
+        sheet
+            .write_formula_with_format(
+                y,
+                11,
+                Formula::new(format!("K{}-J{}", y + 1, y + 1))
+                    .set_result(row.reconciliation_diff.to_string()),
+                &amount,
+            )
+            .map_err(xlsx)?;
         // 月均余额和测算利息全部引用月度表，改利率后 Excel 自己重算。
         sheet
             .write_formula_with_format(
@@ -2729,12 +2743,23 @@ fn write_summary(
     Ok(())
 }
 
-fn write_monthly(sheet: &mut Worksheet, rows: &[AccountRow]) -> Result<(), AppError> {
+fn write_monthly(
+    sheet: &mut Worksheet,
+    rows: &[AccountRow],
+    day_basis: &str,
+) -> Result<(), AppError> {
     sheet.set_name(MONTHLY_SHEET).map_err(xlsx)?;
     let amount = Format::new().set_num_format("#,##0.00;[Red](#,##0.00);-");
     let percent = Format::new().set_num_format("0.0000%");
+    // 按月平均口径里 M 列的 1 是「1 期＝1/12 年」，不是 1 天——列名跟着
+    // 口径走，审计人员才不会把 1 误读成计息天数只有一天。
+    let period_title = if day_basis == "month12" {
+        "计息期数（月）"
+    } else {
+        "计息天数"
+    };
     // 列顺序必须与下面公式里的字母严格一致：
-    // G=月初 H=借方 I=贷方 J=月末 K=月均 L=年利率 M=计息天数 N=年基数 O=当月利息
+    // G=月初余额 H=借方 I=贷方 J=月末余额 K=月均余额 L=年利率 M=计息期数/天数 N=年基数 O=当月利息
     let titles = [
         "核算主体",
         "科目",
@@ -2748,7 +2773,7 @@ fn write_monthly(sheet: &mut Worksheet, rows: &[AccountRow]) -> Result<(), AppEr
         "月末余额",
         "月均余额",
         "年利率",
-        "计息天数",
+        period_title,
         "年基数",
         "当月利息",
     ];
@@ -2818,27 +2843,34 @@ fn write_monthly(sheet: &mut Worksheet, rows: &[AccountRow]) -> Result<(), AppEr
     Ok(())
 }
 
+/// 与 TB 利息收入的勾稽比较：写在汇总表（`SUMMARY_SHEET`）正文下方，
+/// `offset` 是本块首行在整张 sheet 里的 0 基行号（调用方传正文后留一空行）。
 fn write_reconciliation(
     sheet: &mut Worksheet,
     rows: &[AccountRow],
     summary: &Value,
     result: &Value,
+    offset: u32,
 ) -> Result<(), AppError> {
-    sheet.set_name("与TB利息收入勾稽").map_err(xlsx)?;
     let amount = Format::new().set_num_format("#,##0.00;[Red](#,##0.00);-");
     let percent = Format::new().set_num_format("0.00%");
     let bold = Format::new().set_bold();
     let last = rows.len() as u32 + 1;
     let booked = summary["bookedInterestIncome"].as_f64().unwrap_or(0.0);
+    // 同一张 sheet，公式不再带 sheet 前缀；行号全部平移 offset。
+    let (row_calc, row_booked, row_diff, row_ratio) =
+        (offset + 2, offset + 3, offset + 4, offset + 5);
     sheet
-        .write_string_with_format(0, 0, "存款利息测算与账面利息收入比较", &bold)
+        .write_string_with_format(offset, 0, "存款利息测算与账面利息收入比较", &bold)
         .map_err(xlsx)?;
-    sheet.write_string(2, 0, "审计测算存款利息").map_err(xlsx)?;
+    sheet
+        .write_string(row_calc, 0, "审计测算存款利息")
+        .map_err(xlsx)?;
     sheet
         .write_formula_with_format(
-            2,
+            row_calc,
             1,
-            Formula::new(format!("SUM('{SUMMARY_SHEET}'!N2:N{last})")).set_result(
+            Formula::new(format!("SUM(N2:N{last})")).set_result(
                 summary["calculatedInterest"]
                     .as_f64()
                     .unwrap_or(0.0)
@@ -2848,22 +2880,40 @@ fn write_reconciliation(
         )
         .map_err(xlsx)?;
     sheet
-        .write_string(3, 0, "TB 账面利息收入（取自利息收入类科目）")
+        .write_string(row_booked, 0, "TB 账面利息收入（取自利息收入类科目）")
         .map_err(xlsx)?;
     sheet
-        .write_number_with_format(3, 1, booked, &amount)
+        .write_number_with_format(row_booked, 1, booked, &amount)
         .map_err(xlsx)?;
     sheet
-        .write_string(4, 0, "差异（测算－账面）")
+        .write_string(row_diff, 0, "差异（测算－账面）")
         .map_err(xlsx)?;
     sheet
-        .write_formula_with_format(4, 1, Formula::new("B3-B4"), &amount)
+        .write_formula_with_format(
+            row_diff,
+            1,
+            Formula::new(format!(
+                "B{}-B{}",
+                row_calc + 1,
+                row_booked + 1
+            )),
+            &amount,
+        )
         .map_err(xlsx)?;
-    sheet.write_string(5, 0, "差异率").map_err(xlsx)?;
+    sheet.write_string(row_ratio, 0, "差异率").map_err(xlsx)?;
     sheet
-        .write_formula_with_format(5, 1, Formula::new("IFERROR(ABS(B5/B4),0)"), &percent)
+        .write_formula_with_format(
+            row_ratio,
+            1,
+            Formula::new(format!(
+                "IFERROR(ABS(B{}/B{}),0)",
+                row_diff + 1,
+                row_booked + 1
+            )),
+            &percent,
+        )
         .map_err(xlsx)?;
-    let mut y = 6u32;
+    let mut y = offset + 6;
     if !summary["hasInterestIncomeAccount"]
         .as_bool()
         .unwrap_or(false)
@@ -2936,9 +2986,7 @@ fn write_reconciliation(
             .write_string(y, 3, item["note"].as_str().unwrap_or(""))
             .map_err(xlsx)?;
     }
-    sheet.set_column_width(0, 42).map_err(xlsx)?;
-    sheet.set_column_width(1, 34).map_err(xlsx)?;
-    sheet.autofit();
+    // 列宽由上方的汇总表统一决定（autofit 已含本块），不再单独设置。
     Ok(())
 }
 
@@ -3051,9 +3099,13 @@ fn write_parameters(
         ("纳入测算账户数".into(), rows.len().to_string()),
         ("待复核账户数".into(), summary["reviewCount"].to_string()),
         ("待填利率账户数".into(), summary["missingRateCount"].to_string()),
-        ("计算口径".into(), "月均余额 =（月初余额＋月末余额）÷2；当月利息 = 月均余额 × 年利率 × 计息天数 ÷ 年基数。".into()),
+        ("计算口径".into(), if summary["dayBasis"].as_str() == Some("month12") {
+            "月均余额 =（月初余额＋月末余额）÷2；当月利息 = 月均余额 × 年利率 ÷ 12（按月平均，月度表 M 列为月份数）。".to_string()
+        } else {
+            "月均余额 =（月初余额＋月末余额）÷2；当月利息 = 月均余额 × 年利率 × 计息天数 ÷ 年基数。".to_string()
+        }),
         ("勾稽口径".into(), "测算利息合计与 TB 利息收入类科目本期发生额净额比较，差异率超过 5% 提示复核。".into()),
-        ("修改方式".into(), format!("在「{SUMMARY_SHEET}」H 列黄色「年利率」单元格直接改写利率，「{MONTHLY_SHEET}」的月度利息、汇总的测算利息和勾稽表会自动重算。")),
+        ("修改方式".into(), format!("在「{SUMMARY_SHEET}」H 列黄色「年利率」单元格直接改写利率，「{MONTHLY_SHEET}」的月度利息、汇总的测算利息与下方的勾稽比较会自动重算。")),
         ("空白利率格".into(), "活期以外的档位不自动套用默认利率，H 列留空即表示该户利率尚未确定；填入实际利率后金额自动出现。".into()),
     ];
     let items = if summary["ratesStale"].as_bool().unwrap_or(false) {
@@ -4906,6 +4958,22 @@ mod tests {
 
         // 导出的月度表必须是公式而不是死值，否则用户在 Excel 里改利率不会重算。
         let mut book = calamine::open_workbook_auto(&out_path).unwrap();
+        // 勾稽比较已并入汇总表：不再有单独的「与TB利息收入勾稽」sheet。
+        let sheets = calamine::Reader::sheet_names(&book);
+        assert!(
+            !sheets.iter().any(|name| name == "与TB利息收入勾稽"),
+            "勾稽比较应并入「{SUMMARY_SHEET}」：{sheets:?}"
+        );
+        let summary_formulas =
+            calamine::Reader::worksheet_formula(&mut book, SUMMARY_SHEET).unwrap();
+        let summary_formula_text: Vec<String> = summary_formulas
+            .rows()
+            .flat_map(|row| row.to_vec())
+            .collect();
+        assert!(
+            summary_formula_text.iter().any(|f| f.contains("K2-J2")),
+            "汇总表勾稽差异必须是活公式（JE推导−TB）：{summary_formula_text:?}"
+        );
         let formulas = calamine::Reader::worksheet_formula(&mut book, MONTHLY_SHEET).unwrap();
         let cells: Vec<String> = formulas.rows().flat_map(|row| row.to_vec()).collect();
         assert!(
@@ -4958,6 +5026,15 @@ mod tests {
         assert!(summary_text.contains("未命中期限关键字，默认按活期"));
         assert!(summary_text.contains("待填利率"));
         assert!(summary_text.contains("需填写实际利率"));
+        // 勾稽块并入汇总表后，比较标题与不完整提示都必须在同一张 sheet 里。
+        assert!(
+            summary_text.contains("存款利息测算与账面利息收入比较"),
+            "勾稽比较标题应在「{SUMMARY_SHEET}」内"
+        );
+        assert!(
+            summary_text.contains("尚未确定利率"),
+            "勾稽块未说明测算不完整"
+        );
         assert!(
             text.contains("只有活期自动套用默认利率"),
             "档位表缺少自动套用范围说明"
@@ -4967,18 +5044,17 @@ mod tests {
             "档位表未把央行基准降级为参照"
         );
 
-        let recon = calamine::Reader::worksheet_range(&mut book, "与TB利息收入勾稽").unwrap();
-        let recon_text: String = recon
+        // 按月平均口径下，月度表的期数列必须写「期数（月）」而不是「天数」，
+        // 否则 M 列的 1 会被误读成只计息一天。
+        let monthly_sheet = calamine::Reader::worksheet_range(&mut book, MONTHLY_SHEET).unwrap();
+        let monthly_text: String = monthly_sheet
             .rows()
             .flat_map(|row| row.iter().map(|cell| cell.to_string()))
             .collect::<Vec<_>>()
-            .join(
-                "
-",
-            );
+            .join("");
         assert!(
-            recon_text.contains("尚未确定利率"),
-            "勾稽表未说明测算不完整"
+            monthly_text.contains("计息期数（月）"),
+            "按月平均口径的期数列名应写明单位是月：{monthly_text}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

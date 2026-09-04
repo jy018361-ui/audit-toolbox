@@ -354,8 +354,20 @@ impl ExcelMergerService {
         }
         let mut terminal = false;
         let mut cancel_started = None::<Instant>;
+        let mut memory_pressure_started = None::<Instant>;
         loop {
-            if protected && !terminal && crate::resource_budget::check_available().is_err() {
+            let memory_critical =
+                protected && !terminal && crate::resource_budget::check_available().is_err();
+            if memory_critical {
+                memory_pressure_started.get_or_insert_with(Instant::now);
+            } else {
+                memory_pressure_started = None;
+            }
+            // Windows 可用内存会随文件缓存短暂波动。只有紧急阈值持续 5 秒才终止，
+            // 避免重试时黑框一闪就被一次采样误杀。
+            if memory_pressure_started
+                .is_some_and(|started| started.elapsed() >= Duration::from_secs(5))
+            {
                 terminate_process_tree(&mut child);
                 self.emit(event_for(
                     worker_tool_id,
@@ -514,6 +526,7 @@ pub(crate) const SUPPORTED_JOB_METHODS: &[&str] = &[
     "file_list.scan",
     "ts.inspect",
     "kanzhang.inspect",
+    "kanzhang.accounts",
     "excel_merger.merge",
     "ts.cache",
     "ts.filter",
@@ -2338,7 +2351,12 @@ mod tests {
             assert!(is_supported_job_method(method));
         }
         // 看账自己的方法不能被 mark_ 分支顺手带走。
-        for method in ["kanzhang.inspect", "kanzhang.filter", "kanzhang.export"] {
+        for method in [
+            "kanzhang.inspect",
+            "kanzhang.accounts",
+            "kanzhang.filter",
+            "kanzhang.export",
+        ] {
             assert_eq!(tool_id(method), "kanzhang");
         }
         assert!(!is_supported_job_method("kanzhang.mark_unknown"));

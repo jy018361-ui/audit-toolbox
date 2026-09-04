@@ -58,6 +58,14 @@ pub(crate) fn budget() -> Result<MemoryBudget, AppError> {
     }
     Ok(result)
 }
+
+fn runtime_memory_critical(total: u64, available: u64, commit_available: u64) -> bool {
+    // 启动时按 safety_reserve 计算 worker 上限；运行中只在系统接近失稳时熔断。
+    // 两者若共用同一条保留线，Windows 的正常缓存波动就会把已经受 Job Object
+    // 限制的磁盘任务误杀。阈值仍随总内存变化，并为提交余量保留独立底线。
+    let physical_floor = (total / 32).clamp(512 * MIB, 2 * GIB);
+    available < physical_floor || commit_available < GIB
+}
 #[repr(C)]
 #[derive(Default)]
 struct Memory {
@@ -128,8 +136,7 @@ fn available() -> Result<Memory, AppError> {
 }
 pub(crate) fn check_available() -> Result<(), AppError> {
     let memory = available()?;
-    let reserve = plan(memory.total, memory.available, memory.commit_available).reserve_bytes;
-    if memory.available < reserve || memory.commit_available < reserve {
+    if runtime_memory_critical(memory.total, memory.available, memory.commit_available) {
         return Err(failure(
             "系统可用内存不足，已停止任务以保护电脑。请关闭其他大型程序后重试。",
         ));
@@ -245,5 +252,16 @@ mod tests {
         assert!(p.worker_bytes >= 256 * MIB);
         assert!(p.worker_bytes + p.reserve_bytes < p.available_bytes);
         assert!(p.sqlite_cache_kib <= 64 * 1024);
+    }
+
+    #[test]
+    fn runtime_guard_only_trips_near_system_exhaustion() {
+        assert!(!runtime_memory_critical(16 * GIB, GIB, 8 * GIB));
+        assert!(runtime_memory_critical(16 * GIB, 400 * MIB, 8 * GIB));
+        assert!(runtime_memory_critical(64 * GIB, 8 * GIB, 512 * MIB));
+        assert_eq!(
+            (64 * GIB / 32).clamp(512 * MIB, 2 * GIB),
+            2 * GIB
+        );
     }
 }

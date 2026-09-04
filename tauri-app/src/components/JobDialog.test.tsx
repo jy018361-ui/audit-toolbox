@@ -95,10 +95,10 @@ describe("任务进度弹窗", () => {
     fireEvent.click(screen.getByText("最小化"));
     expect(screen.queryByText("正在处理")).toBeNull();
     // 小条上仍报进度，任务没有被藏得无影无踪
-    expect(screen.getByText("Excel 批量合并")).toBeTruthy();
+    expect(screen.getByText("Excel 批量合并 · 点击展开")).toBeTruthy();
     expect(screen.getByText("30%")).toBeTruthy();
 
-    fireEvent.click(screen.getByText("Excel 批量合并"));
+    fireEvent.click(screen.getByText("Excel 批量合并 · 点击展开"));
     expect(screen.getByText("正在处理")).toBeTruthy();
   });
 

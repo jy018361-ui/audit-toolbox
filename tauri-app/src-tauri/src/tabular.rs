@@ -229,6 +229,10 @@ pub(crate) fn run_job(
             check_cancel(&cancel)?;
             value
         }
+        "kanzhang.accounts" => {
+            progress("accounts", 0, 0, "正在准备科目索引…");
+            kanzhang_account_values_with_progress(params, progress, &cancel)
+        }
         "ts.cache" => cache_ts(params, progress, &cancel),
         "ts.filter" => ts_filter_preview(params, progress, &cancel),
         "ts.pivot" | "ts.export" => export_ts(params, progress, &cancel),
@@ -294,7 +298,7 @@ fn inspect_kanzhang_with_progress(
         let table = &cache.table;
         let mapping = suggest_mapping(&table.headers, &table.rows);
         progress("accounts", 0, 0, "正在从磁盘缓存汇总科目…");
-        let accounts = cache.accounts(&mapping, "", &[], 500, cancel)?;
+        let accounts = cache.accounts(&mapping, "", &[], 500, progress, cancel)?;
         return Ok(
             json!({"engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path,"CSV",source.header_row)?,
             "path":table.path,"sheets":table.sheets,"selectedSheet":table.sheet,"headers":table.headers,
@@ -302,7 +306,7 @@ fn inspect_kanzhang_with_progress(
             "encoding":table.encoding,"delimiter":table.delimiter.map(|v|v.to_string()),
             "suggestedMapping":mapping,"accounts":accounts["values"],"accountCodes":accounts["codes"],
             "accountCount":accounts["total"],"lowMemory":true,
-            "resourceNotice":"已启用低内存磁盘模式；筛选、明细和套表会分批处理，首次运行时间较长，可随时取消。",
+            "resourceNotice":"已启用磁盘分批模式；内存上限、缓存和批量会按当前电脑动态调整。首次生成科目索引时间较长，可查看进度并随时取消。",
             "timings":{"readMs":started.elapsed().as_millis()}}),
         );
     }
@@ -334,10 +338,17 @@ fn inspect_kanzhang_with_progress(
 }
 
 fn kanzhang_account_values(params: Value) -> Result<Value, AppError> {
+    kanzhang_account_values_with_progress(params, &|_, _, _, _| {}, &AtomicBool::new(false))
+}
+
+fn kanzhang_account_values_with_progress(
+    params: Value,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<Value, AppError> {
     let source: SourceParams = parse(params.clone(), "看账参数不完整。")?;
     if large_csv::applies(Path::new(&source.input_path)) {
-        let cancel = AtomicBool::new(false);
-        let cache = large_csv::load(&source, &|_, _, _, _| {}, &cancel)?;
+        let cache = large_csv::load(&source, progress, cancel)?;
         let mapping: LedgerMapping = params
             .get("mapping")
             .cloned()
@@ -378,7 +389,8 @@ fn kanzhang_account_values(params: Value) -> Result<Value, AppError> {
             params.get("keyword").and_then(Value::as_str).unwrap_or(""),
             &prefixes,
             limit,
-            &cancel,
+            progress,
+            cancel,
         );
     }
     let table = load_ledger_cached(

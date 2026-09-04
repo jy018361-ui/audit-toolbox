@@ -200,6 +200,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const [query,setQuery]=useState(""); const [accounts,setAccounts]=useState<string[]>(draft.inspect?.accounts??[]); const [accountTotal,setAccountTotal]=useState<number>(draft.inspect?.accountCount??0); const [searchResults,setSearchResults]=useState<string[]>([]); const [selectedAvailable,setSelectedAvailable]=useState<string[]>([]);
   const [selectedTarget,setSelectedTarget]=useState<string[]>([]); const [selectedExclude,setSelectedExclude]=useState<string[]>([]);
   const [accountsKey,setAccountsKey]=useState(""); const [accountsBusy,setAccountsBusy]=useState(false); const [showExcludes,setShowExcludes]=useState(true);
+  const accountsJob=useRef<{id?:string;key:string}|undefined>(undefined);
   // 科目编码与 accounts 同序一一对应，供按编码段做前缀匹配。
   const [accountCodes,setAccountCodes]=useState<string[]>(draft.inspect?.accountCodes??[]);
   const [codePrefix,setCodePrefix]=useState("");
@@ -224,7 +225,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     autoOutputKey.current=key;
     patch({outputPath:draft.inputPath?defaultKanzhangOutputPath(draft.inputPath,draft.sheet):""});
   },[draft.inputPath,draft.sheet,draft.outputTouched,draft.outputPath]);
-  useEffect(()=>{let off=()=>{};void listenJobEvents(event=>{if(event.toolId!=="kanzhang")return;setJob(event);if(event.result){setResult(event.result);const payload=event.result as Inspect|undefined;if(event.phase==="completed"&&Array.isArray(payload?.headers))applyInspect(payload);}const done=["completed","failed","cancelled"].includes(event.phase);setBusy(!done);if(event.phase==="failed")setError(event.message);}).then(value=>off=value);return()=>off();},[]);
+  useEffect(()=>{let off=()=>{};void listenJobEvents(event=>{if(event.toolId!=="kanzhang")return;const pendingAccounts=accountsJob.current;if(pendingAccounts&&!pendingAccounts.id&&event.phase==="queued")pendingAccounts.id=event.jobId;const isAccountsJob=Boolean(pendingAccounts?.id===event.jobId);setJob(event);if(event.result){setResult(event.result);const payload=event.result as (Inspect&{values?:string[];codes?:string[];total?:number})|undefined;if(event.phase==="completed"&&Array.isArray(payload?.headers))applyInspect(payload);if(event.phase==="completed"&&isAccountsJob&&Array.isArray(payload?.values)){setAccounts(payload.values);setAccountCodes(payload.codes??[]);setAccountTotal(payload.total??payload.values.length);setAccountsKey(pendingAccounts?.key??"");setSearchResults([]);setSelectedAvailable([]);}}const done=["completed","failed","cancelled"].includes(event.phase);if(done&&isAccountsJob){if(event.phase!=="completed")setAccountsKey(pendingAccounts?.key??"");setAccountsBusy(false);accountsJob.current=undefined;}setBusy(!done);if(event.phase==="failed")setError(event.message);}).then(value=>off=value);return()=>off();},[]);
   const batch=draft.batches[draft.activeBatch]??draft.batches[0];
   // 输入框一敲就过滤（旧版是 StringVar trace）；只有科目被截断时才需要回后端补捞。
   const pool=useMemo(()=>{
@@ -245,7 +246,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   // 读取任务回来后套用表结构；改走任务通道是为了让大凭证文件的读取能报进度、能取消。
   // 透视默认只按科目名称分行——旧版就是这个口径。之前把公司也塞进行字段，
   // 同一科目被拆成每家公司一行，210 行的透视表膨胀到 665 行，跟旧版对不上。
-  function applyInspect(value:Inspect){const suggested=value.suggestedMapping??EMPTY.mapping;setAccounts(value.accounts??[]);setAccountCodes(value.accountCodes??[]);setCodePrefix("");setAccountTotal(value.accountCount??(value.accounts??[]).length);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");patch({inspect:value,knownSheets:value.sheets??draft.knownSheets,sheet:value.selectedSheet??draft.sheet,mapping:suggested,pivotRows:accountColumns(suggested),pivotColumns:suggested.date?[suggested.date]:[],step:1});setResult(undefined);
+  function applyInspect(value:Inspect){const suggested=value.suggestedMapping??EMPTY.mapping;setAccounts(value.accounts??[]);setAccountCodes(value.accountCodes??[]);setCodePrefix("");setAccountTotal(value.accountCount??(value.accounts??[]).length);setAccountsKey(accountColumns(suggested).join("|"));setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");patch({inspect:value,knownSheets:value.sheets??draft.knownSheets,sheet:value.selectedSheet??draft.sheet,mapping:suggested,pivotRows:accountColumns(suggested),pivotColumns:suggested.date?[suggested.date]:[],step:1});setResult(undefined);
     // 脚本自动映射一出来就直接送 LLM 复核，不再要求用户额外点一次按钮。
     void reviewMapping(suggested,value);}
   // 进入科目筛选时按用户最终确认的科目映射重载全量科目；inspect 阶段那份是按自动映射截断的。
@@ -257,10 +258,17 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   async function loadAccounts(key:string){
     setAccountsBusy(true);
     try{
+      if(draft.inspect?.lowMemory){
+        const request:{id?:string;key:string}={key};accountsJob.current=request;
+        const jobId=await jobStart("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,mapping:draft.mapping,keyword:"",limit:20000});
+        if(accountsJob.current===request)request.id=jobId;
+        setJob({jobId,toolId:"kanzhang",phase:"queued",current:0,total:1,message:"科目汇总任务已进入队列",severity:"info",outputPaths:[]});
+        return;
+      }
       const value=await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,mapping:draft.mapping,keyword:"",limit:20000}) as {values:string[];codes?:string[];total?:number};
       setAccounts(value.values);setAccountCodes(value.codes??[]);setAccountTotal(value.total??value.values.length);setAccountsKey(key);setSearchResults([]);setSelectedAvailable([]);
-    }catch(e){setError(kanzhangErrorText(e));setAccountsKey(key);}
-    finally{setAccountsBusy(false);}
+    }catch(e){setError(kanzhangErrorText(e));setAccountsKey(key);accountsJob.current=undefined;setAccountsBusy(false);}
+    finally{if(!draft.inspect?.lowMemory)setAccountsBusy(false);}
   }
   async function searchAccounts(){try{const value=await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,mapping:draft.mapping,keyword:query,codePrefixes:codePrefix,limit:20000}) as {values:string[]};setSearchResults(value.values);setSelectedAvailable([]);}catch(e){setError(kanzhangErrorText(e));}}
   function skipReview(){llmGeneration.current+=1;setLlmBusy(false);setLlmFailed(false);setLlmStatus("已跳过本次 LLM 复核，保留当前字段映射，可自行调整后继续。");}

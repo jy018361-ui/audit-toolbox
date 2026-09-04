@@ -233,7 +233,7 @@ export function JobDialogProvider({
           <span className="job-dialog-pill-text">
             {running.length > 1
               ? `${running.length} 个任务进行中`
-              : nameOf(first.toolId)}
+              : `${nameOf(first.toolId)} · 点击展开`}
           </span>
           <span className="job-pct">
             {paused[first.jobId] && running.length === 1

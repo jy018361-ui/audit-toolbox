@@ -3046,7 +3046,7 @@ summary:focus-visible {
   position: fixed;
   right: var(--sp-5);
   bottom: var(--sp-5);
-  z-index: 50;
+  z-index: 2147483000;
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -3057,6 +3057,11 @@ summary:focus-visible {
   box-shadow: var(--shadow-overlay);
   cursor: pointer;
   font-size: var(--fs-sm);
+  color: white;
+  background: var(--brand);
+  border-color: color-mix(in srgb, var(--brand) 75%, white);
+  min-width: 210px;
+  justify-content: space-between;
 }
 .job-dialog-pill:hover {
   border-color: var(--brand-accent);

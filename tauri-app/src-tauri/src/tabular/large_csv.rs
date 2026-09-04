@@ -273,15 +273,56 @@ mod tests {
         };
         let expected = account_values(&ordinary, &mapping, "", &[]);
         let actual = cache
-            .accounts(&mapping, "", &[], 100, &AtomicBool::new(false))
+            .accounts(
+                &mapping,
+                "",
+                &[],
+                100,
+                &|_, _, _, _| {},
+                &AtomicBool::new(false),
+            )
             .unwrap();
         assert_eq!(actual["values"], json!(expected.0));
         assert_eq!(actual["codes"], json!(expected.1));
         let filtered = cache
-            .accounts(&mapping, "", &["10".into()], 1, &AtomicBool::new(false))
+            .accounts(
+                &mapping,
+                "",
+                &["10".into()],
+                1,
+                &|_, _, _, _| {},
+                &AtomicBool::new(false),
+            )
             .unwrap();
         assert_eq!(filtered["total"], 2);
         assert_eq!(filtered["truncated"], true);
+        let changed_non_account_mapping = LedgerMapping {
+            amount: Some("借方".into()),
+            ..mapping.clone()
+        };
+        let rescanned = std::cell::Cell::new(false);
+        cache
+            .accounts(
+                &changed_non_account_mapping,
+                "",
+                &[],
+                100,
+                &|phase, current, total, _| {
+                    rescanned.set(rescanned.get() || phase == "accounts" && current < total);
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(!rescanned.get(), "非科目映射变化不应重新扫描科目索引");
+        let index_count: i64 = cache
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'accounts_v3_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 1);
         drop(cache);
         fs::remove_dir_all(root).unwrap();
     }
@@ -322,6 +363,7 @@ mod tests {
 
     #[test]
     fn embedded_headers_are_skipped_without_rebuilding_the_cache() {
+        use std::cell::RefCell;
         let root = fixture();
         let input = root.join("merged.csv");
         let db = root.join("cache.sqlite");
@@ -353,10 +395,28 @@ mod tests {
             account_code: Some("科目编码".into()),
             ..Default::default()
         };
+        let progress_events = RefCell::new(Vec::new());
         let accounts = cache
-            .accounts(&mapping, "", &[], 10, &AtomicBool::new(false))
+            .accounts(
+                &mapping,
+                "",
+                &[],
+                10,
+                &|phase, current, total, _| {
+                    progress_events
+                        .borrow_mut()
+                        .push((phase.to_owned(), current, total));
+                },
+                &AtomicBool::new(false),
+            )
             .unwrap();
         assert_eq!(accounts["values"], json!(["1001", "6601"]));
+        assert!(
+            progress_events
+                .borrow()
+                .iter()
+                .any(|(phase, current, total)| phase == "accounts" && current == total)
+        );
         drop(cache);
         fs::remove_dir_all(root).unwrap();
     }
@@ -417,10 +477,13 @@ impl Cache {
         keyword: &str,
         prefixes: &[String],
         limit: usize,
+        progress: Progress<'_>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        // Disk-backed uniqueness also bounds memory when the wrong column is mapped.
-        let identity = hex::encode(Sha256::digest(serde_json::to_vec(mapping).map_err(
+        // 科目索引只依赖科目列。借贷、日期等映射被 LLM 调整后仍可直接复用，
+        // 避免从第一步进入第二步时再次扫描数十亿字节。
+        let account_columns = mapping.account_columns();
+        let identity = hex::encode(Sha256::digest(serde_json::to_vec(&account_columns).map_err(
             |e| {
                 error(
                     "INVALID_MAPPING",
@@ -429,10 +492,8 @@ impl Cache {
                 )
             },
         )?));
-        // v2 excludes embedded headers. Keep the row cache and rebuild only this small index.
-        let name = format!("accounts_v2_{identity}");
-        let indexes = mapping
-            .account_columns()
+        let name = format!("accounts_v3_{identity}");
+        let indexes = account_columns
             .iter()
             .filter_map(|s| header_index(&self.table.headers, s))
             .collect::<Vec<_>>();
@@ -445,7 +506,7 @@ impl Cache {
             .first()
             .and_then(|s| header_index(&self.table.headers, s));
         let lower = keyword.trim().to_lowercase();
-        let exists: bool = self
+        let mut exists: bool = self
             .db
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?1)",
@@ -454,12 +515,57 @@ impl Cache {
             )
             .map_err(sql_error)?;
         if !exists {
+            // alpha.49/50 的 v2 索引以完整映射命名。若当前完整映射已有索引，
+            // 原子改名到稳定键，升级后也无需重新扫 6GB 行缓存。
+            let legacy_identity = hex::encode(Sha256::digest(
+                serde_json::to_vec(mapping).map_err(|e| {
+                    error(
+                        "INVALID_MAPPING",
+                        "字段映射格式不正确。",
+                        Some(e.to_string()),
+                    )
+                })?,
+            ));
+            let legacy_name = format!("accounts_v2_{legacy_identity}");
+            let legacy_exists: bool = self
+                .db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?1)",
+                    [&legacy_name],
+                    |r| r.get(0),
+                )
+                .map_err(sql_error)?;
+            if legacy_exists {
+                self.db
+                    .execute_batch(&format!("ALTER TABLE {legacy_name} RENAME TO {name}"))
+                    .map_err(sql_error)?;
+                exists = true;
+                progress(
+                    "accounts",
+                    self.count,
+                    self.count,
+                    "已复用第一步生成的科目索引。",
+                );
+            }
+        }
+        if !exists {
             let transaction = self.db.unchecked_transaction().map_err(sql_error)?;
             transaction.execute_batch(&format!("CREATE TABLE {name}(value TEXT PRIMARY KEY COLLATE BINARY,code TEXT,primary_name TEXT);")).map_err(sql_error)?;
             let mut insert = transaction
                 .prepare(&format!("INSERT OR IGNORE INTO {name} VALUES (?1,?2,?3)"))
                 .map_err(sql_error)?;
-            self.visit(None, cancel, |row, _| {
+            self.visit(None, cancel, |row, index| {
+                if index % 10_000 == 0 {
+                    progress(
+                        "accounts",
+                        index,
+                        self.count,
+                        &format!(
+                            "正在从磁盘缓存汇总科目：已扫描 {} / {} 行…",
+                            index, self.count
+                        ),
+                    );
+                }
                 let value = joined_account(&row, &indexes);
                 if value.trim().is_empty() {
                     return Ok(());
@@ -481,6 +587,12 @@ impl Cache {
             drop(insert);
             check_cancel(cancel)?;
             transaction.commit().map_err(sql_error)?;
+            progress(
+                "accounts",
+                self.count,
+                self.count,
+                "科目索引已生成，正在读取结果…",
+            );
         }
         let mut values = Vec::new();
         let mut codes = Vec::new();

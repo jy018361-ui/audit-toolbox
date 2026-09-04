@@ -5,6 +5,24 @@ use rusqlite::{Connection, params};
 const THRESHOLD: u64 = 256 * 1024 * 1024;
 const MAX_ROW: usize = 8 * 1024 * 1024;
 
+// 纵向合并文件会保留每个来源文件的表头。看账把第一行作为字段名后，后续这些
+// 表头属于结构行，不是凭证明细；在缓存访问层统一跳过，已有的大文件缓存也能直接受益。
+fn is_embedded_header(headers: &[String], row: &[String]) -> bool {
+    let mut nonempty = 0usize;
+    let mut matched = 0usize;
+    for (header, value) in headers.iter().zip(row) {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        nonempty += 1;
+        if header.trim() == value {
+            matched += 1;
+        }
+    }
+    matched >= 3 && matched * 2 >= nonempty
+}
+
 fn sql_error(e: rusqlite::Error) -> AppError {
     error(
         "LEDGER_CACHE_FAILED",
@@ -303,6 +321,47 @@ mod tests {
     }
 
     #[test]
+    fn embedded_headers_are_skipped_without_rebuilding_the_cache() {
+        let root = fixture();
+        let input = root.join("merged.csv");
+        let db = root.join("cache.sqlite");
+        fs::write(
+            &input,
+            "来源,凭证号,科目编码,金额\na.csv,1,1001,10\n来源,凭证号,科目编码,金额\nb.csv,2,6601,-10\n",
+        )
+        .unwrap();
+        let source = SourceParams {
+            input_path: input.to_string_lossy().into_owned(),
+            sheet: None,
+            header_row: 1,
+        };
+        build(&db, &source, &|_, _, _, _| {}, &AtomicBool::new(false)).unwrap();
+        let cache = read_cache(&db, &input).unwrap();
+        let mut rows = Vec::new();
+        cache
+            .visit(None, &AtomicBool::new(false), |row, index| {
+                rows.push((index, row));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, 0);
+        assert_eq!(rows[1].0, 2);
+        assert_eq!(rows[1].1[1], "2");
+
+        let mapping = LedgerMapping {
+            account_code: Some("科目编码".into()),
+            ..Default::default()
+        };
+        let accounts = cache
+            .accounts(&mapping, "", &[], 10, &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(accounts["values"], json!(["1001", "6601"]));
+        drop(cache);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn large_csv_cannot_fall_back_to_whole_table_loading() {
         let root = fixture();
         let input = root.join("large.csv");
@@ -342,6 +401,10 @@ impl Cache {
                 )
             })?;
             row.resize(self.table.headers.len(), String::new());
+            if is_embedded_header(&self.table.headers, &row) {
+                index += 1;
+                continue;
+            }
             visit(row, index)?;
             index += 1;
         }
@@ -366,7 +429,8 @@ impl Cache {
                 )
             },
         )?));
-        let name = format!("accounts_{identity}");
+        // v2 excludes embedded headers. Keep the row cache and rebuild only this small index.
+        let name = format!("accounts_v2_{identity}");
         let indexes = mapping
             .account_columns()
             .iter()

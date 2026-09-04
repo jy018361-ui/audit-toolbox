@@ -2,6 +2,7 @@
 
 ## 2026-09-04 · 大 CSV 低内存完整凭证分析与动态资源保护
 
+- 纵向合并 CSV 中间可能保留后续来源文件的重复表头；磁盘缓存访问层会识别并跳过这些结构行，已有缓存无需重建。科目索引使用新版表名重新生成，避免重复表头污染科目列表；真正的金额脏值仍会报出列名、行号和值。
 - CSV/TXT/TSV 达到 256 MiB 时，预览和科目查询使用独立 SQLite 行缓存；复用严格流式解码，保留标题行、原始字符串/前导零、引号内换行、行顺序及宽度补齐。普通文件继续使用原内存/Parquet 路径，并去除 CSV 整理及列转换的多余字符串复制。
 - 大文件缓存按源路径、大小、mtime、标题行隔离；逐行写入，事务完成后原子发布。科目唯一值及首个编码/一级名称在磁盘上索引，不把全量明细读回；查询复用映射专属索引。SQLite 缓存纳入既有缓存统计与清理。
 - 读取时显示已缓存行数、检查真实取消信号；单条 CSV 记录采用字节预算，超长记录安全失败；创建缓存前检查磁盘空间。
@@ -47,7 +48,7 @@
 | 映射字段前向填充、异常候选行余额清理 | `preprocess_ledger` | 导出集成测试 | 已接入 |
 | 全凭证扩展筛选 | `filter_ledger_rows` | 完整凭证测试 | 已接入 |
 | 目标科目搜索与穿梭 | `kanzhang.accounts` + `KanzhangParityPage` | `filterAccounts` 前端测试 | 已修正（改为即时过滤） |
-| 多批次新增、重命名、删除、独立输出 | `targetBatches` / `normalized_batches` | 多批次导出测试 | 已接入 |
+| 多批次新增、重命名、删除、全部一键清空、独立输出 | `targetBatches` / `normalized_batches` + `clearKanzhangBatches` | 多批次导出测试、前端清空测试 | 已接入 |
 | 剔除/例外独立导出 | `excluded_ledger_rows` / `剔除明细` | 不损坏完整凭证测试 | 已修正（原迁移版有语义错误） |
 | 方案 A/B 净额判定 | `ledger_amounts` | 正负及已平衡启发式测试 | 已接入 |
 | 凭证透视 | `build_voucher_pivot_rust` | 导出 Sheet 测试 | 已接入 |
@@ -56,7 +57,7 @@
 | 日期月度分布（8 位、Excel 序列、普通日期） | `parse_month` / 类型月度列 | 日期格式测试 | 已接入 |
 | 自定义透视行/列，日期自动按月 | `build_custom_ledger_pivot` | 导出集成测试 | 已接入 |
 | 损益结转整凭证标记并排除分析 | `detect_loss_transfer_ids` | 损益结转测试 | 已接入 |
-| JE 同额正负匹配 | 已移出本工具 | — | 见 [JE_SIGN_MARK_PARITY.md](JE_SIGN_MARK_PARITY.md) |
+| JE 同额正负匹配 | 已移出本工具；看账界面不再显示“智能对冲”旧文案 | — | 见 [JE_SIGN_MARK_PARITY.md](JE_SIGN_MARK_PARITY.md) |
 | JE 跨行、跨凭证净额匹配 | 已移出本工具 | — | 同上 |
 | 公司/主体参与 JE 分组 | 已移出本工具 | — | 同上 |
 | 仅导出部分列 | `exportColumns` | 导出集成测试 | 已接入 |

@@ -6,6 +6,7 @@ import {
   applyAuditFocusPresetBatches,
   applyLedgerReviews,
   asShuttleZone,
+  clearKanzhangBatches,
   defaultKanzhangOutputName,
   defaultKanzhangOutputPath,
   effectiveVoucherKey,
@@ -56,6 +57,15 @@ const draft = (): KanzhangDraft => ({
   pivotColumns: [],
   pivotValues: [],
   step: 2,
+});
+
+describe("目标批次清空", () => {
+  it("一键删除后保留一个可继续编辑的空批次", () => {
+    expect(clearKanzhangBatches()).toEqual({
+      batches: [{ name: "批次1", accounts: [] }],
+      activeBatch: 0,
+    });
+  });
 });
 
 describe("看账页面状态规则", () => {

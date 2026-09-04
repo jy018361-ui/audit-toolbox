@@ -113,9 +113,19 @@ fn validate_disk_amount_row(
         ledger_columns_for_role(mapping, role)
     });
     if let Some(issue) = issues.first() {
+        let mut display = issue.value.chars().take(80).collect::<String>();
+        if issue.value.chars().count() > 80 {
+            display.push('…');
+        }
+        let user_message = format!(
+            "金额列「{}」第{}行的值“{}”无法解析为数值，请修正后重试。",
+            issue.column,
+            source_index + 1,
+            display
+        );
         return Err(error(
             "KANZHANG_AMOUNT_VALUE_INVALID",
-            "金额列存在非空但无法解析为数值的单元格，请修正后重试。",
+            &user_message,
             Some(format!(
                 "{}（{}）第{}行=“{}”",
                 issue.column,
@@ -862,6 +872,23 @@ mod tests {
             ["现金", "收入"]
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_amount_error_identifies_the_cell_for_the_user() {
+        let headers = vec!["凭证号".into(), "金额".into()];
+        let row = vec!["001".into(), "无法识别".into()];
+        let mapping = LedgerMapping {
+            id: vec!["凭证号".into()],
+            amount: Some("金额".into()),
+            ..Default::default()
+        };
+        let err = validate_disk_amount_row(&headers, &row, &mapping, 41).unwrap_err();
+        assert_eq!(err.code, "KANZHANG_AMOUNT_VALUE_INVALID");
+        assert_eq!(
+            err.user_message,
+            "金额列「金额」第42行的值“无法识别”无法解析为数值，请修正后重试。"
+        );
     }
 
     #[test]

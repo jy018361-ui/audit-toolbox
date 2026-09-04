@@ -1,5 +1,9 @@
 # FA List Rust 迁移覆盖矩阵
 
+## 2026-09-04 · XLS 输入统一
+
+已接入共享 XLS 内容识别/文本读取或模板准备路径。保留本工具的字段映射和业务规则；格式、模板依赖、已覆盖与未覆盖范围及回归命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。不将文件格式兼容表述为旧版全部业务行为等价。
+
 本矩阵以 `tools/fa_list` 的 Python 内核与 `audit_engine/handlers.py` 的实际生产路由为基线。Rust 实现在 `src-tauri/src/fa.rs`，生产路径不调用 Python、PowerShell 或 Excel COM。
 
 ## 已覆盖

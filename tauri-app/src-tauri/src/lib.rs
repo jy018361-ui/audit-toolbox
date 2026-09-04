@@ -17,6 +17,9 @@ mod loan_interest;
 mod lpr;
 mod pdf_to_excel;
 mod roll_forward;
+mod spreadsheet_input;
+#[cfg(test)]
+mod xls_input_tests;
 mod storage;
 mod tabular;
 mod telemetry;

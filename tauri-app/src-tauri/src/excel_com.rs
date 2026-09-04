@@ -44,6 +44,81 @@ pub struct CopySheet {
     pub source_file: String,
 }
 
+/// Convert an old binary workbook for template consumers that require an XLSX package.
+/// Dedicated STA, read-only input, no link updates/macros, and always quit our Excel instance.
+pub(crate) fn convert_xls_to_xlsx(input: &Path, output: &Path) -> Result<(), AppError> {
+    let input = input.to_path_buf();
+    let output = output.to_path_buf();
+    std::thread::spawn(move || unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
+            .map_err(|err| com_error("无法初始化 XLS 模板转换。", Some(err.to_string())))?;
+        let result = convert_xls_sta(&input, &output);
+        CoUninitialize();
+        result
+    })
+    .join()
+    .map_err(|_| com_error("XLS 模板转换线程异常退出。", None))?
+}
+
+unsafe fn convert_xls_sta(input: &Path, output: &Path) -> Result<(), AppError> {
+    let clsid = CLSIDFromProgID(PCWSTR(wide("Excel.Application").as_ptr())).map_err(|err| {
+        com_error(
+            "转换 XLS 底稿模板需要本机 Microsoft Excel。",
+            Some(err.to_string()),
+        )
+    })?;
+    let excel: IDispatch = CoCreateInstance(&clsid, None, CLSCTX_LOCAL_SERVER).map_err(|err| {
+        com_error(
+            "无法启动 Microsoft Excel 转换 XLS 模板。",
+            Some(err.to_string()),
+        )
+    })?;
+    let operation = (|| {
+        put(&excel, "Visible", false.into())?;
+        put(&excel, "DisplayAlerts", false.into())?;
+        put(&excel, "EnableEvents", false.into())?;
+        put(&excel, "AutomationSecurity", 3i32.into())?;
+        let books = get_object(&excel, "Workbooks")?;
+        let source = input
+            .canonicalize()
+            .map_err(|err| com_error("找不到 XLS 模板。", Some(err.to_string())))?;
+        let book = object_method(
+            &books,
+            "Open",
+            vec![
+                excel_friendly_path(&source).as_str().into(),
+                0i32.into(),
+                true.into(),
+                missing_variant(),
+                "".into(),
+                "".into(),
+                true.into(),
+            ],
+        )?;
+        let result = (|| {
+            let has_vba = invoke(&book, "HasVBProject", DISPATCH_PROPERTYGET, Vec::new())?;
+            if bool::try_from(&has_vba).unwrap_or(true) {
+                return Err(com_error(
+                    "XLS 模板含有宏，转换为 XLSX 会丢失宏，请提供不含宏的底稿模板。",
+                    None,
+                ));
+            }
+            invoke(
+                &book,
+                "SaveAs",
+                DISPATCH_METHOD,
+                vec![excel_friendly_path(output).as_str().into(), 51i32.into()],
+            )?;
+            Ok(())
+        })();
+        let _ = invoke(&book, "Close", DISPATCH_METHOD, vec![false.into()]);
+        result
+    })();
+    let _ = invoke(&excel, "Quit", DISPATCH_METHOD, Vec::new());
+    operation
+}
+
 pub fn copy_sheets_exact(
     plans: &[CopySheet],
     output: &Path,

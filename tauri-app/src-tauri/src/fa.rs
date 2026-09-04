@@ -5,8 +5,6 @@
 
 use calamine::{Data, Reader, open_workbook_auto};
 use chrono::{Datelike, Local, Months, NaiveDate};
-use csv::ReaderBuilder;
-use encoding_rs::{GBK, UTF_16BE, UTF_16LE};
 use reqwest::blocking::Client;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
 use serde_json::{Map, Value, json};
@@ -1958,12 +1956,7 @@ pub(crate) fn load_table(
             Some(path.to_string_lossy().into_owned()),
         ));
     }
-    let ext = path
-        .extension()
-        .and_then(|v| v.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if matches!(ext.as_str(), "csv" | "txt" | "tsv") {
+    if crate::spreadsheet_input::is_text(path.as_ref()) {
         return load_csv(path, header);
     }
     let mut workbook = open_workbook_auto(path).map_err(|e| {
@@ -2078,34 +2071,7 @@ pub(crate) fn load_table(
 }
 
 fn load_csv(path: &Path, header: Option<usize>) -> Result<Table, AppError> {
-    let bytes = fs::read(path).map_err(io_error)?;
-    let text = decode_text(&bytes);
-    let first = text.lines().next().unwrap_or("");
-    let delimiter = if path
-        .extension()
-        .and_then(|v| v.to_str())
-        .is_some_and(|v| v.eq_ignore_ascii_case("tsv"))
-        || first.matches('\t').count() > first.matches(',').count()
-    {
-        b'\t'
-    } else if first.matches(';').count() > first.matches(',').count() {
-        b';'
-    } else {
-        b','
-    };
-    let mut reader = ReaderBuilder::new()
-        .has_headers(false)
-        .delimiter(delimiter)
-        .flexible(true)
-        .from_reader(text.as_bytes());
-    let matrix = reader
-        .records()
-        .map(|record| {
-            record
-                .map(|r| r.iter().map(str::to_owned).collect::<Vec<_>>())
-                .map_err(|e| error("FA_LOAD_FAILED", "无法读取文本文件。", Some(e.to_string())))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let matrix = crate::spreadsheet_input::read_rows(path)?;
     let hi = header
         .map(|v| v.saturating_sub(1))
         .unwrap_or_else(|| detect_header(&matrix));
@@ -2129,22 +2095,6 @@ fn load_csv(path: &Path, header: Option<usize>) -> Result<Table, AppError> {
         headers,
         rows,
     })
-}
-
-fn decode_text(bytes: &[u8]) -> String {
-    if let Some(body) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        return String::from_utf8_lossy(body).into_owned();
-    }
-    if let Some(body) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        return UTF_16LE.decode(body).0.into_owned();
-    }
-    if let Some(body) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-        return UTF_16BE.decode(body).0.into_owned();
-    }
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        return text.to_owned();
-    }
-    GBK.decode(bytes).0.into_owned()
 }
 
 fn detect_header(rows: &[Vec<String>]) -> usize {

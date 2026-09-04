@@ -308,7 +308,7 @@ impl PreparedTemplate {
 }
 
 fn ensure_template(folder: &Path) -> std::result::Result<PreparedTemplate, AppError> {
-    let target = folder.join("FY27+WP服务单.xlsx");
+    let target = crate::spreadsheet_input::prefer_workbook(&folder.join("FY27+WP服务单.xlsx"));
     if target.is_file() {
         return Ok(PreparedTemplate {
             path: target,
@@ -443,7 +443,7 @@ fn is_xlsx_input(path: &Path) -> bool {
     path.is_file()
         && path
             .extension()
-            .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("xlsx"))
+            .is_some_and(|extension| matches!(extension.to_string_lossy().to_ascii_lowercase().as_str(), "xlsx" | "xls"))
         && !path
             .file_name()
             .unwrap_or_default()
@@ -455,6 +455,27 @@ fn is_xlsx_input(path: &Path) -> bool {
                 .to_string_lossy()
                 .contains(marker)
         })
+}
+
+#[cfg(test)]
+mod xls_inputs_tests {
+    use super::*;
+    #[test]
+    fn xls_inputs_wp_folder_discovery_and_reader() {
+        let root = std::env::temp_dir().join(format!("wp-xls-input-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let text = root.join("FY27 WP服务单.XLS");
+        fs::write(&text, encoding_rs::GBK.encode("编号\t金额\n001\t123.5\n").0.as_ref()).unwrap();
+        assert!(is_xlsx_input(&text));
+        let rows = read_first_sheet(&text, None).unwrap();
+        assert_eq!(rows[1][0].text(), "001");
+        assert_eq!(rows[1][1].text(), "123.5");
+        let binary = root.join("FY27 section list.xls");
+        fs::write(&binary, include_bytes!("../../tests/fixtures/Excel Merger/simple-biff8.xls")).unwrap();
+        assert_eq!(find_section_list_file(&root).unwrap(), binary);
+        assert_eq!(read_first_sheet(&binary, None).unwrap()[1][0].text(), "001");
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn single_input_candidate(mut candidates: Vec<PathBuf>, label: &str) -> Result<PathBuf> {
@@ -568,6 +589,11 @@ fn from_data(value: &Data) -> Value {
 }
 
 fn read_first_sheet(path: &Path, preferred: Option<&str>) -> Result<Vec<Vec<Value>>> {
+    if crate::spreadsheet_input::is_text(path) {
+        return crate::spreadsheet_input::read_rows(path)
+            .map(|rows| rows.into_iter().map(|row| row.into_iter().map(Value::Text).collect()).collect())
+            .map_err(|err| WpError(err.user_message));
+    }
     let mut book = open_workbook_auto(path)
         .map_err(|error| WpError(format!("无法读取 {}：{error}", path.display())))?;
     let sheet_name = if let Some(name) = preferred {
@@ -1036,7 +1062,7 @@ fn add_optional(target: &mut Option<f64>, value: Option<&Value>) {
 }
 
 fn load_ser_config(folder: &Path) -> Result<[(f64, f64); 4]> {
-    let path = folder.join("SER配置.xlsx");
+    let path = crate::spreadsheet_input::prefer_workbook(&folder.join("SER配置.xlsx"));
     if !path.exists() {
         return Ok(DEFAULT_SER);
     }
@@ -2172,6 +2198,8 @@ fn write_split_workbook(
     metadata: &TemplateMetadata,
     split: &SplitData,
 ) -> Result<()> {
+    let prepared = crate::spreadsheet_input::prepare_xlsx(template_path).map_err(|err| WpError(err.user_message))?;
+    let template_path = prepared.path();
     let mut book = umya_spreadsheet::reader::xlsx::read(template_path)
         .map_err(|error| WpError(format!("无法读取服务方案模板：{error}")))?;
     while book.get_sheet_count() > 0 {
@@ -2658,7 +2686,9 @@ fn generate_cancellable(
         .map(|record| record.service_number.clone())
         .collect();
 
-    let mut book = umya_spreadsheet::reader::xlsx::read(&params.template_path)
+    let prepared = crate::spreadsheet_input::prepare_xlsx(&params.template_path).map_err(|err| WpError(err.user_message))?;
+    let template_path = prepared.path();
+    let mut book = umya_spreadsheet::reader::xlsx::read(template_path)
         .map_err(|error| WpError(format!("无法读取服务方案模板：{error}")))?;
     let template_name = locate_template(&book)?;
     let mut template = book
@@ -2666,7 +2696,7 @@ fn generate_cancellable(
         .map_err(|error| WpError(error.to_string()))?
         .clone();
     let split_template = template.clone();
-    let template_metadata = load_template_metadata(&params.template_path, &template_name)?;
+    let template_metadata = load_template_metadata(template_path, &template_name)?;
     prepare_template(&mut template, &template_metadata);
     template.set_name("_WP_TEMPLATE");
     let outlook = calculate_outlook(
@@ -2685,7 +2715,7 @@ fn generate_cancellable(
         pause_wait()?;
         let temporary = TemporaryArtifact::new(split_output.with_extension("xlsx.tmp"))?;
         write_split_workbook(
-            &params.template_path,
+            template_path,
             &temporary.path,
             &split_template,
             &template_metadata,

@@ -22,6 +22,7 @@ type MergerFile = {
   name: string;
   size: number;
   sheets: string[];
+  format?: string;
   error?: string | null;
 };
 
@@ -291,7 +292,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
                       </strong>
                       <span>
                         {detail
-                          ? `${formatSize(detail.size)} · ${detail.sheets.length ? detail.sheets.join("、") : "文本文件"}`
+                          ? `${formatSize(detail.size)} · ${detail.error ? "读取失败" : detail.sheets.length ? detail.sheets.join("、") : detail.format ?? "无工作表"}`
                           : path}
                       </span>
                       {detail?.error && <em>{detail.error}</em>}
@@ -549,10 +550,12 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             <div className={`job-banner ${job.severity}`}>
               <strong>{job.message}</strong>
             </div>
-            <progress
-              max={Math.max(job.total, 1)}
-              value={job.total ? job.current : 0}
-            />
+            {!["failed", "cancelled"].includes(job.phase) && (
+              <progress
+                max={Math.max(job.total, 1)}
+                value={job.total ? job.current : 0}
+              />
+            )}
             {result && <ResultView value={result} />}
           </>
         ) : result ? (

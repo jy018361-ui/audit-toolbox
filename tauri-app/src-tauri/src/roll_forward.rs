@@ -484,7 +484,7 @@ fn validate(params: Value) -> Result<Value, AppError> {
     let mut details = Vec::new();
     for code in &subjects {
         if let Some(item) = cfg.subjects.get(code) {
-            let template = template_dir.join(&item.template_file);
+            let template = crate::spreadsheet_input::prefer_workbook(&template_dir.join(&item.template_file));
             if !template.is_file() {
                 missing_templates.push(item.template_file.clone());
             }
@@ -594,7 +594,7 @@ fn process(
                 None,
             )
         })?;
-        match process_subject(code,item,&template_dir.join(&item.template_file),&prior_path,&output,&company,date,&params,&cancel){
+        match process_subject(code,item,&crate::spreadsheet_input::prefer_workbook(&template_dir.join(&item.template_file)),&prior_path,&output,&company,date,&params,&cancel){
             Ok((path,warnings,metadata))=>{outputs.push(path.to_string_lossy().into_owned());rows.push(json!({"subjectCode":code,"success":true,"message":"处理成功","outputPath":path.to_string_lossy(),"warnings":warnings,"metadata":metadata}));}
             Err(err)=>rows.push(json!({"subjectCode":code,"success":false,"message":err.user_message,"outputPath":"","warnings":[],"metadata":{"diagnosticId":err.diagnostic_id}})),
         }
@@ -676,6 +676,12 @@ fn process_subject(
 ) -> Result<(PathBuf, Vec<String>, Value), AppError> {
     check_cancel_ref(cancel)?;
     let output = output_dir.join(output_filename(&item.template_file, date, company));
+    let original_prior = prior;
+    let original_template = template;
+    let prepared_template = crate::spreadsheet_input::prepare_xlsx(template)?;
+    let prepared_prior = crate::spreadsheet_input::prepare_xlsx(prior)?;
+    let template = prepared_template.path();
+    let prior = prepared_prior.path();
     let partial = output.with_extension("partial.xlsx");
     fs::copy(template, &partial).map_err(io_error)?;
     let result = (|| {
@@ -752,7 +758,7 @@ fn process_subject(
                 &item.name,
                 company,
                 date,
-                prior,
+                original_prior,
                 copied,
                 &diff,
                 &warnings,
@@ -779,9 +785,9 @@ fn process_subject(
         Ok((
             warnings,
             json!({"copiedCells":copied,"craWriteCount":cra,"templatePreserved":true,
-                "priorPath":prior.to_string_lossy(),
-                "priorSize":fs::metadata(prior).map(|meta| meta.len()).unwrap_or(0),
-                "templatePath":template.to_string_lossy(),
+                "priorPath":original_prior.to_string_lossy(),
+                "priorSize":fs::metadata(original_prior).map(|meta| meta.len()).unwrap_or(0),
+                "templatePath":original_template.to_string_lossy(),
                 "highlightedCells":diff.highlighted.len(),
                 "workbookDiff":{"changedCells":diff.changed_cells,"addedCells":diff.added_cells,"formulaChanges":diff.formula_changes,"touchedSheets":diff.touched_sheets}}),
         ))
@@ -2792,8 +2798,8 @@ fn extract_company_info(
     if pmte_path.trim().is_empty() {
         return Ok(result);
     }
-    let book =
-        umya_spreadsheet::reader::xlsx::read(Path::new(pmte_path)).map_err(xlsx_read_error)?;
+    let prepared = crate::spreadsheet_input::prepare_xlsx(Path::new(pmte_path))?;
+    let book = umya_spreadsheet::reader::xlsx::read(prepared.path()).map_err(xlsx_read_error)?;
     let Ok(sheet) = book.get_sheet_by_name("PMTE") else {
         return Ok(result);
     };
@@ -3824,7 +3830,7 @@ fn workbook_files(path: &Path) -> Result<Vec<PathBuf>, AppError> {
         } else {
             Err(error(
                 "ROLL_FORWARD_PRIOR_INVALID",
-                "请选择 XLSX 上年底稿。",
+                "请选择 XLSX 或 XLS 上年底稿。",
                 None,
             ))
         };
@@ -4003,7 +4009,23 @@ fn json_text(value: &Value) -> String {
 fn is_xlsx(path: &Path) -> bool {
     path.extension()
         .and_then(|v| v.to_str())
-        .is_some_and(|v| v.eq_ignore_ascii_case("xlsx"))
+        .is_some_and(|v| v.eq_ignore_ascii_case("xlsx") || v.eq_ignore_ascii_case("xls"))
+}
+
+#[cfg(test)]
+mod xls_inputs_tests {
+    use super::*;
+    #[test]
+    fn xls_inputs_roll_forward_discovery_and_template_fallback() {
+        let root = std::env::temp_dir().join(format!("roll-xls-input-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("C 货币资金.XLS");
+        fs::write(&input, include_bytes!("../../tests/fixtures/Excel Merger/simple-biff8.xls")).unwrap();
+        assert_eq!(workbook_files(&root).unwrap(), vec![input.clone()]);
+        assert_eq!(workbook_files(&input).unwrap(), vec![input.clone()]);
+        assert_eq!(crate::spreadsheet_input::prefer_workbook(&input.with_extension("xlsx")), input.with_extension("xls"));
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 fn replace_file(source: &Path, target: &Path) -> Result<(), AppError> {
     if target.exists() {

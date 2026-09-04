@@ -1709,12 +1709,7 @@ fn load_ledger_table(spec: &SourceSpec) -> Result<Table, AppError> {
             Some(spec.input_path.clone()),
         ));
     }
-    let ext = path
-        .extension()
-        .and_then(|x| x.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let (sheet, sheets, all) = if matches!(ext.as_str(), "csv" | "txt" | "tsv") {
+    let (sheet, sheets, all) = if crate::spreadsheet_input::is_text(path.as_ref()) {
         ("CSV".into(), vec!["CSV".into()], read_text(&path)?)
     } else {
         let mut book = open_workbook_auto(&path).map_err(|e| {
@@ -1787,33 +1782,7 @@ fn load_ledger_table(spec: &SourceSpec) -> Result<Table, AppError> {
 }
 
 fn read_text(path: &Path) -> Result<Vec<Vec<String>>, AppError> {
-    let bytes = fs::read(path).map_err(|e| {
-        error(
-            "SOURCE_READ_FAILED",
-            "无法读取文本文件。",
-            Some(e.to_string()),
-        )
-    })?;
-    let text = String::from_utf8(bytes.clone())
-        .unwrap_or_else(|_| encoding_rs::GBK.decode(&bytes).0.into_owned());
-    let first = text.lines().find(|x| !x.trim().is_empty()).unwrap_or("");
-    let delim = if first.matches('\t').count() > first.matches(',').count() {
-        b'\t'
-    } else {
-        b','
-    };
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(false)
-        .delimiter(delim)
-        .flexible(true)
-        .from_reader(text.as_bytes());
-    reader
-        .records()
-        .map(|r| {
-            r.map(|x| x.iter().map(str::to_string).collect())
-                .map_err(|e| error("CSV_READ_FAILED", "无法解析文本表格。", Some(e.to_string())))
-        })
-        .collect()
+    crate::spreadsheet_input::read_rows(path)
 }
 fn detect_header(rows: &[Vec<String>]) -> usize {
     // 表头行特征：多数单元格是含关键词的短文本（数据行的日期/金额/长机构名不满足）。

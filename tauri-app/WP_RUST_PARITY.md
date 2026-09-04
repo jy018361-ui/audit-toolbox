@@ -1,5 +1,9 @@
 # FY27 WP 服务单 Rust 迁移说明
 
+## 2026-09-04 · XLS 输入统一
+
+已接入共享 XLS 内容识别/文本读取或模板准备路径。保留本工具的字段映射和业务规则；格式、模板依赖、已覆盖与未覆盖范围及回归命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。不将文件格式兼容表述为旧版全部业务行为等价。
+
 `src-tauri/src/wp.rs` 是原 `modules/wp-service-generator` 的纯 Rust 业务内核。生产接入后不再启动 Python、PowerShell 或 Excel COM。
 
 ## 已复刻范围

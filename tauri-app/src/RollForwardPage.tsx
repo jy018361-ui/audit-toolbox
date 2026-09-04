@@ -881,7 +881,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
             kind="folder"
           />
           <PathField
-            label="上年底稿目录或单个 XLSX"
+            label="上年底稿目录或单个 XLSX / XLS"
             value={company?.prior_path ?? ""}
             onChange={(value) => updateCompany({ prior_path: value })}
             kind="folder"
@@ -1512,7 +1512,7 @@ function PathField({
     const result = await pickPath(
       target,
       label,
-      target === "file" ? ["xlsx"] : [],
+      target === "file" ? ["xlsx", "xls"] : [],
     );
     if (typeof result === "string") onChange(result);
   }

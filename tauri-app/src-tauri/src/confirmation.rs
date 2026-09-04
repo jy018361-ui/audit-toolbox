@@ -596,6 +596,9 @@ fn load_table(path: &Path) -> Result<Table, AppError> {
             Some(path.to_string_lossy().into_owned()),
         ));
     }
+    let range = if crate::spreadsheet_input::is_text(path) {
+        crate::spreadsheet_input::text_range(path)?
+    } else {
     let mut workbook = open_workbook_auto(path).map_err(|e| {
         error(
             "CONFIRMATION_READ_FAILED",
@@ -608,13 +611,14 @@ fn load_table(path: &Path) -> Result<Table, AppError> {
         .first()
         .cloned()
         .ok_or_else(|| error("CONFIRMATION_READ_FAILED", "函证清单没有工作表。", None))?;
-    let range = workbook.worksheet_range(&sheet).map_err(|e| {
+    workbook.worksheet_range(&sheet).map_err(|e| {
         error(
             "CONFIRMATION_READ_FAILED",
             "无法读取函证清单，请确认文件格式正确且未被占用。",
             Some(e.to_string()),
         )
-    })?;
+    })?
+    };
     let mut iter = range.rows();
     let headers = iter
         .next()

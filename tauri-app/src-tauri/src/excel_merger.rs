@@ -1,6 +1,8 @@
+use crate::spreadsheet_input::is_text;
 use calamine::{Data, Reader, open_workbook_auto};
 use chrono::{Local, NaiveDateTime, NaiveTime};
-use encoding_rs::{GBK, UTF_16BE, UTF_16LE};
+#[cfg(test)]
+use encoding_rs::GBK;
 use parking_lot::Mutex;
 use rust_xlsxwriter::{
     Format, FormatAlign, FormatBorder, FormatUnderline, Url, Workbook, Worksheet,
@@ -138,7 +140,9 @@ impl ExcelMergerService {
             job_id.clone(),
             (cancel_path.clone(), pause_path, method.to_owned()),
         );
-        self.job_starts.lock().insert(job_id.clone(), Instant::now());
+        self.job_starts
+            .lock()
+            .insert(job_id.clone(), Instant::now());
         let service = self.clone();
         let worker_job_id = job_id.clone();
         let worker_method = method.to_owned();
@@ -790,6 +794,7 @@ struct InspectedFile {
     name: String,
     size: u64,
     sheets: Vec<String>,
+    format: String,
     error: Option<String>,
 }
 
@@ -943,9 +948,13 @@ pub fn merge(
                 .and_then(|v| v.to_str())
                 .is_some_and(|v| v.eq_ignore_ascii_case("csv"))
             {
-                let (sheets, warnings) = load_selected_sheets(&inputs, &params, progress, &cancel)?;
-                write_vertical_csv(&sheets, &working_output, &params, progress, &cancel)?;
-                return Ok(warnings);
+                return write_vertical_csv_stream(
+                    &inputs,
+                    &working_output,
+                    &params,
+                    progress,
+                    &cancel,
+                );
             } else {
                 return write_vertical_xlsx_stream(
                     &inputs,
@@ -1044,10 +1053,11 @@ fn inspect(paths: &[PathBuf]) -> Result<Value, AppError> {
     for path in files {
         let mut sheets = Vec::new();
         let mut issue = None;
-        if !is_text(&path) {
+        let text_input = is_text(&path);
+        if !text_input {
             match open_workbook_auto(&path) {
                 Ok(workbook) => sheets = workbook.sheet_names().to_vec(),
-                Err(err) => issue = Some(err.to_string()),
+                Err(err) => issue = Some(format!("无法读取工作簿：{err}")),
             }
         }
         for sheet in &sheets {
@@ -1056,6 +1066,14 @@ fn inspect(paths: &[PathBuf]) -> Result<Value, AppError> {
             }
         }
         rows.push(InspectedFile {
+            format: if text_input {
+                "分隔文本"
+            } else if issue.is_some() {
+                "格式未识别"
+            } else {
+                "Excel 工作簿"
+            }
+            .into(),
             path: path.to_string_lossy().into_owned(),
             name: path
                 .file_name()
@@ -1089,14 +1107,20 @@ fn load_selected_sheets(
             &format!("正在读取：{}", file_name(path)),
         );
         if is_text(path) {
-            match read_text_rows(path) {
-                Ok(rows) => result.push(SheetRows {
+            let mut rows = Vec::new();
+            let read = for_each_text_row(path, cancel, |row| {
+                rows.push(row);
+                Ok(())
+            });
+            match read {
+                Ok(()) => result.push(SheetRows {
                     file_path: path.clone(),
                     file_name: file_name(path),
                     sheet_name: "CSV".into(),
                     include_sheet_column: params.sheet_action != "default",
                     rows,
                 }),
+                Err(err) if err.code == "JOB_CANCELLED" => return Err(err),
                 Err(err) => warnings.push(format!("{}: {}", file_name(path), err.user_message)),
             }
             continue;
@@ -1137,7 +1161,7 @@ fn load_selected_sheets(
         }
     }
     if result.iter().all(|sheet| sheet.rows.is_empty()) {
-        return Err(error("MERGER_NO_DATA", "没有读取到有效数据。", None));
+        return Err(no_data_error(&warnings));
     }
     Ok((result, warnings))
 }
@@ -1164,34 +1188,23 @@ fn write_vertical_xlsx_stream(
             &format!("正在流式读取：{}", file_name(path)),
         );
         if is_text(path) {
-            match read_text_rows(path) {
-                Ok(rows) => {
-                    let source = SheetRows {
-                        file_path: path.clone(),
-                        file_name: file_name(path),
-                        sheet_name: "CSV".into(),
-                        include_sheet_column: params.sheet_action != "default",
-                        rows: Vec::new(),
-                    };
-                    for row in rows
-                        .iter()
-                        .filter(|row| row.iter().any(|cell| !cell.is_empty()))
-                    {
-                        write_vertical_row(
-                            &mut workbook,
-                            &mut worksheet,
-                            &mut sheet_no,
-                            &mut out_row,
-                            &source,
-                            row.iter(),
-                            params,
-                            cancel,
-                        )?;
-                        wrote = true;
-                    }
+            let source = text_source(path, params);
+            for_each_text_row(path, cancel, |row| {
+                if row.iter().any(|cell| !cell.is_empty()) {
+                    write_vertical_row(
+                        &mut workbook,
+                        &mut worksheet,
+                        &mut sheet_no,
+                        &mut out_row,
+                        &source,
+                        row.iter(),
+                        params,
+                        cancel,
+                    )?;
+                    wrote = true;
                 }
-                Err(err) => warnings.push(format!("{}: {}", file_name(path), err.user_message)),
-            }
+                Ok(())
+            })?;
             continue;
         }
         let mut source_workbook = match open_workbook_auto(path) {
@@ -1250,7 +1263,7 @@ fn write_vertical_xlsx_stream(
         }
     }
     if !wrote {
-        return Err(error("MERGER_NO_DATA", "没有读取到有效数据。", None));
+        return Err(no_data_error(&warnings));
     }
     if params.add_hyperlinks && (sheet_no > 0 || out_row > EXCEL_MAX_HYPERLINKS) {
         warnings.push(format!(
@@ -1313,31 +1326,38 @@ fn write_vertical_row<'a, I: Iterator<Item = &'a Cell>>(
     Ok(())
 }
 
-fn write_vertical_csv(
-    sheets: &[SheetRows],
+fn write_vertical_csv_stream(
+    inputs: &[PathBuf],
     output: &Path,
-    _params: &MergeParams,
+    params: &MergeParams,
     progress: Progress<'_>,
     cancel: &AtomicBool,
-) -> Result<(), AppError> {
+) -> Result<Vec<String>, AppError> {
     let mut file = fs::File::create(output).map_err(io_error)?;
     file.write_all(&[0xEF, 0xBB, 0xBF]).map_err(io_error)?;
-    let mut writer = csv::WriterBuilder::new().from_writer(file);
+    let mut writer = csv::WriterBuilder::new().flexible(true).from_writer(file);
     let mut count = 0usize;
-    for source in sheets {
+    let mut warnings = Vec::new();
+    for (index, path) in inputs.iter().enumerate() {
+        check_cancel(cancel)?;
         progress(
             "write",
-            count,
-            0,
-            &format!("正在写出 CSV：{} / {}", source.file_name, source.sheet_name),
+            index,
+            inputs.len(),
+            &format!("正在合并：{}", file_name(path)),
         );
-        for row in source
-            .rows
-            .iter()
-            .filter(|row| row.iter().any(|cell| !cell.is_empty()))
-        {
+        let mut write_row = |source: &SheetRows, row: &[Cell]| -> Result<(), AppError> {
+            if row.iter().all(Cell::is_empty) {
+                return Ok(());
+            }
             if count % 1000 == 0 {
                 check_cancel(cancel)?;
+                progress(
+                    "write",
+                    index,
+                    inputs.len(),
+                    &format!("正在合并：{}，已写出 {} 行", file_name(path), count),
+                );
             }
             let mut record = vec![source.file_name.clone()];
             if source.include_sheet_column {
@@ -1346,9 +1366,34 @@ fn write_vertical_csv(
             record.extend(row.iter().map(Cell::display));
             writer.write_record(record).map_err(csv_error)?;
             count += 1;
+            Ok(())
+        };
+        if is_text(path) {
+            let source = text_source(path, params);
+            // A late text decoding error must abort, never publish a partially read file.
+            for_each_text_row(path, cancel, |row| write_row(&source, &row))?;
+        } else {
+            match load_selected_sheets(std::slice::from_ref(path), params, progress, cancel) {
+                Ok((sheets, issues)) => {
+                    warnings.extend(issues);
+                    for source in &sheets {
+                        for row in &source.rows {
+                            write_row(source, row)?;
+                        }
+                    }
+                }
+                Err(err) if err.code == "MERGER_NO_DATA" => {
+                    warnings.push(format!("{}：{}", file_name(path), err.user_message))
+                }
+                Err(err) => return Err(err),
+            }
         }
     }
-    writer.flush().map_err(io_error)
+    if count == 0 {
+        return Err(no_data_error(&warnings));
+    }
+    writer.flush().map_err(io_error)?;
+    Ok(warnings)
 }
 
 fn horizontal_blocks(sheets: &[SheetRows]) -> Vec<(SheetRows, Vec<String>, Vec<Vec<Cell>>)> {
@@ -1496,12 +1541,15 @@ fn merge_workbook_exact(
     let mut used = HashSet::new();
     used.insert("reference".to_string());
     let mut plans = Vec::new();
+    let mut prepared_inputs = Vec::new();
     for path in inputs {
         check_cancel(cancel)?;
-        let names = if is_text(path) {
+        let prepared = crate::spreadsheet_input::prepare_xlsx(path)?;
+        let source_path = prepared.path().to_path_buf();
+        let names = if is_text(&source_path) {
             vec![String::new()]
         } else {
-            let workbook = open_workbook_auto(path).map_err(|e| {
+            let workbook = open_workbook_auto(&source_path).map_err(|e| {
                 error(
                     "WORKBOOK_READ_FAILED",
                     "无法读取工作簿。",
@@ -1525,12 +1573,13 @@ fn merge_workbook_exact(
                 stem(path)
             };
             plans.push(crate::excel_com::CopySheet {
-                source_path: path.clone(),
+                source_path: source_path.clone(),
                 source_sheet: sheet_name.clone(),
                 output_sheet: unique_sheet_name(&preferred, &mut used),
                 source_file: file_name(path),
             });
         }
+        prepared_inputs.push(prepared);
     }
     crate::excel_com::copy_sheets_exact(&plans, output, params.add_hyperlinks, progress, &|| {
         check_cancel(cancel)
@@ -1593,53 +1642,34 @@ fn normalize_horizontal(rows: &[Vec<Cell>]) -> (Vec<String>, Vec<Vec<Cell>>) {
     (headers, data)
 }
 
+#[cfg(test)]
 fn read_text_rows(path: &Path) -> Result<Vec<Vec<Cell>>, AppError> {
-    let bytes = fs::read(path).map_err(io_error)?;
-    let text = if bytes.starts_with(&[0xFF, 0xFE]) {
-        UTF_16LE.decode(&bytes[2..]).0.into_owned()
-    } else if bytes.starts_with(&[0xFE, 0xFF]) {
-        UTF_16BE.decode(&bytes[2..]).0.into_owned()
-    } else if let Ok(value) =
-        std::str::from_utf8(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes))
-    {
-        value.to_owned()
-    } else {
-        GBK.decode(&bytes).0.into_owned()
-    };
-    let delimiter = sniff_delimiter(&text);
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(false)
-        .flexible(true)
-        .delimiter(delimiter)
-        .from_reader(text.as_bytes());
     let mut rows = Vec::new();
-    for record in reader.records() {
-        rows.push(
-            record
-                .map_err(csv_error)?
-                .iter()
-                .map(|v| Cell::String(v.to_owned()))
-                .collect(),
-        );
-    }
+    for_each_text_row(path, &AtomicBool::new(false), |row| {
+        rows.push(row);
+        Ok(())
+    })?;
     Ok(rows)
 }
 
-fn sniff_delimiter(text: &str) -> u8 {
-    let first = text
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("");
-    [
-        (b',', first.matches(',').count()),
-        (b'\t', first.matches('\t').count()),
-        (b';', first.matches(';').count()),
-    ]
-    .into_iter()
-    .max_by_key(|(_, count)| *count)
-    .filter(|(_, count)| *count > 0)
-    .map(|(value, _)| value)
-    .unwrap_or(b',')
+fn for_each_text_row(
+    path: &Path,
+    cancel: &AtomicBool,
+    mut visit: impl FnMut(Vec<Cell>) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    crate::spreadsheet_input::for_each_text_row(path, cancel, |row| {
+        visit(row.into_iter().map(Cell::String).collect())
+    })
+}
+
+fn text_source(path: &Path, params: &MergeParams) -> SheetRows {
+    SheetRows {
+        file_path: path.to_path_buf(),
+        file_name: file_name(path),
+        sheet_name: "CSV".into(),
+        include_sheet_column: params.sheet_action != "default",
+        rows: Vec::new(),
+    }
 }
 
 fn new_constant_sheet(workbook: &mut Workbook, number: usize) -> Result<Worksheet, AppError> {
@@ -1903,10 +1933,19 @@ fn supported(path: &Path) -> bool {
         .and_then(|v| v.to_str())
         .is_some_and(|v| SUPPORTED.contains(&v.to_ascii_lowercase().as_str()))
 }
-fn is_text(path: &Path) -> bool {
-    path.extension()
-        .and_then(|v| v.to_str())
-        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "csv" | "txt"))
+fn no_data_error(warnings: &[String]) -> AppError {
+    let detail = warnings
+        .iter()
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let message = if detail.is_empty() {
+        "没有读取到有效数据，请检查源文件是否为空。".into()
+    } else {
+        format!("没有读取到有效数据。\n{detail}")
+    };
+    error("MERGER_NO_DATA", &message, None)
 }
 fn file_name(path: &Path) -> String {
     path.file_name()
@@ -2056,6 +2095,174 @@ mod tests {
             "targetSheets": [],
             "addHyperlinks": false
         })
+    }
+
+    #[test]
+    fn real_biff8_xls_and_text_xls_merge_together() {
+        let root = std::env::temp_dir().join(format!("audit-biff8-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let binary = root.join("真正.XLS");
+        fs::write(
+            &binary,
+            include_bytes!("../../tests/fixtures/Excel Merger/simple-biff8.xls"),
+        )
+        .unwrap();
+        assert!(!is_text(&binary));
+        assert_eq!(
+            inspect(std::slice::from_ref(&binary)).unwrap()["files"][0]["sheets"][0],
+            "明细"
+        );
+        let text = root.join("文本.xls");
+        fs::write(&text, GBK.encode("编号\t金额\n002\t456.50\n").0.as_ref()).unwrap();
+        for extension in ["csv", "xlsx"] {
+            let output = root.join(format!("混合.{extension}"));
+            let mut params = base_params(&[binary.clone(), text.clone()], &output);
+            params["outputFormat"] = extension.into();
+            test_merge(params, Arc::new(AtomicBool::new(false))).unwrap();
+            let rows: Vec<Vec<Cell>> = if extension == "csv" {
+                read_text_rows(&output).unwrap()
+            } else {
+                open_workbook_auto(&output)
+                    .unwrap()
+                    .worksheet_range("Merged")
+                    .unwrap()
+                    .rows()
+                    .map(|row| row.iter().map(Cell::from_excel).collect())
+                    .collect()
+            };
+            assert_eq!(rows.len(), 4);
+            assert_eq!(rows[1][1].display(), "001");
+            assert_eq!(rows[1][2].display(), "123.5");
+            assert_eq!(rows[3][1].display(), "002");
+            assert_eq!(rows[3][2].display(), "456.50");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn text_xls_encodings_stream_to_csv_and_xlsx() {
+        let root = std::env::temp_dir().join(format!("audit-text-xls-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let text = "公司代码\t公司名称\t金额\r\n001009\t\"中文\t名称\"\t1,234.50\r\n001010\t\"跨行\r\n名称\"\t-2\r\n";
+        let mut encodings = vec![GBK.encode(text).0.into_owned(), text.as_bytes().to_vec()];
+        encodings.push([vec![0xEF, 0xBB, 0xBF], text.as_bytes().to_vec()].concat());
+        encodings.push(
+            [
+                vec![0xFF, 0xFE],
+                text.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+            ]
+            .concat(),
+        );
+        encodings.push(
+            [
+                vec![0xFE, 0xFF],
+                text.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+            ]
+            .concat(),
+        );
+        for (index, bytes) in encodings.iter().enumerate() {
+            let input = root.join(format!("输入{index}.XLS"));
+            fs::write(&input, bytes).unwrap();
+            assert!(is_text(&input));
+            let inspected = inspect(std::slice::from_ref(&input)).unwrap();
+            assert_eq!(inspected["files"][0]["format"], "分隔文本");
+            assert!(inspected["files"][0]["error"].is_null());
+            for extension in ["csv", "xlsx"] {
+                let output = root.join(format!("输出{index}.{extension}"));
+                let mut params = base_params(std::slice::from_ref(&input), &output);
+                params["outputFormat"] = extension.into();
+                params["sheetAction"] = "merge_all".into();
+                test_merge(params, Arc::new(AtomicBool::new(false))).unwrap();
+                let rows = if extension == "csv" {
+                    read_text_rows(&output).unwrap()
+                } else {
+                    open_workbook_auto(&output)
+                        .unwrap()
+                        .worksheet_range("Merged")
+                        .unwrap()
+                        .rows()
+                        .map(|row| row.iter().map(Cell::from_excel).collect())
+                        .collect()
+                };
+                assert_eq!(rows.len(), 3);
+                assert_eq!(rows[0][2].display(), "公司代码");
+                assert_eq!(rows[1][2].display(), "001009");
+                assert_eq!(rows[1][3].display(), "中文\t名称");
+                assert_eq!(rows[1][4].display(), "1,234.50");
+                assert_eq!(rows[2][3].display(), "跨行\r\n名称");
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn text_xls_stream_boundaries_cancel_and_late_decode_failure() {
+        let root = std::env::temp_dir().join(format!("audit-text-stream-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("长文本.XLS");
+        let text = format!("编号\t名称\n{}", "001\t中文名称\n".repeat(20_000));
+        fs::write(&input, GBK.encode(&text).0.as_ref()).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut count = 0;
+        for_each_text_row(&input, &cancel, |row| {
+            if count > 0 {
+                assert_eq!(row[1].display(), "中文名称");
+            }
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 20_001);
+        let err = for_each_text_row(&input, &cancel, |_| {
+            cancel.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(err.code, "JOB_CANCELLED");
+        let mut bytes = GBK.encode(&text).0.into_owned();
+        bytes.push(0x81); // dangling GBK lead byte, beyond the sniff sample
+        fs::write(&input, bytes).unwrap();
+        let output = root.join("结果.csv");
+        let mut params = base_params(&[input], &output);
+        params["outputFormat"] = "csv".into();
+        let err = test_merge(params, Arc::new(AtomicBool::new(false))).unwrap_err();
+        assert_eq!(err.code, "TEXT_READ_FAILED");
+        assert!(err.user_message.contains("长文本.XLS"));
+        assert!(!output.exists());
+        assert!(!partial_output_path(&output).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn xls_detection_does_not_swallow_workbooks_or_markup_and_keeps_errors() {
+        let root = std::env::temp_dir().join(format!("audit-xls-detect-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("源.XLS");
+        sample_book(&input, "明细", &[&["编号", "金额"], &["001", "2"]]);
+        assert!(!is_text(&input));
+        assert_eq!(
+            inspect(std::slice::from_ref(&input)).unwrap()["files"][0]["sheets"][0],
+            "明细"
+        );
+        let output = root.join("结果.csv");
+        let mut params = base_params(std::slice::from_ref(&input), &output);
+        params["outputFormat"] = "csv".into();
+        test_merge(params.clone(), Arc::new(AtomicBool::new(false))).unwrap();
+        assert_eq!(read_text_rows(&output).unwrap()[1][1].display(), "001");
+        fs::remove_file(&output).unwrap();
+        for bytes in [
+            b"<html>\t<table>\na\tb".as_slice(),
+            b"\xD0\xCF\x11\xE0\ta\nb\tc",
+            b"broken workbook",
+        ] {
+            fs::write(&input, bytes).unwrap();
+            assert!(!is_text(&input));
+            let err = test_merge(params.clone(), Arc::new(AtomicBool::new(false))).unwrap_err();
+            assert_eq!(err.code, "MERGER_NO_DATA");
+            assert!(err.user_message.contains("源.XLS"));
+            assert!(!output.exists());
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

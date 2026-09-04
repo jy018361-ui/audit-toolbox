@@ -1,7 +1,6 @@
 use calamine::{Data, Reader, Sheets, open_workbook_auto};
 use chrono::Local;
 use directories::ProjectDirs;
-use encoding_rs::{GBK, UTF_16BE, UTF_16LE};
 use polars::prelude::*;
 use rust_xlsxwriter::{
     ConditionalFormatFormula, Format, FormatAlign, FormatBorder, Workbook, Worksheet,
@@ -2762,7 +2761,7 @@ fn load_table(path: &Path, sheet: Option<&str>, header_row: usize) -> Result<Tab
     if extension == "parquet" {
         return load_parquet(path);
     }
-    if matches!(extension.as_str(), "csv" | "txt" | "tsv") {
+    if crate::spreadsheet_input::is_text(path.as_ref()) {
         return load_text(path, header_row);
     }
     let read_path = local_read_path(path)?;
@@ -2885,7 +2884,7 @@ fn load_ts_cached(
         return Ok((table, true, path.to_path_buf()));
     }
 
-    let (selected_sheet, sheets) = if matches!(extension.as_str(), "csv" | "txt" | "tsv") {
+    let (selected_sheet, sheets) = if crate::spreadsheet_input::is_text(path.as_ref()) {
         ("CSV".to_owned(), Vec::new())
     } else {
         let read_path = local_read_path(path)?;
@@ -2983,24 +2982,8 @@ fn write_frame_cache(path: &Path, frame: &mut DataFrame) -> Result<(), AppError>
 }
 
 fn load_text(path: &Path, header_row: usize) -> Result<Table, AppError> {
-    let bytes = fs::read(path).map_err(io_error)?;
-    let (text, encoding) = decode_text(&bytes);
-    let delimiter = sniff_delimiter(&text);
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(false)
-        .flexible(true)
-        .delimiter(delimiter as u8)
-        .from_reader(text.as_bytes());
-    let mut all = Vec::new();
-    for record in reader.records() {
-        all.push(
-            record
-                .map_err(csv_error)?
-                .iter()
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
-        );
-    }
+    let (encoding, delimiter) = crate::spreadsheet_input::text_metadata(path)?;
+    let all = crate::spreadsheet_input::read_rows(path)?;
     let header_index = header_row.saturating_sub(1);
     if all.len() <= header_index {
         return Err(error("HEADER_ROW_INVALID", "标题行超出数据范围。", None));
@@ -4551,39 +4534,6 @@ fn data_text(v: &Data) -> String {
         other => other.to_string(),
     }
 }
-fn decode_text(bytes: &[u8]) -> (String, String) {
-    if bytes.starts_with(&[0xFF, 0xFE]) {
-        (
-            UTF_16LE.decode(&bytes[2..]).0.into_owned(),
-            "utf-16le".into(),
-        )
-    } else if bytes.starts_with(&[0xFE, 0xFF]) {
-        (
-            UTF_16BE.decode(&bytes[2..]).0.into_owned(),
-            "utf-16be".into(),
-        )
-    } else if let Ok(v) =
-        std::str::from_utf8(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes))
-    {
-        (v.to_owned(), "utf-8".into())
-    } else {
-        (GBK.decode(bytes).0.into_owned(), "gb18030".into())
-    }
-}
-fn sniff_delimiter(text: &str) -> char {
-    let first = text.lines().find(|v| !v.trim().is_empty()).unwrap_or("");
-    [
-        (',', first.matches(',').count()),
-        ('\t', first.matches('\t').count()),
-        (';', first.matches(';').count()),
-        ('|', first.matches('|').count()),
-    ]
-    .into_iter()
-    .max_by_key(|(_, n)| *n)
-    .filter(|(_, n)| *n > 0)
-    .map(|(c, _)| c)
-    .unwrap_or(',')
-}
 fn parse_month(value: &str) -> Option<String> {
     let cleaned = value.trim().trim_end_matches(".0");
     if cleaned.is_empty() {
@@ -4675,8 +4625,8 @@ fn fingerprint(path: &Path, sheet: &str, header_row: usize) -> Result<String, Ap
     h.update(modified.to_le_bytes());
     h.update(sheet.as_bytes());
     h.update(header_row.to_le_bytes());
-    // v2 开始保留表内整行空白，用于正文/附注边界判断；不能复用删过空行的旧缓存。
-    h.update(b"rust-polars-v2");
+    // Shared strict text decoding must not reuse rows decoded lossily by older versions.
+    h.update(b"rust-polars-v3-shared-spreadsheet-input");
     Ok(hex::encode(h.finalize()))
 }
 /// 缓存根目录：`%LOCALAPPDATA%/AuditToolbox/AuditToolbox/cache`。

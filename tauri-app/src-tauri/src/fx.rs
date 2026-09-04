@@ -204,6 +204,9 @@ fn import_classifications(params: &Value) -> Result<Value, AppError> {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| error("INVALID_PARAMS", "请选择包含分类调整页的Excel底稿。", None))?;
+    let range = if crate::spreadsheet_input::is_text(Path::new(path)) {
+        crate::spreadsheet_input::text_range(Path::new(path))?
+    } else {
     let mut book = open_workbook_auto(path).map_err(|e| {
         error(
             "SOURCE_READ_FAILED",
@@ -218,13 +221,14 @@ fn import_classifications(params: &Value) -> Result<Value, AppError> {
     } else {
         "分类调整"
     };
-    let range = book.worksheet_range(sheet_name).map_err(|e| {
+    book.worksheet_range(sheet_name).map_err(|e| {
         error(
             "SOURCE_READ_FAILED",
             "Excel中未找到“分类复核”或历史“分类调整”页。",
             Some(e.to_string()),
         )
-    })?;
+    })?
+    };
     let mut rows = range.rows();
     let headers = rows
         .next()
@@ -1424,7 +1428,7 @@ pub(crate) fn load_fx_table(source: &SourceSpec) -> Result<Arc<FxTable>, AppErro
         store_fx_table(cache_key, &table);
         return Ok(table);
     }
-    let (sheet, sheets, all) = if matches!(ext.as_str(), "csv" | "txt" | "tsv") {
+    let (sheet, sheets, all) = if crate::spreadsheet_input::is_text(path.as_ref()) {
         ("CSV".to_string(), vec![], read_text_rows(&path)?)
     } else {
         let mut book = open_workbook_auto(&path).map_err(|e| {
@@ -1542,44 +1546,7 @@ pub(crate) fn load_fx_table(source: &SourceSpec) -> Result<Arc<FxTable>, AppErro
 }
 
 fn read_text_rows(path: &Path) -> Result<Vec<Vec<String>>, AppError> {
-    let bytes = fs::read(path).map_err(|e| {
-        error(
-            "SOURCE_READ_FAILED",
-            "无法读取文本文件。",
-            Some(e.to_string()),
-        )
-    })?;
-    let text = String::from_utf8(bytes.clone())
-        .unwrap_or_else(|_| encoding_rs::GBK.decode(&bytes).0.into_owned());
-    let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    let delimiter = [
-        (b',', first.matches(',').count()),
-        (b'\t', first.matches('\t').count()),
-        (b';', first.matches(';').count()),
-        (b'|', first.matches('|').count()),
-    ]
-    .into_iter()
-    .max_by_key(|x| x.1)
-    .map(|x| x.0)
-    .unwrap_or(b',');
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(false)
-        .delimiter(delimiter)
-        .flexible(true)
-        .from_reader(text.as_bytes());
-    reader
-        .records()
-        .map(|r| {
-            r.map(|v| v.iter().map(str::to_owned).collect())
-                .map_err(|e| {
-                    error(
-                        "SOURCE_READ_FAILED",
-                        "文本表格格式无效。",
-                        Some(e.to_string()),
-                    )
-                })
-        })
-        .collect()
+    crate::spreadsheet_input::read_rows(path)
 }
 
 fn data_text(value: &Data) -> String {

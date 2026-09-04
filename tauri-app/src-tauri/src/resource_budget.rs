@@ -18,11 +18,17 @@ pub(crate) struct MemoryBudget {
     pub sqlite_cache_kib: u64,
 }
 
+fn safety_reserve(total: u64) -> u64 {
+    // 忙碌主机仍至少给 Windows 留出约 10% 物理内存；上限避免大内存主机被
+    // 不必要地挡住。worker 只拿剩余安全余量的一半，另一半吸收系统波动。
+    (total / 10).clamp(GIB, 4 * GIB)
+}
+
 pub(crate) fn plan(total: u64, available: u64, commit_available: u64) -> MemoryBudget {
-    let reserve = (total / 5).clamp(GIB, 8 * GIB);
+    let reserve = safety_reserve(total);
     let worker = (total / 4)
-        .min(available.saturating_sub(reserve).saturating_mul(3) / 4)
-        .min(commit_available.saturating_sub(reserve).saturating_mul(3) / 4);
+        .min(available.saturating_sub(reserve) / 2)
+        .min(commit_available.saturating_sub(reserve) / 2);
     let batch = if worker < 256 * MIB {
         0
     } else {
@@ -229,5 +235,15 @@ mod tests {
             assert_eq!(p.worker_bytes, 0);
             assert_eq!(p.batch_bytes, 0);
         }
+    }
+
+    #[test]
+    fn sixteen_gib_host_can_continue_slowly_with_three_gib_free() {
+        let p = plan(16 * GIB, 3 * GIB, 20 * GIB);
+        assert_eq!(p.reserve_bytes, 16 * GIB / 10);
+        assert_eq!(p.worker_bytes, (3 * GIB - 16 * GIB / 10) / 2);
+        assert!(p.worker_bytes >= 256 * MIB);
+        assert!(p.worker_bytes + p.reserve_bytes < p.available_bytes);
+        assert!(p.sqlite_cache_kib <= 64 * 1024);
     }
 }

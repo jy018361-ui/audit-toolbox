@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ReleaseNotesSchema } from "./updateNotes";
+import { version as appVersion } from "../package.json";
 import {
   BootstrapSchema,
   JobEventSchema,
@@ -19,12 +20,12 @@ const inTauri = () =>
 let previewSettings: Record<string, unknown> = {};
 
 const previewUnavailable = (action: string) =>
-  new Error(`浏览器预览模式不能${action}，请使用 Tauri 应用。`);
+  new Error(`浏览器预览模式不能${action}，请使用桌面应用。`);
 
 export async function appBootstrap() {
   if (!inTauri())
     return BootstrapSchema.parse({
-      appVersion: "web-preview",
+      appVersion,
       platform: "windows",
       arch: "x64",
       webview2: true,
@@ -110,6 +111,15 @@ export const jobPause = (jobId: string, paused: boolean) =>
   inTauri()
     ? invoke<boolean>("job_pause", { jobId, paused })
     : Promise.resolve(false);
+/** 使用统计：静默上报，浏览器预览模式直接空操作。 */
+export const telemetryTrack = (event: string, toolId?: string, toolName?: string) =>
+  inTauri()
+    ? invoke<void>("telemetry_track", {
+        event,
+        toolId: toolId ?? null,
+        toolName: toolName ?? null,
+      })
+    : Promise.resolve();
 export const openOutput = (path: string) =>
   inTauri()
     ? invoke<void>("open_output", { path })

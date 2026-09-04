@@ -24,6 +24,8 @@ import { FileDropInput } from "@/components/FileDropInput";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { DataHandlingNotice } from "@/components/DataHandlingNotice";
+import { EmptyState } from "@/components/EmptyState";
 
 const CACHE_KEY = "audit-toolbox:file-list-directory:v1";
 
@@ -209,6 +211,12 @@ export default function FileListDirectoryPage({
         title={tool.name}
         detail="递归扫描文件夹，按层级导出文件名、可点击超链接与完整路径。"
       />
+      <DataHandlingNotice
+        mode="local"
+        className="file-list-data-notice"
+        title="目录信息仅在本机处理"
+        description="文件夹扫描与 Excel 清单生成均在当前电脑完成，不会上传文件名、路径或文件内容。"
+      />
       <StepIndicator
         steps={[
           { key: "1", label: "选择文件夹" },
@@ -223,22 +231,26 @@ export default function FileListDirectoryPage({
             <CardTitle>
               {step === 1 ? "1. 选择扫描范围" : "2. 确认输出并生成"}
             </CardTitle>
-            <Badge className="badge-ready">已就绪</Badge>
+            <Badge className={scan ? "badge-ready" : "badge-neutral"}>
+              {busy && !scan ? "扫描中" : scan ? "扫描完成" : "待选择"}
+            </Badge>
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
             {step === 1 && (
               <>
                 <Field label="源文件夹" required>
-                  <FileDropInput
-                    value={sourceDir}
-                    placeholder="拖放或点击选择要扫描的文件夹"
-                    onBrowse={() => void chooseSource()}
-                    onClear={sourceDir ? clear : undefined}
-                    onDragStateChange={() => {}}
-                    highlight={dragHover}
-                    disabled={busy}
-                  />
+                  <div title={sourceDir || undefined}>
+                    <FileDropInput
+                      value={sourceDir}
+                      placeholder="拖放或点击选择要扫描的文件夹"
+                      onBrowse={() => void chooseSource()}
+                      onClear={sourceDir ? clear : undefined}
+                      onDragStateChange={() => {}}
+                      highlight={dragHover}
+                      disabled={busy}
+                    />
+                  </div>
                 </Field>
                 <p className="hint">
                   选择文件夹后会自动扫描；大目录扫描需要几分钟，可随时取消。
@@ -270,6 +282,7 @@ export default function FileListDirectoryPage({
                   <div className="input-with-button">
                     <input
                       value={outputPath}
+                      title={outputPath}
                       onChange={(event) => setOutputPath(event.target.value)}
                       placeholder="默认保存到源文件夹的上一级目录"
                     />
@@ -326,13 +339,23 @@ export default function FileListDirectoryPage({
           </CardHeader>
           <CardContent>
             {!scan ? (
-              <div className="empty">
-                选择文件夹后，这里会显示前 50 个文件及层级。
-              </div>
+              <EmptyState
+                title="等待扫描文件夹"
+                description="选择文件夹后，这里会显示前 50 个文件及目录层级。"
+                action={
+                  <Button
+                    variant="secondary"
+                    onClick={() => void chooseSource()}
+                  >
+                    选择文件夹
+                  </Button>
+                }
+              />
             ) : scan.fileCount === 0 ? (
-              <div className="empty">
-                该文件夹中没有可列出的文件，仍可生成只含标题的清单。
-              </div>
+              <EmptyState
+                title="文件夹中没有可列出的文件"
+                description="仍可继续生成一份只含标题的 Excel 清单。"
+              />
             ) : (
               <>
                 <p className="hint">
@@ -358,11 +381,15 @@ export default function FileListDirectoryPage({
                           {Array.from(
                             { length: scan.maxDepth + 1 },
                             (_, index) => (
-                              <td key={index}>{row.levels[index] ?? ""}</td>
+                              <td key={index} title={row.levels[index] ?? ""}>
+                                {row.levels[index] ?? ""}
+                              </td>
                             ),
                           )}
-                          <td>{row.name}</td>
-                          <td>{displayFileName(row.relativePath)}</td>
+                          <td title={row.name}>{row.name}</td>
+                          <td title={row.relativePath}>
+                            {displayFileName(row.relativePath)}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -384,7 +411,9 @@ export default function FileListDirectoryPage({
                 </strong>
                 <ul>
                   {scan.skippedPaths.slice(0, 20).map((path) => (
-                    <li key={path}>{displayFileName(path)}</li>
+                    <li key={path} title={path}>
+                      {displayFileName(path)}
+                    </li>
                   ))}
                 </ul>
                 {scan.skippedPaths.length > 20 && (
@@ -407,6 +436,7 @@ export default function FileListDirectoryPage({
                     variant="secondary"
                     size="sm"
                     key={path}
+                    title={path}
                     onClick={() => void openOutput(path)}
                   >
                     打开结果：{displayFileName(path)}

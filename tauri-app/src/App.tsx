@@ -1,6 +1,14 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ComponentType, ReactElement } from "react";
-import { NavLink, Navigate, Route, Routes, useParams } from "react-router-dom";
+import {
+  NavLink,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useParams,
+} from "react-router-dom";
+import "./app-shell.css";
 import {
   appBootstrap,
   engineCall,
@@ -36,6 +44,8 @@ import { JobDialogProvider } from "@/components/JobDialog";
 import { SyncBusyDialog } from "@/components/SyncBusyDialog";
 import { StepIndicator } from "@/components/StepIndicator";
 import { ResultView } from "@/components/ResultView";
+import { EmptyState } from "@/components/EmptyState";
+import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { applyReadableForegrounds } from "./theme";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -237,7 +247,35 @@ const TOOL_SUBGROUPS: Record<
   },
 };
 
-const DEVELOPMENT_HINT = "功能仍在完善，使用结果请复核。";
+const TOOL_GROUPS = [
+  {
+    label: "审计工具",
+    ids: [
+      "tbje_check",
+      "fx_audit",
+      "deposit_interest",
+      "loan_interest",
+      "__FA_GROUP__",
+      "__KANZHANG_GROUP__",
+      "audipick",
+      "audit_roll_forward",
+    ],
+  },
+  {
+    label: "效率工具",
+    ids: ["Excel_Merger", "file_list_directory", "pdf_to_excel", "fuzzy_match"],
+  },
+  {
+    label: "运营工具",
+    ids: ["ts_manager", "confirmation_progress", "wp_service_generator"],
+  },
+] as const;
+
+function expandedToolIds(ids: readonly string[]) {
+  return ids.flatMap((id) => TOOL_SUBGROUPS[id]?.ids ?? [id]);
+}
+
+const DEVELOPMENT_HINT = "试用功能，使用结果请复核。";
 
 /**
  * 侧边栏工具入口统一消费清单里的 migrationStatus。
@@ -253,13 +291,13 @@ function SidebarToolLink({
 }) {
   const developing = tool.migrationStatus === "preview";
   const accessibleName = developing
-    ? `${tool.name}，开发中。${DEVELOPMENT_HINT}`
+    ? `${tool.name}，试用。${DEVELOPMENT_HINT}`
     : undefined;
   return (
     <NavLink
       to={tool.route}
       className={className}
-      title={developing ? `开发中：${DEVELOPMENT_HINT}` : undefined}
+      title={developing ? DEVELOPMENT_HINT : undefined}
       aria-label={accessibleName}
     >
       <span className="tool-badge">
@@ -268,7 +306,7 @@ function SidebarToolLink({
       <span className="tool-nav-label">{tool.name}</span>
       {developing && (
         <span className="tool-status-badge" aria-hidden="true">
-          开发中
+          试用
         </span>
       )}
     </NavLink>
@@ -276,6 +314,7 @@ function SidebarToolLink({
 }
 
 export default function App() {
+  const location = useLocation();
   const [catalog, setCatalog] = useState<ToolManifest[]>([]);
   const [bootstrap, setBootstrap] = useState<Bootstrap>();
   const [jobs, setJobs] = useState<Record<string, JobEvent>>({});
@@ -283,6 +322,9 @@ export default function App() {
   const [startupReady, setStartupReady] = useState(false);
   const [startupError, setStartupError] = useState("");
   const automaticUpdateCheckStarted = useRef(false);
+  const [toolDrawerOpen, setToolDrawerOpen] = useState(false);
+  const toolDrawerButton = useRef<HTMLButtonElement>(null);
+  const previousPath = useRef(location.pathname);
   // 侧边栏子分组默认展开：折叠头不是路由入口，收着会让高频工具"消失"。
   const [subgroupOpen, setSubgroupOpen] = useState<Record<string, boolean>>({
     fa: true,
@@ -320,6 +362,45 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
+    if (previousPath.current !== location.pathname && toolDrawerOpen) {
+      window.setTimeout(() => toolDrawerButton.current?.focus(), 0);
+    }
+    previousPath.current = location.pathname;
+    setToolDrawerOpen(false);
+    // Closing is driven by route changes; including the open flag would close
+    // the drawer immediately after its trigger is pressed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname]);
+  useEffect(() => {
+    if (!toolDrawerOpen) return;
+    const sidebar = document.getElementById("app-sidebar");
+    const focusable = () => Array.from(sidebar?.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), [tabindex="0"]',
+    ) ?? []).filter((element) => getComputedStyle(element).display !== "none");
+    focusable()[0]?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Tab") {
+        const elements = focusable();
+        const first = elements[0];
+        const last = elements[elements.length - 1];
+        if (event.shiftKey && (document.activeElement === first || !sidebar?.contains(document.activeElement))) {
+          event.preventDefault();
+          last?.focus();
+        } else if (!event.shiftKey && (document.activeElement === last || !sidebar?.contains(document.activeElement))) {
+          event.preventDefault();
+          first?.focus();
+        }
+        return;
+      }
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setToolDrawerOpen(false);
+      toolDrawerButton.current?.focus();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [toolDrawerOpen]);
+  useEffect(() => {
     void Promise.all([toolCatalog(), appBootstrap()])
       .then(([c, b]) => {
         setCatalog(c);
@@ -332,15 +413,14 @@ export default function App() {
       setJobs((v) => ({ ...v, [e.jobId]: e }));
     }).catch(() => undefined);
   }, []);
-  // 开发窗口和安装版界面完全一样，曾在验证新功能时被误认（拿了没有新代码的
-  // 安装版当开发窗口测）。开发模式下把窗口标题和侧边栏都打上「开发版」标记。
+  // 开发窗口和安装版界面完全一样，开发环境保留一个低权重标记以免误测旧安装版。
   useEffect(() => {
     if (!import.meta.env.DEV) return;
-    document.title = "审计工具箱（开发版）";
+    document.title = "E点通工具箱（开发环境）";
     // 浏览器/测试环境没有原生窗口，只有 Tauri 里才改标题。
     if (!("__TAURI_INTERNALS__" in window)) return;
     void getCurrentWebviewWindow()
-      .setTitle("审计工具箱（开发版）")
+      .setTitle("E点通工具箱（开发环境）")
       .catch(() => undefined);
   }, []);
   useEffect(() => {
@@ -366,13 +446,26 @@ export default function App() {
     >
       <SyncBusyDialog />
       <div className="app-shell">
+        <a className="skip-navigation" href="#main-content" onClick={(event) => { event.preventDefault(); document.getElementById("main-content")?.focus(); }}>跳过导航，进入工作区</a>
         <WindowControls />
-        <aside className="sidebar">
+        <aside
+          id="app-sidebar"
+          className={`sidebar${toolDrawerOpen ? " drawer-open" : ""}`}
+        >
           <div className="brand" data-tauri-drag-region>
-            {/* drag-region 只对本元素生效、不继承，所以每个文字节点都要带上 */}
-            <span data-tauri-drag-region>AUDIT TOOLKIT</span>
+            <button
+              type="button"
+              className="sidebar-drawer-close"
+              aria-label="关闭工具导航"
+              onClick={() => {
+                setToolDrawerOpen(false);
+                toolDrawerButton.current?.focus();
+              }}
+            >
+              ×
+            </button>
             <h1 data-tauri-drag-region>E点通工具箱</h1>
-            <p data-tauri-drag-region>统一、安全、可追踪的审计作业工作台</p>
+            <p data-tauri-drag-region>审计作业工作台</p>
           </div>
           <nav>
             {NAV.map((x) => (
@@ -393,42 +486,7 @@ export default function App() {
             ))}
           </nav>
           <div className="tool-nav">
-            {[
-              // __*_GROUP__ 占位（见 TOOL_SUBGROUPS）：主工具在原位置展开为可折叠子分组，
-              // 看账与正负数凭证标记两个入口同组呈现。
-              {
-                label: "审计工具",
-                ids: [
-                  // 排在最前：这是动手做底稿之前的前置体检，
-                  // 账本身有没有问题应当先于任何测算看到。
-                  "tbje_check",
-                  "fx_audit",
-                  "deposit_interest",
-                  "loan_interest",
-                  "__FA_GROUP__",
-                  "__KANZHANG_GROUP__",
-                  "audipick",
-                  "audit_roll_forward",
-                ],
-              },
-              {
-                label: "效率工具",
-                ids: [
-                  "Excel_Merger",
-                  "file_list_directory",
-                  "pdf_to_excel",
-                  "fuzzy_match",
-                ],
-              },
-              {
-                label: "运营工具",
-                ids: [
-                  "ts_manager",
-                  "confirmation_progress",
-                  "wp_service_generator",
-                ],
-              },
-            ].map((group) => {
+            {TOOL_GROUPS.map((group) => {
               const entries = group.ids
                 .map((id) =>
                   TOOL_SUBGROUPS[id]
@@ -498,18 +556,48 @@ export default function App() {
                 className="dev-build-badge"
                 title="开发版窗口：运行的是本机最新代码，新功能先在这里出现"
               >
-                开发版
+                开发环境
               </span>
             )}
             <span>v{bootstrap?.appVersion ?? "…"}</span>
-            <span>
-              {bootstrap?.engine.available
-                ? "Rust 核心正常"
-                : "Rust 核心待连接"}
-            </span>
           </div>
         </aside>
-        <main className="main">
+        <nav className="sidebar-rail" aria-label="紧凑导航">
+          <button
+            ref={toolDrawerButton}
+            type="button"
+            className="sidebar-rail-menu"
+            aria-label="打开工具导航"
+            aria-expanded={toolDrawerOpen}
+            aria-controls="app-sidebar"
+            onClick={() => setToolDrawerOpen(true)}
+          >
+            <span aria-hidden="true">ET</span>
+          </button>
+          {NAV.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.to === "/"}
+              aria-label={item.label}
+              title={item.label}
+            >
+              {NAV_ICON[item.to]}
+            </NavLink>
+          ))}
+        </nav>
+        {toolDrawerOpen && (
+          <button
+            type="button"
+            className="sidebar-drawer-backdrop"
+            aria-label="关闭工具导航"
+            onClick={() => {
+              setToolDrawerOpen(false);
+              toolDrawerButton.current?.focus();
+            }}
+          />
+        )}
+        <main className="main" id="main-content" tabIndex={-1}>
           {!startupReady ? (
             <AppLoading />
           ) : startupError ? (
@@ -529,7 +617,10 @@ export default function App() {
                 {/* The visible tool is rendered by PersistentToolPages below so
                   route changes hide it instead of destroying its local state. */}
                 <Route path="/tools/:toolId" element={null} />
-                <Route path="/history" element={<History />} />
+                <Route
+                  path="/history"
+                  element={<History catalog={catalog} />}
+                />
                 <Route
                   path="/settings"
                   element={
@@ -609,8 +700,6 @@ function Dashboard({
       .then(setHistory)
       .catch(() => undefined);
   }, []);
-  const nameOf = (toolId: string) =>
-    catalog.find((tool) => tool.id === toolId)?.name ?? toolId;
   const running = jobs.filter(
     (job) => !["completed", "failed", "cancelled"].includes(job.phase),
   );
@@ -620,7 +709,6 @@ function Dashboard({
       row.status === "completed" &&
       new Date(String(row.startedAt ?? "")).getTime() >= startOfToday,
   ).length;
-  const latest = history[0];
   // Most recently used tools, de-duplicated, newest first.
   const recentTools = [
     ...new Set(history.map((row) => String(row.toolId ?? "")).filter(Boolean)),
@@ -631,53 +719,89 @@ function Dashboard({
   return (
     <>
       <PageHeader
-        eyebrow="作业中枢"
-        title="选择一个工具开始处理"
-        detail="所有任务共享同一套文件、进度、错误和结果体验。"
+        eyebrow="E点通工具箱 · 工作台"
+        title="今天要处理什么？"
+        detail="从最近使用继续，或按作业类型选择工具。"
       />
-      {/*
-        These four used to report 已登记工具 9 / Tauri 已就绪 9-9 / Rust 核心 正常 /
-        平台 Windows x64 — the program describing itself. None of it helps an
-        auditor decide what to do next, and it occupied the most prominent strip
-        on the landing page.
-      */}
+      <DataHandlingNotice
+        mode="network-assisted"
+        className="dashboard-data-notice"
+        title="数据处理边界"
+        description="多数文件处理在本机完成；启用 AI 或云端 OCR 时，会按你在设置中的配置调用外部服务。"
+        details="历史记录只保存任务状态、时间和输出路径，不保存客户表格内容。"
+      />
       <section className="metrics">
         <Metric label="进行中任务" value={String(running.length)} />
         <Metric label="今天完成" value={String(finishedToday)} />
-        <Metric
-          label="最近一次"
-          value={latest ? nameOf(String(latest.toolId ?? "")) : "—"}
-          detail={
-            latest ? relativeTime(String(latest.startedAt ?? "")) : "尚无记录"
-          }
-        />
         <Metric label="累计任务" value={String(history.length)} />
       </section>
       {recentTools.length > 0 && (
-        <section className="recent-tools">
-          <span className="nav-caption">最近使用</span>
+        <section className="recent-tools" aria-labelledby="recent-tools-title">
+          <h2 id="recent-tools-title">最近使用</h2>
           <div>
             {recentTools.map((tool) => (
               <NavLink className="recent-chip" to={tool.route} key={tool.id}>
                 {tool.name}
+                <small>
+                  {relativeTime(
+                    String(
+                      history.find((row) => row.toolId === tool.id)
+                        ?.startedAt ?? "",
+                    ),
+                  )}
+                </small>
               </NavLink>
             ))}
           </div>
         </section>
       )}
-      <section className="card-grid">
-        {catalog.map((t) => (
-          <NavLink className="tool-card" to={t.route} key={t.id}>
-            <div>
-              {/* The migration-status badge said "已接入" on all nine cards: no
-                  information, top billing. */}
-              <h2>{t.name}</h2>
-              <p>{t.description}</p>
-            </div>
-            <strong>打开工具 →</strong>
-          </NavLink>
-        ))}
-      </section>
+      <div className="dashboard-tool-groups">
+        {TOOL_GROUPS.map((group) => {
+          const tools = expandedToolIds(group.ids)
+            .map((id) => catalog.find((tool) => tool.id === id))
+            .filter((tool): tool is ToolManifest => Boolean(tool));
+          if (!tools.length) return null;
+          const headingId = `dashboard-${group.label}`;
+          return (
+            <section
+              className="dashboard-tool-group"
+              aria-labelledby={headingId}
+              key={group.label}
+            >
+              <div className="dashboard-section-heading">
+                <h2 id={headingId}>{group.label}</h2>
+                <span>{tools.length} 个工具</span>
+              </div>
+              <div className="card-grid">
+                {tools.map((tool) => {
+                  const preview = tool.migrationStatus === "preview";
+                  return (
+                    <NavLink
+                      className="tool-card"
+                      to={tool.route}
+                      key={tool.id}
+                    >
+                      <div className="tool-card-heading">
+                        <span className="tool-card-badge" aria-hidden="true">
+                          {TOOL_BADGE[tool.id] ?? tool.name.slice(0, 1)}
+                        </span>
+                        <h3>{tool.name}</h3>
+                        {preview && (
+                          <span className="tool-card-status">试用</span>
+                        )}
+                      </div>
+                      <p>{tool.description}</p>
+                      <strong>
+                        打开工具 <span aria-hidden="true">→</span>
+                      </strong>
+                    </NavLink>
+                  );
+                })}
+              </div>
+            </section>
+          );
+        })}
+      </div>
     </>
   );
 }
@@ -757,9 +881,16 @@ function ToolPage({
   const DedicatedPage = DEDICATED_TOOL_PAGES[tool.id];
   if (DedicatedPage)
     return (
+      <>
+      {tool.migrationStatus === "preview" && (
+        <div className="tool-trial-notice" role="note">
+          <strong>试用</strong><span>{DEVELOPMENT_HINT}</span>
+        </div>
+      )}
       <Suspense fallback={<ToolPageLoading />}>
         <DedicatedPage tool={tool} />
       </Suspense>
+      </>
     );
   async function run(action: ActionDefinition) {
     setError("");
@@ -789,7 +920,7 @@ function ToolPage({
   return (
     <>
       <PageHeader
-        eyebrow="WP 服务单生成"
+        eyebrow="审计作业工具"
         title={tool.name}
         detail={def.intro}
       />
@@ -799,7 +930,7 @@ function ToolPage({
           { key: "2", label: "检查输入", disabled: true },
           { key: "3", label: "生成结果", disabled: true },
         ]}
-        current={0}
+        current={busy || job || result ? 2 : missing.length ? 0 : 1}
       />
       <div className="workspace">
         <section className="form-card">
@@ -819,14 +950,14 @@ function ToolPage({
           {error && <div className="error-box">{error}</div>}
           <div className="actions">
             {def.actions.map((a) => (
-              <button
+              <Button
                 disabled={busy}
-                className={a.tone === "primary" ? "primary" : "secondary"}
+                variant={a.tone === "primary" ? "default" : "secondary"}
                 key={a.method}
                 onClick={() => void run(a)}
               >
                 {busy ? "处理中…" : a.label}
-              </button>
+              </Button>
             ))}
           </div>
         </section>
@@ -841,9 +972,7 @@ function ToolPage({
           {result ? (
             <ResultView value={result} />
           ) : (
-            <div className="empty">
-              先检查输入，再启动任务。离开页面后任务仍在后台运行，可回到工具页查看进度。
-            </div>
+            <EmptyState title={busy ? "任务处理中" : "尚未生成结果"} description="先检查输入，再启动任务。离开页面后任务仍在后台运行，可回到工具页查看进度。" />
           )}
         </section>
       </div>
@@ -933,7 +1062,21 @@ function normalizeValues(values: Record<string, unknown>) {
   return out;
 }
 
-function History() {
+const HISTORY_STATUS: Record<
+  string,
+  { label: string; tone: "ready" | "danger" | "preview" }
+> = {
+  completed: { label: "已完成", tone: "ready" },
+  success: { label: "已完成", tone: "ready" },
+  failed: { label: "失败", tone: "danger" },
+  cancelled: { label: "已取消", tone: "preview" },
+  canceled: { label: "已取消", tone: "preview" },
+  running: { label: "处理中", tone: "preview" },
+  queued: { label: "等待中", tone: "preview" },
+  paused: { label: "已暂停", tone: "preview" },
+};
+
+function History({ catalog }: { catalog: ToolManifest[] }) {
   const [rows, setRows] = useState<Array<Record<string, unknown>>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -953,40 +1096,59 @@ function History() {
       <Card className="history-card">
         <CardContent className="history-card-content">
           {loading ? (
-            <div className="empty" role="status" aria-live="polite">
-              正在读取历史记录…
+            <div role="status" aria-live="polite">
+              <EmptyState
+                compact
+                title="正在读取历史记录…"
+                description="正在从本机任务记录中读取。"
+              />
             </div>
           ) : error ? (
             <div className="error-box" role="alert">
               {error} 请稍后重试。
             </div>
           ) : rows.length ? (
-            rows.map((row, index) => (
-              <div className="task-row" key={String(row.jobId ?? index)}>
-                <div>
-                  <strong>{String(row.toolId ?? "")}</strong>
-                  <p>{String(row.message ?? row.status ?? "")}</p>
-                </div>
-                <time dateTime={String(row.startedAt ?? "")}>
-                  {formatHistoryTime(row.startedAt)}
-                </time>
-                <span
-                  className={`pill ${
-                    row.status === "completed"
-                      ? "ready"
-                      : row.status === "failed"
-                        ? "danger"
-                        : "preview"
-                  }`}
-                >
-                  {String(row.status ?? "")}
-                </span>
-              </div>
-            ))
+            rows.map((row, index) => {
+              const toolId = String(row.toolId ?? "");
+              const status =
+                HISTORY_STATUS[String(row.status ?? "")] ??
+                ({ label: "状态未知", tone: "preview" } as const);
+              const outputCount = Array.isArray(row.outputPaths)
+                ? row.outputPaths.length
+                : 0;
+              return (
+                <article className="task-row" key={String(row.jobId ?? index)}>
+                  <div className="task-row-copy">
+                    <strong>
+                      {catalog.find((tool) => tool.id === toolId)?.name ||
+                        "未知工具"}
+                    </strong>
+                    <p>{String(row.message ?? status.label)}</p>
+                  </div>
+                  <div className="task-row-meta">
+                    <time dateTime={String(row.startedAt ?? "")}>
+                      {formatHistoryTime(row.startedAt)}
+                    </time>
+                    <span>
+                      {outputCount > 0
+                        ? `输出 ${outputCount} 个文件`
+                        : "无输出文件"}
+                    </span>
+                  </div>
+                  <span className={`pill ${status.tone}`}>{status.label}</span>
+                </article>
+              );
+            })
           ) : (
-            <div className="empty" role="status">
-              尚无历史任务。
-            </div>
+            <EmptyState
+              title="还没有任务记录"
+              description="完成任务后，这里会显示处理状态、时间和输出文件数量。"
+              action={
+                <NavLink className="primary empty-state-link" to="/">
+                  返回工作台
+                </NavLink>
+              }
+            />
           )}
         </CardContent>
       </Card>
@@ -1028,6 +1190,10 @@ export function formatUpdateProgress(
   return `正在下载更新：${formatBytes(downloaded)} / ${formatBytes(total)}（${percentage}%）`;
 }
 
+function settingsSignature(form: Record<string, unknown>, cacheMode: string) {
+  return JSON.stringify({ form, cacheMode });
+}
+
 export function Settings({
   availableUpdate,
   onAvailableUpdateChange,
@@ -1050,6 +1216,8 @@ export function Settings({
     ocrEngine: "ai",
     ocrApiKey: "",
     ocrSecret: "",
+    telemetryEnabled: true,
+    telemetryUrl: "",
   });
   const [message, setMessage] = useState("");
   const [testingLlm, setTestingLlm] = useState(false);
@@ -1073,6 +1241,7 @@ export function Settings({
   const [cacheMessage, setCacheMessage] = useState("");
   const [cacheStatError, setCacheStatError] = useState("");
   const [clearHistoryWithCache, setClearHistoryWithCache] = useState(false);
+  const savedSettingsSignature = useRef<string | undefined>(undefined);
   const refreshCacheStat = () =>
     engineCall("cache.stat", {})
       .then((v) => {
@@ -1235,17 +1404,33 @@ export function Settings({
       .then((value) => {
         const llm = (value.llm ?? {}) as Record<string, unknown>;
         const ocr = (value.ocr ?? {}) as Record<string, unknown>;
-        setForm((x) => ({
-          ...x,
-          enabled: Boolean(llm.enabled),
-          apiType: String(llm.api_type ?? x.apiType),
-          baseUrl: String(llm.base_url ?? x.baseUrl),
-          model: String(llm.model ?? ""),
-          authMode: String(llm.auth_mode ?? x.authMode),
-          timeout: String(llm.timeout ?? x.timeout),
-          thinkingEnabled: Boolean(llm.thinking_enabled),
-          ocrEngine: String(ocr.engine ?? x.ocrEngine),
-        }));
+        const telemetry = (value.telemetry ?? {}) as Record<string, unknown>;
+        setForm((x) => {
+          const next = {
+            ...x,
+            enabled: Boolean(llm.enabled),
+            apiType: String(llm.api_type ?? x.apiType),
+            baseUrl: String(llm.base_url ?? x.baseUrl),
+            model: String(llm.model ?? ""),
+            authMode: String(llm.auth_mode ?? x.authMode),
+            timeout: String(llm.timeout ?? x.timeout),
+            thinkingEnabled: Boolean(llm.thinking_enabled),
+            ocrEngine: String(ocr.engine ?? x.ocrEngine),
+            telemetryEnabled: telemetry.enabled !== false,
+            telemetryUrl: String(telemetry.server_url ?? ""),
+          };
+          const cache = (value.cache ?? {}) as Record<string, unknown>;
+          const mode = String(cache.cleanup ?? "weekly");
+          const nextCacheMode =
+            mode === "daily" || mode === "weekly" || mode === "off"
+              ? mode
+              : "weekly";
+          savedSettingsSignature.current = settingsSignature(
+            next,
+            nextCacheMode,
+          );
+          return next;
+        });
         const cache = (value.cache ?? {}) as Record<string, unknown>;
         const mode = String(cache.cleanup ?? "weekly");
         if (mode === "daily" || mode === "weekly" || mode === "off")
@@ -1253,6 +1438,30 @@ export function Settings({
       })
       .catch(() => undefined);
   }, []);
+  const dirty =
+    savedSettingsSignature.current !== undefined &&
+    settingsSignature(form, cacheMode) !== savedSettingsSignature.current;
+  useEffect(() => {
+    if (!dirty) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const confirmLinkNavigation = (event: MouseEvent) => {
+      const link = (event.target as Element | null)?.closest("a[href]");
+      if (!link || !document.contains(link)) return;
+      if (!window.confirm("设置尚未保存，确定离开并放弃这些修改吗？")) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    document.addEventListener("click", confirmLinkNavigation, true);
+    return () => {
+      window.removeEventListener("beforeunload", warnBeforeUnload);
+      document.removeEventListener("click", confirmLinkNavigation, true);
+    };
+  }, [dirty]);
   const set = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) =>
     setForm((x) => ({ ...x, [key]: value }));
   const llmSettings = () => ({
@@ -1312,6 +1521,10 @@ export function Settings({
         },
         ocr: { engine: form.ocrEngine },
         cache: { cleanup: cacheMode },
+        telemetry: {
+          enabled: form.telemetryEnabled,
+          server_url: form.telemetryUrl.trim(),
+        },
       });
       if (form.apiKey)
         await secretSet(
@@ -1320,7 +1533,14 @@ export function Settings({
         );
       if (form.ocrApiKey) await secretSet("baidu_ocr_key", form.ocrApiKey);
       if (form.ocrSecret) await secretSet("baidu_ocr_secret", form.ocrSecret);
-      setForm((x) => ({ ...x, apiKey: "", ocrApiKey: "", ocrSecret: "" }));
+      const savedForm = {
+        ...form,
+        apiKey: "",
+        ocrApiKey: "",
+        ocrSecret: "",
+      };
+      savedSettingsSignature.current = settingsSignature(savedForm, cacheMode);
+      setForm(savedForm);
       setMessage("配置已保存，相关工具会使用这些设置。");
     } catch (e) {
       setSaveFailed(true);
@@ -1774,6 +1994,36 @@ export function Settings({
             </div>
           </section>
           <section className="list-card">
+            <h2>使用统计</h2>
+            <DataHandlingNotice
+              mode="telemetry"
+              title="发送哪些使用信息"
+              description="启用后记录软件启动与退出、工具打开、任务结果和耗时，以及安装标识、电脑名、系统用户名、系统版本和应用版本。"
+              details="不记录文件路径、表格内容或客户数据。事件会先进入本机队列，再发送到配置的部门统计服务器；关闭后将清空未发送队列。"
+            />
+            <div className="form-grid">
+              <label className="field settings-toggle">
+                <span>启用使用统计</span>
+                <input
+                  type="checkbox"
+                  checked={form.telemetryEnabled}
+                  onChange={(e) => set("telemetryEnabled", e.target.checked)}
+                />
+              </label>
+              <label className="field">
+                <span>统计服务器地址</span>
+                <input
+                  value={form.telemetryUrl}
+                  onChange={(e) => set("telemetryUrl", e.target.value)}
+                  placeholder="例如 http://192.168.1.10:8787"
+                />
+                <small>
+                  留空时事件只保存在本机队列；填好后，未发出的记录会连同新记录一起补发。
+                </small>
+              </label>
+            </div>
+          </section>
+          <section className="list-card">
             <h2>本地缓存</h2>
             <p>
               缓存读过的科目余额表与序时账，再次打开同一份文件直接命中，不必重新解析。
@@ -1820,6 +2070,14 @@ export function Settings({
                   ((cacheStat?.bytes ?? 0) === 0 && !clearHistoryWithCache)
                 }
                 onClick={() => {
+                  if (
+                    !window.confirm(
+                      clearHistoryWithCache
+                        ? "确定清理本机缓存并永久清除全部历史记录吗？"
+                        : "确定清理全部本机缓存吗？源文件和已生成文件不会被删除。",
+                    )
+                  )
+                    return;
                   setCacheBusy(true);
                   setCacheMessage("");
                   void (async () => {
@@ -1914,11 +2172,15 @@ export function Settings({
         </div>
       )}
       {(section === 0 || section === 1) && (
-        <div className="settings-save-bar">
-          <span>配置修改后需保存；测试连接不会自动保存。</span>
+        <div className={`settings-save-bar${dirty ? " is-dirty" : ""}`}>
+          <span>
+            {dirty
+              ? "有未保存的配置修改；测试连接不会自动保存。"
+              : "配置已保存。界面主题会在选择后立即生效。"}
+          </span>
           <button
             className="primary"
-            disabled={saving || testingLlm}
+            disabled={!dirty || saving || testingLlm}
             onClick={() => void save()}
           >
             {saving ? "保存中…" : "保存配置"}

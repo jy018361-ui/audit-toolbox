@@ -11,6 +11,7 @@ import {
   pickPath,
 } from "./api";
 import { PageHeader } from "@/components/PageHeader";
+import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
@@ -45,6 +46,46 @@ import "./fx-audit.css";
 import { displayFileName } from "./fileDisplay";
 
 type Mode = "realized" | "unrealized" | "combined";
+
+export function fxRequiredSources(mode: Mode): { je: boolean; tb: boolean } {
+  return {
+    je: mode !== "unrealized",
+    tb: mode !== "realized",
+  };
+}
+
+export function fxResultTrustStatus(
+  summary: Record<string, unknown>,
+  blockedItems: number,
+): { tone: "blocked" | "limited" | "usable"; title: string; detail: string } {
+  const missingEvidence =
+    blockedItems > 0 || summary.unrealizedBalanceBasisComplete === false;
+  const tbKnown = summary.tbFxGainLoss != null;
+  const needsReview =
+    Boolean(summary.needsZeroResultReview) ||
+    (tbKnown && summary.reconciliationPassed !== true);
+  if (missingEvidence) {
+    return {
+      tone: "blocked",
+      title: "需补充资料后再使用",
+      detail:
+        "部分测算缺少可靠余额或币种依据。请按下方提示补充资料，然后重新测算。",
+    };
+  }
+  if (needsReview) {
+    return {
+      tone: "limited",
+      title: "结果受限，需人工复核",
+      detail:
+        "测算已完成，但仍有差异或待确认事项。请复核下方提示后再生成最终底稿。",
+    };
+  }
+  return {
+    tone: "usable",
+    title: "测算结果可供复核",
+    detail: "关键资料已具备。请核对差异与凭证分类，确认后生成 Excel 底稿。",
+  };
+}
 type Inspection = {
   headers: string[];
   sheet: string;
@@ -757,6 +798,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     ],
   );
   const reviewingAny = reviewing.je || reviewing.tb;
+  const requiredSources = fxRequiredSources(mode);
   const requiredMappingsMissing = [
     ...(je && mode !== "unrealized"
       ? fxMissingRequired("je", jeMapping, true, fixedEntity)
@@ -971,8 +1013,8 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       }
       setSourceStatus(
         llmFallbacks
-          ? `${classifiedFiles.length} 个文件已识别；LLM 复核不可用的文件已保留脚本结果。`
-          : `${classifiedFiles.length} 个文件已完成脚本识别与汇兑损益专用 LLM 复核。`,
+          ? `${classifiedFiles.length} 个文件已由本机规则识别；智能复核不可用的文件已保留识别结果。`
+          : `${classifiedFiles.length} 个文件已完成本机识别与智能复核。`,
       );
       if (failures.length) setError(failures.join("；"));
     } finally {
@@ -1292,6 +1334,41 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
               <CardTitle>上传审计数据</CardTitle>
             </CardHeader>
             <CardContent>
+              <div className="fx-source-requirements" aria-label="所需审计资料">
+                <strong>当前模式所需资料</strong>
+                <span
+                  className={
+                    jePath
+                      ? "ready"
+                      : requiredSources.je
+                        ? "required"
+                        : "optional"
+                  }
+                >
+                  JE 凭证明细
+                  {!requiredSources.je
+                    ? "（可选）"
+                    : jePath
+                      ? "（已添加）"
+                      : "（必需）"}
+                </span>
+                <span
+                  className={
+                    tbPath
+                      ? "ready"
+                      : requiredSources.tb
+                        ? "required"
+                        : "optional"
+                  }
+                >
+                  TB 科目余额表
+                  {!requiredSources.tb
+                    ? "（可选）"
+                    : tbPath
+                      ? "（已添加）"
+                      : "（必需）"}
+                </span>
+              </div>
               <FileDropInput
                 containerRef={uploadDropRef}
                 value={[
@@ -1329,6 +1406,13 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   setReportEnd("");
                   setSourceStatus("");
                 }}
+              />
+              <DataHandlingNotice
+                mode="network-assisted"
+                className="fx-data-notice"
+                title="本机测算，可选智能复核"
+                description="Excel 读取、汇兑损益测算和底稿生成均在本机完成。"
+                details="如已启用智能复核，文件路径、表头和少量样例行会发送到你在设置中配置的 LLM 服务；关闭后仍可使用本机规则识别。"
               />
               {sourceStatus && (
                 <p className="fx-source-status" aria-live="polite">
@@ -2736,6 +2820,10 @@ function FxResult({
   const tbKnown = summary.tbFxGainLoss != null;
   const tbSplit = summary.tbFxGainLossPresentation === "split";
   const passed = summary.reconciliationPassed === true;
+  const resultStatus = fxResultTrustStatus(
+    summary,
+    ((result.tbGranularityBlocked ?? []) as unknown[]).length,
+  );
   const metric = (
     label: string,
     value: unknown,
@@ -2763,6 +2851,14 @@ function FxResult({
             打开Excel底稿
           </Button>
         ))}
+      </div>
+      <div
+        className={`fx-result-status ${resultStatus.tone}`}
+        role="status"
+        aria-live="polite"
+      >
+        <strong>{resultStatus.title}</strong>
+        <span>{resultStatus.detail}</span>
       </div>
       {Boolean(summary.needsZeroResultReview) && (
         <p className="fa-missing-hint">

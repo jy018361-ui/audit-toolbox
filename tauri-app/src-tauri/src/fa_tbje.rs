@@ -6,7 +6,7 @@
 
 use chrono::{Datelike, NaiveDate};
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Formula, Workbook, Worksheet};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -59,7 +59,7 @@ struct AccountIdentity {
     legacy_display: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct TbLine {
     entity: String,
     account: String,
@@ -70,7 +70,7 @@ struct TbLine {
     source_row: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct JeLine {
     entity: String,
     voucher: String,
@@ -92,7 +92,7 @@ struct JeLine {
     raw: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Movement {
     entity: String,
     voucher: String,
@@ -108,7 +108,7 @@ struct Movement {
     review: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct CategoryTotals {
     opening_cost: f64,
     closing_cost: f64,
@@ -153,19 +153,144 @@ pub(crate) fn run_job(
         ));
     }
     checkpoint(&cancel, pause)?;
-    progress("read", 1, 4, "正在通过公共 TB/JE 引擎读取账表…");
-    let analysis = analyze(&params, &cancel)?;
+    // 预览／导出共用同一份分析：预览结果按参数落盘缓存，随后点「生成文件」
+    // 直接复用，读表与分类不再跑第二遍——大数据量账套从分钟级降到秒级。
+    // worker 是一次性进程，缓存必须落盘；命中失败静默退回全量分析。
+    let cache_key = analysis_cache_key(&params);
+    let analysis = if method == "fa.tbje_export" {
+        if let Some(cached) = load_cached_analysis(&cache_key) {
+            progress("read", 1, 4, "复用生成预览时的分析结果…");
+            checkpoint(&cancel, pause)?;
+            cached
+        } else {
+            progress("read", 1, 4, "正在通过公共 TB/JE 引擎读取账表…");
+            let analysis = analyze(&params, &cancel)?;
+            store_cached_analysis(&cache_key, &analysis);
+            analysis
+        }
+    } else {
+        progress("read", 1, 4, "正在通过公共 TB/JE 引擎读取账表…");
+        let analysis = analyze(&params, &cancel)?;
+        store_cached_analysis(&cache_key, &analysis);
+        analysis
+    };
     checkpoint(&cancel, pause)?;
     progress("classify", 2, 4, "正在分类新增、处置、重分类及对方科目…");
     let mut result = preview_json(&analysis);
     if method == "fa.tbje_export" {
-        progress("export", 3, 4, "正在生成五张固定资产底稿表…");
+        progress("export", 3, 4, "正在生成固定资产底稿表…");
         let output = output_path(&params)?;
         write_workbook(&output, &analysis, &cancel)?;
         result["outputPaths"] = json!([output.to_string_lossy()]);
     }
+    result["message"] = json!("固定资产 TB＋JE 处理完成，可打开下方结果文件。");
     progress("completed", 4, 4, "固定资产 TB＋JE 处理完成");
     Ok(result)
+}
+
+/// 缓存键＝去掉输出路径后的参数 JSON 哈希：同一套账、同一套映射与科目分类
+/// 才会命中；改任何一个设置都会自然失效。
+fn analysis_cache_key(params: &Value) -> String {
+    let mut normalized = params.clone();
+    normalized
+        .as_object_mut()
+        .map(|map| map.remove("outputPath"));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash_slice(
+        serde_json::to_string(&normalized).unwrap_or_default().as_bytes(),
+        &mut hasher,
+    );
+    format!("{:016x}", std::hash::Hasher::finish(&hasher))
+}
+
+fn cache_dir() -> PathBuf {
+    std::env::temp_dir().join("AuditToolbox").join("fa-tbje-cache")
+}
+
+/// `Analysis.totals` 的键是（主体，类别）元组，JSON 对象键必须是字符串，
+/// 直接序列化会失败——缓存专用结构把元组键装进数组元素里。
+#[derive(Serialize, Deserialize)]
+struct AnalysisCache {
+    tb: Vec<TbLine>,
+    je: Vec<JeLine>,
+    je_headers: Vec<String>,
+    additions: Vec<Movement>,
+    disposals: Vec<Movement>,
+    totals: Vec<((String, String), CategoryTotals)>,
+    direct_pairs: usize,
+    cross_pairs: usize,
+    sign_basis: String,
+    warnings: Vec<String>,
+}
+
+impl From<&Analysis> for AnalysisCache {
+    fn from(a: &Analysis) -> Self {
+        Self {
+            tb: a.tb.clone(),
+            je: a.je.clone(),
+            je_headers: a.je_headers.clone(),
+            additions: a.additions.clone(),
+            disposals: a.disposals.clone(),
+            totals: a.totals.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            direct_pairs: a.direct_pairs,
+            cross_pairs: a.cross_pairs,
+            sign_basis: a.sign_basis.clone(),
+            warnings: a.warnings.clone(),
+        }
+    }
+}
+
+impl From<AnalysisCache> for Analysis {
+    fn from(cache: AnalysisCache) -> Self {
+        Self {
+            tb: cache.tb,
+            je: cache.je,
+            je_headers: cache.je_headers,
+            additions: cache.additions,
+            disposals: cache.disposals,
+            totals: cache.totals.into_iter().collect(),
+            direct_pairs: cache.direct_pairs,
+            cross_pairs: cache.cross_pairs,
+            sign_basis: cache.sign_basis,
+            warnings: cache.warnings,
+        }
+    }
+}
+
+fn load_cached_analysis(key: &str) -> Option<Analysis> {
+    let path = cache_dir().join(format!("{key}.json"));
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<AnalysisCache>(&text)
+        .ok()
+        .map(Analysis::from)
+}
+
+fn store_cached_analysis(key: &str, analysis: &Analysis) {
+    let dir = cache_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    if let Ok(text) = serde_json::to_string(&AnalysisCache::from(analysis)) {
+        let _ = std::fs::write(dir.join(format!("{key}.json")), text);
+    }
+    // 只保留最近 5 份缓存，TEMP 不做无界膨胀。
+    let _ = try_prune_cache(&dir);
+}
+
+fn try_prune_cache(dir: &Path) -> std::io::Result<()> {
+    let mut entries: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect();
+    entries.sort();
+    while entries.len() > 5 {
+        let (_, path) = entries.remove(0);
+        std::fs::remove_file(path).ok();
+    }
+    Ok(())
 }
 
 fn checkpoint(cancel: &AtomicBool, pause: &PauseCheckpoint) -> Result<(), AppError> {
@@ -958,12 +1083,24 @@ fn preview_json(a: &Analysis) -> Value {
                     >= 0.01
         })
         .count();
+    // 汇总变动表预览:与导出共享 build_summary_rows 的行定义,零行过滤一致,
+    // 前端看到什么,导出的 Excel 里就是什么。
+    let (summary_columns, summary_rows) = build_summary_rows(a);
+    let summary_table = json!({
+        "columns": summary_columns,
+        "rows": summary_rows.iter().map(|row| json!({
+            "section": row.section,
+            "item": row.item,
+            "values": row.values,
+        })).collect::<Vec<_>>(),
+    });
     json!({
         "engine":"shared-ledger+fa-business", "tbRows":a.tb.len(), "jeRows":a.je.len(),
         "additions":a.additions.len(), "disposals":a.disposals.len(),
         "directNetZeroPairs":a.direct_pairs, "crossNetZeroPairs":a.cross_pairs,
         "reconciliationDifferences":differences, "signBasis":a.sign_basis,
-        "warnings":a.warnings, "preview": a.additions.iter().take(10).map(|m| json!({
+        "warnings":a.warnings, "summaryTable": summary_table,
+        "preview": a.additions.iter().take(10).map(|m| json!({
             "entity":m.entity,"voucher":m.voucher,"category":m.category,"kind":m.kind,
             "original":m.original,"depreciation":m.depreciation,"method":m.method
         })).collect::<Vec<_>>()
@@ -981,7 +1118,7 @@ fn write_workbook(path: &Path, a: &Analysis, cancel: &AtomicBool) -> Result<(), 
     wb.save(path).map_err(|e| {
         error(
             "FA_TBJE_EXPORT_FAILED",
-            "固定资产 TB＋JE 底稿保存失败。",
+            "固定资产 TB＋JE 底稿保存失败。常见原因：输出文件正在 Excel 中打开（关闭后重试），或资产类别名称含引号等特殊字符。",
             Some(e.to_string()),
         )
     })
@@ -1022,15 +1159,38 @@ fn write_headers(ws: &mut Worksheet, headers: &[&str], header: &Format) -> Resul
 /// 全部数据行都是活公式：期初／期末 SUMIFS 到隐藏 `_TB规范数据`，变动行
 /// SUMIFS 到 JE 明细（主体＋类别＋变动分类＋［变动方式］＋角色），净值行做
 /// 行引用；勾稽差异两行放在表体下方（原值／累计折旧），公式即勾稽等式。
+/// 公式 criteria 里嵌入的是主体／类别等用户数据：双引号须双写转义，换行等
+/// 控制字符会直接把公式拆断（rust_xlsxwriter 保存失败），一律替换成空格。
+fn criteria(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c == '"' {
+                String::from("\"\"")
+            } else if c.is_control() {
+                " ".to_owned()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 fn sumifs_tb_formula(entity: &str, category: &str, role: &str, col: char) -> String {
     format!(
-        "SUMIFS('_TB规范数据'!${col}:${col},'_TB规范数据'!$A:$A,\"{entity}\",'_TB规范数据'!$D:$D,\"{category}\",'_TB规范数据'!$C:$C,\"{role}\")"
+        "SUMIFS('_TB规范数据'!${col}:${col},'_TB规范数据'!$A:$A,\"{}\",'_TB规范数据'!$D:$D,\"{}\",'_TB规范数据'!$C:$C,\"{}\")",
+        criteria(entity),
+        criteria(category),
+        criteria(role)
     )
 }
 
 fn sumifs_je_formula(entity: &str, category: &str, role: &str, movement: &str) -> String {
     format!(
-        "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,\"{entity}\",'固定资产相关JE完整明细'!$G:$G,\"{category}\",'固定资产相关JE完整明细'!$K:$K,\"{movement}\",'固定资产相关JE完整明细'!$F:$F,\"{role}\")"
+        "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,\"{}\",'固定资产相关JE完整明细'!$G:$G,\"{}\",'固定资产相关JE完整明细'!$K:$K,\"{}\",'固定资产相关JE完整明细'!$F:$F,\"{}\")",
+        criteria(entity),
+        criteria(category),
+        criteria(movement),
+        criteria(role)
     )
 }
 
@@ -1042,7 +1202,12 @@ fn sumifs_je_method_formula(
     method: &str,
 ) -> String {
     format!(
-        "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,\"{entity}\",'固定资产相关JE完整明细'!$G:$G,\"{category}\",'固定资产相关JE完整明细'!$K:$K,\"{movement}\",'固定资产相关JE完整明细'!$L:$L,\"{method}\",'固定资产相关JE完整明细'!$F:$F,\"{role}\")"
+        "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,\"{}\",'固定资产相关JE完整明细'!$G:$G,\"{}\",'固定资产相关JE完整明细'!$K:$K,\"{}\",'固定资产相关JE完整明细'!$L:$L,\"{}\",'固定资产相关JE完整明细'!$F:$F,\"{}\")",
+        criteria(entity),
+        criteria(category),
+        criteria(movement),
+        criteria(method),
+        criteria(role)
     )
 }
 
@@ -1053,12 +1218,43 @@ fn summary_row_ref(lookup: &BTreeMap<(&'static str, String), u32>, section: &'st
         .map(|row| format!("{col}{}", row + 1))
 }
 
-fn write_summary(ws: &mut Worksheet, a: &Analysis) -> Result<(), AppError> {
-    ws.set_name("固定资产汇总变动表").map_err(xlsx)?;
-    let (header, money, text) = formats();
+/// 汇总表单行的公式语义:行定义(数据)与 Excel 公式生成解耦,预览只取数据,
+/// 写 Excel 时按语义生成 SUMIFS／行引用公式。
+enum FormulaKind {
+    Tb { role: &'static str, closing: bool },
+    Je { role: &'static str, movement: &'static str, sign: f64 },
+    JeMethod { role: &'static str, movement: &'static str, method: String, sign: f64 },
+    ReclassNet { role: &'static str },
+    ReclassIn { role: &'static str },
+    ReclassOut { role: &'static str },
+    /// 折旧当期计提＝-(新增随转＋本年计提)。
+    Charge,
+    Provision,
+    AdditionTransferDep,
+    /// 处置减少＝处置转出＋折旧其他减少。
+    DisposalDecrease,
+    DisposalDepOther,
+    NbvOpening,
+    NbvClosing,
+    DiffCost,
+    DiffDep,
+}
+
+struct SummaryRowData {
+    section: &'static str,
+    item: String,
+    values: Vec<f64>,
+    kind: FormulaKind,
+}
+
+/// FA List 版式汇总表的**共享行定义**:类别列、变动项目行(含勾稽差异表下行),
+/// `write_summary`(配公式写 Excel)与 `preview_json`(前端预览)都从这里取数,
+/// 两边永不漂移。返回 (列标题, 行)。多主体时列标题带「主体-」前缀。
+/// 全零且非主干行(期初/期末/勾稽差异/净值)已过滤。
+fn build_summary_rows(a: &Analysis) -> (Vec<String>, Vec<SummaryRowData>) {
     let entities: BTreeSet<&String> = a.totals.keys().map(|(entity, _)| entity).collect();
     let multi_entity = entities.len() > 1;
-    let mut columns: Vec<String> = Vec::new();
+    let mut columns = Vec::new();
     for (entity, category) in a.totals.keys() {
         columns.push(if multi_entity {
             format!("{entity}-{category}")
@@ -1066,30 +1262,6 @@ fn write_summary(ws: &mut Worksheet, a: &Analysis) -> Result<(), AppError> {
             category.clone()
         });
     }
-    let mut headers = vec![String::new(), "变动项目".to_owned(), "合计".to_owned()];
-    headers.extend(columns.iter().cloned());
-    for (c, h) in headers.iter().enumerate() {
-        ws.write_string_with_format(0, c as u16, h, &header)
-            .map_err(xlsx)?;
-        ws.set_column_width(c as u16, if c == 0 { 14.0 } else if c == 1 { 30.0 } else { 16.0 })
-            .map_err(xlsx)?;
-    }
-    for c in 0..headers.len() {
-        ws.write_string_with_format(
-            1,
-            c as u16,
-            match c {
-                0 | 1 => "变动项目",
-                2 => "计算",
-                _ if multi_entity => "主体-资产类别",
-                _ => "资产类别",
-            },
-            &text,
-        )
-        .map_err(xlsx)?;
-    }
-    // 方式明细按（主体，类别，方式）聚合；重分类转入／转出不算新增／处置
-    // 方式，只在重分类段单独立行。
     let mut addition_by_method: BTreeMap<(String, String, String), f64> = BTreeMap::new();
     let mut disposal_by_method: BTreeMap<(String, String, String), f64> = BTreeMap::new();
     let mut disposal_dep_by_method: BTreeMap<(String, String, String), f64> = BTreeMap::new();
@@ -1117,10 +1289,10 @@ fn write_summary(ws: &mut Worksheet, a: &Analysis) -> Result<(), AppError> {
                 })
                 .collect()
         };
-    let reclass_cost_values = |positive: bool| -> Vec<f64> {
+    let side_values = |get: &dyn Fn(&CategoryTotals) -> f64, positive: bool| -> Vec<f64> {
         keys.iter()
             .map(|k| {
-                let net = a.totals[k].reclass_cost;
+                let net = get(&a.totals[k]);
                 if positive {
                     net.max(0.0)
                 } else {
@@ -1129,308 +1301,168 @@ fn write_summary(ws: &mut Worksheet, a: &Analysis) -> Result<(), AppError> {
             })
             .collect()
     };
-    let reclass_dep_values = |positive: bool| -> Vec<f64> {
-        keys.iter()
-            .map(|k| {
-                let net = a.totals[k].reclass_dep;
-                if positive {
-                    net.max(0.0)
-                } else {
-                    net.min(0.0)
-                }
-            })
-            .collect()
-    };
-    let addition_methods = addition_by_method
-        .keys()
-        .map(|k| k.2.clone())
-        .collect::<BTreeSet<_>>();
-    let disposal_methods = disposal_by_method
-        .keys()
-        .map(|k| k.2.clone())
-        .collect::<BTreeSet<_>>();
-    // 公式素材：TB 隐藏页（期初 F／期末 G，折旧余额已取反为正数）与 JE 明细
-    // （H 净额、A 主体、G 类别、F 角色、K 变动分类、L 变动方式）。
-    type Lookup = BTreeMap<(&'static str, String), u32>;
-    // 行定义：values 是缓存值；formula 按列生成活公式（找不到被引用行时返回
-    // 空串，该单元格退化为缓存数值）。
-    struct RowDef {
-        section: &'static str,
-        item: String,
-        keep_when_zero: bool,
-        values: Vec<f64>,
-        formula: Box<dyn Fn(&str, &str, char, &Lookup) -> String>,
-    }
-    let mut rows: Vec<RowDef> = Vec::new();
+    let mut rows: Vec<SummaryRowData> = Vec::new();
     let mut push = |section: &'static str,
                     item: String,
                     vals: Vec<f64>,
-                    keep: bool,
-                    formula: Box<dyn Fn(&str, &str, char, &Lookup) -> String>| {
-        rows.push(RowDef {
+                    kind: FormulaKind| {
+        rows.push(SummaryRowData {
             section,
             item,
-            keep_when_zero: keep,
             values: vals,
-            formula,
+            kind,
         });
-    };
-    let plain = |text: String| -> Box<dyn Fn(&str, &str, char, &Lookup) -> String> {
-        Box::new(move |_, _, _, _| text.clone())
     };
     push(
         "原值",
         "期初原值".into(),
         values(&|t| t.opening_cost),
-        true,
-        Box::new(|e, c, _, _| sumifs_tb_formula(e, c, "cost", 'F')),
+        FormulaKind::Tb { role: "cost", closing: false },
     );
     push(
         "原值",
         "原值增加".into(),
         values(&|t| t.additions),
-        false,
-        Box::new(|e, c, _, _| sumifs_je_formula(e, c, "cost", "新增")),
+        FormulaKind::Je { role: "cost", movement: "新增", sign: 1.0 },
     );
-    for method in &addition_methods {
-        let m = method.clone();
+    for method in addition_by_method.keys().map(|k| k.2.clone()).collect::<BTreeSet<_>>() {
         push(
             "原值",
             format!("——其中-{method}"),
-            method_values(&addition_by_method, method),
-            false,
-            Box::new(move |e, c, _, _| sumifs_je_method_formula(e, c, "cost", "新增", &m)),
+            method_values(&addition_by_method, &method),
+            FormulaKind::JeMethod { role: "cost", movement: "新增", method, sign: 1.0 },
         );
     }
     push(
         "原值",
         "原值减少".into(),
         values(&|t| t.disposals),
-        false,
-        Box::new(|e, c, _, _| format!("-{}", sumifs_je_formula(e, c, "cost", "处置"))),
+        FormulaKind::Je { role: "cost", movement: "处置", sign: -1.0 },
     );
-    for method in &disposal_methods {
-        let m = method.clone();
+    for method in disposal_by_method.keys().map(|k| k.2.clone()).collect::<BTreeSet<_>>() {
         push(
             "原值",
             format!("——其中-{method}"),
-            method_values(&disposal_by_method, method),
-            false,
-            Box::new(move |e, c, _, _| {
-                format!("-{}", sumifs_je_method_formula(e, c, "cost", "处置", &m))
-            }),
+            method_values(&disposal_by_method, &method),
+            FormulaKind::JeMethod { role: "cost", movement: "处置", method, sign: -1.0 },
         );
     }
     push(
         "原值",
         "原值重分类".into(),
         values(&|t| t.reclass_cost),
-        false,
-        Box::new(|e, c, _, _| sumifs_je_formula(e, c, "cost", "重分类")),
+        FormulaKind::ReclassNet { role: "cost" },
     );
     push(
         "原值",
         "——其中-重分类转入".into(),
-        reclass_cost_values(true),
-        false,
-        Box::new(|e, c, _, _| {
-            format!("MAX({},0)", sumifs_je_formula(e, c, "cost", "重分类"))
-        }),
+        side_values(&|t| t.reclass_cost, true),
+        FormulaKind::ReclassIn { role: "cost" },
     );
     push(
         "原值",
         "——其中-重分类转出".into(),
-        reclass_cost_values(false),
-        false,
-        Box::new(|e, c, _, _| {
-            format!("MIN({},0)", sumifs_je_formula(e, c, "cost", "重分类"))
-        }),
+        side_values(&|t| t.reclass_cost, false),
+        FormulaKind::ReclassOut { role: "cost" },
     );
     push(
         "原值",
         "期末原值".into(),
         values(&|t| t.closing_cost),
-        true,
-        Box::new(|e, c, _, _| sumifs_tb_formula(e, c, "cost", 'G')),
+        FormulaKind::Tb { role: "cost", closing: true },
     );
     push(
         "累计折旧",
         "期初累计折旧".into(),
         values(&|t| t.opening_dep),
-        true,
-        Box::new(|e, c, _, _| sumifs_tb_formula(e, c, "depreciation", 'F')),
+        FormulaKind::Tb { role: "depreciation", closing: false },
     );
     push(
         "累计折旧",
         "当期计提".into(),
         values(&|t| t.dep_charge + t.addition_dep),
-        false,
-        Box::new(|e, c, _, _| {
-            format!(
-                "-{}-{}",
-                sumifs_je_formula(e, c, "depreciation", "新增"),
-                sumifs_je_formula(e, c, "depreciation", "本年计提/其他增加")
-            )
-        }),
+        FormulaKind::Charge,
     );
     push(
         "累计折旧",
         "——其中-本年计提".into(),
         values(&|t| t.dep_charge),
-        false,
-        Box::new(|e, c, _, _| {
-            format!(
-                "-{}",
-                sumifs_je_formula(e, c, "depreciation", "本年计提/其他增加")
-            )
-        }),
+        FormulaKind::Provision,
     );
     push(
         "累计折旧",
         "——其中-新增随转折旧".into(),
         values(&|t| t.addition_dep),
-        false,
-        Box::new(|e, c, _, _| format!("-{}", sumifs_je_formula(e, c, "depreciation", "新增"))),
+        FormulaKind::AdditionTransferDep,
     );
     push(
         "累计折旧",
         "处置减少".into(),
         values(&|t| t.disposal_dep + t.dep_other_decrease),
-        false,
-        Box::new(|e, c, _, _| {
-            format!(
-                "{}+{}",
-                sumifs_je_formula(e, c, "depreciation", "处置"),
-                sumifs_je_formula(e, c, "depreciation", "折旧其他减少")
-            )
-        }),
+        FormulaKind::DisposalDecrease,
     );
-    for method in &disposal_methods {
-        let m = method.clone();
+    for method in disposal_by_method.keys().map(|k| k.2.clone()).collect::<BTreeSet<_>>() {
         push(
             "累计折旧",
             format!("——其中-{method}折旧"),
-            method_values(&disposal_dep_by_method, method),
-            false,
-            Box::new(move |e, c, _, _| sumifs_je_method_formula(e, c, "depreciation", "处置", &m)),
+            method_values(&disposal_dep_by_method, &method),
+            FormulaKind::JeMethod {
+                role: "depreciation",
+                movement: "处置",
+                method,
+                sign: 1.0,
+            },
         );
     }
     push(
         "累计折旧",
         "——其中-折旧其他减少".into(),
         values(&|t| t.dep_other_decrease),
-        false,
-        Box::new(|e, c, _, _| sumifs_je_formula(e, c, "depreciation", "折旧其他减少")),
+        FormulaKind::DisposalDepOther,
     );
     push(
         "累计折旧",
         "累计折旧重分类".into(),
         values(&|t| t.reclass_dep),
-        false,
-        Box::new(|e, c, _, _| {
-            format!("-{}", sumifs_je_formula(e, c, "depreciation", "重分类"))
-        }),
+        FormulaKind::ReclassNet { role: "depreciation" },
     );
     push(
         "累计折旧",
         "——其中-重分类转入".into(),
-        reclass_dep_values(true),
-        false,
-        Box::new(|e, c, _, _| {
-            format!(
-                "MAX(-{},0)",
-                sumifs_je_formula(e, c, "depreciation", "重分类")
-            )
-        }),
+        side_values(&|t| t.reclass_dep, true),
+        FormulaKind::ReclassIn { role: "depreciation" },
     );
     push(
         "累计折旧",
         "——其中-重分类转出".into(),
-        reclass_dep_values(false),
-        false,
-        Box::new(|e, c, _, _| {
-            format!(
-                "MIN(-{},0)",
-                sumifs_je_formula(e, c, "depreciation", "重分类")
-            )
-        }),
+        side_values(&|t| t.reclass_dep, false),
+        FormulaKind::ReclassOut { role: "depreciation" },
     );
     push(
         "累计折旧",
         "期末累计折旧".into(),
         values(&|t| t.closing_dep),
-        true,
-        Box::new(|e, c, _, _| sumifs_tb_formula(e, c, "depreciation", 'G')),
+        FormulaKind::Tb { role: "depreciation", closing: true },
     );
-    // 净值段：行引用公式（期初原值行 − 期初折旧行）。
     push(
         "净值(NBV)",
         "年初余额".into(),
         values(&|t| t.opening_cost - t.opening_dep),
-        true,
-        Box::new(|_, _, col, lookup| {
-            match (
-                summary_row_ref(lookup, "原值", "期初原值", col),
-                summary_row_ref(lookup, "累计折旧", "期初累计折旧", col),
-            ) {
-                (Some(a), Some(b)) => format!("{a}-{b}"),
-                _ => String::new(),
-            }
-        }),
+        FormulaKind::NbvOpening,
     );
     push(
         "净值(NBV)",
         "年末余额".into(),
         values(&|t| t.closing_cost - t.closing_dep),
-        true,
-        Box::new(|_, _, col, lookup| {
-            match (
-                summary_row_ref(lookup, "原值", "期末原值", col),
-                summary_row_ref(lookup, "累计折旧", "期末累计折旧", col),
-            ) {
-                (Some(a), Some(b)) => format!("{a}-{b}"),
-                _ => String::new(),
-            }
-        }),
+        FormulaKind::NbvClosing,
     );
-    // 勾稽差异放在表体下方独立两行：公式即勾稽等式，零值随公式实时呈现。
     push(
         "勾稽差异",
         "原值（期初＋增加－减少＋重分类－期末）".into(),
         values(&|t| {
             t.opening_cost + t.additions - t.disposals + t.reclass_cost - t.closing_cost
         }),
-        true,
-        Box::new(|_, _, col, lookup| {
-            let parts = [
-                ("原值", "期初原值", 1.0f64),
-                ("原值", "原值增加", 1.0),
-                ("原值", "原值减少", -1.0),
-                ("原值", "原值重分类", 1.0),
-                ("原值", "期末原值", -1.0),
-            ];
-            let mut formula = String::new();
-            let mut complete = true;
-            for (offset, (section, item, sign)) in parts.iter().enumerate() {
-                match summary_row_ref(lookup, section, item, col) {
-                    Some(reference) => {
-                        if offset > 0 || *sign < 0.0 {
-                            formula.push(if *sign > 0.0 { '+' } else { '-' });
-                        }
-                        formula.push_str(&reference);
-                    }
-                    None => {
-                        complete = false;
-                        break;
-                    }
-                }
-            }
-            if complete {
-                formula
-            } else {
-                String::new()
-            }
-        }),
+        FormulaKind::DiffCost,
     );
     push(
         "勾稽差异",
@@ -1441,53 +1473,82 @@ fn write_summary(ws: &mut Worksheet, a: &Analysis) -> Result<(), AppError> {
                 + t.reclass_dep
                 - t.closing_dep
         }),
-        true,
-        Box::new(|_, _, col, lookup| {
-            let parts = [
-                ("累计折旧", "期初累计折旧", 1.0f64),
-                ("累计折旧", "当期计提", 1.0),
-                ("累计折旧", "处置减少", -1.0),
-                ("累计折旧", "累计折旧重分类", 1.0),
-                ("累计折旧", "期末累计折旧", -1.0),
-            ];
-            let mut formula = String::new();
-            let mut complete = true;
-            for (offset, (section, item, sign)) in parts.iter().enumerate() {
-                match summary_row_ref(lookup, section, item, col) {
-                    Some(reference) => {
-                        if offset > 0 || *sign < 0.0 {
-                            formula.push(if *sign > 0.0 { '+' } else { '-' });
-                        }
-                        formula.push_str(&reference);
-                    }
-                    None => {
-                        complete = false;
-                        break;
-                    }
-                }
-            }
-            if complete {
-                formula
-            } else {
-                String::new()
-            }
-        }),
+        FormulaKind::DiffDep,
     );
-    // 过滤零行后分配行号并登记引用表，再统一写入。
-    let visible: Vec<&RowDef> = rows
-        .iter()
-        .filter(|r| r.keep_when_zero || r.values.iter().any(|v| v.abs() > 0.005))
+    // 零行过滤:主干行(期初/期末/净值/勾稽差异)保留,其余全零隐藏——与导出一致。
+    let keep_item = |row: &SummaryRowData| {
+        matches!(row.section, "净值(NBV)" | "勾稽差异")
+            || row.item.starts_with("期初")
+            || row.item.starts_with("期末")
+    };
+    let rows = rows
+        .into_iter()
+        .filter(|row| keep_item(row) || row.values.iter().any(|v| v.abs() > 0.005))
         .collect();
+    (columns, rows)
+}
+
+/// FA List 版式的固定资产汇总变动表:资产类别做列、变动项目做行,A 列段名
+/// （原值／累计折旧／净值）纵向合并,合计列写 `=SUM()` 活公式;行数据来自
+/// [`build_summary_rows`]（与前端预览共享）,此处按 [`FormulaKind`] 生成
+/// SUMIFS／行引用公式写入。
+fn write_summary(ws: &mut Worksheet, a: &Analysis) -> Result<(), AppError> {
+    ws.set_name("固定资产汇总变动表").map_err(xlsx)?;
+    let (header, money, text) = formats();
+    let keys: Vec<(String, String)> = a.totals.keys().cloned().collect();
+    let (columns, rows) = build_summary_rows(a);
+    let mut headers = vec![String::new(), "变动项目".to_owned(), "合计".to_owned()];
+    headers.extend(columns.iter().cloned());
+    for (c, h) in headers.iter().enumerate() {
+        ws.write_string_with_format(0, c as u16, h, &header)
+            .map_err(xlsx)?;
+        ws.set_column_width(c as u16, if c == 0 { 14.0 } else if c == 1 { 30.0 } else { 16.0 })
+            .map_err(xlsx)?;
+    }
+    let multi_entity = columns.iter().any(|title| title.contains('-'));
+    for c in 0..headers.len() {
+        ws.write_string_with_format(
+            1,
+            c as u16,
+            match c {
+                0 | 1 => "变动项目",
+                2 => "计算",
+                _ if multi_entity => "主体-资产类别",
+                _ => "资产类别",
+            },
+            &text,
+        )
+        .map_err(xlsx)?;
+    }
+    type Lookup = BTreeMap<(&'static str, String), u32>;
     let mut lookup: Lookup = BTreeMap::new();
-    for (index, row) in visible.iter().enumerate() {
+    for (index, row) in rows.iter().enumerate() {
         lookup.insert((row.section, row.item.clone()), index as u32 + 2);
     }
+    let ref_of = |lookup: &Lookup, section: &'static str, item: &str, col: char| -> Option<String> {
+        lookup
+            .get(&(section, item.to_owned()))
+            .map(|row| format!("{col}{}", row + 1))
+    };
+    // 行引用型公式（净值／勾稽差异）:按 (段, 项目, 符号) 拼正负号。
+    let signed_refs = |lookup: &Lookup, col: char, parts: &[(&'static str, &str, f64)]| -> String {
+        let mut formula = String::new();
+        for (offset, (section, item, sign)) in parts.iter().enumerate() {
+            if let Some(reference) = ref_of(lookup, section, item, col) {
+                if offset > 0 || *sign < 0.0 {
+                    formula.push(if *sign > 0.0 { '+' } else { '-' });
+                }
+                formula.push_str(&reference);
+            }
+        }
+        formula
+    };
     let section_format = header
         .clone()
         .set_align(FormatAlign::Left)
         .set_align(FormatAlign::VerticalCenter);
     let last_letter = col_letter(headers.len().saturating_sub(1));
-    for (index, row) in visible.iter().enumerate() {
+    for (index, row) in rows.iter().enumerate() {
         let excel_row = index as u32 + 2;
         let excel = excel_row + 1;
         ws.write_string_with_format(excel_row, 1, &row.item, &text)
@@ -1503,7 +1564,104 @@ fn write_summary(ws: &mut Worksheet, a: &Analysis) -> Result<(), AppError> {
         .map_err(xlsx)?;
         for (c, value) in row.values.iter().enumerate() {
             let col = col_letter(3 + c);
-            let formula = (row.formula)(&keys[c].0, &keys[c].1, col.chars().next().unwrap(), &lookup);
+            let col_char = col.chars().next().unwrap();
+            let (entity, category) = (&keys[c].0, &keys[c].1);
+            let formula = match &row.kind {
+                FormulaKind::Tb { role, closing } => {
+                    sumifs_tb_formula(entity, category, role, if *closing { 'G' } else { 'F' })
+                }
+                FormulaKind::Je { role, movement, sign } => {
+                    let base = sumifs_je_formula(entity, category, role, movement);
+                    if *sign > 0.0 { base } else { format!("-{base}") }
+                }
+                FormulaKind::JeMethod { role, movement, method, sign } => {
+                    let base =
+                        sumifs_je_method_formula(entity, category, role, movement, method);
+                    if *sign > 0.0 { base } else { format!("-{base}") }
+                }
+                FormulaKind::ReclassNet { role } => {
+                    let base = sumifs_je_formula(entity, category, role, "重分类");
+                    if *role == "cost" { base } else { format!("-{base}") }
+                }
+                FormulaKind::ReclassIn { role } => {
+                    let base = sumifs_je_formula(entity, category, role, "重分类");
+                    if *role == "cost" {
+                        format!("MAX({base},0)")
+                    } else {
+                        format!("MAX(-{base},0)")
+                    }
+                }
+                FormulaKind::ReclassOut { role } => {
+                    let base = sumifs_je_formula(entity, category, role, "重分类");
+                    if *role == "cost" {
+                        format!("MIN({base},0)")
+                    } else {
+                        format!("MIN(-{base},0)")
+                    }
+                }
+                FormulaKind::Charge => format!(
+                    "-{}-{}",
+                    sumifs_je_formula(entity, category, "depreciation", "新增"),
+                    sumifs_je_formula(entity, category, "depreciation", "本年计提/其他增加")
+                ),
+                FormulaKind::Provision => format!(
+                    "-{}",
+                    sumifs_je_formula(entity, category, "depreciation", "本年计提/其他增加")
+                ),
+                FormulaKind::AdditionTransferDep => format!(
+                    "-{}",
+                    sumifs_je_formula(entity, category, "depreciation", "新增")
+                ),
+                FormulaKind::DisposalDecrease => format!(
+                    "{}+{}",
+                    sumifs_je_formula(entity, category, "depreciation", "处置"),
+                    sumifs_je_formula(entity, category, "depreciation", "折旧其他减少")
+                ),
+                FormulaKind::DisposalDepOther => sumifs_je_formula(
+                    entity,
+                    category,
+                    "depreciation",
+                    "折旧其他减少",
+                ),
+                FormulaKind::NbvOpening => signed_refs(
+                    &lookup,
+                    col_char,
+                    &[
+                        ("原值", "期初原值", 1.0),
+                        ("累计折旧", "期初累计折旧", -1.0),
+                    ],
+                ),
+                FormulaKind::NbvClosing => signed_refs(
+                    &lookup,
+                    col_char,
+                    &[
+                        ("原值", "期末原值", 1.0),
+                        ("累计折旧", "期末累计折旧", -1.0),
+                    ],
+                ),
+                FormulaKind::DiffCost => signed_refs(
+                    &lookup,
+                    col_char,
+                    &[
+                        ("原值", "期初原值", 1.0),
+                        ("原值", "原值增加", 1.0),
+                        ("原值", "原值减少", -1.0),
+                        ("原值", "原值重分类", 1.0),
+                        ("原值", "期末原值", -1.0),
+                    ],
+                ),
+                FormulaKind::DiffDep => signed_refs(
+                    &lookup,
+                    col_char,
+                    &[
+                        ("累计折旧", "期初累计折旧", 1.0),
+                        ("累计折旧", "当期计提", 1.0),
+                        ("累计折旧", "处置减少", -1.0),
+                        ("累计折旧", "累计折旧重分类", 1.0),
+                        ("累计折旧", "期末累计折旧", -1.0),
+                    ],
+                ),
+            };
             if formula.is_empty() {
                 ws.write_number_with_format(excel_row, (3 + c) as u16, *value, &money)
                     .map_err(xlsx)?;
@@ -1518,7 +1676,7 @@ fn write_summary(ws: &mut Worksheet, a: &Analysis) -> Result<(), AppError> {
             }
         }
     }
-    let written: Vec<(u32, &'static str)> = visible
+    let written: Vec<(u32, &'static str)> = rows
         .iter()
         .enumerate()
         .map(|(index, row)| (index as u32 + 2, row.section))
@@ -1549,7 +1707,7 @@ fn write_summary(ws: &mut Worksheet, a: &Analysis) -> Result<(), AppError> {
     ws.set_row_height(note_row - 1, 8).map_err(xlsx)?;
     ws.write_string_with_format(note_row, 0, "本表说明", &header)
         .map_err(xlsx)?;
-    let note = "期初／期末取科目余额表已确认科目的余额，增加／减少／重分类取序时账逐凭证归集；数据行均为活公式（SUMIFS 至 TB 隐藏页／JE 明细），勾稽差异行零值表示 JE 与 TB 分毫勾稽。";
+    let note = "期初／期末取科目余额表已确认科目的余额,增加／减少／重分类取序时账逐凭证归集;数据行均为活公式(SUMIFS 至 TB 隐藏页/JE 明细),勾稽差异行零值表示 JE 与 TB 分毫勾稽。";
     if headers.len() >= 4 {
         ws.merge_range(note_row, 1, note_row, 3, note, &note_format)
             .map_err(xlsx)?;
@@ -2170,7 +2328,7 @@ fn output_path(params: &Value) -> Result<PathBuf, AppError> {
 fn xlsx(e: rust_xlsxwriter::XlsxError) -> AppError {
     error(
         "FA_TBJE_EXPORT_FAILED",
-        "写入 Excel 底稿失败。",
+        "写入 Excel 底稿失败。若输出文件当前正在 Excel 中打开，请关闭后重试；若反复失败，请检查资产类别名称是否含引号等特殊字符。",
         Some(e.to_string()),
     )
 }
@@ -2354,6 +2512,129 @@ mod tests {
         assert!((additions[0].original - 42477.82).abs() < 0.005);
         assert!(disposals.is_empty());
         assert!((totals[&("A".into(), "工具仪器".into())].additions - 42477.82).abs() < 0.005);
+    }
+
+    /// 4800（SAP 型账套）真实样例：累计折旧挂在 1601 下、科目串编码在尾、
+    /// 机器设备原值与累计折旧余额同额对冲。跑法：
+    /// $env:FA_TBJE_FX_DIR='...\汇兑损益测试资料'; cargo test tbje_4800 -- --ignored
+    #[test]
+    #[ignore = "requires the local 汇兑损益测试资料 directory"]
+    fn tbje_4800_real_sample_exports_workbook() {
+        let dir = PathBuf::from(std::env::var("FA_TBJE_FX_DIR").expect("FA_TBJE_FX_DIR"));
+        let mut params = json!({
+            "tbSource":{"inputPath":dir.join("TB-4800.xlsx"),"headerRow":1,"headerDepth":1},
+            "jeSource":{"inputPath":dir.join("4800_JE_2025.01-12.xlsx"),"headerRow":1,"headerDepth":1},
+            "tbMapping":{
+                "entity":"公司代码","accountCode":"科目代码","accountName":["科目名称一级","科目名称二级"],
+                "openingFunctionalAmount":"期初金额-本位币",
+                "ytdFunctionalDebit":"借方金额-本位币","ytdFunctionalCredit":"贷方金额-本位币",
+                "closingFunctionalAmount":"期末金额-本位币"
+            },
+            "jeMapping":{
+                "entity":"公司代码","date":"记帐日期","id":["凭证类型","凭证号码"],
+                "accountCode":"会计科目","accountName":["科目文本"],
+                "summary":"科目文本",
+                "functionalAmount":"本位币金额","direction":"借贷"
+            },
+            "reportEnd":"2025-12-31"
+        });
+        let mut assignments = Vec::new();
+        for (code, name, role, suffix) in [
+            ("1601030001", "办公设备", "cost", "固定资产-办公设备"),
+            ("1601040001", "计算机及硬件设备", "cost", "固定资产-计算机及硬件设备"),
+            ("1601050002", "机器设备", "cost", "固定资产-机器设备"),
+            ("1601050099", "机器设备", "cost", "固定资产-机器设备"),
+            ("1601130001", "办公设备", "depreciation", "固定资产-累计折旧-办公设备"),
+            ("1601140001", "计算机及硬件设备", "depreciation", "固定资产-累计折旧-计算机及硬件设备"),
+            ("1601150002", "机器设备", "depreciation", "固定资产-累计折旧-机器设备"),
+            ("1601150099", "机器设备", "depreciation", "固定资产-累计折旧-机器设备"),
+        ] {
+            assignments.push(json!({
+                "account": format!("固定资产 {suffix} {code}"),
+                "role": role,
+                "category": name
+            }));
+        }
+        params["accountAssignments"] = json!(assignments);
+        let a = analyze(&params, &AtomicBool::new(false)).unwrap();
+        println!(
+            "4800 分析：TB {} 行 / JE {} 行 / 新增 {} / 处置 {} / 警告 {}",
+            a.tb.len(),
+            a.je.len(),
+            a.additions.len(),
+            a.disposals.len(),
+            a.warnings.len()
+        );
+        let out = dir.join("fa-tbje-4800-回归底稿.xlsx");
+        write_workbook(&out, &a, &AtomicBool::new(false)).unwrap();
+        assert_export_caches(&out);
+        println!("4800 底稿：{}", out.display());
+    }
+
+    /// 预览与导出复用同一份落盘缓存：预览完成后把两个源文件删掉，导出依然
+    /// 成功——证明读表与分类没有跑第二遍（跑第二遍会因源文件不存在而报错）。
+    #[test]
+    fn export_reuses_preview_analysis_cache() {
+        let (dir, out, mut params) = fixture();
+        params["outputPath"] = json!(out);
+        let key = analysis_cache_key(&params);
+        let _ = std::fs::remove_file(cache_dir().join(format!("{key}.json")));
+        let quiet = |method: &str| {
+            run_job(
+                method,
+                params.clone(),
+                &|_, _, _, _| {},
+                Arc::new(AtomicBool::new(false)),
+                &PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false))),
+            )
+        };
+        let preview = quiet("fa.tbje_preview").unwrap();
+        assert!(preview["jeRows"].as_u64().unwrap() > 0);
+        // 预览的汇总表与导出同源:主干行齐全、数值正确、全零方式行被过滤。
+        let table = &preview["summaryTable"];
+        assert_eq!(table["columns"], json!(["机器设备"]));
+        let items = table["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["item"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        for must in ["期初原值", "原值增加", "原值减少", "期末原值", "当期计提"] {
+            assert!(
+                items.iter().any(|item| item.starts_with(must)),
+                "汇总表预览缺 {must}: {items:?}"
+            );
+        }
+        assert_eq!(
+            table["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row["section"] == "勾稽差异")
+                .count(),
+            2,
+            "表下方应有两行勾稽差异"
+        );
+        let opening = table["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["item"] == "期初原值")
+            .unwrap();
+        assert_eq!(opening["values"], json!([1000.0]));
+        let cache_file = cache_dir().join(format!("{key}.json"));
+        assert!(cache_file.exists(), "预览后应落盘缓存：{}", cache_file.display());
+        assert!(
+            load_cached_analysis(&key).is_some(),
+            "缓存应能读回（serde 环路）"
+        );
+        std::fs::remove_file(dir.join("tb.csv")).unwrap();
+        std::fs::remove_file(dir.join("je.csv")).unwrap();
+        let export = quiet("fa.tbje_export").unwrap();
+        assert_eq!(export["outputPaths"].as_array().map(Vec::len), Some(1));
+        // 缓存键随任一参数变化而失效：改报告截止日后，缓存不再命中。
+        let _ = std::fs::remove_file(cache_dir().join(format!("{key}.json")));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn fixture() -> (PathBuf, PathBuf, Value) {

@@ -29,7 +29,7 @@
 }
 .fx-mode-bar button:focus-visible,
 .fx-detected-file button:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 .fx-source-grid {
@@ -39,6 +39,40 @@
   gap: 16px;
   /* stretch：左右两张识别卡等高，避免内容行数不同导致底部参差。 */
   align-items: stretch;
+}
+.fx-source-requirements {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.fx-source-requirements > strong {
+  margin-right: var(--sp-1);
+  color: var(--ink-strong);
+}
+.fx-source-requirements > span {
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface-sunken);
+}
+.fx-source-requirements > span.ready {
+  border-color: color-mix(in srgb, var(--success-fg) 35%, var(--border));
+  background: var(--success-bg);
+  color: var(--success-fg);
+}
+.fx-source-requirements > span.required {
+  color: var(--label);
+}
+.fx-source-requirements > span.optional {
+  border-color: var(--border-soft);
+  color: var(--text-muted);
+}
+.fx-data-notice {
+  margin-top: var(--sp-3);
 }
 .fx-source-card {
   overflow: hidden;
@@ -58,13 +92,13 @@
 .fx-source-slot-tb {
   grid-area: tb;
 }
-.fx-source-empty {
+.fx-page .fx-source-empty {
   display: flex;
   flex-direction: column;
   justify-content: center;
   min-height: 148px;
-  border: 0 !important;
-  box-shadow: none !important;
+  border: 0;
+  box-shadow: none;
   background: color-mix(in srgb, var(--muted) 55%, var(--card));
 }
 .fx-source-empty p {
@@ -105,13 +139,13 @@
 .fx-list select {
   min-height: 34px;
   padding: 6px 9px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   background: var(--background);
   color: var(--foreground);
 }
 .fx-warning {
-  color: #9a5b00;
+  color: var(--warning-fg);
   font-size: 12px;
 }
 .fx-preview {
@@ -131,8 +165,8 @@
 .fx-hard-badge {
   padding: 3px 7px;
   border-radius: 999px;
-  background: #e8f5ee;
-  color: #17663d;
+  background: var(--success-bg);
+  color: var(--success-fg);
   font-size: 11px;
 }
 .fx-header-control {
@@ -144,7 +178,7 @@
   width: 100%;
   min-height: 30px;
   padding: 4px 6px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 6px;
   background: var(--background);
   color: var(--foreground);
@@ -154,7 +188,7 @@
   border-color: var(--primary);
 }
 .fx-header-control small {
-  color: #17663d;
+  color: var(--success-fg);
   font-size: 10px;
 }
 .fx-review-status {
@@ -224,8 +258,8 @@
   font-size: 12px;
 }
 .fx-review-states span.running {
-  background: #fff3d6;
-  color: #855400;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
 }
 .ledger-review-compact {
   display: grid;
@@ -252,8 +286,8 @@
 .ledger-review-change em {
   padding: 2px 7px;
   border-radius: 999px;
-  background: #fff3d6;
-  color: #855400;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
   font-size: 11px;
   font-style: normal;
 }
@@ -295,6 +329,44 @@
   margin: 0;
   color: var(--muted-foreground);
   font-size: 13px;
+}
+.fx-result-status {
+  display: grid;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-muted);
+}
+.fx-result-status strong {
+  color: var(--ink-strong);
+  font-size: var(--fs-md);
+}
+.fx-result-status span {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.fx-result-status.usable {
+  border-color: color-mix(in srgb, var(--success-fg) 35%, var(--border));
+  background: var(--success-bg);
+}
+.fx-result-status.usable strong {
+  color: var(--success-fg);
+}
+.fx-result-status.limited {
+  border-color: color-mix(in srgb, var(--warning-dot) 60%, var(--border));
+  background: var(--warning-bg);
+}
+.fx-result-status.limited strong {
+  color: var(--warning-fg);
+}
+.fx-result-status.blocked {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+.fx-result-status.blocked strong {
+  color: var(--danger-fg);
 }
 .fx-bridge-step {
   display: grid;
@@ -356,15 +428,15 @@
   background: color-mix(in srgb, var(--primary) 9%, var(--card));
 }
 .fx-bridge-metric.pass {
-  border-color: #9bc7a6;
-  background: #edf8f0;
+  border-color: var(--success-border);
+  background: var(--success-bg);
 }
 .fx-bridge-metric.pass strong {
-  color: #17663d;
+  color: var(--success-fg);
 }
 .fx-bridge-metric.warning {
-  border-color: #dfbd77;
-  background: #fff8e8;
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
 }
 .fx-operator {
   color: var(--muted-foreground);
@@ -474,7 +546,7 @@
 .fx-classification-list select {
   min-height: 36px;
   padding: 6px 9px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   background: var(--background);
   color: var(--foreground);
@@ -572,7 +644,7 @@
   gap: 6px;
   width: max-content;
   margin: 0.75rem 0 0;
-  color: #315f62;
+  color: var(--brand-link);
 }
 .fx-source-status i {
   width: 7px;
@@ -602,7 +674,7 @@
 .fx-detected-file button {
   border: 0;
   background: transparent;
-  color: #a33;
+  color: var(--danger-fg);
   cursor: pointer;
 }
 .fx-stage-note {
@@ -633,7 +705,7 @@
 }
 .fx-export-complete {
   margin: 8px 0 0;
-  color: #17663d;
+  color: var(--success-fg);
   font-size: 13px;
 }
 .fx-currency-confirm {
@@ -643,17 +715,17 @@
   gap: 16px;
   margin: 14px 0;
   padding: 14px 16px;
-  border: 1px solid #e2a83b;
+  border: 1px solid var(--warning-border);
   border-radius: 12px;
-  background: #fff8e8;
+  background: var(--warning-bg);
 }
 .fx-currency-confirm p {
   margin: 4px 0 0;
-  color: #596b6d;
+  color: var(--text-muted);
   line-height: 1.55;
 }
 .fx-currency-confirm strong {
-  color: #8a5700;
+  color: var(--warning-fg);
 }
 
 .fx-alignment ul {
@@ -661,7 +733,7 @@
   padding-left: 20px;
   display: grid;
   gap: 6px;
-  color: #8a5700;
+  color: var(--warning-fg);
   font-size: 13px;
   line-height: 1.55;
 }
@@ -672,8 +744,8 @@
 
 /* TB＋JE 余额滚动失配清单：提示但不阻断，默认收起，展开看逐条明细。 */
 .fx-rollforward-issues {
-  border: 1px solid var(--warning-border, #e0b884);
-  background: var(--warning-bg, #fdf6ec);
+  border: 1px solid var(--warning-border);
+  background: var(--warning-bg);
   border-radius: 8px;
   padding: 12px 14px;
   margin-bottom: 12px;
@@ -690,7 +762,7 @@
 .fx-rollforward-head small {
   display: block;
   margin-top: 4px;
-  color: var(--muted-foreground, #6b6257);
+  color: var(--muted-foreground);
   line-height: 1.6;
 }
 .fx-rollforward-table {
@@ -710,7 +782,7 @@
   padding: 6px 10px;
   text-align: right;
   white-space: nowrap;
-  border-bottom: 1px solid var(--border, #e6ded2);
+  border-bottom: 1px solid var(--border);
 }
 .fx-rollforward-table th:nth-child(-n + 3),
 .fx-rollforward-table td:nth-child(-n + 3) {
@@ -724,7 +796,7 @@
 .fx-rollforward-table thead th {
   position: sticky;
   top: 0;
-  background: var(--warning-bg, #fdf6ec);
+  background: var(--warning-bg);
 }
 .fx-rollforward-diff {
   font-weight: 600;
@@ -733,8 +805,8 @@
 /* TB 粒度不足：外币敞口是「科目×币种」粒度，TB 只给到科目粒度时无法测算。
    用户能做的动作很具体——换一份余额表，所以这条要比普通提示更显眼。 */
 .fx-granularity-notice {
-  border: 1px solid var(--destructive-border, #d98b8b);
-  background: var(--destructive-bg, #fdf1f1);
+  border: 1px solid var(--danger-border);
+  background: var(--danger-bg);
   border-radius: 8px;
   padding: 12px 14px;
   margin-bottom: 12px;
@@ -751,15 +823,15 @@
 .fx-granularity-head small {
   display: block;
   margin-top: 4px;
-  color: var(--muted-foreground, #6b6257);
+  color: var(--muted-foreground);
   line-height: 1.6;
 }
 .fx-granularity-action {
   margin-top: 8px;
   padding: 8px 10px;
   border-radius: 6px;
-  background: var(--card, #fff);
-  border: 1px solid var(--border, #e6ded2);
+  background: var(--card);
+  border: 1px solid var(--border);
   line-height: 1.6;
 }
 .fx-granularity-table {
@@ -777,26 +849,26 @@
 .fx-granularity-table td {
   padding: 6px 10px;
   text-align: left;
-  border-bottom: 1px solid var(--border, #e6ded2);
+  border-bottom: 1px solid var(--border);
   vertical-align: top;
 }
 .fx-granularity-table thead th {
   position: sticky;
   top: 0;
-  background: var(--destructive-bg, #fdf1f1);
+  background: var(--danger-bg);
   white-space: nowrap;
 }
 .fx-granularity-table td:last-child {
   min-width: 20rem;
-  color: var(--muted-foreground, #6b6257);
+  color: var(--muted-foreground);
 }
 
 /* 检查与勾稽：默认折叠，用户想追到「哪一步没通过」时展开。 */
 .fx-checks {
-  border: 1px solid var(--border, #e6ded2);
+  border: 1px solid var(--border);
   border-radius: 8px;
   margin: 12px 0;
-  background: var(--card, #fff);
+  background: var(--card);
 }
 .fx-checks > summary {
   cursor: pointer;
@@ -807,7 +879,7 @@
   user-select: none;
 }
 .fx-checks > summary span {
-  color: var(--muted-foreground, #6b6257);
+  color: var(--muted-foreground);
   font-size: 13px;
 }
 .fx-checks-body {
@@ -823,7 +895,7 @@
 .fx-checks-body p {
   margin: 0 0 8px;
   font-size: 13px;
-  color: var(--muted-foreground, #6b6257);
+  color: var(--muted-foreground);
   line-height: 1.6;
 }
 .fx-checks-list {
@@ -846,13 +918,13 @@
 .fx-checks-table td {
   padding: 6px 10px;
   text-align: left;
-  border-bottom: 1px solid var(--border, #e6ded2);
+  border-bottom: 1px solid var(--border);
   vertical-align: top;
 }
 .fx-checks-table thead th {
   position: sticky;
   top: 0;
-  background: var(--card, #fff);
+  background: var(--card);
   white-space: nowrap;
 }
 .fx-checks-number {
@@ -861,19 +933,19 @@
   white-space: nowrap;
 }
 .fx-checks-table td:last-child {
-  color: var(--muted-foreground, #6b6257);
+  color: var(--muted-foreground);
 }
 .fx-severity {
   display: inline-block;
   padding: 1px 8px;
   border-radius: 999px;
   font-size: 12px;
-  background: var(--muted, #f2ede5);
+  background: var(--muted);
   white-space: nowrap;
 }
 .fx-severity.blocking {
-  background: var(--destructive-bg, #fdf1f1);
-  color: var(--destructive, #a63d3d);
+  background: var(--danger-bg);
+  color: var(--destructive);
 }
 
 /* 凭证分类复核分两段：等你定分类 / 已定分类但算不出金额。 */
@@ -887,7 +959,7 @@
 .fx-classification-section > p {
   margin: 0 0 10px;
   font-size: 13px;
-  color: var(--muted-foreground, #6b6257);
+  color: var(--muted-foreground);
   line-height: 1.7;
 }
 
@@ -914,7 +986,7 @@
 }
 /* 「按本位币」「未识别」都表示没认出账户币种，描边标出来，便于滚一遍就扫到。 */
 .fx-accounts select.fx-currency-unknown {
-  border-color: #b45309;
+  border-color: var(--warning-border);
 }
 .fx-accounts-more {
   margin: 0 0 10px;
@@ -927,8 +999,8 @@
 }
 
 .fx-accounts select.fx-currency-risky {
-  border-color: #c2410c;
-  color: #c2410c;
+  border-color: var(--danger-fg);
+  color: var(--danger-fg);
   font-weight: 600;
 }
 /* 「科目分类」清单的关键词筛选（components/KeywordFilter）：存款利息与汇兑损益共用，
@@ -944,13 +1016,13 @@
   min-width: 0;
   min-height: 34px;
   padding: 6px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   background: var(--background);
   color: var(--foreground);
 }
 .fx-list-filter input:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
 .fx-list-filter .fx-list-filter-count {
@@ -964,7 +1036,7 @@
   place-items: center;
   width: 30px;
   height: 30px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   background: var(--background);
   color: var(--muted-foreground);
@@ -977,12 +1049,12 @@
   color: var(--primary);
 }
 .fx-list-filter button:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 /* 科目名与凭证结构判定冲突的提示行：结构为准，科目名只做交叉验证。 */
 .fx-conflict-hint {
-  color: #8a5700 !important;
+  color: var(--warning-fg);
   font-weight: 600;
 }
 
@@ -1021,15 +1093,15 @@
   padding: 9px 11px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--popover, #222);
-  color: var(--popover-foreground, #eee);
+  background: var(--popover);
+  color: var(--popover-foreground);
   font-size: 12px;
   font-weight: 400;
   line-height: 1.6;
   text-align: left;
   white-space: normal;
   z-index: 40;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+  box-shadow: var(--shadow-overlay);
 }
 .fx-info-hint:hover .fx-info-hint-tip,
 .fx-info-hint:focus-visible .fx-info-hint-tip {
@@ -1052,7 +1124,7 @@
   padding: 0 2px;
   border: 0;
   background: none;
-  color: var(--primary, #0f766e);
+  color: var(--primary);
   font: inherit;
   text-decoration: underline;
   cursor: pointer;

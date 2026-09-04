@@ -20,6 +20,8 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
+import { DataHandlingNotice } from "@/components/DataHandlingNotice";
+import { EmptyState } from "@/components/EmptyState";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -56,6 +58,7 @@ import {
   useLedgerForms,
 } from "@/ledgerForms";
 import {
+  compareGroups,
   fileName,
   pairLedgerFiles,
   reassignJe,
@@ -517,6 +520,9 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const intakeSectionRef = useRef<HTMLElement | null>(null);
   const pairingSectionRef = useRef<HTMLElement | null>(null);
   const resultSectionRef = useRef<HTMLElement | null>(null);
+  // 用户在配对页明确选过「不配对序时账」的 TB。二次添加文件时这些组不许被
+  // 自动配对重新塞回 JE——那是用户亲手清掉的，不是没配上。
+  const clearedTbsRef = useRef(new Set<string>());
 
   const { job, setJob, activeJobId } = useJobEvents({
     toolId: "tbje_check",
@@ -568,13 +574,16 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     const files = selected.filter((path) => /\.(xlsx?|xlsm|csv)$/i.test(path));
     if (!files.length) return;
     setError("");
-    invalidateResults();
+    invalidateResults(false);
     setBusy(true);
     const failures: string[] = [];
     const recognized: PairingFile[] = [];
     const nextInspects: Record<string, Inspection> = { ...inspects };
     const nextMappings: Record<string, Mapping> = { ...mappings };
     for (const [index, path] of files.entries()) {
+      // 已经在列的文件不再重新识别：用户换过的工作表、改过的字段映射要保住，
+      // 重复选入只当「确认要这份」。
+      if (nextInspects[path]) continue;
       setStatus(`正在识别 ${index + 1} / ${files.length}：${fileName(path)}`);
       try {
         const classified = (await engineCall("deposit.classify_source", {
@@ -601,19 +610,40 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         failures.push(`${fileName(path)}：${errorText(e)}`);
       }
     }
-    // 已经在列表里的文件也参与重新配对，否则分两次拖入就配不到一起。
-    const existing: PairingFile[] = groups.flatMap((group) =>
-      [group.tb, group.je].filter(Boolean).map((file) => file!),
+    // 二次添加不推翻已有配对：配好对的组（包括用户手工调整过的）原样保留，
+    // 手工选过「不配对」的 TB 组也原样保留，只有「没配上 JE 的 TB」「没被
+    // 认领的 JE」和新文件一起重新自动配对——分两批拖入仍能配上，但用户确认
+    // 过的结果不会被冲掉。
+    const settled = groups.filter(
+      (group) => group.tb && (group.je || clearedTbsRef.current.has(group.id)),
     );
-    const merged = [...existing, ...recognized].filter(
+    const openTbs = groups
+      .filter(
+        (group) =>
+          group.tb && !group.je && !clearedTbsRef.current.has(group.id),
+      )
+      .map((group) => group.tb!);
+    const looseJes = groups
+      .filter((group) => !group.tb && group.je)
+      .map((group) => group.je!);
+    const pool = [...openTbs, ...looseJes, ...recognized].filter(
       (file, index, all) =>
         all.findIndex((other) => other.path === file.path) === index,
     );
+    const paired = pairLedgerFiles(pool);
+    const nextGroups = [...settled, ...paired].sort(compareGroups);
     setInspects(nextInspects);
     setMappings(nextMappings);
-    const paired = pairLedgerFiles(merged);
-    setGroups(paired);
-    if (paired.length > 0) setCurrentStep(1);
+    setGroups(nextGroups);
+    // LLM 联合复核的结论跟着组走：组还在就继续算复核过，组被解散才清掉。
+    const survivingIds = new Set(nextGroups.map((group) => group.id));
+    setLlmReviews((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([id]) => survivingIds.has(id)),
+      ),
+    );
+    setLlmReviewStatus("");
+    if (nextGroups.length > 0) setCurrentStep(1);
     setStatus(
       failures.length ? `${failures.length} 份文件没读成：${failures[0]}` : "",
     );
@@ -686,6 +716,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     setExpanded((current) =>
       current?.groupId === group.id ? undefined : current,
     );
+    clearedTbsRef.current.delete(group.id);
     if (groups.length === 1) setCurrentStep(0);
     invalidateResults();
   }
@@ -703,6 +734,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     setExpanded(undefined);
     setLlmReviews({});
     setLlmReviewStatus("");
+    clearedTbsRef.current.clear();
     setStatus("");
     setCurrentStep(0);
     invalidateResults();
@@ -710,6 +742,8 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
 
   function selectJe(groupId: string, path?: string) {
     setGroups((current) => reassignJe(current, groupId, path));
+    if (path) clearedTbsRef.current.delete(groupId);
+    else clearedTbsRef.current.add(groupId);
     setExpanded(undefined);
     invalidateResults();
   }
@@ -1029,6 +1063,16 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
+  const resultReviewCount = outcomes.filter(
+    (outcome) =>
+      !outcome.ok ||
+      [
+        outcome.result?.rollforward,
+        outcome.result?.tbVsJe,
+        outcome.result?.equation,
+      ].some((verdict) => !verdict?.performed || verdict.passed !== true),
+  ).length;
+
   return (
     <main className="tool-page fx-page tbje-page">
       <PageHeader
@@ -1076,6 +1120,12 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
               </CardDescription>
             </CardHeader>
             <CardContent>
+              <DataHandlingNotice
+                mode="network-assisted"
+                title="核对默认在本机完成"
+                description="文件读取与勾稽在本机进行；AI 辅助识别或 LLM 联合复核可能将字段名和预览样本按设置发送到所配置服务。"
+                details="至少加入一份 TB；如需核对 TB 与 JE 发生额，请为同组补充 JE。"
+              />
               <div ref={dropRef}>
                 <FileDropInput
                   value=""
@@ -1086,6 +1136,13 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   highlight={dropActive}
                 />
               </div>
+              {groups.length === 0 && (
+                <EmptyState
+                  compact
+                  title="准备核对资料"
+                  description="加入至少一份科目余额表（TB）；如需发生额勾稽，再加入对应的序时账（JE）。支持一次拖入多组文件。"
+                />
+              )}
               {status && (
                 <p className="tbje-status" role="status" aria-live="polite">
                   <i aria-hidden="true" />
@@ -1159,7 +1216,9 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   >
                     <div className="tbje-group-row">
                       <div className="tbje-group-identity">
-                        <strong>第 {group.label} 组</strong>
+                        <strong title={`第 ${group.label} 组`}>
+                          第 {group.label} 组
+                        </strong>
                         <span
                           className={`tbje-pair-status${group.needsReview ? " review" : ""}`}
                         >
@@ -1170,7 +1229,10 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                       <div className="tbje-file-cell">
                         <div className="tbje-file-line">
                           <span className="tbje-kind-tag">TB</span>
-                          <span className="tbje-group-file">
+                          <span
+                            className="tbje-group-file"
+                            title={group.tb?.path}
+                          >
                             {group.tb
                               ? fileName(group.tb.path)
                               : "（缺科目余额表）"}
@@ -1217,6 +1279,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                           <span className="tbje-kind-tag je">JE</span>
                           <select
                             className="tbje-je-select"
+                            title={group.je?.path}
                             aria-label={`为第 ${group.label} 组选择序时账`}
                             value={group.je?.path ?? ""}
                             disabled={busy}
@@ -1416,10 +1479,23 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
             </CardHeader>
             <CardContent>
               <div className="tbje-result-toolbar">
-                <span className="fx-hint">
-                  已完成 {outcomes.filter((outcome) => outcome.ok).length} 组；
-                  可逐组预览，或一次导出全部成功结果。
-                </span>
+                <div className="tbje-result-overview" role="status">
+                  <Badge
+                    variant="outline"
+                    className={
+                      resultReviewCount ? "badge-warning" : "badge-ready"
+                    }
+                  >
+                    {resultReviewCount
+                      ? `${resultReviewCount} 组需复核`
+                      : "全部核对通过"}
+                  </Badge>
+                  <span className="fx-hint">
+                    {resultReviewCount
+                      ? "先预览异常组并检查字段映射，确认后再导出底稿。"
+                      : "未发现异常，可逐组预览或一次导出全部结果。"}
+                  </span>
+                </div>
                 <Button
                   type="button"
                   variant="outline"
@@ -1565,7 +1641,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
               </div>
               {exported && (
                 <div className="tbje-exported" role="status" aria-live="polite">
-                  <span>
+                  <span title={exported.path}>
                     {exported.batch ? "全部结果已导出至：" : "明细已导出："}
                     {fileName(exported.path)}
                   </span>

@@ -5,6 +5,7 @@ import { contrastRatio, readableInk } from "./theme";
 const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 
 const themeIds = [
+  "green-dark",
   "classic-dark",
   "yellow-light",
   "blue-white",
@@ -15,6 +16,14 @@ const themeIds = [
   "teal-dark",
 ] as const;
 
+function variablesIn(block: string): Record<string, string> {
+  return Object.fromEntries(
+    [...block.matchAll(/(--[\w-]+)\s*:\s*(#[\da-f]{3,6})\s*;/gi)].map(
+      ([, name, value]) => [name, value.toLowerCase()],
+    ),
+  );
+}
+
 function variablesFor(theme: string): Record<string, string> {
   const escaped = theme.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const block = new RegExp(
@@ -22,11 +31,8 @@ function variablesFor(theme: string): Record<string, string> {
     "i",
   ).exec(css)?.[1];
   expect(block, `missing CSS block for ${theme}`).toBeTruthy();
-  return Object.fromEntries(
-    [...(block ?? "").matchAll(/(--[\w-]+)\s*:\s*(#[\da-f]{3,6})\s*;/gi)].map(
-      ([, name, value]) => [name, value.toLowerCase()],
-    ),
-  );
+  const root = /:root\s*\{([^}]*)\}/i.exec(css)?.[1] ?? "";
+  return { ...variablesIn(root), ...variablesIn(block ?? "") };
 }
 
 describe("redesigned theme palettes", () => {
@@ -95,5 +101,26 @@ describe("redesigned theme palettes", () => {
     const t = variablesFor(id);
     const foreground = readableInk(t["--brand"]);
     expect(contrastRatio(t["--brand"], foreground as string)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it.each(themeIds)("keeps input boundaries and focus rings visible in %s", (id) => {
+    const t = variablesFor(id);
+    for (const surface of ["--surface", "--surface-sunken", "--surface-page", "--surface-muted"]) {
+      expect(contrastRatio(t["--text-muted"], t[surface]), `${id}: control border on ${surface}`).toBeGreaterThanOrEqual(3);
+      expect(contrastRatio(t["--brand-link"], t[surface]), `${id}: focus ring on ${surface}`).toBeGreaterThanOrEqual(3);
+    }
+    expect(css).toContain("--control-border: var(--text-muted)");
+    expect(css).toContain("--input: var(--control-border)");
+    expect(css).toContain("--ring: var(--focus-ring)");
+    expect(css).toContain("--focus-ring: var(--brand-link)");
+  });
+
+  it.each(themeIds)("keeps all general-purpose text tokens readable across working surfaces in %s", (id) => {
+    const t = variablesFor(id);
+    for (const foreground of ["--ink", "--ink-strong", "--label", "--text-muted"]) {
+      for (const background of ["--surface", "--surface-sunken", "--surface-muted", "--surface-page"]) {
+        expect(contrastRatio(t[foreground], t[background]), `${id}: ${foreground} on ${background}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
   });
 });

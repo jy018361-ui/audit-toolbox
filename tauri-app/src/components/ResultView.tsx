@@ -20,6 +20,12 @@ const RESULT_COUNT_LABELS: Record<string, string> = {
   populatedSectionRows: "有数据 Section",
   outlookCompared: "可核对",
   outlookEqual: "核对一致",
+  // FA TB＋JE 预览指标
+  tbRows: "TB 科目行",
+  jeRows: "JE 明细行",
+  additions: "新增笔数",
+  disposals: "处置笔数",
+  reconciliationDifferences: "勾稽差异类别",
 };
 
 function stringList(value: unknown): string[] {

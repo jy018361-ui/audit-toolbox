@@ -14,6 +14,8 @@ import {
   fxMissingRequired,
   fxPreviewTokenFor,
   fxReportStart,
+  fxRequiredSources,
+  fxResultTrustStatus,
   fxResolveAccountRoles,
   granularityLabel,
   splitClassificationGroups,
@@ -30,6 +32,24 @@ import {
 } from "./ledgerMapping";
 import type React from "react";
 describe("fx audit mode selection", () => {
+  it("按模式明确 JE 与 TB 的必需关系", () => {
+    expect(fxRequiredSources("realized")).toEqual({ je: true, tb: false });
+    expect(fxRequiredSources("unrealized")).toEqual({ je: false, tb: true });
+    expect(fxRequiredSources("combined")).toEqual({ je: true, tb: true });
+  });
+
+  it("先给出可用、受限或需补资料的结果结论", () => {
+    expect(fxResultTrustStatus({}, 0).tone).toBe("usable");
+    expect(
+      fxResultTrustStatus({ tbFxGainLoss: 10, reconciliationPassed: false }, 0)
+        .tone,
+    ).toBe("limited");
+    expect(
+      fxResultTrustStatus({ unrealizedBalanceBasisComplete: false }, 0),
+    ).toMatchObject({ tone: "blocked", title: "需补充资料后再使用" });
+    expect(fxResultTrustStatus({}, 1).tone).toBe("blocked");
+  });
+
   it("uses two-point unrealized mode for TB only", () => {
     expect(fxDefaultMode(false, true)).toBe("unrealized");
     expect(fxAllowedModes(false, true)).toEqual(["unrealized"]);

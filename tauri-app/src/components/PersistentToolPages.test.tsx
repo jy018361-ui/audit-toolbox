@@ -1,21 +1,57 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useEffect, useState } from "react";
 import { MemoryRouter, NavLink, Route, Routes } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { telemetryTrack } from "../api";
 import {
   PersistentToolPages,
   retainedToolIds,
   toolIdFromPathname,
 } from "./PersistentToolPages";
 
+vi.mock("../api", () => ({ telemetryTrack: vi.fn() }));
+
+afterEach(cleanup);
+
 describe("PersistentToolPages", () => {
+  beforeEach(() => {
+    vi.mocked(telemetryTrack).mockClear();
+  });
+
   it("recognizes only complete tool routes", () => {
     expect(toolIdFromPathname("/tools/fx_audit")).toBe("fx_audit");
     expect(toolIdFromPathname("/tools/fx_audit/")).toBe("fx_audit");
     expect(toolIdFromPathname("/settings")).toBeUndefined();
     expect(toolIdFromPathname("/tools/a/more")).toBeUndefined();
+  });
+
+  it("reports a tool_open usage event whenever the active tool changes", async () => {
+    render(
+      <MemoryRouter initialEntries={["/tools/a"]}>
+        <nav>
+          <NavLink to="/tools/b">B</NavLink>
+          <NavLink to="/settings">Settings</NavLink>
+        </nav>
+        <Routes>
+          <Route path="/tools/:toolId" element={null} />
+          <Route path="/settings" element={<p>settings</p>} />
+        </Routes>
+        <PersistentToolPages renderPage={() => <p>page</p>} />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() =>
+      expect(telemetryTrack).toHaveBeenCalledWith("tool_open", "a"),
+    );
+    fireEvent.click(screen.getByRole("link", { name: "B" }));
+    await waitFor(() =>
+      expect(telemetryTrack).toHaveBeenCalledWith("tool_open", "b"),
+    );
+    // 离开工具页（去设置页）不产生新的上报。
+    fireEvent.click(screen.getByRole("link", { name: "Settings" }));
+    expect(telemetryTrack).toHaveBeenCalledTimes(2);
   });
 
   it("keeps visited pages and their effects mounted while disabling hidden DOM", () => {

@@ -82,7 +82,7 @@ function JobRow({ job, label, paused, onTogglePause, onStop }: JobRowProps) {
   const pct = percent(job);
   const tone = toneOf(job);
   return (
-    <div className="job-dialog-row">
+    <div className="job-dialog-row" aria-live="polite">
       <div className="job-dialog-row-head">
         <strong>{label}</strong>
         <span className="job-pct">{paused ? "已暂停" : `${pct}%`}</span>
@@ -102,7 +102,7 @@ function JobRow({ job, label, paused, onTogglePause, onStop }: JobRowProps) {
         >
           {paused ? "继续" : "暂停"}
         </Button>
-        <Button type="button" variant="ghost" size="sm" onClick={onStop}>
+        <Button type="button" variant="destructive" size="sm" onClick={onStop}>
           停止
         </Button>
       </div>
@@ -225,6 +225,9 @@ export function JobDialogProvider({
           type="button"
           className="job-dialog-pill"
           onClick={() => setMinimized(false)}
+          aria-label={`展开任务进度：${
+            running.length > 1 ? `${running.length} 个任务进行中` : nameOf(first.toolId)
+          }`}
         >
           <span className="job-dialog-pill-dot" aria-hidden="true" />
           <span className="job-dialog-pill-text">

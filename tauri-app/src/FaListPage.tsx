@@ -40,8 +40,11 @@ import { StepIndicator } from "@/components/StepIndicator";
 import { StatGrid } from "@/components/StatGrid";
 import { DataTable } from "@/components/DataTable";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { EmptyState } from "@/components/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { useJobEvents } from "@/hooks/useJobEvents";
 import { FaTbJePage } from "./FaTbJePage";
 type FaMapping = {
@@ -209,6 +212,11 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
             ? "公共 TB/JE 引擎识别与映射；固定资产业务层生成变动汇总、新增、处置、JE底表和对方科目汇总。"
             : "按期初、期末两份固定资产表按组合键匹配，生成 FA List、变动与汇总底稿。"
         }
+      />
+      <DataHandlingNotice
+        mode="network-assisted"
+        title="文件处理与智能复核"
+        description="表格读取、匹配和底稿生成在本机完成；使用 LLM 复核时，复核所需信息会按设置发送到对应服务。"
       />
       <div
         className="fx-mode-bar fa-mode-tabs"
@@ -1734,9 +1742,7 @@ function FaCardListPage() {
   const renderFaResult = () => {
     if (!result || typeof result !== "object")
       return (
-        <div className="empty">
-          读取文件结构后，可核对组合键、字段映射和预览结果。
-        </div>
+        <EmptyState compact title="等待结果" description="读取文件结构后，可核对组合键、字段映射和预览结果。" />
       );
     const value = result as Record<string, unknown>;
     if (value.begin && value.end) {
@@ -1893,7 +1899,7 @@ function FaCardListPage() {
         onStepClick={(index) => setStep((index + 1) as 1 | 2 | 3)}
       />
       <div className="fa-stack">
-        <Card>
+        <Card variant="section">
           <CardHeader>
             <CardTitle>
               {step === 1
@@ -1902,7 +1908,9 @@ function FaCardListPage() {
                   ? "2. 补充清单映射（可选）"
                   : "3. 保存并导出"}
             </CardTitle>
-            <Badge className="badge-ready">已就绪</Badge>
+            <Badge variant={busy ? "info" : inspection ? "success" : "neutral"}>
+              {busy ? "处理中" : inspection ? "已读取" : "等待文件"}
+            </Badge>
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
@@ -1956,7 +1964,7 @@ function FaCardListPage() {
                           ))}
                         </select>
                       ) : (
-                        <input
+                        <Input
                           value={beginSheet}
                           onChange={(e) => {
                             setBeginSheet(e.target.value);
@@ -1966,7 +1974,7 @@ function FaCardListPage() {
                       )}
                     </Field>
                     <Field label="标题行（留空自动识别）">
-                      <input
+                      <Input
                         value={beginHeaderRow}
                         placeholder="自动"
                         onChange={(e) => setBeginHeaderRow(e.target.value)}
@@ -2008,7 +2016,7 @@ function FaCardListPage() {
                           ))}
                         </select>
                       ) : (
-                        <input
+                        <Input
                           value={endSheet}
                           onChange={(e) => {
                             setEndSheet(e.target.value);
@@ -2018,7 +2026,7 @@ function FaCardListPage() {
                       )}
                     </Field>
                     <Field label="标题行（留空自动识别）">
-                      <input
+                      <Input
                         value={endHeaderRow}
                         placeholder="自动"
                         onChange={(e) => setEndHeaderRow(e.target.value)}
@@ -2473,19 +2481,19 @@ function FaCardListPage() {
                 <h3>4. 输出</h3>
                 <div className="form-grid">
                   <Field label="期初显示名称">
-                    <input
+                    <Input
                       value={beginDisplayName}
                       onChange={(e) => setBeginDisplayName(e.target.value)}
                     />
                   </Field>
                   <Field label="期末显示名称">
-                    <input
+                    <Input
                       value={endDisplayName}
                       onChange={(e) => setEndDisplayName(e.target.value)}
                     />
                   </Field>
                   <Field label="资产负债表日">
-                    <input
+                    <Input
                       type="date"
                       value={balanceSheetDate}
                       onChange={(e) => setBalanceSheetDate(e.target.value)}
@@ -2561,7 +2569,7 @@ function FaCardListPage() {
                     );
                   })()}
               </div>
-              <Badge className="badge-preview">
+              <Badge variant="info">
                 {step === 1 ? "导入文件" : "补充清单"}
               </Badge>
             </div>
@@ -2585,15 +2593,11 @@ function FaCardListPage() {
                 <>
                   <section className="fa-preview fa-preview-empty-card">
                     <header>期初文件预览</header>
-                    <div className="empty">
-                      选择期初文件并读取结构后，在此显示表格内容。
-                    </div>
+                    <EmptyState compact title="等待结果" description="选择期初文件并读取结构后，在此显示表格内容。" />
                   </section>
                   <section className="fa-preview fa-preview-empty-card">
                     <header>期末文件预览</header>
-                    <div className="empty">
-                      选择期末文件并读取结构后，在此显示表格内容。
-                    </div>
+                    <EmptyState compact title="等待结果" description="选择期末文件并读取结构后，在此显示表格内容。" />
                   </section>
                 </>
               ) : (
@@ -2614,9 +2618,7 @@ function FaCardListPage() {
                   ) : (
                     <section className="fa-preview fa-preview-empty-card">
                       <header>新增清单预览</header>
-                      <div className="empty">
-                        选择新增清单及工作表后，在此显示表格内容。
-                      </div>
+                      <EmptyState compact title="等待结果" description="选择新增清单及工作表后，在此显示表格内容。" />
                     </section>
                   )}
                   {disposalInspect &&
@@ -2635,9 +2637,7 @@ function FaCardListPage() {
                   ) : (
                     <section className="fa-preview fa-preview-empty-card">
                       <header>处置清单预览</header>
-                      <div className="empty">
-                        选择处置清单及工作表后，在此显示表格内容。
-                      </div>
+                      <EmptyState compact title="等待结果" description="选择处置清单及工作表后，在此显示表格内容。" />
                     </section>
                   )}
                 </>
@@ -2645,7 +2645,7 @@ function FaCardListPage() {
             </div>
           </aside>
         ) : (
-          <Card className="fa-result-workspace">
+          <Card variant="workspace" className="fa-result-workspace">
             <CardHeader>
               <CardTitle>匹配与导出结果</CardTitle>
             </CardHeader>

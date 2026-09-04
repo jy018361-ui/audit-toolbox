@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { JobEvent, ToolManifest } from "./types";
-import { engineCall, jobCancel, jobStart, listenJobEvents, listenPositionedFileDrops, openOutput, pickPath } from "./api";
+import {
+  engineCall,
+  jobCancel,
+  jobStart,
+  listenJobEvents,
+  listenPositionedFileDrops,
+  openOutput,
+  pickPath,
+} from "./api";
 import { PageHeader } from "@/components/PageHeader";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
@@ -8,6 +16,8 @@ import { JobProgress } from "@/components/JobProgress";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DataHandlingNotice } from "@/components/DataHandlingNotice";
+import { EmptyState } from "@/components/EmptyState";
 import { errorText } from "@/lib/errors";
 import "./fuzzy-match.css";
 
@@ -39,7 +49,11 @@ export type FuzzyCandidate = {
   breakdown: { charSim: number; lcsSim: number; tokenOverlap: number };
   reasons: string[];
 };
-export type FuzzyResultRow = { aIndex: number; aValue: string; matches: FuzzyCandidate[] };
+export type FuzzyResultRow = {
+  aIndex: number;
+  aValue: string;
+  matches: FuzzyCandidate[];
+};
 export type FuzzySummary = {
   rowsA: number;
   rowsB: number;
@@ -51,8 +65,19 @@ export type FuzzySummary = {
 };
 export type ScoreBand = "all" | "70-80" | "80-90";
 type RowLevel = "auto" | "suspect" | "unmatched";
-type Inspection = { headers: string[]; preview: string[][]; rowCount: number; sheet: string; sheets: string[] };
-type SourceState = { path: string; headerRow: number; inspection?: Inspection; mapping: MappingDict };
+type Inspection = {
+  headers: string[];
+  preview: string[][];
+  rowCount: number;
+  sheet: string;
+  sheets: string[];
+};
+type SourceState = {
+  path: string;
+  headerRow: number;
+  inspection?: Inspection;
+  mapping: MappingDict;
+};
 
 /** 确认进度草稿的 sessionStorage 键；结构是 {jobId, confirmations[]}。 */
 export const DRAFT_KEY = "fuzzy-match-draft.v1";
@@ -69,22 +94,30 @@ export const MATCH_TYPE_OPTIONS: Array<[FuzzyMatchType, string, string]> = [
   ["address", "地址", "按行政区域、路名门牌等分词的重叠度比对"],
   ["generic", "通用文本", "不做事前清洗，直接按字符相似度比对"],
 ];
-export const MATCH_TYPE_LABEL: Record<FuzzyMatchType, string> = Object.fromEntries(
-  MATCH_TYPE_OPTIONS.map(([value, label]) => [value, label]),
-) as Record<FuzzyMatchType, string>;
+export const MATCH_TYPE_LABEL: Record<FuzzyMatchType, string> =
+  Object.fromEntries(
+    MATCH_TYPE_OPTIONS.map(([value, label]) => [value, label]),
+  ) as Record<FuzzyMatchType, string>;
 
 /**
  * 预估候选比对次数：A 侧每行最多与 B 侧前 COMPARISON_CAP 行做精算比对。
  * 任一侧没有数据时无需比对。
  */
 export function estimateComparisons(rowsA: number, rowsB: number): number {
-  if (!Number.isFinite(rowsA) || !Number.isFinite(rowsB) || rowsA <= 0 || rowsB <= 0) return 0;
+  if (
+    !Number.isFinite(rowsA) ||
+    !Number.isFinite(rowsB) ||
+    rowsA <= 0 ||
+    rowsB <= 0
+  )
+    return 0;
   return Math.round(rowsA * Math.min(rowsB, COMPARISON_CAP));
 }
 
 /** 阈值校验：0 < 疑似阈值 < 自动阈值 ≤ 100。返回空串表示通过。 */
 export function validateThresholds(auto: number, suspect: number): string {
-  if (!Number.isFinite(auto) || !Number.isFinite(suspect)) return "自动匹配阈值与疑似阈值必须为数字。";
+  if (!Number.isFinite(auto) || !Number.isFinite(suspect))
+    return "自动匹配阈值与疑似阈值必须为数字。";
   if (suspect <= 0) return "疑似阈值必须大于 0。";
   if (suspect >= auto) return "自动匹配阈值必须大于疑似阈值。";
   if (auto > 100) return "自动匹配阈值不能超过 100。";
@@ -106,7 +139,10 @@ export function bestCandidate(row: FuzzyResultRow): FuzzyCandidate | undefined {
 }
 
 /** 疑似确认队列的进度统计：只统计疑似行，其余行不进入确认流程。 */
-export function confirmStats(rows: FuzzyResultRow[], confirmations: Confirmation[]) {
+export function confirmStats(
+  rows: FuzzyResultRow[],
+  confirmations: Confirmation[],
+) {
   const suspects = rows.filter((r) => rowLevel(r) === "suspect");
   const done = new Map(confirmations.map((c) => [c.aIndex, c]));
   let accepted = 0;
@@ -117,11 +153,20 @@ export function confirmStats(rows: FuzzyResultRow[], confirmations: Confirmation
     else if (c?.action === "reject") rejected += 1;
   }
   const confirmed = accepted + rejected;
-  return { total: suspects.length, confirmed, accepted, rejected, pending: suspects.length - confirmed };
+  return {
+    total: suspects.length,
+    confirmed,
+    accepted,
+    rejected,
+    pending: suspects.length - confirmed,
+  };
 }
 
 /** 确认列表按 aIndex 去重合并：patch 覆盖 base 中的同号确认。 */
-export function mergeConfirmations(base: Confirmation[], patch: Confirmation[]): Confirmation[] {
+export function mergeConfirmations(
+  base: Confirmation[],
+  patch: Confirmation[],
+): Confirmation[] {
   const next = [...base];
   for (const item of patch) {
     const index = next.findIndex((c) => c.aIndex === item.aIndex);
@@ -132,7 +177,9 @@ export function mergeConfirmations(base: Confirmation[], patch: Confirmation[]):
 }
 
 /** 解析 sessionStorage 草稿；结构不完整时返回 null，宁可丢草稿也不能把坏数据喂给渲染。 */
-export function parseDraft(text: string | null): { jobId: string; confirmations: Confirmation[] } | null {
+export function parseDraft(
+  text: string | null,
+): { jobId: string; confirmations: Confirmation[] } | null {
   if (!text) return null;
   try {
     const raw = JSON.parse(text) as Record<string, unknown>;
@@ -160,7 +207,10 @@ export function parseDraft(text: string | null): { jobId: string; confirmations:
   }
 }
 
-export function draftToJson(jobId: string, confirmations: Confirmation[]): string {
+export function draftToJson(
+  jobId: string,
+  confirmations: Confirmation[],
+): string {
   return JSON.stringify({ jobId, confirmations });
 }
 
@@ -182,7 +232,8 @@ export function autoAcceptList(
   for (const row of rows) {
     if (rowLevel(row) !== "suspect" || done.has(row.aIndex)) continue;
     const best = bestCandidate(row);
-    if (best && best.total >= threshold) items.push({ aIndex: row.aIndex, bIndex: best.bIndex, action: "accept" });
+    if (best && best.total >= threshold)
+      items.push({ aIndex: row.aIndex, bIndex: best.bIndex, action: "accept" });
   }
   return items;
 }
@@ -198,12 +249,20 @@ const ROW_LEVEL_LABEL: Record<RowLevel | "invalid", string> = {
   unmatched: "未匹配",
   invalid: "无效值",
 };
-const formatScore = (value: number) => (Number.isFinite(value) ? String(Math.round(value)) : "—");
+const formatScore = (value: number) =>
+  Number.isFinite(value) ? String(Math.round(value)) : "—";
 const formatCount = (value: number) => value.toLocaleString("zh-CN");
 
 export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
-  const emptySource = (): SourceState => ({ path: "", headerRow: 1, mapping: {} });
-  const [sources, setSources] = useState<Record<Kind, SourceState>>({ a: emptySource(), b: emptySource() });
+  const emptySource = (): SourceState => ({
+    path: "",
+    headerRow: 1,
+    mapping: {},
+  });
+  const [sources, setSources] = useState<Record<Kind, SourceState>>({
+    a: emptySource(),
+    b: emptySource(),
+  });
   const [matchType, setMatchType] = useState<FuzzyMatchType>("company");
   const [autoThreshold, setAutoThreshold] = useState(90);
   const [suspectThreshold, setSuspectThreshold] = useState(70);
@@ -222,7 +281,9 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   const [summary, setSummary] = useState<FuzzySummary>();
   const [rows, setRows] = useState<FuzzyResultRow[]>([]);
   const [confirmations, setConfirmations] = useState<Confirmation[]>([]);
-  const [statusFilter, setStatusFilter] = useState<RowLevel | "invalid" | "all">("all");
+  const [statusFilter, setStatusFilter] = useState<
+    RowLevel | "invalid" | "all"
+  >("all");
   const [band, setBand] = useState<ScoreBand>("all");
   const [onlyPending, setOnlyPending] = useState(false);
   const [batchOpen, setBatchOpen] = useState(false);
@@ -230,21 +291,34 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   const [restoreNote, setRestoreNote] = useState("");
   const [exportOutputs, setExportOutputs] = useState<string[]>([]);
   // 双来源卡内容区的 DOM ref：拖放坐标命中测试（同存款利息的 uploadDropRef 模式）。
-  const cardRefs = useRef<Record<Kind, HTMLElement | null>>({ a: null, b: null });
+  const cardRefs = useRef<Record<Kind, HTMLElement | null>>({
+    a: null,
+    b: null,
+  });
   const activeJob = useRef("");
   const activeMethod = useRef<"match" | "export">("match");
 
   const thresholdProblem = validateThresholds(autoThreshold, suspectThreshold);
-  const columnOf = (s: SourceState) => (typeof s.mapping.column === "string" ? s.mapping.column.trim() : "");
+  const columnOf = (s: SourceState) =>
+    typeof s.mapping.column === "string" ? s.mapping.column.trim() : "";
   const aReady = Boolean(sources.a.inspection) && Boolean(columnOf(sources.a));
   const bReady = Boolean(sources.b.inspection) && Boolean(columnOf(sources.b));
   const rowsA = sources.a.inspection?.rowCount ?? 0;
   const rowsB = sources.b.inspection?.rowCount ?? 0;
   const estimate = estimateComparisons(rowsA, rowsB);
 
-  const confirmMap = useMemo(() => new Map(confirmations.map((c) => [c.aIndex, c])), [confirmations]);
-  const stats = useMemo(() => confirmStats(rows, confirmations), [rows, confirmations]);
-  const batch = useMemo(() => autoAcceptList(rows, confirmations), [rows, confirmations]);
+  const confirmMap = useMemo(
+    () => new Map(confirmations.map((c) => [c.aIndex, c])),
+    [confirmations],
+  );
+  const stats = useMemo(
+    () => confirmStats(rows, confirmations),
+    [rows, confirmations],
+  );
+  const batch = useMemo(
+    () => autoAcceptList(rows, confirmations),
+    [rows, confirmations],
+  );
 
   // 任务事件：匹配与导出共用一条事件流，靠当前 jobId 过滤。
   useEffect(() => {
@@ -253,7 +327,11 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
       setJob(e);
       if (e.phase === "completed") {
         setBusy(false);
-        const r = (e.result ?? {}) as { summary?: FuzzySummary; rows?: FuzzyResultRow[]; outputPaths?: string[] };
+        const r = (e.result ?? {}) as {
+          summary?: FuzzySummary;
+          rows?: FuzzyResultRow[];
+          outputPaths?: string[];
+        };
         if (r.summary) {
           setSummary(r.summary);
           setRows(r.rows ?? []);
@@ -285,12 +363,22 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
     setConfirmations(draft.confirmations);
     void engineCall("fuzzy.get_results", { jobId: draft.jobId })
       .then((r) => {
-        const x = (r ?? {}) as { summary?: FuzzySummary; rows?: FuzzyResultRow[]; confirmations?: Confirmation[] };
+        const x = (r ?? {}) as {
+          summary?: FuzzySummary;
+          rows?: FuzzyResultRow[];
+          confirmations?: Confirmation[];
+        };
         if (x.summary) setSummary(x.summary);
         if (x.rows) setRows(x.rows);
-        setConfirmations(mergeConfirmations(x.confirmations ?? [], draft.confirmations));
+        setConfirmations(
+          mergeConfirmations(x.confirmations ?? [], draft.confirmations),
+        );
       })
-      .catch(() => setRestoreNote(`上次任务 ${draft.jobId} 在本机没有可恢复的匹配结果，请重新运行匹配后继续确认。`));
+      .catch(() =>
+        setRestoreNote(
+          `上次任务 ${draft.jobId} 在本机没有可恢复的匹配结果，请重新运行匹配后继续确认。`,
+        ),
+      );
   }, []);
 
   // 确认进度草稿：jobId 与确认列表任一变化就落一份，页面重挂载即可接续。
@@ -329,7 +417,10 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
     sessionStorage.removeItem(DRAFT_KEY);
   }
 
-  async function inspect(kind: Kind, over: { path?: string; sheet?: string; headerRow?: number }) {
+  async function inspect(
+    kind: Kind,
+    over: { path?: string; sheet?: string; headerRow?: number },
+  ) {
     const current = sources[kind];
     const path = over.path ?? current.path;
     if (!path) return;
@@ -351,7 +442,11 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   }
 
   async function browse(kind: Kind) {
-    const picked = await pickPath("file", `选择${SOURCE_LABEL[kind]}表格文件`, ["xlsx", "xls", "csv"]);
+    const picked = await pickPath("file", `选择${SOURCE_LABEL[kind]}表格文件`, [
+      "xlsx",
+      "xls",
+      "csv",
+    ]);
     if (typeof picked !== "string") return;
     invalidateMatchResult();
     setSource(kind, { path: picked, inspection: undefined, mapping: {} });
@@ -387,9 +482,12 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
 
   async function start() {
     setError("");
-    if (!sources.a.inspection || !sources.b.inspection) return setError("请先选择并读取来源 A、来源 B 两个表格文件。");
-    if (!columnOf(sources.a)) return setError("请先在来源 A 预览表头里选择匹配列。");
-    if (!columnOf(sources.b)) return setError("请先在来源 B 预览表头里选择匹配列。");
+    if (!sources.a.inspection || !sources.b.inspection)
+      return setError("请先选择并读取来源 A、来源 B 两个表格文件。");
+    if (!columnOf(sources.a))
+      return setError("请先在来源 A 预览表头里选择匹配列。");
+    if (!columnOf(sources.b))
+      return setError("请先在来源 B 预览表头里选择匹配列。");
     const problem = validateThresholds(autoThreshold, suspectThreshold);
     if (problem) return setError(problem);
     setBusy(true);
@@ -435,8 +533,13 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
     setConfirmations((current) => mergeConfirmations(current, items));
     const id = jobId;
     if (!id) return;
-    void engineCall("fuzzy.save_confirm", { jobId: id, confirmations: items }).catch(() =>
-      setNotice("确认已在本页生效，但保存到任务记录失败，稍后会随下一次确认重试。"),
+    void engineCall("fuzzy.save_confirm", {
+      jobId: id,
+      confirmations: items,
+    }).catch(() =>
+      setNotice(
+        "确认已在本页生效，但保存到任务记录失败，稍后会随下一次确认重试。",
+      ),
     );
   }
 
@@ -446,12 +549,20 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
 
   async function exportExcel() {
     if (!jobId) return setError("请先完成一次匹配，再导出结果。");
-    const path = await pickPath("save", "保存匹配结果", ["xlsx"], "模糊匹配结果.xlsx");
+    const path = await pickPath(
+      "save",
+      "保存匹配结果",
+      ["xlsx"],
+      "模糊匹配结果.xlsx",
+    );
     if (typeof path !== "string") return;
     setError("");
     setBusy(true);
     try {
-      activeJob.current = await jobStart("fuzzy.export", { jobId, outputPath: path });
+      activeJob.current = await jobStart("fuzzy.export", {
+        jobId,
+        outputPath: path,
+      });
       activeMethod.current = "export";
       setJobKind("export");
       setJob(undefined);
@@ -461,7 +572,8 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
-  const typeIntro = MATCH_TYPE_OPTIONS.find(([value]) => value === matchType)?.[2] ?? "";
+  const typeIntro =
+    MATCH_TYPE_OPTIONS.find(([value]) => value === matchType)?.[2] ?? "";
 
   return (
     <main className="tool-page fx-page fuzzy-page">
@@ -469,6 +581,12 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         eyebrow="审计核对"
         title={tool.name}
         detail="对两列公司名称、人名、地址或通用文本做模糊匹配：高相似度自动采纳，疑似项逐条人工确认，确认进度可续作并导出底稿。"
+      />
+      <DataHandlingNotice
+        mode="local"
+        className="fuzzy-data-notice"
+        title="两份清单仅在本机比对"
+        description="表格读取、候选计算、人工确认记录和 Excel 底稿生成均在当前电脑完成，不会上传清单内容。"
       />
       <ErrorBox error={error} onDismiss={() => setError("")} />
       {restoreNote && <p className="fa-missing-hint">{restoreNote}</p>}
@@ -479,7 +597,10 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
           return (
             <Card key={kind} className="fuzzy-source-card">
               <CardHeader>
-                <CardTitle>{SOURCE_LABEL[kind]}{kind === "a" ? "（待核对清单）" : "（基准清单）"}</CardTitle>
+                <CardTitle>
+                  {SOURCE_LABEL[kind]}
+                  {kind === "a" ? "（待核对清单）" : "（基准清单）"}
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 <div
@@ -487,61 +608,74 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                     cardRefs.current[kind] = el;
                   }}
                 >
-                <p className="fx-hint">{SOURCE_HINT[kind]}</p>
-                <FileDropInput
-                  value={s.path}
-                  disabled={busy}
-                  placeholder={`选择${SOURCE_LABEL[kind]} 文件`}
-                  onBrowse={() => void browse(kind)}
-                  onDragStateChange={() => {}}
-                  onClear={() => {
-                    invalidateMatchResult();
-                    setSource(kind, emptySource());
-                  }}
-                />
-                {s.inspection && (
-                  <div className="fuzzy-source-meta">
-                    <span>
-                      已识别 {formatCount(s.inspection.rowCount)} 行 · {s.inspection.sheet}
-                    </span>
-                    <label>
-                      Sheet
-                      <select
-                        value={s.inspection.sheet}
-                        disabled={busy}
-                        onChange={(e) => void inspect(kind, { sheet: e.target.value })}
-                      >
-                        {s.inspection.sheets.length
-                          ? s.inspection.sheets.map((x) => <option key={x}>{x}</option>)
-                          : <option>{s.inspection.sheet}</option>}
-                      </select>
-                    </label>
-                    <label>
-                      表头行
-                      <input
-                        type="number"
-                        min={1}
-                        disabled={busy}
-                        value={s.headerRow}
-                        onChange={(e) => void inspect(kind, { headerRow: Number(e.target.value) })}
-                      />
-                    </label>
+                  <p className="fx-hint">{SOURCE_HINT[kind]}</p>
+                  <div title={s.path || undefined}>
+                    <FileDropInput
+                      value={s.path}
+                      disabled={busy}
+                      placeholder={`选择${SOURCE_LABEL[kind]} 文件`}
+                      onBrowse={() => void browse(kind)}
+                      onDragStateChange={() => {}}
+                      onClear={() => {
+                        invalidateMatchResult();
+                        setSource(kind, emptySource());
+                      }}
+                    />
                   </div>
-                )}
-                {s.inspection && (
-                  <MappingPanel
-                    title={`${SOURCE_LABEL[kind]}匹配列`}
-                    note={`${formatCount(s.inspection.rowCount)} 行 × ${s.inspection.headers.length} 列`}
-                    headers={s.inspection.headers}
-                    rows={s.inspection.preview}
-                    mapping={s.mapping}
-                    roles={[["column", "匹配列"]]}
-                    missing={columnOf(s) ? [] : ["匹配列"]}
-                    busy={busy}
-                    maxHeight={260}
-                    onChange={(next) => setSource(kind, { mapping: next })}
-                  />
-                )}
+                  {s.inspection && (
+                    <div className="fuzzy-source-meta">
+                      <span>
+                        已识别 {formatCount(s.inspection.rowCount)} 行 ·{" "}
+                        {s.inspection.sheet}
+                      </span>
+                      <label>
+                        Sheet
+                        <select
+                          value={s.inspection.sheet}
+                          disabled={busy}
+                          onChange={(e) =>
+                            void inspect(kind, { sheet: e.target.value })
+                          }
+                        >
+                          {s.inspection.sheets.length ? (
+                            s.inspection.sheets.map((x) => (
+                              <option key={x}>{x}</option>
+                            ))
+                          ) : (
+                            <option>{s.inspection.sheet}</option>
+                          )}
+                        </select>
+                      </label>
+                      <label>
+                        表头行
+                        <input
+                          type="number"
+                          min={1}
+                          disabled={busy}
+                          value={s.headerRow}
+                          onChange={(e) =>
+                            void inspect(kind, {
+                              headerRow: Number(e.target.value),
+                            })
+                          }
+                        />
+                      </label>
+                    </div>
+                  )}
+                  {s.inspection && (
+                    <MappingPanel
+                      title={`${SOURCE_LABEL[kind]}匹配列`}
+                      note={`${formatCount(s.inspection.rowCount)} 行 × ${s.inspection.headers.length} 列`}
+                      headers={s.inspection.headers}
+                      rows={s.inspection.preview}
+                      mapping={s.mapping}
+                      roles={[["column", "匹配列"]]}
+                      missing={columnOf(s) ? [] : ["匹配列"]}
+                      busy={busy}
+                      maxHeight={260}
+                      onChange={(next) => setSource(kind, { mapping: next })}
+                    />
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -564,7 +698,9 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                 onChange={(e) => setMatchType(e.target.value as FuzzyMatchType)}
               >
                 {MATCH_TYPE_OPTIONS.map(([value, label]) => (
-                  <option key={value} value={value}>{label}</option>
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
                 ))}
               </select>
             </label>
@@ -575,18 +711,40 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
             <div className="fuzzy-advanced-grid">
               <label>
                 自动匹配阈值（≥ 此分直接采纳）
-                <input type="number" min={1} max={100} value={Number.isFinite(autoThreshold) ? autoThreshold : ""} onChange={(e) => setAutoThreshold(Number(e.target.value))} />
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={Number.isFinite(autoThreshold) ? autoThreshold : ""}
+                  onChange={(e) => setAutoThreshold(Number(e.target.value))}
+                />
               </label>
               <label>
                 疑似阈值（≥ 此分进入人工确认）
-                <input type="number" min={1} max={100} value={Number.isFinite(suspectThreshold) ? suspectThreshold : ""} onChange={(e) => setSuspectThreshold(Number(e.target.value))} />
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={
+                    Number.isFinite(suspectThreshold) ? suspectThreshold : ""
+                  }
+                  onChange={(e) => setSuspectThreshold(Number(e.target.value))}
+                />
               </label>
               <label>
                 每行候选数 topK
-                <input type="number" min={1} max={10} value={Number.isFinite(topK) ? topK : ""} onChange={(e) => setTopK(Number(e.target.value))} />
+                <input
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={Number.isFinite(topK) ? topK : ""}
+                  onChange={(e) => setTopK(Number(e.target.value))}
+                />
               </label>
             </div>
-            {thresholdProblem && <p className="fa-missing-hint">{thresholdProblem}</p>}
+            {thresholdProblem && (
+              <p className="fa-missing-hint">{thresholdProblem}</p>
+            )}
           </details>
         </CardContent>
       </Card>
@@ -598,21 +756,35 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         <CardContent>
           <div className="fuzzy-estimate">
             <p>
-              A 侧 {formatCount(rowsA)} 行 / B 侧 {formatCount(rowsB)} 行，预计候选比对约{" "}
-              <b>{formatCount(estimate)}</b> 次（A 每行最多与 B 侧前 {COMPARISON_CAP} 行精算比对）。
+              A 侧 {formatCount(rowsA)} 行 / B 侧 {formatCount(rowsB)}{" "}
+              行，预计候选比对约 <b>{formatCount(estimate)}</b> 次（A 每行最多与
+              B 侧前 {COMPARISON_CAP} 行精算比对）。
             </p>
             {estimate > COMPARISON_WARN_AT && (
               <p className="fuzzy-estimate-warn">
-                预计比对次数超过 50 万，匹配可能耗时较长；建议先按 Sheet 或期间拆分文件、分批核对。
+                预计比对次数超过 50 万，匹配可能耗时较长；建议先按 Sheet
+                或期间拆分文件、分批核对。
               </p>
             )}
             <div className="fx-actions">
-              <Button disabled={busy || !aReady || !bReady || Boolean(thresholdProblem)} onClick={() => void start()}>
+              <Button
+                disabled={
+                  busy || !aReady || !bReady || Boolean(thresholdProblem)
+                }
+                onClick={() => void start()}
+              >
                 开始匹配
               </Button>
             </div>
-            {jobKind === "match" && job && <JobProgress job={job} onCancel={busy ? (id) => void jobCancel(id) : undefined} />}
-            <p className="fx-hint">离开本页后任务仍在后台运行，回到本页可查看进度并继续确认。</p>
+            {jobKind === "match" && job && (
+              <JobProgress
+                job={job}
+                onCancel={busy ? (id) => void jobCancel(id) : undefined}
+              />
+            )}
+            <p className="fx-hint">
+              离开本页后任务仍在后台运行，回到本页可查看进度并继续确认。
+            </p>
           </div>
         </CardContent>
       </Card>
@@ -623,30 +795,38 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
             <div>
               <h3>匹配结果</h3>
               <p>
-                A 侧 {formatCount(summary.rowsA)} 行、B 侧 {formatCount(summary.rowsB)} 行，耗时{" "}
+                A 侧 {formatCount(summary.rowsA)} 行、B 侧{" "}
+                {formatCount(summary.rowsB)} 行，耗时{" "}
                 {(summary.elapsedMs / 1000).toFixed(1)} 秒；点击指标可筛选明细。
               </p>
             </div>
           </div>
           <div className="fuzzy-pills">
-            {(["auto", "suspect", "unmatched", "invalid"] as const).map((level) => {
-              const value =
-                level === "auto" ? summary.autoCount
-                  : level === "suspect" ? summary.suspectCount
-                  : level === "unmatched" ? summary.unmatchedCount
-                  : summary.invalidCount;
-              return (
-                <button
-                  key={level}
-                  type="button"
-                  className={`fuzzy-pill${statusFilter === level ? " active" : ""}`}
-                  onClick={() => setStatusFilter(statusFilter === level ? "all" : level)}
-                >
-                  <span>{ROW_LEVEL_LABEL[level]}</span>
-                  <strong>{formatCount(value)}</strong>
-                </button>
-              );
-            })}
+            {(["auto", "suspect", "unmatched", "invalid"] as const).map(
+              (level) => {
+                const value =
+                  level === "auto"
+                    ? summary.autoCount
+                    : level === "suspect"
+                      ? summary.suspectCount
+                      : level === "unmatched"
+                        ? summary.unmatchedCount
+                        : summary.invalidCount;
+                return (
+                  <button
+                    key={level}
+                    type="button"
+                    className={`fuzzy-pill${statusFilter === level ? " active" : ""}`}
+                    onClick={() =>
+                      setStatusFilter(statusFilter === level ? "all" : level)
+                    }
+                  >
+                    <span>{ROW_LEVEL_LABEL[level]}</span>
+                    <strong>{formatCount(value)}</strong>
+                  </button>
+                );
+              },
+            )}
           </div>
           <div className="fuzzy-table">
             <table>
@@ -663,22 +843,36 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
               <tbody>
                 {statusFilter === "invalid" ? (
                   <tr>
-                    <td colSpan={6} className="fuzzy-empty">空白等无效值不参与匹配，导出底稿中会单独列示。</td>
+                    <td colSpan={6} className="fuzzy-empty">
+                      空白等无效值不参与匹配，导出底稿中会单独列示。
+                    </td>
                   </tr>
-                ) : rows.filter((r) => statusFilter === "all" || rowLevel(r) === statusFilter).length === 0 ? (
+                ) : rows.filter(
+                    (r) =>
+                      statusFilter === "all" || rowLevel(r) === statusFilter,
+                  ).length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="fuzzy-empty">当前分类下没有明细行。</td>
+                    <td colSpan={6} className="fuzzy-empty">
+                      当前分类下没有明细行。
+                    </td>
                   </tr>
                 ) : (
                   rows
-                    .filter((r) => statusFilter === "all" || rowLevel(r) === statusFilter)
+                    .filter(
+                      (r) =>
+                        statusFilter === "all" || rowLevel(r) === statusFilter,
+                    )
                     .map((r) => {
                       const best = bestCandidate(r);
                       const level = rowLevel(r);
                       const c = confirmMap.get(r.aIndex);
-                      const accepted = r.matches.find((m) => m.bIndex === c?.bIndex);
+                      const accepted = r.matches.find(
+                        (m) => m.bIndex === c?.bIndex,
+                      );
                       const confirmState = !c
-                        ? level === "suspect" ? "待确认" : "—"
+                        ? level === "suspect"
+                          ? "待确认"
+                          : "—"
                         : c.action === "accept"
                           ? `已采纳（${accepted?.bValue ?? `B#${c.bIndex}`}）`
                           : "已拒绝（都不是）";
@@ -686,9 +880,17 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
                         <tr key={r.aIndex}>
                           <td title={r.aValue}>{r.aValue}</td>
                           <td title={best?.bValue}>{best?.bValue ?? "—"}</td>
-                          <td><span className={`fuzzy-level fuzzy-level-${level}`}>{ROW_LEVEL_LABEL[level]}</span></td>
+                          <td>
+                            <span
+                              className={`fuzzy-level fuzzy-level-${level}`}
+                            >
+                              {ROW_LEVEL_LABEL[level]}
+                            </span>
+                          </td>
                           <td>{best ? formatScore(best.total) : "—"}</td>
-                          <td title={best?.reasons.join("，")}>{best?.reasons.join("，") || "—"}</td>
+                          <td title={best?.reasons.join("，")}>
+                            {best?.reasons.join("，") || "—"}
+                          </td>
                           <td>{confirmState}</td>
                         </tr>
                       );
@@ -708,8 +910,20 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
           onlyPending={onlyPending}
           onBand={setBand}
           onOnlyPending={setOnlyPending}
-          onAccept={(row, candidate) => commitConfirmations([{ aIndex: row.aIndex, bIndex: candidate.bIndex, action: "accept" }])}
-          onReject={(row) => commitConfirmations([{ aIndex: row.aIndex, bIndex: null, action: "reject" }])}
+          onAccept={(row, candidate) =>
+            commitConfirmations([
+              {
+                aIndex: row.aIndex,
+                bIndex: candidate.bIndex,
+                action: "accept",
+              },
+            ])
+          }
+          onReject={(row) =>
+            commitConfirmations([
+              { aIndex: row.aIndex, bIndex: null, action: "reject" },
+            ])
+          }
           onUndo={undoConfirmation}
           onBatch={() => setBatchOpen(true)}
           batchCount={batch.length}
@@ -722,28 +936,64 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         </CardHeader>
         <CardContent>
           <p className="fx-hint">
-            导出的 Excel 包含自动匹配、疑似项（含人工确认结果）、未匹配与无效值全部明细；确认进度会随导出一并写入。
+            导出的 Excel
+            包含自动匹配、疑似项（含人工确认结果）、未匹配与无效值全部明细；确认进度会随导出一并写入。
           </p>
+          {!summary && (
+            <EmptyState
+              compact
+              title="尚无可导出的匹配结果"
+              description="选择来源 A、来源 B 的匹配列并完成一次匹配后，即可导出底稿。"
+            />
+          )}
           <div className="fx-actions">
-            <Button disabled={busy || !jobId} onClick={() => void exportExcel()}>导出 Excel</Button>
+            <Button
+              disabled={busy || !jobId}
+              onClick={() => void exportExcel()}
+            >
+              导出 Excel
+            </Button>
             {exportOutputs.map((p) => (
-              <Button key={p} variant="secondary" onClick={() => void openOutput(p)}>打开导出文件</Button>
+              <Button
+                key={p}
+                variant="secondary"
+                onClick={() => void openOutput(p)}
+              >
+                打开导出文件
+              </Button>
             ))}
           </div>
-          {jobKind === "export" && job && <JobProgress job={job} onCancel={busy ? (id) => void jobCancel(id) : undefined} />}
+          {jobKind === "export" && job && (
+            <JobProgress
+              job={job}
+              onCancel={busy ? (id) => void jobCancel(id) : undefined}
+            />
+          )}
         </CardContent>
       </Card>
 
       {batchOpen && (
-        <div className="fuzzy-modal-mask" role="presentation" onClick={() => setBatchOpen(false)}>
-          <div className="fuzzy-modal" role="dialog" aria-label="批量采纳确认" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="fuzzy-modal-mask"
+          role="presentation"
+          onClick={() => setBatchOpen(false)}
+        >
+          <div
+            className="fuzzy-modal"
+            role="dialog"
+            aria-label="批量采纳确认"
+            onClick={(e) => e.stopPropagation()}
+          >
             <h4>批量采纳相似度≥{AUTO_ACCEPT_THRESHOLD} 的候选</h4>
             <p>
-              将对 {batch.length} 条未确认且最高分达到 {AUTO_ACCEPT_THRESHOLD} 分的疑似行自动采纳最高分候选。
+              将对 {batch.length} 条未确认且最高分达到 {AUTO_ACCEPT_THRESHOLD}{" "}
+              分的疑似行自动采纳最高分候选。
               此操作逐条落库，采纳后仍可在卡片上重新选择。
             </p>
             <div className="fuzzy-modal-actions">
-              <Button variant="secondary" onClick={() => setBatchOpen(false)}>取消</Button>
+              <Button variant="secondary" onClick={() => setBatchOpen(false)}>
+                取消
+              </Button>
               <Button
                 disabled={!batch.length}
                 onClick={() => {
@@ -758,7 +1008,11 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         </div>
       )}
 
-      {notice && <div className="fuzzy-notice" role="status">{notice}</div>}
+      {notice && (
+        <div className="fuzzy-notice" role="status">
+          {notice}
+        </div>
+      )}
     </main>
   );
 }
@@ -795,6 +1049,11 @@ function ConfirmQueue(props: {
             <p>本次匹配没有需要人工确认的疑似行。</p>
           </div>
         </div>
+        <EmptyState
+          compact
+          title="无需人工确认"
+          description="所有有效结果均已自动归类，可直接复核明细并导出底稿。"
+        />
       </section>
     );
 
@@ -809,22 +1068,35 @@ function ConfirmQueue(props: {
       <div className="fuzzy-confirm-toolbar">
         <span>
           已确认 <b>{stats.confirmed}</b> / 总数 {stats.total}
-          （采纳 {stats.accepted}、拒绝 {stats.rejected}、待确认 {stats.pending}）
+          （采纳 {stats.accepted}、拒绝 {stats.rejected}、待确认 {stats.pending}
+          ）
         </span>
         <span className="fuzzy-toolbar-spacer" />
         <label>
           分数区间
-          <select aria-label="分数区间" value={props.band} onChange={(e) => props.onBand(e.target.value as ScoreBand)}>
+          <select
+            aria-label="分数区间"
+            value={props.band}
+            onChange={(e) => props.onBand(e.target.value as ScoreBand)}
+          >
             <option value="all">全部</option>
             <option value="70-80">70–80 分</option>
             <option value="80-90">80–90 分</option>
           </select>
         </label>
         <label className="fuzzy-check">
-          <input type="checkbox" checked={props.onlyPending} onChange={(e) => props.onOnlyPending(e.target.checked)} />
+          <input
+            type="checkbox"
+            checked={props.onlyPending}
+            onChange={(e) => props.onOnlyPending(e.target.checked)}
+          />
           仅看未确认
         </label>
-        <Button variant="secondary" disabled={!props.batchCount} onClick={props.onBatch}>
+        <Button
+          variant="secondary"
+          disabled={!props.batchCount}
+          onClick={props.onBatch}
+        >
           相似度≥{AUTO_ACCEPT_THRESHOLD} 全部采纳（{props.batchCount}）
         </Button>
       </div>
@@ -833,14 +1105,23 @@ function ConfirmQueue(props: {
           const c = done.get(row.aIndex);
           const accepted = row.matches.find((m) => m.bIndex === c?.bIndex);
           return (
-            <div key={row.aIndex} className={`fuzzy-confirm-card${c ? " done" : ""}`}>
+            <div
+              key={row.aIndex}
+              className={`fuzzy-confirm-card${c ? " done" : ""}`}
+            >
               <div className="fuzzy-confirm-a">
                 <span className="fuzzy-confirm-index">A#{row.aIndex + 1}</span>
                 <b title={row.aValue}>{row.aValue}</b>
                 {c && (
                   <span className="fuzzy-done-row">
-                    {c.action === "accept" ? `已采纳：${accepted?.bValue ?? `B#${c.bIndex}`}` : "已拒绝（都不是）"}
-                    <button type="button" className="fuzzy-redo" onClick={() => props.onUndo(row.aIndex)}>
+                    {c.action === "accept"
+                      ? `已采纳：${accepted?.bValue ?? `B#${c.bIndex}`}`
+                      : "已拒绝（都不是）"}
+                    <button
+                      type="button"
+                      className="fuzzy-redo"
+                      onClick={() => props.onUndo(row.aIndex)}
+                    >
                       重选
                     </button>
                   </span>
@@ -848,27 +1129,44 @@ function ConfirmQueue(props: {
               </div>
               <div className="fuzzy-candidates">
                 {row.matches.map((m) => (
-                  <button key={m.bIndex} type="button" className="fuzzy-candidate" onClick={() => props.onAccept(row, m)}>
+                  <button
+                    key={m.bIndex}
+                    type="button"
+                    className="fuzzy-candidate"
+                    onClick={() => props.onAccept(row, m)}
+                  >
                     <span className="fuzzy-candidate-head">
                       <b title={m.bValue}>{m.bValue}</b>
-                      <span className="fuzzy-candidate-score">{formatScore(m.total)} 分</span>
+                      <span className="fuzzy-candidate-score">
+                        {formatScore(m.total)} 分
+                      </span>
                     </span>
-                    {m.reasons.length > 0 && <small>{m.reasons.join("，")}</small>}
+                    {m.reasons.length > 0 && (
+                      <small>{m.reasons.join("，")}</small>
+                    )}
                     <small className="fuzzy-breakdown">
                       <span>字面相似 {formatScore(m.breakdown.charSim)}</span>
                       <span>公共子串 {formatScore(m.breakdown.lcsSim)}</span>
-                      <span>词元重叠 {formatScore(m.breakdown.tokenOverlap)}</span>
+                      <span>
+                        词元重叠 {formatScore(m.breakdown.tokenOverlap)}
+                      </span>
                     </small>
                   </button>
                 ))}
-                <button type="button" className="fuzzy-reject" onClick={() => props.onReject(row)}>
+                <button
+                  type="button"
+                  className="fuzzy-reject"
+                  onClick={() => props.onReject(row)}
+                >
                   都不是（拒绝匹配）
                 </button>
               </div>
             </div>
           );
         })}
-        {!visible.length && <p className="fuzzy-empty">当前筛选下没有待确认的疑似行。</p>}
+        {!visible.length && (
+          <p className="fuzzy-empty">当前筛选下没有待确认的疑似行。</p>
+        )}
       </div>
     </section>
   );

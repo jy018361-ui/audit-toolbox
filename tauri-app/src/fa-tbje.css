@@ -69,11 +69,12 @@
   font-weight: 700;
 }
 
-.fa-tbje-file-name {
+.fa-tbje-file-name,
+.fa-tbje-source-title span.fa-tbje-file-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text) !important;
+  color: var(--ink);
   font-weight: 600;
 }
 
@@ -122,10 +123,10 @@
   min-width: 0;
   min-height: 2.5rem;
   padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: var(--r-sm);
   background: var(--surface);
-  color: var(--text);
+  color: var(--ink);
 }
 
 .fa-tbje-source-controls input:focus-visible,
@@ -137,7 +138,7 @@
 .fa-tbje-account-table select:focus-visible,
 .fa-tbje-page .form-grid input:focus-visible,
 .fa-tbje-page .form-grid select:focus-visible {
-  outline: 2px solid var(--brand);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -163,12 +164,13 @@
   color: var(--text-muted);
 }
 
-.fa-tbje-inline-warning {
+.fa-tbje-inline-warning,
+.fa-tbje-step-actions .fa-tbje-inline-warning {
   padding: var(--sp-2) var(--sp-3);
   border: 1px solid var(--warning-dot);
   border-radius: var(--r-sm);
   background: var(--warning-bg);
-  color: var(--warning-fg) !important;
+  color: var(--warning-fg);
 }
 
 .fa-tbje-live-status {
@@ -293,10 +295,10 @@
   white-space: nowrap;
 }
 
-.fa-tbje-empty-table {
-  padding: var(--sp-6) !important;
+.fa-tbje-account-table td.fa-tbje-empty-table {
+  padding: var(--sp-6);
   color: var(--text-muted);
-  text-align: center !important;
+  text-align: center;
 }
 
 .fa-tbje-pagination {
@@ -364,7 +366,7 @@
   border: 1px solid var(--warning-border, var(--border-soft));
   border-radius: var(--r-md);
   background: var(--warning-surface, var(--surface-sunken));
-  color: var(--text);
+  color: var(--ink);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -404,4 +406,19 @@
 
 .fa-tbje-account-table tbody tr:hover td {
   background: color-mix(in srgb, var(--brand-accent) 8%, var(--surface));
+}
+
+/* 汇总变动表预览:段名列窄、项目缩进、金额右对齐,勾稽差异行弱化底色。 */
+.fa-tbje-summary-preview .fa-tbje-summary-section {
+  width: 5.5rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.fa-tbje-summary-preview td:nth-child(2) {
+  padding-left: var(--sp-3);
+}
+
+.fa-tbje-summary-diff td {
+  background: color-mix(in srgb, var(--surface-muted) 60%, var(--surface));
 }

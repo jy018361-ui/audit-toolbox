@@ -1,14 +1,28 @@
 .loan-page {
   padding-bottom: 40px;
 }
+.loan-page .data-handling-notice {
+  margin-bottom: var(--sp-4);
+}
+.loan-result-overview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.loan-output-row input {
+  text-overflow: ellipsis;
+}
 .loan-warning {
   display: grid;
   gap: 4px;
   padding: 13px 16px;
-  border: 1px solid #dfbd77;
+  border: 1px solid var(--warning-border);
   border-radius: 12px;
-  background: #fff8e8;
-  color: #6f4b08;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
 }
 .loan-warning span {
   font-size: 13px;
@@ -50,7 +64,7 @@
 .loan-rate-confirmation select {
   min-height: 34px;
   padding: 6px 9px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   background: var(--background);
   color: var(--foreground);
@@ -145,10 +159,9 @@
 }
 .loan-bridge-equation {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px minmax(0, 1fr) 34px minmax(
-      0,
-      1fr
-    ) 34px minmax(0, 1fr);
+  grid-template-columns:
+    minmax(0, 1fr) 34px minmax(0, 1fr) 34px minmax(0, 1fr)
+    34px minmax(0, 1fr);
   align-items: stretch;
   gap: 8px;
   min-width: 0;
@@ -166,12 +179,12 @@
   font-size: 11px;
 }
 .loan-ok {
-  background: #e8f5ee;
-  color: #17663d;
+  background: var(--success-bg);
+  color: var(--success-fg);
 }
 .loan-review {
-  background: #fff1cf;
-  color: #855400;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
 }
 @media (max-width: 900px) {
   .loan-upload-grid,
@@ -194,10 +207,10 @@
   gap: 12px;
   margin-top: 12px;
   padding: 11px 14px;
-  border: 1px solid #b7dfc6;
+  border: 1px solid var(--success-border);
   border-radius: 10px;
-  background: #f0f9f3;
-  color: #17663d;
+  background: var(--success-bg);
+  color: var(--success-fg);
 }
 .loan-export-done > strong {
   flex: 0 0 auto;

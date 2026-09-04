@@ -12,8 +12,11 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "./kanzhang-parity.css";
 import "./je-sign-mark.css";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { EmptyState } from "@/components/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/PageHeader";
+import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { LedgerSourceCard } from "@/components/LedgerSourceCard";
@@ -636,6 +639,11 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         title={tool.name}
         detail="加载凭证、确认字段映射，在预览表头按列筛选并按批次选定目标科目，导出带正负数智能匹配标记的完整凭证明细。"
       />
+      <DataHandlingNotice
+        mode="network-assisted"
+        title="凭证处理与智能复核"
+        description="凭证读取、正负数匹配和结果导出在本机完成；使用 LLM 复核时，复核所需信息会按设置发送到对应服务。"
+      />
       {error && <ErrorBox error={error} onDismiss={() => setError("")} />}
 
       <LedgerSourceCard
@@ -779,7 +787,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             </Button>
             <label className="jm-batch-name">
               批次名称
-              <input
+              <Input
                 value={batch.name}
                 onChange={(e) =>
                   patch({
@@ -875,9 +883,10 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
           <label>
             输出文件
             <div className="kz-path">
-              <input
+              <Input
                 readOnly
                 value={displayFileName(draft.outputPath)}
+                title={draft.outputPath}
                 placeholder="选择凭证文件后自动填入默认保存位置"
               />
               <Button variant="secondary" size="sm" onClick={chooseOutput}>
@@ -991,7 +1000,7 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
       : undefined;
   const showProgress = shouldShowKanzhangJobProgress(job?.phase);
   return (
-    <Card className="kz-result">
+    <Card variant="workspace" className="kz-result">
       <CardHeader>
         <CardTitle>标记结果</CardTitle>
       </CardHeader>
@@ -1041,7 +1050,7 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
             {sign.basis ? `。依据：${sign.basis}` : ""}
           </p>
         )}
-        {!result && !showProgress && <p>选好目标科目后点「标记并导出」。</p>}
+        {!result && !showProgress && <EmptyState compact title="等待标记结果" description="选好目标科目后点「标记并导出」。" />}
       </CardContent>
     </Card>
   );

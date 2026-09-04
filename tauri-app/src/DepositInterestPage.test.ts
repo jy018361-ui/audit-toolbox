@@ -1,10 +1,28 @@
 import { describe, expect, it } from "vitest";
 import {
+  depositAccountCode, mergeAccountList,
   depositAutoRate, depositDropTargetInside, depositEffectiveTierRate, depositFirstTierOf,
   depositMissingRequired, depositMonthlyAverage, depositMonthlyInterest, depositRateAboveBenchmark,
   depositPercentToRate, depositRateOutOfPractice, depositRateToPercent, depositReportStart,
   depositTermsOf, depositJeLayout, JE_LAYOUT_LABEL,
 } from "./DepositInterestPage";
+
+describe("deposit account list merge", () => {
+  it("TB 与 JE 的两种拼法按科目编码归并成一条", () => {
+    // 用户实测：TB 是「编码＋名称」，JE 反过来「名称＋编码」，全名去重剩两条。
+    expect(
+      mergeAccountList(
+        ["66030002 利息", "1002 银行存款"],
+        ["利息 66030002", "银行存款 1002"],
+      ),
+    ).toEqual(["66030002 利息", "1002 银行存款"]);
+  });
+  it("提码只认足位数的数字 token，纯名称不拆", () => {
+    expect(depositAccountCode("66030002 财务费用-利息收入")).toBe("66030002");
+    expect(depositAccountCode("银行存款")).toBe("银行存款");
+    expect(depositAccountCode("1002.01 招商银行")).toBe("1002.01");
+  });
+});
 
 describe("deposit interest upload and mapping parity", () => {
   it("shows missing TB mappings until an opening and closing balance scheme exists", () => {

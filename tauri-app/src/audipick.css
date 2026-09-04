@@ -1,0 +1,13 @@
+.audipick-workspace,
+.audipick-workspace > section,
+.audipick-workspace .task-row > div {
+  min-width: 0;
+}
+
+.audipick-workspace .task-row > div {
+  overflow: hidden;
+}
+
+.audipick-workspace .result-card {
+  overflow-x: auto;
+}

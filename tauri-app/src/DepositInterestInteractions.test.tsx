@@ -154,6 +154,16 @@ const goToStep = (label: RegExp) =>
   fireEvent.click(screen.getByRole("button", { name: label }));
 
 describe("存款科目手工分类请求", () => {
+  it("披露识别与复核联网边界并提供必需资料说明", () => {
+    render(<DepositInterestPage tool={tool} />);
+    expect(
+      screen.getByRole("complementary", { name: "测算默认在本机完成" }),
+    ).toHaveAttribute("data-mode", "network-assisted");
+    expect(
+      screen.getByRole("region", { name: "准备存款利息资料" }),
+    ).toBeVisible();
+    expect(screen.getByText(/TB 必传；JE 选传/)).toBeVisible();
+  });
   it("真实页面区分默认excluded和手工排除，并支持撤销手工选择", async () => {
     render(<DepositInterestPage tool={tool} />);
     fireEvent.click(

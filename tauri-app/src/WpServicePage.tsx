@@ -9,6 +9,9 @@ import { PageHeader } from "@/components/PageHeader";
 import { ResultView } from "@/components/ResultView";
 import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DataHandlingNotice } from "@/components/DataHandlingNotice";
+import { EmptyState } from "@/components/EmptyState";
 
 function wpErrorText(error: unknown) {
   if (error instanceof Error) return error.message;
@@ -133,13 +136,13 @@ export function WpServicePage({ tool }: { tool: ToolManifest }) {
           { key: "2", label: "检查输入" },
           { key: "3", label: "生成结果" },
         ]}
-        current={job?.phase === "completed" ? 2 : folder ? 1 : 0}
+        current={job ? 2 : folder ? 1 : 0}
       />
+      <DataHandlingNotice mode="local" title="本机处理" description="工作目录检查、表格读取与服务方案生成在本机完成。原始输入文件不会因清空选择而删除。" />
       <div className="workspace wp-workspace">
-        <section className="form-card">
-          <div className="section-title">
-            <h2>选择工作目录</h2>
-          </div>
+        <Card variant="section">
+          <CardHeader><CardTitle>选择工作目录</CardTitle></CardHeader>
+          <CardContent>
           <FileDropInput
             value={folder}
             disabled={busy}
@@ -178,16 +181,19 @@ export function WpServicePage({ tool }: { tool: ToolManifest }) {
               cancelLabel="取消任务"
             />
           )}
-        </section>
+          </CardContent>
+        </Card>
 
-        <section className="result-card">
-          <h2>检查与结果</h2>
+        <Card variant="section">
+          <CardHeader><CardTitle>检查与结果</CardTitle></CardHeader>
+          <CardContent>
           {result ? (
             <ResultView value={result} />
           ) : (
-            <div className="empty">选择目录后先检查输入，再生成服务方案。</div>
+            <EmptyState title={busy ? "正在处理工作目录" : "尚未生成结果"} description="选择目录后先检查输入，再生成服务方案。" />
           )}
-        </section>
+          </CardContent>
+        </Card>
       </div>
     </>
   );

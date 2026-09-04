@@ -16,8 +16,12 @@ import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StepIndicator } from "@/components/StepIndicator";
+import { DataHandlingNotice } from "@/components/DataHandlingNotice";
+import { EmptyState } from "@/components/EmptyState";
+import { Badge } from "@/components/ui/badge";
 import { NumberInput } from "@/components/NumberInput";
 import {
   missingGoldIdentity,
@@ -213,6 +217,34 @@ const ROLE_OPTIONS: Array<[string, string]> = [
   ["interest_income", "利息收入（勾稽基准）"],
   ["excluded", "不参与测算"],
 ];
+
+/** 提科目编码：与引擎同口径——首 token 是足位数数字串才算编码，
+ *  用来把 TB 的「编码＋名称」与 JE 的「名称＋编码」两种拼法归并成一条。 */
+export function depositAccountCode(account: string): string {
+  const token = account.split(/\s+/).find((t) => {
+    const digits = (t.match(/\d/g) ?? []).length;
+    return digits >= 3 && digits * 2 >= t.length && /^\d/.test(t);
+  });
+  return token ?? account.trim();
+}
+
+/** 科目分类清单：TB 与 JE 的同一科目按编码去重（TB 拼法优先保留），
+ *  排序把已映射为计息科目/利息收入的排在前面，excluded 沉底——
+ *  用户要核对的正是参与测算的那批科目。 */
+export function mergeAccountList(
+  tbAccounts: string[],
+  jeAccounts: string[],
+): string[] {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const account of [...tbAccounts, ...jeAccounts]) {
+    const code = depositAccountCode(account);
+    if (seen.has(code)) continue;
+    seen.add(code);
+    merged.push(account);
+  }
+  return merged;
+}
 
 /** 上传的 TB 至少要能取出年初和年末余额；序时账只在提供时才校验。 */
 /**
@@ -447,7 +479,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const reviewingAny = reviews.reviewing.tb || reviews.reviewing.je;
 
   const accounts = useMemo(
-    () => [...new Set([...(tb?.accounts ?? []), ...(je?.accounts ?? [])])],
+    () => mergeAccountList(tb?.accounts ?? [], je?.accounts ?? []),
     [je, tb],
   );
   const depositAccounts = accounts.filter((a) =>
@@ -463,7 +495,15 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     () => keywordFilterPredicate(accountFilter),
     [accountFilter],
   );
-  const visibleAccounts = accounts.filter((account) => accountMatches(account));
+  // 已映射为计息科目/利息收入的排前面，excluded 与未分类沉底；
+  // 排序稳定，同组内保持账表原顺序。
+  const activeAccount = (account: string) => {
+    const role = accountRoles[account] ?? "";
+    return role !== "" && role !== "excluded";
+  };
+  const visibleAccounts = accounts
+    .filter((account) => accountMatches(account))
+    .sort((a, b) => Number(activeAccount(b)) - Number(activeAccount(a)));
 
   useEffect(() => {
     void engineCall("deposit.rate_tiers", {})
@@ -816,6 +856,12 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               </CardTitle>
             </CardHeader>
             <CardContent>
+              <DataHandlingNotice
+                mode="network-assisted"
+                title="测算默认在本机完成"
+                description="文件读取与利息测算在本机进行；AI 辅助识别或 LLM 字段复核可能将字段名和预览样本按设置发送到所配置服务。"
+                details="TB 必传；JE 选传，用于还原月度余额。未上传 JE 时按 TB 期初、期末两点法测算。"
+              />
               <FileDropInput
                 containerRef={uploadDropRef}
                 value=""
@@ -838,6 +884,13 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   setSourceStatus("");
                 }}
               />
+              {!tbPath && !jePath && (
+                <EmptyState
+                  compact
+                  title="准备存款利息资料"
+                  description="先加入科目余额表（TB）；如需更准确地还原月度余额，可同时加入序时账（JE）。"
+                />
+              )}
               {sourceStatus && (
                 <p className="fx-source-status" aria-live="polite">
                   <i aria-hidden="true" />
@@ -870,7 +923,11 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     <CardTitle>JE 序时账</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <p>未上传 JE；当前将使用 TB 两点法。</p>
+                    <EmptyState
+                      compact
+                      title="JE 为选传资料"
+                      description="当前将使用 TB 期初、期末两点法；加入 JE 后可还原月度余额。"
+                    />
                   </CardContent>
                 </Card>
               ) : null}
@@ -897,7 +954,11 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     <CardTitle>TB 科目余额表</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <p>未识别到 TB；请补充上传或检查文件表头。</p>
+                    <EmptyState
+                      compact
+                      title="还需要 TB"
+                      description="TB 是测算与账面利息勾稽的必需资料，请补充上传或检查文件表头。"
+                    />
                   </CardContent>
                 </Card>
               ) : null}
@@ -1177,7 +1238,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               <div className="deposit-run-grid">
                 <label>
                   资产负债表日
-                  <input
+                  <Input
                     type="date"
                     value={reportEnd}
                     onChange={(e) => setReportEnd(e.target.value)}
@@ -1186,9 +1247,10 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                 <label>
                   输出文件
                   <span className="deposit-output-row">
-                    <input
+                    <Input
                       value={outputPath}
                       readOnly
+                      title={outputPath || undefined}
                       placeholder="默认保存到源文件目录"
                     />
                     <Button
@@ -1523,14 +1585,16 @@ function SourceCard(props: {
       </CardHeader>
       <CardContent>
         <div className="fx-detected-file">
-          <span>{fileName(props.path)}</span>
-          <button
+          <span title={props.path}>{fileName(props.path)}</span>
+          <Button
+            variant="ghost"
+            size="sm"
             type="button"
             disabled={props.disabled}
             onClick={props.onClear}
           >
             移除
-          </button>
+          </Button>
         </div>
         {props.path && !props.inspection && (
           <Button
@@ -1615,7 +1679,8 @@ function MappingPreview(props: {
           </label>
           <label>
             标题行
-            <input
+            <Input
+              controlSize="sm"
               type="number"
               min={1}
               value={props.inspection.headerRow}
@@ -1763,6 +1828,41 @@ function Results({
         ))}
       </div>
 
+      <div className="deposit-result-overview" role="status">
+        <Badge
+          variant="outline"
+          className={
+            missing.length ||
+            stale ||
+            !booked ||
+            summary.reconciliationPassed !== true
+              ? "badge-warning"
+              : "badge-ready"
+          }
+        >
+          {missing.length
+            ? "测算未完整"
+            : stale
+              ? "结果待重算"
+              : !booked
+                ? "待补充勾稽"
+                : summary.reconciliationPassed === true
+                  ? "勾稽一致"
+                  : "存在差异"}
+        </Badge>
+        <span>
+          {missing.length
+            ? "先补齐未定利率，再按新利率重算。"
+            : stale
+              ? "按新利率重新测算后，再复核与 TB 的差异。"
+              : !booked
+                ? "请确认 TB 利息收入科目映射，再完成账面勾稽。"
+                : summary.reconciliationPassed === true
+                  ? "可继续复核逐户明细并生成 Excel 底稿。"
+                  : "请复核利率、科目分类和月度余额后重新测算。"}
+        </span>
+      </div>
+
       {missing.length > 0 && (
         <p className="deposit-stale">
           <b>{missing.length} 个账户尚未确定利率，测算尚不完整</b>
@@ -1809,9 +1909,7 @@ function Results({
             booked && summary.bookedNote
               ? String(summary.bookedNote)
               : undefined,
-            booked && Number(summary.bookedInterestIncome) < 0
-              ? "warning"
-              : "",
+            booked && Number(summary.bookedInterestIncome) < 0 ? "warning" : "",
           )}
           <span className="fx-operator" aria-hidden="true">
             ＝
@@ -1943,20 +2041,23 @@ function Results({
                   <td>{amount(row.averageBalance)}</td>
                   <td>{amount(rowInterest(row))}</td>
                   <td title={row.note}>
-                    <span
+                    <Badge
+                      variant="outline"
                       className={
                         row.status === "已勾稽"
-                          ? "deposit-ok"
+                          ? "badge-ready"
                           : row.status === "待填利率"
-                            ? "deposit-missing"
-                            : "deposit-warn"
+                            ? "badge-danger"
+                            : "badge-warning"
                       }
                     >
                       {row.status}
-                    </span>
+                    </Badge>
                   </td>
                   <td>
-                    <button
+                    <Button
+                      variant="outline"
+                      size="sm"
                       type="button"
                       className="deposit-expand"
                       onClick={() =>
@@ -1964,7 +2065,7 @@ function Results({
                       }
                     >
                       {expanded === row.key ? "收起" : "展开"}
-                    </button>
+                    </Button>
                   </td>
                 </tr>
                 {expanded === row.key && (

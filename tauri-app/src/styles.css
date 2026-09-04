@@ -3,7 +3,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@fontsource-variable/geist";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -57,6 +56,11 @@
   --danger-bg: #fff0ed;
   --danger-fg: #983d2f;
   --danger-border: #efc1b8;
+  --info-bg: color-mix(in srgb, var(--brand-accent) 16%, var(--surface));
+  --info-fg: var(--brand-link);
+  --info-border: color-mix(in srgb, var(--brand-accent) 48%, var(--border));
+  --success-border: color-mix(in srgb, var(--success-fg) 28%, var(--border));
+  --warning-border: color-mix(in srgb, var(--warning-fg) 28%, var(--border));
 
   /* 字号 */
   --fs-xs: 12px;
@@ -66,6 +70,15 @@
   --fs-xl: 22px;
   --fs-2xl: 26px;
   --fs-3xl: 30px;
+  --lh-caption: 18px;
+  --lh-label: 20px;
+  --lh-body: 22px;
+  --lh-card-title: 24px;
+  --lh-section-title: 30px;
+  --lh-page-title: 40px;
+  --fw-regular: 400;
+  --fw-medium: 600;
+  --fw-strong: 700;
 
   /* 圆角 */
   --r-sm: 8px;
@@ -82,11 +95,34 @@
   --sp-6: 32px;
   --sp-7: 48px;
 
+  /* 控件 */
+  --control-height-sm: 32px;
+  --control-height: 40px;
+  --control-bg: var(--surface-sunken);
+  --control-bg-hover: var(--surface-muted);
+  --control-border: var(--text-muted);
+  --focus-ring: var(--brand-link);
+  --disabled-opacity: 0.55;
+
   /* 卡片不使用投影：浅色投影在白底上会被感知为一圈细边框。 */
-  --shadow-card: none;
+  --shadow-card: 0 1px 2px rgb(20 53 58 / 6%);
   /* 数据预览是可滚动、可编辑的工作区，不是普通信息卡片；用克制的阴影
      与明确描边把它从页面底色中抬起，避免表格和背景融成一层。 */
   --shadow-preview: 0 12px 30px rgb(20 53 58 / 10%);
+  --shadow-overlay: 0 18px 48px rgb(8 21 22 / 22%);
+  --shadow-button: 0 2px 6px rgb(22 56 56 / 18%);
+  --shadow-interactive: 0 6px 18px rgb(20 53 58 / 10%);
+  --overlay-backdrop: rgb(0 0 0 / 45%);
+  --overlay-white-subtle: rgb(255 255 255 / 8%);
+  --overlay-white-hover: rgb(255 255 255 / 18%);
+  --overlay-white-strong: rgb(255 255 255 / 20%);
+  --overlay-white-border: rgb(255 255 255 / 22%);
+  --overlay-dark-border: rgb(0 0 0 / 14%);
+  --shadow-sticky: 0 -8px 24px rgb(20 53 58 / 8%);
+  /* 原生窗口关闭按钮采用 Windows 危险动作色，不随品牌切换。 */
+  --window-close-bg: #e81123;
+  --window-close-active: #c50f1f;
+  --window-close-fg: #ffffff;
 
   /* ShadCN semantic tokens map to the existing audit-toolbox palette. */
   --background: var(--surface-page);
@@ -104,8 +140,8 @@
   --accent: #dcebe6;
   --accent-foreground: var(--brand-soft);
   --destructive: var(--danger-fg);
-  --input: var(--border);
-  --ring: var(--brand-accent);
+  --input: var(--control-border);
+  --ring: var(--focus-ring);
   --chart-1: var(--brand);
   --chart-2: var(--brand-accent);
   --chart-3: var(--success-fg);
@@ -124,7 +160,9 @@
 /* == tokens end == */
 
 :root {
-  font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  --font-ui: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, monospace;
+  font-family: var(--font-ui);
   color: var(--ink);
   background: var(--surface-page);
   color-scheme: light;
@@ -136,6 +174,7 @@
     transparent
   );
   font-synthesis: none;
+  line-height: var(--lh-body);
 }
 * {
   box-sizing: border-box;
@@ -205,7 +244,7 @@ input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
 summary:focus-visible {
-  outline: 2px solid var(--brand-accent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 .app-shell {
@@ -285,12 +324,12 @@ summary:focus-visible {
   background: var(--border-soft);
 }
 .window-controls .window-controls-close:hover {
-  background: #e81123;
-  color: #fff;
+  background: var(--window-close-bg);
+  color: var(--window-close-fg);
 }
 .window-controls .window-controls-close:active {
-  background: #c50f1f;
-  color: #fff;
+  background: var(--window-close-active);
+  color: var(--window-close-fg);
 }
 /* 品牌区与页头现在是拖拽手柄（双击=最大化），拖动时选中文字只会闪一下，关掉 */
 .brand,
@@ -315,7 +354,7 @@ summary:focus-visible {
 .sidebar a:hover,
 .sidebar a.active {
   background: var(--brand-soft);
-  color: var(--on-brand-soft, #fff);
+  color: var(--on-brand-soft);
 }
 .nav-icon {
   flex: 0 0 auto;
@@ -324,7 +363,7 @@ summary:focus-visible {
 }
 .sidebar a:hover .nav-icon,
 .sidebar a.active .nav-icon {
-  color: var(--on-brand-soft, #fff);
+  color: var(--on-brand-soft);
 }
 .nav-update-dot {
   flex: 0 0 auto;
@@ -347,15 +386,15 @@ summary:focus-visible {
   width: 26px;
   height: 26px;
   border-radius: var(--r-sm);
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--overlay-white-subtle);
   color: var(--on-dark-muted);
   font-size: 11px;
   font-weight: 700;
 }
 .sidebar a:hover .tool-badge,
 .sidebar a.active .tool-badge {
-  background: rgba(255, 255, 255, 0.18);
-  color: var(--on-brand-soft, #fff);
+  background: var(--overlay-white-hover);
+  color: var(--on-brand-soft);
 }
 .tool-nav-label {
   min-width: 0;
@@ -492,7 +531,7 @@ summary:focus-visible {
   display: block;
   margin-top: var(--sp-1);
   font-size: var(--fs-xs);
-  color: var(--muted-soft);
+  color: var(--text-muted);
 }
 /* 最近使用：把重复打开的那几个工具提到九张卡片之前 */
 .recent-tools {
@@ -506,7 +545,7 @@ summary:focus-visible {
 }
 .recent-chip {
   padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: var(--r-pill);
   background: var(--surface);
   color: var(--brand-link);
@@ -620,7 +659,7 @@ summary:focus-visible {
 .field select {
   width: 100%;
   height: 40px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: var(--r-sm);
   padding: 0 var(--sp-2);
   background: var(--surface-sunken);
@@ -648,12 +687,12 @@ summary:focus-visible {
 /* 焦点圈画在元素内部，避免外扩的 outline 穿过紧邻的浏览按钮，造成"颜色条穿按钮"的割裂感 */
 .input-with-button input:focus-visible {
   outline: none;
-  box-shadow: inset 0 0 0 2px var(--brand-accent);
+  box-shadow: inset 0 0 0 2px var(--focus-ring);
 }
 .browse {
   flex: 0 0 auto;
   min-width: 56px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-left: 0;
   border-radius: 0 var(--r-sm) var(--r-sm) 0;
   background: var(--surface-muted);
@@ -697,21 +736,21 @@ summary:focus-visible {
  */
 .primary {
   background: var(--brand);
-  color: var(--on-brand, #fff);
+  color: var(--on-brand);
   font-weight: 600;
-  box-shadow: 0 2px 6px rgba(22, 56, 56, 0.18);
+  box-shadow: var(--shadow-button);
 }
 .primary:hover:not(:disabled) {
   background: var(--brand-link);
-  color: var(--on-brand-link, var(--on-brand, #fff));
+  color: var(--on-brand-link, var(--on-brand));
 }
 .secondary {
   background: var(--surface);
   color: var(--brand-link);
-  border: 1px solid var(--border) !important;
+  border: 1px solid var(--control-border);
 }
 .secondary:hover:not(:disabled) {
-  border-color: var(--border-strong) !important;
+  border-color: var(--focus-ring);
   background: var(--surface-muted);
 }
 .primary,
@@ -759,9 +798,106 @@ summary:focus-visible {
 .empty {
   padding: var(--sp-7) var(--sp-4);
   text-align: center;
-  color: var(--muted-soft);
+  color: var(--text-muted);
   border: 1px dashed var(--border);
   border-radius: var(--r-md);
+}
+.empty-state {
+  display: grid;
+  justify-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-7) var(--sp-4);
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  text-align: center;
+}
+.empty-state--compact {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  justify-items: start;
+  align-items: center;
+  padding: var(--sp-4);
+  text-align: left;
+}
+.empty-state-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--r-pill);
+  background: var(--surface-muted);
+  color: var(--brand-link);
+}
+.empty-state-icon svg {
+  width: 20px;
+  height: 20px;
+}
+.empty-state-copy {
+  min-width: 0;
+}
+.empty-state-copy h2,
+.empty-state-copy p {
+  margin: 0;
+}
+.empty-state-copy h2 {
+  color: var(--ink-strong);
+  font-size: var(--fs-lg);
+}
+.empty-state-copy p {
+  margin-top: var(--sp-1);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+.empty-state-action {
+  display: flex;
+  justify-content: center;
+  gap: var(--sp-2);
+}
+.data-handling-notice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--data-notice-border, var(--border));
+  border-radius: var(--r-md);
+  background: var(--data-notice-bg, var(--surface-muted));
+  color: var(--text-muted);
+}
+.data-handling-notice-icon {
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  color: var(--data-notice-fg, var(--brand-link));
+}
+.data-handling-notice--local {
+  --data-notice-bg: color-mix(in srgb, var(--success-bg) 62%, var(--surface));
+  --data-notice-border: color-mix(in srgb, var(--success-fg) 28%, var(--border));
+  --data-notice-fg: var(--success-fg);
+}
+.data-handling-notice--network-assisted {
+  --data-notice-bg: color-mix(in srgb, var(--info-bg) 70%, var(--surface));
+  --data-notice-border: var(--info-border);
+  --data-notice-fg: var(--info-fg);
+}
+.data-handling-notice--telemetry {
+  --data-notice-bg: color-mix(in srgb, var(--surface-muted) 60%, var(--surface));
+  --data-notice-border: color-mix(in srgb, var(--brand-accent) 44%, var(--border));
+  --data-notice-fg: var(--brand-link);
+}
+.data-handling-notice-copy {
+  min-width: 0;
+}
+.data-handling-notice-copy strong {
+  display: block;
+  color: var(--ink-strong);
+  font-size: var(--fs-sm);
+}
+.data-handling-notice-copy p,
+.data-handling-notice-details {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
 }
 .link-button {
   display: block;
@@ -846,17 +982,20 @@ summary:focus-visible {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .loading-dot {
+  .loading-dot,
+  .job-dialog-pill-dot,
+  .sync-busy-spinner {
     animation: none;
   }
-  .tool-card {
+  .tool-card,
+  .step-indicator-item {
     transition: none;
   }
 }
 .field textarea {
   width: 100%;
   min-height: 78px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: var(--r-sm);
   padding: var(--sp-2) var(--sp-2);
   background: var(--surface-sunken);
@@ -900,7 +1039,7 @@ summary:focus-visible {
 }
 .mapping-row select {
   height: 36px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: var(--r-sm);
   background: var(--surface-sunken);
   padding: 0 var(--sp-2);
@@ -1304,7 +1443,7 @@ summary:focus-visible {
 
 @theme inline {
   --font-heading: var(--font-sans);
-  --font-sans: "Geist Variable", sans-serif;
+  --font-sans: var(--font-ui);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -1348,40 +1487,6 @@ summary:focus-visible {
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
-}
-
-.dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
 }
 
 @layer base {
@@ -1483,15 +1588,23 @@ summary:focus-visible {
 }
 .stat-hint {
   font-size: var(--fs-xs);
-  color: var(--muted-soft);
+  color: var(--text-muted);
 }
 
 /* StepIndicator：统一步骤条（三态） */
 .step-indicator {
+  margin: var(--sp-5) 0 var(--sp-5);
+}
+.step-indicator-list {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: var(--sp-2);
-  margin: var(--sp-5) 0 var(--sp-5);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.step-indicator-list > li {
+  min-width: 0;
 }
 .step-indicator-item {
   display: inline-flex;
@@ -1505,6 +1618,13 @@ summary:focus-visible {
   color: var(--label);
   cursor: pointer;
   font-size: var(--fs-md);
+  width: 100%;
+  min-height: var(--control-height);
+  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+}
+.step-indicator-item:hover:not(:disabled):not(.active) {
+  border-color: var(--border-strong);
+  background: var(--surface-muted);
 }
 .step-indicator-item .step-indicator-index {
   display: inline-grid;
@@ -1524,7 +1644,7 @@ summary:focus-visible {
   font-weight: 700;
 }
 .step-indicator-item.active .step-indicator-index {
-  background: rgba(255, 255, 255, 0.2);
+  background: var(--overlay-white-strong);
   color: var(--on-brand, var(--surface));
 }
 .step-indicator-item.done {
@@ -1636,7 +1756,7 @@ summary:focus-visible {
 .mapping-panel-toolbar select {
   min-height: 34px;
   padding: 6px 9px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: var(--r-sm);
   background-color: var(--surface);
   color: var(--ink);
@@ -1644,7 +1764,7 @@ summary:focus-visible {
 .mapping-panel-toolbar input:focus-visible,
 .mapping-panel-toolbar select:focus-visible,
 .mapping-panel .dt-header-control select:focus-visible {
-  outline: 2px solid var(--brand-accent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 .mapping-panel > .mapping-form-note,
@@ -1653,8 +1773,8 @@ summary:focus-visible {
 .mapping-panel > .fa-missing-hint,
 .mapping-panel > .fx-hint,
 .mapping-panel > .fx-currency-confirm {
-  margin-right: var(--sp-5) !important;
-  margin-left: var(--sp-5) !important;
+  margin-right: var(--sp-5);
+  margin-left: var(--sp-5);
 }
 /* 形态结论与星号说明合并成一行：形态是胶囊标签，星号说明跟随其后，
    不再各自独占一行把预览表往下推。 */
@@ -1663,23 +1783,23 @@ summary:focus-visible {
   align-items: center;
   flex-wrap: wrap;
   gap: var(--sp-2) var(--sp-3);
-  margin-top: var(--sp-2) !important;
-  margin-bottom: var(--sp-2) !important;
+  margin-top: var(--sp-2);
+  margin-bottom: var(--sp-2);
 }
 .mapping-panel .mapping-form-note {
   display: inline-flex;
   align-items: center;
-  margin: 0 !important;
+  margin: 0;
   border-color: color-mix(in srgb, var(--brand-accent) 38%, var(--border));
   background: color-mix(in srgb, var(--success-bg) 52%, var(--surface));
-  color: var(--success-fg) !important;
+  color: var(--success-fg);
   font-weight: 600;
   padding: 1px var(--sp-3);
   border-radius: 999px;
   white-space: nowrap;
 }
 .mapping-panel .mapping-requirement-legend {
-  margin: 0 !important;
+  margin: 0;
 }
 .mapping-panel > .data-table {
   margin-top: var(--sp-4);
@@ -1730,6 +1850,9 @@ summary:focus-visible {
 .result-card-footer {
   border-top: 1px solid var(--border-soft);
 }
+.result-card-shared {
+  padding: 0;
+}
 
 /* Badge 状态色：对齐原 .pill 五态色值 */
 .badge-ready {
@@ -1765,10 +1888,10 @@ summary:focus-visible {
   justify-content: center;
   gap: var(--sp-2);
   min-height: 88px;
-  border: 1.5px dashed var(--muted-soft);
+  border: 1.5px dashed var(--control-border);
   border-radius: var(--r-md);
   background: var(--surface-sunken);
-  color: var(--brand);
+  color: var(--brand-link);
   cursor: pointer;
   font-size: var(--fs-md);
   font-weight: 600;
@@ -1808,6 +1931,16 @@ summary:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+  padding: var(--sp-1);
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.file-drop-slot-value:hover:not(:disabled) {
+  color: var(--brand-link);
+  text-decoration: underline;
 }
 .file-drop-clear {
   border: 0;
@@ -1821,6 +1954,25 @@ summary:focus-visible {
 .file-drop-clear:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+.file-input-description,
+.file-input-error {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
+  line-height: var(--lh-caption);
+}
+.file-input-description {
+  color: var(--text-muted);
+}
+.file-input-error {
+  color: var(--danger-fg);
+}
+.file-drop-input.invalid .file-drop-zone,
+.file-drop-input.invalid .file-drop-slot {
+  border-color: var(--danger-fg);
+}
+.file-drop-input.disabled {
+  opacity: var(--disabled-opacity);
 }
 
 /* FA 期初/期末左右两列（各自纵向）。
@@ -1873,7 +2025,7 @@ summary:focus-visible {
   border-color: var(--brand-accent);
   border-style: dashed;
   background: var(--surface-muted);
-  box-shadow: inset 0 0 0 2px var(--brand-accent);
+  box-shadow: inset 0 0 0 2px var(--focus-ring);
 }
 
 /* FA 字段映射（参考看账 kz-map）：两列 grid，每列一个文件的角色映射 */
@@ -1947,7 +2099,7 @@ summary:focus-visible {
   border: 1px solid var(--border-soft);
   border-radius: var(--r-md);
   background: var(--surface-sunken);
-  color: var(--text);
+  color: var(--ink);
 }
 .wp-directory-requirements h3 {
   margin: 0 0 var(--sp-2);
@@ -2028,7 +2180,7 @@ summary:focus-visible {
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   background: var(--surface);
-  color: var(--text);
+  color: var(--ink);
   box-shadow: var(--shadow-lg);
 }
 .ts-filter-menu-title {
@@ -2147,7 +2299,7 @@ summary:focus-visible {
   width: 100%;
   height: 28px;
   font-size: var(--fs-xs);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: var(--r-sm);
   background: var(--surface);
   color: var(--label);
@@ -2157,7 +2309,7 @@ summary:focus-visible {
    （科目名称同时是币种线索），合起来时下拉框里直接显示「A ＋ B」。 */
 .data-table-table th .dt-header-control select.mapped {
   border-color: var(--brand-accent);
-  background-color: var(--success-bg) !important;
+  background-color: var(--success-bg);
   color: var(--success-fg);
   font-weight: 600;
   box-shadow: inset 0 0 0 1px
@@ -2175,7 +2327,7 @@ summary:focus-visible {
 
 /* 已被其他列占用的角色选项：弱化提示 */
 .data-table-table th .dt-header-control select option.dt-role-taken {
-  color: var(--muted-soft);
+  color: var(--text-muted);
   background: var(--surface-muted);
 }
 
@@ -2183,7 +2335,7 @@ summary:focus-visible {
    但灰化并禁止选择。原生 optgroup 在不同 WebView 的着色有差异，
    disabled 是行为保证，颜色是辅助提示。 */
 .data-table-table th .dt-header-control select optgroup.dt-group-unavailable {
-  color: var(--muted-soft);
+  color: var(--text-muted);
   background: var(--surface-muted);
 }
 
@@ -2202,25 +2354,25 @@ summary:focus-visible {
 
 /* 未映射字段提示 */
 .fa-missing-hint {
-  margin-top: var(--sp-2) !important;
-  color: var(--danger-fg) !important;
+  margin-top: var(--sp-2);
+  color: var(--danger-fg);
   background: var(--danger-bg);
   border: 1px solid var(--danger-border);
   border-radius: var(--r-sm);
   padding: var(--sp-2) var(--sp-3);
-  font-size: var(--fs-sm) !important;
+  font-size: var(--fs-sm);
 }
 
 /* 形态判定结论：「已识别为 类型1（起始日＋到期日）」/「最接近 …，还缺 …」。
    与未映射提示区分开——这条是结论不是错误，用中性底色。 */
 .mapping-form-note {
-  margin-top: var(--sp-2) !important;
-  color: var(--text-muted) !important;
+  margin-top: var(--sp-2);
+  color: var(--text-muted);
   background: var(--surface-muted);
   border: 1px solid var(--border-soft);
   border-radius: var(--r-sm);
   padding: var(--sp-2) var(--sp-3);
-  font-size: var(--fs-sm) !important;
+  font-size: var(--fs-sm);
 }
 
 /* 每个文件预览标题：标题 + 未映射提示 */
@@ -2260,7 +2412,7 @@ summary:focus-visible {
   margin: var(--sp-5) 0 var(--sp-5);
 }
 .ap-views button {
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: var(--r-sm);
   background: var(--surface-sunken);
   color: var(--text-muted);
@@ -2385,7 +2537,7 @@ summary:focus-visible {
   --ink-strong: #14212b;
   --ink-inverse: #f7fbfd;
   --label: #53636f;
-  --text-muted: #5d6c77;
+  --text-muted: #5b6a75;
   --muted-soft: #82909a;
   --surface: #fbfdfe;
   --surface-sunken: #f4f7f9;
@@ -2490,7 +2642,7 @@ summary:focus-visible {
   --ink-strong: #241914;
   --ink-inverse: #fffaf0;
   --label: #66564e;
-  --text-muted: #74645b;
+  --text-muted: #726259;
   --muted-soft: #948178;
   --surface: #fffaf0;
   --surface-sunken: #f8f1e4;
@@ -2525,7 +2677,7 @@ summary:focus-visible {
   --ink-strong: #18271e;
   --ink-inverse: #f8fbf4;
   --label: #536258;
-  --text-muted: #607066;
+  --text-muted: #5b6b61;
   --muted-soft: #829087;
   --surface: #fbfdf8;
   --surface-sunken: #f4f7ef;
@@ -2612,9 +2764,9 @@ summary:focus-visible {
 .theme-option-swatches > span {
   width: 14px;
   height: 14px;
-  border: 1px solid rgb(0 0 0 / 14%);
+  border: 1px solid var(--overlay-dark-border);
   border-radius: 50%;
-  box-shadow: 0 0 0 1px rgb(255 255 255 / 22%);
+  box-shadow: 0 0 0 1px var(--overlay-white-border);
 }
 .theme-option-swatches > span + span {
   margin-left: -4px;
@@ -2659,7 +2811,7 @@ summary:focus-visible {
 }
 .tool-subgroup-toggle:hover {
   background: var(--brand-soft);
-  color: var(--on-brand-soft, #fff);
+  color: var(--on-brand-soft);
 }
 .tool-subgroup-chevron {
   margin-left: auto;
@@ -2715,7 +2867,7 @@ summary:focus-visible {
   color: var(--text-muted);
 }
 .worklog-time {
-  color: var(--muted-soft);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
 }
 .worklog-error .worklog-step {
@@ -2753,7 +2905,7 @@ summary:focus-visible {
   margin: var(--sp-3) 0;
 }
 .ap-template-tabs button {
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: var(--r-sm);
   background: var(--surface-sunken);
   color: var(--text-muted);
@@ -2841,9 +2993,9 @@ summary:focus-visible {
 /* 字段后的星号跟随当前识别出的 TB/JE 形态，而不是固定字段字典。
    在所有共用 MappingPanel 的工具中用同一条说明，避免用户猜测标记含义。 */
 .mapping-requirement-legend {
-  margin: var(--sp-2) 0 0 !important;
-  color: var(--text-muted) !important;
-  font-size: var(--fs-xs) !important;
+  margin: var(--sp-2) 0 0;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
 }
 .job-dialog-rows {
   display: flex;
@@ -2902,7 +3054,7 @@ summary:focus-visible {
   border: 1px solid var(--border);
   border-radius: var(--r-pill);
   background: var(--card);
-  box-shadow: 0 6px 20px rgb(0 0 0 / 12%);
+  box-shadow: var(--shadow-overlay);
   cursor: pointer;
   font-size: var(--fs-sm);
 }
@@ -2929,9 +3081,9 @@ summary:focus-visible {
 .dev-build-badge {
   padding: 2px 8px;
   border-radius: var(--r-pill);
-  background: rgba(245, 158, 11, 0.22);
-  border: 1px solid rgba(245, 158, 11, 0.45);
-  color: #fbbf24;
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  color: var(--warning-fg);
   font-weight: 600;
   letter-spacing: 0.04em;
 }
@@ -2970,4 +3122,16 @@ summary:focus-visible {
   display: flex;
   justify-content: flex-end;
   margin-top: var(--sp-3);
+}
+
+/* 放在动画定义后，避免同权重的后置 animation 声明重新开启运动。 */
+@media (prefers-reduced-motion: reduce) {
+  .job-dialog-pill-dot,
+  .sync-busy-spinner {
+    animation: none;
+  }
+  [data-slot="card"][data-variant="interactive"] {
+    transition: none;
+    transform: none;
+  }
 }

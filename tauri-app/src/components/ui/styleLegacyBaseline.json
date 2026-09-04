@@ -1,0 +1,7 @@
+{
+  "important": [],
+  "transitionAll": [],
+  "literalColor": [],
+  "pageImportant": { "settings.css": ["animation: none !important;"] },
+  "reason": "settings.css 的 reduced-motion 必须覆盖组件动画；这是唯一保留的可访问性强制规则。"
+}

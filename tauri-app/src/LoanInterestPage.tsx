@@ -13,6 +13,8 @@ import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { StepIndicator } from "@/components/StepIndicator";
+import { DataHandlingNotice } from "@/components/DataHandlingNotice";
+import { EmptyState } from "@/components/EmptyState";
 import {
   applyLedgerReviewToDict,
   missingGoldIdentity,
@@ -25,11 +27,7 @@ import {
   type LoanForm,
   type LoanRole,
 } from "@/loanForms";
-import {
-  formGroups,
-  useLedgerForms,
-  type LedgerFormKind,
-} from "@/ledgerForms";
+import { formGroups, useLedgerForms, type LedgerFormKind } from "@/ledgerForms";
 import {
   loanBps,
   loanRateDefaults,
@@ -43,6 +41,8 @@ import { MappingPanel } from "@/components/MappingPanel";
 import { NumberInput } from "@/components/NumberInput";
 import { errorText } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import "./loan-interest.css";
 
@@ -160,7 +160,11 @@ export function loanEffectiveRate(
 export function loanEquation(
   r: Pick<
     LoanRow,
-    "openingPrincipal" | "additions" | "reductions" | "closingPrincipal" | "ledgerClosing"
+    | "openingPrincipal"
+    | "additions"
+    | "reductions"
+    | "closingPrincipal"
+    | "ledgerClosing"
   >,
 ) {
   // 差异＝推算期末（期初＋增加－减少）－台账期末；台账无期末列时无从对照，
@@ -446,24 +450,30 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       {step === 0 && (
         <>
           <section className="fx-mode-bar">
-            <button
+            <Button
+              type="button"
+              variant={mode === "ledger" ? "default" : "ghost"}
               className={mode === "ledger" ? "active" : ""}
+              aria-pressed={mode === "ledger"}
               onClick={() => {
                 invalidateResults();
                 setMode("ledger");
               }}
             >
               完整借款台账
-            </button>
-            <button
+            </Button>
+            <Button
+              type="button"
+              variant={mode === "tb" ? "default" : "ghost"}
               className={mode === "tb" ? "active" : ""}
+              aria-pressed={mode === "tb"}
               onClick={() => {
                 invalidateResults();
                 setMode("tb");
               }}
             >
               TB＋JE
-            </button>
+            </Button>
           </section>
           {mode === "tb" && (
             <section className="loan-warning">
@@ -478,6 +488,16 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               </CardTitle>
             </CardHeader>
             <CardContent>
+              <DataHandlingNotice
+                mode="network-assisted"
+                title="测算默认在本机完成"
+                description="文件读取与利息测算在本机进行；使用 LLM 映射复核时，字段名和预览样本会按设置发送到所配置服务。"
+                details={
+                  mode === "ledger"
+                    ? "完整台账需包含借款标识、本金或余额、借款期间和利率信息。"
+                    : "TB 与 JE 均需上传；可在下一步选传利率台账。"
+                }
+              />
               <div className="loan-upload-grid">
                 {activeKinds.map((kind) => (
                   <Upload
@@ -490,6 +510,19 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                   />
                 ))}
               </div>
+              {!activeKinds.some((kind) => sources[kind].path) && (
+                <EmptyState
+                  compact
+                  title={
+                    mode === "ledger" ? "准备完整借款台账" : "准备 TB 与 JE"
+                  }
+                  description={
+                    mode === "ledger"
+                      ? "加入包含借款标识、本金或余额、起止日期及利率信息的台账。"
+                      : "同时加入科目余额表（TB）与序时账（JE），用于还原并核对本金变动。"
+                  }
+                />
+              )}
             </CardContent>
           </Card>
           {activeKinds.map(
@@ -584,7 +617,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               <div className="loan-run-grid">
                 <label>
                   资产负债表日
-                  <input
+                  <Input
                     type="date"
                     value={reportEnd}
                     onChange={(e) => setReportEnd(e.target.value)}
@@ -593,9 +626,10 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                 <label>
                   输出文件
                   <span className="loan-output-row">
-                    <input
+                    <Input
                       value={outputPath}
                       readOnly
+                      title={outputPath || undefined}
                       placeholder="默认保存到源文件目录"
                     />
                     <Button
@@ -765,7 +799,8 @@ function Mapping({
   const roleList: [string, string][] = Object.entries(labels);
   // 下拉分组与其他账表工具一致：借款/利率台账用引擎随识别下发的形态表，
   // TB/JE 用共享内核的形态表（formGroups 已支持 loan）。
-  const groupKind: LedgerFormKind = kind === "tb" || kind === "je" ? kind : "loan";
+  const groupKind: LedgerFormKind =
+    kind === "tb" || kind === "je" ? kind : "loan";
   const fetchedForms = useLedgerForms(groupKind);
   const forms =
     groupKind === "loan" && x.forms?.length ? x.forms : fetchedForms;
@@ -808,7 +843,8 @@ function Mapping({
             </label>
             <label>
               标题行
-              <input
+              <Input
+                controlSize="sm"
                 type="number"
                 min={1}
                 value={x.headerRow}
@@ -930,9 +966,12 @@ function LedgerRateConfirmation({
                       />
                     </td>
                     <td>
-                      <span className={sourceRate ? "loan-ok" : "loan-review"}>
+                      <Badge
+                        variant="outline"
+                        className={sourceRate ? "badge-ready" : "badge-warning"}
+                      >
                         {sourceRate ? "已识别" : "待补充"}
-                      </span>
+                      </Badge>
                     </td>
                   </tr>
                 );
@@ -969,6 +1008,7 @@ function Results({
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     });
+  const reviewCount = rows.filter((row) => row.matchStatus !== "已匹配").length;
   const metric = (label: string, value: number | string, detail?: string) => (
     <div className="fx-bridge-metric">
       <span>{label}</span>
@@ -992,6 +1032,19 @@ function Results({
             打开 Excel 底稿
           </Button>
         ))}
+      </div>
+      <div className="loan-result-overview" role="status">
+        <Badge
+          variant="outline"
+          className={reviewCount ? "badge-warning" : "badge-ready"}
+        >
+          {reviewCount ? `${reviewCount} 笔待复核` : "测算完成"}
+        </Badge>
+        <span>
+          {reviewCount
+            ? "先处理待复核行，确认本金变化、利率和勾稽差异，再生成底稿。"
+            : "可继续检查逐笔明细并打开或生成 Excel 底稿。"}
+        </span>
       </div>
       <div className="fx-bridge-step">
         <div className="fx-step-label">
@@ -1131,14 +1184,17 @@ function Results({
                 </td>
                 <td>{Number(r.calculatedInterest ?? 0).toLocaleString()}</td>
                 <td>
-                  <span
+                  <Badge
+                    variant="outline"
                     className={
-                      r.matchStatus === "已匹配" ? "loan-ok" : "loan-review"
+                      r.matchStatus === "已匹配"
+                        ? "badge-ready"
+                        : "badge-warning"
                     }
                     title={r.matchBasis}
                   >
                     {r.matchStatus ?? "—"}
-                  </span>
+                  </Badge>
                 </td>
               </tr>
             ))}

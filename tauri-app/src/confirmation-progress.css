@@ -5,6 +5,22 @@
   align-items: start;
   margin-top: var(--sp-5);
 }
+.confirmation-page {
+  display: grid;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+.confirmation-page .data-handling-notice {
+  margin-bottom: var(--sp-4);
+}
+.confirmation-result-overview {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
 .confirmation-card {
   /* 卡片外壳不描边（与 form-card 一致），层次交给投影 */
   background: var(--surface);
@@ -52,7 +68,7 @@
   font-size: var(--fs-lg);
 }
 .confirmation-drop span {
-  color: var(--muted-soft);
+  color: var(--text-muted);
   max-width: 100%;
   overflow-wrap: anywhere;
 }
@@ -96,7 +112,7 @@
   gap: var(--sp-1);
 }
 .confirmation-modes small {
-  color: var(--muted-soft);
+  color: var(--text-muted);
 }
 .confirmation-error,
 .confirmation-success {
@@ -117,7 +133,7 @@
 }
 .confirmation-empty {
   border: 1px dashed var(--border);
-  color: var(--muted-soft);
+  color: var(--text-muted);
   min-height: 180px;
   border-radius: var(--r-lg);
   display: grid;
@@ -139,7 +155,7 @@
   gap: var(--sp-1);
 }
 .confirmation-metrics span {
-  color: var(--muted-soft);
+  color: var(--text-muted);
   font-size: var(--fs-sm);
 }
 .confirmation-metrics strong {

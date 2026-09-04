@@ -19,6 +19,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useJobEvents } from "@/hooks/useJobEvents";
+import { DataHandlingNotice } from "@/components/DataHandlingNotice";
+import { EmptyState } from "@/components/EmptyState";
 import {
   dedupePdfPaths,
   fileStatusLabel,
@@ -30,6 +32,15 @@ import {
   summarizeFileResultsText,
   type PdfConvertResult,
 } from "./pdfToExcelUi";
+
+export function pdfToExcelStep(
+  fileCount: number,
+  hasJob: boolean,
+  hasResult: boolean,
+): number {
+  if (hasResult || hasJob) return 2;
+  return fileCount > 0 ? 1 : 0;
+}
 
 /// 回函 PDF 转 Excel：批量把文字版回函逐行转成 Excel 并自动提取表格。
 /// 结构对齐 FileListDirectoryPage（效率工具同组）：文件准备 → 输出位置 → 进度与结果。
@@ -146,6 +157,11 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
     (result ? outputDir.trim() : "") ||
     result?.outputPaths[0] ||
     "";
+  const currentStep = pdfToExcelStep(
+    pdfPaths.length,
+    Boolean(job),
+    Boolean(result),
+  );
 
   return (
     <>
@@ -154,19 +170,29 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
         title={tool.name}
         detail="把文字版回函逐行转成 Excel，自动提取回函中的表格，支持批量处理。"
       />
+      <DataHandlingNotice
+        mode="local"
+        title="回函文件仅在本机处理"
+        description="PDF 读取、文字与表格提取、Excel 写出均在当前电脑完成，不会上传回函内容。"
+        details="当前仅支持带文字层的 PDF；扫描件不会调用外部 OCR。"
+      />
       <StepIndicator
         steps={[
           { key: "1", label: "选择文件", disabled: true },
           { key: "2", label: "开始转换", disabled: true },
           { key: "3", label: "查看结果", disabled: true },
         ]}
-        current={0}
+        current={currentStep}
       />
       <div className="fa-stack">
         <Card>
           <CardHeader>
             <CardTitle>1. 选择回函 PDF</CardTitle>
-            <Badge className="badge-ready">已就绪</Badge>
+            <Badge
+              className={pdfPaths.length ? "badge-ready" : "badge-neutral"}
+            >
+              {pdfPaths.length ? `已添加 ${pdfPaths.length} 份` : "待添加"}
+            </Badge>
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
@@ -203,10 +229,17 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
               </Button>
               <Button
                 type="button"
-                variant="ghost"
+                variant="destructive"
                 size="sm"
                 disabled={busy || !pdfPaths.length}
-                onClick={() => setPdfPaths([])}
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      `确认清空当前 ${pdfPaths.length} 份 PDF？只会清空本次列表，不会删除原文件。`,
+                    )
+                  )
+                    setPdfPaths([]);
+                }}
               >
                 清空列表
               </Button>
@@ -217,11 +250,14 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                   <div className="file-item" key={path}>
                     <div>
                       <strong>{pdfFileName(path)}</strong>
-                      <span>{pdfFileName(path)}</span>
+                      <span title={path}>{path}</span>
                     </div>
                     <div>
-                      <button
+                      <Button
                         type="button"
+                        variant="ghost"
+                        size="sm"
+                        aria-label={`移除 ${pdfFileName(path)}`}
                         disabled={busy}
                         onClick={() =>
                           setPdfPaths((current) =>
@@ -230,12 +266,16 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                         }
                       >
                         移除
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 ))
               ) : (
-                <div className="empty compact">尚未添加 PDF 文件</div>
+                <EmptyState
+                  compact
+                  title="尚未添加 PDF 文件"
+                  description="选择回函 PDF 或文件夹后，可在此确认待处理列表。"
+                />
               )}
             </div>
             <p className="hint">
@@ -250,14 +290,16 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
           </CardHeader>
           <CardContent>
             <Field label="输出文件夹（可选）">
-              <FileDropInput
-                value={outputDir}
-                placeholder="拖放或点击选择输出文件夹"
-                onBrowse={() => void chooseOutputDir()}
-                onClear={outputDir ? () => setOutputDir("") : undefined}
-                onDragStateChange={() => {}}
-                disabled={busy}
-              />
+              <div title={outputDir || undefined}>
+                <FileDropInput
+                  value={outputDir}
+                  placeholder="拖放或点击选择输出文件夹"
+                  onBrowse={() => void chooseOutputDir()}
+                  onClear={outputDir ? () => setOutputDir("") : undefined}
+                  onDragStateChange={() => {}}
+                  disabled={busy}
+                />
+              </div>
             </Field>
             <p className="hint">
               留空则输出到每份 PDF
@@ -344,6 +386,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                     <Button
                       type="button"
                       variant="default"
+                      title={openTarget}
                       onClick={() => void openOutput(openTarget)}
                     >
                       打开输出
@@ -353,7 +396,14 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
               </>
             ) : (
               !job && (
-                <div className="empty">转换进度和逐份结果会在这里显示。</div>
+                <EmptyState
+                  title="等待转换结果"
+                  description={
+                    pdfPaths.length
+                      ? "开始转换后，这里会显示总体进度和每份回函的处理结果。"
+                      : "先添加回函 PDF，再开始转换。"
+                  }
+                />
               )
             )}
           </CardContent>

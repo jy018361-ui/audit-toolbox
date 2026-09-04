@@ -39,6 +39,8 @@ pub(crate) struct ExcelMergerService {
     app: AppHandle,
     allowed: AllowedPaths,
     jobs: Arc<Mutex<HashMap<String, (PathBuf, PathBuf, String)>>>,
+    /// 每个任务的启动时刻，终态事件到达时用于计算「执行任务」统计的耗时。
+    job_starts: Arc<Mutex<HashMap<String, Instant>>>,
     heavy: Arc<Mutex<()>>,
     cancel_root: PathBuf,
 }
@@ -113,6 +115,7 @@ impl ExcelMergerService {
             app,
             allowed,
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            job_starts: Arc::new(Mutex::new(HashMap::new())),
             heavy: Arc::new(Mutex::new(())),
             cancel_root,
         }
@@ -135,6 +138,7 @@ impl ExcelMergerService {
             job_id.clone(),
             (cancel_path.clone(), pause_path, method.to_owned()),
         );
+        self.job_starts.lock().insert(job_id.clone(), Instant::now());
         let service = self.clone();
         let worker_job_id = job_id.clone();
         let worker_method = method.to_owned();
@@ -412,11 +416,33 @@ impl ExcelMergerService {
             }
         }
         let _ = self.app.state::<Storage>().record_job_event(&payload);
+        // 使用统计：任务首次到达终态时记一条 job_run（取消/失败都算未成功）。
+        // 从 job_starts 里取走时刻天然去重——同一任务重复的终态事件不会重复上报。
+        let phase = payload.get("phase").and_then(Value::as_str);
+        if matches!(phase, Some("completed" | "failed" | "cancelled")) {
+            if let (Some(tool_id), Some(job_id)) = (
+                payload.get("toolId").and_then(Value::as_str),
+                payload.get("jobId").and_then(Value::as_str),
+            ) {
+                if let Some(started) = self.job_starts.lock().remove(job_id) {
+                    if let Some(telemetry) = self.app.try_state::<crate::telemetry::Telemetry>() {
+                        telemetry.track(
+                            "job_run",
+                            Some(tool_id),
+                            None,
+                            Some(phase == Some("completed")),
+                            Some(started.elapsed().as_millis() as i64),
+                        );
+                    }
+                }
+            }
+        }
         let _ = self.app.emit("job-event", payload);
     }
 
     fn finish(&self, job_id: &str, cancel_path: &Path) {
         let _ = fs::remove_file(cancel_path);
+        self.job_starts.lock().remove(job_id);
         if let Some((_cancel, pause, _method)) = self.jobs.lock().remove(job_id) {
             let _ = fs::remove_file(pause);
         }

@@ -24,6 +24,7 @@ import { JobProgress } from "@/components/JobProgress";
 import { ResultView } from "@/components/ResultView";
 import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useJobEvents } from "@/hooks/useJobEvents";
@@ -771,7 +772,7 @@ export function FaTbJePage() {
 
       {step === 1 && (
         <div className="fa-tbje-step-stack">
-          <Card>
+          <Card variant="section">
             <CardHeader>
               <CardTitle>上传审计数据</CardTitle>
             </CardHeader>
@@ -826,7 +827,7 @@ export function FaTbJePage() {
                       onHeaderChange={(over) => void reinspect(kind, over)}
                     />
                   ) : (
-                    <Card className="fx-source-empty">
+                    <Card variant="subtle" className="fx-source-empty">
                       <CardHeader>
                         <CardTitle>
                           {kind === "tb" ? "TB 科目余额表" : "JE 序时账"}
@@ -841,7 +842,7 @@ export function FaTbJePage() {
               ))}
             </div>
           )}
-          <Card>
+          <Card variant="section">
             <CardContent>
               <div className="fa-tbje-step-actions">
                 <span>
@@ -951,7 +952,7 @@ export function FaTbJePage() {
       )}
 
       {step === 3 && (
-        <Card>
+        <Card variant="section">
           <CardHeader className="fa-tbje-card-head">
             <div>
               <CardTitle>复核固定资产科目与资产类别</CardTitle>
@@ -961,7 +962,7 @@ export function FaTbJePage() {
               </p>
             </div>
             <div className="fa-tbje-counts">
-              <Badge>原值 {roleCounts.cost}</Badge>
+              <Badge variant="info">原值 {roleCounts.cost}</Badge>
               <Badge variant="secondary">
                 累计折旧 {roleCounts.depreciation}
               </Badge>
@@ -979,7 +980,7 @@ export function FaTbJePage() {
             <div className="fa-tbje-account-toolbar">
               <label>
                 搜索科目
-                <input
+                <Input
                   name="fa-account-search"
                   autoComplete="off"
                   type="search"
@@ -1038,7 +1039,7 @@ export function FaTbJePage() {
               <div className="fa-tbje-bulk-category">
                 <label>
                   批量资产类别
-                  <input
+                  <Input
                     name="fa-bulk-category"
                     autoComplete="off"
                     value={bulkCategory}
@@ -1097,7 +1098,7 @@ export function FaTbJePage() {
                         {item.role === "excluded" ? (
                           <span className="fa-tbje-category-na">—</span>
                         ) : (
-                          <input
+                          <Input
                             aria-label={`${item.account}的资产类别`}
                             name={`category-${index}`}
                             autoComplete="off"
@@ -1177,26 +1178,26 @@ export function FaTbJePage() {
 
       {step === 4 && (
         <div className="fa-tbje-step-stack">
-          <Card>
+          <Card variant="section">
             <CardHeader className="fa-tbje-card-head">
               <div>
                 <CardTitle>生成预览并导出五表</CardTitle>
                 <p>先核对输入摘要，再生成预览或正式 Excel。</p>
               </div>
-              <Badge>全部就绪</Badge>
+              <Badge variant="success">全部就绪</Badge>
             </CardHeader>
             <CardContent className="form-stack">
               <div className="fa-tbje-readiness-grid">
                 <div>
                   <span>TB</span>
-                  <strong>{fileName(paths.tb)}</strong>
+                  <strong title={paths.tb}>{fileName(paths.tb)}</strong>
                   <small>
                     {inspects.tb?.rowCount.toLocaleString("zh-CN")} 行
                   </small>
                 </div>
                 <div>
                   <span>JE</span>
-                  <strong>{fileName(paths.je)}</strong>
+                  <strong title={paths.je}>{fileName(paths.je)}</strong>
                   <small>
                     {inspects.je?.rowCount.toLocaleString("zh-CN")} 行
                   </small>
@@ -1217,7 +1218,7 @@ export function FaTbJePage() {
               <div className="form-grid">
                 <label>
                   报告截止日
-                  <input
+                  <Input
                     name="fa-report-end"
                     autoComplete="off"
                     type="date"
@@ -1286,10 +1287,139 @@ export function FaTbJePage() {
           </Card>
           {job && <JobProgress job={job} />}
           <ResultView value={result} />
+          <FaTbJeSummaryPreview value={result} />
+          <FaTbJePreviewDetails value={result} />
         </div>
       )}
     </div>
   );
+}
+
+/** 生成预览的汇总变动表：与导出 Excel 共用同一份行定义（零行过滤一致），
+    前端看到什么、导出的底稿里就是什么。段名在切换时显示，模拟合并单元格。 */
+function FaTbJeSummaryPreview({ value }: { value: unknown }) {
+  const summary = (value as { summaryTable?: unknown } | null | undefined)
+    ?.summaryTable as
+    | { columns?: unknown; rows?: unknown }
+    | undefined;
+  if (!summary || !Array.isArray(summary.columns) || !Array.isArray(summary.rows)) {
+    return null;
+  }
+  const columns = summary.columns as string[];
+  const rows = summary.rows as Array<{
+    section?: string;
+    item?: string;
+    values?: unknown[];
+  }>;
+  if (rows.length === 0) return null;
+  let lastSection: string | null = null;
+  return (
+    <Card variant="section">
+      <CardHeader className="fa-tbje-card-head">
+        <CardTitle>固定资产汇总变动表（预览）</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="fa-tbje-account-table-wrap fa-tbje-summary-preview">
+          <table className="fa-tbje-account-table">
+            <thead>
+              <tr>
+                <th>项目</th>
+                <th>合计</th>
+                {columns.map((column) => (
+                  <th key={column} title={column}>
+                    {column}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => {
+                const section =
+                  row.section && row.section !== lastSection ? row.section : "";
+                lastSection = row.section ?? lastSection;
+                const values = Array.isArray(row.values) ? row.values : [];
+                const total = values.reduce<number>(
+                  (sum, item) => sum + (Number(item) || 0),
+                  0,
+                );
+                const isDiff = row.section === "勾稽差异";
+                return (
+                  <tr key={index} className={isDiff ? "fa-tbje-summary-diff" : undefined}>
+                    <td className="fa-tbje-summary-section">{section}</td>
+                    <td>{row.item}</td>
+                    <td className="fa-tbje-num">{formatPreviewAmount(total)}</td>
+                    {values.map((cell, cellIndex) => (
+                      <td key={cellIndex} className="fa-tbje-num">
+                        {formatPreviewAmount(cell)}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** 生成预览的新增明细（引擎只回传前若干笔）：让「生成预览」有内容可看，
+    确认方式判定与金额方向后再点「生成文件」。 */
+function FaTbJePreviewDetails({ value }: { value: unknown }) {
+  const preview = (value as { preview?: unknown } | null | undefined)?.preview;
+  if (!Array.isArray(preview) || preview.length === 0) return null;
+  const rows = preview as Array<Record<string, unknown>>;
+  return (
+    <Card variant="section">
+      <CardHeader className="fa-tbje-card-head">
+        <CardTitle>新增明细预览（前 {rows.length} 笔）</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="fa-tbje-account-table-wrap">
+          <table className="fa-tbje-account-table">
+            <thead>
+              <tr>
+                <th>主体</th>
+                <th>凭证</th>
+                <th>资产类别</th>
+                <th>类型</th>
+                <th>新增原值</th>
+                <th>新增折旧</th>
+                <th>新增方式</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={index}>
+                  <td title={String(row.entity ?? "")}>{String(row.entity ?? "")}</td>
+                  <td>{String(row.voucher ?? "")}</td>
+                  <td>{String(row.category ?? "")}</td>
+                  <td>{String(row.kind ?? "")}</td>
+                  <td className="fa-tbje-num">
+                    {formatPreviewAmount(row.original)}
+                  </td>
+                  <td className="fa-tbje-num">
+                    {formatPreviewAmount(row.depreciation)}
+                  </td>
+                  <td>{String(row.method ?? "")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function formatPreviewAmount(value: unknown): string {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "—";
+  return num.toLocaleString("zh-CN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 function FaLedgerSourceCard(props: {
@@ -1304,7 +1434,7 @@ function FaLedgerSourceCard(props: {
 }) {
   const { kind, inspection } = props;
   return (
-    <Card>
+    <Card variant="section">
       <CardHeader>
         <CardTitle>
           已识别：{kind === "tb" ? "TB 科目余额表" : "JE 序时账"}
@@ -1353,7 +1483,7 @@ function FaLedgerSourceCard(props: {
           </label>
           <label>
             标题行
-            <input
+            <Input
               name={`${kind}-header-row`}
               autoComplete="off"
               disabled={props.disabled}

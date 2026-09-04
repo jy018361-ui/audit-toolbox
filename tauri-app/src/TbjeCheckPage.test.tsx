@@ -46,6 +46,10 @@ describe("TbjeCheckPage", () => {
       screen.getByRole("heading", { level: 1, name: tool.name }),
     ).toBeInTheDocument();
     expect(container.querySelector(".fx-head")).toBeNull();
+    expect(
+      screen.getByRole("complementary", { name: "核对默认在本机完成" }),
+    ).toHaveAttribute("data-mode", "network-assisted");
+    expect(screen.getByRole("region", { name: "准备核对资料" })).toBeVisible();
 
     const steps = container.querySelector(".step-indicator");
     expect(steps).not.toBeNull();
@@ -115,6 +119,14 @@ describe("TbjeCheckPage", () => {
     expect(pairingList).toHaveTextContent("序时账 JE");
     expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1);
     expect(screen.getByLabelText("为第 1 组选择序时账")).toBeInTheDocument();
+    expect(screen.getByLabelText("为第 1 组选择序时账")).toHaveAttribute(
+      "title",
+      "C:/samples/01JE.xlsx",
+    );
+    expect(screen.getByText("01TB.xlsx")).toHaveAttribute(
+      "title",
+      "C:/samples/01TB.xlsx",
+    );
     const tbMapping = screen.getByRole("button", { name: "TB 映射" });
     const jeMapping = screen.getByRole("button", { name: "JE 映射" });
     expect(tbMapping).toBeEnabled();
@@ -372,6 +384,7 @@ describe("TbjeCheckPage", () => {
     const button = await screen.findByRole("button", {
       name: "导出全部结果",
     });
+    expect(screen.getByText("全部核对通过")).toBeVisible();
     fireEvent.click(button);
 
     await waitFor(() =>
@@ -448,5 +461,145 @@ describe("TbjeCheckPage", () => {
     expect(
       screen.queryByRole("heading", { level: 2, name: /确认配对/ }),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps manual pairing decisions when files are added a second time", async () => {
+    const { engineCall, pickPath } = await import("./api");
+    vi.mocked(pickPath)
+      .mockResolvedValueOnce(["C:/samples/01TB.xlsx", "C:/samples/05JE.xlsx"])
+      .mockResolvedValueOnce(["C:/samples/02TB.xlsx", "C:/samples/02JE.xlsx"]);
+    vi.mocked(engineCall).mockImplementation(
+      async (method: string, params: unknown) => {
+        if (method === "ledger.forms") return [];
+        if (method === "ledger.check_mapping_alignment")
+          return { aligned: true, warnings: [] };
+        const source = (params as { source: { inputPath: string } }).source;
+        const isTb = source.inputPath.includes("TB");
+        if (method === "deposit.classify_source") {
+          return {
+            kind: isTb ? "tb" : "je",
+            sheet: "Sheet1",
+            headerRow: 1,
+            headerDepth: 1,
+          };
+        }
+        return {
+          sheet: "Sheet1",
+          headerRow: 1,
+          headerDepth: 1,
+          headers: isTb ? ["科目编码", "期末余额"] : ["科目编码", "借方金额"],
+          preview: [],
+          entities: ["主体 A"],
+          suggestedMapping: {},
+        };
+      },
+    );
+
+    const { container } = render(<TbjeCheckPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+      ).toBeInTheDocument(),
+    );
+    expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1);
+
+    // 手工解除第 1 组的序时账：05JE 变成待认领的独立组。
+    fireEvent.change(screen.getByLabelText("为第 1 组选择序时账"), {
+      target: { value: "" },
+    });
+    expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(2);
+
+    // 回到第 1 步，二次添加另一组文件。
+    const steps = container.querySelector(".step-indicator") as HTMLElement;
+    fireEvent.click(within(steps).getByRole("button", { name: /添加文件/ }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
+    );
+
+    await waitFor(() =>
+      expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(3),
+    );
+    // 第 1 组仍保持「不配对」，5 号序时账也没被强行塞回去。
+    expect(screen.getByLabelText("为第 1 组选择序时账")).toHaveValue("");
+    expect(screen.getByLabelText("为第 5 组选择序时账")).toHaveValue(
+      "C:/samples/05JE.xlsx",
+    );
+    // 新加的 2 号文件自动配成新组，二次添加仍具备跨批次配对能力。
+    expect(screen.getByLabelText("为第 2 组选择序时账")).toHaveValue(
+      "C:/samples/02JE.xlsx",
+    );
+    expect(
+      screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("re-picking an already added file keeps its inspection and mapping untouched", async () => {
+    const { engineCall, pickPath } = await import("./api");
+    vi.mocked(pickPath)
+      .mockResolvedValueOnce(["C:/samples/01TB.xlsx", "C:/samples/01JE.xlsx"])
+      .mockResolvedValueOnce(["C:/samples/01TB.xlsx"]);
+    const classifyCalls: string[] = [];
+    vi.mocked(engineCall).mockImplementation(
+      async (method: string, params: unknown) => {
+        if (method === "ledger.forms") return [];
+        if (method === "ledger.check_mapping_alignment")
+          return { aligned: true, warnings: [] };
+        const source = (params as { source: { inputPath: string } }).source;
+        const isTb = source.inputPath.includes("TB");
+        if (method === "deposit.classify_source") {
+          classifyCalls.push(source.inputPath);
+          return {
+            kind: isTb ? "tb" : "je",
+            sheet: "Sheet1",
+            headerRow: 1,
+            headerDepth: 1,
+          };
+        }
+        return {
+          sheet: "Sheet1",
+          headerRow: 1,
+          headerDepth: 1,
+          headers: ["科目编码"],
+          preview: [],
+          entities: ["主体 A"],
+          suggestedMapping: {},
+        };
+      },
+    );
+
+    const { container } = render(<TbjeCheckPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
+    );
+    await waitFor(() =>
+      expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1),
+    );
+    expect(classifyCalls).toEqual([
+      "C:/samples/01TB.xlsx",
+      "C:/samples/01JE.xlsx",
+    ]);
+
+    // 重复选入同一份 TB：不再重新识别，配对原样保留。
+    const steps = container.querySelector(".step-indicator") as HTMLElement;
+    fireEvent.click(within(steps).getByRole("button", { name: /添加文件/ }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+      ).toBeInTheDocument(),
+    );
+    expect(classifyCalls).toEqual([
+      "C:/samples/01TB.xlsx",
+      "C:/samples/01JE.xlsx",
+    ]);
+    expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1);
+    expect(screen.getByLabelText("为第 1 组选择序时账")).toHaveValue(
+      "C:/samples/01JE.xlsx",
+    );
   });
 });

@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import FileListDirectoryPage from "./FileListDirectoryPage";
 import type { ToolManifest } from "./types";
@@ -43,7 +50,10 @@ describe("FileListDirectoryPage", () => {
     );
   });
 
-  afterEach(() => sessionStorage.clear());
+  afterEach(() => {
+    cleanup();
+    sessionStorage.clear();
+  });
 
   it("uses two steps and generates directly from the output step", async () => {
     const { container } = render(<FileListDirectoryPage tool={tool} />);
@@ -51,12 +61,22 @@ describe("FileListDirectoryPage", () => {
     expect(steps).not.toBeNull();
     expect(within(steps as HTMLElement).getAllByRole("button")).toHaveLength(2);
 
-    const next = await screen.findByRole("button", { name: "下一步：输出文件" });
+    const next = await screen.findByRole("button", {
+      name: "下一步：输出文件",
+    });
     await waitFor(() => expect(next).toBeEnabled());
     fireEvent.click(next);
 
     expect(screen.getByText("2. 确认输出并生成")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "生成文件清单" })).toBeEnabled();
     expect(screen.queryByText("3. 生成文件清单")).not.toBeInTheDocument();
+  });
+
+  it("说明本机处理边界，并给未扫描状态明确下一步", () => {
+    sessionStorage.clear();
+    render(<FileListDirectoryPage tool={tool} />);
+    expect(screen.getByText("目录信息仅在本机处理")).toBeVisible();
+    expect(screen.getByText("等待扫描文件夹")).toBeVisible();
+    expect(screen.getByRole("button", { name: "选择文件夹" })).toBeEnabled();
   });
 });

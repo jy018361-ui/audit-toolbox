@@ -10,7 +10,7 @@
 }
 .kz-steps button,
 .kz-tabs button {
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   background: var(--surface-sunken);
   padding: var(--sp-3);
   border-radius: var(--r-md);
@@ -18,7 +18,7 @@
 .kz-steps .active,
 .kz-tabs .active {
   background: var(--brand-link);
-  color: var(--on-brand-link, #fff);
+  color: var(--on-brand-link);
 }
 /*
  * 列宽一律用 minmax(0, …)：原来的 px 下限（540+520、680+420）加上 270px 侧边栏
@@ -70,12 +70,12 @@
 .kz-card input,
 .kz-card select,
 .kz-card textarea,
-.kz-card button {
+.kz-card button:not([data-slot="button"]) {
   font: inherit;
 }
-.kz-card input,
+.kz-card input:not([data-slot="input"]),
 .kz-card select {
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: var(--r-sm);
   padding: var(--sp-2);
   min-width: 0;
@@ -83,7 +83,7 @@
 .kz-card select[multiple] {
   min-height: 105px;
 }
-.kz-card button {
+.kz-card button:not([data-slot="button"]) {
   border: 0;
   border-radius: var(--r-sm);
   padding: var(--sp-2) var(--sp-3);
@@ -93,7 +93,7 @@
 }
 .kz-card button.primary {
   background: var(--brand);
-  color: var(--on-brand, #fff);
+  color: var(--on-brand);
 }
 .kz-card button:disabled {
   opacity: 0.5;
@@ -286,14 +286,14 @@
  * 所以三个列表统一用 div 实现，自己处理单击 / Ctrl 加选 / Shift 连选。
  */
 .kz-shuttle-list {
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: var(--r-md);
   background: var(--surface);
   overflow: auto;
   user-select: none;
 }
 .kz-shuttle-list:focus-visible {
-  outline: 2px solid var(--border-strong);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
 .kz-shuttle-list.drop-active {
@@ -314,7 +314,7 @@
 }
 .kz-shuttle-item.selected {
   background: var(--brand-link);
-  color: var(--on-brand-link, #fff);
+  color: var(--on-brand-link);
 }
 .kz-shuttle-item:active {
   cursor: grabbing;
@@ -330,13 +330,13 @@
   border-radius: var(--r-sm);
   border: 1px solid var(--brand-link);
   background: var(--surface);
-  color: var(--text);
+  color: var(--ink);
   font-size: var(--fs-xs);
   line-height: 1.6;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  box-shadow: 0 6px 16px rgb(0 0 0 / 18%);
+  box-shadow: var(--shadow-overlay);
 }
 .kz-shuttle-empty {
   padding: var(--sp-3);

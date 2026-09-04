@@ -1,6 +1,29 @@
 .deposit-page {
   padding-bottom: 40px;
 }
+.deposit-page .data-handling-notice {
+  margin-bottom: var(--sp-4);
+}
+.deposit-result-overview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.deposit-page .fx-detected-file > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.deposit-page .fx-detected-file > button {
+  flex-shrink: 0;
+}
+.deposit-output-row input {
+  text-overflow: ellipsis;
+}
 .deposit-help {
   display: inline-flex;
   align-items: center;
@@ -12,7 +35,7 @@
   font-weight: 400;
 }
 .deposit-help:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
   border-radius: 50%;
 }
@@ -62,11 +85,11 @@
     grid-template-columns: minmax(140px, 1fr) 190px minmax(180px, 240px);
   }
 }
-/* 六个参数在窄一点的窗口里放不下一行，交给 auto-fit 自己换行，
-   避免卡片内部出现横向滚动。 */
+/* 只剩两个参数：日期是短字段，定宽即可；输出文件（输入框＋「选择位置」
+   按钮）吃掉剩余宽度——等宽平分会让日期框空出大半，视觉失衡。 */
 .deposit-run-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-template-columns: 220px minmax(0, 1fr);
   gap: 12px;
   align-items: end;
 }
@@ -84,24 +107,10 @@
   min-width: 0;
   min-height: 34px;
   padding: 6px 9px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   background: var(--background);
   color: var(--foreground);
-}
-.deposit-run-grid .deposit-check {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 7px;
-  min-height: 34px;
-  white-space: nowrap;
-}
-.deposit-run-grid .deposit-check input {
-  min-height: 0;
-  width: 16px;
-  height: 16px;
-  padding: 0;
 }
 /* 输出文件格子里输入框和"选择位置"按钮并排，按钮不单独占一格，
    否则 auto-fit 换行时它会孤零零掉到下一行最左边。 */
@@ -194,7 +203,7 @@
 .deposit-table input {
   min-height: 32px;
   padding: 5px 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 7px;
   background: var(--background);
   color: var(--foreground);
@@ -204,7 +213,7 @@
   text-align: right;
 }
 .deposit-review-row {
-  background: color-mix(in srgb, #dfbd77 12%, transparent);
+  background: color-mix(in srgb, var(--warning-border) 12%, transparent);
 }
 .deposit-ok,
 .deposit-warn {
@@ -213,12 +222,12 @@
   font-size: 11px;
 }
 .deposit-ok {
-  background: #e8f5ee;
-  color: #17663d;
+  background: var(--success-bg);
+  color: var(--success-fg);
 }
 .deposit-warn {
-  background: #fff1cf;
-  color: #855400;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
 }
 .deposit-expand {
   padding: 4px 10px;
@@ -230,7 +239,7 @@
   font-size: 12px;
 }
 .deposit-expand:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 .deposit-month-row > td {
@@ -307,15 +316,15 @@
   width: 106px;
   min-height: 30px;
   padding: 4px 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 7px;
   background: var(--background);
   color: var(--foreground);
   text-align: right;
 }
 .deposit-tier-table input.deposit-tier-changed {
-  border-color: #c08a1e;
-  background: #fff8e8;
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
   font-weight: 600;
 }
 .deposit-tier-note {
@@ -332,7 +341,7 @@
 .deposit-tier-actions button {
   margin-left: 6px;
   padding: 3px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 7px;
   background: var(--background);
   color: var(--foreground);
@@ -357,7 +366,7 @@
   background: color-mix(in srgb, var(--muted) 70%, var(--foreground) 6%);
 }
 .deposit-tier-fold:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
 }
 .deposit-tier-source {
@@ -376,7 +385,7 @@
   line-height: 1.7;
 }
 .deposit-tier-actions button:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 .deposit-tier-picker {
@@ -391,10 +400,10 @@
   gap: 5px;
   margin: 0 0 14px;
   padding: 13px 16px;
-  border: 1px solid #dfbd77;
+  border: 1px solid var(--warning-border);
   border-radius: 10px;
-  background: #fff8e8;
-  color: #6f4b08;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
 }
 .deposit-stale b {
   font-size: 14px;
@@ -407,21 +416,21 @@
   color: var(--muted-foreground);
 }
 .deposit-tier-table tr.deposit-tier-unset input::placeholder {
-  color: #a8761a;
+  color: var(--warning-fg);
 }
 .deposit-table input.deposit-rate-missing {
-  border-color: #c08a1e;
-  background: #fff8e8;
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
 }
 .deposit-table input.deposit-rate-missing::placeholder {
-  color: #a8761a;
+  color: var(--warning-fg);
 }
 .deposit-missing {
   padding: 3px 7px;
   border-radius: 999px;
   font-size: 11px;
-  background: #fde8d6;
-  color: #8a3d09;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
 }
 .deposit-pct {
   display: inline-flex;
@@ -512,7 +521,7 @@
   background: color-mix(in srgb, var(--primary) 10%, var(--background));
 }
 .deposit-links button:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 .deposit-links button span {
@@ -534,8 +543,8 @@
   margin: 12px 0 0;
   padding: 8px 11px;
   border-radius: 7px;
-  background: #fff8e8;
-  color: #6f4b08;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
   font-size: 12px;
   overflow-wrap: anywhere;
 }

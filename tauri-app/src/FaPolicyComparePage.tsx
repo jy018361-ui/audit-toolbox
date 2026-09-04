@@ -19,8 +19,11 @@ import { DataTable } from "@/components/DataTable";
 import { displayFileName } from "@/fileDisplay";
 import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { EmptyState } from "@/components/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { LlmReview } from "@/components/LlmReview";
 import { useJobEvents } from "@/hooks/useJobEvents";
 import {
@@ -723,6 +726,11 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
         title={tool.name}
         detail="匹配期初与期末固定资产清单，对比两期折旧政策（类别、寿命、残值率）并测算影响，同时附税法最低折旧年限参考。"
       />
+      <DataHandlingNotice
+        mode="network-assisted"
+        title="文件处理与智能复核"
+        description="两期清单读取、政策比较和底稿生成在本机完成；使用 LLM 复核时，复核所需信息会按设置发送到对应服务。"
+      />
       <StepIndicator
         steps={[
           { key: "1", label: "文件与匹配" },
@@ -732,12 +740,14 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
         onStepClick={(index) => setStep((index + 1) as 1 | 2)}
       />
       <div className="fa-stack">
-        <Card>
+        <Card variant="section">
           <CardHeader>
             <CardTitle>
               {step === 1 ? "1. 选择文件并配置" : "2. 保存并导出"}
             </CardTitle>
-            <Badge className="badge-ready">已就绪</Badge>
+            <Badge variant={busy ? "info" : inspection ? "success" : "neutral"}>
+              {busy ? "处理中" : inspection ? "已读取" : "等待文件"}
+            </Badge>
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
@@ -803,7 +813,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                             ))}
                           </select>
                         ) : (
-                          <input
+                          <Input
                             value={side === "begin" ? beginSheet : endSheet}
                             disabled={busy}
                             onChange={(e) => {
@@ -815,7 +825,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                         )}
                       </Field>
                       <Field label="标题行（留空自动识别）">
-                        <input
+                        <Input
                           value={
                             side === "begin" ? beginHeaderRow : endHeaderRow
                           }
@@ -906,13 +916,13 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
               <>
                 <div className="form-grid">
                   <Field label="期初显示名称">
-                    <input
+                    <Input
                       value={beginDisplayName}
                       onChange={(e) => setBeginDisplayName(e.target.value)}
                     />
                   </Field>
                   <Field label="期末显示名称">
-                    <input
+                    <Input
                       value={endDisplayName}
                       onChange={(e) => setEndDisplayName(e.target.value)}
                     />
@@ -993,7 +1003,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                 <h2>文件预览</h2>
                 <p>预览区已锁定；各文件可独立纵向、横向滚动。</p>
               </div>
-              <Badge className="badge-preview">导入文件</Badge>
+              <Badge variant="info">导入文件</Badge>
             </div>
             <div className="fa-preview-stack">
               {inspection ? (
@@ -1010,22 +1020,18 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                 <>
                   <section className="fa-preview fa-preview-empty-card">
                     <header>期初文件预览</header>
-                    <div className="empty">
-                      选择期初文件并读取结构后，在此显示表格内容。
-                    </div>
+                    <EmptyState compact title="等待结果" description="选择期初文件并读取结构后，在此显示表格内容。" />
                   </section>
                   <section className="fa-preview fa-preview-empty-card">
                     <header>期末文件预览</header>
-                    <div className="empty">
-                      选择期末文件并读取结构后，在此显示表格内容。
-                    </div>
+                    <EmptyState compact title="等待结果" description="选择期末文件并读取结构后，在此显示表格内容。" />
                   </section>
                 </>
               )}
             </div>
           </aside>
         ) : (
-          <Card className="fa-result-workspace">
+          <Card variant="workspace" className="fa-result-workspace">
             <CardHeader>
               <CardTitle>导出结果</CardTitle>
             </CardHeader>
@@ -1041,9 +1047,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                 />
               )}
               {!outputPaths.length && (
-                <div className="empty">
-                  确认期初、期末映射无误后点击"生成折旧政策对比"。
-                </div>
+                <EmptyState compact title="等待结果" description="确认期初、期末映射无误后点击「生成折旧政策对比」。" />
               )}
             </CardContent>
           </Card>

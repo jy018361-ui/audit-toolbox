@@ -1440,28 +1440,36 @@ fn calculate(
             // 科目登记方向定收入/费用符号——费用性质的科目计入负数，
             // 冲减勾稽基准，而不是冒充一笔利息收入。
             let direction = registered_direction(&account, &tb_account_names);
-            let (net, note) = match booked_occurrence(&tb, row, &tb_map, tb_convention, direction)
-            {
-                Some((net, note)) => (net, note),
-                None => (
-                    signed(
-                        &tb,
-                        row,
-                        &tb_map,
-                        "closingFunctionalCredit",
-                        "closingFunctionalDebit",
-                    )
-                    .or_else(|| {
-                        cell_number(&tb, row, &tb_map, "closingFunctionalAmount").map(|x| -x)
-                    })
-                    .unwrap_or(0.0),
-                    "期末余额净额".into(),
-                ),
-            };
+            // 期末余额按「借正贷负」净额列示（与表内两栏口径一致）；
+            // 退到发生额/余额路径时取负号还原成贷方为正的收入数。
+            let closing_balance = signed(
+                &tb,
+                row,
+                &tb_map,
+                "closingFunctionalDebit",
+                "closingFunctionalCredit",
+            )
+            .or_else(|| cell_number(&tb, row, &tb_map, "closingFunctionalAmount"))
+            .unwrap_or(0.0);
+            let (net, note, debit_raw, credit_raw) =
+                match booked_occurrence(&tb, row, &tb_map, tb_convention, direction) {
+                    Some((net, note, debit, credit)) => (net, note, debit, credit),
+                    None => (
+                        -closing_balance,
+                        "期末余额净额".into(),
+                        0.0,
+                        0.0,
+                    ),
+                };
             booked_interest += net;
             booked_interest_rows.push(json!({
                 "entity": cell_text(&tb, row, &tb_map, "entity"),
-                "account": account, "bookedAmount": net, "note": note
+                "account": account,
+                "debit": debit_raw,
+                "credit": credit_raw,
+                "closing": closing_balance,
+                "bookedAmount": net,
+                "note": note
             }));
             continue;
         }
@@ -2482,8 +2490,9 @@ fn closed_pair_baseline(
 }
 
 /// 账面利息收入的发生额口径：本年累计优先，表里只给本期时退而求其次。
-/// 返回（金额, 口径说明）；`None` 表示该口径下没有可用数据（借贷均未
-/// 映射或全为 0），让调用方退到期末余额。
+/// 返回（金额, 口径说明, 借方原值, 贷方原值）——借贷原值供底稿的
+/// 「账面利息收入科目明细」整行列示，审计人员要能看到取数来源的两栏。
+/// `None` 表示该口径下没有可用数据（借贷均未映射或全为 0），让调用方退到期末余额。
 ///
 /// 金额一律折成「贷方正」的经济净额：Unsigned 表的负数是红字（经济上
 /// 归属对面一侧），净额 `贷－借` 天然正确；Signed 表贷方列本身借正贷负，
@@ -2495,7 +2504,7 @@ fn booked_occurrence(
     mapping: &Map<String, Value>,
     convention: ledger_mapping::SignConvention,
     direction: AccountDirection,
-) -> Option<(f64, String)> {
+) -> Option<(f64, String, f64, f64)> {
     for (credit_role, debit_role) in [
         ("ytdFunctionalCredit", "ytdFunctionalDebit"),
         ("periodFunctionalCredit", "periodFunctionalDebit"),
@@ -2511,7 +2520,7 @@ fn booked_occurrence(
             ledger_mapping::SignConvention::Signed => -cr - dr,
         };
         if net.abs() > 0.005 {
-            return Some((net, "发生额净额".into()));
+            return Some((net, "发生额净额".into(), dr, cr));
         }
         // 年末已结转的损益科目：结转分录使借贷发生同额，净额恒为 0，
         // 期末余额也是 0。此时按红字与科目登记方向定收入/费用符号。
@@ -2519,7 +2528,7 @@ fn booked_occurrence(
             return None;
         }
         let (amount, note) = closed_pair_baseline(convention, direction, cr, dr);
-        return Some((amount, note.into()));
+        return Some((amount, note.into(), dr, cr));
     }
     None
 }
@@ -2582,8 +2591,9 @@ fn export(params: &Value, result: &Value) -> Result<PathBuf, AppError> {
     // 勾稽比较直接接在汇总表下方：单独一张 sheet 只有一屏数据，
     // 翻页反而割裂；同 sheet 还让「审计测算存款利息」能直接引用 N 列合计。
     let day_basis = summary["dayBasis"].as_str().unwrap_or("month12");
+    let je_backed = summary["monthlySource"].as_str() == Some("序时账逐月还原");
     let summary_sheet = workbook.add_worksheet();
-    write_summary(summary_sheet, &rows, &ranges)?;
+    write_summary(summary_sheet, &rows, &ranges, je_backed)?;
     write_reconciliation(summary_sheet, &rows, summary, result, rows.len() as u32 + 2)?;
     write_monthly(workbook.add_worksheet(), &rows, day_basis)?;
     write_rate_tiers(workbook.add_worksheet(), params)?;
@@ -2626,6 +2636,7 @@ fn write_summary(
     sheet: &mut Worksheet,
     rows: &[AccountRow],
     ranges: &[(u32, u32)],
+    je_backed: bool,
 ) -> Result<(), AppError> {
     sheet.set_name(SUMMARY_SHEET).map_err(xlsx)?;
     let amount = Format::new().set_num_format("#,##0.00;[Red](#,##0.00);-");
@@ -2634,20 +2645,21 @@ fn write_summary(
         .set_num_format("0.0000%")
         .set_background_color("#FFF2CC")
         .set_border(FormatBorder::Thin);
-    // 列顺序对应下面公式里的字母：H=年利率(输入) M=月均余额 N=测算利息
+    // 列顺序对应公式里的字母：
+    // G=年利率(输入) H=年初 I=年末(TB) J=年末(JE推导) K=勾稽差异 L=勾稽结论 M=月均 N=测算利息
     let headers = [
         "核算主体",
         "科目",
         "辅助核算/账户",
         "币种",
         "存款档位",
-        "档位匹配依据",
         "利率来源",
         "年利率（可修改）",
         "年初余额",
         "年末余额(TB)",
         "年末余额(JE推导)",
         "勾稽差异",
+        "勾稽结论",
         "月均余额(年平均)",
         "测算利息",
         "状态",
@@ -2660,45 +2672,70 @@ fn write_summary(
     }
     for (index, row) in rows.iter().enumerate() {
         let y = index as u32 + 1;
+        let line = y + 1;
         let (first, last) = ranges[index];
         sheet.write_string(y, 0, &row.entity).map_err(xlsx)?;
         sheet.write_string(y, 1, &row.account).map_err(xlsx)?;
         sheet.write_string(y, 2, &row.auxiliary).map_err(xlsx)?;
         sheet.write_string(y, 3, &row.currency).map_err(xlsx)?;
         sheet.write_string(y, 4, &row.tier_label).map_err(xlsx)?;
-        sheet
-            .write_string(y, 5, &row.tier_matched_by)
-            .map_err(xlsx)?;
-        sheet.write_string(y, 6, &row.rate_source).map_err(xlsx)?;
+        sheet.write_string(y, 5, &row.rate_source).map_err(xlsx)?;
         // 没确定利率的留空白输入格：写 0 会算出"0 元利息"这种看似有效的结论。
         if row.rate_resolved {
             sheet
-                .write_number_with_format(y, 7, row.annual_rate, &input)
+                .write_number_with_format(y, 6, row.annual_rate, &input)
                 .map_err(xlsx)?;
         } else {
-            sheet.write_blank(y, 7, &input).map_err(xlsx)?;
+            sheet.write_blank(y, 6, &input).map_err(xlsx)?;
         }
-        for (offset, value) in [
-            row.opening_balance,
-            row.tb_closing_balance,
-            row.derived_closing_balance,
-        ]
-        .iter()
-        .enumerate()
-        {
+        sheet
+            .write_number_with_format(y, 7, row.opening_balance, &amount)
+            .map_err(xlsx)?;
+        sheet
+            .write_number_with_format(y, 8, row.tb_closing_balance, &amount)
+            .map_err(xlsx)?;
+        // JE 推导期末余额＝年初＋Σ借−Σ贷（回引月度表两栏发生额），
+        // 用户在月度表改一笔，推导值、勾稽差异、结论全部跟着重算；
+        // 两点法没有发生额可引，插值过程写不成公式，退回静态值。
+        if je_backed {
             sheet
-                .write_number_with_format(y, 8 + offset as u16, *value, &amount)
+                .write_formula_with_format(
+                    y,
+                    9,
+                    Formula::new(format!(
+                        "H{line}+SUM('{MONTHLY_SHEET}'!H{first}:H{last})-SUM('{MONTHLY_SHEET}'!I{first}:I{last})"
+                    ))
+                    .set_result(row.derived_closing_balance.to_string()),
+                    &amount,
+                )
+                .map_err(xlsx)?;
+        } else {
+            sheet
+                .write_number_with_format(y, 9, row.derived_closing_balance, &amount)
                 .map_err(xlsx)?;
         }
-        // 勾稽差异必须是活公式（JE 推导 − TB）：写死数的话，用户在月度表
-        // 调整数据后这一列不会跟着变，底稿里就留着过期差异冒充结论。
+        // 勾稽差异与结论必须是活公式：差异＝JE推导−TB，为 0 时结论列
+        // 直接输出「勾稽一致」，审计底稿里一眼可判。
+        sheet
+            .write_formula_with_format(
+                y,
+                10,
+                Formula::new(format!("J{line}-I{line}"))
+                    .set_result(row.reconciliation_diff.to_string()),
+                &amount,
+            )
+            .map_err(xlsx)?;
         sheet
             .write_formula_with_format(
                 y,
                 11,
-                Formula::new(format!("K{}-J{}", y + 1, y + 1))
-                    .set_result(row.reconciliation_diff.to_string()),
-                &amount,
+                Formula::new(format!("IF(ABS(K{line})<0.01,\"勾稽一致\",\"存在差异\")"))
+                    .set_result(if row.reconciliation_diff.abs() < 0.01 {
+                        "勾稽一致".to_string()
+                    } else {
+                        "存在差异".to_string()
+                    }),
+                &Format::new(),
             )
             .map_err(xlsx)?;
         // 月均余额和测算利息全部引用月度表，改利率后 Excel 自己重算。
@@ -2737,7 +2774,6 @@ fn write_summary(
         .map_err(xlsx)?;
     sheet.set_column_width(1, 34).map_err(xlsx)?;
     sheet.set_column_width(2, 22).map_err(xlsx)?;
-    sheet.set_column_width(5, 26).map_err(xlsx)?;
     sheet.set_column_width(15, 46).map_err(xlsx)?;
     sheet.autofit();
     Ok(())
@@ -2818,7 +2854,7 @@ fn write_monthly(
                 .write_formula_with_format(
                     y,
                     11,
-                    Formula::new(format!("'{SUMMARY_SHEET}'!$H${summary_row}"))
+                    Formula::new(format!("'{SUMMARY_SHEET}'!$G${summary_row}"))
                         .set_result(row.annual_rate.to_string()),
                     &percent,
                 )
@@ -2914,58 +2950,25 @@ fn write_reconciliation(
         )
         .map_err(xlsx)?;
     let mut y = offset + 6;
-    if !summary["hasInterestIncomeAccount"]
-        .as_bool()
-        .unwrap_or(false)
-    {
-        sheet
-            .write_string(
-                y,
-                0,
-                "提示：TB 中未识别到利息收入科目，账面金额为 0，差异不具备勾稽意义。",
-            )
-            .map_err(xlsx)?;
-        y += 1;
-    }
-    if summary["bookedNote"].as_str().is_some_and(|note| !note.is_empty()) {
-        sheet
-            .write_string(
-                y,
-                0,
-                format!("提示：{}", summary["bookedNote"].as_str().unwrap_or("")),
-            )
-            .map_err(xlsx)?;
-        y += 1;
-    }
-    let missing = summary["missingRateCount"].as_u64().unwrap_or(0);
-    if missing > 0 {
-        let tiers = summary["missingRateTiers"]
-            .as_array()
-            .map(|all| {
-                all.iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join("、")
-            })
-            .unwrap_or_default();
-        sheet.write_string(y, 0, format!(
-            "提示：{missing} 个账户尚未确定利率（{tiers}），月均余额合计 {:.2}，其利息未计入上方测算合计，本次差异尚不完整。",
-            summary["missingRateBalance"].as_f64().unwrap_or(0.0)
-        )).map_err(xlsx)?;
-        y += 1;
-    }
-    if summary["ratesStale"].as_bool().unwrap_or(false) {
-        sheet
-            .write_string(y, 0, summary["staleMessage"].as_str().unwrap_or(""))
-            .map_err(xlsx)?;
-        y += 1;
-    }
     y += 2;
     sheet
         .write_string_with_format(y, 0, "账面利息收入科目明细", &bold)
         .map_err(xlsx)?;
     y += 1;
-    for (column, title) in ["核算主体", "科目", "账面金额", "口径"].iter().enumerate() {
+    // 明细把取数来源整行列示（借贷发生额、期末余额），审计人员才能
+    // 不回到源表就复核基准数是怎么来的。
+    for (column, title) in [
+        "核算主体",
+        "科目",
+        "本期借方发生额",
+        "本期贷方发生额",
+        "期末余额(借正贷负)",
+        "账面利息收入",
+        "口径",
+    ]
+    .iter()
+    .enumerate()
+    {
         sheet
             .write_string_with_format(y, column as u16, *title, &header_format())
             .map_err(xlsx)?;
@@ -2979,11 +2982,20 @@ fn write_reconciliation(
         sheet
             .write_string(y, 1, item["account"].as_str().unwrap_or(""))
             .map_err(xlsx)?;
+        for (key, column) in
+            [("debit", 2u16), ("credit", 3u16), ("closing", 4u16), ("bookedAmount", 5u16)]
+        {
+            sheet
+                .write_number_with_format(
+                    y,
+                    column,
+                    item[key].as_f64().unwrap_or(0.0),
+                    &amount,
+                )
+                .map_err(xlsx)?;
+        }
         sheet
-            .write_number_with_format(y, 2, item["bookedAmount"].as_f64().unwrap_or(0.0), &amount)
-            .map_err(xlsx)?;
-        sheet
-            .write_string(y, 3, item["note"].as_str().unwrap_or(""))
+            .write_string(y, 6, item["note"].as_str().unwrap_or(""))
             .map_err(xlsx)?;
     }
     // 列宽由上方的汇总表统一决定（autofit 已含本块），不再单独设置。
@@ -3056,7 +3068,7 @@ fn write_rate_tiers(sheet: &mut Worksheet, params: &Value) -> Result<(), AppErro
         "实务常见区间：常见报价范围的经验值，不是官方公布数据，只用于提示填入的利率是否明显偏离。".to_string(),
         "审计依据：以上都只是默认值和合理性参照。实际计息利率应以客户的存款协议、银行对账单或银行出具的利息清单为准。".to_string(),
         "官方查询入口：中国人民银行 http://www.pbc.gov.cn/ （货币政策—利率政策）；中国货币网 https://www.chinamoney.com.cn/ （利率自律机制公告）；各行挂牌利率见其官网“人民币存款利率表”栏目。".to_string(),
-        "修改方式：档位利率可在工具界面的「存款利率档位」中改写；单个账户的利率可在「测算汇总」H 列直接改写，单户改写优先于档位默认值。".to_string(),
+        "修改方式：档位利率可在工具界面的「存款利率档位」中改写；单个账户的利率可在「测算汇总」G 列直接改写，单户改写优先于档位默认值。".to_string(),
     ];
     if age > RATE_STALE_AFTER_MONTHS {
         lines.insert(0, format!(
@@ -3105,7 +3117,7 @@ fn write_parameters(
             "月均余额 =（月初余额＋月末余额）÷2；当月利息 = 月均余额 × 年利率 × 计息天数 ÷ 年基数。".to_string()
         }),
         ("勾稽口径".into(), "测算利息合计与 TB 利息收入类科目本期发生额净额比较，差异率超过 5% 提示复核。".into()),
-        ("修改方式".into(), format!("在「{SUMMARY_SHEET}」H 列黄色「年利率」单元格直接改写利率，「{MONTHLY_SHEET}」的月度利息、汇总的测算利息与下方的勾稽比较会自动重算。")),
+        ("修改方式".into(), format!("在「{SUMMARY_SHEET}」G 列黄色「年利率」单元格直接改写利率，「{MONTHLY_SHEET}」的月度利息、汇总的测算利息与勾稽差异/结论会自动重算。")),
         ("空白利率格".into(), "活期以外的档位不自动套用默认利率，H 列留空即表示该户利率尚未确定；填入实际利率后金额自动出现。".into()),
     ];
     let items = if summary["ratesStale"].as_bool().unwrap_or(false) {
@@ -4971,8 +4983,18 @@ mod tests {
             .flat_map(|row| row.to_vec())
             .collect();
         assert!(
-            summary_formula_text.iter().any(|f| f.contains("K2-J2")),
+            summary_formula_text.iter().any(|f| f.contains("J2-I2")),
             "汇总表勾稽差异必须是活公式（JE推导−TB）：{summary_formula_text:?}"
+        );
+        assert!(
+            summary_formula_text.iter().any(|f| f.contains("\"勾稽一致\"")),
+            "勾稽结论列必须由公式判定并输出「勾稽一致」：{summary_formula_text:?}"
+        );
+        assert!(
+            summary_formula_text
+                .iter()
+                .any(|f| f.contains("H2+SUM('月度余额与利息'!H") && f.contains("-SUM('月度余额与利息'!I")),
+            "JE推导期末必须=年初+Σ借−Σ贷（回引月度表）：{summary_formula_text:?}"
         );
         let formulas = calamine::Reader::worksheet_formula(&mut book, MONTHLY_SHEET).unwrap();
         let cells: Vec<String> = formulas.rows().flat_map(|row| row.to_vec()).collect();
@@ -4983,7 +5005,7 @@ mod tests {
         assert!(
             cells
                 .iter()
-                .any(|f| f.contains("测算汇总") && f.contains("$H$2")),
+                .any(|f| f.contains("测算汇总") && f.contains("$G$2")),
             "月度利率未回引汇总表的可编辑利率单元格"
         );
         assert!(
@@ -5022,18 +5044,17 @@ mod tests {
                 "
 ",
             );
-        assert!(summary_text.contains("档位匹配依据"));
-        assert!(summary_text.contains("未命中期限关键字，默认按活期"));
+        assert!(!summary_text.contains("档位匹配依据"));
         assert!(summary_text.contains("待填利率"));
         assert!(summary_text.contains("需填写实际利率"));
-        // 勾稽块并入汇总表后，比较标题与不完整提示都必须在同一张 sheet 里。
+        // 勾稽块并入汇总表后，比较标题与账面明细必须在同一张 sheet 里。
         assert!(
             summary_text.contains("存款利息测算与账面利息收入比较"),
             "勾稽比较标题应在「{SUMMARY_SHEET}」内"
         );
         assert!(
-            summary_text.contains("尚未确定利率"),
-            "勾稽块未说明测算不完整"
+            summary_text.contains("本期借方发生额") && summary_text.contains("期末余额(借正贷负)"),
+            "账面利息收入科目明细应列示借贷发生额与期末余额"
         );
         assert!(
             text.contains("只有活期自动套用默认利率"),

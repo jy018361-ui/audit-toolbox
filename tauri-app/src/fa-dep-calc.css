@@ -15,11 +15,11 @@
   border-radius: var(--r-lg);
 }
 
-.dep-card-header {
-  display: flex !important;
-  align-items: flex-start !important;
+.dep-workbench .dep-card-header {
+  display: flex;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: var(--sp-5) !important;
+  gap: var(--sp-5);
 }
 
 .dep-card-header > div {
@@ -71,7 +71,7 @@
 
 .dep-upload-field .file-drop-zone {
   min-height: 94px;
-  border-color: color-mix(in srgb, var(--brand) 48%, var(--border));
+  border-color: color-mix(in srgb, var(--brand) 48%, var(--control-border));
   background: color-mix(in srgb, var(--surface-muted) 48%, var(--surface));
 }
 
@@ -182,7 +182,7 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .dep-card-header {
-    align-items: flex-start !important;
+  .dep-workbench .dep-card-header {
+    align-items: flex-start;
   }
 }

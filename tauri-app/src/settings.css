@@ -168,7 +168,7 @@
 }
 
 .settings-release-notes-heading > span {
-  color: var(--muted-soft);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   white-space: nowrap;
 }
@@ -231,7 +231,7 @@
 }
 
 .settings-release-commits summary span {
-  color: var(--muted-soft);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   font-weight: 400;
 }
@@ -340,4 +340,18 @@
   background: var(--surface);
   border-top: 1px solid var(--border);
   z-index: 2;
+}
+
+.settings-save-bar.is-dirty {
+  border-top-color: var(--border-strong);
+  box-shadow: var(--shadow-sticky);
+}
+
+.settings-save-bar.is-dirty > span {
+  color: var(--ink-strong);
+  font-weight: 600;
+}
+
+.settings-page .data-handling-notice {
+  margin: var(--sp-4) 0;
 }

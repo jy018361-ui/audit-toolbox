@@ -1,4 +1,14 @@
 /* TB/JE 完整性核对：沿用全局页面骨架、设计变量和状态语义。 */
+.tbje-page .data-handling-notice {
+  margin-bottom: var(--sp-4);
+}
+.tbje-result-overview {
+  display: grid;
+  gap: var(--sp-2);
+}
+.tbje-result-overview > [data-slot="badge"] {
+  width: fit-content;
+}
 
 .tbje-page {
   display: grid;
@@ -53,7 +63,7 @@
 .tbje-group-llm-result {
   display: grid;
   gap: 4px;
-  padding: 9px 14px 10px 154px;
+  padding: 9px 14px 10px calc(96px + var(--sp-3));
   border-top: 1px dashed var(--border);
   background: color-mix(in srgb, var(--primary) 3%, var(--card));
   font-size: 12px;
@@ -71,10 +81,14 @@
 .tbje-pairing-head,
 .tbje-group-row {
   display: grid;
-  grid-template-columns: 100px minmax(250px, 1fr) minmax(280px, 1.08fr) 190px;
+  /* 组名列固定 96px 并允许截断：文件名没编号时组名是整个文件名，撑破固定列
+     会直接压在 TB 文件列上。TB/JE 列靠 ellipsis 可继续收缩；按钮列 260px
+     恰好横排三个按钮。整行下限 720px：125%/150% 缩放的笔记本不再整体横向溢出，
+     更窄的窗口才退回横向滚动。 */
+  grid-template-columns: 96px minmax(150px, 1.2fr) minmax(170px, 1.3fr) 260px;
   align-items: center;
   gap: var(--sp-3);
-  min-width: 900px;
+  min-width: 720px;
 }
 
 .tbje-pairing-head {
@@ -120,11 +134,16 @@
   display: grid;
   gap: var(--sp-1);
   align-content: center;
+  min-width: 0;
 }
 
 .tbje-group-identity strong {
+  display: block;
+  min-width: 0;
   font-weight: 600;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .tbje-pair-status {
@@ -196,7 +215,7 @@
   min-width: 0;
   height: 30px;
   padding: 0 var(--sp-2);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: var(--r-sm);
   background: var(--surface-muted);
   color: var(--ink);
@@ -216,7 +235,9 @@
 }
 
 .tbje-group-mapping {
-  min-width: 900px;
+  /* 不再写死 900px：展开映射面板时以滚动容器当前宽度为准，避免把整个
+     配对列表再横向撑出一截；映射表自身带横向滚动。 */
+  min-width: min(900px, 100%);
   max-height: 560px;
   overflow: auto;
   padding: var(--sp-3) var(--sp-3) var(--sp-4) 116px;
@@ -395,7 +416,7 @@
   max-width: 180px;
   height: 26px;
   padding: 0 var(--sp-2);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: var(--r-sm);
   background: var(--surface-muted);
   color: var(--ink);
@@ -422,7 +443,7 @@
 }
 
 .tbje-detail-row > td {
-  padding: var(--sp-3) !important;
+  padding: var(--sp-3);
   background: var(--surface-muted);
 }
 

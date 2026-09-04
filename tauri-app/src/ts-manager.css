@@ -1,0 +1,22 @@
+.ts-manager-page {
+  display: grid;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+.ts-manager-page .data-handling-notice {
+  margin-bottom: var(--sp-4);
+}
+.ts-result-overview {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.ts-manager-page .output-list > button {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

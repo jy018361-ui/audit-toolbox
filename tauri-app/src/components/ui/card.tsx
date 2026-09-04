@@ -2,17 +2,40 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
+export type CardVariant =
+  | "default"
+  | "section"
+  | "subtle"
+  | "workspace"
+  | "interactive"
+
+const cardVariants: Record<CardVariant, string> = {
+  default: "border border-border/70 shadow-card",
+  section: "border border-border/70 shadow-card",
+  subtle: "border border-border/50 bg-muted/35 shadow-none",
+  workspace:
+    "border border-[var(--border-strong)] shadow-[var(--shadow-preview)]",
+  interactive:
+    "border border-border/70 shadow-card transition-[border-color,box-shadow,transform] hover:-translate-y-0.5 hover:border-[var(--border-strong)] hover:shadow-[var(--shadow-interactive)]",
+}
+
 function Card({
   className,
   size = "default",
+  variant = "default",
   ...props
-}: React.ComponentProps<"div"> & { size?: "default" | "sm" }) {
+}: React.ComponentProps<"div"> & {
+  size?: "default" | "sm"
+  variant?: CardVariant
+}) {
   return (
     <div
       data-slot="card"
       data-size={size}
+      data-variant={variant}
       className={cn(
         "group/card flex flex-col gap-(--card-spacing) overflow-hidden rounded-xl bg-card py-(--card-spacing) text-sm text-card-foreground shadow-card [--card-spacing:--spacing(6)] has-data-[slot=card-footer]:pb-0 has-[>img:first-child]:pt-0 data-[size=sm]:[--card-spacing:--spacing(3)] data-[size=sm]:has-data-[slot=card-footer]:pb-0 *:[img:first-child]:rounded-t-xl *:[img:last-child]:rounded-b-xl",
+        cardVariants[variant],
         className
       )}
       {...props}

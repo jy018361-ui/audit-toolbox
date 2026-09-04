@@ -82,6 +82,12 @@ function makeLabel(key: string, period?: string) {
   return key || period || "未命名";
 }
 
+/** 组列表的统一排序：待确认的排前面，同状态按组名自然排序。 */
+export function compareGroups(a: PairedGroup, b: PairedGroup): number {
+  if (a.needsReview !== b.needsReview) return a.needsReview ? -1 : 1;
+  return a.label.localeCompare(b.label, "zh-CN", { numeric: true });
+}
+
 /**
  * 把一批已识别的文件配成组。
  *
@@ -158,10 +164,7 @@ export function pairLedgerFiles(files: PairingFile[]): PairedGroup[] {
   }
 
   // 待确认的排前面：用户的注意力应该花在这些上，对好的往下沉。
-  return groups.sort((a, b) => {
-    if (a.needsReview !== b.needsReview) return a.needsReview ? -1 : 1;
-    return a.label.localeCompare(b.label, "zh-CN", { numeric: true });
-  });
+  return groups.sort(compareGroups);
 }
 
 /**

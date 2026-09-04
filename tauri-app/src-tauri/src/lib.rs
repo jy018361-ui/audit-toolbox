@@ -19,6 +19,7 @@ mod pdf_to_excel;
 mod roll_forward;
 mod storage;
 mod tabular;
+mod telemetry;
 mod tbje_check;
 mod update_notes;
 mod wp;
@@ -698,6 +699,27 @@ fn settings_set(storage: State<'_, Storage>, settings: Value) -> Result<(), AppE
     storage.settings_set(settings)
 }
 
+/// 使用统计入口（前端只允许报「打开工具」；启动/任务/退出由 Rust 侧自己记录，
+/// 防止任意事件名从这里灌进统计）。
+#[tauri::command]
+fn telemetry_track(
+    telemetry: State<'_, telemetry::Telemetry>,
+    event: String,
+    tool_id: Option<String>,
+    tool_name: Option<String>,
+) -> Result<(), AppError> {
+    if event != "tool_open" {
+        return Err(AppError::new(
+            "TELEMETRY_EVENT_DENIED",
+            "不支持该统计事件。",
+            false,
+            Some(event),
+        ));
+    }
+    telemetry.track(&event, tool_id.as_deref(), tool_name.as_deref(), None, None);
+    Ok(())
+}
+
 #[tauri::command]
 fn llm_test(settings: Value, api_key: Option<String>) -> Result<Value, AppError> {
     let llm = settings.get("llm").unwrap_or(&settings);
@@ -1070,6 +1092,8 @@ pub fn run() {
     let dirs = project_dirs().expect("AuditToolbox data directory");
     std::fs::create_dir_all(dirs.data_local_dir()).expect("create data directory");
     let storage = Storage::new(dirs.data_local_dir()).expect("initialize local storage");
+    // 使用统计只在主窗口进程启动（worker 重入走 main.rs 的提前退出，不会到这里）。
+    let telemetry = telemetry::Telemetry::start(storage.db_path());
     let allowed = AllowedPaths(Arc::new(Mutex::new(HashSet::new())));
     let engine_allowed = allowed.clone();
     let builder = tauri::Builder::default()
@@ -1089,11 +1113,14 @@ pub fn run() {
     builder
         .manage(storage)
         .manage(allowed)
+        .manage(telemetry.clone())
         .setup(move |app| {
             app.manage(ExcelMergerService::new(
                 app.handle().clone(),
                 engine_allowed.clone(),
             ));
+            app.state::<telemetry::Telemetry>()
+                .track("app_start", None, None, None, None);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1107,6 +1134,7 @@ pub fn run() {
             open_reference_url,
             settings_get,
             settings_set,
+            telemetry_track,
             llm_test,
             history_get,
             history_clear,
@@ -1117,8 +1145,16 @@ pub fn run() {
             pick_path,
             open_output
         ])
-        .run(tauri::generate_context!())
-        .expect("run Tauri application");
+        .build(tauri::generate_context!())
+        .expect("build Tauri application")
+        .run(|handle, event| {
+            // 退出时记会话时长并尽力补发，超时即放弃（不拖慢关窗）。
+            if let tauri::RunEvent::Exit = event {
+                let telemetry = handle.state::<telemetry::Telemetry>();
+                telemetry.track("app_exit", None, None, None, Some(telemetry.session_ms()));
+                telemetry.shutdown();
+            }
+        });
 }
 
 pub fn run_excel_merger_worker() -> i32 {

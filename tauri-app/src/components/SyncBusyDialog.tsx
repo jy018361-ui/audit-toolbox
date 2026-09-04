@@ -131,7 +131,7 @@ export function SyncBusyDialog() {
         onPointerDownOutside={(event) => event.preventDefault()}
         onInteractOutside={(event) => event.preventDefault()}
       >
-        <div className="sync-busy-body">
+        <div className="sync-busy-body" aria-live="polite">
           <span className="sync-busy-spinner" aria-hidden="true" />
           <div className="sync-busy-text">
             <DialogTitle>

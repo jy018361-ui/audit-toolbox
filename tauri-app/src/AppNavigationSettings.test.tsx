@@ -14,7 +14,14 @@ import { useState } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import App, { Settings } from "./App";
-import { settingsGet, settingsSet, secretSet, updateReleaseNotes } from "./api";
+import {
+  engineCall,
+  historyGet,
+  settingsGet,
+  settingsSet,
+  secretSet,
+  updateReleaseNotes,
+} from "./api";
 import catalog from "../public/tool-catalog.json";
 
 vi.mock("./api", async (importOriginal) => ({
@@ -43,6 +50,8 @@ vi.mock("@tauri-apps/api/app", () => ({
 vi.mock("./theme", () => ({ applyReadableForegrounds: vi.fn() }));
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(historyGet).mockResolvedValue([]);
+  vi.mocked(engineCall).mockResolvedValue({ bytes: 0, files: 0 });
   vi.mocked(check).mockResolvedValue(null);
   vi.mocked(updateReleaseNotes).mockResolvedValue({
     currentVersion: "1.0.0",
@@ -54,6 +63,102 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+it("presents one product identity and groups every catalog tool once", async () => {
+  render(
+    <MemoryRouter initialEntries={["/"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  await screen.findByRole("heading", { name: "今天要处理什么？" });
+
+  expect(screen.getByRole("heading", { name: "E点通工具箱" })).toBeVisible();
+  expect(screen.queryByText("AUDIT TOOLKIT")).not.toBeInTheDocument();
+  expect(screen.queryByText(/Rust 核心/)).not.toBeInTheDocument();
+  expect(screen.getByLabelText("数据处理边界")).toHaveAttribute(
+    "data-mode",
+    "network-assisted",
+  );
+  for (const group of ["审计工具", "效率工具", "运营工具"]) {
+    expect(screen.getByRole("heading", { name: group })).toBeVisible();
+  }
+  const dashboard = document.querySelector(".dashboard-tool-groups")!;
+  expect(within(dashboard as HTMLElement).getAllByRole("link")).toHaveLength(
+    catalog.length,
+  );
+  expect(document.querySelectorAll(".metrics .metric")).toHaveLength(3);
+});
+
+it("opens and closes the compact navigation drawer with keyboard and route changes", async () => {
+  render(
+    <MemoryRouter initialEntries={["/"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  await screen.findByRole("heading", { name: "今天要处理什么？" });
+  const trigger = screen.getByRole("button", { name: "打开工具导航" });
+  fireEvent.click(trigger);
+  expect(trigger).toHaveAttribute("aria-expanded", "true");
+  const close = within(
+    document.querySelector("aside.sidebar")! as HTMLElement,
+  ).getByRole("button", { name: "关闭工具导航" });
+  expect(close).toHaveFocus();
+  fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+  expect(
+    document.querySelector("aside.sidebar")?.contains(document.activeElement),
+  ).toBe(true);
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(trigger).toHaveAttribute("aria-expanded", "false");
+  expect(trigger).toHaveFocus();
+
+  fireEvent.click(trigger);
+  const sidebar = within(
+    document.querySelector("aside.sidebar")! as HTMLElement,
+  );
+  fireEvent.click(sidebar.getByRole("link", { name: "历史记录" }));
+  await screen.findByRole("heading", { name: "历史记录" });
+  expect(trigger).toHaveAttribute("aria-expanded", "false");
+  expect(trigger).toHaveFocus();
+});
+
+it.each(["completed", "success"])(
+  "renders localized %s history metadata without exposing output paths",
+  async (status) => {
+    vi.mocked(historyGet).mockResolvedValue([
+      {
+        jobId: "job-1",
+        toolId: "fx_audit",
+        status,
+        message: "底稿已生成",
+        outputPaths: ["C:\\客户A\\result.xlsx"],
+        startedAt: "2026-09-04T08:00:00+08:00",
+      },
+    ]);
+    render(
+      <MemoryRouter initialEntries={["/history"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("底稿已生成")).toBeVisible();
+    expect(screen.getByText("已完成")).toBeVisible();
+    expect(screen.getByText("输出 1 个文件")).toBeVisible();
+    expect(screen.queryByText(/客户A/)).not.toBeInTheDocument();
+  },
+);
+
+it("offers a useful action when history is empty", async () => {
+  render(
+    <MemoryRouter initialEntries={["/history"]}>
+      <App />
+    </MemoryRouter>,
+  );
+  expect(await screen.findByText("还没有任务记录")).toBeVisible();
+  fireEvent.click(screen.getByRole("link", { name: "返回工作台" }));
+  expect(
+    await screen.findByRole("heading", { name: "今天要处理什么？" }),
+  ).toBeVisible();
+});
+
 it.each(["/tasks", "/diagnostics"])(
   "removes obsolete navigation and redirects %s without losing the collapsible FA group",
   async (route) => {
@@ -62,7 +167,7 @@ it.each(["/tasks", "/diagnostics"])(
         <App />
       </MemoryRouter>,
     );
-    await screen.findByRole("heading", { name: "选择一个工具开始处理" });
+    await screen.findByRole("heading", { name: "今天要处理什么？" });
     const sidebar = within(
       document.querySelector("aside.sidebar")! as HTMLElement,
     );
@@ -81,27 +186,24 @@ it.each(["/tasks", "/diagnostics"])(
   },
 );
 
-it("marks preview tools as developing in the sidebar without disabling them", async () => {
+it("marks preview tools as trials in the sidebar without disabling them", async () => {
   render(
     <MemoryRouter initialEntries={["/"]}>
       <App />
     </MemoryRouter>,
   );
-  await screen.findByRole("heading", { name: "选择一个工具开始处理" });
+  await screen.findByRole("heading", { name: "今天要处理什么？" });
   const sidebar = within(
     document.querySelector("aside.sidebar")! as HTMLElement,
   );
 
   for (const name of ["AudiPick 智能合同审阅", "WP Roll Forward"]) {
     const link = sidebar.getByRole("link", {
-      name: new RegExp(`${name}.*开发中.*结果请复核`),
+      name: new RegExp(`${name}.*试用.*结果请复核`),
     });
     expect(link).toBeVisible();
-    expect(link).toHaveAttribute(
-      "title",
-      "开发中：功能仍在完善，使用结果请复核。",
-    );
-    expect(within(link).getByText("开发中")).toBeVisible();
+    expect(link).toHaveAttribute("title", "试用功能，使用结果请复核。");
+    expect(within(link).getByText("试用")).toBeVisible();
   }
 
   expect(
@@ -116,6 +218,7 @@ it("groups settings, preserves draft across sections, and saves via the existing
   await waitFor(() =>
     expect(screen.getByLabelText("模型")).toHaveValue("saved-model"),
   );
+  expect(screen.getByRole("button", { name: "保存配置" })).toBeDisabled();
   expect(settingsGet).toHaveBeenCalled();
   expect(screen.getByRole("heading", { name: "统一 LLM 配置" })).toBeVisible();
   expect(
@@ -125,6 +228,7 @@ it("groups settings, preserves draft across sections, and saves via the existing
   fireEvent.change(screen.getByLabelText("模型"), {
     target: { value: "draft-model" },
   });
+  expect(screen.getByRole("button", { name: "保存配置" })).toBeEnabled();
   fireEvent.change(screen.getByLabelText("OCR 引擎"), {
     target: { value: "baidu" },
   });
@@ -132,7 +236,7 @@ it("groups settings, preserves draft across sections, and saves via the existing
   fireEvent.change(screen.getByLabelText("百度 API Key"), {
     target: { value: "test-placeholder" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "2 基本设置" }));
+  fireEvent.click(screen.getByRole("button", { name: /基本设置/ }));
   expect(screen.getByRole("heading", { name: "本地缓存" })).toBeVisible();
   expect(screen.getByRole("heading", { name: "界面主题" })).toBeVisible();
   const themeButtons = screen
@@ -144,7 +248,7 @@ it("groups settings, preserves draft across sections, and saves via the existing
   fireEvent.change(screen.getByLabelText("自动清理"), {
     target: { value: "off" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "1 API 配置" }));
+  fireEvent.click(screen.getByRole("button", { name: /API 配置/ }));
   expect(screen.getByLabelText("模型")).toHaveValue("draft-model");
   fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
   await screen.findByRole("status");
@@ -157,7 +261,8 @@ it("groups settings, preserves draft across sections, and saves via the existing
   );
   expect(secretSet).toHaveBeenCalledWith("baidu_ocr_key", "test-placeholder");
   expect(screen.getByLabelText("百度 API Key")).toHaveValue("");
-  fireEvent.click(screen.getByRole("button", { name: "2 基本设置" }));
+  expect(screen.getByRole("button", { name: "保存配置" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: /基本设置/ }));
   expect(screen.getByRole("button", { name: "深绿" })).toBeVisible();
   expect(screen.getByRole("button", { name: "保存配置" })).toBeVisible();
   const updateButton = screen.getByRole("button", { name: "软件更新" });
@@ -168,6 +273,69 @@ it("groups settings, preserves draft across sections, and saves via the existing
     expect(updateReleaseNotes).toHaveBeenCalledWith(undefined),
   );
   expect(screen.getByRole("button", { name: "重新检查" })).toBeVisible();
+});
+
+it("discloses telemetry fields and protects unsaved settings on leave", async () => {
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  render(
+    <MemoryRouter>
+      <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />
+    </MemoryRouter>,
+  );
+  await waitFor(() =>
+    expect(screen.getByLabelText("模型")).toHaveValue("saved-model"),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /基本设置/ }));
+  expect(screen.getByLabelText("发送哪些使用信息")).toHaveAttribute(
+    "data-mode",
+    "telemetry",
+  );
+  expect(screen.getByText(/电脑名、系统用户名/)).toBeVisible();
+  fireEvent.change(screen.getByRole("textbox", { name: /统计服务器地址/ }), {
+    target: { value: "http://metrics.internal" },
+  });
+  expect(screen.getByText(/有未保存的配置修改/)).toBeVisible();
+
+  const beforeUnload = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(beforeUnload);
+  expect(beforeUnload.defaultPrevented).toBe(true);
+
+  const link = document.createElement("a");
+  link.href = "#/history";
+  link.textContent = "离开设置";
+  document.body.appendChild(link);
+  fireEvent.click(link);
+  expect(confirm).toHaveBeenCalledWith(
+    "设置尚未保存，确定离开并放弃这些修改吗？",
+  );
+  expect(window.location.hash).not.toBe("#/history");
+  confirm.mockRestore();
+});
+
+it("requires confirmation before clearing local cache", async () => {
+  vi.mocked(engineCall).mockResolvedValue({
+    files: 1,
+    bytes: 1024,
+    oldestDays: 1,
+    path: "C:\\cache",
+  });
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  render(
+    <MemoryRouter>
+      <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />
+    </MemoryRouter>,
+  );
+  await waitFor(() => expect(engineCall).toHaveBeenCalled());
+  fireEvent.click(screen.getByRole("button", { name: /基本设置/ }));
+  expect(screen.getByText("已缓存 1.0 KB")).toBeVisible();
+  fireEvent.click(
+    screen.getByRole("button", { name: "立刻清理全部缓存（1.0 KB）" }),
+  );
+  expect(confirm).toHaveBeenCalledWith(
+    "确定清理全部本机缓存吗？源文件和已生成文件不会被删除。",
+  );
+  expect(engineCall).toHaveBeenCalledTimes(1);
+  confirm.mockRestore();
 });
 
 function UpdateSettings({ initial = null }: { initial?: Update | null }) {

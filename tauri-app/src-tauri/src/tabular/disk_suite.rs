@@ -208,7 +208,7 @@ fn visit_shapes(
 }
 
 fn initialize(db: &Connection) -> Result<(), AppError> {
-    db.execute_batch(" 
+    db.execute_batch("
         DROP TABLE IF EXISTS suite_vouchers; DROP TABLE IF EXISTS suite_nets;
         DROP TABLE IF EXISTS suite_month; DROP TABLE IF EXISTS suite_summaries;
         DROP TABLE IF EXISTS suite_subject; DROP TABLE IF EXISTS suite_pivot;

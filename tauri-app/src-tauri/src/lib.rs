@@ -22,6 +22,7 @@ mod spreadsheet_input;
 mod xls_input_tests;
 mod storage;
 mod tabular;
+mod resource_budget;
 mod telemetry;
 mod tbje_check;
 mod update_notes;

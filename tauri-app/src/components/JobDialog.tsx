@@ -85,13 +85,13 @@ function JobRow({ job, label, paused, onTogglePause, onStop }: JobRowProps) {
     <div className="job-dialog-row" aria-live="polite">
       <div className="job-dialog-row-head">
         <strong>{label}</strong>
-        <span className="job-pct">{paused ? "已暂停" : `${pct}%`}</span>
+        <span className="job-pct">{paused ? "已暂停" : job.total > 0 ? `${pct}%` : "处理中"}</span>
       </div>
       <p className="job-dialog-message">{job.message}</p>
       <progress
         className={`progress-tone-${paused ? "warning" : tone}`}
         max={Math.max(job.total, 1)}
-        value={Math.min(job.current, Math.max(job.total, 1))}
+        value={job.total > 0 ? Math.min(job.current, Math.max(job.total, 1)) : undefined}
       />
       <div className="job-dialog-row-actions">
         <Button
@@ -238,7 +238,7 @@ export function JobDialogProvider({
           <span className="job-pct">
             {paused[first.jobId] && running.length === 1
               ? "已暂停"
-              : `${percent(first)}%`}
+              : first.total > 0 ? `${percent(first)}%` : "处理中"}
           </span>
         </button>
       )}

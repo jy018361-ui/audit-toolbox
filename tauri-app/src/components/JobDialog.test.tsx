@@ -47,6 +47,12 @@ afterEach(() => {
 });
 
 describe("任务进度弹窗", () => {
+  it("大文件总行数未知时显示不定进度，不能误报百分之百", () => {
+    renderDialog([job({ current: 10000, total: 0, message: "已缓存 10000 行" })]);
+    expect(screen.getByText("处理中")).toBeTruthy();
+    expect(screen.queryByText("100%")).toBeNull();
+    expect(screen.getByRole("progressbar").hasAttribute("value")).toBe(false);
+  });
   it("结束态的三个 phase 不算运行中", () => {
     expect(isJobRunning(job())).toBe(true);
     expect(isJobRunning(job({ phase: "completed" }))).toBe(false);

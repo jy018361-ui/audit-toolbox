@@ -311,6 +311,30 @@ impl ExcelMergerService {
                 return;
             }
         };
+        let protected = request.method.starts_with("kanzhang.");
+        let _memory_limit = if protected {
+            match crate::resource_budget::WorkerLimit::attach(&child) {
+                Ok(limit) => Some(limit),
+                Err(err) => {
+                    terminate_process_tree(&mut child);
+                    self.emit(event_for(
+                        worker_tool_id,
+                        &job_id,
+                        "failed",
+                        1,
+                        1,
+                        &err.user_message,
+                        "error",
+                        Vec::new(),
+                        None,
+                    ));
+                    self.finish(&job_id, &cancel_path);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         if let Some(mut stdin) = child.stdin.take() {
             let _ = writeln!(
                 stdin,
@@ -331,6 +355,22 @@ impl ExcelMergerService {
         let mut terminal = false;
         let mut cancel_started = None::<Instant>;
         loop {
+            if protected && !terminal && crate::resource_budget::check_available().is_err() {
+                terminate_process_tree(&mut child);
+                self.emit(event_for(
+                    worker_tool_id,
+                    &job_id,
+                    "failed",
+                    1,
+                    1,
+                    "系统内存不足，已停止任务以保护电脑。请关闭其他大型程序后重试。",
+                    "error",
+                    Vec::new(),
+                    None,
+                ));
+                let _ = child.wait();
+                break;
+            }
             while let Ok(payload) = receiver.try_recv() {
                 terminal |= payload
                     .get("phase")
@@ -377,7 +417,15 @@ impl ExcelMergerService {
                         let (phase, severity, message) = if status.success() {
                             ("completed", "success", "任务已结束。")
                         } else {
-                            ("failed", "error", "Rust Excel 处理进程异常退出。")
+                            (
+                                "failed",
+                                "error",
+                                if protected {
+                                    "看账任务异常退出，可能达到内存保护上限。请减小数据范围后重试。"
+                                } else {
+                                    "Rust Excel 处理进程异常退出。"
+                                },
+                            )
                         };
                         self.emit(event_for(
                             worker_tool_id,

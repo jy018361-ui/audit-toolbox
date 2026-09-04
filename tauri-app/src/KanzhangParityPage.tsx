@@ -408,6 +408,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     <DataHandlingNotice mode="network-assisted" title="凭证处理与智能复核" description="凭证读取、筛选和导出在本机完成；使用 LLM 复核或分析时，所需信息会按设置发送到对应服务。" />
     <StepIndicator steps={[{key:"1",label:"加载与映射"},{key:"2",label:"科目筛选",disabled:!draft.inspect||missingRequired.length>0},{key:"3",label:"透视与导出",disabled:!draft.inspect||missingRequired.length>0}]} current={draft.step-1} onStepClick={(index)=>patch({step:index+1})} />
     {error&&<ErrorBox error={error} onDismiss={()=>setError("")} />}
+    {draft.inspect?.resourceNotice&&<p className="kz-hint" role="status">{draft.inspect.resourceNotice}</p>}
     {draft.step===1&&<div className="fa-stack">
       <LedgerSourceCard
         inputPath={draft.inputPath} sheet={draft.sheet} knownSheets={draft.knownSheets} headerRow={draft.headerRow}

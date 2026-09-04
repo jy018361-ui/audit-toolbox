@@ -43,7 +43,7 @@ export function JobProgress({
     <div className={`job-progress ${compact ? "job-progress--compact" : ""}`}>
       <div className={`job-banner ${tone}`}>
         <strong>{job.message}</strong>
-        <span className="job-pct">{pct}%</span>
+        <span className="job-pct">{job.total > 0 ? `${pct}%` : "处理中"}</span>
         {onCancel && (
           <Button
             variant="ghost"
@@ -56,7 +56,7 @@ export function JobProgress({
           </Button>
         )}
       </div>
-      <progress className={`progress-tone-${tone}`} max={max} value={value} />
+      <progress className={`progress-tone-${tone}`} max={max} value={job.total > 0 ? value : undefined} />
     </div>
   );
 }

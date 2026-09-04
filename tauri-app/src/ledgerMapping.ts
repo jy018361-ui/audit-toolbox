@@ -15,6 +15,8 @@ export type Mapping = {
   functionalCredit?: string;
 };
 export type Inspect = {
+  lowMemory?: boolean;
+  resourceNotice?: string;
   headers: string[];
   preview: string[][];
   sheets?: string[];

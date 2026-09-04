@@ -3264,7 +3264,7 @@ fn is_measurement_unit_value(raw: &str) -> bool {
     )
 }
 
-fn column_is_measurement_unit(headers: &[String], rows: &[Vec<String>], index: usize) -> bool {
+pub(crate) fn column_is_measurement_unit(headers: &[String], rows: &[Vec<String>], index: usize) -> bool {
     let header = headers
         .get(index)
         .map(|value| normalize_header(value))

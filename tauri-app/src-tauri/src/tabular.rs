@@ -27,6 +27,9 @@ use crate::ledger_mapping;
 use crate::ledger_mapping::{SignConvention, SignEvidence, header_index, normalize_name};
 
 const TS_MAX_PIVOT_COLUMN_VALUES: usize = 180;
+mod disk_ledger;
+mod disk_suite;
+mod large_csv;
 
 pub(crate) type Progress<'a> = &'a dyn Fn(&str, usize, usize, &str);
 
@@ -222,7 +225,7 @@ pub(crate) fn run_job(
         }
         "kanzhang.inspect" => {
             progress("read", 0, 1, "正在读取凭证文件…");
-            let value = inspect_kanzhang(params);
+            let value = inspect_kanzhang_with_progress(params, progress, &cancel);
             check_cancel(&cancel)?;
             value
         }
@@ -276,8 +279,33 @@ fn inspect_ts(params: Value) -> Result<Value, AppError> {
 }
 
 fn inspect_kanzhang(params: Value) -> Result<Value, AppError> {
+    inspect_kanzhang_with_progress(params, &|_, _, _, _| {}, &AtomicBool::new(false))
+}
+
+fn inspect_kanzhang_with_progress(
+    params: Value,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<Value, AppError> {
     let source: SourceParams = parse(params, "看账参数不完整。")?;
     let started = Instant::now();
+    if large_csv::applies(Path::new(&source.input_path)) {
+        let cache = large_csv::load(&source, progress, cancel)?;
+        let table = &cache.table;
+        let mapping = suggest_mapping(&table.headers, &table.rows);
+        progress("accounts", 0, 0, "正在从磁盘缓存汇总科目…");
+        let accounts = cache.accounts(&mapping, "", &[], 500, cancel)?;
+        return Ok(
+            json!({"engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path,"CSV",source.header_row)?,
+            "path":table.path,"sheets":table.sheets,"selectedSheet":table.sheet,"headers":table.headers,
+            "preview":table.rows,"dimensions":{"rows":cache.count,"columns":table.headers.len()},
+            "encoding":table.encoding,"delimiter":table.delimiter.map(|v|v.to_string()),
+            "suggestedMapping":mapping,"accounts":accounts["values"],"accountCodes":accounts["codes"],
+            "accountCount":accounts["total"],"lowMemory":true,
+            "resourceNotice":"已启用低内存磁盘模式；筛选、明细和套表会分批处理，首次运行时间较长，可随时取消。",
+            "timings":{"readMs":started.elapsed().as_millis()}}),
+        );
+    }
     let table = load_ledger_cached(
         Path::new(&source.input_path),
         source.sheet.as_deref(),
@@ -307,6 +335,52 @@ fn inspect_kanzhang(params: Value) -> Result<Value, AppError> {
 
 fn kanzhang_account_values(params: Value) -> Result<Value, AppError> {
     let source: SourceParams = parse(params.clone(), "看账参数不完整。")?;
+    if large_csv::applies(Path::new(&source.input_path)) {
+        let cancel = AtomicBool::new(false);
+        let cache = large_csv::load(&source, &|_, _, _, _| {}, &cancel)?;
+        let mapping: LedgerMapping = params
+            .get("mapping")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| {
+                error(
+                    "INVALID_MAPPING",
+                    "字段映射格式不正确。",
+                    Some(e.to_string()),
+                )
+            })?
+            .unwrap_or_else(|| suggest_mapping(&cache.table.headers, &cache.table.rows));
+        if mapping.account_columns().is_empty() {
+            return Err(error(
+                "KANZHANG_MAPPING_INCOMPLETE",
+                "请先确认科目编码或科目名称字段映射。",
+                None,
+            ));
+        }
+        let prefixes = parse_code_prefixes(
+            params
+                .get("codePrefixes")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        );
+        let limit = if params.get("all").and_then(Value::as_bool).unwrap_or(false) {
+            usize::MAX
+        } else {
+            params
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(1000)
+                .clamp(1, 20000) as usize
+        };
+        return cache.accounts(
+            &mapping,
+            params.get("keyword").and_then(Value::as_str).unwrap_or(""),
+            &prefixes,
+            limit,
+            &cancel,
+        );
+    }
     let table = load_ledger_cached(
         Path::new(&source.input_path),
         source.sheet.as_deref(),
@@ -395,11 +469,24 @@ fn primary_account_names(table: &Table, mapping: &LedgerMapping, values: &[Strin
 
 fn validate_kanzhang_mapping(params: Value) -> Result<Value, AppError> {
     let source: SourceParams = parse(params.clone(), "看账参数不完整。")?;
-    let table = load_ledger_cached(
-        Path::new(&source.input_path),
-        source.sheet.as_deref(),
-        source.header_row,
-    )?;
+    let large = if large_csv::applies(Path::new(&source.input_path)) {
+        Some(large_csv::load(
+            &source,
+            &|_, _, _, _| {},
+            &AtomicBool::new(false),
+        )?)
+    } else {
+        None
+    };
+    let table = if let Some(cache) = &large {
+        cache.table.clone()
+    } else {
+        load_ledger_cached(
+            Path::new(&source.input_path),
+            source.sheet.as_deref(),
+            source.header_row,
+        )?
+    };
     let mapping = params
         .get("mapping")
         .cloned()
@@ -432,7 +519,25 @@ fn validate_kanzhang_mapping(params: Value) -> Result<Value, AppError> {
     if scheme == "unknown" && !missing.iter().any(|m| m.contains("金额")) {
         missing.push("金额字段");
     }
-    let amount_issues = ledger_amount_parse_issues(&table, &mapping);
+    let mut amount_issues = ledger_amount_parse_issues(&table, &mapping);
+    if let Some(cache) = large {
+        amount_issues.clear();
+        let mut one = table.clone();
+        one.rows.clear();
+        cache.visit(None, &AtomicBool::new(false), |row, index| {
+            if amount_issues.len() < 20 {
+                one.rows.clear();
+                one.rows.push(row);
+                for mut issue in ledger_amount_parse_issues(&one, &mapping) {
+                    issue["rowIndex"] = json!(index);
+                    if amount_issues.len() < 20 {
+                        amount_issues.push(issue);
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
     let mapped = mapping_columns(&mapping);
     let unknown = mapped
         .into_iter()
@@ -701,6 +806,9 @@ fn kanzhang_filter_preview(
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
     let job: KanzhangParams = parse(params, "看账参数不完整。")?;
+    if large_csv::applies(Path::new(&job.input_path)) {
+        return kanzhang_filter_preview_disk(&job, progress, cancel);
+    }
     progress("read", 0, 3, "正在读取凭证数据…");
     let table = load_ledger_cached(
         Path::new(&job.input_path),
@@ -734,6 +842,9 @@ fn export_kanzhang(
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
     let job: KanzhangParams = parse(params, "看账参数不完整。")?;
+    if large_csv::applies(Path::new(&job.input_path)) {
+        return export_kanzhang_disk(&job, progress, cancel);
+    }
     let started = Instant::now();
     progress("read", 0, 6, "正在读取凭证数据…");
     let table = load_ledger_cached(
@@ -820,6 +931,165 @@ fn export_kanzhang(
         "mapping":mapping,
         "timings":{"totalMs":started.elapsed().as_millis()}
     }))
+}
+
+fn source_from_kanzhang(job: &KanzhangParams) -> SourceParams {
+    SourceParams {
+        input_path: job.input_path.clone(),
+        sheet: job.sheet.clone(),
+        header_row: job.header_row,
+    }
+}
+
+fn prepare_disk_ledger(
+    job: &KanzhangParams,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<(LedgerMapping, disk_ledger::DiskLedger), AppError> {
+    let cache = large_csv::load(&source_from_kanzhang(job), progress, cancel)?;
+    let mapping = job
+        .mapping
+        .clone()
+        .unwrap_or_else(|| suggest_mapping(&cache.table.headers, &cache.table.rows));
+    let ledger = disk_ledger::prepare(&cache, &mapping, None, job.header_row, progress, cancel)?;
+    Ok((mapping, ledger))
+}
+
+fn select_disk_batch(
+    ledger: &disk_ledger::DiskLedger,
+    targets: &[String],
+    cancel: &AtomicBool,
+) -> Result<usize, AppError> {
+    let rows = ledger.select(targets, cancel)?;
+    let convention = ledger
+        .evidence_selected(cancel)?
+        .convention
+        .unwrap_or(SignConvention::Unsigned);
+    ledger.set_selected_convention(convention)?;
+    Ok(rows)
+}
+
+fn kanzhang_filter_preview_disk(
+    job: &KanzhangParams,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<Value, AppError> {
+    progress("read", 0, 3, "正在打开低内存缓存并建立凭证索引…");
+    let (mapping, ledger) = prepare_disk_ledger(job, progress, cancel)?;
+    progress("filter", 1, 3, "正在磁盘上筛选目标科目和完整凭证…");
+    let rows = select_disk_batch(&ledger, &job.target_accounts, cancel)?;
+    let mut preview = Vec::new();
+    ledger.visit_selected(cancel, |row, _| {
+        if preview.len() < 50 {
+            preview.push(row);
+        }
+        Ok(())
+    })?;
+    Ok(
+        json!({"engine":"rust-polars","rows":rows,"columns":ledger.table.headers.len(),
+        "mapping":mapping,"preview":preview,"outputPaths":[],"lowMemory":true}),
+    )
+}
+
+fn export_kanzhang_disk(
+    job: &KanzhangParams,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<Value, AppError> {
+    let started = Instant::now();
+    progress("read", 0, 6, "正在打开低内存缓存并建立凭证索引…");
+    let (mapping, ledger) = prepare_disk_ledger(job, progress, cancel)?;
+    let batches = normalized_batches(job);
+    let budget = crate::resource_budget::budget()?;
+    let analysis_budget = (budget.worker_bytes / 4).max(budget.batch_bytes);
+    let mut outputs = Vec::new();
+    let mut batch_results = Vec::new();
+    for (batch_index, batch) in batches.iter().enumerate() {
+        check_cancel(cancel)?;
+        progress(
+            "filter",
+            1,
+            6,
+            &format!("正在磁盘上筛选批次 {}：{}…", batch_index + 1, batch.name),
+        );
+        let selected_rows = select_disk_batch(&ledger, &batch.accounts, cancel)?;
+        let output = kanzhang_batch_output_path(job, batch, batch_index, batches.len())?;
+        if !output
+            .extension()
+            .and_then(|v| v.to_str())
+            .is_some_and(|v| v.eq_ignore_ascii_case("csv"))
+        {
+            return Err(error(
+                "KANZHANG_LARGE_DETAIL_FORMAT",
+                "大文件明细当前使用 CSV 分片导出，请将输出文件扩展名改为 .csv。套表仍会另存为 XLSX。",
+                None,
+            ));
+        }
+        let parent = output.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(parent).map_err(io_error)?;
+        let stem = output.file_stem().unwrap_or_default().to_string_lossy();
+        let suite_path = parent.join(format!("{stem}_套表.xlsx"));
+        let suite_enabled =
+            job.include_pivot || job.include_voucher_types || !job.pivot_rows.is_empty();
+        let suite = if suite_enabled {
+            Some(disk_suite::write_suite(
+                &ledger,
+                &mapping,
+                &batch.accounts,
+                job,
+                &suite_path,
+                analysis_budget,
+                progress,
+                cancel,
+            )?)
+        } else {
+            None
+        };
+        progress(
+            "write",
+            5,
+            6,
+            &format!("正在流式写出批次 {} 明细…", batch_index + 1),
+        );
+        let detail = ledger.write_selected_csv(
+            &output,
+            &ledger.table.headers,
+            job.rows_per_sheet,
+            job.mark_loss_transfer,
+            cancel,
+        )?;
+        outputs.extend(
+            detail
+                .paths
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned()),
+        );
+        let excluded = ledger.write_excluded_csv(
+            &output,
+            &ledger.table.headers,
+            &job.exclude_accounts,
+            cancel,
+        )?;
+        if let Some(path) = &excluded {
+            outputs.push(path.to_string_lossy().into_owned());
+        }
+        if suite_enabled {
+            outputs.push(suite_path.to_string_lossy().into_owned());
+        }
+        batch_results.push(
+            json!({"name":batch.name,"accounts":batch.accounts,"rows":detail.rows,
+            "excludedRows":if excluded.is_some(){Value::String("已流式导出".into())}else{Value::from(0)},"summaryRows":suite.as_ref().map(|v|v.summary.rows.len()).unwrap_or(0),
+            "voucherRows":suite.as_ref().map(|v|v.voucher_count).unwrap_or(0),
+            "voucherTypesLoose":Value::Null,"voucherTypesStrict":Value::Null,
+            "lossTransferVouchers":suite.as_ref().map(|v|v.loss_count).unwrap_or(0),
+            "selectedRows":selected_rows}),
+        );
+    }
+    Ok(
+        json!({"engine":"rust-polars","outputPaths":outputs,"batchCount":batches.len(),
+        "batches":batch_results,"mapping":mapping,"lowMemory":true,
+        "memoryBudget":budget,"timings":{"totalMs":started.elapsed().as_millis()}}),
+    )
 }
 
 #[derive(Debug)]
@@ -2858,6 +3128,9 @@ fn load_ledger_cached(
     sheet: Option<&str>,
     header_row: usize,
 ) -> Result<Table, AppError> {
+    if large_csv::applies(path) {
+        return Err(large_csv::full_table_error());
+    }
     load_ts_cached(path, sheet, header_row, true).map(|(table, _, _)| table)
 }
 
@@ -2990,7 +3263,15 @@ fn load_text(path: &Path, header_row: usize) -> Result<Table, AppError> {
     }
     let width = all.iter().map(Vec::len).max().unwrap_or(0);
     let headers = normalize_headers(&all[header_index], width);
-    let rows = normalize_rows(&all[header_index + 1..], width);
+    let rows = all
+        .into_iter()
+        .skip(header_index + 1)
+        .map(|mut row| {
+            row.resize(width, String::new());
+            row.truncate(width);
+            row
+        })
+        .collect();
     Ok(Table {
         path: path.to_path_buf(),
         sheet: "CSV".into(),
@@ -3045,7 +3326,7 @@ fn rows_to_frame(headers: &[String], rows: &[Vec<String>]) -> Result<DataFrame, 
             Column::new(
                 name.clone().into(),
                 rows.iter()
-                    .map(|row| row.get(index).cloned().unwrap_or_default())
+                    .map(|row| row.get(index).map(String::as_str).unwrap_or_default())
                     .collect::<Vec<_>>(),
             )
         })
@@ -4658,7 +4939,7 @@ fn cache_entries() -> Result<Vec<(PathBuf, SystemTime, u64)>, AppError> {
                 path.extension().and_then(|v| v.to_str()),
                 // `.sheet` 是自动选表结论的小记事文件，跟着 Parquet 缓存一起
                 // 统计、清空与扫除，不然会在缓存目录里悄悄攒下来。
-                Some("parquet") | Some("sheet")
+                Some("parquet") | Some("sheet") | Some("sqlite")
             ) {
                 let used = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
                 out.push((path, used, meta.len()));

@@ -233,6 +233,44 @@ impl Read for DecodedText {
 pub(crate) fn for_each_text_row(
     path: &Path,
     cancel: &AtomicBool,
+    visit: impl FnMut(Vec<String>) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    text_rows_with_budget(path, cancel, None, visit)
+}
+
+pub(crate) fn for_each_text_row_bounded(
+    path: &Path,
+    cancel: &AtomicBool,
+    max_record_bytes: usize,
+    visit: impl FnMut(Vec<String>) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    text_rows_with_budget(path, cancel, Some(max_record_bytes), visit)
+}
+
+struct RecordBudget<R> {
+    reader: R,
+    used: std::rc::Rc<std::cell::Cell<usize>>,
+    limit: usize,
+}
+impl<R: Read> Read for RecordBudget<R> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        if self.used.get() >= self.limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "CSV 单行超过安全预算，请检查异常长字段或缺失引号",
+            ));
+        }
+        let len = bytes.len().min(self.limit - self.used.get());
+        let read = self.reader.read(&mut bytes[..len])?;
+        self.used.set(self.used.get() + read);
+        Ok(read)
+    }
+}
+
+fn text_rows_with_budget(
+    path: &Path,
+    cancel: &AtomicBool,
+    max_record_bytes: Option<usize>,
     mut visit: impl FnMut(Vec<String>) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
     let (sample, encoding) = text_sample(path).map_err(io_error)?;
@@ -245,11 +283,17 @@ pub(crate) fn for_each_text_row(
         end: 0,
         finished: false,
     };
+    let used = std::rc::Rc::new(std::cell::Cell::new(0));
+    let bounded = RecordBudget {
+        reader: decoded,
+        used: used.clone(),
+        limit: max_record_bytes.unwrap_or(usize::MAX),
+    };
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(true)
         .delimiter(delimiter)
-        .from_reader(decoded);
+        .from_reader(bounded);
     for (index, record) in reader.records().enumerate() {
         if index % 1000 == 0 {
             check_cancel(cancel)?;
@@ -262,6 +306,7 @@ pub(crate) fn for_each_text_row(
             )
         })?;
         visit(record.iter().map(str::to_owned).collect())?;
+        used.set(0);
     }
     Ok(())
 }

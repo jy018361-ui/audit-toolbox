@@ -207,6 +207,94 @@ describe("BeginnerTour", () => {
     expect((document.querySelector(".tour-bubble") as HTMLElement).style.visibility).toBe("visible");
     expect(document.querySelector(".tour-spotlight")).not.toBeNull();
   });
+
+  it("目标在首屏之外时先滚动到目标，聚光灯定位在视口内", async () => {
+    // jsdom 没有 scrollIntoView 也没有真实滚动：mock 它并在调用时
+    // 模拟"滚动已完成"的测量结果（目标回到视口内）。
+    let outOfViewport = true;
+    const scrollIntoViewMock = vi.fn(() => {
+      outOfViewport = false;
+    });
+    Element.prototype.scrollIntoView = scrollIntoViewMock;
+    vi.spyOn(
+      HTMLElement.prototype,
+      "getBoundingClientRect",
+    ).mockImplementation(function (this: HTMLElement) {
+      if (this.hasAttribute("data-tour")) {
+        return outOfViewport
+          ? {
+              top: 900,
+              left: 80,
+              right: 320,
+              bottom: 948,
+              width: 240,
+              height: 48,
+              x: 80,
+              y: 900,
+              toJSON: () => ({}),
+            } as DOMRect
+          : {
+              top: 120,
+              left: 80,
+              right: 320,
+              bottom: 168,
+              width: 240,
+              height: 48,
+              x: 80,
+              y: 120,
+              toJSON: () => ({}),
+            } as DOMRect;
+      }
+      return {
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        width: 0,
+        height: 0,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect;
+    });
+    const steps: TourStep[] = [
+      {
+        id: "below",
+        title: "视口外步骤",
+        body: "x",
+        targetSelector: '[data-tour="demo"]',
+      },
+    ];
+    render(
+      <BeginnerTour
+        steps={steps}
+        onFinish={vi.fn()}
+        retryIntervalMs={10}
+      />,
+    );
+    // 目标量出来在视口外：先滚动到目标，等下一轮重新测量。
+    await waitFor(() =>
+      expect(scrollIntoViewMock).toHaveBeenCalledWith({
+        block: "center",
+        inline: "nearest",
+        behavior: "auto",
+      }),
+    );
+    // 滚动生效后聚光灯出现，位置落在视口内，气泡从隐藏转为可见。
+    await waitFor(() =>
+      expect(document.querySelector(".tour-spotlight")).not.toBeNull(),
+    );
+    const spotlight = document.querySelector(".tour-spotlight") as HTMLElement;
+    const top = parseFloat(spotlight.style.top);
+    const left = parseFloat(spotlight.style.left);
+    expect(top).toBeGreaterThanOrEqual(0);
+    expect(top).toBeLessThan(window.innerHeight);
+    expect(left).toBeGreaterThanOrEqual(0);
+    expect(left).toBeLessThan(window.innerWidth);
+    expect(
+      (document.querySelector(".tour-bubble") as HTMLElement).style.visibility,
+    ).toBe("visible");
+  });
 });
 
 describe("tourState", () => {
@@ -288,5 +376,106 @@ describe("buildToolTourSteps", () => {
   it("AI/路径选择类工具（无统一上传区）的准备步骤退化为居中卡片", () => {
     expect(TOOL_TOUR_SCRIPTS.audipick.prepareTargeted).toBeFalsy();
     expect(TOOL_TOUR_SCRIPTS.audit_roll_forward.prepareTargeted).toBeFalsy();
+  });
+});
+
+describe("引导焦点圈定（aria-modal 落地）", () => {
+  it("Tab / Shift+Tab 在引导层内循环，不会落到背景的「跳过导航」链接上", () => {
+    // 模拟应用外壳里排在引导层之前的左上角跳转链接：
+    // 没有焦点圈定时，Shift+Tab 会聚焦它并让它在左上角滑入。
+    const skipLink = document.createElement("a");
+    skipLink.href = "#main-content";
+    skipLink.className = "skip-navigation";
+    skipLink.textContent = "跳过导航，进入工作区";
+    document.body.appendChild(skipLink);
+
+    render(<BeginnerTour steps={baseSteps} onFinish={vi.fn()} />);
+    const layer = document.querySelector(".tour-layer") as HTMLElement;
+    const next = screen.getByRole("button", { name: "下一步" });
+    const skipStep = screen.getByRole("button", { name: "跳过引导" });
+    // 首步自动聚焦主按钮。
+    expect(document.activeElement).toBe(next);
+
+    // 焦点在层外（跳转链接上）：Tab 被拉回层内第一个按钮。
+    skipLink.focus();
+    fireEvent.keyDown(window, { key: "Tab" });
+    expect(document.activeElement).toBe(skipStep);
+    expect(layer.contains(document.activeElement)).toBe(true);
+
+    // 层内首尾循环：首个按钮 Shift+Tab 绕到最后一个。
+    fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(next);
+
+    skipLink.remove();
+  });
+});
+
+describe("目标可见性（keep-alive 遮蔽）", () => {
+  it("同名挂点被隐藏页挡在前面时，仍然锁定当前页的可见目标", () => {
+    // 排在最前的 0×0 同名挂点模拟 keep-alive 隐藏页；
+    // 目标查找必须跳过它取第一个可见匹配，而不是卡在它身上轮询超时。
+    vi.spyOn(
+      HTMLElement.prototype,
+      "getBoundingClientRect",
+    ).mockImplementation(function (this: HTMLElement) {
+      const zero =
+        !this.hasAttribute("data-tour") ||
+        this.style.display === "none";
+      return {
+        top: zero ? 0 : 120,
+        left: zero ? 0 : 80,
+        right: zero ? 0 : 320,
+        bottom: zero ? 0 : 168,
+        width: zero ? 0 : 240,
+        height: zero ? 0 : 48,
+        x: zero ? 0 : 80,
+        y: zero ? 0 : 120,
+        toJSON: () => ({}),
+      } as DOMRect;
+    });
+    const hidden = document.createElement("div");
+    hidden.setAttribute("data-tour", "demo");
+    hidden.style.display = "none";
+    document.body.insertBefore(hidden, document.body.firstChild);
+
+    render(
+      <BeginnerTour
+        steps={[
+          {
+            id: "only",
+            title: "被遮挡的步骤",
+            body: "x",
+            targetSelector: '[data-tour="demo"]',
+          },
+        ]}
+        onFinish={vi.fn()}
+      />,
+    );
+    expect(document.querySelector(".tour-spotlight")).not.toBeNull();
+    expect(
+      (document.querySelector(".tour-bubble") as HTMLElement).style.visibility,
+    ).toBe("visible");
+  });
+});
+
+describe("buildToolTourSteps 锚点", () => {
+  const withScript: ToolManifest = {
+    id: "kanzhang",
+    name: "看账工具",
+    description: "凭证导入、科目筛选、透视与导出",
+    route: "/tools/kanzhang",
+    version: "2.0",
+    capabilities: ["inspect"],
+    migrationStatus: "ready",
+  };
+
+  it("purpose 与 result 都锚定页头，工具导览全程锁定区域", () => {
+    const steps = buildToolTourSteps(withScript);
+    expect(steps.find((s) => s.id === "purpose")?.targetSelector).toBe(
+      '[data-tour="page-header"]',
+    );
+    expect(steps.find((s) => s.id === "result")?.targetSelector).toBe(
+      '[data-tour="page-header"]',
+    );
   });
 });

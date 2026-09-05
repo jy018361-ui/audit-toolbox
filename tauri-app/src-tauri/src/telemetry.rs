@@ -285,8 +285,7 @@ fn enqueue(conn: &Connection, facts: &Facts, event: TrackEvent) {
 /// 在后。不是本服务的应答、或没有合法 http 地址，一律忽略（内网广播可能撞上别的服务）。
 fn parse_announcement(bytes: &[u8]) -> Option<Vec<String>> {
     let value: Value = serde_json::from_slice(bytes).ok()?;
-    let is_ours = value.get("service").and_then(Value::as_str)
-            == Some("audit-toolbox-metrics")
+    let is_ours = value.get("service").and_then(Value::as_str) == Some("audit-toolbox-metrics")
         && value.get("type").and_then(Value::as_str) == Some("announce");
     if !is_ours {
         return None;
@@ -695,7 +694,11 @@ mod tests {
         };
         enqueue(&conn, &facts, track_event("tool_open"));
         flush(&conn, &[discovered_url.clone()]);
-        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().contains("tool_open"));
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .contains("tool_open")
+        );
 
         // 场景二：覆盖键优先于自动发现（发现指向死端口，覆盖键指向活服务器）。
         let (override_url, rx2) = spawn_mock_server();
@@ -705,10 +708,17 @@ mod tests {
             drop(probe);
             format!("http://127.0.0.1:{port}")
         };
-        set_settings(&conn, json!({ "enabled": true, "server_url": override_url }));
+        set_settings(
+            &conn,
+            json!({ "enabled": true, "server_url": override_url }),
+        );
         enqueue(&conn, &facts, track_event("job_run"));
         flush(&conn, &[dead]);
-        assert!(rx2.recv_timeout(Duration::from_secs(5)).unwrap().contains("job_run"));
+        assert!(
+            rx2.recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .contains("job_run")
+        );
         assert_eq!(queue_len(&conn), 0);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -732,7 +742,11 @@ mod tests {
         };
         enqueue(&conn, &facts, track_event("app_start"));
         flush(&conn, &[dead, live]);
-        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().contains("app_start"));
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .contains("app_start")
+        );
         assert_eq!(queue_len(&conn), 0);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -763,15 +777,17 @@ mod tests {
             ])
         );
         // 别的服务的广播、坏 JSON、非 http 地址一律不认。
-        assert!(parse_announcement(
-            br#"{"service":"someone-else","type":"announce","url":"http://x"}"#
-        )
-        .is_none());
+        assert!(
+            parse_announcement(br#"{"service":"someone-else","type":"announce","url":"http://x"}"#)
+                .is_none()
+        );
         assert!(parse_announcement(b"not json").is_none());
-        assert!(parse_announcement(
-            br#"{"service":"audit-toolbox-metrics","type":"announce","url":"ftp://x"}"#
-        )
-        .is_none());
+        assert!(
+            parse_announcement(
+                br#"{"service":"audit-toolbox-metrics","type":"announce","url":"ftp://x"}"#
+            )
+            .is_none()
+        );
     }
 
     /// 内网里起一个只应答固定内容的假统计服务器，验证探测→应答→解析全链路。

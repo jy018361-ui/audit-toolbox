@@ -15,6 +15,7 @@ import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
+import { JargonTip } from "@/components/JargonTip";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
@@ -766,6 +767,10 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
           <div className="fuzzy-settings-grid">
             <label>
               数据类型
+              <JargonTip
+                term="数据类型"
+                text="决定匹配前如何清洗文本：公司名去括号简称、人名忽略空格与姓名顺序、地址按区域分词。"
+              />
               <select
                 aria-label="数据类型"
                 value={matchType}

@@ -180,6 +180,17 @@
   position: relative;
 }
 
+/* 分步提示出现时的整屏压暗层：和完整引导观感一致。层级 39 压在页面
+   之上、提示卡（40）之下，也低于对话框(50)与窗口控制按钮(800)；
+   点击压暗层即关闭提示。 */
+.step-hint-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+  background: rgb(4 12 12 / 45%);
+  animation: tour-veil-in 200ms ease-out;
+}
+
 .step-hint {
   position: absolute;
   top: calc(100% + 10px);
@@ -237,7 +248,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .step-hint {
+  .step-hint,
+  .step-hint-veil {
     animation: none;
   }
 }
@@ -264,6 +276,16 @@
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes tour-veil-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
   }
 }
 

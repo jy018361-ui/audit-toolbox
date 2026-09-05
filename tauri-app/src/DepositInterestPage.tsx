@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StepIndicator } from "@/components/StepIndicator";
+import { JargonTip } from "@/components/JargonTip";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
 import { Badge } from "@/components/ui/badge";
@@ -1530,6 +1531,10 @@ function RateTierCard({
         <CardTitle>
           存款利率档位
           <HelpTip text="科目类型会关联这里的档位。活期自动采用默认利率；协定、通知、定期及大额存单须按协议填写。账户级改写优先。" />
+          <JargonTip
+            term="存款类型"
+            text="活期有内置利率；定期、协定、通知等按客户协议利率填写。"
+          />
         </CardTitle>
       </CardHeader>
       <CardContent>

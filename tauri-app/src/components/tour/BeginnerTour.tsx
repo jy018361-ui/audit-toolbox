@@ -34,8 +34,12 @@ const EDGE_GAP = 16;
 const TARGET_GAP = 14;
 const SPOTLIGHT_PAD = 6;
 const RETRY_INTERVAL_MS = 150;
-/** 约 3 秒：覆盖工具页首次进入时懒加载与首绘的耗时。 */
-const RETRY_LIMIT = 20;
+/** 约 0.6 秒：等待目标只为覆盖翻步瞬间的一帧懒加载首绘；
+ *  目标真不存在时（工具没有该区域）必须快点给结论，
+ *  否则用户面对整屏压暗的空窗等 3 秒，像卡了 bug。 */
+const RETRY_LIMIT = 4;
+/** 兜底夹取的最小边距：气泡 / 聚光灯至少留 8px 在视口内，不整体跑到屏幕外。 */
+const MIN_VIEWPORT_GAP = 8;
 
 function isTargetVisible(el: HTMLElement): boolean {
   const rect = el.getBoundingClientRect();
@@ -43,10 +47,55 @@ function isTargetVisible(el: HTMLElement): boolean {
   return rect.width >= 2 && rect.height >= 2;
 }
 
+/** 元素真的渲染出来了才可聚焦：祖先链上的 display:none / visibility:hidden
+ *  都要排除，否则 Tab 会落进隐藏气泡里凭空消失。 */
+function isRenderedFocusable(el: HTMLElement): boolean {
+  if (typeof el.checkVisibility === "function") {
+    return el.checkVisibility({ checkVisibilityCSS: true });
+  }
+  const style = getComputedStyle(el);
+  return style.display !== "none" && style.visibility !== "hidden";
+}
+
+/** 取选择器下第一个【可见】的匹配。querySelector 只按 DOM 顺序取第一个，
+ *  有后台任务的工具页会被 keep-alive 保活（display:none），同名挂点排在
+ *  前面就会把当前页的目标"挡住"，引导永远找不到目标。 */
+function findVisibleTarget(selector: string): HTMLElement | null {
+  for (const el of document.querySelectorAll<HTMLElement>(selector)) {
+    if (isTargetVisible(el)) return el;
+  }
+  return null;
+}
+
 function findStepTarget(step: TourStep): HTMLElement | null {
   if (!step.targetSelector) return null;
-  const el = document.querySelector<HTMLElement>(step.targetSelector);
-  return el && isTargetVisible(el) ? el : null;
+  const el = findVisibleTarget(step.targetSelector);
+  return el;
+}
+
+/** 把目标矩形外扩一圈后夹回视口：目标特别高 / 宽时挖孔也不会整块跑出屏幕。 */
+function clampSpotlightBox(rect: Rect): {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+} {
+  const top = Math.max(rect.top - SPOTLIGHT_PAD, MIN_VIEWPORT_GAP);
+  const left = Math.max(rect.left - SPOTLIGHT_PAD, MIN_VIEWPORT_GAP);
+  const bottom = Math.min(
+    rect.bottom + SPOTLIGHT_PAD,
+    window.innerHeight - MIN_VIEWPORT_GAP,
+  );
+  const right = Math.min(
+    rect.left + rect.width + SPOTLIGHT_PAD,
+    window.innerWidth - MIN_VIEWPORT_GAP,
+  );
+  return {
+    top,
+    left,
+    width: Math.max(right - left, 0),
+    height: Math.max(bottom - top, 0),
+  };
 }
 
 /** 从 from 沿 dir 找第一个可展示的步骤；optional 且目标缺失的步骤被跳过。null 表示没有可展示步骤。 */
@@ -91,6 +140,7 @@ export function BeginnerTour({
   const [targetGaveUp, setTargetGaveUp] = useState(false);
   const [bubblePos, setBubblePos] = useState<BubblePosition | null>(null);
   const bubbleRef = useRef<HTMLDivElement>(null);
+  const layerRef = useRef<HTMLDivElement>(null);
   const primaryButtonRef = useRef<HTMLButtonElement>(null);
 
   const currentStep = index >= 0 ? steps[index] : undefined;
@@ -129,9 +179,30 @@ export function BeginnerTour({
         Number.isFinite(parsed) ? Math.min(parsed + SPOTLIGHT_PAD, 24) : 12,
       );
     };
+    // 目标尺寸正常但落在首屏之外（如工作台导览的工具卡片在页面下方）：
+    // 引导期间锁了 body 滚动、挡板又吃掉滚轮，用户自己滚不过来，
+    // 必须先把目标滚进视口再测量，否则聚光灯和气泡画到屏幕外，用户直接卡死。
+    let scrolledToTarget = false;
     const attempt = () => {
-      const el = document.querySelector<HTMLElement>(selector);
-      if (el && isTargetVisible(el)) {
+      const el = findVisibleTarget(selector);
+      if (el) {
+        const r = el.getBoundingClientRect();
+        const inViewport =
+          r.top >= 0 &&
+          r.left >= 0 &&
+          r.bottom <= window.innerHeight &&
+          r.right <= window.innerWidth;
+        if (!inViewport && !scrolledToTarget) {
+          // 只主动滚一次：目标比视口还高时滚完也量不到"完整可见"，
+          // 反复滚只会原地打转，交给聚光灯 / 气泡的视口夹取兜底。
+          scrolledToTarget = true;
+          el.scrollIntoView({
+            block: "center",
+            inline: "nearest",
+            behavior: "auto",
+          });
+          return false;
+        }
         apply(el);
         return true;
       }
@@ -152,8 +223,8 @@ export function BeginnerTour({
     }
     // 窗口缩放或页面滚动时聚光灯跟着走；capture 捕获内部滚动容器。
     const remeasure = () => {
-      const el = document.querySelector<HTMLElement>(selector);
-      if (el && isTargetVisible(el)) apply(el);
+      const el = findVisibleTarget(selector);
+      if (el) apply(el);
     };
     window.addEventListener("resize", remeasure);
     window.addEventListener("scroll", remeasure, true);
@@ -194,8 +265,14 @@ export function BeginnerTour({
       spaceBelow >= bh + TARGET_GAP + EDGE_GAP || spaceBelow >= rect.top
         ? "bottom"
         : "top";
-    const top =
+    const rawTop =
       placement === "bottom" ? rect.bottom + TARGET_GAP : rect.top - TARGET_GAP;
+    // 兜底：目标特别高时上下都放不下，算出的 top 会落到屏幕外，
+    // 把气泡夹回视口内保证任何情况下提示都可见。
+    const top = Math.min(
+      Math.max(rawTop, MIN_VIEWPORT_GAP),
+      Math.max(vh - bh - MIN_VIEWPORT_GAP, MIN_VIEWPORT_GAP),
+    );
     const arrowOffset = Math.min(
       Math.max(rect.left + rect.width / 2 - left, 24),
       bw - 24,
@@ -203,8 +280,9 @@ export function BeginnerTour({
     setBubblePos({ top, left, arrowOffset, placement });
   }, [rect, index]);
 
-  // 键盘操作：Esc 退出、←/→ 翻步；焦点在引导按钮上时 Enter 交给 click，
-  // 否则会连翻两步。正在输入的控件不抢按键。
+  // 键盘操作：Esc 退出、←/→ 翻步；Tab / Shift+Tab 在引导层内循环；
+  // 焦点在引导按钮上时 Enter 交给 click，否则会连翻两步。
+  // 正在输入的控件不抢按键。
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -220,6 +298,40 @@ export function BeginnerTour({
         event.key === "Enter" &&
         target?.closest(".tour-bubble, .tour-card")
       ) {
+        return;
+      }
+      if (event.key === "Tab") {
+        // 焦点圈定：引导是 aria-modal 对话框，Tab 不能跑到背景里去。
+        // 不圈定的话焦点会落到背景中第一个可聚焦元素——左上角的
+        //「跳过导航，进入工作区」链接，它一获得焦点就从屏幕顶滑入，
+        // 看起来像凭空冒出来的"取消导航"提示。
+        const layer = layerRef.current;
+        if (!layer) return;
+        const focusable = Array.from(
+          layer.querySelectorAll<HTMLElement>(
+            'a[href], button:not([disabled]), [tabindex="0"]',
+          ),
+        ).filter(isRenderedFocusable);
+        if (focusable.length === 0) {
+          // 等待定位时气泡整体隐藏，层内暂无可聚焦元素：不放 Tab 出去。
+          event.preventDefault();
+          return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        const active = document.activeElement;
+        if (!(active instanceof HTMLElement) || !layer.contains(active)) {
+          event.preventDefault();
+          first.focus();
+          return;
+        }
+        if (event.shiftKey && active === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && active === last) {
+          event.preventDefault();
+          first.focus();
+        }
         return;
       }
       if (event.key === "Escape") {
@@ -258,6 +370,7 @@ export function BeginnerTour({
   // 只有重试超时确认目标不存在时才退化为居中卡片。
   const centered = !wantsTarget || (!rect && targetGaveUp);
   const isLast = index === steps.length - 1;
+  const spotlightBox = rect ? clampSpotlightBox(rect) : null;
 
   const actions = (
     <div className="tour-actions">
@@ -287,6 +400,7 @@ export function BeginnerTour({
 
   return (
     <div
+      ref={layerRef}
       className="tour-layer"
       role="dialog"
       aria-modal="true"
@@ -299,25 +413,25 @@ export function BeginnerTour({
         className={`tour-blocker${rect ? "" : " tour-blocker-dimmed"}`}
         aria-hidden="true"
       />
-      {rect && (
+      {spotlightBox && (
         <>
           <div
             className="tour-spotlight"
             style={{
-              top: rect.top - SPOTLIGHT_PAD,
-              left: rect.left - SPOTLIGHT_PAD,
-              width: rect.width + SPOTLIGHT_PAD * 2,
-              height: rect.height + SPOTLIGHT_PAD * 2,
+              top: spotlightBox.top,
+              left: spotlightBox.left,
+              width: spotlightBox.width,
+              height: spotlightBox.height,
               borderRadius: spotlightRadius,
             }}
           />
           <div
             className="tour-pulse"
             style={{
-              top: rect.top - SPOTLIGHT_PAD,
-              left: rect.left - SPOTLIGHT_PAD,
-              width: rect.width + SPOTLIGHT_PAD * 2,
-              height: rect.height + SPOTLIGHT_PAD * 2,
+              top: spotlightBox.top,
+              left: spotlightBox.left,
+              width: spotlightBox.width,
+              height: spotlightBox.height,
               borderRadius: spotlightRadius,
             }}
             aria-hidden="true"

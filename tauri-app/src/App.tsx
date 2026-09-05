@@ -36,6 +36,7 @@ import { Button } from "@/components/ui/button";
 import { errorText } from "@/lib/errors";
 import { useCountUp } from "./lib/useCountUp";
 import { SwitchInput } from "@/components/SwitchInput";
+import { demoDataEnabled } from "./preview/demoRegistry";
 import {
   TOOL_DEFINITIONS,
   type ActionDefinition,
@@ -60,6 +61,7 @@ import { ResultView } from "@/components/ResultView";
 import { EmptyState } from "@/components/EmptyState";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { BeginnerTour } from "@/components/tour/BeginnerTour";
+import { SuccessNudge } from "@/components/tour/SuccessNudge";
 import {
   buildToolTourSteps,
   workspaceTourSteps,
@@ -641,6 +643,14 @@ export default function App() {
           {/* 新手模式总开关：与导航行同款的一行小设置，常驻侧边栏底部。 */}
           <NewbieModeToggle />
           <div className="sidebar-footer">
+            {demoDataEnabled() && (
+              <span
+                className="dev-build-badge"
+                title="演示数据已开启：浏览器预览模式下用仓库内样例回放引擎返回，便于检查有数据的布局"
+              >
+                演示数据
+              </span>
+            )}
             {import.meta.env.DEV && (
               <span
                 className="dev-build-badge"
@@ -772,6 +782,13 @@ export default function App() {
           onFinish={finishTour}
         />
       )}
+      {/* 任务完成的轻量反馈：与新手引导同层（外壳之外），只在新手模式开时出现。 */}
+      <SuccessNudge
+        jobs={Object.values(jobs)}
+        toolNameOf={(toolId) =>
+          catalog.find((t) => t.id === toolId)?.name ?? toolId
+        }
+      />
     </JobDialogProvider>
   );
 }
@@ -1446,7 +1463,7 @@ export function Settings({
   const [releaseNotes, setReleaseNotes] = useState<ReleaseNotes>();
   const [notesError, setNotesError] = useState("");
   const [fallbackNotes, setFallbackNotes] = useState("");
-  // 更新说明全是空的时候，改用提交记录总结顶替，界面不能只剩“未填写说明”。
+  // 更新说明全是空的时候，说明区直接收敛为一个提交记录块，不再渲染“未填写说明”相关的标题与提示。
   const allReleaseBodiesEmpty =
     !!releaseNotes &&
     releaseNotes.releases.length > 0 &&
@@ -1525,11 +1542,9 @@ export function Settings({
         setFallbackNotes(update?.body ?? "");
       }
       setCheckedUpdateVersion(update?.version);
-      setUpdateStatus(
-        update
-          ? `可从当前版本升级到 v${update.version}。请先查看下方更新内容，再确认安装。`
-          : "当前没有可安装的新版本。以下展示本版发布说明（如有）。",
-      );
+      // 检查结束后的结论由标题区（徽章 + 版本行）表达，状态条只留给进行中的进度与失败信息，
+      // 不再重复叙述“当前没有新版本 / 可升级到某版”。
+      setUpdateStatus("");
     } catch (e) {
       setUpdateStatus(
         typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window)
@@ -1785,7 +1800,6 @@ export function Settings({
         >
           <div className="settings-update-heading">
             <div className="settings-update-title-block">
-              <span className="settings-update-kicker">版本</span>
               <h2 id="settings-update-title">
                 {availableUpdate
                   ? `可更新至 v${availableUpdate.version}`
@@ -1882,25 +1896,19 @@ export function Settings({
           )}
           {releaseNotes && (
             <div className="settings-release-notes">
-              <div className="settings-release-notes-heading">
-                <h3>
-                  {releaseNotes.currentVersion === releaseNotes.targetVersion
-                    ? `本版说明 · v${releaseNotes.currentVersion}`
-                    : `本次更新说明`}
-                </h3>
-                <span>{releaseNotes.releases.length} 个版本</span>
-              </div>
               {releaseNotes.warnings.map((warning, i) => (
                 <p className="settings-release-warning" key={i}>
                   {warning}
                 </p>
               ))}
               {allReleaseBodiesEmpty && releaseNotes.commits.length > 0 ? (
-                /* 各版本说明全为空：整块替换成提交记录总结，默认展开 */
+                /* 说明全为空：不再有标题行/版本计数/“未填写说明”解释，只留一个自解释的提交块 */
                 <details className="settings-release-commits" open>
                   <summary>
-                    提交记录总结（各版本均未填写发布说明）
-                    <span>{releaseNotes.commits.length} 条</span>
+                    {releaseNotes.currentVersion === releaseNotes.targetVersion
+                      ? "本版变更（相对上一版）"
+                      : "升级区间提交记录"}
+                    <span>{releaseNotes.commits.length} 条提交</span>
                   </summary>
                   <ul>
                     {releaseNotes.commits.map((message, i) => (
@@ -1910,6 +1918,19 @@ export function Settings({
                 </details>
               ) : (
                 <>
+                  {releaseNotes.releases.length > 0 && (
+                    <div className="settings-release-notes-heading">
+                      <h3>
+                        {releaseNotes.currentVersion ===
+                        releaseNotes.targetVersion
+                          ? "本版说明"
+                          : "本次更新说明"}
+                      </h3>
+                      {releaseNotes.releases.length > 1 && (
+                        <span>{releaseNotes.releases.length} 个版本</span>
+                      )}
+                    </div>
+                  )}
                   {releaseNotes.releases.map((release) => (
                     <article
                       key={release.version}

@@ -485,15 +485,15 @@ impl Cache {
         // 科目索引只依赖科目列。借贷、日期等映射被 LLM 调整后仍可直接复用，
         // 避免从第一步进入第二步时再次扫描数十亿字节。
         let account_columns = mapping.account_columns();
-        let identity = hex::encode(Sha256::digest(serde_json::to_vec(&account_columns).map_err(
-            |e| {
+        let identity = hex::encode(Sha256::digest(
+            serde_json::to_vec(&account_columns).map_err(|e| {
                 error(
                     "INVALID_MAPPING",
                     "字段映射格式不正确。",
                     Some(e.to_string()),
                 )
-            },
-        )?));
+            })?,
+        ));
         let name = format!("accounts_v3_{identity}");
         let indexes = account_columns
             .iter()

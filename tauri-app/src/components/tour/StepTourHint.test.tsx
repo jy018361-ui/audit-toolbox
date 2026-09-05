@@ -40,6 +40,17 @@ describe("StepTourHint", () => {
     expect(screen.queryByText("确认输入")).not.toBeInTheDocument();
   });
 
+  it("提示弹出时出现全屏压暗层，点击压暗层等同关闭", () => {
+    const { rerender } = render(<StepTourHint steps={steps} current={0} />);
+    rerender(<StepTourHint steps={steps} current={1} />);
+    expect(screen.getByText("确认输入")).toBeInTheDocument();
+    const veil = document.querySelector(".step-hint-veil");
+    expect(veil).not.toBeNull();
+    fireEvent.click(veil as HTMLElement);
+    expect(screen.queryByText("确认输入")).not.toBeInTheDocument();
+    expect(document.querySelector(".step-hint-veil")).toBeNull();
+  });
+
   it("超时自动消失", async () => {
     const { rerender } = render(
       <StepTourHint steps={steps} current={0} autoDismissMs={30} />,

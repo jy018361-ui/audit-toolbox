@@ -453,6 +453,11 @@ it("shows this version's notes when up to date and refreshes on reopening", asyn
   render(<UpdateSettings />);
   fireEvent.click(screen.getByRole("button", { name: "软件更新" }));
   await screen.findByText("本版更新内容");
+  // 单版本说明不显示版本计数；版本号只保留标题区一处
+  expect(screen.queryByText("1 个版本")).not.toBeInTheDocument();
+  expect(
+    screen.queryByText("当前版本：v1.0.0 · 来源：GitHub Releases"),
+  ).toBeVisible();
   expect(
     screen.queryByRole("button", { name: /确认更新到/ }),
   ).not.toBeInTheDocument();
@@ -469,18 +474,21 @@ it("replaces all-empty release notes with the commit summary", async () => {
     releases: [
       { version: "1.0.1", title: "本版", body: "", publishedAt: "" },
     ],
-    warnings: ["本版未填写更新说明；下方提交记录就是这一版相对上一版的全部变更。"],
+    warnings: [],
     commits: ["fix(标题栏): 空白处可拖动", "feat(更新说明): 空说明用提交记录补齐"],
   });
   render(<UpdateSettings />);
   fireEvent.click(screen.getByRole("button", { name: "软件更新" }));
-  await screen.findByText(/提交记录总结/);
+  await screen.findByText(/本版变更（相对上一版）/);
   expect(screen.getByText("fix(标题栏): 空白处可拖动")).toBeVisible();
   expect(screen.getByText("feat(更新说明): 空说明用提交记录补齐")).toBeVisible();
-  // 说明全空时不再逐版本显示“未填写”占位
+  // 精简后不重复叙述：无说明区标题行与版本计数、无状态条复述结论、无“未填写说明”解释
+  expect(screen.queryByText(/本版说明/)).not.toBeInTheDocument();
+  expect(screen.queryByText("1 个版本")).not.toBeInTheDocument();
   expect(
-    screen.queryByText("此版本未填写更新说明。"),
+    screen.queryByText("当前没有可安装的新版本。以下展示本版发布说明（如有）。"),
   ).not.toBeInTheDocument();
+  expect(screen.queryByText(/未填写更新说明/)).not.toBeInTheDocument();
 });
 
 it("does not offer a stale update when a fresh check fails", async () => {

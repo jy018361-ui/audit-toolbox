@@ -103,6 +103,9 @@ export function buildToolTourSteps(tool: ToolManifest): TourStep[] {
   const steps: TourStep[] = [
     {
       id: "purpose",
+      // 锚定页头：工具名称与说明就在那里，讲"是做什么的"时锁定它，
+      // 避免整步只有一张全局居中卡片。
+      targetSelector: '[data-tour="page-header"]',
       title: `「${tool.name}」是做什么的`,
       body: script.purpose,
     },
@@ -128,6 +131,9 @@ export function buildToolTourSteps(tool: ToolManifest): TourStep[] {
   }
   steps.push({
     id: "result",
+    // 收尾同样锚定页头（产出物没有固定挂点）：引导里不再出现全局卡片，
+    // 个别页面没有页头时退化为居中卡片兜底。
+    targetSelector: '[data-tour="page-header"]',
     title: "做完你会得到什么",
     body: script.result,
   });

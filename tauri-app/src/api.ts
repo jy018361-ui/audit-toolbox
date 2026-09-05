@@ -3,6 +3,9 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ReleaseNotesSchema } from "./updateNotes";
 import { version as appVersion } from "../package.json";
+import { demoDataEnabled, demoJobLookup, demoLookup, demoPath,
+  cancelDemoJob, emitDemoJobEvent, isDemoJobCancelled, subscribeDemoJobs } from "./preview/demoRegistry";
+import "./preview/layoutAudit";
 import {
   BootstrapSchema,
   HistoryRowSchema,
@@ -87,8 +90,13 @@ export async function engineCall(
   method: string,
   params: Record<string, unknown>,
 ) {
-  if (!inTauri())
+  if (!inTauri()) {
+    // 演示数据通道：仅浏览器预览 + localStorage 开关打开时生效，
+    // 用仓库内固定样例回放引擎返回，让"有数据之后"的布局可被随时检查。
+    const handler = demoLookup(method);
+    if (handler) return structuredClone(handler(params));
     throw new Error("浏览器预览模式不能处理本地文件，请使用 Tauri 应用。 ");
+  }
   const id = ++syncBusySeq;
   syncBusyActive.set(id, method);
   notifySyncBusy();
@@ -100,17 +108,36 @@ export async function engineCall(
   }
 }
 
+let demoJobSeq = 0;
+
 export async function jobStart(
   method: string,
   params: Record<string, unknown>,
 ) {
-  if (!inTauri())
-    throw new Error("浏览器预览模式不能启动任务，请使用 Tauri 应用。");
+  if (!inTauri()) {
+    // 演示任务通道：按样例剧本回放"排队→进行→完成"事件流，让任务完成后的
+    // 数据化布局（筛选结果、导出文件、批次摘要）在预览模式同样可达。
+    const planner = demoJobLookup(method);
+    if (!planner)
+      throw new Error("浏览器预览模式不能启动任务，请使用 Tauri 应用。");
+    const jobId = `demo-job-${++demoJobSeq}`;
+    const toolId = method.split(".")[0] ?? "";
+    const events = planner(params);
+    events.forEach((event, index) => {
+      window.setTimeout(() => {
+        if (isDemoJobCancelled(jobId)) return;
+        emitDemoJobEvent({ ...event, jobId, toolId });
+      }, 260 * (index + 1));
+    });
+    return Promise.resolve(jobId);
+  }
   return invoke<string>("job_start", { method, params });
 }
 
-export const jobCancel = (jobId: string) =>
-  inTauri() ? invoke<boolean>("job_cancel", { jobId }) : Promise.resolve(false);
+export const jobCancel = (jobId: string) => {
+  if (!inTauri()) return Promise.resolve(cancelDemoJob(jobId));
+  return invoke<boolean>("job_cancel", { jobId });
+};
 export const jobPause = (jobId: string, paused: boolean) =>
   inTauri()
     ? invoke<boolean>("job_pause", { jobId, paused })
@@ -234,7 +261,14 @@ export const pickPath = (
   defaultName?: string,
   defaultDirectory?: string,
 ) => {
-  if (!inTauri()) return Promise.resolve(null);
+  if (!inTauri()) {
+    if (demoDataEnabled()) {
+      return Promise.resolve(
+        kind === "files" ? [demoPath("样例文件.xlsx")] : demoPath("样例文件"),
+      );
+    }
+    return Promise.resolve(null);
+  }
   return invoke<string | string[] | null>("pick_path", {
     kind,
     title,
@@ -247,7 +281,10 @@ export const pickPath = (
 export async function listenJobEvents(
   callback: (event: JobEvent) => void,
 ): Promise<UnlistenFn> {
-  if (!inTauri()) return () => undefined;
+  if (!inTauri()) {
+    if (demoDataEnabled()) return subscribeDemoJobs(callback);
+    return () => undefined;
+  }
   return listen("job-event", (e) => callback(JobEventSchema.parse(e.payload)));
 }
 

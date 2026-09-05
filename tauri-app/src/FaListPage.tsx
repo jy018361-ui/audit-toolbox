@@ -35,6 +35,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { Field } from "@/components/Field";
+import { JargonTip } from "@/components/JargonTip";
 import { FileInput } from "@/components/FileInput";
 import { FileDropInput } from "@/components/FileDropInput";
 import { StepIndicator } from "@/components/StepIndicator";
@@ -1473,7 +1474,17 @@ function FaCardListPage() {
     };
     return (
       <div className="fa-map-fields">
-        <Field label="组合匹配键（可多列）">
+        <Field
+          label={
+            <>
+              组合匹配键（可多列）
+              <JargonTip
+                term="组合匹配键"
+                text="用一列或多列拼成唯一识别一张卡片（或一条记录）的键，两期清单、账与证之间靠它对号入座。"
+              />
+            </>
+          }
+        >
           <select
             multiple
             disabled={llmBusy}

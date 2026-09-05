@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { loadTourState } from "./tourState";
 import { useCurrentToolId } from "./ToolTourContext";
 import { TOOL_TOUR_SCRIPTS } from "./toolTourContent";
@@ -55,25 +55,34 @@ export function StepTourHint({
     ? TOOL_TOUR_SCRIPTS[toolId]?.stepHints?.[step.key]
     : undefined;
   return (
-    <div className="step-hint" role="status" key={hint.nonce}>
-      <p className="step-hint-count">
-        第 {hint.index + 1} 步 · 共 {steps.length} 步
-      </p>
-      <strong className="step-hint-title">{step.label}</strong>
-      <p className="step-hint-body">
-        {specific ??
-          (isLast
-            ? "最后一步：完成它就能看到结果。想改前面的内容，点步骤条随时回去。"
-            : "完成这一步的操作后，点「下一步」或步骤条继续；想改前面的内容，随时点回去。")}
-      </p>
-      <button
-        type="button"
-        className="step-hint-close"
-        aria-label="关闭本步提示"
+    <Fragment key={hint.nonce}>
+      {/* 全屏压暗层：和完整引导观感一致，提示弹出时背景不再全亮。
+          点击压暗层等同点 ×，给用户一个更大的关闭热区。 */}
+      <div
+        className="step-hint-veil"
+        aria-hidden="true"
         onClick={() => setHint(null)}
-      >
-        ×
-      </button>
-    </div>
+      />
+      <div className="step-hint" role="status">
+        <p className="step-hint-count">
+          第 {hint.index + 1} 步 · 共 {steps.length} 步
+        </p>
+        <strong className="step-hint-title">{step.label}</strong>
+        <p className="step-hint-body">
+          {specific ??
+            (isLast
+              ? "最后一步：完成它就能看到结果。想改前面的内容，点步骤条随时回去。"
+              : "完成这一步的操作后，点「下一步」或步骤条继续；想改前面的内容，随时点回去。")}
+        </p>
+        <button
+          type="button"
+          className="step-hint-close"
+          aria-label="关闭本步提示"
+          onClick={() => setHint(null)}
+        >
+          ×
+        </button>
+      </div>
+    </Fragment>
   );
 }

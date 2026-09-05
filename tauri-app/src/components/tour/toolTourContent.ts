@@ -26,9 +26,9 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
     purpose:
       "把年初、年末两份固定资产清单按匹配键逐卡配对，自动生成 FA List、变动表与汇总底稿，是固定资产科目实质性程序的主力工具。",
     prepare:
-      "准备年初、年末两份固定资产清单（Excel/CSV 都行）。关键是两份都要选得出相同的「组合匹配键」（可以多列组合），并映射到必填字段：资产类别、资产名称、原值、累计折旧。",
+      "年初、年末两份固定资产清单（Excel/CSV）。两份需选得出相同的组合匹配键，并映射到资产类别、资产名称、原值、累计折旧等必填字段。",
     prepareTargeted: true,
-    flow: "第 1 步上传两期清单、核对匹配键后执行匹配；第 2 步可选——有本期新增/处置补充清单就上传，让变动分析更完整；第 3 步确认显示名称与资产负债表日后生成底稿。",
+    flow: "第 1 步上传两期清单、核对匹配键后匹配；第 2 步可选传新增/处置补充清单；第 3 步确认信息后生成底稿。",
     result:
       "生成 FA_List_日期_时间.xlsx 底稿，默认存到期末文件所在目录；补充清单里没匹配上的条目会另存一份未匹配清单供复核。字段映射本身在本机完成，LLM 复核只是可选辅助，失败不阻塞。",
     stepHints: {
@@ -76,7 +76,7 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
     purpose:
       "「看账」工具：把序时账/凭证明细加载进来，按批次圈定要看的科目（如固定资产、管理费用等审计关注科目），筛出相关凭证，生成带透视表、凭证类型汇总的分析底稿。",
     prepare:
-      "序时账或凭证明细文件（Excel/CSV/Parquet）。字段映射的要求：凭证编号必选；科目编码、科目名称至少选一个；金额要么「金额＋方向」、要么「借方＋贷方」，二选一。",
+      "序时账或凭证明细（Excel/CSV/Parquet）。映射要求：凭证编号必选；科目编码、科目名称至少选一；金额按「金额＋方向」或「借方＋贷方」二选一。",
     prepareTargeted: true,
     flow: "第 1 步加载凭证并核对字段映射；第 2 步用穿梭框按批次选目标科目，可套用「审计关注科目」预设；第 3 步设计透视、按需勾选损益结转标记后导出。",
     result:
@@ -90,7 +90,7 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
 
   je_sign_mark: {
     purpose:
-      "对凭证明细做正负数对冲检查：按批次选定目标科目后，自动找出「一借一贷、一正一负」的对冲关系，导出带智能匹配状态标记的完整明细。单页流程：上传读取 → 选批次目标科目 → 标记并导出。",
+      "对凭证明细做正负数对冲检查：选定目标科目后，自动找出「一借一贷、一正一负」的对冲关系，导出带智能匹配状态标记的完整明细。流程：上传 → 选科目 → 标记导出。",
     prepare:
       "凭证明细文件（Excel/CSV/Parquet），字段映射要求与看账一致：凭证编号、科目、金额方案。读取后注意「金额符号口径」报告——拿不准时按提示手动指定。",
     prepareTargeted: true,
@@ -106,7 +106,7 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
     prepareTargeted: true,
     flow: "第 1 步上传 TB（和 JE）并核对字段映射；第 2 步核对科目分类、存款类型和利率（非活期按协议利率补填）；第 3 步选资产负债表日，先测算预览再生成底稿。",
     result:
-      "Excel 底稿：逐户月度明细、测算汇总、与 TB 的勾稽差异。汇总里的年利率是活公式，改完即时重算。活期有内置利率，定期/协定/通知等要按协议填；库存现金默认不计息。",
+      "Excel 底稿：逐户月度明细、测算汇总、与 TB 的勾稽差异；汇总里的年利率是活公式，改完即时重算。",
     stepHints: {
       source:
         "拖入 TB（必）和序时账（可选），核对自动建议的字段映射——TB 要有期末余额方案；没传 JE 时还要有期初余额方案。",
@@ -138,7 +138,7 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
     purpose:
       "外币业务的汇兑损益重算：按凭证识别结算事件（已实现损益），外币货币性科目月末按央行中间价重估（未实现损益），并与 TB 账面汇兑损益勾稽。",
     prepare:
-      "按测算模式准备：只算已实现→序时账 JE；只算未实现→科目余额表 TB；两个都算→两份都传。汇率自动取中国人民银行中间价。TB 要按币种拆分导出（SAP 加「货币」维度），否则相关科目测不了。",
+      "按模式准备：算已实现传序时账 JE；算未实现传余额表 TB；都算就都传。TB 要按币种拆分导出，否则相关科目测不了；汇率自动取央行中间价。",
     prepareTargeted: true,
     flow: "第 1 步选测算模式、拖入文件、核对映射和本位币；第 2 步核对科目分类与币种；第 3 步测算预览、复核凭证分类后生成底稿。",
     result:
@@ -172,7 +172,7 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
 
   ts_manager: {
     purpose:
-      "把工时表（Timesheet summary）按经理、项目两个维度透视，导出默认双 Sheet 的 Excel，替代旧版 TS Manager。全程本机处理，工时明细不联网。",
+      "把工时表（Timesheet summary）按经理、项目两个维度透视，导出默认双 Sheet 的 Excel，替代旧版 TS Manager。",
     prepare:
       "工时表文件（Excel/CSV）。对列结构没有硬性要求，任意表头都能筛选；网络盘上的大文件也支持，读取时带进度、可取消。",
     prepareTargeted: true,
@@ -188,7 +188,7 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
 
   confirmation_progress: {
     purpose:
-      "函证程序的进度统计：把函证清单交给工具，按项目、发函单位、基准日自动汇总，生成银行函证和往来函证的进度报告，替代手工透视。纯本机处理，清单内容不外发。",
+      "函证程序的进度统计：把函证清单交给工具，按项目、发函单位、基准日自动汇总，生成银行函证和往来函证的进度报告，替代手工透视。",
     prepare:
       "一份函证清单 Excel（.xlsx/.xls）。列名必须齐全——缺列时工具会明确列出「缺少报告必需字段」，补好列重新检查即可。",
     prepareTargeted: true,
@@ -204,13 +204,13 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
 
   Excel_Merger: {
     purpose:
-      "把一批 Excel/CSV/TXT 批量拼成一张大表或一个多 Sheet 工作簿——常用于把多家单位、多个月的明细账拼在一起核对。纯本机处理。",
+      "把一批 Excel/CSV/TXT 批量拼成一张大表或一个多 Sheet 工作簿——常用于把多家单位、多个月的明细账拼在一起核对。",
     prepare:
       "直接拖文件或文件夹到窗口，也可以点「扫描文件夹」递归收集；支持 XLSX、XLS、XLSM、CSV、TXT。可以调整合并顺序。",
     prepareTargeted: true,
     flow: "三步只是进度指示（不可点击）：加文件并检查 Sheet → 定合并规则 → 执行合并看进度。",
     result:
-      "生成「Excel合并结果_日期_时间.xlsx（或 .csv）」，默认存在第一个输入文件所在目录。默认「合并所有 Sheet」是防止漏数据的兜底设置，按需收紧。",
+      "生成「Excel合并结果_日期_时间.xlsx（或 .csv）」，默认存在第一个输入文件所在目录；默认「合并所有 Sheet」以防漏数据。",
     stepHints: {
       "1": "拖入或扫描添加文件，需要时调整上下顺序，点「检查文件与 Sheet」确认每个文件的内容范围。",
       "2": "定规则：合成一张大表还是一个工作簿、上下拼还是左右拼、取哪些 Sheet、要不要加源文件超链接（大文件会变慢）。",
@@ -220,7 +220,7 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
 
   file_list_directory: {
     purpose:
-      "递归扫描一个文件夹，把所有文件按目录层级做成带可点击超链接的 Excel 清单——典型用途是给审计档案、凭证目录做索引底稿。纯本机处理。",
+      "递归扫描一个文件夹，把所有文件按目录层级做成带可点击超链接的 Excel 清单——典型用途是给审计档案、凭证目录做索引底稿。",
     prepare:
       "不是上传文件，是选一个要扫描的文件夹（可以直接拖进来）。空文件夹也能生成只含标题的清单；无权限的路径会列在警告里跳过。",
     prepareTargeted: true,
@@ -235,7 +235,7 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
 
   pdf_to_excel: {
     purpose:
-      "把函证回函 PDF（文字版）批量逐行转成 Excel，自动提取其中的表格，方便把回函信息汇总核对。纯本机处理；扫描件、图片型 PDF 不支持，也不会调用外部 OCR。",
+      "把函证回函 PDF（文字版）批量逐行转成 Excel，自动提取其中的表格，方便把回函信息汇总核对。注意：扫描件、图片型 PDF 不支持，也不会调用外部 OCR。",
     prepare:
       "多份回函 PDF，或者直接拖整个文件夹（自动只留 PDF、重复只保留一份）。必须是带文字层的 PDF。",
     prepareTargeted: true,
@@ -251,9 +251,9 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
 
   fuzzy_match: {
     purpose:
-      "两份清单各选一列做名称模糊匹配：相似度高的自动采纳、疑似项逐条人工确认，最后导出核对底稿。典型场景：账面客商名和函证/工商清单对不上号。单页流程：A、B 各传一个文件选好匹配列 → 选数据类型 → 开始匹配 → 逐条确认 → 导出。",
+      "两份清单各选一列做名称模糊匹配：高分自动采纳、疑似项逐条人工确认，最后导出核对底稿。适合账面客商名与函证/工商清单对不上号的场景。流程：传文件 → 选匹配列 → 匹配 → 确认 → 导出。",
     prepare:
-      "来源 A（待核对清单，如账面客商）和来源 B（基准清单，如函证/工商清单）各一个 Excel/CSV，并各选一列匹配列。纯本机比对，清单内容不外发。",
+      "来源 A（待核对清单，如账面客商）和来源 B（基准清单，如函证/工商清单）各一个 Excel/CSV，并各选一列匹配列。",
     prepareTargeted: true,
     result:
       "「模糊匹配结果.xlsx」包含自动匹配、疑似项（含人工确认结果）、未匹配与无效值全部明细。数据量大时（预估超 50 万次比对）建议先按 Sheet 或期间拆分再匹配。",
@@ -261,9 +261,9 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
 
   audipick: {
     purpose:
-      "合同审阅的 AI 工作台：按项目整理合同 PDF，用审阅模板（借款契约、收入合同底稿等）提取关键条款，对照原文逐条复核后导出底稿。需要先在设置里配置 AI 服务。",
+      "合同审阅的 AI 工作台：按项目整理合同 PDF，用审阅模板提取关键条款，对照原文复核后导出底稿。使用前需在设置里配置 AI 服务。",
     prepare:
-      "合同 PDF，按项目管理导入；扫描件也能读（页面自动走 OCR 识别）。注意：智能提取会把合同文字发送到你配置的 AI 服务，处理客户合同前请确认授权。",
+      "合同 PDF，按项目管理导入；扫描件也能读（页面自动走 OCR 识别）。",
     flow: "三步：第 1 步建项目；第 2 步导入 PDF 并读取文字；第 3 步选模板、AI 提取、逐条复核、导出底稿。",
     result:
       "Excel 底稿（按模板分为收入底稿填列清单/标准 AudiPick 底稿），每条结果带证据页码，可跳回 PDF 原文复核；项目还能导出 zip 备份。",
@@ -278,10 +278,10 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
     purpose:
       "把上年度标准底稿按公司/科目批量「结转」成本年度底稿：期初数、公式、标黄措辞、CRA 风险评估信息自动迁移，免去逐科目手工复制。",
     prepare:
-      "准备三个位置：标准模板目录、上年底稿目录（或单个 xlsx）、输出目录；可选 PMTE/CRA 文件。CRA 内容不用上传文件，直接粘贴文本解析。",
+      "标准模板目录、上年底稿目录（或单个 xlsx）、输出目录各一个，可选 PMTE/CRA 文件；CRA 直接粘贴文本，不用上传。",
     flow: "四步：第 1 步建项目加公司；第 2 步选目录并勾选科目；第 3 步解析确认 CRA；第 4 步运行前检查后开始结转。",
     result:
-      "输出目录里每个科目一份本年度底稿 xlsx，结果逐科目显示成功/失败和复制、标黄、CRA 写入等计数。勾选 AI 辅助选项后，底稿内容会发送到你配置的 AI 服务。",
+      "输出目录里每个科目一份本年度底稿 xlsx，结果逐科目显示成功/失败和复制、标黄、CRA 写入等计数。",
     stepHints: {
       "1": "新建项目（名称、年度），添加公司并填资产负债表日、记账本位币、适用准则和 PM/TE/SAD。",
       "2": "选标准模板目录、上年底稿位置和输出目录，点「从文件名自动识别科目」或手动勾选；按需勾选结转措辞、Summary 和 AI 辅助选项。",
@@ -292,9 +292,9 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
 
   wp_service_generator: {
     purpose:
-      "校验工作目录里的 FY27 WP 服务单和 Section List 两张表，自动按 Section 拆分服务单并生成汇总文件，替代手工拆表。纯本机处理。",
+      "校验工作目录里的 FY27 WP 服务单和 Section List 两张表，自动按 Section 拆分服务单并生成汇总文件，替代手工拆表。",
     prepare:
-      "不是选文件，是选整个工作目录。目录第一层必须各有一个文件名含「WP服务单」和「section list」（忽略空格和大小写）的 Excel；每类只能一个，别改表头。",
+      "选整个工作目录（不是单个文件）。目录第一层需各有文件名含「WP服务单」和「section list」的 Excel，每类一个，勿改表头。",
     prepareTargeted: true,
     flow: "三步：第 1 步选目录；第 2 步点「检查输入」校验两张表；第 3 步点「生成服务方案」。",
     result:

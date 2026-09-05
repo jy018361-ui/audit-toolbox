@@ -19,6 +19,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/PageHeader";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { ErrorBox } from "@/components/ErrorBox";
+import { JargonTip } from "@/components/JargonTip";
 import { JobProgress } from "@/components/JobProgress";
 import { LedgerSourceCard } from "@/components/LedgerSourceCard";
 import { LedgerLlmReview } from "@/components/LedgerLlmReview";
@@ -770,6 +771,10 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               <p className="kz-hint">
                 金额口径已按方案{scheme}成立，方案{scheme === "A" ? "B" : "A"}
                 的字段已停用；如需切换，先清空当前方案的字段。
+                <JargonTip
+                  term="金额方案"
+                  text="金额记在一列并配借贷方向列（方案A），或分借方、贷方两列（方案B），二选一即可。"
+                />
               </p>
             )}
             {(signReport || signError || signLoading) && (

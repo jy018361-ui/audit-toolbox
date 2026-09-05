@@ -42,6 +42,7 @@ import {
   type LoanRateSetting,
 } from "@/loanRateTypes";
 import { MappingPanel } from "@/components/MappingPanel";
+import { JargonTip } from "@/components/JargonTip";
 import { NumberInput } from "@/components/NumberInput";
 import { errorText } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
@@ -1067,7 +1068,13 @@ function LedgerRateConfirmation({
                 <th>借款标识</th>
                 <th>台账利率</th>
                 <th>利率类型</th>
-                <th>加减点（BP）</th>
+                <th>
+                  加减点（BP）
+                  <JargonTip
+                    term="加减点（BP）"
+                    text="BP＝万分之一。浮动利率＝基准利率＋加减点BP÷10000。"
+                  />
+                </th>
                 <th>状态</th>
               </tr>
             </thead>

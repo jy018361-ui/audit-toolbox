@@ -1,0 +1,126 @@
+/* 导出完成的轻量成功提示（新手模式）。
+   层级约定：低于任务进度弹窗 50 与新手引导 700，只做不打扰的小反馈。 */
+
+.success-nudge {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  z-index: 45;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--success-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-overlay);
+  transform: translate(-50%, 0);
+  animation: success-nudge-rise-in 240ms ease-out;
+}
+
+/* 绿色对勾：200ms 缩放淡入，给"成功了"一个可感知的瞬间。 */
+.success-nudge-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  color: var(--success-fg);
+  background: var(--success-bg);
+  border-radius: var(--r-pill);
+  animation: success-nudge-check-in 200ms ease-out;
+}
+
+.success-nudge-text {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-strong);
+  color: var(--ink-strong);
+  overflow-wrap: anywhere;
+}
+
+.success-nudge-actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-left: var(--sp-2);
+}
+
+.success-nudge-btn {
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--brand-link);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.success-nudge-btn:hover {
+  background: var(--surface-muted);
+}
+
+/* 主操作（打开结果）用成功色轻底色，与对勾同一套语义色。 */
+.success-nudge-btn-primary {
+  color: var(--success-fg);
+  background: var(--success-bg);
+  border-color: var(--success-border);
+}
+
+.success-nudge-btn-primary:hover {
+  background: color-mix(in srgb, var(--success-fg) 12%, var(--success-bg));
+}
+
+.success-nudge-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.success-nudge-close:hover {
+  color: var(--ink);
+}
+
+@keyframes success-nudge-rise-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+@keyframes success-nudge-check-in {
+  from {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .success-nudge,
+  .success-nudge-icon {
+    animation: none;
+  }
+}

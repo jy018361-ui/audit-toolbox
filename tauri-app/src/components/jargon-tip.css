@@ -1,0 +1,83 @@
+/* 行话问号微提示。颜色只引用设计 token，不写字面量。 */
+
+.jargon-tip {
+  position: relative;
+  display: inline-flex;
+  vertical-align: baseline;
+}
+
+.jargon-tip-button {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  line-height: 0;
+  cursor: help;
+  user-select: none;
+}
+
+.jargon-tip-button:hover,
+.jargon-tip-button:focus-visible {
+  color: var(--brand-link);
+}
+
+.jargon-tip-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+  border-radius: var(--r-pill);
+}
+
+.jargon-tip-bubble {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: 280px;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  background: var(--ink-strong);
+  color: var(--ink-inverse);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-caption);
+  font-weight: var(--fw-regular);
+  text-align: left;
+  box-shadow: var(--shadow-card);
+  animation: jargon-tip-fade 150ms ease-out;
+}
+
+/* 默认在图标上方居中；贴近视口右缘时整体右对齐，防止被截断。 */
+.jargon-tip-right .jargon-tip-bubble {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+/* 图标与气泡之间的 6px 空隙也要能悬停，否则指针穿过去时气泡会闪没。 */
+.jargon-tip-bubble::before {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: 6px;
+}
+
+@keyframes jargon-tip-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jargon-tip-bubble {
+    animation: none;
+  }
+}

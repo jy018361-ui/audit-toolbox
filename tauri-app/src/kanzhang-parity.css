@@ -323,7 +323,9 @@
   font-size: var(--fs-sm);
   line-height: 1.7;
   cursor: grab;
-  overflow-wrap: anywhere;
+  /* 科目名按 "-" 分段换行，而不是把词拦腰截断；超长段才允许任意断开 */
+  word-break: keep-all;
+  overflow-wrap: break-word;
   border-bottom: 1px solid var(--surface-muted);
 }
 .kz-shuttle-item:hover {
@@ -356,9 +358,22 @@
   box-shadow: var(--shadow-overlay);
 }
 .kz-shuttle-empty {
+  display: grid;
+  place-items: center;
+  min-height: 72px;
   padding: var(--sp-3);
   color: var(--text-muted);
   font-size: var(--fs-sm);
+}
+/* 空列表不占大版面：出现空态提示时收紧为紧凑高度，腾出版面给下方已分配列表 */
+.kz-shuttle-list:has(.kz-shuttle-empty) {
+  height: auto;
+  min-height: 96px;
+  max-height: 140px;
+}
+.kz-source-panel .kz-shuttle-list:has(.kz-shuttle-empty) {
+  min-height: 96px;
+  max-height: 140px;
 }
 .kz-shuttle-more {
   padding: var(--sp-2);

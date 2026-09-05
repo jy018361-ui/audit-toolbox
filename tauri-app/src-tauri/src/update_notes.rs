@@ -178,12 +178,8 @@ fn collect_notes(
         None
     };
     if let Some(base) = commit_base {
-        result.warnings.push(if same_version {
-            "本版未填写更新说明；下方提交记录就是这一版相对上一版的全部变更。".into()
-        } else {
-            "部分版本未填写更新说明；下方补充整个升级区间的 GitHub 提交标题（不是功能总结）。"
-                .into()
-        });
+        // 说明为空本身由前端的「提交记录」区块自解释，不再额外推送解释性警告；
+        // 只有真实异常（分页中断、标签不连通等）才进 warnings。
         for page in 1..=MAX_PAGES {
             let value = match fetch(&format!(
                 "/compare/{base}...{target_tag}?per_page=100&page={page}"
@@ -327,7 +323,8 @@ mod tests {
         }).unwrap();
         assert_eq!(notes.commits.len(), 101);
         assert_eq!(notes.commits[0], "修复导航");
-        assert!(!notes.warnings.is_empty());
+        // 提交记录成功补齐时不附加解释性警告，界面不再重复叙述“未填写说明”。
+        assert!(notes.warnings.is_empty());
     }
     #[test]
     fn current_version_shows_its_notes_without_diff() {
@@ -372,12 +369,7 @@ mod tests {
                 "feat(更新说明): 空说明用提交记录补齐"
             ]
         );
-        assert!(
-            notes
-                .warnings
-                .iter()
-                .any(|w| w.contains("本版未填写更新说明"))
-        );
+        assert!(notes.warnings.is_empty());
     }
     #[test]
     fn invalid_ranges_rejected_before_network() {

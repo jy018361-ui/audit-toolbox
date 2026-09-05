@@ -23,6 +23,10 @@ jobs:
           cache: npm
           cache-dependency-path: tauri-app/package-lock.json
 
+      - name: Check filename and import casing
+        working-directory: tauri-app
+        run: node scripts/check_import_case.mjs
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 

@@ -5,8 +5,9 @@
 //      ledger.check_mapping_alignment / ledger.forms / ledger.review_mapping / ledger.review_pair_mapping
 //   4. 正负数凭证标记（JeSignMarkPage）：kanzhang.mark_sign_report / llm_mapping / accounts / column_values
 // 返回值形状与各页面源码及对应 Rust 方法（excel_merger.rs / fuzzy_match.rs / fx / ledger_mapping /
-// kanzhang）的真实返回一一对应；job 类任务（合并执行、fuzzy.match、tbje_check.run_batch、
-// kanzhang.mark_inspect / mark_export）走事件流，不在本文件范围内。
+// kanzhang）的真实返回一一对应；文件末尾另附任务剧本（jobHandlers），覆盖四个工具的任务方法
+// （excel_merger.merge、fuzzy.match / fuzzy.export、tbje_check.run_batch / export / export_batch、
+// kanzhang.mark_inspect / mark_export），completed 事件的 result 按"页面消费什么就给什么"逐字段给出。
 // 仅浏览器预览 + 演示开关（localStorage audit-toolbox.demo-data = "1"）时被 demoRegistry 收拢生效。
 
 // ────────────────────────────── 小工具函数 ──────────────────────────────
@@ -587,4 +588,568 @@ export const handlers: Record<string, (params: DemoParams) => unknown> = {
   "kanzhang.llm_mapping": (params) => kanzhangLlmMapping(params),
   "kanzhang.accounts": () => kanzhangAccounts(),
   "kanzhang.column_values": (params) => kanzhangColumnValues(params),
+};
+
+// ────────────────────────────── 任务剧本（jobHandlers）──────────────────────────────
+// api.ts 演示任务通道按序回放这里的事件序列；jobId / toolId 由 api 层统一填充
+// （toolId 与 Rust tool_id() 同映射，Excel 合并页认 "Excel_Merger"、正负数标记页认
+// "je_sign_mark"，均与页面监听过滤器一致）。completed 的 result 按"页面消费什么
+// 就给什么"逐字段给出，各方法的消费点见对应注释。
+
+import type { DemoJobEvent } from "../demoRegistry";
+
+// ────────────────────────────── 1. Excel 批量合并 ──────────────────────────────
+// ExcelMergerPage：completed 后 setResult(event.result) 交给通用 ResultView——
+// 消费 outputPaths（"打开"按钮）、fileCount / rows（结果指标）、warnings（需要注意清单）。
+
+/** 合并输出文件名与页面提示的自动命名规则一致（Excel合并结果_日期_时间.扩展名）。 */
+const mergerMergeEvents = (params: DemoParams): DemoJobEvent[] => {
+  const inputPaths = asStringArray(params.inputPaths);
+  const fileCount = inputPaths.length || DEFAULT_MERGER_PATHS.length;
+  const outputMode = asString(params.outputMode) || "one_sheet";
+  const format =
+    outputMode === "one_workbook"
+      ? "xlsx"
+      : asString(params.outputFormat) || "xlsx";
+  const outputPath = `${DEMO_DIR}\\Excel合并结果_20260905_142630.${format}`;
+  const direction = asString(params.direction) || "vertical";
+  const directionLabel = direction === "horizontal" ? "横向拼接" : "纵向堆叠";
+  const sheetAction = asString(params.sheetAction) || "merge_all";
+  return [
+    {
+      phase: "queued",
+      current: 0,
+      total: fileCount,
+      message: `排队合并 ${fileCount} 个文件…`,
+      severity: "info",
+      outputPaths: [],
+    },
+    {
+      phase: "running",
+      current: Math.max(fileCount - 1, 1),
+      total: fileCount,
+      message: `正在读取源文件并校验 Sheet 结构（${fileCount} 个，其中 1 个无法读取将跳过）…`,
+      severity: "info",
+      outputPaths: [],
+    },
+    {
+      phase: "running",
+      current: fileCount,
+      total: fileCount,
+      message: `正在按「${directionLabel}」写入合并结果…`,
+      severity: "info",
+      outputPaths: [],
+    },
+    {
+      phase: "completed",
+      current: fileCount,
+      total: fileCount,
+      message: `合并完成：${fileCount - 1} / ${fileCount} 个文件共 3,842 行写入输出文件。`,
+      severity: "success",
+      outputPaths: [outputPath],
+      result: {
+        engine: "rust",
+        inputFiles: fileCount,
+        fileCount,
+        rows: 3842,
+        outputMode,
+        direction,
+        sheetAction,
+        targetSheets: asStringArray(params.targetSheets),
+        excelAutomation: outputMode === "one_workbook",
+        warnings: [
+          "旧版报表备份.xls：无法读取工作簿（文件格式无法识别），已跳过",
+        ],
+        outputPaths: [outputPath],
+      },
+    },
+  ];
+};
+
+// ────────────────────────────── 2. 两列模糊匹配 ──────────────────────────────
+// FuzzyMatchPage：只按 jobId 过滤事件。match 的 completed 消费 result.summary / result.rows
+// （与 fuzzy.get_results 同形状，直接复用 FUZZY_MATCH_RESULT）；export 的 completed 消费
+// 事件级与 result 级 outputPaths（合并去重后列出结果文件）。
+
+const FUZZY_EXPORT_PATH = `${DEMO_DIR}\\模糊匹配结果_20260905_151840.xlsx`;
+
+// ────────────────────────────── 3. TBJE 完整性核对 ──────────────────────────────
+// TbjeCheckPage：useJobEvents({ toolId: "tbje_check" })。run_batch 的 completed 消费
+// result.groups（GroupOutcome[]：label / ok / result）——有 groups 就直接进结果页；
+// export 消费 result.outputPath，export_batch 消费 result.outputDirectory。
+
+/** TB 与 JE 发生额勾稽的逐科目差异行：presence 含 两边都有 / 仅余额表 / 仅序时账。 */
+const tbjeItem = (
+  code: string,
+  name: string,
+  presence: "both" | "tbOnly" | "jeOnly",
+  tbDebit: number,
+  jeDebit: number,
+  tbCredit: number,
+  jeCredit: number,
+) => ({
+  entity: DEMO_ENTITY,
+  code,
+  name,
+  presence,
+  tbIncludedCurrencies: presence === "jeOnly" ? undefined : "人民币",
+  tbIncludedRows: presence === "jeOnly" ? 0 : 1,
+  tbDebit,
+  jeDebit,
+  debitDifference: tbDebit - jeDebit,
+  tbCredit,
+  jeCredit,
+  creditDifference: tbCredit - jeCredit,
+  tbNet: tbDebit - tbCredit,
+  jeNet: jeDebit - jeCredit,
+  netDifference: tbDebit - tbCredit - (jeDebit - jeCredit),
+  // 净额差异为零才算通过：单边科目与 1122、2221 销项两个差异科目都不通过。
+  netPassed: presence === "both" && tbDebit - tbCredit === jeDebit - jeCredit,
+});
+
+// 两边都有的科目发生额取科目余额表的年度累计；演示里仅 1122（TB 多记借方 200,000）
+// 与 2221 销项（JE 少记贷方 13,500）与序时账有差，其余逐科目配平。
+const TBJE_TBVJE_ITEMS = [
+  tbjeItem("1002", "银行存款—中国工商银行北京分行营业部", "both", 5210350, 5210350, 4790000, 4790000),
+  tbjeItem("1122", "应收账款—华东区域销售客户往来", "both", 3550000, 3350000, 3062000, 3062000),
+  tbjeItem("1403", "原材料—钢材及辅助材料采购", "both", 1876000, 1876000, 1653000, 1653000),
+  tbjeItem("1601", "固定资产—机器设备与电子办公设备", "both", 460000, 460000, 0, 0),
+  tbjeItem("1602", "累计折旧—机器设备折旧计提", "both", 0, 0, 315000, 315000),
+  tbjeItem("2001", "短期借款—银行流动资金贷款", "both", 1200000, 1200000, 800000, 800000),
+  tbjeItem("2202", "应付账款—基础设施建设分包商", "both", 2380000, 2380000, 2654300, 2654300),
+  tbjeItem("2211", "应付职工薪酬—工资、奖金与社会保险费", "both", 1650000, 1650000, 1620500, 1620500),
+  tbjeItem("2221", "应交税费—应交增值税（进项税额）", "both", 316500, 316500, 289300, 289300),
+  tbjeItem("2221", "应交税费—应交增值税（销项税额）", "both", 598700, 598700, 528600, 542100),
+  tbjeItem("6001", "主营业务收入—机电设备销售收入", "both", 0, 0, 12600000, 12600000),
+  tbjeItem("6401", "主营业务成本—机电设备销售成本", "both", 9860000, 9860000, 0, 0),
+  tbjeItem("6602", "管理费用—办公费、差旅费与业务招待费", "both", 742300, 742300, 0, 0),
+  // 余额表计提了坏账但序时账无发生（仅余额表）。
+  tbjeItem("1221", "其他应收款—备用金及员工差旅借支", "tbOnly", 142000, 0, 128500, 0),
+  // 序时账有一笔捐赠支出但余额表漏记（仅序时账）。
+  tbjeItem("6711", "营业外支出—捐赠支出", "jeOnly", 0, 50000, 0, 0),
+];
+
+/** 单组核对结果：三条勾稽（发生额勾稽 / TB与JE发生额 / BS与PL恒等式）的汇总与差异明细。 */
+const TBJE_DEMO_CHECK = {
+  rollforward: { performed: true, passed: true, checked: 15, mismatched: 0 },
+  tbVsJe: {
+    performed: true,
+    passed: false,
+    sidePassed: false,
+    netPassed: false,
+    accounts: TBJE_TBVJE_ITEMS.length,
+    mismatched: 4,
+    netMismatched: 4,
+    widespread: false,
+    items: TBJE_TBVJE_ITEMS,
+  },
+  equation: {
+    performed: true,
+    passed: true,
+    balancePassed: true,
+    classificationComplete: true,
+    accounts: TBJE_TBVJE_ITEMS.length,
+    signConvention: "借贷分列（方案B）",
+    opening: {
+      byCategory: [
+        { category: "资产", amount: 9607500 },
+        { category: "负债", amount: -4471900 },
+        { category: "权益", amount: -5135600 },
+      ],
+      total: 0,
+      balanced: true,
+    },
+    closing: {
+      byCategory: [
+        { category: "资产", amount: 10897350 },
+        { category: "负债", amount: -4459500 },
+        { category: "权益", amount: -6437850 },
+      ],
+      total: 0,
+      balanced: true,
+    },
+    unclassified: [],
+  },
+  mappingWarnings: [],
+  currencyScope: { functionalCurrency: "CNY", includedRows: 15, excludedForeignRows: 0 },
+};
+
+const tbjeGroupLabels = (params: DemoParams): string[] => {
+  const groups = Array.isArray(params.groups) ? params.groups : [];
+  const labels = groups
+    .map((group) => asString(asRecord(group).label))
+    .filter((label) => label !== "");
+  return labels.length ? labels : ["示例账套"];
+};
+
+const tbjeRunBatchEvents = (params: DemoParams): DemoJobEvent[] => {
+  const labels = tbjeGroupLabels(params);
+  const total = labels.length;
+  // 进度按组推进；组很多时进度行只演示前 3 组，避免事件序列过长。
+  const progressLabels = labels.slice(0, 3);
+  return [
+    {
+      phase: "queued",
+      current: 0,
+      total,
+      message: `排队核对 ${total} 组账套…`,
+      severity: "info",
+      outputPaths: [],
+    },
+    ...progressLabels.map((label, index) => ({
+      phase: "running" as const,
+      current: index + 1,
+      total,
+      message: `正在核对第 ${index + 1} / ${total} 组（${label}）…`,
+      severity: "info" as const,
+      outputPaths: [] as string[],
+    })),
+    {
+      phase: "completed",
+      current: total,
+      total,
+      message: `核对完成：${total} 组执行完毕，发现 4 个科目发生额有差异（含 2 个单边科目）。`,
+      severity: "success",
+      outputPaths: [],
+      result: {
+        groups: labels.map((label) => ({
+          label,
+          ok: true,
+          result: TBJE_DEMO_CHECK,
+        })),
+      },
+    },
+  ];
+};
+
+// ────────────────────────────── 4. 正负数凭证标记 ──────────────────────────────
+// JeSignMarkPage：按 toolId === "je_sign_mark" 过滤。mark_inspect 的 completed 消费
+// Inspect 形状（headers 是数组即套用建议映射，preview 进凭证预览表）；mark_export 的
+// completed 消费 outputPaths（"打开"按钮）、batches（批次统计）、signConvention（口径说明）。
+
+const JE_MARK_HEADERS = [
+  "凭证编号",
+  "记账日期",
+  "公司",
+  "科目编码",
+  "科目名称",
+  "摘要",
+  "借方金额",
+  "贷方金额",
+];
+
+/** 12 行凭证分录：借贷千分位金额，逐张凭证配平（与金额符号口径演示的 48 张凭证同账套）。 */
+const JE_MARK_PREVIEW: string[][] = [
+  ["记-0001", "2025-12-01", DEMO_ENTITY, "1122", "应收账款—华东区域销售客户往来", "赊销机电设备一批", "1,135,000.00", ""],
+  ["记-0001", "2025-12-01", DEMO_ENTITY, "6001", "主营业务收入—机电设备销售收入", "结转机电设备销售收入", "", "1,000,000.00"],
+  ["记-0001", "2025-12-01", DEMO_ENTITY, "2221", "应交税费—应交增值税（销项税额）", "计提销项税额", "", "135,000.00"],
+  ["记-0002", "2025-12-05", DEMO_ENTITY, "1002", "银行存款—中国工商银行北京分行营业部", "收到华东客户部分货款", "800,000.00", ""],
+  ["记-0002", "2025-12-05", DEMO_ENTITY, "1122", "应收账款—华东区域销售客户往来", "冲减应收账款", "", "800,000.00"],
+  ["记-0003", "2025-12-12", DEMO_ENTITY, "1403", "原材料—钢材及辅助材料采购", "赊购钢材及辅助材料", "460,000.00", ""],
+  ["记-0003", "2025-12-12", DEMO_ENTITY, "2221", "应交税费—应交增值税（进项税额）", "抵扣进项税额", "59,800.00", ""],
+  ["记-0003", "2025-12-12", DEMO_ENTITY, "2202", "应付账款—基础设施建设分包商", "应付分包商货款挂账", "", "519,800.00"],
+  ["记-0004", "2025-12-20", DEMO_ENTITY, "6602", "管理费用—办公费、差旅费与业务招待费", "计提本月工资及社保", "286,500.00", ""],
+  ["记-0004", "2025-12-20", DEMO_ENTITY, "2211", "应付职工薪酬—工资、奖金与社会保险费", "应付职工薪酬贷方计提", "", "286,500.00"],
+  ["记-0005", "2025-12-26", DEMO_ENTITY, "6602", "管理费用—办公费、差旅费与业务招待费", "计提本月设备折旧", "58,400.00", ""],
+  ["记-0005", "2025-12-26", DEMO_ENTITY, "1602", "累计折旧—机器设备折旧计提", "累计折旧贷方计提", "", "58,400.00"],
+];
+
+const JE_MARK_ACCOUNT_CODES = [...new Set(JE_MARK_PREVIEW.map((row) => row[3]))];
+const JE_MARK_ACCOUNTS = JE_MARK_ACCOUNT_CODES.map((code) => {
+  const name = JE_MARK_PREVIEW.find((row) => row[3] === code)?.[4] ?? code;
+  return `${code}-${name}`;
+});
+
+/** mark_inspect completed 的 result：页面 Inspect 类型（headers / preview / 建议映射）。 */
+const JE_MARK_INSPECT = {
+  lowMemory: false,
+  headers: JE_MARK_HEADERS,
+  preview: JE_MARK_PREVIEW,
+  sheets: ["凭证序时簿", "银行日记账"],
+  selectedSheet: "凭证序时簿",
+  suggestedMapping: {
+    id: ["凭证编号"],
+    date: "记账日期",
+    summary: "摘要",
+    accountCode: "科目编码",
+    accountName: ["科目名称"],
+    entity: "公司",
+    functionalDebit: "借方金额",
+    functionalCredit: "贷方金额",
+  },
+  accounts: JE_MARK_ACCOUNTS,
+  accountCodes: JE_MARK_ACCOUNT_CODES,
+  accountCount: JE_MARK_ACCOUNTS.length,
+  dimensions: { rows: 48, columns: 8 },
+};
+
+const JE_MARK_EXPORT_PATH = `${DEMO_DIR}\\正负数标记_凭证序时簿_20260905_151240.xlsx`;
+
+const jeMarkExportEvents = (params: DemoParams): DemoJobEvent[] => {
+  const batches = Array.isArray(params.targetBatches) ? params.targetBatches : [];
+  const names = batches
+    .map((batch) => asString(asRecord(batch).name))
+    .filter((name) => name !== "");
+  const batchNames = names.length ? names : ["目标科目批次1"];
+  return [
+    {
+      phase: "queued",
+      current: 0,
+      total: 4,
+      message: "排队标记并导出…",
+      severity: "info",
+      outputPaths: [],
+    },
+    {
+      phase: "running",
+      current: 1,
+      total: 4,
+      message: "正在检测金额符号口径（自动）…",
+      severity: "info",
+      outputPaths: [],
+    },
+    {
+      phase: "running",
+      current: 2,
+      total: 4,
+      message: "正在按目标科目配对正负数分录…",
+      severity: "info",
+      outputPaths: [],
+    },
+    {
+      phase: "running",
+      current: 3,
+      total: 4,
+      message: "正在写出具标记明细工作簿…",
+      severity: "info",
+      outputPaths: [],
+    },
+    {
+      phase: "completed",
+      current: 4,
+      total: 4,
+      message: `标记完成：明细 38 行，直接匹配 12 对、跨凭证匹配 3 对、未匹配 5 行。`,
+      severity: "success",
+      outputPaths: [JE_MARK_EXPORT_PATH],
+      result: {
+        engine: "rust-polars",
+        outputPaths: [JE_MARK_EXPORT_PATH],
+        batchCount: batchNames.length,
+        batches: batchNames.map((name) => ({
+          name,
+          rows: 38,
+          matchedPairs: 12,
+          crossMatchedPairs: 3,
+          unmatchedRows: 5,
+        })),
+        signConvention: {
+          choice: "auto",
+          applied: "unsigned",
+          scheme: "B",
+          detected: "unsigned",
+          basis: "48 张借贷齐全的凭证按「借贷符号一样」配平，取多数。",
+          filtered: false,
+          keySuspect: false,
+        },
+        timings: { totalMs: 2140 },
+      },
+    },
+  ];
+};
+
+// ────────────────────────────── 注册表 ──────────────────────────────
+
+export const jobHandlers: Record<
+  string,
+  (params: DemoParams) => DemoJobEvent[]
+> = {
+  // Excel 批量合并
+  "excel_merger.merge": (params) => mergerMergeEvents(params),
+
+  // 两列模糊匹配
+  "fuzzy.match": () => [
+    {
+      phase: "queued",
+      current: 0,
+      total: 100,
+      message: "排队执行两列模糊匹配…",
+      severity: "info",
+      outputPaths: [],
+    },
+    {
+      phase: "running",
+      current: 38,
+      total: 100,
+      message: "正在计算 10 × 10 名称相似度矩阵…",
+      severity: "info",
+      outputPaths: [],
+    },
+    {
+      phase: "running",
+      current: 76,
+      total: 100,
+      message: "正在生成候选并按阈值自动分级…",
+      severity: "info",
+      outputPaths: [],
+    },
+    {
+      phase: "completed",
+      current: 100,
+      total: 100,
+      message: "匹配完成：自动匹配 3 条、疑似待确认 5 条、未匹配 2 条。",
+      severity: "success",
+      outputPaths: [],
+      result: FUZZY_MATCH_RESULT,
+    },
+  ],
+  "fuzzy.export": () => [
+    {
+      phase: "queued",
+      current: 0,
+      total: 100,
+      message: "排队导出匹配结果…",
+      severity: "info",
+      outputPaths: [],
+    },
+    {
+      phase: "running",
+      current: 62,
+      total: 100,
+      message: "正在写入匹配结果工作簿（自动 / 疑似 / 未匹配三个 Sheet）…",
+      severity: "info",
+      outputPaths: [],
+    },
+    {
+      phase: "completed",
+      current: 100,
+      total: 100,
+      message: "导出完成：匹配结果已写入 Excel。",
+      severity: "success",
+      outputPaths: [FUZZY_EXPORT_PATH],
+      result: { rows: 10, outputPaths: [FUZZY_EXPORT_PATH] },
+    },
+  ],
+
+  // TBJE 完整性核对
+  "tbje_check.run_batch": (params) => tbjeRunBatchEvents(params),
+  "tbje_check.export": () => {
+    const outputPath = `${DEMO_DIR}\\完整性核对明细_20260905_150210.xlsx`;
+    return [
+      {
+        phase: "queued",
+        current: 0,
+        total: 3,
+        message: "排队导出核对明细…",
+        severity: "info",
+        outputPaths: [],
+      },
+      {
+        phase: "running",
+        current: 1,
+        total: 3,
+        message: "正在写入 TB 发生额勾稽与差异明细页…",
+        severity: "info",
+        outputPaths: [],
+      },
+      {
+        phase: "running",
+        current: 2,
+        total: 3,
+        message: "正在生成 BS 与 PL 勾稽页…",
+        severity: "info",
+        outputPaths: [],
+      },
+      {
+        phase: "completed",
+        current: 3,
+        total: 3,
+        message: "明细已导出，可打开核对工作簿查看全部差异。",
+        severity: "success",
+        outputPaths: [outputPath],
+        result: { outputPath },
+      },
+    ];
+  },
+  "tbje_check.export_batch": (params) => {
+    const groups = Array.isArray(params.groups) ? params.groups : [];
+    const count = groups.length || 2;
+    const outputPaths = Array.from(
+      { length: count },
+      (_, index) =>
+        `${DEMO_DIR}\\完整性核对_第${index + 1}组_20260905_150530.xlsx`,
+    );
+    return [
+      {
+        phase: "queued",
+        current: 0,
+        total: count,
+        message: `排队导出全部 ${count} 组核对结果…`,
+        severity: "info",
+        outputPaths: [],
+      },
+      {
+        phase: "running",
+        current: Math.max(count - 1, 1),
+        total: count,
+        message: `正在逐组写出具核对工作簿（${Math.max(count - 1, 1)} / ${count}）…`,
+        severity: "info",
+        outputPaths: [],
+      },
+      {
+        phase: "running",
+        current: count,
+        total: count,
+        message: "正在校验输出文件…",
+        severity: "info",
+        outputPaths: [],
+      },
+      {
+        phase: "completed",
+        current: count,
+        total: count,
+        message: `全部 ${count} 组核对结果已分别导出至所选文件夹。`,
+        severity: "success",
+        outputPaths: outputPaths,
+        result: { outputDirectory: DEMO_DIR, outputPaths },
+      },
+    ];
+  },
+
+  // 正负数凭证标记
+  "kanzhang.mark_inspect": () => [
+    {
+      phase: "queued",
+      current: 0,
+      total: 100,
+      message: "排队读取凭证文件…",
+      severity: "info",
+      outputPaths: [],
+    },
+    {
+      phase: "running",
+      current: 46,
+      total: 100,
+      message: "正在解析「凭证序时簿」…",
+      severity: "info",
+      outputPaths: [],
+    },
+    {
+      phase: "running",
+      current: 84,
+      total: 100,
+      message: "正在识别字段并生成映射建议…",
+      severity: "info",
+      outputPaths: [],
+    },
+    {
+      phase: "completed",
+      current: 100,
+      total: 100,
+      message: `读取完成：48 行凭证、${JE_MARK_ACCOUNTS.length} 个科目。`,
+      severity: "success",
+      outputPaths: [],
+      result: JE_MARK_INSPECT,
+    },
+  ],
+  "kanzhang.mark_export": (params) => jeMarkExportEvents(params),
 };

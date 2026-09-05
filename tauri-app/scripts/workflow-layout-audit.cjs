@@ -58,8 +58,11 @@ const auditGeometry = () => {
     const style = getComputedStyle(element);
     const rect = box(element);
     const scrollX = element.scrollWidth > element.clientWidth + 2;
+    const horizontalScrollAncestor = [...function* ancestors(node) {
+      for (let parent = node.parentElement; parent && parent !== root; parent = parent.parentElement) yield parent;
+    }(element)].find((parent) => /(auto|scroll)/.test(getComputedStyle(parent).overflowX));
     if (scrollX && !/(auto|scroll)/.test(style.overflowX) && style.textOverflow !== "ellipsis" &&
-      !["TABLE", "THEAD", "TBODY", "TR"].includes(element.tagName)) {
+      !horizontalScrollAncestor && !["TABLE", "THEAD", "TBODY", "TR"].includes(element.tagName)) {
       add("child-overflow-x", element, {
         scrollWidth: element.scrollWidth,
         clientWidth: element.clientWidth,
@@ -85,7 +88,8 @@ const auditGeometry = () => {
     if (["contents", "inline"].includes(style.display) || parent.closest("svg, .theme-option-swatches")) continue;
     const children = [...parent.children].filter(visible).filter((child) => {
       const childStyle = getComputedStyle(child);
-      return !["absolute", "fixed", "sticky"].includes(childStyle.position) && childStyle.float === "none" &&
+      return child.tagName !== "COLGROUP" &&
+        !["absolute", "fixed", "sticky"].includes(childStyle.position) && childStyle.float === "none" &&
         !["inline", "inline-block", "inline-flex", "inline-grid"].includes(childStyle.display);
     });
     for (let index = 0; index < children.length; index += 1) {
@@ -127,18 +131,40 @@ const auditGeometry = () => {
 };
 
 const normalize = (value) => value.replace(/\s+/g, " ").trim();
-const progressPattern = /^(?:读取|检查|加载|继续|下一步|开始|重新扫描|筛选预览|套用审计关注|按一级科目)/;
+const progressPattern = /^(?:读取|检查|加载|继续|下一步|开始|扫描|重新扫描|识别|运行前检查|结转|处理全部公司|筛选预览|套用审计关注|按一级科目)/;
 const unsafePattern = /^(?:清空|删除|停止|取消|返回|导出|生成|保存|恢复默认)/;
 
 async function currentButtons(page) {
-  return page.locator(".main button:visible").evaluateAll((buttons) => buttons.map((button, index) => ({
-    index,
-    text: (button.textContent || "").replace(/\s+/g, " ").trim(),
-    disabled: button.disabled || button.getAttribute("aria-disabled") === "true",
-    workflowNavigation: Boolean(button.closest(".step-indicator, [aria-label='任务步骤']")),
-    picker: button.matches(".file-drop-zone") || /拖放|选择.*(?:文件|目录|文件夹|借款台账)|添加文件|扫描文件夹/.test(
-      (button.textContent || "").replace(/\s+/g, " ").trim()),
-  })));
+  return page.locator(".main button:visible").evaluateAll((buttons) => buttons.map((button, index) => {
+    const rect = button.getBoundingClientRect();
+    return {
+      index,
+      text: (button.textContent || "").replace(/\s+/g, " ").trim(),
+      disabled: button.disabled || button.getAttribute("aria-disabled") === "true",
+      workflowNavigation: Boolean(button.closest(".step-indicator, [aria-label='任务步骤']")),
+      picker: button.matches(".file-drop-zone") || /拖放|选择.*(?:文件|目录|文件夹|借款台账)|添加文件/.test(
+        (button.textContent || "").replace(/\s+/g, " ").trim()),
+      rect: { top: Math.round(rect.top), bottom: Math.round(rect.bottom), left: Math.round(rect.left), right: Math.round(rect.right) },
+    };
+  }));
+}
+
+async function waitForTaskOverlay(page) {
+  const confirm = page.locator(".confirm-dialog:visible");
+  if (await confirm.count()) {
+    const actions = confirm.locator("button:visible");
+    if (await actions.count()) {
+      await actions.last().click();
+      await settle(page);
+    }
+  }
+  const dialog = page.locator(".job-dialog:visible");
+  if (!(await dialog.count())) return;
+  const finished = await dialog.waitFor({ state: "hidden", timeout: 2_500 })
+    .then(() => true, () => false);
+  if (finished) return;
+  const minimize = dialog.getByRole("button", { name: "最小化" });
+  if (await minimize.count()) await minimize.click();
 }
 
 async function settle(page) {
@@ -151,11 +177,21 @@ async function settle(page) {
 
 async function captureState(page, tool, viewport, stateLabel, results) {
   const positions = await page.evaluate(() => {
-    const max = Math.max(0, document.documentElement.scrollHeight - innerHeight);
+    const root = document.querySelector("main, .main");
+    const scrollOwner = root && root.scrollHeight > root.clientHeight + 1
+      ? root
+      : document.scrollingElement;
+    const max = Math.max(0, (scrollOwner?.scrollHeight ?? 0) - (scrollOwner?.clientHeight ?? innerHeight));
     return [...new Set([0, Math.round(max / 2), max])];
   });
   for (const [positionIndex, position] of positions.entries()) {
-    await page.evaluate((top) => scrollTo({ top, behavior: "instant" }), position);
+    await page.evaluate((top) => {
+      const root = document.querySelector("main, .main");
+      const scrollOwner = root && root.scrollHeight > root.clientHeight + 1
+        ? root
+        : document.scrollingElement;
+      scrollOwner?.scrollTo({ top, behavior: "instant" });
+    }, position);
     await settle(page);
     const issues = await page.evaluate(auditGeometry);
     const record = {
@@ -171,7 +207,13 @@ async function captureState(page, tool, viewport, stateLabel, results) {
       await page.screenshot({ path: path.join(output, `${fileName}.png`) });
     }
   }
-  await page.evaluate(() => scrollTo({ top: 0, behavior: "instant" }));
+  await page.evaluate(() => {
+    const root = document.querySelector("main, .main");
+    const scrollOwner = root && root.scrollHeight > root.clientHeight + 1
+      ? root
+      : document.scrollingElement;
+    scrollOwner?.scrollTo({ top: 0, behavior: "instant" });
+  });
 }
 
 async function activatePickers(page) {
@@ -185,6 +227,7 @@ async function activatePickers(page) {
     await locator.click();
     clicked.push(candidate.text);
     await settle(page);
+    await waitForTaskOverlay(page);
   }
   return clicked;
 }
@@ -203,19 +246,39 @@ async function completeRequiredSelects(page, tool) {
   await settle(page);
 }
 
+async function prepareRoute(page, tool, viewport, results) {
+  if (tool.id !== "audit_roll_forward") return;
+  const create = page.getByRole("button", { name: "新建项目", exact: true });
+  if (!(await create.count())) return;
+  await create.click();
+  await settle(page);
+  await captureState(page, tool, viewport, "project-created", results);
+  const browseButtons = page.getByRole("button", { name: "浏览", exact: true });
+  const browseCount = await browseButtons.count();
+  for (let index = 0; index < browseCount; index += 1) {
+    await browseButtons.nth(index).click();
+    await settle(page);
+  }
+  const selectAll = page.getByRole("button", { name: "全选科目", exact: true });
+  if (await selectAll.count()) await selectAll.click();
+  await settle(page);
+  await captureState(page, tool, viewport, "project-configured", results);
+}
+
 async function advanceWorkflow(page, tool, viewport, results) {
   const seen = new Set();
   for (let step = 0; step < 7; step += 1) {
+    await waitForTaskOverlay(page);
     const buttons = await currentButtons(page);
     if (process.env.WORKFLOW_AUDIT_DEBUG) console.log("buttons", tool.id, buttons);
-    const signature = buttons.map((button) => `${button.disabled ? "0" : "1"}:${button.text}`).join("|");
     const candidates = buttons.filter((button) => !button.disabled && !button.workflowNavigation && progressPattern.test(button.text) &&
       !unsafePattern.test(button.text) && !/^\d/.test(button.text));
-    const candidate = candidates.find((button) => !seen.has(`${signature}:${button.text}`));
+    const candidate = candidates.find((button) => !seen.has(button.text));
     if (!candidate) break;
-    seen.add(`${signature}:${candidate.text}`);
-    await page.locator(".main button:visible").nth(candidate.index).click();
+    seen.add(candidate.text);
+    await page.locator(".main button:visible").nth(candidate.index).evaluate((button) => button.click());
     await page.waitForTimeout(/(?:读取|检查|加载|开始)/.test(candidate.text) ? 950 : 320);
+    await waitForTaskOverlay(page);
     await settle(page);
     await captureState(page, tool, viewport, `step-${step + 1}-${normalize(candidate.text).slice(0, 24)}`, results);
   }
@@ -241,6 +304,7 @@ async function advanceWorkflow(page, tool, viewport, results) {
         await page.locator(".page-header:visible").first().waitFor({ timeout: 12_000 }).catch(() => {});
         await settle(page);
         await captureState(page, tool, viewport, "initial", results);
+        await prepareRoute(page, tool, viewport, results);
         const pickers = await activatePickers(page);
         if (pickers.length) {
           await page.waitForTimeout(900);

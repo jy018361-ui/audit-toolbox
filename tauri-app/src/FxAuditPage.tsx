@@ -1518,7 +1518,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       />
       {step === 0 && (
         <>
-          <section className="fx-mode-bar">
+          <section className="fx-mode-bar" data-tour="tool-mode">
             {(
               [
                 ["realized", "仅已实现"],

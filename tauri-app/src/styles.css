@@ -466,6 +466,9 @@ summary:focus-visible {
   width: 100%;
   overflow-x: clip;
 }
+.persistent-tool-page {
+  min-width: 0;
+}
 /* 无边框窗口：顶部为右上角的窗口按钮留出高度（34px 按钮 + 一点余量），
    避免页面右上角的操作按钮被压住。浏览器预览没有这个标记，保持原样。 */
 .frameless .main {
@@ -3219,10 +3222,16 @@ summary:focus-visible {
 }
 
 .confirm-dialog {
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+.confirm-dialog > [data-slot="dialog-header"] {
+  min-height: 0;
   overflow: hidden;
 }
 .confirm-dialog-message {
+  min-height: 0;
+  flex: 1 1 auto;
   max-height: min(52dvh, 420px);
   overflow-y: auto;
   overscroll-behavior: contain;

@@ -353,6 +353,11 @@ export default function App() {
   const automaticUpdateCheckStarted = useRef(false);
   const [toolDrawerOpen, setToolDrawerOpen] = useState(false);
   const toolDrawerButton = useRef<HTMLButtonElement>(null);
+  const restoreToolDrawerTrigger = () => {
+    const rail = document.querySelector<HTMLElement>(".sidebar-rail");
+    if (rail) rail.inert = false;
+    toolDrawerButton.current?.focus();
+  };
   const previousPath = useRef(location.pathname);
   // 侧边栏子分组默认展开：折叠头不是路由入口，收着会让高频工具"消失"。
   const [subgroupOpen, setSubgroupOpen] = useState<Record<string, boolean>>({
@@ -490,7 +495,7 @@ export default function App() {
       if (event.key !== "Escape") return;
       event.preventDefault();
       setToolDrawerOpen(false);
-      toolDrawerButton.current?.focus();
+      restoreToolDrawerTrigger();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => {
@@ -565,7 +570,7 @@ export default function App() {
               aria-label="关闭工具导航"
               onClick={() => {
                 setToolDrawerOpen(false);
-                toolDrawerButton.current?.focus();
+                restoreToolDrawerTrigger();
               }}
             >
               ×
@@ -720,7 +725,7 @@ export default function App() {
             aria-label="关闭工具导航"
             onClick={() => {
               setToolDrawerOpen(false);
-              toolDrawerButton.current?.focus();
+              restoreToolDrawerTrigger();
             }}
           />
         )}

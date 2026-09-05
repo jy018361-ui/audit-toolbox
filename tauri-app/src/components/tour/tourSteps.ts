@@ -110,6 +110,17 @@ export function buildToolTourSteps(tool: ToolManifest): TourStep[] {
       body: script.purpose,
     },
   ];
+  if (script.mode) {
+    // 有多种导入/测算模式的工具：进页先讲"选哪个、什么时候用"，
+    // 聚光页面上的模式切换区；页面没有该挂点时整步自动跳过。
+    steps.push({
+      id: "mode",
+      targetSelector: '[data-tour="tool-mode"]',
+      optional: true,
+      title: "先选对模式",
+      body: script.mode,
+    });
+  }
   if (script.prepareTargeted) {
     steps.push({
       id: "prepare",

@@ -442,6 +442,24 @@ describe("buildToolTourSteps", () => {
     expect(TOOL_TOUR_SCRIPTS.audipick.prepareTargeted).toBeFalsy();
     expect(TOOL_TOUR_SCRIPTS.audit_roll_forward.prepareTargeted).toBeFalsy();
   });
+
+  it("带双模式的工具导览必讲模式选择，并聚光模式切换区", () => {
+    for (const id of ["fa_list", "loan_interest", "fx_audit"]) {
+      const script = TOOL_TOUR_SCRIPTS[id];
+      expect(script?.mode, `${id} 缺少模式说明`).toBeDefined();
+      expect(script!.mode!.length).toBeGreaterThan(10);
+    }
+    const faSteps = buildToolTourSteps({
+      ...kanzhang,
+      id: "fa_list",
+      name: "FA List 匹配工具",
+    });
+    const modeStep = faSteps.find((step) => step.id === "mode");
+    expect(modeStep?.targetSelector).toBe('[data-tour="tool-mode"]');
+    expect(modeStep?.optional).toBe(true);
+    expect(modeStep?.body).toContain("两期固定资产清单");
+    expect(modeStep?.body).toContain("TB＋JE 变动表");
+  });
 });
 
 describe("引导焦点圈定（aria-modal 落地）", () => {

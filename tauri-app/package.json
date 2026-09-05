@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "audit:layout:static": "node scripts/static-layout-audit.cjs",
+    "audit:layout:themes": "node scripts/theme-layout-audit.cjs",
     "audit:layout:tasks": "node scripts/task-state-layout-audit.cjs",
     "audit:layout:overlays": "node scripts/overlay-layout-audit.cjs",
     "audit:layout:workflows": "node scripts/workflow-layout-audit.cjs",
@@ -17,7 +18,6 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
-    "@fontsource-variable/geist": "^5.3.0",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-process": "^2.3.0",

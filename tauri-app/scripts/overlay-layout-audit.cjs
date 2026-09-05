@@ -5,10 +5,16 @@ const path = require("node:path");
 
 // Run against `npm run dev -- --host 127.0.0.1`.
 const baseUrl = process.env.OVERLAY_AUDIT_URL || "http://127.0.0.1:1420";
-const widths = [1280, 1000, 854];
+const viewports = [
+  { width: 1280, height: 720, label: "1280x720" },
+  { width: 1000, height: 720, label: "1000x720" },
+  { width: 854, height: 720, label: "854x720" },
+  { width: 1000, height: 480, label: "1000x480-high-content" },
+];
 const scenarios = [
   "confirm", "sync", "job-single", "job-multi", "tour",
-  "step", "success", "jargon", "fuzzy",
+  "step", "success", "jargon", "fuzzy", "job-success-stack",
+  "step-confirm-stack", "jargon-confirm-stack",
 ];
 
 const auditOverlay = () => {
@@ -68,6 +74,16 @@ const auditOverlay = () => {
       issues.push(`${selector(dialog)} does not own focus`);
     }
   }
+
+  const modal = [...document.querySelectorAll('[role="dialog"][aria-modal="true"]')].find(visible);
+  if (modal) {
+    const modalZ = Number.parseInt(getComputedStyle(modal).zIndex, 10) || 0;
+    for (const lower of document.querySelectorAll(".success-nudge,.step-hint,.job-dialog-pill,[role='tooltip']")) {
+      if (!visible(lower) || modal.contains(lower)) continue;
+      const lowerZ = Number.parseInt(getComputedStyle(lower).zIndex, 10) || 0;
+      if (lowerZ >= modalZ) issues.push(`${selector(lower)} z-index ${lowerZ} competes with modal ${modalZ}`);
+    }
+  }
   return [...new Set(issues)];
 };
 
@@ -77,8 +93,9 @@ const auditOverlay = () => {
   const failures = [];
   let cases = 0;
   try {
-    for (const width of widths) {
-      const context = await browser.newContext({ viewport: { width, height: 720 }, reducedMotion: "reduce" });
+    for (const viewport of viewports) {
+      const { width, height, label } = viewport;
+      const context = await browser.newContext({ viewport: { width, height }, reducedMotion: "reduce" });
       const page = await context.newPage();
       page.setDefaultTimeout(120000);
       await page.addInitScript(() => {
@@ -108,7 +125,7 @@ const auditOverlay = () => {
         });
         const issues = await page.evaluate(auditOverlay);
 
-        if (scenario === "job-single" || scenario === "job-multi") {
+        if (scenario === "job-single" || scenario === "job-multi" || scenario === "job-success-stack") {
           await page.keyboard.press("Escape");
           if (!(await page.locator(".job-dialog").isVisible())) issues.push("job dialog closed with Escape");
           await page.getByRole("button", { name: "最小化" }).click();
@@ -118,9 +135,23 @@ const auditOverlay = () => {
           if (!pillFocused) issues.push("minimized job pill did not receive focus");
         }
 
+        if (scenario === "confirm" || scenario === "fuzzy") {
+          const cancelName = scenario === "confirm" ? "取消" : "取消";
+          await page.getByRole("button", { name: cancelName, exact: true }).click();
+          const trigger = page.locator(`[data-fixture-return-focus="${scenario}"]`);
+          const focusReturned = await page.waitForFunction(
+            (selector) => document.activeElement === document.querySelector(selector),
+            `[data-fixture-return-focus="${scenario}"]`,
+            { timeout: 1000 },
+          ).then(() => true, () => false);
+          if (!focusReturned) {
+            issues.push(`${scenario} did not restore focus to its trigger`);
+          }
+        }
+
         if (issues.length) {
-          failures.push({ width, scenario, issues: [...new Set(issues)] });
-          await page.screenshot({ path: path.join(output, `${scenario}-${width}.png`), fullPage: true });
+          failures.push({ viewport: label, scenario, issues: [...new Set(issues)] });
+          await page.screenshot({ path: path.join(output, `${scenario}-${label}.png`), fullPage: true });
         }
       }
 
@@ -134,7 +165,14 @@ const auditOverlay = () => {
         const issues = await page.evaluate(auditOverlay);
         const mainInert = await page.locator("#main-content").evaluate((element) => element.inert);
         if (!mainInert) issues.push("drawer background is not inert");
-        if (issues.length) failures.push({ width, scenario: "drawer", issues });
+        await page.keyboard.press("Escape");
+        const drawerTriggerFocused = await page.waitForFunction(
+          () => document.activeElement === document.querySelector(".sidebar-rail-menu"),
+          undefined,
+          { timeout: 1000 },
+        ).then(() => true, () => false);
+        if (!drawerTriggerFocused) issues.push("drawer did not restore focus to menu trigger");
+        if (issues.length) failures.push({ viewport: label, scenario: "drawer", issues });
       }
 
       // Real settings update panel: it opens synchronously before the network check resolves.
@@ -143,7 +181,10 @@ const auditOverlay = () => {
       await page.getByRole("button", { name: /软件更新|发现新版本/ }).click();
       await page.locator("#settings-update-panel").waitFor();
       const updateIssues = await page.evaluate(auditOverlay);
-      if (updateIssues.length) failures.push({ width, scenario: "settings-update", issues: updateIssues });
+      await page.getByRole("button", { name: "收起" }).click();
+      const updateTriggerFocused = await page.getByRole("button", { name: /软件更新|发现新版本/ }).evaluate((element) => element === document.activeElement);
+      if (!updateTriggerFocused) updateIssues.push("settings update panel did not restore focus to trigger");
+      if (updateIssues.length) failures.push({ viewport: label, scenario: "settings-update", issues: updateIssues });
       await context.close();
     }
   } finally {

@@ -586,7 +586,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
 
       {step === 0 && (
         <>
-          <section className="fx-mode-bar">
+          <section className="fx-mode-bar" data-tour="tool-mode">
             <Button
               type="button"
               variant={mode === "ledger" ? "default" : "ghost"}

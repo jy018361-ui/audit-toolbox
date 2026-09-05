@@ -6,9 +6,10 @@
 // 经 api.ts 的 demoLookup 回放；桌面应用完全不受影响。
 //
 // 设计目标：让「上传 → 识别（Sheet/标题行）→ 字段映射（含 LLM 复核的已改/
-// 待确认态）→ 预览」每一步都有合法返回可走通。匹配/导出类 job 方法
-// （fa.match / fa.export / fa.dep_export / fa.policy_export / fa.tbje_*）
-// 走 jobStart 事件流，不在演示通道范围内。
+// 待确认态）→ 预览 → 匹配/导出完成」每一步都有合法返回可走通。匹配/导出类
+// job 方法（fa.match / fa.export / fa.dep_export / fa.policy_export /
+// fa.tbje_*）见文件末尾的 jobHandlers 任务剧本，由 api.ts 的演示任务通道
+// 按序回放「排队 → 进行 → 完成」事件流。
 //
 // 数据口径：同一批固定资产种子贯穿三个工具——两期清单里既有两期完全一致的
 // 行，也有寿命/残值率变更行与仅单期存在的新增、处置行；资产名称含 20 字以上
@@ -735,4 +736,338 @@ export const handlers: Record<
   "deposit.inspect_je": () => ledgerInspection("je"),
   "ledger.review_mapping": ledgerReviewSingle,
   "ledger.review_pair_mapping": ledgerReviewPair,
+};
+
+// ---------------------------------------------------------------------------
+// 任务剧本：fa.match / fa.export / fa.dep_export / fa.policy_export /
+// fa.tbje_preview / fa.tbje_export（api.ts 演示任务通道按序回放事件流）
+//
+// 各方法与页面完成态消费点的对应关系（result「页面消费什么就给什么」）：
+//   fa.match          FaListPage「开始匹配」：event.result 整体进结果面板——
+//                     stats 出四格统计（合并总行数/两期均有/仅期初/仅期末）、
+//                     stats.duplicates 出重复键告警框、stats.unmatchedAddition/
+//                     unmatchedDisposal 出补充清单未匹配告警框；columns +
+//                     preview 出「合并结果前 N 行」预览表（行是对象、键为
+//                     列名，金额带千分位，列名带 _文件1/_文件2 后缀）。
+//   fa.export         FaListPage「导出底稿」：result 走 outputPaths 分支——
+//                     exportMessage 按 ===CORRECTION_WARNINGS=== 拆成主消息
+//                     与逐条纠偏告警，outputPaths 生成「打开结果」按钮。
+//   fa.dep_export     FaDepCalcPage：页面不读 result，只认 completed 事件的
+//                     outputPaths（「折旧测算表已生成」+ 打开按钮）。
+//   fa.policy_export  FaPolicyComparePage：同上，只认 completed 的 outputPaths。
+//   fa.tbje_preview   FaTbJePage「生成预览」：result 的 tbRows/jeRows 等
+//                     指标进通用 ResultView，warnings 出「需要注意」告警列表，
+//                     summaryTable（columns + rows{section,item,values}）出
+//                     汇总变动表预览，preview（新增明细）出第三张表；
+//                     values/original/depreciation 必须是数字，页面用
+//                     toLocaleString 自行做千分位。
+//   fa.tbje_export    FaTbJePage「生成文件」：预览结果原样保留，另加
+//                     outputPaths。
+//
+// 已知边界：api.ts 演示任务通道给事件填的 toolId 取「方法名第一个点前缀」
+// （fa.* → "fa"），而这四个页面按 useJobEvents 的 toolId 过滤事件
+// （fa_list / fa_dep_calc / fa_policy_compare，与 Rust 侧 excel_merger::tool_id
+// 的映射一致）。方法名必须跟页面 jobStart 的实参保持一致，不能改动；
+// 预览模式要真正看到完成态，需要 api.ts 的 toolId 推导对齐
+// excel_merger::tool_id（fa.dep_ → fa_dep_calc、fa.policy_ → fa_policy_compare、
+// 其余 fa.* → fa_list）。
+// ---------------------------------------------------------------------------
+
+import type { DemoJobEvent } from "../demoRegistry";
+
+const jobEvent = (
+  phase: DemoJobEvent["phase"],
+  current: number,
+  total: number,
+  message: string,
+  extra: Partial<DemoJobEvent> = {},
+): DemoJobEvent => ({
+  phase,
+  current,
+  total,
+  message,
+  severity: phase === "completed" ? "success" : "info",
+  outputPaths: [],
+  ...extra,
+});
+
+/** 页面导出前都会算好保存路径；与 Rust 侧一致，完成后原样回显。 */
+const outputEcho = (
+  params: Record<string, unknown>,
+  fallback: string,
+): string[] => {
+  const target = str(params.outputPath).trim();
+  return [target || fallback];
+};
+
+// ---------------------------------------------------------------------------
+// fa.match / fa.export：两期清单完全外连接（列名与数据来源均沿用 Rust 的
+// 文件1/文件2 口径，preview 行是「列名 → 单元格文本」的对象）
+// ---------------------------------------------------------------------------
+
+const MERGE_COLUMNS = [
+  ...BEGIN_HEADERS.map((header) => `${header}_文件1`),
+  ...END_HEADERS.map((header) => `${header}_文件2`),
+  "数据来源",
+  "匹配列",
+];
+
+const beginCellsOf = (asset: FaAssetSeed): string[] => {
+  const amounts = amountsOf(asset);
+  return [
+    asset.code,
+    asset.name,
+    asset.category,
+    asset.dept,
+    asset.start,
+    String(asset.life),
+    String(asset.residual),
+    money(asset.original),
+    money(amounts.beginDep),
+  ];
+};
+
+const endCellsOf = (asset: FaAssetSeed): string[] => {
+  const amounts = amountsOf(asset);
+  return [
+    asset.code,
+    asset.name,
+    asset.category,
+    asset.dept,
+    asset.start,
+    String(asset.endLife ?? asset.life),
+    String(asset.endResidual ?? asset.residual),
+    money(asset.original),
+    money(amounts.endDep),
+    money(amounts.yearDep),
+    asset.additionMethod ?? "",
+    asset.additionDate ?? "",
+    money(asset.original - amounts.endDep),
+  ];
+};
+
+const mergeRow = (
+  begin: FaAssetSeed | undefined,
+  end: FaAssetSeed | undefined,
+  source: string,
+): Record<string, string> => {
+  const row: Record<string, string> = {};
+  const beginCells = begin ? beginCellsOf(begin) : [];
+  const endCells = end ? endCellsOf(end) : [];
+  BEGIN_HEADERS.forEach((header, index) => {
+    row[`${header}_文件1`] = beginCells[index] ?? "";
+  });
+  END_HEADERS.forEach((header, index) => {
+    row[`${header}_文件2`] = endCells[index] ?? "";
+  });
+  row["数据来源"] = source;
+  row["匹配列"] = begin?.code ?? end?.code ?? "";
+  return row;
+};
+
+// 合并统计：两期均在 14 张卡 + 重复键多配 1 行 = both 15，处置 2、新增 2，
+// 共 19 行；补充清单里 3001/3002 开头的各 6 笔在两期清单中无对应卡。
+const MERGE_STATS = {
+  rows: 19,
+  both: 15,
+  beginOnly: 2,
+  endOnly: 2,
+  duplicates: { hasDuplicates: true, duplicateValueCount: 1, duplicateRowCount: 2 },
+  unmatchedAddition: 6,
+  unmatchedDisposal: 6,
+};
+
+const mergePreviewRows = (): Record<string, string>[] => {
+  const disposed = ASSETS.filter((asset) => asset.disposed);
+  // 剧本刻意安排期末清单里「10010003」出现两次（重复键告警框 + 数据透视
+  // 式逐条配对都需要有行可看）：第 4 行即期初卡与第二张期末卡的配对结果。
+  const plan: Array<[FaAssetSeed | undefined, FaAssetSeed | undefined, string]> = [
+    [BOTH[0], BOTH[0], "两文件都有"],
+    [BOTH[1], BOTH[1], "两文件都有"],
+    [BOTH[2], BOTH[2], "两文件都有"],
+    [BOTH[2], BOTH[2], "两文件都有"],
+    [BOTH[3], BOTH[3], "两文件都有"],
+    [BOTH[6], BOTH[6], "两文件都有"],
+    [disposed[0], undefined, "仅文件1"],
+    [disposed[1], undefined, "仅文件1"],
+    [undefined, ADDED[0], "仅文件2"],
+    [undefined, ADDED[1], "仅文件2"],
+    [BOTH[7], BOTH[7], "两文件都有"],
+    [BOTH[8], BOTH[8], "两文件都有"],
+  ];
+  return plan.map(([begin, end, source]) => mergeRow(begin, end, source));
+};
+
+const faMatchResult = (): Record<string, unknown> => ({
+  engine: "rust-fa",
+  message: "完全外连接完成，共 19 行。",
+  stats: MERGE_STATS,
+  columns: MERGE_COLUMNS,
+  preview: mergePreviewRows(),
+});
+
+const faExportResult = (params: Record<string, unknown>): Record<string, unknown> => ({
+  engine: "rust-fa",
+  message: "完全外连接完成。",
+  // 主消息与纠偏告警按 ===CORRECTION_WARNINGS=== 分隔，页面逐行出告警框；
+  // 文案口径与 Rust correction_warnings 一致（残值率按百分数换算）。
+  exportMessage: [
+    "FA List 导出完成；已生成未匹配资产变动清单",
+    "===CORRECTION_WARNINGS===",
+    "【残值率纠偏】16 张卡片的残值率大于 1，已按百分数换算（例如 5 视作 5%），请确认导出结果。",
+    "【使用寿命纠偏】16 张卡片的“使用年限(年)”按年换算为月（乘以 12），请确认导出的使用寿命是否正确。",
+  ].join("\n"),
+  rows: MERGE_STATS.rows,
+  columns: MERGE_COLUMNS.length,
+  outputPaths: outputEcho(params, "C:\\演示数据\\FA_List_20260905_140530.xlsx"),
+});
+
+// ---------------------------------------------------------------------------
+// fa.tbje_preview / fa.tbje_export：固定资产 TB＋JE（汇总变动表数值均为
+// 数字，勾稽差异保留机器设备 120,000 元一项，让「勾稽差异」高亮行有内容；
+// 期初/期末/计提/处置与演示 TB 的 1601/1602 余额同一量级）
+// ---------------------------------------------------------------------------
+
+const TBJE_ENTITY = "示例集团有限公司";
+const TBJE_COLUMNS = ["机器设备", "电子设备", "运输工具", "办公设备"];
+
+type TbjeSummaryRow = { section: string; item: string; values: number[] };
+
+const TBJE_SUMMARY_ROWS: TbjeSummaryRow[] = [
+  { section: "原值", item: "期初原值", values: [43860000, 2860000, 1880000, 0] },
+  { section: "原值", item: "原值增加", values: [1260000, 528000, 1280000, 156000] },
+  { section: "原值", item: "——其中-购置", values: [1260000, 528000, 1280000, 0] },
+  { section: "原值", item: "——其中-在建工程转入", values: [0, 0, 0, 156000] },
+  { section: "原值", item: "原值减少", values: [1860000, 12800, 0, 0] },
+  { section: "原值", item: "——其中-报废处置", values: [1860000, 0, 0, 0] },
+  { section: "原值", item: "——其中-盘亏", values: [0, 12800, 0, 0] },
+  { section: "原值", item: "期末原值", values: [43140000, 3375200, 3160000, 156000] },
+  { section: "累计折旧", item: "期初累计折旧", values: [18000000, 500000, 140000, 0] },
+  { section: "累计折旧", item: "当期计提", values: [3740000, 210580, 170000, 0] },
+  { section: "累计折旧", item: "——其中-本年计提", values: [3740000, 198050, 110000, 0] },
+  { section: "累计折旧", item: "——其中-新增随转折旧", values: [0, 12530, 60000, 0] },
+  { section: "累计折旧", item: "处置减少", values: [1418484.38, 0, 0, 0] },
+  { section: "累计折旧", item: "——其中-报废处置折旧", values: [1418484.38, 0, 0, 0] },
+  { section: "累计折旧", item: "期末累计折旧", values: [20321515.62, 710580, 310000, 0] },
+  { section: "净值(NBV)", item: "年初余额", values: [25860000, 2360000, 1740000, 0] },
+  { section: "净值(NBV)", item: "年末余额", values: [22818484.38, 2664620, 2850000, 156000] },
+  { section: "勾稽差异", item: "原值（期初＋增加－减少＋重分类－期末）", values: [120000, 0, 0, 0] },
+  { section: "勾稽差异", item: "累计折旧（期初＋计提－处置减少＋重分类－期末）", values: [0, 0, 0, 0] },
+];
+
+const TBJE_ADDITION_PREVIEW = [
+  { entity: TBJE_ENTITY, voucher: "记-0034", category: "机器设备", kind: "新增", original: 660000, depreciation: 10450, method: "融资租入" },
+  { entity: TBJE_ENTITY, voucher: "记-0042", category: "机器设备", kind: "新增", original: 285000, depreciation: 4512.5, method: "购置" },
+  { entity: TBJE_ENTITY, voucher: "记-0061", category: "机器设备", kind: "新增", original: 315000, depreciation: 4987.5, method: "自行建造" },
+  { entity: TBJE_ENTITY, voucher: "记-0107", category: "运输工具", kind: "新增", original: 1280000, depreciation: 60000, method: "购置" },
+  { entity: TBJE_ENTITY, voucher: "转-0009", category: "办公设备", kind: "新增", original: 156000, depreciation: 0, method: "在建工程转入" },
+  { entity: TBJE_ENTITY, voucher: "记-0121", category: "电子设备", kind: "新增", original: 432000, depreciation: 10240, method: "购置" },
+  { entity: TBJE_ENTITY, voucher: "记-0186", category: "电子设备", kind: "新增", original: 96000, depreciation: 1520, method: "股东投入" },
+];
+
+const faTbjeBaseResult = (): Record<string, unknown> => ({
+  engine: "shared-ledger+fa-business",
+  tbRows: 42,
+  jeRows: 126,
+  additions: 7,
+  disposals: 2,
+  directNetZeroPairs: 2,
+  crossNetZeroPairs: 1,
+  reconciliationDifferences: 1,
+  signBasis: "借贷分列",
+  warnings: [
+    "主体 示例集团有限公司 的已确认科目 1604 在建工程 仅存在于 JE，已保留变动；TB 期初/期末无对应科目，请复核勾稽差异。",
+  ],
+  summaryTable: {
+    columns: TBJE_COLUMNS,
+    rows: TBJE_SUMMARY_ROWS,
+  },
+  preview: TBJE_ADDITION_PREVIEW,
+});
+
+const tbjeOutput = (params: Record<string, unknown>): string[] => {
+  const target = str(params.outputPath).trim();
+  const path =
+    target || "C:\\演示数据\\固定资产TB＋JE底稿_20251231.xlsx";
+  // 与 Rust output_path 同口径：没有扩展名时补 .xlsx（预览模式的演示
+  // 保存路径「样例文件」没有扩展名）。
+  return [path.includes(".") ? path : `${path}.xlsx`];
+};
+
+export const jobHandlers: Record<
+  string,
+  (params: Record<string, unknown>) => DemoJobEvent[]
+> = {
+  // FA List 清单模式：匹配预览（stats + 合并预览表）
+  "fa.match": () => [
+    jobEvent("queued", 0, 0, "排队执行两期清单完全外连接…"),
+    jobEvent("running", 1, 4, "正在读取期初与期末清单并套用字段映射…"),
+    jobEvent("running", 2, 4, "正在按组合匹配键「资产编号」对齐两期清单…"),
+    jobEvent("running", 3, 4, "正在合并补充清单并统计重复匹配键…"),
+    jobEvent("completed", 4, 4, "匹配预览完成：完全外连接共 19 行。", {
+      result: faMatchResult(),
+    }),
+  ],
+  // FA List 清单模式：导出底稿（outputPaths + 纠偏告警）
+  "fa.export": (params) => [
+    jobEvent("queued", 0, 0, "排队生成 FA List 底稿…"),
+    jobEvent("running", 1, 4, "正在按组合匹配键「资产编号」对齐两期清单…"),
+    jobEvent("running", 2, 4, "正在合并补充清单：新增 8 笔、处置 8 笔…"),
+    jobEvent("running", 3, 4, "正在生成 FA List、变动清单、汇总与透视表"),
+    jobEvent("completed", 4, 4, "FA List 底稿导出完成。", {
+      outputPaths: outputEcho(params, "C:\\演示数据\\FA_List_20260905_140530.xlsx"),
+      result: faExportResult(params),
+    }),
+  ],
+  // 折旧测算：页面只认 completed 事件的 outputPaths
+  "fa.dep_export": (params) => [
+    jobEvent("queued", 0, 0, "排队生成折旧测算表…"),
+    jobEvent("running", 1, 3, "正在读取期末固定资产清单"),
+    jobEvent("running", 2, 3, "正在逐卡重算月折旧、当年折旧与累计折旧…"),
+    jobEvent("running", 3, 3, "正在生成折旧测算表"),
+    jobEvent("completed", 3, 3, "折旧测算导出完成。", {
+      outputPaths: outputEcho(params, "C:\\演示数据\\折旧测算_20251231_180000.xlsx"),
+      result: {
+        engine: "rust-fa",
+        message: "折旧测算导出完成。",
+        rows: BOTH.length + ADDED.length,
+        outputPaths: outputEcho(params, "C:\\演示数据\\折旧测算_20251231_180000.xlsx"),
+      },
+    }),
+  ],
+  // 折旧政策对比：页面只认 completed 事件的 outputPaths
+  "fa.policy_export": (params) => [
+    jobEvent("queued", 0, 0, "排队生成折旧政策对比底稿…"),
+    jobEvent("running", 1, 4, "正在通过公共引擎对齐期初与期末清单…"),
+    jobEvent("running", 2, 4, "正在按资产类别归集寿命与残值率政策…"),
+    jobEvent("running", 3, 4, "正在生成折旧政策对比与税法参考"),
+    jobEvent("completed", 4, 4, "折旧政策对比导出完成。", {
+      outputPaths: outputEcho(params, "C:\\演示数据\\折旧政策对比_20251231_181500.xlsx"),
+      result: {
+        engine: "rust-fa",
+        message: "折旧政策对比导出完成。",
+        outputPaths: outputEcho(params, "C:\\演示数据\\折旧政策对比_20251231_181500.xlsx"),
+      },
+    }),
+  ],
+  // FA List TB＋JE 变动表：生成预览（指标 + 汇总变动表 + 新增明细）
+  "fa.tbje_preview": () => [
+    jobEvent("queued", 0, 0, "排队生成固定资产 TB＋JE 预览…"),
+    jobEvent("running", 1, 4, "正在通过公共 TB/JE 引擎读取账表…"),
+    jobEvent("running", 2, 4, "正在分类新增、处置、重分类及对方科目…"),
+    jobEvent("completed", 4, 4, "固定资产 TB＋JE 处理完成，可打开下方结果文件。", {
+      result: faTbjeBaseResult(),
+    }),
+  ],
+  // FA List TB＋JE 变动表：生成文件（预览结果 + outputPaths）
+  "fa.tbje_export": (params) => [
+    jobEvent("queued", 0, 0, "排队生成固定资产 TB＋JE 底稿…"),
+    jobEvent("running", 1, 4, "正在通过公共 TB/JE 引擎读取账表…"),
+    jobEvent("running", 2, 4, "正在分类新增、处置、重分类及对方科目…"),
+    jobEvent("running", 3, 4, "正在生成固定资产底稿表…"),
+    jobEvent("completed", 4, 4, "固定资产 TB＋JE 处理完成，可打开下方结果文件。", {
+      outputPaths: tbjeOutput(params),
+      result: { ...faTbjeBaseResult(), outputPaths: tbjeOutput(params) },
+    }),
+  ],
 };

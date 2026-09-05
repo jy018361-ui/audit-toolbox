@@ -110,6 +110,33 @@ export async function engineCall(
 
 let demoJobSeq = 0;
 
+// 演示任务的 toolId：与 Rust 侧（excel_merger.rs 的 tool_id()）同一套
+// 「方法前缀 → 工具 id」映射。页面按 toolId 过滤事件（如 Excel_Merger、
+// je_sign_mark），直接取方法名第一段会对不上，演示事件会被页面当串台丢弃。
+const DEMO_JOB_TOOL_ID_RULES: Array<[prefix: string, toolId: string]> = [
+  ["wp.", "wp_service_generator"],
+  ["confirmation.", "confirmation_progress"],
+  ["file_list.", "file_list_directory"],
+  ["ts.", "ts_manager"],
+  ["kanzhang.mark_", "je_sign_mark"],
+  ["kanzhang.", "kanzhang"],
+  ["audipick.", "audipick"],
+  ["tbje_check.", "tbje_check"],
+  ["fa.dep_", "fa_dep_calc"],
+  ["fa.policy_", "fa_policy_compare"],
+  ["fa.", "fa_list"],
+  ["roll_forward.", "audit_roll_forward"],
+  ["fx.", "fx_audit"],
+  ["deposit.", "deposit_interest"],
+  ["loan.", "loan_interest"],
+  ["pdf2excel.", "pdf_to_excel"],
+  ["fuzzy.", "fuzzy_match"],
+];
+
+const demoJobToolId = (method: string): string =>
+  DEMO_JOB_TOOL_ID_RULES.find(([prefix]) => method.startsWith(prefix))?.[1] ??
+  "Excel_Merger";
+
 export async function jobStart(
   method: string,
   params: Record<string, unknown>,
@@ -121,7 +148,7 @@ export async function jobStart(
     if (!planner)
       throw new Error("浏览器预览模式不能启动任务，请使用 Tauri 应用。");
     const jobId = `demo-job-${++demoJobSeq}`;
-    const toolId = method.split(".")[0] ?? "";
+    const toolId = demoJobToolId(method);
     const events = planner(params);
     events.forEach((event, index) => {
       window.setTimeout(() => {

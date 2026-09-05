@@ -311,6 +311,17 @@
   }
 }
 
+@media (max-width: 900px) {
+  .step-hint {
+    position: fixed;
+    top: auto;
+    right: var(--sp-2);
+    bottom: var(--sp-2);
+    left: var(--sp-2);
+    width: auto;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .step-hint,
   .step-hint-veil-dimmed {

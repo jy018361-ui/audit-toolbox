@@ -175,10 +175,37 @@ body .app-shell {
   gap: var(--sp-3);
   padding: var(--sp-4);
   border: 1px solid transparent;
+  /* 悬停微浮：轻抬 2px 加深投影，箭头同行微移（见下方 hover 规则） */
+  transition: transform 0.15s ease-out, box-shadow 0.15s ease-out,
+    border-color 0.15s ease-out;
 }
 
 .dashboard-tool-group .tool-card:hover {
   border-color: var(--border-strong);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-interactive);
+}
+
+.dashboard-tool-group .tool-card strong > span[aria-hidden="true"] {
+  display: inline-block;
+  transition: transform 0.15s ease-out;
+}
+
+.dashboard-tool-group .tool-card:hover strong > span[aria-hidden="true"] {
+  transform: translateX(3px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dashboard-tool-group .tool-card,
+  .dashboard-tool-group .tool-card strong > span[aria-hidden="true"] {
+    transition: none;
+  }
+  .dashboard-tool-group .tool-card:hover {
+    transform: none;
+  }
+  .dashboard-tool-group .tool-card:hover strong > span[aria-hidden="true"] {
+    transform: none;
+  }
 }
 
 .tool-card-heading {

@@ -10,6 +10,9 @@ import type { TourStep } from "./BeginnerTour";
 export type ToolTourScript = {
   /** 这个工具做什么（导览第 1 步，居中卡片）。 */
   purpose: string;
+  /** 有多种导入/测算模式的工具：先讲清楚"选哪个、什么时候用"，
+   *  聚光到页面上的模式切换区（data-tour="tool-mode"）。 */
+  mode?: string;
   /** 要准备什么：上传/输入要求。prepareTargeted 为 true 时聚光到上传区。 */
   prepare: string;
   prepareTargeted?: boolean;
@@ -25,6 +28,7 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
   fa_list: {
     purpose:
       "把年初、年末两份固定资产清单按匹配键逐卡配对，自动生成 FA List、变动表与汇总底稿，是固定资产科目实质性程序的主力工具。",
+    mode: "左上角有两个模式，按手头资料选：有期初、期末两份固定资产清单 → 留在「两期固定资产清单」，按卡片逐张配对；只有科目余额表和序时账、拿不到清单 → 切到「TB＋JE 变动表」，直接从总账数据生成变动汇总、新增、处置和 JE 底表。",
     prepare:
       "年初、年末两份固定资产清单（Excel/CSV）。两份需选得出相同的组合匹配键，并映射到资产类别、资产名称、原值、累计折旧等必填字段。",
     prepareTargeted: true,
@@ -119,6 +123,7 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
   loan_interest: {
     purpose:
       "借款审计的利息重算：有完整借款台账就逐笔重算；只有 TB＋JE 时，先模糊还原逐笔本金变动再测算，并核对「期初＋本期增加－本期减少＝期末」。",
+    mode: "第 1 步先选导入模式：手上有含本金、期间、利率的借款台账 → 选「完整借款台账」，数据全、直接重算；只有科目余额表和序时账 → 选「TB＋JE」，工具先帮你推算出台账再测算，结果要重点复核。",
     prepare:
       "两种模式二选一：完整借款台账（要有借款标识、本金/余额、起止日期、利率信息），或 TB＋JE 两份表；TB＋JE 模式还能选传一份借款利率台账。",
     prepareTargeted: true,
@@ -137,6 +142,7 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
   fx_audit: {
     purpose:
       "外币业务的汇兑损益重算：按凭证识别结算事件（已实现损益），外币货币性科目月末按央行中间价重估（未实现损益），并与 TB 账面汇兑损益勾稽。",
+    mode: "第 1 步先选测算范围：只有序时账 → 「仅已实现」；只有科目余额表 → 「仅未实现」；两份都有 → 「已实现＋未实现」一起算。选错范围，该传的文件也会跟着变。",
     prepare:
       "按模式准备：算已实现传序时账 JE；算未实现传余额表 TB；都算就都传。TB 要按币种拆分导出，否则相关科目测不了；汇率自动取央行中间价。",
     prepareTargeted: true,

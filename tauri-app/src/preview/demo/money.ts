@@ -2,9 +2,9 @@
 // 借款利息测算（loan.*）、汇兑损益测算（fx.*），以及它们共用的公共账表
 // 引擎方法（ledger.forms / ledger.review_* / ledger.check_mapping_alignment）。
 //
-// 覆盖的是"上传 → 识别 → 科目/利率确认"链路上的全部同步 engineCall 方法；
-// 测算预览/导出走 jobStart 事件流（deposit.preview|export、fx.preview|export、
-// loan.preview|export），不在本文件范围内——job 任务在预览模式仍会提示用桌面应用。
+// 覆盖"上传 → 识别 → 科目/利率确认"链路上的全部同步 engineCall 方法；测算预览
+// 与导出的 jobStart 任务（deposit.preview|export、fx.preview|export、
+// loan.preview|export）也在文件末尾给出任务剧本，预览模式按事件流回放结果态。
 //
 // 数据设计要点（布局审查用）：
 // - 各 TB 识别结果 12 条以上科目，其中 4 条以上超长科目名（≥24 个汉字）
@@ -1123,4 +1123,412 @@ export const handlers: Record<string, (params: Record<string, unknown>) => unkno
     ],
     fix: null,
   }),
+};
+
+// ---------------------------------------------------------------------------
+// 任务剧本：测算预览 / 导出（api.ts 演示任务通道按序回放事件流）
+//
+// 六个任务方法（deposit.preview|export、loan.preview|export、fx.preview|export）
+// 各回放「排队 → 进行×2 → 完成」四步事件；completed 的 result 形状与页面消费点
+// 逐字段对齐：
+// - deposit.*：result.rows（逐户利率与利息，含 12 个月月度余额明细）+ result.summary。
+//   页面会用月度明细按「月均 × 年利率 × 天数 ÷ 365」实时重算合计并与
+//   summary.calculatedInterest 对账，这里用同一条公式现算，保证不出现
+//   「结果待重算」提示；故意留 1 户大额存单待填利率，让"测算未完整"布局可达。
+// - loan.*：result.rows（逐笔本金变动＋利率＋利息，含 2 笔待复核）+ result.summary。
+// - fx.*：完整汇兑测算结果（summary 勾稽桥、凭证分类复核、余额滚动、检查与勾稽、
+//   previewToken）。preview 整体替换 result、export 按键合并，因此 export 的
+//   result 也带全量字段——直接导出（不先预览）时页面同样能渲染。
+// 三个页面的导出按钮都读 result.outputPaths，导出完成的剧本给 C:\演示数据\ 下的底稿路径。
+// ---------------------------------------------------------------------------
+
+import type { DemoJobEvent } from "../demoRegistry";
+
+const round2 = (value: number) => Math.round(value * 100) / 100;
+const yuan = (value: number) =>
+  value.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/** 与 kanzhang 剧本同款的事件骨架：排队 total=0，之后按百分比推进。 */
+const jobEvent = (
+  phase: DemoJobEvent["phase"],
+  current: number,
+  message: string,
+  extra: Partial<DemoJobEvent> = {},
+): DemoJobEvent => ({
+  phase,
+  current: phase === "queued" ? 0 : current,
+  total: phase === "queued" ? 0 : 100,
+  message,
+  severity: phase === "completed" ? "success" : "info",
+  outputPaths: [],
+  ...extra,
+});
+
+// —— 存款利息：逐户行与 12 个月月度余额 ——
+
+const MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+/** 与页面 depositMonthlyInterest 同式：月均余额 × 年利率 × 天数 ÷ 365。 */
+const monthInterest = (average: number, rate: number, days: number) =>
+  (average * rate * days) / 365;
+
+/** 活期账户 12 个月的净变动（占期初比例）；定期/存单用全零（余额不动）。 */
+const DEMAND_MOVES = [0.048, -0.026, 0.115, -0.082, 0.021, 0.063, -0.047, 0.079, -0.024, 0.034, -0.016, -0.058];
+const FLAT_MOVES = DEMAND_MOVES.map(() => 0);
+
+type DepositMonthCell = {
+  month: number;
+  opening: number;
+  debit: number;
+  credit: number;
+  closing: number;
+  average: number;
+  days: number;
+  denominator: number;
+  interest: number;
+};
+
+type DepositRowSeed = {
+  key: string;
+  /** 台账里没有的演示账户直接给全名，其余按编码在 TB 科目清单里现查。 */
+  account?: string;
+  auxiliary: string;
+  currency: string;
+  category: string;
+  tier: string;
+  tierLabel: string;
+  termLabel: string;
+  rate: number;
+  rateResolved: boolean;
+  rateSource: string;
+  tierMatchedBy: string;
+  opening: number;
+  closing: number;
+  moves: number[];
+};
+
+const depositResultRow = (seed: DepositRowSeed) => {
+  const account =
+    seed.account ??
+    DEPOSIT_TB_ACCOUNTS.find((item) => item.startsWith(`${seed.key} `)) ??
+    seed.key;
+  const cells: DepositMonthCell[] = [];
+  let balance = seed.opening;
+  seed.moves.forEach((move, index) => {
+    const debit = move > 0 ? round2(balance * move) : 0;
+    const credit = move < 0 ? round2(balance * -move) : 0;
+    const closing = round2(balance + debit - credit);
+    const average = round2((balance + closing) / 2);
+    const days = MONTH_DAYS[index];
+    // 利息必须用页面同款输入（四舍五入后的月均）现算，合计才对得上。
+    cells.push({
+      month: index + 1,
+      opening: round2(balance),
+      debit,
+      credit,
+      closing,
+      average,
+      days,
+      denominator: 365,
+      interest: monthInterest(average, seed.rate, days),
+    });
+    balance = closing;
+  });
+  return {
+    key: seed.key,
+    entity: COMPANY,
+    account,
+    auxiliary: seed.auxiliary,
+    currency: seed.currency,
+    role: seed.key.startsWith("1012") ? "other_monetary" : "deposit",
+    tier: seed.tier,
+    tierLabel: seed.tierLabel,
+    category: seed.category,
+    termLabel: seed.termLabel,
+    tierMatchedBy: seed.tierMatchedBy,
+    rateSource: seed.rateSource,
+    annualRate: seed.rate,
+    rateResolved: seed.rateResolved,
+    rateWarning: "",
+    openingBalance: seed.opening,
+    tbClosingBalance: seed.closing,
+    derivedClosingBalance: seed.closing,
+    reconciliationDiff: 0,
+    averageBalance: round2(cells.reduce((sum, cell) => sum + cell.average, 0) / cells.length),
+    calculatedInterest: cells.reduce((sum, cell) => sum + cell.interest, 0),
+    months: cells,
+    status: seed.rateResolved ? "已勾稽" : "待填利率",
+    note: seed.rateResolved
+      ? "月度余额取自序时账，勾稽差异为 0。"
+      : "大额存单利率逐笔协议约定，填入实际利率后重新测算。",
+  };
+};
+
+const DEPOSIT_ROW_SEEDS: DepositRowSeed[] = [
+  { key: "1002010101", auxiliary: "工行基本户-0200", currency: "CNY", category: "demand", tier: "demand", tierLabel: "活期存款", termLabel: "", rate: 0.0005, rateResolved: true, rateSource: "活期挂牌利率（自动套用）", tierMatchedBy: "档位字典：对公活期", opening: 4580000, closing: 5236500, moves: DEMAND_MOVES },
+  { key: "1002010102", auxiliary: "招行一般户-6606", currency: "CNY", category: "demand", tier: "demand", tierLabel: "活期存款", termLabel: "", rate: 0.0005, rateResolved: true, rateSource: "活期挂牌利率（自动套用）", tierMatchedBy: "档位字典：对公活期", opening: 8650000, closing: 7980000, moves: DEMAND_MOVES },
+  { key: "1002010104", account: "1002010104 银行存款-交通银行股份有限公司北京朝阳支行-一般存款账户-人民币", auxiliary: "交行一般户-3310", currency: "CNY", category: "demand", tier: "demand", tierLabel: "活期存款", termLabel: "", rate: 0.0005, rateResolved: true, rateSource: "活期挂牌利率（自动套用）", tierMatchedBy: "档位字典：对公活期", opening: 2340000, closing: 2187600, moves: DEMAND_MOVES },
+  { key: "1012010101", auxiliary: "支付宝备付金", currency: "CNY", category: "notice", tier: "notice_7d", tierLabel: "7天通知存款", termLabel: "7天", rate: 0.0055, rateResolved: true, rateSource: "存款协议约定", tierMatchedBy: "科目名「备付金存款」→ 通知 7 天", opening: 2340000, closing: 1876000, moves: DEMAND_MOVES },
+  { key: "1012020101", auxiliary: "建行承兑保证金", currency: "CNY", category: "term", tier: "term_6m", tierLabel: "6个月定期存款", termLabel: "6个月", rate: 0.0085, rateResolved: true, rateSource: "存款协议约定", tierMatchedBy: "科目名「保证金」→ 定期 6 个月", opening: 8000000, closing: 8000000, moves: FLAT_MOVES },
+  { key: "1002010103", account: "1002010103 银行存款-中国银行股份有限公司北京王府井支行-大额存单账户-人民币", auxiliary: "中银大额存单-0517", currency: "CNY", category: "large_cd", tier: "cd_1y", tierLabel: "1年大额存单", termLabel: "1年", rate: 0, rateResolved: false, rateSource: "存单协议（待填）", tierMatchedBy: "底稿备注：2025-05 签发一年期大额存单", opening: 5000000, closing: 5000000, moves: FLAT_MOVES },
+  { key: "1002020101", auxiliary: "汇丰外币户-8801", currency: "USD", category: "term", tier: "term_3m", tierLabel: "3个月定期存款", termLabel: "3个月", rate: 0.0165, rateResolved: true, rateSource: "存款协议约定（美元户）", tierMatchedBy: "档位字典：外币定期", opening: 1284000, closing: 1452800, moves: DEMAND_MOVES },
+  { key: "1002020102", account: "1002020102 银行存款-星展银行（中国）有限公司上海分行-外币存款账户-美元", auxiliary: "星展美元户-6620", currency: "USD", category: "demand", tier: "demand", tierLabel: "活期存款", termLabel: "", rate: 0.0005, rateResolved: true, rateSource: "活期挂牌利率（自动套用）", tierMatchedBy: "档位字典：对公活期", opening: 862000, closing: 905400, moves: DEMAND_MOVES },
+  { key: "1002030101", auxiliary: "中行港币户-2210", currency: "HKD", category: "notice", tier: "notice_1d", tierLabel: "1天通知存款", termLabel: "1天", rate: 0.0035, rateResolved: true, rateSource: "存款协议约定（港币户）", tierMatchedBy: "档位字典：外币通知", opening: 765300, closing: 698400, moves: DEMAND_MOVES },
+];
+
+const DEPOSIT_ROWS = DEPOSIT_ROW_SEEDS.map(depositResultRow);
+/** 页面 liveTotal 的同款算法：只累计已定利率的户，合计与实时重算逐位一致。 */
+const DEPOSIT_INTEREST_TOTAL = DEPOSIT_ROWS.filter((row) => row.rateResolved).reduce(
+  (sum, row) => sum + row.calculatedInterest,
+  0,
+);
+const DEPOSIT_BOOKED = round2(DEPOSIT_INTEREST_TOTAL / 1.032);
+const DEPOSIT_DIFFERENCE = round2(DEPOSIT_INTEREST_TOTAL - DEPOSIT_BOOKED);
+
+const DEPOSIT_SUMMARY = {
+  monthCount: 12,
+  monthlySource: "序时账按月归集月末余额",
+  openingSource: "序时账 2024-12 月末余额",
+  dayBasisLabel: "按实际天数计息（一年 365 天）",
+  amountScheme: "借贷分列（方案B）",
+  amountEvidence: "序时账同时存在「借方金额」「贷方金额」两列且逐行配平。",
+  calculatedInterest: DEPOSIT_INTEREST_TOTAL,
+  hasInterestIncomeAccount: true,
+  bookedInterestIncome: DEPOSIT_BOOKED,
+  bookedNote: "取自 6603 利息收入科目本年累计贷方，外币账户利息已按期末中间价折算。",
+  difference: DEPOSIT_DIFFERENCE,
+  differenceRatio: DEPOSIT_DIFFERENCE / DEPOSIT_BOOKED,
+  reconciliationPassed: true,
+  rateBasisLabel: "利率基准：2025-05-20 各行挂牌利率与客户存款协议。",
+};
+
+const DEPOSIT_EXPORT_PATHS = ["C:\\演示数据\\存款利息测算底稿_2025年度.xlsx"];
+
+const depositPreviewEvents = (): DemoJobEvent[] => [
+  jobEvent("queued", 0, "排队测算存款利息…"),
+  jobEvent("running", 36, `正在按月归集 ${DEPOSIT_ROWS.length} 个计息账户的余额…`),
+  jobEvent("running", 74, "正在匹配利率档位并逐户测算利息…"),
+  jobEvent("completed", 100, `测算完成：${DEPOSIT_ROWS.length} 个账户，测算利息 ${yuan(DEPOSIT_INTEREST_TOTAL)} 元，与 TB 勾稽一致。`, {
+    result: { summary: DEPOSIT_SUMMARY, rows: DEPOSIT_ROWS },
+  }),
+];
+
+const depositExportEvents = (): DemoJobEvent[] => [
+  jobEvent("queued", 0, "排队生成存款利息底稿…"),
+  jobEvent("running", 42, "正在写入测算汇总与逐户利率表…"),
+  jobEvent("running", 83, "正在写入月度余额明细与 TB 勾稽表…"),
+  jobEvent("completed", 100, `导出完成：${DEPOSIT_EXPORT_PATHS[0]} 已生成。`, {
+    outputPaths: DEPOSIT_EXPORT_PATHS,
+    result: { summary: DEPOSIT_SUMMARY, rows: DEPOSIT_ROWS, outputPaths: DEPOSIT_EXPORT_PATHS },
+  }),
+];
+
+// —— 借款利息：逐笔本金变动与利息 ——
+
+type LoanRateSeed = {
+  rateType: "fixed" | "floating";
+  fixedRate?: number;
+  benchmarkRate?: number;
+  spreadBps?: number;
+};
+
+const loanResultRow = (
+  loanId: string,
+  openingPrincipal: number,
+  additions: number,
+  reductions: number,
+  ledgerClosing: number | null,
+  rate: LoanRateSeed,
+  matchStatus: string,
+  matchBasis: string,
+) => {
+  const closingPrincipal = round2(openingPrincipal + additions - reductions);
+  const effective =
+    rate.rateType === "floating"
+      ? (rate.benchmarkRate ?? 0) + (rate.spreadBps ?? 0) / 10000
+      : (rate.fixedRate ?? 0);
+  return {
+    loanId,
+    openingPrincipal,
+    additions,
+    reductions,
+    closingPrincipal,
+    ledgerClosing,
+    ...rate,
+    calculatedInterest: round2(((openingPrincipal + closingPrincipal) / 2) * effective),
+    matchStatus,
+    matchBasis,
+  };
+};
+
+const LOAN_ROWS = [
+  loanResultRow("JK-2025-001", 18000000, 2000000, 0, 20000000, { rateType: "fixed", fixedRate: 0.0345 }, "已匹配", "台账逐笔对应，本金变动与 TB 一致。"),
+  loanResultRow("JK-2025-002", 15000000, 0, 0, 15000000, { rateType: "floating", benchmarkRate: 0.031, spreadBps: 90 }, "已匹配", "挂钩一年期 LPR，季度重定价。"),
+  loanResultRow("JK-2025-003", 12816000, 0, 0, 12708000, { rateType: "fixed", fixedRate: 0.061 }, "已匹配", "美元借款按月均汇率折算为本位币。"),
+  loanResultRow("JK-2025-004", 7440000, 0, 0, 7349400, { rateType: "floating", benchmarkRate: 0.0435, spreadBps: 120 }, "已匹配", "挂钩 HIBOR，按月付息。"),
+  loanResultRow("JK-2025-005", 29000000, 1000000, 0, 30000000, { rateType: "fixed", fixedRate: 0.0425 }, "已匹配", "台账逐笔对应，本金变动与 TB 一致。"),
+  loanResultRow("JK-2025-006", 50000000, 0, 0, 50000000, { rateType: "fixed", fixedRate: 0.0385 }, "已匹配", "台账逐笔对应，本金变动与 TB 一致。"),
+  loanResultRow("JK-2025-007", 5000000, 0, 0, 5000000, { rateType: "fixed", fixedRate: 0.039 }, "已匹配", "执行利率以补充协议为准。"),
+  loanResultRow("JK-2025-008", 4800000, 9600000, 0, 14400000, { rateType: "fixed", fixedRate: 0.021 }, "待复核", "日元借款折算汇率的取数依据待核，见底稿「数据质量」页。"),
+  loanResultRow("JK-2025-009", 12000000, 0, 12000000, 0, { rateType: "fixed", fixedRate: 0.036 }, "已匹配", "2025-08-31 提前结清，按存续期间计息。"),
+  loanResultRow("JK-2025-010", 0, 8592000, 0, 8592000, { rateType: "floating", benchmarkRate: 0.046, spreadBps: 85 }, "待复核", "期后新增借款，期初按零推算，请核对放款凭证。"),
+];
+const LOAN_INTEREST_TOTAL = LOAN_ROWS.reduce((sum, row) => sum + (row.calculatedInterest ?? 0), 0);
+const LOAN_REVIEW_COUNT = LOAN_ROWS.filter((row) => row.matchStatus !== "已匹配").length;
+
+const LOAN_SUMMARY = {
+  loanCount: LOAN_ROWS.length,
+  calculatedInterestTotal: round2(LOAN_INTEREST_TOTAL),
+  reviewCount: LOAN_REVIEW_COUNT,
+  reportEnd: REPORT_END,
+};
+
+const LOAN_EXPORT_PATHS = ["C:\\演示数据\\借款利息测算底稿_2025年度.xlsx"];
+
+const loanPreviewEvents = (): DemoJobEvent[] => [
+  jobEvent("queued", 0, "排队测算借款利息…"),
+  jobEvent("running", 38, "正在逐笔归集本金变动并匹配台账…"),
+  jobEvent("running", 76, "正在按有效利率逐笔测算利息…"),
+  jobEvent("completed", 100, `测算完成：${LOAN_ROWS.length} 笔借款，测算利息 ${yuan(LOAN_INTEREST_TOTAL)} 元，${LOAN_REVIEW_COUNT} 笔待复核。`, {
+    result: { summary: LOAN_SUMMARY, rows: LOAN_ROWS },
+  }),
+];
+
+const loanExportEvents = (): DemoJobEvent[] => [
+  jobEvent("queued", 0, "排队生成借款利息底稿…"),
+  jobEvent("running", 45, "正在写入本金变动与利率测算表…"),
+  jobEvent("running", 84, "正在写入待复核清单与 TB 勾稽表…"),
+  jobEvent("completed", 100, `导出完成：${LOAN_EXPORT_PATHS[0]} 已生成。`, {
+    outputPaths: LOAN_EXPORT_PATHS,
+    result: { summary: LOAN_SUMMARY, rows: LOAN_ROWS, outputPaths: LOAN_EXPORT_PATHS },
+  }),
+];
+
+// —— 汇兑损益：summary 勾稽桥 + 凭证分类复核 + 余额滚动 + 检查与勾稽 ——
+
+const FX_SUMMARY = {
+  realizedGainLoss: 236180,
+  unrealizedAdjustment: 96846,
+  automaticMeasuredFxGainLoss: 333026,
+  tbFxGainLoss: 331260,
+  tbFxGainLossPresentation: "combined",
+  tbRealizedGainLoss: 98400,
+  tbUnrealizedGainLoss: 232860,
+  difference: 1766,
+  differenceRatio: 0.00533,
+  reconciliationPassed: true,
+  needsZeroResultReview: false,
+  unrealizedBalanceBasisComplete: true,
+  unrealizedMissingBalanceKeys: 0,
+  pendingReviewCount: 6,
+  pendingUnclassifiedCount: 2,
+  pendingUnmeasurableCount: 1,
+  notFxEventCount: 3,
+  notFxEventAmount: 45200,
+  uncoveredTbFxGainLoss: 88340,
+};
+
+/** 凭证分类复核：按借贷科目组合分 4 组，覆盖已实现/未实现/不构成/缺证据四种状态。 */
+const FX_CLASSIFICATION_CONTROLS = [
+  { voucherId: "记-0112", date: "2025-01-31", voucherType: "记", systemCategory: "月末重估", patternKey: "重估-银行存款↔汇兑损益", patternLabel: "月末重估：银行存款 ↔ 汇兑损益", classification: "已实现汇兑损益", bookedFxGainLoss: 23500, measurementStatus: "已测算", debitAccounts: ["1002010101"], creditAccounts: ["6603010101"], summary: "月末外币账户按中间价重估" },
+  { voucherId: "记-0233", date: "2025-06-30", voucherType: "记", systemCategory: "月末重估", patternKey: "重估-银行存款↔汇兑损益", patternLabel: "月末重估：银行存款 ↔ 汇兑损益", classification: "已实现汇兑损益", bookedFxGainLoss: 41200, measurementStatus: "已测算", debitAccounts: ["1002010101"], creditAccounts: ["6603010101"], summary: "半年末外币项目重估" },
+  { voucherId: "记-0301", date: "2025-12-31", voucherType: "记", systemCategory: "年末重估", patternKey: "重估-应付账款↔汇兑损益", patternLabel: "年末重估：应付账款 ↔ 汇兑损益", classification: "未实现汇兑损益", bookedFxGainLoss: 86000, measurementStatus: "已测算", debitAccounts: ["6603010101"], creditAccounts: ["2202010101"], summary: "年末应付账款重估" },
+  { voucherId: "记-0302", date: "2025-12-31", voucherType: "记", systemCategory: "年末重估", patternKey: "重估-应付账款↔汇兑损益", patternLabel: "年末重估：应付账款 ↔ 汇兑损益", classification: "未实现汇兑损益", bookedFxGainLoss: 10846, measurementStatus: "已测算", debitAccounts: ["6603010101"], creditAccounts: ["2202020101"], summary: "年末应付账款重估（港币）" },
+  { voucherId: "付-0157", date: "2025-09-12", voucherType: "付", systemCategory: "付款差额", patternKey: "付款差额", patternLabel: "付款汇兑差额", classification: "已实现汇兑损益", bookedFxGainLoss: 18140, measurementStatus: "无法测算：2241 港币户未取得期末原币余额", debitAccounts: ["2241010101"], creditAccounts: ["6603010101"], summary: "支付年度审计费首期款" },
+  { voucherId: "收-0006", date: "2025-01-08", voucherType: "收", systemCategory: "货款收回", patternKey: "货款收回", patternLabel: "出口货款收回", classification: "不构成汇兑事项", bookedFxGainLoss: 0, measurementStatus: "不构成汇兑事项", debitAccounts: ["1002010101"], creditAccounts: ["1122010101"], summary: "收到北美客户出口货款" },
+  { voucherId: "付-0021", date: "2025-02-05", voucherType: "付", systemCategory: "货款收回", patternKey: "货款收回", patternLabel: "出口货款收回", classification: "不构成汇兑事项", bookedFxGainLoss: 0, measurementStatus: "不构成汇兑事项", debitAccounts: ["2202020101"], creditAccounts: ["1002010101"], summary: "支付代垫市场服务费" },
+  { voucherId: "收-0044", date: "2025-03-20", voucherType: "收", systemCategory: "存款利息", patternKey: "存款利息", patternLabel: "外币存款利息", classification: "未实现汇兑损益", bookedFxGainLoss: 710, measurementStatus: "已测算", classificationConflict: "利息收入凭证通常属已实现结构，请复核分类。", debitAccounts: ["1002030101"], creditAccounts: ["6603010101"], summary: "收到港币账户存款利息" },
+];
+
+/** 科目名目录（中英文对照），凭证分组里的科目编码按它显示名称。 */
+const FX_VOUCHER_DETAIL = [
+  { accountCode: "1002010101", accountNameOriginal: "Bank deposits - HSBC Shanghai - USD", accountNameChinese: "银行存款-汇丰银行上海分行-美元户" },
+  { accountCode: "1002030101", accountNameOriginal: "Bank deposits - BOC Shenzhen - HKD", accountNameChinese: "银行存款-中行深圳福田支行-港币户" },
+  { accountCode: "1122010101", accountNameOriginal: "Accounts receivable - North America", accountNameChinese: "应收账款-北美区域销售公司-美元" },
+  { accountCode: "2202010101", accountNameOriginal: "", accountNameChinese: "应付账款-合并范围内全资子公司-美元" },
+  { accountCode: "2202020101", accountNameOriginal: "", accountNameChinese: "应付账款-香港全资子公司-港币" },
+  { accountCode: "2241010101", accountNameOriginal: "", accountNameChinese: "其他应付款-境外审计机构-港币" },
+  { accountCode: "6603010101", accountNameOriginal: "FX gain (loss) - realized", accountNameChinese: "财务费用-汇兑损益-已实现" },
+];
+
+/** 外币货币性项目余额滚动：页面按 suggestedAdjustment 合计显示"与客户入账差异"。 */
+const FX_ROLLFORWARD = [
+  { entity: COMPANY, account: "1002010101 银行存款-汇丰美元户", currency: "USD", openingFunctional: 1284000, jeMovement: 168000, bookedReversal: 0, computedOpening: 1452000, closingForeign: 201500, closingRate: 7.1884, auditBalance: 1448463, suggestedAdjustment: 5120 },
+  { entity: COMPANY, account: "1002030101 银行存款-中行港币户", currency: "HKD", openingFunctional: 765300, jeMovement: -66900, bookedReversal: 0, computedOpening: 698400, closingForeign: 96400, closingRate: 0.9183, auditBalance: 88524, suggestedAdjustment: 3480 },
+  { entity: COMPANY, account: "2202010101 应付账款-合并范围内子公司-美元", currency: "USD", openingFunctional: -2150000, jeMovement: 274000, bookedReversal: -86000, computedOpening: -1962000, closingForeign: -272800, closingRate: 7.1884, auditBalance: -1960998, suggestedAdjustment: 2740 },
+  { entity: COMPANY, account: "2202020101 应付账款-香港子公司-港币", currency: "HKD", openingFunctional: -432600, jeMovement: 34500, bookedReversal: -10846, computedOpening: -408946, closingForeign: -444800, closingRate: 0.9183, auditBalance: -408486, suggestedAdjustment: 1000 },
+];
+
+const FX_CLIENT_REVALUATIONS = [
+  { voucherId: "记-0301", date: "2025-12-31", account: "2202010101 应付账款-美元", currency: "USD", functionalNet: -619430, bookedFxGainLoss: 86000, auditAdjustment: 6480 },
+  { voucherId: "记-0302", date: "2025-12-31", account: "2202020101 应付账款-港币", currency: "HKD", functionalNet: -398100, bookedFxGainLoss: 10846, auditAdjustment: 4366 },
+];
+
+const FX_VALIDATION_WARNINGS = [
+  "TB 的「币种」列同时出现 CNY/USD/HKD：人民币科目请确认币种取值为 CNY，外币科目按该列币种重估。",
+  "2241 其他应付款（港币）未取得期末原币余额，相关凭证已计入「缺重算证据」，不影响其余科目测算。",
+];
+
+const FX_DATA_QUALITY = [
+  { type: "无期末原币余额", severity: "隔离", row: 612, detail: "2241 其他应付款（港币）未取得期末原币余额，相关凭证未进入自动测算。" },
+  { type: "科目余额混合本位币与外币", severity: "提示", row: 731, detail: "收-0006 的对方科目为应收账款（美元），已按不构成汇兑事项处理。" },
+  { type: "同月多笔发生额并入", severity: "合并", row: 204, detail: "同月同账户的多笔外币发生额已并入月度余额滚动测算。" },
+];
+
+const FX_RECONCILIATION = {
+  tbRows: [
+    { account: "6603010101 财务费用-汇兑损益-已实现汇兑损益", amount: 98400, basis: "本年累计借方", sourceRow: 11 },
+    { account: "6603010201 财务费用-汇兑损益-未实现汇兑损益", amount: 232860, basis: "本年累计贷方", sourceRow: 12 },
+  ],
+  jeFxGainLossAfterTransferExclusion: 333026,
+  jeTbDifference: 1766,
+};
+
+const FX_RESULT_CORE = {
+  summary: FX_SUMMARY,
+  classificationControls: FX_CLASSIFICATION_CONTROLS,
+  voucherDetail: FX_VOUCHER_DETAIL,
+  unrealizedBalanceRollforward: FX_ROLLFORWARD,
+  clientRevaluationVouchers: FX_CLIENT_REVALUATIONS,
+  balanceRollforwardValidation: {
+    unit: "人民币元",
+    issues: [
+      { entity: COMPANY, account: "1122010101 应收账款-北美客户", currency: "USD", opening: 3215000, jeMovement: -341000, derivedClosing: 2874000, tbClosing: 2861400, difference: 12600 },
+    ],
+  },
+  validation: { warnings: FX_VALIDATION_WARNINGS },
+  dataQuality: FX_DATA_QUALITY,
+  reconciliation: FX_RECONCILIATION,
+  previewToken: "demo-fx-preview-2025-12-31",
+};
+
+const FX_EXPORT_PATHS = ["C:\\演示数据\\汇兑损益测算底稿_2025年度.xlsx"];
+
+const fxPreviewEvents = (): DemoJobEvent[] => [
+  jobEvent("queued", 0, "排队测算汇兑损益…"),
+  jobEvent("running", 34, "正在识别外币凭证并按结构分类…"),
+  jobEvent("running", 71, "正在逐月滚动外币货币性项目余额…"),
+  jobEvent("completed", 100, `测算完成：已实现 ${yuan(FX_SUMMARY.realizedGainLoss)} 元，未实现 ${yuan(FX_SUMMARY.unrealizedAdjustment)} 元，与 TB 差异 ${yuan(FX_SUMMARY.difference)} 元（0.53%）。`, {
+    result: FX_RESULT_CORE,
+  }),
+];
+
+const fxExportEvents = (): DemoJobEvent[] => [
+  jobEvent("queued", 0, "排队生成汇兑损益底稿…"),
+  jobEvent("running", 44, "正在写入余额滚动与未实现损益测算表…"),
+  jobEvent("running", 85, "正在写入凭证分类复核与 TB 勾稽表…"),
+  jobEvent("completed", 100, `导出完成：${FX_EXPORT_PATHS[0]} 已生成。`, {
+    outputPaths: FX_EXPORT_PATHS,
+    // 页面对 fx.export 的结果按键合并进现有 result，这里给全量字段，
+    // 保证"不先测算直接导出"时结果区同样完整可渲染。
+    result: { ...FX_RESULT_CORE, outputPaths: FX_EXPORT_PATHS },
+  }),
+];
+
+export const jobHandlers: Record<string, (params: Record<string, unknown>) => DemoJobEvent[]> = {
+  "deposit.preview": depositPreviewEvents,
+  "deposit.export": depositExportEvents,
+  "loan.preview": loanPreviewEvents,
+  "loan.export": loanExportEvents,
+  "fx.preview": fxPreviewEvents,
+  "fx.export": fxExportEvents,
 };

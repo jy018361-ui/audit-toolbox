@@ -13,7 +13,14 @@ const os = require("node:os");
  */
 const baseUrl = process.env.STATIC_AUDIT_URL || "http://127.0.0.1:1422";
 const catalog = JSON.parse(fs.readFileSync("public/tool-catalog.json", "utf8"));
-const routes = ["/", "/history", "/settings", ...catalog.map((tool) => tool.route)];
+const requestedRoutes = new Set((process.env.STATIC_AUDIT_ROUTES || "")
+  .split(",").map((value) => value.trim()).filter(Boolean));
+const routes = ["/", "/history", "/settings", ...catalog.map((tool) => tool.route)]
+  .filter((route) => !requestedRoutes.size || requestedRoutes.has(route));
+const requestedWidths = new Set((process.env.STATIC_AUDIT_VIEWPORTS || "")
+  .split(",").map((value) => value.trim()).filter(Boolean));
+const themes = (process.env.STATIC_AUDIT_THEMES || "blue-white")
+  .split(",").map((value) => value.trim()).filter(Boolean);
 const viewports = [
   { width: 1600, height: 900, label: "1600@100%" },
   { width: 1440, height: 900, label: "1440@100%" },
@@ -26,7 +33,8 @@ const viewports = [
   { width: 1000, height: 680, label: "1000-compact" },
   { width: 960, height: 640, label: "960-compact" },
   { width: 900, height: 640, label: "900-compact" },
-];
+].filter((viewport) => !requestedWidths.size || requestedWidths.has(String(viewport.width)) ||
+  requestedWidths.has(viewport.label));
 
 const geometryAudit = () => {
   const visible = (element) => {
@@ -37,6 +45,7 @@ const geometryAudit = () => {
       rect.height > 0 &&
       style.display !== "none" &&
       style.visibility !== "hidden" &&
+      !element.matches(".sr-only") &&
       !element.closest("[hidden], [inert], [role=dialog], .dialog-overlay")
     );
   };
@@ -200,7 +209,8 @@ const geometryAudit = () => {
         localStorage.setItem("audit-toolbox.demo-data", "1");
       });
       for (const route of routes) {
-        console.log(`Auditing ${viewport.label} ${route}`);
+        for (const theme of themes) {
+        console.log(`Auditing ${viewport.label} ${theme} ${route}`);
         await page.goto(`${baseUrl}/#${route}`, { waitUntil: "domcontentloaded" });
         await page.locator(".main").waitFor();
         try {
@@ -208,25 +218,27 @@ const geometryAudit = () => {
         } catch {
           results.push({
             viewport: viewport.label,
+            theme,
             route,
             issues: [{ kind: "page-render-failed", selector: ".page-header" }],
           });
           continue;
         }
-        await page.evaluate(async () => {
-          document.documentElement.dataset.theme = "blue-white";
+        await page.evaluate(async (selectedTheme) => {
+          document.documentElement.dataset.theme = selectedTheme;
           for (const details of document.querySelectorAll("main details")) details.open = true;
           await document.fonts.ready;
           await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        });
+        }, theme);
         const issues = await page.evaluate(geometryAudit);
-        results.push({ viewport: viewport.label, route, issues });
+        results.push({ viewport: viewport.label, theme, route, issues });
         if (issues.length) {
           const safeRoute = route === "/" ? "workspace" : route.replaceAll("/", "_");
           await page.screenshot({
-            path: path.join(output, `${viewport.label}-${safeRoute}.png`),
+            path: path.join(output, `${viewport.label}-${theme}-${safeRoute}.png`),
             fullPage: true,
           });
+        }
         }
       }
       await context.close();
@@ -240,6 +252,7 @@ const geometryAudit = () => {
   const failures = results.filter((result) => result.issues.length);
   const summary = failures.slice(0, 80).map((result) => ({
     viewport: result.viewport,
+    theme: result.theme,
     route: result.route,
     issues: result.issues.slice(0, 12),
   }));

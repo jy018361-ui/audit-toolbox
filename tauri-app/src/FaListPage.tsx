@@ -243,6 +243,7 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
         className="fx-mode-bar fa-mode-tabs"
         role="tablist"
         aria-label="固定资产底稿模式"
+        data-tour="tool-mode"
       >
         <button
           type="button"

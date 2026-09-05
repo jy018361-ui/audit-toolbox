@@ -6,7 +6,7 @@ import {
   render,
   screen,
 } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { StepTourHint } from "./StepTourHint";
 import { ToolTourProvider } from "./ToolTourContext";
@@ -124,5 +124,67 @@ describe("StepTourHint", () => {
       </ToolTourProvider>,
     );
     expect(screen.getByText(/完成这一步的操作后/)).toBeInTheDocument();
+  });
+
+  it("弹出时聚光灯挖孔锁定可见的步骤条", () => {
+    vi.spyOn(
+      HTMLElement.prototype,
+      "getBoundingClientRect",
+    ).mockImplementation(function (this: HTMLElement) {
+      if (this.getAttribute("data-tour") === "step-indicator") {
+        return {
+          top: 120,
+          left: 80,
+          right: 320,
+          bottom: 168,
+          width: 240,
+          height: 48,
+          x: 80,
+          y: 120,
+          toJSON: () => ({}),
+        } as DOMRect;
+      }
+      return {
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        width: 0,
+        height: 0,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect;
+    });
+    const indicator = document.createElement("div");
+    indicator.setAttribute("data-tour", "step-indicator");
+    document.body.appendChild(indicator);
+
+    const { rerender } = render(<StepTourHint steps={steps} current={0} />);
+    rerender(<StepTourHint steps={steps} current={1} />);
+    const spotlight = document.querySelector(
+      ".step-hint-spotlight",
+    ) as HTMLElement;
+    expect(spotlight).not.toBeNull();
+    // 挖孔按步骤条矩形外扩 6px。
+    expect(parseFloat(spotlight.style.top)).toBe(114);
+    expect(parseFloat(spotlight.style.left)).toBe(74);
+    expect(parseFloat(spotlight.style.width)).toBe(252);
+    expect(parseFloat(spotlight.style.height)).toBe(60);
+    // 有挖孔时挡板保持透明，压暗交给聚光灯外圈。
+    expect(
+      document.querySelector(".step-hint-veil")?.classList.contains(
+        "step-hint-veil-dimmed",
+      ),
+    ).toBe(false);
+    vi.restoreAllMocks();
+  });
+
+  it("量不到可见步骤条时不挖孔，挡板整屏压暗兜底", () => {
+    // jsdom 无布局：所有元素宽高为 0，相当于步骤条不可见。
+    const { rerender } = render(<StepTourHint steps={steps} current={0} />);
+    rerender(<StepTourHint steps={steps} current={1} />);
+    expect(document.querySelector(".step-hint-spotlight")).toBeNull();
+    expect(document.querySelector(".step-hint-veil-dimmed")).not.toBeNull();
   });
 });

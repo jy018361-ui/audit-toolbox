@@ -694,8 +694,8 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
           source: {
             inputPath: item.path,
             sheet: item.classification.sheet,
-            headerRow: item.classification.headerRow,
-            headerDepth: item.classification.headerDepth,
+            headerRow: 0,
+            headerDepth: 0,
           },
         })) as Inspection;
         const source: PairingFile = {
@@ -740,6 +740,24 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     setInspects(nextInspects);
     setMappings(nextMappings);
     setGroups(nextGroups);
+    const defaultGroup =
+      nextGroups.find((group) => group.needsReview) ?? nextGroups[0];
+    setExpanded((current) => {
+      if (
+        current &&
+        nextGroups.some(
+          (group) =>
+            group.id === current.groupId &&
+            (current.kind === "tb" ? group.tb : group.je),
+        )
+      )
+        return current;
+      if (!defaultGroup) return undefined;
+      return {
+        groupId: defaultGroup.id,
+        kind: defaultGroup.tb ? "tb" : "je",
+      };
+    });
     // LLM 联合复核的结论跟着组走：组还在就继续算复核过，组被解散才清掉。
     const survivingIds = new Set(nextGroups.map((group) => group.id));
     setLlmReviews((current) =>
@@ -819,8 +837,8 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         source: {
           inputPath: file.path,
           sheet: current.sheet,
-          headerRow: current.headerRow,
-          headerDepth: current.headerDepth,
+          headerRow: 0,
+          headerDepth: 0,
         },
       })) as Inspection;
       const changed: PairingFile = {
@@ -1410,7 +1428,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   <span>配对组</span>
                   <span>科目余额表 TB</span>
                   <span>序时账 JE</span>
-                  <span>映射与操作</span>
+                  <span>字段预览与映射</span>
                 </div>
                 {groups.map((group) => (
                   <div
@@ -1548,7 +1566,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                             <Button
                               key={kind}
                               type="button"
-                              variant={active ? "secondary" : "ghost"}
+                              variant="secondary"
                               size="sm"
                               disabled={busy || !available}
                               aria-expanded={active}
@@ -1561,7 +1579,10 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                 )
                               }
                             >
-                              {active ? "收起" : `${kind.toUpperCase()} 映射`}
+                              <Eye aria-hidden="true" />
+                              {active
+                                ? `收起 ${kind.toUpperCase()} 映射`
+                                : `查看并调整 ${kind.toUpperCase()} 映射`}
                             </Button>
                           );
                         })}

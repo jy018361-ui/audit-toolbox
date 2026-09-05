@@ -29,6 +29,7 @@ import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/EmptyState";
 import { SwitchInput } from "@/components/SwitchInput";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
+import { JobProgress } from "@/components/JobProgress";
 import { Card } from "@/components/ui/card";
 import "./roll-forward.css";
 type RollSubject = {
@@ -1460,10 +1461,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
         </div>
         {job && (
           <>
-            <div className={`job-banner ${job.severity}`}>
-              <strong>{job.message}</strong>
-            </div>
-            <progress max={Math.max(job.total, 1)} value={job.current} />
+            <JobProgress job={job} />
             {job.outputPaths.map((path) => (
               <Button
                 key={path}

@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 export type FileDropInputProps = {
   /** 已选文件路径 */
   value: string;
+  /** 多文件等场景的明确展示文案；不再把组合文案误当成本地路径截取文件名。 */
+  displayValue?: ReactNode;
   disabled?: boolean;
   placeholder?: string;
   /** 点击选择文件 */
@@ -34,6 +36,7 @@ export type FileDropInputProps = {
  */
 export function FileDropInput({
   value,
+  displayValue,
   disabled,
   placeholder,
   onBrowse,
@@ -79,7 +82,7 @@ export function FileDropInput({
             aria-describedby={describedBy}
             aria-invalid={Boolean(invalid) || undefined}
           >
-            {displayFileName(value)}
+            {displayValue ?? displayFileName(value)}
           </button>
           {onClear && (
             <Button

@@ -104,10 +104,14 @@ export async function classifyLedgerWorkbookSheets<
 
 /** 低于公共分类器既有的 5 分可靠线时，不把该 Sheet 暴露成账表来源。 */
 export function ledgerClassificationIsVisible(
-  classification: LedgerSourceClassification,
+  classification: LedgerSourceClassification & { sheet?: string },
 ): boolean {
   // 兼容历史任务记录和旧测试桩：旧分类结果没有 scores 时沿用原先“显示”的行为。
   if (!classification.scores) return true;
+  // 透视、核对和说明页通常是审计人后加的辅助 Sheet。即使它们因汇总列名拿到
+  // TB 分数，也不能抢占原始 TB/JE；需要使用时应选择原始数据 Sheet。
+  if (/(?:透视|pivot|check|核对|校验|说明|封面|目录)/i.test(classification.sheet ?? ""))
+    return false;
   return Math.max(classification.scores.je, classification.scores.tb) >= 5;
 }
 

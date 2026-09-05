@@ -8,6 +8,9 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "audit:layout:static": "node scripts/static-layout-audit.cjs",
+    "audit:layout:tasks": "node scripts/task-state-layout-audit.cjs",
+    "audit:layout:overlays": "node scripts/overlay-layout-audit.cjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

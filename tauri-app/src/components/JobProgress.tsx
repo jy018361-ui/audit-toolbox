@@ -1,6 +1,8 @@
 import { Button } from "@/components/ui/button";
 import { useJobOwnedByDialog } from "@/components/JobDialog";
 import type { JobEvent } from "@/types";
+import { jobPresentation } from "@/jobState";
+import "./task-state.css";
 
 export type JobProgressProps = {
   job: JobEvent;
@@ -26,39 +28,41 @@ export function JobProgress({
   // 弹窗最小化后 owned 转 false，内联进度条回到页面上。
   const owned = useJobOwnedByDialog(job.jobId);
   const max = Math.max(job.total, 1);
-  const value = Math.min(job.current, max);
-  const pct = Math.round((value / max) * 100);
-  const tone =
-    job.severity === "error"
-      ? "danger"
-      : job.severity === "warning"
-        ? "warning"
-        : job.severity === "success"
-          ? "success"
-          : "info";
+  const value = Math.max(0, Math.min(job.current, max));
+  const presentation = jobPresentation(job);
 
   if (owned) return null;
 
   return (
-    <div className={`job-progress ${compact ? "job-progress--compact" : ""}`}>
-      <div className={`job-banner ${tone}`}>
-        {tone === "success" && (
-          <span className="job-done-check" aria-hidden="true">
-            <svg viewBox="0 0 16 16">
-              <path
-                d="M3 8.5 6.5 12 13 4.5"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </span>
-        )}
-        <strong>{job.message}</strong>
-        <span className="job-pct">{job.total > 0 ? `${pct}%` : "处理中"}</span>
-        {onCancel && (
+    <div
+      className={`job-progress ${compact ? "job-progress--compact" : ""}`}
+      role={presentation.state === "failed" ? "alert" : "status"}
+      aria-live={presentation.state === "failed" ? "assertive" : "polite"}
+      data-job-state={presentation.state}
+    >
+      <div className={`job-banner ${presentation.tone}`}>
+        <strong className="job-progress-copy">
+          {presentation.tone === "success" && (
+            <span className="job-done-check" aria-hidden="true">
+              <svg viewBox="0 0 16 16">
+                <path
+                  d="M3 8.5 6.5 12 13 4.5"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </span>
+          )}
+          <span className="job-progress-message">{job.message || presentation.label}</span>
+        </strong>
+        <span className="job-progress-state">{presentation.label}</span>
+        <span className="job-pct">
+          {presentation.percent === null ? presentation.label : `${presentation.percent}%`}
+        </span>
+        {onCancel && !presentation.terminal && (
           <Button
             variant="ghost"
             size="xs"
@@ -70,7 +74,14 @@ export function JobProgress({
           </Button>
         )}
       </div>
-      <progress className={`progress-tone-${tone}`} max={max} value={job.total > 0 ? value : undefined} />
+      {!presentation.terminal && (
+        <progress
+          aria-label={`${presentation.label}进度`}
+          className={`progress-tone-${presentation.tone}`}
+          max={max}
+          value={job.total > 0 ? value : undefined}
+        />
+      )}
     </div>
   );
 }

@@ -1,15 +1,13 @@
 /* 行话问号微提示。颜色只引用设计 token，不写字面量。 */
 
-.jargon-tip {
-  position: relative;
-  display: inline-flex;
-  vertical-align: baseline;
-}
-
 .jargon-tip-button {
   display: inline-flex;
   align-items: center;
-  padding: 0;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
+  margin: 0;
+  padding: 5px;
   border: none;
   background: none;
   color: var(--text-muted);
@@ -30,14 +28,14 @@
 }
 
 .jargon-tip-bubble {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%);
+  position: fixed;
   z-index: 60;
   box-sizing: border-box;
   width: max-content;
-  max-width: 280px;
+  max-width: min(280px, calc(100vw - 16px));
+  max-height: min(240px, calc(100dvh - 16px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--r-sm);
   background: var(--ink-strong);
@@ -47,24 +45,8 @@
   font-weight: var(--fw-regular);
   text-align: left;
   box-shadow: var(--shadow-card);
+  overflow-wrap: anywhere;
   animation: jargon-tip-fade 150ms ease-out;
-}
-
-/* 默认在图标上方居中；贴近视口右缘时整体右对齐，防止被截断。 */
-.jargon-tip-right .jargon-tip-bubble {
-  left: auto;
-  right: 0;
-  transform: none;
-}
-
-/* 图标与气泡之间的 6px 空隙也要能悬停，否则指针穿过去时气泡会闪没。 */
-.jargon-tip-bubble::before {
-  content: "";
-  position: absolute;
-  top: 100%;
-  left: 0;
-  right: 0;
-  height: 6px;
 }
 
 @keyframes jargon-tip-fade {

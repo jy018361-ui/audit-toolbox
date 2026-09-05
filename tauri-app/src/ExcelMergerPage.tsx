@@ -20,6 +20,7 @@ import { BusySpinner } from "@/components/BusySpinner";
 import { SwitchInput } from "@/components/SwitchInput";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
+import { JobProgress } from "@/components/JobProgress";
 
 type MergerFile = {
   path: string;
@@ -635,15 +636,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         <h2>进度与结果</h2>
         {job ? (
           <>
-            <div className={`job-banner ${job.severity}`}>
-              <strong>{job.message}</strong>
-            </div>
-            {!["failed", "cancelled"].includes(job.phase) && (
-              <progress
-                max={Math.max(job.total, 1)}
-                value={job.total ? job.current : 0}
-              />
-            )}
+            <JobProgress job={job} />
             {result && <ResultView value={result} />}
           </>
         ) : result ? (

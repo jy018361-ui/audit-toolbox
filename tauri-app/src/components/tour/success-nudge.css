@@ -3,7 +3,7 @@
 
 .success-nudge {
   position: fixed;
-  bottom: 24px;
+  bottom: max(24px, env(safe-area-inset-bottom));
   left: 50%;
   z-index: 45;
   display: flex;
@@ -11,7 +11,7 @@
   gap: var(--sp-3);
   width: max-content;
   max-width: calc(100vw - 32px);
-  padding: var(--sp-3) var(--sp-4);
+  padding: var(--sp-3) calc(var(--sp-4) + 24px) var(--sp-3) var(--sp-4);
   background: var(--surface);
   color: var(--ink);
   border: 1px solid var(--success-border);
@@ -36,6 +36,7 @@
 }
 
 .success-nudge-text {
+  min-width: 0;
   margin: 0;
   font-size: var(--fs-md);
   font-weight: var(--fw-strong);
@@ -45,11 +46,13 @@
 
 .success-nudge-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--sp-2);
   margin-left: var(--sp-2);
 }
 
 .success-nudge-btn {
+  min-height: 32px;
   padding: var(--sp-1) var(--sp-3);
   font-size: var(--fs-sm);
   color: var(--brand-link);
@@ -79,8 +82,8 @@
   position: absolute;
   top: 6px;
   right: 6px;
-  width: 22px;
-  height: 22px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   border: none;
   background: none;
@@ -92,6 +95,39 @@
 
 .success-nudge-close:hover {
   color: var(--ink);
+}
+
+.success-nudge-btn:focus-visible,
+.success-nudge-close:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+@media (max-width: 640px), (max-height: 520px) {
+  .success-nudge {
+    right: var(--sp-2);
+    bottom: max(var(--sp-2), env(safe-area-inset-bottom));
+    left: var(--sp-2);
+    width: auto;
+    max-width: none;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    transform: none;
+  }
+
+  .success-nudge-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .success-nudge-actions > button {
+    flex: 1 1 auto;
+  }
+
+  @keyframes success-nudge-rise-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: none; }
+  }
 }
 
 @keyframes success-nudge-rise-in {

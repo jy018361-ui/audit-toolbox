@@ -374,8 +374,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       for (const item of selected) {
         await inspect(item.kind, item.path, {
           sheet: item.classification.sheet,
-          headerRow: item.classification.headerRow,
-          headerDepth: item.classification.headerDepth,
+          headerRow: 0,
+          headerDepth: 0,
         });
       }
       setPairStatus(

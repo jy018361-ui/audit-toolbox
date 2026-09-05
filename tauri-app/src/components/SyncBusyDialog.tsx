@@ -67,9 +67,14 @@ function labelOf(method: string): string {
  * 把弹窗藏起来让操作继续后台跑，结果照常返回页面。 dismissed 只对当前
  * 这批忙碌生效（空闲→忙碌算一批），下一批慢操作照常重新弹出。
  */
-export function SyncBusyDialog() {
-  const [visible, setVisible] = useState(false);
-  const [entries, setEntries] = useState<SyncBusyEntry[]>([]);
+export function SyncBusyDialog({
+  fixtureEntries,
+}: {
+  /** 仅供开发态几何夹具注入；应用运行时不传，仍完全由 API 广播驱动。 */
+  fixtureEntries?: SyncBusyEntry[];
+} = {}) {
+  const [visible, setVisible] = useState(() => Boolean(fixtureEntries?.length));
+  const [entries, setEntries] = useState<SyncBusyEntry[]>(() => fixtureEntries ?? []);
   const entriesRef = useRef<SyncBusyEntry[]>([]);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 忙碌批次号：每次从空闲转入忙碌递增；用户「后台等待」掉的就是当前批。
@@ -77,8 +82,14 @@ export function SyncBusyDialog() {
   const dismissedRef = useRef<number | null>(null);
 
   useEffect(
-    () =>
-      onSyncBusyChange((next) => {
+    () => {
+      if (fixtureEntries) {
+        entriesRef.current = fixtureEntries;
+        setEntries(fixtureEntries);
+        setVisible(fixtureEntries.length > 0);
+        return;
+      }
+      return onSyncBusyChange((next) => {
         const wasIdle = entriesRef.current.length === 0;
         entriesRef.current = next;
         setEntries(next);
@@ -107,8 +118,9 @@ export function SyncBusyDialog() {
           setVisible(false);
           dismissedRef.current = null;
         }
-      }),
-    [],
+      });
+    },
+    [fixtureEntries],
   );
 
   // 卸载时清掉计时器，避免测试环境泄漏。

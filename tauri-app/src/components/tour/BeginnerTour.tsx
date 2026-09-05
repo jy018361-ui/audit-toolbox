@@ -265,8 +265,9 @@ export function BeginnerTour({
       spaceBelow >= bh + TARGET_GAP + EDGE_GAP || spaceBelow >= rect.top
         ? "bottom"
         : "top";
-    const rawTop =
-      placement === "bottom" ? rect.bottom + TARGET_GAP : rect.top - TARGET_GAP;
+    const rawTop = placement === "bottom"
+      ? rect.bottom + TARGET_GAP
+      : rect.top - TARGET_GAP - bh;
     // 兜底：目标特别高时上下都放不下，算出的 top 会落到屏幕外，
     // 把气泡夹回视口内保证任何情况下提示都可见。
     const top = Math.min(
@@ -361,7 +362,7 @@ export function BeginnerTour({
   // 每换一步把焦点移到主按钮，键盘用户不用重新找位置。
   useEffect(() => {
     primaryButtonRef.current?.focus();
-  }, [index]);
+  }, [index, bubblePos, targetGaveUp]);
 
   if (!currentStep) return null;
   const wantsTarget = Boolean(currentStep.targetSelector);

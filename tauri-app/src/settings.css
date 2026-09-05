@@ -35,6 +35,38 @@
   margin: 0;
 }
 
+/* 普通设置卡片统一由父级控制纵向节奏。独立的 .field 之前是 inline label，
+   连续字段会挤在同一行，焦点圈也会压到下一项；全局字段现已成为 grid，
+   这里补齐卡片直接子级之间的固定间距。 */
+.settings-page .settings-col > .list-card > p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.settings-page .settings-col > .list-card > p + p {
+  margin-top: var(--sp-2);
+}
+
+.settings-page .settings-col > .list-card > p + .field,
+.settings-page .settings-col > .list-card > .field + .field,
+.settings-page .settings-col > .list-card > p + .theme-picker,
+.settings-page .settings-col > .list-card > p + .newbie-replay-row {
+  margin-top: var(--sp-4);
+}
+
+.settings-page .newbie-replay-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.settings-page .newbie-replay-row small {
+  min-width: min(100%, 18rem);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
 .settings-page .page-header {
   position: relative;
   padding-right: calc(var(--sp-7) * 6);
@@ -50,6 +82,11 @@
   margin-bottom: var(--sp-4);
   padding: 0;
   overflow: hidden;
+}
+
+.settings-page .settings-update-panel:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .settings-page .settings-update-trigger.has-update {
@@ -75,6 +112,7 @@
 
 .settings-update-title-block {
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .settings-update-heading h2 {
@@ -90,6 +128,8 @@
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .settings-update-heading-actions button {
@@ -112,7 +152,7 @@
 }
 
 .settings-release-notes {
-  max-height: min(46vh, 520px);
+  max-height: min(46dvh, 520px);
   overflow-y: auto;
   padding: 0 var(--sp-5);
   scrollbar-gutter: stable;
@@ -132,6 +172,8 @@
   display: flex;
   justify-content: space-between;
   gap: var(--sp-4);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .settings-update-status-line strong {
@@ -319,6 +361,31 @@
   gap: var(--sp-3);
 }
 
+@media (max-width: 720px) {
+  .settings-page .page-header {
+    padding-right: 0;
+  }
+
+  .settings-page .page-header-actions {
+    position: static;
+    margin-top: var(--sp-3);
+  }
+
+  .settings-page .form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-page .form-grid .field input,
+  .settings-page .form-grid .field select {
+    max-width: none;
+  }
+
+  .settings-page .checkbox-field {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 .settings-page .checkbox-field > span {
   margin-bottom: 0;
 }
@@ -387,13 +454,12 @@
 }
 
 .settings-save-bar {
-  position: sticky;
-  bottom: 0;
+  position: static;
   justify-content: space-between;
   padding: var(--sp-4);
+  padding-bottom: max(var(--sp-4), env(safe-area-inset-bottom));
   background: var(--surface);
   border-top: 1px solid var(--border);
-  z-index: 2;
 }
 
 .settings-save-bar.is-dirty {
@@ -408,4 +474,41 @@
 
 .settings-page .data-handling-notice {
   margin: var(--sp-4) 0;
+}
+
+@media (max-width: 640px), (max-height: 520px) {
+  .settings-update-heading {
+    flex-direction: column;
+    gap: var(--sp-3);
+    padding: var(--sp-4);
+  }
+
+  .settings-update-heading-actions,
+  .settings-update-actions {
+    width: 100%;
+  }
+
+  .settings-update-heading-actions {
+    justify-content: space-between;
+  }
+
+  .settings-release-notes,
+  .settings-update-actions {
+    padding-inline: var(--sp-4);
+  }
+
+  .settings-update-status,
+  .settings-update-panel > .settings-test-result,
+  .settings-update-panel > .settings-release-entry {
+    margin-inline: var(--sp-4);
+  }
+
+  .settings-update-actions > button,
+  .settings-save-bar > button {
+    flex: 1 1 160px;
+  }
+
+  .settings-save-bar {
+    align-items: stretch;
+  }
 }

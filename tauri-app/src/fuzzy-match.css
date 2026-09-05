@@ -58,9 +58,13 @@
 }
 .fuzzy-settings-grid label {
   display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
   gap: 5px;
   color: var(--muted-foreground);
   font-size: 12px;
+}
+.fuzzy-settings-grid label > select {
+  grid-column: 1 / -1;
 }
 .fuzzy-settings-grid .fx-hint {
   margin: 0 0 8px;
@@ -327,38 +331,8 @@
   color: var(--foreground);
   border-color: var(--foreground);
 }
-.fuzzy-modal-mask {
-  position: fixed;
-  inset: 0;
-  background: var(--overlay-backdrop);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 60;
-}
 .fuzzy-modal {
-  width: min(440px, 92vw);
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 20px;
-  display: grid;
-  gap: 14px;
-  box-shadow: var(--shadow-overlay);
-}
-.fuzzy-modal h4 {
-  margin: 0;
-}
-.fuzzy-modal p {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: 13px;
-  line-height: 1.6;
-}
-.fuzzy-modal-actions {
-  display: flex;
-  gap: 10px;
-  justify-content: flex-end;
+  width: min(440px, calc(100vw - 32px));
 }
 .fuzzy-notice {
   position: fixed;

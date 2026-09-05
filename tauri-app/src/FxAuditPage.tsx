@@ -739,6 +739,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   const [tbCurrencyConfirmed, setTbCurrencyConfirmed] = useState(false);
   const [alignment, setAlignment] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [changingKind, setChangingKind] = useState<"je" | "tb">();
   const [error, setError] = useState("");
   // 一键复核的进行态与结果文案由共享 hook 管理（与存款利息同一实现）。
   const reviews = useLedgerDictReviews(engineCall, {
@@ -1112,8 +1113,9 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
             source: {
               inputPath: item.path,
               sheet: item.classification.sheet,
-              headerRow: item.classification.headerRow,
-              headerDepth: item.classification.headerDepth,
+              // 分类阶段只负责选 Sheet；正式 inspect 必须重新自动判定表头。
+              headerRow: 0,
+              headerDepth: 0,
             },
           })) as Inspection;
           applyInspection(item.kind, item.path, response);
@@ -1223,7 +1225,13 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     const occupied = to === "je" ? je : tb;
     if (!path || !current || from === to) return;
     setBusy(true);
+    setChangingKind(from);
     setError("");
+    setSourceStatus(
+      occupied
+        ? "正在交换 JE 与 TB，并重新自动识别标题行、层数和字段…"
+        : `正在更正为 ${to.toUpperCase()}，并重新自动识别标题行、层数和字段…`,
+    );
     setAlignment([]);
     setResult(undefined);
     try {
@@ -1239,8 +1247,9 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
             source: {
               inputPath: source.path,
               sheet: source.inspection.sheet,
-              headerRow: source.inspection.headerRow,
-              headerDepth: source.inspection.headerDepth,
+              // 更正类型意味着旧类型下的表头结论也失效，重新自动识别。
+              headerRow: 0,
+              headerDepth: 0,
             },
           })) as Inspection,
       );
@@ -1265,6 +1274,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     } catch (e) {
       setError(errorText(e));
     } finally {
+      setChangingKind(undefined);
       setBusy(false);
     }
   }
@@ -1569,7 +1579,9 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
               </div>
               <FileDropInput
                 containerRef={uploadDropRef}
-                value={[
+                value={jePath || tbPath}
+                ariaLabel="重新选择 JE、TB 文件"
+                displayValue={[
                   jePath && `JE：${fileName(jePath)}${je?.sheet ? ` / ${je.sheet}` : ""}`,
                   tbPath && `TB：${fileName(tbPath)}${tb?.sheet ? ` / ${tb.sheet}` : ""}`,
                 ]
@@ -1640,7 +1652,13 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   onKindChange={
                     () => void changeSourceKind("je", "tb")
                   }
-                  kindChangeLabel="更正为 TB"
+                  kindChangeLabel={
+                    changingKind === "je"
+                      ? "正在更正…"
+                      : tbPath
+                        ? "与 TB 交换"
+                        : "更正为 TB"
+                  }
                 />
               ) : tbPath ? (
                 <Card className="fx-source-empty">
@@ -1673,7 +1691,13 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   onKindChange={
                     () => void changeSourceKind("tb", "je")
                   }
-                  kindChangeLabel="更正为 JE"
+                  kindChangeLabel={
+                    changingKind === "tb"
+                      ? "正在更正…"
+                      : jePath
+                        ? "与 JE 交换"
+                        : "更正为 JE"
+                  }
                 />
               ) : jePath ? (
                 <Card className="fx-source-empty">

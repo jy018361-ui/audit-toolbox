@@ -715,8 +715,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
             source: {
               inputPath: item.path,
               sheet: item.classification.sheet,
-              headerRow: item.classification.headerRow,
-              headerDepth: item.classification.headerDepth,
+              headerRow: 0,
+              headerDepth: 0,
             },
           })) as Inspection;
           applyInspection(item.kind, item.path, response);
@@ -811,8 +811,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
             source: {
               inputPath: source.path,
               sheet: source.inspection.sheet,
-              headerRow: source.inspection.headerRow,
-              headerDepth: source.inspection.headerDepth,
+              headerRow: 0,
+              headerDepth: 0,
             },
           })) as Inspection,
       );

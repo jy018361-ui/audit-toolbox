@@ -6,11 +6,22 @@ import "./beginner-tour.css";
 
 type HintStep = { key: string; label: string; disabled?: boolean };
 
+type Rect = { top: number; left: number; width: number; height: number };
+
+const SPOTLIGHT_PAD = 6;
+
+/** keep-alive 隐藏页宽高为 0，据此排除，只锁定可见的步骤条。 */
+function isVisibleIndicator(el: HTMLElement): boolean {
+  const rect = el.getBoundingClientRect();
+  return rect.width >= 2 && rect.height >= 2;
+}
+
 /**
- * 工具内的分步提示（新手模式）：步骤条切换到某一步时，在该步骤条下方
- * 弹出一张小卡片，说明当前是第几步、这一步叫什么、做完怎么继续。
- * 挂在 StepIndicator 内部——18 个工具共用步骤条，一处接入全部生效。
- * 几秒后自动消失，也可手动关闭；总开关关闭时不弹。
+ * 工具内的分步提示（新手模式）：步骤条切换到某一步时，弹出一张小卡片，
+ * 说明当前是第几步、这一步叫什么、做完怎么继续。弹出期间全屏压暗并
+ * 挖孔锁定步骤条，观感与完整引导一致。挂在 StepIndicator 内部——
+ * 18 个工具共用步骤条，一处接入全部生效。几秒后自动消失，也可手动
+ * 关闭；总开关关闭时不弹。
  */
 export function StepTourHint({
   steps,
@@ -25,6 +36,8 @@ export function StepTourHint({
   const [hint, setHint] = useState<{ index: number; nonce: number } | null>(
     null,
   );
+  const [anchorRect, setAnchorRect] = useState<Rect | null>(null);
+  const [pauseDismiss, setPauseDismiss] = useState(false);
   const previousCurrent = useRef(current);
   const toolId = useCurrentToolId();
 
@@ -40,10 +53,43 @@ export function StepTourHint({
   }, [current, steps]);
 
   useEffect(() => {
-    if (!hint) return;
+    if (!hint || pauseDismiss) return;
     const timer = window.setTimeout(() => setHint(null), autoDismissMs);
     return () => window.clearTimeout(timer);
-  }, [hint, autoDismissMs]);
+  }, [hint, autoDismissMs, pauseDismiss]);
+
+  // 提示展示期间挖孔锁定步骤条：取第一个【可见】的步骤条（有后台任务
+  // 的工具页会被 keep-alive 保活，同名挂点必须跳过），窗口缩放或滚动时
+  // 跟着重量。量不到时没有挖孔，挡板自己整屏压暗兜底。
+  useEffect(() => {
+    if (!hint) {
+      setAnchorRect(null);
+      return;
+    }
+    const measure = () => {
+      for (const el of document.querySelectorAll<HTMLElement>(
+        '[data-tour="step-indicator"]',
+      )) {
+        if (!isVisibleIndicator(el)) continue;
+        const r = el.getBoundingClientRect();
+        setAnchorRect({
+          top: r.top,
+          left: r.left,
+          width: r.width,
+          height: r.height,
+        });
+        return;
+      }
+      setAnchorRect(null);
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [hint]);
 
   if (!hint) return null;
   const step = steps[hint.index];
@@ -56,14 +102,36 @@ export function StepTourHint({
     : undefined;
   return (
     <Fragment key={hint.nonce}>
-      {/* 全屏压暗层：和完整引导观感一致，提示弹出时背景不再全亮。
-          点击压暗层等同点 ×，给用户一个更大的关闭热区。 */}
+      {/* 全屏挡板：吃掉对页面的点击，点它等同点 ×，给用户一个更大的关闭
+          热区。有挖孔时保持透明（压暗由聚光灯外圈承担），量不到步骤条时
+          才自己整屏压暗兜底——否则背景全亮，看起来像坏了。 */}
       <div
-        className="step-hint-veil"
+        className={`step-hint-veil${anchorRect ? "" : " step-hint-veil-dimmed"}`}
         aria-hidden="true"
         onClick={() => setHint(null)}
       />
-      <div className="step-hint" role="status">
+      {/* 聚光灯：挖孔锁定步骤条，观感与完整引导一致。 */}
+      {anchorRect && (
+        <div
+          className="step-hint-spotlight"
+          aria-hidden="true"
+          style={{
+            top: anchorRect.top - SPOTLIGHT_PAD,
+            left: anchorRect.left - SPOTLIGHT_PAD,
+            width: anchorRect.width + SPOTLIGHT_PAD * 2,
+            height: anchorRect.height + SPOTLIGHT_PAD * 2,
+          }}
+        />
+      )}
+      <div
+        className="step-hint"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        onMouseEnter={() => setPauseDismiss(true)}
+        onMouseLeave={() => setPauseDismiss(false)}
+        onFocusCapture={() => setPauseDismiss(true)}
+      >
         <p className="step-hint-count">
           第 {hint.index + 1} 步 · 共 {steps.length} 步
         </p>

@@ -17,6 +17,14 @@ import { JobProgress } from "@/components/JobProgress";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
 import { JargonTip } from "@/components/JargonTip";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
@@ -90,6 +98,41 @@ export const COMPARISON_CAP = 200;
 export const AUTO_ACCEPT_THRESHOLD = 85;
 /** 预估比对次数超过该值时给出耗时警示。 */
 export const COMPARISON_WARN_AT = 500_000;
+
+export function FuzzyBatchConfirmDialog({
+  open,
+  count,
+  onOpenChange,
+  onConfirm,
+}: {
+  open: boolean;
+  count: number;
+  onOpenChange: (open: boolean) => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="fuzzy-modal max-w-md">
+        <DialogHeader>
+          <DialogTitle>批量采纳相似度≥{AUTO_ACCEPT_THRESHOLD} 的候选</DialogTitle>
+          <DialogDescription className="text-foreground">
+            将对 {count} 条未确认且最高分达到 {AUTO_ACCEPT_THRESHOLD}{" "}
+            分的疑似行自动采纳最高分候选。
+            此操作逐条落库，采纳后仍可在卡片上重新选择。
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="secondary" onClick={() => onOpenChange(false)}>
+            取消
+          </Button>
+          <Button disabled={!count} onClick={onConfirm}>
+            全部采纳
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 export const MATCH_TYPE_OPTIONS: Array<[FuzzyMatchType, string, string]> = [
   ["company", "公司名称", "先清洗括号简称、行政区域与组织形式，再比对全称"],
@@ -1052,41 +1095,15 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         </CardContent>
       </Card>
 
-      {batchOpen && (
-        <div
-          className="fuzzy-modal-mask"
-          role="presentation"
-          onClick={() => setBatchOpen(false)}
-        >
-          <div
-            className="fuzzy-modal"
-            role="dialog"
-            aria-label="批量采纳确认"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h4>批量采纳相似度≥{AUTO_ACCEPT_THRESHOLD} 的候选</h4>
-            <p>
-              将对 {batch.length} 条未确认且最高分达到 {AUTO_ACCEPT_THRESHOLD}{" "}
-              分的疑似行自动采纳最高分候选。
-              此操作逐条落库，采纳后仍可在卡片上重新选择。
-            </p>
-            <div className="fuzzy-modal-actions">
-              <Button variant="secondary" onClick={() => setBatchOpen(false)}>
-                取消
-              </Button>
-              <Button
-                disabled={!batch.length}
-                onClick={() => {
-                  commitConfirmations(batch);
-                  setBatchOpen(false);
-                }}
-              >
-                全部采纳
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+      <FuzzyBatchConfirmDialog
+        open={batchOpen}
+        count={batch.length}
+        onOpenChange={setBatchOpen}
+        onConfirm={() => {
+          commitConfirmations(batch);
+          setBatchOpen(false);
+        }}
+      />
 
       {notice && (
         <div className="fuzzy-notice" role="status">

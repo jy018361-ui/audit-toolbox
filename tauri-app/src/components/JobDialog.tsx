@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
 } from "react";
 import { Button } from "@/components/ui/button";
@@ -83,14 +84,15 @@ function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop }: Job
   const pct = percent(job);
   const tone = toneOf(job);
   return (
-    <div className="job-dialog-row" aria-live="polite">
+    <section className="job-dialog-row" aria-label={`${label}任务进度`}>
       <div className="job-dialog-row-head">
         <strong>{label}</strong>
         <span className="job-pct">{memoryPaused ? "内存等待" : paused ? "已暂停" : job.total > 0 ? `${pct}%` : "处理中"}</span>
       </div>
-      <p className="job-dialog-message">{job.message}</p>
+      <p className="job-dialog-message" aria-live="polite" aria-atomic="true">{job.message}</p>
       <progress
         className={`progress-tone-${paused ? "warning" : tone}`}
+        aria-label={`${label}进度`}
         max={Math.max(job.total, 1)}
         value={job.total > 0 ? Math.min(job.current, Math.max(job.total, 1)) : undefined}
       />
@@ -107,7 +109,7 @@ function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop }: Job
           停止
         </Button>
       </div>
-    </div>
+    </section>
   );
 }
 
@@ -132,6 +134,7 @@ export function JobDialogProvider({
   children,
 }: JobDialogProviderProps) {
   const [minimized, setMinimized] = useState(false);
+  const minimizedButtonRef = useRef<HTMLButtonElement>(null);
   const [paused, setPaused] = useState<Record<string, boolean>>({});
   const running = jobs.filter(isJobRunning);
   const runningIds = running.map((job) => job.jobId).join("|");
@@ -176,6 +179,13 @@ export function JobDialogProvider({
   const open = running.length > 0 && !minimized;
   const first = running[0];
 
+  useEffect(() => {
+    if (!minimized) return;
+    // Radix 关闭弹窗时也会恢复焦点；下一帧再把焦点交给真正替代弹窗的任务条。
+    const timer = window.setTimeout(() => minimizedButtonRef.current?.focus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [minimized]);
+
   return (
     <JobDialogContext.Provider
       value={{
@@ -206,19 +216,20 @@ export function JobDialogProvider({
               处理期间可以暂停，稍后从中断处继续；也可以最小化到右下角，先去用别的工具。
             </DialogDescription>
           </DialogHeader>
-          <div className="job-dialog-rows">
+          <div className="job-dialog-rows" role="list" aria-label="进行中的任务">
             {running.map((job) => (
-              <JobRow
-                key={job.jobId}
-                job={job}
-                label={nameOf(job.toolId)}
-                paused={Boolean(paused[job.jobId]) || job.phase === "memory_paused"}
-                memoryPaused={job.phase === "memory_paused"}
-                onTogglePause={() => job.phase === "memory_paused"
-                  ? retryAfterMemoryPause(job.jobId)
-                  : togglePause(job.jobId)}
-                onStop={() => stop(job.jobId)}
-              />
+              <div role="listitem" key={job.jobId}>
+                <JobRow
+                  job={job}
+                  label={nameOf(job.toolId)}
+                  paused={Boolean(paused[job.jobId]) || job.phase === "memory_paused"}
+                  memoryPaused={job.phase === "memory_paused"}
+                  onTogglePause={() => job.phase === "memory_paused"
+                    ? retryAfterMemoryPause(job.jobId)
+                    : togglePause(job.jobId)}
+                  onStop={() => stop(job.jobId)}
+                />
+              </div>
             ))}
           </div>
           <div className="job-dialog-footer">
@@ -235,6 +246,7 @@ export function JobDialogProvider({
       </Dialog>
       {running.length > 0 && minimized && first && (
         <button
+          ref={minimizedButtonRef}
           type="button"
           className="job-dialog-pill"
           onClick={() => setMinimized(false)}

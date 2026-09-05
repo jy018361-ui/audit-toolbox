@@ -54,6 +54,7 @@ import { RestoreBanner } from "@/components/RestoreBanner";
 import { WindowControls } from "@/components/WindowControls";
 import { PersistentToolPages } from "@/components/PersistentToolPages";
 import { JobDialogProvider } from "@/components/JobDialog";
+import { JobProgress } from "@/components/JobProgress";
 import { ConfirmDialogHost, confirmDialog } from "@/components/ConfirmDialog";
 import { SyncBusyDialog } from "@/components/SyncBusyDialog";
 import { StepIndicator } from "@/components/StepIndicator";
@@ -382,6 +383,15 @@ export default function App() {
     }
     setTour(null);
   };
+  // 人离开工具页时取消该工具的引导：导览讲的是"这个工具的页面"，
+  // 人走了引导还挂在上一个页面上，会变成一块压暗全屏、无处安放的浮空遮罩。
+  useEffect(() => {
+    setTour((current) =>
+      current?.kind === "tool" && current.toolId !== activeToolId
+        ? null
+        : current,
+    );
+  }, [activeToolId]);
   // 缓存自动清理：启动时问一次，之后每小时问一次。
   // 「够不够一个周期」由后端判断——那条判断只该有一处，散在两边迟早对不上。
   useEffect(() => {
@@ -450,9 +460,18 @@ export default function App() {
   useEffect(() => {
     if (!toolDrawerOpen) return;
     const sidebar = document.getElementById("app-sidebar");
+    const main = document.getElementById("main-content");
+    const rail = document.querySelector<HTMLElement>(".sidebar-rail");
+    const previousOverflow = document.body.style.overflow;
+    if (main) main.inert = true;
+    if (rail) rail.inert = true;
+    document.body.style.overflow = "hidden";
     const focusable = () => Array.from(sidebar?.querySelectorAll<HTMLElement>(
       'a[href], button:not([disabled]), [tabindex="0"]',
-    ) ?? []).filter((element) => getComputedStyle(element).display !== "none");
+    ) ?? []).filter((element) => {
+      const style = getComputedStyle(element);
+      return style.display !== "none" && style.visibility !== "hidden";
+    });
     focusable()[0]?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Tab") {
@@ -474,7 +493,12 @@ export default function App() {
       toolDrawerButton.current?.focus();
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      if (main) main.inert = false;
+      if (rail) rail.inert = false;
+      document.body.style.overflow = previousOverflow;
+    };
   }, [toolDrawerOpen]);
   useEffect(() => {
     void Promise.all([toolCatalog(), appBootstrap()])
@@ -528,6 +552,9 @@ export default function App() {
         <aside
           id="app-sidebar"
           className={`sidebar${toolDrawerOpen ? " drawer-open" : ""}`}
+          role={toolDrawerOpen ? "dialog" : undefined}
+          aria-modal={toolDrawerOpen ? "true" : undefined}
+          aria-label={toolDrawerOpen ? "工具导航" : undefined}
         >
           {/* deep：整个品牌区（含文字周围的空白）都是拖拽手柄，双击最大化；
               里面的抽屉关闭按钮不带该属性，点击优先于拖拽 */}
@@ -1117,11 +1144,11 @@ function ToolPage({
         </section>
         <section className="result-card">
           <h2>检查与结果</h2>
-          {job && job.phase !== "completed" && (
-            <div className="job-progress">
-              <progress value={job.current} max={Math.max(job.total, 1)} />
-              <span>{job.message}</span>
-            </div>
+          {job && (
+            <JobProgress
+              job={job}
+              onCancel={busy ? (jobId) => void jobCancel(jobId) : undefined}
+            />
           )}
           {result ? (
             <ResultView value={result} />
@@ -1460,6 +1487,8 @@ export function Settings({
   }, []);
   const [updateStatus, setUpdateStatus] = useState("");
   const [updateOpen, setUpdateOpen] = useState(false);
+  const updateTriggerRef = useRef<HTMLButtonElement>(null);
+  const updatePanelRef = useRef<HTMLElement>(null);
   const [releaseNotes, setReleaseNotes] = useState<ReleaseNotes>();
   const [notesError, setNotesError] = useState("");
   const [fallbackNotes, setFallbackNotes] = useState("");
@@ -1476,6 +1505,9 @@ export function Settings({
     downloaded: number;
     total?: number;
   }>();
+  useEffect(() => {
+    if (updateOpen) updatePanelRef.current?.focus();
+  }, [updateOpen]);
   // 全局主题（data-theme 切换，默认深绿）
   const [theme, setTheme] = useState(
     () => document.documentElement.dataset.theme ?? "green-dark",
@@ -1771,6 +1803,7 @@ export function Settings({
         detail="按用途管理工具箱配置；密钥保存在本机凭据管理器。"
         actions={
           <Button
+            ref={updateTriggerRef}
             variant="secondary"
             className={`settings-update-trigger${availableUpdate ? " has-update" : ""}`}
             onClick={() => void checkForUpdates()}
@@ -1794,8 +1827,11 @@ export function Settings({
          * 提交记录默认折叠，避免实现细节压过面向用户的更新内容。
          */
         <section
+          ref={updatePanelRef}
           className="list-card settings-update-panel"
           id="settings-update-panel"
+          tabIndex={-1}
+          role="region"
           aria-labelledby="settings-update-title"
         >
           <div className="settings-update-heading">
@@ -1826,7 +1862,10 @@ export function Settings({
               <Button
                 variant="ghost"
                 disabled={installingUpdate}
-                onClick={() => setUpdateOpen(false)}
+                onClick={() => {
+                  setUpdateOpen(false);
+                  window.setTimeout(() => updateTriggerRef.current?.focus(), 0);
+                }}
               >
                 收起
               </Button>

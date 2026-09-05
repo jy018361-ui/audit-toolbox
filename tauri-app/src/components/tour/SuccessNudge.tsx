@@ -26,6 +26,7 @@ export function SuccessNudge({
   autoDismissMs = 6000,
 }: SuccessNudgeProps) {
   const [celebrating, setCelebrating] = useState<JobEvent | null>(null);
+  const [pauseDismiss, setPauseDismiss] = useState(false);
   // 已经庆祝过的 jobId：同一任务只庆祝一次，事件流里 completed 事件重复推送也不重弹。
   const celebratedIds = useRef<Set<string>>(new Set());
   const navigate = useNavigate();
@@ -46,16 +47,30 @@ export function SuccessNudge({
   }, [jobs]);
 
   useEffect(() => {
-    if (!celebrating) return;
+    if (!celebrating || pauseDismiss) return;
     const timer = window.setTimeout(() => setCelebrating(null), autoDismissMs);
     return () => window.clearTimeout(timer);
-  }, [celebrating, autoDismissMs]);
+  }, [celebrating, autoDismissMs, pauseDismiss]);
 
   if (!celebrating) return null;
   // 打开结果只在确有输出文件时提供；路径由 openOutput 走白名单校验，失败保持安静。
   const outputPath = celebrating.outputPaths[0];
   return (
-    <div className="success-nudge" role="status" key={celebrating.jobId}>
+    <div
+      className="success-nudge"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      key={celebrating.jobId}
+      onMouseEnter={() => setPauseDismiss(true)}
+      onMouseLeave={() => setPauseDismiss(false)}
+      onFocusCapture={() => setPauseDismiss(true)}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setPauseDismiss(false);
+        }
+      }}
+    >
       <span className="success-nudge-icon" aria-hidden="true">
         <CircleCheck size={18} />
       </span>

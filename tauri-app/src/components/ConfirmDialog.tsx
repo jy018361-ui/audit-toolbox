@@ -88,14 +88,14 @@ export function ConfirmDialogHost() {
         if (!open) settle(false);
       }}
     >
-      <DialogContent className="max-w-md">
+      <DialogContent className="confirm-dialog max-w-md">
         <DialogHeader>
           <DialogTitle style={{ fontSize: "var(--fs-lg)" }}>
             {request.title}
           </DialogTitle>
           {request.message ? (
             <DialogDescription
-              className="whitespace-pre-line text-foreground"
+              className="confirm-dialog-message whitespace-pre-line text-foreground"
               style={{ fontSize: "var(--fs-md)", fontWeight: 400 }}
             >
               {request.message}

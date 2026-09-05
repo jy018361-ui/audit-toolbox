@@ -6,6 +6,7 @@
   position: fixed;
   inset: 0;
   z-index: 700;
+  overscroll-behavior: contain;
 }
 
 .tour-blocker {
@@ -48,16 +49,16 @@
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-overlay);
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
-/* 目标旁的气泡：placement-bottom 正着放；placement-top 用 -100% 平移
-   贴到目标上方，无需先测自身高度。 */
+/* 目标旁的气泡：位置由引擎用实测高度算出，避免上方空间不足时
+   CSS 二次平移把卡片推出视口。 */
 .tour-bubble {
-  transform: translateY(0);
-}
-
-.tour-bubble.placement-top {
-  transform: translateY(-100%);
+  transform: none;
 }
 
 .tour-bubble-inner {
@@ -135,10 +136,12 @@
   justify-content: space-between;
   gap: var(--sp-2);
   margin-top: var(--sp-4);
+  flex-wrap: wrap;
 }
 
 .tour-actions-nav {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--sp-2);
 }
 
@@ -180,15 +183,36 @@
   position: relative;
 }
 
-/* 分步提示出现时的整屏压暗层：和完整引导观感一致。层级 39 压在页面
-   之上、提示卡（40）之下，也低于对话框(50)与窗口控制按钮(800)；
-   点击压暗层即关闭提示。 */
+/* 分步提示出现时的全屏挡板：吃掉对页面的点击（点它即关闭）。层级 39
+   压在页面之上、提示卡（40）之下，也低于对话框(50)与窗口控制按钮(800)。
+   有挖孔时保持透明——压暗由聚光灯（.step-hint-spotlight）的外圈阴影
+   承担，步骤条区域内保持明亮。 */
 .step-hint-veil {
   position: fixed;
   inset: 0;
   z-index: 39;
+}
+
+/* 量不到可见步骤条时（兜底场景）挡板自己整屏压暗，否则背景全亮。 */
+.step-hint-veil-dimmed {
   background: rgb(4 12 12 / 45%);
   animation: tour-veil-in 200ms ease-out;
+  pointer-events: none;
+}
+
+/* 分步提示的聚光灯：与完整引导同一手法——压暗来自外圈 200vmax 阴影，
+   中间挖孔锁定步骤条，孔位由组件按步骤条实时位置内联指定。 */
+.step-hint-spotlight {
+  position: fixed;
+  z-index: 39;
+  pointer-events: none;
+  border-radius: 12px;
+  box-shadow: 0 0 0 200vmax rgb(4 12 12 / 56%);
+  transition:
+    top 320ms ease,
+    left 320ms ease,
+    width 320ms ease,
+    height 320ms ease;
 }
 
 .step-hint {
@@ -205,6 +229,10 @@
   border-radius: var(--r-md);
   box-shadow: var(--shadow-overlay);
   animation: tour-rise-in 240ms ease-out;
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .step-hint-count {
@@ -232,8 +260,8 @@
   position: absolute;
   top: 6px;
   right: 6px;
-  width: 22px;
-  height: 22px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   border: none;
   background: none;
@@ -247,10 +275,50 @@
   color: var(--ink);
 }
 
+.step-hint-close:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+  border-radius: var(--r-sm);
+}
+
+@media (max-width: 520px), (max-height: 520px) {
+  .tour-card,
+  .tour-bubble {
+    width: calc(100vw - 16px);
+  }
+
+  .tour-card {
+    padding: var(--sp-4);
+  }
+
+  .tour-actions,
+  .tour-actions-nav {
+    align-items: stretch;
+  }
+
+  .tour-actions > button,
+  .tour-actions-nav > button {
+    min-height: 40px;
+  }
+
+  .step-hint {
+    position: fixed;
+    top: auto;
+    right: var(--sp-2);
+    bottom: var(--sp-2);
+    left: var(--sp-2);
+    width: auto;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .step-hint,
-  .step-hint-veil {
+  .step-hint-veil-dimmed {
     animation: none;
+  }
+
+  .step-hint-spotlight {
+    transition: none;
   }
 }
 

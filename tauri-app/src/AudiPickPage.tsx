@@ -23,6 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { EmptyState } from "@/components/EmptyState";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
+import { JobProgress } from "@/components/JobProgress";
 import "./audipick.css";
 
 import {
@@ -1797,13 +1798,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             )}
           </div>
           {batchJob && (
-            <div className={`job-banner ${batchJob.severity}`}>
-              <strong>{batchJob.message}</strong>
-              <progress
-                max={Math.max(batchJob.total, 1)}
-                value={batchJob.current}
-              />
-            </div>
+            <JobProgress job={batchJob} />
           )}
           {/* The worker reports every document's outcome; without this a batch
               where a third of the files failed still ended on a plain

@@ -182,6 +182,14 @@ describe("存款科目手工分类请求", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled(),
     );
+    expect(mock.engineCall).toHaveBeenCalledWith("deposit.inspect_tb", {
+      source: {
+        inputPath: "fixture-tb.xlsx",
+        sheet: "TB",
+        headerRow: 0,
+        headerDepth: 0,
+      },
+    });
     goToStep(STEP2);
     const parentInput = await screen.findByRole("combobox", {
       name: `${parent}的分类`,

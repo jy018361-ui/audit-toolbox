@@ -225,7 +225,10 @@ body,
  */
 body {
   margin: 0;
-  min-width: 980px;
+  /* Windows 125%/150% 缩放会把 1366px/1440px 窗口压成不足 980 个 CSS
+     像素。硬下限会让整个应用横向滚动，且主区右侧被裁掉；窄屏导航已经有
+     1179px 的抽屉模式，因此页面本身可以安全收缩。 */
+  min-width: 0;
   min-height: 100vh;
 }
 button,
@@ -538,6 +541,7 @@ summary:focus-visible {
 .metric strong {
   display: block;
   font-size: var(--fs-xl);
+  line-height: var(--lh-section-title);
   margin-top: var(--sp-2);
   color: var(--brand-link);
   overflow: hidden;
@@ -664,10 +668,13 @@ summary:focus-visible {
   display: block;
   font-size: var(--fs-sm);
   font-weight: 600;
-  margin-bottom: var(--sp-2);
+  margin: 0;
   color: var(--label);
 }
 .field {
+  display: grid;
+  align-content: start;
+  gap: var(--sp-2);
   min-width: 0;
 }
 .field b {
@@ -1030,7 +1037,7 @@ summary:focus-visible {
 }
 .field small {
   display: block;
-  margin-top: var(--sp-1);
+  margin-top: calc(-1 * var(--sp-1));
   color: var(--text-muted);
 }
 .field select[multiple] {
@@ -3028,6 +3035,9 @@ summary:focus-visible {
    支持暂停/继续/停止；最小化后收成右下角一条常驻小窗。 */
 .job-dialog {
   width: min(520px, calc(100vw - 2 * var(--sp-5)));
+  max-height: calc(100dvh - 2 * var(--sp-4));
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
 }
 
 /* 字段后的星号跟随当前识别出的 TB/JE 形态，而不是固定字段字典。
@@ -3041,11 +3051,21 @@ summary:focus-visible {
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px var(--sp-1) 2px 2px;
+  scrollbar-gutter: stable;
 }
 .job-dialog-row {
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
 }
 .job-dialog-row-head {
   display: flex;
@@ -3057,6 +3077,16 @@ summary:focus-visible {
   margin: 0;
   color: var(--label);
   font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+  overflow-wrap: anywhere;
+}
+.job-dialog-row-head > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.job-dialog-row-head > .job-pct {
+  flex: none;
+  font-variant-numeric: tabular-nums;
 }
 .job-dialog-row progress {
   width: 100%;
@@ -3080,12 +3110,13 @@ summary:focus-visible {
 }
 .job-dialog-footer {
   justify-content: flex-end;
+  padding-top: var(--sp-1);
 }
 /* 最小化后的常驻小条。固定在右下角，点击展开回弹窗。 */
 .job-dialog-pill {
   position: fixed;
-  right: var(--sp-5);
-  bottom: var(--sp-5);
+  right: max(var(--sp-5), env(safe-area-inset-right));
+  bottom: max(var(--sp-5), env(safe-area-inset-bottom));
   z-index: 2147483000;
   display: flex;
   align-items: center;
@@ -3100,11 +3131,22 @@ summary:focus-visible {
   color: white;
   background: var(--brand);
   border-color: color-mix(in srgb, var(--brand) 75%, white);
-  min-width: 210px;
+  min-width: min(210px, calc(100vw - 2 * var(--sp-4)));
+  max-width: min(420px, calc(100vw - 2 * var(--sp-4)));
   justify-content: space-between;
+}
+.job-dialog-pill-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .job-dialog-pill:hover {
   border-color: var(--brand-accent);
+}
+.job-dialog-pill:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
 }
 .job-dialog-pill-dot {
   width: 8px;
@@ -3135,6 +3177,8 @@ summary:focus-visible {
 /* 同步操作等待窗（导入/OCR 这类一口气完成的调用），比任务弹窗更轻 */
 .sync-busy-dialog {
   width: min(430px, calc(100vw - 48px));
+  max-height: calc(100dvh - 2 * var(--sp-4));
+  overflow: hidden;
 }
 .sync-busy-body {
   display: flex;
@@ -3158,15 +3202,49 @@ summary:focus-visible {
 }
 .sync-busy-text {
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 .sync-busy-list {
   margin: var(--sp-1) 0 0;
   padding-left: var(--sp-4);
+  max-height: min(45dvh, 360px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 .sync-busy-actions {
   display: flex;
   justify-content: flex-end;
   margin-top: var(--sp-3);
+}
+
+.confirm-dialog {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+.confirm-dialog-message {
+  max-height: min(52dvh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: var(--sp-1);
+  scrollbar-gutter: stable;
+}
+
+@media (max-width: 520px), (max-height: 520px) {
+  .job-dialog,
+  .sync-busy-dialog {
+    width: calc(100vw - 2 * var(--sp-3));
+    max-height: calc(100dvh - 2 * var(--sp-3));
+  }
+  .job-dialog-row-actions > *,
+  .job-dialog-footer > *,
+  .sync-busy-actions > * {
+    min-height: 40px;
+  }
+  .job-dialog-pill {
+    right: var(--sp-3);
+    bottom: var(--sp-3);
+  }
 }
 
 /* 放在动画定义后，避免同权重的后置 animation 声明重新开启运动。 */

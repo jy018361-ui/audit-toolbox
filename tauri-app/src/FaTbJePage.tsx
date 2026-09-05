@@ -585,8 +585,8 @@ export function FaTbJePage() {
             source: {
               inputPath: item.path,
               sheet: item.classification.sheet,
-              headerRow: item.classification.headerRow,
-              headerDepth: item.classification.headerDepth,
+              headerRow: 0,
+              headerDepth: 0,
             },
           })) as Inspection;
           recognized.push({ kind, path: item.path, inspected });
@@ -671,8 +671,8 @@ export function FaTbJePage() {
             source: {
               inputPath: source.path,
               sheet: source.inspection.sheet,
-              headerRow: source.inspection.headerRow,
-              headerDepth: source.inspection.headerDepth,
+              headerRow: 0,
+              headerDepth: 0,
             },
           })) as Inspection,
       );

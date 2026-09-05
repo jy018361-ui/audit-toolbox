@@ -289,11 +289,13 @@ body .history-card-content {
 
   .app-shell > .sidebar {
     z-index: 42;
-    width: 280px;
+    width: min(280px, calc(100vw - var(--sp-4)));
     transform: translateX(-100%);
     visibility: hidden;
     transition: transform 180ms ease-out;
     box-shadow: var(--shadow-overlay);
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
   }
 
   .app-shell > .sidebar.drawer-open {
@@ -320,6 +322,13 @@ body .history-card-content {
   .sidebar-drawer-close:hover {
     background: var(--brand-soft);
     color: var(--on-brand-soft, #fff);
+  }
+
+  .sidebar-drawer-close:focus-visible,
+  .sidebar-rail a:focus-visible,
+  .sidebar-rail-menu:focus-visible {
+    outline: 2px solid var(--brand-accent);
+    outline-offset: 2px;
   }
 
   .sidebar-rail {

@@ -129,11 +129,12 @@ describe("TbjeCheckPage", () => {
       "title",
       "C:/samples/01TB.xlsx",
     );
-    const tbMapping = screen.getByRole("button", { name: "TB 映射" });
-    const jeMapping = screen.getByRole("button", { name: "JE 映射" });
+    const tbMapping = screen.getByRole("button", { name: "收起 TB 映射" });
+    const jeMapping = screen.getByRole("button", {
+      name: "查看并调整 JE 映射",
+    });
     expect(tbMapping).toBeEnabled();
     expect(jeMapping).toBeEnabled();
-    fireEvent.click(tbMapping);
     expect(screen.getByText("科目余额表字段映射")).toBeVisible();
     expect(screen.queryByText("序时账字段映射")).not.toBeInTheDocument();
     fireEvent.click(jeMapping);
@@ -557,6 +558,10 @@ describe("TbjeCheckPage", () => {
     expect(
       screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
     ).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button", { name: /查看并调整 JE 映射/ }).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByText("科目余额表字段映射")).toBeVisible();
   });
 
   it("re-picking an already added file keeps its inspection and mapping untouched", async () => {

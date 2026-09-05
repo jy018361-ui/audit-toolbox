@@ -1,0 +1,178 @@
+/* 动态任务状态的布局契约：消息、路径和错误均来自文件/引擎，必须按不可信长内容处理。 */
+.job-progress,
+.result-summary,
+.error-box {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.job-progress {
+  display: grid;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+}
+
+.job-progress--compact {
+  margin-top: var(--sp-3);
+}
+
+.job-progress .job-banner {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-3);
+  min-width: 0;
+}
+
+.job-progress-message,
+.result-summary > p,
+.result-summary li,
+.error-box-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.job-progress-copy {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.job-progress-message {
+  min-width: 0;
+  line-height: 1.45;
+}
+
+.job-progress-state,
+.job-pct {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.job-progress-state {
+  color: var(--label);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.job-progress progress {
+  width: 100%;
+  height: 6px;
+  accent-color: var(--brand-accent);
+  border-radius: var(--r-pill);
+}
+
+.job-progress progress.progress-tone-warning { accent-color: var(--warning-dot); }
+.job-progress progress.progress-tone-danger { accent-color: var(--danger-fg); }
+.job-progress progress.progress-tone-success { accent-color: var(--success-fg); }
+
+.result-summary {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.result-summary-list {
+  max-height: min(320px, 42vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.result-output-list {
+  display: grid;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.result-output-list .link-button {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.output-list,
+.kz-outputs {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.output-list > button,
+.kz-outputs > button {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.task-state-fixture {
+  display: grid;
+  gap: var(--sp-5);
+  width: min(1080px, 100%);
+  min-width: 0;
+  margin: 0 auto;
+  padding: var(--sp-5);
+}
+
+.task-state-fixture header,
+.task-state-fixture h1,
+.task-state-fixture h2,
+.task-state-fixture p {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.task-state-mapping-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-4);
+  min-width: 0;
+  margin-top: var(--sp-4);
+}
+
+@media (max-width: 720px) {
+  .task-state-mapping-grid { grid-template-columns: minmax(0, 1fr); }
+  .task-state-fixture { padding: var(--sp-3); }
+}
+
+.error-box-title {
+  min-width: 0;
+}
+
+.error-box-message {
+  flex: 1 1 auto;
+}
+
+.error-box-actions {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 560px) {
+  .job-progress .job-banner {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .job-progress-message {
+    grid-column: 1 / -1;
+  }
+
+  .job-progress .job-cancel {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  .error-box-title {
+    flex-direction: column;
+  }
+
+  .error-box-actions {
+    margin-left: 0;
+  }
+}

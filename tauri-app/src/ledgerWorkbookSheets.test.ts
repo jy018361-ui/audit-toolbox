@@ -58,6 +58,16 @@ describe("工作簿 Sheet 分类", () => {
     ).toBe(false);
   });
 
+  it("透视、check 和核对类辅助 Sheet 即使分数较高也不参与配对", () => {
+    for (const sheet of ["透视check", "Pivot Table", "内部核对表"]) {
+      expect(
+        ledgerClassificationIsVisible(
+          classification(sheet, undefined, { je: 1, tb: 11 }),
+        ),
+      ).toBe(false);
+    }
+  });
+
   it("公共扫描入口统一过滤低置信度并保留 LLM 失败时的规则结果", async () => {
     const call = vi.fn(async (method: string, params: Record<string, unknown>) => {
       if (method === "tool.classify_llm") throw new Error("offline");

@@ -902,7 +902,12 @@ impl DiskLedger {
         } else {
             headers.to_vec()
         };
-        let mut writer = Some(csv::Writer::from_writer(file));
+        // The large CSV cache preserves each source record's physical width.
+        // Merged CSV files can therefore contain records that omit different
+        // numbers of trailing empty fields even though the normalized header
+        // covers the widest record. Pad those fields during streaming export
+        // so the detail file remains rectangular without rebuilding the cache.
+        let mut writer = Some(csv::WriterBuilder::new().flexible(true).from_writer(file));
         writer
             .as_mut()
             .unwrap()
@@ -920,12 +925,15 @@ impl DiskLedger {
                 partial = partial_path(&final_path);
                 let mut next = File::create(&partial).map_err(io_error)?;
                 next.write_all(&[0xEF, 0xBB, 0xBF]).map_err(io_error)?;
-                writer = Some(csv::Writer::from_writer(next));
+                writer = Some(csv::WriterBuilder::new().flexible(true).from_writer(next));
                 writer
                     .as_mut()
                     .unwrap()
                     .write_record(&output_headers)
                     .map_err(csv_error)?;
+            }
+            if row.len() < headers.len() {
+                row.resize(headers.len(), String::new());
             }
             if mark_loss_transfer {
                 row.insert(
@@ -1003,10 +1011,13 @@ impl DiskLedger {
         let partial = partial_path(&path);
         let mut file = File::create(&partial).map_err(io_error)?;
         file.write_all(&[0xEF, 0xBB, 0xBF]).map_err(io_error)?;
-        let mut writer = csv::Writer::from_writer(file);
+        let mut writer = csv::WriterBuilder::new().flexible(true).from_writer(file);
         writer.write_record(headers).map_err(csv_error)?;
         let mut rows = 0usize;
-        let result = self.visit_excluded(excludes, cancel, |row, _| {
+        let result = self.visit_excluded(excludes, cancel, |mut row, _| {
+            if row.len() < headers.len() {
+                row.resize(headers.len(), String::new());
+            }
             writer.write_record(row).map_err(csv_error)?;
             rows += 1;
             Ok(())
@@ -1241,6 +1252,39 @@ mod tests {
             let text = String::from_utf8_lossy(&bytes[3..]);
             assert!(text.starts_with("【损益结转】,凭证号,科目,借方,贷方"));
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selected_csv_pads_missing_trailing_fields_from_merged_sources() {
+        let (ledger, root) = fixture();
+        let short_row = vec!["001", "现金", "100"];
+        ledger
+            .db
+            .execute(
+                "UPDATE raw_cache.rows SET data=?1 WHERE rowid=1",
+                [serde_json::to_string(&short_row).unwrap()],
+            )
+            .unwrap();
+        let cancel = AtomicBool::new(false);
+        ledger.select(&[], &cancel).unwrap();
+        let output = ledger
+            .write_selected_csv(
+                &root.join("结果.csv"),
+                &ledger.table.headers,
+                100,
+                true,
+                &|_, _, _, _| {},
+                &cancel,
+            )
+            .unwrap();
+
+        let bytes = fs::read(&output.paths[0]).unwrap();
+        let mut reader = csv::Reader::from_reader(&bytes[3..]);
+        let records = reader.records().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(reader.headers().unwrap().len(), 5);
+        assert_eq!(records[0].len(), 5);
+        assert_eq!(records[0].get(4), Some(""));
         fs::remove_dir_all(root).unwrap();
     }
 }

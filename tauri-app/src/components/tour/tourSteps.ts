@@ -24,7 +24,7 @@ export const workspaceTourSteps: TourStep[] = [
     id: "sidebar-tools",
     targetSelector: '[data-tour="sidebar-tools"]',
     title: "工具目录",
-    body: "全部工具按「审计工具 / 效率工具 / 运营工具」分组排列，点击工具名称即可打开；带「试用」标记的工具功能已可使用，仍在继续完善。",
+    body: "全部工具按「审计工具 / 效率工具 / 运营工具」分组排列，点击工具名称即可打开；带「开发中」标记的工具功能已可使用，仍在继续完善。",
   },
   {
     id: "tool-cards",

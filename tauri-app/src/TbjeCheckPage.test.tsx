@@ -530,11 +530,11 @@ describe("TbjeCheckPage", () => {
     );
     expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1);
 
-    // 手工解除第 1 组的序时账：05JE 变成待认领的独立组。
+    // 手工解除第 1 组的序时账：05JE 留在候选池，但不单独渲染一行。
     fireEvent.change(screen.getByLabelText("为第 1 组选择序时账"), {
       target: { value: "" },
     });
-    expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(2);
+    expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1);
 
     // 回到第 1 步，二次添加另一组文件。
     const steps = container.querySelector(".step-indicator") as HTMLElement;
@@ -544,13 +544,17 @@ describe("TbjeCheckPage", () => {
     );
 
     await waitFor(() =>
-      expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(3),
+      expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(2),
     );
     // 第 1 组仍保持「不配对」，5 号序时账也没被强行塞回去。
     expect(screen.getByLabelText("为第 1 组选择序时账")).toHaveValue("");
-    expect(screen.getByLabelText("为第 5 组选择序时账")).toHaveValue(
-      pairingFileKey({ path: "C:/samples/05JE.xlsx", sheet: "Sheet1" }),
-    );
+    expect(screen.queryByLabelText("为第 5 组选择序时账")).not.toBeInTheDocument();
+    expect(
+      within(screen.getByLabelText("为第 1 组选择序时账")).getByRole(
+        "option",
+        { name: /05JE\.xlsx/ },
+      ),
+    ).toBeInTheDocument();
     // 新加的 2 号文件自动配成新组，二次添加仍具备跨批次配对能力。
     expect(screen.getByLabelText("为第 2 组选择序时账")).toHaveValue(
       pairingFileKey({ path: "C:/samples/02JE.xlsx", sheet: "Sheet1" }),
@@ -562,6 +566,53 @@ describe("TbjeCheckPage", () => {
       screen.getAllByRole("button", { name: /查看并调整 JE 映射/ }).length,
     ).toBeGreaterThan(0);
     expect(screen.getByText("科目余额表字段映射")).toBeVisible();
+  });
+
+  it("不显示孤立 JE，并允许手工选择两侧 Excel 与 Sheet 建组", async () => {
+    const { engineCall, pickPath } = await import("./api");
+    vi.mocked(pickPath)
+      .mockResolvedValueOnce("C:/samples/TB-4800.xlsx")
+      .mockResolvedValueOnce("C:/samples/4800_JE.xlsx");
+    vi.mocked(engineCall).mockImplementation(
+      async (method: string, params: unknown) => {
+        if (method === "ledger.forms") return [];
+        const source = (params as { source?: { inputPath?: string; sheet?: string } })
+          .source;
+        if (method === "fx.inspect_tb")
+          return {
+            sheet: source?.sheet || "Sheet1",
+            sheets: ["Sheet1", "tb种类"],
+            headerRow: 3,
+            headerDepth: 2,
+            headers: ["科目编码", "期末余额"],
+            preview: [],
+            entities: [],
+            suggestedMapping: {},
+          };
+        if (method === "fx.inspect_je")
+          return {
+            sheet: source?.sheet || "JE",
+            sheets: ["JE", "je种类"],
+            headerRow: 2,
+            headerDepth: 1,
+            headers: ["凭证号", "借方金额"],
+            preview: [],
+            entities: [],
+            suggestedMapping: {},
+          };
+        throw new Error(`unexpected ${method}`);
+      },
+    );
+
+    render(<TbjeCheckPage tool={tool} />);
+    fireEvent.click(screen.getByRole("button", { name: "手动添加配对组" }));
+    await screen.findByText("TB-4800.xlsx");
+    expect(screen.getByLabelText("余额表使用的工作表")).toHaveValue("Sheet1");
+    fireEvent.click(screen.getByRole("button", { name: "选择 Excel" }));
+    await screen.findByText(/4800_JE\.xlsx/);
+    expect(screen.getByLabelText("序时账使用的工作表")).toHaveValue("JE");
+    expect(screen.getAllByRole("button", { name: "更换 Excel" })).toHaveLength(2);
+    expect(screen.queryByText("（缺科目余额表）")).not.toBeInTheDocument();
   });
 
   it("re-picking an already added file keeps its inspection and mapping untouched", async () => {

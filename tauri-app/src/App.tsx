@@ -304,7 +304,7 @@ function expandedToolIds(ids: readonly string[]) {
   return ids.flatMap((id) => TOOL_SUBGROUPS[id]?.ids ?? [id]);
 }
 
-const DEVELOPMENT_HINT = "试用功能，使用结果请复核。";
+const DEVELOPMENT_HINT = "开发中功能，使用结果请复核。";
 
 /**
  * 侧边栏工具入口统一消费清单里的 migrationStatus。
@@ -320,7 +320,7 @@ function SidebarToolLink({
 }) {
   const developing = tool.migrationStatus === "preview";
   const accessibleName = developing
-    ? `${tool.name}，试用。${DEVELOPMENT_HINT}`
+    ? `${tool.name}，开发中。${DEVELOPMENT_HINT}`
     : undefined;
   return (
     <NavLink
@@ -335,7 +335,7 @@ function SidebarToolLink({
       <span className="tool-nav-label">{tool.name}</span>
       {developing && (
         <span className="tool-status-badge" aria-hidden="true">
-          试用
+          开发中
         </span>
       )}
     </NavLink>
@@ -365,7 +365,7 @@ export default function App() {
     kanzhang: true,
   });
   // 新手模式：会话状态只记"当前在播哪条引导"；看过与否存 localStorage
-  // （tourState.ts），首次启动与首次进工具时自动播放，之后可在设置里重播。
+  // （tourState.ts）。新手模式开着时，每次进工具都播导览，关掉即全停。
   const [tour, setTour] = useState<
     { kind: "workspace" } | { kind: "tool"; toolId: string } | null
   >(null);
@@ -376,26 +376,24 @@ export default function App() {
       ? catalog.find((tool) => tool.id === tour.toolId)
       : undefined;
   const finishTour = () => {
-    // 「看过」只在桌面端持久化：浏览器预览是开发/体验入口，
-    // 每次进工具都重播导览，方便逐个检查剧本内容。
-    if (isTauriRuntime()) {
-      if (tour?.kind === "workspace") saveTourState({ workspaceDone: true });
-      if (tour?.kind === "tool") {
-        saveTourState({
-          toolDone: { ...loadTourState().toolDone, [tour.toolId]: true },
-        });
-      }
+    // 工作台导览"只播一次"的记录仅在桌面端持久化；工具导览按用户口径
+    // 每次进入都播（除非关掉新手模式），无需记录。
+    if (isTauriRuntime() && tour?.kind === "workspace") {
+      saveTourState({ workspaceDone: true });
     }
     setTour(null);
   };
   // 人离开工具页时取消该工具的引导：导览讲的是"这个工具的页面"，
   // 人走了引导还挂在上一个页面上，会变成一块压暗全屏、无处安放的浮空遮罩。
+  // 同时清掉"本工具已播"的会话标记，下次再进来还会播（受总开关控制）。
+  const playedToolRef = useRef<string | null>(null);
   useEffect(() => {
     setTour((current) =>
       current?.kind === "tool" && current.toolId !== activeToolId
         ? null
         : current,
     );
+    if (!activeToolId) playedToolRef.current = null;
   }, [activeToolId]);
   // 缓存自动清理：启动时问一次，之后每小时问一次。
   // 「够不够一个周期」由后端判断——那条判断只该有一处，散在两边迟早对不上。
@@ -451,15 +449,20 @@ export default function App() {
     );
     return () => clearTimeout(timer);
   }, [startupReady]);
-  // 第一次进入某个工具时自动播放该工具的上手引导；总开关关掉或看过就不再弹。
+  // 新手模式开启时，每次进入工具都播放该工具的导览；关掉总开关即全停。
+  // playedToolRef 只防"播完还留在本页时重复触发"，离开工具即清，
+  // 再进来照常播——这是用户点名的口径：开关开着就每进必播。
   useEffect(() => {
     if (!startupReady || !activeToolId || tour) return;
     const state = loadTourState();
     if (state.newbieMode === false) return;
-    if (state.toolDone?.[activeToolId]) return;
+    if (playedToolRef.current === activeToolId) return;
     if (!catalog.some((tool) => tool.id === activeToolId)) return;
     // 延迟触发给懒加载页面留出首绘时间；引擎内部还会轮询等待目标元素。
-    const timer = setTimeout(() => setTour({ kind: "tool", toolId: activeToolId }), 800);
+    const timer = setTimeout(() => {
+      playedToolRef.current = activeToolId;
+      setTour({ kind: "tool", toolId: activeToolId });
+    }, 800);
     return () => clearTimeout(timer);
   }, [activeToolId, tour, catalog, startupReady]);
   useEffect(() => {
@@ -578,6 +581,9 @@ export default function App() {
             <h1>E点通工具箱</h1>
             <p>审计作业工作台</p>
           </div>
+          {/* 新手模式总开关：常驻侧边栏上部（品牌区与主导航之间），
+              开着时每次进工具都播导览，关掉即全停。 */}
+          <NewbieModeToggle />
           <nav data-tour="sidebar-nav">
             {NAV.map((x) => (
               <NavLink
@@ -672,8 +678,6 @@ export default function App() {
               );
             })}
           </div>
-          {/* 新手模式总开关：与导航行同款的一行小设置，常驻侧边栏底部。 */}
-          <NewbieModeToggle />
           <div className="sidebar-footer">
             {demoDataEnabled() && (
               <span
@@ -773,9 +777,6 @@ export default function App() {
                     <Settings
                       availableUpdate={availableUpdate}
                       onAvailableUpdateChange={setAvailableUpdate}
-                      onReplayWorkspaceTour={() =>
-                        setTour({ kind: "workspace" })
-                      }
                     />
                   }
                 />
@@ -973,7 +974,7 @@ function Dashboard({
                         </span>
                         <h3>{tool.name}</h3>
                         {preview && (
-                          <span className="tool-card-status">试用</span>
+                          <span className="tool-card-status">开发中</span>
                         )}
                       </div>
                       <p>{tool.description}</p>
@@ -1070,7 +1071,7 @@ function ToolPage({
       <>
       {tool.migrationStatus === "preview" && (
         <div className="tool-trial-notice" role="note">
-          <strong>试用</strong><span>{DEVELOPMENT_HINT}</span>
+          <strong>开发中</strong><span>{DEVELOPMENT_HINT}</span>
         </div>
       )}
       <Suspense fallback={<ToolPageLoading />}>
@@ -1432,11 +1433,9 @@ function settingsSignature(form: Record<string, unknown>, cacheMode: string) {
 export function Settings({
   availableUpdate,
   onAvailableUpdateChange,
-  onReplayWorkspaceTour,
 }: {
   availableUpdate: Update | null;
   onAvailableUpdateChange: (update: Update | null) => void;
-  onReplayWorkspaceTour: () => void;
 }) {
   const [saving, setSaving] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
@@ -2143,9 +2142,10 @@ export function Settings({
             )}
           </section>
           <section className="list-card">
-            <h2>AudiPick OCR 配置</h2>
+            <h2>AudiPick 配置</h2>
             <p className="settings-note">
-              仅用于 AudiPick 扫描件文字识别，按所选引擎显示配置。
+              OCR 仅用于 AudiPick
+              扫描件文字识别，按所选引擎显示配置；旧数据迁移也收在同一张卡片内，按需展开。
             </p>
             <div className="form-grid">
               <label className="field">
@@ -2191,6 +2191,49 @@ export function Settings({
             {form.ocrEngine === "local" && (
               <p className="settings-note">请先启动已配置的本机 OCR 服务。</p>
             )}
+            <details className="settings-advanced">
+              <summary>旧数据迁移（按需使用）</summary>
+              <p>
+                先在旧 AudiPick 配置页导出迁移备份，再在这里导入。导入按项目 ID
+                去重，不会删除旧数据。
+              </p>
+              <div className="input-with-button">
+                <input
+                  value={backupPath}
+                  readOnly
+                  placeholder="选择 AudiPick迁移备份.json"
+                />
+                <button
+                  className="browse"
+                  onClick={() =>
+                    void pickPath("file", "选择 AudiPick 迁移备份", [
+                      "json",
+                    ]).then((v) => setBackupPath(typeof v === "string" ? v : ""))
+                  }
+                >
+                  浏览
+                </button>
+              </div>
+              <div className="actions">
+                <button
+                  className="secondary"
+                  disabled={!backupPath}
+                  onClick={() =>
+                    void legacyImport(backupPath)
+                      .then((r) => {
+                        setSaveFailed(false);
+                        setMessage(JSON.stringify(r));
+                      })
+                      .catch((e) => {
+                        setSaveFailed(true);
+                        setMessage(appErrorText(e));
+                      })
+                  }
+                >
+                  导入并校验
+                </button>
+              </div>
+            </details>
           </section>
         </div>
         <div className="settings-col">
@@ -2264,21 +2307,7 @@ export function Settings({
               ))}
             </div>
           </section>
-          <section className="list-card">
-            <h2>新手模式</h2>
-            <p>
-              用带动画的分步提示认识界面：首次打开软件会自动播放工作台导览，
-              第一次使用某个工具时会播放该工具的简要上手说明，都可以随时跳过。
-              总开关在左侧栏最底部，默认开启，重启后保持你的选择。
-            </p>
-            <div className="newbie-replay-row">
-              <Button variant="outline" size="sm" onClick={onReplayWorkspaceTour}>
-                <Sparkles aria-hidden="true" />
-                重播工作台引导
-              </Button>
-              <small>总开关关闭时，也能从这里手动重播。</small>
-            </div>
-          </section>
+          
           <section className="list-card">
             <h2>本地缓存</h2>
             <p>
@@ -2374,49 +2403,6 @@ export function Settings({
             </div>
             {cacheMessage && <p className="cache-result">{cacheMessage}</p>}
           </section>
-          <details className="list-card settings-advanced">
-            <summary>AudiPick 旧数据迁移（按需使用）</summary>
-            <p>
-              先在旧 AudiPick 配置页导出迁移备份，再在这里导入。导入按项目 ID
-              去重，不会删除旧数据。
-            </p>
-            <div className="input-with-button">
-              <input
-                value={backupPath}
-                readOnly
-                placeholder="选择 AudiPick迁移备份.json"
-              />
-              <button
-                className="browse"
-                onClick={() =>
-                  void pickPath("file", "选择 AudiPick 迁移备份", [
-                    "json",
-                  ]).then((v) => setBackupPath(typeof v === "string" ? v : ""))
-                }
-              >
-                浏览
-              </button>
-            </div>
-            <div className="actions">
-              <button
-                className="secondary"
-                disabled={!backupPath}
-                onClick={() =>
-                  void legacyImport(backupPath)
-                    .then((r) => {
-                      setSaveFailed(false);
-                      setMessage(JSON.stringify(r));
-                    })
-                    .catch((e) => {
-                      setSaveFailed(true);
-                      setMessage(appErrorText(e));
-                    })
-                }
-              >
-                导入并校验
-              </button>
-            </div>
-          </details>
         </div>
       </div>
       {message && (

@@ -74,8 +74,23 @@ export function leadingNumber(path: string): string | undefined {
  */
 export function periodTag(path: string): string | undefined {
   const name = stem(path);
-  const ranged = /(\d{4})[.\-年]\s*(\d{1,2})\s*[-~至]\s*(\d{1,2})/.exec(name);
-  if (ranged) return `${ranged[1]}.${Number(ranged[2])}-${Number(ranged[3])}`;
+  // 统一吸收 ERP/人工命名中的常见期间写法：2024.5-7、2024.5~7、
+  // 2024年5月至7月、2024年5月-7月。符号不同不应成为配对差异。
+  const ranged = /(20\d{2})\s*[.\-/年]\s*(\d{1,2})\s*月?\s*(?:[-~～—–]|至)\s*(\d{1,2})\s*月?/.exec(
+    name,
+  );
+  if (ranged)
+    return `${ranged[1]}.${Number(ranged[2])}-${Number(ranged[3])}`;
+  // 文件名没有年份时，只有明确带“月”的范围才当期间，避免把“06-08”这类
+  // 账套编号误解成月份。5~7月、5月至7月都会归一成 5-7。
+  const yearlessRange = /(?:^|[^\d])(\d{1,2})\s*月?\s*(?:[-~～—–]|至)\s*(\d{1,2})\s*月(?:[^\d]|$)/.exec(
+    name,
+  );
+  if (yearlessRange)
+    return `${Number(yearlessRange[1])}-${Number(yearlessRange[2])}`;
+  // 单月也比退化成年份更精确：2024年5月不能与 2024年7月自动配在一起。
+  const yearMonth = /(20\d{2})\s*[.\-/年]\s*(\d{1,2})\s*月/.exec(name);
+  if (yearMonth) return `${yearMonth[1]}.${Number(yearMonth[2])}`;
   const year = /(?:^|[^\d])(20\d{2})(?![\d.])/.exec(name);
   return year ? year[1] : undefined;
 }
@@ -150,7 +165,15 @@ export function pairLedgerFiles(files: PairingFile[]): PairedGroup[] {
           leadingNumber(je.path) === number,
       );
       const samePeriod = sameNumber.filter((je) => periodTag(je.path) === period);
-      matched = samePeriod[0] ?? (sameNumber.length === 1 ? sameNumber[0] : undefined);
+      const candidatesWithPeriod = sameNumber.filter((je) => periodTag(je.path));
+      // 两边文件名都明确写了期间时，期间冲突就是硬冲突；不能因为当前只剩
+      // 一个同编号 JE，便把 4-12 月账塞给 1-3 月 TB。
+      matched = samePeriod[0] ??
+        (!period || candidatesWithPeriod.length === 0
+          ? sameNumber.length === 1
+            ? sameNumber[0]
+            : undefined
+          : undefined);
       if (matched) {
         reasons.push(`文件名编号 ${number}`);
         if (period && periodTag(matched.path) === period)

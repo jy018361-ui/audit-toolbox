@@ -203,11 +203,11 @@ it("marks preview tools as trials in the sidebar without disabling them", async 
 
   for (const name of ["AudiPick 智能合同审阅", "WP Roll Forward"]) {
     const link = sidebar.getByRole("link", {
-      name: new RegExp(`${name}.*试用.*结果请复核`),
+      name: new RegExp(`${name}.*开发中.*结果请复核`),
     });
     expect(link).toBeVisible();
-    expect(link).toHaveAttribute("title", "试用功能，使用结果请复核。");
-    expect(within(link).getByText("试用")).toBeVisible();
+    expect(link).toHaveAttribute("title", "开发中功能，使用结果请复核。");
+    expect(within(link).getByText("开发中")).toBeVisible();
   }
 
   expect(
@@ -217,7 +217,7 @@ it("marks preview tools as trials in the sidebar without disabling them", async 
 
 it("groups settings into two columns on a single page, preserves draft, and saves via the existing APIs", async () => {
   render(
-    <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} onReplayWorkspaceTour={() => {}} />,
+    <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />,
   );
   await waitFor(() =>
     expect(screen.getByLabelText("模型")).toHaveValue("saved-model"),
@@ -278,7 +278,7 @@ it("groups settings into two columns on a single page, preserves draft, and save
 it("protects unsaved settings on leave", async () => {
   render(
     <MemoryRouter>
-      <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} onReplayWorkspaceTour={() => {}} />
+      <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />
       <ConfirmDialogHost />
     </MemoryRouter>,
   );
@@ -329,7 +329,7 @@ it("requires confirmation before clearing local cache", async () => {
   });
   render(
     <MemoryRouter>
-      <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} onReplayWorkspaceTour={() => {}} />
+      <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />
       <ConfirmDialogHost />
     </MemoryRouter>,
   );
@@ -360,7 +360,7 @@ function UpdateSettings({ initial = null }: { initial?: Update | null }) {
     <Settings
       availableUpdate={available}
       onAvailableUpdateChange={setAvailable}
-      onReplayWorkspaceTour={() => {}}
+     
     />
   );
 }

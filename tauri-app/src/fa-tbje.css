@@ -253,7 +253,9 @@
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
-  table-layout: fixed;
+  /* 预览表的列数随资料变化，固定布局会把排不下的列压成 0 宽（表头竖排、数字重叠）；
+     列数固定的科目复核表在下方单独恢复 fixed + 百分比列宽。 */
+  table-layout: auto;
 }
 
 .fa-tbje-account-table th,
@@ -273,19 +275,24 @@
   font-weight: 600;
 }
 
-.fa-tbje-account-table th:nth-child(1) {
+/* 科目复核表固定 4 列，列宽按 主体/科目/角色/类别 分配，科目列超长省略。 */
+.fa-tbje-account-table.fa-tbje-review-table {
+  table-layout: fixed;
+}
+
+.fa-tbje-review-table th:nth-child(1) {
   width: 14%;
 }
 
-.fa-tbje-account-table th:nth-child(2) {
+.fa-tbje-review-table th:nth-child(2) {
   width: 42%;
 }
 
-.fa-tbje-account-table th:nth-child(3) {
+.fa-tbje-review-table th:nth-child(3) {
   width: 19%;
 }
 
-.fa-tbje-account-table th:nth-child(4) {
+.fa-tbje-review-table th:nth-child(4) {
   width: 25%;
 }
 
@@ -421,4 +428,26 @@
 
 .fa-tbje-summary-diff td {
   background: color-mix(in srgb, var(--surface-muted) 60%, var(--surface));
+}
+
+/* 2026-09-05 汇总变动表预览挤压修复:预览表改回内容自适应列宽,
+   金额列统一右对齐,类别列表头限宽换行而不是竖排;放不下时容器横向滚动。 */
+.fa-tbje-num {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.fa-tbje-summary-preview th:nth-child(n + 3) {
+  text-align: right;
+}
+
+.fa-tbje-summary-preview th:nth-child(n + 4) {
+  min-width: 5.5rem;
+  max-width: 12rem;
+}
+
+.fa-tbje-details-preview th:nth-child(5),
+.fa-tbje-details-preview th:nth-child(6) {
+  text-align: right;
 }

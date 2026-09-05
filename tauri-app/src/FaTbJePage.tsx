@@ -652,6 +652,43 @@ export function FaTbJePage() {
     setStep(1);
   }
 
+  async function replaceSource(kind: Kind) {
+    const picked = await pickPath(
+      "file",
+      kind === "tb" ? "更换 TB 科目余额表" : "更换 JE 序时账",
+      ["xlsx", "xls", "xlsm", "csv"],
+    );
+    const path = Array.isArray(picked) ? picked[0] : picked;
+    if (!path) return;
+    reviews.clearReview(kind);
+    setBusy(true);
+    setError("");
+    setSourceStatus(`正在按 ${kind.toUpperCase()} 读取 ${fileName(path)}…`);
+    try {
+      const inspected = (await engineCall(`deposit.inspect_${kind}`, {
+        source: { inputPath: path, sheet: "", headerRow: 0, headerDepth: 0 },
+      })) as Inspection;
+      setPaths((current) => ({ ...current, [kind]: path }));
+      setInspects((current) => ({ ...current, [kind]: inspected }));
+      setMappings((current) => ({
+        ...current,
+        [kind]: inspected.suggestedMapping ?? {},
+      }));
+      setAssignments([]);
+      setAccountsReviewed(false);
+      setResult(undefined);
+      if (kind === "je" && inspected.suggestedBalanceSheetDate)
+        setReportEnd(inspected.suggestedBalanceSheetDate);
+      setSourceStatus(
+        `${kind.toUpperCase()} 已更换为 ${fileName(path)} / ${inspected.sheet}。`,
+      );
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function changeSourceKind(from: Kind, to: Kind) {
     const current = inspects[from];
     const occupied = inspects[to];
@@ -930,6 +967,7 @@ export function FaTbJePage() {
                       path={paths[kind]}
                       inspection={inspects[kind]!}
                       disabled={busy}
+                      onReplace={() => void replaceSource(kind)}
                       onClear={() => clearSource(kind)}
                       onKindChange={() =>
                         void changeSourceKind(kind, kind === "tb" ? "je" : "tb")
@@ -1168,7 +1206,7 @@ export function FaTbJePage() {
               </div>
             </div>
             <div className="fa-tbje-account-table-wrap">
-              <table className="fa-tbje-account-table">
+              <table className="fa-tbje-account-table fa-tbje-review-table">
                 <thead>
                   <tr>
                     <th>主体</th>
@@ -1406,7 +1444,8 @@ export function FaTbJePage() {
 }
 
 /** 生成预览的汇总变动表：与导出 Excel 共用同一份行定义（零行过滤一致），
-    前端看到什么、导出的底稿里就是什么。段名在切换时显示，模拟合并单元格。 */
+    前端看到什么、导出的底稿里就是什么。表头也是同一套：空段列＋变动项目＋合计＋类别列。
+    段名在切换时显示，模拟合并单元格。 */
 function FaTbJeSummaryPreview({ value }: { value: unknown }) {
   const summary = (value as { summaryTable?: unknown } | null | undefined)
     ?.summaryTable as
@@ -1433,7 +1472,8 @@ function FaTbJeSummaryPreview({ value }: { value: unknown }) {
           <table className="fa-tbje-account-table">
             <thead>
               <tr>
-                <th>项目</th>
+                <th aria-label="分类" />
+                <th>变动项目</th>
                 <th>合计</th>
                 {columns.map((column) => (
                   <th key={column} title={column}>
@@ -1486,7 +1526,7 @@ function FaTbJePreviewDetails({ value }: { value: unknown }) {
         <CardTitle>新增明细预览（前 {rows.length} 笔）</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="fa-tbje-account-table-wrap">
+        <div className="fa-tbje-account-table-wrap fa-tbje-details-preview">
           <table className="fa-tbje-account-table">
             <thead>
               <tr>
@@ -1537,6 +1577,7 @@ function FaLedgerSourceCard(props: {
   path: string;
   inspection: Inspection;
   disabled: boolean;
+  onReplace: () => void;
   onClear: () => void;
   onKindChange: () => void;
   onHeaderChange: (
@@ -1559,6 +1600,13 @@ function FaLedgerSourceCard(props: {
         </p>
         <div className="fx-detected-file">
           <span>{fileName(props.path)}</span>
+          <button
+            type="button"
+            disabled={props.disabled}
+            onClick={props.onReplace}
+          >
+            更换 Excel
+          </button>
           <button
             type="button"
             disabled={props.disabled}

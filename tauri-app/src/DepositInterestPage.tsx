@@ -790,6 +790,32 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
+  async function replaceSource(kind: Kind) {
+    const picked = await pickPath(
+      "file",
+      kind === "tb" ? "更换 TB 科目余额表" : "更换 JE 序时账",
+      ["xlsx", "xls", "xlsm", "csv"],
+    );
+    const path = Array.isArray(picked) ? picked[0] : picked;
+    if (!path) return;
+    reviews.clearReview(kind);
+    setBusy(true);
+    setError("");
+    setSourceStatus(`正在按 ${kind.toUpperCase()} 读取 ${fileName(path)}…`);
+    try {
+      const response = (await engineCall(`deposit.inspect_${kind}`, {
+        source: { inputPath: path, sheet: "", headerRow: 0, headerDepth: 0 },
+      })) as Inspection;
+      applyInspection(kind, path, response);
+      setSourceStatus(
+        `${kind.toUpperCase()} 已更换为 ${fileName(path)} / ${response.sheet}。`,
+      );
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
   async function changeSourceKind(from: Kind, to: Kind) {
     const path = from === "je" ? jePath : tbPath;
     const current = from === "je" ? je : tb;
@@ -1047,6 +1073,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   path={jePath}
                   inspection={je}
                   disabled={busy}
+                  onReplace={() => void replaceSource("je")}
                   onClear={() => {
                     reviews.clearReview("je");
                     setAccountRoleOverrides({});
@@ -1080,6 +1107,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   path={tbPath}
                   inspection={tb}
                   disabled={busy}
+                  onReplace={() => void replaceSource("tb")}
                   onClear={() => {
                     reviews.clearReview("tb");
                     setAccountRoleOverrides({});
@@ -1731,6 +1759,7 @@ function SourceCard(props: {
   path: string;
   inspection?: Inspection;
   disabled: boolean;
+  onReplace: () => void;
   onClear: () => void;
   onInspect: () => void;
   onKindChange?: () => void;
@@ -1744,6 +1773,15 @@ function SourceCard(props: {
       <CardContent>
         <div className="fx-detected-file">
           <span title={props.path}>{fileName(props.path)}</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            type="button"
+            disabled={props.disabled}
+            onClick={props.onReplace}
+          >
+            更换 Excel
+          </Button>
           <Button
             variant="ghost"
             size="sm"

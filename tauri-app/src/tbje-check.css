@@ -60,6 +60,17 @@
 .tbje-llm-action .tbje-remove-all {
   color: var(--danger-fg);
 }
+.tbje-manual-entry {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+.tbje-manual-entry > span {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
 .tbje-group-llm-result {
   display: grid;
   gap: 4px;
@@ -202,6 +213,7 @@
 }
 
 .tbje-group-file {
+  flex: 1 1 auto;
   min-width: 0;
   color: var(--ink-strong);
   font-weight: 600;
@@ -211,7 +223,8 @@
 }
 
 .tbje-je-select {
-  width: 100%;
+  flex: 1 1 150px;
+  width: auto;
   min-width: 0;
   height: 30px;
   padding: 0 var(--sp-2);
@@ -220,6 +233,12 @@
   background: var(--surface-muted);
   color: var(--ink);
   font-size: var(--fs-sm);
+}
+
+.tbje-pick-file {
+  flex: 0 0 auto;
+  padding-inline: var(--sp-2);
+  color: var(--primary);
 }
 
 .tbje-group-buttons {

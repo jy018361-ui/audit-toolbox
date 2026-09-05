@@ -10,8 +10,6 @@ export type TourState = {
   newbieMode?: boolean;
   /** 工作台导览是否播放过（含用户主动跳过）。 */
   workspaceDone?: boolean;
-  /** 每个工具的上手引导是否播放过，键为 toolId。 */
-  toolDone?: Record<string, boolean>;
 };
 
 /** 只有 Tauri 桌面端才做"首次启动自动播放"；浏览器预览/测试环境不主动打扰。 */

@@ -6,9 +6,11 @@ import {
   jobCancel,
   jobStart,
   listenJobEvents,
+  listenPositionedFileDrops,
   openOutput,
   pickPath,
 } from "./api";
+import { depositDropTargetInside } from "./DepositInterestPage";
 import { PageHeader } from "@/components/PageHeader";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
@@ -18,6 +20,7 @@ import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
 import {
   applyLedgerReviewToDict,
+  correctLedgerSourceKinds,
   missingGoldIdentity,
   resolveRoleLabels,
   scanLedgerUploadSources,
@@ -50,6 +53,9 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import "./loan-interest.css";
+// 来源卡与统一上传框的样式（fx-source-grid／fx-source-card／fx-detected-file）
+// 与其他账表工具共用，定义在 fx-audit.css。
+import "./fx-audit.css";
 
 type Mode = "ledger" | "tb";
 type Kind = "ledger" | "tb" | "je" | "rateLedger";
@@ -269,6 +275,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const [step, setStep] = useState(0);
   const [job, setJob] = useState<JobEvent>();
   const activeJob = useRef("");
+  // TB＋JE 统一上传框：拖放命中以这个框的坐标为准（台账模式不渲染，自然不响应）。
+  const uploadDropRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const stop = listenJobEvents((e) => {
       if (e.jobId !== activeJob.current) return;
@@ -286,6 +294,23 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     });
     return () => {
       void stop.then((x) => x());
+    };
+  }, []);
+  // TB＋JE 模式支持把两个文件整组拖进上传框，与存款利息／FA 一致。
+  useEffect(() => {
+    const drops = listenPositionedFileDrops(({ paths, x, y }) => {
+      if (
+        !depositDropTargetInside(
+          x,
+          y,
+          uploadDropRef.current?.getBoundingClientRect(),
+        )
+      )
+        return;
+      void classifyAndInspect(paths);
+    });
+    return () => {
+      void drops.then((unlisten) => unlisten());
     };
   }, []);
   const [resultRateEdits, setResultRateEdits] = useState<
@@ -351,7 +376,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     await inspect(kind, picked);
   }
   async function browsePair() {
-    const picked = await pickPath("files", "共同选择 TB 与 JE", [
+    const picked = await pickPath("files", "选择 TB 或序时账文件", [
       "xlsx",
       "xls",
       "xlsm",
@@ -360,18 +385,36 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       "tsv",
     ]);
     if (!picked) return;
-    const paths = Array.isArray(picked) ? picked : [picked];
+    void classifyAndInspect(Array.isArray(picked) ? picked : [picked]);
+  }
+  /** TB＋JE 统一上传入口：与其他账表工具一致，先公共引擎自动分类再逐侧识别。 */
+  async function classifyAndInspect(selected: string[]) {
+    const files = selected.filter((p) =>
+      /\.(xlsx?|xlsm|csv|txt|tsv)$/i.test(p),
+    );
+    if (!files.length) return;
+    // 重新选择一组 TB/JE 时旧识别与映射整体失效，避免只换一侧时另一侧
+    // 仍沿用旧账套；利率台账是独立补充资料，保留。
+    setSources((v) => ({ ...v, tb: empty(), je: empty() }));
+    invalidateResults();
     setBusy(true);
     setError("");
     setPairStatus("正在通过公共账表引擎逐 Sheet 识别…");
+    const failures: string[] = [];
     try {
-      const scan = await scanLedgerUploadSources<LedgerWorkbookSheetClassification>(
-        engineCall,
-        paths,
+      const scan =
+        await scanLedgerUploadSources<LedgerWorkbookSheetClassification>(
+          engineCall,
+          files,
+        );
+      failures.push(
+        ...scan.failures.map(
+          (failure) => `${fileNameOf(failure.path)}：${errorText(failure.error)}`,
+        ),
       );
-      const selected = selectLedgerSourcePair(scan.sources);
-      setBusy(false);
-      for (const item of selected) {
+      const picked = selectLedgerSourcePair(scan.sources);
+      // inspect 内部自带错误提示，这里只汇总分类阶段的失败。
+      for (const item of picked) {
         await inspect(item.kind, item.path, {
           sheet: item.classification.sheet,
           headerRow: 0,
@@ -379,15 +422,69 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         });
       }
       setPairStatus(
-        `${selected.length} 个账表来源已识别${scan.hiddenSheets ? `；${scan.hiddenSheets} 张低置信度 Sheet 已忽略` : ""}。`,
+        `${picked.length} 个账表来源已识别${scan.hiddenSheets ? `；${scan.hiddenSheets} 张低置信度 Sheet 已忽略` : ""}。`,
       );
-      if (scan.failures.length) {
-        setError(
-          scan.failures
-            .map((failure) => `${failure.path}：${errorText(failure.error)}`)
-            .join("；"),
-        );
-      }
+      if (failures.length) setError(failures.join("；"));
+    } finally {
+      setBusy(false);
+    }
+  }
+  /** 来源卡上的单侧更换：按该侧既定类型直接读取新文件（Sheet 重新自动识别）。 */
+  async function replaceSource(kind: "tb" | "je") {
+    const picked = await pickPath(
+      "file",
+      kind === "tb" ? "更换 TB 科目余额表" : "更换 JE 序时账",
+      ["xlsx", "xls", "xlsm", "csv", "txt", "tsv"],
+    );
+    const path = Array.isArray(picked) ? picked[0] : picked;
+    if (!path) return;
+    setPairStatus(`正在按 ${kind.toUpperCase()} 读取 ${fileNameOf(path)}…`);
+    const x = await inspect(kind, path, {
+      sheet: "",
+      headerRow: 0,
+      headerDepth: 0,
+    });
+    setPairStatus(
+      x ? `${kind.toUpperCase()} 已更换为 ${fileNameOf(path)}。` : "",
+    );
+  }
+  /** 来源卡上的「更正为 TB/JE」：目标槽被占时交换两侧，全部按新类型重新识别。 */
+  async function changeSourceKind(from: "tb" | "je", to: "tb" | "je") {
+    const current = sources[from];
+    const occupied = sources[to];
+    if (!current.path || !current.inspection) return;
+    setBusy(true);
+    setError("");
+    setPairStatus(`正在更正为 ${to.toUpperCase()}，并按新类型重新识别…`);
+    try {
+      const changed = await correctLedgerSourceKinds<Inspection>(
+        from,
+        to,
+        { path: current.path, inspection: current.inspection },
+        occupied.path && occupied.inspection
+          ? { path: occupied.path, inspection: occupied.inspection }
+          : undefined,
+        async (kind, src) =>
+          (await engineCall("loan.inspect", {
+            kind,
+            source: {
+              inputPath: src.path,
+              sheet: src.inspection.sheet,
+              headerRow: 0,
+              headerDepth: 0,
+            },
+          })) as Inspection,
+      );
+      setSources((v) => ({ ...v, tb: empty(), je: empty() }));
+      for (const item of changed)
+        applyInspection(item.kind, item.path, item.inspection);
+      setPairStatus(
+        changed.length > 1
+          ? "TB 与 JE 来源已交换，并按新类型重新识别。"
+          : `${fileNameOf(current.path)} 已更正为 ${to.toUpperCase()}。`,
+      );
+    } catch (e) {
+      setError(errorText(e));
     } finally {
       setBusy(false);
     }
@@ -396,7 +493,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     kind: Kind,
     path = sources[kind].path,
     over?: Partial<Inspection>,
-  ) {
+  ): Promise<Inspection | undefined> {
     setBusy(true);
     setError("");
     try {
@@ -411,24 +508,30 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           headerDepth: over?.headerDepth ?? old?.headerDepth ?? 0,
         },
       })) as Inspection;
-      // 历史恢复后重新识别同一文件：存档映射顶回建议映射，一次性消费；
-      // 换文件照旧用建议值。
-      const stash = restoredLoanMappings.current[kind];
-      const samePath = (a: string, b: string) =>
-        a.trim().toLowerCase() === b.trim().toLowerCase();
-      const mapping =
-        stash && samePath(stash.path, path)
-          ? stash.mapping
-          : (x.suggestedMapping ?? {});
-      if (stash && samePath(stash.path, path))
-        restoredLoanMappings.current[kind] = undefined;
-      setSource(kind, { path, inspection: x, mapping });
-      if (kind === "ledger") setRateEdits({});
+      applyInspection(kind, path, x);
+      return x;
     } catch (e) {
       setError(errorText(e));
+      return undefined;
     } finally {
       setBusy(false);
     }
+  }
+  /** 把识别结果落到对应来源：存档映射顶回建议映射（一次性消费），其余用建议值。 */
+  function applyInspection(kind: Kind, path: string, x: Inspection) {
+    // 历史恢复后重新识别同一文件：存档映射顶回建议映射，一次性消费；
+    // 换文件照旧用建议值。
+    const stash = restoredLoanMappings.current[kind];
+    const samePath = (a: string, b: string) =>
+      a.trim().toLowerCase() === b.trim().toLowerCase();
+    const mapping =
+      stash && samePath(stash.path, path)
+        ? stash.mapping
+        : (x.suggestedMapping ?? {});
+    if (stash && samePath(stash.path, path))
+      restoredLoanMappings.current[kind] = undefined;
+    setSource(kind, { path, inspection: x, mapping });
+    if (kind === "ledger") setRateEdits({});
   }
   function source(kind: Kind) {
     const x = sources[kind];
@@ -635,31 +738,100 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                     : "TB 与 JE 均需上传；可在下一步选传利率台账。"
                 }
               />
-              {mode === "tb" && (
-                <div className="fx-step-actions">
-                  <Button
-                    type="button"
-                    variant="secondary"
+              {mode === "tb" ? (
+                <>
+                  <FileDropInput
+                    containerRef={uploadDropRef}
+                    value=""
                     disabled={busy}
-                    onClick={() => void browsePair()}
-                  >
-                    一次选择 TB 与 JE（自动识别 Sheet）
-                  </Button>
-                  {pairStatus && <span aria-live="polite">{pairStatus}</span>}
+                    placeholder="拖放或选择 TB、序时账文件（可同时选择）"
+                    onBrowse={() => void browsePair()}
+                    onDragStateChange={() => {}}
+                  />
+                  <div className="fx-source-grid">
+                    <div className="fx-source-slot fx-source-slot-tb">
+                      {sources.tb.path ? (
+                        <LoanSourceCard
+                          kind="tb"
+                          source={sources.tb}
+                          disabled={busy}
+                          onReplace={() => void replaceSource("tb")}
+                          onClear={() =>
+                            setSource("tb", {
+                              path: "",
+                              inspection: undefined,
+                              mapping: {},
+                            })
+                          }
+                          onInspect={() => void inspect("tb")}
+                          onKindChange={() => void changeSourceKind("tb", "je")}
+                        />
+                      ) : sources.je.path ? (
+                        <Card className="fx-source-empty">
+                          <CardHeader>
+                            <CardTitle>TB 科目余额表</CardTitle>
+                          </CardHeader>
+                          <CardContent>
+                            <EmptyState
+                              compact
+                              title="还需要 TB"
+                              description="TB 提供期初、期末本金，是推算借款变动的必需资料；请补充上传或检查文件表头。"
+                            />
+                          </CardContent>
+                        </Card>
+                      ) : null}
+                    </div>
+                    <div className="fx-source-slot fx-source-slot-je">
+                      {sources.je.path ? (
+                        <LoanSourceCard
+                          kind="je"
+                          source={sources.je}
+                          disabled={busy}
+                          onReplace={() => void replaceSource("je")}
+                          onClear={() =>
+                            setSource("je", {
+                              path: "",
+                              inspection: undefined,
+                              mapping: {},
+                            })
+                          }
+                          onInspect={() => void inspect("je")}
+                          onKindChange={() => void changeSourceKind("je", "tb")}
+                        />
+                      ) : sources.tb.path ? (
+                        <Card className="fx-source-empty">
+                          <CardHeader>
+                            <CardTitle>JE 序时账</CardTitle>
+                          </CardHeader>
+                          <CardContent>
+                            <EmptyState
+                              compact
+                              title="还需要 JE"
+                              description="JE 用于逐笔还原新增借款与还款；请补充上传或检查文件表头。"
+                            />
+                          </CardContent>
+                        </Card>
+                      ) : null}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="loan-upload-grid">
+                  <Upload
+                    kind="ledger"
+                    source={sources.ledger}
+                    busy={busy}
+                    browse={() => void browse("ledger")}
+                    clear={() => setSource("ledger", empty())}
+                  />
                 </div>
               )}
-              <div className="loan-upload-grid">
-                {activeKinds.map((kind) => (
-                  <Upload
-                    key={kind}
-                    kind={kind}
-                    source={sources[kind]}
-                    busy={busy}
-                    browse={() => void browse(kind)}
-                    clear={() => setSource(kind, empty())}
-                  />
-                ))}
-              </div>
+              {mode === "tb" && pairStatus && (
+                <p className="fx-source-status" aria-live="polite">
+                  <i aria-hidden="true" />
+                  {pairStatus}
+                </p>
+              )}
               {!activeKinds.some((kind) => sources[kind].path) && (
                 <EmptyState
                   compact
@@ -884,6 +1056,17 @@ function Upload({
         onClear={clear}
         onDragStateChange={() => {}}
       />
+      {source.path && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={busy}
+          onClick={browse}
+        >
+          更换 Excel
+        </Button>
+      )}
       {source.inspection && (
         <small>
           已识别 {source.inspection.rowCount.toLocaleString()} 行 ×{" "}
@@ -893,6 +1076,76 @@ function Upload({
     </div>
   );
 }
+/** TB＋JE 模式的来源卡：与其他账表工具一致，在这里更换、移除或一键更正类型。 */
+function LoanSourceCard(props: {
+  kind: "tb" | "je";
+  source: Source;
+  disabled: boolean;
+  onReplace: () => void;
+  onClear: () => void;
+  onInspect: () => void;
+  onKindChange: () => void;
+}) {
+  const name = props.kind === "tb" ? "TB 科目余额表" : "JE 序时账";
+  const x = props.source.inspection;
+  return (
+    <Card className="fx-source-card">
+      <CardHeader>
+        <CardTitle>已识别：{name}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="fx-detected-file">
+          <span title={props.source.path}>{fileNameOf(props.source.path)}</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            type="button"
+            disabled={props.disabled}
+            onClick={props.onReplace}
+          >
+            更换 Excel
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            type="button"
+            disabled={props.disabled}
+            onClick={props.onClear}
+          >
+            移除
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            type="button"
+            disabled={props.disabled}
+            onClick={props.onKindChange}
+          >
+            更正为 {props.kind === "tb" ? "JE" : "TB"}
+          </Button>
+        </div>
+        {props.source.path && !x && (
+          <Button
+            variant="secondary"
+            disabled={props.disabled}
+            onClick={props.onInspect}
+          >
+            自动识别表头和字段
+          </Button>
+        )}
+        {x && (
+          <div className="fx-source-meta">
+            <span>
+              {x.rowCount.toLocaleString()} 行 × {x.headers.length} 列
+            </span>
+            <span>Sheet：{x.sheet}</span>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function Mapping({
   kind,
   source,

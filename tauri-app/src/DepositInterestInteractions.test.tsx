@@ -172,6 +172,28 @@ describe("存款科目手工分类请求", () => {
       screen.getByText("先加入科目余额表（TB）后可继续下一步。"),
     ).toBeVisible();
   });
+  it("自动匹配错误后可直接更换 TB Excel，并按 TB 重新自动识别", async () => {
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "拖放或选择 TB、序时账文件（可同时选择）",
+      }),
+    );
+    await screen.findByRole("button", { name: "更换 Excel" });
+    mock.pickPath.mockResolvedValueOnce("manual-tb.xlsx");
+    fireEvent.click(screen.getByRole("button", { name: "更换 Excel" }));
+    await waitFor(() =>
+      expect(mock.engineCall).toHaveBeenCalledWith("deposit.inspect_tb", {
+        source: {
+          inputPath: "manual-tb.xlsx",
+          sheet: "",
+          headerRow: 0,
+          headerDepth: 0,
+        },
+      }),
+    );
+    expect(await screen.findByText("manual-tb.xlsx")).toBeVisible();
+  });
   it("真实页面区分默认excluded和手工排除，并支持撤销手工选择", async () => {
     render(<DepositInterestPage tool={tool} />);
     fireEvent.click(

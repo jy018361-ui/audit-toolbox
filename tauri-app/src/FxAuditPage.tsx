@@ -70,9 +70,8 @@ export function fxResultTrustStatus(
   if (missingEvidence) {
     return {
       tone: "blocked",
-      title: "需补充资料后再使用",
-      detail:
-        "部分测算缺少可靠余额或币种依据。请按下方提示补充资料，然后重新测算。",
+      title: "资料不足",
+      detail: "部分科目未纳入测算，详见下方清单。",
     };
   }
   if (needsReview) {
@@ -1218,6 +1217,34 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
+  async function replaceSource(kind: "je" | "tb") {
+    const picked = await pickPath(
+      "file",
+      kind === "tb" ? "更换 TB 科目余额表" : "更换 JE 凭证明细",
+      ["xlsx", "xls", "xlsm", "csv"],
+    );
+    const path = Array.isArray(picked) ? picked[0] : picked;
+    if (!path) return;
+    reviews.clearReview(kind);
+    setBusy(true);
+    setError("");
+    setSourceStatus(`正在按 ${kind.toUpperCase()} 读取 ${fileName(path)}…`);
+    setAlignment([]);
+    setResult(undefined);
+    try {
+      const response = (await engineCall(`fx.inspect_${kind}`, {
+        source: { inputPath: path, sheet: "", headerRow: 0, headerDepth: 0 },
+      })) as Inspection;
+      applyInspection(kind, path, response);
+      setSourceStatus(
+        `${kind.toUpperCase()} 已更换为 ${fileName(path)} / ${response.sheet}。`,
+      );
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
   async function changeSourceKind(from: "je" | "tb", to: "je" | "tb") {
     const path = from === "je" ? jePath : tbPath;
     const current = from === "je" ? je : tb;
@@ -1639,6 +1666,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   path={jePath}
                   inspection={je}
                   disabled={busy || reviewingAny}
+                  onReplace={() => void replaceSource("je")}
                   onClear={() => {
                     reviews.clearReview("je");
                     setJePath("");
@@ -1678,6 +1706,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   path={tbPath}
                   inspection={tb}
                   disabled={busy || reviewingAny}
+                  onReplace={() => void replaceSource("tb")}
                   onClear={() => {
                     reviews.clearReview("tb");
                     setTbPath("");
@@ -2226,6 +2255,7 @@ function SourceCard(props: {
   path: string;
   inspection?: Inspection;
   disabled: boolean;
+  onReplace: () => void;
   onClear: () => void;
   onInspect: () => void;
   onHeaderChange: (row: number, depth: number, sheet: string) => void;
@@ -2240,6 +2270,13 @@ function SourceCard(props: {
       <CardContent>
         <div className="fx-detected-file">
           <span>{displayFileName(props.path)}</span>
+          <button
+            type="button"
+            disabled={props.disabled}
+            onClick={props.onReplace}
+          >
+            更换 Excel
+          </button>
           <button
             type="button"
             disabled={props.disabled}
@@ -2756,19 +2793,13 @@ function TbGranularityNotice({
       <div className="fx-granularity-head">
         <div>
           <strong>
-            TB 粒度不足：{items.length} 个科目无法测算未实现汇兑损益
+            {items.length} 个科目缺少可用的币种余额
           </strong>
           <small>
-            外币敞口要按「科目 ＋
-            币种」才算得出来，而当前这份科目余额表只给到「科目」一级。
-            这些科目的余额里混了多种币别或本位币，工具无法拆分，已整块排除在测算之外——
-            它们的账面金额会在数据质量检查中单独列示。
+            这些科目未纳入未实现汇兑损益测算。
           </small>
           <div className="fx-granularity-action">
-            <b>要做什么：</b>请客户从 ERP 重新导出<b>按币种拆分</b>的科目余额表
-            （SAP
-            一般是在余额表里加上「货币」维度，使同一科目的不同币别各占一行），
-            替换当前 TB 后重新测算。
+            请提供按“科目＋币种”分行的科目余额表后重新测算。
           </div>
         </div>
         <Button
@@ -2787,7 +2818,6 @@ function TbGranularityNotice({
                 <th>科目</th>
                 <th>币种</th>
                 <th>原因</th>
-                <th>说明</th>
               </tr>
             </thead>
             <tbody>
@@ -2801,7 +2831,6 @@ function TbGranularityNotice({
                     <td>{String(item.account ?? "")}</td>
                     <td>{shown || "—"}</td>
                     <td>{granularityLabel(item.type)}</td>
-                    <td>{String(item.detail ?? "")}</td>
                   </tr>
                 );
               })}

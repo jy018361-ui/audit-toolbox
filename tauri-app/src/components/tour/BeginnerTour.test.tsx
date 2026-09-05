@@ -364,15 +364,10 @@ describe("BeginnerTour", () => {
 
 describe("tourState", () => {
   it("保存后读取往返一致", () => {
-    saveTourState({
-      newbieMode: false,
-      workspaceDone: true,
-      toolDone: { fa_list: true },
-    });
+    saveTourState({ newbieMode: false, workspaceDone: true });
     expect(loadTourState()).toEqual({
       newbieMode: false,
       workspaceDone: true,
-      toolDone: { fa_list: true },
     });
   });
 

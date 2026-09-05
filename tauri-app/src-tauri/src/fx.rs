@@ -56,8 +56,44 @@ fn preview_cache_key(params: &Value) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+fn preview_cache_dir() -> Option<PathBuf> {
+    let dirs = ProjectDirs::from("com", "AuditToolbox", "AuditToolbox")?;
+    let path = dirs.cache_dir().join("fx_preview");
+    fs::create_dir_all(&path).ok()?;
+    Some(path)
+}
+
+fn preview_cache_file(token: &str) -> Option<PathBuf> {
+    // token 只能来自本模块生成的 SHA-256，拒绝把外部字符串拼进路径。
+    (token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| preview_cache_dir().map(|dir| dir.join(format!("{token}.json"))))
+        .flatten()
+}
+
+fn cleanup_preview_cache(dir: &Path) {
+    let stale_after = StdDuration::from_secs(24 * 60 * 60);
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age > stale_after);
+        if stale {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 fn cached_preview(token: &str) -> Option<Value> {
-    FX_PREVIEW_CACHE
+    let memory = FX_PREVIEW_CACHE
         .get_or_init(|| Mutex::new(None))
         .lock()
         .ok()
@@ -66,12 +102,32 @@ fn cached_preview(token: &str) -> Option<Value> {
                 .as_ref()
                 .filter(|(cached_token, _)| cached_token == token)
                 .map(|(_, result)| result.clone())
-        })
+        });
+    if memory.is_some() {
+        return memory;
+    }
+    // 预览和导出各自由一个独立 worker 进程执行，进程内静态缓存无法跨点击
+    // 复用。把完整结果按输入指纹落到本机缓存，导出 worker 才能真正跳过重算。
+    let bytes = fs::read(preview_cache_file(token)?).ok()?;
+    let result = serde_json::from_slice::<Value>(&bytes).ok()?;
+    if let Ok(mut cache) = FX_PREVIEW_CACHE.get_or_init(|| Mutex::new(None)).lock() {
+        *cache = Some((token.to_owned(), result.clone()));
+    }
+    Some(result)
 }
 
 fn store_preview(token: String, result: Value) {
     if let Ok(mut cache) = FX_PREVIEW_CACHE.get_or_init(|| Mutex::new(None)).lock() {
-        *cache = Some((token, result));
+        *cache = Some((token.clone(), result.clone()));
+    }
+    let Some(path) = preview_cache_file(&token) else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        cleanup_preview_cache(dir);
+    }
+    if let Ok(bytes) = serde_json::to_vec(&result) {
+        let _ = fs::write(path, bytes);
     }
 }
 
@@ -2286,15 +2342,21 @@ fn load_mapped_je_table(params: &Value) -> Result<(Arc<FxTable>, Map<String, Val
     Ok((forward_filled_je_table(&table, &mapping), mapping))
 }
 
-fn is_je_amount_role(role: &str) -> bool {
+fn is_je_forward_fill_role(role: &str) -> bool {
+    // 仅填充 Excel 合并单元格常见的凭证级/身份字段。币种空白表示本位币，
+    // 方向空白也有业务含义，绝不能继承上一行；否则一笔美元分录之后的库存
+    // 现金等本位币科目会被整片误认成 USD。
     matches!(
         ledger_mapping::migrate_role_name("je", role),
-        "functionalAmount"
-            | "functionalDebit"
-            | "functionalCredit"
-            | "foreignAmount"
-            | "foreignDebit"
-            | "foreignCredit"
+        "date"
+            | "id"
+            | "voucherType"
+            | "entity"
+            | "accountCode"
+            | "accountName"
+            | "account"
+            | "auxiliary"
+            | "summary"
     )
 }
 
@@ -2306,7 +2368,7 @@ pub(crate) fn forward_filled_je_table(
 ) -> Arc<FxTable> {
     let columns = mapping
         .iter()
-        .filter(|(role, _)| !is_je_amount_role(role))
+        .filter(|(role, _)| is_je_forward_fill_role(role))
         .flat_map(|(role, _)| mapped_cols(mapping, role))
         .collect::<Vec<_>>();
     let indexes = columns
@@ -2523,8 +2585,14 @@ fn currency_for(
     if let Some(hint) = currency_text_hint(row, mapping).or_else(|| currency_from_text(account)) {
         return hint;
     }
-    // 线索也没有，退回本位币列（整列同值的那一列），至少口径不会错。
-    normalize_currency(cell(row, mapping, "functionalCurrency"))
+    // 线索也没有时，该行就是本位币业务。优先读取表内本位币列；没有这列
+    // （用友 JE 很常见）则按该行所属主体的已确认本位币兜底。
+    let mapped_functional = normalize_currency(cell(row, mapping, "functionalCurrency"));
+    if !mapped_functional.is_empty() {
+        mapped_functional
+    } else {
+        functional_currency(entity_for(row, mapping, params), params)
+    }
 }
 
 // TB 与 JE 共有的字段必须落在同一口径上：科目编码对科目编码、科目名称对
@@ -7418,9 +7486,11 @@ fn calculate_unrealized(
             "entity": entity, "account": account, "auxiliary": auxiliary,
             "currency": currency, "functionalCurrency": functional_code,
             "openingForeign": opening_foreign, "openingBookFunctional": opening_local,
+            "openingRateDate": start.format("%Y-%m-%d").to_string(),
             "openingRate": opening_rate, "openingPublishedDate": opening_published,
             "openingAuditFunctional": opening_audit, "openingDifference": opening_difference,
             "closingForeign": closing_foreign, "closingBookFunctional": closing_local,
+            "closingRateDate": end.format("%Y-%m-%d").to_string(),
             "closingRate": closing_rate, "closingPublishedDate": closing_published,
             "closingAuditFunctional": closing_audit, "closingDifference": closing_difference,
             "twoPointChange": closing_difference - opening_difference,
@@ -8387,13 +8457,8 @@ fn export_workbook(params: &Value, result: &Value) -> Result<String, AppError> {
             ]);
             write_value_array_sheet(&mut workbook, "TB勾稽", Some(&reconciliation_row))?;
         } else {
-            // 无 JE 时仍保留一张面向用户的两时点未实现测算汇总；其余拆解页
-            // 仅作为技术追溯隐藏保存。
-            write_value_array_sheet(
-                &mut workbook,
-                "未实现汇兑损益测算",
-                result.get("unrealized"),
-            )?;
+            // 无 JE 时也输出可追踪的两时点公式底稿，不能退回纯数值 JSON 表。
+            write_two_point_unrealized_sheet(&mut workbook, result.get("unrealized"), &rate_index)?;
             write_value_array_sheet(&mut workbook, "TB余额明细", result.get("unrealized"))?;
             write_filtered_sheet(
                 &mut workbook,
@@ -8514,8 +8579,7 @@ fn write_user_conclusion_sheet(
     }
 
     let mode = result.get("mode").and_then(Value::as_str).unwrap_or("");
-    let has_rollforward_sheet =
-        params.get("jeSource").is_some() && matches!(mode, "unrealized" | "combined");
+    let has_unrealized_sheet = matches!(mode, "unrealized" | "combined");
     let gain_loss_column = if summary
         .get("accountTranslationEnabled")
         .and_then(Value::as_bool)
@@ -8561,8 +8625,13 @@ fn write_user_conclusion_sheet(
             gain_loss_column
         )),
     )?;
-    let unrealized_formula =
-        has_rollforward_sheet.then(|| "SUM('未实现汇兑损益测算'!$L:$L)".to_owned());
+    let unrealized_formula = has_unrealized_sheet.then(|| {
+        if params.get("jeSource").is_some() {
+            "SUM('未实现汇兑损益测算'!$L:$L)".to_owned()
+        } else {
+            "SUM('未实现汇兑损益测算'!$Q:$Q)".to_owned()
+        }
+    });
     let unrealized_excel_row = write_amount(
         "未实现汇兑损益测算",
         number("unrealizedAdjustment"),
@@ -9744,6 +9813,239 @@ fn write_rate_matrix_sheet(
     Ok(index)
 }
 
+fn write_two_point_unrealized_sheet(
+    workbook: &mut Workbook,
+    value: Option<&Value>,
+    rate_index: &std::collections::HashSet<(String, String)>,
+) -> Result<(), AppError> {
+    let rows = value.and_then(Value::as_array).cloned().unwrap_or_default();
+    let (header, _) = formats();
+    let amount = Format::new().set_num_format("#,##0.00;[Red](#,##0.00);-");
+    let rate_format = Format::new().set_num_format("0.00000000");
+    let sheet = workbook.add_worksheet();
+    setup(sheet, "未实现汇兑损益测算")?;
+    const COLUMNS: &[(&str, &str)] = &[
+        ("entity", "主体"),
+        ("account", "科目"),
+        ("auxiliary", "辅助核算"),
+        ("currency", "币种"),
+        ("functionalCurrency", "本位币"),
+        ("openingForeign", "期初原币余额"),
+        ("openingRate", "期初官方中间价"),
+        ("openingBookFunctional", "期初账面本位币余额"),
+        ("openingAuditFunctional", "期初审计本位币余额"),
+        ("openingDifference", "期初重估差异"),
+        ("closingForeign", "期末原币余额"),
+        ("closingRate", "期末官方中间价"),
+        ("closingBookFunctional", "期末账面本位币余额"),
+        ("closingAuditFunctional", "期末审计本位币余额"),
+        ("closingDifference", "期末重估差异"),
+        ("twoPointChange", "两时点差异变动"),
+        ("suggestedAdjustment", "建议调整"),
+        ("method", "测算方法"),
+        ("sourceRow", "源文件行"),
+    ];
+    for (column, (_, title)) in COLUMNS.iter().enumerate() {
+        sheet
+            .write_string_with_format(0, column as u16, *title, &header)
+            .map_err(xlsx_err)?;
+        sheet
+            .set_column_width(column as u16, if *title == "科目" { 42 } else { 22 })
+            .map_err(xlsx_err)?;
+    }
+    let write_rate = |sheet: &mut Worksheet,
+                      output_row: u32,
+                      column: u16,
+                      excel_row: usize,
+                      date: &str,
+                      currency: &str,
+                      cached: f64|
+     -> Result<(), AppError> {
+        if !date.is_empty()
+            && !currency.is_empty()
+            && rate_index.contains(&(date.to_owned(), currency.to_owned()))
+        {
+            sheet
+                .write_formula_with_format(
+                    output_row,
+                    column,
+                    Formula::new(format!(
+                        "INDEX('汇率表'!$A:$XFD,MATCH({date_column}{excel_row},'汇率表'!$A:$A,0),MATCH(D{excel_row},'汇率表'!$1:$1,0))",
+                        date_column = if column == 6 { "T" } else { "U" }
+                    ))
+                    .set_result(cached.to_string()),
+                    &rate_format,
+                )
+                .map_err(xlsx_err)?;
+        } else {
+            sheet
+                .write_number_with_format(output_row, column, cached, &rate_format)
+                .map_err(xlsx_err)?;
+        }
+        Ok(())
+    };
+    // 两个日期放在隐藏追溯列，汇率公式据此链接统一的「汇率表」。
+    sheet
+        .write_string_with_format(0, 19, "期初汇率日期", &header)
+        .map_err(xlsx_err)?;
+    sheet
+        .write_string_with_format(0, 20, "期末汇率日期", &header)
+        .map_err(xlsx_err)?;
+    for (index, row) in rows.iter().enumerate() {
+        let output_row = (index + 1) as u32;
+        let excel_row = index + 2;
+        let number = |key: &str| row.get(key).and_then(Value::as_f64);
+        for (column, key) in [
+            (0u16, "entity"),
+            (1, "account"),
+            (2, "auxiliary"),
+            (3, "currency"),
+            (4, "functionalCurrency"),
+            (17, "method"),
+        ] {
+            if let Some(value) = row.get(key) {
+                let text = localized_text(key, value);
+                if !text.is_empty() {
+                    sheet
+                        .write_string(output_row, column, text)
+                        .map_err(xlsx_err)?;
+                }
+            }
+        }
+        if let Some(source_row) = row.get("sourceRow").and_then(Value::as_u64) {
+            sheet
+                .write_number(output_row, 18, source_row as f64)
+                .map_err(xlsx_err)?;
+        }
+        let opening_date = row
+            .get("openingRateDate")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let closing_date = row
+            .get("closingRateDate")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let currency = row.get("currency").and_then(Value::as_str).unwrap_or("");
+        sheet
+            .write_string(output_row, 19, opening_date)
+            .map_err(xlsx_err)?;
+        sheet
+            .write_string(output_row, 20, closing_date)
+            .map_err(xlsx_err)?;
+        for (column, key) in [
+            (5u16, "openingForeign"),
+            (7, "openingBookFunctional"),
+            (10, "closingForeign"),
+            (12, "closingBookFunctional"),
+        ] {
+            if let Some(value) = number(key) {
+                sheet
+                    .write_number_with_format(output_row, column, value, &amount)
+                    .map_err(xlsx_err)?;
+            }
+        }
+        if let Some(value) = number("openingRate") {
+            write_rate(
+                sheet,
+                output_row,
+                6,
+                excel_row,
+                opening_date,
+                currency,
+                value,
+            )?;
+        }
+        if let Some(value) = number("closingRate") {
+            write_rate(
+                sheet,
+                output_row,
+                11,
+                excel_row,
+                closing_date,
+                currency,
+                value,
+            )?;
+        }
+        if let (Some(foreign), Some(rate)) = (number("openingForeign"), number("openingRate")) {
+            let cached = number("openingAuditFunctional").unwrap_or(foreign * rate);
+            sheet
+                .write_formula_with_format(
+                    output_row,
+                    8,
+                    Formula::new(format!("F{excel_row}*G{excel_row}"))
+                        .set_result(cached.to_string()),
+                    &amount,
+                )
+                .map_err(xlsx_err)?;
+        }
+        if let (Some(book), Some(audit)) = (
+            number("openingBookFunctional"),
+            number("openingAuditFunctional"),
+        ) {
+            sheet
+                .write_formula_with_format(
+                    output_row,
+                    9,
+                    Formula::new(format!("I{excel_row}-H{excel_row}"))
+                        .set_result((audit - book).to_string()),
+                    &amount,
+                )
+                .map_err(xlsx_err)?;
+        }
+        if let (Some(foreign), Some(rate)) = (number("closingForeign"), number("closingRate")) {
+            let cached = number("closingAuditFunctional").unwrap_or(foreign * rate);
+            sheet
+                .write_formula_with_format(
+                    output_row,
+                    13,
+                    Formula::new(format!("K{excel_row}*L{excel_row}"))
+                        .set_result(cached.to_string()),
+                    &amount,
+                )
+                .map_err(xlsx_err)?;
+        }
+        if let (Some(book), Some(audit)) = (
+            number("closingBookFunctional"),
+            number("closingAuditFunctional"),
+        ) {
+            let difference = number("closingDifference").unwrap_or(audit - book);
+            sheet
+                .write_formula_with_format(
+                    output_row,
+                    14,
+                    Formula::new(format!("N{excel_row}-M{excel_row}"))
+                        .set_result(difference.to_string()),
+                    &amount,
+                )
+                .map_err(xlsx_err)?;
+            let opening_difference = number("openingDifference").unwrap_or(0.0);
+            let change = number("twoPointChange").unwrap_or(difference - opening_difference);
+            sheet
+                .write_formula_with_format(
+                    output_row,
+                    15,
+                    Formula::new(format!("O{excel_row}-J{excel_row}"))
+                        .set_result(change.to_string()),
+                    &amount,
+                )
+                .map_err(xlsx_err)?;
+            let suggested = number("suggestedAdjustment").unwrap_or(difference);
+            sheet
+                .write_formula_with_format(
+                    output_row,
+                    16,
+                    Formula::new(format!("O{excel_row}")).set_result(suggested.to_string()),
+                    &amount,
+                )
+                .map_err(xlsx_err)?;
+        }
+    }
+    sheet.set_column_hidden(19).map_err(xlsx_err)?;
+    sheet.set_column_hidden(20).map_err(xlsx_err)?;
+    sheet.set_freeze_panes(1, 0).map_err(xlsx_err)?;
+    Ok(())
+}
+
 fn write_unrealized_rollforward_sheet(
     workbook: &mut Workbook,
     value: Option<&Value>,
@@ -10729,6 +11031,75 @@ mod tests {
         // 第三行没有身份只有金额（合计行形态）：不接收填充，保持原样——
         // 填上一行的凭证号/科目它会变成真分录混进发生额。
         assert_eq!(filled.rows[2], vec!["", "", "-100"]);
+    }
+
+    #[test]
+    fn je空币种和方向不继承上一行() {
+        let table = Arc::new(FxTable {
+            path: PathBuf::new(),
+            sheet: "JE".into(),
+            sheets: vec!["JE".into()],
+            header_row: 1,
+            header_depth: 1,
+            raw_headers: vec![vec![
+                "凭证号".into(),
+                "科目".into(),
+                "币种".into(),
+                "方向".into(),
+                "原币".into(),
+                "本位币".into(),
+            ]],
+            headers: vec![
+                "凭证号".into(),
+                "科目".into(),
+                "币种".into(),
+                "方向".into(),
+                "原币".into(),
+                "本位币".into(),
+            ],
+            rows: vec![
+                vec![
+                    "JE-1".into(),
+                    "美元户".into(),
+                    "美元".into(),
+                    "借".into(),
+                    "100".into(),
+                    "720".into(),
+                ],
+                vec![
+                    "".into(),
+                    "库存现金".into(),
+                    "".into(),
+                    "".into(),
+                    "".into(),
+                    "50".into(),
+                ],
+            ],
+            row_count: 2,
+            header_candidates: vec![],
+            sampled: false,
+        });
+        let mapping = json!({
+            "id": "凭证号", "accountName": "科目", "currency": "币种",
+            "direction": "方向", "foreignAmount": "原币", "functionalAmount": "本位币"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let filled = forward_filled_je_table(&table, &mapping);
+        assert_eq!(filled.rows[1][0], "JE-1", "合并的凭证号仍应向下填充");
+        assert_eq!(filled.rows[1][2], "", "空币种表示本位币，不能继承美元");
+        assert_eq!(filled.rows[1][3], "", "空方向不能继承上一行");
+        let row = records(&filled)[1].clone();
+        let params = json!({
+            "fixedEntity": DEFAULT_ENTITY,
+            "entityCurrencies": {DEFAULT_ENTITY: "CNY"}
+        });
+        assert_eq!(
+            currency_for(&row, &mapping, "库存现金", &params),
+            "CNY",
+            "JE 币种空白必须按主体本位币处理"
+        );
     }
 
     #[test]
@@ -12476,6 +12847,16 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             "识别客户重估后，审计未实现测算不得继续机械归零：{}",
             result["summary"]
         );
+        let blocked = result["tbGranularityBlocked"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            blocked
+                .iter()
+                .all(|item| { !item["account"].as_str().unwrap_or("").starts_with("1001 ") }),
+            "库存现金的 JE 币种为空，应按 CNY 处理，不能继承 USD：{blocked:#?}"
+        );
     }
 
     fn candidate_has(value: &Value, role: &str, column: &str) -> bool {
@@ -12513,6 +12894,25 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
         let mut changed = base.clone();
         changed["manualClassifications"]["E-1"] = json!("未实现汇兑损益");
         assert_ne!(preview_cache_key(&base), preview_cache_key(&changed));
+    }
+
+    #[test]
+    fn preview_cache_survives_worker_process_boundary() {
+        let token = preview_cache_key(&json!({
+            "test": "跨 worker 预览缓存",
+            "process": std::process::id()
+        }));
+        let path = preview_cache_file(&token).unwrap();
+        let _ = fs::remove_file(&path);
+        let expected = json!({"previewToken": token, "summary": {"auditFxGainLoss": 12.34}});
+        store_preview(token.clone(), expected.clone());
+        // 模拟预览 worker 退出：清掉进程内缓存，只允许从磁盘恢复。
+        *FX_PREVIEW_CACHE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = None;
+        assert_eq!(cached_preview(&token), Some(expected));
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -12774,6 +13174,79 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             );
             fs::remove_file(path).unwrap();
         }
+    }
+
+    #[test]
+    fn tb_only_workpaper_contains_traceable_two_point_formulas() {
+        let path =
+            std::env::temp_dir().join(format!("fx-tb-only-formulas-{}.xlsx", std::process::id()));
+        let result = json!({
+            "mode": "unrealized",
+            "summary": {
+                "realizedGainLoss": 0.0,
+                "unrealizedAdjustment": 26.0,
+                "auditFxGainLoss": 26.0,
+                "tbFxGainLoss": 26.0,
+                "difference": 0.0,
+                "differenceRatio": 0.0,
+                "reconciliationPassed": true,
+                "pendingReviewAmount": 0.0
+            },
+            "voucherDetail": [], "pendingReview": [], "dataQuality": [],
+            "unrealized": [{
+                "entity": "E", "account": "1002 美元户", "currency": "USD",
+                "functionalCurrency": "CNY", "openingForeign": 10.0,
+                "openingRateDate": "2025-01-01", "openingRate": 7.1,
+                "openingPublishedDate": "2024-12-31", "openingBookFunctional": 70.0,
+                "openingAuditFunctional": 71.0, "openingDifference": 1.0,
+                "closingForeign": 20.0, "closingRateDate": "2025-12-31",
+                "closingRate": 7.2, "closingPublishedDate": "2025-12-31",
+                "closingBookFunctional": 118.0, "closingAuditFunctional": 144.0,
+                "closingDifference": 26.0, "twoPointChange": 25.0,
+                "suggestedAdjustment": 26.0, "method": "年初/年末两时点检查",
+                "sourceRow": 2
+            }],
+            "rateSnapshot": {"responseHash":"test", "rates": [
+                {"requestedDate":"2025-01-01", "publishedDate":"2024-12-31", "currency":"USD", "cnyPerUnit":7.1},
+                {"requestedDate":"2025-12-31", "publishedDate":"2025-12-31", "currency":"USD", "cnyPerUnit":7.2}
+            ]}
+        });
+        let params = json!({
+            "reportStart":"2025-01-01", "reportEnd":"2025-12-31",
+            "fixedEntity":"E", "outputPath":path.to_string_lossy(),
+            "tbSource":{"inputPath":"tb.xlsx"}
+        });
+        export_workbook(&params, &result).unwrap();
+        let mut reader = open_workbook_auto(&path).unwrap();
+        let formulas = reader
+            .worksheet_formula("未实现汇兑损益测算")
+            .unwrap()
+            .cells()
+            .map(|(_, _, formula)| formula.clone())
+            .collect::<Vec<_>>();
+        for expected in ["F2*G2", "I2-H2", "K2*L2", "N2-M2", "O2-J2", "O2"] {
+            assert!(
+                formulas.iter().any(|formula| formula == expected),
+                "缺少公式 {expected}：{formulas:?}"
+            );
+        }
+        assert!(
+            formulas
+                .iter()
+                .any(|formula| formula.contains("汇率表") && formula.contains("MATCH")),
+            "两时点汇率必须链接统一汇率表：{formulas:?}"
+        );
+        let conclusion = reader
+            .worksheet_formula("审计结论")
+            .unwrap()
+            .cells()
+            .map(|(_, _, formula)| formula.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            conclusion.iter().any(|formula| formula.contains("$Q:$Q")),
+            "TB-only 结论页应汇总两时点建议调整公式列：{conclusion:?}"
+        );
+        fs::remove_file(path).unwrap();
     }
 
     // 回归：Excel 打开时会全量重算（rust_xlsxwriter 默认 fullCalcOnLoad），

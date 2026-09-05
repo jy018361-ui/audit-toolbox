@@ -5,6 +5,7 @@ import {
   ledgerClassificationIsVisible,
   scanLedgerUploadSources,
   selectLedgerSourcePair,
+  selectLedgerWorkbookKindSources,
   type LedgerWorkbookSheetClassification,
 } from "./ledgerMapping";
 
@@ -58,14 +59,64 @@ describe("工作簿 Sheet 分类", () => {
     ).toBe(false);
   });
 
-  it("透视、check 和核对类辅助 Sheet 即使分数较高也不参与配对", () => {
-    for (const sheet of ["透视check", "Pivot Table", "内部核对表"]) {
+  it("透视、check、核对和账表种类辅助 Sheet 即使分数较高也不参与配对", () => {
+    for (const sheet of [
+      "透视check",
+      "Pivot Table",
+      "内部核对表",
+      "je种类",
+      "TB_类型",
+    ]) {
       expect(
         ledgerClassificationIsVisible(
           classification(sheet, undefined, { je: 1, tb: 11 }),
         ),
       ).toBe(false);
     }
+  });
+
+  it("同一工作簿同一类型只保留一个自动来源，其他 Sheet 留给下拉手选", () => {
+    const path = "C:/x/06科目余额表_2024.1-3.xlsx";
+    const selected = selectLedgerWorkbookKindSources([
+      {
+        path,
+        classification: classification("Sheet1", ["Sheet1", "Sheet2"], {
+          je: 1,
+          tb: 9,
+        }),
+      },
+      {
+        path,
+        classification: classification("Sheet2", ["Sheet1", "Sheet2"], {
+          je: 1,
+          tb: 10,
+        }),
+      },
+    ]);
+    // 第一项是 Rust 按规模等证据选出的工作簿正表，不因辅助页表头分高 1 分而重复建组。
+    expect(selected.map((item) => item.classification.sheet)).toEqual(["Sheet1"]);
+  });
+
+  it("文件名明确写 JE 时不让其中的辅助 Sheet 反向生成 TB 组", () => {
+    const path = "C:/x/04JE.XLSX";
+    const selected = selectLedgerWorkbookKindSources([
+      {
+        path,
+        classification: classification("Sheet1", ["Sheet1", "处理"], {
+          je: 9,
+          tb: 1,
+        }),
+      },
+      {
+        path,
+        classification: classification("处理", ["Sheet1", "处理"], {
+          je: 2,
+          tb: 8,
+        }),
+      },
+    ]);
+    expect(selected).toHaveLength(1);
+    expect(selected[0].classification).toMatchObject({ kind: "je", sheet: "Sheet1" });
   });
 
   it("公共扫描入口统一过滤低置信度并保留 LLM 失败时的规则结果", async () => {

@@ -58,6 +58,14 @@ describe("文件名里的编号与期间", () => {
     expect(periodTag("C:/x/09科目余额表-2025.xls")).toBe("2025");
     expect(periodTag("C:/x/04TB.XLSX")).toBeUndefined();
   });
+
+  it("不同符号和中文月份写法统一成同一个期间键", () => {
+    expect(periodTag("C:/x/05科目余额表_2024.5~7.xlsx")).toBe("2024.5-7");
+    expect(periodTag("C:/x/05序时账_2024年5月至7月.xlsx")).toBe("2024.5-7");
+    expect(periodTag("C:/x/05科目余额表_5~7月.xlsx")).toBe("5-7");
+    expect(periodTag("C:/x/05序时账_5月至7月.xlsx")).toBe("5-7");
+    expect(periodTag("C:/x/05TB_2024年5月.xlsx")).toBe("2024.5");
+  });
 });
 
 describe("批量配对", () => {
@@ -96,6 +104,41 @@ describe("批量配对", () => {
       expect(periodTag(group.tb!.path)).toBe(periodTag(group.je!.path));
       expect(group.reasons.join()).toContain("期间");
     }
+  });
+
+  it("同编号只剩一个 JE 但期间冲突时也绝不硬配", () => {
+    const groups = pairLedgerFiles([
+      { path: "C:/x/06科目余额表_2024.1-3.xlsx", kind: "tb" },
+      { path: "C:/x/06序时账-2024.4-12.xlsx", kind: "je" },
+    ]);
+    const tbGroup = groups.find((group) => group.tb)!;
+    expect(tbGroup.je).toBeUndefined();
+    expect(tbGroup.needsReview).toBe(true);
+  });
+
+  it("任意编号的 5~7 月都遵守同一期间硬约束", () => {
+    const matched = pairLedgerFiles([
+      { path: "C:/x/12科目余额表_2024.5~7.xlsx", kind: "tb" },
+      { path: "C:/x/12序时账_2024年5月至7月.xlsx", kind: "je" },
+    ]);
+    expect(matched).toHaveLength(1);
+    expect(matched[0].je).toBeDefined();
+
+    const conflicted = pairLedgerFiles([
+      { path: "C:/x/12科目余额表_5~7月.xlsx", kind: "tb" },
+      { path: "C:/x/12序时账_8月至10月.xlsx", kind: "je" },
+    ]);
+    expect(conflicted.find((group) => group.tb)?.je).toBeUndefined();
+  });
+
+  it("04TB 与 04JE 在没有期间时仍按编号正常配对", () => {
+    const groups = pairLedgerFiles([
+      { path: "C:/x/04TB.XLSX", kind: "tb" },
+      { path: "C:/x/04JE.XLSX", kind: "je" },
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].tb?.path).toContain("04TB");
+    expect(groups[0].je?.path).toContain("04JE");
   });
 
   it("配不上的余额表单独列出，不硬凑一个序时账", () => {

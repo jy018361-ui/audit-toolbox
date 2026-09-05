@@ -1476,7 +1476,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         <section id="ap-proj" className="form-card">
           <div className="section-title">
             <h2>项目</h2>
-            <Badge variant="warning">试用功能 · 请复核结果</Badge>
+            <Badge variant="warning">开发中功能 · 请复核结果</Badge>
           </div>
           <div className="form-grid">
             <label className="field">

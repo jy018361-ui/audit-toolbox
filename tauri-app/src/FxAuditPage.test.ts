@@ -47,7 +47,7 @@ describe("fx audit mode selection", () => {
     ).toBe("limited");
     expect(
       fxResultTrustStatus({ unrealizedBalanceBasisComplete: false }, 0),
-    ).toMatchObject({ tone: "blocked", title: "需补充资料后再使用" });
+    ).toMatchObject({ tone: "blocked", title: "资料不足" });
     expect(fxResultTrustStatus({}, 1).tone).toBe("blocked");
   });
 

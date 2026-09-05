@@ -435,14 +435,14 @@ body .history-card-content {
   }
 }
 
-/* ---- 新手模式开关（侧边栏底部，版本号上一行）----
-   做成与导航行同款的一行小设置：图标 + 文案 + 开关，安静但不藏起来；
-   margin-top: auto 让它和版本号一起常驻底部，不被工具列表长短挤动。 */
+/* ---- 新手模式开关（侧边栏上部，品牌区与主导航之间）----
+   做成与导航行同款的一行小设置：图标 + 文案 + 开关，
+   放在最显眼的上部区域，进软件第一眼就能看到。 */
 .newbie-mode-toggle {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  margin-top: auto;
+  margin: 0 var(--sp-1) var(--sp-2);
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--r-sm);
   font-size: var(--fs-md);
@@ -463,12 +463,6 @@ body .history-card-content {
 .newbie-mode-toggle-icon {
   color: var(--brand-accent);
   flex-shrink: 0;
-}
-
-/* 版本号紧贴在开关行下面，两者一起常驻底部。 */
-.app-shell > .sidebar .sidebar-footer {
-  margin-top: 0;
-  padding-top: var(--sp-3);
 }
 
 /* 深绿侧边栏上，开关打开态用默认主色会沉进底色里，提亮为品牌强调色。 */

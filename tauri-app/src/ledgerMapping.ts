@@ -110,9 +110,57 @@ export function ledgerClassificationIsVisible(
   if (!classification.scores) return true;
   // 透视、核对和说明页通常是审计人后加的辅助 Sheet。即使它们因汇总列名拿到
   // TB 分数，也不能抢占原始 TB/JE；需要使用时应选择原始数据 Sheet。
-  if (/(?:透视|pivot|check|核对|校验|说明|封面|目录)/i.test(classification.sheet ?? ""))
+  if (
+    /(?:透视|pivot|check|核对|校验|说明|封面|目录|(?:tb|je)[\s_-]*(?:种类|类型|分类)|(?:种类|类型|分类)[\s_-]*(?:tb|je))/i.test(
+      classification.sheet ?? "",
+    )
+  )
     return false;
   return Math.max(classification.scores.je, classification.scores.tb) >= 5;
+}
+
+/** 批量配对页以工作簿为文件单位：同一工作簿同一种账表只自动保留一个最佳
+ * Sheet，其余 Sheet 仍能在 inspect 返回的下拉列表中手工选择。否则一份多 Sheet
+ * TB 会生成多个重复组，并依次抢走其他期间的 JE。 */
+export function selectLedgerWorkbookKindSources<
+  T extends LedgerWorkbookSheetClassification,
+>(sources: LedgerClassifiedSource<T>[]): LedgerClassifiedSource<T>[] {
+  const byWorkbook = new Map<string, LedgerClassifiedSource<T>[]>();
+  for (const source of sources) {
+    const items = byWorkbook.get(source.path) ?? [];
+    items.push(source);
+    byWorkbook.set(source.path, items);
+  }
+  const selected: LedgerClassifiedSource<T>[] = [];
+  for (const [path, items] of byWorkbook.entries()) {
+    const name = (path.split(/[\\/]/).pop() ?? path).replace(/\.[^.]+$/, "");
+    const explicitKind: LedgerSourceKind | undefined =
+      /科目余额|余额表|(?:^|[^a-z])tb(?:[^a-z]|$)/i.test(name)
+        ? "tb"
+        : /序时|凭证明细|日记账|(?:^|[^a-z])je(?:[^a-z]|$)/i.test(name)
+          ? "je"
+          : undefined;
+    for (const kind of (explicitKind ? [explicitKind] : ["tb", "je"]) as LedgerSourceKind[]) {
+      const candidates = items.filter(
+        (item) => item.classification.kind === kind,
+      );
+      if (!candidates.length) continue;
+      // classifyLedgerWorkbookSheets 把后端默认正表放在第一项；若它正是当前
+      // 类型，优先沿用。另一类型则按该类型得分取最高者。
+      const first = items[0];
+      const picked =
+        first.classification.kind === kind
+          ? first
+          : candidates.reduce((best, item) =>
+              item.classification.scores[kind] >
+              best.classification.scores[kind]
+                ? item
+                : best,
+            );
+      selected.push(picked);
+    }
+  }
+  return selected;
 }
 
 /**

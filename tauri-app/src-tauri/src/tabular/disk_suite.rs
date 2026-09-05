@@ -307,7 +307,7 @@ fn aggregate(
         .as_deref()
         .and_then(|s| header_index(headers, s));
     let config = PivotConfig::new(headers, mapping, job)?;
-    let mut stmt = db.prepare("SELECT p.seq,p.data,p.voucher,p.account,p.net FROM processed p JOIN selected s ON s.voucher=p.voucher ORDER BY p.seq").map_err(db_error)?;
+    let mut stmt = db.prepare(&format!("SELECT p.seq,r.data,p.voucher,p.account,p.{} FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 JOIN selected s ON s.voucher=p.voucher ORDER BY p.seq", ledger.selected_net_column())).map_err(db_error)?;
     let mut cursor = stmt.query([]).map_err(db_error)?;
     let mut count = 0;
     let transaction = db.unchecked_transaction().map_err(db_error)?;
@@ -401,7 +401,7 @@ fn aggregate(
     // Loss status is only known after the entire voucher has been seen. Make a
     // second streaming pass for custom pivots, excluding every line of that ID.
     if !config.rows.is_empty() {
-        let mut stmt = db.prepare("SELECT p.data,p.net FROM processed p JOIN selected s ON s.voucher=p.voucher JOIN suite_vouchers v ON v.id=p.voucher WHERE v.loss=0 ORDER BY p.seq").map_err(db_error)?;
+        let mut stmt = db.prepare(&format!("SELECT r.data,p.{} FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 JOIN selected s ON s.voucher=p.voucher JOIN suite_vouchers v ON v.id=p.voucher WHERE v.loss=0 ORDER BY p.seq", ledger.selected_net_column())).map_err(db_error)?;
         let mut cursor = stmt.query([]).map_err(db_error)?;
         let transaction = db.unchecked_transaction().map_err(db_error)?;
         while let Some(record) = cursor.next().map_err(db_error)? {

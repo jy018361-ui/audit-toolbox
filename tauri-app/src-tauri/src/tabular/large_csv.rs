@@ -49,6 +49,7 @@ pub(super) fn full_table_error() -> AppError {
 
 pub(super) struct Cache {
     pub(super) db: Connection,
+    pub(super) path: PathBuf,
     pub table: Table,
     pub count: usize,
 }
@@ -213,6 +214,7 @@ fn read_cache(path: &Path, source: &Path) -> Result<Cache, AppError> {
         as usize;
     let mut cache = Cache {
         db,
+        path: path.to_path_buf(),
         count,
         table: Table {
             path: source.to_path_buf(),

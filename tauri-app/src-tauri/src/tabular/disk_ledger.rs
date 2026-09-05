@@ -2,6 +2,9 @@
 //! Rust retains only the current row, fill state and one voucher's counters.
 use super::*;
 use rusqlite::{Connection, params};
+use std::cell::Cell;
+
+const PREPARED_CACHE_VERSION: u64 = 1;
 
 pub(super) fn sql_error(e: rusqlite::Error) -> AppError {
     error(
@@ -16,6 +19,7 @@ pub(super) struct DiskLedger {
     pub table: Table,
     pub count: usize,
     pub convention: SignConvention,
+    selected_convention: Cell<SignConvention>,
     mapping: LedgerMapping,
 }
 
@@ -138,6 +142,108 @@ fn validate_disk_amount_row(
     Ok(())
 }
 
+fn prepared_key(
+    cache: &large_csv::Cache,
+    mapping: &LedgerMapping,
+    sign_override: Option<SignConvention>,
+    header_row: usize,
+) -> Result<String, AppError> {
+    let mut hash = Sha256::new();
+    hash.update(fingerprint(&cache.table.path, "CSV", header_row)?.as_bytes());
+    hash.update(serde_json::to_vec(mapping).map_err(|e| {
+        error(
+            "LEDGER_CACHE_FAILED",
+            "无法生成凭证分析缓存标识。",
+            Some(e.to_string()),
+        )
+    })?);
+    hash.update(
+        sign_override
+            .map(SignConvention::as_str)
+            .unwrap_or("auto")
+            .as_bytes(),
+    );
+    hash.update(PREPARED_CACHE_VERSION.to_le_bytes());
+    Ok(hex::encode(hash.finalize()))
+}
+
+fn attach_raw(db: &Connection, cache: &large_csv::Cache) -> Result<(), AppError> {
+    db.execute(
+        "ATTACH DATABASE ?1 AS raw_cache",
+        [cache.path.to_string_lossy().as_ref()],
+    )
+    .map_err(sql_error)?;
+    Ok(())
+}
+
+fn read_prepared(
+    path: &Path,
+    cache: &large_csv::Cache,
+    mapping: &LedgerMapping,
+    expected_key: &str,
+) -> Result<DiskLedger, AppError> {
+    let db = Connection::open(path).map_err(sql_error)?;
+    let budget = crate::resource_budget::budget()?;
+    db.execute_batch(&format!(
+        "PRAGMA cache_size=-{}; PRAGMA temp_store=FILE; PRAGMA mmap_size=0; PRAGMA journal_mode=DELETE;",
+        budget.sqlite_cache_kib
+    ))
+    .map_err(sql_error)?;
+    let text: String = db
+        .query_row("SELECT value FROM meta", [], |row| row.get(0))
+        .map_err(sql_error)?;
+    let meta: Value = serde_json::from_str(&text).map_err(|e| {
+        error(
+            "LEDGER_CACHE_FAILED",
+            "凭证分析缓存已损坏。",
+            Some(e.to_string()),
+        )
+    })?;
+    if meta["version"].as_u64() != Some(PREPARED_CACHE_VERSION)
+        || meta["key"].as_str() != Some(expected_key)
+    {
+        return Err(error(
+            "LEDGER_CACHE_FAILED",
+            "凭证分析缓存版本已过期。",
+            None,
+        ));
+    }
+    let count = meta["rows"]
+        .as_u64()
+        .ok_or_else(|| error("LEDGER_CACHE_FAILED", "凭证分析缓存行数无效。", None))?
+        as usize;
+    let convention = match meta["convention"].as_str() {
+        Some("signed") => SignConvention::Signed,
+        Some("unsigned") => SignConvention::Unsigned,
+        _ => {
+            return Err(error(
+                "LEDGER_CACHE_FAILED",
+                "凭证分析缓存金额方向无效。",
+                None,
+            ));
+        }
+    };
+    let actual: usize = db
+        .query_row("SELECT COUNT(*) FROM processed", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(sql_error)? as usize;
+    if actual != count {
+        return Err(error("LEDGER_CACHE_FAILED", "凭证分析缓存不完整。", None));
+    }
+    attach_raw(&db, cache)?;
+    let mut table = cache.table.clone();
+    table.rows.clear();
+    Ok(DiskLedger {
+        db,
+        table,
+        count,
+        convention,
+        selected_convention: Cell::new(convention),
+        mapping: mapping.clone(),
+    })
+}
+
 pub(super) fn prepare(
     cache: &large_csv::Cache,
     mapping: &LedgerMapping,
@@ -145,6 +251,89 @@ pub(super) fn prepare(
     header_row: usize,
     progress: Progress<'_>,
     cancel: &AtomicBool,
+) -> Result<DiskLedger, AppError> {
+    validate_mapping_required(mapping)?;
+    let key = prepared_key(cache, mapping, sign_override, header_row)?;
+    let path = cache_path("kanzhang-ledger", &key)?.with_extension("sqlite");
+    fs::create_dir_all(path.parent().unwrap()).map_err(io_error)?;
+    if path.is_file() {
+        match read_prepared(&path, cache, mapping, &key) {
+            Ok(ledger) => {
+                touch_cache(&path);
+                progress(
+                    "prepare",
+                    1000,
+                    1000,
+                    "已复用凭证分析缓存，无需重新整理和建立索引。",
+                );
+                return Ok(ledger);
+            }
+            Err(_) => {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+    crate::resource_budget::check_disk_space(
+        path.parent().unwrap(),
+        fs::metadata(&cache.table.path)
+            .map_err(io_error)?
+            .len()
+            .saturating_mul(2),
+    )?;
+    let partial = path.with_extension(format!("{}.partial", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let ledger = build_prepared(
+            cache,
+            mapping,
+            sign_override,
+            header_row,
+            progress,
+            cancel,
+            &partial,
+        )?;
+        let metadata = json!({
+            "version": PREPARED_CACHE_VERSION,
+            "key": key,
+            "rows": ledger.count,
+            "convention": ledger.convention.as_str(),
+        });
+        ledger
+            .db
+            .execute("INSERT INTO meta VALUES(?1)", [metadata.to_string()])
+            .map_err(sql_error)?;
+        drop(ledger);
+        check_cancel(cancel)?;
+        if prepared_key(cache, mapping, sign_override, header_row)? != key {
+            return Err(error(
+                "SOURCE_CHANGED",
+                "分析期间源文件发生变化，请重新读取。",
+                None,
+            ));
+        }
+        replace_file(&partial, &path)?;
+        read_prepared(&path, cache, mapping, &key)
+    })();
+    match result {
+        Ok(ledger) => {
+            touch_cache(&path);
+            progress("prepare", 1000, 1000, "凭证分析缓存已保存并可复用。");
+            Ok(ledger)
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&partial);
+            Err(err)
+        }
+    }
+}
+
+fn build_prepared(
+    cache: &large_csv::Cache,
+    mapping: &LedgerMapping,
+    sign_override: Option<SignConvention>,
+    header_row: usize,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+    path: &Path,
 ) -> Result<DiskLedger, AppError> {
     validate_mapping_required(mapping)?;
     let ids = ledger_id_indexes(&cache.table.headers, mapping);
@@ -161,17 +350,9 @@ pub(super) fn prepare(
         ));
     }
     let budget = crate::resource_budget::budget()?;
-    crate::resource_budget::check_disk_space(
-        &std::env::temp_dir(),
-        fs::metadata(&cache.table.path)
-            .map_err(io_error)?
-            .len()
-            .saturating_mul(3),
-    )?;
-    // An empty SQLite filename creates a private on-disk temporary database,
-    // removed by SQLite when the connection closes (including error paths).
-    let db = Connection::open("").map_err(sql_error)?;
-    db.execute_batch(&format!("PRAGMA cache_size=-{}; PRAGMA temp_store=FILE; PRAGMA mmap_size=0; PRAGMA journal_mode=OFF; CREATE TABLE processed(seq INTEGER PRIMARY KEY,data TEXT NOT NULL,voucher TEXT NOT NULL,account TEXT NOT NULL,account_norm TEXT NOT NULL,net REAL NOT NULL DEFAULT 0,candidate INTEGER NOT NULL,signkey TEXT NOT NULL,signkey_noentity TEXT NOT NULL,entity TEXT NOT NULL,dr REAL NOT NULL,cr REAL NOT NULL,raw REAL NOT NULL,unsigned REAL NOT NULL,hd INTEGER NOT NULL,hc INTEGER NOT NULL,pos INTEGER NOT NULL,neg INTEGER NOT NULL);",budget.sqlite_cache_kib)).map_err(sql_error)?;
+    let db = Connection::open(path).map_err(sql_error)?;
+    db.execute_batch(&format!("PRAGMA cache_size=-{}; PRAGMA temp_store=FILE; PRAGMA mmap_size=0; PRAGMA journal_mode=OFF; CREATE TABLE processed(seq INTEGER PRIMARY KEY,voucher TEXT NOT NULL,account TEXT NOT NULL,account_norm TEXT NOT NULL,net REAL NOT NULL DEFAULT 0,candidate INTEGER NOT NULL,signkey TEXT NOT NULL,signkey_noentity TEXT NOT NULL,entity TEXT NOT NULL,dr REAL NOT NULL,cr REAL NOT NULL,raw REAL NOT NULL,unsigned REAL NOT NULL,hd INTEGER NOT NULL,hc INTEGER NOT NULL,pos INTEGER NOT NULL,neg INTEGER NOT NULL); CREATE TABLE meta(value TEXT NOT NULL);",budget.sqlite_cache_kib)).map_err(sql_error)?;
+    attach_raw(&db, cache)?;
     let mut table = cache.table.clone();
     table.rows.clear();
     let ledger = DiskLedger {
@@ -179,6 +360,7 @@ pub(super) fn prepare(
         table,
         count: 0,
         convention: SignConvention::Unsigned,
+        selected_convention: Cell::new(SignConvention::Unsigned),
         mapping: mapping.clone(),
     };
     ledger.db.execute_batch("BEGIN").map_err(sql_error)?;
@@ -221,7 +403,7 @@ pub(super) fn prepare(
                     == Some(*i)
         })
         .collect::<Vec<_>>();
-    let mut insert = ledger.db.prepare("INSERT INTO processed(seq,data,voucher,account,account_norm,candidate,signkey,signkey_noentity,entity,dr,cr,raw,unsigned,hd,hc,pos,neg) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)").map_err(sql_error)?;
+    let mut insert = ledger.db.prepare("INSERT INTO processed(seq,voucher,account,account_norm,candidate,signkey,signkey_noentity,entity,dr,cr,raw,unsigned,hd,hc,pos,neg) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)").map_err(sql_error)?;
     let mut last_progress = Instant::now();
     cache.visit(None, cancel, |mut row, index| {
         // Validate before fill/filter, exactly as the ordinary export path does.
@@ -248,17 +430,9 @@ pub(super) fn prepare(
                     .collect::<Vec<_>>()
                     .join("\u{1f}")
             };
-            let text = serde_json::to_string(&row).map_err(|e| {
-                error(
-                    "LEDGER_CACHE_FAILED",
-                    "无法编码凭证明细。",
-                    Some(e.to_string()),
-                )
-            })?;
             insert
                 .execute(params![
                     index as i64,
-                    text,
                     voucher_key(&row, &ids),
                     joined_account(&row, &accounts),
                     normalize_account_text(&joined_account(&row, &accounts)),
@@ -396,10 +570,11 @@ pub(super) fn prepare(
         .db
         .query_row("SELECT COUNT(*) FROM processed", [], |r| r.get::<_, i64>(0))
         .map_err(sql_error)? as usize;
-    progress("prepare", 1000, 1000, "凭证磁盘索引已完成。");
+    progress("prepare", 990, 1000, "凭证索引整理完成，正在保存分析缓存…");
     Ok(DiskLedger {
         count,
         convention,
+        selected_convention: Cell::new(convention),
         ..ledger
     })
 }
@@ -586,27 +761,29 @@ impl DiskLedger {
     /// Legacy analysis re-detects the sign on the selected rows. Preparation's
     /// balance cleaning must precede this and must never be repeated here.
     pub fn set_selected_convention(&self, convention: SignConvention) -> Result<(), AppError> {
-        self.db
-            .execute_batch(if convention == SignConvention::Signed {
-                "UPDATE processed SET net=raw WHERE voucher IN (SELECT voucher FROM selected)"
-            } else {
-                "UPDATE processed SET net=unsigned WHERE voucher IN (SELECT voucher FROM selected)"
-            })
-            .map_err(sql_error)
+        self.selected_convention.set(convention);
+        Ok(())
+    }
+    pub(super) fn selected_net_column(&self) -> &'static str {
+        if self.selected_convention.get() == SignConvention::Signed {
+            "raw"
+        } else {
+            "unsigned"
+        }
     }
     pub fn visit_selected(
         &self,
         cancel: &AtomicBool,
         mut visit: impl FnMut(Vec<String>, f64) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
-        self.visit_query("SELECT data,net FROM processed WHERE voucher IN (SELECT voucher FROM selected) ORDER BY seq",cancel,&mut visit)
+        self.visit_query(&format!("SELECT r.data,p.{} FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE p.voucher IN (SELECT voucher FROM selected) ORDER BY p.seq",self.selected_net_column()),cancel,&mut visit)
     }
     fn visit_selected_marked(
         &self,
         cancel: &AtomicBool,
         mut visit: impl FnMut(Vec<String>, f64, bool) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
-        let mut statement=self.db.prepare("SELECT data,net,EXISTS(SELECT 1 FROM detail_loss l WHERE l.voucher=p.voucher) FROM processed p WHERE voucher IN (SELECT voucher FROM selected) ORDER BY seq").map_err(sql_error)?;
+        let mut statement=self.db.prepare(&format!("SELECT r.data,p.{},EXISTS(SELECT 1 FROM detail_loss l WHERE l.voucher=p.voucher) FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE p.voucher IN (SELECT voucher FROM selected) ORDER BY p.seq",self.selected_net_column())).map_err(sql_error)?;
         let mut cursor = statement.query([]).map_err(sql_error)?;
         let mut index = 0usize;
         while let Some(record) = cursor.next().map_err(sql_error)? {
@@ -673,7 +850,7 @@ impl DiskLedger {
                     .map_err(sql_error)?;
             }
         }
-        self.visit_query("SELECT data,net FROM processed WHERE account_norm IN (SELECT account FROM excludes) ORDER BY seq",cancel,&mut visit)
+        self.visit_query("SELECT r.data,p.net FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE p.account_norm IN (SELECT account FROM excludes) ORDER BY p.seq",cancel,&mut visit)
     }
 
     /// Write selected complete-voucher detail without collecting rows in RAM.
@@ -852,6 +1029,7 @@ impl DiskLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
     fn fixture() -> (DiskLedger, PathBuf) {
         let root = std::env::temp_dir().join(format!("disk-ledger-test-{}", uuid::Uuid::new_v4()));
@@ -864,13 +1042,17 @@ mod tests {
             vec!["002".into(), "费用".into(), "".into(), "40".into()],
         ];
         let db = Connection::open("").unwrap();
-        db.execute_batch("CREATE TABLE processed(seq INTEGER PRIMARY KEY,data TEXT,voucher TEXT,account TEXT,account_norm TEXT,net REAL)").unwrap();
+        db.execute_batch("CREATE TABLE processed(seq INTEGER PRIMARY KEY,voucher TEXT,account TEXT,account_norm TEXT,net REAL,raw REAL,unsigned REAL); ATTACH DATABASE ':memory:' AS raw_cache; CREATE TABLE raw_cache.rows(data TEXT NOT NULL)").unwrap();
         for (seq, row) in rows.iter().enumerate() {
             db.execute(
-                "INSERT INTO processed VALUES(?1,?2,?3,?4,?4,?5)",
+                "INSERT INTO raw_cache.rows VALUES(?1)",
+                [serde_json::to_string(row).unwrap()],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO processed VALUES(?1,?2,?3,?3,?4,?4,?4)",
                 params![
                     seq as i64,
-                    serde_json::to_string(row).unwrap(),
                     row[0],
                     normalize_account_text(&row[1]),
                     if seq % 2 == 0 { 100.0 } else { -100.0 }
@@ -900,10 +1082,101 @@ mod tests {
                 table,
                 count: rows.len(),
                 convention: SignConvention::Unsigned,
+                selected_convention: Cell::new(SignConvention::Unsigned),
                 mapping,
             },
             root,
         )
+    }
+
+    #[test]
+    fn prepared_cache_reuses_indexes_and_reads_rows_from_raw_cache() {
+        let root =
+            std::env::temp_dir().join(format!("disk-ledger-cache-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("source.csv");
+        fs::write(
+            &input,
+            "凭证号,科目,借方,贷方\n001,现金,100,0\n001,收入,0,100\n002,银行,40,0\n002,费用,0,40\n",
+        )
+        .unwrap();
+        let source = SourceParams {
+            input_path: input.to_string_lossy().into_owned(),
+            sheet: None,
+            header_row: 1,
+        };
+        let cancel = AtomicBool::new(false);
+        let cache = large_csv::load(&source, &|_, _, _, _| {}, &cancel).unwrap();
+        let mapping = LedgerMapping {
+            id: vec!["凭证号".into()],
+            account_name: vec!["科目".into()],
+            debit: Some("借方".into()),
+            credit: Some("贷方".into()),
+            ..Default::default()
+        };
+        let key = prepared_key(&cache, &mapping, None, 1).unwrap();
+        let prepared_path = cache_path("kanzhang-ledger", &key)
+            .unwrap()
+            .with_extension("sqlite");
+        let _ = fs::remove_file(&prepared_path);
+
+        let first_messages = RefCell::new(Vec::new());
+        let first = prepare(
+            &cache,
+            &mapping,
+            None,
+            1,
+            &|_, _, _, message| first_messages.borrow_mut().push(message.to_owned()),
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(first.count, 4);
+        let data_columns: i64 = first
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('processed') WHERE name='data'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(data_columns, 0, "分析缓存不应重复保存整行 JSON");
+        drop(first);
+
+        let second_messages = RefCell::new(Vec::new());
+        let second = prepare(
+            &cache,
+            &mapping,
+            None,
+            1,
+            &|_, _, _, message| second_messages.borrow_mut().push(message.to_owned()),
+            &cancel,
+        )
+        .unwrap();
+        assert!(
+            second_messages
+                .borrow()
+                .iter()
+                .any(|message| message.contains("已复用凭证分析缓存"))
+        );
+        second.select(&["收入".into()], &cancel).unwrap();
+        second
+            .set_selected_convention(SignConvention::Unsigned)
+            .unwrap();
+        let mut accounts = Vec::new();
+        second
+            .visit_selected(&cancel, |row, _| {
+                accounts.push(row[1].clone());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(accounts, ["现金", "收入"]);
+
+        drop(second);
+        let raw_path = cache.path.clone();
+        drop(cache);
+        let _ = fs::remove_file(prepared_path);
+        let _ = fs::remove_file(raw_path);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

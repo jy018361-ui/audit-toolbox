@@ -295,6 +295,71 @@ describe("BeginnerTour", () => {
       (document.querySelector(".tour-bubble") as HTMLElement).style.visibility,
     ).toBe("visible");
   });
+
+  it("目标比视口还高时：滚动改为顶部对齐，气泡夹回屏幕内可见", async () => {
+    // 第四步实测的回归：工具卡片区比视口还高，滚动对齐后顶部越过屏幕
+    // 上沿，气泡曾被自己的位移推出屏幕，只剩一个箭头尖挂在角落。
+    const scrollIntoViewMock = vi.fn(() => undefined);
+    Element.prototype.scrollIntoView = scrollIntoViewMock;
+    vi.spyOn(
+      HTMLElement.prototype,
+      "getBoundingClientRect",
+    ).mockImplementation(function (this: HTMLElement) {
+      if (this.hasAttribute("data-tour")) {
+        return {
+          top: -850,
+          left: 80,
+          right: 1000,
+          bottom: 1650,
+          width: 920,
+          height: 2500,
+          x: 80,
+          y: -850,
+          toJSON: () => ({}),
+        } as DOMRect;
+      }
+      return {
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        width: 0,
+        height: 0,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect;
+    });
+    const steps: TourStep[] = [
+      {
+        id: "tall",
+        title: "高个步骤",
+        body: "x",
+        targetSelector: '[data-tour="demo"]',
+      },
+    ];
+    render(
+      <BeginnerTour
+        steps={steps}
+        onFinish={vi.fn()}
+        retryIntervalMs={10}
+      />,
+    );
+    await waitFor(() =>
+      expect(scrollIntoViewMock).toHaveBeenCalledWith(
+        expect.objectContaining({ block: "start" }),
+      ),
+    );
+    // 等定位完成、气泡从"待命隐藏"转为可见，再断言位置夹在视口内。
+    await waitFor(() => {
+      const target = document.querySelector(".tour-bubble") as HTMLElement;
+      expect(target?.style.visibility).toBe("visible");
+    });
+    const bubble = document.querySelector(".tour-bubble") as HTMLElement;
+    const top = parseFloat(bubble.style.top);
+    expect(top).toBeGreaterThanOrEqual(8);
+    expect(top).toBeLessThanOrEqual(window.innerHeight - 8);
+  });
 });
 
 describe("tourState", () => {

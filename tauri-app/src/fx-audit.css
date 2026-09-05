@@ -215,9 +215,14 @@
 }
 .fx-run-grid {
   display: grid;
-  grid-template-columns: 160px 160px minmax(220px, 1fr) auto;
+  grid-template-columns: 160px minmax(220px, 1fr) auto;
   gap: 10px;
   align-items: end;
+}
+.fx-run-grid label,
+.fx-run-grid input {
+  min-width: 0;
+  width: 100%;
 }
 .fx-actions {
   display: flex;

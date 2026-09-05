@@ -336,9 +336,11 @@
   background: var(--warning-bg);
   font-weight: 600;
 }
+.deposit-tier-table td.deposit-tier-note,
 .deposit-tier-note {
   max-width: 52ch;
   white-space: normal;
+  overflow-wrap: anywhere;
   color: var(--muted-foreground);
   font-size: 12px;
 }

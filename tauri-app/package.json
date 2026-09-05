@@ -11,6 +11,7 @@
     "audit:layout:static": "node scripts/static-layout-audit.cjs",
     "audit:layout:tasks": "node scripts/task-state-layout-audit.cjs",
     "audit:layout:overlays": "node scripts/overlay-layout-audit.cjs",
+    "audit:layout:workflows": "node scripts/workflow-layout-audit.cjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

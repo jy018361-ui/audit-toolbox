@@ -193,11 +193,12 @@ export function BeginnerTour({
           r.bottom <= window.innerHeight &&
           r.right <= window.innerWidth;
         if (!inViewport && !scrolledToTarget) {
-          // 只主动滚一次：目标比视口还高时滚完也量不到"完整可见"，
-          // 反复滚只会原地打转，交给聚光灯 / 气泡的视口夹取兜底。
           scrolledToTarget = true;
+          // 目标比视口还高时（如工作台的工具卡片区），按"居中"滚会让顶部
+          // 越过屏幕上沿，气泡失去挂点；改为顶部对齐，让目标的起点留在
+          // 视口内，挖孔与气泡都有明确锚点。小目标仍居中，观感更好。
           el.scrollIntoView({
-            block: "center",
+            block: r.height > window.innerHeight ? "start" : "center",
             inline: "nearest",
             behavior: "auto",
           });
@@ -244,8 +245,10 @@ export function BeginnerTour({
     else setIndex(next);
   }, [targetGaveUp, currentStep, index, steps, onFinish]);
 
-  // 气泡摆放：优先放目标下方，放不下放上方；水平方向夹在视口内，
-  // 箭头对准目标中线（气泡被夹到边缘时箭头留在气泡范围内）。
+  // 气泡摆放：定位依据是目标【看得见的部分】——目标比视口还高/宽时
+  // （如工作台的工具卡片区，挖孔已被夹回视口），拿完整矩形算会得出
+  // 屏幕外的锚点，把气泡整个推出去，只剩一个箭头尖挂在角落（第四步实测）。
+  // 优先放可见部分下方，放不下放上方；水平夹在视口内，箭头对准可见区中线。
   useLayoutEffect(() => {
     const bubble = bubbleRef.current;
     if (!rect || !bubble) {
@@ -256,18 +259,31 @@ export function BeginnerTour({
     const vh = window.innerHeight;
     const bw = bubble.offsetWidth;
     const bh = bubble.offsetHeight;
+    const visibleTop = Math.max(rect.top, 0);
+    const visibleLeft = Math.max(rect.left, 0);
+    const visibleBottom = Math.min(rect.bottom, vh);
+    const visibleRight = Math.min(rect.left + rect.width, vw);
+    const anchorCenterX = Math.min(
+      Math.max((visibleLeft + visibleRight) / 2, MIN_VIEWPORT_GAP),
+      vw - MIN_VIEWPORT_GAP,
+    );
     const left = Math.min(
-      Math.max(rect.left + rect.width / 2 - bw / 2, EDGE_GAP),
+      Math.max(anchorCenterX - bw / 2, EDGE_GAP),
       Math.max(vw - bw - EDGE_GAP, EDGE_GAP),
     );
-    const spaceBelow = vh - rect.bottom;
-    const placement: BubblePosition["placement"] =
-      spaceBelow >= bh + TARGET_GAP + EDGE_GAP || spaceBelow >= rect.top
+    const spaceBelow = vh - visibleBottom;
+    // 目标占满视口（比屏幕还高的大家伙，画面已滚到它的开头）：
+    // 气泡贴在开头旁、箭头朝下指向这片区域——画面跟着气泡走，气泡不乱跑。
+    const fillsViewport =
+      visibleTop <= MIN_VIEWPORT_GAP && visibleBottom >= vh - MIN_VIEWPORT_GAP;
+    const placement: BubblePosition["placement"] = fillsViewport
+      ? "top"
+      : spaceBelow >= bh + TARGET_GAP + EDGE_GAP || spaceBelow >= visibleTop
         ? "bottom"
         : "top";
     const rawTop = placement === "bottom"
-      ? rect.bottom + TARGET_GAP
-      : rect.top - TARGET_GAP - bh;
+      ? visibleBottom + TARGET_GAP
+      : visibleTop - TARGET_GAP - bh;
     // 兜底：目标特别高时上下都放不下，算出的 top 会落到屏幕外，
     // 把气泡夹回视口内保证任何情况下提示都可见。
     const top = Math.min(
@@ -275,7 +291,7 @@ export function BeginnerTour({
       Math.max(vh - bh - MIN_VIEWPORT_GAP, MIN_VIEWPORT_GAP),
     );
     const arrowOffset = Math.min(
-      Math.max(rect.left + rect.width / 2 - left, 24),
+      Math.max(anchorCenterX - left, 24),
       bw - 24,
     );
     setBubblePos({ top, left, arrowOffset, placement });

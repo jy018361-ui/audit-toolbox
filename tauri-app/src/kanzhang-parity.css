@@ -36,7 +36,9 @@
   grid-template-columns: minmax(0, 0.62fr) minmax(0, 1fr);
 }
 .kz-filter-grid {
-  grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.65fr);
+  /* 科目筛选是高密度主任务，不能和一个很短的结果空态并排。
+     旧两列布局滚动到列表中段时，右侧整列只剩大块空白。 */
+  grid-template-columns: minmax(0, 1fr);
 }
 .kz-export-grid {
   display: grid;
@@ -184,18 +186,28 @@
   margin: 0 0 var(--sp-2);
 }
 .kz-source-panel .kz-shuttle-list {
-  min-height: 430px;
-  max-height: 52vh;
+  height: clamp(240px, 34vh, 340px);
+  min-height: 240px;
+  max-height: 42vh;
 }
 .kz-source-actions {
   margin-top: var(--sp-2);
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 .kz-assigned-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--sp-3);
   margin-top: var(--sp-3);
+  align-items: start;
+}
+.kz-assigned-grid .kz-row {
+  min-height: 40px;
+}
+.kz-assigned-grid .kz-row h3 {
+  flex: 1 1 16rem;
+  min-width: 0;
+  margin: 0;
 }
 .kz-progress {
   margin-top: var(--sp-3);
@@ -382,7 +394,7 @@
   text-align: center;
 }
 .kz-assigned-grid .kz-shuttle-list {
-  height: 300px;
+  height: clamp(220px, 28vh, 300px);
 }
 .kz-outputs {
   display: grid;

@@ -300,10 +300,12 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     setStep(1);
   }
 
-  // 历史记录「继续任务」：回填文件/Sheet/标题行/输出路径与筛选条件，不自动
-  // 读取（读取走任务通道）。存档筛选暂存在 ref 里：用户点「加载文件」后
-  // applyInspect 用它顶替引擎默认筛选，条件就不丢。
+  // 历史记录「继续任务」：回填文件/Sheet/标题行/输出路径，并自动重新加载
+  // 文件——筛选与导出都以表头为显示前提，不重读用户看到的还是空页。存档
+  // 筛选暂存在 ref 里：加载完成后 applyInspect 用它顶替引擎默认筛选。
   const restoredSelections = useRef<Record<string, string[]> | null>(null);
+  const autoLoadPathRef = useRef("");
+  const [autoLoadSeq, setAutoLoadSeq] = useState(0);
   useTaskRestore(tool.id, (restore) => {
     const p = restore.params as {
       inputPath?: string;
@@ -325,6 +327,8 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     restoredSelections.current = Object.keys(selections).length
       ? selections
       : null;
+    autoLoadPathRef.current = p.inputPath;
+    setAutoLoadSeq((value) => value + 1);
     resetForNewSource({
       inputPath: p.inputPath,
       sheet: typeof p.sheet === "string" ? p.sheet : "",
@@ -337,6 +341,15 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     if (Object.keys(selections).length)
       setState((current) => ({ ...current, selections }));
   });
+
+  // 恢复的来源提交到 state 后自动触发加载（setState 异步；seq 触发器保证
+  // 来源恰好与恢复前相同时也会执行）。
+  useEffect(() => {
+    if (!autoLoadPathRef.current) return;
+    if (state.inputPath !== autoLoadPathRef.current) return;
+    autoLoadPathRef.current = "";
+    void inspect();
+  }, [autoLoadSeq, state.inputPath]);
 
   async function chooseInput() {
     const selected = await pickPath(

@@ -153,6 +153,30 @@ const geometryAudit = () => {
     }
   }
 
+  // A technically non-overflowing two-column grid can still be unusable when
+  // one column is a long workspace and the companion ends near the top. Once
+  // the user scrolls, the short column becomes a full-height blank strip.
+  for (const parent of elements) {
+    const style = getComputedStyle(parent);
+    if (!/(grid|flex)/.test(style.display)) continue;
+    const children = [...parent.children].filter(visible).filter((child) => {
+      const position = getComputedStyle(child).position;
+      return !["absolute", "fixed", "sticky"].includes(position);
+    });
+    if (children.length !== 2) continue;
+    const [first, second] = children.map(rect);
+    const sideBySide = Math.abs(first.top - second.top) <= 4 && first.right <= second.left + 2;
+    const tall = Math.max(first.height, second.height);
+    const short = Math.min(first.height, second.height);
+    if (sideBySide && tall >= 720 && short <= 360 && tall / Math.max(short, 1) >= 2.5) {
+      add("imbalanced-columns", parent, {
+        firstHeight: rounded(first.height),
+        secondHeight: rounded(second.height),
+        consequence: "short column becomes unused blank space while scrolling",
+      });
+    }
+  }
+
   return issues;
 };
 

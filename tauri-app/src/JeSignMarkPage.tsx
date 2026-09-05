@@ -199,9 +199,12 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     columnFilters: JeMarkDraft["columnFilters"];
   } | null>(null);
   const inspectKeyRef = useRef("");
-  // 历史记录「继续任务」：用存档参数重建草稿（含映射/批次/筛选，可直接导出），
-  // 不自动重新读取——预览与列值等派生状态等用户点「读取文件」再补。
+  // 历史记录「继续任务」：用存档参数重建草稿（含映射/批次/筛选），并自动
+  // 重新读取文件——批次/标记/导出都以读取结果为显示前提，不重读用户看到
+  // 的还是空页；读取完成后 restoredDraftRef 把存档映射与列筛选顶回建议值。
   // 没有字段映射的存档（读取子步骤）不恢复，免得把现场覆盖成半成品。
+  const autoReadKeyRef = useRef("");
+  const [autoReadSeq, setAutoReadSeq] = useState(0);
   useTaskRestore(tool.id, (restore) => {
     const p = restore.params as {
       inputPath?: string;
@@ -229,6 +232,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       mapping,
       columnFilters,
     };
+    autoReadKeyRef.current = `${p.inputPath}|${sheet.trim()}`;
+    setAutoReadSeq((value) => value + 1);
     llmGeneration.current += 1;
     setDraft({
       ...EMPTY,
@@ -261,11 +266,25 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     setSignReport(undefined);
   });
 
+  // 恢复的草稿提交到 state 后自动触发读取（setDraft 异步，恢复回调里直接
+  // 调 inspect 读到的还是旧 draft；seq 触发器保证草稿恰好与恢复前相同时也
+  // 会执行）。
+  useEffect(() => {
+    if (!autoReadKeyRef.current) return;
+    const key = `${draft.inputPath}|${(draft.sheet || "").trim()}`;
+    if (autoReadKeyRef.current !== key) return;
+    autoReadKeyRef.current = "";
+    void inspect();
+  }, [autoReadSeq, draft.inputPath, draft.sheet]);
+
   // 没手选过保存位置时，输出框跟着凭证文件和 Sheet 走。只在来源变化时重算——
   // 默认文件名带时间戳，每次渲染都算会把自己重新触发一遍。
   const autoOutputKey = useRef("");
   useEffect(() => {
     if (draft.outputTouched) return;
+    // 历史恢复挂载时本 effect 会先于恢复草稿提交跑一遍（闭包里还是空草稿），
+    // 把恢复的输出路径清掉；恢复暂存未消费完时跳过。
+    if (autoReadKeyRef.current) return;
     const key = `${draft.inputPath}|${draft.sheet}`;
     if (autoOutputKey.current === key && draft.outputPath) return;
     autoOutputKey.current = key;

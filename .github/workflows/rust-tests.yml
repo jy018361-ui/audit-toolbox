@@ -1,0 +1,35 @@
+name: Rust tests
+
+# 本机（Downloads 目录 + Defender 实时扫描）反复出现编译产物损坏，
+# Rust 测试改由云端干净环境执行。业务 Rust 代码变更时自动触发。
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "tauri-app/src-tauri/**"
+      - ".github/workflows/rust-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tauri-app/src-tauri
+
+      - name: Run tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml

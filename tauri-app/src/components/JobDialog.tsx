@@ -74,18 +74,19 @@ type JobRowProps = {
   job: JobEvent;
   label: string;
   paused: boolean;
+  memoryPaused: boolean;
   onTogglePause: () => void;
   onStop: () => void;
 };
 
-function JobRow({ job, label, paused, onTogglePause, onStop }: JobRowProps) {
+function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop }: JobRowProps) {
   const pct = percent(job);
   const tone = toneOf(job);
   return (
     <div className="job-dialog-row" aria-live="polite">
       <div className="job-dialog-row-head">
         <strong>{label}</strong>
-        <span className="job-pct">{paused ? "已暂停" : job.total > 0 ? `${pct}%` : "处理中"}</span>
+        <span className="job-pct">{memoryPaused ? "内存等待" : paused ? "已暂停" : job.total > 0 ? `${pct}%` : "处理中"}</span>
       </div>
       <p className="job-dialog-message">{job.message}</p>
       <progress
@@ -100,7 +101,7 @@ function JobRow({ job, label, paused, onTogglePause, onStop }: JobRowProps) {
           size="sm"
           onClick={onTogglePause}
         >
-          {paused ? "继续" : "暂停"}
+          {memoryPaused ? "尝试继续" : paused ? "继续" : "暂停"}
         </Button>
         <Button type="button" variant="destructive" size="sm" onClick={onStop}>
           停止
@@ -122,8 +123,8 @@ export type JobDialogProviderProps = {
  * 全局任务进度弹窗。任何后台任务一开始就弹出，显示进度并提供暂停/继续/停止；
  * 「最小化」把它收成右下角一条，用户可以切去别的工具，点小条再展开。
  *
- * 暂停是前端记账：后端一暂停就不再发进度事件，没有「已暂停」这种事件可听，
- * 所以按下暂停后由这里记住状态，任务结束时清掉。
+ * 用户暂停在前端记录，以便任务停在后端检查点期间按钮仍保持正确状态；
+ * 内存暂停则由后端事件驱动，达到安全回升线后会自动恢复。
  */
 export function JobDialogProvider({
   jobs,
@@ -152,12 +153,20 @@ export function JobDialogProvider({
   );
 
   const togglePause = (jobId: string) => {
-    const next = !paused[jobId];
+    const memoryPaused = running.some(
+      (job) => job.jobId === jobId && job.phase === "memory_paused",
+    );
+    const next = memoryPaused ? false : !paused[jobId];
     setPaused((current) => ({ ...current, [jobId]: next }));
     void jobPause(jobId, next).catch(() => {
       // 任务可能刚好结束；回滚状态，不打断用户。
       setPaused((current) => ({ ...current, [jobId]: !next }));
     });
+  };
+
+  const retryAfterMemoryPause = (jobId: string) => {
+    setPaused((current) => ({ ...current, [jobId]: false }));
+    void jobPause(jobId, false).catch(() => undefined);
   };
 
   const stop = (jobId: string) => {
@@ -171,7 +180,8 @@ export function JobDialogProvider({
     <JobDialogContext.Provider
       value={{
         owns,
-        isPaused: (jobId) => Boolean(paused[jobId]),
+        isPaused: (jobId) => Boolean(paused[jobId])
+          || running.some((job) => job.jobId === jobId && job.phase === "memory_paused"),
         togglePause,
       }}
     >
@@ -202,8 +212,11 @@ export function JobDialogProvider({
                 key={job.jobId}
                 job={job}
                 label={nameOf(job.toolId)}
-                paused={Boolean(paused[job.jobId])}
-                onTogglePause={() => togglePause(job.jobId)}
+                paused={Boolean(paused[job.jobId]) || job.phase === "memory_paused"}
+                memoryPaused={job.phase === "memory_paused"}
+                onTogglePause={() => job.phase === "memory_paused"
+                  ? retryAfterMemoryPause(job.jobId)
+                  : togglePause(job.jobId)}
                 onStop={() => stop(job.jobId)}
               />
             ))}
@@ -236,8 +249,8 @@ export function JobDialogProvider({
               : `${nameOf(first.toolId)} · 点击展开`}
           </span>
           <span className="job-pct">
-            {paused[first.jobId] && running.length === 1
-              ? "已暂停"
+            {(paused[first.jobId] || first.phase === "memory_paused") && running.length === 1
+              ? first.phase === "memory_paused" ? "内存等待" : "已暂停"
               : first.total > 0 ? `${percent(first)}%` : "处理中"}
           </span>
         </button>

@@ -2,6 +2,11 @@
 use crate::AppError;
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const MIB: u64 = 1024 * 1024;
@@ -59,12 +64,24 @@ pub(crate) fn budget() -> Result<MemoryBudget, AppError> {
     Ok(result)
 }
 
+fn physical_pause_floor(total: u64) -> u64 {
+    (total / 32).clamp(512 * MIB, 2 * GIB)
+}
+
 fn runtime_memory_critical(total: u64, available: u64, commit_available: u64) -> bool {
-    // 启动时按 safety_reserve 计算 worker 上限；运行中只在系统接近失稳时熔断。
+    // 启动时按 safety_reserve 计算 worker 上限；运行中先在系统接近失稳时暂停。
     // 两者若共用同一条保留线，Windows 的正常缓存波动就会把已经受 Job Object
     // 限制的磁盘任务误杀。阈值仍随总内存变化，并为提交余量保留独立底线。
-    let physical_floor = (total / 32).clamp(512 * MIB, 2 * GIB);
-    available < physical_floor || commit_available < GIB
+    available < physical_pause_floor(total) || commit_available < GIB
+}
+
+fn runtime_memory_recovered(total: u64, available: u64, commit_available: u64) -> bool {
+    available >= physical_pause_floor(total).saturating_mul(2) && commit_available >= 2 * GIB
+}
+
+fn runtime_memory_emergency(total: u64, available: u64, commit_available: u64) -> bool {
+    let physical_floor = (total / 64).clamp(128 * MIB, 512 * MIB);
+    available < physical_floor || commit_available < 256 * MIB
 }
 #[repr(C)]
 #[derive(Default)]
@@ -134,14 +151,112 @@ fn available() -> Result<Memory, AppError> {
     }
     Ok(memory)
 }
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MemoryStatus {
+    pub total: u64,
+    pub available: u64,
+    pub commit_available: u64,
+}
+
+pub(crate) fn memory_status() -> Result<MemoryStatus, AppError> {
+    let memory = available()?;
+    Ok(MemoryStatus {
+        total: memory.total,
+        available: memory.available,
+        commit_available: memory.commit_available,
+    })
+}
+
+impl MemoryStatus {
+    pub(crate) fn should_pause(self) -> bool {
+        runtime_memory_critical(self.total, self.available, self.commit_available)
+    }
+
+    pub(crate) fn auto_resume_ready(self) -> bool {
+        runtime_memory_recovered(self.total, self.available, self.commit_available)
+    }
+
+    pub(crate) fn emergency(self) -> bool {
+        runtime_memory_emergency(self.total, self.available, self.commit_available)
+    }
+
+    pub(crate) fn can_start_worker(self) -> bool {
+        self.worker_bytes() >= 256 * MIB
+    }
+
+    pub(crate) fn worker_bytes(self) -> u64 {
+        plan(self.total, self.available, self.commit_available).worker_bytes
+    }
+
+    pub(crate) fn available_gib(self) -> f64 {
+        self.available as f64 / GIB as f64
+    }
+}
+
+struct RuntimeMemoryControl {
+    cancel: Arc<AtomicBool>,
+    retry_path: PathBuf,
+}
+
+static RUNTIME_MEMORY_CONTROL: OnceLock<RuntimeMemoryControl> = OnceLock::new();
+
+/// A worker process handles exactly one job, so one process-wide control is sufficient.
+pub(crate) fn install_runtime_memory_control(cancel: Arc<AtomicBool>, retry_path: PathBuf) {
+    let _ = RUNTIME_MEMORY_CONTROL.set(RuntimeMemoryControl { cancel, retry_path });
+}
+
+pub(crate) fn memory_retry_path(pause_path: &Path) -> PathBuf {
+    pause_path.with_extension("memory-retry")
+}
+
 pub(crate) fn check_available() -> Result<(), AppError> {
     let memory = available()?;
-    if runtime_memory_critical(memory.total, memory.available, memory.commit_available) {
-        return Err(failure(
-            "系统可用内存不足，已停止任务以保护电脑。请关闭其他大型程序后重试。",
-        ));
+    if !runtime_memory_critical(memory.total, memory.available, memory.commit_available) {
+        if let Some(control) = RUNTIME_MEMORY_CONTROL.get() {
+            let _ = std::fs::remove_file(&control.retry_path);
+        }
+        return Ok(());
     }
-    Ok(())
+    let Some(control) = RUNTIME_MEMORY_CONTROL.get() else {
+        return Err(failure(
+            "系统可用内存不足，当前任务尚未启动，正在等待内存恢复。",
+        ));
+    };
+    let mut recovered_since = None::<Instant>;
+    let mut emergency_since = None::<Instant>;
+    loop {
+        if control.cancel.load(Ordering::Relaxed) {
+            return Err(AppError::new("JOB_CANCELLED", "任务已取消。", false, None));
+        }
+        let memory = available()?;
+        let manually_retried = control.retry_path.exists();
+        if manually_retried {
+            let _ = std::fs::remove_file(&control.retry_path);
+        }
+        let critical =
+            runtime_memory_critical(memory.total, memory.available, memory.commit_available);
+        if manually_retried && !critical {
+            return Ok(());
+        }
+        if runtime_memory_recovered(memory.total, memory.available, memory.commit_available) {
+            let since = recovered_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= Duration::from_secs(5) {
+                return Ok(());
+            }
+        } else {
+            recovered_since = None;
+        }
+        if runtime_memory_emergency(memory.total, memory.available, memory.commit_available) {
+            let since = emergency_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= Duration::from_secs(15) {
+                return Err(failure("系统内存持续处于危险水平，已停止任务以保护电脑。"));
+            }
+        } else {
+            emergency_since = None;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
 }
 pub(crate) fn check_disk_space(path: &std::path::Path, estimated: u64) -> Result<(), AppError> {
     use std::os::windows::ffi::OsStrExt;
@@ -170,10 +285,8 @@ pub(crate) fn check_disk_space(path: &std::path::Path, estimated: u64) -> Result
 }
 pub(crate) struct WorkerLimit(*mut c_void);
 impl WorkerLimit {
-    pub(crate) fn attach(child: &std::process::Child) -> Result<Self, AppError> {
+    pub(crate) fn attach(child: &std::process::Child, worker_bytes: u64) -> Result<Self, AppError> {
         use std::os::windows::io::AsRawHandle;
-        check_available()?;
-        let budget = budget()?.worker_bytes;
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
             return Err(failure("无法启用任务内存保护，未开始读取。"));
@@ -184,8 +297,8 @@ impl WorkerLimit {
                 flags: 0x100 | 0x200 | 0x2000,
                 ..Default::default()
             },
-            process_memory: budget as usize,
-            job_memory: budget as usize,
+            process_memory: worker_bytes as usize,
+            job_memory: worker_bytes as usize,
             ..Default::default()
         };
         if unsafe {
@@ -260,5 +373,14 @@ mod tests {
         assert!(runtime_memory_critical(16 * GIB, 400 * MIB, 8 * GIB));
         assert!(runtime_memory_critical(64 * GIB, 8 * GIB, 512 * MIB));
         assert_eq!((64 * GIB / 32).clamp(512 * MIB, 2 * GIB), 2 * GIB);
+    }
+
+    #[test]
+    fn runtime_pause_has_hysteresis_and_a_lower_emergency_line() {
+        assert!(runtime_memory_critical(16 * GIB, 400 * MIB, 8 * GIB));
+        assert!(!runtime_memory_recovered(16 * GIB, 900 * MIB, 8 * GIB));
+        assert!(runtime_memory_recovered(16 * GIB, GIB, 8 * GIB));
+        assert!(!runtime_memory_emergency(16 * GIB, 300 * MIB, 8 * GIB));
+        assert!(runtime_memory_emergency(16 * GIB, 100 * MIB, 8 * GIB));
     }
 }

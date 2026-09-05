@@ -176,23 +176,37 @@ impl ExcelMergerService {
             return false;
         };
         let changed = if paused {
+            let _ = fs::remove_file(crate::resource_budget::memory_retry_path(&path));
             fs::write(&path, b"pause").is_ok()
         } else {
-            !path.exists() || fs::remove_file(&path).is_ok()
+            let resumed = !path.exists() || fs::remove_file(&path).is_ok();
+            resumed && fs::write(crate::resource_budget::memory_retry_path(&path), b"retry").is_ok()
         };
         if changed {
+            let memory_waiting = !paused
+                && method.starts_with("kanzhang.")
+                && crate::resource_budget::memory_status()
+                    .is_ok_and(|memory| memory.should_pause());
             self.emit(event_for(
                 tool_id(&method),
                 job_id,
-                if paused { "paused" } else { "running" },
+                if paused {
+                    "paused"
+                } else if memory_waiting {
+                    "memory_paused"
+                } else {
+                    "running"
+                },
                 0,
                 1,
                 if paused {
                     "任务已暂停；正在进行的单项请求完成后暂停。"
+                } else if memory_waiting {
+                    "当前内存仍不足，任务继续等待；内存恢复后将自动继续。"
                 } else {
                     "任务已继续。"
                 },
-                "info",
+                if memory_waiting { "warning" } else { "info" },
                 Vec::new(),
                 None,
             ));
@@ -229,16 +243,76 @@ impl ExcelMergerService {
             self.finish(&job_id, &cancel_path);
             return;
         }
+        let pause_path = self.cancel_root.join(format!("{job_id}.pause"));
+        let memory_retry_path = crate::resource_budget::memory_retry_path(&pause_path);
+        let protected = method.starts_with("kanzhang.");
+        let worker_memory_limit = if protected {
+            let mut last_notice = None::<Instant>;
+            Some(loop {
+                if cancel_path.exists() {
+                    self.emit(event_for(
+                        worker_tool_id,
+                        &job_id,
+                        "cancelled",
+                        1,
+                        1,
+                        "任务已取消。",
+                        "warning",
+                        Vec::new(),
+                        None,
+                    ));
+                    self.finish(&job_id, &cancel_path);
+                    return;
+                }
+                match crate::resource_budget::memory_status() {
+                    Ok(memory) if memory.can_start_worker() => break memory.worker_bytes(),
+                    Ok(memory) => {
+                        if last_notice.is_none_or(|time| time.elapsed() >= Duration::from_secs(5)) {
+                            self.emit(event_for(
+                                worker_tool_id,
+                                &job_id,
+                                "memory_paused",
+                                0,
+                                1,
+                                &format!(
+                                    "内存紧张，任务尚未启动：当前可用 {:.2} GiB。正在等待恢复，可手动尝试继续或停止任务。",
+                                    memory.available_gib()
+                                ),
+                                "warning",
+                                Vec::new(),
+                                None,
+                            ));
+                            last_notice = Some(Instant::now());
+                        }
+                    }
+                    Err(err) => {
+                        self.emit(event_for(
+                            worker_tool_id,
+                            &job_id,
+                            "failed",
+                            1,
+                            1,
+                            &err.user_message,
+                            "error",
+                            Vec::new(),
+                            None,
+                        ));
+                        self.finish(&job_id, &cancel_path);
+                        return;
+                    }
+                }
+                let _ = fs::remove_file(&memory_retry_path);
+                thread::sleep(Duration::from_millis(500));
+            })
+        } else {
+            None
+        };
         let request = WorkerRequest {
             job_id: job_id.clone(),
             method,
             params,
             cancel_path: cancel_path.to_string_lossy().into_owned(),
-            pause_path: self
-                .cancel_root
-                .join(format!("{job_id}.pause"))
-                .to_string_lossy()
-                .into_owned(),
+            pause_path: pause_path.to_string_lossy().into_owned(),
         };
         let mut command = match std::env::current_exe() {
             // 重任务靠"再启动一份自己"来跑。程序文件在运行期间被移走或重新构建过时
@@ -311,9 +385,11 @@ impl ExcelMergerService {
                 return;
             }
         };
-        let protected = request.method.starts_with("kanzhang.");
         let _memory_limit = if protected {
-            match crate::resource_budget::WorkerLimit::attach(&child) {
+            match crate::resource_budget::WorkerLimit::attach(
+                &child,
+                worker_memory_limit.expect("受保护任务必须有内存上限"),
+            ) {
                 Ok(limit) => Some(limit),
                 Err(err) => {
                     terminate_process_tree(&mut child);
@@ -354,41 +430,104 @@ impl ExcelMergerService {
         }
         let mut terminal = false;
         let mut cancel_started = None::<Instant>;
-        let mut memory_pressure_started = None::<Instant>;
+        let mut memory_paused = false;
+        let mut last_memory_notice = None::<Instant>;
+        let mut memory_recovery_started = None::<Instant>;
+        let mut memory_emergency_started = None::<Instant>;
+        let mut last_current = 0usize;
+        let mut last_total = 1usize;
         loop {
-            let memory_critical =
-                protected && !terminal && crate::resource_budget::check_available().is_err();
-            if memory_critical {
-                memory_pressure_started.get_or_insert_with(Instant::now);
-            } else {
-                memory_pressure_started = None;
-            }
-            // Windows 可用内存会随文件缓存短暂波动。只有紧急阈值持续 5 秒才终止，
-            // 避免重试时黑框一闪就被一次采样误杀。
-            if memory_pressure_started
-                .is_some_and(|started| started.elapsed() >= Duration::from_secs(5))
-            {
-                terminate_process_tree(&mut child);
-                self.emit(event_for(
-                    worker_tool_id,
-                    &job_id,
-                    "failed",
-                    1,
-                    1,
-                    "系统内存不足，已停止任务以保护电脑。请关闭其他大型程序后重试。",
-                    "error",
-                    Vec::new(),
-                    None,
-                ));
-                let _ = child.wait();
-                break;
-            }
             while let Ok(payload) = receiver.try_recv() {
+                last_current = payload
+                    .get("current")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize)
+                    .unwrap_or(last_current);
+                last_total = payload
+                    .get("total")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize)
+                    .unwrap_or(last_total);
+                if payload.get("phase").and_then(Value::as_str) != Some("memory_paused") {
+                    memory_paused = false;
+                }
                 terminal |= payload
                     .get("phase")
                     .and_then(Value::as_str)
                     .is_some_and(|phase| matches!(phase, "completed" | "failed" | "cancelled"));
                 self.emit(payload);
+            }
+            if protected && !terminal {
+                if let Ok(memory) = crate::resource_budget::memory_status() {
+                    if memory.emergency() {
+                        let emergency = memory_emergency_started.get_or_insert_with(Instant::now);
+                        if emergency.elapsed() >= Duration::from_secs(15) {
+                            terminate_process_tree(&mut child);
+                            self.emit(event_for(
+                                worker_tool_id,
+                                &job_id,
+                                "failed",
+                                last_current,
+                                last_total,
+                                "系统内存持续处于危险水平，已停止任务以保护电脑。",
+                                "error",
+                                Vec::new(),
+                                None,
+                            ));
+                            let _ = child.wait();
+                            break;
+                        }
+                    } else {
+                        memory_emergency_started = None;
+                    }
+                    if memory.should_pause() {
+                        memory_recovery_started = None;
+                        if !memory_paused
+                            || last_memory_notice
+                                .is_none_or(|time| time.elapsed() >= Duration::from_secs(5))
+                        {
+                            self.emit(event_for(
+                                worker_tool_id,
+                                &job_id,
+                                "memory_paused",
+                                last_current,
+                                last_total,
+                                &format!(
+                                    "内存紧张，任务已自动暂停：当前可用 {:.2} GiB。内存恢复后将自动继续，也可手动尝试继续。",
+                                    memory.available_gib()
+                                ),
+                                "warning",
+                                Vec::new(),
+                                None,
+                            ));
+                            memory_paused = true;
+                            last_memory_notice = Some(Instant::now());
+                        }
+                    } else if memory_paused {
+                        if memory.auto_resume_ready() {
+                            let recovered =
+                                memory_recovery_started.get_or_insert_with(Instant::now);
+                            if recovered.elapsed() >= Duration::from_secs(5) {
+                                self.emit(event_for(
+                                    worker_tool_id,
+                                    &job_id,
+                                    "memory_resumed",
+                                    last_current,
+                                    last_total,
+                                    "内存已稳定恢复，任务正在自动继续。",
+                                    "info",
+                                    Vec::new(),
+                                    None,
+                                ));
+                                memory_paused = false;
+                                last_memory_notice = None;
+                                memory_recovery_started = None;
+                            }
+                        } else {
+                            memory_recovery_started = None;
+                        }
+                    }
+                }
             }
             if cancel_path.exists() {
                 let started = cancel_started.get_or_insert_with(Instant::now);
@@ -508,6 +647,7 @@ impl ExcelMergerService {
         let _ = fs::remove_file(cancel_path);
         self.job_starts.lock().remove(job_id);
         if let Some((_cancel, pause, _method)) = self.jobs.lock().remove(job_id) {
+            let _ = fs::remove_file(crate::resource_budget::memory_retry_path(&pause));
             let _ = fs::remove_file(pause);
         }
     }
@@ -592,6 +732,12 @@ pub fn worker_main() -> i32 {
     let job_id = request.job_id.clone();
     let worker_tool_id = tool_id(&request.method);
     let pause = PauseCheckpoint::new(PathBuf::from(&request.pause_path), cancel.clone());
+    if request.method.starts_with("kanzhang.") {
+        crate::resource_budget::install_runtime_memory_control(
+            cancel.clone(),
+            crate::resource_budget::memory_retry_path(Path::new(&request.pause_path)),
+        );
+    }
     let progress_pause = pause.clone();
     let progress = |phase: &str, current: usize, total: usize, message: &str| {
         if progress_pause.wait().is_err() {

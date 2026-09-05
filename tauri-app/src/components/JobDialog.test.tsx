@@ -84,6 +84,18 @@ describe("任务进度弹窗", () => {
     expect(screen.getByText("30%")).toBeTruthy();
   });
 
+  it("内存自动暂停时显示等待状态并允许手动尝试继续", () => {
+    renderDialog([
+      job({
+        phase: "memory_paused",
+        message: "内存紧张，任务已自动暂停：当前可用 0.29 GiB。",
+      }),
+    ]);
+    expect(screen.getByText("内存等待")).toBeTruthy();
+    fireEvent.click(screen.getByText("尝试继续"));
+    expect(jobPause).toHaveBeenCalledWith("job-1", false);
+  });
+
   it("停止按钮取消任务", () => {
     renderDialog([job()]);
     fireEvent.click(screen.getByText("停止"));

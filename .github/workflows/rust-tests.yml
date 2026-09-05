@@ -23,6 +23,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tauri-app/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: tauri-app
+        run: npm ci
+
+      - name: Build frontend (dist-web is required by tauri::generate_context)
+        working-directory: tauri-app
+        run: npm run build
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -30,6 +45,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: tauri-app/src-tauri
+          cache-on-failure: true
 
       - name: Run tests
         working-directory: tauri-app

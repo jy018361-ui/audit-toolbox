@@ -398,3 +398,44 @@ body .history-card-content {
     transition: none;
   }
 }
+
+/* ---- 新手模式开关（侧边栏底部，版本号上一行）----
+   做成与导航行同款的一行小设置：图标 + 文案 + 开关，安静但不藏起来；
+   margin-top: auto 让它和版本号一起常驻底部，不被工具列表长短挤动。 */
+.newbie-mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: auto;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-md);
+  color: var(--on-dark-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.newbie-mode-toggle:hover {
+  background: var(--overlay-white-subtle);
+  color: var(--on-dark);
+}
+
+.newbie-mode-toggle-label {
+  flex: 1;
+}
+
+.newbie-mode-toggle-icon {
+  color: var(--brand-accent);
+  flex-shrink: 0;
+}
+
+/* 版本号紧贴在开关行下面，两者一起常驻底部。 */
+.app-shell > .sidebar .sidebar-footer {
+  margin-top: 0;
+  padding-top: var(--sp-3);
+}
+
+/* 深绿侧边栏上，开关打开态用默认主色会沉进底色里，提亮为品牌强调色。 */
+.newbie-mode-toggle [data-slot="switch"][data-state="checked"] {
+  background: var(--brand-accent);
+}

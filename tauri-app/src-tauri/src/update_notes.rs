@@ -353,9 +353,7 @@ mod tests {
                     release("v2.0.0-alpha.48", "更早")
                 ]));
             }
-            assert!(path.starts_with(
-                "/compare/v2.0.0-alpha.49...v2.0.0-alpha.50?"
-            ));
+            assert!(path.starts_with("/compare/v2.0.0-alpha.49...v2.0.0-alpha.50?"));
             Ok(json!({
                 "status": "ahead",
                 "commits": [
@@ -374,10 +372,12 @@ mod tests {
                 "feat(更新说明): 空说明用提交记录补齐"
             ]
         );
-        assert!(notes
-            .warnings
-            .iter()
-            .any(|w| w.contains("本版未填写更新说明")));
+        assert!(
+            notes
+                .warnings
+                .iter()
+                .any(|w| w.contains("本版未填写更新说明"))
+        );
     }
     #[test]
     fn invalid_ranges_rejected_before_network() {

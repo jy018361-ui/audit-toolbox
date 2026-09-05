@@ -3,6 +3,7 @@ import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   consumeTaskRestore,
+  historyRowCanResume,
   publishTaskRestore,
   subscribeTaskRestore,
   useTaskRestore,
@@ -18,9 +19,46 @@ const make = (
   params,
   missingPaths: [],
   authorizedPathCount: 1,
+  method: "test.main",
 });
 
 describe("task restore channel", () => {
+  it("gates resume on params and method: sub-step jobs are not restorable", () => {
+    expect(historyRowCanResume({ method: "wp.generate", params: { folder: "C:\\x" } })).toBe(true);
+    // 没有参数存档（旧版本任务）不可恢复。
+    expect(historyRowCanResume({ method: "wp.generate", params: {} })).toBe(false);
+    expect(historyRowCanResume({ method: "", params: {} })).toBe(false);
+    // 读取/筛选子步骤有参数但配置不完整，不给恢复。
+    expect(
+      historyRowCanResume({
+        method: "kanzhang.inspect",
+        params: { inputPath: "C:\\je.xlsx" },
+      }),
+    ).toBe(false);
+    expect(
+      historyRowCanResume({
+        method: "ts.filter",
+        params: { inputPath: "C:\\ts.xlsx" },
+      }),
+    ).toBe(false);
+    expect(
+      historyRowCanResume({
+        method: "fuzzy.export",
+        params: { jobId: "j1", outputPath: "C:\\out.xlsx" },
+      }),
+    ).toBe(false);
+    // 主任务可恢复；method 缺失（老格式但有参数）默认可恢复。
+    expect(
+      historyRowCanResume({
+        method: "kanzhang.export",
+        params: { inputPath: "C:\\je.xlsx", mapping: { date: "日期" } },
+      }),
+    ).toBe(true);
+    expect(
+      historyRowCanResume({ params: { inputPath: "C:\\je.xlsx" } }),
+    ).toBe(true);
+  });
+
   beforeEach(() => {
     // 模块级 pending 会跨用例残留：用一个哨兵恢复包顶掉再取走，保证排空。
     publishTaskRestore({
@@ -29,6 +67,7 @@ describe("task restore channel", () => {
       params: { sentinel: true },
       missingPaths: [],
       authorizedPathCount: 0,
+      method: "__drain__",
     });
     expect(consumeTaskRestore("__drain__")).not.toBeNull();
   });

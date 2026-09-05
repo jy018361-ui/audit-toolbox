@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { StepTourHint } from "./tour/StepTourHint";
 
 export type Step = {
   key: string;
@@ -65,15 +66,31 @@ export function StepIndicator({
                 onClick={() => onStepClick?.(index)}
               >
                 <span className="step-indicator-index" aria-hidden="true">
-                  {done ? "✓" : index + 1}
+                  {done ? (
+                    <svg className="step-check" viewBox="0 0 16 16">
+                      <path
+                        d="M3 8.5 6.5 12 13 4.5"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        pathLength={24}
+                      />
+                    </svg>
+                  ) : (
+                    index + 1
+                  )}
                 </span>
                 <span className="step-indicator-label">{step.label}</span>
                 {done ? <span className="sr-only">（已完成）</span> : null}
               </button>
-            </li>
-          );
+          </li>
+        );
         })}
       </ol>
+      {/* 新手模式的分步提示：每切换一步弹出当前步的说明，挂在步骤条正下方。 */}
+      <StepTourHint steps={steps} current={current} />
     </nav>
   );
 }

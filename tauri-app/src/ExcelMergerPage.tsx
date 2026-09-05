@@ -16,6 +16,8 @@ import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ConfirmDialog";
+import { BusySpinner } from "@/components/BusySpinner";
+import { SwitchInput } from "@/components/SwitchInput";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
 
@@ -111,6 +113,12 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
   // 历史恢复暂存的目标 Sheet：paths 变化的副作用会清空 targetSheets，
   // 恢复的自定义 Sheet 子集要等副作用跑完再补回。
   const pendingTargetSheets = useRef<string[] | null>(null);
+  // 历史恢复的 Sheet 子集另存一份：用户稍后点「检查文件」时，inspect 默认
+  // 全选 availableSheets——同一批文件用存档子集顶回，一次性消费。
+  const restoredSheetsRef = useRef<{
+    paths: string[];
+    targetSheets: string[];
+  } | null>(null);
   useEffect(() => {
     setFiles([]);
     setAvailableSheets([]);
@@ -141,6 +149,9 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     if (!Array.isArray(p.inputPaths) || !p.inputPaths.length) return;
     const restoredSheets = Array.isArray(p.targetSheets)
       ? p.targetSheets
+      : null;
+    restoredSheetsRef.current = restoredSheets
+      ? { paths: p.inputPaths, targetSheets: restoredSheets }
       : null;
     const samePaths =
       p.inputPaths.length === paths.length &&
@@ -206,7 +217,23 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
       })) as { files: MergerFile[]; availableSheets: string[] };
       setFiles(value.files);
       setAvailableSheets(value.availableSheets);
-      setTargetSheets(value.availableSheets);
+      // 历史恢复后检查同一批文件：自定义 Sheet 子集保留（一次性消费，
+      // 换文件清单照旧全选）。
+      const stash = restoredSheetsRef.current;
+      const sameSet = (a: string[], b: string[]) =>
+        a.length === b.length &&
+        [...a].sort().join("\n").toLowerCase() ===
+          [...b].sort().join("\n").toLowerCase();
+      const kept =
+        stash && sameSet(stash.paths, paths)
+          ? stash.targetSheets.filter((name) =>
+              value.availableSheets.includes(name),
+            )
+          : undefined;
+      if (stash && sameSet(stash.paths, paths)) restoredSheetsRef.current = null;
+      setTargetSheets(
+        kept && kept.length ? kept : value.availableSheets,
+      );
       setResult(value);
     } catch (e) {
       setError(errorText(e));
@@ -314,6 +341,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
           <button
             type="button"
             className="drop-zone"
+            data-tour="tool-upload"
             onClick={() => void chooseFiles()}
           >
             <strong>拖放文件或文件夹到窗口</strong>
@@ -525,10 +553,9 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             </div>
           )}
           <label className="check-row">
-            <input
-              type="checkbox"
+            <SwitchInput
               checked={addHyperlinks}
-              onChange={(e) => setAddHyperlinks(e.target.checked)}
+              onChange={setAddHyperlinks}
             />
             加入源文件超链接（大文件会降低导出速度）
           </label>
@@ -593,6 +620,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
                 variant="secondary"
                 onClick={() => void jobCancel(job.jobId)}
               >
+                <BusySpinner />
                 停止执行
               </Button>
             ) : (

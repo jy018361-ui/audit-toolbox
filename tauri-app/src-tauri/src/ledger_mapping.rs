@@ -3264,7 +3264,11 @@ fn is_measurement_unit_value(raw: &str) -> bool {
     )
 }
 
-pub(crate) fn column_is_measurement_unit(headers: &[String], rows: &[Vec<String>], index: usize) -> bool {
+pub(crate) fn column_is_measurement_unit(
+    headers: &[String],
+    rows: &[Vec<String>],
+    index: usize,
+) -> bool {
     let header = headers
         .get(index)
         .map(|value| normalize_header(value))
@@ -7363,10 +7367,7 @@ mod tests {
     fn 编码加空格加名称的混写在首段是编码时拆开() {
         assert_eq!(
             split_code_and_name("6701090001 财务费用-汇兑收益-未实现"),
-            Some((
-                "6701090001".into(),
-                "财务费用-汇兑收益-未实现".into()
-            ))
+            Some(("6701090001".into(), "财务费用-汇兑收益-未实现".into()))
         );
         assert_eq!(
             split_code_and_name("1002.01 招商银行-基本户"),

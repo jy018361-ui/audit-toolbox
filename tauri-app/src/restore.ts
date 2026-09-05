@@ -6,6 +6,32 @@ import type { TaskRestore } from "./types";
 // 消费并回填表单。不走 route state：工具页由 PersistentToolPages 保活，
 // 二次进入不会重跑 useState 初始化；订阅 + 待取双通道才能两头都接住。
 
+/**
+ * 这些方法是工具内部的读取/筛选子步骤，存档里只有部分配置（如看账的
+ * inspect 只有文件路径没有字段映射）——恢复它们等于把现场覆盖成半成品。
+ * 历史页只对主任务方法显示「继续任务」。
+ */
+const RESTORE_BLOCKED_METHODS = new Set([
+  "kanzhang.inspect",
+  "kanzhang.filter",
+  "kanzhang.mark_inspect",
+  "ts.inspect",
+  "ts.filter",
+  "file_list.scan",
+  "fuzzy.export",
+  // 汇率拉取是测算的辅助步骤，存档里没有账表配置。
+  "fx.fetch_rates",
+]);
+
+/** 历史行是否可恢复：有参数存档，且不是被排除的子步骤方法。 */
+export function historyRowCanResume(row: {
+  method?: string;
+  params?: Record<string, unknown> | null;
+}): boolean {
+  if (!row.params || Object.keys(row.params).length === 0) return false;
+  return !RESTORE_BLOCKED_METHODS.has(String(row.method ?? ""));
+}
+
 const listeners = new Set<(restore: TaskRestore) => void>();
 let pending: TaskRestore | null = null;
 

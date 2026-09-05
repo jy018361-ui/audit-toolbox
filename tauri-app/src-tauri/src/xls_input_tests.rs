@@ -132,7 +132,10 @@ fn xls_inputs_template_text_conversion_preserves_values_and_cleans_up() {
     assert!(source.exists());
     fs::write(&source, "名称\n甲公司\n乙公司\n").unwrap();
     assert!(crate::spreadsheet_input::is_text(&source));
-    assert_eq!(crate::spreadsheet_input::read_rows(&source).unwrap()[2], vec!["乙公司"]);
+    assert_eq!(
+        crate::spreadsheet_input::read_rows(&source).unwrap()[2],
+        vec!["乙公司"]
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

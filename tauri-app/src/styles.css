@@ -829,6 +829,12 @@ summary:focus-visible {
   border: 1px dashed var(--border);
   border-radius: var(--r-md);
   background: var(--surface-sunken);
+  /* 空状态底纹：低饱和品牌色斜向细纹（试验），透明度刻意压低到若隐若现 */
+  background-image: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--brand) 4%, transparent) 0 1px,
+    transparent 1px 14px
+  );
   color: var(--text-muted);
   text-align: center;
 }
@@ -1925,6 +1931,9 @@ summary:focus-visible {
   font-weight: 600;
   text-align: center;
   padding: var(--sp-3);
+  /* 拖入/移出时的边框与底色变化走平滑过渡 */
+  transition: border-color 0.15s ease-out, background-color 0.15s ease-out,
+    transform 0.15s ease-out;
 }
 .file-drop-zone span {
   font-size: var(--fs-xs);
@@ -2050,10 +2059,13 @@ summary:focus-visible {
 /* 拖放悬停高亮：提示文件将落到这个框 */
 .file-drop-input.drag-hover .file-drop-zone,
 .file-drop-input.drag-hover .file-drop-slot {
-  border-color: var(--brand-accent);
+  border-color: var(--brand-link);
   border-style: dashed;
   background: var(--surface-muted);
   box-shadow: inset 0 0 0 2px var(--focus-ring);
+}
+.file-drop-input.drag-hover .file-drop-zone {
+  transform: scale(1.005);
 }
 
 /* FA 字段映射（参考看账 kz-map）：两列 grid，每列一个文件的角色映射 */
@@ -3166,5 +3178,227 @@ summary:focus-visible {
   [data-slot="card"][data-variant="interactive"] {
     transition: none;
     transform: none;
+  }
+}
+
+/* 忙碌指示器：改编自 Uiverse「pretty-treefrog-77」（MIT，作者 SelfMadeSystem），
+   颜色走 currentColor 跟随所在按钮文字，尺寸用 em 档随字号缩放 */
+.busy-spinner {
+  width: 1.1em;
+  height: 1.1em;
+  flex: 0 0 auto;
+}
+.busy-spinner circle {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3;
+  stroke-linecap: round;
+  animation: busy-dash 2s ease-in-out infinite, busy-offset 2s linear infinite,
+    busy-spin 8s ease-in-out infinite;
+  transform-origin: center;
+}
+@keyframes busy-dash {
+  0% {
+    stroke-dasharray: 270 90;
+  }
+  50% {
+    stroke-dasharray: 0 360;
+  }
+  100% {
+    stroke-dasharray: 270 90;
+  }
+}
+@keyframes busy-offset {
+  0% {
+    stroke-dashoffset: 365;
+  }
+  100% {
+    stroke-dashoffset: 5;
+  }
+}
+@keyframes busy-spin {
+  0% {
+    rotate: 0deg;
+  }
+  12.5%,
+  25% {
+    rotate: 270deg;
+  }
+  37.5%,
+  50% {
+    rotate: 540deg;
+  }
+  62.5%,
+  75% {
+    rotate: 810deg;
+  }
+  87.5%,
+  100% {
+    rotate: 1080deg;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .busy-spinner circle {
+    animation: none;
+    stroke-dasharray: 200 160;
+  }
+}
+
+/* ===== 页面级动效：全部只动 transform/opacity，尊重系统"减少动态效果" ===== */
+
+/* 工具页/导航页切换淡入：保活页从 hidden 重新显示或页面首次挂载时重放 */
+#main-content > * {
+  animation: page-fade-in 0.16s ease-out;
+}
+@keyframes page-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 步骤完成对勾描画：完成的一步出现时"画"出对勾 */
+.step-check {
+  width: 1em;
+  height: 1em;
+  display: block;
+}
+.step-check path {
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+  animation: step-check-draw 0.35s ease-out 0.05s forwards;
+}
+@keyframes step-check-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* 任务完成徽标：success 时缩放弹入 */
+.job-done-check {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  border-radius: var(--r-pill);
+  background: var(--success-bg);
+  color: var(--success-fg);
+  animation: pop-in 0.25s ease-out;
+}
+.job-done-check svg {
+  width: 12px;
+  height: 12px;
+  display: block;
+}
+@keyframes pop-in {
+  0% {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+  70% {
+    transform: scale(1.1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* 骨架占位：任务处理中替代静态空态文案，三行呼吸明暗 */
+.skeleton-rows {
+  display: grid;
+  gap: var(--sp-3);
+  width: 100%;
+  max-width: 420px;
+  margin: 0 auto;
+}
+.skeleton-rows i {
+  height: 14px;
+  border-radius: var(--r-pill);
+  background: var(--surface-muted);
+  animation: skeleton-pulse 1.2s ease-in-out infinite;
+}
+.skeleton-rows i:nth-child(2) {
+  width: 72%;
+  animation-delay: 0.15s;
+}
+.skeleton-rows i:nth-child(3) {
+  width: 55%;
+  animation-delay: 0.3s;
+}
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #main-content > *,
+  .step-check path,
+  .job-done-check,
+  .skeleton-rows i {
+    animation: none;
+  }
+  .step-check path {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* 滑动开关：原生勾选框的外观升级（语义仍是勾选框），仅用于"开/关"型选项 */
+input[type="checkbox"].switch-input {
+  appearance: none;
+  width: 36px;
+  height: 20px;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  flex: 0 0 auto;
+  position: relative;
+  border-radius: var(--r-pill);
+  background: var(--border);
+  cursor: pointer;
+  transition: background-color 0.15s ease-out;
+  vertical-align: middle;
+}
+input[type="checkbox"].switch-input::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: var(--shadow-button);
+  transition: transform 0.15s ease-out;
+}
+input[type="checkbox"].switch-input:checked {
+  background: var(--brand);
+}
+input[type="checkbox"].switch-input:checked::after {
+  transform: translateX(16px);
+}
+input[type="checkbox"].switch-input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+input[type="checkbox"].switch-input:disabled {
+  opacity: var(--disabled-opacity);
+  cursor: not-allowed;
+}
+@media (prefers-reduced-motion: reduce) {
+  input[type="checkbox"].switch-input,
+  input[type="checkbox"].switch-input::after {
+    transition: none;
   }
 }

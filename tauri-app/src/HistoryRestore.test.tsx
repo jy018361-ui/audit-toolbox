@@ -45,6 +45,7 @@ const completedRow = (overrides: Record<string, unknown> = {}) => ({
   startedAt: "2026-09-03T10:00:00+08:00",
   finishedAt: "2026-09-03T10:05:00+08:00",
   params: { folder: "C:\\客户A\\WP" },
+  method: "wp.generate",
   ...overrides,
 });
 
@@ -64,6 +65,7 @@ describe("history resume", () => {
       params: { folder: "C:\\客户A\\WP" },
       missingPaths: [],
       authorizedPathCount: 1,
+      method: "wp.generate",
     });
     render(
       <MemoryRouter initialEntries={["/history"]}>
@@ -90,6 +92,7 @@ describe("history resume", () => {
       params: { folder: "C:\\客户A\\WP" },
       missingPaths: ["C:\\客户A\\WP"],
       authorizedPathCount: 0,
+      method: "wp.generate",
     });
     render(
       <MemoryRouter initialEntries={["/history"]}>
@@ -133,5 +136,39 @@ describe("history resume", () => {
     );
     fireEvent.click(await screen.findByRole("button", { name: "继续任务" }));
     expect(await screen.findByText("未找到该任务，无法恢复。")).toBeVisible();
+  });
+
+  it("hides the resume action for sub-step jobs like kanzhang.inspect", async () => {
+    // 看账的「读取文件」子步骤也有参数存档，但只有文件路径没有字段映射，
+    // 恢复它等于把现场覆盖成半成品——这类记录不显示按钮。
+    vi.mocked(historyGet).mockResolvedValue([
+      completedRow({
+        jobId: "job-kz-read",
+        toolId: "kanzhang",
+        message: "已读取文件",
+        params: { inputPath: "C:\\je.xlsx", headerRow: 1 },
+        method: "kanzhang.inspect",
+      }),
+      completedRow({
+        jobId: "job-kz-export",
+        toolId: "kanzhang",
+        message: "导出完成",
+        params: {
+          inputPath: "C:\\je.xlsx",
+          mapping: { date: "日期" },
+          targetBatches: [{ name: "批次1", accounts: ["管理费用"] }],
+        },
+        method: "kanzhang.export",
+      }),
+    ]);
+    render(
+      <MemoryRouter initialEntries={["/history"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    await screen.findByText("已读取文件");
+    expect(screen.getByText("导出完成")).toBeVisible();
+    const buttons = screen.getAllByRole("button", { name: "继续任务" });
+    expect(buttons).toHaveLength(1);
   });
 });

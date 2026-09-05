@@ -352,8 +352,17 @@ function FaCardListPage() {
   });
 
   // 历史记录「继续任务」：回填两份清单与映射/匹配键/补充表等全部配置，
-  // 不自动重新读取——读取会用建议映射覆盖，预览等用户点「读取两表」再补。
+  // 不自动重新读取——重新读取同一对文件时用存档映射/匹配键顶回建议值
+  // （见 inspect），换文件照旧。
   // restore key 用 "fa_list:cards" 与账表核对子页区分（见 restore.ts）。
+  const restoredFaCardsRef = useRef<{
+    beginPath: string;
+    endPath: string;
+    beginMapping: FaMapping;
+    endMapping: FaMapping;
+    beginKeys: string[];
+    endKeys: string[];
+  } | null>(null);
   useTaskRestore("fa_list:cards", (restore) => {
     const p = restore.params as {
       beginPath?: string;
@@ -375,6 +384,19 @@ function FaCardListPage() {
     };
     if (typeof p.beginPath !== "string" || !p.beginPath) return;
     if (typeof p.endPath !== "string" || !p.endPath) return;
+    const isMapping = (value: unknown): value is FaMapping =>
+      Boolean(value && typeof value === "object");
+    restoredFaCardsRef.current =
+      isMapping(p.beginMapping) && isMapping(p.endMapping)
+        ? {
+            beginPath: p.beginPath,
+            endPath: p.endPath,
+            beginMapping: p.beginMapping,
+            endMapping: p.endMapping,
+            beginKeys: Array.isArray(p.beginKeys) ? p.beginKeys : [],
+            endKeys: Array.isArray(p.endKeys) ? p.endKeys : [],
+          }
+        : null;
     llmReviewGeneration.current += 1;
     supplementReviewGeneration.current += 1;
     setStep(2);
@@ -802,11 +824,32 @@ function FaCardListPage() {
           ? [value.suggestedMapping.end.matchKey]
           : []);
       // 建议映射可能已含 matchKeys；统一补上，保证 mapping 与 keys 影子 state 一致
-      setBeginMapping({ ...suggestedBegin, matchKeys: suggestedBeginKeys });
-      setEndMapping({ ...suggestedEnd, matchKeys: suggestedEndKeys });
-      setBeginKeys(suggestedBeginKeys);
-      setEndKeys(suggestedEndKeys);
+      // 历史恢复后重新读取同一对文件：存档映射/匹配键顶回建议值（一次性
+      // 消费，换文件照旧），且不再自动送 LLM 复核——那份映射已确认过。
+      const stash = restoredFaCardsRef.current;
+      const samePath = (a: string, b: string) =>
+        a.trim().toLowerCase() === b.trim().toLowerCase();
+      const match =
+        stash &&
+        samePath(stash.beginPath, bPath) &&
+        samePath(stash.endPath, ePath)
+          ? stash
+          : undefined;
+      if (match) restoredFaCardsRef.current = null;
+      setBeginMapping(
+        match
+          ? { ...match.beginMapping, matchKeys: match.beginKeys }
+          : { ...suggestedBegin, matchKeys: suggestedBeginKeys },
+      );
+      setEndMapping(
+        match
+          ? { ...match.endMapping, matchKeys: match.endKeys }
+          : { ...suggestedEnd, matchKeys: suggestedEndKeys },
+      );
+      setBeginKeys(match ? match.beginKeys : suggestedBeginKeys);
+      setEndKeys(match ? match.endKeys : suggestedEndKeys);
       setResult(value);
+      if (match) return;
       void reviewLlm({
         beginPath: bPath,
         endPath: ePath,

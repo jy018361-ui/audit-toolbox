@@ -484,7 +484,8 @@ fn validate(params: Value) -> Result<Value, AppError> {
     let mut details = Vec::new();
     for code in &subjects {
         if let Some(item) = cfg.subjects.get(code) {
-            let template = crate::spreadsheet_input::prefer_workbook(&template_dir.join(&item.template_file));
+            let template =
+                crate::spreadsheet_input::prefer_workbook(&template_dir.join(&item.template_file));
             if !template.is_file() {
                 missing_templates.push(item.template_file.clone());
             }
@@ -4020,10 +4021,17 @@ mod xls_inputs_tests {
         let root = std::env::temp_dir().join(format!("roll-xls-input-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let input = root.join("C 货币资金.XLS");
-        fs::write(&input, include_bytes!("../../tests/fixtures/Excel Merger/simple-biff8.xls")).unwrap();
+        fs::write(
+            &input,
+            include_bytes!("../../tests/fixtures/Excel Merger/simple-biff8.xls"),
+        )
+        .unwrap();
         assert_eq!(workbook_files(&root).unwrap(), vec![input.clone()]);
         assert_eq!(workbook_files(&input).unwrap(), vec![input.clone()]);
-        assert_eq!(crate::spreadsheet_input::prefer_workbook(&input.with_extension("xlsx")), input.with_extension("xls"));
+        assert_eq!(
+            crate::spreadsheet_input::prefer_workbook(&input.with_extension("xlsx")),
+            input.with_extension("xls")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

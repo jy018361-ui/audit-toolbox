@@ -29,6 +29,7 @@ import {
   applyLedgerReviewsTogether,
   resolveLedgerPairKinds,
   reviewLedgerSourceClassification,
+  selectLedgerSourcePair,
 } from "./ledgerMapping";
 import type React from "react";
 describe("fx audit mode selection", () => {
@@ -66,6 +67,27 @@ describe("fx audit mode selection", () => {
   });
 });
 describe("fx audit upload and mapping parity", () => {
+  it("同一工作簿有 TB/JE Sheet 时优先选为一组", () => {
+    const source = (
+      path: string,
+      sheet: string,
+      kind: "je" | "tb",
+      scores: { je: number; tb: number },
+    ) => ({
+      path,
+      classification: { path, sheet, kind, scores },
+    });
+    const selected = selectLedgerSourcePair([
+      source("C:/x/账套.xlsx", "TB", "tb", { je: 1, tb: 8 }),
+      source("C:/x/账套.xlsx", "JE", "je", { je: 8, tb: 1 }),
+      source("C:/x/01序时账.xlsx", "明细", "je", { je: 12, tb: 0 }),
+    ] as never);
+    expect(selected.map((item) => [item.path, item.classification.sheet])).toEqual([
+      ["C:/x/账套.xlsx", "JE"],
+      ["C:/x/账套.xlsx", "TB"],
+    ]);
+  });
+
   it("jointly assigns an ambiguous two-file upload to stable JE/TB slots", () => {
     const kinds = resolveLedgerPairKinds([
       { kind: "je", scores: { je: 11, tb: 2 } },

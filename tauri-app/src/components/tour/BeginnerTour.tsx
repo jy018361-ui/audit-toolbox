@@ -293,8 +293,12 @@ export function BeginnerTour({
       aria-label={`新手引导：${currentStep.title}`}
     >
       {/* 透明挡板：吃掉对底层的所有点击。层级低于窗口控制按钮（800），
-          引导期间最小化 / 关闭窗口仍然可用。 */}
-      <div className="tour-blocker" aria-hidden="true" />
+          引导期间最小化 / 关闭窗口仍然可用。没有挖孔目标时（居中卡片、
+          等待定位）挡板自己整屏压暗，否则背景会全亮，看起来像坏了。 */}
+      <div
+        className={`tour-blocker${rect ? "" : " tour-blocker-dimmed"}`}
+        aria-hidden="true"
+      />
       {rect && (
         <>
           <div

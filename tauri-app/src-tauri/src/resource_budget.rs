@@ -259,9 +259,6 @@ mod tests {
         assert!(!runtime_memory_critical(16 * GIB, GIB, 8 * GIB));
         assert!(runtime_memory_critical(16 * GIB, 400 * MIB, 8 * GIB));
         assert!(runtime_memory_critical(64 * GIB, 8 * GIB, 512 * MIB));
-        assert_eq!(
-            (64 * GIB / 32).clamp(512 * MIB, 2 * GIB),
-            2 * GIB
-        );
+        assert_eq!((64 * GIB / 32).clamp(512 * MIB, 2 * GIB), 2 * GIB);
     }
 }

@@ -20,6 +20,9 @@ import {
   applyLedgerReviewToDict,
   missingGoldIdentity,
   resolveRoleLabels,
+  scanLedgerUploadSources,
+  selectLedgerSourcePair,
+  type LedgerWorkbookSheetClassification,
 } from "@/ledgerMapping";
 import {
   describeLoanForm,
@@ -260,6 +263,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const [rows, setRows] = useState<LoanRow[]>([]);
   const [result, setResult] = useState<Record<string, unknown>>();
   const [error, setError] = useState("");
+  const [pairStatus, setPairStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState(0);
   const [job, setJob] = useState<JobEvent>();
@@ -345,6 +349,48 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     setSource(kind, { path: picked, inspection: undefined, mapping: {} });
     await inspect(kind, picked);
   }
+  async function browsePair() {
+    const picked = await pickPath("files", "共同选择 TB 与 JE", [
+      "xlsx",
+      "xls",
+      "xlsm",
+      "csv",
+      "txt",
+      "tsv",
+    ]);
+    if (!picked) return;
+    const paths = Array.isArray(picked) ? picked : [picked];
+    setBusy(true);
+    setError("");
+    setPairStatus("正在通过公共账表引擎逐 Sheet 识别…");
+    try {
+      const scan = await scanLedgerUploadSources<LedgerWorkbookSheetClassification>(
+        engineCall,
+        paths,
+      );
+      const selected = selectLedgerSourcePair(scan.sources);
+      setBusy(false);
+      for (const item of selected) {
+        await inspect(item.kind, item.path, {
+          sheet: item.classification.sheet,
+          headerRow: item.classification.headerRow,
+          headerDepth: item.classification.headerDepth,
+        });
+      }
+      setPairStatus(
+        `${selected.length} 个账表来源已识别${scan.hiddenSheets ? `；${scan.hiddenSheets} 张低置信度 Sheet 已忽略` : ""}。`,
+      );
+      if (scan.failures.length) {
+        setError(
+          scan.failures
+            .map((failure) => `${failure.path}：${errorText(failure.error)}`)
+            .join("；"),
+        );
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
   async function inspect(
     kind: Kind,
     path = sources[kind].path,
@@ -364,7 +410,18 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           headerDepth: over?.headerDepth ?? old?.headerDepth ?? 0,
         },
       })) as Inspection;
-      setSource(kind, { path, inspection: x, mapping: x.suggestedMapping });
+      // 历史恢复后重新识别同一文件：存档映射顶回建议映射，一次性消费；
+      // 换文件照旧用建议值。
+      const stash = restoredLoanMappings.current[kind];
+      const samePath = (a: string, b: string) =>
+        a.trim().toLowerCase() === b.trim().toLowerCase();
+      const mapping =
+        stash && samePath(stash.path, path)
+          ? stash.mapping
+          : (x.suggestedMapping ?? {});
+      if (stash && samePath(stash.path, path))
+        restoredLoanMappings.current[kind] = undefined;
+      setSource(kind, { path, inspection: x, mapping });
       if (kind === "ledger") setRateEdits({});
     } catch (e) {
       setError(errorText(e));
@@ -407,6 +464,11 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   // 历史记录「继续任务」：回填台账/TB/JE/利率台账路径、模式与映射；Sheet 等
   // 识别信息以存档参数重建最小 Inspection，不点「重新识别」也能直接测算。
   // 逐行利率的手工改动依赖台账预览现算默认值，恢复后需在识别后重设。
+  // restoredLoanMappings：用户重新识别同一文件时，inspect 完成会把映射重设
+  // 为建议值——这里把存档映射顶回，逐来源一次性消费。
+  const restoredLoanMappings = useRef<
+    Partial<Record<Kind, { path: string; mapping: Record<string, string> }>>
+  >({});
   useTaskRestore(tool.id, (restore) => {
     type LoanSourceParams = {
       source?: {
@@ -458,6 +520,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       };
     }
     if (!restoredAny) return;
+    for (const kind of ["ledger", "tb", "je", "rateLedger"] as Kind[]) {
+      const mapping = next[kind].mapping;
+      restoredLoanMappings.current[kind] =
+        next[kind].path && Object.keys(mapping).length
+          ? { path: next[kind].path, mapping }
+          : undefined;
+    }
     invalidateResults();
     setSources(next);
     setRateEdits({});
@@ -565,6 +634,19 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                     : "TB 与 JE 均需上传；可在下一步选传利率台账。"
                 }
               />
+              {mode === "tb" && (
+                <div className="fx-step-actions">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={() => void browsePair()}
+                  >
+                    一次选择 TB 与 JE（自动识别 Sheet）
+                  </Button>
+                  {pairStatus && <span aria-live="polite">{pairStatus}</span>}
+                </div>
+              )}
               <div className="loan-upload-grid">
                 {activeKinds.map((kind) => (
                   <Upload

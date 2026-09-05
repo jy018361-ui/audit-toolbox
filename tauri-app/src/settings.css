@@ -1,10 +1,34 @@
-.settings-page .settings-group {
+/* 单页双栏：左栏「要填写的」（LLM / OCR）略宽，右栏「要选择的」略窄 */
+.settings-page .settings-columns {
   display: grid;
+  grid-template-columns: minmax(0, 8fr) minmax(0, 7fr);
   gap: var(--sp-4);
+  align-items: start;
 }
 
-.settings-page .settings-group[hidden] {
-  display: none;
+.settings-page .settings-col {
+  display: grid;
+  gap: var(--sp-4);
+  align-content: start;
+  min-width: 0;
+}
+
+/* 窄窗口（或半屏使用）时落回单栏，避免两栏各自挤成一长条 */
+@media (max-width: 1279px) {
+  .settings-page .settings-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 双栏之下每栏宽度有限，输入框不再需要跟随整卡拉宽 */
+.settings-page .form-grid .field input,
+.settings-page .form-grid .field select {
+  max-width: 420px;
+}
+
+/* 旧数据迁移卡是右栏直接子级，间距交给栏间距，不再额外加 margin */
+.settings-page .settings-col > .settings-advanced {
+  margin-top: 0;
 }
 
 .settings-page .list-card {
@@ -270,10 +294,11 @@
 .settings-page .settings-toggle {
   display: flex;
   flex-direction: row;
-  /* 与同网格其他字段的标签文字保持同一水平线：顶对齐，而不是整行垂直居中 */
-  align-items: flex-start;
-  justify-content: flex-start;
+  /* 开关行横贯表单整行：名称居左、开关居右，读起来像一条独立设置 */
+  align-items: center;
+  justify-content: space-between;
   gap: var(--sp-3);
+  grid-column: 1 / -1;
 }
 
 .settings-page .settings-toggle > span {
@@ -281,12 +306,38 @@
 }
 
 .settings-page .settings-toggle input[type="checkbox"] {
-  width: var(--sp-4);
-  height: var(--sp-4);
+  /* 已升级为滑动开关（switch-input），这里只对齐高度与行高 */
+  width: 36px;
+  height: 20px;
   min-height: 0;
   flex: 0 0 auto;
-  /* 16px 勾选框对 20px 文字行居中 */
-  margin-top: 2px;
+  accent-color: var(--brand);
+}
+
+/* 清理范围一行：勾选框回到正常尺寸，避免被 .field input 的整行样式撑成大方块 */
+.settings-page .checkbox-field {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.settings-page .checkbox-field > span {
+  margin-bottom: 0;
+}
+
+.settings-page .checkbox-field > span:last-child {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.settings-page .checkbox-field input[type="checkbox"] {
+  width: 36px;
+  height: 20px;
+  min-height: 0;
+  margin: 0;
+  flex: 0 0 auto;
   accent-color: var(--brand);
 }
 

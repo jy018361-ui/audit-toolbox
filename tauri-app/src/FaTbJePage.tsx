@@ -31,11 +31,13 @@ import { useJobEvents } from "@/hooks/useJobEvents";
 import { useTaskRestore } from "./restore";
 import { errorText } from "@/lib/errors";
 import {
+  correctLedgerSourceKinds,
   DEFAULT_ENTITY,
-  resolveLedgerPairKinds,
   resolveRoleLabels,
-  reviewLedgerSourceClassification,
+  scanLedgerUploadSources,
+  selectLedgerSourcePair,
   type EngineRoleLabels,
+  type LedgerWorkbookSheetClassification,
 } from "@/ledgerMapping";
 import {
   describeForm,
@@ -57,15 +59,7 @@ type Assignment = {
   category: string;
 };
 type AssignmentFilter = "candidate" | AccountRole | "all";
-type Classification = {
-  kind: Kind;
-  scores: { je: number; tb: number };
-  headers: string[];
-  preview: string[][];
-  sheet: string;
-  headerRow: number;
-  headerDepth: number;
-};
+type Classification = LedgerWorkbookSheetClassification;
 
 const MULTI = new Set(["id", "accountName", "account", "auxiliary"]);
 const PAGE_SIZE = 50;
@@ -350,8 +344,12 @@ export function FaTbJePage() {
   });
 
   // 历史记录「继续任务」：回填 TB/JE 路径、映射与科目分类；Sheet/标题行以
-  // 存档参数重建最小 Inspection，不点「重新读取」也能直接预览/导出。
+  // 存档参数重建最小 Inspection，不点「重新读取」也能直接预览/导出；重新
+  // 识别同一文件时用存档映射顶回建议值（见 intake）。
   // restore key 用 "fa_list:tbje" 与清单对比子页区分（见 restore.ts）。
+  const restoredTbjeMappings = useRef<
+    Partial<Record<Kind, { path: string; mapping: Mapping }>>
+  >({});
   useTaskRestore("fa_list:tbje", (restore) => {
     type SourceParams = {
       inputPath?: string;
@@ -367,6 +365,18 @@ export function FaTbJePage() {
       accountAssignments?: Assignment[];
       reportEnd?: string;
       outputPath?: string;
+    };
+    const isMapping = (value: unknown): value is Mapping =>
+      Boolean(value && typeof value === "object");
+    restoredTbjeMappings.current = {
+      tb:
+        typeof p.tbSource?.inputPath === "string" && isMapping(p.tbMapping)
+          ? { path: p.tbSource.inputPath, mapping: p.tbMapping }
+          : undefined,
+      je:
+        typeof p.jeSource?.inputPath === "string" && isMapping(p.jeMapping)
+          ? { path: p.jeSource.inputPath, mapping: p.jeMapping }
+          : undefined,
     };
     const minimalInspection = (src: SourceParams | undefined): Inspection =>
       ({
@@ -551,47 +561,25 @@ export function FaTbJePage() {
     setError("");
     setSourceStatus("正在识别文件类型、Sheet、表头和字段…");
     const failures: string[] = [];
-    let llmFallbacks = 0;
-    const classifiedFiles: {
-      path: string;
-      classification: Classification;
-    }[] = [];
     try {
-      for (const path of files) {
-        try {
-          const classified = (await engineCall("deposit.classify_source", {
-            source: {
-              inputPath: path,
-              sheet: "",
-              headerRow: 0,
-              headerDepth: 0,
-            },
-          })) as Classification;
-          const reviewed = await reviewLedgerSourceClassification(
-            engineCall,
-            "fa_tbje.classify_source_llm",
-            path,
-            classified,
-          );
-          if (!reviewed.reviewed) llmFallbacks += 1;
-          classifiedFiles.push({
-            path,
-            classification: reviewed.classification,
-          });
-        } catch (e) {
-          failures.push(`${fileName(path)}：${errorText(e)}`);
-        }
-      }
-      const resolvedKinds = resolveLedgerPairKinds(
-        classifiedFiles.map((item) => item.classification),
+      const scan = await scanLedgerUploadSources<Classification>(
+        engineCall,
+        files,
+        { llmMethod: "fa_tbje.classify_source_llm" },
       );
+      failures.push(
+        ...scan.failures.map(
+          (failure) => `${fileName(failure.path)}：${errorText(failure.error)}`,
+        ),
+      );
+      const selected = selectLedgerSourcePair(scan.sources);
       const recognized: {
         kind: Kind;
         path: string;
         inspected: Inspection;
       }[] = [];
-      for (const [index, item] of classifiedFiles.entries()) {
-        const kind = resolvedKinds[index];
+      for (const item of selected) {
+        const kind = item.kind;
         try {
           const inspected = (await engineCall(`deposit.inspect_${kind}`, {
             source: {
@@ -612,9 +600,20 @@ export function FaTbJePage() {
           ...current,
           [item.kind]: item.inspected,
         }));
+        // 历史恢复后重新识别同一文件：存档映射顶回建议映射（逐侧一次性
+        // 消费，换文件照旧用建议值）。
+        const stash = restoredTbjeMappings.current[item.kind];
+        const samePath = (a: string, b: string) =>
+          a.trim().toLowerCase() === b.trim().toLowerCase();
+        const mapping =
+          stash && samePath(stash.path, item.path)
+            ? stash.mapping
+            : (item.inspected.suggestedMapping ?? {});
+        if (stash && samePath(stash.path, item.path))
+          restoredTbjeMappings.current[item.kind] = undefined;
         setMappings((current) => ({
           ...current,
-          [item.kind]: item.inspected.suggestedMapping,
+          [item.kind]: mapping,
         }));
         reviews.clearReview(item.kind);
         if (item.kind === "je") {
@@ -628,7 +627,7 @@ export function FaTbJePage() {
       }
       setSourceStatus(
         recognized.length
-          ? `${recognized.length} 个文件完成公共账表引擎识别与${llmFallbacks ? "可用时的" : ""} LLM 复核：${recognized
+          ? `${recognized.length} 个来源完成公共账表引擎识别与${scan.llmFallbacks ? "可用时的" : ""} LLM 复核${scan.hiddenSheets ? `，${scan.hiddenSheets} 张低置信度 Sheet 已忽略` : ""}：${recognized
               .map(
                 ({ kind, path }) =>
                   `${kind.toUpperCase()}「${fileName(path)}」`,
@@ -651,6 +650,56 @@ export function FaTbJePage() {
     setResult(undefined);
     setSourceStatus(`${kind.toUpperCase()} 已清除，请重新上传。`);
     setStep(1);
+  }
+
+  async function changeSourceKind(from: Kind, to: Kind) {
+    const current = inspects[from];
+    const occupied = inspects[to];
+    if (!paths[from] || !current) return;
+    setBusy(true);
+    setError("");
+    try {
+      const changed = await correctLedgerSourceKinds(
+        from,
+        to,
+        { path: paths[from], inspection: current },
+        paths[to] && occupied
+          ? { path: paths[to], inspection: occupied }
+          : undefined,
+        async (kind, source) =>
+          (await engineCall(`deposit.inspect_${kind}`, {
+            source: {
+              inputPath: source.path,
+              sheet: source.inspection.sheet,
+              headerRow: source.inspection.headerRow,
+              headerDepth: source.inspection.headerDepth,
+            },
+          })) as Inspection,
+      );
+      setPaths({ tb: "", je: "" });
+      setInspects({});
+      setMappings({ tb: {}, je: {} });
+      for (const item of changed) {
+        setPaths((value) => ({ ...value, [item.kind]: item.path }));
+        setInspects((value) => ({ ...value, [item.kind]: item.inspection }));
+        setMappings((value) => ({
+          ...value,
+          [item.kind]: item.inspection.suggestedMapping ?? {},
+        }));
+      }
+      setAssignments([]);
+      setAccountsReviewed(false);
+      setResult(undefined);
+      setSourceStatus(
+        changed.length > 1
+          ? "JE 与 TB 来源已交换，并按新类型重新识别。"
+          : `${fileName(paths[from])} 已更正为 ${to.toUpperCase()}。`,
+      );
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function reinspect(
@@ -882,6 +931,9 @@ export function FaTbJePage() {
                       inspection={inspects[kind]!}
                       disabled={busy}
                       onClear={() => clearSource(kind)}
+                      onKindChange={() =>
+                        void changeSourceKind(kind, kind === "tb" ? "je" : "tb")
+                      }
                       onHeaderChange={(over) => void reinspect(kind, over)}
                     />
                   ) : (
@@ -1486,6 +1538,7 @@ function FaLedgerSourceCard(props: {
   inspection: Inspection;
   disabled: boolean;
   onClear: () => void;
+  onKindChange: () => void;
   onHeaderChange: (
     over: Partial<Pick<Inspection, "sheet" | "headerRow" | "headerDepth">>,
   ) => void;
@@ -1512,6 +1565,13 @@ function FaLedgerSourceCard(props: {
             onClick={props.onClear}
           >
             移除
+          </button>
+          <button
+            type="button"
+            disabled={props.disabled}
+            onClick={props.onKindChange}
+          >
+            更正为 {kind === "tb" ? "JE" : "TB"}
           </button>
         </div>
         <div className="fx-source-meta">

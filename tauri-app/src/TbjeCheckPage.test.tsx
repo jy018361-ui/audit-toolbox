@@ -11,6 +11,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TbjeCheckPage } from "./TbjeCheckPage";
+import { pairingFileKey } from "./tbjePairing";
 import { ConfirmDialogHost } from "./components/ConfirmDialog";
 import type { ToolManifest } from "./types";
 
@@ -547,11 +548,11 @@ describe("TbjeCheckPage", () => {
     // 第 1 组仍保持「不配对」，5 号序时账也没被强行塞回去。
     expect(screen.getByLabelText("为第 1 组选择序时账")).toHaveValue("");
     expect(screen.getByLabelText("为第 5 组选择序时账")).toHaveValue(
-      "C:/samples/05JE.xlsx",
+      pairingFileKey({ path: "C:/samples/05JE.xlsx", sheet: "Sheet1" }),
     );
     // 新加的 2 号文件自动配成新组，二次添加仍具备跨批次配对能力。
     expect(screen.getByLabelText("为第 2 组选择序时账")).toHaveValue(
-      "C:/samples/02JE.xlsx",
+      pairingFileKey({ path: "C:/samples/02JE.xlsx", sheet: "Sheet1" }),
     );
     expect(
       screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
@@ -621,7 +622,7 @@ describe("TbjeCheckPage", () => {
     ]);
     expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1);
     expect(screen.getByLabelText("为第 1 组选择序时账")).toHaveValue(
-      "C:/samples/01JE.xlsx",
+      pairingFileKey({ path: "C:/samples/01JE.xlsx", sheet: "Sheet1" }),
     );
   });
 });

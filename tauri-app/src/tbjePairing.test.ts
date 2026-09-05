@@ -3,6 +3,7 @@ import {
   leadingNumber,
   pairLedgerFiles,
   periodTag,
+  pairingFileKey,
   reassignJe,
   type PairingFile,
 } from "./tbjePairing";
@@ -60,6 +61,24 @@ describe("文件名里的编号与期间", () => {
 });
 
 describe("批量配对", () => {
+  it("同一工作簿的 TB/JE Sheet 优先于文件名匹配", () => {
+    const workbook = "C:/x/01账套.xlsx";
+    const groups = pairLedgerFiles([
+      { path: workbook, sheet: "TB", kind: "tb" },
+      { path: workbook, sheet: "JE", kind: "je" },
+      { path: "C:/x/01序时账.xlsx", sheet: "明细", kind: "je" },
+    ]);
+    const paired = groups.find((group) => group.tb?.path === workbook)!;
+    expect(paired.je).toMatchObject({ path: workbook, sheet: "JE" });
+    expect(paired.reasons).toContain("同一工作簿");
+  });
+
+  it("同一路径的不同 Sheet 拥有不同来源标识", () => {
+    expect(pairingFileKey({ path: "C:/x/账套.xlsx", sheet: "TB" })).not.toBe(
+      pairingFileKey({ path: "C:/x/账套.xlsx", sheet: "JE" }),
+    );
+  });
+
   it("十套真实文件名全部配对成功，一份不剩", () => {
     const groups = pairLedgerFiles(样例文件());
     // 06 套一年拆两段，应当配成两组 —— 一共 11 组。

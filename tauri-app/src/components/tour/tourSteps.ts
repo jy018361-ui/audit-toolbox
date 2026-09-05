@@ -1,9 +1,10 @@
 import type { ToolManifest } from "../../types";
 import type { TourStep } from "./BeginnerTour";
+import { TOOL_TOUR_SCRIPTS } from "./toolTourContent";
 
 /**
  * 引导剧本。目标元素统一用 data-tour 属性挂点（App.tsx 侧边栏 / 工作台、
- * PageHeader、StepIndicator），避免依赖会被重构的样式类名。
+ * PageHeader、StepIndicator、FileDropInput 等），避免依赖会被重构的样式类名。
  */
 
 /** 工作台总览导览：首次启动自动播放，也可随时重播。全程停在工作台一页。 */
@@ -51,14 +52,20 @@ export const workspaceTourSteps: TourStep[] = [
     body: "界面主题、AI 与 OCR 配置、本地缓存清理都在这里；本引导也能在「设置 → 新手模式」里重新播放。",
   },
   {
+    id: "newbie-toggle",
+    targetSelector: '[data-tour="newbie-toggle"]',
+    title: "新手模式",
+    body: "侧边栏最底下的这个小开关管着全部分步引导：开启时，首次使用工具会有动画提示；不需要时随手关掉，重启后也保持你的选择。",
+  },
+  {
     id: "done",
     title: "引导完成，开工！",
     body: "回到工作台挑一个工具试试吧。使用中有任何疑问，「历史记录」和「设置」永远是你的后盾。",
   },
 ];
 
-/** 工具通用上手引导：第一次进入某个工具时自动播放。 */
-export function buildToolTourSteps(tool: ToolManifest): TourStep[] {
+/** 工具通用上手引导：没有任何针对性剧本时的兜底（新工具接入前的过渡）。 */
+function genericToolTourSteps(tool: ToolManifest): TourStep[] {
   return [
     {
       id: "tool-welcome",
@@ -76,7 +83,7 @@ export function buildToolTourSteps(tool: ToolManifest): TourStep[] {
       targetSelector: '[data-tour="step-indicator"]',
       optional: true,
       title: "步骤条",
-      body: "操作从左到右分步进行：当前步骤高亮，完成过的步骤会打勾。点击可用的步骤，可以在已完成环节之间来回切换。",
+      body: "操作从左到右分步进行：当前步骤高亮，完成过的步骤会打勾。之后每切换一步，步骤条下方都会弹出这一步的提示；点击可用的步骤也可以在已完成环节之间来回切换。",
     },
     {
       id: "tool-done",
@@ -84,4 +91,45 @@ export function buildToolTourSteps(tool: ToolManifest): TourStep[] {
       body: "从第一步开始操作吧。想再看一次引导，到「设置 → 新手模式」重播即可。",
     },
   ];
+}
+
+/**
+ * 工具进页导览：优先用 toolTourContent.ts 里逐工具编写的针对性剧本
+ * （讲清楚用途、要传什么文件、流程、产出），没有剧本的工具回落到通用模板。
+ */
+export function buildToolTourSteps(tool: ToolManifest): TourStep[] {
+  const script = TOOL_TOUR_SCRIPTS[tool.id];
+  if (!script) return genericToolTourSteps(tool);
+  const steps: TourStep[] = [
+    {
+      id: "purpose",
+      title: `「${tool.name}」是做什么的`,
+      body: script.purpose,
+    },
+  ];
+  if (script.prepareTargeted) {
+    steps.push({
+      id: "prepare",
+      targetSelector: '[data-tour="tool-upload"]',
+      title: "要准备什么",
+      body: script.prepare,
+    });
+  } else {
+    steps.push({ id: "prepare", title: "要准备什么", body: script.prepare });
+  }
+  if (script.flow) {
+    steps.push({
+      id: "flow",
+      targetSelector: '[data-tour="step-indicator"]',
+      optional: true,
+      title: "操作流程",
+      body: script.flow,
+    });
+  }
+  steps.push({
+    id: "result",
+    title: "做完你会得到什么",
+    body: script.result,
+  });
+  return steps;
 }

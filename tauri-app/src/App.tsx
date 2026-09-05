@@ -30,10 +30,12 @@ import {
   toolCatalog,
   updateReleaseNotes,
 } from "./api";
-import { publishTaskRestore } from "./restore";
+import { historyRowCanResume, publishTaskRestore } from "./restore";
 import type { ReleaseNotes } from "./updateNotes";
 import { Button } from "@/components/ui/button";
 import { errorText } from "@/lib/errors";
+import { useCountUp } from "./lib/useCountUp";
+import { SwitchInput } from "@/components/SwitchInput";
 import {
   TOOL_DEFINITIONS,
   type ActionDefinition,
@@ -67,6 +69,8 @@ import {
   loadTourState,
   saveTourState,
 } from "@/components/tour/tourState";
+import { ToolTourProvider } from "@/components/tour/ToolTourContext";
+import { NewbieModeToggle } from "@/components/tour/NewbieModeToggle";
 import { Sparkles } from "lucide-react";
 import { applyReadableForegrounds } from "./theme";
 import { getVersion } from "@tauri-apps/api/app";
@@ -364,11 +368,15 @@ export default function App() {
       ? catalog.find((tool) => tool.id === tour.toolId)
       : undefined;
   const finishTour = () => {
-    if (tour?.kind === "workspace") saveTourState({ workspaceDone: true });
-    if (tour?.kind === "tool") {
-      saveTourState({
-        toolDone: { ...loadTourState().toolDone, [tour.toolId]: true },
-      });
+    // 「看过」只在桌面端持久化：浏览器预览是开发/体验入口，
+    // 每次进工具都重播导览，方便逐个检查剧本内容。
+    if (isTauriRuntime()) {
+      if (tour?.kind === "workspace") saveTourState({ workspaceDone: true });
+      if (tour?.kind === "tool") {
+        saveTourState({
+          toolDone: { ...loadTourState().toolDone, [tour.toolId]: true },
+        });
+      }
     }
     setTour(null);
   };
@@ -417,7 +425,8 @@ export default function App() {
   // 每次清缓存都会弹，打扰大于帮助；桌面用户只会在真正首次使用时遇到一次。
   useEffect(() => {
     if (!startupReady || !isTauriRuntime()) return;
-    if (loadTourState().workspaceDone) return;
+    const state = loadTourState();
+    if (state.newbieMode === false || state.workspaceDone) return;
     // 等首屏渲染完再弹，避免引导和启动画面抢注意力。
     const timer = setTimeout(
       () => setTour((current) => current ?? { kind: "workspace" }),
@@ -425,11 +434,11 @@ export default function App() {
     );
     return () => clearTimeout(timer);
   }, [startupReady]);
-  // 第一次进入某个工具时自动播放该工具的上手引导；看过或关掉开关就不再弹。
+  // 第一次进入某个工具时自动播放该工具的上手引导；总开关关掉或看过就不再弹。
   useEffect(() => {
     if (!startupReady || !activeToolId || tour) return;
     const state = loadTourState();
-    if (state.autoToolTours === false) return;
+    if (state.newbieMode === false) return;
     if (state.toolDone?.[activeToolId]) return;
     if (!catalog.some((tool) => tool.id === activeToolId)) return;
     // 延迟触发给懒加载页面留出首绘时间；引擎内部还会轮询等待目标元素。
@@ -629,6 +638,8 @@ export default function App() {
               );
             })}
           </div>
+          {/* 新手模式总开关：与导航行同款的一行小设置，常驻侧边栏底部。 */}
+          <NewbieModeToggle />
           <div className="sidebar-footer">
             {import.meta.env.DEV && (
               <span
@@ -736,7 +747,9 @@ export default function App() {
                   )
                   .map((job) => job.toolId)}
                 renderPage={(toolId) => (
-                  <ToolPage catalog={catalog} toolId={toolId} />
+                  <ToolTourProvider toolId={toolId}>
+                    <ToolPage catalog={catalog} toolId={toolId} />
+                  </ToolTourProvider>
                 )}
               />
             </>
@@ -1095,8 +1108,14 @@ function ToolPage({
           )}
           {result ? (
             <ResultView value={result} />
+          ) : busy ? (
+            <div className="skeleton-rows" role="status" aria-label="任务处理中">
+              <i />
+              <i />
+              <i />
+            </div>
           ) : (
-            <EmptyState title={busy ? "任务处理中" : "尚未生成结果"} description="先检查输入，再启动任务。离开页面后任务仍在后台运行，可回到工具页查看进度。" />
+            <EmptyState title="尚未生成结果" description="先检查输入，再启动任务。离开页面后任务仍在后台运行，可回到工具页查看进度。" />
           )}
         </section>
       </div>
@@ -1137,10 +1156,9 @@ function Field({
           ))}
         </select>
       ) : field.kind === "boolean" ? (
-        <input
-          type="checkbox"
+        <SwitchInput
           checked={Boolean(value)}
-          onChange={(e) => onChange(e.target.checked)}
+          onChange={onChange}
         />
       ) : (
         <div className="input-with-button">
@@ -1268,8 +1286,11 @@ function History({ catalog }: { catalog: ToolManifest[] }) {
                 const outputCount = Array.isArray(row.outputPaths)
                   ? row.outputPaths.length
                   : 0;
-                const hasParams =
-                  row.params && Object.keys(row.params).length > 0;
+                // 读取/筛选这类子步骤的存档只有部分配置，不给恢复按钮。
+                const canResume = historyRowCanResume({
+                  method: row.method,
+                  params: row.params,
+                });
                 const restoring = restoringJobId === row.jobId;
                 return (
                   <article className="task-row" key={String(row.jobId ?? index)}>
@@ -1289,7 +1310,7 @@ function History({ catalog }: { catalog: ToolManifest[] }) {
                           ? `输出 ${outputCount} 个文件`
                           : "无输出文件"}
                       </span>
-                      {hasParams && (
+                      {canResume && (
                         <Button
                           variant="secondary"
                           disabled={restoringJobId !== ""}
@@ -1368,7 +1389,6 @@ export function Settings({
   onAvailableUpdateChange: (update: Update | null) => void;
   onReplayWorkspaceTour: () => void;
 }) {
-  const [section, setSection] = useState(0);
   const [saving, setSaving] = useState(false);
   const [saveFailed, setSaveFailed] = useState(false);
   const [form, setForm] = useState({
@@ -1383,14 +1403,8 @@ export function Settings({
     ocrEngine: "ai",
     ocrApiKey: "",
     ocrSecret: "",
-    telemetryEnabled: true,
-    telemetryUrl: "",
   });
   const [message, setMessage] = useState("");
-  // 新手模式偏好与主题一样存 localStorage，改动立即生效，不进后端保存流程。
-  const [newbieAutoToolTours, setNewbieAutoToolTours] = useState(
-    () => loadTourState().autoToolTours !== false,
-  );
   const [testingLlm, setTestingLlm] = useState(false);
   const [llmTestResult, setLlmTestResult] = useState<{
     ok: boolean;
@@ -1580,7 +1594,6 @@ export function Settings({
       .then((value) => {
         const llm = (value.llm ?? {}) as Record<string, unknown>;
         const ocr = (value.ocr ?? {}) as Record<string, unknown>;
-        const telemetry = (value.telemetry ?? {}) as Record<string, unknown>;
         setForm((x) => {
           const next = {
             ...x,
@@ -1592,8 +1605,6 @@ export function Settings({
             timeout: String(llm.timeout ?? x.timeout),
             thinkingEnabled: Boolean(llm.thinking_enabled),
             ocrEngine: String(ocr.engine ?? x.ocrEngine),
-            telemetryEnabled: telemetry.enabled !== false,
-            telemetryUrl: String(telemetry.server_url ?? ""),
           };
           const cache = (value.cache ?? {}) as Record<string, unknown>;
           const mode = String(cache.cleanup ?? "weekly");
@@ -1713,10 +1724,6 @@ export function Settings({
         },
         ocr: { engine: form.ocrEngine },
         cache: { cleanup: cacheMode },
-        telemetry: {
-          enabled: form.telemetryEnabled,
-          server_url: form.telemetryUrl.trim(),
-        },
       });
       if (form.apiKey)
         await secretSet(
@@ -1968,17 +1975,9 @@ export function Settings({
           </div>
         </section>
       )}
-      <StepIndicator
-        steps={[
-          { key: "api", label: "API 配置" },
-          { key: "basic", label: "基本设置" },
-        ]}
-        current={section}
-        onStepClick={setSection}
-        showCompleted={false}
-      />
-      <div className="settings-panels">
-        <div hidden={section !== 0} className="settings-group">
+      {/* 单页双栏：左栏放要填写的（LLM / OCR），右栏放要选择的（主题、新手模式、缓存）；窄窗口自动落回单栏 */}
+      <div className="settings-columns">
+        <div className="settings-col">
           <section className="list-card">
             <h2>统一 LLM 配置</h2>
             <p className="settings-note">
@@ -1987,10 +1986,9 @@ export function Settings({
             <div className="form-grid">
               <label className="field settings-toggle">
                 <span>启用 LLM</span>
-                <input
-                  type="checkbox"
+                <SwitchInput
                   checked={form.enabled}
-                  onChange={(e) => set("enabled", e.target.checked)}
+                  onChange={(c) => set("enabled", c)}
                 />
               </label>
               <label className="field">
@@ -2051,10 +2049,9 @@ export function Settings({
                 </label>
                 <label className="field settings-toggle">
                   <span>思考模式</span>
-                  <input
-                    type="checkbox"
+                  <SwitchInput
                     checked={form.thinkingEnabled}
-                    onChange={(e) => set("thinkingEnabled", e.target.checked)}
+                    onChange={(c) => set("thinkingEnabled", c)}
                   />
                 </label>
               </div>
@@ -2131,7 +2128,7 @@ export function Settings({
             )}
           </section>
         </div>
-        <div hidden={section !== 1} className="settings-group">
+        <div className="settings-col">
           <section className="list-card">
             <h2>界面主题</h2>
             <p className="settings-note">
@@ -2205,58 +2202,16 @@ export function Settings({
           <section className="list-card">
             <h2>新手模式</h2>
             <p>
-              用带动画的分步提示带你认识界面：首次打开软件会自动播放工作台导览，
+              用带动画的分步提示认识界面：首次打开软件会自动播放工作台导览，
               第一次使用某个工具时会播放该工具的简要上手说明，都可以随时跳过。
+              总开关在左侧栏最底部，默认开启，重启后保持你的选择。
             </p>
-            <div className="form-grid">
-              <label className="field settings-toggle">
-                <span>第一次使用新工具时自动播放引导</span>
-                <input
-                  type="checkbox"
-                  checked={newbieAutoToolTours}
-                  onChange={(e) => {
-                    setNewbieAutoToolTours(e.target.checked);
-                    saveTourState({ autoToolTours: e.target.checked });
-                  }}
-                />
-              </label>
-            </div>
             <div className="newbie-replay-row">
               <Button variant="outline" size="sm" onClick={onReplayWorkspaceTour}>
                 <Sparkles aria-hidden="true" />
                 重播工作台引导
               </Button>
-              <small>以上选择立即生效，无需点击保存配置。</small>
-            </div>
-          </section>
-          <section className="list-card">
-            <h2>使用统计</h2>
-            <DataHandlingNotice
-              mode="telemetry"
-              title="发送哪些使用信息"
-              description="启用后记录软件启动与退出、工具打开、任务结果和耗时，以及安装标识、电脑名、系统用户名、系统版本和应用版本。"
-              details="不记录文件路径、表格内容或客户数据。事件会先进入本机队列，再发送到配置的部门统计服务器；关闭后将清空未发送队列。"
-            />
-            <div className="form-grid">
-              <label className="field settings-toggle">
-                <span>启用使用统计</span>
-                <input
-                  type="checkbox"
-                  checked={form.telemetryEnabled}
-                  onChange={(e) => set("telemetryEnabled", e.target.checked)}
-                />
-              </label>
-              <label className="field">
-                <span>统计服务器地址</span>
-                <input
-                  value={form.telemetryUrl}
-                  onChange={(e) => set("telemetryUrl", e.target.value)}
-                  placeholder="例如 http://192.168.1.10:8787"
-                />
-                <small>
-                  留空时事件只保存在本机队列；填好后，未发出的记录会连同新记录一起补发。
-                </small>
-              </label>
+              <small>总开关关闭时，也能从这里手动重播。</small>
             </div>
           </section>
           <section className="list-card">
@@ -2288,12 +2243,9 @@ export function Settings({
             <label className="field checkbox-field">
               <span>清理范围</span>
               <span>
-                <input
-                  type="checkbox"
+                <SwitchInput
                   checked={clearHistoryWithCache}
-                  onChange={(event) =>
-                    setClearHistoryWithCache(event.target.checked)
-                  }
+                  onChange={setClearHistoryWithCache}
                 />{" "}
                 同时清除历史记录
               </span>
@@ -2410,22 +2362,20 @@ export function Settings({
           {message}
         </div>
       )}
-      {(section === 0 || section === 1) && (
-        <div className={`settings-save-bar${dirty ? " is-dirty" : ""}`}>
-          <span>
-            {dirty
-              ? "有未保存的配置修改；测试连接不会自动保存。"
-              : "配置会保存到本机；界面主题在选择后立即生效。"}
-          </span>
-          <button
-            className="primary"
-            disabled={!dirty || saving || testingLlm}
-            onClick={() => void save()}
-          >
-            {saving ? "保存中…" : "保存配置"}
-          </button>
-        </div>
-      )}
+      <div className={`settings-save-bar${dirty ? " is-dirty" : ""}`}>
+        <span>
+          {dirty
+            ? "有未保存的配置修改；测试连接不会自动保存。"
+            : "配置会保存到本机；界面主题在选择后立即生效。"}
+        </span>
+        <button
+          className="primary"
+          disabled={!dirty || saving || testingLlm}
+          onClick={() => void save()}
+        >
+          {saving ? "保存中…" : "保存配置"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -2449,10 +2399,13 @@ function Metric({
   value: string;
   detail?: string;
 }) {
+  // 纯数字才滚动；带文字的值（如"3 项"）保持原样
+  const numeric = /^\d+$/.test(value) ? Number(value) : null;
+  const rolled = useCountUp(numeric ?? 0);
   return (
     <div className="metric">
       <span>{label}</span>
-      <strong>{value}</strong>
+      <strong>{numeric === null ? value : rolled}</strong>
       {detail ? <small>{detail}</small> : null}
     </div>
   );

@@ -189,8 +189,18 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     sessionStorage.setItem(CACHE, JSON.stringify(draft));
   }, [draft]);
 
+  // 历史恢复的映射/筛选暂存：读取完成（applyInspect）默认套用建议映射并
+  // 清空列筛选，会把恢复成果冲掉；同一文件+Sheet 的读取完成后改用存档值
+  // 顶回，一次性生效，且不再自动送 LLM 复核——那份映射用户确认过。
+  const restoredDraftRef = useRef<{
+    key: string;
+    mapping: JeMarkDraft["mapping"];
+    columnFilters: JeMarkDraft["columnFilters"];
+  } | null>(null);
+  const inspectKeyRef = useRef("");
   // 历史记录「继续任务」：用存档参数重建草稿（含映射/批次/筛选，可直接导出），
   // 不自动重新读取——预览与列值等派生状态等用户点「读取文件」再补。
+  // 没有字段映射的存档（读取子步骤）不恢复，免得把现场覆盖成半成品。
   useTaskRestore(tool.id, (restore) => {
     const p = restore.params as {
       inputPath?: string;
@@ -203,23 +213,34 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       outputPath?: string;
     };
     if (typeof p.inputPath !== "string" || !p.inputPath) return;
+    const mapping =
+      p.mapping && typeof p.mapping === "object" && Object.keys(p.mapping).length
+        ? p.mapping
+        : undefined;
+    if (!mapping) return;
+    const sheet = p.sheet ?? "";
+    const columnFilters =
+      p.columnFilters && typeof p.columnFilters === "object"
+        ? p.columnFilters
+        : {};
+    restoredDraftRef.current = {
+      key: `${p.inputPath}|${sheet.trim()}`,
+      mapping,
+      columnFilters,
+    };
     llmGeneration.current += 1;
     setDraft({
       ...EMPTY,
       inputPath: p.inputPath,
-      sheet: p.sheet ?? "",
+      sheet,
       headerRow: p.headerRow ?? 1,
-      mapping:
-        p.mapping && typeof p.mapping === "object" ? p.mapping : EMPTY_MAPPING,
+      mapping,
       batches:
         Array.isArray(p.targetBatches) && p.targetBatches.length
           ? p.targetBatches
           : [newBatch(0)],
       activeBatch: 0,
-      columnFilters:
-        p.columnFilters && typeof p.columnFilters === "object"
-          ? p.columnFilters
-          : {},
+      columnFilters,
       outputPath: p.outputPath ?? "",
       outputTouched: Boolean(p.outputPath),
       signChoice:
@@ -336,6 +357,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     }
     setBusy(true);
     setError("");
+    inspectKeyRef.current = `${draft.inputPath}|${(draft.sheet || "").trim()}`;
     try {
       await jobStart("kanzhang.mark_inspect", {
         inputPath: draft.inputPath,
@@ -349,19 +371,30 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   }
 
   function applyInspect(value: Inspect) {
+    // 历史恢复后用户重新读取同一文件+Sheet：用存档映射与列筛选顶回建议
+    // 值，批次也不按"科目口径变化"清空——恢复的批次与映射本来配套。
+    const restored = restoredDraftRef.current;
+    const match =
+      restored && restored.key === inspectKeyRef.current ? restored : null;
+    if (match) restoredDraftRef.current = null;
     const suggested = value.suggestedMapping ?? EMPTY_MAPPING;
+    const effective = match ? match.mapping : suggested;
     setValueCache({});
     setDraft((current) => ({
       ...current,
       inspect: value,
       knownSheets: value.sheets ?? current.knownSheets,
       sheet: value.selectedSheet ?? current.sheet,
-      mapping: suggested,
-      batches: clearAccountsOnMappingChange(current.batches),
-      columnFilters: {},
+      mapping: effective,
+      batches: match
+        ? current.batches
+        : clearAccountsOnMappingChange(current.batches),
+      columnFilters: match ? match.columnFilters : {},
     }));
     setResult(undefined);
     // 脚本自动映射一出来就直接送 LLM 复核，不再要求用户额外点一次按钮。
+    // 恢复的映射已经用户确认过，跳过复核。
+    if (match) return;
     void reviewMapping(suggested, value);
   }
 

@@ -212,6 +212,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
             <button
               type="button"
               className="drop-zone"
+              data-tour="tool-upload"
               disabled={busy}
               onClick={() => void chooseFiles()}
             >

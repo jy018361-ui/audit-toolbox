@@ -20,11 +20,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   DEFAULT_ENTITY,
+  correctLedgerSourceKinds,
   missingGoldIdentity,
-  resolveLedgerPairKinds,
   resolveRoleLabels,
-  reviewLedgerSourceClassification,
+  scanLedgerUploadSources,
+  selectLedgerSourcePair,
   type EngineRoleLabels,
+  type LedgerWorkbookSheetClassification,
 } from "@/ledgerMapping";
 import {
   describeForm,
@@ -167,17 +169,8 @@ const CURRENCY_OPTIONS = [
   "NZD",
 ];
 
-type SourceClassification = {
-  kind: "je" | "tb";
-  confidence: number;
-  needsLlm: boolean;
-  scores: { je: number; tb: number };
+type SourceClassification = LedgerWorkbookSheetClassification & {
   reasons: string[];
-  headers: string[];
-  preview: string[][];
-  sheet: string;
-  headerRow: number;
-  headerDepth: number;
 };
 type VoucherClassification =
   "已实现汇兑损益" | "未实现汇兑损益" | "不构成汇兑事项";
@@ -878,6 +871,19 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   // 等识别信息以存档参数重建最小 Inspection，不点「重新识别」也能直接测算；
   // 主体/科目清单也按存档键重建，并把角色与币种标记为已手选，避免上面的
   // 预填副作用把恢复值改写掉。
+  // restoredFxRef：用户重新识别**同一文件**时，applyInspection 默认套用建议
+  // 映射并清空角色/币种覆盖——这里把存档值顶回，逐侧一次性消费；换文件
+  // 不顶回。
+  const restoredFxRef = useRef<{
+    sides: {
+      je?: { path: string; mapping: Record<string, string | string[]> };
+      tb?: { path: string; mapping: Record<string, string | string[]> };
+    };
+    manualClassifications?: Record<string, VoucherClassification>;
+    accountRoles?: Record<string, string>;
+    entityCurrencies?: Record<string, string>;
+    accountCurrencies?: Record<string, string>;
+  } | null>(null);
   useTaskRestore(tool.id, (restore) => {
     type FxSourceParams = {
       inputPath?: string;
@@ -921,6 +927,28 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
         headerDepth: src?.headerDepth ?? 0,
         ...(withLists ? { entities: entityList, accounts: accountList } : {}),
       }) as Inspection;
+    const isMapping = (value: unknown): value is Record<string, string | string[]> =>
+      Boolean(value && typeof value === "object");
+    restoredFxRef.current = {
+      sides: {
+        ...(restoredJePath && isMapping(p.jeMapping)
+          ? { je: { path: restoredJePath, mapping: p.jeMapping } }
+          : {}),
+        ...(restoredTbPath && isMapping(p.tbMapping)
+          ? { tb: { path: restoredTbPath, mapping: p.tbMapping } }
+          : {}),
+      },
+      ...(isMapping(p.manualClassifications)
+        ? { manualClassifications: p.manualClassifications }
+        : {}),
+      ...(isMapping(p.accountRoles) ? { accountRoles: p.accountRoles } : {}),
+      ...(isMapping(p.entityCurrencies)
+        ? { entityCurrencies: p.entityCurrencies }
+        : {}),
+      ...(isMapping(p.accountCurrencies)
+        ? { accountCurrencies: p.accountCurrencies }
+        : {}),
+    };
     setJePath(restoredJePath);
     setTbPath(restoredTbPath);
     setJe(restoredJePath ? minimalInspection(p.jeSource, !restoredTbPath) : undefined);
@@ -1063,44 +1091,24 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     setError("");
     setSourceStatus("正在识别文件类型、表头和字段…");
     const failures: string[] = [];
-    let llmFallbacks = 0;
     try {
-      const classifiedFiles: Array<{
-        path: string;
-        classification: SourceClassification;
-      }> = [];
-      for (const path of files) {
-        try {
-          const scripted = (await engineCall("fx.classify_source", {
-            source: {
-              inputPath: path,
-              sheet: "",
-              headerRow: 0,
-              headerDepth: 0,
-            },
-          })) as SourceClassification;
-          const reviewed = await reviewLedgerSourceClassification(
-            engineCall,
-            "fx.classify_source_llm",
-            path,
-            scripted,
-          );
-          if (!reviewed.reviewed) llmFallbacks += 1;
-          classifiedFiles.push({
-            path,
-            classification: reviewed.classification,
-          });
-        } catch (e) {
-          failures.push(`${fileName(path)}：${errorText(e)}`);
-        }
-      }
-      const resolvedKinds = resolveLedgerPairKinds(
-        classifiedFiles.map((item) => item.classification),
+      const scan = await scanLedgerUploadSources<SourceClassification>(
+        engineCall,
+        files,
+        {
+          classificationMethod: "fx.classify_source",
+          llmMethod: "fx.classify_source_llm",
+        },
       );
-      for (const [index, item] of classifiedFiles.entries()) {
+      failures.push(
+        ...scan.failures.map(
+          (failure) => `${fileName(failure.path)}：${errorText(failure.error)}`,
+        ),
+      );
+      const selectedSources = selectLedgerSourcePair(scan.sources);
+      for (const item of selectedSources) {
         try {
-          const kind = resolvedKinds[index];
-          const response = (await engineCall("fx.inspect_" + kind, {
+          const response = (await engineCall("fx.inspect_" + item.kind, {
             source: {
               inputPath: item.path,
               sheet: item.classification.sheet,
@@ -1108,15 +1116,20 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
               headerDepth: item.classification.headerDepth,
             },
           })) as Inspection;
-          applyInspection(kind, item.path, response);
+          applyInspection(item.kind, item.path, response);
         } catch (e) {
-          failures.push(`${fileName(item.path)}：${errorText(e)}`);
+          failures.push(
+            `${fileName(item.path)} / ${item.classification.sheet}：${errorText(e)}`,
+          );
         }
       }
+      const hiddenText = scan.hiddenSheets
+        ? `；另有 ${scan.hiddenSheets} 张低置信度 Sheet 已忽略`
+        : "";
       setSourceStatus(
-        llmFallbacks
-          ? `${classifiedFiles.length} 个文件已由本机规则识别；智能复核不可用的文件已保留识别结果。`
-          : `${classifiedFiles.length} 个文件已完成本机识别与智能复核。`,
+        scan.llmFallbacks
+          ? `${selectedSources.length} 个账表来源已由本机规则识别${hiddenText}；智能复核不可用的来源已保留识别结果。`
+          : `${selectedSources.length} 个账表来源已完成本机识别与智能复核${hiddenText}。`,
       );
       if (failures.length) setError(failures.join("；"));
     } finally {
@@ -1128,24 +1141,55 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     path: string,
     response: Inspection,
   ) {
+    // 历史恢复后重新识别同一文件：用存档映射与各口径覆盖顶回建议值，
+    // 逐侧一次性消费；换文件照旧用建议值。
+    const stash = restoredFxRef.current;
+    const side = stash?.sides[kind];
+    const samePath = (a: string, b: string) =>
+      a.trim().toLowerCase() === b.trim().toLowerCase();
+    const match = side && samePath(side.path, path) ? side : undefined;
+    if (match && stash) {
+      delete stash.sides[kind];
+      if (!stash.sides.je && !stash.sides.tb) restoredFxRef.current = null;
+    }
     if (response.suggestedBalanceSheetDate)
       setReportEnd(response.suggestedBalanceSheetDate);
     else if (response.dataYears?.length === 1)
       setReportEnd(`${response.dataYears[0]}-12-31`);
     reviews.clearReview(kind);
-    setAccountRoles({});
-    setAccountRolesTouched({});
+    if (match && stash?.accountRoles) {
+      setAccountRoles(stash.accountRoles);
+      setAccountRolesTouched(
+        Object.fromEntries(
+          Object.keys(stash.accountRoles).map((account) => [account, true]),
+        ),
+      );
+    } else {
+      setAccountRoles({});
+      setAccountRolesTouched({});
+    }
     if (kind === "je") {
-      setManualClassifications({});
+      setManualClassifications(match ? (stash?.manualClassifications ?? {}) : {});
       setClassificationDrafts({});
       setJePath(path);
       setJe(response);
-      setJeMapping(response.suggestedMapping);
+      setJeMapping(match ? match.mapping : (response.suggestedMapping ?? {}));
     } else {
       setTbPath(path);
       setTb(response);
-      setTbMapping(response.suggestedMapping);
+      setTbMapping(match ? match.mapping : (response.suggestedMapping ?? {}));
       setTbCurrencyConfirmed(!response.foreignCurrencyNeedsConfirmation);
+      if (match && stash?.entityCurrencies) {
+        setEntityCurrencies(stash.entityCurrencies);
+        // 标记已手选，真实识别带来的 uniformCurrency 不得再改写恢复值。
+        setCurrencyTouched(
+          Object.fromEntries(
+            Object.keys(stash.entityCurrencies).map((entity) => [entity, true]),
+          ),
+        );
+      }
+      if (match && stash?.accountCurrencies)
+        setAccountCurrencies(stash.accountCurrencies);
     }
   }
   async function inspect(
@@ -1166,6 +1210,58 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
         },
       })) as Inspection;
       applyInspection(kind, kind === "je" ? jePath : tbPath, response);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function changeSourceKind(from: "je" | "tb", to: "je" | "tb") {
+    const path = from === "je" ? jePath : tbPath;
+    const current = from === "je" ? je : tb;
+    const occupiedPath = to === "je" ? jePath : tbPath;
+    const occupied = to === "je" ? je : tb;
+    if (!path || !current || from === to) return;
+    setBusy(true);
+    setError("");
+    setAlignment([]);
+    setResult(undefined);
+    try {
+      const changed = await correctLedgerSourceKinds(
+        from,
+        to,
+        { path, inspection: current },
+        occupiedPath && occupied
+          ? { path: occupiedPath, inspection: occupied }
+          : undefined,
+        async (kind, source) =>
+          (await engineCall("fx.inspect_" + kind, {
+            source: {
+              inputPath: source.path,
+              sheet: source.inspection.sheet,
+              headerRow: source.inspection.headerRow,
+              headerDepth: source.inspection.headerDepth,
+            },
+          })) as Inspection,
+      );
+      reviews.clearReview(from);
+      reviews.clearReview(to);
+      if (from === "je") {
+        setJePath("");
+        setJe(undefined);
+        setJeMapping({});
+      } else {
+        setTbPath("");
+        setTb(undefined);
+        setTbMapping({});
+      }
+      for (const item of changed)
+        applyInspection(item.kind, item.path, item.inspection);
+      setSourceStatus(
+        changed.length > 1
+          ? `JE 与 TB 来源已交换，并按新类型重新识别。`
+          : `${fileName(path)} / ${changed[0].inspection.sheet} 已更正为 ${to.toUpperCase()}。`,
+      );
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -1474,8 +1570,8 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
               <FileDropInput
                 containerRef={uploadDropRef}
                 value={[
-                  jePath && `JE：${fileName(jePath)}`,
-                  tbPath && `TB：${fileName(tbPath)}`,
+                  jePath && `JE：${fileName(jePath)}${je?.sheet ? ` / ${je.sheet}` : ""}`,
+                  tbPath && `TB：${fileName(tbPath)}${tb?.sheet ? ` / ${tb.sheet}` : ""}`,
                 ]
                   .filter(Boolean)
                   .join("；")}
@@ -1541,6 +1637,10 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   onHeaderChange={(headerRow, headerDepth, sheet) =>
                     void inspect("je", { headerRow, headerDepth, sheet })
                   }
+                  onKindChange={
+                    () => void changeSourceKind("je", "tb")
+                  }
+                  kindChangeLabel="更正为 TB"
                 />
               ) : tbPath ? (
                 <Card className="fx-source-empty">
@@ -1570,6 +1670,10 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   onHeaderChange={(headerRow, headerDepth, sheet) =>
                     void inspect("tb", { headerRow, headerDepth, sheet })
                   }
+                  onKindChange={
+                    () => void changeSourceKind("tb", "je")
+                  }
+                  kindChangeLabel="更正为 JE"
                 />
               ) : jePath ? (
                 <Card className="fx-source-empty">
@@ -2101,6 +2205,8 @@ function SourceCard(props: {
   onClear: () => void;
   onInspect: () => void;
   onHeaderChange: (row: number, depth: number, sheet: string) => void;
+  onKindChange?: () => void;
+  kindChangeLabel?: string;
 }) {
   return (
     <Card className="fx-source-card">
@@ -2117,6 +2223,15 @@ function SourceCard(props: {
           >
             移除
           </button>
+          {props.onKindChange && (
+            <button
+              type="button"
+              disabled={props.disabled}
+              onClick={props.onKindChange}
+            >
+              {props.kindChangeLabel ?? "更正类型"}
+            </button>
+          )}
         </div>
         {props.path && !props.inspection && (
           <Button

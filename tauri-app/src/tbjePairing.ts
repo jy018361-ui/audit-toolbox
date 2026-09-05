@@ -18,10 +18,20 @@ export type LedgerKind = "tb" | "je";
 export type PairingFile = {
   /** 文件绝对路径，也是这份文件在配对里的唯一标识。 */
   path: string;
+  /** 同一工作簿里的逻辑来源由 Sheet 区分。文本文件留空。 */
+  sheet?: string;
   kind: LedgerKind;
   /** 识别阶段拿到的主体清单，可能为空。 */
   entities?: string[];
 };
+
+export function pairingFileKey(file: Pick<PairingFile, "path" | "sheet">): string {
+  return file.sheet ? JSON.stringify([file.path, file.sheet]) : file.path;
+}
+
+export function pairingFileLabel(file: Pick<PairingFile, "path" | "sheet">): string {
+  return file.sheet ? `${fileName(file.path)} / ${file.sheet}` : fileName(file.path);
+}
 
 export type PairedGroup = {
   /** 稳定的组标识，改配对时不变。 */
@@ -106,10 +116,38 @@ export function pairLedgerFiles(files: PairingFile[]): PairedGroup[] {
     let matched: PairingFile | undefined;
     const reasons: string[] = [];
 
-    if (number) {
+    // 最高优先级：同一物理工作簿中的 TB / JE Sheet。只有候选唯一，或 Sheet
+    // 名的编号＋期间能唯一对上时才配；多张同类表绝不按出现顺序硬猜。
+    const sameWorkbook = jes.filter(
+      (je) => !usedJe.has(pairingFileKey(je)) && je.path === tb.path,
+    );
+    if (sameWorkbook.length === 1) {
+      matched = sameWorkbook[0];
+      reasons.push("同一工作簿");
+    } else if (sameWorkbook.length > 1) {
+      const tbSheet = tb.sheet ?? "";
+      const sheetNumber = leadingNumber(tbSheet);
+      const sheetPeriod = periodTag(tbSheet);
+      const candidates = sameWorkbook.filter((je) => {
+        const jeSheet = je.sheet ?? "";
+        return (
+          (sheetNumber && leadingNumber(jeSheet) === sheetNumber) ||
+          (sheetPeriod && periodTag(jeSheet) === sheetPeriod)
+        );
+      });
+      if (candidates.length === 1) {
+        matched = candidates[0];
+        reasons.push("同一工作簿", "Sheet 编号或期间一致");
+      }
+    }
+
+    if (!matched && number) {
       // 编号相同的候选里，再按期间挑——06 套一年两段全靠这一步分开。
       const sameNumber = jes.filter(
-        (je) => !usedJe.has(je.path) && leadingNumber(je.path) === number,
+        (je) =>
+          !usedJe.has(pairingFileKey(je)) &&
+          je.path !== tb.path &&
+          leadingNumber(je.path) === number,
       );
       const samePeriod = sameNumber.filter((je) => periodTag(je.path) === period);
       matched = samePeriod[0] ?? (sameNumber.length === 1 ? sameNumber[0] : undefined);
@@ -123,14 +161,16 @@ export function pairLedgerFiles(files: PairingFile[]): PairedGroup[] {
     }
     if (!matched) {
       const byEntity = jes.find(
-        (je) => !usedJe.has(je.path) && sharedEntity(tb.entities, je.entities),
+        (je) =>
+          !usedJe.has(pairingFileKey(je)) &&
+          sharedEntity(tb.entities, je.entities),
       );
       if (byEntity) {
         matched = byEntity;
         reasons.push(`主体 ${sharedEntity(tb.entities, byEntity.entities)}`);
       }
     }
-    if (matched) usedJe.add(matched.path);
+    if (matched) usedJe.add(pairingFileKey(matched));
 
     // 主体两边都识别出来了却对不上，多半配错了，得让用户看一眼。
     const conflict =
@@ -141,7 +181,7 @@ export function pairLedgerFiles(files: PairingFile[]): PairedGroup[] {
     if (conflict) reasons.push("两边主体不同");
 
     groups.push({
-      id: tb.path,
+      id: pairingFileKey(tb),
       label: makeLabel(number ?? stem(tb.path), period),
       tb,
       je: matched,
@@ -152,10 +192,10 @@ export function pairLedgerFiles(files: PairingFile[]): PairedGroup[] {
 
   // 没被认领的序时账也要列出来——用户可能是余额表还没拖进来。
   for (const je of jes) {
-    if (usedJe.has(je.path)) continue;
+    if (usedJe.has(pairingFileKey(je))) continue;
     const number = leadingNumber(je.path);
     groups.push({
-      id: je.path,
+      id: pairingFileKey(je),
       label: makeLabel(number ?? stem(je.path), periodTag(je.path)),
       je,
       reasons: ["没有找到对应的科目余额表"],
@@ -176,17 +216,19 @@ export function pairLedgerFiles(files: PairingFile[]): PairedGroup[] {
 export function reassignJe(
   groups: PairedGroup[],
   groupId: string,
-  jePath: string | undefined,
+  jeSourceId: string | undefined,
 ): PairedGroup[] {
   const target = groups.find((group) => group.id === groupId);
   if (!target) return groups;
-  const incoming = jePath
-    ? groups.find((group) => group.je?.path === jePath)
+  const incoming = jeSourceId
+    ? groups.find(
+        (group) => group.je && pairingFileKey(group.je) === jeSourceId,
+      )
     : undefined;
   const previous = target.je;
   const next = groups.map((group) => {
     if (group.id === groupId) {
-      const je = jePath
+      const je = jeSourceId
         ? (incoming?.je ?? group.je)
         : undefined;
       return {
@@ -208,9 +250,9 @@ export function reassignJe(
   });
   // 「不配对」只解除关系，不能让刚才那份 JE 从页面状态里消失。TB 组清空
   // 后把原 JE 留成待配对组；对调产生的空壳组则直接去掉。
-  if (!jePath && previous && target.tb) {
+  if (!jeSourceId && previous && target.tb) {
     next.push({
-      id: previous.path,
+      id: pairingFileKey(previous),
       label: makeLabel(
         leadingNumber(previous.path) ?? stem(previous.path),
         periodTag(previous.path),

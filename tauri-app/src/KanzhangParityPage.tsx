@@ -17,6 +17,7 @@ import { JobProgress } from "@/components/JobProgress";
 import { LedgerSourceCard } from "@/components/LedgerSourceCard";
 import { LedgerLlmReview } from "@/components/LedgerLlmReview";
 import { LedgerMappingPreview } from "@/components/LedgerMappingPreview";
+import { SwitchInput } from "@/components/SwitchInput";
 import {
   accountColumns,
   activeAmountScheme,
@@ -216,15 +217,24 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const [dragHover,setDragHover]=useState(false);
   useEffect(()=>{if(typeof window==="undefined"||!("__TAURI_INTERNALS__" in window))return;let off:()=>void=()=>{};void getCurrentWebview().onDragDropEvent((event)=>{const p=event.payload;if(p.type==="over"||p.type==="enter"){setDragHover(true);}else if(p.type==="drop"){setDragHover(false);if(p.paths.length)resetSource(p.paths[0]);}else if(p.type==="leave"){setDragHover(false);}}).then((fn)=>{off=fn;});return ()=>off();},[]);
   useEffect(()=>{sessionStorage.setItem(CACHE,JSON.stringify(draft));},[draft]);
+  // 历史恢复的映射/透视暂存：读取完成（applyInspect）默认套用建议映射，
+  // 会把恢复成果冲掉；同一文件+Sheet 的读取完成后改用存档值顶回，一次性
+  // 生效，且不再自动送 LLM 复核——那份映射本来就是用户确认过的。
+  const restoredMappingRef=useRef<{key:string;mapping:Mapping;pivotRows:string[];pivotColumns:string[]}|null>(null);
+  const inspectKeyRef=useRef("");
   // 历史记录「继续任务」：用存档参数重建草稿（含映射与批次，可直接导出），
   // 不自动重新读取——科目列表等派生状态等用户点「读取文件」再补。
+  // 没有字段映射的存档（读取/筛选子步骤）不恢复，免得把现场覆盖成半成品。
   useTaskRestore(tool.id,(restore)=>{
     const p=restore.params as Partial<Pick<KanzhangDraft,"inputPath"|"sheet"|"headerRow"|"mapping"|"batches"|"excludes"|"outputPath"|"markLossTransfer"|"pivotRows"|"pivotColumns"|"pivotValues">>&{targetBatches?:Batch[];excludeAccounts?:string[]};
     if(typeof p.inputPath!=="string"||!p.inputPath)return;
+    const mapping=p.mapping&&typeof p.mapping==="object"&&Object.keys(p.mapping).length?p.mapping:undefined;
+    if(!mapping)return;
     const batches=Array.isArray(p.targetBatches)&&p.targetBatches.length?p.targetBatches:clearKanzhangBatches().batches;
-    const mapping=p.mapping&&typeof p.mapping==="object"?p.mapping:EMPTY_MAPPING;
+    const sheet=p.sheet??"";
+    restoredMappingRef.current={key:`${p.inputPath}|${sheet.trim()}`,mapping,pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[]};
     llmGeneration.current+=1;
-    setDraft({...EMPTY,inputPath:p.inputPath,sheet:p.sheet??"" ,headerRow:p.headerRow??1,mapping,batches,activeBatch:0,excludes:p.excludeAccounts??[],outputPath:p.outputPath??"",outputTouched:Boolean(p.outputPath),markLossTransfer:p.markLossTransfer??true,pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[],pivotValues:p.pivotValues??[]});
+    setDraft({...EMPTY,inputPath:p.inputPath,sheet,headerRow:p.headerRow??1,mapping,batches,activeBatch:0,excludes:p.excludeAccounts??[],outputPath:p.outputPath??"",outputTouched:Boolean(p.outputPath),markLossTransfer:p.markLossTransfer??true,pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[],pivotValues:p.pivotValues??[]});
     setAccounts([]);setAccountCodes([]);setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");setResult(undefined);setJob(undefined);setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setChanges([]);setPending([]);setLlmStatus("");
   });
   // 没手选过保存位置时，输出框跟着凭证文件和 Sheet 走，显示这次会写到哪。
@@ -254,12 +264,22 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const truncated=accountTotal>accounts.length;
   const setMap=(key:keyof Mapping,value:string|string[])=>patch({mapping:setKanzhangMapping(draft.mapping,key,value)});
   async function chooseInput(){const value=await pickPath("file","选择凭证文件",["xlsx","xls","xlsm","csv","txt","parquet"]);if(typeof value==="string")resetSource(value);}
-  async function inspect(){if(!draft.inputPath){setError("请选择凭证文件。");return;}setBusy(true);setError("");try{await jobStart("kanzhang.inspect",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow});return;}catch(e){setError(kanzhangErrorText(e));setBusy(false);}}
+  async function inspect(){if(!draft.inputPath){setError("请选择凭证文件。");return;}setBusy(true);setError("");inspectKeyRef.current=`${draft.inputPath}|${(draft.sheet||"").trim()}`;try{await jobStart("kanzhang.inspect",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow});return;}catch(e){setError(kanzhangErrorText(e));setBusy(false);}}
   // 读取任务回来后套用表结构；改走任务通道是为了让大凭证文件的读取能报进度、能取消。
   // 透视默认只按科目名称分行——旧版就是这个口径。之前把公司也塞进行字段，
   // 同一科目被拆成每家公司一行，210 行的透视表膨胀到 665 行，跟旧版对不上。
-  function applyInspect(value:Inspect){const suggested=value.suggestedMapping??EMPTY.mapping;setAccounts(value.accounts??[]);setAccountCodes(value.accountCodes??[]);setCodePrefix("");setAccountTotal(value.accountCount??(value.accounts??[]).length);setAccountsKey(accountColumns(suggested).join("|"));setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");patch({inspect:value,knownSheets:value.sheets??draft.knownSheets,sheet:value.selectedSheet??draft.sheet,mapping:suggested,pivotRows:accountColumns(suggested),pivotColumns:suggested.date?[suggested.date]:[],step:1});setResult(undefined);
+  function applyInspect(value:Inspect){
+    // 历史恢复后用户重新读取同一文件+Sheet：用存档映射顶回建议映射，
+    // 否则恢复的字段配置一读取就被自动建议冲掉。换文件/换 Sheet 不顶回。
+    const restored=restoredMappingRef.current;
+    const match=restored&&restored.key===inspectKeyRef.current?restored:null;
+    if(match)restoredMappingRef.current=null;
+    const suggested=value.suggestedMapping??EMPTY.mapping;
+    const effective=match?match.mapping:suggested;
+    setAccounts(value.accounts??[]);setAccountCodes(value.accountCodes??[]);setCodePrefix("");setAccountTotal(value.accountCount??(value.accounts??[]).length);setAccountsKey(accountColumns(effective).join("|"));setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");patch({inspect:value,knownSheets:value.sheets??draft.knownSheets,sheet:value.selectedSheet??draft.sheet,mapping:effective,pivotRows:match?match.pivotRows:accountColumns(effective),pivotColumns:match?match.pivotColumns:(effective.date?[effective.date]:[]),step:1});setResult(undefined);
     // 脚本自动映射一出来就直接送 LLM 复核，不再要求用户额外点一次按钮。
+    // 恢复的映射已经用户确认过，跳过复核。
+    if(match)return;
     void reviewMapping(suggested,value);}
   // 进入科目筛选时按用户最终确认的科目映射重载全量科目；inspect 阶段那份是按自动映射截断的。
   const accountMappingKey=accountColumns(draft.mapping).join("|");
@@ -563,7 +583,7 @@ function ShuttleList({zone,values,selected,onSelect,onDragBegin,drag,emptyText}:
     {values.length>shown.length&&<div className="kz-shuttle-more">另有 {values.length-shown.length} 个未显示，请用搜索缩小范围。</div>}
   </div>;
 }
-function Check({label,value,onChange}:{label:string;value:boolean;onChange:(value:boolean)=>void}){return <label><input type="checkbox" checked={value} onChange={e=>onChange(e.target.checked)}/>{label}</label>}
+function Check({label,value,onChange}:{label:string;value:boolean;onChange:(value:boolean)=>void}){return <label><SwitchInput checked={value} onChange={onChange} ariaLabel={label}/>{label}</label>}
 function PresetSummary({summary}:{summary:PresetApplySummary}){const empty=summary.matches.filter(value=>!value.accounts.length);return <div className="kz-hint" role="status"><b>预设已套用：</b>新增 {summary.created} 个、更新 {summary.updated} 个预设批次。{summary.matches.map(value=><span key={value.preset.id}> {value.preset.name.replace("预设｜","")} {value.accounts.length} 个；</span>)}{empty.length>0&&<span>未命中：{empty.map(value=>value.preset.name.replace("预设｜","")).join("、")}。</span>}{summary.skippedExcludes.length>0&&<span> 已在剔除/例外中而未加入：{summary.skippedExcludes.join("、")}。</span>}</div>}
 function PrimaryPresetSummary({summary}:{summary:PrimaryPresetSummary}){return <div className="kz-hint" role="status"><b>全科目批次已生成：</b>共 {summary.groups.length} 个一级科目；新增 {summary.created} 个、更新 {summary.updated} 个、移除 {summary.removed} 个旧的全科目预设批次。已排除货币资金 {summary.skippedCash.length} 个科目{summary.skippedExcludes.length>0&&`，另跳过剔除/例外 ${summary.skippedExcludes.length} 个科目`}。</div>}
 function Result({job,result}:{job?:JobEvent;result?:unknown}){const object=result&&typeof result==="object"?result as Record<string,unknown>:undefined;const paths=[...new Set([...(job?.outputPaths??[]),...(Array.isArray(object?.outputPaths)?object.outputPaths.filter((value):value is string=>typeof value==="string"):[])])];const batches=Array.isArray(object?.batches)?object.batches as Record<string,unknown>[]:[];const rows=typeof object?.rows==="number"?object.rows:undefined;const showProgress=shouldShowKanzhangJobProgress(job?.phase);return <Card variant="workspace" className="kz-result"><CardHeader><CardTitle>预览与结果</CardTitle></CardHeader><CardContent>{job&&showProgress&&<JobProgress job={job} onCancel={(jobId)=>void jobCancel(jobId)} cancelLabel="取消任务"/>}{rows!==undefined&&<p>筛选后共 <b>{rows}</b> 行，可继续调整科目或进入导出。</p>}{paths.length>0&&<div className="kz-outputs">{paths.map(path=><Button key={path} variant="secondary" size="sm" title={path} onClick={()=>void openOutput(path)}><span>打开：</span><span>{path.split(/[\\/]/).pop()}</span></Button>)}</div>}{batches.length>0&&<div className="kz-summary">{batches.map((batch,index)=><div key={index}><b>{String(batch.name??`批次${index+1}`)}</b><span>明细 {String(batch.rows??0)} 行</span><span>损益结转 {String(batch.lossTransferVouchers??0)} 笔</span></div>)}</div>}{!result&&!showProgress&&<EmptyState compact title="等待筛选结果" description="执行筛选或导出后显示结果。"/>}</CardContent></Card>}

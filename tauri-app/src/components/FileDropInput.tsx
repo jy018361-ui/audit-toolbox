@@ -53,6 +53,7 @@ export function FileDropInput({
   return (
     <div
       ref={containerRef}
+      data-tour="tool-upload"
       className={cn(
         "file-drop-input",
         highlight && "drag-hover",

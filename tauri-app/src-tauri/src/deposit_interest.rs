@@ -1454,12 +1454,7 @@ fn calculate(
             let (net, note, debit_raw, credit_raw) =
                 match booked_occurrence(&tb, row, &tb_map, tb_convention, direction) {
                     Some((net, note, debit, credit)) => (net, note, debit, credit),
-                    None => (
-                        -closing_balance,
-                        "期末余额净额".into(),
-                        0.0,
-                        0.0,
-                    ),
+                    None => (-closing_balance, "期末余额净额".into(), 0.0, 0.0),
                 };
             booked_interest += net;
             booked_interest_rows.push(json!({
@@ -2404,14 +2399,18 @@ enum AccountDirection {
 }
 
 const EXPENSE_DIRECTION_KEYWORDS: &[&str] = &[
-    "费用", "手续费", "支出", "损失", "expense", "charge", "fee", "cost",
+    "费用",
+    "手续费",
+    "支出",
+    "损失",
+    "expense",
+    "charge",
+    "fee",
+    "cost",
 ];
 const INCOME_DIRECTION_KEYWORDS: &[&str] = &["收入", "收益", "income"];
 
-fn registered_direction(
-    account: &str,
-    tb_accounts: &BTreeMap<String, String>,
-) -> AccountDirection {
+fn registered_direction(account: &str, tb_accounts: &BTreeMap<String, String>) -> AccountDirection {
     let code = ledger_mapping::account_code_of(account);
     let name = ledger_mapping::account_name_of(account);
     let lower = name.to_lowercase();
@@ -2423,11 +2422,7 @@ fn registered_direction(
         (1..code.len())
             .rev()
             .filter_map(|length| tb_accounts.get(&code[..length]))
-            .any(|parent| {
-                keywords
-                    .iter()
-                    .any(|k| parent.to_lowercase().contains(k))
-            })
+            .any(|parent| keywords.iter().any(|k| parent.to_lowercase().contains(k)))
     };
     if EXPENSE_DIRECTION_KEYWORDS.iter().any(|k| lower.contains(k))
         || ancestor_hits(EXPENSE_DIRECTION_KEYWORDS)
@@ -2478,10 +2473,7 @@ fn closed_pair_baseline(
             -magnitude,
             "已结转·费用性质，按负数计入（表为借正贷负口径）",
         ),
-        (_, AccountDirection::Credit) => (
-            magnitude,
-            "已结转·按贷方全额计入（表为借正贷负口径）",
-        ),
+        (_, AccountDirection::Credit) => (magnitude, "已结转·按贷方全额计入（表为借正贷负口径）"),
         (_, AccountDirection::Unknown) => (
             magnitude,
             "已结转·科目方向未识别，按全额计入，请复核红字方向",
@@ -2928,11 +2920,7 @@ fn write_reconciliation(
         .write_formula_with_format(
             row_diff,
             1,
-            Formula::new(format!(
-                "B{}-B{}",
-                row_calc + 1,
-                row_booked + 1
-            )),
+            Formula::new(format!("B{}-B{}", row_calc + 1, row_booked + 1)),
             &amount,
         )
         .map_err(xlsx)?;
@@ -2982,16 +2970,14 @@ fn write_reconciliation(
         sheet
             .write_string(y, 1, item["account"].as_str().unwrap_or(""))
             .map_err(xlsx)?;
-        for (key, column) in
-            [("debit", 2u16), ("credit", 3u16), ("closing", 4u16), ("bookedAmount", 5u16)]
-        {
+        for (key, column) in [
+            ("debit", 2u16),
+            ("credit", 3u16),
+            ("closing", 4u16),
+            ("bookedAmount", 5u16),
+        ] {
             sheet
-                .write_number_with_format(
-                    y,
-                    column,
-                    item[key].as_f64().unwrap_or(0.0),
-                    &amount,
-                )
+                .write_number_with_format(y, column, item[key].as_f64().unwrap_or(0.0), &amount)
                 .map_err(xlsx)?;
         }
         sheet
@@ -4165,12 +4151,30 @@ mod tests {
                     "期末余额借方",
                     "期末余额贷方",
                 ],
-                vec!["1002", "银行存款", "1200000", "0", "1200000", "0", "2400000", "0"],
+                vec![
+                    "1002",
+                    "银行存款",
+                    "1200000",
+                    "0",
+                    "1200000",
+                    "0",
+                    "2400000",
+                    "0",
+                ],
                 // 汇总行：登记方向推断靠它把「66030002 利息」认成费用方向。
                 vec!["6603", "财务费用", "0", "0", "0", "0", "0", "0"],
                 // 用友形态：利息收入以红字借方冲减费用，结转对应红字贷方，
                 // 借贷两列同额同负。
-                vec!["66030002", "利息", "0", "0", "-923800.50", "-923800.50", "0", "0"],
+                vec![
+                    "66030002",
+                    "利息",
+                    "0",
+                    "0",
+                    "-923800.50",
+                    "-923800.50",
+                    "0",
+                    "0",
+                ],
             ],
         );
         let tb = inspect(
@@ -4195,7 +4199,10 @@ mod tests {
             "费用类科目下的红字对是冲减费用的利息收入，应按正数计入: {summary}"
         );
         assert!(
-            !summary["bookedNote"].as_str().unwrap_or("").contains("净利息支出"),
+            !summary["bookedNote"]
+                .as_str()
+                .unwrap_or("")
+                .contains("净利息支出"),
             "红字收入不是净支出，不应出负数提示: {summary}"
         );
         let rows = result["bookedInterestRows"].as_array().unwrap();
@@ -4220,12 +4227,36 @@ mod tests {
             &tb_path,
             &[
                 vec![
-                    "科目编码", "科目名称", "期初余额借方", "期初余额贷方",
-                    "本期发生借方", "本期发生贷方", "期末余额借方", "期末余额贷方",
+                    "科目编码",
+                    "科目名称",
+                    "期初余额借方",
+                    "期初余额贷方",
+                    "本期发生借方",
+                    "本期发生贷方",
+                    "期末余额借方",
+                    "期末余额贷方",
                 ],
-                vec!["1002", "银行存款", "1200000", "0", "1200000", "0", "2400000", "0"],
+                vec![
+                    "1002",
+                    "银行存款",
+                    "1200000",
+                    "0",
+                    "1200000",
+                    "0",
+                    "2400000",
+                    "0",
+                ],
                 vec!["6603", "财务费用", "0", "0", "0", "0", "0", "0"],
-                vec!["66030001", "手续费", "0", "0", "4429.49", "4429.49", "0", "0"],
+                vec![
+                    "66030001",
+                    "手续费",
+                    "0",
+                    "0",
+                    "4429.49",
+                    "4429.49",
+                    "0",
+                    "0",
+                ],
             ],
         );
         let tb = inspect(
@@ -4249,7 +4280,10 @@ mod tests {
             "费用性质科目应按负数冲减基准: {summary}"
         );
         assert!(
-            summary["bookedNote"].as_str().unwrap_or("").contains("净利息支出"),
+            summary["bookedNote"]
+                .as_str()
+                .unwrap_or("")
+                .contains("净利息支出"),
             "合计为负时应提示净利息支出: {summary}"
         );
         let rows = result["bookedInterestRows"].as_array().unwrap();
@@ -4272,11 +4306,35 @@ mod tests {
             &tb_path,
             &[
                 vec![
-                    "科目编码", "科目名称", "期初余额借方", "期初余额贷方",
-                    "本期发生借方", "本期发生贷方", "期末余额借方", "期末余额贷方",
+                    "科目编码",
+                    "科目名称",
+                    "期初余额借方",
+                    "期初余额贷方",
+                    "本期发生借方",
+                    "本期发生贷方",
+                    "期末余额借方",
+                    "期末余额贷方",
                 ],
-                vec!["1002", "银行存款", "1200000", "0", "1200000", "0", "2400000", "0"],
-                vec!["6051", "其他业务收入", "0", "0", "16534.97", "16534.97", "0", "0"],
+                vec![
+                    "1002",
+                    "银行存款",
+                    "1200000",
+                    "0",
+                    "1200000",
+                    "0",
+                    "2400000",
+                    "0",
+                ],
+                vec![
+                    "6051",
+                    "其他业务收入",
+                    "0",
+                    "0",
+                    "16534.97",
+                    "16534.97",
+                    "0",
+                    "0",
+                ],
             ],
         );
         let tb = inspect(
@@ -4987,13 +5045,16 @@ mod tests {
             "汇总表勾稽差异必须是活公式（JE推导−TB）：{summary_formula_text:?}"
         );
         assert!(
-            summary_formula_text.iter().any(|f| f.contains("\"勾稽一致\"")),
+            summary_formula_text
+                .iter()
+                .any(|f| f.contains("\"勾稽一致\"")),
             "勾稽结论列必须由公式判定并输出「勾稽一致」：{summary_formula_text:?}"
         );
         assert!(
             summary_formula_text
                 .iter()
-                .any(|f| f.contains("H2+SUM('月度余额与利息'!H") && f.contains("-SUM('月度余额与利息'!I")),
+                .any(|f| f.contains("H2+SUM('月度余额与利息'!H")
+                    && f.contains("-SUM('月度余额与利息'!I")),
             "JE推导期末必须=年初+Σ借−Σ贷（回引月度表）：{summary_formula_text:?}"
         );
         let formulas = calamine::Reader::worksheet_formula(&mut book, MONTHLY_SHEET).unwrap();

@@ -27,7 +27,8 @@ export type AppError = z.infer<typeof AppErrorSchema>;
 
 export type TaskRecord = JobEvent & { startedAt: string; finishedAt?: string };
 
-/** 历史记录行：params 是任务启动时的用户原始参数，供「继续任务」回填。 */
+/** 历史记录行：params 是任务启动时的用户原始参数，供「继续任务」回填；
+ * method 区分主任务与读取/筛选等子步骤。 */
 export const HistoryRowSchema = z.object({
   jobId: z.string(),
   toolId: z.string(),
@@ -37,6 +38,7 @@ export const HistoryRowSchema = z.object({
   startedAt: z.string(),
   finishedAt: z.string().nullable(),
   params: z.record(z.string(), z.unknown()).default({}),
+  method: z.string().default(""),
 });
 export type HistoryRow = z.infer<typeof HistoryRowSchema>;
 
@@ -47,5 +49,6 @@ export const TaskRestoreSchema = z.object({
   params: z.record(z.string(), z.unknown()).default({}),
   missingPaths: z.array(z.string()).default([]),
   authorizedPathCount: z.number().default(0),
+  method: z.string().default(""),
 });
 export type TaskRestore = z.infer<typeof TaskRestoreSchema>;

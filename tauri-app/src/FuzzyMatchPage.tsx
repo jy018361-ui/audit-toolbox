@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
+import { SwitchInput } from "@/components/SwitchInput";
 import { errorText } from "@/lib/errors";
 import "./fuzzy-match.css";
 
@@ -324,6 +325,11 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
   // 历史记录「继续任务」：回填两侧来源（路径/标题行/选中列）与匹配参数；
   // 匹配结果本身不恢复，用户点「开始匹配」即重算。fuzzy.export 的存档
   // 只有 jobId/outputPath，找不到来源字段时自然跳过。
+  // restoredColumns：重新读取同一文件时，inspect 默认清空选中列——这里把
+  // 存档列顶回，逐侧一次性消费。
+  const restoredColumns = useRef<
+    Partial<Record<Kind, { path: string; column: string }>>
+  >({});
   useTaskRestore(tool.id, (restore) => {
     const p = restore.params as {
       sourceA?: { inputPath?: string; headerRow?: number; column?: string };
@@ -348,6 +354,16 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
       }
     }
     if (!next.a.path && !next.b.path) return;
+    restoredColumns.current = {
+      a:
+        next.a.path && typeof next.a.mapping.column === "string"
+          ? { path: next.a.path, column: next.a.mapping.column }
+          : undefined,
+      b:
+        next.b.path && typeof next.b.mapping.column === "string"
+          ? { path: next.b.path, column: next.b.mapping.column }
+          : undefined,
+    };
     setSources(next);
     if (
       p.matchType === "company" ||
@@ -478,7 +494,21 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         kind,
         source: { inputPath: path, sheet, headerRow, headerDepth: 1 },
       })) as Inspection;
-      setSource(kind, { path, headerRow, inspection: x, mapping: {} });
+      // 历史恢复后重新读取同一文件：存档的选中列顶回（一次性消费，换文件
+      // 照旧清空待选）。
+      const stash = restoredColumns.current[kind];
+      const samePath = (a: string, b: string) =>
+        a.trim().toLowerCase() === b.trim().toLowerCase();
+      const column =
+        stash && samePath(stash.path, path) ? stash.column : undefined;
+      if (stash && samePath(stash.path, path))
+        restoredColumns.current[kind] = undefined;
+      setSource(kind, {
+        path,
+        headerRow,
+        inspection: x,
+        mapping: column ? { column } : {},
+      });
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -1130,10 +1160,9 @@ function ConfirmQueue(props: {
           </select>
         </label>
         <label className="fuzzy-check">
-          <input
-            type="checkbox"
+          <SwitchInput
             checked={props.onlyPending}
-            onChange={(e) => props.onOnlyPending(e.target.checked)}
+            onChange={props.onOnlyPending}
           />
           仅看未确认
         </label>

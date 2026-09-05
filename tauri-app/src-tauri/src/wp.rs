@@ -441,9 +441,12 @@ fn normalized_file_stem(path: &Path) -> String {
 
 fn is_xlsx_input(path: &Path) -> bool {
     path.is_file()
-        && path
-            .extension()
-            .is_some_and(|extension| matches!(extension.to_string_lossy().to_ascii_lowercase().as_str(), "xlsx" | "xls"))
+        && path.extension().is_some_and(|extension| {
+            matches!(
+                extension.to_string_lossy().to_ascii_lowercase().as_str(),
+                "xlsx" | "xls"
+            )
+        })
         && !path
             .file_name()
             .unwrap_or_default()
@@ -465,13 +468,24 @@ mod xls_inputs_tests {
         let root = std::env::temp_dir().join(format!("wp-xls-input-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let text = root.join("FY27 WP服务单.XLS");
-        fs::write(&text, encoding_rs::GBK.encode("编号\t金额\n001\t123.5\n").0.as_ref()).unwrap();
+        fs::write(
+            &text,
+            encoding_rs::GBK
+                .encode("编号\t金额\n001\t123.5\n")
+                .0
+                .as_ref(),
+        )
+        .unwrap();
         assert!(is_xlsx_input(&text));
         let rows = read_first_sheet(&text, None).unwrap();
         assert_eq!(rows[1][0].text(), "001");
         assert_eq!(rows[1][1].text(), "123.5");
         let binary = root.join("FY27 section list.xls");
-        fs::write(&binary, include_bytes!("../../tests/fixtures/Excel Merger/simple-biff8.xls")).unwrap();
+        fs::write(
+            &binary,
+            include_bytes!("../../tests/fixtures/Excel Merger/simple-biff8.xls"),
+        )
+        .unwrap();
         assert_eq!(find_section_list_file(&root).unwrap(), binary);
         assert_eq!(read_first_sheet(&binary, None).unwrap()[1][0].text(), "001");
         fs::remove_dir_all(root).unwrap();
@@ -591,7 +605,11 @@ fn from_data(value: &Data) -> Value {
 fn read_first_sheet(path: &Path, preferred: Option<&str>) -> Result<Vec<Vec<Value>>> {
     if crate::spreadsheet_input::is_text(path) {
         return crate::spreadsheet_input::read_rows(path)
-            .map(|rows| rows.into_iter().map(|row| row.into_iter().map(Value::Text).collect()).collect())
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| row.into_iter().map(Value::Text).collect())
+                    .collect()
+            })
             .map_err(|err| WpError(err.user_message));
     }
     let mut book = open_workbook_auto(path)
@@ -2198,7 +2216,8 @@ fn write_split_workbook(
     metadata: &TemplateMetadata,
     split: &SplitData,
 ) -> Result<()> {
-    let prepared = crate::spreadsheet_input::prepare_xlsx(template_path).map_err(|err| WpError(err.user_message))?;
+    let prepared = crate::spreadsheet_input::prepare_xlsx(template_path)
+        .map_err(|err| WpError(err.user_message))?;
     let template_path = prepared.path();
     let mut book = umya_spreadsheet::reader::xlsx::read(template_path)
         .map_err(|error| WpError(format!("无法读取服务方案模板：{error}")))?;
@@ -2686,7 +2705,8 @@ fn generate_cancellable(
         .map(|record| record.service_number.clone())
         .collect();
 
-    let prepared = crate::spreadsheet_input::prepare_xlsx(&params.template_path).map_err(|err| WpError(err.user_message))?;
+    let prepared = crate::spreadsheet_input::prepare_xlsx(&params.template_path)
+        .map_err(|err| WpError(err.user_message))?;
     let template_path = prepared.path();
     let mut book = umya_spreadsheet::reader::xlsx::read(template_path)
         .map_err(|error| WpError(format!("无法读取服务方案模板：{error}")))?;

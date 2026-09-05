@@ -49,6 +49,198 @@ export type LedgerSourceClassification = {
   kind: LedgerSourceKind;
   scores: { je: number; tb: number };
 };
+
+export type LedgerWorkbookSheetClassification = LedgerSourceClassification & {
+  confidence: number;
+  needsLlm: boolean;
+  sheet: string;
+  sheets?: string[];
+  headerRow: number;
+  headerDepth: number;
+  headers: string[];
+  preview: string[][];
+  reasons?: string[];
+};
+
+export type LedgerClassifiedSource<
+  T extends LedgerWorkbookSheetClassification = LedgerWorkbookSheetClassification,
+> = {
+  path: string;
+  classification: T;
+};
+
+export type LedgerSourceScanResult<
+  T extends LedgerWorkbookSheetClassification = LedgerWorkbookSheetClassification,
+> = {
+  sources: LedgerClassifiedSource<T>[];
+  hiddenSheets: number;
+  llmFallbacks: number;
+  failures: Array<{ path: string; error: unknown }>;
+};
+
+/**
+ * 扫描一个工作簿里的每张非空 Sheet。公共 Rust 分类器在未指定 Sheet 时只会
+ * 挑分数最高的一张；这里先拿到 Sheet 清单，再逐张指定 Sheet 复用同一分类器。
+ */
+export async function classifyLedgerWorkbookSheets<
+  T extends LedgerWorkbookSheetClassification,
+>(
+  call: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+  method: string,
+  path: string,
+): Promise<T[]> {
+  const classify = (sheet: string) =>
+    call(method, {
+      source: { inputPath: path, sheet, headerRow: 0, headerDepth: 0 },
+    }) as Promise<T>;
+  const first = await classify("");
+  const names = [...new Set((first.sheets?.length ? first.sheets : [first.sheet]).filter(Boolean))];
+  const results: T[] = [];
+  for (const sheet of names) {
+    results.push(sheet === first.sheet ? first : await classify(sheet));
+  }
+  return results;
+}
+
+/** 低于公共分类器既有的 5 分可靠线时，不把该 Sheet 暴露成账表来源。 */
+export function ledgerClassificationIsVisible(
+  classification: LedgerSourceClassification,
+): boolean {
+  // 兼容历史任务记录和旧测试桩：旧分类结果没有 scores 时沿用原先“显示”的行为。
+  if (!classification.scores) return true;
+  return Math.max(classification.scores.je, classification.scores.tb) >= 5;
+}
+
+/**
+ * 五个 TB/JE 工具共用的上传识别入口：逐工作簿、逐 Sheet 分类，过滤低置信度
+ * 来源，并按工具自己的提示词做可选 LLM 复核。页面只负责展示和后续 inspect。
+ */
+export async function scanLedgerUploadSources<
+  T extends LedgerWorkbookSheetClassification,
+>(
+  call: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+  paths: string[],
+  options: {
+    classificationMethod?: string;
+    llmMethod?: string;
+    onWorkbookStart?: (path: string, index: number, total: number) => void;
+  } = {},
+): Promise<LedgerSourceScanResult<T>> {
+  const result: LedgerSourceScanResult<T> = {
+    sources: [],
+    hiddenSheets: 0,
+    llmFallbacks: 0,
+    failures: [],
+  };
+  for (const [index, path] of paths.entries()) {
+    options.onWorkbookStart?.(path, index, paths.length);
+    try {
+      const sheets = await classifyLedgerWorkbookSheets<T>(
+        call,
+        options.classificationMethod ?? "deposit.classify_source",
+        path,
+      );
+      for (const scripted of sheets) {
+        if (!ledgerClassificationIsVisible(scripted)) {
+          result.hiddenSheets += 1;
+          continue;
+        }
+        if (!options.llmMethod) {
+          result.sources.push({ path, classification: scripted });
+          continue;
+        }
+        const reviewed = await reviewLedgerSourceClassification(
+          call,
+          options.llmMethod,
+          `${path} / ${scripted.sheet}`,
+          scripted,
+        );
+        if (!reviewed.reviewed) result.llmFallbacks += 1;
+        result.sources.push({ path, classification: reviewed.classification });
+      }
+    } catch (error) {
+      result.failures.push({ path, error });
+    }
+  }
+  return result;
+}
+
+/** 同一工作簿的 TB/JE 优先；没有同簿组合时再做跨文件联合判型并按得分取最佳一对。 */
+export function selectLedgerSourcePair<
+  T extends LedgerWorkbookSheetClassification,
+>(sources: LedgerClassifiedSource<T>[]): Array<LedgerClassifiedSource<T> & {
+  kind: LedgerSourceKind;
+}> {
+  const byWorkbook = new Map<string, LedgerClassifiedSource<T>[]>();
+  for (const source of sources) {
+    const group = byWorkbook.get(source.path) ?? [];
+    group.push(source);
+    byWorkbook.set(source.path, group);
+  }
+  const pairs = [...byWorkbook.values()]
+    .map((items) => {
+      const je = items
+        .filter((item) => item.classification.kind === "je")
+        .sort((a, b) => b.classification.scores.je - a.classification.scores.je)[0];
+      const tb = items
+        .filter((item) => item.classification.kind === "tb")
+        .sort((a, b) => b.classification.scores.tb - a.classification.scores.tb)[0];
+      return je && tb
+        ? { je, tb, score: je.classification.scores.je + tb.classification.scores.tb }
+        : undefined;
+    })
+    .filter((pair): pair is NonNullable<typeof pair> => Boolean(pair))
+    .sort((a, b) => b.score - a.score);
+  if (pairs.length) {
+    return [
+      { ...pairs[0].je, kind: "je" },
+      { ...pairs[0].tb, kind: "tb" },
+    ];
+  }
+  const kinds = resolveLedgerPairKinds(sources.map((item) => item.classification));
+  const resolved = sources.map((item, index) => ({ ...item, kind: kinds[index] }));
+  const je = resolved
+    .filter((item) => item.kind === "je")
+    .sort((a, b) => b.classification.scores.je - a.classification.scores.je)[0];
+  const tb = resolved
+    .filter((item) => item.kind === "tb")
+    .sort((a, b) => b.classification.scores.tb - a.classification.scores.tb)[0];
+  return [je, tb].filter(
+    (item): item is LedgerClassifiedSource<T> & { kind: LedgerSourceKind } =>
+      Boolean(item),
+  );
+}
+
+export type LedgerInspectableSource<T> = {
+  path: string;
+  inspection: T & { sheet: string; headerRow: number; headerDepth: number };
+};
+
+/**
+ * 类型更正的公共编排：目标槽为空时移动来源，目标槽已有来源时交换两侧，
+ * 两份都按新类型重新 inspect，避免沿用错误类型产生的字段建议。
+ */
+export async function correctLedgerSourceKinds<T>(
+  from: LedgerSourceKind,
+  to: LedgerSourceKind,
+  current: LedgerInspectableSource<T>,
+  occupied: LedgerInspectableSource<T> | undefined,
+  inspect: (
+    kind: LedgerSourceKind,
+    source: LedgerInspectableSource<T>,
+  ) => Promise<T>,
+): Promise<Array<{ kind: LedgerSourceKind; path: string; inspection: T }>> {
+  const changed = await inspect(to, current);
+  const results = [{ kind: to, path: current.path, inspection: changed }];
+  if (occupied) {
+    results.push({
+      kind: from,
+      path: occupied.path,
+      inspection: await inspect(from, occupied),
+    });
+  }
+  return results;
+}
 /**
  * Resolve a two-file upload as a pair.  Independent classification may call both
  * files JE when one ambiguous TB loses a tie; assigning the pair jointly keeps

@@ -29,7 +29,7 @@ impl Storage {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;
           CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS migrations(source TEXT PRIMARY KEY,completed_at TEXT NOT NULL,report_json TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS task_history(job_id TEXT PRIMARY KEY,tool_id TEXT NOT NULL,status TEXT NOT NULL,summary_json TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,message TEXT,output_paths_json TEXT NOT NULL DEFAULT '[]',params_json TEXT NOT NULL DEFAULT '{}');
+          CREATE TABLE IF NOT EXISTS task_history(job_id TEXT PRIMARY KEY,tool_id TEXT NOT NULL,status TEXT NOT NULL,summary_json TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,message TEXT,output_paths_json TEXT NOT NULL DEFAULT '[]',params_json TEXT NOT NULL DEFAULT '{}',method TEXT NOT NULL DEFAULT '');
           CREATE TABLE IF NOT EXISTS audipick_projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,data_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS audipick_documents(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,path TEXT NOT NULL,sha256 TEXT NOT NULL,data_json TEXT NOT NULL,FOREIGN KEY(project_id) REFERENCES audipick_projects(id));
           CREATE TABLE IF NOT EXISTS fuzzy_match_results(job_id TEXT NOT NULL,a_index INTEGER NOT NULL,a_value TEXT NOT NULL,level TEXT NOT NULL,match_json TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(job_id,a_index));
@@ -136,10 +136,13 @@ impl Storage {
     /// job_start 时存档用户原始参数（lib.rs 注入 `__settings`/`__llmOptions`
     /// 等之前克隆的版本），供历史记录「继续任务」还原现场。任务事件随后
     /// 到达也不会覆盖它——record_job_event 的 UPSERT 不碰 params_json。
+    /// method 一并存档：同一工具的读取/筛选子步骤（如 kanzhang.inspect）
+    /// 存档不含完整配置，前端据此只给主任务开放恢复。
     pub fn record_job_params(
         &self,
         job_id: &str,
         tool_id: &str,
+        method: &str,
         params: &Value,
     ) -> Result<(), AppError> {
         let archived = if params.to_string().len() > Self::JOB_PARAMS_ARCHIVE_LIMIT {
@@ -148,15 +151,16 @@ impl Storage {
             params.clone()
         };
         self.conn.lock().execute(
-            "INSERT INTO task_history(job_id,tool_id,status,summary_json,started_at,message,output_paths_json,params_json)
-             VALUES(?1,?2,'queued','{}',?3,NULL,'[]',?4)
+            "INSERT INTO task_history(job_id,tool_id,status,summary_json,started_at,message,output_paths_json,params_json,method)
+             VALUES(?1,?2,'queued','{}',?3,NULL,'[]',?4,?5)
              ON CONFLICT(job_id)DO UPDATE SET
-               tool_id=excluded.tool_id,params_json=excluded.params_json",
+               tool_id=excluded.tool_id,params_json=excluded.params_json,method=excluded.method",
             params![
                 job_id,
                 tool_id,
                 Utc::now().to_rfc3339(),
-                archived.to_string()
+                archived.to_string(),
+                method
             ],
         ).map_err(db_error)?;
         Ok(())
@@ -168,12 +172,13 @@ impl Storage {
         let conn = self.conn.lock();
         let row = conn
             .query_row(
-                "SELECT tool_id,params_json FROM task_history WHERE job_id=?1",
+                "SELECT tool_id,params_json,method FROM task_history WHERE job_id=?1",
                 params![job_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
                     ))
                 },
             )
@@ -186,7 +191,7 @@ impl Storage {
                 )
             })?;
         drop(conn);
-        let (tool, params_text) = row;
+        let (tool, params_text, method) = row;
         let params = serde_json::from_str::<Value>(&params_text)
             .ok()
             .filter(|v| v.is_object())
@@ -199,11 +204,11 @@ impl Storage {
                 Some(job_id.to_owned()),
             ));
         }
-        Ok(json!({"toolId": tool, "params": params}))
+        Ok(json!({"toolId": tool, "params": params, "method": method}))
     }
     pub fn history_get(&self) -> Result<Value, AppError> {
         let conn = self.conn.lock();
-        let mut stmt=conn.prepare("SELECT job_id,tool_id,status,message,output_paths_json,started_at,finished_at,params_json FROM task_history ORDER BY started_at DESC LIMIT 200").map_err(db_error)?;
+        let mut stmt=conn.prepare("SELECT job_id,tool_id,status,message,output_paths_json,started_at,finished_at,params_json,method FROM task_history ORDER BY started_at DESC LIMIT 200").map_err(db_error)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
@@ -215,12 +220,13 @@ impl Storage {
                     row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             })
             .map_err(db_error)?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, tool, status, message, output_paths, started, finished, params_text) =
+            let (id, tool, status, message, output_paths, started, finished, params_text, method) =
                 row.map_err(db_error)?;
             let output_paths = serde_json::from_str::<Value>(&output_paths)
                 .ok()
@@ -230,7 +236,7 @@ impl Storage {
                 .ok()
                 .filter(Value::is_object)
                 .unwrap_or_else(|| json!({}));
-            out.push(json!({"jobId":id,"toolId":tool,"status":status,"message":message,"outputPaths":output_paths,"startedAt":started,"finishedAt":finished,"params":params}));
+            out.push(json!({"jobId":id,"toolId":tool,"status":status,"message":message,"outputPaths":output_paths,"startedAt":started,"finishedAt":finished,"params":params,"method":method}));
         }
         Ok(Value::Array(out))
     }
@@ -250,8 +256,8 @@ impl Storage {
     /// The migration deliberately discards `result`: task_history was always
     /// documented as metadata-only, while durable fuzzy results live in their
     /// own row-level tables and can rebuild their summary when needed.
-    /// 旧库补 params_json 列（默认 '{}'，旧行无参数存档，恢复按钮对它们
-    /// 自然隐藏）。纯加列无数据回填，不需要 migrations 表记账。
+    /// 旧库补 params_json / method 列（默认 '{}' / ''，旧行无参数存档，
+    /// 恢复按钮对它们自然隐藏）。纯加列无数据回填，不需要 migrations 表记账。
     fn migrate_task_history_params(&self) -> Result<(), AppError> {
         let conn = self.conn.lock();
         let has_params: bool = conn
@@ -264,6 +270,21 @@ impl Storage {
         if !has_params {
             conn.execute(
                 "ALTER TABLE task_history ADD COLUMN params_json TEXT NOT NULL DEFAULT '{}'",
+                [],
+            )
+            .map_err(db_error)?;
+        }
+        // method 区分主任务与读取/筛选子步骤：「继续任务」只对主任务开放。
+        let has_method: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('task_history') WHERE name='method')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if !has_method {
+            conn.execute(
+                "ALTER TABLE task_history ADD COLUMN method TEXT NOT NULL DEFAULT ''",
                 [],
             )
             .map_err(db_error)?;
@@ -1250,6 +1271,7 @@ mod tests {
             .record_job_params(
                 "job-2",
                 "fx_audit",
+                "fx.export",
                 &json!({"mode":"bank","jePath":"C:\\je.xlsx"}),
             )
             .unwrap();
@@ -1269,9 +1291,11 @@ mod tests {
         let history = storage.history_get().unwrap();
         assert_eq!(history[0]["params"]["mode"], "bank");
         assert_eq!(history[0]["params"]["jePath"], "C:\\je.xlsx");
+        assert_eq!(history[0]["method"], "fx.export");
         let restored = storage.history_params("job-2").unwrap();
         assert_eq!(restored["toolId"], "fx_audit");
         assert_eq!(restored["params"]["mode"], "bank");
+        assert_eq!(restored["method"], "fx.export");
 
         // 只有事件、没有参数存档的任务（旧版本记录）：history_get 兜底
         // 空对象，history_params 明确报「无参数」而不是静默给空。
@@ -1304,6 +1328,7 @@ mod tests {
             .record_job_params(
                 "job-big",
                 "audipick",
+                "audipick.batch_extract",
                 &json!({"blob":"x".repeat(Storage::JOB_PARAMS_ARCHIVE_LIMIT + 1)}),
             )
             .unwrap();
@@ -1339,13 +1364,19 @@ mod tests {
         drop(conn);
 
         let storage = Storage::new(&root).unwrap();
-        // 旧行没有参数存档，恢复按钮对它们隐藏。
+        // 旧行没有参数存档，恢复按钮对它们隐藏；method 列同样补齐为空串。
         let history = storage.history_get().unwrap();
         assert_eq!(history[0]["jobId"], "legacy-1");
         assert_eq!(history[0]["params"], json!({}));
+        assert_eq!(history[0]["method"], "");
         // 新任务照常存档。
         storage
-            .record_job_params("job-new", "ts_manager", &json!({"inputPath":"C:\\ts.xlsx"}))
+            .record_job_params(
+                "job-new",
+                "ts_manager",
+                "ts.export",
+                &json!({"inputPath":"C:\\ts.xlsx"}),
+            )
             .unwrap();
         assert_eq!(
             storage.history_params("job-new").unwrap()["params"]["inputPath"],

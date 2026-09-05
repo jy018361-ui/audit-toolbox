@@ -134,6 +134,7 @@ it.each(["completed", "success"])(
         startedAt: "2026-09-04T08:00:00+08:00",
         finishedAt: null,
         params: {},
+        method: "fx.export",
       },
     ]);
     render(
@@ -214,7 +215,7 @@ it("marks preview tools as trials in the sidebar without disabling them", async 
   ).not.toHaveAttribute("title");
 });
 
-it("groups settings, preserves draft across sections, and saves via the existing APIs", async () => {
+it("groups settings into two columns on a single page, preserves draft, and saves via the existing APIs", async () => {
   render(
     <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} onReplayWorkspaceTour={() => {}} />,
   );
@@ -239,7 +240,6 @@ it("groups settings, preserves draft across sections, and saves via the existing
   fireEvent.change(screen.getByLabelText("百度 API Key"), {
     target: { value: "test-placeholder" },
   });
-  fireEvent.click(screen.getByRole("button", { name: /基本设置/ }));
   expect(screen.getByRole("heading", { name: "本地缓存" })).toBeVisible();
   expect(screen.getByRole("heading", { name: "界面主题" })).toBeVisible();
   const themeButtons = screen
@@ -251,7 +251,6 @@ it("groups settings, preserves draft across sections, and saves via the existing
   fireEvent.change(screen.getByLabelText("自动清理"), {
     target: { value: "off" },
   });
-  fireEvent.click(screen.getByRole("button", { name: /API 配置/ }));
   expect(screen.getByLabelText("模型")).toHaveValue("draft-model");
   fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
   await screen.findByRole("status");
@@ -265,12 +264,10 @@ it("groups settings, preserves draft across sections, and saves via the existing
   expect(secretSet).toHaveBeenCalledWith("baidu_ocr_key", "test-placeholder");
   expect(screen.getByLabelText("百度 API Key")).toHaveValue("");
   expect(screen.getByRole("button", { name: "保存配置" })).toBeDisabled();
-  fireEvent.click(screen.getByRole("button", { name: /基本设置/ }));
   expect(screen.getByRole("button", { name: "深绿" })).toBeVisible();
   expect(screen.getByRole("button", { name: "保存配置" })).toBeVisible();
   const updateButton = screen.getByRole("button", { name: "软件更新" });
   expect(updateButton.closest(".page-header-actions")).not.toBeNull();
-  expect(document.querySelectorAll(".step-indicator button")).toHaveLength(2);
   fireEvent.click(updateButton);
   await waitFor(() =>
     expect(updateReleaseNotes).toHaveBeenCalledWith(undefined),
@@ -278,7 +275,7 @@ it("groups settings, preserves draft across sections, and saves via the existing
   expect(screen.getByRole("button", { name: "重新检查" })).toBeVisible();
 });
 
-it("discloses telemetry fields and protects unsaved settings on leave", async () => {
+it("protects unsaved settings on leave", async () => {
   render(
     <MemoryRouter>
       <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} onReplayWorkspaceTour={() => {}} />
@@ -288,14 +285,8 @@ it("discloses telemetry fields and protects unsaved settings on leave", async ()
   await waitFor(() =>
     expect(screen.getByLabelText("模型")).toHaveValue("saved-model"),
   );
-  fireEvent.click(screen.getByRole("button", { name: /基本设置/ }));
-  expect(screen.getByLabelText("发送哪些使用信息")).toHaveAttribute(
-    "data-mode",
-    "telemetry",
-  );
-  expect(screen.getByText(/电脑名、系统用户名/)).toBeVisible();
-  fireEvent.change(screen.getByRole("textbox", { name: /统计服务器地址/ }), {
-    target: { value: "http://metrics.internal" },
+  fireEvent.change(screen.getByLabelText("Base URL"), {
+    target: { value: "https://llm.internal" },
   });
   expect(screen.getByText(/有未保存的配置修改/)).toBeVisible();
 
@@ -343,7 +334,6 @@ it("requires confirmation before clearing local cache", async () => {
     </MemoryRouter>,
   );
   await waitFor(() => expect(engineCall).toHaveBeenCalled());
-  fireEvent.click(screen.getByRole("button", { name: /基本设置/ }));
   expect(screen.getByText("已缓存 1.0 KB")).toBeVisible();
   fireEvent.click(
     screen.getByRole("button", { name: "立刻清理全部缓存（1.0 KB）" }),

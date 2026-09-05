@@ -45,6 +45,11 @@ it("按资料模式显示空态、联网边界和可访问的选中状态", () =
   expect(screen.getByRole("region", { name: "准备 TB 与 JE" })).toBeVisible();
   expect(screen.getByText(/TB 与 JE 均需上传/)).toBeVisible();
   expect(
+    screen.getByRole("button", {
+      name: "一次选择 TB 与 JE（自动识别 Sheet）",
+    }),
+  ).toBeVisible();
+  expect(
     screen.getByRole("button", { name: "下一步：利率确认" }),
   ).toBeDisabled();
 });

@@ -25,13 +25,16 @@ import { EmptyState } from "@/components/EmptyState";
 import { Badge } from "@/components/ui/badge";
 import { NumberInput } from "@/components/NumberInput";
 import {
+  correctLedgerSourceKinds,
   missingGoldIdentity,
-  resolveLedgerPairKinds,
   resolveRoleLabels,
-  reviewLedgerSourceClassification,
+  scanLedgerUploadSources,
+  selectLedgerSourcePair,
   type EngineRoleLabels,
+  type LedgerWorkbookSheetClassification,
 } from "@/ledgerMapping";
 import { MappingPanel } from "@/components/MappingPanel";
+import { BusySpinner } from "@/components/BusySpinner";
 import {
   describeForm,
   formGroups,
@@ -84,17 +87,7 @@ export type Inspection = {
   dataYears: number[];
   suggestedBalanceSheetDate?: string;
 };
-type SourceClassification = {
-  kind: Kind;
-  confidence: number;
-  needsLlm: boolean;
-  scores: { je: number; tb: number };
-  headers: string[];
-  preview: string[][];
-  sheet: string;
-  headerRow: number;
-  headerDepth: number;
-};
+type SourceClassification = LedgerWorkbookSheetClassification;
 type RateTier = {
   key: string;
   category: string;
@@ -528,6 +521,15 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   // 历史记录「继续任务」：回填两表路径/基准日/映射与分层利率、逐户改价。
   // Sheet 等识别信息以存档参数重建最小 Inspection，不点「重新识别」也能直接
   // 测算；存档的最终科目分类整体写入 overrides，预填 effect 会原样采纳。
+  // restoredDepositRef：用户重新识别同一文件时，applyInspection 默认套用
+  // 建议映射并清空分类覆盖——这里把存档值顶回，逐侧一次性消费。
+  const restoredDepositRef = useRef<{
+    sides: {
+      je?: { path: string; mapping: Record<string, string | string[]> };
+      tb?: { path: string; mapping: Record<string, string | string[]> };
+    };
+    accountRoleOverrides?: Record<string, string>;
+  } | null>(null);
   useTaskRestore(tool.id, (restore) => {
     type DepositSourceParams = {
       inputPath?: string;
@@ -566,6 +568,21 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         headerDepth: src.headerDepth ?? 0,
         accounts: accountList,
       }) as Inspection;
+    const isMapping = (value: unknown): value is Record<string, string | string[]> =>
+      Boolean(value && typeof value === "object");
+    restoredDepositRef.current = {
+      sides: {
+        ...(restoredJePath && isMapping(p.jeMapping)
+          ? { je: { path: restoredJePath, mapping: p.jeMapping } }
+          : {}),
+        ...(restoredTbPath && isMapping(p.tbMapping)
+          ? { tb: { path: restoredTbPath, mapping: p.tbMapping } }
+          : {}),
+      },
+      ...(isMapping(p.accountRoles)
+        ? { accountRoleOverrides: p.accountRoles }
+        : {}),
+    };
     setJePath(restoredJePath);
     setTbPath(restoredTbPath);
     setJe(restoredJePath ? minimalInspection(p.jeSource!) : undefined);
@@ -680,41 +697,20 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     setSourceStatus("正在识别文件…");
     const failures: string[] = [];
     try {
-      const classifiedFiles: Array<{
-        path: string;
-        classification: SourceClassification;
-      }> = [];
-      for (const path of files) {
-        try {
-          const scripted = (await engineCall("deposit.classify_source", {
-            source: {
-              inputPath: path,
-              sheet: "",
-              headerRow: 0,
-              headerDepth: 0,
-            },
-          })) as SourceClassification;
-          const reviewed = await reviewLedgerSourceClassification(
-            engineCall,
-            "deposit.classify_source_llm",
-            path,
-            scripted,
-          );
-          classifiedFiles.push({
-            path,
-            classification: reviewed.classification,
-          });
-        } catch (e) {
-          failures.push(`${fileName(path)}：${errorText(e)}`);
-        }
-      }
-      const resolvedKinds = resolveLedgerPairKinds(
-        classifiedFiles.map((item) => item.classification),
+      const scan = await scanLedgerUploadSources<SourceClassification>(
+        engineCall,
+        files,
+        { llmMethod: "deposit.classify_source_llm" },
       );
-      for (const [index, item] of classifiedFiles.entries()) {
+      failures.push(
+        ...scan.failures.map(
+          (failure) => `${fileName(failure.path)}：${errorText(failure.error)}`,
+        ),
+      );
+      const selected = selectLedgerSourcePair(scan.sources);
+      for (const item of selected) {
         try {
-          const kind = resolvedKinds[index];
-          const response = (await engineCall(`deposit.inspect_${kind}`, {
+          const response = (await engineCall(`deposit.inspect_${item.kind}`, {
             source: {
               inputPath: item.path,
               sheet: item.classification.sheet,
@@ -722,19 +718,36 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               headerDepth: item.classification.headerDepth,
             },
           })) as Inspection;
-          applyInspection(kind, item.path, response);
+          applyInspection(item.kind, item.path, response);
         } catch (e) {
           failures.push(`${fileName(item.path)}：${errorText(e)}`);
         }
       }
-      setSourceStatus("");
+      setSourceStatus(
+        scan.hiddenSheets
+          ? `${selected.length} 个账表来源已识别；${scan.hiddenSheets} 张低置信度 Sheet 已忽略。`
+          : "",
+      );
       if (failures.length) setError(failures.join("；"));
     } finally {
       setBusy(false);
     }
   }
   function applyInspection(kind: Kind, path: string, response: Inspection) {
-    setAccountRoleOverrides({});
+    // 历史恢复后重新识别同一文件：用存档映射与科目分类顶回建议值，
+    // 逐侧一次性消费；换文件照旧用建议值。
+    const stash = restoredDepositRef.current;
+    const side = stash?.sides[kind];
+    const samePath = (a: string, b: string) =>
+      a.trim().toLowerCase() === b.trim().toLowerCase();
+    const match = side && samePath(side.path, path) ? side : undefined;
+    if (match && stash) {
+      delete stash.sides[kind];
+      if (!stash.sides.je && !stash.sides.tb) restoredDepositRef.current = null;
+    }
+    setAccountRoleOverrides(
+      match ? (stash?.accountRoleOverrides ?? {}) : {},
+    );
     if (response.suggestedBalanceSheetDate)
       setReportEnd(response.suggestedBalanceSheetDate);
     else if (response.dataYears?.length === 1)
@@ -742,11 +755,11 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     if (kind === "je") {
       setJePath(path);
       setJe(response);
-      setJeMapping(response.suggestedMapping);
+      setJeMapping(match ? match.mapping : (response.suggestedMapping ?? {}));
     } else {
       setTbPath(path);
       setTb(response);
-      setTbMapping(response.suggestedMapping);
+      setTbMapping(match ? match.mapping : (response.suggestedMapping ?? {}));
     }
     reviews.clearReview(kind);
     setRows([]);
@@ -770,6 +783,51 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         },
       })) as Inspection;
       applyInspection(kind, kind === "je" ? jePath : tbPath, response);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function changeSourceKind(from: Kind, to: Kind) {
+    const path = from === "je" ? jePath : tbPath;
+    const current = from === "je" ? je : tb;
+    const occupiedPath = to === "je" ? jePath : tbPath;
+    const occupied = to === "je" ? je : tb;
+    if (!path || !current) return;
+    setBusy(true);
+    setError("");
+    try {
+      const changed = await correctLedgerSourceKinds(
+        from,
+        to,
+        { path, inspection: current },
+        occupiedPath && occupied
+          ? { path: occupiedPath, inspection: occupied }
+          : undefined,
+        async (kind, source) =>
+          (await engineCall(`deposit.inspect_${kind}`, {
+            source: {
+              inputPath: source.path,
+              sheet: source.inspection.sheet,
+              headerRow: source.inspection.headerRow,
+              headerDepth: source.inspection.headerDepth,
+            },
+          })) as Inspection,
+      );
+      setJePath("");
+      setTbPath("");
+      setJe(undefined);
+      setTb(undefined);
+      setJeMapping({});
+      setTbMapping({});
+      for (const item of changed)
+        applyInspection(item.kind, item.path, item.inspection);
+      setSourceStatus(
+        changed.length > 1
+          ? "JE 与 TB 来源已交换，并按新类型重新识别。"
+          : `${fileName(path)} 已更正为 ${to.toUpperCase()}。`,
+      );
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -996,6 +1054,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     setJeMapping({});
                   }}
                   onInspect={() => void inspect("je")}
+                  onKindChange={() => void changeSourceKind("je", "tb")}
+                  kindChangeLabel="更正为 TB"
                 />
               ) : tbPath ? (
                 <Card className="fx-source-empty">
@@ -1027,6 +1087,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     setTbMapping({});
                   }}
                   onInspect={() => void inspect("tb")}
+                  onKindChange={() => void changeSourceKind("tb", "je")}
+                  kindChangeLabel="更正为 JE"
                 />
               ) : jePath ? (
                 <Card className="fx-source-empty">
@@ -1386,7 +1448,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   }
                   onClick={() => void run("deposit.preview")}
                 >
-                  测算预览
+                  {busy && <BusySpinner />}测算预览
                 </Button>
                 <Button
                   disabled={
@@ -1394,7 +1456,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   }
                   onClick={() => void run("deposit.export")}
                 >
-                  生成 Excel 底稿
+                  {busy && <BusySpinner />}生成 Excel 底稿
                 </Button>
               </div>
               {job && (
@@ -1666,6 +1728,8 @@ function SourceCard(props: {
   disabled: boolean;
   onClear: () => void;
   onInspect: () => void;
+  onKindChange?: () => void;
+  kindChangeLabel?: string;
 }) {
   return (
     <Card className="fx-source-card">
@@ -1684,6 +1748,17 @@ function SourceCard(props: {
           >
             移除
           </Button>
+          {props.onKindChange && (
+            <Button
+              variant="ghost"
+              size="sm"
+              type="button"
+              disabled={props.disabled}
+              onClick={props.onKindChange}
+            >
+              {props.kindChangeLabel ?? "更正类型"}
+            </Button>
+          )}
         </div>
         {props.path && !props.inspection && (
           <Button

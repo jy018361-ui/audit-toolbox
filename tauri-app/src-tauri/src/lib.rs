@@ -16,17 +16,17 @@ mod ledger_mapping;
 mod loan_interest;
 mod lpr;
 mod pdf_to_excel;
+mod resource_budget;
 mod roll_forward;
 mod spreadsheet_input;
-#[cfg(test)]
-mod xls_input_tests;
 mod storage;
 mod tabular;
-mod resource_budget;
-mod telemetry;
 mod tbje_check;
+mod telemetry;
 mod update_notes;
 mod wp;
+#[cfg(test)]
+mod xls_input_tests;
 
 use directories::ProjectDirs;
 use parking_lot::Mutex;
@@ -505,6 +505,7 @@ async fn job_start(
     let _ = storage.record_job_params(
         &job_id,
         excel_merger::tool_id(&method),
+        &method,
         &user_params,
     );
     Ok(job_id)
@@ -1273,7 +1274,7 @@ mod tests {
             "d:/tb/余额表.xlsx".to_owned(),
             "\\\\server\\share\\out.xlsx".to_owned(),
             "C:\\a.xlsx".to_owned(),
-            "E:\\logs\\".to_owned()
+            "E:\\logs\\".to_owned(),
         ];
         expected.sort();
         assert_eq!(out, expected);

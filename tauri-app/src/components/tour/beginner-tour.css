@@ -13,6 +13,12 @@
   inset: 0;
 }
 
+/* 居中卡片步骤的整屏压暗：这类步骤没有挖孔目标，聚光灯不渲染，
+   压暗改由挡板自己承担，避免"弹了引导框但背景全亮"。 */
+.tour-blocker-dimmed {
+  background: rgb(4 12 12 / 56%);
+}
+
 /* 聚光灯：透明挖孔 + 巨大外阴影压暗四周。位置变化时平滑滑到下一个目标。 */
 .tour-spotlight {
   position: fixed;
@@ -167,6 +173,73 @@
 
 .newbie-replay-row small {
   color: var(--text-muted);
+}
+
+/* ---- 分步提示（StepTourHint）：挂在步骤条正下方的小卡片 ---- */
+.step-indicator {
+  position: relative;
+}
+
+.step-hint {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 0;
+  /* 低于对话框(50)与窗口控制按钮(800)，不挡更重要的浮层 */
+  z-index: 40;
+  width: min(320px, calc(100vw - 32px));
+  padding: var(--sp-3) var(--sp-5);
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-overlay);
+  animation: tour-rise-in 240ms ease-out;
+}
+
+.step-hint-count {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.step-hint-title {
+  display: block;
+  margin: var(--sp-1) 0;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-strong);
+  color: var(--ink-strong);
+}
+
+.step-hint-body {
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  color: var(--ink);
+}
+
+.step-hint-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.step-hint-close:hover {
+  color: var(--ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .step-hint {
+    animation: none;
+  }
 }
 
 @keyframes tour-ping {

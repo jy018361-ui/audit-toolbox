@@ -27,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/EmptyState";
+import { SwitchInput } from "@/components/SwitchInput";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { Card } from "@/components/ui/card";
 import "./roll-forward.css";
@@ -1061,26 +1062,24 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
               kind="folder"
             />
             <label className="check-row">
-              <input
-                type="checkbox"
+              <SwitchInput
                 checked={rollPreferences.rememberLastProject}
-                onChange={(e) =>
+                onChange={(c) =>
                   setRollPreferences((current) => ({
                     ...current,
-                    rememberLastProject: e.target.checked,
+                    rememberLastProject: c,
                   }))
                 }
               />
               记住最后选择的项目与公司
             </label>
             <label className="check-row">
-              <input
-                type="checkbox"
+              <SwitchInput
                 checked={rollPreferences.openOutputAfterSuccess}
-                onChange={(e) =>
+                onChange={(c) =>
                   setRollPreferences((current) => ({
                     ...current,
-                    openOutputAfterSuccess: e.target.checked,
+                    openOutputAfterSuccess: c,
                   }))
                 }
               />
@@ -1126,44 +1125,33 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
             </Button>
           </div>
           <label className="check-row">
-            <input
-              type="checkbox"
+            <SwitchInput
               checked={company?.roll_wording ?? false}
-              onChange={(e) =>
-                updateCompany({ roll_wording: e.target.checked })
-              }
+              onChange={(c) => updateCompany({ roll_wording: c })}
             />
             结转 wording / 分析说明 / 调整分录汇总
           </label>
           <label className="check-row">
-            <input
-              type="checkbox"
+            <SwitchInput
               checked={company?.generate_summary ?? true}
-              onChange={(e) =>
-                updateCompany({ generate_summary: e.target.checked })
-              }
+              onChange={(c) => updateCompany({ generate_summary: c })}
             />
             生成 Roll Forward Summary
           </label>
           <label className="check-row">
-            <input
-              type="checkbox"
+            <SwitchInput
               checked={company?.llm_enhanced ?? false}
-              onChange={(e) =>
-                updateCompany({ llm_enhanced: e.target.checked })
-              }
+              onChange={(c) => updateCompany({ llm_enhanced: c })}
             />
             启用 AI 辅助运行前检查与复核
           </label>
           <label className="check-row">
-            <input
-              type="checkbox"
+            <SwitchInput
               checked={company?.llm_wording_revision ?? false}
-              onChange={(e) =>
+              onChange={(c) =>
                 updateCompany({
-                  llm_wording_revision: e.target.checked,
-                  llm_enhanced:
-                    e.target.checked || company?.llm_enhanced || false,
+                  llm_wording_revision: c,
+                  llm_enhanced: c || company?.llm_enhanced || false,
                 })
               }
             />
@@ -1216,13 +1204,12 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
             清空 CRA
           </Button>
           <label className="check-row">
-            <input
-              type="checkbox"
+            <SwitchInput
               disabled={!company?.cra_table_records.length}
               checked={company?.apply_cra ?? false}
-              onChange={(e) =>
+              onChange={(c) =>
                 updateCompany({
-                  apply_cra: e.target.checked,
+                  apply_cra: c,
                   cra_skip_confirmed: false,
                 })
               }
@@ -1230,15 +1217,12 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
             将 {company?.cra_table_records.length ?? 0} 条确认记录写入底稿
           </label>
           <label className="check-row">
-            <input
-              type="checkbox"
+            <SwitchInput
               checked={company?.cra_skip_confirmed ?? false}
-              onChange={(e) =>
+              onChange={(c) =>
                 updateCompany({
-                  cra_skip_confirmed: e.target.checked,
-                  apply_cra: e.target.checked
-                    ? false
-                    : (company?.apply_cra ?? false),
+                  cra_skip_confirmed: c,
+                  apply_cra: c ? false : (company?.apply_cra ?? false),
                 })
               }
             />
@@ -1306,10 +1290,9 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
               </select>
             </label>
             <label className="check-row">
-              <input
-                type="checkbox"
+              <SwitchInput
                 checked={craExceptionOnly}
-                onChange={(e) => setCraExceptionOnly(e.target.checked)}
+                onChange={setCraExceptionOnly}
               />
               仅看异常/需确认
             </label>
@@ -1358,13 +1341,12 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
                   key={`${String(record.subject_code)}-${index}`}
                 >
                   <label className="check-row">
-                    <input
-                      type="checkbox"
+                    <SwitchInput
                       checked={Boolean(record.apply)}
-                      onChange={(e) =>
+                      onChange={(c) =>
                         updateCraRecord(index, {
-                          apply: e.target.checked,
-                          match_status: e.target.checked ? "将写入" : "不写入",
+                          apply: c,
+                          match_status: c ? "将写入" : "不写入",
                         })
                       }
                     />

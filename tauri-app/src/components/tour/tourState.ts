@@ -3,15 +3,15 @@
  * 纯界面偏好，与主题一样存 localStorage（键名沿用 audit-toolbox 前缀），
  * 不走后端 settings，避免为一条界面标记增加跨进程读写。
  */
-const TOUR_STORAGE_KEY = "audit-toolbox.newbie-tour";
+const TOUR_STORAGE_KEY = "audit-toolbox.newbie-tour.v2";
 
 export type TourState = {
+  /** 新手模式总开关（侧边栏标题旁），默认开；关掉后不自动播放任何引导。 */
+  newbieMode?: boolean;
   /** 工作台导览是否播放过（含用户主动跳过）。 */
   workspaceDone?: boolean;
   /** 每个工具的上手引导是否播放过，键为 toolId。 */
   toolDone?: Record<string, boolean>;
-  /** 第一次进入新工具时是否自动播放引导，默认开。 */
-  autoToolTours?: boolean;
 };
 
 /** 只有 Tauri 桌面端才做"首次启动自动播放"；浏览器预览/测试环境不主动打扰。 */

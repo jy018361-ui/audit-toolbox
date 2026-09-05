@@ -207,27 +207,27 @@ fn import_classifications(params: &Value) -> Result<Value, AppError> {
     let range = if crate::spreadsheet_input::is_text(Path::new(path)) {
         crate::spreadsheet_input::text_range(Path::new(path))?
     } else {
-    let mut book = open_workbook_auto(path).map_err(|e| {
-        error(
-            "SOURCE_READ_FAILED",
-            "无法读取分类调整底稿。",
-            Some(e.to_string()),
-        )
-    })?;
-    // 新版底稿将面向用户的页签改为“分类复核”；继续兼容历史底稿的
-    // “分类调整”，避免用户以前导出的文件无法导回。
-    let sheet_name = if book.sheet_names().iter().any(|name| name == "分类复核") {
-        "分类复核"
-    } else {
-        "分类调整"
-    };
-    book.worksheet_range(sheet_name).map_err(|e| {
-        error(
-            "SOURCE_READ_FAILED",
-            "Excel中未找到“分类复核”或历史“分类调整”页。",
-            Some(e.to_string()),
-        )
-    })?
+        let mut book = open_workbook_auto(path).map_err(|e| {
+            error(
+                "SOURCE_READ_FAILED",
+                "无法读取分类调整底稿。",
+                Some(e.to_string()),
+            )
+        })?;
+        // 新版底稿将面向用户的页签改为“分类复核”；继续兼容历史底稿的
+        // “分类调整”，避免用户以前导出的文件无法导回。
+        let sheet_name = if book.sheet_names().iter().any(|name| name == "分类复核") {
+            "分类复核"
+        } else {
+            "分类调整"
+        };
+        book.worksheet_range(sheet_name).map_err(|e| {
+            error(
+                "SOURCE_READ_FAILED",
+                "Excel中未找到“分类复核”或历史“分类调整”页。",
+                Some(e.to_string()),
+            )
+        })?
     };
     let mut rows = range.rows();
     let headers = rows
@@ -2656,9 +2656,7 @@ fn shared_ambiguous_account_keys(
             .map(|(entity, code, _)| {
                 (
                     entity.trim().to_uppercase(),
-                    ledger_mapping::normalize_account_code(&ledger_mapping::account_code_of(
-                        code,
-                    )),
+                    ledger_mapping::normalize_account_code(&ledger_mapping::account_code_of(code)),
                 )
             })
             .collect::<HashSet<_>>()
@@ -2674,9 +2672,7 @@ fn shared_ambiguous_account_keys(
             .filter(|(entity, code, _)| {
                 shared.contains(&(
                     entity.trim().to_uppercase(),
-                    ledger_mapping::normalize_account_code(&ledger_mapping::account_code_of(
-                        code,
-                    )),
+                    ledger_mapping::normalize_account_code(&ledger_mapping::account_code_of(code)),
                 )) && policy.is_ambiguous(entity, code)
             })
             .map(|(entity, code, name)| policy.account_key(entity, code, name))

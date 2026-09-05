@@ -169,7 +169,11 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
   }, [path, outputPathTouched]);
 
   // 历史记录「继续任务」：回填清单文件/Sheet/标题行/映射/基准日/输出路径，
-  // 不自动读取——重新读取会用建议映射覆盖，预览等用户点「读取文件」再补。
+  // 不自动读取——重新读取同一文件时用存档映射顶回建议值（见 inspect）。
+  // restoredDepMapping 就是那份待顶回的存档，一次性消费。
+  const restoredDepMapping = useRef<{ path: string; mapping: DepMapping } | null>(
+    null,
+  );
   useTaskRestore(tool.id, (restore) => {
     const p = restore.params as {
       path?: string;
@@ -180,6 +184,10 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
       outputPath?: string;
     };
     if (typeof p.path !== "string" || !p.path) return;
+    restoredDepMapping.current =
+      p.mapping && typeof p.mapping === "object" && Object.keys(p.mapping).length
+        ? { path: p.path, mapping: p.mapping }
+        : null;
     reviewGeneration.current += 1;
     setStep(1);
     setPath(p.path);
@@ -224,13 +232,23 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
       setStep(1);
       setSheet(value.selectedSheet ?? overrides?.sheet ?? sheet);
       setHeaderRow(String(value.detectedHeaderRow ?? ""));
+      // 历史恢复后重新读取同一文件：存档映射顶回建议映射（一次性消费，
+      // 换文件照旧用建议值），且不再自动送 LLM 复核——那份映射已确认过。
+      const stash = restoredDepMapping.current;
+      const match =
+        stash &&
+        stash.path.trim().toLowerCase() === target.trim().toLowerCase()
+          ? stash
+          : undefined;
+      if (match) restoredDepMapping.current = null;
       const suggested: DepMapping = {};
       for (const [key] of DEP_MAPPING_ROLES) {
         suggested[key] = value.suggestedMapping?.[key];
       }
-      setMapping(suggested);
+      setMapping(match ? match.mapping : suggested);
       setLlmChanges([]);
       setLlmPending([]);
+      if (match) return;
       void review(
         suggested,
         value.selectedSheet ?? "",

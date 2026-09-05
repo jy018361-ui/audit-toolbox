@@ -563,7 +563,11 @@ fn contract_rows(
                 let (op, op_note, op_inferred) = if mapping.contains_key("openingPrincipal") {
                     (op_col, "", false)
                 } else if repaid > 0.0 {
-                    (outstanding + repaid, "；期初按期末余额＋本期归还推回", false)
+                    (
+                        outstanding + repaid,
+                        "；期初按期末余额＋本期归还推回",
+                        false,
+                    )
                 } else if end.is_some_and(|e| e > period.0 && e <= period.1) {
                     // 台账有到期日（或期限推得）：到期日落在报告期内的借款，
                     // 当期减少＝合同金额－期末余额是日期锚定的确定口径（期末为 0
@@ -644,7 +648,11 @@ fn contract_rows(
             principal_days: 0.0,
             rate_basis_date: None,
             lpr_term: String::new(),
-            match_status: if inferred { "待复核".into() } else { "已匹配".into() },
+            match_status: if inferred {
+                "待复核".into()
+            } else {
+                "已匹配".into()
+            },
             match_basis: basis,
             events: vec![],
             contract_start: start,
@@ -1158,7 +1166,8 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
         // 期初/增加/减少，两列与差异都是活公式，跟着重算。
         match row.ledger_closing {
             Some(v) => {
-                ws.write_number_with_format(y, 4, v, &amount).map_err(xlsx)?;
+                ws.write_number_with_format(y, 4, v, &amount)
+                    .map_err(xlsx)?;
             }
             None => {
                 ws.write_blank(y, 4, &amount).map_err(xlsx)?;
@@ -1411,8 +1420,7 @@ fn write_segments_sheet(wb: &mut Workbook, rows: &[LoanRow]) -> Result<(), AppEr
             ws.write_formula_with_format(
                 y,
                 5,
-                Formula::new(format!("=D{excel_row}-C{excel_row}+1"))
-                    .set_result(days.to_string()),
+                Formula::new(format!("=D{excel_row}-C{excel_row}+1")).set_result(days.to_string()),
                 &integer,
             )
             .map_err(xlsx)?;
@@ -1435,10 +1443,9 @@ fn write_segments_sheet(wb: &mut Workbook, rows: &[LoanRow]) -> Result<(), AppEr
             ws.write_formula_with_format(
                 y,
                 8,
-                Formula::new(format!("=E{excel_row}*H{excel_row}*F{excel_row}/365"))
-                    .set_result(
-                        (seg.principal * row.effective_rate * days as f64 / 365.0).to_string(),
-                    ),
+                Formula::new(format!("=E{excel_row}*H{excel_row}*F{excel_row}/365")).set_result(
+                    (seg.principal * row.effective_rate * days as f64 / 365.0).to_string(),
+                ),
                 &amount,
             )
             .map_err(xlsx)?;
@@ -1470,7 +1477,17 @@ fn write_segments_sheet(wb: &mut Workbook, rows: &[LoanRow]) -> Result<(), AppEr
         }
     }
     // 显式定宽，避免 autofit 被长借款标识或文本撑爆。
-    for (col, width) in [(0u16, 16.0), (1, 6.0), (2, 12.0), (3, 14.0), (4, 15.0), (5, 8.0), (6, 18.0), (7, 12.0), (8, 15.0)] {
+    for (col, width) in [
+        (0u16, 16.0),
+        (1, 6.0),
+        (2, 12.0),
+        (3, 14.0),
+        (4, 15.0),
+        (5, 8.0),
+        (6, 18.0),
+        (7, 12.0),
+        (8, 15.0),
+    ] {
         ws.set_column_width(col, width).map_err(xlsx)?;
     }
     Ok(())
@@ -1622,8 +1639,7 @@ fn source(params: &Value, key: &str) -> Result<(Table, Map<String, Value>), AppE
     )
     .into_iter()
     .filter(|issue| {
-        keep
-            .as_deref()
+        keep.as_deref()
             .is_none_or(|mask| mask.get(issue.row_index).copied().unwrap_or(false))
     })
     .collect::<Vec<_>>();
@@ -2802,7 +2818,10 @@ mod loan_form_tests {
         );
         // 分段明细：天数/积数/利率/段利息四列全是活公式，利率引用主表。
         let seg_names = calamine::Reader::sheet_names(&book).to_vec();
-        assert!(seg_names.iter().any(|n| n == "计息分段明细"), "{seg_names:?}");
+        assert!(
+            seg_names.iter().any(|n| n == "计息分段明细"),
+            "{seg_names:?}"
+        );
         let seg_formulas = calamine::Reader::worksheet_formula(&mut book, "计息分段明细").unwrap();
         assert_eq!(seg_formulas.get_value((1, 5)).unwrap(), "D2-C2+1");
         assert_eq!(seg_formulas.get_value((1, 6)).unwrap(), "E2*F2");
@@ -2852,10 +2871,7 @@ mod loan_form_tests {
             values2.get_value((1, 4)),
             Some(calamine::Data::Empty) | None
         ));
-        assert_eq!(
-            values2.get_value((1, 5)).unwrap().to_string(),
-            "1000000"
-        );
+        assert_eq!(values2.get_value((1, 5)).unwrap().to_string(), "1000000");
         let _ = std::fs::remove_file(&out);
     }
 
@@ -3433,16 +3449,51 @@ mod tests {
         let path = dir.join("contract-dates.xlsx");
         let mut book = Workbook::new();
         let sheet = book.add_worksheet();
-        let headers = ["合同编号", "借款金额", "起始日", "到期日", "利率", "期末余额"];
+        let headers = [
+            "合同编号",
+            "借款金额",
+            "起始日",
+            "到期日",
+            "利率",
+            "期末余额",
+        ];
         for (c, h) in headers.iter().enumerate() {
             sheet.write_string(0, c as u16, *h).unwrap();
         }
         let d = |y: i32, m: u32, day: u32| NaiveDate::from_ymd_opt(y, m, day).unwrap();
         let rows: [(&str, f64, NaiveDate, NaiveDate, f64, f64); 4] = [
-            ("A-存续部分归还", 100_000_000.0, d(2023, 1, 10), d(2028, 1, 9), 0.0385, 80_000_000.0),
-            ("B-年内新放款", 50_000_000.0, d(2025, 3, 1), d(2026, 2, 28), 0.0435, 50_000_000.0),
-            ("C-年内到期结清", 8_000_000.0, d(2024, 2, 5), d(2025, 2, 4), 0.031, 0.0),
-            ("D-期前结清", 29_800_000.0, d(2023, 4, 20), d(2024, 4, 19), 0.033, 0.0),
+            (
+                "A-存续部分归还",
+                100_000_000.0,
+                d(2023, 1, 10),
+                d(2028, 1, 9),
+                0.0385,
+                80_000_000.0,
+            ),
+            (
+                "B-年内新放款",
+                50_000_000.0,
+                d(2025, 3, 1),
+                d(2026, 2, 28),
+                0.0435,
+                50_000_000.0,
+            ),
+            (
+                "C-年内到期结清",
+                8_000_000.0,
+                d(2024, 2, 5),
+                d(2025, 2, 4),
+                0.031,
+                0.0,
+            ),
+            (
+                "D-期前结清",
+                29_800_000.0,
+                d(2023, 4, 20),
+                d(2024, 4, 19),
+                0.033,
+                0.0,
+            ),
         ];
         let date_fmt = Format::new().set_num_format("yyyy-mm-dd");
         for (i, (id, amt, s, e, r, close)) in rows.iter().enumerate() {
@@ -3457,8 +3508,12 @@ mod tests {
         book.save(&path).unwrap();
         let insp = inspect(&inspect_params(&path, 0)).unwrap();
         let header_row = insp["headerRow"].as_u64().unwrap_or(1) as usize;
-        let out = run_preview(&preview_params(&path, header_row, insp["suggestedMapping"].clone()))
-            .unwrap();
+        let out = run_preview(&preview_params(
+            &path,
+            header_row,
+            insp["suggestedMapping"].clone(),
+        ))
+        .unwrap();
         let rows = out["rows"].as_array().unwrap();
         let by_id = |id: &str| {
             rows.iter()
@@ -3489,16 +3544,32 @@ mod tests {
         // 到期日落在报告期内：减少＝合同金额是日期锚定的确定口径，不标待复核。
         assert_eq!(c["matchStatus"].as_str().unwrap(), "已匹配");
         assert!(c["matchBasis"].as_str().unwrap().contains("期内到期"));
-        assert!((c["calculatedInterest"].as_f64().unwrap() - 8_000_000.0 * 0.031 * 34.0 / 365.0).abs() < 0.01);
+        assert!(
+            (c["calculatedInterest"].as_f64().unwrap() - 8_000_000.0 * 0.031 * 34.0 / 365.0).abs()
+                < 0.01
+        );
         // 期前结清：四栏全零、不计息。
         let dd = by_id("D-期前结清");
-        for key in ["openingPrincipal", "additions", "reductions", "closingPrincipal"] {
+        for key in [
+            "openingPrincipal",
+            "additions",
+            "reductions",
+            "closingPrincipal",
+        ] {
             assert_eq!(dd[key].as_f64().unwrap(), 0.0, "D 行 {key}");
         }
         assert_eq!(dd["calculatedInterest"].as_f64().unwrap(), 0.0);
-        assert!(dd["matchBasis"].as_str().unwrap().contains("报告期前已结清"));
+        assert!(
+            dd["matchBasis"]
+                .as_str()
+                .unwrap()
+                .contains("报告期前已结清")
+        );
         // 台账期末原值：在账的行 Some、期前结清行 None（不属于本期）。
-        assert_eq!(a["ledgerClosing"].as_f64().map(|v| v as i64), Some(80_000_000));
+        assert_eq!(
+            a["ledgerClosing"].as_f64().map(|v| v as i64),
+            Some(80_000_000)
+        );
         assert_eq!(dd["ledgerClosing"].as_f64().map(|v| v as i64), None);
         // 导出底稿保留台账原始列：表头行应含输入文件全部列名，数据行带原值。
         // 注意必须用内存行导出——JSON 结果不含 #[serde(skip)] 的原始列。
@@ -3517,8 +3588,18 @@ mod tests {
         let header_row: Vec<String> = (0..sheet.width())
             .map(|c| sheet.get_value((0, c as u32)).unwrap().to_string())
             .collect();
-        for name in ["合同编号", "借款金额", "起始日", "到期日", "利率", "期末余额"] {
-            assert!(header_row.contains(&name.to_string()), "底稿缺台账原始列 {name}");
+        for name in [
+            "合同编号",
+            "借款金额",
+            "起始日",
+            "到期日",
+            "利率",
+            "期末余额",
+        ] {
+            assert!(
+                header_row.contains(&name.to_string()),
+                "底稿缺台账原始列 {name}"
+            );
         }
         let id_col = header_row.iter().position(|h| h == "合同编号").unwrap();
         assert_eq!(
@@ -3536,10 +3617,9 @@ mod tests {
         };
         assert_eq!(cell(4), 80_000_000);
         assert_eq!(cell(5), 80_000_000);
-                // 逐行「期初＋增加－减少＝期末」。
+        // 逐行「期初＋增加－减少＝期末」。
         for r in rows {
-            let eq = r["openingPrincipal"].as_f64().unwrap()
-                + r["additions"].as_f64().unwrap()
+            let eq = r["openingPrincipal"].as_f64().unwrap() + r["additions"].as_f64().unwrap()
                 - r["reductions"].as_f64().unwrap()
                 - r["closingPrincipal"].as_f64().unwrap();
             assert!(eq.abs() < 0.01, "{:?} 勾稽不平：{eq}", r["loanId"]);
@@ -3880,20 +3960,31 @@ mod tests {
 
 #[cfg(test)]
 mod zz_debug2 {
-    use super::*;
     use super::tests::{inspect_params, preview_params, run_preview, testset_dir};
+    use super::*;
     #[test]
     #[ignore = "debug"]
     fn zz_dump_01_clean() {
         let path = testset_dir().join("01-华辰重型装备集团有限公司-借款合同台账.xlsx");
         let insp = inspect(&inspect_params(&path, 0)).unwrap();
         let header_row = insp["headerRow"].as_u64().unwrap_or(1) as usize;
-        let result = run_preview(&preview_params(&path, header_row, insp["suggestedMapping"].clone())).unwrap();
+        let result = run_preview(&preview_params(
+            &path,
+            header_row,
+            insp["suggestedMapping"].clone(),
+        ))
+        .unwrap();
         for r in result["rows"].as_array().unwrap().iter().take(3) {
-            println!("{} | fixed={:?} bench={:?} bps={:?} eff={} status={} | {}",
-                r["loanId"].as_str().unwrap_or(""), r["fixedRate"], r["benchmarkRate"], r["spreadBps"],
-                r["effectiveRate"].as_f64().unwrap_or(0.0), r["matchStatus"].as_str().unwrap_or(""),
-                r["matchBasis"].as_str().unwrap_or(""));
+            println!(
+                "{} | fixed={:?} bench={:?} bps={:?} eff={} status={} | {}",
+                r["loanId"].as_str().unwrap_or(""),
+                r["fixedRate"],
+                r["benchmarkRate"],
+                r["spreadBps"],
+                r["effectiveRate"].as_f64().unwrap_or(0.0),
+                r["matchStatus"].as_str().unwrap_or(""),
+                r["matchBasis"].as_str().unwrap_or("")
+            );
         }
     }
 }

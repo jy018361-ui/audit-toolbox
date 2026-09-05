@@ -235,7 +235,16 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
   }, [endPath, outputPathTouched]);
 
   // 历史记录「继续任务」：回填期初/期末文件与全部配置（含匹配键与映射），
-  // 不自动重新读取——读取会覆盖映射，预览等用户点「读取两表」再补。
+  // 不自动重新读取——重新读取同一对文件时用存档映射/匹配键顶回建议值
+  // （见 inspect），换文件照旧。
+  const restoredPolicyRef = useRef<{
+    beginPath: string;
+    endPath: string;
+    beginMapping: PolicyMapping;
+    endMapping: PolicyMapping;
+    beginKeys: string[];
+    endKeys: string[];
+  } | null>(null);
   useTaskRestore(tool.id, (restore) => {
     const p = restore.params as {
       beginPath?: string;
@@ -254,6 +263,19 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
     };
     if (typeof p.beginPath !== "string" || !p.beginPath) return;
     if (typeof p.endPath !== "string" || !p.endPath) return;
+    const isMapping = (value: unknown): value is PolicyMapping =>
+      Boolean(value && typeof value === "object");
+    restoredPolicyRef.current =
+      isMapping(p.beginMapping) && isMapping(p.endMapping)
+        ? {
+            beginPath: p.beginPath,
+            endPath: p.endPath,
+            beginMapping: p.beginMapping,
+            endMapping: p.endMapping,
+            beginKeys: Array.isArray(p.beginKeys) ? p.beginKeys : [],
+            endKeys: Array.isArray(p.endKeys) ? p.endKeys : [],
+          }
+        : null;
     reviewGeneration.current += 1;
     setStep(2);
     setBeginPath(p.beginPath);
@@ -331,12 +353,25 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
         value.suggestedMapping.begin?.matchKeys,
       );
       const suggestedEndKeys = asKeys(value.suggestedMapping.end?.matchKeys);
-      setBeginMapping(suggestedBegin);
-      setEndMapping(suggestedEnd);
-      setBeginKeys(suggestedBeginKeys);
-      setEndKeys(suggestedEndKeys);
+      // 历史恢复后重新读取同一对文件：存档映射/匹配键顶回建议值（一次性
+      // 消费，换文件照旧），且不再自动送 LLM 复核——那份映射已确认过。
+      const stash = restoredPolicyRef.current;
+      const samePath = (a: string, b: string) =>
+        a.trim().toLowerCase() === b.trim().toLowerCase();
+      const match =
+        stash &&
+        samePath(stash.beginPath, bPath) &&
+        samePath(stash.endPath, ePath)
+          ? stash
+          : undefined;
+      if (match) restoredPolicyRef.current = null;
+      setBeginMapping(match ? match.beginMapping : suggestedBegin);
+      setEndMapping(match ? match.endMapping : suggestedEnd);
+      setBeginKeys(match ? match.beginKeys : suggestedBeginKeys);
+      setEndKeys(match ? match.endKeys : suggestedEndKeys);
       setLlmChanges([]);
       setLlmPending([]);
+      if (match) return;
       void review({
         beginPath: bPath,
         endPath: ePath,

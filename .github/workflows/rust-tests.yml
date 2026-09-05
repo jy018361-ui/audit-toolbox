@@ -32,4 +32,5 @@ jobs:
           workspaces: tauri-app/src-tauri
 
       - name: Run tests
+        working-directory: tauri-app
         run: cargo test --manifest-path src-tauri/Cargo.toml

@@ -281,10 +281,15 @@ pub(super) fn prepare(
                 .map_err(sql_error)?;
         }
         if last_progress.elapsed() >= Duration::from_millis(500) {
+            let current = if cache.count == 0 {
+                0
+            } else {
+                (index + 1).saturating_mul(550) / cache.count
+            };
             progress(
                 "prepare",
-                index + 1,
-                cache.count,
+                current.min(550),
+                1000,
                 "正在分批整理凭证并建立磁盘索引…",
             );
             last_progress = Instant::now();
@@ -293,7 +298,35 @@ pub(super) fn prepare(
     })?;
     drop(insert);
     check_cancel(cancel)?;
-    ledger.db.execute_batch("COMMIT; CREATE INDEX processed_voucher ON processed(voucher,seq); CREATE INDEX processed_account ON processed(account_norm,voucher); CREATE INDEX processed_sign ON processed(signkey,seq); CREATE INDEX processed_sign_noentity ON processed(signkey_noentity,seq);").map_err(sql_error)?;
+    progress("prepare", 550, 1000, "凭证明细整理完成，正在提交磁盘数据…");
+    ledger.db.execute_batch("COMMIT").map_err(sql_error)?;
+    for (current, sql, message) in [
+        (
+            620,
+            "CREATE INDEX processed_voucher ON processed(voucher,seq)",
+            "正在建立凭证检索索引…",
+        ),
+        (
+            680,
+            "CREATE INDEX processed_account ON processed(account_norm,voucher)",
+            "正在建立科目检索索引…",
+        ),
+        (
+            730,
+            "CREATE INDEX processed_sign ON processed(signkey,seq)",
+            "正在建立借贷方向索引…",
+        ),
+        (
+            770,
+            "CREATE INDEX processed_sign_noentity ON processed(signkey_noentity,seq)",
+            "正在完成跨主体检索索引…",
+        ),
+    ] {
+        progress("prepare", current, 1000, message);
+        ledger.db.execute_batch(sql).map_err(sql_error)?;
+        check_cancel(cancel)?;
+    }
+    progress("prepare", 790, 1000, "正在识别凭证金额方向…");
     let evidence = ledger.evidence(false, cancel)?;
     let convention = sign_override
         .or(evidence.convention)
@@ -306,6 +339,7 @@ pub(super) fn prepare(
             "UPDATE processed SET net=unsigned"
         })
         .map_err(sql_error)?;
+    progress("prepare", 830, 1000, "正在校验凭证借贷平衡…");
     // Accumulate in original row order inside each voucher, just as the memory
     // implementation does. SQL SUM may use different floating-point summation.
     ledger
@@ -319,7 +353,7 @@ pub(super) fn prepare(
     let mut cursor = cursor_stmt.query([]).map_err(sql_error)?;
     let mut key: Option<String> = None;
     let mut balance = 0.0_f64;
-    let mut index = 0;
+    let mut index: usize = 0;
     let mut reject = ledger
         .db
         .prepare("INSERT INTO rejected VALUES(?1)")
@@ -328,6 +362,12 @@ pub(super) fn prepare(
         if index % 1000 == 0 {
             check_cancel(cancel)?;
             crate::resource_budget::check_available()?;
+            let current = if ledger.count == 0 {
+                830
+            } else {
+                830 + index.saturating_mul(140) / ledger.count
+            };
+            progress("prepare", current.min(970), 1000, "正在校验凭证借贷平衡…");
         }
         index += 1;
         let next: String = record.get(0).map_err(sql_error)?;
@@ -350,11 +390,13 @@ pub(super) fn prepare(
     drop(cursor);
     drop(cursor_stmt);
     drop(reject);
+    progress("prepare", 975, 1000, "正在清理不完整凭证并完成索引…");
     ledger.db.execute_batch("DELETE FROM processed WHERE candidate=1 AND voucher IN (SELECT voucher FROM rejected); DROP TABLE rejected; COMMIT;").map_err(sql_error)?;
     let count = ledger
         .db
         .query_row("SELECT COUNT(*) FROM processed", [], |r| r.get::<_, i64>(0))
         .map_err(sql_error)? as usize;
+    progress("prepare", 1000, 1000, "凭证磁盘索引已完成。");
     Ok(DiskLedger {
         count,
         convention,
@@ -642,6 +684,7 @@ impl DiskLedger {
         headers: &[String],
         rows_per_part: usize,
         mark_loss_transfer: bool,
+        progress: Progress<'_>,
         cancel: &AtomicBool,
     ) -> Result<DetailExport, AppError> {
         use std::io::Write;
@@ -689,6 +732,7 @@ impl DiskLedger {
             .write_record(&output_headers)
             .map_err(csv_error)?;
         let mut written = 0usize;
+        let mut last_progress = Instant::now();
         let mut write_row = |mut row: Vec<String>, loss: bool| -> Result<(), AppError> {
             if written > 0 && written % per_part == 0 {
                 writer.as_mut().unwrap().flush().map_err(io_error)?;
@@ -722,6 +766,15 @@ impl DiskLedger {
                 .write_record(row)
                 .map_err(csv_error)?;
             written += 1;
+            if last_progress.elapsed() >= Duration::from_millis(500) {
+                progress(
+                    "detail",
+                    written,
+                    total,
+                    &format!("正在流式写出凭证明细：{} / {} 行…", written, total),
+                );
+                last_progress = Instant::now();
+            }
             Ok(())
         };
         let result = if mark_loss_transfer {
@@ -746,6 +799,7 @@ impl DiskLedger {
             }
             paths.push(final_path);
         }
+        progress("detail", total, total, "凭证明细已写出。");
         Ok(DetailExport {
             paths,
             rows: written,
@@ -902,6 +956,7 @@ mod tests {
                 &ledger.table.headers,
                 2,
                 true,
+                &|_, _, _, _| {},
                 &cancel,
             )
             .unwrap();

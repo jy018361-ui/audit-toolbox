@@ -953,17 +953,43 @@ fn source_from_kanzhang(job: &KanzhangParams) -> SourceParams {
     }
 }
 
+fn scaled_progress(
+    progress: Progress<'_>,
+    start: usize,
+    end: usize,
+    phase: &str,
+    current: usize,
+    total: usize,
+    message: &str,
+) {
+    if total == 0 {
+        progress(phase, 0, 0, message);
+        return;
+    }
+    let width = end.saturating_sub(start);
+    let scaled = start + width.saturating_mul(current.min(total)) / total;
+    progress(phase, scaled, 1000, message);
+}
+
 fn prepare_disk_ledger(
     job: &KanzhangParams,
-    progress: Progress<'_>,
+    cache_progress: Progress<'_>,
+    ledger_progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<(LedgerMapping, disk_ledger::DiskLedger), AppError> {
-    let cache = large_csv::load(&source_from_kanzhang(job), progress, cancel)?;
+    let cache = large_csv::load(&source_from_kanzhang(job), cache_progress, cancel)?;
     let mapping = job
         .mapping
         .clone()
         .unwrap_or_else(|| suggest_mapping(&cache.table.headers, &cache.table.rows));
-    let ledger = disk_ledger::prepare(&cache, &mapping, None, job.header_row, progress, cancel)?;
+    let ledger = disk_ledger::prepare(
+        &cache,
+        &mapping,
+        None,
+        job.header_row,
+        ledger_progress,
+        cancel,
+    )?;
     Ok((mapping, ledger))
 }
 
@@ -986,9 +1012,15 @@ fn kanzhang_filter_preview_disk(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
-    progress("read", 0, 3, "正在打开低内存缓存并建立凭证索引…");
-    let (mapping, ledger) = prepare_disk_ledger(job, progress, cancel)?;
-    progress("filter", 1, 3, "正在磁盘上筛选目标科目和完整凭证…");
+    progress("read", 0, 1000, "正在打开磁盘分批缓存…");
+    let cache_progress = |phase: &str, current: usize, total: usize, message: &str| {
+        scaled_progress(progress, 0, 150, phase, current, total, message)
+    };
+    let ledger_progress = |phase: &str, current: usize, total: usize, message: &str| {
+        scaled_progress(progress, 150, 850, phase, current, total, message)
+    };
+    let (mapping, ledger) = prepare_disk_ledger(job, &cache_progress, &ledger_progress, cancel)?;
+    progress("filter", 880, 1000, "正在磁盘上筛选目标科目和完整凭证…");
     let rows = select_disk_batch(&ledger, &job.target_accounts, cancel)?;
     let mut preview = Vec::new();
     ledger.visit_selected(cancel, |row, _| {
@@ -1009,8 +1041,14 @@ fn export_kanzhang_disk(
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
     let started = Instant::now();
-    progress("read", 0, 6, "正在打开低内存缓存并建立凭证索引…");
-    let (mapping, ledger) = prepare_disk_ledger(job, progress, cancel)?;
+    progress("read", 0, 1000, "正在打开磁盘分批缓存…");
+    let cache_progress = |phase: &str, current: usize, total: usize, message: &str| {
+        scaled_progress(progress, 0, 100, phase, current, total, message)
+    };
+    let ledger_progress = |phase: &str, current: usize, total: usize, message: &str| {
+        scaled_progress(progress, 100, 500, phase, current, total, message)
+    };
+    let (mapping, ledger) = prepare_disk_ledger(job, &cache_progress, &ledger_progress, cancel)?;
     let batches = normalized_batches(job);
     let budget = crate::resource_budget::budget()?;
     let analysis_budget = (budget.worker_bytes / 4).max(budget.batch_bytes);
@@ -1018,10 +1056,13 @@ fn export_kanzhang_disk(
     let mut batch_results = Vec::new();
     for (batch_index, batch) in batches.iter().enumerate() {
         check_cancel(cancel)?;
+        let batch_start: usize = 500 + 490 * batch_index / batches.len().max(1);
+        let batch_end: usize = 500 + 490 * (batch_index + 1) / batches.len().max(1);
+        let batch_width = batch_end.saturating_sub(batch_start);
         progress(
             "filter",
-            1,
-            6,
+            batch_start,
+            1000,
             &format!("正在磁盘上筛选批次 {}：{}…", batch_index + 1, batch.name),
         );
         let selected_rows = select_disk_batch(&ledger, &batch.accounts, cancel)?;
@@ -1044,6 +1085,32 @@ fn export_kanzhang_disk(
         let suite_enabled =
             job.include_pivot || job.include_voucher_types || !job.pivot_rows.is_empty();
         let suite = if suite_enabled {
+            let suite_progress = |phase: &str, current: usize, total: usize, message: &str| {
+                let (local_start, local_end) = match phase {
+                    "analyze" => (
+                        batch_start + batch_width * 5 / 100,
+                        batch_start + batch_width * 50 / 100,
+                    ),
+                    "classify" => (
+                        batch_start + batch_width * 50 / 100,
+                        batch_start + batch_width * 65 / 100,
+                    ),
+                    "write" => (
+                        batch_start + batch_width * 65 / 100,
+                        batch_start + batch_width * 80 / 100,
+                    ),
+                    _ => (batch_start, batch_start + batch_width * 80 / 100),
+                };
+                scaled_progress(
+                    progress,
+                    local_start,
+                    local_end,
+                    phase,
+                    current,
+                    total,
+                    message,
+                )
+            };
             Some(disk_suite::write_suite(
                 &ledger,
                 &mapping,
@@ -1051,7 +1118,7 @@ fn export_kanzhang_disk(
                 job,
                 &suite_path,
                 analysis_budget,
-                progress,
+                &suite_progress,
                 cancel,
             )?)
         } else {
@@ -1059,17 +1126,35 @@ fn export_kanzhang_disk(
         };
         progress(
             "write",
-            5,
-            6,
+            batch_start + batch_width * 82 / 100,
+            1000,
             &format!("正在流式写出批次 {} 明细…", batch_index + 1),
         );
+        let detail_progress = |phase: &str, current: usize, total: usize, message: &str| {
+            scaled_progress(
+                progress,
+                batch_start + batch_width * 82 / 100,
+                batch_start + batch_width * 96 / 100,
+                phase,
+                current,
+                total,
+                message,
+            )
+        };
         let detail = ledger.write_selected_csv(
             &output,
             &ledger.table.headers,
             job.rows_per_sheet,
             job.mark_loss_transfer,
+            &detail_progress,
             cancel,
         )?;
+        progress(
+            "write",
+            batch_start + batch_width * 97 / 100,
+            1000,
+            &format!("正在处理批次 {} 的剔除明细…", batch_index + 1),
+        );
         outputs.extend(
             detail
                 .paths
@@ -1088,6 +1173,12 @@ fn export_kanzhang_disk(
         if suite_enabled {
             outputs.push(suite_path.to_string_lossy().into_owned());
         }
+        progress(
+            "write",
+            batch_end,
+            1000,
+            &format!("批次 {} 已完成。", batch_index + 1),
+        );
         batch_results.push(
             json!({"name":batch.name,"accounts":batch.accounts,"rows":detail.rows,
             "excludedRows":if excluded.is_some(){Value::String("已流式导出".into())}else{Value::from(0)},"summaryRows":suite.as_ref().map(|v|v.summary.rows.len()).unwrap_or(0),
@@ -5661,6 +5752,24 @@ fn je_mark_batches(job: &JeMarkParams) -> Result<Vec<LedgerBatch>, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disk_export_subprogress_is_scaled_into_its_overall_range() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let record = |phase: &str, current: usize, total: usize, message: &str| {
+            events
+                .borrow_mut()
+                .push((phase.to_owned(), current, total, message.to_owned()));
+        };
+        scaled_progress(&record, 100, 500, "prepare", 550, 1000, "扫描完成");
+        scaled_progress(&record, 100, 500, "prepare", 1000, 1000, "索引完成");
+        let events = events.borrow();
+        assert_eq!(events[0].1, 320);
+        assert_eq!(events[1].1, 500);
+        assert!(events.iter().all(|event| event.2 == 1000));
+        assert!(events.iter().all(|event| event.1 < 1000));
+    }
+
     fn temp_dir(name: &str) -> PathBuf {
         let path =
             std::env::temp_dir().join(format!("audit-toolbox-{name}-{}", uuid::Uuid::new_v4()));

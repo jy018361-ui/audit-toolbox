@@ -8,6 +8,7 @@ import {
   pickPath,
 } from "./api";
 import type { ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { errorText } from "@/lib/errors";
 import { PageHeader } from "@/components/PageHeader";
 import { ErrorBox } from "@/components/ErrorBox";
@@ -232,6 +233,60 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
     if (outputPathTouched) return;
     setOutputPath(endPath ? faPolicyDefaultOutputPath(endPath) : "");
   }, [endPath, outputPathTouched]);
+
+  // 历史记录「继续任务」：回填期初/期末文件与全部配置（含匹配键与映射），
+  // 不自动重新读取——读取会覆盖映射，预览等用户点「读取两表」再补。
+  useTaskRestore(tool.id, (restore) => {
+    const p = restore.params as {
+      beginPath?: string;
+      endPath?: string;
+      beginSheet?: string;
+      endSheet?: string;
+      beginHeaderRow?: number;
+      endHeaderRow?: number;
+      beginKeys?: string[];
+      endKeys?: string[];
+      beginMapping?: PolicyMapping;
+      endMapping?: PolicyMapping;
+      beginDisplayName?: string;
+      endDisplayName?: string;
+      outputPath?: string;
+    };
+    if (typeof p.beginPath !== "string" || !p.beginPath) return;
+    if (typeof p.endPath !== "string" || !p.endPath) return;
+    reviewGeneration.current += 1;
+    setStep(2);
+    setBeginPath(p.beginPath);
+    setEndPath(p.endPath);
+    setBeginSheet(p.beginSheet ?? "");
+    setEndSheet(p.endSheet ?? "");
+    setBeginHeaderRow(p.beginHeaderRow != null ? String(p.beginHeaderRow) : "");
+    setEndHeaderRow(p.endHeaderRow != null ? String(p.endHeaderRow) : "");
+    setInspection(undefined);
+    setBeginKeys(Array.isArray(p.beginKeys) ? p.beginKeys : []);
+    setEndKeys(Array.isArray(p.endKeys) ? p.endKeys : []);
+    setBeginMapping(
+      p.beginMapping && typeof p.beginMapping === "object"
+        ? p.beginMapping
+        : {},
+    );
+    setEndMapping(
+      p.endMapping && typeof p.endMapping === "object" ? p.endMapping : {},
+    );
+    if (typeof p.beginDisplayName === "string" && p.beginDisplayName)
+      setBeginDisplayName(p.beginDisplayName);
+    if (typeof p.endDisplayName === "string" && p.endDisplayName)
+      setEndDisplayName(p.endDisplayName);
+    if (typeof p.outputPath === "string" && p.outputPath) {
+      setOutputPath(p.outputPath);
+      setOutputPathTouched(true);
+    }
+    setLlmReview(undefined);
+    setLlmChanges([]);
+    setLlmPending([]);
+    setError("");
+    setJob(undefined);
+  });
 
   /// 两表检查直接复用 fa.inspect；建议映射裁剪到政策四要素 + 匹配键。
   async function inspect(overrides?: { beginPath?: string; endPath?: string }) {

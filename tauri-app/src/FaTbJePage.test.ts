@@ -5,7 +5,7 @@ import {
   splitFaAccount,
   suggestFaAccount,
   suggestFaAccounts,
-} from "./FaTbJePage";
+} from "./FaTbjePage";
 
 describe("FA TB+JE account role presets", () => {
   it("suggests roles without creating an independent ledger dictionary", () => {

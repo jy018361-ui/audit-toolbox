@@ -8,12 +8,14 @@ import {
   pickPath,
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { errorText } from "@/lib/errors";
 import { formatSize, parentPath } from "@/lib/utils";
 import { ResultView } from "@/components/ResultView";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
 
@@ -106,10 +108,14 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     });
     return () => off();
   }, []);
+  // 历史恢复暂存的目标 Sheet：paths 变化的副作用会清空 targetSheets，
+  // 恢复的自定义 Sheet 子集要等副作用跑完再补回。
+  const pendingTargetSheets = useRef<string[] | null>(null);
   useEffect(() => {
     setFiles([]);
     setAvailableSheets([]);
-    setTargetSheets([]);
+    setTargetSheets(pendingTargetSheets.current ?? []);
+    pendingTargetSheets.current = null;
     setResult(undefined);
     setJob(undefined);
     activeJobId.current = "";
@@ -118,6 +124,52 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     if (!outputDirectoryTouched)
       setOutputDirectory(paths[0] ? parentPath(paths[0]) : "");
   }, [paths, outputDirectoryTouched]);
+
+  // 历史记录「继续任务」：回填文件列表与全部合并选项，不自动检查文件
+  // （检查会用实际 Sheet 清单覆盖自定义 Sheet 子集）。
+  useTaskRestore(tool.id, (restore) => {
+    const p = restore.params as {
+      inputPaths?: string[];
+      outputDirectory?: string;
+      outputFormat?: string;
+      outputMode?: string;
+      direction?: string;
+      sheetAction?: string;
+      targetSheets?: string[];
+      addHyperlinks?: boolean;
+    };
+    if (!Array.isArray(p.inputPaths) || !p.inputPaths.length) return;
+    const restoredSheets = Array.isArray(p.targetSheets)
+      ? p.targetSheets
+      : null;
+    const samePaths =
+      p.inputPaths.length === paths.length &&
+      p.inputPaths.every((value, index) => value === paths[index]);
+    if (samePaths) {
+      setTargetSheets(restoredSheets ?? []);
+      pendingTargetSheets.current = null;
+    } else {
+      pendingTargetSheets.current = restoredSheets;
+      setPaths(p.inputPaths);
+    }
+    if (typeof p.outputDirectory === "string" && p.outputDirectory) {
+      setOutputDirectory(p.outputDirectory);
+      setOutputDirectoryTouched(true);
+    }
+    if (typeof p.outputFormat === "string" && p.outputFormat)
+      setOutputFormat(p.outputFormat);
+    if (typeof p.outputMode === "string" && p.outputMode)
+      setOutputMode(p.outputMode);
+    if (typeof p.direction === "string" && p.direction)
+      setDirection(p.direction);
+    if (typeof p.sheetAction === "string" && p.sheetAction)
+      setSheetAction(p.sheetAction);
+    if (typeof p.addHyperlinks === "boolean")
+      setAddHyperlinks(p.addHyperlinks);
+    setError("");
+    setResult(undefined);
+    setJob(undefined);
+  });
   async function chooseFiles() {
     const value = await pickPath("files", "添加 Excel、CSV 或 TXT", [
       "xlsx",
@@ -225,9 +277,17 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     );
   }
   const currentStep = excelMergerStep(paths.length, files.length, Boolean(job));
-  const clearFiles = () => {
+  const clearFiles = async () => {
     if (!paths.length) return;
-    if (!window.confirm(excelMergerClearPrompt(paths.length))) return;
+    if (
+      !(await confirmDialog({
+        title: "确认清空列表",
+        message: excelMergerClearPrompt(paths.length),
+        confirmLabel: "清空",
+        tone: "danger",
+      }))
+    )
+      return;
     setPaths([]);
   };
   return (

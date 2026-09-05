@@ -754,7 +754,9 @@ fn event_for(
     json!({"protocol":1,"jobId":job_id,"toolId":tool_id,"phase":phase,"current":current,"total":total,"message":message,"severity":severity,"outputPaths":output_paths,"result":result})
 }
 
-fn tool_id(method: &str) -> &'static str {
+/// method 前缀 → 工具 id。job_start 在主进程存档参数时也要用它落 tool_id，
+/// 因此对 crate 内可见。
+pub(crate) fn tool_id(method: &str) -> &'static str {
     if method.starts_with("wp.") {
         "wp_service_generator"
     } else if method.starts_with("confirmation.") {

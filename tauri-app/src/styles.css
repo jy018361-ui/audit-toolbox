@@ -232,6 +232,15 @@ button,
 input,
 select {
   font: inherit;
+  /* 控件不再顺延 body 的 16px：统一落在字阶 --fs-md，行高同步 --lh-body；
+     等宽代码类自带显式字号，按特异性正常覆盖。 */
+  font-size: var(--fs-md);
+  line-height: var(--lh-body);
+}
+/* 原生单选/勾选框在 Windows 上取系统主题色（本机显示为红色），与品牌主题脱节 */
+input[type="radio"],
+input[type="checkbox"] {
+  accent-color: var(--brand);
 }
 button {
   flex-shrink: 0;
@@ -266,7 +275,10 @@ summary:focus-visible {
   --scrollbar-thumb: color-mix(in srgb, var(--on-dark-muted) 54%, transparent);
   --scrollbar-thumb-hover: color-mix(in srgb, var(--on-dark) 74%, transparent);
   color: var(--on-brand-deep, var(--ink-inverse));
-  overflow: auto;
+  /* 只允许纵向滚动：内容过宽时横向滚动条会出现在深色侧栏底部，
+     可截断的文字项（.tool-nav-label）自带省略号，横向溢出直接裁掉 */
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .brand span,
 .nav-caption {
@@ -292,9 +304,9 @@ summary:focus-visible {
   margin: 0 0 var(--sp-5);
 }
 /* ---- 无边框窗口（decorations: false）----
- * 右上角只保留最小化/最大化/关闭；拖动窗口靠品牌区与页头的
- * data-tauri-drag-region。按钮固定压在主区顶部留白上，
- * 所以 .frameless .main 要加出一截顶部内边距（见 .main 处）。
+ * 右上角只保留最小化/最大化/关闭；拖动窗口靠品牌区、页头（deep 拖拽区）
+ * 和主区顶部的 44px 条带（.main 自身 padding 上的裸 drag-region）。
+ * 按钮固定压在主区顶部条带上，所以 .frameless .main 要加出一截顶部内边距。
  * 层级取 800：高于侧边栏(20)，低于 ts-filter-menu(1000)，
  * 下拉菜单能盖住按钮，但按钮不会反过来挡菜单。 */
 .window-controls {
@@ -487,12 +499,17 @@ summary:focus-visible {
 }
 .page-header h1 {
   font-size: var(--fs-3xl);
+  /* 30px 字形压在正文 22px 行高上会被顶死，页题单独用页题行高 */
+  line-height: var(--lh-page-title);
+  font-weight: var(--fw-medium);
   margin: var(--sp-2) 0;
   color: var(--ink-strong);
   text-wrap: balance;
 }
 .page-header p {
   margin: 0;
+  font-size: var(--fs-md);
+  line-height: var(--lh-body);
   color: var(--text-muted);
 }
 .metrics {
@@ -579,6 +596,7 @@ summary:focus-visible {
 }
 .tool-card h2 {
   font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
   margin: var(--sp-3) 0 var(--sp-2);
 }
 .tool-card p {
@@ -632,6 +650,7 @@ summary:focus-visible {
 .result-card h2,
 .list-card h2 {
   font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
   margin: 0 0 var(--sp-4);
 }
 .form-grid {
@@ -711,7 +730,7 @@ summary:focus-visible {
 }
 .browse:disabled {
   cursor: not-allowed;
-  opacity: 0.5;
+  opacity: var(--disabled-opacity);
 }
 .actions {
   display: flex;
@@ -773,7 +792,7 @@ summary:focus-visible {
 .actions button:disabled,
 .secondary:disabled,
 .ghost:disabled {
-  opacity: 0.55;
+  opacity: var(--disabled-opacity);
   cursor: not-allowed;
 }
 .error-box {
@@ -1116,6 +1135,7 @@ summary:focus-visible {
 .form-card h3 {
   margin: var(--sp-5) 0 var(--sp-3);
   font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
   color: var(--brand);
 }
 .fa-preview-stack {
@@ -1637,24 +1657,32 @@ summary:focus-visible {
   font-size: var(--fs-xs);
   font-weight: 700;
 }
+/* 三态层级必须拉开的约束：当前=最强（--brand-deep 实底+反白文字），
+   已完成=中等（白底+品牌色对勾），未到=弱（浅灰底+可读灰字）。
+   当前态不用 --brand：部分主题里它偏亮，反白字对比不足；
+   文字用 --on-dark，各主题都为深底 --brand-deep 定义了这一档。 */
 .step-indicator-item.active {
-  border-color: var(--brand);
-  background: var(--brand);
-  color: var(--on-brand, var(--surface));
-  font-weight: 700;
+  border-color: var(--brand-deep);
+  background: var(--brand-deep);
+  color: var(--on-dark);
+  font-weight: var(--fw-strong);
 }
 .step-indicator-item.active .step-indicator-index {
   background: var(--overlay-white-strong);
-  color: var(--on-brand, var(--surface));
+  color: inherit;
 }
 .step-indicator-item.done {
   border-color: var(--border);
   background: var(--surface);
   color: var(--brand);
 }
+.step-indicator-item.done .step-indicator-index {
+  /* 对勾是已完成态的核心信号，不能落在基类的灰色上 */
+  color: var(--brand);
+}
 .step-indicator-item.disabled {
   cursor: not-allowed;
-  opacity: 0.55;
+  opacity: var(--disabled-opacity);
 }
 
 /* DataTable：统一数据预览表（粘性表头） */
@@ -1905,7 +1933,7 @@ summary:focus-visible {
 }
 .file-drop-zone:disabled {
   cursor: not-allowed;
-  opacity: 0.6;
+  opacity: var(--disabled-opacity);
 }
 /* 已选择后的文件槽位 */
 .file-drop-slot {
@@ -1953,7 +1981,7 @@ summary:focus-visible {
 }
 .file-drop-clear:disabled {
   cursor: not-allowed;
-  opacity: 0.5;
+  opacity: var(--disabled-opacity);
 }
 .file-input-description,
 .file-input-error {

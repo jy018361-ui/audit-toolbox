@@ -14,6 +14,7 @@ import {
   TB_LABELS,
 } from "./DepositInterestPage";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import { LedgerReviewCompact } from "@/components/LedgerReviewAll";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
@@ -67,6 +68,7 @@ import {
   type PairingFile,
 } from "./tbjePairing";
 import type { ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import "./fx-audit.css";
 import "./tbje-check.css";
 
@@ -558,6 +560,58 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 历史记录「继续任务」：把存档里的 TB/JE 文件重新批量识别（自动配对），
+  // 完成后用存档映射覆盖建议映射。此前手动「不配对序时账」的组会被重新
+  // 自动配对，需要的话在配对页再清一次。run_batch 是组数组，单组导出的
+  // 存档把组字段放在顶层，两种形状都兼容。
+  useTaskRestore(tool.id, (restore) => {
+    type TbjeGroupParams = {
+      tbSource?: { inputPath?: unknown };
+      tbMapping?: Mapping;
+      jeSource?: { inputPath?: unknown };
+      jeMapping?: Mapping;
+    };
+    const raw = restore.params.groups;
+    const groups = (
+      Array.isArray(raw) ? raw : [restore.params]
+    ) as TbjeGroupParams[];
+    if (!groups.length) return;
+    const paths = new Set<string>();
+    for (const group of groups) {
+      if (typeof group?.tbSource?.inputPath === "string" && group.tbSource.inputPath)
+        paths.add(group.tbSource.inputPath);
+      if (typeof group?.jeSource?.inputPath === "string" && group.jeSource.inputPath)
+        paths.add(group.jeSource.inputPath);
+    }
+    if (!paths.size) return;
+    setError("");
+    setOutcomes([]);
+    setExported(undefined);
+    void (async () => {
+      await intake([...paths]);
+      setMappings((current) => {
+        const next = { ...current };
+        for (const group of groups) {
+          const tbPath = group?.tbSource?.inputPath;
+          if (
+            typeof tbPath === "string" &&
+            group.tbMapping &&
+            typeof group.tbMapping === "object"
+          )
+            next[tbPath] = group.tbMapping;
+          const jePath = group?.jeSource?.inputPath;
+          if (
+            typeof jePath === "string" &&
+            group.jeMapping &&
+            typeof group.jeMapping === "object"
+          )
+            next[jePath] = group.jeMapping;
+        }
+        return next;
+      });
+    })();
+  });
+
   async function browse() {
     const picked = await pickPath("files", "选择 TB 与 JE 文件", [
       "xlsx",
@@ -694,11 +748,14 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
-  function removeGroup(group: PairedGroup) {
+  async function removeGroup(group: PairedGroup) {
     if (
-      !window.confirm(
-        `确认移除第 ${group.label} 组？只会从本次核对中清除，不会删除原文件。`,
-      )
+      !(await confirmDialog({
+        title: "确认移除分组",
+        message: `确认移除第 ${group.label} 组？只会从本次核对中清除，不会删除原文件。`,
+        confirmLabel: "移除",
+        tone: "danger",
+      }))
     )
       return;
     const paths = [group.tb?.path, group.je?.path].filter(Boolean) as string[];
@@ -721,11 +778,14 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     invalidateResults();
   }
 
-  function removeAllGroups() {
+  async function removeAllGroups() {
     if (
-      !window.confirm(
-        `确认移除全部 ${groups.length} 组？只会清空本次核对，不会删除原文件。`,
-      )
+      !(await confirmDialog({
+        title: "确认移除全部分组",
+        message: `确认移除全部 ${groups.length} 组？只会清空本次核对，不会删除原文件。`,
+        confirmLabel: "移除",
+        tone: "danger",
+      }))
     )
       return;
     setGroups([]);

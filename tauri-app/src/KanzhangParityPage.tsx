@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { engineCall, jobCancel, jobStart, listenJobEvents, openOutput, pickPath } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "./kanzhang-parity.css";
 import { Button } from "@/components/ui/button";
@@ -215,6 +216,17 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const [dragHover,setDragHover]=useState(false);
   useEffect(()=>{if(typeof window==="undefined"||!("__TAURI_INTERNALS__" in window))return;let off:()=>void=()=>{};void getCurrentWebview().onDragDropEvent((event)=>{const p=event.payload;if(p.type==="over"||p.type==="enter"){setDragHover(true);}else if(p.type==="drop"){setDragHover(false);if(p.paths.length)resetSource(p.paths[0]);}else if(p.type==="leave"){setDragHover(false);}}).then((fn)=>{off=fn;});return ()=>off();},[]);
   useEffect(()=>{sessionStorage.setItem(CACHE,JSON.stringify(draft));},[draft]);
+  // 历史记录「继续任务」：用存档参数重建草稿（含映射与批次，可直接导出），
+  // 不自动重新读取——科目列表等派生状态等用户点「读取文件」再补。
+  useTaskRestore(tool.id,(restore)=>{
+    const p=restore.params as Partial<Pick<KanzhangDraft,"inputPath"|"sheet"|"headerRow"|"mapping"|"batches"|"excludes"|"outputPath"|"markLossTransfer"|"pivotRows"|"pivotColumns"|"pivotValues">>&{targetBatches?:Batch[];excludeAccounts?:string[]};
+    if(typeof p.inputPath!=="string"||!p.inputPath)return;
+    const batches=Array.isArray(p.targetBatches)&&p.targetBatches.length?p.targetBatches:clearKanzhangBatches().batches;
+    const mapping=p.mapping&&typeof p.mapping==="object"?p.mapping:EMPTY_MAPPING;
+    llmGeneration.current+=1;
+    setDraft({...EMPTY,inputPath:p.inputPath,sheet:p.sheet??"" ,headerRow:p.headerRow??1,mapping,batches,activeBatch:0,excludes:p.excludeAccounts??[],outputPath:p.outputPath??"",outputTouched:Boolean(p.outputPath),markLossTransfer:p.markLossTransfer??true,pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[],pivotValues:p.pivotValues??[]});
+    setAccounts([]);setAccountCodes([]);setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");setResult(undefined);setJob(undefined);setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setChanges([]);setPending([]);setLlmStatus("");
+  });
   // 没手选过保存位置时，输出框跟着凭证文件和 Sheet 走，显示这次会写到哪。
   // 只在来源变化时重算——默认文件名带时间戳，每次渲染都算会把自己重新触发一遍。
   const autoOutputKey=useRef("");

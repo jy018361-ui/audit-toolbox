@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import {
   engineCall,
   jobCancel,
@@ -319,6 +320,50 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
     () => autoAcceptList(rows, confirmations),
     [rows, confirmations],
   );
+
+  // 历史记录「继续任务」：回填两侧来源（路径/标题行/选中列）与匹配参数；
+  // 匹配结果本身不恢复，用户点「开始匹配」即重算。fuzzy.export 的存档
+  // 只有 jobId/outputPath，找不到来源字段时自然跳过。
+  useTaskRestore(tool.id, (restore) => {
+    const p = restore.params as {
+      sourceA?: { inputPath?: string; headerRow?: number; column?: string };
+      sourceB?: { inputPath?: string; headerRow?: number; column?: string };
+      matchType?: string;
+      autoThreshold?: number;
+      suspectThreshold?: number;
+      topK?: number;
+    };
+    const next: Record<Kind, SourceState> = { a: emptySource(), b: emptySource() };
+    for (const kind of ["a", "b"] as const) {
+      const src = kind === "a" ? p.sourceA : p.sourceB;
+      if (src && typeof src.inputPath === "string" && src.inputPath) {
+        next[kind] = {
+          path: src.inputPath,
+          headerRow: src.headerRow ?? 1,
+          mapping:
+            typeof src.column === "string" && src.column
+              ? { column: src.column }
+              : {},
+        };
+      }
+    }
+    if (!next.a.path && !next.b.path) return;
+    setSources(next);
+    if (
+      p.matchType === "company" ||
+      p.matchType === "person" ||
+      p.matchType === "address" ||
+      p.matchType === "generic"
+    )
+      setMatchType(p.matchType);
+    if (Number.isFinite(p.autoThreshold))
+      setAutoThreshold(Number(p.autoThreshold));
+    if (Number.isFinite(p.suspectThreshold))
+      setSuspectThreshold(Number(p.suspectThreshold));
+    if (Number.isFinite(p.topK)) setTopK(Number(p.topK));
+    setError("");
+    setNotice("");
+  });
 
   // 任务事件：匹配与导出共用一条事件流，靠当前 jobId 过滤。
   useEffect(() => {

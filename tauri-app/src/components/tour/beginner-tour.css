@@ -1,0 +1,220 @@
+/* 新手引导（分步动画提示）。
+   层级约定：遮罩 700 < 窗口控制按钮 800（styles.css .window-controls），
+   保证引导期间最小化 / 关闭窗口仍然可用；高于 shadcn Dialog 的 50。 */
+
+.tour-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 700;
+}
+
+.tour-blocker {
+  position: absolute;
+  inset: 0;
+}
+
+/* 聚光灯：透明挖孔 + 巨大外阴影压暗四周。位置变化时平滑滑到下一个目标。 */
+.tour-spotlight {
+  position: fixed;
+  pointer-events: none;
+  box-shadow: 0 0 0 200vmax rgb(4 12 12 / 56%);
+  transition:
+    top 320ms ease,
+    left 320ms ease,
+    width 320ms ease,
+    height 320ms ease;
+}
+
+/* 目标外围的呼吸光环：提示"看这里"。 */
+.tour-pulse {
+  position: fixed;
+  pointer-events: none;
+  border: 2px solid var(--brand-accent);
+  animation: tour-ping 1.8s ease-out infinite;
+}
+
+.tour-bubble,
+.tour-card {
+  position: fixed;
+  width: min(360px, calc(100vw - 32px));
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-overlay);
+}
+
+/* 目标旁的气泡：placement-bottom 正着放；placement-top 用 -100% 平移
+   贴到目标上方，无需先测自身高度。 */
+.tour-bubble {
+  transform: translateY(0);
+}
+
+.tour-bubble.placement-top {
+  transform: translateY(-100%);
+}
+
+.tour-bubble-inner {
+  position: relative;
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  animation: tour-rise-in 240ms ease-out;
+}
+
+/* 指向目标的小箭头：旋转 45° 的方块，只留一侧描边。 */
+.tour-bubble-arrow {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  border-top: 1px solid var(--border);
+  transform: rotate(45deg);
+}
+
+.tour-bubble.placement-bottom .tour-bubble-arrow {
+  top: -7px;
+}
+
+.tour-bubble.placement-top .tour-bubble-arrow {
+  bottom: -7px;
+  transform: rotate(225deg);
+}
+
+/* 居中卡片：欢迎 / 收尾步骤。 */
+.tour-card {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: var(--sp-5);
+  text-align: left;
+  animation: tour-pop-in 260ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+.tour-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  margin-bottom: var(--sp-3);
+  color: var(--brand-link);
+  background: var(--surface-muted);
+  border-radius: var(--r-pill);
+}
+
+.tour-step-count {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.tour-title {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-strong);
+  color: var(--ink-strong);
+  line-height: var(--lh-card-title);
+}
+
+.tour-body {
+  font-size: var(--fs-md);
+  line-height: var(--lh-body);
+  color: var(--ink);
+  overflow-wrap: break-word;
+}
+
+.tour-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+}
+
+.tour-actions-nav {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.tour-dots {
+  display: flex;
+  gap: 6px;
+  margin-top: var(--sp-3);
+}
+
+.tour-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--border);
+  transition:
+    width 200ms ease,
+    background-color 200ms ease;
+}
+
+.tour-dots span.active {
+  width: 18px;
+  background: var(--brand);
+}
+
+/* 设置页「新手模式」分区：重播按钮与说明同行排列。 */
+.newbie-replay-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+}
+
+.newbie-replay-row small {
+  color: var(--text-muted);
+}
+
+@keyframes tour-ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+
+  70%,
+  100% {
+    transform: scale(1.1);
+    opacity: 0;
+  }
+}
+
+@keyframes tour-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes tour-pop-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.94);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-spotlight,
+  .tour-dots span {
+    transition: none;
+  }
+
+  .tour-pulse,
+  .tour-bubble-inner,
+  .tour-card {
+    animation: none;
+  }
+}

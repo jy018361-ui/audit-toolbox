@@ -11,6 +11,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TbjeCheckPage } from "./TbjeCheckPage";
+import { ConfirmDialogHost } from "./components/ConfirmDialog";
 import type { ToolManifest } from "./types";
 
 vi.mock("./api", () => ({
@@ -445,18 +446,39 @@ describe("TbjeCheckPage", () => {
         };
       },
     );
-    vi.spyOn(window, "confirm").mockReturnValue(true);
-
-    render(<TbjeCheckPage tool={tool} />);
+    render(
+      <>
+        <TbjeCheckPage tool={tool} />
+        <ConfirmDialogHost />
+      </>,
+    );
     fireEvent.click(
       screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
     );
     await screen.findByRole("button", { name: "移除全部" });
-    fireEvent.click(screen.getByRole("button", { name: "移除全部" }));
 
-    expect(screen.queryByText("01TB.xlsx")).not.toBeInTheDocument();
-    expect(window.confirm).toHaveBeenCalledWith(
+    // 取消路径：对话框出现后点「取消」，分组保持原样。
+    fireEvent.click(screen.getByRole("button", { name: "移除全部" }));
+    expect(
+      await screen.findByText(
+        "确认移除全部 1 组？只会清空本次核对，不会删除原文件。",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("01TB.xlsx")).toBeInTheDocument();
+
+    // 确认路径：再点「移除全部」并点「移除」，分组被清空且原文件不受影响。
+    fireEvent.click(screen.getByRole("button", { name: "移除全部" }));
+    await screen.findByText(
       "确认移除全部 1 组？只会清空本次核对，不会删除原文件。",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "移除" }));
+
+    await waitFor(() =>
+      expect(screen.queryByText("01TB.xlsx")).not.toBeInTheDocument(),
     );
     expect(
       screen.queryByRole("heading", { level: 2, name: /确认配对/ }),

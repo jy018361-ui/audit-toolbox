@@ -55,12 +55,16 @@
 }
 .kz-card h2 {
   margin: 0 0 var(--sp-4);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-body);
 }
 .kz-card label {
   display: grid;
   gap: var(--sp-1);
   margin: var(--sp-2) 0;
-  font-weight: 600;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
 }
 .kz-card small {
   color: var(--text-muted);
@@ -79,6 +83,8 @@
   border-radius: var(--r-sm);
   padding: var(--sp-2);
   min-width: 0;
+  /* 控件不再跟着 13px 标签缩小，保持页面控件字号一致。 */
+  font-size: var(--fs-md);
 }
 .kz-card select[multiple] {
   min-height: 105px;
@@ -90,6 +96,17 @@
   background: var(--border-soft);
   color: var(--brand-link);
   cursor: pointer;
+}
+/* 上传热区（FileDropInput 空态是个普通 button）不吃卡片通用按钮的实心灰底：
+   统一对齐全局 .file-drop-zone 规范——虚线描边、凹陷浅底、链接色主行。
+   特异性与上面的通用按钮规则持平、靠源码顺序靠后取胜。 */
+.kz-card button.file-drop-zone {
+  border: 1.5px dashed var(--control-border);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+  color: var(--brand-link);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-strong);
 }
 .kz-card button.primary {
   background: var(--brand);

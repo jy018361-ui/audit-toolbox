@@ -13,6 +13,18 @@
   font-size: var(--fs-xs);
   color: var(--text-muted);
 }
+/* 分区标题行基线对齐：h2 的下边距只撑行高，不再把右侧提示顶离文字中线。 */
+.merger-source .section-title,
+.merger-rules .section-title {
+  align-items: baseline;
+}
+.merger-source .section-title h2,
+.merger-rules .section-title h2,
+.merger-progress h2 {
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-body);
+}
 .drop-zone {
   width: 100%;
   white-space: normal;
@@ -22,11 +34,17 @@
   justify-content: center;
   gap: var(--sp-2);
   min-height: 104px;
-  border: 1.5px dashed var(--muted-soft);
+  /* 与全局 .file-drop-zone 同一规范：虚线用控件描边色、主行用链接色。 */
+  border: 1.5px dashed var(--control-border);
   border-radius: var(--r-md);
   background: var(--surface-sunken);
-  color: var(--brand);
+  color: var(--brand-link);
   cursor: pointer;
+}
+/* 主行对齐 .file-drop-zone 的 fs-md/700；副行保持 xs/400。 */
+.drop-zone strong {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-strong);
 }
 .drop-zone span {
   font-size: var(--fs-xs);
@@ -35,6 +53,15 @@
 .merger-data-notice {
   margin: var(--sp-3) 0 0;
 }
+/* 数据边界横幅与其他页同一信息色调：信息底、信息边、信息标题，不用绿色成功底。 */
+.data-handling-notice.merger-data-notice {
+  --data-notice-bg: var(--info-bg);
+  --data-notice-border: var(--info-border);
+  --data-notice-fg: var(--info-fg);
+}
+.data-handling-notice.merger-data-notice .data-handling-notice-copy strong {
+  color: var(--info-fg);
+}
 .merger-toolbar {
   display: flex;
   gap: var(--sp-2);
@@ -42,6 +69,11 @@
 }
 .merger-toolbar [data-variant="destructive"] {
   margin-left: auto;
+}
+/* 主按钮（开始合并）统一品牌实底反白，与步骤条激活项同一视觉重量。 */
+.merger-rules .actions button[data-slot="button"][data-variant="default"] {
+  background: var(--brand);
+  color: var(--ink-inverse);
 }
 .file-queue {
   display: grid;
@@ -98,8 +130,9 @@
   margin: 0 0 var(--sp-4);
 }
 .merger-rules legend {
-  font-size: var(--fs-xs);
-  font-weight: 700;
+  /* 与选项文字同字号，靠字重分层。 */
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
   color: var(--label);
   margin-bottom: var(--sp-2);
 }

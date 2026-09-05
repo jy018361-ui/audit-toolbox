@@ -495,6 +495,25 @@ async fn job_start(
     excel_merger: State<'_, ExcelMergerService>,
     storage: State<'_, Storage>,
     method: String,
+    params: Value,
+) -> Result<String, AppError> {
+    // 历史记录「继续任务」要能还原现场：在注入 __settings/__llmOptions/
+    // __dbPath/textPath 之前克隆用户原始参数存档。存档失败不拦任务本身，
+    // 只是该条历史记录没有恢复按钮。
+    let user_params = params.clone();
+    let job_id = job_start_inner(excel_merger, &storage, &method, params).await?;
+    let _ = storage.record_job_params(
+        &job_id,
+        excel_merger::tool_id(&method),
+        &user_params,
+    );
+    Ok(job_id)
+}
+
+async fn job_start_inner(
+    excel_merger: State<'_, ExcelMergerService>,
+    storage: &State<'_, Storage>,
+    method: &str,
     mut params: Value,
 ) -> Result<String, AppError> {
     if method == "audipick.batch_extract" {
@@ -522,7 +541,7 @@ async fn job_start(
                 }
             }
         }
-        return excel_merger.start(&method, params);
+        return excel_merger.start(method, params);
     }
     if method.starts_with("kanzhang.")
         || method.starts_with("fx.")
@@ -544,37 +563,37 @@ async fn job_start(
         }
     }
     if is_fa_job_method(&method) {
-        inject_fa_settings(&storage, &mut params)?;
-        return excel_merger.start(&method, params);
+        inject_fa_settings(storage, &mut params)?;
+        return excel_merger.start(method, params);
     }
     if method.starts_with("fa.") {
         return Err(AppError::new(
             "METHOD_NOT_FOUND",
             "未找到 Rust FA List 任务方法。",
             false,
-            Some(method),
+            Some(method.to_owned()),
         ));
     }
-    if is_direct_job_method(&method) {
-        return excel_merger.start(&method, params);
+    if is_direct_job_method(method) {
+        return excel_merger.start(method, params);
     }
-    if is_roll_forward_job_method(&method) {
-        inject_roll_forward_llm(&storage, &mut params)?;
-        return excel_merger.start(&method, params);
+    if is_roll_forward_job_method(method) {
+        inject_roll_forward_llm(storage, &mut params)?;
+        return excel_merger.start(method, params);
     }
     if method.starts_with("roll_forward.") {
         return Err(AppError::new(
             "METHOD_NOT_FOUND",
             "未找到 Rust WP Roll Forward 任务方法。",
             false,
-            Some(method),
+            Some(method.to_owned()),
         ));
     }
     Err(AppError::new(
         "METHOD_NOT_FOUND",
         "未找到对应的 Rust 任务方法。",
         false,
-        Some(method),
+        Some(method.to_owned()),
     ))
 }
 
@@ -738,6 +757,70 @@ fn history_get(storage: State<'_, Storage>) -> Result<Value, AppError> {
 #[tauri::command]
 fn history_clear(storage: State<'_, Storage>) -> Result<Value, AppError> {
     storage.history_clear()
+}
+
+/// 「继续任务」：取回该任务的用户参数存档，把其中仍存在的文件/目录重新
+/// 授权（与 pick_path 同语义：目录授权后代，文件只授权文件本身；这是一次
+/// 显式的用户点击，等价于用户重新选了一次这些文件）。已消失的路径单独
+/// 返回，前端据此提醒用户重新选择。前端拿到参数后跳到对应工具页回填。
+#[tauri::command]
+fn history_restore(
+    storage: State<'_, Storage>,
+    allowed: State<'_, AllowedPaths>,
+    job_id: String,
+) -> Result<Value, AppError> {
+    let record = storage.history_params(job_id.as_str())?;
+    let params = record.get("params").cloned().unwrap_or_else(|| json!({}));
+    let mut collected: Vec<String> = Vec::new();
+    collect_path_like(&params, &mut collected);
+    let mut missing: Vec<String> = Vec::new();
+    let mut authorized = 0usize;
+    for path in collected {
+        let candidate = PathBuf::from(&path);
+        if candidate.exists() {
+            allowed.0.lock().insert(candidate);
+            authorized += 1;
+        } else {
+            missing.push(path);
+        }
+    }
+    Ok(json!({
+        "jobId": job_id,
+        "toolId": record.get("toolId").cloned().unwrap_or_else(|| json!("")),
+        "params": params,
+        "missingPaths": missing,
+        "authorizedPathCount": authorized
+    }))
+}
+
+/// 递归收集 params 里形如 Windows 绝对路径的字符串（盘符或 UNC 开头）。
+/// 参数全部来自自家前端表单的文件选择，误判空间极小；相对路径、URL、
+/// 普通文本一律不碰，宁少勿滥。
+fn collect_path_like(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(text) => {
+            let bytes = text.as_bytes();
+            let drive_like = bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && (bytes[2] == b'/' || bytes[2] == b'\\');
+            let unc_like = text.starts_with(r"\\");
+            if (drive_like || unc_like) && !out.iter().any(|x| x == text) {
+                out.push(text.clone());
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_path_like(item, out);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values() {
+                collect_path_like(item, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[tauri::command]
@@ -1142,6 +1225,7 @@ pub fn run() {
             llm_test,
             history_get,
             history_clear,
+            history_restore,
             audipick_pdf_bytes,
             secret_set,
             secret_delete,
@@ -1168,6 +1252,32 @@ pub fn run_excel_merger_worker() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collect_path_like_only_takes_absolute_windows_paths() {
+        let params = json!({
+            "mode": "bank",
+            "note": "C:盘见附件",
+            "jePath": "C:\\data\\je.xlsx",
+            "lowerDrive": "d:/tb/余额表.xlsx",
+            "unc": "\\\\server\\share\\out.xlsx",
+            "relative": "downloads/je.xlsx",
+            "url": "https://example.com/C:/fake.xlsx",
+            "nested": {"sheets": ["C:\\a.xlsx", "C:\\a.xlsx"], "depth": {"log": "E:\\logs\\"}}
+        });
+        let mut out = Vec::new();
+        collect_path_like(&params, &mut out);
+        out.sort();
+        let mut expected = vec![
+            "C:\\data\\je.xlsx".to_owned(),
+            "d:/tb/余额表.xlsx".to_owned(),
+            "\\\\server\\share\\out.xlsx".to_owned(),
+            "C:\\a.xlsx".to_owned(),
+            "E:\\logs\\".to_owned()
+        ];
+        expected.sort();
+        assert_eq!(out, expected);
+    }
 
     /// 前端按型号分组、按型号标必填，全靠这份下发的槽位定义；型号名也必须是
     /// 用户读得懂的那个（`TB-类型C`），而不是内部 id。

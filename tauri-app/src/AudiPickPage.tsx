@@ -10,8 +10,10 @@ import {
   settingsSet,
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { audipickAssetsReady, loadAudipickAssets } from "./audipickAssets";
 import { useJobPause } from "@/components/JobDialog";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import { errorText } from "@/lib/errors";
 import { ResultView } from "@/components/ResultView";
 import { PageHeader } from "@/components/PageHeader";
@@ -147,6 +149,14 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
 function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   const [projects, setProjects] = useState<AudiPickProjectData[]>([]);
   const [selectedId, setSelectedId] = useState("");
+
+  // 历史记录「继续任务」：AudiPick 的项目/文档/字段全部由引擎与规则库派生，
+  // 项目本身就持久化在引擎里（页面加载时自动拉取）；这里只回填上次的审阅
+  // 规则，字段清单会随规则自动带出。
+  useTaskRestore(tool.id, (restore) => {
+    const p = restore.params as { ruleId?: string };
+    if (typeof p.ruleId === "string" && p.ruleId) setRuleId(p.ruleId);
+  });
   const [documents, setDocuments] = useState<AudiPickDocument[]>([]);
   const [name, setName] = useState("");
   const [client, setClient] = useState("");
@@ -428,9 +438,11 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     // mark under it, and there is no undo.
     const project = projects.find((item) => item.project.id === selectedId);
     if (
-      !window.confirm(
-        `确认删除项目"${project?.project.name ?? selectedId}"？\n\n该项目下的全部合同 PDF、提取结果和复核标记会一并删除，且无法恢复。`,
-      )
+      !(await confirmDialog({
+        title: "确认删除项目",
+        message: `确认删除项目"${project?.project.name ?? selectedId}"？\n\n该项目下的全部合同 PDF、提取结果和复核标记会一并删除，且无法恢复。`,
+        tone: "danger",
+      }))
     )
       return;
     setBusy(true);
@@ -499,9 +511,11 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   async function deleteDocument(documentId: string) {
     const document = documents.find((item) => item.id === documentId);
     if (
-      !window.confirm(
-        `确认删除"${document?.name ?? documentId}"？\n\n该文件的 PDF、已保存的文字层和提取结果会一并删除，且无法恢复。`,
-      )
+      !(await confirmDialog({
+        title: "确认删除文件",
+        message: `确认删除"${document?.name ?? documentId}"？\n\n该文件的 PDF、已保存的文字层和提取结果会一并删除，且无法恢复。`,
+        tone: "danger",
+      }))
     )
       return;
     setBusy(true);

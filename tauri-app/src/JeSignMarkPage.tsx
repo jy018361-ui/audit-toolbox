@@ -8,6 +8,7 @@ import {
   pickPath,
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "./kanzhang-parity.css";
 import "./je-sign-mark.css";
@@ -187,6 +188,56 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   useEffect(() => {
     sessionStorage.setItem(CACHE, JSON.stringify(draft));
   }, [draft]);
+
+  // 历史记录「继续任务」：用存档参数重建草稿（含映射/批次/筛选，可直接导出），
+  // 不自动重新读取——预览与列值等派生状态等用户点「读取文件」再补。
+  useTaskRestore(tool.id, (restore) => {
+    const p = restore.params as {
+      inputPath?: string;
+      sheet?: string;
+      headerRow?: number;
+      mapping?: JeMarkDraft["mapping"];
+      targetBatches?: JeMarkDraft["batches"];
+      columnFilters?: JeMarkDraft["columnFilters"];
+      signConvention?: string;
+      outputPath?: string;
+    };
+    if (typeof p.inputPath !== "string" || !p.inputPath) return;
+    llmGeneration.current += 1;
+    setDraft({
+      ...EMPTY,
+      inputPath: p.inputPath,
+      sheet: p.sheet ?? "",
+      headerRow: p.headerRow ?? 1,
+      mapping:
+        p.mapping && typeof p.mapping === "object" ? p.mapping : EMPTY_MAPPING,
+      batches:
+        Array.isArray(p.targetBatches) && p.targetBatches.length
+          ? p.targetBatches
+          : [newBatch(0)],
+      activeBatch: 0,
+      columnFilters:
+        p.columnFilters && typeof p.columnFilters === "object"
+          ? p.columnFilters
+          : {},
+      outputPath: p.outputPath ?? "",
+      outputTouched: Boolean(p.outputPath),
+      signChoice:
+        p.signConvention === "signed" || p.signConvention === "unsigned"
+          ? p.signConvention
+          : "auto",
+    });
+    setResult(undefined);
+    setJob(undefined);
+    setChanges([]);
+    setPending([]);
+    setLlmStatus("");
+    setLlmBusy(false);
+    setLlmFailed(false);
+    setValueCache({});
+    setMenu(undefined);
+    setSignReport(undefined);
+  });
 
   // 没手选过保存位置时，输出框跟着凭证文件和 Sheet 走。只在来源变化时重算——
   // 默认文件名带时间戳，每次渲染都算会把自己重新触发一遍。

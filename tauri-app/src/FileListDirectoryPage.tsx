@@ -7,6 +7,7 @@ import {
   pickPath,
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   fileListCanExport,
@@ -22,6 +23,7 @@ import { JobProgress } from "@/components/JobProgress";
 import { Field } from "@/components/Field";
 import { FileDropInput } from "@/components/FileDropInput";
 import { Button } from "@/components/ui/button";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
@@ -74,6 +76,19 @@ export default function FileListDirectoryPage({
       JSON.stringify({ sourceDir, outputPath, scan }),
     );
   }, [sourceDir, outputPath, scan]);
+
+  // 历史记录「继续任务」：回填扫描目录与输出路径。不自动重扫——
+  // 扫描是任务通道，恢复瞬间弹进度窗反而吓人，用户点「扫描」即可。
+  useTaskRestore(tool.id, (restore) => {
+    const params = restore.params as {
+      sourceDir?: string;
+      outputPath?: string;
+    };
+    if (typeof params.sourceDir === "string" && params.sourceDir)
+      setSourceDir(params.sourceDir);
+    if (typeof params.outputPath === "string" && params.outputPath)
+      setOutputPath(params.outputPath);
+  });
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -185,9 +200,12 @@ export default function FileListDirectoryPage({
     // silently discard any review notes added to the previous list.
     if (
       outputPath === scan?.outputPath &&
-      !window.confirm(
-        `将写入：\n${outputPath}\n\n如果该文件已存在会被覆盖（其中的手工批注会丢失）。是否继续？`,
-      )
+      !(await confirmDialog({
+        title: "确认覆盖文件",
+        message: `将写入：\n${outputPath}\n\n如果该文件已存在会被覆盖（其中的手工批注会丢失）。是否继续？`,
+        confirmLabel: "继续",
+        tone: "danger",
+      }))
     )
       return;
     setBusy(true);

@@ -28,6 +28,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useJobEvents } from "@/hooks/useJobEvents";
+import { useTaskRestore } from "./restore";
 import { errorText } from "@/lib/errors";
 import {
   DEFAULT_ENTITY,
@@ -346,6 +347,63 @@ export function FaTbJePage() {
         setBusy(false);
       if (event.phase === "failed") setError(event.message);
     },
+  });
+
+  // 历史记录「继续任务」：回填 TB/JE 路径、映射与科目分类；Sheet/标题行以
+  // 存档参数重建最小 Inspection，不点「重新读取」也能直接预览/导出。
+  // restore key 用 "fa_list:tbje" 与清单对比子页区分（见 restore.ts）。
+  useTaskRestore("fa_list:tbje", (restore) => {
+    type SourceParams = {
+      inputPath?: string;
+      sheet?: string;
+      headerRow?: number;
+      headerDepth?: number;
+    };
+    const p = restore.params as {
+      tbSource?: SourceParams;
+      jeSource?: SourceParams;
+      tbMapping?: Mapping;
+      jeMapping?: Mapping;
+      accountAssignments?: Assignment[];
+      reportEnd?: string;
+      outputPath?: string;
+    };
+    const minimalInspection = (src: SourceParams | undefined): Inspection =>
+      ({
+        sheet: src?.sheet ?? "",
+        headerRow: src?.headerRow ?? 0,
+        headerDepth: src?.headerDepth ?? 0,
+      }) as Inspection;
+    const tbPath =
+      typeof p.tbSource?.inputPath === "string" ? p.tbSource.inputPath : "";
+    const jePath =
+      typeof p.jeSource?.inputPath === "string" ? p.jeSource.inputPath : "";
+    if (!tbPath && !jePath) return;
+    setPaths({ tb: tbPath, je: jePath });
+    setInspects({
+      tb: tbPath ? minimalInspection(p.tbSource) : undefined,
+      je: jePath ? minimalInspection(p.jeSource) : undefined,
+    });
+    setMappings({
+      tb:
+        p.tbMapping && typeof p.tbMapping === "object"
+          ? (p.tbMapping as Mapping)
+          : {},
+      je:
+        p.jeMapping && typeof p.jeMapping === "object"
+          ? (p.jeMapping as Mapping)
+          : {},
+    });
+    if (Array.isArray(p.accountAssignments))
+      setAssignments(p.accountAssignments as Assignment[]);
+    if (typeof p.reportEnd === "string" && p.reportEnd)
+      setReportEnd(p.reportEnd);
+    if (typeof p.outputPath === "string") setOutputPath(p.outputPath);
+    setStep(2);
+    setAccountsReviewed(false);
+    setError("");
+    setResult(undefined);
+    setJob(undefined);
   });
 
   const accounts = useMemo(

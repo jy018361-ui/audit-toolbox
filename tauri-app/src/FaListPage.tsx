@@ -28,6 +28,7 @@ import {
   shouldShowFaPreviewWorkspace,
 } from "./faListUi";
 import type { ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { errorText } from "@/lib/errors";
 import { ResultView } from "@/components/ResultView";
 import { PageHeader } from "@/components/PageHeader";
@@ -46,7 +47,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { useJobEvents } from "@/hooks/useJobEvents";
-import { FaTbJePage } from "./FaTbJePage";
+import { FaTbJePage } from "./FaTbjePage";
 type FaMapping = {
   matchKey?: string;
   matchKeys?: string[];
@@ -136,6 +137,25 @@ const emptyFaSupplement = (): FaSupplementConfig => ({
   originalValue: "",
   depreciation: "",
 });
+
+/** 历史存档里的补充表参数（supplementPayload 的产物）逆向还原成表单配置；
+ * 空对象/形状不对时退回空白补充表。 */
+const supplementConfigOf = (value: unknown): FaSupplementConfig => {
+  const v = (value && typeof value === "object" ? value : {}) as Partial<
+    Record<keyof FaSupplementConfig, unknown>
+  >;
+  return {
+    path: typeof v.path === "string" ? v.path : "",
+    sheet: typeof v.sheet === "string" ? v.sheet : "",
+    headerRow: v.headerRow != null ? String(v.headerRow) : "",
+    keys: Array.isArray(v.keys) ? (v.keys as string[]) : [],
+    matchKeysVerified: Boolean(v.matchKeysVerified),
+    method: typeof v.method === "string" ? v.method : "",
+    date: typeof v.date === "string" ? v.date : "",
+    originalValue: typeof v.originalValue === "string" ? v.originalValue : "",
+    depreciation: typeof v.depreciation === "string" ? v.depreciation : "",
+  };
+};
 
 type FaListDraft = {
   step: 1 | 2 | 3;
@@ -329,6 +349,80 @@ function FaCardListPage() {
       setBusy(!["completed", "failed", "cancelled"].includes(event.phase));
       if (event.phase === "failed") setError(event.message);
     },
+  });
+
+  // 历史记录「继续任务」：回填两份清单与映射/匹配键/补充表等全部配置，
+  // 不自动重新读取——读取会用建议映射覆盖，预览等用户点「读取两表」再补。
+  // restore key 用 "fa_list:cards" 与账表核对子页区分（见 restore.ts）。
+  useTaskRestore("fa_list:cards", (restore) => {
+    const p = restore.params as {
+      beginPath?: string;
+      endPath?: string;
+      beginSheet?: string;
+      endSheet?: string;
+      beginHeaderRow?: number;
+      endHeaderRow?: number;
+      beginKeys?: string[];
+      endKeys?: string[];
+      beginMapping?: FaMapping;
+      endMapping?: FaMapping;
+      beginDisplayName?: string;
+      endDisplayName?: string;
+      balanceSheetDate?: string;
+      additionSupplement?: Partial<FaSupplementConfig>;
+      disposalSupplement?: Partial<FaSupplementConfig>;
+      outputPath?: string;
+    };
+    if (typeof p.beginPath !== "string" || !p.beginPath) return;
+    if (typeof p.endPath !== "string" || !p.endPath) return;
+    llmReviewGeneration.current += 1;
+    supplementReviewGeneration.current += 1;
+    setStep(2);
+    setBeginPath(p.beginPath);
+    setEndPath(p.endPath);
+    setBeginSheet(p.beginSheet ?? "");
+    setEndSheet(p.endSheet ?? "");
+    setBeginHeaderRow(p.beginHeaderRow != null ? String(p.beginHeaderRow) : "");
+    setEndHeaderRow(p.endHeaderRow != null ? String(p.endHeaderRow) : "");
+    setInspection(undefined);
+    setBeginKeys(Array.isArray(p.beginKeys) ? p.beginKeys : []);
+    setEndKeys(Array.isArray(p.endKeys) ? p.endKeys : []);
+    setBeginMapping(
+      p.beginMapping && typeof p.beginMapping === "object"
+        ? (p.beginMapping as FaMapping)
+        : {},
+    );
+    setEndMapping(
+      p.endMapping && typeof p.endMapping === "object"
+        ? (p.endMapping as FaMapping)
+        : {},
+    );
+    if (typeof p.beginDisplayName === "string" && p.beginDisplayName)
+      setBeginDisplayName(p.beginDisplayName);
+    if (typeof p.endDisplayName === "string" && p.endDisplayName)
+      setEndDisplayName(p.endDisplayName);
+    if (typeof p.balanceSheetDate === "string" && p.balanceSheetDate)
+      setBalanceSheetDate(p.balanceSheetDate);
+    setAddition(supplementConfigOf(p.additionSupplement));
+    setDisposal(supplementConfigOf(p.disposalSupplement));
+    setAdditionInspect(undefined);
+    setDisposalInspect(undefined);
+    setSupplementAutoHandled(false);
+    if (typeof p.outputPath === "string" && p.outputPath) {
+      setOutputPath(p.outputPath);
+      setOutputPathTouched(true);
+    }
+    setLlmReview(undefined);
+    setLlmChanges([]);
+    setLlmPending([]);
+    setLlmBypassed(false);
+    setSupplementLlmChanges([]);
+    setSupplementLlmPending([]);
+    setSupplementLlmReview(undefined);
+    setSupplementLlmBypassed(false);
+    setError("");
+    setJob(undefined);
+    setResult(undefined);
   });
   // Tauri 会拦截 DOM 文件拖放，因此仍监听窗口级事件；但落点必须
   // 命中实际上传框，不能用窗口左右/上下中线猜测。

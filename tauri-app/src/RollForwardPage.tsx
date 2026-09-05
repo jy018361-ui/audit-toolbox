@@ -10,8 +10,10 @@ import {
   settingsSet,
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { errorText } from "@/lib/errors";
 import { useJobPause } from "@/components/JobDialog";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import {
   parseRollForwardCraRatio,
   rollForwardCraWriteRecords,
@@ -242,6 +244,18 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
         setRollPreferences(loadedPreferences);
         preferencesRef.current = loadedPreferences;
         loadedRef.current = true;
+        // 挂载期间到达的历史恢复排队到这里执行，避免被刚加载的项目列表覆盖。
+        const pendingRestore = pendingRestoreRef.current;
+        if (pendingRestore) {
+          pendingRestoreRef.current = null;
+          if (pendingRestore.templateDir)
+            setTemplateDir(pendingRestore.templateDir);
+          if (pendingRestore.pmtePath) setPmtePath(pendingRestore.pmtePath);
+          setProjects([...loaded, pendingRestore.project]);
+          setProjectIndex(loaded.length);
+          setCompanyIndex(0);
+          void saveProjects([...loaded, pendingRestore.project]);
+        }
       })
       .catch((e) => setError(errorText(e)));
   }, []);
@@ -418,14 +432,18 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
     setCompanyIndex(project.companies.length);
     void saveProjects(next);
   }
-  function deleteProject() {
+  async function deleteProject() {
     if (projects.length <= 1) {
       setError("工作台中至少保留一个项目。");
       return;
     }
     if (
       !project ||
-      !window.confirm(`确认删除项目“${project.project_name}”及其公司配置？`)
+      !(await confirmDialog({
+        title: "确认删除项目",
+        message: `确认删除项目“${project.project_name}”及其公司配置？`,
+        tone: "danger",
+      }))
     )
       return;
     const next = projects.filter((_, index) => index !== projectIndex);
@@ -434,7 +452,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
     setCompanyIndex(0);
     void saveProjects(next);
   }
-  function deleteCompany() {
+  async function deleteCompany() {
     if ((project?.companies.length ?? 0) <= 1) {
       setError("项目中至少保留一个公司。");
       return;
@@ -442,7 +460,11 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
     if (
       !project ||
       !company ||
-      !window.confirm(`确认删除公司“${company.name}”？`)
+      !(await confirmDialog({
+        title: "确认删除公司",
+        message: `确认删除公司“${company.name}”？`,
+        tone: "danger",
+      }))
     )
       return;
     const next = projects.map((p, index) =>
@@ -484,6 +506,105 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
       llmWordingRevision: target.llm_wording_revision,
     };
   }
+
+  // 历史记录「继续任务」：把存档的公司参数逆向还原成一个新项目（不动现有
+  // 项目——它们持久化在设置里，覆盖等于毁掉用户现行工作）。模板目录与
+  // PMTE 路径直接回填页面；新建项目自动保存，不用了可整项删除。页面挂载时
+  // 项目列表还在异步加载，恢复必须排队到加载完成之后，否则会被覆盖。
+  const pendingRestoreRef = useRef<{
+    project: RollProject;
+    templateDir?: string;
+    pmtePath?: string;
+  } | null>(null);
+  const applyRestoredProject = (restored: {
+    project: RollProject;
+    templateDir?: string;
+    pmtePath?: string;
+  }) => {
+    if (restored.templateDir) setTemplateDir(restored.templateDir);
+    if (restored.pmtePath) setPmtePath(restored.pmtePath);
+    setProjects((current) => {
+      const next = [...current, restored.project];
+      void saveProjects(next);
+      return next;
+    });
+    setProjectIndex(projects.length);
+    setCompanyIndex(0);
+    setError("");
+    setValidation(undefined);
+  };
+  useTaskRestore(tool.id, (restore) => {
+    const companyOfParams = (raw: unknown): RollCompany | undefined => {
+      const p = (raw && typeof raw === "object" ? raw : {}) as Record<
+        string,
+        unknown
+      >;
+      const priorDir = typeof p.priorDir === "string" ? p.priorDir : "";
+      if (!priorDir) return undefined;
+      const craRecords = Array.isArray(p.craRecords)
+        ? (p.craRecords as Array<Record<string, unknown>>)
+        : [];
+      return {
+        ...newRollCompany(
+          typeof p.companyName === "string" && p.companyName
+            ? p.companyName
+            : "恢复的公司",
+        ),
+        prior_path: priorDir,
+        output_dir: typeof p.outputDir === "string" ? p.outputDir : "",
+        subjects: Array.isArray(p.subjectCodes)
+          ? p.subjectCodes.map(String)
+          : [],
+        bs_date: typeof p.bsDate === "string" ? p.bsDate : "",
+        functional_currency:
+          typeof p.functionalCurrency === "string"
+            ? p.functionalCurrency
+            : "人民币",
+        accounting_standard:
+          typeof p.accountingStandard === "string"
+            ? p.accountingStandard
+            : "企业会计准则",
+        pm: typeof p.pmValue === "string" ? p.pmValue : "",
+        te: typeof p.teValue === "string" ? p.teValue : "",
+        sad: typeof p.sadValue === "string" ? p.sadValue : "",
+        roll_wording: Boolean(p.rollForwardWording),
+        generate_summary: p.generate_summary !== false,
+        cra_table_records: craRecords,
+        apply_cra: craRecords.length > 0,
+        llm_enhanced: Boolean(p.llmEnhanced),
+        llm_wording_revision: Boolean(p.llmWordingRevision),
+      };
+    };
+    const single = companyOfParams(restore.params);
+    const batch = Array.isArray(restore.params.companies)
+      ? (restore.params.companies as unknown[])
+          .map(companyOfParams)
+          .filter((c): c is RollCompany => Boolean(c))
+      : [];
+    const companies = single ? [single] : batch;
+    if (!companies.length) return;
+    const stamp = new Date().toISOString().slice(0, 10);
+    const restored = {
+      project: {
+        id: crypto.randomUUID(),
+        project_name: `恢复-${companies[0]?.name ?? "项目"}-${stamp}`,
+        project_year: companies[0]?.bs_date?.slice(0, 4) ?? "",
+        companies,
+        updated_at: new Date().toISOString(),
+      } as RollProject,
+      templateDir:
+        typeof restore.params.templateDir === "string" &&
+        restore.params.templateDir
+          ? restore.params.templateDir
+          : undefined,
+      pmtePath:
+        typeof restore.params.pmtePath === "string" && restore.params.pmtePath
+          ? restore.params.pmtePath
+          : undefined,
+    };
+    if (loadedRef.current) applyRestoredProject(restored);
+    else pendingRestoreRef.current = restored;
+  });
   const params = () => paramsFor(company);
   async function validate() {
     if (!company) return;
@@ -567,7 +688,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
   }
   async function start() {
     if (!company) return;
-    if (!ensureCraReady([company])) return;
+    if (!(await ensureCraReady([company]))) return;
     setError("");
     setBusy(true);
     try {
@@ -597,7 +718,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
   }
   async function startAllCompanies() {
     if (!project) return;
-    if (!ensureCraReady(project.companies)) return;
+    if (!(await ensureCraReady(project.companies))) return;
     setError("");
     setBusy(true);
     try {
@@ -631,7 +752,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
-  function ensureCraReady(targets: RollCompany[]) {
+  async function ensureCraReady(targets: RollCompany[]) {
     const unresolved = targets.filter((target) => {
       if (target.cra_skip_confirmed) return false;
       return !(target.cra_table_records.length && target.apply_cra);
@@ -646,9 +767,10 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
         return `${target.name}：尚未提供 CRA`;
       })
       .join("\n");
-    const confirmed = window.confirm(
-      `执行前 CRA 确认\n\n${detail}\n\n确定本次不使用这些 CRA 并继续吗？`,
-    );
+    const confirmed = await confirmDialog({
+      title: "执行前 CRA 确认",
+      message: `${detail}\n\n确定本次不使用这些 CRA 并继续吗？`,
+    });
     if (!confirmed)
       setError("已取消执行。请解析并启用 CRA，或明确选择本次不使用 CRA。");
     if (confirmed) {

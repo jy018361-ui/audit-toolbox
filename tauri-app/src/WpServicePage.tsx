@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { engineCall, jobCancel, jobStart, listenJobEvents, pickPath } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { ErrorBox } from "@/components/ErrorBox";
 import { FileDropInput } from "@/components/FileDropInput";
 import { JobProgress } from "@/components/JobProgress";
@@ -74,6 +75,12 @@ export function WpServicePage({ tool }: { tool: ToolManifest }) {
     setResult(undefined);
     setJob(undefined);
   }
+
+  // 历史记录「继续任务」：回填上次的工作目录，不自动生成。
+  useTaskRestore(tool.id, (restore) => {
+    const folder = restore.params.folder;
+    if (typeof folder === "string" && folder) selectFolder(folder);
+  });
 
   async function chooseFolder() {
     const value = await pickPath("folder", "选择 WP 服务单工作目录");

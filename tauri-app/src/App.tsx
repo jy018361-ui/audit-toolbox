@@ -1,11 +1,13 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ComponentType, ReactElement } from "react";
 import {
+  matchPath,
   NavLink,
   Navigate,
   Route,
   Routes,
   useLocation,
+  useNavigate,
   useParams,
 } from "react-router-dom";
 import "./app-shell.css";
@@ -14,6 +16,7 @@ import {
   engineCall,
   historyGet,
   historyClear,
+  historyRestore,
   invalidateHistoryCache,
   jobCancel,
   jobStart,
@@ -27,6 +30,7 @@ import {
   toolCatalog,
   updateReleaseNotes,
 } from "./api";
+import { publishTaskRestore } from "./restore";
 import type { ReleaseNotes } from "./updateNotes";
 import { Button } from "@/components/ui/button";
 import { errorText } from "@/lib/errors";
@@ -35,17 +39,35 @@ import {
   type ActionDefinition,
   type FieldDefinition,
 } from "./toolDefinitions";
-import type { Bootstrap, JobEvent, ToolManifest } from "./types";
+import type {
+  Bootstrap,
+  HistoryRow,
+  JobEvent,
+  ToolManifest,
+} from "./types";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageHeader } from "@/components/PageHeader";
+import { RestoreBanner } from "@/components/RestoreBanner";
 import { WindowControls } from "@/components/WindowControls";
 import { PersistentToolPages } from "@/components/PersistentToolPages";
 import { JobDialogProvider } from "@/components/JobDialog";
+import { ConfirmDialogHost, confirmDialog } from "@/components/ConfirmDialog";
 import { SyncBusyDialog } from "@/components/SyncBusyDialog";
 import { StepIndicator } from "@/components/StepIndicator";
 import { ResultView } from "@/components/ResultView";
 import { EmptyState } from "@/components/EmptyState";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
+import { BeginnerTour } from "@/components/tour/BeginnerTour";
+import {
+  buildToolTourSteps,
+  workspaceTourSteps,
+} from "@/components/tour/tourSteps";
+import {
+  isTauriRuntime,
+  loadTourState,
+  saveTourState,
+} from "@/components/tour/tourState";
+import { Sparkles } from "lucide-react";
 import { applyReadableForegrounds } from "./theme";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -330,6 +352,26 @@ export default function App() {
     fa: true,
     kanzhang: true,
   });
+  // 新手模式：会话状态只记"当前在播哪条引导"；看过与否存 localStorage
+  // （tourState.ts），首次启动与首次进工具时自动播放，之后可在设置里重播。
+  const [tour, setTour] = useState<
+    { kind: "workspace" } | { kind: "tool"; toolId: string } | null
+  >(null);
+  const activeToolId = matchPath("/tools/:toolId", location.pathname)?.params
+    .toolId ?? null;
+  const tourTool =
+    tour?.kind === "tool"
+      ? catalog.find((tool) => tool.id === tour.toolId)
+      : undefined;
+  const finishTour = () => {
+    if (tour?.kind === "workspace") saveTourState({ workspaceDone: true });
+    if (tour?.kind === "tool") {
+      saveTourState({
+        toolDone: { ...loadTourState().toolDone, [tour.toolId]: true },
+      });
+    }
+    setTour(null);
+  };
   // 缓存自动清理：启动时问一次，之后每小时问一次。
   // 「够不够一个周期」由后端判断——那条判断只该有一处，散在两边迟早对不上。
   useEffect(() => {
@@ -371,6 +413,29 @@ export default function App() {
     // the drawer immediately after its trigger is pressed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname]);
+  // 首次启动自动播放工作台导览。只在桌面端生效：浏览器预览是开发者视角，
+  // 每次清缓存都会弹，打扰大于帮助；桌面用户只会在真正首次使用时遇到一次。
+  useEffect(() => {
+    if (!startupReady || !isTauriRuntime()) return;
+    if (loadTourState().workspaceDone) return;
+    // 等首屏渲染完再弹，避免引导和启动画面抢注意力。
+    const timer = setTimeout(
+      () => setTour((current) => current ?? { kind: "workspace" }),
+      1000,
+    );
+    return () => clearTimeout(timer);
+  }, [startupReady]);
+  // 第一次进入某个工具时自动播放该工具的上手引导；看过或关掉开关就不再弹。
+  useEffect(() => {
+    if (!startupReady || !activeToolId || tour) return;
+    const state = loadTourState();
+    if (state.autoToolTours === false) return;
+    if (state.toolDone?.[activeToolId]) return;
+    if (!catalog.some((tool) => tool.id === activeToolId)) return;
+    // 延迟触发给懒加载页面留出首绘时间；引擎内部还会轮询等待目标元素。
+    const timer = setTimeout(() => setTour({ kind: "tool", toolId: activeToolId }), 800);
+    return () => clearTimeout(timer);
+  }, [activeToolId, tour, catalog, startupReady]);
   useEffect(() => {
     if (!toolDrawerOpen) return;
     const sidebar = document.getElementById("app-sidebar");
@@ -445,6 +510,7 @@ export default function App() {
       }
     >
       <SyncBusyDialog />
+      <ConfirmDialogHost />
       <div className="app-shell">
         <a className="skip-navigation" href="#main-content" onClick={(event) => { event.preventDefault(); document.getElementById("main-content")?.focus(); }}>跳过导航，进入工作区</a>
         <WindowControls />
@@ -452,7 +518,9 @@ export default function App() {
           id="app-sidebar"
           className={`sidebar${toolDrawerOpen ? " drawer-open" : ""}`}
         >
-          <div className="brand" data-tauri-drag-region>
+          {/* deep：整个品牌区（含文字周围的空白）都是拖拽手柄，双击最大化；
+              里面的抽屉关闭按钮不带该属性，点击优先于拖拽 */}
+          <div className="brand" data-tauri-drag-region="deep">
             <button
               type="button"
               className="sidebar-drawer-close"
@@ -464,12 +532,23 @@ export default function App() {
             >
               ×
             </button>
-            <h1 data-tauri-drag-region>E点通工具箱</h1>
-            <p data-tauri-drag-region>审计作业工作台</p>
+            <h1>E点通工具箱</h1>
+            <p>审计作业工作台</p>
           </div>
-          <nav>
+          <nav data-tour="sidebar-nav">
             {NAV.map((x) => (
-              <NavLink key={x.to} to={x.to} end={x.to === "/"}>
+              <NavLink
+                key={x.to}
+                to={x.to}
+                end={x.to === "/"}
+                data-tour={
+                  x.to === "/history"
+                    ? "nav-history"
+                    : x.to === "/settings"
+                      ? "nav-settings"
+                      : undefined
+                }
+              >
                 <span className="nav-icon">{NAV_ICON[x.to]}</span>
                 <span>{x.label}</span>
                 {x.to === "/settings" && availableUpdate && (
@@ -485,7 +564,7 @@ export default function App() {
               </NavLink>
             ))}
           </nav>
-          <div className="tool-nav">
+          <div className="tool-nav" data-tour="sidebar-tools">
             {TOOL_GROUPS.map((group) => {
               const entries = group.ids
                 .map((id) =>
@@ -597,7 +676,14 @@ export default function App() {
             }}
           />
         )}
-        <main className="main" id="main-content" tabIndex={-1}>
+        {/* 裸 drag-region：只有直接点在 main 自身（顶部 44px 标题栏条带和
+            四周留白）时才拖拽/双击最大化，卡片等子元素不受影响 */}
+        <main
+          className="main"
+          id="main-content"
+          tabIndex={-1}
+          data-tauri-drag-region
+        >
           {!startupReady ? (
             <AppLoading />
           ) : startupError ? (
@@ -607,11 +693,18 @@ export default function App() {
             />
           ) : (
             <>
+              <RestoreBanner catalog={catalog} />
               <Routes>
                 <Route
                   path="/"
                   element={
-                    <Dashboard catalog={catalog} jobs={Object.values(jobs)} />
+                    <Dashboard
+                      catalog={catalog}
+                      jobs={Object.values(jobs)}
+                      onStartWorkspaceTour={() =>
+                        setTour({ kind: "workspace" })
+                      }
+                    />
                   }
                 />
                 {/* The visible tool is rendered by PersistentToolPages below so
@@ -627,6 +720,9 @@ export default function App() {
                     <Settings
                       availableUpdate={availableUpdate}
                       onAvailableUpdateChange={setAvailableUpdate}
+                      onReplayWorkspaceTour={() =>
+                        setTour({ kind: "workspace" })
+                      }
                     />
                   }
                 />
@@ -647,6 +743,22 @@ export default function App() {
           )}
         </main>
       </div>
+      {/* 新手引导浮层：挂在 JobDialogProvider 内、应用外壳之外，
+          全屏 fixed 定位不参与布局。 */}
+      {tour?.kind === "workspace" && (
+        <BeginnerTour
+          key="workspace"
+          steps={workspaceTourSteps}
+          onFinish={finishTour}
+        />
+      )}
+      {tourTool && (
+        <BeginnerTour
+          key={`tool-${tourTool.id}`}
+          steps={buildToolTourSteps(tourTool)}
+          onFinish={finishTour}
+        />
+      )}
     </JobDialogProvider>
   );
 }
@@ -690,9 +802,11 @@ function relativeTime(value: string): string {
 function Dashboard({
   catalog,
   jobs,
+  onStartWorkspaceTour,
 }: {
   catalog: ToolManifest[];
   jobs: JobEvent[];
+  onStartWorkspaceTour: () => void;
 }) {
   const [history, setHistory] = useState<Array<Record<string, unknown>>>([]);
   useEffect(() => {
@@ -722,13 +836,19 @@ function Dashboard({
         eyebrow="E点通工具箱 · 工作台"
         title="今天要处理什么？"
         detail="从最近使用继续，或按作业类型选择工具。"
+        actions={
+          <Button variant="outline" size="sm" onClick={onStartWorkspaceTour}>
+            <Sparkles aria-hidden="true" />
+            新手引导
+          </Button>
+        }
       />
       <DataHandlingNotice
         mode="network-assisted"
         className="dashboard-data-notice"
         title="数据处理边界"
         description="多数文件处理在本机完成；启用 AI 或云端 OCR 时，会按你在设置中的配置调用外部服务。"
-        details="历史记录只保存任务状态、时间和输出路径，不保存客户表格内容。"
+        details="历史记录只保存任务状态、时间、输出路径和任务输入参数（用于「继续任务」恢复现场），不保存客户表格内容。"
       />
       <section className="metrics">
         <Metric label="进行中任务" value={String(running.length)} />
@@ -736,7 +856,11 @@ function Dashboard({
         <Metric label="累计任务" value={String(history.length)} />
       </section>
       {recentTools.length > 0 && (
-        <section className="recent-tools" aria-labelledby="recent-tools-title">
+        <section
+          className="recent-tools"
+          aria-labelledby="recent-tools-title"
+          data-tour="recent-tools"
+        >
           <h2 id="recent-tools-title">最近使用</h2>
           <div>
             {recentTools.map((tool) => (
@@ -755,7 +879,7 @@ function Dashboard({
           </div>
         </section>
       )}
-      <div className="dashboard-tool-groups">
+      <div className="dashboard-tool-groups" data-tour="dashboard-tool-groups">
         {TOOL_GROUPS.map((group) => {
           const tools = expandedToolIds(group.ids)
             .map((id) => catalog.find((tool) => tool.id === id))
@@ -1077,21 +1201,43 @@ const HISTORY_STATUS: Record<
 };
 
 function History({ catalog }: { catalog: ToolManifest[] }) {
-  const [rows, setRows] = useState<Array<Record<string, unknown>>>([]);
+  const navigate = useNavigate();
+  const [rows, setRows] = useState<HistoryRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [restoringJobId, setRestoringJobId] = useState("");
+  const [restoreError, setRestoreError] = useState("");
   useEffect(() => {
     void historyGet()
       .then(setRows)
       .catch((reason) => setError(appErrorText(reason)))
       .finally(() => setLoading(false));
   }, []);
+  async function resume(row: HistoryRow) {
+    const tool = catalog.find((t) => t.id === row.toolId);
+    if (!tool) {
+      setRestoreError("该工具已不在工具箱中，无法恢复。");
+      return;
+    }
+    setRestoreError("");
+    setRestoringJobId(row.jobId);
+    try {
+      // Rust 侧同时把仍存在的原输入路径重新授权，回填后即可直接运行。
+      const restore = await historyRestore(row.jobId);
+      publishTaskRestore(restore);
+      navigate(tool.route);
+    } catch (reason) {
+      setRestoreError(appErrorText(reason));
+    } finally {
+      setRestoringJobId("");
+    }
+  }
   return (
     <>
       <PageHeader
         eyebrow="可追踪结果"
         title="历史记录"
-        detail="记录任务状态、时间和输出路径，不保存客户表格内容。"
+        detail="记录任务状态、时间和输出路径；输入参数仅用于「继续任务」恢复现场，不保存客户表格内容。"
       />
       <Card className="history-card">
         <CardContent className="history-card-content">
@@ -1108,37 +1254,56 @@ function History({ catalog }: { catalog: ToolManifest[] }) {
               {error} 请稍后重试。
             </div>
           ) : rows.length ? (
-            rows.map((row, index) => {
-              const toolId = String(row.toolId ?? "");
-              const status =
-                HISTORY_STATUS[String(row.status ?? "")] ??
-                ({ label: "状态未知", tone: "preview" } as const);
-              const outputCount = Array.isArray(row.outputPaths)
-                ? row.outputPaths.length
-                : 0;
-              return (
-                <article className="task-row" key={String(row.jobId ?? index)}>
-                  <div className="task-row-copy">
-                    <strong>
-                      {catalog.find((tool) => tool.id === toolId)?.name ||
-                        "未知工具"}
-                    </strong>
-                    <p>{String(row.message ?? status.label)}</p>
-                  </div>
-                  <div className="task-row-meta">
-                    <time dateTime={String(row.startedAt ?? "")}>
-                      {formatHistoryTime(row.startedAt)}
-                    </time>
-                    <span>
-                      {outputCount > 0
-                        ? `输出 ${outputCount} 个文件`
-                        : "无输出文件"}
-                    </span>
-                  </div>
-                  <span className={`pill ${status.tone}`}>{status.label}</span>
-                </article>
-              );
-            })
+            <>
+              {restoreError && (
+                <div className="error-box" role="alert">
+                  {restoreError}
+                </div>
+              )}
+              {rows.map((row, index) => {
+                const toolId = String(row.toolId ?? "");
+                const status =
+                  HISTORY_STATUS[String(row.status ?? "")] ??
+                  ({ label: "状态未知", tone: "preview" } as const);
+                const outputCount = Array.isArray(row.outputPaths)
+                  ? row.outputPaths.length
+                  : 0;
+                const hasParams =
+                  row.params && Object.keys(row.params).length > 0;
+                const restoring = restoringJobId === row.jobId;
+                return (
+                  <article className="task-row" key={String(row.jobId ?? index)}>
+                    <div className="task-row-copy">
+                      <strong>
+                        {catalog.find((tool) => tool.id === toolId)?.name ||
+                          "未知工具"}
+                      </strong>
+                      <p>{String(row.message ?? status.label)}</p>
+                    </div>
+                    <div className="task-row-meta">
+                      <time dateTime={String(row.startedAt ?? "")}>
+                        {formatHistoryTime(row.startedAt)}
+                      </time>
+                      <span>
+                        {outputCount > 0
+                          ? `输出 ${outputCount} 个文件`
+                          : "无输出文件"}
+                      </span>
+                      {hasParams && (
+                        <Button
+                          variant="secondary"
+                          disabled={restoringJobId !== ""}
+                          onClick={() => void resume(row)}
+                        >
+                          {restoring ? "恢复中…" : "继续任务"}
+                        </Button>
+                      )}
+                    </div>
+                    <span className={`pill ${status.tone}`}>{status.label}</span>
+                  </article>
+                );
+              })}
+            </>
           ) : (
             <EmptyState
               title="还没有任务记录"
@@ -1197,9 +1362,11 @@ function settingsSignature(form: Record<string, unknown>, cacheMode: string) {
 export function Settings({
   availableUpdate,
   onAvailableUpdateChange,
+  onReplayWorkspaceTour,
 }: {
   availableUpdate: Update | null;
   onAvailableUpdateChange: (update: Update | null) => void;
+  onReplayWorkspaceTour: () => void;
 }) {
   const [section, setSection] = useState(0);
   const [saving, setSaving] = useState(false);
@@ -1220,6 +1387,10 @@ export function Settings({
     telemetryUrl: "",
   });
   const [message, setMessage] = useState("");
+  // 新手模式偏好与主题一样存 localStorage，改动立即生效，不进后端保存流程。
+  const [newbieAutoToolTours, setNewbieAutoToolTours] = useState(
+    () => loadTourState().autoToolTours !== false,
+  );
   const [testingLlm, setTestingLlm] = useState(false);
   const [llmTestResult, setLlmTestResult] = useState<{
     ok: boolean;
@@ -1261,6 +1432,11 @@ export function Settings({
   const [releaseNotes, setReleaseNotes] = useState<ReleaseNotes>();
   const [notesError, setNotesError] = useState("");
   const [fallbackNotes, setFallbackNotes] = useState("");
+  // 更新说明全是空的时候，改用提交记录总结顶替，界面不能只剩“未填写说明”。
+  const allReleaseBodiesEmpty =
+    !!releaseNotes &&
+    releaseNotes.releases.length > 0 &&
+    releaseNotes.releases.every((release) => !release.body);
   const [checkedUpdateVersion, setCheckedUpdateVersion] = useState<string>();
   const updateCheckLock = useRef(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -1448,12 +1624,28 @@ export function Settings({
       event.returnValue = "";
     };
     const confirmLinkNavigation = (event: MouseEvent) => {
-      const link = (event.target as Element | null)?.closest("a[href]");
+      const link = (event.target as Element | null)?.closest<HTMLAnchorElement>(
+        "a[href]",
+      );
       if (!link || !document.contains(link)) return;
-      if (!window.confirm("设置尚未保存，确定离开并放弃这些修改吗？")) {
-        event.preventDefault();
-        event.stopPropagation();
+      // 同意离开后由 confirmDialog 回调补发的合成点击：放行这一次，避免二次弹窗
+      if (link.dataset.confirmBypass) {
+        delete link.dataset.confirmBypass;
+        return;
       }
+      // 确认是异步的，必须在事件同步阶段先拦下原生跳转，再按结果决定是否补发
+      event.preventDefault();
+      event.stopPropagation();
+      void confirmDialog({
+        title: "放弃未保存的修改？",
+        message: "设置尚未保存，确定离开并放弃这些修改吗？",
+        confirmLabel: "离开",
+        tone: "danger",
+      }).then((ok) => {
+        if (!ok) return;
+        link.dataset.confirmBypass = "1";
+        link.click();
+      });
     };
     window.addEventListener("beforeunload", warnBeforeUnload);
     document.addEventListener("click", confirmLinkNavigation, true);
@@ -1586,7 +1778,7 @@ export function Settings({
         >
           <div className="settings-update-heading">
             <div className="settings-update-title-block">
-              <span className="settings-update-kicker">软件更新</span>
+              <span className="settings-update-kicker">版本</span>
               <h2 id="settings-update-title">
                 {availableUpdate
                   ? `可更新至 v${availableUpdate.version}`
@@ -1696,30 +1888,11 @@ export function Settings({
                   {warning}
                 </p>
               ))}
-              {releaseNotes.releases.map((release) => (
-                <article
-                  key={release.version}
-                  className="settings-release-entry"
-                >
-                  <h3>
-                    {release.title === `E点通工具箱 v${release.version}`
-                      ? `v${release.version}`
-                      : `v${release.version} · ${release.title}`}
-                  </h3>
-                  {release.publishedAt && (
-                    <p className="settings-note">
-                      发布时间：{release.publishedAt.slice(0, 10)}
-                    </p>
-                  )}
-                  <div className="settings-release-body">
-                    {release.body || "此版本未填写更新说明。"}
-                  </div>
-                </article>
-              ))}
-              {releaseNotes.commits.length > 0 && (
-                <details className="settings-release-commits">
+              {allReleaseBodiesEmpty && releaseNotes.commits.length > 0 ? (
+                /* 各版本说明全为空：整块替换成提交记录总结，默认展开 */
+                <details className="settings-release-commits" open>
                   <summary>
-                    升级区间提交记录
+                    提交记录总结（各版本均未填写发布说明）
                     <span>{releaseNotes.commits.length} 条</span>
                   </summary>
                   <ul>
@@ -1728,6 +1901,42 @@ export function Settings({
                     ))}
                   </ul>
                 </details>
+              ) : (
+                <>
+                  {releaseNotes.releases.map((release) => (
+                    <article
+                      key={release.version}
+                      className="settings-release-entry"
+                    >
+                      <h3>
+                        {release.title === `E点通工具箱 v${release.version}`
+                          ? `v${release.version}`
+                          : `v${release.version} · ${release.title}`}
+                      </h3>
+                      {release.publishedAt && (
+                        <p className="settings-note">
+                          发布时间：{release.publishedAt.slice(0, 10)}
+                        </p>
+                      )}
+                      <div className="settings-release-body">
+                        {release.body || "此版本未填写更新说明。"}
+                      </div>
+                    </article>
+                  ))}
+                  {releaseNotes.commits.length > 0 && (
+                    <details className="settings-release-commits">
+                      <summary>
+                        升级区间提交记录
+                        <span>{releaseNotes.commits.length} 条</span>
+                      </summary>
+                      <ul>
+                        {releaseNotes.commits.map((message, i) => (
+                          <li key={i}>{message}</li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                </>
               )}
             </div>
           )}
@@ -1806,7 +2015,7 @@ export function Settings({
                 <input
                   value={form.model}
                   onChange={(e) => set("model", e.target.value)}
-                  placeholder="Dify 可留空"
+                  placeholder="填写模型名称，如 gpt-4o-mini"
                 />
               </label>
               <label className="field">
@@ -1994,6 +2203,33 @@ export function Settings({
             </div>
           </section>
           <section className="list-card">
+            <h2>新手模式</h2>
+            <p>
+              用带动画的分步提示带你认识界面：首次打开软件会自动播放工作台导览，
+              第一次使用某个工具时会播放该工具的简要上手说明，都可以随时跳过。
+            </p>
+            <div className="form-grid">
+              <label className="field settings-toggle">
+                <span>第一次使用新工具时自动播放引导</span>
+                <input
+                  type="checkbox"
+                  checked={newbieAutoToolTours}
+                  onChange={(e) => {
+                    setNewbieAutoToolTours(e.target.checked);
+                    saveTourState({ autoToolTours: e.target.checked });
+                  }}
+                />
+              </label>
+            </div>
+            <div className="newbie-replay-row">
+              <Button variant="outline" size="sm" onClick={onReplayWorkspaceTour}>
+                <Sparkles aria-hidden="true" />
+                重播工作台引导
+              </Button>
+              <small>以上选择立即生效，无需点击保存配置。</small>
+            </div>
+          </section>
+          <section className="list-card">
             <h2>使用统计</h2>
             <DataHandlingNotice
               mode="telemetry"
@@ -2069,15 +2305,18 @@ export function Settings({
                   cacheBusy ||
                   ((cacheStat?.bytes ?? 0) === 0 && !clearHistoryWithCache)
                 }
-                onClick={() => {
-                  if (
-                    !window.confirm(
-                      clearHistoryWithCache
-                        ? "确定清理本机缓存并永久清除全部历史记录吗？"
-                        : "确定清理全部本机缓存吗？源文件和已生成文件不会被删除。",
-                    )
-                  )
-                    return;
+                onClick={async () => {
+                  const confirmed = await confirmDialog({
+                    title: clearHistoryWithCache
+                      ? "清理缓存并清除历史记录"
+                      : "清理本机缓存",
+                    message: clearHistoryWithCache
+                      ? "确定清理本机缓存并永久清除全部历史记录吗？"
+                      : "确定清理全部本机缓存吗？源文件和已生成文件不会被删除。",
+                    confirmLabel: "清理",
+                    tone: "danger",
+                  });
+                  if (!confirmed) return;
                   setCacheBusy(true);
                   setCacheMessage("");
                   void (async () => {
@@ -2176,7 +2415,7 @@ export function Settings({
           <span>
             {dirty
               ? "有未保存的配置修改；测试连接不会自动保存。"
-              : "配置已保存。界面主题会在选择后立即生效。"}
+              : "配置会保存到本机；界面主题在选择后立即生效。"}
           </span>
           <button
             className="primary"

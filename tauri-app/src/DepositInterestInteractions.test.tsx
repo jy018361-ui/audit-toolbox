@@ -163,6 +163,14 @@ describe("存款科目手工分类请求", () => {
       screen.getByRole("region", { name: "准备存款利息资料" }),
     ).toBeVisible();
     expect(screen.getByText(/TB 必传；JE 选传/)).toBeVisible();
+    // 底部主按钮设防：没上传 TB 时禁用并给出浅色提示；
+    // 步骤条第二步不受影响（参考资料设计，允许直接点进去）。
+    expect(
+      screen.getByRole("button", { name: "下一步：科目与利率确认" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText("先加入科目余额表（TB）后可继续下一步。"),
+    ).toBeVisible();
   });
   it("真实页面区分默认excluded和手工排除，并支持撤销手工选择", async () => {
     render(<DepositInterestPage tool={tool} />);

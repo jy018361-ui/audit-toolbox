@@ -5,9 +5,13 @@ import { ReleaseNotesSchema } from "./updateNotes";
 import { version as appVersion } from "../package.json";
 import {
   BootstrapSchema,
+  HistoryRowSchema,
   JobEventSchema,
+  TaskRestoreSchema,
   ToolManifestSchema,
+  type HistoryRow,
   type JobEvent,
+  type TaskRestore,
 } from "./types";
 
 const inTauri = () =>
@@ -138,7 +142,6 @@ export async function updateReleaseNotes(targetVersion?: string) {
     await invoke("update_release_notes", { targetVersion }),
   );
 }
-type HistoryRow = Record<string, unknown>;
 let historyCache: HistoryRow[] | undefined;
 let historyRequest: Promise<HistoryRow[]> | undefined;
 let historyGeneration = 0;
@@ -149,7 +152,14 @@ export function historyGet(): Promise<HistoryRow[]> {
   if (historyCache) return Promise.resolve(historyCache);
   if (historyRequest) return historyRequest;
   const generation = historyGeneration;
-  const request = invoke<HistoryRow[]>("history_get")
+  const request = invoke<unknown>("history_get")
+    .then((rows) =>
+      Promise.all(
+        (Array.isArray(rows) ? rows : []).map((row) =>
+          HistoryRowSchema.parse(row),
+        ),
+      ),
+    )
     .then((rows) => {
       if (generation === historyGeneration) historyCache = rows;
       return rows;
@@ -172,6 +182,13 @@ export async function historyClear(): Promise<{ removed: number }> {
   const result = await invoke<{ removed: number }>("history_clear");
   invalidateHistoryCache();
   return result;
+}
+
+/** 「继续任务」：取回该任务的输入参数存档（Rust 侧会重新授权仍存在的
+ * 原输入路径），前端据此跳到对应工具页回填表单。 */
+export async function historyRestore(jobId: string): Promise<TaskRestore> {
+  if (!inTauri()) throw previewUnavailable("恢复历史任务");
+  return TaskRestoreSchema.parse(await invoke("history_restore", { jobId }));
 }
 export const settingsSet = (settings: Record<string, unknown>) => {
   if (inTauri()) return invoke<void>("settings_set", { settings });

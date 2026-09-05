@@ -270,9 +270,14 @@
 .settings-page .settings-toggle {
   display: flex;
   flex-direction: row;
-  align-items: center;
+  /* 与同网格其他字段的标签文字保持同一水平线：顶对齐，而不是整行垂直居中 */
+  align-items: flex-start;
   justify-content: flex-start;
   gap: var(--sp-3);
+}
+
+.settings-page .settings-toggle > span {
+  line-height: 20px;
 }
 
 .settings-page .settings-toggle input[type="checkbox"] {
@@ -280,7 +285,8 @@
   height: var(--sp-4);
   min-height: 0;
   flex: 0 0 auto;
-  margin: 0;
+  /* 16px 勾选框对 20px 文字行居中 */
+  margin-top: 2px;
   accent-color: var(--brand);
 }
 

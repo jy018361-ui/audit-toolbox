@@ -16,5 +16,5 @@
   {"id":"audit_roll_forward","name":"WP Roll Forward","description":"标准审计底稿跨年度结转与 CRA 信息迁移","route":"/tools/audit_roll_forward","version":"2.0","capabilities":["projects","companies","catalog","validate","cra_parse","pmte","process","pause","cancel","history"],"migrationStatus":"preview"},
   {"id":"wp_service_generator","name":"FY27 WP服务单生成工具","description":"拆分服务单并生成服务方案与工时核对","route":"/tools/wp_service_generator","version":"2.0","capabilities":["validate","generate"],"migrationStatus":"ready"},
   {"id":"fuzzy_match","name":"两列模糊匹配","description":"两列公司名称/人名/地址/通用文本的模糊匹配核对，支持人工确认与底稿导出","route":"/tools/fuzzy_match","version":"1.0","capabilities":["模糊匹配","人工确认","Excel导出"],"migrationStatus":"ready"},
-  {"id":"tbje_check","name":"TBJE完整性核对","description":"上传科目余额表与序时账，自动核对勾稽关系、发生额一致性与会计恒等式","route":"/tools/tbje_check","version":"1.0","capabilities":["inspect_tb","inspect_je","map","run","export"],"migrationStatus":"ready"}
+  {"id":"tbje_check","name":"TBJE 完整性核对","description":"上传科目余额表与序时账，自动核对勾稽关系、发生额一致性与会计恒等式","route":"/tools/tbje_check","version":"1.0","capabilities":["inspect_tb","inspect_je","map","run","export"],"migrationStatus":"ready"}
 ]

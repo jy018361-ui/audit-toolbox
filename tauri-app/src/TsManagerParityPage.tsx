@@ -8,6 +8,7 @@ import {
   pickPath,
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
@@ -299,6 +300,44 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     setStep(1);
   }
 
+  // 历史记录「继续任务」：回填文件/Sheet/标题行/输出路径与筛选条件，不自动
+  // 读取（读取走任务通道）。存档筛选暂存在 ref 里：用户点「加载文件」后
+  // applyInspect 用它顶替引擎默认筛选，条件就不丢。
+  const restoredSelections = useRef<Record<string, string[]> | null>(null);
+  useTaskRestore(tool.id, (restore) => {
+    const p = restore.params as {
+      inputPath?: string;
+      sheet?: string;
+      headerRow?: number;
+      outputPath?: string;
+      filters?: Array<{ field?: unknown; values?: unknown }>;
+    };
+    if (typeof p.inputPath !== "string" || !p.inputPath) return;
+    const selections: Record<string, string[]> = {};
+    for (const filter of Array.isArray(p.filters) ? p.filters : []) {
+      if (
+        filter &&
+        typeof filter.field === "string" &&
+        Array.isArray(filter.values)
+      )
+        selections[filter.field] = filter.values as string[];
+    }
+    restoredSelections.current = Object.keys(selections).length
+      ? selections
+      : null;
+    resetForNewSource({
+      inputPath: p.inputPath,
+      sheet: typeof p.sheet === "string" ? p.sheet : "",
+      headerRow:
+        p.headerRow != null && Number.isFinite(Number(p.headerRow))
+          ? String(p.headerRow)
+          : "1",
+      outputPath: typeof p.outputPath === "string" ? p.outputPath : "",
+    });
+    if (Object.keys(selections).length)
+      setState((current) => ({ ...current, selections }));
+  });
+
   async function chooseInput() {
     const selected = await pickPath(
       "file",
@@ -341,13 +380,17 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     const defaults = value.defaults ?? {};
     const defaultField = String(defaults.filterField ?? "").trim();
     const defaultValue = String(defaults.filterValue ?? "").trim();
+    // 历史恢复暂存的筛选优先于引擎默认筛选；一次性消费。
+    const restored = restoredSelections.current;
+    restoredSelections.current = null;
     setValueCache({});
     setState((current) => ({
       ...current,
       inspect: value,
       sheet: value.selectedSheet ?? current.sheet,
       selections:
-        defaultField && defaultValue ? { [defaultField]: [defaultValue] } : {},
+        restored ??
+        (defaultField && defaultValue ? { [defaultField]: [defaultValue] } : {}),
       filtered: undefined,
     }));
   }

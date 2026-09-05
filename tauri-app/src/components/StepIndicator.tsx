@@ -35,7 +35,12 @@ export function StepIndicator({
   className,
 }: StepIndicatorProps) {
   return (
-    <nav className={cn("step-indicator", className)} aria-label={ariaLabel}>
+    // data-tour：新手引导讲解"分步操作"时的挂点。
+    <nav
+      className={cn("step-indicator", className)}
+      aria-label={ariaLabel}
+      data-tour="step-indicator"
+    >
       <ol className="step-indicator-list">
         {steps.map((step, index) => {
         const done = showCompleted && index < current;

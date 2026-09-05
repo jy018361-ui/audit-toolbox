@@ -11,3 +11,30 @@
 .audipick-workspace .result-card {
   overflow-x: auto;
 }
+
+/* 顶部纵向节奏：横幅→页签、页签→下一导航行一律 --sp-5，导航区→内容卡 --sp-6。
+   间距一律由后一块的 margin-top 提供，页签行不带下边距；三个视图分支
+   （步骤条 / 模板库壳 / 工作日志卡）都紧跟在 .ap-views 后，各配一条。 */
+.ap-views {
+  margin: var(--sp-5) 0 0;
+}
+.ap-views + .step-indicator {
+  margin: var(--sp-5) 0 0;
+}
+.ap-views + .form-card {
+  margin-top: var(--sp-5);
+}
+.workspace.audipick-workspace {
+  margin-top: var(--sp-6);
+}
+/* 页签与步骤条同高（--control-height），激活页签字重提到 --fw-strong，
+   视觉重量与步骤条一致。 */
+.ap-views button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--control-height);
+}
+.ap-views button.active {
+  font-weight: var(--fw-strong);
+}

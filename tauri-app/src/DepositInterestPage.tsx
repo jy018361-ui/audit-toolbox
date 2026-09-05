@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { ToolManifest, JobEvent } from "./types";
+import { useTaskRestore } from "./restore";
 import {
   engineCall,
   jobCancel,
@@ -523,6 +524,85 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       ),
     );
   }, [accounts, je, tb, accountRoleOverrides]);
+
+  // 历史记录「继续任务」：回填两表路径/基准日/映射与分层利率、逐户改价。
+  // Sheet 等识别信息以存档参数重建最小 Inspection，不点「重新识别」也能直接
+  // 测算；存档的最终科目分类整体写入 overrides，预填 effect 会原样采纳。
+  useTaskRestore(tool.id, (restore) => {
+    type DepositSourceParams = {
+      inputPath?: string;
+      sheet?: string;
+      headerRow?: number;
+      headerDepth?: number;
+    };
+    const p = restore.params as {
+      reportEnd?: string;
+      tbSource?: DepositSourceParams;
+      jeSource?: DepositSourceParams;
+      tbMapping?: Record<string, string | string[]>;
+      jeMapping?: Record<string, string | string[]>;
+      accountRoles?: Record<string, string>;
+      accountTierOverrides?: Record<string, string>;
+      rateOverrides?: Record<string, { tier?: string; annualRate?: number }>;
+      tierRates?: Record<string, number>;
+      outputPath?: string;
+    };
+    const restoredJePath =
+      typeof p.jeSource?.inputPath === "string" ? p.jeSource.inputPath : "";
+    const restoredTbPath =
+      typeof p.tbSource?.inputPath === "string" ? p.tbSource.inputPath : "";
+    if (!restoredJePath && !restoredTbPath) return;
+    const accountList = [
+      ...new Set([
+        ...Object.keys(p.accountRoles ?? {}),
+        ...Object.keys(p.accountTierOverrides ?? {}),
+        ...Object.keys(p.rateOverrides ?? {}),
+      ]),
+    ];
+    const minimalInspection = (src: DepositSourceParams): Inspection =>
+      ({
+        sheet: src.sheet ?? "",
+        headerRow: src.headerRow ?? 0,
+        headerDepth: src.headerDepth ?? 0,
+        accounts: accountList,
+      }) as Inspection;
+    setJePath(restoredJePath);
+    setTbPath(restoredTbPath);
+    setJe(restoredJePath ? minimalInspection(p.jeSource!) : undefined);
+    setTb(restoredTbPath ? minimalInspection(p.tbSource!) : undefined);
+    if (typeof p.reportEnd === "string" && p.reportEnd)
+      setReportEnd(p.reportEnd);
+    setJeMapping(
+      p.jeMapping && typeof p.jeMapping === "object" ? p.jeMapping : {},
+    );
+    setTbMapping(
+      p.tbMapping && typeof p.tbMapping === "object" ? p.tbMapping : {},
+    );
+    setAccountRoleOverrides(
+      p.accountRoles && typeof p.accountRoles === "object"
+        ? p.accountRoles
+        : {},
+    );
+    setAccountTierOverrides(
+      p.accountTierOverrides && typeof p.accountTierOverrides === "object"
+        ? p.accountTierOverrides
+        : {},
+    );
+    setRateOverrides(
+      p.rateOverrides && typeof p.rateOverrides === "object"
+        ? p.rateOverrides
+        : {},
+    );
+    if (p.tierRates && typeof p.tierRates === "object")
+      setTierRates(p.tierRates);
+    setOutputPath(typeof p.outputPath === "string" ? p.outputPath : "");
+    setStep(2);
+    setBusy(false);
+    setError("");
+    setResult(undefined);
+    setRows([]);
+    setJob(undefined);
+  });
   useEffect(() => {
     const drops = listenPositionedFileDrops(({ paths, x, y }) => {
       if (
@@ -1072,8 +1152,17 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               />
             )}
           </div>
+          {/* 步骤条第二步是参考资料、没传文件也允许进（见上方 StepIndicator
+              注释）；但底部主按钮要设防：没拿到 TB 就不许走这条快捷路径。 */}
           <div className="fx-step-actions">
-            <Button onClick={() => setStep(1)}>下一步：科目与利率确认</Button>
+            <Button disabled={!tb} onClick={() => setStep(1)}>
+              下一步：科目与利率确认
+            </Button>
+            {!tb && (
+              <p className="fx-hint self-center">
+                先加入科目余额表（TB）后可继续下一步。
+              </p>
+            )}
           </div>
         </>
       )}

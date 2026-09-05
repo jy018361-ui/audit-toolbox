@@ -8,6 +8,7 @@ import {
   pickPath,
 } from "./api";
 import type { ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { errorText } from "@/lib/errors";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
@@ -16,6 +17,7 @@ import { JobProgress } from "@/components/JobProgress";
 import { Field } from "@/components/Field";
 import { FileDropInput } from "@/components/FileDropInput";
 import { Button } from "@/components/ui/button";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useJobEvents } from "@/hooks/useJobEvents";
@@ -72,6 +74,17 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
     setJob(undefined);
     activeJobId.current = "__input_changed__";
   }, [pdfPaths, setJob, activeJobId]);
+
+  // 历史记录「继续任务」：回填上次的 PDF 列表与输出目录，不自动转换。
+  useTaskRestore(tool.id, (restore) => {
+    const params = restore.params as {
+      pdfPaths?: string[];
+      outputDir?: string;
+    };
+    if (Array.isArray(params.pdfPaths) && params.pdfPaths.length)
+      setPdfPaths(dedupePdfPaths(params.pdfPaths));
+    if (typeof params.outputDir === "string") setOutputDir(params.outputDir);
+  });
 
   // 拖放：一次可拖入多份 PDF 或整个文件夹，展开后只保留 PDF。
   useEffect(() => {
@@ -232,11 +245,14 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                 variant="destructive"
                 size="sm"
                 disabled={busy || !pdfPaths.length}
-                onClick={() => {
+                onClick={async () => {
                   if (
-                    window.confirm(
-                      `确认清空当前 ${pdfPaths.length} 份 PDF？只会清空本次列表，不会删除原文件。`,
-                    )
+                    await confirmDialog({
+                      title: "确认清空列表",
+                      message: `确认清空当前 ${pdfPaths.length} 份 PDF？只会清空本次列表，不会删除原文件。`,
+                      confirmLabel: "清空",
+                      tone: "danger",
+                    })
                   )
                     setPdfPaths([]);
                 }}

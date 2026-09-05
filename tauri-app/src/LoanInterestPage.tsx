@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import {
   engineCall,
   jobCancel,
@@ -402,6 +403,72 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       ...(outputPath ? { outputPath } : {}),
     };
   }
+
+  // 历史记录「继续任务」：回填台账/TB/JE/利率台账路径、模式与映射；Sheet 等
+  // 识别信息以存档参数重建最小 Inspection，不点「重新识别」也能直接测算。
+  // 逐行利率的手工改动依赖台账预览现算默认值，恢复后需在识别后重设。
+  useTaskRestore(tool.id, (restore) => {
+    type LoanSourceParams = {
+      source?: {
+        inputPath?: string;
+        sheet?: string;
+        headerRow?: number;
+        headerDepth?: number;
+      };
+      mapping?: Record<string, string>;
+    };
+    const p = restore.params as {
+      mode?: string;
+      reportEnd?: string;
+      ledgerSource?: LoanSourceParams;
+      tbSource?: LoanSourceParams;
+      jeSource?: LoanSourceParams;
+      rateLedgerSource?: LoanSourceParams;
+      outputPath?: string;
+    };
+    const paramsKey: Record<Kind, keyof typeof p> = {
+      ledger: "ledgerSource",
+      tb: "tbSource",
+      je: "jeSource",
+      rateLedger: "rateLedgerSource",
+    };
+    const next: Record<Kind, Source> = {
+      ledger: empty(),
+      tb: empty(),
+      je: empty(),
+      rateLedger: empty(),
+    };
+    let restoredAny = false;
+    for (const kind of ["ledger", "tb", "je", "rateLedger"] as Kind[]) {
+      const src = p[paramsKey[kind]] as LoanSourceParams | undefined;
+      if (!src?.source) continue;
+      const path =
+        typeof src.source.inputPath === "string" ? src.source.inputPath : "";
+      if (!path) continue;
+      restoredAny = true;
+      next[kind] = {
+        path,
+        mapping:
+          src.mapping && typeof src.mapping === "object" ? src.mapping : {},
+        inspection: {
+          sheet: src.source.sheet ?? "",
+          headerRow: src.source.headerRow ?? 1,
+          headerDepth: src.source.headerDepth ?? 1,
+        } as Inspection,
+      };
+    }
+    if (!restoredAny) return;
+    invalidateResults();
+    setSources(next);
+    setRateEdits({});
+    if (p.mode === "ledger" || p.mode === "tb") setMode(p.mode);
+    if (typeof p.reportEnd === "string" && p.reportEnd)
+      setReportEnd(p.reportEnd);
+    setOutputPath(typeof p.outputPath === "string" ? p.outputPath : "");
+    setStep(2);
+    setBusy(false);
+    setError("");
+  });
   async function run(method: "loan.preview" | "loan.export") {
     setError("");
     if (!reportEnd) return setError("请选择资产负债表日。");

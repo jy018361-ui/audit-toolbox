@@ -25,6 +25,33 @@
   font-size: var(--fs-xs);
 }
 
+/* 历史记录「继续任务」后的全局提示：恢复结果 + 缺失文件提醒。 */
+.restore-notice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-3);
+  border: 1px solid var(--success-border);
+  border-radius: var(--r-sm);
+  background: var(--success-bg);
+  color: var(--success-fg);
+  font-size: var(--fs-xs);
+}
+.restore-notice p {
+  margin: 0;
+}
+.restore-notice button {
+  border: 1px solid var(--success-border);
+  background: transparent;
+  color: inherit;
+  border-radius: var(--r-sm);
+  padding: var(--sp-1) var(--sp-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
 body .app-shell {
   grid-template-columns: 248px minmax(0, 1fr);
 }
@@ -92,6 +119,8 @@ body .app-shell {
   margin: 0;
   color: var(--ink-strong);
   font-size: var(--fs-lg);
+  /* 工作台分区标题与卡片标题同用 medium：层级靠字重+字号，不靠默认常规体硬撑 */
+  font-weight: var(--fw-medium);
 }
 
 .app-shell .recent-tools > div {
@@ -164,6 +193,7 @@ body .app-shell {
   margin: 0;
   color: var(--ink-strong);
   font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

@@ -8,6 +8,7 @@ import {
   pickPath,
 } from "./api";
 import type { ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { errorText } from "@/lib/errors";
 import { StepIndicator } from "@/components/StepIndicator";
 import { PageHeader } from "@/components/PageHeader";
@@ -166,6 +167,40 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
     if (outputPathTouched) return;
     setOutputPath(path ? faDepDefaultOutputPath(path) : "");
   }, [path, outputPathTouched]);
+
+  // 历史记录「继续任务」：回填清单文件/Sheet/标题行/映射/基准日/输出路径，
+  // 不自动读取——重新读取会用建议映射覆盖，预览等用户点「读取文件」再补。
+  useTaskRestore(tool.id, (restore) => {
+    const p = restore.params as {
+      path?: string;
+      sheet?: string;
+      headerRow?: number;
+      mapping?: DepMapping;
+      balanceSheetDate?: string;
+      outputPath?: string;
+    };
+    if (typeof p.path !== "string" || !p.path) return;
+    reviewGeneration.current += 1;
+    setStep(1);
+    setPath(p.path);
+    setSheet(p.sheet ?? "");
+    setHeaderRow(p.headerRow != null ? String(p.headerRow) : "");
+    setInspection(undefined);
+    setMapping(
+      p.mapping && typeof p.mapping === "object" ? p.mapping : {},
+    );
+    if (typeof p.balanceSheetDate === "string" && p.balanceSheetDate)
+      setBalanceSheetDate(p.balanceSheetDate);
+    if (typeof p.outputPath === "string" && p.outputPath) {
+      setOutputPath(p.outputPath);
+      setOutputPathTouched(true);
+    }
+    setLlmReview(undefined);
+    setLlmChanges([]);
+    setLlmPending([]);
+    setError("");
+    setJob(undefined);
+  });
 
   async function inspect(overrides?: {
     path?: string;

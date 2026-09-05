@@ -8,6 +8,7 @@ import {
   pickPath,
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "./confirmation-progress.css";
 import { PageHeader } from "@/components/PageHeader";
@@ -119,6 +120,18 @@ export default function ConfirmationProgressPage({
   useEffect(() => {
     sessionStorage.setItem(CACHE_KEY, JSON.stringify({ inputPath, mode }));
   }, [inputPath, mode]);
+
+  // 历史记录「继续任务」：回填台账路径与函证类型，不自动重新检查。
+  useTaskRestore(tool.id, (restore) => {
+    const params = restore.params as { inputPath?: string; mode?: string };
+    if (typeof params.inputPath === "string" && params.inputPath) {
+      setInputPath(params.inputPath);
+      setInspection(undefined);
+      setResult(undefined);
+    }
+    if (params.mode === "bank" || params.mode === "trade" || params.mode === "both")
+      setMode(params.mode);
+  });
 
   useEffect(() => {
     const stopEvents = listenJobEvents((event) => {

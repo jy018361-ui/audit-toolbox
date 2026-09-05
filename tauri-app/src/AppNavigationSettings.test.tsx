@@ -14,6 +14,7 @@ import { useState } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import App, { Settings } from "./App";
+import { ConfirmDialogHost } from "@/components/ConfirmDialog";
 import {
   engineCall,
   historyGet,
@@ -131,6 +132,8 @@ it.each(["completed", "success"])(
         message: "底稿已生成",
         outputPaths: ["C:\\客户A\\result.xlsx"],
         startedAt: "2026-09-04T08:00:00+08:00",
+        finishedAt: null,
+        params: {},
       },
     ]);
     render(
@@ -213,7 +216,7 @@ it("marks preview tools as trials in the sidebar without disabling them", async 
 
 it("groups settings, preserves draft across sections, and saves via the existing APIs", async () => {
   render(
-    <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />,
+    <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} onReplayWorkspaceTour={() => {}} />,
   );
   await waitFor(() =>
     expect(screen.getByLabelText("模型")).toHaveValue("saved-model"),
@@ -276,10 +279,10 @@ it("groups settings, preserves draft across sections, and saves via the existing
 });
 
 it("discloses telemetry fields and protects unsaved settings on leave", async () => {
-  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
   render(
     <MemoryRouter>
-      <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />
+      <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} onReplayWorkspaceTour={() => {}} />
+      <ConfirmDialogHost />
     </MemoryRouter>,
   );
   await waitFor(() =>
@@ -305,11 +308,25 @@ it("discloses telemetry fields and protects unsaved settings on leave", async ()
   link.textContent = "离开设置";
   document.body.appendChild(link);
   fireEvent.click(link);
-  expect(confirm).toHaveBeenCalledWith(
-    "设置尚未保存，确定离开并放弃这些修改吗？",
+  expect(
+    screen.getByText("设置尚未保存，确定离开并放弃这些修改吗？"),
+  ).toBeVisible();
+  expect(window.location.hash).not.toBe("#/history");
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  await waitFor(() =>
+    expect(
+      screen.queryByText("设置尚未保存，确定离开并放弃这些修改吗？"),
+    ).toBeNull(),
   );
   expect(window.location.hash).not.toBe("#/history");
-  confirm.mockRestore();
+  fireEvent.click(link);
+  fireEvent.click(screen.getByRole("button", { name: "离开" }));
+  // 确认离开后补发的合成点击应被放行：对话框不再出现，也不需要再次确认
+  await waitFor(() =>
+    expect(
+      screen.queryByText("设置尚未保存，确定离开并放弃这些修改吗？"),
+    ).toBeNull(),
+  );
 });
 
 it("requires confirmation before clearing local cache", async () => {
@@ -319,10 +336,10 @@ it("requires confirmation before clearing local cache", async () => {
     oldestDays: 1,
     path: "C:\\cache",
   });
-  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
   render(
     <MemoryRouter>
-      <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} />
+      <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} onReplayWorkspaceTour={() => {}} />
+      <ConfirmDialogHost />
     </MemoryRouter>,
   );
   await waitFor(() => expect(engineCall).toHaveBeenCalled());
@@ -331,11 +348,20 @@ it("requires confirmation before clearing local cache", async () => {
   fireEvent.click(
     screen.getByRole("button", { name: "立刻清理全部缓存（1.0 KB）" }),
   );
-  expect(confirm).toHaveBeenCalledWith(
-    "确定清理全部本机缓存吗？源文件和已生成文件不会被删除。",
+  expect(
+    await screen.findByText(
+      "确定清理全部本机缓存吗？源文件和已生成文件不会被删除。",
+    ),
+  ).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  await waitFor(() =>
+    expect(
+      screen.queryByText(
+        "确定清理全部本机缓存吗？源文件和已生成文件不会被删除。",
+      ),
+    ).toBeNull(),
   );
   expect(engineCall).toHaveBeenCalledTimes(1);
-  confirm.mockRestore();
 });
 
 function UpdateSettings({ initial = null }: { initial?: Update | null }) {
@@ -344,6 +370,7 @@ function UpdateSettings({ initial = null }: { initial?: Update | null }) {
     <Settings
       availableUpdate={available}
       onAvailableUpdateChange={setAvailable}
+      onReplayWorkspaceTour={() => {}}
     />
   );
 }
@@ -443,6 +470,27 @@ it("shows this version's notes when up to date and refreshes on reopening", asyn
   expect(screen.queryByText("本版更新内容")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "软件更新" }));
   await waitFor(() => expect(updateReleaseNotes).toHaveBeenCalledTimes(2));
+});
+
+it("replaces all-empty release notes with the commit summary", async () => {
+  vi.mocked(updateReleaseNotes).mockResolvedValue({
+    currentVersion: "1.0.1",
+    targetVersion: "1.0.1",
+    releases: [
+      { version: "1.0.1", title: "本版", body: "", publishedAt: "" },
+    ],
+    warnings: ["本版未填写更新说明；下方提交记录就是这一版相对上一版的全部变更。"],
+    commits: ["fix(标题栏): 空白处可拖动", "feat(更新说明): 空说明用提交记录补齐"],
+  });
+  render(<UpdateSettings />);
+  fireEvent.click(screen.getByRole("button", { name: "软件更新" }));
+  await screen.findByText(/提交记录总结/);
+  expect(screen.getByText("fix(标题栏): 空白处可拖动")).toBeVisible();
+  expect(screen.getByText("feat(更新说明): 空说明用提交记录补齐")).toBeVisible();
+  // 说明全空时不再逐版本显示“未填写”占位
+  expect(
+    screen.queryByText("此版本未填写更新说明。"),
+  ).not.toBeInTheDocument();
 });
 
 it("does not offer a stale update when a fresh check fails", async () => {

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { ToolManifest, JobEvent } from "./types";
+import { useTaskRestore } from "./restore";
 import {
   engineCall,
   jobCancel,
@@ -872,6 +873,107 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       accountRolesTouched,
     ],
   );
+
+  // 历史记录「继续任务」：回填两表路径/模式/基准日/映射与各口径覆盖。Sheet
+  // 等识别信息以存档参数重建最小 Inspection，不点「重新识别」也能直接测算；
+  // 主体/科目清单也按存档键重建，并把角色与币种标记为已手选，避免上面的
+  // 预填副作用把恢复值改写掉。
+  useTaskRestore(tool.id, (restore) => {
+    type FxSourceParams = {
+      inputPath?: string;
+      sheet?: string;
+      headerRow?: number;
+      headerDepth?: number;
+    };
+    const p = restore.params as {
+      mode?: string;
+      reportEnd?: string;
+      jeSource?: FxSourceParams;
+      tbSource?: FxSourceParams;
+      jeMapping?: Record<string, string | string[]>;
+      tbMapping?: Record<string, string | string[]>;
+      entityCurrencies?: Record<string, string>;
+      accountRoles?: Record<string, string>;
+      accountCurrencies?: Record<string, string>;
+      manualClassifications?: Record<string, VoucherClassification>;
+      outputPath?: string;
+    };
+    const restoredJePath =
+      typeof p.jeSource?.inputPath === "string" ? p.jeSource.inputPath : "";
+    const restoredTbPath =
+      typeof p.tbSource?.inputPath === "string" ? p.tbSource.inputPath : "";
+    if (!restoredJePath && !restoredTbPath) return;
+    const entityList = Object.keys(p.entityCurrencies ?? {});
+    const accountList = [
+      ...new Set([
+        ...Object.keys(p.accountRoles ?? {}),
+        ...Object.keys(p.accountCurrencies ?? {}),
+        ...Object.keys(p.manualClassifications ?? {}),
+      ]),
+    ];
+    const minimalInspection = (
+      src: FxSourceParams | undefined,
+      withLists: boolean,
+    ): Inspection =>
+      ({
+        sheet: src?.sheet ?? "",
+        headerRow: src?.headerRow ?? 0,
+        headerDepth: src?.headerDepth ?? 0,
+        ...(withLists ? { entities: entityList, accounts: accountList } : {}),
+      }) as Inspection;
+    setJePath(restoredJePath);
+    setTbPath(restoredTbPath);
+    setJe(restoredJePath ? minimalInspection(p.jeSource, !restoredTbPath) : undefined);
+    setTb(restoredTbPath ? minimalInspection(p.tbSource, true) : undefined);
+    if (
+      p.mode === "realized" ||
+      p.mode === "unrealized" ||
+      p.mode === "combined"
+    )
+      setMode(p.mode);
+    if (typeof p.reportEnd === "string" && p.reportEnd)
+      setReportEnd(p.reportEnd);
+    setJeMapping(
+      p.jeMapping && typeof p.jeMapping === "object" ? p.jeMapping : {},
+    );
+    setTbMapping(
+      p.tbMapping && typeof p.tbMapping === "object" ? p.tbMapping : {},
+    );
+    setEntityCurrencies(
+      p.entityCurrencies && typeof p.entityCurrencies === "object"
+        ? p.entityCurrencies
+        : {},
+    );
+    setAccountRoles(
+      p.accountRoles && typeof p.accountRoles === "object"
+        ? p.accountRoles
+        : {},
+    );
+    setAccountRolesTouched(
+      Object.fromEntries(
+        Object.keys(p.accountRoles ?? {}).map((account) => [account, true]),
+      ),
+    );
+    setAccountCurrencies(
+      p.accountCurrencies && typeof p.accountCurrencies === "object"
+        ? p.accountCurrencies
+        : {},
+    );
+    setManualClassifications(
+      p.manualClassifications && typeof p.manualClassifications === "object"
+        ? p.manualClassifications
+        : {},
+    );
+    setClassificationDrafts({});
+    setOutputPath(typeof p.outputPath === "string" ? p.outputPath : "");
+    setStep(2);
+    setBusy(false);
+    setError("");
+    setResult(undefined);
+    setJob(undefined);
+    setActiveStage(undefined);
+    setCompletedStage(undefined);
+  });
   useEffect(() => {
     const drops = listenPositionedFileDrops(({ paths, x, y }) => {
       const rect = uploadDropRef.current?.getBoundingClientRect();

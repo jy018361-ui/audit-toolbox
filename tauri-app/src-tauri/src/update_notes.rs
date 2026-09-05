@@ -64,6 +64,10 @@ fn collect_notes(
     };
     let mut base_tag = format!("v{current_v}");
     let mut target_tag = format!("v{target_v}");
+    // 本版说明为空时，要拿“上一版本 → 当前版本”的提交记录补齐，所以
+    // 记录低于当前版本里最新的那个标签（含预发布版本比较规则）。
+    let mut previous_v: Option<Version> = None;
+    let mut previous_tag: Option<String> = None;
     let mut selected = Vec::new();
     for page in 1..=MAX_PAGES {
         let value = match fetch(&format!("/releases?per_page=100&page={page}")) {
@@ -88,6 +92,14 @@ fn collect_notes(
             }
             if v.cmp_precedence(&target_v).is_eq() {
                 target_tag = tag.to_string();
+            }
+            if v.cmp_precedence(&current_v).is_lt()
+                && previous_v
+                    .as_ref()
+                    .is_none_or(|p| v.cmp_precedence(p).is_gt())
+            {
+                previous_v = Some(v.clone());
+                previous_tag = Some(tag.to_string());
             }
             // Do not use publication order or string ordering (alpha.10 > alpha.9).
             if v.cmp_precedence(&target_v).is_gt()
@@ -138,15 +150,43 @@ fn collect_notes(
             .warnings
             .push("未找到目标版本的 GitHub Release，可能尚未发布或版本标签不匹配。".into());
     }
+    let target_body_empty = result.releases.iter().any(|r| {
+        version(&r.version)
+            .unwrap()
+            .cmp_precedence(&target_v)
+            .is_eq()
+            && r.body.is_empty()
+    });
     let incomplete = missing_target || result.releases.iter().any(|r| r.body.is_empty());
-    if incomplete && !same_version {
-        result.warnings.push(
+    let commit_base: Option<String> = if same_version {
+        // 更新完成后用户看到的是“本版说明”，正文为空时用上一版本到当前版本的提交记录补齐，
+        // 不能只剩一句“此版本未填写更新说明”。
+        match previous_tag {
+            Some(tag) if !missing_target && target_body_empty => Some(tag),
+            _ => {
+                if !missing_target && target_body_empty {
+                    result.warnings.push(
+                        "本版未填写更新说明，也没有找到更早的版本标签，无法用提交记录补齐。".into(),
+                    );
+                }
+                None
+            }
+        }
+    } else if incomplete {
+        Some(base_tag.clone())
+    } else {
+        None
+    };
+    if let Some(base) = commit_base {
+        result.warnings.push(if same_version {
+            "本版未填写更新说明；下方提交记录就是这一版相对上一版的全部变更。".into()
+        } else {
             "部分版本未填写更新说明；下方补充整个升级区间的 GitHub 提交标题（不是功能总结）。"
-                .into(),
-        );
+                .into()
+        });
         for page in 1..=MAX_PAGES {
             let value = match fetch(&format!(
-                "/compare/{base_tag}...{target_tag}?per_page=100&page={page}"
+                "/compare/{base}...{target_tag}?per_page=100&page={page}"
             )) {
                 Ok(value) => value,
                 Err(error) => {
@@ -301,6 +341,43 @@ mod tests {
         .unwrap();
         assert_eq!(notes.releases.len(), 1);
         assert!(notes.commits.is_empty());
+    }
+
+    #[test]
+    fn current_version_with_empty_body_uses_previous_tag_commits() {
+        let notes = collect_notes("2.0.0-alpha.50", "2.0.0-alpha.50", |path| {
+            if path.starts_with("/releases") {
+                return Ok(json!([
+                    release("v2.0.0-alpha.50", "请查看本次 Release 的更新说明。"),
+                    release("v2.0.0-alpha.49", "上一版"),
+                    release("v2.0.0-alpha.48", "更早")
+                ]));
+            }
+            assert!(path.starts_with(
+                "/compare/v2.0.0-alpha.49...v2.0.0-alpha.50?"
+            ));
+            Ok(json!({
+                "status": "ahead",
+                "commits": [
+                    {"commit": {"message": "fix(标题栏): 空白处可拖动\n细节"}},
+                    {"commit": {"message": "feat(更新说明): 空说明用提交记录补齐"}}
+                ]
+            }))
+        })
+        .unwrap();
+        assert_eq!(notes.releases.len(), 1);
+        assert!(notes.releases[0].body.is_empty());
+        assert_eq!(
+            notes.commits,
+            vec![
+                "fix(标题栏): 空白处可拖动",
+                "feat(更新说明): 空说明用提交记录补齐"
+            ]
+        );
+        assert!(notes
+            .warnings
+            .iter()
+            .any(|w| w.contains("本版未填写更新说明")));
     }
     #[test]
     fn invalid_ranges_rejected_before_network() {

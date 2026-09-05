@@ -47,7 +47,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { useJobEvents } from "@/hooks/useJobEvents";
-import { FaTbJePage } from "./FaTbjePage";
+import { FaTbJePage } from "./FaTbJePage";
 type FaMapping = {
   matchKey?: string;
   matchKeys?: string[];

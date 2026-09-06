@@ -49,6 +49,26 @@ pub(crate) fn read_rows(path: &Path) -> Result<Vec<Vec<String>>, AppError> {
     })?;
     Ok(rows)
 }
+
+/// 只读取文件开头的若干条记录，供超大文本表格识别表头和字段映射。
+/// CSV 引号中的换行仍按一条记录处理；达到上限后立即停止，不扫描文件尾部。
+pub(crate) fn read_rows_limited(
+    path: &Path,
+    limit: usize,
+) -> Result<Vec<Vec<String>>, AppError> {
+    let mut rows = Vec::with_capacity(limit);
+    text_rows_with_budget(
+        path,
+        &AtomicBool::new(false),
+        Some(8 * 1024 * 1024),
+        Some(limit),
+        |row| {
+            rows.push(row);
+            Ok(())
+        },
+    )?;
+    Ok(rows)
+}
 pub(crate) fn text_metadata(path: &Path) -> Result<(String, char), AppError> {
     let (sample, encoding) = text_sample(path).map_err(io_error)?;
     Ok((
@@ -235,7 +255,7 @@ pub(crate) fn for_each_text_row(
     cancel: &AtomicBool,
     visit: impl FnMut(Vec<String>) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
-    text_rows_with_budget(path, cancel, None, visit)
+    text_rows_with_budget(path, cancel, None, None, visit)
 }
 
 pub(crate) fn for_each_text_row_bounded(
@@ -244,7 +264,7 @@ pub(crate) fn for_each_text_row_bounded(
     max_record_bytes: usize,
     visit: impl FnMut(Vec<String>) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
-    text_rows_with_budget(path, cancel, Some(max_record_bytes), visit)
+    text_rows_with_budget(path, cancel, Some(max_record_bytes), None, visit)
 }
 
 struct RecordBudget<R> {
@@ -271,6 +291,7 @@ fn text_rows_with_budget(
     path: &Path,
     cancel: &AtomicBool,
     max_record_bytes: Option<usize>,
+    row_limit: Option<usize>,
     mut visit: impl FnMut(Vec<String>) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
     let (sample, encoding) = text_sample(path).map_err(io_error)?;
@@ -295,6 +316,9 @@ fn text_rows_with_budget(
         .delimiter(delimiter)
         .from_reader(bounded);
     for (index, record) in reader.records().enumerate() {
+        if row_limit.is_some_and(|limit| index >= limit) {
+            break;
+        }
         if index % 1000 == 0 {
             check_cancel(cancel)?;
         }
@@ -362,4 +386,28 @@ pub(crate) fn is_text(path: &Path) -> bool {
     let delimiter = sniff_delimiter(first) as char;
     // Also accept header-only tables and single-column exports (e.g. a name list).
     first.contains(delimiter) || lines.next().is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn limited_text_read_stops_after_complete_csv_records() {
+        let root = std::env::temp_dir().join(format!(
+            "spreadsheet-limited-read-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("large.csv");
+        fs::write(
+            &path,
+            "凭证号,摘要,金额\n1,第一行,1\n2,\"跨行\n摘要\",2\n3,第三行,3\n",
+        )
+        .unwrap();
+        let rows = read_rows_limited(&path, 3).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2], ["2", "跨行\n摘要", "2"]);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

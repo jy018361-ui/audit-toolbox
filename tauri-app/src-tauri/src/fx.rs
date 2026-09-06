@@ -589,6 +589,9 @@ pub(crate) fn run_job(
         "fx.preview" => {
             let token = preview_cache_key(&params);
             let mut params = params;
+            if prepare_large_je_table(&params, progress, &cancel, pause)? {
+                params["__largeJeDiskMode"] = Value::Bool(true);
+            }
             detect_and_inject_sign_conventions(&mut params)?;
             let mut result = calculate(&params, progress, &cancel, pause)?;
             if let Some(object) = result.as_object_mut() {
@@ -617,35 +620,35 @@ pub(crate) fn run_job(
                 object.insert("translateTbAccountNames".into(), Value::Bool(true));
             }
             let expected_token = preview_cache_key(&export_params);
-            // 直接导出（无预览缓存可用）时的重算路径同样要先检测符号口径：
-            // 「已带符号」账簿（4800 用友）漏检会按「贷方记正」兜底解析，
-            // 金额正负全翻、借贷组合全挤到借方。token 必须在注入前计算，
-            // 否则注入的口径键会让缓存永远对不上号。
-            detect_and_inject_sign_conventions(&mut export_params)?;
             let supplied_token = export_params
                 .get("previewToken")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let mut result = if supplied_token == expected_token {
-                if let Some(result) = cached_preview(supplied_token) {
-                    progress("reuse_preview", 3, 5, "正在复用已完成的测算预览结果…");
-                    result
-                } else {
-                    progress(
-                        "calculate",
-                        1,
-                        5,
-                        "测算预览缓存已失效，正在重新执行汇兑损益测算…",
-                    );
-                    calculate(&export_params, progress, &cancel, pause)?
-                }
+            let cached = (supplied_token == expected_token)
+                .then(|| cached_preview(supplied_token))
+                .flatten();
+            let mut result = if let Some(result) = cached {
+                // 缓存内已经包含符号口径检测后的完整测算结果。此处不再读取 JE
+                // 或重复检测，否则用户点击导出仍要白等一次完整预处理。
+                progress("reuse_preview", 3, 5, "正在复用已完成的测算预览结果…");
+                result
             } else {
                 progress(
                     "calculate",
                     1,
                     5,
-                    "数据或参数已发生变化，正在重新执行汇兑损益测算…",
+                    if supplied_token == expected_token {
+                        "测算预览缓存已失效，正在重新执行汇兑损益测算…"
+                    } else {
+                        "数据或参数已发生变化，正在重新执行汇兑损益测算…"
+                    },
                 );
+                // 直接导出或缓存失效时仍须检测符号口径。「已带符号」账簿
+                // 漏检会导致金额正负翻转。token 在注入前计算，保持缓存键稳定。
+                if prepare_large_je_table(&export_params, progress, &cancel, pause)? {
+                    export_params["__largeJeDiskMode"] = Value::Bool(true);
+                }
+                detect_and_inject_sign_conventions(&mut export_params)?;
                 calculate(&export_params, progress, &cancel, pause)?
             };
             checkpoint(&cancel, pause)?;
@@ -655,10 +658,42 @@ pub(crate) fn run_job(
                 .and_then(Value::as_array)
                 .is_none_or(|all| all.is_empty())
             {
-                progress("export", 3, 5, "正在整理JE完整明细…");
-                let detail = build_je_detail(&export_params)?;
-                if let Some(object) = result.as_object_mut() {
-                    object.insert("jeDetail".into(), Value::Array(detail));
+                if result
+                    .get("largeJeDiskMode")
+                    .and_then(Value::as_bool)
+                    .unwrap_or_else(|| je_uses_disk(&export_params))
+                {
+                    // 超大 JE 往往超过 Excel 单 Sheet 1048576 行上限；把整份原始
+                    // JE 再塞进 JSON/工作簿会抵消磁盘模式并重新耗尽内存。底稿保留
+                    // 来源指纹、测算结果和相关凭证明细，完整源文件仍作为审计证据。
+                    progress(
+                        "export",
+                        3,
+                        5,
+                        "超大 JE 保留原文件引用，正在整理测算结果与相关凭证明细…",
+                    );
+                    if let Some(object) = result.as_object_mut() {
+                        object.insert("jeDetail".into(), Value::Array(Vec::new()));
+                        object.insert("jeDetailOmittedForLargeSource".into(), Value::Bool(true));
+                        if let Some(items) = object
+                            .entry("dataQuality")
+                            .or_insert_with(|| Value::Array(Vec::new()))
+                            .as_array_mut()
+                        {
+                            items.push(json!({
+                                "source":"JE",
+                                "type":"超大源文件未嵌入完整JE明细",
+                                "severity":"提示",
+                                "detail":"底稿保留测算结果、相关凭证明细和源文件引用；完整JE请以原始CSV作为审计证据。"
+                            }));
+                        }
+                    }
+                } else {
+                    progress("export", 3, 5, "正在整理JE完整明细…");
+                    let detail = build_je_detail(&export_params)?;
+                    if let Some(object) = result.as_object_mut() {
+                        object.insert("jeDetail".into(), Value::Array(detail));
+                    }
                 }
             }
             checkpoint(&cancel, pause)?;
@@ -684,7 +719,8 @@ fn checkpoint(cancel: &AtomicBool, pause: &PauseCheckpoint) -> Result<(), AppErr
     if cancel.load(Ordering::Relaxed) {
         return Err(error("JOB_CANCELLED", "任务已取消。", None));
     }
-    pause.wait()
+    pause.wait()?;
+    crate::resource_budget::check_available_if_managed()
 }
 
 fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
@@ -1448,7 +1484,9 @@ fn load_fx_inspection_table(source: &SourceSpec) -> Result<Arc<FxTable>, AppErro
         .to_ascii_lowercase();
     let large_xlsx = matches!(extension.as_str(), "xlsx" | "xlsm")
         && fs::metadata(&path).is_ok_and(|metadata| metadata.len() >= 8 * 1024 * 1024);
-    if !large_xlsx {
+    let large_text = crate::spreadsheet_input::is_text(&path)
+        && tabular::disk_ledger_applies(&path);
+    if !large_xlsx && !large_text {
         return load_fx_table(source);
     }
     let key = fx_table_cache_key(source, &path).map(|value| format!("inspection|{value}"));
@@ -1461,7 +1499,11 @@ fn load_fx_inspection_table(source: &SourceSpec) -> Result<Arc<FxTable>, AppErro
     }) {
         return Ok(table);
     }
-    let table = load_large_xlsx_inspection(source, &path)?;
+    let table = if large_text {
+        load_large_text_inspection(source, &path)?
+    } else {
+        load_large_xlsx_inspection(source, &path)?
+    };
     if let (Some(key), Ok(mut cache)) = (
         key,
         FX_INSPECTION_CACHE
@@ -1474,6 +1516,66 @@ fn load_fx_inspection_table(source: &SourceSpec) -> Result<Arc<FxTable>, AppErro
         cache.insert(key, Arc::clone(&table));
     }
     Ok(table)
+}
+
+/// 超大 CSV 的上传识别只看文件开头，不在界面第一步就把整份文件读入内存。
+/// 正式测算会另行建立可恢复的磁盘缓存；此处只负责表头、映射和预览样本。
+fn load_large_text_inspection(
+    source: &SourceSpec,
+    path: &Path,
+) -> Result<Arc<FxTable>, AppError> {
+    let all = crate::spreadsheet_input::read_rows_limited(path, 256)?;
+    if all.is_empty() {
+        return Err(error("SOURCE_EMPTY", "文件中没有可读取的数据。", None));
+    }
+    let (auto_header_row, auto_header_depth, scored) = infer_header_layout(&all);
+    let header_row = if source.header_row > 0 {
+        source.header_row
+    } else {
+        auto_header_row
+    };
+    if header_row > all.len() {
+        return Err(error("HEADER_ROW_INVALID", "标题行超出预览样本范围。", None));
+    }
+    let header_index = header_row - 1;
+    let width = all.iter().map(Vec::len).max().unwrap_or(0);
+    let inferred_depth = if source.header_row == 0 {
+        auto_header_depth
+    } else if header_index + 1 < all.len()
+        && combined_semantic_score(&all[header_index], &all[header_index + 1])
+            > ledger_mapping::header_semantic_hits(&all[header_index]) + 2
+    {
+        2
+    } else {
+        1
+    };
+    let depth = if source.header_depth == 0 {
+        inferred_depth
+    } else {
+        source.header_depth.clamp(1, 2)
+    };
+    let raw_headers = all[header_index..(header_index + depth).min(all.len())]
+        .iter()
+        .map(|row| pad(row, width))
+        .collect::<Vec<_>>();
+    let headers = merge_headers(&raw_headers, width);
+    let rows = all[(header_index + depth).min(all.len())..]
+        .iter()
+        .map(|row| pad(row, width))
+        .collect::<Vec<_>>();
+    Ok(Arc::new(FxTable {
+        path: path.to_path_buf(),
+        sheet: "CSV".into(),
+        sheets: Vec::new(),
+        header_row,
+        header_depth: depth,
+        raw_headers,
+        headers,
+        row_count: rows.len(),
+        rows,
+        header_candidates: scored.into_iter().take(3).collect(),
+        sampled: true,
+    }))
 }
 
 pub(crate) fn load_fx_table(source: &SourceSpec) -> Result<Arc<FxTable>, AppError> {
@@ -2405,6 +2507,136 @@ fn load_mapped_je_table(params: &Value) -> Result<(Arc<FxTable>, Map<String, Val
     Ok((forward_filled_je_table(&table, &mapping), mapping))
 }
 
+/// 大 CSV 先进入公共 SQLite 行缓存，再只把 FX 已映射列投影到计算表。
+/// 这避免 46 列序时账在每个阶段都把无关列和字符串分配搬进内存；投影表按
+/// 源文件指纹存进当前 worker 的表缓存，后续校验、测算、复核共用同一份。
+fn prepare_large_je_table(
+    params: &Value,
+    progress: &dyn Fn(&str, usize, usize, &str),
+    cancel: &AtomicBool,
+    pause: &PauseCheckpoint,
+) -> Result<bool, AppError> {
+    let Some(source) = params.get("jeSource") else {
+        return Ok(false);
+    };
+    let spec: SourceSpec = serde_json::from_value(source.clone())
+        .map_err(|e| error("INVALID_PARAMS", "JE参数无效。", Some(e.to_string())))?;
+    let path = PathBuf::from(&spec.input_path);
+    if !tabular::disk_ledger_applies(&path) {
+        return Ok(false);
+    }
+    if spec.header_depth > 1 {
+        return Err(error(
+            "LARGE_CSV_DOUBLE_HEADER",
+            "超大 CSV 暂不支持双层标题，请先整理为单层标题后重试。",
+            None,
+        ));
+    }
+    let cache_key = fx_table_cache_key(&spec, &path);
+    if cache_key.as_deref().and_then(cached_fx_table).is_some() {
+        return Ok(true);
+    }
+    checkpoint(cancel, pause)?;
+    progress(
+        "disk_cache",
+        0,
+        0,
+        "正在建立或复用 JE 磁盘缓存；首次读取时间较长，可暂停或最小化…",
+    );
+    let disk = tabular::open_disk_ledger(&path, spec.header_row.max(1), progress, cancel)?;
+    let mapping = mapping_obj(params, "jeMapping");
+    let requested = mapping
+        .iter()
+        .filter(|(role, _)| !role.starts_with("__"))
+        .flat_map(|(role, _)| mapped_cols(&mapping, role))
+        .collect::<BTreeSet<_>>();
+    let selected = disk
+        .headers()
+        .iter()
+        .enumerate()
+        .filter(|(_, header)| requested.contains(*header))
+        .map(|(index, header)| (index, header.clone()))
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err(error(
+            "MAPPING_INVALID",
+            "JE 已映射字段在文件中均不存在，请返回映射步骤重新确认。",
+            None,
+        ));
+    }
+    let headers = selected
+        .iter()
+        .map(|(_, header)| header.clone())
+        .collect::<Vec<_>>();
+    let mut rows = Vec::with_capacity(disk.row_count().min(500_000));
+    let mut estimated_bytes = 0_u64;
+    let safe_projection_bytes = crate::resource_budget::budget()?
+        .worker_bytes
+        .saturating_mul(55)
+        / 100;
+    disk.visit(cancel, |row, source_row| {
+        if rows.len() % 10_000 == 0 {
+            checkpoint(cancel, pause)?;
+        }
+        while spec.header_row + rows.len() + 1 < source_row {
+            estimated_bytes = estimated_bytes
+                .saturating_add(std::mem::size_of::<Vec<String>>() as u64);
+            rows.push(vec![String::new(); selected.len()]);
+        }
+        let projected = selected
+            .iter()
+            .map(|(index, _)| row.get(*index).cloned().unwrap_or_default())
+            .collect::<Vec<_>>();
+        estimated_bytes = estimated_bytes
+            .saturating_add(std::mem::size_of::<Vec<String>>() as u64)
+            .saturating_add(
+                projected
+                    .iter()
+                    .map(|value| std::mem::size_of::<String>() as u64 + value.capacity() as u64)
+                    .sum::<u64>(),
+            );
+        if estimated_bytes > safe_projection_bytes {
+            return Err(AppError::new(
+                "FX_PROJECTED_MEMORY_BUDGET",
+                "当前电脑内存不足以安全装入汇兑损益所需字段。任务已保留磁盘缓存，请释放内存后重试。",
+                true,
+                None,
+            ));
+        }
+        rows.push(projected);
+        if rows.len() % 50_000 == 0 {
+            progress(
+                "project_je",
+                rows.len(),
+                0,
+                &format!("正在从磁盘缓存提取测算字段：已处理 {} 行…", rows.len()),
+            );
+        }
+        Ok(())
+    })?;
+    let table = Arc::new(FxTable {
+        path: path.clone(),
+        sheet: "CSV".into(),
+        sheets: Vec::new(),
+        header_row: spec.header_row.max(1),
+        header_depth: 1,
+        raw_headers: vec![headers.clone()],
+        headers,
+        row_count: rows.len(),
+        rows,
+        header_candidates: vec![(spec.header_row.max(1), 1.0)],
+        sampled: false,
+    });
+    store_fx_table(cache_key, &table);
+    progress(
+        "project_je",
+        table.row_count,
+        0,
+        &format!("JE 磁盘缓存已就绪，已提取 {} 行测算字段。", table.row_count),
+    );
+    Ok(true)
+}
+
 fn is_je_forward_fill_role(role: &str) -> bool {
     // 仅填充 Excel 合并单元格常见的凭证级/身份字段。币种空白表示本位币，
     // 方向空白也有业务含义，绝不能继承上一行；否则一笔美元分录之后的库存
@@ -2681,6 +2913,13 @@ fn source_spec(params: &Value, source_key: &str) -> Result<Option<SourceSpec>, A
     serde_json::from_value(source.clone())
         .map(Some)
         .map_err(|e| error("INVALID_PARAMS", "来源参数无效。", Some(e.to_string())))
+}
+
+fn je_uses_disk(params: &Value) -> bool {
+    source_spec(params, "jeSource")
+        .ok()
+        .flatten()
+        .is_some_and(|source| tabular::disk_ledger_applies(Path::new(&source.input_path)))
 }
 
 // 口径比对不需要全量数据：大文件先用识别用的样本表，比对不通过要去找替代列时
@@ -5899,7 +6138,8 @@ fn calculate(
     cancel: &AtomicBool,
     pause: &PauseCheckpoint,
 ) -> Result<Value, AppError> {
-    progress("validate", 0, 4, "正在校验账表映射与金额数据…");
+    const TOTAL_STAGES: usize = 10;
+    progress("validate", 0, TOTAL_STAGES, "正在校验账表映射与金额数据…");
     let validation = validate_mapping(params)?;
     if !validation
         .get("valid")
@@ -5912,7 +6152,13 @@ fn calculate(
             Some(validation.to_string()),
         ));
     }
-    progress("account_names", 0, 4, "正在建立科目名称与编码索引…");
+    checkpoint(cancel, pause)?;
+    progress(
+        "account_names",
+        1,
+        TOTAL_STAGES,
+        "正在复用已读取数据建立科目名称与编码索引…",
+    );
     let enriched_params = with_tb_account_names(params)?;
     let params = &enriched_params;
     let mode = params
@@ -5923,16 +6169,27 @@ fn calculate(
         // 校验本身出错（读不出表、解析不了金额）仍然要中断；
         // 只有「对不上」不再中断——结论与逐条明细挂在 `balanceRollforwardValidation`
         // 上带给前端展示。
-        progress("rollforward", 0, 4, "正在执行TB与JE余额滚动校验…");
+        checkpoint(cancel, pause)?;
+        progress(
+            "rollforward",
+            2,
+            TOTAL_STAGES,
+            "正在执行TB与JE余额滚动校验…",
+        );
         validate_tb_je_balance_rollforward(params)?
     } else {
         json!({"performed":false,"reason":"当前模式不包含未实现测算"})
     };
     checkpoint(cancel, pause)?;
-    progress("rates", 1, 4, "正在锁定官方汇率快照…");
+    progress("rates", 3, TOTAL_STAGES, "正在锁定官方汇率快照…");
     let snapshot = obtain_rates(params)?;
     checkpoint(cancel, pause)?;
-    progress("calculate", 2, 4, "正在执行汇兑损益测算与分类…");
+    progress(
+        "calculate",
+        4,
+        TOTAL_STAGES,
+        "正在执行汇兑损益测算与分类…",
+    );
     let mut realized = Vec::new();
     let mut unrealized = Vec::new();
     let mut classification = Vec::new();
@@ -5942,20 +6199,47 @@ fn calculate(
     // 白算一遍。改为导出前按需构造（[`build_je_detail`]）。
     let je_detail: Vec<Value> = Vec::new();
     if matches!(mode, "realized" | "combined") {
-        progress("realized", 2, 4, "正在识别并测算已实现汇兑事项…");
-        let (calculation, classes, issues) = calculate_realized(params, &snapshot)?;
+        progress(
+            "realized",
+            4,
+            TOTAL_STAGES,
+            "正在识别并测算已实现汇兑事项…",
+        );
+        let (calculation, classes, issues) = calculate_realized(
+            params,
+            &snapshot,
+            Some(FxProgressControl {
+                progress,
+                cancel,
+                pause,
+            }),
+        )?;
         realized = calculation;
         classification = classes;
         quality.extend(issues);
     }
+    checkpoint(cancel, pause)?;
     if matches!(mode, "unrealized" | "combined") {
-        progress("unrealized", 2, 4, "正在测算外币货币性项目期末重估…");
-        let (calculation, issues) = calculate_unrealized(params, &snapshot, &realized)?;
+        progress(
+            "unrealized",
+            5,
+            TOTAL_STAGES,
+            "正在测算外币货币性项目期末重估…",
+        );
+        let (calculation, issues) =
+            calculate_unrealized(params, &snapshot, &realized, &classification)?;
         unrealized = calculation;
         quality.extend(issues);
     }
     // 新已实现口径（记账日牌价−月初牌价）的前置假设体检：入账口径恒定性
     // 与每月重估存在性。只提示不阻断，缺 jeSource 时自动跳过。
+    checkpoint(cancel, pause)?;
+    progress(
+        "assumption_checks",
+        6,
+        TOTAL_STAGES,
+        "正在检查月初汇率与客户重估口径…",
+    );
     quality.extend(month_start_rate_assumption_checks(params, &snapshot));
     let realized_total = realized
         .iter()
@@ -5970,7 +6254,13 @@ fn calculate(
         })
         .sum::<f64>();
     let automatic_total = realized_total + unrealized_total;
-    progress("review", 2, 4, "正在建立分类复核与账面覆盖关系…");
+    checkpoint(cancel, pause)?;
+    progress(
+        "review",
+        7,
+        TOTAL_STAGES,
+        "正在建立分类复核与账面覆盖关系…",
+    );
     let bridge = build_review_bridge(params, &realized, &unrealized)?;
     let classification_controls = bridge
         .get("classificationControls")
@@ -6002,7 +6292,12 @@ fn calculate(
             .and_then(Value::as_bool)
             .unwrap_or(false)
     {
-        progress("translate_accounts", 2, 4, "正在翻译TB英文科目名称…");
+        progress(
+            "translate_accounts",
+            8,
+            TOTAL_STAGES,
+            "正在翻译TB英文科目名称…",
+        );
     }
     let (account_translations, translation_enabled, translation_issue) =
         translate_tb_account_names(params);
@@ -6012,7 +6307,13 @@ fn calculate(
             "severity":"提示", "detail":detail
         }));
     }
-    progress("voucher_detail", 2, 4, "正在整理相关凭证明细…");
+    checkpoint(cancel, pause)?;
+    progress(
+        "voucher_detail",
+        8,
+        TOTAL_STAGES,
+        "正在从已读取数据整理相关凭证明细…",
+    );
     let voucher_detail = build_relevant_voucher_detail(
         params,
         &realized,
@@ -6142,9 +6443,19 @@ fn calculate(
             "detail": format!("已读取{}个凭证事件，但没有事件进入已实现或未实现测算；请检查科目角色、币种及金额映射。", classification.len())
         }));
     }
-    progress("reconcile", 3, 4, "正在汇总并执行TB勾稽…");
+    checkpoint(cancel, pause)?;
+    progress(
+        "reconcile",
+        9,
+        TOTAL_STAGES,
+        "正在汇总并执行TB勾稽…",
+    );
     Ok(json!({
         "mode": mode,
+        "largeJeDiskMode": params
+            .get("__largeJeDiskMode")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| je_uses_disk(params)),
         "summary": {
             "realizedGainLoss": realized_total,
             "unrealizedAdjustment": unrealized_total,
@@ -6947,9 +7258,17 @@ fn build_relevant_voucher_detail(
     Ok(output)
 }
 
+#[derive(Clone, Copy)]
+struct FxProgressControl<'a> {
+    progress: &'a dyn Fn(&str, usize, usize, &str),
+    cancel: &'a AtomicBool,
+    pause: &'a PauseCheckpoint,
+}
+
 fn calculate_realized(
     params: &Value,
     snapshot: &RateSnapshot,
+    control: Option<FxProgressControl<'_>>,
 ) -> Result<(Vec<Value>, Vec<Value>, Vec<Value>), AppError> {
     let (table, mapping) = load_mapped_je_table(params)?;
     let id_indexes = std::iter::once(first_col(&mapping, "date"))
@@ -6988,7 +7307,21 @@ fn calculate_realized(
     // 仅剩候选证据的外币业务凭证（投资款、外币收息等）：不构成汇兑事项、
     // 原币已进余额滚动，但此前完全不可见——聚合一条提示让复核看得到。
     let mut candidate_vouchers: Vec<String> = Vec::new();
-    for (id, rows) in groups {
+    let group_count = groups.len();
+    for (group_index, (id, rows)) in groups.into_iter().enumerate() {
+        if group_index % 500 == 0 {
+            if let Some(control) = control {
+                checkpoint(control.cancel, control.pause)?;
+                (control.progress)(
+                    "realized",
+                    4,
+                    10,
+                    &format!(
+                        "正在识别并测算已实现汇兑事项：已处理 {group_index}/{group_count} 张凭证…"
+                    ),
+                );
+            }
+        }
         if loss_ids.contains(&id) {
             classes.push(json!({
                 "voucherId": display_voucher_id(&id),
@@ -7450,6 +7783,7 @@ fn calculate_unrealized(
     params: &Value,
     snapshot: &RateSnapshot,
     realized: &[Value],
+    classification: &[Value],
 ) -> Result<(Vec<Value>, Vec<Value>), AppError> {
     let spec: SourceSpec = serde_json::from_value(params.get("tbSource").cloned().unwrap())
         .map_err(|e| error("INVALID_PARAMS", "TB参数无效。", Some(e.to_string())))?;
@@ -7482,6 +7816,7 @@ fn calculate_unrealized(
             &table,
             &mapping,
             realized,
+            classification,
             &account_policy,
         );
     }
@@ -7592,6 +7927,7 @@ fn calculate_unrealized(
             &output,
             &mut quality,
             realized,
+            classification,
         )?;
         Ok((monthly, quality))
     } else {
@@ -7607,6 +7943,7 @@ fn calculate_inferred_opening_unrealized(
     tb_table: &FxTable,
     tb_mapping: &Map<String, Value>,
     realized: &[Value],
+    classification: &[Value],
     account_policy: &ledger_mapping::AccountMatchPolicy,
 ) -> Result<(Vec<Value>, Vec<Value>), AppError> {
     let (je_table, je_mapping) = load_mapped_je_table(params)?;
@@ -7872,6 +8209,7 @@ fn calculate_inferred_opening_unrealized(
         &endpoints,
         &mut quality,
         realized,
+        classification,
     )?;
     Ok((monthly, quality))
 }
@@ -8100,6 +8438,7 @@ fn calculate_monthly_unrealized(
     endpoints: &[Value],
     quality: &mut Vec<Value>,
     realized: &[Value],
+    classification: &[Value],
 ) -> Result<Vec<Value>, AppError> {
     let (table, mapping) = load_mapped_je_table(params)?;
     let account_policy = account_match_policy(params)?;
@@ -8150,7 +8489,28 @@ fn calculate_monthly_unrealized(
     // 客户重估凭证只是比较证据，不是审计测算对象。先按完整凭证识别，
     // 后续将其全部行从正常业务发生额中剔除；货币性项目行的本位币变化
     // 仅作为客户已入账重估金额保留。
+    // 组合模式的上一阶段已经按完整凭证完成了结构分类。直接复用其中的
+    // 「未实现」凭证集合，避免紧接着再对整张 JE 重复解析科目、币种和金额。
+    // 单独运行未实现模式时没有这份分类结果，仍走原有的独立结构判定。
+    let classified_revaluation_ids = (!classification.is_empty()).then(|| {
+        let mut ids = classification
+            .iter()
+            .filter(|item| item.get("classification").and_then(Value::as_str) == Some("未实现"))
+            .filter_map(|item| item.get("voucherId").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+        if let Some(manual) = params.get("manualClassifications").and_then(Value::as_object) {
+            ids.extend(manual.iter().filter_map(|(id, value)| {
+                (value.as_str() == Some("未实现汇兑损益")).then(|| id.clone())
+            }));
+        }
+        ids
+    });
     let mut voucher_rows = BTreeMap::<String, Vec<&RowRecord>>::new();
+    // 后面的月度滚动原先对每个月都重新扫描整张 JE：23 万行、12 个月就是
+    // 约 280 万次日期/科目/币种解析。首次分组凭证时顺手按年月分桶，后面每月
+    // 只访问当月行；桶里仅保存引用，不复制单元格。
+    let mut rows_by_month = BTreeMap::<(i32, u32), Vec<&RowRecord>>::new();
     for row in &rows {
         let Some(date) = parse_date(cell(row, &mapping, "date")) else {
             continue;
@@ -8159,11 +8519,33 @@ fn calculate_monthly_unrealized(
             continue;
         }
         let id = display_voucher_id(&voucher_id(row, &mapping, params));
-        voucher_rows.entry(id).or_default().push(row);
+        if classified_revaluation_ids
+            .as_ref()
+            .is_none_or(|ids| ids.contains(&id))
+        {
+            voucher_rows.entry(id).or_default().push(row);
+        }
+        rows_by_month
+            .entry((date.year(), date.month()))
+            .or_default()
+            .push(row);
     }
     let mut revaluation_meta = HashMap::<String, Value>::new();
     for (id, voucher) in &voucher_rows {
         let manual = manual_classification(params, id);
+        let automatic_signal = if let Some(ids) = &classified_revaluation_ids {
+            ids.contains(id)
+        } else {
+            voucher_fx_structure(voucher.iter().copied(), &mapping, params)?.unrealized
+        };
+        let is_revaluation = match manual {
+            Some("未实现汇兑损益") => true,
+            Some("已实现汇兑损益") => false,
+            _ => automatic_signal,
+        };
+        if !is_revaluation {
+            continue;
+        }
         let summary = voucher
             .iter()
             .map(|row| cell(row, &mapping, "summary"))
@@ -8188,28 +8570,19 @@ fn calculate_monthly_unrealized(
         }
         // 与界面分类、已实现引擎同口径：单凭证内没有满足资金已实现结构，
         // 且外币货币性分组原币净额为零、本位币净额非零，才认作重估。
-        let automatic_signal =
-            voucher_fx_structure(voucher.iter().copied(), &mapping, params)?.unrealized;
-        let is_revaluation = match manual {
-            Some("未实现汇兑损益") => true,
-            Some("已实现汇兑损益") => false,
-            _ => automatic_signal,
-        };
-        if is_revaluation {
-            let date = voucher
-                .iter()
-                .find_map(|row| parse_date(cell(row, &mapping, "date")));
-            revaluation_meta.insert(
-                id.clone(),
-                json!({
-                    "voucherId": id, "date": date, "voucherType": voucher_type,
-                    "summary": summary, "bookedFxGainLoss": booked_fx,
-                    "identificationBasis": if manual == Some("未实现汇兑损益") {
-                        "用户按借贷科目组合确认为未实现汇兑损益类凭证"
-                    } else {"系统按完整凭证识别为未实现汇兑损益或其冲回凭证"}
-                }),
-            );
-        }
+        let date = voucher
+            .iter()
+            .find_map(|row| parse_date(cell(row, &mapping, "date")));
+        revaluation_meta.insert(
+            id.clone(),
+            json!({
+                "voucherId": id, "date": date, "voucherType": voucher_type,
+                "summary": summary, "bookedFxGainLoss": booked_fx,
+                "identificationBasis": if manual == Some("未实现汇兑损益") {
+                    "用户按借贷科目组合确认为未实现汇兑损益类凭证"
+                } else {"系统按完整凭证识别为未实现汇兑损益或其冲回凭证"}
+            }),
+        );
     }
 
     // 已实现重算过的腿（按源文件行号索引）：滚动里的本位币发生额必须改用
@@ -8231,20 +8604,17 @@ fn calculate_monthly_unrealized(
 
     let mut output = Vec::new();
     let mut missing_balance_keys = BTreeSet::new();
-    let mut previous = start - Duration::days(1);
     for month_end in date_points(start, end)
         .into_iter()
         .filter(|date| *date == end || (*date + Duration::days(1)).day() == 1)
     {
         let mut movement: HashMap<String, (f64, f64, f64, f64)> = HashMap::new();
         let mut revaluation_vouchers: HashMap<String, BTreeSet<String>> = HashMap::new();
-        for row in &rows {
-            let Some(date) = parse_date(cell(row, &mapping, "date")) else {
-                continue;
-            };
-            if date <= previous || date > month_end {
-                continue;
-            }
+        let month_rows = rows_by_month
+            .get(&(month_end.year(), month_end.month()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        for row in month_rows {
             let account = account_name(row, &mapping);
             let role = role_for(&account, params);
             let display_id = display_voucher_id(&voucher_id(row, &mapping, params));
@@ -8376,7 +8746,6 @@ fn calculate_monthly_unrealized(
                 ),
             );
         }
-        previous = month_end;
     }
     Ok(output)
 }
@@ -11577,7 +11946,7 @@ E,2025-01-02,1,AB,6603,账面汇兑损益,CNY,0,999\n",
             ],
             missing: Vec::new(),
         };
-        let (calculation, classes, quality) = calculate_realized(&params, &snapshot).unwrap();
+        let (calculation, classes, quality) = calculate_realized(&params, &snapshot, None).unwrap();
         assert_eq!(calculation.len(), 1, "quality={quality:#?}");
         assert_eq!(classes[0]["classification"], "已实现");
         assert_eq!(
@@ -11708,7 +12077,7 @@ E,2025-01-02,1,DZ,6603,汇兑损失,CNY,0,1050\n",
             ],
             missing: Vec::new(),
         };
-        let (calculation, classes, _quality) = calculate_realized(&params, &snapshot).unwrap();
+        let (calculation, classes, _quality) = calculate_realized(&params, &snapshot, None).unwrap();
         // 一张凭证结清三张发票：逐条终止确认行重算，有几条算几条，
         // 不再因「终止确认行不恰好一条」整张推进待复核。
         assert_eq!(
@@ -11790,7 +12159,7 @@ E,2025-01-02,2,AB,6603,汇兑收益,CNY,0,-3000\n",
             ],
             missing: Vec::new(),
         };
-        let (calculation, classes, _quality) = calculate_realized(&params, &snapshot).unwrap();
+        let (calculation, classes, _quality) = calculate_realized(&params, &snapshot, None).unwrap();
         // 外币兑换：外币现金与本位币现金对转。成交价口径（用户拍板成交价差
         // 属已实现损益）：成交价＝本位币现金腿÷外币现金腿＝718000÷100000
         // ＝7.18；账面＝100000×月初牌价7.15＝715000；资产减少方向损益＝
@@ -11927,6 +12296,10 @@ E,2025-01-31,R,AB,6603,月末重估,CNY,0,-5\n",
             &endpoints,
             &mut quality,
             &[],
+            &[json!({
+                "voucherId":"E-2025-01-15-N",
+                "classification":"已实现"
+            })],
         )
         .unwrap();
         assert_eq!(rows.len(), 1, "quality={quality:#?}");
@@ -12032,6 +12405,7 @@ E,2025-01-10,1,记,1001,结汇,CNY,0,719.07\n",
             &endpoints,
             &mut quality,
             &realized,
+            &[],
         )
         .unwrap();
         assert_eq!(rows.len(), 1, "quality={quality:#?}");
@@ -12124,6 +12498,7 @@ E,2025-01-31,V001,SA,6701120001 财务费用-汇兑损失-未实现,INV-20250131
             &endpoints,
             &mut quality,
             &[],
+            &[],
         )
         .unwrap();
         assert_eq!(rows.len(), 1, "quality={quality:#?}");
@@ -12149,6 +12524,22 @@ E,2025-01-31,V001,SA,6701120001 财务费用-汇兑损失-未实现,INV-20250131
             details[0]["identificationBasis"],
             json!("系统按完整凭证识别为未实现汇兑损益或其冲回凭证")
         );
+        let mut reused_quality = Vec::new();
+        let reused = calculate_monthly_unrealized(
+            &params,
+            &snapshot,
+            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2025, 1, 31).unwrap(),
+            &endpoints,
+            &mut reused_quality,
+            &[],
+            &[json!({
+                "voucherId":"E-2025-01-31-V001",
+                "classification":"未实现"
+            })],
+        )
+        .unwrap();
+        assert_eq!(reused, rows, "复用上一阶段分类不得改变未实现测算结果");
         // 界面侧同口径：结构满足即判未实现；科目名方向一致，不再提示冲突。
         let bridge = build_review_bridge(&params, &[], &[]).unwrap();
         let controls = bridge["classificationControls"].as_array().unwrap();
@@ -12889,7 +13280,7 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             ],
             missing: Vec::new(),
         };
-        let (realized, classes, quality) = calculate_realized(&params, &snapshot).unwrap();
+        let (realized, classes, quality) = calculate_realized(&params, &snapshot, None).unwrap();
         assert_eq!(realized.len(), 1, "quality={quality:#?}");
         assert_eq!(classes[0]["classification"], "已实现");
         // 资产减少：损益＝原币×(月初7.1−记账日7.2)＝100×(−0.1)＝−10（收益）。
@@ -12908,6 +13299,7 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             &endpoints,
             &mut monthly_quality,
             &realized,
+            &[],
         )
         .unwrap();
         assert!(
@@ -14787,6 +15179,7 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             &tb_table,
             &tb_mapping,
             &[],
+            &[],
             &account_match_policy(&params).unwrap(),
         )
         .unwrap();
@@ -14923,6 +15316,40 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             Some(&json!("科目文本")),
             "{result:#}"
         );
+    }
+
+    #[test]
+    fn huge_csv_inspection_reads_only_a_bounded_sample() {
+        let root = std::env::temp_dir().join(format!(
+            "fx-huge-csv-inspection-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("je.csv");
+        let mut text = String::from("日期,凭证号,科目编码,科目名称,币种,原币,本位币\n");
+        for index in 0..300 {
+            text.push_str(&format!(
+                "2025-01-01,{index},1002,银行存款,USD,1,7.2\n"
+            ));
+        }
+        fs::write(&path, text).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(2 * 1024 * 1024 * 1024)
+            .unwrap();
+        let table = load_fx_inspection_table(&SourceSpec {
+            input_path: path.to_string_lossy().into_owned(),
+            sheet: String::new(),
+            header_row: 1,
+            header_depth: 1,
+        })
+        .unwrap();
+        assert!(table.sampled);
+        assert_eq!(table.rows.len(), 255);
+        assert_eq!(table.headers[0], "日期");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -15272,7 +15699,7 @@ E,2025-01-10,3,AB,6603,汇兑损失,CNY,0,300\n",
             ],
             missing: Vec::new(),
         };
-        let (calculation, classes, quality) = calculate_realized(&params, &snapshot).unwrap();
+        let (calculation, classes, quality) = calculate_realized(&params, &snapshot, None).unwrap();
         assert_eq!(classes[0]["classification"], "已实现");
         assert_eq!(calculation.len(), 1, "quality={quality:#?}");
         let row = &calculation[0];
@@ -15362,7 +15789,7 @@ E,2024-05-09,8,记,4001,收到股东投资款,CNY,0,-7100\n",
             ],
             missing: Vec::new(),
         };
-        let (calculation, classes, quality) = calculate_realized(&params, &snapshot).unwrap();
+        let (calculation, classes, quality) = calculate_realized(&params, &snapshot, None).unwrap();
         assert_eq!(calculation.len(), 1, "只应认领结汇凭证：{calculation:#?}");
         let row = &calculation[0];
         assert_eq!(
@@ -15454,7 +15881,7 @@ E,2025-01-31,5,FX,6603,期末重估,CNY,0,-300\n",
             ],
             missing: Vec::new(),
         };
-        let (calculation, classes, quality) = calculate_realized(&params, &snapshot).unwrap();
+        let (calculation, classes, quality) = calculate_realized(&params, &snapshot, None).unwrap();
         assert!(
             calculation.is_empty(),
             "未实现凭证不进已实现测算：{calculation:#?}"

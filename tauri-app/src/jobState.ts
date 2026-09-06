@@ -46,10 +46,17 @@ export function jobPresentation(job: JobEvent): JobPresentation {
       Boolean(result && PARTIAL_RESULT_KEYS.some((key) => nonEmptyList(result[key]))) ||
       result?.valid === false);
   const max = Math.max(job.total, 1);
-  const percent =
+  const calculatedPercent =
     job.total > 0
       ? Math.round((Math.max(0, Math.min(job.current, max)) / max) * 100)
       : null;
+  // 阶段计数走完后仍可能有写盘、校验或原子替换。结束事件抵达前保留 1%，
+  // 避免用户看到“100%”却仍需等待。
+  const percent = calculatedPercent === null
+    ? null
+    : TERMINAL_JOB_PHASES.includes(job.phase as (typeof TERMINAL_JOB_PHASES)[number])
+      ? calculatedPercent
+      : Math.min(calculatedPercent, 99);
 
   if (job.phase === "failed")
     return { state: "failed", label: "处理失败", tone: "danger", terminal: true, percent };

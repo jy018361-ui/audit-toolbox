@@ -26,6 +26,17 @@ const makeJob = (overrides: Partial<JobEvent> = {}): JobEvent => ({
 afterEach(cleanup);
 
 describe("18 个工具的动态任务状态契约", () => {
+  it("运行态计数已满时保留最后百分之一，完成后才显示百分之百", () => {
+    expect(jobPresentation(makeJob({ phase: "write", current: 10, total: 10 }))).toMatchObject({
+      percent: 99,
+      terminal: false,
+    });
+    expect(jobPresentation(makeJob({ phase: "completed", current: 10, total: 10 }))).toMatchObject({
+      percent: 100,
+      terminal: true,
+    });
+  });
+
   it("状态夹具覆盖目录内全部工具及恢复/部分完成/长任务状态", () => {
     expect([...TASK_STATE_TOOL_IDS].sort()).toEqual(
       catalog.map((tool) => tool.id).sort(),

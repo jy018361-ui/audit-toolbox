@@ -68,6 +68,13 @@ describe("任务进度弹窗", () => {
     expect(screen.getByText("30%")).toBeTruthy();
   });
 
+  it("阶段计数走完但任务未完成时最多显示百分之九十九", () => {
+    renderDialog([job({ current: 10, total: 10, message: "正在校验输出" })]);
+    expect(screen.getByText("99%")).toBeTruthy();
+    expect(screen.queryByText("100%")).toBeNull();
+    expect(screen.getByRole("progressbar").getAttribute("value")).toBe("9.9");
+  });
+
   it("任务全部结束后不再弹出", () => {
     renderDialog([job({ phase: "completed" })]);
     expect(screen.queryByText("正在处理")).toBeNull();

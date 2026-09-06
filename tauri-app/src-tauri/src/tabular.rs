@@ -3314,6 +3314,59 @@ fn load_ledger_cached(
     load_ts_cached(path, sheet, header_row, true).map(|(table, _, _)| table)
 }
 
+/// 跨工具复用的大 CSV 磁盘数据源。调用方逐行访问，不取得底层 SQLite
+/// 连接，也不能把整表重新装回内存。
+pub(crate) struct DiskLedger {
+    cache: large_csv::Cache,
+    header_row: usize,
+}
+
+impl DiskLedger {
+    pub(crate) fn headers(&self) -> &[String] {
+        &self.cache.table.headers
+    }
+
+    pub(crate) fn row_count(&self) -> usize {
+        self.cache.count
+    }
+
+    pub(crate) fn visit(
+        &self,
+        cancel: &AtomicBool,
+        mut visitor: impl FnMut(&[String], usize) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        self.cache.visit(None, cancel, |row, index| {
+            visitor(&row, self.header_row + index + 1)
+        })
+    }
+}
+
+pub(crate) fn disk_ledger_applies(path: &Path) -> bool {
+    large_csv::applies(path)
+}
+
+pub(crate) fn open_disk_ledger(
+    path: &Path,
+    header_row: usize,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<DiskLedger, AppError> {
+    if !large_csv::applies(path) {
+        return Err(error(
+            "DISK_LEDGER_NOT_REQUIRED",
+            "当前文件无需启用磁盘分批读取。",
+            None,
+        ));
+    }
+    let source = SourceParams {
+        input_path: path.to_string_lossy().into_owned(),
+        sheet: None,
+        header_row,
+    };
+    let cache = large_csv::load(&source, progress, cancel)?;
+    Ok(DiskLedger { cache, header_row })
+}
+
 fn load_ts_cached(
     path: &Path,
     sheet: Option<&str>,

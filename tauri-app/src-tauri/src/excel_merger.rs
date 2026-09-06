@@ -184,7 +184,7 @@ impl ExcelMergerService {
         };
         if changed {
             let memory_waiting = !paused
-                && method.starts_with("kanzhang.")
+                && memory_protected_method(&method)
                 && crate::resource_budget::memory_status()
                     .is_ok_and(|memory| memory.should_pause());
             self.emit(event_for(
@@ -245,7 +245,7 @@ impl ExcelMergerService {
         }
         let pause_path = self.cancel_root.join(format!("{job_id}.pause"));
         let memory_retry_path = crate::resource_budget::memory_retry_path(&pause_path);
-        let protected = method.starts_with("kanzhang.");
+        let protected = memory_protected_method(&method);
         let worker_memory_limit = if protected {
             let mut last_notice = None::<Instant>;
             Some(loop {
@@ -572,7 +572,7 @@ impl ExcelMergerService {
                                 "failed",
                                 "error",
                                 if protected {
-                                    "看账任务异常退出，可能达到内存保护上限。请减小数据范围后重试。"
+                                    "数据处理任务异常退出，可能达到内存保护上限。请减小数据范围后重试。"
                                 } else {
                                     "Rust Excel 处理进程异常退出。"
                                 },
@@ -708,6 +708,12 @@ fn is_supported_job_method(method: &str) -> bool {
     SUPPORTED_JOB_METHODS.contains(&method)
 }
 
+/// 已在业务循环里接入内存等待检查点的任务才能启用 Job Object 上限。
+/// 汇兑损益与看账都由独立 worker 执行，内存紧张时可停在安全检查点恢复。
+fn memory_protected_method(method: &str) -> bool {
+    method.starts_with("kanzhang.") || method.starts_with("fx.")
+}
+
 pub fn worker_main() -> i32 {
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).is_err() {
@@ -732,7 +738,7 @@ pub fn worker_main() -> i32 {
     let job_id = request.job_id.clone();
     let worker_tool_id = tool_id(&request.method);
     let pause = PauseCheckpoint::new(PathBuf::from(&request.pause_path), cancel.clone());
-    if request.method.starts_with("kanzhang.") {
+    if memory_protected_method(&request.method) {
         crate::resource_budget::install_runtime_memory_control(
             cancel.clone(),
             crate::resource_budget::memory_retry_path(Path::new(&request.pause_path)),
@@ -2508,6 +2514,15 @@ mod tests {
             assert_eq!(tool_id(method), "kanzhang");
         }
         assert!(!is_supported_job_method("kanzhang.mark_unknown"));
+    }
+
+    #[test]
+    fn memory_protection_covers_kanzhang_and_fx_workers_only() {
+        assert!(memory_protected_method("kanzhang.export"));
+        assert!(memory_protected_method("fx.preview"));
+        assert!(memory_protected_method("fx.export"));
+        assert!(!memory_protected_method("deposit.preview"));
+        assert!(!memory_protected_method("file_list.export"));
     }
 
     /// FA 子工具的 job 事件必须路由到各自的页面（useJobEvents 按 toolId 过滤），

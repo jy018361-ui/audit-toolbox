@@ -29,8 +29,11 @@ export function JobProgress({
   const owned = useJobOwnedByDialog(job.jobId);
   const total = Number.isFinite(job.total) ? Math.max(job.total, 0) : 0;
   const max = Math.max(total, 1);
-  const value = Math.max(0, Math.min(job.current, max));
   const presentation = jobPresentation(job);
+  const value = Math.max(
+    0,
+    Math.min(job.current, presentation.terminal ? max : max * 0.99),
+  );
 
   if (owned) return null;
 

@@ -1,8 +1,18 @@
 //! Disk-backed CSV inspection. Never materialize the complete ledger in RAM.
 use super::*;
 use rusqlite::{Connection, params};
+use std::io::Read;
 
-const THRESHOLD: u64 = 256 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
+const SAMPLE_BYTES: u64 = 16 * MIB;
+const FAST_MEMORY_BYTES: u64 = 64 * MIB;
+const ALWAYS_DISK_BYTES: u64 = 2 * GIB;
+const MEMORY_SAFETY_PERCENT: u64 = 65;
+// Vec<String>、逐单元格分配、凭证预处理和筛选结果会把原始文本放大。
+// 这里按基础表估算的 2.5 倍计算工作峰值，宁可提前走磁盘，也不挤垮主机。
+const WORKING_SET_NUMERATOR: u64 = 5;
+const WORKING_SET_DENOMINATOR: u64 = 2;
 const MAX_ROW: usize = 8 * 1024 * 1024;
 
 // 纵向合并文件会保留每个来源文件的表头。看账把第一行作为字段名后，后续这些
@@ -32,17 +42,91 @@ fn sql_error(e: rusqlite::Error) -> AppError {
 }
 
 pub(super) fn applies(path: &Path) -> bool {
-    path.extension().and_then(|s| s.to_str()).is_some_and(|s| {
+    let delimited = path.extension().and_then(|s| s.to_str()).is_some_and(|s| {
         ["csv", "txt", "tsv"]
             .iter()
             .any(|ext| s.eq_ignore_ascii_case(ext))
-    }) && fs::metadata(path).is_ok_and(|m| m.len() >= THRESHOLD)
+    });
+    if !delimited {
+        return false;
+    }
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    let file_bytes = metadata.len();
+    if file_bytes >= ALWAYS_DISK_BYTES {
+        return true;
+    }
+    let Ok(memory) = crate::resource_budget::budget() else {
+        // 启动预算已经不足时不要尝试整表分配；磁盘 worker 会在启动门禁
+        // 等待可用内存恢复，而不是把电脑推到失稳状态。
+        return true;
+    };
+    if file_bytes <= FAST_MEMORY_BYTES {
+        // 正常小文件不额外读 16 MiB 样本，按保守的六倍放大直接判断；
+        // 只有主机已经很忙、连这点余量都没有时才切到磁盘路径。
+        return should_use_disk(
+            file_bytes,
+            file_bytes.saturating_mul(6),
+            memory.worker_bytes,
+        );
+    }
+    let estimated_peak =
+        estimate_peak_bytes(path, file_bytes).unwrap_or_else(|| file_bytes.saturating_mul(6));
+    should_use_disk(file_bytes, estimated_peak, memory.worker_bytes)
+}
+
+fn should_use_disk(file_bytes: u64, estimated_peak: u64, worker_bytes: u64) -> bool {
+    file_bytes >= ALWAYS_DISK_BYTES || exceeds_memory_budget(estimated_peak, worker_bytes)
+}
+
+fn exceeds_memory_budget(estimated_peak: u64, worker_bytes: u64) -> bool {
+    let safe_resident = worker_bytes.saturating_mul(MEMORY_SAFETY_PERCENT) / 100;
+    estimated_peak > safe_resident
+}
+
+/// 用开头最多 16 MiB 估算整表进入 `Vec<Vec<String>>` 后的内存，再乘上
+/// 看账预处理/筛选的工作系数。只统计 ASCII 分隔符和换行，对 UTF-8/GBK 都成立；
+/// 引号内逗号会让估算偏大，方向是安全的。
+fn estimate_peak_bytes(path: &Path, file_bytes: u64) -> Option<u64> {
+    let mut file = File::open(path).ok()?;
+    let sample_capacity = file_bytes.min(SAMPLE_BYTES) as usize;
+    if sample_capacity == 0 {
+        return Some(0);
+    }
+    let mut sample = vec![0_u8; sample_capacity];
+    let read = file.read(&mut sample).ok()?;
+    if read == 0 {
+        return Some(0);
+    }
+    sample.truncate(read);
+    let rows_in_sample = sample.iter().filter(|byte| **byte == b'\n').count().max(1) as u64;
+    let separators_in_sample = [b',', b'\t', b';', b'|']
+        .into_iter()
+        .map(|delimiter| sample.iter().filter(|byte| **byte == delimiter).count() as u64)
+        .max()
+        .unwrap_or(0);
+    let sample_bytes = read as u64;
+    let estimated_rows = file_bytes
+        .saturating_mul(rows_in_sample)
+        .div_ceil(sample_bytes);
+    let estimated_cells = file_bytes
+        .saturating_mul(separators_in_sample.saturating_add(rows_in_sample))
+        .div_ceil(sample_bytes);
+    let resident_table = file_bytes
+        .saturating_add(estimated_rows.saturating_mul(32))
+        .saturating_add(estimated_cells.saturating_mul(32));
+    Some(
+        resident_table
+            .saturating_mul(WORKING_SET_NUMERATOR)
+            .div_ceil(WORKING_SET_DENOMINATOR),
+    )
 }
 
 pub(super) fn full_table_error() -> AppError {
     error(
         "KANZHANG_MEMORY_BUDGET",
-        "该文件必须使用低内存磁盘流程，已阻止旧的整表内存读取以保护电脑。请从看账页面重新发起筛选或导出。",
+        "该文件已超过当前电脑的安全内存预算，已阻止整表读取以保护电脑。当前工具尚未接入大文件磁盘计算，请改用看账工具处理，或缩小文件后重试。",
         None,
     )
 }
@@ -427,7 +511,10 @@ mod tests {
     fn large_csv_cannot_fall_back_to_whole_table_loading() {
         let root = fixture();
         let input = root.join("large.csv");
-        File::create(&input).unwrap().set_len(THRESHOLD).unwrap();
+        File::create(&input)
+            .unwrap()
+            .set_len(ALWAYS_DISK_BYTES)
+            .unwrap();
         let err = load_ledger_cached(&input, None, 1).unwrap_err();
         assert_eq!(err.code, "KANZHANG_MEMORY_BUDGET");
         fs::remove_dir_all(root).unwrap();
@@ -641,5 +728,42 @@ impl Cache {
         Ok(
             json!({"engine":"rust-polars","values":values,"codes":codes,"primaryNames":names,"total":total,"truncated":total>limit}),
         )
+    }
+}
+
+#[cfg(test)]
+mod threshold_tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_threshold_scales_with_worker_budget() {
+        let estimated_peak = 3 * GIB;
+        // 空闲 16 GiB 主机的 worker 上限约 4 GiB，65% 安全线不足 3 GiB。
+        assert!(should_use_disk(512 * MIB, estimated_peak, 4 * GIB));
+        // 24/32/64 GiB 主机有更大预算时，同一个中型文件保留内存快路径。
+        assert!(!should_use_disk(512 * MIB, estimated_peak, 6 * GIB));
+        assert!(!should_use_disk(512 * MIB, estimated_peak, 8 * GIB));
+        assert!(!should_use_disk(512 * MIB, estimated_peak, 16 * GIB));
+        // 主机虽大但当前很忙时，实时 worker 预算下降，自动切回磁盘模式。
+        assert!(should_use_disk(512 * MIB, estimated_peak, 1400 * MIB));
+    }
+
+    #[test]
+    fn two_gib_delimited_file_always_uses_disk() {
+        assert!(should_use_disk(2 * GIB, MIB, 64 * GIB));
+        assert!(should_use_disk(6 * GIB, MIB, 64 * GIB));
+    }
+
+    #[test]
+    fn sampled_cells_contribute_to_peak_estimate() {
+        let path = std::env::temp_dir().join(format!(
+            "audit-toolbox-threshold-sample-{}.csv",
+            std::process::id()
+        ));
+        fs::write(&path, "日期,凭证号,科目,借方,贷方\n2026-01-01,1,1001,1,0\n").unwrap();
+        let size = fs::metadata(&path).unwrap().len();
+        let estimate = estimate_peak_bytes(&path, size).unwrap();
+        assert!(estimate > size.saturating_mul(2));
+        fs::remove_file(path).unwrap();
     }
 }

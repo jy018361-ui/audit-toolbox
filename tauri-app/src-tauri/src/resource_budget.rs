@@ -258,6 +258,17 @@ pub(crate) fn check_available() -> Result<(), AppError> {
         thread::sleep(Duration::from_millis(500));
     }
 }
+
+/// 长任务在 worker 中安装控制器后才等待内存恢复。同步探测、单元测试等
+/// 非 worker 调用不应因为主机一时繁忙而被这个运行期检查误拦。
+pub(crate) fn check_available_if_managed() -> Result<(), AppError> {
+    if RUNTIME_MEMORY_CONTROL.get().is_some() {
+        check_available()
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) fn check_disk_space(path: &std::path::Path, estimated: u64) -> Result<(), AppError> {
     use std::os::windows::ffi::OsStrExt;
     let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();

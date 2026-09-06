@@ -61,7 +61,18 @@ export function useJobPause(): Pick<JobDialogApi, "isPaused" | "togglePause"> {
 
 function percent(job: JobEvent): number {
   const max = Math.max(job.total, 1);
-  return Math.round((Math.min(job.current, max) / max) * 100);
+  const calculated = Math.round((Math.min(job.current, max) / max) * 100);
+  // current/total 只描述当前业务阶段。worker 还可能在落盘、校验和原子替换，
+  // 所以运行态不能显示 100%；只有 completed 事件才代表整个任务完成。
+  return isJobRunning(job) ? Math.min(calculated, 99) : calculated;
+}
+
+function progressValue(job: JobEvent): number | undefined {
+  if (job.total <= 0) return undefined;
+  const max = Math.max(job.total, 1);
+  return isJobRunning(job)
+    ? Math.min(job.current, max * 0.99)
+    : Math.min(job.current, max);
 }
 
 function toneOf(job: JobEvent): string {
@@ -94,7 +105,7 @@ function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop }: Job
         className={`progress-tone-${paused ? "warning" : tone}`}
         aria-label={`${label}进度`}
         max={Math.max(job.total, 1)}
-        value={job.total > 0 ? Math.min(job.current, Math.max(job.total, 1)) : undefined}
+        value={progressValue(job)}
       />
       <div className="job-dialog-row-actions">
         <Button

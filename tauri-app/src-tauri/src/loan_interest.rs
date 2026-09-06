@@ -8,6 +8,7 @@ use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Formula, Workbook};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -126,7 +127,7 @@ pub(crate) fn run_job(
 ) -> Result<Value, AppError> {
     checkpoint(&cancel, pause)?;
     progress("calculate", 1, 3, "正在读取借款数据并还原本金变动…");
-    let mut rows = calculate(&params)?;
+    let mut rows = calculate_with_context(&params, progress, cancel.as_ref())?;
     checkpoint(&cancel, pause)?;
     progress("calculate", 2, 3, "正在按有效利率测算利息…");
     apply_overrides(&mut rows, &params);
@@ -425,8 +426,24 @@ fn rate_header_role(cell: &str) -> Option<&'static str> {
         return Some("rate");
     }
     if has(&[
-        "借款", "贷款", "合同", "协议", "明细", "辅助", "名称", "标识", "编号", "银行", "债权人",
-        "贷款人", "户名", "项目", "品种", "摘要", "单位", "笔次",
+        "借款",
+        "贷款",
+        "合同",
+        "协议",
+        "明细",
+        "辅助",
+        "名称",
+        "标识",
+        "编号",
+        "银行",
+        "债权人",
+        "贷款人",
+        "户名",
+        "项目",
+        "品种",
+        "摘要",
+        "单位",
+        "笔次",
     ]) {
         return Some("loanId");
     }
@@ -554,8 +571,7 @@ fn parse_pasted_rate_text(s: &str) -> Result<(Table, Map<String, Value>, bool), 
         // 首行不是表头：它是数据行，放回队首。
         let mut all = rows;
         all.insert(0, first);
-        let headers: Vec<String> =
-            (0..width).map(|i| format!("第{}列", i + 1)).collect();
+        let headers: Vec<String> = (0..width).map(|i| format!("第{}列", i + 1)).collect();
         let mapping = content_rate_mapping(&headers, &all);
         (headers, mapping, all)
     };
@@ -579,8 +595,17 @@ fn parse_pasted_rate_text(s: &str) -> Result<(Table, Map<String, Value>, bool), 
 }
 
 fn calculate(params: &Value) -> Result<Vec<LoanRow>, AppError> {
+    let cancel = AtomicBool::new(false);
+    calculate_with_context(params, &|_, _, _, _| {}, &cancel)
+}
+
+fn calculate_with_context(
+    params: &Value,
+    progress: &dyn Fn(&str, usize, usize, &str),
+    cancel: &AtomicBool,
+) -> Result<Vec<LoanRow>, AppError> {
     if params.get("mode").and_then(Value::as_str) == Some("tb") {
-        calculate_tb(params)
+        calculate_tb(params, progress, cancel)
     } else {
         calculate_ledger(params)
     }
@@ -790,8 +815,7 @@ fn calculate_ledger(params: &Value) -> Result<Vec<LoanRow>, AppError> {
             match_basis: if has_closing {
                 "客户借款台账".into()
             } else {
-                "客户借款台账（无期末余额列，期末按期初＋新增－归还推算，未做勾稽对照）"
-                    .into()
+                "客户借款台账（无期末余额列，期末按期初＋新增－归还推算，未做勾稽对照）".into()
             },
             events,
             contract_start: None,
@@ -799,11 +823,7 @@ fn calculate_ledger(params: &Value) -> Result<Vec<LoanRow>, AppError> {
             repaid: 0.0,
             repayment_method: String::new(),
             contract_opening: 0.0,
-            ledger_closing: if has_closing {
-                Some(closing)
-            } else {
-                None
-            },
+            ledger_closing: if has_closing { Some(closing) } else { None },
             source_columns: table.headers.clone(),
             source_cells: row.clone(),
             segments: Vec::new(),
@@ -1053,9 +1073,177 @@ fn looks_like_id(s: &str) -> bool {
         && t.chars().any(|c| c.is_ascii_alphabetic())
         && t.chars().any(|c| c.is_ascii_digit())
 }
-fn calculate_tb(params: &Value) -> Result<Vec<LoanRow>, AppError> {
+
+#[derive(Clone, Default)]
+struct JeLoanAggregate {
+    additions: f64,
+    reductions: f64,
+    matched: usize,
+    events: Vec<(NaiveDate, f64)>,
+}
+
+impl JeLoanAggregate {
+    fn add(&mut self, net: f64, date: Option<NaiveDate>) {
+        self.matched += 1;
+        if net > 0.0 {
+            self.reductions += net;
+        } else if net < 0.0 {
+            self.additions += -net;
+        }
+        if net != 0.0 {
+            if let Some(date) = date {
+                self.events.push((date, -net));
+            }
+        }
+    }
+}
+
+/// 大 CSV 只顺序访问一次；扫描时直接把本金变动归集到对应的 TB 借款。
+fn aggregate_large_je_once(
+    tb: &Table,
+    tb_mapping: &Map<String, Value>,
+    tb_leaf: &[bool],
+    spec: &SourceSpec,
+    je_mapping: &Map<String, Value>,
+    progress: &dyn Fn(&str, usize, usize, &str),
+    cancel: &AtomicBool,
+) -> Result<HashMap<usize, JeLoanAggregate>, AppError> {
+    let mut candidates = HashMap::<String, Vec<(usize, String)>>::new();
+    for (row_index, row) in tb.rows.iter().enumerate() {
+        if !tb_leaf.get(row_index).copied().unwrap_or(false) {
+            continue;
+        }
+        let account = account_text(tb, row, tb_mapping, "tb");
+        let id = text(tb, row, tb_mapping, "loanId");
+        if account.is_empty() || id.is_empty() {
+            continue;
+        }
+        candidates
+            .entry(norm(&account))
+            .or_default()
+            .push((row_index, norm(&id)));
+    }
+
+    let prepared_mapping = normalized_disk_je_mapping(je_mapping);
+    let ledger = crate::tabular::open_prepared_disk_ledger(
+        Path::new(&spec.input_path),
+        spec.header_row,
+        spec.header_depth.max(1),
+        &prepared_mapping,
+        progress,
+        cancel,
+    )?;
+    let headers = ledger.headers().to_vec();
+    let total_rows = ledger.row_count().max(1);
+    let mut scanned = 0usize;
+    let mut aggregates = HashMap::<usize, JeLoanAggregate>::new();
+    ledger.visit(false, cancel, |row| {
+        scanned += 1;
+        if scanned == 1 || scanned % 50_000 == 0 {
+            progress(
+                "calculate_je",
+                scanned.min(total_rows),
+                total_rows,
+                "正在从磁盘汇总借款本金变动…",
+            );
+        }
+        let Some(targets) = candidates.get(&norm(&row.account)) else {
+            return Ok(());
+        };
+        let loan_id = disk_role_text(&headers, &row.values, &prepared_mapping, "loanId");
+        let loan_key = norm(&loan_id);
+        let summary = norm(&disk_role_text(
+            &headers,
+            &row.values,
+            &prepared_mapping,
+            "summary",
+        ));
+        let event_date = parse_date(&disk_role_text(
+            &headers,
+            &row.values,
+            &prepared_mapping,
+            "date",
+        ));
+        for (row_index, target_id) in targets {
+            if loan_id.is_empty() || loan_key == *target_id || summary.contains(target_id) {
+                aggregates
+                    .entry(*row_index)
+                    .or_default()
+                    .add(row.net, event_date);
+            }
+        }
+        Ok(())
+    })?;
+    progress(
+        "calculate_je",
+        total_rows,
+        total_rows,
+        "借款本金变动汇总完成。",
+    );
+    Ok(aggregates)
+}
+
+fn disk_role_text(
+    headers: &[String],
+    row: &[String],
+    mapping: &Map<String, Value>,
+    role: &str,
+) -> String {
+    mapped_names(mapping, "je", role)
+        .iter()
+        .filter_map(|name| headers.iter().position(|header| header == name))
+        .filter_map(|index| row.get(index))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalized_disk_je_mapping(mapping: &Map<String, Value>) -> Map<String, Value> {
+    let mut normalized = Map::new();
+    for (role, value) in mapping {
+        let migrated = ledger_mapping::migrate_role_name("je", role);
+        let key = if migrated.is_empty() {
+            role.clone()
+        } else {
+            migrated.to_string()
+        };
+        normalized.entry(key).or_insert_with(|| value.clone());
+    }
+    if !normalized.contains_key("id") {
+        if let Some(value) = ["loanId", "date", "accountCode", "accountName"]
+            .into_iter()
+            .find_map(|role| normalized.get(role).cloned())
+        {
+            normalized.insert("id".into(), value);
+        }
+    }
+    normalized
+}
+
+fn calculate_tb(
+    params: &Value,
+    progress: &dyn Fn(&str, usize, usize, &str),
+    cancel: &AtomicBool,
+) -> Result<Vec<LoanRow>, AppError> {
+    calculate_tb_impl(params, progress, cancel, false)
+}
+
+fn calculate_tb_impl(
+    params: &Value,
+    progress: &dyn Fn(&str, usize, usize, &str),
+    cancel: &AtomicBool,
+    force_disk_je: bool,
+) -> Result<Vec<LoanRow>, AppError> {
     let (tb, tm) = source(params, "tbSource")?;
-    let (je, jm) = source(params, "jeSource")?;
+    let (je_spec, je_mapping) = source_config(params, "jeSource")?;
+    let disk_je =
+        force_disk_je || crate::tabular::disk_ledger_applies(Path::new(&je_spec.input_path));
+    let memory_je = if disk_je {
+        None
+    } else {
+        Some(source(params, "jeSource")?)
+    };
     // 「利率确认」步骤粘贴匹配后逐笔确认的利率优先；利率台账文件仅历史任务恢复用。
     let inline_rates = inline_rate_rows(params);
     let rate_source = optional_source(params, "rateLedgerSource")?;
@@ -1075,9 +1263,24 @@ fn calculate_tb(params: &Value) -> Result<Vec<LoanRow>, AppError> {
         balance_self_signed("openingFunctional"),
         balance_self_signed("closingFunctional"),
     );
-    let je_convention = je_sign_convention(&je, &jm);
     let tb_leaf =
         ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| mapped_names(&tm, "tb", role));
+    let disk_aggregates = if disk_je {
+        Some(aggregate_large_je_once(
+            &tb,
+            &tm,
+            &tb_leaf,
+            &je_spec,
+            &je_mapping,
+            progress,
+            cancel,
+        )?)
+    } else {
+        None
+    };
+    let memory_convention = memory_je
+        .as_ref()
+        .map(|(je, jm)| je_sign_convention(je, jm));
     let mut out = vec![];
     for (row_index, row) in tb.rows.iter().enumerate() {
         if !tb_leaf[row_index] {
@@ -1099,33 +1302,34 @@ fn calculate_tb(params: &Value) -> Result<Vec<LoanRow>, AppError> {
             tb_convention,
             closing_self_signed,
         ));
-        let mut additions = 0.0;
-        let mut reductions = 0.0;
-        let mut matched = 0usize;
-        let mut events = vec![];
-        for jr in &je.rows {
-            let ja = account_text(&je, jr, &jm, "je");
-            let ji = text(&je, jr, &jm, "loanId");
-            let summary = text(&je, jr, &jm, "summary");
-            let hit = norm(&ja) == norm(&account)
-                && (ji.is_empty() || norm(&ji) == norm(&id) || norm(&summary).contains(&norm(&id)));
-            if !hit {
-                continue;
-            }
-            matched += 1;
-            let net = ledger_mapping::signed_amount(&je_amount_inputs(&je, jr, &jm), je_convention);
-            if net > 0.0 {
-                reductions += net;
-            } else if net < 0.0 {
-                additions += -net;
-            }
-            if net != 0.0 {
-                if let Some(value) = row_date(&je, jr, &jm, "date") {
-                    // 借款本金台账以贷方增加为正，正好是公共“借正贷负”净额的反号。
-                    events.push((value, -net));
+        let mut aggregate = disk_aggregates
+            .as_ref()
+            .and_then(|all| all.get(&row_index))
+            .cloned()
+            .unwrap_or_default();
+        if let (Some((je, jm)), Some(je_convention)) = (memory_je.as_ref(), memory_convention) {
+            for jr in &je.rows {
+                let ja = account_text(je, jr, jm, "je");
+                let ji = text(je, jr, jm, "loanId");
+                let summary = text(je, jr, jm, "summary");
+                let hit = norm(&ja) == norm(&account)
+                    && (ji.is_empty()
+                        || norm(&ji) == norm(&id)
+                        || norm(&summary).contains(&norm(&id)));
+                if !hit {
+                    continue;
                 }
+                let net =
+                    ledger_mapping::signed_amount(&je_amount_inputs(je, jr, jm), je_convention);
+                aggregate.add(net, row_date(je, jr, jm, "date"));
             }
         }
+        let JeLoanAggregate {
+            mut additions,
+            mut reductions,
+            matched,
+            events,
+        } = aggregate;
         if matched == 0 {
             let net =
                 ledger_mapping::signed_amount(&amount_inputs(&tb, row, &tm, "ytd"), tb_convention);
@@ -1144,8 +1348,7 @@ fn calculate_tb(params: &Value) -> Result<Vec<LoanRow>, AppError> {
             if !row.rate_type.is_empty() {
                 rate_type = row.rate_type.clone();
             }
-            (fixed, benchmark, bps) =
-                (row.fixed_rate, row.benchmark_rate, row.spread_bps);
+            (fixed, benchmark, bps) = (row.fixed_rate, row.benchmark_rate, row.spread_bps);
         } else if let Some((rt, rm)) = &rate_source {
             if let Some(rr) = rt
                 .rows
@@ -1933,7 +2136,7 @@ fn write_lpr_sheet(wb: &mut Workbook, header: &Format, date_fmt: &Format) -> Res
     Ok(())
 }
 
-fn source(params: &Value, key: &str) -> Result<(Table, Map<String, Value>), AppError> {
+fn source_config(params: &Value, key: &str) -> Result<(SourceSpec, Map<String, Value>), AppError> {
     let v = params
         .get(key)
         .ok_or_else(|| error("MISSING_SOURCE", format!("缺少 {} 数据源。", key), None))?;
@@ -1944,6 +2147,11 @@ fn source(params: &Value, key: &str) -> Result<(Table, Map<String, Value>), AppE
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    Ok((spec, mapping))
+}
+
+fn source(params: &Value, key: &str) -> Result<(Table, Map<String, Value>), AppError> {
+    let (spec, mapping) = source_config(params, key)?;
     // key 形如 tbSource／jeSource／ledgerSource，前缀即表的种类。
     let kind = key.trim_end_matches("Source");
     // 台账的取值一律按标准角色名读（[`text`] 直接查键，不做迁移），
@@ -2033,11 +2241,16 @@ fn source(params: &Value, key: &str) -> Result<(Table, Map<String, Value>), AppE
     })
     .collect::<Vec<_>>();
     if let Some(issue) = issues.first() {
+        // 首处位置折进主文案：job 失败事件只回传 user_message，留在 detail 里
+        // 用户看不到（与看账内存/磁盘路径同款措辞）。
         return Err(error(
             "AMOUNT_VALUE_INVALID",
             format!(
-                "{}金额列存在非空但无法解析为数值的单元格，请修正后重试。",
-                kind.to_uppercase()
+                "{}金额列「{}」第{}行的值“{}”无法解析为数值，请修正后重试。",
+                kind.to_uppercase(),
+                issue.column,
+                table.header_row + table.header_depth + issue.row_index,
+                issue.value.chars().take(80).collect::<String>()
             ),
             Some(format!(
                 "{}（{}）第{}行=“{}”{}",
@@ -3578,12 +3791,8 @@ mod tests {
         let result = run_preview(&params).unwrap();
         let out = result["rows"].as_array().unwrap();
         assert!((out[0]["effectiveRate"].as_f64().unwrap() - 0.0385).abs() < 1e-12);
-        assert!(
-            (out[0]["calculatedInterest"].as_f64().unwrap() - 38_500.0).abs() < 0.01
-        );
-        assert!(
-            (out[1]["calculatedInterest"].as_f64().unwrap() - 59_000.0).abs() < 0.01
-        );
+        assert!((out[0]["calculatedInterest"].as_f64().unwrap() - 38_500.0).abs() < 0.01);
+        assert!((out[1]["calculatedInterest"].as_f64().unwrap() - 59_000.0).abs() < 0.01);
         assert_eq!(out[2]["calculatedInterest"], 0.0);
         assert_eq!(out[3]["calculatedInterest"], 0.0);
     }
@@ -3595,16 +3804,10 @@ mod tests {
         let (table, mapping, header_like) =
             parse_pasted_rate_text("工行贷款A\t3.85\n建行贷款B\t2.95").unwrap();
         assert!(!header_like);
-        assert_eq!(
-            mapping.get("loanId").and_then(Value::as_str),
-            Some("第1列")
-        );
+        assert_eq!(mapping.get("loanId").and_then(Value::as_str), Some("第1列"));
         assert_eq!(mapping.get("rate").and_then(Value::as_str), Some("第2列"));
         assert_eq!(table.rows.len(), 2);
-        assert_eq!(
-            text(&table, &table.rows[0], &mapping, "rate"),
-            "3.85"
-        );
+        assert_eq!(text(&table, &table.rows[0], &mapping, "rate"), "3.85");
         // 「借款金额」含「借款」但是金额列，必须被排除。
         assert_eq!(rate_header_role("借款金额"), None);
         assert_eq!(rate_header_role("到期日"), None);
@@ -4140,7 +4343,10 @@ mod tests {
         let path = dir.join("contract-noclose.xlsx");
         let mut book = Workbook::new();
         let sheet = book.add_worksheet();
-        for (c, h) in ["合同编号", "借款金额", "起始日", "到期日", "利率"].iter().enumerate() {
+        for (c, h) in ["合同编号", "借款金额", "起始日", "到期日", "利率"]
+            .iter()
+            .enumerate()
+        {
             sheet.write_string(0, c as u16, *h).unwrap();
         }
         sheet.write_string(1, 0, "HT-2024-001").unwrap();
@@ -4500,6 +4706,47 @@ mod tests {
         assert_eq!(account_text(&table, row, &m, "je"), "2202 短期借款");
         assert_eq!(num_role(&table, row, &m, "je", "functionalDebit"), 1000.0);
         assert_eq!(num_role(&table, row, &m, "je", "functionalCredit"), 2000.0);
+    }
+
+    #[test]
+    fn 小型序时账强制磁盘路径与内存路径等价() {
+        let dir = std::env::temp_dir().join(format!(
+            "loan-interest-disk-equivalence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let tb = dir.join("tb.csv");
+        let je = dir.join("je.csv");
+        fs::write(
+            &tb,
+            "编码,科目,借款,期初贷,期末贷\n2001,短期借款,L-1,1000,1300\n2002,长期借款,L-2,2000,1900\n",
+        )
+        .unwrap();
+        fs::write(
+            &je,
+            "凭证,编码,科目,借款,摘要,日期,借方,贷方\nV1,2001,短期借款,L-1,,2025-02-01,0,500\nV2,2001,短期借款,L-1,,2025-03-01,200,0\nV3,2002,长期借款,其他,归还L-2本金,2025-04-01,100,0\n",
+        )
+        .unwrap();
+        let params = json!({
+            "mode":"tb",
+            "tbSource":{"source":{"inputPath":tb,"sheet":"CSV","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","loanId":"借款","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷"}},
+            "jeSource":{"source":{"inputPath":je,"sheet":"CSV","headerRow":1,"headerDepth":1},"mapping":{"id":"凭证","accountCode":"编码","accountName":"科目","loanId":"借款","summary":"摘要","date":"日期","functionalDebit":"借方","functionalCredit":"贷方"}}
+        });
+        let cancel = AtomicBool::new(false);
+        let memory = calculate_tb_impl(&params, &|_, _, _, _| {}, &cancel, false).unwrap();
+        let disk = calculate_tb_impl(&params, &|_, _, _, _| {}, &cancel, true).unwrap();
+        assert_eq!(memory.len(), disk.len());
+        for (left, right) in memory.iter().zip(&disk) {
+            assert_eq!(left.loan_id, right.loan_id);
+            assert_eq!(left.opening_principal, right.opening_principal);
+            assert_eq!(left.additions, right.additions);
+            assert_eq!(left.reductions, right.reductions);
+            assert_eq!(left.closing_principal, right.closing_principal);
+            assert_eq!(left.match_status, right.match_status);
+            assert_eq!(left.match_basis, right.match_basis);
+            assert_eq!(left.events, right.events);
+        }
+        let _ = fs::remove_dir_all(dir);
     }
 }
 

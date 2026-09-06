@@ -4,7 +4,7 @@ use super::*;
 use rusqlite::{Connection, params};
 use std::cell::Cell;
 
-const PREPARED_CACHE_VERSION: u64 = 1;
+const PREPARED_CACHE_VERSION: u64 = 3;
 
 pub(super) fn sql_error(e: rusqlite::Error) -> AppError {
     error(
@@ -23,10 +23,57 @@ pub(super) struct DiskLedger {
     mapping: LedgerMapping,
 }
 
+/// One normalized ledger row exposed to business tools. `values` is the
+/// forward-filled row that was used to build the voucher key and amounts, so
+/// consumers never have to repeat preprocessing or retain the whole JE.
+pub(super) struct ProcessedRow {
+    pub values: Vec<String>,
+    pub source_row: usize,
+    pub voucher: String,
+    pub account: String,
+    pub entity: String,
+    pub debit: f64,
+    pub credit: f64,
+    pub net: f64,
+}
+
+fn normalized_row(data: &str, fills: &str, width: usize) -> Result<Vec<String>, AppError> {
+    let mut row: Vec<String> = serde_json::from_str(data).map_err(|e| {
+        error(
+            "LEDGER_CACHE_FAILED",
+            "原始凭证明细缓存已损坏。",
+            Some(e.to_string()),
+        )
+    })?;
+    if row.len() < width {
+        row.resize(width, String::new());
+    }
+    let fills: Vec<(usize, String)> = serde_json::from_str(fills).map_err(|e| {
+        error(
+            "LEDGER_CACHE_FAILED",
+            "凭证明细填充缓存已损坏。",
+            Some(e.to_string()),
+        )
+    })?;
+    for (index, value) in fills {
+        if index >= row.len() {
+            row.resize(index + 1, String::new());
+        }
+        row[index] = value;
+    }
+    Ok(row)
+}
+
 #[derive(Debug)]
 pub(super) struct DetailExport {
     pub paths: Vec<PathBuf>,
     pub rows: usize,
+}
+
+pub(super) struct MarkResult {
+    pub direct_pairs: usize,
+    pub cross_pairs: usize,
+    pub unmatched_rows: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -142,6 +189,17 @@ fn validate_disk_amount_row(
     Ok(())
 }
 
+fn validate_prepared_mapping_required(mapping: &LedgerMapping) -> Result<(), AppError> {
+    if mapping.id.is_empty() {
+        if let Some(date) = mapping.date.clone() {
+            let mut validation = mapping.clone();
+            validation.id.push(date);
+            return validate_mapping_required(&validation);
+        }
+    }
+    validate_mapping_required(mapping)
+}
+
 fn prepared_key(
     cache: &large_csv::Cache,
     mapping: &LedgerMapping,
@@ -164,6 +222,26 @@ fn prepared_key(
             .as_bytes(),
     );
     hash.update(PREPARED_CACHE_VERSION.to_le_bytes());
+    Ok(hex::encode(hash.finalize()))
+}
+
+fn prepared_key_with_fill_columns(
+    cache: &large_csv::Cache,
+    mapping: &LedgerMapping,
+    sign_override: Option<SignConvention>,
+    header_row: usize,
+    additional_fill_columns: &[String],
+) -> Result<String, AppError> {
+    let key = prepared_key(cache, mapping, sign_override, header_row)?;
+    if additional_fill_columns.is_empty() {
+        return Ok(key);
+    }
+    let mut hash = Sha256::new();
+    hash.update(key.as_bytes());
+    for column in additional_fill_columns {
+        hash.update(column.as_bytes());
+        hash.update([0]);
+    }
     Ok(hex::encode(hash.finalize()))
 }
 
@@ -252,8 +330,34 @@ pub(super) fn prepare(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<DiskLedger, AppError> {
-    validate_mapping_required(mapping)?;
-    let key = prepared_key(cache, mapping, sign_override, header_row)?;
+    prepare_with_fill_columns(
+        cache,
+        mapping,
+        sign_override,
+        header_row,
+        &[],
+        progress,
+        cancel,
+    )
+}
+
+pub(super) fn prepare_with_fill_columns(
+    cache: &large_csv::Cache,
+    mapping: &LedgerMapping,
+    sign_override: Option<SignConvention>,
+    header_row: usize,
+    additional_fill_columns: &[String],
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<DiskLedger, AppError> {
+    validate_prepared_mapping_required(mapping)?;
+    let key = prepared_key_with_fill_columns(
+        cache,
+        mapping,
+        sign_override,
+        header_row,
+        additional_fill_columns,
+    )?;
     let path = cache_path("kanzhang-ledger", &key)?.with_extension("sqlite");
     fs::create_dir_all(path.parent().unwrap()).map_err(io_error)?;
     if path.is_file() {
@@ -287,6 +391,7 @@ pub(super) fn prepare(
             mapping,
             sign_override,
             header_row,
+            additional_fill_columns,
             progress,
             cancel,
             &partial,
@@ -303,7 +408,14 @@ pub(super) fn prepare(
             .map_err(sql_error)?;
         drop(ledger);
         check_cancel(cancel)?;
-        if prepared_key(cache, mapping, sign_override, header_row)? != key {
+        if prepared_key_with_fill_columns(
+            cache,
+            mapping,
+            sign_override,
+            header_row,
+            additional_fill_columns,
+        )? != key
+        {
             return Err(error(
                 "SOURCE_CHANGED",
                 "分析期间源文件发生变化，请重新读取。",
@@ -331,11 +443,12 @@ fn build_prepared(
     mapping: &LedgerMapping,
     sign_override: Option<SignConvention>,
     header_row: usize,
+    additional_fill_columns: &[String],
     progress: Progress<'_>,
     cancel: &AtomicBool,
     path: &Path,
 ) -> Result<DiskLedger, AppError> {
-    validate_mapping_required(mapping)?;
+    validate_prepared_mapping_required(mapping)?;
     let ids = ledger_id_indexes(&cache.table.headers, mapping);
     let accounts = mapping
         .account_columns()
@@ -351,7 +464,7 @@ fn build_prepared(
     }
     let budget = crate::resource_budget::budget()?;
     let db = Connection::open(path).map_err(sql_error)?;
-    db.execute_batch(&format!("PRAGMA cache_size=-{}; PRAGMA temp_store=FILE; PRAGMA mmap_size=0; PRAGMA journal_mode=OFF; CREATE TABLE processed(seq INTEGER PRIMARY KEY,voucher TEXT NOT NULL,account TEXT NOT NULL,account_norm TEXT NOT NULL,net REAL NOT NULL DEFAULT 0,candidate INTEGER NOT NULL,signkey TEXT NOT NULL,signkey_noentity TEXT NOT NULL,entity TEXT NOT NULL,dr REAL NOT NULL,cr REAL NOT NULL,raw REAL NOT NULL,unsigned REAL NOT NULL,hd INTEGER NOT NULL,hc INTEGER NOT NULL,pos INTEGER NOT NULL,neg INTEGER NOT NULL); CREATE TABLE meta(value TEXT NOT NULL);",budget.sqlite_cache_kib)).map_err(sql_error)?;
+    db.execute_batch(&format!("PRAGMA cache_size=-{}; PRAGMA temp_store=FILE; PRAGMA mmap_size=0; PRAGMA journal_mode=OFF; CREATE TABLE processed(seq INTEGER PRIMARY KEY,fills TEXT NOT NULL,voucher TEXT NOT NULL,account TEXT NOT NULL,account_norm TEXT NOT NULL,net REAL NOT NULL DEFAULT 0,candidate INTEGER NOT NULL,signkey TEXT NOT NULL,signkey_noentity TEXT NOT NULL,entity TEXT NOT NULL,dr REAL NOT NULL,cr REAL NOT NULL,raw REAL NOT NULL,unsigned REAL NOT NULL,hd INTEGER NOT NULL,hc INTEGER NOT NULL,pos INTEGER NOT NULL,neg INTEGER NOT NULL); CREATE TABLE meta(value TEXT NOT NULL);",budget.sqlite_cache_kib)).map_err(sql_error)?;
     attach_raw(&db, cache)?;
     let mut table = cache.table.clone();
     table.rows.clear();
@@ -377,11 +490,17 @@ fn build_prepared(
         .into_iter()
         .filter_map(|n| header_index(&ledger.table.headers, n))
         .collect::<Vec<_>>();
-    let fill = mapped
+    let mut fill = mapped
         .iter()
         .copied()
         .filter(|i| !amount_indexes.contains(i))
         .collect::<HashSet<_>>();
+    fill.extend(
+        additional_fill_columns
+            .iter()
+            .filter_map(|name| header_index(&ledger.table.headers, name))
+            .filter(|index| !amount_indexes.contains(index)),
+    );
     let mut previous = HashMap::<usize, String>::new();
     let entity_index = mapping
         .entity
@@ -403,16 +522,27 @@ fn build_prepared(
                     == Some(*i)
         })
         .collect::<Vec<_>>();
-    let mut insert = ledger.db.prepare("INSERT INTO processed(seq,voucher,account,account_norm,candidate,signkey,signkey_noentity,entity,dr,cr,raw,unsigned,hd,hc,pos,neg) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)").map_err(sql_error)?;
+    // 大 CSV 走流式逐行，用引擎的单行正文判定先剔非正文行：表尾小计/手工草稿
+    // 不是凭证明细，不校验金额、不填充、也不进正文。整表版另有表尾倒扫，
+    // 流式拿不到全表视野做不了，表尾噪声靠业务行协议兜底。
+    let body = ledger_mapping::LedgerBodyRule::new(&ledger.table.headers, &|role| {
+        ledger_role_columns(mapping, role)
+    });
+    let mut insert = ledger.db.prepare("INSERT INTO processed(seq,fills,voucher,account,account_norm,candidate,signkey,signkey_noentity,entity,dr,cr,raw,unsigned,hd,hc,pos,neg) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)").map_err(sql_error)?;
     let mut last_progress = Instant::now();
     cache.visit(None, cancel, |mut row, index| {
+        if !body.is_body(&row) {
+            return Ok(());
+        }
         // Validate before fill/filter, exactly as the ordinary export path does.
         validate_disk_amount_row(&ledger.table.headers, &row, mapping, header_row + index)?;
+        let mut applied_fills = Vec::<(usize, String)>::new();
         for &i in &fill {
             let current = row.get(i).map(|s| s.trim()).unwrap_or("");
             if current.is_empty() {
                 if let (Some(value), Some(cell)) = (previous.get(&i), row.get_mut(i)) {
                     *cell = value.clone();
+                    applied_fills.push((i, value.clone()));
                 }
             } else {
                 previous.insert(i, current.to_owned());
@@ -433,6 +563,11 @@ fn build_prepared(
             insert
                 .execute(params![
                     index as i64,
+                    serde_json::to_string(&applied_fills).map_err(|e| error(
+                        "LEDGER_CACHE_FAILED",
+                        "无法保存凭证明细填充信息。",
+                        Some(e.to_string()),
+                    ))?,
                     voucher_key(&row, &ids),
                     joined_account(&row, &accounts),
                     normalize_account_text(&joined_account(&row, &accounts)),
@@ -442,7 +577,8 @@ fn build_prepared(
                     entity_index
                         .and_then(|i| row.get(i))
                         .map(String::as_str)
-                        .unwrap_or(""),
+                        .unwrap_or("")
+                        .trim(),
                     dr,
                     cr,
                     raw,
@@ -603,6 +739,350 @@ impl Vote {
 }
 
 impl DiskLedger {
+    pub(super) fn convention(&self) -> SignConvention {
+        self.convention
+    }
+
+    pub(super) fn evidence_all(&self, cancel: &AtomicBool) -> Result<SignEvidence, AppError> {
+        self.evidence(false, cancel)
+    }
+
+    pub(super) fn retain_selected_by_filters(
+        &self,
+        filters: &[(usize, HashSet<String>)],
+        cancel: &AtomicBool,
+    ) -> Result<(), AppError> {
+        if filters.is_empty() {
+            return Ok(());
+        }
+        self.db
+            .execute_batch(
+                "DROP TABLE IF EXISTS temp.filter_hits;
+             CREATE TEMP TABLE filter_hits(voucher TEXT PRIMARY KEY) WITHOUT ROWID;",
+            )
+            .map_err(sql_error)?;
+        let transaction = self.db.unchecked_transaction().map_err(sql_error)?;
+        let mut scan = transaction
+            .prepare(
+                "SELECT r.data,p.fills,p.voucher FROM processed p
+                 JOIN raw_cache.rows r ON r.rowid=p.seq+1
+                 WHERE p.voucher IN (SELECT voucher FROM selected) ORDER BY p.seq",
+            )
+            .map_err(sql_error)?;
+        let mut cursor = scan.query([]).map_err(sql_error)?;
+        let mut insert = transaction
+            .prepare("INSERT OR IGNORE INTO filter_hits VALUES(?1)")
+            .map_err(sql_error)?;
+        let mut index = 0usize;
+        while let Some(record) = cursor.next().map_err(sql_error)? {
+            if index % 1000 == 0 {
+                check_cancel(cancel)?;
+                crate::resource_budget::check_available()?;
+            }
+            index += 1;
+            let data: String = record.get(0).map_err(sql_error)?;
+            let fills: String = record.get(1).map_err(sql_error)?;
+            let row = normalized_row(&data, &fills, self.table.headers.len())?;
+            let hit = filters.iter().all(|(column, chosen)| {
+                let value = row.get(*column).map(|value| value.trim()).unwrap_or("");
+                chosen.contains(if value.is_empty() {
+                    BLANK_VALUE_TOKEN
+                } else {
+                    value
+                })
+            });
+            if hit {
+                insert
+                    .execute([record.get::<_, String>(2).map_err(sql_error)?])
+                    .map_err(sql_error)?;
+            }
+        }
+        drop(insert);
+        drop(cursor);
+        drop(scan);
+        transaction.commit().map_err(sql_error)?;
+        self.db
+            .execute_batch(
+                "DELETE FROM selected WHERE voucher NOT IN (SELECT voucher FROM filter_hits);
+             DROP TABLE filter_hits;",
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+
+    pub(super) fn mark_selected_offsets(
+        &self,
+        cancel: &AtomicBool,
+    ) -> Result<MarkResult, AppError> {
+        check_cancel(cancel)?;
+        let net = self.selected_net_column();
+        self.db.execute_batch(&format!(
+            "DROP TABLE IF EXISTS temp.mark_eligible;
+             DROP TABLE IF EXISTS temp.mark_status;
+             CREATE TEMP TABLE mark_eligible AS
+               SELECT seq,voucher,account_norm,entity,CAST(ROUND({net}*100.0) AS INTEGER) cents
+               FROM processed
+               WHERE voucher IN (SELECT voucher FROM selected)
+                 AND account_norm IN (SELECT account FROM targets)
+                 AND CAST(ROUND({net}*100.0) AS INTEGER)<>0;
+             CREATE UNIQUE INDEX mark_eligible_seq ON mark_eligible(seq);
+             CREATE INDEX mark_eligible_direct ON mark_eligible(account_norm,entity,ABS(cents),cents,seq);
+             CREATE TEMP TABLE mark_status(seq INTEGER PRIMARY KEY,status TEXT NOT NULL);
+             INSERT INTO mark_status
+               SELECT seq,'未匹配' FROM processed
+               WHERE voucher IN (SELECT voucher FROM selected)
+                 AND account_norm IN (SELECT account FROM targets);"
+        )).map_err(sql_error)?;
+        check_cancel(cancel)?;
+        self.db.execute_batch(
+            "DROP TABLE IF EXISTS temp.mark_direct;
+             CREATE TEMP TABLE mark_direct AS
+             WITH ranked AS (
+               SELECT seq,cents,account_norm,entity,ABS(cents) amount,
+                      ROW_NUMBER() OVER(PARTITION BY account_norm,entity,ABS(cents),cents>0 ORDER BY seq) rn
+               FROM mark_eligible
+             )
+             SELECT p.seq positive_seq,n.seq negative_seq
+             FROM ranked p JOIN ranked n
+               ON p.account_norm=n.account_norm AND p.entity=n.entity
+              AND p.amount=n.amount AND p.rn=n.rn
+             WHERE p.cents>0 AND n.cents<0;
+             UPDATE mark_status SET status='已匹配-计提'
+               WHERE seq IN (SELECT positive_seq FROM mark_direct);
+             UPDATE mark_status SET status='已匹配-冲销'
+               WHERE seq IN (SELECT negative_seq FROM mark_direct);",
+        ).map_err(sql_error)?;
+        let direct_pairs = self
+            .db
+            .query_row("SELECT COUNT(*) FROM mark_direct", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(sql_error)? as usize;
+        check_cancel(cancel)?;
+        let allow_cross_match =
+            AmountColumns::new(&self.table.headers, &self.mapping).scheme() != "A";
+        if allow_cross_match {
+            self.db.execute_batch(
+                "DROP TABLE IF EXISTS temp.mark_cross;
+             CREATE TEMP TABLE mark_cross AS
+             WITH voucher_net AS (
+               SELECT e.account_norm,e.entity,e.voucher,SUM(e.cents) cents
+               FROM mark_eligible e JOIN mark_status s ON s.seq=e.seq
+               WHERE s.status='未匹配'
+               GROUP BY e.account_norm,e.entity,e.voucher
+               HAVING SUM(e.cents)<>0
+             ), ranked AS (
+               SELECT *,ABS(cents) amount,
+                      ROW_NUMBER() OVER(PARTITION BY account_norm,entity,ABS(cents),cents>0 ORDER BY voucher) rn
+               FROM voucher_net
+             )
+             SELECT p.account_norm,p.entity,p.voucher positive_voucher,n.voucher negative_voucher
+             FROM ranked p JOIN ranked n
+               ON p.account_norm=n.account_norm AND p.entity=n.entity
+              AND p.amount=n.amount AND p.rn=n.rn
+             WHERE p.cents>0 AND n.cents<0;
+             UPDATE mark_status SET status='跨行已匹配-计提'
+              WHERE status='未匹配' AND seq IN (
+                SELECT e.seq FROM mark_eligible e JOIN mark_cross c
+                 ON e.account_norm=c.account_norm AND e.entity=c.entity AND e.voucher=c.positive_voucher);
+             UPDATE mark_status SET status='跨行已匹配-冲销'
+              WHERE status='未匹配' AND seq IN (
+                SELECT e.seq FROM mark_eligible e JOIN mark_cross c
+                 ON e.account_norm=c.account_norm AND e.entity=c.entity AND e.voucher=c.negative_voucher);",
+            ).map_err(sql_error)?;
+        } else {
+            self.db
+                .execute_batch(
+                    "DROP TABLE IF EXISTS temp.mark_cross;
+                 CREATE TEMP TABLE mark_cross(
+                   account_norm TEXT,entity TEXT,positive_voucher TEXT,negative_voucher TEXT
+                 );",
+                )
+                .map_err(sql_error)?;
+        }
+        let cross_pairs = self
+            .db
+            .query_row("SELECT COUNT(*) FROM mark_cross", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(sql_error)? as usize;
+        let unmatched_rows = self
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM mark_status WHERE status='未匹配'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(sql_error)? as usize;
+        Ok(MarkResult {
+            direct_pairs,
+            cross_pairs,
+            unmatched_rows,
+        })
+    }
+
+    pub(super) fn write_selected_marked_csv(
+        &self,
+        output: &Path,
+        headers: &[String],
+        progress: Progress<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<usize, AppError> {
+        use std::io::Write;
+        let partial = partial_path(output);
+        let result = (|| {
+            let mut file = File::create(&partial).map_err(io_error)?;
+            file.write_all(&[0xEF, 0xBB, 0xBF]).map_err(io_error)?;
+            let mut writer = csv::WriterBuilder::new().flexible(true).from_writer(file);
+            let output_headers = ["【辅助_绝对值】", "【辅助_符号】", "【智能匹配状态】"]
+                .into_iter()
+                .map(str::to_owned)
+                .chain(headers.iter().cloned())
+                .collect::<Vec<_>>();
+            writer.write_record(&output_headers).map_err(csv_error)?;
+            let mut statement = self
+                .db
+                .prepare(&format!(
+                    "SELECT r.data,p.fills,p.{},COALESCE(s.status,'') FROM processed p
+             JOIN raw_cache.rows r ON r.rowid=p.seq+1
+             LEFT JOIN mark_status s ON s.seq=p.seq
+             WHERE p.voucher IN (SELECT voucher FROM selected) ORDER BY p.seq",
+                    self.selected_net_column()
+                ))
+                .map_err(sql_error)?;
+            let mut cursor = statement.query([]).map_err(sql_error)?;
+            let mut written = 0usize;
+            while let Some(record) = cursor.next().map_err(sql_error)? {
+                if written % 1000 == 0 {
+                    check_cancel(cancel)?;
+                    crate::resource_budget::check_available()?;
+                    progress("write", written, self.count, "正在流式写出正负数标记结果…");
+                }
+                let data: String = record.get(0).map_err(sql_error)?;
+                let fills: String = record.get(1).map_err(sql_error)?;
+                let row = normalized_row(&data, &fills, headers.len())?;
+                let amount: f64 = record.get(2).map_err(sql_error)?;
+                let status: String = record.get(3).map_err(sql_error)?;
+                let mut output_row = Vec::with_capacity(row.len() + 3);
+                if status.is_empty() {
+                    output_row.extend([String::new(), String::new(), String::new()]);
+                } else {
+                    output_row.push(format_number(amount.abs()));
+                    output_row.push(if amount >= 0.0 {
+                        "正数".into()
+                    } else {
+                        "负数".into()
+                    });
+                    output_row.push(status);
+                }
+                output_row.extend(row);
+                writer.write_record(output_row).map_err(csv_error)?;
+                written += 1;
+            }
+            writer.flush().map_err(io_error)?;
+            drop(writer);
+            replace_file(&partial, output)?;
+            Ok(written)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&partial);
+        }
+        result
+    }
+
+    pub(super) fn visit_processed(
+        &self,
+        selected_only: bool,
+        cancel: &AtomicBool,
+        visit: impl FnMut(ProcessedRow) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        self.visit_processed_limit(selected_only, None, cancel, visit)
+    }
+
+    pub(super) fn visit_processed_limit(
+        &self,
+        selected_only: bool,
+        limit: Option<usize>,
+        cancel: &AtomicBool,
+        visit: impl FnMut(ProcessedRow) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        self.visit_processed_ordered(selected_only, limit, "p.seq", cancel, visit)
+    }
+
+    pub(super) fn visit_processed_by_voucher(
+        &self,
+        selected_only: bool,
+        cancel: &AtomicBool,
+        visit: impl FnMut(ProcessedRow) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        // Keep every voucher contiguous while preserving the order in which vouchers
+        // first appeared in the source. Business outputs rely on that stable source order.
+        self.visit_processed_ordered(
+            selected_only,
+            None,
+            "MIN(p.seq) OVER (PARTITION BY p.voucher),p.seq",
+            cancel,
+            visit,
+        )
+    }
+
+    fn visit_processed_ordered(
+        &self,
+        selected_only: bool,
+        limit: Option<usize>,
+        order_by: &str,
+        cancel: &AtomicBool,
+        mut visit: impl FnMut(ProcessedRow) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        let filter = if selected_only {
+            "WHERE voucher IN (SELECT voucher FROM selected)"
+        } else {
+            ""
+        };
+        let limit = limit
+            .map(|value| format!(" LIMIT {value}"))
+            .unwrap_or_default();
+        let sql = format!(
+            "SELECT p.seq,r.data,p.fills,p.voucher,p.account,p.entity,p.dr,p.cr,p.{}
+             FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 {filter} ORDER BY {order_by}{limit}",
+            self.selected_net_column(),
+        );
+        let mut statement = self.db.prepare(&sql).map_err(sql_error)?;
+        let mut cursor = statement.query([]).map_err(sql_error)?;
+        let mut index = 0usize;
+        while let Some(record) = cursor.next().map_err(sql_error)? {
+            if index % 1000 == 0 {
+                check_cancel(cancel)?;
+                crate::resource_budget::check_available()?;
+            }
+            index += 1;
+            let data: String = record.get(1).map_err(sql_error)?;
+            let fills: String = record.get(2).map_err(sql_error)?;
+            let raw_debit: f64 = record.get(6).map_err(sql_error)?;
+            let raw_credit: f64 = record.get(7).map_err(sql_error)?;
+            let net: f64 = record.get(8).map_err(sql_error)?;
+            let (debit, credit) =
+                if AmountColumns::new(&self.table.headers, &self.mapping).scheme() == "single" {
+                    if net >= 0.0 { (net, 0.0) } else { (0.0, -net) }
+                } else if self.selected_convention.get() == SignConvention::Signed {
+                    (raw_debit, -raw_credit)
+                } else {
+                    (raw_debit, raw_credit)
+                };
+            visit(ProcessedRow {
+                values: normalized_row(&data, &fills, self.table.headers.len())?,
+                source_row: record.get::<_, i64>(0).map_err(sql_error)? as usize + 1,
+                voucher: record.get(3).map_err(sql_error)?,
+                account: record.get(4).map_err(sql_error)?,
+                entity: record.get(5).map_err(sql_error)?,
+                debit,
+                credit,
+                net,
+            })?;
+        }
+        Ok(())
+    }
+
     fn entity_is_unit(&self, selected: bool, cancel: &AtomicBool) -> Result<bool, AppError> {
         let Some(ref name) = self.mapping.entity else {
             return Ok(false);
@@ -1101,14 +1581,14 @@ mod tests {
     }
 
     #[test]
-    fn prepared_cache_reuses_indexes_and_reads_rows_from_raw_cache() {
+    fn prepared_cache_reuses_indexes_and_preserves_normalized_rows() {
         let root =
             std::env::temp_dir().join(format!("disk-ledger-cache-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let input = root.join("source.csv");
         fs::write(
             &input,
-            "凭证号,科目,借方,贷方\n001,现金,100,0\n001,收入,0,100\n002,银行,40,0\n002,费用,0,40\n",
+            "凭证号,科目,借方,贷方\n001,现金,100,0\n,收入,0,100\n002,银行,40,0\n,费用,0,40\n",
         )
         .unwrap();
         let source = SourceParams {
@@ -1142,15 +1622,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(first.count, 4);
-        let data_columns: i64 = first
+        let fill_columns: i64 = first
             .db
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('processed') WHERE name='data'",
+                "SELECT COUNT(*) FROM pragma_table_info('processed') WHERE name='fills'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(data_columns, 0, "分析缓存不应重复保存整行 JSON");
+        assert_eq!(fill_columns, 1, "公共分析缓存应只保存向下填充的差异");
+        let mut normalized_vouchers = Vec::new();
+        first
+            .visit_processed(false, &cancel, |row| {
+                normalized_vouchers.push((row.values[0].clone(), row.voucher));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            normalized_vouchers,
+            [
+                ("001".into(), "001".into()),
+                ("001".into(), "001".into()),
+                ("002".into(), "002".into()),
+                ("002".into(), "002".into())
+            ]
+        );
         drop(first);
 
         let second_messages = RefCell::new(Vec::new());
@@ -1186,6 +1682,120 @@ mod tests {
         let raw_path = cache.path.clone();
         drop(cache);
         let _ = fs::remove_file(prepared_path);
+        let _ = fs::remove_file(raw_path);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disk_mark_matches_direct_and_cross_voucher_offsets() {
+        let root = std::env::temp_dir().join(format!("disk-mark-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("source.csv");
+        fs::write(
+            &input,
+            "凭证号,科目,借方,贷方\n001,目标,100,0\n,现金,0,100\n002,目标,0,100\n,现金,100,0\n003,目标,30,0\n,目标,20,0\n,现金,0,50\n004,目标,0,50\n,现金,50,0\n",
+        ).unwrap();
+        let source = SourceParams {
+            input_path: input.to_string_lossy().into_owned(),
+            sheet: None,
+            header_row: 1,
+        };
+        let cancel = AtomicBool::new(false);
+        let cache = large_csv::load(&source, &|_, _, _, _| {}, &cancel).unwrap();
+        let mapping = LedgerMapping {
+            id: vec!["凭证号".into()],
+            account_name: vec!["科目".into()],
+            debit: Some("借方".into()),
+            credit: Some("贷方".into()),
+            ..Default::default()
+        };
+        let ledger = prepare(
+            &cache,
+            &mapping,
+            Some(SignConvention::Unsigned),
+            1,
+            &|_, _, _, _| {},
+            &cancel,
+        )
+        .unwrap();
+        ledger.select(&["目标".into()], &cancel).unwrap();
+        ledger
+            .set_selected_convention(SignConvention::Unsigned)
+            .unwrap();
+        let result = ledger.mark_selected_offsets(&cancel).unwrap();
+        assert_eq!(result.direct_pairs, 1);
+        assert_eq!(result.cross_pairs, 1);
+        assert_eq!(result.unmatched_rows, 0);
+        let statuses = ledger
+            .db
+            .prepare("SELECT status FROM mark_status ORDER BY seq")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            statuses,
+            [
+                "已匹配-计提",
+                "已匹配-冲销",
+                "跨行已匹配-计提",
+                "跨行已匹配-计提",
+                "跨行已匹配-冲销",
+            ]
+        );
+        drop(ledger);
+        let raw_path = cache.path.clone();
+        drop(cache);
+        let _ = fs::remove_file(raw_path);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn amount_direction_mark_does_not_cross_match_vouchers() {
+        let root =
+            std::env::temp_dir().join(format!("disk-mark-direction-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("source.csv");
+        fs::write(
+            &input,
+            "凭证号,科目,金额,方向\n001,目标,30,借\n,目标,20,借\n,现金,50,贷\n002,目标,50,贷\n,现金,50,借\n",
+        )
+        .unwrap();
+        let source = SourceParams {
+            input_path: input.to_string_lossy().into_owned(),
+            sheet: None,
+            header_row: 1,
+        };
+        let cancel = AtomicBool::new(false);
+        let cache = large_csv::load(&source, &|_, _, _, _| {}, &cancel).unwrap();
+        let mapping = LedgerMapping {
+            id: vec!["凭证号".into()],
+            account_name: vec!["科目".into()],
+            amount: Some("金额".into()),
+            direction: Some("方向".into()),
+            ..Default::default()
+        };
+        let ledger = prepare(
+            &cache,
+            &mapping,
+            Some(SignConvention::Unsigned),
+            1,
+            &|_, _, _, _| {},
+            &cancel,
+        )
+        .unwrap();
+        ledger.select(&["目标".into()], &cancel).unwrap();
+        ledger
+            .set_selected_convention(SignConvention::Unsigned)
+            .unwrap();
+        let result = ledger.mark_selected_offsets(&cancel).unwrap();
+        assert_eq!(result.direct_pairs, 0);
+        assert_eq!(result.cross_pairs, 0);
+        assert_eq!(result.unmatched_rows, 3);
+        drop(ledger);
+        let raw_path = cache.path.clone();
+        drop(cache);
         let _ = fs::remove_file(raw_path);
         fs::remove_dir_all(root).unwrap();
     }

@@ -2395,6 +2395,117 @@ pub(crate) struct LedgerRowAnalysis {
     pub(crate) invalid_account_code_rows: Vec<(usize, String)>,
 }
 
+/// 正文行的**单行**判定，与整表版 [`analyze_ledger_rows`] 同一份口径。
+///
+/// 大 CSV 走流式逐行处理，拿不到全表——表尾倒扫得先知道最后一行在哪——只能
+/// 执行行内可判的两条：有钱没身份的游离行、以及业务行协议（编码＋名称＋可解析
+/// 金额三项齐备）。整表版额外做的表尾倒扫与编码语法校验这里没有，流式路径的
+/// 表尾噪声靠业务行协议兜住（表尾草稿行三项必有缺）。
+pub(crate) struct LedgerBodyRule {
+    identity: Vec<usize>,
+    amount: Vec<usize>,
+    code: Vec<usize>,
+    name: Vec<usize>,
+    je_amounts: Vec<usize>,
+    boundary: bool,
+}
+
+impl LedgerBodyRule {
+    pub(crate) fn new(
+        headers: &[String],
+        column_of: &dyn Fn(&str) -> Vec<String>,
+    ) -> LedgerBodyRule {
+        let indexes = |roles: &[&str]| {
+            let mut v = roles
+                .iter()
+                .flat_map(|role| column_of(role))
+                .filter_map(|name| header_index(headers, &name))
+                .collect::<Vec<_>>();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let identity = indexes(IDENTITY_ROLES);
+        let amount = indexes(&[TB_AMOUNT_ROLES, JE_AMOUNT_ROLES].concat());
+        let mut code = indexes(&["accountCode"]);
+        let mut name = indexes(&["accountName"]);
+        let legacy = indexes(&["account"]);
+        if code.is_empty() {
+            code.extend(legacy.first().copied());
+        }
+        if name.is_empty() {
+            name.extend(legacy.iter().skip(1).copied());
+        }
+        let je_amounts = indexes(JE_AMOUNT_ROLES);
+        // 业务行协议只有 JE 三类必要角色都已映射时才启用——TB 也共用这套判定，
+        // 不能拿 JE 的协议去截余额表。是否属于 JE 只看映射列：科目编码、科目名称
+        // 和至少一个可解析金额三项齐备才纳入；凭证号、备注、任意其他列有值都
+        // 不能把残留行放进正文。
+        let boundary = !code.is_empty() && !name.is_empty() && !je_amounts.is_empty();
+        LedgerBodyRule {
+            identity,
+            amount,
+            code,
+            name,
+            je_amounts,
+            boundary,
+        }
+    }
+
+    /// 该行是否属于账表正文。身份列都没映射时无从判断，一律算正文。
+    pub(crate) fn is_body(&self, row: &[String]) -> bool {
+        if self.identity.is_empty() {
+            return true;
+        }
+        if self.boundary {
+            return self.has_field(row, &self.code)
+                && self.has_field(row, &self.name)
+                && self.has_parseable_je_amount(row);
+        }
+        self.has_identity(row) || !self.has_amount(row)
+    }
+
+    /// 合计标签不是身份。各家把「合计」写在哪一列全凭喜好——10 号样例写在日期列，
+    /// 07 号样例写在科目编码列。认它作身份，表尾倒扫就会停在合计行上，
+    /// 后面那串手工草稿反而留下来了。
+    fn has_identity(&self, row: &[String]) -> bool {
+        self.identity.iter().any(|index| {
+            row.get(*index).map(|v| v.trim()).is_some_and(|v| {
+                !v.is_empty()
+                    && !is_formula_error(v)
+                    && !is_rollup_label(v)
+                    && !is_report_footer_value(v)
+            })
+        })
+    }
+
+    fn has_amount(&self, row: &[String]) -> bool {
+        self.amount.iter().any(|index| {
+            row.get(*index)
+                .and_then(|v| parse_amount(v).ok().flatten())
+                .is_some_and(|v| v.abs() > 0.005)
+        })
+    }
+
+    fn has_field(&self, row: &[String], positions: &[usize]) -> bool {
+        positions.iter().any(|index| {
+            row.get(*index)
+                .map(|value| value.trim())
+                .is_some_and(|value| {
+                    !value.is_empty() && !is_formula_error(value) && !is_rollup_label(value)
+                })
+        })
+    }
+
+    fn has_parseable_je_amount(&self, row: &[String]) -> bool {
+        self.je_amounts.iter().any(|index| {
+            row.get(*index).is_some_and(|value| {
+                !value.trim().is_empty() && parse_amount(value).is_ok_and(|amount| amount.is_some())
+            })
+        })
+    }
+}
+
 /// 分析序时账正文边界与必要字段完整性。
 ///
 /// 整行全空才构成正文分隔符。出现分隔符后，只有同时具备科目编码、科目名称和
@@ -2406,112 +2517,31 @@ pub(crate) fn analyze_ledger_rows(
     rows: &[Vec<String>],
     column_of: &dyn Fn(&str) -> Vec<String>,
 ) -> LedgerRowAnalysis {
-    let indexes = |roles: &[&str]| {
-        let mut v = roles
-            .iter()
-            .flat_map(|role| column_of(role))
-            .filter_map(|name| header_index(headers, &name))
-            .collect::<Vec<_>>();
-        v.sort_unstable();
-        v.dedup();
-        v
-    };
-    let identity_indexes = indexes(IDENTITY_ROLES);
-    let amount_indexes = indexes(&[TB_AMOUNT_ROLES, JE_AMOUNT_ROLES].concat());
-    let je_amount_indexes = indexes(JE_AMOUNT_ROLES);
-    let mut account_code_indexes = indexes(&["accountCode"]);
-    let mut account_name_indexes = indexes(&["accountName"]);
-    // 兼容历史映射：旧版把编码与名称依次放进 `account` 多列角色。
-    let legacy_account_indexes = indexes(&["account"]);
-    if account_code_indexes.is_empty() {
-        account_code_indexes.extend(legacy_account_indexes.first().copied());
-    }
-    if account_name_indexes.is_empty() {
-        account_name_indexes.extend(legacy_account_indexes.iter().skip(1).copied());
-    }
+    let rule = LedgerBodyRule::new(headers, column_of);
     // 身份列都没映射就无从判断，一行不删。
-    if identity_indexes.is_empty() {
+    if rule.identity.is_empty() {
         return LedgerRowAnalysis {
             keep: vec![true; rows.len()],
             invalid_account_code_rows: Vec::new(),
         };
     }
-    // 合计标签不是身份。各家把「合计」写在哪一列全凭喜好——10 号样例写在日期列，
-    // 07 号样例写在科目编码列。认它作身份，表尾倒扫就会停在合计行上，
-    // 后面那串手工草稿反而留下来了。
-    let has_identity = |row: &Vec<String>| {
-        identity_indexes.iter().any(|index| {
-            row.get(*index).map(|v| v.trim()).is_some_and(|v| {
-                !v.is_empty()
-                    && !is_formula_error(v)
-                    && !is_rollup_label(v)
-                    && !is_report_footer_value(v)
-            })
-        })
-    };
-    let has_amount = |row: &Vec<String>| {
-        amount_indexes.iter().any(|index| {
-            row.get(*index)
-                .and_then(|v| parse_amount(v).ok().flatten())
-                .is_some_and(|v| v.abs() > 0.005)
-        })
-    };
-
     let mut keep = rows
         .iter()
-        .map(|row| has_identity(row) || !has_amount(row))
+        .map(|row| rule.is_body(row))
         .collect::<Vec<bool>>();
     // 表尾噪声：倒着扫到第一个有身份的行就停手。
     for index in (0..rows.len()).rev() {
-        if has_identity(&rows[index]) {
+        if rule.has_identity(&rows[index]) {
             break;
         }
         keep[index] = false;
     }
 
-    let has_field = |row: &[String], positions: &[usize]| {
-        positions.iter().any(|index| {
-            row.get(*index)
-                .map(|value| value.trim())
-                .is_some_and(|value| {
-                    !value.is_empty() && !is_formula_error(value) && !is_rollup_label(value)
-                })
-        })
-    };
-    let has_parseable_je_amount = |row: &[String]| {
-        je_amount_indexes.iter().any(|index| {
-            row.get(*index).is_some_and(|value| {
-                !value.trim().is_empty() && parse_amount(value).is_ok_and(|amount| amount.is_some())
-            })
-        })
-    };
-
-    // 只有 JE 三类必要角色都已映射时才启用业务行协议。TB 也共用
-    // `ledger_junk_mask`，不能拿 JE 的业务行协议去截余额表。
-    //
-    // 是否属于 JE 只看映射列：科目编码、科目名称和至少一个可解析金额三项
-    // 齐备才纳入。凭证号、备注、任意其他列有值都不能把残留行放进正文；整行
-    // 空白仍是明确的段落分隔符，分隔后同样按这三项重新识别。
-    let boundary_enabled = !account_code_indexes.is_empty()
-        && !account_name_indexes.is_empty()
-        && !je_amount_indexes.is_empty();
-    if boundary_enabled {
-        for (index, row) in rows.iter().enumerate() {
-            if row.iter().all(|value| value.trim().is_empty()) {
-                keep[index] = false;
-                continue;
-            }
-            keep[index] = has_field(row, &account_code_indexes)
-                && has_field(row, &account_name_indexes)
-                && has_parseable_je_amount(row);
-        }
-    }
-
+    let mut invalid_account_code_rows = Vec::new();
     // 科目编码必须是含数字的 ASCII 字母数字串，可用点号或连字符分级。
     // `下·` 这类版式标签不能成为科目，更不能进入勾稽或导出；混写的
     // `1001/库存现金` 先拆出编码再校验。
-    let mut invalid_account_code_rows = Vec::new();
-    if let Some(code_index) = account_code_indexes.first().copied() {
+    if let Some(code_index) = rule.code.first().copied() {
         for (index, row) in rows.iter().enumerate() {
             if !keep.get(index).copied().unwrap_or(false) {
                 continue;

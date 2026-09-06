@@ -52,10 +52,7 @@ pub(crate) fn read_rows(path: &Path) -> Result<Vec<Vec<String>>, AppError> {
 
 /// 只读取文件开头的若干条记录，供超大文本表格识别表头和字段映射。
 /// CSV 引号中的换行仍按一条记录处理；达到上限后立即停止，不扫描文件尾部。
-pub(crate) fn read_rows_limited(
-    path: &Path,
-    limit: usize,
-) -> Result<Vec<Vec<String>>, AppError> {
+pub(crate) fn read_rows_limited(path: &Path, limit: usize) -> Result<Vec<Vec<String>>, AppError> {
     let mut rows = Vec::with_capacity(limit);
     text_rows_with_budget(
         path,
@@ -394,10 +391,8 @@ mod tests {
 
     #[test]
     fn limited_text_read_stops_after_complete_csv_records() {
-        let root = std::env::temp_dir().join(format!(
-            "spreadsheet-limited-read-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("spreadsheet-limited-read-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("large.csv");
         fs::write(

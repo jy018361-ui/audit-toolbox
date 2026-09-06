@@ -1259,9 +1259,7 @@ fn distinct_accounts(table: &FxTable, mapping: &Map<String, Value>) -> Vec<Strin
         .rows
         .iter()
         .map(|row| join_columns(row, &indexes))
-        .filter(|value| {
-            !value.is_empty() && !ledger_mapping::is_report_footer_value(value)
-        })
+        .filter(|value| !value.is_empty() && !ledger_mapping::is_report_footer_value(value))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .take(1000)
@@ -1562,7 +1560,9 @@ fn calculate(
 
     // 逐月发生额：有序时账就按日期还原，没有序时账就退回期初/期末两点法。
     progress("movement", 2, total, "正在按序时账还原逐月余额变动…");
-    let detected = monthly_movements(params, &accounts, start, end)?;
+    let detected = monthly_movements(
+        params, &accounts, start, end, cancel, pause, progress, total,
+    )?;
     let has_je = detected.is_some();
     let amount_scheme = detected
         .as_ref()
@@ -1860,9 +1860,57 @@ fn monthly_movements(
     accounts: &[AccountRow],
     start: NaiveDate,
     end: NaiveDate,
+    cancel: &AtomicBool,
+    pause: &PauseCheckpoint,
+    progress: &dyn Fn(&str, usize, usize, &str),
+    total: usize,
 ) -> Result<Option<(MonthlySeries, String, String)>, AppError> {
     if params.get("jeSource").is_none_or(Value::is_null) {
         return Ok(None);
+    }
+    let spec: SourceSpec = serde_json::from_value(
+        params.get("jeSource").cloned().unwrap_or(Value::Null),
+    )
+    .map_err(|e| {
+        error(
+            "MISSING_SOURCE",
+            "缺少 jeSource 数据源或参数不完整。",
+            Some(e.to_string()),
+        )
+    })?;
+    let je_map = params
+        .get("jeMapping")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let path = PathBuf::from(&spec.input_path);
+    if crate::tabular::disk_ledger_applies(&path) {
+        require_mappings("je", &je_map, false)?;
+        let disk_progress = |_: &str, current: usize, inner_total: usize, message: &str| {
+            let percent = if inner_total == 0 {
+                0
+            } else {
+                current.saturating_mul(100) / inner_total
+            };
+            progress(
+                "movement",
+                2,
+                total,
+                &format!("{message}（磁盘处理 {percent}%）"),
+            );
+        };
+        let ledger = crate::tabular::open_prepared_disk_ledger(
+            &path,
+            spec.header_row.max(1),
+            spec.header_depth.max(1),
+            &je_map,
+            &disk_progress,
+            cancel,
+        )?;
+        return aggregate_disk_monthly(
+            &ledger, &je_map, accounts, start, end, cancel, pause, progress, total,
+        )
+        .map(Some);
     }
     let (je, je_map) = table_for(params, "jeSource", "jeMapping")?;
     // 抽样表只解析了开头若干行，拿它还原逐月余额会得到一份看似完整、
@@ -1978,6 +2026,180 @@ fn monthly_movements(
         ));
     }
     Ok(Some((series, scheme.label(), scheme.evidence.clone())))
+}
+
+/// 大 CSV 的序时账只在 SQLite 规范化缓存上顺序扫描一次。账户清单和最终
+/// 12 个月汇总留在内存；原始 JE 行、向下填充副本和凭证分组均不进入本进程。
+fn aggregate_disk_monthly(
+    ledger: &crate::tabular::PreparedDiskLedger,
+    mapping: &Map<String, Value>,
+    accounts: &[AccountRow],
+    start: NaiveDate,
+    end: NaiveDate,
+    cancel: &AtomicBool,
+    pause: &PauseCheckpoint,
+    progress: &dyn Fn(&str, usize, usize, &str),
+    total: usize,
+) -> Result<(MonthlySeries, String, String), AppError> {
+    let headers = ledger.headers();
+    let indexes = |role: &str| -> Vec<usize> {
+        let columns = match mapping.get(role) {
+            Some(Value::String(value)) => vec![value.as_str()],
+            Some(Value::Array(values)) => values.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        columns
+            .into_iter()
+            .filter_map(|column| headers.iter().position(|header| header == column))
+            .collect()
+    };
+    let date_index = indexes("date").first().copied().ok_or_else(|| {
+        error(
+            "MAPPING_INCOMPLETE",
+            "序时账尚未映射记账日期，无法还原逐月余额。",
+            None,
+        )
+    })?;
+    let mut account_cols = indexes("accountCode");
+    for index in indexes("accountName") {
+        if !account_cols.contains(&index) {
+            account_cols.push(index);
+        }
+    }
+    if account_cols.is_empty() {
+        account_cols = indexes("account");
+    }
+    account_cols.sort_unstable();
+    if account_cols.is_empty() {
+        return Err(error(
+            "MAPPING_INCOMPLETE",
+            "序时账尚未映射科目编码/名称。",
+            None,
+        ));
+    }
+    let entity_index = indexes("entity").first().copied();
+    let auxiliary_index = indexes("auxiliary").first().copied();
+
+    let mut by_account: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut by_code: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, account) in accounts.iter().enumerate() {
+        by_account
+            .entry(normalize_header(&account.account))
+            .or_default()
+            .push(index);
+        by_code
+            .entry(account_code(&account.account).to_owned())
+            .or_default()
+            .push(index);
+    }
+    let mut series: MonthlySeries = accounts
+        .iter()
+        .map(|account| (account.key.clone(), [(0.0, 0.0); 12]))
+        .collect();
+    let mut matched = 0usize;
+    let mut visited = 0usize;
+    let row_count = ledger.row_count();
+    ledger.visit(false, cancel, |row| {
+        visited += 1;
+        if visited % 10_000 == 0 {
+            checkpoint(cancel, pause)?;
+        }
+        if visited % 50_000 == 0 {
+            progress(
+                "movement",
+                2,
+                total,
+                &format!(
+                    "正在从磁盘汇总序时账月度发生额…已处理 {} / {} 行",
+                    visited, row_count
+                ),
+            );
+        }
+        let Some(date) = row
+            .values
+            .get(date_index)
+            .and_then(|value| parse_date(value))
+        else {
+            return Ok(());
+        };
+        if date < start || date > end {
+            return Ok(());
+        }
+        let account = join_columns(&row.values, &account_cols);
+        if account.is_empty() {
+            return Ok(());
+        }
+        let code = account_code(&account);
+        let hits = by_account
+            .get(&normalize_header(&account))
+            .or_else(|| by_code.get(code))
+            .cloned()
+            .unwrap_or_default();
+        if hits.is_empty() {
+            return Ok(());
+        }
+        let entity = entity_index
+            .and_then(|index| row.values.get(index))
+            .map(|value| value.trim())
+            .unwrap_or("");
+        let auxiliary = auxiliary_index
+            .and_then(|index| row.values.get(index))
+            .map(|value| value.trim())
+            .unwrap_or("");
+        let target = hits
+            .iter()
+            .find(|index| {
+                let candidate = &accounts[**index];
+                (entity.is_empty() || candidate.entity.is_empty() || candidate.entity == entity)
+                    && (auxiliary.is_empty()
+                        || candidate.auxiliary.is_empty()
+                        || candidate.auxiliary == auxiliary)
+            })
+            .copied()
+            .or_else(|| (hits.len() == 1).then(|| hits[0]));
+        let Some(target) = target else { return Ok(()) };
+        if row.net == 0.0 {
+            return Ok(());
+        }
+        let (debit, credit) = if row.net < 0.0 {
+            (0.0, -row.net)
+        } else {
+            (row.net, 0.0)
+        };
+        matched += 1;
+        let slot = &mut series.get_mut(&accounts[target].key).unwrap()[(date.month() - 1) as usize];
+        slot.0 += debit;
+        slot.1 += credit;
+        Ok(())
+    })?;
+    checkpoint(cancel, pause)?;
+    if matched == 0 {
+        return Err(error(
+            "NO_JE_MATCH",
+            "序时账中没有任何行匹配到 TB 的货币资金科目；请检查科目映射或改用不含序时账的两点法。",
+            None,
+        ));
+    }
+
+    let convention = ledger.convention();
+    let layout =
+        if !indexes("functionalDebit").is_empty() && !indexes("functionalCredit").is_empty() {
+            "借贷分列"
+        } else if !indexes("functionalAmount").is_empty() && !indexes("direction").is_empty() {
+            "金额＋方向列"
+        } else {
+            "单一金额列"
+        };
+    let scheme = format!(
+        "{layout}，{}",
+        if convention == ledger_mapping::SignConvention::Signed {
+            "数值已带符号（借正贷负）"
+        } else {
+            "借贷符号一样（靠分列/方向区分）"
+        }
+    );
+    let evidence = ledger.amount_evidence(cancel)?;
+    Ok((series, scheme, evidence))
 }
 
 /// 序时账金额口径。直接复用看账小工具的 `sign_evidence`：它把 JE 的金额
@@ -3182,7 +3404,10 @@ mod tests {
             suggest_account_role("6051050000 其他业务收入-材料销售"),
             "excluded"
         );
-        assert_eq!(suggest_account_role("6051080000 其他业务收入-水"), "excluded");
+        assert_eq!(
+            suggest_account_role("6051080000 其他业务收入-水"),
+            "excluded"
+        );
         assert_eq!(
             suggest_account_role("6051.01 其他业务收入_手续费收入"),
             "excluded"
@@ -4733,6 +4958,99 @@ mod tests {
         );
         assert!(row["reconciliationDiff"].as_f64().unwrap().abs() < 0.01);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 小型csv强制磁盘月度聚合与内存路径等价() {
+        let dir = std::env::temp_dir().join(format!(
+            "deposit-disk-equivalence-{}-{}",
+            std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("je.csv");
+        std::fs::write(
+            &path,
+            concat!(
+                "记账日期,凭证号,核算主体,科目编码,科目名称,辅助核算,摘要,借方金额,贷方金额\n",
+                "2025-01-15,记-1,公司A,1002,银行存款,工行,收款,100,0\n",
+                ",,,6001,主营业务收入,,收款,0,100\n",
+                "2025-01-20,记-2,公司A,1002,银行存款,工行,付款,0,30\n",
+                ",,,6603,财务费用,,付款,30,0\n",
+                "2025-02-01,记-3,公司A,1002,银行存款,工行,收款,25,0\n",
+                ",,,6001,主营业务收入,,收款,0,25\n"
+            ),
+        )
+        .unwrap();
+        let mapping = json!({
+            "date": "记账日期",
+            "id": "凭证号",
+            "entity": "核算主体",
+            "accountCode": "科目编码",
+            "accountName": ["科目名称"],
+            "auxiliary": "辅助核算",
+            "summary": "摘要",
+            "functionalDebit": "借方金额",
+            "functionalCredit": "贷方金额"
+        });
+        let params = json!({
+            "jeSource": {"inputPath": path.to_string_lossy(), "headerRow": 1},
+            "jeMapping": mapping
+        });
+        let mut account = blank_row();
+        account.entity = "公司A".into();
+        account.account = "1002 银行存款".into();
+        account.auxiliary = "工行".into();
+        account.key = account_key(&account.entity, &account.account, &account.auxiliary);
+        let accounts = vec![account];
+        let start = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        let end = NaiveDate::from_ymd_opt(2025, 12, 31).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let memory = monthly_movements(
+            &params,
+            &accounts,
+            start,
+            end,
+            &cancel,
+            &pause,
+            &|_, _, _, _| {},
+            3,
+        )
+        .unwrap()
+        .unwrap();
+
+        // 生产分支仅在动态策略选中大文件时调用；测试直接打开同一小文件，
+        // 以低成本锁定磁盘规范化与原内存口径逐项一致。
+        let mapping = params["jeMapping"].as_object().unwrap().clone();
+        let ledger = crate::tabular::open_prepared_disk_ledger(
+            &path,
+            1,
+            1,
+            &mapping,
+            &|_, _, _, _| {},
+            &cancel,
+        )
+        .unwrap();
+        let disk = aggregate_disk_monthly(
+            &ledger,
+            &mapping,
+            &accounts,
+            start,
+            end,
+            &cancel,
+            &pause,
+            &|_, _, _, _| {},
+            3,
+        )
+        .unwrap();
+        assert_eq!(disk.1, memory.1, "金额方案说明必须保持一致");
+        assert_eq!(disk.2, memory.2, "金额口径证据必须保持一致");
+        let key = &accounts[0].key;
+        assert_eq!(disk.0[key], memory.0[key]);
+        assert_eq!(disk.0[key][0], (100.0, 30.0));
+        assert_eq!(disk.0[key][1], (25.0, 0.0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

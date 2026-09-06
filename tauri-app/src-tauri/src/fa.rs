@@ -4044,7 +4044,9 @@ fn correction_warnings(result: &MergeResult, params: &Value) -> Vec<String> {
             };
             let original = mapped_number(result, &row, params, side, "originalValue");
             let raw_residual = mapped_number(result, &row, params, side, "residualRate");
-            if residual_is_amount && original.abs() > f64::EPSILON && raw_residual.abs() > f64::EPSILON
+            if residual_is_amount
+                && original.abs() > f64::EPSILON
+                && raw_residual.abs() > f64::EPSILON
             {
                 residual_from_amount += 1;
             } else if raw_residual > 1.0 {
@@ -7923,11 +7925,7 @@ mod tests {
         assert_eq!(output["stats"]["unmatchedDisposal"], 0);
         // 合并预览不再回传明细行，改回变动汇总（类别为列、数值为数字）。
         let summary_columns = output["summary"]["columns"].as_array().unwrap();
-        assert!(
-            summary_columns
-                .iter()
-                .any(|c| c.as_str() == Some("运输"))
-        );
+        assert!(summary_columns.iter().any(|c| c.as_str() == Some("运输")));
         assert!(
             output["summary"]["rows"]
                 .as_array()

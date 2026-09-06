@@ -560,6 +560,84 @@ impl Cache {
         Ok(())
     }
 
+    pub fn column_values(
+        &self,
+        field: &str,
+        keyword: &str,
+        limit: usize,
+        cancel: &AtomicBool,
+    ) -> Result<(Vec<String>, usize), AppError> {
+        let index = header_index(&self.table.headers, field).ok_or_else(|| {
+            error(
+                "COLUMN_NOT_FOUND",
+                "筛选字段不存在。",
+                Some(field.to_owned()),
+            )
+        })?;
+        let identity = hex::encode(Sha256::digest(field.as_bytes()));
+        let name = format!("column_values_v1_{identity}");
+        let exists: bool = self
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name=?1)",
+                [&name],
+                |row| row.get(0),
+            )
+            .map_err(sql_error)?;
+        if !exists {
+            let transaction = self.db.unchecked_transaction().map_err(sql_error)?;
+            transaction
+                .execute_batch(&format!(
+                    "CREATE TABLE {name}(value TEXT PRIMARY KEY COLLATE BINARY);"
+                ))
+                .map_err(sql_error)?;
+            let mut insert = transaction
+                .prepare(&format!("INSERT OR IGNORE INTO {name} VALUES(?1)"))
+                .map_err(sql_error)?;
+            self.visit(None, cancel, |row, _| {
+                let value = row.get(index).map(|value| value.trim()).unwrap_or("");
+                insert
+                    .execute([if value.is_empty() {
+                        BLANK_VALUE_TOKEN
+                    } else {
+                        value
+                    }])
+                    .map_err(sql_error)?;
+                Ok(())
+            })?;
+            drop(insert);
+            check_cancel(cancel)?;
+            transaction.commit().map_err(sql_error)?;
+        }
+        let lower = keyword.trim().to_lowercase();
+        let mut statement = self
+            .db
+            .prepare(&format!(
+                "SELECT value FROM {name} ORDER BY value COLLATE BINARY"
+            ))
+            .map_err(sql_error)?;
+        let mut cursor = statement.query([]).map_err(sql_error)?;
+        let mut values = Vec::with_capacity(limit.min(20_000));
+        let mut total = 0usize;
+        let mut scanned = 0usize;
+        while let Some(record) = cursor.next().map_err(sql_error)? {
+            if scanned % 1000 == 0 {
+                check_cancel(cancel)?;
+                crate::resource_budget::check_available()?;
+            }
+            scanned += 1;
+            let value: String = record.get(0).map_err(sql_error)?;
+            if !lower.is_empty() && !value.to_lowercase().contains(&lower) {
+                continue;
+            }
+            total += 1;
+            if values.len() < limit {
+                values.push(value);
+            }
+        }
+        Ok((values, total))
+    }
+
     pub fn accounts(
         &self,
         mapping: &LedgerMapping,

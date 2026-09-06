@@ -1380,6 +1380,51 @@ fn infer_xlsx_header_layout(all: &[XlsxSampleRow]) -> (usize, usize, Vec<(usize,
     (best.0, best.1, row_scores)
 }
 
+/// 供看账等公共账表入口复用的 OOXML 轻量标题探测。
+///
+/// `calamine::worksheet_range` 会先物化整张工作表；对只想查看表头的调用者，
+/// 直接从 zip 中流式解压到前若干个 `</row>`，可避免在正式读取前把大表完整
+/// 解压一次。这里只返回标题行，正式读取仍由公共 Parquet 缓存入口完成。
+pub(crate) fn lightweight_xlsx_header_row(
+    path: &Path,
+    requested_sheet: Option<&str>,
+) -> Result<(String, usize), AppError> {
+    let sheets = xlsx_sheet_entries(path)?;
+    let shared = xlsx_shared_strings(path);
+    let date_styles = xlsx_date_styles(path);
+    let epoch_1904 = xlsx_uses_1904_epoch(path);
+    let selected =
+        requested_sheet.and_then(|requested| sheets.iter().find(|(name, _)| name == requested));
+    let mut best: Option<(String, Vec<XlsxSampleRow>, f64)> = None;
+    for (name, entry) in selected
+        .into_iter()
+        .chain(sheets.iter())
+        .take(if selected.is_some() { 1 } else { sheets.len() })
+    {
+        let prefix = xlsx_sheet_prefix(path, entry, 32)?;
+        let (total_rows, width) = xlsx_dimension(&prefix);
+        let rows = xlsx_sample_rows(&prefix, &shared, width, &date_styles, epoch_1904);
+        if rows.is_empty() {
+            continue;
+        }
+        let compact = rows
+            .iter()
+            .take(30)
+            .map(|row| row.cells.clone())
+            .collect::<Vec<_>>();
+        let header = (0..compact.len())
+            .map(|index| ledger_mapping::header_row_score(&compact, index))
+            .fold(0.0_f64, f64::max);
+        let score = ledger_mapping::sheet_score(header, total_rows, name);
+        if best.as_ref().is_none_or(|(_, _, current)| score > *current) {
+            best = Some((name.clone(), rows, score));
+        }
+    }
+    let (sheet, rows, _) =
+        best.ok_or_else(|| error("WORKBOOK_EMPTY", "工作簿中没有可读取的数据Sheet。", None))?;
+    Ok((sheet, infer_xlsx_header_layout(&rows).0))
+}
+
 fn load_large_xlsx_inspection(source: &SourceSpec, path: &Path) -> Result<Arc<FxTable>, AppError> {
     let sheets = xlsx_sheet_entries(path)?;
     let shared = xlsx_shared_strings(path);
@@ -1484,8 +1529,8 @@ fn load_fx_inspection_table(source: &SourceSpec) -> Result<Arc<FxTable>, AppErro
         .to_ascii_lowercase();
     let large_xlsx = matches!(extension.as_str(), "xlsx" | "xlsm")
         && fs::metadata(&path).is_ok_and(|metadata| metadata.len() >= 8 * 1024 * 1024);
-    let large_text = crate::spreadsheet_input::is_text(&path)
-        && tabular::disk_ledger_applies(&path);
+    let large_text =
+        crate::spreadsheet_input::is_text(&path) && tabular::disk_ledger_applies(&path);
     if !large_xlsx && !large_text {
         return load_fx_table(source);
     }
@@ -1520,10 +1565,7 @@ fn load_fx_inspection_table(source: &SourceSpec) -> Result<Arc<FxTable>, AppErro
 
 /// 超大 CSV 的上传识别只看文件开头，不在界面第一步就把整份文件读入内存。
 /// 正式测算会另行建立可恢复的磁盘缓存；此处只负责表头、映射和预览样本。
-fn load_large_text_inspection(
-    source: &SourceSpec,
-    path: &Path,
-) -> Result<Arc<FxTable>, AppError> {
+fn load_large_text_inspection(source: &SourceSpec, path: &Path) -> Result<Arc<FxTable>, AppError> {
     let all = crate::spreadsheet_input::read_rows_limited(path, 256)?;
     if all.is_empty() {
         return Err(error("SOURCE_EMPTY", "文件中没有可读取的数据。", None));
@@ -1535,7 +1577,11 @@ fn load_large_text_inspection(
         auto_header_row
     };
     if header_row > all.len() {
-        return Err(error("HEADER_ROW_INVALID", "标题行超出预览样本范围。", None));
+        return Err(error(
+            "HEADER_ROW_INVALID",
+            "标题行超出预览样本范围。",
+            None,
+        ));
     }
     let header_index = header_row - 1;
     let width = all.iter().map(Vec::len).max().unwrap_or(0);
@@ -4607,9 +4653,17 @@ pub(crate) fn validate_mapped_amount_values(
         })
         .collect::<Vec<_>>()
         .join("；");
+    // 首处位置折进主文案：job 失败事件只回传 user_message，留在 detail 里
+    // 用户看不到（与看账内存/磁盘路径同款措辞）。
+    let first = &issues[0];
     Err(error(
         "AMOUNT_VALUE_INVALID",
-        &format!("{label}金额列存在非空但无法解析为数值的单元格，请修正后重试。"),
+        &format!(
+            "{label}金额列「{}」第{}行的值“{}”无法解析为数值，请修正后重试。",
+            first.column,
+            table.header_row + table.header_depth + first.row_index,
+            first.value.chars().take(80).collect::<String>()
+        ),
         Some(if issues.len() > 20 {
             format!("{detail}；另有{}处未列出。", issues.len() - 20)
         } else {
@@ -6184,12 +6238,7 @@ fn calculate(
     progress("rates", 3, TOTAL_STAGES, "正在锁定官方汇率快照…");
     let snapshot = obtain_rates(params)?;
     checkpoint(cancel, pause)?;
-    progress(
-        "calculate",
-        4,
-        TOTAL_STAGES,
-        "正在执行汇兑损益测算与分类…",
-    );
+    progress("calculate", 4, TOTAL_STAGES, "正在执行汇兑损益测算与分类…");
     let mut realized = Vec::new();
     let mut unrealized = Vec::new();
     let mut classification = Vec::new();
@@ -6199,12 +6248,7 @@ fn calculate(
     // 白算一遍。改为导出前按需构造（[`build_je_detail`]）。
     let je_detail: Vec<Value> = Vec::new();
     if matches!(mode, "realized" | "combined") {
-        progress(
-            "realized",
-            4,
-            TOTAL_STAGES,
-            "正在识别并测算已实现汇兑事项…",
-        );
+        progress("realized", 4, TOTAL_STAGES, "正在识别并测算已实现汇兑事项…");
         let (calculation, classes, issues) = calculate_realized(
             params,
             &snapshot,
@@ -6255,12 +6299,7 @@ fn calculate(
         .sum::<f64>();
     let automatic_total = realized_total + unrealized_total;
     checkpoint(cancel, pause)?;
-    progress(
-        "review",
-        7,
-        TOTAL_STAGES,
-        "正在建立分类复核与账面覆盖关系…",
-    );
+    progress("review", 7, TOTAL_STAGES, "正在建立分类复核与账面覆盖关系…");
     let bridge = build_review_bridge(params, &realized, &unrealized)?;
     let classification_controls = bridge
         .get("classificationControls")
@@ -6444,12 +6483,7 @@ fn calculate(
         }));
     }
     checkpoint(cancel, pause)?;
-    progress(
-        "reconcile",
-        9,
-        TOTAL_STAGES,
-        "正在汇总并执行TB勾稽…",
-    );
+    progress("reconcile", 9, TOTAL_STAGES, "正在汇总并执行TB勾稽…");
     Ok(json!({
         "mode": mode,
         "largeJeDiskMode": params
@@ -8499,7 +8533,10 @@ fn calculate_monthly_unrealized(
             .filter_map(|item| item.get("voucherId").and_then(Value::as_str))
             .map(str::to_owned)
             .collect::<HashSet<_>>();
-        if let Some(manual) = params.get("manualClassifications").and_then(Value::as_object) {
+        if let Some(manual) = params
+            .get("manualClassifications")
+            .and_then(Value::as_object)
+        {
             ids.extend(manual.iter().filter_map(|(id, value)| {
                 (value.as_str() == Some("未实现汇兑损益")).then(|| id.clone())
             }));
@@ -12077,7 +12114,8 @@ E,2025-01-02,1,DZ,6603,汇兑损失,CNY,0,1050\n",
             ],
             missing: Vec::new(),
         };
-        let (calculation, classes, _quality) = calculate_realized(&params, &snapshot, None).unwrap();
+        let (calculation, classes, _quality) =
+            calculate_realized(&params, &snapshot, None).unwrap();
         // 一张凭证结清三张发票：逐条终止确认行重算，有几条算几条，
         // 不再因「终止确认行不恰好一条」整张推进待复核。
         assert_eq!(
@@ -12159,7 +12197,8 @@ E,2025-01-02,2,AB,6603,汇兑收益,CNY,0,-3000\n",
             ],
             missing: Vec::new(),
         };
-        let (calculation, classes, _quality) = calculate_realized(&params, &snapshot, None).unwrap();
+        let (calculation, classes, _quality) =
+            calculate_realized(&params, &snapshot, None).unwrap();
         // 外币兑换：外币现金与本位币现金对转。成交价口径（用户拍板成交价差
         // 属已实现损益）：成交价＝本位币现金腿÷外币现金腿＝718000÷100000
         // ＝7.18；账面＝100000×月初牌价7.15＝715000；资产减少方向损益＝
@@ -15216,7 +15255,10 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
         // 乙：影子科目所有币种原币都是零，归到「原币金额全为零」。
         let shadow = issue_of("2202010002", "外币凭证原币金额全为零");
         assert!(
-            shadow["detail"].as_str().unwrap_or("").contains("原币金额全部为 0"),
+            shadow["detail"]
+                .as_str()
+                .unwrap_or("")
+                .contains("原币金额全部为 0"),
             "文案只陈述原币为零的事实，不下评估调整的判语：{shadow:#}"
         );
         // 丙、丁：干净的港币户和纯本位币科目都不该被报成粒度问题。
@@ -15320,17 +15362,13 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
 
     #[test]
     fn huge_csv_inspection_reads_only_a_bounded_sample() {
-        let root = std::env::temp_dir().join(format!(
-            "fx-huge-csv-inspection-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("fx-huge-csv-inspection-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("je.csv");
         let mut text = String::from("日期,凭证号,科目编码,科目名称,币种,原币,本位币\n");
         for index in 0..300 {
-            text.push_str(&format!(
-                "2025-01-01,{index},1002,银行存款,USD,1,7.2\n"
-            ));
+            text.push_str(&format!("2025-01-01,{index},1002,银行存款,USD,1,7.2\n"));
         }
         fs::write(&path, text).unwrap();
         std::fs::OpenOptions::new()
@@ -15943,7 +15981,10 @@ E,2025-01-31,5,FX,6603,期末重估,CNY,0,-300\n",
                     );
                 }
                 Err(e) => {
-                    entry.insert("deposit".into(), serde_json::json!({"error": format!("{e:?}")}));
+                    entry.insert(
+                        "deposit".into(),
+                        serde_json::json!({"error": format!("{e:?}")}),
+                    );
                 }
             }
             match call("fx.inspect_tb", serde_json::json!({"source": src})) {
@@ -15983,7 +16024,10 @@ E,2025-01-31,5,FX,6603,期末重估,CNY,0,-300\n",
                     );
                 }
                 Err(e) => {
-                    entry.insert("kanzhang".into(), serde_json::json!({"error": format!("{e:?}")}));
+                    entry.insert(
+                        "kanzhang".into(),
+                        serde_json::json!({"error": format!("{e:?}")}),
+                    );
                 }
             }
             report.insert(name.into(), serde_json::Value::Object(entry));

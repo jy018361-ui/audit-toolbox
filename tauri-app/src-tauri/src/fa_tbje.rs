@@ -158,20 +158,20 @@ pub(crate) fn run_job(
     // worker 是一次性进程，缓存必须落盘；命中失败静默退回全量分析。
     let cache_key = analysis_cache_key(&params);
     let analysis = if method == "fa.tbje_export" {
-        if let Some(cached) = load_cached_analysis(&cache_key) {
+        if let Some(cached) = load_cached_analysis_for(&cache_key, &params) {
             progress("read", 1, 4, "复用生成预览时的分析结果…");
             checkpoint(&cancel, pause)?;
             cached
         } else {
             progress("read", 1, 4, "正在通过公共 TB/JE 引擎读取账表…");
-            let analysis = analyze(&params, &cancel)?;
-            store_cached_analysis(&cache_key, &analysis);
+            let analysis = analyze_with_progress(&params, &cancel, progress)?;
+            store_cached_analysis(&cache_key, &analysis, &params);
             analysis
         }
     } else {
         progress("read", 1, 4, "正在通过公共 TB/JE 引擎读取账表…");
-        let analysis = analyze(&params, &cancel)?;
-        store_cached_analysis(&cache_key, &analysis);
+        let analysis = analyze_with_progress(&params, &cancel, progress)?;
+        store_cached_analysis(&cache_key, &analysis, &params);
         analysis
     };
     checkpoint(&cancel, pause)?;
@@ -188,8 +188,8 @@ pub(crate) fn run_job(
     Ok(result)
 }
 
-/// 缓存键＝去掉输出路径后的参数 JSON 哈希：同一套账、同一套映射与科目分类
-/// 才会命中；改任何一个设置都会自然失效。
+/// 缓存键只描述参数；源文件 size/mtime 另存进缓存内容并在读取时校验。这样
+/// 同路径覆盖文件会失效，而预览后暂时移动源文件仍可完成导出。
 fn analysis_cache_key(params: &Value) -> String {
     let mut normalized = params.clone();
     normalized
@@ -215,6 +215,8 @@ fn cache_dir() -> PathBuf {
 /// 直接序列化会失败——缓存专用结构把元组键装进数组元素里。
 #[derive(Serialize, Deserialize)]
 struct AnalysisCache {
+    #[serde(default)]
+    source_fingerprints: Map<String, Value>,
     tb: Vec<TbLine>,
     je: Vec<JeLine>,
     je_headers: Vec<String>,
@@ -227,9 +229,25 @@ struct AnalysisCache {
     warnings: Vec<String>,
 }
 
+#[derive(Serialize)]
+struct AnalysisCacheRef<'a> {
+    source_fingerprints: Map<String, Value>,
+    tb: &'a [TbLine],
+    je: &'a [JeLine],
+    je_headers: &'a [String],
+    additions: &'a [Movement],
+    disposals: &'a [Movement],
+    totals: Vec<(&'a (String, String), &'a CategoryTotals)>,
+    direct_pairs: usize,
+    cross_pairs: usize,
+    sign_basis: &'a str,
+    warnings: &'a [String],
+}
+
 impl From<&Analysis> for AnalysisCache {
     fn from(a: &Analysis) -> Self {
         Self {
+            source_fingerprints: Map::new(),
             tb: a.tb.clone(),
             je: a.je.clone(),
             je_headers: a.je_headers.clone(),
@@ -266,20 +284,67 @@ impl From<AnalysisCache> for Analysis {
 }
 
 fn load_cached_analysis(key: &str) -> Option<Analysis> {
-    let path = cache_dir().join(format!("{key}.json"));
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<AnalysisCache>(&text)
-        .ok()
-        .map(Analysis::from)
+    load_cached_analysis_record(key).map(Analysis::from)
 }
 
-fn store_cached_analysis(key: &str, analysis: &Analysis) {
+fn load_cached_analysis_record(key: &str) -> Option<AnalysisCache> {
+    let path = cache_dir().join(format!("{key}.json"));
+    let file = std::fs::File::open(path).ok()?;
+    serde_json::from_reader::<_, AnalysisCache>(std::io::BufReader::new(file)).ok()
+}
+
+fn source_fingerprints(params: &Value) -> Map<String, Value> {
+    ["tbSource", "jeSource"]
+        .into_iter()
+        .filter_map(|key| {
+            let path = params
+                .get(key)
+                .and_then(|source| source.get("inputPath"))
+                .and_then(Value::as_str)?;
+            let metadata = std::fs::metadata(path).ok()?;
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|value| value.as_nanos().to_string())
+                .unwrap_or_default();
+            Some((
+                key.to_owned(),
+                json!({"path":path,"size":metadata.len(),"modified":modified}),
+            ))
+        })
+        .collect()
+}
+
+fn load_cached_analysis_for(key: &str, params: &Value) -> Option<Analysis> {
+    let cached = load_cached_analysis_record(key)?;
+    let current = source_fingerprints(params);
+    if !current.is_empty() && cached.source_fingerprints != current {
+        return None;
+    }
+    Some(Analysis::from(cached))
+}
+
+fn store_cached_analysis(key: &str, analysis: &Analysis, params: &Value) {
     let dir = cache_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    if let Ok(text) = serde_json::to_string(&AnalysisCache::from(analysis)) {
-        let _ = std::fs::write(dir.join(format!("{key}.json")), text);
+    if let Ok(file) = std::fs::File::create(dir.join(format!("{key}.json"))) {
+        let cached = AnalysisCacheRef {
+            source_fingerprints: source_fingerprints(params),
+            tb: &analysis.tb,
+            je: &analysis.je,
+            je_headers: &analysis.je_headers,
+            additions: &analysis.additions,
+            disposals: &analysis.disposals,
+            totals: analysis.totals.iter().collect(),
+            direct_pairs: analysis.direct_pairs,
+            cross_pairs: analysis.cross_pairs,
+            sign_basis: &analysis.sign_basis,
+            warnings: &analysis.warnings,
+        };
+        let _ = serde_json::to_writer(std::io::BufWriter::new(file), &cached);
     }
     // 只保留最近 5 份缓存，TEMP 不做无界膨胀。
     let _ = try_prune_cache(&dir);
@@ -309,17 +374,34 @@ fn checkpoint(cancel: &AtomicBool, pause: &PauseCheckpoint) -> Result<(), AppErr
 }
 
 fn analyze(params: &Value, cancel: &AtomicBool) -> Result<Analysis, AppError> {
+    analyze_with_progress(params, cancel, &|_, _, _, _| {})
+}
+
+fn analyze_with_progress(
+    params: &Value,
+    cancel: &AtomicBool,
+    progress: Progress<'_>,
+) -> Result<Analysis, AppError> {
     let tb_spec: SourceSpec = parse_param(params, "tbSource", "缺少 TB 数据源。")?;
     let je_spec: SourceSpec = parse_param(params, "jeSource", "缺少 JE 数据源。")?;
     let tb_map = mapping(params, "tbMapping");
     let je_map = mapping(params, "jeMapping");
     validate_required(&tb_map, &je_map)?;
     let tb = load_fx_table(&tb_spec)?;
-    let raw_je = load_fx_table(&je_spec)?;
     let tb_keep = ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| {
         crate::fx::mapped_cols(&tb_map, role)
     });
     crate::fx::validate_mapped_amount_values(&tb, &tb_map, "tb", "TB", Some(&tb_keep))?;
+    let disk_mode = tabular::disk_ledger_applies(Path::new(&je_spec.input_path))
+        || (cfg!(test)
+            && params
+                .get("__testForceDiskLedger")
+                .and_then(Value::as_bool)
+                .unwrap_or(false));
+    if disk_mode {
+        return analyze_with_disk_je(params, cancel, &tb, &tb_map, &je_spec, &je_map, progress);
+    }
+    let raw_je = load_fx_table(&je_spec)?;
     let je_keep = ledger_mapping::ledger_junk_mask(&raw_je.headers, &raw_je.rows, &|role| {
         crate::fx::mapped_cols(&je_map, role)
     });
@@ -411,6 +493,290 @@ fn analyze(params: &Value, cancel: &AtomicBool) -> Result<Analysis, AppError> {
         sign_basis,
         warnings,
     })
+}
+
+/// 大 CSV 不再先构造整张 `FxTable`。公共磁盘账本负责一次解析、前向填充和
+/// 凭证索引；这里先用去重后的科目身份建立分类索引，再只把命中固定资产科目
+/// 的完整凭证交给既有分类器。这样普通文件完全不变，大文件的常驻内存由
+/// “整本 JE”缩小为“命中的凭证明细”。
+fn analyze_with_disk_je(
+    params: &Value,
+    cancel: &AtomicBool,
+    tb: &FxTable,
+    tb_map: &Map<String, Value>,
+    je_spec: &SourceSpec,
+    je_map: &Map<String, Value>,
+    progress: Progress<'_>,
+) -> Result<Analysis, AppError> {
+    let disk = tabular::open_prepared_disk_ledger(
+        Path::new(&je_spec.input_path),
+        je_spec.header_row.max(1),
+        je_spec.header_depth.max(1),
+        je_map,
+        progress,
+        cancel,
+    )?;
+    let headers = disk.headers().to_vec();
+    validate_mapping_headers("JE", &headers, je_map)?;
+
+    let header_table = disk_table(je_spec, headers.clone(), Vec::new(), disk.row_count());
+    let report_end = parse_report_end(params)?;
+    let report_start = NaiveDate::from_ymd_opt(report_end.year(), 1, 1).unwrap();
+    let mut any_row_in_period = false;
+    let mut years = BTreeSet::new();
+    let mut unique = BTreeMap::<(String, String, String, String, String), AccountIdentity>::new();
+    let mut scanned = 0usize;
+    disk.visit(false, cancel, |row| {
+        scanned += 1;
+        if scanned == 1 || scanned % 50_000 == 0 {
+            progress(
+                "fa-identities",
+                scanned,
+                disk.row_count().max(1),
+                "正在识别固定资产科目与报告期间…",
+            );
+        }
+        if let Some(date) = parse_date(&text(&header_table, &row.values, je_map, "date")) {
+            years.insert(date.year());
+            any_row_in_period |= date >= report_start && date <= report_end;
+        }
+        let identity = account_identity_from_row(
+            &header_table,
+            &row.values,
+            je_map,
+            params,
+            "jeFixedEntity",
+            &row.account,
+        );
+        unique
+            .entry((
+                identity.entity.clone(),
+                identity.code.clone(),
+                identity.name.clone(),
+                identity.display.clone(),
+                identity.legacy_display.clone(),
+            ))
+            .or_insert(identity);
+        Ok(())
+    })?;
+    progress(
+        "fa-identities",
+        disk.row_count(),
+        disk.row_count().max(1),
+        "固定资产科目识别完成，正在读取命中凭证…",
+    );
+    if disk.row_count() > 0 && !any_row_in_period {
+        let detail = if years.is_empty() {
+            "序时账里没有能解析出来的记账日期。".to_owned()
+        } else {
+            format!(
+                "序时账的数据年度是 {} 年。",
+                years
+                    .into_iter()
+                    .map(|year| year.to_string())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            )
+        };
+        return Err(error(
+            "FA_TBJE_PERIOD_EMPTY",
+            format!(
+                "报告期间 {report_start} 至 {report_end} 内没有任何序时账凭证，无法生成底稿。{detail}请把报告截止日改到账套所属年度后重试。"
+            ),
+            None,
+        ));
+    }
+    let je_identities = unique.into_values().collect::<Vec<_>>();
+    let tb_identities = account_identities(tb, tb_map, params, "tbFixedEntity");
+    let assignments = assignment_index_from_identities(params, &tb_identities, &je_identities)?;
+    if assignments.codes.is_empty() && assignments.names.is_empty() {
+        return Err(error(
+            "FA_TBJE_ACCOUNTS_REQUIRED",
+            "请至少确认一个固定资产原值或累计折旧科目。",
+            None,
+        ));
+    }
+    let target_accounts = je_identities
+        .iter()
+        .filter(|identity| find_assignment(&assignments, identity).is_some())
+        .map(|identity| identity.display.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    disk.select_accounts(&target_accounts, cancel)?;
+    let mut selected_rows = Vec::new();
+    let mut selected_count = 0usize;
+    disk.visit_vouchers(true, cancel, |_, voucher_rows| {
+        selected_count += voucher_rows.len();
+        if selected_count % 50_000 < voucher_rows.len() {
+            progress(
+                "fa-vouchers",
+                selected_count,
+                disk.row_count().max(1),
+                "正在读取固定资产相关完整凭证…",
+            );
+        }
+        selected_rows.extend(voucher_rows.iter().map(|row| row.values.clone()));
+        Ok(())
+    })?;
+    let je = disk_table(je_spec, headers, selected_rows, disk.row_count());
+    let tb_lines = normalize_tb(tb, tb_map, &assignments, params)?;
+    if tb_lines.is_empty() {
+        return Err(error(
+            "FA_TBJE_NO_TB_ACCOUNTS",
+            "TB 中没有命中已确认的固定资产末级科目。",
+            None,
+        ));
+    }
+    let (mut je_lines, direct_pairs, cross_pairs, sign_basis) =
+        normalize_je(&je, je_map, &assignments, params, report_end, cancel)?;
+    let (additions, disposals, mut totals) = classify_movements(&mut je_lines);
+    let mut warnings = Vec::new();
+    append_je_only_warnings(&mut warnings, &tb_identities, &je_identities, &assignments);
+    add_tb_totals(&mut totals, &tb_lines);
+    Ok(Analysis {
+        tb: tb_lines,
+        je: je_lines,
+        je_headers: je.headers.clone(),
+        additions,
+        disposals,
+        totals,
+        direct_pairs,
+        cross_pairs,
+        sign_basis,
+        warnings,
+    })
+}
+
+fn parse_report_end(params: &Value) -> Result<NaiveDate, AppError> {
+    NaiveDate::parse_from_str(
+        params
+            .get("reportEnd")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        "%Y-%m-%d",
+    )
+    .map_err(|_| error("INVALID_DATE", "报告截止日必须为 YYYY-MM-DD。", None))
+}
+
+fn disk_table(
+    spec: &SourceSpec,
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+    row_count: usize,
+) -> FxTable {
+    FxTable {
+        path: PathBuf::from(&spec.input_path),
+        sheet: if spec.sheet.trim().is_empty() {
+            "CSV".into()
+        } else {
+            spec.sheet.clone()
+        },
+        sheets: Vec::new(),
+        header_row: spec.header_row.max(1),
+        header_depth: spec.header_depth.max(1),
+        raw_headers: vec![headers.clone()],
+        headers,
+        rows,
+        row_count,
+        header_candidates: Vec::new(),
+        sampled: false,
+    }
+}
+
+fn validate_mapping_headers(
+    kind: &str,
+    headers: &[String],
+    map: &Map<String, Value>,
+) -> Result<(), AppError> {
+    for role in map.keys() {
+        if mapped_columns(map, role)
+            .iter()
+            .any(|column| ledger_mapping::header_index(headers, column).is_none())
+        {
+            return Err(error(
+                "FA_TBJE_MAPPING_STALE",
+                format!("{kind} 映射列已不在当前文件中，请返回字段映射区重新确认。"),
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn account_identity_from_row(
+    table: &FxTable,
+    row: &[String],
+    map: &Map<String, Value>,
+    params: &Value,
+    fixed_key: &str,
+    display: &str,
+) -> AccountIdentity {
+    let fixed = params
+        .get(fixed_key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let entity = text(table, row, map, "entity");
+    let raw_code = text(table, row, map, "accountCode");
+    let mut name = join(row, &indexes(table, map, "accountName"));
+    if name.is_empty() {
+        name = join(row, &indexes(table, map, "account"));
+    }
+    name = ledger_mapping::account_name_of(if name.is_empty() { &raw_code } else { &name });
+    AccountIdentity {
+        entity: if entity.is_empty() {
+            fixed.to_owned()
+        } else {
+            entity
+        },
+        code: ledger_mapping::account_code_of(&raw_code),
+        name,
+        display: display.to_owned(),
+        legacy_display: join(row, &account_indexes(table, map)),
+    }
+}
+
+fn append_je_only_warnings(
+    warnings: &mut Vec<String>,
+    tb_accounts: &[AccountIdentity],
+    je_accounts: &[AccountIdentity],
+    assignments: &AssignmentIndex,
+) {
+    for id in je_accounts {
+        if find_assignment(assignments, id).is_some()
+            && !tb_accounts.iter().any(|other| {
+                other.entity == id.entity
+                    && ((!id.code.is_empty() && other.code == id.code)
+                        || (id.code.is_empty() || other.code.is_empty())
+                            && ledger_mapping::normalize_name(&other.name)
+                                == ledger_mapping::normalize_name(&id.name))
+            })
+        {
+            let warning = format!(
+                "主体 {} 的已确认科目 {} 仅存在于 JE，已保留变动；TB 期初/期末无对应科目，请复核勾稽差异。",
+                id.entity, id.display
+            );
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+    }
+}
+
+fn add_tb_totals(totals: &mut BTreeMap<(String, String), CategoryTotals>, tb_lines: &[TbLine]) {
+    for line in tb_lines {
+        let slot = totals
+            .entry((line.entity.clone(), line.category.clone()))
+            .or_default();
+        if line.role == "cost" {
+            slot.opening_cost += line.opening;
+            slot.closing_cost += line.closing;
+        } else if line.role == "depreciation" {
+            slot.opening_dep += -line.opening;
+            slot.closing_dep += -line.closing;
+        }
+    }
 }
 
 /// 必填口径走公共引擎：金标身份槽 ∪ 金额／余额形态槽（TB1–TB6／JE1–JE3）∪
@@ -1056,9 +1422,10 @@ fn is_cip_account(account: &str) -> bool {
             .split(['-', '_'])
             .any(|part| part.starts_with("1604") || part.starts_with("1605"))
     });
-    code_prefix || ["在建工程", "cip", "工程物资"]
-        .iter()
-        .any(|term| lower.contains(term))
+    code_prefix
+        || ["在建工程", "cip", "工程物资"]
+            .iter()
+            .any(|term| lower.contains(term))
 }
 
 /// 新增方式「在建工程转入」的金额锁定结论：同一张凭证里既有真在建转入、
@@ -1917,7 +2284,9 @@ fn col_letter(mut index: usize) -> String {
 /// 返回（原值 map，累计折旧 map），键＝科目串、值＝（借方合计，贷方合计）；
 /// 导出落表（write_counterpart_pivots）与前端预览（preview_json 的
 /// counterpartPivots）共用这一份聚合，两边永不漂移。
-fn counterpart_pivots(a: &Analysis) -> (BTreeMap<String, (f64, f64)>, BTreeMap<String, (f64, f64)>) {
+fn counterpart_pivots(
+    a: &Analysis,
+) -> (BTreeMap<String, (f64, f64)>, BTreeMap<String, (f64, f64)>) {
     let mut voucher_flags: BTreeMap<(String, String), (bool, bool)> = BTreeMap::new();
     for line in &a.je {
         if line.counterpart || is_net_zero_matched(&line.status) {
@@ -2337,6 +2706,16 @@ fn assignment_index(
     je: &FxTable,
     je_map: &Map<String, Value>,
 ) -> Result<AssignmentIndex, AppError> {
+    let tb_ids = account_identities(tb, tb_map, params, "tbFixedEntity");
+    let je_ids = account_identities(je, je_map, params, "jeFixedEntity");
+    assignment_index_from_identities(params, &tb_ids, &je_ids)
+}
+
+fn assignment_index_from_identities(
+    params: &Value,
+    tb_ids: &[AccountIdentity],
+    je_ids: &[AccountIdentity],
+) -> Result<AssignmentIndex, AppError> {
     let rows: Vec<Assignment> = serde_json::from_value(
         params
             .get("accountAssignments")
@@ -2344,15 +2723,12 @@ fn assignment_index(
             .unwrap_or_else(|| json!([])),
     )
     .map_err(|e| error("INVALID_PARAMS", "科目分类参数无效。", Some(e.to_string())))?;
-    let tb_ids = account_identities(tb, tb_map, params, "tbFixedEntity");
-    let je_ids = account_identities(je, je_map, params, "jeFixedEntity");
     let tuples = |ids: &[AccountIdentity]| {
         ids.iter()
             .map(|id| (id.entity.clone(), id.code.clone(), id.name.clone()))
             .collect::<Vec<_>>()
     };
-    let valid_names =
-        ledger_mapping::validated_account_name_keys(&tuples(&tb_ids), &tuples(&je_ids));
+    let valid_names = ledger_mapping::validated_account_name_keys(&tuples(tb_ids), &tuples(je_ids));
     let mut out = AssignmentIndex::default();
     for a in &rows {
         if !matches!(a.role.as_str(), "cost" | "depreciation") {
@@ -2365,7 +2741,7 @@ fn assignment_index(
                 category: a.category.clone(),
             }),
         };
-        for id in tb_ids.iter().chain(&je_ids).filter(|id| {
+        for id in tb_ids.iter().chain(je_ids).filter(|id| {
             a.entity
                 .as_ref()
                 .is_none_or(|entity| entity.trim() == id.entity)
@@ -2743,14 +3119,7 @@ mod tests {
     #[test]
     fn mixed_voucher_locks_cip_transfer_by_credit_amount() {
         let mut je = vec![
-            je_line(
-                "A",
-                "J67",
-                "1601-机器设备",
-                "cost",
-                "机器设备",
-                76725.66,
-            ),
+            je_line("A", "J67", "1601-机器设备", "cost", "机器设备", 76725.66),
             je_line("A", "J67", "1601-运输设备", "cost", "运输设备", 30600.0),
             je_line("A", "J67", "1122-预付账款", "", "", -84099.0),
             je_line("A", "J67", "1002-银行存款", "", "", -2601.0),
@@ -2773,9 +3142,7 @@ mod tests {
             .expect("运输设备新增行");
         assert_eq!(cip.method, "在建工程转入");
         assert!((cip.original - 30600.0).abs() < 0.005);
-        assert_eq!(
-            cip.rule, "在建工程转出金额覆盖本笔增加（按转出金额锁定）"
-        );
+        assert_eq!(cip.rule, "在建工程转出金额覆盖本笔增加（按转出金额锁定）");
         // JE 明细行回填同一结论：一行一方式，混合凭证不拆行。
         let machine_line = je
             .iter()
@@ -2969,7 +3336,11 @@ mod tests {
             .as_array()
             .expect("原值透视预览必须是数组")
             .iter()
-            .find(|e| e["account"].as_str().is_some_and(|a| a.contains("银行存款")))
+            .find(|e| {
+                e["account"]
+                    .as_str()
+                    .is_some_and(|a| a.contains("银行存款"))
+            })
             .expect("原值透视预览应含银行存款（V2 处置收款）");
         assert_eq!(bank["debit"], json!(150.0));
         assert_eq!(bank["credit"], json!(0.0));
@@ -3065,6 +3436,22 @@ mod tests {
                 .map(|line| line.status.clone())
                 .collect::<Vec<_>>(),
             common.status
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn forced_disk_je_matches_the_memory_analysis() {
+        let (dir, _, mut params) = fixture();
+        let cancel = AtomicBool::new(false);
+        let memory = analyze(&params, &cancel).unwrap();
+        params["__testForceDiskLedger"] = json!(true);
+        let disk = analyze(&params, &cancel).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(AnalysisCache::from(&disk)).unwrap(),
+            serde_json::to_value(AnalysisCache::from(&memory)).unwrap(),
+            "大 CSV 的磁盘读取分支必须保持分类、冲销、对方科目及底稿明细一致"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -3702,7 +4089,10 @@ mod tests {
             ("16040001-在建工程".into(), -500.0),
             ("银行存款".into(), -100.0),
         ]);
-        assert_eq!(classify_method(true, &nets, CipLock::Locked).0, "在建工程转入");
+        assert_eq!(
+            classify_method(true, &nets, CipLock::Locked).0,
+            "在建工程转入"
+        );
         // 名称不含「在建」的 1604 科目（如「16040002-工具仪器」）按编码前缀
         // 识别——金额锁定覆盖见 cip_counterpart_... 与混合凭证两条回归。
         assert_eq!(
@@ -3728,19 +4118,35 @@ mod tests {
             "更新改造转入"
         );
         assert_eq!(
-            classify_method(true, &BTreeMap::from([("银行存款".into(), -500.0)]), CipLock::NoCredit).0,
+            classify_method(
+                true,
+                &BTreeMap::from([("银行存款".into(), -500.0)]),
+                CipLock::NoCredit
+            )
+            .0,
             "购入"
         );
-        assert_eq!(classify_method(true, &BTreeMap::new(), CipLock::NoCredit).0, "购入");
+        assert_eq!(
+            classify_method(true, &BTreeMap::new(), CipLock::NoCredit).0,
+            "购入"
+        );
         // 有在建转出金额但未覆盖本笔增加：按购入列示，判断依据注明原因。
-        let (method, rule, review) =
-            classify_method(true, &BTreeMap::from([("银行存款".into(), -500.0)]), CipLock::Uncovered);
+        let (method, rule, review) = classify_method(
+            true,
+            &BTreeMap::from([("银行存款".into(), -500.0)]),
+            CipLock::Uncovered,
+        );
         assert_eq!(method, "购入");
         assert_eq!(rule, "在建工程转出金额未覆盖本笔增加");
         assert_eq!(review, "");
         // 处置侧规则保持：出售／报废毁损／其他待判断。
         assert_eq!(
-            classify_method(false, &BTreeMap::from([("银行存款".into(), 500.0)]), CipLock::NoCredit).0,
+            classify_method(
+                false,
+                &BTreeMap::from([("银行存款".into(), 500.0)]),
+                CipLock::NoCredit
+            )
+            .0,
             "出售"
         );
         assert_eq!(

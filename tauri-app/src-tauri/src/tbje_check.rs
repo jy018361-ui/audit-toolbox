@@ -31,6 +31,7 @@ use crate::{
     excel_merger::PauseCheckpoint,
     fx::{self, FxTable, SourceSpec, load_fx_table},
     ledger_mapping::{self, AccountCategory, SignConvention},
+    tabular::{self, PreparedDiskLedger},
 };
 
 fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppError {
@@ -65,7 +66,7 @@ pub(crate) fn run_job(
         "tbje_check.run" => {
             progress("read", 1, 3, "正在读取科目余额表与序时账…");
             pause.wait()?;
-            let result = run(&params, &cancel)?;
+            let result = run_with_progress(&params, &cancel, progress)?;
             progress("done", 3, 3, "核对完成。");
             Ok(result)
         }
@@ -73,7 +74,7 @@ pub(crate) fn run_job(
         "tbje_check.export" => {
             progress("read", 1, 3, "正在读取科目余额表与序时账…");
             pause.wait()?;
-            let prepared = prepare(&params)?;
+            let prepared = prepare_with_control(&params, &cancel, progress)?;
             let result = evaluate(&prepared, &cancel, true)?;
             pause.wait()?;
             progress("write", 2, 3, "正在写出核对明细…");
@@ -218,7 +219,7 @@ fn load(
 
 struct PreparedCheck {
     tb: Arc<FxTable>,
-    je: Option<Arc<FxTable>>,
+    je: Option<PreparedJe>,
     tb_map: Map<String, Value>,
     je_map: Map<String, Value>,
     tb_fixed: String,
@@ -230,6 +231,19 @@ struct PreparedCheck {
     tbje_currency_scope: &'static str,
     tbje_currency_scope_note: String,
     inferred_functional_currency: Option<String>,
+}
+
+/// Small ledgers retain the existing in-memory table. Large CSV ledgers keep
+/// only a bounded inspection sample in `table`; their rows remain in SQLite.
+struct PreparedJe {
+    table: Arc<FxTable>,
+    disk: Option<PreparedDiskLedger>,
+}
+
+impl PreparedJe {
+    fn memory(table: Arc<FxTable>) -> Self {
+        Self { table, disk: None }
+    }
 }
 
 fn currency_code(value: &str) -> String {
@@ -438,6 +452,64 @@ fn align_account_mappings(
 }
 
 fn prepare(params: &Value) -> Result<PreparedCheck, AppError> {
+    prepare_with_control(params, &AtomicBool::new(false), &|_, _, _, _| {})
+}
+
+fn prepared_disk_je(
+    spec: &SourceSpec,
+    je_map: &Map<String, Value>,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<PreparedJe, AppError> {
+    let disk = tabular::open_prepared_disk_ledger(
+        &PathBuf::from(&spec.input_path),
+        spec.header_row,
+        spec.header_depth.max(1),
+        je_map,
+        progress,
+        cancel,
+    )?;
+    let mut sample_rows = Vec::new();
+    disk.visit_limit(false, 10_000, cancel, |row| {
+        sample_rows.push(row.values);
+        Ok(())
+    })?;
+    let headers = disk.headers().to_vec();
+    let width = headers.len();
+    let table = Arc::new(FxTable {
+        path: PathBuf::from(&spec.input_path),
+        sheet: if spec.sheet.trim().is_empty() {
+            "CSV".to_owned()
+        } else {
+            spec.sheet.clone()
+        },
+        sheets: Vec::new(),
+        header_row: spec.header_row,
+        header_depth: spec.header_depth.max(1),
+        raw_headers: vec![headers.clone()],
+        headers,
+        rows: sample_rows
+            .into_iter()
+            .map(|mut row| {
+                row.resize(width, String::new());
+                row
+            })
+            .collect(),
+        row_count: disk.row_count(),
+        header_candidates: Vec::new(),
+        sampled: true,
+    });
+    Ok(PreparedJe {
+        table,
+        disk: Some(disk),
+    })
+}
+
+fn prepare_with_control(
+    params: &Value,
+    cancel: &AtomicBool,
+    progress: Progress<'_>,
+) -> Result<PreparedCheck, AppError> {
     let tb = load(params, "tbSource", "TB")?.ok_or_else(|| {
         error(
             "TBJE_CHECK_NO_TB",
@@ -445,9 +517,29 @@ fn prepare(params: &Value) -> Result<PreparedCheck, AppError> {
             None,
         )
     })?;
-    let je = load(params, "jeSource", "JE")?;
     let mut tb_map = mapping_of(params, "tbMapping");
     let mut je_map = mapping_of(params, "jeMapping");
+    let je_spec = params
+        .get("jeSource")
+        .map(|source| {
+            serde_json::from_value::<SourceSpec>(source.clone())
+                .map_err(|e| error("INVALID_PARAMS", "JE参数无效。", Some(e.to_string())))
+        })
+        .transpose()?;
+    let mut je = match je_spec.as_ref() {
+        Some(spec)
+            if tabular::disk_ledger_applies(&PathBuf::from(&spec.input_path))
+                || (cfg!(test)
+                    && params
+                        .get("__testForceDiskLedger")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)) =>
+        {
+            Some(prepared_disk_je(spec, &je_map, progress, cancel)?)
+        }
+        Some(spec) => Some(PreparedJe::memory(load_fx_table(spec)?)),
+        None => None,
+    };
     let tb_fixed = params
         .get("tbFixedEntity")
         .and_then(Value::as_str)
@@ -461,13 +553,24 @@ fn prepare(params: &Value) -> Result<PreparedCheck, AppError> {
         .trim()
         .to_owned();
 
-    let mut mapping_warnings = if let Some(je) = je.as_deref() {
-        align_account_mappings(&tb, &mut tb_map, je, &mut je_map)?
+    let je_map_before_alignment = je_map.clone();
+    let mut mapping_warnings = if let Some(je) = je.as_ref() {
+        align_account_mappings(&tb, &mut tb_map, &je.table, &mut je_map)?
     } else {
         Vec::new()
     };
 
-    if let Some(je) = je.as_deref() {
+    // 磁盘规范化缓存的正文判定、账户键和向下填充都依赖映射。若跨表校验纠正了
+    // JE 映射，必须用纠正后的映射重开缓存；只改 je_map 会让后续汇总继续读取按
+    // 错误科目列建成的 prepared 数据，极端情况下会静默漏行。
+    if je_map != je_map_before_alignment && je.as_ref().is_some_and(|value| value.disk.is_some()) {
+        if let Some(spec) = je_spec.as_ref() {
+            je = Some(prepared_disk_je(spec, &je_map, progress, cancel)?);
+        }
+    }
+
+    if let Some(je) = je.as_ref() {
+        let je = &*je.table;
         if columns(&je_map, "entity").iter().any(|column| {
             ledger_mapping::entity_column_is_measurement_unit(&je.headers, &je.rows, column)
         }) {
@@ -504,7 +607,8 @@ fn prepare(params: &Value) -> Result<PreparedCheck, AppError> {
             ));
         }
     }
-    let je_rows = if let Some(je) = je.as_deref() {
+    let je_rows = if let Some(je) = je.as_ref() {
+        let je = &*je.table;
         let analysis = ledger_mapping::analyze_ledger_rows(&je.headers, &je.rows, &|role| {
             columns(&je_map, role)
         });
@@ -555,13 +659,13 @@ fn prepare(params: &Value) -> Result<PreparedCheck, AppError> {
     let tb_rows_to_validate =
         ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| columns(&tb_map, role));
     validate_amount_columns("TB", "tb", &tb, &tb_map, Some(&tb_rows_to_validate))?;
-    if let Some(je) = je.as_deref() {
-        validate_amount_columns("JE", "je", je, &je_map, je_rows.as_deref())?;
+    if let Some(je) = je.as_ref().filter(|je| je.disk.is_none()) {
+        validate_amount_columns("JE", "je", &je.table, &je_map, je_rows.as_deref())?;
     }
     fx::ensure_sign_convention(&tb, &mut tb_map, "tb")
         .map_err(|message| error("SIGN_CONVENTION_UNCERTAIN", message, None))?;
-    if let Some(je) = je.as_deref() {
-        fx::ensure_sign_convention(je, &mut je_map, "je")
+    if let Some(je) = je.as_ref().filter(|je| je.disk.is_none()) {
+        fx::ensure_sign_convention(&je.table, &mut je_map, "je")
             .map_err(|message| error("SIGN_CONVENTION_UNCERTAIN", message, None))?;
     }
     let (tb_functional_rows, inferred_functional_currency) = functional_currency_rows(&tb, &tb_map);
@@ -641,9 +745,17 @@ fn validate_amount_columns(
         })
         .collect::<Vec<_>>()
         .join("；");
+    // 首处位置折进主文案：job 失败事件只回传 user_message，留在 detail 里
+    // 用户看不到（与看账内存/磁盘路径同款措辞）。
+    let first = &issues[0];
     Err(error(
         "AMOUNT_VALUE_INVALID",
-        format!("{label}金额列存在非空但无法解析为数值的单元格，请修正后重试。"),
+        format!(
+            "{label}金额列「{}」第{}行的值“{}”无法解析为数值，请修正后重试。",
+            first.column,
+            table.header_row + table.header_depth + first.row_index,
+            first.value.chars().take(80).collect::<String>()
+        ),
         Some(if issues.len() > 20 {
             format!("{detail}；另有{}处未列出。", issues.len() - 20)
         } else {
@@ -662,7 +774,15 @@ fn beyond(difference: f64, scale: f64) -> bool {
 }
 
 pub(crate) fn run(params: &Value, cancel: &AtomicBool) -> Result<Value, AppError> {
-    let prepared = prepare(params)?;
+    run_with_progress(params, cancel, &|_, _, _, _| {})
+}
+
+fn run_with_progress(
+    params: &Value,
+    cancel: &AtomicBool,
+    progress: Progress<'_>,
+) -> Result<Value, AppError> {
+    let prepared = prepare_with_control(params, cancel, progress)?;
     evaluate(&prepared, cancel, false)
 }
 
@@ -685,7 +805,7 @@ fn evaluate(
     if cancel.load(Ordering::Relaxed) {
         return Err(error("JOB_CANCELLED", "任务已取消。", None));
     }
-    let tb_vs_je = match prepared.je.as_deref() {
+    let tb_vs_je = match prepared.je.as_ref() {
         Some(je) => check_tb_vs_je(
             &prepared.tb,
             &prepared.tb_map,
@@ -775,7 +895,7 @@ fn run_batch(
                 }
             ),
         );
-        match run(group, cancel) {
+        match run_with_progress(group, cancel, progress) {
             Ok(result) => results.push(json!({ "label": label, "ok": true, "result": result })),
             // 取消要中断整批，别的错误只记在这一组上。
             Err(e) if e.code == "JOB_CANCELLED" => return Err(e),
@@ -862,11 +982,12 @@ fn export_batch(
         let mut export_params = group.clone();
         export_params["outputPath"] = json!(output_path.to_string_lossy());
 
-        let exported = prepare(&export_params).and_then(|prepared| {
-            let result = evaluate(&prepared, cancel, true)?;
-            let path = export(&export_params, &result, &prepared)?;
-            Ok(path)
-        });
+        let exported =
+            prepare_with_control(&export_params, cancel, progress).and_then(|prepared| {
+                let result = evaluate(&prepared, cancel, true)?;
+                let path = export(&export_params, &result, &prepared)?;
+                Ok(path)
+            });
         match exported {
             Ok(path) => {
                 output_paths.push(path.to_string_lossy().into_owned());
@@ -1197,7 +1318,7 @@ fn write_tbje_sheet(
         prepared
             .je
             .as_ref()
-            .map(|je| je.path.to_string_lossy().into_owned())
+            .map(|je| je.table.path.to_string_lossy().into_owned())
             .unwrap_or_else(|| "未提供序时账".to_owned())
             .as_str(),
         headers.len() as u16 - 1,
@@ -1823,7 +1944,7 @@ fn check_tb_vs_je(
     tb: &FxTable,
     tb_map: &Map<String, Value>,
     tb_fixed: &str,
-    je: &FxTable,
+    je: &PreparedJe,
     je_map: &Map<String, Value>,
     je_fixed: &str,
     cancel: &AtomicBool,
@@ -1833,6 +1954,7 @@ fn check_tb_vs_je(
     currency_scope: &str,
     currency_scope_note: &str,
 ) -> Result<Value, AppError> {
+    let je_table = &*je.table;
     let tb_debit = columns(tb_map, "ytdFunctionalDebit");
     let tb_credit = columns(tb_map, "ytdFunctionalCredit");
     if tb_debit.is_empty() || tb_credit.is_empty() {
@@ -1868,13 +1990,22 @@ fn check_tb_vs_je(
         .filter(|(index, _)| leaf.get(*index).copied().unwrap_or(true))
         .map(|(_, row)| identity_parts(tb, row, tb_map, tb_fixed))
         .collect::<Vec<_>>();
-    let je_identities = je
-        .rows
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| je_rows.get(*index).copied().unwrap_or(true))
-        .map(|(_, row)| identity_parts(je, row, je_map, je_fixed))
-        .collect::<Vec<_>>();
+    let je_identities = if let Some(disk) = je.disk.as_ref() {
+        let mut distinct = BTreeSet::new();
+        disk.visit(false, cancel, |row| {
+            distinct.insert(identity_parts(je_table, &row.values, je_map, je_fixed));
+            Ok(())
+        })?;
+        distinct.into_iter().collect::<Vec<_>>()
+    } else {
+        je_table
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| je_rows.get(*index).copied().unwrap_or(true))
+            .map(|(_, row)| identity_parts(je_table, row, je_map, je_fixed))
+            .collect::<Vec<_>>()
+    };
     let account_policy =
         ledger_mapping::AccountMatchPolicy::from_sides(&tb_identities, &je_identities);
     let tb_records = fx::records(tb);
@@ -1911,33 +2042,53 @@ fn check_tb_vs_je(
     }
 
     // JE 侧：剔掉合计行与游离数字行，其余按科目累加借贷。
-    let je_records = fx::records(je);
     let mut je_totals = BTreeMap::<(String, String), Side>::new();
-    for (index, row) in je.rows.iter().enumerate() {
-        if index % 8192 == 0 && cancel.load(Ordering::Relaxed) {
-            return Err(error("JOB_CANCELLED", "任务已取消。", None));
+    if let Some(disk) = je.disk.as_ref() {
+        disk.visit(false, cancel, |row| {
+            let key = matched_identity(je_table, &row.values, je_map, je_fixed, &account_policy);
+            if key.1.is_empty() {
+                return Ok(());
+            }
+            let entry = je_totals.entry(key.clone()).or_default();
+            // The common disk row has already normalized both evidence sides
+            // with the final sign convention. A red entry therefore stays on
+            // its original side and reduces that side's total.
+            entry.debit += row.debit;
+            entry.credit += row.credit;
+            names
+                .entry(key)
+                .or_insert_with(|| display_name(je_table, &row.values, je_map));
+            Ok(())
+        })?;
+    } else {
+        let je_records = fx::records(je_table);
+        for (index, row) in je_table.rows.iter().enumerate() {
+            if index % 8192 == 0 && cancel.load(Ordering::Relaxed) {
+                return Err(error("JOB_CANCELLED", "任务已取消。", None));
+            }
+            if !je_rows.get(index).copied().unwrap_or(true) {
+                continue;
+            }
+            let key = matched_identity(je_table, row, je_map, je_fixed, &account_policy);
+            if key.1.is_empty() {
+                continue;
+            }
+            let Some(record) = je_records.get(index) else {
+                continue;
+            };
+            let entry = je_totals.entry(key.clone()).or_default();
+            // 借还是贷由列（或方向列）决定，正负留在本侧冲减——按净额符号归侧会把
+            // 红字冲销翻到对面：贷方记 −467.02 折成 +467.02 进了借方，借贷两侧同时
+            // 虚增（08 号样例实测差 467.02×2）。余额表的列合计就是这么按列直加的，
+            // 两侧口径必须一致。
+            let (debit, credit) =
+                fx::side_amounts(record, je_map, "functional").unwrap_or((0.0, 0.0));
+            entry.debit += debit;
+            entry.credit += credit;
+            names
+                .entry(key)
+                .or_insert_with(|| display_name(je_table, row, je_map));
         }
-        if !je_rows.get(index).copied().unwrap_or(true) {
-            continue;
-        }
-        let key = matched_identity(je, row, je_map, je_fixed, &account_policy);
-        if key.1.is_empty() {
-            continue;
-        }
-        let Some(record) = je_records.get(index) else {
-            continue;
-        };
-        let entry = je_totals.entry(key.clone()).or_default();
-        // 借还是贷由列（或方向列）决定，正负留在本侧冲减——按净额符号归侧会把
-        // 红字冲销翻到对面：贷方记 −467.02 折成 +467.02 进了借方，借贷两侧同时
-        // 虚增（08 号样例实测差 467.02×2）。余额表的列合计就是这么按列直加的，
-        // 两侧口径必须一致。
-        let (debit, credit) = fx::side_amounts(record, je_map, "functional").unwrap_or((0.0, 0.0));
-        entry.debit += debit;
-        entry.credit += credit;
-        names
-            .entry(key)
-            .or_insert_with(|| display_name(je, row, je_map));
     }
 
     let mut items = Vec::new();

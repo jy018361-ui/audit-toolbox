@@ -709,9 +709,15 @@ fn is_supported_job_method(method: &str) -> bool {
 }
 
 /// 已在业务循环里接入内存等待检查点的任务才能启用 Job Object 上限。
-/// 汇兑损益与看账都由独立 worker 执行，内存紧张时可停在安全检查点恢复。
+/// 所有会消费 JE 的长任务都由独立 worker 执行；公共磁盘账簿在分批扫描时
+/// 定期进入内存检查点，内存紧张时可以自动暂停并在恢复后继续。
 fn memory_protected_method(method: &str) -> bool {
-    method.starts_with("kanzhang.") || method.starts_with("fx.")
+    method.starts_with("kanzhang.")
+        || method.starts_with("fx.")
+        || method.starts_with("loan.")
+        || method.starts_with("deposit.")
+        || method.starts_with("fa.tbje_")
+        || method.starts_with("tbje_check.")
 }
 
 pub fn worker_main() -> i32 {
@@ -2517,11 +2523,18 @@ mod tests {
     }
 
     #[test]
-    fn memory_protection_covers_kanzhang_and_fx_workers_only() {
+    fn memory_protection_covers_all_je_workers() {
         assert!(memory_protected_method("kanzhang.export"));
         assert!(memory_protected_method("fx.preview"));
         assert!(memory_protected_method("fx.export"));
-        assert!(!memory_protected_method("deposit.preview"));
+        assert!(memory_protected_method("deposit.preview"));
+        assert!(memory_protected_method("deposit.export"));
+        assert!(memory_protected_method("loan.preview"));
+        assert!(memory_protected_method("loan.export"));
+        assert!(memory_protected_method("fa.tbje_preview"));
+        assert!(memory_protected_method("fa.tbje_export"));
+        assert!(memory_protected_method("tbje_check.run"));
+        assert!(memory_protected_method("tbje_check.export_batch"));
         assert!(!memory_protected_method("file_list.export"));
     }
 

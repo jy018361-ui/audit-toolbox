@@ -70,7 +70,7 @@
 .tbje-group-llm-result {
   display: grid;
   gap: 4px;
-  padding: 9px 14px 10px calc(96px + var(--sp-3));
+  padding: var(--sp-3) var(--sp-4);
   border-top: 1px dashed var(--border);
   background: color-mix(in srgb, var(--primary) 3%, var(--card));
   font-size: 12px;
@@ -88,12 +88,8 @@
 .tbje-pairing-head,
 .tbje-group-row {
   display: grid;
-  /* 组名列固定 96px 并允许截断：文件名没编号时组名是整个文件名，撑破固定列
-     会直接压在 TB 文件列上。TB/JE 列靠 ellipsis 可继续收缩；按钮列 260px
-     恰好横排三个按钮。整行下限 720px：125%/150% 缩放的笔记本不再整体横向溢出，
-     更窄的窗口才退回横向滚动。 */
-  grid-template-columns: 96px minmax(150px, 1.2fr) minmax(170px, 1.3fr) 260px;
-  align-items: center;
+  grid-template-columns: 84px minmax(150px, 1fr) minmax(170px, 1fr) 244px;
+  align-items: start;
   gap: var(--sp-3);
   min-width: 720px;
 }
@@ -106,6 +102,7 @@
   color: var(--text-muted);
   font-size: var(--fs-xs);
   font-weight: 600;
+  align-items: center;
 }
 
 .tbje-pairing-head > span:last-child {
@@ -132,8 +129,8 @@
 }
 
 .tbje-group-row {
-  min-height: 82px;
-  padding: var(--sp-3);
+  min-height: 0;
+  padding: var(--sp-4) var(--sp-3);
   font-size: var(--fs-sm);
 }
 
@@ -266,24 +263,28 @@
 }
 
 .tbje-group-buttons {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: flex-start;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
   gap: var(--sp-1);
 }
 
+.tbje-group-buttons > button {
+  min-width: 0;
+  padding-inline: var(--sp-2);
+  white-space: nowrap;
+}
+
 .tbje-group-buttons .tbje-remove-group {
+  grid-column: 1 / -1;
+  justify-self: start;
   color: var(--danger-fg);
 }
 
 .tbje-group-mapping {
-  /* 不再写死 900px：展开映射面板时以滚动容器当前宽度为准，避免把整个
-     配对列表再横向撑出一截；映射表自身带横向滚动。 */
-  min-width: min(900px, 100%);
-  max-height: 560px;
-  overflow: auto;
-  padding: var(--sp-3) var(--sp-3) var(--sp-4) 116px;
+  min-width: 0;
+  overflow: visible;
+  padding: var(--sp-4);
   border-top: 1px solid var(--border-soft);
   background: var(--surface-sunken);
 }

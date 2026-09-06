@@ -56,6 +56,7 @@ import { PersistentToolPages } from "@/components/PersistentToolPages";
 import { JobDialogProvider } from "@/components/JobDialog";
 import { JobProgress } from "@/components/JobProgress";
 import { ConfirmDialogHost, confirmDialog } from "@/components/ConfirmDialog";
+import { displayFileName } from "@/fileDisplay";
 import { SyncBusyDialog } from "@/components/SyncBusyDialog";
 import { StepIndicator } from "@/components/StepIndicator";
 import { ResultView } from "@/components/ResultView";
@@ -2201,7 +2202,7 @@ export function Settings({
               </p>
               <div className="input-with-button">
                 <input
-                  value={backupPath}
+                  value={displayFileName(backupPath)}
                   readOnly
                   placeholder="选择 AudiPick迁移备份.json"
                 />

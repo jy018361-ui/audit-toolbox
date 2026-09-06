@@ -4,6 +4,7 @@ import {
   jobCancel,
   jobStart,
   listenPositionedFileDrops,
+  openOutput,
   pickPath,
 } from "./api";
 import type { Inspection } from "./DepositInterestPage";
@@ -21,7 +22,6 @@ import { FileDropInput } from "@/components/FileDropInput";
 import { FileInput } from "@/components/FileInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
-import { ResultView } from "@/components/ResultView";
 import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -58,7 +58,6 @@ type Assignment = {
   role: AccountRole;
   category: string;
 };
-type AssignmentFilter = "candidate" | AccountRole | "all";
 type Classification = LedgerWorkbookSheetClassification;
 
 const MULTI = new Set(["id", "accountName", "account", "auxiliary"]);
@@ -131,21 +130,27 @@ export function splitFaAccount(account: string): {
  * 1603 减值准备／1604 在建工程／1605 工程物资或使用权资产／1606 固定资产清理都不进本表口径；
  * 1602 整支是累计折旧；1601 整支进表，原值还是折旧再由科目名称定（见 `suggestFaAccounts`）。
  *
- * 数字编码不以 1 打头的一律排除：会计科目表 1 资产／2 负债／3 共同／4 权益／
- * 5 成本／6 损益，固定资产只可能在资产类。`6601090401 折旧费-固定资产-计算机及硬件设备`
- * 是损益类折旧费用，名称里带「固定资产」「设备」，只看名称必然被当成原值捞进来。
+ * 数字编码里只有 1601／1602 进表，其余（1603-1606、资产类的 1002／1122、
+ * 负债权益成本损益、自定义的 1642 使用权资产折旧）一律排除：名称里带
+ * 「房屋」「设备」的费用或存款科目（`6601090401 折旧费-固定资产-…`、
+ * `1002016871 银行存款-汉口银行(房屋积金)`）只看名称必然被当成原值捞进来。
  * 字母开头的自定义编码（`FA01`）不适用本规则，继续按名称判。
  */
 function roleFromCode(code: string): AccountRole | undefined {
   if (/^1601/.test(code)) return "cost";
   if (/^1602/.test(code)) return "depreciation";
-  if (/^160\d/.test(code)) return "excluded";
-  if (/^\d/.test(code) && !/^1/.test(code)) return "excluded";
+  // 其余一切数字编码都不进本表：除了 1603-1606，还有 02 号样例的
+  // 1002016871 银行存款-汉口银行(房屋积金)——名称带「房屋」曾被当成原值；
+  // 10 号样例的自定义 1642 使用权资产折旧同理（原值侧不含使用权资产，
+  // 折旧侧混入必然勾稽不平）。字母编码（FA01）继续按名称判。
+  if (/^\d/.test(code)) return "excluded";
   return undefined;
 }
 
 const SAYS_DEPRECIATION =
   /累计折旧|累計折舊|accumulated\s+depreciation|accum\.?\s*dep/i;
+/** 名称一出现就整枝出局（优先于折旧词）：使用权资产与 SAP 技术性清账科目不是固定资产本体。 */
+const SAYS_NOT_IN_SCOPE = /使用权|使用權|清账|清賬|right[-\s]?of[-\s]?use/i;
 /** 名称一出现就不是原值：减值准备、清理清算过渡户、折旧费／摊销／租赁费等费用科目。 */
 const SAYS_NOT_COST =
   /减值准备|減值準備|impairment|清理|清算|折旧费|折舊費|摊销|攤銷|租赁费|租賃費/i;
@@ -153,6 +158,7 @@ const SAYS_FIXED_ASSET =
   /固定资产|固定資產|房屋|建筑物|建築物|机器|機器|机械|機械|设备|設備|运输工具|運輸工具|电子设备|办公设备|fixture|equipment|building|vehicle/i;
 
 function roleFromName(name: string): AccountRole {
+  if (SAYS_NOT_IN_SCOPE.test(name)) return "excluded";
   if (SAYS_DEPRECIATION.test(name)) return "depreciation";
   if (SAYS_NOT_COST.test(name)) return "excluded";
   return SAYS_FIXED_ASSET.test(name) ? "cost" : "excluded";
@@ -161,11 +167,14 @@ function roleFromName(name: string): AccountRole {
 function faCategory(name: string): string {
   return (
     name
+      // SAP 型科目串的名称部分还带着一份编码（`160101\固定资产\房屋建筑物`），
+      // 类别列先剥掉它，08 号样例的类别才不会显示成「160101\房屋建筑物」。
+      .replace(/^[0-9][0-9A-Za-z._]*[\s:：\-—/\\|]+/, "")
       .replace(
         /累计折旧|累計折舊|固定资产|固定資產|accumulated\s+depreciation|property[,\s]*plant\s*(and|&)\s*equipment|ppe/gi,
         "",
       )
-      .replace(/^[-—:：\s]+|[-—:：\s]+$/g, "") || "固定资产"
+      .replace(/^[-—:：\s\\/|]+|[-—:：\s\\/|]+$/g, "") || "固定资产"
   );
 }
 
@@ -222,7 +231,8 @@ export function suggestFaAccounts(accounts: string[]): Assignment[] {
       : (roleFromCode(code) ?? roleFromName(name || code));
     let role = base;
     if (base !== "excluded") {
-      if (SAYS_DEPRECIATION.test(name)) role = "depreciation";
+      if (SAYS_NOT_IN_SCOPE.test(name)) role = "excluded";
+      else if (SAYS_DEPRECIATION.test(name)) role = "depreciation";
       else if (SAYS_NOT_COST.test(name)) role = "excluded";
     }
     resolved.set(code, role);
@@ -308,11 +318,6 @@ export function FaTbJePage() {
   const [error, setError] = useState("");
   const [sourceStatus, setSourceStatus] = useState("");
   const [result, setResult] = useState<unknown>();
-  const [accountQuery, setAccountQuery] = useState("");
-  // 科目复核默认铺开全部科目：只列固定资产候选的话，被自动分类漏判的科目
-  // 连露面的机会都没有，用户也就无从纠正。
-  const [assignmentFilter, setAssignmentFilter] =
-    useState<AssignmentFilter>("all");
   // 科目复核是必经步骤，用户在第三步按过"继续"才算复核过。
   const [accountsReviewed, setAccountsReviewed] = useState(false);
   const [assignmentPage, setAssignmentPage] = useState(0);
@@ -453,35 +458,12 @@ export function FaTbJePage() {
   const assignmentsReady =
     includedAssignments.some((item) => item.role === "cost") &&
     unresolvedAssignments.length === 0;
-  const filteredAssignments = useMemo(() => {
-    const query = accountQuery.trim().toLowerCase();
-    return assignments
-      .map((item, index) => ({ item, index }))
-      .filter(({ item }) => {
-        if (assignmentFilter === "candidate" && item.role === "excluded")
-          return false;
-        if (
-          assignmentFilter !== "candidate" &&
-          assignmentFilter !== "all" &&
-          item.role !== assignmentFilter
-        )
-          return false;
-        return (
-          !query ||
-          item.account.toLowerCase().includes(query) ||
-          (item.entity ?? "").toLowerCase().includes(query) ||
-          item.category.toLowerCase().includes(query)
-        );
-      });
-  }, [accountQuery, assignmentFilter, assignments]);
-  const pageCount = Math.max(
-    1,
-    Math.ceil(filteredAssignments.length / PAGE_SIZE),
-  );
-  const pagedAssignments = filteredAssignments.slice(
-    assignmentPage * PAGE_SIZE,
-    (assignmentPage + 1) * PAGE_SIZE,
-  );
+  // 科目复核铺开全部科目：只列固定资产候选的话，被自动分类漏判的科目
+  // 连露面的机会都没有；科目已按角色降序分组，分页浏览即可，不再需要检索。
+  const pageCount = Math.max(1, Math.ceil(assignments.length / PAGE_SIZE));
+  const pagedAssignments = assignments
+    .map((item, index) => ({ item, index }))
+    .slice(assignmentPage * PAGE_SIZE, (assignmentPage + 1) * PAGE_SIZE);
   // JE 的数据年度由引擎在识别阶段一并下发；报告期间落在数据之外时，
   // 期间过滤会把整本序时账滤空，导出的 JE 相关表就全是空表。
   const reportPeriodMismatch = useMemo(() => {
@@ -500,7 +482,6 @@ export function FaTbJePage() {
     );
     setAccountsReviewed(false);
   }, [accounts, entities]);
-  useEffect(() => setAssignmentPage(0), [accountQuery, assignmentFilter]);
   useEffect(() => {
     setAssignmentPage((current) => Math.min(current, pageCount - 1));
   }, [pageCount]);
@@ -549,8 +530,6 @@ export function FaTbJePage() {
     setMappings({ tb: {}, je: {} });
     setAssignments([]);
     setAccountsReviewed(false);
-    setAccountQuery("");
-    setAssignmentFilter("all");
     setAssignmentPage(0);
     setBulkCategory("");
     setResult(undefined);
@@ -868,22 +847,16 @@ export function FaTbJePage() {
     });
   }
 
-  function applyRoleToFiltered(role: AccountRole) {
-    const indexes = new Set(filteredAssignments.map(({ index }) => index));
-    setAssignments((rows) =>
-      rows.map((row, index) => (indexes.has(index) ? { ...row, role } : row)),
-    );
+  function applyRoleToAll(role: AccountRole) {
+    setAssignments((rows) => rows.map((row) => ({ ...row, role })));
   }
 
-  function applyCategoryToFiltered() {
+  function applyCategoryToAll() {
     const category = bulkCategory.trim();
     if (!category) return;
-    const indexes = new Set(filteredAssignments.map(({ index }) => index));
     setAssignments((rows) =>
-      rows.map((row, index) =>
-        indexes.has(index) && row.role !== "excluded"
-          ? { ...row, category }
-          : row,
+      rows.map((row) =>
+        row.role !== "excluded" ? { ...row, category } : row,
       ),
     );
   }
@@ -1126,84 +1099,49 @@ export function FaTbJePage() {
           </CardHeader>
           <CardContent className="form-stack">
             <div className="fa-tbje-account-toolbar">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => applyRoleToAll("cost")}
+              >
+                设为原值
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => applyRoleToAll("depreciation")}
+              >
+                设为折旧
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => applyRoleToAll("excluded")}
+              >
+                全部排除
+              </Button>
               <label>
-                搜索科目
+                批量资产类别
                 <Input
-                  name="fa-account-search"
+                  name="fa-bulk-category"
                   autoComplete="off"
-                  type="search"
-                  value={accountQuery}
-                  placeholder="输入科目编码、名称或类别…"
-                  onChange={(event) => setAccountQuery(event.target.value)}
+                  value={bulkCategory}
+                  placeholder="例如：机器设备…"
+                  onChange={(event) => setBulkCategory(event.target.value)}
                 />
               </label>
-              <label>
-                显示范围
-                <select
-                  name="fa-account-filter"
-                  autoComplete="off"
-                  value={assignmentFilter}
-                  onChange={(event) =>
-                    setAssignmentFilter(event.target.value as AssignmentFilter)
-                  }
-                >
-                  <option value="all">全部科目</option>
-                  <option value="candidate">固定资产候选</option>
-                  <option value="cost">固定资产原值</option>
-                  <option value="depreciation">累计折旧</option>
-                  <option value="excluded">已排除</option>
-                </select>
-              </label>
-              <div
-                className="fa-tbje-bulk-actions"
-                aria-label="批量设置当前筛选结果"
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={!bulkCategory.trim()}
+                onClick={applyCategoryToAll}
               >
-                <span>
-                  当前筛选共{" "}
-                  {filteredAssignments.length.toLocaleString("zh-CN")} 项
-                </span>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={() => applyRoleToFiltered("cost")}
-                >
-                  设为原值
-                </Button>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={() => applyRoleToFiltered("depreciation")}
-                >
-                  设为折旧
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  onClick={() => applyRoleToFiltered("excluded")}
-                >
-                  全部排除
-                </Button>
-              </div>
-              <div className="fa-tbje-bulk-category">
-                <label>
-                  批量资产类别
-                  <Input
-                    name="fa-bulk-category"
-                    autoComplete="off"
-                    value={bulkCategory}
-                    placeholder="例如：机器设备…"
-                    onChange={(event) => setBulkCategory(event.target.value)}
-                  />
-                </label>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  disabled={!bulkCategory.trim()}
-                  onClick={applyCategoryToFiltered}
-                >
-                  应用到当前筛选
-                </Button>
-              </div>
+                应用到全部科目
+              </Button>
+              <span>
+                批量操作对全部 {assignments.length.toLocaleString("zh-CN")}{" "}
+                个科目生效
+              </span>
             </div>
             <div className="fa-tbje-account-table-wrap">
               <table className="fa-tbje-account-table fa-tbje-review-table">
@@ -1265,7 +1203,7 @@ export function FaTbJePage() {
                   {!pagedAssignments.length && (
                     <tr>
                       <td colSpan={4} className="fa-tbje-empty-table">
-                        当前筛选没有科目。
+                        没有可复核的科目。
                       </td>
                     </tr>
                   )}
@@ -1433,10 +1371,11 @@ export function FaTbJePage() {
               </div>
             </CardContent>
           </Card>
-          {job && <JobProgress job={job} />}
-          <ResultView value={result} />
+          {/* 任务完成后的进度横幅由结果卡片接管，跑动中才显示进度条。 */}
+          {job && job.phase !== "completed" && <JobProgress job={job} />}
+          <FaTbJeResultCard value={result} />
           <FaTbJeSummaryPreview value={result} />
-          <FaTbJePreviewDetails value={result} />
+          <FaTbJeCounterpartPreview value={result} />
         </div>
       )}
     </div>
@@ -1455,109 +1394,287 @@ function FaTbJeSummaryPreview({ value }: { value: unknown }) {
     return null;
   }
   const columns = summary.columns as string[];
-  const rows = summary.rows as Array<{
-    section?: string;
-    item?: string;
-    values?: unknown[];
-  }>;
+  const rows = summary.rows as FaSummaryRow[];
   if (rows.length === 0) return null;
-  let lastSection: string | null = null;
   return (
     <Card variant="section">
       <CardHeader className="fa-tbje-card-head">
         <CardTitle>固定资产汇总变动表（预览）</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="fa-tbje-account-table-wrap fa-tbje-summary-preview">
-          <table className="fa-tbje-account-table">
-            <thead>
-              <tr>
-                <th aria-label="分类" />
-                <th>变动项目</th>
-                <th>合计</th>
-                {columns.map((column) => (
-                  <th key={column} title={column}>
-                    {column}
-                  </th>
+        <FaSummaryTable columns={columns} rows={rows} />
+      </CardContent>
+    </Card>
+  );
+}
+
+export type FaSummaryRow = {
+  section?: string;
+  item?: string;
+  values?: unknown[];
+};
+
+/** 汇总变动表的表体：两期清单模式的合并预览与 TB＋JE 的生成预览共用，
+    保证两个入口看到的版式、千分位与子项缩进完全一致。 */
+export function FaSummaryTable({
+  columns,
+  rows,
+}: {
+  columns: string[];
+  rows: FaSummaryRow[];
+}) {
+  let lastSection: string | null = null;
+  return (
+    <div className="fa-tbje-account-table-wrap fa-tbje-summary-preview">
+      <table className="fa-tbje-account-table">
+        <thead>
+          <tr>
+            <th aria-label="分类" />
+            <th>变动项目</th>
+            <th>合计</th>
+            {columns.map((column) => (
+              <th key={column} title={column}>
+                {column}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => {
+            const section =
+              row.section && row.section !== lastSection ? row.section : "";
+            lastSection = row.section ?? lastSection;
+            const values = Array.isArray(row.values) ? row.values : [];
+            const total = values.reduce<number>(
+              (sum, item) => sum + (Number(item) || 0),
+              0,
+            );
+            const isDiff = row.section === "勾稽差异";
+            // "——其中-××"子项去前缀缩进展示，主干行加粗，避免长项目名折成多行。
+            const item = row.item ?? "";
+            const isSub = item.startsWith("——");
+            return (
+              <tr key={index} className={isDiff ? "fa-tbje-summary-diff" : undefined}>
+                <td className="fa-tbje-summary-section">{section}</td>
+                <td
+                  className={
+                    isSub
+                      ? "fa-tbje-summary-item fa-tbje-summary-item-sub"
+                      : "fa-tbje-summary-item"
+                  }
+                  title={item}
+                >
+                  {isSub ? item.replace(/^——/, "") : item}
+                </td>
+                <td className="fa-tbje-num fa-tbje-summary-total">
+                  {formatPreviewAmount(total)}
+                </td>
+                {values.map((cell, cellIndex) => (
+                  <td key={cellIndex} className="fa-tbje-num">
+                    {formatPreviewAmount(cell)}
+                  </td>
                 ))}
               </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, index) => {
-                const section =
-                  row.section && row.section !== lastSection ? row.section : "";
-                lastSection = row.section ?? lastSection;
-                const values = Array.isArray(row.values) ? row.values : [];
-                const total = values.reduce<number>(
-                  (sum, item) => sum + (Number(item) || 0),
-                  0,
-                );
-                const isDiff = row.section === "勾稽差异";
-                return (
-                  <tr key={index} className={isDiff ? "fa-tbje-summary-diff" : undefined}>
-                    <td className="fa-tbje-summary-section">{section}</td>
-                    <td>{row.item}</td>
-                    <td className="fa-tbje-num">{formatPreviewAmount(total)}</td>
-                    {values.map((cell, cellIndex) => (
-                      <td key={cellIndex} className="fa-tbje-num">
-                        {formatPreviewAmount(cell)}
-                      </td>
-                    ))}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** 对方科目预览：与导出文件里的「原值透视表」「累计折旧透视表」同一套聚合
+    与版式（科目｜借方金额｜贷方金额＋合计行），预览阶段即可核对方科目的
+    借贷构成，确认后再生成正式 Excel。 */
+function FaTbJeCounterpartPreview({ value }: { value: unknown }) {
+  const pivots = (value as { counterpartPivots?: unknown } | null | undefined)
+    ?.counterpartPivots as
+    | { cost?: CounterpartRow[]; depreciation?: CounterpartRow[] }
+    | undefined;
+  if (!pivots) return null;
+  const cost = Array.isArray(pivots.cost) ? pivots.cost : [];
+  const depreciation = Array.isArray(pivots.depreciation)
+    ? pivots.depreciation
+    : [];
+  if (!cost.length && !depreciation.length) return null;
+  return (
+    <Card variant="section">
+      <CardHeader className="fa-tbje-card-head">
+        <div>
+          <CardTitle>对方科目预览</CardTitle>
+          <p>
+            出现原值／折旧变动的凭证，其全部科目按借贷净额列示，与导出文件的两张透视表一致。
+          </p>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="fa-tbje-pivot-grid">
+          <FaPivotTable title="原值对方科目" rows={cost} />
+          <FaPivotTable title="累计折旧对方科目" rows={depreciation} />
         </div>
       </CardContent>
     </Card>
   );
 }
 
-/** 生成预览的新增明细（引擎只回传前若干笔）：让「生成预览」有内容可看，
-    确认方式判定与金额方向后再点「生成文件」。 */
-function FaTbJePreviewDetails({ value }: { value: unknown }) {
-  const preview = (value as { preview?: unknown } | null | undefined)?.preview;
-  if (!Array.isArray(preview) || preview.length === 0) return null;
-  const rows = preview as Array<Record<string, unknown>>;
+type CounterpartRow = { account?: unknown; debit?: unknown; credit?: unknown };
+
+function FaPivotTable({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: CounterpartRow[];
+}) {
+  const totals = rows.reduce<{ debit: number; credit: number }>(
+    (acc, row) => ({
+      debit: acc.debit + (Number(row.debit) || 0),
+      credit: acc.credit + (Number(row.credit) || 0),
+    }),
+    { debit: 0, credit: 0 },
+  );
   return (
-    <Card variant="section">
-      <CardHeader className="fa-tbje-card-head">
-        <CardTitle>新增明细预览（前 {rows.length} 笔）</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="fa-tbje-account-table-wrap fa-tbje-details-preview">
-          <table className="fa-tbje-account-table">
-            <thead>
-              <tr>
-                <th>主体</th>
-                <th>凭证</th>
-                <th>资产类别</th>
-                <th>类型</th>
-                <th>新增原值</th>
-                <th>新增折旧</th>
-                <th>新增方式</th>
+    <div className="fa-tbje-pivot-block">
+      <h4>{title}</h4>
+      <div className="fa-tbje-account-table-wrap">
+        <table className="fa-tbje-account-table fa-tbje-pivot-preview">
+          <thead>
+            <tr>
+              <th>科目</th>
+              <th>借方金额</th>
+              <th>贷方金额</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={index}>
+                <td
+                  className="fa-tbje-pivot-account"
+                  title={String(row.account ?? "")}
+                >
+                  {String(row.account ?? "")}
+                </td>
+                <td className="fa-tbje-num">{formatPivotAmount(row.debit)}</td>
+                <td className="fa-tbje-num">{formatPivotAmount(row.credit)}</td>
               </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, index) => (
-                <tr key={index}>
-                  <td title={String(row.entity ?? "")}>{String(row.entity ?? "")}</td>
-                  <td>{String(row.voucher ?? "")}</td>
-                  <td>{String(row.category ?? "")}</td>
-                  <td>{String(row.kind ?? "")}</td>
-                  <td className="fa-tbje-num">
-                    {formatPreviewAmount(row.original)}
-                  </td>
-                  <td className="fa-tbje-num">
-                    {formatPreviewAmount(row.depreciation)}
-                  </td>
-                  <td>{String(row.method ?? "")}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+            ))}
+            {!rows.length && (
+              <tr>
+                <td colSpan={3} className="fa-tbje-empty-table">
+                  期间内没有相关凭证。
+                </td>
+              </tr>
+            )}
+            <tr className="fa-tbje-pivot-total">
+              <td>合计</td>
+              <td className="fa-tbje-num">{formatPivotAmount(totals.debit)}</td>
+              <td className="fa-tbje-num">
+                {formatPivotAmount(totals.credit)}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/** 与导出格式 `#,##0.00;[Red]-#,##0.00;-` 对齐：零值显示短横线。 */
+function formatPivotAmount(value: unknown): string {
+  const num = Number(value);
+  if (!Number.isFinite(num) || Math.abs(num) < 0.005) return "-";
+  return num.toLocaleString("zh-CN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+/** 任务结果卡片：完成状态、关键指标、输出文件与告警集中在一处，
+    替代原先横幅＋平铺链接的完成态。 */
+function FaTbJeResultCard({ value }: { value: unknown }) {
+  if (!value || typeof value !== "object") return null;
+  const obj = value as Record<string, unknown>;
+  const outputPaths = Array.isArray(obj.outputPaths)
+    ? obj.outputPaths.filter(
+        (item): item is string => typeof item === "string",
+      )
+    : [];
+  const warnings = Array.isArray(obj.warnings)
+    ? obj.warnings.filter(
+        (item): item is string => typeof item === "string",
+      )
+    : [];
+  const metrics = (
+    [
+      ["TB 科目行", obj.tbRows],
+      ["JE 明细行", obj.jeRows],
+      ["新增笔数", obj.additions],
+      ["处置笔数", obj.disposals],
+      ["勾稽差异类别", obj.reconciliationDifferences],
+    ] as Array<[string, unknown]>
+  ).filter(([, v]) => typeof v === "number");
+  const exported = outputPaths.length > 0;
+  return (
+    <Card variant="section" className="fa-tbje-result-card">
+      <CardContent className="form-stack">
+        <div className="fa-tbje-result-head">
+          <span className="fa-tbje-result-check" aria-hidden="true">
+            <svg viewBox="0 0 16 16">
+              <path
+                d="M3 8.5 6.5 12 13 4.5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </span>
+          <div className="fa-tbje-result-title">
+            <strong>
+              {exported ? "固定资产底稿已生成" : "预览已生成"}
+            </strong>
+            <p>
+              {exported
+                ? "五张业务表导出完成，核对指标后打开文件复核。"
+                : "预览数据与导出文件一致，确认后可生成正式 Excel。"}
+            </p>
+          </div>
+          {exported && (
+            <span className="fa-tbje-result-badge">已完成</span>
+          )}
         </div>
+        {!!metrics.length && (
+          <div className="fa-tbje-result-metrics">
+            {metrics.map(([label, count]) => (
+              <span key={label}>
+                <b>{Number(count).toLocaleString("zh-CN")}</b>
+                {label}
+              </span>
+            ))}
+          </div>
+        )}
+        {outputPaths.map((path) => (
+          <div className="fa-tbje-result-file" key={path}>
+            <span className="fa-tbje-result-filename" title={path}>
+              {fileName(path)}
+            </span>
+            <Button type="button" onClick={() => void openOutput(path)}>
+              打开文件
+            </Button>
+          </div>
+        ))}
+        {!!warnings.length && (
+          <div className="warning-box fa-tbje-result-warnings">
+            <strong>需要注意（{warnings.length}）</strong>
+            <ul>
+              {warnings.slice(0, 20).map((warning, index) => (
+                <li key={`${warning}-${index}`}>{warning}</li>
+              ))}
+              {warnings.length > 20 && <li>另有 {warnings.length - 20} 项未显示。</li>}
+            </ul>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

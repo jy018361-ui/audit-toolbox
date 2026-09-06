@@ -68,6 +68,12 @@ describe("FileListDirectoryPage", () => {
     fireEvent.click(next);
 
     expect(screen.getByText("2. 确认输出并生成")).toBeInTheDocument();
+    expect(screen.getByLabelText("输出 Excel 文件")).toHaveValue(
+      "客户资料List.xlsx",
+    );
+    expect(
+      screen.queryByDisplayValue("C:\\客户资料List.xlsx"),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "生成文件清单" })).toBeEnabled();
     expect(screen.queryByText("3. 生成文件清单")).not.toBeInTheDocument();
   });

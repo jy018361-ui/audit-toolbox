@@ -523,7 +523,11 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
       )}
       <div className="dep-workbench">
         {activeStep === 0 && (
-          <Card variant="section" className="dep-source-card">
+          <Card
+            variant="section"
+            className="dep-source-card"
+            data-ui-state={busy ? "loading" : inspection ? "ready" : "empty"}
+          >
             <CardHeader className="dep-card-header">
               <div>
                 <CardTitle>导入期末固定资产清单</CardTitle>

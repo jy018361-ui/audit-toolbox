@@ -97,7 +97,7 @@ const EMPTY: JeMarkDraft = {
   inputPath: "",
   sheet: "",
   knownSheets: [],
-  headerRow: 1,
+  headerRow: 0,
   mapping: EMPTY_MAPPING,
   batches: [newBatch(0)],
   activeBatch: 0,
@@ -238,7 +238,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       ...EMPTY,
       inputPath: p.inputPath,
       sheet,
-      headerRow: p.headerRow ?? 1,
+      headerRow: p.headerRow ?? 0,
       mapping,
       batches:
         Array.isArray(p.targetBatches) && p.targetBatches.length
@@ -749,13 +749,14 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         sheet={draft.sheet}
         knownSheets={draft.knownSheets}
         headerRow={draft.headerRow}
+        detectedHeaderRow={draft.headerRow === 0 ? draft.inspect?.headerRow : undefined}
         dragHover={dragHover}
         busy={busy}
         job={job}
         needsReload={!draft.inspect && draft.knownSheets.length > 0}
         onBrowse={chooseInput}
         onClear={clearAll}
-        onSheetChange={(value) => invalidate({ sheet: value })}
+        onSheetChange={(value) => invalidate({ sheet: value, headerRow: 0 })}
         onHeaderRowChange={(value) => invalidate({ headerRow: value })}
         onInspect={inspect}
         onCancel={(jobId) => void jobCancel(jobId)}

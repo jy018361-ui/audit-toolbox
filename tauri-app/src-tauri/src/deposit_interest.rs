@@ -466,9 +466,20 @@ pub(crate) fn suggest_account_role(account: &str) -> &'static str {
             "relatedparty",
         ]);
 
-    // 利息收入：中国科目表 6051，SAP 常见 "Int Income" / "Interest Income"。
+    // 利息收入：名称线索为主；中国科目表 6051 是「其他业务收入」，只有明细名
+    // 也带「利息」时才算（02 号样例整级 6051 下挂着材料销售、水费，编码前缀
+    // 单独兜底会把它们全认成勾稽基准）。名称恰为「利息」两字的也认——07 号
+    // 样例的 66030002 就叫「利息」，与手续费、汇兑损益并列在 6603 财务费用下。
+    // 资产类编码（首位 1）先挡在门外：08 号样例的 1604010310 在建工程\待摊投资
+    // \存款利息收入是资本化利息，混进基准会把勾稽差异直接撑大。
+    let name_part: String = account
+        .split_whitespace()
+        .filter(|token| *token != code)
+        .collect::<Vec<_>>()
+        .join("");
     if !not_deposit_interest
-        && (code.starts_with("6051")
+        && code.chars().next() != Some('1')
+        && ((code.starts_with("6051") && value.contains("利息"))
             || has(&[
                 "利息收入",
                 "利息收益",
@@ -479,7 +490,8 @@ pub(crate) fn suggest_account_role(account: &str) -> &'static str {
                 "interestrevenue",
                 "intinc-",
                 "interestearned",
-            ]))
+            ])
+            || normalize_header(&name_part) == "利息")
     {
         return "interest_income";
     }
@@ -501,6 +513,7 @@ pub(crate) fn suggest_account_role(account: &str) -> &'static str {
         "clearing",
         "过渡",
         "清算",
+        "中转",
         "fxval",
         "valuation",
         "重估",
@@ -1246,7 +1259,9 @@ fn distinct_accounts(table: &FxTable, mapping: &Map<String, Value>) -> Vec<Strin
         .rows
         .iter()
         .map(|row| join_columns(row, &indexes))
-        .filter(|value| !value.is_empty())
+        .filter(|value| {
+            !value.is_empty() && !ledger_mapping::is_report_footer_value(value)
+        })
         .collect::<BTreeSet<_>>()
         .into_iter()
         .take(1000)
@@ -3157,6 +3172,45 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn tjepbc_tb_role_rules() {
+        // 6051 是「其他业务收入」：整级 6051 下挂的材料销售、水费与手续费
+        // 不是存款利息的勾稽基准（02/06 号 TBJEPBC 样例）。
+        assert_eq!(
+            suggest_account_role("6051050000 其他业务收入-材料销售"),
+            "excluded"
+        );
+        assert_eq!(suggest_account_role("6051080000 其他业务收入-水"), "excluded");
+        assert_eq!(
+            suggest_account_role("6051.01 其他业务收入_手续费收入"),
+            "excluded"
+        );
+        // 6051 下的利息明细仍要认（名称带「利息」）。
+        assert_eq!(
+            suggest_account_role("6051990001 其他业务收入-利息收入"),
+            "interest_income"
+        );
+        // 资产类编码下的资本化利息（08 号样例：在建工程-待摊投资-存款利息收入）
+        // 不进勾稽基准。
+        assert_eq!(
+            suggest_account_role("1604010310 1604010310\\在建工程\\原值\\待摊投资\\存款利息收入"),
+            "excluded"
+        );
+        // 名称恰为「利息」两字（07 号样例 66030002，与手续费/汇兑损益并列在
+        // 6603 下）是收入侧科目。
+        assert_eq!(suggest_account_role("66030002 利息"), "interest_income");
+        // 外币中转户不是可计息存款（05 号样例）。
+        assert_eq!(
+            suggest_account_role("1002989999 银行存款-外币中转"),
+            "excluded"
+        );
+        // 财务费用下的利息收入照旧。
+        assert_eq!(
+            suggest_account_role("6603020000 财务费用-利息收入"),
+            "interest_income"
+        );
     }
 
     #[test]

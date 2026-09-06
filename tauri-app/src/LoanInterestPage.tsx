@@ -17,6 +17,7 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { StepIndicator } from "@/components/StepIndicator";
 import { EmptyState } from "@/components/EmptyState";
+import { displayFileName } from "@/fileDisplay";
 import {
   applyLedgerReviewToDict,
   correctLedgerSourceKinds,
@@ -95,6 +96,16 @@ type LoanRow = {
 type ResultRateEdit = Partial<
   Pick<LoanRow, "rateType" | "fixedRate" | "benchmarkRate" | "spreadBps">
 >;
+/** TB 模式「利率确认」：粘贴的利率区域与 TB 借款明细匹配后的逐笔利率。 */
+type PasteRateRow = {
+  loanId: string;
+  rateType: "fixed" | "floating";
+  fixedRate?: number;
+  benchmarkRate?: number;
+  spreadBps?: number;
+  matchStatus?: string;
+  matchBasis?: string;
+};
 /** 与 Rust `ledger_mapping::loan_roles()` 同名同序的兜底清单（浏览器预览模式用）。 */
 const LOAN_ROLE_FALLBACK: Record<string, string> = {
   principal: "本金",
@@ -176,14 +187,15 @@ export function loanEquation(
     | "closingPrincipal"
     | "ledgerClosing"
   >,
-) {
+): number | null {
   // 差异＝推算期末（期初＋增加－减少）－台账期末；台账无期末列时无从对照，
-  // 退回推算值自身（差异恒 0）。有账面数的行差异是真实的独立勾稽。
+  // 不出假 0，返回 null 让界面显示为空。有账面数的行差异是真实的独立勾稽。
+  if (r.ledgerClosing == null) return null;
   return (
     r.openingPrincipal +
     r.additions -
     r.reductions -
-    (r.ledgerClosing ?? r.closingPrincipal)
+    r.ledgerClosing
   );
 }
 /** TB/JE 的余额与科目走统一角色名，同一语义有几种写法时任一到位即可。 */
@@ -267,6 +279,11 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   >({});
   const [outputPath, setOutputPath] = useState("");
   const [rows, setRows] = useState<LoanRow[]>([]);
+  // 利率确认（TB 模式）：用户从 Excel 复制粘贴的利率区域原文，与匹配出的逐笔利率。
+  // 粘贴原文保留（方便换映射后一键重匹配），匹配结果随 TB 来源/映射变化作废。
+  const [rateText, setRateText] = useState("");
+  const [pasteRates, setPasteRates] = useState<PasteRateRow[]>([]);
+  const [rateNote, setRateNote] = useState("");
   const [result, setResult] = useState<Record<string, unknown>>();
   const [error, setError] = useState("");
   const [pairStatus, setPairStatus] = useState("");
@@ -325,6 +342,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const setSource = (kind: Kind, next: Partial<Source>) => {
     invalidateResults();
     if (kind === "ledger") setRateEdits({});
+    // TB 的文件/Sheet/映射一变，逐笔借款清单就可能变，粘贴匹配结果作废；
+    // 粘贴原文保留，改完映射回来一键重匹配即可。
+    if (kind === "tb") setPasteRates([]);
     setSources((v) => ({ ...v, [kind]: { ...v[kind], ...next } }));
   };
   const activeKinds: Kind[] = mode === "ledger" ? ["ledger"] : ["tb", "je"];
@@ -360,6 +380,39 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       v.map((row, i) => (i === index ? { ...row, ...patch } : row)),
     );
     setResultRateEdits((v) => ({ ...v, [id]: { ...v[id], ...patch } }));
+  };
+  // 步骤 2 停在"可选的利率确认"上时，禁用的下一步其实卡的是步骤 1 的映射——
+  // 把缺什么明说并给一键返回，不让用户在可选步骤上猜哪里没完成。
+  const mappingGaps = activeKinds.flatMap((kind) =>
+    loanMissing(
+      kind,
+      sources[kind].mapping,
+      sources[kind].inspection?.forms,
+    ).map((item) => `${kind.toUpperCase()}：${item}`),
+  );
+  /** 利率确认（TB 模式）：粘贴文本交引擎解析列，并按借款明细模糊匹配利率。 */
+  async function matchRates() {
+    setBusy(true);
+    setError("");
+    try {
+      const res = (await engineCall("loan.match_rates", {
+        tbSource: source("tb"),
+        rateText,
+      })) as { rows: PasteRateRow[]; note: string };
+      invalidateResults();
+      setPasteRates(res.rows ?? []);
+      setRateNote(res.note ?? "");
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  const editPasteRate = (index: number, patch: Partial<PasteRateRow>) => {
+    invalidateResults();
+    setPasteRates((v) =>
+      v.map((row, i) => (i === index ? { ...row, ...patch } : row)),
+    );
   };
   async function browse(kind: Kind) {
     const picked = await pickPath("file", "选择表格文件", [
@@ -558,6 +611,18 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       ledgerSource: source("ledger"),
       tbSource: source("tb"),
       jeSource: source("je"),
+      // TB 模式的利率来自「利率确认」的粘贴匹配结果（用户已逐笔确认/补填）；
+      // 引擎按借款明细归一化对应，优先于利率台账文件（后者仅历史任务恢复用）。
+      rateRows:
+        mode === "tb" && pasteRates.length
+          ? pasteRates.map((r) => ({
+              loanId: r.loanId,
+              rateType: r.rateType,
+              fixedRate: r.fixedRate,
+              benchmarkRate: r.benchmarkRate,
+              spreadBps: r.spreadBps,
+            }))
+          : undefined,
       rateLedgerSource: source("rateLedger"),
       rateOverrides: resultRateEdits,
       ...(outputPath ? { outputPath } : {}),
@@ -589,6 +654,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       tbSource?: LoanSourceParams;
       jeSource?: LoanSourceParams;
       rateLedgerSource?: LoanSourceParams;
+      rateRows?: PasteRateRow[];
       outputPath?: string;
     };
     const paramsKey: Record<Kind, keyof typeof p> = {
@@ -633,6 +699,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     invalidateResults();
     setSources(next);
     setRateEdits({});
+    // 粘贴匹配确认过的逐笔利率一并回填（粘贴原文不可恢复，需要时可重新粘贴）。
+    if (Array.isArray(p.rateRows) && p.rateRows.length)
+      setPasteRates(p.rateRows);
     if (p.mode === "ledger" || p.mode === "tb") setMode(p.mode);
     if (typeof p.reportEnd === "string" && p.reportEnd)
       setReportEnd(p.reportEnd);
@@ -880,32 +949,49 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               </CardHeader>
               <CardContent>
                 <p className="fx-hint">
-                  可上传借款台账自动补充；未匹配项可在测算结果中逐笔填写。
+                  在 Excel 中框选利率台账区域（建议连同表头行）复制后粘贴到下面；工具按借款明细模糊匹配利率，未匹配的可逐笔补填。
                 </p>
-                <Upload
-                  kind="rateLedger"
-                  source={sources.rateLedger}
-                  busy={busy}
-                  browse={() => void browse("rateLedger")}
-                  clear={() => setSource("rateLedger", empty())}
+                <textarea
+                  className="loan-rate-paste"
+                  rows={5}
+                  spellCheck={false}
+                  aria-label="粘贴借款利率区域"
+                  placeholder={
+                    "从 Excel 复制后粘贴到这里，例如：\n合同名称\t执行利率\t加点BP\n工行短期流动借款\t3.85%\t90"
+                  }
+                  value={rateText}
+                  onChange={(e) => setRateText(e.target.value)}
                 />
+                <div className="loan-paste-actions">
+                  <Button
+                    variant="secondary"
+                    disabled={
+                      busy ||
+                      !rateText.trim() ||
+                      !sources.tb.inspection ||
+                      !sources.tb.mapping.loanId?.trim()
+                    }
+                    onClick={() => void matchRates()}
+                  >
+                    解析并匹配利率
+                  </Button>
+                  {rateNote && (
+                    <span className="loan-paste-note" title={rateNote}>
+                      {rateNote}
+                    </span>
+                  )}
+                </div>
+                {sources.tb.inspection &&
+                  !sources.tb.mapping.loanId?.trim() && (
+                    <p className="fx-hint">
+                      TB 尚未映射「借款明细/辅助核算」，请先回到「上传与识别」完成映射，再匹配利率。
+                    </p>
+                  )}
               </CardContent>
             </Card>
           )}
-          {mode === "tb" && sources.rateLedger.inspection && (
-            <Mapping
-              kind="rateLedger"
-              source={sources.rateLedger}
-              busy={busy}
-              change={(mapping) => setSource("rateLedger", { mapping })}
-              header={(sheet, row, depth) =>
-                void inspect("rateLedger", undefined, {
-                  sheet,
-                  headerRow: row,
-                  headerDepth: depth,
-                })
-              }
-            />
+          {mode === "tb" && pasteRates.length > 0 && (
+            <PasteRateTable rows={pasteRates} onEdit={editPasteRate} />
           )}
           <div className="fx-step-actions">
             <Button variant="secondary" onClick={() => setStep(0)}>
@@ -915,6 +1001,20 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               下一步：测算与底稿
             </Button>
           </div>
+          {!mappingsReady && (
+            <p className="fx-hint loan-step-gate">
+              {sourcesReady ? (
+                <>
+                  下一步前需先补齐字段映射：{mappingGaps.join("、")}。
+                  <Button variant="link" onClick={() => setStep(0)}>
+                    返回补齐映射
+                  </Button>
+                </>
+              ) : (
+                "请先回到「上传与识别」完成文件识别。"
+              )}
+            </p>
+          )}
         </>
       )}
 
@@ -938,7 +1038,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                   输出文件
                   <span className="loan-output-row">
                     <Input
-                      value={outputPath}
+                      value={displayFileName(outputPath)}
                       readOnly
                       title={outputPath || undefined}
                       placeholder="默认保存到源文件目录"
@@ -1028,12 +1128,7 @@ function Upload({
   browse: () => void;
   clear: () => void;
 }) {
-  const name =
-    kind === "ledger"
-      ? "完整借款台账"
-      : kind === "rateLedger"
-        ? "借款利率台账"
-        : kind.toUpperCase();
+  const name = kind === "ledger" ? "完整借款台账" : kind.toUpperCase();
   return (
     <div className="loan-upload">
       <b>{name}</b>
@@ -1200,7 +1295,16 @@ function Mapping({
         rows={x.preview}
         mapping={source.mapping}
         roles={roleList}
-        groups={formGroups(groupKind, roleList, forms, source.mapping)}
+        groups={formGroups(
+          groupKind,
+          roleList,
+          forms,
+          source.mapping,
+          // TB＋JE 测算按「借款明细/辅助核算」逐笔还原本金，缺它整表算不了
+          // （引擎直接跳过无明细的行）。校验清单（ANY_OF）早已拦，这里把
+          // 下拉同步标成必填，两边口径一致，不再出现"选填却红框"的矛盾。
+          kind === "tb" ? ["loanId"] : [],
+        )}
         requirementOf={
           hit ? (role) => loanRoleRequirement(hit, role) : undefined
         }
@@ -1265,6 +1369,134 @@ function Mapping({
       />
       {review && <p className="fx-hint">{review}</p>}
     </>
+  );
+}
+
+/** TB 模式「利率确认」：粘贴匹配出的逐笔利率，可改类型/利率/加点，未匹配的可补填。 */
+function PasteRateTable({
+  rows,
+  onEdit,
+}: {
+  rows: PasteRateRow[];
+  onEdit: (index: number, patch: Partial<PasteRateRow>) => void;
+}) {
+  const exact = rows.filter((r) => r.matchStatus === "精确匹配").length;
+  const fuzzy = rows.filter((r) => r.matchStatus === "模糊匹配").length;
+  const rest = rows.length - exact - fuzzy;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>借款利率匹配结果</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="fx-hint">
+          共 {rows.length} 笔借款：精确匹配 {exact} 笔、模糊匹配 {fuzzy} 笔
+          {rest > 0 ? `、待核对或补填 ${rest} 笔` : ""}。
+          模糊匹配与补填的利率请核对后使用；留空的按无利率进入测算，可在结果表逐笔补。
+        </p>
+        <div className="loan-rate-confirmation loan-rate-match">
+          <table>
+            <thead>
+              <tr>
+                <th>借款明细</th>
+                <th>匹配依据</th>
+                <th>利率类型</th>
+                <th>固定/基准利率</th>
+                <th>
+                  加减点（BP）
+                  <JargonTip
+                    term="加减点（BP）"
+                    text="BP＝万分之一。浮动利率＝基准利率＋加减点BP÷10000。"
+                  />
+                </th>
+                <th>状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={`${row.loanId}-${index}`}>
+                  <td title={row.loanId}>{row.loanId}</td>
+                  <td
+                    className="loan-match-basis"
+                    title={row.matchBasis ?? row.loanId}
+                  >
+                    {row.matchBasis ?? "手工补填"}
+                  </td>
+                  <td>
+                    <select
+                      className="loan-rate-pick"
+                      value={row.rateType}
+                      onChange={(e) => {
+                        const rateType = e.target
+                          .value as PasteRateRow["rateType"];
+                        onEdit(
+                          index,
+                          rateType === "floating"
+                            ? { rateType, fixedRate: undefined }
+                            : {
+                                rateType,
+                                benchmarkRate: undefined,
+                                spreadBps: undefined,
+                              },
+                        );
+                      }}
+                    >
+                      <option value="fixed">固定</option>
+                      <option value="floating">浮动</option>
+                    </select>
+                  </td>
+                  <td>
+                    <NumberInput
+                      label={`${row.loanId}的${
+                        row.rateType === "fixed" ? "固定利率" : "基准利率"
+                      }`}
+                      step=".0001"
+                      value={
+                        row.rateType === "fixed"
+                          ? (row.fixedRate ?? "")
+                          : (row.benchmarkRate ?? "")
+                      }
+                      onCommit={(text) =>
+                        onEdit(
+                          index,
+                          row.rateType === "fixed"
+                            ? { fixedRate: loanRateValue(text) }
+                            : { benchmarkRate: loanRateValue(text) },
+                        )
+                      }
+                    />
+                  </td>
+                  <td>
+                    <NumberInput
+                      label={`${row.loanId}的加点 BP`}
+                      step="1"
+                      disabled={row.rateType !== "floating"}
+                      value={row.spreadBps ?? 0}
+                      onCommit={(text) =>
+                        onEdit(index, { spreadBps: loanBps(text) })
+                      }
+                    />
+                  </td>
+                  <td>
+                    <Badge
+                      variant="outline"
+                      className={
+                        row.matchStatus === "精确匹配"
+                          ? "badge-ready"
+                          : "badge-warning"
+                      }
+                      title={row.matchBasis}
+                    >
+                      {row.matchStatus ?? "待补填"}
+                    </Badge>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

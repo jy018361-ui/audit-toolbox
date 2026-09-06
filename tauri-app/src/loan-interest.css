@@ -209,6 +209,72 @@
   background: var(--success-bg);
   color: var(--success-fg);
 }
+/* 利率确认（TB 模式）：从 Excel 复制粘贴利率区域，替代此前的利率台账文件上传。 */
+.loan-rate-paste {
+  width: 100%;
+  min-height: 120px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+  border: 1px dashed var(--control-border);
+  border-radius: 10px;
+  background: var(--muted);
+  color: var(--foreground);
+  resize: vertical;
+}
+.loan-rate-paste:focus {
+  outline: none;
+  border-color: var(--primary);
+  background: var(--background);
+}
+.loan-paste-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+}
+.loan-paste-note {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 匹配结果表：六列，列宽与逐行确认表（.loan-rate-confirmation 默认）不同。 */
+.loan-rate-match table {
+  min-width: 960px;
+  table-layout: fixed;
+}
+.loan-rate-match th:first-child {
+  width: 22%;
+}
+.loan-rate-match th:nth-child(2) {
+  width: 26%;
+}
+.loan-rate-match th:nth-child(3),
+.loan-rate-match th:nth-child(4),
+.loan-rate-match th:nth-child(5) {
+  width: 14%;
+}
+.loan-rate-match th:last-child {
+  width: 10%;
+}
+.loan-rate-match .loan-match-basis {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 步骤间门禁说明：下一步被映射卡住时，明说缺什么并给返回入口。 */
+.loan-step-gate {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
 .loan-export-done > strong {
   flex: 0 0 auto;
 }

@@ -3,14 +3,25 @@
   max-width: 1380px;
 }
 
+/* 此页只在当前步骤渲染一张工作卡。全局步骤条与工作台各自的外边距
+   原来会叠成 44px，任务状态切换时尤其像中间凭空多出一块空白。 */
+.fa-dep-page .step-indicator {
+  margin: var(--sp-4) 0 var(--sp-3);
+}
+
+.fa-dep-page > .job-progress {
+  margin: 0 0 var(--sp-3);
+}
+
 .dep-workbench {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: var(--sp-4);
-  margin-top: var(--sp-5);
+  margin-top: 0;
 }
 
 .dep-workbench [data-slot="card"] {
+  --card-spacing: var(--sp-4);
   gap: var(--sp-4);
   border-radius: var(--r-lg);
 }
@@ -58,8 +69,8 @@
 
 .dep-source-grid {
   display: grid;
-  grid-template-columns: minmax(420px, 1.35fr) minmax(320px, 0.65fr);
-  gap: var(--sp-6);
+  grid-template-columns: minmax(420px, 1.5fr) minmax(320px, 0.75fr);
+  gap: var(--sp-4);
   align-items: start;
 }
 
@@ -70,7 +81,7 @@
 }
 
 .dep-upload-field .file-drop-zone {
-  min-height: 94px;
+  min-height: 88px;
   border-color: color-mix(in srgb, var(--brand) 48%, var(--control-border));
   background: color-mix(in srgb, var(--surface-muted) 48%, var(--surface));
 }
@@ -81,7 +92,7 @@
 }
 
 .dep-upload-field .file-drop-slot {
-  min-height: 94px;
+  min-height: 88px;
 }
 
 .dep-field-note {
@@ -93,8 +104,8 @@
 }
 
 .dep-source-actions {
-  margin-top: var(--sp-4);
-  padding-top: var(--sp-4);
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
   border-top: 1px solid var(--dep-rule);
 }
 

@@ -1574,6 +1574,15 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   <div
                     key={group.id}
                     className={`tbje-group${group.needsReview ? " tbje-group-review" : ""}`}
+                    data-ui-state={
+                      expanded?.groupId === group.id
+                        ? "expanded"
+                        : llmReviews[group.id]
+                          ? "reviewed"
+                          : group.needsReview
+                            ? "attention"
+                            : "ready"
+                    }
                   >
                     <div className="tbje-group-row">
                       <div className="tbje-group-identity">
@@ -1753,6 +1762,11 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                               variant="secondary"
                               size="sm"
                               disabled={busy || !available}
+                              aria-label={
+                                active
+                                  ? `收起 ${kind.toUpperCase()} 映射`
+                                  : `查看并调整 ${kind.toUpperCase()} 映射`
+                              }
                               aria-expanded={active}
                               aria-controls={`tbje-mapping-${group.id}-${kind}`}
                               onClick={() =>
@@ -1765,8 +1779,8 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                             >
                               <Eye aria-hidden="true" />
                               {active
-                                ? `收起 ${kind.toUpperCase()} 映射`
-                                : `查看并调整 ${kind.toUpperCase()} 映射`}
+                                ? `收起 ${kind.toUpperCase()}`
+                                : `${kind.toUpperCase()} 字段映射`}
                             </Button>
                           );
                         })}

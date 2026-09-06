@@ -59,6 +59,14 @@ describe("18 个工具的动态任务状态契约", () => {
     expect(screen.getByRole("progressbar").hasAttribute("value")).toBe(false);
     expect(screen.getByRole("button", { name: "取消任务" })).toBeTruthy();
     rerender(
+      <JobProgress
+        job={makeJob({ total: Number.NaN })}
+        onCancel={() => undefined}
+      />,
+    );
+    expect(screen.getByRole("progressbar").getAttribute("max")).toBe("1");
+    expect(screen.getByRole("progressbar").hasAttribute("value")).toBe(false);
+    rerender(
       <JobProgress job={makeJob({ phase: "failed", message: "失败", severity: "error" })} onCancel={() => undefined} />,
     );
     expect(screen.queryByRole("button", { name: "取消任务" })).toBeNull();

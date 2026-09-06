@@ -72,7 +72,7 @@ export type { Mapping, MappingChange, MappingChangeSource } from "./ledgerMappin
 
 export type Batch = { name: string; accounts: string[]; presetId?: string };
 export type KanzhangDraft = { inputPath: string; sheet: string; knownSheets:string[]; headerRow: number; inspect?: Inspect; mapping: Mapping; batches: Batch[]; activeBatch: number; excludes: string[]; outputPath: string; outputTouched: boolean; includePivot: boolean; includeVoucherTypes: boolean; markLossTransfer: boolean; llmAnalysis:boolean; pivotRows: string[]; pivotColumns: string[]; pivotValues: string[]; step: number };
-const EMPTY: KanzhangDraft = { inputPath:"",sheet:"",knownSheets:[],headerRow:1,mapping:EMPTY_MAPPING,batches:[{name:"批次1",accounts:[]}],activeBatch:0,excludes:[],outputPath:"",outputTouched:false,includePivot:true,includeVoucherTypes:true,markLossTransfer:true,llmAnalysis:true,pivotRows:[],pivotColumns:[],pivotValues:[],step:1 };
+const EMPTY: KanzhangDraft = { inputPath:"",sheet:"",knownSheets:[],headerRow:0,mapping:EMPTY_MAPPING,batches:[{name:"批次1",accounts:[]}],activeBatch:0,excludes:[],outputPath:"",outputTouched:false,includePivot:true,includeVoucherTypes:true,markLossTransfer:true,llmAnalysis:true,pivotRows:[],pivotColumns:[],pivotValues:[],step:1 };
 const CACHE="audit-toolbox.kanzhang.draft.v4";
 const loadDraft=():KanzhangDraft=>{try{return {...EMPTY,...JSON.parse(sessionStorage.getItem(CACHE)||"{}")};}catch{return EMPTY;}};
 export const kanzhangErrorText=ledgerErrorText;
@@ -116,7 +116,16 @@ export const AUDIT_FOCUS_PRESETS:AuditFocusPreset[]=[
 ];
 export type PresetMatch={preset:AuditFocusPreset;accounts:string[]};
 export type PresetApplySummary={matches:PresetMatch[];skippedExcludes:string[];created:number;updated:number};
-export const matchAuditFocusPresets=(values:string[],codes:string[]):PresetMatch[]=>AUDIT_FOCUS_PRESETS.map(preset=>({preset,accounts:values.filter((value,index)=>preset.pattern.test(value)||preset.codePrefixes.some(prefix=>(codes[index]??"").trim().startsWith(prefix)))}));
+// 名称词典优先、损益编码让路：摊销/折旧类费用科目（`5301 研发支出-…-无形资产摊销`、
+// `6602 管理费用-折旧和长期待摊费用`）名称里带资产字样，但它们是损益科目，
+// 归各自的费用批次（6601/6602/6603 编码前缀），不能靠名称再混进资产批次。
+// 无编码列（codes 为空）时没有这层证据，维持纯名称匹配。
+const looksLikePnlCode=(code:string):boolean=>/^[567]/.test(code);
+export const matchAuditFocusPresets=(values:string[],codes:string[]):PresetMatch[]=>AUDIT_FOCUS_PRESETS.map(preset=>({preset,accounts:values.filter((value,index)=>{
+  const code=(codes[index]??"").trim();
+  const nameHit=preset.pattern.test(value)&&!looksLikePnlCode(code);
+  return nameHit||preset.codePrefixes.some(prefix=>code.startsWith(prefix));
+})}));
 export function applyAuditFocusPresetBatches(batches:Batch[],values:string[],codes:string[],excludes:string[]):{batches:Batch[];summary:PresetApplySummary}{
   const excluded=new Set(excludes);
   const matches=matchAuditFocusPresets(values,codes);
@@ -238,7 +247,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     autoReadKeyRef.current=`${p.inputPath}|${sheet.trim()}`;
     setAutoReadSeq(value=>value+1);
     llmGeneration.current+=1;
-    setDraft({...EMPTY,inputPath:p.inputPath,sheet,headerRow:p.headerRow??1,mapping,batches,activeBatch:0,excludes:p.excludeAccounts??[],outputPath:p.outputPath??"",outputTouched:Boolean(p.outputPath),markLossTransfer:p.markLossTransfer??true,pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[],pivotValues:p.pivotValues??[]});
+    setDraft({...EMPTY,inputPath:p.inputPath,sheet,headerRow:p.headerRow??0,mapping,batches,activeBatch:0,excludes:p.excludeAccounts??[],outputPath:p.outputPath??"",outputTouched:Boolean(p.outputPath),markLossTransfer:p.markLossTransfer??true,pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[],pivotValues:p.pivotValues??[]});
     setAccounts([]);setAccountCodes([]);setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");setResult(undefined);setJob(undefined);setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setChanges([]);setPending([]);setLlmStatus("");
   });
   // 恢复的草稿提交到 state 后自动触发读取（setDraft 异步，恢复回调里直接
@@ -466,13 +475,13 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     <PageHeader eyebrow="凭证映射与科目筛选" title={tool.name} detail="按三步流程完成字段映射、科目穿梭、多批次、凭证类型、损益结转与导出。" />
     <StepIndicator steps={[{key:"1",label:"加载与映射"},{key:"2",label:"科目筛选",disabled:!draft.inspect||missingRequired.length>0},{key:"3",label:"透视与导出",disabled:!draft.inspect||missingRequired.length>0}]} current={draft.step-1} onStepClick={(index)=>patch({step:index+1})} />
     {error&&<ErrorBox error={error} onDismiss={()=>setError("")} />}
-    {draft.inspect?.resourceNotice&&<p className="kz-hint" role="status">{draft.inspect.resourceNotice}</p>}
     {draft.step===1&&<div className="fa-stack">
       <LedgerSourceCard
         inputPath={draft.inputPath} sheet={draft.sheet} knownSheets={draft.knownSheets} headerRow={draft.headerRow}
+        detectedHeaderRow={draft.headerRow===0?draft.inspect?.headerRow:undefined}
         dragHover={dragHover} busy={busy} job={job} needsReload={!draft.inspect&&draft.knownSheets.length>0}
         onBrowse={chooseInput} onClear={clearAll}
-        onSheetChange={value=>setDraft(current=>invalidateKanzhangInspection(current,{sheet:value}))}
+        onSheetChange={value=>setDraft(current=>invalidateKanzhangInspection({...current,headerRow:0},{sheet:value}))}
         onHeaderRowChange={value=>setDraft(current=>invalidateKanzhangInspection(current,{headerRow:value}))}
         onInspect={inspect} onCancel={(jobId)=>void jobCancel(jobId)}
       >

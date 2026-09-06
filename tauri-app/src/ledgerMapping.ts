@@ -21,6 +21,8 @@ export type Inspect = {
   preview: string[][];
   sheets?: string[];
   selectedSheet?: string;
+  /** 后端实际采用的标题行（headerRow=0 自动探测时的回显）。 */
+  headerRow?: number;
   suggestedMapping?: Mapping;
   accounts?: string[];
   accountCodes?: string[];

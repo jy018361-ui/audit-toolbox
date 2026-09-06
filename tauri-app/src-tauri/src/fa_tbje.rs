@@ -818,6 +818,37 @@ fn classify_movements(
                 review: String::new(),
             });
         }
+        // 新增方式「在建工程转入」按在建转出金额锁定：本凭证在建类对方科目
+        // （编码前缀 1604/1605 或名称含在建工程/cip/工程物资）的贷方净额合计
+        // 是可分配的「转入额度」，分两轮配给各资产类别的新增额——第一轮精确
+        // 匹配（差额 ≤ 0.05，避免排序在前的类别在第二轮贪心里抢占额度），
+        // 第二轮足额覆盖；两轮都轮不到的类别按购入列示。混合凭证（真在建
+        // 转入＋购入同票）靠这个把两种方式拆到正确的类别上，且保持一行一
+        // 方式（清单行与「——其中-」子行都按 method 聚合，不能拆行）。
+        let cip_credit: f64 = counterpart
+            .iter()
+            .filter(|(account, net)| **net < -0.005 && is_cip_account(account))
+            .map(|(_, net)| -net)
+            .sum();
+        let addition_amounts: Vec<(String, f64)> = cost
+            .iter()
+            .filter(|(_, amount)| **amount > 0.0)
+            .map(|(category, amount)| (category.clone(), *amount))
+            .collect();
+        let mut cip_remaining = cip_credit;
+        let mut cip_locked: BTreeSet<String> = BTreeSet::new();
+        for (category, amount) in &addition_amounts {
+            if (*amount - cip_remaining).abs() <= 0.05 {
+                cip_locked.insert(category.clone());
+                cip_remaining -= amount;
+            }
+        }
+        for (category, amount) in &addition_amounts {
+            if !cip_locked.contains(category) && cip_remaining >= amount - 0.05 {
+                cip_locked.insert(category.clone());
+                cip_remaining -= amount;
+            }
+        }
         for (category, amount) in cost {
             let key = (
                 entity.clone(),
@@ -866,7 +897,19 @@ fn classify_movements(
                 continue;
             }
             let dep_amount = dep.remove(&category).unwrap_or(0.0);
-            let (method, rule, review) = classify_method(amount > 0.0, &counterpart);
+            let cip = if amount > 0.0 {
+                if cip_locked.contains(&category) {
+                    CipLock::Locked
+                } else if cip_credit >= 0.005 {
+                    CipLock::Uncovered
+                } else {
+                    CipLock::NoCredit
+                }
+            } else {
+                // 处置侧不走金额锁定，判定保持原状。
+                CipLock::NoCredit
+            };
+            let (method, rule, review) = classify_method(amount > 0.0, &counterpart, cip);
             let sample = reclass_sample(lines, &indexes, &category);
             let movement = Movement {
                 entity: entity.clone(),
@@ -1002,7 +1045,41 @@ fn is_net_zero_matched(status: &str) -> bool {
     )
 }
 
-fn classify_method(addition: bool, accounts: &BTreeMap<String, f64>) -> (String, String, String) {
+/// 单个对方科目是否属于在建工程类：国标编码前缀（1604/1605）或名称含
+/// 在建工程/cip/工程物资。不少账套的在建科目直接叫「工具仪器」（挂在 1604
+/// 下），名称里没有「在建」二字——编码前缀是比名称更稳的判据，两者取或，
+/// 与处置侧 1606 固定资产清理的判法同一套思路。
+fn is_cip_account(account: &str) -> bool {
+    let lower = account.to_lowercase();
+    let code_prefix = lower.split_whitespace().any(|token| {
+        token
+            .split(['-', '_'])
+            .any(|part| part.starts_with("1604") || part.starts_with("1605"))
+    });
+    code_prefix || ["在建工程", "cip", "工程物资"]
+        .iter()
+        .any(|term| lower.contains(term))
+}
+
+/// 新增方式「在建工程转入」的金额锁定结论：同一张凭证里既有真在建转入、
+/// 也有普通购入时，不能只看对方科目名称整笔判定，必须把凭证内在建类对方
+/// 科目的贷方转出金额（cip_credit）按金额分配给各新增类别（`classify_movements`
+/// 负责），classify_method 只消费这里的结论。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CipLock {
+    /// 本凭证没有在建工程转出金额（cip_credit 为零），走旧判据。
+    NoCredit,
+    /// 转出金额已锁定覆盖本笔增加（精确匹配或足额覆盖）。
+    Locked,
+    /// 本凭证有在建转出金额，但额度未覆盖到本笔增加。
+    Uncovered,
+}
+
+fn classify_method(
+    addition: bool,
+    accounts: &BTreeMap<String, f64>,
+    cip: CipLock,
+) -> (String, String, String) {
     let names = accounts
         .iter()
         .filter(|(_, amount)| {
@@ -1031,19 +1108,22 @@ fn classify_method(addition: bool, accounts: &BTreeMap<String, f64>) -> (String,
                 .any(|part| prefixes.iter().any(|prefix| part.starts_with(prefix)))
         })
     };
-    let is_cip = code_prefix(&["1604", "1605"]) || hit(&["在建工程", "cip", "工程物资"]);
     let is_disposal_account = code_prefix(&["1606"]) || hit(&["固定资产清理"]);
     let (method, rule) = if addition {
         // 新增方式三分：在建工程转入／更新改造转入（对方为固定资产清理）／购入。
-        // 固定资产科目之间的类别调整不走这里——凭证级净额对冲已按「重分类」
-        // 单独列示，不会误进购入口径。
-        if is_cip {
+        // 「在建工程转入」按在建转出金额锁定（用户口径：根据在建工程转出金额
+        // 确定锁定转入方式，剩余金额就是购入）——混合凭证里真在建转入与购入
+        // 各归各类，不再整笔误判。固定资产科目之间的类别调整不走这里——
+        // 凭证级净额对冲已按「重分类」单独列示，不会误进购入口径。
+        if cip == CipLock::Locked {
             (
                 "在建工程转入",
-                "对方科目命中在建工程/CIP/工程物资（编码或名称）",
+                "在建工程转出金额覆盖本笔增加（按转出金额锁定）",
             )
         } else if is_disposal_account {
             ("更新改造转入", "对方科目命中固定资产清理（编码或名称）")
+        } else if cip == CipLock::Uncovered {
+            ("购入", "在建工程转出金额未覆盖本笔增加")
         } else {
             ("购入", "对方科目非在建工程/固定资产清理，按购入列示")
         }
@@ -1101,16 +1181,26 @@ fn preview_json(a: &Analysis) -> Value {
             "values": row.values,
         })).collect::<Vec<_>>(),
     });
+    // 对方科目透视（原值／累计折旧）与导出共用 counterpart_pivots 聚合，
+    // 前端「对方科目预览」与底稿两张透视表同源；数组顺序＝BTreeMap 顺序。
+    let (cost_pivot, dep_pivot) = counterpart_pivots(a);
+    let pivot_entries = |map: &BTreeMap<String, (f64, f64)>| {
+        map.iter()
+            .map(|(account, (debit, credit))| {
+                json!({"account": account, "debit": debit, "credit": credit})
+            })
+            .collect::<Vec<_>>()
+    };
     json!({
         "engine":"shared-ledger+fa-business", "tbRows":a.tb.len(), "jeRows":a.je.len(),
         "additions":a.additions.len(), "disposals":a.disposals.len(),
         "directNetZeroPairs":a.direct_pairs, "crossNetZeroPairs":a.cross_pairs,
         "reconciliationDifferences":differences, "signBasis":a.sign_basis,
         "warnings":a.warnings, "summaryTable": summary_table,
-        "preview": a.additions.iter().take(10).map(|m| json!({
-            "entity":m.entity,"voucher":m.voucher,"category":m.category,"kind":m.kind,
-            "original":m.original,"depreciation":m.depreciation,"method":m.method
-        })).collect::<Vec<_>>()
+        "counterpartPivots": {
+            "cost": pivot_entries(&cost_pivot),
+            "depreciation": pivot_entries(&dep_pivot),
+        }
     })
 }
 
@@ -1193,7 +1283,7 @@ fn sumifs_tb_formula(entity: &str, category: &str, role: &str, col: char) -> Str
 
 fn sumifs_je_formula(entity: &str, category: &str, role: &str, movement: &str) -> String {
     format!(
-        "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,\"{}\",'固定资产相关JE完整明细'!$G:$G,\"{}\",'固定资产相关JE完整明细'!$K:$K,\"{}\",'固定资产相关JE完整明细'!$F:$F,\"{}\")",
+        "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,\"{}\",'固定资产相关JE完整明细'!$G:$G,\"{}\",'固定资产相关JE完整明细'!$J:$J,\"{}\",'固定资产相关JE完整明细'!$F:$F,\"{}\")",
         criteria(entity),
         criteria(category),
         criteria(movement),
@@ -1209,7 +1299,7 @@ fn sumifs_je_method_formula(
     method: &str,
 ) -> String {
     format!(
-        "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,\"{}\",'固定资产相关JE完整明细'!$G:$G,\"{}\",'固定资产相关JE完整明细'!$K:$K,\"{}\",'固定资产相关JE完整明细'!$L:$L,\"{}\",'固定资产相关JE完整明细'!$F:$F,\"{}\")",
+        "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,\"{}\",'固定资产相关JE完整明细'!$G:$G,\"{}\",'固定资产相关JE完整明细'!$J:$J,\"{}\",'固定资产相关JE完整明细'!$K:$K,\"{}\",'固定资产相关JE完整明细'!$F:$F,\"{}\")",
         criteria(entity),
         criteria(category),
         criteria(movement),
@@ -1821,10 +1911,13 @@ fn col_letter(mut index: usize) -> String {
     out
 }
 
-/// 原值／累计折旧各自的对方科目透视表：凭证里出现原值变动的，其对方科目
-/// 进「原值透视表」；出现折旧变动的进「累计折旧透视表」。原值处置与折旧
-/// 转出常常是同一张凭证的两面，这类凭证的对方科目两边都进，各自完整。
-fn write_counterpart_pivots(wb: &mut Workbook, a: &Analysis) -> Result<(), AppError> {
+/// 原值／累计折旧各自的对方科目透视聚合：凭证里出现原值变动的，其对方科目
+/// 进「原值」map；出现折旧变动的进「累计折旧」map。原值处置与折旧转出
+/// 常常是同一张凭证的两面，这类凭证的对方科目两边都进，各自完整。
+/// 返回（原值 map，累计折旧 map），键＝科目串、值＝（借方合计，贷方合计）；
+/// 导出落表（write_counterpart_pivots）与前端预览（preview_json 的
+/// counterpartPivots）共用这一份聚合，两边永不漂移。
+fn counterpart_pivots(a: &Analysis) -> (BTreeMap<String, (f64, f64)>, BTreeMap<String, (f64, f64)>) {
     let mut voucher_flags: BTreeMap<(String, String), (bool, bool)> = BTreeMap::new();
     for line in &a.je {
         if line.counterpart || is_net_zero_matched(&line.status) {
@@ -1868,6 +1961,11 @@ fn write_counterpart_pivots(wb: &mut Workbook, a: &Analysis) -> Result<(), AppEr
             entry(&mut dep_map);
         }
     }
+    (cost_map, dep_map)
+}
+
+fn write_counterpart_pivots(wb: &mut Workbook, a: &Analysis) -> Result<(), AppError> {
+    let (cost_map, dep_map) = counterpart_pivots(a);
     write_pivot_sheet(wb.add_worksheet(), "原值透视表", &cost_map)?;
     write_pivot_sheet(wb.add_worksheet(), "累计折旧透视表", &dep_map)?;
     Ok(())
@@ -1891,7 +1989,11 @@ fn write_pivot_sheet(
             .map_err(xlsx)?;
     }
     let total_row = groups.len() as u32 + 1;
-    let excel = total_row + 1;
+    // SUM 区间的上界必须止于**最后一条数据行**：数据占 Excel 第 2..=N+1 行
+    // （N＝数据组数），其行号数值上恰等于 0 基合计行号 total_row。上界若写成
+    // 合计行自身（N+2），SUM 会把自己圈进去，用户打开导出的 Excel 即报
+    // 「循环引用」警告（累计折旧透视表 B23/C23 实测）。
+    let last_data_excel_row = total_row;
     let (debit, credit): (f64, f64) = groups
         .values()
         .fold((0.0, 0.0), |acc, v| (acc.0 + v.0, acc.1 + v.1));
@@ -1902,7 +2004,8 @@ fn write_pivot_sheet(
         ws.write_formula_with_format(
             total_row,
             col,
-            Formula::new(format!("=SUM({letter}2:{letter}{excel})")).set_result(value.to_string()),
+            Formula::new(format!("=SUM({letter}2:{letter}{last_data_excel_row})"))
+                .set_result(value.to_string()),
             &money,
         )
         .map_err(xlsx)?;
@@ -1910,7 +2013,7 @@ fn write_pivot_sheet(
     Ok(())
 }
 
-/// 清单行的变动分类（JE 明细 K 列口径）：新增／处置照旧，重分类转入／转出
+/// 清单行的变动分类（JE 明细 J 列口径）：新增／处置照旧，重分类转入／转出
 /// 都按「重分类」聚合，清单公式据此过滤 JE 明细。
 fn movement_label(kind: &str) -> &'static str {
     if kind.starts_with("重分类") {
@@ -1973,7 +2076,7 @@ fn write_movements(
         let movement = movement_label(&m.kind);
         let excel = row + 1;
         let base = format!(
-            "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,A{excel},'固定资产相关JE完整明细'!$B:$B,B{excel},'固定资产相关JE完整明细'!$C:$C,C{excel},'固定资产相关JE完整明细'!$G:$G,E{excel},'固定资产相关JE完整明细'!$K:$K,\"{movement}\",'固定资产相关JE完整明细'!$F:$F,"
+            "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,A{excel},'固定资产相关JE完整明细'!$B:$B,B{excel},'固定资产相关JE完整明细'!$C:$C,C{excel},'固定资产相关JE完整明细'!$G:$G,E{excel},'固定资产相关JE完整明细'!$J:$J,\"{movement}\",'固定资产相关JE完整明细'!$F:$F,"
         );
         let cost = if addition {
             format!("{base}\"cost\")")
@@ -2015,6 +2118,9 @@ fn write_movements(
 fn write_je(ws: &mut Worksheet, a: &Analysis, cancel: &AtomicBool) -> Result<(), AppError> {
     ws.set_name("固定资产相关JE完整明细").map_err(xlsx)?;
     let (header, money, text) = formats();
+    // 「智能匹配状态」列已按用户要求删除（FA 工具场景不适用）：status 仅作
+    // 内部口径（净额配对、透视过滤），不再导出成列；其后各列整体左移一列，
+    // 变动分类落在 J、变动方式落在 K，SUMIFS 公式引用已同步。
     let mut headers = vec![
         "主体",
         "凭证键",
@@ -2025,7 +2131,6 @@ fn write_je(ws: &mut Worksheet, a: &Analysis, cancel: &AtomicBool) -> Result<(),
         "资产类别",
         "借正贷负净额",
         "绝对值",
-        "智能匹配状态",
         "变动分类",
         "变动方式",
         "是否对方科目",
@@ -2060,16 +2165,14 @@ fn write_je(ws: &mut Worksheet, a: &Analysis, cancel: &AtomicBool) -> Result<(),
             .map_err(xlsx)?;
         ws.write_number_with_format(row, 8, l.net.abs(), &money)
             .map_err(xlsx)?;
-        ws.write_string_with_format(row, 9, &l.status, &text)
+        ws.write_string_with_format(row, 9, &l.movement, &text)
             .map_err(xlsx)?;
-        ws.write_string_with_format(row, 10, &l.movement, &text)
+        ws.write_string_with_format(row, 10, &l.method, &text)
             .map_err(xlsx)?;
-        ws.write_string_with_format(row, 11, &l.method, &text)
-            .map_err(xlsx)?;
-        ws.write_string_with_format(row, 12, if l.counterpart { "是" } else { "否" }, &text)
+        ws.write_string_with_format(row, 11, if l.counterpart { "是" } else { "否" }, &text)
             .map_err(xlsx)?;
         for (c, v) in l.raw.iter().enumerate() {
-            ws.write_string_with_format(row, (13 + c) as u16, v, &text)
+            ws.write_string_with_format(row, (12 + c) as u16, v, &text)
                 .map_err(xlsx)?;
         }
     }
@@ -2596,7 +2699,7 @@ mod tests {
             write_workbook(&fallback, &a, &cancel).unwrap();
             fallback
         };
-        assert_export_caches(&out);
+        assert_export_caches(&out, &a);
         println!("固定资产 TB＋JE 回归底稿：{}", out.display());
     }
 
@@ -2631,6 +2734,98 @@ mod tests {
         assert!((additions[0].original - 42477.82).abs() < 0.005);
         assert!(disposals.is_empty());
         assert!((totals[&("A".into(), "工具仪器".into())].additions - 42477.82).abs() < 0.005);
+    }
+
+    /// 用户真实场景复刻：同一张凭证里既有真在建转入（运输设备 30,600，
+    /// 对方 1604 在建工程），也有普通购入（机器设备 76,725.66，对方为预付
+    /// 账款／银行存款／进项税）。在建转入必须按转出金额锁定到运输设备，
+    /// 机器设备的购入不得再被判成「在建工程转入」。
+    #[test]
+    fn mixed_voucher_locks_cip_transfer_by_credit_amount() {
+        let mut je = vec![
+            je_line(
+                "A",
+                "J67",
+                "1601-机器设备",
+                "cost",
+                "机器设备",
+                76725.66,
+            ),
+            je_line("A", "J67", "1601-运输设备", "cost", "运输设备", 30600.0),
+            je_line("A", "J67", "1122-预付账款", "", "", -84099.0),
+            je_line("A", "J67", "1002-银行存款", "", "", -2601.0),
+            je_line("A", "J67", "22210101-进项税额", "", "", 9974.34),
+            je_line("A", "J67", "1604-在建工程", "", "", -30600.0),
+        ];
+        let (additions, disposals, totals) = classify_movements(&mut je);
+        assert!(disposals.is_empty());
+        assert_eq!(additions.len(), 2);
+        let purchase = additions
+            .iter()
+            .find(|m| m.category == "机器设备")
+            .expect("机器设备新增行");
+        assert_eq!(purchase.method, "购入");
+        assert!((purchase.original - 76725.66).abs() < 0.005);
+        assert_eq!(purchase.rule, "在建工程转出金额未覆盖本笔增加");
+        let cip = additions
+            .iter()
+            .find(|m| m.category == "运输设备")
+            .expect("运输设备新增行");
+        assert_eq!(cip.method, "在建工程转入");
+        assert!((cip.original - 30600.0).abs() < 0.005);
+        assert_eq!(
+            cip.rule, "在建工程转出金额覆盖本笔增加（按转出金额锁定）"
+        );
+        // JE 明细行回填同一结论：一行一方式，混合凭证不拆行。
+        let machine_line = je
+            .iter()
+            .find(|l| l.role == "cost" && l.category == "机器设备")
+            .unwrap();
+        assert_eq!(machine_line.method, "购入");
+        let vehicle_line = je
+            .iter()
+            .find(|l| l.role == "cost" && l.category == "运输设备")
+            .unwrap();
+        assert_eq!(vehicle_line.method, "在建工程转入");
+        assert!((totals[&("A".into(), "机器设备".into())].additions - 76725.66).abs() < 0.005);
+        assert!((totals[&("A".into(), "运输设备".into())].additions - 30600.0).abs() < 0.005);
+    }
+
+    /// 透视表合计行的 SUM 上界必须止于最后一条数据行：把合计行自身圈进
+    /// SUM 区间会触发 Excel 打开导出文件时的「循环引用」警告（用户实测
+    /// 累计折旧透视表 B23/C23）。
+    #[test]
+    fn pivot_total_formula_stops_at_last_data_row() {
+        let groups = BTreeMap::from([
+            ("1604 在建工程".to_owned(), (0.0, 30600.0)),
+            ("银行存款".to_owned(), (76725.66, 0.0)),
+        ]);
+        let mut wb = Workbook::new();
+        write_pivot_sheet(wb.add_worksheet(), "原值透视表", &groups).unwrap();
+        let dir = std::env::temp_dir().join(format!("fa-tbje-pivot-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("pivot.xlsx");
+        wb.save(&out).unwrap();
+        let mut book = open_workbook_auto(&out).unwrap();
+        let formulas = book.worksheet_formula("原值透视表").unwrap();
+        let rows = formulas.rows().map(|r| r.to_vec()).collect::<Vec<_>>();
+        let total = rows.last().expect("透视表必须有合计行");
+        // 两组数据占 Excel 第 2..=3 行，合计在第 4 行。
+        for cell in total.iter() {
+            let text = cell.to_string().trim_start_matches('=').to_owned();
+            if !text.contains("SUM") {
+                continue;
+            }
+            assert!(
+                text.contains("B2:B3") || text.contains("C2:C3"),
+                "SUM 应止于最后一条数据行：{text}"
+            );
+            assert!(
+                !text.contains("B4") && !text.contains("C4"),
+                "合计公式不得圈入合计行自身（循环引用）：{text}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// 4800（SAP 型账套）真实样例：累计折旧挂在 1601 下、科目串编码在尾、
@@ -2711,7 +2906,7 @@ mod tests {
         );
         let out = dir.join("fa-tbje-4800-回归底稿.xlsx");
         write_workbook(&out, &a, &AtomicBool::new(false)).unwrap();
-        assert_export_caches(&out);
+        assert_export_caches(&out, &a);
         println!("4800 底稿：{}", out.display());
     }
 
@@ -2767,6 +2962,24 @@ mod tests {
             .find(|row| row["item"] == "期初原值")
             .unwrap();
         assert_eq!(opening["values"], json!([1000.0]));
+        // 对方科目透视与导出同源（counterpart_pivots）：V2 处置收款银行存款
+        // 借方 150；「新增明细预览」的 preview 字段已废弃，不再下发。
+        let cost_pivot = &preview["counterpartPivots"]["cost"];
+        let bank = cost_pivot
+            .as_array()
+            .expect("原值透视预览必须是数组")
+            .iter()
+            .find(|e| e["account"].as_str().is_some_and(|a| a.contains("银行存款")))
+            .expect("原值透视预览应含银行存款（V2 处置收款）");
+        assert_eq!(bank["debit"], json!(150.0));
+        assert_eq!(bank["credit"], json!(0.0));
+        assert!(
+            preview["counterpartPivots"]["depreciation"]
+                .as_array()
+                .is_some_and(|v| !v.is_empty()),
+            "累计折旧透视预览不应为空（V2/V3 折旧变动）"
+        );
+        assert!(preview.get("preview").is_none(), "新增明细预览字段已废弃");
         let cache_file = cache_dir().join(format!("{key}.json"));
         assert!(
             cache_file.exists(),
@@ -2963,7 +3176,7 @@ mod tests {
             assert!(!voucher.contains("2025"), "凭证键不应拼入日期：{voucher}");
             assert_eq!(
                 voucher,
-                row[13 + voucher_col].to_string(),
+                row[12 + voucher_col].to_string(),
                 "凭证键应等于凭证识别字段原文"
             );
         }
@@ -2986,14 +3199,16 @@ mod tests {
         assert!(workbook_xml.contains("_TB规范数据") && workbook_xml.contains("state=\"hidden\""));
         assert!(workbook_xml.contains("fullCalcOnLoad=\"1\""));
         assert_eq!(workbook_xml.matches("state=\"hidden\"").count(), 1);
-        assert_export_caches(&out);
+        assert_export_caches(&out, &analysis);
         let _ = std::fs::remove_dir_all(dir);
     }
 
     /// 汇总表按 FA List 版式输出后，缓存值必须仍能对着两张源表独立勾稽：
     /// 期初／期末对照 `_TB规范数据`，增加／减少／重分类对照 JE 明细的
     /// （类别，角色，变动分类）净额；方式子行与主行、合计列与类别列自洽。
-    fn assert_export_caches(path: &Path) {
+    /// JE 明细已不导出「智能匹配状态」列，冲销配对的行级状态改从内存中的
+    /// `Analysis` 按行序对照（JE 明细行序与 a.je 完全一致）。
+    fn assert_export_caches(path: &Path, a: &Analysis) {
         let mut book = open_workbook_auto(path).unwrap();
         let summary = book.worksheet_range("固定资产汇总变动表").unwrap();
         let je = book.worksheet_range("固定资产相关JE完整明细").unwrap();
@@ -3063,7 +3278,7 @@ mod tests {
             je.rows()
                 .skip(1)
                 .filter(|r| s(r, 0) == entity && s(r, 6) == category && s(r, 5) == role)
-                .filter(|r| movements.contains(&s(r, 10).as_str()))
+                .filter(|r| movements.contains(&s(r, 9).as_str()))
                 .map(|r| n(r, 7))
                 .sum::<f64>()
         };
@@ -3244,7 +3459,7 @@ mod tests {
                                     && s(r, 2) == s(row, 2)
                                     && s(r, 6) == s(row, 4)
                                     && s(r, 5) == role
-                                    && s(r, 10) == kind
+                                    && s(r, 9) == kind
                             })
                             .map(|r| n(r, 7))
                             .sum::<f64>();
@@ -3264,11 +3479,12 @@ mod tests {
             )
         };
         let mut flags: Vec<((String, String, String), (bool, bool))> = Vec::new();
-        for r in je.rows().skip(1) {
+        for (r, status) in je.rows().skip(1).zip(a.je.iter().map(|l| &l.status)) {
             // 凭证分组必须带日期：跨日同号凭证（如 1 月与 7 月各一张「记-0067」）
-            // 是两张不同的凭证，对方科目不能互相串表。
+            // 是两张不同的凭证，对方科目不能互相串表。冲销配对状态列已不导出，
+            // 改从 Analysis 按行序对照（见函数注释）。
             let key = (s(r, 0), s(r, 1), s(r, 2));
-            if s(r, 12) == "是" || net_zero_status(&s(r, 9)) {
+            if s(r, 11) == "是" || net_zero_status(status) {
                 continue;
             }
             let flag = match flags.iter_mut().find(|(k, _)| *k == key) {
@@ -3361,7 +3577,7 @@ mod tests {
         assert_eq!(a.totals.len(), 2);
         assert_eq!(preview_json(&a)["reconciliationDifferences"], 0);
         write_workbook(&out, &a, &AtomicBool::new(false)).unwrap();
-        assert_export_caches(&out);
+        assert_export_caches(&out, &a);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -3473,58 +3689,79 @@ mod tests {
         a.disposals = dispose;
         a.totals = totals;
         write_workbook(&out, &a, &AtomicBool::new(false)).unwrap();
-        assert_export_caches(&out);
+        assert_export_caches(&out, &a);
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn method_uses_directional_nonzero_counterpart_nets() {
-        // 新增方式三分：在建工程转入／更新改造转入（固定资产清理）／购入。
+        // 新增方式三分：在建工程转入（按转出金额锁定）／更新改造转入
+        // （固定资产清理）／购入；「是否命中在建科目」已前移到
+        // classify_movements 的金额锁定环节（is_cip_account + CipLock）。
         let nets = BTreeMap::from([
             ("16040001-在建工程".into(), -500.0),
             ("银行存款".into(), -100.0),
         ]);
-        assert_eq!(classify_method(true, &nets).0, "在建工程转入");
-        // 名称不含「在建」的 1604 科目（如「16040002-工具仪器」）按编码前缀识别。
+        assert_eq!(classify_method(true, &nets, CipLock::Locked).0, "在建工程转入");
+        // 名称不含「在建」的 1604 科目（如「16040002-工具仪器」）按编码前缀
+        // 识别——金额锁定覆盖见 cip_counterpart_... 与混合凭证两条回归。
         assert_eq!(
-            classify_method(
-                true,
-                &BTreeMap::from([("16040002-工具仪器".into(), -100.0)])
-            )
-            .0,
+            classify_method(true, &BTreeMap::new(), CipLock::Locked).0,
             "在建工程转入"
         );
         assert_eq!(
             classify_method(
                 true,
-                &BTreeMap::from([("1606-固定资产清理".into(), -100.0)])
+                &BTreeMap::from([("1606-固定资产清理".into(), -100.0)]),
+                CipLock::NoCredit
             )
             .0,
             "更新改造转入"
         );
         assert_eq!(
-            classify_method(true, &BTreeMap::from([("160601-清理".into(), -100.0)])).0,
+            classify_method(
+                true,
+                &BTreeMap::from([("160601-清理".into(), -100.0)]),
+                CipLock::NoCredit
+            )
+            .0,
             "更新改造转入"
         );
         assert_eq!(
-            classify_method(true, &BTreeMap::from([("银行存款".into(), -500.0)])).0,
+            classify_method(true, &BTreeMap::from([("银行存款".into(), -500.0)]), CipLock::NoCredit).0,
             "购入"
         );
-        assert_eq!(classify_method(true, &BTreeMap::new()).0, "购入");
+        assert_eq!(classify_method(true, &BTreeMap::new(), CipLock::NoCredit).0, "购入");
+        // 有在建转出金额但未覆盖本笔增加：按购入列示，判断依据注明原因。
+        let (method, rule, review) =
+            classify_method(true, &BTreeMap::from([("银行存款".into(), -500.0)]), CipLock::Uncovered);
+        assert_eq!(method, "购入");
+        assert_eq!(rule, "在建工程转出金额未覆盖本笔增加");
+        assert_eq!(review, "");
         // 处置侧规则保持：出售／报废毁损／其他待判断。
         assert_eq!(
-            classify_method(false, &BTreeMap::from([("银行存款".into(), 500.0)])).0,
+            classify_method(false, &BTreeMap::from([("银行存款".into(), 500.0)]), CipLock::NoCredit).0,
             "出售"
         );
         assert_eq!(
-            classify_method(false, &BTreeMap::from([("160601-清理".into(), 500.0)])).0,
+            classify_method(
+                false,
+                &BTreeMap::from([("160601-清理".into(), 500.0)]),
+                CipLock::NoCredit
+            )
+            .0,
             "报废/毁损"
         );
         assert_eq!(
-            classify_method(false, &BTreeMap::from([("在建工程".into(), 500.0)])).0,
+            classify_method(
+                false,
+                &BTreeMap::from([("在建工程".into(), 500.0)]),
+                CipLock::NoCredit
+            )
+            .0,
             "其他/待判断"
         );
-        let (_, _, review) = classify_method(false, &BTreeMap::new());
+        let (_, _, review) = classify_method(false, &BTreeMap::new(), CipLock::NoCredit);
         assert_eq!(review, "需人工复核");
     }
 

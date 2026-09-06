@@ -22,6 +22,7 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { Field } from "@/components/Field";
 import { FileDropInput } from "@/components/FileDropInput";
+import { FileInput } from "@/components/FileInput";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -201,7 +202,7 @@ export default function FileListDirectoryPage({
       outputPath === scan?.outputPath &&
       !(await confirmDialog({
         title: "确认覆盖文件",
-        message: `将写入：\n${outputPath}\n\n如果该文件已存在会被覆盖（其中的手工批注会丢失）。是否继续？`,
+        message: `将覆盖文件“${displayFileName(outputPath)}”，其中的手工批注会丢失。是否继续？`,
         confirmLabel: "继续",
         tone: "danger",
       }))
@@ -290,22 +291,13 @@ export default function FileListDirectoryPage({
             {step === 2 && (
               <>
                 <Field label="输出 Excel 文件" required>
-                  <div className="input-with-button">
-                    <input
-                      value={outputPath}
-                      title={outputPath}
-                      onChange={(event) => setOutputPath(event.target.value)}
-                      placeholder="默认保存到源文件夹的上一级目录"
-                    />
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => void chooseOutput()}
-                    >
-                      选择
-                    </Button>
-                  </div>
+                  <FileInput
+                    value={outputPath}
+                    placeholder="默认保存到源文件夹的上一级目录"
+                    ariaLabel="输出 Excel 文件"
+                    browseLabel="选择"
+                    onBrowse={() => void chooseOutput()}
+                  />
                 </Field>
                 <p className="hint">
                   默认文件名与旧版一致：“文件夹名List-年月日时分.xlsx”。文件数量多时导出需要几分钟，中途可随时取消。

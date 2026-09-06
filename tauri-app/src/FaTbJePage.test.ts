@@ -122,6 +122,32 @@ describe("FA TB+JE account role presets", () => {
     ]);
   });
 
+  it("TBJEPBC 样例：名称带资产字样的非固定资产科目与编码残留的类别", () => {
+    // 02 号样例：银行存款户名带「房屋积金」，名称词会把它当原值——
+    // 数字编码不是 1601/1602 的一律不进本表。
+    expect(suggestFaAccount("1002016871 银行存款-汉口银行硚口支行(房屋积金)6").role).toBe(
+      "excluded",
+    );
+    // 10 号样例：自定义 1642 使用权资产折旧。原值侧不含使用权资产，
+    // 折旧侧混入必然勾稽不平。
+    expect(suggestFaAccount("1642 使用权资产累计折旧").role).toBe("excluded");
+    expect(suggestFaAccount("1642.01 使用权资产折旧-医药港5期租赁").role).toBe(
+      "excluded",
+    );
+    // 05 号样例：SAP 技术性清账科目不是固定资产本体。
+    expect(suggestFaAccount("1601999999 固定资产技术性清账科目").role).toBe(
+      "excluded",
+    );
+    // 08 号样例：名称部分自带一份编码（160101\固定资产\房屋建筑物），
+    // 类别要剥干净编码与路径分隔，不能显示成「160101\房屋建筑物」。
+    expect(suggestFaAccount("160101 160101\\固定资产\\房屋建筑物").category).toBe(
+      "房屋建筑物",
+    );
+    expect(suggestFaAccount("160101 160101\\固定资产\\房屋建筑物").role).toBe(
+      "cost",
+    );
+  });
+
   it("同一科目在 TB 与 JE 里拼法不同也归一到同一角色与类别", () => {
     // TB 侧「名称 代码」、JE 侧「代码 名称」，名称取的列还不一样。
     // 不归一的话两条分类会带着不同类别送进引擎，原值与累计折旧永远配不上对。

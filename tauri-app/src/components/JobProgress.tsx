@@ -27,7 +27,8 @@ export function JobProgress({
   // 进度弹窗正展示同一个任务时这里让位，免得一个任务看着像跑了两遍。
   // 弹窗最小化后 owned 转 false，内联进度条回到页面上。
   const owned = useJobOwnedByDialog(job.jobId);
-  const max = Math.max(job.total, 1);
+  const total = Number.isFinite(job.total) ? Math.max(job.total, 0) : 0;
+  const max = Math.max(total, 1);
   const value = Math.max(0, Math.min(job.current, max));
   const presentation = jobPresentation(job);
 
@@ -79,7 +80,7 @@ export function JobProgress({
           aria-label={`${presentation.label}进度`}
           className={`progress-tone-${presentation.tone}`}
           max={max}
-          value={job.total > 0 ? value : undefined}
+          value={total > 0 ? value : undefined}
         />
       )}
     </div>

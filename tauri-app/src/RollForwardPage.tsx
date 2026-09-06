@@ -24,7 +24,7 @@ import { StepIndicator } from "@/components/StepIndicator";
 import { ErrorBox } from "@/components/ErrorBox";
 import { ResultView } from "@/components/ResultView";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { FileInput } from "@/components/FileInput";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/EmptyState";
 import { SwitchInput } from "@/components/SwitchInput";
@@ -1614,17 +1614,19 @@ function PathField({
   return (
     <label className="field">
       <span>{label}</span>
-      <div className="input-with-button">
-        <Input title={value} value={value} onChange={(e) => onChange(e.target.value)} />
-        <Button variant="outline" onClick={() => void browse()}>
-          浏览
-        </Button>
-        {allowFile && (
-          <Button variant="outline" onClick={() => void browse("file")}>
-            单文件
-          </Button>
-        )}
-      </div>
+      <FileInput
+        value={value}
+        ariaLabel={label}
+        browseLabel="浏览"
+        onBrowse={() => void browse()}
+        extraActions={
+          allowFile ? (
+            <Button variant="outline" onClick={() => void browse("file")}>
+              单文件
+            </Button>
+          ) : undefined
+        }
+      />
     </label>
   );
 }

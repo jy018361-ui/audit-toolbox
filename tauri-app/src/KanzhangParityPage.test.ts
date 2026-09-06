@@ -19,6 +19,7 @@ import {
   isSchemeLockedRole,
   kanzhangErrorText,
   kanzhangReviewSummary,
+  matchAuditFocusPresets,
   KZ_ROLE_LABELS,
   LEDGER_ROLES,
   mergeMappingChanges,
@@ -412,6 +413,29 @@ describe("看账其他交互口径", () => {
       administrative_expense: [values[4]], selling_expense: [values[5]], financial_expense: [values[6]],
       accounts_payable: [values[7]], short_term_loans: [values[8]],
     });
+  });
+
+  it("摊销折旧类费用科目不靠名称混进资产预设批次", () => {
+    // 05 号 TBJEPBC 样例：研发费用与管理费用下的摊销科目名称带资产字样，
+    // 但它们归各自费用批次（编码前缀），不进无形资产/长期待摊批次。
+    const values = [
+      "5301010000-研发费用-研发支出-费用化-无形资产摊销-软件使用权",
+      "6602010100-管理费用-无形资产摊销",
+      "6602020000-管理费用-研发费用-折旧和长期待摊费用-设备",
+      "1701010000-无形资产-软件",
+    ];
+    const codes = ["5301010000", "6602010100", "6602020000", "1701010000"];
+    const matches = Object.fromEntries(
+      matchAuditFocusPresets(values, codes).map(match => [match.preset.id, match.accounts]),
+    );
+    expect(matches.intangible_assets).toEqual([values[3]]);
+    expect(matches.long_term_prepaid).toEqual([]);
+    expect(matches.administrative_expense).toEqual([values[1], values[2]]);
+    // 无编码列时维持纯名称匹配（历史行为）。
+    const noCodes = Object.fromEntries(
+      matchAuditFocusPresets([values[0]], [""]).map(match => [match.preset.id, match.accounts]),
+    );
+    expect(noCodes.intangible_assets).toEqual([values[0]]);
   });
 
   it("重复套用更新预设、保留人工批次并尊重剔除项", () => {

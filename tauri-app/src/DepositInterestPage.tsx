@@ -24,6 +24,7 @@ import { JargonTip } from "@/components/JargonTip";
 import { EmptyState } from "@/components/EmptyState";
 import { Badge } from "@/components/ui/badge";
 import { NumberInput } from "@/components/NumberInput";
+import { displayFileName } from "@/fileDisplay";
 import {
   correctLedgerSourceKinds,
   missingGoldIdentity,
@@ -1421,7 +1422,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   输出文件
                   <span className="deposit-output-row">
                     <Input
-                      value={outputPath}
+                      value={displayFileName(outputPath)}
                       readOnly
                       title={outputPath || undefined}
                       placeholder="默认保存到源文件目录"

@@ -375,7 +375,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
                       <span>
                         {detail
                           ? `${formatSize(detail.size)} · ${detail.error ? "读取失败" : detail.sheets.length ? detail.sheets.join("、") : detail.format ?? "无工作表"}`
-                          : path}
+                          : path.split(/[\\/]/).pop()}
                       </span>
                       {detail?.error && <em>{detail.error}</em>}
                     </div>

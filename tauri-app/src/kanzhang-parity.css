@@ -1,4 +1,7 @@
 .kz-page {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-4);
   min-width: 0;
   color: var(--ink-strong);
 }
@@ -174,7 +177,7 @@
   display: flex;
   gap: var(--sp-1);
   overflow: auto;
-  margin-bottom: var(--sp-3);
+  margin: var(--sp-3) 0;
 }
 .kz-source-panel {
   border: 1px solid var(--border);

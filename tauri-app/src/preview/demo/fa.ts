@@ -746,9 +746,10 @@ export const handlers: Record<
 //   fa.match          FaListPage「开始匹配」：event.result 整体进结果面板——
 //                     stats 出四格统计（合并总行数/两期均有/仅期初/仅期末）、
 //                     stats.duplicates 出重复键告警框、stats.unmatchedAddition/
-//                     unmatchedDisposal 出补充清单未匹配告警框；columns +
-//                     preview 出「合并结果前 N 行」预览表（行是对象、键为
-//                     列名，金额带千分位，列名带 _文件1/_文件2 后缀）。
+//                     unmatchedDisposal 出补充清单未匹配告警框；summary
+//                     （columns + rows{section,item,values}）出「固定资产变动
+//                     汇总表（预览）」，数值为数字，页面用 toLocaleString 自行
+//                     做千分位（与导出底稿同一份行定义）。
 //   fa.export         FaListPage「导出底稿」：result 走 outputPaths 分支——
 //                     exportMessage 按 ===CORRECTION_WARNINGS=== 拆成主消息
 //                     与逐条纠偏告警，outputPaths 生成「打开结果」按钮。
@@ -801,72 +802,129 @@ const outputEcho = (
 };
 
 // ---------------------------------------------------------------------------
-// fa.match / fa.export：两期清单完全外连接（列名与数据来源均沿用 Rust 的
-// 文件1/文件2 口径，preview 行是「列名 → 单元格文本」的对象）
+// fa.match / fa.export：两期清单完全外连接。合并预览不再回传明细行，按 Rust
+// build_summary_lines（short_labels）同口径给变动汇总：类别为列、数值为数字。
 // ---------------------------------------------------------------------------
 
-const MERGE_COLUMNS = [
-  ...BEGIN_HEADERS.map((header) => `${header}_文件1`),
-  ...END_HEADERS.map((header) => `${header}_文件2`),
-  "数据来源",
-  "匹配列",
-];
-
-const beginCellsOf = (asset: FaAssetSeed): string[] => {
-  const amounts = amountsOf(asset);
-  return [
-    asset.code,
-    asset.name,
-    asset.category,
-    asset.dept,
-    asset.start,
-    String(asset.life),
-    String(asset.residual),
-    money(asset.original),
-    money(amounts.beginDep),
-  ];
+/** 合并后的行：重复键 10010003 在期末清单出现两次，透视配对成两行（both 15）。 */
+const mergedPlan = (): Array<
+  [FaAssetSeed | undefined, FaAssetSeed | undefined]
+> => {
+  const disposed = ASSETS.filter((asset) => asset.disposed);
+  const rows: Array<[FaAssetSeed | undefined, FaAssetSeed | undefined]> =
+    BOTH.map((asset) => [asset, asset]);
+  const duplicated = BOTH.find((asset) => asset.code === "10010003");
+  if (duplicated) rows.push([duplicated, duplicated]);
+  for (const asset of disposed) rows.push([asset, undefined]);
+  for (const asset of ADDED) rows.push([undefined, asset]);
+  return rows;
 };
 
-const endCellsOf = (asset: FaAssetSeed): string[] => {
-  const amounts = amountsOf(asset);
-  return [
-    asset.code,
-    asset.name,
-    asset.category,
-    asset.dept,
-    asset.start,
-    String(asset.endLife ?? asset.life),
-    String(asset.endResidual ?? asset.residual),
-    money(asset.original),
-    money(amounts.endDep),
-    money(amounts.yearDep),
-    asset.additionMethod ?? "",
-    asset.additionDate ?? "",
-    money(asset.original - amounts.endDep),
-  ];
-};
-
-const mergeRow = (
-  begin: FaAssetSeed | undefined,
-  end: FaAssetSeed | undefined,
-  source: string,
-): Record<string, string> => {
-  const row: Record<string, string> = {};
-  const beginCells = begin ? beginCellsOf(begin) : [];
-  const endCells = end ? endCellsOf(end) : [];
-  BEGIN_HEADERS.forEach((header, index) => {
-    row[`${header}_文件1`] = beginCells[index] ?? "";
-  });
-  END_HEADERS.forEach((header, index) => {
-    row[`${header}_文件2`] = endCells[index] ?? "";
-  });
-  row["数据来源"] = source;
-  row["匹配列"] = begin?.code ?? end?.code ?? "";
-  return row;
+/** 与 Rust 固定资产变动汇总表同口径的增减变动：期初余额锚定期初类别，
+    变动归期末类别，无方式标注归「未标注××方式」；全零行照旧过滤，
+    只保留余额行。 */
+const movementSummary = (): {
+  columns: string[];
+  rows: Array<{ section: string; item: string; values: number[] }>;
+} => {
+  type Movement = {
+    beginOriginal: number;
+    endOriginal: number;
+    beginDep: number;
+    endDep: number;
+    additions: Map<string, number>;
+    disposals: Map<string, number>;
+    depChange: number;
+  };
+  const columns: string[] = [];
+  const movements = new Map<string, Movement>();
+  const movementOf = (category: string): Movement => {
+    if (!columns.includes(category)) columns.push(category);
+    let movement = movements.get(category);
+    if (!movement) {
+      movement = {
+        beginOriginal: 0,
+        endOriginal: 0,
+        beginDep: 0,
+        endDep: 0,
+        additions: new Map(),
+        disposals: new Map(),
+        depChange: 0,
+      };
+      movements.set(category, movement);
+    }
+    return movement;
+  };
+  for (const [begin, end] of mergedPlan()) {
+    const beginKey = (begin?.category ?? end?.category ?? "未分类").trim() || "未分类";
+    const endKey = (end?.category ?? begin?.category ?? "未分类").trim() || "未分类";
+    const beginOriginal = begin ? begin.original : 0;
+    const endOriginal = end ? end.original : 0;
+    const beginDep = begin ? amountsOf(begin).beginDep : 0;
+    const endDep = end ? amountsOf(end).endDep : 0;
+    const opening = movementOf(beginKey);
+    opening.beginOriginal += beginOriginal;
+    opening.beginDep += beginDep;
+    const closing = movementOf(endKey);
+    closing.endOriginal += endOriginal;
+    closing.endDep += endDep;
+    const change = endOriginal - beginOriginal;
+    if (change > 0.005) {
+      const method = end?.additionMethod?.trim() || "未标注新增方式";
+      closing.additions.set(method, (closing.additions.get(method) ?? 0) + change);
+    } else if (change < -0.005) {
+      const method = "未标注处置方式";
+      closing.disposals.set(method, (closing.disposals.get(method) ?? 0) - change);
+    }
+    if (Math.abs(endDep - beginDep) > 0.005) closing.depChange += endDep - beginDep;
+  }
+  const rows: Array<{ section: string; item: string; values: number[] }> = [];
+  const byCategory = (pick: (movement: Movement) => number): number[] =>
+    columns.map((category) => round2(pick(movements.get(category)!)));
+  const push = (
+    section: string,
+    item: string,
+    values: number[],
+    force = false,
+  ): void => {
+    if (!force && values.every((value) => Math.abs(value) <= 0.005)) return;
+    rows.push({ section, item, values });
+  };
+  const sumOf = (map: Map<string, number>): number =>
+    [...map.values()].reduce((total, value) => total + value, 0);
+  push("原值", "期初原值", byCategory((m) => m.beginOriginal));
+  push("原值", "原值增加", byCategory((m) => sumOf(m.additions)));
+  const additionMethods = new Set<string>();
+  movements.forEach((m) =>
+    m.additions.forEach((_, method) => additionMethods.add(method)),
+  );
+  for (const method of additionMethods) {
+    push("原值", `——其中-${method}`, byCategory((m) => m.additions.get(method) ?? 0));
+  }
+  push("原值", "原值减少", byCategory((m) => sumOf(m.disposals)));
+  push(
+    "原值",
+    "——其中-未标注处置方式",
+    byCategory((m) => m.disposals.get("未标注处置方式") ?? 0),
+  );
+  push("原值", "期末原值", byCategory((m) => m.endOriginal));
+  push("累计折旧", "期初累计折旧", byCategory((m) => m.beginDep));
+  push("累计折旧", "累计折旧变动净额", byCategory((m) => m.depChange));
+  push(
+    "累计折旧",
+    "——其中-非处置变动（含计提折旧）",
+    byCategory((m) => -m.depChange),
+  );
+  push("累计折旧", "期末累计折旧", byCategory((m) => m.endDep));
+  push("净值(NBV)", "年初余额", byCategory((m) => m.beginOriginal - Math.abs(m.beginDep)), true);
+  push("净值(NBV)", "年末余额", byCategory((m) => m.endOriginal - Math.abs(m.endDep)), true);
+  return { columns, rows };
 };
 
 // 合并统计：两期均在 14 张卡 + 重复键多配 1 行 = both 15，处置 2、新增 2，
 // 共 19 行；补充清单里 3001/3002 开头的各 6 笔在两期清单中无对应卡。
+// 剧本刻意安排期末清单里「10010003」出现两次：重复键告警框要有内容可看，
+// 合并聚合口径也会把这张期末卡按两行计入变动汇总。
 const MERGE_STATS = {
   rows: 19,
   both: 15,
@@ -877,48 +935,26 @@ const MERGE_STATS = {
   unmatchedDisposal: 6,
 };
 
-const mergePreviewRows = (): Record<string, string>[] => {
-  const disposed = ASSETS.filter((asset) => asset.disposed);
-  // 剧本刻意安排期末清单里「10010003」出现两次（重复键告警框 + 数据透视
-  // 式逐条配对都需要有行可看）：第 4 行即期初卡与第二张期末卡的配对结果。
-  const plan: Array<[FaAssetSeed | undefined, FaAssetSeed | undefined, string]> = [
-    [BOTH[0], BOTH[0], "两文件都有"],
-    [BOTH[1], BOTH[1], "两文件都有"],
-    [BOTH[2], BOTH[2], "两文件都有"],
-    [BOTH[2], BOTH[2], "两文件都有"],
-    [BOTH[3], BOTH[3], "两文件都有"],
-    [BOTH[6], BOTH[6], "两文件都有"],
-    [disposed[0], undefined, "仅文件1"],
-    [disposed[1], undefined, "仅文件1"],
-    [undefined, ADDED[0], "仅文件2"],
-    [undefined, ADDED[1], "仅文件2"],
-    [BOTH[7], BOTH[7], "两文件都有"],
-    [BOTH[8], BOTH[8], "两文件都有"],
-  ];
-  return plan.map(([begin, end, source]) => mergeRow(begin, end, source));
-};
-
 const faMatchResult = (): Record<string, unknown> => ({
   engine: "rust-fa",
   message: "完全外连接完成，共 19 行。",
   stats: MERGE_STATS,
-  columns: MERGE_COLUMNS,
-  preview: mergePreviewRows(),
+  summary: movementSummary(),
 });
 
 const faExportResult = (params: Record<string, unknown>): Record<string, unknown> => ({
   engine: "rust-fa",
   message: "完全外连接完成。",
   // 主消息与纠偏告警按 ===CORRECTION_WARNINGS=== 分隔，页面逐行出告警框；
-  // 文案口径与 Rust correction_warnings 一致（残值率按百分数换算）。
+  // 文案口径与 Rust correction_warnings 一致（逐侧统计并带期初/期末前缀）。
   exportMessage: [
     "FA List 导出完成；已生成未匹配资产变动清单",
     "===CORRECTION_WARNINGS===",
-    "【残值率纠偏】16 张卡片的残值率大于 1，已按百分数换算（例如 5 视作 5%），请确认导出结果。",
-    "【使用寿命纠偏】16 张卡片的“使用年限(年)”按年换算为月（乘以 12），请确认导出的使用寿命是否正确。",
+    "【期末·残值率纠偏】16 张卡片的残值率大于 1，已按百分数换算（例如 5 视作 5%），请确认导出结果。",
+    "【期末·使用寿命纠偏】16 张卡片的“使用年限(年)”按年换算为月（乘以 12），请确认导出的使用寿命是否正确。",
   ].join("\n"),
   rows: MERGE_STATS.rows,
-  columns: MERGE_COLUMNS.length,
+  columns: BEGIN_HEADERS.length + END_HEADERS.length + 2,
   outputPaths: outputEcho(params, "C:\\演示数据\\FA_List_20260905_140530.xlsx"),
 });
 

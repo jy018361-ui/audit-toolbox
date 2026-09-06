@@ -1168,7 +1168,7 @@ summary:focus-visible {
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
-  margin-top: var(--sp-5);
+  margin-top: 0;
   max-width: 1200px;
 }
 .fa-preview-workspace {
@@ -1418,6 +1418,27 @@ summary:focus-visible {
   background: var(--surface-sunken);
   color: var(--brand);
 }
+/* 匹配结果区的变动汇总折叠块：表体走 fa-tbje-account-table 的版式（金额右对齐、
+   类别列限宽换行），不能挂 .fa-preview——它的 th/td 规则（省略号、恒左对齐、
+   max-width）会盖掉汇总表的金额列样式。 */
+.fa-summary-details {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+.fa-summary-details > summary {
+  cursor: pointer;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--brand);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  background: var(--surface-muted);
+}
+.fa-summary-details .fa-tbje-account-table-wrap {
+  border: none;
+  border-radius: 0;
+  max-height: 320px;
+}
 @media (max-width: 1500px) {
   .fa-workspace.preview-mode {
     grid-template-columns: minmax(390px, 0.82fr) minmax(0, 1.18fr);
@@ -1631,6 +1652,26 @@ summary:focus-visible {
 /* StepIndicator：统一步骤条（三态） */
 .step-indicator {
   margin: var(--sp-5) 0 var(--sp-5);
+}
+.step-indicator + :is(.fa-stack, .workspace, .merger-layout) {
+  margin-top: 0;
+}
+/* 页面自身已经用 grid gap 管纵向节奏时，直接子状态组件不能再携带外边距。
+   否则 ErrorBox / JobProgress 被任务事件插入后会把 16px gap 叠成 32~56px。 */
+:is(
+    .fx-page,
+    .kz-page,
+    .confirmation-page,
+    .ts-manager-page,
+    .fa-tbje-page
+  )
+  > :is(.step-indicator, .error-box, .job-progress, .fa-stack, .workspace) {
+  margin-block: 0;
+}
+
+[data-slot="card-content"]
+  > :is(.error-box, .job-progress):first-child {
+  margin-top: 0;
 }
 .step-indicator-list {
   display: grid;

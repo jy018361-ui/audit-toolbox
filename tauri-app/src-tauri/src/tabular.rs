@@ -291,7 +291,7 @@ fn inspect_kanzhang_with_progress(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
-    let source: SourceParams = parse(params, "看账参数不完整。")?;
+    let source: SourceParams = parse_ledger_source(params, "看账参数不完整。")?;
     let started = Instant::now();
     if large_csv::applies(Path::new(&source.input_path)) {
         let cache = large_csv::load(&source, progress, cancel)?;
@@ -302,6 +302,7 @@ fn inspect_kanzhang_with_progress(
         return Ok(
             json!({"engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path,"CSV",source.header_row)?,
             "path":table.path,"sheets":table.sheets,"selectedSheet":table.sheet,"headers":table.headers,
+            "headerRow":source.header_row,
             "preview":table.rows,"dimensions":{"rows":cache.count,"columns":table.headers.len()},
             "encoding":table.encoding,"delimiter":table.delimiter.map(|v|v.to_string()),
             "suggestedMapping":mapping,"accounts":accounts["values"],"accountCodes":accounts["codes"],
@@ -329,6 +330,7 @@ fn inspect_kanzhang_with_progress(
     Ok(json!({
         "engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path, &table.sheet, source.header_row)?,
         "path":table.path, "sheets":table.sheets, "selectedSheet":table.sheet,
+        "headerRow":source.header_row,
         "headers":table.headers, "preview":table.rows.iter().take(50).collect::<Vec<_>>(),
         "dimensions":{"rows":table.rows.len(),"columns":table.headers.len()},
         "encoding":table.encoding, "delimiter":table.delimiter.map(|v|v.to_string()),
@@ -346,7 +348,7 @@ fn kanzhang_account_values_with_progress(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
-    let source: SourceParams = parse(params.clone(), "看账参数不完整。")?;
+    let source: SourceParams = parse_ledger_source(params.clone(), "看账参数不完整。")?;
     if large_csv::applies(Path::new(&source.input_path)) {
         let cache = large_csv::load(&source, progress, cancel)?;
         let mapping: LedgerMapping = params
@@ -480,7 +482,7 @@ fn primary_account_names(table: &Table, mapping: &LedgerMapping, values: &[Strin
 }
 
 fn validate_kanzhang_mapping(params: Value) -> Result<Value, AppError> {
-    let source: SourceParams = parse(params.clone(), "看账参数不完整。")?;
+    let source: SourceParams = parse_ledger_source(params.clone(), "看账参数不完整。")?;
     let large = if large_csv::applies(Path::new(&source.input_path)) {
         Some(large_csv::load(
             &source,
@@ -563,7 +565,7 @@ fn validate_kanzhang_mapping(params: Value) -> Result<Value, AppError> {
 /// 符号口径检测报告：导出前把结论与依据亮给用户，映射变更后可随时重查。
 /// 与导出走同一套预处理和检测，保证「看到的口径 = 实际采用的口径」。
 fn je_mark_sign_report(params: Value) -> Result<Value, AppError> {
-    let source: SourceParams = parse(params.clone(), "看账参数不完整。")?;
+    let source: SourceParams = parse_ledger_source(params.clone(), "看账参数不完整。")?;
     let table = load_ledger_cached(
         Path::new(&source.input_path),
         source.sheet.as_deref(),
@@ -817,7 +819,12 @@ fn kanzhang_filter_preview(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
-    let job: KanzhangParams = parse(params, "看账参数不完整。")?;
+    let mut job: KanzhangParams = parse(params, "看账参数不完整。")?;
+    job.header_row = resolve_auto_header_row(
+        &job.input_path,
+        job.sheet.as_deref(),
+        job.header_row,
+    )?;
     if large_csv::applies(Path::new(&job.input_path)) {
         return kanzhang_filter_preview_disk(&job, progress, cancel);
     }
@@ -3118,6 +3125,76 @@ fn auto_sheet_memo_path(path: &Path) -> Result<PathBuf, AppError> {
         .join(format!("{key}.sheet")))
 }
 
+/// 标题行 `0` 表示自动探测：与存款/汇兑引擎共用 [`ledger_mapping::header_row_score`]
+/// 的打分口径，只看前 31 行选最高分。看账此前把标题行硬锁在用户输入（默认
+/// 第 1 行），表头在第 2/4 行的余额表（TBJEPBC 06/09/10 号样例）第一步就报
+/// 「请先确认科目编码或科目名称字段映射」，而同一文件在存款/汇兑引擎里能自动
+/// 认出。大 CSV 走流式路径暂不探测，`0` 仍按第 1 行处理。
+fn resolve_auto_header_row(
+    input_path: &str,
+    sheet: Option<&str>,
+    header_row: usize,
+) -> Result<usize, AppError> {
+    if header_row != 0 {
+        return Ok(header_row);
+    }
+    let path = Path::new(input_path);
+    if !path.is_file() {
+        return Err(error(
+            "PATH_NOT_FOUND",
+            "找不到输入文件。",
+            Some(input_path.to_string()),
+        ));
+    }
+    if large_csv::applies(path) {
+        return Ok(1);
+    }
+    let rows: Vec<Vec<String>> = if crate::spreadsheet_input::is_text(path) {
+        crate::spreadsheet_input::read_rows(path)?
+            .into_iter()
+            .take(31)
+            .collect()
+    } else {
+        let read_path = local_read_path(path)?;
+        let mut workbook = open_workbook_auto(&read_path)
+            .map_err(|e| error("WORKBOOK_READ_FAILED", "无法读取工作簿。", Some(e.to_string())))?;
+        let sheets = workbook.sheet_names().to_vec();
+        let selected = sheet
+            .filter(|name| sheets.iter().any(|value| value == name))
+            .map(str::to_owned)
+            .or_else(|| pick_auto_sheet(path, &mut workbook, &sheets))
+            .ok_or_else(|| error("WORKBOOK_EMPTY", "工作簿中没有 Sheet。", None))?;
+        let range = workbook.worksheet_range(&selected).map_err(|e| {
+            error("WORKBOOK_READ_FAILED", "无法读取指定 Sheet。", Some(e.to_string()))
+        })?;
+        range
+            .rows()
+            .take(31)
+            .map(|row| row.iter().map(data_text).collect::<Vec<_>>())
+            .collect()
+    };
+    if rows.is_empty() {
+        return Ok(1);
+    }
+    Ok((0..rows.len().min(30))
+        .map(|index| (index + 1, ledger_mapping::header_row_score(&rows, index)))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(row, _)| row)
+        .unwrap_or(1))
+}
+
+/// 看账/正负数的账表来源参数：`headerRow: 0`（自动）在此解析成实际行号，
+/// 之后缓存键与读取用的都是确定值，同一文件不会因两次探测不一致而分裂。
+fn parse_ledger_source(params: Value, message: &str) -> Result<SourceParams, AppError> {
+    let mut source: SourceParams = parse(params, message)?;
+    source.header_row = resolve_auto_header_row(
+        &source.input_path,
+        source.sheet.as_deref(),
+        source.header_row,
+    )?;
+    Ok(source)
+}
+
 fn load_table(path: &Path, sheet: Option<&str>, header_row: usize) -> Result<Table, AppError> {
     if !path.is_file() {
         return Err(error(
@@ -5374,7 +5451,7 @@ fn parse_sign_choice(value: Option<&str>) -> Result<Option<SignConvention>, AppE
 /// 与 `ts.filter` 同形，但走 `load_table` 而不是 TS 的 Parquet 缓存，
 /// 保证读到的表结构与看账/标记的其他步骤完全一致。
 fn kanzhang_column_values(params: Value) -> Result<Value, AppError> {
-    let source: SourceParams = parse(params.clone(), "参数不完整。")?;
+    let source: SourceParams = parse_ledger_source(params.clone(), "参数不完整。")?;
     let field = required_string(&params, "field")?;
     let keyword = params
         .get("keyword")
@@ -5622,7 +5699,12 @@ fn export_je_mark(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
-    let job: JeMarkParams = parse(params, "正负数标记参数不完整。")?;
+    let mut job: JeMarkParams = parse(params, "正负数标记参数不完整。")?;
+    job.header_row = resolve_auto_header_row(
+        &job.input_path,
+        job.sheet.as_deref(),
+        job.header_row,
+    )?;
     let sign_choice = parse_sign_choice(job.sign_convention.as_deref())?;
     let started = Instant::now();
     progress("read", 0, 5, "正在读取凭证数据…");
@@ -5775,6 +5857,78 @@ mod tests {
             std::env::temp_dir().join(format!("audit-toolbox-{name}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    /// 表头不在第 1 行的账表（TBJEPBC 06/09/10 号真实样例的形态）：标题行
+    /// 传 0 时自动探测，与存款/汇兑引擎同一打分口径；显式行号照旧生效。
+    /// 此前硬锁第 1 行时，这类文件第一步就报「请先确认科目编码或科目名称
+    /// 字段映射」。
+    #[test]
+    fn kanzhang_inspect_auto_detects_header_row() {
+        let dir = temp_dir("kz-auto-header");
+        let path = dir.join("tb.xlsx");
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.write_string(0, 0, "某某公司科目余额表").unwrap();
+        sheet.write_string(1, 0, "单位：人民币元").unwrap();
+        for (col, header) in ["科目编码", "科目名称", "期末余额", "借方发生额", "贷方发生额"]
+            .iter()
+            .enumerate()
+        {
+            sheet.write_string(2, col as u16, *header).unwrap();
+        }
+        sheet.write_string(3, 0, "1002").unwrap();
+        sheet.write_string(3, 1, "银行存款").unwrap();
+        sheet.write_number(3, 2, 1500.0).unwrap();
+        sheet.write_number(3, 3, 0.0).unwrap();
+        sheet.write_number(3, 4, 500.0).unwrap();
+        sheet.write_string(4, 0, "6603").unwrap();
+        sheet.write_string(4, 1, "财务费用").unwrap();
+        sheet.write_number(4, 2, 300.0).unwrap();
+        sheet.write_number(4, 3, 300.0).unwrap();
+        sheet.write_number(4, 4, 0.0).unwrap();
+        workbook.save(&path).unwrap();
+
+        let value = inspect_kanzhang(json!({
+            "inputPath": path.to_string_lossy(),
+            "headerRow": 0,
+        }))
+        .unwrap();
+        assert_eq!(value["headerRow"], json!(3), "应自动探测到第 3 行表头");
+        let headers = value["headers"].as_array().unwrap();
+        assert!(headers.iter().any(|header| header == "科目编码"));
+        assert!(
+            value["accountCount"].as_u64().unwrap() >= 1,
+            "识别到表头后应能给出科目清单"
+        );
+
+        // 显式指定第 3 行与自动探测结果一致；显式指定仍然优先。
+        let manual = inspect_kanzhang(json!({
+            "inputPath": path.to_string_lossy(),
+            "headerRow": 3,
+        }))
+        .unwrap();
+        assert_eq!(manual["headerRow"], json!(3));
+
+        // 不传 headerRow 维持历史默认（第 1 行），老任务不受影响。
+        let legacy = inspect_kanzhang(json!({"inputPath": path.to_string_lossy()})).unwrap();
+        assert_eq!(legacy["headerRow"], json!(1));
+
+        // 文本路径同样探测：CSV 前两行是标题与单位说明。
+        let csv = dir.join("tb.csv");
+        fs::write(
+            &csv,
+            "某某公司科目余额表\n单位：元\n科目编码,科目名称,期末余额\n1002,银行存款,1000\n6603,财务费用,300\n",
+        )
+        .unwrap();
+        let text = inspect_kanzhang(json!({
+            "inputPath": csv.to_string_lossy(),
+            "headerRow": 0,
+        }))
+        .unwrap();
+        assert_eq!(text["headerRow"], json!(3));
+
+        fs::remove_dir_all(&dir).unwrap();
     }
     /// 账被按科目筛过 vs 凭证识别字段组错——两种成因的提示语完全不同，
     /// 指错方向会让人去查一个根本不存在的映射问题。判据是单边凭证占比。

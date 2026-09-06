@@ -101,8 +101,6 @@
 
 .fa-tbje-source-controls label,
 .fa-tbje-fixed-entity,
-.fa-tbje-account-toolbar label,
-.fa-tbje-bulk-category label,
 .fa-tbje-page .form-grid label {
   display: grid;
   gap: var(--sp-1);
@@ -113,9 +111,6 @@
 .fa-tbje-source-controls input,
 .fa-tbje-source-controls select,
 .fa-tbje-fixed-entity input,
-.fa-tbje-account-toolbar input,
-.fa-tbje-account-toolbar select,
-.fa-tbje-bulk-category input,
 .fa-tbje-account-table select,
 .fa-tbje-page .form-grid input,
 .fa-tbje-page .form-grid select {
@@ -132,9 +127,6 @@
 .fa-tbje-source-controls input:focus-visible,
 .fa-tbje-source-controls select:focus-visible,
 .fa-tbje-fixed-entity input:focus-visible,
-.fa-tbje-account-toolbar input:focus-visible,
-.fa-tbje-account-toolbar select:focus-visible,
-.fa-tbje-bulk-category input:focus-visible,
 .fa-tbje-account-table select:focus-visible,
 .fa-tbje-page .form-grid input:focus-visible,
 .fa-tbje-page .form-grid select:focus-visible {
@@ -145,9 +137,6 @@
 .fa-tbje-source-controls input:disabled,
 .fa-tbje-source-controls select:disabled,
 .fa-tbje-fixed-entity input:disabled,
-.fa-tbje-account-toolbar input:disabled,
-.fa-tbje-account-toolbar select:disabled,
-.fa-tbje-bulk-category input:disabled,
 .fa-tbje-account-table select:disabled,
 .fa-tbje-page .form-grid input:disabled,
 .fa-tbje-page .form-grid select:disabled {
@@ -210,34 +199,47 @@
   justify-content: flex-end;
 }
 
+/* 2026-09-06 科目复核工具栏合并：批量按钮、批量类别与作用范围提示同一行，
+   取消「搜索科目／显示范围」检索区（科目已按角色降序分组，分页浏览即可）。 */
 .fa-tbje-account-toolbar {
-  display: grid;
-  grid-template-columns: minmax(14rem, 1fr) minmax(11rem, 0.45fr);
-  gap: var(--sp-3);
-  align-items: end;
-}
-
-.fa-tbje-bulk-actions,
-.fa-tbje-bulk-category {
-  grid-column: 1 / -1;
   display: flex;
   align-items: end;
   flex-wrap: wrap;
-  gap: var(--sp-2);
+  gap: var(--sp-2) var(--sp-3);
   padding: var(--sp-3);
   border: 1px solid var(--border-soft);
   border-radius: var(--r-md);
   background: var(--surface-sunken);
 }
 
-.fa-tbje-bulk-actions > span {
-  margin-right: auto;
+.fa-tbje-account-toolbar > span {
+  margin-left: auto;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
 
-.fa-tbje-bulk-category label {
-  flex: 1 1 16rem;
+.fa-tbje-account-toolbar label {
+  display: grid;
+  gap: var(--sp-1);
+  flex: 1 1 14rem;
+  min-width: 0;
+  color: var(--text-muted);
+}
+
+.fa-tbje-account-toolbar input {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.25rem;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--control-border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.fa-tbje-account-toolbar input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .fa-tbje-account-table-wrap {
@@ -342,7 +344,6 @@
 
 @media (max-width: 900px) {
   .fa-tbje-source-grid,
-  .fa-tbje-account-toolbar,
   .fa-tbje-readiness-grid {
     grid-template-columns: 1fr;
   }
@@ -382,28 +383,15 @@
   }
 }
 
-/* 2026-09-03 科目复核密度收紧：工具栏控件并拢、表格行高与内边距压缩、
-   加斑马纹，单屏可见行数明显增多（用户走查：筛选行松散、行高过大）。 */
-.fa-tbje-account-toolbar {
-  grid-template-columns: minmax(13rem, 1fr) minmax(9rem, auto);
-  gap: var(--sp-2) var(--sp-3);
-}
-
-.fa-tbje-bulk-actions,
-.fa-tbje-bulk-category {
-  gap: var(--sp-2) var(--sp-3);
-  flex-wrap: wrap;
-}
-
+/* 2026-09-03 科目复核密度收紧：表格行高与内边距压缩、加斑马纹，
+   单屏可见行数明显增多（用户走查：行高过大）。 */
 .fa-tbje-account-table th,
 .fa-tbje-account-table td {
   padding: var(--sp-1) var(--sp-2);
 }
 
 .fa-tbje-account-table select,
-.fa-tbje-account-toolbar input,
-.fa-tbje-account-toolbar select,
-.fa-tbje-bulk-category input {
+.fa-tbje-account-toolbar input {
   min-height: 2.25rem;
 }
 
@@ -415,15 +403,27 @@
   background: color-mix(in srgb, var(--brand-accent) 8%, var(--surface));
 }
 
-/* 汇总变动表预览:段名列窄、项目缩进、金额右对齐,勾稽差异行弱化底色。 */
+/* 汇总变动表预览:段名列窄、项目单行不折行,合计列加粗,勾稽差异行弱化底色。 */
 .fa-tbje-summary-preview .fa-tbje-summary-section {
   width: 5.5rem;
   font-weight: 600;
   white-space: nowrap;
 }
 
-.fa-tbje-summary-preview td:nth-child(2) {
-  padding-left: var(--sp-3);
+.fa-tbje-summary-item {
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+/* "其中-××"子项缩进弱化，与主干行拉开层级。 */
+.fa-tbje-summary-item-sub {
+  padding-left: var(--sp-4);
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.fa-tbje-summary-total {
+  font-weight: 600;
 }
 
 .fa-tbje-summary-diff td {
@@ -447,7 +447,135 @@
   max-width: 12rem;
 }
 
-.fa-tbje-details-preview th:nth-child(5),
-.fa-tbje-details-preview th:nth-child(6) {
+/* 2026-09-06 对方科目预览:与导出文件的原值/累计折旧透视表同版式,
+   两张并排、放不下时自动换行;科目列限宽省略,合计行强调。 */
+.fa-tbje-pivot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr));
+  gap: var(--sp-4);
+}
+
+.fa-tbje-pivot-block {
+  display: grid;
+  align-content: start;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.fa-tbje-pivot-block h4 {
+  margin: 0;
+}
+
+.fa-tbje-pivot-preview th:not(:first-child) {
   text-align: right;
+}
+
+.fa-tbje-pivot-account {
+  max-width: 26rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fa-tbje-pivot-total td {
+  font-weight: 600;
+  background: var(--surface-muted);
+}
+
+/* 2026-09-06 任务结果卡片:完成态不再用横幅+平铺链接,改为
+   绿色对勾标题区 + 指标胶囊 + 文件行(文件名+打开按钮) + 告警。 */
+.fa-tbje-result-card {
+  border-color: color-mix(in srgb, var(--success-fg) 32%, var(--border-soft));
+}
+
+.fa-tbje-result-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+}
+
+.fa-tbje-result-check {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--success-bg);
+  color: var(--success-fg);
+}
+
+.fa-tbje-result-check svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.fa-tbje-result-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.fa-tbje-result-title strong {
+  font-size: var(--fs-md);
+}
+
+.fa-tbje-result-title p {
+  margin: var(--sp-1) 0 0;
+  color: var(--text-muted);
+}
+
+.fa-tbje-result-badge {
+  flex: 0 0 auto;
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-pill);
+  background: var(--success-bg);
+  color: var(--success-fg);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.fa-tbje-result-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.fa-tbje-result-metrics span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-pill);
+  background: var(--surface-muted);
+}
+
+.fa-tbje-result-metrics b {
+  font-variant-numeric: tabular-nums;
+}
+
+.fa-tbje-result-file {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+}
+
+.fa-tbje-result-filename {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.fa-tbje-result-warnings ul {
+  max-height: min(320px, 42vh);
+  margin: var(--sp-2) 0 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-left: var(--sp-5);
 }

@@ -164,3 +164,180 @@ it("统一上传自动分类出 TB 与 JE 来源卡，并可一键更正类型",
     await screen.findByText("TB 与 JE 来源已交换，并按新类型重新识别。"),
   ).toBeVisible();
 });
+
+/** TB＋JE 的利率确认：文件上传已改为粘贴匹配；映射没补齐时明说卡在哪。 */
+it("利率确认改为粘贴匹配，TB 缺借款明细时明说缺口并拦下一步", async () => {
+  const tbHeaders = ["科目编码", "科目名称", "借款明细", "期初余额", "期末余额"];
+  const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "贷方金额"];
+  const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
+    kind,
+    scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
+    sheet,
+    headerRow: 1,
+    headerDepth: 1,
+    headers,
+    preview: [headers.map(() => "x")],
+  });
+  const inspect = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
+    headers,
+    preview: [headers.map(() => "x")],
+    rowCount: 2,
+    sheet,
+    sheets: [sheet],
+    headerRow: 1,
+    headerDepth: 1,
+    // TB 故意只建议科目两列：借款明细与金额都缺，用来验证提示与拦门。
+    suggestedMapping:
+      kind === "tb"
+        ? { accountCode: "科目编码", accountName: "科目名称" }
+        : {
+            date: "记账日期",
+            id: "凭证号",
+            accountCode: "科目编码",
+            accountName: "科目名称",
+            summary: "摘要",
+          },
+  });
+  mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
+  mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
+    const p = params as { kind?: string; source?: { inputPath?: string } };
+    if (method === "ledger.forms") return [];
+    if (method === "deposit.classify_source") {
+      return p.source?.inputPath?.endsWith("je.xlsx")
+        ? classify("je", "序时账", jeHeaders)
+        : classify("tb", "余额表", tbHeaders);
+    }
+    if (method === "loan.inspect") {
+      return p.kind === "je"
+        ? inspect("je", "序时账", jeHeaders)
+        : inspect("tb", "余额表", tbHeaders);
+    }
+    throw new Error(`unexpected ${method}`);
+  });
+  render(<LoanInterestPage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: "TB＋JE" }));
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "拖放或选择 TB、序时账文件（可同时选择）",
+    }),
+  );
+  await screen.findByText("已识别：TB 科目余额表");
+  await screen.findByText("已识别：JE 序时账");
+  fireEvent.click(screen.getByRole("button", { name: "下一步：利率确认" }));
+  // 文件上传入口已移除，改为粘贴区。
+  expect(
+    screen.getByRole("textbox", { name: "粘贴借款利率区域" }),
+  ).toBeVisible();
+  expect(
+    screen.queryByRole("button", { name: "选择借款利率台账文件" }),
+  ).not.toBeInTheDocument();
+  // TB 没映射借款明细：匹配按钮禁用并说明原因；下一步也明说缺什么。
+  expect(screen.getByRole("button", { name: "解析并匹配利率" })).toBeDisabled();
+  expect(
+    screen.getByText(/TB 尚未映射「借款明细\/辅助核算」/),
+  ).toBeVisible();
+  expect(
+    screen.getByRole("button", { name: "下一步：测算与底稿" }),
+  ).toBeDisabled();
+  expect(screen.getByText(/TB：借款明细\/辅助核算/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "返回补齐映射" })).toBeVisible();
+});
+
+/** 映射齐全时粘贴原文交引擎模糊匹配，逐笔结果入表、下一步放行。 */
+it("粘贴利率匹配出逐笔结果并可进入测算", async () => {
+  const tbHeaders = ["科目编码", "科目名称", "借款明细", "期初余额", "期末余额"];
+  const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "贷方金额"];
+  const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
+    kind,
+    scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
+    sheet,
+    headerRow: 1,
+    headerDepth: 1,
+    headers,
+    preview: [headers.map(() => "x")],
+  });
+  const inspect = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
+    headers,
+    preview: [headers.map(() => "x")],
+    rowCount: 2,
+    sheet,
+    sheets: [sheet],
+    headerRow: 1,
+    headerDepth: 1,
+    suggestedMapping:
+      kind === "tb"
+        ? {
+            accountCode: "科目编码",
+            accountName: "科目名称",
+            loanId: "借款明细",
+            openingFunctionalAmount: "期初余额",
+            closingFunctionalAmount: "期末余额",
+          }
+        : {
+            date: "记账日期",
+            id: "凭证号",
+            accountCode: "科目编码",
+            accountName: "科目名称",
+            summary: "摘要",
+          },
+  });
+  const paste = "合同名称\t执行利率\n工行短期借款\t3.85%";
+  mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
+  mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
+    const p = params as { kind?: string; source?: { inputPath?: string } };
+    if (method === "ledger.forms") return [];
+    if (method === "deposit.classify_source") {
+      return p.source?.inputPath?.endsWith("je.xlsx")
+        ? classify("je", "序时账", jeHeaders)
+        : classify("tb", "余额表", tbHeaders);
+    }
+    if (method === "loan.inspect") {
+      return p.kind === "je"
+        ? inspect("je", "序时账", jeHeaders)
+        : inspect("tb", "余额表", tbHeaders);
+    }
+    if (method === "loan.match_rates") {
+      return {
+        rows: [
+          {
+            loanId: "工行短期借款",
+            rateType: "fixed",
+            fixedRate: 0.0385,
+            benchmarkRate: null,
+            spreadBps: null,
+            matchStatus: "精确匹配",
+            matchBasis: "与粘贴行「工行短期借款」一致",
+          },
+        ],
+        note: "已按表头识别列：名称=「合同名称」、利率=「执行利率」，共1行数据、1笔借款（精确1笔、模糊0笔）。",
+      };
+    }
+    throw new Error(`unexpected ${method}`);
+  });
+  render(<LoanInterestPage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: "TB＋JE" }));
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "拖放或选择 TB、序时账文件（可同时选择）",
+    }),
+  );
+  await screen.findByText("已识别：TB 科目余额表");
+  await screen.findByText("已识别：JE 序时账");
+  fireEvent.click(screen.getByRole("button", { name: "下一步：利率确认" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "粘贴借款利率区域" }), {
+    target: { value: paste },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "解析并匹配利率" }));
+  expect(await screen.findByText("借款利率匹配结果")).toBeVisible();
+  expect(await screen.findByText("工行短期借款")).toBeVisible();
+  // 匹配请求带上粘贴原文与 TB 来源；映射齐全后下一步放行。
+  await waitFor(() =>
+    expect(mock.engineCall).toHaveBeenCalledWith(
+      "loan.match_rates",
+      expect.objectContaining({ rateText: paste }),
+    ),
+  );
+  expect(
+    screen.getByRole("button", { name: "下一步：测算与底稿" }),
+  ).toBeEnabled();
+});

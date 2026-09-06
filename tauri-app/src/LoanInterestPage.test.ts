@@ -21,8 +21,19 @@ describe("借款利息测算", () => {
         additions: 30,
         reductions: 20,
         closingPrincipal: 110,
+        ledgerClosing: 110,
       }),
     ).toBe(0));
+  // 台账无期末余额列时无从对照：不出假 0，返回空由界面显示为空。
+  it("台账无期末列时勾稽差异为空", () =>
+    expect(
+      loanEquation({
+        openingPrincipal: 100,
+        additions: 30,
+        reductions: 20,
+        closingPrincipal: 110,
+      }),
+    ).toBeNull());
   // 金标要求 TB 的科目编码与名称都到位，缺名称同样拦。
   it("不允许TB明细缺少借款识别和本金余额", () =>
     expect(loanMissing("tb", { accountCode: "科目编码" })).toEqual([

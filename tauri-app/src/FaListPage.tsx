@@ -47,7 +47,11 @@ import { EmptyState } from "@/components/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useJobEvents } from "@/hooks/useJobEvents";
-import { FaTbJePage } from "./FaTbJePage";
+import {
+  FaSummaryRow,
+  FaSummaryTable,
+  FaTbJePage,
+} from "./FaTbJePage";
 type FaMapping = {
   matchKey?: string;
   matchKeys?: string[];
@@ -1552,6 +1556,10 @@ function FaCardListPage() {
       ["matchKeys", "组合匹配键"],
       ...rolesForSide(side),
     ];
+    // 与共用映射面板（MappingPanel）同一套标注法：必填角色标签后跟全角
+    // “＊”，下拉的 <option> 无法单独上样式，只能用文字标。
+    const requiredKeys = new Set(REQUIRED_ROLES.map(([key]) => key));
+    const markOf = (key: keyof FaMapping) => (requiredKeys.has(key) ? "＊" : "");
     // 已被某列占用的角色集合（跨列感知，用于标记"已映射"）
     const usedRoles = new Set<string>();
     for (const header of inspect.headers) {
@@ -1584,7 +1592,9 @@ function FaCardListPage() {
             className={mappedRoles.length ? "mapped" : undefined}
             disabled={llmBusy}
             title={
-              mappedRoles.map(([, label]) => label).join(" + ") || "未映射"
+              mappedRoles
+                .map(([key, label]) => `${label}${markOf(key)}`)
+                .join(" + ") || "未映射"
             }
             value={
               mappedRoles.length > 1
@@ -1624,7 +1634,9 @@ function FaCardListPage() {
             <option value="">—</option>
             {mappedRoles.length > 1 && (
               <option value={multipleValue} disabled>
-                {mappedRoles.map(([, label]) => label).join(" + ")}
+                {mappedRoles
+                  .map(([key, label]) => `${label}${markOf(key)}`)
+                  .join(" + ")}
               </option>
             )}
             {roleOptions.map(([key, label]) => {
@@ -1640,6 +1652,7 @@ function FaCardListPage() {
                   className={takenByOther ? "dt-role-taken" : undefined}
                 >
                   {label}
+                  {markOf(key)}
                   {takenByOther ? "（已用）" : ""}
                 </option>
               );
@@ -1712,9 +1725,10 @@ function FaCardListPage() {
             }}
           >
             <option value="">—</option>
+            {/* 补充清单的角色全部必填（缺失会拦截导出），统一标注“＊”。 */}
             {roles.map(({ field, label }) => (
               <option key={field} value={String(field)}>
-                {label}
+                {label}＊
               </option>
             ))}
           </select>
@@ -1920,12 +1934,6 @@ function FaCardListPage() {
           duplicateRowCount?: number;
         };
       };
-      const rows = Array.isArray(value.preview)
-        ? (value.preview as Record<string, unknown>[])
-        : [];
-      const columns = Array.isArray(value.columns)
-        ? (value.columns as string[])
-        : [];
       return (
         <>
           <StatGrid
@@ -1944,7 +1952,7 @@ function FaCardListPage() {
               匹配列存在重复值：{stats.duplicates?.duplicateValueCount ?? 0}{" "}
               个重复键、
               {stats.duplicates?.duplicateRowCount ?? 0}{" "}
-              行；已按数据透视逻辑逐条配对，请确认匹配列是否唯一。
+              行；已按合并聚合口径计算增减变动，确保合计数无误。
             </div>
           )}
           {(Number(stats.unmatchedAddition || 0) > 0 ||
@@ -1954,33 +1962,30 @@ function FaCardListPage() {
               {stats.unmatchedDisposal ?? 0} 条；导出时将另存未匹配清单。
             </div>
           )}
-          {!!rows.length && (
-            <details className="fa-preview" open>
-              <summary>合并结果前 {rows.length} 行</summary>
-              <div className="fa-preview-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      {columns.map((column) => (
-                        <th key={column}>{column}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((row, rowIndex) => (
-                      <tr key={rowIndex}>
-                        {columns.map((column) => (
-                          <td key={column} title={String(row[column] ?? "")}>
-                            {String(row[column] ?? "")}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </details>
-          )}
+          {(() => {
+            // 明细前 N 行看不出两期勾稽关系，改列变动汇总：与导出的
+            // 「固定资产变动汇总表」同一份数值与版式（类别为列、千分位）。
+            const summary = (
+              value as { summary?: { columns?: unknown; rows?: unknown } }
+            ).summary;
+            if (
+              !summary ||
+              !Array.isArray(summary.columns) ||
+              !Array.isArray(summary.rows) ||
+              summary.rows.length === 0
+            ) {
+              return null;
+            }
+            return (
+              <details className="fa-summary-details" open>
+                <summary>固定资产变动汇总表（预览）</summary>
+                <FaSummaryTable
+                  columns={summary.columns as string[]}
+                  rows={summary.rows as FaSummaryRow[]}
+                />
+              </details>
+            );
+          })()}
         </>
       );
     }
@@ -2695,6 +2700,8 @@ function FaCardListPage() {
               <div>
                 <h2>文件预览</h2>
                 <p>预览区已锁定；各文件可独立纵向、横向滚动。</p>
+                {/* 与其他工具的映射面板同一条说明：下拉角色后的“＊”表示必填。 */}
+                <p className="mapping-requirement-legend">＊ 为必填字段。</p>
                 {step === 1 &&
                   inspection &&
                   (() => {

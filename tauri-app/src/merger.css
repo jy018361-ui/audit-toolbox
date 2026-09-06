@@ -3,11 +3,7 @@
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
   gap: var(--sp-4);
   margin-top: var(--sp-5);
-  align-items: start;
-}
-.merger-source,
-.merger-rules {
-  min-height: 560px;
+  align-items: stretch;
 }
 .section-title > span:not(.pill) {
   font-size: var(--fs-xs);
@@ -220,9 +216,6 @@
 @media (max-width: 1450px) {
   .merger-layout {
     grid-template-columns: 1fr;
-  }
-  .merger-source,
-  .merger-rules {
-    min-height: auto;
+    align-items: start;
   }
 }

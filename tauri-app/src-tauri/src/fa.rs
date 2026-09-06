@@ -1159,19 +1159,23 @@ fn preview(
         }
         acc
     });
-    let columns = result_columns(&result, false);
-    let preview = result
-        .rows
+    // 明细前 N 行对核对没有帮助：审计员要看的是期初→期末的增减变动是否
+    // 对得上，所以预览直接给变动汇总（与导出的固定资产变动汇总表同一份
+    // 行定义，数值为数字，由前端按千分位渲染）。
+    let (categories, lines, _noise) = build_summary_lines(&result, &params, true);
+    let summary_rows = lines
         .iter()
-        .take(50)
-        .map(|row| row_json(&result, row, false))
+        .map(|line| {
+            json!({"section": line.section, "item": line.item,
+                "values": line.values.iter().map(|v| round_money(*v)).collect::<Vec<_>>()})
+        })
         .collect::<Vec<_>>();
     Ok(json!({
         "engine":"rust-fa", "message":format!("完全外连接完成，共 {} 行。", result.rows.len()),
         "stats":{"rows":result.rows.len(),"both":counts[0],"beginOnly":counts[1],"endOnly":counts[2],
             "duplicates":{"hasDuplicates":result.duplicate_values>0,"duplicateValueCount":result.duplicate_values,"duplicateRowCount":result.duplicate_rows},
             "unmatchedAddition":result.unmatched_addition.len(),"unmatchedDisposal":result.unmatched_disposal.len()},
-        "columns":columns,"preview":preview
+        "summary":{"columns":categories,"rows":summary_rows}
     }))
 }
 
@@ -2941,10 +2945,22 @@ fn method_parts(value: Option<String>, fallback: &str) -> Vec<String> {
     parts
 }
 
-fn build_extended_summary(
+/// 汇总行的数值态：section（原值／累计折旧／净值）＋项目＋按类别顺序的金额。
+/// 导出 Excel 的固定资产变动汇总表与合并预览共用同一份行定义和零行过滤，
+/// 两边看到的合计永远一致。
+struct SummaryLine {
+    section: String,
+    item: String,
+    values: Vec<f64>,
+}
+
+/// `short_labels` 为真时，期初期末行直接叫「期初原值／期末原值」；导出底稿
+/// 沿用旧版写法，把来源工作簿名拼进项目名（`side_label`）。
+fn build_summary_lines(
     result: &MergeResult,
     params: &Value,
-) -> (Vec<String>, Vec<Vec<String>>, Vec<Vec<String>>) {
+    short_labels: bool,
+) -> (Vec<String>, Vec<SummaryLine>, Vec<Vec<String>>) {
     let mut movements: BTreeMap<String, CategoryMovement> = BTreeMap::new();
     // Legacy preserves the category order in the merged schedule instead of
     // alphabetically sorting Chinese labels.
@@ -3059,8 +3075,6 @@ fn build_extended_summary(
         let unclassified = categories.remove(index);
         categories.push(unclassified);
     }
-    let mut headers = vec![String::new(), String::new(), "合计".into()];
-    headers.extend(categories.clone());
     let add_methods = add_method_order;
     let disposal_methods = disposal_method_order;
     // Legacy only splits depreciation disposal rows that carry an explicit
@@ -3080,20 +3094,39 @@ fn build_extended_summary(
         (-m.dep_change_total - disposed).abs() > 0.005
     });
     let mut rows = Vec::new();
-    let mut add_row = |section: &str, item: &str, values: Vec<f64>| {
+    let mut add_row = |section: &str, item: String, values: Vec<f64>| {
         if values.iter().all(|v| v.abs() <= 0.005)
-            && !["期初余额", "期末余额", "年初余额", "年末余额"].contains(&item)
+            && !["期初余额", "期末余额", "年初余额", "年末余额"].contains(&item.as_str())
         {
             return;
         }
-        let mut row = vec![section.to_owned(), item.to_owned()];
-        row.push(display_number(round_money(values.iter().sum())));
-        row.extend(values.into_iter().map(|v| display_number(round_money(v))));
-        rows.push(row);
+        rows.push(SummaryLine {
+            section: section.to_owned(),
+            item,
+            values,
+        });
     };
+    let begin_label = if short_labels {
+        "期初".to_owned()
+    } else {
+        side_label(params, 1)
+    };
+    let end_label = if short_labels {
+        "期末".to_owned()
+    } else {
+        side_label(params, 2)
+    };
+    let begin_dep_item = format!(
+        "{begin_label}{}",
+        mapped_header(params, 1, "depreciation").unwrap_or_else(|| "累计折旧".into())
+    );
+    let end_dep_item = format!(
+        "{end_label}{}",
+        mapped_header(params, 2, "depreciation").unwrap_or_else(|| "累计折旧".into())
+    );
     add_row(
         "原值",
-        &format!("{}{}", side_label(params, 1), "原值"),
+        format!("{begin_label}原值"),
         categories
             .iter()
             .map(|c| movements[c].begin_original)
@@ -3101,7 +3134,7 @@ fn build_extended_summary(
     );
     add_row(
         "原值",
-        "原值增加",
+        "原值增加".into(),
         categories
             .iter()
             .map(|c| movements[c].additions.values().sum())
@@ -3110,7 +3143,7 @@ fn build_extended_summary(
     for method in &add_methods {
         add_row(
             "原值",
-            &format!("——其中-{method}"),
+            format!("——其中-{method}"),
             categories
                 .iter()
                 .map(|c| *movements[c].additions.get(method).unwrap_or(&0.0))
@@ -3119,7 +3152,7 @@ fn build_extended_summary(
     }
     add_row(
         "原值",
-        "原值减少",
+        "原值减少".into(),
         categories
             .iter()
             .map(|c| movements[c].disposals.values().sum())
@@ -3128,7 +3161,7 @@ fn build_extended_summary(
     for method in &disposal_methods {
         add_row(
             "原值",
-            &format!("——其中-{method}"),
+            format!("——其中-{method}"),
             categories
                 .iter()
                 .map(|c| *movements[c].disposals.get(method).unwrap_or(&0.0))
@@ -3137,7 +3170,7 @@ fn build_extended_summary(
     }
     add_row(
         "原值",
-        "原值重分类",
+        "原值重分类".into(),
         categories
             .iter()
             .map(|c| movements[c].reclass_original)
@@ -3145,7 +3178,7 @@ fn build_extended_summary(
     );
     add_row(
         "原值",
-        &format!("{}{}", side_label(params, 2), "原值"),
+        format!("{end_label}原值"),
         categories
             .iter()
             .map(|c| movements[c].end_original)
@@ -3153,16 +3186,12 @@ fn build_extended_summary(
     );
     add_row(
         "累计折旧",
-        &format!(
-            "{}{}",
-            side_label(params, 1),
-            mapped_header(params, 1, "depreciation").unwrap_or_else(|| "累计折旧".into())
-        ),
+        begin_dep_item,
         categories.iter().map(|c| movements[c].begin_dep).collect(),
     );
     add_row(
         "累计折旧",
-        "累计折旧变动净额",
+        "累计折旧变动净额".into(),
         categories
             .iter()
             .map(|c| movements[c].dep_change_total)
@@ -3171,7 +3200,7 @@ fn build_extended_summary(
     for method in &dep_methods {
         add_row(
             "累计折旧",
-            &format!("——其中-{method}"),
+            format!("——其中-{method}"),
             categories
                 .iter()
                 .map(|c| *movements[c].disposal_dep.get(method).unwrap_or(&0.0))
@@ -3181,7 +3210,7 @@ fn build_extended_summary(
     if has_non_disposal_dep {
         add_row(
             "累计折旧",
-            "——其中-非处置变动（含计提折旧）",
+            "——其中-非处置变动（含计提折旧）".into(),
             categories
                 .iter()
                 .map(|c| {
@@ -3197,7 +3226,7 @@ fn build_extended_summary(
     }
     add_row(
         "累计折旧",
-        "累计折旧重分类",
+        "累计折旧重分类".into(),
         categories
             .iter()
             .map(|c| movements[c].reclass_dep)
@@ -3205,18 +3234,14 @@ fn build_extended_summary(
     );
     add_row(
         "累计折旧",
-        &format!(
-            "{}{}",
-            side_label(params, 2),
-            mapped_header(params, 2, "depreciation").unwrap_or_else(|| "累计折旧".into())
-        ),
+        end_dep_item,
         categories.iter().map(|c| movements[c].end_dep).collect(),
     );
     // Same absolute-value rule as the FA List sheet: a ledger that books
     // accumulated depreciation as a negative number must not inflate net value.
     add_row(
         "净值(NBV)",
-        "年初余额",
+        "年初余额".into(),
         categories
             .iter()
             .map(|c| movements[c].begin_original - movements[c].begin_dep.abs())
@@ -3224,12 +3249,38 @@ fn build_extended_summary(
     );
     add_row(
         "净值(NBV)",
-        "年末余额",
+        "年末余额".into(),
         categories
             .iter()
             .map(|c| movements[c].end_original - movements[c].end_dep.abs())
             .collect(),
     );
+    (categories, rows, noise)
+}
+
+fn build_extended_summary(
+    result: &MergeResult,
+    params: &Value,
+) -> (Vec<String>, Vec<Vec<String>>, Vec<Vec<String>>) {
+    let (categories, lines, noise) = build_summary_lines(result, params, false);
+    let mut headers = vec![String::new(), String::new(), "合计".into()];
+    headers.extend(categories.iter().cloned());
+    let rows = lines
+        .into_iter()
+        .map(|line| {
+            let mut row = vec![
+                line.section,
+                line.item,
+                display_number(round_money(line.values.iter().sum())),
+            ];
+            row.extend(
+                line.values
+                    .into_iter()
+                    .map(|value| display_number(round_money(value))),
+            );
+            row
+        })
+        .collect();
     (headers, rows, noise)
 }
 
@@ -3941,63 +3992,91 @@ fn mapped_residual_rate(
 /// divided by原值).  Legacy popped a dialog for each of these asking the user to
 /// verify the exported sheets; report them so the change is at least visible.
 fn correction_warnings(result: &MergeResult, params: &Value) -> Vec<String> {
-    let mut residual_scaled = 0usize;
-    let mut residual_from_amount = 0usize;
-    let mut life_converted = 0usize;
-    let residual_header = mapped_header(params, 2, "residualRate")
-        .unwrap_or_default()
-        .to_lowercase();
-    let normalized_residual = normalize_header(&residual_header);
-    let residual_is_amount = (normalized_residual.contains("残值")
-        && !normalized_residual.contains("残值率"))
-        || normalized_residual.contains("residualvalue")
-        || normalized_residual.contains("salvagevalue");
-    let life_header = mapped_header(params, 2, "life").unwrap_or_default();
-    // Warn on the same column-level decision the export actually applies, so
-    // the message cannot claim a conversion that never happened (or stay silent
-    // about one that did).
-    let life_in_years = life_scale(result, params, 2) > 1.0;
-    for values in &result.end.rows {
-        if values_are_summary_noise(values) {
-            continue;
-        }
-        let row = JoinedRow {
-            begin: None,
-            end: Some(values.clone()),
-            source: "仅文件2",
-            match_value: String::new(),
-            extra: BTreeMap::new(),
-        };
-        let original = mapped_number(result, &row, params, 2, "originalValue");
-        let raw_residual = mapped_number(result, &row, params, 2, "residualRate");
-        if residual_is_amount && original.abs() > f64::EPSILON && raw_residual.abs() > f64::EPSILON
-        {
-            residual_from_amount += 1;
-        } else if raw_residual > 1.0 {
-            residual_scaled += 1;
-        }
-        if life_in_years
-            && parse_life_cell(&mapped_text(result, &row, params, 2, "life"))
-                .is_some_and(|life| life > 0.0)
-        {
-            life_converted += 1;
-        }
-    }
     let mut warnings = Vec::new();
-    if residual_from_amount > 0 {
-        warnings.push(format!(
-            "【残值率纠偏】{residual_from_amount} 张卡片的“{residual_header}”按残值金额除以原值换算成残值率，请确认导出的 FA List 与新增清单_BKD 中的残值率是否正确。"
-        ));
-    }
-    if residual_scaled > 0 {
-        warnings.push(format!(
-            "【残值率纠偏】{residual_scaled} 张卡片的残值率大于 1，已按百分数换算（例如 5 视作 5%），请确认导出结果。"
-        ));
-    }
-    if life_converted > 0 {
-        warnings.push(format!(
-            "【使用寿命纠偏】{life_converted} 张卡片的“{life_header}”按年换算为月（乘以 12），请确认导出的使用寿命是否正确。"
-        ));
+    // 残值率/寿命纠偏对期初、期末两侧都会发生（折旧期间表两侧都要用），警告
+    // 逐侧统计并带上期初/期末前缀——只写「残值率纠偏」用户无从知道该核对
+    // 哪份清单。
+    for side in [1u8, 2u8] {
+        let period = if side == 1 { "期初" } else { "期末" };
+        let table = if side == 1 {
+            &result.begin
+        } else {
+            &result.end
+        };
+        let mut residual_scaled = 0usize;
+        let mut residual_from_amount = 0usize;
+        let mut life_converted = 0usize;
+        let residual_header = mapped_header(params, side, "residualRate")
+            .unwrap_or_default()
+            .to_lowercase();
+        let normalized_residual = normalize_header(&residual_header);
+        let residual_is_amount = (normalized_residual.contains("残值")
+            && !normalized_residual.contains("残值率"))
+            || normalized_residual.contains("residualvalue")
+            || normalized_residual.contains("salvagevalue");
+        let life_header = mapped_header(params, side, "life").unwrap_or_default();
+        // Warn on the same column-level decision the export actually applies, so
+        // the message cannot claim a conversion that never happened (or stay silent
+        // about one that did).
+        let life_in_years = life_scale(result, params, side) > 1.0;
+        for values in &table.rows {
+            if values_are_summary_noise(values) {
+                continue;
+            }
+            let row = JoinedRow {
+                begin: if side == 1 {
+                    Some(values.clone())
+                } else {
+                    None
+                },
+                end: if side == 2 {
+                    Some(values.clone())
+                } else {
+                    None
+                },
+                source: if side == 1 {
+                    "仅文件1"
+                } else {
+                    "仅文件2"
+                },
+                match_value: String::new(),
+                extra: BTreeMap::new(),
+            };
+            let original = mapped_number(result, &row, params, side, "originalValue");
+            let raw_residual = mapped_number(result, &row, params, side, "residualRate");
+            if residual_is_amount && original.abs() > f64::EPSILON && raw_residual.abs() > f64::EPSILON
+            {
+                residual_from_amount += 1;
+            } else if raw_residual > 1.0 {
+                residual_scaled += 1;
+            }
+            if life_in_years
+                && parse_life_cell(&mapped_text(result, &row, params, side, "life"))
+                    .is_some_and(|life| life > 0.0)
+            {
+                life_converted += 1;
+            }
+        }
+        if residual_from_amount > 0 {
+            warnings.push(format!(
+                "【{period}·残值率纠偏】{residual_from_amount} 张卡片的“{residual_header}”按残值金额除以原值换算成残值率，{}",
+                if side == 2 {
+                    "请确认导出的 FA List 与新增清单_BKD 中的残值率是否正确。"
+                } else {
+                    "请确认导出的折旧期间等底稿中的期初残值率是否正确。"
+                }
+            ));
+        }
+        if residual_scaled > 0 {
+            warnings.push(format!(
+                "【{period}·残值率纠偏】{residual_scaled} 张卡片的残值率大于 1，已按百分数换算（例如 5 视作 5%），请确认导出结果。"
+            ));
+        }
+        if life_converted > 0 {
+            warnings.push(format!(
+                "【{period}·使用寿命纠偏】{life_converted} 张卡片的“{life_header}”按年换算为月（乘以 12），请确认导出的使用寿命是否正确。"
+            ));
+        }
     }
     warnings
 }
@@ -6314,7 +6393,12 @@ mod tests {
         let end = dir.join("end.csv");
         fs::write(&begin,"卡片编号,资产类别,资产名称,原值,累计折旧,使用寿命,残值率,入账开始日期,本年折旧\nA1,机器,甲,100,20,60,5%,2020-01-01,10\nA2,电子,乙,50,30,36,5%,2021-01-01,8\n").unwrap();
         fs::write(&end,"卡片编号,资产类别,资产名称,原值,累计折旧,使用寿命,残值,入账开始日期,本年折旧\nA1,机器,甲,100,40,60,5,2020-01-01,20\nA3,运输,丙,80,8,48,4,2025-01-01,8\n").unwrap();
-        json!({"beginPath":begin,"endPath":end,"beginKeys":["卡片编号"],"endKeys":["卡片编号"],"outputPath":dir.join("FA_List.xlsx")})
+        // 前端真实负载始终带两侧映射（必填角色未映射时不会发起任务），
+        // 汇总/纠偏等后段逻辑都按映射取数；夹具与真实口径保持一致。
+        json!({"beginPath":begin,"endPath":end,"beginKeys":["卡片编号"],"endKeys":["卡片编号"],
+            "beginMapping":{"category":"资产类别","name":"资产名称","originalValue":"原值","depreciation":"累计折旧","life":"使用寿命","residualRate":"残值率","startDate":"入账开始日期"},
+            "endMapping":{"category":"资产类别","name":"资产名称","originalValue":"原值","depreciation":"累计折旧","life":"使用寿命","residualRate":"残值","startDate":"入账开始日期"},
+            "outputPath":dir.join("FA_List.xlsx")})
     }
     #[test]
     fn inspect_and_merge_contract() {
@@ -7834,14 +7918,52 @@ mod tests {
         p["additionSupplement"] =
             json!({"path":addition,"keys":["卡片编号"],"method":"新增方式","date":"新增日期"});
         p["disposalSupplement"] = json!({"path":disposal,"keys":["卡片编号"],"method":"处置方式","date":"处置日期","originalValue":"处置原值","depreciation":"处置折旧"});
-        let output = test_preview(p).unwrap();
+        let output = test_preview(p.clone()).unwrap();
         assert_eq!(output["stats"]["unmatchedAddition"], 1);
         assert_eq!(output["stats"]["unmatchedDisposal"], 0);
-        let rows = output["preview"].as_array().unwrap();
-        let a3 = rows.iter().find(|r| r["卡片编号_文件2"] == "A3").unwrap();
-        assert_eq!(a3["新增方式_辅助_文件2"], "购置；转入");
-        let a2 = rows.iter().find(|r| r["卡片编号_文件1"] == "A2").unwrap();
-        assert_eq!(a2["处置原值_辅助_文件1"], 500.0);
+        // 合并预览不再回传明细行，改回变动汇总（类别为列、数值为数字）。
+        let summary_columns = output["summary"]["columns"].as_array().unwrap();
+        assert!(
+            summary_columns
+                .iter()
+                .any(|c| c.as_str() == Some("运输"))
+        );
+        assert!(
+            output["summary"]["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["item"] == "期末原值")
+        );
+        // 补充清单聚合结果直接在合并行上断言（新增方式合并去重、处置金额取绝对值合计）。
+        let cancel = Arc::new(AtomicBool::new(false));
+        let merged = merge(&p, &|_, _, _, _| {}, &cancel).unwrap();
+        let a3 = merged
+            .rows
+            .iter()
+            .find(|row| {
+                row.end
+                    .as_ref()
+                    .is_some_and(|cells| cells.first().map(String::as_str) == Some("A3"))
+            })
+            .unwrap();
+        assert!(matches!(
+            a3.extra.get("新增方式_辅助_文件2"),
+            Some(Cell::Text(text)) if text == "购置；转入"
+        ));
+        let a2 = merged
+            .rows
+            .iter()
+            .find(|row| {
+                row.begin
+                    .as_ref()
+                    .is_some_and(|cells| cells.first().map(String::as_str) == Some("A2"))
+            })
+            .unwrap();
+        assert!(matches!(
+            a2.extra.get("处置原值_辅助_文件1"),
+            Some(Cell::Number(value)) if (*value - 500.0).abs() < 1e-9
+        ));
         let mut export_params = params(&dir);
         export_params["additionSupplement"] =
             json!({"path":addition,"keys":["卡片编号"],"method":"新增方式","date":"新增日期"});

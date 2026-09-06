@@ -144,6 +144,10 @@ describe("TbjeCheckPage", () => {
     ).toBeVisible();
     fireEvent.click(tbMapping);
     expect(screen.getByText("科目余额表字段映射")).toBeVisible();
+    expect(container.querySelector(".tbje-group")).toHaveAttribute(
+      "data-ui-state",
+      "expanded",
+    );
     fireEvent.click(jeMapping);
     expect(screen.getByText("序时账字段映射")).toBeVisible();
     expect(screen.queryByText("科目余额表字段映射")).not.toBeInTheDocument();

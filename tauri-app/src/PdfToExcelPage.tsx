@@ -260,7 +260,6 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                   <div className="file-item" key={path}>
                     <div>
                       <strong>{pdfFileName(path)}</strong>
-                      <span title={path}>{path}</span>
                     </div>
                     <div>
                       <Button

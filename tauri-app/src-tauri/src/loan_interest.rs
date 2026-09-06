@@ -109,6 +109,7 @@ struct LoanRow {
 pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
     match method {
         "loan.inspect" => inspect(&params),
+        "loan.match_rates" => match_rates(&params),
         _ => Err(error(
             "METHOD_NOT_FOUND",
             "未找到借款利息业务方法。",
@@ -213,6 +214,368 @@ fn loan_form_catalog() -> Value {
             })
             .collect(),
     )
+}
+
+/// 前端「利率确认」步骤粘贴匹配后逐笔确认的利率（TB 模式）。
+/// 按 norm(借款明细) 与 TB 行对应；优先级高于利率台账文件（后者仅历史任务恢复用）。
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InlineRateRow {
+    loan_id: String,
+    #[serde(default)]
+    rate_type: String,
+    #[serde(default)]
+    fixed_rate: Option<f64>,
+    #[serde(default)]
+    benchmark_rate: Option<f64>,
+    #[serde(default)]
+    spread_bps: Option<f64>,
+}
+
+fn inline_rate_rows(params: &Value) -> Vec<InlineRateRow> {
+    params
+        .get("rateRows")
+        .and_then(Value::as_array)
+        .map(|all| {
+            all.iter()
+                .filter_map(|item| serde_json::from_value(item.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 「利率确认」步骤：把用户从 Excel 复制粘贴的利率区域与 TB 借款明细匹配。
+///
+/// 匹配口径与 JE 的模糊匹配一致：norm 归一化后先精确相等，再双向包含
+/// （按名称去重后唯一命中才采用）；多条候选或没有命中都如实报出来，由用户
+/// 在匹配结果表里手工核对/补填，绝不猜。利率取数复用 [`rates`]／
+/// [`source_rate_type`]，与利率台账文件同一套口径。
+fn match_rates(params: &Value) -> Result<Value, AppError> {
+    let rate_text = params
+        .get("rateText")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if rate_text.is_empty() {
+        return Err(error(
+            "RATE_PASTE_EMPTY",
+            "粘贴内容为空：请先在 Excel 中复制利率区域。",
+            None,
+        ));
+    }
+    let (tb, tm) = source(params, "tbSource")?;
+    let tb_leaf =
+        ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| mapped_names(&tm, "tb", role));
+    let loans: Vec<String> = tb
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| tb_leaf.get(*index).copied().unwrap_or(true))
+        .filter_map(|(_, row)| {
+            let id = text(&tb, row, &tm, "loanId");
+            let account = account_text(&tb, row, &tm, "tb");
+            (!id.is_empty() && !account.is_empty()).then_some(id)
+        })
+        .collect();
+    if loans.is_empty() {
+        return Err(error(
+            "NO_LOANS",
+            "未从 TB 识别到借款明细：请先在「上传与识别」完成「借款明细/辅助核算」的映射。",
+            None,
+        ));
+    }
+    let (paste, paste_mapping, header_like) = parse_pasted_rate_text(&rate_text)?;
+    if !paste_mapping.contains_key("loanId") {
+        return Err(error(
+            "RATE_COLUMNS_UNRECOGNIZED",
+            "未从粘贴内容识别出借款名称列：请连同表头一起复制（表头含「借款/合同/明细」等字样）。",
+            None,
+        ));
+    }
+    let name_at = |row: &[String]| text(&paste, row, &paste_mapping, "loanId");
+    let mut rows = vec![];
+    let (mut exact_hits, mut fuzzy_hits) = (0usize, 0usize);
+    for id in &loans {
+        let key = norm(id);
+        let exact = paste.rows.iter().position(|r| norm(&name_at(r)) == key);
+        // 双向包含只对双方都 ≥2 字的名称开放，避免「1」包含在「12」里的假命中。
+        let mut fuzzy: Vec<(usize, String)> = vec![];
+        if exact.is_none() && key.chars().count() >= 2 {
+            for (index, row) in paste.rows.iter().enumerate() {
+                let name_key = norm(&name_at(row));
+                if name_key.chars().count() < 2 {
+                    continue;
+                }
+                if name_key.contains(&key) || key.contains(&name_key) {
+                    if !fuzzy.iter().any(|(_, n)| *n == name_key) {
+                        fuzzy.push((index, name_key));
+                    }
+                }
+            }
+        }
+        let (hit_row, status, basis) = if let Some(index) = exact {
+            exact_hits += 1;
+            (
+                Some(index),
+                "精确匹配",
+                format!("与粘贴行「{}」一致", name_at(&paste.rows[index])),
+            )
+        } else if fuzzy.len() == 1 {
+            fuzzy_hits += 1;
+            let (index, _) = fuzzy[0];
+            (
+                Some(index),
+                "模糊匹配",
+                format!("与粘贴行「{}」模糊对应", name_at(&paste.rows[index])),
+            )
+        } else if fuzzy.len() > 1 {
+            (
+                None,
+                "未匹配",
+                format!(
+                    "匹配到{}条候选（{}），请手工确认",
+                    fuzzy.len(),
+                    fuzzy
+                        .iter()
+                        .map(|(_, n)| n.clone())
+                        .collect::<Vec<_>>()
+                        .join("、")
+                ),
+            )
+        } else {
+            (None, "未匹配", "粘贴内容中未找到对应名称".to_string())
+        };
+        let (rate_type, fixed, benchmark, bps) = match hit_row {
+            Some(index) => {
+                let row = &paste.rows[index];
+                let (fixed, benchmark, bps) = rates(&paste, row, &paste_mapping);
+                (
+                    source_rate_type(&paste, row, &paste_mapping),
+                    fixed,
+                    benchmark,
+                    bps,
+                )
+            }
+            None => ("fixed".to_string(), None, None, None),
+        };
+        rows.push(json!({
+            "loanId": id,
+            "rateType": rate_type,
+            "fixedRate": fixed,
+            "benchmarkRate": benchmark,
+            "spreadBps": bps,
+            "matchStatus": status,
+            "matchBasis": basis,
+        }));
+    }
+    let role_label = [
+        ("loanId", "名称"),
+        ("rate", "利率"),
+        ("rateType", "利率类型"),
+        ("benchmarkRate", "基准利率"),
+        ("spreadBps", "加点"),
+    ];
+    let columns: Vec<String> = role_label
+        .iter()
+        .filter_map(|(role, label)| {
+            paste_mapping
+                .get(*role)
+                .and_then(Value::as_str)
+                .map(|name| format!("{label}=「{name}」"))
+        })
+        .collect();
+    let note = format!(
+        "{}，共{}行数据、{}笔借款（精确{}笔、模糊{}笔）。",
+        if header_like {
+            format!("已按表头识别列：{}", columns.join("、"))
+        } else {
+            format!("未识别出表头，按内容猜列：{}", columns.join("、"))
+        },
+        paste.rows.len(),
+        loans.len(),
+        exact_hits,
+        fuzzy_hits,
+    );
+    Ok(json!({"rows": rows, "note": note}))
+}
+
+/// 表头单元格 → 利率区域角色。按关键词认列，也用于判断首行是不是表头。
+/// 金额/余额/日期类表头先排除（如「借款金额」含「借款」但不是名称列）。
+fn rate_header_role(cell: &str) -> Option<&'static str> {
+    let lower = cell.trim().to_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    let has = |words: &[&str]| words.iter().any(|w| lower.contains(w));
+    if has(&["金额", "余额", "本金", "日期", "到期", "期限", "天数"]) {
+        return None;
+    }
+    if has(&["bp", "基点", "加点", "减点", "点差"]) {
+        return Some("spreadBps");
+    }
+    if has(&["基准", "lpr"]) {
+        return Some("benchmarkRate");
+    }
+    // 「利率类型」「定价方式」要在「利率」之前判，否则会被执行利率列抢走。
+    if has(&["类型", "方式", "定价"]) {
+        return Some("rateType");
+    }
+    if has(&["利率", "执行", "年化"]) {
+        return Some("rate");
+    }
+    if has(&[
+        "借款", "贷款", "合同", "协议", "明细", "辅助", "名称", "标识", "编号", "银行", "债权人",
+        "贷款人", "户名", "项目", "品种", "摘要", "单位", "笔次",
+    ]) {
+        return Some("loanId");
+    }
+    None
+}
+
+/// 按表头认列：每个角色取最左命中列。
+fn header_rate_mapping(headers: &[String]) -> Map<String, Value> {
+    let mut mapping = Map::new();
+    for header in headers {
+        if let Some(role) = rate_header_role(header) {
+            mapping
+                .entry(role.to_string())
+                .or_insert_with(|| Value::String(header.clone()));
+        }
+    }
+    mapping
+}
+
+/// 没认出表头时按内容猜列：多数为文本的列当名称；数值集中在利率量级
+/// （0～30，含百分号写法）的列当执行利率。猜不出就留空，由用户手工补填。
+fn content_rate_mapping(headers: &[String], data: &[Vec<String>]) -> Map<String, Value> {
+    let mut mapping = Map::new();
+    let mut best_text: Option<(usize, usize)> = None;
+    let mut best_rate: Option<(usize, usize)> = None;
+    for (column, _) in headers.iter().enumerate() {
+        let cells: Vec<&str> = data
+            .iter()
+            .filter_map(|row| row.get(column).map(|s| s.trim()))
+            .filter(|s| !s.is_empty())
+            .collect();
+        if cells.is_empty() {
+            continue;
+        }
+        let numeric = cells
+            .iter()
+            .filter(|c| parse_optional_num(c).is_some())
+            .count();
+        let rate_like = cells
+            .iter()
+            .filter(|c| {
+                parse_optional_num(c)
+                    .map(|v| v > 0.0 && v <= 30.0)
+                    .unwrap_or(false)
+                    || c.contains('%')
+            })
+            .count();
+        let text = cells.len() - numeric;
+        if text * 2 >= cells.len() && best_text.map_or(true, |(best, _)| text > best) {
+            best_text = Some((text, column));
+        }
+        if rate_like > 0 && best_rate.map_or(true, |(best, _)| rate_like > best) {
+            best_rate = Some((rate_like, column));
+        }
+    }
+    if let Some((_, column)) = best_text {
+        mapping.insert("loanId".into(), Value::String(headers[column].clone()));
+    }
+    if let Some((_, column)) = best_rate {
+        let taken = mapping
+            .get("loanId")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name == headers[column]);
+        if !taken {
+            mapping.insert("rate".into(), Value::String(headers[column].clone()));
+        }
+    }
+    mapping
+}
+
+/// 用户从 Excel 复制粘贴的利率区域（制表符分隔文本）→ 合成表格 + 角色映射。
+///
+/// 首行含任一可识别表头关键词则当表头，否则整段视为纯数据并按内容猜列
+/// （表头合成为「第N列」，识别说明里据此提示用户）。合成表格复用
+/// [`rates`]／[`source_rate_type`] 的取数规则，与利率台账文件同一套口径。
+fn parse_pasted_rate_text(s: &str) -> Result<(Table, Map<String, Value>, bool), AppError> {
+    let lines: Vec<Vec<String>> = s
+        .lines()
+        .map(|line| {
+            line.split('\t')
+                .map(|cell| cell.trim().to_string())
+                .collect::<Vec<String>>()
+        })
+        .filter(|cells| cells.iter().any(|cell| !cell.is_empty()))
+        .collect();
+    if lines.is_empty() {
+        return Err(error(
+            "RATE_PASTE_EMPTY",
+            "粘贴内容为空：请先在 Excel 中复制利率区域。",
+            None,
+        ));
+    }
+    let width = lines.iter().map(Vec::len).max().unwrap_or(0);
+    if width == 0 {
+        return Err(error(
+            "RATE_PASTE_EMPTY",
+            "粘贴内容为空：请先在 Excel 中复制利率区域。",
+            None,
+        ));
+    }
+    let mut rows: Vec<Vec<String>> = lines
+        .into_iter()
+        .map(|mut cells| {
+            cells.resize(width, String::new());
+            cells
+        })
+        .collect();
+    let first = rows.remove(0);
+    // 首行是不是表头不能只看关键词——数据行也常含「借款/贷款」字样
+    // （如「工行贷款A」）。补两条硬证据：首行没有任何数字单元格，
+    // 且第二行有数字（利率/加点这类数值出现在数据行，不出现在表头）。
+    let numeric_count = |cells: &[String]| {
+        cells
+            .iter()
+            .filter(|cell| parse_optional_num(cell).is_some())
+            .count()
+    };
+    let keyword_hit = first.iter().any(|cell| rate_header_role(cell).is_some());
+    let second_numeric = rows.first().map(|r| numeric_count(r)).unwrap_or(0);
+    let header_like = keyword_hit && numeric_count(&first) == 0 && second_numeric > 0;
+    let (headers, mapping, rows) = if header_like {
+        let mapping = header_rate_mapping(&first);
+        (first, mapping, rows)
+    } else {
+        // 首行不是表头：它是数据行，放回队首。
+        let mut all = rows;
+        all.insert(0, first);
+        let headers: Vec<String> =
+            (0..width).map(|i| format!("第{}列", i + 1)).collect();
+        let mapping = content_rate_mapping(&headers, &all);
+        (headers, mapping, all)
+    };
+    if rows.is_empty() {
+        return Err(error(
+            "RATE_PASTE_EMPTY",
+            "粘贴内容只有表头行，没有数据行。",
+            None,
+        ));
+    }
+    let table = Table {
+        path: PathBuf::new(),
+        sheet: "粘贴区域".into(),
+        sheets: vec!["粘贴区域".into()],
+        header_row: 1,
+        header_depth: 1,
+        headers,
+        rows,
+    };
+    Ok((table, mapping, header_like))
 }
 
 fn calculate(params: &Value) -> Result<Vec<LoanRow>, AppError> {
@@ -380,7 +743,13 @@ fn calculate_ledger(params: &Value) -> Result<Vec<LoanRow>, AppError> {
         let opening = num(&table, row, &mapping, "openingPrincipal");
         let additions = num(&table, row, &mapping, "drawdownAmount");
         let reductions = num(&table, row, &mapping, "repaymentAmount");
-        let closing = num(&table, row, &mapping, "closingPrincipal");
+        // 台账无期末余额列时勾稽无从对照：期末按期初＋新增－归还推算，不标待复核。
+        let has_closing = mapping.contains_key("closingPrincipal");
+        let closing = if has_closing {
+            num(&table, row, &mapping, "closingPrincipal")
+        } else {
+            opening + additions - reductions
+        };
         let (fixed, benchmark, bps) = rates(&table, row, &mapping);
         let (rate_type, fixed, benchmark, bps) = apply_rate_override(
             overrides.get(idx).and_then(Option::as_ref),
@@ -411,19 +780,26 @@ fn calculate_ledger(params: &Value) -> Result<Vec<LoanRow>, AppError> {
             principal_days: 0.0,
             rate_basis_date: None,
             lpr_term: String::new(),
-            match_status: if (opening + additions - reductions - closing).abs() < 0.01 {
-                "已匹配".into()
-            } else {
+            match_status: if has_closing
+                && (opening + additions - reductions - closing).abs() > 0.01
+            {
                 "待复核".into()
+            } else {
+                "已匹配".into()
             },
-            match_basis: "客户借款台账".into(),
+            match_basis: if has_closing {
+                "客户借款台账".into()
+            } else {
+                "客户借款台账（无期末余额列，期末按期初＋新增－归还推算，未做勾稽对照）"
+                    .into()
+            },
             events,
             contract_start: None,
             contract_end: None,
             repaid: 0.0,
             repayment_method: String::new(),
             contract_opening: 0.0,
-            ledger_closing: if mapping.contains_key("closingPrincipal") {
+            ledger_closing: if has_closing {
                 Some(closing)
             } else {
                 None
@@ -442,7 +818,9 @@ fn calculate_ledger(params: &Value) -> Result<Vec<LoanRow>, AppError> {
 /// unit 为该段金额折算为元的系数（单段台账恒为 1，保持原单位输出）。
 /// period 为报告期（起，止）：合同台账通常没有期间发生额列，四栏
 /// （期初/增加/减少/期末）按起止日与期末余额折算成报告期口径，让
-/// 「期初＋增加－减少＝期末」逐行成立；折算不出的行在匹配依据里说明并标待复核。
+/// 「期初＋增加－减少＝期末」逐行成立；推算口径写进匹配依据，只有账面
+/// 期末数勾稽不平或归还时点拿不准的行才标待复核——台账无期末列即无从
+/// 勾稽，不标。
 fn contract_rows(
     table: &Table,
     mapping: &Map<String, Value>,
@@ -601,10 +979,10 @@ fn contract_rows(
             }
         } else {
             // 期末余额也不在账：期末按期初＋新增－归还推算（利息分段同口径）。
+            // 台账本身没有期末列就无从勾稽：推算口径写进依据，不标待复核。
             let op = contract_opening;
             let close = op + drawdown - repaid;
-            note.push_str("；台账无期末余额列，期末按期初＋新增－归还推算");
-            inferred = true;
+            note.push_str("；台账无期末余额列，期末按期初＋新增－归还推算，未做勾稽对照");
             (op, drawdown, repaid, close)
         };
         let basis = if multi && unit != 1.0 {
@@ -678,6 +1056,8 @@ fn looks_like_id(s: &str) -> bool {
 fn calculate_tb(params: &Value) -> Result<Vec<LoanRow>, AppError> {
     let (tb, tm) = source(params, "tbSource")?;
     let (je, jm) = source(params, "jeSource")?;
+    // 「利率确认」步骤粘贴匹配后逐笔确认的利率优先；利率台账文件仅历史任务恢复用。
+    let inline_rates = inline_rate_rows(params);
     let rate_source = optional_source(params, "rateLedgerSource")?;
     // 贷方列写的是绝对值还是已带负号，全表判一次，不逐行猜。
     let tb_convention = tb_sign_convention(&tb, &tm);
@@ -757,7 +1137,16 @@ fn calculate_tb(params: &Value) -> Result<Vec<LoanRow>, AppError> {
         }
         let mut rate_type = "fixed".into();
         let (mut fixed, mut benchmark, mut bps) = (None, None, None);
-        if let Some((rt, rm)) = &rate_source {
+        if let Some(row) = inline_rates
+            .iter()
+            .find(|row| norm(&row.loan_id) == norm(&id))
+        {
+            if !row.rate_type.is_empty() {
+                rate_type = row.rate_type.clone();
+            }
+            (fixed, benchmark, bps) =
+                (row.fixed_rate, row.benchmark_rate, row.spread_bps);
+        } else if let Some((rt, rm)) = &rate_source {
             if let Some(rr) = rt
                 .rows
                 .iter()
@@ -3107,6 +3496,121 @@ mod tests {
     fn floating_rate_converts_bps() {
         assert!(((0.035_f64 + 75.0 / 10000.0) - 0.0425).abs() < 1e-12)
     }
+
+    /// 「利率确认」粘贴匹配：精确/模糊/多候选/未匹配四类命中都如实报，
+    /// 确认后的内联利率行（rateRows）参与测算。
+    #[test]
+    fn tb_paste_rate_matching_and_inline_rows_drive_calculation() {
+        let fixture = SyntheticLedger::new(&[["4.2%", "浮动", "", "90"]]);
+        let loans = [
+            ("工行XX支行贷款", 1_000_000.0),
+            ("建行YY分行贷款", 2_000_000.0),
+            ("农行ZZ支行借款", 3_000_000.0),
+            ("质押借款001", 4_000_000.0),
+        ];
+        let mut book = Workbook::new();
+        {
+            let sheet = book.add_worksheet();
+            sheet.set_name("TB").unwrap();
+            for (c, name) in ["编码", "科目", "借款", "期初贷", "期末贷"]
+                .iter()
+                .enumerate()
+            {
+                sheet.write_string(0, c as u16, *name).unwrap();
+            }
+            for (index, (id, amount)) in loans.iter().enumerate() {
+                let y = index as u32 + 1;
+                sheet.write_string(y, 0, "2001").unwrap();
+                sheet.write_string(y, 1, "短期借款").unwrap();
+                sheet.write_string(y, 2, *id).unwrap();
+                sheet.write_number(y, 3, *amount).unwrap();
+                sheet.write_number(y, 4, *amount).unwrap();
+            }
+        }
+        {
+            let sheet = book.add_worksheet();
+            sheet.set_name("JE").unwrap();
+            for (c, name) in ["编码", "科目", "借款", "日期", "借方", "贷方"]
+                .iter()
+                .enumerate()
+            {
+                sheet.write_string(0, c as u16, *name).unwrap();
+            }
+            for (c, v) in ["2001", "短期借款", "工行XX支行贷款", "2025-01-01", "0", "0"]
+                .iter()
+                .enumerate()
+            {
+                sheet.write_string(1, c as u16, *v).unwrap();
+            }
+        }
+        let path = fixture.dir.join("tbje-paste.xlsx");
+        book.save(&path).unwrap();
+        let tb_source = json!({"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","loanId":"借款","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷"}});
+        let paste = "合同名称\t执行利率\t加点BP\n\
+                     工行XX支行贷款\t3.85%\t90\n\
+                     建行YY分行贷款一年期\t2.95%\t\n\
+                     质押借款001A\t4.0%\t\n\
+                     质押借款001B\t4.5%";
+        let matched =
+            match_rates(&json!({"tbSource": tb_source.clone(), "rateText": paste})).unwrap();
+        let rows = matched["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0]["matchStatus"], "精确匹配");
+        assert!((rows[0]["fixedRate"].as_f64().unwrap() - 0.0385).abs() < 1e-12);
+        assert_eq!(rows[0]["spreadBps"], 90.0);
+        assert_eq!(rows[1]["matchStatus"], "模糊匹配");
+        assert!((rows[1]["fixedRate"].as_f64().unwrap() - 0.0295).abs() < 1e-12);
+        assert_eq!(rows[2]["matchStatus"], "未匹配");
+        assert_eq!(rows[3]["matchStatus"], "未匹配");
+        assert!(rows[3]["matchBasis"].as_str().unwrap().contains("2条候选"));
+        // 前端确认后的内联利率行参与测算；未填利率的两笔不硬造数字。
+        let mut params = json!({
+            "mode": "tb",
+            "reportStart": "2025-01-01",
+            "reportEnd": "2025-12-31",
+            "tbSource": tb_source,
+            "jeSource": {"source":{"inputPath":path,"sheet":"JE","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","loanId":"借款","date":"日期","functionalDebit":"借方","functionalCredit":"贷方"}},
+            "rateRows": [
+                {"loanId":"工行XX支行贷款","rateType":"fixed","fixedRate":0.0385,"spreadBps":90.0},
+                {"loanId":"建行YY分行贷款","rateType":"fixed","fixedRate":0.0295}
+            ]
+        });
+        let result = run_preview(&params).unwrap();
+        let out = result["rows"].as_array().unwrap();
+        assert!((out[0]["effectiveRate"].as_f64().unwrap() - 0.0385).abs() < 1e-12);
+        assert!(
+            (out[0]["calculatedInterest"].as_f64().unwrap() - 38_500.0).abs() < 0.01
+        );
+        assert!(
+            (out[1]["calculatedInterest"].as_f64().unwrap() - 59_000.0).abs() < 0.01
+        );
+        assert_eq!(out[2]["calculatedInterest"], 0.0);
+        assert_eq!(out[3]["calculatedInterest"], 0.0);
+    }
+
+    /// 粘贴内容没有表头时按内容猜列（文本列当名称、利率量级数值列当利率）；
+    /// 金额/日期类表头（如「借款金额」）不会被误认成名称列。
+    #[test]
+    fn paste_rate_text_without_header_guesses_columns_by_content() {
+        let (table, mapping, header_like) =
+            parse_pasted_rate_text("工行贷款A\t3.85\n建行贷款B\t2.95").unwrap();
+        assert!(!header_like);
+        assert_eq!(
+            mapping.get("loanId").and_then(Value::as_str),
+            Some("第1列")
+        );
+        assert_eq!(mapping.get("rate").and_then(Value::as_str), Some("第2列"));
+        assert_eq!(table.rows.len(), 2);
+        assert_eq!(
+            text(&table, &table.rows[0], &mapping, "rate"),
+            "3.85"
+        );
+        // 「借款金额」含「借款」但是金额列，必须被排除。
+        assert_eq!(rate_header_role("借款金额"), None);
+        assert_eq!(rate_header_role("到期日"), None);
+        assert_eq!(rate_header_role("利率类型"), Some("rateType"));
+        assert_eq!(rate_header_role("基准利率"), Some("benchmarkRate"));
+    }
     #[test]
     fn frontend_and_backend_floating_words_stay_aligned() {
         for text in [
@@ -3624,6 +4128,47 @@ mod tests {
                 - r["closingPrincipal"].as_f64().unwrap();
             assert!(eq.abs() < 0.01, "{:?} 勾稽不平：{eq}", r["loanId"]);
         }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn 合同台账无期末余额列不标待复核且不做勾稽对照() {
+        // 台账只有合同要素（标识/金额/起止日/利率）时无从勾稽：四栏按合同
+        // 口径列示、状态直接已匹配，不再要求逐行复核（依据里说明推算口径）。
+        let dir = std::env::temp_dir().join(format!("loan-noclose-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("contract-noclose.xlsx");
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet();
+        for (c, h) in ["合同编号", "借款金额", "起始日", "到期日", "利率"].iter().enumerate() {
+            sheet.write_string(0, c as u16, *h).unwrap();
+        }
+        sheet.write_string(1, 0, "HT-2024-001").unwrap();
+        sheet.write_number(1, 1, 50_000_000.0).unwrap();
+        sheet.write_string(1, 2, "2024-06-01").unwrap();
+        sheet.write_string(1, 3, "2027-05-31").unwrap();
+        sheet.write_number(1, 4, 0.041).unwrap();
+        book.save(&path).unwrap();
+        let insp = inspect(&inspect_params(&path, 0)).unwrap();
+        let header_row = insp["headerRow"].as_u64().unwrap_or(1) as usize;
+        let out = run_preview(&preview_params(
+            &path,
+            header_row,
+            insp["suggestedMapping"].clone(),
+        ))
+        .unwrap();
+        assert_eq!(out["rows"].as_array().unwrap().len(), 1, "{out:#?}");
+        let row = &out["rows"][0];
+        assert_eq!(row["matchStatus"].as_str().unwrap(), "已匹配");
+        let basis = row["matchBasis"].as_str().unwrap();
+        assert!(basis.contains("台账无期末余额列"), "{basis}");
+        assert!(basis.contains("未做勾稽对照"), "{basis}");
+        assert_eq!(row["ledgerClosing"], Value::Null);
+        for key in ["openingPrincipal", "closingPrincipal"] {
+            assert_eq!(row[key].as_f64().unwrap(), 50_000_000.0, "{key}");
+        }
+        assert_eq!(row["additions"].as_f64().unwrap(), 0.0);
+        assert_eq!(row["reductions"].as_f64().unwrap(), 0.0);
         fs::remove_dir_all(&dir).unwrap();
     }
 

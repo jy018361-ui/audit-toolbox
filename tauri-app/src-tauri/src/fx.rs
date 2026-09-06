@@ -4565,7 +4565,10 @@ fn account_roles(params: &Value) -> Result<Value, AppError> {
             let mapping = mapping_obj(params, map_key);
             for row in records(&table) {
                 let name = account_name(&row, &mapping);
-                if !name.is_empty() && !is_summary_account(&name) {
+                if !name.is_empty()
+                    && !is_summary_account(&name)
+                    && !ledger_mapping::is_report_footer_value(&name)
+                {
                     output.entry(name.clone()).or_insert_with(|| {
                         let suggestion = suggest_account_role_detail(&name);
                         json!({
@@ -5038,6 +5041,21 @@ fn role_by_keyword(value: &str) -> Option<AccountRoleSuggestion> {
     // 6701 落进 5001..=6999 的损益类，被判成**非货币性项目**。后果是整张凭证
     // 被打上「非货币性项目/异常复核」而无法自动测算，且账面金额只累加了
     // 汇兑收益那一侧。实测某公司 359 张凭证、385 万账面汇兑损益全部因此落空。
+    //
+    // 但词根只对**损益语境**生效：资产负债编码（首位 1/2）下的「xx-汇兑损益」
+    // 是挂在外币往来科目下的汇兑调整子目（05 号样例：1122010900 应收账款-
+    // 汇兑损益、2202190000 应付账款-汇兑损益）。它们不是账面汇兑损益本体——
+    // 认进来会把勾稽基准撑大，还会让这几户跳过货币性重估。让它们继续走
+    // 后面的往来词表，归回货币性资产/负债。编码缺失或字母开头（自定义/SAP）
+    // 时没有这层证据，维持词根优先的原行为。
+    let fx_digits: String = value
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    let fx_hit_balance_sheet_code = fx_digits.len() >= 4
+        && matches!(fx_digits.as_bytes()[0], b'1' | b'2')
+        && !(fx_digits.len() == 6);
     if hit(&[
         "汇兑",
         "汇率损益",
@@ -5053,7 +5071,8 @@ fn role_by_keyword(value: &str) -> Option<AccountRoleSuggestion> {
         "currency remeasur",
         "foreign exch",
         "forex g/l",
-    ]) {
+    ]) && !fx_hit_balance_sheet_code
+    {
         return Some(role_suggestion(
             "fx_gain_loss",
             0.99,
@@ -12252,6 +12271,23 @@ E,2025-01-31,V001,SA,6701120001 财务费用-汇兑损失-未实现,INV-20250131
             suggest_account_role("6701010001 财务费用-利息支出"),
             "fx_gain_loss"
         );
+        // 资产负债编码下的「xx-汇兑损益」是挂在外币往来科目上的汇兑调整子目
+        // （05 号 TBJEPBC 样例），不是账面汇兑损益本体：认进来既撑大勾稽基准，
+        // 又让这几户跳过货币性重估。它们应归回往来科目的货币性类别。
+        assert_eq!(
+            suggest_account_role("1122010900 应收账款-一般应收账款-汇兑损益"),
+            "monetary_asset"
+        );
+        assert_eq!(
+            suggest_account_role("2202190000 应付账款-汇兑损益"),
+            "monetary_liability"
+        );
+        assert_eq!(
+            suggest_account_role("1123090900 预付账款-其他-汇兑损益"),
+            "non_monetary"
+        );
+        // 编码缺失或字母开头（自定义/SAP）时没有资产负债证据，词根优先保持不变。
+        assert_eq!(suggest_account_role("FX 汇兑损益"), "fx_gain_loss");
     }
 
     /// 与存款利息同一口径的回归：界面科目清单包含非末级汇总行而测算只读
@@ -15431,6 +15467,103 @@ E,2025-01-31,5,FX,6603,期末重估,CNY,0,-300\n",
             "摘要文字提示已废止：{quality:#?}"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 调查测试：逐份跑本机 `Downloads\TBJEPBC` 样例 TB，dump 存款利息、
+    /// 汇兑损益、看账三套口径的科目识别建议与映射，供补匹配词表时对照。
+    ///
+    /// ```text
+    /// cargo test --manifest-path src-tauri/Cargo.toml pbc_tb_role_audit -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "读取本机 Downloads\\TBJEPBC 样例，仅调查用"]
+    fn pbc_tb_role_audit() {
+        let base = r"C:\Users\lenovo\Downloads\TBJEPBC";
+        let files = [
+            "01科目余额表（TB）.xls",
+            "02科目余额表.xlsx",
+            "03科目余额表.xlsx",
+            "04TB.XLSX",
+            "05科目余额表.XLSX",
+            "06科目余额表_2024.1-3.xlsx",
+            "06科目余额表_2024.4-12.xlsx",
+            "07科目余额表.xls",
+            "08TB.xlsx",
+            "09科目余额表-2025.xls",
+            "10科目余额表.xlsx",
+        ];
+        let mut report = serde_json::Map::new();
+        for name in files {
+            let path = format!(r"{base}\{name}");
+            let src = serde_json::json!({"inputPath": path});
+            let mut entry = serde_json::Map::new();
+            match crate::deposit_interest::call(
+                "deposit.inspect_tb",
+                serde_json::json!({"source": src}),
+            ) {
+                Ok(v) => {
+                    entry.insert(
+                        "deposit".into(),
+                        serde_json::json!({
+                            "sheet": v["sheet"].clone(),
+                            "headerRow": v["headerRow"].clone(),
+                            "headers": v["headers"].clone(),
+                            "mapping": v["suggestedMapping"].clone(),
+                            "accounts": v["accounts"].clone(),
+                            "roles": v["suggestedAccountRoles"].clone(),
+                            "tiers": v["suggestedAccountTiers"].clone(),
+                        }),
+                    );
+                }
+                Err(e) => {
+                    entry.insert("deposit".into(), serde_json::json!({"error": format!("{e:?}")}));
+                }
+            }
+            match call("fx.inspect_tb", serde_json::json!({"source": src})) {
+                Ok(ins) => {
+                    let mapping = ins["suggestedMapping"].clone();
+                    let roles = call(
+                        "fx.account_roles",
+                        serde_json::json!({"tbSource": src, "tbMapping": mapping}),
+                    )
+                    .map(|r| r["accounts"].clone())
+                    .unwrap_or_else(|e| serde_json::json!({"error": format!("{e:?}")}));
+                    entry.insert(
+                        "fx".into(),
+                        serde_json::json!({"mapping": mapping, "roles": roles}),
+                    );
+                }
+                Err(e) => {
+                    entry.insert("fx".into(), serde_json::json!({"error": format!("{e:?}")}));
+                }
+            }
+            // 看账改走标题行自动探测（0）：真实路径里前端默认也传 0。
+            match crate::tabular::call(
+                "kanzhang.accounts",
+                serde_json::json!({
+                    "inputPath": path,
+                    "all": true,
+                    "headerRow": 0,
+                }),
+            ) {
+                Ok(v) => {
+                    entry.insert(
+                        "kanzhang".into(),
+                        serde_json::json!({
+                            "values": v["values"].clone(),
+                            "codes": v["codes"].clone(),
+                        }),
+                    );
+                }
+                Err(e) => {
+                    entry.insert("kanzhang".into(), serde_json::json!({"error": format!("{e:?}")}));
+                }
+            }
+            report.insert(name.into(), serde_json::Value::Object(entry));
+        }
+        let out = std::env::temp_dir().join("pbc_tb_audit.json");
+        std::fs::write(&out, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+        println!("report -> {}", out.display());
     }
 }
 

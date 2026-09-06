@@ -2356,7 +2356,10 @@ fn is_formula_error(value: &str) -> bool {
     )
 }
 
-fn is_report_footer_value(value: &str) -> bool {
+/// 页脚行的值形态：`核算单位：/制单人：/打印时间：` 打头的整格。
+/// 09 号样例的科目余额表把这批行留在表尾，科目清单若不过滤，
+/// 它们会以「科目」身份出现在各工具的分类界面里。
+pub(crate) fn is_report_footer_value(value: &str) -> bool {
     let compact = value.trim().replace(' ', "");
     [
         "核算单位：",

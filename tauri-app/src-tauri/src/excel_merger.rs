@@ -245,8 +245,9 @@ impl ExcelMergerService {
         }
         let pause_path = self.cancel_root.join(format!("{job_id}.pause"));
         let memory_retry_path = crate::resource_budget::memory_retry_path(&pause_path);
-        let protected = memory_protected_method(&method);
-        let worker_memory_limit = if protected {
+        let monitored = memory_protected_method(&method);
+        let hard_limited = hard_memory_limited_job(&method, &params);
+        let available_worker_memory = if monitored {
             let mut last_notice = None::<Instant>;
             Some(loop {
                 if cancel_path.exists() {
@@ -385,10 +386,10 @@ impl ExcelMergerService {
                 return;
             }
         };
-        let _memory_limit = if protected {
+        let _memory_limit = if hard_limited {
             match crate::resource_budget::WorkerLimit::attach(
                 &child,
-                worker_memory_limit.expect("受保护任务必须有内存上限"),
+                available_worker_memory.expect("硬限制任务必须有内存上限"),
             ) {
                 Ok(limit) => Some(limit),
                 Err(err) => {
@@ -457,7 +458,7 @@ impl ExcelMergerService {
                     .is_some_and(|phase| matches!(phase, "completed" | "failed" | "cancelled"));
                 self.emit(payload);
             }
-            if protected && !terminal {
+            if monitored && !terminal {
                 if let Ok(memory) = crate::resource_budget::memory_status() {
                     if memory.emergency() {
                         let emergency = memory_emergency_started.get_or_insert_with(Instant::now);
@@ -571,8 +572,10 @@ impl ExcelMergerService {
                             (
                                 "failed",
                                 "error",
-                                if protected {
+                                if hard_limited {
                                     "数据处理任务异常退出，可能达到内存保护上限。请减小数据范围后重试。"
+                                } else if params_have_excel_input(&request.params) {
+                                    "Excel 数据处理进程异常退出。请重试；若持续发生，请查看诊断记录。"
                                 } else {
                                     "Rust Excel 处理进程异常退出。"
                                 },
@@ -708,9 +711,7 @@ fn is_supported_job_method(method: &str) -> bool {
     SUPPORTED_JOB_METHODS.contains(&method)
 }
 
-/// 已在业务循环里接入内存等待检查点的任务才能启用 Job Object 上限。
-/// 所有会消费 JE 的长任务都由独立 worker 执行；公共磁盘账簿在分批扫描时
-/// 定期进入内存检查点，内存紧张时可以自动暂停并在恢复后继续。
+/// 所有会消费 JE 的长任务都由独立 worker 执行，并接入启动前与运行期内存监测。
 fn memory_protected_method(method: &str) -> bool {
     method.starts_with("kanzhang.")
         || method.starts_with("fx.")
@@ -718,6 +719,46 @@ fn memory_protected_method(method: &str) -> bool {
         || method.starts_with("deposit.")
         || method.starts_with("fa.tbje_")
         || method.starts_with("tbje_check.")
+}
+
+fn is_excel_input_path(value: &str) -> bool {
+    Path::new(value)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["xls", "xlsx", "xlsm", "xlsb"]
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
+/// 只识别明确的输入路径字段，避免 `outputPath: result.xlsx` 误关闭 CSV 任务的硬保护。
+/// 递归扫描可同时覆盖看账的直接参数与汇兑损益、借款、存款、FA/TBJE 的嵌套 source。
+fn params_have_excel_input(value: &Value) -> bool {
+    match value {
+        Value::Object(values) => values.iter().any(|(key, value)| {
+            let normalized = key.to_ascii_lowercase();
+            let direct_input = matches!(
+                normalized.as_str(),
+                "inputpath" | "jepath" | "tbpath" | "sourcepath" | "ledgerpath"
+            ) && value.as_str().is_some_and(is_excel_input_path);
+            let input_list = normalized == "inputpaths"
+                && value.as_array().is_some_and(|paths| {
+                    paths
+                        .iter()
+                        .any(|path| path.as_str().is_some_and(is_excel_input_path))
+                });
+            direct_input || input_list || params_have_excel_input(value)
+        }),
+        Value::Array(values) => values.iter().any(params_have_excel_input),
+        _ => false,
+    }
+}
+
+/// Excel 解码器在单个工作簿解压期间无法安全暂停，动态 Job Object 上限会在瞬时峰值时
+/// 直接终止正常任务。因此所有工具的 Excel 输入只使用软监测；CSV/TXT/TSV 等可分批输入保留硬上限。
+fn hard_memory_limited_job(method: &str, params: &Value) -> bool {
+    memory_protected_method(method) && !params_have_excel_input(params)
 }
 
 pub fn worker_main() -> i32 {
@@ -2536,6 +2577,49 @@ mod tests {
         assert!(memory_protected_method("tbje_check.run"));
         assert!(memory_protected_method("tbje_check.export_batch"));
         assert!(!memory_protected_method("file_list.export"));
+    }
+
+    #[test]
+    fn excel_inputs_skip_job_object_hard_limit_across_tools() {
+        let cases = [
+            ("kanzhang.inspect", json!({"inputPath":"C:\\data\\je.xlsx"})),
+            (
+                "fx.preview",
+                json!({"jeSource":{"inputPath":"C:\\data\\je.xls"}}),
+            ),
+            (
+                "deposit.export",
+                json!({"jeSource":{"inputPath":"C:\\data\\je.xlsm"}}),
+            ),
+            (
+                "loan.preview",
+                json!({"jeSource":{"source":{"inputPath":"C:\\data\\je.xlsb"}}}),
+            ),
+            (
+                "fa.tbje_preview",
+                json!({"tbSource":{"inputPath":"C:\\data\\tb.xlsx"}}),
+            ),
+            (
+                "tbje_check.run",
+                json!({"inputPaths":["C:\\data\\tb.csv", "C:\\data\\je.xlsx"]}),
+            ),
+        ];
+
+        for (method, params) in cases {
+            assert!(memory_protected_method(method));
+            assert!(params_have_excel_input(&params));
+            assert!(!hard_memory_limited_job(method, &params));
+        }
+    }
+
+    #[test]
+    fn csv_input_keeps_hard_limit_when_output_is_xlsx() {
+        let params = json!({
+            "inputPath":"C:\\data\\je.csv",
+            "outputPath":"C:\\output\\result.xlsx"
+        });
+        assert!(!params_have_excel_input(&params));
+        assert!(hard_memory_limited_job("kanzhang.export", &params));
     }
 
     /// FA 子工具的 job 事件必须路由到各自的页面（useJobEvents 按 toolId 过滤），

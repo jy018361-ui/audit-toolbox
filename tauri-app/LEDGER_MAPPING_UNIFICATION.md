@@ -1,5 +1,10 @@
 # 账表映射统一方案
 
+## 2026-09-07 · Excel JE 的内存保护改为公共软监测
+
+- 公共 worker 调度层按输入格式选择保护方式：所有接入的 JE 工具遇到 `.xls/.xlsx/.xlsm/.xlsb` 输入时取消动态 Windows Job Object 硬上限，保留启动前等待、运行期软监测及持续危险线保护。CSV/TXT/TSV 仍可在公共磁盘分批检查点暂停，因此继续使用动态硬上限。
+- 该判断递归识别各工具的直接或嵌套 `inputPath`/`inputPaths`，不检查 `outputPath`；因此「CSV JE 导出 XLSX 结果」仍保留 CSV 硬保护。
+
 ## 2026-09-06 · 正文判定收口到看账，单行版 `LedgerBodyRule` 抽出
 
 - `analyze_ledger_rows` 的行内判据（身份/金额谓词、业务行协议）抽成 `LedgerBodyRule::new(headers, column_of)` ＋ `is_body(row)`，整表版与单行版共用同一份口径，不再各写一份。整表版独有的表尾倒扫与科目编码语法校验保留在 `analyze_ledger_rows`。

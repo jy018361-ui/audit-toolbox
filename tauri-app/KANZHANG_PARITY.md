@@ -1,5 +1,11 @@
 # 看账小工具迁移功能矩阵
 
+## 2026-09-07 · Excel 输入取消动态 Job Object 硬上限
+
+- 看账及所有共用 JE worker 的 `.xls/.xlsx/.xlsm/.xlsb` 输入不再绑定按实时空闲内存折算的 Windows Job Object 硬上限。Excel 工作簿解压会产生短时峰值且无法在单次 calamine 解码中安全暂停，旧上限会把本可正常完成的 51.2 MiB、164,420 行工作簿随机终止。
+- 启动前内存等待、运行期软监测、自动/手动继续与持续危险状态的最终保护仍保留。CSV/TXT/TSV 可在分批检查点暂停，继续使用动态硬上限。公共调度层只检查明确的输入字段，`outputPath: result.xlsx` 不会把 CSV 任务误归为 Excel。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib excel_inputs_skip_job_object_hard_limit_across_tools`；`cargo test --manifest-path src-tauri/Cargo.toml --lib csv_input_keeps_hard_limit_when_output_is_xlsx`。
+
 ## 2026-09-06 · 自动标题行复用文件指纹缓存
 
 - 51.2 MB 的 `04JE.XLSX` 实测中，Parquet 数据缓存命中后读取 164,420 行 × 61 列只需约 4.8 秒，但自动标题行识别仍会通过 calamine 解压整张工作表，总等待约 55.6 秒。OOXML 首次识别现复用汇兑引擎的 zip 前缀读取，只流式解压工作表前 32 行；识别结论再按规范路径、文件大小、修改时间及 Sheet 选择持久化。同一文件再次读取直接复用，源文件或 Sheet 改变时自动失效。

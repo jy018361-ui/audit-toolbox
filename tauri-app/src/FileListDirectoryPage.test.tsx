@@ -72,10 +72,9 @@ describe("FileListDirectoryPage", () => {
     expect(screen.queryByText("3. 生成文件清单")).not.toBeInTheDocument();
   });
 
-  it("说明本机处理边界，并给未扫描状态明确下一步", () => {
+  it("给未扫描状态明确下一步", () => {
     sessionStorage.clear();
     render(<FileListDirectoryPage tool={tool} />);
-    expect(screen.getByText("目录信息仅在本机处理")).toBeVisible();
     expect(screen.getByText("等待扫描文件夹")).toBeVisible();
     expect(screen.getByRole("button", { name: "选择文件夹" })).toBeEnabled();
   });

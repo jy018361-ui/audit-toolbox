@@ -53,15 +53,6 @@
 .merger-data-notice {
   margin: var(--sp-3) 0 0;
 }
-/* 数据边界横幅与其他页同一信息色调：信息底、信息边、信息标题，不用绿色成功底。 */
-.data-handling-notice.merger-data-notice {
-  --data-notice-bg: var(--info-bg);
-  --data-notice-border: var(--info-border);
-  --data-notice-fg: var(--info-fg);
-}
-.data-handling-notice.merger-data-notice .data-handling-notice-copy strong {
-  color: var(--info-fg);
-}
 .merger-toolbar {
   display: flex;
   gap: var(--sp-2);

@@ -12,7 +12,6 @@ import {
   pickPath,
 } from "./api";
 import { PageHeader } from "@/components/PageHeader";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
@@ -584,9 +583,9 @@ export function uncoveredBreakdown(summary: Record<string, unknown>) {
   };
 }
 export const NOT_FX_EVENT_HINT =
-  "这些凭证既不满足“货币资金净额非零且对方货币性项目净额非零”的已实现结构，也不满足“外币原币净额为零且本位币净额非零”的未实现结构。账面汇差已从测算总体剔除；明细见底稿「不构成汇兑事项」页。";
+  "这些凭证按结构看不出汇兑损益，账面汇差未纳入测算；明细见底稿「不构成汇兑事项」页。";
 export const UNMEASURABLE_HINT =
-  "这些凭证已明确归类为已实现/未实现，但缺少独立重算所需的原币余额、历史账面价值或汇率证据——常见原因是科目余额表未按币种拆分。审计金额暂未测出；需向客户补要资料后重跑。";
+  "这些凭证已分好类，但缺少重算所需的原币余额或汇率证据（常见原因：科目余额表没按币种拆分），审计金额暂未测出；补资料后重算。";
 /** 「?」圆形图标：鼠标移上去（或键盘聚焦）显示口径注释。 */
 export function InfoHint({ text }: { text: string }) {
   return (
@@ -1644,13 +1643,6 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   setSourceStatus("");
                 }}
               />
-              <DataHandlingNotice
-                mode="network-assisted"
-                className="fx-data-notice"
-                title="本机测算，可选智能复核"
-                description="Excel 读取、汇兑损益测算和底稿生成均在本机完成。"
-                details="如已启用智能复核，文件路径、表头和少量样例行会发送到你在设置中配置的 LLM 服务；关闭后仍可使用本机规则识别。"
-              />
               {sourceStatus && (
                 <p className="fx-source-status" aria-live="polite">
                   {sourceStatus}
@@ -2269,13 +2261,14 @@ function SourceCard(props: {
       </CardHeader>
       <CardContent>
         <div className="fx-detected-file">
-          <span>{displayFileName(props.path)}</span>
           <button
+            className="fx-file-name-button"
             type="button"
+            title={`${props.path}（点击更换）`}
             disabled={props.disabled}
             onClick={props.onReplace}
           >
-            更换 Excel
+            {displayFileName(props.path)}
           </button>
           <button
             type="button"
@@ -2659,9 +2652,8 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
     .reduce((sum, g) => sum + g.count, 0);
   const headline =
     [
-      warnings.length ? `${warnings.length} 项校验提示` : "",
-      isolated ? `${isolated} 行被隔离` : "",
-      tbRows.length ? `TB 取数 ${tbRows.length} 个科目` : "",
+      warnings.length ? `${warnings.length} 项提示` : "",
+      isolated ? "部分数据被隔离" : "",
     ]
       .filter(Boolean)
       .join(" · ") || "全部检查通过";
@@ -2764,17 +2756,19 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
     </details>
   );
 }
-/** 一句话说清这条隔离属于哪种粒度问题，用户不必读完整段 detail。 */
+/** 一句话说清这条隔离属于哪种粒度问题：先摆证据、再下结论，用户不必读完整段 detail。 */
 export function granularityLabel(type: unknown): string {
   switch (String(type ?? "")) {
     case "科目余额混合本位币与外币":
-      return "科目余额里既有本位币又有外币，拆不开";
+      return "余额里混了本位币和外币，TB 只有合计数，拆不出外币部分";
     case "同一科目存在多种外币敞口":
-      return "同一科目持有多种外币，TB 只有合计数";
+      return "同一科目持有多种外币，TB 只有合计数，拆不出各币种余额";
+    case "外币凭证原币金额全为零":
+    // 历史结果里的旧类型名，含义相同，同样兜底。
     case "无外币敞口的评估调整科目":
-      return "评估调整科目，本身不持有外币";
+      return "该科目的外币凭证原币金额全为 0，没有可测算的外币余额";
     default:
-      return "TB 未提供可唯一对应的原币币种";
+      return "TB 里找不到唯一对应的外币余额行，无法测算";
   }
 }
 /** TB 粒度不足：外币敞口是「科目×币种」粒度，TB 只给到科目粒度就测不了。
@@ -2941,9 +2935,6 @@ function FxResult({
   const rollforward = (result.unrealizedBalanceRollforward ?? []) as Array<
     Record<string, unknown>
   >;
-  const clientRevaluations = (result.clientRevaluationVouchers ?? []) as Array<
-    Record<string, unknown>
-  >;
   const unrealizedComparisonDifference = rollforward.reduce(
     (sum, item) => sum + Number(item.suggestedAdjustment ?? 0),
     0,
@@ -3002,8 +2993,8 @@ function FxResult({
           return (
             <span key={code}>
               <b>{code}</b>
-              <small>英文：{english || "—"}</small>
-              <small>中文：{chinese || "—"}</small>
+              {english && <small>英文：{english}</small>}
+              {chinese && <small>中文：{chinese}</small>}
             </span>
           );
         })}
@@ -3056,7 +3047,7 @@ function FxResult({
             {accountSide("贷方科目", first.creditAccounts)}
           </div>
           <small>
-            {group.items.length} 张凭证；账面汇兑损益{" "}
+            {group.items.length} 张凭证，账面汇差{" "}
             {booked.toLocaleString("zh-CN", {
               minimumFractionDigits: 2,
               maximumFractionDigits: 2,
@@ -3065,8 +3056,7 @@ function FxResult({
           </small>
           {conflicts.length > 0 && (
             <small className="fx-conflict-hint">
-              分类冲突（{conflicts.length} 张）：
-              {conflicts[0].classificationConflict}
+              分类冲突：{conflicts[0].classificationConflict}
             </small>
           )}
         </span>
@@ -3148,9 +3138,11 @@ function FxResult({
       />
       {summary.unrealizedBalanceBasisComplete === false && (
         <p className="fa-missing-hint">
-          未实现测算余额基础不完整：
+          未实现汇兑损益测算不完整：序时账里有{" "}
           {String(summary.unrealizedMissingBalanceKeys ?? 0)}{" "}
-          个账户币种余额键未取得可唯一对应的TB端点，已隔离且未按零期初测算。当前结果属于受限结果。
+          个「科目＋币种」的外币户在 TB
+          里找不到一一对应的余额行。为保证数字可靠，这部分已跳过、未参与测算，当前结果不完整。请核对这些科目是否在
+          TB 中缺失、或两边科目名称是否对得上，补齐后重新测算。
         </p>
       )}
       <div className="fx-bridge-step">
@@ -3257,15 +3249,12 @@ function FxResult({
       {rollforward.length > 0 && (
         <section className="fx-unrealized-module">
           <div>
-            <h4>外币货币性项目余额滚动与未实现损益测算</h4>
+            <h4>未实现汇兑损益测算</h4>
             <p>
-              期初余额＋正常业务JE发生额－客户已入账未实现损益及其冲回＝计算前余额；月末原币余额×官方汇率形成审计余额。被分类为“未实现汇兑损益”的凭证只用于账面比较，不作为审计测算金额。
+              月末按官方汇率重估各外币账户余额，得出审计口径的未实现汇兑损益；右边是与客户已入账数的差额。
             </p>
           </div>
           <div className="fx-unrealized-metrics">
-            {metric("月度账户测算行", rollforward.length)}
-            {metric("已识别未实现类凭证", clientRevaluations.length)}
-            {metric("审计未实现汇兑损益", summary.unrealizedAdjustment)}
             {metric(
               "与客户入账差异",
               unrealizedComparisonDifference,
@@ -3281,9 +3270,7 @@ function FxResult({
             <div>
               <h4>凭证分类复核</h4>
               <p>
-                系统仅在单张凭证内按公司、币种和货币性科目汇总净额：货币资金及其对方货币性项目净额均不为零时判为已实现；否则，外币原币净额为零而本位币净额不为零时判为未实现。未实现类凭证会从正常JE发生额中剔除，
-                并在账户余额测算完成后与审计结果比较；不会直接采用该凭证金额作为测算结果。
-                借贷科目组合相同的凭证归成一组，可一次性改一整组。
+                系统按凭证结构自动分类：已实现、未实现、不构成汇兑事项。借贷科目组合相同的凭证归为一组，整组一次改；判断不对的在这里改，改完点「重新测算」。
               </p>
             </div>
             <Button disabled={busy} onClick={() => void onRecalculate()}>
@@ -3292,13 +3279,9 @@ function FxResult({
           </div>
           {undecided.length > 0 && (
             <section className="fx-classification-section">
-              <h5>
-                不构成汇兑事项（
-                {undecided.reduce((n, g) => n + g.items.length, 0)} 张）
-              </h5>
+              <h5>不构成汇兑事项</h5>
               <p>
-                这些凭证没有同时出现净额非零的货币资金和对方货币性项目，也不符合原币净额为零、本位币净额非零的未实现结构；账面汇差已从测算总体剔除并计入
-                「数据质量检查」。若你判断其中某组确属已实现/未实现，仍可在这里改，选完点「重新测算」。
+                这些凭证按结构看不出汇兑损益，账面汇差未纳入测算（明细见底稿「不构成汇兑事项」页）。若某组判断不对，改分类后点「重新测算」。
               </p>
               <div className="fx-classification-list">
                 {undecided.map(renderGroup)}
@@ -3307,15 +3290,9 @@ function FxResult({
           )}
           {unmeasurable.length > 0 && (
             <section className="fx-classification-section">
-              <h5>
-                已分好类，但工具算不出审计金额（
-                {unmeasurable.reduce((n, g) => n + g.items.length, 0)} 张）
-              </h5>
+              <h5>已分好类，但工具算不出审计金额</h5>
               <p>
-                这些凭证的分类已经确定，<b>不需要你再确认</b>。
-                它们没进测算结果，是因为缺少重算所需的原币余额或汇率证据——账面金额已计入上面的
-                数据质量检查会单独列示。<b>常见原因是科目余额表粒度不够</b>
-                ，参见页首的提示。 如果你认为某一组的分类判错了，仍可在这里改。
+                这些凭证的分类已确定，不用再确认；没进测算是因为缺少重算所需的原币余额或汇率证据，常见原因是科目余额表只给到科目合计。判断不对的，同样可以改。
               </p>
               <div className="fx-classification-list">
                 {unmeasurable.map(renderGroup)}

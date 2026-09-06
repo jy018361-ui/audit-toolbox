@@ -18,7 +18,6 @@ import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { BusySpinner } from "@/components/BusySpinner";
 import { SwitchInput } from "@/components/SwitchInput";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
 import { JobProgress } from "@/components/JobProgress";
 
@@ -348,12 +347,6 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             <strong>拖放文件或文件夹到窗口</strong>
             <span>支持 XLSX、XLS、XLSM、CSV、TXT，也可点击添加文件</span>
           </button>
-          <DataHandlingNotice
-            mode="local"
-            title="文件仅在本机处理"
-            description="文件读取、合并和结果写出均在当前电脑完成，不会上传表格内容。"
-            className="merger-data-notice"
-          />
           <div className="merger-toolbar">
             <Button variant="secondary" onClick={() => void chooseFiles()}>
               添加文件

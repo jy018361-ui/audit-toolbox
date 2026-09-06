@@ -46,7 +46,6 @@ import { Input } from "@/components/ui/input";
 import { EmptyState } from "@/components/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { useJobEvents } from "@/hooks/useJobEvents";
 import { FaTbJePage } from "./FaTbJePage";
 type FaMapping = {
@@ -233,11 +232,6 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
             ? "公共 TB/JE 引擎识别与映射；固定资产业务层生成变动汇总、新增、处置、JE底表和对方科目汇总。"
             : "按期初、期末两份固定资产表按组合键匹配，生成 FA List、变动与汇总底稿。"
         }
-      />
-      <DataHandlingNotice
-        mode="network-assisted"
-        title="文件处理与智能复核"
-        description="表格读取、匹配和底稿生成在本机完成；使用 LLM 复核时，复核所需信息会按设置发送到对应服务。"
       />
       <div
         className="fx-mode-bar fa-mode-tabs"

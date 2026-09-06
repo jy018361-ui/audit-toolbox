@@ -26,7 +26,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
 import { SwitchInput } from "@/components/SwitchInput";
 import { errorText } from "@/lib/errors";
@@ -700,12 +699,6 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
         eyebrow="审计核对"
         title={tool.name}
         detail="对两列公司名称、人名、地址或通用文本做模糊匹配：高相似度自动采纳，疑似项逐条人工确认，确认进度可续作并导出底稿。"
-      />
-      <DataHandlingNotice
-        mode="local"
-        className="fuzzy-data-notice"
-        title="两份清单仅在本机比对"
-        description="表格读取、候选计算、人工确认记录和 Excel 底稿生成均在当前电脑完成，不会上传清单内容。"
       />
       <ErrorBox error={error} onDismiss={() => setError("")} />
       {restoreNote && <p className="fa-missing-hint">{restoreNote}</p>}

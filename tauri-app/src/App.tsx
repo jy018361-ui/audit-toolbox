@@ -906,6 +906,8 @@ function Dashboard({
           </Button>
         }
       />
+      {/* 数据处理边界说明全局只保留这一处：在工作台统一提示，
+          不再逐工具页重复（用户反馈逐页提示太吵）。 */}
       <DataHandlingNotice
         mode="network-assisted"
         className="dashboard-data-notice"

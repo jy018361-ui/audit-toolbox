@@ -159,7 +159,6 @@ describe("FuzzyMatchPage", () => {
   it("未选齐来源 A/B 时开始按钮禁用", () => {
     render(<FuzzyMatchPage tool={tool} />);
     expect(screen.getByRole("button", { name: "开始匹配" })).toBeDisabled();
-    expect(screen.getByText("两份清单仅在本机比对")).toBeVisible();
     expect(screen.getByText("尚无可导出的匹配结果")).toBeVisible();
   });
 

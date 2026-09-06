@@ -265,7 +265,7 @@ const cache = new Map<string, Promise<LedgerForm[]>>();
 export function fetchLedgerForms(kind: LedgerFormKind): Promise<LedgerForm[]> {
   const hit = cache.get(kind);
   if (hit) return hit;
-  const task = engineCall("ledger.forms", { kind })
+  const task = Promise.resolve(engineCall("ledger.forms", { kind }))
     .then((data) => (Array.isArray(data) ? (data as LedgerForm[]) : []))
     .catch(() => {
       cache.delete(kind);

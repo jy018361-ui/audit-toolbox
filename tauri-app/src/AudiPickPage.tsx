@@ -22,7 +22,6 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { EmptyState } from "@/components/EmptyState";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { JobProgress } from "@/components/JobProgress";
 import "./audipick.css";
 
@@ -1435,12 +1434,6 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         eyebrow="合同审阅管理"
         title={tool.name}
         detail="按项目整理合同，选择审阅模板并提取关键信息，结合原文核对后导出。"
-      />
-      <DataHandlingNotice
-        mode="network-assisted"
-        title="本机管理合同 · 外部服务参与智能提取"
-        description="项目和 PDF 在本机管理。智能提取会将相关合同文字发送至设置中配置的 AI 服务；文字识别使用外部服务时，会发送所选页面图像。"
-        details="处理客户合同前，请确认服务配置及数据使用授权。提取结果需结合合同原文复核。"
       />
       <div className="ap-views">
         <button className={viewMode === "workbench" ? "active" : ""} onClick={() => setViewMode("workbench")}>

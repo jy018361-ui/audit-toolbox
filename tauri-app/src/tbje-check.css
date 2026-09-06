@@ -1,7 +1,3 @@
-/* TB/JE 完整性核对：沿用全局页面骨架、设计变量和状态语义。 */
-.tbje-page .data-handling-notice {
-  margin-bottom: var(--sp-4);
-}
 .tbje-result-overview {
   display: grid;
   gap: var(--sp-2);
@@ -221,6 +217,23 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.tbje-file-name-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.tbje-file-name-button:hover {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.tbje-file-name-button:focus-visible,
+.tbje-mapping-warning:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
 
 .tbje-je-select {
   flex: 1 1 150px;
@@ -235,10 +248,21 @@
   font-size: var(--fs-sm);
 }
 
-.tbje-pick-file {
-  flex: 0 0 auto;
-  padding-inline: var(--sp-2);
-  color: var(--primary);
+.tbje-mapping-warning {
+  width: fit-content;
+  max-width: 100%;
+  padding: 3px 7px;
+  border: 1px solid var(--warning-border);
+  border-radius: var(--r-sm);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
 }
 
 .tbje-group-buttons {

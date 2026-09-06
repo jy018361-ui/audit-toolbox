@@ -21,7 +21,6 @@ import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -33,7 +32,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Download, Eye, FolderOpen, Plus, Trash2 } from "lucide-react";
+import { Download, Eye, Plus, Trash2 } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -46,6 +45,7 @@ import { errorText } from "@/lib/errors";
 import {
   applyLedgerReviewsTogether,
   LEDGER_MULTI_COLUMN_ROLES,
+  missingGoldIdentity,
   scanLedgerUploadSources,
   resolveRoleLabels,
   selectLedgerWorkbookKindSources,
@@ -58,6 +58,7 @@ import {
   resolveForm,
   roleRequirement,
   useLedgerForms,
+  type LedgerForm,
 } from "@/ledgerForms";
 import {
   compareGroups,
@@ -77,6 +78,29 @@ import "./tbje-check.css";
 
 type Mapping = MappingDict;
 type GroupLedgerReview = Partial<Record<LedgerKind, LedgerReviewOutcome>>;
+
+export function tbjeMissingMappings(
+  kind: LedgerKind,
+  mapping: MappingDict,
+  forms: LedgerForm[],
+  labels: Record<string, string>,
+): string[] {
+  const filled = (value: string | string[] | undefined) =>
+    Array.isArray(value)
+      ? value.some((item) => Boolean(item?.trim()))
+      : Boolean(value?.trim());
+  const missing = missingGoldIdentity(kind, (role) => filled(mapping[role]));
+  const match = forms.length ? resolveForm(kind, forms, mapping) : undefined;
+  if (match && !match.complete) {
+    missing.push(...match.missing.map((role) => labels[role] ?? role));
+    for (const slot of match.missingAny)
+      missing.push(`${slot.map((role) => labels[role] ?? role).join("／")}（任一）`);
+    missing.push(
+      ...match.partialOptional.map((role) => labels[role] ?? role),
+    );
+  }
+  return [...new Set(missing)];
+}
 
 type Verdict = { performed: boolean; passed?: boolean; reason?: string };
 
@@ -509,6 +533,8 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     () => groups.filter((group) => Boolean(group.tb)),
     [groups],
   );
+  const tbForms = useLedgerForms("tb");
+  const jeForms = useLedgerForms("je");
   const [expanded, setExpanded] = useState<
     { groupId: string; kind: LedgerKind } | undefined
   >();
@@ -534,6 +560,21 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   // 用户在配对页明确选过「不配对序时账」的 TB。二次添加文件时这些组不许被
   // 自动配对重新塞回 JE——那是用户亲手清掉的，不是没配上。
   const clearedTbsRef = useRef(new Set<string>());
+
+  const missingOf = (kind: LedgerKind, file?: PairingFile) => {
+    if (!file) return [];
+    const inspection = inspects[pairingFileKey(file)];
+    const labels = resolveRoleLabels(
+      inspection?.roles,
+      kind === "tb" ? TB_LABELS : JE_LABELS,
+    );
+    return tbjeMissingMappings(
+      kind,
+      mappings[pairingFileKey(file)] ?? {},
+      kind === "tb" ? tbForms : jeForms,
+      labels,
+    );
+  };
 
   const { job, setJob, activeJobId } = useJobEvents({
     toolId: "tbje_check",
@@ -746,24 +787,8 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     setMappings(nextMappings);
     setGroups(nextGroups);
     const displayedGroups = nextGroups.filter((group) => group.tb);
-    const defaultGroup =
-      displayedGroups.find((group) => group.needsReview) ?? displayedGroups[0];
-    setExpanded((current) => {
-      if (
-        current &&
-        nextGroups.some(
-          (group) =>
-            group.id === current.groupId &&
-            (current.kind === "tb" ? group.tb : group.je),
-        )
-      )
-        return current;
-      if (!defaultGroup) return undefined;
-      return {
-        groupId: defaultGroup.id,
-        kind: defaultGroup.tb ? "tb" : "je",
-      };
-    });
+    // 批量结果默认保持折叠；映射缺口直接在行内提示，由用户决定展开哪一侧。
+    setExpanded(undefined);
     // LLM 联合复核的结论跟着组走：组还在就继续算复核过，组被解散才清掉。
     const survivingIds = new Set(nextGroups.map((group) => group.id));
     setLlmReviews((current) =>
@@ -929,7 +954,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
           needsReview: true,
         };
         setGroups((current) => [...current, manualGroup].sort(compareGroups));
-        setExpanded({ groupId: manualGroup.id, kind: "tb" });
+        setExpanded(undefined);
         setCurrentStep(1);
       } else {
         setGroups((current) =>
@@ -958,7 +983,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
             .sort(compareGroups),
         );
         clearedTbsRef.current.delete(groupId);
-        setExpanded({ groupId, kind });
+        setExpanded(undefined);
       }
       invalidateResults();
       setStatus(`${pairingFileLabel(source)} 已作为 ${kind.toUpperCase()} 加入。`);
@@ -1441,12 +1466,6 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <DataHandlingNotice
-                mode="network-assisted"
-                title="核对默认在本机完成"
-                description="文件读取与勾稽在本机进行；AI 辅助识别或 LLM 联合复核可能将字段名和预览样本按设置发送到所配置服务。"
-                details="至少加入一份 TB；如需核对 TB 与 JE 发生额，请为同组补充 JE。"
-              />
               <div ref={dropRef}>
                 <FileDropInput
                   value=""
@@ -1571,23 +1590,15 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                       <div className="tbje-file-cell">
                         <div className="tbje-file-line">
                           <span className="tbje-kind-tag">TB</span>
-                          <span
-                            className="tbje-group-file"
-                            title={group.tb?.path}
-                          >
-                            {fileName(group.tb!.path)}
-                          </span>
-                          <Button
+                          <button
                             type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="tbje-pick-file"
+                            className="tbje-group-file tbje-file-name-button"
+                            title={`${group.tb?.path}（点击更换）`}
                             disabled={busy}
                             onClick={() => void pickManualSource("tb", group.id)}
                           >
-                            <FolderOpen aria-hidden="true" />
-                            更换 Excel
-                          </Button>
+                            {fileName(group.tb!.path)}
+                          </button>
                         </div>
                         {group.tb &&
                           (() => {
@@ -1624,23 +1635,51 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                               </label>
                             );
                           })()}
+                        {missingOf("tb", group.tb).length > 0 && (
+                          <button
+                            type="button"
+                            className="tbje-mapping-warning"
+                            title={`TB 缺少必填映射：${missingOf("tb", group.tb).join("、")}`}
+                            onClick={() =>
+                              setExpanded({ groupId: group.id, kind: "tb" })
+                            }
+                          >
+                            TB 缺少 {missingOf("tb", group.tb).length} 项必填映射：
+                            {missingOf("tb", group.tb).slice(0, 2).join("、")}
+                            {missingOf("tb", group.tb).length > 2 ? "…" : ""}
+                          </button>
+                        )}
                       </div>
                       <div className="tbje-file-cell">
                         <div className="tbje-file-line">
                           <span className="tbje-kind-tag je">JE</span>
-                          <select
-                            className="tbje-je-select"
-                            title={group.je?.path}
-                            aria-label={`为第 ${group.label} 组选择序时账`}
-                            value={group.je ? pairingFileKey(group.je) : ""}
-                            disabled={busy}
-                            onChange={(event) =>
-                              selectJe(
-                                group.id,
-                                event.target.value || undefined,
-                              )
+                          <button
+                            type="button"
+                            className="tbje-group-file tbje-file-name-button"
+                            title={
+                              group.je
+                                ? `${group.je.path}（点击更换）`
+                                : "选择 JE Excel"
                             }
+                            disabled={busy}
+                            onClick={() => void pickManualSource("je", group.id)}
                           >
+                            {group.je ? fileName(group.je.path) : "选择 JE Excel"}
+                          </button>
+                        </div>
+                        <select
+                          className="tbje-je-select"
+                          title={group.je?.path}
+                          aria-label={`为第 ${group.label} 组选择序时账`}
+                          value={group.je ? pairingFileKey(group.je) : ""}
+                          disabled={busy}
+                          onChange={(event) =>
+                            selectJe(
+                              group.id,
+                              event.target.value || undefined,
+                            )
+                          }
+                        >
                             <option value="">（不配对序时账）</option>
                             {unusedJe.map((item) => (
                               <option key={item.id} value={item.id}>
@@ -1650,19 +1689,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                   : ` · 现属第 ${item.owner} 组`}
                               </option>
                             ))}
-                          </select>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="tbje-pick-file"
-                            disabled={busy}
-                            onClick={() => void pickManualSource("je", group.id)}
-                          >
-                            <FolderOpen aria-hidden="true" />
-                            {group.je ? "更换 Excel" : "选择 Excel"}
-                          </Button>
-                        </div>
+                        </select>
                         {group.je &&
                           (() => {
                             const inspected = inspects[pairingFileKey(group.je)];
@@ -1698,6 +1725,20 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                               </label>
                             );
                           })()}
+                        {group.je && missingOf("je", group.je).length > 0 && (
+                          <button
+                            type="button"
+                            className="tbje-mapping-warning"
+                            title={`JE 缺少必填映射：${missingOf("je", group.je).join("、")}`}
+                            onClick={() =>
+                              setExpanded({ groupId: group.id, kind: "je" })
+                            }
+                          >
+                            JE 缺少 {missingOf("je", group.je).length} 项必填映射：
+                            {missingOf("je", group.je).slice(0, 2).join("、")}
+                            {missingOf("je", group.je).length > 2 ? "…" : ""}
+                          </button>
+                        )}
                       </div>
                       <div className="tbje-group-buttons">
                         {(["tb", "je"] as LedgerKind[]).map((kind) => {
@@ -1796,6 +1837,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                               key={pairingFileKey(file)}
                               kind={file.kind}
                               inspection={inspects[pairingFileKey(file)]}
+                              forms={expanded.kind === "tb" ? tbForms : jeForms}
                               mapping={
                                 (mappings[pairingFileKey(file)] ?? {}) as MappingDict
                               }
@@ -2061,6 +2103,7 @@ function LedgerMappingPanel(props: {
   kind: LedgerKind;
   inspection?: Inspection;
   mapping: MappingDict;
+  forms: LedgerForm[];
   disabled?: boolean;
   onHeaderChange?: (row: number, depth: number) => void;
   onKindChange?: () => void;
@@ -2073,9 +2116,8 @@ function LedgerMappingPanel(props: {
     props.kind === "tb" ? TB_LABELS : JE_LABELS,
   );
   const roles = Object.entries(labels) as [string, string][];
-  const forms = useLedgerForms(props.kind);
-  const match = forms.length
-    ? resolveForm(props.kind, forms, props.mapping)
+  const match = props.forms.length
+    ? resolveForm(props.kind, props.forms, props.mapping)
     : undefined;
   if (!props.inspection) return null;
   return (
@@ -2085,7 +2127,7 @@ function LedgerMappingPanel(props: {
       rows={props.inspection.preview ?? []}
       mapping={props.mapping}
       roles={roles}
-      groups={formGroups(props.kind, roles, forms, props.mapping)}
+      groups={formGroups(props.kind, roles, props.forms, props.mapping)}
       requirementOf={(role) => roleRequirement(match, role)}
       formNote={describeForm(match, (role) => labels[role] ?? role)}
       multi={MULTI_COLUMN_ROLES}

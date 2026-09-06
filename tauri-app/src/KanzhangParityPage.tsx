@@ -11,7 +11,6 @@ import { displayFileName } from "@/fileDisplay";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StepIndicator } from "@/components/StepIndicator";
 import { PageHeader } from "@/components/PageHeader";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { LedgerSourceCard } from "@/components/LedgerSourceCard";
@@ -465,7 +464,6 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const showReview=llmBusy||llmFailed||Boolean(llmStatus)||changes.length>0||pending.length>0;
   return <div className="kz-page">
     <PageHeader eyebrow="凭证映射与科目筛选" title={tool.name} detail="按三步流程完成字段映射、科目穿梭、多批次、凭证类型、损益结转与导出。" />
-    <DataHandlingNotice mode="network-assisted" title="凭证处理与智能复核" description="凭证读取、筛选和导出在本机完成；使用 LLM 复核或分析时，所需信息会按设置发送到对应服务。" />
     <StepIndicator steps={[{key:"1",label:"加载与映射"},{key:"2",label:"科目筛选",disabled:!draft.inspect||missingRequired.length>0},{key:"3",label:"透视与导出",disabled:!draft.inspect||missingRequired.length>0}]} current={draft.step-1} onStepClick={(index)=>patch({step:index+1})} />
     {error&&<ErrorBox error={error} onDismiss={()=>setError("")} />}
     {draft.inspect?.resourceNotice&&<p className="kz-hint" role="status">{draft.inspect.resourceNotice}</p>}

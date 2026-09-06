@@ -21,7 +21,6 @@ import { confirmDialog } from "@/components/ConfirmDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useJobEvents } from "@/hooks/useJobEvents";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
 import {
   dedupePdfPaths,
@@ -182,12 +181,6 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
         eyebrow="PDF 整理"
         title={tool.name}
         detail="把文字版回函逐行转成 Excel，自动提取回函中的表格，支持批量处理。"
-      />
-      <DataHandlingNotice
-        mode="local"
-        title="回函文件仅在本机处理"
-        description="PDF 读取、文字与表格提取、Excel 写出均在当前电脑完成，不会上传回函内容。"
-        details="当前仅支持带文字层的 PDF；扫描件不会调用外部 OCR。"
       />
       <StepIndicator
         steps={[

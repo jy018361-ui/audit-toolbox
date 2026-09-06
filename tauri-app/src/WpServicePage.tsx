@@ -11,7 +11,6 @@ import { ResultView } from "@/components/ResultView";
 import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
 
 function wpErrorText(error: unknown) {
@@ -145,7 +144,6 @@ export function WpServicePage({ tool }: { tool: ToolManifest }) {
         ]}
         current={job ? 2 : folder ? 1 : 0}
       />
-      <DataHandlingNotice mode="local" title="本机处理" description="工作目录检查、表格读取与服务方案生成在本机完成。原始输入文件不会因清空选择而删除。" />
       <div className="workspace wp-workspace">
         <Card variant="section">
           <CardHeader><CardTitle>选择工作目录</CardTitle></CardHeader>

@@ -21,7 +21,6 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StepIndicator } from "@/components/StepIndicator";
 import { JargonTip } from "@/components/JargonTip";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
 import { Badge } from "@/components/ui/badge";
 import { NumberInput } from "@/components/NumberInput";
@@ -1021,12 +1020,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <DataHandlingNotice
-                mode="network-assisted"
-                title="测算默认在本机完成"
-                description="文件读取与利息测算在本机进行；AI 辅助识别或 LLM 字段复核可能将字段名和预览样本按设置发送到所配置服务。"
-                details="TB 必传；JE 选传，用于还原月度余额。未上传 JE 时按 TB 期初、期末两点法测算。"
-              />
               <FileDropInput
                 containerRef={uploadDropRef}
                 value=""
@@ -1772,16 +1765,15 @@ function SourceCard(props: {
       </CardHeader>
       <CardContent>
         <div className="fx-detected-file">
-          <span title={props.path}>{fileName(props.path)}</span>
-          <Button
-            variant="ghost"
-            size="sm"
+          <button
+            className="fx-file-name-button"
             type="button"
+            title={`${props.path}（点击更换）`}
             disabled={props.disabled}
             onClick={props.onReplace}
           >
-            更换 Excel
-          </Button>
+            {fileName(props.path)}
+          </button>
           <Button
             variant="ghost"
             size="sm"

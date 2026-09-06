@@ -48,9 +48,6 @@ describe("TbjeCheckPage", () => {
       screen.getByRole("heading", { level: 1, name: tool.name }),
     ).toBeInTheDocument();
     expect(container.querySelector(".fx-head")).toBeNull();
-    expect(
-      screen.getByRole("complementary", { name: "核对默认在本机完成" }),
-    ).toHaveAttribute("data-mode", "network-assisted");
     expect(screen.getByRole("region", { name: "准备核对资料" })).toBeVisible();
 
     const steps = container.querySelector(".step-indicator");
@@ -125,18 +122,28 @@ describe("TbjeCheckPage", () => {
       "title",
       "C:/samples/01JE.xlsx",
     );
-    expect(screen.getByText("01TB.xlsx")).toHaveAttribute(
+    expect(screen.getByRole("button", { name: "01TB.xlsx" })).toHaveAttribute(
       "title",
-      "C:/samples/01TB.xlsx",
+      "C:/samples/01TB.xlsx（点击更换）",
     );
-    const tbMapping = screen.getByRole("button", { name: "收起 TB 映射" });
+    const tbMapping = screen.getByRole("button", {
+      name: "查看并调整 TB 映射",
+    });
     const jeMapping = screen.getByRole("button", {
       name: "查看并调整 JE 映射",
     });
     expect(tbMapping).toBeEnabled();
     expect(jeMapping).toBeEnabled();
-    expect(screen.getByText("科目余额表字段映射")).toBeVisible();
+    expect(screen.queryByText("科目余额表字段映射")).not.toBeInTheDocument();
     expect(screen.queryByText("序时账字段映射")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /TB 缺少 .*必填映射/ }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /JE 缺少 .*必填映射/ }),
+    ).toBeVisible();
+    fireEvent.click(tbMapping);
+    expect(screen.getByText("科目余额表字段映射")).toBeVisible();
     fireEvent.click(jeMapping);
     expect(screen.getByText("序时账字段映射")).toBeVisible();
     expect(screen.queryByText("科目余额表字段映射")).not.toBeInTheDocument();
@@ -565,7 +572,7 @@ describe("TbjeCheckPage", () => {
     expect(
       screen.getAllByRole("button", { name: /查看并调整 JE 映射/ }).length,
     ).toBeGreaterThan(0);
-    expect(screen.getByText("科目余额表字段映射")).toBeVisible();
+    expect(screen.queryByText("科目余额表字段映射")).not.toBeInTheDocument();
   });
 
   it("不显示孤立 JE，并允许手工选择两侧 Excel 与 Sheet 建组", async () => {
@@ -606,12 +613,14 @@ describe("TbjeCheckPage", () => {
 
     render(<TbjeCheckPage tool={tool} />);
     fireEvent.click(screen.getByRole("button", { name: "手动添加配对组" }));
-    await screen.findByText("TB-4800.xlsx");
+    await screen.findByRole("button", { name: "TB-4800.xlsx" });
     expect(screen.getByLabelText("余额表使用的工作表")).toHaveValue("Sheet1");
-    fireEvent.click(screen.getByRole("button", { name: "选择 Excel" }));
-    await screen.findByText(/4800_JE\.xlsx/);
+    fireEvent.click(screen.getByRole("button", { name: "选择 JE Excel" }));
+    await screen.findByRole("button", { name: "4800_JE.xlsx" });
     expect(screen.getByLabelText("序时账使用的工作表")).toHaveValue("JE");
-    expect(screen.getAllByRole("button", { name: "更换 Excel" })).toHaveLength(2);
+    expect(
+      screen.queryByRole("button", { name: "更换 Excel" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("（缺科目余额表）")).not.toBeInTheDocument();
   });
 

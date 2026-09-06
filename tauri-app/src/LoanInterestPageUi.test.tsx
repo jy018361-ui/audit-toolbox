@@ -38,11 +38,8 @@ beforeEach(() => {
   });
 });
 
-it("按资料模式显示空态、联网边界和可访问的选中状态", () => {
+it("按资料模式显示空态和可访问的选中状态", () => {
   render(<LoanInterestPage tool={tool} />);
-  expect(
-    screen.getByRole("complementary", { name: "测算默认在本机完成" }),
-  ).toHaveAttribute("data-mode", "network-assisted");
   expect(
     screen.getByRole("region", { name: "准备完整借款台账" }),
   ).toBeVisible();
@@ -56,7 +53,6 @@ it("按资料模式显示空态、联网边界和可访问的选中状态", () =
     "true",
   );
   expect(screen.getByRole("region", { name: "准备 TB 与 JE" })).toBeVisible();
-  expect(screen.getByText(/TB 与 JE 均需上传/)).toBeVisible();
   // TB＋JE 与其他账表工具一致：一个统一上传入口，不再分 TB/JE 两个上传框。
   expect(
     screen.getByRole("button", {

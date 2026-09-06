@@ -4,9 +4,6 @@
   gap: var(--sp-4);
   min-width: 0;
 }
-.ts-manager-page .data-handling-notice {
-  margin-bottom: var(--sp-4);
-}
 .ts-result-overview {
   display: flex;
   align-items: center;

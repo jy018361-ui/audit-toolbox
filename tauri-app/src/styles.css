@@ -932,8 +932,9 @@ summary:focus-visible {
 .data-handling-notice-details {
   margin: var(--sp-1) 0 0;
   font-size: var(--fs-xs);
-  line-height: 1.5;
+  line-height: 1.5;;
 }
+
 .link-button {
   display: block;
   border: 0;

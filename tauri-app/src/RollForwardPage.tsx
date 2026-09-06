@@ -28,7 +28,6 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/EmptyState";
 import { SwitchInput } from "@/components/SwitchInput";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { JobProgress } from "@/components/JobProgress";
 import { Card } from "@/components/ui/card";
 import "./roll-forward.css";
@@ -818,12 +817,6 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
         eyebrow="底稿年度结转"
         title={tool.name}
         detail="按公司选择上年底稿与科目，确认风险评估信息，检查后生成本年度底稿。"
-      />
-      <DataHandlingNotice
-        mode={company?.llm_enhanced || company?.llm_wording_revision ? "network-assisted" : "local"}
-        title="本机结转 · 智能辅助可选"
-        description="项目与底稿结转在本机处理。启用智能检查或表述修订后，相关底稿内容会发送至设置中配置的 AI 服务。"
-        details="请确认客户资料允许发送至该服务；生成的底稿和智能建议均需人工复核。"
       />
       <StepIndicator
         steps={[

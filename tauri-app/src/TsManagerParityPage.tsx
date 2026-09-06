@@ -31,7 +31,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
 import "./ts-manager.css";
 
@@ -641,12 +640,6 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
               )}
             {step === 1 && (
               <>
-                <DataHandlingNotice
-                  mode="local"
-                  title="工时数据在本机处理"
-                  description="文件读取、筛选与透视导出由本机完成，不向 AI 服务发送工时明细。"
-                  details="如选择网络共享目录，读写仍通过该目录进行；导出前需选择保存位置。"
-                />
                 <Field label="目标文件" required>
                   <FileDropInput
                     value={state.inputPath}

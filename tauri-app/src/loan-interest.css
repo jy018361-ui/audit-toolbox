@@ -1,9 +1,6 @@
 .loan-page {
   padding-bottom: 40px;
 }
-.loan-page .data-handling-notice {
-  margin-bottom: var(--sp-4);
-}
 .loan-result-overview {
   display: flex;
   flex-wrap: wrap;

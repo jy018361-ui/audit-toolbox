@@ -1599,13 +1599,14 @@ function FaLedgerSourceCard(props: {
             : "新增、处置、折旧及对方科目的完整期间数据源"}
         </p>
         <div className="fx-detected-file">
-          <span>{fileName(props.path)}</span>
           <button
+            className="fx-file-name-button"
             type="button"
+            title={`${props.path}（点击更换）`}
             disabled={props.disabled}
             onClick={props.onReplace}
           >
-            更换 Excel
+            {fileName(props.path)}
           </button>
           <button
             type="button"

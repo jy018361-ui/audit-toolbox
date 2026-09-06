@@ -23,13 +23,10 @@ const tool: ToolManifest = {
   capabilities: [],
   migrationStatus: "ready",
 };
-it("空文件状态不虚报就绪，并显示本机处理及资料指引", () => {
+it("空文件状态不虚报就绪并显示资料指引", () => {
   render(<TsManagerParityPage tool={tool} />);
   expect(screen.getByText("待加载文件")).toBeVisible();
   expect(screen.queryByText("已就绪")).not.toBeInTheDocument();
   expect(screen.getByRole("region", { name: "准备工时数据" })).toBeVisible();
-  expect(
-    screen.getByRole("complementary", { name: "工时数据在本机处理" }),
-  ).toHaveAttribute("data-mode", "local");
   expect(screen.getByRole("button", { name: "加载文件" })).toBeDisabled();
 });

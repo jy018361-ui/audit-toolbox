@@ -26,7 +26,6 @@ import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
 
 const CACHE_KEY = "audit-toolbox:file-list-directory:v1";
@@ -228,12 +227,6 @@ export default function FileListDirectoryPage({
         eyebrow="文件夹清单生成"
         title={tool.name}
         detail="递归扫描文件夹，按层级导出文件名、可点击超链接与完整路径。"
-      />
-      <DataHandlingNotice
-        mode="local"
-        className="file-list-data-notice"
-        title="目录信息仅在本机处理"
-        description="文件夹扫描与 Excel 清单生成均在当前电脑完成，不会上传文件名、路径或文件内容。"
       />
       <StepIndicator
         steps={[

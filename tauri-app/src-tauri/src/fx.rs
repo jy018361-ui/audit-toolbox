@@ -15,10 +15,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::Read,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -33,6 +35,48 @@ static FX_TABLE_CACHE: OnceLock<Mutex<HashMap<String, Arc<FxTable>>>> = OnceLock
 static FX_INSPECTION_CACHE: OnceLock<Mutex<HashMap<String, Arc<FxTable>>>> = OnceLock::new();
 static FX_RATE_INDEX: OnceLock<Mutex<Option<(String, HashMap<(String, String), RatePoint>)>>> =
     OnceLock::new();
+
+thread_local! {
+    /// A worker handles one FX job and exits. Keep derived tables only for that
+    /// job so every calculation stage can share the same forward-filled JE,
+    /// then release it before the process terminates. Synchronous inspect and
+    /// validation calls in the long-lived app process never enter this cache.
+    static FX_JOB_TABLE_CACHE: RefCell<Option<HashMap<String, Arc<FxTable>>>> = const {
+        RefCell::new(None)
+    };
+}
+
+struct FxJobTableCacheGuard;
+
+impl FxJobTableCacheGuard {
+    fn begin() -> Self {
+        FX_JOB_TABLE_CACHE.with(|cache| *cache.borrow_mut() = Some(HashMap::new()));
+        Self
+    }
+}
+
+impl Drop for FxJobTableCacheGuard {
+    fn drop(&mut self) {
+        FX_JOB_TABLE_CACHE.with(|cache| *cache.borrow_mut() = None);
+    }
+}
+
+fn cached_job_table(key: &str) -> Option<Arc<FxTable>> {
+    FX_JOB_TABLE_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .as_ref()
+            .and_then(|tables| tables.get(key).cloned())
+    })
+}
+
+fn store_job_table(key: String, table: &Arc<FxTable>) {
+    FX_JOB_TABLE_CACHE.with(|cache| {
+        if let Some(tables) = cache.borrow_mut().as_mut() {
+            tables.insert(key, Arc::clone(table));
+        }
+    });
+}
 
 fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppError {
     AppError::new(code, message, false, detail)
@@ -232,7 +276,23 @@ struct RateSnapshot {
 /// 堆分配；而测算过程里 `records()` 会被反复调用好几遍。借用之后这部分开销归零。
 pub(crate) struct RowRecord<'a> {
     source_row: usize,
-    values: HashMap<&'a str, &'a str>,
+    header_index: Rc<HashMap<&'a str, usize>>,
+    row: &'a [String],
+}
+
+impl<'a> RowRecord<'a> {
+    fn get(&self, header: &str) -> Option<&'a str> {
+        self.header_index
+            .get(header)
+            .and_then(|index| self.row.get(*index))
+            .map(String::as_str)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&'a str, &'a str)> + '_ {
+        self.header_index.iter().filter_map(|(header, index)| {
+            self.row.get(*index).map(|value| (*header, value.as_str()))
+        })
+    }
 }
 
 pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
@@ -515,6 +575,9 @@ pub(crate) fn run_job(
     cancel: Arc<AtomicBool>,
     pause: &PauseCheckpoint,
 ) -> Result<Value, AppError> {
+    // Preview/export call many helpers that historically re-created the same
+    // cleaned JE. Scope this cache to the single worker request.
+    let _table_cache = FxJobTableCacheGuard::begin();
     checkpoint(&cancel, pause)?;
     match method {
         "fx.fetch_rates" => {
@@ -2371,6 +2434,15 @@ pub(crate) fn forward_filled_je_table(
         .filter(|(role, _)| is_je_forward_fill_role(role))
         .flat_map(|(role, _)| mapped_cols(mapping, role))
         .collect::<Vec<_>>();
+    let mapping_fingerprint = serde_json::to_vec(mapping).unwrap_or_default();
+    let cache_key = format!(
+        "{:p}|{}",
+        Arc::as_ptr(table),
+        hex::encode(Sha256::digest(mapping_fingerprint))
+    );
+    if let Some(cached) = cached_job_table(&cache_key) {
+        return cached;
+    }
     let indexes = columns
         .iter()
         .filter_map(|column| ledger_mapping::header_index(&table.headers, column))
@@ -2381,7 +2453,9 @@ pub(crate) fn forward_filled_je_table(
             .any(|index| row.get(*index).is_none_or(|value| value.trim().is_empty()))
     });
     if !needs_fill {
-        return Arc::clone(table);
+        let unchanged = Arc::clone(table);
+        store_job_table(cache_key, &unchanged);
+        return unchanged;
     }
     let mut filled = (**table).clone();
     // 合计行/游离数字行不能参与填充：它们没有身份，一旦被填上一行的科目/凭证
@@ -2399,7 +2473,9 @@ pub(crate) fn forward_filled_je_table(
             &junk,
         );
     }
-    Arc::new(filled)
+    let filled = Arc::new(filled);
+    store_job_table(cache_key, &filled);
+    filled
 }
 
 fn first_col(mapping: &Map<String, Value>, role: &str) -> Option<String> {
@@ -2443,7 +2519,7 @@ fn currency_from_text(value: &str) -> Option<String> {
 fn currency_text_hint(row: &RowRecord, mapping: &Map<String, Value>) -> Option<String> {
     let text = mapped_cols(mapping, "currencyText")
         .iter()
-        .filter_map(|column| row.values.get(column.as_str()))
+        .filter_map(|column| row.get(column.as_str()))
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>()
@@ -3830,20 +3906,14 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
     let je_spec: SourceSpec = serde_json::from_value(je_source.clone())
         .map_err(|e| error("INVALID_PARAMS", "JE参数无效。", Some(e.to_string())))?;
     let je_table = forward_filled_je_table(&load_fx_table(&je_spec)?, &je_mapping);
-    // 符号口径必须在这里也判一次。此前只有 `fx.preview` 入口注入了它，
-    // 余额滚动校验是独立入口，拿到的映射没有口径标记，一律按「贷方记正数」折算——
-    // 实测 4800 的序时账是「已带符号」（26314 张凭证投票，0 张反对），
-    // 贷方行被再乘一次 −1，差异正好是贷方发生额的两倍。
+    // 独立测试入口可能没有符号标记，因此这里仍需确保口径存在；正式测算入口已经
+    // 注入过标记，`ensure_sign_convention` 会直接复用，避免再次扫描整张 TB/JE。
     for (table, mapping, kind) in [
         (&tb_table, &mut tb_mapping, "tb"),
         (&je_table, &mut je_mapping, "je"),
     ] {
-        let convention = detect_sign_convention(table, mapping, kind)
+        ensure_sign_convention(table, mapping, kind)
             .map_err(|message| error("SIGN_CONVENTION_UNCERTAIN", &message, None))?;
-        mapping.insert(
-            SIGN_CONVENTION_KEY.into(),
-            Value::String(convention.as_str().to_owned()),
-        );
     }
     let (tb_mapping, je_mapping) = (tb_mapping, je_mapping);
     let use_foreign = amount_scheme_ok(&tb_mapping, "openingForeign")
@@ -4093,8 +4163,7 @@ fn build_je_detail(params: &Value) -> Result<Vec<Value>, AppError> {
         .into_iter()
         .map(|row| {
             let mut value = row
-                .values
-                .into_iter()
+                .iter()
                 .map(|(key, value)| (key.to_string(), Value::String(value.to_string())))
                 .collect::<Map<_, _>>();
             value.insert("sourceRow".into(), json!(row.source_row));
@@ -4104,18 +4173,22 @@ fn build_je_detail(params: &Value) -> Result<Vec<Value>, AppError> {
 }
 
 pub(crate) fn records(table: &FxTable) -> Vec<RowRecord<'_>> {
+    let header_index = Rc::new(
+        table
+            .headers
+            .iter()
+            .enumerate()
+            .map(|(index, header)| (header.as_str(), index))
+            .collect::<HashMap<_, _>>(),
+    );
     table
         .rows
         .iter()
         .enumerate()
         .map(|(i, row)| RowRecord {
             source_row: table.header_row + table.header_depth + i,
-            values: table
-                .headers
-                .iter()
-                .map(String::as_str)
-                .zip(row.iter().map(String::as_str))
-                .collect(),
+            header_index: Rc::clone(&header_index),
+            row,
         })
         .collect()
 }
@@ -4134,8 +4207,7 @@ fn tb_leaf_records<'a>(table: &'a FxTable, mapping: &Map<String, Value>) -> Vec<
 
 fn cell<'a>(row: &'a RowRecord, mapping: &Map<String, Value>, role: &str) -> &'a str {
     first_col(mapping, role)
-        .and_then(|c| row.values.get(c.as_str()))
-        .copied()
+        .and_then(|c| row.get(c.as_str()))
         .unwrap_or("")
 }
 
@@ -4157,21 +4229,11 @@ fn detect_and_inject_sign_conventions(params: &mut Value) -> Result<(), AppError
         let spec = serde_json::from_value::<SourceSpec>(spec)
             .map_err(|e| error("INVALID_PARAMS", "来源参数无效。", Some(e.to_string())))?;
         let table = load_fx_table(&spec)?;
-        let mapping = mapping_obj(params, mapping_key);
-        let convention = match detect_sign_convention(&table, &mapping, kind) {
-            Ok(convention) => convention,
-            // TB 可能本身存在勾稽差异，不能因为源表不平而阻断完整性核对；
-            // 保留历史的借贷分列口径。JE 则必须有凭证配平证据，不能静默猜方向。
-            Err(_) if kind == "tb" => ledger_mapping::SignConvention::Unsigned,
-            Err(message) => {
-                return Err(error("SIGN_CONVENTION_UNCERTAIN", &message, None));
-            }
-        };
+        let mut mapping = mapping_obj(params, mapping_key);
+        ensure_sign_convention(&table, &mut mapping, kind)
+            .map_err(|message| error("SIGN_CONVENTION_UNCERTAIN", &message, None))?;
         if let Some(object) = params.get_mut(mapping_key).and_then(Value::as_object_mut) {
-            object.insert(
-                SIGN_CONVENTION_KEY.into(),
-                Value::String(convention.as_str().to_owned()),
-            );
+            *object = mapping;
         }
     }
     Ok(())
@@ -4186,13 +4248,11 @@ fn detect_sign_convention(
     mapping: &Map<String, Value>,
     kind: &str,
 ) -> Result<ledger_mapping::SignConvention, String> {
-    let headers = table.headers.clone();
-    let rows: Vec<Vec<String>> = table.rows.clone();
     let column_of = |role: &str| -> Vec<String> { mapped_cols(mapping, role) };
     let evidence = if kind == "tb" {
-        ledger_mapping::detect_tb_sign_convention(&headers, &rows, &column_of)
+        ledger_mapping::detect_tb_sign_convention(&table.headers, &table.rows, &column_of)
     } else {
-        ledger_mapping::detect_sign_convention(&headers, &rows, &column_of)
+        ledger_mapping::detect_sign_convention(&table.headers, &table.rows, &column_of)
     };
     let direction_votes = evidence.signed_votes + evidence.unsigned_votes;
     let je_direction_is_trustworthy = if direction_votes == 0 {
@@ -4256,6 +4316,9 @@ pub(crate) fn ensure_sign_convention(
     kind: &str,
 ) -> Result<(), String> {
     if mapping.contains_key(SIGN_CONVENTION_KEY) {
+        if kind == "tb" {
+            ensure_balance_sign_mode(table, mapping);
+        }
         return Ok(());
     }
     let convention = match detect_sign_convention(table, mapping, kind) {
@@ -4374,14 +4437,8 @@ fn amount_inputs_of(
     };
     Ok(if let Some((debit, credit)) = pair {
         ledger_mapping::AmountInputs {
-            debit: Some(
-                strict_number(row.values.get(debit.as_str()).copied().unwrap_or(""))?
-                    .unwrap_or(0.0),
-            ),
-            credit: Some(
-                strict_number(row.values.get(credit.as_str()).copied().unwrap_or(""))?
-                    .unwrap_or(0.0),
-            ),
+            debit: Some(strict_number(row.get(debit.as_str()).unwrap_or(""))?.unwrap_or(0.0)),
+            credit: Some(strict_number(row.get(credit.as_str()).unwrap_or(""))?.unwrap_or(0.0)),
             ..Default::default()
         }
     } else {
@@ -4461,8 +4518,7 @@ fn voucher_id(row: &RowRecord, mapping: &Map<String, Value>, params: &Value) -> 
             .unwrap_or_else(|| cell(row, mapping, "date").trim().to_owned()),
     ];
     parts.extend(mapped_cols(mapping, "id").iter().map(|c| {
-        row.values
-            .get(c.as_str())
+        row.get(c.as_str())
             .map(|v| v.trim().to_owned())
             .unwrap_or_default()
     }));
@@ -4475,8 +4531,7 @@ fn display_voucher_id(id: &str) -> String {
 fn is_je_business_row(row: &RowRecord, mapping: &Map<String, Value>) -> bool {
     !cell(row, mapping, "date").trim().is_empty()
         || mapped_cols(mapping, "id").iter().any(|column| {
-            row.values
-                .get(column.as_str())
+            row.get(column.as_str())
                 .is_some_and(|value| !value.trim().is_empty())
         })
 }
@@ -4565,7 +4620,7 @@ fn account_columns(mapping: &Map<String, Value>) -> Vec<String> {
 fn account_name(row: &RowRecord, mapping: &Map<String, Value>) -> String {
     account_columns(mapping)
         .iter()
-        .filter_map(|c| row.values.get(c.as_str()))
+        .filter_map(|c| row.get(c.as_str()))
         .map(|v| v.trim())
         .filter(|v| !v.is_empty())
         .collect::<Vec<_>>()
@@ -4576,7 +4631,7 @@ fn account_code_and_name(row: &RowRecord, mapping: &Map<String, Value>) -> (Stri
     let read = |columns: &[String]| {
         columns
             .iter()
-            .filter_map(|column| row.values.get(column.as_str()))
+            .filter_map(|column| row.get(column.as_str()))
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .collect::<Vec<_>>()
@@ -4593,8 +4648,7 @@ fn account_code_and_name(row: &RowRecord, mapping: &Map<String, Value>) -> (Stri
         .map(|column| {
             (
                 column.as_str(),
-                row.values
-                    .get(column.as_str())
+                row.get(column.as_str())
                     .map(|value| value.trim())
                     .unwrap_or(""),
             )
@@ -4833,7 +4887,7 @@ fn normalized_account_match_key(account: &str) -> String {
 fn auxiliary_value(row: &RowRecord, mapping: &Map<String, Value>) -> String {
     mapped_cols(mapping, "auxiliary")
         .iter()
-        .filter_map(|column| row.values.get(column.as_str()))
+        .filter_map(|column| row.get(column.as_str()))
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>()
@@ -5826,6 +5880,7 @@ fn calculate(
     cancel: &AtomicBool,
     pause: &PauseCheckpoint,
 ) -> Result<Value, AppError> {
+    progress("validate", 0, 4, "正在校验账表映射与金额数据…");
     let validation = validate_mapping(params)?;
     if !validation
         .get("valid")
@@ -5838,6 +5893,7 @@ fn calculate(
             Some(validation.to_string()),
         ));
     }
+    progress("account_names", 0, 4, "正在建立科目名称与编码索引…");
     let enriched_params = with_tb_account_names(params)?;
     let params = &enriched_params;
     let mode = params
@@ -5848,6 +5904,7 @@ fn calculate(
         // 校验本身出错（读不出表、解析不了金额）仍然要中断；
         // 只有「对不上」不再中断——结论与逐条明细挂在 `balanceRollforwardValidation`
         // 上带给前端展示。
+        progress("rollforward", 0, 4, "正在执行TB与JE余额滚动校验…");
         validate_tb_je_balance_rollforward(params)?
     } else {
         json!({"performed":false,"reason":"当前模式不包含未实现测算"})
@@ -5866,12 +5923,14 @@ fn calculate(
     // 白算一遍。改为导出前按需构造（[`build_je_detail`]）。
     let je_detail: Vec<Value> = Vec::new();
     if matches!(mode, "realized" | "combined") {
+        progress("realized", 2, 4, "正在识别并测算已实现汇兑事项…");
         let (calculation, classes, issues) = calculate_realized(params, &snapshot)?;
         realized = calculation;
         classification = classes;
         quality.extend(issues);
     }
     if matches!(mode, "unrealized" | "combined") {
+        progress("unrealized", 2, 4, "正在测算外币货币性项目期末重估…");
         let (calculation, issues) = calculate_unrealized(params, &snapshot, &realized)?;
         unrealized = calculation;
         quality.extend(issues);
@@ -5892,6 +5951,7 @@ fn calculate(
         })
         .sum::<f64>();
     let automatic_total = realized_total + unrealized_total;
+    progress("review", 2, 4, "正在建立分类复核与账面覆盖关系…");
     let bridge = build_review_bridge(params, &realized, &unrealized)?;
     let classification_controls = bridge
         .get("classificationControls")
@@ -5933,6 +5993,7 @@ fn calculate(
             "severity":"提示", "detail":detail
         }));
     }
+    progress("voucher_detail", 2, 4, "正在整理相关凭证明细…");
     let voucher_detail = build_relevant_voucher_detail(
         params,
         &realized,
@@ -6036,7 +6097,7 @@ fn calculate(
     const GRANULARITY_TYPES: &[&str] = &[
         "科目余额混合本位币与外币",
         "同一科目存在多种外币敞口",
-        "无外币敞口的评估调整科目",
+        "外币凭证原币金额全为零",
         "同一余额键存在多个外币",
     ];
     let tb_granularity_blocked = quality
@@ -6311,19 +6372,19 @@ fn reconcile_fx_gain_loss(params: &Value) -> Result<Value, AppError> {
                     return None;
                 }
                 let debit = first_col(&mapping, "periodFunctionalDebit")
-                    .and_then(|column| row.values.get(column.as_str()))
+                    .and_then(|column| row.get(column.as_str()))
                     .map(|value| strict_number(value).map(|v| v.unwrap_or(0.0)))
                     .transpose()
                     .ok()
                     .flatten();
                 let credit = first_col(&mapping, "periodFunctionalCredit")
-                    .and_then(|column| row.values.get(column.as_str()))
+                    .and_then(|column| row.get(column.as_str()))
                     .map(|value| strict_number(value).map(|v| v.unwrap_or(0.0)))
                     .transpose()
                     .ok()
                     .flatten();
                 let closing = first_col(&mapping, "closingFunctionalAmount")
-                    .and_then(|column| row.values.get(column.as_str()))
+                    .and_then(|column| row.get(column.as_str()))
                     .map(|value| strict_number(value).map(|v| v.unwrap_or(0.0)))
                     .transpose()
                     .ok()
@@ -6857,7 +6918,7 @@ fn build_relevant_voucher_detail(
             "functionalAmount".into(),
             functional.map(Value::from).unwrap_or(Value::Null),
         );
-        for (header, raw) in row.values {
+        for (header, raw) in row.iter() {
             value
                 .entry(format!("原始_{header}"))
                 .or_insert(Value::String(raw.to_string()));
@@ -7414,7 +7475,7 @@ fn calculate_unrealized(
         let currency = currency_for(&row, &mapping, &account, params);
         let auxiliary = mapped_cols(&mapping, "auxiliary")
             .iter()
-            .filter_map(|c| row.values.get(c.as_str()))
+            .filter_map(|c| row.get(c.as_str()))
             .map(|v| v.trim())
             .collect::<Vec<_>>()
             .join("|");
@@ -7669,7 +7730,7 @@ fn calculate_inferred_opening_unrealized(
                     "currency":only, "functionalResidue":functional_residue,
                     "severity":"隔离",
                     "detail":format!(
-                        "该科目既持有{only}敞口，又沉淀了{:.2}的本位币余额；TB 只给到科目粒度的合计余额，无法拆出其中属于{only}的部分。请提供按币种拆分的科目余额表后重算。",
+                        "该科目既有{only}余额，又沉淀了{:.2}的本位币；TB 只有科目合计，拆不出其中属于{only}的部分。请提供按币种拆分的科目余额表后重算。",
                         functional_residue
                     )
                 }));
@@ -7688,7 +7749,7 @@ fn calculate_inferred_opening_unrealized(
                     "currencies":inferred_currencies,
                     "severity":"隔离",
                     "detail":format!(
-                        "该科目同时持有 {detail} 敞口，而 TB 只给到科目粒度的合计余额，无法拆出各币种分别是多少。请提供按币种拆分的科目余额表后重算。"
+                        "该科目同时有 {detail} 多种外币余额，TB 只有科目合计，拆不出各币种分别是多少。请提供按币种拆分的科目余额表后重算。"
                     )
                 }));
             } else if inferred_currencies.is_some_and(|values| values.is_empty())
@@ -7702,19 +7763,18 @@ fn calculate_inferred_opening_unrealized(
                     .abs()
                     > 0.01
             {
-                // 名义上挂着外币凭证，但每一种的原币都是零——「外币评估调整」
-                // 这类影子科目就是如此：它不持有外币，只承载本位币差额。
-                // 审计上要看的是它对应的原科目，不是对它自己做重估。
+                // 这类形态多半是客户的评估调整科目，但原币为零也可能只是
+                // 序时账没填原币金额——文案只陈述事实，不下「评估调整」的判语。
                 let detail = nominal
                     .map(|values| values.iter().cloned().collect::<Vec<_>>().join("、"))
                     .unwrap_or_default();
                 quality.push(json!({
                     "source":"TB+JE", "row":row.source_row,
-                    "type":"无外币敞口的评估调整科目", "account":account,
+                    "type":"外币凭证原币金额全为零", "account":account,
                     "currencies":nominal,
                     "severity":"隔离",
                     "detail":format!(
-                        "该科目挂着 {detail} 的凭证但原币金额全部为零，说明它不持有外币，只承载客户记入的本位币评估调整。审计金额要看它对应的原科目——若原科目也因 TB 只给到科目粒度而无法测算，请更换为按币种拆分的科目余额表后重算。"
+                        "该科目挂着 {detail} 的凭证，但原币金额全部为 0，没有可测算的外币余额。若序时账本身未填原币金额，请核对数据后重算。"
                     )
                 }));
             }
@@ -8190,7 +8250,7 @@ fn calculate_monthly_unrealized(
                         "source":"JE+TB", "type":"未实现测算缺少TB余额基础",
                         "severity":"隔离", "entity":entity, "account":account,
                         "auxiliary":auxiliary, "currency":normalize_currency(&currency),
-                        "detail":"该外币货币性项目在JE中存在发生额，但未取得可唯一对应的TB余额端点；系统不会再假设零期初，也不将其计入未实现测算。"
+                        "detail":"该「科目＋币种」在序时账里有发生额，但 TB 里找不到一一对应的余额行；为保证数字可靠，未将其计入未实现测算。"
                     }));
                 }
                 continue;
@@ -10878,6 +10938,35 @@ fn xlsx_err(value: XlsxError) -> AppError {
 mod tests {
     use super::*;
 
+    fn test_row_record(pairs: &[(&str, &str)]) -> RowRecord<'static> {
+        let headers = Box::leak(
+            pairs
+                .iter()
+                .map(|(header, _)| (*header).to_owned())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let row = Box::leak(
+            pairs
+                .iter()
+                .map(|(_, value)| (*value).to_owned())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let header_index = Rc::new(
+            headers
+                .iter()
+                .enumerate()
+                .map(|(index, header)| (header.as_str(), index))
+                .collect(),
+        );
+        RowRecord {
+            source_row: 1,
+            header_index,
+            row,
+        }
+    }
+
     #[test]
     fn 大文件轻量预览保留被省略空白行后的物理表头行号() {
         let xml = r#"<worksheet><dimension ref="A1:E7"/><sheetData>
@@ -11031,6 +11120,41 @@ mod tests {
         // 第三行没有身份只有金额（合计行形态）：不接收填充，保持原样——
         // 填上一行的凭证号/科目它会变成真分录混进发生额。
         assert_eq!(filled.rows[2], vec!["", "", "-100"]);
+    }
+
+    #[test]
+    fn 同一汇兑任务复用向下填充后的je() {
+        let table = Arc::new(FxTable {
+            path: PathBuf::new(),
+            sheet: "JE".into(),
+            sheets: vec!["JE".into()],
+            header_row: 1,
+            header_depth: 1,
+            raw_headers: vec![vec!["凭证号".into(), "科目".into(), "金额".into()]],
+            headers: vec!["凭证号".into(), "科目".into(), "金额".into()],
+            rows: vec![
+                vec!["JE-1".into(), "银行存款".into(), "100".into()],
+                vec!["".into(), "应收账款".into(), "-100".into()],
+            ],
+            row_count: 2,
+            header_candidates: vec![],
+            sampled: false,
+        });
+        let mapping = json!({
+            "id": "凭证号",
+            "accountName": "科目",
+            "functionalAmount": "金额"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        let _cache = FxJobTableCacheGuard::begin();
+        let first = forward_filled_je_table(&table, &mapping);
+        let second = forward_filled_je_table(&table, &mapping);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&table, &first), "有空身份字段时应生成清洗表");
+        assert_eq!(second.rows[1][0], "JE-1");
     }
 
     #[test]
@@ -11353,13 +11477,8 @@ mod tests {
             .as_object()
             .unwrap()
             .clone();
-        // RowRecord 借用原表数据，测试里的字面量都是 'static，显式标注让闭包能返回它。
-        let row = |account: &'static str, amount: &'static str| RowRecord {
-            source_row: 1,
-            values: HashMap::from([
-                ("科目".into(), account.into()),
-                ("金额".into(), amount.into()),
-            ]),
+        let row = |account: &'static str, amount: &'static str| {
+            test_row_record(&[("科目", account), ("金额", amount)])
         };
         let first = vec![row("1001 银行存款", "100"), row("1122 应收账款", "-100")];
         let second = vec![row("1122 应收账款", "-80"), row("1001 银行存款", "80")];
@@ -12939,15 +13058,13 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
 
     #[test]
     fn voucher_key_uses_entity_date_and_all_ids() {
-        let row = RowRecord {
-            source_row: 2,
-            values: HashMap::from([
-                ("公司".into(), "A".into()),
-                ("日期".into(), "2025-01-02".into()),
-                ("凭证".into(), "9".into()),
-                ("类型".into(), "记".into()),
-            ]),
-        };
+        let mut row = test_row_record(&[
+            ("公司", "A"),
+            ("日期", "2025-01-02"),
+            ("凭证", "9"),
+            ("类型", "记"),
+        ]);
+        row.source_row = 2;
         let mapping = Map::from_iter([
             ("entity".into(), json!("公司")),
             ("date".into(), json!("日期")),
@@ -13637,14 +13754,12 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
 
     #[test]
     fn account_code_and_name_stay_separate_roles() {
-        let row = RowRecord {
-            source_row: 2,
-            values: HashMap::from([
-                ("科目代码".into(), "1002010017".into()),
-                ("科目名称一级".into(), "货币资金".into()),
-                ("科目名称二级".into(), "货币资金-银行存款".into()),
-            ]),
-        };
+        let mut row = test_row_record(&[
+            ("科目代码", "1002010017"),
+            ("科目名称一级", "货币资金"),
+            ("科目名称二级", "货币资金-银行存款"),
+        ]);
+        row.source_row = 2;
         let mapping = Map::from_iter([
             ("accountCode".into(), json!("科目代码")),
             (
@@ -13684,16 +13799,15 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             ("currencyText".into(), json!("文本")),
         ]);
         let params = json!({"entityCurrencies": {"4800": "USD"}});
-        let row = |code: &'static str, text: &'static str, currency: &'static str| RowRecord {
-            source_row: 2,
-            values: HashMap::from([
-                ("公司代码".into(), "4800".into()),
-                ("科目代码".into(), code.into()),
-                ("科目名称二级".into(), "货币资金-银行存款".into()),
-                ("货币".into(), "USD".into()),
-                ("交易币种".into(), currency.into()),
-                ("文本".into(), text.into()),
-            ]),
+        let row = |code: &'static str, text: &'static str, currency: &'static str| {
+            test_row_record(&[
+                ("公司代码", "4800"),
+                ("科目代码", code),
+                ("科目名称二级", "货币资金-银行存款"),
+                ("货币", "USD"),
+                ("交易币种", currency),
+                ("文本", text),
+            ])
         };
         let currency = |mapping: &Map<String, Value>,
                         code: &'static str,
@@ -14670,11 +14784,11 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             !has_issue("2202010001", "同一科目存在多种外币敞口"),
             "原币为零的日元不构成敞口，不该报成多币种：{quality:#?}"
         );
-        // 乙：影子科目所有币种原币都是零，归到「无外币敞口」。
-        let shadow = issue_of("2202010002", "无外币敞口的评估调整科目");
+        // 乙：影子科目所有币种原币都是零，归到「原币金额全为零」。
+        let shadow = issue_of("2202010002", "外币凭证原币金额全为零");
         assert!(
-            shadow["detail"].as_str().unwrap_or("").contains("原科目"),
-            "要指引用户去看对应的原科目：{shadow:#}"
+            shadow["detail"].as_str().unwrap_or("").contains("原币金额全部为 0"),
+            "文案只陈述原币为零的事实，不下评估调整的判语：{shadow:#}"
         );
         // 丙、丁：干净的港币户和纯本位币科目都不该被报成粒度问题。
         // 2202030101 的外币行一借一贷抵平（净额为零），它只是个本位币科目——
@@ -14683,7 +14797,7 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             for kind in [
                 "科目余额混合本位币与外币",
                 "同一科目存在多种外币敞口",
-                "无外币敞口的评估调整科目",
+                "外币凭证原币金额全为零",
             ] {
                 assert!(
                     !has_issue(account, kind),

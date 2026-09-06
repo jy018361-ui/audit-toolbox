@@ -16,7 +16,6 @@ import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { StepIndicator } from "@/components/StepIndicator";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
 import {
   applyLedgerReviewToDict,
@@ -728,16 +727,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <DataHandlingNotice
-                mode="network-assisted"
-                title="测算默认在本机完成"
-                description="文件读取与利息测算在本机进行；使用 LLM 映射复核时，字段名和预览样本会按设置发送到所配置服务。"
-                details={
-                  mode === "ledger"
-                    ? "完整台账需包含借款标识、本金或余额、借款期间和利率信息。"
-                    : "TB 与 JE 均需上传；可在下一步选传利率台账。"
-                }
-              />
               {mode === "tb" ? (
                 <>
                   <FileDropInput
@@ -1056,17 +1045,6 @@ function Upload({
         onClear={clear}
         onDragStateChange={() => {}}
       />
-      {source.path && (
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          disabled={busy}
-          onClick={browse}
-        >
-          更换 Excel
-        </Button>
-      )}
       {source.inspection && (
         <small>
           已识别 {source.inspection.rowCount.toLocaleString()} 行 ×{" "}
@@ -1095,16 +1073,15 @@ function LoanSourceCard(props: {
       </CardHeader>
       <CardContent>
         <div className="fx-detected-file">
-          <span title={props.source.path}>{fileNameOf(props.source.path)}</span>
-          <Button
-            variant="ghost"
-            size="sm"
+          <button
+            className="fx-file-name-button"
             type="button"
+            title={`${props.source.path}（点击更换）`}
             disabled={props.disabled}
             onClick={props.onReplace}
           >
-            更换 Excel
-          </Button>
+            {fileNameOf(props.source.path)}
+          </button>
           <Button
             variant="ghost"
             size="sm"

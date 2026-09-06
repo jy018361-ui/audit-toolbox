@@ -24,13 +24,10 @@ const tool: ToolManifest = {
   capabilities: [],
   migrationStatus: "ready",
 };
-it("检查前显示真实准备状态、资料要求和本机处理边界", () => {
+it("检查前显示真实准备状态和资料要求", () => {
   render(<ConfirmationProgressPage tool={tool} />);
   expect(screen.getByText("待检查数据")).toBeVisible();
   expect(screen.queryByText("已就绪")).not.toBeInTheDocument();
   expect(screen.getByRole("region", { name: "准备函证清单" })).toBeVisible();
-  expect(
-    screen.getByRole("complementary", { name: "函证清单在本机处理" }),
-  ).toHaveAttribute("data-mode", "local");
   expect(screen.getByRole("button", { name: "检查数据" })).toBeDisabled();
 });

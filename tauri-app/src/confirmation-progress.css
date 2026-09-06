@@ -11,9 +11,6 @@
   gap: var(--sp-4);
   min-width: 0;
 }
-.confirmation-page .data-handling-notice {
-  margin-bottom: var(--sp-4);
-}
 .confirmation-result-overview {
   display: flex;
   align-items: center;

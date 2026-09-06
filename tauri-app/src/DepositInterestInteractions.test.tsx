@@ -154,15 +154,11 @@ const goToStep = (label: RegExp) =>
   fireEvent.click(screen.getByRole("button", { name: label }));
 
 describe("存款科目手工分类请求", () => {
-  it("披露识别与复核联网边界并提供必需资料说明", () => {
+  it("未上传 TB 时给出明确状态且底部主按钮禁用", () => {
     render(<DepositInterestPage tool={tool} />);
-    expect(
-      screen.getByRole("complementary", { name: "测算默认在本机完成" }),
-    ).toHaveAttribute("data-mode", "network-assisted");
     expect(
       screen.getByRole("region", { name: "准备存款利息资料" }),
     ).toBeVisible();
-    expect(screen.getByText(/TB 必传；JE 选传/)).toBeVisible();
     // 底部主按钮设防：没上传 TB 时禁用并给出浅色提示；
     // 步骤条第二步不受影响（参考资料设计，允许直接点进去）。
     expect(
@@ -179,9 +175,9 @@ describe("存款科目手工分类请求", () => {
         name: "拖放或选择 TB、序时账文件（可同时选择）",
       }),
     );
-    await screen.findByRole("button", { name: "更换 Excel" });
+    await screen.findByRole("button", { name: "fixture-tb.xlsx" });
     mock.pickPath.mockResolvedValueOnce("manual-tb.xlsx");
-    fireEvent.click(screen.getByRole("button", { name: "更换 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "fixture-tb.xlsx" }));
     await waitFor(() =>
       expect(mock.engineCall).toHaveBeenCalledWith("deposit.inspect_tb", {
         source: {

@@ -24,7 +24,6 @@ import { Input } from "@/components/ui/input";
 import { EmptyState } from "@/components/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { LlmReview } from "@/components/LlmReview";
 import { useJobEvents } from "@/hooks/useJobEvents";
 import {
@@ -815,11 +814,6 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
         eyebrow="固定资产折旧政策对比"
         title={tool.name}
         detail="匹配期初与期末固定资产清单，对比两期折旧政策（类别、寿命、残值率）并测算影响，同时附税法最低折旧年限参考。"
-      />
-      <DataHandlingNotice
-        mode="network-assisted"
-        title="文件处理与智能复核"
-        description="两期清单读取、政策比较和底稿生成在本机完成；使用 LLM 复核时，复核所需信息会按设置发送到对应服务。"
       />
       <StepIndicator
         steps={[

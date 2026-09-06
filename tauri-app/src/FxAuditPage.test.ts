@@ -626,19 +626,25 @@ describe("跨表对齐后的币种线索", () => {
 describe("TB 粒度不足提示", () => {
   it("按隔离类型给出用户看得懂的原因", () => {
     expect(granularityLabel("科目余额混合本位币与外币")).toBe(
-      "科目余额里既有本位币又有外币，拆不开",
+      "余额里混了本位币和外币，TB 只有合计数，拆不出外币部分",
     );
     expect(granularityLabel("同一科目存在多种外币敞口")).toBe(
-      "同一科目持有多种外币，TB 只有合计数",
+      "同一科目持有多种外币，TB 只有合计数，拆不出各币种余额",
     );
+    expect(granularityLabel("外币凭证原币金额全为零")).toBe(
+      "该科目的外币凭证原币金额全为 0，没有可测算的外币余额",
+    );
+    // 历史结果里的旧类型名，含义相同，同样兜底。
     expect(granularityLabel("无外币敞口的评估调整科目")).toBe(
-      "评估调整科目，本身不持有外币",
+      "该科目的外币凭证原币金额全为 0，没有可测算的外币余额",
     );
     // 历史结果里的旧类型名也要有兜底，不能显示成空白。
     expect(granularityLabel("同一余额键存在多个外币")).toBe(
-      "TB 未提供可唯一对应的原币币种",
+      "TB 里找不到唯一对应的外币余额行，无法测算",
     );
-    expect(granularityLabel(undefined)).toBe("TB 未提供可唯一对应的原币币种");
+    expect(granularityLabel(undefined)).toBe(
+      "TB 里找不到唯一对应的外币余额行，无法测算",
+    );
   });
 });
 

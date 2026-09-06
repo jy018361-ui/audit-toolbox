@@ -17,7 +17,6 @@ import { Input } from "@/components/ui/input";
 import { EmptyState } from "@/components/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/PageHeader";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JargonTip } from "@/components/JargonTip";
 import { JobProgress } from "@/components/JobProgress";
@@ -742,11 +741,6 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         eyebrow="凭证对冲标记"
         title={tool.name}
         detail="加载凭证、确认字段映射，在预览表头按列筛选并按批次选定目标科目，导出带正负数智能匹配标记的完整凭证明细。"
-      />
-      <DataHandlingNotice
-        mode="network-assisted"
-        title="凭证处理与智能复核"
-        description="凭证读取、正负数匹配和结果导出在本机完成；使用 LLM 复核时，复核所需信息会按设置发送到对应服务。"
       />
       {error && <ErrorBox error={error} onDismiss={() => setError("")} />}
 

@@ -1,9 +1,6 @@
 .deposit-page {
   padding-bottom: 40px;
 }
-.deposit-page .data-handling-notice {
-  margin-bottom: var(--sp-4);
-}
 /* 映射未补齐的行内警告做成小警告条：统一警告令牌，不再是橄榄色裸文本。 */
 .deposit-page .fx-warning {
   color: var(--warning-fg);

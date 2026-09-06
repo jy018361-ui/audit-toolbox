@@ -23,7 +23,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { LlmReview } from "@/components/LlmReview";
 import { useJobEvents } from "@/hooks/useJobEvents";
 import { faMappedRolesForColumn } from "./faListUi";
@@ -496,11 +495,6 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
         eyebrow="固定资产折旧测算"
         title={tool.name}
         detail="上传期末固定资产清单，逐卡重算月折旧额、当年与累计折旧，并输出带活公式的折旧测算表。"
-      />
-      <DataHandlingNotice
-        mode="network-assisted"
-        title="文件处理与智能复核"
-        description="清单读取和折旧底稿生成在本机完成；使用 LLM 复核时，复核所需信息会按设置发送到对应服务。"
       />
 
       <StepIndicator

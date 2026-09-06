@@ -676,6 +676,23 @@
   color: var(--success-fg);
   font-weight: 650;
 }
+.fx-detected-file .fx-file-name-button {
+  min-width: 0;
+  flex: 1;
+  padding: 0;
+  overflow: hidden;
+  color: var(--success-fg);
+  font-weight: 650;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.fx-detected-file .fx-file-name-button:hover {
+  color: var(--primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
 .fx-detected-file button {
   border: 0;
   background: transparent;

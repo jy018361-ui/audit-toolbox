@@ -471,11 +471,6 @@
   color: var(--ink-strong);
   font-weight: 600;
 }
-
-.settings-page .data-handling-notice {
-  margin: var(--sp-4) 0;
-}
-
 @media (max-width: 640px), (max-height: 520px) {
   .settings-update-heading {
     flex-direction: column;

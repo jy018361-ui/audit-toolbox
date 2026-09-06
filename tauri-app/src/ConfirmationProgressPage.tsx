@@ -23,7 +23,6 @@ import { StatGrid } from "@/components/StatGrid";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { DataHandlingNotice } from "@/components/DataHandlingNotice";
 import { EmptyState } from "@/components/EmptyState";
 import { errorText } from "@/lib/errors";
 
@@ -345,12 +344,6 @@ export default function ConfirmationProgressPage({
               )}
             {step === 1 && (
               <>
-                <DataHandlingNotice
-                  mode="local"
-                  title="函证清单在本机处理"
-                  description="清单检查与统计报告生成在本机完成，不向 AI 服务发送函证内容。"
-                  details="报告保存到源文件旁的结果目录；选择网络共享目录时会向该目录读写。"
-                />
                 <Field label="函证清单" required>
                   <FileDropInput
                     value={inputPath}

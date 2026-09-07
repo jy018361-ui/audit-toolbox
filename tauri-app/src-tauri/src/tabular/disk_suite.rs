@@ -341,7 +341,11 @@ fn initialize(db: &Connection) -> Result<(), AppError> {
         DROP TABLE IF EXISTS suite_month; DROP TABLE IF EXISTS suite_summaries;
         DROP TABLE IF EXISTS suite_subject; DROP TABLE IF EXISTS suite_pivot;
         DROP TABLE IF EXISTS suite_custom; DROP TABLE IF EXISTS suite_shapes;
-        DROP TABLE IF EXISTS suite_output;
+        DROP TABLE IF EXISTS suite_output; DROP TABLE IF EXISTS suite_stage;
+        CREATE TEMP TABLE suite_stage(
+          seq INTEGER NOT NULL,id TEXT NOT NULL,account TEXT NOT NULL,net REAL NOT NULL,
+          direction TEXT NOT NULL,month TEXT NOT NULL,summary TEXT NOT NULL,loss INTEGER NOT NULL
+        );
         CREATE TEMP TABLE suite_vouchers(id TEXT PRIMARY KEY,seq INTEGER NOT NULL,loss INTEGER NOT NULL);
         CREATE TEMP TABLE suite_nets(id TEXT,account TEXT,net REAL,PRIMARY KEY(id,account));
         CREATE TEMP TABLE suite_month(id TEXT,month TEXT,account TEXT,net REAL,PRIMARY KEY(id,month,account));
@@ -488,16 +492,13 @@ fn aggregate(
     let mut cursor = stmt.query([]).map_err(db_error)?;
     let mut count = 0;
     let transaction = db.unchecked_transaction().map_err(db_error)?;
-    // These statements run once per selected ledger row. Preparing them inside
-    // the loop dominated large exports (millions of rows * several statements)
-    // and kept one CPU core busy compiling identical SQL. Reuse one VM for the
-    // whole transaction while preserving the original row order and sums.
-    let mut insert_voucher = transaction.prepare("INSERT INTO suite_vouchers VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET loss=MAX(loss,excluded.loss)").map_err(db_error)?;
-    let mut insert_net = transaction.prepare("INSERT INTO suite_nets VALUES(?1,?2,?3) ON CONFLICT(id,account) DO UPDATE SET net=net+excluded.net").map_err(db_error)?;
-    let mut insert_subject = transaction.prepare("INSERT INTO suite_subject VALUES(?1,?2,1) ON CONFLICT(account) DO UPDATE SET net=net+excluded.net,count=count+1").map_err(db_error)?;
-    let mut insert_pivot = transaction.prepare("INSERT INTO suite_pivot VALUES(?1,?2,?3,?4) ON CONFLICT(id,account,direction) DO UPDATE SET net=net+excluded.net").map_err(db_error)?;
-    let mut insert_month = transaction.prepare("INSERT INTO suite_month VALUES(?1,?2,?3,?4) ON CONFLICT(id,month,account) DO UPDATE SET net=net+excluded.net").map_err(db_error)?;
-    let mut insert_summary = transaction.prepare("INSERT OR IGNORE INTO suite_summaries SELECT ?1,?2,?3 WHERE (SELECT COUNT(*) FROM suite_summaries WHERE id=?1)<3").map_err(db_error)?;
+    // Keep the scan append-only. Updating five indexed aggregate tables for
+    // every source row caused tens of millions of B-tree mutations on large
+    // ledgers. SQLite is substantially faster when it groups the unindexed
+    // staging rows once after the scan.
+    let mut insert_stage = transaction
+        .prepare("INSERT INTO suite_stage VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")
+        .map_err(db_error)?;
     let runtime_budget = crate::resource_budget::budget()?;
     let decode_batch_bytes = (runtime_budget.batch_bytes / 8).max(2 * 1024 * 1024) as usize;
     let parallelism = crate::resource_budget::recommended_parallelism()?;
@@ -530,66 +531,101 @@ fn aggregate(
                     row.get(*i)
                         .is_some_and(|s| s.contains("本年利润") || s.contains("未分配利润"))
                 });
-            insert_voucher
-                .execute(params![&record.id, record.seq, loss])
-                .map_err(db_error)?;
-            insert_net
-                .execute(params![&record.id, &record.account, record.net])
-                .map_err(db_error)?;
-            insert_subject
-                .execute(params![&record.account, record.net])
-                .map_err(db_error)?;
             let direction_value = direction
                 .and_then(|i| row.get(i))
                 .map(|s| s.trim())
                 .unwrap_or("");
-            insert_pivot
-                .execute(params![
-                    &record.id,
-                    &record.account,
-                    direction_value,
-                    record.net
-                ])
-                .map_err(db_error)?;
-            if let Some(month) = config
+            let month = config
                 .date
                 .and_then(|i| row.get(i))
                 .and_then(|s| parse_month(s))
-            {
-                insert_month
-                    .execute(params![&record.id, month, &record.account, record.net])
-                    .map_err(db_error)?;
-            }
-            if let Some(value) = summary
+                .unwrap_or_default();
+            let summary_value = summary
                 .and_then(|i| row.get(i))
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
-            {
-                // Only the first three distinct summaries of each voucher can ever
-                // contribute to the original type-summary algorithm.
-                insert_summary
-                    .execute(params![&record.id, value, record.seq])
-                    .map_err(db_error)?;
-            }
+                .unwrap_or("");
+            insert_stage
+                .execute(params![
+                    record.seq,
+                    &record.id,
+                    &record.account,
+                    record.net,
+                    direction_value,
+                    month,
+                    summary_value,
+                    loss
+                ])
+                .map_err(db_error)?;
             count += 1;
         }
         progress(
             "analyze",
             count,
-            ledger.count,
+            ledger.count.saturating_mul(2).max(1),
             &format!(
-                "正在并行汇总凭证和科目：已处理 {} 行（{} 个线程）…",
+                "正在并行读取并暂存凭证明细：已处理 {} 行（{} 个线程）…",
                 count, parallelism
             ),
         );
     }
-    drop(insert_summary);
-    drop(insert_month);
-    drop(insert_pivot);
-    drop(insert_subject);
-    drop(insert_net);
-    drop(insert_voucher);
+    drop(insert_stage);
     transaction.commit().map_err(db_error)?;
+    let aggregate_progress = |stage: usize, message: &str| {
+        progress(
+            "analyze",
+            ledger.count + ledger.count * stage / 6,
+            ledger.count.saturating_mul(2).max(1),
+            message,
+        )
+    };
+    aggregate_progress(1, "正在批量汇总凭证索引…");
+    db.execute_batch(
+        "INSERT INTO suite_vouchers
+           SELECT id,MIN(seq),MAX(loss) FROM suite_stage GROUP BY id;",
+    )
+    .map_err(db_error)?;
+    check_cancel(cancel)?;
+    aggregate_progress(2, "正在批量汇总凭证科目净额…");
+    db.execute_batch(
+        "INSERT INTO suite_nets
+           SELECT id,account,SUM(net) FROM suite_stage GROUP BY id,account;",
+    )
+    .map_err(db_error)?;
+    check_cancel(cancel)?;
+    aggregate_progress(3, "正在批量汇总科目和方向…");
+    db.execute_batch(
+        "INSERT INTO suite_subject
+           SELECT account,SUM(net),COUNT(*) FROM suite_stage GROUP BY account;
+         INSERT INTO suite_pivot
+           SELECT id,account,direction,SUM(net) FROM suite_stage
+           GROUP BY id,account,direction;",
+    )
+    .map_err(db_error)?;
+    check_cancel(cancel)?;
+    aggregate_progress(4, "正在批量汇总凭证月份…");
+    db.execute_batch(
+        "INSERT INTO suite_month
+           SELECT id,month,account,SUM(net) FROM suite_stage
+           WHERE month<>'' GROUP BY id,month,account;",
+    )
+    .map_err(db_error)?;
+    check_cancel(cancel)?;
+    aggregate_progress(5, "正在提取每张凭证的前三项摘要…");
+    db.execute_batch(
+        "INSERT INTO suite_summaries(id,value,seq)
+         SELECT id,summary,first_seq FROM (
+           SELECT id,summary,first_seq,
+                  ROW_NUMBER() OVER(PARTITION BY id ORDER BY first_seq,summary) AS rank
+           FROM (
+             SELECT id,summary,MIN(seq) AS first_seq FROM suite_stage
+             WHERE summary<>'' GROUP BY id,summary
+           )
+         ) WHERE rank<=3;
+         DROP TABLE suite_stage;",
+    )
+    .map_err(db_error)?;
+    aggregate_progress(6, "凭证和科目批量汇总完成。");
     let targets = targets
         .iter()
         .map(|s| normalize_account_text(s))

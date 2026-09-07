@@ -9158,6 +9158,50 @@ mod tests {
     }
 
     #[test]
+    fn disk_export_batch_aggregation_keeps_suite_totals() {
+        let root = temp_dir("kanzhang-batch-aggregate");
+        let input = root.join("ledger.csv");
+        let output = root.join("result.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,借方金额,贷方金额,记账日期,借贷方向,摘要\n\
+             1,收入,100,0,2026-01-01,借,摘要甲\n\
+             1,银行,0,100,2026-01-01,贷,摘要甲\n\
+             2,收入,50,0,2026-02-01,借,摘要乙\n\
+             2,现金,0,50,2026-02-01,贷,摘要乙\n",
+        )
+        .unwrap();
+        let job: KanzhangParams = serde_json::from_value(json!({
+            "inputPath": input,
+            "outputPath": output,
+            "mapping": {
+                "id": ["凭证号"], "accountName": ["科目名称"],
+                "debit": "借方金额", "credit": "贷方金额",
+                "date": "记账日期", "direction": "借贷方向", "summary": "摘要"
+            },
+            "targetBatches": [{"name": "收入", "accounts": ["收入"]}],
+            "includePivot": true, "includeVoucherTypes": true, "llmAnalysis": false
+        }))
+        .unwrap();
+        let result = export_kanzhang_disk(&job, &|_, _, _, _| {}, &AtomicBool::new(false))
+            .expect("批量聚合后应正常生成套表");
+        assert_eq!(result["partial"], false);
+        assert_eq!(result["batches"][0]["suiteGenerated"], true);
+        let mut workbook = open_workbook_auto(root.join("result_套表.xlsx")).unwrap();
+        let summary = workbook.worksheet_range("科目汇总").unwrap();
+        let rows = summary
+            .rows()
+            .skip(1)
+            .map(|row| row.iter().map(ToString::to_string).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        assert!(rows.iter().any(|row| row == &["收入", "150", "2"]));
+        assert!(rows.iter().any(|row| row == &["银行", "-100", "1"]));
+        assert!(rows.iter().any(|row| row == &["现金", "-50", "1"]));
+        assert!(workbook.worksheet_range("凭证类型-严格").is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn je_mark_disk_path_streams_the_same_match_columns() {
         let root = temp_dir("je-mark-disk");
         let input = root.join("ledger.csv");

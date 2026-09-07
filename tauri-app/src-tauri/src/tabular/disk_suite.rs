@@ -10,6 +10,8 @@ pub(super) struct DiskSuiteResult {
     pub summary: PivotResult,
     pub loss_count: usize,
     pub voucher_count: usize,
+    pub overflow_paths: Vec<PathBuf>,
+    pub warnings: Vec<String>,
 }
 
 #[cfg(test)]
@@ -235,6 +237,34 @@ mod tests {
                     .any(|row| row[3] == "对方X" && row[4..] == ["-120", "-100", "-20"])
             );
         }
+        let root =
+            std::env::temp_dir().join(format!("audit-toolbox-type-csv-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("严格.csv");
+        write_type_output_csv(
+            &db,
+            "凭证类型-严格",
+            &path,
+            "凭证号",
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let mut reader = csv::Reader::from_path(&path).unwrap();
+        let header = reader.headers().unwrap().clone();
+        assert_eq!(
+            header.iter().take(4).collect::<Vec<_>>(),
+            ["科目名称-类型", "凭证号", "摘要", "科目名称"]
+        );
+        assert_eq!(header.get(header.len() - 2), Some("2026-01"));
+        assert_eq!(header.get(header.len() - 1), Some("2026-02"));
+        assert_eq!(reader.records().count(), 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn type_sheet_switches_to_csv_only_after_excel_data_row_limit() {
+        assert!(!type_sheet_requires_csv(EXCEL_DATA_ROW_LIMIT));
+        assert!(type_sheet_requires_csv(EXCEL_DATA_ROW_LIMIT + 1));
     }
 }
 
@@ -910,7 +940,7 @@ fn type_rows(
     progress: Progress<'_>,
     stage_start: usize,
     cancel: &AtomicBool,
-) -> Result<(), AppError> {
+) -> Result<usize, AppError> {
     let label = if strict { "严格" } else { "宽松" };
     progress(
         "classify",
@@ -1091,6 +1121,7 @@ fn type_rows(
     let mut current_key = None::<(i64, String)>;
     let mut current = None::<(String, String, String, String, f64)>;
     let mut month_values = vec![0.0_f64; months.len()];
+    let mut written = 0usize;
     let mut flush = |record: Option<(String, String, String, String, f64)>,
                      values: &mut Vec<f64>|
      -> Result<(), AppError> {
@@ -1120,6 +1151,7 @@ fn type_rows(
                         encode(&output)?
                     ])
                     .map_err(db_error)?;
+                written += 1;
             }
         }
         values.fill(0.0);
@@ -1167,7 +1199,7 @@ fn type_rows(
         6,
         &format!("{label}凭证类型已生成。"),
     );
-    Ok(())
+    Ok(written)
 }
 
 fn write_row(
@@ -1240,23 +1272,300 @@ fn output_rows(
     Ok(())
 }
 
-fn ensure_suite_sheet_row_limit(db: &Connection, sheet_name: &str) -> Result<(), AppError> {
-    let rows = db
-        .query_row(
-            "SELECT COUNT(*) FROM suite_output WHERE sheet=?1",
-            [sheet_name],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(db_error)?;
-    // One Excel row is reserved for the header.
-    if rows > 1_048_575 {
-        return Err(error(
-            "KANZHANG_EXCEL_ROW_LIMIT",
-            format!(
-                "套表工作表「{sheet_name}」共有 {rows} 行数据，超过 Excel 的 1,048,575 行数据上限。凭证明细 CSV 已保留。"
-            ),
-            None,
-        ));
+const EXCEL_DATA_ROW_LIMIT: usize = 1_048_575;
+
+fn type_sheet_requires_csv(row_count: usize) -> bool {
+    row_count > EXCEL_DATA_ROW_LIMIT
+}
+
+fn overflow_csv_path(suite_path: &Path, sheet_name: &str) -> PathBuf {
+    let parent = suite_path.parent().unwrap_or(Path::new("."));
+    let stem = suite_path.file_stem().unwrap_or_default().to_string_lossy();
+    parent.join(format!("{stem}_{}.csv", sanitize_filename(sheet_name)))
+}
+
+fn write_type_output_csv(
+    db: &Connection,
+    sheet_name: &str,
+    path: &Path,
+    voucher_header: &str,
+    cancel: &AtomicBool,
+) -> Result<(), AppError> {
+    let partial = partial_path(path);
+    let file = File::create(&partial).map_err(io_error)?;
+    let mut writer = csv::WriterBuilder::new().flexible(true).from_writer(file);
+    let months = {
+        let mut statement = db
+            .prepare("SELECT DISTINCT month FROM suite_month ORDER BY month")
+            .map_err(db_error)?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?
+    };
+    let mut header = vec![
+        "科目名称-类型".to_owned(),
+        voucher_header.to_owned(),
+        "摘要".to_owned(),
+        "科目名称".to_owned(),
+        NET_VALUE_FIELD.to_owned(),
+    ];
+    header.extend(months);
+    writer.write_record(&header).map_err(csv_error)?;
+    let result = (|| {
+        let mut statement = db
+            .prepare(
+                "SELECT rowdata FROM suite_output WHERE sheet=?1
+             ORDER BY sort_head DESC,sort_rank DESC,sort_label,sort_account,seq",
+            )
+            .map_err(db_error)?;
+        let mut rows = statement.query([sheet_name]).map_err(db_error)?;
+        let mut scanned = 0usize;
+        while let Some(row) = rows.next().map_err(db_error)? {
+            if scanned % 2_000 == 0 {
+                check_cancel(cancel)?;
+            }
+            let values: Vec<String> =
+                serde_json::from_str(&row.get::<_, String>(0).map_err(db_error)?)
+                    .map_err(json_error)?;
+            writer.write_record(values).map_err(csv_error)?;
+            scanned += 1;
+        }
+        writer.flush().map_err(io_error)
+    })();
+    if let Err(failure) = result {
+        drop(writer);
+        let _ = fs::remove_file(&partial);
+        return Err(failure);
+    }
+    drop(writer);
+    if let Err(failure) = replace_file(&partial, path) {
+        let _ = fs::remove_file(&partial);
+        return Err(failure);
+    }
+    Ok(())
+}
+
+fn export_type_overflow_if_needed(
+    db: &Connection,
+    suite_path: &Path,
+    sheet_name: &str,
+    row_count: usize,
+    voucher_header: &str,
+    overflow_paths: &mut Vec<PathBuf>,
+    warnings: &mut Vec<String>,
+    progress: Progress<'_>,
+    classify_stage: usize,
+    cancel: &AtomicBool,
+) -> Result<bool, AppError> {
+    if !type_sheet_requires_csv(row_count) {
+        return Ok(false);
+    }
+    db.execute_batch(
+        "CREATE INDEX IF NOT EXISTS suite_output_order ON suite_output(
+            sheet,sort_head DESC,sort_rank DESC,sort_label,sort_account,seq
+        );",
+    )
+    .map_err(db_error)?;
+    let csv_path = overflow_csv_path(suite_path, sheet_name);
+    progress(
+        "classify",
+        classify_stage,
+        6,
+        &format!("{sheet_name}预计 {row_count} 行，超过 Excel 上限，正在直接导出 CSV…"),
+    );
+    write_type_output_csv(db, sheet_name, &csv_path, voucher_header, cancel)?;
+    overflow_paths.push(csv_path.clone());
+    warnings.push(format!(
+        "套表工作表「{sheet_name}」共有 {row_count} 行数据，已自动改为 CSV：{}",
+        csv_path.to_string_lossy()
+    ));
+    Ok(true)
+}
+
+fn write_voucher_output_csv(
+    db: &Connection,
+    path: &Path,
+    key_header: &str,
+    directions: &[String],
+    cancel: &AtomicBool,
+) -> Result<(), AppError> {
+    let partial = partial_path(path);
+    let file = File::create(&partial).map_err(io_error)?;
+    let mut writer = csv::WriterBuilder::new().flexible(true).from_writer(file);
+    let mut header = vec![key_header.to_owned(), "科目名称".to_owned()];
+    if directions.is_empty() {
+        header.push(NET_VALUE_FIELD.to_owned());
+    } else {
+        header.extend(directions.iter().cloned());
+    }
+    writer.write_record(header).map_err(csv_error)?;
+    let result = (|| {
+        let mut scanned = 0usize;
+        if directions.is_empty() {
+            let mut statement = db
+                .prepare(
+                    "SELECT id,account,SUM(net) FROM suite_pivot
+                     GROUP BY id,account ORDER BY id,account",
+                )
+                .map_err(db_error)?;
+            let mut rows = statement.query([]).map_err(db_error)?;
+            while let Some(row) = rows.next().map_err(db_error)? {
+                if scanned % 2_000 == 0 {
+                    check_cancel(cancel)?;
+                }
+                writer
+                    .write_record([
+                        display_voucher_key(&row.get::<_, String>(0).map_err(db_error)?),
+                        row.get::<_, String>(1).map_err(db_error)?,
+                        format_number(round_to_cent(row.get::<_, f64>(2).map_err(db_error)?)),
+                    ])
+                    .map_err(csv_error)?;
+                scanned += 1;
+            }
+        } else {
+            let direction_indexes = directions
+                .iter()
+                .enumerate()
+                .map(|(index, value)| (value.as_str(), index))
+                .collect::<HashMap<_, _>>();
+            let mut statement = db
+                .prepare(
+                    "SELECT id,account,direction,net FROM suite_pivot
+                 WHERE direction<>'' ORDER BY id,account,direction",
+                )
+                .map_err(db_error)?;
+            let mut rows = statement.query([]).map_err(db_error)?;
+            let mut current = None::<(String, String)>;
+            let mut amounts = vec![0.0_f64; directions.len()];
+            let mut flush =
+                |record: Option<(String, String)>, values: &mut Vec<f64>| -> Result<(), AppError> {
+                    if let Some((id, account)) = record {
+                        let mut output = vec![display_voucher_key(&id), account];
+                        output.extend(
+                            values
+                                .iter()
+                                .map(|value| format_number(round_to_cent(*value))),
+                        );
+                        writer.write_record(output).map_err(csv_error)?;
+                    }
+                    values.fill(0.0);
+                    Ok(())
+                };
+            while let Some(row) = rows.next().map_err(db_error)? {
+                if scanned % 2_000 == 0 {
+                    check_cancel(cancel)?;
+                }
+                scanned += 1;
+                let next = (
+                    row.get::<_, String>(0).map_err(db_error)?,
+                    row.get::<_, String>(1).map_err(db_error)?,
+                );
+                if current.as_ref().is_some_and(|value| value != &next) {
+                    flush(current.take(), &mut amounts)?;
+                }
+                current = Some(next);
+                let direction: String = row.get(2).map_err(db_error)?;
+                if let Some(position) = direction_indexes.get(direction.as_str()) {
+                    amounts[*position] = row.get(3).map_err(db_error)?;
+                }
+            }
+            flush(current.take(), &mut amounts)?;
+        }
+        writer.flush().map_err(io_error)
+    })();
+    if let Err(failure) = result {
+        drop(writer);
+        let _ = fs::remove_file(&partial);
+        return Err(failure);
+    }
+    drop(writer);
+    if let Err(failure) = replace_file(&partial, path) {
+        let _ = fs::remove_file(&partial);
+        return Err(failure);
+    }
+    Ok(())
+}
+
+fn write_custom_output_csv(
+    db: &Connection,
+    path: &Path,
+    config: &PivotConfig,
+    columns: &[String],
+    cancel: &AtomicBool,
+) -> Result<(), AppError> {
+    let partial = partial_path(path);
+    let file = File::create(&partial).map_err(io_error)?;
+    let mut writer = csv::WriterBuilder::new().flexible(true).from_writer(file);
+    let mut header = config
+        .rows
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    if !config.columns.is_empty() {
+        header.push("合计".to_owned());
+    }
+    header.extend(columns.iter().cloned());
+    writer.write_record(header).map_err(csv_error)?;
+    let result = (|| {
+        let column_indexes = columns
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (value.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        let mut statement = db
+            .prepare("SELECT rowkey,col,net FROM suite_custom ORDER BY rowkey,col")
+            .map_err(db_error)?;
+        let mut rows = statement.query([]).map_err(db_error)?;
+        let mut current = None::<String>;
+        let mut amounts = vec![0.0_f64; columns.len()];
+        let mut total = 0.0_f64;
+        let mut flush =
+            |key: Option<String>, values: &mut Vec<f64>, sum: &mut f64| -> Result<(), AppError> {
+                if let Some(key) = key {
+                    let mut output: Vec<String> = serde_json::from_str(&key).map_err(json_error)?;
+                    if !config.columns.is_empty() {
+                        output.push(format_number(*sum));
+                    }
+                    output.extend(values.iter().map(|value| format_number(*value)));
+                    writer.write_record(output).map_err(csv_error)?;
+                }
+                values.fill(0.0);
+                *sum = 0.0;
+                Ok(())
+            };
+        let mut visited = 0usize;
+        while let Some(row) = rows.next().map_err(db_error)? {
+            if visited % 2_000 == 0 {
+                check_cancel(cancel)?;
+            }
+            visited += 1;
+            let key: String = row.get(0).map_err(db_error)?;
+            if current.as_ref().is_some_and(|value| value != &key) {
+                flush(current.take(), &mut amounts, &mut total)?;
+            }
+            current = Some(key);
+            let column: String = row.get(1).map_err(db_error)?;
+            let amount: f64 = row.get(2).map_err(db_error)?;
+            total += amount;
+            if let Some(position) = column_indexes.get(column.as_str()) {
+                amounts[*position] = amount;
+            }
+        }
+        flush(current.take(), &mut amounts, &mut total)?;
+        drop(flush);
+        writer.flush().map_err(io_error)
+    })();
+    if let Err(failure) = result {
+        drop(writer);
+        let _ = fs::remove_file(&partial);
+        return Err(failure);
+    }
+    drop(writer);
+    if let Err(failure) = replace_file(&partial, path) {
+        let _ = fs::remove_file(&partial);
+        return Err(failure);
     }
     Ok(())
 }
@@ -1276,9 +1585,16 @@ pub(super) fn write_suite(
 ) -> Result<DiskSuiteResult, AppError> {
     initialize(&ledger.db)?;
     let config = aggregate(ledger, mapping, targets, job, budget, progress, cancel)?;
+    let mut overflow_paths = Vec::new();
+    let mut warnings = Vec::new();
+    let mut overflow_type_sheets = HashSet::<String>::new();
     if job.include_voucher_types {
         progress("classify", 0, 6, "正在按原有宽松和严格口径归类凭证…");
-        type_rows(
+        let voucher_header = voucher_key_label(
+            &ledger.table.headers,
+            &ledger_id_indexes(&ledger.table.headers, mapping),
+        );
+        let loose_rows = type_rows(
             &ledger.db,
             "凭证类型-宽松",
             false,
@@ -1287,8 +1603,21 @@ pub(super) fn write_suite(
             0,
             cancel,
         )?;
-        ensure_suite_sheet_row_limit(&ledger.db, "凭证类型-宽松")?;
-        type_rows(
+        if export_type_overflow_if_needed(
+            &ledger.db,
+            path,
+            "凭证类型-宽松",
+            loose_rows,
+            &voucher_header,
+            &mut overflow_paths,
+            &mut warnings,
+            progress,
+            3,
+            cancel,
+        )? {
+            overflow_type_sheets.insert("凭证类型-宽松".to_owned());
+        }
+        let strict_rows = type_rows(
             &ledger.db,
             "凭证类型-严格",
             true,
@@ -1297,8 +1626,21 @@ pub(super) fn write_suite(
             3,
             cancel,
         )?;
-        ensure_suite_sheet_row_limit(&ledger.db, "凭证类型-严格")?;
         ledger.db.execute_batch("CREATE INDEX IF NOT EXISTS suite_output_order ON suite_output(sheet,sort_head DESC,sort_rank DESC,sort_label,sort_account,seq);").map_err(db_error)?;
+        if export_type_overflow_if_needed(
+            &ledger.db,
+            path,
+            "凭证类型-严格",
+            strict_rows,
+            &voucher_header,
+            &mut overflow_paths,
+            &mut warnings,
+            progress,
+            6,
+            cancel,
+        )? {
+            overflow_type_sheets.insert("凭证类型-严格".to_owned());
+        }
         progress("classify", 6, 6, "宽松和严格凭证类型已生成。");
     }
     let loss_count = ledger
@@ -1368,28 +1710,80 @@ pub(super) fn write_suite(
     } else {
         None
     };
-    progress("write", 0, 7, "正在生成看账套表工作表…");
-    let mut workbook = Workbook::new();
-    if job.include_pivot {
-        let ws = workbook.add_worksheet_with_constant_memory();
-        ws.set_name("凭证").map_err(xlsx_error)?;
-        let has_direction: bool = ledger
+    let has_direction = if job.include_pivot {
+        ledger
             .db
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM suite_pivot WHERE direction<>'')",
                 [],
-                |r| r.get(0),
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(db_error)?
+    } else {
+        false
+    };
+    let directions = if has_direction {
+        let mut statement = ledger
+            .db
+            .prepare(
+                "SELECT DISTINCT direction FROM suite_pivot
+                 WHERE direction<>'' ORDER BY direction",
             )
             .map_err(db_error)?;
-        let directions = if has_direction {
-            let mut s=ledger.db.prepare("SELECT DISTINCT direction FROM suite_pivot WHERE direction<>'' ORDER BY direction").map_err(db_error)?;
-            s.query_map([], |r| r.get::<_, String>(0))
-                .map_err(db_error)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(db_error)?
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?
+    } else {
+        Vec::new()
+    };
+    let voucher_row_count = if job.include_pivot {
+        let where_clause = if has_direction {
+            "WHERE direction<>''"
         } else {
-            Vec::new()
+            ""
         };
+        ledger
+            .db
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM (
+                        SELECT 1 FROM suite_pivot {where_clause} GROUP BY id,account
+                    )"
+                ),
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(db_error)? as usize
+    } else {
+        0
+    };
+    let voucher_overflow = type_sheet_requires_csv(voucher_row_count);
+    if voucher_overflow {
+        let csv_path = overflow_csv_path(path, "凭证");
+        progress(
+            "write",
+            0,
+            7,
+            &format!("凭证透视预计 {voucher_row_count} 行，超过 Excel 上限，正在直接导出 CSV…"),
+        );
+        let key_header = voucher_key_label(
+            &ledger.table.headers,
+            &ledger_id_indexes(&ledger.table.headers, mapping),
+        );
+        write_voucher_output_csv(&ledger.db, &csv_path, &key_header, &directions, cancel)?;
+        overflow_paths.push(csv_path.clone());
+        warnings.push(format!(
+            "套表工作表「凭证」共有 {voucher_row_count} 行数据，已自动改为 CSV：{}",
+            csv_path.to_string_lossy()
+        ));
+    }
+    progress("write", 0, 7, "正在生成看账套表工作表…");
+    let mut workbook = Workbook::new();
+    if job.include_pivot && !voucher_overflow {
+        let ws = workbook.add_worksheet_with_constant_memory();
+        ws.set_name("凭证").map_err(xlsx_error)?;
         let key = voucher_key_label(
             &ledger.table.headers,
             &ledger_id_indexes(&ledger.table.headers, mapping),
@@ -1474,7 +1868,16 @@ pub(super) fn write_suite(
         }
         ws.set_hidden(true);
     }
-    progress("write", 1, 7, "凭证透视表已生成。");
+    progress(
+        "write",
+        1,
+        7,
+        if voucher_overflow {
+            "凭证透视超过 Excel 行数上限，已改为 CSV。"
+        } else {
+            "凭证透视表已生成。"
+        },
+    );
     if job.include_voucher_types {
         let months = {
             let mut s = ledger
@@ -1488,6 +1891,15 @@ pub(super) fn write_suite(
         };
         for (type_index, name) in ["凭证类型-宽松", "凭证类型-严格"].into_iter().enumerate()
         {
+            if overflow_type_sheets.contains(name) {
+                progress(
+                    "write",
+                    type_index + 2,
+                    7,
+                    &format!("{name}超过 Excel 行数上限，已改为 CSV。"),
+                );
+                continue;
+            }
             let ws = workbook.add_worksheet_with_constant_memory();
             ws.set_name(name).map_err(xlsx_error)?;
             let mut h = vec![
@@ -1521,64 +1933,88 @@ pub(super) fn write_suite(
             guard(values.iter().map(|s| s.len() + 96).sum(), budget / 4)?;
             values
         };
-        let ws = workbook.add_worksheet_with_constant_memory();
-        ws.set_name("透视分析").map_err(xlsx_error)?;
-        let mut h = config
-            .rows
-            .iter()
-            .map(|(s, _)| s.clone())
-            .collect::<Vec<_>>();
-        if !config.columns.is_empty() {
-            h.push("合计".into());
-        }
-        h.extend(columns.clone());
-        headers(ws, &h)?;
-        let column_indexes = columns
-            .iter()
-            .enumerate()
-            .map(|(index, value)| (value.as_str(), index))
-            .collect::<HashMap<_, _>>();
-        let mut stmt = ledger
+        let custom_row_count = ledger
             .db
-            .prepare("SELECT rowkey,col,net FROM suite_custom ORDER BY rowkey,col")
-            .map_err(db_error)?;
-        let mut rows = stmt.query([]).map_err(db_error)?;
-        let mut index = 1u32;
-        let mut current = None::<String>;
-        let mut amounts = vec![0.0_f64; columns.len()];
-        let mut total = 0.0_f64;
-        while let Some(row) = rows.next().map_err(db_error)? {
-            let key: String = row.get(0).map_err(db_error)?;
-            if current.as_ref().is_some_and(|value| value != &key) {
-                let mut values: Vec<String> =
-                    serde_json::from_str(current.as_deref().unwrap()).map_err(json_error)?;
+            .query_row(
+                "SELECT COUNT(DISTINCT rowkey) FROM suite_custom",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(db_error)? as usize;
+        if type_sheet_requires_csv(custom_row_count) {
+            let csv_path = overflow_csv_path(path, "透视分析");
+            progress(
+                "write",
+                3,
+                7,
+                &format!("透视分析预计 {custom_row_count} 行，超过 Excel 上限，正在直接导出 CSV…"),
+            );
+            write_custom_output_csv(&ledger.db, &csv_path, &config, &columns, cancel)?;
+            overflow_paths.push(csv_path.clone());
+            warnings.push(format!(
+                "套表工作表「透视分析」共有 {custom_row_count} 行数据，已自动改为 CSV：{}",
+                csv_path.to_string_lossy()
+            ));
+        } else {
+            let ws = workbook.add_worksheet_with_constant_memory();
+            ws.set_name("透视分析").map_err(xlsx_error)?;
+            let mut h = config
+                .rows
+                .iter()
+                .map(|(s, _)| s.clone())
+                .collect::<Vec<_>>();
+            if !config.columns.is_empty() {
+                h.push("合计".into());
+            }
+            h.extend(columns.clone());
+            headers(ws, &h)?;
+            let column_indexes = columns
+                .iter()
+                .enumerate()
+                .map(|(index, value)| (value.as_str(), index))
+                .collect::<HashMap<_, _>>();
+            let mut stmt = ledger
+                .db
+                .prepare("SELECT rowkey,col,net FROM suite_custom ORDER BY rowkey,col")
+                .map_err(db_error)?;
+            let mut rows = stmt.query([]).map_err(db_error)?;
+            let mut index = 1u32;
+            let mut current = None::<String>;
+            let mut amounts = vec![0.0_f64; columns.len()];
+            let mut total = 0.0_f64;
+            while let Some(row) = rows.next().map_err(db_error)? {
+                let key: String = row.get(0).map_err(db_error)?;
+                if current.as_ref().is_some_and(|value| value != &key) {
+                    let mut values: Vec<String> =
+                        serde_json::from_str(current.as_deref().unwrap()).map_err(json_error)?;
+                    if !config.columns.is_empty() {
+                        values.push(format_number(total));
+                    }
+                    values.extend(amounts.iter().map(|value| format_number(*value)));
+                    write_row(ws, index, &values, config.rows.len())?;
+                    index += 1;
+                    amounts.fill(0.0);
+                    total = 0.0;
+                    if index % 2000 == 0 {
+                        check_cancel(cancel)?;
+                    }
+                }
+                current = Some(key);
+                let column: String = row.get(1).map_err(db_error)?;
+                let amount: f64 = row.get(2).map_err(db_error)?;
+                total += amount;
+                if let Some(position) = column_indexes.get(column.as_str()) {
+                    amounts[*position] = amount;
+                }
+            }
+            if let Some(key) = current {
+                let mut values: Vec<String> = serde_json::from_str(&key).map_err(json_error)?;
                 if !config.columns.is_empty() {
                     values.push(format_number(total));
                 }
                 values.extend(amounts.iter().map(|value| format_number(*value)));
                 write_row(ws, index, &values, config.rows.len())?;
-                index += 1;
-                amounts.fill(0.0);
-                total = 0.0;
-                if index % 2000 == 0 {
-                    check_cancel(cancel)?;
-                }
             }
-            current = Some(key);
-            let column: String = row.get(1).map_err(db_error)?;
-            let amount: f64 = row.get(2).map_err(db_error)?;
-            total += amount;
-            if let Some(position) = column_indexes.get(column.as_str()) {
-                amounts[*position] = amount;
-            }
-        }
-        if let Some(key) = current {
-            let mut values: Vec<String> = serde_json::from_str(&key).map_err(json_error)?;
-            if !config.columns.is_empty() {
-                values.push(format_number(total));
-            }
-            values.extend(amounts.iter().map(|value| format_number(*value)));
-            write_row(ws, index, &values, config.rows.len())?;
         }
     }
     progress("write", 4, 7, "自定义透视工作表已生成。");
@@ -1639,5 +2075,7 @@ pub(super) fn write_suite(
         summary,
         loss_count,
         voucher_count,
+        overflow_paths,
+        warnings,
     })
 }

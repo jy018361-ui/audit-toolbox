@@ -1216,6 +1216,13 @@ fn export_kanzhang_disk(
             ) {
                 Ok(value) => {
                     outputs.push(suite_path.to_string_lossy().into_owned());
+                    outputs.extend(
+                        value
+                            .overflow_paths
+                            .iter()
+                            .map(|path| path.to_string_lossy().into_owned()),
+                    );
+                    warnings.extend(value.warnings.iter().cloned());
                     Some(value)
                 }
                 Err(err) if err.code == "JOB_CANCELLED" => return Err(err),

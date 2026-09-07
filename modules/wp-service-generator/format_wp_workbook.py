@@ -219,12 +219,12 @@ def style_service_sheet(ws):
     widths = {
         "A": 13,
         "B": 36,
-        "C": 15,
-        "D": 15,
-        "E": 17,
+        "C": 20,
+        "D": 13,
+        "E": 13,
         "F": 15,
-        "G": 16,
-        "H": 18,
+        "G": 17,
+        "H": 15,
         "I": 14,
     }
     for letter, width in widths.items():
@@ -233,21 +233,33 @@ def style_service_sheet(ws):
     ws.sheet_properties.tabColor = TEAL
     ws.freeze_panes = "A5"
 
-    ws.row_dimensions[1].height = 30
+    ws.row_dimensions[1].height = 36
     ws.row_dimensions[2].height = 42
     style_header_row(ws, 1, 1, 8, NAVY)
     for col in range(1, 9):
         set_cell_style(ws.cell(2, col), fill=WHITE, size=10, bold=col in (2, 3, 4))
-    for row in (1, 2):
-        for col in range(5, 9):
-            set_cell_style(
-                ws.cell(row, col),
-                fill=WHITE,
-                size=10,
-                border=Border(),
-            )
-    ws["C2"].number_format = "#,##0.00"
-    ws["D2"].number_format = "#,##0.00"
+    for col in range(5, 9):
+        set_cell_style(
+            ws.cell(1, col),
+            fill=NAVY,
+            font_color=WHITE,
+            size=9,
+            bold=True,
+            horizontal="center",
+        )
+    for col in range(3, 9):
+        ws.cell(1, col).alignment = Alignment(
+            horizontal="center", vertical="center", wrap_text=True
+        )
+        set_cell_style(
+            ws.cell(2, col),
+            fill=WHITE,
+            size=10,
+            bold=True,
+            horizontal="center",
+        )
+    for ref in ("C2", "D2", "E2", "F2", "G2", "H2"):
+        ws[ref].number_format = "#,##0.00"
     if ws["I1"].value:
         set_cell_style(ws["I1"], fill=TEAL, font_color=WHITE, bold=True, horizontal="center")
         ws["I1"].font = Font(name=FONT_NAME, size=10, bold=True, color=WHITE, underline="single")
@@ -434,14 +446,14 @@ def create_index_sheet(wb, service_sheets):
     ws.sheet_view.showGridLines = False
     ws.sheet_view.zoomScale = 90
 
-    ws.merge_cells("A1:K1")
+    ws.merge_cells("A1:M1")
     ws["A1"] = "FY27 WP 服务方案清单"
     ws["A1"].fill = solid(NAVY)
     ws["A1"].font = Font(name=FONT_NAME, size=20, bold=True, color=WHITE)
     ws["A1"].alignment = Alignment(horizontal="left", vertical="center")
     ws.row_dimensions[1].height = 46
 
-    ws.merge_cells("A2:K2")
+    ws.merge_cells("A2:M2")
     ws["A2"] = "项目组展示版 · 服务单、相关订单、Section 与 SER 测算集中查看"
     ws["A2"].fill = solid(NAVY)
     ws["A2"].font = Font(name=FONT_NAME, size=10, color="DDE8F0")
@@ -490,11 +502,12 @@ def create_index_sheet(wb, service_sheets):
 
     headers = [
         "序号", "来源", "项目名称", "WP服务单编号", "相关订单", "WP FIC",
-        "预算Outlook Hours", "源表Outlook Hours", "差异", "核对结果", "查看服务方案",
+        "CI Hours", "AI Hours", "预算Outlook Hours", "源表Outlook Hours",
+        "差异", "核对结果", "查看服务方案",
     ]
     for col, header in enumerate(headers, 1):
         ws.cell(7, col).value = header
-    style_header_row(ws, 7, 1, 11, TEAL)
+    style_header_row(ws, 7, 1, 13, TEAL)
     ws.row_dimensions[7].height = 32
 
     for index, service_ws in enumerate(service_sheets, 1):
@@ -508,7 +521,7 @@ def create_index_sheet(wb, service_sheets):
         has_section_data = any(
             service_ws.cell(section_row, col).value not in (None, "")
             for section_row in range(5, 37)
-            for col in (3, 6)
+            for col in (3, 4, 6, 7)
         )
         values = [
             index,
@@ -517,43 +530,45 @@ def create_index_sheet(wb, service_sheets):
             service_number,
             service_ws["A2"].value,
             source_info.get("wp_fic", ""),
-            f"='{safe_sheet}'!C2",
+            service_ws["D2"].value,
+            service_ws["E2"].value,
+            f"='{safe_sheet}'!G2",
             source_info.get("outlook_hours", ""),
         ]
         for col, value in enumerate(values, 1):
             ws.cell(row, col).value = value
         if has_section_data:
-            ws.cell(row, 9).value = f'=IF(OR(G{row}="",H{row}=""),"",G{row}-H{row})'
-            ws.cell(row, 10).value = f'=IF(I{row}="","",IF(ABS(I{row})<=0.01,"一致","不一致"))'
+            ws.cell(row, 11).value = f'=IF(OR(I{row}="",J{row}=""),"",I{row}-J{row})'
+            ws.cell(row, 12).value = f'=IF(K{row}="","",IF(ABS(K{row})<=0.01,"一致","不一致"))'
         else:
-            ws.cell(row, 9).value = None
-            ws.cell(row, 10).value = "待补充Section"
+            ws.cell(row, 11).value = None
+            ws.cell(row, 12).value = "待补充Section"
         set_internal_hyperlink(
-            ws.cell(row, 11), service_ws.title, "A1", "打开"
+            ws.cell(row, 13), service_ws.title, "A1", "打开"
         )
 
         row_fill = WHITE if row % 2 == 0 else LIGHT
-        for col in range(1, 12):
+        for col in range(1, 14):
             set_cell_style(ws.cell(row, col), fill=row_fill, size=9)
         ws.cell(row, 1).alignment = Alignment(horizontal="center", vertical="center")
         ws.cell(row, 2).alignment = Alignment(horizontal="center", vertical="center")
-        for col in (7, 8, 9):
+        for col in (7, 8, 9, 10, 11):
             ws.cell(row, col).number_format = "#,##0.00"
-        ws.cell(row, 10).alignment = Alignment(horizontal="center", vertical="center")
-        ws.cell(row, 11).fill = solid(PALE_TEAL)
-        ws.cell(row, 11).alignment = Alignment(horizontal="center", vertical="center")
-        ws.cell(row, 11).font = Font(name=FONT_NAME, size=9, bold=True, color=TEAL, underline="single")
+        ws.cell(row, 12).alignment = Alignment(horizontal="center", vertical="center")
+        ws.cell(row, 13).fill = solid(PALE_TEAL)
+        ws.cell(row, 13).alignment = Alignment(horizontal="center", vertical="center")
+        ws.cell(row, 13).font = Font(name=FONT_NAME, size=9, bold=True, color=TEAL, underline="single")
         ws.row_dimensions[row].height = 28
 
     widths = {
         "A": 8, "B": 10, "C": 38, "D": 27, "E": 28, "F": 24,
-        "G": 19, "H": 19, "I": 14, "J": 16, "K": 16,
+        "G": 13, "H": 13, "I": 19, "J": 19, "K": 14, "L": 16, "M": 16,
     }
     for letter, width in widths.items():
         ws.column_dimensions[letter].width = width
     ws.freeze_panes = "A8"
-    ws.auto_filter.ref = f"A7:K{7 + len(service_sheets)}"
-    apply_page_setup(ws, f"A1:K{7 + len(service_sheets)}", "7:7")
+    ws.auto_filter.ref = f"A7:M{7 + len(service_sheets)}"
+    apply_page_setup(ws, f"A1:M{7 + len(service_sheets)}", "7:7")
 
 
 def format_workbook(input_path: Path, output_path: Path):

@@ -7,10 +7,16 @@ from openpyxl import Workbook
 import format_wp_workbook as formatter
 from generate_wp_project_workbook import (
     DEFAULT_SER_CONFIG,
+    apply_order_adjustments,
     collect_service_orders,
     fill_service_sheet,
     find_section_list_file,
     find_service_order_file,
+    find_my_orders_file,
+    load_order_adjustments,
+    map_sections_to_template,
+    normalize_order_number,
+    normalize_section_name,
     prepare_template,
 )
 
@@ -58,6 +64,31 @@ def add_source_sheet(workbook, title):
 
 
 class HeaderBasedSourceReadingTests(unittest.TestCase):
+    def test_unmatched_sections_are_merged_into_others(self):
+        mapped = map_sections_to_template(
+            {
+                normalize_section_name("Others"): {
+                    "entity": None,
+                    "drafts": 1,
+                    "budget": None,
+                    "outlook": None,
+                },
+                normalize_section_name("底稿迁移服务"): {
+                    "entity": 8,
+                    "drafts": 8,
+                    "budget": 12,
+                    "outlook": 36,
+                },
+            },
+            {normalize_section_name("Others"), normalize_section_name("FSO Pilot")},
+        )
+
+        others = mapped[normalize_section_name("Others")]
+        self.assertEqual(others["entity"], 8)
+        self.assertEqual(others["drafts"], 9)
+        self.assertEqual(others["budget"], 12)
+        self.assertEqual(others["outlook"], 36)
+
     def test_reference_hour_overrides_are_applied(self):
         workbook = Workbook()
         template = workbook.active
@@ -86,9 +117,11 @@ class HeaderBasedSourceReadingTests(unittest.TestCase):
         folder = Path("test-inputs")
         service_order = folder / "8月导出的 WP 服务单 v2.xlsx"
         section_list = folder / "Client Section LIST final.xlsx"
+        my_orders = folder / "FY26 我的订单.xlsx"
         files = [
             service_order,
             section_list,
+            my_orders,
             folder / "FY27+WP服务单汇总.xlsx",
             folder / "~$临时 WP服务单.xlsx",
         ]
@@ -100,6 +133,38 @@ class HeaderBasedSourceReadingTests(unittest.TestCase):
             Path, "is_file", return_value=True
         ):
             self.assertEqual(find_section_list_file(folder), section_list)
+        with patch.object(Path, "iterdir", return_value=iter(files)), patch.object(
+            Path, "is_file", return_value=True
+        ):
+            self.assertEqual(find_my_orders_file(folder), my_orders)
+
+    def test_my_orders_are_read_by_headers_and_mapped_by_order_number(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "业务"
+        sheet.append(["AI Hours", "订单编号", "说明", "CI Hours"])
+        sheet.append([11, "Order47151072- 260902002", "test", 11.6])
+        with patch(
+            "generate_wp_project_workbook.load_workbook",
+            return_value=workbook,
+        ):
+            adjustments = load_order_adjustments(Path("团队 我的订单 final.xlsx"))
+
+        records = [
+            {
+                "related_order": "Order47151072- 260902002",
+                "service_number": "TEST-WP-001",
+                "ci_hours": None,
+                "ai_hours": None,
+                "order_adjustment_found": False,
+            }
+        ]
+        result = apply_order_adjustments(records, adjustments)
+
+        self.assertEqual(result["matched"], 1)
+        self.assertEqual(result["unmatched"], [])
+        self.assertEqual(records[0]["ci_hours"], 11.6)
+        self.assertEqual(records[0]["ai_hours"], 11)
 
     def test_multiple_keyword_matches_are_rejected(self):
         folder = Path("test-inputs")
@@ -135,6 +200,8 @@ class HeaderBasedSourceReadingTests(unittest.TestCase):
         service["A2"] = "TEST-ORDER-001"
         service["B2"] = "TEST-WP-001"
         service["C2"] = 123.45
+        service["D2"] = 11.6
+        service["E2"] = 11
         service["I1"] = '=HYPERLINK("#\'AUD2026\'!A2","返回原表")'
         service["C5"] = 1
 
@@ -142,7 +209,10 @@ class HeaderBasedSourceReadingTests(unittest.TestCase):
 
         index = workbook["服务方案索引"]
         self.assertEqual(index["F8"].value, "fic.user")
-        self.assertEqual(index["H8"].value, 123.45)
+        self.assertEqual(index["G8"].value, 11.6)
+        self.assertEqual(index["H8"].value, 11)
+        self.assertEqual(index["I8"].value, "='AUD2026 Test'!G2")
+        self.assertEqual(index["J8"].value, 123.45)
         self.assertEqual(index["D8"].value, "TEST-WP-001")
 
     def test_service_sheet_shows_ser_roles_and_rate_headers(self):
@@ -161,6 +231,8 @@ class HeaderBasedSourceReadingTests(unittest.TestCase):
             "pre_end": "2026-10-31",
             "final_start": "2027-01-01",
             "final_end": "2027-04-30",
+            "ci_hours": 11.6,
+            "ai_hours": 11,
         }
 
         fill_service_sheet(service, record, {}, DEFAULT_SER_CONFIG)
@@ -185,6 +257,57 @@ class HeaderBasedSourceReadingTests(unittest.TestCase):
         )
         self.assertEqual(service["I1"].value, "返回源表")
         self.assertEqual(service["I1"].hyperlink.target, "#'AUD2026'!A2")
+        self.assertEqual(service["C1"].value, "Section Outlook Hours")
+        self.assertEqual(service["C2"].value, "=SUM(G5:G36)")
+        self.assertEqual(service["D2"].value, 11.6)
+        self.assertEqual(service["E2"].value, 11)
+        self.assertEqual(
+            service["F2"].value,
+            '=ROUND((C2-IF(D2="",0,D2)-IF(E2="",0,E2))*0.1,2)',
+        )
+        self.assertEqual(
+            service["G2"].value,
+            '=ROUND(C2-IF(D2="",0,D2)-IF(E2="",0,E2)+F2,2)',
+        )
+        self.assertEqual(service["H2"].value, "=F62")
+
+    def test_service_sheet_uses_source_outlook_for_flexible_sections(self):
+        workbook = Workbook()
+        service = workbook.active
+        service["B36"] = "Others"
+        record = {
+            "related_order": "TEST-ORDER-001",
+            "service_number": "TEST-WP-001",
+            "source_sheet": "AUD2026",
+            "source_row": 2,
+            "service_type": "Audit/Working paper",
+            "task_count": 1,
+            "audit_eic": "audit.eic",
+            "report_date": "2027-03-31",
+            "pre_start": "2026-10-01",
+            "pre_end": "2026-10-31",
+            "final_start": "2027-01-01",
+            "final_end": "2027-04-30",
+            "ci_hours": None,
+            "ai_hours": None,
+        }
+        section_details = {
+            normalize_order_number("TEST-WP-001"): {
+                normalize_section_name("底稿迁移服务"): {
+                    "entity": 8,
+                    "drafts": 8,
+                    "budget": 12,
+                    "outlook": 36,
+                }
+            }
+        }
+
+        fill_service_sheet(service, record, section_details, DEFAULT_SER_CONFIG)
+
+        self.assertEqual(service["C36"].value, 8)
+        self.assertEqual(service["D36"].value, 8)
+        self.assertEqual(service["F36"].value, 12)
+        self.assertEqual(service["G36"].value, 36)
 
 
 if __name__ == "__main__":

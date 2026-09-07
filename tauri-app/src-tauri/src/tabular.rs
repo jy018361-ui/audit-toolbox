@@ -1095,6 +1095,7 @@ fn export_kanzhang_disk(
     let analysis_budget = (budget.worker_bytes / 4).max(budget.batch_bytes);
     let mut outputs = Vec::new();
     let mut batch_results = Vec::new();
+    let mut warnings = Vec::new();
     for (batch_index, batch) in batches.iter().enumerate() {
         check_cancel(cancel)?;
         let batch_start: usize = 500 + 490 * batch_index / batches.len().max(1);
@@ -1125,57 +1126,17 @@ fn export_kanzhang_disk(
         let suite_path = parent.join(format!("{stem}_套表.xlsx"));
         let suite_enabled =
             job.include_pivot || job.include_voucher_types || !job.pivot_rows.is_empty();
-        let suite = if suite_enabled {
-            let suite_progress = |phase: &str, current: usize, total: usize, message: &str| {
-                let (local_start, local_end) = match phase {
-                    "analyze" => (
-                        batch_start + batch_width * 5 / 100,
-                        batch_start + batch_width * 50 / 100,
-                    ),
-                    "classify" => (
-                        batch_start + batch_width * 50 / 100,
-                        batch_start + batch_width * 65 / 100,
-                    ),
-                    "write" => (
-                        batch_start + batch_width * 65 / 100,
-                        batch_start + batch_width * 80 / 100,
-                    ),
-                    _ => (batch_start, batch_start + batch_width * 80 / 100),
-                };
-                scaled_progress(
-                    progress,
-                    local_start,
-                    local_end,
-                    phase,
-                    current,
-                    total,
-                    message,
-                )
-            };
-            Some(disk_suite::write_suite(
-                &ledger,
-                &mapping,
-                &batch.accounts,
-                job,
-                &suite_path,
-                analysis_budget,
-                &suite_progress,
-                cancel,
-            )?)
-        } else {
-            None
-        };
         progress(
             "write",
-            batch_start + batch_width * 82 / 100,
+            batch_start + batch_width * 5 / 100,
             1000,
-            &format!("正在流式写出批次 {} 明细…", batch_index + 1),
+            &format!("正在优先流式写出批次 {} 明细…", batch_index + 1),
         );
         let detail_progress = |phase: &str, current: usize, total: usize, message: &str| {
             scaled_progress(
                 progress,
-                batch_start + batch_width * 82 / 100,
-                batch_start + batch_width * 96 / 100,
+                batch_start + batch_width * 5 / 100,
+                batch_start + batch_width * 18 / 100,
                 phase,
                 current,
                 total,
@@ -1190,17 +1151,17 @@ fn export_kanzhang_disk(
             &detail_progress,
             cancel,
         )?;
-        progress(
-            "write",
-            batch_start + batch_width * 97 / 100,
-            1000,
-            &format!("正在处理批次 {} 的剔除明细…", batch_index + 1),
-        );
         outputs.extend(
             detail
                 .paths
                 .iter()
                 .map(|p| p.to_string_lossy().into_owned()),
+        );
+        progress(
+            "write",
+            batch_start + batch_width * 19 / 100,
+            1000,
+            &format!("正在处理批次 {} 的剔除明细…", batch_index + 1),
         );
         let excluded = ledger.write_excluded_csv(
             &output,
@@ -1211,14 +1172,81 @@ fn export_kanzhang_disk(
         if let Some(path) = &excluded {
             outputs.push(path.to_string_lossy().into_owned());
         }
-        if suite_enabled {
-            outputs.push(suite_path.to_string_lossy().into_owned());
-        }
+
+        let mut suite_warning = None;
+        let suite = if suite_enabled {
+            let suite_progress = |phase: &str, current: usize, total: usize, message: &str| {
+                let (local_start, local_end) = match phase {
+                    "analyze" => (
+                        batch_start + batch_width * 20 / 100,
+                        batch_start + batch_width * 62 / 100,
+                    ),
+                    "classify" => (
+                        batch_start + batch_width * 62 / 100,
+                        batch_start + batch_width * 80 / 100,
+                    ),
+                    "write" => (
+                        batch_start + batch_width * 80 / 100,
+                        batch_start + batch_width * 97 / 100,
+                    ),
+                    _ => (
+                        batch_start + batch_width * 20 / 100,
+                        batch_start + batch_width * 97 / 100,
+                    ),
+                };
+                scaled_progress(
+                    progress,
+                    local_start,
+                    local_end,
+                    phase,
+                    current,
+                    total,
+                    message,
+                )
+            };
+            match disk_suite::write_suite(
+                &ledger,
+                &mapping,
+                &batch.accounts,
+                job,
+                &suite_path,
+                analysis_budget,
+                &suite_progress,
+                cancel,
+            ) {
+                Ok(value) => {
+                    outputs.push(suite_path.to_string_lossy().into_owned());
+                    Some(value)
+                }
+                Err(err) if err.code == "JOB_CANCELLED" => return Err(err),
+                Err(err) => {
+                    let warning = format!(
+                        "批次「{}」的 Excel 套表未生成：{} 已保留凭证明细 CSV。",
+                        batch.name, err.user_message
+                    );
+                    progress(
+                        "write",
+                        batch_start + batch_width * 97 / 100,
+                        1000,
+                        &warning,
+                    );
+                    warnings.push(warning.clone());
+                    suite_warning = Some(warning);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         progress(
             "write",
             batch_end,
             1000,
-            &format!("批次 {} 已完成。", batch_index + 1),
+            &if suite_warning.is_some() {
+                format!("批次 {} 的 CSV 已完成，Excel 套表未生成。", batch_index + 1)
+            } else {
+                format!("批次 {} 已完成。", batch_index + 1)
+            },
         );
         batch_results.push(
             json!({"name":batch.name,"accounts":batch.accounts,"rows":detail.rows,
@@ -1226,12 +1254,15 @@ fn export_kanzhang_disk(
             "voucherRows":suite.as_ref().map(|v|v.voucher_count).unwrap_or(0),
             "voucherTypesLoose":Value::Null,"voucherTypesStrict":Value::Null,
             "lossTransferVouchers":suite.as_ref().map(|v|v.loss_count).unwrap_or(0),
-            "selectedRows":selected_rows}),
+            "selectedRows":selected_rows,"suiteGenerated":suite.is_some(),
+            "suiteWarning":suite_warning}),
         );
     }
+    let partial = !warnings.is_empty();
     Ok(
         json!({"engine":"rust-polars","outputPaths":outputs,"batchCount":batches.len(),
         "batches":batch_results,"mapping":mapping,"lowMemory":true,
+        "partial":partial,"warnings":warnings,
         "memoryBudget":budget,"timings":{"totalMs":started.elapsed().as_millis()}}),
     )
 }
@@ -9072,6 +9103,50 @@ mod tests {
         assert!(root.join("result_凭证明细_Part1.csv").is_file());
         assert!(root.join("result_凭证明细_Part2.csv").is_file());
         assert!(!root.join("result_凭证明细.csv").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disk_export_keeps_csv_when_suite_save_fails() {
+        let root = temp_dir("kanzhang-suite-partial");
+        let input = root.join("ledger.csv");
+        let output = root.join("result.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,借方金额,贷方金额\n1,收入,100,0\n1,银行,0,100\n",
+        )
+        .unwrap();
+        // 用同名目录稳定制造工作簿保存失败；明细 CSV 所在目录仍然可写。
+        fs::create_dir(root.join("result_套表.xlsx")).unwrap();
+        let job: KanzhangParams = serde_json::from_value(json!({
+            "inputPath": input,
+            "outputPath": output,
+            "mapping": {
+                "id": ["凭证号"],
+                "accountName": ["科目名称"],
+                "debit": "借方金额",
+                "credit": "贷方金额"
+            },
+            "targetBatches": [{"name": "收入", "accounts": ["收入"]}],
+            "includePivot": true,
+            "includeVoucherTypes": false,
+            "llmAnalysis": false
+        }))
+        .unwrap();
+
+        let result = export_kanzhang_disk(&job, &|_, _, _, _| {}, &AtomicBool::new(false))
+            .expect("套表失败不应抹掉已经生成的 CSV");
+        assert_eq!(result["partial"], true);
+        assert_eq!(result["batches"][0]["suiteGenerated"], false);
+        assert_eq!(result["warnings"].as_array().unwrap().len(), 1);
+        let paths = result["outputPaths"].as_array().unwrap();
+        assert_eq!(paths.len(), 1, "失败的套表路径不应出现在结果中");
+        assert!(Path::new(paths[0].as_str().unwrap()).is_file());
+        assert!(
+            fs::read_to_string(paths[0].as_str().unwrap())
+                .unwrap()
+                .contains("收入")
+        );
         let _ = fs::remove_dir_all(root);
     }
 

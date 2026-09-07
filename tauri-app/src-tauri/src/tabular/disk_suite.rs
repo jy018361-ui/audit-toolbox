@@ -161,6 +161,81 @@ mod tests {
         assert_eq!(parallel[0][0], "凭证-0000");
         assert_eq!(parallel[256][0], "凭证-0256");
     }
+
+    #[test]
+    fn type_rows_streams_group_labels_summaries_and_months() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE suite_shapes(seq INTEGER PRIMARY KEY,id TEXT,full TEXT,signs TEXT);
+             CREATE TABLE suite_nets(id TEXT,account TEXT,net REAL,PRIMARY KEY(id,account));
+             CREATE TABLE suite_month(id TEXT,month TEXT,account TEXT,net REAL,PRIMARY KEY(id,month,account));
+             CREATE TABLE suite_summaries(id TEXT,value TEXT,seq INTEGER,PRIMARY KEY(id,value));
+             CREATE TABLE suite_output(sheet TEXT,sort_head TEXT,sort_rank INTEGER,sort_label TEXT,sort_account TEXT,seq INTEGER PRIMARY KEY AUTOINCREMENT,rowdata TEXT);",
+        )
+        .unwrap();
+        let full = encode(&BTreeSet::from(["目标A".to_owned(), "对方X".to_owned()])).unwrap();
+        let signs = encode(&BTreeMap::from([("目标A".to_owned(), 1_i8)])).unwrap();
+        for (seq, id, target, other, month, summary) in [
+            (0_i64, "001", 100.0, -100.0, "2026-01", "摘要一"),
+            (1_i64, "002", 20.0, -20.0, "2026-02", "摘要二"),
+        ] {
+            db.execute(
+                "INSERT INTO suite_shapes VALUES(?1,?2,?3,?4)",
+                params![seq, id, full, signs],
+            )
+            .unwrap();
+            for (account, net) in [("目标A", target), ("对方X", other)] {
+                db.execute(
+                    "INSERT INTO suite_nets VALUES(?1,?2,?3)",
+                    params![id, account, net],
+                )
+                .unwrap();
+                db.execute(
+                    "INSERT INTO suite_month VALUES(?1,?2,?3,?4)",
+                    params![id, month, account, net],
+                )
+                .unwrap();
+            }
+            db.execute(
+                "INSERT INTO suite_summaries VALUES(?1,?2,?3)",
+                params![id, summary, seq],
+            )
+            .unwrap();
+        }
+        for (sheet, strict) in [("凭证类型-宽松", false), ("凭证类型-严格", true)] {
+            type_rows(
+                &db,
+                sheet,
+                strict,
+                64 * 1024 * 1024,
+                &|_, _, _, _| {},
+                0,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            let rows = db
+                .prepare("SELECT rowdata FROM suite_output WHERE sheet=?1 ORDER BY sort_account")
+                .unwrap()
+                .query_map([sheet], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(|row| serde_json::from_str::<Vec<String>>(&row.unwrap()).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(rows.len(), 2);
+            assert!(
+                rows.iter()
+                    .all(|row| row[0] == "目标A-类型1" && row[1] == "001")
+            );
+            assert!(rows.iter().all(|row| row[2] == "摘要一 | 摘要二"));
+            assert!(
+                rows.iter()
+                    .any(|row| row[3] == "目标A" && row[4..] == ["120", "100", "20"])
+            );
+            assert!(
+                rows.iter()
+                    .any(|row| row[3] == "对方X" && row[4..] == ["-120", "-100", "-20"])
+            );
+        }
+    }
 }
 
 fn db_error(e: rusqlite::Error) -> AppError {
@@ -914,77 +989,122 @@ fn type_rows(
             .map_err(db_error)?
     };
     let tx = db.unchecked_transaction().map_err(db_error)?;
-    let mut group_stmt = tx
-        .prepare("SELECT DISTINCT grp FROM suite_members ORDER BY grp")
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS suite_group_rank;
+         DROP TABLE IF EXISTS suite_group_meta;
+         CREATE TEMP TABLE suite_group_rank AS
+           SELECT t.grp,t.account,
+                  DENSE_RANK() OVER(PARTITION BY t.account ORDER BY r.rep) AS rank
+           FROM suite_group_target t JOIN suite_group_rep r ON r.grp=t.grp;
+         CREATE INDEX suite_group_rank_grp ON suite_group_rank(grp,account);
+         CREATE TEMP TABLE suite_group_meta(
+           grp INTEGER PRIMARY KEY,rep TEXT NOT NULL,label TEXT NOT NULL DEFAULT '',summaries TEXT NOT NULL DEFAULT ''
+         );
+         INSERT INTO suite_group_meta(grp,rep) SELECT grp,rep FROM suite_group_rep;",
+    )
+    .map_err(db_error)?;
+    let mut update_label = tx
+        .prepare("UPDATE suite_group_meta SET label=?2 WHERE grp=?1")
         .map_err(db_error)?;
-    let mut groups = group_stmt.query([]).map_err(db_error)?;
-    let mut rep_stmt = tx
-        .prepare("SELECT rep FROM suite_group_rep WHERE grp=?1")
+    let mut rank_stmt = tx
+        .prepare("SELECT grp,account,rank FROM suite_group_rank ORDER BY grp,account")
         .map_err(db_error)?;
-    let mut targets_stmt = tx
-        .prepare("SELECT account FROM suite_group_target WHERE grp=?1 ORDER BY account")
+    let mut ranks = rank_stmt.query([]).map_err(db_error)?;
+    let mut current_group = None;
+    let mut labels = Vec::new();
+    while let Some(row) = ranks.next().map_err(db_error)? {
+        check_cancel(cancel)?;
+        let grp: i64 = row.get(0).map_err(db_error)?;
+        if current_group.is_some_and(|value| value != grp) {
+            update_label
+                .execute(params![current_group.unwrap(), labels.join(" | ")])
+                .map_err(db_error)?;
+            labels.clear();
+        }
+        current_group = Some(grp);
+        let account: String = row.get(1).map_err(db_error)?;
+        let rank: i64 = row.get(2).map_err(db_error)?;
+        labels.push(format!("{account}-类型{}", rank.max(1)));
+    }
+    if let Some(grp) = current_group {
+        update_label
+            .execute(params![grp, labels.join(" | ")])
+            .map_err(db_error)?;
+    }
+    drop(ranks);
+    drop(rank_stmt);
+    drop(update_label);
+
+    let mut update_summaries = tx
+        .prepare("UPDATE suite_group_meta SET summaries=?2 WHERE grp=?1")
         .map_err(db_error)?;
-    let mut rank_stmt = tx.prepare("SELECT COUNT(DISTINCT r.rep) FROM suite_group_target t JOIN suite_group_rep r ON r.grp=t.grp WHERE t.account=?1 AND r.rep<=?2").map_err(db_error)?;
-    let mut summaries_stmt = tx.prepare("SELECT x.value FROM suite_members m JOIN suite_shapes s ON s.seq=m.seq JOIN suite_summaries x ON x.id=s.id WHERE m.grp=?1 GROUP BY x.value ORDER BY MIN(x.seq) LIMIT 3").map_err(db_error)?;
-    let mut accounts_stmt = tx
-        .prepare("SELECT account,net FROM suite_group_account WHERE grp=?1 ORDER BY account")
-        .map_err(db_error)?;
-    let mut month_stmt = tx
+    let mut summary_stmt = tx
         .prepare(
-            "SELECT month,net FROM suite_group_month WHERE grp=?1 AND account=?2 ORDER BY month",
+            "SELECT grp,value FROM (
+           SELECT m.grp AS grp,x.value AS value,
+                  ROW_NUMBER() OVER(PARTITION BY m.grp ORDER BY MIN(x.seq),x.value) AS rn
+           FROM suite_members m JOIN suite_shapes s ON s.seq=m.seq
+           JOIN suite_summaries x ON x.id=s.id
+           GROUP BY m.grp,x.value
+         ) WHERE rn<=3 ORDER BY grp,rn",
         )
         .map_err(db_error)?;
-    let mut insert_output = tx.prepare("INSERT INTO suite_output(sheet,sort_head,sort_rank,sort_label,sort_account,rowdata) VALUES(?1,?2,?3,?4,?5,?6)").map_err(db_error)?;
-    while let Some(group) = groups.next().map_err(db_error)? {
+    let mut summary_rows = summary_stmt.query([]).map_err(db_error)?;
+    let mut summary_group = None;
+    let mut summaries = Vec::new();
+    while let Some(row) = summary_rows.next().map_err(db_error)? {
         check_cancel(cancel)?;
-        let grp: i64 = group.get(0).map_err(db_error)?;
-        let rep: String = rep_stmt.query_row([grp], |r| r.get(0)).map_err(db_error)?;
-        let targets = {
-            targets_stmt
-                .query_map([grp], |r| r.get::<_, String>(0))
-                .map_err(db_error)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(db_error)?
-        };
-        let mut labels = Vec::new();
-        for account in targets {
-            // Rank representatives for this target exactly as the BTreeSet in
-            // the ordinary implementation: distinct ID, lexical ordering.
-            let rank: i64 = rank_stmt
-                .query_row(params![account, rep], |r| r.get(0))
+        let grp: i64 = row.get(0).map_err(db_error)?;
+        if summary_group.is_some_and(|value| value != grp) {
+            update_summaries
+                .execute(params![summary_group.unwrap(), summaries.join(" | ")])
                 .map_err(db_error)?;
-            labels.push(format!("{account}-类型{}", rank.max(1)));
+            summaries.clear();
         }
-        let label = labels.join(" | ");
-        let summaries = {
-            summaries_stmt
-                .query_map([grp], |r| r.get::<_, String>(0))
-                .map_err(db_error)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(db_error)?
-                .join(" | ")
-        };
-        let mut accounts = accounts_stmt.query([grp]).map_err(db_error)?;
-        while let Some(account) = accounts.next().map_err(db_error)? {
-            let name: String = account.get(0).map_err(db_error)?;
-            let net = round_to_cent(account.get(1).map_err(db_error)?);
+        summary_group = Some(grp);
+        summaries.push(row.get::<_, String>(1).map_err(db_error)?);
+    }
+    if let Some(grp) = summary_group {
+        update_summaries
+            .execute(params![grp, summaries.join(" | ")])
+            .map_err(db_error)?;
+    }
+    drop(summary_rows);
+    drop(summary_stmt);
+    drop(update_summaries);
+
+    let mut insert_output = tx.prepare("INSERT INTO suite_output(sheet,sort_head,sort_rank,sort_label,sort_account,rowdata) VALUES(?1,?2,?3,?4,?5,?6)").map_err(db_error)?;
+    let month_positions = months
+        .iter()
+        .enumerate()
+        .map(|(index, month)| (month.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut output_stmt = tx
+        .prepare(
+            "SELECT a.grp,g.rep,g.label,g.summaries,a.account,a.net,m.month,m.net
+         FROM suite_group_account a JOIN suite_group_meta g ON g.grp=a.grp
+         LEFT JOIN suite_group_month m ON m.grp=a.grp AND m.account=a.account
+         ORDER BY a.grp,a.account,m.month",
+        )
+        .map_err(db_error)?;
+    let mut output_rows = output_stmt.query([]).map_err(db_error)?;
+    let mut current_key = None::<(i64, String)>;
+    let mut current = None::<(String, String, String, String, f64)>;
+    let mut month_values = vec![0.0_f64; months.len()];
+    let mut flush = |record: Option<(String, String, String, String, f64)>,
+                     values: &mut Vec<f64>|
+     -> Result<(), AppError> {
+        if let Some((rep, label, summaries, name, net)) = record {
             let mut output = vec![
                 label.clone(),
                 display_voucher_key(&rep),
-                summaries.clone(),
+                summaries,
                 name.clone(),
                 format_number(net),
             ];
             let mut nonzero = net != 0.0;
-            let month_values = month_stmt
-                .query_map(params![grp, name], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
-                })
-                .map_err(db_error)?
-                .collect::<Result<BTreeMap<_, _>, _>>()
-                .map_err(db_error)?;
-            for month in &months {
-                let value = round_to_cent(month_values.get(month).copied().unwrap_or(0.0));
+            for amount in values.iter() {
+                let value = round_to_cent(*amount);
                 nonzero |= value != 0.0;
                 output.push(format_number(value));
             }
@@ -1002,16 +1122,44 @@ fn type_rows(
                     .map_err(db_error)?;
             }
         }
+        values.fill(0.0);
+        Ok(())
+    };
+    let mut visited = 0usize;
+    while let Some(row) = output_rows.next().map_err(db_error)? {
+        if visited % 2000 == 0 {
+            check_cancel(cancel)?;
+        }
+        visited += 1;
+        let grp: i64 = row.get(0).map_err(db_error)?;
+        let name: String = row.get(4).map_err(db_error)?;
+        let next_key = (grp, name.clone());
+        if current_key.as_ref().is_some_and(|value| value != &next_key) {
+            flush(current.take(), &mut month_values)?;
+        }
+        if current_key.as_ref() != Some(&next_key) {
+            current_key = Some(next_key);
+            current = Some((
+                row.get(1).map_err(db_error)?,
+                row.get(2).map_err(db_error)?,
+                row.get(3).map_err(db_error)?,
+                name,
+                round_to_cent(row.get(5).map_err(db_error)?),
+            ));
+        }
+        let month: Option<String> = row.get(6).map_err(db_error)?;
+        let amount: Option<f64> = row.get(7).map_err(db_error)?;
+        if let (Some(month), Some(amount)) = (month, amount)
+            && let Some(position) = month_positions.get(month.as_str())
+        {
+            month_values[*position] = amount;
+        }
     }
+    flush(current.take(), &mut month_values)?;
+    drop(flush);
+    drop(output_rows);
+    drop(output_stmt);
     drop(insert_output);
-    drop(month_stmt);
-    drop(accounts_stmt);
-    drop(summaries_stmt);
-    drop(rank_stmt);
-    drop(targets_stmt);
-    drop(rep_stmt);
-    drop(groups);
-    drop(group_stmt);
     tx.commit().map_err(db_error)?;
     progress(
         "classify",
@@ -1092,6 +1240,27 @@ fn output_rows(
     Ok(())
 }
 
+fn ensure_suite_sheet_row_limit(db: &Connection, sheet_name: &str) -> Result<(), AppError> {
+    let rows = db
+        .query_row(
+            "SELECT COUNT(*) FROM suite_output WHERE sheet=?1",
+            [sheet_name],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(db_error)?;
+    // One Excel row is reserved for the header.
+    if rows > 1_048_575 {
+        return Err(error(
+            "KANZHANG_EXCEL_ROW_LIMIT",
+            format!(
+                "套表工作表「{sheet_name}」共有 {rows} 行数据，超过 Excel 的 1,048,575 行数据上限。凭证明细 CSV 已保留。"
+            ),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 /// Write every suite sheet directly from SQLite using rust_xlsxwriter's
 /// constant-memory worksheets. This deliberately doesn't construct a
 /// `LedgerAnalysis.rows` or a full `PivotResult.rows` in Rust.
@@ -1118,6 +1287,7 @@ pub(super) fn write_suite(
             0,
             cancel,
         )?;
+        ensure_suite_sheet_row_limit(&ledger.db, "凭证类型-宽松")?;
         type_rows(
             &ledger.db,
             "凭证类型-严格",
@@ -1127,6 +1297,7 @@ pub(super) fn write_suite(
             3,
             cancel,
         )?;
+        ensure_suite_sheet_row_limit(&ledger.db, "凭证类型-严格")?;
         ledger.db.execute_batch("CREATE INDEX IF NOT EXISTS suite_output_order ON suite_output(sheet,sort_head DESC,sort_rank DESC,sort_label,sort_account,seq);").map_err(db_error)?;
         progress("classify", 6, 6, "宽松和严格凭证类型已生成。");
     }

@@ -25,19 +25,20 @@ pub(crate) struct MemoryBudget {
 
 fn safety_reserve(total: u64) -> u64 {
     // 忙碌主机仍至少给 Windows 留出约 10% 物理内存；上限避免大内存主机被
-    // 不必要地挡住。worker 只拿剩余安全余量的一半，另一半吸收系统波动。
+    // 不必要地挡住。剩余余量仍留出 30% 吸收系统波动。
     (total / 10).clamp(GIB, 4 * GIB)
 }
 
 pub(crate) fn plan(total: u64, available: u64, commit_available: u64) -> MemoryBudget {
     let reserve = safety_reserve(total);
-    let worker = (total / 4)
-        .min(available.saturating_sub(reserve) / 2)
-        .min(commit_available.saturating_sub(reserve) / 2);
+    let usable = |bytes: u64| bytes.saturating_sub(reserve).saturating_mul(7) / 10;
+    let worker = (total / 3)
+        .min(usable(available))
+        .min(usable(commit_available));
     let batch = if worker < 256 * MIB {
         0
     } else {
-        (worker / 16).clamp(4 * MIB, 128 * MIB)
+        (worker / 12).clamp(8 * MIB, 256 * MIB)
     };
     MemoryBudget {
         total_bytes: total,
@@ -48,7 +49,7 @@ pub(crate) fn plan(total: u64, available: u64, commit_available: u64) -> MemoryB
         sqlite_cache_kib: if batch == 0 {
             0
         } else {
-            (batch / 1024).clamp(8192, 131072)
+            (batch / 1024).clamp(16_384, 262_144)
         },
     }
 }
@@ -62,6 +63,27 @@ pub(crate) fn budget() -> Result<MemoryBudget, AppError> {
         ));
     }
     Ok(result)
+}
+
+fn parallelism_for(worker_bytes: u64, logical_processors: usize) -> usize {
+    let desired = if worker_bytes < 768 * MIB {
+        1
+    } else if worker_bytes < 1536 * MIB {
+        2
+    } else {
+        4
+    };
+    desired.min(logical_processors.max(1))
+}
+
+/// CPU-heavy row decoding uses a small bounded pool. Memory pressure reduces
+/// the pool automatically without changing business results or row order.
+pub(crate) fn recommended_parallelism() -> Result<usize, AppError> {
+    let memory = budget()?;
+    let logical = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    Ok(parallelism_for(memory.worker_bytes, logical))
 }
 
 fn physical_pause_floor(total: u64) -> u64 {
@@ -345,9 +367,9 @@ mod tests {
             let total = size * GIB;
             let p = plan(total, total * 3 / 4, total);
             assert!(p.worker_bytes > previous);
-            assert!(p.worker_bytes <= total / 4);
+            assert!(p.worker_bytes <= total / 3);
             assert!(p.worker_bytes + p.reserve_bytes < p.available_bytes);
-            assert!((4 * MIB..=128 * MIB).contains(&p.batch_bytes));
+            assert!((8 * MIB..=256 * MIB).contains(&p.batch_bytes));
             previous = p.worker_bytes;
         }
     }
@@ -372,10 +394,13 @@ mod tests {
     fn sixteen_gib_host_can_continue_slowly_with_three_gib_free() {
         let p = plan(16 * GIB, 3 * GIB, 20 * GIB);
         assert_eq!(p.reserve_bytes, 16 * GIB / 10);
-        assert_eq!(p.worker_bytes, (3 * GIB - 16 * GIB / 10) / 2);
+        assert_eq!(
+            p.worker_bytes,
+            (3 * GIB - 16 * GIB / 10).saturating_mul(7) / 10
+        );
         assert!(p.worker_bytes >= 256 * MIB);
         assert!(p.worker_bytes + p.reserve_bytes < p.available_bytes);
-        assert!(p.sqlite_cache_kib <= 64 * 1024);
+        assert!(p.sqlite_cache_kib <= 128 * 1024);
     }
 
     #[test]
@@ -393,5 +418,13 @@ mod tests {
         assert!(runtime_memory_recovered(16 * GIB, GIB, 8 * GIB));
         assert!(!runtime_memory_emergency(16 * GIB, 300 * MIB, 8 * GIB));
         assert!(runtime_memory_emergency(16 * GIB, 100 * MIB, 8 * GIB));
+    }
+
+    #[test]
+    fn decoding_parallelism_scales_down_under_memory_pressure() {
+        assert_eq!(parallelism_for(512 * MIB, 16), 1);
+        assert_eq!(parallelism_for(GIB, 16), 2);
+        assert_eq!(parallelism_for(2 * GIB, 16), 4);
+        assert_eq!(parallelism_for(2 * GIB, 2), 2);
     }
 }

@@ -1256,14 +1256,14 @@ impl DiskLedger {
         cancel: &AtomicBool,
         mut visit: impl FnMut(Vec<String>, f64) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
-        self.visit_query(&format!("SELECT r.data,p.{} FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE p.voucher IN (SELECT voucher FROM selected) ORDER BY p.seq",self.selected_net_column()),cancel,&mut visit)
+        self.visit_query(&format!("SELECT r.data,p.fills,p.{} FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE p.voucher IN (SELECT voucher FROM selected) ORDER BY p.seq",self.selected_net_column()),cancel,&mut visit)
     }
     fn visit_selected_marked(
         &self,
         cancel: &AtomicBool,
         mut visit: impl FnMut(Vec<String>, f64, bool) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
-        let mut statement=self.db.prepare(&format!("SELECT r.data,p.{},EXISTS(SELECT 1 FROM detail_loss l WHERE l.voucher=p.voucher) FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE p.voucher IN (SELECT voucher FROM selected) ORDER BY p.seq",self.selected_net_column())).map_err(sql_error)?;
+        let mut statement=self.db.prepare(&format!("SELECT r.data,p.fills,p.{},EXISTS(SELECT 1 FROM detail_loss l WHERE l.voucher=p.voucher) FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE p.voucher IN (SELECT voucher FROM selected) ORDER BY p.seq",self.selected_net_column())).map_err(sql_error)?;
         let mut cursor = statement.query([]).map_err(sql_error)?;
         let mut index = 0usize;
         while let Some(record) = cursor.next().map_err(sql_error)? {
@@ -1273,17 +1273,12 @@ impl DiskLedger {
             }
             index += 1;
             let text: String = record.get(0).map_err(sql_error)?;
-            let row = serde_json::from_str(&text).map_err(|e| {
-                error(
-                    "LEDGER_CACHE_FAILED",
-                    "磁盘凭证明细损坏。",
-                    Some(e.to_string()),
-                )
-            })?;
+            let fills: String = record.get(1).map_err(sql_error)?;
+            let row = normalized_row(&text, &fills, self.table.headers.len())?;
             visit(
                 row,
-                record.get(1).map_err(sql_error)?,
                 record.get(2).map_err(sql_error)?,
+                record.get(3).map_err(sql_error)?,
             )?;
         }
         Ok(())
@@ -1304,14 +1299,9 @@ impl DiskLedger {
             }
             index += 1;
             let text: String = record.get(0).map_err(sql_error)?;
-            let row = serde_json::from_str(&text).map_err(|e| {
-                error(
-                    "LEDGER_CACHE_FAILED",
-                    "磁盘凭证明细损坏。",
-                    Some(e.to_string()),
-                )
-            })?;
-            visit(row, record.get(1).map_err(sql_error)?)?;
+            let fills: String = record.get(1).map_err(sql_error)?;
+            let row = normalized_row(&text, &fills, self.table.headers.len())?;
+            visit(row, record.get(2).map_err(sql_error)?)?;
         }
         Ok(())
     }
@@ -1330,7 +1320,7 @@ impl DiskLedger {
                     .map_err(sql_error)?;
             }
         }
-        self.visit_query("SELECT r.data,p.net FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE p.account_norm IN (SELECT account FROM excludes) ORDER BY p.seq",cancel,&mut visit)
+        self.visit_query("SELECT r.data,p.fills,p.net FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE p.account_norm IN (SELECT account FROM excludes) ORDER BY p.seq",cancel,&mut visit)
     }
 
     /// Write selected complete-voucher detail without collecting rows in RAM.
@@ -1533,7 +1523,7 @@ mod tests {
             vec!["002".into(), "费用".into(), "".into(), "40".into()],
         ];
         let db = Connection::open("").unwrap();
-        db.execute_batch("CREATE TABLE processed(seq INTEGER PRIMARY KEY,voucher TEXT,account TEXT,account_norm TEXT,net REAL,raw REAL,unsigned REAL); ATTACH DATABASE ':memory:' AS raw_cache; CREATE TABLE raw_cache.rows(data TEXT NOT NULL)").unwrap();
+        db.execute_batch("CREATE TABLE processed(seq INTEGER PRIMARY KEY,fills TEXT NOT NULL,voucher TEXT,account TEXT,account_norm TEXT,net REAL,raw REAL,unsigned REAL); ATTACH DATABASE ':memory:' AS raw_cache; CREATE TABLE raw_cache.rows(data TEXT NOT NULL)").unwrap();
         for (seq, row) in rows.iter().enumerate() {
             db.execute(
                 "INSERT INTO raw_cache.rows VALUES(?1)",
@@ -1541,7 +1531,7 @@ mod tests {
             )
             .unwrap();
             db.execute(
-                "INSERT INTO processed VALUES(?1,?2,?3,?3,?4,?4,?4)",
+                "INSERT INTO processed VALUES(?1,'[]',?2,?3,?3,?4,?4,?4)",
                 params![
                     seq as i64,
                     row[0],
@@ -1647,6 +1637,15 @@ mod tests {
                 ("002".into(), "002".into())
             ]
         );
+        first.select(&[], &cancel).unwrap();
+        let mut selected_ids = Vec::new();
+        first
+            .visit_selected(&cancel, |row, _| {
+                selected_ids.push(row[0].clone());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(selected_ids, ["001", "001", "002", "002"]);
         drop(first);
 
         let second_messages = RefCell::new(Vec::new());

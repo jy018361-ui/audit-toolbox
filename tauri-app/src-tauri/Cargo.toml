@@ -1,6 +1,6 @@
 [package]
 name = "audit-toolbox"
-version = "2.0.0-alpha.63"
+version = "2.0.0-alpha.64"
 description = "统一的 Tauri 审计工具箱"
 authors = ["Audit Toolbox"]
 edition = "2024"

@@ -2,7 +2,7 @@
 
 python scripts/verify_kanzhang_disk.py --self-test
 python scripts/verify_kanzhang_disk.py --exe <worker.exe> --out <新目录>
-默认生成四组小文件/272 MiB 大文件，逐组串行运行；--cases b_positive 可先跑一组。
+默认生成四组小文件/2 GiB 大文件，逐组串行运行；--cases b_positive 可先跑一组。
 报告中的采样峰值不等于操作系统硬峰值；worker 直接入口由本脚本额外安装 Job Object。
 """
 import argparse
@@ -79,11 +79,11 @@ def run_worker(exe, directory, method, params, timeout):
     import diagnose_kanzhang_import as guard
     directory.mkdir()
     initial = guard.memory()
-    reserve = max(1 * guard.GIB, min(initial.total // 5, 8 * guard.GIB))
+    reserve = max(1 * guard.GIB, min(initial.total // 10, 4 * guard.GIB))
     # 与生产 resource_budget::plan 的 worker 公式一致；此处只负责给绕过 Tauri
     # 父进程的直接验收入口安装同口径硬限制，不复制批次/SQLite 策略。
-    hard = min(initial.total // 4, max(0, initial.available - reserve) * 3 // 4,
-               max(0, initial.commit_available - reserve) * 3 // 4)
+    hard = min(initial.total // 3, max(0, initial.available - reserve) * 7 // 10,
+               max(0, initial.commit_available - reserve) * 7 // 10)
     if hard < 256 * MIB:
         raise RuntimeError("可用内存/提交余量不足，验收未启动；关闭其他大程序后再运行。")
     handle = guard.checked(guard.create_job(None, None))
@@ -230,7 +230,9 @@ def main():
     ap.add_argument("--exe", type=Path)
     ap.add_argument("--out", type=Path)
     ap.add_argument("--cases", nargs="+", choices=CASES, default=list(CASES))
-    ap.add_argument("--large-mib", type=int, default=272)
+    # 动态预算可能允许空闲内存较多的主机直接处理 1 GiB CSV；生产读取器从
+    # 2 GiB 起固定走磁盘，因此验收默认使用同一条确定性边界。
+    ap.add_argument("--large-mib", type=int, default=2048)
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--fixtures-only", action="store_true")
     ap.add_argument("--keep-cache", action="store_true", help="保留本次合成输入生成的应用缓存")
@@ -249,8 +251,8 @@ def main():
         return
     if not args.out or (not args.exe and not args.fixtures_only):
         ap.error("需要 --out；执行 worker 时还需要 --exe")
-    if not 256 <= args.large_mib <= 1024 or not 1 <= args.timeout <= 1800:
-        ap.error("large-mib 要求 256..1024，timeout 要求 1..1800")
+    if not 256 <= args.large_mib <= 2048 or not 1 <= args.timeout <= 1800:
+        ap.error("large-mib 要求 256..2048，timeout 要求 1..1800")
     if os.name != "nt" and not args.fixtures_only:
         ap.error("受限 worker 验收仅支持 Windows")
     root = args.out.resolve()
@@ -259,8 +261,8 @@ def main():
         raise RuntimeError("磁盘空间不足以保留夹具、磁盘缓存和输出。")
     exe = args.exe.resolve(strict=True) if args.exe else None
     report = dict(status="running", executable=str(exe), cases={}, limitations=[
-        "合成数据路径等价验收不等于真实6GB完整验收", "内存模拟需另跑resource_budget::tests::adaptive_，脚本不复制生产预算算法",
-        "直接worker入口不经过Tauri父进程保护；脚本安装的是独立验收保护"])
+        "合成数据路径等价验收不等于真实6GB完整验收", "内存模拟需另跑 resource_budget 定向测试",
+        "直接 worker 入口不经过 Tauri 父进程保护；脚本只安装同口径硬上限，不覆盖运行中的自动暂停与恢复"])
     try:
         for case in args.cases:
             directory = root / case

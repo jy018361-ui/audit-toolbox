@@ -1,10 +1,27 @@
 # 看账小工具迁移功能矩阵
 
+## 2026-09-07 · 6GB CSV 导出的动态并行与 SQLite 热路径优化
+
+- 实机导出采样显示 worker 私有内存约 160 MiB，一个 CPU 核心接近满载；当时的慢点是套表聚合每行重复准备多条 SQLite 语句，不是 worker 触及内存上限。凭证、科目、方向、月份、摘要及自定义透视的 upsert 现在每批只预编译一次并在事务中复用。
+- 行 JSON 解码改为有界并行：根据实时 worker 预算自动选择 1/2/4 线程，原始批次按字节限额保持在内存中，解码后按源行顺序入库，不改变凭证排序或浮点累加顺序。内存紧张时自动退回单线程。
+- 凭证透视和自定义透视写表改为单次有序 SQL 扫描后分组，删除「每一输出行 × 每一透视列」的回查。输出表结构、补零、排序与隐藏页语义不变。
+- 宽松/严格凭证类型进一步删除按分类组重复执行的大表 JOIN，以及「输出科目 × 月份」逐格查询；分组科目和月份改为整表各扫描一次，代表凭证及排序索引预先落盘，类型输出 SQL 全程复用。
+- 最小凭证科目集合改为按集合长度递增、只与已确认的最小集合比较，保持集合结果不变并避免形状种类较多时的全量两两比较。分类显示六个子阶段，套表构造、压缩与保存显示七个子阶段。
+- 磁盘明细写出会重新应用凭证索引中保存的向下填充差异，跨 CSV 分片的公司、期间和凭证号不再退回空白原值；普通与磁盘路径保持一致。
+- CSV 动态硬预算改为「总内存最多 1/3，扣除系统保留后取 70%」，分批和 SQLite 缓存上限由 128 MiB 提高到 256 MiB；运行期暂停、恢复和危险线不变。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib resource_budget::tests::`；`cargo test --manifest-path src-tauri/Cargo.toml --lib disk_suite::tests::`；`python scripts/verify_kanzhang_disk.py --exe <worker.exe> --out <新目录> --cases b_positive`。
+
 ## 2026-09-07 · Excel 输入取消动态 Job Object 硬上限
 
 - 看账及所有共用 JE worker 的 `.xls/.xlsx/.xlsm/.xlsb` 输入不再绑定按实时空闲内存折算的 Windows Job Object 硬上限。Excel 工作簿解压会产生短时峰值且无法在单次 calamine 解码中安全暂停，旧上限会把本可正常完成的 51.2 MiB、164,420 行工作簿随机终止。
 - 启动前内存等待、运行期软监测、自动/手动继续与持续危险状态的最终保护仍保留。CSV/TXT/TSV 可在分批检查点暂停，继续使用动态硬上限。公共调度层只检查明确的输入字段，`outputPath: result.xlsx` 不会把 CSV 任务误归为 Excel。
 - 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib excel_inputs_skip_job_object_hard_limit_across_tools`；`cargo test --manifest-path src-tauri/Cargo.toml --lib csv_input_keeps_hard_limit_when_output_is_xlsx`。
+
+## 2026-09-07 · 大 CSV 读取与导出共用同一份原始缓存
+
+- 看账读取会先把自动标题行 `0` 解析成实际第 1 行，导出入口此前却直接使用 `0` 生成缓存键。同一份 6GB CSV 因此被当成两个来源，导出时重新完整读取并在本机生成第二份约 9.76GB SQLite 原始行缓存。
+- 筛选预览与导出现统一通过 `parse_kanzhang_job` 解析标题行。同时在公共 `large_csv::load` 和 `open_prepared_disk_ledger` 入口将大 CSV 的 `0/1` 归一，防止汇兑损益、存款、借款、FA/TBJE 等其他工具因参数回传形式不同分裂原始或凭证分析缓存。
+- 导出仍会「打开」原始缓存，且第一次必须建立凭证分析索引；但不再重扫 6GB 源 CSV。已存在的重复缓存不在任务中自动删除，避免误删正在使用的文件。
 
 ## 2026-09-06 · 自动标题行复用文件指纹缓存
 

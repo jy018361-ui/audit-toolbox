@@ -153,7 +153,10 @@ pub(super) fn load(
 ) -> Result<Cache, AppError> {
     check_cancel(cancel)?;
     let source_path = Path::new(&source.input_path);
-    let key = fingerprint(source_path, "CSV", source.header_row)?;
+    // 大 CSV 的自动标题行 `0` 与实际第 1 行语义相同。缓存键也必须相同，
+    // 否则不同工具/阶段参数回传形式不同时会重新扫描整个源文件。
+    let cache_header_row = source.header_row.max(1);
+    let key = fingerprint(source_path, "CSV", cache_header_row)?;
     let path = cache_path("kanzhang-stream", &key)?.with_extension("sqlite");
     fs::create_dir_all(path.parent().unwrap()).map_err(io_error)?;
     if path.is_file() {
@@ -173,7 +176,7 @@ pub(super) fn load(
     // Each attempt owns its partial file. A cancellation never publishes it.
     let partial = path.with_extension(format!("{}.partial", uuid::Uuid::new_v4()));
     let result = build(&partial, source, progress, cancel).and_then(|()| {
-        if fingerprint(source_path, "CSV", source.header_row)? != key {
+        if fingerprint(source_path, "CSV", cache_header_row)? != key {
             return Err(error(
                 "SOURCE_CHANGED",
                 "读取期间源文件发生变化，请重新读取。",
@@ -328,6 +331,31 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         root
     }
+
+    #[test]
+    fn automatic_and_first_header_row_share_one_raw_cache() {
+        let root = fixture();
+        let input = root.join("same-source.csv");
+        fs::write(&input, "凭证号,科目,借方,贷方\n1,1001,1,0\n1,1002,0,1\n").unwrap();
+        let cancel = AtomicBool::new(false);
+        let source = |header_row| SourceParams {
+            input_path: input.to_string_lossy().into_owned(),
+            sheet: None,
+            header_row,
+        };
+
+        let automatic = load(&source(0), &|_, _, _, _| {}, &cancel).unwrap();
+        let explicit = load(&source(1), &|_, _, _, _| {}, &cancel).unwrap();
+        assert_eq!(automatic.path, explicit.path);
+        assert_eq!(automatic.count, explicit.count);
+
+        let cache_path = automatic.path.clone();
+        drop(automatic);
+        drop(explicit);
+        fs::remove_file(cache_path).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn disk_rows_and_accounts_preserve_csv_semantics() {
         let root = fixture();

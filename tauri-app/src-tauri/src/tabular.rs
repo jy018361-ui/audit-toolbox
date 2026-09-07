@@ -849,9 +849,7 @@ fn kanzhang_filter_preview(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
-    let mut job: KanzhangParams = parse(params, "看账参数不完整。")?;
-    job.header_row =
-        resolve_auto_header_row(&job.input_path, job.sheet.as_deref(), job.header_row)?;
+    let job = parse_kanzhang_job(params)?;
     if large_csv::applies(Path::new(&job.input_path)) {
         return kanzhang_filter_preview_disk(&job, progress, cancel);
     }
@@ -887,7 +885,7 @@ fn export_kanzhang(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
-    let job: KanzhangParams = parse(params, "看账参数不完整。")?;
+    let job = parse_kanzhang_job(params)?;
     if large_csv::applies(Path::new(&job.input_path)) {
         return export_kanzhang_disk(&job, progress, cancel);
     }
@@ -985,6 +983,15 @@ fn source_from_kanzhang(job: &KanzhangParams) -> SourceParams {
         sheet: job.sheet.clone(),
         header_row: job.header_row,
     }
+}
+
+/// 看账的预览与导出必须在生成任何缓存键之前共用同一个实际标题行。
+/// 否则前端的自动值 `0` 与读取阶段已解析的行号会将同一份大 CSV 分成两份缓存。
+fn parse_kanzhang_job(params: Value) -> Result<KanzhangParams, AppError> {
+    let mut job: KanzhangParams = parse(params, "看账参数不完整。")?;
+    job.header_row =
+        resolve_auto_header_row(&job.input_path, job.sheet.as_deref(), job.header_row)?;
+    Ok(job)
 }
 
 fn scaled_progress(
@@ -3494,6 +3501,7 @@ pub(crate) fn open_disk_ledger(
             None,
         ));
     }
+    let header_row = header_row.max(1);
     let source = SourceParams {
         input_path: path.to_string_lossy().into_owned(),
         sheet: None,
@@ -3702,6 +3710,9 @@ pub(crate) fn open_prepared_disk_ledger(
             None,
         ));
     }
+    // CSV 的自动标题行目前固定为第 1 行。在公共入口收口，避免任何工具把
+    // `0` 与 `1` 写成两份原始缓存和凭证分析缓存。
+    let header_row = header_row.max(1);
     let source = SourceParams {
         input_path: path.to_string_lossy().into_owned(),
         sheet: None,
@@ -6525,6 +6536,15 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(text["headerRow"], json!(3));
+
+        // 导出入口与读取入口共用同一个实际行号；曾经这里仍保留 0，
+        // 6GB CSV 会因缓存键不同而在导出时再完整读取一次。
+        let export_job = parse_kanzhang_job(json!({
+            "inputPath": csv.to_string_lossy(),
+            "headerRow": 0,
+        }))
+        .unwrap();
+        assert_eq!(export_job.header_row, 3);
 
         fs::remove_dir_all(&dir).unwrap();
     }

@@ -4,6 +4,7 @@
 use super::disk_ledger::DiskLedger;
 use super::*;
 use rusqlite::{Connection, OptionalExtension, params};
+use std::thread;
 
 pub(super) struct DiskSuiteResult {
     pub summary: PivotResult,
@@ -138,6 +139,28 @@ mod tests {
         let failure = classify(&db, false, 64, &AtomicBool::new(false)).unwrap_err();
         assert_eq!(failure.code, "KANZHANG_SUITE_MEMORY_LIMIT");
     }
+
+    #[test]
+    fn parallel_json_decode_preserves_source_order() {
+        let records = (0..257)
+            .map(|index| AggregateRecord {
+                seq: index,
+                raw: serde_json::to_string(&vec![
+                    format!("凭证-{index:04}"),
+                    format!("科目-{index}"),
+                ])
+                .unwrap(),
+                id: index.to_string(),
+                account: String::new(),
+                net: index as f64,
+            })
+            .collect::<Vec<_>>();
+        let serial = decode_aggregate_rows(&records, 1).unwrap();
+        let parallel = decode_aggregate_rows(&records, 4).unwrap();
+        assert_eq!(parallel, serial);
+        assert_eq!(parallel[0][0], "凭证-0000");
+        assert_eq!(parallel[256][0], "凭证-0256");
+    }
 }
 
 fn db_error(e: rusqlite::Error) -> AppError {
@@ -233,6 +256,55 @@ struct PivotConfig {
     values: Vec<(String, Option<usize>)>,
     date: Option<usize>,
 }
+
+struct AggregateRecord {
+    seq: i64,
+    raw: String,
+    id: String,
+    account: String,
+    net: f64,
+}
+
+fn decode_aggregate_rows(
+    records: &[AggregateRecord],
+    parallelism: usize,
+) -> Result<Vec<Vec<String>>, AppError> {
+    if parallelism <= 1 || records.len() < 64 {
+        return records
+            .iter()
+            .map(|record| serde_json::from_str(&record.raw).map_err(json_error))
+            .collect();
+    }
+    let chunk_size = records.len().div_ceil(parallelism);
+    let decoded = thread::scope(|scope| {
+        records
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|record| serde_json::from_str::<Vec<String>>(&record.raw))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|worker| worker.join())
+            .collect::<Vec<_>>()
+    });
+    let mut rows = Vec::with_capacity(records.len());
+    for result in decoded {
+        let chunk = result.map_err(|_| {
+            error(
+                "KANZHANG_SUITE_WORKER",
+                "看账并行分析线程异常退出，请重试。",
+                None,
+            )
+        })?;
+        rows.extend(chunk.map_err(json_error)?);
+    }
+    Ok(rows)
+}
 impl PivotConfig {
     fn new(
         headers: &[String],
@@ -311,54 +383,107 @@ fn aggregate(
     let mut cursor = stmt.query([]).map_err(db_error)?;
     let mut count = 0;
     let transaction = db.unchecked_transaction().map_err(db_error)?;
-    while let Some(record) = cursor.next().map_err(db_error)? {
-        if count % 2000 == 0 {
-            check_cancel(cancel)?;
-            progress(
-                "analyze",
-                count,
-                ledger.count,
-                "正在分批汇总凭证和科目，分析索引保存在磁盘…",
-            );
-        }
-        let seq: i64 = record.get(0).map_err(db_error)?;
-        let raw: String = record.get(1).map_err(db_error)?;
-        guard(raw.len().saturating_mul(4), budget)?;
-        let row: Vec<String> = serde_json::from_str(&raw).map_err(json_error)?;
-        let id: String = record.get(2).map_err(db_error)?;
-        let account: String = record.get(3).map_err(db_error)?;
-        let net: f64 = record.get(4).map_err(db_error)?;
-        let loss = job.mark_loss_transfer
-            && accounts.iter().any(|i| {
-                row.get(*i)
-                    .is_some_and(|s| s.contains("本年利润") || s.contains("未分配利润"))
+    // These statements run once per selected ledger row. Preparing them inside
+    // the loop dominated large exports (millions of rows * several statements)
+    // and kept one CPU core busy compiling identical SQL. Reuse one VM for the
+    // whole transaction while preserving the original row order and sums.
+    let mut insert_voucher = transaction.prepare("INSERT INTO suite_vouchers VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET loss=MAX(loss,excluded.loss)").map_err(db_error)?;
+    let mut insert_net = transaction.prepare("INSERT INTO suite_nets VALUES(?1,?2,?3) ON CONFLICT(id,account) DO UPDATE SET net=net+excluded.net").map_err(db_error)?;
+    let mut insert_subject = transaction.prepare("INSERT INTO suite_subject VALUES(?1,?2,1) ON CONFLICT(account) DO UPDATE SET net=net+excluded.net,count=count+1").map_err(db_error)?;
+    let mut insert_pivot = transaction.prepare("INSERT INTO suite_pivot VALUES(?1,?2,?3,?4) ON CONFLICT(id,account,direction) DO UPDATE SET net=net+excluded.net").map_err(db_error)?;
+    let mut insert_month = transaction.prepare("INSERT INTO suite_month VALUES(?1,?2,?3,?4) ON CONFLICT(id,month,account) DO UPDATE SET net=net+excluded.net").map_err(db_error)?;
+    let mut insert_summary = transaction.prepare("INSERT OR IGNORE INTO suite_summaries SELECT ?1,?2,?3 WHERE (SELECT COUNT(*) FROM suite_summaries WHERE id=?1)<3").map_err(db_error)?;
+    let runtime_budget = crate::resource_budget::budget()?;
+    let decode_batch_bytes = (runtime_budget.batch_bytes / 8).max(2 * 1024 * 1024) as usize;
+    let parallelism = crate::resource_budget::recommended_parallelism()?;
+    loop {
+        let mut records = Vec::<AggregateRecord>::new();
+        let mut raw_bytes = 0usize;
+        while raw_bytes < decode_batch_bytes {
+            let Some(record) = cursor.next().map_err(db_error)? else {
+                break;
+            };
+            let raw: String = record.get(1).map_err(db_error)?;
+            guard(raw.len().saturating_mul(4), budget)?;
+            raw_bytes = raw_bytes.saturating_add(raw.len());
+            records.push(AggregateRecord {
+                seq: record.get(0).map_err(db_error)?,
+                raw,
+                id: record.get(2).map_err(db_error)?,
+                account: record.get(3).map_err(db_error)?,
+                net: record.get(4).map_err(db_error)?,
             });
-        db.execute("INSERT INTO suite_vouchers VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET loss=MAX(loss,excluded.loss)",params![id,seq,loss]).map_err(db_error)?;
-        db.execute("INSERT INTO suite_nets VALUES(?1,?2,?3) ON CONFLICT(id,account) DO UPDATE SET net=net+excluded.net",params![id,account,net]).map_err(db_error)?;
-        db.execute("INSERT INTO suite_subject VALUES(?1,?2,1) ON CONFLICT(account) DO UPDATE SET net=net+excluded.net,count=count+1",params![account,net]).map_err(db_error)?;
-        let direction_value = direction
-            .and_then(|i| row.get(i))
-            .map(|s| s.trim())
-            .unwrap_or("");
-        db.execute("INSERT INTO suite_pivot VALUES(?1,?2,?3,?4) ON CONFLICT(id,account,direction) DO UPDATE SET net=net+excluded.net",params![id,account,direction_value,net]).map_err(db_error)?;
-        if let Some(month) = config
-            .date
-            .and_then(|i| row.get(i))
-            .and_then(|s| parse_month(s))
-        {
-            db.execute("INSERT INTO suite_month VALUES(?1,?2,?3,?4) ON CONFLICT(id,month,account) DO UPDATE SET net=net+excluded.net",params![id,month,account,net]).map_err(db_error)?;
         }
-        if let Some(value) = summary
-            .and_then(|i| row.get(i))
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-        {
-            // Only the first three distinct summaries of each voucher can ever
-            // contribute to the original type-summary algorithm.
-            db.execute("INSERT OR IGNORE INTO suite_summaries SELECT ?1,?2,?3 WHERE (SELECT COUNT(*) FROM suite_summaries WHERE id=?1)<3",params![id,value,seq]).map_err(db_error)?;
+        if records.is_empty() {
+            break;
         }
-        count += 1;
+        check_cancel(cancel)?;
+        let rows = decode_aggregate_rows(&records, parallelism)?;
+        for (record, row) in records.iter().zip(rows.iter()) {
+            let loss = job.mark_loss_transfer
+                && accounts.iter().any(|i| {
+                    row.get(*i)
+                        .is_some_and(|s| s.contains("本年利润") || s.contains("未分配利润"))
+                });
+            insert_voucher
+                .execute(params![&record.id, record.seq, loss])
+                .map_err(db_error)?;
+            insert_net
+                .execute(params![&record.id, &record.account, record.net])
+                .map_err(db_error)?;
+            insert_subject
+                .execute(params![&record.account, record.net])
+                .map_err(db_error)?;
+            let direction_value = direction
+                .and_then(|i| row.get(i))
+                .map(|s| s.trim())
+                .unwrap_or("");
+            insert_pivot
+                .execute(params![
+                    &record.id,
+                    &record.account,
+                    direction_value,
+                    record.net
+                ])
+                .map_err(db_error)?;
+            if let Some(month) = config
+                .date
+                .and_then(|i| row.get(i))
+                .and_then(|s| parse_month(s))
+            {
+                insert_month
+                    .execute(params![&record.id, month, &record.account, record.net])
+                    .map_err(db_error)?;
+            }
+            if let Some(value) = summary
+                .and_then(|i| row.get(i))
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                // Only the first three distinct summaries of each voucher can ever
+                // contribute to the original type-summary algorithm.
+                insert_summary
+                    .execute(params![&record.id, value, record.seq])
+                    .map_err(db_error)?;
+            }
+            count += 1;
+        }
+        progress(
+            "analyze",
+            count,
+            ledger.count,
+            &format!(
+                "正在并行汇总凭证和科目：已处理 {} 行（{} 个线程）…",
+                count, parallelism
+            ),
+        );
     }
+    drop(insert_summary);
+    drop(insert_month);
+    drop(insert_pivot);
+    drop(insert_subject);
+    drop(insert_net);
+    drop(insert_voucher);
     transaction.commit().map_err(db_error)?;
     let targets = targets
         .iter()
@@ -404,6 +529,7 @@ fn aggregate(
         let mut stmt = db.prepare(&format!("SELECT r.data,p.{} FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 JOIN selected s ON s.voucher=p.voucher JOIN suite_vouchers v ON v.id=p.voucher WHERE v.loss=0 ORDER BY p.seq", ledger.selected_net_column())).map_err(db_error)?;
         let mut cursor = stmt.query([]).map_err(db_error)?;
         let transaction = db.unchecked_transaction().map_err(db_error)?;
+        let mut insert_custom = transaction.prepare("INSERT INTO suite_custom VALUES(?1,?2,?3) ON CONFLICT(rowkey,col) DO UPDATE SET net=net+excluded.net").map_err(db_error)?;
         while let Some(record) = cursor.next().map_err(db_error)? {
             check_cancel(cancel)?;
             let raw: String = record.get(0).map_err(db_error)?;
@@ -437,9 +563,12 @@ fn aggregate(
                 let amount = index
                     .map(|i| parse_number(row.get(i).map(String::as_str).unwrap_or("")))
                     .unwrap_or(net);
-                db.execute("INSERT INTO suite_custom VALUES(?1,?2,?3) ON CONFLICT(rowkey,col) DO UPDATE SET net=net+excluded.net",params![encode(&key)?,col,amount]).map_err(db_error)?;
+                insert_custom
+                    .execute(params![encode(&key)?, col, amount])
+                    .map_err(db_error)?;
             }
         }
+        drop(insert_custom);
         transaction.commit().map_err(db_error)?;
     }
     Ok(config)
@@ -505,14 +634,19 @@ fn minimal_sets(
         }
         Ok(())
     })?;
+    // A non-minimal subset always contains at least one minimal subset. Compare
+    // length-ordered candidates only with the minima already retained instead
+    // of scanning every unique shape for every candidate (quadratic on varied
+    // ledgers). `order_base_sets` below restores the legacy output order.
+    let mut candidates = unique.into_iter().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.len().cmp(&right.len()).then_with(|| left.cmp(right)));
     let mut minimal = Vec::new();
-    for candidate in &unique {
+    for candidate in candidates {
         check_cancel(cancel)?;
-        if !unique
-            .iter()
-            .any(|other| other.len() < candidate.len() && other.is_subset(candidate))
-        {
-            minimal.push(candidate.clone());
+        if !minimal.iter().any(|other: &BTreeSet<String>| {
+            other.len() < candidate.len() && other.is_subset(&candidate)
+        }) {
+            minimal.push(candidate);
         }
     }
     Ok(order_base_sets(&minimal))
@@ -698,40 +832,78 @@ fn type_rows(
     sheet: &str,
     strict: bool,
     budget: u64,
+    progress: Progress<'_>,
+    stage_start: usize,
     cancel: &AtomicBool,
 ) -> Result<(), AppError> {
+    let label = if strict { "严格" } else { "宽松" };
+    progress(
+        "classify",
+        stage_start,
+        6,
+        &format!("正在建立{label}凭证分组索引…"),
+    );
     classify(db, strict, budget, cancel)?;
+    progress(
+        "classify",
+        stage_start + 1,
+        6,
+        &format!("正在汇总{label}凭证分组…"),
+    );
     db.execute_batch("DROP TABLE IF EXISTS suite_group_target; DROP TABLE IF EXISTS suite_group_account;
-        DROP TABLE IF EXISTS suite_group_month;
+        DROP TABLE IF EXISTS suite_group_month; DROP TABLE IF EXISTS suite_group_rep;
         CREATE TEMP TABLE suite_group_target(grp INTEGER,account TEXT,PRIMARY KEY(grp,account));
         CREATE TEMP TABLE suite_group_account(grp INTEGER,account TEXT,net REAL,PRIMARY KEY(grp,account));
-        CREATE TEMP TABLE suite_group_month(grp INTEGER,account TEXT,month TEXT,net REAL,PRIMARY KEY(grp,account,month));").map_err(db_error)?;
+        CREATE TEMP TABLE suite_group_month(grp INTEGER,account TEXT,month TEXT,net REAL,PRIMARY KEY(grp,account,month));
+        CREATE TEMP TABLE suite_group_rep(grp INTEGER PRIMARY KEY,rep TEXT NOT NULL);").map_err(db_error)?;
     let tx = db.unchecked_transaction().map_err(db_error)?;
-    let mut groups = db
-        .prepare("SELECT DISTINCT grp FROM suite_members ORDER BY grp")
+    let mut insert_target = tx
+        .prepare("INSERT OR IGNORE INTO suite_group_target VALUES(?1,?2)")
         .map_err(db_error)?;
-    let mut groups = groups.query([]).map_err(db_error)?;
-    while let Some(group) = groups.next().map_err(db_error)? {
+    let mut shape_stmt = tx
+        .prepare("SELECT m.grp,s.signs FROM suite_members m JOIN suite_shapes s ON s.seq=m.seq ORDER BY m.grp,m.seq")
+        .map_err(db_error)?;
+    let mut shapes = shape_stmt.query([]).map_err(db_error)?;
+    while let Some(shape) = shapes.next().map_err(db_error)? {
         check_cancel(cancel)?;
-        let grp: i64 = group.get(0).map_err(db_error)?;
-        let mut stmt=db.prepare("SELECT s.signs FROM suite_members m JOIN suite_shapes s ON s.seq=m.seq WHERE m.grp=?1 ORDER BY m.seq").map_err(db_error)?;
-        let mut rows = stmt.query([grp]).map_err(db_error)?;
-        while let Some(row) = rows.next().map_err(db_error)? {
-            let signs: BTreeMap<String, i8> =
-                serde_json::from_str(&row.get::<_, String>(0).map_err(db_error)?)
-                    .map_err(json_error)?;
-            for account in signs.keys() {
-                db.execute(
-                    "INSERT OR IGNORE INTO suite_group_target VALUES(?1,?2)",
-                    params![grp, account],
-                )
+        let grp: i64 = shape.get(0).map_err(db_error)?;
+        let signs: BTreeMap<String, i8> =
+            serde_json::from_str(&shape.get::<_, String>(1).map_err(db_error)?)
+                .map_err(json_error)?;
+        for account in signs.keys() {
+            insert_target
+                .execute(params![grp, account])
                 .map_err(db_error)?;
-            }
         }
-        db.execute("INSERT INTO suite_group_account SELECT ?1,n.account,SUM(n.net) FROM suite_members m JOIN suite_shapes s ON s.seq=m.seq JOIN suite_nets n ON n.id=s.id WHERE m.grp=?1 GROUP BY n.account",[grp]).map_err(db_error)?;
-        db.execute("INSERT INTO suite_group_month SELECT ?1,x.account,x.month,SUM(x.net) FROM suite_members m JOIN suite_shapes s ON s.seq=m.seq JOIN suite_month x ON x.id=s.id WHERE m.grp=?1 GROUP BY x.account,x.month",[grp]).map_err(db_error)?;
     }
+    drop(shapes);
+    drop(shape_stmt);
+    drop(insert_target);
+    // Aggregate all classification groups in two scans. The previous loop ran
+    // both joins once per group, which became quadratic for varied ledgers.
+    tx.execute_batch(
+        "INSERT INTO suite_group_account
+            SELECT m.grp,n.account,SUM(n.net)
+            FROM suite_members m JOIN suite_shapes s ON s.seq=m.seq JOIN suite_nets n ON n.id=s.id
+            GROUP BY m.grp,n.account;
+         INSERT INTO suite_group_month
+            SELECT m.grp,x.account,x.month,SUM(x.net)
+            FROM suite_members m JOIN suite_shapes s ON s.seq=m.seq JOIN suite_month x ON x.id=s.id
+            GROUP BY m.grp,x.account,x.month;
+         INSERT INTO suite_group_rep
+            SELECT first.grp,s.id
+            FROM (SELECT grp,MIN(seq) AS seq FROM suite_members GROUP BY grp) first
+            JOIN suite_shapes s ON s.seq=first.seq;
+         CREATE INDEX suite_group_target_account ON suite_group_target(account,grp);",
+    )
+    .map_err(db_error)?;
     tx.commit().map_err(db_error)?;
+    progress(
+        "classify",
+        stage_start + 2,
+        6,
+        &format!("正在生成{label}凭证类型明细…"),
+    );
     let months = {
         let mut stmt = db
             .prepare("SELECT DISTINCT month FROM suite_month ORDER BY month")
@@ -742,19 +914,34 @@ fn type_rows(
             .map_err(db_error)?
     };
     let tx = db.unchecked_transaction().map_err(db_error)?;
-    let mut groups = db
+    let mut group_stmt = tx
         .prepare("SELECT DISTINCT grp FROM suite_members ORDER BY grp")
         .map_err(db_error)?;
-    let mut groups = groups.query([]).map_err(db_error)?;
+    let mut groups = group_stmt.query([]).map_err(db_error)?;
+    let mut rep_stmt = tx
+        .prepare("SELECT rep FROM suite_group_rep WHERE grp=?1")
+        .map_err(db_error)?;
+    let mut targets_stmt = tx
+        .prepare("SELECT account FROM suite_group_target WHERE grp=?1 ORDER BY account")
+        .map_err(db_error)?;
+    let mut rank_stmt = tx.prepare("SELECT COUNT(DISTINCT r.rep) FROM suite_group_target t JOIN suite_group_rep r ON r.grp=t.grp WHERE t.account=?1 AND r.rep<=?2").map_err(db_error)?;
+    let mut summaries_stmt = tx.prepare("SELECT x.value FROM suite_members m JOIN suite_shapes s ON s.seq=m.seq JOIN suite_summaries x ON x.id=s.id WHERE m.grp=?1 GROUP BY x.value ORDER BY MIN(x.seq) LIMIT 3").map_err(db_error)?;
+    let mut accounts_stmt = tx
+        .prepare("SELECT account,net FROM suite_group_account WHERE grp=?1 ORDER BY account")
+        .map_err(db_error)?;
+    let mut month_stmt = tx
+        .prepare(
+            "SELECT month,net FROM suite_group_month WHERE grp=?1 AND account=?2 ORDER BY month",
+        )
+        .map_err(db_error)?;
+    let mut insert_output = tx.prepare("INSERT INTO suite_output(sheet,sort_head,sort_rank,sort_label,sort_account,rowdata) VALUES(?1,?2,?3,?4,?5,?6)").map_err(db_error)?;
     while let Some(group) = groups.next().map_err(db_error)? {
         check_cancel(cancel)?;
         let grp: i64 = group.get(0).map_err(db_error)?;
-        let rep:String=db.query_row("SELECT s.id FROM suite_members m JOIN suite_shapes s ON s.seq=m.seq WHERE m.grp=?1 ORDER BY m.seq LIMIT 1",[grp],|r|r.get(0)).map_err(db_error)?;
+        let rep: String = rep_stmt.query_row([grp], |r| r.get(0)).map_err(db_error)?;
         let targets = {
-            let mut stmt = db
-                .prepare("SELECT account FROM suite_group_target WHERE grp=?1 ORDER BY account")
-                .map_err(db_error)?;
-            stmt.query_map([grp], |r| r.get::<_, String>(0))
+            targets_stmt
+                .query_map([grp], |r| r.get::<_, String>(0))
                 .map_err(db_error)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(db_error)?
@@ -763,22 +950,21 @@ fn type_rows(
         for account in targets {
             // Rank representatives for this target exactly as the BTreeSet in
             // the ordinary implementation: distinct ID, lexical ordering.
-            let rank:i64=db.query_row("SELECT COUNT(DISTINCT s.id) FROM suite_members m JOIN suite_shapes s ON s.seq=m.seq JOIN suite_group_target t ON t.grp=m.grp WHERE t.account=?1 AND s.id<=?2 AND s.seq=(SELECT MIN(q.seq) FROM suite_members q WHERE q.grp=m.grp)",params![account,rep],|r|r.get(0)).map_err(db_error)?;
+            let rank: i64 = rank_stmt
+                .query_row(params![account, rep], |r| r.get(0))
+                .map_err(db_error)?;
             labels.push(format!("{account}-类型{}", rank.max(1)));
         }
         let label = labels.join(" | ");
         let summaries = {
-            let mut stmt=db.prepare("SELECT x.value FROM suite_members m JOIN suite_shapes s ON s.seq=m.seq JOIN suite_summaries x ON x.id=s.id WHERE m.grp=?1 GROUP BY x.value ORDER BY MIN(x.seq) LIMIT 3").map_err(db_error)?;
-            stmt.query_map([grp], |r| r.get::<_, String>(0))
+            summaries_stmt
+                .query_map([grp], |r| r.get::<_, String>(0))
                 .map_err(db_error)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(db_error)?
                 .join(" | ")
         };
-        let mut accounts = db
-            .prepare("SELECT account,net FROM suite_group_account WHERE grp=?1 ORDER BY account")
-            .map_err(db_error)?;
-        let mut accounts = accounts.query([grp]).map_err(db_error)?;
+        let mut accounts = accounts_stmt.query([grp]).map_err(db_error)?;
         while let Some(account) = accounts.next().map_err(db_error)? {
             let name: String = account.get(0).map_err(db_error)?;
             let net = round_to_cent(account.get(1).map_err(db_error)?);
@@ -790,19 +976,50 @@ fn type_rows(
                 format_number(net),
             ];
             let mut nonzero = net != 0.0;
+            let month_values = month_stmt
+                .query_map(params![grp, name], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+                })
+                .map_err(db_error)?
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .map_err(db_error)?;
             for month in &months {
-                let value:Option<f64>=db.query_row("SELECT net FROM suite_group_month WHERE grp=?1 AND account=?2 AND month=?3",params![grp,name,month],|r|r.get(0)).optional().map_err(db_error)?;
-                let value = round_to_cent(value.unwrap_or(0.0));
+                let value = round_to_cent(month_values.get(month).copied().unwrap_or(0.0));
                 nonzero |= value != 0.0;
                 output.push(format_number(value));
             }
             if nonzero {
                 let (sort_head, sort_rank) = type_sort_key(&label);
-                db.execute("INSERT INTO suite_output(sheet,sort_head,sort_rank,sort_label,sort_account,rowdata) VALUES(?1,?2,?3,?4,?5,?6)",params![sheet,sort_head,sort_rank,label,name,encode(&output)?]).map_err(db_error)?;
+                insert_output
+                    .execute(params![
+                        sheet,
+                        sort_head,
+                        sort_rank,
+                        label,
+                        name,
+                        encode(&output)?
+                    ])
+                    .map_err(db_error)?;
             }
         }
     }
-    tx.commit().map_err(db_error)
+    drop(insert_output);
+    drop(month_stmt);
+    drop(accounts_stmt);
+    drop(summaries_stmt);
+    drop(rank_stmt);
+    drop(targets_stmt);
+    drop(rep_stmt);
+    drop(groups);
+    drop(group_stmt);
+    tx.commit().map_err(db_error)?;
+    progress(
+        "classify",
+        stage_start + 3,
+        6,
+        &format!("{label}凭证类型已生成。"),
+    );
+    Ok(())
 }
 
 fn write_row(
@@ -890,11 +1107,28 @@ pub(super) fn write_suite(
 ) -> Result<DiskSuiteResult, AppError> {
     initialize(&ledger.db)?;
     let config = aggregate(ledger, mapping, targets, job, budget, progress, cancel)?;
-    progress("classify", 0, 2, "正在按原有宽松和严格口径归类凭证…");
     if job.include_voucher_types {
-        type_rows(&ledger.db, "凭证类型-宽松", false, budget, cancel)?;
-        progress("classify", 1, 2, "正在生成严格凭证类型…");
-        type_rows(&ledger.db, "凭证类型-严格", true, budget, cancel)?;
+        progress("classify", 0, 6, "正在按原有宽松和严格口径归类凭证…");
+        type_rows(
+            &ledger.db,
+            "凭证类型-宽松",
+            false,
+            budget,
+            progress,
+            0,
+            cancel,
+        )?;
+        type_rows(
+            &ledger.db,
+            "凭证类型-严格",
+            true,
+            budget,
+            progress,
+            3,
+            cancel,
+        )?;
+        ledger.db.execute_batch("CREATE INDEX IF NOT EXISTS suite_output_order ON suite_output(sheet,sort_head DESC,sort_rank DESC,sort_label,sort_account,seq);").map_err(db_error)?;
+        progress("classify", 6, 6, "宽松和严格凭证类型已生成。");
     }
     let loss_count = ledger
         .db
@@ -963,6 +1197,7 @@ pub(super) fn write_suite(
     } else {
         None
     };
+    progress("write", 0, 7, "正在生成看账套表工作表…");
     let mut workbook = Workbook::new();
     if job.include_pivot {
         let ws = workbook.add_worksheet_with_constant_memory();
@@ -998,42 +1233,77 @@ pub(super) fn write_suite(
         // The ordinary direction pivot skips rows whose direction cell is
         // blank. Once any nonblank direction exists, don't synthesize an all
         // zero voucher/account row for an empty direction.
-        let pivot_rows_sql = if directions.is_empty() {
-            "SELECT DISTINCT id,account FROM suite_pivot ORDER BY id,account"
-        } else {
-            "SELECT DISTINCT id,account FROM suite_pivot WHERE direction<>'' ORDER BY id,account"
-        };
-        let mut stmt = ledger.db.prepare(pivot_rows_sql).map_err(db_error)?;
-        let mut rows = stmt.query([]).map_err(db_error)?;
         let mut index = 1u32;
-        while let Some(row) = rows.next().map_err(db_error)? {
-            if index % 2000 == 0 {
-                check_cancel(cancel)?;
+        if directions.is_empty() {
+            let mut stmt = ledger.db.prepare("SELECT id,account,SUM(net) FROM suite_pivot GROUP BY id,account ORDER BY id,account").map_err(db_error)?;
+            let mut rows = stmt.query([]).map_err(db_error)?;
+            while let Some(row) = rows.next().map_err(db_error)? {
+                if index % 2000 == 0 {
+                    check_cancel(cancel)?;
+                }
+                let id: String = row.get(0).map_err(db_error)?;
+                let account: String = row.get(1).map_err(db_error)?;
+                let net: f64 = row.get(2).map_err(db_error)?;
+                write_row(
+                    ws,
+                    index,
+                    &[
+                        display_voucher_key(&id),
+                        account,
+                        format_number(round_to_cent(net)),
+                    ],
+                    2,
+                )?;
+                index += 1;
             }
-            let id: String = row.get(0).map_err(db_error)?;
-            let account: String = row.get(1).map_err(db_error)?;
-            let mut values = vec![display_voucher_key(&id), account.clone()];
-            if directions.is_empty() {
-                let v: f64 = ledger
-                    .db
-                    .query_row(
-                        "SELECT SUM(net) FROM suite_pivot WHERE id=?1 AND account=?2",
-                        params![id, account],
-                        |r| r.get(0),
-                    )
-                    .map_err(db_error)?;
-                values.push(format_number(round_to_cent(v)));
-            } else {
-                for d in &directions {
-                    let v:Option<f64>=ledger.db.query_row("SELECT net FROM suite_pivot WHERE id=?1 AND account=?2 AND direction=?3",params![id,account,d],|r|r.get(0)).optional().map_err(db_error)?;
-                    values.push(format_number(round_to_cent(v.unwrap_or(0.0))));
+        } else {
+            let direction_indexes = directions
+                .iter()
+                .enumerate()
+                .map(|(index, value)| (value.as_str(), index))
+                .collect::<HashMap<_, _>>();
+            let mut stmt = ledger.db.prepare("SELECT id,account,direction,net FROM suite_pivot WHERE direction<>'' ORDER BY id,account,direction").map_err(db_error)?;
+            let mut rows = stmt.query([]).map_err(db_error)?;
+            let mut current: Option<(String, String)> = None;
+            let mut amounts = vec![0.0_f64; directions.len()];
+            while let Some(row) = rows.next().map_err(db_error)? {
+                let id: String = row.get(0).map_err(db_error)?;
+                let account: String = row.get(1).map_err(db_error)?;
+                let next = (id, account);
+                if current.as_ref().is_some_and(|value| value != &next) {
+                    let (id, account) = current.take().unwrap();
+                    let mut values = vec![display_voucher_key(&id), account];
+                    values.extend(
+                        amounts
+                            .iter()
+                            .map(|value| format_number(round_to_cent(*value))),
+                    );
+                    write_row(ws, index, &values, 2)?;
+                    index += 1;
+                    amounts.fill(0.0);
+                    if index % 2000 == 0 {
+                        check_cancel(cancel)?;
+                    }
+                }
+                current = Some(next);
+                let direction: String = row.get(2).map_err(db_error)?;
+                if let Some(position) = direction_indexes.get(direction.as_str()) {
+                    amounts[*position] = row.get(3).map_err(db_error)?;
                 }
             }
-            write_row(ws, index, &values, 2)?;
-            index += 1;
+            if let Some((id, account)) = current {
+                let mut values = vec![display_voucher_key(&id), account];
+                values.extend(
+                    amounts
+                        .iter()
+                        .map(|value| format_number(round_to_cent(*value))),
+                );
+                write_row(ws, index, &values, 2)?;
+            }
         }
         ws.set_hidden(true);
     }
+    progress("write", 1, 7, "凭证透视表已生成。");
     if job.include_voucher_types {
         let months = {
             let mut s = ledger
@@ -1045,7 +1315,8 @@ pub(super) fn write_suite(
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(db_error)?
         };
-        for name in ["凭证类型-宽松", "凭证类型-严格"] {
+        for (type_index, name) in ["凭证类型-宽松", "凭证类型-严格"].into_iter().enumerate()
+        {
             let ws = workbook.add_worksheet_with_constant_memory();
             ws.set_name(name).map_err(xlsx_error)?;
             let mut h = vec![
@@ -1061,8 +1332,10 @@ pub(super) fn write_suite(
             h.extend(months.clone());
             headers(ws, &h)?;
             output_rows(&ledger.db, name, ws, cancel)?;
+            progress("write", type_index + 2, 7, &format!("{name}工作表已生成。"));
         }
     }
+    progress("write", 3, 7, "凭证类型工作表已生成。");
     if !config.rows.is_empty() {
         let columns = {
             let mut s = ledger
@@ -1089,43 +1362,55 @@ pub(super) fn write_suite(
         }
         h.extend(columns.clone());
         headers(ws, &h)?;
+        let column_indexes = columns
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (value.as_str(), index))
+            .collect::<HashMap<_, _>>();
         let mut stmt = ledger
             .db
-            .prepare("SELECT DISTINCT rowkey FROM suite_custom ORDER BY rowkey")
+            .prepare("SELECT rowkey,col,net FROM suite_custom ORDER BY rowkey,col")
             .map_err(db_error)?;
         let mut rows = stmt.query([]).map_err(db_error)?;
         let mut index = 1u32;
+        let mut current = None::<String>;
+        let mut amounts = vec![0.0_f64; columns.len()];
+        let mut total = 0.0_f64;
         while let Some(row) = rows.next().map_err(db_error)? {
-            check_cancel(cancel)?;
             let key: String = row.get(0).map_err(db_error)?;
+            if current.as_ref().is_some_and(|value| value != &key) {
+                let mut values: Vec<String> =
+                    serde_json::from_str(current.as_deref().unwrap()).map_err(json_error)?;
+                if !config.columns.is_empty() {
+                    values.push(format_number(total));
+                }
+                values.extend(amounts.iter().map(|value| format_number(*value)));
+                write_row(ws, index, &values, config.rows.len())?;
+                index += 1;
+                amounts.fill(0.0);
+                total = 0.0;
+                if index % 2000 == 0 {
+                    check_cancel(cancel)?;
+                }
+            }
+            current = Some(key);
+            let column: String = row.get(1).map_err(db_error)?;
+            let amount: f64 = row.get(2).map_err(db_error)?;
+            total += amount;
+            if let Some(position) = column_indexes.get(column.as_str()) {
+                amounts[*position] = amount;
+            }
+        }
+        if let Some(key) = current {
             let mut values: Vec<String> = serde_json::from_str(&key).map_err(json_error)?;
             if !config.columns.is_empty() {
-                let total: f64 = ledger
-                    .db
-                    .query_row(
-                        "SELECT SUM(net) FROM suite_custom WHERE rowkey=?1",
-                        [&key],
-                        |r| r.get(0),
-                    )
-                    .map_err(db_error)?;
                 values.push(format_number(total));
             }
-            for col in &columns {
-                let v: Option<f64> = ledger
-                    .db
-                    .query_row(
-                        "SELECT net FROM suite_custom WHERE rowkey=?1 AND col=?2",
-                        params![key, col],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .map_err(db_error)?;
-                values.push(format_number(v.unwrap_or(0.0)));
-            }
+            values.extend(amounts.iter().map(|value| format_number(*value)));
             write_row(ws, index, &values, config.rows.len())?;
-            index += 1;
         }
     }
+    progress("write", 4, 7, "自定义透视工作表已生成。");
     {
         let ws = workbook.add_worksheet_with_constant_memory();
         ws.set_name("科目汇总").map_err(xlsx_error)?;
@@ -1153,6 +1438,7 @@ pub(super) fn write_suite(
             index += 1;
         }
     }
+    progress("write", 5, 7, "科目汇总工作表已生成。");
     {
         let ws = workbook.add_worksheet_with_constant_memory();
         ws.set_name("_targets").map_err(xlsx_error)?;
@@ -1163,12 +1449,12 @@ pub(super) fn write_suite(
         }
         ws.set_hidden(true);
     }
+    progress("write", 6, 7, "正在压缩并保存看账套表…");
     if let Some(value) = llm_analysis.as_ref() {
         write_llm_analysis_sheet(workbook.add_worksheet(), value)?;
     }
     activate_first_visible_sheet(&mut workbook);
     let partial = partial_path(path);
-    progress("write", 0, 1, "正在以恒定内存写出看账套表…");
     if let Err(failure) = workbook.save(&partial).map_err(xlsx_error) {
         let _ = fs::remove_file(&partial);
         return Err(failure);
@@ -1177,7 +1463,7 @@ pub(super) fn write_suite(
         let _ = fs::remove_file(&partial);
         return Err(failure);
     }
-    progress("write", 1, 1, "看账套表已写出。");
+    progress("write", 7, 7, "看账套表已写出。");
     Ok(DiskSuiteResult {
         summary,
         loss_count,

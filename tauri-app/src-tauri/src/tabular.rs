@@ -147,6 +147,10 @@ struct KanzhangParams {
     exclude_accounts: Vec<String>,
     #[serde(default)]
     include_pivot: bool,
+    #[serde(default = "default_true")]
+    include_counterpart: bool,
+    #[serde(default = "default_true")]
+    include_suite: bool,
     #[serde(default)]
     target_batches: Vec<LedgerBatch>,
     #[serde(default = "default_true")]
@@ -915,8 +919,13 @@ fn export_kanzhang(
             6,
             &format!("正在处理批次 {}：{}…", batch_index + 1, batch.name),
         );
-        let filtered =
-            filter_ledger_rows(&table, &mapping, &batch.accounts, &job.exclude_accounts)?;
+        let filtered = filter_ledger_rows_by_mode(
+            &table,
+            &mapping,
+            &batch.accounts,
+            &job.exclude_accounts,
+            job.include_counterpart,
+        )?;
         progress("polars", 2, 6, "Rust Polars 正在生成凭证、科目及月份汇总…");
         let analysis = analyze_ledger(&table, &mapping, &filtered, &batch.accounts, &job, cancel)?;
         progress("classify", 4, 6, "正在识别凭证类型、JE 匹配和损益结转…");
@@ -937,6 +946,7 @@ fn export_kanzhang(
                 &analysis,
                 job.include_pivot,
                 job.include_voucher_types,
+                job.include_suite && job.include_counterpart,
                 job.rows_per_sheet,
                 cancel,
             )?
@@ -946,6 +956,7 @@ fn export_kanzhang(
                 &analysis,
                 job.include_pivot,
                 job.include_voucher_types,
+                job.include_suite && job.include_counterpart,
                 job.rows_per_sheet,
                 cancel,
             )?
@@ -1124,8 +1135,9 @@ fn export_kanzhang_disk(
         fs::create_dir_all(parent).map_err(io_error)?;
         let stem = output.file_stem().unwrap_or_default().to_string_lossy();
         let suite_path = parent.join(format!("{stem}_套表.xlsx"));
-        let suite_enabled =
-            job.include_pivot || job.include_voucher_types || !job.pivot_rows.is_empty();
+        let suite_enabled = job.include_counterpart
+            && job.include_suite
+            && (job.include_pivot || job.include_voucher_types || !job.pivot_rows.is_empty());
         progress(
             "write",
             batch_start + batch_width * 5 / 100,
@@ -1147,6 +1159,7 @@ fn export_kanzhang_disk(
             &output,
             &ledger.table.headers,
             job.rows_per_sheet,
+            job.include_counterpart,
             job.mark_loss_transfer,
             &detail_progress,
             cancel,
@@ -1572,6 +1585,43 @@ fn filter_ledger_rows(
     Ok(result)
 }
 
+fn filter_ledger_rows_by_mode(
+    table: &Table,
+    mapping: &LedgerMapping,
+    targets: &[String],
+    excludes: &[String],
+    include_counterpart: bool,
+) -> Result<Vec<Vec<String>>, AppError> {
+    if include_counterpart {
+        return filter_ledger_rows(table, mapping, targets, excludes);
+    }
+    let account_indexes = mapping
+        .account_columns()
+        .into_iter()
+        .filter_map(|name| header_index(&table.headers, name))
+        .collect::<Vec<_>>();
+    if account_indexes.is_empty() {
+        return Err(error(
+            "KANZHANG_MAPPING_INCOMPLETE",
+            "请先确认科目字段映射。",
+            None,
+        ));
+    }
+    let target_set = targets
+        .iter()
+        .map(|value| normalize_account_text(value))
+        .filter(|value| !value.is_empty())
+        .collect::<HashSet<_>>();
+    Ok(table
+        .rows
+        .iter()
+        .filter(|row| {
+            target_set.is_empty() || row_matches_accounts(row, &account_indexes, &target_set)
+        })
+        .cloned()
+        .collect())
+}
+
 fn excluded_ledger_rows(
     table: &Table,
     mapping: &LedgerMapping,
@@ -1751,9 +1801,13 @@ fn analyze_ledger(
         .map(|value| normalize_account_text(value))
         .filter(|value| !value.is_empty())
         .collect::<HashSet<_>>();
-    let amounts = ledger_amounts(rows, &table.headers, mapping, &id_indexes, None);
     let loss_ids = if job.mark_loss_transfer {
-        detect_loss_transfer_ids(rows, &id_indexes, &account_indexes)
+        let loss_source = if job.include_counterpart {
+            rows
+        } else {
+            &table.rows
+        };
+        detect_loss_transfer_ids(loss_source, &id_indexes, &account_indexes)
     } else {
         HashSet::new()
     };
@@ -1785,6 +1839,60 @@ fn analyze_ledger(
         enriched.push(output);
     }
     let excluded_headers = table.headers.clone();
+    let target_accounts = || {
+        let mut values = targets
+            .iter()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        values.sort();
+        values.dedup();
+        values
+    };
+    let account_headers = || {
+        mapping
+            .account_columns()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    };
+    let amount_headers = || {
+        [
+            mapping.amount.as_deref(),
+            mapping.debit.as_deref(),
+            mapping.credit.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::to_owned)
+        .collect()
+    };
+    if !job.include_suite || !job.include_counterpart {
+        let empty_pivot = || PivotResult {
+            headers: Vec::new(),
+            rows: Vec::new(),
+            row_field_count: 0,
+        };
+        return Ok(LedgerAnalysis {
+            headers,
+            rows: enriched,
+            excluded_headers,
+            excluded_rows,
+            summary: empty_pivot(),
+            voucher_pivot: empty_pivot(),
+            voucher_type_loose: empty_pivot(),
+            voucher_type_strict: empty_pivot(),
+            custom_pivot: None,
+            llm_analysis: None,
+            target_accounts: target_accounts(),
+            account_headers: account_headers(),
+            amount_headers: amount_headers(),
+            loss_count: loss_ids.len(),
+            je_pairs: 0,
+            je_cross_pairs: 0,
+        });
+    }
+    let amounts = ledger_amounts(rows, &table.headers, mapping, &id_indexes, None);
     let summary = ledger_summary_from_amounts(rows, &account_indexes, &amounts.net)?;
     let key_label = voucher_key_label(&table.headers, &id_indexes);
     let voucher_pivot = build_voucher_pivot_rust(
@@ -1847,30 +1955,9 @@ fn analyze_ledger(
         custom_pivot,
         llm_analysis,
         // 用原始科目名而不是 target_set 里归一化过的小写值——`_targets` 的 A 列是给人看的。
-        target_accounts: {
-            let mut values = targets
-                .iter()
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty())
-                .collect::<Vec<_>>();
-            values.sort();
-            values.dedup();
-            values
-        },
-        account_headers: mapping
-            .account_columns()
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
-        amount_headers: [
-            mapping.amount.as_deref(),
-            mapping.debit.as_deref(),
-            mapping.credit.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .map(str::to_owned)
-        .collect(),
+        target_accounts: target_accounts(),
+        account_headers: account_headers(),
+        amount_headers: amount_headers(),
         loss_count: loss_ids.len(),
         // 对冲配对属于正负数智能标记，看账不再统计。
         je_pairs: 0,
@@ -4592,16 +4679,18 @@ fn write_kanzhang_xlsx_suite(
     analysis: &LedgerAnalysis,
     include_pivot: bool,
     include_voucher_types: bool,
+    include_suite: bool,
     rows_per_sheet: usize,
     cancel: &AtomicBool,
 ) -> Result<Vec<PathBuf>, AppError> {
-    let suite_enabled = kanzhang_suite_enabled(analysis, include_pivot, include_voucher_types);
+    let suite_enabled =
+        include_suite && kanzhang_suite_enabled(analysis, include_pivot, include_voucher_types);
     let detail_partial = partial_path(detail);
     write_kanzhang_detail_workbook(
         &detail_partial,
         analysis,
         rows_per_sheet,
-        !suite_enabled,
+        include_suite && !suite_enabled,
         cancel,
     )?;
     replace_file(&detail_partial, detail)?;
@@ -4629,6 +4718,7 @@ fn write_kanzhang_csv_suite(
     analysis: &LedgerAnalysis,
     include_pivot: bool,
     include_voucher_types: bool,
+    include_suite: bool,
     rows_per_sheet: usize,
     cancel: &AtomicBool,
 ) -> Result<Vec<PathBuf>, AppError> {
@@ -4663,7 +4753,7 @@ fn write_kanzhang_csv_suite(
         replace_file(&partial, &excluded)?;
         outputs.push(excluded);
     }
-    if kanzhang_suite_enabled(analysis, include_pivot, include_voucher_types) {
+    if include_suite && kanzhang_suite_enabled(analysis, include_pivot, include_voucher_types) {
         let suite = parent.join(format!("{stem}_套表.xlsx"));
         let partial = partial_path(&suite);
         write_kanzhang_suite_workbook(
@@ -7383,6 +7473,19 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
     #[test]
+    fn ledger_target_can_export_single_side_only() {
+        let root = temp_dir("ledger-single-side");
+        let input = root.join("ledger.csv");
+        fs::write(&input,"凭证号,科目名称,借方金额,贷方金额\n1,现金,100,0\n1,收入,0,100\n2,银行,20,0\n2,费用,0,20\n").unwrap();
+        let table = load_table(&input, None, 1).unwrap();
+        let mapping = suggest_mapping(&table.headers, &table.rows);
+        let rows =
+            filter_ledger_rows_by_mode(&table, &mapping, &["现金".into()], &[], false).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1], "现金");
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
     fn excluded_accounts_are_separate_and_do_not_damage_complete_voucher() {
         let headers = vec!["凭证号".into(), "科目名称".into(), "金额".into()];
         let rows = vec![
@@ -9086,6 +9189,35 @@ mod tests {
         assert!(outputs[0].ends_with("_凭证明细.csv"), "{outputs:?}");
         assert!(outputs[1].ends_with("_剔除明细.csv"), "{outputs:?}");
         assert!(outputs[2].ends_with("_套表.xlsx"), "{outputs:?}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kanzhang_single_side_disables_suite_even_when_requested() {
+        let root = temp_dir("kanzhang-single-side-export");
+        let input = root.join("ledger.csv");
+        let output = root.join("out.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,借方金额,贷方金额\n1,收入,100,0\n1,银行,0,100\n",
+        )
+        .unwrap();
+        let result = export_kanzhang(
+            json!({"inputPath":input,"outputPath":output,
+                "targetBatches":[{"name":"收入","accounts":["收入"]}],
+                "includeCounterpart":false,"includeSuite":true,
+                "includePivot":true,"includeVoucherTypes":true,"llmAnalysis":false}),
+            &|_, _, _, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(result["outputPaths"].as_array().unwrap().len(), 1);
+        let detail = PathBuf::from(result["outputPaths"][0].as_str().unwrap());
+        let bytes = fs::read(detail).unwrap();
+        let text = String::from_utf8_lossy(&bytes[3..]);
+        assert!(text.contains("收入"));
+        assert!(!text.contains("银行"));
+        assert!(!root.join("out_套表.xlsx").exists());
         let _ = fs::remove_dir_all(root);
     }
     #[test]

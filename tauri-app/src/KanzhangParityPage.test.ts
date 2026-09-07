@@ -32,6 +32,7 @@ import {
   setKanzhangMapping,
   shouldAutoApply,
   shouldShowKanzhangJobProgress,
+  setCounterpartMode,
   type KanzhangDraft,
   type Mapping,
   undoMappingChange,
@@ -52,6 +53,8 @@ const draft = (): KanzhangDraft => ({
   outputTouched: false,
   includePivot: true,
   includeVoucherTypes: true,
+  includeCounterpart: true,
+  includeSuite: true,
   markLossTransfer: true,
   llmAnalysis: true,
   pivotRows: [],
@@ -66,6 +69,13 @@ describe("目标批次清空", () => {
       batches: [{ name: "批次1", accounts: [] }],
       activeBatch: 0,
     });
+  });
+});
+
+describe("看账导出模式联动", () => {
+  it("关闭对方科目时强制关闭套表，重新开启时恢复默认套表", () => {
+    expect(setCounterpartMode(false)).toEqual({includeCounterpart:false,includeSuite:false});
+    expect(setCounterpartMode(true)).toEqual({includeCounterpart:true,includeSuite:true});
   });
 });
 

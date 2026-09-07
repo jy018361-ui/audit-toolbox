@@ -1,5 +1,13 @@
 # 看账小工具迁移功能矩阵
 
+## 2026-09-07 · 对方科目与套表改为独立导出选择
+
+- 导出设置新增 `includeCounterpart` 与 `includeSuite`，旧任务缺少字段时均按 `true` 处理，保持完整凭证明细加套表的既有行为。
+- `includeCounterpart=false` 时，普通路径只保留命中目标科目的源行；大 CSV 路径直接按磁盘目标科目索引流式写出，不把整张凭证重新装入内存。后端同时强制禁用套表，即使绕过界面提交 `includeSuite=true` 也不会生成套表。
+- `includeCounterpart=true, includeSuite=false` 时仍导出完整凭证明细，但跳过科目汇总、凭证分析、凭证类型、自定义透视和 LLM 分析；大 CSV 不进入 `disk_suite` 聚合阶段。
+- 套表失败的磁盘任务继续保留明细，并通过 `warnings` 在看账结果区提示部分完成。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib selected_csv_can_export_only_target_account_rows -- --test-threads=1`；`cargo test --manifest-path src-tauri/Cargo.toml --lib ledger_target_can_export_single_side_only -- --test-threads=1`；`npx vitest run src/KanzhangParityPage.test.ts --exclude .claude/**`。
+
 ## 2026-09-07 · 6GB CSV 导出的动态并行与 SQLite 热路径优化
 
 - 实机导出采样显示 worker 私有内存约 160–300 MiB，一个 CPU 核心接近满载；当时的慢点不是 worker 触及内存上限，而是约 514 万行逐行更新凭证、科目、方向、月份、摘要等多张带索引汇总表，累计形成数千万次 B-tree 修改。扫描阶段现只向无索引临时表顺序追加一次，随后分别用 `GROUP BY`/窗口函数批量生成各汇总表；进度拆成“读取并暂存”与五个批量汇总阶段，不再把这一大段统称为并行汇总。

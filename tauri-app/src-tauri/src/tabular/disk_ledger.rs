@@ -1258,12 +1258,13 @@ impl DiskLedger {
     ) -> Result<(), AppError> {
         self.visit_query(&format!("SELECT r.data,p.fills,p.{} FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE p.voucher IN (SELECT voucher FROM selected) ORDER BY p.seq",self.selected_net_column()),cancel,&mut visit)
     }
-    fn visit_selected_marked(
+    fn visit_selected_marked_where(
         &self,
+        selected_where: &str,
         cancel: &AtomicBool,
         mut visit: impl FnMut(Vec<String>, f64, bool) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
-        let mut statement=self.db.prepare(&format!("SELECT r.data,p.fills,p.{},EXISTS(SELECT 1 FROM detail_loss l WHERE l.voucher=p.voucher) FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE p.voucher IN (SELECT voucher FROM selected) ORDER BY p.seq",self.selected_net_column())).map_err(sql_error)?;
+        let mut statement=self.db.prepare(&format!("SELECT r.data,p.fills,p.{},EXISTS(SELECT 1 FROM detail_loss l WHERE l.voucher=p.voucher) FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE {selected_where} ORDER BY p.seq",self.selected_net_column())).map_err(sql_error)?;
         let mut cursor = statement.query([]).map_err(sql_error)?;
         let mut index = 0usize;
         while let Some(record) = cursor.next().map_err(sql_error)? {
@@ -1330,16 +1331,22 @@ impl DiskLedger {
         base: &Path,
         headers: &[String],
         rows_per_part: usize,
+        include_counterpart: bool,
         mark_loss_transfer: bool,
         progress: Progress<'_>,
         cancel: &AtomicBool,
     ) -> Result<DetailExport, AppError> {
         use std::io::Write;
 
+        let selected_where = if include_counterpart {
+            "p.voucher IN (SELECT voucher FROM selected)"
+        } else {
+            "p.account_norm IN (SELECT account FROM targets)"
+        };
         let total = self
             .db
             .query_row(
-                "SELECT COUNT(*) FROM processed WHERE voucher IN (SELECT voucher FROM selected)",
+                &format!("SELECT COUNT(*) FROM processed p WHERE {selected_where}"),
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -1433,9 +1440,13 @@ impl DiskLedger {
             Ok(())
         };
         let result = if mark_loss_transfer {
-            self.visit_selected_marked(cancel, |row, _, loss| write_row(row, loss))
-        } else {
+            self.visit_selected_marked_where(selected_where, cancel, |row, _, loss| {
+                write_row(row, loss)
+            })
+        } else if include_counterpart {
             self.visit_selected(cancel, |row, _| write_row(row, false))
+        } else {
+            self.visit_query(&format!("SELECT r.data,p.fills,p.{} FROM processed p JOIN raw_cache.rows r ON r.rowid=p.seq+1 WHERE {selected_where} ORDER BY p.seq", self.selected_net_column()), cancel, &mut |row, _| write_row(row, false))
         };
         if let Err(err) = result {
             let _ = fs::remove_file(&partial);
@@ -1849,6 +1860,7 @@ mod tests {
                 &ledger.table.headers,
                 2,
                 true,
+                true,
                 &|_, _, _, _| {},
                 &cancel,
             )
@@ -1883,6 +1895,7 @@ mod tests {
                 &ledger.table.headers,
                 100,
                 true,
+                true,
                 &|_, _, _, _| {},
                 &cancel,
             )
@@ -1894,6 +1907,30 @@ mod tests {
         assert_eq!(reader.headers().unwrap().len(), 5);
         assert_eq!(records[0].len(), 5);
         assert_eq!(records[0].get(4), Some(""));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selected_csv_can_export_only_target_account_rows() {
+        let (ledger, root) = fixture();
+        let cancel = AtomicBool::new(false);
+        ledger.select(&["现金".into()], &cancel).unwrap();
+        let output = ledger
+            .write_selected_csv(
+                &root.join("单边.csv"),
+                &ledger.table.headers,
+                100,
+                false,
+                false,
+                &|_, _, _, _| {},
+                &cancel,
+            )
+            .unwrap();
+        assert_eq!(output.rows, 1);
+        let bytes = fs::read(&output.paths[0]).unwrap();
+        let text = String::from_utf8_lossy(&bytes[3..]);
+        assert!(text.contains("001,现金,100,"));
+        assert!(!text.contains("收入"));
         fs::remove_dir_all(root).unwrap();
     }
 }

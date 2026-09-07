@@ -12,6 +12,7 @@ from openpyxl import load_workbook
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.workbook.properties import CalcProperties
 
 
 NAVY = "17324D"
@@ -319,8 +320,17 @@ def style_service_sheet(ws):
     apply_page_setup(ws, "A1:H62", "1:4")
 
 
-def parse_source_name(return_formula: object) -> str:
-    text = str(return_formula or "")
+def parse_source_name(return_link: object) -> str:
+    if hasattr(return_link, "value"):
+        hyperlink = getattr(return_link, "hyperlink", None)
+        text = str(
+            getattr(hyperlink, "target", None)
+            or getattr(hyperlink, "location", None)
+            or return_link.value
+            or ""
+        )
+    else:
+        text = str(return_link or "")
     match = re.search(r"#'?(AUD2026|FY26|IPO)'?!", text, re.IGNORECASE)
     if not match:
         return "AUD2026"
@@ -330,6 +340,21 @@ def parse_source_name(return_formula: object) -> str:
 
 def quote_sheet_name(name: str) -> str:
     return name.replace("'", "''")
+
+
+def set_internal_hyperlink(cell, sheet_name: str, target_cell: str, display: object):
+    safe_sheet = quote_sheet_name(sheet_name)
+    cell.value = display
+    cell.hyperlink = f"#'{safe_sheet}'!{target_cell}"
+
+
+def configure_calculation(wb):
+    """Keep smart recalculation without forcing a full-workbook recalculation."""
+    if wb.calculation is None:
+        wb.calculation = CalcProperties()
+    wb.calculation.fullCalcOnLoad = False
+    wb.calculation.forceFullCalc = False
+    wb.calculation.calcMode = "auto"
 
 
 def hyperlink_display(value: object):
@@ -423,7 +448,10 @@ def create_index_sheet(wb, service_sheets):
     ws["A2"].alignment = Alignment(horizontal="left", vertical="center")
     ws.row_dimensions[2].height = 27
 
-    aud2026_count = sum(1 for sheet in service_sheets if parse_source_name(sheet["I1"].value) == "AUD2026")
+    aud2026_count = sum(
+        1 for sheet in service_sheets
+        if parse_source_name(sheet["I1"]) == "AUD2026"
+    )
     ipo_count = len(service_sheets) - aud2026_count
     summary = [
         ("A4", "服务方案", "B4", len(service_sheets)),
@@ -471,7 +499,7 @@ def create_index_sheet(wb, service_sheets):
 
     for index, service_ws in enumerate(service_sheets, 1):
         row = 7 + index
-        source_name = parse_source_name(service_ws["I1"].value)
+        source_name = parse_source_name(service_ws["I1"])
         safe_sheet = quote_sheet_name(service_ws.title)
         service_number = service_ws["B2"].value
         source_info = source_info_by_service.get(
@@ -500,7 +528,9 @@ def create_index_sheet(wb, service_sheets):
         else:
             ws.cell(row, 9).value = None
             ws.cell(row, 10).value = "待补充Section"
-        ws.cell(row, 11).value = f'=HYPERLINK("#\'{safe_sheet}\'!A1","打开")'
+        set_internal_hyperlink(
+            ws.cell(row, 11), service_ws.title, "A1", "打开"
+        )
 
         row_fill = WHITE if row % 2 == 0 else LIGHT
         for col in range(1, 12):
@@ -544,9 +574,7 @@ def format_workbook(input_path: Path, output_path: Path):
 
     create_index_sheet(wb, service_sheets)
 
-    wb.calculation.fullCalcOnLoad = True
-    wb.calculation.forceFullCalc = True
-    wb.calculation.calcMode = "auto"
+    configure_calculation(wb)
     wb.active = 0
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

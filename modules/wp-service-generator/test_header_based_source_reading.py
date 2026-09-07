@@ -11,6 +11,7 @@ from generate_wp_project_workbook import (
     fill_service_sheet,
     find_section_list_file,
     find_service_order_file,
+    prepare_template,
 )
 
 
@@ -57,6 +58,30 @@ def add_source_sheet(workbook, title):
 
 
 class HeaderBasedSourceReadingTests(unittest.TestCase):
+    def test_reference_hour_overrides_are_applied(self):
+        workbook = Workbook()
+        template = workbook.active
+        template["H4"] = "参考时间/Entity"
+        template["B5"] = "C_货币资金（除函证程序）"
+        template["H5"] = 4.6
+        template["B6"] = "C_货币资金_银行函证"
+        template["H6"] = 12.5
+
+        prepare_template(template)
+
+        self.assertEqual(template["H5"].value, 3)
+        self.assertEqual(template["H6"].value, 10)
+
+    def test_calculation_uses_smart_auto_mode(self):
+        workbook = Workbook()
+        workbook.calculation = None
+
+        formatter.configure_calculation(workbook)
+
+        self.assertEqual(workbook.calculation.calcMode, "auto")
+        self.assertFalse(workbook.calculation.fullCalcOnLoad)
+        self.assertFalse(workbook.calculation.forceFullCalc)
+
     def test_input_files_are_found_by_keywords(self):
         folder = Path("test-inputs")
         service_order = folder / "8月导出的 WP 服务单 v2.xlsx"
@@ -150,6 +175,16 @@ class HeaderBasedSourceReadingTests(unittest.TestCase):
             [service.cell(row, 2).value for row in range(58, 62)],
             [0.08, 0.25, 0.58, 0.09],
         )
+        self.assertEqual(
+            service["E5"].value,
+            '=IF(OR(C5="",H5=""),"",ROUND(C5*H5,2))',
+        )
+        self.assertEqual(
+            service["G5"].value,
+            '=IF(AND(F5="",E5=""),"",ROUND(IF(E5="",0,E5)+IFERROR(VALUE(F5),0),2))',
+        )
+        self.assertEqual(service["I1"].value, "返回源表")
+        self.assertEqual(service["I1"].hyperlink.target, "#'AUD2026'!A2")
 
 
 if __name__ == "__main__":

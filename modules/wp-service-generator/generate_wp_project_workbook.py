@@ -12,9 +12,11 @@ import format_wp_workbook as workbook_formatter
 
 workbook_formatter = importlib.reload(workbook_formatter)
 create_index_sheet = workbook_formatter.create_index_sheet
+configure_calculation = workbook_formatter.configure_calculation
 style_service_sheet = workbook_formatter.style_service_sheet
 style_source_sheet = workbook_formatter.style_source_sheet
 validate_workbook = workbook_formatter.validate_workbook
+set_internal_hyperlink = workbook_formatter.set_internal_hyperlink
 source_column_map = workbook_formatter.source_column_map
 source_value = workbook_formatter.source_value
 
@@ -28,6 +30,10 @@ DEFAULT_SER_RULES = (
     {"role": "Staff", "hours_mix": 0.58, "ser_rate": 683.0},
     {"role": "Intern", "hours_mix": 0.09, "ser_rate": 173.0},
 )
+REFERENCE_HOUR_OVERRIDES = {
+    "C_货币资金（除函证程序）": 3.0,
+    "C_货币资金_银行函证": 10.0,
+}
 
 
 def normalized_file_stem(path: Path) -> str:
@@ -175,16 +181,6 @@ def safe_sheet_name(preferred: object, used_names: set[str]) -> str:
         suffix_number += 1
     used_names.add(candidate)
     return candidate
-
-
-def quote_sheet(name: str) -> str:
-    return name.replace("'", "''")
-
-
-def hyperlink_formula(sheet_name: str, target_cell: str, display: object) -> str:
-    safe_sheet = quote_sheet(sheet_name)
-    safe_display = str(display or "").replace('"', '""')
-    return f'=HYPERLINK("#\'{safe_sheet}\'!{target_cell}","{safe_display}")'
 
 
 def normalize_base_sheet_names(wb):
@@ -548,6 +544,22 @@ def prepare_template(ws):
             ws.cell(row, 8).value = float(str(value).replace(",", ""))
         except (TypeError, ValueError):
             ws.cell(row, 8).value = None
+    override_keys = {
+        normalize_section_name(section): hours
+        for section, hours in REFERENCE_HOUR_OVERRIDES.items()
+    }
+    applied = set()
+    for row in range(5, 37):
+        section_key = normalize_section_name(ws.cell(row, 2).value)
+        if section_key in override_keys:
+            ws.cell(row, 8).value = override_keys[section_key]
+            applied.add(section_key)
+    missing = set(override_keys) - applied
+    if missing:
+        raise ValueError(
+            "服务方案模板缺少需要更新参考工时的Section："
+            + "、".join(sorted(missing))
+        )
     if ws.max_row >= 55:
         ws.delete_rows(55, ws.max_row - 54)
 
@@ -624,8 +636,8 @@ def fill_service_sheet(ws, record, section_details, ser_config):
     ws["C2"] = "=G37"
     ws["D1"] = "SER"
     ws["D2"] = "=F62"
-    ws["I1"] = hyperlink_formula(
-        record["source_sheet"], f"A{record['source_row']}", "返回源表"
+    set_internal_hyperlink(
+        ws["I1"], record["source_sheet"], f"A{record['source_row']}", "返回源表"
     )
     ws["H4"] = "参考时间/Entity"
 
@@ -646,12 +658,11 @@ def fill_service_sheet(ws, record, section_details, ser_config):
             ws.cell(row, 6).value = None
         ws.cell(row, 5).value = (
             f'=IF(OR(C{row}="",H{row}=""),"",'
-            f'ROUND(C{row}*IFERROR(VALUE(H{row}),0),2))'
+            f'ROUND(C{row}*H{row},2))'
         )
         ws.cell(row, 7).value = (
-            f'=IF(AND(F{row}="",OR(C{row}="",H{row}="")),"",'
-            f'ROUND(IF(OR(C{row}="",H{row}=""),0,C{row}*IFERROR(VALUE(H{row}),0))'
-            f'+IFERROR(VALUE(F{row}),0),2))'
+            f'=IF(AND(F{row}="",E{row}=""),"",'
+            f'ROUND(IF(E{row}="",0,E{row})+IFERROR(VALUE(F{row}),0),2))'
         )
     ws["G37"] = "=SUM(G5:G36)*1.1"
     ws["C41"] = record["pre_start"]
@@ -751,15 +762,21 @@ def generate(
             record = record_by_number.get(service_number)
             if not record:
                 continue
-            ws.cell(row, columns["service_number"]).value = hyperlink_formula(
-                record["sheet_name"], "A1", service_number
+            set_internal_hyperlink(
+                ws.cell(row, columns["service_number"]),
+                record["sheet_name"],
+                "A1",
+                service_number,
             )
             related_order = display_value(
                 source_value(ws, row, columns, "related_order")
             )
             if related_order:
-                ws.cell(row, columns["related_order"]).value = hyperlink_formula(
-                    record["sheet_name"], "A1", related_order
+                set_internal_hyperlink(
+                    ws.cell(row, columns["related_order"]),
+                    record["sheet_name"],
+                    "A1",
+                    related_order,
                 )
 
     for name in ("AUD2026", "AUD2025", "IPO", "IPO archive"):
@@ -769,9 +786,7 @@ def generate(
         style_service_sheet(ws)
     create_index_sheet(wb, service_sheets)
 
-    wb.calculation.fullCalcOnLoad = True
-    wb.calculation.forceFullCalc = True
-    wb.calculation.calcMode = "auto"
+    configure_calculation(wb)
     wb.active = 0
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
@@ -817,14 +832,16 @@ def validate_formula_logic(output_path: Path, section_details=None, ser_config=N
             and ws["G37"].value == "=SUM(G5:G36)*1.1"
             and ws["B56"].value == "=G37"
             and ws["H4"].value == "参考时间/Entity"
+            and ws["H5"].value == 3
+            and ws["H6"].value == 10
             and all(
                 ws.cell(row, 7).value
-                == f'=IF(AND(F{row}="",OR(C{row}="",H{row}="")),"",ROUND(IF(OR(C{row}="",H{row}=""),0,C{row}*IFERROR(VALUE(H{row}),0))+IFERROR(VALUE(F{row}),0),2))'
+                == f'=IF(AND(F{row}="",E{row}=""),"",ROUND(IF(E{row}="",0,E{row})+IFERROR(VALUE(F{row}),0),2))'
                 for row in range(5, 37)
             )
             and all(
                 ws.cell(row, 5).value
-                == f'=IF(OR(C{row}="",H{row}=""),"",ROUND(C{row}*IFERROR(VALUE(H{row}),0),2))'
+                == f'=IF(OR(C{row}="",H{row}=""),"",ROUND(C{row}*H{row},2))'
                 for row in range(5, 37)
             )
             and all(
@@ -840,6 +857,8 @@ def validate_formula_logic(output_path: Path, section_details=None, ser_config=N
             == [mix for _, mix, _ in ser_config]
             and [ws.cell(row, 4).value for row in range(58, 62)]
             == [rate for _, _, rate in ser_config]
+            and ws["I1"].value == "返回源表"
+            and ws["I1"].hyperlink is not None
         )
         if not expected:
             errors.append(ws.title)
@@ -873,6 +892,12 @@ def validate_formula_logic(output_path: Path, section_details=None, ser_config=N
         "差异", "核对结果", "查看服务方案",
     ]
     actual_headers = [index_ws.cell(7, col).value for col in range(1, 12)]
+    if (
+        wb.calculation.calcMode != "auto"
+        or wb.calculation.fullCalcOnLoad
+        or wb.calculation.forceFullCalc
+    ):
+        errors.append("计算设置")
     source_info_by_service = {}
     for source_name in ("AUD2026", "IPO"):
         source_ws = wb[source_name]

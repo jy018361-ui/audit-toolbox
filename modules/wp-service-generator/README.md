@@ -122,12 +122,20 @@ python main.py
 
 - 同一服务单、同一 Section 的 Entity数量、底稿数量和预算调整会合并。
 - 标准参考工时 = Entity数量 × 参考时间/Entity。
+- `C_货币资金（除函证程序）` 的参考时间/Entity 为 `3`。
+- `C_货币资金_银行函证` 的参考时间/Entity 为 `10`。
 - Section Outlook Hours = 标准参考工时 + 预算调整。
 - 项目总 Outlook Hours = Section 合计 × 1.1。
 - 系统导出的文本型 Outlook Hours 会自动转换为数值。
 - IPO 的 Booking Period Start 需落在 2026 或 2027 年。
 - 2026年1月至3月开始，或2026年4月30日及以前结束的项目进入 `IPO archive`。
 - `IPO archive` 不生成活动服务方案。
+
+## Excel 性能
+
+生成的汇总表保留自动计算，修改 Entity数量、预算调整或其他输入后，相关公式会自动更新。为减少包含大量服务方案时的卡顿，程序不会再要求 Excel 每次打开都执行全工作簿强制重算，并将页内跳转改为原生超链接、简化 Section 计算公式。
+
+如果在已有文件中一次性粘贴或修改大量数据，建议先完成批量输入，再等待 Excel 更新结果；无需切换为手动计算或反复按 `F9`。
 
 ## 数据安全
 

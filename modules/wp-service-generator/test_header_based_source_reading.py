@@ -1,3 +1,4 @@
+import base64
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from generate_wp_project_workbook import (
     apply_order_adjustments,
     collect_service_orders,
     fill_service_sheet,
+    find_or_restore_template,
     find_section_list_file,
     find_service_order_file,
     find_my_orders_file,
@@ -64,6 +66,26 @@ def add_source_sheet(workbook, title):
 
 
 class HeaderBasedSourceReadingTests(unittest.TestCase):
+    def test_template_is_restored_from_encoded_resource(self):
+        folder = Path("test-inputs")
+        encoded = folder / "templates" / "FY27+WP服务单.xlsx.b64"
+        expected = b"test workbook bytes"
+        with patch.object(
+            Path,
+            "exists",
+            autospec=True,
+            side_effect=lambda path: path == encoded,
+        ), patch.object(
+            Path,
+            "read_text",
+            autospec=True,
+            return_value=base64.b64encode(expected).decode("ascii"),
+        ), patch.object(Path, "write_bytes", autospec=True) as write_bytes:
+            restored = find_or_restore_template(folder)
+
+        self.assertEqual(restored, folder / "FY27+WP服务单.xlsx")
+        write_bytes.assert_called_once_with(restored, expected)
+
     def test_unmatched_sections_are_merged_into_others(self):
         mapped = map_sections_to_template(
             {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import importlib
 import re
 import warnings
@@ -100,6 +101,36 @@ def find_section_list_file(folder: Path) -> Path:
 
 def find_my_orders_file(folder: Path) -> Path:
     return find_named_input(folder, "我的订单", "我的订单")
+
+
+def find_or_restore_template(folder: Path) -> Path | None:
+    for candidate in (
+        folder / "FY27+WP服务单.xlsx",
+        folder / "服务方案.xlsx",
+    ):
+        if candidate.exists():
+            return candidate
+
+    encoded_candidates = (
+        folder / "templates" / "FY27+WP服务单.xlsx.b64",
+        Path(__file__).resolve().parent / "templates" / "FY27+WP服务单.xlsx.b64",
+    )
+    encoded_source = next(
+        (path for path in encoded_candidates if path.exists()), None
+    )
+    if encoded_source is None:
+        return None
+
+    target = folder / "FY27+WP服务单.xlsx"
+    try:
+        target.write_bytes(
+            base64.b64decode(encoded_source.read_text(encoding="ascii"))
+        )
+    except Exception as exc:
+        raise ValueError(
+            f"无法从模板资源还原服务方案模板：{encoded_source}"
+        ) from exc
+    return target
 
 
 DEFAULT_SER_CONFIG = tuple(
@@ -364,14 +395,11 @@ def split_raw_service_orders(
     raw_book.close()
 
     if template_path is None:
-        candidates = (
-            raw_path.parent / "FY27+WP服务单.xlsx",
-            raw_path.parent / "服务方案.xlsx",
-        )
-        template_path = next((path for path in candidates if path.exists()), None)
+        template_path = find_or_restore_template(raw_path.parent)
     if template_path is None or not template_path.exists():
         raise FileNotFoundError(
-            "找不到服务方案模板。请将 FY27+WP服务单.xlsx 放在同一文件夹。"
+            "找不到服务方案模板。请保留 templates/FY27+WP服务单.xlsx.b64，"
+            "或将 FY27+WP服务单.xlsx 放在同一文件夹。"
         )
 
     source_book = load_workbook(template_path, data_only=False, read_only=False)

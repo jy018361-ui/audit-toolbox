@@ -55,6 +55,14 @@ python main.py
 
 打开 `生成项目组展示版_Jupyter.ipynb`，将 Notebook、Python 程序文件、`templates` 文件夹和三个系统导出文件放在同一文件夹，依次运行两个代码单元格。Python/Jupyter 版需要保留 `templates/FY27+WP服务单.xlsx.b64`；程序会在首次运行时自动还原模板。输出文件名为 `FY27+WP服务单汇总.xlsx`。
 
+也可以在 Jupyter 中直接运行生成脚本：
+
+```python
+%run "generate_wp_project_workbook.py" --input "FY27 WP服务单.xlsx" --output "FY27+WP服务单汇总.xlsx"
+```
+
+直接运行生成脚本时，如果同一文件夹中没有 `FY27+WP服务单.xlsx`，程序也会从 `templates/FY27+WP服务单.xlsx.b64` 自动还原，不需要手工准备模板文件。
+
 ### 本地独立 EXE
 
 将 `FY27_WP服务单生成工具.exe` 与三个系统导出文件放在同一文件夹即可双击运行。EXE 已内置脱敏模板，不需要另放 `templates` 文件夹，也不要求安装 Python。仓库同时保留可审阅的 Python 源码、脱敏模板文本资源和独立 EXE。

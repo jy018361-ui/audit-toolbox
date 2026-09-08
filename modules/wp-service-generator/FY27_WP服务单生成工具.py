@@ -10,6 +10,7 @@ from pathlib import Path
 from generate_wp_project_workbook import (
     find_section_list_file,
     find_service_order_file,
+    find_my_orders_file,
     generate,
 )
 
@@ -59,11 +60,13 @@ def ensure_template(folder: Path) -> Path:
 def run_generation(folder: Path):
     service_order_path = find_service_order_file(folder)
     section_list_path = find_section_list_file(folder)
+    my_orders_path = find_my_orders_file(folder)
     ensure_template(folder)
     return generate(
         service_order_path,
         folder / "FY27+WP服务单汇总.xlsx",
         section_list_path,
+        my_orders_path,
     )
 
 
@@ -72,6 +75,7 @@ def interactive_main():
     try:
         service_order_path = find_service_order_file(folder)
         section_list_path = find_section_list_file(folder)
+        my_orders_path = find_my_orders_file(folder)
     except Exception as exc:
         message_box(
             str(exc) + "\n\n请将文件放在EXE所在文件夹后重试。",
@@ -83,6 +87,7 @@ def interactive_main():
         "已找到输入文件：\n\n"
         f"WP服务单：{service_order_path.name}\n"
         f"Section List：{section_list_path.name}\n\n"
+        f"我的订单：{my_orders_path.name}\n\n"
         "点击“是”开始生成，通常需要10至30秒。",
         MB_YESNO | MB_ICONQUESTION,
     )

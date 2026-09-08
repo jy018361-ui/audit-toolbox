@@ -133,11 +133,13 @@ const wpValidate = (params: DemoParams) => {
     folder,
     valid: true,
     missing: [] as string[],
-    serviceOrderPath: `${folder}\\FY27+WP服务单.xlsx`,
+    serviceOrderPath: `${folder}\\FY27 WP服务单.xlsx`,
     sectionListPath: `${folder}\\FY27 Section List.xlsx`,
+    myOrdersPath: `${folder}\\FY26 我的订单.xlsx`,
     inputFiles: {
-      wpServiceOrder: "FY27+WP服务单.xlsx",
+      wpServiceOrder: "FY27 WP服务单.xlsx",
       sectionList: "FY27 Section List.xlsx",
+      myOrders: "FY26 我的订单.xlsx",
     },
     outputPath: `${folder}\\FY27+WP服务单汇总.xlsx`,
     engine: "rust",
@@ -181,6 +183,9 @@ const WP_GENERATE_RESULT = (folder: string) => ({
   outlookCompared: 26,
   outlookEqual: 18,
   outlookDifferences: OUTLOOK_DIFFERENCES,
+  fallbackSectionRows: 4,
+  matchedOrderAdjustments: 24,
+  unmatchedOrderAdjustments: ["Order-SAMPLE-0141", "Order-SAMPLE-0148"],
   unmatchedSectionOrders: ["S-FY27-0141", "S-FY27-0148"],
   excludedIpo: [
     {

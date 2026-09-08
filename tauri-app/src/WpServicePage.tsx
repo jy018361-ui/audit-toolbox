@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { engineCall, jobCancel, jobStart, listenJobEvents, pickPath } from "./api";
+import {
+  engineCall,
+  jobCancel,
+  jobStart,
+  listenJobEvents,
+  pickPath,
+} from "./api";
 import type { JobEvent, ToolManifest } from "./types";
 import { useTaskRestore } from "./restore";
 import { ErrorBox } from "@/components/ErrorBox";
@@ -18,7 +24,10 @@ function wpErrorText(error: unknown) {
   if (error && typeof error === "object") {
     const value = error as Record<string, unknown>;
     return String(
-      value.userMessage ?? value.message ?? value.detail ?? "操作失败，请检查输入后重试。",
+      value.userMessage ??
+        value.message ??
+        value.detail ??
+        "操作失败，请检查输入后重试。",
     );
   }
   return String(error);
@@ -33,7 +42,8 @@ export function WpServicePage({ tool }: { tool: ToolManifest }) {
   const [result, setResult] = useState<unknown>();
 
   useEffect(() => {
-    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
+    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window))
+      return;
     let off: () => void = () => undefined;
     void getCurrentWebview()
       .onDragDropEvent((event) => {
@@ -134,7 +144,7 @@ export function WpServicePage({ tool }: { tool: ToolManifest }) {
       <PageHeader
         eyebrow="WP 服务单生成"
         title={tool.name}
-        detail="校验工作目录中的 WP 服务单与 Section List，并生成拆分及汇总文件。"
+        detail="校验工作目录中的 WP 服务单、Section List 与我的订单，并生成拆分及汇总文件。"
       />
       <StepIndicator
         steps={[
@@ -146,57 +156,74 @@ export function WpServicePage({ tool }: { tool: ToolManifest }) {
       />
       <div className="workspace wp-workspace">
         <Card variant="section">
-          <CardHeader><CardTitle>选择工作目录</CardTitle></CardHeader>
+          <CardHeader>
+            <CardTitle>选择工作目录</CardTitle>
+          </CardHeader>
           <CardContent>
-          <FileDropInput
-            value={folder}
-            disabled={busy}
-            placeholder="拖放或单击选择目录"
-            onBrowse={chooseFolder}
-            onClear={folder && !busy ? () => selectFolder("") : undefined}
-            onDragStateChange={() => undefined}
-            highlight={dragHover}
-          />
-
-          <div className="wp-directory-requirements" aria-label="目录内文件要求">
-            <h3>目录内文件要求</h3>
-            <p>所选目录第一层需各有一个符合关键词规则的 Excel 文件：</p>
-            <ul>
-              <li>WP 服务单：文件名包含“WP服务单”</li>
-              <li>Section List：文件名包含“section list”（忽略空格和大小写）</li>
-            </ul>
-            <p className="wp-requirement-note">
-              每类输入文件只能保留一个。临时文件、模板和已生成的汇总文件会自动忽略；请勿修改表头。
-            </p>
-          </div>
-
-          {error && <ErrorBox error={error} onDismiss={() => setError("")} />}
-          <div className="actions">
-            <Button variant="secondary" disabled={busy} onClick={() => void validate()}>
-              检查输入
-            </Button>
-            <Button disabled={busy} onClick={() => void generate()}>
-              {busy ? "处理中…" : "生成服务方案"}
-            </Button>
-          </div>
-          {busy && job && (
-            <JobProgress
-              job={job}
-              onCancel={(jobId) => void jobCancel(jobId)}
-              cancelLabel="取消任务"
+            <FileDropInput
+              value={folder}
+              disabled={busy}
+              placeholder="拖放或单击选择目录"
+              onBrowse={chooseFolder}
+              onClear={folder && !busy ? () => selectFolder("") : undefined}
+              onDragStateChange={() => undefined}
+              highlight={dragHover}
             />
-          )}
+
+            <div
+              className="wp-directory-requirements"
+              aria-label="目录内文件要求"
+            >
+              <h3>目录内文件要求</h3>
+              <p>所选目录第一层需各有一个符合关键词规则的 Excel 文件：</p>
+              <ul>
+                <li>WP 服务单：文件名包含“WP服务单”</li>
+                <li>
+                  Section List：文件名包含“section list”（忽略空格和大小写）
+                </li>
+                <li>我的订单：文件名包含“我的订单”</li>
+              </ul>
+              <p className="wp-requirement-note">
+                每类输入文件只能保留一个。临时文件、模板和已生成的汇总文件会自动忽略；请勿修改表头。
+              </p>
+            </div>
+
+            {error && <ErrorBox error={error} onDismiss={() => setError("")} />}
+            <div className="actions">
+              <Button
+                variant="secondary"
+                disabled={busy}
+                onClick={() => void validate()}
+              >
+                检查输入
+              </Button>
+              <Button disabled={busy} onClick={() => void generate()}>
+                {busy ? "处理中…" : "生成服务方案"}
+              </Button>
+            </div>
+            {busy && job && (
+              <JobProgress
+                job={job}
+                onCancel={(jobId) => void jobCancel(jobId)}
+                cancelLabel="取消任务"
+              />
+            )}
           </CardContent>
         </Card>
 
         <Card variant="section">
-          <CardHeader><CardTitle>检查与结果</CardTitle></CardHeader>
+          <CardHeader>
+            <CardTitle>检查与结果</CardTitle>
+          </CardHeader>
           <CardContent>
-          {result ? (
-            <ResultView value={result} />
-          ) : (
-            <EmptyState title={busy ? "正在处理工作目录" : "尚未生成结果"} description="选择目录后先检查输入，再生成服务方案。" />
-          )}
+            {result ? (
+              <ResultView value={result} />
+            ) : (
+              <EmptyState
+                title={busy ? "正在处理工作目录" : "尚未生成结果"}
+                description="选择目录后先检查输入，再生成服务方案。"
+              />
+            )}
           </CardContent>
         </Card>
       </div>

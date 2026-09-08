@@ -51,6 +51,9 @@ struct SourceParams {
     sheet: Option<String>,
     #[serde(default = "one")]
     header_row: usize,
+    /// 表头占几行（双层合并表头选 2）。与 TB/JE 账表引擎同口径，默认 1。
+    #[serde(default = "one")]
+    header_depth: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +71,9 @@ struct TsJobParams {
     sheet: Option<String>,
     #[serde(default = "one")]
     header_row: usize,
+    /// TS 不暴露双层表头入口，恒为 1；字段与看账共用读取链路才对齐。
+    #[serde(default = "one")]
+    header_depth: usize,
     output_path: Option<String>,
     #[serde(default)]
     filters: Vec<FilterSpec>,
@@ -138,6 +144,9 @@ struct KanzhangParams {
     sheet: Option<String>,
     #[serde(default = "one")]
     header_row: usize,
+    /// 双层合并表头选 2，默认 1；缓存键会带上它。
+    #[serde(default = "one")]
+    header_depth: usize,
     output_path: Option<String>,
     output_dir: Option<String>,
     mapping: Option<LedgerMapping>,
@@ -272,11 +281,13 @@ fn inspect_ts(params: Value) -> Result<Value, AppError> {
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
+        source.header_depth,
         true,
     )?;
     let defaults = ts_defaults(&table.headers);
     Ok(json!({
-        "engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path, &table.sheet, source.header_row)?,
+        "engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path, &table.sheet, source.header_row, source.header_depth)?,
+        "headerDepth":source.header_depth,
         "path":table.path, "sheets":table.sheets, "selectedSheet":table.sheet,
         "headers":table.headers, "preview":table.rows.iter().take(20).collect::<Vec<_>>(),
         "dimensions":{"rows":table.rows.len(),"columns":table.headers.len()},
@@ -297,6 +308,13 @@ fn inspect_kanzhang_with_progress(
 ) -> Result<Value, AppError> {
     let source: SourceParams = parse_ledger_source(params, "看账参数不完整。")?;
     let started = Instant::now();
+    if source.header_depth > 1 && large_csv::applies(Path::new(&source.input_path)) {
+        return Err(error(
+            "LARGE_CSV_DOUBLE_HEADER",
+            "超大 CSV 暂不支持双层标题，请先整理为单层标题后重试。",
+            None,
+        ));
+    }
     if large_csv::applies(Path::new(&source.input_path)) {
         let cache = large_csv::load(&source, progress, cancel)?;
         let table = &cache.table;
@@ -304,9 +322,9 @@ fn inspect_kanzhang_with_progress(
         progress("accounts", 0, 0, "正在从磁盘缓存汇总科目…");
         let accounts = cache.accounts(&mapping, "", &[], 500, progress, cancel)?;
         return Ok(
-            json!({"engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path,"CSV",source.header_row)?,
+            json!({"engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path,"CSV",source.header_row,source.header_depth)?,
             "path":table.path,"sheets":table.sheets,"selectedSheet":table.sheet,"headers":table.headers,
-            "headerRow":source.header_row,
+            "headerRow":source.header_row,"headerDepth":source.header_depth,
             "preview":table.rows,"dimensions":{"rows":cache.count,"columns":table.headers.len()},
             "encoding":table.encoding,"delimiter":table.delimiter.map(|v|v.to_string()),
             "suggestedMapping":mapping,"accounts":accounts["values"],"accountCodes":accounts["codes"],
@@ -319,6 +337,7 @@ fn inspect_kanzhang_with_progress(
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
+        source.header_depth,
     )?;
     let mapping = suggest_mapping(&table.headers, &table.rows);
     let (accounts, account_codes, account_count) = (!mapping.account_columns().is_empty())
@@ -332,9 +351,9 @@ fn inspect_kanzhang_with_progress(
         })
         .unwrap_or_default();
     Ok(json!({
-        "engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path, &table.sheet, source.header_row)?,
+        "engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path, &table.sheet, source.header_row, source.header_depth)?,
         "path":table.path, "sheets":table.sheets, "selectedSheet":table.sheet,
-        "headerRow":source.header_row,
+        "headerRow":source.header_row,"headerDepth":source.header_depth,
         "headers":table.headers, "preview":table.rows.iter().take(50).collect::<Vec<_>>(),
         "dimensions":{"rows":table.rows.len(),"columns":table.headers.len()},
         "encoding":table.encoding, "delimiter":table.delimiter.map(|v|v.to_string()),
@@ -403,6 +422,7 @@ fn kanzhang_account_values_with_progress(
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
+        source.header_depth,
     )?;
     let mapping: LedgerMapping = params
         .get("mapping")
@@ -503,6 +523,7 @@ fn validate_kanzhang_mapping(params: Value) -> Result<Value, AppError> {
             Path::new(&source.input_path),
             source.sheet.as_deref(),
             source.header_row,
+            source.header_depth,
         )?
     };
     let mapping = params
@@ -604,6 +625,7 @@ fn je_mark_sign_report(params: Value) -> Result<Value, AppError> {
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
+        source.header_depth,
     )?;
     let mapping = params
         .get("mapping")
@@ -644,6 +666,7 @@ fn ts_filter_values(params: Value) -> Result<Value, AppError> {
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
+        source.header_depth,
         true,
     )?;
     let index = header_index(&table.headers, &field)
@@ -673,6 +696,7 @@ fn cache_ts(params: Value, progress: Progress<'_>, cancel: &AtomicBool) -> Resul
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
+        source.header_depth,
         false,
     )?;
     if cache_hit {
@@ -702,6 +726,7 @@ fn ts_filter_preview(
         Path::new(&job.input_path),
         job.sheet.as_deref(),
         job.header_row,
+        job.header_depth,
         true,
     )?;
     check_cancel(cancel)?;
@@ -730,6 +755,7 @@ fn export_ts(
         Path::new(&job.input_path),
         job.sheet.as_deref(),
         job.header_row,
+        job.header_depth,
         true,
     )?;
     check_cancel(cancel)?;
@@ -854,6 +880,13 @@ fn kanzhang_filter_preview(
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
     let job = parse_kanzhang_job(params)?;
+    if job.header_depth > 1 && large_csv::applies(Path::new(&job.input_path)) {
+        return Err(error(
+            "LARGE_CSV_DOUBLE_HEADER",
+            "超大 CSV 暂不支持双层标题，请先整理为单层标题后重试。",
+            None,
+        ));
+    }
     if large_csv::applies(Path::new(&job.input_path)) {
         return kanzhang_filter_preview_disk(&job, progress, cancel);
     }
@@ -862,6 +895,7 @@ fn kanzhang_filter_preview(
         Path::new(&job.input_path),
         job.sheet.as_deref(),
         job.header_row,
+        job.header_depth,
     )?;
     let mapping = job
         .mapping
@@ -899,6 +933,7 @@ fn export_kanzhang(
         Path::new(&job.input_path),
         job.sheet.as_deref(),
         job.header_row,
+        job.header_depth,
     )?;
     let mapping = job
         .mapping
@@ -993,6 +1028,7 @@ fn source_from_kanzhang(job: &KanzhangParams) -> SourceParams {
         input_path: job.input_path.clone(),
         sheet: job.sheet.clone(),
         header_row: job.header_row,
+        header_depth: 1,
     }
 }
 
@@ -3453,7 +3489,12 @@ fn parse_ledger_source(params: Value, message: &str) -> Result<SourceParams, App
     Ok(source)
 }
 
-fn load_table(path: &Path, sheet: Option<&str>, header_row: usize) -> Result<Table, AppError> {
+fn load_table(
+    path: &Path,
+    sheet: Option<&str>,
+    header_row: usize,
+    header_depth: usize,
+) -> Result<Table, AppError> {
     if !path.is_file() {
         return Err(error(
             "PATH_NOT_FOUND",
@@ -3467,10 +3508,17 @@ fn load_table(path: &Path, sheet: Option<&str>, header_row: usize) -> Result<Tab
         .unwrap_or("")
         .to_lowercase();
     if extension == "parquet" {
+        if header_depth > 1 {
+            return Err(error(
+                "PARQUET_DOUBLE_HEADER",
+                "Parquet 缓存文件是单层列名，不支持双层表头。",
+                None,
+            ));
+        }
         return load_parquet(path);
     }
     if crate::spreadsheet_input::is_text(path.as_ref()) {
-        return load_text(path, header_row);
+        return load_text(path, header_row, header_depth);
     }
     let read_path = local_read_path(path)?;
     let mut workbook = open_workbook_auto(&read_path).map_err(|e| {
@@ -3503,8 +3551,16 @@ fn load_table(path: &Path, sheet: Option<&str>, header_row: usize) -> Result<Tab
         return Err(error("HEADER_ROW_INVALID", "标题行超出数据范围。", None));
     }
     let width = all.iter().map(Vec::len).max().unwrap_or(0);
-    let headers = normalize_headers(&all[header_index], width);
-    let rows = normalize_rows(&all[header_index + 1..], width);
+    // 双层表头沿用汇兑损益的合并规则（首行横向补齐合并单元格，再逐列
+    // 「上级-下级」拼接），保证各工具读出的列名口径一致。
+    let depth = header_depth.max(1).min(all.len() - header_index);
+    let headers = if depth > 1 {
+        let raw: Vec<Vec<String>> = all[header_index..header_index + depth].to_vec();
+        crate::fx::merge_headers(&raw, width)
+    } else {
+        normalize_headers(&all[header_index], width)
+    };
+    let rows = normalize_rows(&all[header_index + depth..], width);
     Ok(Table {
         path: path.to_path_buf(),
         sheet: selected,
@@ -3523,7 +3579,7 @@ pub(crate) fn fx_load_table_value(
     sheet: Option<&str>,
     header_row: usize,
 ) -> Result<Value, AppError> {
-    let table = load_table(path, sheet, header_row)?;
+    let table = load_table(path, sheet, header_row, 1)?;
     Ok(json!({
         "path": table.path, "sheet": table.sheet, "sheets": table.sheets,
         "headers": table.headers, "rows": table.rows,
@@ -3541,7 +3597,7 @@ pub(crate) fn fx_load_ledger_table_value_cached(
     sheet: Option<&str>,
     header_row: usize,
 ) -> Result<Value, AppError> {
-    let table = load_ledger_cached(path, sheet, header_row)?;
+    let table = load_ledger_cached(path, sheet, header_row, 1)?;
     Ok(json!({
         "path": table.path, "sheet": table.sheet, "sheets": table.sheets,
         "headers": table.headers, "rows": table.rows,
@@ -3565,11 +3621,12 @@ fn load_ledger_cached(
     path: &Path,
     sheet: Option<&str>,
     header_row: usize,
+    header_depth: usize,
 ) -> Result<Table, AppError> {
     if large_csv::applies(path) {
         return Err(large_csv::full_table_error());
     }
-    load_ts_cached(path, sheet, header_row, true).map(|(table, _, _)| table)
+    load_ts_cached(path, sheet, header_row, header_depth, true).map(|(table, _, _)| table)
 }
 
 /// 跨工具复用的大 CSV 磁盘数据源。调用方逐行访问，不取得底层 SQLite
@@ -3631,6 +3688,7 @@ pub(crate) fn open_disk_ledger(
         input_path: path.to_string_lossy().into_owned(),
         sheet: None,
         header_row,
+        header_depth: 1,
     };
     let cache = large_csv::load(&source, progress, cancel)?;
     Ok(DiskLedger { cache, header_row })
@@ -3842,6 +3900,7 @@ pub(crate) fn open_prepared_disk_ledger(
         input_path: path.to_string_lossy().into_owned(),
         sheet: None,
         header_row,
+        header_depth: 1,
     };
     let cache_progress = |phase: &str, current: usize, total: usize, message: &str| {
         scaled_progress(progress, 0, 300, phase, current, total, message)
@@ -3884,6 +3943,7 @@ fn load_ts_cached(
     path: &Path,
     sheet: Option<&str>,
     header_row: usize,
+    header_depth: usize,
     populate_on_miss: bool,
 ) -> Result<(Table, bool, PathBuf), AppError> {
     if !path.is_file() {
@@ -3899,6 +3959,13 @@ fn load_ts_cached(
         .unwrap_or("")
         .to_lowercase();
     if extension == "parquet" {
+        if header_depth > 1 {
+            return Err(error(
+                "PARQUET_DOUBLE_HEADER",
+                "Parquet 缓存文件是单层列名，不支持双层表头。",
+                None,
+            ));
+        }
         let table = load_parquet(path)?;
         return Ok((table, true, path.to_path_buf()));
     }
@@ -3923,7 +3990,7 @@ fn load_ts_cached(
             .ok_or_else(|| error("WORKBOOK_EMPTY", "工作簿中没有 Sheet。", None))?;
         (selected, names)
     };
-    let key = fingerprint(path, &selected_sheet, header_row)?;
+    let key = fingerprint(path, &selected_sheet, header_row, header_depth)?;
     let cache = cache_path("ts", &key)?;
     if cache.is_file() {
         match load_parquet(&cache) {
@@ -3942,7 +4009,7 @@ fn load_ts_cached(
             }
         }
     }
-    let table = load_table(path, Some(&selected_sheet), header_row)?;
+    let table = load_table(path, Some(&selected_sheet), header_row, header_depth)?;
     if populate_on_miss {
         let mut frame = table_to_frame(&table)?;
         write_frame_cache(&cache, &mut frame)?;
@@ -4000,7 +4067,7 @@ fn write_frame_cache(path: &Path, frame: &mut DataFrame) -> Result<(), AppError>
     replace_file(&partial, path)
 }
 
-fn load_text(path: &Path, header_row: usize) -> Result<Table, AppError> {
+fn load_text(path: &Path, header_row: usize, header_depth: usize) -> Result<Table, AppError> {
     let (encoding, delimiter) = crate::spreadsheet_input::text_metadata(path)?;
     let all = crate::spreadsheet_input::read_rows(path)?;
     let header_index = header_row.saturating_sub(1);
@@ -4008,10 +4075,16 @@ fn load_text(path: &Path, header_row: usize) -> Result<Table, AppError> {
         return Err(error("HEADER_ROW_INVALID", "标题行超出数据范围。", None));
     }
     let width = all.iter().map(Vec::len).max().unwrap_or(0);
-    let headers = normalize_headers(&all[header_index], width);
+    let depth = header_depth.max(1).min(all.len() - header_index);
+    let headers = if depth > 1 {
+        let raw: Vec<Vec<String>> = all[header_index..header_index + depth].to_vec();
+        crate::fx::merge_headers(&raw, width)
+    } else {
+        normalize_headers(&all[header_index], width)
+    };
     let rows = all
         .into_iter()
-        .skip(header_index + 1)
+        .skip(header_index + depth)
         .map(|mut row| {
             row.resize(width, String::new());
             row.truncate(width);
@@ -5682,7 +5755,12 @@ fn any_to_f64(value: &AnyValue<'_>) -> f64 {
     }
 }
 
-fn fingerprint(path: &Path, sheet: &str, header_row: usize) -> Result<String, AppError> {
+fn fingerprint(
+    path: &Path,
+    sheet: &str,
+    header_row: usize,
+    header_depth: usize,
+) -> Result<String, AppError> {
     let meta = fs::metadata(path).map_err(io_error)?;
     let modified = meta
         .modified()
@@ -5697,6 +5775,8 @@ fn fingerprint(path: &Path, sheet: &str, header_row: usize) -> Result<String, Ap
     h.update(modified.to_le_bytes());
     h.update(sheet.as_bytes());
     h.update(header_row.to_le_bytes());
+    // 双层表头会改变合并后的列名，同文件同 Sheet 换层数必须落不同的缓存。
+    h.update(header_depth.to_le_bytes());
     // Shared strict text decoding must not reuse rows decoded lossily by older versions.
     h.update(b"rust-polars-v3-shared-spreadsheet-input");
     Ok(hex::encode(h.finalize()))
@@ -6030,6 +6110,9 @@ struct JeMarkParams {
     sheet: Option<String>,
     #[serde(default = "one")]
     header_row: usize,
+    /// 双层合并表头选 2，默认 1；与看账同口径。
+    #[serde(default = "one")]
+    header_depth: usize,
     output_path: Option<String>,
     mapping: Option<LedgerMapping>,
     #[serde(default)]
@@ -6090,6 +6173,7 @@ fn kanzhang_column_values(params: Value) -> Result<Value, AppError> {
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
+        source.header_depth,
     )?;
     let index = header_index(&table.headers, &field)
         .ok_or_else(|| error("COLUMN_NOT_FOUND", "筛选字段不存在。", Some(field.clone())))?;
@@ -6325,6 +6409,13 @@ fn export_je_mark(
     let mut job: JeMarkParams = parse(params, "正负数标记参数不完整。")?;
     job.header_row =
         resolve_auto_header_row(&job.input_path, job.sheet.as_deref(), job.header_row)?;
+    if job.header_depth > 1 && large_csv::applies(Path::new(&job.input_path)) {
+        return Err(error(
+            "LARGE_CSV_DOUBLE_HEADER",
+            "超大 CSV 暂不支持双层标题，请先整理为单层标题后重试。",
+            None,
+        ));
+    }
     if large_csv::applies(Path::new(&job.input_path)) {
         return export_je_mark_disk(&job, progress, cancel);
     }
@@ -6335,6 +6426,7 @@ fn export_je_mark(
         Path::new(&job.input_path),
         job.sheet.as_deref(),
         job.header_row,
+        job.header_depth,
     )?;
     let mapping = job
         .mapping
@@ -6436,6 +6528,7 @@ fn export_je_mark_disk(
         input_path: job.input_path.clone(),
         sheet: job.sheet.clone(),
         header_row: job.header_row,
+        header_depth: 1,
     };
     let cache_progress = |phase: &str, current: usize, total: usize, message: &str| {
         scaled_progress(progress, 0, 180, phase, current, total, message)
@@ -6630,6 +6723,7 @@ mod tests {
             "inputPath": path.to_string_lossy(),
             "headerRow": 0,
         }))
+
         .unwrap();
         assert_eq!(value["headerRow"], json!(3), "应自动探测到第 3 行表头");
         let headers = value["headers"].as_array().unwrap();
@@ -6675,6 +6769,43 @@ mod tests {
         assert_eq!(export_job.header_row, 3);
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn kanzhang_inspect_merges_double_header() {
+        let dir = temp_dir("kz-double-header");
+        let path = dir.join("je.xlsx");
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        // 双层表头：首行大类（合并单元格形态：空白格沿用左侧文字），次行明细列名。
+        sheet.write_string(0, 0, "凭证信息").unwrap();
+        sheet.write_string(0, 2, "金额").unwrap();
+        sheet.write_string(1, 0, "凭证号").unwrap();
+        sheet.write_string(1, 1, "摘要").unwrap();
+        sheet.write_string(1, 2, "借方").unwrap();
+        sheet.write_string(2, 0, "记-001").unwrap();
+        sheet.write_string(2, 1, "期初").unwrap();
+        sheet.write_number(2, 2, 100.0).unwrap();
+        workbook.save(&path).unwrap();
+
+        let value = inspect_kanzhang(json!({
+            "inputPath": path.to_string_lossy(),
+            "headerRow": 1,
+            "headerDepth": 2,
+        }))
+        .unwrap();
+        assert_eq!(value["headerDepth"], json!(2));
+        let headers = value["headers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        assert!(headers.contains(&"凭证信息-凭证号".to_owned()), "{headers:?}");
+        assert!(headers.contains(&"凭证信息-摘要".to_owned()), "{headers:?}");
+        assert!(headers.contains(&"金额-借方".to_owned()), "{headers:?}");
+        let preview = value["preview"].as_array().unwrap();
+        assert_eq!(preview.len(), 1, "双层表头下的两行标题都不应进数据预览");
+        assert_eq!(preview[0][0], json!("记-001"));
     }
 
     #[test]
@@ -7300,7 +7431,7 @@ mod tests {
         let first = fx_load_ledger_table_value_cached(&input, None, 1).unwrap();
         assert_eq!(first["engine"], "rust-polars");
         assert_eq!(first["rows"].as_array().unwrap().len(), 2);
-        let key = fingerprint(&input, "CSV", 1).unwrap();
+        let key = fingerprint(&input, "CSV", 1, 1).unwrap();
         let cache = cache_path("ts", &key).unwrap();
         assert!(cache.is_file(), "TBJE 应复用统一的稳定 Parquet 缓存");
         let second = fx_load_ledger_table_value_cached(&input, None, 1).unwrap();
@@ -7381,10 +7512,10 @@ mod tests {
         book.save(&input).unwrap();
 
         // 未指定表名：自动选几千行的正表，不再被第一张透视副本带走。
-        let table = load_table(&input, None, 1).unwrap();
+        let table = load_table(&input, None, 1, 1).unwrap();
         assert_eq!(table.sheet, "序时账", "规模与表名降权应让正表胜出");
         // 用户显式指定表名：照用，哪怕它是那张小副本。
-        let pinned = load_table(&input, Some("透视check"), 1).unwrap();
+        let pinned = load_table(&input, Some("透视check"), 1, 1).unwrap();
         assert_eq!(pinned.sheet, "透视check");
 
         // 自动选表的结论记进缓存目录：同一份文件走缓存化入口结论一致。
@@ -7394,11 +7525,11 @@ mod tests {
         assert_eq!(cached["sheet"].as_str().unwrap(), "序时账");
         // 记事文件丢了不阻塞读取：重扫一遍仍是同一张表。
         fs::remove_file(&memo).unwrap();
-        let again = load_table(&input, None, 1).unwrap();
+        let again = load_table(&input, None, 1, 1).unwrap();
         assert_eq!(again.sheet, "序时账");
 
         // 测试写进真实缓存目录的产物要带走。
-        if let Ok(key) = fingerprint(&input, "序时账", 1) {
+        if let Ok(key) = fingerprint(&input, "序时账", 1, 1) {
             let _ = fs::remove_file(cache_path("ts", &key).unwrap());
         }
         let _ = fs::remove_file(auto_sheet_memo_path(&input).unwrap());
@@ -7452,9 +7583,9 @@ mod tests {
         book.save(&input).unwrap();
 
         // 未指定表名同样适用：说明页不该再凭「排在第一」当选。
-        let auto = load_table(&input, None, 1).unwrap();
+        let auto = load_table(&input, None, 1, 1).unwrap();
         assert_eq!(auto.sheet, "序时账");
-        let missing = load_table(&input, Some("不存在"), 1).unwrap();
+        let missing = load_table(&input, Some("不存在"), 1, 1).unwrap();
         assert_eq!(missing.sheet, "序时账");
 
         let _ = fs::remove_file(auto_sheet_memo_path(&input).unwrap());
@@ -7465,7 +7596,7 @@ mod tests {
         let root = temp_dir("ledger");
         let input = root.join("ledger.csv");
         fs::write(&input,"凭证号,科目名称,借方金额,贷方金额\n1,现金,100,0\n1,收入,0,100\n2,银行,20,0\n2,费用,0,20\n").unwrap();
-        let table = load_table(&input, None, 1).unwrap();
+        let table = load_table(&input, None, 1, 1).unwrap();
         let mapping = suggest_mapping(&table.headers, &table.rows);
         let rows = filter_ledger_rows(&table, &mapping, &["现金".into()], &[]).unwrap();
         assert_eq!(rows.len(), 2);
@@ -7477,7 +7608,7 @@ mod tests {
         let root = temp_dir("ledger-single-side");
         let input = root.join("ledger.csv");
         fs::write(&input,"凭证号,科目名称,借方金额,贷方金额\n1,现金,100,0\n1,收入,0,100\n2,银行,20,0\n2,费用,0,20\n").unwrap();
-        let table = load_table(&input, None, 1).unwrap();
+        let table = load_table(&input, None, 1, 1).unwrap();
         let mapping = suggest_mapping(&table.headers, &table.rows);
         let rows =
             filter_ledger_rows_by_mode(&table, &mapping, &["现金".into()], &[], false).unwrap();
@@ -8568,6 +8699,7 @@ mod tests {
             input_path: input.to_string_lossy().into_owned(),
             sheet: None,
             header_row: 1,
+            header_depth: 1,
         };
         let cache = large_csv::load(&source, &|_, _, _, _| {}, &cancel).unwrap();
         let (values, total) = cache.column_values("部门", "生产", 1, &cancel).unwrap();
@@ -9347,6 +9479,7 @@ mod tests {
             input_path: input.to_string_lossy().into_owned(),
             sheet: None,
             header_row: 1,
+            header_depth: 1,
             output_path: Some(output.to_string_lossy().into_owned()),
             mapping: Some(LedgerMapping {
                 id: vec!["凭证号".into()],

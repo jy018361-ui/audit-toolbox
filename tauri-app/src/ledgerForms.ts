@@ -210,7 +210,8 @@ export function formGroups(
     (role) => !publicRequired.includes(role),
   );
   if (publicOptional.length)
-    groups.push({ title: "公共选填字段", roles: publicOptional });
+    // A/B 编号区分两个选填性质的组：A 是身份类选填，B 是本期发生额口径。
+    groups.push({ title: "公共选填字段A", roles: publicOptional });
 
   const matches = new Map(
     matchForms(kind, forms, mapping).map((match) => [match.form.id, match]),
@@ -253,7 +254,7 @@ export function formGroups(
     .map(([role]) => role)
     .filter((role) => role.startsWith("period"));
   if (period.length)
-    groups.push({ title: "本期发生额（通过勾稽后自动提升）", roles: period });
+    groups.push({ title: "公共选填字段B（勾稽后自动提升）", roles: period });
   if (!forms.length) {
     const amounts = roles
       .map(([role]) => role)

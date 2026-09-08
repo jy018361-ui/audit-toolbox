@@ -603,13 +603,11 @@ export default function App() {
                 <span>{x.label}</span>
                 {x.to === "/settings" && availableUpdate && (
                   <span
-                    className="nav-update-badge"
+                    className="nav-update-dot"
                     role="status"
                     aria-label={`发现新版本 ${availableUpdate.version}`}
                     title={`发现新版本 ${availableUpdate.version}`}
-                  >
-                    更新
-                  </span>
+                  />
                 )}
               </NavLink>
             ))}

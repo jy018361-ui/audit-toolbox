@@ -1933,7 +1933,8 @@ fn infer_header_layout(all: &[Vec<String>]) -> (usize, usize, Vec<(usize, f64)>)
     (best.0, best.1, row_scores)
 }
 
-fn merge_headers(raw: &[Vec<String>], width: usize) -> Vec<String> {
+/// 看账/TS 的双层表头也走同一套合并规则，跨工具列名口径才一致。
+pub(crate) fn merge_headers(raw: &[Vec<String>], width: usize) -> Vec<String> {
     let mut upper = raw.first().cloned().unwrap_or_default();
     let mut carry = String::new();
     for value in &mut upper {
@@ -3071,10 +3072,9 @@ fn account_identity_rows(
 
 /// 跨表匹配只关心**两侧都出现**的歧义编码的复合键。
 ///
-/// 歧义集合按两侧并集统计（`AccountMatchPolicy::from_sides`），但一侧内部
-/// 把某编码拆成多个名称（TB 按币种/辅助核算分行）而另一侧根本不用该编码时，
-/// 这个歧义不影响两表按编码匹配——此前把它一并算进复合核对，JE 侧永远凑不出
-/// 对应键，合法账套（仅未实现模式、本位币序时账）被整体拦下。
+/// 歧义由 `AccountMatchPolicy::from_sides` 判定（两侧都拆且名称交集达六成），
+/// 这里按该策略收集两侧的「编码＋名称」复合键并报告实际配上的比例；
+/// 仅一侧拆分或名称配不上的编码已在策略层退回按编码汇总，不会出现在这里。
 fn shared_ambiguous_account_keys(
     je: &[(String, String, String)],
     tb: &[(String, String, String)],
@@ -3109,6 +3109,54 @@ fn shared_ambiguous_account_keys(
             .collect::<HashSet<String>>()
     };
     (keys(je), keys(tb))
+}
+
+/// 两侧共有的（主体＋编码）里，仅一侧对应多个名称的数量，返回
+/// （仅 TB 拆分，仅 JE 拆分）。这类编码按编码聚合即可配对，
+/// 只用于生成知情提示，不参与复合匹配判定。
+fn one_sided_split_account_codes(
+    tb: &[(String, String, String)],
+    je: &[(String, String, String)],
+) -> (usize, usize) {
+    let tb_index = ledger_mapping::account_name_sets(tb);
+    let je_index = ledger_mapping::account_name_sets(je);
+    let mut tb_only = 0usize;
+    let mut je_only = 0usize;
+    for (key, names) in &tb_index {
+        let Some(opposite) = je_index.get(key) else {
+            continue;
+        };
+        match (names.len() > 1, opposite.len() > 1) {
+            (true, false) => tb_only += 1,
+            (false, true) => je_only += 1,
+            _ => {}
+        }
+    }
+    (tb_only, je_only)
+}
+
+/// 两侧共有的（主体＋编码）里，两侧都对应多个名称、但名称交集不足六成
+/// （公共引擎复合配对的同一把尺）的数量。这类编码在匹配策略里已退回按
+/// 编码汇总，这里只用于生成知情提示。
+fn unpairable_split_account_codes(
+    tb: &[(String, String, String)],
+    je: &[(String, String, String)],
+) -> usize {
+    let tb_index = ledger_mapping::account_name_sets(tb);
+    let je_index = ledger_mapping::account_name_sets(je);
+    tb_index
+        .iter()
+        .filter(|(key, names)| {
+            let Some(opposite) = je_index.get(key) else {
+                return false;
+            };
+            if names.len() <= 1 || opposite.len() <= 1 {
+                return false;
+            }
+            let paired = names.intersection(opposite).count();
+            paired * 5 < names.len().min(opposite.len()) * 3
+        })
+        .count()
 }
 
 /// TB 常把“科目编码:科目名称”或“上级编码/名称”放在同一格。
@@ -3301,57 +3349,66 @@ fn cross_table_alignment(
             let tb_identities = account_identity_rows(&tb_table, &tb_mapping);
             let policy =
                 ledger_mapping::AccountMatchPolicy::from_sides(&tb_identities, &je_identities);
+            // 仅一侧拆分的共有编码（带辅助核算的余额表按部门／项目／往来把末级
+            // 科目拆成多行）不需要复合匹配：另一侧名称唯一，编码已足够配对，
+            // 拆分行汇总回编码即为该科目全量。只提示让用户知情，不拦截。
+            let (tb_split_only, je_split_only) =
+                one_sided_split_account_codes(&tb_identities, &je_identities);
+            if tb_split_only > 0 {
+                warnings.push(format!(
+                    "检测到 {tb_split_only} 个科目编码在余额表侧对应多个名称（常见于辅助核算按部门／项目／往来拆行），序时账侧名称唯一，两表按科目编码汇总匹配，名称仅作展示。"
+                ));
+            }
+            if je_split_only > 0 {
+                warnings.push(format!(
+                    "检测到 {je_split_only} 个科目编码在序时账侧对应多个名称，余额表侧名称唯一，两表按科目编码汇总匹配，名称仅作展示。"
+                ));
+            }
+            // 两侧都拆但两套名称对不上（交集不足六成，公共引擎复合配对的
+            // 同一把尺）的编码：策略里已退回按编码汇总。先看有没有取值真正
+            // 一致的名称列可换（换上后复合匹配就能逐名配对），没有就按第三
+            // 层兜底继续——只提示，不拦截。
+            let unpairable = unpairable_split_account_codes(&tb_identities, &je_identities);
+            if unpairable > 0 {
+                let je_full =
+                    load_full_side(params, "jeSource")?.unwrap_or_else(|| Arc::clone(&je_table));
+                let tb_full =
+                    load_full_side(params, "tbSource")?.unwrap_or_else(|| Arc::clone(&tb_table));
+                let je_columns = low_cardinality_columns(&je_full);
+                let tb_columns = low_cardinality_columns(&tb_full);
+                if let Some((je_header, tb_header, name_overlap, _)) =
+                    best_column_pair(&je_columns, &tb_columns, false)
+                {
+                    warnings.push(format!(
+                        "科目编码存在一对多，当前名称无法消歧；已自动改用取值一致的名称列：JE“{je_header}”对 TB“{tb_header}”（{name_overlap} 项一致），后续按科目编码＋科目名称匹配。"
+                    ));
+                    return Ok((
+                        errors,
+                        warnings,
+                        Some(json!({
+                            "jeMapping": {"accountName": je_header},
+                            "tbMapping": {"accountName": tb_header}
+                        })),
+                    ));
+                }
+                warnings.push(format!(
+                    "检测到 {unpairable} 个科目编码在两侧都对应多个名称，但两套名称对不上（不是同一套写法），已按科目编码汇总匹配，名称仅作展示。"
+                ));
+            }
             if policy.ambiguous_count() == 0 {
                 // 编码已经可靠且一一对应时，名称只是展示文本。TB 常用标准科目名，
                 // JE 常用带账号的账户全称，强制名称相等只会制造无意义的纠偏提示。
                 return Ok((errors, warnings, None));
             }
+            // 走到这里说明确有两侧都拆且名称配上（六成口径）的编码：按
+            // 「编码＋名称」复合键逐名配对，把实际配上的比例说清楚。
             let (je_keys, tb_keys) =
                 shared_ambiguous_account_keys(&je_identities, &tb_identities, &policy);
-            if je_keys.is_empty() && tb_keys.is_empty() {
-                // 歧义编码只在单侧出现：另一侧不用它，按编码匹配不受影响。
-                warnings.push(format!(
-                    "检测到 {} 个科目编码在单侧对应多个名称（另一侧未使用该编码），不影响两表按科目编码匹配。",
-                    policy.ambiguous_count()
-                ));
-                return Ok((errors, warnings, None));
-            }
             let composite_overlap = je_keys.intersection(&tb_keys).count();
             let composite_base = je_keys.len().min(tb_keys.len());
-            if composite_overlap > 0
-                && composite_base > 0
-                && composite_overlap * 5 >= composite_base * 3
-            {
-                warnings.push(format!(
-                    "检测到 {} 个科目编码对应多个名称，公共引擎已按“科目编码＋科目名称”匹配（其中 {composite_overlap}/{composite_base} 个复合科目一致）。",
-                    policy.ambiguous_count()
-                ));
-                return Ok((errors, warnings, None));
-            }
-
-            // 编码确有歧义但当前名称不足以消歧时，尝试从全表找到真正一致的名称列。
-            let je_full = load_full_side(params, "jeSource")?.unwrap_or(je_table);
-            let tb_full = load_full_side(params, "tbSource")?.unwrap_or(tb_table);
-            let je_columns = low_cardinality_columns(&je_full);
-            let tb_columns = low_cardinality_columns(&tb_full);
-            if let Some((je_header, tb_header, name_overlap, _)) =
-                best_column_pair(&je_columns, &tb_columns, false)
-            {
-                warnings.push(format!(
-                    "科目编码存在一对多，当前名称无法消歧；已自动改用取值一致的名称列：JE“{je_header}”对 TB“{tb_header}”（{name_overlap} 项一致），后续按科目编码＋科目名称匹配。"
-                ));
-                return Ok((
-                    errors,
-                    warnings,
-                    Some(json!({
-                        "jeMapping": {"accountName": je_header},
-                        "tbMapping": {"accountName": tb_header}
-                    })),
-                ));
-            }
-            errors.push(format!(
-                "检测到同一科目编码对应多个名称，但JE与TB的科目名称无法形成可靠的复合匹配。编码样例：{}；请确认两边科目名称映射后重试。",
-                three_samples(&je_codes)
+            warnings.push(format!(
+                "检测到 {} 个科目编码对应多个名称，公共引擎已按“科目编码＋科目名称”匹配（其中 {composite_overlap}/{composite_base} 个复合科目一致）。",
+                policy.ambiguous_count()
             ));
             return Ok((errors, warnings, None));
         }
@@ -4292,7 +4349,8 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
             if !is_je_business_row(&row, &je_mapping) {
                 continue;
             }
-            let Some(date) = parse_date(cell(&row, &je_mapping, "date")) else {
+            // 月份粒度的记账日期也收：勾稽只看期间内发生额合计，按月归集足够。
+            let Some(date) = je_date(cell(&row, &je_mapping, "date"), report_end) else {
                 continue;
             };
             if report_start.is_some_and(|start| date < start)
@@ -4430,9 +4488,37 @@ fn is_placeholder(s: &str) -> bool {
 }
 
 /// 日期解析，**走统一内核**。内核那份合并了本工具与借款利息两边的覆盖面：
-/// 多了英文月份缩写 `10-Jan-2023`，也会先切掉 `2023-01-10 00:00:00` 的时间段。
+/// 多了英文月份缩写 `10-Jan-2023`，也会先切掉 `2023-01-10 00:00:00` 的时间段，
+/// 并把带年份的年月写法（`2025-01`、`2025年1月`）按当月 1 日收下。
 pub(crate) fn parse_date(s: &str) -> Option<NaiveDate> {
     ledger_mapping::parse_date(s)
+}
+
+/// 记账日期列的取值兜底：完整日期优先；只有月份时按月归集——未实现测算
+/// 本来就按 (年, 月) 分桶，月份粒度足够。纯月份数字（「1」「1月」）没有年份，
+/// 按报告期末推定：月份晚于期末月份时归上一年（兼容 4 月至次年 3 月的跨年
+/// 账期），报告期缺失时宁可跳行也不猜年份。
+fn je_date(raw: &str, report_end: Option<NaiveDate>) -> Option<NaiveDate> {
+    if let Some(date) = parse_date(raw) {
+        return Some(date);
+    }
+    let (year, month) = ledger_mapping::parse_month(raw)?;
+    let year = year.or_else(|| {
+        report_end.map(|end| {
+            if month > end.month() {
+                end.year() - 1
+            } else {
+                end.year()
+            }
+        })
+    })?;
+    NaiveDate::from_ymd_opt(year, month, 1)
+}
+
+/// 该取值是否只到月份粒度（供质量提示：已实现测算的记账日牌价被近似）。
+/// 带年份的年月（2025-01）日也不明，同样算月份粒度；完整日期 parse_month 不认。
+fn date_is_month_only(raw: &str) -> bool {
+    ledger_mapping::parse_month(raw).is_some()
 }
 
 /// 把序时账原样转成 JSON 行，供导出时写「JE完整明细」。
@@ -7342,6 +7428,12 @@ fn calculate_realized(
     // 原币已进余额滚动，但此前完全不可见——聚合一条提示让复核看得到。
     let mut candidate_vouchers: Vec<String> = Vec::new();
     let group_count = groups.len();
+    // 月份粒度的记账日期：已实现测算要用记账日牌价，先记一笔让底稿复核。
+    let report_end = params
+        .get("reportEnd")
+        .and_then(Value::as_str)
+        .and_then(parse_date);
+    let mut month_only_noted = false;
     for (group_index, (id, rows)) in groups.into_iter().enumerate() {
         if group_index % 500 == 0 {
             if let Some(control) = control {
@@ -7370,12 +7462,22 @@ fn calculate_realized(
             }));
             continue;
         }
-        let Some(date) = rows
+        let raw_date = rows
             .iter()
-            .find_map(|r| parse_date(cell(r, &mapping, "date")))
+            .map(|r| cell(r, &mapping, "date"))
+            .find(|t| !t.trim().is_empty())
+            .unwrap_or("");
+        let Some(date) = je_date(raw_date, report_end)
         else {
             continue;
         };
+        if !month_only_noted && date_is_month_only(raw_date) {
+            month_only_noted = true;
+            quality.push(json!({
+                "source": "JE", "type": "记账日期仅到月份", "severity": "待复核",
+                "detail": "记账日期列只有月份，已按报告期推定年份；已实现测算的记账日牌价以当月可用牌价近似，请结合银行回单复核。"
+            }));
+        }
         let display_id = display_voucher_id(&id);
         let manual = manual_classification(params, &display_id);
         let manual_realized = manual == Some("已实现汇兑损益");
@@ -8548,10 +8650,15 @@ fn calculate_monthly_unrealized(
     // 约 280 万次日期/科目/币种解析。首次分组凭证时顺手按年月分桶，后面每月
     // 只访问当月行；桶里仅保存引用，不复制单元格。
     let mut rows_by_month = BTreeMap::<(i32, u32), Vec<&RowRecord>>::new();
+    // 月份粒度的记账日期（「年-月」列）按报告期推定年份后照常入桶；提示一次，
+    // 让底稿读者知道月份是推定的。
+    let mut month_only_dates = false;
     for row in &rows {
-        let Some(date) = parse_date(cell(row, &mapping, "date")) else {
+        let raw_date = cell(row, &mapping, "date");
+        let Some(date) = je_date(raw_date, Some(end)) else {
             continue;
         };
+        month_only_dates |= date_is_month_only(raw_date);
         if date < start || date > end {
             continue;
         }
@@ -8566,6 +8673,12 @@ fn calculate_monthly_unrealized(
             .entry((date.year(), date.month()))
             .or_default()
             .push(row);
+    }
+    if month_only_dates {
+        quality.push(json!({
+            "source": "JE", "type": "记账日期仅到月份", "severity": "提示",
+            "detail": "记账日期列只有月份（如「年-月」），已按报告期推定年份、按月归集测算；请结合原始凭证复核月份归属。"
+        }));
     }
     let mut revaluation_meta = HashMap::<String, Value>::new();
     for (id, voucher) in &voucher_rows {
@@ -11416,6 +11529,29 @@ mod tests {
         let (header_row, depth, _) = infer_xlsx_header_layout(&rows);
         assert_eq!(header_row, 6);
         assert_eq!(depth, 1);
+    }
+
+    #[test]
+    fn 记账日期按月份兜底并推定年份() {
+        let date = |y: i32, m: u32| NaiveDate::from_ymd_opt(y, m, 1);
+        // 「年-月」列的纯月份数字：期末 2025-12-31 时 1..12 都归 2025。
+        assert_eq!(je_date("1", date(2025, 12)), date(2025, 1));
+        assert_eq!(je_date("12", date(2025, 12).and_then(|d| d.with_day(31))), date(2025, 12));
+        // 跨年账期（期末 2026-03-31）：晚于 3 月的月份归上一年。
+        let end_mar = NaiveDate::from_ymd_opt(2026, 3, 31);
+        assert_eq!(je_date("4", end_mar), date(2025, 4));
+        assert_eq!(je_date("3", end_mar), date(2026, 3));
+        // 带年份的年月不靠报告期；完整日期原样；报告期缺失时纯月份不猜年份。
+        assert_eq!(je_date("2025年1月", None), date(2025, 1));
+        assert_eq!(je_date("2025-01", None), date(2025, 1));
+        assert_eq!(
+            je_date("2025-01-10 00:00:00", None),
+            NaiveDate::from_ymd_opt(2025, 1, 10)
+        );
+        assert_eq!(je_date("1", None), None);
+        assert!(date_is_month_only("1"));
+        assert!(date_is_month_only("2025-01"));
+        assert!(!date_is_month_only("2025-01-10"));
     }
 
     fn period_promotion_table(rows: usize, broken: Option<usize>) -> FxTable {
@@ -14415,6 +14551,109 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
     }
 
     #[test]
+    fn tb辅助核算拆行且je名称唯一时按科目编码放行() {
+        // TBJEPBC 01 号的形态：余额表把末级科目按往来／部门拆成多行
+        // （名称列填的是辅助维度），序时账同码名称唯一。此时编码已足够
+        // 配对，TB 拆行汇总回编码即为该科目全量；不能因为「名称无法消歧」
+        // 整体拦下——这张 TB 根本没有标准科目名列可换。
+        let dir = std::env::temp_dir().join(format!("fx-aux-split-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let je = dir.join("je.csv");
+        let tb = dir.join("tb.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,科目编码,科目名称,借方,贷方\n\
+             E,2025-01-02,1,1002,银行存款,100,\n\
+             E,2025-01-03,2,2241.02,其他应付款-个人往来,,80\n\
+             E,2025-01-04,3,6602.03,管理费用-办公费,20,\n",
+        )
+        .unwrap();
+        fs::write(
+            &tb,
+            "公司,科目编码,科目名称,本年累计借方,本年累计贷方\n\
+             E,1002,银行存款,100,0\n\
+             E,2241.02,荀海波,0,50\n\
+             E,2241.02,王强,0,30\n\
+             E,6602.03,管理费用-办公费,20,0\n",
+        )
+        .unwrap();
+        let params = json!({
+            "jeSource":{"inputPath":je, "sheet":"", "headerRow":1, "headerDepth":1},
+            "tbSource":{"inputPath":tb, "sheet":"", "headerRow":1, "headerDepth":1},
+            "jeMapping":{"entity":"公司","date":"日期","id":["凭证号"],
+                "accountCode":"科目编码","accountName":"科目名称",
+                "functionalDebit":"借方","functionalCredit":"贷方"},
+            "tbMapping":{"entity":"公司","accountCode":"科目编码","accountName":"科目名称",
+                "ytdFunctionalDebit":"本年累计借方","ytdFunctionalCredit":"本年累计贷方"}
+        });
+        let result = check_mapping_alignment(&params).unwrap();
+        assert_eq!(
+            result["errors"].as_array().map(Vec::len),
+            Some(0),
+            "单侧拆行不是编码歧义，不该拦下：{result:#}"
+        );
+        assert!(
+            result["warnings"].as_array().is_some_and(|items| items.iter().any(|item| item
+                .as_str()
+                .is_some_and(|text| text.contains("在余额表侧对应多个名称")))),
+            "要告诉用户按科目编码汇总匹配：{result:#}"
+        );
+        fs::remove_file(&je).unwrap();
+        fs::remove_file(&tb).unwrap();
+    }
+
+    #[test]
+    fn 两侧都把编码拆成多个名称且对不上时退回按编码汇总() {
+        // 匹配三层规则的兜底：两侧都把同一编码拆成多个名称，但两套名称
+        // 完全对不上（不是同一套词汇）。此时复合键只会制造互不相认的孤儿
+        // 键，必须退回按科目编码汇总，并明确告知——不再拦截用户。
+        let dir = std::env::temp_dir().join(format!("fx-both-split-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let je = dir.join("je.csv");
+        let tb = dir.join("tb.csv");
+        fs::write(
+            &je,
+            "公司,日期,凭证号,科目编码,科目名称,借方,贷方\n\
+             E,2025-01-02,1,2241.02,张三,,80\n\
+             E,2025-01-03,2,2241.02,李四,,30\n\
+             E,2025-01-04,3,1122.01,应收账款-A公司,50,\n\
+             E,2025-01-05,4,6602.03,管理费用-办公费,20,\n",
+        )
+        .unwrap();
+        fs::write(
+            &tb,
+            "公司,科目编码,科目名称,本年累计借方,本年累计贷方\n\
+             E,2241.02,荀海波,0,60\n\
+             E,2241.02,王强,0,50\n\
+             E,1122.01,应收账款-A公司,50,0\n\
+             E,6602.03,管理费用-办公费,20,0\n",
+        )
+        .unwrap();
+        let params = json!({
+            "jeSource":{"inputPath":je, "sheet":"", "headerRow":1, "headerDepth":1},
+            "tbSource":{"inputPath":tb, "sheet":"", "headerRow":1, "headerDepth":1},
+            "jeMapping":{"entity":"公司","date":"日期","id":["凭证号"],
+                "accountCode":"科目编码","accountName":"科目名称",
+                "functionalDebit":"借方","functionalCredit":"贷方"},
+            "tbMapping":{"entity":"公司","accountCode":"科目编码","accountName":"科目名称",
+                "ytdFunctionalDebit":"本年累计借方","ytdFunctionalCredit":"本年累计贷方"}
+        });
+        let result = check_mapping_alignment(&params).unwrap();
+        assert_eq!(
+            result["aligned"], json!(true),
+            "名称对不上按编码汇总兜底，不该拦下：{result:#}"
+        );
+        assert!(
+            result["warnings"].as_array().is_some_and(|items| items.iter().any(|item| item
+                .as_str()
+                .is_some_and(|text| text.contains("两套名称对不上")))),
+            "要告诉用户已按科目编码汇总匹配：{result:#}"
+        );
+        fs::remove_file(&je).unwrap();
+        fs::remove_file(&tb).unwrap();
+    }
+
+    #[test]
     fn je_document_currency_column_keeps_currency_role_even_when_uniform() {
         // 04 PBC 的形态：整本序时账都是本币业务，「货币」列整列 CNY。按取值
         // 形态（填满＋单一代码→本位币列）会把「货币」判给 functionalCurrency、
@@ -15346,17 +15585,17 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             None,
             "科目编码本来就对得上，不该被改动：{result:#}"
         );
-        // TB 的“科目名称一级/二级”是分类层级，和 JE 的科目文本不是一套东西；
-        // 真正同口径的是 TB 的“文本”列，工具应当自己发现并改过去。
-        assert_eq!(
-            result.pointer("/fix/tbMapping/accountName"),
-            Some(&json!("文本")),
-            "{result:#}"
+        // TB 的名称建议是多列（科目名称一级/二级，分类层级），JE 是科目文本，
+        // 两套名称不是一回事；但两侧各自同码名称唯一（没有编码歧义），按编码
+        // 匹配即可，无需改写名称列。旧断言“强制改用文本/科目文本”是名称建议
+        // 多列化之前的形态——那时单列建议制造过编码歧义，才需要找替换列。
+        assert!(
+            result["fix"].is_null(),
+            "名称不参与匹配就不该有任何改列建议：{result:#}"
         );
         assert_eq!(
-            result.pointer("/fix/jeMapping/accountName"),
-            Some(&json!("科目文本")),
-            "{result:#}"
+            result["aligned"], json!(true),
+            "真实 4800 必须一次对齐：{result:#}"
         );
     }
 
@@ -16097,4 +16336,81 @@ mod bench_load {
         }
         println!("BENCH 逐行取值×3: {:?}   有效 {n} 行", t.elapsed());
     }
+
+    // 真实样例验收：TBJEPBC 十一组配对的映射口径对齐。01 号是带辅助核算的
+    // 明细余额表（末级科目按部门／往来拆行、名称列填辅助维度），必须按科目
+    // 编码汇总匹配而不是被「名称无法消歧」拦下；对齐通过后 01 号的 TB×JE
+    // 发生额勾稽 0 差异。
+    #[test]
+    #[ignore = "依赖本机样例目录，用 LEDGER_SAMPLES=<TBJEPBC路径> 显式运行"]
+    fn 真实tbjepbc样例全部对齐且01号按编码勾稽() {
+        let Some(root) = std::env::var_os("LEDGER_SAMPLES")
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir())
+        else {
+            panic!("未设置 LEDGER_SAMPLES，跳过");
+        };
+        let pairs: &[(&str, &str, &str)] = &[
+            ("01", "01序时账 (JE).xlsx", "01科目余额表（TB）.xls"),
+            ("02", "02序时账 (2).xlsx", "02科目余额表.xlsx"),
+            ("03", "03序时账 (2).xlsx", "03科目余额表.xlsx"),
+            ("04", "04JE.XLSX", "04TB.XLSX"),
+            ("05", "05序时账 (2).XLSX", "05科目余额表.XLSX"),
+            ("06a", "06序时账-2024.1-3.xlsx", "06科目余额表_2024.1-3.xlsx"),
+            ("06b", "06序时账-2024.4-12.xlsx", "06科目余额表_2024.4-12.xlsx"),
+            ("07", "07序时账.xls", "07科目余额表.xls"),
+            ("08", "08序时账 (2).xlsx", "08TB.xlsx"),
+            ("09", "09序时账-2025.xls", "09科目余额表-2025.xls"),
+            ("10", "10序时账 (2).xlsx", "10科目余额表.xlsx"),
+        ];
+        for (label, je_name, tb_name) in pairs {
+            let inspect_side = |name: &str, kind: &str| {
+                inspect(
+                    &json!({"source": {
+                        "inputPath": root.join(name), "sheet": "", "headerRow": 0, "headerDepth": 0
+                    }}),
+                    kind,
+                )
+                .unwrap()
+            };
+            let je_inspect = inspect_side(je_name, "je");
+            let tb_inspect = inspect_side(tb_name, "tb");
+            let source = |inspected: &Value, name: &str| {
+                json!({
+                    "inputPath": root.join(name),
+                    "sheet": inspected["sheet"],
+                    "headerRow": inspected["headerRow"],
+                    "headerDepth": inspected["headerDepth"],
+                })
+            };
+            let params = json!({
+                "label": label,
+                "jeSource": source(&je_inspect, je_name),
+                "jeMapping": je_inspect["suggestedMapping"],
+                "tbSource": source(&tb_inspect, tb_name),
+                "tbMapping": tb_inspect["suggestedMapping"],
+            });
+            let result = check_mapping_alignment(&params).unwrap();
+            assert_eq!(
+                result["aligned"], json!(true),
+                "组 {label}（{je_name} × {tb_name}）必须能对齐：{result:#}"
+            );
+            if *label == "01" {
+                assert!(
+                    result["warnings"].as_array().is_some_and(|items| items.iter().any(
+                        |item| item.as_str().is_some_and(|text|
+                            text.contains("在余额表侧对应多个名称"))
+                    )),
+                    "辅助核算拆行要给知情提示：{result:#}"
+                );
+                let cancel = std::sync::atomic::AtomicBool::new(false);
+                let verdict = crate::tbje_check::run(&params, &cancel).unwrap();
+                let tb_vs_je = &verdict["tbVsJe"];
+                assert_eq!(tb_vs_je["accountMatchMode"], json!("code"), "{tb_vs_je:#}");
+                assert_eq!(tb_vs_je["mismatched"], json!(0), "{tb_vs_je:#}");
+                assert_eq!(tb_vs_je["netMismatched"], json!(0), "{tb_vs_je:#}");
+            }
+        }
+    }
+
 }

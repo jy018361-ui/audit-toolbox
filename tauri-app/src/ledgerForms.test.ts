@@ -113,10 +113,10 @@ describe("下拉分组", () => {
     const groups = formGroups("tb", TB_ROLES, TB_FORMS, debitCreditMapping);
     expect(groups.map((group) => group.title)).toEqual([
       "公共必填字段",
-      "公共选填字段",
+      "公共选填字段A",
       "TB-类型A（本位币净额）",
       "TB-类型C（本位币借贷分列）",
-      "本期发生额（通过勾稽后自动提升）",
+      "公共选填字段B（勾稽后自动提升）",
     ]);
     expect(groups[0].roles).toEqual(["accountCode", "accountName"]);
     expect(groups[0].required).toEqual(["accountCode", "accountName"]);
@@ -141,11 +141,11 @@ describe("下拉分组", () => {
         required: ["accountCode", "accountName"],
       },
       {
-        title: "公共选填字段",
+        title: "公共选填字段A",
         roles: ["entity", "currency"],
       },
       {
-        title: "本期发生额（通过勾稽后自动提升）",
+        title: "公共选填字段B（勾稽后自动提升）",
         roles: ["periodFunctionalDebit", "periodFunctionalCredit"],
       },
       {

@@ -44,6 +44,7 @@ const draft = (): KanzhangDraft => ({
   sheet: "总账",
   knownSheets: ["总账", "明细"],
   headerRow: 1,
+  headerDepth: 1,
   inspect: { headers: ["凭证号", "科目", "金额"], preview: [] },
   mapping: { id: ["凭证号"], accountName: ["科目"], functionalAmount: "金额" },
   batches: [{ name: "收入", accounts: ["主营业务收入"] }],

@@ -277,7 +277,7 @@ const faReview = (): unknown => ({
   matchReview: {
     action: "keep",
     confidence: 0.86,
-    reasons: ["「资产编号」在两期清单中均未发现重复，维持当前组合匹配键。"],
+    reasons: ["「资产编号」在两期清单中均未发现重复，维持当前资产ID。"],
   },
 });
 
@@ -387,7 +387,7 @@ const faSupplementReview = (): unknown => ({
   matchReview: {
     action: "keep",
     confidence: 0.9,
-    reasons: ["补充清单的「资产编号」与第一步组合匹配键逐值碰撞通过。"],
+    reasons: ["补充清单的「资产编号」与第一步资产ID逐值碰撞通过。"],
   },
 });
 
@@ -1038,7 +1038,7 @@ export const jobHandlers: Record<
   "fa.match": () => [
     jobEvent("queued", 0, 0, "排队执行两期清单完全外连接…"),
     jobEvent("running", 1, 4, "正在读取期初与期末清单并套用字段映射…"),
-    jobEvent("running", 2, 4, "正在按组合匹配键「资产编号」对齐两期清单…"),
+    jobEvent("running", 2, 4, "正在按资产ID「资产编号」对齐两期清单…"),
     jobEvent("running", 3, 4, "正在合并补充清单并统计重复匹配键…"),
     jobEvent("completed", 4, 4, "匹配预览完成：完全外连接共 19 行。", {
       result: faMatchResult(),
@@ -1047,7 +1047,7 @@ export const jobHandlers: Record<
   // FA List 清单模式：导出底稿（outputPaths + 纠偏告警）
   "fa.export": (params) => [
     jobEvent("queued", 0, 0, "排队生成 FA List 底稿…"),
-    jobEvent("running", 1, 4, "正在按组合匹配键「资产编号」对齐两期清单…"),
+    jobEvent("running", 1, 4, "正在按资产ID「资产编号」对齐两期清单…"),
     jobEvent("running", 2, 4, "正在合并补充清单：新增 8 笔、处置 8 笔…"),
     jobEvent("running", 3, 4, "正在生成 FA List、变动清单、汇总与透视表"),
     jobEvent("completed", 4, 4, "FA List 底稿导出完成。", {

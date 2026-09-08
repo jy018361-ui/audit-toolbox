@@ -505,6 +505,7 @@ export const isCombinedAccountValues = (values: string[]): boolean => {
  * 强类型结构不同，所以单独一个入口；纪律、卫生过滤在后端已经统一。
  * 后端已按冲突词、占用、置信度过滤过一轮，这里只做两件后端做不了的事：
  * 丢掉本工具不认识的角色，以及丢掉指向表里不存在的列的建议。
+ * `tool` 透传给后端做工具专属纪律（汇兑损益的记账日期月度兜底）。
  */
 export async function applyLedgerReviewToDict(
   call: (method: string, params: Record<string, unknown>) => Promise<unknown>,
@@ -513,6 +514,7 @@ export async function applyLedgerReviewToDict(
   sampleRows: string[][],
   current: Record<string, string | string[]>,
   labels: Record<string, string>,
+  tool?: string,
 ): Promise<{
   mapping: Record<string, string | string[]>;
   applied: LedgerPlannedChange[];
@@ -525,6 +527,7 @@ export async function applyLedgerReviewToDict(
       sampleRows: sampleRows.slice(0, 8),
       currentMapping: current,
       availableRoles: Object.keys(labels),
+      ...(tool ? { tool } : {}),
     },
   })) as { changes?: LedgerChange[] };
   return planLedgerChanges(headers, sampleRows, current, labels, response.changes ?? []);
@@ -704,6 +707,7 @@ export async function applyLedgerReviewsTogether(
   try {
     const { mapping, applied, pending } = await applyLedgerReviewToDict(
       call, kind, target.headers, target.preview, target.mapping, target.labels,
+      target.tool,
     );
     return { [kind]: {
       mapping,

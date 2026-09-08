@@ -1345,6 +1345,9 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       const alignedGroups: Record<string, unknown>[] = [];
       const correctedMappings: Record<string, Mapping> = {};
       const alignmentWarnings: string[] = [];
+      // 对齐失败的组要指名道姓地报出来，并且只跳过该组——
+      // 其余组照常核对，不能一组映射问题拖住整批。
+      const alignmentFailures: string[] = [];
       for (const group of runnable) {
         const groupParams = paramsOf(group);
         if (group.je) {
@@ -1361,9 +1364,10 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
             };
           };
           if (alignment.aligned === false) {
-            throw new Error(
-              alignment.errors?.[0] ?? "TB与JE的科目字段无法对齐。",
+            alignmentFailures.push(
+              `「${group.label}」组（${group.tb ? fileName(group.tb.path) : "无余额表"} × ${fileName(group.je.path)}）：${alignment.errors?.join("；") || "TB与JE的科目字段无法对齐。"}`,
             );
+            continue;
           }
           if (alignment.fix?.tbMapping && group.tb) {
             groupParams.tbMapping = {
@@ -1388,7 +1392,16 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       if (Object.keys(correctedMappings).length) {
         setMappings((current) => ({ ...current, ...correctedMappings }));
       }
+      if (alignmentFailures.length) {
+        setError(
+          `有 ${alignmentFailures.length} 组因科目字段无法对齐已跳过，其余组继续核对：\n${alignmentFailures.join("\n")}`,
+        );
+      }
       if (alignmentWarnings.length) setStatus(alignmentWarnings[0]);
+      if (!alignedGroups.length) {
+        setBusy(false);
+        return;
+      }
       const id = await jobStart("tbje_check.run_batch", {
         groups: alignedGroups,
       });
@@ -1558,18 +1571,14 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   移除全部
                 </Button>
                 {llmReviewStatus && (
-                  <span aria-live="polite">{llmReviewStatus}</span>
+                  <span className="tbje-llm-status" aria-live="polite">
+                    {llmReviewStatus}
+                  </span>
                 )}
               </div>
             </CardHeader>
             <CardContent>
               <div className="tbje-pairing-list">
-                <div className="tbje-pairing-head" aria-hidden="true">
-                  <span>配对组</span>
-                  <span>科目余额表 TB</span>
-                  <span>序时账 JE</span>
-                  <span>字段预览与映射</span>
-                </div>
                 {visibleGroups.map((group) => (
                   <div
                     key={group.id}
@@ -1593,10 +1602,15 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                           className={`tbje-pair-status${group.needsReview ? " review" : ""}`}
                         >
                           <i aria-hidden="true" />
-                          {group.needsReview ? "待确认" : "已识别"}
+                          {group.needsReview
+                            ? "待确认"
+                            : llmReviews[group.id]
+                              ? "复核通过"
+                              : "已识别"}
                         </span>
                       </div>
                       <div className="tbje-file-cell">
+                        <h3 className="sr-only">科目余额表 TB</h3>
                         <div className="tbje-file-line">
                           <span className="tbje-kind-tag">TB</span>
                           <button
@@ -1658,8 +1672,42 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                             {missingOf("tb", group.tb).length > 2 ? "…" : ""}
                           </button>
                         )}
+                        <div className="tbje-source-actions">
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            disabled={busy || !group.tb}
+                            aria-label={
+                              expanded?.groupId === group.id &&
+                              expanded.kind === "tb"
+                                ? "收起 TB 映射"
+                                : "查看并调整 TB 映射"
+                            }
+                            aria-expanded={
+                              expanded?.groupId === group.id &&
+                              expanded.kind === "tb"
+                            }
+                            aria-controls={`tbje-mapping-${group.id}-tb`}
+                            onClick={() =>
+                              setExpanded(
+                                expanded?.groupId === group.id &&
+                                  expanded.kind === "tb"
+                                  ? undefined
+                                  : { groupId: group.id, kind: "tb" },
+                              )
+                            }
+                          >
+                            <Eye aria-hidden="true" />
+                            {expanded?.groupId === group.id &&
+                            expanded.kind === "tb"
+                              ? "收起字段映射"
+                              : "查看字段映射"}
+                          </Button>
+                        </div>
                       </div>
                       <div className="tbje-file-cell">
+                        <h3 className="sr-only">序时账 JE</h3>
                         <div className="tbje-file-line">
                           <span className="tbje-kind-tag je">JE</span>
                           <button
@@ -1748,42 +1796,41 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                             {missingOf("je", group.je).length > 2 ? "…" : ""}
                           </button>
                         )}
+                        <div className="tbje-source-actions">
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            disabled={busy || !group.je}
+                            aria-label={
+                              expanded?.groupId === group.id &&
+                              expanded.kind === "je"
+                                ? "收起 JE 映射"
+                                : "查看并调整 JE 映射"
+                            }
+                            aria-expanded={
+                              expanded?.groupId === group.id &&
+                              expanded.kind === "je"
+                            }
+                            aria-controls={`tbje-mapping-${group.id}-je`}
+                            onClick={() =>
+                              setExpanded(
+                                expanded?.groupId === group.id &&
+                                  expanded.kind === "je"
+                                  ? undefined
+                                  : { groupId: group.id, kind: "je" },
+                              )
+                            }
+                          >
+                            <Eye aria-hidden="true" />
+                            {expanded?.groupId === group.id &&
+                            expanded.kind === "je"
+                              ? "收起字段映射"
+                              : "查看字段映射"}
+                          </Button>
+                        </div>
                       </div>
                       <div className="tbje-group-buttons">
-                        {(["tb", "je"] as LedgerKind[]).map((kind) => {
-                          const active =
-                            expanded?.groupId === group.id &&
-                            expanded.kind === kind;
-                          const available = kind === "tb" ? group.tb : group.je;
-                          return (
-                            <Button
-                              key={kind}
-                              type="button"
-                              variant="secondary"
-                              size="sm"
-                              disabled={busy || !available}
-                              aria-label={
-                                active
-                                  ? `收起 ${kind.toUpperCase()} 映射`
-                                  : `查看并调整 ${kind.toUpperCase()} 映射`
-                              }
-                              aria-expanded={active}
-                              aria-controls={`tbje-mapping-${group.id}-${kind}`}
-                              onClick={() =>
-                                setExpanded(
-                                  active
-                                    ? undefined
-                                    : { groupId: group.id, kind },
-                                )
-                              }
-                            >
-                              <Eye aria-hidden="true" />
-                              {active
-                                ? `收起 ${kind.toUpperCase()}`
-                                : `${kind.toUpperCase()} 字段映射`}
-                            </Button>
-                          );
-                        })}
                         <Button
                           type="button"
                           variant="ghost"
@@ -1811,6 +1858,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                             (review[kind]?.applied.length ?? 0) > 0 ||
                             (review[kind]?.pending.length ?? 0) > 0,
                         );
+                        if (!failed && !changed) return null;
                         return (
                           <div
                             className="tbje-group-llm-result"
@@ -2176,8 +2224,8 @@ function LedgerMappingPanel(props: {
                   )
                 }
               >
-                <option value={1}>1 层</option>
-                <option value={2}>2 层</option>
+                <option value={1}>1层</option>
+                <option value={2}>2层</option>
               </select>
             </label>
             <Button

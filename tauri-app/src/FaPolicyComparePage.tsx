@@ -444,7 +444,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
         matchReview: value.matchReview,
         roleLabels: Object.fromEntries([
           ...POLICY_MAPPING_ROLES,
-          ["matchKeys", "组合匹配键"],
+          ["matchKeys", "资产ID"],
         ]),
       });
       setBeginMapping({ ...plan.beginMapping, matchKeys: plan.beginKeys });
@@ -568,7 +568,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
     }
   }
 
-  /// 组合匹配键的选择（多选）。
+  /// 资产ID（可多列）的选择。
   function toggleKey(side: "begin" | "end", column: string) {
     const keys = side === "begin" ? beginKeys : endKeys;
     const next = keys.includes(column)
@@ -693,7 +693,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
         shouldShowFaAdditionFields(String(endMapping.additionMethod ?? "")),
     );
     const roleOptions: [string, string][] = [
-      ["matchKeys", "组合匹配键"],
+      ["matchKeys", "资产ID"],
       ...faRolesForSide(side, visibleRoles),
     ];
     // 已被某列占用的角色集合（跨列感知，用于标记"已用"）
@@ -710,7 +710,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
     }
     const controls = headers.map((header) => {
       const column = header.trim();
-      // 同一列可以同时承担组合匹配键、资产名称等多个角色，保留全部关系合并展示。
+      // 同一列可以同时承担资产ID、资产名称等多个角色，保留全部关系合并展示。
       const mapped = faMappedRolesForColumn(column, roleOptions, mapping);
       const multipleValue = `__multiple__:${column}`;
       return (

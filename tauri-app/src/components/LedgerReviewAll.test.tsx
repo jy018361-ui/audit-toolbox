@@ -168,6 +168,23 @@ describe("共享账表复核生命周期", () => {
     expect(result.current.results.je?.applied[0].attention).toBe(true);
   });
 
+  it("只上传一侧时单表复核请求要带上 tool 供后端区分工具纪律", async () => {
+    const call = vi.fn().mockResolvedValue({ changes: [] });
+    const { result } = renderHook(() => useLedgerDictReviews(call));
+    await act(async () => {
+      await result.current.reviewAll({
+        je: { ...slot(), tool: "fx_audit" },
+      });
+    });
+    expect(call).toHaveBeenCalledWith(
+      "ledger.review_mapping",
+      expect.objectContaining({
+        kind: "je",
+        payload: expect.objectContaining({ tool: "fx_audit" }),
+      }),
+    );
+  });
+
   it("组件卸载后不调用页面回写，也不返回可供二次回写的旧结果", async () => {
     const request = deferred();
     const applied = vi.fn();

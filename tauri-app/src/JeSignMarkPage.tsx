@@ -69,6 +69,7 @@ type JeMarkDraft = {
   sheet: string;
   knownSheets: string[];
   headerRow: number;
+  headerDepth: number;
   inspect?: Inspect;
   mapping: Mapping;
   batches: JeMarkBatch[];
@@ -98,6 +99,7 @@ const EMPTY: JeMarkDraft = {
   sheet: "",
   knownSheets: [],
   headerRow: 0,
+  headerDepth: 1,
   mapping: EMPTY_MAPPING,
   batches: [newBatch(0)],
   activeBatch: 0,
@@ -209,6 +211,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       inputPath?: string;
       sheet?: string;
       headerRow?: number;
+      headerDepth?: number;
       mapping?: JeMarkDraft["mapping"];
       targetBatches?: JeMarkDraft["batches"];
       columnFilters?: JeMarkDraft["columnFilters"];
@@ -239,6 +242,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       inputPath: p.inputPath,
       sheet,
       headerRow: p.headerRow ?? 0,
+      headerDepth: p.headerDepth ?? 1,
       mapping,
       batches:
         Array.isArray(p.targetBatches) && p.targetBatches.length
@@ -355,7 +359,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   }
 
   function invalidate(
-    change: Partial<Pick<JeMarkDraft, "sheet" | "headerRow">>,
+    change: Partial<Pick<JeMarkDraft, "sheet" | "headerRow" | "headerDepth">>,
   ) {
     setValueCache({});
     setMenu(undefined);
@@ -382,6 +386,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         inputPath: draft.inputPath,
         sheet: draft.sheet || undefined,
         headerRow: draft.headerRow,
+        headerDepth: draft.headerDepth,
       });
     } catch (e) {
       setError(ledgerErrorText(e));
@@ -467,6 +472,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       inputPath: draft.inputPath,
       sheet: draft.sheet || undefined,
       headerRow: draft.headerRow,
+      headerDepth: draft.headerDepth,
       mapping: draft.mapping,
     })
       .then((value) => {
@@ -577,6 +583,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             inputPath: draft.inputPath,
             sheet: draft.sheet || undefined,
             headerRow: draft.headerRow,
+            headerDepth: draft.headerDepth,
             mapping: draft.mapping,
             keyword,
             limit: VALUE_LIMIT,
@@ -585,6 +592,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             inputPath: draft.inputPath,
             sheet: draft.sheet || undefined,
             headerRow: draft.headerRow,
+            headerDepth: draft.headerDepth,
             field,
             keyword,
             limit: VALUE_LIMIT,
@@ -681,6 +689,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         inputPath: draft.inputPath,
         sheet: draft.sheet || undefined,
         headerRow: draft.headerRow,
+        headerDepth: draft.headerDepth,
         mapping: draft.mapping,
         targetBatches: validBatches,
         columnFilters: activeColumnFilters(draft.columnFilters),
@@ -749,6 +758,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         sheet={draft.sheet}
         knownSheets={draft.knownSheets}
         headerRow={draft.headerRow}
+        headerDepth={draft.headerDepth}
         detectedHeaderRow={draft.headerRow === 0 ? draft.inspect?.headerRow : undefined}
         dragHover={dragHover}
         busy={busy}
@@ -758,6 +768,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         onClear={clearAll}
         onSheetChange={(value) => invalidate({ sheet: value, headerRow: 0 })}
         onHeaderRowChange={(value) => invalidate({ headerRow: value })}
+        onHeaderDepthChange={(value) => invalidate({ headerDepth: value })}
         onInspect={inspect}
         onCancel={(jobId) => void jobCancel(jobId)}
       >

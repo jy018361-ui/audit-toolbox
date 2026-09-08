@@ -76,7 +76,7 @@ export const POLICY_MAPPING_ROLES: [string, string][] = [
   ["additionDate", "新增日期"],
 ];
 
-/// 必填集合与 FA 主工具 REQUIRED_ROLES 一致（组合匹配键在该页面单独校验，
+/// 必填集合与 FA 主工具 REQUIRED_ROLES 一致（资产ID 在该页面单独校验，
 /// 这里不重复列）。
 export const POLICY_REQUIRED_ROLE_KEYS = [
   "category",
@@ -87,7 +87,7 @@ export const POLICY_REQUIRED_ROLE_KEYS = [
 
 export const policyRoleLabel = (key: string): string =>
   key === "matchKeys"
-    ? "组合匹配键"
+    ? "资产ID"
     : (POLICY_MAPPING_ROLES.find(([role]) => role === key)?.[1] ?? key);
 
 export const policyMissingRoles = (mapping: FaMappingLike): string[] =>

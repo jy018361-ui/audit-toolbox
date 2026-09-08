@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -87,6 +88,32 @@ it("presents one product identity and groups every catalog tool once", async () 
     catalog.length,
   );
   expect(document.querySelectorAll(".metrics .metric")).toHaveLength(3);
+});
+
+it("发现新版本时侧边栏「设置」显示圆点提示而非文字", async () => {
+  vi.mocked(check).mockResolvedValue({ version: "9.9.9" } as Update);
+  vi.useFakeTimers();
+  try {
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    // 自动检查更新在启动约 5 秒后触发，推进到那之后。
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5500);
+    });
+    const sidebar = within(
+      document.querySelector("aside.sidebar")! as HTMLElement,
+    );
+    const dot = sidebar.getByRole("status");
+    expect(dot).toHaveAttribute("aria-label", "发现新版本 9.9.9");
+    expect(dot).toHaveClass("nav-update-dot");
+    // 圆点不带文字：视觉提示全部由 CSS 承担。
+    expect(dot).toBeEmptyDOMElement();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("opens and closes the compact navigation drawer with keyboard and route changes", async () => {

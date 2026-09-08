@@ -71,15 +71,15 @@ export {
 export type { Mapping, MappingChange, MappingChangeSource } from "./ledgerMapping";
 
 export type Batch = { name: string; accounts: string[]; presetId?: string };
-export type KanzhangDraft = { inputPath: string; sheet: string; knownSheets:string[]; headerRow: number; inspect?: Inspect; mapping: Mapping; batches: Batch[]; activeBatch: number; excludes: string[]; outputPath: string; outputTouched: boolean; includePivot: boolean; includeVoucherTypes: boolean; includeCounterpart:boolean; includeSuite:boolean; markLossTransfer: boolean; llmAnalysis:boolean; pivotRows: string[]; pivotColumns: string[]; pivotValues: string[]; step: number };
-const EMPTY: KanzhangDraft = { inputPath:"",sheet:"",knownSheets:[],headerRow:0,mapping:EMPTY_MAPPING,batches:[{name:"批次1",accounts:[]}],activeBatch:0,excludes:[],outputPath:"",outputTouched:false,includePivot:true,includeVoucherTypes:true,includeCounterpart:true,includeSuite:true,markLossTransfer:true,llmAnalysis:true,pivotRows:[],pivotColumns:[],pivotValues:[],step:1 };
+export type KanzhangDraft = { inputPath: string; sheet: string; knownSheets:string[]; headerRow: number; headerDepth: number; inspect?: Inspect; mapping: Mapping; batches: Batch[]; activeBatch: number; excludes: string[]; outputPath: string; outputTouched: boolean; includePivot: boolean; includeVoucherTypes: boolean; includeCounterpart:boolean; includeSuite:boolean; markLossTransfer: boolean; llmAnalysis:boolean; pivotRows: string[]; pivotColumns: string[]; pivotValues: string[]; step: number };
+const EMPTY: KanzhangDraft = { inputPath:"",sheet:"",knownSheets:[],headerRow:0,headerDepth:1,mapping:EMPTY_MAPPING,batches:[{name:"批次1",accounts:[]}],activeBatch:0,excludes:[],outputPath:"",outputTouched:false,includePivot:true,includeVoucherTypes:true,includeCounterpart:true,includeSuite:true,markLossTransfer:true,llmAnalysis:true,pivotRows:[],pivotColumns:[],pivotValues:[],step:1 };
 const CACHE="audit-toolbox.kanzhang.draft.v4";
 export const setCounterpartMode=(enabled:boolean):Pick<KanzhangDraft,"includeCounterpart"|"includeSuite">=>({includeCounterpart:enabled,includeSuite:enabled});
 const loadDraft=():KanzhangDraft=>{try{const value={...EMPTY,...JSON.parse(sessionStorage.getItem(CACHE)||"{}")} as KanzhangDraft;return value.includeCounterpart?value:{...value,includeSuite:false};}catch{return EMPTY;}};
 export const kanzhangErrorText=ledgerErrorText;
 export const validKanzhangBatches=(batches:Batch[])=>batches.filter(value=>value.name.trim()&&value.accounts.length);
 export const clearKanzhangBatches=():Pick<KanzhangDraft,"batches"|"activeBatch">=>({batches:[{name:"批次1",accounts:[]}],activeBatch:0});
-export const invalidateKanzhangInspection=(current:KanzhangDraft,change:Partial<Pick<KanzhangDraft,"sheet"|"headerRow">>):KanzhangDraft=>({...current,...change,inspect:undefined,mapping:EMPTY_MAPPING,step:1});
+export const invalidateKanzhangInspection=(current:KanzhangDraft,change:Partial<Pick<KanzhangDraft,"sheet"|"headerRow"|"headerDepth">>):KanzhangDraft=>({...current,...change,inspect:undefined,mapping:EMPTY_MAPPING,step:1});
 // 科目检索按旧版口径：在已载入的科目列表上即时过滤，不需要点"搜索"。
 export const filterAccounts=(values:string[],keyword:string):string[]=>{
   const kw=keyword.trim().toLowerCase();
@@ -238,7 +238,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const autoReadKeyRef=useRef("");
   const [autoReadSeq,setAutoReadSeq]=useState(0);
   useTaskRestore(tool.id,(restore)=>{
-    const p=restore.params as Partial<Pick<KanzhangDraft,"inputPath"|"sheet"|"headerRow"|"mapping"|"batches"|"excludes"|"outputPath"|"markLossTransfer"|"includeCounterpart"|"includeSuite"|"pivotRows"|"pivotColumns"|"pivotValues">>&{targetBatches?:Batch[];excludeAccounts?:string[]};
+    const p=restore.params as Partial<Pick<KanzhangDraft,"inputPath"|"sheet"|"headerRow"|"headerDepth"|"mapping"|"batches"|"excludes"|"outputPath"|"markLossTransfer"|"includeCounterpart"|"includeSuite"|"pivotRows"|"pivotColumns"|"pivotValues">>&{targetBatches?:Batch[];excludeAccounts?:string[]};
     if(typeof p.inputPath!=="string"||!p.inputPath)return;
     const mapping=p.mapping&&typeof p.mapping==="object"&&Object.keys(p.mapping).length?p.mapping:undefined;
     if(!mapping)return;
@@ -249,7 +249,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     setAutoReadSeq(value=>value+1);
     llmGeneration.current+=1;
     const includeCounterpart=p.includeCounterpart??true;
-    setDraft({...EMPTY,inputPath:p.inputPath,sheet,headerRow:p.headerRow??0,mapping,batches,activeBatch:0,excludes:p.excludeAccounts??[],outputPath:p.outputPath??"",outputTouched:Boolean(p.outputPath),markLossTransfer:p.markLossTransfer??true,includeCounterpart,includeSuite:includeCounterpart&&(p.includeSuite??true),pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[],pivotValues:p.pivotValues??[]});
+    setDraft({...EMPTY,inputPath:p.inputPath,sheet,headerRow:p.headerRow??0,headerDepth:p.headerDepth??1,mapping,batches,activeBatch:0,excludes:p.excludeAccounts??[],outputPath:p.outputPath??"",outputTouched:Boolean(p.outputPath),markLossTransfer:p.markLossTransfer??true,includeCounterpart,includeSuite:includeCounterpart&&(p.includeSuite??true),pivotRows:p.pivotRows??[],pivotColumns:p.pivotColumns??[],pivotValues:p.pivotValues??[]});
     setAccounts([]);setAccountCodes([]);setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");setResult(undefined);setJob(undefined);setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setChanges([]);setPending([]);setLlmStatus("");
   });
   // 恢复的草稿提交到 state 后自动触发读取（setDraft 异步，恢复回调里直接
@@ -292,7 +292,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const truncated=accountTotal>accounts.length;
   const setMap=(key:keyof Mapping,value:string|string[])=>patch({mapping:setKanzhangMapping(draft.mapping,key,value)});
   async function chooseInput(){const value=await pickPath("file","选择凭证文件",["xlsx","xls","xlsm","csv","txt","parquet"]);if(typeof value==="string")resetSource(value);}
-  async function inspect(){if(!draft.inputPath){setError("请选择凭证文件。");return;}setBusy(true);setError("");inspectKeyRef.current=`${draft.inputPath}|${(draft.sheet||"").trim()}`;try{await jobStart("kanzhang.inspect",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow});return;}catch(e){setError(kanzhangErrorText(e));setBusy(false);}}
+  async function inspect(){if(!draft.inputPath){setError("请选择凭证文件。");return;}setBusy(true);setError("");inspectKeyRef.current=`${draft.inputPath}|${(draft.sheet||"").trim()}`;try{await jobStart("kanzhang.inspect",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,headerDepth:draft.headerDepth});return;}catch(e){setError(kanzhangErrorText(e));setBusy(false);}}
   // 读取任务回来后套用表结构；改走任务通道是为了让大凭证文件的读取能报进度、能取消。
   // 透视默认只按科目名称分行——旧版就是这个口径。之前把公司也塞进行字段，
   // 同一科目被拆成每家公司一行，210 行的透视表膨胀到 665 行，跟旧版对不上。
@@ -320,17 +320,17 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     try{
       if(draft.inspect?.lowMemory){
         const request:{id?:string;key:string}={key};accountsJob.current=request;
-        const jobId=await jobStart("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,mapping:draft.mapping,keyword:"",limit:20000});
+        const jobId=await jobStart("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,headerDepth:draft.headerDepth,mapping:draft.mapping,keyword:"",limit:20000});
         if(accountsJob.current===request)request.id=jobId;
         setJob({jobId,toolId:"kanzhang",phase:"queued",current:0,total:1,message:"科目汇总任务已进入队列",severity:"info",outputPaths:[]});
         return;
       }
-      const value=await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,mapping:draft.mapping,keyword:"",limit:20000}) as {values:string[];codes?:string[];total?:number};
+      const value=await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,headerDepth:draft.headerDepth,mapping:draft.mapping,keyword:"",limit:20000}) as {values:string[];codes?:string[];total?:number};
       setAccounts(value.values);setAccountCodes(value.codes??[]);setAccountTotal(value.total??value.values.length);setAccountsKey(key);setSearchResults([]);setSelectedAvailable([]);
     }catch(e){setError(kanzhangErrorText(e));setAccountsKey(key);accountsJob.current=undefined;setAccountsBusy(false);}
     finally{if(!draft.inspect?.lowMemory)setAccountsBusy(false);}
   }
-  async function searchAccounts(){try{const value=await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,mapping:draft.mapping,keyword:query,codePrefixes:codePrefix,limit:20000}) as {values:string[]};setSearchResults(value.values);setSelectedAvailable([]);}catch(e){setError(kanzhangErrorText(e));}}
+  async function searchAccounts(){try{const value=await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,headerDepth:draft.headerDepth,mapping:draft.mapping,keyword:query,codePrefixes:codePrefix,limit:20000}) as {values:string[]};setSearchResults(value.values);setSelectedAvailable([]);}catch(e){setError(kanzhangErrorText(e));}}
   function skipReview(){llmGeneration.current+=1;setLlmBusy(false);setLlmFailed(false);setLlmStatus("已跳过本次 LLM 复核，保留当前字段映射，可自行调整后继续。");}
   async function reviewMapping(baseMapping?:Mapping,baseInspect?:Inspect){
     const target=baseInspect??draft.inspect;
@@ -430,7 +430,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     setAccountsBusy(true);setError("");
     try{
       // 列表界面可能为性能而截断；预设必须基于全量唯一科目，不可只套用前 20,000 项。
-      const source=truncated?await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,mapping:draft.mapping,keyword:"",limit:1,all:true}) as {values:string[];codes?:string[]}: {values:accounts,codes:accountCodes};
+      const source=truncated?await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,headerDepth:draft.headerDepth,mapping:draft.mapping,keyword:"",limit:1,all:true}) as {values:string[];codes?:string[]}: {values:accounts,codes:accountCodes};
       const applied=applyAuditFocusPresetBatches(draft.batches,source.values,source.codes??[],draft.excludes);
       const firstPreset=applied.batches.findIndex(value=>value.presetId===AUDIT_FOCUS_PRESETS[0].id);
       const outputPath=!draft.outputTouched&&draft.inputPath?defaultKanzhangOutputPath(draft.inputPath,draft.sheet).replace(/\.csv$/i,".xlsx"):draft.outputPath;
@@ -442,7 +442,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   async function applyAllPrimaryAccounts(){
     setAccountsBusy(true);setError("");
     try{
-      const source=await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,mapping:draft.mapping,keyword:"",limit:1,all:true}) as {values:string[];codes?:string[];primaryNames?:string[]};
+      const source=await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,headerDepth:draft.headerDepth,mapping:draft.mapping,keyword:"",limit:1,all:true}) as {values:string[];codes?:string[];primaryNames?:string[]};
       const applied=applyAllPrimaryAccountBatches(draft.batches,source.values,source.codes??[],source.primaryNames??[],draft.excludes);
       const firstPreset=applied.batches.findIndex(value=>value.presetId?.startsWith("all_primary:"));
       const outputPath=!draft.outputTouched&&draft.inputPath?defaultKanzhangOutputPath(draft.inputPath,draft.sheet).replace(/\.csv$/i,".xlsx"):draft.outputPath;
@@ -463,7 +463,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
       autoOutputKey.current=`${draft.inputPath}|${draft.sheet}`;
       patch({outputPath:target});
     }
-    try{const jobId=await jobStart(method,{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,mapping:draft.mapping,targetBatches:valid,excludeAccounts:draft.excludes,outputPath:target||undefined,
+    try{const jobId=await jobStart(method,{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,headerDepth:draft.headerDepth,mapping:draft.mapping,targetBatches:valid,excludeAccounts:draft.excludes,outputPath:target||undefined,
       // 套表和 LLM 分析在旧版里没有开关，一律生成；这里写死 true，
       // 顺带覆盖掉早期版本残留在 sessionStorage 草稿里的 false。
       includePivot:true,includeVoucherTypes:true,includeCounterpart:draft.includeCounterpart,includeSuite:draft.includeSuite,llmAnalysis:true,
@@ -479,12 +479,13 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     {error&&<ErrorBox error={error} onDismiss={()=>setError("")} />}
     {draft.step===1&&<div className="fa-stack">
       <LedgerSourceCard
-        inputPath={draft.inputPath} sheet={draft.sheet} knownSheets={draft.knownSheets} headerRow={draft.headerRow}
+        inputPath={draft.inputPath} sheet={draft.sheet} knownSheets={draft.knownSheets} headerRow={draft.headerRow} headerDepth={draft.headerDepth}
         detectedHeaderRow={draft.headerRow===0?draft.inspect?.headerRow:undefined}
         dragHover={dragHover} busy={busy} job={job} needsReload={!draft.inspect&&draft.knownSheets.length>0}
         onBrowse={chooseInput} onClear={clearAll}
         onSheetChange={value=>setDraft(current=>invalidateKanzhangInspection({...current,headerRow:0},{sheet:value}))}
         onHeaderRowChange={value=>setDraft(current=>invalidateKanzhangInspection(current,{headerRow:value}))}
+        onHeaderDepthChange={value=>setDraft(current=>invalidateKanzhangInspection(current,{headerDepth:value}))}
         onInspect={inspect} onCancel={(jobId)=>void jobCancel(jobId)}
       >
       {draft.inspect&&<>

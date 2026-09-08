@@ -207,7 +207,7 @@ fn prepared_key(
     header_row: usize,
 ) -> Result<String, AppError> {
     let mut hash = Sha256::new();
-    hash.update(fingerprint(&cache.table.path, "CSV", header_row)?.as_bytes());
+    hash.update(fingerprint(&cache.table.path, "CSV", header_row, 1)?.as_bytes());
     hash.update(serde_json::to_vec(mapping).map_err(|e| {
         error(
             "LEDGER_CACHE_FAILED",
@@ -1596,6 +1596,7 @@ mod tests {
             input_path: input.to_string_lossy().into_owned(),
             sheet: None,
             header_row: 1,
+            header_depth: 1,
         };
         let cancel = AtomicBool::new(false);
         let cache = large_csv::load(&source, &|_, _, _, _| {}, &cancel).unwrap();
@@ -1709,6 +1710,7 @@ mod tests {
             input_path: input.to_string_lossy().into_owned(),
             sheet: None,
             header_row: 1,
+            header_depth: 1,
         };
         let cancel = AtomicBool::new(false);
         let cache = large_csv::load(&source, &|_, _, _, _| {}, &cancel).unwrap();
@@ -1776,6 +1778,7 @@ mod tests {
             input_path: input.to_string_lossy().into_owned(),
             sheet: None,
             header_row: 1,
+            header_depth: 1,
         };
         let cancel = AtomicBool::new(false);
         let cache = large_csv::load(&source, &|_, _, _, _| {}, &cancel).unwrap();

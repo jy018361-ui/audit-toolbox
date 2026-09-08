@@ -73,6 +73,7 @@ describe("kanzhang history resume", () => {
         inputPath: "C:/tmp/je.xlsx",
         sheet: undefined,
         headerRow: 1,
+        headerDepth: 1,
       }),
     );
 

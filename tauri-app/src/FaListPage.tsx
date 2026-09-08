@@ -1402,7 +1402,7 @@ function FaCardListPage() {
   };
   // FA 匹配必需的角色：必须完成映射才能进入下一步
   const REQUIRED_ROLES: [keyof FaMapping, string][] = [
-    ["matchKeys", "组合匹配键"],
+    ["matchKeys", "资产ID"],
     ["category", "资产类别"],
     ["name", "资产名称"],
     ["originalValue", "原值"],
@@ -1456,7 +1456,7 @@ function FaCardListPage() {
     );
   const multi = (event: ChangeEvent<HTMLSelectElement>) =>
     Array.from(event.target.selectedOptions).map((option) => option.value);
-  // 单侧字段映射列表（参考看账 kz-map）：第一行「组合匹配键」多选，
+  // 单侧字段映射列表（参考看账 kz-map）：第一行「资产ID」多选，
   // 其余角色单选。每个下拉直接列该文件的全部表头。
   const faMapSide = (
     side: "begin" | "end",
@@ -1476,10 +1476,10 @@ function FaCardListPage() {
         <Field
           label={
             <>
-              组合匹配键（可多列）
+              资产ID（可多列）
               <JargonTip
-                term="组合匹配键"
-                text="用一列或多列拼成唯一识别一张卡片（或一条记录）的键，两期清单、账与证之间靠它对号入座。"
+                term="资产ID"
+                text="用一列或多列拼成唯一识别一张资产卡片的 ID，两期清单之间靠它对号入座。可只选资产编号一列，编号不唯一时加类别等列拼成组合键。"
               />
             </>
           }
@@ -1553,7 +1553,7 @@ function FaCardListPage() {
     mapping: FaMapping,
   ): { controls: React.ReactNode[]; mappedFlags: boolean[] } => {
     const roleOptions: [keyof FaMapping, string][] = [
-      ["matchKeys", "组合匹配键"],
+      ["matchKeys", "资产ID"],
       ...rolesForSide(side),
     ];
     // 与共用映射面板（MappingPanel）同一套标注法：必填角色标签后跟全角
@@ -1576,7 +1576,7 @@ function FaCardListPage() {
     const mappedFlags: boolean[] = [];
     for (const header of inspect.headers) {
       const colValue = header.trim();
-      // 同一列可以同时承担组合匹配键、资产名称等多个角色。原先用 find
+      // 同一列可以同时承担资产ID、资产名称等多个角色。原先用 find
       // 只显示第一个，复核时看不到完整关系；这里保留全部角色并合并展示。
       const mappedRoles = faMappedRolesForColumn(
         colValue,
@@ -1667,7 +1667,7 @@ function FaCardListPage() {
   const supplementRoleOptions = (
     kind: "addition" | "disposal",
   ): { field: keyof FaSupplementConfig; label: string; multi?: boolean }[] => [
-    { field: "keys", label: "组合匹配键", multi: true },
+    { field: "keys", label: "资产ID", multi: true },
     { field: "method", label: kind === "addition" ? "新增方式" : "处置方式" },
     { field: "date", label: kind === "addition" ? "新增日期" : "处置日期" },
     ...(kind === "disposal"
@@ -1899,7 +1899,7 @@ function FaCardListPage() {
   const renderFaResult = () => {
     if (!result || typeof result !== "object")
       return (
-        <EmptyState compact title="等待结果" description="读取文件结构后，可核对组合键、字段映射和预览结果。" />
+        <EmptyState compact title="等待结果" description="读取文件结构后，可核对资产ID、必选映射和预览结果。" />
       );
     const value = result as Record<string, unknown>;
     if (value.begin && value.end) {
@@ -1916,7 +1916,7 @@ function FaCardListPage() {
             期末：{end.displayName ?? end.selectedSheet}，标题在第{" "}
             {end.detectedHeaderRow} 行，{end.dimensions?.rows ?? 0} 条数据
           </span>
-          <span>请在左侧核对预览、组合匹配键和字段映射。</span>
+          <span>请在左侧核对预览、资产ID和必选映射。</span>
         </div>
       );
     }
@@ -2701,7 +2701,9 @@ function FaCardListPage() {
                 <h2>文件预览</h2>
                 <p>预览区已锁定；各文件可独立纵向、横向滚动。</p>
                 {/* 与其他工具的映射面板同一条说明：下拉角色后的“＊”表示必填。 */}
-                <p className="mapping-requirement-legend">＊ 为必填字段。</p>
+                <p className="mapping-requirement-legend">
+                  各列顶部的下拉为必选映射；＊ 为必填字段。
+                </p>
                 {step === 1 &&
                   inspection &&
                   (() => {

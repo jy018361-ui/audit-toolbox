@@ -1,5 +1,12 @@
 # 看账小工具迁移功能矩阵
 
+## 2026-09-08 · 表头层数（1层/2层）接入看账与正负数凭证标记
+
+- 加载卡片新增「表头层数」下拉：`headerDepth`（默认 1），随 `kanzhang.inspect / accounts / filter / export / mark_inspect / mark_export` 全链路下发；缓存指纹加入层数，同文件同 Sheet 换层数不再串缓存。
+- 双层表头沿用汇兑损益的合并规则：首行横向补齐合并单元格，再逐列「上级-下级」拼接（`fx::merge_headers`），两行标题均不进数据预览。
+- 边界：超大 CSV 与 Parquet 选 2层时报「暂不支持双层标题」；TS 链路字段对齐但界面不暴露（恒 1）。
+- 验证：`cargo test --manifest-path src-tauri/Cargo.toml --lib kanzhang`；新增 `kanzhang_inspect_merges_double_header`。
+
 ## 2026-09-07 · 对方科目与套表改为独立导出选择
 
 - 导出设置新增 `includeCounterpart` 与 `includeSuite`，旧任务缺少字段时均按 `true` 处理，保持完整凭证明细加套表的既有行为。
@@ -179,7 +186,7 @@
 - **LLM 复核要手动点**：`kanzhang.inspect` 回来自动映射后即刻触发 `kanzhang.llm_mapping`，与 FA List 一致；复核期间给"跳过复核并继续"的出口。
 - **复核结果 UI 与 FA 不一致**：改用 FA 那套 `.fa-llm-review` / `.fa-review-item` 结构与样式，角色名从内部键名（`summary` / `direction`）换成中文标签。
 - **落选金额方案仍可编辑、LLM 仍给建议**：`activeAmountScheme` / `isSchemeLockedRole` 判定生效方案，另一套的下拉置灰并显示"不适用（已用方案X）"，LLM 对该套的建议直接丢弃；方案已成立时也不再听 LLM 的 `scheme` 反向清空。
-- **复核期间可手改映射**：复核进行中锁定全部映射下拉（FA 侧同时锁定字段映射与组合匹配键），避免用户的修改被返回结果静默覆盖。
+- **复核期间可手改映射**：复核进行中锁定全部映射下拉（FA 侧同时锁定字段映射与资产ID），避免用户的修改被返回结果静默覆盖。
 - **敲关键词后科目列表清空**：改为在已载入列表上即时过滤；进入"科目筛选"时按用户最终确认的科目映射重载全量科目（上限 20,000），只有被截断时才回后端全库检索。
 - **导出只出一个文件**：恢复旧版两阶段导出与默认命名，见上表两行。
 

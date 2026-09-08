@@ -167,7 +167,7 @@ export function OverlayStateFixture() {
           />
         )}
         {scenario === "jargon" && (
-          <p>组合匹配键 <JargonTip term={longText} text={`${longText}。${longText}。`} /></p>
+          <p>资产ID <JargonTip term={longText} text={`${longText}。${longText}。`} /></p>
         )}
         {scenario === "fuzzy" && <FuzzyFixture />}
         {scenario === "jargon-confirm-stack" && (

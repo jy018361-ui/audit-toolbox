@@ -156,7 +156,7 @@ pub(super) fn load(
     // 大 CSV 的自动标题行 `0` 与实际第 1 行语义相同。缓存键也必须相同，
     // 否则不同工具/阶段参数回传形式不同时会重新扫描整个源文件。
     let cache_header_row = source.header_row.max(1);
-    let key = fingerprint(source_path, "CSV", cache_header_row)?;
+    let key = fingerprint(source_path, "CSV", cache_header_row, 1)?;
     let path = cache_path("kanzhang-stream", &key)?.with_extension("sqlite");
     fs::create_dir_all(path.parent().unwrap()).map_err(io_error)?;
     if path.is_file() {
@@ -176,7 +176,7 @@ pub(super) fn load(
     // Each attempt owns its partial file. A cancellation never publishes it.
     let partial = path.with_extension(format!("{}.partial", uuid::Uuid::new_v4()));
     let result = build(&partial, source, progress, cancel).and_then(|()| {
-        if fingerprint(source_path, "CSV", cache_header_row)? != key {
+        if fingerprint(source_path, "CSV", cache_header_row, 1)? != key {
             return Err(error(
                 "SOURCE_CHANGED",
                 "读取期间源文件发生变化，请重新读取。",
@@ -339,6 +339,7 @@ mod tests {
         fs::write(&input, "凭证号,科目,借方,贷方\n1,1001,1,0\n1,1002,0,1\n").unwrap();
         let cancel = AtomicBool::new(false);
         let source = |header_row| SourceParams {
+            header_depth: 1,
             input_path: input.to_string_lossy().into_owned(),
             sheet: None,
             header_row,
@@ -366,10 +367,11 @@ mod tests {
             input_path: input.to_string_lossy().into_owned(),
             sheet: None,
             header_row: 2,
+            header_depth: 1,
         };
         build(&db, &source, &|_, _, _, _| {}, &AtomicBool::new(false)).unwrap();
         let cache = read_cache(&db, &input).unwrap();
-        let ordinary = load_text(&input, 2).unwrap();
+        let ordinary = load_text(&input, 2, 1).unwrap();
         let mut rows = Vec::new();
         cache
             .visit(None, &AtomicBool::new(false), |row, _| {
@@ -449,9 +451,10 @@ mod tests {
             input_path: input.to_string_lossy().into_owned(),
             sheet: None,
             header_row: 1,
+            header_depth: 1,
         };
         assert!(load(&source, &|_, _, _, _| {}, &AtomicBool::new(true)).is_err());
-        let key = fingerprint(&input, "CSV", 1).unwrap();
+        let key = fingerprint(&input, "CSV", 1, 1).unwrap();
         assert!(
             !cache_path("kanzhang-stream", &key)
                 .unwrap()
@@ -490,6 +493,7 @@ mod tests {
             input_path: input.to_string_lossy().into_owned(),
             sheet: None,
             header_row: 1,
+            header_depth: 1,
         };
         build(&db, &source, &|_, _, _, _| {}, &AtomicBool::new(false)).unwrap();
         let cache = read_cache(&db, &input).unwrap();
@@ -543,7 +547,7 @@ mod tests {
             .unwrap()
             .set_len(ALWAYS_DISK_BYTES)
             .unwrap();
-        let err = load_ledger_cached(&input, None, 1).unwrap_err();
+        let err = load_ledger_cached(&input, None, 1, 1).unwrap_err();
         assert_eq!(err.code, "KANZHANG_MEMORY_BUDGET");
         fs::remove_dir_all(root).unwrap();
     }

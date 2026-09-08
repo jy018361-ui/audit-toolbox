@@ -249,6 +249,93 @@ describe("TbjeCheckPage", () => {
     );
   });
 
+  it("names the failed group and still checks the rest when alignment fails", async () => {
+    const { engineCall, jobStart, pickPath } = await import("./api");
+    vi.mocked(pickPath).mockResolvedValue([
+      "C:/samples/01科目余额表.xlsx",
+      "C:/samples/01序时账.xlsx",
+      "C:/samples/02科目余额表.xlsx",
+      "C:/samples/02序时账.xlsx",
+    ]);
+    vi.mocked(engineCall).mockImplementation(
+      async (method: string, params: unknown) => {
+        if (method === "ledger.forms") return [];
+        if (method === "ledger.check_mapping_alignment") {
+          const failed = (params as { tbSource?: { inputPath?: string } })
+            .tbSource?.inputPath?.includes("01科目余额表");
+          return failed
+            ? {
+                aligned: false,
+                errors: ["科目字段无法对齐的错误说明。"],
+                warnings: [],
+              }
+            : { aligned: true, warnings: [] };
+        }
+        const source = (params as { source: { inputPath: string } }).source;
+        const isTb = source.inputPath.includes("科目余额表");
+        if (method === "deposit.classify_source") {
+          return {
+            kind: isTb ? "tb" : "je",
+            sheet: "Sheet1",
+            headerRow: 1,
+            headerDepth: 1,
+          };
+        }
+        return {
+          sheet: "Sheet1",
+          headerRow: 1,
+          headerDepth: 1,
+          headers: isTb
+            ? ["科目编码", "科目名称", "本年累计借方", "本年累计贷方"]
+            : ["日期", "凭证号", "科目编码", "科目名称", "借方", "贷方"],
+          preview: [],
+          entities: [],
+          suggestedMapping: isTb
+            ? {
+                accountCode: "科目编码",
+                accountName: ["科目名称"],
+                ytdFunctionalDebit: "本年累计借方",
+                ytdFunctionalCredit: "本年累计贷方",
+              }
+            : {
+                date: "日期",
+                id: ["凭证号"],
+                accountCode: "科目编码",
+                accountName: ["科目名称"],
+                functionalDebit: "借方",
+                functionalCredit: "贷方",
+              },
+        };
+      },
+    );
+
+    render(<TbjeCheckPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
+    );
+    await screen.findByText("02科目余额表.xlsx");
+    fireEvent.click(screen.getByRole("button", { name: "开始核对 2 组" }));
+
+    await waitFor(() =>
+      expect(jobStart).toHaveBeenCalledWith(
+        "tbje_check.run_batch",
+        expect.objectContaining({
+          groups: [
+            expect.objectContaining({
+              tbSource: expect.objectContaining({
+                inputPath: "C:/samples/02科目余额表.xlsx",
+              }),
+            }),
+          ],
+        }),
+      ),
+    );
+    const banner = await screen.findByText(/已跳过/, { exact: false });
+    expect(banner.textContent).toContain(
+      "「1」组（01科目余额表.xlsx × 01序时账.xlsx）：科目字段无法对齐的错误说明。",
+    );
+  });
+
   it("keeps result columns aligned and explains a zero balance with unclassified accounts", async () => {
     const { listenJobEvents } = await import("./api");
     vi.mocked(listenJobEvents).mockImplementation(async (callback) => {

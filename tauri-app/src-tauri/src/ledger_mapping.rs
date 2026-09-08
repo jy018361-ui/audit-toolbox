@@ -3460,6 +3460,12 @@ pub(crate) fn parse_date(raw: &str) -> Option<NaiveDate> {
     if let Some(date) = parse_cn_date(text) {
         return Some(date);
     }
+    // 年月写法（无日）：「2025-01」「2025.1」「202501」「2025年1月」按当月 1 日。
+    // 只认带年份的——纯月份数字没有上下文推不出年份，由各工具按报告期补
+    // （汇兑损益的月度归集见 `fx::je_date`）。
+    if let Some((Some(year), month)) = parse_month(text) {
+        return NaiveDate::from_ymd_opt(year, month, 1);
+    }
     // Excel 序列号（5 位纯数字，约 1954～2119 年）：有人把日期粘贴成数值，
     // 单元格类型是数字而非日期，读取侧只能拿到 "45662" 这样的文本——
     // Excel 序列 1 即 1900-01-01（1900 闰年 bug 后与 1899-12-30 基准一致）。
@@ -3472,6 +3478,126 @@ pub(crate) fn parse_date(raw: &str) -> Option<NaiveDate> {
         }
     }
     None
+}
+
+/// 月度取值：供「序时账只有月份列」的兜底口径使用。
+///
+/// 带年份的写法（`2025-01`、`2025/1`、`2025.01`、`202501`、`2025年1月`）返回
+/// `(Some(年), 月)`；纯月份（`1`、`01`、`1月`、`一月`、`Jan`）返回 `(None, 月)`，
+/// 年份由调用方按报告期推定。只认 1..12 的月份——日列（13..31）、纯年份列、
+/// 完整日期都不认，避免把别的列误读成月份。
+pub(crate) fn parse_month(raw: &str) -> Option<(Option<i32>, u32)> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some(month) = english_month(text) {
+        return Some((None, month));
+    }
+    if let Some(month) = chinese_numeral_month(text) {
+        return Some((None, month));
+    }
+    // 其余写法只允许数字、分隔符与「年」「月」两种字。
+    if !text
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '-' | '/' | '.') || c == '年' || c == '月')
+    {
+        return None;
+    }
+    if let Some(i_nian) = text.find('年') {
+        // 「2025年1月」；年后没有月段（「2025年」）是年份列，不算月份。
+        let year = text[..i_nian]
+            .parse::<i32>()
+            .ok()
+            .filter(|y| (1900..=2100).contains(y))?;
+        let month = text[i_nian + '年'.len_utf8()..]
+            .strip_suffix('月')?
+            .parse::<u32>()
+            .ok()?;
+        return (1..=12)
+            .contains(&month)
+            .then_some((Some(year), month));
+    }
+    if let Some(digits) = text.strip_suffix('月') {
+        // 「1月」「01月」：纯月份，不带年份。
+        let month = digits.parse::<u32>().ok()?;
+        return (1..=12).contains(&month).then_some((None, month));
+    }
+    if text.chars().all(|c| c.is_ascii_digit()) {
+        // 6 位是年＋月（「202501」）；1～2 位是纯月份（「1」「01」）。
+        if text.len() == 6 {
+            let year = text[..4]
+                .parse::<i32>()
+                .ok()
+                .filter(|y| (1900..=2100).contains(y))?;
+            let month = text[4..].parse::<u32>().ok()?;
+            return (1..=12)
+                .contains(&month)
+                .then_some((Some(year), month));
+        }
+        if text.len() <= 2 {
+            let month = text.parse::<u32>().ok()?;
+            return (1..=12).contains(&month).then_some((None, month));
+        }
+        return None;
+    }
+    // 「2025-01」「2025/1」「2025.01」：两段且左段是四位年份。
+    let (left, right) = ['-', '/', '.']
+        .into_iter()
+        .find_map(|sep| text.rsplit_once(sep))?;
+    let month = right.parse::<u32>().ok()?;
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    if left.len() == 4 && left.chars().all(|c| c.is_ascii_digit()) {
+        let year = left
+            .parse::<i32>()
+            .ok()
+            .filter(|y| (1900..=2100).contains(y))?;
+        return Some((Some(year), month));
+    }
+    None
+}
+
+/// 英文月份缩写与全称（大小写不敏感）。只认整段就是月份的写法。
+fn english_month(text: &str) -> Option<u32> {
+    let lower = text.trim().to_ascii_lowercase();
+    Some(match lower.as_str() {
+        "jan" | "january" => 1,
+        "feb" | "february" => 2,
+        "mar" | "march" => 3,
+        "apr" | "april" => 4,
+        "may" => 5,
+        "jun" | "june" => 6,
+        "jul" | "july" => 7,
+        "aug" | "august" => 8,
+        "sep" | "sept" | "september" => 9,
+        "oct" | "october" => 10,
+        "nov" | "november" => 11,
+        "dec" | "december" => 12,
+        _ => return None,
+    })
+}
+
+/// 中文数字月份：一月、十二月……不带「月」字的纯中文数字不认——
+/// 科目层级里的「一级」「二级」不是月份。
+fn chinese_numeral_month(text: &str) -> Option<u32> {
+    let body = text.trim().strip_suffix('月')?;
+    Some(match body {
+        "一" => 1,
+        "二" => 2,
+        "三" => 3,
+        "四" => 4,
+        "五" => 5,
+        "六" => 6,
+        "七" => 7,
+        "八" => 8,
+        "九" => 9,
+        "十" => 10,
+        "十一" => 11,
+        "十二" => 12,
+        _ => return None,
+    })
 }
 
 /// 中文年月日写法：年（四位或两位，两位按 20xx）＋月＋日，日后的“日”字可省。
@@ -5157,47 +5283,72 @@ pub(crate) fn normalize_account_code(value: &str) -> String {
 
 /// TB/JE 共用的科目匹配策略。
 ///
-/// 普通科目以「主体＋归一化科目编码」为键；只有同一主体下同一编码在任一侧
-/// 实际对应多个不同名称时，才把规范化名称追加到键中。这里判断的是
-/// 「一个编码对应几个不同名称」，不是一张序时账里同一编码出现了多少行——
-/// 后者只是正常的多笔分录，不能误判成编码不唯一。
+/// 普通科目以「主体＋归一化科目编码」为键；只有同一主体下同一编码在**两张表里
+/// 都**对应多个不同名称、光靠编码无法跨表配对、且两侧名称能真正配上时，才把
+/// 规范化名称追加到键中。这里判断的是「一个编码对应几个不同名称」，不是一张
+/// 序时账里同一编码出现了多少行——后者只是正常的多笔分录，不能误判成编码不唯一。
+///
+/// 匹配键按三层退让，任何情况都不因名称问题拦截：
+/// 1. 编码能唯一确定科目（至多一侧拆分）→ 按编码。仅一侧把编码拆成多个名称
+///    （带辅助核算的余额表按部门／往来拆行、名称列填辅助维度）不算歧义：另一侧
+///    在编码层已聚合，本侧多行汇总回编码即为该科目全量，名称退回展示文本
+///    （实测 TBJEPBC 01 号：TB 侧 167 个共有编码拆多行、JE 侧名称全部唯一）。
+/// 2. 两侧都拆且名称对得上（交集按六成口径衡量）→ 编码＋名称复合键逐名配对。
+/// 3. 两侧都拆但两套名称对不上（不是同一套词汇）→ 复合只会制造互不相认的
+///    孤儿键，退回按编码汇总。
 ///
 /// 编码在统计歧义前先走 [`normalize_account_code`]，所以 `0000943100` 与
 /// `943100` 被视为同一个编码。名称只在确有编码歧义时参与匹配；普通情况下
 /// TB 的标准科目名与 JE 的账户全称即使写法不同，也不会把同一科目拆开。
+/// 按（主体大写、归一化编码）收集一张表内见过的归一化名称集合。编码或
+/// 名称为空的行不参与：它们既不能建键，也不能证明编码对应了几个名称。
+/// `AccountMatchPolicy` 的三层匹配判定与口径预检的拆分统计共用这一份口径。
+pub(crate) fn account_name_sets(
+    rows: &[(String, String, String)],
+) -> HashMap<(String, String), HashSet<String>> {
+    let mut index = HashMap::<(String, String), HashSet<String>>::new();
+    for (entity, raw_code, raw_name) in rows {
+        let code = normalize_account_code(&account_code_of(raw_code));
+        let name = normalize_name(&account_name_of(raw_name));
+        if code.is_empty() || name.is_empty() {
+            continue;
+        }
+        index
+            .entry((entity.trim().to_uppercase(), code))
+            .or_default()
+            .insert(name);
+    }
+    index
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AccountMatchPolicy {
     ambiguous_codes: HashSet<(String, String)>,
 }
 
 impl AccountMatchPolicy {
-    /// 每行依次为（主体、科目编码、科目名称）。两侧分开统计，避免仅仅因为
-    /// TB 与 JE 对同一科目采用不同名称，就把原本唯一的编码误判为歧义。
+    /// 每行依次为（主体、科目编码、科目名称）。歧义要求同一编码在两侧**都**
+    /// 对应多个名称，且两侧名称集合的交集达到六成（与口径预检的复合配对
+    /// 比例同一把尺）：配不上的名称拆行按编码汇总，不再纠缠名称。
     pub(crate) fn from_sides(
         tb: &[(String, String, String)],
         je: &[(String, String, String)],
     ) -> Self {
-        let collect = |rows: &[(String, String, String)]| {
-            let mut index = HashMap::<(String, String), HashSet<String>>::new();
-            for (entity, raw_code, raw_name) in rows {
-                let code = normalize_account_code(&account_code_of(raw_code));
-                let name = normalize_name(&account_name_of(raw_name));
-                if code.is_empty() || name.is_empty() {
-                    continue;
-                }
-                index
-                    .entry((entity.trim().to_uppercase(), code))
-                    .or_default()
-                    .insert(name);
-            }
-            index
-        };
-        let tb_index = collect(tb);
-        let je_index = collect(je);
+        let tb_index = account_name_sets(tb);
+        let je_index = account_name_sets(je);
         let ambiguous_codes = tb_index
             .iter()
-            .chain(je_index.iter())
-            .filter_map(|(key, names)| (names.len() > 1).then_some(key.clone()))
+            .filter(|(key, names)| {
+                let Some(opposite) = je_index.get(key) else {
+                    return false;
+                };
+                if names.len() <= 1 || opposite.len() <= 1 {
+                    return false;
+                }
+                let paired = names.intersection(opposite).count();
+                paired * 5 >= names.len().min(opposite.len()) * 3
+            })
+            .map(|(key, _)| key.clone())
             .collect();
         Self { ambiguous_codes }
     }
@@ -6007,6 +6158,51 @@ mod tests {
             policy.account_key("4800", "1002010017", &tb[0].2),
             policy.account_key("4800", "1002010017", &je[0].2)
         );
+    }
+
+    #[test]
+    fn 仅一侧把编码拆成多个名称不算歧义() {
+        // 带辅助核算的余额表形态：TB 把 2241.02 按往来拆成两行（名称列填
+        // 辅助维度），JE 同码名称唯一。编码在 JE 侧已唯一可配对，TB 拆行
+        // 汇总回编码即是该科目全量，不进复合匹配——否则两侧名称根本不是
+        // 同一套词汇，整组账套会被「名称无法消歧」拦下。
+        let tb = vec![
+            ("E".into(), "2241.02".into(), "荀海波".into()),
+            ("E".into(), "2241.02".into(), "王强".into()),
+        ];
+        let je = vec![
+            ("E".into(), "2241.02".into(), "其他应付款-个人往来".into()),
+            ("E".into(), "2241.02".into(), "其他应付款-个人往来".into()),
+        ];
+        let policy = AccountMatchPolicy::from_sides(&tb, &je);
+        assert_eq!(policy.ambiguous_count(), 0);
+        assert_eq!(
+            policy.account_key("E", "2241.02", "荀海波"),
+            policy.account_key("E", "2241.02", "其他应付款-个人往来")
+        );
+    }
+
+    #[test]
+    fn 两侧都拆时按名称交集六成决定复合或编码() {
+        // 1002：两侧名称完全一致 → 复合键逐名配对。
+        // 1003：两侧名称毫无交集 → 复合只会制造孤儿键，退回编码。
+        // 1004：交集 1/3 不足六成 → 同样退回编码。
+        // 1005：交集 2/3 达到六成 → 复合键逐名配对。
+        let split = |tb_names: &[&str], je_names: &[&str]| {
+            let tb = tb_names
+                .iter()
+                .map(|name| ("E".into(), "1002".into(), (*name).into()))
+                .collect::<Vec<_>>();
+            let je = je_names
+                .iter()
+                .map(|name| ("E".into(), "1002".into(), (*name).into()))
+                .collect::<Vec<_>>();
+            AccountMatchPolicy::from_sides(&tb, &je).ambiguous_count()
+        };
+        assert_eq!(split(&["工行", "建行"], &["工行", "建行"]), 1);
+        assert_eq!(split(&["工行", "建行"], &["招行", "浦行"]), 0);
+        assert_eq!(split(&["工行", "建行", "招商"], &["工行", "浦行", "兴业"]), 0);
+        assert_eq!(split(&["工行", "建行", "招商"], &["工行", "建行", "兴业"]), 1);
     }
 
     #[test]
@@ -8229,6 +8425,31 @@ mod tests {
         assert_eq!(d("44936"), expect);
         assert!(parse_date("").is_none());
         assert!(parse_date("待定").is_none());
+    }
+
+    #[test]
+    fn 年月与月份取值解析() {
+        // 带年份的年月按当月 1 日进入完整日期解析。
+        let jan = NaiveDate::from_ymd_opt(2025, 1, 1).expect("合法日期");
+        for raw in ["2025-01", "2025/1", "2025.01", "202501", "2025年1月", "2025年01月"] {
+            assert_eq!(parse_date(raw), Some(jan), "{raw}");
+        }
+        // 纯月份不带年份：parse_date 不认（没有上下文推不出年份），parse_month 认。
+        assert!(parse_date("1").is_none());
+        assert!(parse_date("1月").is_none());
+        assert_eq!(parse_month("1"), Some((None, 1)));
+        assert_eq!(parse_month("01"), Some((None, 1)));
+        assert_eq!(parse_month("1月"), Some((None, 1)));
+        assert_eq!(parse_month("一月"), Some((None, 1)));
+        assert_eq!(parse_month("December"), Some((None, 12)));
+        assert_eq!(parse_month("2025-3"), Some((Some(2025), 3)));
+        assert_eq!(parse_month(" 12 "), Some((None, 12)));
+        // 日列（13..31）、年份列、完整日期、空值都不是月份。
+        assert!(parse_month("31").is_none());
+        assert!(parse_month("2025").is_none());
+        assert!(parse_month("2025-01-31").is_none());
+        assert!(parse_month("一级").is_none());
+        assert!(parse_month("").is_none());
     }
 
     #[test]

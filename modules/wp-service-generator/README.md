@@ -51,6 +51,8 @@ pip install -r requirements.txt
 python main.py
 ```
 
+Windows 本地 Python、VS Code、Jupyter/Anaconda 的分步操作和常见问题见 [`PYTHON_USAGE.md`](PYTHON_USAGE.md)。
+
 ### Jupyter Notebook
 
 打开 `生成项目组展示版_Jupyter.ipynb`，将 Notebook、Python 程序文件、`templates` 文件夹和三个系统导出文件放在同一文件夹，依次运行两个代码单元格。Python/Jupyter 版需要保留 `templates/FY27+WP服务单.xlsx.b64`；程序会在首次运行时自动还原模板。输出文件名为 `FY27+WP服务单汇总.xlsx`。

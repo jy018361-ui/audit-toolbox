@@ -3625,9 +3625,12 @@ mod tests {
                 result.outlook_compared,
                 result.outlook_equal
             ),
-            (2, 2, 2)
+            (2, 2, 0)
         );
-        assert!(result.outlook_differences.is_empty());
+        // The checked-in fixture contains the retired 4.6/12.5 cash reference
+        // hours, so both source Outlook values must differ under the new 3/10
+        // rules. Formula-level tests above cover the new expected values.
+        assert_eq!(result.outlook_differences.len(), 2);
         validate_output(&output, 2).unwrap();
         assert!(split_output.exists());
         let _ = std::fs::remove_file(output);

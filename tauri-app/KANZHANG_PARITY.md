@@ -1,5 +1,11 @@
 # 看账小工具迁移功能矩阵
 
+## 2026-09-09 · 内存拦截收窄到超过 1 GiB 的文本输入
+
+- `.xls/.xlsx/.xlsm/.xlsb` 输入不再进入公共启动等待、运行期自动内存暂停或 Job Object 硬上限；该规则在统一 worker 调度层生效，覆盖所有读取 JE 的工具。
+- `.csv/.tsv/.txt` 按本次任务明确输入路径去重并合计大小，严格超过 1 GiB 才启用公共保护。等于或小于 1 GiB 时不在调度层拦截，但看账内部仍会根据文件体积和实时预算选择内存或磁盘分批路径。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib "excel_merger::tests::" -- --test-threads=1`。
+
 ## 2026-09-08 · 表头层数（1层/2层）接入看账与正负数凭证标记
 
 - 加载卡片新增「表头层数」下拉：`headerDepth`（默认 1），随 `kanzhang.inspect / accounts / filter / export / mark_inspect / mark_export` 全链路下发；缓存指纹加入层数，同文件同 Sheet 换层数不再串缓存。

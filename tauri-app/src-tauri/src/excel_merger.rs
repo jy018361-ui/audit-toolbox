@@ -40,7 +40,7 @@ const EXCEL_MAX_HYPERLINKS: usize = 65_530;
 pub(crate) struct ExcelMergerService {
     app: AppHandle,
     allowed: AllowedPaths,
-    jobs: Arc<Mutex<HashMap<String, (PathBuf, PathBuf, String)>>>,
+    jobs: Arc<Mutex<HashMap<String, (PathBuf, PathBuf, String, bool)>>>,
     /// 每个任务的启动时刻，终态事件到达时用于计算「执行任务」统计的耗时。
     job_starts: Arc<Mutex<HashMap<String, Instant>>>,
     heavy: Arc<Mutex<()>>,
@@ -56,6 +56,8 @@ struct WorkerRequest {
     params: Value,
     cancel_path: String,
     pause_path: String,
+    #[serde(default)]
+    memory_protected: bool,
 }
 
 /// Cooperative pause gate shared by all native heavy jobs.
@@ -134,11 +136,17 @@ impl ExcelMergerService {
         let job_id = uuid::Uuid::new_v4().simple().to_string();
         let cancel_path = self.cancel_root.join(format!("{job_id}.cancel"));
         let pause_path = self.cancel_root.join(format!("{job_id}.pause"));
+        let memory_protected = hard_memory_limited_job(method, &params);
         let _ = fs::remove_file(&cancel_path);
         let _ = fs::remove_file(&pause_path);
         self.jobs.lock().insert(
             job_id.clone(),
-            (cancel_path.clone(), pause_path, method.to_owned()),
+            (
+                cancel_path.clone(),
+                pause_path,
+                method.to_owned(),
+                memory_protected,
+            ),
         );
         self.job_starts
             .lock()
@@ -146,12 +154,21 @@ impl ExcelMergerService {
         let service = self.clone();
         let worker_job_id = job_id.clone();
         let worker_method = method.to_owned();
-        thread::spawn(move || service.monitor(worker_job_id, worker_method, params, cancel_path));
+        thread::spawn(move || {
+            service.monitor(
+                worker_job_id,
+                worker_method,
+                params,
+                cancel_path,
+                memory_protected,
+            )
+        });
         Ok(job_id)
     }
 
     pub fn cancel(&self, job_id: &str) -> bool {
-        let Some((path, _pause, method)) = self.jobs.lock().get(job_id).cloned() else {
+        let Some((path, _pause, method, _memory_protected)) = self.jobs.lock().get(job_id).cloned()
+        else {
             return false;
         };
         if fs::write(path, b"cancel").is_err() {
@@ -172,7 +189,8 @@ impl ExcelMergerService {
     }
 
     pub fn pause(&self, job_id: &str, paused: bool) -> bool {
-        let Some((_cancel, path, method)) = self.jobs.lock().get(job_id).cloned() else {
+        let Some((_cancel, path, method, memory_protected)) = self.jobs.lock().get(job_id).cloned()
+        else {
             return false;
         };
         let changed = if paused {
@@ -184,7 +202,7 @@ impl ExcelMergerService {
         };
         if changed {
             let memory_waiting = !paused
-                && memory_protected_method(&method)
+                && memory_protected
                 && crate::resource_budget::memory_status()
                     .is_ok_and(|memory| memory.should_pause());
             self.emit(event_for(
@@ -214,7 +232,14 @@ impl ExcelMergerService {
         changed
     }
 
-    fn monitor(&self, job_id: String, method: String, params: Value, cancel_path: PathBuf) {
+    fn monitor(
+        &self,
+        job_id: String,
+        method: String,
+        params: Value,
+        cancel_path: PathBuf,
+        memory_protected: bool,
+    ) {
         let worker_tool_id = tool_id(&method);
         self.emit(event_for(
             worker_tool_id,
@@ -245,8 +270,8 @@ impl ExcelMergerService {
         }
         let pause_path = self.cancel_root.join(format!("{job_id}.pause"));
         let memory_retry_path = crate::resource_budget::memory_retry_path(&pause_path);
-        let monitored = memory_protected_method(&method);
-        let hard_limited = hard_memory_limited_job(&method, &params);
+        let hard_limited = memory_protected;
+        let monitored = memory_protected;
         let available_worker_memory = if monitored {
             let mut last_notice = None::<Instant>;
             Some(loop {
@@ -314,6 +339,7 @@ impl ExcelMergerService {
             params,
             cancel_path: cancel_path.to_string_lossy().into_owned(),
             pause_path: pause_path.to_string_lossy().into_owned(),
+            memory_protected: monitored,
         };
         let mut command = match std::env::current_exe() {
             // 重任务靠"再启动一份自己"来跑。程序文件在运行期间被移走或重新构建过时
@@ -649,7 +675,8 @@ impl ExcelMergerService {
     fn finish(&self, job_id: &str, cancel_path: &Path) {
         let _ = fs::remove_file(cancel_path);
         self.job_starts.lock().remove(job_id);
-        if let Some((_cancel, pause, _method)) = self.jobs.lock().remove(job_id) {
+        if let Some((_cancel, pause, _method, _memory_protected)) = self.jobs.lock().remove(job_id)
+        {
             let _ = fs::remove_file(crate::resource_budget::memory_retry_path(&pause));
             let _ = fs::remove_file(pause);
         }
@@ -711,7 +738,7 @@ fn is_supported_job_method(method: &str) -> bool {
     SUPPORTED_JOB_METHODS.contains(&method)
 }
 
-/// 所有会消费 JE 的长任务都由独立 worker 执行，并接入启动前与运行期内存监测。
+/// 可以消费 JE 的长任务。是否实际启用内存保护还取决于本次文本输入总大小。
 fn memory_protected_method(method: &str) -> bool {
     method.starts_with("kanzhang.")
         || method.starts_with("fx.")
@@ -721,9 +748,41 @@ fn memory_protected_method(method: &str) -> bool {
         || method.starts_with("tbje_check.")
 }
 
-fn is_excel_input_path(value: &str) -> bool {
-    Path::new(value)
-        .extension()
+const LARGE_TEXT_INPUT_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// 只收集明确的输入路径字段，避免把 outputPath 或结果目录计入保护阈值。
+/// 递归扫描可同时覆盖直接参数、批量任务及各工具嵌套的 source。
+fn collect_input_paths(value: &Value, paths: &mut HashSet<PathBuf>) {
+    match value {
+        Value::Object(values) => {
+            for (key, value) in values {
+                let normalized = key.to_ascii_lowercase();
+                if matches!(
+                    normalized.as_str(),
+                    "inputpath" | "jepath" | "tbpath" | "sourcepath" | "ledgerpath"
+                ) {
+                    if let Some(path) = value.as_str() {
+                        paths.insert(PathBuf::from(path));
+                    }
+                } else if normalized == "inputpaths" {
+                    if let Some(values) = value.as_array() {
+                        paths.extend(values.iter().filter_map(Value::as_str).map(PathBuf::from));
+                    }
+                }
+                collect_input_paths(value, paths);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_input_paths(value, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_excel_input_path(path: &Path) -> bool {
+    path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
             ["xls", "xlsx", "xlsm", "xlsb"]
@@ -732,33 +791,48 @@ fn is_excel_input_path(value: &str) -> bool {
         })
 }
 
-/// 只识别明确的输入路径字段，避免 `outputPath: result.xlsx` 误关闭 CSV 任务的硬保护。
-/// 递归扫描可同时覆盖看账的直接参数与汇兑损益、借款、存款、FA/TBJE 的嵌套 source。
 fn params_have_excel_input(value: &Value) -> bool {
-    match value {
-        Value::Object(values) => values.iter().any(|(key, value)| {
-            let normalized = key.to_ascii_lowercase();
-            let direct_input = matches!(
-                normalized.as_str(),
-                "inputpath" | "jepath" | "tbpath" | "sourcepath" | "ledgerpath"
-            ) && value.as_str().is_some_and(is_excel_input_path);
-            let input_list = normalized == "inputpaths"
-                && value.as_array().is_some_and(|paths| {
-                    paths
-                        .iter()
-                        .any(|path| path.as_str().is_some_and(is_excel_input_path))
-                });
-            direct_input || input_list || params_have_excel_input(value)
-        }),
-        Value::Array(values) => values.iter().any(params_have_excel_input),
-        _ => false,
-    }
+    let mut paths = HashSet::new();
+    collect_input_paths(value, &mut paths);
+    paths.iter().any(|path| is_excel_input_path(path))
 }
 
-/// Excel 解码器在单个工作簿解压期间无法安全暂停，动态 Job Object 上限会在瞬时峰值时
-/// 直接终止正常任务。因此所有工具的 Excel 输入只使用软监测；CSV/TXT/TSV 等可分批输入保留硬上限。
+fn is_protected_text_input_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["csv", "txt", "tsv"]
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
+fn text_input_bytes_with(value: &Value, size_of: impl Fn(&Path) -> Option<u64>) -> u64 {
+    let mut paths = HashSet::new();
+    collect_input_paths(value, &mut paths);
+    paths
+        .iter()
+        .filter(|path| is_protected_text_input_path(path))
+        .filter_map(|path| size_of(path))
+        .fold(0_u64, u64::saturating_add)
+}
+
+fn text_input_bytes(value: &Value) -> u64 {
+    text_input_bytes_with(value, |path| fs::metadata(path).ok().map(|meta| meta.len()))
+}
+
+fn memory_protected_for_text_bytes(method: &str, bytes: u64) -> bool {
+    memory_protected_method(method) && bytes > LARGE_TEXT_INPUT_BYTES
+}
+
+/// Excel 输入不启用公共内存拦截。CSV/TXT/TSV 按本次任务去重后的输入总大小计，
+/// 只有严格超过 1 GiB 才启用启动等待、运行监测和 Job Object 硬上限。
+fn memory_protected_job(method: &str, params: &Value) -> bool {
+    memory_protected_for_text_bytes(method, text_input_bytes(params))
+}
+
 fn hard_memory_limited_job(method: &str, params: &Value) -> bool {
-    memory_protected_method(method) && !params_have_excel_input(params)
+    memory_protected_job(method, params)
 }
 
 pub fn worker_main() -> i32 {
@@ -785,7 +859,7 @@ pub fn worker_main() -> i32 {
     let job_id = request.job_id.clone();
     let worker_tool_id = tool_id(&request.method);
     let pause = PauseCheckpoint::new(PathBuf::from(&request.pause_path), cancel.clone());
-    if memory_protected_method(&request.method) {
+    if request.memory_protected {
         crate::resource_budget::install_runtime_memory_control(
             cancel.clone(),
             crate::resource_budget::memory_retry_path(Path::new(&request.pause_path)),
@@ -2580,7 +2654,7 @@ mod tests {
     }
 
     #[test]
-    fn excel_inputs_skip_job_object_hard_limit_across_tools() {
+    fn excel_inputs_skip_all_memory_interception_across_tools() {
         let cases = [
             ("kanzhang.inspect", json!({"inputPath":"C:\\data\\je.xlsx"})),
             (
@@ -2601,25 +2675,54 @@ mod tests {
             ),
             (
                 "tbje_check.run",
-                json!({"inputPaths":["C:\\data\\tb.csv", "C:\\data\\je.xlsx"]}),
+                json!({"inputPaths":["C:\\data\\tb.xlsx", "C:\\data\\je.xlsx"]}),
             ),
         ];
 
         for (method, params) in cases {
             assert!(memory_protected_method(method));
-            assert!(params_have_excel_input(&params));
+            assert_eq!(
+                text_input_bytes_with(&params, |_| Some(8 * LARGE_TEXT_INPUT_BYTES)),
+                0
+            );
+            assert!(!memory_protected_job(method, &params));
             assert!(!hard_memory_limited_job(method, &params));
         }
     }
 
     #[test]
-    fn csv_input_keeps_hard_limit_when_output_is_xlsx() {
+    fn text_inputs_are_protected_only_when_combined_size_exceeds_one_gib() {
         let params = json!({
-            "inputPath":"C:\\data\\je.csv",
+            "jeSource":{"inputPath":"C:\\data\\je.csv"},
+            "tbSource":{"inputPath":"C:\\data\\tb.tsv"},
+            "inputPaths":["C:\\data\\je.csv", "C:\\data\\notes.txt", "C:\\data\\reference.xlsx"],
             "outputPath":"C:\\output\\result.xlsx"
         });
-        assert!(!params_have_excel_input(&params));
-        assert!(hard_memory_limited_job("kanzhang.export", &params));
+        let size = |path: &Path| match path.file_name().and_then(|name| name.to_str()) {
+            Some("je.csv") => Some(600 * 1024 * 1024),
+            Some("tb.tsv") => Some(400 * 1024 * 1024),
+            Some("notes.txt") => Some(25 * 1024 * 1024),
+            _ => Some(20 * LARGE_TEXT_INPUT_BYTES),
+        };
+        // je.csv appears twice but is counted once. outputPath is ignored.
+        let bytes = text_input_bytes_with(&params, size);
+        assert_eq!(bytes, 1025 * 1024 * 1024);
+        assert!(memory_protected_for_text_bytes("kanzhang.export", bytes));
+        assert!(!memory_protected_for_text_bytes("file_list.export", bytes));
+    }
+
+    #[test]
+    fn one_gib_text_input_is_not_yet_protected() {
+        let params = json!({"inputPath":"C:\\data\\je.csv"});
+        assert_eq!(
+            text_input_bytes_with(&params, |_| Some(LARGE_TEXT_INPUT_BYTES)),
+            LARGE_TEXT_INPUT_BYTES
+        );
+        // The product rule is strictly greater than 1 GiB.
+        assert!(!memory_protected_for_text_bytes(
+            "kanzhang.export",
+            LARGE_TEXT_INPUT_BYTES
+        ));
     }
 
     /// FA 子工具的 job 事件必须路由到各自的页面（useJobEvents 按 toolId 过滤），

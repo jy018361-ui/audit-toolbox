@@ -11,6 +11,7 @@ import {
   fxDetachRole,
   fxDropTargetAt,
   fxMergeJobResult,
+  fxCurrencyRequirement,
   fxMissingRequired,
   fxPreviewTokenFor,
   fxReportStart,
@@ -938,5 +939,27 @@ describe("科目币种覆盖", () => {
 
   it("没有任何选择时传空对象，不影响后端自动识别", () => {
     expect(fxAccountCurrencyOverrides({})).toEqual({});
+  });
+});
+
+describe("fxCurrencyRequirement：币种类角色的下拉必填口径", () => {
+  it("TB 侧原币币种与币种线索二选一——都没映射时双双必填", () => {
+    expect(fxCurrencyRequirement("tb", {}, "combined", "currency")).toBe("required");
+    expect(fxCurrencyRequirement("tb", {}, "combined", "currencyText")).toBe("required");
+  });
+  it("TB 侧映射其一后另一个转选填", () => {
+    const mapping = { currency: "币种" };
+    expect(fxCurrencyRequirement("tb", mapping, "combined", "currency")).toBe("optional");
+    expect(fxCurrencyRequirement("tb", mapping, "combined", "currencyText")).toBe("optional");
+  });
+  it("JE 侧原币币种依模式：已实现/组合必填，仅未实现转选填", () => {
+    expect(fxCurrencyRequirement("je", {}, "realized", "currency")).toBe("required");
+    expect(fxCurrencyRequirement("je", {}, "combined", "currency")).toBe("required");
+    expect(fxCurrencyRequirement("je", {}, "unrealized", "currency")).toBe("optional");
+  });
+  it("本位币币种恒为选填，其余角色不干预", () => {
+    expect(fxCurrencyRequirement("tb", {}, "combined", "functionalCurrency")).toBe("optional");
+    expect(fxCurrencyRequirement("je", {}, "realized", "functionalCurrency")).toBe("optional");
+    expect(fxCurrencyRequirement("tb", {}, "combined", "summary")).toBeUndefined();
   });
 });

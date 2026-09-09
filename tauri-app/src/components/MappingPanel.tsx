@@ -137,7 +137,8 @@ export function MappingPanel(props: MappingPanelProps) {
     current: string,
     group?: MappingGroup,
   ) => {
-    const taken = used.has(role) && role !== current && !isMulti(role);
+    // （已用）覆盖所有角色——含可多列角色：提示已挂过，但不拦截继续加列。
+    const taken = used.has(role) && role !== current;
     const disabled = locked(role);
     const suffix = taken ? "（已用）" : disabled ? "（已停用）" : "";
     return (
@@ -164,7 +165,7 @@ export function MappingPanel(props: MappingPanelProps) {
     group?: MappingGroup,
   ) => {
     const chosen = held.includes(role);
-    const taken = used.has(role) && !chosen && !isMulti(role);
+    const taken = used.has(role) && !chosen;
     const disabled = locked(role);
     return (
       <option
@@ -283,7 +284,7 @@ export function MappingPanel(props: MappingPanelProps) {
           ) : null}
           {props.requirementOf ? (
             <span className="mapping-requirement-legend">
-              ＊ 为必填字段；（选填）须按当前分组的整组规则补充。
+              ＊ 为必填字段；（选填）须按当前分组的整组规则补充；（已用）＝已有列挂在该角色上，可多列角色仍可继续加列。
             </span>
           ) : null}
         </p>

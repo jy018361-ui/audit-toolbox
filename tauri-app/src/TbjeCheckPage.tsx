@@ -102,6 +102,23 @@ export function tbjeMissingMappings(
   return [...new Set(missing)];
 }
 
+export function tbjeReviewStatus(
+  needsPairReview: boolean,
+  reviewed: boolean,
+  reviewFailed: boolean,
+  missingCount: number,
+): { label: string; attention: boolean } {
+  if (needsPairReview) return { label: "待确认", attention: true };
+  if (!reviewed) return { label: "已识别", attention: false };
+  if (reviewFailed) return { label: "LLM 复核失败", attention: true };
+  if (missingCount > 0)
+    return {
+      label: `复核完成，仍缺 ${missingCount} 项`,
+      attention: true,
+    };
+  return { label: "复核完成，映射完整", attention: false };
+}
+
 type Verdict = { performed: boolean; passed?: boolean; reason?: string };
 
 type SideTotals = {
@@ -259,7 +276,12 @@ function TbJeVerdict({ check }: { check?: CheckResult["tbVsJe"] }) {
 
 /** 预览截断的行数。几百条差异全塞进页面没法看——预览管定位，导出管全量。 */
 const PREVIEW_CAP = 100;
-const MULTI_COLUMN_ROLES = new Set(["id", "accountName", "auxiliary"]);
+// TBJE 只需用日期组成凭证键，不做按日计息；没有完整日期时允许月／日等
+// 多列共同组成日期键。其他工具是否允许复合日期由各自页面单独声明。
+const MULTI_COLUMN_ROLES = new Set([
+  ...LEDGER_MULTI_COLUMN_ROLES,
+  "date",
+]);
 
 const presenceLabel = (presence: string) =>
   presence === "tbOnly"
@@ -573,6 +595,21 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       mappings[pairingFileKey(file)] ?? {},
       kind === "tb" ? tbForms : jeForms,
       labels,
+    );
+  };
+
+  const reviewStatusOf = (group: PairedGroup) => {
+    const review = llmReviews[group.id];
+    const failed = Boolean(
+      review && Object.values(review).some((item) => item?.failed),
+    );
+    const missingCount =
+      missingOf("tb", group.tb).length + missingOf("je", group.je).length;
+    return tbjeReviewStatus(
+      group.needsReview,
+      Boolean(review),
+      failed,
+      missingCount,
     );
   };
 
@@ -1105,6 +1142,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         ),
         tool: "tbje_check",
         pairLabel: group.label,
+        multiColumnRoles: MULTI_COLUMN_ROLES,
       };
     };
     return { tb: target("tb", group.tb), je: target("je", group.je) };
@@ -1204,7 +1242,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     if (!file || !outcome || !change) return;
     const mapping = { ...outcome.mapping };
     const beforeValue = mapping[change.role];
-    mapping[change.role] = LEDGER_MULTI_COLUMN_ROLES.has(change.role)
+    mapping[change.role] = MULTI_COLUMN_ROLES.has(change.role)
       ? [
           ...new Set([
             ...(Array.isArray(beforeValue)
@@ -1586,11 +1624,11 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                     data-ui-state={
                       expanded?.groupId === group.id
                         ? "expanded"
-                        : llmReviews[group.id]
-                          ? "reviewed"
-                          : group.needsReview
+                        : reviewStatusOf(group).attention
                             ? "attention"
-                            : "ready"
+                            : llmReviews[group.id]
+                              ? "reviewed"
+                              : "ready"
                     }
                   >
                     <div className="tbje-group-row">
@@ -1599,14 +1637,10 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                           第 {group.label} 组
                         </strong>
                         <span
-                          className={`tbje-pair-status${group.needsReview ? " review" : ""}`}
+                          className={`tbje-pair-status${reviewStatusOf(group).attention ? " review" : ""}`}
                         >
                           <i aria-hidden="true" />
-                          {group.needsReview
-                            ? "待确认"
-                            : llmReviews[group.id]
-                              ? "复核通过"
-                              : "已识别"}
+                          {reviewStatusOf(group).label}
                         </span>
                       </div>
                       <div className="tbje-file-cell">

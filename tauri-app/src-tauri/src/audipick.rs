@@ -355,7 +355,7 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
     if mode != "analysis" {
         // 与汇兑损益共用同一套卫生过滤，不再各写一份。看账按天取数，
         // 不启用汇兑损益的记账日期月度兜底。
-        sanitize_mapping_changes(&mut value, &payload, "je", false);
+        sanitize_mapping_changes(&mut value, &payload, "je", ReviewDatePolicy::Strict);
     }
     Ok(value)
 }
@@ -375,6 +375,35 @@ const REVIEW_TB: &str = "角色共分七组：身份（entity、accountCode、ac
 /// date 不必非要完整日期。其他工具（存款利息按日计息、借款利息按天
 /// 折算）仍要求完整日期，这条纪律只在 `tool == fx_audit` 时附加。
 const REVIEW_JE_FX_MONTH_DATE: &str = "汇兑损益的月度兜底（仅本工具适用）：date 首选完整日期列；全表确实没有任何完整日期列时，**月份列可以映射为 date**——取值为月份数字或年月文本的列（如「年-月」「月份」，取值 1、01、1月、2025-01、2025年1月），引擎按月归集测算，月份缺年份时按报告期推定。表里存在完整日期列时仍必须用完整日期列，不得拿月份列替代；「年」「日」单独成列的也不是月份列。";
+
+/// TBJE 完整性核对不按日计息；日期只用于把同一张凭证的明细聚在一起。
+/// 一些 ERP 把年份写在标题、月日拆成两列，或只给会计月份。此时允许模型
+/// 逐列建议同一个 date 角色，前端以数组保存，符号口径内核会把这些列共同
+/// 拼进凭证键。卫生过滤仍逐列验证取值，模型不能凭空制造日期列。
+const REVIEW_JE_TBJE_COMPOSITE_DATE: &str = "TBJE完整性核对的日期降级（仅本工具适用）：date 首选完整日期列；全表确实没有完整日期列时，可以由真实存在的年月／月份列，或年、月、日拆分列共同组成 date。这是对前述‘其余角色各占一列’规则的唯一例外。若日期拆在多列，请为每个组成列分别输出一条 role=date 的 change，suggestedColumn 分别填写真实列名；年份只写在工作表标题时，不要虚构年份列，使用月列或月＋日列即可组成账内凭证键。不得使用制单日期、审核日期等非记账日期字段。";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReviewDatePolicy {
+    Strict,
+    FxMonth,
+    TbjeComposite,
+}
+
+fn review_date_policy(tool: Option<&str>) -> ReviewDatePolicy {
+    match tool {
+        Some("fx_audit") => ReviewDatePolicy::FxMonth,
+        Some("tbje_check") => ReviewDatePolicy::TbjeComposite,
+        _ => ReviewDatePolicy::Strict,
+    }
+}
+
+fn review_date_instruction(policy: ReviewDatePolicy) -> &'static str {
+    match policy {
+        ReviewDatePolicy::Strict => "",
+        ReviewDatePolicy::FxMonth => REVIEW_JE_FX_MONTH_DATE,
+        ReviewDatePolicy::TbjeComposite => REVIEW_JE_TBJE_COMPOSITE_DATE,
+    }
+}
 
 /// 把**脚本已经判出的账表形态**写进 payload。
 ///
@@ -466,13 +495,8 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
         inject_current_form(&mut je, "je");
         inject_engine_facts(&mut je);
     }
-    // 汇兑损益的月度兜底只附加给本工具，别的工具测算粒度按天，月份列不算日期。
-    let je_month_date_allowed = root.get("tool").and_then(Value::as_str) == Some("fx_audit");
-    let je_month_date = if je_month_date_allowed {
-        REVIEW_JE_FX_MONTH_DATE
-    } else {
-        ""
-    };
+    let date_policy = review_date_policy(root.get("tool").and_then(Value::as_str));
+    let je_date_instruction = review_date_instruction(date_policy);
     let prompt = format!(
         "你是审计工具箱公共 TB＋JE 联合字段映射复核器。TB 与 JE 属于同一账套，必须在一次判断中同时复核。\
          只输出严格 JSON：{{\"task\":\"ledger_pair_mapping\",\"tbChanges\":[{{\"role\":string,\"currentColumn\":string,\"suggestedColumn\":string,\"confidence\":number,\"reason\":string}}],\
@@ -484,7 +508,7 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
          联合比较 accountCode/accountName 的标题语义、样例形态与两侧口径；证据接近时维持当前映射，不要为了换成看起来更好的列而改。\
          changes 只放真实调整，确认现状正确不要造条目。{REVIEW_COMMON}\
          对 TB：{REVIEW_TB}\
-         对 JE：{REVIEW_JE}{je_month_date}"
+         对 JE：{REVIEW_JE}{je_date_instruction}"
     );
     let payload = json!({
         "tool": root.get("tool").cloned().unwrap_or_else(|| json!("ledger")),
@@ -533,7 +557,7 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
             .cloned()
             .unwrap_or_else(|| json!([]));
         let mut wrapper = json!({"changes": changes});
-        sanitize_mapping_changes(&mut wrapper, side, kind, je_month_date_allowed);
+        sanitize_mapping_changes(&mut wrapper, side, kind, date_policy);
         output[key] = wrapper["changes"].clone();
     }
     Ok(output)
@@ -608,24 +632,23 @@ fn ledger_mapping_llm_call(
     } else {
         ("序时账", REVIEW_JE)
     };
-    // 汇兑损益的月度兜底只附加给本工具：别的工具按天测算，月份列不算日期。
-    let month_date = if !is_tb
-        && params
-            .get("payload")
-            .unwrap_or(params)
-            .get("tool")
-            .and_then(Value::as_str)
-            == Some("fx_audit")
-    {
-        REVIEW_JE_FX_MONTH_DATE
+    let date_policy = if is_tb {
+        ReviewDatePolicy::Strict
     } else {
-        ""
+        review_date_policy(
+            params
+                .get("payload")
+                .unwrap_or(params)
+                .get("tool")
+                .and_then(Value::as_str),
+        )
     };
+    let date_instruction = review_date_instruction(date_policy);
     let prompt = format!(
         "你是审计工具箱公共 TB/JE 引擎的{table_name}字段映射复核器，任务名为 {task}。\
          只输出严格 JSON：{{\"task\":\"{task}\",\"changes\":[{{\"role\":string,\
          \"currentColumn\":string,\"suggestedColumn\":string,\"confidence\":number,\
-         \"reason\":string,\"scheme\":string}}]}}。{REVIEW_COMMON}{specific}{month_date}"
+         \"reason\":string,\"scheme\":string}}]}}。{REVIEW_COMMON}{specific}{date_instruction}"
     );
     let mut payload = params.get("payload").unwrap_or(params).clone();
     // 兼容旧版 FX 请求携带的 hardcodedCandidates。
@@ -662,13 +685,7 @@ fn ledger_mapping_llm_call(
         &mut value,
         payload,
         if is_tb { "tb" } else { "je" },
-        // 汇兑损益的月度兜底：单表复核也按 tool 放行月份列。
-        params
-            .get("payload")
-            .unwrap_or(params)
-            .get("tool")
-            .and_then(Value::as_str)
-            == Some("fx_audit"),
+        date_policy,
     );
     Ok(value)
 }
@@ -687,12 +704,12 @@ fn sanitize_mapping_changes(
     value: &mut Value,
     payload: &Value,
     kind: &str,
-    month_date_allowed: bool,
+    date_policy: ReviewDatePolicy,
 ) {
     // 汇兑损益输出 `changes`，看账与正负数凭证标记输出 `fills`／`reviews`——
     // 结构不同，纪律相同，逐个字段过一遍同一套规则。
     for key in ["changes", "fills", "reviews"] {
-        sanitize_change_list(value, payload, kind, key, month_date_allowed);
+        sanitize_change_list(value, payload, kind, key, date_policy);
     }
 }
 
@@ -717,12 +734,80 @@ fn month_shaped_column(rows: &[Vec<String>], index: usize) -> bool {
     seen > 0
 }
 
+fn integer_component_column(
+    rows: &[Vec<String>],
+    index: usize,
+    range: std::ops::RangeInclusive<u32>,
+) -> bool {
+    let mut seen = 0;
+    for row in rows {
+        let text = row.get(index).map(String::as_str).unwrap_or("").trim();
+        if text.is_empty() {
+            continue;
+        }
+        let Ok(value) = text.parse::<u32>() else {
+            return false;
+        };
+        if !range.contains(&value) {
+            return false;
+        }
+        seen += 1;
+    }
+    seen > 0
+}
+
+/// TBJE 的复合日期组成列。列名与样例取值必须同时成立，避免模型把任意
+/// 1..12 的层级/期间数字误当月份，或把制单人等无关列塞进 date。
+fn tbje_date_component_column(headers: &[String], rows: &[Vec<String>], index: usize) -> bool {
+    let header = headers.get(index).map(String::as_str).unwrap_or("");
+    let normalized = crate::ledger_mapping::normalize_header(header);
+    let month_header = normalized.contains('月')
+        || normalized.contains("month")
+        || normalized.contains("期间")
+        || normalized.contains("period");
+    let day_header = normalized.contains('日') || normalized.contains("day");
+    let year_header = normalized.contains('年') || normalized.contains("year");
+    (month_header && month_shaped_column(rows, index))
+        || (day_header && integer_component_column(rows, index, 1..=31))
+        || (year_header && integer_component_column(rows, index, 1900..=2100))
+}
+
+/// 是否已经存在真正的完整日期候选。TBJE 只有在整张样例找不到完整日期时
+/// 才放开组成列，确保“完整日期优先”不仅写在提示词里，也由代码强制执行。
+fn has_full_date_column(headers: &[String], rows: &[Vec<String>]) -> bool {
+    headers.iter().enumerate().any(|(index, header)| {
+        let normalized = crate::ledger_mapping::normalize_header(header);
+        if !(normalized.contains("日期")
+            || normalized.contains("date")
+            || normalized.contains("过账日")
+            || normalized.contains("記賬日"))
+        {
+            return false;
+        }
+        let mut seen = 0;
+        for row in rows {
+            let text = row.get(index).map(String::as_str).unwrap_or("").trim();
+            if text.is_empty() {
+                continue;
+            }
+            // 年月能被 parse_date 按 1 日收下，但它仍是月度粒度，不算完整日期。
+            if crate::ledger_mapping::parse_month(text).is_some()
+                || crate::ledger_mapping::parse_date(text).is_none()
+            {
+                return false;
+            }
+            seen += 1;
+        }
+        seen > 0
+    })
+}
+
 fn sanitize_change_list(
     value: &mut Value,
     payload: &Value,
     kind: &str,
     key: &str,
-    month_date_allowed: bool,
+    date_policy: ReviewDatePolicy,
 ) {
     let Some(changes) = value.get_mut(key).and_then(Value::as_array_mut) else {
         return;
@@ -863,17 +948,21 @@ fn sanitize_change_list(
             })
             .iter()
             .any(|column| column == suggested);
-        // 汇兑损益的月度兜底：取值确实是月份的列（「年-月」取值 1、2025-01）
-        // 允许指给 date——列名里的「年」「月」是冲突词，但这里正是合法目标。
-        let month_date_column = month_date_allowed
-            && role == "date"
+        let date_fallback_column = role == "date"
             && headers
                 .iter()
                 .position(|header| header.trim() == suggested)
                 .zip(sample_rows.as_deref())
-                .is_some_and(|(index, rows)| month_shaped_column(rows, index));
+                .is_some_and(|(index, rows)| match date_policy {
+                    ReviewDatePolicy::Strict => false,
+                    ReviewDatePolicy::FxMonth => month_shaped_column(rows, index),
+                    ReviewDatePolicy::TbjeComposite => {
+                        !has_full_date_column(&headers, rows)
+                            && tbje_date_component_column(&headers, rows, index)
+                    }
+                });
         if !combined_pair
-            && !month_date_column
+            && !date_fallback_column
             && crate::ledger_mapping::role_rejects_header(kind, role, suggested)
         {
             return false;
@@ -1592,7 +1681,7 @@ mod tests {
                  "confidence": 0.9, "reason": "当摘要用"},
             ],
         });
-        sanitize_mapping_changes(&mut value, &payload, "je", false);
+        sanitize_mapping_changes(&mut value, &payload, "je", ReviewDatePolicy::Strict);
         let fills = value["fills"].as_array().expect("fills 还在");
         assert_eq!(fills.len(), 1, "{fills:?}");
         assert_eq!(fills[0]["suggestedColumn"], "本位币金额");
@@ -1694,7 +1783,13 @@ mod tests {
             {"role":"direction","currentColumn":"","suggestedColumn":"借贷标志","confidence":0.9,"reason":"S/H即借贷"},
             {"role":"currency","currentColumn":"","suggestedColumn":"本币","confidence":0.9,"reason":"整列CNY即本位币"},
         ]});
-        sanitize_change_list(&mut review, &payload, "je", "changes", false);
+        sanitize_change_list(
+            &mut review,
+            &payload,
+            "je",
+            "changes",
+            ReviewDatePolicy::Strict,
+        );
         let changes = review["changes"].as_array().expect("changes");
         assert_eq!(
             changes.len(),
@@ -1723,7 +1818,13 @@ mod tests {
             // 日列取值出现 13 以上，形态不是月份，照样拦。
             {"role":"date","currentColumn":"","suggestedColumn":"年-日","confidence":0.85,"reason":"也是月份"},
         ]});
-        sanitize_change_list(&mut review, &payload, "je", "changes", true);
+        sanitize_change_list(
+            &mut review,
+            &payload,
+            "je",
+            "changes",
+            ReviewDatePolicy::FxMonth,
+        );
         let changes = review["changes"].as_array().expect("changes");
         assert_eq!(changes.len(), 1, "只有「年-月」放行：{review:#}");
         assert_eq!(changes[0]["suggestedColumn"], "年-月");
@@ -1732,13 +1833,71 @@ mod tests {
         let mut review = json!({"changes": [
             {"role":"date","currentColumn":"","suggestedColumn":"年-月","confidence":0.85,"reason":"全表唯一月份列"},
         ]});
-        sanitize_change_list(&mut review, &payload, "je", "changes", false);
+        sanitize_change_list(
+            &mut review,
+            &payload,
+            "je",
+            "changes",
+            ReviewDatePolicy::Strict,
+        );
         assert!(
-            review["changes"]
-                .as_array()
-                .expect("changes")
-                .is_empty(),
+            review["changes"].as_array().expect("changes").is_empty(),
             "非汇兑损益不放行月份列：{review:#}"
+        );
+    }
+
+    #[test]
+    fn tbje复核允许月日组成日期但完整日期优先() {
+        let payload = json!({
+            "headers": ["年-月", "年-日", "凭证号"],
+            "currentMapping": {"id": "凭证号"},
+            "sampleRows": [
+                ["1", "9", "0001"],
+                ["2", "15", "0002"],
+                ["3", "21", "0003"],
+            ],
+        });
+        let mut review = json!({"changes": [
+            {"role":"date","currentColumn":"","suggestedColumn":"年-月","confidence":0.9,"reason":"月份组成列"},
+            {"role":"date","currentColumn":"","suggestedColumn":"年-日","confidence":0.9,"reason":"日期组成列"},
+        ]});
+        sanitize_change_list(
+            &mut review,
+            &payload,
+            "je",
+            "changes",
+            ReviewDatePolicy::TbjeComposite,
+        );
+        let columns = review["changes"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .filter_map(|change| change["suggestedColumn"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(columns, vec!["年-月", "年-日"]);
+
+        let full_date = json!({
+            "headers": ["记账日期", "年-月", "年-日", "凭证号"],
+            "currentMapping": {"id": "凭证号"},
+            "sampleRows": [
+                ["2025-01-09", "1", "9", "0001"],
+                ["2025-02-15", "2", "15", "0002"],
+            ],
+        });
+        let mut fallback = json!({"changes": [
+            {"role":"date","currentColumn":"","suggestedColumn":"年-月","confidence":0.9,"reason":"月份组成列"},
+            {"role":"date","currentColumn":"","suggestedColumn":"年-日","confidence":0.9,"reason":"日期组成列"},
+        ]});
+        sanitize_change_list(
+            &mut fallback,
+            &full_date,
+            "je",
+            "changes",
+            ReviewDatePolicy::TbjeComposite,
+        );
+        assert!(
+            fallback["changes"].as_array().expect("changes").is_empty(),
+            "已有完整日期时不得退回组成列：{fallback:#}"
         );
     }
 
@@ -1761,7 +1920,13 @@ mod tests {
         let mut review = json!({"changes": [
             {"role":"accountName","currentColumn":"","suggestedColumn":combined,"confidence":0.9,"reason":"编码与名称混写"}
         ]});
-        sanitize_change_list(&mut review, &payload, "tb", "changes", false);
+        sanitize_change_list(
+            &mut review,
+            &payload,
+            "tb",
+            "changes",
+            ReviewDatePolicy::Strict,
+        );
         let changes = review["changes"].as_array().expect("changes");
         assert_eq!(
             changes.len(),
@@ -1956,7 +2121,7 @@ mod mapping_prompt_tests {
                  "confidence": 0.7, "reason": "重复占列", "scheme": ""},
             ],
         });
-        sanitize_mapping_changes(&mut value, &payload, "tb", false);
+        sanitize_mapping_changes(&mut value, &payload, "tb", ReviewDatePolicy::Strict);
         let changes = value["changes"].as_array().unwrap();
         // 留下 currency→币种 与 accountName→科目名称；同列的 closingDirection
         // 在 accountName 之后出现，被"一列一次"规则丢弃。
@@ -1990,7 +2155,7 @@ mod mapping_prompt_tests {
                  "confidence": 0.9, "reason": "", "scheme": ""},
             ],
         });
-        sanitize_mapping_changes(&mut value, &json!({}), "tb", false);
+        sanitize_mapping_changes(&mut value, &json!({}), "tb", ReviewDatePolicy::Strict);
         assert_eq!(value["changes"].as_array().unwrap().len(), 1);
     }
 
@@ -2020,7 +2185,7 @@ mod mapping_prompt_tests {
                  "confidence": 0.8, "reason": "", "scheme": ""},
             ],
         });
-        sanitize_mapping_changes(&mut value, &payload, "tb", false);
+        sanitize_mapping_changes(&mut value, &payload, "tb", ReviewDatePolicy::Strict);
         assert!(
             value["changes"].as_array().unwrap().is_empty(),
             "三条都该拦：{value:?}"
@@ -2052,7 +2217,7 @@ mod mapping_prompt_tests {
                  "confidence": 0.9, "reason": "保留文本列映射为currencyText", "scheme": ""},
             ],
         });
-        sanitize_mapping_changes(&mut value, &payload, "tb", false);
+        sanitize_mapping_changes(&mut value, &payload, "tb", ReviewDatePolicy::Strict);
         assert!(
             value["changes"].as_array().unwrap().is_empty(),
             "货币列已被 functionalCurrency 占用：{value:?}"
@@ -2073,7 +2238,7 @@ mod mapping_prompt_tests {
                  "scheme": ""},
             ],
         });
-        sanitize_mapping_changes(&mut value, &payload, "tb", false);
+        sanitize_mapping_changes(&mut value, &payload, "tb", ReviewDatePolicy::Strict);
         assert!(value["changes"].as_array().unwrap().is_empty(), "{value:?}");
     }
 
@@ -2101,7 +2266,7 @@ mod mapping_prompt_tests {
                  "confidence": 0.9, "reason": "", "scheme": ""},
             ],
         });
-        sanitize_mapping_changes(&mut value, &payload, "tb", false);
+        sanitize_mapping_changes(&mut value, &payload, "tb", ReviewDatePolicy::Strict);
         let changes = value["changes"].as_array().unwrap();
         assert_eq!(changes.len(), 2, "只留成对挪移的两条：{changes:?}");
         assert!(
@@ -2163,7 +2328,7 @@ mod mapping_prompt_tests {
             }]
         });
 
-        sanitize_mapping_changes(&mut value, &payload, "tb", false);
+        sanitize_mapping_changes(&mut value, &payload, "tb", ReviewDatePolicy::Strict);
 
         assert!(value["changes"].as_array().unwrap().is_empty(), "{value:?}");
     }

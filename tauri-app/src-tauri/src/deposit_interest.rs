@@ -371,14 +371,13 @@ pub(crate) fn detect_foreign_currency(text: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn suggest_tier(text: &str) -> (&'static str, String) {
-    // 外币存款不适用人民币挂牌档位——美元户按 0.05% 人民币活期算会严重低估。
-    // 大类仍按活期兜底（认不出类型时统一落活期），但 [`resolve_rate`] 不会
-    // 给外币户自动套用人民币挂牌利率，必须由用户填对账单上的实际利率。
+    // 外币存款仍按活期兜底（认不出类型时统一落活期）。测算先沿用活期
+    // 0.05% 默认值，但必须把外币身份和复核提示写进结果，提醒用户按对账单改写。
     if let Some(code) = detect_foreign_currency(text) {
         return (
             "demand",
             format!(
-                "科目为 {} 外币户，人民币挂牌利率不适用，大类按活期兜底，请按对账单填实际利率",
+                "科目为 {} 外币户，大类按活期兜底并暂按 0.05% 测算，请按对账单核对实际利率",
                 code.to_uppercase()
             ),
         );
@@ -1099,7 +1098,7 @@ fn rate_tiers() -> Value {
         ),
         "practiceSource": "实务区间是常见报价范围的经验值，不是官方公布数据，仅用来提示填入的利率是否明显离谱。",
         "authority": "以上三组都只是默认值和合理性参照。审计依据应当是客户的存款协议、银行对账单或银行出具的利息清单。",
-        "autoApplyPolicy": "只有活期自动套用默认利率——对公活期没有议价空间。协定、通知、定期、大额存单的利率逐笔合同约定，默认留空，须填入实际利率后才计入测算。",
+        "autoApplyPolicy": "只有活期自动套用 0.05% 默认利率；识别为外币活期户时仍先按 0.05% 测算，但会提示按对账单核对实际利率。协定、通知、定期、大额存单的利率逐笔合同约定，默认留空，须填入实际利率后才计入测算。",
         "listedRateDate": LISTED_REFERENCE_DATE,
         "rateAgeMonths": age,
         "ratesStale": stale,
@@ -1757,7 +1756,7 @@ fn calculate(
             "dayBasis": basis_key,
             "dayBasisLabel": basis_label,
             "rateBasisLabel": format!(
-                "仅活期自动套用国有大行挂牌默认值（{LISTED_REFERENCE_DATE}）；\
+                "仅活期自动套用 0.05% 默认值（{LISTED_REFERENCE_DATE}）；外币活期户会提示核对实际利率。\
                  其余档位须填实际利率。央行基准（{PBC_BENCHMARK_DATE}）只作上限参照，不参与测算。"
             ),
             "listedRateDate": LISTED_REFERENCE_DATE,
@@ -1818,8 +1817,8 @@ fn resolve_rate(
     {
         return done(rate, "自定义档位利率");
     }
-    // 外币户即便落在活期档，也不能自动套人民币挂牌利率（0.05% 会严重低估
-    // 美元存款利息）——留空逼着用户按对账单填。用户手工填的利率在上面已经返回。
+    // 外币户落在活期档时也先套 0.05% 默认值，但必须明确提示这只是暂估值，
+    // 让用户按该币种的银行对账单复核。用户手工填的利率在上面已经返回。
     let identity = format!("{} {}", account.account, account.auxiliary);
     let normalized_identity = normalize_header(&identity);
     // 科目/辅助核算中明写 RMB、CNY 或人民币时，这是账户级证据，
@@ -1828,11 +1827,23 @@ fn resolve_rate(
     let explicitly_domestic = ["rmb", "cny", "人民币"]
         .iter()
         .any(|token| normalized_identity.contains(token));
-    let foreign = !explicitly_domestic
-        && (detect_foreign_currency(&identity).is_some()
-            || detect_foreign_currency(&account.currency).is_some());
-    match auto_rate(&tier).filter(|_| !foreign) {
-        Some(rate) => done(rate, "活期挂牌默认值"),
+    let foreign_currency = (!explicitly_domestic)
+        .then(|| {
+            detect_foreign_currency(&identity)
+                .or_else(|| detect_foreign_currency(&account.currency))
+        })
+        .flatten();
+    match auto_rate(&tier) {
+        Some(rate) => match foreign_currency {
+            Some(code) => done(
+                rate,
+                &format!(
+                    "已识别为 {} 外币活期户，暂按 0.05% 默认值，请核对实际利率",
+                    code.to_uppercase()
+                ),
+            ),
+            None => done(rate, "活期挂牌默认值"),
+        },
         None => ResolvedRate {
             tier,
             rate: 0.0,
@@ -3285,7 +3296,7 @@ fn write_rate_tiers(sheet: &mut Worksheet, params: &Value) -> Result<(), AppErro
     let mut y = RATE_TIERS.len() as u32 + 2;
     let age = listed_rate_age_months();
     let mut lines = vec![
-        "自动套用范围：只有活期自动套用默认利率——对公活期没有议价空间。协定、通知、定期、大额存单的利率是逐笔合同约定的，默认留空，须填入实际利率后才计入测算合计。".to_string(),
+        "自动套用范围：只有活期自动套用 0.05% 默认利率；识别为外币活期户时仍先按 0.05% 测算，但须按对账单核对实际利率。协定、通知、定期、大额存单的利率是逐笔合同约定的，默认留空，须填入实际利率后才计入测算合计。".to_string(),
         format!("央行基准来源：中国人民银行《金融机构人民币存款基准利率调整表》，{PBC_BENCHMARK_DATE} 起执行，至今未再调整。仅作合理性上限参照，不参与测算——3 年期基准 2.75% 对比实际约 1.25%，拿它算会把利息放大一倍以上。"),
         format!("大行挂牌来源：国有大型商业银行人民币存款挂牌利率，{LISTED_REFERENCE_DATE} 调整后水平；2022 年建立存款利率市场化调整机制后由各行自主报价，已多轮下调。"),
         "实务常见区间：常见报价范围的经验值，不是官方公布数据，只用于提示填入的利率是否明显偏离。".to_string(),
@@ -3542,15 +3553,27 @@ mod tests {
             (summary["bookedInterestIncome"].as_f64().unwrap() - 1_582_447.80).abs() < 1.0,
             "账面利息收入应取自 520000"
         );
-        // 全部落活期档，自动套用 0.05%，所以一定测得出数且没有待填利率。
-        // 三个美元户（USD BOC / USD BOA / HSBC USD）大类同样兜底为活期，
-        // 但不自动套人民币挂牌利率，必须落到待填，否则会把美元存款利息严重低估。
-        assert_eq!(summary["missingRateCount"], json!(3));
-        assert_eq!(summary["missingRateTiers"], json!(["活期存款"]));
+        // 全部落活期档（含三个美元户），自动套用 0.05%，所以一定测得出数且没有待填利率。
+        // 外币户必须在利率来源中明确提示这是默认值，提醒用户按对账单复核。
+        assert_eq!(summary["missingRateCount"], json!(0));
+        assert_eq!(summary["missingRateTiers"], json!([]));
         assert!(summary["calculatedInterest"].as_f64().unwrap() > 0.0);
         let usd = rows_of(&result, "USD BOA");
         assert_eq!(usd["tier"], "demand");
-        assert!(!usd["rateResolved"].as_bool().unwrap());
+        assert!(usd["rateResolved"].as_bool().unwrap());
+        assert_eq!(usd["annualRate"], json!(0.0005));
+        assert!(
+            usd["rateSource"]
+                .as_str()
+                .unwrap()
+                .contains("USD 外币活期户")
+        );
+        assert!(
+            usd["rateSource"]
+                .as_str()
+                .unwrap()
+                .contains("请核对实际利率")
+        );
         assert!(usd["tierMatchedBy"].as_str().unwrap().contains("USD"));
         let rmb = rows_of(&result, "RMB CMB");
         assert_eq!(rmb["tier"], "demand");
@@ -3758,9 +3781,9 @@ mod tests {
                 "{account} 不该被当成可计息存款"
             );
         }
-        // 10 个外币户（USD/HKD）大类兜底为活期，但不套人民币活期挂牌，落到待填利率。
-        assert_eq!(summary["missingRateCount"], json!(10));
-        assert_eq!(summary["missingRateTiers"], json!(["活期存款"]));
+        // 10 个外币户（USD/HKD）大类兜底为活期，暂按 0.05% 测算并提示复核。
+        assert_eq!(summary["missingRateCount"], json!(0));
+        assert_eq!(summary["missingRateTiers"], json!([]));
         // 建行 RMB3250 户：期初 255.21 ＋ 借 143,172.03 － 贷 130,827.78 ＝ 期末 12,599.46。
         let rmb = rows_of(&result, "1002010017");
         assert!((rmb["openingBalance"].as_f64().unwrap() - 255.21).abs() < 0.01);
@@ -3997,9 +4020,9 @@ mod tests {
     }
 
     /// 外币户：大类同样兜底为活期（认不出类型一律落活期），
-    /// 但人民币挂牌利率不会被自动套用，必须由用户按对账单填。
+    /// 暂按 0.05% 默认值测算，同时明确提示用户核对实际利率。
     #[test]
-    fn foreign_currency_falls_back_to_demand_but_never_auto_fills_rmb_rate() {
+    fn foreign_currency_falls_back_to_demand_with_default_rate_and_warning() {
         let (tier, reason) = suggest_tier("100332 USD BOC-CPCSC-SH");
         assert_eq!(tier, "demand");
         assert!(reason.contains("USD") && reason.contains("活期"));
@@ -4009,8 +4032,11 @@ mod tests {
             ..blank_row()
         };
         let resolved = resolve_rate(&row, None, None);
-        assert!(!resolved.resolved && resolved.rate == 0.0);
-        assert_eq!(resolved.source, "需填写实际利率");
+        assert!(resolved.resolved);
+        assert_eq!(resolved.rate, 0.0005);
+        assert!(resolved.source.contains("USD 外币活期户"));
+        assert!(resolved.source.contains("暂按 0.05%"));
+        assert!(resolved.source.contains("核对实际利率"));
         // 人民币户不受影响，仍自动套活期挂牌。
         let rmb = AccountRow {
             account: "100201 RMB CMB-CPCSC-SH".into(),
@@ -5490,8 +5516,10 @@ mod tests {
             "账面利息收入科目明细应列示借贷发生额与期末余额"
         );
         assert!(
-            text.contains("只有活期自动套用默认利率"),
-            "档位表缺少自动套用范围说明"
+            text.contains("只有活期自动套用 0.05% 默认利率")
+                && text.contains("外币活期户")
+                && text.contains("核对实际利率"),
+            "档位表缺少活期默认值或外币复核说明"
         );
         assert!(
             text.contains("仅作合理性上限参照"),

@@ -515,6 +515,7 @@ export async function applyLedgerReviewToDict(
   current: Record<string, string | string[]>,
   labels: Record<string, string>,
   tool?: string,
+  multiColumnRoles: ReadonlySet<string> = LEDGER_MULTI_COLUMN_ROLES,
 ): Promise<{
   mapping: Record<string, string | string[]>;
   applied: LedgerPlannedChange[];
@@ -530,7 +531,14 @@ export async function applyLedgerReviewToDict(
       ...(tool ? { tool } : {}),
     },
   })) as { changes?: LedgerChange[] };
-  return planLedgerChanges(headers, sampleRows, current, labels, response.changes ?? []);
+  return planLedgerChanges(
+    headers,
+    sampleRows,
+    current,
+    labels,
+    response.changes ?? [],
+    multiColumnRoles,
+  );
 }
 
 const ledgerMappingText = (value: string | string[] | undefined): string =>
@@ -543,6 +551,7 @@ export function planLedgerChanges(
   current: Record<string, string | string[]>,
   labels: Record<string, string>,
   changes: LedgerChange[],
+  multiColumnRoles: ReadonlySet<string> = LEDGER_MULTI_COLUMN_ROLES,
 ): {
   mapping: Record<string, string | string[]>;
   applied: LedgerPlannedChange[];
@@ -590,7 +599,7 @@ export function planLedgerChanges(
       continue;
     // 多列角色是“追加组成键”，不是“建议一次覆盖一次”。例如目标 JE 的
     // 「凭证字」「凭证号」都属于 id；LLM 分两条返回时两列必须同时保留。
-    next[change.role] = LEDGER_MULTI_COLUMN_ROLES.has(change.role)
+    next[change.role] = multiColumnRoles.has(change.role)
       ? appendMappingColumn(next[change.role], column)
       : column;
     applied.push(planned);
@@ -620,6 +629,8 @@ export type LedgerReviewTarget = {
   labels: Record<string, string>;
   tool?: string;
   pairLabel?: string;
+  /** 当前工具允许由多列共同组成的角色；TBJE 的日期可由月／日列组合。 */
+  multiColumnRoles?: ReadonlySet<string>;
 };
 /** 一键复核里单个文件的结果：应用后的映射、采纳的建议数与失败原因。 */
 export type LedgerReviewOutcome = {
@@ -676,6 +687,7 @@ export async function applyLedgerReviewsTogether(
             target.mapping,
             target.labels,
             kind === "tb" ? response.tbChanges ?? [] : response.jeChanges ?? [],
+            target.multiColumnRoles,
           );
           return [kind, {
             mapping: plan.mapping,
@@ -708,6 +720,7 @@ export async function applyLedgerReviewsTogether(
     const { mapping, applied, pending } = await applyLedgerReviewToDict(
       call, kind, target.headers, target.preview, target.mapping, target.labels,
       target.tool,
+      target.multiColumnRoles,
     );
     return { [kind]: {
       mapping,

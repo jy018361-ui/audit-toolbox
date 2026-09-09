@@ -202,7 +202,6 @@ export function loanEquation(
 const ANY_OF: Record<string, string[][]> = {
   tb: [
     ["accountCode", "accountName", "account"],
-    ["loanId"],
     [
       "openingFunctionalAmount",
       "openingFunctionalDebit",
@@ -219,7 +218,7 @@ const ANY_OF: Record<string, string[][]> = {
   je: [["date"], ["accountCode", "accountName", "account"]],
 };
 const ANY_OF_LABEL: Record<string, string[]> = {
-  tb: ["借款科目", "借款明细/辅助核算", "期初余额", "期末余额"],
+  tb: ["借款科目", "期初余额", "期末余额"],
   je: ["记账日期", "借款科目"],
 };
 /**
@@ -1300,10 +1299,9 @@ function Mapping({
           roleList,
           forms,
           source.mapping,
-          // TB＋JE 测算按「借款明细/辅助核算」逐笔还原本金，缺它整表算不了
-          // （引擎直接跳过无明细的行）。校验清单（ANY_OF）早已拦，这里把
-          // 下拉同步标成必填，两边口径一致，不再出现"选填却红框"的矛盾。
-          kind === "tb" ? ["loanId"] : [],
+          // 「借款明细/辅助核算」按业务口径是选填：走借款台账时根本用不到它；
+          // 走 TB＋JE 重建时缺了它，引擎在测算入口报「未从 TB 识别到借款明细」
+          // 明确提示，不靠映射阶段的必填标记拦人。
         )}
         requirementOf={
           hit ? (role) => loanRoleRequirement(hit, role) : undefined

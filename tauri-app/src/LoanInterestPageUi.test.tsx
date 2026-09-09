@@ -231,15 +231,21 @@ it("利率确认改为粘贴匹配，TB 缺借款明细时明说缺口并拦下�
   expect(
     screen.queryByRole("button", { name: "选择借款利率台账文件" }),
   ).not.toBeInTheDocument();
-  // TB 没映射借款明细：匹配按钮禁用并说明原因；下一步也明说缺什么。
+  // 利率匹配按借款明细逐笔对号：TB 没映射它时匹配按钮禁用并说明原因
+  //（功能自身的门槛，与映射必填清单无关）。
   expect(screen.getByRole("button", { name: "解析并匹配利率" })).toBeDisabled();
   expect(
     screen.getByText(/TB 尚未映射「借款明细\/辅助核算」/),
   ).toBeVisible();
+  // 借款明细/辅助核算已按业务口径转为选填：不再出现在映射缺口里；
+  // 缺口提示列的是仍然必填的期初/期末余额。
   expect(
     screen.getByRole("button", { name: "下一步：测算与底稿" }),
   ).toBeDisabled();
-  expect(screen.getByText(/TB：借款明细\/辅助核算/)).toBeVisible();
+  expect(screen.getByText(/TB：期初余额/)).toBeVisible();
+  expect(
+    screen.queryByText(/TB：借款明细\/辅助核算/),
+  ).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "返回补齐映射" })).toBeVisible();
 });
 

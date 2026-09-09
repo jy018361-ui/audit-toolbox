@@ -26,6 +26,7 @@ import {
   isMultiRole,
   isRedundantKanzhangReview,
   isSchemeLockedRole,
+  kanzhangReviewPayload,
   kanzhangReviewSummary,
   ledgerErrorText,
   mergeMappingChanges,
@@ -54,6 +55,7 @@ export {
   isRedundantKanzhangReview,
   isSameMappingValue,
   isSchemeLockedRole,
+  kanzhangReviewPayload,
   kanzhangReviewSummary,
   KZ_ROLE_LABELS,
   LEDGER_ROLES,
@@ -338,7 +340,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     const source=baseMapping??draft.mapping;
     const generation=++llmGeneration.current;
     setLlmBusy(true);setLlmFailed(false);setLlmStatus("");setError("");setChanges([]);setPending([]);
-    try{const value=await engineCall("kanzhang.llm_mapping",{mode:"mapping",payload:{headers:target.headers,samples:target.preview.slice(0,8),currentMapping:source}}) as LedgerReviewResponse;
+    try{const value=await engineCall("kanzhang.llm_mapping",{mode:"mapping",payload:kanzhangReviewPayload(target.headers,target.preview,source)}) as LedgerReviewResponse;
       if(generation!==llmGeneration.current)return;
       const {mapping,changes:merged,pending:rest}=applyLedgerReviews(source,value);
       patch({mapping});setChanges(merged);setPending(rest);setLlmStatus(kanzhangReviewSummary(merged.length,rest.length));}

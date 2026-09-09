@@ -6723,7 +6723,6 @@ mod tests {
             "inputPath": path.to_string_lossy(),
             "headerRow": 0,
         }))
-
         .unwrap();
         assert_eq!(value["headerRow"], json!(3), "应自动探测到第 3 行表头");
         let headers = value["headers"].as_array().unwrap();
@@ -6800,7 +6799,10 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap_or_default().to_owned())
             .collect::<Vec<_>>();
-        assert!(headers.contains(&"凭证信息-凭证号".to_owned()), "{headers:?}");
+        assert!(
+            headers.contains(&"凭证信息-凭证号".to_owned()),
+            "{headers:?}"
+        );
         assert!(headers.contains(&"凭证信息-摘要".to_owned()), "{headers:?}");
         assert!(headers.contains(&"金额-借方".to_owned()), "{headers:?}");
         let preview = value["preview"].as_array().unwrap();
@@ -7119,12 +7121,11 @@ mod tests {
             ],
             &[],
         );
-        assert_eq!(m.account_code.as_deref(), Some("会计科目"));
+        assert_eq!(m.account_code, None, "歧义标题留给 LLM 或人工判断");
         assert_eq!(m.account_name, vec!["科目文本"]);
         // 预算科目是冲突词挡下的，绝不能拼进科目键。
         assert!(!m.account_name.iter().any(|v| v.contains("预算")));
-        // 科目键的顺序固定：编码在前、名称在后。
-        assert_eq!(m.account_columns(), vec!["会计科目", "科目文本"]);
+        assert_eq!(m.account_columns(), vec!["科目文本"]);
     }
 
     #[test]

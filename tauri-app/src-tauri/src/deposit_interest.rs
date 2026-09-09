@@ -727,28 +727,16 @@ fn roles(kind: &str) -> Vec<(&'static str, Vec<&'static str>, Vec<&'static str>)
             .filter(|role| !role.name.contains("Foreign") && role.name != "currencyText")
             .map(|role| (role.name, role.aliases.to_vec(), role.conflicts.to_vec()))
             .collect();
-    // 辅助核算是存款利息的关键字段：靠它认存款档次（活期／定期／通知），
-    // 再把序时账每一笔落到具体银行账户上。不进标准表，只在本工具启用。
-    out.push((
-        "auxiliary",
-        vec![
-            "辅助核算",
-            "银行账号",
-            "银行帐号",
-            "账户",
-            "明细项",
-            "往来单位",
-            "文本",
-            "科目文本",
-            "账户文本",
-            "assignment",
-            "profit center",
-            "profitcenter",
-            "成本中心",
-            "财务项目",
-        ],
-        vec!["科目编码", "科目代码", "科目名称"],
-    ));
+    // 辅助核算已是公共角色；存款只追加银行业务特有写法。JE 的泛化「文本」
+    // 必须留给摘要，科目文本必须留给科目名称，否则 SAP 行项目文本会与
+    // 成本中心一起被错误挂成辅助核算多列。TB 没有摘要角色，且部分银行余额表
+    // 的「文本」确实承载账户维度，因此只在 TB 侧保留这一兜底。
+    if let Some((_, aliases, _)) = out.iter_mut().find(|(role, _, _)| *role == "auxiliary") {
+        aliases.extend(["账户", "财务项目"]);
+        if kind == "tb" {
+            aliases.extend(["文本", "科目文本", "账户文本"]);
+        }
+    }
     if kind == "je" {
         // 数量列用于识别计息天数之类的辅助信息，同样是本工具专属。
         out.push((
@@ -1164,6 +1152,25 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     // 合并科目列的兜底与汇兑损益共用同一份（判定在公共引擎、套用在 fx 侧），
     // 存款利息不再自持一份近似实现。
     crate::fx::fill_combined_account_column(kind, &table, &mut mapping);
+    let identity =
+        ledger_mapping::account_identity_columns_by_data(kind, &table.headers, &table.rows);
+    let code_invalid = mapping
+        .get("accountCode")
+        .and_then(Value::as_str)
+        .and_then(|column| table.headers.iter().position(|header| header == column))
+        .is_some_and(|index| {
+            ledger_mapping::account_column_shape(
+                table.rows.iter().filter_map(|row| row.get(index)).cloned(),
+            ) == ledger_mapping::AccountColumnShape::Name
+        });
+    if (mapping.get("accountCode").is_none() || code_invalid)
+        && let Some(column) = identity.code
+    {
+        mapping.insert("accountCode".into(), json!(column));
+    }
+    if !mapping.contains_key("accountName") && !identity.names.is_empty() {
+        mapping.insert("accountName".into(), json!(identity.names));
+    }
     if kind == "tb" {
         crate::fx::promote_period_movement(&table, &mut mapping);
     }
@@ -1544,6 +1551,18 @@ fn calculate(
             None,
         ));
     }
+    // JE 没有币种字段时，同一科目在 TB 按多个币种拆行，JE 发生额只能得到
+    // 科目合计，无法可靠分配到每一个币种。按用户要求保留当前计算，只披露
+    // 输入资料局限，不把它冒充成分币种勾稽证据。
+    let je_currency_ambiguous_keys = je_currency_ambiguous_keys(params, &accounts);
+    let je_currency_allocation_warning = if je_currency_ambiguous_keys.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "JE 未提供或未映射币种字段，但 TB 中有 {} 个账户按多个币种列示。JE 发生额只能按账户合计，无法准确分配到各币种；分币种的“年末余额（JE推导）”及勾稽差异仅供参考，请补充 JE 币种字段或按账户合并口径复核。",
+            je_currency_ambiguous_keys.len()
+        )
+    };
     checkpoint(cancel, pause)?;
 
     // 只测算期间覆盖到的月份。SAP 的 TB 常常只出到某个期间（例如 10 月），
@@ -1677,6 +1696,12 @@ fn calculate(
         if !account.rate_warning.is_empty() {
             notes.push(account.rate_warning.clone());
         }
+        if je_currency_ambiguous_keys.contains(&account.key) {
+            notes.push(
+                "JE 未提供或未映射币种字段，而该账户在 TB 中按多个币种列示；JE 发生额无法按币种拆分，本行的 JE 推导余额及勾稽差异仅供参考。"
+                    .into(),
+            );
+        }
         if !has_je {
             notes.push("未提供序时账，月末余额按年初到年末直线推算，月均余额仅供参考。".into());
         } else if account.reconciliation_diff.abs() >= 0.01 {
@@ -1762,6 +1787,8 @@ fn calculate(
             "listedRateDate": LISTED_REFERENCE_DATE,
             "ratesStale": rates_stale,
             "rateAgeMonths": stale_months,
+            "jeCurrencyAllocationWarningCount": je_currency_ambiguous_keys.len(),
+            "jeCurrencyAllocationWarning": je_currency_allocation_warning,
             "staleMessage": if rates_stale {
                 format!(
                     "内置挂牌利率最后更新于 {LISTED_REFERENCE_DATE}，距今约 {stale_months} 个月，\
@@ -2360,6 +2387,44 @@ fn account_key(entity: &str, account: &str, auxiliary: &str) -> String {
         .map(|part| part.trim())
         .collect::<Vec<_>>()
         .join(" | ")
+}
+
+/// JE 未提供币种维度时，找出 TB 中“同一账户、多币种”的账户键。
+/// 这里只提示输入资料局限，不改变既有计算、状态或匹配结果。
+fn je_currency_ambiguous_keys(params: &Value, accounts: &[AccountRow]) -> BTreeSet<String> {
+    if params.get("jeSource").is_none_or(Value::is_null) {
+        return BTreeSet::new();
+    }
+    let currency_mapped = params
+        .get("jeMapping")
+        .and_then(Value::as_object)
+        .and_then(|mapping| mapping.get("currency"))
+        .is_some_and(|value| match value {
+            Value::String(column) => !column.trim().is_empty(),
+            Value::Array(columns) => columns
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|column| !column.trim().is_empty()),
+            _ => false,
+        });
+    if currency_mapped {
+        return BTreeSet::new();
+    }
+
+    let mut currencies: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for account in accounts {
+        let currency = account.currency.trim().to_uppercase();
+        if !currency.is_empty() {
+            currencies
+                .entry(account.key.clone())
+                .or_default()
+                .insert(currency);
+        }
+    }
+    currencies
+        .into_iter()
+        .filter_map(|(key, values)| (values.len() > 1).then_some(key))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -3734,6 +3799,10 @@ mod tests {
             "不能错选凭证货币或集团货币"
         );
         assert_eq!(je_map["direction"], json!("借贷"));
+        let mut je_map = je_map.clone();
+        // 该 SAP 导出的编码列叫「会计科目」；这是跨 ERP 歧义标题，
+        // Coding 故意留空，此处模拟 LLM／用户确认后再进入业务测算。
+        je_map["accountCode"] = json!("会计科目");
 
         let params = json!({
             "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
@@ -4050,6 +4119,42 @@ mod tests {
         // 认不出的档位键也回落活期，不再冒出"自定义"。
         assert_eq!(RATE_TIERS[0].key, "demand", "第一档必须是活期，兜底靠它");
         assert_eq!(tier_label("不存在的档位"), "活期存款");
+    }
+
+    #[test]
+    fn warns_only_when_je_lacks_currency_and_tb_splits_one_account_by_currency() {
+        let mut usd = blank_row();
+        usd.key = account_key("3110", "1002013636 银行存款", "");
+        usd.currency = "USD".into();
+        let mut cny = usd.clone();
+        cny.currency = "CNY".into();
+        let accounts = vec![usd.clone(), cny];
+
+        assert!(je_currency_ambiguous_keys(&json!({}), &accounts).is_empty());
+        assert_eq!(
+            je_currency_ambiguous_keys(
+                &json!({"jeSource": {"inputPath": "je.xlsx"}, "jeMapping": {}}),
+                &accounts
+            ),
+            BTreeSet::from([usd.key.clone()])
+        );
+        assert!(
+            je_currency_ambiguous_keys(
+                &json!({"jeSource": {"inputPath": "je.xlsx"}, "jeMapping": {}}),
+                &[usd.clone()]
+            )
+            .is_empty()
+        );
+        assert!(
+            je_currency_ambiguous_keys(
+                &json!({
+                    "jeSource": {"inputPath": "je.xlsx"},
+                    "jeMapping": {"currency": "币种"}
+                }),
+                &accounts
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -4839,6 +4944,96 @@ mod tests {
         assert_eq!(mapping["accountName"], json!(["科目"]));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 存款inspect保留歧义科目给llm并自动识别摘要() {
+        let dir = std::env::temp_dir().join(format!("deposit-sap-je-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("je.xlsx");
+        write_fixture(
+            &path,
+            &[
+                vec![
+                    "凭证编号",
+                    "凭证日期",
+                    "文本",
+                    "成本中心",
+                    "本币金额",
+                    "会计科目",
+                    "总账科目",
+                ],
+                vec![
+                    "1",
+                    "2025-01-01",
+                    "发放工资",
+                    "CC01",
+                    "100",
+                    "库存现金-人民币",
+                    "1001010000",
+                ],
+                vec![
+                    "2",
+                    "2025-01-02",
+                    "支付货款",
+                    "CC02",
+                    "200",
+                    "银行存款-人民币",
+                    "1002101001",
+                ],
+                vec![
+                    "3",
+                    "2025-01-03",
+                    "计提利息",
+                    "CC03",
+                    "300",
+                    "财务费用-利息支出",
+                    "6603010000",
+                ],
+                vec![
+                    "4",
+                    "2025-01-04",
+                    "收到回款",
+                    "CC04",
+                    "400",
+                    "应收账款-客户",
+                    "1122010000",
+                ],
+            ],
+        );
+        let inspected = inspect(
+            &json!({"source": {"inputPath": path.to_string_lossy()}}),
+            "je",
+        )
+        .unwrap();
+        let mapping = &inspected["suggestedMapping"];
+        assert!(mapping.get("accountCode").is_none(), "{mapping:#?}");
+        assert!(mapping.get("accountName").is_none(), "{mapping:#?}");
+        assert_eq!(mapping["summary"], json!("文本"));
+        assert_eq!(mapping["auxiliary"], json!(["成本中心"]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "依赖本机样例目录，用 LEDGER_SAMPLES=<TBJEPBC路径> 显式运行"]
+    fn 存款inspect真实03序时账映射() {
+        let root = std::env::var_os("LEDGER_SAMPLES")
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir())
+            .expect("请设置 LEDGER_SAMPLES");
+        let inspected = inspect(
+            &json!({"source": {
+                "inputPath": root.join("03序时账 (2).xlsx"),
+                "sheet": "", "headerRow": 0, "headerDepth": 0
+            }}),
+            "je",
+        )
+        .unwrap();
+        let mapping = &inspected["suggestedMapping"];
+        assert!(mapping.get("accountCode").is_none(), "{mapping:#?}");
+        assert!(mapping.get("accountName").is_none(), "{mapping:#?}");
+        assert_eq!(mapping["summary"], json!("文本"));
+        assert_eq!(mapping["auxiliary"], json!(["成本中心"]));
     }
 
     /// inspect 下发的 `roles` 角色标签表与引擎 Role 表逐条同源：全量、

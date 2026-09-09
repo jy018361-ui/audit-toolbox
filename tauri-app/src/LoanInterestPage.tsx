@@ -280,9 +280,15 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const [rows, setRows] = useState<LoanRow[]>([]);
   // 利率确认（TB 模式）：用户从 Excel 复制粘贴的利率区域原文，与匹配出的逐笔利率。
   // 粘贴原文保留（方便换映射后一键重匹配），匹配结果随 TB 来源/映射变化作废。
-  const [rateText, setRateText] = useState("");
-  const [pasteRates, setPasteRates] = useState<PasteRateRow[]>([]);
-  const [rateNote, setRateNote] = useState("");
+  /** 「确认科目与利率」步骤：TB 末级科目清单（loan.tb_accounts 下发）。 */
+  const [tbAccounts, setTbAccounts] = useState<
+    { key: string; code: string; name: string; account: string; opening: number; closing: number }[]
+  >([]);
+  const [accountsBusy, setAccountsBusy] = useState(false);
+  /** 科目角色确认：行键 → 借款科目/排除；预选规则为名称含「借款/贷款」。 */
+  const [loanAccountRoles, setLoanAccountRoles] = useState<Record<string, "loan" | "skip">>({});
+  /** 利率手填：行标识 → 利率口径（叠加在 preview 借款行之上）。 */
+  const [tbRateEdits, setTbRateEdits] = useState<Record<string, PasteRateRow>>({});
   const [result, setResult] = useState<Record<string, unknown>>();
   const [error, setError] = useState("");
   const [pairStatus, setPairStatus] = useState("");
@@ -341,9 +347,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const setSource = (kind: Kind, next: Partial<Source>) => {
     invalidateResults();
     if (kind === "ledger") setRateEdits({});
-    // TB 的文件/Sheet/映射一变，逐笔借款清单就可能变，粘贴匹配结果作废；
-    // 粘贴原文保留，改完映射回来一键重匹配即可。
-    if (kind === "tb") setPasteRates([]);
+    // TB 的文件/Sheet/映射一变，借款行清单就可能变：科目确认与手填利率作废，
+    // 回到第二步重新确认。
+    if (kind === "tb") {
+      setTbAccounts([]);
+      setLoanAccountRoles({});
+      setTbRateEdits({});
+    }
     setSources((v) => ({ ...v, [kind]: { ...v[kind], ...next } }));
   };
   const activeKinds: Kind[] = mode === "ledger" ? ["ledger"] : ["tb", "je"];
@@ -389,30 +399,98 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       sources[kind].inspection?.forms,
     ).map((item) => `${kind.toUpperCase()}：${item}`),
   );
-  /** 利率确认（TB 模式）：粘贴文本交引擎解析列，并按借款明细模糊匹配利率。 */
-  async function matchRates() {
+  /** 进入「确认科目与利率」步骤时拉取 TB 末级科目清单并按名称预选。 */
+  async function loadTbAccounts() {
+    if (!sources.tb.inspection || accountsBusy) return;
+    setAccountsBusy(true);
+    setError("");
+    try {
+      const res = (await engineCall("loan.tb_accounts", {
+        tbSource: source("tb"),
+      })) as {
+        accounts: { key: string; code: string; name: string; account: string; opening: number; closing: number }[];
+      };
+      setTbAccounts(res.accounts ?? []);
+      setLoanAccountRoles(
+        Object.fromEntries(
+          (res.accounts ?? []).map((a) => [
+            a.key,
+            /借款|贷款/.test(a.name || a.account) ? "loan" : "skip",
+          ]),
+        ),
+      );
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setAccountsBusy(false);
+    }
+  }
+  useEffect(() => {
+    if (step === 1 && mode === "tb" && sources.tb.inspection && !tbAccounts.length) {
+      void loadTbAccounts();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, mode, sources.tb.inspection]);
+  const selectedLoanAccounts = () =>
+    tbAccounts
+      .filter((a) => loanAccountRoles[a.key] === "loan")
+      .map((a) => a.key);
+  /** 导出利率确认表模板（带入已填值），用户在 Excel 补填后经 importRates 回读。 */
+  async function exportRateTemplate() {
+    const target = await pickPath("save", "保存利率确认表", ["xlsx"], "借款利率确认表.xlsx");
+    if (typeof target !== "string") return;
     setBusy(true);
     setError("");
     try {
-      const res = (await engineCall("loan.match_rates", {
+      await engineCall("loan.rate_template", {
         tbSource: source("tb"),
-        rateText,
-      })) as { rows: PasteRateRow[]; note: string };
-      invalidateResults();
-      setPasteRates(res.rows ?? []);
-      setRateNote(res.note ?? "");
+        jeSource: source("je"),
+        loanAccounts: selectedLoanAccounts(),
+        rateRows: Object.entries(tbRateEdits).map(([id, r]) => ({ ...r, loanId: id })),
+        outputPath: target,
+      });
+      setRateNoteText(`利率确认表已导出：${target}`);
     } catch (e) {
       setError(errorText(e));
     } finally {
       setBusy(false);
     }
   }
-  const editPasteRate = (index: number, patch: Partial<PasteRateRow>) => {
-    invalidateResults();
-    setPasteRates((v) =>
-      v.map((row, i) => (i === index ? { ...row, ...patch } : row)),
-    );
+  async function importRates() {
+    const picked = await pickPath("file", "选择已填写的利率确认表", ["xlsx"]);
+    if (typeof picked !== "string") return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = (await engineCall("loan.import_rates", {
+        inputPath: picked,
+      })) as { rateRows: PasteRateRow[] };
+      const incoming = res.rateRows ?? [];
+      setTbRateEdits((current) => {
+        const next = { ...current };
+        for (const row of incoming) {
+          const hit = Object.keys(next).find(
+            (k) => k.trim() === row.loanId.trim(),
+          );
+          next[hit ?? row.loanId] = row;
+        }
+        return next;
+      });
+      setRateNoteText(`已回读 ${incoming.length} 行利率。`);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  const editTbRate = (loanId: string, patch: Partial<PasteRateRow>) => {
+    setTbRateEdits((v) => {
+      const prev = v[loanId] ?? { rateType: "fixed" as const };
+      const base: PasteRateRow = { ...prev, ...patch };
+      return { ...v, [loanId]: { ...base, loanId } };
+    });
   };
+  const [rateNoteText, setRateNoteText] = useState("");
   async function browse(kind: Kind) {
     const picked = await pickPath("file", "选择表格文件", [
       "xlsx",
@@ -610,11 +688,12 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       ledgerSource: source("ledger"),
       tbSource: source("tb"),
       jeSource: source("je"),
-      // TB 模式的利率来自「利率确认」的粘贴匹配结果（用户已逐笔确认/补填）；
-      // 引擎按借款明细归一化对应，优先于利率台账文件（后者仅历史任务恢复用）。
+      // TB 模式：确认的借款科目清单 + 「确认科目与利率」步骤手填/回读的利率。
+      // 引擎按借款行标识归一化对应，优先于利率台账文件（后者仅历史任务恢复用）。
+      loanAccounts: mode === "tb" ? selectedLoanAccounts() : undefined,
       rateRows:
-        mode === "tb" && pasteRates.length
-          ? pasteRates.map((r) => ({
+        mode === "tb" && Object.keys(tbRateEdits).length
+          ? Object.values(tbRateEdits).map((r) => ({
               loanId: r.loanId,
               rateType: r.rateType,
               fixedRate: r.fixedRate,
@@ -654,6 +733,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       jeSource?: LoanSourceParams;
       rateLedgerSource?: LoanSourceParams;
       rateRows?: PasteRateRow[];
+      loanAccounts?: string[];
       outputPath?: string;
     };
     const paramsKey: Record<Kind, keyof typeof p> = {
@@ -698,9 +778,19 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     invalidateResults();
     setSources(next);
     setRateEdits({});
-    // 粘贴匹配确认过的逐笔利率一并回填（粘贴原文不可恢复，需要时可重新粘贴）。
-    if (Array.isArray(p.rateRows) && p.rateRows.length)
-      setPasteRates(p.rateRows);
+    // 「确认科目与利率」的选择一并回填：确认清单按行键恢复，利率按行标识恢复。
+    if (Array.isArray(p.loanAccounts))
+      setLoanAccountRoles(
+        Object.fromEntries(
+          (p.loanAccounts as string[]).map((key) => [key, "loan" as const]),
+        ),
+      );
+    if (Array.isArray(p.rateRows))
+      setTbRateEdits(
+        Object.fromEntries(
+          (p.rateRows as PasteRateRow[]).map((r) => [String(r.loanId), r]),
+        ),
+      );
     if (p.mode === "ledger" || p.mode === "tb") setMode(p.mode);
     if (typeof p.reportEnd === "string" && p.reportEnd)
       setReportEnd(p.reportEnd);
@@ -747,7 +837,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       <StepIndicator
         steps={[
           { key: "source", label: "上传与识别" },
-          { key: "rates", label: "利率确认", disabled: !sourcesReady },
+          { key: "rates", label: mode === "tb" ? "确认科目与利率" : "利率确认", disabled: !sourcesReady },
           { key: "run", label: "测算与底稿", disabled: !mappingsReady },
         ]}
         current={step}
@@ -925,7 +1015,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           )}
           <div className="fx-step-actions">
             <Button disabled={!sourcesReady} onClick={() => setStep(1)}>
-              下一步：利率确认
+              {mode === "tb" ? "下一步：确认科目与利率" : "下一步：利率确认"}
             </Button>
           </div>
         </>
@@ -944,53 +1034,117 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           ) : (
             <Card>
               <CardHeader>
-                <CardTitle>补充借款利率（可选）</CardTitle>
+                <CardTitle>确认借款科目</CardTitle>
               </CardHeader>
               <CardContent>
                 <p className="fx-hint">
-                  在 Excel 中框选利率台账区域（建议连同表头行）复制后粘贴到下面；工具按借款明细模糊匹配利率，未匹配的可逐笔补填。
+                  名称含「借款/贷款」的科目已预选为借款科目，请逐行确认；确认后点下方按钮生成借款利率表。
+                  借款明细/辅助核算不是必选项——映射了仅用于同科目多笔时区分到笔。
                 </p>
-                <textarea
-                  className="loan-rate-paste"
-                  rows={5}
-                  spellCheck={false}
-                  aria-label="粘贴借款利率区域"
-                  placeholder={
-                    "从 Excel 复制后粘贴到这里，例如：\n合同名称\t执行利率\t加点BP\n工行短期流动借款\t3.85%\t90"
-                  }
-                  value={rateText}
-                  onChange={(e) => setRateText(e.target.value)}
-                />
+                {accountsBusy ? (
+                  <p className="fx-hint">正在读取科目清单…</p>
+                ) : (
+                  <div className="loan-account-confirm">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>科目编码</th>
+                          <th>科目名称</th>
+                          <th>期初余额</th>
+                          <th>期末余额</th>
+                          <th>科目类型</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {tbAccounts.map((a) => (
+                          <tr key={a.key}>
+                            <td>{a.code}</td>
+                            <td title={a.account}>{a.name || a.account}</td>
+                            <td className="loan-num">{a.opening.toLocaleString()}</td>
+                            <td className="loan-num">{a.closing.toLocaleString()}</td>
+                            <td>
+                              <select
+                                aria-label={`${a.account}的科目类型`}
+                                value={loanAccountRoles[a.key] ?? "skip"}
+                                onChange={(e) =>
+                                  setLoanAccountRoles((v) => ({
+                                    ...v,
+                                    [a.key]: e.target.value as "loan" | "skip",
+                                  }))
+                                }
+                              >
+                                <option value="loan">借款科目</option>
+                                <option value="skip">排除</option>
+                              </select>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                <div className="loan-run-grid">
+                  <label>
+                    资产负债表日
+                    <Input
+                      type="date"
+                      value={reportEnd}
+                      onChange={(e) => setReportEnd(e.target.value)}
+                    />
+                  </label>
+                </div>
                 <div className="loan-paste-actions">
                   <Button
                     variant="secondary"
-                    disabled={
-                      busy ||
-                      !rateText.trim() ||
-                      !sources.tb.inspection ||
-                      !sources.tb.mapping.loanId?.trim()
-                    }
-                    onClick={() => void matchRates()}
+                    disabled={accountsBusy || !selectedLoanAccounts().length}
+                    onClick={() => {
+                      setLoanAccountRoles((v) =>
+                        Object.fromEntries(
+                          tbAccounts.map((a) => [
+                            a.key,
+                            /借款|贷款/.test(a.name || a.account) ? "loan" : "skip",
+                          ]),
+                        ),
+                      );
+                      void loadTbAccounts();
+                    }}
                   >
-                    解析并匹配利率
+                    按名称建议重选
                   </Button>
-                  {rateNote && (
-                    <span className="loan-paste-note" title={rateNote}>
-                      {rateNote}
-                    </span>
+                  <Button
+                    variant="default"
+                    disabled={
+                      busy || accountsBusy || !selectedLoanAccounts().length || !mappingsReady
+                    }
+                    onClick={() => void run("loan.preview")}
+                    title={mappingsReady ? undefined : "请先补齐字段映射"}
+                  >
+                    生成借款利率表
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    disabled={busy || !selectedLoanAccounts().length}
+                    onClick={() => void exportRateTemplate()}
+                  >
+                    导出利率确认表
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    disabled={busy || !rows.length}
+                    onClick={() => void importRates()}
+                    title={rows.length ? undefined : "先生成借款利率表再回读"}
+                  >
+                    回读已填利率表
+                  </Button>
+                  {rateNoteText && (
+                    <span className="loan-paste-note">{rateNoteText}</span>
                   )}
                 </div>
-                {sources.tb.inspection &&
-                  !sources.tb.mapping.loanId?.trim() && (
-                    <p className="fx-hint">
-                      TB 尚未映射「借款明细/辅助核算」，请先回到「上传与识别」完成映射，再匹配利率。
-                    </p>
-                  )}
               </CardContent>
             </Card>
           )}
-          {mode === "tb" && pasteRates.length > 0 && (
-            <PasteRateTable rows={pasteRates} onEdit={editPasteRate} />
+          {mode === "tb" && rows.length > 0 && (
+            <TbRateTable rows={rows} edits={tbRateEdits} onEdit={editTbRate} />
           )}
           <div className="fx-step-actions">
             <Button variant="secondary" onClick={() => setStep(0)}>
@@ -1371,35 +1525,42 @@ function Mapping({
 }
 
 /** TB 模式「利率确认」：粘贴匹配出的逐笔利率，可改类型/利率/加点，未匹配的可补填。 */
-function PasteRateTable({
+function TbRateTable({
   rows,
+  edits,
   onEdit,
 }: {
-  rows: PasteRateRow[];
-  onEdit: (index: number, patch: Partial<PasteRateRow>) => void;
+  rows: LoanRow[];
+  edits: Record<string, PasteRateRow>;
+  onEdit: (loanId: string, patch: Partial<PasteRateRow>) => void;
 }) {
-  const exact = rows.filter((r) => r.matchStatus === "精确匹配").length;
-  const fuzzy = rows.filter((r) => r.matchStatus === "模糊匹配").length;
-  const rest = rows.length - exact - fuzzy;
+  const filled = rows.filter((r) => {
+    const e = edits[r.loanId];
+    return e && (e.fixedRate != null || e.benchmarkRate != null);
+  }).length;
   return (
     <Card>
       <CardHeader>
-        <CardTitle>借款利率匹配结果</CardTitle>
+        <CardTitle>借款利率确认表</CardTitle>
       </CardHeader>
       <CardContent>
         <p className="fx-hint">
-          共 {rows.length} 笔借款：精确匹配 {exact} 笔、模糊匹配 {fuzzy} 笔
-          {rest > 0 ? `、待核对或补填 ${rest} 笔` : ""}。
-          模糊匹配与补填的利率请核对后使用；留空的按无利率进入测算，可在结果表逐笔补。
+          共 {rows.length} 笔借款，已填利率 {filled} 笔。可直接在下表逐笔填写；
+          也可「导出利率确认表」在 Excel 里补填后「回读已填利率表」。
+          留空的按无利率进入测算（状态列会提示补利率），不影响其他笔。
         </p>
         <div className="loan-rate-confirmation loan-rate-match">
           <table>
             <thead>
               <tr>
-                <th>借款明细</th>
-                <th>匹配依据</th>
+                <th>借款行</th>
+                <th>期初余额</th>
+                <th>期末余额</th>
                 <th>利率类型</th>
-                <th>固定/基准利率</th>
+                <th>执行利率（固定）</th>
+                <th>
+                  基准利率（浮动）
+                </th>
                 <th>
                   加减点（BP）
                   <JargonTip
@@ -1407,92 +1568,85 @@ function PasteRateTable({
                     text="BP＝万分之一。浮动利率＝基准利率＋加减点BP÷10000。"
                   />
                 </th>
-                <th>状态</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((row, index) => (
-                <tr key={`${row.loanId}-${index}`}>
-                  <td title={row.loanId}>{row.loanId}</td>
-                  <td
-                    className="loan-match-basis"
-                    title={row.matchBasis ?? row.loanId}
-                  >
-                    {row.matchBasis ?? "手工补填"}
-                  </td>
-                  <td>
-                    <select
-                      className="loan-rate-pick"
-                      value={row.rateType}
-                      onChange={(e) => {
-                        const rateType = e.target
-                          .value as PasteRateRow["rateType"];
-                        onEdit(
-                          index,
-                          rateType === "floating"
-                            ? { rateType, fixedRate: undefined }
-                            : {
-                                rateType,
-                                benchmarkRate: undefined,
-                                spreadBps: undefined,
-                              },
-                        );
-                      }}
-                    >
-                      <option value="fixed">固定</option>
-                      <option value="floating">浮动</option>
-                    </select>
-                  </td>
-                  <td>
-                    <NumberInput
-                      label={`${row.loanId}的${
-                        row.rateType === "fixed" ? "固定利率" : "基准利率"
-                      }`}
-                      step=".0001"
-                      value={
-                        row.rateType === "fixed"
-                          ? (row.fixedRate ?? "")
-                          : (row.benchmarkRate ?? "")
-                      }
-                      onCommit={(text) =>
-                        onEdit(
-                          index,
-                          row.rateType === "fixed"
-                            ? { fixedRate: loanRateValue(text) }
-                            : { benchmarkRate: loanRateValue(text) },
-                        )
-                      }
-                    />
-                  </td>
-                  <td>
-                    <NumberInput
-                      label={`${row.loanId}的加点 BP`}
-                      step="1"
-                      disabled={row.rateType !== "floating"}
-                      value={row.spreadBps ?? 0}
-                      onCommit={(text) =>
-                        onEdit(index, { spreadBps: loanBps(text) })
-                      }
-                    />
-                  </td>
-                  <td>
-                    <Badge
-                      variant="outline"
-                      className={
-                        row.matchStatus === "精确匹配"
-                          ? "badge-ready"
-                          : "badge-warning"
-                      }
-                      title={row.matchBasis}
-                    >
-                      {row.matchStatus ?? "待补填"}
-                    </Badge>
-                  </td>
-                </tr>
-              ))}
+              {rows.map((row) => {
+                const e = edits[row.loanId] ?? { rateType: "fixed" as const };
+                const rateType = e.rateType ?? "fixed";
+                return (
+                  <tr key={row.loanId}>
+                    <td title={row.loanId}>{row.loanId}</td>
+                    <td className="loan-num">{row.openingPrincipal.toLocaleString()}</td>
+                    <td className="loan-num">{row.closingPrincipal.toLocaleString()}</td>
+                    <td>
+                      <select
+                        aria-label={`${row.loanId}的利率类型`}
+                        value={rateType}
+                        onChange={(ev) =>
+                          onEdit(row.loanId, {
+                            rateType: ev.target.value as "fixed" | "floating",
+                          })
+                        }
+                      >
+                        <option value="fixed">固定</option>
+                        <option value="floating">浮动</option>
+                      </select>
+                    </td>
+                    <td>
+                      <input
+                        aria-label={`${row.loanId}的执行利率`}
+                        type="number"
+                        step="0.0001"
+                        placeholder="如 3.85"
+                        value={e.fixedRate ?? ""}
+                        disabled={rateType === "floating"}
+                        onChange={(ev) =>
+                          onEdit(row.loanId, {
+                            fixedRate: ev.target.value === "" ? undefined : Number(ev.target.value) / 100,
+                          })
+                        }
+                      />
+                    </td>
+                    <td>
+                      <input
+                        aria-label={`${row.loanId}的基准利率`}
+                        type="number"
+                        step="0.0001"
+                        placeholder="如 3.1"
+                        value={e.benchmarkRate ?? ""}
+                        disabled={rateType === "fixed"}
+                        onChange={(ev) =>
+                          onEdit(row.loanId, {
+                            benchmarkRate: ev.target.value === "" ? undefined : Number(ev.target.value) / 100,
+                          })
+                        }
+                      />
+                    </td>
+                    <td>
+                      <input
+                        aria-label={`${row.loanId}的加减点`}
+                        type="number"
+                        step="1"
+                        placeholder="如 90"
+                        value={e.spreadBps ?? ""}
+                        disabled={rateType === "fixed"}
+                        onChange={(ev) =>
+                          onEdit(row.loanId, {
+                            spreadBps: ev.target.value === "" ? undefined : Number(ev.target.value),
+                          })
+                        }
+                      />
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
+        <p className="fx-rate-note">
+          利率填百分比数值（3.85 即 3.85%）；浮动利率按“基准利率＋加减点（BP÷10,000）”换算有效年利率。
+        </p>
       </CardContent>
     </Card>
   );

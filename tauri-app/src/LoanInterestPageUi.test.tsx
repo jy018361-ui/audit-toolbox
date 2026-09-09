@@ -8,12 +8,17 @@ import type { ToolManifest } from "./types";
 const mock = vi.hoisted(() => ({
   engineCall: vi.fn(),
   pickPath: vi.fn(),
+  jobStart: vi.fn(),
+  jobEvents: { callback: undefined as undefined | ((event: unknown) => void) },
 }));
 vi.mock("./api", () => ({
   engineCall: mock.engineCall,
   jobCancel: vi.fn(),
-  jobStart: vi.fn(),
-  listenJobEvents: vi.fn(async () => () => undefined),
+  jobStart: mock.jobStart,
+  listenJobEvents: vi.fn(async (callback: unknown) => {
+    mock.jobEvents.callback = callback as (event: unknown) => void;
+    return () => undefined;
+  }),
   listenPositionedFileDrops: vi.fn(async () => () => undefined),
   openOutput: vi.fn(),
   pickPath: mock.pickPath,
@@ -62,8 +67,9 @@ it("按资料模式显示空态和可访问的选中状态", () => {
   expect(
     screen.queryByRole("button", { name: "一次选择 TB 与 JE（自动识别 Sheet）" }),
   ).not.toBeInTheDocument();
+  // TB＋JE 模式下第二步更名为「确认科目与利率」。
   expect(
-    screen.getByRole("button", { name: "下一步：利率确认" }),
+    screen.getByRole("button", { name: "下一步：确认科目与利率" }),
   ).toBeDisabled();
 });
 
@@ -165,8 +171,8 @@ it("统一上传自动分类出 TB 与 JE 来源卡，并可一键更正类型",
   ).toBeVisible();
 });
 
-/** TB＋JE 的利率确认：文件上传已改为粘贴匹配；映射没补齐时明说卡在哪。 */
-it("利率确认改为粘贴匹配，TB 缺借款明细时明说缺口并拦下一步", async () => {
+/** TB＋JE 第二步为「确认科目与利率」：科目清单预选借款科目；借款明细不再拦路。 */
+it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不提借款明细", async () => {
   const tbHeaders = ["科目编码", "科目名称", "借款明细", "期初余额", "期末余额"];
   const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "贷方金额"];
   const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
@@ -186,7 +192,7 @@ it("利率确认改为粘贴匹配，TB 缺借款明细时明说缺口并拦下�
     sheets: [sheet],
     headerRow: 1,
     headerDepth: 1,
-    // TB 故意只建议科目两列：借款明细与金额都缺，用来验证提示与拦门。
+    // TB 故意只建议科目两列：金额缺，用来验证提示与拦门。
     suggestedMapping:
       kind === "tb"
         ? { accountCode: "科目编码", accountName: "科目名称" }
@@ -212,6 +218,14 @@ it("利率确认改为粘贴匹配，TB 缺借款明细时明说缺口并拦下�
         ? inspect("je", "序时账", jeHeaders)
         : inspect("tb", "余额表", tbHeaders);
     }
+    if (method === "loan.tb_accounts") {
+      return {
+        accounts: [
+          { key: "2001", code: "2001", name: "短期借款", account: "2001 短期借款", opening: 1000, closing: 900 },
+          { key: "1122", code: "1122", name: "应收账款", account: "1122 应收账款", opening: 5, closing: 6 },
+        ],
+      };
+    }
     throw new Error(`unexpected ${method}`);
   });
   render(<LoanInterestPage tool={tool} />);
@@ -223,35 +237,26 @@ it("利率确认改为粘贴匹配，TB 缺借款明细时明说缺口并拦下�
   );
   await screen.findByText("已识别：TB 科目余额表");
   await screen.findByText("已识别：JE 序时账");
-  fireEvent.click(screen.getByRole("button", { name: "下一步：利率确认" }));
-  // 文件上传入口已移除，改为粘贴区。
-  expect(
-    screen.getByRole("textbox", { name: "粘贴借款利率区域" }),
-  ).toBeVisible();
-  expect(
-    screen.queryByRole("button", { name: "选择借款利率台账文件" }),
-  ).not.toBeInTheDocument();
-  // 利率匹配按借款明细逐笔对号：TB 没映射它时匹配按钮禁用并说明原因
-  //（功能自身的门槛，与映射必填清单无关）。
-  expect(screen.getByRole("button", { name: "解析并匹配利率" })).toBeDisabled();
-  expect(
-    screen.getByText(/TB 尚未映射「借款明细\/辅助核算」/),
-  ).toBeVisible();
-  // 借款明细/辅助核算已按业务口径转为选填：不再出现在映射缺口里；
-  // 缺口提示列的是仍然必填的期初/期末余额。
+  fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
+  // 科目清单渲染，借款科目按名称预选，应收账款默认排除。
+  expect(await screen.findByText("确认借款科目")).toBeVisible();
+  const loanSelect = screen.getByRole("combobox", { name: "2001 短期借款的科目类型" });
+  expect((loanSelect as HTMLSelectElement).value).toBe("loan");
+  const skipSelect = screen.getByRole("combobox", { name: "1122 应收账款的科目类型" });
+  expect((skipSelect as HTMLSelectElement).value).toBe("skip");
+  // 金额映射没补齐：下一步仍拦，但不再出现「借款明细/辅助核算」的旧提示。
   expect(
     screen.getByRole("button", { name: "下一步：测算与底稿" }),
   ).toBeDisabled();
-  expect(screen.getByText(/TB：期初余额/)).toBeVisible();
   expect(
-    screen.queryByText(/TB：借款明细\/辅助核算/),
+    screen.queryByText(/尚未映射「借款明细\/辅助核算」/),
   ).not.toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "返回补齐映射" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "生成借款利率表" })).toBeDisabled();
 });
 
-/** 映射齐全时粘贴原文交引擎模糊匹配，逐笔结果入表、下一步放行。 */
-it("粘贴利率匹配出逐笔结果并可进入测算", async () => {
-  const tbHeaders = ["科目编码", "科目名称", "借款明细", "期初余额", "期末余额"];
+/** 映射齐全时生成借款利率表，手填年利率后下一步放行、测算带确认清单与利率。 */
+it("生成借款利率表并手填利率后可进入测算", async () => {
+  const tbHeaders = ["科目编码", "科目名称", "期初余额", "期末余额"];
   const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "贷方金额"];
   const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
     kind,
@@ -262,6 +267,12 @@ it("粘贴利率匹配出逐笔结果并可进入测算", async () => {
     headers,
     preview: [headers.map(() => "x")],
   });
+  const fullMapping = {
+    accountCode: "科目编码",
+    accountName: "科目名称",
+    openingFunctionalAmount: "期初余额",
+    closingFunctionalAmount: "期末余额",
+  };
   const inspect = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
     headers,
     preview: [headers.map(() => "x")],
@@ -272,13 +283,7 @@ it("粘贴利率匹配出逐笔结果并可进入测算", async () => {
     headerDepth: 1,
     suggestedMapping:
       kind === "tb"
-        ? {
-            accountCode: "科目编码",
-            accountName: "科目名称",
-            loanId: "借款明细",
-            openingFunctionalAmount: "期初余额",
-            closingFunctionalAmount: "期末余额",
-          }
+        ? fullMapping
         : {
             date: "记账日期",
             id: "凭证号",
@@ -287,7 +292,6 @@ it("粘贴利率匹配出逐笔结果并可进入测算", async () => {
             summary: "摘要",
           },
   });
-  const paste = "合同名称\t执行利率\n工行短期借款\t3.85%";
   mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
   mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
     const p = params as { kind?: string; source?: { inputPath?: string } };
@@ -302,20 +306,11 @@ it("粘贴利率匹配出逐笔结果并可进入测算", async () => {
         ? inspect("je", "序时账", jeHeaders)
         : inspect("tb", "余额表", tbHeaders);
     }
-    if (method === "loan.match_rates") {
+    if (method === "loan.tb_accounts") {
       return {
-        rows: [
-          {
-            loanId: "工行短期借款",
-            rateType: "fixed",
-            fixedRate: 0.0385,
-            benchmarkRate: null,
-            spreadBps: null,
-            matchStatus: "精确匹配",
-            matchBasis: "与粘贴行「工行短期借款」一致",
-          },
+        accounts: [
+          { key: "2001", code: "2001", name: "短期借款", account: "2001 短期借款", opening: 1000000, closing: 900000 },
         ],
-        note: "已按表头识别列：名称=「合同名称」、利率=「执行利率」，共1行数据、1笔借款（精确1笔、模糊0笔）。",
       };
     }
     throw new Error(`unexpected ${method}`);
@@ -329,21 +324,60 @@ it("粘贴利率匹配出逐笔结果并可进入测算", async () => {
   );
   await screen.findByText("已识别：TB 科目余额表");
   await screen.findByText("已识别：JE 序时账");
-  fireEvent.click(screen.getByRole("button", { name: "下一步：利率确认" }));
-  fireEvent.change(screen.getByRole("textbox", { name: "粘贴借款利率区域" }), {
-    target: { value: paste },
+  fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
+  expect(await screen.findByText("确认借款科目")).toBeVisible();
+  mock.jobStart.mockResolvedValue("job-rates");
+  fireEvent.change(screen.getByLabelText("资产负债表日"), {
+    target: { value: "2025-12-31" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "解析并匹配利率" }));
-  expect(await screen.findByText("借款利率匹配结果")).toBeVisible();
-  expect(await screen.findByText("工行短期借款")).toBeVisible();
-  // 匹配请求带上粘贴原文与 TB 来源；映射齐全后下一步放行。
-  await waitFor(() =>
-    expect(mock.engineCall).toHaveBeenCalledWith(
-      "loan.match_rates",
-      expect.objectContaining({ rateText: paste }),
-    ),
-  );
+  const generate = await screen.findByRole("button", { name: "生成借款利率表" });
+  await waitFor(() => expect(generate).toBeEnabled());
+  fireEvent.click(generate);
+  await waitFor(() => expect(mock.jobStart).toHaveBeenCalledWith(
+    "loan.preview",
+    expect.objectContaining({ loanAccounts: ["2001"] }),
+  ));
+  // preview 任务完成：借款行进入利率确认表。
+  mock.jobEvents.callback?.({
+    jobId: "job-rates",
+    phase: "completed",
+    result: {
+      rows: [
+        {
+          loanId: "2001 短期借款",
+          openingPrincipal: 1000000,
+          closingPrincipal: 900000,
+          matchStatus: "待复核",
+          matchBasis: "匹配 2 条 JE（编码 2）",
+        },
+      ],
+      summary: { loanCount: 1 },
+    },
+  });
+  expect(await screen.findByText("借款利率确认表")).toBeVisible();
+  // 手填固定执行利率 3.85。
+  fireEvent.change(screen.getByRole("spinbutton", { name: "2001 短期借款的执行利率" }), {
+    target: { value: "3.85" },
+  });
+  // 下一步放行。
   expect(
     screen.getByRole("button", { name: "下一步：测算与底稿" }),
   ).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "下一步：测算与底稿" }));
+  fireEvent.click(screen.getByRole("button", { name: "生成 Excel 底稿" }));
+  await waitFor(() =>
+    expect(mock.jobStart).toHaveBeenCalledWith(
+      "loan.export",
+      expect.objectContaining({
+        loanAccounts: ["2001"],
+        rateRows: [
+          expect.objectContaining({
+            loanId: "2001 短期借款",
+            rateType: "fixed",
+            fixedRate: 0.0385,
+          }),
+        ],
+      }),
+    ),
+  );
 });

@@ -78,7 +78,10 @@ import { NewbieModeToggle } from "@/components/tour/NewbieModeToggle";
 import { Sparkles } from "lucide-react";
 import { applyReadableForegrounds } from "./theme";
 import { getVersion } from "@tauri-apps/api/app";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import {
+  getCurrentWebviewWindow,
+  WebviewWindow,
+} from "@tauri-apps/api/webviewWindow";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
@@ -307,6 +310,31 @@ function expandedToolIds(ids: readonly string[]) {
 
 const DEVELOPMENT_HINT = "开发中功能，使用结果请复核。";
 
+async function openAudiPickWindow(): Promise<void> {
+  const existing = await WebviewWindow.getByLabel("audipick");
+  if (existing) {
+    await existing.show();
+    await existing.setFocus();
+    return;
+  }
+  const popup = new WebviewWindow("audipick", {
+    url: "/#/audipick-window",
+    title: "AudiPick 合同摘录",
+    width: 1480,
+    height: 920,
+    minWidth: 1080,
+    minHeight: 700,
+    center: true,
+    decorations: false,
+    resizable: true,
+    focus: true,
+  });
+  await new Promise<void>((resolve, reject) => {
+    void popup.once("tauri://created", () => resolve());
+    void popup.once("tauri://error", (event) => reject(event.payload));
+  });
+}
+
 /**
  * 侧边栏工具入口统一消费清单里的 migrationStatus。
  * preview 工具仍可进入，但必须在点击前让用户知道它还在开发中；状态不写死
@@ -329,6 +357,14 @@ function SidebarToolLink({
       className={className}
       title={developing ? DEVELOPMENT_HINT : undefined}
       aria-label={accessibleName}
+      onClick={(event) => {
+        if (tool.id !== "audipick" || !("__TAURI_INTERNALS__" in window))
+          return;
+        event.preventDefault();
+        void openAudiPickWindow().catch((error) => {
+          window.alert(`无法打开 AudiPick 独立窗口：${appErrorText(error)}`);
+        });
+      }}
     >
       <span className="tool-badge">
         {TOOL_BADGE[tool.id] ?? tool.name.slice(0, 1)}
@@ -1566,15 +1602,7 @@ export function Settings({
     () => document.documentElement.dataset.theme ?? "green-dark",
   );
   const applyTheme = (id: string) => {
-    document.documentElement.dataset.theme = id;
-    // Text drawn on the theme's own colours is derived from those colours, so a
-    // light brand does not keep the white label it was hand-paired with.
-    applyReadableForegrounds();
-    try {
-      localStorage.setItem("audit-toolbox.theme", id);
-    } catch {
-      /* ignore */
-    }
+    setSavedTheme(id);
     setTheme(id);
   };
   useEffect(() => {

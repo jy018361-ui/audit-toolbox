@@ -16,6 +16,11 @@ declare global {
         description?: string;
         category?: string;
         version?: string;
+        readonly?: boolean;
+        docKind?: string;
+        useCase?: string;
+        example?: { category?: string; quote?: string; hint?: string };
+        prompt?: string;
       }>;
       getFieldsForRule: (id: string) => Array<{ key: string; label: string }>;
       getRulePrompt: (id: string) => string;
@@ -25,6 +30,10 @@ declare global {
         name: string,
         kind: string,
       ) => Record<string, unknown>;
+      copyBuiltinAsCustom: (
+        id: string,
+        name?: string,
+      ) => Record<string, unknown> | null;
       updateCustomRule: (id: string, patch: Record<string, unknown>) => boolean;
       deleteCustomRule: (id: string) => void;
       resetFieldsCache: (id?: string) => void;

@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { HashRouter } from "react-router-dom";
 import App from "./App";
+import AudiPickWindow from "./AudiPickWindow";
 import "./styles.css";
 import "./settings.css";
 import "./merger.css";

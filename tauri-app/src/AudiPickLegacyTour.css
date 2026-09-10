@@ -1,0 +1,145 @@
+.ap-legacy-tour {
+  --ap-tour-accent: var(--brand-accent, #ffcc00);
+  --ap-tour-accent-strong: var(--brand, #e5b800);
+  --ap-tour-on-accent: var(--on-brand, #17191a);
+  --ap-tour-surface: var(--surface, #222222);
+  --ap-tour-border: var(--border, #444444);
+  --ap-tour-text: var(--ink, #ffffff);
+  --ap-tour-muted: var(--text-muted, #d1d5db);
+  --ap-tour-faint: var(--muted-soft, #9ca3af);
+  position: fixed;
+  inset: 0;
+  z-index: 99997;
+  pointer-events: none;
+  font-family: inherit;
+}
+
+.ap-legacy-tour__spotlight {
+  position: fixed;
+  z-index: 99998;
+  border: 1px solid color-mix(in srgb, var(--ap-tour-accent) 76%, transparent);
+  border-radius: 8px;
+  box-shadow:
+    0 0 0 9999px rgb(0 0 0 / 80%),
+    0 0 0 3px color-mix(in srgb, var(--ap-tour-accent) 24%, transparent);
+  transition:
+    top 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+    left 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+    width 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+    height 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+
+.ap-legacy-tour__curtain {
+  position: fixed;
+  inset: 0;
+  z-index: 99998;
+  background: rgb(0 0 0 / 80%);
+}
+
+.ap-legacy-tour__tooltip {
+  position: fixed;
+  z-index: 99999;
+  width: min(320px, calc(100vw - 32px));
+  box-sizing: border-box;
+  padding: 20px;
+  color: var(--ap-tour-text);
+  background: var(--ap-tour-surface);
+  border: 1px solid var(--ap-tour-border);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 55%);
+  transition:
+    top 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+    left 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: auto;
+}
+
+.ap-legacy-tour__tooltip h3 {
+  margin: 0 0 8px;
+  color: var(--ap-tour-accent);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.ap-legacy-tour__tooltip p {
+  margin: 0 0 16px;
+  color: var(--ap-tour-muted);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.ap-legacy-tour__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--ap-tour-border);
+}
+
+.ap-legacy-tour__count {
+  color: var(--ap-tour-faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ap-legacy-tour__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ap-legacy-tour__actions button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ap-legacy-tour__skip {
+  color: var(--ap-tour-muted);
+  background: transparent;
+}
+
+.ap-legacy-tour__skip:hover,
+.ap-legacy-tour__skip:focus-visible {
+  color: var(--ap-tour-text);
+}
+
+.ap-legacy-tour__next {
+  color: var(--ap-tour-on-accent);
+  background: var(--ap-tour-accent);
+  font-weight: 700 !important;
+  transition:
+    background 0.18s ease,
+    transform 0.18s ease;
+}
+
+.ap-legacy-tour__next:hover {
+  background: var(--ap-tour-accent-strong);
+  transform: translateY(-1px);
+}
+
+.ap-legacy-tour__actions button:focus-visible {
+  outline: 2px solid var(--ap-tour-accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ap-legacy-tour__spotlight,
+  .ap-legacy-tour__tooltip,
+  .ap-legacy-tour__next {
+    transition: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .ap-legacy-tour__tooltip {
+    padding: 16px;
+  }
+}

@@ -25,6 +25,7 @@ const inTauri = () =>
 // IPC bridge when it is unavailable. File, secret, and engine operations still
 // fail with an actionable message instead of the opaque "undefined.invoke".
 let previewSettings: Record<string, unknown> = {};
+let previewAudiPickProjects: Array<Record<string, unknown>> = [];
 
 const previewUnavailable = (action: string) =>
   new Error(`浏览器预览模式不能${action}，请使用桌面应用。`);

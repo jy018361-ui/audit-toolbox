@@ -10,6 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use zip::{ZipWriter, write::SimpleFileOptions};
+use walkdir::WalkDir;
 
 use crate::AppError;
 
@@ -775,6 +776,58 @@ impl Storage {
         ).map_err(db_error)?;
         Ok(metadata)
     }
+    pub fn audipick_document_import_folder(
+        &self,
+        project_id: &str,
+        source: &Path,
+    ) -> Result<Value, AppError> {
+        if !source.is_dir() {
+            return Err(AppError::new(
+                "AUDIPICK_FOLDER_INVALID",
+                "所选路径不是可读取的文件夹。",
+                false,
+                None,
+            ));
+        }
+        let mut pdfs: Vec<PathBuf> = WalkDir::new(source)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.into_path())
+            .filter(|path| {
+                path.extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| value.eq_ignore_ascii_case("pdf"))
+            })
+            .collect();
+        pdfs.sort();
+        if pdfs.is_empty() {
+            return Err(AppError::new(
+                "AUDIPICK_FOLDER_EMPTY",
+                "所选文件夹及其子文件夹中没有 PDF。",
+                false,
+                None,
+            ));
+        }
+        let mut imported = Vec::new();
+        let mut skipped = Vec::new();
+        for path in pdfs {
+            match self.audipick_document_import(project_id, &path) {
+                Ok(document) => imported.push(document),
+                Err(error) => skipped.push(json!({
+                    "path": path.to_string_lossy(),
+                    "error": error.user_message,
+                })),
+            }
+        }
+        Ok(json!({
+            "imported": imported.len(),
+            "skipped": skipped.len(),
+            "documents": imported,
+            "failures": skipped,
+        }))
+    }
     pub fn audipick_documents(&self, project_id: &str) -> Result<Value, AppError> {
         let conn = self.conn.lock();
         let mut stmt = conn
@@ -1475,6 +1528,37 @@ mod tests {
             1
         );
         let _ = fs::remove_dir_all(import_root);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn audipick_folder_import_recurses_and_ignores_non_pdf_files() {
+        let root = test_root();
+        let storage = Storage::new(&root).unwrap();
+        storage
+            .audipick_project_save(
+                json!({"project":{"id":"folder-project","name":"文件夹导入"},"results":[]}),
+            )
+            .unwrap();
+        let source = root.join("source");
+        let nested = source.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(source.join("甲.pdf"), b"%PDF-1.4 first").unwrap();
+        fs::write(nested.join("乙.PDF"), b"%PDF-1.4 second").unwrap();
+        fs::write(nested.join("说明.txt"), b"ignore").unwrap();
+
+        let result = storage
+            .audipick_document_import_folder("folder-project", &source)
+            .unwrap();
+        assert_eq!(result["imported"], 2);
+        assert_eq!(result["skipped"], 0);
+        assert_eq!(
+            storage.audipick_documents("folder-project").unwrap()["documents"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

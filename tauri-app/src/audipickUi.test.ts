@@ -8,6 +8,7 @@ import {
   classifySample,
   extractionCacheKey,
   latestFieldSetId,
+  latestRowsByDocumentAndRule,
   matchEvidenceDocument,
   pickClassifiedRule,
   splitContractText,
@@ -21,6 +22,34 @@ import {
 import type { RevenueTargetQuestion } from "./audipickUi";
 
 const page = (index: number, body: string) => `---PDF第${index}页---\n${body}\n`;
+
+describe("latestRowsByDocumentAndRule", () => {
+  it("keeps one newest complete run per document and template", () => {
+    const rows = [
+      { id: "old-a", contractId: "a", ruleId: "loan", extractRunId: "old", extractAt: "2026-01-01" },
+      { id: "new-a-1", contractId: "a", ruleId: "loan", extractRunId: "new", extractAt: "2026-02-01" },
+      { id: "new-a-2", contractId: "a", ruleId: "loan", extractRunId: "new", extractAt: "2026-02-01" },
+      { id: "other-rule", contractId: "a", ruleId: "revenue", extractRunId: "r1", extractAt: "2026-01-15" },
+      { id: "other-document", contractId: "b", ruleId: "loan", extractRunId: "b1", extractAt: "2026-01-10" },
+    ];
+    expect(latestRowsByDocumentAndRule(rows).map((row) => row.id)).toEqual([
+      "new-a-1",
+      "new-a-2",
+      "other-rule",
+      "other-document",
+    ]);
+  });
+
+  it("groups legacy rows by their field set", () => {
+    const rows = [
+      { id: "legacy-old", contractId: "a", ruleId: "loan", fieldSetId: "one", extractAt: "2025-01-01" },
+      { id: "legacy-new", contractId: "a", ruleId: "loan", fieldSetId: "two", extractAt: "2025-02-01" },
+    ];
+    expect(latestRowsByDocumentAndRule(rows).map((row) => row.id)).toEqual([
+      "legacy-new",
+    ]);
+  });
+});
 
 describe("splitContractText", () => {
   it("keeps a short contract in a single request", () => {

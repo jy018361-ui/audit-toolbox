@@ -105,6 +105,69 @@ export function applyReadableForegrounds(
 
 export const THEME_STORAGE_KEY = "audit-toolbox.theme";
 export const DEFAULT_THEME = "green-dark";
+export const THEME_SYNC_EVENT = "audit-toolbox-theme-changed";
+
+/** Apply and persist a theme, then notify every Tauri webview. */
+export function setSavedTheme(
+  theme: string,
+  root: HTMLElement = document.documentElement,
+): void {
+  const next = theme || DEFAULT_THEME;
+  root.dataset.theme = next;
+  applyReadableForegrounds(root);
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, next);
+  } catch {
+    /* A locked-down profile can still use the theme for this session. */
+  }
+  window.dispatchEvent(
+    new CustomEvent(THEME_SYNC_EVENT, { detail: { theme: next } }),
+  );
+  if ("__TAURI_INTERNALS__" in window) {
+    void import("@tauri-apps/api/event")
+      .then(({ emit }) => emit(THEME_SYNC_EVENT, { theme: next }))
+      .catch(() => undefined);
+  }
+}
+
+/** Keep a secondary webview in lock-step with the toolbox theme picker. */
+export function listenForThemeChanges(): () => void {
+  const apply = (theme: unknown) => {
+    if (typeof theme !== "string" || !theme) return;
+    document.documentElement.dataset.theme = theme;
+    applyReadableForegrounds();
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      /* Applying the event is enough when storage is unavailable. */
+    }
+  };
+  const onCustom = (event: Event) =>
+    apply((event as CustomEvent<{ theme?: string }>).detail?.theme);
+  const onStorage = (event: StorageEvent) => {
+    if (event.key === THEME_STORAGE_KEY) apply(event.newValue);
+  };
+  window.addEventListener(THEME_SYNC_EVENT, onCustom);
+  window.addEventListener("storage", onStorage);
+  let unlisten: () => void = () => undefined;
+  if ("__TAURI_INTERNALS__" in window) {
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<{ theme?: string }>(THEME_SYNC_EVENT, (event) =>
+          apply(event.payload?.theme),
+        ),
+      )
+      .then((off) => {
+        unlisten = off;
+      })
+      .catch(() => undefined);
+  }
+  return () => {
+    window.removeEventListener(THEME_SYNC_EVENT, onCustom);
+    window.removeEventListener("storage", onStorage);
+    unlisten();
+  };
+}
 
 /**
  * Put the saved theme on `<html>` before the app renders.

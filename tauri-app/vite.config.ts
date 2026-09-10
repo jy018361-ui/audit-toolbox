@@ -87,7 +87,15 @@ export default defineConfig(({ mode }) => ({
     },
   },
   clearScreen: false,
-  server: { port: 1420, strictPort: true },
+  server: {
+    port: 1420,
+    strictPort: true,
+    // Rust writes and replaces native archives while Tauri is compiling.
+    // Watching those files on Windows can raise EBUSY and kill the dev server.
+    watch: {
+      ignored: ["**/src-tauri/target/**", "**/build/tauri-cargo-target/**"],
+    },
+  },
   envPrefix: ["VITE_", "TAURI_"],
   // sourcemap 不进生产包：开着会把 3.6MB 的 .map 一起嵌进 EXE，而发布包里
   // 没有 devtools 去读它，纯占体积、拖慢冷启动读盘与杀软扫描。

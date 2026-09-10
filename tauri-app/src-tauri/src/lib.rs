@@ -189,6 +189,13 @@ async fn engine_call(
             .unwrap_or("");
         let path = params.get("path").and_then(Value::as_str).unwrap_or("");
         storage.audipick_document_import(project_id, Path::new(path))
+    } else if method == "audipick.document_import_folder" {
+        let project_id = params
+            .get("projectId")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let path = params.get("path").and_then(Value::as_str).unwrap_or("");
+        storage.audipick_document_import_folder(project_id, Path::new(path))
     } else if matches!(
         method.as_str(),
         "fx.classify_source_llm" | "deposit.classify_source_llm" | "fa_tbje.classify_source_llm"
@@ -219,6 +226,7 @@ async fn engine_call(
             | "audipick.classify"
             | "audipick.ocr"
             | "audipick.export"
+            | "audipick.export_bundle"
     ) {
         let settings = storage.settings_get()?;
         tauri::async_runtime::spawn_blocking(move || audipick::call(&method, params, settings))

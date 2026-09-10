@@ -359,6 +359,39 @@ export default function App() {
     if (rail) rail.inert = false;
     toolDrawerButton.current?.focus();
   };
+  // 桌面端侧边栏折叠：折叠后只剩 72px 窄图标栏，选择状态跨重启保留。
+  // 窄屏（<1180px）本来就是窄条+抽屉，这个开关只对桌面宽屏生效；
+  // 折叠态下点窄条顶部按钮，仍可临时拉开完整导航（抽屉式，选完自动收回）。
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return (
+        window.localStorage.getItem("audit-toolbox.sidebar-collapsed") === "1"
+      );
+    } catch {
+      return false;
+    }
+  });
+  const sidebarCollapseToggle = useRef<HTMLButtonElement>(null);
+  const toggleSidebarCollapsed = () => {
+    const next = !sidebarCollapsed;
+    setSidebarCollapsed(next);
+    try {
+      window.localStorage.setItem(
+        "audit-toolbox.sidebar-collapsed",
+        next ? "1" : "0",
+      );
+    } catch {
+      // 隐私模式等场景写不进去就跳过，折叠态只是布局偏好。
+    }
+    if (next) {
+      // 折叠后原按钮随侧边栏一起隐藏，焦点交给窄条上的菜单按钮。
+      window.setTimeout(() => toolDrawerButton.current?.focus(), 0);
+    } else {
+      // 从折叠态展开：抽屉若开着就一并关掉，焦点回到展开后的折叠按钮。
+      setToolDrawerOpen(false);
+      window.setTimeout(() => sidebarCollapseToggle.current?.focus(), 0);
+    }
+  };
   const previousPath = useRef(location.pathname);
   // 侧边栏子分组默认展开：折叠头不是路由入口，收着会让高频工具"消失"。
   const [subgroupOpen, setSubgroupOpen] = useState<Record<string, boolean>>({
@@ -555,7 +588,7 @@ export default function App() {
     >
       <SyncBusyDialog />
       <ConfirmDialogHost />
-      <div className="app-shell">
+      <div className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
         <a className="skip-navigation" href="#main-content" onClick={(event) => { event.preventDefault(); document.getElementById("main-content")?.focus(); }}>跳过导航，进入工作区</a>
         <WindowControls />
         <aside
@@ -578,6 +611,21 @@ export default function App() {
               }}
             >
               ×
+            </button>
+            {/* 风车标走 CSS 蒙版，颜色引用主题变量，换主题自动跟随；
+                完整带文字 logo 不进侧边栏——图里的"E点通"会和下面标题重复 */}
+            <span className="brand-logo" role="img" aria-label="EY E点通" />
+            {/* 桌面端折叠开关：折叠成窄图标栏；折叠态下抽屉里同一位置变成"展开固定" */}
+            <button
+              ref={sidebarCollapseToggle}
+              type="button"
+              className="sidebar-collapse-toggle"
+              aria-label={sidebarCollapsed ? "展开侧边栏" : "折叠侧边栏"}
+              aria-expanded={!sidebarCollapsed}
+              title={sidebarCollapsed ? "展开侧边栏" : "折叠侧边栏"}
+              onClick={toggleSidebarCollapsed}
+            >
+              <span aria-hidden="true">{sidebarCollapsed ? "»" : "«"}</span>
             </button>
             <h1>E点通工具箱</h1>
             <p>审计作业工作台</p>
@@ -707,7 +755,7 @@ export default function App() {
             aria-controls="app-sidebar"
             onClick={() => setToolDrawerOpen(true)}
           >
-            <span aria-hidden="true">ET</span>
+            <span className="sidebar-rail-brand" aria-hidden="true" />
           </button>
           {NAV.map((item) => (
             <NavLink

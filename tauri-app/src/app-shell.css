@@ -81,6 +81,148 @@ body .app-shell {
   display: none;
 }
 
+/* ---- 窄图标栏与抽屉浮层（窄屏与桌面折叠态共用）----
+   视觉样式统一放在这里，"何时显示"由两处各管各的：
+   窄屏靠下方 max-width:1179px 的媒体查询，桌面折叠态靠 .app-shell.sidebar-collapsed。
+   默认 display:none（上方规则），被启用时才覆盖 display。 */
+.sidebar-rail {
+  position: fixed;
+  z-index: 41;
+  inset: 0 auto 0 0;
+  width: 72px;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
+  background: var(--brand-deep);
+}
+
+.sidebar-rail a,
+.sidebar-rail-menu {
+  display: inline-grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--on-dark-muted);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.sidebar-rail-menu {
+  margin-bottom: var(--sp-3);
+  background: color-mix(in srgb, var(--brand-accent) 18%, transparent);
+  color: var(--on-brand-deep, #fff);
+  font-size: var(--fs-sm);
+  font-weight: 800;
+}
+
+/* 窄条顶部的品牌标志：与安装图标同一枚风车标；
+   蒙版 + currentColor， hover/激活态颜色变化时标志同步跟随 */
+.sidebar-rail-brand {
+  width: 28px;
+  height: 28px;
+  background: currentColor;
+  -webkit-mask-image: url(/brand-mark.png);
+  mask-image: url(/brand-mark.png);
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+}
+
+.sidebar-rail a:hover,
+.sidebar-rail a.active,
+.sidebar-rail-menu:hover {
+  background: var(--brand-soft);
+  color: var(--on-brand-soft, #fff);
+}
+
+.sidebar-drawer-close {
+  position: absolute;
+  top: var(--sp-3);
+  right: var(--sp-3);
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--on-dark-muted);
+  cursor: pointer;
+  font-size: 22px;
+}
+
+.sidebar-drawer-close:hover {
+  background: var(--brand-soft);
+  color: var(--on-brand-soft, #fff);
+}
+
+.sidebar-drawer-close:focus-visible,
+.sidebar-rail a:focus-visible,
+.sidebar-rail-menu:focus-visible,
+.sidebar-collapse-toggle:focus-visible {
+  outline: 2px solid var(--brand-accent);
+  outline-offset: 2px;
+}
+
+.sidebar-drawer-backdrop {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: color-mix(in srgb, var(--brand-deep) 34%, transparent);
+  cursor: default;
+}
+
+/* ---- 品牌区 logo 与桌面端折叠开关 ----
+   logo 用 mask 蒙版实现：形状来自 brand-mark.png 的透明度，
+   颜色引用主题变量，切换界面主题时标志跟着主题色走。 */
+.app-shell .brand-logo {
+  display: block;
+  width: 48px;
+  height: 48px;
+  margin-bottom: var(--sp-3);
+  background: var(--brand-accent);
+  -webkit-mask-image: url(/brand-mark.png);
+  mask-image: url(/brand-mark.png);
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+}
+
+.sidebar-collapse-toggle {
+  position: absolute;
+  top: var(--sp-3);
+  right: var(--sp-3);
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--on-dark-muted);
+  cursor: pointer;
+  font-size: var(--fs-lg);
+  line-height: 1;
+}
+
+.sidebar-collapse-toggle:hover {
+  background: var(--brand-soft);
+  color: var(--on-brand-soft, #fff);
+}
+
 .app-shell .sidebar-footer {
   justify-content: flex-start;
   gap: var(--sp-3);
@@ -330,87 +472,22 @@ body .history-card-content {
     visibility: visible;
   }
 
-  .sidebar-drawer-close {
-    position: absolute;
-    top: var(--sp-3);
-    right: var(--sp-3);
-    display: inline-grid;
-    width: 32px;
-    height: 32px;
-    place-items: center;
-    border: 0;
-    border-radius: var(--r-sm);
-    background: transparent;
-    color: var(--on-dark-muted);
-    cursor: pointer;
-    font-size: 22px;
-  }
-
-  .sidebar-drawer-close:hover {
-    background: var(--brand-soft);
-    color: var(--on-brand-soft, #fff);
-  }
-
-  .sidebar-drawer-close:focus-visible,
-  .sidebar-rail a:focus-visible,
-  .sidebar-rail-menu:focus-visible {
-    outline: 2px solid var(--brand-accent);
-    outline-offset: 2px;
-  }
-
+  /* 窄屏启用窄条与抽屉控件：视觉样式在文件上部的共享块里，这里只给 display */
   .sidebar-rail {
-    position: fixed;
-    z-index: 41;
-    inset: 0 auto 0 0;
     display: flex;
-    width: 72px;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--sp-2);
-    padding: var(--sp-3) 0;
-    background: var(--brand-deep);
   }
 
-  .sidebar-rail a,
-  .sidebar-rail-menu {
+  .sidebar-drawer-close {
     display: inline-grid;
-    width: 44px;
-    height: 44px;
-    place-items: center;
-    border: 0;
-    border-radius: var(--r-sm);
-    background: transparent;
-    color: var(--on-dark-muted);
-    text-decoration: none;
-    cursor: pointer;
-  }
-
-  .sidebar-rail-menu {
-    margin-bottom: var(--sp-3);
-    background: color-mix(in srgb, var(--brand-accent) 18%, transparent);
-    color: var(--on-brand-deep, #fff);
-    font-size: var(--fs-sm);
-    font-weight: 800;
-  }
-
-  .sidebar-rail a:hover,
-  .sidebar-rail a.active,
-  .sidebar-rail-menu:hover {
-    background: var(--brand-soft);
-    color: var(--on-brand-soft, #fff);
   }
 
   .sidebar-drawer-backdrop {
-    position: fixed;
-    z-index: 40;
-    inset: 0;
     display: block;
-    width: 100%;
-    height: 100%;
-    padding: 0;
-    border: 0;
-    background: color-mix(in srgb, var(--brand-deep) 34%, transparent);
-    cursor: default;
+  }
+
+  /* 窄屏抽屉的关闭靠右上角 ×、遮罩与 Esc，折叠开关只在桌面端出现 */
+  .sidebar-collapse-toggle {
+    display: none;
   }
 
   .task-row {
@@ -427,6 +504,39 @@ body .history-card-content {
     grid-column: 2;
     grid-row: 1 / span 2;
   }
+}
+
+/* ---- 桌面端侧边栏折叠 ----
+   折叠后网格只留 72px 窄图标栏；完整侧边栏变成抽屉式浮层：
+   点窄条顶部标志临时拉开，Esc / 点遮罩 / 选完工具自动收回；
+   抽屉里右上角的 » 按钮（.sidebar-collapse-toggle）负责固定展开。
+   抽屉几何与窄屏媒体查询里的同一套保持一致。 */
+body .app-shell.sidebar-collapsed {
+  grid-template-columns: 72px minmax(0, 1fr);
+}
+
+.app-shell.sidebar-collapsed > .sidebar {
+  z-index: 42;
+  width: min(280px, calc(100vw - var(--sp-4)));
+  transform: translateX(-100%);
+  visibility: hidden;
+  transition: transform 180ms ease-out;
+  box-shadow: var(--shadow-overlay);
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.app-shell.sidebar-collapsed > .sidebar.drawer-open {
+  transform: translateX(0);
+  visibility: visible;
+}
+
+.app-shell.sidebar-collapsed .sidebar-rail {
+  display: flex;
+}
+
+.app-shell.sidebar-collapsed .sidebar-drawer-backdrop {
+  display: block;
 }
 
 @media (prefers-reduced-motion: reduce) {

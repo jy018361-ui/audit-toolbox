@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { HashRouter } from "react-router-dom";
 import App from "./App";
+import AudiPickWindow from "./AudiPickWindow";
 import "./styles.css";
 import "./settings.css";
 import "./merger.css";
@@ -18,5 +19,13 @@ if ("__TAURI_INTERNALS__" in window) {
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode><HashRouter><App /></HashRouter></React.StrictMode>
+  <React.StrictMode>
+    <HashRouter>
+      {window.location.hash.startsWith("#/audipick-window") ? (
+        <AudiPickWindow />
+      ) : (
+        <App />
+      )}
+    </HashRouter>
+  </React.StrictMode>
 );

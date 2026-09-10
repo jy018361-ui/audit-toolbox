@@ -17,6 +17,33 @@ import { ResultView } from "@/components/ResultView";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
 import {
+  AudiPickLegacyShell,
+  type AudiPickLegacyPage,
+} from "./AudiPickLegacyShell";
+import {
+  AudiPickLegacyConfig,
+  AudiPickLegacyGuide,
+  AudiPickLegacyHome,
+} from "./AudiPickLegacyAuxiliary";
+import {
+  AudiPickLegacyDashboard,
+  type AudiPickLegacyCreateProjectValues,
+  type AudiPickLegacyProject as LegacyDashboardProject,
+  type AudiPickLegacyProjectStatus,
+} from "./AudiPickLegacyDashboard";
+import { AudiPickLegacyProject } from "./AudiPickLegacyProject";
+import { AudiPickLegacyContract } from "./AudiPickLegacyContract";
+import {
+  AudiPickLegacyLoanAudit,
+  buildAudiPickLoanAuditModel,
+} from "./AudiPickLegacyLoanAudit";
+import { AudiPickLegacyTour } from "./AudiPickLegacyTour";
+import { setSavedTheme } from "./theme";
+import {
+  AudiPickLegacyTemplates,
+  type AudiPickLegacyTemplateTab,
+} from "./AudiPickLegacyTemplates";
+import {
   audipickExportName,
   buildClassifyPrompt,
   buildRevenueBatchPrompt,
@@ -25,6 +52,7 @@ import {
   extractionCacheKey,
   groupRevenueDetailQuestions,
   latestFieldSetId,
+  latestRowsByDocumentAndRule,
   matchEvidenceDocument,
   mergeRevenueAnswers,
   missingRevenueTargets,
@@ -53,6 +81,7 @@ type AudiPickResult = Record<string, unknown> & {
   /// written on save and decide which rows the panel still shows.
   fieldSetId?: string;
   extractAt?: string;
+  extractRunId?: string;
 };
 type AudiPickProjectData = {
   project: {
@@ -61,10 +90,27 @@ type AudiPickProjectData = {
     client?: string;
     date?: string;
     status?: string;
+    t?: string;
+    createdAt?: string;
+    updatedAt?: string;
+    loanReportDate?: string;
+    defaultRuleId?: string;
     relationGroups?: AudiPickRelation[];
   };
-  contracts?: unknown[];
+  contracts?: AudiPickContractMeta[];
   results?: AudiPickResult[];
+};
+type AudiPickContractMeta = {
+  id: string;
+  ruleId?: string;
+  ruleConfirmed?: boolean;
+  detectedRuleId?: string;
+  detectedConfidence?: "high" | "medium" | "low" | string;
+  detectedLabel?: string;
+  isScanned?: boolean;
+  ocrPending?: boolean;
+  ocrCompletedPages?: number;
+  ocrTotalPages?: number;
 };
 type AudiPickDocument = {
   id: string;
@@ -74,6 +120,39 @@ type AudiPickDocument = {
   size: number;
   status: string;
 };
+
+function parseSavedPdfPages(text: string): Map<number, string> {
+  const pages = new Map<number, string>();
+  const pattern = /---PDF第(\d+)页---\n([\s\S]*?)(?=---PDF第\d+页---\n|$)/g;
+  for (const match of text.matchAll(pattern)) {
+    pages.set(Number(match[1]), match[2].trimEnd());
+  }
+  return pages;
+}
+
+function serializePdfPages(pages: Map<number, string>): string {
+  return [...pages.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([page, text]) => `---PDF第${page}页---\n${text}\n`)
+    .join("");
+}
+
+const RESULT_SYSTEM_KEYS = new Set([
+  "id",
+  "contractId",
+  "ruleId",
+  "ruleVersion",
+  "fieldKeys",
+  "fieldSetId",
+  "extractAt",
+  "extractRunId",
+]);
+
+function editableResult(row: AudiPickResult): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(row).filter(([key]) => !RESULT_SYSTEM_KEYS.has(key)),
+  );
+}
 
 /**
  * AudiPick 的 PDF 引擎与规则脚本不再随 index.html 同步加载（那会拖慢每个工具
@@ -135,6 +214,10 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   const [documents, setDocuments] = useState<AudiPickDocument[]>([]);
   const [name, setName] = useState("");
   const [client, setClient] = useState("");
+  const [projectDate, setProjectDate] = useState(
+    () => new Date().toISOString().slice(0, 10),
+  );
+  const [defaultRuleId, setDefaultRuleId] = useState("loan_covenant");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<unknown>();
@@ -145,14 +228,32 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   const [associationTarget, setAssociationTarget] = useState("");
   const [associationRole, setAssociationRole] = useState("补充协议/变更");
   const [customRuleName, setCustomRuleName] = useState("");
+  const [editingCustomRuleId, setEditingCustomRuleId] = useState("");
   // 模板库视图状态：分类 tab + 搜索词
   const [templateTab, setTemplateTab] = useState("all");
   const [templateSearch, setTemplateSearch] = useState("");
+  const [projectSearch, setProjectSearch] = useState("");
+  const [projectStatusFilter, setProjectStatusFilter] = useState("all");
+  const [projectSort, setProjectSort] = useState("date_desc");
+  const [projectDocumentCounts, setProjectDocumentCounts] = useState<
+    Record<string, number>
+  >({});
+  const [documentTextLengths, setDocumentTextLengths] = useState<
+    Record<string, number>
+  >({});
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<string[]>([]);
+  const [pendingExtractDocumentId, setPendingExtractDocumentId] = useState("");
   const [customRulePrompt, setCustomRulePrompt] = useState("");
   const [ruleRevision, setRuleRevision] = useState(0);
   const [suggestedRule, setSuggestedRule] = useState<ClassifiedDocument>();
   const extractCache = useRef(
     new Map<string, Array<{ parsed?: { items?: unknown[] } }>>(),
+  );
+  const batchRulePlans = useRef(
+    new Map<
+      string,
+      { ruleId: string; fieldKeys: string[]; fieldSetId: string }
+    >(),
   );
   const revenueFacts = useRef(
     new Map<string, Array<Record<string, unknown>>>(),
@@ -167,14 +268,42 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   const [pdfMatches, setPdfMatches] = useState<number[]>([]);
   const [pdfScale, setPdfScale] = useState(1.25);
   const [pdfRotation, setPdfRotation] = useState(0);
+  const [ocrRequiredPages, setOcrRequiredPages] = useState<number[]>([]);
+  const [selectedResultRunId, setSelectedResultRunId] = useState("latest");
+  const [contractView, setContractView] = useState<"detail" | "workpaper">(
+    "detail",
+  );
+  const [workpaperFilter, setWorkpaperFilter] = useState("");
+  const [selectedWorkRowId, setSelectedWorkRowId] = useState("");
+  const [previewOpen, setPreviewOpen] = useState(true);
+  const [previewWidthPercent, setPreviewWidthPercent] = useState(() => {
+    try {
+      const saved = Number(localStorage.getItem("ap_split_ratio"));
+      return Number.isFinite(saved) && saved >= 25 && saved <= 65 ? saved : 42;
+    } catch {
+      return 42;
+    }
+  });
+  const [editingResult, setEditingResult] = useState<AudiPickResult>();
+  const [editingResultJson, setEditingResultJson] = useState("");
   const [configStatus, setConfigStatus] = useState<{
     llm?: { ready: boolean };
     ocr?: { ready: boolean; engine: string };
   }>({});
   // 顶层视图：工作台 / 提取模板库 / 处理工作日志
-  const [viewMode, setViewMode] = useState<"workbench" | "templates" | "worklog">(
-    "workbench",
-  );
+  const [viewMode, setViewMode] = useState<AudiPickLegacyPage>("home");
+  const [logOpen, setLogOpen] = useState(false);
+  const [themePickerOpen, setThemePickerOpen] = useState(false);
+  const [themeRevision, setThemeRevision] = useState(0);
+  const [tourOpen, setTourOpen] = useState(false);
+  const [loanAuditOpen, setLoanAuditOpen] = useState(false);
+  useEffect(() => {
+    try {
+      localStorage.setItem("ap_split_ratio", String(previewWidthPercent));
+    } catch {
+      /* The splitter still works when browser storage is unavailable. */
+    }
+  }, [previewWidthPercent]);
   // 处理工作日志（参考旧版 workLog：记录每步处理操作）
   type WorkLogEntry = {
     id: number;
@@ -218,6 +347,33 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       /* ignore */
     }
   };
+  useEffect(() => {
+    if (
+      !selectedId ||
+      viewMode !== "workbench" ||
+      !("__TAURI_INTERNALS__" in window)
+    )
+      return undefined;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/webview")
+      .then(({ getCurrentWebview }) =>
+        getCurrentWebview().onDragDropEvent((event) => {
+          if (event.payload.type === "drop") {
+            void importDroppedPaths(event.payload.paths);
+          }
+        }),
+      )
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch((dragError) => setError(errorText(dragError)));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [selectedId, viewMode]);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rules = useMemo(
     () => window.RuleEngine?.getAllSelectableRules() ?? [],
@@ -237,9 +393,25 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   // still in the database.  Legacy shows the newest field set recorded for this
   // contract and rule instead, so follow that and fall back to the current one
   // only when nothing has been extracted yet.
+  const resultRuns = Object.values(
+    documentResults.reduce<
+      Record<string, { id: string; extractAt: string; rows: AudiPickResult[] }>
+    >((runs, row) => {
+      const id = row.extractRunId ?? `legacy:${row.fieldSetId ?? "default"}`;
+      const run = runs[id] ?? { id, extractAt: "", rows: [] };
+      run.rows.push(row);
+      if (String(row.extractAt ?? "") > run.extractAt) {
+        run.extractAt = String(row.extractAt ?? "");
+      }
+      runs[id] = run;
+      return runs;
+    }, {}),
+  ).sort((left, right) => right.extractAt.localeCompare(left.extractAt));
+  const activeResultRun =
+    resultRuns.find((run) => run.id === selectedResultRunId) ?? resultRuns[0];
   const visibleFieldSetId =
-    latestFieldSetId(documentResults) ?? activeFieldSetId;
-  const matchedResults = documentResults.filter(
+    latestFieldSetId(activeResultRun?.rows ?? documentResults) ?? activeFieldSetId;
+  const matchedResults = (activeResultRun?.rows ?? []).filter(
     (row) => !row.fieldSetId || row.fieldSetId === visibleFieldSetId,
   );
   // The revenue rules mark questions that the contract makes inapplicable (no
@@ -265,6 +437,14 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     typeof (window.RevenueWorkpaper as any)?.buildMissingTasks === "function"
       ? (window.RevenueWorkpaper as any).buildMissingTasks(currentResults)
       : [];
+  async function refreshConfigStatus() {
+    try {
+      const value = await engineCall("audipick.config_status", {});
+      setConfigStatus(value as typeof configStatus);
+    } catch {
+      // The page remains usable for project management without configured AI.
+    }
+  }
   async function refresh() {
     setBusy(true);
     setError("");
@@ -273,9 +453,17 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         projects: AudiPickProjectData[];
       };
       setProjects(value.projects);
-      if (!selectedId && value.projects[0])
-        setSelectedId(value.projects[0].project.id);
       setResult(value);
+      void Promise.all(
+        value.projects.map(async (project) => {
+          const response = (await engineCall("audipick.documents", {
+            projectId: project.project.id,
+          })) as { documents?: AudiPickDocument[] };
+          return [project.project.id, response.documents?.length ?? 0] as const;
+        }),
+      )
+        .then((entries) => setProjectDocumentCounts(Object.fromEntries(entries)))
+        .catch(() => undefined);
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -284,9 +472,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   }
   useEffect(() => {
     void refresh();
-    void engineCall("audipick.config_status", {})
-      .then((value) => setConfigStatus(value as typeof configStatus))
-      .catch(() => undefined);
+    void refreshConfigStatus();
     void settingsGet()
       .then((value) => {
         const audipick = (value.audipick ?? {}) as {
@@ -300,12 +486,24 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   useEffect(() => {
     if (!selectedId) {
       setDocuments([]);
+      setDocumentTextLengths({});
+      setSelectedDocumentIds([]);
       return;
     }
     void engineCall("audipick.documents", { projectId: selectedId })
-      .then((value) =>
-        setDocuments((value as { documents: AudiPickDocument[] }).documents),
-      )
+      .then(async (value) => {
+        const nextDocuments = (value as { documents: AudiPickDocument[] }).documents;
+        setDocuments(nextDocuments);
+        const lengths = await Promise.all(
+          nextDocuments.map(async (document) => {
+            const stored = (await engineCall("audipick.document_text", {
+              documentId: document.id,
+            })) as { text?: string };
+            return [document.id, stored.text?.length ?? 0] as const;
+          }),
+        );
+        setDocumentTextLengths(Object.fromEntries(lengths));
+      })
       .catch((e) => setError(errorText(e)));
   }, [selectedId]);
   useEffect(() => {
@@ -316,12 +514,35 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     );
   }, [ruleId, ruleRevision]);
   useEffect(() => {
+    setSelectedResultRunId("latest");
+    setEditingResult(undefined);
+    setEditingResultJson("");
+  }, [selectedDocument, ruleId]);
+  useEffect(() => {
+    if (
+      !pendingExtractDocumentId ||
+      selectedDocument !== pendingExtractDocumentId ||
+      !pdfText.trim() ||
+      busy
+    )
+      return;
+    setPendingExtractDocumentId("");
+    void extract().catch((cause) => {
+      setError(errorText(cause));
+    });
+  }, [pendingExtractDocumentId, selectedDocument, pdfText, busy]);
+  useEffect(() => {
     let off = () => {};
     void listenJobEvents((event) => {
       if (event.toolId !== "audipick") return;
       setBatchJob(event);
       if (event.result) setResult(event.result);
       if (event.phase === "completed" && event.result && selected) {
+        const plan = batchRulePlans.current.get(event.jobId) ?? {
+          ruleId,
+          fieldKeys: activeFieldKeys,
+          fieldSetId: activeFieldSetId,
+        };
         const payload = event.result as {
           documents?: Array<{
             id: string;
@@ -329,8 +550,10 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             parsed?: { items?: unknown[] };
           }>;
         };
-        const incoming = (payload.documents ?? []).flatMap((document) =>
-          document.ok && Array.isArray(document.parsed?.items)
+        const completedAt = new Date().toISOString();
+        const incoming = (payload.documents ?? []).flatMap((document) => {
+          const extractRunId = `run_${Date.now().toString(36)}_${document.id}`;
+          return document.ok && Array.isArray(document.parsed?.items)
             ? document.parsed.items
                 .filter((item): item is Record<string, unknown> =>
                   Boolean(item && typeof item === "object"),
@@ -339,57 +562,64 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                   ...item,
                   id: `r_${Date.now().toString(36)}_${document.id}_${index}`,
                   contractId: document.id,
-                  ruleId,
-                  fieldKeys: activeFieldKeys,
-                  fieldSetId: activeFieldSetId,
-                  extractAt: new Date().toISOString(),
+                  ruleId: plan.ruleId,
+                  fieldKeys: plan.fieldKeys,
+                  fieldSetId: plan.fieldSetId,
+                  extractAt: completedAt,
+                  extractRunId,
                   reviewed: false,
                 }))
-            : [],
-        );
-        const documentIds = new Set(
-          (payload.documents ?? []).map((document) => document.id),
-        );
-        const saved = {
-          ...selected,
-          results: [
-            ...(selected.results ?? []).filter(
-              (row) =>
-                !(
-                  documentIds.has(String(row.contractId)) &&
-                  row.ruleId === ruleId &&
-                  row.fieldSetId === activeFieldSetId
-                ),
-            ),
-            ...incoming,
-          ],
-        };
-        void engineCall("audipick.project_save", saved).then(() =>
-          setProjects((current) =>
-            current.map((project) =>
-              project.project.id === selectedId ? saved : project,
-            ),
-          ),
-        );
+            : [];
+        });
+        setProjects((current) => {
+          const target = current.find(
+            (project) => project.project.id === selectedId,
+          );
+          if (!target) return current;
+          const saved = {
+            ...target,
+            project: {
+              ...target.project,
+              updatedAt: completedAt,
+            },
+            results: [...(target.results ?? []), ...incoming],
+          };
+          void engineCall("audipick.project_save", saved).catch((saveError) =>
+            setError(errorText(saveError)),
+          );
+          return current.map((project) =>
+            project.project.id === selectedId ? saved : project,
+          );
+        });
+        batchRulePlans.current.delete(event.jobId);
       }
     }).then((value) => {
       off = value;
     });
     return () => off();
   }, [selectedId, ruleId, selected, fields]);
-  async function create() {
-    if (!name.trim()) {
+  async function create(values?: AudiPickLegacyCreateProjectValues) {
+    const nextName = values?.name ?? name;
+    const nextClient = values?.client ?? client;
+    const nextDate = values?.date ?? projectDate;
+    const nextDefaultRuleId = values?.defaultTemplateId ?? defaultRuleId;
+    if (!nextName.trim()) {
       setError("请输入项目名称。");
       return;
     }
     const id = `p_${Date.now().toString(36)}`;
+    const createdAt = new Date().toISOString();
     const data: AudiPickProjectData = {
       project: {
         id,
-        name: name.trim(),
-        client: client.trim(),
-        date: new Date().toISOString().slice(0, 10),
+        name: nextName.trim(),
+        client: nextClient.trim(),
+        date: nextDate,
         status: "active",
+        defaultRuleId: nextDefaultRuleId,
+        t: createdAt,
+        createdAt,
+        updatedAt: createdAt,
       },
       contracts: [],
       results: [],
@@ -399,7 +629,13 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       await engineCall("audipick.project_save", data);
       setName("");
       setClient("");
-      setSelectedId(id);
+      setProjectDate(new Date().toISOString().slice(0, 10));
+      if (!values) {
+        setSelectedId(id);
+        setRuleId(nextDefaultRuleId);
+      } else {
+        setSelectedId("");
+      }
       await refresh();
     } catch (e) {
       setError(errorText(e));
@@ -407,27 +643,129 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
-  async function remove() {
-    if (!selectedId) return;
+  async function remove(projectId = selectedId) {
+    if (!projectId) return;
     // Deleting a project also drops every PDF, extraction result and review
     // mark under it, and there is no undo.
-    const project = projects.find((item) => item.project.id === selectedId);
+    const project = projects.find((item) => item.project.id === projectId);
     if (
       !window.confirm(
-        `确认删除项目"${project?.project.name ?? selectedId}"？\n\n该项目下的全部合同 PDF、提取结果和复核标记会一并删除，且无法恢复。`,
+        `确认删除项目"${project?.project.name ?? projectId}"？\n\n该项目下的全部合同 PDF、提取结果和复核标记会一并删除，且无法恢复。`,
       )
     )
       return;
     setBusy(true);
     try {
-      await engineCall("audipick.project_delete", { id: selectedId });
-      setSelectedId("");
+      await engineCall("audipick.project_delete", { id: projectId });
+      if (selectedId === projectId) setSelectedId("");
       await refresh();
     } catch (e) {
       setError(errorText(e));
     } finally {
       setBusy(false);
     }
+  }
+  async function updateProjectStatus(
+    status: string,
+    target: AudiPickProjectData | undefined = selected,
+  ) {
+    if (!target) return;
+    const saved: AudiPickProjectData = {
+      ...target,
+      project: { ...target.project, status },
+    };
+    setBusy(true);
+    try {
+      await engineCall("audipick.project_save", saved);
+      setProjects((current) =>
+        current.map((project) =>
+          project.project.id === target.project.id ? saved : project,
+        ),
+      );
+      addLog(target.project.name, "项目状态", status === "completed" ? "已完成" : "进行中", "done");
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function updateLoanReportDate(reportDate: string) {
+    if (!selected) return;
+    const saved: AudiPickProjectData = {
+      ...selected,
+      project: {
+        ...selected.project,
+        loanReportDate: reportDate,
+        updatedAt: new Date().toISOString(),
+      },
+    };
+    try {
+      await engineCall("audipick.project_save", saved);
+      setProjects((current) =>
+        current.map((project) =>
+          project.project.id === selected.project.id ? saved : project,
+        ),
+      );
+    } catch (e) {
+      setError(errorText(e));
+    }
+  }
+  function getContractMeta(documentId: string): AudiPickContractMeta {
+    return selected?.contracts?.find((item) => item.id === documentId) ?? {
+      id: documentId,
+    };
+  }
+  async function saveContractMeta(
+    documentId: string,
+    patch: Partial<AudiPickContractMeta>,
+  ) {
+    if (!selected) return;
+    const existing = selected.contracts ?? [];
+    const current = existing.find((item) => item.id === documentId) ?? {
+      id: documentId,
+    };
+    const contracts = [
+      ...existing.filter((item) => item.id !== documentId),
+      { ...current, ...patch, id: documentId },
+    ];
+    const saved: AudiPickProjectData = {
+      ...selected,
+      project: { ...selected.project, updatedAt: new Date().toISOString() },
+      contracts,
+    };
+    await engineCall("audipick.project_save", saved);
+    setProjects((items) =>
+      items.map((item) =>
+        item.project.id === selected.project.id ? saved : item,
+      ),
+    );
+  }
+  async function removeAssociation(anchorId: string, fileId: string) {
+    if (!selected) return;
+    const relationGroups = (selected.project.relationGroups ?? [])
+      .map((group) =>
+        group.anchorFileId === anchorId
+          ? {
+              ...group,
+              members: group.members.filter((member) => member.fileId !== fileId),
+            }
+          : group,
+      )
+      .filter((group) => group.members.length > 0);
+    const saved: AudiPickProjectData = {
+      ...selected,
+      project: {
+        ...selected.project,
+        relationGroups,
+        updatedAt: new Date().toISOString(),
+      },
+    };
+    await engineCall("audipick.project_save", saved);
+    setProjects((items) =>
+      items.map((item) =>
+        item.project.id === selected.project.id ? saved : item,
+      ),
+    );
   }
   async function exportBackup() {
     const outputPath = await pickPath(
@@ -481,6 +819,85 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
+  async function importDroppedPaths(paths: string[]) {
+    if (!selectedId || !paths.length) return;
+    setBusy(true);
+    setError("");
+    try {
+      let importedCount = 0;
+      let skippedCount = 0;
+      for (const path of paths) {
+        if (/\.pdf$/i.test(path)) {
+          await engineCall("audipick.document_import", {
+            projectId: selectedId,
+            path,
+          });
+          importedCount += 1;
+        } else {
+          const imported = (await engineCall(
+            "audipick.document_import_folder",
+            { projectId: selectedId, path },
+          )) as { imported?: number; skipped?: number };
+          importedCount += imported.imported ?? 0;
+          skippedCount += imported.skipped ?? 0;
+        }
+      }
+      const value = (await engineCall("audipick.documents", {
+        projectId: selectedId,
+      })) as { documents: AudiPickDocument[] };
+      setDocuments(value.documents);
+      setProjectDocumentCounts((current) => ({
+        ...current,
+        [selectedId]: value.documents.length,
+      }));
+      addLog(
+        `${paths.length} 个拖放项目`,
+        "拖放导入",
+        `已导入 ${importedCount} 份 PDF${skippedCount ? `，跳过 ${skippedCount} 份` : ""}`,
+        "done",
+      );
+      setResult({ imported: importedCount, skipped: skippedCount });
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function importPdfFolder() {
+    if (!selectedId) {
+      setError("请先选择项目。");
+      return;
+    }
+    const path = await pickPath("folder", "选择包含合同 PDF 的文件夹");
+    if (typeof path !== "string") return;
+    setBusy(true);
+    setError("");
+    try {
+      const imported = (await engineCall("audipick.document_import_folder", {
+        projectId: selectedId,
+        path,
+      })) as { imported?: number; skipped?: number };
+      const value = (await engineCall("audipick.documents", {
+        projectId: selectedId,
+      })) as { documents: AudiPickDocument[] };
+      setDocuments(value.documents);
+      setProjectDocumentCounts((current) => ({
+        ...current,
+        [selectedId]: value.documents.length,
+      }));
+      addLog(
+        path.split(/[\\/]/).pop() ?? path,
+        "文件夹导入",
+        `已导入 ${imported.imported ?? 0} 份 PDF${imported.skipped ? `，跳过 ${imported.skipped} 份` : ""}`,
+        "done",
+      );
+      setResult(imported);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
   async function deleteDocument(documentId: string) {
     const document = documents.find((item) => item.id === documentId);
     if (
@@ -492,6 +909,37 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     setBusy(true);
     try {
       await engineCall("audipick.document_delete", { documentId });
+      if (selected) {
+        const relationGroups = (selected.project.relationGroups ?? [])
+          .filter((group) => group.anchorFileId !== documentId)
+          .map((group) => ({
+            ...group,
+            members: group.members.filter(
+              (member) => member.fileId !== documentId,
+            ),
+          }))
+          .filter((group) => group.members.length > 0);
+        const saved: AudiPickProjectData = {
+          ...selected,
+          project: {
+            ...selected.project,
+            relationGroups,
+            updatedAt: new Date().toISOString(),
+          },
+          contracts: (selected.contracts ?? []).filter(
+            (item) => item.id !== documentId,
+          ),
+          results: (selected.results ?? []).filter(
+            (row) => row.contractId !== documentId,
+          ),
+        };
+        await engineCall("audipick.project_save", saved);
+        setProjects((items) =>
+          items.map((item) =>
+            item.project.id === selected.project.id ? saved : item,
+          ),
+        );
+      }
       setDocuments((current) =>
         current.filter((value) => value.id !== documentId),
       );
@@ -514,6 +962,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     setBusy(true);
     setError("");
     setSelectedDocument(id);
+    setPdfText("");
     try {
       pdfjs.GlobalWorkerOptions.workerSrc =
         "/audipick-pdfjs/legacy/build/pdf.worker.min.js";
@@ -533,15 +982,34 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         `已加载 PDF，共 ${pdf.numPages} 页`,
         "done",
       );
-      let text = "";
+      const stored = (await engineCall("audipick.document_text", {
+        documentId: id,
+      })) as { text?: string };
+      const savedPages = parseSavedPdfPages(stored.text ?? "");
+      const pageTexts = new Map<number, string>();
       let ocrPages = 0;
+      let resumedPages = 0;
+      const unreadablePages: number[] = [];
       for (let number = 1; number <= pdf.numPages; number++) {
         const page = await pdf.getPage(number);
         const content = await page.getTextContent();
         let pageText = content.items
           .map((item: { str?: string }) => item.str ?? "")
           .join(" ");
-        if (pageText.trim().length < 60 && configStatus.ocr?.ready) {
+        const cachedText = savedPages.get(number)?.trim() ?? "";
+        if (
+          pageText.trim().length < 60 &&
+          cachedText.length >= 60 &&
+          !cachedText.includes("需要先配置 OCR")
+        ) {
+          pageText = cachedText;
+          resumedPages += 1;
+        } else if (pageText.trim().length < 60 && configStatus.ocr?.ready) {
+          await saveContractMeta(id, {
+            ocrPending: true,
+            ocrCompletedPages: number - 1,
+            ocrTotalPages: pdf.numPages,
+          });
           const viewport = page.getViewport({ scale: 1.5 });
           const image = document.createElement("canvas");
           image.width = viewport.width;
@@ -557,8 +1025,28 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           })) as { text: string };
           pageText = ocr.text;
           ocrPages += 1;
+          savedPages.set(number, pageText);
+          await engineCall("audipick.document_text_save", {
+            documentId: id,
+            text: serializePdfPages(savedPages),
+          });
+          await saveContractMeta(id, {
+            ocrPending: number < pdf.numPages,
+            ocrCompletedPages: number,
+            ocrTotalPages: pdf.numPages,
+          });
+        } else if (pageText.trim().length < 60) {
+          unreadablePages.push(number);
+          pageText = "【本页文字层过少，需要先配置 OCR 后识别】";
         }
-        text += `---PDF第${number}页---\n${pageText}\n`;
+        pageTexts.set(number, pageText);
+      }
+      const text = serializePdfPages(pageTexts);
+      if (!unreadablePages.length) {
+        await engineCall("audipick.document_text_save", {
+          documentId: id,
+          text,
+        });
       }
       await renderPdfPage(
         pdf,
@@ -568,14 +1056,30 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         pdfRotation,
       );
       setPdfText(text);
+      setDocumentTextLengths((current) => ({ ...current, [id]: text.length }));
+      setOcrRequiredPages(unreadablePages);
+      const isScanned = ocrPages > 0 || resumedPages > 0;
+      await saveContractMeta(id, {
+        isScanned,
+        ocrPending: false,
+        ocrCompletedPages: pdf.numPages,
+        ocrTotalPages: pdf.numPages,
+      });
       setResult({
         documentId: id,
         pages: pdf.numPages,
         textLength: text.length,
         ocrPages,
-        scanned: text.replace(/---PDF第\d+页---/g, "").trim().length < 60,
+        resumedPages,
+        scanned: isScanned,
       });
-      void suggestRule(id, text);
+      if (unreadablePages.length) {
+        setError(
+          `第 ${unreadablePages.join("、")} 页需要 OCR，但当前 OCR 未就绪。请到工具箱设置完成配置后重新读取文档。`,
+        );
+      } else {
+        void suggestRule(id, text);
+      }
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -605,6 +1109,14 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         catalog.map((rule) => rule.id),
         ruleId,
       );
+      await saveContractMeta(documentId, {
+        ruleId: picked.ruleId,
+        detectedRuleId: picked.ruleId,
+        detectedConfidence: picked.confidence,
+        detectedLabel: picked.docLabel,
+        ruleConfirmed: picked.confidence === "high",
+      });
+      setRuleId(picked.ruleId);
       setSuggestedRule(picked.ruleId === ruleId ? undefined : picked);
     } catch {
       // Classification is advisory; a failure must never block extraction.
@@ -680,6 +1192,17 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     setPdfMatches(matches);
     if (matches[0]) await renderPdfPage(pdfDocument, matches[0], pdfSearch);
   }
+  async function jumpPdfMatch(offset: -1 | 1) {
+    if (!pdfDocument || !pdfMatches.length) return;
+    const currentIndex = pdfMatches.indexOf(pdfPage);
+    const nextIndex =
+      currentIndex < 0
+        ? offset > 0
+          ? 0
+          : pdfMatches.length - 1
+        : (currentIndex + offset + pdfMatches.length) % pdfMatches.length;
+    await renderPdfPage(pdfDocument, pdfMatches[nextIndex], pdfSearch);
+  }
   async function jumpEvidence(row: AudiPickResult) {
     const value = String(row.pages ?? row.page ?? row.evidence_page ?? "");
     const match = value.match(/\d+/);
@@ -716,10 +1239,20 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         documentId: selectedDocument,
         imageBase64: data,
       })) as { text: string; engine: string };
-      setPdfText((current) =>
-        current ? `${current}\n---OCR补充---\n${value.text}` : value.text,
-      );
+      const pages = parseSavedPdfPages(pdfText);
+      pages.set(pdfPage, value.text);
+      const nextText = serializePdfPages(pages);
+      setPdfText(nextText);
+      setDocumentTextLengths((current) => ({
+        ...current,
+        [selectedDocument]: nextText.length,
+      }));
+      await engineCall("audipick.document_text_save", {
+        documentId: selectedDocument,
+        text: nextText,
+      });
       setResult(value);
+      setOcrRequiredPages((current) => current.filter((page) => page !== pdfPage));
       addLog("当前文档", "OCR", `${value.engine} 引擎识别完成`, "done");
     } catch (e) {
       addLog("当前文档", "OCR", "识别失败", "error");
@@ -738,6 +1271,10 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           text: pdfText,
         }),
       );
+      setDocumentTextLengths((current) => ({
+        ...current,
+        [selectedDocument]: pdfText.length,
+      }));
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -754,14 +1291,26 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       setError("请选择不同的关联文件。");
       return;
     }
-    const groups = (selected.project.relationGroups ?? []).filter(
-      (group) => group.anchorFileId !== selectedDocument,
+    const previousGroups = selected.project.relationGroups ?? [];
+    const currentGroup = previousGroups.find(
+      (group) => group.anchorFileId === selectedDocument,
     );
-    groups.push({
-      id: `g_${Date.now().toString(36)}`,
+    const nextGroup = {
+      id: currentGroup?.id ?? `g_${Date.now().toString(36)}`,
       anchorFileId: selectedDocument,
-      members: [{ fileId: associationTarget, role: associationRole }],
-    });
+      members: [
+        ...(currentGroup?.members ?? []).filter(
+          (member) => member.fileId !== associationTarget,
+        ),
+        { fileId: associationTarget, role: associationRole },
+      ],
+    };
+    const groups = [
+      ...previousGroups.filter(
+        (group) => group.anchorFileId !== selectedDocument,
+      ),
+      nextGroup,
+    ];
     const saved = {
       ...selected,
       project: { ...selected.project, relationGroups: groups },
@@ -779,21 +1328,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       role: associationRole,
     });
   }
-  async function saveCustomRule() {
-    if (!customRuleName.trim() || !customRulePrompt.includes("【字段定义】")) {
-      setError("自定义模板需要名称，并且提示词必须包含【字段定义】。");
-      return;
-    }
-    const created = window.RuleEngine?.createBlankCustomRule(
-      customRuleName.trim(),
-      "contract",
-    );
-    const id = String(created?.id ?? "");
-    window.RuleEngine?.updateCustomRule(id, {
-      prompt: customRulePrompt,
-      description: "用户自定义审计提取模板",
-    });
-    window.RuleEngine?.resetFieldsCache(id);
+  async function persistCustomRules() {
     const allSettings = await settingsGet();
     const current = (allSettings.audipick ?? {}) as Record<string, unknown>;
     await settingsSet({
@@ -802,37 +1337,140 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         customRules: window.RuleEngine?.getCustomRules() ?? [],
       },
     });
+  }
+  async function saveCustomRule() {
+    if (!customRuleName.trim() || !customRulePrompt.includes("【字段定义】")) {
+      setError("自定义模板需要名称，并且提示词必须包含【字段定义】。");
+      return;
+    }
+    const created = editingCustomRuleId
+      ? undefined
+      : window.RuleEngine?.createBlankCustomRule(
+          customRuleName.trim(),
+          "contract",
+        );
+    const id = editingCustomRuleId || String(created?.id ?? "");
+    window.RuleEngine?.updateCustomRule(id, {
+      name: customRuleName.trim(),
+      shortName: customRuleName.trim(),
+      prompt: customRulePrompt,
+      description: "用户自定义审计提取模板",
+    });
+    window.RuleEngine?.resetFieldsCache(id);
+    await persistCustomRules();
     setCustomRuleName("");
     setCustomRulePrompt("");
+    setEditingCustomRuleId("");
     setRuleRevision((value) => value + 1);
     setRuleId(id);
     setResult({ customRuleSaved: true, id });
   }
+  async function copySelectedRule() {
+    const current = rules.find((rule) => rule.id === ruleId);
+    if (!current) return;
+    const created = window.RuleEngine?.copyBuiltinAsCustom?.(
+      ruleId,
+      `${current.name}（我的模板）`,
+    );
+    if (!created) return;
+    await persistCustomRules();
+    const id = String(created.id ?? "");
+    setRuleRevision((value) => value + 1);
+    setRuleId(id);
+    setTemplateTab("mine");
+    setEditingCustomRuleId(id);
+    setCustomRuleName(String(created.name ?? ""));
+    setCustomRulePrompt(String(created.prompt ?? ""));
+  }
+  function editSelectedRule() {
+    const current = rules.find((rule) => rule.id === ruleId) as
+      | (typeof rules)[number] & { prompt?: string }
+      | undefined;
+    if (!current || current.readonly !== false) return;
+    setEditingCustomRuleId(current.id);
+    setCustomRuleName(current.name);
+    setCustomRulePrompt(
+      current.prompt ?? window.RuleEngine?.getRulePrompt(current.id) ?? "",
+    );
+  }
+  async function deleteSelectedRule() {
+    const current = rules.find((rule) => rule.id === ruleId);
+    if (!current || current.readonly !== false) return;
+    if (!window.confirm(`确认删除模板“${current.name}”？已有提取结果不会删除。`))
+      return;
+    window.RuleEngine?.deleteCustomRule(current.id);
+    await persistCustomRules();
+    const next = rules.find((rule) => rule.readonly !== false)?.id ?? "loan_covenant";
+    setRuleId(next);
+    setEditingCustomRuleId("");
+    setCustomRuleName("");
+    setCustomRulePrompt("");
+    setRuleRevision((value) => value + 1);
+  }
+  async function createLegacyRule(input: {
+    name: string;
+    docKind: "contract" | "table";
+  }) {
+    const created = window.RuleEngine?.createBlankCustomRule(
+      input.name,
+      input.docKind,
+    );
+    if (!created) return;
+    await persistCustomRules();
+    setRuleRevision((value) => value + 1);
+    setRuleId(String(created.id));
+    setTemplateTab("mine");
+  }
+  async function copyLegacyRule(input: {
+    sourceRuleId: string;
+    name: string;
+  }) {
+    const created = window.RuleEngine?.copyBuiltinAsCustom?.(
+      input.sourceRuleId,
+      input.name,
+    );
+    if (!created) return;
+    await persistCustomRules();
+    setRuleRevision((value) => value + 1);
+    setRuleId(String(created.id));
+    setTemplateTab("mine");
+  }
+  async function saveLegacyRulePrompt(targetRuleId: string, prompt: string) {
+    window.RuleEngine?.updateCustomRule(targetRuleId, { prompt });
+    window.RuleEngine?.resetFieldsCache(targetRuleId);
+    await persistCustomRules();
+    setRuleRevision((value) => value + 1);
+  }
+  async function deleteLegacyRule(targetRuleId: string) {
+    const target = rules.find((item) => item.id === targetRuleId);
+    if (!target || target.readonly !== false) return;
+    if (!window.confirm(`确认删除模板“${target.name}”？已有提取结果不会删除。`)) return;
+    window.RuleEngine?.deleteCustomRule(targetRuleId);
+    await persistCustomRules();
+    setRuleId(rules.find((item) => item.readonly !== false)?.id ?? "loan_covenant");
+    setEditingCustomRuleId("");
+    setRuleRevision((value) => value + 1);
+  }
   /// Persist one extraction run's items against the current contract/template.
   async function saveExtractedItems(items: Array<Record<string, unknown>>) {
     if (!selected) return;
-    const retained = (selected.results ?? []).filter(
-      (row) =>
-        !(
-          row.contractId === selectedDocument &&
-          row.ruleId === ruleId &&
-          row.fieldSetId === activeFieldSetId
-        ),
-    );
+    const extractAt = new Date().toISOString();
+    const extractRunId = `run_${Date.now().toString(36)}`;
     const saved = {
       ...selected,
       results: [
-        ...retained,
+        ...(selected.results ?? []),
         ...items.map((item, index) => ({
           ...item,
-          id: `r_${Date.now().toString(36)}_${index}`,
+          id: `r_${extractRunId}_${index}`,
           contractId: selectedDocument,
           ruleId,
           ruleVersion:
             rules.find((rule) => rule.id === ruleId)?.version ?? "1.0",
           fieldKeys: activeFieldKeys,
           fieldSetId: activeFieldSetId,
-          extractAt: new Date().toISOString(),
+          extractAt,
+          extractRunId,
           reviewed: false,
         })),
       ],
@@ -843,6 +1481,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
         project.project.id === selectedId ? saved : project,
       ),
     );
+    setSelectedResultRunId(extractRunId);
   }
 
   /// Two-pass extraction for the revenue workpaper.
@@ -1243,26 +1882,21 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           items,
         );
       if (selected) {
-        const retained = (selected.results ?? []).filter(
-          (row) =>
-            !(
-              row.contractId === selectedDocument &&
-              row.ruleId === ruleId &&
-              row.fieldSetId === activeFieldSetId
-            ),
-        );
+        const extractAt = new Date().toISOString();
+        const extractRunId = `run_deep_${Date.now().toString(36)}`;
         const saved = {
           ...selected,
           results: [
-            ...retained,
+            ...(selected.results ?? []),
             ...items.map((item, index) => ({
               ...item,
-              id: `r_deep_${Date.now().toString(36)}_${index}`,
+              id: `r_${extractRunId}_${index}`,
               contractId: selectedDocument,
               ruleId,
               fieldKeys: activeFieldKeys,
               fieldSetId: activeFieldSetId,
-              extractAt: new Date().toISOString(),
+              extractAt,
+              extractRunId,
               deepReviewed: true,
               reviewed: false,
             })),
@@ -1274,6 +1908,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             project.project.id === selectedId ? saved : project,
           ),
         );
+        setSelectedResultRunId(extractRunId);
         setResult({ deepReview: true, rows: items.length });
       }
     } catch (e) {
@@ -1282,40 +1917,88 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
-  async function startBatch() {
-    if (!documents.length) {
+  async function startBatch(documentIds = documents.map((document) => document.id)) {
+    const targetDocuments = documents.filter((document) =>
+      documentIds.includes(document.id),
+    );
+    if (!targetDocuments.length) {
       setError("项目中没有可提取的 PDF。");
       return;
     }
-    const prompt = `${window.RuleEngine?.getRulePrompt(ruleId) ?? ""}\n\n本次仅返回这些字段：${activeFieldKeys.join(", ")}`;
     setError("");
     try {
-      const jobId = await jobStart("audipick.batch_extract", {
-        ruleId,
-        fieldSetId: activeFieldSetId,
-        fieldKeys: activeFieldKeys,
-        prompt,
-        documents: documents.map((document) => ({
-          id: document.id,
-          name: document.name,
-        })),
-      });
-      addLog(
-        `${documents.length} 份文档`,
-        "批量提取",
-        `按「${rules.find((r) => r.id === ruleId)?.name ?? ruleId}」模板启动`,
-        "info",
+      const textStates = await Promise.all(
+        targetDocuments.map(async (document) => {
+          const value = (await engineCall("audipick.document_text", {
+            documentId: document.id,
+          })) as { text?: string };
+          return { document, ready: Boolean(value.text?.trim()) };
+        }),
       );
-      setBatchJob({
-        jobId,
-        toolId: "audipick",
-        phase: "queued",
-        current: 0,
-        total: documents.length,
-        message: "批量任务已进入队列",
-        severity: "info",
-        outputPaths: [],
-      });
+      const missing = textStates.filter((item) => !item.ready);
+      if (missing.length) {
+        setError(
+          `以下 ${missing.length} 份文件尚未生成文字层，请先逐份点击“读取/预览”（扫描件会自动 OCR 并续存进度）：${missing
+            .slice(0, 6)
+            .map((item) => item.document.name)
+            .join("、")}${missing.length > 6 ? "等" : ""}`,
+        );
+        return;
+      }
+      const groups = new Map<string, AudiPickDocument[]>();
+      for (const document of targetDocuments) {
+        const documentRuleId =
+          getContractMeta(document.id).ruleId ??
+          selected?.project.defaultRuleId ??
+          ruleId;
+        groups.set(documentRuleId, [
+          ...(groups.get(documentRuleId) ?? []),
+          document,
+        ]);
+      }
+      for (const [groupRuleId, groupDocuments] of groups) {
+        const groupFieldKeys = (
+          window.RuleEngine?.getFieldsForRule(groupRuleId) ?? []
+        ).map((field) => field.key);
+        const groupFieldSetId = `${groupRuleId}:${[...groupFieldKeys]
+          .sort()
+          .join("|")}`;
+        const prompt = `${window.RuleEngine?.getRulePrompt(groupRuleId) ?? ""}\n\n本次仅返回这些字段：${groupFieldKeys.join(", ")}`;
+        const jobId = await jobStart("audipick.batch_extract", {
+          ruleId: groupRuleId,
+          fieldSetId: groupFieldSetId,
+          fieldKeys: groupFieldKeys,
+          prompt,
+          documents: groupDocuments.map((document) => ({
+            id: document.id,
+            name: document.name,
+          })),
+        });
+        batchRulePlans.current.set(jobId, {
+          ruleId: groupRuleId,
+          fieldKeys: groupFieldKeys,
+          fieldSetId: groupFieldSetId,
+        });
+        addLog(
+          `${groupDocuments.length} 份文档`,
+          "批量提取",
+          `按「${rules.find((candidate) => candidate.id === groupRuleId)?.name ?? groupRuleId}」模板启动`,
+          "info",
+        );
+        setBatchJob({
+          jobId,
+          toolId: "audipick",
+          phase: "queued",
+          current: 0,
+          total: groupDocuments.length,
+          message:
+            groups.size > 1
+              ? `已按单文件模板拆分为 ${groups.size} 个批次`
+              : "批量任务已进入队列",
+          severity: "info",
+          outputPaths: [],
+        });
+      }
     } catch (e) {
       setError(errorText(e));
     }
@@ -1335,11 +2018,95 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       ),
     );
   }
-  async function exportResults() {
-    const rows = (selected?.results ?? []).filter(
-      (row: any) =>
-        row?.contractId === selectedDocument && row?.ruleId === ruleId,
+  function updateResultField(rowId: string, key: string, value: string) {
+    setProjects((current) =>
+      current.map((project) =>
+        project.project.id === selectedId
+          ? {
+              ...project,
+              results: (project.results ?? []).map((row) =>
+                String(row.id) === rowId ? { ...row, [key]: value } : row,
+              ),
+            }
+          : project,
+      ),
     );
+  }
+  async function saveResultRow() {
+    const latest = projects.find((project) => project.project.id === selectedId);
+    if (!latest) return;
+    await engineCall("audipick.project_save", latest);
+    setResult({ resultSaved: true });
+  }
+  async function copyResultRow(rowId: string) {
+    const row = currentResults.find((item) => String(item.id) === rowId);
+    if (!row) return;
+    await navigator.clipboard.writeText(
+      JSON.stringify(editableResult(row), null, 2),
+    );
+  }
+  function beginEditResult(row: AudiPickResult) {
+    setEditingResult(row);
+    setEditingResultJson(JSON.stringify(editableResult(row), null, 2));
+  }
+  async function saveEditedResult() {
+    if (!selected || !editingResult) return;
+    let fields: unknown;
+    try {
+      fields = JSON.parse(editingResultJson);
+    } catch {
+      setError("结果内容不是有效的 JSON，请检查逗号、引号和括号。");
+      return;
+    }
+    if (!fields || Array.isArray(fields) || typeof fields !== "object") {
+      setError("结果内容必须是一个 JSON 对象。");
+      return;
+    }
+    const saved = {
+      ...selected,
+      results: (selected.results ?? []).map((row) =>
+        row === editingResult ||
+        (editingResult.id && row.id === editingResult.id)
+          ? {
+              ...row,
+              ...(fields as Record<string, unknown>),
+              id: row.id,
+              contractId: row.contractId,
+              ruleId: row.ruleId,
+              ruleVersion: row.ruleVersion,
+              fieldKeys: row.fieldKeys,
+              fieldSetId: row.fieldSetId,
+              extractAt: row.extractAt,
+              extractRunId: row.extractRunId,
+            }
+          : row,
+      ),
+    };
+    setBusy(true);
+    setError("");
+    try {
+      await engineCall("audipick.project_save", saved);
+      setProjects((current) =>
+        current.map((project) =>
+          project.project.id === selectedId ? saved : project,
+        ),
+      );
+      setEditingResult(undefined);
+      setEditingResultJson("");
+      addLog(
+        documents.find((item) => item.id === selectedDocument)?.name ?? "文档",
+        "结果修订",
+        "已保存人工修改，历史提取版本仍保留",
+        "done",
+      );
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function exportResults() {
+    const rows = currentResults;
     if (!rows.length) {
       setError("当前合同和模板还没有提取结果。");
       return;
@@ -1399,27 +2166,880 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
-  return (
-    <>
-      <PageHeader
-        eyebrow="合同审阅管理"
-        title={tool.name}
-        detail="项目、PDF、本地预览和13个审计模板已接入；扫描页走OCR，文字层直接使用工具箱全局LLM。"
-      />
-      <div className="ap-views">
-        <button className={viewMode === "workbench" ? "active" : ""} onClick={() => setViewMode("workbench")}>
-          工作台
-        </button>
-        <button className={viewMode === "templates" ? "active" : ""} onClick={() => setViewMode("templates")}>
-          提取模板库
-        </button>
-        <button className={viewMode === "worklog" ? "active" : ""} onClick={() => setViewMode("worklog")}>
-          处理工作日志
-        </button>
+  async function exportProjectResults(scope: "project" | "document" = "project") {
+    if (!selected) return;
+    const source = latestRowsByDocumentAndRule(
+      (selected.results ?? []).filter(
+        (row) => scope === "project" || row.contractId === selectedDocument,
+      ),
+    );
+    if (!source.length) {
+      setError(scope === "project" ? "当前项目还没有提取结果。" : "当前文件还没有提取结果。");
+      return;
+    }
+    const grouped = new Map<string, AudiPickResult[]>();
+    for (const row of source) {
+      const key = String(row.ruleId ?? "未分类");
+      grouped.set(key, [...(grouped.get(key) ?? []), row]);
+    }
+    const sheets = [...grouped.entries()].map(([sheetRuleId, rows]) => {
+      const exportedRows = rows.map((row) => ({
+        文件名称:
+          documents.find((document) => document.id === row.contractId)?.name ??
+          String(row.contractId ?? ""),
+        ...editableResult(row),
+      }));
+      const columns = [
+        "文件名称",
+        ...new Set(exportedRows.flatMap((row) => Object.keys(row))),
+      ].filter((key, index, all) => all.indexOf(key) === index);
+      return {
+        name:
+          rules.find((candidate) => candidate.id === sheetRuleId)?.shortName ??
+          rules.find((candidate) => candidate.id === sheetRuleId)?.name ??
+          sheetRuleId,
+        rows: exportedRows,
+        columns,
+      };
+    });
+    const outputPath = await pickPath(
+      "save",
+      scope === "project" ? "导出项目全部结果" : "导出当前文件全部模板结果",
+      ["xlsx"],
+      audipickExportName({
+        projectName: selected.project.name,
+        clientName: selected.project.client,
+        fileName:
+          scope === "document"
+            ? documents.find((item) => item.id === selectedDocument)?.name
+            : undefined,
+        typeLabel: scope === "project" ? "项目提取结果" : "文件提取结果",
+      }),
+    );
+    if (typeof outputPath !== "string") return;
+    setBusy(true);
+    setError("");
+    try {
+      setResult(
+        await engineCall("audipick.export_bundle", { outputPath, sheets }),
+      );
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function exportLoanAudit() {
+    if (!selected) return;
+    const model = buildAudiPickLoanAuditModel({
+      project: selected.project,
+      contracts: documents.map((document) => {
+        const meta = getContractMeta(document.id);
+        return {
+          id: document.id,
+          name: document.name,
+          file: document.path,
+          ruleId: meta.ruleId,
+          detectedRuleId: meta.detectedRuleId,
+        };
+      }),
+      results: selected.results ?? [],
+      relationGroups: selected.project.relationGroups ?? [],
+      reportDate:
+        selected.project.loanReportDate ?? selected.project.date ?? "",
+    });
+    if (!model.debts.length) {
+      setError("当前项目还没有可汇总的借款合同提取结果。");
+      return;
+    }
+    const asText = (value: unknown) =>
+      value === null || value === undefined ? "" : String(value);
+    const dashboardRows = [
+      { 指标: "报告日", 结果: model.reportDate },
+      { 指标: "独立债项数", 结果: model.counts.debtCount },
+      { 指标: "主合同文件数", 结果: model.counts.contractCount },
+      { 指标: "本年新签", 结果: model.counts.newSigned },
+      { 指标: "本年生效", 结果: model.counts.newEffective },
+      { 指标: "未来12个月有还款的债项", 结果: model.counts.futureTwelveMonthDebtCount },
+      { 指标: "未来12个月整笔到期债项", 结果: model.counts.maturityWithinTwelveCount },
+      { 指标: "浮动利率债项", 结果: model.counts.floatingRateCount },
+      { 指标: "存在担保债项", 结果: model.counts.securedCount },
+      { 指标: "存在限制条款债项", 结果: model.counts.restrictionCount },
+      { 指标: "利率调整日临近债项", 结果: model.counts.rateResetSoonCount },
+      { 指标: "还款计划待明确债项", 结果: model.counts.pendingRepayment },
+    ];
+    const debtRows = model.debts.map((debt) => ({
+      主文件: debt.contractName,
+      合同编号: debt.contractNo,
+      借款人: debt.borrower,
+      贷款人: debt.lender,
+      币种: debt.currency,
+      合同本金: debt.principal,
+      金额原文: debt.principalText,
+      签约日: debt.signingDate?.iso ?? "",
+      本年新签: debt.newSigned ? "是" : "否",
+      起始日: debt.startDate?.iso ?? "",
+      本年生效: debt.newEffective ? "是" : "否",
+      到期日: debt.maturityDate?.iso ?? "",
+      报告日列报测算: debt.computedStatementClassification,
+      利率类型: asText(debt.raw.interest_rate_type),
+      执行利率: asText(debt.raw.interest_rate),
+      利率调整频率: asText(debt.raw.interest_rate_adjustment_frequency),
+      下次利率调整日: asText(debt.raw.next_interest_rate_adjustment_date),
+      还本方式: asText(debt.raw.repayment_method),
+      本金还款计划: asText(debt.raw.repayment_schedule),
+      借款性质: asText(debt.raw.loan_nature),
+      保证人: asText(debt.raw.guarantor),
+      担保摘要: asText(debt.raw.security_summary),
+      提前还款限制状态: asText(debt.raw.prepayment_restriction_status),
+      财务指标约束状态: asText(debt.raw.financial_covenant_status),
+      加速到期或重大违约触发状态: asText(
+        debt.raw.acceleration_or_material_default_trigger_status,
+      ),
+      限制性契约: asText(debt.raw.covenant_summary),
+      风险标签: debt.risks.map((risk) => risk.label).join("；"),
+      关联资料: debt.relatedFiles
+        .map((file) => `${file.name}（${file.role}）`)
+        .join("；"),
+      审计提示: asText(debt.raw.auditor_summary),
+    }));
+    const currencyRows = model.currencyStats.map((entry) => ({
+      币种代码: entry.currency,
+      币种: entry.currencyName,
+      债项数: entry.debtCount,
+      合同金额合计: entry.amount,
+      未来12个月合同约定还本:
+        model.futureTwelveMonthTotals[entry.currency] ?? "",
+    }));
+    const repaymentRows = model.repaymentPlan.map((row) => ({
+      合同编号: row.contractNo,
+      还款日: row.date,
+      币种: row.currency,
+      本金金额: row.amount,
+      金额说明: row.amountText,
+      解析口径: row.source,
+      状态: row.status,
+    }));
+    const validationRows = model.validations.map((item) => ({
+      级别: item.level === "error" ? "错误" : "提示",
+      代码: item.code,
+      合同或债项: item.debtId ?? "",
+      校验提示: item.message,
+    }));
+    const sheets: Array<{
+      name: string;
+      rows: Array<Record<string, unknown>>;
+      columns?: string[];
+    }> = [
+      { name: "驾驶舱", rows: dashboardRows },
+      { name: "借款清单", rows: debtRows },
+      { name: "分币种汇总", rows: currencyRows },
+      { name: "还款明细", rows: repaymentRows },
+      { name: "校验提示", rows: validationRows },
+    ];
+    const currencies = [...new Set(model.debts.map((debt) => debt.currency))].sort();
+    for (const currency of currencies) {
+      const currencyDebts = model.debts.filter((debt) => debt.currency === currency);
+      const rows = model.monthlyMatrix.months.map((month) => {
+        const row: Record<string, unknown> = { 还款月份: month };
+        for (const debt of currencyDebts) {
+          const cell = model.monthlyMatrix.rowByDebtId[debt.id]?.cells[month];
+          row[debt.displayName] = !cell
+            ? ""
+            : cell.amount === null
+              ? "待明确"
+              : cell.amount;
+        }
+        row.当月合计 = model.monthlyMatrix.totalsByCurrency[currency]?.[month] ?? "";
+        return row;
+      });
+      sheets.push({
+        name: `还款计划-${currency}`.slice(0, 31),
+        rows,
+      });
+    }
+    const outputPath = await pickPath(
+      "save",
+      "导出借款审计 Excel",
+      ["xlsx"],
+      audipickExportName({
+        projectName: selected.project.name,
+        clientName: selected.project.client,
+        typeLabel: "借款审计底稿",
+      }),
+    );
+    if (typeof outputPath !== "string") return;
+    setBusy(true);
+    setError("");
+    try {
+      setResult(
+        await engineCall("audipick.export_bundle", { outputPath, sheets }),
+      );
+      addLog(selected.project.name, "借款审计", "借款审计 Excel 已导出", "done");
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function exportWorkLog() {
+    if (!workLog.length) {
+      setError("当前没有可导出的处理日志。");
+      return;
+    }
+    const outputPath = await pickPath(
+      "save",
+      "导出 AudiPick 处理日志",
+      ["xlsx"],
+      audipickExportName({ typeLabel: "AudiPick处理日志" }),
+    );
+    if (typeof outputPath !== "string") return;
+    setBusy(true);
+    try {
+      setResult(
+        await engineCall("audipick.export", {
+          ruleId: "worklog",
+          results: workLog.map((entry) => ({
+            文件或项目: entry.fileName,
+            处理步骤: entry.step,
+            处理详情: entry.detail,
+            状态:
+              entry.status === "done"
+                ? "完成"
+                : entry.status === "error"
+                  ? "失败"
+                  : entry.status === "warn"
+                    ? "警告"
+                    : "信息",
+            时间: entry.time,
+          })),
+          columns: ["文件或项目", "处理步骤", "处理详情", "状态", "时间"],
+          outputPath,
+        }),
+      );
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const projectStats = {
+    total: projects.length,
+    active: projects.filter((item) => item.project.status !== "completed").length,
+    completed: projects.filter((item) => item.project.status === "completed").length,
+    documents: Object.values(projectDocumentCounts).reduce(
+      (sum, count) => sum + count,
+      0,
+    ),
+  };
+  const visibleProjects = [...projects]
+    .filter((item) => {
+      const query = projectSearch.trim().toLowerCase();
+      const matchesSearch = !query ||
+        `${item.project.name} ${item.project.client ?? ""}`.toLowerCase().includes(query);
+      const status = item.project.status ?? "active";
+      return matchesSearch &&
+        (projectStatusFilter === "all" || status === projectStatusFilter);
+    })
+    .sort((left, right) => {
+      const leftDate = left.project.date ?? "";
+      const rightDate = right.project.date ?? "";
+      if (projectSort === "date_asc") return leftDate.localeCompare(rightDate);
+      if (projectSort === "name_asc") return left.project.name.localeCompare(right.project.name, "zh-CN");
+      if (projectSort === "client_asc") return (left.project.client ?? "").localeCompare(right.project.client ?? "", "zh-CN");
+      if (projectSort === "results_desc") return (right.results?.length ?? 0) - (left.results?.length ?? 0);
+      if (projectSort === "documents_desc") return (projectDocumentCounts[right.project.id] ?? 0) - (projectDocumentCounts[left.project.id] ?? 0);
+      return rightDate.localeCompare(leftDate);
+    });
+  const selectedRule = rules.find((rule) => rule.id === ruleId) as
+    | (typeof rules)[number] & {
+        docKind?: string;
+        useCase?: string;
+        example?: { category?: string; quote?: string; hint?: string };
+        prompt?: string;
+      }
+    | undefined;
+  const ruleOptions = rules.map((item) => ({ id: item.id, name: item.name }));
+  const dashboardProjects: LegacyDashboardProject[] = projects.map((item) => {
+    const fileCount = projectDocumentCounts[item.project.id] ?? 0;
+    const extractedIds = new Set((item.results ?? []).map((row) => String(row.contractId ?? "")));
+    const reviewTotal = item.results?.length ?? 0;
+    const reviewed = (item.results ?? []).filter((row) => row.reviewed).length;
+    const extracted = extractedIds.size;
+    const complete = item.project.status === "completed";
+    const percent = fileCount === 0
+      ? 0
+      : Math.min(100, Math.round((extracted / fileCount) * 75 + (reviewTotal ? reviewed / reviewTotal : 0) * 25));
+    const phase = complete
+      ? { phase: "已完成", tone: "green" as const }
+      : fileCount === 0
+        ? { phase: "准备材料", tone: "gray" as const }
+        : extracted === 0
+          ? { phase: "待提取", tone: "amber" as const }
+          : reviewed < reviewTotal
+            ? { phase: "待复核", tone: "blue" as const }
+            : { phase: "可完成", tone: "green" as const };
+    const updatedAt = item.project.updatedAt ?? item.project.date ?? item.project.createdAt ?? item.project.t;
+    return {
+      id: item.project.id,
+      name: item.project.name,
+      client: item.project.client,
+      date: item.project.date,
+      status: complete ? "completed" : "active",
+      createdAt: item.project.createdAt ?? item.project.t ?? item.project.date,
+      updatedAt,
+      fileCount,
+      templateCount: new Set((item.results ?? []).map((row) => String(row.ruleId ?? ""))).size,
+      defaultTemplateName: rules.find((candidate) => candidate.id === item.project.defaultRuleId)?.name,
+      progress: {
+        ...phase,
+        rootCount: fileCount,
+        extracted,
+        reviewTotal,
+        reviewed,
+        percent,
+        ready: fileCount > 0 && extracted === fileCount && reviewed === reviewTotal,
+        stale: !complete && Boolean(updatedAt) && Date.now() - new Date(String(updatedAt)).getTime() > 30 * 86400000,
+      },
+    };
+  });
+  const dashboardById = new Map(projects.map((item) => [item.project.id, item]));
+  const relationMemberRoles = new Map(
+    (selected?.project.relationGroups ?? []).flatMap((group) =>
+      group.members.map((member) => [member.fileId, member.role] as const),
+    ),
+  );
+  const legacyProjectDocuments = documents.map((document) => {
+    const meta = getContractMeta(document.id);
+    const rows = selected?.results?.filter((row) => row.contractId === document.id) ?? [];
+    return {
+      id: document.id,
+      name: document.name,
+      textLength: documentTextLengths[document.id] ?? 0,
+      isScanned: meta.isScanned,
+      status: document.status,
+      resultCount: rows.length,
+      appliedRuleCount: new Set(rows.map((row) => String(row.ruleId ?? ""))).size,
+      ruleId: meta.ruleId ?? selected?.project.defaultRuleId,
+      ruleConfirmed: meta.ruleConfirmed,
+      detectedRuleId: meta.detectedRuleId,
+      detectedConfidence: meta.detectedConfidence,
+      detectedLabel: meta.detectedLabel,
+      associationRole: relationMemberRoles.get(document.id) ?? null,
+    };
+  });
+  const pendingOcrMetas = (selected?.contracts ?? []).filter(
+    (meta) => meta.ocrPending,
+  );
+  const pendingOcrMeta = pendingOcrMetas[0];
+  const legacyOcrTask = pendingOcrMeta
+    ? {
+        id: pendingOcrMeta.id,
+        fileName:
+          documents.find((document) => document.id === pendingOcrMeta.id)?.name ??
+          pendingOcrMeta.id,
+        completedPages: pendingOcrMeta.ocrCompletedPages ?? 0,
+        totalPages: pendingOcrMeta.ocrTotalPages,
+        remainingCount: Math.max(0, pendingOcrMetas.length - 1),
+      }
+    : null;
+  const activeDocument = documents.find((document) => document.id === selectedDocument);
+  const activeMeta = selectedDocument ? getContractMeta(selectedDocument) : undefined;
+  const activeDocumentAllRows = selected?.results?.filter((row) => row.contractId === selectedDocument) ?? [];
+  const workpaperRows = currentResults.filter((row) => {
+    const query = workpaperFilter.trim().toLocaleLowerCase("zh-CN");
+    return !query || JSON.stringify(editableResult(row)).toLocaleLowerCase("zh-CN").includes(query);
+  });
+  const currentTheme = document.documentElement.dataset.theme ?? "classic-dark";
+  const ocrDisplayLabel = configStatus.ocr?.engine === "baidu"
+    ? "百度OCR"
+    : configStatus.ocr?.engine === "local"
+      ? "本机OCR"
+      : "AI视觉";
+  void themeRevision;
+  const themeNames: Record<string, string> = {
+    "green-dark": "深绿",
+    "classic-dark": "黄黑",
+    "yellow-light": "黄白",
+    "blue-white": "蓝白",
+    "red-white": "红白",
+    "purple-light": "紫白",
+    "gray-light": "灰白",
+    "dark-blue": "深蓝",
+  };
+  const logDrawer = (
+    <div className="ap-legacy-log-panel">
+      <div className="section-title"><h3>处理工作日志</h3><button className="secondary" onClick={() => setLogOpen(false)}>关闭</button></div>
+      <div className="worklog-list">
+        {workLog.length === 0 ? <p className="hint">暂无处理记录</p> : workLog.map((entry) => <div key={entry.id} className={`worklog-item worklog-${entry.status}`}><strong>{entry.fileName}</strong><span>{entry.step}</span><small>{entry.detail} · {entry.time}</small></div>)}
       </div>
+      <div className="actions"><button className="secondary" onClick={clearLog}>清空</button><button className="secondary" disabled={!workLog.length} onClick={() => void exportWorkLog()}>导出</button></div>
+    </div>
+  );
+
+  if (viewMode === "home") {
+    return (
+      <AudiPickLegacyHome
+        onStart={() => {
+          setViewMode("workbench");
+          try {
+            if (!localStorage.getItem("ap_tour_done")) setTourOpen(true);
+          } catch {
+            setTourOpen(true);
+          }
+        }}
+        onConfig={() => setViewMode("config")}
+      />
+    );
+  }
+  const useParityShell = true as boolean;
+  if (useParityShell) return (
+    <AudiPickLegacyShell
+      activePage={viewMode}
+      configReady={Boolean(configStatus.llm?.ready)}
+      logCount={workLog.length}
+      logOpen={logOpen}
+      themeLabel={themeNames[currentTheme] ?? currentTheme}
+      onNavigate={(page) => {
+        if (page === "guide") {
+          setViewMode("workbench");
+          setSelectedId("");
+          setSelectedDocument("");
+          setLoanAuditOpen(false);
+          setTourOpen(true);
+          return;
+        }
+        setViewMode(page);
+        setLoanAuditOpen(false);
+        if (page !== "workbench") {
+          setSelectedId("");
+          setSelectedDocument("");
+        }
+      }}
+      onToggleLog={() => setLogOpen((open) => !open)}
+      onOpenTheme={() => setThemePickerOpen(true)}
+      logDrawer={logDrawer}
+    >
+      {viewMode === "workbench" && !selectedId && (
+        <AudiPickLegacyDashboard
+          projects={dashboardProjects}
+          templates={ruleOptions}
+          busy={busy}
+          createError=""
+          initialTemplateId={defaultRuleId}
+          onCreateProject={(values) => create(values)}
+          onContinueProject={(project) => {
+            const source = dashboardById.get(project.id);
+            setSelectedId(project.id);
+            setSelectedDocument("");
+            setRuleId(source?.project.defaultRuleId ?? "loan_covenant");
+          }}
+          onDeleteProject={(project) => remove(project.id)}
+          onProjectStatusChange={(project, status: AudiPickLegacyProjectStatus) => updateProjectStatus(status, dashboardById.get(project.id))}
+        />
+      )}
+      {viewMode === "workbench" && selected && loanAuditOpen && (
+        <>
+          {error && <div className="error-box">{error}</div>}
+          <AudiPickLegacyLoanAudit
+            project={selected.project}
+            contracts={documents.map((document) => {
+              const meta = getContractMeta(document.id);
+              return {
+                id: document.id,
+                name: document.name,
+                file: document.path,
+                ruleId: meta.ruleId,
+                detectedRuleId: meta.detectedRuleId,
+              };
+            })}
+            results={selected.results ?? []}
+            relationGroups={selected.project.relationGroups ?? []}
+            reportDate={
+              selected.project.loanReportDate ?? selected.project.date ?? ""
+            }
+            busy={busy}
+            actions={{
+              onBack: () => setLoanAuditOpen(false),
+              onReportDateChange: updateLoanReportDate,
+              onExport: exportLoanAudit,
+              onOpenWorkpaper: async (contractId) => {
+                setLoanAuditOpen(false);
+                setRuleId("loan_general");
+                setContractView("workpaper");
+                await openDocument(contractId);
+              },
+            }}
+          />
+        </>
+      )}
+      {viewMode === "workbench" && selected && !selectedDocument && !loanAuditOpen && (
+        <>
+          {error && <div className="error-box">{error}</div>}
+          <AudiPickLegacyProject
+            project={{ id: selected.project.id, name: selected.project.name, client: selected.project.client, date: selected.project.date, defaultRuleName: rules.find((item) => item.id === selected.project.defaultRuleId)?.name }}
+            documents={legacyProjectDocuments}
+            rules={ruleOptions}
+            relationGroups={selected.project.relationGroups ?? []}
+            selectedDocumentIds={selectedDocumentIds}
+            busy={busy}
+            ocrLabel={ocrDisplayLabel}
+            ocrTask={legacyOcrTask}
+            showLoanAudit={(selected.results ?? []).some(
+              (row) => row.ruleId === "loan_general",
+            )}
+            onSelectionChange={setSelectedDocumentIds}
+            actions={{
+              onBack: () => { setSelectedId(""); setSelectedDocument(""); },
+              onBatchExtract: (ids) => startBatch(ids),
+              onOpenLoanAudit: () => setLoanAuditOpen(true),
+              onExportProject: () => exportProjectResults("project"),
+              onPickPdfs: importPdfs,
+              onPickFolder: importPdfFolder,
+              onResumeOcr: (id) => openDocument(id),
+              onDiscardOcr: async (id) => {
+                await engineCall("audipick.document_text_save", {
+                  documentId: id,
+                  text: "",
+                });
+                await saveContractMeta(id, {
+                  ocrPending: false,
+                  ocrCompletedPages: 0,
+                });
+                setDocumentTextLengths((current) => ({ ...current, [id]: 0 }));
+              },
+              onOpenDocument: async (id) => { const meta = getContractMeta(id); setRuleId(meta.ruleId ?? selected.project.defaultRuleId ?? "loan_covenant"); setContractView("detail"); await openDocument(id); },
+              onDeleteDocument: deleteDocument,
+              onRuleChange: async (id, nextRuleId) => { await saveContractMeta(id, { ruleId: nextRuleId, ruleConfirmed: false }); },
+              onConfirmRule: async (id, nextRuleId) => { await saveContractMeta(id, { ruleId: nextRuleId, ruleConfirmed: true }); },
+              onExtractDocument: async (id) => { const meta = getContractMeta(id); setRuleId(meta.ruleId ?? selected.project.defaultRuleId ?? "loan_covenant"); setPendingExtractDocumentId(id); setContractView("detail"); await openDocument(id); },
+              onViewWorkpaper: async (id, nextRuleId) => { setRuleId(nextRuleId ?? getContractMeta(id).ruleId ?? selected.project.defaultRuleId ?? "loan_covenant"); setContractView("workpaper"); await openDocument(id); },
+              onManageAssociation: async (id) => { setSelectedDocument(id); setAssociationTarget(documents.find((item) => item.id !== id)?.id ?? ""); },
+              onRemoveAssociation: removeAssociation,
+              onConfirmAssociation: async (fileId, anchorId, suggestion) => { setSelectedDocument(anchorId); setAssociationTarget(fileId); setAssociationRole(suggestion.role); },
+            }}
+          />
+        </>
+      )}
+      {viewMode === "workbench" && selected && selectedDocument && activeDocument && !loanAuditOpen && (
+        <>
+          {error && <div className="error-box">{error}</div>}
+          <AudiPickLegacyContract
+            view={contractView}
+            projectName={selected.project.name}
+            contractName={activeDocument.name}
+            clientName={selected.project.client}
+            projectDate={selected.project.date}
+            textLength={pdfText.length}
+            totalExtracted={activeDocumentAllRows.length}
+            isScanned={Boolean(activeMeta?.isScanned)}
+            recognitionLabel={activeMeta?.isScanned ? ocrDisplayLabel : "文字PDF"}
+            aiReady={Boolean(configStatus.llm?.ready)}
+            busy={busy}
+            previewOpen={previewOpen}
+            previewWidthPercent={previewWidthPercent}
+            preview={
+              <div className="pdf-panel">
+                <div className="pdf-toolbar">
+                  <button
+                    className="secondary"
+                    disabled={!pdfDocument || pdfPage <= 1}
+                    onClick={() =>
+                      void renderPdfPage(pdfDocument, pdfPage - 1)
+                    }
+                  >
+                    上一页
+                  </button>
+                  <label className="aplc-pdf-page-jump">
+                    <input
+                      aria-label="PDF 页码"
+                      type="number"
+                      min={1}
+                      max={Math.max(1, pdfPages)}
+                      value={pdfPage}
+                      disabled={!pdfDocument}
+                      onChange={(event) => {
+                        const nextPage = Math.min(
+                          Math.max(1, Number(event.target.value) || 1),
+                          Math.max(1, pdfPages),
+                        );
+                        void renderPdfPage(pdfDocument, nextPage);
+                      }}
+                    />
+                    <span>/ {pdfPages || "-"}</span>
+                  </label>
+                  <button
+                    className="secondary"
+                    disabled={!pdfDocument || pdfPage >= pdfPages}
+                    onClick={() =>
+                      void renderPdfPage(pdfDocument, pdfPage + 1)
+                    }
+                  >
+                    下一页
+                  </button>
+                  <button
+                    className="secondary"
+                    disabled={!pdfDocument}
+                    onClick={() => {
+                      const value = Math.max(0.6, pdfScale - 0.15);
+                      setPdfScale(value);
+                      void renderPdfPage(
+                        pdfDocument,
+                        pdfPage,
+                        pdfSearch,
+                        value,
+                        pdfRotation,
+                      );
+                    }}
+                  >
+                    缩小
+                  </button>
+                  <button
+                    className="secondary"
+                    disabled={!pdfDocument}
+                    onClick={() => {
+                      const value = Math.min(2.5, pdfScale + 0.15);
+                      setPdfScale(value);
+                      void renderPdfPage(
+                        pdfDocument,
+                        pdfPage,
+                        pdfSearch,
+                        value,
+                        pdfRotation,
+                      );
+                    }}
+                  >
+                    放大
+                  </button>
+                  <button
+                    className="secondary"
+                    disabled={!pdfDocument}
+                    onClick={() => {
+                      const value = (pdfRotation + 90) % 360;
+                      setPdfRotation(value);
+                      void renderPdfPage(
+                        pdfDocument,
+                        pdfPage,
+                        pdfSearch,
+                        pdfScale,
+                        value,
+                      );
+                    }}
+                  >
+                    旋转
+                  </button>
+                </div>
+                <div className="aplc-pdf-search">
+                  <input
+                    value={pdfSearch}
+                    placeholder="搜索 PDF 原文"
+                    aria-label="搜索 PDF 原文"
+                    onChange={(event) => setPdfSearch(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void searchPdf();
+                    }}
+                  />
+                  <button
+                    className="secondary"
+                    disabled={!pdfDocument || !pdfSearch.trim()}
+                    onClick={() => void searchPdf()}
+                  >
+                    搜索
+                  </button>
+                  <button
+                    className="secondary"
+                    disabled={!pdfMatches.length}
+                    onClick={() => void jumpPdfMatch(-1)}
+                  >
+                    上一个
+                  </button>
+                  <button
+                    className="secondary"
+                    disabled={!pdfMatches.length}
+                    onClick={() => void jumpPdfMatch(1)}
+                  >
+                    下一个
+                  </button>
+                  {pdfSearch && (
+                    <small>
+                      命中页：{pdfMatches.length ? pdfMatches.join("、") : "无"}
+                    </small>
+                  )}
+                </div>
+                <canvas ref={canvasRef} />
+              </div>
+            }
+            contractText={pdfText}
+            fileFlow={{
+              ruleId,
+              rules: ruleOptions,
+              ruleName: selectedRule?.name ?? ruleId,
+              detectedLabel: activeMeta?.detectedLabel ?? suggestedRule?.docLabel,
+              detectedConfidence: (activeMeta?.detectedConfidence ?? suggestedRule?.confidence) as "high" | "medium" | "low" | undefined,
+              detectedReason: suggestedRule?.reason,
+              ruleConfirmed: Boolean(activeMeta?.ruleConfirmed),
+              resultCount: currentResults.length,
+              versionCount: resultRuns.length,
+              appliedRuleCount: new Set(activeDocumentAllRows.map((row) => String(row.ruleId ?? ""))).size,
+              associationSummary: relationMemberRoles.has(selectedDocument) ? `已作为${relationMemberRoles.get(selectedDocument)}关联` : undefined,
+              extractDisabled: !pdfText.trim() || !configStatus.llm?.ready,
+              onRuleChange: (nextRuleId) => { setRuleId(nextRuleId); void saveContractMeta(selectedDocument, { ruleId: nextRuleId, ruleConfirmed: false }); },
+              onConfirmRule: (nextRuleId) => void saveContractMeta(selectedDocument, { ruleId: nextRuleId, ruleConfirmed: true }),
+              onManageAssociation: () => setAssociationTarget(documents.find((item) => item.id !== selectedDocument)?.id ?? ""),
+              onExtract: () => void extract(),
+              onExportCurrent: () => void exportResults(),
+              onExportAll: () => void exportProjectResults("document"),
+            }}
+            workpaper={{
+              ruleId,
+              rules: ruleOptions,
+              versions: resultRuns.map((run, index) => ({ id: run.id, label: `${index === 0 ? "最新 · " : ""}${run.extractAt ? new Date(run.extractAt).toLocaleString() : `版本 ${resultRuns.length - index}`}`, count: run.rows.length })),
+              versionId: activeResultRun?.id ?? "latest",
+              filterText: workpaperFilter,
+              columns: fields.map((field) => ({ key: field.key, label: field.label, editable: true, long: /原文|摘要|提示|说明/.test(field.label) })),
+              rows: workpaperRows.map((row) => ({ id: String(row.id), reviewed: Boolean(row.reviewed), values: editableResult(row) })),
+              selectedRowId: selectedWorkRowId,
+              extra:
+                revenueMissingTasks.length > 0 ? (
+                  <div className="error-box aplc-revenue-missing">
+                    <strong>
+                      收入底稿待补资料（{revenueMissingTasks.length}）
+                    </strong>
+                    {revenueMissingTasks
+                      .slice(0, 8)
+                      .map((task: any, index: number) => (
+                        <p key={String(task.id ?? index)}>
+                          {task.blocking ? "【阻塞】" : ""}
+                          {String(
+                            task.text ??
+                              task.title ??
+                              task.question ??
+                              task.message ??
+                              "需要补充支持资料",
+                          )}
+                          {Array.isArray(task.questionNos) &&
+                          task.questionNos.length
+                            ? `（涉及第 ${task.questionNos.join("、")}题）`
+                            : ""}
+                        </p>
+                      ))}
+                  </div>
+                ) : undefined,
+              onRuleChange: setRuleId,
+              onVersionChange: setSelectedResultRunId,
+              onFilterChange: setWorkpaperFilter,
+              onSelectRow: setSelectedWorkRowId,
+              onFieldChange: updateResultField,
+              onSaveRow: () => void saveResultRow(),
+              onCopyRow: (rowId) => void copyResultRow(rowId),
+              onToggleReviewed: (rowId) => void toggleReviewed(rowId),
+              onOpenEvidence: (rowId) => { const row = currentResults.find((item) => String(item.id) === rowId); if (row) void jumpEvidence(row); },
+            }}
+            onBackWorkbench={() => { setSelectedDocument(""); setSelectedId(""); }}
+            onBackProject={() => setSelectedDocument("")}
+            onViewChange={setContractView}
+            onTogglePreview={() => setPreviewOpen((open) => !open)}
+            onPreviewWidthChange={setPreviewWidthPercent}
+            onContractTextChange={setPdfText}
+            onSaveContractText={() => void saveText()}
+            onCopyContractText={() => void navigator.clipboard.writeText(pdfText)}
+          />
+        </>
+      )}
+      {viewMode === "templates" && (
+        <AudiPickLegacyTemplates
+          rules={rules.map((item) => { const source = item as typeof item & { shortName?: string; description?: string; category?: string; docKind?: string; useCase?: string; prompt?: string; example?: { category?: string; quote?: string; hint?: string } }; return { ...source, fields: window.RuleEngine?.getFieldsForRule(item.id) ?? [], prompt: source.prompt ?? window.RuleEngine?.getRulePrompt(item.id), docKind: source.docKind ?? "contract", isCustom: item.readonly === false }; })}
+          selectedRuleId={ruleId}
+          activeTab={(templateTab === "mine" ? "custom" : templateTab) as AudiPickLegacyTemplateTab}
+          search={templateSearch}
+          editingRuleId={editingCustomRuleId || null}
+          busy={busy}
+          message=""
+          actions={{ onCreateRule: createLegacyRule, onCopyRule: copyLegacyRule, onSavePrompt: saveLegacyRulePrompt, onDeleteRule: deleteLegacyRule, onSelectRule: setRuleId, onTabChange: (tab) => setTemplateTab(tab === "custom" ? "mine" : tab), onSearchChange: setTemplateSearch, onEditRule: (id) => setEditingCustomRuleId(id ?? "") }}
+        />
+      )}
+      {viewMode === "config" && <AudiPickLegacyConfig status={configStatus} onSaved={() => void refreshConfigStatus()} />}
+      {viewMode === "guide" && <AudiPickLegacyGuide onClose={() => setViewMode("workbench")} />}
+      {associationTarget && selectedDocument && <div className="ap-legacy-theme-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setAssociationTarget(""); }}><section className="ap-legacy-theme-modal"><div className="section-title"><h3>管理关联资料</h3><button className="secondary" onClick={() => setAssociationTarget("")}>关闭</button></div><p className="hint">主文件：{documents.find((item) => item.id === selectedDocument)?.name}</p><label className="field"><span>关联文件</span><select value={associationTarget} onChange={(event) => setAssociationTarget(event.target.value)}>{documents.filter((item) => item.id !== selectedDocument).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label className="field"><span>资料角色</span><select value={associationRole} onChange={(event) => setAssociationRole(event.target.value)}><option value="补充协议/变更">补充协议/变更</option><option value="订单/结算单">订单/结算单</option><option value="验收/签收资料">验收/签收资料</option><option value="发票/回款资料">发票/回款资料</option><option value="其他支持资料">其他支持资料</option></select></label><div className="actions"><button className="primary" disabled={busy} onClick={() => void saveAssociation().then(() => setAssociationTarget(""))}>保存关联</button></div></section></div>}
+      {themePickerOpen && <div className="ap-legacy-theme-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setThemePickerOpen(false); }}><section className="ap-legacy-theme-modal"><div className="section-title"><h3>主题设置</h3><button className="secondary" onClick={() => setThemePickerOpen(false)}>关闭</button></div><p className="hint">颜色与工具箱保持同步，AudiPick 页面布局不变。</p><div className="ap-legacy-theme-grid">{Object.entries(themeNames).map(([id, label]) => <button key={id} className={currentTheme === id ? "primary" : "secondary"} onClick={() => { setSavedTheme(id); setThemeRevision((value) => value + 1); }}>{label}</button>)}</div></section></div>}
+      <AudiPickLegacyTour
+        open={tourOpen}
+        onRequestClose={(reason) => {
+          setTourOpen(false);
+          if (reason === "complete" || reason === "skip") {
+            try {
+              localStorage.setItem("ap_tour_done", "1");
+            } catch {
+              /* Browser storage can be disabled without blocking the tour. */
+            }
+          }
+        }}
+      />
+    </AudiPickLegacyShell>
+  );
+
+  /* The legacy JSX below is intentionally unreachable while the parity shell is
+     integrated incrementally. It remains in this patch as a short-term safety
+     net for moving specialized revenue-workpaper controls into the new slots. */
+  return (
+    <div className="ap-product-shell">
+      <aside className="ap-product-sidebar">
+        <div className="ap-product-brand">
+          <span className="ap-product-mark">AP</span>
+          <div>
+            <strong>AudiPick</strong>
+            <small>合同摘录与审阅</small>
+          </div>
+        </div>
+        <nav className="ap-product-nav" aria-label="AudiPick 功能导航">
+          <button
+            className={viewMode === "workbench" ? "active" : ""}
+            onClick={() => {
+              setViewMode("workbench");
+              setSelectedId("");
+              setSelectedDocument("");
+            }}
+          >
+            <span>⌂</span>项目工作台
+          </button>
+          <button
+            className={viewMode === "templates" ? "active" : ""}
+            onClick={() => setViewMode("templates")}
+          >
+            <span>▦</span>提取模板库
+          </button>
+          <button
+            className={viewMode === "worklog" ? "active" : ""}
+            onClick={() => setViewMode("worklog")}
+          >
+            <span>≡</span>处理工作日志
+          </button>
+          <button
+            className={viewMode === "guide" ? "active" : ""}
+            onClick={() => setViewMode("guide")}
+          >
+            <span>?</span>使用指南
+          </button>
+        </nav>
+        <div className="ap-product-status">
+          <span className={configStatus.llm?.ready ? "ready" : ""} />
+          <div>
+            <strong>{configStatus.llm?.ready ? "AI 已就绪" : "AI 尚未配置"}</strong>
+            <small>数据由工具箱 Rust / SQLite 管理</small>
+          </div>
+        </div>
+        <p className="ap-theme-note">配色实时跟随工具箱主题</p>
+      </aside>
+      <div className="ap-product-main">
+        <PageHeader
+          eyebrow="合同审阅管理"
+          title={viewMode === "templates" ? "提取模板库" : viewMode === "worklog" ? "处理工作日志" : viewMode === "guide" ? "使用指南" : selected?.project.name ?? tool.name}
+          detail="沿用独立版 AudiPick 的操作布局，文件、结果和设置仍由工具箱统一安全管理。"
+        />
       {viewMode === "workbench" && (
       <>
-      <StepIndicator
+      {selectedId && <StepIndicator
         steps={[
           { key: "1", label: "项目", disabled: false },
           { key: "2", label: "合同文件", disabled: !selectedId },
@@ -1435,64 +3055,96 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             document.getElementById("ap-extract")?.scrollIntoView({ behavior: "smooth" });
           }
         }}
-      />
-      <div className="workspace">
-        <section id="ap-proj" className="form-card">
-          <div className="section-title">
-            <h2>项目</h2>
-            <span className="pill preview">迁移进行中</span>
-          </div>
-          <div className="form-grid">
-            <label className="field">
-              <span>项目名称</span>
-              <input value={name} onChange={(e) => setName(e.target.value)} />
-            </label>
-            <label className="field">
-              <span>客户名称</span>
-              <input
-                value={client}
-                onChange={(e) => setClient(e.target.value)}
-              />
-            </label>
-          </div>
-          <div className="actions">
-            <button
-              className="primary"
-              disabled={busy}
-              onClick={() => void create()}
-            >
-              新建项目
-            </button>
-            <button
-              className="secondary"
-              disabled={busy}
-              onClick={() => void refresh()}
-            >
-              刷新
-            </button>
-            <button
-              className="secondary"
-              disabled={busy}
-              onClick={() => void exportBackup()}
-            >
-              导出迁移备份
-            </button>
-          </div>
-          <div className="list-card">
-            {projects.map((value) => (
-              <button
-                key={value.project.id}
-                className={
-                  value.project.id === selectedId ? "secondary" : "browse"
-                }
-                onClick={() => setSelectedId(value.project.id)}
-              >
-                {value.project.name}
-                {value.project.client ? ` · ${value.project.client}` : ""}
-              </button>
-            ))}
-          </div>
-        </section>
+      />}
+      <div className={`workspace ${!selectedId ? "ap-dashboard-workspace" : ""}`}>
+        {!selectedId ? (
+          <section id="ap-proj" className="ap-dashboard">
+            <div className="ap-stat-grid">
+              <div><span>全部项目</span><strong>{projectStats.total}</strong></div>
+              <div><span>进行中</span><strong>{projectStats.active}</strong></div>
+              <div><span>已完成</span><strong>{projectStats.completed}</strong></div>
+              <div><span>合同文件</span><strong>{projectStats.documents}</strong></div>
+            </div>
+            <div className="form-card ap-dashboard-card">
+              <div className="section-title">
+                <div>
+                  <h2>项目工作台</h2>
+                  <p className="hint">查找项目、查看处理进度或新建摘录任务。</p>
+                </div>
+                <div className="actions compact">
+                  <button className="secondary" disabled={busy} onClick={() => void refresh()}>刷新</button>
+                  <button className="secondary" disabled={busy} onClick={() => void exportBackup()}>导出备份</button>
+                </div>
+              </div>
+              <div className="ap-dashboard-filters">
+                <input
+                  value={projectSearch}
+                  onChange={(event) => setProjectSearch(event.target.value)}
+                  placeholder="搜索项目或客户名称"
+                />
+                <select value={projectStatusFilter} onChange={(event) => setProjectStatusFilter(event.target.value)}>
+                  <option value="all">全部状态</option>
+                  <option value="active">进行中</option>
+                  <option value="completed">已完成</option>
+                </select>
+                <select value={projectSort} onChange={(event) => setProjectSort(event.target.value)}>
+                  <option value="date_desc">日期：从新到旧</option>
+                  <option value="date_asc">日期：从旧到新</option>
+                  <option value="name_asc">项目名称</option>
+                  <option value="client_asc">客户名称</option>
+                  <option value="documents_desc">文件数量</option>
+                  <option value="results_desc">结果数量</option>
+                </select>
+              </div>
+              <details className="ap-create-project" open={projects.length === 0}>
+                <summary>＋ 新建项目</summary>
+                <div className="form-grid">
+                  <label className="field"><span>项目名称</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
+                  <label className="field"><span>客户名称</span><input value={client} onChange={(event) => setClient(event.target.value)} /></label>
+                  <label className="field"><span>项目日期</span><input type="date" value={projectDate} onChange={(event) => setProjectDate(event.target.value)} /></label>
+                  <label className="field"><span>默认提取模板</span><select value={defaultRuleId} onChange={(event) => setDefaultRuleId(event.target.value)}>{rules.map((rule) => <option key={rule.id} value={rule.id}>{rule.name}</option>)}</select></label>
+                </div>
+                <div className="actions"><button className="primary" disabled={busy} onClick={() => void create()}>创建并进入项目</button></div>
+              </details>
+              {error && <div className="error-box">{error}</div>}
+              <div className="ap-project-grid">
+                {visibleProjects.map((value) => {
+                  const resultCount = value.results?.length ?? 0;
+                  const documentCount = projectDocumentCounts[value.project.id] ?? 0;
+                  const stale = value.project.status !== "completed" && value.project.date && Date.now() - new Date(value.project.date).getTime() > 30 * 86400000;
+                  return (
+                    <button key={value.project.id} className="ap-project-card" onClick={() => {
+                      setSelectedId(value.project.id);
+                      setRuleId(value.project.defaultRuleId ?? "loan_covenant");
+                    }}>
+                      <span className={`ap-project-status ${value.project.status === "completed" ? "completed" : "active"}`}>{value.project.status === "completed" ? "已完成" : "进行中"}</span>
+                      <strong>{value.project.name}</strong>
+                      <span>{value.project.client || "未填写客户"}</span>
+                      <div><span>{documentCount} 份文件</span><span>{resultCount} 条结果</span><span>{value.project.date || "未填写日期"}</span></div>
+                      {stale && <em>超过 30 天未完成，请确认状态</em>}
+                    </button>
+                  );
+                })}
+                {visibleProjects.length === 0 && <div className="empty">没有符合筛选条件的项目。</div>}
+              </div>
+            </div>
+          </section>
+        ) : (
+          <section id="ap-proj" className="form-card ap-project-overview">
+            <div className="section-title">
+              <div>
+                <button className="ap-back-link" onClick={() => { setSelectedId(""); setSelectedDocument(""); }}>← 返回项目工作台</button>
+                <h2>{selected?.project.name}</h2>
+                <p className="hint">{selected?.project.client || "未填写客户"} · {selected?.project.date || "未填写日期"}</p>
+              </div>
+              <div className="ap-project-overview-actions">
+                <button className="secondary" disabled={busy || !(selected?.results?.length)} onClick={() => void exportProjectResults("project")}>导出项目结果</button>
+                <label className="field ap-status-field"><span>项目状态</span><select value={selected?.project.status ?? "active"} disabled={busy} onChange={(event) => void updateProjectStatus(event.target.value)}><option value="active">进行中</option><option value="completed">已完成</option></select></label>
+              </div>
+            </div>
+          </section>
+        )}
+        {selectedId && <>
         <section id="ap-contract" className="form-card">
           <div className="section-title">
             <h2>{selected?.project.name ?? "合同文件"}</h2>
@@ -1504,7 +3156,14 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               disabled={!selectedId || busy}
               onClick={() => void importPdfs()}
             >
-              导入 PDF
+              选择 PDF
+            </button>
+            <button
+              className="secondary"
+              disabled={!selectedId || busy}
+              onClick={() => void importPdfFolder()}
+            >
+              选择文件夹
             </button>
             <button
               className="secondary"
@@ -1706,6 +3365,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                 busy ||
                 !configStatus.llm?.ready ||
                 !pdfText ||
+                ocrRequiredPages.length > 0 ||
                 !activeFieldKeys.length
               }
               onClick={() => void extract()}
@@ -1718,6 +3378,13 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               onClick={() => void exportResults()}
             >
               导出底稿
+            </button>
+            <button
+              className="secondary"
+              disabled={busy || !selectedDocument}
+              onClick={() => void exportProjectResults("document")}
+            >
+              导出本文件全部模板
             </button>
             {ruleId === "revenue_workpaper" && (
               <button
@@ -1916,10 +3583,36 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           )}
           {currentResults.length > 0 && (
             <>
-              <h3>当前底稿结果（{currentResults.length}）</h3>
+              <div className="ap-result-heading">
+                <div>
+                  <h3>当前底稿结果（{currentResults.length}）</h3>
+                  <small>重新提取不会覆盖历史版本；人工修改只作用于当前版本。</small>
+                </div>
+                {resultRuns.length > 0 && (
+                  <label className="field ap-result-version">
+                    <span>结果版本</span>
+                    <select
+                      value={activeResultRun?.id ?? ""}
+                      onChange={(event) => setSelectedResultRunId(event.target.value)}
+                    >
+                      {resultRuns.map((run, index) => (
+                        <option key={run.id} value={run.id}>
+                          {index === 0 ? "最新 · " : "历史 · "}
+                          {run.extractAt
+                            ? new Date(run.extractAt).toLocaleString()
+                            : "旧版导入结果"}
+                          {run.rows.some((row) => row.deepReviewed)
+                            ? " · 深度复核"
+                            : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+              </div>
               {currentResults.map((row, index) => (
                 <div className="task-row" key={String(row.id ?? index)}>
-                  <div>
+                  <div className="ap-result-content">
                     <strong>
                       {String(
                         row.title ??
@@ -1933,7 +3626,22 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                         row.excerpt ?? row.answer ?? row.summary ?? "",
                       ).slice(0, 180)}
                     </p>
+                    {editingResult === row ||
+                    (editingResult?.id && editingResult.id === row.id) ? (
+                      <div className="ap-result-editor">
+                        <textarea
+                          value={editingResultJson}
+                          onChange={(event) => setEditingResultJson(event.target.value)}
+                          aria-label="编辑提取结果 JSON"
+                        />
+                        <div className="actions compact">
+                          <button className="primary" disabled={busy} onClick={() => void saveEditedResult()}>保存修改</button>
+                          <button className="secondary" disabled={busy} onClick={() => { setEditingResult(undefined); setEditingResultJson(""); }}>取消</button>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
+                  <button className="secondary" onClick={() => beginEditResult(row)}>编辑</button>
                   <button
                     className={row.reviewed ? "primary" : "secondary"}
                     onClick={() => void toggleReviewed(String(row.id))}
@@ -1951,6 +3659,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             </>
           )}
         </section>
+        </>}
       </div>
       </>
       )}
@@ -2054,9 +3763,16 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             <div className="section-title">
               <h2>模板详情</h2>
               <div className="actions compact">
-                <button className="secondary" onClick={() => setTemplateTab("mine")}>
-                  我的模板
-                </button>
+                {selectedRule?.readonly === false ? (
+                  <>
+                    <button className="secondary" onClick={editSelectedRule}>编辑</button>
+                    <button className="secondary" onClick={() => void deleteSelectedRule()}>删除</button>
+                  </>
+                ) : (
+                  <button className="primary" onClick={() => void copySelectedRule()}>
+                    复制并编辑
+                  </button>
+                )}
               </div>
             </div>
             <label className="field">
@@ -2069,9 +3785,14 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                 ))}
               </select>
             </label>
-            <small>
-              {rules.find((rule) => rule.id === ruleId)?.description}
-            </small>
+            <div className="ap-template-meta">
+              <span>版本 {selectedRule?.version ?? "1.0"}</span>
+              <span>{selectedRule?.docKind === "table" ? "表格型" : "条款型"}</span>
+              <span>{selectedRule?.readonly === false ? "我的模板" : "内置模板"}</span>
+            </div>
+            <p className="hint">{selectedRule?.description}</p>
+            <h3>适用场景</h3>
+            <p className="hint">{selectedRule?.useCase || selectedRule?.description || "适用于按所选字段提取和复核文档内容。"}</p>
             <h3>提取字段</h3>
             <div className="chip-list">
               {fields.map((field) => (
@@ -2091,8 +3812,20 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                 </label>
               ))}
             </div>
-            <details>
-              <summary>新建自定义模板</summary>
+            {selectedRule?.example && (
+              <div className="ap-template-example">
+                <strong>示例结果</strong>
+                <p>{selectedRule.example.category}</p>
+                <p>{selectedRule.example.quote}</p>
+                <p>{selectedRule.example.hint}</p>
+              </div>
+            )}
+            <details className="ap-template-advanced">
+              <summary>高级规则 / Prompt 与 JSON 结构</summary>
+              <pre>{selectedRule?.prompt ?? (selectedRule ? window.RuleEngine?.getRulePrompt(selectedRule.id) : "")}</pre>
+            </details>
+            <details open={Boolean(editingCustomRuleId)}>
+              <summary>{editingCustomRuleId ? "编辑我的模板" : "新增自定义模板"}</summary>
               <div className="form-grid">
                 <label className="field">
                   <span>模板名称</span>
@@ -2114,8 +3847,15 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                   className="secondary"
                   onClick={() => void saveCustomRule()}
                 >
-                  保存自定义模板
+                  {editingCustomRuleId ? "保存修改" : "保存自定义模板"}
                 </button>
+                {editingCustomRuleId && (
+                  <button className="secondary" onClick={() => {
+                    setEditingCustomRuleId("");
+                    setCustomRuleName("");
+                    setCustomRulePrompt("");
+                  }}>取消</button>
+                )}
               </div>
             </details>
             <p className="hint">
@@ -2130,6 +3870,9 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           <div className="section-title">
             <h2>处理工作日志</h2>
             <div className="actions compact">
+              <button className="secondary" disabled={!workLog.length || busy} onClick={() => void exportWorkLog()}>
+                导出 Excel
+              </button>
               <button className="secondary" onClick={clearLog}>
                 清空日志
               </button>
@@ -2156,6 +3899,30 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           )}
         </section>
       )}
-    </>
+      {viewMode === "guide" && (
+        <div className="ap-guide-grid">
+          <section className="form-card">
+            <span className="ap-guide-step">1</span>
+            <h2>建立项目并导入 PDF</h2>
+            <p>在项目工作台填写客户、日期和默认模板。可选择多个 PDF，也可递归导入整个文件夹。</p>
+          </section>
+          <section className="form-card">
+            <span className="ap-guide-step">2</span>
+            <h2>读取文字并选择模板</h2>
+            <p>点击“读取/预览”。普通 PDF 直接读取文字层；扫描页自动 OCR，并在每页完成后保存进度。</p>
+          </section>
+          <section className="form-card">
+            <span className="ap-guide-step">3</span>
+            <h2>提取、复核与导出</h2>
+            <p>AI 结果可人工编辑、标记复核并保留多个历史版本。既可导出单一底稿，也可导出项目多工作表结果。</p>
+          </section>
+          <section className="form-card ap-guide-note">
+            <h2>与工具箱保持一致</h2>
+            <p>AudiPick 使用工具箱的 Rust 命令、SQLite 项目数据、AI/OCR 设置和主题。独立弹窗只是操作界面，不会产生第二套数据。</p>
+          </section>
+        </div>
+      )}
+      </div>
+    </div>
   );
 }

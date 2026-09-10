@@ -40,7 +40,7 @@ vi.mock("@tauri-apps/plugin-updater", () => ({
 vi.mock("@tauri-apps/api/app", () => ({
   getVersion: vi.fn().mockResolvedValue("test"),
 }));
-vi.mock("./theme", () => ({ applyReadableForegrounds: vi.fn() }));
+vi.mock("./theme", () => ({ setSavedTheme: vi.fn() }));
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(check).mockResolvedValue(null);

@@ -8,11 +8,18 @@ __pycache__/
 
 # 构建产物
 build/
+# AudiPick loads the minified PDF.js runtime directly in its webview.  These
+# two source assets are not generated build output and must survive a clean
+# clone even though their upstream directory is named `build`.
+!tauri-app/assets/audipick/pdfjs/legacy/build/
+!tauri-app/assets/audipick/pdfjs/legacy/build/pdf.min.js
+!tauri-app/assets/audipick/pdfjs/legacy/build/pdf.worker.min.js
 tauri-app/build/
 dist/*
 tauri-app/dist/*
 tauri-app/dist-web/
 tauri-app/node_modules/
+tauri-app/.cargo-home/
 tauri-app/src-tauri/target/
 tauri-app/src-tauri/target-*/
 *.tsbuildinfo

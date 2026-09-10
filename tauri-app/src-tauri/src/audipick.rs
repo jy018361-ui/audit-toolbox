@@ -22,6 +22,7 @@ pub fn call(method: &str, params: Value, settings: Value) -> Result<Value, AppEr
         "audipick.extract" | "audipick.classify" => llm_text(&params, &settings),
         "audipick.ocr" => ocr(&params, &settings),
         "audipick.export" => export_workpaper(&params),
+        "audipick.export_bundle" => export_workpaper_bundle(&params),
         _ => Err(error(
             "METHOD_NOT_ALLOWED",
             "不允许调用该 AudiPick 接口。",
@@ -188,7 +189,17 @@ fn export_workpaper(params: &Value) -> Result<Value, AppError> {
         for row in &rows {
             if let Some(object) = row.as_object() {
                 for key in object.keys() {
-                    if !matches!(key.as_str(), "id" | "contractId" | "fieldSetId") {
+                    if !matches!(
+                        key.as_str(),
+                        "id"
+                            | "contractId"
+                            | "ruleId"
+                            | "ruleVersion"
+                            | "fieldKeys"
+                            | "fieldSetId"
+                            | "extractAt"
+                            | "extractRunId"
+                    ) {
                         keys.insert(key.clone());
                     }
                 }
@@ -251,6 +262,164 @@ fn export_workpaper(params: &Value) -> Result<Value, AppError> {
     Ok(json!({"outputPaths":[output.to_string_lossy()],"rows":rows.len(),"ruleId":rule_id}))
 }
 
+fn export_workpaper_bundle(params: &Value) -> Result<Value, AppError> {
+    let mut output = PathBuf::from(
+        params
+            .get("outputPath")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    if output.as_os_str().is_empty() {
+        return Err(error("OUTPUT_REQUIRED", "请选择项目结果输出文件。", None));
+    }
+    if output
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.eq_ignore_ascii_case("xlsx"))
+        != Some(true)
+    {
+        output.set_extension("xlsx");
+    }
+    let sheets = params
+        .get("sheets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| error("SHEETS_REQUIRED", "没有可导出的项目结果。", None))?;
+    if sheets.is_empty() {
+        return Err(error("SHEETS_REQUIRED", "没有可导出的项目结果。", None));
+    }
+
+    let mut workbook = Workbook::new();
+    let header = Format::new()
+        .set_bold()
+        .set_border(FormatBorder::Thin)
+        .set_align(FormatAlign::Center)
+        .set_background_color("#DCE6F1");
+    let mut used_names = BTreeSet::new();
+    let mut total_rows = 0usize;
+    for (sheet_index, descriptor) in sheets.iter().enumerate() {
+        let rows = descriptor
+            .get("rows")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let requested = descriptor
+            .get("columns")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|items| !items.is_empty());
+        let columns: Vec<String> = requested.unwrap_or_else(|| {
+            let mut keys = BTreeSet::new();
+            for row in &rows {
+                if let Some(object) = row.as_object() {
+                    keys.extend(object.keys().cloned());
+                }
+            }
+            keys.into_iter().collect()
+        });
+        let base_name = safe_sheet_name(
+            descriptor
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("提取结果"),
+        );
+        let mut sheet_name = base_name.clone();
+        let mut suffix_index = 2usize;
+        while used_names.contains(&sheet_name) {
+            let suffix = format!(" ({suffix_index})");
+            let prefix: String = base_name
+                .chars()
+                .take(31usize.saturating_sub(suffix.chars().count()))
+                .collect();
+            sheet_name = format!("{prefix}{suffix}");
+            suffix_index += 1;
+        }
+        used_names.insert(sheet_name.clone());
+
+        let sheet = workbook.add_worksheet();
+        sheet.set_name(&sheet_name).map_err(xlsx_error)?;
+        for (column, key) in columns.iter().enumerate() {
+            sheet
+                .write_string_with_format(0, column as u16, key, &header)
+                .map_err(xlsx_error)?;
+            let wide = [
+                "excerpt",
+                "reason",
+                "question",
+                "问题描述",
+                "建议回答",
+                "合同依据",
+                "意见",
+                "摘录",
+                "证据",
+            ]
+            .iter()
+            .any(|needle| key.contains(needle));
+            sheet
+                .set_column_width(column as u16, if wide { 60 } else { 22 })
+                .map_err(xlsx_error)?;
+        }
+        for (row_index, row) in rows.iter().enumerate() {
+            for (column, key) in columns.iter().enumerate() {
+                let value = row.get(key).cloned().unwrap_or(Value::Null);
+                let text = match value {
+                    Value::Null => String::new(),
+                    Value::String(value) => value,
+                    other => other.to_string(),
+                };
+                sheet
+                    .write_string((row_index + 1) as u32, column as u16, &text)
+                    .map_err(xlsx_error)?;
+            }
+        }
+        sheet.set_freeze_panes(1, 0).map_err(xlsx_error)?;
+        if !columns.is_empty() {
+            sheet
+                .autofilter(
+                    0,
+                    0,
+                    rows.len() as u32,
+                    columns.len().saturating_sub(1) as u16,
+                )
+                .map_err(xlsx_error)?;
+        }
+        total_rows += rows.len();
+        if sheet_index == 0 && columns.is_empty() {
+            sheet.write_string(0, 0, "无可显示字段").map_err(xlsx_error)?;
+        }
+    }
+    workbook.save(&output).map_err(xlsx_error)?;
+    Ok(json!({
+        "outputPaths": [output.to_string_lossy()],
+        "rows": total_rows,
+        "sheets": sheets.len()
+    }))
+}
+
+fn safe_sheet_name(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .map(|character| {
+            if matches!(character, '[' | ']' | ':' | '*' | '?' | '/' | '\\') {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let shortened: String = cleaned.trim().chars().take(31).collect();
+    if shortened.is_empty() {
+        "提取结果".to_owned()
+    } else {
+        shortened
+    }
+}
+
 fn config_status(settings: &Value) -> Result<Value, AppError> {
     let llm = settings.get("llm").cloned().unwrap_or(json!({}));
     let ocr = settings.get("ocr").cloned().unwrap_or(json!({}));
@@ -267,6 +436,7 @@ fn config_status(settings: &Value) -> Result<Value, AppError> {
     let ocr_ready = match ocr_engine {
         "ai" => llm_secret.is_some(),
         "baidu" => secret("baidu_ocr_key").is_some() && secret("baidu_ocr_secret").is_some(),
+        "local" => local_ocr_ready(),
         _ => false,
     };
     Ok(json!({
@@ -1104,6 +1274,9 @@ fn ocr(params: &Value, settings: &Value) -> Result<Value, AppError> {
     if engine == "baidu" {
         return baidu_ocr(image);
     }
+    if engine == "local" {
+        return local_ocr(image);
+    }
     if engine != "ai" {
         return Err(error(
             "OCR_ENGINE_UNAVAILABLE",
@@ -1121,6 +1294,60 @@ fn ocr(params: &Value, settings: &Value) -> Result<Value, AppError> {
         Some(image),
     )?;
     Ok(json!({"text": content, "engine": "ai"}))
+}
+
+fn local_ocr_ready() -> bool {
+    Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .and_then(|client| client.get("http://127.0.0.1:8765/health").send())
+        .ok()
+        .filter(|response| response.status().is_success())
+        .and_then(|response| response.json::<Value>().ok())
+        .and_then(|value| value.get("status").and_then(Value::as_str).map(str::to_owned))
+        .is_some_and(|status| status == "ok")
+}
+
+fn local_ocr(image: &str) -> Result<Value, AppError> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(90))
+        .build()
+        .map_err(network_error)?;
+    let response = client
+        .post("http://127.0.0.1:8765/ocr")
+        .json(&json!({"image": image}))
+        .send()
+        .map_err(|error| {
+            crate::AppError::new(
+                "LOCAL_OCR_UNAVAILABLE",
+                "无法连接本机 OCR 服务，请确认 127.0.0.1:8765 已启动。",
+                true,
+                Some(error.to_string()),
+            )
+        })?;
+    let status = response.status();
+    let body = response.text().map_err(network_error)?;
+    if !status.is_success() {
+        return Err(error(
+            "LOCAL_OCR_FAILED",
+            "本机 OCR 服务返回错误。",
+            Some(format!("HTTP {status}：{}", body_snippet(&body))),
+        ));
+    }
+    let value: Value = serde_json::from_str(&body).map_err(|parse_error| {
+        error(
+            "LOCAL_OCR_RESPONSE_INVALID",
+            "本机 OCR 返回内容不是有效 JSON。",
+            Some(parse_error.to_string()),
+        )
+    })?;
+    if let Some(message) = value.get("error").and_then(Value::as_str) {
+        return Err(error("LOCAL_OCR_FAILED", "本机 OCR 识别失败。", Some(message.into())));
+    }
+    Ok(json!({
+        "text": value.get("text").and_then(Value::as_str).unwrap_or(""),
+        "engine": "local",
+    }))
 }
 
 fn request_llm(
@@ -1459,6 +1686,13 @@ fn error(code: &str, message: &str, detail: Option<String>) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bundle_sheet_names_are_excel_safe() {
+        assert_eq!(safe_sheet_name("借款/合同:*?[]"), "借款 合同");
+        assert_eq!(safe_sheet_name("   "), "提取结果");
+        assert_eq!(safe_sheet_name(&"中".repeat(40)).chars().count(), 31);
+    }
+
     /// An empty assistant message must surface as an error rather than as a
     /// successful extraction of nothing.
     #[test]

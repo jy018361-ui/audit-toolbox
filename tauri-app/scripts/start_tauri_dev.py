@@ -14,9 +14,14 @@ DEV_PORT = 1420
 
 
 def _pwsh_json(script: str):
-    pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    pwsh = (
+        shutil.which("pwsh.exe")
+        or shutil.which("pwsh")
+        or shutil.which("powershell.exe")
+        or shutil.which("powershell")
+    )
     if not pwsh:
-        raise RuntimeError("未找到 PowerShell 7，无法检查开发服务端口。")
+        raise RuntimeError("未找到 PowerShell，无法检查开发服务端口。")
     completed = subprocess.run(
         [pwsh, "-NoLogo", "-NoProfile", "-Command", script],
         check=False,
@@ -111,9 +116,17 @@ def _stop_stale_project_dev_server(root: Path) -> None:
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
     npm = shutil.which("npm.cmd") or shutil.which("npm")
+    if not npm and os.name == "nt":
+        installed_npm = (
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+            / "nodejs"
+            / "npm.cmd"
+        )
+        if installed_npm.is_file():
+            npm = str(installed_npm)
     cargo = shutil.which("cargo") or str(Path.home() / ".cargo" / "bin" / "cargo.exe")
     if not npm:
-        raise RuntimeError("未找到 Node.js/npm，请先安装 Node.js 22 x64。")
+        raise RuntimeError("未找到 Node.js/npm，请先安装 Node.js LTS x64。")
     if not Path(cargo).is_file():
         raise RuntimeError("未找到 Rust/Cargo，请先安装 rustup stable-msvc。")
     _stop_stale_project_dev_server(root)
@@ -121,6 +134,16 @@ def main() -> int:
         subprocess.check_call([npm, "ci", "--no-audit", "--no-fund"], cwd=root)
     load_msvc_environment()
     BUILD_ENV["PATH"] = str(Path(cargo).parent) + os.pathsep + BUILD_ENV.get("PATH", "")
+    # A workspace-local Cargo home can be prepared when the machine-wide
+    # registry source cache is damaged.  It is ignored by git; clean machines
+    # continue using their normal Cargo home without extra downloads.
+    local_cargo_home = root / ".cargo-home"
+    if local_cargo_home.is_dir():
+        BUILD_ENV["CARGO_HOME"] = str(local_cargo_home)
+    # Keep local preview builds usable on machines with limited free memory.
+    # These settings affect only the development profile, not release bundles.
+    BUILD_ENV.setdefault("CARGO_BUILD_JOBS", "2")
+    BUILD_ENV.setdefault("CARGO_PROFILE_DEV_DEBUG", "0")
     print("正在启动 Tauri 迁移版审计工具箱……关闭窗口后本命令会自动结束。")
     return subprocess.call([npm, "run", "tauri:dev"], cwd=root, env=BUILD_ENV)
 

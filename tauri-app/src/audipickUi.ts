@@ -2,6 +2,37 @@
 
 export type ClassifiableRule = { id: string; name: string; docKind?: string };
 
+export type VersionedResultRow = {
+  contractId?: unknown;
+  ruleId?: unknown;
+  extractRunId?: string;
+  fieldSetId?: string;
+  extractAt?: string;
+};
+
+/** Keep the newest complete run for every document/template pair. */
+export function latestRowsByDocumentAndRule<T extends VersionedResultRow>(
+  rows: T[],
+): T[] {
+  const groups = new Map<string, T[]>();
+  for (const row of rows) {
+    const key = `${String(row.contractId ?? "")}\u0000${String(row.ruleId ?? "")}`;
+    groups.set(key, [...(groups.get(key) ?? []), row]);
+  }
+  return [...groups.values()].flatMap((group) => {
+    const runs = new Map<string, T[]>();
+    for (const row of group) {
+      const key = row.extractRunId ?? `legacy:${row.fieldSetId ?? "default"}`;
+      runs.set(key, [...(runs.get(key) ?? []), row]);
+    }
+    return [...runs.values()].sort((left, right) => {
+      const leftAt = String(left[0]?.extractAt ?? "");
+      const rightAt = String(right[0]?.extractAt ?? "");
+      return rightAt.localeCompare(leftAt);
+    })[0] ?? [];
+  });
+}
+
 export type RevenueQuestion = {
   sheet: string;
   row: number;

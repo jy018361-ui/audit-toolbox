@@ -17,6 +17,7 @@ const inTauri = () =>
 // IPC bridge when it is unavailable. File, secret, and engine operations still
 // fail with an actionable message instead of the opaque "undefined.invoke".
 let previewSettings: Record<string, unknown> = {};
+let previewAudiPickProjects: Array<Record<string, unknown>> = [];
 
 const previewUnavailable = (action: string) =>
   new Error(`浏览器预览模式不能${action}，请使用 Tauri 应用。`);
@@ -82,8 +83,40 @@ export async function engineCall(
   method: string,
   params: Record<string, unknown>,
 ) {
-  if (!inTauri())
+  if (!inTauri()) {
+    // Project-only AudiPick mocks make the browser preview useful for checking
+    // the real dashboard, creation modal and empty project page. PDF/OCR/AI
+    // operations remain Tauri-only and still fail clearly below.
+    if (method === "audipick.projects")
+      return { projects: previewAudiPickProjects };
+    if (method === "audipick.project_save") {
+      const project = params.project as { id?: string } | undefined;
+      if (!project?.id) throw new Error("预览项目缺少项目 ID。");
+      previewAudiPickProjects = [
+        ...previewAudiPickProjects.filter(
+          (item) =>
+            (item.project as { id?: string } | undefined)?.id !== project.id,
+        ),
+        structuredClone(params),
+      ];
+      return { saved: true, id: project.id };
+    }
+    if (method === "audipick.project_delete") {
+      const id = String(params.id ?? "");
+      previewAudiPickProjects = previewAudiPickProjects.filter(
+        (item) => (item.project as { id?: string } | undefined)?.id !== id,
+      );
+      return { deleted: true, id };
+    }
+    if (method === "audipick.documents")
+      return { projectId: params.projectId, documents: [] };
+    if (method === "audipick.config_status")
+      return {
+        llm: { ready: false },
+        ocr: { ready: false, engine: "ai" },
+      };
     throw new Error("浏览器预览模式不能处理本地文件，请使用 Tauri 应用。 ");
+  }
   const id = ++syncBusySeq;
   syncBusyActive.set(id, method);
   notifySyncBusy();

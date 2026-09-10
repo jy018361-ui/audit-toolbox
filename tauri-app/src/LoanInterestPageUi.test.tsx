@@ -171,6 +171,101 @@ it("统一上传自动分类出 TB 与 JE 来源卡，并可一键更正类型",
   ).toBeVisible();
 });
 
+/** 公共复核支持多列角色，但借款页当前仍是单列映射交互。
+ *  曾经把 accountName 的单个建议写成 string[]，随后 loanMissing 调用
+ *  `.trim()` 直接把整个 React 界面打成白屏。 */
+it("借款 JE 的 LLM 复核按单列映射写回且不会白屏", async () => {
+  const tbHeaders = ["科目编码", "科目名称", "期初余额", "期末余额"];
+  const jeHeaders = ["记账日期", "凭证号", "文本", "会计科目", "总账科目", "本币金额"];
+  const classify = (kind: "tb" | "je", headers: string[]) => ({
+    kind,
+    scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
+    sheet: "Sheet1",
+    headerRow: 1,
+    headerDepth: 1,
+    headers,
+    preview: [headers.map(() => "x")],
+  });
+  const inspect = (kind: "tb" | "je", headers: string[]) => ({
+    headers,
+    preview:
+      kind === "je"
+        ? [["2025-01-31", "1", "摘要", "库存现金-人民币", "1001010000", "100"]]
+        : [["1001", "库存现金", "0", "100"]],
+    rowCount: 2,
+    sheet: "Sheet1",
+    sheets: ["Sheet1"],
+    headerRow: 1,
+    headerDepth: 1,
+    suggestedMapping:
+      kind === "je"
+        ? { date: "记账日期", id: "凭证号", accountCode: "总账科目" }
+        : {
+            accountCode: "科目编码",
+            accountName: "科目名称",
+            openingFunctionalAmount: "期初余额",
+            closingFunctionalAmount: "期末余额",
+          },
+  });
+  mock.pickPath.mockResolvedValue(["tb.xlsx", "03序时账.xlsx"]);
+  mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
+    const p = params as {
+      kind?: "tb" | "je";
+      source?: { inputPath?: string };
+      payload?: { kind?: "tb" | "je" };
+    };
+    if (method === "ledger.forms") return [];
+    if (method === "deposit.classify_source") {
+      return p.source?.inputPath?.includes("03")
+        ? classify("je", jeHeaders)
+        : classify("tb", tbHeaders);
+    }
+    if (method === "loan.inspect") {
+      return p.kind === "je"
+        ? inspect("je", jeHeaders)
+        : inspect("tb", tbHeaders);
+    }
+    if (method === "ledger.review_mapping") {
+      expect(p.kind).toBe("je");
+      return {
+        changes: [
+          {
+            role: "accountName",
+            suggestedColumn: "会计科目",
+            confidence: 1,
+            reason: "样例值为科目名称",
+            engineVerified: true,
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected ${method}`);
+  });
+
+  render(<LoanInterestPage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: "TB＋JE" }));
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "拖放或选择 TB、序时账文件（可同时选择）",
+    }),
+  );
+  await screen.findByText("已识别：JE 序时账");
+  const reviewButtons = await screen.findAllByRole("button", {
+    name: "LLM 复核映射",
+  });
+  fireEvent.click(reviewButtons[1]);
+
+  expect(
+    await screen.findByText("复核完成，已应用 1 项建议。"),
+  ).toBeVisible();
+  expect(
+    screen
+      .getAllByRole("combobox")
+      .some((element) => (element as HTMLSelectElement).value === "accountName"),
+  ).toBe(true);
+  expect(screen.queryByText("尚未映射：科目名称")).not.toBeInTheDocument();
+});
+
 /** TB＋JE 第二步为「确认科目与利率」：科目清单预选借款科目；借款明细不再拦路。 */
 it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不提借款明细", async () => {
   const tbHeaders = ["科目编码", "科目名称", "借款明细", "期初余额", "期末余额"];

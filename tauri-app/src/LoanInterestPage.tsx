@@ -164,6 +164,16 @@ const LABELS: Record<Kind, Record<string, string>> = {
   },
   rateLedger: LOAN_ROLE_FALLBACK,
 };
+/**
+ * 借款页当前的映射状态与 MappingPanel 交互是“一角色一列”。
+ *
+ * 公共复核默认会把 accountName / id 等角色保存成数组；若直接写回
+ * 本页的纯字符串状态，下一次渲染会在 loanMissing 中对数组调用
+ * `.trim()` 并导致 WebView 白屏。在借款页边界显式关闭多列角色，与页面的
+ * MappingPanel（未开启 multi）保持一致。Rust 引擎本身可接受数组，
+ * 但页面尚未提供多列角色的手工编辑语义。
+ */
+const LOAN_SINGLE_COLUMN_ROLES = new Set<string>();
 /** 底稿反馈里只展示文件名，完整路径放 title 悬浮提示。 */
 function fileNameOf(path: string) {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
@@ -1403,6 +1413,8 @@ function Mapping({
         x.preview,
         source.mapping,
         labels,
+        undefined,
+        LOAN_SINGLE_COLUMN_ROLES,
       );
       change(mapping as Record<string, string>);
       setReview(

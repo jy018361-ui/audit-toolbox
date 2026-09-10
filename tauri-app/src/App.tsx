@@ -76,7 +76,7 @@ import {
 import { ToolTourProvider } from "@/components/tour/ToolTourContext";
 import { NewbieModeToggle } from "@/components/tour/NewbieModeToggle";
 import { Sparkles } from "lucide-react";
-import { applyReadableForegrounds } from "./theme";
+import { setSavedTheme } from "./theme";
 import { getVersion } from "@tauri-apps/api/app";
 import {
   getCurrentWebviewWindow,

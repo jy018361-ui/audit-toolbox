@@ -1,4 +1,5 @@
 import {
+  type CSSProperties,
   useRef,
   type KeyboardEvent,
   type PointerEvent as ReactPointerEvent,
@@ -718,7 +719,7 @@ function SplitPane({
     <div className="aplc-split" ref={paneRef}>
       <section
         className="aplc-preview"
-        style={{ width: `${width}%` }}
+        style={{ "--aplc-preview-width": `${width}%` } as CSSProperties}
         aria-label="PDF 预览"
       >
         {props.preview ?? (

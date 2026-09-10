@@ -1,4 +1,5 @@
 .aplc-contract {
+  --aplc-paper: #fff;
   min-width: 0;
   color: var(--ink);
 }
@@ -472,6 +473,7 @@
 }
 
 .aplc-preview {
+  width: var(--aplc-preview-width);
   min-width: 260px;
   max-width: 65%;
   flex: 0 0 auto;
@@ -491,7 +493,7 @@
   max-width: 100%;
   height: auto;
   margin: var(--sp-2) auto;
-  background: #fff;
+  background: var(--aplc-paper);
 }
 
 .aplc-pdf-page-jump,
@@ -750,7 +752,7 @@
   }
 
   .aplc-preview {
-    width: 100% !important;
+    --aplc-preview-width: 100%;
     max-width: none;
     min-height: 380px;
   }

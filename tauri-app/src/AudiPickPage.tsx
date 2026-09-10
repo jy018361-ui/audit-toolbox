@@ -3186,7 +3186,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               onClick={() => void importPdfs()}
             >
               选择 PDF
-            </button>
+            </Button>
             <button
               className="secondary"
               disabled={!selectedId || busy}
@@ -3200,7 +3200,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               onClick={() => void remove()}
             >
               删除项目
-            </Button>
+            </button>
           </div>
           {documents.map((value) => (
             <div className="task-row" key={value.id}>
@@ -3409,7 +3409,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               onClick={() => void exportResults()}
             >
               导出底稿
-            </button>
+            </Button>
             <button
               className="secondary"
               disabled={busy || !selectedDocument}
@@ -3874,7 +3874,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                   onClick={() => void saveCustomRule()}
                 >
                   {editingCustomRuleId ? "保存修改" : "保存自定义模板"}
-                </button>
+                </Button>
                 {editingCustomRuleId && (
                   <button className="secondary" onClick={() => {
                     setEditingCustomRuleId("");
@@ -3901,7 +3901,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               </button>
               <button className="secondary" onClick={clearLog}>
                 清空日志
-              </Button>
+              </button>
             </div>
           </div>
           {workLog.length === 0 ? (

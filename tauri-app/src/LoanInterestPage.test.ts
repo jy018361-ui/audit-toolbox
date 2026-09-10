@@ -34,14 +34,23 @@ describe("借款利息测算", () => {
         closingPrincipal: 110,
       }),
     ).toBeNull());
-  // 金标要求 TB 的科目编码与名称都到位，缺名称同样拦。
+  // 金标要求 TB 的科目编码与名称都到位，缺名称同样拦。借款明细/辅助核算
+  // 按业务口径是选填：不进必填清单，缺了由引擎在测算入口明确报错。
   it("不允许TB明细缺少借款识别和本金余额", () =>
     expect(loanMissing("tb", { accountCode: "科目编码" })).toEqual([
       "科目名称",
-      "借款明细/辅助核算",
       "期初余额",
       "期末余额",
     ]));
+  it("借款明细/辅助核算为选填，缺它不拦映射", () =>
+    expect(
+      loanMissing("tb", {
+        accountCode: "科目",
+        accountName: "科目名称",
+        openingFunctionalAmount: "期初余额",
+        closingFunctionalAmount: "期末余额",
+      }),
+    ).toEqual([]));
   it("六种TB形态的期初期末任一到位即可", () => {
     // 借贷分列（TB3/TB6）。
     expect(

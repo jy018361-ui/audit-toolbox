@@ -798,7 +798,7 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     refine_layout(&table, kind, &mut mapping);
     drop_column_conflicts(kind, &candidates, &mut mapping);
     fill_combined_account_column(kind, &table, &mut mapping);
-    fill_account_name_from_code_alias(&table, &candidates, &mut mapping);
+    reconcile_account_identity_by_data(kind, &table, &mut mapping);
     pick_currency_text_column(&table, kind, &mut mapping);
     if kind == "tb" {
         promote_period_movement(&table, &mut mapping);
@@ -2097,66 +2097,31 @@ pub(crate) fn fill_combined_account_column(
 /// 「会计科目」在别名库里是 accountCode 的别名，按列名它只会去争编码；
 /// 编码已有主列后它就被丢弃，科目名称两头落空。只能看数据说话：
 /// 整列取值拆不出编码前缀、又大多是中文文本的，就是科目名称列。
-fn fill_account_name_from_code_alias(
+fn reconcile_account_identity_by_data(
+    kind: &str,
     table: &FxTable,
-    candidates: &BTreeMap<String, Vec<Candidate>>,
     mapping: &mut Map<String, Value>,
 ) {
-    if mapping.contains_key("accountName") {
-        return;
-    }
-    // 已被任何角色占用的列都不看——编码列要排除，币种线索之类的弱角色也一样。
-    let taken: Vec<String> = mapping
-        .values()
-        .flat_map(|value| match value {
-            Value::String(one) => vec![one.clone()],
-            Value::Array(all) => all
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect(),
-            _ => vec![],
-        })
-        .collect();
-    let pick = candidates
+    let identity =
+        ledger_mapping::account_identity_columns_by_data(kind, &table.headers, &table.rows);
+    let code_invalid = mapping
         .get("accountCode")
-        .into_iter()
-        .flatten()
-        // 分数太低的只是沾了点边，不算科目列。
-        .filter(|candidate| candidate.1 >= 0.5 && !taken.contains(&candidate.0))
-        .find(|candidate| {
-            let Some(index) = table.headers.iter().position(|h| h == &candidate.0) else {
-                return false;
-            };
-            let values = table
-                .rows
-                .iter()
-                .take(2000)
-                .filter_map(|row| row.get(index))
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty())
-                .collect::<Vec<_>>();
-            // 样本太少说明不了形态；名称文本列应是：拆不出「编码+分隔符」
-            // 前缀，且大部分取值带中文（编码列是纯字母数字，「抵销科目」这类
-            // 对手方编码列进不来）。
-            let (mut text, mut unsplittable) = (0usize, 0usize);
-            for value in &values {
-                if ledger_mapping::split_code_and_name(value).is_none() {
-                    unsplittable += 1;
-                }
-                if value
-                    .chars()
-                    .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
-                {
-                    text += 1;
-                }
-            }
-            values.len() >= 4
-                && text * 5 >= values.len() * 4
-                && unsplittable * 4 >= values.len() * 3
+        .and_then(Value::as_str)
+        .and_then(|column| table.headers.iter().position(|header| header == column))
+        .is_some_and(|index| {
+            ledger_mapping::account_column_shape(
+                table.rows.iter().filter_map(|row| row.get(index)).cloned(),
+            ) == ledger_mapping::AccountColumnShape::Name
         });
-    if let Some(candidate) = pick {
-        mapping.insert("accountName".into(), Value::String(candidate.0.clone()));
+    if (mapping.get("accountCode").is_none() || code_invalid)
+        && let Some(column) = identity.code
+    {
+        mapping.insert("accountCode".into(), Value::String(column));
+    }
+    if !mapping.contains_key("accountName")
+        && let Some(column) = identity.names.into_iter().next()
+    {
+        mapping.insert("accountName".into(), Value::String(column));
     }
 }
 
@@ -3414,28 +3379,10 @@ fn cross_table_alignment(
         }
     }
 
-    // 当前编码列对不上时，优先在全量数据中纠正编码映射；编码始终是第一选择。
+    // 当前编码列缺失或对不上时，不再扫描全表后由 Coding 直接替换语义映射。
+    // 「会计科目/总账科目」在不同 ERP 中含义会互换，必须回到 LLM 或人工确认。
     let je_full = load_full_side(params, "jeSource")?.unwrap_or(je_table);
     let tb_full = load_full_side(params, "tbSource")?.unwrap_or(tb_table);
-    if let Some(aligned) = ledger_mapping::align_account_code_columns(
-        &je_full.headers,
-        &je_full.rows,
-        &tb_full.headers,
-        &tb_full.rows,
-    ) {
-        warnings.push(format!(
-            "JE与TB的科目编码原映射对不上，已自动改用取值真正一致的列：JE“{}”对 TB“{}”（{} 项一致）。",
-            aligned.je_column, aligned.tb_column, aligned.overlap
-        ));
-        return Ok((
-            errors,
-            warnings,
-            Some(json!({
-                "jeMapping": {"accountCode": aligned.je_column},
-                "tbMapping": {"accountCode": aligned.tb_column}
-            })),
-        ));
-    }
 
     // 没有可用编码时才退到名称；名称必须在两侧有真实取值交集。
     let je_names = role_values(&je_full, &je_mapping, "accountName");
@@ -3444,6 +3391,10 @@ fn cross_table_alignment(
         warnings.push("JE与TB没有可可靠对齐的科目编码，已按科目名称继续匹配。".into());
         return Ok((errors, warnings, None));
     }
+    errors.push(
+        "JE与TB缺少可验证的科目编码映射，或当前编码完全对不上。请使用 LLM 复核或在映射面板人工确认，系统不会自动改换 Excel 列。"
+            .into(),
+    );
     let je_columns = low_cardinality_columns(&je_full);
     let tb_columns = low_cardinality_columns(&tb_full);
     if let Some((je_header, tb_header, overlap, _)) =
@@ -7467,8 +7418,7 @@ fn calculate_realized(
             .map(|r| cell(r, &mapping, "date"))
             .find(|t| !t.trim().is_empty())
             .unwrap_or("");
-        let Some(date) = je_date(raw_date, report_end)
-        else {
+        let Some(date) = je_date(raw_date, report_end) else {
             continue;
         };
         if !month_only_noted && date_is_month_only(raw_date) {
@@ -11536,7 +11486,10 @@ mod tests {
         let date = |y: i32, m: u32| NaiveDate::from_ymd_opt(y, m, 1);
         // 「年-月」列的纯月份数字：期末 2025-12-31 时 1..12 都归 2025。
         assert_eq!(je_date("1", date(2025, 12)), date(2025, 1));
-        assert_eq!(je_date("12", date(2025, 12).and_then(|d| d.with_day(31))), date(2025, 12));
+        assert_eq!(
+            je_date("12", date(2025, 12).and_then(|d| d.with_day(31))),
+            date(2025, 12)
+        );
         // 跨年账期（期末 2026-03-31）：晚于 3 月的月份归上一年。
         let end_mar = NaiveDate::from_ymd_opt(2026, 3, 31);
         assert_eq!(je_date("4", end_mar), date(2025, 4));
@@ -14593,9 +14546,11 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             "单侧拆行不是编码歧义，不该拦下：{result:#}"
         );
         assert!(
-            result["warnings"].as_array().is_some_and(|items| items.iter().any(|item| item
-                .as_str()
-                .is_some_and(|text| text.contains("在余额表侧对应多个名称")))),
+            result["warnings"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item
+                    .as_str()
+                    .is_some_and(|text| text.contains("在余额表侧对应多个名称")))),
             "要告诉用户按科目编码汇总匹配：{result:#}"
         );
         fs::remove_file(&je).unwrap();
@@ -14640,13 +14595,16 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
         });
         let result = check_mapping_alignment(&params).unwrap();
         assert_eq!(
-            result["aligned"], json!(true),
+            result["aligned"],
+            json!(true),
             "名称对不上按编码汇总兜底，不该拦下：{result:#}"
         );
         assert!(
-            result["warnings"].as_array().is_some_and(|items| items.iter().any(|item| item
-                .as_str()
-                .is_some_and(|text| text.contains("两套名称对不上")))),
+            result["warnings"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item
+                    .as_str()
+                    .is_some_and(|text| text.contains("两套名称对不上")))),
             "要告诉用户已按科目编码汇总匹配：{result:#}"
         );
         fs::remove_file(&je).unwrap();
@@ -14696,10 +14654,9 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             Some(&json!("总账货币")),
             "本位币币种认总账货币，不许抢走凭证货币列：{mapping:#?}"
         );
-        assert_eq!(
-            mapping.get("accountCode"),
-            Some(&json!("总帐科目")),
-            "「帐」是「账」的旧异体字，总帐科目必须能当科目编码识别：{mapping:#?}"
+        assert!(
+            mapping.get("accountCode").is_none(),
+            "总帐科目跨 ERP 可能是编码也可能是名称，应留给 LLM：{mapping:#?}"
         );
         fs::remove_file(&je).unwrap();
     }
@@ -14708,8 +14665,8 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
     fn sap03_je_gl_account_column_and_account_name_text_column() {
         // 03 号样例的 SAP 序时账（表头在第 6 行，这里直接从第 1 行起测映射）：
         // 编码列叫「总账科目」取值 1001010000；另有一列「会计科目」取值是
-        // 库存现金-人民币 这种名称文本。此前「会计科目」按列名只能去争编码、
-        // 争输被丢，科目名称两头落空。现在按取值补判它为科目名称列。
+        // 库存现金-人民币 这种名称文本。两个标题在不同 ERP 里语义都不稳定，
+        // Coding 不硬判科目身份，由 LLM 结合样本值补齐。
         // 「本币」列（整列 CNY）必须归本位币币种，不许被 LLM 复核指给原币币种；
         // 「过账代码」（取值 40/50）是统驭过账码，不是借贷方向。
         let dir = std::env::temp_dir().join(format!("fx-sap03-{}", std::process::id()));
@@ -14778,16 +14735,8 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
         )
         .unwrap();
         let mapping = &inspection["suggestedMapping"];
-        assert_eq!(
-            mapping.get("accountCode"),
-            Some(&json!("总账科目")),
-            "取值是纯编码的「总账科目」归科目编码：{mapping:#?}"
-        );
-        assert_eq!(
-            mapping.get("accountName"),
-            Some(&json!("会计科目")),
-            "取值是名称文本的「会计科目」应按数据补判为科目名称：{mapping:#?}"
-        );
+        assert!(mapping.get("accountCode").is_none(), "{mapping:#?}");
+        assert!(mapping.get("accountName").is_none(), "{mapping:#?}");
         assert_eq!(
             mapping.get("functionalCurrency"),
             Some(&json!("本币")),
@@ -14869,8 +14818,8 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
         let je_mapping = &je["suggestedMapping"];
         println!("03 JE 表头行 {} 映射：{je_mapping:#}", je["headerRow"]);
         assert_eq!(je["headerRow"], json!(6));
-        assert_eq!(je_mapping.get("accountCode"), Some(&json!("总账科目")));
-        assert_eq!(je_mapping.get("accountName"), Some(&json!("会计科目")));
+        assert!(je_mapping.get("accountCode").is_none(), "{je_mapping:#?}");
+        assert!(je_mapping.get("accountName").is_none(), "{je_mapping:#?}");
         assert_eq!(je_mapping.get("functionalCurrency"), Some(&json!("本币")));
         assert_ne!(je_mapping.get("currency"), Some(&json!("本币")));
         assert_ne!(je_mapping.get("direction"), Some(&json!("过账代码")));
@@ -14900,7 +14849,7 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
     }
 
     #[test]
-    fn mismatched_account_mapping_is_realigned_to_columns_that_actually_match() {
+    fn mismatched_account_mapping_is_not_replaced_by_coding() {
         let dir = std::env::temp_dir().join(format!("fx-realign-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let je = dir.join("je.csv");
@@ -14928,23 +14877,22 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
                 "closingFunctionalAmount":"期末金额"}
         });
         let result = check_mapping_alignment(&params).unwrap();
-        assert_eq!(
-            result.pointer("/fix/tbMapping/accountCode"),
-            Some(&json!("科目代码")),
-            "应当自己找到取值真正对得上的编码列：{result:#}"
+        assert!(
+            result["fix"].is_null(),
+            "Coding 不得自动替换科目语义列：{result:#}"
         );
         assert_eq!(
             result["errors"].as_array().map(Vec::len),
             Some(0),
-            "找到了可用口径就不该再报错：{result:#}"
+            "两侧名称仍能对齐时可以继续，但不得偷换编码列：{result:#}"
         );
         assert!(
             result["warnings"]
                 .as_array()
                 .is_some_and(|items| items.iter().any(|item| item
                     .as_str()
-                    .is_some_and(|text| text.contains("已自动改用")))),
-            "要告诉用户改用了哪一列：{result:#}"
+                    .is_some_and(|text| text.contains("按科目名称继续匹配")))),
+            "要告诉用户当前仅按名称继续，不能暗示已替换编码列：{result:#}"
         );
         fs::remove_file(&je).unwrap();
         fs::remove_file(&tb).unwrap();
@@ -15594,7 +15542,8 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             "名称不参与匹配就不该有任何改列建议：{result:#}"
         );
         assert_eq!(
-            result["aligned"], json!(true),
+            result["aligned"],
+            json!(true),
             "真实 4800 必须一次对齐：{result:#}"
         );
     }
@@ -16356,8 +16305,16 @@ mod bench_load {
             ("03", "03序时账 (2).xlsx", "03科目余额表.xlsx"),
             ("04", "04JE.XLSX", "04TB.XLSX"),
             ("05", "05序时账 (2).XLSX", "05科目余额表.XLSX"),
-            ("06a", "06序时账-2024.1-3.xlsx", "06科目余额表_2024.1-3.xlsx"),
-            ("06b", "06序时账-2024.4-12.xlsx", "06科目余额表_2024.4-12.xlsx"),
+            (
+                "06a",
+                "06序时账-2024.1-3.xlsx",
+                "06科目余额表_2024.1-3.xlsx",
+            ),
+            (
+                "06b",
+                "06序时账-2024.4-12.xlsx",
+                "06科目余额表_2024.4-12.xlsx",
+            ),
             ("07", "07序时账.xls", "07科目余额表.xls"),
             ("08", "08序时账 (2).xlsx", "08TB.xlsx"),
             ("09", "09序时账-2025.xls", "09科目余额表-2025.xls"),
@@ -16392,15 +16349,17 @@ mod bench_load {
             });
             let result = check_mapping_alignment(&params).unwrap();
             assert_eq!(
-                result["aligned"], json!(true),
+                result["aligned"],
+                json!(true),
                 "组 {label}（{je_name} × {tb_name}）必须能对齐：{result:#}"
             );
             if *label == "01" {
                 assert!(
-                    result["warnings"].as_array().is_some_and(|items| items.iter().any(
-                        |item| item.as_str().is_some_and(|text|
-                            text.contains("在余额表侧对应多个名称"))
-                    )),
+                    result["warnings"].as_array().is_some_and(|items| items
+                        .iter()
+                        .any(|item| item
+                            .as_str()
+                            .is_some_and(|text| text.contains("在余额表侧对应多个名称")))),
                     "辅助核算拆行要给知情提示：{result:#}"
                 );
                 let cancel = std::sync::atomic::AtomicBool::new(false);
@@ -16412,5 +16371,4 @@ mod bench_load {
             }
         }
     }
-
 }

@@ -371,14 +371,13 @@ pub(crate) fn detect_foreign_currency(text: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn suggest_tier(text: &str) -> (&'static str, String) {
-    // 外币存款不适用人民币挂牌档位——美元户按 0.05% 人民币活期算会严重低估。
-    // 大类仍按活期兜底（认不出类型时统一落活期），但 [`resolve_rate`] 不会
-    // 给外币户自动套用人民币挂牌利率，必须由用户填对账单上的实际利率。
+    // 外币存款仍按活期兜底（认不出类型时统一落活期）。测算先沿用活期
+    // 0.05% 默认值，但必须把外币身份和复核提示写进结果，提醒用户按对账单改写。
     if let Some(code) = detect_foreign_currency(text) {
         return (
             "demand",
             format!(
-                "科目为 {} 外币户，人民币挂牌利率不适用，大类按活期兜底，请按对账单填实际利率",
+                "科目为 {} 外币户，大类按活期兜底并暂按 0.05% 测算，请按对账单核对实际利率",
                 code.to_uppercase()
             ),
         );
@@ -728,28 +727,16 @@ fn roles(kind: &str) -> Vec<(&'static str, Vec<&'static str>, Vec<&'static str>)
             .filter(|role| !role.name.contains("Foreign") && role.name != "currencyText")
             .map(|role| (role.name, role.aliases.to_vec(), role.conflicts.to_vec()))
             .collect();
-    // 辅助核算是存款利息的关键字段：靠它认存款档次（活期／定期／通知），
-    // 再把序时账每一笔落到具体银行账户上。不进标准表，只在本工具启用。
-    out.push((
-        "auxiliary",
-        vec![
-            "辅助核算",
-            "银行账号",
-            "银行帐号",
-            "账户",
-            "明细项",
-            "往来单位",
-            "文本",
-            "科目文本",
-            "账户文本",
-            "assignment",
-            "profit center",
-            "profitcenter",
-            "成本中心",
-            "财务项目",
-        ],
-        vec!["科目编码", "科目代码", "科目名称"],
-    ));
+    // 辅助核算已是公共角色；存款只追加银行业务特有写法。JE 的泛化「文本」
+    // 必须留给摘要，科目文本必须留给科目名称，否则 SAP 行项目文本会与
+    // 成本中心一起被错误挂成辅助核算多列。TB 没有摘要角色，且部分银行余额表
+    // 的「文本」确实承载账户维度，因此只在 TB 侧保留这一兜底。
+    if let Some((_, aliases, _)) = out.iter_mut().find(|(role, _, _)| *role == "auxiliary") {
+        aliases.extend(["账户", "财务项目"]);
+        if kind == "tb" {
+            aliases.extend(["文本", "科目文本", "账户文本"]);
+        }
+    }
     if kind == "je" {
         // 数量列用于识别计息天数之类的辅助信息，同样是本工具专属。
         out.push((
@@ -1099,7 +1086,7 @@ fn rate_tiers() -> Value {
         ),
         "practiceSource": "实务区间是常见报价范围的经验值，不是官方公布数据，仅用来提示填入的利率是否明显离谱。",
         "authority": "以上三组都只是默认值和合理性参照。审计依据应当是客户的存款协议、银行对账单或银行出具的利息清单。",
-        "autoApplyPolicy": "只有活期自动套用默认利率——对公活期没有议价空间。协定、通知、定期、大额存单的利率逐笔合同约定，默认留空，须填入实际利率后才计入测算。",
+        "autoApplyPolicy": "只有活期自动套用 0.05% 默认利率；识别为外币活期户时仍先按 0.05% 测算，但会提示按对账单核对实际利率。协定、通知、定期、大额存单的利率逐笔合同约定，默认留空，须填入实际利率后才计入测算。",
         "listedRateDate": LISTED_REFERENCE_DATE,
         "rateAgeMonths": age,
         "ratesStale": stale,
@@ -1165,6 +1152,25 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     // 合并科目列的兜底与汇兑损益共用同一份（判定在公共引擎、套用在 fx 侧），
     // 存款利息不再自持一份近似实现。
     crate::fx::fill_combined_account_column(kind, &table, &mut mapping);
+    let identity =
+        ledger_mapping::account_identity_columns_by_data(kind, &table.headers, &table.rows);
+    let code_invalid = mapping
+        .get("accountCode")
+        .and_then(Value::as_str)
+        .and_then(|column| table.headers.iter().position(|header| header == column))
+        .is_some_and(|index| {
+            ledger_mapping::account_column_shape(
+                table.rows.iter().filter_map(|row| row.get(index)).cloned(),
+            ) == ledger_mapping::AccountColumnShape::Name
+        });
+    if (mapping.get("accountCode").is_none() || code_invalid)
+        && let Some(column) = identity.code
+    {
+        mapping.insert("accountCode".into(), json!(column));
+    }
+    if !mapping.contains_key("accountName") && !identity.names.is_empty() {
+        mapping.insert("accountName".into(), json!(identity.names));
+    }
     if kind == "tb" {
         crate::fx::promote_period_movement(&table, &mut mapping);
     }
@@ -1545,6 +1551,18 @@ fn calculate(
             None,
         ));
     }
+    // JE 没有币种字段时，同一科目在 TB 按多个币种拆行，JE 发生额只能得到
+    // 科目合计，无法可靠分配到每一个币种。按用户要求保留当前计算，只披露
+    // 输入资料局限，不把它冒充成分币种勾稽证据。
+    let je_currency_ambiguous_keys = je_currency_ambiguous_keys(params, &accounts);
+    let je_currency_allocation_warning = if je_currency_ambiguous_keys.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "JE 未提供或未映射币种字段，但 TB 中有 {} 个账户按多个币种列示。JE 发生额只能按账户合计，无法准确分配到各币种；分币种的“年末余额（JE推导）”及勾稽差异仅供参考，请补充 JE 币种字段或按账户合并口径复核。",
+            je_currency_ambiguous_keys.len()
+        )
+    };
     checkpoint(cancel, pause)?;
 
     // 只测算期间覆盖到的月份。SAP 的 TB 常常只出到某个期间（例如 10 月），
@@ -1678,6 +1696,12 @@ fn calculate(
         if !account.rate_warning.is_empty() {
             notes.push(account.rate_warning.clone());
         }
+        if je_currency_ambiguous_keys.contains(&account.key) {
+            notes.push(
+                "JE 未提供或未映射币种字段，而该账户在 TB 中按多个币种列示；JE 发生额无法按币种拆分，本行的 JE 推导余额及勾稽差异仅供参考。"
+                    .into(),
+            );
+        }
         if !has_je {
             notes.push("未提供序时账，月末余额按年初到年末直线推算，月均余额仅供参考。".into());
         } else if account.reconciliation_diff.abs() >= 0.01 {
@@ -1757,12 +1781,14 @@ fn calculate(
             "dayBasis": basis_key,
             "dayBasisLabel": basis_label,
             "rateBasisLabel": format!(
-                "仅活期自动套用国有大行挂牌默认值（{LISTED_REFERENCE_DATE}）；\
+                "仅活期自动套用 0.05% 默认值（{LISTED_REFERENCE_DATE}）；外币活期户会提示核对实际利率。\
                  其余档位须填实际利率。央行基准（{PBC_BENCHMARK_DATE}）只作上限参照，不参与测算。"
             ),
             "listedRateDate": LISTED_REFERENCE_DATE,
             "ratesStale": rates_stale,
             "rateAgeMonths": stale_months,
+            "jeCurrencyAllocationWarningCount": je_currency_ambiguous_keys.len(),
+            "jeCurrencyAllocationWarning": je_currency_allocation_warning,
             "staleMessage": if rates_stale {
                 format!(
                     "内置挂牌利率最后更新于 {LISTED_REFERENCE_DATE}，距今约 {stale_months} 个月，\
@@ -1818,8 +1844,8 @@ fn resolve_rate(
     {
         return done(rate, "自定义档位利率");
     }
-    // 外币户即便落在活期档，也不能自动套人民币挂牌利率（0.05% 会严重低估
-    // 美元存款利息）——留空逼着用户按对账单填。用户手工填的利率在上面已经返回。
+    // 外币户落在活期档时也先套 0.05% 默认值，但必须明确提示这只是暂估值，
+    // 让用户按该币种的银行对账单复核。用户手工填的利率在上面已经返回。
     let identity = format!("{} {}", account.account, account.auxiliary);
     let normalized_identity = normalize_header(&identity);
     // 科目/辅助核算中明写 RMB、CNY 或人民币时，这是账户级证据，
@@ -1828,11 +1854,23 @@ fn resolve_rate(
     let explicitly_domestic = ["rmb", "cny", "人民币"]
         .iter()
         .any(|token| normalized_identity.contains(token));
-    let foreign = !explicitly_domestic
-        && (detect_foreign_currency(&identity).is_some()
-            || detect_foreign_currency(&account.currency).is_some());
-    match auto_rate(&tier).filter(|_| !foreign) {
-        Some(rate) => done(rate, "活期挂牌默认值"),
+    let foreign_currency = (!explicitly_domestic)
+        .then(|| {
+            detect_foreign_currency(&identity)
+                .or_else(|| detect_foreign_currency(&account.currency))
+        })
+        .flatten();
+    match auto_rate(&tier) {
+        Some(rate) => match foreign_currency {
+            Some(code) => done(
+                rate,
+                &format!(
+                    "已识别为 {} 外币活期户，暂按 0.05% 默认值，请核对实际利率",
+                    code.to_uppercase()
+                ),
+            ),
+            None => done(rate, "活期挂牌默认值"),
+        },
         None => ResolvedRate {
             tier,
             rate: 0.0,
@@ -2349,6 +2387,44 @@ fn account_key(entity: &str, account: &str, auxiliary: &str) -> String {
         .map(|part| part.trim())
         .collect::<Vec<_>>()
         .join(" | ")
+}
+
+/// JE 未提供币种维度时，找出 TB 中“同一账户、多币种”的账户键。
+/// 这里只提示输入资料局限，不改变既有计算、状态或匹配结果。
+fn je_currency_ambiguous_keys(params: &Value, accounts: &[AccountRow]) -> BTreeSet<String> {
+    if params.get("jeSource").is_none_or(Value::is_null) {
+        return BTreeSet::new();
+    }
+    let currency_mapped = params
+        .get("jeMapping")
+        .and_then(Value::as_object)
+        .and_then(|mapping| mapping.get("currency"))
+        .is_some_and(|value| match value {
+            Value::String(column) => !column.trim().is_empty(),
+            Value::Array(columns) => columns
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|column| !column.trim().is_empty()),
+            _ => false,
+        });
+    if currency_mapped {
+        return BTreeSet::new();
+    }
+
+    let mut currencies: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for account in accounts {
+        let currency = account.currency.trim().to_uppercase();
+        if !currency.is_empty() {
+            currencies
+                .entry(account.key.clone())
+                .or_default()
+                .insert(currency);
+        }
+    }
+    currencies
+        .into_iter()
+        .filter_map(|(key, values)| (values.len() > 1).then_some(key))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -3285,7 +3361,7 @@ fn write_rate_tiers(sheet: &mut Worksheet, params: &Value) -> Result<(), AppErro
     let mut y = RATE_TIERS.len() as u32 + 2;
     let age = listed_rate_age_months();
     let mut lines = vec![
-        "自动套用范围：只有活期自动套用默认利率——对公活期没有议价空间。协定、通知、定期、大额存单的利率是逐笔合同约定的，默认留空，须填入实际利率后才计入测算合计。".to_string(),
+        "自动套用范围：只有活期自动套用 0.05% 默认利率；识别为外币活期户时仍先按 0.05% 测算，但须按对账单核对实际利率。协定、通知、定期、大额存单的利率是逐笔合同约定的，默认留空，须填入实际利率后才计入测算合计。".to_string(),
         format!("央行基准来源：中国人民银行《金融机构人民币存款基准利率调整表》，{PBC_BENCHMARK_DATE} 起执行，至今未再调整。仅作合理性上限参照，不参与测算——3 年期基准 2.75% 对比实际约 1.25%，拿它算会把利息放大一倍以上。"),
         format!("大行挂牌来源：国有大型商业银行人民币存款挂牌利率，{LISTED_REFERENCE_DATE} 调整后水平；2022 年建立存款利率市场化调整机制后由各行自主报价，已多轮下调。"),
         "实务常见区间：常见报价范围的经验值，不是官方公布数据，只用于提示填入的利率是否明显偏离。".to_string(),
@@ -3542,15 +3618,27 @@ mod tests {
             (summary["bookedInterestIncome"].as_f64().unwrap() - 1_582_447.80).abs() < 1.0,
             "账面利息收入应取自 520000"
         );
-        // 全部落活期档，自动套用 0.05%，所以一定测得出数且没有待填利率。
-        // 三个美元户（USD BOC / USD BOA / HSBC USD）大类同样兜底为活期，
-        // 但不自动套人民币挂牌利率，必须落到待填，否则会把美元存款利息严重低估。
-        assert_eq!(summary["missingRateCount"], json!(3));
-        assert_eq!(summary["missingRateTiers"], json!(["活期存款"]));
+        // 全部落活期档（含三个美元户），自动套用 0.05%，所以一定测得出数且没有待填利率。
+        // 外币户必须在利率来源中明确提示这是默认值，提醒用户按对账单复核。
+        assert_eq!(summary["missingRateCount"], json!(0));
+        assert_eq!(summary["missingRateTiers"], json!([]));
         assert!(summary["calculatedInterest"].as_f64().unwrap() > 0.0);
         let usd = rows_of(&result, "USD BOA");
         assert_eq!(usd["tier"], "demand");
-        assert!(!usd["rateResolved"].as_bool().unwrap());
+        assert!(usd["rateResolved"].as_bool().unwrap());
+        assert_eq!(usd["annualRate"], json!(0.0005));
+        assert!(
+            usd["rateSource"]
+                .as_str()
+                .unwrap()
+                .contains("USD 外币活期户")
+        );
+        assert!(
+            usd["rateSource"]
+                .as_str()
+                .unwrap()
+                .contains("请核对实际利率")
+        );
         assert!(usd["tierMatchedBy"].as_str().unwrap().contains("USD"));
         let rmb = rows_of(&result, "RMB CMB");
         assert_eq!(rmb["tier"], "demand");
@@ -3711,6 +3799,10 @@ mod tests {
             "不能错选凭证货币或集团货币"
         );
         assert_eq!(je_map["direction"], json!("借贷"));
+        let mut je_map = je_map.clone();
+        // 该 SAP 导出的编码列叫「会计科目」；这是跨 ERP 歧义标题，
+        // Coding 故意留空，此处模拟 LLM／用户确认后再进入业务测算。
+        je_map["accountCode"] = json!("会计科目");
 
         let params = json!({
             "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
@@ -3758,9 +3850,9 @@ mod tests {
                 "{account} 不该被当成可计息存款"
             );
         }
-        // 10 个外币户（USD/HKD）大类兜底为活期，但不套人民币活期挂牌，落到待填利率。
-        assert_eq!(summary["missingRateCount"], json!(10));
-        assert_eq!(summary["missingRateTiers"], json!(["活期存款"]));
+        // 10 个外币户（USD/HKD）大类兜底为活期，暂按 0.05% 测算并提示复核。
+        assert_eq!(summary["missingRateCount"], json!(0));
+        assert_eq!(summary["missingRateTiers"], json!([]));
         // 建行 RMB3250 户：期初 255.21 ＋ 借 143,172.03 － 贷 130,827.78 ＝ 期末 12,599.46。
         let rmb = rows_of(&result, "1002010017");
         assert!((rmb["openingBalance"].as_f64().unwrap() - 255.21).abs() < 0.01);
@@ -3997,9 +4089,9 @@ mod tests {
     }
 
     /// 外币户：大类同样兜底为活期（认不出类型一律落活期），
-    /// 但人民币挂牌利率不会被自动套用，必须由用户按对账单填。
+    /// 暂按 0.05% 默认值测算，同时明确提示用户核对实际利率。
     #[test]
-    fn foreign_currency_falls_back_to_demand_but_never_auto_fills_rmb_rate() {
+    fn foreign_currency_falls_back_to_demand_with_default_rate_and_warning() {
         let (tier, reason) = suggest_tier("100332 USD BOC-CPCSC-SH");
         assert_eq!(tier, "demand");
         assert!(reason.contains("USD") && reason.contains("活期"));
@@ -4009,8 +4101,11 @@ mod tests {
             ..blank_row()
         };
         let resolved = resolve_rate(&row, None, None);
-        assert!(!resolved.resolved && resolved.rate == 0.0);
-        assert_eq!(resolved.source, "需填写实际利率");
+        assert!(resolved.resolved);
+        assert_eq!(resolved.rate, 0.0005);
+        assert!(resolved.source.contains("USD 外币活期户"));
+        assert!(resolved.source.contains("暂按 0.05%"));
+        assert!(resolved.source.contains("核对实际利率"));
         // 人民币户不受影响，仍自动套活期挂牌。
         let rmb = AccountRow {
             account: "100201 RMB CMB-CPCSC-SH".into(),
@@ -4024,6 +4119,42 @@ mod tests {
         // 认不出的档位键也回落活期，不再冒出"自定义"。
         assert_eq!(RATE_TIERS[0].key, "demand", "第一档必须是活期，兜底靠它");
         assert_eq!(tier_label("不存在的档位"), "活期存款");
+    }
+
+    #[test]
+    fn warns_only_when_je_lacks_currency_and_tb_splits_one_account_by_currency() {
+        let mut usd = blank_row();
+        usd.key = account_key("3110", "1002013636 银行存款", "");
+        usd.currency = "USD".into();
+        let mut cny = usd.clone();
+        cny.currency = "CNY".into();
+        let accounts = vec![usd.clone(), cny];
+
+        assert!(je_currency_ambiguous_keys(&json!({}), &accounts).is_empty());
+        assert_eq!(
+            je_currency_ambiguous_keys(
+                &json!({"jeSource": {"inputPath": "je.xlsx"}, "jeMapping": {}}),
+                &accounts
+            ),
+            BTreeSet::from([usd.key.clone()])
+        );
+        assert!(
+            je_currency_ambiguous_keys(
+                &json!({"jeSource": {"inputPath": "je.xlsx"}, "jeMapping": {}}),
+                &[usd.clone()]
+            )
+            .is_empty()
+        );
+        assert!(
+            je_currency_ambiguous_keys(
+                &json!({
+                    "jeSource": {"inputPath": "je.xlsx"},
+                    "jeMapping": {"currency": "币种"}
+                }),
+                &accounts
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -4815,6 +4946,96 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn 存款inspect保留歧义科目给llm并自动识别摘要() {
+        let dir = std::env::temp_dir().join(format!("deposit-sap-je-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("je.xlsx");
+        write_fixture(
+            &path,
+            &[
+                vec![
+                    "凭证编号",
+                    "凭证日期",
+                    "文本",
+                    "成本中心",
+                    "本币金额",
+                    "会计科目",
+                    "总账科目",
+                ],
+                vec![
+                    "1",
+                    "2025-01-01",
+                    "发放工资",
+                    "CC01",
+                    "100",
+                    "库存现金-人民币",
+                    "1001010000",
+                ],
+                vec![
+                    "2",
+                    "2025-01-02",
+                    "支付货款",
+                    "CC02",
+                    "200",
+                    "银行存款-人民币",
+                    "1002101001",
+                ],
+                vec![
+                    "3",
+                    "2025-01-03",
+                    "计提利息",
+                    "CC03",
+                    "300",
+                    "财务费用-利息支出",
+                    "6603010000",
+                ],
+                vec![
+                    "4",
+                    "2025-01-04",
+                    "收到回款",
+                    "CC04",
+                    "400",
+                    "应收账款-客户",
+                    "1122010000",
+                ],
+            ],
+        );
+        let inspected = inspect(
+            &json!({"source": {"inputPath": path.to_string_lossy()}}),
+            "je",
+        )
+        .unwrap();
+        let mapping = &inspected["suggestedMapping"];
+        assert!(mapping.get("accountCode").is_none(), "{mapping:#?}");
+        assert!(mapping.get("accountName").is_none(), "{mapping:#?}");
+        assert_eq!(mapping["summary"], json!("文本"));
+        assert_eq!(mapping["auxiliary"], json!(["成本中心"]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "依赖本机样例目录，用 LEDGER_SAMPLES=<TBJEPBC路径> 显式运行"]
+    fn 存款inspect真实03序时账映射() {
+        let root = std::env::var_os("LEDGER_SAMPLES")
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir())
+            .expect("请设置 LEDGER_SAMPLES");
+        let inspected = inspect(
+            &json!({"source": {
+                "inputPath": root.join("03序时账 (2).xlsx"),
+                "sheet": "", "headerRow": 0, "headerDepth": 0
+            }}),
+            "je",
+        )
+        .unwrap();
+        let mapping = &inspected["suggestedMapping"];
+        assert!(mapping.get("accountCode").is_none(), "{mapping:#?}");
+        assert!(mapping.get("accountName").is_none(), "{mapping:#?}");
+        assert_eq!(mapping["summary"], json!("文本"));
+        assert_eq!(mapping["auxiliary"], json!(["成本中心"]));
+    }
+
     /// inspect 下发的 `roles` 角色标签表与引擎 Role 表逐条同源：全量、
     /// name/label 齐全、标签就是引擎那份（与 MissingRole.label 同一张表），
     /// 前端据此渲染中文角色名，不再自持会过期的对照表。
@@ -5490,8 +5711,10 @@ mod tests {
             "账面利息收入科目明细应列示借贷发生额与期末余额"
         );
         assert!(
-            text.contains("只有活期自动套用默认利率"),
-            "档位表缺少自动套用范围说明"
+            text.contains("只有活期自动套用 0.05% 默认利率")
+                && text.contains("外币活期户")
+                && text.contains("核对实际利率"),
+            "档位表缺少活期默认值或外币复核说明"
         );
         assert!(
             text.contains("仅作合理性上限参照"),

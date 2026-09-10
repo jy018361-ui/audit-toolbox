@@ -649,6 +649,36 @@ export function fxMissingRequired(
 ): string[] {
   return [...new Set(fxMissingRaw(kind, mapping, _hasJe, fixedEntity, mode))];
 }
+
+/**
+ * 币种类角色的必填口径——本工具自报，覆盖公共形态表「与形态无关」的默认结论，
+ * 让下拉标记与校验（fxMissingRaw）一个口径：
+ * - TB：原币币种列与币种线索文本**二选一**——都没映射时双双标＊，映射其一后转（选填）；
+ * - JE：原币币种依模式——已实现/组合必填，仅未实现可选（本位币账套序时账无外币列是常态）；
+ * - 本位币币种：恒为（选填）。
+ */
+export function fxCurrencyRequirement(
+  kind: "je" | "tb",
+  mapping: Record<string, string | string[]>,
+  mode: Mode,
+  role: string,
+): "required" | "optional" | undefined {
+  const has = (key: string) => {
+    const value = mapping[key];
+    return Array.isArray(value)
+      ? value.some((item) => item.trim())
+      : Boolean(value?.trim());
+  };
+  if (kind === "tb") {
+    if (role === "currency" || role === "currencyText") {
+      return has("currency") || has("currencyText") ? "optional" : "required";
+    }
+  } else if (role === "currency") {
+    return mode === "unrealized" ? "optional" : "required";
+  }
+  if (role === "functionalCurrency") return "optional";
+  return undefined;
+}
 function fxMissingRaw(
   kind: "je" | "tb",
   mapping: Record<string, string | string[]>,
@@ -1811,6 +1841,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
               <FxPreview
                 title="JE 文件预览与字段映射"
                 kind="je"
+                mode={mode}
                 inspection={je}
                 mapping={jeMapping}
                 labels={JE_LABELS}
@@ -1838,6 +1869,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
               <FxPreview
                 title="TB 文件预览与字段映射"
                 kind="tb"
+                mode={mode}
                 inspection={tb}
                 mapping={tbMapping}
                 labels={TB_LABELS}
@@ -2414,6 +2446,8 @@ export function fxDetachRole(
 function FxPreview(props: {
   title: string;
   kind: "je" | "tb";
+  /** 币种类角色的必填标记随模式变：仅未实现模式下 JE 的原币币种转选填。 */
+  mode: Mode;
   inspection: Inspection;
   mapping: Record<string, string | string[]>;
   labels: Record<string, string>;
@@ -2539,7 +2573,10 @@ function FxPreview(props: {
       mapping={props.mapping}
       roles={roles}
       groups={groups}
-      requirementOf={(role) => roleRequirement(formMatch, role)}
+      requirementOf={(role) =>
+        fxCurrencyRequirement(props.kind, props.mapping, props.mode, role) ??
+        roleRequirement(formMatch, role)
+      }
       formNote={formNote}
       multi={MULTI_COLUMN_ROLES}
       isLocked={locked}

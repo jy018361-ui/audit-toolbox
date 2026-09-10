@@ -1990,6 +1990,9 @@ function Results({
   const missing = rows.filter((row) => !row.rateResolved);
   const stale =
     Math.abs(liveTotal - Number(summary.calculatedInterest ?? 0)) > 0.005;
+  const jeCurrencyAllocationWarning = String(
+    summary.jeCurrencyAllocationWarning ?? "",
+  );
 
   return (
     <section className="fx-result deposit-result">
@@ -2074,6 +2077,12 @@ function Results({
             这些档位的利率是逐笔合同约定的，请按存款协议、银行对账单或利息清单填入实际利率——填之前它们的利息不计入下方合计和与
             TB 的比较。
           </span>
+        </p>
+      )}
+      {jeCurrencyAllocationWarning && (
+        <p className="deposit-stale" role="alert">
+          <b>JE 币种资料不完整</b>
+          <span>{jeCurrencyAllocationWarning}</span>
         </p>
       )}
       {stale && (

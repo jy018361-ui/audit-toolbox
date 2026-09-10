@@ -294,3 +294,68 @@ describe("利率手工填写", () => {
     });
   });
 });
+
+describe("JE 币种资料提示", () => {
+  it("在结果顶部说明分币种 JE 推导余额仅供参考", async () => {
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "拖放或选择 TB、序时账文件（可同时选择）",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled(),
+    );
+    goToStep(STEP2);
+    goToStep(STEP3);
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+
+    act(() =>
+      mock.event?.({
+        ...complete,
+        result: {
+          rows: [
+            {
+              key: "3110 | 1002013636 银行存款 | ",
+              entity: "3110",
+              account: "1002013636 银行存款",
+              auxiliary: "",
+              currency: "USD",
+              role: "deposit",
+              tier: "demand",
+              tierLabel: "活期存款",
+              category: "demand",
+              termLabel: "",
+              tierMatchedBy: "默认按活期",
+              rateSource: "活期挂牌默认值",
+              annualRate: 0.0005,
+              rateResolved: true,
+              rateWarning: "",
+              openingBalance: 100,
+              tbClosingBalance: 100,
+              derivedClosingBalance: 100,
+              reconciliationDiff: 0,
+              averageBalance: 100,
+              calculatedInterest: 0.05,
+              months: [],
+              status: "待复核",
+              note: "",
+            },
+          ],
+          summary: {
+            jeCurrencyAllocationWarning:
+              "JE 未提供或未映射币种字段，分币种的年末余额（JE推导）仅供参考。",
+          },
+        },
+      }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "JE 币种资料不完整",
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "分币种的年末余额（JE推导）仅供参考",
+    );
+  });
+});

@@ -426,29 +426,13 @@ fn align_account_mappings(
         return Ok(warnings);
     }
 
-    let Some(aligned) =
-        ledger_mapping::align_account_code_columns(&je.headers, &je.rows, &tb.headers, &tb.rows)
-    else {
-        return Err(error(
-            "TBJE_ACCOUNT_MAPPING_MISMATCH",
-            "TB与JE的科目编码完全对不上，也找不到可靠的替代列。请在映射面板确认两边都选中真实科目编码。",
-            Some(format!(
-                "JE列“{je_column}”有 {je_count} 个编码，TB列“{tb_column}”有 {tb_count} 个编码，交集为0。"
-            )),
-        ));
-    };
-    je_map.insert(
-        "accountCode".into(),
-        Value::String(aligned.je_column.clone()),
-    );
-    tb_map.insert(
-        "accountCode".into(),
-        Value::String(aligned.tb_column.clone()),
-    );
-    Ok(vec![format!(
-        "已纠正科目编码映射：JE“{}” ↔ TB“{}”（{} 项编码一致）。",
-        aligned.je_column, aligned.tb_column, aligned.overlap
-    )])
+    Err(error(
+        "TBJE_ACCOUNT_MAPPING_MISMATCH",
+        "TB与JE的科目编码完全对不上。请使用 LLM 复核或在映射面板人工确认两边的科目编码列，系统不会自动替换。",
+        Some(format!(
+            "JE列“{je_column}”有 {je_count} 个编码，TB列“{tb_column}”有 {tb_count} 个编码，交集为0。"
+        )),
+    ))
 }
 
 fn prepare(params: &Value) -> Result<PreparedCheck, AppError> {

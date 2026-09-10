@@ -17,6 +17,7 @@ import {
   isMultiRole,
   isRedundantKanzhangReview,
   isSchemeLockedRole,
+  kanzhangReviewPayload,
   kanzhangErrorText,
   kanzhangReviewSummary,
   matchAuditFocusPresets,
@@ -65,6 +66,20 @@ const draft = (): KanzhangDraft => ({
 });
 
 describe("目标批次清空", () => {
+  it("看账 LLM 请求统一使用 sampleRows 并限制八行样例", () => {
+    const preview = Array.from({ length: 10 }, (_, index) => [String(index)]);
+    const payload = kanzhangReviewPayload(["总账科目"], preview, {
+      id: [],
+      accountName: [],
+    });
+    expect(payload).toEqual({
+      headers: ["总账科目"],
+      sampleRows: preview.slice(0, 8),
+      currentMapping: { id: [], accountName: [] },
+    });
+    expect(payload).not.toHaveProperty("samples");
+  });
+
   it("一键删除后保留一个可继续编辑的空批次", () => {
     expect(clearKanzhangBatches()).toEqual({
       batches: [{ name: "批次1", accounts: [] }],

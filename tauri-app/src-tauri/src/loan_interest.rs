@@ -111,12 +111,252 @@ pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
     match method {
         "loan.inspect" => inspect(&params),
         "loan.match_rates" => match_rates(&params),
+        "loan.tb_accounts" => tb_accounts(&params),
+        "loan.rate_template" => rate_template(&params),
+        "loan.import_rates" => import_rates(&params),
         _ => Err(error(
             "METHOD_NOT_FOUND",
             "未找到借款利息业务方法。",
             Some(method.into()),
         )),
     }
+}
+
+/// 「确认科目与利率」步骤的科目清单：TB 末级科目逐行下发（编码、名称、
+/// 期初/期末余额、行键）。前端按名称含「借款/贷款」预选借款科目，用户
+/// 逐行确认后把行键回传为 loanAccounts。
+fn tb_accounts(params: &Value) -> Result<Value, AppError> {
+    let (tb, tm) = source(params, "tbSource")?;
+    let tb_leaf =
+        ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| mapped_names(&tm, "tb", role));
+    let balance_self_signed = |prefix: &str| {
+        ledger_mapping::balance_self_signed(
+            &tb.headers,
+            &tb.rows,
+            &|role| mapped_names(&tm, "tb", role),
+            prefix,
+        )
+    };
+    let tb_convention = tb_sign_convention(&tb, &tm);
+    let (opening_signed, closing_signed) = (
+        balance_self_signed("openingFunctional"),
+        balance_self_signed("closingFunctional"),
+    );
+    let mut accounts = Vec::new();
+    for (row_index, row) in tb.rows.iter().enumerate() {
+        if !tb_leaf.get(row_index).copied().unwrap_or(true) {
+            continue;
+        }
+        let code = role_text(&tb, row, &tm, "tb", "accountCode");
+        let name = role_text(&tb, row, &tm, "tb", "accountName");
+        let account = account_text(&tb, row, &tm, "tb");
+        if account.trim().is_empty() {
+            continue;
+        }
+        let opening = ledger_mapping::credit_positive(ledger_mapping::signed_balance(
+            &amount_inputs(&tb, row, &tm, "opening"),
+            tb_convention,
+            opening_signed,
+        ));
+        let closing = ledger_mapping::credit_positive(ledger_mapping::signed_balance(
+            &amount_inputs(&tb, row, &tm, "closing"),
+            tb_convention,
+            closing_signed,
+        ));
+        let key = if code.trim().is_empty() {
+            norm(&account)
+        } else {
+            norm(&code)
+        };
+        accounts.push(json!({
+            "key": key,
+            "code": code,
+            "name": name,
+            "account": account,
+            "opening": opening,
+            "closing": closing,
+        }));
+    }
+    Ok(json!({ "accounts": accounts }))
+}
+
+/// 导出「借款利率确认表」模板：借款行逐行列出（行标识、科目、期初/期末），
+/// 利率列带入当前已填值（若有），用户在 Excel 里补填后经 import_rates 回读。
+fn rate_template(params: &Value) -> Result<Value, AppError> {
+    let output = params
+        .get("outputPath")
+        .and_then(Value::as_str)
+        .filter(|x| !x.trim().is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| error("INVALID_PARAMS", "请先选择模板保存位置。", None))?;
+    let rows = calculate_tb(params, &|_, _, _, _| {}, &AtomicBool::new(false))?;
+    let filled: std::collections::HashMap<String, &Value> = params
+        .get("rateRows")
+        .and_then(Value::as_array)
+        .map(|all| {
+            all.iter()
+                .filter_map(|item| {
+                    item.get("loanId")
+                        .and_then(Value::as_str)
+                        .map(|id| (norm(id), item))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // 模板用 umya 写：回读（import_rates）也走 umya，读写同源；实测 umya
+    // 读不到 rust_xlsxwriter 写的字符串单元格，混用会把借款行标识读成空。
+    let mut wb = umya_spreadsheet::new_file();
+    {
+        let sheet = wb.get_sheet_mut(&0).map_err(|e| {
+            error(
+                "WORKBOOK_WRITE_FAILED",
+                "无法创建利率确认表。",
+                Some(e.to_string()),
+            )
+        })?;
+        sheet.set_name("借款利率确认表");
+    }
+    let ws = wb.get_sheet_by_name_mut("借款利率确认表").map_err(|e| {
+        error(
+            "WORKBOOK_WRITE_FAILED",
+            "无法创建利率确认表。",
+            Some(e.to_string()),
+        )
+    })?;
+    for (col, title) in [
+        "借款行标识",
+        "科目编码",
+        "科目名称",
+        "期初余额",
+        "期末余额",
+        "利率类型（固定/浮动）",
+        "执行利率（%，固定填这列）",
+        "基准利率（%，浮动填这列）",
+        "加减点（BP，浮动选填）",
+    ]
+    .iter()
+    .enumerate()
+    {
+        ws.get_cell_mut((col as u32 + 1, 1)).set_value(*title);
+    }
+    for (index, row) in rows.iter().enumerate() {
+        let y = index as u32 + 1;
+        let rate = filled.get(&norm(&row.loan_id));
+        let pick = |field: &str| -> Option<f64> {
+            rate.and_then(|item| item.get(field).and_then(Value::as_f64))
+        };
+        let rate_type = match rate.and_then(|item| item.get("rateType").and_then(Value::as_str)) {
+            Some("floating") => "浮动",
+            _ => "固定",
+        };
+        let (code, name) = match row.loan_id.split_once(' ') {
+            Some((head, tail)) => (head.to_owned(), tail.to_owned()),
+            None => (String::new(), row.loan_id.clone()),
+        };
+        ws.get_cell_mut((1, y + 1)).set_value(row.loan_id.clone());
+        ws.get_cell_mut((2, y + 1)).set_value(code);
+        ws.get_cell_mut((3, y + 1)).set_value(name);
+        ws.get_cell_mut((4, y + 1))
+            .set_value_number(row.opening_principal);
+        ws.get_cell_mut((5, y + 1))
+            .set_value_number(row.closing_principal);
+        ws.get_cell_mut((6, y + 1)).set_value(rate_type);
+        if let Some(v) = pick("fixedRate") {
+            ws.get_cell_mut((7, y + 1)).set_value_number(v);
+        }
+        if let Some(v) = pick("benchmarkRate") {
+            ws.get_cell_mut((8, y + 1)).set_value_number(v);
+        }
+        if let Some(v) = pick("spreadBps") {
+            ws.get_cell_mut((9, y + 1)).set_value_number(v);
+        }
+    }
+    umya_spreadsheet::writer::xlsx::write(&wb, &output).map_err(|e| {
+        error(
+            "WORKBOOK_WRITE_FAILED",
+            "无法保存利率确认表模板。",
+            Some(e.to_string()),
+        )
+    })?;
+    Ok(json!({ "path": output, "rowCount": rows.len() }))
+}
+
+/// 回读用户补填过的利率确认表：按「借款行标识」列对号，利率列支持
+/// `3.85`、`3.85%` 两种写法（统一换算为小数），利率类型只认 固定/浮动。
+fn import_rates(params: &Value) -> Result<Value, AppError> {
+    let path = params
+        .get("inputPath")
+        .and_then(Value::as_str)
+        .filter(|x| !x.trim().is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| error("INVALID_PARAMS", "请先选择已填写的利率确认表。", None))?;
+    let book = umya_spreadsheet::reader::xlsx::read(&path).map_err(|e| {
+        error(
+            "WORKBOOK_READ_FAILED",
+            "无法读取利率确认表。",
+            Some(e.to_string()),
+        )
+    })?;
+    // 模板固定单表；表名对不上时退回第一张，避免多余的命名仪式。
+    let ws = match book.get_sheet_by_name("借款利率确认表") {
+        Ok(sheet) => sheet,
+        Err(_) => book.get_sheet(&0).map_err(|e| {
+            error(
+                "WORKBOOK_READ_FAILED",
+                "利率确认表里没有工作表。",
+                Some(e.to_string()),
+            )
+        })?,
+    };
+    // umya 的数字坐标从 1 起；y 即模板里的第几行（1 起，1 为表头）。
+    // 列序：1 借款行标识 … 6 利率类型 7 执行利率 8 基准利率 9 加减点。
+    let text = |row: u32, col: u32| -> String { ws.get_value((col + 1, row)).trim().to_string() };
+    let header_row = ws.get_highest_row();
+    // 表头固定在第 1 行（模板即此形态）；空行跳过，行标识为空的行忽略。
+    let mut rows = Vec::new();
+    for y in 1..=header_row {
+        let loan_id = text(y, 0);
+        if y == 1 || loan_id.is_empty() {
+            continue;
+        }
+        let rate_type_text = text(y, 5);
+        let rate_type =
+            if rate_type_text.contains("浮") || rate_type_text.eq_ignore_ascii_case("floating") {
+                "floating"
+            } else {
+                "fixed"
+            };
+        let percent = |raw: String| -> Option<f64> {
+            let cleaned = raw.trim().trim_end_matches('%');
+            if cleaned.is_empty() {
+                return None;
+            }
+            let value: f64 = cleaned.parse().ok()?;
+            Some(if raw.contains('%') || value > 1.0 {
+                value / 100.0
+            } else {
+                value
+            })
+        };
+        let fixed = percent(text(y, 6));
+        let benchmark = percent(text(y, 7));
+        let spread = text(y, 8).parse::<f64>().ok();
+        rows.push(json!({
+            "loanId": loan_id,
+            "rateType": rate_type,
+            "fixedRate": fixed,
+            "benchmarkRate": benchmark,
+            "spreadBps": spread,
+        }));
+    }
+    if rows.is_empty() {
+        return Err(error(
+            "NO_RATES_IMPORTED",
+            "利率确认表里没有可回读的借款行（请检查「借款行标识」列是否有内容）。",
+            None,
+        ));
+    }
+    Ok(json!({ "rateRows": rows }))
 }
 pub(crate) fn run_job(
     method: &str,
@@ -1080,6 +1320,9 @@ struct JeLoanAggregate {
     reductions: f64,
     matched: usize,
     events: Vec<(NaiveDate, f64)>,
+    /// 各匹配方式命中的 JE 条数（编码／编码＋明细／编码＋名称／科目…），
+    /// 底稿「匹配依据」列如实标注，复核时能看出这笔走的哪层口径。
+    kinds: std::collections::BTreeMap<&'static str, usize>,
 }
 
 impl JeLoanAggregate {
@@ -1098,6 +1341,14 @@ impl JeLoanAggregate {
     }
 }
 
+fn kinds_text(kinds: &std::collections::BTreeMap<&'static str, usize>) -> String {
+    kinds
+        .iter()
+        .map(|(kind, count)| format!("{kind} {count}"))
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
 /// 大 CSV 只顺序访问一次；扫描时直接把本金变动归集到对应的 TB 借款。
 fn aggregate_large_je_once(
     tb: &Table,
@@ -1105,23 +1356,50 @@ fn aggregate_large_je_once(
     tb_leaf: &[bool],
     spec: &SourceSpec,
     je_mapping: &Map<String, Value>,
+    loan_accounts: &Option<std::collections::HashSet<String>>,
+    loan_id_mapped: bool,
     progress: &dyn Fn(&str, usize, usize, &str),
     cancel: &AtomicBool,
 ) -> Result<HashMap<usize, JeLoanAggregate>, AppError> {
-    let mut candidates = HashMap::<String, Vec<(usize, String)>>::new();
+    // 三层科目配对（先编码 → 编码撞车按明细/名称消歧 → 消不开留给 TB 发生额
+    // 兜底）的候选索引：有编码按编码键，没编码退回科目文本键。元组为
+    // （TB 行号，明细 norm，名称 norm，明细是否为回退值）。
+    let mut candidates: HashMap<String, Vec<(usize, String, String, bool)>> = HashMap::new();
     for (row_index, row) in tb.rows.iter().enumerate() {
         if !tb_leaf.get(row_index).copied().unwrap_or(false) {
             continue;
         }
         let account = account_text(tb, row, tb_mapping, "tb");
-        let id = text(tb, row, tb_mapping, "loanId");
-        if account.is_empty() || id.is_empty() {
+        if account.is_empty() {
             continue;
         }
-        candidates
-            .entry(norm(&account))
-            .or_default()
-            .push((row_index, norm(&id)));
+        let raw_id = text(tb, row, tb_mapping, "loanId");
+        let code = role_text(tb, row, tb_mapping, "tb", "accountCode");
+        // 与内存路径同一圈定口径：确认清单或明细列，二者必居其一。
+        let selected = match loan_accounts {
+            Some(set) => set.contains(&if code.is_empty() {
+                norm(&account)
+            } else {
+                norm(&code)
+            }),
+            None => loan_id_mapped && !raw_id.trim().is_empty(),
+        };
+        if !selected {
+            continue;
+        }
+        let detail_fallback = raw_id.is_empty();
+        let name = role_text(tb, row, tb_mapping, "tb", "accountName");
+        let key = if code.is_empty() {
+            norm(&account)
+        } else {
+            norm(&code)
+        };
+        candidates.entry(key).or_default().push((
+            row_index,
+            norm(&raw_id),
+            norm(&name),
+            detail_fallback,
+        ));
     }
 
     let prepared_mapping = normalized_disk_je_mapping(je_mapping);
@@ -1147,7 +1425,15 @@ fn aggregate_large_je_once(
                 "正在从磁盘汇总借款本金变动…",
             );
         }
-        let Some(targets) = candidates.get(&norm(&row.account)) else {
+        let je_code = disk_role_text(&headers, &row.values, &prepared_mapping, "accountCode");
+        let je_name = disk_role_text(&headers, &row.values, &prepared_mapping, "accountName");
+        let targets = if !je_code.is_empty() {
+            candidates.get(&norm(&je_code))
+        } else {
+            None
+        }
+        .or_else(|| candidates.get(&norm(&row.account)));
+        let Some(targets) = targets else {
             return Ok(());
         };
         let loan_id = disk_role_text(&headers, &row.values, &prepared_mapping, "loanId");
@@ -1164,13 +1450,48 @@ fn aggregate_large_je_once(
             &prepared_mapping,
             "date",
         ));
-        for (row_index, target_id) in targets {
-            if loan_id.is_empty() || loan_key == *target_id || summary.contains(target_id) {
-                aggregates
-                    .entry(*row_index)
-                    .or_default()
-                    .add(row.net, event_date);
-            }
+        let code_keyed = !je_code.is_empty() && candidates.contains_key(&norm(&je_code));
+        let unique = targets.len() == 1;
+        for target in targets {
+            let (row_index, target_detail, target_name, detail_fallback) = target;
+            let kind: Option<&'static str> = if code_keyed {
+                if unique {
+                    Some("编码")
+                } else if !loan_id.is_empty()
+                    && !target_detail.is_empty()
+                    && (loan_key == *target_detail || summary.contains(target_detail.as_str()))
+                {
+                    Some("编码＋明细")
+                } else if !je_name.is_empty()
+                    && !target_name.is_empty()
+                    && norm(&je_name) == *target_name
+                    && targets
+                        .iter()
+                        .filter(|(_, _, name, _)| name == target_name)
+                        .count()
+                        == 1
+                {
+                    Some("编码＋名称")
+                } else {
+                    None
+                }
+            } else if *detail_fallback
+                || loan_id.is_empty()
+                || loan_key == *target_detail
+                || summary.contains(target_detail.as_str())
+            {
+                Some(if *detail_fallback {
+                    "科目"
+                } else {
+                    "科目＋明细"
+                })
+            } else {
+                None
+            };
+            let Some(kind) = kind else { continue };
+            let entry = aggregates.entry(*row_index).or_default();
+            entry.add(row.net, event_date);
+            *entry.kinds.entry(kind).or_default() += 1;
         }
         Ok(())
     })?;
@@ -1265,6 +1586,43 @@ fn calculate_tb_impl(
     );
     let tb_leaf =
         ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| mapped_names(&tm, "tb", role));
+    // 借款行的圈定：优先用「确认科目与利率」步骤勾选的借款科目清单
+    // （loanAccounts，键为科目编码或无编码时的科目文本）；没给清单时沿用
+    // 旧口径——映射了借款明细列的表按「有明细值的行」圈定。两者都没有就
+    // 明确报错，不再把整张 TB 的末级行都当借款。
+    let loan_accounts: Option<std::collections::HashSet<String>> = params
+        .get("loanAccounts")
+        .and_then(Value::as_array)
+        .map(|all| {
+            all.iter()
+                .filter_map(Value::as_str)
+                .map(norm)
+                .collect::<std::collections::HashSet<_>>()
+        });
+    let loan_id_mapped = mapped_names(&tm, "tb", "loanId")
+        .first()
+        .is_some_and(|v| !v.trim().is_empty());
+    let account_key_of = |code: &str, account: &str| -> String {
+        if code.trim().is_empty() {
+            norm(account)
+        } else {
+            norm(code)
+        }
+    };
+    let row_selected = |code: &str, account: &str, raw_id: &str| -> bool {
+        if let Some(set) = &loan_accounts {
+            set.contains(&account_key_of(code, account))
+        } else {
+            loan_id_mapped && !raw_id.trim().is_empty()
+        }
+    };
+    if loan_accounts.is_none() && !loan_id_mapped {
+        return Err(error(
+            "LOAN_ACCOUNTS_REQUIRED",
+            "请先在「确认科目与利率」步骤勾选借款科目（或在映射里指定借款明细列）。",
+            None,
+        ));
+    }
     let disk_aggregates = if disk_je {
         Some(aggregate_large_je_once(
             &tb,
@@ -1272,6 +1630,8 @@ fn calculate_tb_impl(
             &tb_leaf,
             &je_spec,
             &je_mapping,
+            &loan_accounts,
+            loan_id_mapped,
             progress,
             cancel,
         )?)
@@ -1281,16 +1641,66 @@ fn calculate_tb_impl(
     let memory_convention = memory_je
         .as_ref()
         .map(|(je, jm)| je_sign_convention(je, jm));
+    // 三层科目配对索引：编码 → 拆行数、（编码,名称）→ 行数。编码唯一时直接
+    // 按编码归集（两侧名称写法不同无妨）；撞车时借款明细优先、名称其次消歧
+    // 到笔，名称消歧只在编码下唯一时有效；都消不开留给 TB 发生额兜底（编码
+    // 汇总口径），不强行归集、绝不重复计数。
+    let mut code_rows: HashMap<String, usize> = HashMap::new();
+    let mut code_name_rows: HashMap<(String, String), usize> = HashMap::new();
+    for (row_index, row) in tb.rows.iter().enumerate() {
+        if !tb_leaf.get(row_index).copied().unwrap_or(true) {
+            continue;
+        }
+        let code = role_text(&tb, row, &tm, "tb", "accountCode");
+        let account = account_text(&tb, row, &tm, "tb");
+        let raw_id = text(&tb, row, &tm, "loanId");
+        if !row_selected(&code, &account, &raw_id) {
+            continue;
+        }
+        if code.is_empty() {
+            continue;
+        }
+        *code_rows.entry(norm(&code)).or_default() += 1;
+        let name = role_text(&tb, row, &tm, "tb", "accountName");
+        if !name.is_empty() {
+            *code_name_rows
+                .entry((norm(&code), norm(&name)))
+                .or_default() += 1;
+        }
+    }
     let mut out = vec![];
     for (row_index, row) in tb.rows.iter().enumerate() {
         if !tb_leaf[row_index] {
             continue;
         }
         let account = account_text(&tb, row, &tm, "tb");
-        let id = text(&tb, row, &tm, "loanId");
-        if id.is_empty() || account.is_empty() {
+        if account.is_empty() {
             continue;
         }
+        {
+            let code = role_text(&tb, row, &tm, "tb", "accountCode");
+            let raw = text(&tb, row, &tm, "loanId");
+            if !row_selected(&code, &account, &raw) {
+                continue;
+            }
+        }
+        // 辅助核算没映射、或该行值为空时，按科目文本自成一笔：科目名称本身就
+        // 足以标识借款（每个末级科目一行借款的形态），TB＋JE 测算不因缺辅助
+        // 核算而中断；这类行的 JE 归集放宽为「同科目即归集」。
+        let raw_id = text(&tb, row, &tm, "loanId");
+        let detail_fallback = raw_id.is_empty();
+        let id = if detail_fallback {
+            account.clone()
+        } else {
+            raw_id.clone()
+        };
+        let tb_code = role_text(&tb, row, &tm, "tb", "accountCode");
+        let tb_name = role_text(&tb, row, &tm, "tb", "accountName");
+        let code_unique = !tb_code.is_empty() && code_rows.get(&norm(&tb_code)) == Some(&1);
+        let code_name_unique = !tb_code.is_empty()
+            && !tb_name.is_empty()
+            && code_rows.get(&norm(&tb_code)).map_or(false, |&n| n > 1)
+            && code_name_rows.get(&(norm(&tb_code), norm(&tb_name))) == Some(&1);
         // 借款是负债类科目，贷方为正。六种 TB 形态的差异由内核吸收。
         let opening = ledger_mapping::credit_positive(ledger_mapping::signed_balance(
             &amount_inputs(&tb, row, &tm, "opening"),
@@ -1312,16 +1722,49 @@ fn calculate_tb_impl(
                 let ja = account_text(je, jr, jm, "je");
                 let ji = text(je, jr, jm, "loanId");
                 let summary = text(je, jr, jm, "summary");
-                let hit = norm(&ja) == norm(&account)
-                    && (ji.is_empty()
+                let je_code = role_text(je, jr, jm, "je", "accountCode");
+                let je_name = role_text(je, jr, jm, "je", "accountName");
+                // 三层科目配对：①编码直归；②编码撞车时明细优先、名称消歧；
+                // ③都消不开不归集（TB 发生额兜底即编码汇总口径）。任一侧没
+                // 映射编码时退回「科目文本全等」的旧口径。
+                let kind: Option<&'static str> = if !tb_code.is_empty()
+                    && !je_code.is_empty()
+                    && norm(&je_code) == norm(&tb_code)
+                {
+                    if code_unique {
+                        Some("编码")
+                    } else if !ji.is_empty()
+                        && !raw_id.is_empty()
+                        && (norm(&ji) == norm(&raw_id) || norm(&summary).contains(&norm(&raw_id)))
+                    {
+                        Some("编码＋明细")
+                    } else if code_name_unique
+                        && !je_name.is_empty()
+                        && norm(&je_name) == norm(&tb_name)
+                    {
+                        Some("编码＋名称")
+                    } else {
+                        None
+                    }
+                } else if norm(&ja) == norm(&account)
+                    && (detail_fallback
+                        || ji.is_empty()
                         || norm(&ji) == norm(&id)
-                        || norm(&summary).contains(&norm(&id)));
-                if !hit {
-                    continue;
-                }
+                        || norm(&summary).contains(&norm(&id)))
+                {
+                    Some(if detail_fallback {
+                        "科目"
+                    } else {
+                        "科目＋明细"
+                    })
+                } else {
+                    None
+                };
+                let Some(kind) = kind else { continue };
                 let net =
                     ledger_mapping::signed_amount(&je_amount_inputs(je, jr, jm), je_convention);
                 aggregate.add(net, row_date(je, jr, jm, "date"));
+                *aggregate.kinds.entry(kind).or_default() += 1;
             }
         }
         let JeLoanAggregate {
@@ -1329,6 +1772,7 @@ fn calculate_tb_impl(
             mut reductions,
             matched,
             events,
+            kinds,
         } = aggregate;
         if matched == 0 {
             let net =
@@ -1381,9 +1825,9 @@ fn calculate_tb_impl(
                 "待复核".into()
             },
             match_basis: if matched > 0 {
-                format!("科目＋明细/摘要模糊匹配 {} 条 JE", matched)
+                format!("匹配 {} 条 JE（{}）", matched, kinds_text(&kinds))
             } else {
-                "未匹配 JE，采用 TB 发生额".into()
+                "未匹配 JE，采用 TB 发生额（编码汇总口径）".into()
             },
             events,
             contract_start: None,
@@ -1398,7 +1842,11 @@ fn calculate_tb_impl(
         })
     }
     if out.is_empty() {
-        return Err(error("NO_LOANS", "未从 TB 识别到借款明细。", None));
+        return Err(error(
+            "NO_LOANS",
+            "未从 TB 识别到借款行：请检查科目编码/名称映射。",
+            None,
+        ));
     }
     Ok(out)
 }
@@ -4683,12 +5131,324 @@ mod tests {
             row["matchBasis"]
                 .as_str()
                 .unwrap()
-                .starts_with("科目＋明细/摘要模糊匹配 2 条 JE"),
+                .starts_with("匹配 2 条 JE（编码 2"),
             "{}",
             row["matchBasis"]
         );
         // 期初 100 万 ＋ 新增 10 万 − 归还 20 万 ＝ 期末 90 万，本金变动勾稽平。
         // matchStatus 另由利率复核改写（本测试未配利率台账），不在断言范围。
+    }
+
+    #[test]
+    fn 科目清单与利率模板导出回读往返() {
+        // 第二步「确认科目与利率」的引擎链路：tb_accounts 下发末级科目；
+        // rate_template 导出模板；import_rates 回读补填的利率（3.85 与 3.85%
+        // 两种写法都换算为小数）。
+        let fixture = SyntheticLedger::new(&[]);
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet();
+        sheet.set_name("TB").unwrap();
+        for (r, row) in [
+            vec!["编码", "科目", "期初贷", "期末贷"],
+            vec!["2001", "短期借款", "1000000", "900000"],
+            vec!["1122", "应收账款", "5000", "6000"],
+        ]
+        .iter()
+        .enumerate()
+        {
+            for (c, v) in row.iter().enumerate() {
+                sheet.write_string(r as u32, c as u16, *v).unwrap();
+            }
+        }
+        let path = fixture.dir.join("tb-accounts.xlsx");
+        book.save(&path).unwrap();
+        let tb_source = json!({"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷"}});
+        let accounts = tb_accounts(&json!({"tbSource": tb_source})).unwrap();
+        let list = accounts["accounts"].as_array().unwrap();
+        assert_eq!(list.len(), 2, "只下发末级科目：{accounts:#?}");
+        assert_eq!(list[0]["key"].as_str().unwrap(), "2001");
+        assert_eq!(list[0]["opening"].as_f64().unwrap(), 1000000.0);
+        // 模板导出（空 JE 的最小来源）+ 回读往返。
+        let je = fixture.dir.join("je-empty.xlsx");
+        let mut je_book = Workbook::new();
+        let je_sheet = je_book.add_worksheet();
+        je_sheet.set_name("JE").unwrap();
+        je_sheet.write_string(0, 0, "编码").unwrap();
+        je_book.save(&je).unwrap();
+        let template = fixture.dir.join("rate-template.xlsx");
+        let exported = rate_template(&json!({
+            "tbSource": tb_source,
+            "jeSource": {"source":{"inputPath":je,"sheet":"JE","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","functionalDebit":"借方","functionalCredit":"贷方"}},
+            "loanAccounts": ["2001"],
+            "outputPath": template,
+        }))
+        .unwrap();
+        assert_eq!(exported["rowCount"].as_u64().unwrap(), 1);
+        // 在模板上补填利率（固定 3.85 与浮动 3.1%+90BP 各一行验证解析）。
+        let mut filled_book = umya_spreadsheet::reader::xlsx::read(&template).unwrap();
+        let ws = filled_book.get_sheet_by_name_mut("借款利率确认表").unwrap();
+        ws.get_cell_mut((6, 2)).set_value("固定");
+        ws.get_cell_mut((7, 2)).set_value("3.85");
+        let template2 = fixture.dir.join("rate-template-filled2.xlsx");
+        umya_spreadsheet::writer::xlsx::write(&filled_book, &template2).unwrap();
+        let mut book3 = umya_spreadsheet::reader::xlsx::read(&template).unwrap();
+        let ws3 = book3.get_sheet_by_name_mut("借款利率确认表").unwrap();
+        ws3.get_cell_mut((6, 2)).set_value("浮动");
+        ws3.get_cell_mut((8, 2)).set_value("3.1%");
+        ws3.get_cell_mut((9, 2)).set_value("90");
+        let template3 = fixture.dir.join("rate-template-filled3.xlsx");
+        umya_spreadsheet::writer::xlsx::write(&book3, &template3).unwrap();
+        {
+            let dbg = umya_spreadsheet::reader::xlsx::read(&template2).unwrap();
+            let dws = dbg.get_sheet_by_name("借款利率确认表").unwrap();
+            eprintln!(
+                "DEBUG highest_row={} A1=[{}] A2=[{}] F2=[{}] G2=[{}]",
+                dws.get_highest_row(),
+                dws.get_value((0, 1)),
+                dws.get_value((0, 2)),
+                dws.get_value((5, 2)),
+                dws.get_value((6, 2)),
+            );
+        }
+        let fixed = import_rates(&json!({"inputPath": template2})).unwrap();
+        assert_eq!(
+            fixed["rateRows"][0]["fixedRate"].as_f64().unwrap(),
+            0.0385,
+            "{fixed:#?}"
+        );
+        let floating = import_rates(&json!({"inputPath": template3})).unwrap();
+        assert_eq!(
+            floating["rateRows"][0]["benchmarkRate"].as_f64().unwrap(),
+            0.031
+        );
+        assert_eq!(floating["rateRows"][0]["spreadBps"].as_f64().unwrap(), 90.0);
+    }
+
+    #[test]
+    fn tbje模式无辅助核算时按科目自成一笔() {
+        // 辅助核算按业务口径是选填：TB 没有借款明细列时，科目文本本身就足以
+        // 标识借款（每个末级科目一行借款的形态），TB＋JE 测算照常出逐笔行，
+        // JE 按「同科目即归集」还原本金变动。
+        let fixture = SyntheticLedger::new(&[]);
+        let mut book = Workbook::new();
+        for (name, data) in [
+            (
+                "TB",
+                vec![
+                    vec!["编码", "科目", "期初贷", "期末贷"],
+                    vec!["2001", "短期借款", "1000000", "900000"],
+                ],
+            ),
+            (
+                "JE",
+                vec![
+                    // JE 侧科目名带账户后缀、与 TB 写法不同：编码直归层不挑名称。
+                    vec!["编码", "科目", "日期", "借方", "贷方"],
+                    vec!["2001", "短期借款—工行朝阳户", "2025-03-01", "0", "100000"],
+                    vec!["2001", "短期借款—工行朝阳户", "2025-06-01", "200000", "0"],
+                ],
+            ),
+        ] {
+            let sheet = book.add_worksheet();
+            sheet.set_name(name).unwrap();
+            for (r, row) in data.iter().enumerate() {
+                for (c, v) in row.iter().enumerate() {
+                    sheet.write_string(r as u32, c as u16, *v).unwrap();
+                }
+            }
+        }
+        let path = fixture.dir.join("tbje-no-detail.xlsx");
+        book.save(&path).unwrap();
+        let mut params = fixture.params();
+        params["mode"] = json!("tb");
+        params["loanAccounts"] = json!(["2001"]);
+        params["tbSource"] = json!({"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷"}});
+        params["jeSource"] = json!({"source":{"inputPath":path,"sheet":"JE","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","date":"日期","functionalDebit":"借方","functionalCredit":"贷方"}});
+        let result = run_preview(&params).unwrap();
+        let row = &result["rows"][0];
+        assert_eq!(row["loanId"].as_str().unwrap(), "2001 短期借款");
+        // 贷 10 万新增、借 20 万归还；期初 100 万＋10 万−20 万＝期末 90 万，勾稽平。
+        assert_eq!(row["additions"].as_f64().unwrap(), 100000.0, "{result:#?}");
+        assert_eq!(row["reductions"].as_f64().unwrap(), 200000.0, "{result:#?}");
+        assert!(
+            row["matchBasis"]
+                .as_str()
+                .unwrap()
+                .starts_with("匹配 2 条 JE（编码 2"),
+            "{}",
+            row["matchBasis"]
+        );
+    }
+
+    #[test]
+    fn tbje模式编码撞车时名称消歧到笔() {
+        // 同一科目编码在 TB 拆成两笔（名称不同），JE 靠名称各归各笔；
+        // 名称消歧只在编码下唯一时生效，两笔互不串数。
+        let fixture = SyntheticLedger::new(&[]);
+        let mut book = Workbook::new();
+        for (name, data) in [
+            (
+                "TB",
+                vec![
+                    vec!["编码", "科目", "期初贷", "期末贷"],
+                    vec!["2001", "短期借款-A银行", "1000000", "1100000"],
+                    vec!["2001", "短期借款-B银行", "2000000", "1950000"],
+                ],
+            ),
+            (
+                "JE",
+                vec![
+                    vec!["编码", "科目", "日期", "借方", "贷方"],
+                    vec!["2001", "短期借款-A银行", "2025-03-01", "0", "200000"],
+                    vec!["2001", "短期借款-B银行", "2025-04-01", "100000", "0"],
+                ],
+            ),
+        ] {
+            let sheet = book.add_worksheet();
+            sheet.set_name(name).unwrap();
+            for (r, row) in data.iter().enumerate() {
+                for (c, v) in row.iter().enumerate() {
+                    sheet.write_string(r as u32, c as u16, *v).unwrap();
+                }
+            }
+        }
+        let path = fixture.dir.join("tbje-name-disambig.xlsx");
+        book.save(&path).unwrap();
+        let mut params = fixture.params();
+        params["mode"] = json!("tb");
+        params["loanAccounts"] = json!(["2001"]);
+        params["tbSource"] = json!({"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷"}});
+        params["jeSource"] = json!({"source":{"inputPath":path,"sheet":"JE","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","date":"日期","functionalDebit":"借方","functionalCredit":"贷方"}});
+        let result = run_preview(&params).unwrap();
+        let rows = result["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "{result:#?}");
+        let a = &rows[0];
+        let b = &rows[1];
+        assert_eq!(a["additions"].as_f64().unwrap(), 200000.0);
+        assert_eq!(a["reductions"].as_f64().unwrap(), 0.0);
+        assert_eq!(b["additions"].as_f64().unwrap(), 0.0);
+        assert_eq!(b["reductions"].as_f64().unwrap(), 100000.0);
+        assert!(
+            a["matchBasis"].as_str().unwrap().contains("编码＋名称 1"),
+            "{}",
+            a["matchBasis"]
+        );
+    }
+
+    #[test]
+    fn tbje模式编码撞车时明细消歧到笔() {
+        // 同一编码两笔、名称完全相同（名称无法消歧），靠借款明细各归各笔——
+        // 辅助核算是可选的第二级匹配键，映射了就用于消歧。
+        let fixture = SyntheticLedger::new(&[]);
+        let mut book = Workbook::new();
+        for (name, data) in [
+            (
+                "TB",
+                vec![
+                    vec!["编码", "科目", "借款", "期初贷", "期末贷"],
+                    vec!["2001", "短期借款", "L-1", "1000000", "1100000"],
+                    vec!["2001", "短期借款", "L-2", "2000000", "1950000"],
+                ],
+            ),
+            (
+                "JE",
+                vec![
+                    vec!["编码", "科目", "借款", "日期", "借方", "贷方"],
+                    vec!["2001", "短期借款", "L-1", "2025-03-01", "0", "200000"],
+                    vec!["2001", "短期借款", "L-2", "2025-04-01", "100000", "0"],
+                ],
+            ),
+        ] {
+            let sheet = book.add_worksheet();
+            sheet.set_name(name).unwrap();
+            for (r, row) in data.iter().enumerate() {
+                for (c, v) in row.iter().enumerate() {
+                    sheet.write_string(r as u32, c as u16, *v).unwrap();
+                }
+            }
+        }
+        let path = fixture.dir.join("tbje-detail-disambig.xlsx");
+        book.save(&path).unwrap();
+        let mut params = fixture.params();
+        params["mode"] = json!("tb");
+        params["tbSource"] = json!({"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","loanId":"借款","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷"}});
+        params["jeSource"] = json!({"source":{"inputPath":path,"sheet":"JE","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","loanId":"借款","date":"日期","functionalDebit":"借方","functionalCredit":"贷方"}});
+        let result = run_preview(&params).unwrap();
+        let rows = result["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "{result:#?}");
+        assert_eq!(rows[0]["loanId"].as_str().unwrap(), "L-1");
+        assert_eq!(rows[1]["loanId"].as_str().unwrap(), "L-2");
+        assert_eq!(rows[0]["additions"].as_f64().unwrap(), 200000.0);
+        assert_eq!(rows[1]["reductions"].as_f64().unwrap(), 100000.0);
+        assert!(
+            rows[0]["matchBasis"]
+                .as_str()
+                .unwrap()
+                .contains("编码＋明细 1"),
+            "{}",
+            rows[0]["matchBasis"]
+        );
+    }
+
+    #[test]
+    fn tbje模式编码撞车消不开时退回编码汇总兜底() {
+        // 编码撞车、名称对不上又没有明细：两笔都不强行归集（不重复计数），
+        // 各自按 TB 本年累计发生额兜底——即「退回按编码汇总」的金额口径。
+        let fixture = SyntheticLedger::new(&[]);
+        let mut book = Workbook::new();
+        for (name, data) in [
+            (
+                "TB",
+                vec![
+                    vec!["编码", "科目", "期初贷", "期末贷", "本年借", "本年贷"],
+                    vec!["2001", "短期借款-A银行", "1000000", "1050000", "0", "50000"],
+                    vec!["2001", "短期借款-B银行", "2000000", "1980000", "20000", "0"],
+                ],
+            ),
+            (
+                "JE",
+                vec![
+                    // 名称写法两侧对不上（既非 A 也非 B），也无借款明细可消歧。
+                    vec!["编码", "科目", "日期", "借方", "贷方"],
+                    vec!["2001", "工行朝阳户", "2025-03-01", "0", "50000"],
+                    vec!["2001", "工行朝阳户", "2025-06-01", "20000", "0"],
+                ],
+            ),
+        ] {
+            let sheet = book.add_worksheet();
+            sheet.set_name(name).unwrap();
+            for (r, row) in data.iter().enumerate() {
+                for (c, v) in row.iter().enumerate() {
+                    sheet.write_string(r as u32, c as u16, *v).unwrap();
+                }
+            }
+        }
+        let path = fixture.dir.join("tbje-code-fallback.xlsx");
+        book.save(&path).unwrap();
+        let mut params = fixture.params();
+        params["mode"] = json!("tb");
+        params["loanAccounts"] = json!(["2001"]);
+        params["tbSource"] = json!({"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷","ytdFunctionalDebit":"本年借","ytdFunctionalCredit":"本年贷"}});
+        params["jeSource"] = json!({"source":{"inputPath":path,"sheet":"JE","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","date":"日期","functionalDebit":"借方","functionalCredit":"贷方"}});
+        let result = run_preview(&params).unwrap();
+        let rows = result["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "{result:#?}");
+        // A 笔：本年贷 5 万 → 新增 5 万；B 笔：本年借 2 万 → 归还 2 万。
+        // JE 两条谁都没归上——没有重复计数，也没有串笔。
+        assert_eq!(rows[0]["additions"].as_f64().unwrap(), 50000.0);
+        assert_eq!(rows[0]["reductions"].as_f64().unwrap(), 0.0);
+        assert_eq!(rows[1]["additions"].as_f64().unwrap(), 0.0);
+        assert_eq!(rows[1]["reductions"].as_f64().unwrap(), 20000.0);
+        for row in rows {
+            assert!(
+                row["matchBasis"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("未匹配 JE，采用 TB 发生额（编码汇总口径）"),
+                "{}",
+                row["matchBasis"]
+            );
+        }
     }
 
     #[test]
@@ -4778,5 +5538,41 @@ mod zz_debug2 {
                 r["matchBasis"].as_str().unwrap_or("")
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod loan_real_ledger_mapping_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    #[ignore = "仅本机真实账表验收，需 LEDGER_SAMPLES 指向 TBJEPBC 目录"]
+    fn 借款inspect真实03序时账返回公共映射() {
+        let root = std::env::var("LEDGER_SAMPLES").expect("LEDGER_SAMPLES 未设置");
+        let path = std::path::Path::new(&root).join("03序时账 (2).xlsx");
+        let result = inspect(&json!({
+            "kind": "je",
+            "source": {
+                "inputPath": path,
+                "sheet": "Sheet1",
+                "headerRow": 0,
+                "headerDepth": 0
+            }
+        }))
+        .expect("借款 JE inspect 失败");
+        let mapping = result["suggestedMapping"]
+            .as_object()
+            .expect("缺 suggestedMapping");
+        println!("{}", serde_json::to_string_pretty(mapping).unwrap());
+        assert_eq!(mapping.get("date").and_then(Value::as_str), Some("凭证日期"));
+        assert!(
+            mapping.get("accountCode").is_none(),
+            "歧义科目表头应留给 LLM，日期列不得被借款科目编码占用: {mapping:?}"
+        );
+        assert!(
+            mapping.get("accountName").is_none(),
+            "歧义科目表头应留给 LLM: {mapping:?}"
+        );
     }
 }

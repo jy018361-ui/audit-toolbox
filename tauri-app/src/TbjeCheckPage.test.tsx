@@ -231,6 +231,7 @@ describe("TbjeCheckPage", () => {
       screen.getByRole("button", { name: "LLM 一键联合复核 1 组" }),
     );
     await screen.findByText("联合复核完成：已复核 1 组。");
+    expect(screen.getByText("复核完成，仍缺 1 项")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "开始核对 1 组" }));
 
     await waitFor(() =>
@@ -241,6 +242,118 @@ describe("TbjeCheckPage", () => {
             expect.objectContaining({
               jeMapping: expect.objectContaining({
                 functionalAmount: "本币金额",
+              }),
+            }),
+          ],
+        }),
+      ),
+    );
+  });
+
+  it("allows LLM review to compose the TBJE voucher date from month and day columns", async () => {
+    const { engineCall, jobStart, pickPath } = await import("./api");
+    vi.mocked(pickPath).mockResolvedValue([
+      "C:/samples/09科目余额表.xlsx",
+      "C:/samples/09序时账.xlsx",
+    ]);
+    vi.mocked(engineCall).mockImplementation(
+      async (method: string, params: unknown) => {
+        if (method === "ledger.forms") return [];
+        if (method === "ledger.check_mapping_alignment")
+          return { aligned: true, warnings: [] };
+        if (method === "ledger.review_pair_mapping")
+          return {
+            tbChanges: [],
+            jeChanges: [
+              {
+                role: "date",
+                currentColumn: "",
+                suggestedColumn: "年-月",
+                confidence: 0.9,
+                reason: "月份组成列",
+              },
+              {
+                role: "date",
+                currentColumn: "",
+                suggestedColumn: "年-日",
+                confidence: 0.9,
+                reason: "日期组成列",
+              },
+            ],
+            pairFindings: [],
+          };
+        const source = (params as { source: { inputPath: string } }).source;
+        const isTb = source.inputPath.includes("科目余额表");
+        if (method === "deposit.classify_source")
+          return {
+            kind: isTb ? "tb" : "je",
+            sheet: "Sheet1",
+            headerRow: 1,
+            headerDepth: 1,
+          };
+        return {
+          sheet: "Sheet1",
+          headerRow: 1,
+          headerDepth: 1,
+          headers: isTb
+            ? ["科目编码", "科目名称", "期末余额"]
+            : [
+                "年-月",
+                "年-日",
+                "凭证号",
+                "科目编码",
+                "科目名称",
+                "摘要",
+                "借方",
+                "贷方",
+              ],
+          preview: isTb
+            ? [["1001", "库存现金", "10"]]
+            : [["1", "9", "0001", "1001", "库存现金", "收款", "10", ""]],
+          entities: [],
+          suggestedMapping: isTb
+            ? {
+                accountCode: "科目编码",
+                accountName: ["科目名称"],
+                closingFunctionalAmount: "期末余额",
+              }
+            : {
+                id: ["凭证号"],
+                accountCode: "科目编码",
+                accountName: ["科目名称"],
+                summary: "摘要",
+                functionalDebit: "借方",
+                functionalCredit: "贷方",
+              },
+        };
+      },
+    );
+
+    render(<TbjeCheckPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
+    );
+    await screen.findByText("09科目余额表.xlsx");
+    expect(screen.getByRole("button", { name: /JE 缺少 1 项必填映射/ })).toBeVisible();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "LLM 一键联合复核 1 组" }),
+    );
+    await screen.findByText("联合复核完成：已复核 1 组。");
+    expect(screen.getByText("复核完成，映射完整")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: /JE 缺少 .*必填映射/ }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "开始核对 1 组" }));
+    await waitFor(() =>
+      expect(jobStart).toHaveBeenCalledWith(
+        "tbje_check.run_batch",
+        expect.objectContaining({
+          groups: [
+            expect.objectContaining({
+              jeMapping: expect.objectContaining({
+                date: ["年-月", "年-日"],
               }),
             }),
           ],

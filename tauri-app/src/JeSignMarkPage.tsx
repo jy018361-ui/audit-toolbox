@@ -36,6 +36,7 @@ import {
   EMPTY_MAPPING,
   formatMappingValue,
   isMultiRole,
+  kanzhangReviewPayload,
   kanzhangReviewSummary,
   ledgerErrorText,
   missingKanzhangRequiredRoles,
@@ -517,11 +518,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     try {
       const value = (await engineCall("kanzhang.llm_mapping", {
         mode: "mapping",
-        payload: {
-          headers: target.headers,
-          samples: target.preview.slice(0, 8),
-          currentMapping: source,
-        },
+        payload: kanzhangReviewPayload(target.headers, target.preview, source),
       })) as LedgerReviewResponse;
       if (generation !== llmGeneration.current) return;
       const {

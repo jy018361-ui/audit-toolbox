@@ -81,7 +81,7 @@ export function useLedgerDictReviews(
       }));
       setStatus((current) => ({
         ...current,
-        ...Object.fromEntries(kinds.map((kind) => [kind, "正在复核字段映射…"])),
+        ...Object.fromEntries(kinds.map((kind) => [kind, "LLM 正在复核字段映射…"])),
       }));
       const targets = Object.fromEntries(
         kinds.map((kind) => [kind, slots[kind]!]),
@@ -240,7 +240,10 @@ export function LedgerReviewAll(props: {
               key={kind}
               className={props.reviewing[kind] ? "running" : undefined}
             >
-              {props.names[kind]}：{props.status[kind] || "等待复核"}
+              {/* 这里说的是 LLM 复核的进度，不是字段缺失——字段是否齐全由
+                  预览面板自己的「尚未映射」提示负责，两件事不能混用一句
+                  「待复核」让人误以为映射有问题。 */}
+              {props.names[kind]}：{props.status[kind] || "未做 LLM 复核（不影响手工映射）"}
             </span>
           ))}
         </div>

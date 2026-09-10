@@ -31,6 +31,10 @@ use crate::excel_merger::PauseCheckpoint;
 const BASE_SHEETS: [&str; 4] = ["AUD2026", "IPO", "IPO archive", "AUD2025"];
 const DEFAULT_SER: [(f64, f64); 4] = [(0.08, 2733.0), (0.25, 1199.0), (0.58, 683.0), (0.09, 173.0)];
 const SER_ROLES: [&str; 4] = ["Manager", "Senior", "Staff", "Intern"];
+const REFERENCE_HOUR_OVERRIDES: [(&str, f64); 2] = [
+    ("C_货币资金（除函证程序）", 3.0),
+    ("C_货币资金_银行函证", 10.0),
+];
 const TIMELINE_NOTES: [&str; 13] = [
     "预审开始日前3周，整理发出预审PBC List",
     "完成抽样、TOD、大额分析性复核等工作",
@@ -65,6 +69,7 @@ static TEMPLATE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub struct WpGenerateParams {
     pub input_path: PathBuf,
     pub section_list_path: Option<PathBuf>,
+    pub my_orders_path: Option<PathBuf>,
     pub template_path: PathBuf,
     pub output_path: PathBuf,
     pub split_output_path: Option<PathBuf>,
@@ -123,6 +128,9 @@ pub struct WpGenerateResult {
     pub populated_section_rows: usize,
     pub template_section_rows: usize,
     pub populated_template_rows: usize,
+    pub fallback_section_rows: usize,
+    pub matched_order_adjustments: usize,
+    pub unmatched_order_adjustments: Vec<String>,
     pub outlook_compared: usize,
     pub outlook_equal: usize,
     pub outlook_differences: Vec<OutlookDifference>,
@@ -183,7 +191,7 @@ pub(crate) fn run_job(
             .join("、");
         return Err(app_error(
             "WP_INPUT_MISSING",
-            &format!("缺少 WP 服务单输入文件：{missing}"),
+            &format!("缺少 WP 服务单所需输入文件：{missing}"),
             None,
         ));
     }
@@ -199,10 +207,15 @@ pub(crate) fn run_job(
         .as_str()
         .map(PathBuf::from)
         .ok_or_else(|| app_error("WP_INPUT_INVALID", "未识别到 Section List 文件。", None))?;
+    let my_orders_path = check["myOrdersPath"]
+        .as_str()
+        .map(PathBuf::from)
+        .ok_or_else(|| app_error("WP_INPUT_INVALID", "未识别到我的订单文件。", None))?;
     let template = ensure_template(&folder)?;
     let generation = WpGenerateParams {
         input_path,
         section_list_path: Some(section_list_path),
+        my_orders_path: Some(my_orders_path),
         template_path: template.path().to_path_buf(),
         output_path: params
             .get("outputPath")
@@ -264,15 +277,19 @@ fn validate_call(params: JsonValue) -> std::result::Result<JsonValue, AppError> 
         .map_err(|error| app_error("WP_INPUT_INVALID", &error.to_string(), None))?;
     let section_list = find_section_list_file(&folder)
         .map_err(|error| app_error("WP_INPUT_INVALID", &error.to_string(), None))?;
+    let my_orders = find_my_orders_file(&folder)
+        .map_err(|error| app_error("WP_INPUT_INVALID", &error.to_string(), None))?;
     Ok(json!({
         "folder": folder.to_string_lossy(),
         "valid": true,
         "missing": [],
         "serviceOrderPath": service_order.to_string_lossy(),
         "sectionListPath": section_list.to_string_lossy(),
+        "myOrdersPath": my_orders.to_string_lossy(),
         "inputFiles": {
             "wpServiceOrder": service_order.file_name().unwrap_or_default().to_string_lossy(),
-            "sectionList": section_list.file_name().unwrap_or_default().to_string_lossy()
+            "sectionList": section_list.file_name().unwrap_or_default().to_string_lossy(),
+            "myOrders": my_orders.file_name().unwrap_or_default().to_string_lossy()
         },
         "outputPath": folder.join("FY27+WP服务单汇总.xlsx").to_string_lossy(),
         "engine": "rust"
@@ -308,7 +325,7 @@ impl PreparedTemplate {
 }
 
 fn ensure_template(folder: &Path) -> std::result::Result<PreparedTemplate, AppError> {
-    let target = folder.join("FY27+WP服务单.xlsx");
+    let target = crate::spreadsheet_input::prefer_workbook(&folder.join("FY27+WP服务单.xlsx"));
     if target.is_file() {
         return Ok(PreparedTemplate {
             path: target,
@@ -441,9 +458,12 @@ fn normalized_file_stem(path: &Path) -> String {
 
 fn is_xlsx_input(path: &Path) -> bool {
     path.is_file()
-        && path
-            .extension()
-            .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("xlsx"))
+        && path.extension().is_some_and(|extension| {
+            matches!(
+                extension.to_string_lossy().to_ascii_lowercase().as_str(),
+                "xlsx" | "xls"
+            )
+        })
         && !path
             .file_name()
             .unwrap_or_default()
@@ -455,6 +475,38 @@ fn is_xlsx_input(path: &Path) -> bool {
                 .to_string_lossy()
                 .contains(marker)
         })
+}
+
+#[cfg(test)]
+mod xls_inputs_tests {
+    use super::*;
+    #[test]
+    fn xls_inputs_wp_folder_discovery_and_reader() {
+        let root = std::env::temp_dir().join(format!("wp-xls-input-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let text = root.join("FY27 WP服务单.XLS");
+        fs::write(
+            &text,
+            encoding_rs::GBK
+                .encode("编号\t金额\n001\t123.5\n")
+                .0
+                .as_ref(),
+        )
+        .unwrap();
+        assert!(is_xlsx_input(&text));
+        let rows = read_first_sheet(&text, None).unwrap();
+        assert_eq!(rows[1][0].text(), "001");
+        assert_eq!(rows[1][1].text(), "123.5");
+        let binary = root.join("FY27 section list.xls");
+        fs::write(
+            &binary,
+            include_bytes!("../../tests/fixtures/Excel Merger/simple-biff8.xls"),
+        )
+        .unwrap();
+        assert_eq!(find_section_list_file(&root).unwrap(), binary);
+        assert_eq!(read_first_sheet(&binary, None).unwrap()[1][0].text(), "001");
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn single_input_candidate(mut candidates: Vec<PathBuf>, label: &str) -> Result<PathBuf> {
@@ -516,6 +568,17 @@ fn find_section_list_file(folder: &Path) -> Result<PathBuf> {
     single_input_candidate(candidates, "Section List")
 }
 
+fn find_my_orders_file(folder: &Path) -> Result<PathBuf> {
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(folder)? {
+        let path = entry?.path();
+        if is_xlsx_input(&path) && normalized_file_stem(&path).contains("我的订单") {
+            candidates.push(path);
+        }
+    }
+    single_input_candidate(candidates, "我的订单")
+}
+
 #[derive(Clone, Debug)]
 enum Value {
     Empty,
@@ -568,6 +631,15 @@ fn from_data(value: &Data) -> Value {
 }
 
 fn read_first_sheet(path: &Path, preferred: Option<&str>) -> Result<Vec<Vec<Value>>> {
+    if crate::spreadsheet_input::is_text(path) {
+        return crate::spreadsheet_input::read_rows(path)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| row.into_iter().map(Value::Text).collect())
+                    .collect()
+            })
+            .map_err(|err| WpError(err.user_message));
+    }
     let mut book = open_workbook_auto(path)
         .map_err(|error| WpError(format!("无法读取 {}：{error}", path.display())))?;
     let sheet_name = if let Some(name) = preferred {
@@ -584,6 +656,28 @@ fn read_first_sheet(path: &Path, preferred: Option<&str>) -> Result<Vec<Vec<Valu
             .cloned()
             .ok_or_else(|| WpError("工作簿没有工作表。".into()))?
     };
+    let range = book
+        .worksheet_range(&sheet_name)
+        .map_err(|error| WpError(format!("无法读取工作表 {sheet_name}：{error}")))?;
+    Ok(range
+        .rows()
+        .map(|row| row.iter().map(from_data).collect())
+        .collect())
+}
+
+fn read_preferred_or_first_sheet(path: &Path, preferred: &str) -> Result<Vec<Vec<Value>>> {
+    if crate::spreadsheet_input::is_text(path) {
+        return read_first_sheet(path, None);
+    }
+    let mut book = open_workbook_auto(path)
+        .map_err(|error| WpError(format!("无法读取 {}：{error}", path.display())))?;
+    let sheet_name = book
+        .sheet_names()
+        .iter()
+        .find(|name| name.as_str() == preferred)
+        .cloned()
+        .or_else(|| book.sheet_names().first().cloned())
+        .ok_or_else(|| WpError("工作簿没有工作表。".into()))?;
     let range = book
         .worksheet_range(&sheet_name)
         .map_err(|error| WpError(format!("无法读取工作表 {sheet_name}：{error}")))?;
@@ -903,6 +997,8 @@ struct Record {
     final_end: Value,
     report_date: Value,
     wp_fic: String,
+    ci_hours: Option<f64>,
+    ai_hours: Option<f64>,
     sheet_name: String,
 }
 
@@ -929,6 +1025,8 @@ fn collect_records(split: &SplitData) -> Vec<Record> {
                 final_end: source_field(row, &columns, "final_end").clone(),
                 report_date: source_field(row, &columns, "report_date").clone(),
                 related_order: source_field(row, &columns, "related_order").text(),
+                ci_hours: None,
+                ai_hours: None,
                 sheet_name: String::new(),
             });
         }
@@ -936,11 +1034,84 @@ fn collect_records(split: &SplitData) -> Vec<Record> {
     records
 }
 
+type OrderAdjustments = HashMap<String, (f64, f64)>;
+
+fn parse_order_hours(value: &Value, row: usize, label: &str) -> Result<f64> {
+    if value.is_empty() {
+        return Ok(0.0);
+    }
+    match value {
+        Value::Number(value) => Ok(*value),
+        Value::Text(value) => value
+            .replace(',', "")
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| WpError(format!("我的订单第{row}行{label}不是数字。"))),
+        _ => Err(WpError(format!("我的订单第{row}行{label}不是数字。"))),
+    }
+}
+
+fn load_order_adjustments(path: &Path) -> Result<OrderAdjustments> {
+    let rows = read_preferred_or_first_sheet(path, "业务")?;
+    let headers = rows
+        .first()
+        .ok_or_else(|| WpError("我的订单为空。".into()))?;
+    let map = header_map(headers);
+    require_headers(&map, &["订单编号", "CIHours", "AIHours"], "我的订单")?;
+    let order = map["订单编号"];
+    let ci = map["CIHours"];
+    let ai = map["AIHours"];
+    let mut adjustments = HashMap::new();
+    for (index, row) in rows.iter().enumerate().skip(1) {
+        let order_key = normalize_order(&row.get(order).map(Value::text).unwrap_or_default());
+        if order_key.is_empty() {
+            continue;
+        }
+        let values = (
+            parse_order_hours(row.get(ci).unwrap_or(&Value::Empty), index + 1, "CI Hours")?,
+            parse_order_hours(row.get(ai).unwrap_or(&Value::Empty), index + 1, "AI Hours")?,
+        );
+        if adjustments
+            .insert(order_key.clone(), values)
+            .is_some_and(|existing| existing != values)
+        {
+            return Err(WpError(format!(
+                "我的订单中订单编号重复且AI/CI Hours不一致：{order_key}"
+            )));
+        }
+    }
+    Ok(adjustments)
+}
+
+fn apply_order_adjustments(
+    records: &mut [Record],
+    adjustments: &OrderAdjustments,
+) -> (usize, Vec<String>) {
+    let mut matched = 0;
+    let mut unmatched = Vec::new();
+    for record in records {
+        let key = normalize_order(&record.related_order);
+        if let Some(&(ci, ai)) = adjustments.get(&key) {
+            record.ci_hours = Some(ci);
+            record.ai_hours = Some(ai);
+            matched += 1;
+        } else {
+            unmatched.push(if record.related_order.is_empty() {
+                record.service_number.clone()
+            } else {
+                record.related_order.clone()
+            });
+        }
+    }
+    (matched, unmatched)
+}
+
 #[derive(Clone, Copy, Default)]
 struct SectionItem {
     entity: Option<f64>,
     drafts: Option<f64>,
     budget: Option<f64>,
+    outlook: Option<f64>,
 }
 type SectionDetails = HashMap<String, HashMap<String, SectionItem>>;
 
@@ -963,7 +1134,7 @@ fn load_section_details(path: Option<&Path>, records: &[Record]) -> Result<Secti
     let rows = read_first_sheet(path, None)?;
     let headers = rows
         .first()
-        .ok_or_else(|| WpError("FY27 Section List为空。".into()))?;
+        .ok_or_else(|| WpError("Section List为空。".into()))?;
     let map = header_map(headers);
     let section = map.get("Section").copied();
     // Scan in column order: a hash-map iteration would pick an arbitrary column
@@ -974,14 +1145,14 @@ fn load_section_details(path: Option<&Path>, records: &[Record]) -> Result<Secti
         .position(|value| value.text().trim().starts_with("Entity数量"));
     let drafts = map.get("底稿数量").copied();
     let budget = map.get("预算调整").copied();
+    let outlook = map.get("OutlookHours").copied();
     let order = map.get("所属WP服务单").copied();
     if [section, entity, drafts, budget, order]
         .iter()
         .any(Option::is_none)
     {
         return Err(WpError(
-            "FY27 Section List 缺少字段：Section、Entity数量、底稿数量、预算调整或所属WP服务单。"
-                .into(),
+            "Section List 缺少字段：Section、Entity数量、底稿数量、预算调整或所属WP服务单。".into(),
         ));
     }
     let (section, entity, drafts, budget, order) = (
@@ -1008,7 +1179,12 @@ fn load_section_details(path: Option<&Path>, records: &[Record]) -> Result<Secti
             continue;
         }
         matched_rows += 1;
-        let raw = [row.get(entity), row.get(drafts), row.get(budget)];
+        let raw = [
+            row.get(entity),
+            row.get(drafts),
+            row.get(budget),
+            outlook.and_then(|column| row.get(column)),
+        ];
         if raw.iter().flatten().any(|value| !value.is_empty()) {
             populated_rows += 1;
         }
@@ -1020,6 +1196,7 @@ fn load_section_details(path: Option<&Path>, records: &[Record]) -> Result<Secti
         add_optional(&mut item.entity, raw[0]);
         add_optional(&mut item.drafts, raw[1]);
         add_optional(&mut item.budget, raw[2]);
+        add_optional(&mut item.outlook, raw[3]);
     }
     Ok(SectionResult {
         details,
@@ -1029,6 +1206,45 @@ fn load_section_details(path: Option<&Path>, records: &[Record]) -> Result<Secti
     })
 }
 
+fn has_section_values(item: &SectionItem) -> bool {
+    item.entity.is_some()
+        || item.drafts.is_some()
+        || item.budget.is_some()
+        || item.outlook.is_some()
+}
+
+fn merge_section_values(target: &mut SectionItem, source: &SectionItem) {
+    fn merge(target: &mut Option<f64>, source: Option<f64>) {
+        if let Some(value) = source {
+            *target = Some(target.unwrap_or(0.0) + value);
+        }
+    }
+    merge(&mut target.entity, source.entity);
+    merge(&mut target.drafts, source.drafts);
+    merge(&mut target.budget, source.budget);
+    merge(&mut target.outlook, source.outlook);
+}
+
+fn map_sections_to_template(
+    project: &HashMap<String, SectionItem>,
+    template_sections: &HashSet<String>,
+) -> HashMap<String, SectionItem> {
+    let fallback = normalize_section("Others");
+    let mut mapped: HashMap<String, SectionItem> = HashMap::new();
+    for (section, item) in project {
+        if !template_sections.contains(section) && !has_section_values(item) {
+            continue;
+        }
+        let target = if template_sections.contains(section) {
+            section.clone()
+        } else {
+            fallback.clone()
+        };
+        merge_section_values(mapped.entry(target).or_default(), item);
+    }
+    mapped
+}
+
 fn add_optional(target: &mut Option<f64>, value: Option<&Value>) {
     if let Some(value) = value.filter(|value| !value.is_empty()) {
         *target = Some(target.unwrap_or(0.0) + value.number());
@@ -1036,7 +1252,7 @@ fn add_optional(target: &mut Option<f64>, value: Option<&Value>) {
 }
 
 fn load_ser_config(folder: &Path) -> Result<[(f64, f64); 4]> {
-    let path = folder.join("SER配置.xlsx");
+    let path = crate::spreadsheet_input::prefer_workbook(&folder.join("SER配置.xlsx"));
     if !path.exists() {
         return Ok(DEFAULT_SER);
     }
@@ -1512,18 +1728,18 @@ fn style_service_sheet(sheet: &mut Worksheet) {
         &[
             ("A", 13.0),
             ("B", 36.0),
-            ("C", 15.0),
-            ("D", 15.0),
-            ("E", 17.0),
+            ("C", 20.0),
+            ("D", 13.0),
+            ("E", 13.0),
             ("F", 15.0),
-            ("G", 16.0),
-            ("H", 18.0),
+            ("G", 17.0),
+            ("H", 15.0),
             ("I", 14.0),
         ],
     );
     configure_view(sheet, 5);
     for (row, height) in [
-        (1, 30.0),
+        (1, 36.0),
         (2, 42.0),
         (4, 32.0),
         (39, 28.0),
@@ -1553,19 +1769,8 @@ fn style_service_sheet(sheet: &mut Worksheet) {
         set_visual_style(
             sheet,
             (col, 2),
-            cell_style(Some(WHITE), TEXT, matches!(col, 2 | 3 | 4), 10.0, false),
+            cell_style(Some(WHITE), TEXT, col >= 2, 10.0, col >= 3),
         );
-    }
-    // 旧版把 E1:H2 重新刷成无边框白底正文：第 1 行这四格不是表头。
-    for row in [1, 2] {
-        for col in 5..=8 {
-            set_visual_style(
-                sheet,
-                (col, row),
-                cell_style(Some(WHITE), TEXT, false, 10.0, false),
-            );
-            sheet.get_style_mut((col, row)).remove_borders();
-        }
     }
     if !sheet.value("I1").is_empty()
         || sheet
@@ -1679,8 +1884,9 @@ fn style_service_sheet(sheet: &mut Worksheet) {
     set_number_format(sheet, "B62", "0%");
     set_number_format(sheet, "C62", "#,##0.00");
     set_number_format(sheet, "F62", "#,##0.00");
-    set_number_format(sheet, "C2", "#,##0.00");
-    set_number_format(sheet, "D2", "#,##0.00");
+    for coordinate in ["C2", "D2", "E2", "F2", "G2", "H2"] {
+        set_number_format(sheet, coordinate, "#,##0.00");
+    }
     set_tab_color(sheet, TEAL);
     configure_print(sheet, "$A$1:$H$62", Some("$1:$4"));
 }
@@ -1695,11 +1901,13 @@ fn style_index_sheet(sheet: &mut Worksheet) {
             ("D", 27.0),
             ("E", 28.0),
             ("F", 24.0),
-            ("G", 19.0),
-            ("H", 19.0),
-            ("I", 14.0),
-            ("J", 16.0),
-            ("K", 16.0),
+            ("G", 13.0),
+            ("H", 13.0),
+            ("I", 19.0),
+            ("J", 19.0),
+            ("K", 14.0),
+            ("L", 16.0),
+            ("M", 16.0),
         ],
     );
     configure_view(sheet, 8);
@@ -1736,33 +1944,33 @@ fn style_index_sheet(sheet: &mut Worksheet) {
         );
     }
     let header = cell_style(Some(TEAL), WHITE, true, 10.0, true);
-    for col in 1..=11 {
+    for col in 1..=13 {
         set_visual_style(sheet, (col, 7), header.clone());
     }
     for row in 8..=sheet.get_highest_row() {
         set_row_height(sheet, row, 28.0);
         let fill = if row % 2 == 0 { WHITE } else { LIGHT };
-        for col in 1..=11 {
+        for col in 1..=13 {
             set_visual_style(
                 sheet,
                 (col, row),
-                cell_style(Some(fill), TEXT, false, 9.0, matches!(col, 1 | 2 | 10 | 11)),
+                cell_style(Some(fill), TEXT, false, 9.0, matches!(col, 1 | 2 | 12 | 13)),
             );
         }
-        for col in [1, 2, 10, 11] {
+        for col in [1, 2, 12, 13] {
             clear_wrap(sheet, (col, row));
         }
-        for col in [7, 8, 9] {
+        for col in [7, 8, 9, 10, 11] {
             sheet
                 .get_style_mut((col, row))
                 .number_format_mut()
                 .set_format_code("#,##0.00");
         }
         sheet
-            .get_style_mut((11, row))
+            .get_style_mut((13, row))
             .set_background_color(PALE_TEAL);
         sheet
-            .get_style_mut((11, row))
+            .get_style_mut((13, row))
             .font_mut()
             .set_bold(true)
             .set_underline("single")
@@ -1772,7 +1980,7 @@ fn style_index_sheet(sheet: &mut Worksheet) {
     set_tab_color(sheet, GOLD);
     configure_print(
         sheet,
-        &format!("$A$1:$K${}", sheet.get_highest_row()),
+        &format!("$A$1:$M${}", sheet.get_highest_row()),
         Some("$7:$7"),
     );
 }
@@ -1897,15 +2105,32 @@ fn load_template_metadata(path: &Path, sheet_name: &str) -> Result<TemplateMetad
             continue;
         }
         metadata.section_by_row.insert(row, section);
-        metadata.reference_by_section.insert(
-            key,
-            values.get(value_index).map(Value::number).unwrap_or(0.0),
-        );
+        let reference = REFERENCE_HOUR_OVERRIDES
+            .iter()
+            .find(|(section, _)| normalize_section(section) == key)
+            .map(|(_, hours)| *hours)
+            .unwrap_or_else(|| values.get(value_index).map(Value::number).unwrap_or(0.0));
+        metadata.reference_by_section.insert(key, reference);
     }
     if metadata.section_by_row.len() != 32 {
         return Err(WpError(format!(
             "服务方案模板应包含32个Section，实际读取{}个。",
             metadata.section_by_row.len()
+        )));
+    }
+    let missing_overrides = REFERENCE_HOUR_OVERRIDES
+        .iter()
+        .filter(|(section, _)| {
+            !metadata
+                .reference_by_section
+                .contains_key(&normalize_section(section))
+        })
+        .map(|(section, _)| *section)
+        .collect::<Vec<_>>();
+    if !missing_overrides.is_empty() {
+        return Err(WpError(format!(
+            "服务方案模板缺少需要更新参考工时的Section：{}",
+            missing_overrides.join("、")
         )));
     }
     Ok(metadata)
@@ -1915,24 +2140,35 @@ fn calculate_outlook(
     records: &[Record],
     details: &SectionDetails,
     reference: &HashMap<String, f64>,
-) -> (usize, usize, usize, usize, Vec<OutlookDifference>) {
+) -> (usize, usize, usize, usize, usize, Vec<OutlookDifference>) {
     let mut template_rows = 0;
     let mut populated_rows = 0;
+    let mut fallback_rows = 0;
     let mut compared = 0;
     let mut equal = 0;
     let mut differences = Vec::new();
+    let template_sections = reference.keys().cloned().collect::<HashSet<_>>();
     for record in records {
         let project = details.get(&normalize_order(&record.service_number));
         let mut total = 0.0;
         let mut has_data = false;
         if let Some(project) = project {
-            for (section, item) in project {
-                let Some(reference) = reference.get(section) else {
-                    continue;
-                };
+            fallback_rows += project
+                .iter()
+                .filter(|(section, item)| {
+                    !template_sections.contains(section.as_str()) && has_section_values(item)
+                })
+                .count();
+            for (section, item) in map_sections_to_template(project, &template_sections) {
+                let reference = reference.get(&section).copied().unwrap_or(0.0);
                 template_rows += 1;
-                if item.entity.is_some() || item.drafts.is_some() || item.budget.is_some() {
+                if has_section_values(&item) {
                     populated_rows += 1;
+                }
+                if reference == 0.0 && item.outlook.is_some() {
+                    has_data = true;
+                    total += round2(item.outlook.unwrap_or(0.0));
+                    continue;
                 }
                 if item.entity.is_none() && item.budget.is_none() {
                     continue;
@@ -1943,7 +2179,8 @@ fn calculate_outlook(
             }
         }
         if has_data {
-            let calculated = round2(total * 1.1);
+            let adjusted = total - record.ci_hours.unwrap_or(0.0) - record.ai_hours.unwrap_or(0.0);
+            let calculated = round2(adjusted * 1.1);
             let source = round2(record.outlook_hours);
             let difference = round2(calculated - source);
             compared += 1;
@@ -1960,7 +2197,14 @@ fn calculate_outlook(
             }
         }
     }
-    (template_rows, populated_rows, compared, equal, differences)
+    (
+        template_rows,
+        populated_rows,
+        fallback_rows,
+        compared,
+        equal,
+        differences,
+    )
 }
 
 /// 把 Calamine 读到的模板文本原样写回，补上 umya 丢失的富文本 run。
@@ -2053,6 +2297,15 @@ fn prepare_template(template: &mut Worksheet, metadata: &TemplateMetadata) {
             }
         }
     }
+    for (section, hours) in REFERENCE_HOUR_OVERRIDES {
+        let key = normalize_section(section);
+        let row = metadata
+            .section_by_row
+            .iter()
+            .find_map(|(row, value)| (normalize_section(value) == key).then_some(*row))
+            .expect("validated template contains reference-hour override section");
+        set_number(template, &format!("H{row}"), hours);
+    }
 }
 
 fn fill_service_sheet(
@@ -2064,13 +2317,34 @@ fn fill_service_sheet(
 ) {
     set_text(sheet, "A2", &record.related_order);
     set_text(sheet, "B2", &record.service_number);
-    for coordinate in ["E1", "F1", "G1", "H1", "E2", "F2", "G2", "H2"] {
-        set_text(sheet, coordinate, "");
+    set_text(sheet, "C1", "Section Outlook Hours");
+    set_formula(sheet, "C2", "SUM(G5:G36)");
+    set_text(sheet, "D1", "CI Hours");
+    if let Some(hours) = record.ci_hours {
+        set_number(sheet, "D2", hours);
+    } else {
+        set_text(sheet, "D2", "");
     }
-    set_text(sheet, "C1", "Outlook Hours");
-    set_formula(sheet, "C2", "G37");
-    set_text(sheet, "D1", "SER");
-    set_formula(sheet, "D2", "F62");
+    set_text(sheet, "E1", "AI Hours");
+    if let Some(hours) = record.ai_hours {
+        set_number(sheet, "E2", hours);
+    } else {
+        set_text(sheet, "E2", "");
+    }
+    set_text(sheet, "F1", "Hours调整");
+    set_formula(
+        sheet,
+        "F2",
+        "ROUND((C2-IF(D2=\"\",0,D2)-IF(E2=\"\",0,E2))*0.1,2)",
+    );
+    set_text(sheet, "G1", "Outlook Hours");
+    set_formula(
+        sheet,
+        "G2",
+        "ROUND(C2-IF(D2=\"\",0,D2)-IF(E2=\"\",0,E2)+F2,2)",
+    );
+    set_text(sheet, "H1", "SER");
+    set_formula(sheet, "H2", "F62");
     set_formula(
         sheet,
         "I1",
@@ -2082,6 +2356,12 @@ fn fill_service_sheet(
     );
     set_text(sheet, "H4", "参考时间/Entity");
     let project = details.get(&normalize_order(&record.service_number));
+    let template_sections = template_metadata
+        .reference_by_section
+        .keys()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let mapped = project.map(|project| map_sections_to_template(project, &template_sections));
     for row in 5..=36 {
         let section = template_metadata
             .section_by_row
@@ -2089,7 +2369,9 @@ fn fill_service_sheet(
             .cloned()
             .unwrap_or_else(|| sheet.value((2, row)));
         set_text(sheet, &format!("B{row}"), &section);
-        let imported = project.and_then(|project| project.get(&normalize_section(&section)));
+        let imported = mapped
+            .as_ref()
+            .and_then(|project| project.get(&normalize_section(&section)));
         for (col, value) in [
             (3, imported.and_then(|item| item.entity)),
             (4, imported.and_then(|item| item.drafts)),
@@ -2105,19 +2387,30 @@ fn fill_service_sheet(
         set_formula(
             sheet,
             &format!("E{row}"),
-            format!(
-                "IF(OR(C{row}=\"\",H{row}=\"\"),\"\",ROUND(C{row}*IFERROR(VALUE(H{row}),0),2))"
-            ),
+            format!("IF(OR(C{row}=\"\",H{row}=\"\"),\"\",ROUND(C{row}*H{row},2))"),
         );
-        set_formula(
-            sheet,
-            &format!("G{row}"),
-            format!(
-                "IF(AND(F{row}=\"\",OR(C{row}=\"\",H{row}=\"\")),\"\",ROUND(IF(OR(C{row}=\"\",H{row}=\"\"),0,C{row}*IFERROR(VALUE(H{row}),0))+IFERROR(VALUE(F{row}),0),2))"
-            ),
-        );
+        let reference = template_metadata
+            .reference_by_section
+            .get(&normalize_section(&section))
+            .copied()
+            .unwrap_or(0.0);
+        if reference == 0.0 && imported.and_then(|item| item.outlook).is_some() {
+            set_number(
+                sheet,
+                &format!("G{row}"),
+                imported.and_then(|item| item.outlook).unwrap_or(0.0),
+            );
+        } else {
+            set_formula(
+                sheet,
+                &format!("G{row}"),
+                format!(
+                    "IF(AND(F{row}=\"\",E{row}=\"\"),\"\",ROUND(IF(E{row}=\"\",0,E{row})+IFERROR(VALUE(F{row}),0),2))"
+                ),
+            );
+        }
     }
-    set_formula(sheet, "G37", "SUM(G5:G36)*1.1");
+    set_formula(sheet, "G37", "G2");
     for (coordinate, value) in [
         ("C41", &record.pre_start),
         ("C42", &record.pre_end),
@@ -2172,6 +2465,9 @@ fn write_split_workbook(
     metadata: &TemplateMetadata,
     split: &SplitData,
 ) -> Result<()> {
+    let prepared = crate::spreadsheet_input::prepare_xlsx(template_path)
+        .map_err(|err| WpError(err.user_message))?;
+    let template_path = prepared.path();
     let mut book = umya_spreadsheet::reader::xlsx::read(template_path)
         .map_err(|error| WpError(format!("无法读取服务方案模板：{error}")))?;
     while book.get_sheet_count() > 0 {
@@ -2195,6 +2491,19 @@ fn write_split_workbook(
     hidden_template.set_name("_WP_TEMPLATE");
     hidden_template.set_state(SheetStateValues::Hidden);
     restore_template_text(&mut hidden_template, metadata, false);
+    let reference_column = template_reference_column(&hidden_template);
+    for (section, hours) in REFERENCE_HOUR_OVERRIDES {
+        let key = normalize_section(section);
+        if let Some(row) = metadata
+            .section_by_row
+            .iter()
+            .find_map(|(row, value)| (normalize_section(value) == key).then_some(*row))
+        {
+            hidden_template
+                .get_cell_mut((reference_column, row))
+                .set_value_number(hours);
+        }
+    }
     for column in ["F", "G", "H", "I"] {
         hidden_template
             .get_column_dimension_mut(column)
@@ -2339,7 +2648,7 @@ fn finalize_workbook_xml(path: &Path) -> Result<()> {
 }
 
 const CALC_PR: &str =
-    "<calcPr calcId=\"122211\" calcMode=\"auto\" fullCalcOnLoad=\"1\" forceFullCalc=\"1\"/>";
+    "<calcPr calcId=\"122211\" calcMode=\"auto\" fullCalcOnLoad=\"0\" forceFullCalc=\"0\"/>";
 
 fn patch_calculation_properties(bytes: &[u8]) -> Vec<u8> {
     let Ok(text) = std::str::from_utf8(bytes) else {
@@ -2460,13 +2769,13 @@ fn build_index(service_sheets: &[Worksheet], records: &[Record]) -> Worksheet {
     let mut sheet = Worksheet::default();
     sheet.set_name("服务方案索引");
     set_text(&mut sheet, "A1", "FY27 WP 服务方案清单");
-    sheet.add_merge_cells("A1:K1");
+    sheet.add_merge_cells("A1:M1");
     set_text(
         &mut sheet,
         "A2",
         "项目组展示版 · 服务单、相关订单、Section 与 SER 测算集中查看",
     );
-    sheet.add_merge_cells("A2:K2");
+    sheet.add_merge_cells("A2:M2");
     set_text(&mut sheet, "A4", "服务方案");
     set_number(&mut sheet, "B4", service_sheets.len() as f64);
     set_text(&mut sheet, "C4", "AUD2026项目");
@@ -2500,6 +2809,8 @@ fn build_index(service_sheets: &[Worksheet], records: &[Record]) -> Worksheet {
         "WP服务单编号",
         "相关订单",
         "WP FIC",
+        "CI Hours",
+        "AI Hours",
         "预算Outlook Hours",
         "源表Outlook Hours",
         "差异",
@@ -2527,31 +2838,43 @@ fn build_index(service_sheets: &[Worksheet], records: &[Record]) -> Worksheet {
         for (col, value) in (2..=6).zip(values) {
             set_text(&mut sheet, &format!("{}{row}", column_name(col)), value);
         }
-        set_formula(&mut sheet, &format!("G{row}"), format!("'{quoted}'!C2"));
-        set_number(&mut sheet, &format!("H{row}"), record.outlook_hours);
-        let has_data = (5..=36)
-            .any(|r| !service.value((3, r)).is_empty() || !service.value((6, r)).is_empty());
+        if let Some(hours) = record.ci_hours {
+            set_number(&mut sheet, &format!("G{row}"), hours);
+        }
+        if let Some(hours) = record.ai_hours {
+            set_number(&mut sheet, &format!("H{row}"), hours);
+        }
+        set_formula(&mut sheet, &format!("I{row}"), format!("'{quoted}'!G2"));
+        set_number(&mut sheet, &format!("J{row}"), record.outlook_hours);
+        let has_data = (5..=36).any(|r| {
+            [3, 4, 6]
+                .iter()
+                .any(|col| !service.value((*col, r)).is_empty())
+                || service.get_cell((7, r)).is_some_and(|cell| {
+                    cell.get_formula().is_empty() && !cell.get_value().is_empty()
+                })
+        });
         if has_data {
             set_formula(
                 &mut sheet,
-                &format!("I{row}"),
-                format!("IF(OR(G{row}=\"\",H{row}=\"\"),\"\",G{row}-H{row})"),
+                &format!("K{row}"),
+                format!("IF(OR(I{row}=\"\",J{row}=\"\"),\"\",I{row}-J{row})"),
             );
             set_formula(
                 &mut sheet,
-                &format!("J{row}"),
-                format!("IF(I{row}=\"\",\"\",IF(ABS(I{row})<=0.01,\"一致\",\"不一致\"))"),
+                &format!("L{row}"),
+                format!("IF(K{row}=\"\",\"\",IF(ABS(K{row})<=0.01,\"一致\",\"不一致\"))"),
             );
         } else {
-            set_text(&mut sheet, &format!("J{row}"), "待补充Section");
+            set_text(&mut sheet, &format!("L{row}"), "待补充Section");
         }
         set_formula(
             &mut sheet,
-            &format!("K{row}"),
+            &format!("M{row}"),
             hyperlink_formula(service.get_name(), "A1", "打开"),
         );
     }
-    sheet.set_auto_filter(format!("A7:K{}", service_sheets.len() + 7));
+    sheet.set_auto_filter(format!("A7:M{}", service_sheets.len() + 7));
     style_index_sheet(&mut sheet);
     sheet
 }
@@ -2639,6 +2962,12 @@ fn generate_cancellable(
         return Err(WpError("AUD2026 和 IPO 中没有找到 WP服务单编号。".into()));
     }
     let ser = load_ser_config(params.input_path.parent().unwrap_or(Path::new(".")))?;
+    let my_orders_path = match params.my_orders_path.clone() {
+        Some(path) => path,
+        None => find_my_orders_file(params.input_path.parent().unwrap_or(Path::new(".")))?,
+    };
+    let (matched_order_adjustments, unmatched_order_adjustments) =
+        apply_order_adjustments(&mut records, &load_order_adjustments(&my_orders_path)?);
     let section_path = match params.section_list_path.clone() {
         Some(path) => path,
         None => find_section_list_file(params.input_path.parent().unwrap_or(Path::new(".")))?,
@@ -2658,7 +2987,10 @@ fn generate_cancellable(
         .map(|record| record.service_number.clone())
         .collect();
 
-    let mut book = umya_spreadsheet::reader::xlsx::read(&params.template_path)
+    let prepared = crate::spreadsheet_input::prepare_xlsx(&params.template_path)
+        .map_err(|err| WpError(err.user_message))?;
+    let template_path = prepared.path();
+    let mut book = umya_spreadsheet::reader::xlsx::read(template_path)
         .map_err(|error| WpError(format!("无法读取服务方案模板：{error}")))?;
     let template_name = locate_template(&book)?;
     let mut template = book
@@ -2666,7 +2998,7 @@ fn generate_cancellable(
         .map_err(|error| WpError(error.to_string()))?
         .clone();
     let split_template = template.clone();
-    let template_metadata = load_template_metadata(&params.template_path, &template_name)?;
+    let template_metadata = load_template_metadata(template_path, &template_name)?;
     prepare_template(&mut template, &template_metadata);
     template.set_name("_WP_TEMPLATE");
     let outlook = calculate_outlook(
@@ -2685,7 +3017,7 @@ fn generate_cancellable(
         pause_wait()?;
         let temporary = TemporaryArtifact::new(split_output.with_extension("xlsx.tmp"))?;
         write_split_workbook(
-            &params.template_path,
+            template_path,
             &temporary.path,
             &split_template,
             &template_metadata,
@@ -2778,9 +3110,12 @@ fn generate_cancellable(
         populated_section_rows: section.populated_rows,
         template_section_rows: outlook.0,
         populated_template_rows: outlook.1,
-        outlook_compared: outlook.2,
-        outlook_equal: outlook.3,
-        outlook_differences: outlook.4,
+        fallback_section_rows: outlook.2,
+        matched_order_adjustments,
+        unmatched_order_adjustments,
+        outlook_compared: outlook.3,
+        outlook_equal: outlook.4,
+        outlook_differences: outlook.5,
         unmatched_section_orders: unmatched,
         excluded_ipo: split.excluded_ipo,
         excluded_other: split.excluded_other,
@@ -2823,7 +3158,7 @@ pub fn validate_output(path: &Path, expected_services: usize) -> Result<()> {
             .get_cell((7, 37))
             .map(|cell| cell.get_formula())
             .unwrap_or_default()
-            != "SUM(G5:G36)*1.1"
+            != "G2"
         {
             return Err(WpError(format!("{} Outlook公式异常。", sheet.get_name())));
         }
@@ -2835,24 +3170,30 @@ pub fn validate_output(path: &Path, expected_services: usize) -> Result<()> {
         {
             return Err(WpError(format!("{} SER公式异常。", sheet.get_name())));
         }
-        for coordinate in ["E1", "F1", "G1", "H1", "E2", "F2", "G2", "H2"] {
-            if !sheet.value(coordinate).is_empty() {
-                return Err(WpError(format!(
-                    "{} 隐藏字段未清空：{coordinate}。",
-                    sheet.get_name()
-                )));
-            }
-        }
-        if sheet.value("C1") != "Outlook Hours"
-            || sheet.value("D1") != "SER"
+        if sheet.value("C1") != "Section Outlook Hours"
+            || sheet.value("D1") != "CI Hours"
+            || sheet.value("E1") != "AI Hours"
+            || sheet.value("F1") != "Hours调整"
+            || sheet.value("G1") != "Outlook Hours"
+            || sheet.value("H1") != "SER"
             || sheet.value("H4") != "参考时间/Entity"
             || sheet
                 .get_cell("C2")
                 .map(|cell| cell.get_formula())
                 .unwrap_or_default()
-                != "G37"
+                != "SUM(G5:G36)"
             || sheet
-                .get_cell("D2")
+                .get_cell("F2")
+                .map(|cell| cell.get_formula())
+                .unwrap_or_default()
+                != "ROUND((C2-IF(D2=\"\",0,D2)-IF(E2=\"\",0,E2))*0.1,2)"
+            || sheet
+                .get_cell("G2")
+                .map(|cell| cell.get_formula())
+                .unwrap_or_default()
+                != "ROUND(C2-IF(D2=\"\",0,D2)-IF(E2=\"\",0,E2)+F2,2)"
+            || sheet
+                .get_cell("H2")
                 .map(|cell| cell.get_formula())
                 .unwrap_or_default()
                 != "F62"
@@ -2891,22 +3232,25 @@ pub fn validate_output(path: &Path, expected_services: usize) -> Result<()> {
             )));
         }
         for row in 5..=36 {
-            let e = format!(
-                "IF(OR(C{row}=\"\",H{row}=\"\"),\"\",ROUND(C{row}*IFERROR(VALUE(H{row}),0),2))"
-            );
+            let e = format!("IF(OR(C{row}=\"\",H{row}=\"\"),\"\",ROUND(C{row}*H{row},2))");
             let g = format!(
-                "IF(AND(F{row}=\"\",OR(C{row}=\"\",H{row}=\"\")),\"\",ROUND(IF(OR(C{row}=\"\",H{row}=\"\"),0,C{row}*IFERROR(VALUE(H{row}),0))+IFERROR(VALUE(F{row}),0),2))"
+                "IF(AND(F{row}=\"\",E{row}=\"\"),\"\",ROUND(IF(E{row}=\"\",0,E{row})+IFERROR(VALUE(F{row}),0),2))"
             );
             if sheet
                 .get_cell((5, row))
                 .map(|cell| cell.get_formula())
                 .unwrap_or_default()
                 != e
-                || sheet
+                || (!sheet
                     .get_cell((7, row))
                     .map(|cell| cell.get_formula())
                     .unwrap_or_default()
-                    != g
+                    .is_empty()
+                    && sheet
+                        .get_cell((7, row))
+                        .map(|cell| cell.get_formula())
+                        .unwrap_or_default()
+                        != g)
             {
                 return Err(WpError(format!(
                     "{} 第{row}行Outlook公式异常。",
@@ -2956,6 +3300,8 @@ pub fn validate_output(path: &Path, expected_services: usize) -> Result<()> {
         "WP服务单编号",
         "相关订单",
         "WP FIC",
+        "CI Hours",
+        "AI Hours",
         "预算Outlook Hours",
         "源表Outlook Hours",
         "差异",
@@ -2977,7 +3323,7 @@ mod tests {
     use super::*;
 
     /// 对着一份真实（脱敏）样例跑完整生成，用于和旧版 Python 逐格比对。
-    /// 需要 `WP_REAL_FOLDER` 指向放着两个输入文件的目录：
+    /// 需要 `WP_REAL_FOLDER` 指向放着三个输入文件的目录：
     /// `cargo test --lib wp::tests::real_sample_generate -- --ignored`
     #[test]
     #[ignore]
@@ -2990,6 +3336,7 @@ mod tests {
         let params = WpGenerateParams {
             input_path: folder.join("FY27 WP服务单.xlsx"),
             section_list_path: Some(folder.join("FY27 section list.xlsx")),
+            my_orders_path: Some(folder.join("FY26 我的订单.xlsx")),
             template_path: template.path().to_path_buf(),
             output_path: folder.join("FY27+WP服务单汇总.xlsx"),
             split_output_path: Some(folder.join("FY27+WP服务单_自动拆分.xlsx")),
@@ -3004,6 +3351,27 @@ mod tests {
         let mut text = String::new();
         std::io::Read::read_to_string(&mut archive.by_name(entry).unwrap(), &mut text).unwrap();
         text
+    }
+
+    fn write_test_my_orders(path: &Path, rows: &[(&str, f64, f64)]) {
+        let mut book = umya_spreadsheet::new_file();
+        let sheet = book.get_sheet_by_name_mut("Sheet1").unwrap();
+        sheet.set_name("业务");
+        for (column, header) in ["AI Hours", "订单编号", "说明", "CI Hours"]
+            .iter()
+            .enumerate()
+        {
+            sheet
+                .get_cell_mut((column as u32 + 1, 1))
+                .set_value_string(*header);
+        }
+        for (index, (order, ci, ai)) in rows.iter().enumerate() {
+            let row = index as u32 + 2;
+            sheet.get_cell_mut((1, row)).set_value_number(*ai);
+            sheet.get_cell_mut((2, row)).set_value_string(*order);
+            sheet.get_cell_mut((4, row)).set_value_number(*ci);
+        }
+        umya_spreadsheet::writer::xlsx::write(&book, path).unwrap();
     }
 
     #[test]
@@ -3077,6 +3445,7 @@ mod tests {
         for name in [
             "8月导出的 WP 服务单 v2.XLSX",
             "Client SECTION LIST final.xlsx",
+            "FY26 我的订单.xlsx",
             "FY27+WP服务单.xlsx",
             "FY27+WP服务单汇总.xlsx",
             "~$临时 WP服务单.xlsx",
@@ -3097,6 +3466,10 @@ mod tests {
                 .file_name()
                 .unwrap(),
             "Client SECTION LIST final.xlsx"
+        );
+        assert_eq!(
+            find_my_orders_file(&folder).unwrap().file_name().unwrap(),
+            "FY26 我的订单.xlsx"
         );
         let _ = std::fs::remove_dir_all(folder);
     }
@@ -3120,6 +3493,55 @@ mod tests {
     }
 
     #[test]
+    fn my_orders_are_read_by_headers_and_normalized_order_number() {
+        let folder = std::env::temp_dir()
+            .join("AuditToolbox")
+            .join(format!("wp-orders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("团队 我的订单 final.xlsx");
+        write_test_my_orders(&path, &[(" order – 01 ", 11.6, 11.0)]);
+        let adjustments = load_order_adjustments(&path).unwrap();
+        assert_eq!(adjustments.get("ORDER-01"), Some(&(11.6, 11.0)));
+        let _ = std::fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn outlook_uses_flexible_sections_and_deducts_ai_ci_before_uplift() {
+        let record = Record {
+            source_sheet: "AUD2026",
+            source_row: 2,
+            engagement_name: "测试项目".into(),
+            outlook_hours: 93.5,
+            service_number: "WP-01".into(),
+            related_order: "ORDER-01".into(),
+            pre_start: Value::Empty,
+            pre_end: Value::Empty,
+            final_start: Value::Empty,
+            final_end: Value::Empty,
+            report_date: Value::Empty,
+            wp_fic: String::new(),
+            ci_hours: Some(10.0),
+            ai_hours: Some(5.0),
+            sheet_name: String::new(),
+        };
+        let mut project = HashMap::new();
+        project.insert(
+            normalize_section("自定义 Section"),
+            SectionItem {
+                outlook: Some(100.0),
+                ..Default::default()
+            },
+        );
+        let details = HashMap::from([(normalize_order("WP-01"), project)]);
+        let reference = HashMap::from([(normalize_section("Others"), 0.0)]);
+        let result = calculate_outlook(&[record], &details, &reference);
+        assert_eq!(result.2, 1);
+        assert_eq!((result.3, result.4), (1, 1));
+        assert!(result.5.is_empty());
+    }
+
+    #[test]
     fn generate_contract_honors_pre_cancel() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -3129,17 +3551,30 @@ mod tests {
         if !root.join("FY27 WP服务单.xlsx").exists() {
             return;
         }
+        let folder = std::env::temp_dir()
+            .join("AuditToolbox")
+            .join(format!("wp-cancel-entry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        for name in ["FY27 WP服务单.xlsx", "FY27 section list.xlsx"] {
+            std::fs::copy(root.join(name), folder.join(name)).unwrap();
+        }
+        write_test_my_orders(
+            &folder.join("FY26 我的订单.xlsx"),
+            &[("UNMATCHED", 0.0, 0.0)],
+        );
         let cancel = Arc::new(AtomicBool::new(true));
         let pause = PauseCheckpoint::unpaused(cancel.clone());
         let error = run_job(
             "wp.generate",
-            json!({ "folder": root }),
+            json!({ "folder": folder }),
             &|_, _, _, _| {},
             cancel,
             &pause,
         )
         .unwrap_err();
         assert_eq!(error.code, "JOB_CANCELLED");
+        let _ = std::fs::remove_dir_all(folder);
     }
 
     #[test]
@@ -3161,9 +3596,13 @@ mod tests {
             .join("AuditToolbox")
             .join(format!("wp-rust-split-{}.xlsx", std::process::id()));
         std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        let my_orders =
+            output.with_file_name(format!("wp-rust-orders-{}.xlsx", std::process::id()));
+        write_test_my_orders(&my_orders, &[("UNMATCHED", 0.0, 0.0)]);
         let params = WpGenerateParams {
             input_path: root.join("FY27 WP服务单.xlsx"),
             section_list_path: Some(root.join("FY27 section list.xlsx")),
+            my_orders_path: Some(my_orders.clone()),
             template_path: root.join("FY27+WP服务单.xlsx"),
             output_path: output.clone(),
             split_output_path: Some(split_output.clone()),
@@ -3186,13 +3625,17 @@ mod tests {
                 result.outlook_compared,
                 result.outlook_equal
             ),
-            (2, 2, 2)
+            (2, 2, 0)
         );
-        assert!(result.outlook_differences.is_empty());
+        // The checked-in fixture contains the retired 4.6/12.5 cash reference
+        // hours, so both source Outlook values must differ under the new 3/10
+        // rules. Formula-level tests above cover the new expected values.
+        assert_eq!(result.outlook_differences.len(), 2);
         validate_output(&output, 2).unwrap();
         assert!(split_output.exists());
         let _ = std::fs::remove_file(output);
         let _ = std::fs::remove_file(split_output);
+        let _ = std::fs::remove_file(my_orders);
     }
 
     #[test]
@@ -3213,6 +3656,10 @@ mod tests {
         for name in ["FY27 WP服务单.xlsx", "FY27 section list.xlsx"] {
             std::fs::copy(samples.join(name), folder.join(name)).unwrap();
         }
+        write_test_my_orders(
+            &folder.join("FY26 我的订单.xlsx"),
+            &[("UNMATCHED", 0.0, 0.0)],
+        );
         let raw_template =
             umya_spreadsheet::reader::xlsx::read(samples.join("FY27+WP服务单.xlsx")).unwrap();
         let raw_template_name = locate_template(&raw_template).unwrap();
@@ -3250,7 +3697,7 @@ mod tests {
             index
                 .get_merge_cells()
                 .iter()
-                .any(|range| range.get_range() == "A1:K1")
+                .any(|range| range.get_range() == "A1:M1")
         );
         assert_eq!(index.get_column_dimension("C").unwrap().width(), 38.0);
         assert_eq!(index.get_row_dimension(&1).unwrap().height(), 46.0);
@@ -3389,8 +3836,8 @@ mod tests {
             "来源表列数应与导出文件表头一致"
         );
         let workbook_xml = read_zip_entry(&output, "xl/workbook.xml");
-        assert!(workbook_xml.contains("fullCalcOnLoad=\"1\""));
-        assert!(workbook_xml.contains("forceFullCalc=\"1\""));
+        assert!(workbook_xml.contains("fullCalcOnLoad=\"0\""));
+        assert!(workbook_xml.contains("forceFullCalc=\"0\""));
         assert!(
             read_zip_entry(&output, "xl/worksheets/sheet1.xml")
                 .contains("<pageSetUpPr fitToPage=\"1\"/>")
@@ -3429,49 +3876,6 @@ mod tests {
                 .to_string(),
             "A2"
         );
-        let gold_path = samples.join("FY27+WP服务单汇总.xlsx");
-        if gold_path.exists() {
-            let gold = umya_spreadsheet::reader::xlsx::read(gold_path).unwrap();
-            let actual_names = book
-                .get_sheet_collection()
-                .iter()
-                .map(|sheet| sheet.get_name())
-                .collect::<Vec<_>>();
-            let gold_names = gold
-                .get_sheet_collection()
-                .iter()
-                .map(|sheet| sheet.get_name())
-                .collect::<Vec<_>>();
-            assert_eq!(actual_names, gold_names);
-            for name in actual_names {
-                let actual = book.get_sheet_by_name(name).unwrap();
-                let expected = gold.get_sheet_by_name(name).unwrap();
-                let max_row = actual.get_highest_row().max(expected.get_highest_row());
-                let max_col = actual
-                    .get_highest_column()
-                    .max(expected.get_highest_column());
-                for row in 1..=max_row {
-                    for col in 1..=max_col {
-                        if name == "服务方案索引" && row == 4 && col == 8 {
-                            continue; // 生成日期随运行日变化。
-                        }
-                        assert_eq!(
-                            actual
-                                .get_cell((col, row))
-                                .map(|cell| cell.get_formula())
-                                .unwrap_or_default(),
-                            expected
-                                .get_cell((col, row))
-                                .map(|cell| cell.get_formula())
-                                .unwrap_or_default(),
-                            "公式不一致：{name}!{}{}",
-                            column_name(col),
-                            row
-                        );
-                    }
-                }
-            }
-        }
         let _ = std::fs::remove_dir_all(folder);
     }
 

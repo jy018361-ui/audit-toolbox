@@ -1,0 +1,581 @@
+/* Product shell overrides live separately so business-page CSS can evolve in parallel. */
+.skip-navigation {
+  position: fixed;
+  z-index: 100;
+  top: var(--sp-2);
+  left: var(--sp-2);
+  transform: translateY(-200%);
+  padding: var(--sp-3);
+  background: var(--surface);
+  color: var(--ink);
+  border: 2px solid var(--focus-ring);
+  border-radius: var(--r-sm);
+}
+.skip-navigation:focus { transform: translateY(0); }
+.tool-trial-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-3);
+  border: 1px solid var(--warning-border);
+  border-radius: var(--r-sm);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  font-size: var(--fs-xs);
+}
+
+/* 历史记录「继续任务」后的全局提示：恢复结果 + 缺失文件提醒。 */
+.restore-notice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-3);
+  border: 1px solid var(--success-border);
+  border-radius: var(--r-sm);
+  background: var(--success-bg);
+  color: var(--success-fg);
+  font-size: var(--fs-xs);
+}
+.restore-notice p {
+  margin: 0;
+}
+.restore-notice button {
+  border: 1px solid var(--success-border);
+  background: transparent;
+  color: inherit;
+  border-radius: var(--r-sm);
+  padding: var(--sp-1) var(--sp-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+body .app-shell {
+  grid-template-columns: 248px minmax(0, 1fr);
+}
+
+.app-shell > .sidebar {
+  width: 248px;
+  padding: var(--sp-4) var(--sp-3);
+}
+
+.app-shell > .main {
+  grid-column: 2;
+  justify-self: center;
+}
+
+.app-shell .brand h1 {
+  margin-top: 0;
+  font-size: var(--fs-xl);
+}
+
+.app-shell .brand p {
+  margin-bottom: var(--sp-4);
+}
+
+.sidebar-drawer-close,
+.sidebar-rail,
+.sidebar-drawer-backdrop {
+  display: none;
+}
+
+/* ---- 窄图标栏与抽屉浮层（窄屏与桌面折叠态共用）----
+   视觉样式统一放在这里，"何时显示"由两处各管各的：
+   窄屏靠下方 max-width:1179px 的媒体查询，桌面折叠态靠 .app-shell.sidebar-collapsed。
+   默认 display:none（上方规则），被启用时才覆盖 display。 */
+.sidebar-rail {
+  position: fixed;
+  z-index: 41;
+  inset: 0 auto 0 0;
+  width: 72px;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
+  background: var(--brand-deep);
+}
+
+.sidebar-rail a,
+.sidebar-rail-menu {
+  display: inline-grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--on-dark-muted);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.sidebar-rail-menu {
+  margin-bottom: var(--sp-3);
+  background: color-mix(in srgb, var(--brand-accent) 18%, transparent);
+  color: var(--on-brand-deep, #fff);
+  font-size: var(--fs-sm);
+  font-weight: 800;
+}
+
+/* 窄条顶部的品牌标志：与安装图标同一枚风车标；
+   蒙版 + currentColor， hover/激活态颜色变化时标志同步跟随 */
+.sidebar-rail-brand {
+  width: 28px;
+  height: 28px;
+  background: currentColor;
+  -webkit-mask-image: url(/brand-mark.png);
+  mask-image: url(/brand-mark.png);
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+}
+
+.sidebar-rail a:hover,
+.sidebar-rail a.active,
+.sidebar-rail-menu:hover {
+  background: var(--brand-soft);
+  color: var(--on-brand-soft, #fff);
+}
+
+.sidebar-drawer-close {
+  position: absolute;
+  top: var(--sp-3);
+  right: var(--sp-3);
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--on-dark-muted);
+  cursor: pointer;
+  font-size: 22px;
+}
+
+.sidebar-drawer-close:hover {
+  background: var(--brand-soft);
+  color: var(--on-brand-soft, #fff);
+}
+
+.sidebar-drawer-close:focus-visible,
+.sidebar-rail a:focus-visible,
+.sidebar-rail-menu:focus-visible,
+.sidebar-collapse-toggle:focus-visible {
+  outline: 2px solid var(--brand-accent);
+  outline-offset: 2px;
+}
+
+.sidebar-drawer-backdrop {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: color-mix(in srgb, var(--brand-deep) 34%, transparent);
+  cursor: default;
+}
+
+/* ---- 品牌区 logo 与桌面端折叠开关 ----
+   logo 用 mask 蒙版实现：形状来自 brand-mark.png 的透明度，
+   颜色引用主题变量，切换界面主题时标志跟着主题色走。 */
+.app-shell .brand-logo {
+  display: block;
+  width: 48px;
+  height: 48px;
+  margin-bottom: var(--sp-3);
+  background: var(--brand-accent);
+  -webkit-mask-image: url(/brand-mark.png);
+  mask-image: url(/brand-mark.png);
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+}
+
+.sidebar-collapse-toggle {
+  position: absolute;
+  top: var(--sp-3);
+  right: var(--sp-3);
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--on-dark-muted);
+  cursor: pointer;
+  font-size: var(--fs-lg);
+  line-height: 1;
+}
+
+.sidebar-collapse-toggle:hover {
+  background: var(--brand-soft);
+  color: var(--on-brand-soft, #fff);
+}
+
+.app-shell .sidebar-footer {
+  justify-content: flex-start;
+  gap: var(--sp-3);
+}
+
+.app-shell .dev-build-badge {
+  border-color: color-mix(in srgb, var(--warning-dot) 28%, transparent);
+  background: color-mix(in srgb, var(--warning-dot) 10%, transparent);
+  color: var(--on-dark-muted);
+  font-weight: 500;
+}
+
+.dashboard-data-notice {
+  margin-top: var(--sp-5);
+}
+
+.app-shell .metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: var(--sp-4) 0 var(--sp-5);
+}
+
+.app-shell .metric {
+  padding: var(--sp-3) var(--sp-4);
+}
+
+.app-shell .metric strong {
+  margin-top: var(--sp-1);
+}
+
+.app-shell .recent-tools {
+  margin-bottom: var(--sp-5);
+}
+
+.app-shell .recent-tools h2,
+.dashboard-section-heading h2 {
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: var(--fs-lg);
+  /* 工作台分区标题与卡片标题同用 medium：层级靠字重+字号，不靠默认常规体硬撑 */
+  font-weight: var(--fw-medium);
+}
+
+.app-shell .recent-tools > div {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+
+.app-shell .recent-chip {
+  display: grid;
+  min-width: 0;
+  gap: var(--sp-1);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-shell .recent-chip small {
+  color: var(--muted-soft);
+  font-size: var(--fs-xs);
+}
+
+.dashboard-tool-groups {
+  display: grid;
+  gap: var(--sp-6);
+}
+
+.dashboard-tool-group {
+  min-width: 0;
+}
+
+.dashboard-section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+
+.dashboard-section-heading > span {
+  color: var(--muted-soft);
+  font-size: var(--fs-xs);
+}
+
+.dashboard-tool-group .card-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.dashboard-tool-group .tool-card {
+  min-height: 148px;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  border: 1px solid transparent;
+  /* 悬停微浮：轻抬 2px 加深投影，箭头同行微移（见下方 hover 规则） */
+  transition: transform 0.15s ease-out, box-shadow 0.15s ease-out,
+    border-color 0.15s ease-out;
+}
+
+.dashboard-tool-group .tool-card:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-interactive);
+}
+
+.dashboard-tool-group .tool-card strong > span[aria-hidden="true"] {
+  display: inline-block;
+  transition: transform 0.15s ease-out;
+}
+
+.dashboard-tool-group .tool-card:hover strong > span[aria-hidden="true"] {
+  transform: translateX(3px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dashboard-tool-group .tool-card,
+  .dashboard-tool-group .tool-card strong > span[aria-hidden="true"] {
+    transition: none;
+  }
+  .dashboard-tool-group .tool-card:hover {
+    transform: none;
+  }
+  .dashboard-tool-group .tool-card:hover strong > span[aria-hidden="true"] {
+    transform: none;
+  }
+}
+
+.tool-card-heading {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.tool-card-heading h3 {
+  min-width: 0;
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-card-badge {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--r-sm);
+  background: var(--surface-muted);
+  color: var(--brand-link);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.tool-card-status {
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.dashboard-tool-group .tool-card > p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.dashboard-tool-group .tool-card > strong {
+  margin-top: auto;
+}
+
+body .history-card {
+  padding-block: 0;
+}
+
+body .history-card-content {
+  padding: var(--sp-4) var(--sp-5);
+}
+
+.history-card-content .task-row:last-child {
+  border-bottom: 0;
+}
+
+.task-row-copy {
+  min-width: 0;
+}
+
+.task-row-meta {
+  display: grid;
+  justify-items: end;
+  gap: var(--sp-1);
+}
+
+.task-row-meta > span {
+  color: var(--muted-soft);
+  font-size: var(--fs-xs);
+}
+
+.empty-state-link {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: var(--r-sm);
+  text-decoration: none;
+}
+
+@media (max-width: 1450px) {
+  .dashboard-tool-group .card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .app-shell .recent-tools > div {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1179px) {
+  body .app-shell {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+
+  .app-shell > .main {
+    padding-inline: var(--sp-5);
+  }
+
+  .app-shell > .sidebar {
+    z-index: 42;
+    width: min(280px, calc(100vw - var(--sp-4)));
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform 180ms ease-out;
+    box-shadow: var(--shadow-overlay);
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  .app-shell > .sidebar.drawer-open {
+    transform: translateX(0);
+    visibility: visible;
+  }
+
+  /* 窄屏启用窄条与抽屉控件：视觉样式在文件上部的共享块里，这里只给 display */
+  .sidebar-rail {
+    display: flex;
+  }
+
+  .sidebar-drawer-close {
+    display: inline-grid;
+  }
+
+  .sidebar-drawer-backdrop {
+    display: block;
+  }
+
+  /* 窄屏抽屉的关闭靠右上角 ×、遮罩与 Esc，折叠开关只在桌面端出现 */
+  .sidebar-collapse-toggle {
+    display: none;
+  }
+
+  .task-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .task-row-meta {
+    grid-column: 1;
+    grid-row: 2;
+    justify-items: start;
+  }
+
+  .task-row > .pill {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+}
+
+/* ---- 桌面端侧边栏折叠 ----
+   折叠后网格只留 72px 窄图标栏；完整侧边栏变成抽屉式浮层：
+   点窄条顶部标志临时拉开，Esc / 点遮罩 / 选完工具自动收回；
+   抽屉里右上角的 » 按钮（.sidebar-collapse-toggle）负责固定展开。
+   抽屉几何与窄屏媒体查询里的同一套保持一致。 */
+body .app-shell.sidebar-collapsed {
+  grid-template-columns: 72px minmax(0, 1fr);
+}
+
+.app-shell.sidebar-collapsed > .sidebar {
+  z-index: 42;
+  width: min(280px, calc(100vw - var(--sp-4)));
+  transform: translateX(-100%);
+  visibility: hidden;
+  transition: transform 180ms ease-out;
+  box-shadow: var(--shadow-overlay);
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.app-shell.sidebar-collapsed > .sidebar.drawer-open {
+  transform: translateX(0);
+  visibility: visible;
+}
+
+.app-shell.sidebar-collapsed .sidebar-rail {
+  display: flex;
+}
+
+.app-shell.sidebar-collapsed .sidebar-drawer-backdrop {
+  display: block;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell > .sidebar {
+    transition: none;
+  }
+}
+
+/* ---- 新手模式开关（侧边栏上部，品牌区与主导航之间）----
+   做成与导航行同款的一行小设置：图标 + 文案 + 开关，
+   放在最显眼的上部区域，进软件第一眼就能看到。 */
+.newbie-mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0 var(--sp-1) var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-md);
+  color: var(--on-dark-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.newbie-mode-toggle:hover {
+  background: var(--overlay-white-subtle);
+  color: var(--on-dark);
+}
+
+.newbie-mode-toggle-label {
+  flex: 1;
+}
+
+.newbie-mode-toggle-icon {
+  color: var(--brand-accent);
+  flex-shrink: 0;
+}
+
+/* 深绿侧边栏上，开关打开态用默认主色会沉进底色里，提亮为品牌强调色。 */
+.newbie-mode-toggle [data-slot="switch"][data-state="checked"] {
+  background: var(--brand-accent);
+}

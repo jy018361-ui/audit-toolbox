@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
 
 export type FieldProps = {
-  label: string;
+  /** 允许传节点，以便在标签文字后内联 <JargonTip /> 之类的微提示。 */
+  label: ReactNode;
   required?: boolean;
   hint?: string;
   children: ReactNode;

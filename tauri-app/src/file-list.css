@@ -4,6 +4,9 @@
   gap: var(--sp-5);
   align-items: start;
 }
+.file-list-data-notice + .step-indicator {
+  margin-top: var(--sp-4);
+}
 .file-list-config hr {
   border: 0;
   border-top: 1px solid var(--line, var(--border));

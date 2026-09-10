@@ -159,7 +159,7 @@ export function faRolesForSide<T extends readonly [string, string]>(
   );
 }
 
-// 一列可以同时承担多个角色（例如资产编号既是组合匹配键，也是资产名称/编号
+// 一列可以同时承担多个角色（例如资产编号既是资产ID，也是资产名称/编号
 // 的来源）。返回全部命中项，避免 UI 用 `find` 时只展示第一个关系。
 export function faMappedRolesForColumn<T extends readonly [string, string]>(
   column: string,

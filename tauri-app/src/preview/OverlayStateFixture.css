@@ -1,0 +1,17 @@
+.overlay-state-fixture {
+  box-sizing: border-box;
+  min-height: 100dvh;
+  min-width: 0;
+  padding: 48px 24px 160px;
+  overflow-wrap: anywhere;
+}
+
+.overlay-state-fixture > * {
+  min-width: 0;
+}
+
+.overlay-fixture-long-content {
+  max-width: 72rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

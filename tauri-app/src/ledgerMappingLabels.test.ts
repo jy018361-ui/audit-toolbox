@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveRoleLabels } from "./ledgerMapping";
+import { planLedgerChanges, resolveRoleLabels } from "./ledgerMapping";
 
 // 五个账表工具此前各抄一份「角色名→中文标签」，改成后端下发＋本地兜底之后，
 // 这里钉住三条：后端优先、缺项回落、整段缺失时行为与从前完全一致。
@@ -38,5 +38,49 @@ describe("resolveRoleLabels", () => {
       local,
     );
     expect(labels.accountCode).toBe("科目编码");
+  });
+});
+
+describe("planLedgerChanges", () => {
+  it("按整批建议原子交换科目身份且让摘要接管辅助核算中的文本列", () => {
+    const result = planLedgerChanges(
+      ["文本", "成本中心", "总账科目", "会计科目"],
+      [["发放工资", "CC01", "1001010000", "库存现金-人民币"]],
+      {
+        accountCode: "会计科目",
+        auxiliary: ["文本", "成本中心"],
+      },
+      {
+        accountCode: "科目编码",
+        accountName: "科目名称",
+        summary: "摘要",
+        auxiliary: "辅助核算",
+      },
+      [
+        {
+          role: "accountName",
+          currentColumn: "",
+          suggestedColumn: "会计科目",
+          confidence: 0.95,
+        },
+        {
+          role: "summary",
+          currentColumn: "",
+          suggestedColumn: "文本",
+          confidence: 0.95,
+        },
+        {
+          role: "accountCode",
+          currentColumn: "会计科目",
+          suggestedColumn: "总账科目",
+          confidence: 0.95,
+        },
+      ],
+    );
+    expect(result.mapping.accountCode).toBe("总账科目");
+    expect(result.mapping.accountName).toEqual(["会计科目"]);
+    expect(result.mapping.summary).toBe("文本");
+    expect(result.mapping.auxiliary).toEqual(["成本中心"]);
+    expect(result.applied).toHaveLength(3);
   });
 });

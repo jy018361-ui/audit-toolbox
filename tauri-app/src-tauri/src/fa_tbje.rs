@@ -5,8 +5,8 @@
 //! 分类、变动归属及底稿输出。
 
 use chrono::{Datelike, NaiveDate};
-use rust_xlsxwriter::{Format, FormatBorder, Formula, Workbook, Worksheet};
-use serde::Deserialize;
+use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Formula, Workbook, Worksheet};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -59,7 +59,7 @@ struct AccountIdentity {
     legacy_display: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct TbLine {
     entity: String,
     account: String,
@@ -70,7 +70,7 @@ struct TbLine {
     source_row: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct JeLine {
     entity: String,
     voucher: String,
@@ -85,11 +85,14 @@ struct JeLine {
     net: f64,
     status: String,
     movement: String,
+    /// 变动方式（购入／在建工程转入／出售…），由分类结果回填，供汇总表
+    /// 方式子行的 SUMIFS 引用；对方科目行为空。
+    method: String,
     counterpart: bool,
     raw: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct Movement {
     entity: String,
     voucher: String,
@@ -105,7 +108,7 @@ struct Movement {
     review: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct CategoryTotals {
     opening_cost: f64,
     closing_cost: f64,
@@ -150,19 +153,217 @@ pub(crate) fn run_job(
         ));
     }
     checkpoint(&cancel, pause)?;
-    progress("read", 1, 4, "正在通过公共 TB/JE 引擎读取账表…");
-    let analysis = analyze(&params, &cancel)?;
+    // 预览／导出共用同一份分析：预览结果按参数落盘缓存，随后点「生成文件」
+    // 直接复用，读表与分类不再跑第二遍——大数据量账套从分钟级降到秒级。
+    // worker 是一次性进程，缓存必须落盘；命中失败静默退回全量分析。
+    let cache_key = analysis_cache_key(&params);
+    let analysis = if method == "fa.tbje_export" {
+        if let Some(cached) = load_cached_analysis_for(&cache_key, &params) {
+            progress("read", 1, 4, "复用生成预览时的分析结果…");
+            checkpoint(&cancel, pause)?;
+            cached
+        } else {
+            progress("read", 1, 4, "正在通过公共 TB/JE 引擎读取账表…");
+            let analysis = analyze_with_progress(&params, &cancel, progress)?;
+            store_cached_analysis(&cache_key, &analysis, &params);
+            analysis
+        }
+    } else {
+        progress("read", 1, 4, "正在通过公共 TB/JE 引擎读取账表…");
+        let analysis = analyze_with_progress(&params, &cancel, progress)?;
+        store_cached_analysis(&cache_key, &analysis, &params);
+        analysis
+    };
     checkpoint(&cancel, pause)?;
     progress("classify", 2, 4, "正在分类新增、处置、重分类及对方科目…");
     let mut result = preview_json(&analysis);
     if method == "fa.tbje_export" {
-        progress("export", 3, 4, "正在生成五张固定资产底稿表…");
+        progress("export", 3, 4, "正在生成固定资产底稿表…");
         let output = output_path(&params)?;
         write_workbook(&output, &analysis, &cancel)?;
         result["outputPaths"] = json!([output.to_string_lossy()]);
     }
+    result["message"] = json!("固定资产 TB＋JE 处理完成，可打开下方结果文件。");
     progress("completed", 4, 4, "固定资产 TB＋JE 处理完成");
     Ok(result)
+}
+
+/// 缓存键只描述参数；源文件 size/mtime 另存进缓存内容并在读取时校验。这样
+/// 同路径覆盖文件会失效，而预览后暂时移动源文件仍可完成导出。
+fn analysis_cache_key(params: &Value) -> String {
+    let mut normalized = params.clone();
+    normalized
+        .as_object_mut()
+        .map(|map| map.remove("outputPath"));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash_slice(
+        serde_json::to_string(&normalized)
+            .unwrap_or_default()
+            .as_bytes(),
+        &mut hasher,
+    );
+    format!("{:016x}", std::hash::Hasher::finish(&hasher))
+}
+
+fn cache_dir() -> PathBuf {
+    std::env::temp_dir()
+        .join("AuditToolbox")
+        .join("fa-tbje-cache")
+}
+
+/// `Analysis.totals` 的键是（主体，类别）元组，JSON 对象键必须是字符串，
+/// 直接序列化会失败——缓存专用结构把元组键装进数组元素里。
+#[derive(Serialize, Deserialize)]
+struct AnalysisCache {
+    #[serde(default)]
+    source_fingerprints: Map<String, Value>,
+    tb: Vec<TbLine>,
+    je: Vec<JeLine>,
+    je_headers: Vec<String>,
+    additions: Vec<Movement>,
+    disposals: Vec<Movement>,
+    totals: Vec<((String, String), CategoryTotals)>,
+    direct_pairs: usize,
+    cross_pairs: usize,
+    sign_basis: String,
+    warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct AnalysisCacheRef<'a> {
+    source_fingerprints: Map<String, Value>,
+    tb: &'a [TbLine],
+    je: &'a [JeLine],
+    je_headers: &'a [String],
+    additions: &'a [Movement],
+    disposals: &'a [Movement],
+    totals: Vec<(&'a (String, String), &'a CategoryTotals)>,
+    direct_pairs: usize,
+    cross_pairs: usize,
+    sign_basis: &'a str,
+    warnings: &'a [String],
+}
+
+impl From<&Analysis> for AnalysisCache {
+    fn from(a: &Analysis) -> Self {
+        Self {
+            source_fingerprints: Map::new(),
+            tb: a.tb.clone(),
+            je: a.je.clone(),
+            je_headers: a.je_headers.clone(),
+            additions: a.additions.clone(),
+            disposals: a.disposals.clone(),
+            totals: a
+                .totals
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            direct_pairs: a.direct_pairs,
+            cross_pairs: a.cross_pairs,
+            sign_basis: a.sign_basis.clone(),
+            warnings: a.warnings.clone(),
+        }
+    }
+}
+
+impl From<AnalysisCache> for Analysis {
+    fn from(cache: AnalysisCache) -> Self {
+        Self {
+            tb: cache.tb,
+            je: cache.je,
+            je_headers: cache.je_headers,
+            additions: cache.additions,
+            disposals: cache.disposals,
+            totals: cache.totals.into_iter().collect(),
+            direct_pairs: cache.direct_pairs,
+            cross_pairs: cache.cross_pairs,
+            sign_basis: cache.sign_basis,
+            warnings: cache.warnings,
+        }
+    }
+}
+
+fn load_cached_analysis(key: &str) -> Option<Analysis> {
+    load_cached_analysis_record(key).map(Analysis::from)
+}
+
+fn load_cached_analysis_record(key: &str) -> Option<AnalysisCache> {
+    let path = cache_dir().join(format!("{key}.json"));
+    let file = std::fs::File::open(path).ok()?;
+    serde_json::from_reader::<_, AnalysisCache>(std::io::BufReader::new(file)).ok()
+}
+
+fn source_fingerprints(params: &Value) -> Map<String, Value> {
+    ["tbSource", "jeSource"]
+        .into_iter()
+        .filter_map(|key| {
+            let path = params
+                .get(key)
+                .and_then(|source| source.get("inputPath"))
+                .and_then(Value::as_str)?;
+            let metadata = std::fs::metadata(path).ok()?;
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|value| value.as_nanos().to_string())
+                .unwrap_or_default();
+            Some((
+                key.to_owned(),
+                json!({"path":path,"size":metadata.len(),"modified":modified}),
+            ))
+        })
+        .collect()
+}
+
+fn load_cached_analysis_for(key: &str, params: &Value) -> Option<Analysis> {
+    let cached = load_cached_analysis_record(key)?;
+    let current = source_fingerprints(params);
+    if !current.is_empty() && cached.source_fingerprints != current {
+        return None;
+    }
+    Some(Analysis::from(cached))
+}
+
+fn store_cached_analysis(key: &str, analysis: &Analysis, params: &Value) {
+    let dir = cache_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    if let Ok(file) = std::fs::File::create(dir.join(format!("{key}.json"))) {
+        let cached = AnalysisCacheRef {
+            source_fingerprints: source_fingerprints(params),
+            tb: &analysis.tb,
+            je: &analysis.je,
+            je_headers: &analysis.je_headers,
+            additions: &analysis.additions,
+            disposals: &analysis.disposals,
+            totals: analysis.totals.iter().collect(),
+            direct_pairs: analysis.direct_pairs,
+            cross_pairs: analysis.cross_pairs,
+            sign_basis: &analysis.sign_basis,
+            warnings: &analysis.warnings,
+        };
+        let _ = serde_json::to_writer(std::io::BufWriter::new(file), &cached);
+    }
+    // 只保留最近 5 份缓存，TEMP 不做无界膨胀。
+    let _ = try_prune_cache(&dir);
+}
+
+fn try_prune_cache(dir: &Path) -> std::io::Result<()> {
+    let mut entries: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect();
+    entries.sort();
+    while entries.len() > 5 {
+        let (_, path) = entries.remove(0);
+        std::fs::remove_file(path).ok();
+    }
+    Ok(())
 }
 
 fn checkpoint(cancel: &AtomicBool, pause: &PauseCheckpoint) -> Result<(), AppError> {
@@ -173,17 +374,34 @@ fn checkpoint(cancel: &AtomicBool, pause: &PauseCheckpoint) -> Result<(), AppErr
 }
 
 fn analyze(params: &Value, cancel: &AtomicBool) -> Result<Analysis, AppError> {
+    analyze_with_progress(params, cancel, &|_, _, _, _| {})
+}
+
+fn analyze_with_progress(
+    params: &Value,
+    cancel: &AtomicBool,
+    progress: Progress<'_>,
+) -> Result<Analysis, AppError> {
     let tb_spec: SourceSpec = parse_param(params, "tbSource", "缺少 TB 数据源。")?;
     let je_spec: SourceSpec = parse_param(params, "jeSource", "缺少 JE 数据源。")?;
     let tb_map = mapping(params, "tbMapping");
     let je_map = mapping(params, "jeMapping");
     validate_required(&tb_map, &je_map)?;
     let tb = load_fx_table(&tb_spec)?;
-    let raw_je = load_fx_table(&je_spec)?;
     let tb_keep = ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| {
         crate::fx::mapped_cols(&tb_map, role)
     });
     crate::fx::validate_mapped_amount_values(&tb, &tb_map, "tb", "TB", Some(&tb_keep))?;
+    let disk_mode = tabular::disk_ledger_applies(Path::new(&je_spec.input_path))
+        || (cfg!(test)
+            && params
+                .get("__testForceDiskLedger")
+                .and_then(Value::as_bool)
+                .unwrap_or(false));
+    if disk_mode {
+        return analyze_with_disk_je(params, cancel, &tb, &tb_map, &je_spec, &je_map, progress);
+    }
+    let raw_je = load_fx_table(&je_spec)?;
     let je_keep = ledger_mapping::ledger_junk_mask(&raw_je.headers, &raw_je.rows, &|role| {
         crate::fx::mapped_cols(&je_map, role)
     });
@@ -275,6 +493,290 @@ fn analyze(params: &Value, cancel: &AtomicBool) -> Result<Analysis, AppError> {
         sign_basis,
         warnings,
     })
+}
+
+/// 大 CSV 不再先构造整张 `FxTable`。公共磁盘账本负责一次解析、前向填充和
+/// 凭证索引；这里先用去重后的科目身份建立分类索引，再只把命中固定资产科目
+/// 的完整凭证交给既有分类器。这样普通文件完全不变，大文件的常驻内存由
+/// “整本 JE”缩小为“命中的凭证明细”。
+fn analyze_with_disk_je(
+    params: &Value,
+    cancel: &AtomicBool,
+    tb: &FxTable,
+    tb_map: &Map<String, Value>,
+    je_spec: &SourceSpec,
+    je_map: &Map<String, Value>,
+    progress: Progress<'_>,
+) -> Result<Analysis, AppError> {
+    let disk = tabular::open_prepared_disk_ledger(
+        Path::new(&je_spec.input_path),
+        je_spec.header_row.max(1),
+        je_spec.header_depth.max(1),
+        je_map,
+        progress,
+        cancel,
+    )?;
+    let headers = disk.headers().to_vec();
+    validate_mapping_headers("JE", &headers, je_map)?;
+
+    let header_table = disk_table(je_spec, headers.clone(), Vec::new(), disk.row_count());
+    let report_end = parse_report_end(params)?;
+    let report_start = NaiveDate::from_ymd_opt(report_end.year(), 1, 1).unwrap();
+    let mut any_row_in_period = false;
+    let mut years = BTreeSet::new();
+    let mut unique = BTreeMap::<(String, String, String, String, String), AccountIdentity>::new();
+    let mut scanned = 0usize;
+    disk.visit(false, cancel, |row| {
+        scanned += 1;
+        if scanned == 1 || scanned % 50_000 == 0 {
+            progress(
+                "fa-identities",
+                scanned,
+                disk.row_count().max(1),
+                "正在识别固定资产科目与报告期间…",
+            );
+        }
+        if let Some(date) = parse_date(&text(&header_table, &row.values, je_map, "date")) {
+            years.insert(date.year());
+            any_row_in_period |= date >= report_start && date <= report_end;
+        }
+        let identity = account_identity_from_row(
+            &header_table,
+            &row.values,
+            je_map,
+            params,
+            "jeFixedEntity",
+            &row.account,
+        );
+        unique
+            .entry((
+                identity.entity.clone(),
+                identity.code.clone(),
+                identity.name.clone(),
+                identity.display.clone(),
+                identity.legacy_display.clone(),
+            ))
+            .or_insert(identity);
+        Ok(())
+    })?;
+    progress(
+        "fa-identities",
+        disk.row_count(),
+        disk.row_count().max(1),
+        "固定资产科目识别完成，正在读取命中凭证…",
+    );
+    if disk.row_count() > 0 && !any_row_in_period {
+        let detail = if years.is_empty() {
+            "序时账里没有能解析出来的记账日期。".to_owned()
+        } else {
+            format!(
+                "序时账的数据年度是 {} 年。",
+                years
+                    .into_iter()
+                    .map(|year| year.to_string())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            )
+        };
+        return Err(error(
+            "FA_TBJE_PERIOD_EMPTY",
+            format!(
+                "报告期间 {report_start} 至 {report_end} 内没有任何序时账凭证，无法生成底稿。{detail}请把报告截止日改到账套所属年度后重试。"
+            ),
+            None,
+        ));
+    }
+    let je_identities = unique.into_values().collect::<Vec<_>>();
+    let tb_identities = account_identities(tb, tb_map, params, "tbFixedEntity");
+    let assignments = assignment_index_from_identities(params, &tb_identities, &je_identities)?;
+    if assignments.codes.is_empty() && assignments.names.is_empty() {
+        return Err(error(
+            "FA_TBJE_ACCOUNTS_REQUIRED",
+            "请至少确认一个固定资产原值或累计折旧科目。",
+            None,
+        ));
+    }
+    let target_accounts = je_identities
+        .iter()
+        .filter(|identity| find_assignment(&assignments, identity).is_some())
+        .map(|identity| identity.display.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    disk.select_accounts(&target_accounts, cancel)?;
+    let mut selected_rows = Vec::new();
+    let mut selected_count = 0usize;
+    disk.visit_vouchers(true, cancel, |_, voucher_rows| {
+        selected_count += voucher_rows.len();
+        if selected_count % 50_000 < voucher_rows.len() {
+            progress(
+                "fa-vouchers",
+                selected_count,
+                disk.row_count().max(1),
+                "正在读取固定资产相关完整凭证…",
+            );
+        }
+        selected_rows.extend(voucher_rows.iter().map(|row| row.values.clone()));
+        Ok(())
+    })?;
+    let je = disk_table(je_spec, headers, selected_rows, disk.row_count());
+    let tb_lines = normalize_tb(tb, tb_map, &assignments, params)?;
+    if tb_lines.is_empty() {
+        return Err(error(
+            "FA_TBJE_NO_TB_ACCOUNTS",
+            "TB 中没有命中已确认的固定资产末级科目。",
+            None,
+        ));
+    }
+    let (mut je_lines, direct_pairs, cross_pairs, sign_basis) =
+        normalize_je(&je, je_map, &assignments, params, report_end, cancel)?;
+    let (additions, disposals, mut totals) = classify_movements(&mut je_lines);
+    let mut warnings = Vec::new();
+    append_je_only_warnings(&mut warnings, &tb_identities, &je_identities, &assignments);
+    add_tb_totals(&mut totals, &tb_lines);
+    Ok(Analysis {
+        tb: tb_lines,
+        je: je_lines,
+        je_headers: je.headers.clone(),
+        additions,
+        disposals,
+        totals,
+        direct_pairs,
+        cross_pairs,
+        sign_basis,
+        warnings,
+    })
+}
+
+fn parse_report_end(params: &Value) -> Result<NaiveDate, AppError> {
+    NaiveDate::parse_from_str(
+        params
+            .get("reportEnd")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        "%Y-%m-%d",
+    )
+    .map_err(|_| error("INVALID_DATE", "报告截止日必须为 YYYY-MM-DD。", None))
+}
+
+fn disk_table(
+    spec: &SourceSpec,
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+    row_count: usize,
+) -> FxTable {
+    FxTable {
+        path: PathBuf::from(&spec.input_path),
+        sheet: if spec.sheet.trim().is_empty() {
+            "CSV".into()
+        } else {
+            spec.sheet.clone()
+        },
+        sheets: Vec::new(),
+        header_row: spec.header_row.max(1),
+        header_depth: spec.header_depth.max(1),
+        raw_headers: vec![headers.clone()],
+        headers,
+        rows,
+        row_count,
+        header_candidates: Vec::new(),
+        sampled: false,
+    }
+}
+
+fn validate_mapping_headers(
+    kind: &str,
+    headers: &[String],
+    map: &Map<String, Value>,
+) -> Result<(), AppError> {
+    for role in map.keys() {
+        if mapped_columns(map, role)
+            .iter()
+            .any(|column| ledger_mapping::header_index(headers, column).is_none())
+        {
+            return Err(error(
+                "FA_TBJE_MAPPING_STALE",
+                format!("{kind} 映射列已不在当前文件中，请返回字段映射区重新确认。"),
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn account_identity_from_row(
+    table: &FxTable,
+    row: &[String],
+    map: &Map<String, Value>,
+    params: &Value,
+    fixed_key: &str,
+    display: &str,
+) -> AccountIdentity {
+    let fixed = params
+        .get(fixed_key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let entity = text(table, row, map, "entity");
+    let raw_code = text(table, row, map, "accountCode");
+    let mut name = join(row, &indexes(table, map, "accountName"));
+    if name.is_empty() {
+        name = join(row, &indexes(table, map, "account"));
+    }
+    name = ledger_mapping::account_name_of(if name.is_empty() { &raw_code } else { &name });
+    AccountIdentity {
+        entity: if entity.is_empty() {
+            fixed.to_owned()
+        } else {
+            entity
+        },
+        code: ledger_mapping::account_code_of(&raw_code),
+        name,
+        display: display.to_owned(),
+        legacy_display: join(row, &account_indexes(table, map)),
+    }
+}
+
+fn append_je_only_warnings(
+    warnings: &mut Vec<String>,
+    tb_accounts: &[AccountIdentity],
+    je_accounts: &[AccountIdentity],
+    assignments: &AssignmentIndex,
+) {
+    for id in je_accounts {
+        if find_assignment(assignments, id).is_some()
+            && !tb_accounts.iter().any(|other| {
+                other.entity == id.entity
+                    && ((!id.code.is_empty() && other.code == id.code)
+                        || (id.code.is_empty() || other.code.is_empty())
+                            && ledger_mapping::normalize_name(&other.name)
+                                == ledger_mapping::normalize_name(&id.name))
+            })
+        {
+            let warning = format!(
+                "主体 {} 的已确认科目 {} 仅存在于 JE，已保留变动；TB 期初/期末无对应科目，请复核勾稽差异。",
+                id.entity, id.display
+            );
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+    }
+}
+
+fn add_tb_totals(totals: &mut BTreeMap<(String, String), CategoryTotals>, tb_lines: &[TbLine]) {
+    for line in tb_lines {
+        let slot = totals
+            .entry((line.entity.clone(), line.category.clone()))
+            .or_default();
+        if line.role == "cost" {
+            slot.opening_cost += line.opening;
+            slot.closing_cost += line.closing;
+        } else if line.role == "depreciation" {
+            slot.opening_dep += -line.opening;
+            slot.closing_dep += -line.closing;
+        }
+    }
 }
 
 /// 必填口径走公共引擎：金标身份槽 ∪ 金额／余额形态槽（TB1–TB6／JE1–JE3）∪
@@ -502,6 +1004,7 @@ fn normalize_je(
             net: net_zero.net[i],
             status: net_zero.status[i].clone(),
             movement: String::new(),
+            method: String::new(),
             counterpart: assigned.is_none(),
             raw: row.clone(),
         });
@@ -532,6 +1035,49 @@ fn classify_movements(
     let mut disposals = Vec::new();
     let mut totals = BTreeMap::<(String, String), CategoryTotals>::new();
     for ((entity, voucher), indexes) in vouchers {
+        // 折旧的类别间调整按**行级等额配对**识别：凭证内借方折旧行与等额的贷方
+        // 折旧行配成一对（如记-0059 的「折旧科目调整」借机械设备／贷工具仪器
+        // 各 507550），配上的两侧进「重分类净额」与清单，配不上的行按方向走
+        // 计提／其他减少。这样计提与调整混在同一张凭证也能完整拆开，重分类
+        // 两侧永远等额、全表净额恒为 0。
+        let mut dep_rows = indexes
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let line = &lines[i];
+                line.role == "depreciation"
+                    && !line.counterpart
+                    && !is_net_zero_matched(&line.status)
+                    && line.net.abs() >= 0.005
+            })
+            .collect::<Vec<_>>();
+        dep_rows.sort_by(|a, b| lines[*a].net.partial_cmp(&lines[*b].net).unwrap());
+        let mut paired: Vec<(usize, usize)> = Vec::new();
+        {
+            // 升序排列后双指针找和为零的行对：left 指向最负（贷方转出侧的反向，
+            // 即折旧增加），right-1 指向最正（借方，折旧减少）。
+            let mut left = 0usize;
+            let mut right = dep_rows.len();
+            while left < right {
+                if left == right - 1 {
+                    break;
+                }
+                let sum = lines[dep_rows[left]].net + lines[dep_rows[right - 1]].net;
+                if sum.abs() < 0.005 {
+                    paired.push((dep_rows[right - 1], dep_rows[left])); // (借方行, 贷方行)
+                    left += 1;
+                    right -= 1;
+                } else if sum < 0.0 {
+                    left += 1;
+                } else {
+                    right -= 1;
+                }
+            }
+        }
+        let paired_rows = paired
+            .iter()
+            .flat_map(|(a, b)| [*a, *b])
+            .collect::<HashSet<_>>();
         let mut cost = BTreeMap::<String, f64>::new();
         let mut dep = BTreeMap::<String, f64>::new();
         let voucher_nets = tabular::voucher_account_nets(
@@ -555,7 +1101,7 @@ fn classify_movements(
             .collect::<BTreeMap<_, _>>();
         for &i in &indexes {
             let line = &lines[i];
-            if is_net_zero_matched(&line.status) {
+            if is_net_zero_matched(&line.status) || paired_rows.contains(&i) {
                 continue;
             }
             match line.role.as_str() {
@@ -569,20 +1115,106 @@ fn classify_movements(
         let reclass = total_cost.abs() < 0.005
             && cost.values().any(|v| *v > 0.005)
             && cost.values().any(|v| *v < -0.005);
-        // 纯折旧对冲凭证（无原值变动、折旧在类别间有增有减）是折旧的类别间调整：
-        // 与原值重分类同一口径进「重分类净额」列和新增／处置清单，不再当作
-        // 「无法归属」的差异报出来——TB 原值侧没有同名类别只是科目设置差异，
-        // 勾稽差异列已经把这件事讲清楚。cost 为空时下方原值循环不会动 dep，
-        // 这里先判不改变结果。
-        let dep_reclass = cost.is_empty()
-            && dep.values().any(|v| *v > 0.005)
-            && dep.values().any(|v| *v < -0.005);
         let evidence = counterpart
             .iter()
             .filter(|(_, v)| v.abs() >= 0.005)
             .map(|(a, v)| format!("{a}：{v:.2}"))
             .collect::<Vec<_>>()
             .join("；");
+        // 行级配对出的折旧类别间调整：两侧等额进「重分类净额」并生成清单行。
+        // 转入（贷方、折旧调增）进新增清单，转出（借方、折旧调减）进处置清单，
+        // 清单金额取绝对值；汇总表子行按转入为正、转出为负的净额口径呈现。
+        // 标记先于下方 cost／dep 循环执行，`mark_indexes` 会跳过这些行不被
+        // 新增／处置口径覆盖。
+        for &(debit, credit) in &paired {
+            let amount = lines[debit].net;
+            let out_category = lines[debit].category.clone();
+            let in_category = lines[credit].category.clone();
+            for (category, delta) in [
+                (out_category.clone(), -amount),
+                (in_category.clone(), amount),
+            ] {
+                let key = if category.is_empty() {
+                    "未归属".to_owned()
+                } else {
+                    category
+                };
+                totals.entry((entity.clone(), key)).or_default().reclass_dep += delta;
+            }
+            for i in [debit, credit] {
+                lines[i].movement = "重分类".into();
+                lines[i].method = "折旧类别间调整".into();
+            }
+            let in_key = if in_category.is_empty() {
+                "未归属".to_owned()
+            } else {
+                in_category.clone()
+            };
+            let out_key = if out_category.is_empty() {
+                "未归属".to_owned()
+            } else {
+                out_category.clone()
+            };
+            additions.push(Movement {
+                entity: entity.clone(),
+                voucher: lines[credit].voucher_display.clone(),
+                date: lines[credit].date.clone(),
+                summary: lines[credit].summary.clone(),
+                category: in_key,
+                kind: "重分类转入".into(),
+                original: 0.0,
+                depreciation: amount,
+                method: "折旧类别间调整".into(),
+                evidence: evidence.clone(),
+                rule: "凭证内累计折旧等额对冲（行级配对）".into(),
+                review: String::new(),
+            });
+            disposals.push(Movement {
+                entity: entity.clone(),
+                voucher: lines[debit].voucher_display.clone(),
+                date: lines[debit].date.clone(),
+                summary: lines[debit].summary.clone(),
+                category: out_key,
+                kind: "重分类转出".into(),
+                original: 0.0,
+                depreciation: amount,
+                method: "折旧类别间调整".into(),
+                evidence: evidence.clone(),
+                rule: "凭证内累计折旧等额对冲（行级配对）".into(),
+                review: String::new(),
+            });
+        }
+        // 新增方式「在建工程转入」按在建转出金额锁定：本凭证在建类对方科目
+        // （编码前缀 1604/1605 或名称含在建工程/cip/工程物资）的贷方净额合计
+        // 是可分配的「转入额度」，分两轮配给各资产类别的新增额——第一轮精确
+        // 匹配（差额 ≤ 0.05，避免排序在前的类别在第二轮贪心里抢占额度），
+        // 第二轮足额覆盖；两轮都轮不到的类别按购入列示。混合凭证（真在建
+        // 转入＋购入同票）靠这个把两种方式拆到正确的类别上，且保持一行一
+        // 方式（清单行与「——其中-」子行都按 method 聚合，不能拆行）。
+        let cip_credit: f64 = counterpart
+            .iter()
+            .filter(|(account, net)| **net < -0.005 && is_cip_account(account))
+            .map(|(_, net)| -net)
+            .sum();
+        let addition_amounts: Vec<(String, f64)> = cost
+            .iter()
+            .filter(|(_, amount)| **amount > 0.0)
+            .map(|(category, amount)| (category.clone(), *amount))
+            .collect();
+        let mut cip_remaining = cip_credit;
+        let mut cip_locked: BTreeSet<String> = BTreeSet::new();
+        for (category, amount) in &addition_amounts {
+            if (*amount - cip_remaining).abs() <= 0.05 {
+                cip_locked.insert(category.clone());
+                cip_remaining -= amount;
+            }
+        }
+        for (category, amount) in &addition_amounts {
+            if !cip_locked.contains(category) && cip_remaining >= amount - 0.05 {
+                cip_locked.insert(category.clone());
+                cip_remaining -= amount;
+            }
+        }
         for (category, amount) in cost {
             let key = (
                 entity.clone(),
@@ -599,7 +1231,7 @@ fn classify_movements(
                 slot.reclass_cost += amount;
                 let dep_amount = dep.remove(&category).unwrap_or(0.0);
                 slot.reclass_dep += -dep_amount;
-                mark_indexes(lines, &indexes, &category, "重分类");
+                mark_indexes(lines, &indexes, &category, "重分类", "原值类别间调整");
                 let sample = reclass_sample(lines, &indexes, &category);
                 let movement = Movement {
                     entity: entity.clone(),
@@ -631,7 +1263,19 @@ fn classify_movements(
                 continue;
             }
             let dep_amount = dep.remove(&category).unwrap_or(0.0);
-            let (method, rule, review) = classify_method(amount > 0.0, &counterpart);
+            let cip = if amount > 0.0 {
+                if cip_locked.contains(&category) {
+                    CipLock::Locked
+                } else if cip_credit >= 0.005 {
+                    CipLock::Uncovered
+                } else {
+                    CipLock::NoCredit
+                }
+            } else {
+                // 处置侧不走金额锁定，判定保持原状。
+                CipLock::NoCredit
+            };
+            let (method, rule, review) = classify_method(amount > 0.0, &counterpart, cip);
             let sample = reclass_sample(lines, &indexes, &category);
             let movement = Movement {
                 entity: entity.clone(),
@@ -650,7 +1294,7 @@ fn classify_movements(
                 } else {
                     dep_amount
                 },
-                method,
+                method: method.clone(),
                 evidence: evidence.clone(),
                 rule,
                 review,
@@ -658,12 +1302,12 @@ fn classify_movements(
             if amount > 0.0 {
                 slot.additions += amount;
                 slot.addition_dep += -dep_amount;
-                mark_indexes(lines, &indexes, &category, "新增");
+                mark_indexes(lines, &indexes, &category, "新增", &method);
                 additions.push(movement);
             } else {
                 slot.disposals += -amount;
                 slot.disposal_dep += dep_amount;
-                mark_indexes(lines, &indexes, &category, "处置");
+                mark_indexes(lines, &indexes, &category, "处置", &method);
                 disposals.push(movement);
             }
         }
@@ -677,39 +1321,12 @@ fn classify_movements(
             let slot = totals
                 .entry((entity.clone(), category.clone()))
                 .or_default();
-            if dep_reclass {
-                slot.reclass_dep += -amount;
-                mark_indexes(lines, &indexes, &category, "重分类");
-                let sample = reclass_sample(lines, &indexes, &category);
-                let movement = Movement {
-                    entity: entity.clone(),
-                    voucher: sample.voucher_display.clone(),
-                    date: sample.date.clone(),
-                    summary: sample.summary.clone(),
-                    category: category.clone(),
-                    kind: if amount < 0.0 {
-                        "重分类转入".into()
-                    } else {
-                        "重分类转出".into()
-                    },
-                    original: 0.0,
-                    depreciation: amount.abs(),
-                    method: "折旧类别间调整".into(),
-                    evidence: evidence.clone(),
-                    rule: "凭证内累计折旧在类别间对冲".into(),
-                    review: String::new(),
-                };
-                if amount < 0.0 {
-                    additions.push(movement);
-                } else {
-                    disposals.push(movement);
-                }
-            } else if amount < 0.0 {
+            if amount < 0.0 {
                 slot.dep_charge += -amount;
-                mark_indexes(lines, &indexes, &category, "本年计提/其他增加");
+                mark_indexes(lines, &indexes, &category, "本年计提/其他增加", "");
             } else {
                 slot.dep_other_decrease += amount;
-                mark_indexes(lines, &indexes, &category, "折旧其他减少");
+                mark_indexes(lines, &indexes, &category, "折旧其他减少", "");
             }
         }
         let kinds = indexes
@@ -746,15 +1363,27 @@ fn reclass_sample<'a>(lines: &'a [JeLine], indexes: &[usize], category: &str) ->
         .unwrap()
 }
 
-fn mark_indexes(lines: &mut [JeLine], indexes: &[usize], category: &str, movement: &str) {
+fn mark_indexes(
+    lines: &mut [JeLine],
+    indexes: &[usize],
+    category: &str,
+    movement: &str,
+    method: &str,
+) {
     for &i in indexes {
-        if is_net_zero_matched(&lines[i].status) {
+        if is_net_zero_matched(&lines[i].status) || paired_out(&lines[i]) {
             continue;
         }
         if !lines[i].counterpart && lines[i].category == category {
             lines[i].movement = movement.into();
+            lines[i].method = method.into();
         }
     }
+}
+
+/// 行级配对出的折旧调整行不再参与类别级标记，避免被新增／处置口径覆盖。
+fn paired_out(line: &JeLine) -> bool {
+    line.movement == "重分类" && line.method == "折旧类别间调整"
 }
 
 /// 落表用的凭证号：优先只取凭证识别字段（映射的 id 列原文，如「记-0067」），
@@ -782,7 +1411,42 @@ fn is_net_zero_matched(status: &str) -> bool {
     )
 }
 
-fn classify_method(addition: bool, accounts: &BTreeMap<String, f64>) -> (String, String, String) {
+/// 单个对方科目是否属于在建工程类：国标编码前缀（1604/1605）或名称含
+/// 在建工程/cip/工程物资。不少账套的在建科目直接叫「工具仪器」（挂在 1604
+/// 下），名称里没有「在建」二字——编码前缀是比名称更稳的判据，两者取或，
+/// 与处置侧 1606 固定资产清理的判法同一套思路。
+fn is_cip_account(account: &str) -> bool {
+    let lower = account.to_lowercase();
+    let code_prefix = lower.split_whitespace().any(|token| {
+        token
+            .split(['-', '_'])
+            .any(|part| part.starts_with("1604") || part.starts_with("1605"))
+    });
+    code_prefix
+        || ["在建工程", "cip", "工程物资"]
+            .iter()
+            .any(|term| lower.contains(term))
+}
+
+/// 新增方式「在建工程转入」的金额锁定结论：同一张凭证里既有真在建转入、
+/// 也有普通购入时，不能只看对方科目名称整笔判定，必须把凭证内在建类对方
+/// 科目的贷方转出金额（cip_credit）按金额分配给各新增类别（`classify_movements`
+/// 负责），classify_method 只消费这里的结论。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CipLock {
+    /// 本凭证没有在建工程转出金额（cip_credit 为零），走旧判据。
+    NoCredit,
+    /// 转出金额已锁定覆盖本笔增加（精确匹配或足额覆盖）。
+    Locked,
+    /// 本凭证有在建转出金额，但额度未覆盖到本笔增加。
+    Uncovered,
+}
+
+fn classify_method(
+    addition: bool,
+    accounts: &BTreeMap<String, f64>,
+    cip: CipLock,
+) -> (String, String, String) {
     let names = accounts
         .iter()
         .filter(|(_, amount)| {
@@ -801,18 +1465,34 @@ fn classify_method(addition: bool, accounts: &BTreeMap<String, f64>) -> (String,
             .iter()
             .any(|term| names.contains(&term.to_lowercase()))
     };
+    // 编码前缀判定：不少账套的在建工程科目直接叫「工具仪器」「数据处理设备」
+    // （挂在 1604 下），名称里没有「在建」二字；固定资产清理同理（1606）。
+    // 国标编码前缀是比名称更稳的判据，两者取或。
+    let code_prefix = |prefixes: &[&str]| {
+        names.split_whitespace().any(|token| {
+            token
+                .split(['-', '_'])
+                .any(|part| prefixes.iter().any(|prefix| part.starts_with(prefix)))
+        })
+    };
+    let is_disposal_account = code_prefix(&["1606"]) || hit(&["固定资产清理"]);
     let (method, rule) = if addition {
-        if hit(&["在建工程", "cip", "工程物资"]) {
-            ("在建工程转入", "对方科目命中在建工程/CIP/工程物资")
-        } else if hit(&["租赁负债", "长期应付款", "未确认融资费用"]) {
-            ("融资租入", "对方科目命中租赁负债/长期应付款")
-        } else if hit(&["原材料", "库存商品", "存货", "生产成本"]) {
-            ("自制/存货转入", "对方科目命中存货或生产成本")
-        } else if hit(&["银行存款", "库存现金", "应付账款", "其他应付款", "预付账款"])
-        {
-            ("购置", "对方科目命中现金/往来购置科目")
+        // 新增方式三分：在建工程转入／更新改造转入（对方为固定资产清理）／购入。
+        // 「在建工程转入」按在建转出金额锁定（用户口径：根据在建工程转出金额
+        // 确定锁定转入方式，剩余金额就是购入）——混合凭证里真在建转入与购入
+        // 各归各类，不再整笔误判。固定资产科目之间的类别调整不走这里——
+        // 凭证级净额对冲已按「重分类」单独列示，不会误进购入口径。
+        if cip == CipLock::Locked {
+            (
+                "在建工程转入",
+                "在建工程转出金额覆盖本笔增加（按转出金额锁定）",
+            )
+        } else if is_disposal_account {
+            ("更新改造转入", "对方科目命中固定资产清理（编码或名称）")
+        } else if cip == CipLock::Uncovered {
+            ("购入", "在建工程转出金额未覆盖本笔增加")
         } else {
-            ("其他/待判断", "未命中新增方式确定性规则")
+            ("购入", "对方科目非在建工程/固定资产清理，按购入列示")
         }
     } else if hit(&["捐赠支出", "公益性捐赠"]) {
         ("对外捐赠", "对方科目命中捐赠支出")
@@ -825,7 +1505,7 @@ fn classify_method(addition: bool, accounts: &BTreeMap<String, f64>) -> (String,
         "资产处置损益",
     ]) {
         ("出售", "对方科目命中收款或资产处置损益")
-    } else if hit(&["固定资产清理", "营业外支出"]) {
+    } else if is_disposal_account || hit(&["营业外支出"]) {
         ("报废/毁损", "无收款科目且命中固定资产清理/营业外支出")
     } else {
         ("其他/待判断", "未命中处置方式确定性规则")
@@ -857,15 +1537,37 @@ fn preview_json(a: &Analysis) -> Value {
                     >= 0.01
         })
         .count();
+    // 汇总变动表预览:与导出共享 build_summary_rows 的行定义,零行过滤一致,
+    // 前端看到什么,导出的 Excel 里就是什么。
+    let (summary_columns, summary_rows) = build_summary_rows(a);
+    let summary_table = json!({
+        "columns": summary_columns,
+        "rows": summary_rows.iter().map(|row| json!({
+            "section": row.section,
+            "item": row.item,
+            "values": row.values,
+        })).collect::<Vec<_>>(),
+    });
+    // 对方科目透视（原值／累计折旧）与导出共用 counterpart_pivots 聚合，
+    // 前端「对方科目预览」与底稿两张透视表同源；数组顺序＝BTreeMap 顺序。
+    let (cost_pivot, dep_pivot) = counterpart_pivots(a);
+    let pivot_entries = |map: &BTreeMap<String, (f64, f64)>| {
+        map.iter()
+            .map(|(account, (debit, credit))| {
+                json!({"account": account, "debit": debit, "credit": credit})
+            })
+            .collect::<Vec<_>>()
+    };
     json!({
         "engine":"shared-ledger+fa-business", "tbRows":a.tb.len(), "jeRows":a.je.len(),
         "additions":a.additions.len(), "disposals":a.disposals.len(),
         "directNetZeroPairs":a.direct_pairs, "crossNetZeroPairs":a.cross_pairs,
         "reconciliationDifferences":differences, "signBasis":a.sign_basis,
-        "warnings":a.warnings, "preview": a.additions.iter().take(10).map(|m| json!({
-            "entity":m.entity,"voucher":m.voucher,"category":m.category,"kind":m.kind,
-            "original":m.original,"depreciation":m.depreciation,"method":m.method
-        })).collect::<Vec<_>>()
+        "warnings":a.warnings, "summaryTable": summary_table,
+        "counterpartPivots": {
+            "cost": pivot_entries(&cost_pivot),
+            "depreciation": pivot_entries(&dep_pivot),
+        }
     })
 }
 
@@ -875,18 +1577,18 @@ fn write_workbook(path: &Path, a: &Analysis, cancel: &AtomicBool) -> Result<(), 
     write_movements(wb.add_worksheet(), "新增清单", &a.additions, true)?;
     write_movements(wb.add_worksheet(), "处置清单", &a.disposals, false)?;
     write_je(wb.add_worksheet(), a, cancel)?;
-    write_counterparts(wb.add_worksheet(), a)?;
+    write_counterpart_pivots(&mut wb, a)?;
     write_tb_hidden(wb.add_worksheet(), a)?;
     wb.save(path).map_err(|e| {
         error(
             "FA_TBJE_EXPORT_FAILED",
-            "固定资产 TB＋JE 底稿保存失败。",
+            "固定资产 TB＋JE 底稿保存失败。常见原因：输出文件正在 Excel 中打开（关闭后重试），或资产类别名称含引号等特殊字符。",
             Some(e.to_string()),
         )
     })
 }
 
-fn formats() -> (Format, Format) {
+fn formats() -> (Format, Format, Format) {
     (
         Format::new()
             .set_bold()
@@ -895,6 +1597,8 @@ fn formats() -> (Format, Format) {
         Format::new()
             .set_num_format("#,##0.00;[Red]-#,##0.00;-")
             .set_border(FormatBorder::Thin),
+        // 文字单元格统一细边框，让整张表的数据区域连成完整表格。
+        Format::new().set_border(FormatBorder::Thin),
     )
 }
 
@@ -909,287 +1613,777 @@ fn write_headers(ws: &mut Worksheet, headers: &[&str], header: &Format) -> Resul
     Ok(())
 }
 
+/// FA List 版式的固定资产汇总变动表：资产类别做列、变动项目做行，A 列段名
+/// （原值／累计折旧／净值）纵向合并，合计列写 `=SUM()` 活公式；新增／处置按
+/// 方式以「——其中-」明细行展开，重分类拆转入／转出两侧，期初／期末后跟
+/// 勾稽差异行（JE 推导 − TB 余额）。
+/// FA List 版式的固定资产汇总变动表：资产类别做列、变动项目做行，A 列段名
+/// （原值／累计折旧／净值）纵向合并，合计列写 `=SUM()` 活公式；新增／处置按
+/// 方式以「——其中-」明细行展开，重分类拆转入（正）／转出（负）两侧。
+/// 全部数据行都是活公式：期初／期末 SUMIFS 到隐藏 `_TB规范数据`，变动行
+/// SUMIFS 到 JE 明细（主体＋类别＋变动分类＋［变动方式］＋角色），净值行做
+/// 行引用；勾稽差异两行放在表体下方（原值／累计折旧），公式即勾稽等式。
+/// 公式 criteria 里嵌入的是主体／类别等用户数据：双引号须双写转义，换行等
+/// 控制字符会直接把公式拆断（rust_xlsxwriter 保存失败），一律替换成空格。
+fn criteria(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c == '"' {
+                String::from("\"\"")
+            } else if c.is_control() {
+                " ".to_owned()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+fn sumifs_tb_formula(entity: &str, category: &str, role: &str, col: char) -> String {
+    format!(
+        "SUMIFS('_TB规范数据'!${col}:${col},'_TB规范数据'!$A:$A,\"{}\",'_TB规范数据'!$D:$D,\"{}\",'_TB规范数据'!$C:$C,\"{}\")",
+        criteria(entity),
+        criteria(category),
+        criteria(role)
+    )
+}
+
+fn sumifs_je_formula(entity: &str, category: &str, role: &str, movement: &str) -> String {
+    format!(
+        "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,\"{}\",'固定资产相关JE完整明细'!$G:$G,\"{}\",'固定资产相关JE完整明细'!$J:$J,\"{}\",'固定资产相关JE完整明细'!$F:$F,\"{}\")",
+        criteria(entity),
+        criteria(category),
+        criteria(movement),
+        criteria(role)
+    )
+}
+
+fn sumifs_je_method_formula(
+    entity: &str,
+    category: &str,
+    role: &str,
+    movement: &str,
+    method: &str,
+) -> String {
+    format!(
+        "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,\"{}\",'固定资产相关JE完整明细'!$G:$G,\"{}\",'固定资产相关JE完整明细'!$J:$J,\"{}\",'固定资产相关JE完整明细'!$K:$K,\"{}\",'固定资产相关JE完整明细'!$F:$F,\"{}\")",
+        criteria(entity),
+        criteria(category),
+        criteria(movement),
+        criteria(method),
+        criteria(role)
+    )
+}
+
+fn summary_row_ref(
+    lookup: &BTreeMap<(&'static str, String), u32>,
+    section: &'static str,
+    item: &str,
+    col: char,
+) -> Option<String> {
+    lookup
+        .get(&(section, item.to_owned()))
+        .map(|row| format!("{col}{}", row + 1))
+}
+
+/// 汇总表单行的公式语义:行定义(数据)与 Excel 公式生成解耦,预览只取数据,
+/// 写 Excel 时按语义生成 SUMIFS／行引用公式。
+enum FormulaKind {
+    Tb {
+        role: &'static str,
+        closing: bool,
+    },
+    Je {
+        role: &'static str,
+        movement: &'static str,
+        sign: f64,
+    },
+    JeMethod {
+        role: &'static str,
+        movement: &'static str,
+        method: String,
+        sign: f64,
+    },
+    ReclassNet {
+        role: &'static str,
+    },
+    ReclassIn {
+        role: &'static str,
+    },
+    ReclassOut {
+        role: &'static str,
+    },
+    /// 折旧当期计提＝-(新增随转＋本年计提)。
+    Charge,
+    Provision,
+    AdditionTransferDep,
+    /// 处置减少＝处置转出＋折旧其他减少。
+    DisposalDecrease,
+    DisposalDepOther,
+    NbvOpening,
+    NbvClosing,
+    DiffCost,
+    DiffDep,
+}
+
+struct SummaryRowData {
+    section: &'static str,
+    item: String,
+    values: Vec<f64>,
+    kind: FormulaKind,
+}
+
+/// FA List 版式汇总表的**共享行定义**:类别列、变动项目行(含勾稽差异表下行),
+/// `write_summary`(配公式写 Excel)与 `preview_json`(前端预览)都从这里取数,
+/// 两边永不漂移。返回 (列标题, 行)。多主体时列标题带「主体-」前缀。
+/// 全零且非主干行(期初/期末/勾稽差异/净值)已过滤。
+fn build_summary_rows(a: &Analysis) -> (Vec<String>, Vec<SummaryRowData>) {
+    let entities: BTreeSet<&String> = a.totals.keys().map(|(entity, _)| entity).collect();
+    let multi_entity = entities.len() > 1;
+    let mut columns = Vec::new();
+    for (entity, category) in a.totals.keys() {
+        columns.push(if multi_entity {
+            format!("{entity}-{category}")
+        } else {
+            category.clone()
+        });
+    }
+    let mut addition_by_method: BTreeMap<(String, String, String), f64> = BTreeMap::new();
+    let mut disposal_by_method: BTreeMap<(String, String, String), f64> = BTreeMap::new();
+    let mut disposal_dep_by_method: BTreeMap<(String, String, String), f64> = BTreeMap::new();
+    for m in a.additions.iter().chain(&a.disposals) {
+        let key = (m.entity.clone(), m.category.clone(), m.method.clone());
+        match m.kind.as_str() {
+            "新增" => *addition_by_method.entry(key).or_default() += m.original,
+            "处置" => {
+                *disposal_by_method.entry(key.clone()).or_default() += m.original;
+                *disposal_dep_by_method.entry(key).or_default() += m.depreciation;
+            }
+            _ => {}
+        }
+    }
+    let keys: Vec<(String, String)> = a.totals.keys().cloned().collect();
+    let values = |f: &dyn Fn(&CategoryTotals) -> f64| -> Vec<f64> {
+        keys.iter().map(|k| f(&a.totals[k])).collect()
+    };
+    let method_values = |map: &BTreeMap<(String, String, String), f64>, method: &str| -> Vec<f64> {
+        keys.iter()
+            .map(|k| {
+                *map.get(&(k.0.clone(), k.1.clone(), method.to_owned()))
+                    .unwrap_or(&0.0)
+            })
+            .collect()
+    };
+    let side_values = |get: &dyn Fn(&CategoryTotals) -> f64, positive: bool| -> Vec<f64> {
+        keys.iter()
+            .map(|k| {
+                let net = get(&a.totals[k]);
+                if positive { net.max(0.0) } else { net.min(0.0) }
+            })
+            .collect()
+    };
+    let mut rows: Vec<SummaryRowData> = Vec::new();
+    let mut push = |section: &'static str, item: String, vals: Vec<f64>, kind: FormulaKind| {
+        rows.push(SummaryRowData {
+            section,
+            item,
+            values: vals,
+            kind,
+        });
+    };
+    push(
+        "原值",
+        "期初原值".into(),
+        values(&|t| t.opening_cost),
+        FormulaKind::Tb {
+            role: "cost",
+            closing: false,
+        },
+    );
+    push(
+        "原值",
+        "原值增加".into(),
+        values(&|t| t.additions),
+        FormulaKind::Je {
+            role: "cost",
+            movement: "新增",
+            sign: 1.0,
+        },
+    );
+    for method in addition_by_method
+        .keys()
+        .map(|k| k.2.clone())
+        .collect::<BTreeSet<_>>()
+    {
+        push(
+            "原值",
+            format!("——其中-{method}"),
+            method_values(&addition_by_method, &method),
+            FormulaKind::JeMethod {
+                role: "cost",
+                movement: "新增",
+                method,
+                sign: 1.0,
+            },
+        );
+    }
+    push(
+        "原值",
+        "原值减少".into(),
+        values(&|t| t.disposals),
+        FormulaKind::Je {
+            role: "cost",
+            movement: "处置",
+            sign: -1.0,
+        },
+    );
+    for method in disposal_by_method
+        .keys()
+        .map(|k| k.2.clone())
+        .collect::<BTreeSet<_>>()
+    {
+        push(
+            "原值",
+            format!("——其中-{method}"),
+            method_values(&disposal_by_method, &method),
+            FormulaKind::JeMethod {
+                role: "cost",
+                movement: "处置",
+                method,
+                sign: -1.0,
+            },
+        );
+    }
+    push(
+        "原值",
+        "原值重分类".into(),
+        values(&|t| t.reclass_cost),
+        FormulaKind::ReclassNet { role: "cost" },
+    );
+    push(
+        "原值",
+        "——其中-重分类转入".into(),
+        side_values(&|t| t.reclass_cost, true),
+        FormulaKind::ReclassIn { role: "cost" },
+    );
+    push(
+        "原值",
+        "——其中-重分类转出".into(),
+        side_values(&|t| t.reclass_cost, false),
+        FormulaKind::ReclassOut { role: "cost" },
+    );
+    push(
+        "原值",
+        "期末原值".into(),
+        values(&|t| t.closing_cost),
+        FormulaKind::Tb {
+            role: "cost",
+            closing: true,
+        },
+    );
+    push(
+        "累计折旧",
+        "期初累计折旧".into(),
+        values(&|t| t.opening_dep),
+        FormulaKind::Tb {
+            role: "depreciation",
+            closing: false,
+        },
+    );
+    push(
+        "累计折旧",
+        "当期计提".into(),
+        values(&|t| t.dep_charge + t.addition_dep),
+        FormulaKind::Charge,
+    );
+    push(
+        "累计折旧",
+        "——其中-本年计提".into(),
+        values(&|t| t.dep_charge),
+        FormulaKind::Provision,
+    );
+    push(
+        "累计折旧",
+        "——其中-新增随转折旧".into(),
+        values(&|t| t.addition_dep),
+        FormulaKind::AdditionTransferDep,
+    );
+    push(
+        "累计折旧",
+        "处置减少".into(),
+        values(&|t| t.disposal_dep + t.dep_other_decrease),
+        FormulaKind::DisposalDecrease,
+    );
+    for method in disposal_by_method
+        .keys()
+        .map(|k| k.2.clone())
+        .collect::<BTreeSet<_>>()
+    {
+        push(
+            "累计折旧",
+            format!("——其中-{method}折旧"),
+            method_values(&disposal_dep_by_method, &method),
+            FormulaKind::JeMethod {
+                role: "depreciation",
+                movement: "处置",
+                method,
+                sign: 1.0,
+            },
+        );
+    }
+    push(
+        "累计折旧",
+        "——其中-折旧其他减少".into(),
+        values(&|t| t.dep_other_decrease),
+        FormulaKind::DisposalDepOther,
+    );
+    push(
+        "累计折旧",
+        "累计折旧重分类".into(),
+        values(&|t| t.reclass_dep),
+        FormulaKind::ReclassNet {
+            role: "depreciation",
+        },
+    );
+    push(
+        "累计折旧",
+        "——其中-重分类转入".into(),
+        side_values(&|t| t.reclass_dep, true),
+        FormulaKind::ReclassIn {
+            role: "depreciation",
+        },
+    );
+    push(
+        "累计折旧",
+        "——其中-重分类转出".into(),
+        side_values(&|t| t.reclass_dep, false),
+        FormulaKind::ReclassOut {
+            role: "depreciation",
+        },
+    );
+    push(
+        "累计折旧",
+        "期末累计折旧".into(),
+        values(&|t| t.closing_dep),
+        FormulaKind::Tb {
+            role: "depreciation",
+            closing: true,
+        },
+    );
+    push(
+        "净值(NBV)",
+        "年初余额".into(),
+        values(&|t| t.opening_cost - t.opening_dep),
+        FormulaKind::NbvOpening,
+    );
+    push(
+        "净值(NBV)",
+        "年末余额".into(),
+        values(&|t| t.closing_cost - t.closing_dep),
+        FormulaKind::NbvClosing,
+    );
+    push(
+        "勾稽差异",
+        "原值（期初＋增加－减少＋重分类－期末）".into(),
+        values(&|t| t.opening_cost + t.additions - t.disposals + t.reclass_cost - t.closing_cost),
+        FormulaKind::DiffCost,
+    );
+    push(
+        "勾稽差异",
+        "累计折旧（期初＋计提－处置减少＋重分类－期末）".into(),
+        values(&|t| {
+            t.opening_dep + t.addition_dep + t.dep_charge - t.disposal_dep - t.dep_other_decrease
+                + t.reclass_dep
+                - t.closing_dep
+        }),
+        FormulaKind::DiffDep,
+    );
+    // 零行过滤:主干行(期初/期末/净值/勾稽差异)保留,其余全零隐藏——与导出一致。
+    let keep_item = |row: &SummaryRowData| {
+        matches!(row.section, "净值(NBV)" | "勾稽差异")
+            || row.item.starts_with("期初")
+            || row.item.starts_with("期末")
+    };
+    let rows = rows
+        .into_iter()
+        .filter(|row| keep_item(row) || row.values.iter().any(|v| v.abs() > 0.005))
+        .collect();
+    (columns, rows)
+}
+
+/// FA List 版式的固定资产汇总变动表:资产类别做列、变动项目做行,A 列段名
+/// （原值／累计折旧／净值）纵向合并,合计列写 `=SUM()` 活公式;行数据来自
+/// [`build_summary_rows`]（与前端预览共享）,此处按 [`FormulaKind`] 生成
+/// SUMIFS／行引用公式写入。
 fn write_summary(ws: &mut Worksheet, a: &Analysis) -> Result<(), AppError> {
     ws.set_name("固定资产汇总变动表").map_err(xlsx)?;
-    let (header, money) = formats();
-    let headers = [
-        "主体",
-        "资产类别",
-        "项目",
-        "TB期初",
-        "新增",
-        "处置",
-        "重分类净额",
-        "其他变动",
-        "JE推导年末",
-        "TB年末",
-        "勾稽差异",
-    ];
-    write_headers(ws, &headers, &header)?;
-    let mut row = 1u32;
-    for ((entity, category), t) in &a.totals {
-        for (label, opening, add, disposal, reclass, other, closing) in [
-            (
-                "原值",
-                t.opening_cost,
-                t.additions,
-                t.disposals,
-                t.reclass_cost,
-                0.0,
-                t.closing_cost,
-            ),
-            (
-                "累计折旧",
-                t.opening_dep,
-                t.addition_dep,
-                t.disposal_dep,
-                t.reclass_dep,
-                t.dep_charge - t.dep_other_decrease,
-                t.closing_dep,
-            ),
-        ] {
-            ws.write_string(row, 0, entity).map_err(xlsx)?;
-            ws.write_string(row, 1, category).map_err(xlsx)?;
-            ws.write_string(row, 2, label).map_err(xlsx)?;
-            let excel = row + 1;
-            let tb_role = if label == "原值" {
-                "cost"
-            } else {
-                "depreciation"
-            };
-            let opening_formula = format!(
-                "SUMIFS('_TB规范数据'!$F:$F,'_TB规范数据'!$A:$A,A{excel},'_TB规范数据'!$D:$D,B{excel},'_TB规范数据'!$C:$C,\"{tb_role}\")"
-            );
-            let closing_formula = format!(
-                "SUMIFS('_TB规范数据'!$G:$G,'_TB规范数据'!$A:$A,A{excel},'_TB规范数据'!$D:$D,B{excel},'_TB规范数据'!$C:$C,\"{tb_role}\")"
-            );
-            ws.write_formula_with_format(
-                row,
-                3,
-                Formula::new(opening_formula).set_result(opening.to_string()),
-                &money,
-            )
+    let (header, money, text) = formats();
+    let keys: Vec<(String, String)> = a.totals.keys().cloned().collect();
+    let (columns, rows) = build_summary_rows(a);
+    let mut headers = vec![String::new(), "变动项目".to_owned(), "合计".to_owned()];
+    headers.extend(columns.iter().cloned());
+    for (c, h) in headers.iter().enumerate() {
+        ws.write_string_with_format(0, c as u16, h, &header)
             .map_err(xlsx)?;
-            let je_sum = |movement: &str| {
-                format!(
-                    "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,A{excel},'固定资产相关JE完整明细'!$G:$G,B{excel},'固定资产相关JE完整明细'!$F:$F,\"{tb_role}\",'固定资产相关JE完整明细'!$L:$L,\"{movement}\")"
-                )
-            };
-            let (add_formula, disposal_formula, reclass_formula, other_formula) = if label == "原值"
-            {
-                (
-                    je_sum("新增"),
-                    format!("-{}", je_sum("处置")),
-                    je_sum("重分类"),
-                    je_sum("其他变动"),
-                )
+        ws.set_column_width(
+            c as u16,
+            if c == 0 {
+                14.0
+            } else if c == 1 {
+                30.0
             } else {
-                (
-                    format!("-{}", je_sum("新增")),
-                    je_sum("处置"),
-                    format!("-{}", je_sum("重分类")),
-                    format!("-{}-{}", je_sum("本年计提/其他增加"), je_sum("折旧其他减少")),
-                )
+                16.0
+            },
+        )
+        .map_err(xlsx)?;
+    }
+    let multi_entity = columns.iter().any(|title| title.contains('-'));
+    for c in 0..headers.len() {
+        ws.write_string_with_format(
+            1,
+            c as u16,
+            match c {
+                0 | 1 => "变动项目",
+                2 => "计算",
+                _ if multi_entity => "主体-资产类别",
+                _ => "资产类别",
+            },
+            &text,
+        )
+        .map_err(xlsx)?;
+    }
+    type Lookup = BTreeMap<(&'static str, String), u32>;
+    let mut lookup: Lookup = BTreeMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        lookup.insert((row.section, row.item.clone()), index as u32 + 2);
+    }
+    let ref_of =
+        |lookup: &Lookup, section: &'static str, item: &str, col: char| -> Option<String> {
+            lookup
+                .get(&(section, item.to_owned()))
+                .map(|row| format!("{col}{}", row + 1))
+        };
+    // 行引用型公式（净值／勾稽差异）:按 (段, 项目, 符号) 拼正负号。
+    let signed_refs = |lookup: &Lookup, col: char, parts: &[(&'static str, &str, f64)]| -> String {
+        let mut formula = String::new();
+        for (offset, (section, item, sign)) in parts.iter().enumerate() {
+            if let Some(reference) = ref_of(lookup, section, item, col) {
+                if offset > 0 || *sign < 0.0 {
+                    formula.push(if *sign > 0.0 { '+' } else { '-' });
+                }
+                formula.push_str(&reference);
+            }
+        }
+        formula
+    };
+    let section_format = header
+        .clone()
+        .set_align(FormatAlign::Left)
+        .set_align(FormatAlign::VerticalCenter);
+    let last_letter = col_letter(headers.len().saturating_sub(1));
+    for (index, row) in rows.iter().enumerate() {
+        let excel_row = index as u32 + 2;
+        let excel = excel_row + 1;
+        ws.write_string_with_format(excel_row, 1, &row.item, &text)
+            .map_err(xlsx)?;
+        let total: f64 = row.values.iter().sum();
+        ws.write_formula_with_format(
+            excel_row,
+            2,
+            Formula::new(format!("=SUM(D{excel}:{last_letter}{excel})"))
+                .set_result(total.to_string()),
+            &money,
+        )
+        .map_err(xlsx)?;
+        for (c, value) in row.values.iter().enumerate() {
+            let col = col_letter(3 + c);
+            let col_char = col.chars().next().unwrap();
+            let (entity, category) = (&keys[c].0, &keys[c].1);
+            let formula = match &row.kind {
+                FormulaKind::Tb { role, closing } => {
+                    sumifs_tb_formula(entity, category, role, if *closing { 'G' } else { 'F' })
+                }
+                FormulaKind::Je {
+                    role,
+                    movement,
+                    sign,
+                } => {
+                    let base = sumifs_je_formula(entity, category, role, movement);
+                    if *sign > 0.0 {
+                        base
+                    } else {
+                        format!("-{base}")
+                    }
+                }
+                FormulaKind::JeMethod {
+                    role,
+                    movement,
+                    method,
+                    sign,
+                } => {
+                    let base = sumifs_je_method_formula(entity, category, role, movement, method);
+                    if *sign > 0.0 {
+                        base
+                    } else {
+                        format!("-{base}")
+                    }
+                }
+                FormulaKind::ReclassNet { role } => {
+                    let base = sumifs_je_formula(entity, category, role, "重分类");
+                    if *role == "cost" {
+                        base
+                    } else {
+                        format!("-{base}")
+                    }
+                }
+                FormulaKind::ReclassIn { role } => {
+                    let base = sumifs_je_formula(entity, category, role, "重分类");
+                    if *role == "cost" {
+                        format!("MAX({base},0)")
+                    } else {
+                        format!("MAX(-{base},0)")
+                    }
+                }
+                FormulaKind::ReclassOut { role } => {
+                    let base = sumifs_je_formula(entity, category, role, "重分类");
+                    if *role == "cost" {
+                        format!("MIN({base},0)")
+                    } else {
+                        format!("MIN(-{base},0)")
+                    }
+                }
+                FormulaKind::Charge => format!(
+                    "-{}-{}",
+                    sumifs_je_formula(entity, category, "depreciation", "新增"),
+                    sumifs_je_formula(entity, category, "depreciation", "本年计提/其他增加")
+                ),
+                FormulaKind::Provision => format!(
+                    "-{}",
+                    sumifs_je_formula(entity, category, "depreciation", "本年计提/其他增加")
+                ),
+                FormulaKind::AdditionTransferDep => format!(
+                    "-{}",
+                    sumifs_je_formula(entity, category, "depreciation", "新增")
+                ),
+                FormulaKind::DisposalDecrease => format!(
+                    "{}+{}",
+                    sumifs_je_formula(entity, category, "depreciation", "处置"),
+                    sumifs_je_formula(entity, category, "depreciation", "折旧其他减少")
+                ),
+                FormulaKind::DisposalDepOther => {
+                    sumifs_je_formula(entity, category, "depreciation", "折旧其他减少")
+                }
+                FormulaKind::NbvOpening => signed_refs(
+                    &lookup,
+                    col_char,
+                    &[
+                        ("原值", "期初原值", 1.0),
+                        ("累计折旧", "期初累计折旧", -1.0),
+                    ],
+                ),
+                FormulaKind::NbvClosing => signed_refs(
+                    &lookup,
+                    col_char,
+                    &[
+                        ("原值", "期末原值", 1.0),
+                        ("累计折旧", "期末累计折旧", -1.0),
+                    ],
+                ),
+                FormulaKind::DiffCost => signed_refs(
+                    &lookup,
+                    col_char,
+                    &[
+                        ("原值", "期初原值", 1.0),
+                        ("原值", "原值增加", 1.0),
+                        ("原值", "原值减少", -1.0),
+                        ("原值", "原值重分类", 1.0),
+                        ("原值", "期末原值", -1.0),
+                    ],
+                ),
+                FormulaKind::DiffDep => signed_refs(
+                    &lookup,
+                    col_char,
+                    &[
+                        ("累计折旧", "期初累计折旧", 1.0),
+                        ("累计折旧", "当期计提", 1.0),
+                        ("累计折旧", "处置减少", -1.0),
+                        ("累计折旧", "累计折旧重分类", 1.0),
+                        ("累计折旧", "期末累计折旧", -1.0),
+                    ],
+                ),
             };
-            for (col, formula, value) in [
-                (4, add_formula, add),
-                (5, disposal_formula, disposal),
-                (6, reclass_formula, reclass),
-                (7, other_formula, other),
-            ] {
+            if formula.is_empty() {
+                ws.write_number_with_format(excel_row, (3 + c) as u16, *value, &money)
+                    .map_err(xlsx)?;
+            } else {
                 ws.write_formula_with_format(
-                    row,
-                    col,
+                    excel_row,
+                    (3 + c) as u16,
                     Formula::new(formula).set_result(value.to_string()),
                     &money,
                 )
                 .map_err(xlsx)?;
             }
-            ws.write_formula_with_format(
-                row,
-                8,
-                Formula::new(format!("D{excel}+E{excel}-F{excel}+G{excel}+H{excel}"))
-                    .set_result((opening + add - disposal + reclass + other).to_string()),
-                &money,
-            )
-            .map_err(xlsx)?;
-            ws.write_formula_with_format(
-                row,
-                9,
-                Formula::new(closing_formula).set_result(closing.to_string()),
-                &money,
-            )
-            .map_err(xlsx)?;
-            ws.write_formula_with_format(
-                row,
-                10,
-                Formula::new(format!("I{excel}-J{excel}"))
-                    .set_result((opening + add - disposal + reclass + other - closing).to_string()),
-                &money,
-            )
-            .map_err(xlsx)?;
-            row += 1;
         }
-        let excel = row + 1;
-        ws.write_string(row, 0, entity).map_err(xlsx)?;
-        ws.write_string(row, 1, category).map_err(xlsx)?;
-        ws.write_string(row, 2, "净值").map_err(xlsx)?;
-        let original_values = summary_values(t, false);
-        let depreciation_values = summary_values(t, true);
-        for col in 3..=10 {
-            let letter = (b'A' + col as u8) as char;
-            ws.write_formula_with_format(
-                row,
-                col,
-                Formula::new(format!("{letter}{}-{letter}{}", excel - 2, excel - 1)).set_result(
-                    (original_values[col as usize - 3] - depreciation_values[col as usize - 3])
-                        .to_string(),
-                ),
-                &money,
-            )
-            .map_err(xlsx)?;
+    }
+    let written: Vec<(u32, &'static str)> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (index as u32 + 2, row.section))
+        .collect();
+    let mut index = 0usize;
+    while index < written.len() {
+        let section = written[index].1;
+        let mut end = index;
+        while end + 1 < written.len() && written[end + 1].1 == section {
+            end += 1;
         }
-        row += 1;
+        let (first, last) = (written[index].0, written[end].0);
+        if last > first {
+            ws.merge_range(first, 0, last, 0, section, &section_format)
+                .map_err(xlsx)?;
+        } else {
+            ws.write_string_with_format(first, 0, section, &section_format)
+                .map_err(xlsx)?;
+        }
+        index = end + 1;
     }
-    let detail_last = row;
-    let mut entity_totals = BTreeMap::<String, CategoryTotals>::new();
-    let mut grand_totals = CategoryTotals::default();
-    for ((entity, _), totals) in &a.totals {
-        merge_totals(entity_totals.entry(entity.clone()).or_default(), totals);
-        merge_totals(&mut grand_totals, totals);
+    ws.set_freeze_panes(2, 2).map_err(xlsx)?;
+    let note_row = written.len() as u32 + 3;
+    let note_format = Format::new()
+        .set_background_color("#F6F6F6")
+        .set_border(FormatBorder::Thin)
+        .set_text_wrap();
+    ws.set_row_height(note_row - 1, 8).map_err(xlsx)?;
+    ws.write_string_with_format(note_row, 0, "本表说明", &header)
+        .map_err(xlsx)?;
+    let note = "期初／期末取科目余额表已确认科目的余额,增加／减少／重分类取序时账逐凭证归集;数据行均为活公式(SUMIFS 至 TB 隐藏页/JE 明细),勾稽差异行零值表示 JE 与 TB 分毫勾稽。";
+    if headers.len() >= 4 {
+        ws.merge_range(note_row, 1, note_row, 3, note, &note_format)
+            .map_err(xlsx)?;
     }
-    let total_money = money.clone().set_bold();
-    for (entity, totals) in entity_totals {
-        write_summary_total_block(
-            ws,
-            &mut row,
-            detail_last,
-            &entity,
-            "主体合计",
-            &totals,
-            &header,
-            &total_money,
-            false,
-        )?;
-    }
-    write_summary_total_block(
-        ws,
-        &mut row,
-        detail_last,
-        "全部主体",
-        "总计",
-        &grand_totals,
-        &header,
-        &total_money,
-        true,
-    )?;
+    ws.set_row_height(note_row, 72).map_err(xlsx)?;
     Ok(())
 }
 
-fn write_summary_total_block(
-    ws: &mut Worksheet,
-    row: &mut u32,
-    detail_last: u32,
-    entity: &str,
-    category: &str,
-    totals: &CategoryTotals,
-    header: &Format,
-    money: &Format,
-    grand: bool,
-) -> Result<(), AppError> {
-    let original_row = *row + 1;
-    let depreciation_row = *row + 2;
-    let original_values = summary_values(totals, false);
-    let depreciation_values = summary_values(totals, true);
-    for (label, values) in [
-        ("原值", original_values),
-        ("累计折旧", depreciation_values),
-        (
-            "净值",
-            std::array::from_fn(|i| original_values[i] - depreciation_values[i]),
-        ),
-    ] {
-        let excel = *row + 1;
-        ws.write_string_with_format(*row, 0, entity, header)
-            .map_err(xlsx)?;
-        ws.write_string_with_format(*row, 1, category, header)
-            .map_err(xlsx)?;
-        ws.write_string_with_format(*row, 2, label, header)
-            .map_err(xlsx)?;
-        for col in 3..=10 {
-            let letter = (b'A' + col as u8) as char;
-            let formula = if label == "净值" {
-                format!("{letter}{original_row}-{letter}{depreciation_row}")
-            } else if grand {
-                format!("SUMIF($C$2:$C${detail_last},$C{excel},{letter}$2:{letter}${detail_last})")
+fn col_letter(mut index: usize) -> String {
+    let mut out = String::new();
+    loop {
+        out.insert(0, (b'A' + (index % 26) as u8) as char);
+        if index < 26 {
+            break;
+        }
+        index = index / 26 - 1;
+    }
+    out
+}
+
+/// 原值／累计折旧各自的对方科目透视聚合：凭证里出现原值变动的，其对方科目
+/// 进「原值」map；出现折旧变动的进「累计折旧」map。原值处置与折旧转出
+/// 常常是同一张凭证的两面，这类凭证的对方科目两边都进，各自完整。
+/// 返回（原值 map，累计折旧 map），键＝科目串、值＝（借方合计，贷方合计）；
+/// 导出落表（write_counterpart_pivots）与前端预览（preview_json 的
+/// counterpartPivots）共用这一份聚合，两边永不漂移。
+fn counterpart_pivots(
+    a: &Analysis,
+) -> (BTreeMap<String, (f64, f64)>, BTreeMap<String, (f64, f64)>) {
+    let mut voucher_flags: BTreeMap<(String, String), (bool, bool)> = BTreeMap::new();
+    for line in &a.je {
+        if line.counterpart || is_net_zero_matched(&line.status) {
+            continue;
+        }
+        let flag = voucher_flags
+            .entry((line.entity.clone(), line.voucher.clone()))
+            .or_default();
+        if line.role == "cost" {
+            flag.0 = true;
+        } else if line.role == "depreciation" {
+            flag.1 = true;
+        }
+    }
+    let mut cost_map: BTreeMap<String, (f64, f64)> = BTreeMap::new();
+    let mut dep_map: BTreeMap<String, (f64, f64)> = BTreeMap::new();
+    for line in &a.je {
+        if line.net.abs() < 0.005 {
+            continue;
+        }
+        let Some((has_cost, has_dep)) =
+            voucher_flags.get(&(line.entity.clone(), line.voucher.clone()))
+        else {
+            continue;
+        };
+        // 整张凭证的全部科目（含固定资产科目自身）都进透视：固定资产科目与
+        // 对方科目互为镜像，两侧都在表内，借贷自然平衡；固定资产科目行的
+        // 借贷差即本类变动额，与汇总表直接勾稽。
+        let entry = |map: &mut BTreeMap<String, (f64, f64)>| {
+            let entry = map.entry(line.account.clone()).or_default();
+            if line.net > 0.0 {
+                entry.0 += line.net;
             } else {
-                format!(
-                    "SUMIFS({letter}$2:{letter}${detail_last},$A$2:$A${detail_last},$A{excel},$C$2:$C${detail_last},$C{excel})"
-                )
-            };
-            ws.write_formula_with_format(
-                *row,
-                col,
-                Formula::new(formula).set_result(values[col as usize - 3].to_string()),
-                money,
-            )
-            .map_err(xlsx)?;
+                entry.1 += -line.net;
+            }
+        };
+        if *has_cost {
+            entry(&mut cost_map);
         }
-        *row += 1;
+        if *has_dep {
+            entry(&mut dep_map);
+        }
+    }
+    (cost_map, dep_map)
+}
+
+fn write_counterpart_pivots(wb: &mut Workbook, a: &Analysis) -> Result<(), AppError> {
+    let (cost_map, dep_map) = counterpart_pivots(a);
+    write_pivot_sheet(wb.add_worksheet(), "原值透视表", &cost_map)?;
+    write_pivot_sheet(wb.add_worksheet(), "累计折旧透视表", &dep_map)?;
+    Ok(())
+}
+
+fn write_pivot_sheet(
+    ws: &mut Worksheet,
+    name: &str,
+    groups: &BTreeMap<String, (f64, f64)>,
+) -> Result<(), AppError> {
+    ws.set_name(name).map_err(xlsx)?;
+    let (header, money, text) = formats();
+    write_headers(ws, &["科目", "借方金额", "贷方金额"], &header)?;
+    for (r, (account, (debit, credit))) in groups.iter().enumerate() {
+        let row = r as u32 + 1;
+        ws.write_string_with_format(row, 0, account, &text)
+            .map_err(xlsx)?;
+        ws.write_number_with_format(row, 1, *debit, &money)
+            .map_err(xlsx)?;
+        ws.write_number_with_format(row, 2, *credit, &money)
+            .map_err(xlsx)?;
+    }
+    let total_row = groups.len() as u32 + 1;
+    // SUM 区间的上界必须止于**最后一条数据行**：数据占 Excel 第 2..=N+1 行
+    // （N＝数据组数），其行号数值上恰等于 0 基合计行号 total_row。上界若写成
+    // 合计行自身（N+2），SUM 会把自己圈进去，用户打开导出的 Excel 即报
+    // 「循环引用」警告（累计折旧透视表 B23/C23 实测）。
+    let last_data_excel_row = total_row;
+    let (debit, credit): (f64, f64) = groups
+        .values()
+        .fold((0.0, 0.0), |acc, v| (acc.0 + v.0, acc.1 + v.1));
+    ws.write_string_with_format(total_row, 0, "合计", &header)
+        .map_err(xlsx)?;
+    for (col, value) in [(1u16, debit), (2, credit)] {
+        let letter = (b'A' + col as u8) as char;
+        ws.write_formula_with_format(
+            total_row,
+            col,
+            Formula::new(format!("=SUM({letter}2:{letter}{last_data_excel_row})"))
+                .set_result(value.to_string()),
+            &money,
+        )
+        .map_err(xlsx)?;
     }
     Ok(())
 }
 
-fn summary_values(t: &CategoryTotals, depreciation: bool) -> [f64; 8] {
-    let (opening, addition, disposal, reclass, other, closing) = if depreciation {
-        (
-            t.opening_dep,
-            t.addition_dep,
-            t.disposal_dep,
-            t.reclass_dep,
-            t.dep_charge - t.dep_other_decrease,
-            t.closing_dep,
-        )
-    } else {
-        (
-            t.opening_cost,
-            t.additions,
-            t.disposals,
-            t.reclass_cost,
-            0.0,
-            t.closing_cost,
-        )
-    };
-    let derived = opening + addition - disposal + reclass + other;
-    [
-        opening,
-        addition,
-        disposal,
-        reclass,
-        other,
-        derived,
-        closing,
-        derived - closing,
-    ]
-}
-
-fn merge_totals(target: &mut CategoryTotals, value: &CategoryTotals) {
-    target.opening_cost += value.opening_cost;
-    target.closing_cost += value.closing_cost;
-    target.opening_dep += value.opening_dep;
-    target.closing_dep += value.closing_dep;
-    target.additions += value.additions;
-    target.addition_dep += value.addition_dep;
-    target.disposals += value.disposals;
-    target.disposal_dep += value.disposal_dep;
-    target.dep_charge += value.dep_charge;
-    target.dep_other_decrease += value.dep_other_decrease;
-    target.reclass_cost += value.reclass_cost;
-    target.reclass_dep += value.reclass_dep;
-}
-
-/// 清单行的变动分类（JE 明细 L 列口径）：新增／处置照旧，重分类转入／转出
-/// 都按「重分类」聚合，与汇总表「重分类净额」列同一 SUMIFS 维度。
+/// 清单行的变动分类（JE 明细 J 列口径）：新增／处置照旧，重分类转入／转出
+/// 都按「重分类」聚合，清单公式据此过滤 JE 明细。
 fn movement_label(kind: &str) -> &'static str {
     if kind.starts_with("重分类") {
         "重分类"
@@ -1207,7 +2401,7 @@ fn write_movements(
     addition: bool,
 ) -> Result<(), AppError> {
     ws.set_name(name).map_err(xlsx)?;
-    let (header, money) = formats();
+    let (header, money, text) = formats();
     write_headers(
         ws,
         &[
@@ -1243,14 +2437,15 @@ fn write_movements(
             .iter()
             .enumerate()
         {
-            ws.write_string(row, c as u16, *v).map_err(xlsx)?;
+            ws.write_string_with_format(row, c as u16, *v, &text)
+                .map_err(xlsx)?;
         }
         // 凭证键列只显示凭证识别字段，同主体跨日同号凭证靠日期列区分，
         // SUMIFS 因此带上日期维度，保证逐行金额不被同号凭证合并。
         let movement = movement_label(&m.kind);
         let excel = row + 1;
         let base = format!(
-            "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,A{excel},'固定资产相关JE完整明细'!$B:$B,B{excel},'固定资产相关JE完整明细'!$C:$C,C{excel},'固定资产相关JE完整明细'!$G:$G,E{excel},'固定资产相关JE完整明细'!$L:$L,\"{movement}\",'固定资产相关JE完整明细'!$F:$F,"
+            "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,A{excel},'固定资产相关JE完整明细'!$B:$B,B{excel},'固定资产相关JE完整明细'!$C:$C,C{excel},'固定资产相关JE完整明细'!$G:$G,E{excel},'固定资产相关JE完整明细'!$J:$J,\"{movement}\",'固定资产相关JE完整明细'!$F:$F,"
         );
         let cost = if addition {
             format!("{base}\"cost\")")
@@ -1282,7 +2477,8 @@ fn write_movements(
             (9, &m.rule),
             (10, &m.review),
         ] {
-            ws.write_string(row, c, v).map_err(xlsx)?;
+            ws.write_string_with_format(row, c, v, &text)
+                .map_err(xlsx)?;
         }
     }
     Ok(())
@@ -1290,7 +2486,10 @@ fn write_movements(
 
 fn write_je(ws: &mut Worksheet, a: &Analysis, cancel: &AtomicBool) -> Result<(), AppError> {
     ws.set_name("固定资产相关JE完整明细").map_err(xlsx)?;
-    let (header, money) = formats();
+    let (header, money, text) = formats();
+    // 「智能匹配状态」列已按用户要求删除（FA 工具场景不适用）：status 仅作
+    // 内部口径（净额配对、透视过滤），不再导出成列；其后各列整体左移一列，
+    // 变动分类落在 J、变动方式落在 K，SUMIFS 公式引用已同步。
     let mut headers = vec![
         "主体",
         "凭证键",
@@ -1301,9 +2500,8 @@ fn write_je(ws: &mut Worksheet, a: &Analysis, cancel: &AtomicBool) -> Result<(),
         "资产类别",
         "借正贷负净额",
         "绝对值",
-        "正负标记",
-        "智能匹配状态",
         "变动分类",
+        "变动方式",
         "是否对方科目",
     ]
     .into_iter()
@@ -1329,131 +2527,30 @@ fn write_je(ws: &mut Worksheet, a: &Analysis, cancel: &AtomicBool) -> Result<(),
         .iter()
         .enumerate()
         {
-            ws.write_string(row, c as u16, *v).map_err(xlsx)?;
+            ws.write_string_with_format(row, c as u16, *v, &text)
+                .map_err(xlsx)?;
         }
         ws.write_number_with_format(row, 7, l.net, &money)
             .map_err(xlsx)?;
         ws.write_number_with_format(row, 8, l.net.abs(), &money)
             .map_err(xlsx)?;
-        ws.write_string(row, 9, if l.net >= 0.0 { "正数" } else { "负数" })
+        ws.write_string_with_format(row, 9, &l.movement, &text)
             .map_err(xlsx)?;
-        ws.write_string(row, 10, &l.status).map_err(xlsx)?;
-        ws.write_string(row, 11, &l.movement).map_err(xlsx)?;
-        ws.write_string(row, 12, if l.counterpart { "是" } else { "否" })
+        ws.write_string_with_format(row, 10, &l.method, &text)
+            .map_err(xlsx)?;
+        ws.write_string_with_format(row, 11, if l.counterpart { "是" } else { "否" }, &text)
             .map_err(xlsx)?;
         for (c, v) in l.raw.iter().enumerate() {
-            ws.write_string(row, (13 + c) as u16, v).map_err(xlsx)?;
+            ws.write_string_with_format(row, (12 + c) as u16, v, &text)
+                .map_err(xlsx)?;
         }
-    }
-    Ok(())
-}
-
-fn write_counterparts(ws: &mut Worksheet, a: &Analysis) -> Result<(), AppError> {
-    ws.set_name("对方科目汇总表").map_err(xlsx)?;
-    let (header, money) = formats();
-    write_headers(
-        ws,
-        &[
-            "主体",
-            "变动分类",
-            "对方科目",
-            "凭证数",
-            "借方金额",
-            "贷方金额",
-            "净额",
-            "涉及资产类别",
-            "代表凭证",
-        ],
-        &header,
-    )?;
-    let mut groups = BTreeMap::<
-        (String, String, String),
-        (
-            BTreeSet<String>,
-            f64,
-            f64,
-            BTreeSet<String>,
-            BTreeSet<String>,
-        ),
-    >::new();
-    for l in &a.je {
-        if !l.counterpart || l.net.abs() < 0.005 {
-            continue;
-        }
-        let kind = l.movement.clone();
-        let e = groups
-            .entry((l.entity.clone(), kind, l.account.clone()))
-            .or_default();
-        e.0.insert(l.voucher_display.clone());
-        if l.net > 0.0 {
-            e.1 += l.net
-        } else {
-            e.2 += -l.net
-        }
-        e.3.extend(
-            a.je.iter()
-                .filter(|x| {
-                    x.entity == l.entity && x.voucher == l.voucher && !x.category.is_empty()
-                })
-                .map(|x| x.category.clone()),
-        );
-        e.4.insert(l.voucher_display.clone());
-    }
-    for (r, ((entity, kind, account), (vouchers, debit, credit, categories, reps))) in
-        groups.into_iter().enumerate()
-    {
-        let row = r as u32 + 1;
-        let excel = row + 1;
-        ws.write_string(row, 0, &entity).map_err(xlsx)?;
-        ws.write_string(row, 1, &kind).map_err(xlsx)?;
-        ws.write_string(row, 2, &account).map_err(xlsx)?;
-        ws.write_number(row, 3, vouchers.len() as f64)
-            .map_err(xlsx)?;
-        let base = format!(
-            "SUMIFS('固定资产相关JE完整明细'!$H:$H,'固定资产相关JE完整明细'!$A:$A,A{excel},'固定资产相关JE完整明细'!$L:$L,B{excel},'固定资产相关JE完整明细'!$E:$E,C{excel},'固定资产相关JE完整明细'!$M:$M,\"是\",'固定资产相关JE完整明细'!$H:$H,"
-        );
-        let debit_formula = format!("{base}\">0\")");
-        let credit_formula = format!("-{base}\"<0\")");
-        ws.write_formula_with_format(
-            row,
-            4,
-            Formula::new(debit_formula).set_result(debit.to_string()),
-            &money,
-        )
-        .map_err(xlsx)?;
-        ws.write_formula_with_format(
-            row,
-            5,
-            Formula::new(credit_formula).set_result(credit.to_string()),
-            &money,
-        )
-        .map_err(xlsx)?;
-        ws.write_formula_with_format(
-            row,
-            6,
-            Formula::new(format!("E{excel}-F{excel}")).set_result((debit - credit).to_string()),
-            &money,
-        )
-        .map_err(xlsx)?;
-        ws.write_string(
-            row,
-            7,
-            categories.into_iter().collect::<Vec<_>>().join("；"),
-        )
-        .map_err(xlsx)?;
-        ws.write_string(
-            row,
-            8,
-            reps.into_iter().take(3).collect::<Vec<_>>().join("；"),
-        )
-        .map_err(xlsx)?;
     }
     Ok(())
 }
 
 fn write_tb_hidden(ws: &mut Worksheet, a: &Analysis) -> Result<(), AppError> {
     ws.set_name("_TB规范数据").map_err(xlsx)?;
-    let (header, money) = formats();
+    let (header, money, text) = formats();
     write_headers(
         ws,
         &[
@@ -1473,9 +2570,11 @@ fn write_tb_hidden(ws: &mut Worksheet, a: &Analysis) -> Result<(), AppError> {
             .iter()
             .enumerate()
         {
-            ws.write_string(row, c as u16, *v).map_err(xlsx)?;
+            ws.write_string_with_format(row, c as u16, *v, &text)
+                .map_err(xlsx)?;
         }
-        ws.write_number(row, 4, l.source_row as f64).map_err(xlsx)?;
+        ws.write_number_with_format(row, 4, l.source_row as f64, &text)
+            .map_err(xlsx)?;
         ws.write_number_with_format(
             row,
             5,
@@ -1607,6 +2706,16 @@ fn assignment_index(
     je: &FxTable,
     je_map: &Map<String, Value>,
 ) -> Result<AssignmentIndex, AppError> {
+    let tb_ids = account_identities(tb, tb_map, params, "tbFixedEntity");
+    let je_ids = account_identities(je, je_map, params, "jeFixedEntity");
+    assignment_index_from_identities(params, &tb_ids, &je_ids)
+}
+
+fn assignment_index_from_identities(
+    params: &Value,
+    tb_ids: &[AccountIdentity],
+    je_ids: &[AccountIdentity],
+) -> Result<AssignmentIndex, AppError> {
     let rows: Vec<Assignment> = serde_json::from_value(
         params
             .get("accountAssignments")
@@ -1614,15 +2723,12 @@ fn assignment_index(
             .unwrap_or_else(|| json!([])),
     )
     .map_err(|e| error("INVALID_PARAMS", "科目分类参数无效。", Some(e.to_string())))?;
-    let tb_ids = account_identities(tb, tb_map, params, "tbFixedEntity");
-    let je_ids = account_identities(je, je_map, params, "jeFixedEntity");
     let tuples = |ids: &[AccountIdentity]| {
         ids.iter()
             .map(|id| (id.entity.clone(), id.code.clone(), id.name.clone()))
             .collect::<Vec<_>>()
     };
-    let valid_names =
-        ledger_mapping::validated_account_name_keys(&tuples(&tb_ids), &tuples(&je_ids));
+    let valid_names = ledger_mapping::validated_account_name_keys(&tuples(tb_ids), &tuples(je_ids));
     let mut out = AssignmentIndex::default();
     for a in &rows {
         if !matches!(a.role.as_str(), "cost" | "depreciation") {
@@ -1635,7 +2741,7 @@ fn assignment_index(
                 category: a.category.clone(),
             }),
         };
-        for id in tb_ids.iter().chain(&je_ids).filter(|id| {
+        for id in tb_ids.iter().chain(je_ids).filter(|id| {
             a.entity
                 .as_ref()
                 .is_none_or(|entity| entity.trim() == id.entity)
@@ -1800,7 +2906,7 @@ fn output_path(params: &Value) -> Result<PathBuf, AppError> {
 fn xlsx(e: rust_xlsxwriter::XlsxError) -> AppError {
     error(
         "FA_TBJE_EXPORT_FAILED",
-        "写入 Excel 底稿失败。",
+        "写入 Excel 底稿失败。若输出文件当前正在 Excel 中打开，请关闭后重试；若反复失败，请检查资产类别名称是否含引号等特殊字符。",
         Some(e.to_string()),
     )
 }
@@ -1890,7 +2996,9 @@ mod tests {
             ("16010006", "运输工具"),
             ("16010007", "其他"),
         ] {
-            assignments.push(json!({"account": format!("{code} {name}"), "role": "cost", "category": name}));
+            assignments.push(
+                json!({"account": format!("{code} {name}"), "role": "cost", "category": name}),
+            );
         }
         for (code, name) in [
             ("16020002", "机械设备"),
@@ -1904,6 +3012,20 @@ mod tests {
         }
         params["accountAssignments"] = json!(assignments);
         let a = analyze(&params, &AtomicBool::new(false)).unwrap();
+        // 记-0035 的对方是在建科目 16040002（名称就叫「工具仪器」），
+        // 必须按编码前缀判成在建工程转入，而不是落进购入。
+        let j35 = a
+            .additions
+            .iter()
+            .find(|m| m.voucher == "记-0035" && m.category == "工具仪器")
+            .expect("记-0035 新增行");
+        assert_eq!(j35.method, "在建工程转入");
+        assert!(
+            a.additions
+                .iter()
+                .any(|m| m.method == "购入" && m.voucher != "记-0035"),
+            "其余新增应全部按购入列示"
+        );
         assert!(
             a.warnings.is_empty(),
             "不应再有无法归属告警：{:?}",
@@ -1918,21 +3040,334 @@ mod tests {
         let adjust = a
             .additions
             .iter()
-            .find(|m| m.voucher == "记-0059" && m.category == "工具仪器")
+            .find(|m| m.voucher == "记-0059" && m.category == "工具仪器" && m.kind == "重分类转入")
             .expect("折旧调整转入清单行");
-        assert_eq!(adjust.kind, "重分类转入");
-        assert_eq!(adjust.depreciation, 549491.65);
+        assert_eq!(adjust.depreciation, 507550.0);
         let adjust_out = a
             .disposals
             .iter()
             .find(|m| m.category == "机械设备")
             .expect("折旧调整转出清单行");
         assert_eq!(adjust_out.depreciation, 507550.0);
+        // 行级配对后，记-0059 里混着的 3 月计提不再被卷进重分类：
+        // 工具仪器计提 41941.65 单独进「本年计提」。
+        let machinery_dep = &a.totals[&(String::from("默认主体"), String::from("工具仪器"))];
+        assert_eq!(machinery_dep.reclass_dep, 507550.0);
+        // 全表重分类净额必须为 0（转入＝转出），这是类别间调整的定义。
+        let reclass_net: f64 = a
+            .totals
+            .values()
+            .map(|t| t.reclass_dep + t.reclass_cost)
+            .sum();
+        assert!(
+            reclass_net.abs() < 0.01,
+            "重分类净额应为 0，实际 {reclass_net}"
+        );
         assert_eq!(preview_json(&a)["reconciliationDifferences"], 0);
-        let out = dir.join(format!("fa-tbje-回归-{}.xlsx", uuid::Uuid::new_v4()));
+        // 底稿默认留在资料目录里供人工复核版式，重复跑同名覆盖；
+        // 文件正被 Excel 打开时退回带序号的文件名，不阻断回归。
+        let cancel = AtomicBool::new(false);
+        let preferred = dir.join("fa-tbje-回归底稿.xlsx");
+        let out = if write_workbook(&preferred, &a, &cancel).is_ok() {
+            preferred
+        } else {
+            let fallback = dir.join(format!("fa-tbje-回归底稿-{}.xlsx", uuid::Uuid::new_v4()));
+            write_workbook(&fallback, &a, &cancel).unwrap();
+            fallback
+        };
+        assert_export_caches(&out, &a);
+        println!("固定资产 TB＋JE 回归底稿：{}", out.display());
+    }
+
+    /// 记-0035 形态的更新改造凭证：借原值＋贷原值（净增）＋对方为 1604 在建
+    /// 科目（名称就叫「工具仪器」，不含「在建」二字），必须按编码前缀判成
+    /// 在建工程转入而不是购入。
+    #[test]
+    fn cip_counterpart_named_like_category_still_maps_to_cip_transfer() {
+        let mut je = vec![
+            je_line(
+                "A",
+                "J35",
+                "16010003-工具仪器",
+                "cost",
+                "工具仪器",
+                191150.38,
+            ),
+            je_line(
+                "A",
+                "J35",
+                "16010003-工具仪器",
+                "cost",
+                "工具仪器",
+                -148672.56,
+            ),
+            je_line("A", "J35", "16040002-工具仪器", "", "", -191150.38),
+            je_line("A", "J35", "16040002-工具仪器", "", "", 111504.36),
+        ];
+        let (additions, disposals, totals) = classify_movements(&mut je);
+        assert_eq!(additions.len(), 1);
+        assert_eq!(additions[0].method, "在建工程转入");
+        assert!((additions[0].original - 42477.82).abs() < 0.005);
+        assert!(disposals.is_empty());
+        assert!((totals[&("A".into(), "工具仪器".into())].additions - 42477.82).abs() < 0.005);
+    }
+
+    /// 用户真实场景复刻：同一张凭证里既有真在建转入（运输设备 30,600，
+    /// 对方 1604 在建工程），也有普通购入（机器设备 76,725.66，对方为预付
+    /// 账款／银行存款／进项税）。在建转入必须按转出金额锁定到运输设备，
+    /// 机器设备的购入不得再被判成「在建工程转入」。
+    #[test]
+    fn mixed_voucher_locks_cip_transfer_by_credit_amount() {
+        let mut je = vec![
+            je_line("A", "J67", "1601-机器设备", "cost", "机器设备", 76725.66),
+            je_line("A", "J67", "1601-运输设备", "cost", "运输设备", 30600.0),
+            je_line("A", "J67", "1122-预付账款", "", "", -84099.0),
+            je_line("A", "J67", "1002-银行存款", "", "", -2601.0),
+            je_line("A", "J67", "22210101-进项税额", "", "", 9974.34),
+            je_line("A", "J67", "1604-在建工程", "", "", -30600.0),
+        ];
+        let (additions, disposals, totals) = classify_movements(&mut je);
+        assert!(disposals.is_empty());
+        assert_eq!(additions.len(), 2);
+        let purchase = additions
+            .iter()
+            .find(|m| m.category == "机器设备")
+            .expect("机器设备新增行");
+        assert_eq!(purchase.method, "购入");
+        assert!((purchase.original - 76725.66).abs() < 0.005);
+        assert_eq!(purchase.rule, "在建工程转出金额未覆盖本笔增加");
+        let cip = additions
+            .iter()
+            .find(|m| m.category == "运输设备")
+            .expect("运输设备新增行");
+        assert_eq!(cip.method, "在建工程转入");
+        assert!((cip.original - 30600.0).abs() < 0.005);
+        assert_eq!(cip.rule, "在建工程转出金额覆盖本笔增加（按转出金额锁定）");
+        // JE 明细行回填同一结论：一行一方式，混合凭证不拆行。
+        let machine_line = je
+            .iter()
+            .find(|l| l.role == "cost" && l.category == "机器设备")
+            .unwrap();
+        assert_eq!(machine_line.method, "购入");
+        let vehicle_line = je
+            .iter()
+            .find(|l| l.role == "cost" && l.category == "运输设备")
+            .unwrap();
+        assert_eq!(vehicle_line.method, "在建工程转入");
+        assert!((totals[&("A".into(), "机器设备".into())].additions - 76725.66).abs() < 0.005);
+        assert!((totals[&("A".into(), "运输设备".into())].additions - 30600.0).abs() < 0.005);
+    }
+
+    /// 透视表合计行的 SUM 上界必须止于最后一条数据行：把合计行自身圈进
+    /// SUM 区间会触发 Excel 打开导出文件时的「循环引用」警告（用户实测
+    /// 累计折旧透视表 B23/C23）。
+    #[test]
+    fn pivot_total_formula_stops_at_last_data_row() {
+        let groups = BTreeMap::from([
+            ("1604 在建工程".to_owned(), (0.0, 30600.0)),
+            ("银行存款".to_owned(), (76725.66, 0.0)),
+        ]);
+        let mut wb = Workbook::new();
+        write_pivot_sheet(wb.add_worksheet(), "原值透视表", &groups).unwrap();
+        let dir = std::env::temp_dir().join(format!("fa-tbje-pivot-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("pivot.xlsx");
+        wb.save(&out).unwrap();
+        let mut book = open_workbook_auto(&out).unwrap();
+        let formulas = book.worksheet_formula("原值透视表").unwrap();
+        let rows = formulas.rows().map(|r| r.to_vec()).collect::<Vec<_>>();
+        let total = rows.last().expect("透视表必须有合计行");
+        // 两组数据占 Excel 第 2..=3 行，合计在第 4 行。
+        for cell in total.iter() {
+            let text = cell.to_string().trim_start_matches('=').to_owned();
+            if !text.contains("SUM") {
+                continue;
+            }
+            assert!(
+                text.contains("B2:B3") || text.contains("C2:C3"),
+                "SUM 应止于最后一条数据行：{text}"
+            );
+            assert!(
+                !text.contains("B4") && !text.contains("C4"),
+                "合计公式不得圈入合计行自身（循环引用）：{text}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 4800（SAP 型账套）真实样例：累计折旧挂在 1601 下、科目串编码在尾、
+    /// 机器设备原值与累计折旧余额同额对冲。跑法：
+    /// $env:FA_TBJE_FX_DIR='...\汇兑损益测试资料'; cargo test tbje_4800 -- --ignored
+    #[test]
+    #[ignore = "requires the local 汇兑损益测试资料 directory"]
+    fn tbje_4800_real_sample_exports_workbook() {
+        let dir = PathBuf::from(std::env::var("FA_TBJE_FX_DIR").expect("FA_TBJE_FX_DIR"));
+        let mut params = json!({
+            "tbSource":{"inputPath":dir.join("TB-4800.xlsx"),"headerRow":1,"headerDepth":1},
+            "jeSource":{"inputPath":dir.join("4800_JE_2025.01-12.xlsx"),"headerRow":1,"headerDepth":1},
+            "tbMapping":{
+                "entity":"公司代码","accountCode":"科目代码","accountName":["科目名称一级","科目名称二级"],
+                "openingFunctionalAmount":"期初金额-本位币",
+                "ytdFunctionalDebit":"借方金额-本位币","ytdFunctionalCredit":"贷方金额-本位币",
+                "closingFunctionalAmount":"期末金额-本位币"
+            },
+            "jeMapping":{
+                "entity":"公司代码","date":"记帐日期","id":["凭证类型","凭证号码"],
+                "accountCode":"会计科目","accountName":["科目文本"],
+                "summary":"科目文本",
+                "functionalAmount":"本位币金额","direction":"借贷"
+            },
+            "reportEnd":"2025-12-31"
+        });
+        let mut assignments = Vec::new();
+        for (code, name, role, suffix) in [
+            ("1601030001", "办公设备", "cost", "固定资产-办公设备"),
+            (
+                "1601040001",
+                "计算机及硬件设备",
+                "cost",
+                "固定资产-计算机及硬件设备",
+            ),
+            ("1601050002", "机器设备", "cost", "固定资产-机器设备"),
+            ("1601050099", "机器设备", "cost", "固定资产-机器设备"),
+            (
+                "1601130001",
+                "办公设备",
+                "depreciation",
+                "固定资产-累计折旧-办公设备",
+            ),
+            (
+                "1601140001",
+                "计算机及硬件设备",
+                "depreciation",
+                "固定资产-累计折旧-计算机及硬件设备",
+            ),
+            (
+                "1601150002",
+                "机器设备",
+                "depreciation",
+                "固定资产-累计折旧-机器设备",
+            ),
+            (
+                "1601150099",
+                "机器设备",
+                "depreciation",
+                "固定资产-累计折旧-机器设备",
+            ),
+        ] {
+            assignments.push(json!({
+                "account": format!("固定资产 {suffix} {code}"),
+                "role": role,
+                "category": name
+            }));
+        }
+        params["accountAssignments"] = json!(assignments);
+        let a = analyze(&params, &AtomicBool::new(false)).unwrap();
+        println!(
+            "4800 分析：TB {} 行 / JE {} 行 / 新增 {} / 处置 {} / 警告 {}",
+            a.tb.len(),
+            a.je.len(),
+            a.additions.len(),
+            a.disposals.len(),
+            a.warnings.len()
+        );
+        let out = dir.join("fa-tbje-4800-回归底稿.xlsx");
         write_workbook(&out, &a, &AtomicBool::new(false)).unwrap();
-        assert_export_caches(&out);
-        let _ = std::fs::remove_file(out);
+        assert_export_caches(&out, &a);
+        println!("4800 底稿：{}", out.display());
+    }
+
+    /// 预览与导出复用同一份落盘缓存：预览完成后把两个源文件删掉，导出依然
+    /// 成功——证明读表与分类没有跑第二遍（跑第二遍会因源文件不存在而报错）。
+    #[test]
+    fn export_reuses_preview_analysis_cache() {
+        let (dir, out, mut params) = fixture();
+        params["outputPath"] = json!(out);
+        let key = analysis_cache_key(&params);
+        let _ = std::fs::remove_file(cache_dir().join(format!("{key}.json")));
+        let quiet = |method: &str| {
+            run_job(
+                method,
+                params.clone(),
+                &|_, _, _, _| {},
+                Arc::new(AtomicBool::new(false)),
+                &PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false))),
+            )
+        };
+        let preview = quiet("fa.tbje_preview").unwrap();
+        assert!(preview["jeRows"].as_u64().unwrap() > 0);
+        // 预览的汇总表与导出同源:主干行齐全、数值正确、全零方式行被过滤。
+        let table = &preview["summaryTable"];
+        assert_eq!(table["columns"], json!(["机器设备"]));
+        let items = table["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["item"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        for must in ["期初原值", "原值增加", "原值减少", "期末原值", "当期计提"]
+        {
+            assert!(
+                items.iter().any(|item| item.starts_with(must)),
+                "汇总表预览缺 {must}: {items:?}"
+            );
+        }
+        assert_eq!(
+            table["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row["section"] == "勾稽差异")
+                .count(),
+            2,
+            "表下方应有两行勾稽差异"
+        );
+        let opening = table["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["item"] == "期初原值")
+            .unwrap();
+        assert_eq!(opening["values"], json!([1000.0]));
+        // 对方科目透视与导出同源（counterpart_pivots）：V2 处置收款银行存款
+        // 借方 150；「新增明细预览」的 preview 字段已废弃，不再下发。
+        let cost_pivot = &preview["counterpartPivots"]["cost"];
+        let bank = cost_pivot
+            .as_array()
+            .expect("原值透视预览必须是数组")
+            .iter()
+            .find(|e| {
+                e["account"]
+                    .as_str()
+                    .is_some_and(|a| a.contains("银行存款"))
+            })
+            .expect("原值透视预览应含银行存款（V2 处置收款）");
+        assert_eq!(bank["debit"], json!(150.0));
+        assert_eq!(bank["credit"], json!(0.0));
+        assert!(
+            preview["counterpartPivots"]["depreciation"]
+                .as_array()
+                .is_some_and(|v| !v.is_empty()),
+            "累计折旧透视预览不应为空（V2/V3 折旧变动）"
+        );
+        assert!(preview.get("preview").is_none(), "新增明细预览字段已废弃");
+        let cache_file = cache_dir().join(format!("{key}.json"));
+        assert!(
+            cache_file.exists(),
+            "预览后应落盘缓存：{}",
+            cache_file.display()
+        );
+        assert!(
+            load_cached_analysis(&key).is_some(),
+            "缓存应能读回（serde 环路）"
+        );
+        std::fs::remove_file(dir.join("tb.csv")).unwrap();
+        std::fs::remove_file(dir.join("je.csv")).unwrap();
+        let export = quiet("fa.tbje_export").unwrap();
+        assert_eq!(export["outputPaths"].as_array().map(Vec::len), Some(1));
+        // 缓存键随任一参数变化而失效：改报告截止日后，缓存不再命中。
+        let _ = std::fs::remove_file(cache_dir().join(format!("{key}.json")));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn fixture() -> (PathBuf, PathBuf, Value) {
@@ -2006,6 +3441,22 @@ mod tests {
     }
 
     #[test]
+    fn forced_disk_je_matches_the_memory_analysis() {
+        let (dir, _, mut params) = fixture();
+        let cancel = AtomicBool::new(false);
+        let memory = analyze(&params, &cancel).unwrap();
+        params["__testForceDiskLedger"] = json!(true);
+        let disk = analyze(&params, &cancel).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(AnalysisCache::from(&disk)).unwrap(),
+            serde_json::to_value(AnalysisCache::from(&memory)).unwrap(),
+            "大 CSV 的磁盘读取分支必须保持分类、冲销、对方科目及底稿明细一致"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn fa_frontend_classification_entry_is_the_shared_fx_engine() {
         let (dir, _, params) = fixture();
         let request = json!({"source": params["jeSource"].clone()});
@@ -2041,23 +3492,53 @@ mod tests {
                 "新增清单",
                 "处置清单",
                 "固定资产相关JE完整明细",
-                "对方科目汇总表",
+                "原值透视表",
+                "累计折旧透视表",
                 "_TB规范数据"
             ]
         );
+        // 汇总表是 FA List 版式：合计列 =SUM() 活公式，行数据为数值缓存。
         let formulas = book.worksheet_formula("固定资产汇总变动表").unwrap();
         assert!(
             formulas
                 .rows()
                 .flatten()
-                .any(|v| v.to_string().contains("SUMIFS('_TB规范数据'"))
+                .any(|v| v.to_string().contains("SUM(D")),
+            "合计列必须是跨类别列的活公式"
         );
         assert!(
             formulas
                 .rows()
                 .flatten()
-                .any(|v| v.to_string().contains("固定资产相关JE完整明细"))
+                .any(|v| v.to_string().contains("SUMIFS('_TB规范数据'")),
+            "期初／期末必须活公式链到 TB 隐藏页"
         );
+        assert!(
+            formulas
+                .rows()
+                .flatten()
+                .any(|v| v.to_string().contains("SUMIFS('固定资产相关JE完整明细'")),
+            "变动行必须活公式链到 JE 明细"
+        );
+        // 勾稽差异在表体下方的独立段，公式即勾稽等式。
+        assert!(
+            formulas
+                .rows()
+                .flatten()
+                .any(|v| v.to_string().replace("=", "").starts_with("D3")),
+            "勾稽差异应为行引用公式"
+        );
+        // 清单金额公式仍引用 JE 明细，且按「主体＋凭证键＋日期＋类别＋变动分类＋角色」过滤。
+        for name in ["新增清单", "处置清单"] {
+            let sheet_formulas = book.worksheet_formula(name).unwrap();
+            assert!(
+                sheet_formulas
+                    .rows()
+                    .flatten()
+                    .any(|v| v.to_string().contains("'固定资产相关JE完整明细'!$C:$C")),
+                "{name} 公式必须带日期维度"
+            );
+        }
         // 凭证键列只显示凭证识别字段（本夹具即「V1」等凭证号原文），
         // 不再拼主体与日期，也不残留内部连接符。
         let voucher_col = analysis
@@ -2066,13 +3547,23 @@ mod tests {
             .position(|h| h == "凭证号")
             .expect("夹具 JE 必须有凭证号列");
         let je_range = book.worksheet_range("固定资产相关JE完整明细").unwrap();
+        let je_headers_row = je_range.rows().next().unwrap().to_vec();
+        assert!(
+            !je_headers_row
+                .iter()
+                .any(|v| v.to_string().contains("正负")),
+            "JE 明细不应再有正负数标记列"
+        );
         for row in je_range.rows().skip(1) {
             let voucher = row[1].to_string();
-            assert!(!voucher.contains('\u{1f}'), "凭证键不应残留内部连接符：{voucher}");
+            assert!(
+                !voucher.contains('\u{1f}'),
+                "凭证键不应残留内部连接符：{voucher}"
+            );
             assert!(!voucher.contains("2025"), "凭证键不应拼入日期：{voucher}");
             assert_eq!(
                 voucher,
-                row[13 + voucher_col].to_string(),
+                row[12 + voucher_col].to_string(),
                 "凭证键应等于凭证识别字段原文"
             );
         }
@@ -2095,85 +3586,237 @@ mod tests {
         assert!(workbook_xml.contains("_TB规范数据") && workbook_xml.contains("state=\"hidden\""));
         assert!(workbook_xml.contains("fullCalcOnLoad=\"1\""));
         assert_eq!(workbook_xml.matches("state=\"hidden\"").count(), 1);
-        assert_export_caches(&out);
+        assert_export_caches(&out, &analysis);
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Evaluate the generated SUMIFS criteria against the exported source sheets, not
-    /// against CategoryTotals (which could repeat the same cache calculation defect).
-    fn assert_export_caches(path: &Path) {
+    /// 汇总表按 FA List 版式输出后，缓存值必须仍能对着两张源表独立勾稽：
+    /// 期初／期末对照 `_TB规范数据`，增加／减少／重分类对照 JE 明细的
+    /// （类别，角色，变动分类）净额；方式子行与主行、合计列与类别列自洽。
+    /// JE 明细已不导出「智能匹配状态」列，冲销配对的行级状态改从内存中的
+    /// `Analysis` 按行序对照（JE 明细行序与 a.je 完全一致）。
+    fn assert_export_caches(path: &Path, a: &Analysis) {
         let mut book = open_workbook_auto(path).unwrap();
         let summary = book.worksheet_range("固定资产汇总变动表").unwrap();
         let je = book.worksheet_range("固定资产相关JE完整明细").unwrap();
         let tb = book.worksheet_range("_TB规范数据").unwrap();
-        let formulas = book.worksheet_formula("固定资产汇总变动表").unwrap();
         let s = |row: &[calamine::Data], col: usize| row[col].to_string();
         let n = |row: &[calamine::Data], col: usize| row[col].as_f64().unwrap_or(0.0);
-        for (index, row) in summary.rows().enumerate().skip(1) {
-            let (entity, category, label) = (s(row, 0), s(row, 1), s(row, 2));
-            let selected = |other: &[calamine::Data], category_col: usize| {
-                (category == "总计" || s(other, 0) == entity)
-                    && (["主体合计", "总计"].contains(&category.as_str())
-                        || s(other, category_col) == category)
+        let header = summary.rows().next().unwrap().to_vec();
+        let columns: Vec<String> = header
+            .iter()
+            .enumerate()
+            .skip(3)
+            .map(|(_, value)| value.to_string())
+            .collect();
+        // 行定位必须带段：原值段与折旧段各有「勾稽差异」与重分类转入／转出。
+        let mut rows: Vec<(String, String, f64, Vec<f64>)> = Vec::new();
+        let mut current_section = String::new();
+        for row in summary.rows().skip(2) {
+            if !s(row, 0).trim().is_empty() {
+                current_section = s(row, 0);
+            }
+            let item = s(row, 1);
+            if item.is_empty() || item == "本表说明" {
+                continue;
+            }
+            let values: Vec<f64> = (3..header.len()).map(|c| n(row, c)).collect();
+            rows.push((current_section.clone(), item, n(row, 2), values));
+        }
+        // 多主体时列标题是「主体-类别」，从 TB／JE 的（主体，类别）组合反解回来。
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        let mut entities: Vec<String> = Vec::new();
+        for (entity, category) in tb
+            .rows()
+            .skip(1)
+            .map(|r| (s(r, 0), s(r, 3)))
+            .chain(je.rows().skip(1).map(|r| (s(r, 0), s(r, 6))))
+        {
+            if !entity.is_empty() && !entities.contains(&entity) {
+                entities.push(entity.clone());
+            }
+            if !category.is_empty() && !pairs.contains(&(entity.clone(), category.clone())) {
+                pairs.push((entity.clone(), category.clone()));
+            }
+        }
+        let multi_entity = entities.len() > 1;
+        let resolve = |title: &str| -> (String, String) {
+            pairs
+                .iter()
+                .find(|(entity, category)| {
+                    if multi_entity {
+                        format!("{entity}-{category}") == title
+                    } else {
+                        category == title
+                    }
+                })
+                .cloned()
+                .unwrap_or_else(|| (String::new(), title.to_owned()))
+        };
+        // TB 期初／期末（隐藏页按主体＋类别＋角色聚合；折旧余额已取反为正数）。
+        let tb_sum = |entity: &str, category: &str, role: &str, col: usize| -> f64 {
+            tb.rows()
+                .skip(1)
+                .filter(|r| s(r, 0) == entity && s(r, 3) == category && s(r, 2) == role)
+                .map(|r| n(r, col))
+                .sum::<f64>()
+        };
+        let je_sum = |entity: &str, category: &str, role: &str, movements: &[&str]| -> f64 {
+            je.rows()
+                .skip(1)
+                .filter(|r| s(r, 0) == entity && s(r, 6) == category && s(r, 5) == role)
+                .filter(|r| movements.contains(&s(r, 9).as_str()))
+                .map(|r| n(r, 7))
+                .sum::<f64>()
+        };
+        for (col, title) in columns.iter().enumerate() {
+            let (entity, category) = resolve(title);
+            let category = category.as_str();
+            let entity = entity.as_str();
+            let value = |section: &str, item: &str| -> f64 {
+                rows.iter()
+                    .find(|(sct, name, _, _)| sct == section && name == item)
+                    .and_then(|(_, _, _, values)| values.get(col).copied())
+                    .unwrap_or(0.0)
             };
-            let values = |depreciation: bool| {
-                let role = if depreciation { "depreciation" } else { "cost" };
-                let tb_sum = |col| {
-                    tb.rows()
-                        .skip(1)
-                        .filter(|r| selected(r, 3) && s(r, 2) == role)
-                        .map(|r| n(r, col))
-                        .sum::<f64>()
-                };
-                let je_sum = |movement: &str| {
-                    je.rows()
-                        .skip(1)
-                        .filter(|r| selected(r, 6) && s(r, 5) == role && s(r, 11) == movement)
-                        .map(|r| n(r, 7))
-                        .sum::<f64>()
-                };
-                let sign = if depreciation { -1.0 } else { 1.0 };
-                let opening = tb_sum(5);
-                let add = sign * je_sum("新增");
-                let disposal = -sign * je_sum("处置");
-                let reclass = sign * je_sum("重分类");
-                let other = if depreciation {
-                    -(je_sum("本年计提/其他增加") + je_sum("折旧其他减少"))
-                } else {
-                    je_sum("其他变动")
-                };
-                let derived = opening + add - disposal + reclass + other;
-                [
-                    opening,
-                    add,
-                    disposal,
-                    reclass,
-                    other,
-                    derived,
-                    tb_sum(6),
-                    derived - tb_sum(6),
-                ]
-            };
-            let expected = match label.as_str() {
-                "原值" => values(false),
-                "累计折旧" => values(true),
-                "净值" => std::array::from_fn(|i| values(false)[i] - values(true)[i]),
-                _ => panic!("unexpected summary row"),
-            };
-            for (col, expected) in expected.iter().enumerate() {
+            let derived_cost = tb_sum(entity, category, "cost", 5)
+                + je_sum(entity, category, "cost", &["新增"])
+                + je_sum(entity, category, "cost", &["处置"])
+                + je_sum(entity, category, "cost", &["重分类"]);
+            for (item, expected) in [
+                ("期初原值", tb_sum(entity, category, "cost", 5)),
+                ("原值增加", je_sum(entity, category, "cost", &["新增"])),
+                ("原值减少", -je_sum(entity, category, "cost", &["处置"])),
+                ("原值重分类", je_sum(entity, category, "cost", &["重分类"])),
+                ("期末原值", tb_sum(entity, category, "cost", 6)),
+                (
+                    "——其中-重分类转入",
+                    je_sum(entity, category, "cost", &["重分类"]).max(0.0),
+                ),
+                (
+                    "——其中-重分类转出",
+                    je_sum(entity, category, "cost", &["重分类"]).min(0.0),
+                ),
+            ] {
                 assert!(
-                    (n(row, col + 3) - expected).abs() < 0.00001,
-                    "summary row {index}, col {} cache {} != computed {expected}",
-                    col + 3,
-                    n(row, col + 3)
-                );
-                assert!(
-                    !formulas
-                        .get_value((index as u32, (col + 3) as u32))
-                        .unwrap()
-                        .is_empty()
+                    (value("原值", item) - expected).abs() < 0.00001,
+                    "{title} 原值 {item} = {} != {expected}",
+                    value("原值", item)
                 );
             }
+            let diff_row = rows
+                .iter()
+                .find(|(sct, name, _, _)| sct == "勾稽差异" && name.starts_with("原值"))
+                .map(|(_, _, _, values)| values.get(col).copied().unwrap_or(0.0))
+                .unwrap_or(0.0);
+            assert!(
+                (diff_row - (derived_cost - tb_sum(entity, category, "cost", 6))).abs() < 0.00001,
+                "{title} 勾稽差异（原值）缓存与重算不符"
+            );
+            // 隐藏页的折旧期初／期末已取反为正数（贷方余额），直接相加。
+            let derived_dep = tb_sum(entity, category, "depreciation", 5)
+                - je_sum(
+                    entity,
+                    category,
+                    "depreciation",
+                    &["新增", "本年计提/其他增加"],
+                )
+                - je_sum(entity, category, "depreciation", &["处置", "折旧其他减少"])
+                - je_sum(entity, category, "depreciation", &["重分类"]);
+            for (item, expected) in [
+                ("期初累计折旧", tb_sum(entity, category, "depreciation", 5)),
+                (
+                    "当期计提",
+                    -je_sum(
+                        entity,
+                        category,
+                        "depreciation",
+                        &["新增", "本年计提/其他增加"],
+                    ),
+                ),
+                (
+                    "——其中-本年计提",
+                    -je_sum(entity, category, "depreciation", &["本年计提/其他增加"]),
+                ),
+                (
+                    "——其中-新增随转折旧",
+                    -je_sum(entity, category, "depreciation", &["新增"]),
+                ),
+                (
+                    "处置减少",
+                    je_sum(entity, category, "depreciation", &["处置", "折旧其他减少"]),
+                ),
+                (
+                    "——其中-折旧其他减少",
+                    je_sum(entity, category, "depreciation", &["折旧其他减少"]),
+                ),
+                (
+                    "累计折旧重分类",
+                    -je_sum(entity, category, "depreciation", &["重分类"]),
+                ),
+                ("期末累计折旧", tb_sum(entity, category, "depreciation", 6)),
+            ] {
+                assert!(
+                    (value("累计折旧", item) - expected).abs() < 0.00001,
+                    "{title} 折旧 {item} = {} != {expected}",
+                    value("累计折旧", item)
+                );
+            }
+            let dep_diff_row = rows
+                .iter()
+                .find(|(sct, name, _, _)| sct == "勾稽差异" && name.starts_with("累计折旧"))
+                .map(|(_, _, _, values)| values.get(col).copied().unwrap_or(0.0))
+                .unwrap_or(0.0);
+            assert!(
+                (dep_diff_row - (derived_dep - tb_sum(entity, category, "depreciation", 6))).abs()
+                    < 0.00001,
+                "{title} 勾稽差异（累计折旧）缓存与重算不符"
+            );
+            let nbv_opening =
+                tb_sum(entity, category, "cost", 5) - tb_sum(entity, category, "depreciation", 5);
+            assert!(
+                (value("净值(NBV)", "年初余额") - nbv_opening).abs() < 0.00001,
+                "{title} 年初余额不匹配"
+            );
+        }
+        // 合计列（C）缓存等于类别列之和；每个主行的「——其中-」子行按符号
+        // 还原后必须等于主行（重分类的转出子行取负，其余子行直接相加）。
+        for (section, item, total, values) in rows.iter() {
+            let sum: f64 = values.iter().sum();
+            assert!(
+                (total - sum).abs() < 0.00001,
+                "{section}/{item} 合计列缓存 {total} != {sum}"
+            );
+        }
+        let mut main_index = 0usize;
+        while main_index < rows.len() {
+            if rows[main_index].1.starts_with("——其中-") {
+                main_index += 1;
+                continue;
+            }
+            let (section, item, _, _) = &rows[main_index];
+            let mut child_end = main_index + 1;
+            while child_end < rows.len()
+                && rows[child_end].0 == *section
+                && rows[child_end].1.starts_with("——其中-")
+            {
+                child_end += 1;
+            }
+            if child_end > main_index + 1 {
+                for c in 0..columns.len() {
+                    let expected: f64 = rows[main_index + 1..child_end]
+                        .iter()
+                        .map(|row| row.3[c])
+                        .sum();
+                    let actual = rows[main_index].3[c];
+                    assert!(
+                        (actual - expected).abs() < 0.00001,
+                        "{section}/{item} 第 {c} 列 {} 与子行合计 {expected} 不符",
+                        actual
+                    );
+                }
+            }
+            main_index = child_end;
         }
         for name in ["新增清单", "处置清单"] {
             let range = book.worksheet_range(name).unwrap();
@@ -2188,7 +3831,11 @@ mod tests {
                 };
                 for (role, col, sign) in [
                     ("cost", 5, if name == "新增清单" { 1.0 } else { -1.0 }),
-                    ("depreciation", 6, if name == "新增清单" { -1.0 } else { 1.0 }),
+                    (
+                        "depreciation",
+                        6,
+                        if name == "新增清单" { -1.0 } else { 1.0 },
+                    ),
                 ] {
                     let expected = sign
                         * je.rows()
@@ -2199,7 +3846,7 @@ mod tests {
                                     && s(r, 2) == s(row, 2)
                                     && s(r, 6) == s(row, 4)
                                     && s(r, 5) == role
-                                    && s(r, 11) == kind
+                                    && s(r, 9) == kind
                             })
                             .map(|r| n(r, 7))
                             .sum::<f64>();
@@ -2210,24 +3857,93 @@ mod tests {
                 }
             }
         }
-        let range = book.worksheet_range("对方科目汇总表").unwrap();
-        for row in range.rows().skip(1) {
-            let matched = je
-                .rows()
-                .skip(1)
-                .filter(|r| {
-                    s(r, 0) == s(row, 0)
-                        && s(r, 11) == s(row, 1)
-                        && s(r, 4) == s(row, 2)
-                        && s(r, 12) == "是"
-                })
-                .collect::<Vec<_>>();
-            let debit = matched.iter().map(|r| n(r, 7).max(0.0)).sum::<f64>();
-            let credit = matched.iter().map(|r| (-n(r, 7)).max(0.0)).sum::<f64>();
-            for (col, expected) in [(4, debit), (5, credit), (6, debit - credit)] {
+        // 原值／累计折旧对方科目透视表：按「凭证含哪类变动」把对方科目行
+        // 分派到两张表，对照 JE 明细逐科目重算借贷。
+        let net_zero_status = |status: &str| {
+            matches!(
+                status,
+                "已匹配-计提" | "已匹配-冲销" | "跨行已匹配-计提" | "跨行已匹配-冲销"
+            )
+        };
+        let mut flags: Vec<((String, String, String), (bool, bool))> = Vec::new();
+        for (r, status) in je.rows().skip(1).zip(a.je.iter().map(|l| &l.status)) {
+            // 凭证分组必须带日期：跨日同号凭证（如 1 月与 7 月各一张「记-0067」）
+            // 是两张不同的凭证，对方科目不能互相串表。冲销配对状态列已不导出，
+            // 改从 Analysis 按行序对照（见函数注释）。
+            let key = (s(r, 0), s(r, 1), s(r, 2));
+            if s(r, 11) == "是" || net_zero_status(status) {
+                continue;
+            }
+            let flag = match flags.iter_mut().find(|(k, _)| *k == key) {
+                Some(entry) => &mut entry.1,
+                None => {
+                    flags.push((key, (false, false)));
+                    &mut flags.last_mut().unwrap().1
+                }
+            };
+            if s(r, 5) == "cost" {
+                flag.0 = true;
+            } else if s(r, 5) == "depreciation" {
+                flag.1 = true;
+            }
+        }
+        let mut expected_cost = std::collections::BTreeMap::new();
+        let mut expected_dep = std::collections::BTreeMap::new();
+        for r in je.rows().skip(1) {
+            if n(r, 7).abs() < 0.005 {
+                continue;
+            }
+            let key = (s(r, 0), s(r, 1), s(r, 2));
+            let Some((has_cost, has_dep)) =
+                flags.iter().find(|(k, _)| *k == key).map(|(_, flag)| *flag)
+            else {
+                continue;
+            };
+            for (hit, map) in [(has_cost, &mut expected_cost), (has_dep, &mut expected_dep)] {
+                if !hit {
+                    continue;
+                }
+                let entry = map.entry(s(r, 4)).or_insert((0.0, 0.0));
+                if n(r, 7) > 0.0 {
+                    entry.0 += n(r, 7);
+                } else {
+                    entry.1 += -n(r, 7);
+                }
+            }
+        }
+        for (name, expected) in [
+            ("原值透视表", &expected_cost),
+            ("累计折旧透视表", &expected_dep),
+        ] {
+            let pivot = book.worksheet_range(name).unwrap();
+            let mut pivot_rows = pivot.rows().skip(1).collect::<Vec<_>>();
+            let total_row = pivot_rows
+                .pop()
+                .unwrap_or_else(|| panic!("{name} 必须有合计行"));
+            assert_eq!(s(total_row, 0), "合计");
+            let mut pivot_map = std::collections::BTreeMap::new();
+            for row in &pivot_rows {
+                pivot_map.insert(s(row, 0), (n(row, 1), n(row, 2)));
+            }
+            assert_eq!(
+                pivot_map.len(),
+                expected.len(),
+                "{name} 科目数不匹配：{:?} vs {:?}",
+                pivot_map.keys().collect::<Vec<_>>(),
+                expected.keys().collect::<Vec<_>>()
+            );
+            for (account, (debit, credit)) in expected.iter() {
+                let actual = pivot_map.get(account).copied().unwrap_or((0.0, 0.0));
                 assert!(
-                    (n(row, col) - expected).abs() < 0.00001,
-                    "counterpart cache mismatch"
+                    (actual.0 - debit).abs() < 0.00001 && (actual.1 - credit).abs() < 0.00001,
+                    "{name} {account} 借贷不匹配"
+                );
+            }
+            for col in [1usize, 2] {
+                let sum: f64 = pivot_rows.iter().map(|r| n(r, col)).sum();
+                assert!(
+                    (n(total_row, col) - sum).abs() < 0.00001,
+                    "{name} 合计列不匹配"
                 );
             }
         }
@@ -2248,7 +3964,7 @@ mod tests {
         assert_eq!(a.totals.len(), 2);
         assert_eq!(preview_json(&a)["reconciliationDifferences"], 0);
         write_workbook(&out, &a, &AtomicBool::new(false)).unwrap();
-        assert_export_caches(&out);
+        assert_export_caches(&out, &a);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2360,16 +4076,98 @@ mod tests {
         a.disposals = dispose;
         a.totals = totals;
         write_workbook(&out, &a, &AtomicBool::new(false)).unwrap();
-        assert_export_caches(&out);
+        assert_export_caches(&out, &a);
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn method_uses_directional_nonzero_counterpart_nets() {
-        let nets = BTreeMap::from([("在建工程".into(), 0.0), ("银行存款".into(), -500.0)]);
-        assert_eq!(classify_method(true, &nets).0, "购置");
-        assert_eq!(classify_method(false, &nets).0, "其他/待判断");
-        let (_, _, review) = classify_method(true, &BTreeMap::new());
+        // 新增方式三分：在建工程转入（按转出金额锁定）／更新改造转入
+        // （固定资产清理）／购入；「是否命中在建科目」已前移到
+        // classify_movements 的金额锁定环节（is_cip_account + CipLock）。
+        let nets = BTreeMap::from([
+            ("16040001-在建工程".into(), -500.0),
+            ("银行存款".into(), -100.0),
+        ]);
+        assert_eq!(
+            classify_method(true, &nets, CipLock::Locked).0,
+            "在建工程转入"
+        );
+        // 名称不含「在建」的 1604 科目（如「16040002-工具仪器」）按编码前缀
+        // 识别——金额锁定覆盖见 cip_counterpart_... 与混合凭证两条回归。
+        assert_eq!(
+            classify_method(true, &BTreeMap::new(), CipLock::Locked).0,
+            "在建工程转入"
+        );
+        assert_eq!(
+            classify_method(
+                true,
+                &BTreeMap::from([("1606-固定资产清理".into(), -100.0)]),
+                CipLock::NoCredit
+            )
+            .0,
+            "更新改造转入"
+        );
+        assert_eq!(
+            classify_method(
+                true,
+                &BTreeMap::from([("160601-清理".into(), -100.0)]),
+                CipLock::NoCredit
+            )
+            .0,
+            "更新改造转入"
+        );
+        assert_eq!(
+            classify_method(
+                true,
+                &BTreeMap::from([("银行存款".into(), -500.0)]),
+                CipLock::NoCredit
+            )
+            .0,
+            "购入"
+        );
+        assert_eq!(
+            classify_method(true, &BTreeMap::new(), CipLock::NoCredit).0,
+            "购入"
+        );
+        // 有在建转出金额但未覆盖本笔增加：按购入列示，判断依据注明原因。
+        let (method, rule, review) = classify_method(
+            true,
+            &BTreeMap::from([("银行存款".into(), -500.0)]),
+            CipLock::Uncovered,
+        );
+        assert_eq!(method, "购入");
+        assert_eq!(rule, "在建工程转出金额未覆盖本笔增加");
+        assert_eq!(review, "");
+        // 处置侧规则保持：出售／报废毁损／其他待判断。
+        assert_eq!(
+            classify_method(
+                false,
+                &BTreeMap::from([("银行存款".into(), 500.0)]),
+                CipLock::NoCredit
+            )
+            .0,
+            "出售"
+        );
+        assert_eq!(
+            classify_method(
+                false,
+                &BTreeMap::from([("160601-清理".into(), 500.0)]),
+                CipLock::NoCredit
+            )
+            .0,
+            "报废/毁损"
+        );
+        assert_eq!(
+            classify_method(
+                false,
+                &BTreeMap::from([("在建工程".into(), 500.0)]),
+                CipLock::NoCredit
+            )
+            .0,
+            "其他/待判断"
+        );
+        let (_, _, review) = classify_method(false, &BTreeMap::new(), CipLock::NoCredit);
         assert_eq!(review, "需人工复核");
     }
 
@@ -2495,19 +4293,26 @@ mod tests {
             je_line("B", "N1", "2202-应付账款", "", "", -50.0),
         ];
         let (additions, disposals, totals) = classify_movements(&mut je);
-        // R1 原值重分类转入侧进新增清单、转出侧进处置清单，N1 普通新增照旧。
-        assert_eq!(additions.len(), 2);
-        assert_eq!(disposals.len(), 1);
+        // R1 原值重分类转入侧进新增清单、转出侧进处置清单；R1 里的折旧对冲
+        // （机器 +20／运输 -20）也按行级配对进清单，N1 普通新增照旧。
+        assert_eq!(additions.len(), 3);
+        assert_eq!(disposals.len(), 2);
+        assert!(additions.iter().any(|m| m.kind == "重分类转入"
+            && m.method == "折旧类别间调整"
+            && m.depreciation == 20.0));
         let reclass_in = additions
             .iter()
-            .find(|m| m.voucher == "R1")
-            .expect("R1 重分类转入行");
+            .find(|m| m.voucher == "R1" && m.method == "原值类别间调整")
+            .expect("R1 原值重分类转入行");
         assert_eq!(reclass_in.category, "运输设备");
-        assert_eq!(reclass_in.kind, "重分类转入");
         assert_eq!(reclass_in.original, 100.0);
-        assert_eq!(reclass_in.depreciation, 20.0);
-        assert_eq!(disposals[0].kind, "重分类转出");
-        assert_eq!(disposals[0].original, 100.0);
+        // 折旧对冲按行级配对独立成行，不再挂在原值重分类行上。
+        assert_eq!(reclass_in.depreciation, 0.0);
+        let reclass_out = disposals
+            .iter()
+            .find(|m| m.voucher == "R1" && m.method == "原值类别间调整")
+            .expect("R1 原值重分类转出行");
+        assert_eq!(reclass_out.original, 100.0);
         assert_eq!(
             totals[&("A".into(), "机器设备".into())].reclass_cost,
             -100.0
@@ -2560,7 +4365,10 @@ mod tests {
         ];
         let (additions, disposals, totals) = classify_movements(&mut je);
         // 计提进「本年计提/其他增加」，调整两侧进「重分类净额」。
-        assert_eq!(totals[&("A".into(), "机械设备".into())].dep_charge, 41233.69);
+        assert_eq!(
+            totals[&("A".into(), "机械设备".into())].dep_charge,
+            41233.69
+        );
         assert_eq!(
             totals[&("A".into(), "机械设备".into())].reclass_dep,
             -507550.0
@@ -2617,6 +4425,7 @@ mod tests {
             net,
             status: "未匹配".into(),
             movement: String::new(),
+            method: String::new(),
             counterpart: role.is_empty(),
             raw: vec![],
         }

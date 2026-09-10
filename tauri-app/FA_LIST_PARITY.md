@@ -62,6 +62,42 @@
 - [x] 将纠偏、未匹配清单、LLM 分析状态改成原版可读提示
 - [x] 导出后提供打开文件与再次运行
 
+## 固定资产 TB＋JE 变动表（2026-09-06 行为更新）
+
+TB＋JE 变动表模式（`fa.tbje_preview` / `fa.tbje_export`，Rust 实现 `src-tauri/src/fa_tbje.rs`）
+本轮四项行为变化，均来自用户对导出底稿与真实混合凭证的走查：
+
+- 透视表合计行 SUM 循环引用修复：原值／累计折旧透视表的合计公式上界此前把
+  合计行自身圈进 SUM 区间，Excel 打开导出文件即报「循环引用」警告（用户实测
+  累计折旧透视表 B23/C23）。现上界止于最后一条数据行，合计数值缓存不变。
+  回归 `pivot_total_formula_stops_at_last_data_row`。
+- JE 明细删除「智能匹配状态」列（FA 工具场景不适用）：净额配对状态仍作内部
+  口径（净额配对、透视过滤），只是不再导出成列；其后各列整体左移——变动分类
+  K→J、变动方式 L→K、是否对方科目 M→L、原始_列从 M 起，汇总表与清单的全部
+  SUMIFS 公式引用同步。`assert_export_caches` 的冲销状态改从内存分析按行序
+  对照，JE 列号断言同步前移。
+- 「在建工程转入」改按在建转出金额锁定：此前对方科目任一贷方命中在建工程
+  （编码前缀 1604/1605 或名称含在建工程/cip/工程物资）即整笔判在建转入，
+  混合凭证里购入那笔被误判（真在建转入 30,600 与购入 76,725.66 同票）。
+  现按凭证归集在建类对方科目贷方净额合计，两轮分配给各新增类别：先精确锁定
+  （差额 ≤ 0.05），再足额覆盖（剩余额度 ≥ 新增额 − 0.05）；轮不到的按
+  「购入」列示并注明「在建工程转出金额未覆盖本笔增加」（无在建转出金额时
+  保留原文案）。保持一行一方式，处置侧（更新改造转入／出售／报废／捐赠）
+  判定不变。回归 `mixed_voucher_locks_cip_transfer_by_credit_amount`、
+  `cip_counterpart_named_like_category_still_maps_to_cip_transfer`、
+  `method_uses_directional_nonzero_counterpart_nets`。
+- 预览新增对方科目透视、废弃新增明细预览：透视聚合抽成 `counterpart_pivots`
+  （导出与预览同源），`fa.tbje_preview` 新增 `counterpartPivots`（cost／
+  depreciation 两组：account／debit／credit，顺序与导出一致）；原 `preview`
+  字段（新增明细前 10 笔）随前端「新增明细预览」卡片废弃删除。回归
+  `export_reuses_preview_analysis_cache`。
+
+运行命令（不写死数量）：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml fa_tbje --lib
+```
+
 ## 验收门槛
 
 - [x] 现有 FA/Python 回归测试

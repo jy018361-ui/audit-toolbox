@@ -1,4 +1,7 @@
 .kz-page {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-4);
   min-width: 0;
   color: var(--ink-strong);
 }
@@ -10,7 +13,7 @@
 }
 .kz-steps button,
 .kz-tabs button {
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   background: var(--surface-sunken);
   padding: var(--sp-3);
   border-radius: var(--r-md);
@@ -18,7 +21,7 @@
 .kz-steps .active,
 .kz-tabs .active {
   background: var(--brand-link);
-  color: var(--on-brand-link, #fff);
+  color: var(--on-brand-link);
 }
 /*
  * 列宽一律用 minmax(0, …)：原来的 px 下限（540+520、680+420）加上 270px 侧边栏
@@ -36,7 +39,9 @@
   grid-template-columns: minmax(0, 0.62fr) minmax(0, 1fr);
 }
 .kz-filter-grid {
-  grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.65fr);
+  /* 科目筛选是高密度主任务，不能和一个很短的结果空态并排。
+     旧两列布局滚动到列表中段时，右侧整列只剩大块空白。 */
+  grid-template-columns: minmax(0, 1fr);
 }
 .kz-export-grid {
   display: grid;
@@ -55,12 +60,16 @@
 }
 .kz-card h2 {
   margin: 0 0 var(--sp-4);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-body);
 }
 .kz-card label {
   display: grid;
   gap: var(--sp-1);
   margin: var(--sp-2) 0;
-  font-weight: 600;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
 }
 .kz-card small {
   color: var(--text-muted);
@@ -70,20 +79,22 @@
 .kz-card input,
 .kz-card select,
 .kz-card textarea,
-.kz-card button {
+.kz-card button:not([data-slot="button"]) {
   font: inherit;
 }
-.kz-card input,
+.kz-card input:not([data-slot="input"]),
 .kz-card select {
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: var(--r-sm);
   padding: var(--sp-2);
   min-width: 0;
+  /* 控件不再跟着 13px 标签缩小，保持页面控件字号一致。 */
+  font-size: var(--fs-md);
 }
 .kz-card select[multiple] {
   min-height: 105px;
 }
-.kz-card button {
+.kz-card button:not([data-slot="button"]) {
   border: 0;
   border-radius: var(--r-sm);
   padding: var(--sp-2) var(--sp-3);
@@ -91,9 +102,20 @@
   color: var(--brand-link);
   cursor: pointer;
 }
+/* 上传热区（FileDropInput 空态是个普通 button）不吃卡片通用按钮的实心灰底：
+   统一对齐全局 .file-drop-zone 规范——虚线描边、凹陷浅底、链接色主行。
+   特异性与上面的通用按钮规则持平、靠源码顺序靠后取胜。 */
+.kz-card button.file-drop-zone {
+  border: 1.5px dashed var(--control-border);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+  color: var(--brand-link);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-strong);
+}
 .kz-card button.primary {
   background: var(--brand);
-  color: var(--on-brand, #fff);
+  color: var(--on-brand);
 }
 .kz-card button:disabled {
   opacity: 0.5;
@@ -155,7 +177,7 @@
   display: flex;
   gap: var(--sp-1);
   overflow: auto;
-  margin-bottom: var(--sp-3);
+  margin: var(--sp-3) 0;
 }
 .kz-source-panel {
   border: 1px solid var(--border);
@@ -167,18 +189,28 @@
   margin: 0 0 var(--sp-2);
 }
 .kz-source-panel .kz-shuttle-list {
-  min-height: 430px;
-  max-height: 52vh;
+  height: clamp(240px, 34vh, 340px);
+  min-height: 240px;
+  max-height: 42vh;
 }
 .kz-source-actions {
   margin-top: var(--sp-2);
-  justify-content: flex-end;
+  justify-content: flex-start;
 }
 .kz-assigned-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--sp-3);
   margin-top: var(--sp-3);
+  align-items: start;
+}
+.kz-assigned-grid .kz-row {
+  min-height: 40px;
+}
+.kz-assigned-grid .kz-row h3 {
+  flex: 1 1 16rem;
+  min-width: 0;
+  margin: 0;
 }
 .kz-progress {
   margin-top: var(--sp-3);
@@ -286,14 +318,14 @@
  * 所以三个列表统一用 div 实现，自己处理单击 / Ctrl 加选 / Shift 连选。
  */
 .kz-shuttle-list {
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: var(--r-md);
   background: var(--surface);
   overflow: auto;
   user-select: none;
 }
 .kz-shuttle-list:focus-visible {
-  outline: 2px solid var(--border-strong);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
 .kz-shuttle-list.drop-active {
@@ -306,7 +338,9 @@
   font-size: var(--fs-sm);
   line-height: 1.7;
   cursor: grab;
-  overflow-wrap: anywhere;
+  /* 科目名按 "-" 分段换行，而不是把词拦腰截断；超长段才允许任意断开 */
+  word-break: keep-all;
+  overflow-wrap: break-word;
   border-bottom: 1px solid var(--surface-muted);
 }
 .kz-shuttle-item:hover {
@@ -314,7 +348,7 @@
 }
 .kz-shuttle-item.selected {
   background: var(--brand-link);
-  color: var(--on-brand-link, #fff);
+  color: var(--on-brand-link);
 }
 .kz-shuttle-item:active {
   cursor: grabbing;
@@ -330,18 +364,31 @@
   border-radius: var(--r-sm);
   border: 1px solid var(--brand-link);
   background: var(--surface);
-  color: var(--text);
+  color: var(--ink);
   font-size: var(--fs-xs);
   line-height: 1.6;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  box-shadow: 0 6px 16px rgb(0 0 0 / 18%);
+  box-shadow: var(--shadow-overlay);
 }
 .kz-shuttle-empty {
+  display: grid;
+  place-items: center;
+  min-height: 72px;
   padding: var(--sp-3);
   color: var(--text-muted);
   font-size: var(--fs-sm);
+}
+/* 空列表不占大版面：出现空态提示时收紧为紧凑高度，腾出版面给下方已分配列表 */
+.kz-shuttle-list:has(.kz-shuttle-empty) {
+  height: auto;
+  min-height: 96px;
+  max-height: 140px;
+}
+.kz-source-panel .kz-shuttle-list:has(.kz-shuttle-empty) {
+  min-height: 96px;
+  max-height: 140px;
 }
 .kz-shuttle-more {
   padding: var(--sp-2);
@@ -350,7 +397,7 @@
   text-align: center;
 }
 .kz-assigned-grid .kz-shuttle-list {
-  height: 300px;
+  height: clamp(220px, 28vh, 300px);
 }
 .kz-outputs {
   display: grid;

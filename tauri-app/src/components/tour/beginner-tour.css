@@ -1,0 +1,394 @@
+/* 新手引导（分步动画提示）。
+   层级约定：遮罩 700 < 窗口控制按钮 800（styles.css .window-controls），
+   保证引导期间最小化 / 关闭窗口仍然可用；高于 shadcn Dialog 的 50。 */
+
+.tour-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 700;
+  overscroll-behavior: contain;
+}
+
+.tour-blocker {
+  position: absolute;
+  inset: 0;
+}
+
+/* 居中卡片步骤的整屏压暗：这类步骤没有挖孔目标，聚光灯不渲染，
+   压暗改由挡板自己承担，避免"弹了引导框但背景全亮"。 */
+.tour-blocker-dimmed {
+  background: rgb(4 12 12 / 56%);
+}
+
+/* 聚光灯：透明挖孔 + 巨大外阴影压暗四周。位置变化时平滑滑到下一个目标。 */
+.tour-spotlight {
+  position: fixed;
+  pointer-events: none;
+  box-shadow: 0 0 0 200vmax rgb(4 12 12 / 56%);
+  transition:
+    top 320ms ease,
+    left 320ms ease,
+    width 320ms ease,
+    height 320ms ease;
+}
+
+/* 目标外围的呼吸光环：提示"看这里"。 */
+.tour-pulse {
+  position: fixed;
+  pointer-events: none;
+  border: 2px solid var(--brand-accent);
+  animation: tour-ping 1.8s ease-out infinite;
+}
+
+.tour-bubble,
+.tour-card {
+  position: fixed;
+  width: min(360px, calc(100vw - 32px));
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-overlay);
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+/* 目标旁的气泡：位置由引擎用实测高度算出，避免上方空间不足时
+   CSS 二次平移把卡片推出视口。 */
+.tour-bubble {
+  transform: none;
+}
+
+.tour-bubble-inner {
+  position: relative;
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+  animation: tour-rise-in 240ms ease-out;
+}
+
+/* 指向目标的小箭头：旋转 45° 的方块，只留一侧描边。 */
+.tour-bubble-arrow {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  border-top: 1px solid var(--border);
+  transform: rotate(45deg);
+}
+
+.tour-bubble.placement-bottom .tour-bubble-arrow {
+  top: -7px;
+}
+
+.tour-bubble.placement-top .tour-bubble-arrow {
+  bottom: -7px;
+  transform: rotate(225deg);
+}
+
+/* 居中卡片：欢迎 / 收尾步骤。 */
+.tour-card {
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: var(--sp-5);
+  text-align: left;
+  animation: tour-pop-in 260ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+.tour-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  margin-bottom: var(--sp-3);
+  color: var(--brand-link);
+  background: var(--surface-muted);
+  border-radius: var(--r-pill);
+}
+
+.tour-step-count {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.tour-title {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-strong);
+  color: var(--ink-strong);
+  line-height: var(--lh-card-title);
+}
+
+.tour-body {
+  font-size: var(--fs-md);
+  line-height: var(--lh-body);
+  color: var(--ink);
+  overflow-wrap: break-word;
+}
+
+.tour-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+  flex-wrap: wrap;
+}
+
+.tour-actions-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.tour-dots {
+  display: flex;
+  gap: 6px;
+  margin-top: var(--sp-3);
+}
+
+.tour-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--border);
+  transition:
+    width 200ms ease,
+    background-color 200ms ease;
+}
+
+.tour-dots span.active {
+  width: 18px;
+  background: var(--brand);
+}
+
+/* 设置页「新手模式」分区：重播按钮与说明同行排列。 */
+.newbie-replay-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+}
+
+.newbie-replay-row small {
+  color: var(--text-muted);
+}
+
+/* ---- 分步提示（StepTourHint）：挂在步骤条正下方的小卡片 ---- */
+.step-indicator {
+  position: relative;
+}
+
+/* 分步提示出现时的全屏挡板：吃掉对页面的点击（点它即关闭）。层级 39
+   压在页面之上、提示卡（40）之下，也低于对话框(50)与窗口控制按钮(800)。
+   有挖孔时保持透明——压暗由聚光灯（.step-hint-spotlight）的外圈阴影
+   承担，步骤条区域内保持明亮。 */
+.step-hint-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+}
+
+/* 量不到可见步骤条时（兜底场景）挡板自己整屏压暗，否则背景全亮。 */
+.step-hint-veil-dimmed {
+  background: rgb(4 12 12 / 45%);
+  animation: tour-veil-in 200ms ease-out;
+  pointer-events: none;
+}
+
+/* 分步提示的聚光灯：与完整引导同一手法——压暗来自外圈 200vmax 阴影，
+   中间挖孔锁定步骤条，孔位由组件按步骤条实时位置内联指定。 */
+.step-hint-spotlight {
+  position: fixed;
+  z-index: 39;
+  pointer-events: none;
+  border-radius: 12px;
+  box-shadow: 0 0 0 200vmax rgb(4 12 12 / 56%);
+  transition:
+    top 320ms ease,
+    left 320ms ease,
+    width 320ms ease,
+    height 320ms ease;
+}
+
+.step-hint {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 0;
+  /* 低于对话框(50)与窗口控制按钮(800)，不挡更重要的浮层 */
+  z-index: 40;
+  width: min(320px, calc(100vw - 32px));
+  padding: var(--sp-3) var(--sp-5);
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-overlay);
+  animation: tour-rise-in 240ms ease-out;
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.step-hint-count {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.step-hint-title {
+  display: block;
+  margin: var(--sp-1) 0;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-strong);
+  color: var(--ink-strong);
+}
+
+.step-hint-body {
+  margin: 0;
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  color: var(--ink);
+}
+
+.step-hint-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.step-hint-close:hover {
+  color: var(--ink);
+}
+
+.step-hint-close:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+  border-radius: var(--r-sm);
+}
+
+@media (max-width: 520px), (max-height: 520px) {
+  .tour-card,
+  .tour-bubble {
+    width: calc(100vw - 16px);
+  }
+
+  .tour-card {
+    padding: var(--sp-4);
+  }
+
+  .tour-actions,
+  .tour-actions-nav {
+    align-items: stretch;
+  }
+
+  .tour-actions > button,
+  .tour-actions-nav > button {
+    min-height: 40px;
+  }
+
+  .step-hint {
+    position: fixed;
+    top: auto;
+    right: var(--sp-2);
+    bottom: var(--sp-2);
+    left: var(--sp-2);
+    width: auto;
+  }
+}
+
+@media (max-width: 900px) {
+  .step-hint {
+    position: fixed;
+    top: auto;
+    right: var(--sp-2);
+    bottom: var(--sp-2);
+    left: var(--sp-2);
+    width: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .step-hint,
+  .step-hint-veil-dimmed {
+    animation: none;
+  }
+
+  .step-hint-spotlight {
+    transition: none;
+  }
+}
+
+@keyframes tour-ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+
+  70%,
+  100% {
+    transform: scale(1.1);
+    opacity: 0;
+  }
+}
+
+@keyframes tour-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes tour-veil-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes tour-pop-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.94);
+  }
+
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-spotlight,
+  .tour-dots span {
+    transition: none;
+  }
+
+  .tour-pulse,
+  .tour-bubble-inner,
+  .tour-card {
+    animation: none;
+  }
+}

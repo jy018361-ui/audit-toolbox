@@ -1,14 +1,25 @@
 .loan-page {
   padding-bottom: 40px;
 }
+.loan-result-overview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.loan-output-row input {
+  text-overflow: ellipsis;
+}
 .loan-warning {
   display: grid;
   gap: 4px;
   padding: 13px 16px;
-  border: 1px solid #dfbd77;
+  border: 1px solid var(--warning-border);
   border-radius: 12px;
-  background: #fff8e8;
-  color: #6f4b08;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
 }
 .loan-warning span {
   font-size: 13px;
@@ -50,7 +61,7 @@
 .loan-rate-confirmation select {
   min-height: 34px;
   padding: 6px 9px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   border-radius: 8px;
   background: var(--background);
   color: var(--foreground);
@@ -145,10 +156,9 @@
 }
 .loan-bridge-equation {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px minmax(0, 1fr) 34px minmax(
-      0,
-      1fr
-    ) 34px minmax(0, 1fr);
+  grid-template-columns:
+    minmax(0, 1fr) 34px minmax(0, 1fr) 34px minmax(0, 1fr)
+    34px minmax(0, 1fr);
   align-items: stretch;
   gap: 8px;
   min-width: 0;
@@ -166,12 +176,12 @@
   font-size: 11px;
 }
 .loan-ok {
-  background: #e8f5ee;
-  color: #17663d;
+  background: var(--success-bg);
+  color: var(--success-fg);
 }
 .loan-review {
-  background: #fff1cf;
-  color: #855400;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
 }
 @media (max-width: 900px) {
   .loan-upload-grid,
@@ -185,4 +195,112 @@
   .loan-bridge-equation .fx-operator {
     min-height: 24px;
   }
+}
+/* 导出完成反馈：文件名＋打开按钮，完整路径放悬浮提示。 */
+.loan-export-done {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 11px 14px;
+  border: 1px solid var(--success-border);
+  border-radius: 10px;
+  background: var(--success-bg);
+  color: var(--success-fg);
+}
+/* 利率确认（TB 模式）：从 Excel 复制粘贴利率区域，替代此前的利率台账文件上传。 */
+.loan-rate-paste {
+  width: 100%;
+  min-height: 120px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+  border: 1px dashed var(--control-border);
+  border-radius: 10px;
+  background: var(--muted);
+  color: var(--foreground);
+  resize: vertical;
+}
+.loan-rate-paste:focus {
+  outline: none;
+  border-color: var(--primary);
+  background: var(--background);
+}
+.loan-paste-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+}
+.loan-paste-note {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 匹配结果表：六列，列宽与逐行确认表（.loan-rate-confirmation 默认）不同。 */
+.loan-rate-match table {
+  min-width: 960px;
+  table-layout: fixed;
+}
+.loan-rate-match th:first-child {
+  width: 22%;
+}
+.loan-rate-match th:nth-child(2) {
+  width: 26%;
+}
+.loan-rate-match th:nth-child(3),
+.loan-rate-match th:nth-child(4),
+.loan-rate-match th:nth-child(5) {
+  width: 14%;
+}
+.loan-rate-match th:last-child {
+  width: 10%;
+}
+.loan-rate-match .loan-match-basis {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 步骤间门禁说明：下一步被映射卡住时，明说缺什么并给返回入口。 */
+.loan-step-gate {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.loan-export-done > strong {
+  flex: 0 0 auto;
+}
+.loan-export-path {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.loan-export-file {
+  overflow: hidden;
+  max-width: 320px;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 汇总卡口径说明（不依赖 fx-audit.css 是否已随其他页面加载）。 */
+.loan-result-summary .fx-bridge-metric,
+.loan-bridge-equation .fx-bridge-metric {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.loan-result-summary .fx-bridge-metric small,
+.loan-bridge-equation .fx-bridge-metric small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.4;
 }

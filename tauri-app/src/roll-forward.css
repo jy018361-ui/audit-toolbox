@@ -1,0 +1,30 @@
+.roll-cra-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.roll-cra-scroll .roll-cra-row {
+  min-width: 640px;
+}
+
+.roll-result-list {
+  min-width: 0;
+}
+
+.roll-result-row > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.roll-result-row small,
+.roll-result-row [data-variant="link"] {
+  grid-column: 1 / -1;
+  justify-self: start;
+  max-width: 100%;
+}
+
+@media (max-width: 800px) {
+  .roll-result-row {
+    grid-template-columns: 1fr;
+  }
+}

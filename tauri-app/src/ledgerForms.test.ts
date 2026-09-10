@@ -113,10 +113,10 @@ describe("下拉分组", () => {
     const groups = formGroups("tb", TB_ROLES, TB_FORMS, debitCreditMapping);
     expect(groups.map((group) => group.title)).toEqual([
       "公共必填字段",
-      "公共选填字段",
+      "公共选填字段A",
       "TB-类型A（本位币净额）",
       "TB-类型C（本位币借贷分列）",
-      "本期发生额（通过勾稽后自动提升）",
+      "公共选填字段B（勾稽后自动提升）",
     ]);
     expect(groups[0].roles).toEqual(["accountCode", "accountName"]);
     expect(groups[0].required).toEqual(["accountCode", "accountName"]);
@@ -141,11 +141,11 @@ describe("下拉分组", () => {
         required: ["accountCode", "accountName"],
       },
       {
-        title: "公共选填字段",
+        title: "公共选填字段A",
         roles: ["entity", "currency"],
       },
       {
-        title: "本期发生额（通过勾稽后自动提升）",
+        title: "公共选填字段B（勾稽后自动提升）",
         roles: ["periodFunctionalDebit", "periodFunctionalCredit"],
       },
       {
@@ -161,5 +161,24 @@ describe("下拉分组", () => {
         ],
       },
     ]);
+  });
+
+  it("extraRequired 把本工具额外必填的身份角色并进公共必填组", () => {
+    const roles: [string, string][] = [
+      ...TB_ROLES,
+      ["loanId", "借款明细/辅助核算"],
+    ];
+    // 不传：loanId 与金标无关，落在公共选填（其他账表工具的口径）。
+    const plain = formGroups("tb", roles, TB_FORMS, debitCreditMapping);
+    expect(plain[0].roles).not.toContain("loanId");
+    expect(plain[1].roles).toContain("loanId");
+    // 借款利息的 TB＋JE 模式按借款明细逐笔还原，传 extraRequired 后
+    // 进必填组并带＊，与 loanMissing 的拦截口径一致。
+    const loan = formGroups("tb", roles, TB_FORMS, debitCreditMapping, [
+      "loanId",
+    ]);
+    expect(loan[0].roles).toContain("loanId");
+    expect(loan[0].required).toContain("loanId");
+    expect(loan[1].roles).not.toContain("loanId");
   });
 });

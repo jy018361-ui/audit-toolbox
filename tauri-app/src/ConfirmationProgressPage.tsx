@@ -8,6 +8,7 @@ import {
   pickPath,
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "./confirmation-progress.css";
 import { PageHeader } from "@/components/PageHeader";
@@ -22,6 +23,7 @@ import { StatGrid } from "@/components/StatGrid";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { EmptyState } from "@/components/EmptyState";
 import { errorText } from "@/lib/errors";
 
 export type ConfirmationMode = "both" | "bank" | "trade";
@@ -87,7 +89,7 @@ const CONFIRMATION_MODE_OPTIONS: Array<{
   {
     value: "both",
     label: "银行 + 往来",
-    detail: "与原工具一致，一次生成两类报告",
+    detail: "一次生成银行与往来两类报告",
   },
   {
     value: "bank",
@@ -117,6 +119,18 @@ export default function ConfirmationProgressPage({
   useEffect(() => {
     sessionStorage.setItem(CACHE_KEY, JSON.stringify({ inputPath, mode }));
   }, [inputPath, mode]);
+
+  // 历史记录「继续任务」：回填台账路径与函证类型，不自动重新检查。
+  useTaskRestore(tool.id, (restore) => {
+    const params = restore.params as { inputPath?: string; mode?: string };
+    if (typeof params.inputPath === "string" && params.inputPath) {
+      setInputPath(params.inputPath);
+      setInspection(undefined);
+      setResult(undefined);
+    }
+    if (params.mode === "bank" || params.mode === "trade" || params.mode === "both")
+      setMode(params.mode);
+  });
 
   useEffect(() => {
     const stopEvents = listenJobEvents((event) => {
@@ -268,11 +282,11 @@ export default function ConfirmationProgressPage({
   );
 
   return (
-    <>
+    <div className="confirmation-page">
       <PageHeader
         eyebrow="函证进度统计"
         title={tool.name}
-        detail="选择函证列表后，按原工具口径生成银行函证与往来函证统计报告。"
+        detail="检查函证清单，按项目、发函单位与基准日生成银行及往来函证进度报告。"
       />
       <StepIndicator
         steps={[
@@ -297,7 +311,26 @@ export default function ConfirmationProgressPage({
                   ? "2. 报告范围"
                   : "3. 生成进度报告"}
             </CardTitle>
-            <Badge className="badge-ready">已就绪</Badge>
+            <Badge
+              variant="outline"
+              className={
+                busy
+                  ? "badge-info"
+                  : canGenerateConfirmation(inputPath, inspection)
+                    ? "badge-ready"
+                    : inspection
+                      ? "badge-warning"
+                      : "badge-neutral"
+              }
+            >
+              {busy
+                ? "处理中"
+                : canGenerateConfirmation(inputPath, inspection)
+                  ? "字段检查通过"
+                  : inspection
+                    ? "字段待补充"
+                    : "待检查数据"}
+            </Badge>
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
@@ -371,11 +404,14 @@ export default function ConfirmationProgressPage({
                 </div>
                 {inspection?.missingColumns.length ? (
                   <div className="confirmation-error">
-                    缺少原处理逻辑必需字段：
+                    缺少报告必需字段：
                     {inspection.missingColumns.join("、")}
                   </div>
                 ) : inspection ? (
-                  <div className="confirmation-success">
+                  <div
+                    className="confirmation-success"
+                    title={inspection.outputDirectory}
+                  >
                     字段检查通过，报告将保存到：
                     {displayFileName(inspection.outputDirectory)}
                   </div>
@@ -406,11 +442,14 @@ export default function ConfirmationProgressPage({
               <>
                 {inspection?.missingColumns.length ? (
                   <div className="confirmation-error">
-                    缺少原处理逻辑必需字段：
+                    缺少报告必需字段：
                     {inspection.missingColumns.join("、")}
                   </div>
                 ) : inspection ? (
-                  <div className="confirmation-success">
+                  <div
+                    className="confirmation-success"
+                    title={inspection.outputDirectory}
+                  >
                     字段检查通过，报告将保存到：
                     {displayFileName(inspection.outputDirectory)}
                   </div>
@@ -448,9 +487,11 @@ export default function ConfirmationProgressPage({
           </CardHeader>
           <CardContent>
             {!inspection && !job && (
-              <div className="empty">
-                检查后显示函证数量、必需字段和数据预览。
-              </div>
+              <EmptyState
+                compact
+                title="准备函证清单"
+                description="选择 Excel 清单并点击“检查数据”，这里将显示函证数量、必需字段和数据预览。"
+              />
             )}
             {inspection && (
               <>
@@ -487,6 +528,23 @@ export default function ConfirmationProgressPage({
             {reports.length > 0 && (
               <div className="confirmation-outputs">
                 <h3>本次处理的报告</h3>
+                <p className="confirmation-result-overview" role="status">
+                  <Badge
+                    variant="outline"
+                    className={
+                      reports.some((report) => report.status === "skipped")
+                        ? "badge-warning"
+                        : "badge-ready"
+                    }
+                  >
+                    {reports.some((report) => report.status === "skipped")
+                      ? "部分报告未生成"
+                      : "报告处理完成"}
+                  </Badge>
+                  <span>
+                    请核对报告类型与数量；未生成的报告请查看下方原因。
+                  </span>
+                </p>
                 {reports.map((report, index) => (
                   <p
                     key={String(report.type ?? index)}
@@ -514,6 +572,7 @@ export default function ConfirmationProgressPage({
                     size="sm"
                     className="confirmation-output-link"
                     key={path}
+                    title={path}
                     onClick={() => void openOutput(path)}
                   >
                     打开：{displayFileName(path)}
@@ -524,6 +583,6 @@ export default function ConfirmationProgressPage({
           </CardContent>
         </Card>
       </div>
-    </>
+    </div>
   );
 }

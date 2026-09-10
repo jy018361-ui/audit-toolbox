@@ -7,6 +7,7 @@ import {
   pickPath,
   settingsGet,
   settingsSet,
+  telemetryTrack,
   updateReleaseNotes,
 } from "./api";
 
@@ -27,5 +28,11 @@ describe("browser preview API fallbacks", () => {
     await expect(updateReleaseNotes()).rejects.toThrow(
       "浏览器预览模式不能读取版本更新说明",
     );
+  });
+
+  it("keeps usage telemetry silent in preview mode", async () => {
+    await expect(
+      telemetryTrack("tool_open", "fx_audit"),
+    ).resolves.toBeUndefined();
   });
 });

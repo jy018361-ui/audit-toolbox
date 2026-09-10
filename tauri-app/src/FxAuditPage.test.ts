@@ -11,9 +11,12 @@ import {
   fxDetachRole,
   fxDropTargetAt,
   fxMergeJobResult,
+  fxCurrencyRequirement,
   fxMissingRequired,
   fxPreviewTokenFor,
   fxReportStart,
+  fxRequiredSources,
+  fxResultTrustStatus,
   fxResolveAccountRoles,
   granularityLabel,
   splitClassificationGroups,
@@ -27,9 +30,28 @@ import {
   applyLedgerReviewsTogether,
   resolveLedgerPairKinds,
   reviewLedgerSourceClassification,
+  selectLedgerSourcePair,
 } from "./ledgerMapping";
 import type React from "react";
 describe("fx audit mode selection", () => {
+  it("按模式明确 JE 与 TB 的必需关系", () => {
+    expect(fxRequiredSources("realized")).toEqual({ je: true, tb: false });
+    expect(fxRequiredSources("unrealized")).toEqual({ je: false, tb: true });
+    expect(fxRequiredSources("combined")).toEqual({ je: true, tb: true });
+  });
+
+  it("先给出可用、受限或需补资料的结果结论", () => {
+    expect(fxResultTrustStatus({}, 0).tone).toBe("usable");
+    expect(
+      fxResultTrustStatus({ tbFxGainLoss: 10, reconciliationPassed: false }, 0)
+        .tone,
+    ).toBe("limited");
+    expect(
+      fxResultTrustStatus({ unrealizedBalanceBasisComplete: false }, 0),
+    ).toMatchObject({ tone: "blocked", title: "资料不足" });
+    expect(fxResultTrustStatus({}, 1).tone).toBe("blocked");
+  });
+
   it("uses two-point unrealized mode for TB only", () => {
     expect(fxDefaultMode(false, true)).toBe("unrealized");
     expect(fxAllowedModes(false, true)).toEqual(["unrealized"]);
@@ -46,6 +68,27 @@ describe("fx audit mode selection", () => {
   });
 });
 describe("fx audit upload and mapping parity", () => {
+  it("同一工作簿有 TB/JE Sheet 时优先选为一组", () => {
+    const source = (
+      path: string,
+      sheet: string,
+      kind: "je" | "tb",
+      scores: { je: number; tb: number },
+    ) => ({
+      path,
+      classification: { path, sheet, kind, scores },
+    });
+    const selected = selectLedgerSourcePair([
+      source("C:/x/账套.xlsx", "TB", "tb", { je: 1, tb: 8 }),
+      source("C:/x/账套.xlsx", "JE", "je", { je: 8, tb: 1 }),
+      source("C:/x/01序时账.xlsx", "明细", "je", { je: 12, tb: 0 }),
+    ] as never);
+    expect(selected.map((item) => [item.path, item.classification.sheet])).toEqual([
+      ["C:/x/账套.xlsx", "JE"],
+      ["C:/x/账套.xlsx", "TB"],
+    ]);
+  });
+
   it("jointly assigns an ambiguous two-file upload to stable JE/TB slots", () => {
     const kinds = resolveLedgerPairKinds([
       { kind: "je", scores: { je: 11, tb: 2 } },
@@ -584,19 +627,25 @@ describe("跨表对齐后的币种线索", () => {
 describe("TB 粒度不足提示", () => {
   it("按隔离类型给出用户看得懂的原因", () => {
     expect(granularityLabel("科目余额混合本位币与外币")).toBe(
-      "科目余额里既有本位币又有外币，拆不开",
+      "余额里混了本位币和外币，TB 只有合计数，拆不出外币部分",
     );
     expect(granularityLabel("同一科目存在多种外币敞口")).toBe(
-      "同一科目持有多种外币，TB 只有合计数",
+      "同一科目持有多种外币，TB 只有合计数，拆不出各币种余额",
     );
+    expect(granularityLabel("外币凭证原币金额全为零")).toBe(
+      "该科目的外币凭证原币金额全为 0，没有可测算的外币余额",
+    );
+    // 历史结果里的旧类型名，含义相同，同样兜底。
     expect(granularityLabel("无外币敞口的评估调整科目")).toBe(
-      "评估调整科目，本身不持有外币",
+      "该科目的外币凭证原币金额全为 0，没有可测算的外币余额",
     );
     // 历史结果里的旧类型名也要有兜底，不能显示成空白。
     expect(granularityLabel("同一余额键存在多个外币")).toBe(
-      "TB 未提供可唯一对应的原币币种",
+      "TB 里找不到唯一对应的外币余额行，无法测算",
     );
-    expect(granularityLabel(undefined)).toBe("TB 未提供可唯一对应的原币币种");
+    expect(granularityLabel(undefined)).toBe(
+      "TB 里找不到唯一对应的外币余额行，无法测算",
+    );
   });
 });
 
@@ -890,5 +939,27 @@ describe("科目币种覆盖", () => {
 
   it("没有任何选择时传空对象，不影响后端自动识别", () => {
     expect(fxAccountCurrencyOverrides({})).toEqual({});
+  });
+});
+
+describe("fxCurrencyRequirement：币种类角色的下拉必填口径", () => {
+  it("TB 侧原币币种与币种线索二选一——都没映射时双双必填", () => {
+    expect(fxCurrencyRequirement("tb", {}, "combined", "currency")).toBe("required");
+    expect(fxCurrencyRequirement("tb", {}, "combined", "currencyText")).toBe("required");
+  });
+  it("TB 侧映射其一后另一个转选填", () => {
+    const mapping = { currency: "币种" };
+    expect(fxCurrencyRequirement("tb", mapping, "combined", "currency")).toBe("optional");
+    expect(fxCurrencyRequirement("tb", mapping, "combined", "currencyText")).toBe("optional");
+  });
+  it("JE 侧原币币种依模式：已实现/组合必填，仅未实现转选填", () => {
+    expect(fxCurrencyRequirement("je", {}, "realized", "currency")).toBe("required");
+    expect(fxCurrencyRequirement("je", {}, "combined", "currency")).toBe("required");
+    expect(fxCurrencyRequirement("je", {}, "unrealized", "currency")).toBe("optional");
+  });
+  it("本位币币种恒为选填，其余角色不干预", () => {
+    expect(fxCurrencyRequirement("tb", {}, "combined", "functionalCurrency")).toBe("optional");
+    expect(fxCurrencyRequirement("je", {}, "realized", "functionalCurrency")).toBe("optional");
+    expect(fxCurrencyRequirement("tb", {}, "combined", "summary")).toBeUndefined();
   });
 });

@@ -155,12 +155,17 @@ export function slotTitle(slot: string[]): string {
  *
  * 顺序：先身份类（不参与形态判定的角色），再按这一型的槽位逐组列出，
  * 最后把别的型才用得上的记法收进"其他记法"——它们不是漏填，是这一型不需要。
+ *
+ * `extraRequired`：公共金标之外，**本工具**额外必填的身份角色（如借款利息的
+ * TB「借款明细/辅助核算」——测算按它逐笔还原，缺了整表算不了）。它们会被
+ * 挪进「公共必填字段」组并带＊，与 loanMissing 的拦截口径保持一致。
  */
 export function formGroups(
   kind: LedgerFormKind,
   roles: [string, string][],
   forms: LedgerForm[],
   mapping: Record<string, string | string[] | undefined>,
+  extraRequired: string[] = [],
 ): {
   title: string;
   roles: string[];
@@ -191,9 +196,10 @@ export function formGroups(
     optional?: string[];
     status?: "已适配" | "可适配" | "未适配";
   }[] = [];
-  const publicRequired = GOLD_IDENTITY[kind === "je" ? "je" : "tb"].filter(
-    (role) => names.has(role),
-  );
+  const publicRequired = [
+    ...GOLD_IDENTITY[kind === "je" ? "je" : "tb"],
+    ...extraRequired,
+  ].filter((role) => names.has(role));
   if (publicRequired.length)
     groups.push({
       title: "公共必填字段",
@@ -204,7 +210,8 @@ export function formGroups(
     (role) => !publicRequired.includes(role),
   );
   if (publicOptional.length)
-    groups.push({ title: "公共选填字段", roles: publicOptional });
+    // A/B 编号区分两个选填性质的组：A 是身份类选填，B 是本期发生额口径。
+    groups.push({ title: "公共选填字段A", roles: publicOptional });
 
   const matches = new Map(
     matchForms(kind, forms, mapping).map((match) => [match.form.id, match]),
@@ -247,7 +254,7 @@ export function formGroups(
     .map(([role]) => role)
     .filter((role) => role.startsWith("period"));
   if (period.length)
-    groups.push({ title: "本期发生额（通过勾稽后自动提升）", roles: period });
+    groups.push({ title: "公共选填字段B（勾稽后自动提升）", roles: period });
   if (!forms.length) {
     const amounts = roles
       .map(([role]) => role)
@@ -265,7 +272,7 @@ const cache = new Map<string, Promise<LedgerForm[]>>();
 export function fetchLedgerForms(kind: LedgerFormKind): Promise<LedgerForm[]> {
   const hit = cache.get(kind);
   if (hit) return hit;
-  const task = engineCall("ledger.forms", { kind })
+  const task = Promise.resolve(engineCall("ledger.forms", { kind }))
     .then((data) => (Array.isArray(data) ? (data as LedgerForm[]) : []))
     .catch(() => {
       cache.delete(kind);

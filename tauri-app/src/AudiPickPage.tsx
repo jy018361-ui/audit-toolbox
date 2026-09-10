@@ -10,12 +10,21 @@ import {
   settingsSet,
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { audipickAssetsReady, loadAudipickAssets } from "./audipickAssets";
 import { useJobPause } from "@/components/JobDialog";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import { errorText } from "@/lib/errors";
 import { ResultView } from "@/components/ResultView";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
+import { EmptyState } from "@/components/EmptyState";
+import { JobProgress } from "@/components/JobProgress";
+import "./audipick.css";
+
 import {
   AudiPickLegacyShell,
   type AudiPickLegacyPage,
@@ -66,6 +75,14 @@ import {
   type ClassifiedDocument,
   type RevenueTargetQuestion,
 } from "./audipickUi";
+
+export function AudiPickResultStatus({ hasResult, missingCount }: { hasResult: boolean; missingCount: number }) {
+  return (
+    <Badge variant={missingCount ? "warning" : hasResult ? "info" : "neutral"}>
+      {missingCount ? "需补充资料" : hasResult ? "已有处理结果 · 待人工复核" : "等待处理"}
+    </Badge>
+  );
+}
 
 type AudiPickRelation = {
   id: string;
@@ -197,7 +214,7 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
         <PageHeader
           eyebrow="合同审阅管理"
           title={tool.name}
-          detail="正在加载本地 PDF 引擎与审计模板库…"
+          detail="正在准备合同预览与审阅模板…"
         />
         <section className="form-card">
           <p>首次进入本页面需要加载本地 PDF 组件，请稍候。</p>
@@ -211,6 +228,14 @@ export function AudiPickPage({ tool }: { tool: ToolManifest }) {
 function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   const [projects, setProjects] = useState<AudiPickProjectData[]>([]);
   const [selectedId, setSelectedId] = useState("");
+
+  // 历史记录「继续任务」：AudiPick 的项目/文档/字段全部由引擎与规则库派生，
+  // 项目本身就持久化在引擎里（页面加载时自动拉取）；这里只回填上次的审阅
+  // 规则，字段清单会随规则自动带出。
+  useTaskRestore(tool.id, (restore) => {
+    const p = restore.params as { ruleId?: string };
+    if (typeof p.ruleId === "string" && p.ruleId) setRuleId(p.ruleId);
+  });
   const [documents, setDocuments] = useState<AudiPickDocument[]>([]);
   const [name, setName] = useState("");
   const [client, setClient] = useState("");
@@ -649,9 +674,11 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
     // mark under it, and there is no undo.
     const project = projects.find((item) => item.project.id === projectId);
     if (
-      !window.confirm(
-        `确认删除项目"${project?.project.name ?? projectId}"？\n\n该项目下的全部合同 PDF、提取结果和复核标记会一并删除，且无法恢复。`,
-      )
+      !(await confirmDialog({
+        title: "确认删除项目",
+        message: `确认删除项目"${project?.project.name ?? selectedId}"？\n\n该项目下的全部合同 PDF、提取结果和复核标记会一并删除，且无法恢复。`,
+        tone: "danger",
+      }))
     )
       return;
     setBusy(true);
@@ -770,13 +797,13 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   async function exportBackup() {
     const outputPath = await pickPath(
       "save",
-      "导出 AudiPick 迁移备份",
+      "导出合同项目备份",
       ["zip"],
       audipickExportName(
         {
           projectName: selected?.project.name,
           clientName: selected?.project.client,
-          typeLabel: "AudiPick迁移备份",
+          typeLabel: "合同项目备份",
         },
         "zip",
       ),
@@ -901,9 +928,11 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
   async function deleteDocument(documentId: string) {
     const document = documents.find((item) => item.id === documentId);
     if (
-      !window.confirm(
-        `确认删除"${document?.name ?? documentId}"？\n\n该文件的 PDF、已保存的文字层和提取结果会一并删除，且无法恢复。`,
-      )
+      !(await confirmDialog({
+        title: "确认删除文件",
+        message: `确认删除"${document?.name ?? documentId}"？\n\n该文件的 PDF、已保存的文字层和提取结果会一并删除，且无法恢复。`,
+        tone: "danger",
+      }))
     )
       return;
     setBusy(true);
@@ -1255,7 +1284,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
       setOcrRequiredPages((current) => current.filter((page) => page !== pdfPage));
       addLog("当前文档", "OCR", `${value.engine} 引擎识别完成`, "done");
     } catch (e) {
-      addLog("当前文档", "OCR", "识别失败", "error");
+      addLog("当前文档", "文字识别", "识别失败", "error");
       setError(errorText(e));
     } finally {
       setBusy(false);
@@ -1729,7 +1758,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
 
   async function extract() {
     if (!selectedDocument || !pdfText.trim()) {
-      setError("请先读取 PDF 文字或执行 OCR。");
+      setError("请先读取 PDF 文字或识别扫描页面。");
       return;
     }
     const prompt = `${window.RuleEngine?.getRulePrompt(ruleId) ?? ""}\n\n本次仅返回这些字段：${activeFieldKeys.join(", ")}`;
@@ -3151,8 +3180,8 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             <span>{documents.length} 份 PDF</span>
           </div>
           <div className="actions">
-            <button
-              className="primary"
+            <Button
+              variant="default"
               disabled={!selectedId || busy}
               onClick={() => void importPdfs()}
             >
@@ -3171,12 +3200,12 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               onClick={() => void remove()}
             >
               删除项目
-            </button>
+            </Button>
           </div>
           {documents.map((value) => (
             <div className="task-row" key={value.id}>
               <div>
-                <strong>{value.name}</strong>
+              <strong title={value.name} className="block max-w-full truncate">{value.name}</strong>
                 <p>
                   {Math.ceil(value.size / 1024)} KB ·{" "}
                   {value.sha256.slice(0, 12)}
@@ -3190,14 +3219,16 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               >
                 读取/预览
               </button>
-              <button
-                className="secondary"
+              <Button
+                variant="destructive"
+                aria-label={`删除合同 ${value.name}`}
                 onClick={() => void deleteDocument(value.id)}
               >
                 删除
-              </button>
+              </Button>
             </div>
           ))}
+          {documents.length === 0 && <EmptyState compact title={selectedId ? "等待导入合同" : "请先选择项目"} description={selectedId ? "导入 PDF 后，可预览原文、识别文字并按模板提取信息。" : "新建或选择项目后，再导入需要审阅的 PDF。"} />}
           {error && <div className="error-box">{error}</div>}
         </section>
         <section className="form-card">
@@ -3206,7 +3237,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             <span
               className={`pill ${configStatus.llm?.ready ? "ready" : "preview"}`}
             >
-              LLM {configStatus.llm?.ready ? "已就绪" : "未配置"}
+              AI 服务{configStatus.llm?.ready ? "已就绪" : "未配置"}
             </span>
           </div>
           <label className="field">
@@ -3237,21 +3268,21 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               </strong>
               {suggestedRule.reason && <p>{suggestedRule.reason}</p>}
               <div className="actions">
-                <button
-                  className="secondary"
+                <Button
+                  variant="secondary"
                   onClick={() => {
                     setRuleId(suggestedRule.ruleId);
                     setSuggestedRule(undefined);
                   }}
                 >
                   采用建议模板
-                </button>
-                <button
-                  className="browse"
+                </Button>
+                <Button
+                  variant="outline"
                   onClick={() => setSuggestedRule(undefined)}
                 >
                   保留当前模板
-                </button>
+                </Button>
               </div>
             </div>
           )}
@@ -3312,13 +3343,13 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               </select>
             </label>
           </div>
-          <button
-            className="secondary"
+          <Button
+            variant="secondary"
             disabled={!selectedDocument || !associationTarget}
             onClick={() => void saveAssociation()}
           >
             保存关联
-          </button>
+          </Button>
           <details>
             <summary>新建自定义模板</summary>
             <div className="form-grid">
@@ -3340,27 +3371,27 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                 />
               </label>
             </div>
-            <button className="secondary" onClick={() => void saveCustomRule()}>
+            <Button variant="secondary" onClick={() => void saveCustomRule()}>
               保存自定义模板
-            </button>
+            </Button>
           </details>
           <div className="actions">
-            <button
-              className="secondary"
+            <Button
+              variant="secondary"
               disabled={busy || !selectedDocument}
               onClick={() => void runOcr()}
             >
-              OCR 当前页
-            </button>
-            <button
-              className="secondary"
+              识别当前页文字
+            </Button>
+            <Button
+              variant="secondary"
               disabled={busy || !pdfText}
               onClick={() => void saveText()}
             >
               保存文字
-            </button>
-            <button
-              className="primary"
+            </Button>
+            <Button
+              variant="default"
               disabled={
                 busy ||
                 !configStatus.llm?.ready ||
@@ -3371,9 +3402,9 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               onClick={() => void extract()}
             >
               AI 提取并保存
-            </button>
-            <button
-              className="secondary"
+            </Button>
+            <Button
+              variant="secondary"
               disabled={busy || !selectedDocument}
               onClick={() => void exportResults()}
             >
@@ -3387,18 +3418,18 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               导出本文件全部模板
             </button>
             {ruleId === "revenue_workpaper" && (
-              <button
-                className="secondary"
+              <Button
+                variant="secondary"
                 disabled={busy || !currentResults.length}
                 onClick={() => void deepReview()}
               >
                 深度复核
-              </button>
+              </Button>
             )}
             {!batchJob ||
             ["completed", "failed", "cancelled"].includes(batchJob.phase) ? (
-              <button
-                className="primary"
+              <Button
+                variant="default"
                 disabled={
                   !configStatus.llm?.ready ||
                   !documents.length ||
@@ -3407,32 +3438,26 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                 onClick={() => void startBatch()}
               >
                 批量提取
-              </button>
+              </Button>
             ) : (
               <>
-                <button
-                  className="secondary"
+                <Button
+                  variant="secondary"
                   onClick={() => toggleJobPause(batchJob.jobId)}
                 >
                   {isJobPaused(batchJob.jobId) ? "继续" : "暂停"}
-                </button>
-                <button
-                  className="secondary"
+                </Button>
+                <Button
+                  variant="secondary"
                   onClick={() => void jobCancel(batchJob.jobId)}
                 >
                   停止
-                </button>
+                </Button>
               </>
             )}
           </div>
           {batchJob && (
-            <div className={`job-banner ${batchJob.severity}`}>
-              <strong>{batchJob.message}</strong>
-              <progress
-                max={Math.max(batchJob.total, 1)}
-                value={batchJob.current}
-              />
-            </div>
+            <JobProgress job={batchJob} />
           )}
           {/* The worker reports every document's outcome; without this a batch
               where a third of the files failed still ended on a plain
@@ -3456,29 +3481,30 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           )}
         </section>
         <section id="ap-extract" className="result-card">
-          <h2>PDF、文字层与结果</h2>
+          <h2>合同原文与提取结果</h2>
+          <AudiPickResultStatus hasResult={Boolean(result)} missingCount={revenueMissingTasks.length} />
           {pdfDocument && (
             <>
               <div className="pdf-toolbar">
-                <button
-                  className="secondary"
+                <Button
+                  variant="secondary"
                   disabled={pdfPage <= 1}
                   onClick={() => void renderPdfPage(pdfDocument, pdfPage - 1)}
                 >
                   上一页
-                </button>
+                </Button>
                 <span>
                   {pdfPage} / {pdfPages}
                 </span>
-                <button
-                  className="secondary"
+                <Button
+                  variant="secondary"
                   disabled={pdfPage >= pdfPages}
                   onClick={() => void renderPdfPage(pdfDocument, pdfPage + 1)}
                 >
                   下一页
-                </button>
-                <button
-                  className="secondary"
+                </Button>
+                <Button
+                  variant="secondary"
                   onClick={() => {
                     const value = Math.max(0.6, pdfScale - 0.15);
                     setPdfScale(value);
@@ -3492,9 +3518,9 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                   }}
                 >
                   缩小
-                </button>
-                <button
-                  className="secondary"
+                </Button>
+                <Button
+                  variant="secondary"
                   onClick={() => {
                     const value = Math.min(2.5, pdfScale + 0.15);
                     setPdfScale(value);
@@ -3508,9 +3534,9 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                   }}
                 >
                   放大
-                </button>
-                <button
-                  className="secondary"
+                </Button>
+                <Button
+                  variant="secondary"
                   onClick={() => {
                     const value = (pdfRotation + 90) % 360;
                     setPdfRotation(value);
@@ -3524,7 +3550,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                   }}
                 >
                   旋转
-                </button>
+                </Button>
               </div>
               <div className="input-with-button">
                 <input
@@ -3532,9 +3558,9 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                   onChange={(e) => setPdfSearch(e.target.value)}
                   placeholder="搜索 PDF 原文"
                 />
-                <button className="browse" onClick={() => void searchPdf()}>
+                <Button variant="outline" onClick={() => void searchPdf()}>
                   搜索
-                </button>
+                </Button>
               </div>
               {pdfSearch && (
                 <small>
@@ -3554,7 +3580,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
           {result ? (
             <ResultView value={result} />
           ) : (
-            <div className="empty">选择合同后读取本地PDF文字层。</div>
+            <EmptyState compact title={selectedDocument ? "尚无处理结果" : "请先选择合同"} description={selectedDocument ? "读取合同文字，选择模板后开始提取；完成后请对照原文核对。" : "在合同列表中选择“读取/预览”，即可查看原文并继续处理。"} />
           )}
           {revenueMissingTasks.length > 0 && (
             <div className="error-box">
@@ -3648,12 +3674,12 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                   >
                     {row.reviewed ? "已复核" : "标记复核"}
                   </button>
-                  <button
-                    className="secondary"
+                  <Button
+                    variant="secondary"
                     onClick={() => void jumpEvidence(row)}
                   >
                     证据页
-                  </button>
+                  </Button>
                 </div>
               ))}
             </>
@@ -3672,7 +3698,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               <span
                 className={`pill ${configStatus.llm?.ready ? "ready" : "preview"}`}
               >
-                LLM {configStatus.llm?.ready ? "已就绪" : "未配置"}
+                AI 服务{configStatus.llm?.ready ? "已就绪" : "未配置"}
               </span>
             </div>
             <p className="hint">
@@ -3843,8 +3869,8 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                 />
               </label>
               <div className="actions">
-                <button
-                  className="secondary"
+                <Button
+                  variant="secondary"
                   onClick={() => void saveCustomRule()}
                 >
                   {editingCustomRuleId ? "保存修改" : "保存自定义模板"}
@@ -3875,13 +3901,11 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
               </button>
               <button className="secondary" onClick={clearLog}>
                 清空日志
-              </button>
+              </Button>
             </div>
           </div>
           {workLog.length === 0 ? (
-            <p className="hint">
-              暂无处理日志。导入 PDF、OCR、AI 提取等操作会记录在这里。
-            </p>
+            <EmptyState compact title="暂无处理记录" description="导入 PDF、文字识别和智能提取的处理记录会显示在这里。" />
           ) : (
             <div className="worklog-list">
               {workLog.map((entry) => (

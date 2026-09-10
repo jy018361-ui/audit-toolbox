@@ -8,19 +8,41 @@ import {
   pickPath,
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { errorText } from "@/lib/errors";
 import { formatSize, parentPath } from "@/lib/utils";
 import { ResultView } from "@/components/ResultView";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
+import { Button } from "@/components/ui/button";
+import { confirmDialog } from "@/components/ConfirmDialog";
+import { BusySpinner } from "@/components/BusySpinner";
+import { SwitchInput } from "@/components/SwitchInput";
+import { EmptyState } from "@/components/EmptyState";
+import { JobProgress } from "@/components/JobProgress";
 
 type MergerFile = {
   path: string;
   name: string;
   size: number;
   sheets: string[];
+  format?: string;
   error?: string | null;
 };
+
+export function excelMergerStep(
+  pathCount: number,
+  inspectedCount: number,
+  hasJob: boolean,
+): number {
+  if (hasJob) return 2;
+  if (pathCount > 0 && inspectedCount > 0) return 1;
+  return 0;
+}
+
+export function excelMergerClearPrompt(pathCount: number): string {
+  return `确认清空当前 ${pathCount} 个待合并文件？只会清空本次列表，不会删除原文件。`;
+}
 
 export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
   const [paths, setPaths] = useState<string[]>([]);
@@ -88,10 +110,20 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     });
     return () => off();
   }, []);
+  // 历史恢复暂存的目标 Sheet：paths 变化的副作用会清空 targetSheets，
+  // 恢复的自定义 Sheet 子集要等副作用跑完再补回。
+  const pendingTargetSheets = useRef<string[] | null>(null);
+  // 历史恢复的 Sheet 子集另存一份：用户稍后点「检查文件」时，inspect 默认
+  // 全选 availableSheets——同一批文件用存档子集顶回，一次性消费。
+  const restoredSheetsRef = useRef<{
+    paths: string[];
+    targetSheets: string[];
+  } | null>(null);
   useEffect(() => {
     setFiles([]);
     setAvailableSheets([]);
-    setTargetSheets([]);
+    setTargetSheets(pendingTargetSheets.current ?? []);
+    pendingTargetSheets.current = null;
     setResult(undefined);
     setJob(undefined);
     activeJobId.current = "";
@@ -100,6 +132,55 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     if (!outputDirectoryTouched)
       setOutputDirectory(paths[0] ? parentPath(paths[0]) : "");
   }, [paths, outputDirectoryTouched]);
+
+  // 历史记录「继续任务」：回填文件列表与全部合并选项，不自动检查文件
+  // （检查会用实际 Sheet 清单覆盖自定义 Sheet 子集）。
+  useTaskRestore(tool.id, (restore) => {
+    const p = restore.params as {
+      inputPaths?: string[];
+      outputDirectory?: string;
+      outputFormat?: string;
+      outputMode?: string;
+      direction?: string;
+      sheetAction?: string;
+      targetSheets?: string[];
+      addHyperlinks?: boolean;
+    };
+    if (!Array.isArray(p.inputPaths) || !p.inputPaths.length) return;
+    const restoredSheets = Array.isArray(p.targetSheets)
+      ? p.targetSheets
+      : null;
+    restoredSheetsRef.current = restoredSheets
+      ? { paths: p.inputPaths, targetSheets: restoredSheets }
+      : null;
+    const samePaths =
+      p.inputPaths.length === paths.length &&
+      p.inputPaths.every((value, index) => value === paths[index]);
+    if (samePaths) {
+      setTargetSheets(restoredSheets ?? []);
+      pendingTargetSheets.current = null;
+    } else {
+      pendingTargetSheets.current = restoredSheets;
+      setPaths(p.inputPaths);
+    }
+    if (typeof p.outputDirectory === "string" && p.outputDirectory) {
+      setOutputDirectory(p.outputDirectory);
+      setOutputDirectoryTouched(true);
+    }
+    if (typeof p.outputFormat === "string" && p.outputFormat)
+      setOutputFormat(p.outputFormat);
+    if (typeof p.outputMode === "string" && p.outputMode)
+      setOutputMode(p.outputMode);
+    if (typeof p.direction === "string" && p.direction)
+      setDirection(p.direction);
+    if (typeof p.sheetAction === "string" && p.sheetAction)
+      setSheetAction(p.sheetAction);
+    if (typeof p.addHyperlinks === "boolean")
+      setAddHyperlinks(p.addHyperlinks);
+    setError("");
+    setResult(undefined);
+    setJob(undefined);
+  });
   async function chooseFiles() {
     const value = await pickPath("files", "添加 Excel、CSV 或 TXT", [
       "xlsx",
@@ -136,7 +217,23 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
       })) as { files: MergerFile[]; availableSheets: string[] };
       setFiles(value.files);
       setAvailableSheets(value.availableSheets);
-      setTargetSheets(value.availableSheets);
+      // 历史恢复后检查同一批文件：自定义 Sheet 子集保留（一次性消费，
+      // 换文件清单照旧全选）。
+      const stash = restoredSheetsRef.current;
+      const sameSet = (a: string[], b: string[]) =>
+        a.length === b.length &&
+        [...a].sort().join("\n").toLowerCase() ===
+          [...b].sort().join("\n").toLowerCase();
+      const kept =
+        stash && sameSet(stash.paths, paths)
+          ? stash.targetSheets.filter((name) =>
+              value.availableSheets.includes(name),
+            )
+          : undefined;
+      if (stash && sameSet(stash.paths, paths)) restoredSheetsRef.current = null;
+      setTargetSheets(
+        kept && kept.length ? kept : value.availableSheets,
+      );
       setResult(value);
     } catch (e) {
       setError(errorText(e));
@@ -206,12 +303,26 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         : [...current, name],
     );
   }
+  const currentStep = excelMergerStep(paths.length, files.length, Boolean(job));
+  const clearFiles = async () => {
+    if (!paths.length) return;
+    if (
+      !(await confirmDialog({
+        title: "确认清空列表",
+        message: excelMergerClearPrompt(paths.length),
+        confirmLabel: "清空",
+        tone: "danger",
+      }))
+    )
+      return;
+    setPaths([]);
+  };
   return (
     <>
       <PageHeader
         eyebrow="批量 Excel 合并"
         title={tool.name}
-        detail="Rust 直接读取和写出表格；多 Sheet 模式通过 Excel 原生接口原样复制，不再调用 Python 合并库。"
+        detail="批量合并 Excel、CSV 与 TXT，可按 Sheet 范围和拼接方向生成结果。"
       />
       <StepIndicator
         steps={[
@@ -219,7 +330,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
           { key: "2", label: "合并规则", disabled: true },
           { key: "3", label: "执行合并", disabled: true },
         ]}
-        current={0}
+        current={currentStep}
       />
       <div className="merger-layout">
         <section className="form-card merger-source">
@@ -230,25 +341,26 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
           <button
             type="button"
             className="drop-zone"
+            data-tour="tool-upload"
             onClick={() => void chooseFiles()}
           >
             <strong>拖放文件或文件夹到窗口</strong>
             <span>支持 XLSX、XLS、XLSM、CSV、TXT，也可点击添加文件</span>
           </button>
           <div className="merger-toolbar">
-            <button className="secondary" onClick={() => void chooseFiles()}>
+            <Button variant="secondary" onClick={() => void chooseFiles()}>
               添加文件
-            </button>
-            <button className="secondary" onClick={() => void chooseFolder()}>
+            </Button>
+            <Button variant="secondary" onClick={() => void chooseFolder()}>
               扫描文件夹
-            </button>
-            <button
-              className="ghost"
+            </Button>
+            <Button
+              variant="destructive"
               disabled={!paths.length}
-              onClick={() => setPaths([])}
+              onClick={clearFiles}
             >
               清空列表
-            </button>
+            </Button>
           </div>
           <div className="file-queue">
             {paths.length ? (
@@ -262,25 +374,39 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
                       </strong>
                       <span>
                         {detail
-                          ? `${formatSize(detail.size)} · ${detail.sheets.length ? detail.sheets.join("、") : "文本文件"}`
-                          : path}
+                          ? `${formatSize(detail.size)} · ${detail.error ? "读取失败" : detail.sheets.length ? detail.sheets.join("、") : detail.format ?? "无工作表"}`
+                          : path.split(/[\\/]/).pop()}
                       </span>
                       {detail?.error && <em>{detail.error}</em>}
                     </div>
                     <div>
-                      <button
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`上移 ${detail?.name ?? path.split(/[\\/]/).pop() ?? "文件"}`}
+                        title="上移"
                         disabled={index === 0}
                         onClick={() => move(index, -1)}
                       >
                         ↑
-                      </button>
-                      <button
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`下移 ${detail?.name ?? path.split(/[\\/]/).pop() ?? "文件"}`}
+                        title="下移"
                         disabled={index === paths.length - 1}
                         onClick={() => move(index, 1)}
                       >
                         ↓
-                      </button>
-                      <button
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        aria-label={`移除 ${detail?.name ?? path.split(/[\\/]/).pop() ?? "文件"}`}
                         onClick={() =>
                           setPaths((current) =>
                             current.filter((_, i) => i !== index),
@@ -288,29 +414,37 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
                         }
                       >
                         移除
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 );
               })
             ) : (
-              <div className="empty compact">尚未添加文件</div>
+              <EmptyState
+                compact
+                title="尚未添加文件"
+                description="添加文件或扫描文件夹后，可检查 Sheet 并设置合并顺序。"
+              />
             )}
           </div>
           <div className="actions">
-            <button
-              className="secondary"
+            <Button
+              variant="secondary"
               disabled={busy || !paths.length}
               onClick={() => void inspect()}
             >
               检查文件与 Sheet
-            </button>
+            </Button>
           </div>
         </section>
         <section className="form-card merger-rules">
           <div className="section-title">
             <h2>2. 合并规则</h2>
-            <span className="pill ready">Rust 原生引擎</span>
+            <span>
+              {files.length
+                ? `已检查 ${files.length} 个文件`
+                : "检查后配置规则"}
+            </span>
           </div>
           <fieldset>
             <legend>输出目标</legend>
@@ -381,10 +515,20 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             <div className="sheet-picker">
               <div>
                 <span>目标 Sheet</span>
-                <button onClick={() => setTargetSheets(availableSheets)}>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => setTargetSheets(availableSheets)}
+                >
                   全选
-                </button>
-                <button onClick={() => setTargetSheets([])}>全不选</button>
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => setTargetSheets([])}
+                >
+                  全不选
+                </Button>
               </div>
               {availableSheets.length ? (
                 availableSheets.map((name) => (
@@ -398,15 +542,14 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
                   </label>
                 ))
               ) : (
-                <p>请先执行"检查文件与 Sheet"。</p>
+                <p>请先执行「检查文件与 Sheet」。</p>
               )}
             </div>
           )}
           <label className="check-row">
-            <input
-              type="checkbox"
+            <SwitchInput
               checked={addHyperlinks}
-              onChange={(e) => setAddHyperlinks(e.target.checked)}
+              onChange={setAddHyperlinks}
             />
             加入源文件超链接（大文件会降低导出速度）
           </label>
@@ -438,20 +581,23 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
               readOnly
               title={outputDirectory}
               placeholder="添加文件后自动填入默认保存目录"
+              aria-label="输出目录"
             />
-            <button
+            <Button
+              variant="secondary"
               className="browse"
               onClick={() => void chooseOutputDirectory()}
             >
               选择目录
-            </button>
+            </Button>
             {outputDirectoryTouched && (
-              <button
+              <Button
+                variant="secondary"
                 className="browse"
                 onClick={() => setOutputDirectoryTouched(false)}
               >
                 恢复默认
-              </button>
+              </Button>
             )}
           </div>
           <p className="output-hint">
@@ -464,20 +610,17 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
           {error && <div className="error-box">{error}</div>}
           <div className="actions">
             {busy && job ? (
-              <button
-                className="secondary"
+              <Button
+                variant="secondary"
                 onClick={() => void jobCancel(job.jobId)}
               >
+                <BusySpinner />
                 停止执行
-              </button>
+              </Button>
             ) : (
-              <button
-                className="primary"
-                disabled={!paths.length}
-                onClick={() => void start()}
-              >
+              <Button disabled={!paths.length} onClick={() => void start()}>
                 开始合并
-              </button>
+              </Button>
             )}
           </div>
         </section>
@@ -486,19 +629,29 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         <h2>进度与结果</h2>
         {job ? (
           <>
-            <div className={`job-banner ${job.severity}`}>
-              <strong>{job.message}</strong>
-            </div>
-            <progress
-              max={Math.max(job.total, 1)}
-              value={job.total ? job.current : 0}
-            />
+            <JobProgress job={job} />
             {result && <ResultView value={result} />}
           </>
         ) : result ? (
           <ResultView value={result} />
         ) : (
-          <div className="empty compact">检查结果和合并进度将在这里显示。</div>
+          <EmptyState
+            compact
+            title={
+              !paths.length
+                ? "等待添加文件"
+                : !files.length
+                  ? "等待检查文件结构"
+                  : "可以开始合并"
+            }
+            description={
+              !paths.length
+                ? "添加文件或扫描文件夹后，可在这里查看检查结果与合并进度。"
+                : !files.length
+                  ? "先检查文件与 Sheet，确认结构后再设置合并规则。"
+                  : "规则已就绪，开始合并后可在这里查看进度与输出结果。"
+            }
+          />
         )}
       </section>
     </>

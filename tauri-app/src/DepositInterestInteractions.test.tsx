@@ -154,6 +154,42 @@ const goToStep = (label: RegExp) =>
   fireEvent.click(screen.getByRole("button", { name: label }));
 
 describe("存款科目手工分类请求", () => {
+  it("未上传 TB 时给出明确状态且底部主按钮禁用", () => {
+    render(<DepositInterestPage tool={tool} />);
+    expect(
+      screen.getByRole("region", { name: "准备存款利息资料" }),
+    ).toBeVisible();
+    // 底部主按钮设防：没上传 TB 时禁用并给出浅色提示；
+    // 步骤条第二步不受影响（参考资料设计，允许直接点进去）。
+    expect(
+      screen.getByRole("button", { name: "下一步：科目与利率确认" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText("先加入科目余额表（TB）后可继续下一步。"),
+    ).toBeVisible();
+  });
+  it("自动匹配错误后可直接更换 TB Excel，并按 TB 重新自动识别", async () => {
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "拖放或选择 TB、序时账文件（可同时选择）",
+      }),
+    );
+    await screen.findByRole("button", { name: "fixture-tb.xlsx" });
+    mock.pickPath.mockResolvedValueOnce("manual-tb.xlsx");
+    fireEvent.click(screen.getByRole("button", { name: "fixture-tb.xlsx" }));
+    await waitFor(() =>
+      expect(mock.engineCall).toHaveBeenCalledWith("deposit.inspect_tb", {
+        source: {
+          inputPath: "manual-tb.xlsx",
+          sheet: "",
+          headerRow: 0,
+          headerDepth: 0,
+        },
+      }),
+    );
+    expect(await screen.findByText("manual-tb.xlsx")).toBeVisible();
+  });
   it("真实页面区分默认excluded和手工排除，并支持撤销手工选择", async () => {
     render(<DepositInterestPage tool={tool} />);
     fireEvent.click(
@@ -164,6 +200,14 @@ describe("存款科目手工分类请求", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled(),
     );
+    expect(mock.engineCall).toHaveBeenCalledWith("deposit.inspect_tb", {
+      source: {
+        inputPath: "fixture-tb.xlsx",
+        sheet: "TB",
+        headerRow: 0,
+        headerDepth: 0,
+      },
+    });
     goToStep(STEP2);
     const parentInput = await screen.findByRole("combobox", {
       name: `${parent}的分类`,
@@ -248,5 +292,70 @@ describe("利率手工填写", () => {
     expect(mock.jobStart.mock.calls[0][1]).toMatchObject({
       tierRates: { demand: 0.0005 },
     });
+  });
+});
+
+describe("JE 币种资料提示", () => {
+  it("在结果顶部说明分币种 JE 推导余额仅供参考", async () => {
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "拖放或选择 TB、序时账文件（可同时选择）",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled(),
+    );
+    goToStep(STEP2);
+    goToStep(STEP3);
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+
+    act(() =>
+      mock.event?.({
+        ...complete,
+        result: {
+          rows: [
+            {
+              key: "3110 | 1002013636 银行存款 | ",
+              entity: "3110",
+              account: "1002013636 银行存款",
+              auxiliary: "",
+              currency: "USD",
+              role: "deposit",
+              tier: "demand",
+              tierLabel: "活期存款",
+              category: "demand",
+              termLabel: "",
+              tierMatchedBy: "默认按活期",
+              rateSource: "活期挂牌默认值",
+              annualRate: 0.0005,
+              rateResolved: true,
+              rateWarning: "",
+              openingBalance: 100,
+              tbClosingBalance: 100,
+              derivedClosingBalance: 100,
+              reconciliationDiff: 0,
+              averageBalance: 100,
+              calculatedInterest: 0.05,
+              months: [],
+              status: "待复核",
+              note: "",
+            },
+          ],
+          summary: {
+            jeCurrencyAllocationWarning:
+              "JE 未提供或未映射币种字段，分币种的年末余额（JE推导）仅供参考。",
+          },
+        },
+      }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "JE 币种资料不完整",
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "分币种的年末余额（JE推导）仅供参考",
+    );
   });
 });

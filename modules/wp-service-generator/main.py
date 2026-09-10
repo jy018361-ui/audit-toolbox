@@ -7,13 +7,14 @@ from FY27_WP服务单生成工具 import run_generation
 from generate_wp_project_workbook import (
     find_section_list_file,
     find_service_order_file,
+    find_my_orders_file,
 )
 
 
 def main(parent=None):
     selected = filedialog.askdirectory(
         parent=parent,
-        title="选择包含FY27 WP服务单和Section List的文件夹",
+        title="选择包含WP服务单、Section List和我的订单的文件夹",
     )
     if not selected:
         return
@@ -22,6 +23,7 @@ def main(parent=None):
     try:
         service_order_path = find_service_order_file(folder)
         section_list_path = find_section_list_file(folder)
+        my_orders_path = find_my_orders_file(folder)
     except Exception as exc:
         messagebox.showerror(
             "FY27 WP服务单生成工具",
@@ -49,6 +51,7 @@ def main(parent=None):
             f"IPO archive：{result['ipo_archive_rows']}个\n\n"
             f"WP服务单：{service_order_path.name}\n"
             f"Section List：{section_list_path.name}\n\n"
+            f"我的订单：{my_orders_path.name}\n\n"
             "输出文件：FY27+WP服务单汇总.xlsx"
         ),
         parent=parent,

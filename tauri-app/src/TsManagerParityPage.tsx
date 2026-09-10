@@ -8,6 +8,7 @@ import {
   pickPath,
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
@@ -27,8 +28,11 @@ import {
 } from "@/components/ColumnFilterMenu";
 import { StatGrid } from "@/components/StatGrid";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { EmptyState } from "@/components/EmptyState";
+import "./ts-manager.css";
 
 type TsInspect = {
   headers?: string[];
@@ -295,6 +299,57 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     setStep(1);
   }
 
+  // 历史记录「继续任务」：回填文件/Sheet/标题行/输出路径，并自动重新加载
+  // 文件——筛选与导出都以表头为显示前提，不重读用户看到的还是空页。存档
+  // 筛选暂存在 ref 里：加载完成后 applyInspect 用它顶替引擎默认筛选。
+  const restoredSelections = useRef<Record<string, string[]> | null>(null);
+  const autoLoadPathRef = useRef("");
+  const [autoLoadSeq, setAutoLoadSeq] = useState(0);
+  useTaskRestore(tool.id, (restore) => {
+    const p = restore.params as {
+      inputPath?: string;
+      sheet?: string;
+      headerRow?: number;
+      outputPath?: string;
+      filters?: Array<{ field?: unknown; values?: unknown }>;
+    };
+    if (typeof p.inputPath !== "string" || !p.inputPath) return;
+    const selections: Record<string, string[]> = {};
+    for (const filter of Array.isArray(p.filters) ? p.filters : []) {
+      if (
+        filter &&
+        typeof filter.field === "string" &&
+        Array.isArray(filter.values)
+      )
+        selections[filter.field] = filter.values as string[];
+    }
+    restoredSelections.current = Object.keys(selections).length
+      ? selections
+      : null;
+    autoLoadPathRef.current = p.inputPath;
+    setAutoLoadSeq((value) => value + 1);
+    resetForNewSource({
+      inputPath: p.inputPath,
+      sheet: typeof p.sheet === "string" ? p.sheet : "",
+      headerRow:
+        p.headerRow != null && Number.isFinite(Number(p.headerRow))
+          ? String(p.headerRow)
+          : "1",
+      outputPath: typeof p.outputPath === "string" ? p.outputPath : "",
+    });
+    if (Object.keys(selections).length)
+      setState((current) => ({ ...current, selections }));
+  });
+
+  // 恢复的来源提交到 state 后自动触发加载（setState 异步；seq 触发器保证
+  // 来源恰好与恢复前相同时也会执行）。
+  useEffect(() => {
+    if (!autoLoadPathRef.current) return;
+    if (state.inputPath !== autoLoadPathRef.current) return;
+    autoLoadPathRef.current = "";
+    void inspect();
+  }, [autoLoadSeq, state.inputPath]);
+
   async function chooseInput() {
     const selected = await pickPath(
       "file",
@@ -337,13 +392,17 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     const defaults = value.defaults ?? {};
     const defaultField = String(defaults.filterField ?? "").trim();
     const defaultValue = String(defaults.filterValue ?? "").trim();
+    // 历史恢复暂存的筛选优先于引擎默认筛选；一次性消费。
+    const restored = restoredSelections.current;
+    restoredSelections.current = null;
     setValueCache({});
     setState((current) => ({
       ...current,
       inspect: value,
       sheet: value.selectedSheet ?? current.sheet,
       selections:
-        defaultField && defaultValue ? { [defaultField]: [defaultValue] } : {},
+        restored ??
+        (defaultField && defaultValue ? { [defaultField]: [defaultValue] } : {}),
       filtered: undefined,
     }));
   }
@@ -531,7 +590,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
   const totalRows = state.inspect?.dimensions?.rows ?? 0;
   const shownRows = state.filtered?.rows ?? totalRows;
   return (
-    <>
+    <div className="ts-manager-page">
       <PageHeader
         eyebrow="Timesheet 透视"
         title={tool.name}
@@ -556,7 +615,18 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   ? "2. 条件筛选（在预览表头按列勾选）"
                   : "3. 输出与导出"}
             </CardTitle>
-            <Badge className="badge-ready">已就绪</Badge>
+            <Badge
+              variant="outline"
+              className={
+                busy
+                  ? "badge-info"
+                  : headers.length
+                    ? "badge-ready"
+                    : "badge-neutral"
+              }
+            >
+              {busy ? "处理中" : headers.length ? "文件已加载" : "待加载文件"}
+            </Badge>
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
@@ -605,7 +675,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                         ))}
                       </select>
                     ) : (
-                      <input
+                      <Input
                         value={state.sheet}
                         onChange={(event) => {
                           patch({ sheet: event.target.value });
@@ -615,7 +685,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                     )}
                   </Field>
                   <Field label="标题行（默认 1）">
-                    <input
+                    <Input
                       type="number"
                       min={1}
                       max={50}
@@ -656,9 +726,11 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                   的自动筛选一致。
                 </p>
                 {filters.length === 0 ? (
-                  <div className="empty">
-                    当前没有筛选条件，导出会包含全部 {totalRows} 行。
-                  </div>
+                  <EmptyState
+                    compact
+                    title="尚未添加筛选条件"
+                    description={`导出将包含全部 ${totalRows} 行。可在下方预览表头按列筛选，或直接进入导出。`}
+                  />
                 ) : (
                   <>
                     <div className="chip-list">
@@ -670,13 +742,15 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                               ? `${entry.values.slice(0, 2).join("、")} 等 ${entry.values.length} 项`
                               : entry.values.join("、")}
                           </span>
-                          <button
+                          <Button
+                            variant="ghost"
+                            size="sm"
                             type="button"
                             aria-label={`清除 ${entry.field} 的筛选`}
                             onClick={() => clearFilter(entry.field)}
                           >
                             ×
-                          </button>
+                          </Button>
                         </span>
                       ))}
                     </div>
@@ -833,12 +907,19 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
             )}
             {outputPaths.length > 0 && (
               <div className="output-list">
+                <p className="ts-result-overview" role="status">
+                  <Badge variant="outline" className="badge-ready">
+                    导出完成
+                  </Badge>
+                  <span>请打开文件核对筛选范围与汇总结果。</span>
+                </p>
                 {outputPaths.map((path) => (
                   <Button
                     type="button"
                     variant="secondary"
                     size="sm"
                     key={path}
+                    title={path}
                     onClick={() => void openOutput(path)}
                   >
                     打开：{displayFileName(path)}
@@ -847,9 +928,11 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
               </div>
             )}
             {!state.inspect && !job && (
-              <div className="empty">
-                加载文件后可核对表头、前 20 行，并在表头按列筛选。
-              </div>
+              <EmptyState
+                compact
+                title="准备工时数据"
+                description="选择 Timesheet 文件并加载后，可核对表头和前 20 行，再按列筛选。"
+              />
             )}
           </CardContent>
         </Card>
@@ -867,7 +950,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
           onClose={() => setMenu(undefined)}
         />
       )}
-    </>
+    </div>
   );
 }
 

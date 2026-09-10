@@ -2,11 +2,19 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ReleaseNotesSchema } from "./updateNotes";
+import { version as appVersion } from "../package.json";
+import { demoDataEnabled, demoJobLookup, demoLookup, demoPath,
+  cancelDemoJob, emitDemoJobEvent, isDemoJobCancelled, subscribeDemoJobs } from "./preview/demoRegistry";
+import "./preview/layoutAudit";
 import {
   BootstrapSchema,
+  HistoryRowSchema,
   JobEventSchema,
+  TaskRestoreSchema,
   ToolManifestSchema,
+  type HistoryRow,
   type JobEvent,
+  type TaskRestore,
 } from "./types";
 
 const inTauri = () =>
@@ -20,12 +28,12 @@ let previewSettings: Record<string, unknown> = {};
 let previewAudiPickProjects: Array<Record<string, unknown>> = [];
 
 const previewUnavailable = (action: string) =>
-  new Error(`浏览器预览模式不能${action}，请使用 Tauri 应用。`);
+  new Error(`浏览器预览模式不能${action}，请使用桌面应用。`);
 
 export async function appBootstrap() {
   if (!inTauri())
     return BootstrapSchema.parse({
-      appVersion: "web-preview",
+      appVersion,
       platform: "windows",
       arch: "x64",
       webview2: true,
@@ -84,37 +92,10 @@ export async function engineCall(
   params: Record<string, unknown>,
 ) {
   if (!inTauri()) {
-    // Project-only AudiPick mocks make the browser preview useful for checking
-    // the real dashboard, creation modal and empty project page. PDF/OCR/AI
-    // operations remain Tauri-only and still fail clearly below.
-    if (method === "audipick.projects")
-      return { projects: previewAudiPickProjects };
-    if (method === "audipick.project_save") {
-      const project = params.project as { id?: string } | undefined;
-      if (!project?.id) throw new Error("预览项目缺少项目 ID。");
-      previewAudiPickProjects = [
-        ...previewAudiPickProjects.filter(
-          (item) =>
-            (item.project as { id?: string } | undefined)?.id !== project.id,
-        ),
-        structuredClone(params),
-      ];
-      return { saved: true, id: project.id };
-    }
-    if (method === "audipick.project_delete") {
-      const id = String(params.id ?? "");
-      previewAudiPickProjects = previewAudiPickProjects.filter(
-        (item) => (item.project as { id?: string } | undefined)?.id !== id,
-      );
-      return { deleted: true, id };
-    }
-    if (method === "audipick.documents")
-      return { projectId: params.projectId, documents: [] };
-    if (method === "audipick.config_status")
-      return {
-        llm: { ready: false },
-        ocr: { ready: false, engine: "ai" },
-      };
+    // 演示数据通道：仅浏览器预览 + localStorage 开关打开时生效，
+    // 用仓库内固定样例回放引擎返回，让"有数据之后"的布局可被随时检查。
+    const handler = demoLookup(method);
+    if (handler) return structuredClone(handler(params));
     throw new Error("浏览器预览模式不能处理本地文件，请使用 Tauri 应用。 ");
   }
   const id = ++syncBusySeq;
@@ -128,21 +109,76 @@ export async function engineCall(
   }
 }
 
+let demoJobSeq = 0;
+
+// 演示任务的 toolId：与 Rust 侧（excel_merger.rs 的 tool_id()）同一套
+// 「方法前缀 → 工具 id」映射。页面按 toolId 过滤事件（如 Excel_Merger、
+// je_sign_mark），直接取方法名第一段会对不上，演示事件会被页面当串台丢弃。
+const DEMO_JOB_TOOL_ID_RULES: Array<[prefix: string, toolId: string]> = [
+  ["wp.", "wp_service_generator"],
+  ["confirmation.", "confirmation_progress"],
+  ["file_list.", "file_list_directory"],
+  ["ts.", "ts_manager"],
+  ["kanzhang.mark_", "je_sign_mark"],
+  ["kanzhang.", "kanzhang"],
+  ["audipick.", "audipick"],
+  ["tbje_check.", "tbje_check"],
+  ["fa.dep_", "fa_dep_calc"],
+  ["fa.policy_", "fa_policy_compare"],
+  ["fa.", "fa_list"],
+  ["roll_forward.", "audit_roll_forward"],
+  ["fx.", "fx_audit"],
+  ["deposit.", "deposit_interest"],
+  ["loan.", "loan_interest"],
+  ["pdf2excel.", "pdf_to_excel"],
+  ["fuzzy.", "fuzzy_match"],
+];
+
+const demoJobToolId = (method: string): string =>
+  DEMO_JOB_TOOL_ID_RULES.find(([prefix]) => method.startsWith(prefix))?.[1] ??
+  "Excel_Merger";
+
 export async function jobStart(
   method: string,
   params: Record<string, unknown>,
 ) {
-  if (!inTauri())
-    throw new Error("浏览器预览模式不能启动任务，请使用 Tauri 应用。");
+  if (!inTauri()) {
+    // 演示任务通道：按样例剧本回放"排队→进行→完成"事件流，让任务完成后的
+    // 数据化布局（筛选结果、导出文件、批次摘要）在预览模式同样可达。
+    const planner = demoJobLookup(method);
+    if (!planner)
+      throw new Error("浏览器预览模式不能启动任务，请使用 Tauri 应用。");
+    const jobId = `demo-job-${++demoJobSeq}`;
+    const toolId = demoJobToolId(method);
+    const events = planner(params);
+    events.forEach((event, index) => {
+      window.setTimeout(() => {
+        if (isDemoJobCancelled(jobId)) return;
+        emitDemoJobEvent({ ...event, jobId, toolId });
+      }, 260 * (index + 1));
+    });
+    return Promise.resolve(jobId);
+  }
   return invoke<string>("job_start", { method, params });
 }
 
-export const jobCancel = (jobId: string) =>
-  inTauri() ? invoke<boolean>("job_cancel", { jobId }) : Promise.resolve(false);
+export const jobCancel = (jobId: string) => {
+  if (!inTauri()) return Promise.resolve(cancelDemoJob(jobId));
+  return invoke<boolean>("job_cancel", { jobId });
+};
 export const jobPause = (jobId: string, paused: boolean) =>
   inTauri()
     ? invoke<boolean>("job_pause", { jobId, paused })
     : Promise.resolve(false);
+/** 使用统计：静默上报，浏览器预览模式直接空操作。 */
+export const telemetryTrack = (event: string, toolId?: string, toolName?: string) =>
+  inTauri()
+    ? invoke<void>("telemetry_track", {
+        event,
+        toolId: toolId ?? null,
+        toolName: toolName ?? null,
+      })
+    : Promise.resolve();
 export const openOutput = (path: string) =>
   inTauri()
     ? invoke<void>("open_output", { path })
@@ -161,7 +197,6 @@ export async function updateReleaseNotes(targetVersion?: string) {
     await invoke("update_release_notes", { targetVersion }),
   );
 }
-type HistoryRow = Record<string, unknown>;
 let historyCache: HistoryRow[] | undefined;
 let historyRequest: Promise<HistoryRow[]> | undefined;
 let historyGeneration = 0;
@@ -172,7 +207,14 @@ export function historyGet(): Promise<HistoryRow[]> {
   if (historyCache) return Promise.resolve(historyCache);
   if (historyRequest) return historyRequest;
   const generation = historyGeneration;
-  const request = invoke<HistoryRow[]>("history_get")
+  const request = invoke<unknown>("history_get")
+    .then((rows) =>
+      Promise.all(
+        (Array.isArray(rows) ? rows : []).map((row) =>
+          HistoryRowSchema.parse(row),
+        ),
+      ),
+    )
     .then((rows) => {
       if (generation === historyGeneration) historyCache = rows;
       return rows;
@@ -195,6 +237,13 @@ export async function historyClear(): Promise<{ removed: number }> {
   const result = await invoke<{ removed: number }>("history_clear");
   invalidateHistoryCache();
   return result;
+}
+
+/** 「继续任务」：取回该任务的输入参数存档（Rust 侧会重新授权仍存在的
+ * 原输入路径），前端据此跳到对应工具页回填表单。 */
+export async function historyRestore(jobId: string): Promise<TaskRestore> {
+  if (!inTauri()) throw previewUnavailable("恢复历史任务");
+  return TaskRestoreSchema.parse(await invoke("history_restore", { jobId }));
 }
 export const settingsSet = (settings: Record<string, unknown>) => {
   if (inTauri()) return invoke<void>("settings_set", { settings });
@@ -240,7 +289,14 @@ export const pickPath = (
   defaultName?: string,
   defaultDirectory?: string,
 ) => {
-  if (!inTauri()) return Promise.resolve(null);
+  if (!inTauri()) {
+    if (demoDataEnabled()) {
+      return Promise.resolve(
+        kind === "files" ? [demoPath("样例文件.xlsx")] : demoPath("样例文件"),
+      );
+    }
+    return Promise.resolve(null);
+  }
   return invoke<string | string[] | null>("pick_path", {
     kind,
     title,
@@ -253,7 +309,10 @@ export const pickPath = (
 export async function listenJobEvents(
   callback: (event: JobEvent) => void,
 ): Promise<UnlistenFn> {
-  if (!inTauri()) return () => undefined;
+  if (!inTauri()) {
+    if (demoDataEnabled()) return subscribeDemoJobs(callback);
+    return () => undefined;
+  }
   return listen("job-event", (e) => callback(JobEventSchema.parse(e.payload)));
 }
 

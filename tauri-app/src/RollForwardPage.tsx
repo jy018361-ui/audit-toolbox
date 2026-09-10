@@ -10,8 +10,10 @@ import {
   settingsSet,
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { errorText } from "@/lib/errors";
 import { useJobPause } from "@/components/JobDialog";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import {
   parseRollForwardCraRatio,
   rollForwardCraWriteRecords,
@@ -21,6 +23,14 @@ import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
 import { ErrorBox } from "@/components/ErrorBox";
 import { ResultView } from "@/components/ResultView";
+import { Button } from "@/components/ui/button";
+import { FileInput } from "@/components/FileInput";
+import { Badge } from "@/components/ui/badge";
+import { EmptyState } from "@/components/EmptyState";
+import { SwitchInput } from "@/components/SwitchInput";
+import { JobProgress } from "@/components/JobProgress";
+import { Card } from "@/components/ui/card";
+import "./roll-forward.css";
 type RollSubject = {
   code: string;
   name: string;
@@ -235,6 +245,18 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
         setRollPreferences(loadedPreferences);
         preferencesRef.current = loadedPreferences;
         loadedRef.current = true;
+        // 挂载期间到达的历史恢复排队到这里执行，避免被刚加载的项目列表覆盖。
+        const pendingRestore = pendingRestoreRef.current;
+        if (pendingRestore) {
+          pendingRestoreRef.current = null;
+          if (pendingRestore.templateDir)
+            setTemplateDir(pendingRestore.templateDir);
+          if (pendingRestore.pmtePath) setPmtePath(pendingRestore.pmtePath);
+          setProjects([...loaded, pendingRestore.project]);
+          setProjectIndex(loaded.length);
+          setCompanyIndex(0);
+          void saveProjects([...loaded, pendingRestore.project]);
+        }
       })
       .catch((e) => setError(errorText(e)));
   }, []);
@@ -411,14 +433,18 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
     setCompanyIndex(project.companies.length);
     void saveProjects(next);
   }
-  function deleteProject() {
+  async function deleteProject() {
     if (projects.length <= 1) {
       setError("工作台中至少保留一个项目。");
       return;
     }
     if (
       !project ||
-      !window.confirm(`确认删除项目“${project.project_name}”及其公司配置？`)
+      !(await confirmDialog({
+        title: "确认删除项目",
+        message: `确认删除项目“${project.project_name}”及其公司配置？`,
+        tone: "danger",
+      }))
     )
       return;
     const next = projects.filter((_, index) => index !== projectIndex);
@@ -427,7 +453,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
     setCompanyIndex(0);
     void saveProjects(next);
   }
-  function deleteCompany() {
+  async function deleteCompany() {
     if ((project?.companies.length ?? 0) <= 1) {
       setError("项目中至少保留一个公司。");
       return;
@@ -435,7 +461,11 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
     if (
       !project ||
       !company ||
-      !window.confirm(`确认删除公司“${company.name}”？`)
+      !(await confirmDialog({
+        title: "确认删除公司",
+        message: `确认删除公司“${company.name}”？`,
+        tone: "danger",
+      }))
     )
       return;
     const next = projects.map((p, index) =>
@@ -477,6 +507,105 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
       llmWordingRevision: target.llm_wording_revision,
     };
   }
+
+  // 历史记录「继续任务」：把存档的公司参数逆向还原成一个新项目（不动现有
+  // 项目——它们持久化在设置里，覆盖等于毁掉用户现行工作）。模板目录与
+  // PMTE 路径直接回填页面；新建项目自动保存，不用了可整项删除。页面挂载时
+  // 项目列表还在异步加载，恢复必须排队到加载完成之后，否则会被覆盖。
+  const pendingRestoreRef = useRef<{
+    project: RollProject;
+    templateDir?: string;
+    pmtePath?: string;
+  } | null>(null);
+  const applyRestoredProject = (restored: {
+    project: RollProject;
+    templateDir?: string;
+    pmtePath?: string;
+  }) => {
+    if (restored.templateDir) setTemplateDir(restored.templateDir);
+    if (restored.pmtePath) setPmtePath(restored.pmtePath);
+    setProjects((current) => {
+      const next = [...current, restored.project];
+      void saveProjects(next);
+      return next;
+    });
+    setProjectIndex(projects.length);
+    setCompanyIndex(0);
+    setError("");
+    setValidation(undefined);
+  };
+  useTaskRestore(tool.id, (restore) => {
+    const companyOfParams = (raw: unknown): RollCompany | undefined => {
+      const p = (raw && typeof raw === "object" ? raw : {}) as Record<
+        string,
+        unknown
+      >;
+      const priorDir = typeof p.priorDir === "string" ? p.priorDir : "";
+      if (!priorDir) return undefined;
+      const craRecords = Array.isArray(p.craRecords)
+        ? (p.craRecords as Array<Record<string, unknown>>)
+        : [];
+      return {
+        ...newRollCompany(
+          typeof p.companyName === "string" && p.companyName
+            ? p.companyName
+            : "恢复的公司",
+        ),
+        prior_path: priorDir,
+        output_dir: typeof p.outputDir === "string" ? p.outputDir : "",
+        subjects: Array.isArray(p.subjectCodes)
+          ? p.subjectCodes.map(String)
+          : [],
+        bs_date: typeof p.bsDate === "string" ? p.bsDate : "",
+        functional_currency:
+          typeof p.functionalCurrency === "string"
+            ? p.functionalCurrency
+            : "人民币",
+        accounting_standard:
+          typeof p.accountingStandard === "string"
+            ? p.accountingStandard
+            : "企业会计准则",
+        pm: typeof p.pmValue === "string" ? p.pmValue : "",
+        te: typeof p.teValue === "string" ? p.teValue : "",
+        sad: typeof p.sadValue === "string" ? p.sadValue : "",
+        roll_wording: Boolean(p.rollForwardWording),
+        generate_summary: p.generate_summary !== false,
+        cra_table_records: craRecords,
+        apply_cra: craRecords.length > 0,
+        llm_enhanced: Boolean(p.llmEnhanced),
+        llm_wording_revision: Boolean(p.llmWordingRevision),
+      };
+    };
+    const single = companyOfParams(restore.params);
+    const batch = Array.isArray(restore.params.companies)
+      ? (restore.params.companies as unknown[])
+          .map(companyOfParams)
+          .filter((c): c is RollCompany => Boolean(c))
+      : [];
+    const companies = single ? [single] : batch;
+    if (!companies.length) return;
+    const stamp = new Date().toISOString().slice(0, 10);
+    const restored = {
+      project: {
+        id: crypto.randomUUID(),
+        project_name: `恢复-${companies[0]?.name ?? "项目"}-${stamp}`,
+        project_year: companies[0]?.bs_date?.slice(0, 4) ?? "",
+        companies,
+        updated_at: new Date().toISOString(),
+      } as RollProject,
+      templateDir:
+        typeof restore.params.templateDir === "string" &&
+        restore.params.templateDir
+          ? restore.params.templateDir
+          : undefined,
+      pmtePath:
+        typeof restore.params.pmtePath === "string" && restore.params.pmtePath
+          ? restore.params.pmtePath
+          : undefined,
+    };
+    if (loadedRef.current) applyRestoredProject(restored);
+    else pendingRestoreRef.current = restored;
+  });
   const params = () => paramsFor(company);
   async function validate() {
     if (!company) return;
@@ -560,7 +689,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
   }
   async function start() {
     if (!company) return;
-    if (!ensureCraReady([company])) return;
+    if (!(await ensureCraReady([company]))) return;
     setError("");
     setBusy(true);
     try {
@@ -590,7 +719,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
   }
   async function startAllCompanies() {
     if (!project) return;
-    if (!ensureCraReady(project.companies)) return;
+    if (!(await ensureCraReady(project.companies))) return;
     setError("");
     setBusy(true);
     try {
@@ -624,7 +753,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
-  function ensureCraReady(targets: RollCompany[]) {
+  async function ensureCraReady(targets: RollCompany[]) {
     const unresolved = targets.filter((target) => {
       if (target.cra_skip_confirmed) return false;
       return !(target.cra_table_records.length && target.apply_cra);
@@ -639,9 +768,10 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
         return `${target.name}：尚未提供 CRA`;
       })
       .join("\n");
-    const confirmed = window.confirm(
-      `执行前 CRA 确认\n\n${detail}\n\n确定本次不使用这些 CRA 并继续吗？`,
-    );
+    const confirmed = await confirmDialog({
+      title: "执行前 CRA 确认",
+      message: `${detail}\n\n确定本次不使用这些 CRA 并继续吗？`,
+    });
     if (!confirmed)
       setError("已取消执行。请解析并启用 CRA，或明确选择本次不使用 CRA。");
     if (confirmed) {
@@ -666,18 +796,18 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
     return (
       <>
         <PageHeader
-          eyebrow="完整迁移工具"
+          eyebrow="底稿年度结转"
           title={tool.name}
           detail="项目、公司、科目、CRA 与处理任务统一保存在工具箱中。"
         />
-        <section className="list-card">
-          <div className="empty">还没有 Roll Forward 项目。</div>
+        <Card className="list-card" variant="section">
+          <EmptyState title="还没有年度结转项目" description="先创建项目与公司，再选择上年底稿、输出位置和需要结转的科目。" />
           <div className="actions">
-            <button className="primary" onClick={addProject}>
+            <Button variant="default" onClick={addProject}>
               新建项目
-            </button>
+            </Button>
           </div>
-        </section>
+        </Card>
       </>
     );
   }
@@ -686,7 +816,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
       <PageHeader
         eyebrow="底稿年度结转"
         title={tool.name}
-        detail="Rust 原生结转内核统一管理项目、CRA、进度、安全暂停与取消。"
+        detail="按公司选择上年底稿与科目，确认风险评估信息，检查后生成本年度底稿。"
       />
       <StepIndicator
         steps={[
@@ -695,7 +825,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
           { key: "3", label: "CRA 解析与确认", disabled: true },
           { key: "4", label: "运行检查与结果", disabled: true },
         ]}
-        current={0}
+        current={job || validation !== undefined ? 3 : company?.subjects.length && company.prior_path ? 2 : company ? 1 : 0}
       />
       <ErrorBox error={error} onDismiss={() => setError("")} />
       <div className="merger-layout">
@@ -703,12 +833,12 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
           <div className="section-title">
             <h2>1. 项目与公司</h2>
             <div className="actions compact-actions">
-              <button className="secondary" onClick={addProject}>
+              <Button variant="secondary" onClick={addProject}>
                 新建项目
-              </button>
-              <button className="danger" onClick={deleteProject}>
+              </Button>
+              <Button variant="destructive" onClick={deleteProject}>
                 删除项目
-              </button>
+              </Button>
             </div>
           </div>
           <label className="field">
@@ -772,12 +902,12 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
                   </option>
                 ))}
               </select>
-              <button className="browse" onClick={addCompany}>
+              <Button variant="outline" onClick={addCompany}>
                 添加公司
-              </button>
-              <button className="danger" onClick={deleteCompany}>
+              </Button>
+              <Button variant="destructive" onClick={deleteCompany}>
                 删除公司
-              </button>
+              </Button>
             </div>
           </label>
           {company && (
@@ -868,26 +998,26 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
             kind="folder"
           />
           <PathField
-            label="上年底稿目录或单个 XLSX"
+            label="上年底稿目录或单个 XLSX / XLS"
             value={company?.prior_path ?? ""}
             onChange={(value) => updateCompany({ prior_path: value })}
             kind="folder"
             allowFile
           />
           <div className="actions">
-            <button
-              className="secondary"
+            <Button
+              variant="secondary"
               disabled={!company?.prior_path.trim()}
               onClick={() => void detectSubjects()}
             >
               从文件名自动识别科目
-            </button>
-            <button
-              className="ghost"
+            </Button>
+            <Button
+              variant="ghost"
               onClick={() => updateCompany({ prior_path: "", subjects: [] })}
             >
               清空上年底稿
-            </button>
+            </Button>
           </div>
           <PathField
             label="输出目录"
@@ -926,26 +1056,24 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
               kind="folder"
             />
             <label className="check-row">
-              <input
-                type="checkbox"
+              <SwitchInput
                 checked={rollPreferences.rememberLastProject}
-                onChange={(e) =>
+                onChange={(c) =>
                   setRollPreferences((current) => ({
                     ...current,
-                    rememberLastProject: e.target.checked,
+                    rememberLastProject: c,
                   }))
                 }
               />
               记住最后选择的项目与公司
             </label>
             <label className="check-row">
-              <input
-                type="checkbox"
+              <SwitchInput
                 checked={rollPreferences.openOutputAfterSuccess}
-                onChange={(e) =>
+                onChange={(c) =>
                   setRollPreferences((current) => ({
                     ...current,
-                    openOutputAfterSuccess: e.target.checked,
+                    openOutputAfterSuccess: c,
                   }))
                 }
               />
@@ -975,68 +1103,57 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
             ))}
           </div>
           <div className="actions">
-            <button
-              className="ghost"
+            <Button
+              variant="ghost"
               onClick={() =>
                 updateCompany({ subjects: subjects.map((item) => item.code) })
               }
             >
               全选科目
-            </button>
-            <button
-              className="ghost"
+            </Button>
+            <Button
+              variant="ghost"
               onClick={() => updateCompany({ subjects: [] })}
             >
               清空科目
-            </button>
+            </Button>
           </div>
           <label className="check-row">
-            <input
-              type="checkbox"
+            <SwitchInput
               checked={company?.roll_wording ?? false}
-              onChange={(e) =>
-                updateCompany({ roll_wording: e.target.checked })
-              }
+              onChange={(c) => updateCompany({ roll_wording: c })}
             />
             结转 wording / 分析说明 / 调整分录汇总
           </label>
           <label className="check-row">
-            <input
-              type="checkbox"
+            <SwitchInput
               checked={company?.generate_summary ?? true}
-              onChange={(e) =>
-                updateCompany({ generate_summary: e.target.checked })
-              }
+              onChange={(c) => updateCompany({ generate_summary: c })}
             />
             生成 Roll Forward Summary
           </label>
           <label className="check-row">
-            <input
-              type="checkbox"
+            <SwitchInput
               checked={company?.llm_enhanced ?? false}
-              onChange={(e) =>
-                updateCompany({ llm_enhanced: e.target.checked })
-              }
+              onChange={(c) => updateCompany({ llm_enhanced: c })}
             />
-            启用全局 LLM 增强预检与 Review
+            启用 AI 辅助运行前检查与复核
           </label>
           <label className="check-row">
-            <input
-              type="checkbox"
+            <SwitchInput
               checked={company?.llm_wording_revision ?? false}
-              onChange={(e) =>
+              onChange={(c) =>
                 updateCompany({
-                  llm_wording_revision: e.target.checked,
-                  llm_enhanced:
-                    e.target.checked || company?.llm_enhanced || false,
+                  llm_wording_revision: c,
+                  llm_enhanced: c || company?.llm_enhanced || false,
                 })
               }
             />
-            允许 LLM 修订已标黄 wording
+            允许 AI 修订已标黄的底稿表述
           </label>
           {(company?.llm_enhanced || company?.llm_wording_revision) && (
             <small className="muted-copy">
-              使用工具箱“设置”中的全局 LLM 配置；不会在项目数据中保存密钥。
+              使用工具箱“设置”中的 AI 服务配置；相关底稿内容会发送至该服务，项目数据不保存服务密钥。
             </small>
           )}
         </section>
@@ -1057,15 +1174,15 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
           }
         />
         <div className="actions">
-          <button
-            className="secondary"
+          <Button
+            variant="secondary"
             disabled={!company?.cra_text.trim()}
             onClick={() => void parseCra()}
           >
             解析 CRA
-          </button>
-          <button
-            className="ghost"
+          </Button>
+          <Button
+            variant="ghost"
             disabled={!company?.cra_text && !company?.cra_table_records.length}
             onClick={() => {
               updateCompany({
@@ -1079,15 +1196,14 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
             }}
           >
             清空 CRA
-          </button>
+          </Button>
           <label className="check-row">
-            <input
-              type="checkbox"
+            <SwitchInput
               disabled={!company?.cra_table_records.length}
               checked={company?.apply_cra ?? false}
-              onChange={(e) =>
+              onChange={(c) =>
                 updateCompany({
-                  apply_cra: e.target.checked,
+                  apply_cra: c,
                   cra_skip_confirmed: false,
                 })
               }
@@ -1095,15 +1211,12 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
             将 {company?.cra_table_records.length ?? 0} 条确认记录写入底稿
           </label>
           <label className="check-row">
-            <input
-              type="checkbox"
+            <SwitchInput
               checked={company?.cra_skip_confirmed ?? false}
-              onChange={(e) =>
+              onChange={(c) =>
                 updateCompany({
-                  cra_skip_confirmed: e.target.checked,
-                  apply_cra: e.target.checked
-                    ? false
-                    : (company?.apply_cra ?? false),
+                  cra_skip_confirmed: c,
+                  apply_cra: c ? false : (company?.apply_cra ?? false),
                 })
               }
             />
@@ -1171,17 +1284,16 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
               </select>
             </label>
             <label className="check-row">
-              <input
-                type="checkbox"
+              <SwitchInput
                 checked={craExceptionOnly}
-                onChange={(e) => setCraExceptionOnly(e.target.checked)}
+                onChange={setCraExceptionOnly}
               />
               仅看异常/需确认
             </label>
           </div>
         )}
         {!!company?.cra_table_records.length && (
-          <div className="mapping-table">
+          <div className="mapping-table roll-cra-scroll" tabIndex={0} role="region" aria-label="风险评估记录，可横向滚动">
             <div className="mapping-row mapping-head roll-cra-row">
               <span>写入</span>
               <span>底稿科目</span>
@@ -1223,13 +1335,12 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
                   key={`${String(record.subject_code)}-${index}`}
                 >
                   <label className="check-row">
-                    <input
-                      type="checkbox"
+                    <SwitchInput
                       checked={Boolean(record.apply)}
-                      onChange={(e) =>
+                      onChange={(c) =>
                         updateCraRecord(index, {
-                          apply: e.target.checked,
-                          match_status: e.target.checked ? "将写入" : "不写入",
+                          apply: c,
+                          match_status: c ? "将写入" : "不写入",
                         })
                       }
                     />
@@ -1290,81 +1401,80 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
           <span>{company?.status}</span>
         </div>
         <div className="actions">
-          <button
-            className="secondary"
+          <Button
+            variant="secondary"
             onClick={() =>
               void saveProjects().catch((e) => setError(errorText(e)))
             }
           >
             保存项目
-          </button>
-          <button className="secondary" onClick={() => void exportProject()}>
+          </Button>
+          <Button variant="secondary" onClick={() => void exportProject()}>
             导出项目
-          </button>
-          <button
-            className="secondary"
+          </Button>
+          <Button
+            variant="secondary"
             disabled={busy}
             onClick={() => void validate()}
           >
             运行前检查
-          </button>
-          <button
-            className="primary"
+          </Button>
+          <Button
+            variant="default"
             disabled={busy || !company?.subjects.length}
             onClick={() => void start()}
           >
             开始结转
-          </button>
-          <button
-            className="primary"
+          </Button>
+          <Button
+            variant="default"
             disabled={
               busy || project.companies.some((item) => !item.subjects.length)
             }
             onClick={() => void startAllCompanies()}
           >
             处理全部公司
-          </button>
+          </Button>
           {job && busy && (
-            <button
-              className="secondary"
+            <Button
+              variant="secondary"
               onClick={() => togglePause(job.jobId)}
             >
               {isPaused(job.jobId) ? "继续" : "安全暂停"}
-            </button>
+            </Button>
           )}
           {job && busy && (
-            <button
-              className="danger"
+            <Button
+              variant="destructive"
               onClick={() => void jobCancel(job.jobId)}
             >
               取消任务
-            </button>
+            </Button>
           )}
         </div>
         {job && (
           <>
-            <div className={`job-banner ${job.severity}`}>
-              <strong>{job.message}</strong>
-            </div>
-            <progress max={Math.max(job.total, 1)} value={job.current} />
+            <JobProgress job={job} />
             {job.outputPaths.map((path) => (
-              <button
+              <Button
                 key={path}
-                className="ghost"
+                variant="ghost"
+                title={path}
                 onClick={() => void openOutput(path)}
               >
                 {displayFileName(path)}
-              </button>
+              </Button>
             ))}
           </>
         )}
         {validation !== undefined && <RollForwardResult value={validation} />}
+        {!job && validation === undefined && <EmptyState compact title="尚未运行检查" description="选择文件与科目并确认风险评估信息后，先运行检查，再开始结转。" />}
       </section>
     </>
   );
 }
 
-function RollForwardResult({ value }: { value: unknown }) {
+export function RollForwardResult({ value }: { value: unknown }) {
   const root = (value ?? {}) as Record<string, unknown>;
   const validationRows = Array.isArray(root.details)
     ? (root.details as Array<Record<string, unknown>>)
@@ -1389,7 +1499,7 @@ function RollForwardResult({ value }: { value: unknown }) {
             </strong>
             <span>{row.templateReady ? "模板就绪" : "缺少模板"}</span>
             <span>{row.priorReady ? "已匹配上年底稿" : "未找到上年底稿"}</span>
-            <small>{displayFileName(String(row.priorPath ?? ""))}</small>
+            <small title={String(row.priorPath ?? "")}>{displayFileName(String(row.priorPath ?? ""))}</small>
           </div>
         ))}
       </div>
@@ -1406,8 +1516,16 @@ function RollForwardResult({ value }: { value: unknown }) {
         ),
       );
   if (rows.length) {
+    const failed = rows.filter((row) => !row.success).length;
+    const warned = rows.some((row) => Array.isArray(row.warnings) && row.warnings.length > 0);
     return (
       <div className="roll-result-list">
+        <div role="status">
+          <Badge variant={failed || warned ? "warning" : "success"}>
+            {failed ? `需处理：${failed} 项未完成` : warned ? "已生成 · 有待复核提示" : "已生成 · 请复核底稿"}
+          </Badge>
+          <p className="hint">{failed ? "查看下方失败原因，修正资料或配置后重试对应科目。" : "打开输出文件，核对上年来源、风险评估与标黄变更后再使用。"}</p>
+        </div>
         {rows.map((row, index) => {
           // The engine reports which prior-year workbook it matched and how much
           // it rewrote. Hiding that left no way to catch a subject bound to the
@@ -1437,15 +1555,16 @@ function RollForwardResult({ value }: { value: unknown }) {
               <span>{row.success ? "成功" : "失败"}</span>
               <span>{String(row.message ?? "")}</span>
               {row.outputPath ? (
-                <button
-                  className="link-button"
+                <Button
+                  variant="link"
+                  title={String(row.outputPath)}
                   onClick={() => void openOutput(String(row.outputPath))}
                 >
                   打开输出文件
-                </button>
+                </Button>
               ) : null}
               {priorPath ? (
-                <small>
+                <small title={priorPath}>
                   使用上年底稿：{displayFileName(priorPath)}
                   {priorSize > 0
                     ? `（${(priorSize / 1024 / 1024).toFixed(1)} MB）`
@@ -1488,24 +1607,26 @@ function PathField({
     const result = await pickPath(
       target,
       label,
-      target === "file" ? ["xlsx"] : [],
+      target === "file" ? ["xlsx", "xls"] : [],
     );
     if (typeof result === "string") onChange(result);
   }
   return (
     <label className="field">
       <span>{label}</span>
-      <div className="input-with-button">
-        <input value={value} onChange={(e) => onChange(e.target.value)} />
-        <button className="browse" onClick={() => void browse()}>
-          浏览
-        </button>
-        {allowFile && (
-          <button className="browse" onClick={() => void browse("file")}>
-            单文件
-          </button>
-        )}
-      </div>
+      <FileInput
+        value={value}
+        ariaLabel={label}
+        browseLabel="浏览"
+        onBrowse={() => void browse()}
+        extraActions={
+          allowFile ? (
+            <Button variant="outline" onClick={() => void browse("file")}>
+              单文件
+            </Button>
+          ) : undefined
+        }
+      />
     </label>
   );
 }

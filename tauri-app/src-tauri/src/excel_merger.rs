@@ -1,6 +1,8 @@
+use crate::spreadsheet_input::is_text;
 use calamine::{Data, Reader, open_workbook_auto};
 use chrono::{Local, NaiveDateTime, NaiveTime};
-use encoding_rs::{GBK, UTF_16BE, UTF_16LE};
+#[cfg(test)]
+use encoding_rs::GBK;
 use parking_lot::Mutex;
 use rust_xlsxwriter::{
     Format, FormatAlign, FormatBorder, FormatUnderline, Url, Workbook, Worksheet,
@@ -38,7 +40,9 @@ const EXCEL_MAX_HYPERLINKS: usize = 65_530;
 pub(crate) struct ExcelMergerService {
     app: AppHandle,
     allowed: AllowedPaths,
-    jobs: Arc<Mutex<HashMap<String, (PathBuf, PathBuf, String)>>>,
+    jobs: Arc<Mutex<HashMap<String, (PathBuf, PathBuf, String, bool)>>>,
+    /// 每个任务的启动时刻，终态事件到达时用于计算「执行任务」统计的耗时。
+    job_starts: Arc<Mutex<HashMap<String, Instant>>>,
     heavy: Arc<Mutex<()>>,
     cancel_root: PathBuf,
 }
@@ -52,6 +56,8 @@ struct WorkerRequest {
     params: Value,
     cancel_path: String,
     pause_path: String,
+    #[serde(default)]
+    memory_protected: bool,
 }
 
 /// Cooperative pause gate shared by all native heavy jobs.
@@ -113,6 +119,7 @@ impl ExcelMergerService {
             app,
             allowed,
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            job_starts: Arc::new(Mutex::new(HashMap::new())),
             heavy: Arc::new(Mutex::new(())),
             cancel_root,
         }
@@ -129,21 +136,39 @@ impl ExcelMergerService {
         let job_id = uuid::Uuid::new_v4().simple().to_string();
         let cancel_path = self.cancel_root.join(format!("{job_id}.cancel"));
         let pause_path = self.cancel_root.join(format!("{job_id}.pause"));
+        let memory_protected = hard_memory_limited_job(method, &params);
         let _ = fs::remove_file(&cancel_path);
         let _ = fs::remove_file(&pause_path);
         self.jobs.lock().insert(
             job_id.clone(),
-            (cancel_path.clone(), pause_path, method.to_owned()),
+            (
+                cancel_path.clone(),
+                pause_path,
+                method.to_owned(),
+                memory_protected,
+            ),
         );
+        self.job_starts
+            .lock()
+            .insert(job_id.clone(), Instant::now());
         let service = self.clone();
         let worker_job_id = job_id.clone();
         let worker_method = method.to_owned();
-        thread::spawn(move || service.monitor(worker_job_id, worker_method, params, cancel_path));
+        thread::spawn(move || {
+            service.monitor(
+                worker_job_id,
+                worker_method,
+                params,
+                cancel_path,
+                memory_protected,
+            )
+        });
         Ok(job_id)
     }
 
     pub fn cancel(&self, job_id: &str) -> bool {
-        let Some((path, _pause, method)) = self.jobs.lock().get(job_id).cloned() else {
+        let Some((path, _pause, method, _memory_protected)) = self.jobs.lock().get(job_id).cloned()
+        else {
             return false;
         };
         if fs::write(path, b"cancel").is_err() {
@@ -164,27 +189,42 @@ impl ExcelMergerService {
     }
 
     pub fn pause(&self, job_id: &str, paused: bool) -> bool {
-        let Some((_cancel, path, method)) = self.jobs.lock().get(job_id).cloned() else {
+        let Some((_cancel, path, method, memory_protected)) = self.jobs.lock().get(job_id).cloned()
+        else {
             return false;
         };
         let changed = if paused {
+            let _ = fs::remove_file(crate::resource_budget::memory_retry_path(&path));
             fs::write(&path, b"pause").is_ok()
         } else {
-            !path.exists() || fs::remove_file(&path).is_ok()
+            let resumed = !path.exists() || fs::remove_file(&path).is_ok();
+            resumed && fs::write(crate::resource_budget::memory_retry_path(&path), b"retry").is_ok()
         };
         if changed {
+            let memory_waiting = !paused
+                && memory_protected
+                && crate::resource_budget::memory_status()
+                    .is_ok_and(|memory| memory.should_pause());
             self.emit(event_for(
                 tool_id(&method),
                 job_id,
-                if paused { "paused" } else { "running" },
+                if paused {
+                    "paused"
+                } else if memory_waiting {
+                    "memory_paused"
+                } else {
+                    "running"
+                },
                 0,
                 1,
                 if paused {
                     "任务已暂停；正在进行的单项请求完成后暂停。"
+                } else if memory_waiting {
+                    "当前内存仍不足，任务继续等待；内存恢复后将自动继续。"
                 } else {
                     "任务已继续。"
                 },
-                "info",
+                if memory_waiting { "warning" } else { "info" },
                 Vec::new(),
                 None,
             ));
@@ -192,7 +232,14 @@ impl ExcelMergerService {
         changed
     }
 
-    fn monitor(&self, job_id: String, method: String, params: Value, cancel_path: PathBuf) {
+    fn monitor(
+        &self,
+        job_id: String,
+        method: String,
+        params: Value,
+        cancel_path: PathBuf,
+        memory_protected: bool,
+    ) {
         let worker_tool_id = tool_id(&method);
         self.emit(event_for(
             worker_tool_id,
@@ -221,16 +268,78 @@ impl ExcelMergerService {
             self.finish(&job_id, &cancel_path);
             return;
         }
+        let pause_path = self.cancel_root.join(format!("{job_id}.pause"));
+        let memory_retry_path = crate::resource_budget::memory_retry_path(&pause_path);
+        let hard_limited = memory_protected;
+        let monitored = memory_protected;
+        let available_worker_memory = if monitored {
+            let mut last_notice = None::<Instant>;
+            Some(loop {
+                if cancel_path.exists() {
+                    self.emit(event_for(
+                        worker_tool_id,
+                        &job_id,
+                        "cancelled",
+                        1,
+                        1,
+                        "任务已取消。",
+                        "warning",
+                        Vec::new(),
+                        None,
+                    ));
+                    self.finish(&job_id, &cancel_path);
+                    return;
+                }
+                match crate::resource_budget::memory_status() {
+                    Ok(memory) if memory.can_start_worker() => break memory.worker_bytes(),
+                    Ok(memory) => {
+                        if last_notice.is_none_or(|time| time.elapsed() >= Duration::from_secs(5)) {
+                            self.emit(event_for(
+                                worker_tool_id,
+                                &job_id,
+                                "memory_paused",
+                                0,
+                                1,
+                                &format!(
+                                    "内存紧张，任务尚未启动：当前可用 {:.2} GiB。正在等待恢复，可手动尝试继续或停止任务。",
+                                    memory.available_gib()
+                                ),
+                                "warning",
+                                Vec::new(),
+                                None,
+                            ));
+                            last_notice = Some(Instant::now());
+                        }
+                    }
+                    Err(err) => {
+                        self.emit(event_for(
+                            worker_tool_id,
+                            &job_id,
+                            "failed",
+                            1,
+                            1,
+                            &err.user_message,
+                            "error",
+                            Vec::new(),
+                            None,
+                        ));
+                        self.finish(&job_id, &cancel_path);
+                        return;
+                    }
+                }
+                let _ = fs::remove_file(&memory_retry_path);
+                thread::sleep(Duration::from_millis(500));
+            })
+        } else {
+            None
+        };
         let request = WorkerRequest {
             job_id: job_id.clone(),
             method,
             params,
             cancel_path: cancel_path.to_string_lossy().into_owned(),
-            pause_path: self
-                .cancel_root
-                .join(format!("{job_id}.pause"))
-                .to_string_lossy()
-                .into_owned(),
+            pause_path: pause_path.to_string_lossy().into_owned(),
+            memory_protected: monitored,
         };
         let mut command = match std::env::current_exe() {
             // 重任务靠"再启动一份自己"来跑。程序文件在运行期间被移走或重新构建过时
@@ -303,6 +412,32 @@ impl ExcelMergerService {
                 return;
             }
         };
+        let _memory_limit = if hard_limited {
+            match crate::resource_budget::WorkerLimit::attach(
+                &child,
+                available_worker_memory.expect("硬限制任务必须有内存上限"),
+            ) {
+                Ok(limit) => Some(limit),
+                Err(err) => {
+                    terminate_process_tree(&mut child);
+                    self.emit(event_for(
+                        worker_tool_id,
+                        &job_id,
+                        "failed",
+                        1,
+                        1,
+                        &err.user_message,
+                        "error",
+                        Vec::new(),
+                        None,
+                    ));
+                    self.finish(&job_id, &cancel_path);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         if let Some(mut stdin) = child.stdin.take() {
             let _ = writeln!(
                 stdin,
@@ -322,13 +457,104 @@ impl ExcelMergerService {
         }
         let mut terminal = false;
         let mut cancel_started = None::<Instant>;
+        let mut memory_paused = false;
+        let mut last_memory_notice = None::<Instant>;
+        let mut memory_recovery_started = None::<Instant>;
+        let mut memory_emergency_started = None::<Instant>;
+        let mut last_current = 0usize;
+        let mut last_total = 1usize;
         loop {
             while let Ok(payload) = receiver.try_recv() {
+                last_current = payload
+                    .get("current")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize)
+                    .unwrap_or(last_current);
+                last_total = payload
+                    .get("total")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize)
+                    .unwrap_or(last_total);
+                if payload.get("phase").and_then(Value::as_str) != Some("memory_paused") {
+                    memory_paused = false;
+                }
                 terminal |= payload
                     .get("phase")
                     .and_then(Value::as_str)
                     .is_some_and(|phase| matches!(phase, "completed" | "failed" | "cancelled"));
                 self.emit(payload);
+            }
+            if monitored && !terminal {
+                if let Ok(memory) = crate::resource_budget::memory_status() {
+                    if memory.emergency() {
+                        let emergency = memory_emergency_started.get_or_insert_with(Instant::now);
+                        if emergency.elapsed() >= Duration::from_secs(15) {
+                            terminate_process_tree(&mut child);
+                            self.emit(event_for(
+                                worker_tool_id,
+                                &job_id,
+                                "failed",
+                                last_current,
+                                last_total,
+                                "系统内存持续处于危险水平，已停止任务以保护电脑。",
+                                "error",
+                                Vec::new(),
+                                None,
+                            ));
+                            let _ = child.wait();
+                            break;
+                        }
+                    } else {
+                        memory_emergency_started = None;
+                    }
+                    if memory.should_pause() {
+                        memory_recovery_started = None;
+                        if !memory_paused
+                            || last_memory_notice
+                                .is_none_or(|time| time.elapsed() >= Duration::from_secs(5))
+                        {
+                            self.emit(event_for(
+                                worker_tool_id,
+                                &job_id,
+                                "memory_paused",
+                                last_current,
+                                last_total,
+                                &format!(
+                                    "内存紧张，任务已自动暂停：当前可用 {:.2} GiB。内存恢复后将自动继续，也可手动尝试继续。",
+                                    memory.available_gib()
+                                ),
+                                "warning",
+                                Vec::new(),
+                                None,
+                            ));
+                            memory_paused = true;
+                            last_memory_notice = Some(Instant::now());
+                        }
+                    } else if memory_paused {
+                        if memory.auto_resume_ready() {
+                            let recovered =
+                                memory_recovery_started.get_or_insert_with(Instant::now);
+                            if recovered.elapsed() >= Duration::from_secs(5) {
+                                self.emit(event_for(
+                                    worker_tool_id,
+                                    &job_id,
+                                    "memory_resumed",
+                                    last_current,
+                                    last_total,
+                                    "内存已稳定恢复，任务正在自动继续。",
+                                    "info",
+                                    Vec::new(),
+                                    None,
+                                ));
+                                memory_paused = false;
+                                last_memory_notice = None;
+                                memory_recovery_started = None;
+                            }
+                        } else {
+                            memory_recovery_started = None;
+                        }
+                    }
+                }
             }
             if cancel_path.exists() {
                 let started = cancel_started.get_or_insert_with(Instant::now);
@@ -369,7 +595,17 @@ impl ExcelMergerService {
                         let (phase, severity, message) = if status.success() {
                             ("completed", "success", "任务已结束。")
                         } else {
-                            ("failed", "error", "Rust Excel 处理进程异常退出。")
+                            (
+                                "failed",
+                                "error",
+                                if hard_limited {
+                                    "数据处理任务异常退出，可能达到内存保护上限。请减小数据范围后重试。"
+                                } else if params_have_excel_input(&request.params) {
+                                    "Excel 数据处理进程异常退出。请重试；若持续发生，请查看诊断记录。"
+                                } else {
+                                    "Rust Excel 处理进程异常退出。"
+                                },
+                            )
                         };
                         self.emit(event_for(
                             worker_tool_id,
@@ -412,12 +648,36 @@ impl ExcelMergerService {
             }
         }
         let _ = self.app.state::<Storage>().record_job_event(&payload);
+        // 使用统计：任务首次到达终态时记一条 job_run（取消/失败都算未成功）。
+        // 从 job_starts 里取走时刻天然去重——同一任务重复的终态事件不会重复上报。
+        let phase = payload.get("phase").and_then(Value::as_str);
+        if matches!(phase, Some("completed" | "failed" | "cancelled")) {
+            if let (Some(tool_id), Some(job_id)) = (
+                payload.get("toolId").and_then(Value::as_str),
+                payload.get("jobId").and_then(Value::as_str),
+            ) {
+                if let Some(started) = self.job_starts.lock().remove(job_id) {
+                    if let Some(telemetry) = self.app.try_state::<crate::telemetry::Telemetry>() {
+                        telemetry.track(
+                            "job_run",
+                            Some(tool_id),
+                            None,
+                            Some(phase == Some("completed")),
+                            Some(started.elapsed().as_millis() as i64),
+                        );
+                    }
+                }
+            }
+        }
         let _ = self.app.emit("job-event", payload);
     }
 
     fn finish(&self, job_id: &str, cancel_path: &Path) {
         let _ = fs::remove_file(cancel_path);
-        if let Some((_cancel, pause, _method)) = self.jobs.lock().remove(job_id) {
+        self.job_starts.lock().remove(job_id);
+        if let Some((_cancel, pause, _method, _memory_protected)) = self.jobs.lock().remove(job_id)
+        {
+            let _ = fs::remove_file(crate::resource_budget::memory_retry_path(&pause));
             let _ = fs::remove_file(pause);
         }
     }
@@ -436,6 +696,7 @@ pub(crate) const SUPPORTED_JOB_METHODS: &[&str] = &[
     "file_list.scan",
     "ts.inspect",
     "kanzhang.inspect",
+    "kanzhang.accounts",
     "excel_merger.merge",
     "ts.cache",
     "ts.filter",
@@ -477,6 +738,103 @@ fn is_supported_job_method(method: &str) -> bool {
     SUPPORTED_JOB_METHODS.contains(&method)
 }
 
+/// 可以消费 JE 的长任务。是否实际启用内存保护还取决于本次文本输入总大小。
+fn memory_protected_method(method: &str) -> bool {
+    method.starts_with("kanzhang.")
+        || method.starts_with("fx.")
+        || method.starts_with("loan.")
+        || method.starts_with("deposit.")
+        || method.starts_with("fa.tbje_")
+        || method.starts_with("tbje_check.")
+}
+
+const LARGE_TEXT_INPUT_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// 只收集明确的输入路径字段，避免把 outputPath 或结果目录计入保护阈值。
+/// 递归扫描可同时覆盖直接参数、批量任务及各工具嵌套的 source。
+fn collect_input_paths(value: &Value, paths: &mut HashSet<PathBuf>) {
+    match value {
+        Value::Object(values) => {
+            for (key, value) in values {
+                let normalized = key.to_ascii_lowercase();
+                if matches!(
+                    normalized.as_str(),
+                    "inputpath" | "jepath" | "tbpath" | "sourcepath" | "ledgerpath"
+                ) {
+                    if let Some(path) = value.as_str() {
+                        paths.insert(PathBuf::from(path));
+                    }
+                } else if normalized == "inputpaths" {
+                    if let Some(values) = value.as_array() {
+                        paths.extend(values.iter().filter_map(Value::as_str).map(PathBuf::from));
+                    }
+                }
+                collect_input_paths(value, paths);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_input_paths(value, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_excel_input_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["xls", "xlsx", "xlsm", "xlsb"]
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
+fn params_have_excel_input(value: &Value) -> bool {
+    let mut paths = HashSet::new();
+    collect_input_paths(value, &mut paths);
+    paths.iter().any(|path| is_excel_input_path(path))
+}
+
+fn is_protected_text_input_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["csv", "txt", "tsv"]
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
+fn text_input_bytes_with(value: &Value, size_of: impl Fn(&Path) -> Option<u64>) -> u64 {
+    let mut paths = HashSet::new();
+    collect_input_paths(value, &mut paths);
+    paths
+        .iter()
+        .filter(|path| is_protected_text_input_path(path))
+        .filter_map(|path| size_of(path))
+        .fold(0_u64, u64::saturating_add)
+}
+
+fn text_input_bytes(value: &Value) -> u64 {
+    text_input_bytes_with(value, |path| fs::metadata(path).ok().map(|meta| meta.len()))
+}
+
+fn memory_protected_for_text_bytes(method: &str, bytes: u64) -> bool {
+    memory_protected_method(method) && bytes > LARGE_TEXT_INPUT_BYTES
+}
+
+/// Excel 输入不启用公共内存拦截。CSV/TXT/TSV 按本次任务去重后的输入总大小计，
+/// 只有严格超过 1 GiB 才启用启动等待、运行监测和 Job Object 硬上限。
+fn memory_protected_job(method: &str, params: &Value) -> bool {
+    memory_protected_for_text_bytes(method, text_input_bytes(params))
+}
+
+fn hard_memory_limited_job(method: &str, params: &Value) -> bool {
+    memory_protected_job(method, params)
+}
+
 pub fn worker_main() -> i32 {
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).is_err() {
@@ -501,6 +859,12 @@ pub fn worker_main() -> i32 {
     let job_id = request.job_id.clone();
     let worker_tool_id = tool_id(&request.method);
     let pause = PauseCheckpoint::new(PathBuf::from(&request.pause_path), cancel.clone());
+    if request.memory_protected {
+        crate::resource_budget::install_runtime_memory_control(
+            cancel.clone(),
+            crate::resource_budget::memory_retry_path(Path::new(&request.pause_path)),
+        );
+    }
     let progress_pause = pause.clone();
     let progress = |phase: &str, current: usize, total: usize, message: &str| {
         if progress_pause.wait().is_err() {
@@ -663,7 +1027,9 @@ fn event_for(
     json!({"protocol":1,"jobId":job_id,"toolId":tool_id,"phase":phase,"current":current,"total":total,"message":message,"severity":severity,"outputPaths":output_paths,"result":result})
 }
 
-fn tool_id(method: &str) -> &'static str {
+/// method 前缀 → 工具 id。job_start 在主进程存档参数时也要用它落 tool_id，
+/// 因此对 crate 内可见。
+pub(crate) fn tool_id(method: &str) -> &'static str {
     if method.starts_with("wp.") {
         "wp_service_generator"
     } else if method.starts_with("confirmation.") {
@@ -764,6 +1130,7 @@ struct InspectedFile {
     name: String,
     size: u64,
     sheets: Vec<String>,
+    format: String,
     error: Option<String>,
 }
 
@@ -917,9 +1284,13 @@ pub fn merge(
                 .and_then(|v| v.to_str())
                 .is_some_and(|v| v.eq_ignore_ascii_case("csv"))
             {
-                let (sheets, warnings) = load_selected_sheets(&inputs, &params, progress, &cancel)?;
-                write_vertical_csv(&sheets, &working_output, &params, progress, &cancel)?;
-                return Ok(warnings);
+                return write_vertical_csv_stream(
+                    &inputs,
+                    &working_output,
+                    &params,
+                    progress,
+                    &cancel,
+                );
             } else {
                 return write_vertical_xlsx_stream(
                     &inputs,
@@ -1018,10 +1389,11 @@ fn inspect(paths: &[PathBuf]) -> Result<Value, AppError> {
     for path in files {
         let mut sheets = Vec::new();
         let mut issue = None;
-        if !is_text(&path) {
+        let text_input = is_text(&path);
+        if !text_input {
             match open_workbook_auto(&path) {
                 Ok(workbook) => sheets = workbook.sheet_names().to_vec(),
-                Err(err) => issue = Some(err.to_string()),
+                Err(err) => issue = Some(format!("无法读取工作簿：{err}")),
             }
         }
         for sheet in &sheets {
@@ -1030,6 +1402,14 @@ fn inspect(paths: &[PathBuf]) -> Result<Value, AppError> {
             }
         }
         rows.push(InspectedFile {
+            format: if text_input {
+                "分隔文本"
+            } else if issue.is_some() {
+                "格式未识别"
+            } else {
+                "Excel 工作簿"
+            }
+            .into(),
             path: path.to_string_lossy().into_owned(),
             name: path
                 .file_name()
@@ -1063,14 +1443,20 @@ fn load_selected_sheets(
             &format!("正在读取：{}", file_name(path)),
         );
         if is_text(path) {
-            match read_text_rows(path) {
-                Ok(rows) => result.push(SheetRows {
+            let mut rows = Vec::new();
+            let read = for_each_text_row(path, cancel, |row| {
+                rows.push(row);
+                Ok(())
+            });
+            match read {
+                Ok(()) => result.push(SheetRows {
                     file_path: path.clone(),
                     file_name: file_name(path),
                     sheet_name: "CSV".into(),
                     include_sheet_column: params.sheet_action != "default",
                     rows,
                 }),
+                Err(err) if err.code == "JOB_CANCELLED" => return Err(err),
                 Err(err) => warnings.push(format!("{}: {}", file_name(path), err.user_message)),
             }
             continue;
@@ -1111,7 +1497,7 @@ fn load_selected_sheets(
         }
     }
     if result.iter().all(|sheet| sheet.rows.is_empty()) {
-        return Err(error("MERGER_NO_DATA", "没有读取到有效数据。", None));
+        return Err(no_data_error(&warnings));
     }
     Ok((result, warnings))
 }
@@ -1138,34 +1524,23 @@ fn write_vertical_xlsx_stream(
             &format!("正在流式读取：{}", file_name(path)),
         );
         if is_text(path) {
-            match read_text_rows(path) {
-                Ok(rows) => {
-                    let source = SheetRows {
-                        file_path: path.clone(),
-                        file_name: file_name(path),
-                        sheet_name: "CSV".into(),
-                        include_sheet_column: params.sheet_action != "default",
-                        rows: Vec::new(),
-                    };
-                    for row in rows
-                        .iter()
-                        .filter(|row| row.iter().any(|cell| !cell.is_empty()))
-                    {
-                        write_vertical_row(
-                            &mut workbook,
-                            &mut worksheet,
-                            &mut sheet_no,
-                            &mut out_row,
-                            &source,
-                            row.iter(),
-                            params,
-                            cancel,
-                        )?;
-                        wrote = true;
-                    }
+            let source = text_source(path, params);
+            for_each_text_row(path, cancel, |row| {
+                if row.iter().any(|cell| !cell.is_empty()) {
+                    write_vertical_row(
+                        &mut workbook,
+                        &mut worksheet,
+                        &mut sheet_no,
+                        &mut out_row,
+                        &source,
+                        row.iter(),
+                        params,
+                        cancel,
+                    )?;
+                    wrote = true;
                 }
-                Err(err) => warnings.push(format!("{}: {}", file_name(path), err.user_message)),
-            }
+                Ok(())
+            })?;
             continue;
         }
         let mut source_workbook = match open_workbook_auto(path) {
@@ -1224,7 +1599,7 @@ fn write_vertical_xlsx_stream(
         }
     }
     if !wrote {
-        return Err(error("MERGER_NO_DATA", "没有读取到有效数据。", None));
+        return Err(no_data_error(&warnings));
     }
     if params.add_hyperlinks && (sheet_no > 0 || out_row > EXCEL_MAX_HYPERLINKS) {
         warnings.push(format!(
@@ -1287,31 +1662,38 @@ fn write_vertical_row<'a, I: Iterator<Item = &'a Cell>>(
     Ok(())
 }
 
-fn write_vertical_csv(
-    sheets: &[SheetRows],
+fn write_vertical_csv_stream(
+    inputs: &[PathBuf],
     output: &Path,
-    _params: &MergeParams,
+    params: &MergeParams,
     progress: Progress<'_>,
     cancel: &AtomicBool,
-) -> Result<(), AppError> {
+) -> Result<Vec<String>, AppError> {
     let mut file = fs::File::create(output).map_err(io_error)?;
     file.write_all(&[0xEF, 0xBB, 0xBF]).map_err(io_error)?;
-    let mut writer = csv::WriterBuilder::new().from_writer(file);
+    let mut writer = csv::WriterBuilder::new().flexible(true).from_writer(file);
     let mut count = 0usize;
-    for source in sheets {
+    let mut warnings = Vec::new();
+    for (index, path) in inputs.iter().enumerate() {
+        check_cancel(cancel)?;
         progress(
             "write",
-            count,
-            0,
-            &format!("正在写出 CSV：{} / {}", source.file_name, source.sheet_name),
+            index,
+            inputs.len(),
+            &format!("正在合并：{}", file_name(path)),
         );
-        for row in source
-            .rows
-            .iter()
-            .filter(|row| row.iter().any(|cell| !cell.is_empty()))
-        {
+        let mut write_row = |source: &SheetRows, row: &[Cell]| -> Result<(), AppError> {
+            if row.iter().all(Cell::is_empty) {
+                return Ok(());
+            }
             if count % 1000 == 0 {
                 check_cancel(cancel)?;
+                progress(
+                    "write",
+                    index,
+                    inputs.len(),
+                    &format!("正在合并：{}，已写出 {} 行", file_name(path), count),
+                );
             }
             let mut record = vec![source.file_name.clone()];
             if source.include_sheet_column {
@@ -1320,9 +1702,34 @@ fn write_vertical_csv(
             record.extend(row.iter().map(Cell::display));
             writer.write_record(record).map_err(csv_error)?;
             count += 1;
+            Ok(())
+        };
+        if is_text(path) {
+            let source = text_source(path, params);
+            // A late text decoding error must abort, never publish a partially read file.
+            for_each_text_row(path, cancel, |row| write_row(&source, &row))?;
+        } else {
+            match load_selected_sheets(std::slice::from_ref(path), params, progress, cancel) {
+                Ok((sheets, issues)) => {
+                    warnings.extend(issues);
+                    for source in &sheets {
+                        for row in &source.rows {
+                            write_row(source, row)?;
+                        }
+                    }
+                }
+                Err(err) if err.code == "MERGER_NO_DATA" => {
+                    warnings.push(format!("{}：{}", file_name(path), err.user_message))
+                }
+                Err(err) => return Err(err),
+            }
         }
     }
-    writer.flush().map_err(io_error)
+    if count == 0 {
+        return Err(no_data_error(&warnings));
+    }
+    writer.flush().map_err(io_error)?;
+    Ok(warnings)
 }
 
 fn horizontal_blocks(sheets: &[SheetRows]) -> Vec<(SheetRows, Vec<String>, Vec<Vec<Cell>>)> {
@@ -1470,12 +1877,15 @@ fn merge_workbook_exact(
     let mut used = HashSet::new();
     used.insert("reference".to_string());
     let mut plans = Vec::new();
+    let mut prepared_inputs = Vec::new();
     for path in inputs {
         check_cancel(cancel)?;
-        let names = if is_text(path) {
+        let prepared = crate::spreadsheet_input::prepare_xlsx(path)?;
+        let source_path = prepared.path().to_path_buf();
+        let names = if is_text(&source_path) {
             vec![String::new()]
         } else {
-            let workbook = open_workbook_auto(path).map_err(|e| {
+            let workbook = open_workbook_auto(&source_path).map_err(|e| {
                 error(
                     "WORKBOOK_READ_FAILED",
                     "无法读取工作簿。",
@@ -1499,12 +1909,13 @@ fn merge_workbook_exact(
                 stem(path)
             };
             plans.push(crate::excel_com::CopySheet {
-                source_path: path.clone(),
+                source_path: source_path.clone(),
                 source_sheet: sheet_name.clone(),
                 output_sheet: unique_sheet_name(&preferred, &mut used),
                 source_file: file_name(path),
             });
         }
+        prepared_inputs.push(prepared);
     }
     crate::excel_com::copy_sheets_exact(&plans, output, params.add_hyperlinks, progress, &|| {
         check_cancel(cancel)
@@ -1567,53 +1978,34 @@ fn normalize_horizontal(rows: &[Vec<Cell>]) -> (Vec<String>, Vec<Vec<Cell>>) {
     (headers, data)
 }
 
+#[cfg(test)]
 fn read_text_rows(path: &Path) -> Result<Vec<Vec<Cell>>, AppError> {
-    let bytes = fs::read(path).map_err(io_error)?;
-    let text = if bytes.starts_with(&[0xFF, 0xFE]) {
-        UTF_16LE.decode(&bytes[2..]).0.into_owned()
-    } else if bytes.starts_with(&[0xFE, 0xFF]) {
-        UTF_16BE.decode(&bytes[2..]).0.into_owned()
-    } else if let Ok(value) =
-        std::str::from_utf8(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes))
-    {
-        value.to_owned()
-    } else {
-        GBK.decode(&bytes).0.into_owned()
-    };
-    let delimiter = sniff_delimiter(&text);
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(false)
-        .flexible(true)
-        .delimiter(delimiter)
-        .from_reader(text.as_bytes());
     let mut rows = Vec::new();
-    for record in reader.records() {
-        rows.push(
-            record
-                .map_err(csv_error)?
-                .iter()
-                .map(|v| Cell::String(v.to_owned()))
-                .collect(),
-        );
-    }
+    for_each_text_row(path, &AtomicBool::new(false), |row| {
+        rows.push(row);
+        Ok(())
+    })?;
     Ok(rows)
 }
 
-fn sniff_delimiter(text: &str) -> u8 {
-    let first = text
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("");
-    [
-        (b',', first.matches(',').count()),
-        (b'\t', first.matches('\t').count()),
-        (b';', first.matches(';').count()),
-    ]
-    .into_iter()
-    .max_by_key(|(_, count)| *count)
-    .filter(|(_, count)| *count > 0)
-    .map(|(value, _)| value)
-    .unwrap_or(b',')
+fn for_each_text_row(
+    path: &Path,
+    cancel: &AtomicBool,
+    mut visit: impl FnMut(Vec<Cell>) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    crate::spreadsheet_input::for_each_text_row(path, cancel, |row| {
+        visit(row.into_iter().map(Cell::String).collect())
+    })
+}
+
+fn text_source(path: &Path, params: &MergeParams) -> SheetRows {
+    SheetRows {
+        file_path: path.to_path_buf(),
+        file_name: file_name(path),
+        sheet_name: "CSV".into(),
+        include_sheet_column: params.sheet_action != "default",
+        rows: Vec::new(),
+    }
 }
 
 fn new_constant_sheet(workbook: &mut Workbook, number: usize) -> Result<Worksheet, AppError> {
@@ -1877,10 +2269,19 @@ fn supported(path: &Path) -> bool {
         .and_then(|v| v.to_str())
         .is_some_and(|v| SUPPORTED.contains(&v.to_ascii_lowercase().as_str()))
 }
-fn is_text(path: &Path) -> bool {
-    path.extension()
-        .and_then(|v| v.to_str())
-        .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "csv" | "txt"))
+fn no_data_error(warnings: &[String]) -> AppError {
+    let detail = warnings
+        .iter()
+        .take(8)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let message = if detail.is_empty() {
+        "没有读取到有效数据，请检查源文件是否为空。".into()
+    } else {
+        format!("没有读取到有效数据。\n{detail}")
+    };
+    error("MERGER_NO_DATA", &message, None)
 }
 fn file_name(path: &Path) -> String {
     path.file_name()
@@ -2033,6 +2434,174 @@ mod tests {
     }
 
     #[test]
+    fn real_biff8_xls_and_text_xls_merge_together() {
+        let root = std::env::temp_dir().join(format!("audit-biff8-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let binary = root.join("真正.XLS");
+        fs::write(
+            &binary,
+            include_bytes!("../../tests/fixtures/Excel Merger/simple-biff8.xls"),
+        )
+        .unwrap();
+        assert!(!is_text(&binary));
+        assert_eq!(
+            inspect(std::slice::from_ref(&binary)).unwrap()["files"][0]["sheets"][0],
+            "明细"
+        );
+        let text = root.join("文本.xls");
+        fs::write(&text, GBK.encode("编号\t金额\n002\t456.50\n").0.as_ref()).unwrap();
+        for extension in ["csv", "xlsx"] {
+            let output = root.join(format!("混合.{extension}"));
+            let mut params = base_params(&[binary.clone(), text.clone()], &output);
+            params["outputFormat"] = extension.into();
+            test_merge(params, Arc::new(AtomicBool::new(false))).unwrap();
+            let rows: Vec<Vec<Cell>> = if extension == "csv" {
+                read_text_rows(&output).unwrap()
+            } else {
+                open_workbook_auto(&output)
+                    .unwrap()
+                    .worksheet_range("Merged")
+                    .unwrap()
+                    .rows()
+                    .map(|row| row.iter().map(Cell::from_excel).collect())
+                    .collect()
+            };
+            assert_eq!(rows.len(), 4);
+            assert_eq!(rows[1][1].display(), "001");
+            assert_eq!(rows[1][2].display(), "123.5");
+            assert_eq!(rows[3][1].display(), "002");
+            assert_eq!(rows[3][2].display(), "456.50");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn text_xls_encodings_stream_to_csv_and_xlsx() {
+        let root = std::env::temp_dir().join(format!("audit-text-xls-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let text = "公司代码\t公司名称\t金额\r\n001009\t\"中文\t名称\"\t1,234.50\r\n001010\t\"跨行\r\n名称\"\t-2\r\n";
+        let mut encodings = vec![GBK.encode(text).0.into_owned(), text.as_bytes().to_vec()];
+        encodings.push([vec![0xEF, 0xBB, 0xBF], text.as_bytes().to_vec()].concat());
+        encodings.push(
+            [
+                vec![0xFF, 0xFE],
+                text.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+            ]
+            .concat(),
+        );
+        encodings.push(
+            [
+                vec![0xFE, 0xFF],
+                text.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+            ]
+            .concat(),
+        );
+        for (index, bytes) in encodings.iter().enumerate() {
+            let input = root.join(format!("输入{index}.XLS"));
+            fs::write(&input, bytes).unwrap();
+            assert!(is_text(&input));
+            let inspected = inspect(std::slice::from_ref(&input)).unwrap();
+            assert_eq!(inspected["files"][0]["format"], "分隔文本");
+            assert!(inspected["files"][0]["error"].is_null());
+            for extension in ["csv", "xlsx"] {
+                let output = root.join(format!("输出{index}.{extension}"));
+                let mut params = base_params(std::slice::from_ref(&input), &output);
+                params["outputFormat"] = extension.into();
+                params["sheetAction"] = "merge_all".into();
+                test_merge(params, Arc::new(AtomicBool::new(false))).unwrap();
+                let rows = if extension == "csv" {
+                    read_text_rows(&output).unwrap()
+                } else {
+                    open_workbook_auto(&output)
+                        .unwrap()
+                        .worksheet_range("Merged")
+                        .unwrap()
+                        .rows()
+                        .map(|row| row.iter().map(Cell::from_excel).collect())
+                        .collect()
+                };
+                assert_eq!(rows.len(), 3);
+                assert_eq!(rows[0][2].display(), "公司代码");
+                assert_eq!(rows[1][2].display(), "001009");
+                assert_eq!(rows[1][3].display(), "中文\t名称");
+                assert_eq!(rows[1][4].display(), "1,234.50");
+                assert_eq!(rows[2][3].display(), "跨行\r\n名称");
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn text_xls_stream_boundaries_cancel_and_late_decode_failure() {
+        let root = std::env::temp_dir().join(format!("audit-text-stream-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("长文本.XLS");
+        let text = format!("编号\t名称\n{}", "001\t中文名称\n".repeat(20_000));
+        fs::write(&input, GBK.encode(&text).0.as_ref()).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut count = 0;
+        for_each_text_row(&input, &cancel, |row| {
+            if count > 0 {
+                assert_eq!(row[1].display(), "中文名称");
+            }
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 20_001);
+        let err = for_each_text_row(&input, &cancel, |_| {
+            cancel.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(err.code, "JOB_CANCELLED");
+        let mut bytes = GBK.encode(&text).0.into_owned();
+        bytes.push(0x81); // dangling GBK lead byte, beyond the sniff sample
+        fs::write(&input, bytes).unwrap();
+        let output = root.join("结果.csv");
+        let mut params = base_params(&[input], &output);
+        params["outputFormat"] = "csv".into();
+        let err = test_merge(params, Arc::new(AtomicBool::new(false))).unwrap_err();
+        assert_eq!(err.code, "TEXT_READ_FAILED");
+        assert!(err.user_message.contains("长文本.XLS"));
+        assert!(!output.exists());
+        assert!(!partial_output_path(&output).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn xls_detection_does_not_swallow_workbooks_or_markup_and_keeps_errors() {
+        let root = std::env::temp_dir().join(format!("audit-xls-detect-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("源.XLS");
+        sample_book(&input, "明细", &[&["编号", "金额"], &["001", "2"]]);
+        assert!(!is_text(&input));
+        assert_eq!(
+            inspect(std::slice::from_ref(&input)).unwrap()["files"][0]["sheets"][0],
+            "明细"
+        );
+        let output = root.join("结果.csv");
+        let mut params = base_params(std::slice::from_ref(&input), &output);
+        params["outputFormat"] = "csv".into();
+        test_merge(params.clone(), Arc::new(AtomicBool::new(false))).unwrap();
+        assert_eq!(read_text_rows(&output).unwrap()[1][1].display(), "001");
+        fs::remove_file(&output).unwrap();
+        for bytes in [
+            b"<html>\t<table>\na\tb".as_slice(),
+            b"\xD0\xCF\x11\xE0\ta\nb\tc",
+            b"broken workbook",
+        ] {
+            fs::write(&input, bytes).unwrap();
+            assert!(!is_text(&input));
+            let err = test_merge(params.clone(), Arc::new(AtomicBool::new(false))).unwrap_err();
+            assert_eq!(err.code, "MERGER_NO_DATA");
+            assert!(err.user_message.contains("源.XLS"));
+            assert!(!output.exists());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn fa_jobs_have_a_dedicated_native_tool_id() {
         for method in [
             "fa.match",
@@ -2057,10 +2626,103 @@ mod tests {
             assert!(is_supported_job_method(method));
         }
         // 看账自己的方法不能被 mark_ 分支顺手带走。
-        for method in ["kanzhang.inspect", "kanzhang.filter", "kanzhang.export"] {
+        for method in [
+            "kanzhang.inspect",
+            "kanzhang.accounts",
+            "kanzhang.filter",
+            "kanzhang.export",
+        ] {
             assert_eq!(tool_id(method), "kanzhang");
         }
         assert!(!is_supported_job_method("kanzhang.mark_unknown"));
+    }
+
+    #[test]
+    fn memory_protection_covers_all_je_workers() {
+        assert!(memory_protected_method("kanzhang.export"));
+        assert!(memory_protected_method("fx.preview"));
+        assert!(memory_protected_method("fx.export"));
+        assert!(memory_protected_method("deposit.preview"));
+        assert!(memory_protected_method("deposit.export"));
+        assert!(memory_protected_method("loan.preview"));
+        assert!(memory_protected_method("loan.export"));
+        assert!(memory_protected_method("fa.tbje_preview"));
+        assert!(memory_protected_method("fa.tbje_export"));
+        assert!(memory_protected_method("tbje_check.run"));
+        assert!(memory_protected_method("tbje_check.export_batch"));
+        assert!(!memory_protected_method("file_list.export"));
+    }
+
+    #[test]
+    fn excel_inputs_skip_all_memory_interception_across_tools() {
+        let cases = [
+            ("kanzhang.inspect", json!({"inputPath":"C:\\data\\je.xlsx"})),
+            (
+                "fx.preview",
+                json!({"jeSource":{"inputPath":"C:\\data\\je.xls"}}),
+            ),
+            (
+                "deposit.export",
+                json!({"jeSource":{"inputPath":"C:\\data\\je.xlsm"}}),
+            ),
+            (
+                "loan.preview",
+                json!({"jeSource":{"source":{"inputPath":"C:\\data\\je.xlsb"}}}),
+            ),
+            (
+                "fa.tbje_preview",
+                json!({"tbSource":{"inputPath":"C:\\data\\tb.xlsx"}}),
+            ),
+            (
+                "tbje_check.run",
+                json!({"inputPaths":["C:\\data\\tb.xlsx", "C:\\data\\je.xlsx"]}),
+            ),
+        ];
+
+        for (method, params) in cases {
+            assert!(memory_protected_method(method));
+            assert_eq!(
+                text_input_bytes_with(&params, |_| Some(8 * LARGE_TEXT_INPUT_BYTES)),
+                0
+            );
+            assert!(!memory_protected_job(method, &params));
+            assert!(!hard_memory_limited_job(method, &params));
+        }
+    }
+
+    #[test]
+    fn text_inputs_are_protected_only_when_combined_size_exceeds_one_gib() {
+        let params = json!({
+            "jeSource":{"inputPath":"C:\\data\\je.csv"},
+            "tbSource":{"inputPath":"C:\\data\\tb.tsv"},
+            "inputPaths":["C:\\data\\je.csv", "C:\\data\\notes.txt", "C:\\data\\reference.xlsx"],
+            "outputPath":"C:\\output\\result.xlsx"
+        });
+        let size = |path: &Path| match path.file_name().and_then(|name| name.to_str()) {
+            Some("je.csv") => Some(600 * 1024 * 1024),
+            Some("tb.tsv") => Some(400 * 1024 * 1024),
+            Some("notes.txt") => Some(25 * 1024 * 1024),
+            _ => Some(20 * LARGE_TEXT_INPUT_BYTES),
+        };
+        // je.csv appears twice but is counted once. outputPath is ignored.
+        let bytes = text_input_bytes_with(&params, size);
+        assert_eq!(bytes, 1025 * 1024 * 1024);
+        assert!(memory_protected_for_text_bytes("kanzhang.export", bytes));
+        assert!(!memory_protected_for_text_bytes("file_list.export", bytes));
+    }
+
+    #[test]
+    fn one_gib_text_input_is_not_yet_protected() {
+        let params = json!({"inputPath":"C:\\data\\je.csv"});
+        assert_eq!(
+            text_input_bytes_with(&params, |_| Some(LARGE_TEXT_INPUT_BYTES)),
+            LARGE_TEXT_INPUT_BYTES
+        );
+        // The product rule is strictly greater than 1 GiB.
+        assert!(!memory_protected_for_text_bytes(
+            "kanzhang.export",
+            LARGE_TEXT_INPUT_BYTES
+        ));
     }
 
     /// FA 子工具的 job 事件必须路由到各自的页面（useJobEvents 按 toolId 过滤），

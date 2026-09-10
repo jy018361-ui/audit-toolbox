@@ -8,6 +8,7 @@ import {
   pickPath,
 } from "./api";
 import type { ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { errorText } from "@/lib/errors";
 import { StepIndicator } from "@/components/StepIndicator";
 import { PageHeader } from "@/components/PageHeader";
@@ -19,6 +20,7 @@ import { FileDropInput } from "@/components/FileDropInput";
 import { displayFileName } from "@/fileDisplay";
 import { DataTable } from "@/components/DataTable";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { LlmReview } from "@/components/LlmReview";
@@ -165,6 +167,48 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
     setOutputPath(path ? faDepDefaultOutputPath(path) : "");
   }, [path, outputPathTouched]);
 
+  // 历史记录「继续任务」：回填清单文件/Sheet/标题行/映射/基准日/输出路径，
+  // 不自动读取——重新读取同一文件时用存档映射顶回建议值（见 inspect）。
+  // restoredDepMapping 就是那份待顶回的存档，一次性消费。
+  const restoredDepMapping = useRef<{ path: string; mapping: DepMapping } | null>(
+    null,
+  );
+  useTaskRestore(tool.id, (restore) => {
+    const p = restore.params as {
+      path?: string;
+      sheet?: string;
+      headerRow?: number;
+      mapping?: DepMapping;
+      balanceSheetDate?: string;
+      outputPath?: string;
+    };
+    if (typeof p.path !== "string" || !p.path) return;
+    restoredDepMapping.current =
+      p.mapping && typeof p.mapping === "object" && Object.keys(p.mapping).length
+        ? { path: p.path, mapping: p.mapping }
+        : null;
+    reviewGeneration.current += 1;
+    setStep(1);
+    setPath(p.path);
+    setSheet(p.sheet ?? "");
+    setHeaderRow(p.headerRow != null ? String(p.headerRow) : "");
+    setInspection(undefined);
+    setMapping(
+      p.mapping && typeof p.mapping === "object" ? p.mapping : {},
+    );
+    if (typeof p.balanceSheetDate === "string" && p.balanceSheetDate)
+      setBalanceSheetDate(p.balanceSheetDate);
+    if (typeof p.outputPath === "string" && p.outputPath) {
+      setOutputPath(p.outputPath);
+      setOutputPathTouched(true);
+    }
+    setLlmReview(undefined);
+    setLlmChanges([]);
+    setLlmPending([]);
+    setError("");
+    setJob(undefined);
+  });
+
   async function inspect(overrides?: {
     path?: string;
     sheet?: string;
@@ -187,13 +231,23 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
       setStep(1);
       setSheet(value.selectedSheet ?? overrides?.sheet ?? sheet);
       setHeaderRow(String(value.detectedHeaderRow ?? ""));
+      // 历史恢复后重新读取同一文件：存档映射顶回建议映射（一次性消费，
+      // 换文件照旧用建议值），且不再自动送 LLM 复核——那份映射已确认过。
+      const stash = restoredDepMapping.current;
+      const match =
+        stash &&
+        stash.path.trim().toLowerCase() === target.trim().toLowerCase()
+          ? stash
+          : undefined;
+      if (match) restoredDepMapping.current = null;
       const suggested: DepMapping = {};
       for (const [key] of DEP_MAPPING_ROLES) {
         suggested[key] = value.suggestedMapping?.[key];
       }
-      setMapping(suggested);
+      setMapping(match ? match.mapping : suggested);
       setLlmChanges([]);
       setLlmPending([]);
+      if (match) return;
       void review(
         suggested,
         value.selectedSheet ?? "",
@@ -469,15 +523,17 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
       )}
       <div className="dep-workbench">
         {activeStep === 0 && (
-          <Card className="dep-source-card">
+          <Card
+            variant="section"
+            className="dep-source-card"
+            data-ui-state={busy ? "loading" : inspection ? "ready" : "empty"}
+          >
             <CardHeader className="dep-card-header">
               <div>
                 <CardTitle>导入期末固定资产清单</CardTitle>
                 <p>选择文件后自动识别 Sheet、标题行并启动字段复核。</p>
               </div>
-              <Badge
-                className={inspection ? "badge-ready" : "dep-badge-neutral"}
-              >
+              <Badge variant={inspection ? "success" : "neutral"}>
                 {busy ? "正在读取" : inspection ? "已读取" : "等待文件"}
               </Badge>
             </CardHeader>
@@ -523,7 +579,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                         ))}
                       </select>
                     ) : (
-                      <input
+                      <Input
                         value={sheet}
                         placeholder="自动选择"
                         disabled={busy}
@@ -532,7 +588,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                     )}
                   </Field>
                   <Field label="标题行">
-                    <input
+                    <Input
                       value={headerRow}
                       placeholder="自动识别"
                       disabled={busy}
@@ -576,15 +632,13 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
           </Card>
         )}
         {activeStep === 1 && inspection && (
-          <Card className="fa-result-workspace dep-preview-card">
+          <Card variant="workspace" className="fa-result-workspace dep-preview-card">
             <CardHeader className="dep-card-header">
               <div>
                 <CardTitle>核对字段映射</CardTitle>
                 <p>在每列表头选择字段角色；必填项齐全后即可生成底稿。</p>
               </div>
-              <Badge
-                className={missing.length ? "dep-badge-warning" : "badge-ready"}
-              >
+              <Badge variant={missing.length ? "warning" : "success"}>
                 {missing.length ? `待补 ${missing.length} 项` : "映射完整"}
               </Badge>
             </CardHeader>
@@ -675,24 +729,20 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
         )}
 
         {activeStep === 2 && inspection && (
-          <Card className="dep-export-card">
+          <Card variant="section" className="dep-export-card">
             <CardHeader className="dep-card-header">
               <div>
                 <CardTitle>设置并生成折旧底稿</CardTitle>
                 <p>输出文件保留活公式，便于复核计算过程与后续调整。</p>
               </div>
-              <Badge
-                className={
-                  outputPaths.length ? "badge-ready" : "dep-badge-neutral"
-                }
-              >
+              <Badge variant={outputPaths.length ? "success" : "neutral"}>
                 {outputPaths.length ? "已生成" : "待生成"}
               </Badge>
             </CardHeader>
             <CardContent>
               <div className="dep-export-grid">
                 <Field label="资产负债表日" required>
-                  <input
+                  <Input
                     type="date"
                     value={balanceSheetDate}
                     onChange={(e) => setBalanceSheetDate(e.target.value)}

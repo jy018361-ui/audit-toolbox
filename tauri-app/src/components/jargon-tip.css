@@ -1,0 +1,65 @@
+/* 行话问号微提示。颜色只引用设计 token，不写字面量。 */
+
+.jargon-tip-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
+  margin: 0;
+  padding: 5px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  line-height: 0;
+  cursor: help;
+  user-select: none;
+}
+
+.jargon-tip-button:hover,
+.jargon-tip-button:focus-visible {
+  color: var(--brand-link);
+}
+
+.jargon-tip-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+  border-radius: var(--r-pill);
+}
+
+.jargon-tip-bubble {
+  position: fixed;
+  z-index: 60;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 16px));
+  max-height: min(240px, calc(100dvh - 16px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  background: var(--ink-strong);
+  color: var(--ink-inverse);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-caption);
+  font-weight: var(--fw-regular);
+  text-align: left;
+  box-shadow: var(--shadow-card);
+  overflow-wrap: anywhere;
+  animation: jargon-tip-fade 150ms ease-out;
+}
+
+@keyframes jargon-tip-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jargon-tip-bubble {
+    animation: none;
+  }
+}

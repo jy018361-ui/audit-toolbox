@@ -1,13 +1,12 @@
 use calamine::{Data, Reader, Sheets, open_workbook_auto};
 use chrono::Local;
 use directories::ProjectDirs;
-use encoding_rs::{GBK, UTF_16BE, UTF_16LE};
 use polars::prelude::*;
 use rust_xlsxwriter::{
     ConditionalFormatFormula, Format, FormatAlign, FormatBorder, Workbook, Worksheet,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -28,6 +27,9 @@ use crate::ledger_mapping;
 use crate::ledger_mapping::{SignConvention, SignEvidence, header_index, normalize_name};
 
 const TS_MAX_PIVOT_COLUMN_VALUES: usize = 180;
+mod disk_ledger;
+mod disk_suite;
+mod large_csv;
 
 pub(crate) type Progress<'a> = &'a dyn Fn(&str, usize, usize, &str);
 
@@ -49,6 +51,9 @@ struct SourceParams {
     sheet: Option<String>,
     #[serde(default = "one")]
     header_row: usize,
+    /// 表头占几行（双层合并表头选 2）。与 TB/JE 账表引擎同口径，默认 1。
+    #[serde(default = "one")]
+    header_depth: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +71,9 @@ struct TsJobParams {
     sheet: Option<String>,
     #[serde(default = "one")]
     header_row: usize,
+    /// TS 不暴露双层表头入口，恒为 1；字段与看账共用读取链路才对齐。
+    #[serde(default = "one")]
+    header_depth: usize,
     output_path: Option<String>,
     #[serde(default)]
     filters: Vec<FilterSpec>,
@@ -136,6 +144,9 @@ struct KanzhangParams {
     sheet: Option<String>,
     #[serde(default = "one")]
     header_row: usize,
+    /// 双层合并表头选 2，默认 1；缓存键会带上它。
+    #[serde(default = "one")]
+    header_depth: usize,
     output_path: Option<String>,
     output_dir: Option<String>,
     mapping: Option<LedgerMapping>,
@@ -145,6 +156,10 @@ struct KanzhangParams {
     exclude_accounts: Vec<String>,
     #[serde(default)]
     include_pivot: bool,
+    #[serde(default = "default_true")]
+    include_counterpart: bool,
+    #[serde(default = "default_true")]
+    include_suite: bool,
     #[serde(default)]
     target_batches: Vec<LedgerBatch>,
     #[serde(default = "default_true")]
@@ -223,9 +238,13 @@ pub(crate) fn run_job(
         }
         "kanzhang.inspect" => {
             progress("read", 0, 1, "正在读取凭证文件…");
-            let value = inspect_kanzhang(params);
+            let value = inspect_kanzhang_with_progress(params, progress, &cancel);
             check_cancel(&cancel)?;
             value
+        }
+        "kanzhang.accounts" => {
+            progress("accounts", 0, 0, "正在准备科目索引…");
+            kanzhang_account_values_with_progress(params, progress, &cancel)
         }
         "ts.cache" => cache_ts(params, progress, &cancel),
         "ts.filter" => ts_filter_preview(params, progress, &cancel),
@@ -236,7 +255,7 @@ pub(crate) fn run_job(
         // 正负数智能标记：读取与看账同一实现，只是要走自己的 toolId 才能被本页收到。
         "kanzhang.mark_inspect" => {
             progress("read", 0, 1, "正在读取凭证文件…");
-            let value = inspect_kanzhang(params);
+            let value = inspect_kanzhang_with_progress(params, progress, &cancel);
             check_cancel(&cancel)?;
             value
         }
@@ -262,11 +281,13 @@ fn inspect_ts(params: Value) -> Result<Value, AppError> {
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
+        source.header_depth,
         true,
     )?;
     let defaults = ts_defaults(&table.headers);
     Ok(json!({
-        "engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path, &table.sheet, source.header_row)?,
+        "engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path, &table.sheet, source.header_row, source.header_depth)?,
+        "headerDepth":source.header_depth,
         "path":table.path, "sheets":table.sheets, "selectedSheet":table.sheet,
         "headers":table.headers, "preview":table.rows.iter().take(20).collect::<Vec<_>>(),
         "dimensions":{"rows":table.rows.len(),"columns":table.headers.len()},
@@ -277,12 +298,46 @@ fn inspect_ts(params: Value) -> Result<Value, AppError> {
 }
 
 fn inspect_kanzhang(params: Value) -> Result<Value, AppError> {
-    let source: SourceParams = parse(params, "看账参数不完整。")?;
+    inspect_kanzhang_with_progress(params, &|_, _, _, _| {}, &AtomicBool::new(false))
+}
+
+fn inspect_kanzhang_with_progress(
+    params: Value,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<Value, AppError> {
+    let source: SourceParams = parse_ledger_source(params, "看账参数不完整。")?;
     let started = Instant::now();
+    if source.header_depth > 1 && large_csv::applies(Path::new(&source.input_path)) {
+        return Err(error(
+            "LARGE_CSV_DOUBLE_HEADER",
+            "超大 CSV 暂不支持双层标题，请先整理为单层标题后重试。",
+            None,
+        ));
+    }
+    if large_csv::applies(Path::new(&source.input_path)) {
+        let cache = large_csv::load(&source, progress, cancel)?;
+        let table = &cache.table;
+        let mapping = suggest_mapping(&table.headers, &table.rows);
+        progress("accounts", 0, 0, "正在从磁盘缓存汇总科目…");
+        let accounts = cache.accounts(&mapping, "", &[], 500, progress, cancel)?;
+        return Ok(
+            json!({"engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path,"CSV",source.header_row,source.header_depth)?,
+            "path":table.path,"sheets":table.sheets,"selectedSheet":table.sheet,"headers":table.headers,
+            "headerRow":source.header_row,"headerDepth":source.header_depth,
+            "preview":table.rows,"dimensions":{"rows":cache.count,"columns":table.headers.len()},
+            "encoding":table.encoding,"delimiter":table.delimiter.map(|v|v.to_string()),
+            "suggestedMapping":mapping,"accounts":accounts["values"],"accountCodes":accounts["codes"],
+            "accountCount":accounts["total"],"lowMemory":true,
+            "resourceNotice":"已启用磁盘分批模式；内存上限、缓存和批量会按当前电脑动态调整。首次生成科目索引时间较长，可查看进度并随时取消。",
+            "timings":{"readMs":started.elapsed().as_millis()}}),
+        );
+    }
     let table = load_ledger_cached(
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
+        source.header_depth,
     )?;
     let mapping = suggest_mapping(&table.headers, &table.rows);
     let (accounts, account_codes, account_count) = (!mapping.account_columns().is_empty())
@@ -296,8 +351,9 @@ fn inspect_kanzhang(params: Value) -> Result<Value, AppError> {
         })
         .unwrap_or_default();
     Ok(json!({
-        "engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path, &table.sheet, source.header_row)?,
+        "engine":"rust-polars", "sourceFingerprint":fingerprint(&table.path, &table.sheet, source.header_row, source.header_depth)?,
         "path":table.path, "sheets":table.sheets, "selectedSheet":table.sheet,
+        "headerRow":source.header_row,"headerDepth":source.header_depth,
         "headers":table.headers, "preview":table.rows.iter().take(50).collect::<Vec<_>>(),
         "dimensions":{"rows":table.rows.len(),"columns":table.headers.len()},
         "encoding":table.encoding, "delimiter":table.delimiter.map(|v|v.to_string()),
@@ -307,11 +363,66 @@ fn inspect_kanzhang(params: Value) -> Result<Value, AppError> {
 }
 
 fn kanzhang_account_values(params: Value) -> Result<Value, AppError> {
-    let source: SourceParams = parse(params.clone(), "看账参数不完整。")?;
+    kanzhang_account_values_with_progress(params, &|_, _, _, _| {}, &AtomicBool::new(false))
+}
+
+fn kanzhang_account_values_with_progress(
+    params: Value,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<Value, AppError> {
+    let source: SourceParams = parse_ledger_source(params.clone(), "看账参数不完整。")?;
+    if large_csv::applies(Path::new(&source.input_path)) {
+        let cache = large_csv::load(&source, progress, cancel)?;
+        let mapping: LedgerMapping = params
+            .get("mapping")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| {
+                error(
+                    "INVALID_MAPPING",
+                    "字段映射格式不正确。",
+                    Some(e.to_string()),
+                )
+            })?
+            .unwrap_or_else(|| suggest_mapping(&cache.table.headers, &cache.table.rows));
+        if mapping.account_columns().is_empty() {
+            return Err(error(
+                "KANZHANG_MAPPING_INCOMPLETE",
+                "请先确认科目编码或科目名称字段映射。",
+                None,
+            ));
+        }
+        let prefixes = parse_code_prefixes(
+            params
+                .get("codePrefixes")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        );
+        let limit = if params.get("all").and_then(Value::as_bool).unwrap_or(false) {
+            usize::MAX
+        } else {
+            params
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(1000)
+                .clamp(1, 20000) as usize
+        };
+        return cache.accounts(
+            &mapping,
+            params.get("keyword").and_then(Value::as_str).unwrap_or(""),
+            &prefixes,
+            limit,
+            progress,
+            cancel,
+        );
+    }
     let table = load_ledger_cached(
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
+        source.header_depth,
     )?;
     let mapping: LedgerMapping = params
         .get("mapping")
@@ -395,12 +506,26 @@ fn primary_account_names(table: &Table, mapping: &LedgerMapping, values: &[Strin
 }
 
 fn validate_kanzhang_mapping(params: Value) -> Result<Value, AppError> {
-    let source: SourceParams = parse(params.clone(), "看账参数不完整。")?;
-    let table = load_ledger_cached(
-        Path::new(&source.input_path),
-        source.sheet.as_deref(),
-        source.header_row,
-    )?;
+    let source: SourceParams = parse_ledger_source(params.clone(), "看账参数不完整。")?;
+    let large = if large_csv::applies(Path::new(&source.input_path)) {
+        Some(large_csv::load(
+            &source,
+            &|_, _, _, _| {},
+            &AtomicBool::new(false),
+        )?)
+    } else {
+        None
+    };
+    let table = if let Some(cache) = &large {
+        cache.table.clone()
+    } else {
+        load_ledger_cached(
+            Path::new(&source.input_path),
+            source.sheet.as_deref(),
+            source.header_row,
+            source.header_depth,
+        )?
+    };
     let mapping = params
         .get("mapping")
         .cloned()
@@ -433,7 +558,25 @@ fn validate_kanzhang_mapping(params: Value) -> Result<Value, AppError> {
     if scheme == "unknown" && !missing.iter().any(|m| m.contains("金额")) {
         missing.push("金额字段");
     }
-    let amount_issues = ledger_amount_parse_issues(&table, &mapping);
+    let mut amount_issues = ledger_amount_parse_issues(&table, &mapping);
+    if let Some(cache) = large {
+        amount_issues.clear();
+        let mut one = table.clone();
+        one.rows.clear();
+        cache.visit(None, &AtomicBool::new(false), |row, index| {
+            if amount_issues.len() < 20 {
+                one.rows.clear();
+                one.rows.push(row);
+                for mut issue in ledger_amount_parse_issues(&one, &mapping) {
+                    issue["rowIndex"] = json!(index);
+                    if amount_issues.len() < 20 {
+                        amount_issues.push(issue);
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
     let mapped = mapping_columns(&mapping);
     let unknown = mapped
         .into_iter()
@@ -447,11 +590,42 @@ fn validate_kanzhang_mapping(params: Value) -> Result<Value, AppError> {
 /// 符号口径检测报告：导出前把结论与依据亮给用户，映射变更后可随时重查。
 /// 与导出走同一套预处理和检测，保证「看到的口径 = 实际采用的口径」。
 fn je_mark_sign_report(params: Value) -> Result<Value, AppError> {
-    let source: SourceParams = parse(params.clone(), "看账参数不完整。")?;
+    let source: SourceParams = parse_ledger_source(params.clone(), "看账参数不完整。")?;
+    if large_csv::applies(Path::new(&source.input_path)) {
+        let cancel = AtomicBool::new(false);
+        let cache = large_csv::load(&source, &|_, _, _, _| {}, &cancel)?;
+        let mapping = params
+            .get("mapping")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| {
+                error(
+                    "INVALID_MAPPING",
+                    "字段映射格式不正确。",
+                    Some(e.to_string()),
+                )
+            })?
+            .unwrap_or_else(|| suggest_mapping(&cache.table.headers, &cache.table.rows));
+        let ledger = disk_ledger::prepare(
+            &cache,
+            &mapping,
+            None,
+            source.header_row,
+            &|_, _, _, _| {},
+            &cancel,
+        )?;
+        let report = sign_report_from_evidence(ledger.evidence_all(&cancel)?);
+        return Ok(json!({
+            "engine":"rust-sqlite",
+            "signConvention":serde_json::to_value(&report).unwrap_or_default(),
+        }));
+    }
     let table = load_ledger_cached(
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
+        source.header_depth,
     )?;
     let mapping = params
         .get("mapping")
@@ -492,6 +666,7 @@ fn ts_filter_values(params: Value) -> Result<Value, AppError> {
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
+        source.header_depth,
         true,
     )?;
     let index = header_index(&table.headers, &field)
@@ -521,6 +696,7 @@ fn cache_ts(params: Value, progress: Progress<'_>, cancel: &AtomicBool) -> Resul
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
+        source.header_depth,
         false,
     )?;
     if cache_hit {
@@ -550,6 +726,7 @@ fn ts_filter_preview(
         Path::new(&job.input_path),
         job.sheet.as_deref(),
         job.header_row,
+        job.header_depth,
         true,
     )?;
     check_cancel(cancel)?;
@@ -578,6 +755,7 @@ fn export_ts(
         Path::new(&job.input_path),
         job.sheet.as_deref(),
         job.header_row,
+        job.header_depth,
         true,
     )?;
     check_cancel(cancel)?;
@@ -701,12 +879,23 @@ fn kanzhang_filter_preview(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
-    let job: KanzhangParams = parse(params, "看账参数不完整。")?;
+    let job = parse_kanzhang_job(params)?;
+    if job.header_depth > 1 && large_csv::applies(Path::new(&job.input_path)) {
+        return Err(error(
+            "LARGE_CSV_DOUBLE_HEADER",
+            "超大 CSV 暂不支持双层标题，请先整理为单层标题后重试。",
+            None,
+        ));
+    }
+    if large_csv::applies(Path::new(&job.input_path)) {
+        return kanzhang_filter_preview_disk(&job, progress, cancel);
+    }
     progress("read", 0, 3, "正在读取凭证数据…");
     let table = load_ledger_cached(
         Path::new(&job.input_path),
         job.sheet.as_deref(),
         job.header_row,
+        job.header_depth,
     )?;
     let mapping = job
         .mapping
@@ -734,13 +923,17 @@ fn export_kanzhang(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
-    let job: KanzhangParams = parse(params, "看账参数不完整。")?;
+    let job = parse_kanzhang_job(params)?;
+    if large_csv::applies(Path::new(&job.input_path)) {
+        return export_kanzhang_disk(&job, progress, cancel);
+    }
     let started = Instant::now();
     progress("read", 0, 6, "正在读取凭证数据…");
     let table = load_ledger_cached(
         Path::new(&job.input_path),
         job.sheet.as_deref(),
         job.header_row,
+        job.header_depth,
     )?;
     let mapping = job
         .mapping
@@ -761,8 +954,13 @@ fn export_kanzhang(
             6,
             &format!("正在处理批次 {}：{}…", batch_index + 1, batch.name),
         );
-        let filtered =
-            filter_ledger_rows(&table, &mapping, &batch.accounts, &job.exclude_accounts)?;
+        let filtered = filter_ledger_rows_by_mode(
+            &table,
+            &mapping,
+            &batch.accounts,
+            &job.exclude_accounts,
+            job.include_counterpart,
+        )?;
         progress("polars", 2, 6, "Rust Polars 正在生成凭证、科目及月份汇总…");
         let analysis = analyze_ledger(&table, &mapping, &filtered, &batch.accounts, &job, cancel)?;
         progress("classify", 4, 6, "正在识别凭证类型、JE 匹配和损益结转…");
@@ -783,6 +981,7 @@ fn export_kanzhang(
                 &analysis,
                 job.include_pivot,
                 job.include_voucher_types,
+                job.include_suite && job.include_counterpart,
                 job.rows_per_sheet,
                 cancel,
             )?
@@ -792,6 +991,7 @@ fn export_kanzhang(
                 &analysis,
                 job.include_pivot,
                 job.include_voucher_types,
+                job.include_suite && job.include_counterpart,
                 job.rows_per_sheet,
                 cancel,
             )?
@@ -821,6 +1021,306 @@ fn export_kanzhang(
         "mapping":mapping,
         "timings":{"totalMs":started.elapsed().as_millis()}
     }))
+}
+
+fn source_from_kanzhang(job: &KanzhangParams) -> SourceParams {
+    SourceParams {
+        input_path: job.input_path.clone(),
+        sheet: job.sheet.clone(),
+        header_row: job.header_row,
+        header_depth: 1,
+    }
+}
+
+/// 看账的预览与导出必须在生成任何缓存键之前共用同一个实际标题行。
+/// 否则前端的自动值 `0` 与读取阶段已解析的行号会将同一份大 CSV 分成两份缓存。
+fn parse_kanzhang_job(params: Value) -> Result<KanzhangParams, AppError> {
+    let mut job: KanzhangParams = parse(params, "看账参数不完整。")?;
+    job.header_row =
+        resolve_auto_header_row(&job.input_path, job.sheet.as_deref(), job.header_row)?;
+    Ok(job)
+}
+
+fn scaled_progress(
+    progress: Progress<'_>,
+    start: usize,
+    end: usize,
+    phase: &str,
+    current: usize,
+    total: usize,
+    message: &str,
+) {
+    if total == 0 {
+        progress(phase, 0, 0, message);
+        return;
+    }
+    let width = end.saturating_sub(start);
+    let scaled = start + width.saturating_mul(current.min(total)) / total;
+    progress(phase, scaled, 1000, message);
+}
+
+fn prepare_disk_ledger(
+    job: &KanzhangParams,
+    cache_progress: Progress<'_>,
+    ledger_progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<(LedgerMapping, disk_ledger::DiskLedger), AppError> {
+    let cache = large_csv::load(&source_from_kanzhang(job), cache_progress, cancel)?;
+    let mapping = job
+        .mapping
+        .clone()
+        .unwrap_or_else(|| suggest_mapping(&cache.table.headers, &cache.table.rows));
+    let ledger = disk_ledger::prepare(
+        &cache,
+        &mapping,
+        None,
+        job.header_row,
+        ledger_progress,
+        cancel,
+    )?;
+    Ok((mapping, ledger))
+}
+
+fn select_disk_batch(
+    ledger: &disk_ledger::DiskLedger,
+    targets: &[String],
+    cancel: &AtomicBool,
+) -> Result<usize, AppError> {
+    let rows = ledger.select(targets, cancel)?;
+    let convention = ledger
+        .evidence_selected(cancel)?
+        .convention
+        .unwrap_or(SignConvention::Unsigned);
+    ledger.set_selected_convention(convention)?;
+    Ok(rows)
+}
+
+fn kanzhang_filter_preview_disk(
+    job: &KanzhangParams,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<Value, AppError> {
+    progress("read", 0, 1000, "正在打开磁盘分批缓存…");
+    let cache_progress = |phase: &str, current: usize, total: usize, message: &str| {
+        scaled_progress(progress, 0, 150, phase, current, total, message)
+    };
+    let ledger_progress = |phase: &str, current: usize, total: usize, message: &str| {
+        scaled_progress(progress, 150, 850, phase, current, total, message)
+    };
+    let (mapping, ledger) = prepare_disk_ledger(job, &cache_progress, &ledger_progress, cancel)?;
+    progress("filter", 880, 1000, "正在磁盘上筛选目标科目和完整凭证…");
+    let rows = select_disk_batch(&ledger, &job.target_accounts, cancel)?;
+    let mut preview = Vec::new();
+    ledger.visit_selected(cancel, |row, _| {
+        if preview.len() < 50 {
+            preview.push(row);
+        }
+        Ok(())
+    })?;
+    Ok(
+        json!({"engine":"rust-polars","rows":rows,"columns":ledger.table.headers.len(),
+        "mapping":mapping,"preview":preview,"outputPaths":[],"lowMemory":true}),
+    )
+}
+
+fn export_kanzhang_disk(
+    job: &KanzhangParams,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<Value, AppError> {
+    let started = Instant::now();
+    progress("read", 0, 1000, "正在打开磁盘分批缓存…");
+    let cache_progress = |phase: &str, current: usize, total: usize, message: &str| {
+        scaled_progress(progress, 0, 100, phase, current, total, message)
+    };
+    let ledger_progress = |phase: &str, current: usize, total: usize, message: &str| {
+        scaled_progress(progress, 100, 500, phase, current, total, message)
+    };
+    let (mapping, ledger) = prepare_disk_ledger(job, &cache_progress, &ledger_progress, cancel)?;
+    let batches = normalized_batches(job);
+    let budget = crate::resource_budget::budget()?;
+    let analysis_budget = (budget.worker_bytes / 4).max(budget.batch_bytes);
+    let mut outputs = Vec::new();
+    let mut batch_results = Vec::new();
+    let mut warnings = Vec::new();
+    for (batch_index, batch) in batches.iter().enumerate() {
+        check_cancel(cancel)?;
+        let batch_start: usize = 500 + 490 * batch_index / batches.len().max(1);
+        let batch_end: usize = 500 + 490 * (batch_index + 1) / batches.len().max(1);
+        let batch_width = batch_end.saturating_sub(batch_start);
+        progress(
+            "filter",
+            batch_start,
+            1000,
+            &format!("正在磁盘上筛选批次 {}：{}…", batch_index + 1, batch.name),
+        );
+        let selected_rows = select_disk_batch(&ledger, &batch.accounts, cancel)?;
+        let output = kanzhang_batch_output_path(job, batch, batch_index, batches.len())?;
+        if !output
+            .extension()
+            .and_then(|v| v.to_str())
+            .is_some_and(|v| v.eq_ignore_ascii_case("csv"))
+        {
+            return Err(error(
+                "KANZHANG_LARGE_DETAIL_FORMAT",
+                "大文件明细当前使用 CSV 分片导出，请将输出文件扩展名改为 .csv。套表仍会另存为 XLSX。",
+                None,
+            ));
+        }
+        let parent = output.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(parent).map_err(io_error)?;
+        let stem = output.file_stem().unwrap_or_default().to_string_lossy();
+        let suite_path = parent.join(format!("{stem}_套表.xlsx"));
+        let suite_enabled = job.include_counterpart
+            && job.include_suite
+            && (job.include_pivot || job.include_voucher_types || !job.pivot_rows.is_empty());
+        progress(
+            "write",
+            batch_start + batch_width * 5 / 100,
+            1000,
+            &format!("正在优先流式写出批次 {} 明细…", batch_index + 1),
+        );
+        let detail_progress = |phase: &str, current: usize, total: usize, message: &str| {
+            scaled_progress(
+                progress,
+                batch_start + batch_width * 5 / 100,
+                batch_start + batch_width * 18 / 100,
+                phase,
+                current,
+                total,
+                message,
+            )
+        };
+        let detail = ledger.write_selected_csv(
+            &output,
+            &ledger.table.headers,
+            job.rows_per_sheet,
+            job.include_counterpart,
+            job.mark_loss_transfer,
+            &detail_progress,
+            cancel,
+        )?;
+        outputs.extend(
+            detail
+                .paths
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned()),
+        );
+        progress(
+            "write",
+            batch_start + batch_width * 19 / 100,
+            1000,
+            &format!("正在处理批次 {} 的剔除明细…", batch_index + 1),
+        );
+        let excluded = ledger.write_excluded_csv(
+            &output,
+            &ledger.table.headers,
+            &job.exclude_accounts,
+            cancel,
+        )?;
+        if let Some(path) = &excluded {
+            outputs.push(path.to_string_lossy().into_owned());
+        }
+
+        let mut suite_warning = None;
+        let suite = if suite_enabled {
+            let suite_progress = |phase: &str, current: usize, total: usize, message: &str| {
+                let (local_start, local_end) = match phase {
+                    "analyze" => (
+                        batch_start + batch_width * 20 / 100,
+                        batch_start + batch_width * 62 / 100,
+                    ),
+                    "classify" => (
+                        batch_start + batch_width * 62 / 100,
+                        batch_start + batch_width * 80 / 100,
+                    ),
+                    "write" => (
+                        batch_start + batch_width * 80 / 100,
+                        batch_start + batch_width * 97 / 100,
+                    ),
+                    _ => (
+                        batch_start + batch_width * 20 / 100,
+                        batch_start + batch_width * 97 / 100,
+                    ),
+                };
+                scaled_progress(
+                    progress,
+                    local_start,
+                    local_end,
+                    phase,
+                    current,
+                    total,
+                    message,
+                )
+            };
+            match disk_suite::write_suite(
+                &ledger,
+                &mapping,
+                &batch.accounts,
+                job,
+                &suite_path,
+                analysis_budget,
+                &suite_progress,
+                cancel,
+            ) {
+                Ok(value) => {
+                    outputs.push(suite_path.to_string_lossy().into_owned());
+                    outputs.extend(
+                        value
+                            .overflow_paths
+                            .iter()
+                            .map(|path| path.to_string_lossy().into_owned()),
+                    );
+                    warnings.extend(value.warnings.iter().cloned());
+                    Some(value)
+                }
+                Err(err) if err.code == "JOB_CANCELLED" => return Err(err),
+                Err(err) => {
+                    let warning = format!(
+                        "批次「{}」的 Excel 套表未生成：{} 已保留凭证明细 CSV。",
+                        batch.name, err.user_message
+                    );
+                    progress(
+                        "write",
+                        batch_start + batch_width * 97 / 100,
+                        1000,
+                        &warning,
+                    );
+                    warnings.push(warning.clone());
+                    suite_warning = Some(warning);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        progress(
+            "write",
+            batch_end,
+            1000,
+            &if suite_warning.is_some() {
+                format!("批次 {} 的 CSV 已完成，Excel 套表未生成。", batch_index + 1)
+            } else {
+                format!("批次 {} 已完成。", batch_index + 1)
+            },
+        );
+        batch_results.push(
+            json!({"name":batch.name,"accounts":batch.accounts,"rows":detail.rows,
+            "excludedRows":if excluded.is_some(){Value::String("已流式导出".into())}else{Value::from(0)},"summaryRows":suite.as_ref().map(|v|v.summary.rows.len()).unwrap_or(0),
+            "voucherRows":suite.as_ref().map(|v|v.voucher_count).unwrap_or(0),
+            "voucherTypesLoose":Value::Null,"voucherTypesStrict":Value::Null,
+            "lossTransferVouchers":suite.as_ref().map(|v|v.loss_count).unwrap_or(0),
+            "selectedRows":selected_rows,"suiteGenerated":suite.is_some(),
+            "suiteWarning":suite_warning}),
+        );
+    }
+    let partial = !warnings.is_empty();
+    Ok(
+        json!({"engine":"rust-polars","outputPaths":outputs,"batchCount":batches.len(),
+        "batches":batch_results,"mapping":mapping,"lowMemory":true,
+        "partial":partial,"warnings":warnings,
+        "memoryBudget":budget,"timings":{"totalMs":started.elapsed().as_millis()}}),
+    )
 }
 
 #[derive(Debug)]
@@ -1121,6 +1621,43 @@ fn filter_ledger_rows(
     Ok(result)
 }
 
+fn filter_ledger_rows_by_mode(
+    table: &Table,
+    mapping: &LedgerMapping,
+    targets: &[String],
+    excludes: &[String],
+    include_counterpart: bool,
+) -> Result<Vec<Vec<String>>, AppError> {
+    if include_counterpart {
+        return filter_ledger_rows(table, mapping, targets, excludes);
+    }
+    let account_indexes = mapping
+        .account_columns()
+        .into_iter()
+        .filter_map(|name| header_index(&table.headers, name))
+        .collect::<Vec<_>>();
+    if account_indexes.is_empty() {
+        return Err(error(
+            "KANZHANG_MAPPING_INCOMPLETE",
+            "请先确认科目字段映射。",
+            None,
+        ));
+    }
+    let target_set = targets
+        .iter()
+        .map(|value| normalize_account_text(value))
+        .filter(|value| !value.is_empty())
+        .collect::<HashSet<_>>();
+    Ok(table
+        .rows
+        .iter()
+        .filter(|row| {
+            target_set.is_empty() || row_matches_accounts(row, &account_indexes, &target_set)
+        })
+        .cloned()
+        .collect())
+}
+
 fn excluded_ledger_rows(
     table: &Table,
     mapping: &LedgerMapping,
@@ -1152,6 +1689,20 @@ fn preprocess_ledger(
     mapping: &LedgerMapping,
     sign_override: Option<SignConvention>,
 ) -> Result<Table, AppError> {
+    // 顺序不能反：先按公共引擎剔噪声行（表尾小计/手工草稿、有钱没身份的游离行），
+    // 再做非金额列的向下填充——填充会把上一行的科目/凭证号带给空白格，垃圾行被
+    // 填上身份后就再也认不出来了，摇身变成真分录混进发生额（借款利息、TBJE 勾稽
+    // 同序踩过）。
+    let keep = ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
+        ledger_role_columns(mapping, role)
+    });
+    let mut kept_rows = Vec::with_capacity(table.rows.len());
+    for (index, row) in table.rows.iter().enumerate() {
+        if keep.get(index).copied().unwrap_or(true) {
+            kept_rows.push(row.clone());
+        }
+    }
+    table.rows = kept_rows;
     let id_indexes = ledger_id_indexes(&table.headers, mapping);
     let account_indexes = mapping
         .account_columns()
@@ -1286,9 +1837,13 @@ fn analyze_ledger(
         .map(|value| normalize_account_text(value))
         .filter(|value| !value.is_empty())
         .collect::<HashSet<_>>();
-    let amounts = ledger_amounts(rows, &table.headers, mapping, &id_indexes, None);
     let loss_ids = if job.mark_loss_transfer {
-        detect_loss_transfer_ids(rows, &id_indexes, &account_indexes)
+        let loss_source = if job.include_counterpart {
+            rows
+        } else {
+            &table.rows
+        };
+        detect_loss_transfer_ids(loss_source, &id_indexes, &account_indexes)
     } else {
         HashSet::new()
     };
@@ -1320,6 +1875,60 @@ fn analyze_ledger(
         enriched.push(output);
     }
     let excluded_headers = table.headers.clone();
+    let target_accounts = || {
+        let mut values = targets
+            .iter()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        values.sort();
+        values.dedup();
+        values
+    };
+    let account_headers = || {
+        mapping
+            .account_columns()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    };
+    let amount_headers = || {
+        [
+            mapping.amount.as_deref(),
+            mapping.debit.as_deref(),
+            mapping.credit.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::to_owned)
+        .collect()
+    };
+    if !job.include_suite || !job.include_counterpart {
+        let empty_pivot = || PivotResult {
+            headers: Vec::new(),
+            rows: Vec::new(),
+            row_field_count: 0,
+        };
+        return Ok(LedgerAnalysis {
+            headers,
+            rows: enriched,
+            excluded_headers,
+            excluded_rows,
+            summary: empty_pivot(),
+            voucher_pivot: empty_pivot(),
+            voucher_type_loose: empty_pivot(),
+            voucher_type_strict: empty_pivot(),
+            custom_pivot: None,
+            llm_analysis: None,
+            target_accounts: target_accounts(),
+            account_headers: account_headers(),
+            amount_headers: amount_headers(),
+            loss_count: loss_ids.len(),
+            je_pairs: 0,
+            je_cross_pairs: 0,
+        });
+    }
+    let amounts = ledger_amounts(rows, &table.headers, mapping, &id_indexes, None);
     let summary = ledger_summary_from_amounts(rows, &account_indexes, &amounts.net)?;
     let key_label = voucher_key_label(&table.headers, &id_indexes);
     let voucher_pivot = build_voucher_pivot_rust(
@@ -1382,30 +1991,9 @@ fn analyze_ledger(
         custom_pivot,
         llm_analysis,
         // 用原始科目名而不是 target_set 里归一化过的小写值——`_targets` 的 A 列是给人看的。
-        target_accounts: {
-            let mut values = targets
-                .iter()
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty())
-                .collect::<Vec<_>>();
-            values.sort();
-            values.dedup();
-            values
-        },
-        account_headers: mapping
-            .account_columns()
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
-        amount_headers: [
-            mapping.amount.as_deref(),
-            mapping.debit.as_deref(),
-            mapping.credit.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .map(str::to_owned)
-        .collect(),
+        target_accounts: target_accounts(),
+        account_headers: account_headers(),
+        amount_headers: amount_headers(),
         loss_count: loss_ids.len(),
         // 对冲配对属于正负数智能标记，看账不再统计。
         je_pairs: 0,
@@ -2666,16 +3254,21 @@ fn pick_auto_sheet(path: &Path, workbook: &mut AutoWorkbook, sheets: &[String]) 
         }
     }
     let picked = auto_select_sheet(workbook, sheets)?;
-    if let Ok(memo_path) = auto_sheet_memo_path(path) {
-        let partial = memo_path.with_extension("sheet.partial");
-        if fs::create_dir_all(memo_path.parent().unwrap_or(Path::new("."))).is_ok()
-            && fs::write(&partial, &picked).is_ok()
-        {
-            // 记不下来不影响本次结果，最坏只是下次多扫一遍。
-            let _ = replace_file(&partial, &memo_path);
-        }
-    }
+    remember_auto_sheet(path, &picked);
     Some(picked)
+}
+
+fn remember_auto_sheet(path: &Path, sheet: &str) {
+    let Ok(memo_path) = auto_sheet_memo_path(path) else {
+        return;
+    };
+    let partial = memo_path.with_extension("sheet.partial");
+    if fs::create_dir_all(memo_path.parent().unwrap_or(Path::new("."))).is_ok()
+        && fs::write(&partial, sheet).is_ok()
+    {
+        // 记不下来不影响本次结果，最坏只是下次多扫一遍。
+        let _ = replace_file(&partial, &memo_path);
+    }
 }
 
 /// 逐张表打分取最高。表头分取前 30 行里的最大值，有数行数按「至少两个非空
@@ -2746,7 +3339,162 @@ fn auto_sheet_memo_path(path: &Path) -> Result<PathBuf, AppError> {
         .join(format!("{key}.sheet")))
 }
 
-fn load_table(path: &Path, sheet: Option<&str>, header_row: usize) -> Result<Table, AppError> {
+/// 自动标题行也按源文件身份和用户指定的 Sheet 记忆。calamine 的
+/// `worksheet_range` 即使调用方只取前 31 行，也会先解压并解析整张工作表；
+/// 对十几万行的 xlsx，这一步可能比读取已经存在的 Parquet 缓存慢十倍。
+fn auto_header_memo_path(path: &Path, sheet: Option<&str>) -> Result<PathBuf, AppError> {
+    let meta = fs::metadata(path).map_err(io_error)?;
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    hasher.update(meta.len().to_le_bytes());
+    hasher.update(modified.to_le_bytes());
+    hasher.update(sheet.unwrap_or("<auto>").as_bytes());
+    hasher.update(b"auto-header-v1");
+    let key = hex::encode(hasher.finalize());
+    Ok(cache_root()?
+        .join("ts")
+        .join("v1")
+        .join(format!("{key}.header")))
+}
+
+fn remember_auto_header(path: &Path, sheet: Option<&str>, header_row: usize) {
+    let Ok(memo_path) = auto_header_memo_path(path, sheet) else {
+        return;
+    };
+    let partial = memo_path.with_extension("header.partial");
+    if fs::create_dir_all(memo_path.parent().unwrap_or(Path::new("."))).is_ok()
+        && fs::write(&partial, header_row.to_string()).is_ok()
+    {
+        let _ = replace_file(&partial, &memo_path);
+    }
+}
+
+/// 标题行 `0` 表示自动探测：与存款/汇兑引擎共用 [`ledger_mapping::header_row_score`]
+/// 的打分口径，只看前 31 行选最高分。看账此前把标题行硬锁在用户输入（默认
+/// 第 1 行），表头在第 2/4 行的余额表（TBJEPBC 06/09/10 号样例）第一步就报
+/// 「请先确认科目编码或科目名称字段映射」，而同一文件在存款/汇兑引擎里能自动
+/// 认出。大 CSV 走流式路径暂不探测，`0` 仍按第 1 行处理。
+fn resolve_auto_header_row(
+    input_path: &str,
+    sheet: Option<&str>,
+    header_row: usize,
+) -> Result<usize, AppError> {
+    if header_row != 0 {
+        return Ok(header_row);
+    }
+    let path = Path::new(input_path);
+    if !path.is_file() {
+        return Err(error(
+            "PATH_NOT_FOUND",
+            "找不到输入文件。",
+            Some(input_path.to_string()),
+        ));
+    }
+    if large_csv::applies(path) {
+        return Ok(1);
+    }
+    if let Ok(memo_path) = auto_header_memo_path(path, sheet) {
+        if let Some(remembered) = fs::read_to_string(&memo_path)
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| (1..=30).contains(value))
+        {
+            touch_cache(&memo_path);
+            return Ok(remembered);
+        }
+    }
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    if ["xlsx", "xlsm"]
+        .iter()
+        .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+    {
+        // 直接流式解压工作表 XML 的前 32 行；失败时再回退到 calamine，
+        // 兼容个别非标准 OOXML 文件，不让性能优化改变可读范围。
+        if let Ok((selected_sheet, resolved)) = crate::fx::lightweight_xlsx_header_row(path, sheet)
+        {
+            if sheet.is_none() {
+                // 标题探测已经顺手比较了各 Sheet 的维度和表头分，不要让随后
+                // 的正式读取再通过 calamine 把每张表完整解析一遍来选表。
+                remember_auto_sheet(path, &selected_sheet);
+            }
+            remember_auto_header(path, sheet, resolved);
+            return Ok(resolved);
+        }
+    }
+    let rows: Vec<Vec<String>> = if crate::spreadsheet_input::is_text(path) {
+        crate::spreadsheet_input::read_rows(path)?
+            .into_iter()
+            .take(31)
+            .collect()
+    } else {
+        let read_path = local_read_path(path)?;
+        let mut workbook = open_workbook_auto(&read_path).map_err(|e| {
+            error(
+                "WORKBOOK_READ_FAILED",
+                "无法读取工作簿。",
+                Some(e.to_string()),
+            )
+        })?;
+        let sheets = workbook.sheet_names().to_vec();
+        let selected = sheet
+            .filter(|name| sheets.iter().any(|value| value == name))
+            .map(str::to_owned)
+            .or_else(|| pick_auto_sheet(path, &mut workbook, &sheets))
+            .ok_or_else(|| error("WORKBOOK_EMPTY", "工作簿中没有 Sheet。", None))?;
+        let range = workbook.worksheet_range(&selected).map_err(|e| {
+            error(
+                "WORKBOOK_READ_FAILED",
+                "无法读取指定 Sheet。",
+                Some(e.to_string()),
+            )
+        })?;
+        range
+            .rows()
+            .take(31)
+            .map(|row| row.iter().map(data_text).collect::<Vec<_>>())
+            .collect()
+    };
+    let resolved = if rows.is_empty() {
+        1
+    } else {
+        (0..rows.len().min(30))
+            .map(|index| (index + 1, ledger_mapping::header_row_score(&rows, index)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(row, _)| row)
+            .unwrap_or(1)
+    };
+    remember_auto_header(path, sheet, resolved);
+    Ok(resolved)
+}
+
+/// 看账/正负数的账表来源参数：`headerRow: 0`（自动）在此解析成实际行号，
+/// 之后缓存键与读取用的都是确定值，同一文件不会因两次探测不一致而分裂。
+fn parse_ledger_source(params: Value, message: &str) -> Result<SourceParams, AppError> {
+    let mut source: SourceParams = parse(params, message)?;
+    source.header_row = resolve_auto_header_row(
+        &source.input_path,
+        source.sheet.as_deref(),
+        source.header_row,
+    )?;
+    Ok(source)
+}
+
+fn load_table(
+    path: &Path,
+    sheet: Option<&str>,
+    header_row: usize,
+    header_depth: usize,
+) -> Result<Table, AppError> {
     if !path.is_file() {
         return Err(error(
             "PATH_NOT_FOUND",
@@ -2760,10 +3508,17 @@ fn load_table(path: &Path, sheet: Option<&str>, header_row: usize) -> Result<Tab
         .unwrap_or("")
         .to_lowercase();
     if extension == "parquet" {
+        if header_depth > 1 {
+            return Err(error(
+                "PARQUET_DOUBLE_HEADER",
+                "Parquet 缓存文件是单层列名，不支持双层表头。",
+                None,
+            ));
+        }
         return load_parquet(path);
     }
-    if matches!(extension.as_str(), "csv" | "txt" | "tsv") {
-        return load_text(path, header_row);
+    if crate::spreadsheet_input::is_text(path.as_ref()) {
+        return load_text(path, header_row, header_depth);
     }
     let read_path = local_read_path(path)?;
     let mut workbook = open_workbook_auto(&read_path).map_err(|e| {
@@ -2796,8 +3551,16 @@ fn load_table(path: &Path, sheet: Option<&str>, header_row: usize) -> Result<Tab
         return Err(error("HEADER_ROW_INVALID", "标题行超出数据范围。", None));
     }
     let width = all.iter().map(Vec::len).max().unwrap_or(0);
-    let headers = normalize_headers(&all[header_index], width);
-    let rows = normalize_rows(&all[header_index + 1..], width);
+    // 双层表头沿用汇兑损益的合并规则（首行横向补齐合并单元格，再逐列
+    // 「上级-下级」拼接），保证各工具读出的列名口径一致。
+    let depth = header_depth.max(1).min(all.len() - header_index);
+    let headers = if depth > 1 {
+        let raw: Vec<Vec<String>> = all[header_index..header_index + depth].to_vec();
+        crate::fx::merge_headers(&raw, width)
+    } else {
+        normalize_headers(&all[header_index], width)
+    };
+    let rows = normalize_rows(&all[header_index + depth..], width);
     Ok(Table {
         path: path.to_path_buf(),
         sheet: selected,
@@ -2816,7 +3579,7 @@ pub(crate) fn fx_load_table_value(
     sheet: Option<&str>,
     header_row: usize,
 ) -> Result<Value, AppError> {
-    let table = load_table(path, sheet, header_row)?;
+    let table = load_table(path, sheet, header_row, 1)?;
     Ok(json!({
         "path": table.path, "sheet": table.sheet, "sheets": table.sheets,
         "headers": table.headers, "rows": table.rows,
@@ -2834,7 +3597,7 @@ pub(crate) fn fx_load_ledger_table_value_cached(
     sheet: Option<&str>,
     header_row: usize,
 ) -> Result<Value, AppError> {
-    let table = load_ledger_cached(path, sheet, header_row)?;
+    let table = load_ledger_cached(path, sheet, header_row, 1)?;
     Ok(json!({
         "path": table.path, "sheet": table.sheet, "sheets": table.sheets,
         "headers": table.headers, "rows": table.rows,
@@ -2858,14 +3621,329 @@ fn load_ledger_cached(
     path: &Path,
     sheet: Option<&str>,
     header_row: usize,
+    header_depth: usize,
 ) -> Result<Table, AppError> {
-    load_ts_cached(path, sheet, header_row, true).map(|(table, _, _)| table)
+    if large_csv::applies(path) {
+        return Err(large_csv::full_table_error());
+    }
+    load_ts_cached(path, sheet, header_row, header_depth, true).map(|(table, _, _)| table)
+}
+
+/// 跨工具复用的大 CSV 磁盘数据源。调用方逐行访问，不取得底层 SQLite
+/// 连接，也不能把整表重新装回内存。
+pub(crate) struct DiskLedger {
+    cache: large_csv::Cache,
+    header_row: usize,
+}
+
+impl DiskLedger {
+    pub(crate) fn headers(&self) -> &[String] {
+        &self.cache.table.headers
+    }
+
+    pub(crate) fn row_count(&self) -> usize {
+        self.cache.count
+    }
+
+    pub(crate) fn visit(
+        &self,
+        cancel: &AtomicBool,
+        mut visitor: impl FnMut(&[String], usize) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        self.cache.visit(None, cancel, |row, index| {
+            visitor(&row, self.header_row + index + 1)
+        })
+    }
+
+    pub(crate) fn column_values(
+        &self,
+        field: &str,
+        keyword: &str,
+        limit: usize,
+        cancel: &AtomicBool,
+    ) -> Result<(Vec<String>, usize), AppError> {
+        self.cache.column_values(field, keyword, limit, cancel)
+    }
+}
+
+pub(crate) fn disk_ledger_applies(path: &Path) -> bool {
+    large_csv::applies(path)
+}
+
+pub(crate) fn open_disk_ledger(
+    path: &Path,
+    header_row: usize,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<DiskLedger, AppError> {
+    if !large_csv::applies(path) {
+        return Err(error(
+            "DISK_LEDGER_NOT_REQUIRED",
+            "当前文件无需启用磁盘分批读取。",
+            None,
+        ));
+    }
+    let header_row = header_row.max(1);
+    let source = SourceParams {
+        input_path: path.to_string_lossy().into_owned(),
+        sheet: None,
+        header_row,
+        header_depth: 1,
+    };
+    let cache = large_csv::load(&source, progress, cancel)?;
+    Ok(DiskLedger { cache, header_row })
+}
+
+/// A normalized, disk-backed JE shared by every business tool. Small files keep
+/// using their existing in-memory path; this type is created only when the
+/// dynamic large-file policy selects SQLite.
+pub(crate) struct PreparedDiskLedger {
+    inner: disk_ledger::DiskLedger,
+    header_row: usize,
+}
+
+pub(crate) struct PreparedDiskLedgerRow {
+    pub(crate) values: Vec<String>,
+    pub(crate) source_row: usize,
+    pub(crate) voucher: String,
+    pub(crate) account: String,
+    pub(crate) entity: String,
+    pub(crate) debit: f64,
+    pub(crate) credit: f64,
+    pub(crate) net: f64,
+}
+
+impl PreparedDiskLedger {
+    pub(crate) fn headers(&self) -> &[String] {
+        &self.inner.table.headers
+    }
+
+    pub(crate) fn row_count(&self) -> usize {
+        self.inner.count
+    }
+
+    pub(crate) fn convention(&self) -> SignConvention {
+        self.inner.convention()
+    }
+
+    pub(crate) fn amount_evidence(&self, cancel: &AtomicBool) -> Result<String, AppError> {
+        let evidence = self.inner.evidence_all(cancel)?;
+        if evidence.convention.is_none() {
+            return Err(error(
+                "AMOUNT_SCHEME_UNDETERMINED",
+                &format!(
+                    "无法自动判断序时账的金额记法：{}这份序时账的借贷记法两种解释都说得通，为避免算错已停止测算。",
+                    evidence
+                        .note
+                        .as_deref()
+                        .map(|note| format!("{note}。"))
+                        .unwrap_or_default()
+                ),
+                None,
+            ));
+        }
+        Ok(if evidence.signed_votes + evidence.unsigned_votes > 0 {
+            format!(
+                "{} 张借贷齐全的凭证按此口径配平",
+                evidence.signed_votes.max(evidence.unsigned_votes)
+            )
+        } else {
+            evidence
+                .note
+                .unwrap_or_else(|| "按金额列的正负形状判定".into())
+        })
+    }
+
+    pub(crate) fn sign_evidence(&self, cancel: &AtomicBool) -> Result<SignEvidence, AppError> {
+        self.inner.evidence_all(cancel)
+    }
+
+    pub(crate) fn select_accounts(
+        &self,
+        accounts: &[String],
+        cancel: &AtomicBool,
+    ) -> Result<usize, AppError> {
+        self.inner.select(accounts, cancel)
+    }
+
+    pub(crate) fn visit(
+        &self,
+        selected_only: bool,
+        cancel: &AtomicBool,
+        mut visitor: impl FnMut(PreparedDiskLedgerRow) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        self.inner.visit_processed(selected_only, cancel, |row| {
+            visitor(PreparedDiskLedgerRow {
+                values: row.values,
+                source_row: self.header_row + row.source_row,
+                voucher: row.voucher,
+                account: row.account,
+                entity: row.entity,
+                debit: row.debit,
+                credit: row.credit,
+                net: row.net,
+            })
+        })
+    }
+
+    pub(crate) fn visit_limit(
+        &self,
+        selected_only: bool,
+        limit: usize,
+        cancel: &AtomicBool,
+        mut visitor: impl FnMut(PreparedDiskLedgerRow) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        self.inner
+            .visit_processed_limit(selected_only, Some(limit), cancel, |row| {
+                visitor(PreparedDiskLedgerRow {
+                    values: row.values,
+                    source_row: self.header_row + row.source_row,
+                    voucher: row.voucher,
+                    account: row.account,
+                    entity: row.entity,
+                    debit: row.debit,
+                    credit: row.credit,
+                    net: row.net,
+                })
+            })
+    }
+
+    /// Visit one complete voucher at a time. Memory use is bounded by the
+    /// largest voucher rather than the number of rows in the ledger.
+    pub(crate) fn visit_vouchers(
+        &self,
+        selected_only: bool,
+        cancel: &AtomicBool,
+        mut visitor: impl FnMut(&str, &[PreparedDiskLedgerRow]) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        let mut current_id = String::new();
+        let mut current = Vec::new();
+        self.inner
+            .visit_processed_by_voucher(selected_only, cancel, |row| {
+                let row = PreparedDiskLedgerRow {
+                    values: row.values,
+                    source_row: self.header_row + row.source_row,
+                    voucher: row.voucher,
+                    account: row.account,
+                    entity: row.entity,
+                    debit: row.debit,
+                    credit: row.credit,
+                    net: row.net,
+                };
+                if !current.is_empty() && current_id != row.voucher {
+                    visitor(&current_id, &current)?;
+                    current.clear();
+                }
+                current_id = row.voucher.clone();
+                current.push(row);
+                Ok(())
+            })?;
+        if !current.is_empty() {
+            visitor(&current_id, &current)?;
+        }
+        Ok(())
+    }
+}
+
+fn role_columns(mapping: &Map<String, Value>, role: &str) -> Vec<String> {
+    match mapping.get(role) {
+        Some(Value::String(value)) if !value.trim().is_empty() => vec![value.clone()],
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn prepared_mapping(mapping: &Map<String, Value>) -> LedgerMapping {
+    LedgerMapping {
+        id: role_columns(mapping, "id"),
+        account_code: role_columns(mapping, "accountCode").into_iter().next(),
+        account_name: role_columns(mapping, "accountName"),
+        legacy_account: role_columns(mapping, "account"),
+        entity: role_columns(mapping, "entity").into_iter().next(),
+        date: role_columns(mapping, "date").into_iter().next(),
+        summary: role_columns(mapping, "summary").into_iter().next(),
+        amount: role_columns(mapping, "functionalAmount").into_iter().next(),
+        direction: role_columns(mapping, "direction").into_iter().next(),
+        debit: role_columns(mapping, "functionalDebit").into_iter().next(),
+        credit: role_columns(mapping, "functionalCredit").into_iter().next(),
+    }
+}
+
+/// Open the common normalized JE cache. Besides the common accounting fields,
+/// caller-specific identity columns are forward-filled with the same rules used
+/// by the in-memory ledger engine. Amount, currency and direction columns are
+/// deliberately excluded because an empty value is meaningful for those roles.
+pub(crate) fn open_prepared_disk_ledger(
+    path: &Path,
+    header_row: usize,
+    header_depth: usize,
+    mapping: &Map<String, Value>,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<PreparedDiskLedger, AppError> {
+    if header_depth > 1 {
+        return Err(error(
+            "LARGE_CSV_DOUBLE_HEADER",
+            "超大 CSV 暂不支持双层标题，请先整理为单层标题后重试。",
+            None,
+        ));
+    }
+    // CSV 的自动标题行目前固定为第 1 行。在公共入口收口，避免任何工具把
+    // `0` 与 `1` 写成两份原始缓存和凭证分析缓存。
+    let header_row = header_row.max(1);
+    let source = SourceParams {
+        input_path: path.to_string_lossy().into_owned(),
+        sheet: None,
+        header_row,
+        header_depth: 1,
+    };
+    let cache_progress = |phase: &str, current: usize, total: usize, message: &str| {
+        scaled_progress(progress, 0, 300, phase, current, total, message)
+    };
+    let prepare_progress = |phase: &str, current: usize, total: usize, message: &str| {
+        scaled_progress(progress, 300, 1000, phase, current, total, message)
+    };
+    let cache = large_csv::load(&source, &cache_progress, cancel)?;
+    let core = prepared_mapping(mapping);
+    let mut fill_columns = [
+        "date",
+        "id",
+        "voucherType",
+        "entity",
+        "accountCode",
+        "accountName",
+        "account",
+        "auxiliary",
+        "summary",
+        "loanId",
+    ]
+    .into_iter()
+    .flat_map(|role| role_columns(mapping, role))
+    .collect::<Vec<_>>();
+    fill_columns.sort();
+    fill_columns.dedup();
+    let inner = disk_ledger::prepare_with_fill_columns(
+        &cache,
+        &core,
+        None,
+        header_row,
+        &fill_columns,
+        &prepare_progress,
+        cancel,
+    )?;
+    Ok(PreparedDiskLedger { inner, header_row })
 }
 
 fn load_ts_cached(
     path: &Path,
     sheet: Option<&str>,
     header_row: usize,
+    header_depth: usize,
     populate_on_miss: bool,
 ) -> Result<(Table, bool, PathBuf), AppError> {
     if !path.is_file() {
@@ -2881,11 +3959,18 @@ fn load_ts_cached(
         .unwrap_or("")
         .to_lowercase();
     if extension == "parquet" {
+        if header_depth > 1 {
+            return Err(error(
+                "PARQUET_DOUBLE_HEADER",
+                "Parquet 缓存文件是单层列名，不支持双层表头。",
+                None,
+            ));
+        }
         let table = load_parquet(path)?;
         return Ok((table, true, path.to_path_buf()));
     }
 
-    let (selected_sheet, sheets) = if matches!(extension.as_str(), "csv" | "txt" | "tsv") {
+    let (selected_sheet, sheets) = if crate::spreadsheet_input::is_text(path.as_ref()) {
         ("CSV".to_owned(), Vec::new())
     } else {
         let read_path = local_read_path(path)?;
@@ -2905,7 +3990,7 @@ fn load_ts_cached(
             .ok_or_else(|| error("WORKBOOK_EMPTY", "工作簿中没有 Sheet。", None))?;
         (selected, names)
     };
-    let key = fingerprint(path, &selected_sheet, header_row)?;
+    let key = fingerprint(path, &selected_sheet, header_row, header_depth)?;
     let cache = cache_path("ts", &key)?;
     if cache.is_file() {
         match load_parquet(&cache) {
@@ -2924,7 +4009,7 @@ fn load_ts_cached(
             }
         }
     }
-    let table = load_table(path, Some(&selected_sheet), header_row)?;
+    let table = load_table(path, Some(&selected_sheet), header_row, header_depth)?;
     if populate_on_miss {
         let mut frame = table_to_frame(&table)?;
         write_frame_cache(&cache, &mut frame)?;
@@ -2982,32 +4067,30 @@ fn write_frame_cache(path: &Path, frame: &mut DataFrame) -> Result<(), AppError>
     replace_file(&partial, path)
 }
 
-fn load_text(path: &Path, header_row: usize) -> Result<Table, AppError> {
-    let bytes = fs::read(path).map_err(io_error)?;
-    let (text, encoding) = decode_text(&bytes);
-    let delimiter = sniff_delimiter(&text);
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(false)
-        .flexible(true)
-        .delimiter(delimiter as u8)
-        .from_reader(text.as_bytes());
-    let mut all = Vec::new();
-    for record in reader.records() {
-        all.push(
-            record
-                .map_err(csv_error)?
-                .iter()
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
-        );
-    }
+fn load_text(path: &Path, header_row: usize, header_depth: usize) -> Result<Table, AppError> {
+    let (encoding, delimiter) = crate::spreadsheet_input::text_metadata(path)?;
+    let all = crate::spreadsheet_input::read_rows(path)?;
     let header_index = header_row.saturating_sub(1);
     if all.len() <= header_index {
         return Err(error("HEADER_ROW_INVALID", "标题行超出数据范围。", None));
     }
     let width = all.iter().map(Vec::len).max().unwrap_or(0);
-    let headers = normalize_headers(&all[header_index], width);
-    let rows = normalize_rows(&all[header_index + 1..], width);
+    let depth = header_depth.max(1).min(all.len() - header_index);
+    let headers = if depth > 1 {
+        let raw: Vec<Vec<String>> = all[header_index..header_index + depth].to_vec();
+        crate::fx::merge_headers(&raw, width)
+    } else {
+        normalize_headers(&all[header_index], width)
+    };
+    let rows = all
+        .into_iter()
+        .skip(header_index + depth)
+        .map(|mut row| {
+            row.resize(width, String::new());
+            row.truncate(width);
+            row
+        })
+        .collect();
     Ok(Table {
         path: path.to_path_buf(),
         sheet: "CSV".into(),
@@ -3062,7 +4145,7 @@ fn rows_to_frame(headers: &[String], rows: &[Vec<String>]) -> Result<DataFrame, 
             Column::new(
                 name.clone().into(),
                 rows.iter()
-                    .map(|row| row.get(index).cloned().unwrap_or_default())
+                    .map(|row| row.get(index).map(String::as_str).unwrap_or_default())
                     .collect::<Vec<_>>(),
             )
         })
@@ -3669,16 +4752,18 @@ fn write_kanzhang_xlsx_suite(
     analysis: &LedgerAnalysis,
     include_pivot: bool,
     include_voucher_types: bool,
+    include_suite: bool,
     rows_per_sheet: usize,
     cancel: &AtomicBool,
 ) -> Result<Vec<PathBuf>, AppError> {
-    let suite_enabled = kanzhang_suite_enabled(analysis, include_pivot, include_voucher_types);
+    let suite_enabled =
+        include_suite && kanzhang_suite_enabled(analysis, include_pivot, include_voucher_types);
     let detail_partial = partial_path(detail);
     write_kanzhang_detail_workbook(
         &detail_partial,
         analysis,
         rows_per_sheet,
-        !suite_enabled,
+        include_suite && !suite_enabled,
         cancel,
     )?;
     replace_file(&detail_partial, detail)?;
@@ -3706,6 +4791,7 @@ fn write_kanzhang_csv_suite(
     analysis: &LedgerAnalysis,
     include_pivot: bool,
     include_voucher_types: bool,
+    include_suite: bool,
     rows_per_sheet: usize,
     cancel: &AtomicBool,
 ) -> Result<Vec<PathBuf>, AppError> {
@@ -3740,7 +4826,7 @@ fn write_kanzhang_csv_suite(
         replace_file(&partial, &excluded)?;
         outputs.push(excluded);
     }
-    if kanzhang_suite_enabled(analysis, include_pivot, include_voucher_types) {
+    if include_suite && kanzhang_suite_enabled(analysis, include_pivot, include_voucher_types) {
         let suite = parent.join(format!("{stem}_套表.xlsx"));
         let partial = partial_path(&suite);
         write_kanzhang_suite_workbook(
@@ -4260,7 +5346,10 @@ fn detect_sign_convention(
     mapping: &LedgerMapping,
     id_indexes: &[usize],
 ) -> SignReport {
-    let evidence = sign_evidence(rows, headers, mapping, id_indexes);
+    sign_report_from_evidence(sign_evidence(rows, headers, mapping, id_indexes))
+}
+
+fn sign_report_from_evidence(evidence: SignEvidence) -> SignReport {
     let votes = evidence.signed_votes + evidence.unsigned_votes;
     let basis = if votes > 0 {
         format!(
@@ -4419,6 +5508,24 @@ fn ledger_columns_for_role(mapping: &LedgerMapping, role: &str) -> Vec<String> {
     }
 }
 
+/// 公共引擎的完整角色名 → 看账映射列。`ledger_junk_mask` 正文判定要问身份列
+/// （凭证号/科目/日期）与旧版 `account` 数组，比金额校验用的
+/// [`ledger_columns_for_role`] 覆盖面宽。
+fn ledger_role_columns(mapping: &LedgerMapping, role: &str) -> Vec<String> {
+    match role {
+        "id" => mapping.id.clone(),
+        "accountCode" => mapping.account_code.iter().cloned().collect(),
+        "accountName" => mapping.account_name.clone(),
+        // 旧版把编码与名称依次放进 account 数组，引擎自会取首列当编码、其余当名称。
+        "account" => mapping.legacy_account.clone(),
+        "date" => mapping.date.iter().cloned().collect(),
+        "functionalAmount" => mapping.amount.iter().cloned().collect(),
+        "functionalDebit" => mapping.debit.iter().cloned().collect(),
+        "functionalCredit" => mapping.credit.iter().cloned().collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn ledger_amount_parse_issues(table: &Table, mapping: &LedgerMapping) -> Vec<Value> {
     ledger_mapping::mapped_amount_parse_issues("je", &table.headers, &table.rows, &|role| {
         ledger_columns_for_role(mapping, role)
@@ -4442,10 +5549,19 @@ fn validate_ledger_amounts(
     mapping: &LedgerMapping,
     header_row: usize,
 ) -> Result<(), AppError> {
+    // 只校验正文行：表尾手工小计/核对公式行不是凭证明细（金额列常是 SUBTOTAL
+    // 结果或失效外链的 #REF!），先按公共引擎的正文判定剔掉再验，它们随后也会
+    // 被 preprocess_ledger 挡在导出正文之外。真实分录行的坏值照拦不误。
+    let keep = ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
+        ledger_role_columns(mapping, role)
+    });
     let issues =
         ledger_mapping::mapped_amount_parse_issues("je", &table.headers, &table.rows, &|role| {
             ledger_columns_for_role(mapping, role)
-        });
+        })
+        .into_iter()
+        .filter(|issue| keep.get(issue.row_index).copied().unwrap_or(false))
+        .collect::<Vec<_>>();
     if issues.is_empty() {
         return Ok(());
     }
@@ -4463,9 +5579,21 @@ fn validate_ledger_amounts(
         })
         .collect::<Vec<_>>()
         .join("；");
+    // job 失败事件只回传 user_message，首处位置折进主文案才能到达用户，
+    // 与大 CSV 路径同款措辞；完整清单仍在 detail。
+    let first = &issues[0];
+    let mut display = first.value.chars().take(80).collect::<String>();
+    if first.value.chars().count() > 80 {
+        display.push('…');
+    }
     Err(error(
         "KANZHANG_AMOUNT_VALUE_INVALID",
-        "金额列存在非空但无法解析为数值的单元格，请修正后重试。",
+        format!(
+            "金额列「{}」第{}行的值“{}”无法解析为数值，请修正后重试。",
+            first.column,
+            header_row + first.row_index + 1,
+            display
+        ),
         Some(if issues.len() > 20 {
             format!("{detail}；另有{}处未列出。", issues.len() - 20)
         } else {
@@ -4551,39 +5679,6 @@ fn data_text(v: &Data) -> String {
         other => other.to_string(),
     }
 }
-fn decode_text(bytes: &[u8]) -> (String, String) {
-    if bytes.starts_with(&[0xFF, 0xFE]) {
-        (
-            UTF_16LE.decode(&bytes[2..]).0.into_owned(),
-            "utf-16le".into(),
-        )
-    } else if bytes.starts_with(&[0xFE, 0xFF]) {
-        (
-            UTF_16BE.decode(&bytes[2..]).0.into_owned(),
-            "utf-16be".into(),
-        )
-    } else if let Ok(v) =
-        std::str::from_utf8(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes))
-    {
-        (v.to_owned(), "utf-8".into())
-    } else {
-        (GBK.decode(bytes).0.into_owned(), "gb18030".into())
-    }
-}
-fn sniff_delimiter(text: &str) -> char {
-    let first = text.lines().find(|v| !v.trim().is_empty()).unwrap_or("");
-    [
-        (',', first.matches(',').count()),
-        ('\t', first.matches('\t').count()),
-        (';', first.matches(';').count()),
-        ('|', first.matches('|').count()),
-    ]
-    .into_iter()
-    .max_by_key(|(_, n)| *n)
-    .filter(|(_, n)| *n > 0)
-    .map(|(c, _)| c)
-    .unwrap_or(',')
-}
 fn parse_month(value: &str) -> Option<String> {
     let cleaned = value.trim().trim_end_matches(".0");
     if cleaned.is_empty() {
@@ -4660,7 +5755,12 @@ fn any_to_f64(value: &AnyValue<'_>) -> f64 {
     }
 }
 
-fn fingerprint(path: &Path, sheet: &str, header_row: usize) -> Result<String, AppError> {
+fn fingerprint(
+    path: &Path,
+    sheet: &str,
+    header_row: usize,
+    header_depth: usize,
+) -> Result<String, AppError> {
     let meta = fs::metadata(path).map_err(io_error)?;
     let modified = meta
         .modified()
@@ -4675,8 +5775,10 @@ fn fingerprint(path: &Path, sheet: &str, header_row: usize) -> Result<String, Ap
     h.update(modified.to_le_bytes());
     h.update(sheet.as_bytes());
     h.update(header_row.to_le_bytes());
-    // v2 开始保留表内整行空白，用于正文/附注边界判断；不能复用删过空行的旧缓存。
-    h.update(b"rust-polars-v2");
+    // 双层表头会改变合并后的列名，同文件同 Sheet 换层数必须落不同的缓存。
+    h.update(header_depth.to_le_bytes());
+    // Shared strict text decoding must not reuse rows decoded lossily by older versions.
+    h.update(b"rust-polars-v3-shared-spreadsheet-input");
     Ok(hex::encode(h.finalize()))
 }
 /// 缓存根目录：`%LOCALAPPDATA%/AuditToolbox/AuditToolbox/cache`。
@@ -4708,7 +5810,7 @@ fn cache_entries() -> Result<Vec<(PathBuf, SystemTime, u64)>, AppError> {
                 path.extension().and_then(|v| v.to_str()),
                 // `.sheet` 是自动选表结论的小记事文件，跟着 Parquet 缓存一起
                 // 统计、清空与扫除，不然会在缓存目录里悄悄攒下来。
-                Some("parquet") | Some("sheet")
+                Some("parquet") | Some("sheet") | Some("header") | Some("sqlite")
             ) {
                 let used = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
                 out.push((path, used, meta.len()));
@@ -5008,6 +6110,9 @@ struct JeMarkParams {
     sheet: Option<String>,
     #[serde(default = "one")]
     header_row: usize,
+    /// 双层合并表头选 2，默认 1；与看账同口径。
+    #[serde(default = "one")]
+    header_depth: usize,
     output_path: Option<String>,
     mapping: Option<LedgerMapping>,
     #[serde(default)]
@@ -5040,7 +6145,7 @@ fn parse_sign_choice(value: Option<&str>) -> Result<Option<SignConvention>, AppE
 /// 与 `ts.filter` 同形，但走 `load_table` 而不是 TS 的 Parquet 缓存，
 /// 保证读到的表结构与看账/标记的其他步骤完全一致。
 fn kanzhang_column_values(params: Value) -> Result<Value, AppError> {
-    let source: SourceParams = parse(params.clone(), "参数不完整。")?;
+    let source: SourceParams = parse_ledger_source(params.clone(), "参数不完整。")?;
     let field = required_string(&params, "field")?;
     let keyword = params
         .get("keyword")
@@ -5052,10 +6157,23 @@ fn kanzhang_column_values(params: Value) -> Result<Value, AppError> {
         .and_then(Value::as_u64)
         .unwrap_or(1_000)
         .clamp(1, 20_000) as usize;
+    let path = Path::new(&source.input_path);
+    if large_csv::applies(path) {
+        let cancel = AtomicBool::new(false);
+        let ledger = open_disk_ledger(path, source.header_row, &|_, _, _, _| {}, &cancel)?;
+        let (values, total) = ledger.column_values(&field, &keyword, limit, &cancel)?;
+        return Ok(json!({
+            "engine":"rust-sqlite",
+            "values":values,
+            "total":total,
+            "truncated":total>limit,
+        }));
+    }
     let table = load_ledger_cached(
         Path::new(&source.input_path),
         source.sheet.as_deref(),
         source.header_row,
+        source.header_depth,
     )?;
     let index = header_index(&table.headers, &field)
         .ok_or_else(|| error("COLUMN_NOT_FOUND", "筛选字段不存在。", Some(field.clone())))?;
@@ -5288,7 +6406,19 @@ fn export_je_mark(
     progress: Progress<'_>,
     cancel: &AtomicBool,
 ) -> Result<Value, AppError> {
-    let job: JeMarkParams = parse(params, "正负数标记参数不完整。")?;
+    let mut job: JeMarkParams = parse(params, "正负数标记参数不完整。")?;
+    job.header_row =
+        resolve_auto_header_row(&job.input_path, job.sheet.as_deref(), job.header_row)?;
+    if job.header_depth > 1 && large_csv::applies(Path::new(&job.input_path)) {
+        return Err(error(
+            "LARGE_CSV_DOUBLE_HEADER",
+            "超大 CSV 暂不支持双层标题，请先整理为单层标题后重试。",
+            None,
+        ));
+    }
+    if large_csv::applies(Path::new(&job.input_path)) {
+        return export_je_mark_disk(&job, progress, cancel);
+    }
     let sign_choice = parse_sign_choice(job.sign_convention.as_deref())?;
     let started = Instant::now();
     progress("read", 0, 5, "正在读取凭证数据…");
@@ -5296,6 +6426,7 @@ fn export_je_mark(
         Path::new(&job.input_path),
         job.sheet.as_deref(),
         job.header_row,
+        job.header_depth,
     )?;
     let mapping = job
         .mapping
@@ -5387,6 +6518,115 @@ fn export_je_mark(
     }))
 }
 
+fn export_je_mark_disk(
+    job: &JeMarkParams,
+    progress: Progress<'_>,
+    cancel: &AtomicBool,
+) -> Result<Value, AppError> {
+    let started = Instant::now();
+    let source = SourceParams {
+        input_path: job.input_path.clone(),
+        sheet: job.sheet.clone(),
+        header_row: job.header_row,
+        header_depth: 1,
+    };
+    let cache_progress = |phase: &str, current: usize, total: usize, message: &str| {
+        scaled_progress(progress, 0, 180, phase, current, total, message)
+    };
+    let prepare_progress = |phase: &str, current: usize, total: usize, message: &str| {
+        scaled_progress(progress, 180, 650, phase, current, total, message)
+    };
+    let cache = large_csv::load(&source, &cache_progress, cancel)?;
+    let mapping = job
+        .mapping
+        .clone()
+        .unwrap_or_else(|| suggest_mapping(&cache.table.headers, &cache.table.rows));
+    let sign_choice = parse_sign_choice(job.sign_convention.as_deref())?;
+    let ledger = disk_ledger::prepare(
+        &cache,
+        &mapping,
+        sign_choice,
+        job.header_row,
+        &prepare_progress,
+        cancel,
+    )?;
+    let evidence = ledger.evidence_all(cancel)?;
+    let resolved = sign_choice.unwrap_or_else(|| ledger.convention());
+    ledger.set_selected_convention(resolved)?;
+    let active_filters = job
+        .column_filters
+        .iter()
+        .filter_map(|filter| {
+            let index = header_index(&ledger.table.headers, &filter.field)?;
+            let chosen = filter
+                .values
+                .iter()
+                .map(|value| value.trim().to_owned())
+                .collect::<HashSet<_>>();
+            (!chosen.is_empty()).then_some((index, chosen))
+        })
+        .collect::<Vec<_>>();
+    let batches = je_mark_batches(job)?;
+    let mut outputs = Vec::new();
+    let mut batch_results = Vec::new();
+    for (batch_index, batch) in batches.iter().enumerate() {
+        check_cancel(cancel)?;
+        progress(
+            "filter",
+            680,
+            1000,
+            &format!("正在磁盘上筛选批次 {}：{}…", batch_index + 1, batch.name),
+        );
+        ledger.select(&batch.accounts, cancel)?;
+        ledger.retain_selected_by_filters(&active_filters, cancel)?;
+        progress("match", 760, 1000, "正在磁盘上执行正负数匹配…");
+        let mark = ledger.mark_selected_offsets(cancel)?;
+        let output = je_mark_batch_output_path(job, batch, batch_index, batches.len())?;
+        if !output
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("csv"))
+        {
+            return Err(error(
+                "JE_MARK_LARGE_XLSX_UNSUPPORTED",
+                "大文件模式目前只能流式导出 CSV，请把输出文件后缀改为 .csv 后重试。",
+                Some(output.to_string_lossy().into_owned()),
+            ));
+        }
+        progress("write", 860, 1000, "正在流式写出标记结果…");
+        let rows =
+            ledger.write_selected_marked_csv(&output, &ledger.table.headers, progress, cancel)?;
+        outputs.push(output.to_string_lossy().into_owned());
+        batch_results.push(json!({
+            "name": batch.name,
+            "accounts": batch.accounts,
+            "rows": rows,
+            "matchedPairs": mark.direct_pairs,
+            "crossMatchedPairs": mark.cross_pairs,
+            "unmatchedRows": mark.unmatched_rows,
+        }));
+    }
+    progress("completed", 1000, 1000, "正负数标记已完成。");
+    Ok(json!({
+        "engine": "rust-sqlite",
+        "lowMemory": true,
+        "outputPaths": outputs,
+        "batchCount": batches.len(),
+        "batches": batch_results,
+        "mapping": mapping,
+        "signConvention": {
+            "choice": job.sign_convention.as_deref().unwrap_or("auto"),
+            "applied": resolved.as_str(),
+            "scheme": evidence.scheme,
+            "detected": evidence.convention.map(SignConvention::as_str),
+            "basis": evidence.note,
+            "filtered": evidence.one_sided > evidence.total_vouchers / 2,
+            "keySuspect": evidence.unbalanced > evidence.total_vouchers / 2,
+        },
+        "timings": {"totalMs": started.elapsed().as_millis()},
+    }))
+}
+
 /// 空批次直接跳过；一个有效批次都没有时不该猜用户想标全表。
 fn je_mark_batches(job: &JeMarkParams) -> Result<Vec<LedgerBatch>, AppError> {
     let batches = job
@@ -5418,12 +6658,194 @@ fn je_mark_batches(job: &JeMarkParams) -> Result<Vec<LedgerBatch>, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disk_export_subprogress_is_scaled_into_its_overall_range() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let record = |phase: &str, current: usize, total: usize, message: &str| {
+            events
+                .borrow_mut()
+                .push((phase.to_owned(), current, total, message.to_owned()));
+        };
+        scaled_progress(&record, 100, 500, "prepare", 550, 1000, "扫描完成");
+        scaled_progress(&record, 100, 500, "prepare", 1000, 1000, "索引完成");
+        let events = events.borrow();
+        assert_eq!(events[0].1, 320);
+        assert_eq!(events[1].1, 500);
+        assert!(events.iter().all(|event| event.2 == 1000));
+        assert!(events.iter().all(|event| event.1 < 1000));
+    }
+
     fn temp_dir(name: &str) -> PathBuf {
         let path =
             std::env::temp_dir().join(format!("audit-toolbox-{name}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&path).unwrap();
         path
     }
+
+    /// 表头不在第 1 行的账表（TBJEPBC 06/09/10 号真实样例的形态）：标题行
+    /// 传 0 时自动探测，与存款/汇兑引擎同一打分口径；显式行号照旧生效。
+    /// 此前硬锁第 1 行时，这类文件第一步就报「请先确认科目编码或科目名称
+    /// 字段映射」。
+    #[test]
+    fn kanzhang_inspect_auto_detects_header_row() {
+        let dir = temp_dir("kz-auto-header");
+        let path = dir.join("tb.xlsx");
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.write_string(0, 0, "某某公司科目余额表").unwrap();
+        sheet.write_string(1, 0, "单位：人民币元").unwrap();
+        for (col, header) in [
+            "科目编码",
+            "科目名称",
+            "期末余额",
+            "借方发生额",
+            "贷方发生额",
+        ]
+        .iter()
+        .enumerate()
+        {
+            sheet.write_string(2, col as u16, *header).unwrap();
+        }
+        sheet.write_string(3, 0, "1002").unwrap();
+        sheet.write_string(3, 1, "银行存款").unwrap();
+        sheet.write_number(3, 2, 1500.0).unwrap();
+        sheet.write_number(3, 3, 0.0).unwrap();
+        sheet.write_number(3, 4, 500.0).unwrap();
+        sheet.write_string(4, 0, "6603").unwrap();
+        sheet.write_string(4, 1, "财务费用").unwrap();
+        sheet.write_number(4, 2, 300.0).unwrap();
+        sheet.write_number(4, 3, 300.0).unwrap();
+        sheet.write_number(4, 4, 0.0).unwrap();
+        workbook.save(&path).unwrap();
+
+        let value = inspect_kanzhang(json!({
+            "inputPath": path.to_string_lossy(),
+            "headerRow": 0,
+        }))
+        .unwrap();
+        assert_eq!(value["headerRow"], json!(3), "应自动探测到第 3 行表头");
+        let headers = value["headers"].as_array().unwrap();
+        assert!(headers.iter().any(|header| header == "科目编码"));
+        assert!(
+            value["accountCount"].as_u64().unwrap() >= 1,
+            "识别到表头后应能给出科目清单"
+        );
+
+        // 显式指定第 3 行与自动探测结果一致；显式指定仍然优先。
+        let manual = inspect_kanzhang(json!({
+            "inputPath": path.to_string_lossy(),
+            "headerRow": 3,
+        }))
+        .unwrap();
+        assert_eq!(manual["headerRow"], json!(3));
+
+        // 不传 headerRow 维持历史默认（第 1 行），老任务不受影响。
+        let legacy = inspect_kanzhang(json!({"inputPath": path.to_string_lossy()})).unwrap();
+        assert_eq!(legacy["headerRow"], json!(1));
+
+        // 文本路径同样探测：CSV 前两行是标题与单位说明。
+        let csv = dir.join("tb.csv");
+        fs::write(
+            &csv,
+            "某某公司科目余额表\n单位：元\n科目编码,科目名称,期末余额\n1002,银行存款,1000\n6603,财务费用,300\n",
+        )
+        .unwrap();
+        let text = inspect_kanzhang(json!({
+            "inputPath": csv.to_string_lossy(),
+            "headerRow": 0,
+        }))
+        .unwrap();
+        assert_eq!(text["headerRow"], json!(3));
+
+        // 导出入口与读取入口共用同一个实际行号；曾经这里仍保留 0，
+        // 6GB CSV 会因缓存键不同而在导出时再完整读取一次。
+        let export_job = parse_kanzhang_job(json!({
+            "inputPath": csv.to_string_lossy(),
+            "headerRow": 0,
+        }))
+        .unwrap();
+        assert_eq!(export_job.header_row, 3);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn kanzhang_inspect_merges_double_header() {
+        let dir = temp_dir("kz-double-header");
+        let path = dir.join("je.xlsx");
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        // 双层表头：首行大类（合并单元格形态：空白格沿用左侧文字），次行明细列名。
+        sheet.write_string(0, 0, "凭证信息").unwrap();
+        sheet.write_string(0, 2, "金额").unwrap();
+        sheet.write_string(1, 0, "凭证号").unwrap();
+        sheet.write_string(1, 1, "摘要").unwrap();
+        sheet.write_string(1, 2, "借方").unwrap();
+        sheet.write_string(2, 0, "记-001").unwrap();
+        sheet.write_string(2, 1, "期初").unwrap();
+        sheet.write_number(2, 2, 100.0).unwrap();
+        workbook.save(&path).unwrap();
+
+        let value = inspect_kanzhang(json!({
+            "inputPath": path.to_string_lossy(),
+            "headerRow": 1,
+            "headerDepth": 2,
+        }))
+        .unwrap();
+        assert_eq!(value["headerDepth"], json!(2));
+        let headers = value["headers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            headers.contains(&"凭证信息-凭证号".to_owned()),
+            "{headers:?}"
+        );
+        assert!(headers.contains(&"凭证信息-摘要".to_owned()), "{headers:?}");
+        assert!(headers.contains(&"金额-借方".to_owned()), "{headers:?}");
+        let preview = value["preview"].as_array().unwrap();
+        assert_eq!(preview.len(), 1, "双层表头下的两行标题都不应进数据预览");
+        assert_eq!(preview[0][0], json!("记-001"));
+    }
+
+    #[test]
+    fn auto_header_row_memo_is_reused() {
+        let dir = temp_dir("kz-auto-header-memo");
+        let path = dir.join("ledger.xlsx");
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.write_string(0, 0, "某某公司序时账").unwrap();
+        for (col, header) in ["凭证号", "科目编码", "科目名称", "借方", "贷方"]
+            .iter()
+            .enumerate()
+        {
+            sheet.write_string(2, col as u16, *header).unwrap();
+        }
+        sheet.write_string(3, 0, "记-1").unwrap();
+        sheet.write_string(3, 1, "1001").unwrap();
+        sheet.write_string(3, 2, "库存现金").unwrap();
+        sheet.write_number(3, 3, 100.0).unwrap();
+        workbook.save(&path).unwrap();
+
+        assert_eq!(
+            resolve_auto_header_row(path.to_str().unwrap(), None, 0).unwrap(),
+            3
+        );
+        let memo = auto_header_memo_path(&path, None).unwrap();
+        assert_eq!(fs::read_to_string(&memo).unwrap(), "3");
+
+        // 改写记忆值，证明第二次在打开并解析工作簿之前已返回缓存结论。
+        fs::write(&memo, "2").unwrap();
+        assert_eq!(
+            resolve_auto_header_row(path.to_str().unwrap(), None, 0).unwrap(),
+            2
+        );
+        let _ = fs::remove_file(memo);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// 账被按科目筛过 vs 凭证识别字段组错——两种成因的提示语完全不同，
     /// 指错方向会让人去查一个根本不存在的映射问题。判据是单边凭证占比。
     #[test]
@@ -5699,12 +7121,11 @@ mod tests {
             ],
             &[],
         );
-        assert_eq!(m.account_code.as_deref(), Some("会计科目"));
+        assert_eq!(m.account_code, None, "歧义标题留给 LLM 或人工判断");
         assert_eq!(m.account_name, vec!["科目文本"]);
         // 预算科目是冲突词挡下的，绝不能拼进科目键。
         assert!(!m.account_name.iter().any(|v| v.contains("预算")));
-        // 科目键的顺序固定：编码在前、名称在后。
-        assert_eq!(m.account_columns(), vec!["会计科目", "科目文本"]);
+        assert_eq!(m.account_columns(), vec!["科目文本"]);
     }
 
     #[test]
@@ -5750,6 +7171,108 @@ mod tests {
         let error = validate_ledger_amounts(&table, &mapping, 1).unwrap_err();
         assert_eq!(error.code, "KANZHANG_AMOUNT_VALUE_INVALID");
         assert!(error.detail.as_deref().unwrap_or("").contains("待确认"));
+    }
+
+    #[test]
+    fn 表尾小计与失效公式行不拦导出也不进正文() {
+        // 10 号样例的实测形态：正文后面跟着 SUBTOTAL 小计行与引用失效的外链核对行
+        // （#REF!），都没有凭证号与科目。它们不是凭证明细：金额校验放行，
+        // preprocess 也不得让它们借向下填充继承上一行的身份混进发生额。
+        let headers = vec![
+            "凭证号".to_owned(),
+            "科目编码".to_owned(),
+            "科目名称".to_owned(),
+            "借方金额".to_owned(),
+            "贷方金额".to_owned(),
+        ];
+        let rows = vec![
+            vec![
+                "记-1".into(),
+                "1001".into(),
+                "库存现金".into(),
+                "100".into(),
+                "".into(),
+            ],
+            vec![
+                "记-1".into(),
+                "2202".into(),
+                "应付账款".into(),
+                "".into(),
+                "100".into(),
+            ],
+            vec![
+                "".into(),
+                "".into(),
+                "".into(),
+                "278194951.8".into(),
+                "".into(),
+            ],
+            vec!["".into(), "".into(), "".into(), "#REF!".into(), "".into()],
+        ];
+        let mapping = LedgerMapping {
+            id: vec!["凭证号".into()],
+            account_code: Some("科目编码".into()),
+            account_name: vec!["科目名称".into()],
+            debit: Some("借方金额".into()),
+            credit: Some("贷方金额".into()),
+            ..Default::default()
+        };
+        let table = Table {
+            path: PathBuf::new(),
+            sheet: "Sheet1".to_owned(),
+            headers,
+            rows,
+            sheets: vec![],
+            encoding: None,
+            delimiter: None,
+        };
+        assert!(validate_ledger_amounts(&table, &mapping, 1).is_ok());
+        let prepared = preprocess_ledger(table, &mapping, None).unwrap();
+        assert_eq!(prepared.rows.len(), 2);
+        assert!(prepared.rows.iter().all(|row| row[0] == "记-1"));
+        assert!(prepared.rows.iter().all(|row| row[3] != "#REF!"));
+    }
+
+    #[test]
+    fn 正文行的坏金额照拦且指明行列位置() {
+        // 有凭证号、科目编码与名称、借方可解析的真实分录行，贷方坏了必须拦下，
+        // 且主文案（job 失败事件只回传它）要带上列名、行号与原值。
+        let headers = vec![
+            "凭证号".to_owned(),
+            "科目编码".to_owned(),
+            "科目名称".to_owned(),
+            "借方金额".to_owned(),
+            "贷方金额".to_owned(),
+        ];
+        let rows = vec![vec![
+            "记-1".into(),
+            "1001".into(),
+            "库存现金".into(),
+            "100".into(),
+            "待确认".into(),
+        ]];
+        let mapping = LedgerMapping {
+            id: vec!["凭证号".into()],
+            account_code: Some("科目编码".into()),
+            account_name: vec!["科目名称".into()],
+            debit: Some("借方金额".into()),
+            credit: Some("贷方金额".into()),
+            ..Default::default()
+        };
+        let table = Table {
+            path: PathBuf::new(),
+            sheet: "Sheet1".to_owned(),
+            headers,
+            rows,
+            sheets: vec![],
+            encoding: None,
+            delimiter: None,
+        };
+        let error = validate_ledger_amounts(&table, &mapping, 1).unwrap_err();
+        assert_eq!(error.code, "KANZHANG_AMOUNT_VALUE_INVALID");
+        assert!(error.user_message.contains("贷方金额"));
+        assert!(error.user_message.contains("第2行"));
+        assert!(error.user_message.contains("待确认"));
     }
 
     #[test]
@@ -5909,7 +7432,7 @@ mod tests {
         let first = fx_load_ledger_table_value_cached(&input, None, 1).unwrap();
         assert_eq!(first["engine"], "rust-polars");
         assert_eq!(first["rows"].as_array().unwrap().len(), 2);
-        let key = fingerprint(&input, "CSV", 1).unwrap();
+        let key = fingerprint(&input, "CSV", 1, 1).unwrap();
         let cache = cache_path("ts", &key).unwrap();
         assert!(cache.is_file(), "TBJE 应复用统一的稳定 Parquet 缓存");
         let second = fx_load_ledger_table_value_cached(&input, None, 1).unwrap();
@@ -5990,10 +7513,10 @@ mod tests {
         book.save(&input).unwrap();
 
         // 未指定表名：自动选几千行的正表，不再被第一张透视副本带走。
-        let table = load_table(&input, None, 1).unwrap();
+        let table = load_table(&input, None, 1, 1).unwrap();
         assert_eq!(table.sheet, "序时账", "规模与表名降权应让正表胜出");
         // 用户显式指定表名：照用，哪怕它是那张小副本。
-        let pinned = load_table(&input, Some("透视check"), 1).unwrap();
+        let pinned = load_table(&input, Some("透视check"), 1, 1).unwrap();
         assert_eq!(pinned.sheet, "透视check");
 
         // 自动选表的结论记进缓存目录：同一份文件走缓存化入口结论一致。
@@ -6003,11 +7526,11 @@ mod tests {
         assert_eq!(cached["sheet"].as_str().unwrap(), "序时账");
         // 记事文件丢了不阻塞读取：重扫一遍仍是同一张表。
         fs::remove_file(&memo).unwrap();
-        let again = load_table(&input, None, 1).unwrap();
+        let again = load_table(&input, None, 1, 1).unwrap();
         assert_eq!(again.sheet, "序时账");
 
         // 测试写进真实缓存目录的产物要带走。
-        if let Ok(key) = fingerprint(&input, "序时账", 1) {
+        if let Ok(key) = fingerprint(&input, "序时账", 1, 1) {
             let _ = fs::remove_file(cache_path("ts", &key).unwrap());
         }
         let _ = fs::remove_file(auto_sheet_memo_path(&input).unwrap());
@@ -6061,9 +7584,9 @@ mod tests {
         book.save(&input).unwrap();
 
         // 未指定表名同样适用：说明页不该再凭「排在第一」当选。
-        let auto = load_table(&input, None, 1).unwrap();
+        let auto = load_table(&input, None, 1, 1).unwrap();
         assert_eq!(auto.sheet, "序时账");
-        let missing = load_table(&input, Some("不存在"), 1).unwrap();
+        let missing = load_table(&input, Some("不存在"), 1, 1).unwrap();
         assert_eq!(missing.sheet, "序时账");
 
         let _ = fs::remove_file(auto_sheet_memo_path(&input).unwrap());
@@ -6074,11 +7597,24 @@ mod tests {
         let root = temp_dir("ledger");
         let input = root.join("ledger.csv");
         fs::write(&input,"凭证号,科目名称,借方金额,贷方金额\n1,现金,100,0\n1,收入,0,100\n2,银行,20,0\n2,费用,0,20\n").unwrap();
-        let table = load_table(&input, None, 1).unwrap();
+        let table = load_table(&input, None, 1, 1).unwrap();
         let mapping = suggest_mapping(&table.headers, &table.rows);
         let rows = filter_ledger_rows(&table, &mapping, &["现金".into()], &[]).unwrap();
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().any(|row| row[1] == "收入"));
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn ledger_target_can_export_single_side_only() {
+        let root = temp_dir("ledger-single-side");
+        let input = root.join("ledger.csv");
+        fs::write(&input,"凭证号,科目名称,借方金额,贷方金额\n1,现金,100,0\n1,收入,0,100\n2,银行,20,0\n2,费用,0,20\n").unwrap();
+        let table = load_table(&input, None, 1, 1).unwrap();
+        let mapping = suggest_mapping(&table.headers, &table.rows);
+        let rows =
+            filter_ledger_rows_by_mode(&table, &mapping, &["现金".into()], &[], false).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1], "现金");
         let _ = fs::remove_dir_all(root);
     }
     #[test]
@@ -7142,6 +8678,116 @@ mod tests {
         assert!(values.contains(&"生产部".to_owned()));
         assert_eq!(value["truncated"], false);
     }
+
+    #[test]
+    fn je_mark_column_values_disk_helper_matches_memory_path() {
+        let root = temp_dir("je-mark-values-disk-equivalence");
+        let input = root.join("ledger.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,部门\n1,预提费用,生产部\n2,预提费用,\n3,预提费用,销售部\n4,预提费用,生产二部\n",
+        )
+        .unwrap();
+        let params = json!({
+            "inputPath": input,
+            "field": "部门",
+            "keyword": "生产",
+            "limit": 1
+        });
+        let memory = kanzhang_column_values(params).unwrap();
+        let cancel = AtomicBool::new(false);
+        let source = SourceParams {
+            input_path: input.to_string_lossy().into_owned(),
+            sheet: None,
+            header_row: 1,
+            header_depth: 1,
+        };
+        let cache = large_csv::load(&source, &|_, _, _, _| {}, &cancel).unwrap();
+        let (values, total) = cache.column_values("部门", "生产", 1, &cancel).unwrap();
+        assert_eq!(
+            Value::Array(values.into_iter().map(Value::String).collect()),
+            memory["values"]
+        );
+        assert_eq!(json!(total), memory["total"]);
+        assert_eq!(json!(total > 1), memory["truncated"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn je_mark_sign_report_disk_helper_matches_memory_path() {
+        let root = temp_dir("je-mark-sign-disk-equivalence");
+        let input = root.join("ledger.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,借方金额,贷方金额\n1,预提费用,100,0\n,银行存款,0,100\n2,预提费用,0,30\n,银行存款,30,0\n",
+        )
+        .unwrap();
+        let mapping = json!({
+            "id": ["凭证号"],
+            "accountName": ["科目名称"],
+            "functionalDebit": "借方金额",
+            "functionalCredit": "贷方金额"
+        });
+        let memory = je_mark_sign_report(json!({
+            "inputPath": input,
+            "headerRow": 1,
+            "mapping": mapping
+        }))
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+        let prepared = open_prepared_disk_ledger(
+            &input,
+            1,
+            1,
+            mapping.as_object().unwrap(),
+            &|_, _, _, _| {},
+            &cancel,
+        )
+        .unwrap();
+        let disk_report = sign_report_from_evidence(prepared.sign_evidence(&cancel).unwrap());
+        assert_eq!(
+            serde_json::to_value(disk_report).unwrap(),
+            memory["signConvention"]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prepared_disk_groups_noncontiguous_rows_into_complete_vouchers() {
+        let root = temp_dir("prepared-voucher-order");
+        let input = root.join("ledger.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,借方金额,贷方金额\n1,现金,100,0\n2,银行,30,0\n1,收入,0,100\n2,费用,0,30\n",
+        )
+        .unwrap();
+        let mapping = json!({
+            "id": ["凭证号"],
+            "accountName": ["科目名称"],
+            "functionalDebit": "借方金额",
+            "functionalCredit": "贷方金额"
+        });
+        let cancel = AtomicBool::new(false);
+        let prepared = open_prepared_disk_ledger(
+            &input,
+            1,
+            1,
+            mapping.as_object().unwrap(),
+            &|_, _, _, _| {},
+            &cancel,
+        )
+        .unwrap();
+        let mut groups = Vec::new();
+        prepared
+            .visit_vouchers(false, &cancel, |voucher, rows| {
+                groups.push((voucher.to_owned(), rows.len()));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(groups, [("1".to_owned(), 2), ("2".to_owned(), 2)]);
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn kanzhang_pivot_value_fields_are_selectable() {
         let root = temp_dir("kanzhang-pivot-values");
@@ -7678,6 +9324,35 @@ mod tests {
         assert!(outputs[2].ends_with("_套表.xlsx"), "{outputs:?}");
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn kanzhang_single_side_disables_suite_even_when_requested() {
+        let root = temp_dir("kanzhang-single-side-export");
+        let input = root.join("ledger.csv");
+        let output = root.join("out.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,借方金额,贷方金额\n1,收入,100,0\n1,银行,0,100\n",
+        )
+        .unwrap();
+        let result = export_kanzhang(
+            json!({"inputPath":input,"outputPath":output,
+                "targetBatches":[{"name":"收入","accounts":["收入"]}],
+                "includeCounterpart":false,"includeSuite":true,
+                "includePivot":true,"includeVoucherTypes":true,"llmAnalysis":false}),
+            &|_, _, _, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(result["outputPaths"].as_array().unwrap().len(), 1);
+        let detail = PathBuf::from(result["outputPaths"][0].as_str().unwrap());
+        let bytes = fs::read(detail).unwrap();
+        let text = String::from_utf8_lossy(&bytes[3..]);
+        assert!(text.contains("收入"));
+        assert!(!text.contains("银行"));
+        assert!(!root.join("out_套表.xlsx").exists());
+        let _ = fs::remove_dir_all(root);
+    }
     #[test]
     fn kanzhang_csv_export_uses_legacy_chunk_names() {
         let root = temp_dir("kanzhang-csv-chunks");
@@ -7700,6 +9375,136 @@ mod tests {
         assert!(root.join("result_凭证明细_Part1.csv").is_file());
         assert!(root.join("result_凭证明细_Part2.csv").is_file());
         assert!(!root.join("result_凭证明细.csv").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disk_export_keeps_csv_when_suite_save_fails() {
+        let root = temp_dir("kanzhang-suite-partial");
+        let input = root.join("ledger.csv");
+        let output = root.join("result.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,借方金额,贷方金额\n1,收入,100,0\n1,银行,0,100\n",
+        )
+        .unwrap();
+        // 用同名目录稳定制造工作簿保存失败；明细 CSV 所在目录仍然可写。
+        fs::create_dir(root.join("result_套表.xlsx")).unwrap();
+        let job: KanzhangParams = serde_json::from_value(json!({
+            "inputPath": input,
+            "outputPath": output,
+            "mapping": {
+                "id": ["凭证号"],
+                "accountName": ["科目名称"],
+                "debit": "借方金额",
+                "credit": "贷方金额"
+            },
+            "targetBatches": [{"name": "收入", "accounts": ["收入"]}],
+            "includePivot": true,
+            "includeVoucherTypes": false,
+            "llmAnalysis": false
+        }))
+        .unwrap();
+
+        let result = export_kanzhang_disk(&job, &|_, _, _, _| {}, &AtomicBool::new(false))
+            .expect("套表失败不应抹掉已经生成的 CSV");
+        assert_eq!(result["partial"], true);
+        assert_eq!(result["batches"][0]["suiteGenerated"], false);
+        assert_eq!(result["warnings"].as_array().unwrap().len(), 1);
+        let paths = result["outputPaths"].as_array().unwrap();
+        assert_eq!(paths.len(), 1, "失败的套表路径不应出现在结果中");
+        assert!(Path::new(paths[0].as_str().unwrap()).is_file());
+        assert!(
+            fs::read_to_string(paths[0].as_str().unwrap())
+                .unwrap()
+                .contains("收入")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn disk_export_batch_aggregation_keeps_suite_totals() {
+        let root = temp_dir("kanzhang-batch-aggregate");
+        let input = root.join("ledger.csv");
+        let output = root.join("result.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,借方金额,贷方金额,记账日期,借贷方向,摘要\n\
+             1,收入,100,0,2026-01-01,借,摘要甲\n\
+             1,银行,0,100,2026-01-01,贷,摘要甲\n\
+             2,收入,50,0,2026-02-01,借,摘要乙\n\
+             2,现金,0,50,2026-02-01,贷,摘要乙\n",
+        )
+        .unwrap();
+        let job: KanzhangParams = serde_json::from_value(json!({
+            "inputPath": input,
+            "outputPath": output,
+            "mapping": {
+                "id": ["凭证号"], "accountName": ["科目名称"],
+                "debit": "借方金额", "credit": "贷方金额",
+                "date": "记账日期", "direction": "借贷方向", "summary": "摘要"
+            },
+            "targetBatches": [{"name": "收入", "accounts": ["收入"]}],
+            "includePivot": true, "includeVoucherTypes": true, "llmAnalysis": false
+        }))
+        .unwrap();
+        let result = export_kanzhang_disk(&job, &|_, _, _, _| {}, &AtomicBool::new(false))
+            .expect("批量聚合后应正常生成套表");
+        assert_eq!(result["partial"], false);
+        assert_eq!(result["batches"][0]["suiteGenerated"], true);
+        let mut workbook = open_workbook_auto(root.join("result_套表.xlsx")).unwrap();
+        let summary = workbook.worksheet_range("科目汇总").unwrap();
+        let rows = summary
+            .rows()
+            .skip(1)
+            .map(|row| row.iter().map(ToString::to_string).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        assert!(rows.iter().any(|row| row == &["收入", "150", "2"]));
+        assert!(rows.iter().any(|row| row == &["银行", "-100", "1"]));
+        assert!(rows.iter().any(|row| row == &["现金", "-50", "1"]));
+        assert!(workbook.worksheet_range("凭证类型-严格").is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn je_mark_disk_path_streams_the_same_match_columns() {
+        let root = temp_dir("je-mark-disk");
+        let input = root.join("ledger.csv");
+        let output = root.join("marked.csv");
+        fs::write(
+            &input,
+            "凭证号,科目,借方,贷方\n001,目标,100,0\n,现金,0,100\n002,目标,0,100\n,现金,100,0\n",
+        )
+        .unwrap();
+        let job = JeMarkParams {
+            input_path: input.to_string_lossy().into_owned(),
+            sheet: None,
+            header_row: 1,
+            header_depth: 1,
+            output_path: Some(output.to_string_lossy().into_owned()),
+            mapping: Some(LedgerMapping {
+                id: vec!["凭证号".into()],
+                account_name: vec!["科目".into()],
+                debit: Some("借方".into()),
+                credit: Some("贷方".into()),
+                ..Default::default()
+            }),
+            target_batches: vec![LedgerBatch {
+                name: "目标".into(),
+                accounts: vec!["目标".into()],
+            }],
+            column_filters: Vec::new(),
+            sign_convention: Some("unsigned".into()),
+            rows_per_sheet: 1000,
+        };
+        let result = export_je_mark_disk(&job, &|_, _, _, _| {}, &AtomicBool::new(false)).unwrap();
+        assert_eq!(result["engine"], "rust-sqlite");
+        assert_eq!(result["batches"][0]["matchedPairs"], 1);
+        let exported = PathBuf::from(result["outputPaths"][0].as_str().unwrap());
+        let text = fs::read_to_string(&exported).unwrap();
+        assert!(text.contains("【辅助_绝对值】,【辅助_符号】,【智能匹配状态】"));
+        assert!(text.contains("已匹配-计提"));
+        assert!(text.contains("已匹配-冲销"));
         let _ = fs::remove_dir_all(root);
     }
 }

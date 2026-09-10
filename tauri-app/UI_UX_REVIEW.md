@@ -1,5 +1,9 @@
 # GUI UI/UX 审查与修复记录
 
+> 当前 Tauri/React 界面的系统审查基线与状态矩阵见
+> [TAURI_UI_STATE_AUDIT.md](TAURI_UI_STATE_AUDIT.md)。本文件以下内容只保留旧 tkinter
+> 界面的历史记录。
+
 > **本文件记录的是旧 tkinter Hub 的界面审查（2026-06 之前），与当前 Tauri/React 界面无关。**
 > 里面提到的 `launcher/ui_theme.py`、标准 header/body/footer 骨架、旧控件规范化等，
 > 在现行工程中都不存在。保留它只为追溯当时的判断依据。

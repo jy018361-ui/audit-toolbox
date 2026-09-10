@@ -654,7 +654,7 @@ describe("字段映射角色按文件侧过滤", () => {
 describe("预览表头展示同列多角色", () => {
   it("返回同一字段命中的全部映射关系，而不是只取第一个", () => {
     const roles = [
-      ["matchKeys", "组合匹配键"],
+      ["matchKeys", "资产ID"],
       ["name", "资产名称"],
       ["category", "资产类别"],
     ] as const;
@@ -664,6 +664,6 @@ describe("预览表头展示同列多角色", () => {
         name: "资产编号",
         category: "类别",
       }).map(([, label]) => label),
-    ).toEqual(["组合匹配键", "资产名称"]);
+    ).toEqual(["资产ID", "资产名称"]);
   });
 });

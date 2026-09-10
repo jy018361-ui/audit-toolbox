@@ -1,10 +1,13 @@
 import { cn } from "@/lib/utils";
 import { displayFileName } from "@/fileDisplay";
-import type { Ref } from "react";
+import { useId, type ReactNode, type Ref } from "react";
+import { Button } from "@/components/ui/button";
 
 export type FileDropInputProps = {
   /** 已选文件路径 */
   value: string;
+  /** 多文件等场景的明确展示文案；不再把组合文案误当成本地路径截取文件名。 */
+  displayValue?: ReactNode;
   disabled?: boolean;
   placeholder?: string;
   /** 点击选择文件 */
@@ -17,6 +20,10 @@ export type FileDropInputProps = {
   onClear?: () => void;
   /** DOM ref used by multi-slot pages to hit-test the native drop coordinates. */
   containerRef?: Ref<HTMLDivElement>;
+  description?: ReactNode;
+  invalid?: ReactNode;
+  ariaLabel?: string;
+  className?: string;
 };
 
 /**
@@ -29,6 +36,7 @@ export type FileDropInputProps = {
  */
 export function FileDropInput({
   value,
+  displayValue,
   disabled,
   placeholder,
   onBrowse,
@@ -36,27 +44,57 @@ export function FileDropInput({
   highlight,
   onClear,
   containerRef,
+  description,
+  invalid,
+  ariaLabel,
+  className,
 }: FileDropInputProps) {
+  const generatedId = useId();
+  const helpId = description ? `file-drop-${generatedId}-description` : undefined;
+  const errorId = invalid ? `file-drop-${generatedId}-error` : undefined;
+  const describedBy = [helpId, errorId].filter(Boolean).join(" ") || undefined;
   return (
     <div
       ref={containerRef}
-      className={cn("file-drop-input", highlight && "drag-hover")}
+      data-tour="tool-upload"
+      className={cn(
+        "file-drop-input",
+        highlight && "drag-hover",
+        invalid && "invalid",
+        disabled && "disabled",
+        className,
+      )}
+      onDragEnter={() => onDragStateChange(true)}
+      onDragLeave={() => onDragStateChange(false)}
+      onDrop={() => onDragStateChange(false)}
     >
       {value ? (
         <div className="file-drop-slot filled">
           <span className="file-drop-slot-label">
             {placeholder ?? "已选文件"}
           </span>
-          <span className="file-drop-slot-value">{displayFileName(value)}</span>
+          <button
+            type="button"
+            className="file-drop-slot-value"
+            disabled={disabled}
+            onClick={onBrowse}
+            aria-label={ariaLabel ?? `重新选择文件：${displayFileName(value)}`}
+            aria-describedby={describedBy}
+            aria-invalid={Boolean(invalid) || undefined}
+          >
+            {displayValue ?? displayFileName(value)}
+          </button>
           {onClear && (
-            <button
+            <Button
               type="button"
-              className="file-drop-clear"
+              variant="ghost"
+              size="sm"
+              className="file-drop-clear text-destructive"
               disabled={disabled}
               onClick={onClear}
             >
               清空
-            </button>
+            </Button>
           )}
         </div>
       ) : (
@@ -65,10 +103,15 @@ export function FileDropInput({
           className={cn("file-drop-zone", "slot-mode")}
           disabled={disabled}
           onClick={onBrowse}
+          aria-label={ariaLabel}
+          aria-describedby={describedBy}
+          aria-invalid={Boolean(invalid) || undefined}
         >
           <strong>{placeholder ?? "拖放文件到窗口"}</strong>
         </button>
       )}
+      {description ? <p id={helpId} className="file-input-description">{description}</p> : null}
+      {invalid ? <p id={errorId} className="file-input-error" role="alert">{invalid}</p> : null}
     </div>
   );
 }

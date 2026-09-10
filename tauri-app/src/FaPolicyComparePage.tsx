@@ -8,6 +8,7 @@ import {
   pickPath,
 } from "./api";
 import type { ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { errorText } from "@/lib/errors";
 import { PageHeader } from "@/components/PageHeader";
 import { ErrorBox } from "@/components/ErrorBox";
@@ -19,6 +20,8 @@ import { DataTable } from "@/components/DataTable";
 import { displayFileName } from "@/fileDisplay";
 import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { EmptyState } from "@/components/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { LlmReview } from "@/components/LlmReview";
@@ -230,6 +233,82 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
     setOutputPath(endPath ? faPolicyDefaultOutputPath(endPath) : "");
   }, [endPath, outputPathTouched]);
 
+  // 历史记录「继续任务」：回填期初/期末文件与全部配置（含匹配键与映射），
+  // 不自动重新读取——重新读取同一对文件时用存档映射/匹配键顶回建议值
+  // （见 inspect），换文件照旧。
+  const restoredPolicyRef = useRef<{
+    beginPath: string;
+    endPath: string;
+    beginMapping: PolicyMapping;
+    endMapping: PolicyMapping;
+    beginKeys: string[];
+    endKeys: string[];
+  } | null>(null);
+  useTaskRestore(tool.id, (restore) => {
+    const p = restore.params as {
+      beginPath?: string;
+      endPath?: string;
+      beginSheet?: string;
+      endSheet?: string;
+      beginHeaderRow?: number;
+      endHeaderRow?: number;
+      beginKeys?: string[];
+      endKeys?: string[];
+      beginMapping?: PolicyMapping;
+      endMapping?: PolicyMapping;
+      beginDisplayName?: string;
+      endDisplayName?: string;
+      outputPath?: string;
+    };
+    if (typeof p.beginPath !== "string" || !p.beginPath) return;
+    if (typeof p.endPath !== "string" || !p.endPath) return;
+    const isMapping = (value: unknown): value is PolicyMapping =>
+      Boolean(value && typeof value === "object");
+    restoredPolicyRef.current =
+      isMapping(p.beginMapping) && isMapping(p.endMapping)
+        ? {
+            beginPath: p.beginPath,
+            endPath: p.endPath,
+            beginMapping: p.beginMapping,
+            endMapping: p.endMapping,
+            beginKeys: Array.isArray(p.beginKeys) ? p.beginKeys : [],
+            endKeys: Array.isArray(p.endKeys) ? p.endKeys : [],
+          }
+        : null;
+    reviewGeneration.current += 1;
+    setStep(2);
+    setBeginPath(p.beginPath);
+    setEndPath(p.endPath);
+    setBeginSheet(p.beginSheet ?? "");
+    setEndSheet(p.endSheet ?? "");
+    setBeginHeaderRow(p.beginHeaderRow != null ? String(p.beginHeaderRow) : "");
+    setEndHeaderRow(p.endHeaderRow != null ? String(p.endHeaderRow) : "");
+    setInspection(undefined);
+    setBeginKeys(Array.isArray(p.beginKeys) ? p.beginKeys : []);
+    setEndKeys(Array.isArray(p.endKeys) ? p.endKeys : []);
+    setBeginMapping(
+      p.beginMapping && typeof p.beginMapping === "object"
+        ? p.beginMapping
+        : {},
+    );
+    setEndMapping(
+      p.endMapping && typeof p.endMapping === "object" ? p.endMapping : {},
+    );
+    if (typeof p.beginDisplayName === "string" && p.beginDisplayName)
+      setBeginDisplayName(p.beginDisplayName);
+    if (typeof p.endDisplayName === "string" && p.endDisplayName)
+      setEndDisplayName(p.endDisplayName);
+    if (typeof p.outputPath === "string" && p.outputPath) {
+      setOutputPath(p.outputPath);
+      setOutputPathTouched(true);
+    }
+    setLlmReview(undefined);
+    setLlmChanges([]);
+    setLlmPending([]);
+    setError("");
+    setJob(undefined);
+  });
+
   /// 两表检查直接复用 fa.inspect；建议映射裁剪到政策四要素 + 匹配键。
   async function inspect(overrides?: { beginPath?: string; endPath?: string }) {
     const bPath = overrides?.beginPath ?? beginPath;
@@ -273,12 +352,25 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
         value.suggestedMapping.begin?.matchKeys,
       );
       const suggestedEndKeys = asKeys(value.suggestedMapping.end?.matchKeys);
-      setBeginMapping(suggestedBegin);
-      setEndMapping(suggestedEnd);
-      setBeginKeys(suggestedBeginKeys);
-      setEndKeys(suggestedEndKeys);
+      // 历史恢复后重新读取同一对文件：存档映射/匹配键顶回建议值（一次性
+      // 消费，换文件照旧），且不再自动送 LLM 复核——那份映射已确认过。
+      const stash = restoredPolicyRef.current;
+      const samePath = (a: string, b: string) =>
+        a.trim().toLowerCase() === b.trim().toLowerCase();
+      const match =
+        stash &&
+        samePath(stash.beginPath, bPath) &&
+        samePath(stash.endPath, ePath)
+          ? stash
+          : undefined;
+      if (match) restoredPolicyRef.current = null;
+      setBeginMapping(match ? match.beginMapping : suggestedBegin);
+      setEndMapping(match ? match.endMapping : suggestedEnd);
+      setBeginKeys(match ? match.beginKeys : suggestedBeginKeys);
+      setEndKeys(match ? match.endKeys : suggestedEndKeys);
       setLlmChanges([]);
       setLlmPending([]);
+      if (match) return;
       void review({
         beginPath: bPath,
         endPath: ePath,
@@ -352,7 +444,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
         matchReview: value.matchReview,
         roleLabels: Object.fromEntries([
           ...POLICY_MAPPING_ROLES,
-          ["matchKeys", "组合匹配键"],
+          ["matchKeys", "资产ID"],
         ]),
       });
       setBeginMapping({ ...plan.beginMapping, matchKeys: plan.beginKeys });
@@ -476,7 +568,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
     }
   }
 
-  /// 组合匹配键的选择（多选）。
+  /// 资产ID（可多列）的选择。
   function toggleKey(side: "begin" | "end", column: string) {
     const keys = side === "begin" ? beginKeys : endKeys;
     const next = keys.includes(column)
@@ -601,7 +693,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
         shouldShowFaAdditionFields(String(endMapping.additionMethod ?? "")),
     );
     const roleOptions: [string, string][] = [
-      ["matchKeys", "组合匹配键"],
+      ["matchKeys", "资产ID"],
       ...faRolesForSide(side, visibleRoles),
     ];
     // 已被某列占用的角色集合（跨列感知，用于标记"已用"）
@@ -618,7 +710,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
     }
     const controls = headers.map((header) => {
       const column = header.trim();
-      // 同一列可以同时承担组合匹配键、资产名称等多个角色，保留全部关系合并展示。
+      // 同一列可以同时承担资产ID、资产名称等多个角色，保留全部关系合并展示。
       const mapped = faMappedRolesForColumn(column, roleOptions, mapping);
       const multipleValue = `__multiple__:${column}`;
       return (
@@ -732,12 +824,14 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
         onStepClick={(index) => setStep((index + 1) as 1 | 2)}
       />
       <div className="fa-stack">
-        <Card>
+        <Card variant="section">
           <CardHeader>
             <CardTitle>
               {step === 1 ? "1. 选择文件并配置" : "2. 保存并导出"}
             </CardTitle>
-            <Badge className="badge-ready">已就绪</Badge>
+            <Badge variant={busy ? "info" : inspection ? "success" : "neutral"}>
+              {busy ? "处理中" : inspection ? "已读取" : "等待文件"}
+            </Badge>
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
@@ -803,7 +897,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                             ))}
                           </select>
                         ) : (
-                          <input
+                          <Input
                             value={side === "begin" ? beginSheet : endSheet}
                             disabled={busy}
                             onChange={(e) => {
@@ -815,7 +909,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                         )}
                       </Field>
                       <Field label="标题行（留空自动识别）">
-                        <input
+                        <Input
                           value={
                             side === "begin" ? beginHeaderRow : endHeaderRow
                           }
@@ -906,13 +1000,13 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
               <>
                 <div className="form-grid">
                   <Field label="期初显示名称">
-                    <input
+                    <Input
                       value={beginDisplayName}
                       onChange={(e) => setBeginDisplayName(e.target.value)}
                     />
                   </Field>
                   <Field label="期末显示名称">
-                    <input
+                    <Input
                       value={endDisplayName}
                       onChange={(e) => setEndDisplayName(e.target.value)}
                     />
@@ -993,7 +1087,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                 <h2>文件预览</h2>
                 <p>预览区已锁定；各文件可独立纵向、横向滚动。</p>
               </div>
-              <Badge className="badge-preview">导入文件</Badge>
+              <Badge variant="info">导入文件</Badge>
             </div>
             <div className="fa-preview-stack">
               {inspection ? (
@@ -1010,22 +1104,18 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                 <>
                   <section className="fa-preview fa-preview-empty-card">
                     <header>期初文件预览</header>
-                    <div className="empty">
-                      选择期初文件并读取结构后，在此显示表格内容。
-                    </div>
+                    <EmptyState compact title="等待结果" description="选择期初文件并读取结构后，在此显示表格内容。" />
                   </section>
                   <section className="fa-preview fa-preview-empty-card">
                     <header>期末文件预览</header>
-                    <div className="empty">
-                      选择期末文件并读取结构后，在此显示表格内容。
-                    </div>
+                    <EmptyState compact title="等待结果" description="选择期末文件并读取结构后，在此显示表格内容。" />
                   </section>
                 </>
               )}
             </div>
           </aside>
         ) : (
-          <Card className="fa-result-workspace">
+          <Card variant="workspace" className="fa-result-workspace">
             <CardHeader>
               <CardTitle>导出结果</CardTitle>
             </CardHeader>
@@ -1041,9 +1131,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                 />
               )}
               {!outputPaths.length && (
-                <div className="empty">
-                  确认期初、期末映射无误后点击"生成折旧政策对比"。
-                </div>
+                <EmptyState compact title="等待结果" description="确认期初、期末映射无误后点击「生成折旧政策对比」。" />
               )}
             </CardContent>
           </Card>

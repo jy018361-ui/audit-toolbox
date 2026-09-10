@@ -1,5 +1,6 @@
 import { Alert, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import "./task-state.css";
 
 export type ErrorBoxProps = {
   error: string;
@@ -16,7 +17,7 @@ export function ErrorBox({ error, onDismiss, onRetry }: ErrorBoxProps) {
   return (
     <Alert variant="destructive" className="error-box">
       <AlertTitle className="error-box-title">
-        <span>{error}</span>
+        <span className="error-box-message">{error}</span>
         <span className="error-box-actions">
           {onRetry && (
             <Button

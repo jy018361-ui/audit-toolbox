@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import importlib
 import re
 import warnings
@@ -12,11 +13,14 @@ import format_wp_workbook as workbook_formatter
 
 workbook_formatter = importlib.reload(workbook_formatter)
 create_index_sheet = workbook_formatter.create_index_sheet
+configure_calculation = workbook_formatter.configure_calculation
 style_service_sheet = workbook_formatter.style_service_sheet
 style_source_sheet = workbook_formatter.style_source_sheet
 validate_workbook = workbook_formatter.validate_workbook
+set_internal_hyperlink = workbook_formatter.set_internal_hyperlink
 source_column_map = workbook_formatter.source_column_map
 source_value = workbook_formatter.source_value
+normalize_header = workbook_formatter.normalize_header
 
 
 SER_CONFIG_FILENAME = "SER配置.xlsx"
@@ -28,6 +32,11 @@ DEFAULT_SER_RULES = (
     {"role": "Staff", "hours_mix": 0.58, "ser_rate": 683.0},
     {"role": "Intern", "hours_mix": 0.09, "ser_rate": 173.0},
 )
+REFERENCE_HOUR_OVERRIDES = {
+    "C_货币资金（除函证程序）": 3.0,
+    "C_货币资金_银行函证": 10.0,
+}
+SECTION_VALUE_FIELDS = ("entity", "drafts", "budget", "outlook")
 
 
 def normalized_file_stem(path: Path) -> str:
@@ -88,6 +97,42 @@ def find_service_order_file(folder: Path) -> Path:
 
 def find_section_list_file(folder: Path) -> Path:
     return find_named_input(folder, "sectionlist", "Section List")
+
+
+def find_my_orders_file(folder: Path) -> Path:
+    return find_named_input(folder, "我的订单", "我的订单")
+
+
+def find_or_restore_template(folder: Path) -> Path | None:
+    for candidate in (
+        folder / "FY27+WP服务单.xlsx",
+        folder / "服务方案.xlsx",
+    ):
+        if candidate.exists():
+            return candidate
+
+    encoded_candidates = (
+        folder / "templates" / "FY27+WP服务单.xlsx.b64",
+        Path(__file__).resolve().parent / "templates" / "FY27+WP服务单.xlsx.b64",
+    )
+    encoded_source = next(
+        (path for path in encoded_candidates if path.exists()), None
+    )
+    if encoded_source is None:
+        return None
+
+    target = folder / "FY27+WP服务单.xlsx"
+    try:
+        target.write_bytes(
+            base64.b64decode(encoded_source.read_text(encoding="ascii"))
+        )
+    except Exception as exc:
+        raise ValueError(
+            f"无法从模板资源还原服务方案模板：{encoded_source}"
+        ) from exc
+    return target
+
+
 DEFAULT_SER_CONFIG = tuple(
     (rule["role"], rule["hours_mix"], rule["ser_rate"]) for rule in DEFAULT_SER_RULES
 )
@@ -144,6 +189,15 @@ def number_value(value) -> float:
         return 0.0
 
 
+def parse_hours(value, row: int, label: str) -> float:
+    if value in (None, ""):
+        return 0.0
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"我的订单第{row}行{label}不是数字。") from exc
+
+
 def normalize_order_number(value: object) -> str:
     return (
         re.sub(r"\s+", "", str(value or ""))
@@ -163,6 +217,34 @@ def normalize_section_name(value: object) -> str:
     return re.sub(r"^u_exp(?:-?other)?(?=\()", "u_exp", normalized)
 
 
+def has_section_values(item) -> bool:
+    return any(item.get(name) is not None for name in SECTION_VALUE_FIELDS)
+
+
+def merge_section_values(target, source):
+    for name in SECTION_VALUE_FIELDS:
+        value = source.get(name)
+        if value is None:
+            continue
+        target[name] = (target[name] or 0.0) + number_value(value)
+
+
+def map_sections_to_template(project_sections, template_section_keys):
+    template_keys = set(template_section_keys)
+    fallback_key = normalize_section_name("Others")
+    mapped = {}
+    for section_key, item in project_sections.items():
+        if section_key not in template_keys and not has_section_values(item):
+            continue
+        target_key = section_key if section_key in template_keys else fallback_key
+        target = mapped.setdefault(
+            target_key,
+            {name: None for name in SECTION_VALUE_FIELDS},
+        )
+        merge_section_values(target, item)
+    return mapped
+
+
 def safe_sheet_name(preferred: object, used_names: set[str]) -> str:
     base = re.sub(r"[\\/?*\[\]:]", " ", str(preferred or "服务方案")).strip()
     base = base[:31].strip() or "服务方案"
@@ -175,16 +257,6 @@ def safe_sheet_name(preferred: object, used_names: set[str]) -> str:
         suffix_number += 1
     used_names.add(candidate)
     return candidate
-
-
-def quote_sheet(name: str) -> str:
-    return name.replace("'", "''")
-
-
-def hyperlink_formula(sheet_name: str, target_cell: str, display: object) -> str:
-    safe_sheet = quote_sheet(sheet_name)
-    safe_display = str(display or "").replace('"', '""')
-    return f'=HYPERLINK("#\'{safe_sheet}\'!{target_cell}","{safe_display}")'
 
 
 def normalize_base_sheet_names(wb):
@@ -323,14 +395,11 @@ def split_raw_service_orders(
     raw_book.close()
 
     if template_path is None:
-        candidates = (
-            raw_path.parent / "FY27+WP服务单.xlsx",
-            raw_path.parent / "服务方案.xlsx",
-        )
-        template_path = next((path for path in candidates if path.exists()), None)
+        template_path = find_or_restore_template(raw_path.parent)
     if template_path is None or not template_path.exists():
         raise FileNotFoundError(
-            "找不到服务方案模板。请将 FY27+WP服务单.xlsx 放在同一文件夹。"
+            "找不到服务方案模板。请保留 templates/FY27+WP服务单.xlsx.b64，"
+            "或将 FY27+WP服务单.xlsx 放在同一文件夹。"
         )
 
     source_book = load_workbook(template_path, data_only=False, read_only=False)
@@ -420,10 +489,86 @@ def collect_service_orders(wb):
                     "pre_end": source_value(ws, row, columns, "pre_end"),
                     "final_start": source_value(ws, row, columns, "final_start"),
                     "final_end": source_value(ws, row, columns, "final_end"),
+                    "ci_hours": None,
+                    "ai_hours": None,
+                    "order_adjustment_found": False,
                     "sheet_name": "",
                 }
             )
     return records
+
+
+def load_order_adjustments(my_orders_path: Path):
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="Workbook contains no default style"
+        )
+        orders_book = load_workbook(
+            my_orders_path, read_only=False, data_only=True
+        )
+    orders_sheet = (
+        orders_book["业务"]
+        if "业务" in orders_book.sheetnames
+        else orders_book[orders_book.sheetnames[0]]
+    )
+    headers = {
+        normalize_header(orders_sheet.cell(1, column).value): column
+        for column in range(1, orders_sheet.max_column + 1)
+        if orders_sheet.cell(1, column).value not in (None, "")
+    }
+    required = {
+        "order": "订单编号",
+        "ci": "CI Hours",
+        "ai": "AI Hours",
+    }
+    columns = {
+        name: headers.get(normalize_header(label))
+        for name, label in required.items()
+    }
+    missing = [required[name] for name, column in columns.items() if column is None]
+    if missing:
+        orders_book.close()
+        raise ValueError("我的订单缺少字段：" + "、".join(missing))
+
+    adjustments = {}
+    for row in range(2, orders_sheet.max_row + 1):
+        order_key = normalize_order_number(
+            orders_sheet.cell(row, columns["order"]).value
+        )
+        if not order_key:
+            continue
+        values = {
+            "ci_hours": parse_hours(
+                orders_sheet.cell(row, columns["ci"]).value, row, "CI Hours"
+            ),
+            "ai_hours": parse_hours(
+                orders_sheet.cell(row, columns["ai"]).value, row, "AI Hours"
+            ),
+        }
+        existing = adjustments.get(order_key)
+        if existing is not None and existing != values:
+            orders_book.close()
+            raise ValueError(
+                f"我的订单中订单编号重复且AI/CI Hours不一致：{order_key}"
+            )
+        adjustments[order_key] = values
+    orders_book.close()
+    return adjustments
+
+
+def apply_order_adjustments(records, adjustments):
+    unmatched = []
+    matched = 0
+    for record in records:
+        order_key = normalize_order_number(record["related_order"])
+        values = adjustments.get(order_key)
+        if values is None:
+            unmatched.append(record["related_order"] or record["service_number"])
+            continue
+        record.update(values)
+        record["order_adjustment_found"] = True
+        matched += 1
+    return {"matched": matched, "unmatched": unmatched}
 
 
 def load_section_details(section_list_path: Path, records):
@@ -481,16 +626,19 @@ def load_section_details(section_list_path: Path, records):
         "entity": find_column(prefix="Entity数量"),
         "drafts": find_column(exact="底稿数量"),
         "budget": find_column(exact="预算调整"),
+        "outlook": find_column(exact="OutlookHours"),
         "order": find_column(exact="所属WP服务单"),
     }
-    missing = [name for name, column in columns.items() if column is None]
+    required_columns = ("section", "entity", "drafts", "budget", "order")
+    missing = [name for name in required_columns if columns[name] is None]
     if missing:
         raise ValueError(
             "FY27 Section List 缺少字段：" + "、".join(missing)
         )
 
-    first_column = min(columns.values())
-    last_column = max(columns.values())
+    selected_columns = [column for column in columns.values() if column is not None]
+    first_column = min(selected_columns)
+    last_column = max(selected_columns)
 
     # 只读取所需字段所在的列区间，并且只保留服务单号命中的行。
     for values in section_sheet.iter_rows(
@@ -500,6 +648,8 @@ def load_section_details(section_list_path: Path, records):
         values_only=True,
     ):
         def field(name):
+            if columns[name] is None:
+                return None
             return values[columns[name] - first_column]
 
         order_key = normalize_order_number(field("order"))
@@ -513,13 +663,14 @@ def load_section_details(section_list_path: Path, records):
             "entity": field("entity"),
             "drafts": field("drafts"),
             "budget": field("budget"),
+            "outlook": field("outlook"),
         }
         if any(value not in (None, "") for value in raw_values.values()):
             populated_rows += 1
         order_details = details.setdefault(order_key, {})
         item = order_details.setdefault(
             section_key,
-            {"entity": None, "drafts": None, "budget": None},
+            {name: None for name in SECTION_VALUE_FIELDS},
         )
         for name, value in raw_values.items():
             if value in (None, ""):
@@ -548,6 +699,22 @@ def prepare_template(ws):
             ws.cell(row, 8).value = float(str(value).replace(",", ""))
         except (TypeError, ValueError):
             ws.cell(row, 8).value = None
+    override_keys = {
+        normalize_section_name(section): hours
+        for section, hours in REFERENCE_HOUR_OVERRIDES.items()
+    }
+    applied = set()
+    for row in range(5, 37):
+        section_key = normalize_section_name(ws.cell(row, 2).value)
+        if section_key in override_keys:
+            ws.cell(row, 8).value = override_keys[section_key]
+            applied.add(section_key)
+    missing = set(override_keys) - applied
+    if missing:
+        raise ValueError(
+            "服务方案模板缺少需要更新参考工时的Section："
+            + "、".join(sorted(missing))
+        )
     if ws.max_row >= 55:
         ws.delete_rows(55, ws.max_row - 54)
 
@@ -562,6 +729,7 @@ def calculate_section_outlook_checks(records, section_details, template_ws):
     }
     template_section_rows = 0
     populated_template_rows = 0
+    fallback_section_rows = 0
     compared = 0
     equal = 0
     differences = []
@@ -570,26 +738,40 @@ def calculate_section_outlook_checks(records, section_details, template_ws):
         project_details = section_details.get(
             normalize_order_number(record["service_number"]), {}
         )
+        fallback_section_rows += sum(
+            1
+            for section_key, item in project_details.items()
+            if section_key not in reference_by_section and has_section_values(item)
+        )
+        mapped_sections = map_sections_to_template(
+            project_details, reference_by_section
+        )
         total = 0.0
         has_outlook_data = False
-        for section_key, item in project_details.items():
-            if section_key not in reference_by_section:
-                continue
+        for section_key, item in mapped_sections.items():
             template_section_rows += 1
-            if any(item[name] is not None for name in ("entity", "drafts", "budget")):
+            if has_section_values(item):
                 populated_template_rows += 1
+            reference_hours = reference_by_section.get(section_key, 0.0)
+            if reference_hours == 0 and item["outlook"] is not None:
+                has_outlook_data = True
+                total += round(item["outlook"], 2)
+                continue
             if item["entity"] is None and item["budget"] is None:
                 continue
             has_outlook_data = True
             section_hours = (
-                (item["entity"] or 0.0) * reference_by_section[section_key]
+                (item["entity"] or 0.0) * reference_hours
                 + (item["budget"] or 0.0)
             )
             total += round(section_hours, 2)
 
         if not has_outlook_data:
             continue
-        calculated = round(total * 1.1, 2)
+        ci_hours = number_value(record.get("ci_hours"))
+        ai_hours = number_value(record.get("ai_hours"))
+        adjusted_hours = total - ci_hours - ai_hours
+        calculated = round(adjusted_hours + adjusted_hours * 0.1, 2)
         source_value = round(record["outlook_hours"], 2)
         difference = round(calculated - source_value, 2)
         compared += 1
@@ -609,6 +791,7 @@ def calculate_section_outlook_checks(records, section_details, template_ws):
     return {
         "template_section_rows": template_section_rows,
         "populated_template_rows": populated_template_rows,
+        "fallback_section_rows": fallback_section_rows,
         "outlook_compared": compared,
         "outlook_equal": equal,
         "outlook_differences": differences,
@@ -618,22 +801,36 @@ def calculate_section_outlook_checks(records, section_details, template_ws):
 def fill_service_sheet(ws, record, section_details, ser_config):
     ws["A2"] = record["related_order"]
     ws["B2"] = record["service_number"]
-    for ref in ("E1", "F1", "G1", "H1", "E2", "F2", "G2", "H2"):
-        ws[ref] = None
-    ws["C1"] = "Outlook Hours"
-    ws["C2"] = "=G37"
-    ws["D1"] = "SER"
-    ws["D2"] = "=F62"
-    ws["I1"] = hyperlink_formula(
-        record["source_sheet"], f"A{record['source_row']}", "返回源表"
+    ws["C1"] = "Section Outlook Hours"
+    ws["C2"] = "=SUM(G5:G36)"
+    ws["D1"] = "CI Hours"
+    ws["D2"] = record.get("ci_hours")
+    ws["E1"] = "AI Hours"
+    ws["E2"] = record.get("ai_hours")
+    ws["F1"] = "Hours调整"
+    ws["F2"] = '=ROUND((C2-IF(D2="",0,D2)-IF(E2="",0,E2))*0.1,2)'
+    ws["G1"] = "Outlook Hours"
+    ws["G2"] = '=ROUND(C2-IF(D2="",0,D2)-IF(E2="",0,E2)+F2,2)'
+    ws["H1"] = "SER"
+    ws["H2"] = "=F62"
+    set_internal_hyperlink(
+        ws["I1"], record["source_sheet"], f"A{record['source_row']}", "返回源表"
     )
     ws["H4"] = "参考时间/Entity"
 
     project_sections = section_details.get(
         normalize_order_number(record["service_number"]), {}
     )
+    template_section_keys = {
+        normalize_section_name(ws.cell(row, 2).value)
+        for row in range(5, 37)
+        if ws.cell(row, 2).value
+    }
+    mapped_sections = map_sections_to_template(
+        project_sections, template_section_keys
+    )
     for row in range(5, 37):
-        imported = project_sections.get(
+        imported = mapped_sections.get(
             normalize_section_name(ws.cell(row, 2).value)
         )
         if imported:
@@ -646,14 +843,20 @@ def fill_service_sheet(ws, record, section_details, ser_config):
             ws.cell(row, 6).value = None
         ws.cell(row, 5).value = (
             f'=IF(OR(C{row}="",H{row}=""),"",'
-            f'ROUND(C{row}*IFERROR(VALUE(H{row}),0),2))'
+            f'ROUND(C{row}*H{row},2))'
         )
-        ws.cell(row, 7).value = (
-            f'=IF(AND(F{row}="",OR(C{row}="",H{row}="")),"",'
-            f'ROUND(IF(OR(C{row}="",H{row}=""),0,C{row}*IFERROR(VALUE(H{row}),0))'
-            f'+IFERROR(VALUE(F{row}),0),2))'
-        )
-    ws["G37"] = "=SUM(G5:G36)*1.1"
+        if (
+            imported
+            and imported["outlook"] is not None
+            and ws.cell(row, 8).value in (None, "")
+        ):
+            ws.cell(row, 7).value = imported["outlook"]
+        else:
+            ws.cell(row, 7).value = (
+                f'=IF(AND(F{row}="",E{row}=""),"",'
+                f'ROUND(IF(E{row}="",0,E{row})+IFERROR(VALUE(F{row}),0),2))'
+            )
+    ws["G37"] = "=G2"
     ws["C41"] = record["pre_start"]
     ws["C42"] = record["pre_end"]
     ws["C47"] = record["final_start"]
@@ -684,9 +887,12 @@ def generate(
     input_path: Path,
     output_path: Path,
     section_list_path: Path | None = None,
+    my_orders_path: Path | None = None,
 ):
     if section_list_path is None:
         section_list_path = find_section_list_file(input_path.parent)
+    if my_orders_path is None:
+        my_orders_path = find_my_orders_file(input_path.parent)
     ser_config = load_ser_config(input_path.parent)
     split_result = {}
     with warnings.catch_warnings():
@@ -707,6 +913,9 @@ def generate(
     records = collect_service_orders(wb)
     if not records:
         raise ValueError("AUD2026 和 IPO 中没有找到 WP服务单编号。")
+    adjustment_result = apply_order_adjustments(
+        records, load_order_adjustments(my_orders_path)
+    )
     section_result = load_section_details(section_list_path, records)
     section_details = section_result["details"]
     unmatched_section_orders = [
@@ -751,15 +960,21 @@ def generate(
             record = record_by_number.get(service_number)
             if not record:
                 continue
-            ws.cell(row, columns["service_number"]).value = hyperlink_formula(
-                record["sheet_name"], "A1", service_number
+            set_internal_hyperlink(
+                ws.cell(row, columns["service_number"]),
+                record["sheet_name"],
+                "A1",
+                service_number,
             )
             related_order = display_value(
                 source_value(ws, row, columns, "related_order")
             )
             if related_order:
-                ws.cell(row, columns["related_order"]).value = hyperlink_formula(
-                    record["sheet_name"], "A1", related_order
+                set_internal_hyperlink(
+                    ws.cell(row, columns["related_order"]),
+                    record["sheet_name"],
+                    "A1",
+                    related_order,
                 )
 
     for name in ("AUD2026", "AUD2025", "IPO", "IPO archive"):
@@ -769,9 +984,7 @@ def generate(
         style_service_sheet(ws)
     create_index_sheet(wb, service_sheets)
 
-    wb.calculation.fullCalcOnLoad = True
-    wb.calculation.forceFullCalc = True
-    wb.calculation.calcMode = "auto"
+    configure_calculation(wb)
     wb.active = 0
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
@@ -786,6 +999,9 @@ def generate(
             "populated_section_rows": section_result["populated_rows"],
             "template_section_rows": outlook_result["template_section_rows"],
             "populated_template_rows": outlook_result["populated_template_rows"],
+            "fallback_section_rows": outlook_result["fallback_section_rows"],
+            "matched_order_adjustments": adjustment_result["matched"],
+            "unmatched_order_adjustments": adjustment_result["unmatched"],
             "outlook_compared": outlook_result["outlook_compared"],
             "outlook_equal": outlook_result["outlook_equal"],
             "outlook_differences": outlook_result["outlook_differences"],
@@ -807,24 +1023,27 @@ def validate_formula_logic(output_path: Path, section_details=None, ser_config=N
     for ws in wb.worksheets:
         if ws.title in base_names:
             continue
-        hidden_fields = [ws[ref].value for ref in ("E1", "F1", "G1", "H1", "E2", "F2", "G2", "H2")]
         expected = (
-            all(value is None for value in hidden_fields)
-            and ws["C1"].value == "Outlook Hours"
-            and ws["C2"].value == "=G37"
-            and ws["D1"].value == "SER"
-            and ws["D2"].value == "=F62"
-            and ws["G37"].value == "=SUM(G5:G36)*1.1"
+            ws["C1"].value == "Section Outlook Hours"
+            and ws["C2"].value == "=SUM(G5:G36)"
+            and ws["D1"].value == "CI Hours"
+            and ws["E1"].value == "AI Hours"
+            and ws["F1"].value == "Hours调整"
+            and ws["F2"].value
+            == '=ROUND((C2-IF(D2="",0,D2)-IF(E2="",0,E2))*0.1,2)'
+            and ws["G1"].value == "Outlook Hours"
+            and ws["G2"].value
+            == '=ROUND(C2-IF(D2="",0,D2)-IF(E2="",0,E2)+F2,2)'
+            and ws["H1"].value == "SER"
+            and ws["H2"].value == "=F62"
+            and ws["G37"].value == "=G2"
             and ws["B56"].value == "=G37"
             and ws["H4"].value == "参考时间/Entity"
-            and all(
-                ws.cell(row, 7).value
-                == f'=IF(AND(F{row}="",OR(C{row}="",H{row}="")),"",ROUND(IF(OR(C{row}="",H{row}=""),0,C{row}*IFERROR(VALUE(H{row}),0))+IFERROR(VALUE(F{row}),0),2))'
-                for row in range(5, 37)
-            )
+            and ws["H5"].value == 3
+            and ws["H6"].value == 10
             and all(
                 ws.cell(row, 5).value
-                == f'=IF(OR(C{row}="",H{row}=""),"",ROUND(C{row}*IFERROR(VALUE(H{row}),0),2))'
+                == f'=IF(OR(C{row}="",H{row}=""),"",ROUND(C{row}*H{row},2))'
                 for row in range(5, 37)
             )
             and all(
@@ -840,6 +1059,8 @@ def validate_formula_logic(output_path: Path, section_details=None, ser_config=N
             == [mix for _, mix, _ in ser_config]
             and [ws.cell(row, 4).value for row in range(58, 62)]
             == [rate for _, _, rate in ser_config]
+            and ws["I1"].value == "返回源表"
+            and ws["I1"].hyperlink is not None
         )
         if not expected:
             errors.append(ws.title)
@@ -847,21 +1068,36 @@ def validate_formula_logic(output_path: Path, section_details=None, ser_config=N
             project_details = section_details.get(
                 normalize_order_number(ws["B2"].value), {}
             )
+            template_section_keys = {
+                normalize_section_name(ws.cell(row, 2).value)
+                for row in range(5, 37)
+                if ws.cell(row, 2).value
+            }
+            mapped_sections = map_sections_to_template(
+                project_details, template_section_keys
+            )
             for row in range(5, 37):
-                imported = project_details.get(
+                imported = mapped_sections.get(
                     normalize_section_name(ws.cell(row, 2).value)
                 )
-                if not imported:
-                    continue
+                expected_outlook = (
+                    imported["outlook"]
+                    if imported
+                    and imported["outlook"] is not None
+                    and ws.cell(row, 8).value in (None, "")
+                    else f'=IF(AND(F{row}="",E{row}=""),"",ROUND(IF(E{row}="",0,E{row})+IFERROR(VALUE(F{row}),0),2))'
+                )
                 actual = (
                     ws.cell(row, 3).value,
                     ws.cell(row, 4).value,
                     ws.cell(row, 6).value,
+                    ws.cell(row, 7).value,
                 )
                 expected_values = (
-                    imported["entity"],
-                    imported["drafts"],
-                    imported["budget"],
+                    imported["entity"] if imported else None,
+                    imported["drafts"] if imported else None,
+                    imported["budget"] if imported else None,
+                    expected_outlook,
                 )
                 if actual != expected_values:
                     errors.append(f"{ws.title}!{row}")
@@ -869,10 +1105,17 @@ def validate_formula_logic(output_path: Path, section_details=None, ser_config=N
     index_ws = wb["服务方案索引"]
     expected_headers = [
         "序号", "来源", "项目名称", "WP服务单编号",
-        "相关订单", "WP FIC", "预算Outlook Hours", "源表Outlook Hours",
-        "差异", "核对结果", "查看服务方案",
+        "相关订单", "WP FIC", "CI Hours", "AI Hours",
+        "预算Outlook Hours", "源表Outlook Hours", "差异", "核对结果",
+        "查看服务方案",
     ]
-    actual_headers = [index_ws.cell(7, col).value for col in range(1, 12)]
+    actual_headers = [index_ws.cell(7, col).value for col in range(1, 14)]
+    if (
+        wb.calculation.calcMode != "auto"
+        or wb.calculation.fullCalcOnLoad
+        or wb.calculation.forceFullCalc
+    ):
+        errors.append("计算设置")
     source_info_by_service = {}
     for source_name in ("AUD2026", "IPO"):
         source_ws = wb[source_name]
@@ -906,7 +1149,7 @@ def validate_formula_logic(output_path: Path, section_details=None, ser_config=N
         expected_wp_fic = str(
             source_info.get("wp_fic") or ""
         ).strip()
-        actual_outlook = number_value(index_ws.cell(row, 8).value)
+        actual_outlook = number_value(index_ws.cell(row, 10).value)
         expected_outlook = number_value(source_info.get("outlook_hours"))
         if (
             actual_wp_fic != expected_wp_fic
@@ -942,14 +1185,28 @@ def main():
             "Section回填："
             f"匹配 {result['matched_section_orders']} 个服务单，"
             f"{result['matched_section_rows']} 条Section，"
-            f"其中 {result['populated_section_rows']} 条有数量或预算数据。"
+            f"其中 {result['populated_section_rows']} 条有数量、预算或Outlook数据。"
         )
+        if result["fallback_section_rows"]:
+            print(
+                f"非模板Section：{result['fallback_section_rows']} 条已汇总到Others。"
+            )
         print(
             "Outlook核对："
             f"可核对 {result['outlook_compared']} 个项目，"
             f"一致 {result['outlook_equal']} 个，"
             f"不一致 {result['outlook_compared'] - result['outlook_equal']} 个。"
         )
+        print(
+            "AI/CI匹配："
+            f"匹配 {result['matched_order_adjustments']} 个服务单，"
+            f"未匹配 {len(result['unmatched_order_adjustments'])} 个。"
+        )
+        if result["unmatched_order_adjustments"]:
+            print(
+                "我的订单未匹配："
+                + "；".join(result["unmatched_order_adjustments"])
+            )
         if result["unmatched_section_orders"]:
             print(
                 "Section List未匹配服务单："

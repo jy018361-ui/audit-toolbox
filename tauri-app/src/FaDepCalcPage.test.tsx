@@ -63,6 +63,10 @@ it("uses the shared horizontal steps, gates export, preserves mappings and reset
   const { container } = render(<FaDepCalcPage tool={tool} />);
   const nav = container.querySelector(".step-indicator")!;
   expect(nav.previousElementSibling).toHaveClass("page-header");
+  expect(container.querySelector(".dep-source-card")).toHaveAttribute(
+    "data-ui-state",
+    "empty",
+  );
   expect(nav.querySelectorAll("button")).toHaveLength(3);
   expect(screen.getByRole("button", { name: "2 核对映射" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "3 生成底稿" })).toBeDisabled();

@@ -14,12 +14,14 @@ import {
   TB_LABELS,
 } from "./DepositInterestPage";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import { LedgerReviewCompact } from "@/components/LedgerReviewAll";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
+import { EmptyState } from "@/components/EmptyState";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -30,7 +32,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Download, Eye, Trash2 } from "lucide-react";
+import { Download, Eye, Plus, Trash2 } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -43,10 +45,12 @@ import { errorText } from "@/lib/errors";
 import {
   applyLedgerReviewsTogether,
   LEDGER_MULTI_COLUMN_ROLES,
-  resolveLedgerPairKinds,
+  missingGoldIdentity,
+  scanLedgerUploadSources,
   resolveRoleLabels,
+  selectLedgerWorkbookKindSources,
   type LedgerReviewOutcome,
-  type LedgerSourceClassification,
+  type LedgerWorkbookSheetClassification,
 } from "@/ledgerMapping";
 import {
   describeForm,
@@ -54,21 +58,66 @@ import {
   resolveForm,
   roleRequirement,
   useLedgerForms,
+  type LedgerForm,
 } from "@/ledgerForms";
 import {
+  compareGroups,
   fileName,
   pairLedgerFiles,
+  pairingFileKey,
+  pairingFileLabel,
   reassignJe,
   type LedgerKind,
   type PairedGroup,
   type PairingFile,
 } from "./tbjePairing";
 import type { ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import "./fx-audit.css";
 import "./tbje-check.css";
 
 type Mapping = MappingDict;
 type GroupLedgerReview = Partial<Record<LedgerKind, LedgerReviewOutcome>>;
+
+export function tbjeMissingMappings(
+  kind: LedgerKind,
+  mapping: MappingDict,
+  forms: LedgerForm[],
+  labels: Record<string, string>,
+): string[] {
+  const filled = (value: string | string[] | undefined) =>
+    Array.isArray(value)
+      ? value.some((item) => Boolean(item?.trim()))
+      : Boolean(value?.trim());
+  const missing = missingGoldIdentity(kind, (role) => filled(mapping[role]));
+  const match = forms.length ? resolveForm(kind, forms, mapping) : undefined;
+  if (match && !match.complete) {
+    missing.push(...match.missing.map((role) => labels[role] ?? role));
+    for (const slot of match.missingAny)
+      missing.push(`${slot.map((role) => labels[role] ?? role).join("／")}（任一）`);
+    missing.push(
+      ...match.partialOptional.map((role) => labels[role] ?? role),
+    );
+  }
+  return [...new Set(missing)];
+}
+
+export function tbjeReviewStatus(
+  needsPairReview: boolean,
+  reviewed: boolean,
+  reviewFailed: boolean,
+  missingCount: number,
+): { label: string; attention: boolean } {
+  if (needsPairReview) return { label: "待确认", attention: true };
+  if (!reviewed) return { label: "已识别", attention: false };
+  if (reviewFailed) return { label: "LLM 复核失败", attention: true };
+  if (missingCount > 0)
+    return {
+      label: `复核完成，仍缺 ${missingCount} 项`,
+      attention: true,
+    };
+  return { label: "复核完成，映射完整", attention: false };
+}
 
 type Verdict = { performed: boolean; passed?: boolean; reason?: string };
 
@@ -227,7 +276,12 @@ function TbJeVerdict({ check }: { check?: CheckResult["tbVsJe"] }) {
 
 /** 预览截断的行数。几百条差异全塞进页面没法看——预览管定位，导出管全量。 */
 const PREVIEW_CAP = 100;
-const MULTI_COLUMN_ROLES = new Set(["id", "accountName", "auxiliary"]);
+// TBJE 只需用日期组成凭证键，不做按日计息；没有完整日期时允许月／日等
+// 多列共同组成日期键。其他工具是否允许复合日期由各自页面单独声明。
+const MULTI_COLUMN_ROLES = new Set([
+  ...LEDGER_MULTI_COLUMN_ROLES,
+  "date",
+]);
 
 const presenceLabel = (presence: string) =>
   presence === "tbOnly"
@@ -495,6 +549,14 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const [inspects, setInspects] = useState<Record<string, Inspection>>({});
   const [mappings, setMappings] = useState<Record<string, Mapping>>({});
   const [groups, setGroups] = useState<PairedGroup[]>([]);
+  // JE-only groups remain in memory so a later TB upload or manual selection can
+  // claim them, but they are not rows: this page is TB-led and a JE cannot run alone.
+  const visibleGroups = useMemo(
+    () => groups.filter((group) => Boolean(group.tb)),
+    [groups],
+  );
+  const tbForms = useLedgerForms("tb");
+  const jeForms = useLedgerForms("je");
   const [expanded, setExpanded] = useState<
     { groupId: string; kind: LedgerKind } | undefined
   >();
@@ -517,6 +579,39 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const intakeSectionRef = useRef<HTMLElement | null>(null);
   const pairingSectionRef = useRef<HTMLElement | null>(null);
   const resultSectionRef = useRef<HTMLElement | null>(null);
+  // 用户在配对页明确选过「不配对序时账」的 TB。二次添加文件时这些组不许被
+  // 自动配对重新塞回 JE——那是用户亲手清掉的，不是没配上。
+  const clearedTbsRef = useRef(new Set<string>());
+
+  const missingOf = (kind: LedgerKind, file?: PairingFile) => {
+    if (!file) return [];
+    const inspection = inspects[pairingFileKey(file)];
+    const labels = resolveRoleLabels(
+      inspection?.roles,
+      kind === "tb" ? TB_LABELS : JE_LABELS,
+    );
+    return tbjeMissingMappings(
+      kind,
+      mappings[pairingFileKey(file)] ?? {},
+      kind === "tb" ? tbForms : jeForms,
+      labels,
+    );
+  };
+
+  const reviewStatusOf = (group: PairedGroup) => {
+    const review = llmReviews[group.id];
+    const failed = Boolean(
+      review && Object.values(review).some((item) => item?.failed),
+    );
+    const missingCount =
+      missingOf("tb", group.tb).length + missingOf("je", group.je).length;
+    return tbjeReviewStatus(
+      group.needsReview,
+      Boolean(review),
+      failed,
+      missingCount,
+    );
+  };
 
   const { job, setJob, activeJobId } = useJobEvents({
     toolId: "tbje_check",
@@ -552,6 +647,74 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 历史记录「继续任务」：把存档里的 TB/JE 文件重新批量识别（自动配对），
+  // 完成后用存档映射覆盖建议映射。此前手动「不配对序时账」的组会被重新
+  // 自动配对，需要的话在配对页再清一次。run_batch 是组数组，单组导出的
+  // 存档把组字段放在顶层，两种形状都兼容。
+  useTaskRestore(tool.id, (restore) => {
+    type TbjeGroupParams = {
+      tbSource?: { inputPath?: unknown; sheet?: unknown };
+      tbMapping?: Mapping;
+      jeSource?: { inputPath?: unknown; sheet?: unknown };
+      jeMapping?: Mapping;
+    };
+    const raw = restore.params.groups;
+    const groups = (
+      Array.isArray(raw) ? raw : [restore.params]
+    ) as TbjeGroupParams[];
+    if (!groups.length) return;
+    const paths = new Set<string>();
+    for (const group of groups) {
+      if (typeof group?.tbSource?.inputPath === "string" && group.tbSource.inputPath)
+        paths.add(group.tbSource.inputPath);
+      if (typeof group?.jeSource?.inputPath === "string" && group.jeSource.inputPath)
+        paths.add(group.jeSource.inputPath);
+    }
+    if (!paths.size) return;
+    setError("");
+    setOutcomes([]);
+    setExported(undefined);
+    void (async () => {
+      await intake([...paths]);
+      setMappings((current) => {
+        const next = { ...current };
+        for (const group of groups) {
+          const tbPath = group?.tbSource?.inputPath;
+          if (
+            typeof tbPath === "string" &&
+            group.tbMapping &&
+            typeof group.tbMapping === "object"
+          )
+            next[
+              pairingFileKey({
+                path: tbPath,
+                sheet:
+                  typeof group.tbSource?.sheet === "string"
+                    ? group.tbSource.sheet
+                    : undefined,
+              })
+            ] = group.tbMapping;
+          const jePath = group?.jeSource?.inputPath;
+          if (
+            typeof jePath === "string" &&
+            group.jeMapping &&
+            typeof group.jeMapping === "object"
+          )
+            next[
+              pairingFileKey({
+                path: jePath,
+                sheet:
+                  typeof group.jeSource?.sheet === "string"
+                    ? group.jeSource.sheet
+                    : undefined,
+              })
+            ] = group.jeMapping;
+        }
+        return next;
+      });
+    })();
+  });
+
   async function browse() {
     const picked = await pickPath("files", "选择 TB 与 JE 文件", [
       "xlsx",
@@ -565,77 +728,302 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
 
   /** 批量识别：每份文件判类型、读表头、给映射建议。配对不读文件内容。 */
   async function intake(selected: string[]) {
-    const files = selected.filter((path) => /\.(xlsx?|xlsm|csv)$/i.test(path));
-    if (!files.length) return;
+    const existingPaths = new Set(
+      groups
+        .flatMap((group) => [group.tb?.path, group.je?.path])
+        .filter((path): path is string => Boolean(path)),
+    );
+    const files = selected.filter(
+      (path) => /\.(xlsx?|xlsm|csv)$/i.test(path) && !existingPaths.has(path),
+    );
+    if (!files.length) {
+      if (visibleGroups.length) setCurrentStep(1);
+      return;
+    }
     setError("");
-    invalidateResults();
+    invalidateResults(false);
     setBusy(true);
     const failures: string[] = [];
     const recognized: PairingFile[] = [];
     const nextInspects: Record<string, Inspection> = { ...inspects };
     const nextMappings: Record<string, Mapping> = { ...mappings };
-    for (const [index, path] of files.entries()) {
-      setStatus(`正在识别 ${index + 1} / ${files.length}：${fileName(path)}`);
+    const scan = await scanLedgerUploadSources<LedgerWorkbookSheetClassification>(
+      engineCall,
+      files,
+      {
+        onWorkbookStart: (path, index, total) =>
+          setStatus(`正在识别 ${index + 1} / ${total}：${fileName(path)}`),
+      },
+    );
+    const classifiedSources = selectLedgerWorkbookKindSources(scan.sources);
+    const hiddenSheets = scan.hiddenSheets;
+    failures.push(
+      ...scan.failures.map(
+        (failure) => `${fileName(failure.path)}：${errorText(failure.error)}`,
+      ),
+    );
+    for (const item of classifiedSources) {
+      // 批量页不能把全批来源拿去做“两文件联合判型”；那会为了凑 TB/JE
+      // 数量而把明确的 04JE 辅助 Sheet 强行改成 TB。
+      const kind = item.classification.kind as LedgerKind;
+      const provisionalKey = pairingFileKey({
+        path: item.path,
+        sheet: item.classification.sheet,
+      });
+      // 重复选入只当“确认要这份”；已换标题行、改过映射的 Sheet 原样保留。
+      if (nextInspects[provisionalKey]) continue;
       try {
-        const classified = (await engineCall("deposit.classify_source", {
-          source: { inputPath: path, sheet: "", headerRow: 0, headerDepth: 0 },
-        })) as LedgerSourceClassification & {
-          sheet: string;
-          headerRow: number;
-          headerDepth: number;
-        };
-        const kind = (resolveLedgerPairKinds([classified])[0] ??
-          classified.kind) as LedgerKind;
         const inspected = (await engineCall(`fx.inspect_${kind}`, {
           source: {
-            inputPath: path,
-            sheet: classified.sheet,
-            headerRow: classified.headerRow,
-            headerDepth: classified.headerDepth,
+            inputPath: item.path,
+            sheet: item.classification.sheet,
+            headerRow: 0,
+            headerDepth: 0,
           },
         })) as Inspection;
-        nextInspects[path] = inspected;
-        nextMappings[path] = inspected.suggestedMapping;
-        recognized.push({ path, kind, entities: inspected.entities });
+        const source: PairingFile = {
+          path: item.path,
+          sheet: inspected.sheet,
+          kind,
+          entities: inspected.entities,
+        };
+        const key = pairingFileKey(source);
+        nextInspects[key] = inspected;
+        nextMappings[key] = inspected.suggestedMapping;
+        recognized.push(source);
       } catch (e) {
-        failures.push(`${fileName(path)}：${errorText(e)}`);
+        failures.push(
+          `${fileName(item.path)} / ${item.classification.sheet}：${errorText(e)}`,
+        );
       }
     }
-    // 已经在列表里的文件也参与重新配对，否则分两次拖入就配不到一起。
-    const existing: PairingFile[] = groups.flatMap((group) =>
-      [group.tb, group.je].filter(Boolean).map((file) => file!),
+    // 二次添加不推翻已有配对：配好对的组（包括用户手工调整过的）原样保留，
+    // 手工选过「不配对」的 TB 组也原样保留，只有「没配上 JE 的 TB」「没被
+    // 认领的 JE」和新文件一起重新自动配对——分两批拖入仍能配上，但用户确认
+    // 过的结果不会被冲掉。
+    const settled = groups.filter(
+      (group) => group.tb && (group.je || clearedTbsRef.current.has(group.id)),
     );
-    const merged = [...existing, ...recognized].filter(
+    const openTbs = groups
+      .filter(
+        (group) =>
+          group.tb && !group.je && !clearedTbsRef.current.has(group.id),
+      )
+      .map((group) => group.tb!);
+    const looseJes = groups
+      .filter((group) => !group.tb && group.je)
+      .map((group) => group.je!);
+    const pool = [...openTbs, ...looseJes, ...recognized].filter(
       (file, index, all) =>
-        all.findIndex((other) => other.path === file.path) === index,
+        all.findIndex((other) => pairingFileKey(other) === pairingFileKey(file)) ===
+        index,
     );
+    const paired = pairLedgerFiles(pool);
+    const nextGroups = [...settled, ...paired].sort(compareGroups);
     setInspects(nextInspects);
     setMappings(nextMappings);
-    const paired = pairLedgerFiles(merged);
-    setGroups(paired);
-    if (paired.length > 0) setCurrentStep(1);
+    setGroups(nextGroups);
+    const displayedGroups = nextGroups.filter((group) => group.tb);
+    // 批量结果默认保持折叠；映射缺口直接在行内提示，由用户决定展开哪一侧。
+    setExpanded(undefined);
+    // LLM 联合复核的结论跟着组走：组还在就继续算复核过，组被解散才清掉。
+    const survivingIds = new Set(nextGroups.map((group) => group.id));
+    setLlmReviews((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([id]) => survivingIds.has(id)),
+      ),
+    );
+    setLlmReviewStatus("");
+    if (displayedGroups.length > 0) setCurrentStep(1);
     setStatus(
-      failures.length ? `${failures.length} 份文件没读成：${failures[0]}` : "",
+      failures.length
+        ? `${failures.length} 个来源没读成：${failures[0]}`
+        : hiddenSheets
+          ? `已识别可用账表；${hiddenSheets} 张低置信度工作表未显示。`
+          : "",
     );
     setBusy(false);
   }
 
   /** 换一个 sheet 重读：识别默认挑内容最多的表，但审计师加工过的副本
    *  可能与原始导出并存——最终读哪张由用户说了算。 */
-  async function switchSheet(path: string, kind: LedgerKind, sheet: string) {
+  async function switchSheet(
+    file: PairingFile,
+    kind: LedgerKind,
+    sheet: string,
+    headerRow = 0,
+    headerDepth = 0,
+  ) {
     if (!sheet || busy) return;
     setBusy(true);
     setError("");
+    const oldKey = pairingFileKey(file);
     try {
       const inspected = (await engineCall(`fx.inspect_${kind}`, {
-        source: { inputPath: path, sheet, headerRow: 0, headerDepth: 0 },
+        source: { inputPath: file.path, sheet, headerRow, headerDepth },
       })) as Inspection;
-      setInspects((current) => ({ ...current, [path]: inspected }));
+      const nextFile = { ...file, sheet: inspected.sheet, entities: inspected.entities };
+      const nextKey = pairingFileKey(nextFile);
+      setInspects((current) => {
+        const next = { ...current };
+        delete next[oldKey];
+        next[nextKey] = inspected;
+        return next;
+      });
+      setMappings((current) => {
+        const next = { ...current };
+        delete next[oldKey];
+        next[nextKey] = inspected.suggestedMapping;
+        return next;
+      });
+      setGroups((current) =>
+        current.map((group) => ({
+          ...group,
+          tb:
+            group.tb && pairingFileKey(group.tb) === oldKey ? nextFile : group.tb,
+          je:
+            group.je && pairingFileKey(group.je) === oldKey ? nextFile : group.je,
+        })),
+      );
+      invalidateResults();
+    } catch (e) {
+      setError(`${fileName(file.path)}：${errorText(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function changeSourceKind(file: PairingFile, nextKind: LedgerKind) {
+    if (file.kind === nextKind || busy) return;
+    const key = pairingFileKey(file);
+    const current = inspects[key];
+    if (!current) return;
+    setBusy(true);
+    setError("");
+    try {
+      const inspected = (await engineCall(`fx.inspect_${nextKind}`, {
+        source: {
+          inputPath: file.path,
+          sheet: current.sheet,
+          headerRow: 0,
+          headerDepth: 0,
+        },
+      })) as Inspection;
+      const changed: PairingFile = {
+        ...file,
+        kind: nextKind,
+        sheet: inspected.sheet,
+        entities: inspected.entities,
+      };
+      const pool = groups
+        .flatMap((group) => [group.tb, group.je])
+        .filter((item): item is PairingFile => Boolean(item))
+        .map((item) => (pairingFileKey(item) === key ? changed : item))
+        .filter(
+          (item, index, all) =>
+            all.findIndex(
+              (other) => pairingFileKey(other) === pairingFileKey(item),
+            ) === index,
+        );
+      setInspects((value) => ({ ...value, [key]: inspected }));
+      setMappings((value) => ({
+        ...value,
+        [key]: inspected.suggestedMapping,
+      }));
+      setGroups(pairLedgerFiles(pool));
+      clearedTbsRef.current.clear();
+      setExpanded(undefined);
+      invalidateResults();
+    } catch (e) {
+      setError(`${pairingFileLabel(file)}：${errorText(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** 用户明确指定类型时不再经过分类器：选 Excel 后由对应 inspect 自动选正表，
+   *  行内 Sheet 下拉仍可继续改。TB 是建组锚点；JE 可选、可替换。 */
+  async function pickManualSource(kind: LedgerKind, groupId?: string) {
+    if (busy) return;
+    const picked = await pickPath(
+      "file",
+      kind === "tb" ? "选择科目余额表（TB）" : "选择序时账（JE）",
+      ["xlsx", "xls", "xlsm", "csv"],
+    );
+    const path = Array.isArray(picked) ? picked[0] : picked;
+    if (!path) return;
+    setBusy(true);
+    setError("");
+    setStatus(
+      `正在读取${kind === "tb" ? "科目余额表" : "序时账"}：${fileName(path)}`,
+    );
+    try {
+      const inspected = (await engineCall(`fx.inspect_${kind}`, {
+        source: { inputPath: path, sheet: "", headerRow: 0, headerDepth: 0 },
+      })) as Inspection;
+      const source: PairingFile = {
+        path,
+        sheet: inspected.sheet,
+        kind,
+        entities: inspected.entities,
+      };
+      const key = pairingFileKey(source);
+      if (
+        kind === "tb" &&
+        groups.some(
+          (group) => group.id !== groupId && group.tb && pairingFileKey(group.tb) === key,
+        )
+      ) {
+        setError(`${pairingFileLabel(source)} 已在其他配对组中。`);
+        return;
+      }
+      setInspects((current) => ({ ...current, [key]: inspected }));
       setMappings((current) => ({
         ...current,
-        [path]: inspected.suggestedMapping,
+        [key]: inspected.suggestedMapping,
       }));
+      if (!groupId) {
+        const manualGroup: PairedGroup = {
+          id: `manual:${key}`,
+          label: fileName(path).replace(/\.(?:xlsx?|xlsm|csv)$/i, ""),
+          tb: source,
+          reasons: ["手工指定 TB"],
+          needsReview: true,
+        };
+        setGroups((current) => [...current, manualGroup].sort(compareGroups));
+        setExpanded(undefined);
+        setCurrentStep(1);
+      } else {
+        setGroups((current) =>
+          current
+            .map((group) => {
+              if (group.id === groupId) {
+                return {
+                  ...group,
+                  [kind]: source,
+                  reasons: [`手工指定 ${kind.toUpperCase()}`],
+                  needsReview: kind === "tb" ? !group.je : false,
+                };
+              }
+              // 同一 JE 只能属于一组；手工选中后从原组释放。
+              if (kind === "je" && group.je && pairingFileKey(group.je) === key) {
+                return {
+                  ...group,
+                  je: undefined,
+                  reasons: ["序时账已手工移至另一组"],
+                  needsReview: true,
+                };
+              }
+              return group;
+            })
+            .filter((group) => group.tb || group.je)
+            .sort(compareGroups),
+        );
+        clearedTbsRef.current.delete(groupId);
+        setExpanded(undefined);
+      }
       invalidateResults();
+      setStatus(`${pairingFileLabel(source)} 已作为 ${kind.toUpperCase()} 加入。`);
     } catch (e) {
       setError(`${fileName(path)}：${errorText(e)}`);
     } finally {
@@ -647,11 +1035,15 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     () =>
       groups
         .filter((group) => group.je)
-        .map((group) => ({ path: group.je!.path, owner: group.label })),
+        .map((group) => ({
+          id: pairingFileKey(group.je!),
+          label: pairingFileLabel(group.je!),
+          owner: group.label,
+        })),
     [groups],
   );
 
-  const runnable = groups.filter((group) => group.tb);
+  const runnable = visibleGroups;
   function invalidateResults(clearLlm = true) {
     activeJobId.current = "__inputs_changed__";
     setOutcomes([]);
@@ -664,37 +1056,46 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
-  function removeGroup(group: PairedGroup) {
+  async function removeGroup(group: PairedGroup) {
     if (
-      !window.confirm(
-        `确认移除第 ${group.label} 组？只会从本次核对中清除，不会删除原文件。`,
-      )
+      !(await confirmDialog({
+        title: "确认移除分组",
+        message: `确认移除第 ${group.label} 组？只会从本次核对中清除，不会删除原文件。`,
+        confirmLabel: "移除",
+        tone: "danger",
+      }))
     )
       return;
-    const paths = [group.tb?.path, group.je?.path].filter(Boolean) as string[];
+    const sourceKeys = [group.tb, group.je]
+      .filter(Boolean)
+      .map((file) => pairingFileKey(file!));
     setGroups((current) => current.filter((item) => item.id !== group.id));
     setInspects((current) =>
       Object.fromEntries(
-        Object.entries(current).filter(([path]) => !paths.includes(path)),
+        Object.entries(current).filter(([key]) => !sourceKeys.includes(key)),
       ),
     );
     setMappings((current) =>
       Object.fromEntries(
-        Object.entries(current).filter(([path]) => !paths.includes(path)),
+        Object.entries(current).filter(([key]) => !sourceKeys.includes(key)),
       ),
     );
     setExpanded((current) =>
       current?.groupId === group.id ? undefined : current,
     );
-    if (groups.length === 1) setCurrentStep(0);
+    clearedTbsRef.current.delete(group.id);
+    if (visibleGroups.length === 1) setCurrentStep(0);
     invalidateResults();
   }
 
-  function removeAllGroups() {
+  async function removeAllGroups() {
     if (
-      !window.confirm(
-        `确认移除全部 ${groups.length} 组？只会清空本次核对，不会删除原文件。`,
-      )
+      !(await confirmDialog({
+        title: "确认移除全部分组",
+        message: `确认移除全部 ${visibleGroups.length} 组？只会清空本次核对，不会删除原文件。`,
+        confirmLabel: "移除",
+        tone: "danger",
+      }))
     )
       return;
     setGroups([]);
@@ -703,13 +1104,16 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     setExpanded(undefined);
     setLlmReviews({});
     setLlmReviewStatus("");
+    clearedTbsRef.current.clear();
     setStatus("");
     setCurrentStep(0);
     invalidateResults();
   }
 
-  function selectJe(groupId: string, path?: string) {
-    setGroups((current) => reassignJe(current, groupId, path));
+  function selectJe(groupId: string, sourceId?: string) {
+    setGroups((current) => reassignJe(current, groupId, sourceId));
+    if (sourceId) clearedTbsRef.current.delete(groupId);
+    else clearedTbsRef.current.add(groupId);
     setExpanded(undefined);
     invalidateResults();
   }
@@ -721,13 +1125,14 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const reviewTargetsOf = (group: PairedGroup) => {
     const target = (kind: LedgerKind, file?: PairingFile) => {
       if (!file) return undefined;
-      const inspection = inspects[file.path];
+      const key = pairingFileKey(file);
+      const inspection = inspects[key];
       if (!inspection) return undefined;
       return {
         headers: inspection.headers,
         preview: inspection.preview ?? [],
         mapping: Object.fromEntries(
-          Object.entries(mappings[file.path] ?? {}).filter(
+          Object.entries(mappings[key] ?? {}).filter(
             ([, value]) => typeof value === "string" || Array.isArray(value),
           ),
         ) as Record<string, string | string[]>,
@@ -737,6 +1142,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         ),
         tool: "tbje_check",
         pairLabel: group.label,
+        multiColumnRoles: MULTI_COLUMN_ROLES,
       };
     };
     return { tb: target("tb", group.tb), je: target("je", group.je) };
@@ -744,7 +1150,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
 
   /** 页面级一键复核：每组一次真正的 TB＋JE 联合请求，最多并发两组。 */
   async function reviewAllGroups() {
-    const candidates = groups.filter((group) => {
+    const candidates = visibleGroups.filter((group) => {
       const targets = reviewTargetsOf(group);
       return targets.tb || targets.je;
     });
@@ -769,9 +1175,9 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         setMappings((current) => {
           const next = { ...current };
           if (group.tb && result.tb && !result.tb.failed)
-            next[group.tb.path] = result.tb.mapping;
+            next[pairingFileKey(group.tb)] = result.tb.mapping;
           if (group.je && result.je && !result.je.failed)
-            next[group.je.path] = result.je.mapping;
+            next[pairingFileKey(group.je)] = result.je.mapping;
           return next;
         });
         completed += 1;
@@ -811,7 +1217,10 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         ? [...change.beforeValue]
         : change.beforeValue;
     const applied = outcome.applied.filter((_, at) => at !== index);
-    setMappings((current) => ({ ...current, [file.path]: mapping }));
+    setMappings((current) => ({
+      ...current,
+      [pairingFileKey(file)]: mapping,
+    }));
     setLlmReviews((current) => ({
       ...current,
       [group.id]: {
@@ -833,7 +1242,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     if (!file || !outcome || !change) return;
     const mapping = { ...outcome.mapping };
     const beforeValue = mapping[change.role];
-    mapping[change.role] = LEDGER_MULTI_COLUMN_ROLES.has(change.role)
+    mapping[change.role] = MULTI_COLUMN_ROLES.has(change.role)
       ? [
           ...new Set([
             ...(Array.isArray(beforeValue)
@@ -859,7 +1268,10 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         attention: true,
       },
     ];
-    setMappings((current) => ({ ...current, [file.path]: mapping }));
+    setMappings((current) => ({
+      ...current,
+      [pairingFileKey(file)]: mapping,
+    }));
     setLlmReviews((current) => ({
       ...current,
       [group.id]: {
@@ -879,7 +1291,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   function paramsOf(group: PairedGroup) {
     const source = (file?: PairingFile) => {
       if (!file) return undefined;
-      const inspected = inspects[file.path];
+      const inspected = inspects[pairingFileKey(file)];
       if (!inspected) return undefined;
       return {
         inputPath: file.path,
@@ -891,12 +1303,12 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     const params: Record<string, unknown> = {
       label: group.label,
       tbSource: source(group.tb),
-      tbMapping: mappings[group.tb!.path] ?? {},
+      tbMapping: mappings[pairingFileKey(group.tb!)] ?? {},
     };
     const je = source(group.je);
     if (je) {
       params.jeSource = je;
-      params.jeMapping = mappings[group.je!.path] ?? {};
+      params.jeMapping = mappings[pairingFileKey(group.je!)] ?? {};
     }
     return params;
   }
@@ -971,6 +1383,9 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       const alignedGroups: Record<string, unknown>[] = [];
       const correctedMappings: Record<string, Mapping> = {};
       const alignmentWarnings: string[] = [];
+      // 对齐失败的组要指名道姓地报出来，并且只跳过该组——
+      // 其余组照常核对，不能一组映射问题拖住整批。
+      const alignmentFailures: string[] = [];
       for (const group of runnable) {
         const groupParams = paramsOf(group);
         if (group.je) {
@@ -987,23 +1402,26 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
             };
           };
           if (alignment.aligned === false) {
-            throw new Error(
-              alignment.errors?.[0] ?? "TB与JE的科目字段无法对齐。",
+            alignmentFailures.push(
+              `「${group.label}」组（${group.tb ? fileName(group.tb.path) : "无余额表"} × ${fileName(group.je.path)}）：${alignment.errors?.join("；") || "TB与JE的科目字段无法对齐。"}`,
             );
+            continue;
           }
           if (alignment.fix?.tbMapping && group.tb) {
             groupParams.tbMapping = {
               ...(groupParams.tbMapping as Mapping),
               ...alignment.fix.tbMapping,
             };
-            correctedMappings[group.tb.path] = groupParams.tbMapping as Mapping;
+            correctedMappings[pairingFileKey(group.tb)] =
+              groupParams.tbMapping as Mapping;
           }
           if (alignment.fix?.jeMapping) {
             groupParams.jeMapping = {
               ...(groupParams.jeMapping as Mapping),
               ...alignment.fix.jeMapping,
             };
-            correctedMappings[group.je.path] = groupParams.jeMapping as Mapping;
+            correctedMappings[pairingFileKey(group.je)] =
+              groupParams.jeMapping as Mapping;
           }
           alignmentWarnings.push(...(alignment.warnings ?? []));
         }
@@ -1012,7 +1430,16 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       if (Object.keys(correctedMappings).length) {
         setMappings((current) => ({ ...current, ...correctedMappings }));
       }
+      if (alignmentFailures.length) {
+        setError(
+          `有 ${alignmentFailures.length} 组因科目字段无法对齐已跳过，其余组继续核对：\n${alignmentFailures.join("\n")}`,
+        );
+      }
       if (alignmentWarnings.length) setStatus(alignmentWarnings[0]);
+      if (!alignedGroups.length) {
+        setBusy(false);
+        return;
+      }
       const id = await jobStart("tbje_check.run_batch", {
         groups: alignedGroups,
       });
@@ -1029,6 +1456,16 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
+  const resultReviewCount = outcomes.filter(
+    (outcome) =>
+      !outcome.ok ||
+      [
+        outcome.result?.rollforward,
+        outcome.result?.tbVsJe,
+        outcome.result?.equation,
+      ].some((verdict) => !verdict?.performed || verdict.passed !== true),
+  ).length;
+
   return (
     <main className="tool-page fx-page tbje-page">
       <PageHeader
@@ -1039,7 +1476,11 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       <StepIndicator
         steps={[
           { key: "files", label: "添加文件" },
-          { key: "pairing", label: "确认配对", disabled: groups.length === 0 },
+          {
+            key: "pairing",
+            label: "确认配对",
+            disabled: visibleGroups.length === 0,
+          },
           {
             key: "results",
             label: "查看结果",
@@ -1072,7 +1513,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                 </h2>
               </CardTitle>
               <CardDescription>
-                把多组科目余额表和序时账一起加入。系统先识别文件类型，再按文件名与主体信息自动配对。
+                把多组科目余额表和序时账一起加入。系统逐 Sheet 识别类型，优先配对同一工作簿，再按文件名与主体信息配对。
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -1086,8 +1527,28 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   highlight={dropActive}
                 />
               </div>
+              <div className="tbje-manual-entry">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={busy}
+                  onClick={() => void pickManualSource("tb")}
+                >
+                  <Plus aria-hidden="true" />
+                  手动添加配对组
+                </Button>
+                <span>先选择 TB Excel；进入配对组后可再选择 JE Excel 和两侧 Sheet。</span>
+              </div>
+              {visibleGroups.length === 0 && (
+                <EmptyState
+                  compact
+                  title="准备核对资料"
+                  description="加入至少一份科目余额表（TB）；如需发生额勾稽，再加入对应的序时账（JE）。支持一次拖入多组文件。"
+                />
+              )}
               {status && (
                 <p className="tbje-status" role="status" aria-live="polite">
+                  <i aria-hidden="true" />
                   {status}
                 </p>
               )}
@@ -1096,7 +1557,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         </section>
       )}
 
-      {currentStep === 1 && groups.length > 0 && (
+      {currentStep === 1 && visibleGroups.length > 0 && (
         <section
           ref={pairingSectionRef}
           className="tbje-section"
@@ -1108,30 +1569,39 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                 <h2 id="tbje-pairing-title" className="tbje-section-title">
                   2. 确认配对与字段{" "}
                   <span className="tbje-count">
-                    {groups.length} 组
-                    {groups.some((group) => group.needsReview) &&
-                      ` · ${groups.filter((g) => g.needsReview).length} 组待确认`}
+                    {visibleGroups.length} 组
+                    {visibleGroups.some((group) => group.needsReview) &&
+                      ` · ${visibleGroups.filter((g) => g.needsReview).length} 组待确认`}
                   </span>
                 </h2>
               </CardTitle>
               <CardDescription>
-                配对仅依据文件名和识别出的主体信息；待确认项目需要在核对前人工检查。
+                只展示已找到 TB 的配对组；未配上的 JE 会保留为可选来源，不单独占一行。也可手工选择两侧 Excel 与 Sheet。
               </CardDescription>
               <div className="tbje-llm-action">
                 <Button
                   type="button"
                   variant="secondary"
-                  disabled={busy || !groups.length}
+                  disabled={busy}
+                  onClick={() => void pickManualSource("tb")}
+                >
+                  <Plus aria-hidden="true" />
+                  手动添加配对组
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={busy || !visibleGroups.length}
                   onClick={() => void reviewAllGroups()}
                 >
                   {llmReviewBusy
                     ? "LLM 联合复核中…"
-                    : `LLM 一键联合复核 ${groups.length} 组`}
+                    : `LLM 一键联合复核 ${visibleGroups.length} 组`}
                 </Button>
                 <Button
                   type="button"
                   variant="ghost"
-                  disabled={busy || !groups.length}
+                  disabled={busy || !visibleGroups.length}
                   className="tbje-remove-all"
                   onClick={removeAllGroups}
                 >
@@ -1139,45 +1609,57 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   移除全部
                 </Button>
                 {llmReviewStatus && (
-                  <span aria-live="polite">{llmReviewStatus}</span>
+                  <span className="tbje-llm-status" aria-live="polite">
+                    {llmReviewStatus}
+                  </span>
                 )}
               </div>
             </CardHeader>
             <CardContent>
               <div className="tbje-pairing-list">
-                <div className="tbje-pairing-head" aria-hidden="true">
-                  <span>配对组</span>
-                  <span>科目余额表 TB</span>
-                  <span>序时账 JE</span>
-                  <span>映射与操作</span>
-                </div>
-                {groups.map((group) => (
+                {visibleGroups.map((group) => (
                   <div
                     key={group.id}
                     className={`tbje-group${group.needsReview ? " tbje-group-review" : ""}`}
+                    data-ui-state={
+                      expanded?.groupId === group.id
+                        ? "expanded"
+                        : reviewStatusOf(group).attention
+                            ? "attention"
+                            : llmReviews[group.id]
+                              ? "reviewed"
+                              : "ready"
+                    }
                   >
                     <div className="tbje-group-row">
                       <div className="tbje-group-identity">
-                        <strong>第 {group.label} 组</strong>
+                        <strong title={`第 ${group.label} 组`}>
+                          第 {group.label} 组
+                        </strong>
                         <span
-                          className={`tbje-pair-status${group.needsReview ? " review" : ""}`}
+                          className={`tbje-pair-status${reviewStatusOf(group).attention ? " review" : ""}`}
                         >
                           <i aria-hidden="true" />
-                          {group.needsReview ? "待确认" : "已识别"}
+                          {reviewStatusOf(group).label}
                         </span>
                       </div>
                       <div className="tbje-file-cell">
+                        <h3 className="sr-only">科目余额表 TB</h3>
                         <div className="tbje-file-line">
                           <span className="tbje-kind-tag">TB</span>
-                          <span className="tbje-group-file">
-                            {group.tb
-                              ? fileName(group.tb.path)
-                              : "（缺科目余额表）"}
-                          </span>
+                          <button
+                            type="button"
+                            className="tbje-group-file tbje-file-name-button"
+                            title={`${group.tb?.path}（点击更换）`}
+                            disabled={busy}
+                            onClick={() => void pickManualSource("tb", group.id)}
+                          >
+                            {fileName(group.tb!.path)}
+                          </button>
                         </div>
                         {group.tb &&
                           (() => {
-                            const inspected = inspects[group.tb.path];
+                            const inspected = inspects[pairingFileKey(group.tb)];
                             if (!inspected) return null;
                             const sheets = inspected.sheets ?? [];
                             return (
@@ -1190,7 +1672,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                     disabled={busy}
                                     onChange={(event) =>
                                       void switchSheet(
-                                        group.tb!.path,
+                                        group.tb!,
                                         "tb",
                                         event.target.value,
                                       )
@@ -1210,36 +1692,98 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                               </label>
                             );
                           })()}
-                      </div>
-                      <div className="tbje-file-cell">
-                        <div className="tbje-file-line">
-                          <span className="tbje-kind-tag je">JE</span>
-                          <select
-                            className="tbje-je-select"
-                            aria-label={`为第 ${group.label} 组选择序时账`}
-                            value={group.je?.path ?? ""}
-                            disabled={busy}
-                            onChange={(event) =>
-                              selectJe(
-                                group.id,
-                                event.target.value || undefined,
+                        {missingOf("tb", group.tb).length > 0 && (
+                          <button
+                            type="button"
+                            className="tbje-mapping-warning"
+                            title={`TB 缺少必填映射：${missingOf("tb", group.tb).join("、")}`}
+                            onClick={() =>
+                              setExpanded({ groupId: group.id, kind: "tb" })
+                            }
+                          >
+                            TB 缺少 {missingOf("tb", group.tb).length} 项必填映射：
+                            {missingOf("tb", group.tb).slice(0, 2).join("、")}
+                            {missingOf("tb", group.tb).length > 2 ? "…" : ""}
+                          </button>
+                        )}
+                        <div className="tbje-source-actions">
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            disabled={busy || !group.tb}
+                            aria-label={
+                              expanded?.groupId === group.id &&
+                              expanded.kind === "tb"
+                                ? "收起 TB 映射"
+                                : "查看并调整 TB 映射"
+                            }
+                            aria-expanded={
+                              expanded?.groupId === group.id &&
+                              expanded.kind === "tb"
+                            }
+                            aria-controls={`tbje-mapping-${group.id}-tb`}
+                            onClick={() =>
+                              setExpanded(
+                                expanded?.groupId === group.id &&
+                                  expanded.kind === "tb"
+                                  ? undefined
+                                  : { groupId: group.id, kind: "tb" },
                               )
                             }
                           >
+                            <Eye aria-hidden="true" />
+                            {expanded?.groupId === group.id &&
+                            expanded.kind === "tb"
+                              ? "收起字段映射"
+                              : "查看字段映射"}
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="tbje-file-cell">
+                        <h3 className="sr-only">序时账 JE</h3>
+                        <div className="tbje-file-line">
+                          <span className="tbje-kind-tag je">JE</span>
+                          <button
+                            type="button"
+                            className="tbje-group-file tbje-file-name-button"
+                            title={
+                              group.je
+                                ? `${group.je.path}（点击更换）`
+                                : "选择 JE Excel"
+                            }
+                            disabled={busy}
+                            onClick={() => void pickManualSource("je", group.id)}
+                          >
+                            {group.je ? fileName(group.je.path) : "选择 JE Excel"}
+                          </button>
+                        </div>
+                        <select
+                          className="tbje-je-select"
+                          title={group.je?.path}
+                          aria-label={`为第 ${group.label} 组选择序时账`}
+                          value={group.je ? pairingFileKey(group.je) : ""}
+                          disabled={busy}
+                          onChange={(event) =>
+                            selectJe(
+                              group.id,
+                              event.target.value || undefined,
+                            )
+                          }
+                        >
                             <option value="">（不配对序时账）</option>
                             {unusedJe.map((item) => (
-                              <option key={item.path} value={item.path}>
-                                {fileName(item.path)}
-                                {item.path === group.je?.path
+                              <option key={item.id} value={item.id}>
+                                {item.label}
+                                {item.id === (group.je ? pairingFileKey(group.je) : "")
                                   ? ""
                                   : ` · 现属第 ${item.owner} 组`}
                               </option>
                             ))}
-                          </select>
-                        </div>
+                        </select>
                         {group.je &&
                           (() => {
-                            const inspected = inspects[group.je.path];
+                            const inspected = inspects[pairingFileKey(group.je)];
                             if (!inspected) return null;
                             const sheets = inspected.sheets ?? [];
                             return (
@@ -1252,7 +1796,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                     disabled={busy}
                                     onChange={(event) =>
                                       void switchSheet(
-                                        group.je!.path,
+                                        group.je!,
                                         "je",
                                         event.target.value,
                                       )
@@ -1272,34 +1816,55 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                               </label>
                             );
                           })()}
+                        {group.je && missingOf("je", group.je).length > 0 && (
+                          <button
+                            type="button"
+                            className="tbje-mapping-warning"
+                            title={`JE 缺少必填映射：${missingOf("je", group.je).join("、")}`}
+                            onClick={() =>
+                              setExpanded({ groupId: group.id, kind: "je" })
+                            }
+                          >
+                            JE 缺少 {missingOf("je", group.je).length} 项必填映射：
+                            {missingOf("je", group.je).slice(0, 2).join("、")}
+                            {missingOf("je", group.je).length > 2 ? "…" : ""}
+                          </button>
+                        )}
+                        <div className="tbje-source-actions">
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            disabled={busy || !group.je}
+                            aria-label={
+                              expanded?.groupId === group.id &&
+                              expanded.kind === "je"
+                                ? "收起 JE 映射"
+                                : "查看并调整 JE 映射"
+                            }
+                            aria-expanded={
+                              expanded?.groupId === group.id &&
+                              expanded.kind === "je"
+                            }
+                            aria-controls={`tbje-mapping-${group.id}-je`}
+                            onClick={() =>
+                              setExpanded(
+                                expanded?.groupId === group.id &&
+                                  expanded.kind === "je"
+                                  ? undefined
+                                  : { groupId: group.id, kind: "je" },
+                              )
+                            }
+                          >
+                            <Eye aria-hidden="true" />
+                            {expanded?.groupId === group.id &&
+                            expanded.kind === "je"
+                              ? "收起字段映射"
+                              : "查看字段映射"}
+                          </Button>
+                        </div>
                       </div>
                       <div className="tbje-group-buttons">
-                        {(["tb", "je"] as LedgerKind[]).map((kind) => {
-                          const active =
-                            expanded?.groupId === group.id &&
-                            expanded.kind === kind;
-                          const available = kind === "tb" ? group.tb : group.je;
-                          return (
-                            <Button
-                              key={kind}
-                              type="button"
-                              variant={active ? "secondary" : "ghost"}
-                              size="sm"
-                              disabled={busy || !available}
-                              aria-expanded={active}
-                              aria-controls={`tbje-mapping-${group.id}-${kind}`}
-                              onClick={() =>
-                                setExpanded(
-                                  active
-                                    ? undefined
-                                    : { groupId: group.id, kind },
-                                )
-                              }
-                            >
-                              {active ? "收起" : `${kind.toUpperCase()} 映射`}
-                            </Button>
-                          );
-                        })}
                         <Button
                           type="button"
                           variant="ghost"
@@ -1327,6 +1892,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                             (review[kind]?.applied.length ?? 0) > 0 ||
                             (review[kind]?.pending.length ?? 0) > 0,
                         );
+                        if (!failed && !changed) return null;
                         return (
                           <div
                             className="tbje-group-llm-result"
@@ -1364,16 +1930,35 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                           if (!file) return null;
                           return (
                             <LedgerMappingPanel
-                              key={file.path}
+                              key={pairingFileKey(file)}
                               kind={file.kind}
-                              inspection={inspects[file.path]}
+                              inspection={inspects[pairingFileKey(file)]}
+                              forms={expanded.kind === "tb" ? tbForms : jeForms}
                               mapping={
-                                (mappings[file.path] ?? {}) as MappingDict
+                                (mappings[pairingFileKey(file)] ?? {}) as MappingDict
+                              }
+                              disabled={busy}
+                              onHeaderChange={(row, depth) =>
+                                void switchSheet(
+                                  file,
+                                  file.kind,
+                                  inspects[pairingFileKey(file)]?.sheet ??
+                                    file.sheet ??
+                                    "",
+                                  row,
+                                  depth,
+                                )
+                              }
+                              onKindChange={() =>
+                                void changeSourceKind(
+                                  file,
+                                  file.kind === "tb" ? "je" : "tb",
+                                )
                               }
                               onChange={(next) => {
                                 setMappings((current) => ({
                                   ...current,
-                                  [file.path]: next,
+                                  [pairingFileKey(file)]: next,
                                 }));
                                 invalidateResults();
                               }}
@@ -1415,10 +2000,23 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
             </CardHeader>
             <CardContent>
               <div className="tbje-result-toolbar">
-                <span className="fx-hint">
-                  已完成 {outcomes.filter((outcome) => outcome.ok).length} 组；
-                  可逐组预览，或一次导出全部成功结果。
-                </span>
+                <div className="tbje-result-overview" role="status">
+                  <Badge
+                    variant="outline"
+                    className={
+                      resultReviewCount ? "badge-warning" : "badge-ready"
+                    }
+                  >
+                    {resultReviewCount
+                      ? `${resultReviewCount} 组需复核`
+                      : "全部核对通过"}
+                  </Badge>
+                  <span className="fx-hint">
+                    {resultReviewCount
+                      ? "先预览异常组并检查字段映射，确认后再导出底稿。"
+                      : "未发现异常，可逐组预览或一次导出全部结果。"}
+                  </span>
+                </div>
                 <Button
                   type="button"
                   variant="outline"
@@ -1564,7 +2162,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
               </div>
               {exported && (
                 <div className="tbje-exported" role="status" aria-live="polite">
-                  <span>
+                  <span title={exported.path}>
                     {exported.batch ? "全部结果已导出至：" : "明细已导出："}
                     {fileName(exported.path)}
                   </span>
@@ -1601,6 +2199,10 @@ function LedgerMappingPanel(props: {
   kind: LedgerKind;
   inspection?: Inspection;
   mapping: MappingDict;
+  forms: LedgerForm[];
+  disabled?: boolean;
+  onHeaderChange?: (row: number, depth: number) => void;
+  onKindChange?: () => void;
   onChange: (next: MappingDict) => void;
 }) {
   // 标签优先取引擎随识别结果下发的 roles（deposit.inspect_* 响应），
@@ -1610,9 +2212,8 @@ function LedgerMappingPanel(props: {
     props.kind === "tb" ? TB_LABELS : JE_LABELS,
   );
   const roles = Object.entries(labels) as [string, string][];
-  const forms = useLedgerForms(props.kind);
-  const match = forms.length
-    ? resolveForm(props.kind, forms, props.mapping)
+  const match = props.forms.length
+    ? resolveForm(props.kind, props.forms, props.mapping)
     : undefined;
   if (!props.inspection) return null;
   return (
@@ -1622,10 +2223,57 @@ function LedgerMappingPanel(props: {
       rows={props.inspection.preview ?? []}
       mapping={props.mapping}
       roles={roles}
-      groups={formGroups(props.kind, roles, forms, props.mapping)}
+      groups={formGroups(props.kind, roles, props.forms, props.mapping)}
       requirementOf={(role) => roleRequirement(match, role)}
       formNote={describeForm(match, (role) => labels[role] ?? role)}
       multi={MULTI_COLUMN_ROLES}
+      busy={props.disabled}
+      toolbar={
+        props.onHeaderChange ? (
+          <>
+            <label>
+              标题行
+              <input
+                type="number"
+                min={1}
+                value={props.inspection.headerRow}
+                disabled={props.disabled}
+                onChange={(event) =>
+                  props.onHeaderChange?.(
+                    Number(event.target.value),
+                    props.inspection!.headerDepth,
+                  )
+                }
+              />
+            </label>
+            <label>
+              表头层数
+              <select
+                value={props.inspection.headerDepth}
+                disabled={props.disabled}
+                onChange={(event) =>
+                  props.onHeaderChange?.(
+                    props.inspection!.headerRow,
+                    Number(event.target.value),
+                  )
+                }
+              >
+                <option value={1}>1层</option>
+                <option value={2}>2层</option>
+              </select>
+            </label>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={props.disabled}
+              onClick={props.onKindChange}
+            >
+              更正为 {props.kind === "tb" ? "JE" : "TB"}
+            </Button>
+          </>
+        ) : undefined
+      }
       onChange={props.onChange}
     />
   );

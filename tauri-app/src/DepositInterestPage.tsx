@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { ToolManifest, JobEvent } from "./types";
+import { useTaskRestore } from "./restore";
 import {
   engineCall,
   jobCancel,
@@ -16,17 +17,25 @@ import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StepIndicator } from "@/components/StepIndicator";
+import { JargonTip } from "@/components/JargonTip";
+import { EmptyState } from "@/components/EmptyState";
+import { Badge } from "@/components/ui/badge";
 import { NumberInput } from "@/components/NumberInput";
+import { displayFileName } from "@/fileDisplay";
 import {
+  correctLedgerSourceKinds,
   missingGoldIdentity,
-  resolveLedgerPairKinds,
   resolveRoleLabels,
-  reviewLedgerSourceClassification,
+  scanLedgerUploadSources,
+  selectLedgerSourcePair,
   type EngineRoleLabels,
+  type LedgerWorkbookSheetClassification,
 } from "@/ledgerMapping";
 import { MappingPanel } from "@/components/MappingPanel";
+import { BusySpinner } from "@/components/BusySpinner";
 import {
   describeForm,
   formGroups,
@@ -49,7 +58,6 @@ import "./fx-audit.css";
 import "./deposit-interest.css";
 
 type Kind = "je" | "tb";
-type DayBasis = "month12" | "actual360" | "actual365";
 export type Inspection = {
   headers: string[];
   sheet: string;
@@ -80,17 +88,7 @@ export type Inspection = {
   dataYears: number[];
   suggestedBalanceSheetDate?: string;
 };
-type SourceClassification = {
-  kind: Kind;
-  confidence: number;
-  needsLlm: boolean;
-  scores: { je: number; tb: number };
-  headers: string[];
-  preview: string[][];
-  sheet: string;
-  headerRow: number;
-  headerDepth: number;
-};
+type SourceClassification = LedgerWorkbookSheetClassification;
 type RateTier = {
   key: string;
   category: string;
@@ -214,11 +212,34 @@ const ROLE_OPTIONS: Array<[string, string]> = [
   ["interest_income", "利息收入（勾稽基准）"],
   ["excluded", "不参与测算"],
 ];
-const DAY_BASIS_OPTIONS: Array<[DayBasis, string]> = [
-  ["month12", "年利率÷12（按月平均）"],
-  ["actual360", "实际天数÷360（银行计息惯例）"],
-  ["actual365", "实际天数÷365"],
-];
+
+/** 提科目编码：与引擎同口径——首 token 是足位数数字串才算编码，
+ *  用来把 TB 的「编码＋名称」与 JE 的「名称＋编码」两种拼法归并成一条。 */
+export function depositAccountCode(account: string): string {
+  const token = account.split(/\s+/).find((t) => {
+    const digits = (t.match(/\d/g) ?? []).length;
+    return digits >= 3 && digits * 2 >= t.length && /^\d/.test(t);
+  });
+  return token ?? account.trim();
+}
+
+/** 科目分类清单：TB 与 JE 的同一科目按编码去重（TB 拼法优先保留），
+ *  排序把已映射为计息科目/利息收入的排在前面，excluded 沉底——
+ *  用户要核对的正是参与测算的那批科目。 */
+export function mergeAccountList(
+  tbAccounts: string[],
+  jeAccounts: string[],
+): string[] {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const account of [...tbAccounts, ...jeAccounts]) {
+    const code = depositAccountCode(account);
+    if (seen.has(code)) continue;
+    seen.add(code);
+    merged.push(account);
+  }
+  return merged;
+}
 
 /** 上传的 TB 至少要能取出年初和年末余额；序时账只在提供时才校验。 */
 /**
@@ -428,7 +449,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   >({});
   const [accountFilter, setAccountFilter] = useState("");
   const [reportEnd, setReportEnd] = useState("");
-  const [dayBasis, setDayBasis] = useState<DayBasis>("month12");
   const [tiers, setTiers] = useState<RateTiers>();
   const [tierRates, setTierRates] = useState<Record<string, number>>({});
   const [rows, setRows] = useState<AccountRow[]>([]);
@@ -454,7 +474,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const reviewingAny = reviews.reviewing.tb || reviews.reviewing.je;
 
   const accounts = useMemo(
-    () => [...new Set([...(tb?.accounts ?? []), ...(je?.accounts ?? [])])],
+    () => mergeAccountList(tb?.accounts ?? [], je?.accounts ?? []),
     [je, tb],
   );
   const depositAccounts = accounts.filter((a) =>
@@ -470,7 +490,15 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     () => keywordFilterPredicate(accountFilter),
     [accountFilter],
   );
-  const visibleAccounts = accounts.filter((account) => accountMatches(account));
+  // 已映射为计息科目/利息收入的排前面，excluded 与未分类沉底；
+  // 排序稳定，同组内保持账表原顺序。
+  const activeAccount = (account: string) => {
+    const role = accountRoles[account] ?? "";
+    return role !== "" && role !== "excluded";
+  };
+  const visibleAccounts = accounts
+    .filter((account) => accountMatches(account))
+    .sort((a, b) => Number(activeAccount(b)) - Number(activeAccount(a)));
 
   useEffect(() => {
     void engineCall("deposit.rate_tiers", {})
@@ -490,6 +518,109 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       ),
     );
   }, [accounts, je, tb, accountRoleOverrides]);
+
+  // 历史记录「继续任务」：回填两表路径/基准日/映射与分层利率、逐户改价。
+  // Sheet 等识别信息以存档参数重建最小 Inspection，不点「重新识别」也能直接
+  // 测算；存档的最终科目分类整体写入 overrides，预填 effect 会原样采纳。
+  // restoredDepositRef：用户重新识别同一文件时，applyInspection 默认套用
+  // 建议映射并清空分类覆盖——这里把存档值顶回，逐侧一次性消费。
+  const restoredDepositRef = useRef<{
+    sides: {
+      je?: { path: string; mapping: Record<string, string | string[]> };
+      tb?: { path: string; mapping: Record<string, string | string[]> };
+    };
+    accountRoleOverrides?: Record<string, string>;
+  } | null>(null);
+  useTaskRestore(tool.id, (restore) => {
+    type DepositSourceParams = {
+      inputPath?: string;
+      sheet?: string;
+      headerRow?: number;
+      headerDepth?: number;
+    };
+    const p = restore.params as {
+      reportEnd?: string;
+      tbSource?: DepositSourceParams;
+      jeSource?: DepositSourceParams;
+      tbMapping?: Record<string, string | string[]>;
+      jeMapping?: Record<string, string | string[]>;
+      accountRoles?: Record<string, string>;
+      accountTierOverrides?: Record<string, string>;
+      rateOverrides?: Record<string, { tier?: string; annualRate?: number }>;
+      tierRates?: Record<string, number>;
+      outputPath?: string;
+    };
+    const restoredJePath =
+      typeof p.jeSource?.inputPath === "string" ? p.jeSource.inputPath : "";
+    const restoredTbPath =
+      typeof p.tbSource?.inputPath === "string" ? p.tbSource.inputPath : "";
+    if (!restoredJePath && !restoredTbPath) return;
+    const accountList = [
+      ...new Set([
+        ...Object.keys(p.accountRoles ?? {}),
+        ...Object.keys(p.accountTierOverrides ?? {}),
+        ...Object.keys(p.rateOverrides ?? {}),
+      ]),
+    ];
+    const minimalInspection = (src: DepositSourceParams): Inspection =>
+      ({
+        sheet: src.sheet ?? "",
+        headerRow: src.headerRow ?? 0,
+        headerDepth: src.headerDepth ?? 0,
+        accounts: accountList,
+      }) as Inspection;
+    const isMapping = (value: unknown): value is Record<string, string | string[]> =>
+      Boolean(value && typeof value === "object");
+    restoredDepositRef.current = {
+      sides: {
+        ...(restoredJePath && isMapping(p.jeMapping)
+          ? { je: { path: restoredJePath, mapping: p.jeMapping } }
+          : {}),
+        ...(restoredTbPath && isMapping(p.tbMapping)
+          ? { tb: { path: restoredTbPath, mapping: p.tbMapping } }
+          : {}),
+      },
+      ...(isMapping(p.accountRoles)
+        ? { accountRoleOverrides: p.accountRoles }
+        : {}),
+    };
+    setJePath(restoredJePath);
+    setTbPath(restoredTbPath);
+    setJe(restoredJePath ? minimalInspection(p.jeSource!) : undefined);
+    setTb(restoredTbPath ? minimalInspection(p.tbSource!) : undefined);
+    if (typeof p.reportEnd === "string" && p.reportEnd)
+      setReportEnd(p.reportEnd);
+    setJeMapping(
+      p.jeMapping && typeof p.jeMapping === "object" ? p.jeMapping : {},
+    );
+    setTbMapping(
+      p.tbMapping && typeof p.tbMapping === "object" ? p.tbMapping : {},
+    );
+    setAccountRoleOverrides(
+      p.accountRoles && typeof p.accountRoles === "object"
+        ? p.accountRoles
+        : {},
+    );
+    setAccountTierOverrides(
+      p.accountTierOverrides && typeof p.accountTierOverrides === "object"
+        ? p.accountTierOverrides
+        : {},
+    );
+    setRateOverrides(
+      p.rateOverrides && typeof p.rateOverrides === "object"
+        ? p.rateOverrides
+        : {},
+    );
+    if (p.tierRates && typeof p.tierRates === "object")
+      setTierRates(p.tierRates);
+    setOutputPath(typeof p.outputPath === "string" ? p.outputPath : "");
+    setStep(2);
+    setBusy(false);
+    setError("");
+    setResult(undefined);
+    setRows([]);
+    setJob(undefined);
+  });
   useEffect(() => {
     const drops = listenPositionedFileDrops(({ paths, x, y }) => {
       if (
@@ -564,62 +695,39 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     setStep(0);
     setBusy(true);
     setError("");
-    setSourceStatus("正在识别文件类型、表头和字段…");
+    setSourceStatus("正在识别文件…");
     const failures: string[] = [];
-    let llmFallbacks = 0;
     try {
-      const classifiedFiles: Array<{
-        path: string;
-        classification: SourceClassification;
-      }> = [];
-      for (const path of files) {
-        try {
-          const scripted = (await engineCall("deposit.classify_source", {
-            source: {
-              inputPath: path,
-              sheet: "",
-              headerRow: 0,
-              headerDepth: 0,
-            },
-          })) as SourceClassification;
-          const reviewed = await reviewLedgerSourceClassification(
-            engineCall,
-            "deposit.classify_source_llm",
-            path,
-            scripted,
-          );
-          if (!reviewed.reviewed) llmFallbacks += 1;
-          classifiedFiles.push({
-            path,
-            classification: reviewed.classification,
-          });
-        } catch (e) {
-          failures.push(`${fileName(path)}：${errorText(e)}`);
-        }
-      }
-      const resolvedKinds = resolveLedgerPairKinds(
-        classifiedFiles.map((item) => item.classification),
+      const scan = await scanLedgerUploadSources<SourceClassification>(
+        engineCall,
+        files,
+        { llmMethod: "deposit.classify_source_llm" },
       );
-      for (const [index, item] of classifiedFiles.entries()) {
+      failures.push(
+        ...scan.failures.map(
+          (failure) => `${fileName(failure.path)}：${errorText(failure.error)}`,
+        ),
+      );
+      const selected = selectLedgerSourcePair(scan.sources);
+      for (const item of selected) {
         try {
-          const kind = resolvedKinds[index];
-          const response = (await engineCall(`deposit.inspect_${kind}`, {
+          const response = (await engineCall(`deposit.inspect_${item.kind}`, {
             source: {
               inputPath: item.path,
               sheet: item.classification.sheet,
-              headerRow: item.classification.headerRow,
-              headerDepth: item.classification.headerDepth,
+              headerRow: 0,
+              headerDepth: 0,
             },
           })) as Inspection;
-          applyInspection(kind, item.path, response);
+          applyInspection(item.kind, item.path, response);
         } catch (e) {
           failures.push(`${fileName(item.path)}：${errorText(e)}`);
         }
       }
       setSourceStatus(
-        llmFallbacks
-          ? `${classifiedFiles.length} 个文件已识别；LLM 复核不可用的文件已保留脚本结果，JE 与 TB 已按固定槽位分配。`
-          : `${classifiedFiles.length} 个文件已完成脚本识别与存款利息专用 LLM 复核；JE 与 TB 已按固定槽位分配。`,
+        scan.hiddenSheets
+          ? `${selected.length} 个账表来源已识别；${scan.hiddenSheets} 张低置信度 Sheet 已忽略。`
+          : "",
       );
       if (failures.length) setError(failures.join("；"));
     } finally {
@@ -627,7 +735,20 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     }
   }
   function applyInspection(kind: Kind, path: string, response: Inspection) {
-    setAccountRoleOverrides({});
+    // 历史恢复后重新识别同一文件：用存档映射与科目分类顶回建议值，
+    // 逐侧一次性消费；换文件照旧用建议值。
+    const stash = restoredDepositRef.current;
+    const side = stash?.sides[kind];
+    const samePath = (a: string, b: string) =>
+      a.trim().toLowerCase() === b.trim().toLowerCase();
+    const match = side && samePath(side.path, path) ? side : undefined;
+    if (match && stash) {
+      delete stash.sides[kind];
+      if (!stash.sides.je && !stash.sides.tb) restoredDepositRef.current = null;
+    }
+    setAccountRoleOverrides(
+      match ? (stash?.accountRoleOverrides ?? {}) : {},
+    );
     if (response.suggestedBalanceSheetDate)
       setReportEnd(response.suggestedBalanceSheetDate);
     else if (response.dataYears?.length === 1)
@@ -635,11 +756,11 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     if (kind === "je") {
       setJePath(path);
       setJe(response);
-      setJeMapping(response.suggestedMapping);
+      setJeMapping(match ? match.mapping : (response.suggestedMapping ?? {}));
     } else {
       setTbPath(path);
       setTb(response);
-      setTbMapping(response.suggestedMapping);
+      setTbMapping(match ? match.mapping : (response.suggestedMapping ?? {}));
     }
     reviews.clearReview(kind);
     setRows([]);
@@ -669,12 +790,84 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
+  async function replaceSource(kind: Kind) {
+    const picked = await pickPath(
+      "file",
+      kind === "tb" ? "更换 TB 科目余额表" : "更换 JE 序时账",
+      ["xlsx", "xls", "xlsm", "csv"],
+    );
+    const path = Array.isArray(picked) ? picked[0] : picked;
+    if (!path) return;
+    reviews.clearReview(kind);
+    setBusy(true);
+    setError("");
+    setSourceStatus(`正在按 ${kind.toUpperCase()} 读取 ${fileName(path)}…`);
+    try {
+      const response = (await engineCall(`deposit.inspect_${kind}`, {
+        source: { inputPath: path, sheet: "", headerRow: 0, headerDepth: 0 },
+      })) as Inspection;
+      applyInspection(kind, path, response);
+      setSourceStatus(
+        `${kind.toUpperCase()} 已更换为 ${fileName(path)} / ${response.sheet}。`,
+      );
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function changeSourceKind(from: Kind, to: Kind) {
+    const path = from === "je" ? jePath : tbPath;
+    const current = from === "je" ? je : tb;
+    const occupiedPath = to === "je" ? jePath : tbPath;
+    const occupied = to === "je" ? je : tb;
+    if (!path || !current) return;
+    setBusy(true);
+    setError("");
+    try {
+      const changed = await correctLedgerSourceKinds(
+        from,
+        to,
+        { path, inspection: current },
+        occupiedPath && occupied
+          ? { path: occupiedPath, inspection: occupied }
+          : undefined,
+        async (kind, source) =>
+          (await engineCall(`deposit.inspect_${kind}`, {
+            source: {
+              inputPath: source.path,
+              sheet: source.inspection.sheet,
+              headerRow: 0,
+              headerDepth: 0,
+            },
+          })) as Inspection,
+      );
+      setJePath("");
+      setTbPath("");
+      setJe(undefined);
+      setTb(undefined);
+      setJeMapping({});
+      setTbMapping({});
+      for (const item of changed)
+        applyInspection(item.kind, item.path, item.inspection);
+      setSourceStatus(
+        changed.length > 1
+          ? "JE 与 TB 来源已交换，并按新类型重新识别。"
+          : `${fileName(path)} 已更正为 ${to.toUpperCase()}。`,
+      );
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   function payload() {
     return {
       reportStart: depositReportStart(reportEnd),
       reportEnd,
-      dayBasis,
+      // 计息口径固定按月平均（年利率÷12）：选项对用户没有实际意义，已从界面移除。
+      dayBasis: "month12",
       // 库存现金不参与存款利息测算；保留字段仅用于兼容现有引擎入参。
       includeCashOnHand: false,
       tbSource: {
@@ -830,12 +1023,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
             <CardContent>
               <FileDropInput
                 containerRef={uploadDropRef}
-                value={[
-                  tbPath && `TB：${fileName(tbPath)}`,
-                  jePath && `序时账：${fileName(jePath)}`,
-                ]
-                  .filter(Boolean)
-                  .join("；")}
+                value=""
                 disabled={busy}
                 placeholder="拖放或选择 TB、序时账文件（可同时选择）"
                 onBrowse={() => void browse()}
@@ -855,8 +1043,16 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   setSourceStatus("");
                 }}
               />
+              {!tbPath && !jePath && (
+                <EmptyState
+                  compact
+                  title="准备存款利息资料"
+                  description="先加入科目余额表（TB）；如需更准确地还原月度余额，可同时加入序时账（JE）。"
+                />
+              )}
               {sourceStatus && (
                 <p className="fx-source-status" aria-live="polite">
+                  <i aria-hidden="true" />
                   {sourceStatus}
                 </p>
               )}
@@ -871,6 +1067,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   path={jePath}
                   inspection={je}
                   disabled={busy}
+                  onReplace={() => void replaceSource("je")}
                   onClear={() => {
                     reviews.clearReview("je");
                     setAccountRoleOverrides({});
@@ -879,6 +1076,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     setJeMapping({});
                   }}
                   onInspect={() => void inspect("je")}
+                  onKindChange={() => void changeSourceKind("je", "tb")}
+                  kindChangeLabel="更正为 TB"
                 />
               ) : tbPath ? (
                 <Card className="fx-source-empty">
@@ -886,7 +1085,11 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     <CardTitle>JE 序时账</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <p>未上传 JE；当前将使用 TB 两点法。</p>
+                    <EmptyState
+                      compact
+                      title="JE 为选传资料"
+                      description="当前将使用 TB 期初、期末两点法；加入 JE 后可还原月度余额。"
+                    />
                   </CardContent>
                 </Card>
               ) : null}
@@ -898,6 +1101,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   path={tbPath}
                   inspection={tb}
                   disabled={busy}
+                  onReplace={() => void replaceSource("tb")}
                   onClear={() => {
                     reviews.clearReview("tb");
                     setAccountRoleOverrides({});
@@ -906,6 +1110,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     setTbMapping({});
                   }}
                   onInspect={() => void inspect("tb")}
+                  onKindChange={() => void changeSourceKind("tb", "je")}
+                  kindChangeLabel="更正为 JE"
                 />
               ) : jePath ? (
                 <Card className="fx-source-empty">
@@ -913,7 +1119,11 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     <CardTitle>TB 科目余额表</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <p>未识别到 TB；请补充上传或检查文件表头。</p>
+                    <EmptyState
+                      compact
+                      title="还需要 TB"
+                      description="TB 是测算与账面利息勾稽的必需资料，请补充上传或检查文件表头。"
+                    />
                   </CardContent>
                 </Card>
               ) : null}
@@ -1027,8 +1237,17 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               />
             )}
           </div>
+          {/* 步骤条第二步是参考资料、没传文件也允许进（见上方 StepIndicator
+              注释）；但底部主按钮要设防：没拿到 TB 就不许走这条快捷路径。 */}
           <div className="fx-step-actions">
-            <Button onClick={() => setStep(1)}>下一步：科目与利率确认</Button>
+            <Button disabled={!tb} onClick={() => setStep(1)}>
+              下一步：科目与利率确认
+            </Button>
+            {!tb && (
+              <p className="fx-hint self-center">
+                先加入科目余额表（TB）后可继续下一步。
+              </p>
+            )}
           </div>
         </>
       )}
@@ -1045,7 +1264,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   <b>{interestAccounts.length}</b>
                   <HelpTip text="利息收入是 TB 比较基准；未设置时仍可测算，但不能勾稽。存款类型关联下方利率档位；名称无法判断时默认活期。" />
                 </p>
-                <details open={!interestAccounts.length}>
+                <details open>
                   <summary>逐个核对科目分类</summary>
                   <KeywordFilter
                     value={accountFilter}
@@ -1193,31 +1412,19 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               <div className="deposit-run-grid">
                 <label>
                   资产负债表日
-                  <input
+                  <Input
                     type="date"
                     value={reportEnd}
                     onChange={(e) => setReportEnd(e.target.value)}
                   />
                 </label>
                 <label>
-                  计息口径
-                  <select
-                    value={dayBasis}
-                    onChange={(e) => setDayBasis(e.target.value as DayBasis)}
-                  >
-                    {DAY_BASIS_OPTIONS.map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
                   输出文件
                   <span className="deposit-output-row">
-                    <input
-                      value={outputPath}
+                    <Input
+                      value={displayFileName(outputPath)}
                       readOnly
+                      title={outputPath || undefined}
                       placeholder="默认保存到源文件目录"
                     />
                     <Button
@@ -1264,7 +1471,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   }
                   onClick={() => void run("deposit.preview")}
                 >
-                  测算预览
+                  {busy && <BusySpinner />}测算预览
                 </Button>
                 <Button
                   disabled={
@@ -1272,7 +1479,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   }
                   onClick={() => void run("deposit.export")}
                 >
-                  生成 Excel 底稿
+                  {busy && <BusySpinner />}生成 Excel 底稿
                 </Button>
               </div>
               {job && (
@@ -1346,6 +1553,10 @@ function RateTierCard({
         <CardTitle>
           存款利率档位
           <HelpTip text="科目类型会关联这里的档位。活期自动采用默认利率；协定、通知、定期及大额存单须按协议填写。账户级改写优先。" />
+          <JargonTip
+            term="存款类型"
+            text="活期有内置利率；定期、协定、通知等按客户协议利率填写。"
+          />
         </CardTitle>
       </CardHeader>
       <CardContent>
@@ -1440,23 +1651,12 @@ function RateTierCard({
           </p>
         )}
         <ReferenceLinks tiers={tiers} />
-        <details className="deposit-tier-source">
-          <summary>利率来源与口径说明</summary>
-          <ul>
-            <li>
-              <b>央行基准</b>：{tiers.benchmarkSource}
-            </li>
-            <li>
-              <b>大行挂牌</b>：{tiers.listedSource}
-            </li>
-            <li>
-              <b>实务常见区间</b>：{tiers.practiceSource}
-            </li>
-            <li>
-              <b>审计依据</b>：{tiers.authority}
-            </li>
-          </ul>
-        </details>
+        <p className="deposit-tier-note">
+          利率来源与口径说明
+          <HelpTip
+            text={`央行基准：${tiers.benchmarkSource}；大行挂牌：${tiers.listedSource}；实务常见区间：${tiers.practiceSource}；审计依据：${tiers.authority}`}
+          />
+        </p>
       </CardContent>
     </Card>
   );
@@ -1553,8 +1753,11 @@ function SourceCard(props: {
   path: string;
   inspection?: Inspection;
   disabled: boolean;
+  onReplace: () => void;
   onClear: () => void;
   onInspect: () => void;
+  onKindChange?: () => void;
+  kindChangeLabel?: string;
 }) {
   return (
     <Card className="fx-source-card">
@@ -1563,14 +1766,35 @@ function SourceCard(props: {
       </CardHeader>
       <CardContent>
         <div className="fx-detected-file">
-          <span>{fileName(props.path)}</span>
           <button
+            className="fx-file-name-button"
+            type="button"
+            title={`${props.path}（点击更换）`}
+            disabled={props.disabled}
+            onClick={props.onReplace}
+          >
+            {fileName(props.path)}
+          </button>
+          <Button
+            variant="ghost"
+            size="sm"
             type="button"
             disabled={props.disabled}
             onClick={props.onClear}
           >
             移除
-          </button>
+          </Button>
+          {props.onKindChange && (
+            <Button
+              variant="ghost"
+              size="sm"
+              type="button"
+              disabled={props.disabled}
+              onClick={props.onKindChange}
+            >
+              {props.kindChangeLabel ?? "更正类型"}
+            </Button>
+          )}
         </div>
         {props.path && !props.inspection && (
           <Button
@@ -1655,7 +1879,8 @@ function MappingPreview(props: {
           </label>
           <label>
             标题行
-            <input
+            <Input
+              controlSize="sm"
               type="number"
               min={1}
               value={props.inspection.headerRow}
@@ -1765,19 +1990,26 @@ function Results({
   const missing = rows.filter((row) => !row.rateResolved);
   const stale =
     Math.abs(liveTotal - Number(summary.calculatedInterest ?? 0)) > 0.005;
+  const jeCurrencyAllocationWarning = String(
+    summary.jeCurrencyAllocationWarning ?? "",
+  );
 
   return (
     <section className="fx-result deposit-result">
       <div className="fx-result-heading">
         <div>
-          <h3>存款利息测算结果</h3>
-          <p>
-            月均余额＝（月初余额＋月末余额）÷2；月度余额来源：
-            {String(summary.monthlySource ?? "—")}； 期初余额来源：
-            {String(summary.openingSource ?? "—")}；测算月份：
-            {String(summary.monthCount ?? "—")} 个月； 计息口径：
-            {String(summary.dayBasisLabel ?? "—")}。
-          </p>
+          <h3>
+            存款利息测算结果
+            <HelpTip
+              text={`月均余额＝（月初余额＋月末余额）÷2；月度余额来源：${String(
+                summary.monthlySource ?? "—",
+              )}；期初余额来源：${String(
+                summary.openingSource ?? "—",
+              )}；测算月份：${String(summary.monthCount ?? "—")} 个月；计息口径：${String(
+                summary.dayBasisLabel ?? "—",
+              )}。`}
+            />
+          </h3>
           {Boolean(summary.amountScheme) && (
             <p
               className="deposit-scheme"
@@ -1799,6 +2031,41 @@ function Results({
         ))}
       </div>
 
+      <div className="deposit-result-overview" role="status">
+        <Badge
+          variant="outline"
+          className={
+            missing.length ||
+            stale ||
+            !booked ||
+            summary.reconciliationPassed !== true
+              ? "badge-warning"
+              : "badge-ready"
+          }
+        >
+          {missing.length
+            ? "测算未完整"
+            : stale
+              ? "结果待重算"
+              : !booked
+                ? "待补充勾稽"
+                : summary.reconciliationPassed === true
+                  ? "勾稽一致"
+                  : "存在差异"}
+        </Badge>
+        <span>
+          {missing.length
+            ? "先补齐未定利率，再按新利率重算。"
+            : stale
+              ? "按新利率重新测算后，再复核与 TB 的差异。"
+              : !booked
+                ? "请确认 TB 利息收入科目映射，再完成账面勾稽。"
+                : summary.reconciliationPassed === true
+                  ? "可继续复核逐户明细并生成 Excel 底稿。"
+                  : "请复核利率、科目分类和月度余额后重新测算。"}
+        </span>
+      </div>
+
       {missing.length > 0 && (
         <p className="deposit-stale">
           <b>{missing.length} 个账户尚未确定利率，测算尚不完整</b>
@@ -1810,6 +2077,12 @@ function Results({
             这些档位的利率是逐笔合同约定的，请按存款协议、银行对账单或利息清单填入实际利率——填之前它们的利息不计入下方合计和与
             TB 的比较。
           </span>
+        </p>
+      )}
+      {jeCurrencyAllocationWarning && (
+        <p className="deposit-stale" role="alert">
+          <b>JE 币种资料不完整</b>
+          <span>{jeCurrencyAllocationWarning}</span>
         </p>
       )}
       {stale && (
@@ -1845,9 +2118,7 @@ function Results({
             booked && summary.bookedNote
               ? String(summary.bookedNote)
               : undefined,
-            booked && Number(summary.bookedInterestIncome) < 0
-              ? "warning"
-              : "",
+            booked && Number(summary.bookedInterestIncome) < 0 ? "warning" : "",
           )}
           <span className="fx-operator" aria-hidden="true">
             ＝
@@ -1979,20 +2250,23 @@ function Results({
                   <td>{amount(row.averageBalance)}</td>
                   <td>{amount(rowInterest(row))}</td>
                   <td title={row.note}>
-                    <span
+                    <Badge
+                      variant="outline"
                       className={
                         row.status === "已勾稽"
-                          ? "deposit-ok"
+                          ? "badge-ready"
                           : row.status === "待填利率"
-                            ? "deposit-missing"
-                            : "deposit-warn"
+                            ? "badge-danger"
+                            : "badge-warning"
                       }
                     >
                       {row.status}
-                    </span>
+                    </Badge>
                   </td>
                   <td>
-                    <button
+                    <Button
+                      variant="outline"
+                      size="sm"
                       type="button"
                       className="deposit-expand"
                       onClick={() =>
@@ -2000,7 +2274,7 @@ function Results({
                       }
                     >
                       {expanded === row.key ? "收起" : "展开"}
-                    </button>
+                    </Button>
                   </td>
                 </tr>
                 {expanded === row.key && (

@@ -15,10 +15,14 @@ export type Mapping = {
   functionalCredit?: string;
 };
 export type Inspect = {
+  lowMemory?: boolean;
+  resourceNotice?: string;
   headers: string[];
   preview: string[][];
   sheets?: string[];
   selectedSheet?: string;
+  /** 后端实际采用的标题行（headerRow=0 自动探测时的回显）。 */
+  headerRow?: number;
   suggestedMapping?: Mapping;
   accounts?: string[];
   accountCodes?: string[];
@@ -47,6 +51,275 @@ export type LedgerSourceClassification = {
   kind: LedgerSourceKind;
   scores: { je: number; tb: number };
 };
+
+export type LedgerWorkbookSheetClassification = LedgerSourceClassification & {
+  confidence: number;
+  needsLlm: boolean;
+  sheet: string;
+  sheets?: string[];
+  headerRow: number;
+  headerDepth: number;
+  headers: string[];
+  preview: string[][];
+  reasons?: string[];
+};
+
+export type LedgerClassifiedSource<
+  T extends LedgerWorkbookSheetClassification =
+    LedgerWorkbookSheetClassification,
+> = {
+  path: string;
+  classification: T;
+};
+
+export type LedgerSourceScanResult<
+  T extends LedgerWorkbookSheetClassification =
+    LedgerWorkbookSheetClassification,
+> = {
+  sources: LedgerClassifiedSource<T>[];
+  hiddenSheets: number;
+  llmFallbacks: number;
+  failures: Array<{ path: string; error: unknown }>;
+};
+
+/**
+ * 扫描一个工作簿里的每张非空 Sheet。公共 Rust 分类器在未指定 Sheet 时只会
+ * 挑分数最高的一张；这里先拿到 Sheet 清单，再逐张指定 Sheet 复用同一分类器。
+ */
+export async function classifyLedgerWorkbookSheets<
+  T extends LedgerWorkbookSheetClassification,
+>(
+  call: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+  method: string,
+  path: string,
+): Promise<T[]> {
+  const classify = (sheet: string) =>
+    call(method, {
+      source: { inputPath: path, sheet, headerRow: 0, headerDepth: 0 },
+    }) as Promise<T>;
+  const first = await classify("");
+  const names = [
+    ...new Set(
+      (first.sheets?.length ? first.sheets : [first.sheet]).filter(Boolean),
+    ),
+  ];
+  const results: T[] = [];
+  for (const sheet of names) {
+    results.push(sheet === first.sheet ? first : await classify(sheet));
+  }
+  return results;
+}
+
+/** 低于公共分类器既有的 5 分可靠线时，不把该 Sheet 暴露成账表来源。 */
+export function ledgerClassificationIsVisible(
+  classification: LedgerSourceClassification & { sheet?: string },
+): boolean {
+  // 兼容历史任务记录和旧测试桩：旧分类结果没有 scores 时沿用原先“显示”的行为。
+  if (!classification.scores) return true;
+  // 透视、核对和说明页通常是审计人后加的辅助 Sheet。即使它们因汇总列名拿到
+  // TB 分数，也不能抢占原始 TB/JE；需要使用时应选择原始数据 Sheet。
+  if (
+    /(?:透视|pivot|check|核对|校验|说明|封面|目录|(?:tb|je)[\s_-]*(?:种类|类型|分类)|(?:种类|类型|分类)[\s_-]*(?:tb|je))/i.test(
+      classification.sheet ?? "",
+    )
+  )
+    return false;
+  return Math.max(classification.scores.je, classification.scores.tb) >= 5;
+}
+
+/** 批量配对页以工作簿为文件单位：同一工作簿同一种账表只自动保留一个最佳
+ * Sheet，其余 Sheet 仍能在 inspect 返回的下拉列表中手工选择。否则一份多 Sheet
+ * TB 会生成多个重复组，并依次抢走其他期间的 JE。 */
+export function selectLedgerWorkbookKindSources<
+  T extends LedgerWorkbookSheetClassification,
+>(sources: LedgerClassifiedSource<T>[]): LedgerClassifiedSource<T>[] {
+  const byWorkbook = new Map<string, LedgerClassifiedSource<T>[]>();
+  for (const source of sources) {
+    const items = byWorkbook.get(source.path) ?? [];
+    items.push(source);
+    byWorkbook.set(source.path, items);
+  }
+  const selected: LedgerClassifiedSource<T>[] = [];
+  for (const [path, items] of byWorkbook.entries()) {
+    const name = (path.split(/[\\/]/).pop() ?? path).replace(/\.[^.]+$/, "");
+    const explicitKind: LedgerSourceKind | undefined =
+      /科目余额|余额表|(?:^|[^a-z])tb(?:[^a-z]|$)/i.test(name)
+        ? "tb"
+        : /序时|凭证明细|日记账|(?:^|[^a-z])je(?:[^a-z]|$)/i.test(name)
+          ? "je"
+          : undefined;
+    for (const kind of (explicitKind
+      ? [explicitKind]
+      : ["tb", "je"]) as LedgerSourceKind[]) {
+      const candidates = items.filter(
+        (item) => item.classification.kind === kind,
+      );
+      if (!candidates.length) continue;
+      // classifyLedgerWorkbookSheets 把后端默认正表放在第一项；若它正是当前
+      // 类型，优先沿用。另一类型则按该类型得分取最高者。
+      const first = items[0];
+      const picked =
+        first.classification.kind === kind
+          ? first
+          : candidates.reduce((best, item) =>
+              item.classification.scores[kind] >
+              best.classification.scores[kind]
+                ? item
+                : best,
+            );
+      selected.push(picked);
+    }
+  }
+  return selected;
+}
+
+/**
+ * 五个 TB/JE 工具共用的上传识别入口：逐工作簿、逐 Sheet 分类，过滤低置信度
+ * 来源，并按工具自己的提示词做可选 LLM 复核。页面只负责展示和后续 inspect。
+ */
+export async function scanLedgerUploadSources<
+  T extends LedgerWorkbookSheetClassification,
+>(
+  call: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+  paths: string[],
+  options: {
+    classificationMethod?: string;
+    llmMethod?: string;
+    onWorkbookStart?: (path: string, index: number, total: number) => void;
+  } = {},
+): Promise<LedgerSourceScanResult<T>> {
+  const result: LedgerSourceScanResult<T> = {
+    sources: [],
+    hiddenSheets: 0,
+    llmFallbacks: 0,
+    failures: [],
+  };
+  for (const [index, path] of paths.entries()) {
+    options.onWorkbookStart?.(path, index, paths.length);
+    try {
+      const sheets = await classifyLedgerWorkbookSheets<T>(
+        call,
+        options.classificationMethod ?? "deposit.classify_source",
+        path,
+      );
+      for (const scripted of sheets) {
+        if (!ledgerClassificationIsVisible(scripted)) {
+          result.hiddenSheets += 1;
+          continue;
+        }
+        if (!options.llmMethod) {
+          result.sources.push({ path, classification: scripted });
+          continue;
+        }
+        const reviewed = await reviewLedgerSourceClassification(
+          call,
+          options.llmMethod,
+          `${path} / ${scripted.sheet}`,
+          scripted,
+        );
+        if (!reviewed.reviewed) result.llmFallbacks += 1;
+        result.sources.push({ path, classification: reviewed.classification });
+      }
+    } catch (error) {
+      result.failures.push({ path, error });
+    }
+  }
+  return result;
+}
+
+/** 同一工作簿的 TB/JE 优先；没有同簿组合时再做跨文件联合判型并按得分取最佳一对。 */
+export function selectLedgerSourcePair<
+  T extends LedgerWorkbookSheetClassification,
+>(
+  sources: LedgerClassifiedSource<T>[],
+): Array<
+  LedgerClassifiedSource<T> & {
+    kind: LedgerSourceKind;
+  }
+> {
+  const byWorkbook = new Map<string, LedgerClassifiedSource<T>[]>();
+  for (const source of sources) {
+    const group = byWorkbook.get(source.path) ?? [];
+    group.push(source);
+    byWorkbook.set(source.path, group);
+  }
+  const pairs = [...byWorkbook.values()]
+    .map((items) => {
+      const je = items
+        .filter((item) => item.classification.kind === "je")
+        .sort(
+          (a, b) => b.classification.scores.je - a.classification.scores.je,
+        )[0];
+      const tb = items
+        .filter((item) => item.classification.kind === "tb")
+        .sort(
+          (a, b) => b.classification.scores.tb - a.classification.scores.tb,
+        )[0];
+      return je && tb
+        ? {
+            je,
+            tb,
+            score: je.classification.scores.je + tb.classification.scores.tb,
+          }
+        : undefined;
+    })
+    .filter((pair): pair is NonNullable<typeof pair> => Boolean(pair))
+    .sort((a, b) => b.score - a.score);
+  if (pairs.length) {
+    return [
+      { ...pairs[0].je, kind: "je" },
+      { ...pairs[0].tb, kind: "tb" },
+    ];
+  }
+  const kinds = resolveLedgerPairKinds(
+    sources.map((item) => item.classification),
+  );
+  const resolved = sources.map((item, index) => ({
+    ...item,
+    kind: kinds[index],
+  }));
+  const je = resolved
+    .filter((item) => item.kind === "je")
+    .sort((a, b) => b.classification.scores.je - a.classification.scores.je)[0];
+  const tb = resolved
+    .filter((item) => item.kind === "tb")
+    .sort((a, b) => b.classification.scores.tb - a.classification.scores.tb)[0];
+  return [je, tb].filter(
+    (item): item is LedgerClassifiedSource<T> & { kind: LedgerSourceKind } =>
+      Boolean(item),
+  );
+}
+
+export type LedgerInspectableSource<T> = {
+  path: string;
+  inspection: T & { sheet: string; headerRow: number; headerDepth: number };
+};
+
+/**
+ * 类型更正的公共编排：目标槽为空时移动来源，目标槽已有来源时交换两侧，
+ * 两份都按新类型重新 inspect，避免沿用错误类型产生的字段建议。
+ */
+export async function correctLedgerSourceKinds<T>(
+  from: LedgerSourceKind,
+  to: LedgerSourceKind,
+  current: LedgerInspectableSource<T>,
+  occupied: LedgerInspectableSource<T> | undefined,
+  inspect: (
+    kind: LedgerSourceKind,
+    source: LedgerInspectableSource<T>,
+  ) => Promise<T>,
+): Promise<Array<{ kind: LedgerSourceKind; path: string; inspection: T }>> {
+  const changed = await inspect(to, current);
+  const results = [{ kind: to, path: current.path, inspection: changed }];
+  if (occupied) {
+    results.push({
+      kind: from,
+      path: occupied.path,
+      inspection: await inspect(from, occupied),
+    });
+  }
+  return results;
+}
 /**
  * Resolve a two-file upload as a pair.  Independent classification may call both
  * files JE when one ambiguous TB loses a tie; assigning the pair jointly keeps
@@ -257,6 +530,7 @@ export const isCombinedAccountValues = (values: string[]): boolean => {
  * 强类型结构不同，所以单独一个入口；纪律、卫生过滤在后端已经统一。
  * 后端已按冲突词、占用、置信度过滤过一轮，这里只做两件后端做不了的事：
  * 丢掉本工具不认识的角色，以及丢掉指向表里不存在的列的建议。
+ * `tool` 透传给后端做工具专属纪律（汇兑损益的记账日期月度兜底）。
  */
 export async function applyLedgerReviewToDict(
   call: (method: string, params: Record<string, unknown>) => Promise<unknown>,
@@ -265,6 +539,8 @@ export async function applyLedgerReviewToDict(
   sampleRows: string[][],
   current: Record<string, string | string[]>,
   labels: Record<string, string>,
+  tool?: string,
+  multiColumnRoles: ReadonlySet<string> = LEDGER_MULTI_COLUMN_ROLES,
 ): Promise<{
   mapping: Record<string, string | string[]>;
   applied: LedgerPlannedChange[];
@@ -277,13 +553,23 @@ export async function applyLedgerReviewToDict(
       sampleRows: sampleRows.slice(0, 8),
       currentMapping: current,
       availableRoles: Object.keys(labels),
+      ...(tool ? { tool } : {}),
     },
   })) as { changes?: LedgerChange[] };
-  return planLedgerChanges(headers, sampleRows, current, labels, response.changes ?? []);
+  return planLedgerChanges(
+    headers,
+    sampleRows,
+    current,
+    labels,
+    response.changes ?? [],
+    multiColumnRoles,
+  );
 }
 
 const ledgerMappingText = (value: string | string[] | undefined): string =>
-  Array.isArray(value) ? value.filter(Boolean).join("＋") : value?.trim() || "未映射";
+  Array.isArray(value)
+    ? value.filter(Boolean).join("＋")
+    : value?.trim() || "未映射";
 
 /** 后端完成提示词与硬规则过滤后，前端统一执行 60% 应用、待确认与撤销计划。 */
 export function planLedgerChanges(
@@ -292,6 +578,7 @@ export function planLedgerChanges(
   current: Record<string, string | string[]>,
   labels: Record<string, string>,
   changes: LedgerChange[],
+  multiColumnRoles: ReadonlySet<string> = LEDGER_MULTI_COLUMN_ROLES,
 ): {
   mapping: Record<string, string | string[]>;
   applied: LedgerPlannedChange[];
@@ -303,43 +590,90 @@ export function planLedgerChanges(
   // 「编码＋名称混写」的列允许科目编码与科目名称共用（与后端同口径豁免）。
   const combinedOf = (column: string): boolean => {
     const index = headers.indexOf(column);
-    return index >= 0 && isCombinedAccountValues(sampleRows.map((row) => row[index] ?? ""));
+    return (
+      index >= 0 &&
+      isCombinedAccountValues(sampleRows.map((row) => row[index] ?? ""))
+    );
   };
+  // LLM 的一批建议必须作为一个原子调整计划判断，不能依赖返回顺序。
+  // 例如 accountCode 先从「会计科目」挪走，accountName 才能接手该列；
+  // 若逐条检查，两条都会因为“当前仍被占用”而被错误丢弃。
+  const validHighChanges = changes.filter((change) => {
+    const column = change?.suggestedColumn?.trim();
+    return (
+      !!column &&
+      change.role in labels &&
+      headers.includes(column) &&
+      change.confidence !== undefined &&
+      change.confidence >= AUTO_APPLY_MIN
+    );
+  });
+  const vacatedByRole = new Map<string, Set<string>>();
+  for (const change of validHighChanges) {
+    if (multiColumnRoles.has(change.role)) continue;
+    const target = change.suggestedColumn.trim();
+    const before = current[change.role];
+    const sources = Array.isArray(before) ? before : before ? [before] : [];
+    for (const source of sources) {
+      if (source === target) continue;
+      const all = vacatedByRole.get(change.role) ?? new Set<string>();
+      all.add(source);
+      vacatedByRole.set(change.role, all);
+    }
+  }
   for (const change of changes) {
     const column = change?.suggestedColumn?.trim();
     if (!column || !(change.role in labels) || !headers.includes(column))
       continue;
-    const beforeValue = next[change.role];
+    const beforeValue = current[change.role];
     const planned: LedgerPlannedChange = {
       ...change,
       suggestedColumn: column,
       currentColumn: ledgerMappingText(beforeValue),
       beforeValue: Array.isArray(beforeValue) ? [...beforeValue] : beforeValue,
-      attention:
-        change.confidence !== undefined && change.confidence < 0.7,
+      attention: change.confidence !== undefined && change.confidence < 0.7,
       label: labels[change.role] ?? change.role,
     };
     if (change.confidence === undefined || change.confidence < AUTO_APPLY_MIN) {
       pending.push(planned);
       continue;
     }
-    // 同一列已被别的角色占用就跳过——一列只承载一个语义。
-    if (
-      Object.entries(next).some(
-        ([role, value]) =>
-          role !== change.role &&
-          (Array.isArray(value) ? value.includes(column) : value === column) &&
-          !(
-            ((change.role === "accountName" && role === "accountCode") ||
-              (change.role === "accountCode" && role === "accountName")) &&
-            combinedOf(column)
-          ),
-      )
-    )
-      continue;
+    const occupied = Object.entries(next).filter(
+      ([role, value]) =>
+        role !== change.role &&
+        (Array.isArray(value) ? value.includes(column) : value === column) &&
+        !(
+          ((change.role === "accountName" && role === "accountCode") ||
+            (change.role === "accountCode" && role === "accountName")) &&
+          combinedOf(column)
+        ),
+    );
+    const blocking = occupied.filter(
+      ([role]) =>
+        !vacatedByRole.get(role)?.has(column) &&
+        // auxiliary 是兜底型多列角色；LLM 把其中某列识别成更明确的核心角色
+        // 时，只移除该列，保留其他辅助核算列。
+        !(role === "auxiliary" && change.role !== "auxiliary"),
+    );
+    if (blocking.length) continue;
+    for (const [role, value] of occupied) {
+      if (
+        !vacatedByRole.get(role)?.has(column) &&
+        !(role === "auxiliary" && change.role !== "auxiliary")
+      ) {
+        continue;
+      }
+      if (Array.isArray(value)) {
+        const remaining = value.filter((item) => item !== column);
+        if (remaining.length) next[role] = remaining;
+        else delete next[role];
+      } else {
+        delete next[role];
+      }
+    }
     // 多列角色是“追加组成键”，不是“建议一次覆盖一次”。例如目标 JE 的
     // 「凭证字」「凭证号」都属于 id；LLM 分两条返回时两列必须同时保留。
-    next[change.role] = LEDGER_MULTI_COLUMN_ROLES.has(change.role)
+    next[change.role] = multiColumnRoles.has(change.role)
       ? appendMappingColumn(next[change.role], column)
       : column;
     applied.push(planned);
@@ -369,6 +703,8 @@ export type LedgerReviewTarget = {
   labels: Record<string, string>;
   tool?: string;
   pairLabel?: string;
+  /** 当前工具允许由多列共同组成的角色；TBJE 的日期可由月／日列组合。 */
+  multiColumnRoles?: ReadonlySet<string>;
 };
 /** 一键复核里单个文件的结果：应用后的映射、采纳的建议数与失败原因。 */
 export type LedgerReviewOutcome = {
@@ -424,30 +760,41 @@ export async function applyLedgerReviewsTogether(
             target.preview,
             target.mapping,
             target.labels,
-            kind === "tb" ? response.tbChanges ?? [] : response.jeChanges ?? [],
+            kind === "tb"
+              ? (response.tbChanges ?? [])
+              : (response.jeChanges ?? []),
+            target.multiColumnRoles,
           );
-          return [kind, {
-            mapping: plan.mapping,
-            appliedCount: plan.applied.length,
-            failed: false,
-            error: "",
-            applied: plan.applied,
-            pending: plan.pending,
-            pairFindings: findings,
-          }] as const;
+          return [
+            kind,
+            {
+              mapping: plan.mapping,
+              appliedCount: plan.applied.length,
+              failed: false,
+              error: "",
+              applied: plan.applied,
+              pending: plan.pending,
+              pairFindings: findings,
+            },
+          ] as const;
         }),
       );
     } catch (e) {
       const error = ledgerErrorText(e);
-      return Object.fromEntries(kinds.map((kind) => [kind, {
-        mapping: targets[kind]!.mapping,
-        appliedCount: 0,
-        failed: true,
-        error,
-        applied: [],
-        pending: [],
-        pairFindings: [],
-      }]));
+      return Object.fromEntries(
+        kinds.map((kind) => [
+          kind,
+          {
+            mapping: targets[kind]!.mapping,
+            appliedCount: 0,
+            failed: true,
+            error,
+            applied: [],
+            pending: [],
+            pairFindings: [],
+          },
+        ]),
+      );
     }
   }
   const kind = kinds[0];
@@ -455,27 +802,38 @@ export async function applyLedgerReviewsTogether(
   const target = targets[kind]!;
   try {
     const { mapping, applied, pending } = await applyLedgerReviewToDict(
-      call, kind, target.headers, target.preview, target.mapping, target.labels,
+      call,
+      kind,
+      target.headers,
+      target.preview,
+      target.mapping,
+      target.labels,
+      target.tool,
+      target.multiColumnRoles,
     );
-    return { [kind]: {
-      mapping,
-      appliedCount: applied.length,
-      failed: false,
-      error: "",
-      applied,
-      pending,
-      pairFindings: [],
-    } };
+    return {
+      [kind]: {
+        mapping,
+        appliedCount: applied.length,
+        failed: false,
+        error: "",
+        applied,
+        pending,
+        pairFindings: [],
+      },
+    };
   } catch (e) {
-    return { [kind]: {
-      mapping: target.mapping,
-      appliedCount: 0,
-      failed: true,
-      error: ledgerErrorText(e),
-      applied: [],
-      pending: [],
-      pairFindings: [],
-    } };
+    return {
+      [kind]: {
+        mapping: target.mapping,
+        appliedCount: 0,
+        failed: true,
+        error: ledgerErrorText(e),
+        applied: [],
+        pending: [],
+        pairFindings: [],
+      },
+    };
   }
 }
 
@@ -686,6 +1044,20 @@ export type LedgerReviewResponse = {
   fills?: Review[];
   reviews?: Review[];
 };
+
+/** 看账与正负凭证标记共用的 LLM 输入合同。 */
+export function kanzhangReviewPayload(
+  headers: string[],
+  preview: string[][],
+  currentMapping: Mapping,
+) {
+  return {
+    headers,
+    sampleRows: preview.slice(0, 8),
+    currentMapping,
+  };
+}
+
 export function applyLedgerReviews(
   source: Mapping,
   value: LedgerReviewResponse,

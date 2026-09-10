@@ -1,10 +1,24 @@
 # FY27 WP 服务单 Rust 迁移说明
 
+团队使用方式、三类输入文件的命名规则和必要字段见 [WP 服务单生成工具使用说明](WP_SERVICE_GENERATOR_USAGE.md)。
+
+## 2026-09-08 · AI/CI 工时与灵活 Section
+
+- 新增“我的订单”输入，按 `相关订单` 与 `订单编号` 映射 `CI Hours`、`AI Hours`。
+- Outlook Hours 改为 `(Section Outlook Hours - CI Hours - AI Hours) × 1.1`，服务方案顶部和索引页同步展示 AI/CI。
+- `C_货币资金（除函证程序）` 与 `C_货币资金_银行函证` 的参考工时更新为 3 和 10。
+- Section List 可读取 `Outlook Hours`；无固定参考工时及非模板 Section 汇总到 `Others` 后保留 Outlook、Entity、底稿数量和预算调整。
+- Excel 保持自动计算，但不再设置打开时强制全工作簿重算，以减少大型汇总文件的卡顿。
+
+## 2026-09-04 · XLS 输入统一
+
+已接入共享 XLS 内容识别/文本读取或模板准备路径。保留本工具的字段映射和业务规则；格式、模板依赖、已覆盖与未覆盖范围及回归命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。不将文件格式兼容表述为旧版全部业务行为等价。
+
 `src-tauri/src/wp.rs` 是原 `modules/wp-service-generator` 的纯 Rust 业务内核。生产接入后不再启动 Python、PowerShell 或 Excel COM。
 
 ## 已复刻范围
 
-- 在所选目录第一层按关键词唯一识别 WP 服务单与 Section List，读取“业务”Sheet 并校验七个必填表头。
+- 在所选目录第一层按关键词唯一识别 WP 服务单、Section List 与“我的订单”，按表头名称读取并校验必要字段。
 - 按旧规则拆分 `AUD2026`、`IPO`、`IPO archive`、`AUD2025`，保留不纳入记录及 IPO 年份说明。
 - 只为 `AUD2026` 与活动 `IPO` 的唯一 WP 服务单生成方案。
 - 读取可变列序的 Section List，规范化服务单号和 Section 名称，合并重复 Section 的 Entity、底稿数量和预算调整。
@@ -77,7 +91,7 @@ let result = wp::generate(&params)?;
 - 服务方案页的四个 Booking Period 日期以序列号写入且未设日期格式，可能显示为五位数字。
   （仅当来源导出把日期存成真日期时才触发；本次真实样例里这四列是文本，两版写出的都是同样的文本。）
 - 索引页的"缩放到一页宽"开关所用写库不支持，参数写了但开关没开。→ **2026-08-10 已修**（写盘后补 `pageSetUpPr`）。
-- 未设"打开时全部重算"，公式可能开档显示 0 直到手动重算。→ **2026-08-10 已修**（写盘后补 `calcPr`）。
+- 计算模式保持 `auto`。2026-09-08 起不再设置 `fullCalcOnLoad` / `forceFullCalc`，避免大型汇总文件每次打开都全量重算；编辑依赖单元格时仍由 Excel 正常增量计算。
 - ~~未显式指定活动工作表，打开时停留位置不确定（旧版强制停在索引页）。~~
   2026-08-10 实测两版的活动工作表都是"服务方案索引"，这条当初记错了。
   真正存在的问题是 85 张服务方案的标签页处于成组选中状态，已一并修复。

@@ -1,7 +1,8 @@
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { displayFileName } from "@/fileDisplay";
+import { cn } from "@/lib/utils";
 
 export type FileInputProps = {
   value: string;
@@ -14,6 +15,12 @@ export type FileInputProps = {
   clearLabel?: string;
   /** 额外的按钮（如补充清单的"读取"），渲染在浏览按钮之后 */
   extraActions?: ReactNode;
+  id?: string;
+  name?: string;
+  ariaLabel?: string;
+  description?: ReactNode;
+  invalid?: ReactNode;
+  className?: string;
 };
 
 /**
@@ -30,37 +37,54 @@ export function FileInput({
   browseLabel = "浏览",
   clearLabel = "清空",
   extraActions,
+  id,
+  name,
+  ariaLabel,
+  description,
+  invalid,
+  className,
 }: FileInputProps) {
+  const generatedId = useId();
+  const inputId = id ?? `file-input-${generatedId}`;
+  const helpId = description ? `${inputId}-description` : undefined;
+  const errorId = invalid ? `${inputId}-error` : undefined;
   return (
-    <div className="input-with-button">
-      <Input
-        value={value ? displayFileName(value) : ""}
-        placeholder={placeholder}
-        readOnly={readOnly}
-        disabled={disabled}
-      />
-      <Button
-        type="button"
-        variant="secondary"
-        size="sm"
-        onClick={onBrowse}
-        disabled={disabled}
-      >
-        {browseLabel}
-      </Button>
-      {extraActions}
-      {onClear && value && (
+    <div className={cn("file-input", className)}>
+      <div className="input-with-button">
+        <Input
+          id={inputId}
+          name={name}
+          value={value ? displayFileName(value) : ""}
+          placeholder={placeholder}
+          readOnly={readOnly}
+          disabled={disabled}
+          aria-label={ariaLabel}
+          aria-invalid={Boolean(invalid) || undefined}
+          aria-describedby={[helpId, errorId].filter(Boolean).join(" ") || undefined}
+        />
         <Button
           type="button"
-          variant="ghost"
-          size="sm"
-          className="text-destructive"
-          onClick={onClear}
+          variant="secondary"
+          onClick={onBrowse}
           disabled={disabled}
         >
-          {clearLabel}
+          {browseLabel}
         </Button>
-      )}
+        {extraActions}
+        {onClear && value && (
+          <Button
+            type="button"
+            variant="ghost"
+            className="text-destructive"
+            onClick={onClear}
+            disabled={disabled}
+          >
+            {clearLabel}
+          </Button>
+        )}
+      </div>
+      {description ? <p id={helpId} className="file-input-description">{description}</p> : null}
+      {invalid ? <p id={errorId} className="file-input-error" role="alert">{invalid}</p> : null}
     </div>
   );
 }

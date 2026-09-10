@@ -28,22 +28,30 @@ import {
   shouldShowFaPreviewWorkspace,
 } from "./faListUi";
 import type { ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { errorText } from "@/lib/errors";
 import { ResultView } from "@/components/ResultView";
 import { PageHeader } from "@/components/PageHeader";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { Field } from "@/components/Field";
+import { JargonTip } from "@/components/JargonTip";
 import { FileInput } from "@/components/FileInput";
 import { FileDropInput } from "@/components/FileDropInput";
 import { StepIndicator } from "@/components/StepIndicator";
 import { StatGrid } from "@/components/StatGrid";
 import { DataTable } from "@/components/DataTable";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { EmptyState } from "@/components/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useJobEvents } from "@/hooks/useJobEvents";
-import { FaTbJePage } from "./FaTbJePage";
+import {
+  FaSummaryRow,
+  FaSummaryTable,
+  FaTbJePage,
+} from "./FaTbJePage";
 type FaMapping = {
   matchKey?: string;
   matchKeys?: string[];
@@ -134,6 +142,25 @@ const emptyFaSupplement = (): FaSupplementConfig => ({
   depreciation: "",
 });
 
+/** 历史存档里的补充表参数（supplementPayload 的产物）逆向还原成表单配置；
+ * 空对象/形状不对时退回空白补充表。 */
+const supplementConfigOf = (value: unknown): FaSupplementConfig => {
+  const v = (value && typeof value === "object" ? value : {}) as Partial<
+    Record<keyof FaSupplementConfig, unknown>
+  >;
+  return {
+    path: typeof v.path === "string" ? v.path : "",
+    sheet: typeof v.sheet === "string" ? v.sheet : "",
+    headerRow: v.headerRow != null ? String(v.headerRow) : "",
+    keys: Array.isArray(v.keys) ? (v.keys as string[]) : [],
+    matchKeysVerified: Boolean(v.matchKeysVerified),
+    method: typeof v.method === "string" ? v.method : "",
+    date: typeof v.date === "string" ? v.date : "",
+    originalValue: typeof v.originalValue === "string" ? v.originalValue : "",
+    depreciation: typeof v.depreciation === "string" ? v.depreciation : "",
+  };
+};
+
 type FaListDraft = {
   step: 1 | 2 | 3;
   beginPath: string;
@@ -214,6 +241,7 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
         className="fx-mode-bar fa-mode-tabs"
         role="tablist"
         aria-label="固定资产底稿模式"
+        data-tour="tool-mode"
       >
         <button
           type="button"
@@ -321,6 +349,102 @@ function FaCardListPage() {
       setBusy(!["completed", "failed", "cancelled"].includes(event.phase));
       if (event.phase === "failed") setError(event.message);
     },
+  });
+
+  // 历史记录「继续任务」：回填两份清单与映射/匹配键/补充表等全部配置，
+  // 不自动重新读取——重新读取同一对文件时用存档映射/匹配键顶回建议值
+  // （见 inspect），换文件照旧。
+  // restore key 用 "fa_list:cards" 与账表核对子页区分（见 restore.ts）。
+  const restoredFaCardsRef = useRef<{
+    beginPath: string;
+    endPath: string;
+    beginMapping: FaMapping;
+    endMapping: FaMapping;
+    beginKeys: string[];
+    endKeys: string[];
+  } | null>(null);
+  useTaskRestore("fa_list:cards", (restore) => {
+    const p = restore.params as {
+      beginPath?: string;
+      endPath?: string;
+      beginSheet?: string;
+      endSheet?: string;
+      beginHeaderRow?: number;
+      endHeaderRow?: number;
+      beginKeys?: string[];
+      endKeys?: string[];
+      beginMapping?: FaMapping;
+      endMapping?: FaMapping;
+      beginDisplayName?: string;
+      endDisplayName?: string;
+      balanceSheetDate?: string;
+      additionSupplement?: Partial<FaSupplementConfig>;
+      disposalSupplement?: Partial<FaSupplementConfig>;
+      outputPath?: string;
+    };
+    if (typeof p.beginPath !== "string" || !p.beginPath) return;
+    if (typeof p.endPath !== "string" || !p.endPath) return;
+    const isMapping = (value: unknown): value is FaMapping =>
+      Boolean(value && typeof value === "object");
+    restoredFaCardsRef.current =
+      isMapping(p.beginMapping) && isMapping(p.endMapping)
+        ? {
+            beginPath: p.beginPath,
+            endPath: p.endPath,
+            beginMapping: p.beginMapping,
+            endMapping: p.endMapping,
+            beginKeys: Array.isArray(p.beginKeys) ? p.beginKeys : [],
+            endKeys: Array.isArray(p.endKeys) ? p.endKeys : [],
+          }
+        : null;
+    llmReviewGeneration.current += 1;
+    supplementReviewGeneration.current += 1;
+    setStep(2);
+    setBeginPath(p.beginPath);
+    setEndPath(p.endPath);
+    setBeginSheet(p.beginSheet ?? "");
+    setEndSheet(p.endSheet ?? "");
+    setBeginHeaderRow(p.beginHeaderRow != null ? String(p.beginHeaderRow) : "");
+    setEndHeaderRow(p.endHeaderRow != null ? String(p.endHeaderRow) : "");
+    setInspection(undefined);
+    setBeginKeys(Array.isArray(p.beginKeys) ? p.beginKeys : []);
+    setEndKeys(Array.isArray(p.endKeys) ? p.endKeys : []);
+    setBeginMapping(
+      p.beginMapping && typeof p.beginMapping === "object"
+        ? (p.beginMapping as FaMapping)
+        : {},
+    );
+    setEndMapping(
+      p.endMapping && typeof p.endMapping === "object"
+        ? (p.endMapping as FaMapping)
+        : {},
+    );
+    if (typeof p.beginDisplayName === "string" && p.beginDisplayName)
+      setBeginDisplayName(p.beginDisplayName);
+    if (typeof p.endDisplayName === "string" && p.endDisplayName)
+      setEndDisplayName(p.endDisplayName);
+    if (typeof p.balanceSheetDate === "string" && p.balanceSheetDate)
+      setBalanceSheetDate(p.balanceSheetDate);
+    setAddition(supplementConfigOf(p.additionSupplement));
+    setDisposal(supplementConfigOf(p.disposalSupplement));
+    setAdditionInspect(undefined);
+    setDisposalInspect(undefined);
+    setSupplementAutoHandled(false);
+    if (typeof p.outputPath === "string" && p.outputPath) {
+      setOutputPath(p.outputPath);
+      setOutputPathTouched(true);
+    }
+    setLlmReview(undefined);
+    setLlmChanges([]);
+    setLlmPending([]);
+    setLlmBypassed(false);
+    setSupplementLlmChanges([]);
+    setSupplementLlmPending([]);
+    setSupplementLlmReview(undefined);
+    setSupplementLlmBypassed(false);
+    setError("");
+    setJob(undefined);
+    setResult(undefined);
   });
   // Tauri 会拦截 DOM 文件拖放，因此仍监听窗口级事件；但落点必须
   // 命中实际上传框，不能用窗口左右/上下中线猜测。
@@ -700,11 +824,32 @@ function FaCardListPage() {
           ? [value.suggestedMapping.end.matchKey]
           : []);
       // 建议映射可能已含 matchKeys；统一补上，保证 mapping 与 keys 影子 state 一致
-      setBeginMapping({ ...suggestedBegin, matchKeys: suggestedBeginKeys });
-      setEndMapping({ ...suggestedEnd, matchKeys: suggestedEndKeys });
-      setBeginKeys(suggestedBeginKeys);
-      setEndKeys(suggestedEndKeys);
+      // 历史恢复后重新读取同一对文件：存档映射/匹配键顶回建议值（一次性
+      // 消费，换文件照旧），且不再自动送 LLM 复核——那份映射已确认过。
+      const stash = restoredFaCardsRef.current;
+      const samePath = (a: string, b: string) =>
+        a.trim().toLowerCase() === b.trim().toLowerCase();
+      const match =
+        stash &&
+        samePath(stash.beginPath, bPath) &&
+        samePath(stash.endPath, ePath)
+          ? stash
+          : undefined;
+      if (match) restoredFaCardsRef.current = null;
+      setBeginMapping(
+        match
+          ? { ...match.beginMapping, matchKeys: match.beginKeys }
+          : { ...suggestedBegin, matchKeys: suggestedBeginKeys },
+      );
+      setEndMapping(
+        match
+          ? { ...match.endMapping, matchKeys: match.endKeys }
+          : { ...suggestedEnd, matchKeys: suggestedEndKeys },
+      );
+      setBeginKeys(match ? match.beginKeys : suggestedBeginKeys);
+      setEndKeys(match ? match.endKeys : suggestedEndKeys);
       setResult(value);
+      if (match) return;
       void reviewLlm({
         beginPath: bPath,
         endPath: ePath,
@@ -1257,7 +1402,7 @@ function FaCardListPage() {
   };
   // FA 匹配必需的角色：必须完成映射才能进入下一步
   const REQUIRED_ROLES: [keyof FaMapping, string][] = [
-    ["matchKeys", "组合匹配键"],
+    ["matchKeys", "资产ID"],
     ["category", "资产类别"],
     ["name", "资产名称"],
     ["originalValue", "原值"],
@@ -1311,7 +1456,7 @@ function FaCardListPage() {
     );
   const multi = (event: ChangeEvent<HTMLSelectElement>) =>
     Array.from(event.target.selectedOptions).map((option) => option.value);
-  // 单侧字段映射列表（参考看账 kz-map）：第一行「组合匹配键」多选，
+  // 单侧字段映射列表（参考看账 kz-map）：第一行「资产ID」多选，
   // 其余角色单选。每个下拉直接列该文件的全部表头。
   const faMapSide = (
     side: "begin" | "end",
@@ -1328,7 +1473,17 @@ function FaCardListPage() {
     };
     return (
       <div className="fa-map-fields">
-        <Field label="组合匹配键（可多列）">
+        <Field
+          label={
+            <>
+              资产ID（可多列）
+              <JargonTip
+                term="资产ID"
+                text="用一列或多列拼成唯一识别一张资产卡片的 ID，两期清单之间靠它对号入座。可只选资产编号一列，编号不唯一时加类别等列拼成组合键。"
+              />
+            </>
+          }
+        >
           <select
             multiple
             disabled={llmBusy}
@@ -1398,9 +1553,13 @@ function FaCardListPage() {
     mapping: FaMapping,
   ): { controls: React.ReactNode[]; mappedFlags: boolean[] } => {
     const roleOptions: [keyof FaMapping, string][] = [
-      ["matchKeys", "组合匹配键"],
+      ["matchKeys", "资产ID"],
       ...rolesForSide(side),
     ];
+    // 与共用映射面板（MappingPanel）同一套标注法：必填角色标签后跟全角
+    // “＊”，下拉的 <option> 无法单独上样式，只能用文字标。
+    const requiredKeys = new Set(REQUIRED_ROLES.map(([key]) => key));
+    const markOf = (key: keyof FaMapping) => (requiredKeys.has(key) ? "＊" : "");
     // 已被某列占用的角色集合（跨列感知，用于标记"已映射"）
     const usedRoles = new Set<string>();
     for (const header of inspect.headers) {
@@ -1417,7 +1576,7 @@ function FaCardListPage() {
     const mappedFlags: boolean[] = [];
     for (const header of inspect.headers) {
       const colValue = header.trim();
-      // 同一列可以同时承担组合匹配键、资产名称等多个角色。原先用 find
+      // 同一列可以同时承担资产ID、资产名称等多个角色。原先用 find
       // 只显示第一个，复核时看不到完整关系；这里保留全部角色并合并展示。
       const mappedRoles = faMappedRolesForColumn(
         colValue,
@@ -1433,7 +1592,9 @@ function FaCardListPage() {
             className={mappedRoles.length ? "mapped" : undefined}
             disabled={llmBusy}
             title={
-              mappedRoles.map(([, label]) => label).join(" + ") || "未映射"
+              mappedRoles
+                .map(([key, label]) => `${label}${markOf(key)}`)
+                .join(" + ") || "未映射"
             }
             value={
               mappedRoles.length > 1
@@ -1473,7 +1634,9 @@ function FaCardListPage() {
             <option value="">—</option>
             {mappedRoles.length > 1 && (
               <option value={multipleValue} disabled>
-                {mappedRoles.map(([, label]) => label).join(" + ")}
+                {mappedRoles
+                  .map(([key, label]) => `${label}${markOf(key)}`)
+                  .join(" + ")}
               </option>
             )}
             {roleOptions.map(([key, label]) => {
@@ -1489,6 +1652,7 @@ function FaCardListPage() {
                   className={takenByOther ? "dt-role-taken" : undefined}
                 >
                   {label}
+                  {markOf(key)}
                   {takenByOther ? "（已用）" : ""}
                 </option>
               );
@@ -1503,7 +1667,7 @@ function FaCardListPage() {
   const supplementRoleOptions = (
     kind: "addition" | "disposal",
   ): { field: keyof FaSupplementConfig; label: string; multi?: boolean }[] => [
-    { field: "keys", label: "组合匹配键", multi: true },
+    { field: "keys", label: "资产ID", multi: true },
     { field: "method", label: kind === "addition" ? "新增方式" : "处置方式" },
     { field: "date", label: kind === "addition" ? "新增日期" : "处置日期" },
     ...(kind === "disposal"
@@ -1561,9 +1725,10 @@ function FaCardListPage() {
             }}
           >
             <option value="">—</option>
+            {/* 补充清单的角色全部必填（缺失会拦截导出），统一标注“＊”。 */}
             {roles.map(({ field, label }) => (
               <option key={field} value={String(field)}>
-                {label}
+                {label}＊
               </option>
             ))}
           </select>
@@ -1734,9 +1899,7 @@ function FaCardListPage() {
   const renderFaResult = () => {
     if (!result || typeof result !== "object")
       return (
-        <div className="empty">
-          读取文件结构后，可核对组合键、字段映射和预览结果。
-        </div>
+        <EmptyState compact title="等待结果" description="读取文件结构后，可核对资产ID、必选映射和预览结果。" />
       );
     const value = result as Record<string, unknown>;
     if (value.begin && value.end) {
@@ -1753,7 +1916,7 @@ function FaCardListPage() {
             期末：{end.displayName ?? end.selectedSheet}，标题在第{" "}
             {end.detectedHeaderRow} 行，{end.dimensions?.rows ?? 0} 条数据
           </span>
-          <span>请在左侧核对预览、组合匹配键和字段映射。</span>
+          <span>请在左侧核对预览、资产ID和必选映射。</span>
         </div>
       );
     }
@@ -1771,12 +1934,6 @@ function FaCardListPage() {
           duplicateRowCount?: number;
         };
       };
-      const rows = Array.isArray(value.preview)
-        ? (value.preview as Record<string, unknown>[])
-        : [];
-      const columns = Array.isArray(value.columns)
-        ? (value.columns as string[])
-        : [];
       return (
         <>
           <StatGrid
@@ -1795,7 +1952,7 @@ function FaCardListPage() {
               匹配列存在重复值：{stats.duplicates?.duplicateValueCount ?? 0}{" "}
               个重复键、
               {stats.duplicates?.duplicateRowCount ?? 0}{" "}
-              行；已按数据透视逻辑逐条配对，请确认匹配列是否唯一。
+              行；已按合并聚合口径计算增减变动，确保合计数无误。
             </div>
           )}
           {(Number(stats.unmatchedAddition || 0) > 0 ||
@@ -1805,33 +1962,30 @@ function FaCardListPage() {
               {stats.unmatchedDisposal ?? 0} 条；导出时将另存未匹配清单。
             </div>
           )}
-          {!!rows.length && (
-            <details className="fa-preview" open>
-              <summary>合并结果前 {rows.length} 行</summary>
-              <div className="fa-preview-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      {columns.map((column) => (
-                        <th key={column}>{column}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((row, rowIndex) => (
-                      <tr key={rowIndex}>
-                        {columns.map((column) => (
-                          <td key={column} title={String(row[column] ?? "")}>
-                            {String(row[column] ?? "")}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </details>
-          )}
+          {(() => {
+            // 明细前 N 行看不出两期勾稽关系，改列变动汇总：与导出的
+            // 「固定资产变动汇总表」同一份数值与版式（类别为列、千分位）。
+            const summary = (
+              value as { summary?: { columns?: unknown; rows?: unknown } }
+            ).summary;
+            if (
+              !summary ||
+              !Array.isArray(summary.columns) ||
+              !Array.isArray(summary.rows) ||
+              summary.rows.length === 0
+            ) {
+              return null;
+            }
+            return (
+              <details className="fa-summary-details" open>
+                <summary>固定资产变动汇总表（预览）</summary>
+                <FaSummaryTable
+                  columns={summary.columns as string[]}
+                  rows={summary.rows as FaSummaryRow[]}
+                />
+              </details>
+            );
+          })()}
         </>
       );
     }
@@ -1893,7 +2047,7 @@ function FaCardListPage() {
         onStepClick={(index) => setStep((index + 1) as 1 | 2 | 3)}
       />
       <div className="fa-stack">
-        <Card>
+        <Card variant="section">
           <CardHeader>
             <CardTitle>
               {step === 1
@@ -1902,7 +2056,9 @@ function FaCardListPage() {
                   ? "2. 补充清单映射（可选）"
                   : "3. 保存并导出"}
             </CardTitle>
-            <Badge className="badge-ready">已就绪</Badge>
+            <Badge variant={busy ? "info" : inspection ? "success" : "neutral"}>
+              {busy ? "处理中" : inspection ? "已读取" : "等待文件"}
+            </Badge>
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
@@ -1956,7 +2112,7 @@ function FaCardListPage() {
                           ))}
                         </select>
                       ) : (
-                        <input
+                        <Input
                           value={beginSheet}
                           onChange={(e) => {
                             setBeginSheet(e.target.value);
@@ -1966,7 +2122,7 @@ function FaCardListPage() {
                       )}
                     </Field>
                     <Field label="标题行（留空自动识别）">
-                      <input
+                      <Input
                         value={beginHeaderRow}
                         placeholder="自动"
                         onChange={(e) => setBeginHeaderRow(e.target.value)}
@@ -2008,7 +2164,7 @@ function FaCardListPage() {
                           ))}
                         </select>
                       ) : (
-                        <input
+                        <Input
                           value={endSheet}
                           onChange={(e) => {
                             setEndSheet(e.target.value);
@@ -2018,7 +2174,7 @@ function FaCardListPage() {
                       )}
                     </Field>
                     <Field label="标题行（留空自动识别）">
-                      <input
+                      <Input
                         value={endHeaderRow}
                         placeholder="自动"
                         onChange={(e) => setEndHeaderRow(e.target.value)}
@@ -2473,19 +2629,19 @@ function FaCardListPage() {
                 <h3>4. 输出</h3>
                 <div className="form-grid">
                   <Field label="期初显示名称">
-                    <input
+                    <Input
                       value={beginDisplayName}
                       onChange={(e) => setBeginDisplayName(e.target.value)}
                     />
                   </Field>
                   <Field label="期末显示名称">
-                    <input
+                    <Input
                       value={endDisplayName}
                       onChange={(e) => setEndDisplayName(e.target.value)}
                     />
                   </Field>
                   <Field label="资产负债表日">
-                    <input
+                    <Input
                       type="date"
                       value={balanceSheetDate}
                       onChange={(e) => setBalanceSheetDate(e.target.value)}
@@ -2544,6 +2700,10 @@ function FaCardListPage() {
               <div>
                 <h2>文件预览</h2>
                 <p>预览区已锁定；各文件可独立纵向、横向滚动。</p>
+                {/* 与其他工具的映射面板同一条说明：下拉角色后的“＊”表示必填。 */}
+                <p className="mapping-requirement-legend">
+                  各列顶部的下拉为必选映射；＊ 为必填字段。
+                </p>
                 {step === 1 &&
                   inspection &&
                   (() => {
@@ -2561,7 +2721,7 @@ function FaCardListPage() {
                     );
                   })()}
               </div>
-              <Badge className="badge-preview">
+              <Badge variant="info">
                 {step === 1 ? "导入文件" : "补充清单"}
               </Badge>
             </div>
@@ -2585,15 +2745,11 @@ function FaCardListPage() {
                 <>
                   <section className="fa-preview fa-preview-empty-card">
                     <header>期初文件预览</header>
-                    <div className="empty">
-                      选择期初文件并读取结构后，在此显示表格内容。
-                    </div>
+                    <EmptyState compact title="等待结果" description="选择期初文件并读取结构后，在此显示表格内容。" />
                   </section>
                   <section className="fa-preview fa-preview-empty-card">
                     <header>期末文件预览</header>
-                    <div className="empty">
-                      选择期末文件并读取结构后，在此显示表格内容。
-                    </div>
+                    <EmptyState compact title="等待结果" description="选择期末文件并读取结构后，在此显示表格内容。" />
                   </section>
                 </>
               ) : (
@@ -2614,9 +2770,7 @@ function FaCardListPage() {
                   ) : (
                     <section className="fa-preview fa-preview-empty-card">
                       <header>新增清单预览</header>
-                      <div className="empty">
-                        选择新增清单及工作表后，在此显示表格内容。
-                      </div>
+                      <EmptyState compact title="等待结果" description="选择新增清单及工作表后，在此显示表格内容。" />
                     </section>
                   )}
                   {disposalInspect &&
@@ -2635,9 +2789,7 @@ function FaCardListPage() {
                   ) : (
                     <section className="fa-preview fa-preview-empty-card">
                       <header>处置清单预览</header>
-                      <div className="empty">
-                        选择处置清单及工作表后，在此显示表格内容。
-                      </div>
+                      <EmptyState compact title="等待结果" description="选择处置清单及工作表后，在此显示表格内容。" />
                     </section>
                   )}
                 </>
@@ -2645,7 +2797,7 @@ function FaCardListPage() {
             </div>
           </aside>
         ) : (
-          <Card className="fa-result-workspace">
+          <Card variant="workspace" className="fa-result-workspace">
             <CardHeader>
               <CardTitle>匹配与导出结果</CardTitle>
             </CardHeader>

@@ -8,6 +8,7 @@ import {
   pickPath,
 } from "./api";
 import type { ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { errorText } from "@/lib/errors";
 import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
@@ -16,9 +17,11 @@ import { JobProgress } from "@/components/JobProgress";
 import { Field } from "@/components/Field";
 import { FileDropInput } from "@/components/FileDropInput";
 import { Button } from "@/components/ui/button";
+import { confirmDialog } from "@/components/ConfirmDialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useJobEvents } from "@/hooks/useJobEvents";
+import { EmptyState } from "@/components/EmptyState";
 import {
   dedupePdfPaths,
   fileStatusLabel,
@@ -30,6 +33,15 @@ import {
   summarizeFileResultsText,
   type PdfConvertResult,
 } from "./pdfToExcelUi";
+
+export function pdfToExcelStep(
+  fileCount: number,
+  hasJob: boolean,
+  hasResult: boolean,
+): number {
+  if (hasResult || hasJob) return 2;
+  return fileCount > 0 ? 1 : 0;
+}
 
 /// 回函 PDF 转 Excel：批量把文字版回函逐行转成 Excel 并自动提取表格。
 /// 结构对齐 FileListDirectoryPage（效率工具同组）：文件准备 → 输出位置 → 进度与结果。
@@ -61,6 +73,17 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
     setJob(undefined);
     activeJobId.current = "__input_changed__";
   }, [pdfPaths, setJob, activeJobId]);
+
+  // 历史记录「继续任务」：回填上次的 PDF 列表与输出目录，不自动转换。
+  useTaskRestore(tool.id, (restore) => {
+    const params = restore.params as {
+      pdfPaths?: string[];
+      outputDir?: string;
+    };
+    if (Array.isArray(params.pdfPaths) && params.pdfPaths.length)
+      setPdfPaths(dedupePdfPaths(params.pdfPaths));
+    if (typeof params.outputDir === "string") setOutputDir(params.outputDir);
+  });
 
   // 拖放：一次可拖入多份 PDF 或整个文件夹，展开后只保留 PDF。
   useEffect(() => {
@@ -146,6 +169,11 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
     (result ? outputDir.trim() : "") ||
     result?.outputPaths[0] ||
     "";
+  const currentStep = pdfToExcelStep(
+    pdfPaths.length,
+    Boolean(job),
+    Boolean(result),
+  );
 
   return (
     <>
@@ -160,19 +188,24 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
           { key: "2", label: "开始转换", disabled: true },
           { key: "3", label: "查看结果", disabled: true },
         ]}
-        current={0}
+        current={currentStep}
       />
       <div className="fa-stack">
         <Card>
           <CardHeader>
             <CardTitle>1. 选择回函 PDF</CardTitle>
-            <Badge className="badge-ready">已就绪</Badge>
+            <Badge
+              className={pdfPaths.length ? "badge-ready" : "badge-neutral"}
+            >
+              {pdfPaths.length ? `已添加 ${pdfPaths.length} 份` : "待添加"}
+            </Badge>
           </CardHeader>
           <CardContent>
             <ErrorBox error={error} onDismiss={() => setError("")} />
             <button
               type="button"
               className="drop-zone"
+              data-tour="tool-upload"
               disabled={busy}
               onClick={() => void chooseFiles()}
             >
@@ -203,10 +236,20 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
               </Button>
               <Button
                 type="button"
-                variant="ghost"
+                variant="destructive"
                 size="sm"
                 disabled={busy || !pdfPaths.length}
-                onClick={() => setPdfPaths([])}
+                onClick={async () => {
+                  if (
+                    await confirmDialog({
+                      title: "确认清空列表",
+                      message: `确认清空当前 ${pdfPaths.length} 份 PDF？只会清空本次列表，不会删除原文件。`,
+                      confirmLabel: "清空",
+                      tone: "danger",
+                    })
+                  )
+                    setPdfPaths([]);
+                }}
               >
                 清空列表
               </Button>
@@ -217,11 +260,13 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                   <div className="file-item" key={path}>
                     <div>
                       <strong>{pdfFileName(path)}</strong>
-                      <span>{pdfFileName(path)}</span>
                     </div>
                     <div>
-                      <button
+                      <Button
                         type="button"
+                        variant="ghost"
+                        size="sm"
+                        aria-label={`移除 ${pdfFileName(path)}`}
                         disabled={busy}
                         onClick={() =>
                           setPdfPaths((current) =>
@@ -230,12 +275,16 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                         }
                       >
                         移除
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 ))
               ) : (
-                <div className="empty compact">尚未添加 PDF 文件</div>
+                <EmptyState
+                  compact
+                  title="尚未添加 PDF 文件"
+                  description="选择回函 PDF 或文件夹后，可在此确认待处理列表。"
+                />
               )}
             </div>
             <p className="hint">
@@ -250,14 +299,16 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
           </CardHeader>
           <CardContent>
             <Field label="输出文件夹（可选）">
-              <FileDropInput
-                value={outputDir}
-                placeholder="拖放或点击选择输出文件夹"
-                onBrowse={() => void chooseOutputDir()}
-                onClear={outputDir ? () => setOutputDir("") : undefined}
-                onDragStateChange={() => {}}
-                disabled={busy}
-              />
+              <div title={outputDir || undefined}>
+                <FileDropInput
+                  value={outputDir}
+                  placeholder="拖放或点击选择输出文件夹"
+                  onBrowse={() => void chooseOutputDir()}
+                  onClear={outputDir ? () => setOutputDir("") : undefined}
+                  onDragStateChange={() => {}}
+                  disabled={busy}
+                />
+              </div>
             </Field>
             <p className="hint">
               留空则输出到每份 PDF
@@ -344,6 +395,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                     <Button
                       type="button"
                       variant="default"
+                      title={openTarget}
                       onClick={() => void openOutput(openTarget)}
                     >
                       打开输出
@@ -353,7 +405,14 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
               </>
             ) : (
               !job && (
-                <div className="empty">转换进度和逐份结果会在这里显示。</div>
+                <EmptyState
+                  title="等待转换结果"
+                  description={
+                    pdfPaths.length
+                      ? "开始转换后，这里会显示总体进度和每份回函的处理结果。"
+                      : "先添加回函 PDF，再开始转换。"
+                  }
+                />
               )
             )}
           </CardContent>

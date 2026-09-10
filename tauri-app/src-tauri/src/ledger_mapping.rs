@@ -255,6 +255,9 @@ const AUX: &[&str] = &[
     "assignment",
     "profit center",
     "profitcenter",
+    "成本中心",
+    "成本中心代码",
+    "成本中心編碼",
 ];
 /// 辅助核算的冲突词：挡住它去吃科目类与金额类的列。
 const NOT_AUX: &[&str] = &["科目", "account", "金额", "amount", "余额", "balance"];
@@ -428,14 +431,6 @@ static JE_ROLES: &[Role] = &[
             "科目代碼",
             "科目号",
             "科目編號",
-            "会计科目",
-            "會計科目",
-            "总账科目",
-            "總賬科目",
-            // 「帐」是「账」的旧异体字，财务导出里两种写法都常见
-            //（04 PBC 的序时账表头就写作「总帐科目」），必须一并收录。
-            "总帐科目",
-            "總帳科目",
             "账户",
             "帳戶",
             "account",
@@ -714,11 +709,6 @@ static TB_ROLES: &[Role] = &[
             "科目代碼",
             "科目号",
             "科目編號",
-            "会计科目",
-            "會計科目",
-            "总账科目",
-            "总帐科目",
-            "總賬科目",
             "科目段组合",
             // 04／05 号样例的明细编码列就叫裸的一个「科目」，旁边另有
             // 「科目级别」放一级编码。分数比 `科目编码`（四字）低，同表里
@@ -1669,6 +1659,25 @@ pub(crate) fn alias_score(role: &Role, header: &str) -> Option<f64> {
     if n.is_empty() {
         return None;
     }
+    // 这些 ERP 标题在真实导出中既可能装编码，也可能装名称。公共 Coding
+    // 不凭标题定性，交给 LLM 结合 sampleRows 或用户人工选择。
+    if matches!(role.name, "accountCode" | "accountName")
+        && header_segments(header).iter().any(|segment| {
+            matches!(
+                segment.as_str(),
+                "会计科目"
+                    | "會計科目"
+                    | "总账科目"
+                    | "總賬科目"
+                    | "总帐科目"
+                    | "總帳科目"
+                    | "账户"
+                    | "帳戶"
+            )
+        })
+    {
+        return None;
+    }
     if role
         .conflicts
         .iter()
@@ -2356,7 +2365,10 @@ fn is_formula_error(value: &str) -> bool {
     )
 }
 
-fn is_report_footer_value(value: &str) -> bool {
+/// 页脚行的值形态：`核算单位：/制单人：/打印时间：` 打头的整格。
+/// 09 号样例的科目余额表把这批行留在表尾，科目清单若不过滤，
+/// 它们会以「科目」身份出现在各工具的分类界面里。
+pub(crate) fn is_report_footer_value(value: &str) -> bool {
     let compact = value.trim().replace(' ', "");
     [
         "核算单位：",
@@ -2392,6 +2404,117 @@ pub(crate) struct LedgerRowAnalysis {
     pub(crate) invalid_account_code_rows: Vec<(usize, String)>,
 }
 
+/// 正文行的**单行**判定，与整表版 [`analyze_ledger_rows`] 同一份口径。
+///
+/// 大 CSV 走流式逐行处理，拿不到全表——表尾倒扫得先知道最后一行在哪——只能
+/// 执行行内可判的两条：有钱没身份的游离行、以及业务行协议（编码＋名称＋可解析
+/// 金额三项齐备）。整表版额外做的表尾倒扫与编码语法校验这里没有，流式路径的
+/// 表尾噪声靠业务行协议兜住（表尾草稿行三项必有缺）。
+pub(crate) struct LedgerBodyRule {
+    identity: Vec<usize>,
+    amount: Vec<usize>,
+    code: Vec<usize>,
+    name: Vec<usize>,
+    je_amounts: Vec<usize>,
+    boundary: bool,
+}
+
+impl LedgerBodyRule {
+    pub(crate) fn new(
+        headers: &[String],
+        column_of: &dyn Fn(&str) -> Vec<String>,
+    ) -> LedgerBodyRule {
+        let indexes = |roles: &[&str]| {
+            let mut v = roles
+                .iter()
+                .flat_map(|role| column_of(role))
+                .filter_map(|name| header_index(headers, &name))
+                .collect::<Vec<_>>();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let identity = indexes(IDENTITY_ROLES);
+        let amount = indexes(&[TB_AMOUNT_ROLES, JE_AMOUNT_ROLES].concat());
+        let mut code = indexes(&["accountCode"]);
+        let mut name = indexes(&["accountName"]);
+        let legacy = indexes(&["account"]);
+        if code.is_empty() {
+            code.extend(legacy.first().copied());
+        }
+        if name.is_empty() {
+            name.extend(legacy.iter().skip(1).copied());
+        }
+        let je_amounts = indexes(JE_AMOUNT_ROLES);
+        // 业务行协议只有 JE 三类必要角色都已映射时才启用——TB 也共用这套判定，
+        // 不能拿 JE 的协议去截余额表。是否属于 JE 只看映射列：科目编码、科目名称
+        // 和至少一个可解析金额三项齐备才纳入；凭证号、备注、任意其他列有值都
+        // 不能把残留行放进正文。
+        let boundary = !code.is_empty() && !name.is_empty() && !je_amounts.is_empty();
+        LedgerBodyRule {
+            identity,
+            amount,
+            code,
+            name,
+            je_amounts,
+            boundary,
+        }
+    }
+
+    /// 该行是否属于账表正文。身份列都没映射时无从判断，一律算正文。
+    pub(crate) fn is_body(&self, row: &[String]) -> bool {
+        if self.identity.is_empty() {
+            return true;
+        }
+        if self.boundary {
+            return self.has_field(row, &self.code)
+                && self.has_field(row, &self.name)
+                && self.has_parseable_je_amount(row);
+        }
+        self.has_identity(row) || !self.has_amount(row)
+    }
+
+    /// 合计标签不是身份。各家把「合计」写在哪一列全凭喜好——10 号样例写在日期列，
+    /// 07 号样例写在科目编码列。认它作身份，表尾倒扫就会停在合计行上，
+    /// 后面那串手工草稿反而留下来了。
+    fn has_identity(&self, row: &[String]) -> bool {
+        self.identity.iter().any(|index| {
+            row.get(*index).map(|v| v.trim()).is_some_and(|v| {
+                !v.is_empty()
+                    && !is_formula_error(v)
+                    && !is_rollup_label(v)
+                    && !is_report_footer_value(v)
+            })
+        })
+    }
+
+    fn has_amount(&self, row: &[String]) -> bool {
+        self.amount.iter().any(|index| {
+            row.get(*index)
+                .and_then(|v| parse_amount(v).ok().flatten())
+                .is_some_and(|v| v.abs() > 0.005)
+        })
+    }
+
+    fn has_field(&self, row: &[String], positions: &[usize]) -> bool {
+        positions.iter().any(|index| {
+            row.get(*index)
+                .map(|value| value.trim())
+                .is_some_and(|value| {
+                    !value.is_empty() && !is_formula_error(value) && !is_rollup_label(value)
+                })
+        })
+    }
+
+    fn has_parseable_je_amount(&self, row: &[String]) -> bool {
+        self.je_amounts.iter().any(|index| {
+            row.get(*index).is_some_and(|value| {
+                !value.trim().is_empty() && parse_amount(value).is_ok_and(|amount| amount.is_some())
+            })
+        })
+    }
+}
+
 /// 分析序时账正文边界与必要字段完整性。
 ///
 /// 整行全空才构成正文分隔符。出现分隔符后，只有同时具备科目编码、科目名称和
@@ -2403,112 +2526,31 @@ pub(crate) fn analyze_ledger_rows(
     rows: &[Vec<String>],
     column_of: &dyn Fn(&str) -> Vec<String>,
 ) -> LedgerRowAnalysis {
-    let indexes = |roles: &[&str]| {
-        let mut v = roles
-            .iter()
-            .flat_map(|role| column_of(role))
-            .filter_map(|name| header_index(headers, &name))
-            .collect::<Vec<_>>();
-        v.sort_unstable();
-        v.dedup();
-        v
-    };
-    let identity_indexes = indexes(IDENTITY_ROLES);
-    let amount_indexes = indexes(&[TB_AMOUNT_ROLES, JE_AMOUNT_ROLES].concat());
-    let je_amount_indexes = indexes(JE_AMOUNT_ROLES);
-    let mut account_code_indexes = indexes(&["accountCode"]);
-    let mut account_name_indexes = indexes(&["accountName"]);
-    // 兼容历史映射：旧版把编码与名称依次放进 `account` 多列角色。
-    let legacy_account_indexes = indexes(&["account"]);
-    if account_code_indexes.is_empty() {
-        account_code_indexes.extend(legacy_account_indexes.first().copied());
-    }
-    if account_name_indexes.is_empty() {
-        account_name_indexes.extend(legacy_account_indexes.iter().skip(1).copied());
-    }
+    let rule = LedgerBodyRule::new(headers, column_of);
     // 身份列都没映射就无从判断，一行不删。
-    if identity_indexes.is_empty() {
+    if rule.identity.is_empty() {
         return LedgerRowAnalysis {
             keep: vec![true; rows.len()],
             invalid_account_code_rows: Vec::new(),
         };
     }
-    // 合计标签不是身份。各家把「合计」写在哪一列全凭喜好——10 号样例写在日期列，
-    // 07 号样例写在科目编码列。认它作身份，表尾倒扫就会停在合计行上，
-    // 后面那串手工草稿反而留下来了。
-    let has_identity = |row: &Vec<String>| {
-        identity_indexes.iter().any(|index| {
-            row.get(*index).map(|v| v.trim()).is_some_and(|v| {
-                !v.is_empty()
-                    && !is_formula_error(v)
-                    && !is_rollup_label(v)
-                    && !is_report_footer_value(v)
-            })
-        })
-    };
-    let has_amount = |row: &Vec<String>| {
-        amount_indexes.iter().any(|index| {
-            row.get(*index)
-                .and_then(|v| parse_amount(v).ok().flatten())
-                .is_some_and(|v| v.abs() > 0.005)
-        })
-    };
-
     let mut keep = rows
         .iter()
-        .map(|row| has_identity(row) || !has_amount(row))
+        .map(|row| rule.is_body(row))
         .collect::<Vec<bool>>();
     // 表尾噪声：倒着扫到第一个有身份的行就停手。
     for index in (0..rows.len()).rev() {
-        if has_identity(&rows[index]) {
+        if rule.has_identity(&rows[index]) {
             break;
         }
         keep[index] = false;
     }
 
-    let has_field = |row: &[String], positions: &[usize]| {
-        positions.iter().any(|index| {
-            row.get(*index)
-                .map(|value| value.trim())
-                .is_some_and(|value| {
-                    !value.is_empty() && !is_formula_error(value) && !is_rollup_label(value)
-                })
-        })
-    };
-    let has_parseable_je_amount = |row: &[String]| {
-        je_amount_indexes.iter().any(|index| {
-            row.get(*index).is_some_and(|value| {
-                !value.trim().is_empty() && parse_amount(value).is_ok_and(|amount| amount.is_some())
-            })
-        })
-    };
-
-    // 只有 JE 三类必要角色都已映射时才启用业务行协议。TB 也共用
-    // `ledger_junk_mask`，不能拿 JE 的业务行协议去截余额表。
-    //
-    // 是否属于 JE 只看映射列：科目编码、科目名称和至少一个可解析金额三项
-    // 齐备才纳入。凭证号、备注、任意其他列有值都不能把残留行放进正文；整行
-    // 空白仍是明确的段落分隔符，分隔后同样按这三项重新识别。
-    let boundary_enabled = !account_code_indexes.is_empty()
-        && !account_name_indexes.is_empty()
-        && !je_amount_indexes.is_empty();
-    if boundary_enabled {
-        for (index, row) in rows.iter().enumerate() {
-            if row.iter().all(|value| value.trim().is_empty()) {
-                keep[index] = false;
-                continue;
-            }
-            keep[index] = has_field(row, &account_code_indexes)
-                && has_field(row, &account_name_indexes)
-                && has_parseable_je_amount(row);
-        }
-    }
-
+    let mut invalid_account_code_rows = Vec::new();
     // 科目编码必须是含数字的 ASCII 字母数字串，可用点号或连字符分级。
     // `下·` 这类版式标签不能成为科目，更不能进入勾稽或导出；混写的
     // `1001/库存现金` 先拆出编码再校验。
-    let mut invalid_account_code_rows = Vec::new();
-    if let Some(code_index) = account_code_indexes.first().copied() {
+    if let Some(code_index) = rule.code.first().copied() {
         for (index, row) in rows.iter().enumerate() {
             if !keep.get(index).copied().unwrap_or(false) {
                 continue;
@@ -3264,7 +3306,11 @@ fn is_measurement_unit_value(raw: &str) -> bool {
     )
 }
 
-fn column_is_measurement_unit(headers: &[String], rows: &[Vec<String>], index: usize) -> bool {
+pub(crate) fn column_is_measurement_unit(
+    headers: &[String],
+    rows: &[Vec<String>],
+    index: usize,
+) -> bool {
     let header = headers
         .get(index)
         .map(|value| normalize_header(value))
@@ -3418,7 +3464,162 @@ pub(crate) fn parse_date(raw: &str) -> Option<NaiveDate> {
             }
         }
     }
+    // 中文日期：“2024年3月5日”“25年1月10日”（两位年按 20xx）——借款台账
+    // 的常见手写体，此前只存在借款模块一份未接线的实现，内核认不出来。
+    if let Some(date) = parse_cn_date(text) {
+        return Some(date);
+    }
+    // 年月写法（无日）：「2025-01」「2025.1」「202501」「2025年1月」按当月 1 日。
+    // 只认带年份的——纯月份数字没有上下文推不出年份，由各工具按报告期补
+    // （汇兑损益的月度归集见 `fx::je_date`）。
+    if let Some((Some(year), month)) = parse_month(text) {
+        return NaiveDate::from_ymd_opt(year, month, 1);
+    }
+    // Excel 序列号（5 位纯数字，约 1954～2119 年）：有人把日期粘贴成数值，
+    // 单元格类型是数字而非日期，读取侧只能拿到 "45662" 这样的文本——
+    // Excel 序列 1 即 1900-01-01（1900 闰年 bug 后与 1899-12-30 基准一致）。
+    if text.len() == 5 && text.chars().all(|c| c.is_ascii_digit()) {
+        if let Ok(serial) = text.parse::<i64>() {
+            if (20000..80000).contains(&serial) {
+                return NaiveDate::from_ymd_opt(1899, 12, 30)
+                    .and_then(|epoch| epoch.checked_add_signed(chrono::Duration::days(serial)));
+            }
+        }
+    }
     None
+}
+
+/// 月度取值：供「序时账只有月份列」的兜底口径使用。
+///
+/// 带年份的写法（`2025-01`、`2025/1`、`2025.01`、`202501`、`2025年1月`）返回
+/// `(Some(年), 月)`；纯月份（`1`、`01`、`1月`、`一月`、`Jan`）返回 `(None, 月)`，
+/// 年份由调用方按报告期推定。只认 1..12 的月份——日列（13..31）、纯年份列、
+/// 完整日期都不认，避免把别的列误读成月份。
+pub(crate) fn parse_month(raw: &str) -> Option<(Option<i32>, u32)> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some(month) = english_month(text) {
+        return Some((None, month));
+    }
+    if let Some(month) = chinese_numeral_month(text) {
+        return Some((None, month));
+    }
+    // 其余写法只允许数字、分隔符与「年」「月」两种字。
+    if !text
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '-' | '/' | '.') || c == '年' || c == '月')
+    {
+        return None;
+    }
+    if let Some(i_nian) = text.find('年') {
+        // 「2025年1月」；年后没有月段（「2025年」）是年份列，不算月份。
+        let year = text[..i_nian]
+            .parse::<i32>()
+            .ok()
+            .filter(|y| (1900..=2100).contains(y))?;
+        let month = text[i_nian + '年'.len_utf8()..]
+            .strip_suffix('月')?
+            .parse::<u32>()
+            .ok()?;
+        return (1..=12).contains(&month).then_some((Some(year), month));
+    }
+    if let Some(digits) = text.strip_suffix('月') {
+        // 「1月」「01月」：纯月份，不带年份。
+        let month = digits.parse::<u32>().ok()?;
+        return (1..=12).contains(&month).then_some((None, month));
+    }
+    if text.chars().all(|c| c.is_ascii_digit()) {
+        // 6 位是年＋月（「202501」）；1～2 位是纯月份（「1」「01」）。
+        if text.len() == 6 {
+            let year = text[..4]
+                .parse::<i32>()
+                .ok()
+                .filter(|y| (1900..=2100).contains(y))?;
+            let month = text[4..].parse::<u32>().ok()?;
+            return (1..=12).contains(&month).then_some((Some(year), month));
+        }
+        if text.len() <= 2 {
+            let month = text.parse::<u32>().ok()?;
+            return (1..=12).contains(&month).then_some((None, month));
+        }
+        return None;
+    }
+    // 「2025-01」「2025/1」「2025.01」：两段且左段是四位年份。
+    let (left, right) = ['-', '/', '.']
+        .into_iter()
+        .find_map(|sep| text.rsplit_once(sep))?;
+    let month = right.parse::<u32>().ok()?;
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    if left.len() == 4 && left.chars().all(|c| c.is_ascii_digit()) {
+        let year = left
+            .parse::<i32>()
+            .ok()
+            .filter(|y| (1900..=2100).contains(y))?;
+        return Some((Some(year), month));
+    }
+    None
+}
+
+/// 英文月份缩写与全称（大小写不敏感）。只认整段就是月份的写法。
+fn english_month(text: &str) -> Option<u32> {
+    let lower = text.trim().to_ascii_lowercase();
+    Some(match lower.as_str() {
+        "jan" | "january" => 1,
+        "feb" | "february" => 2,
+        "mar" | "march" => 3,
+        "apr" | "april" => 4,
+        "may" => 5,
+        "jun" | "june" => 6,
+        "jul" | "july" => 7,
+        "aug" | "august" => 8,
+        "sep" | "sept" | "september" => 9,
+        "oct" | "october" => 10,
+        "nov" | "november" => 11,
+        "dec" | "december" => 12,
+        _ => return None,
+    })
+}
+
+/// 中文数字月份：一月、十二月……不带「月」字的纯中文数字不认——
+/// 科目层级里的「一级」「二级」不是月份。
+fn chinese_numeral_month(text: &str) -> Option<u32> {
+    let body = text.trim().strip_suffix('月')?;
+    Some(match body {
+        "一" => 1,
+        "二" => 2,
+        "三" => 3,
+        "四" => 4,
+        "五" => 5,
+        "六" => 6,
+        "七" => 7,
+        "八" => 8,
+        "九" => 9,
+        "十" => 10,
+        "十一" => 11,
+        "十二" => 12,
+        _ => return None,
+    })
+}
+
+/// 中文年月日写法：年（四位或两位，两位按 20xx）＋月＋日，日后的“日”字可省。
+fn parse_cn_date(text: &str) -> Option<NaiveDate> {
+    let i_nian = text.find('年')?;
+    let y_str = &text[..i_nian];
+    let y = if y_str.chars().count() <= 2 {
+        2000 + y_str.parse::<i32>().ok()?
+    } else {
+        y_str.parse::<i32>().ok()?
+    };
+    let rest = &text[i_nian + '年'.len_utf8()..];
+    let i_yue = rest.find('月')?;
+    let m = rest[..i_yue].parse::<u32>().ok()?;
+    let d_part = &rest[i_yue + '月'.len_utf8()..];
+    let d = d_part.trim_end_matches('日').trim().parse::<u32>().ok()?;
+    NaiveDate::from_ymd_opt(y, m, d)
 }
 
 /// 抽查多少行来比较列的量级。扫到 200 行足以让本年累计与本期发生分出高下，
@@ -3694,7 +3895,171 @@ pub(crate) fn suggest_roles_with_data(
     disambiguate_cumulative(kind, headers, rows, &mut out);
     align_opening_period_scope(kind, headers, &mut out);
     fill_combined_account_column(rows, &mut out, headers.len());
+    refine_account_identity_by_data(kind, headers, rows, &mut out);
     out
+}
+
+/// 科目身份列的数据形态。表头「会计科目」在不同 ERP 导出里既可能放编码，
+/// 也可能放名称，不能只靠别名决定角色。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AccountColumnShape {
+    Code,
+    Name,
+    Combined,
+    Unknown,
+}
+
+pub(crate) fn account_column_shape(values: impl Iterator<Item = String>) -> AccountColumnShape {
+    let (mut total, mut code, mut name, mut combined) = (0usize, 0usize, 0usize, 0usize);
+    for raw in values.take(2000) {
+        let value = raw.trim();
+        if value.is_empty() {
+            continue;
+        }
+        total += 1;
+        if split_code_and_name(value).is_some() {
+            combined += 1;
+            continue;
+        }
+        if looks_like_account_code(value) {
+            code += 1;
+            continue;
+        }
+        // 中文或带空格/常见名称分隔符的非编码文本，才算名称证据；纯金额、
+        // 日期和短标志不因“不是编码”就自动变成科目名称。
+        if value
+            .chars()
+            .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+            || value.chars().any(char::is_whitespace)
+            || value.contains(['/', '\\', '_'])
+        {
+            name += 1;
+        }
+    }
+    if total < 4 {
+        return AccountColumnShape::Unknown;
+    }
+    if combined * 4 >= total * 3 {
+        AccountColumnShape::Combined
+    } else if code * 4 >= total * 3 {
+        AccountColumnShape::Code
+    } else if name * 4 >= total * 3 {
+        AccountColumnShape::Name
+    } else {
+        AccountColumnShape::Unknown
+    }
+}
+
+fn account_shape_at(rows: &[Vec<String>], index: usize) -> AccountColumnShape {
+    account_column_shape(rows.iter().filter_map(|row| row.get(index)).cloned())
+}
+
+/// 从“科目编码别名”候选中找取值实际为名称的列。典型是 SAP 03：
+/// `总账科目=1001010000`，而 `会计科目=库存现金-人民币`。
+///
+/// 该判断放在公共层，供看账/TBJE 的直接推荐和各业务 inspect 共同使用，
+/// 避免只有汇兑损益能识别、存款与看账各自漏掉。
+pub(crate) fn account_name_from_code_alias(
+    kind: &str,
+    headers: &[String],
+    rows: &[Vec<String>],
+    taken: &HashSet<String>,
+) -> Option<String> {
+    let role = role_of(kind, "accountCode")?;
+    headers
+        .iter()
+        .enumerate()
+        .filter(|(_, header)| !taken.contains(header.as_str()))
+        .filter_map(|(index, header)| alias_score(role, header).map(|score| (index, header, score)))
+        .filter(|(index, _, _)| account_shape_at(rows, *index) == AccountColumnShape::Name)
+        .max_by(|left, right| {
+            left.2
+                .partial_cmp(&right.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| right.0.cmp(&left.0))
+        })
+        .map(|(_, header, _)| header.clone())
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AccountIdentityColumns {
+    pub(crate) code: Option<String>,
+    pub(crate) names: Vec<String>,
+}
+
+/// 给带自定义候选评分的 inspect 返回公共科目身份结论。调用方的 JSON 映射
+/// 形状各不相同，但“哪列是编码、哪列是名称”只能由这里裁决一次。
+pub(crate) fn account_identity_columns_by_data(
+    kind: &str,
+    headers: &[String],
+    rows: &[Vec<String>],
+) -> AccountIdentityColumns {
+    let suggested = suggest_roles_with_data(kind, headers, rows);
+    AccountIdentityColumns {
+        code: suggested
+            .iter()
+            .find_map(|(index, role)| (*role == "accountCode").then(|| headers[*index].clone())),
+        names: suggested
+            .iter()
+            .filter_map(|(index, role)| (*role == "accountName").then(|| headers[*index].clone()))
+            .collect(),
+    }
+}
+
+fn refine_account_identity_by_data(
+    kind: &str,
+    headers: &[String],
+    rows: &[Vec<String>],
+    out: &mut BTreeMap<usize, &'static str>,
+) {
+    if kind != "je" || rows.is_empty() {
+        return;
+    }
+    let code_role = role_of(kind, "accountCode").expect("JE 科目编码角色存在");
+    let current_code = out
+        .iter()
+        .find_map(|(index, role)| (*role == "accountCode").then_some(*index));
+
+    // 如果别名先把名称文本列判成编码，优先改回真正的编码形态列。
+    if current_code.is_some_and(|index| account_shape_at(rows, index) == AccountColumnShape::Name) {
+        if let Some((replacement, _)) = headers
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != current_code)
+            .filter_map(|(index, header)| {
+                alias_score(code_role, header).map(|score| (index, score))
+            })
+            .filter(|(index, _)| {
+                matches!(
+                    account_shape_at(rows, *index),
+                    AccountColumnShape::Code | AccountColumnShape::Combined
+                )
+            })
+            .max_by(|left, right| {
+                left.1
+                    .partial_cmp(&right.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        {
+            let old = current_code.expect("已判定存在");
+            out.insert(replacement, "accountCode");
+            out.insert(old, "accountName");
+            return;
+        }
+    }
+
+    if out.values().any(|role| *role == "accountName") {
+        return;
+    }
+    let taken = out
+        .keys()
+        .filter_map(|index| headers.get(*index).cloned())
+        .collect::<HashSet<_>>();
+    if let Some(name) = account_name_from_code_alias(kind, headers, rows, &taken) {
+        if let Some(index) = headers.iter().position(|header| header == &name) {
+            out.insert(index, "accountName");
+        }
+    }
 }
 
 /// 科目编码整个空缺时，找一列「编码+名称混写」的顶上。
@@ -4146,7 +4511,12 @@ static LOAN_FORMS: &[Form] = &[
             &["drawdownAmount", "repaymentAmount"],
         ],
         any_of: &[&["closingPrincipal", "principal"]],
-        optional: &[&["rateType"]],
+        optional: &[
+            &["rateType"],
+            &["openingPrincipal"],
+            &["endDate"],
+            &["term"],
+        ],
     },
     Form {
         id: "C",
@@ -4158,7 +4528,12 @@ static LOAN_FORMS: &[Form] = &[
             &["drawdownAmount", "repaymentAmount"],
         ],
         any_of: &[&["openingPrincipal", "principal"]],
-        optional: &[&["rateType"]],
+        optional: &[
+            &["rateType"],
+            &["closingPrincipal"],
+            &["endDate"],
+            &["term"],
+        ],
     },
     Form {
         id: "B",
@@ -4166,7 +4541,13 @@ static LOAN_FORMS: &[Form] = &[
         label: "起始日＋期限",
         required: &[&["startDate"], &["term"], &["rate"]],
         any_of: &[&["principal", "openingPrincipal"]],
-        optional: &[&["rateType"]],
+        optional: &[
+            &["rateType"],
+            &["endDate"],
+            &["closingPrincipal"],
+            &["repaymentAmount"],
+            &["drawdownAmount"],
+        ],
     },
     Form {
         id: "A",
@@ -4174,7 +4555,13 @@ static LOAN_FORMS: &[Form] = &[
         label: "起始日＋到期日",
         required: &[&["startDate"], &["endDate"], &["rate"]],
         any_of: &[&["principal", "openingPrincipal"]],
-        optional: &[&["rateType"]],
+        optional: &[
+            &["rateType"],
+            &["term"],
+            &["closingPrincipal"],
+            &["repaymentAmount"],
+            &["drawdownAmount"],
+        ],
     },
 ];
 
@@ -4940,11 +5327,19 @@ pub(crate) fn split_code_and_name(value: &str) -> Option<(String, String)> {
 pub(crate) fn split_code_and_name_ref(value: &str) -> Option<(&str, &str)> {
     const SEPARATORS: [char; 5] = ['/', ':', '_', '\\', '|'];
     let trimmed = value.trim();
+    // 日期也常用 `/` 分隔。`2025/01/31` 过去会被拆成 `2025` + `01/31`：
+    // 前半段像编码、后半段因仍含 `/` 又过不了编码判定，于是整列被误补成
+    // 科目编码。先交给公共日期解析器排除，避免所有账表 inspect 都踩同一坑。
+    if parse_date(trimmed).is_some() {
+        return None;
+    }
     if let Some(position) = trimmed.find(SEPARATORS) {
         let code = trimmed[..position].trim();
         // 分隔符都是单字节 ASCII，跳过它是安全的。
         let name = trimmed[position + 1..].trim();
-        if looks_like_account_code(code) && !name.is_empty() {
+        // `2025/01`、`1001/02` 这类编码／期间组合不是「编码+名称」。
+        // 后半段自身仍像编码时不得拆成科目名称。
+        if looks_like_account_code(code) && !name.is_empty() && !looks_like_account_code(name) {
             return Some((code, name));
         }
     }
@@ -5065,47 +5460,72 @@ pub(crate) fn normalize_account_code(value: &str) -> String {
 
 /// TB/JE 共用的科目匹配策略。
 ///
-/// 普通科目以「主体＋归一化科目编码」为键；只有同一主体下同一编码在任一侧
-/// 实际对应多个不同名称时，才把规范化名称追加到键中。这里判断的是
-/// 「一个编码对应几个不同名称」，不是一张序时账里同一编码出现了多少行——
-/// 后者只是正常的多笔分录，不能误判成编码不唯一。
+/// 普通科目以「主体＋归一化科目编码」为键；只有同一主体下同一编码在**两张表里
+/// 都**对应多个不同名称、光靠编码无法跨表配对、且两侧名称能真正配上时，才把
+/// 规范化名称追加到键中。这里判断的是「一个编码对应几个不同名称」，不是一张
+/// 序时账里同一编码出现了多少行——后者只是正常的多笔分录，不能误判成编码不唯一。
+///
+/// 匹配键按三层退让，任何情况都不因名称问题拦截：
+/// 1. 编码能唯一确定科目（至多一侧拆分）→ 按编码。仅一侧把编码拆成多个名称
+///    （带辅助核算的余额表按部门／往来拆行、名称列填辅助维度）不算歧义：另一侧
+///    在编码层已聚合，本侧多行汇总回编码即为该科目全量，名称退回展示文本
+///    （实测 TBJEPBC 01 号：TB 侧 167 个共有编码拆多行、JE 侧名称全部唯一）。
+/// 2. 两侧都拆且名称对得上（交集按六成口径衡量）→ 编码＋名称复合键逐名配对。
+/// 3. 两侧都拆但两套名称对不上（不是同一套词汇）→ 复合只会制造互不相认的
+///    孤儿键，退回按编码汇总。
 ///
 /// 编码在统计歧义前先走 [`normalize_account_code`]，所以 `0000943100` 与
 /// `943100` 被视为同一个编码。名称只在确有编码歧义时参与匹配；普通情况下
 /// TB 的标准科目名与 JE 的账户全称即使写法不同，也不会把同一科目拆开。
+/// 按（主体大写、归一化编码）收集一张表内见过的归一化名称集合。编码或
+/// 名称为空的行不参与：它们既不能建键，也不能证明编码对应了几个名称。
+/// `AccountMatchPolicy` 的三层匹配判定与口径预检的拆分统计共用这一份口径。
+pub(crate) fn account_name_sets(
+    rows: &[(String, String, String)],
+) -> HashMap<(String, String), HashSet<String>> {
+    let mut index = HashMap::<(String, String), HashSet<String>>::new();
+    for (entity, raw_code, raw_name) in rows {
+        let code = normalize_account_code(&account_code_of(raw_code));
+        let name = normalize_name(&account_name_of(raw_name));
+        if code.is_empty() || name.is_empty() {
+            continue;
+        }
+        index
+            .entry((entity.trim().to_uppercase(), code))
+            .or_default()
+            .insert(name);
+    }
+    index
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AccountMatchPolicy {
     ambiguous_codes: HashSet<(String, String)>,
 }
 
 impl AccountMatchPolicy {
-    /// 每行依次为（主体、科目编码、科目名称）。两侧分开统计，避免仅仅因为
-    /// TB 与 JE 对同一科目采用不同名称，就把原本唯一的编码误判为歧义。
+    /// 每行依次为（主体、科目编码、科目名称）。歧义要求同一编码在两侧**都**
+    /// 对应多个名称，且两侧名称集合的交集达到六成（与口径预检的复合配对
+    /// 比例同一把尺）：配不上的名称拆行按编码汇总，不再纠缠名称。
     pub(crate) fn from_sides(
         tb: &[(String, String, String)],
         je: &[(String, String, String)],
     ) -> Self {
-        let collect = |rows: &[(String, String, String)]| {
-            let mut index = HashMap::<(String, String), HashSet<String>>::new();
-            for (entity, raw_code, raw_name) in rows {
-                let code = normalize_account_code(&account_code_of(raw_code));
-                let name = normalize_name(&account_name_of(raw_name));
-                if code.is_empty() || name.is_empty() {
-                    continue;
-                }
-                index
-                    .entry((entity.trim().to_uppercase(), code))
-                    .or_default()
-                    .insert(name);
-            }
-            index
-        };
-        let tb_index = collect(tb);
-        let je_index = collect(je);
+        let tb_index = account_name_sets(tb);
+        let je_index = account_name_sets(je);
         let ambiguous_codes = tb_index
             .iter()
-            .chain(je_index.iter())
-            .filter_map(|(key, names)| (names.len() > 1).then_some(key.clone()))
+            .filter(|(key, names)| {
+                let Some(opposite) = je_index.get(key) else {
+                    return false;
+                };
+                if names.len() <= 1 || opposite.len() <= 1 {
+                    return false;
+                }
+                let paired = names.intersection(opposite).count();
+                paired * 5 >= names.len().min(opposite.len()) * 3
+            })
+            .map(|(key, _)| key.clone())
             .collect();
         Self { ambiguous_codes }
     }
@@ -5918,6 +6338,57 @@ mod tests {
     }
 
     #[test]
+    fn 仅一侧把编码拆成多个名称不算歧义() {
+        // 带辅助核算的余额表形态：TB 把 2241.02 按往来拆成两行（名称列填
+        // 辅助维度），JE 同码名称唯一。编码在 JE 侧已唯一可配对，TB 拆行
+        // 汇总回编码即是该科目全量，不进复合匹配——否则两侧名称根本不是
+        // 同一套词汇，整组账套会被「名称无法消歧」拦下。
+        let tb = vec![
+            ("E".into(), "2241.02".into(), "荀海波".into()),
+            ("E".into(), "2241.02".into(), "王强".into()),
+        ];
+        let je = vec![
+            ("E".into(), "2241.02".into(), "其他应付款-个人往来".into()),
+            ("E".into(), "2241.02".into(), "其他应付款-个人往来".into()),
+        ];
+        let policy = AccountMatchPolicy::from_sides(&tb, &je);
+        assert_eq!(policy.ambiguous_count(), 0);
+        assert_eq!(
+            policy.account_key("E", "2241.02", "荀海波"),
+            policy.account_key("E", "2241.02", "其他应付款-个人往来")
+        );
+    }
+
+    #[test]
+    fn 两侧都拆时按名称交集六成决定复合或编码() {
+        // 1002：两侧名称完全一致 → 复合键逐名配对。
+        // 1003：两侧名称毫无交集 → 复合只会制造孤儿键，退回编码。
+        // 1004：交集 1/3 不足六成 → 同样退回编码。
+        // 1005：交集 2/3 达到六成 → 复合键逐名配对。
+        let split = |tb_names: &[&str], je_names: &[&str]| {
+            let tb = tb_names
+                .iter()
+                .map(|name| ("E".into(), "1002".into(), (*name).into()))
+                .collect::<Vec<_>>();
+            let je = je_names
+                .iter()
+                .map(|name| ("E".into(), "1002".into(), (*name).into()))
+                .collect::<Vec<_>>();
+            AccountMatchPolicy::from_sides(&tb, &je).ambiguous_count()
+        };
+        assert_eq!(split(&["工行", "建行"], &["工行", "建行"]), 1);
+        assert_eq!(split(&["工行", "建行"], &["招行", "浦行"]), 0);
+        assert_eq!(
+            split(&["工行", "建行", "招商"], &["工行", "浦行", "兴业"]),
+            0
+        );
+        assert_eq!(
+            split(&["工行", "建行", "招商"], &["工行", "建行", "兴业"]),
+            1
+        );
+    }
+
+    #[test]
     fn 合并科目列两级挑选并让弱角色出让() {
         // 03 号样例形态：整表只有一列科目，编码与名称挤在一格。列名带「文本」
         // 两个字，辅助核算会先把它兜底占走——科目本体比辅助核算重要，要抢回来。
@@ -6025,7 +6496,7 @@ mod tests {
             "凭证号码",
             "冲销凭证号",
             "被冲销凭证号",
-            "会计科目",
+            "科目编码",
             "科目文本",
             "预算二级科目描述",
             "对方科目名称",
@@ -7299,6 +7770,10 @@ mod tests {
         );
         assert_eq!(split_code_and_name("应付账款 - 应付暂估款"), None);
         assert_eq!(split_code_and_name("库存现金"), None);
+        assert_eq!(split_code_and_name("2025/01"), None);
+        assert_eq!(split_code_and_name("2025/01/31"), None);
+        assert_eq!(split_code_and_name("31/01/2025"), None);
+        assert_eq!(split_code_and_name("2025/01/31 00:00:00"), None);
     }
 
     /// 「编码＋空格＋名称」混写（用友导出、审计底稿常见）。alpha.39 起
@@ -7308,10 +7783,7 @@ mod tests {
     fn 编码加空格加名称的混写在首段是编码时拆开() {
         assert_eq!(
             split_code_and_name("6701090001 财务费用-汇兑收益-未实现"),
-            Some((
-                "6701090001".into(),
-                "财务费用-汇兑收益-未实现".into()
-            ))
+            Some(("6701090001".into(), "财务费用-汇兑收益-未实现".into()))
         );
         assert_eq!(
             split_code_and_name("1002.01 招商银行-基本户"),
@@ -7399,7 +7871,7 @@ mod tests {
             "累计余额",
             "累计余额方向",
         ];
-        assert_eq!(落在("tb", &累计口径余额表, "accountCode"), ["总账科目"]);
+        assert!(落在("tb", &累计口径余额表, "accountCode").is_empty());
         assert_eq!(落在("tb", &累计口径余额表, "accountName"), ["总账科目名称"]);
         assert_eq!(
             落在("tb", &累计口径余额表, "closingFunctionalAmount"),
@@ -7428,8 +7900,9 @@ mod tests {
             ["贷方累计"]
         );
 
-        // 03 号序时账：`抵销科目` 是对方科目，取值同样是十位编码，
-        // 绝不能顶掉本方的 `总账科目`。
+        // 03 号序时账：`抵销科目` 是对方科目，取值同样是十位编码。
+        // `总账科目` / `会计科目` 跨 ERP 语义不稳定，Coding 不根据标题硬判，
+        // 留给 LLM 结合样本值判断。
         let sap序时账 = [
             "凭证编号",
             "凭证类型",
@@ -7441,12 +7914,12 @@ mod tests {
             "过账日期",
             "会计科目",
         ];
-        assert_eq!(落在("je", &sap序时账, "accountCode"), ["总账科目"]);
+        assert!(落在("je", &sap序时账, "accountCode").is_empty());
 
         // 04 号序时账：SAP 的方向列叫「借贷标志」（S／H）。
         let sap借贷标志 = ["凭证编号", "借贷标志", "本位币金额", "总帐科目", "科目名称"];
         assert_eq!(落在("je", &sap借贷标志, "direction"), ["借贷标志"]);
-        assert_eq!(落在("je", &sap借贷标志, "accountCode"), ["总帐科目"]);
+        assert!(落在("je", &sap借贷标志, "accountCode").is_empty());
 
         // 07 号序时账：日期与凭证号已经拼成一列「唯一码」。
         let 拼好凭证键 = ["唯一码", "日期", "凭证号数", "科目编码", "科目名称", "摘要"];
@@ -8133,8 +8606,45 @@ mod tests {
         assert_eq!(d("10 Jan 2023"), expect);
         // 日在前的欧洲写法。
         assert_eq!(d("10/01/2023"), expect);
+        // 中文日期：借款台账的手写体，两位年按 20xx。
+        assert_eq!(d("2023年1月10日"), expect);
+        assert_eq!(d("23年1月10日"), expect);
+        // Excel 序列号：日期被粘贴成数值的写法（44936 = 2023-01-10）。
+        assert_eq!(d("44936"), expect);
         assert!(parse_date("").is_none());
         assert!(parse_date("待定").is_none());
+    }
+
+    #[test]
+    fn 年月与月份取值解析() {
+        // 带年份的年月按当月 1 日进入完整日期解析。
+        let jan = NaiveDate::from_ymd_opt(2025, 1, 1).expect("合法日期");
+        for raw in [
+            "2025-01",
+            "2025/1",
+            "2025.01",
+            "202501",
+            "2025年1月",
+            "2025年01月",
+        ] {
+            assert_eq!(parse_date(raw), Some(jan), "{raw}");
+        }
+        // 纯月份不带年份：parse_date 不认（没有上下文推不出年份），parse_month 认。
+        assert!(parse_date("1").is_none());
+        assert!(parse_date("1月").is_none());
+        assert_eq!(parse_month("1"), Some((None, 1)));
+        assert_eq!(parse_month("01"), Some((None, 1)));
+        assert_eq!(parse_month("1月"), Some((None, 1)));
+        assert_eq!(parse_month("一月"), Some((None, 1)));
+        assert_eq!(parse_month("December"), Some((None, 12)));
+        assert_eq!(parse_month("2025-3"), Some((Some(2025), 3)));
+        assert_eq!(parse_month(" 12 "), Some((None, 12)));
+        // 日列（13..31）、年份列、完整日期、空值都不是月份。
+        assert!(parse_month("31").is_none());
+        assert!(parse_month("2025").is_none());
+        assert!(parse_month("2025-01-31").is_none());
+        assert!(parse_month("一级").is_none());
+        assert!(parse_month("").is_none());
     }
 
     #[test]
@@ -8437,5 +8947,50 @@ mod tests {
         assert_eq!(aligned.je_column, "总账科目");
         assert_eq!(aligned.tb_column, "科目");
         assert_eq!(aligned.overlap, 3);
+    }
+
+    #[test]
+    fn 歧义科目标题留给llm且明确文本归摘要() {
+        let headers = vec![
+            "文本".into(),
+            "成本中心".into(),
+            "会计科目".into(),
+            "总账科目".into(),
+        ];
+        let rows = vec![
+            vec![
+                "发放工资".into(),
+                "CC01".into(),
+                "库存现金-人民币".into(),
+                "1001010000".into(),
+            ],
+            vec![
+                "支付货款".into(),
+                "CC02".into(),
+                "银行存款-人民币".into(),
+                "1002101001".into(),
+            ],
+            vec![
+                "计提利息".into(),
+                "CC03".into(),
+                "财务费用-利息支出".into(),
+                "6603010000".into(),
+            ],
+            vec![
+                "收到回款".into(),
+                "CC04".into(),
+                "应收账款-客户".into(),
+                "1122010000".into(),
+            ],
+        ];
+        let suggested = suggest_roles_with_data("je", &headers, &rows);
+        assert_eq!(suggested.get(&0), Some(&"summary"), "文本应归摘要");
+        assert_eq!(
+            suggested.get(&1),
+            Some(&"auxiliary"),
+            "成本中心应归辅助核算"
+        );
+        assert_eq!(suggested.get(&2), None, "会计科目不由 Coding 硬判");
+        assert_eq!(suggested.get(&3), None, "总账科目不由 Coding 硬判");
     }
 }

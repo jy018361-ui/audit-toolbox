@@ -47,6 +47,12 @@ afterEach(() => {
 });
 
 describe("任务进度弹窗", () => {
+  it("大文件总行数未知时显示不定进度，不能误报百分之百", () => {
+    renderDialog([job({ current: 10000, total: 0, message: "已缓存 10000 行" })]);
+    expect(screen.getByText("处理中")).toBeTruthy();
+    expect(screen.queryByText("100%")).toBeNull();
+    expect(screen.getByRole("progressbar").hasAttribute("value")).toBe(false);
+  });
   it("结束态的三个 phase 不算运行中", () => {
     expect(isJobRunning(job())).toBe(true);
     expect(isJobRunning(job({ phase: "completed" }))).toBe(false);
@@ -60,6 +66,13 @@ describe("任务进度弹窗", () => {
     expect(screen.getByText("Excel 批量合并")).toBeTruthy();
     expect(screen.getByText("正在合并第 3 个文件")).toBeTruthy();
     expect(screen.getByText("30%")).toBeTruthy();
+  });
+
+  it("阶段计数走完但任务未完成时最多显示百分之九十九", () => {
+    renderDialog([job({ current: 10, total: 10, message: "正在校验输出" })]);
+    expect(screen.getByText("99%")).toBeTruthy();
+    expect(screen.queryByText("100%")).toBeNull();
+    expect(screen.getByRole("progressbar").getAttribute("value")).toBe("9.9");
   });
 
   it("任务全部结束后不再弹出", () => {
@@ -78,6 +91,18 @@ describe("任务进度弹窗", () => {
     expect(screen.getByText("30%")).toBeTruthy();
   });
 
+  it("内存自动暂停时显示等待状态并允许手动尝试继续", () => {
+    renderDialog([
+      job({
+        phase: "memory_paused",
+        message: "内存紧张，任务已自动暂停：当前可用 0.29 GiB。",
+      }),
+    ]);
+    expect(screen.getByText("内存等待")).toBeTruthy();
+    fireEvent.click(screen.getByText("尝试继续"));
+    expect(jobPause).toHaveBeenCalledWith("job-1", false);
+  });
+
   it("停止按钮取消任务", () => {
     renderDialog([job()]);
     fireEvent.click(screen.getByText("停止"));
@@ -89,10 +114,10 @@ describe("任务进度弹窗", () => {
     fireEvent.click(screen.getByText("最小化"));
     expect(screen.queryByText("正在处理")).toBeNull();
     // 小条上仍报进度，任务没有被藏得无影无踪
-    expect(screen.getByText("Excel 批量合并")).toBeTruthy();
+    expect(screen.getByText("Excel 批量合并 · 点击展开")).toBeTruthy();
     expect(screen.getByText("30%")).toBeTruthy();
 
-    fireEvent.click(screen.getByText("Excel 批量合并"));
+    fireEvent.click(screen.getByText("Excel 批量合并 · 点击展开"));
     expect(screen.getByText("正在处理")).toBeTruthy();
   });
 

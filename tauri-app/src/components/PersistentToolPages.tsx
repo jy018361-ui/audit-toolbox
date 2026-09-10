@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation } from "react-router-dom";
+import { telemetryTrack } from "../api";
 
 export function toolIdFromPathname(pathname: string): string | undefined {
   const match = /^\/tools\/([^/]+)\/?$/.exec(pathname);
@@ -71,6 +72,12 @@ export function PersistentToolPages({
         break;
       }
     }
+  }, [activeToolId]);
+
+  useEffect(() => {
+    // 使用统计：切到某个工具页时记一条「打开工具」；
+    // 工具名由 Rust 端按内嵌工具目录补齐，失败也不影响导航。
+    if (activeToolId) void telemetryTrack("tool_open", activeToolId);
   }, [activeToolId]);
 
   return (

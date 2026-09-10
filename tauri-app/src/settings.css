@@ -1,14 +1,70 @@
-.settings-page .settings-group {
+/* 单页双栏：左栏「要填写的」（LLM / OCR）略宽，右栏「要选择的」略窄 */
+.settings-page .settings-columns {
   display: grid;
+  grid-template-columns: minmax(0, 8fr) minmax(0, 7fr);
   gap: var(--sp-4);
+  align-items: start;
 }
 
-.settings-page .settings-group[hidden] {
-  display: none;
+.settings-page .settings-col {
+  display: grid;
+  gap: var(--sp-4);
+  align-content: start;
+  min-width: 0;
+}
+
+/* 窄窗口（或半屏使用）时落回单栏，避免两栏各自挤成一长条 */
+@media (max-width: 1279px) {
+  .settings-page .settings-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 双栏之下每栏宽度有限，输入框不再需要跟随整卡拉宽 */
+.settings-page .form-grid .field input,
+.settings-page .form-grid .field select {
+  max-width: 420px;
+}
+
+/* 旧数据迁移卡是右栏直接子级，间距交给栏间距，不再额外加 margin */
+.settings-page .settings-col > .settings-advanced {
+  margin-top: 0;
 }
 
 .settings-page .list-card {
   margin: 0;
+}
+
+/* 普通设置卡片统一由父级控制纵向节奏。独立的 .field 之前是 inline label，
+   连续字段会挤在同一行，焦点圈也会压到下一项；全局字段现已成为 grid，
+   这里补齐卡片直接子级之间的固定间距。 */
+.settings-page .settings-col > .list-card > p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.settings-page .settings-col > .list-card > p + p {
+  margin-top: var(--sp-2);
+}
+
+.settings-page .settings-col > .list-card > p + .field,
+.settings-page .settings-col > .list-card > .field + .field,
+.settings-page .settings-col > .list-card > p + .theme-picker,
+.settings-page .settings-col > .list-card > p + .newbie-replay-row {
+  margin-top: var(--sp-4);
+}
+
+.settings-page .newbie-replay-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.settings-page .newbie-replay-row small {
+  min-width: min(100%, 18rem);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 
 .settings-page .page-header {
@@ -26,6 +82,11 @@
   margin-bottom: var(--sp-4);
   padding: 0;
   overflow: hidden;
+}
+
+.settings-page .settings-update-panel:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .settings-page .settings-update-trigger.has-update {
@@ -51,15 +112,7 @@
 
 .settings-update-title-block {
   min-width: 0;
-}
-
-.settings-update-kicker {
-  display: block;
-  margin-bottom: var(--sp-2);
-  color: var(--brand-link);
-  font-size: var(--fs-xs);
-  font-weight: 700;
-  letter-spacing: 0.12em;
+  overflow-wrap: anywhere;
 }
 
 .settings-update-heading h2 {
@@ -75,6 +128,8 @@
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .settings-update-heading-actions button {
@@ -97,7 +152,7 @@
 }
 
 .settings-release-notes {
-  max-height: min(46vh, 520px);
+  max-height: min(46dvh, 520px);
   overflow-y: auto;
   padding: 0 var(--sp-5);
   scrollbar-gutter: stable;
@@ -117,6 +172,8 @@
   display: flex;
   justify-content: space-between;
   gap: var(--sp-4);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .settings-update-status-line strong {
@@ -168,7 +225,7 @@
 }
 
 .settings-release-notes-heading > span {
-  color: var(--muted-soft);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   white-space: nowrap;
 }
@@ -214,6 +271,12 @@
   padding: var(--sp-3) 0 var(--sp-4);
 }
 
+/* 说明全为空时提交块是说明区第一个元素，避免紧贴标题分隔线出现双线 */
+.settings-release-commits:first-child {
+  border-top: none;
+  padding-top: var(--sp-4);
+}
+
 .settings-release-commits summary {
   display: flex;
   align-items: center;
@@ -231,7 +294,7 @@
 }
 
 .settings-release-commits summary span {
-  color: var(--muted-soft);
+  color: var(--text-muted);
   font-size: var(--fs-xs);
   font-weight: 400;
 }
@@ -270,17 +333,75 @@
 .settings-page .settings-toggle {
   display: flex;
   flex-direction: row;
+  /* 开关行横贯表单整行：名称居左、开关居右，读起来像一条独立设置 */
   align-items: center;
-  justify-content: flex-start;
+  justify-content: space-between;
   gap: var(--sp-3);
+  grid-column: 1 / -1;
+}
+
+.settings-page .settings-toggle > span {
+  line-height: 20px;
 }
 
 .settings-page .settings-toggle input[type="checkbox"] {
-  width: var(--sp-4);
-  height: var(--sp-4);
+  /* 已升级为滑动开关（switch-input），这里只对齐高度与行高 */
+  width: 36px;
+  height: 20px;
   min-height: 0;
   flex: 0 0 auto;
+  accent-color: var(--brand);
+}
+
+/* 清理范围一行：勾选框回到正常尺寸，避免被 .field input 的整行样式撑成大方块 */
+.settings-page .checkbox-field {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+@media (max-width: 720px) {
+  .settings-page .page-header {
+    padding-right: 0;
+  }
+
+  .settings-page .page-header-actions {
+    position: static;
+    margin-top: var(--sp-3);
+  }
+
+  .settings-page .form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-page .form-grid .field input,
+  .settings-page .form-grid .field select {
+    max-width: none;
+  }
+
+  .settings-page .checkbox-field {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+.settings-page .checkbox-field > span {
+  margin-bottom: 0;
+}
+
+.settings-page .checkbox-field > span:last-child {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.settings-page .checkbox-field input[type="checkbox"] {
+  width: 36px;
+  height: 20px;
+  min-height: 0;
   margin: 0;
+  flex: 0 0 auto;
   accent-color: var(--brand);
 }
 
@@ -333,11 +454,56 @@
 }
 
 .settings-save-bar {
-  position: sticky;
-  bottom: 0;
+  position: static;
   justify-content: space-between;
   padding: var(--sp-4);
+  padding-bottom: max(var(--sp-4), env(safe-area-inset-bottom));
   background: var(--surface);
   border-top: 1px solid var(--border);
-  z-index: 2;
+}
+
+.settings-save-bar.is-dirty {
+  border-top-color: var(--border-strong);
+  box-shadow: var(--shadow-sticky);
+}
+
+.settings-save-bar.is-dirty > span {
+  color: var(--ink-strong);
+  font-weight: 600;
+}
+@media (max-width: 640px), (max-height: 520px) {
+  .settings-update-heading {
+    flex-direction: column;
+    gap: var(--sp-3);
+    padding: var(--sp-4);
+  }
+
+  .settings-update-heading-actions,
+  .settings-update-actions {
+    width: 100%;
+  }
+
+  .settings-update-heading-actions {
+    justify-content: space-between;
+  }
+
+  .settings-release-notes,
+  .settings-update-actions {
+    padding-inline: var(--sp-4);
+  }
+
+  .settings-update-status,
+  .settings-update-panel > .settings-test-result,
+  .settings-update-panel > .settings-release-entry {
+    margin-inline: var(--sp-4);
+  }
+
+  .settings-update-actions > button,
+  .settings-save-bar > button {
+    flex: 1 1 160px;
+  }
+
+  .settings-save-bar {
+    align-items: stretch;
+  }
 }

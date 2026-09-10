@@ -1,5 +1,6 @@
 import { openOutput } from "@/api";
 import { displayFileName } from "@/fileDisplay";
+import "./task-state.css";
 
 const RESULT_COUNT_LABELS: Record<string, string> = {
   rows: "处理行数",
@@ -20,6 +21,12 @@ const RESULT_COUNT_LABELS: Record<string, string> = {
   populatedSectionRows: "有数据 Section",
   outlookCompared: "可核对",
   outlookEqual: "核对一致",
+  // FA TB＋JE 预览指标
+  tbRows: "TB 科目行",
+  jeRows: "JE 明细行",
+  additions: "新增笔数",
+  disposals: "处置笔数",
+  reconciliationDifferences: "勾稽差异类别",
 };
 
 function stringList(value: unknown): string[] {
@@ -59,8 +66,9 @@ export function ResultView({ value }: { value: unknown }) {
     ? (obj.outlookDifferences as Array<Record<string, unknown>>)
     : [];
   const valid = typeof obj.valid === "boolean" ? obj.valid : undefined;
+  const limited = (items: string[]) => items.slice(0, 20);
   return (
-    <div className="result-summary">
+    <div className="result-summary" role="status" aria-live="polite">
       <p>
         {message ??
           (valid === true
@@ -82,32 +90,34 @@ export function ResultView({ value }: { value: unknown }) {
         </div>
       )}
       {!!warnings.length && (
-        <div className="warning-box">
+        <div className="warning-box result-summary-list">
           <strong>需要注意（{warnings.length}）</strong>
           <ul>
-            {warnings.map((item) => (
-              <li key={item}>{displayFileName(item)}</li>
+            {limited(warnings).map((item, index) => (
+              <li key={`${item}-${index}`}>{displayFileName(item)}</li>
             ))}
           </ul>
+          {warnings.length > 20 && <p>另有 {warnings.length - 20} 项未显示。</p>}
         </div>
       )}
       {!!unmatched.length && (
-        <div className="warning-box">
+        <div className="warning-box result-summary-list">
           <strong>
             未在 Section List 中匹配到的服务单（{unmatched.length}）
           </strong>
           <ul>
-            {unmatched.map((item) => (
-              <li key={item}>{item}</li>
+            {limited(unmatched).map((item, index) => (
+              <li key={`${item}-${index}`}>{item}</li>
             ))}
           </ul>
+          {unmatched.length > 20 && <p>另有 {unmatched.length - 20} 项未显示。</p>}
         </div>
       )}
       {!!differences.length && (
-        <div className="warning-box">
+        <div className="warning-box result-summary-list">
           <strong>Outlook Hours 核对不一致（{differences.length}）</strong>
           <ul>
-            {differences.map((item, index) => (
+            {differences.slice(0, 20).map((item, index) => (
               <li key={`${String(item.serviceNumber ?? index)}`}>
                 {String(item.serviceNumber ?? "")}{" "}
                 {String(item.engagementName ?? "")}： 方案{" "}
@@ -117,10 +127,11 @@ export function ResultView({ value }: { value: unknown }) {
               </li>
             ))}
           </ul>
+          {differences.length > 20 && <p>另有 {differences.length - 20} 项未显示。</p>}
         </div>
       )}
       {!!skipped.length && (
-        <div className="warning-box">
+        <div className="warning-box result-summary-list">
           <strong>无法访问、已跳过的路径（{skipped.length}）</strong>
           <ul>
             {skipped.slice(0, 20).map((item) => (
@@ -130,15 +141,21 @@ export function ResultView({ value }: { value: unknown }) {
           {skipped.length > 20 && <p>另有 {skipped.length - 20} 项未显示。</p>}
         </div>
       )}
-      {outputPaths.map((p) => (
-        <button
-          className="link-button"
-          key={p}
-          onClick={() => void openOutput(p)}
-        >
-          {displayFileName(p)}
-        </button>
-      ))}
+      {!!outputPaths.length && (
+        <div className="result-output-list" aria-label="输出文件">
+          {outputPaths.map((p, index) => (
+            <button
+              type="button"
+              className="link-button"
+              key={`${p}-${index}`}
+              title={p}
+              onClick={() => void openOutput(p)}
+            >
+              {displayFileName(p)}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

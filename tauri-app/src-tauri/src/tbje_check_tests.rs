@@ -199,6 +199,54 @@ fn 已带符号的je贷方先统一方向再与tb比较() {
 }
 
 #[test]
+fn 大csv磁盘路径与内存路径输出完全一致() {
+    let dir = fixture("disk-memory-parity");
+    平的账(&dir);
+    let mut input = params(&dir, true);
+    input["jeSource"]["headerRow"] = json!(1);
+    input["jeSource"]["headerDepth"] = json!(1);
+    let memory = run(&input, &AtomicBool::new(false)).unwrap();
+    input["__testForceDiskLedger"] = json!(true);
+    let disk = run(&input, &AtomicBool::new(false)).unwrap();
+    assert_eq!(disk, memory);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 大csv磁盘路径保持已带符号贷方和红字的原侧语义() {
+    let dir = fixture("disk-signed-redletter");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,0,500,300,200\n\
+         2202,应付账款,0,300,500,-200\n",
+    )
+    .unwrap();
+    // 借正贷负口径下，贷方 +70 是红字；规范化后仍在贷方冲减 70。
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-03-01,V1,1001,库存现金,500,0\n\
+         2025-03-01,V1,2202,应付账款,0,-500\n\
+         2025-06-01,V2,1001,库存现金,0,-370\n\
+         2025-06-01,V2,2202,应付账款,370,0\n\
+         2025-06-02,V3,1001,库存现金,0,70\n\
+         2025-06-02,V3,2202,应付账款,-70,0\n",
+    )
+    .unwrap();
+    let mut input = params(&dir, true);
+    input["jeSource"]["headerRow"] = json!(1);
+    input["jeSource"]["headerDepth"] = json!(1);
+    let memory = run(&input, &AtomicBool::new(false)).unwrap();
+    assert_eq!(memory["tbVsJe"]["passed"], json!(true), "{memory:#}");
+    input["__testForceDiskLedger"] = json!(true);
+    let disk = run(&input, &AtomicBool::new(false)).unwrap();
+    assert_eq!(disk, memory);
+    assert_eq!(disk["tbVsJe"]["passed"], json!(true), "{disk:#}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn 三三零零口径按原始方向汇总且红字不跨侧() {
     let dir = fixture("3300-signed-redletter");
     std::fs::write(

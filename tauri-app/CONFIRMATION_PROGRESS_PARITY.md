@@ -1,5 +1,9 @@
 # 函证进度小能手 Tauri 迁移对照
 
+## 2026-09-04 · XLS 输入统一
+
+已接入共享 XLS 内容识别/文本读取或模板准备路径。保留本工具的字段映射和业务规则；格式、模板依赖、已覆盖与未覆盖范围及回归命令见 [XLS 输入兼容范围](XLS_INPUT_COMPATIBILITY.md)。不将文件格式兼容表述为旧版全部业务行为等价。
+
 基线源码：`modules/confirmation_progress/confirmation_app.py`。新页面调用
 `confirmation.inspect` / `confirmation.process`。生产路径现由 Rust 直接读取、聚合和
 生成 Excel，不再进入 Python sidecar；统计口径通过旧版金标测试锁定。

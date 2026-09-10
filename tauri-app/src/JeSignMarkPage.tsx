@@ -8,13 +8,17 @@ import {
   pickPath,
 } from "./api";
 import type { JobEvent, ToolManifest } from "./types";
+import { useTaskRestore } from "./restore";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "./kanzhang-parity.css";
 import "./je-sign-mark.css";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { EmptyState } from "@/components/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/PageHeader";
 import { ErrorBox } from "@/components/ErrorBox";
+import { JargonTip } from "@/components/JargonTip";
 import { JobProgress } from "@/components/JobProgress";
 import { LedgerSourceCard } from "@/components/LedgerSourceCard";
 import { LedgerLlmReview } from "@/components/LedgerLlmReview";
@@ -32,6 +36,7 @@ import {
   EMPTY_MAPPING,
   formatMappingValue,
   isMultiRole,
+  kanzhangReviewPayload,
   kanzhangReviewSummary,
   ledgerErrorText,
   missingKanzhangRequiredRoles,
@@ -65,6 +70,7 @@ type JeMarkDraft = {
   sheet: string;
   knownSheets: string[];
   headerRow: number;
+  headerDepth: number;
   inspect?: Inspect;
   mapping: Mapping;
   batches: JeMarkBatch[];
@@ -93,7 +99,8 @@ const EMPTY: JeMarkDraft = {
   inputPath: "",
   sheet: "",
   knownSheets: [],
-  headerRow: 1,
+  headerRow: 0,
+  headerDepth: 1,
   mapping: EMPTY_MAPPING,
   batches: [newBatch(0)],
   activeBatch: 0,
@@ -185,11 +192,103 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     sessionStorage.setItem(CACHE, JSON.stringify(draft));
   }, [draft]);
 
+  // 历史恢复的映射/筛选暂存：读取完成（applyInspect）默认套用建议映射并
+  // 清空列筛选，会把恢复成果冲掉；同一文件+Sheet 的读取完成后改用存档值
+  // 顶回，一次性生效，且不再自动送 LLM 复核——那份映射用户确认过。
+  const restoredDraftRef = useRef<{
+    key: string;
+    mapping: JeMarkDraft["mapping"];
+    columnFilters: JeMarkDraft["columnFilters"];
+  } | null>(null);
+  const inspectKeyRef = useRef("");
+  // 历史记录「继续任务」：用存档参数重建草稿（含映射/批次/筛选），并自动
+  // 重新读取文件——批次/标记/导出都以读取结果为显示前提，不重读用户看到
+  // 的还是空页；读取完成后 restoredDraftRef 把存档映射与列筛选顶回建议值。
+  // 没有字段映射的存档（读取子步骤）不恢复，免得把现场覆盖成半成品。
+  const autoReadKeyRef = useRef("");
+  const [autoReadSeq, setAutoReadSeq] = useState(0);
+  useTaskRestore(tool.id, (restore) => {
+    const p = restore.params as {
+      inputPath?: string;
+      sheet?: string;
+      headerRow?: number;
+      headerDepth?: number;
+      mapping?: JeMarkDraft["mapping"];
+      targetBatches?: JeMarkDraft["batches"];
+      columnFilters?: JeMarkDraft["columnFilters"];
+      signConvention?: string;
+      outputPath?: string;
+    };
+    if (typeof p.inputPath !== "string" || !p.inputPath) return;
+    const mapping =
+      p.mapping && typeof p.mapping === "object" && Object.keys(p.mapping).length
+        ? p.mapping
+        : undefined;
+    if (!mapping) return;
+    const sheet = p.sheet ?? "";
+    const columnFilters =
+      p.columnFilters && typeof p.columnFilters === "object"
+        ? p.columnFilters
+        : {};
+    restoredDraftRef.current = {
+      key: `${p.inputPath}|${sheet.trim()}`,
+      mapping,
+      columnFilters,
+    };
+    autoReadKeyRef.current = `${p.inputPath}|${sheet.trim()}`;
+    setAutoReadSeq((value) => value + 1);
+    llmGeneration.current += 1;
+    setDraft({
+      ...EMPTY,
+      inputPath: p.inputPath,
+      sheet,
+      headerRow: p.headerRow ?? 0,
+      headerDepth: p.headerDepth ?? 1,
+      mapping,
+      batches:
+        Array.isArray(p.targetBatches) && p.targetBatches.length
+          ? p.targetBatches
+          : [newBatch(0)],
+      activeBatch: 0,
+      columnFilters,
+      outputPath: p.outputPath ?? "",
+      outputTouched: Boolean(p.outputPath),
+      signChoice:
+        p.signConvention === "signed" || p.signConvention === "unsigned"
+          ? p.signConvention
+          : "auto",
+    });
+    setResult(undefined);
+    setJob(undefined);
+    setChanges([]);
+    setPending([]);
+    setLlmStatus("");
+    setLlmBusy(false);
+    setLlmFailed(false);
+    setValueCache({});
+    setMenu(undefined);
+    setSignReport(undefined);
+  });
+
+  // 恢复的草稿提交到 state 后自动触发读取（setDraft 异步，恢复回调里直接
+  // 调 inspect 读到的还是旧 draft；seq 触发器保证草稿恰好与恢复前相同时也
+  // 会执行）。
+  useEffect(() => {
+    if (!autoReadKeyRef.current) return;
+    const key = `${draft.inputPath}|${(draft.sheet || "").trim()}`;
+    if (autoReadKeyRef.current !== key) return;
+    autoReadKeyRef.current = "";
+    void inspect();
+  }, [autoReadSeq, draft.inputPath, draft.sheet]);
+
   // 没手选过保存位置时，输出框跟着凭证文件和 Sheet 走。只在来源变化时重算——
   // 默认文件名带时间戳，每次渲染都算会把自己重新触发一遍。
   const autoOutputKey = useRef("");
   useEffect(() => {
     if (draft.outputTouched) return;
+    // 历史恢复挂载时本 effect 会先于恢复草稿提交跑一遍（闭包里还是空草稿），
+    // 把恢复的输出路径清掉；恢复暂存未消费完时跳过。
+    if (autoReadKeyRef.current) return;
     const key = `${draft.inputPath}|${draft.sheet}`;
     if (autoOutputKey.current === key && draft.outputPath) return;
     autoOutputKey.current = key;
@@ -261,7 +360,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   }
 
   function invalidate(
-    change: Partial<Pick<JeMarkDraft, "sheet" | "headerRow">>,
+    change: Partial<Pick<JeMarkDraft, "sheet" | "headerRow" | "headerDepth">>,
   ) {
     setValueCache({});
     setMenu(undefined);
@@ -282,11 +381,13 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     }
     setBusy(true);
     setError("");
+    inspectKeyRef.current = `${draft.inputPath}|${(draft.sheet || "").trim()}`;
     try {
       await jobStart("kanzhang.mark_inspect", {
         inputPath: draft.inputPath,
         sheet: draft.sheet || undefined,
         headerRow: draft.headerRow,
+        headerDepth: draft.headerDepth,
       });
     } catch (e) {
       setError(ledgerErrorText(e));
@@ -295,19 +396,30 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   }
 
   function applyInspect(value: Inspect) {
+    // 历史恢复后用户重新读取同一文件+Sheet：用存档映射与列筛选顶回建议
+    // 值，批次也不按"科目口径变化"清空——恢复的批次与映射本来配套。
+    const restored = restoredDraftRef.current;
+    const match =
+      restored && restored.key === inspectKeyRef.current ? restored : null;
+    if (match) restoredDraftRef.current = null;
     const suggested = value.suggestedMapping ?? EMPTY_MAPPING;
+    const effective = match ? match.mapping : suggested;
     setValueCache({});
     setDraft((current) => ({
       ...current,
       inspect: value,
       knownSheets: value.sheets ?? current.knownSheets,
       sheet: value.selectedSheet ?? current.sheet,
-      mapping: suggested,
-      batches: clearAccountsOnMappingChange(current.batches),
-      columnFilters: {},
+      mapping: effective,
+      batches: match
+        ? current.batches
+        : clearAccountsOnMappingChange(current.batches),
+      columnFilters: match ? match.columnFilters : {},
     }));
     setResult(undefined);
     // 脚本自动映射一出来就直接送 LLM 复核，不再要求用户额外点一次按钮。
+    // 恢复的映射已经用户确认过，跳过复核。
+    if (match) return;
     void reviewMapping(suggested, value);
   }
 
@@ -361,6 +473,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       inputPath: draft.inputPath,
       sheet: draft.sheet || undefined,
       headerRow: draft.headerRow,
+      headerDepth: draft.headerDepth,
       mapping: draft.mapping,
     })
       .then((value) => {
@@ -405,11 +518,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     try {
       const value = (await engineCall("kanzhang.llm_mapping", {
         mode: "mapping",
-        payload: {
-          headers: target.headers,
-          samples: target.preview.slice(0, 8),
-          currentMapping: source,
-        },
+        payload: kanzhangReviewPayload(target.headers, target.preview, source),
       })) as LedgerReviewResponse;
       if (generation !== llmGeneration.current) return;
       const {
@@ -471,6 +580,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             inputPath: draft.inputPath,
             sheet: draft.sheet || undefined,
             headerRow: draft.headerRow,
+            headerDepth: draft.headerDepth,
             mapping: draft.mapping,
             keyword,
             limit: VALUE_LIMIT,
@@ -479,6 +589,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             inputPath: draft.inputPath,
             sheet: draft.sheet || undefined,
             headerRow: draft.headerRow,
+            headerDepth: draft.headerDepth,
             field,
             keyword,
             limit: VALUE_LIMIT,
@@ -575,6 +686,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         inputPath: draft.inputPath,
         sheet: draft.sheet || undefined,
         headerRow: draft.headerRow,
+        headerDepth: draft.headerDepth,
         mapping: draft.mapping,
         targetBatches: validBatches,
         columnFilters: activeColumnFilters(draft.columnFilters),
@@ -643,14 +755,17 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         sheet={draft.sheet}
         knownSheets={draft.knownSheets}
         headerRow={draft.headerRow}
+        headerDepth={draft.headerDepth}
+        detectedHeaderRow={draft.headerRow === 0 ? draft.inspect?.headerRow : undefined}
         dragHover={dragHover}
         busy={busy}
         job={job}
         needsReload={!draft.inspect && draft.knownSheets.length > 0}
         onBrowse={chooseInput}
         onClear={clearAll}
-        onSheetChange={(value) => invalidate({ sheet: value })}
+        onSheetChange={(value) => invalidate({ sheet: value, headerRow: 0 })}
         onHeaderRowChange={(value) => invalidate({ headerRow: value })}
+        onHeaderDepthChange={(value) => invalidate({ headerDepth: value })}
         onInspect={inspect}
         onCancel={(jobId) => void jobCancel(jobId)}
       >
@@ -678,6 +793,10 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               <p className="kz-hint">
                 金额口径已按方案{scheme}成立，方案{scheme === "A" ? "B" : "A"}
                 的字段已停用；如需切换，先清空当前方案的字段。
+                <JargonTip
+                  term="金额方案"
+                  text="金额记在一列并配借贷方向列（方案A），或分借方、贷方两列（方案B），二选一即可。"
+                />
               </p>
             )}
             {(signReport || signError || signLoading) && (
@@ -779,7 +898,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
             </Button>
             <label className="jm-batch-name">
               批次名称
-              <input
+              <Input
                 value={batch.name}
                 onChange={(e) =>
                   patch({
@@ -875,9 +994,10 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
           <label>
             输出文件
             <div className="kz-path">
-              <input
+              <Input
                 readOnly
                 value={displayFileName(draft.outputPath)}
+                title={draft.outputPath}
                 placeholder="选择凭证文件后自动填入默认保存位置"
               />
               <Button variant="secondary" size="sm" onClick={chooseOutput}>
@@ -991,7 +1111,7 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
       : undefined;
   const showProgress = shouldShowKanzhangJobProgress(job?.phase);
   return (
-    <Card className="kz-result">
+    <Card variant="workspace" className="kz-result">
       <CardHeader>
         <CardTitle>标记结果</CardTitle>
       </CardHeader>
@@ -1041,7 +1161,7 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
             {sign.basis ? `。依据：${sign.basis}` : ""}
           </p>
         )}
-        {!result && !showProgress && <p>选好目标科目后点「标记并导出」。</p>}
+        {!result && !showProgress && <EmptyState compact title="等待标记结果" description="选好目标科目后点「标记并导出」。" />}
       </CardContent>
     </Card>
   );

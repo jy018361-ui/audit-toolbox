@@ -81,6 +81,17 @@ describe("共用字段映射面板", () => {
     expect(option?.textContent).toContain("已用");
   });
 
+  it("可多列角色被占用后同样标为已用（不拦截继续挂列）", () => {
+    const { selects } = panel({
+      mapping: { accountName: ["总账科目"] },
+      multi: new Set(["accountName"]),
+    });
+    const option = selects[1].querySelector('option[value="accountName"]');
+    expect(option?.textContent).toContain("已用");
+    // 仍是可选项，没有被禁用——可多列角色允许继续加列。
+    expect(option?.hasAttribute("disabled")).toBe(false);
+  });
+
   it("尚未映射的必填项直接列出来", () => {
     panel({ missing: ["记账日期", "摘要"] });
     expect(screen.getByText(/尚未映射：记账日期、摘要/)).toBeTruthy();
@@ -96,7 +107,7 @@ describe("共用字段映射面板", () => {
             : undefined,
     });
     expect(screen.getByText(/为必填字段/)).toHaveTextContent(
-      "＊ 为必填字段；（选填）须按当前分组的整组规则补充。",
+      "＊ 为必填字段；（选填）须按当前分组的整组规则补充；（已用）＝已有列挂在该角色上，可多列角色仍可继续加列。",
     );
     expect(
       selects[0].querySelector('option[value="functionalAmount"]'),

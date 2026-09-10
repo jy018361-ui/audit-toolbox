@@ -1,14 +1,13 @@
 use reqwest::blocking::Client;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc,
+        mpsc, Arc, Mutex,
     },
     thread,
     time::Duration,
@@ -369,6 +368,11 @@ const REVIEW_COMMON: &str = "只能使用输入 availableRoles 中列出的角�
 /// Coding 只负责在响应返回后拦截与数据形态明显冲突的建议，不能代替模型补答案。
 const REVIEW_AMBIGUOUS_ACCOUNT_HEADERS: &str = "特别注意：「会计科目」「总账科目」「账户」等都是歧义标题，没有固定默认角色，严禁只凭标题下结论。必须逐列比较 sampleRows：实际存数字或字母数字编码的列才是 accountCode，实际存可读名称的列才是 accountName。两列并存时必须同时检查，既可能是『总账科目=编码、会计科目=名称』，也可能完全相反；若 currentMapping 与取值冲突，必须输出纠正 change，不能因为标题常见而维持。";
 
+/// `currentForm.complete` 只由“形态槽位是否已填”推导，并不校验每个
+/// 角色当前所指列的内容。因此 complete 不能把错指的日期/科目列变成
+/// “不得修改”的事实；这条要放在通用纪律之后，明确收窄它的适用范围。
+const REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY: &str = "关于 currentForm.complete 的强制补充：complete=true 只表示形态所需角色的 currentMapping 有非空值，不证明这些角色指向了正确的列。先用 sampleRows 校验当前列的取值形态；只有当角色与列值相容时，才适用『槽位已成立、不要改动』。若 accountCode 指向日期或名称文本、accountName 指向编码，或其他当前列明显不符合角色取值形态，即使 complete=true 也必须输出纠正 change。";
+
 fn review_je_instruction() -> String {
     REVIEW_JE.replacen(
         "会计科目、总账科目、总帐科目（「帐」是「账」的异体字，两种写法都有）属于 accountCode，",
@@ -519,7 +523,7 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
          两侧 engineFacts 是 Coding 根据样例验证的处理事实；protected=true 的事实不得修改。\
          同一源列可合法承担 engineFacts.mappedRoles 中列出的多个角色，Coding 会在后续完成拆分、组合或标准化。\
          联合比较 accountCode/accountName 的标题语义、样例形态与两侧口径；证据接近时维持当前映射，不要为了换成看起来更好的列而改。\
-         changes 只放真实调整，确认现状正确不要造条目。{REVIEW_COMMON}\
+         changes 只放真实调整，确认现状正确不要造条目。{REVIEW_COMMON}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}\
          对 TB：{REVIEW_TB}\
          对 JE：{je_instruction}{je_date_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
     );
@@ -661,7 +665,7 @@ fn ledger_mapping_llm_call(
         "你是审计工具箱公共 TB/JE 引擎的{table_name}字段映射复核器，任务名为 {task}。\
          只输出严格 JSON：{{\"task\":\"{task}\",\"changes\":[{{\"role\":string,\
          \"currentColumn\":string,\"suggestedColumn\":string,\"confidence\":number,\
-         \"reason\":string,\"scheme\":string}}]}}。{REVIEW_COMMON}{specific}{date_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
+         \"reason\":string,\"scheme\":string}}]}}。{REVIEW_COMMON}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{specific}{date_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
     );
     let mut payload = params.get("payload").unwrap_or(params).clone();
     // 兼容旧版 FX 请求携带的 hardcodedCandidates。
@@ -1295,7 +1299,7 @@ fn kanzhang_mapping_prompt() -> String {
          fills:[{{role:string,suggestedColumn:string,confidence:number,reason:string}}],\
          reviews:[{{role:string,currentColumn:string,suggestedColumn:string,confidence:number,reason:string}}]}}。\
          方案A＝净额列（可加方向列）；方案B＝借方与贷方两列，二者互斥。\
-         {REVIEW_COMMON}{je_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
+         {REVIEW_COMMON}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{je_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
     )
 }
 
@@ -1732,12 +1736,10 @@ mod tests {
         let fills = value["fills"].as_array().expect("fills 还在");
         assert_eq!(fills.len(), 1, "{fills:?}");
         assert_eq!(fills[0]["suggestedColumn"], "本位币金额");
-        assert!(
-            value["reviews"]
-                .as_array()
-                .expect("reviews 还在")
-                .is_empty()
-        );
+        assert!(value["reviews"]
+            .as_array()
+            .expect("reviews 还在")
+            .is_empty());
     }
 
     #[test]
@@ -1758,12 +1760,10 @@ mod tests {
         let form = &payload["currentForm"];
         assert_eq!(form["id"], "JE2");
         assert_eq!(form["complete"], true);
-        assert!(
-            form["missingSlots"]
-                .as_array()
-                .expect("有该字段")
-                .is_empty()
-        );
+        assert!(form["missingSlots"]
+            .as_array()
+            .expect("有该字段")
+            .is_empty());
     }
 
     #[test]
@@ -2320,12 +2320,12 @@ mod mapping_prompt_tests {
         sanitize_mapping_changes(&mut value, &payload, "tb", ReviewDatePolicy::Strict);
         let changes = value["changes"].as_array().unwrap();
         assert_eq!(changes.len(), 2, "只留成对挪移的两条：{changes:?}");
-        assert!(
-            changes.iter().all(
+        assert!(changes
+            .iter()
+            .all(
                 |change| change["suggestedColumn"].as_str() != Some("科目名称")
                     || change["role"].as_str() == Some("accountName")
-            )
-        );
+            ));
     }
 
     #[test]
@@ -2419,17 +2419,78 @@ mod mapping_prompt_tests {
     }
 
     #[test]
+    fn 借款角色合同允许llm纠正已填但取值错误的科目映射() {
+        // `currentForm.complete` 只会看 accountCode 这个槽位是否非空。
+        // 此处故意模拟它已被错指到日期列：LLM 给出的两条取值纠正
+        // 必须能通过公共 sanitizer，不能因“形态已完整”被压掉。
+        let payload = json!({
+            "headers": ["过账日期", "总账科目", "会计科目", "本币金额"],
+            "sampleRows": [
+                ["2025-01-31", "1001010000", "库存现金-人民币", "-60500"],
+                ["2025-02-28", "1002101001", "银行存款-人民币", "74500"],
+                ["2025-03-31", "6603010000", "财务费用-利息支出", "950"],
+                ["2025-04-30", "1122010000", "应收账款-客户", "200"]
+            ],
+            "currentMapping": {
+                "date": "凭证日期",
+                "id": "凭证号",
+                "accountCode": "过账日期",
+                "functionalAmount": "本币金额"
+            },
+            "availableRoles": [
+                "date", "id", "accountCode", "accountName", "loanId", "summary",
+                "functionalDebit", "functionalCredit", "functionalAmount", "direction"
+            ]
+        });
+        let mut value = json!({"changes": [
+            {
+                "role": "accountCode",
+                "currentColumn": "过账日期",
+                "suggestedColumn": "总账科目",
+                "confidence": 0.99,
+                "reason": "总账科目样例是稳定的数字编码"
+            },
+            {
+                "role": "accountName",
+                "currentColumn": "",
+                "suggestedColumn": "会计科目",
+                "confidence": 0.99,
+                "reason": "会计科目样例是可读的科目名称"
+            }
+        ]});
+
+        sanitize_mapping_changes(&mut value, &payload, "je", ReviewDatePolicy::Strict);
+
+        let changes = value["changes"].as_array().unwrap();
+        assert_eq!(
+            changes.len(),
+            2,
+            "正确的科目编码/名称纠正应全部保留：{changes:?}"
+        );
+        assert!(changes.iter().any(|change| {
+            change["role"] == "accountCode" && change["suggestedColumn"] == "总账科目"
+        }));
+        assert!(changes.iter().any(|change| {
+            change["role"] == "accountName" && change["suggestedColumn"] == "会计科目"
+        }));
+    }
+
+    #[test]
     fn je复核提示词不再把歧义标题固定成科目编码() {
         let instruction = review_je_instruction();
         assert!(!instruction.contains("会计科目、总账科目、总帐科目"));
         assert!(instruction.contains("科目编码、科目代码、科目号属于 accountCode"));
         assert!(REVIEW_AMBIGUOUS_ACCOUNT_HEADERS.contains("没有固定默认角色"));
         assert!(REVIEW_AMBIGUOUS_ACCOUNT_HEADERS.contains("必须逐列比较 sampleRows"));
+        assert!(REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY.contains("complete=true"));
+        assert!(REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY
+            .contains("即使 complete=true 也必须输出纠正 change"));
 
         let kanzhang = kanzhang_mapping_prompt();
         assert!(!kanzhang.contains("会计科目、总账科目、总帐科目"));
         assert!(kanzhang.contains("没有固定默认角色"));
         assert!(kanzhang.contains("必须逐列比较 sampleRows"));
+        assert!(kanzhang.contains(REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY));
     }
 
     #[test]

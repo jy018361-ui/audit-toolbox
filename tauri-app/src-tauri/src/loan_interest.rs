@@ -5540,3 +5540,39 @@ mod zz_debug2 {
         }
     }
 }
+
+#[cfg(test)]
+mod loan_real_ledger_mapping_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    #[ignore = "仅本机真实账表验收，需 LEDGER_SAMPLES 指向 TBJEPBC 目录"]
+    fn 借款inspect真实03序时账返回公共映射() {
+        let root = std::env::var("LEDGER_SAMPLES").expect("LEDGER_SAMPLES 未设置");
+        let path = std::path::Path::new(&root).join("03序时账 (2).xlsx");
+        let result = inspect(&json!({
+            "kind": "je",
+            "source": {
+                "inputPath": path,
+                "sheet": "Sheet1",
+                "headerRow": 0,
+                "headerDepth": 0
+            }
+        }))
+        .expect("借款 JE inspect 失败");
+        let mapping = result["suggestedMapping"]
+            .as_object()
+            .expect("缺 suggestedMapping");
+        println!("{}", serde_json::to_string_pretty(mapping).unwrap());
+        assert_eq!(mapping.get("date").and_then(Value::as_str), Some("凭证日期"));
+        assert!(
+            mapping.get("accountCode").is_none(),
+            "歧义科目表头应留给 LLM，日期列不得被借款科目编码占用: {mapping:?}"
+        );
+        assert!(
+            mapping.get("accountName").is_none(),
+            "歧义科目表头应留给 LLM: {mapping:?}"
+        );
+    }
+}

@@ -5327,6 +5327,12 @@ pub(crate) fn split_code_and_name(value: &str) -> Option<(String, String)> {
 pub(crate) fn split_code_and_name_ref(value: &str) -> Option<(&str, &str)> {
     const SEPARATORS: [char; 5] = ['/', ':', '_', '\\', '|'];
     let trimmed = value.trim();
+    // 日期也常用 `/` 分隔。`2025/01/31` 过去会被拆成 `2025` + `01/31`：
+    // 前半段像编码、后半段因仍含 `/` 又过不了编码判定，于是整列被误补成
+    // 科目编码。先交给公共日期解析器排除，避免所有账表 inspect 都踩同一坑。
+    if parse_date(trimmed).is_some() {
+        return None;
+    }
     if let Some(position) = trimmed.find(SEPARATORS) {
         let code = trimmed[..position].trim();
         // 分隔符都是单字节 ASCII，跳过它是安全的。
@@ -7765,6 +7771,9 @@ mod tests {
         assert_eq!(split_code_and_name("应付账款 - 应付暂估款"), None);
         assert_eq!(split_code_and_name("库存现金"), None);
         assert_eq!(split_code_and_name("2025/01"), None);
+        assert_eq!(split_code_and_name("2025/01/31"), None);
+        assert_eq!(split_code_and_name("31/01/2025"), None);
+        assert_eq!(split_code_and_name("2025/01/31 00:00:00"), None);
     }
 
     /// 「编码＋空格＋名称」混写（用友导出、审计底稿常见）。alpha.39 起

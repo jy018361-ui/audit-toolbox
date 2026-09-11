@@ -67,6 +67,118 @@ describe("共用字段映射面板", () => {
     });
   });
 
+  it("仅当样例确认编码名称混写时允许两个科目身份角色共用一列", () => {
+    const mixedHeader = "项目编码、文本/科目编码、文本";
+    const mixedRows = [
+      ["1001/库存现金", "1000"],
+      ["1001010000:库存现金-人民币", "2000"],
+      ["1002/银行存款", "3000"],
+      ["1002101001:银行存款-建设银行", "4000"],
+    ];
+    const { onChange, selects } = panel({
+      headers: [mixedHeader, "本位币金额"],
+      rows: mixedRows,
+      mapping: { accountCode: mixedHeader },
+      multi: new Set(["accountName"]),
+    });
+
+    pick(selects[0], "accountName");
+    expect(onChange).toHaveBeenCalledWith({
+      accountCode: mixedHeader,
+      accountName: [mixedHeader],
+    });
+  });
+
+  it("借款页的字符串映射也能保存混写列双角色且不产生数组状态", () => {
+    const mixedHeader = "科目";
+    const { onChange, selects } = panel({
+      headers: [mixedHeader],
+      rows: [
+        ["1001/库存现金"],
+        ["1002/银行存款"],
+        ["1003/存放央行"],
+        ["1004/其他货币资金"],
+      ],
+      mapping: { accountCode: mixedHeader },
+      // 借款工具有意不传 multi：页面状态保持 Record<string, string>。
+      multi: new Set<string>(),
+    });
+
+    pick(selects[0], "accountName");
+    expect(onChange).toHaveBeenCalledWith({
+      accountCode: mixedHeader,
+      accountName: mixedHeader,
+    });
+  });
+
+  it("科目双角色例外不扩展到普通列或其他字段角色", () => {
+    const mixedHeader = "科目";
+    const mixedRows = [
+      ["1001/库存现金", "1000"],
+      ["1002/银行存款", "2000"],
+      ["1003/存放央行", "3000"],
+      ["1004/其他货币资金", "4000"],
+    ];
+    const first = panel({
+      headers: [mixedHeader, "本位币金额"],
+      rows: mixedRows,
+      mapping: { accountCode: mixedHeader },
+    });
+    pick(first.selects[0], "functionalAmount");
+    expect(first.onChange).toHaveBeenCalledWith({
+      accountCode: undefined,
+      functionalAmount: mixedHeader,
+    });
+    cleanup();
+
+    const second = panel({
+      mapping: { accountCode: "会计科目" },
+      rows: [
+        ["1001010000", "库存现金", "1200"],
+        ["1002010000", "银行存款", "1300"],
+        ["1003010000", "存放央行", "1400"],
+        ["1004010000", "其他货币资金", "1500"],
+      ],
+      multi: new Set(["accountName"]),
+    });
+    pick(second.selects[0], "accountName");
+    expect(second.onChange).toHaveBeenCalledWith({
+      accountCode: undefined,
+      accountName: ["会计科目"],
+    });
+  });
+
+  it("双角色混写列可在同一下拉中显示并单独取消一个科目角色", () => {
+    const mixedHeader = "科目";
+    const mixedRows = [
+      ["1001/库存现金"],
+      ["1002/银行存款"],
+      ["1003/存放央行"],
+      ["1004/其他货币资金"],
+    ];
+    const { onChange, selects } = panel({
+      headers: [mixedHeader],
+      rows: mixedRows,
+      mapping: {
+        accountCode: mixedHeader,
+        accountName: [mixedHeader],
+      },
+      multi: new Set(["accountName"]),
+    });
+
+    expect(selects[0].querySelector("option")?.textContent).toBe(
+      "科目编码 ＋ 科目名称",
+    );
+    expect(
+      selects[0].querySelector('option[value="accountName"]')?.textContent,
+    ).toContain("再点取消");
+    pick(selects[0], "accountName");
+    expect(onChange).toHaveBeenCalledWith({
+      accountCode: mixedHeader,
+      accountName: [],
+    });
+  });
+
   it("被方案互斥锁定的角色标为已停用", () => {
     const { selects } = panel({
       isLocked: (role: string) => role === "functionalAmount",

@@ -88,6 +88,60 @@ fn 三条核对都通过时不报任何差异() {
 }
 
 #[test]
+fn tb科目编码名称混写而je分列时按拆分后的科目身份对齐() {
+    let dir = fixture("combined-account-vs-split");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目,期初余额,本年借方,本年贷方,期末余额\n\
+         1001:库存现金,100,500,300,300\n\
+         2202/应付账款,-100,300,500,-300\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-03-01,V1,1001,库存现金,500,0\n\
+         2025-03-01,V1,2202,应付账款,0,500\n\
+         2025-06-01,V2,2202,应付账款,300,0\n\
+         2025-06-01,V2,1001,库存现金,0,300\n",
+    )
+    .unwrap();
+
+    let params = json!({
+        "tbSource": {
+            "inputPath": dir.join("tb.csv"),
+            "sheet": "",
+            "headerRow": 0,
+            "headerDepth": 0
+        },
+        "tbMapping": {
+            // 只有科目编码和科目名称允许共用一个物理列；下游必须分别拆出身份字段。
+            "accountCode": "科目",
+            "accountName": "科目",
+            "openingFunctionalAmount": "期初余额",
+            "ytdFunctionalDebit": "本年借方",
+            "ytdFunctionalCredit": "本年贷方",
+            "closingFunctionalAmount": "期末余额"
+        },
+        "jeSource": {
+            "inputPath": dir.join("je.csv"),
+            "sheet": "",
+            "headerRow": 0,
+            "headerDepth": 0
+        },
+        "jeMapping": je_mapping()
+    });
+
+    let result = run(&params, &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["rollforward"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["tbVsJe"]["accounts"], json!(2), "{result:#}");
+    assert_eq!(result["tbVsJe"]["mismatched"], json!(0), "{result:#}");
+    assert_eq!(result["equation"]["passed"], json!(true), "{result:#}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn 期末余额被改动时勾稽报出那一行() {
     let dir = fixture("rollforward");
     平的账(&dir);

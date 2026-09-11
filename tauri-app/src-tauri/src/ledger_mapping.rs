@@ -3874,11 +3874,79 @@ pub(crate) fn recheck_cumulative(
 /// 列名分不出来的角色（目前是本年累计与本期发生）。
 ///
 /// 能拿到数据行时一律用这个；只有表头时才退回 [`suggest_roles`]。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RoleSuggestions {
+    primary: BTreeMap<usize, &'static str>,
+    additional: Vec<(usize, &'static str)>,
+}
+
+impl RoleSuggestions {
+    fn with_combined_account_pair(
+        primary: BTreeMap<usize, &'static str>,
+        rows: &[Vec<String>],
+    ) -> Self {
+        let has_code = primary.values().any(|role| *role == "accountCode");
+        let has_name = primary.values().any(|role| *role == "accountName");
+        let additional = if has_code != has_name {
+            primary
+                .iter()
+                .find_map(|(index, role)| {
+                    let counterpart = match *role {
+                        "accountCode" if !has_name => "accountName",
+                        "accountName" if !has_code => "accountCode",
+                        _ => return None,
+                    };
+                    is_combined_account_column(
+                        rows.iter().filter_map(|row| row.get(*index)).cloned(),
+                    )
+                    .then_some((*index, counterpart))
+                })
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self {
+            primary,
+            additional,
+        }
+    }
+
+    pub(crate) fn get(&self, index: &usize) -> Option<&&'static str> {
+        self.primary.get(index)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&usize, &&'static str)> {
+        self.primary
+            .iter()
+            .chain(self.additional.iter().map(|(index, role)| (index, role)))
+    }
+
+    pub(crate) fn values(&self) -> impl Iterator<Item = &&'static str> {
+        self.primary
+            .values()
+            .chain(self.additional.iter().map(|(_, role)| role))
+    }
+}
+
+impl IntoIterator for RoleSuggestions {
+    type Item = (usize, &'static str);
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.primary
+            .into_iter()
+            .chain(self.additional)
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+}
+
 pub(crate) fn suggest_roles_with_data(
     kind: &str,
     headers: &[String],
     rows: &[Vec<String>],
-) -> BTreeMap<usize, &'static str> {
+) -> RoleSuggestions {
     let mut out = suggest_roles(kind, headers);
     // 「单位」既可能指公司，也可能指物料计量单位。若取值明显是 KG／EA／BOX，
     // 就撤销主体建议，避免它进入凭证键后拆散同一张凭证的借贷两边。
@@ -3896,7 +3964,10 @@ pub(crate) fn suggest_roles_with_data(
     align_opening_period_scope(kind, headers, &mut out);
     fill_combined_account_column(rows, &mut out, headers.len());
     refine_account_identity_by_data(kind, headers, rows, &mut out);
-    out
+    // 物理列通常仍是一列一角色。唯一例外是取值本身可稳定拆成
+    // 「科目编码＋科目名称」的列：两个科目身份角色必须同时下发，才能让
+    // TB 混写列与 JE 分列在标准化后按相同科目身份匹配。
+    RoleSuggestions::with_combined_account_pair(out, rows)
 }
 
 /// 科目身份列的数据形态。表头「会计科目」在不同 ERP 导出里既可能放编码，
@@ -7836,6 +7907,16 @@ mod tests {
             roles.get(&1).copied(),
             Some("accountCode"),
             "混合列应当顶上空缺的科目编码：{roles:?}"
+        );
+        let roles_on_combined = roles
+            .iter()
+            .filter(|(index, _)| **index == 1)
+            .map(|(_, role)| *role)
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            roles_on_combined,
+            HashSet::from(["accountCode", "accountName"]),
+            "混写列只允许科目编码与科目名称双角色：{roles:?}"
         );
     }
 

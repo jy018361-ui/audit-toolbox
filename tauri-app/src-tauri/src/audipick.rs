@@ -534,6 +534,13 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
 /// 免得复核一张表时眼前摆着另一张表的规矩。
 const REVIEW_COMMON: &str = "只能使用输入 availableRoles 中列出的角色——它是本工具启用的角色清单，没列出的角色即使表里有对应的列也不要提。输入的 currentForm 是脚本按整组匹配判出的账表形态。**complete 为 true 时，构成该形态的那些槽位已经成立，一律不要改动**——净额列里是正数还是自带正负号都不影响判定，借贷符号口径由数据配平判定，不由列名判定；表里另有一列看起来更像净额，也不构成改动理由。**两种映射都能成立时一律维持现状，不要为了让它更好看而改**。complete 只说明该形态自身的槽位成立，不代表整张表的映射已经完备——availableRoles 里本工具需要、currentMapping 还缺着的角色（比如原币币种、原币净额），仍必须照样补齐。complete 为 false 时，优先补齐 currentForm.missingSlots 里点名缺失的槽位。除此之外，必须主动补齐 currentMapping 中缺失、但可由 headers 与 sampleRows 判断出来的角色，不得仅复核已有映射。只能使用输入 headers 中真实存在的列，不得虚构列名。双语表头（如「科目描述 Description」「过账日期 Posting Date」）按其中的中文段判断角色。一列只承载一个语义，不能把同一列同时映射到两个角色——唯一的例外是下述「编码与名称写在同一格」的科目列。判断依据必须落在 sampleRows 的实际取值上：每提出一个 change，先从 sampleRows 里随意取三五行看该列的真实内容，若这几行取值与该角色应有的形态不符（科目编码列应是稳定的数字或字母数字编码，科目名称列应是可读文本，币种列应是三位 ISO 代码，金额列应是数值），就不要提出该 change。accountCode 与 accountName 是两个彼此独立的角色，不能互换：编码给 accountCode，名称/文本给 accountName。**编码与名称写在同一格**是例外情形（`1001010000:库存现金-人民币`、`1001/库存现金`、`1001_现金`，也有编码后面接反斜杠再接多级名称的写法——分隔符是斜杠、冒号、下划线、反斜杠、竖线之一，前半段是一串数字或字母数字编码）：这一列应**同时映射为 accountCode 与 accountName 两个角色**（脚本自动映射正是这么做的），既不要因为这列里有名称就改判成纯 accountName，也不要把其中任何一个角色挪走或删掉。务必与**层级名称拼接**区分开——`交易性金融资产_结构性存款`、`管理费用_研发费用_水电气费`，以及用反斜杠拼起来的「银行存款、在财务公司存款、活期」这种，前半段是上级科目名不是编码，这些整列属于 accountName。科目余额表与序时账是同一套账，同名角色必须同口径——两边的 accountCode 必须是同一种科目编码，accountName 同理。`抵销科目`、`统驭科目`、`对方科目`、`往来科目`、`预算科目` 记的是对手方或参考科目，取值同样是一串科目编码，跟本方科目长得一模一样，但它们绝不是 accountCode，也不是 accountName。entity 是记账主体（公司代码、核算主体、账套公司），绝不是交易对手方、往来单位（往來單位、Counterparty）、客户（客戶）、供应商（供應商）这类对手方字段，也不是制单人、录入人、审核人、过账人这类操作员；没有明确的主体列时让 entity 空缺，不得拿对手方字段凑数。集团货币／报告货币（Group Currency、集团货币金额）是第三套口径，既不是本位币也不是原币，对应的金额列与币种列一律不映射到任何角色。changes 数组只放需要修改或补充的条目：每条的 suggestedColumn 必须是输入 headers 中真实存在的列名，且与该角色当前的 currentColumn 不同（当前为空时是补缺）。只是确认现有映射正确、确认某列不存在、或没有实际变更的，一律不要输出该条——空缺本身就是正确状态，不要为了表态而造条目。suggestedColumn 为空的条目不要输出；低于 0.6 的有效建议可以输出供人工确认，但绝不能表述成确定结论。reason 与 suggestedColumn 必须指向同一个结论：reason 说该列不该映射，就不能输出把它映射上去的条目。同一列在 changes 里最多出现一次。『整列同值』的意思是全列每一行取值完全相同；只要出现两种以上取值，该列就在逐行区分交易或账户，绝不是本位币列。优先建议原始数据列：由其他列推算出的公式辅助列（如按方向列把金额改写成的「借正贷负」列、用日期与凭证号拼出的唯一码列）不要抢原始列的角色。不要计算金额、汇率或业务分类，只管映射。";
 
+fn review_common_instruction() -> String {
+    REVIEW_COMMON.replace(
+        "同一列在 changes 里最多出现一次。",
+        "同一列在 changes 里通常最多出现一次；唯一例外是经 sampleRows 确认的科目编码＋科目名称混写列，可分别为 accountCode 与 accountName 各出现一次，除此之外绝不放宽。",
+    )
+}
+
 /// 科目标题在不同 ERP 导出中含义会互换。这类纠偏必须由 LLM 读取样例值提出，
 /// Coding 只负责在响应返回后拦截与数据形态明显冲突的建议，不能代替模型补答案。
 const REVIEW_AMBIGUOUS_ACCOUNT_HEADERS: &str = "特别注意：「会计科目」「总账科目」「账户」等都是歧义标题，没有固定默认角色，严禁只凭标题下结论。必须逐列比较 sampleRows：实际存数字或字母数字编码的列才是 accountCode，实际存可读名称的列才是 accountName。两列并存时必须同时检查，既可能是『总账科目=编码、会计科目=名称』，也可能完全相反；若 currentMapping 与取值冲突，必须输出纠正 change，不能因为标题常见而维持。";
@@ -684,6 +691,7 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
     let date_policy = review_date_policy(root.get("tool").and_then(Value::as_str));
     let je_date_instruction = review_date_instruction(date_policy);
     let je_instruction = review_je_instruction();
+    let review_common = review_common_instruction();
     let prompt = format!(
         "你是审计工具箱公共 TB＋JE 联合字段映射复核器。TB 与 JE 属于同一账套，必须在一次判断中同时复核。\
          只输出严格 JSON：{{\"task\":\"ledger_pair_mapping\",\"tbChanges\":[{{\"role\":string,\"currentColumn\":string,\"suggestedColumn\":string,\"confidence\":number,\"reason\":string}}],\
@@ -693,7 +701,7 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
          两侧 engineFacts 是 Coding 根据样例验证的处理事实；protected=true 的事实不得修改。\
          同一源列可合法承担 engineFacts.mappedRoles 中列出的多个角色，Coding 会在后续完成拆分、组合或标准化。\
          联合比较 accountCode/accountName 的标题语义、样例形态与两侧口径；证据接近时维持当前映射，不要为了换成看起来更好的列而改。\
-         changes 只放真实调整，确认现状正确不要造条目。{REVIEW_COMMON}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}\
+         changes 只放真实调整，确认现状正确不要造条目。{review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}\
          对 TB：{REVIEW_TB}\
          对 JE：{je_instruction}{je_date_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
     );
@@ -831,11 +839,12 @@ fn ledger_mapping_llm_call(
         )
     };
     let date_instruction = review_date_instruction(date_policy);
+    let review_common = review_common_instruction();
     let prompt = format!(
         "你是审计工具箱公共 TB/JE 引擎的{table_name}字段映射复核器，任务名为 {task}。\
          只输出严格 JSON：{{\"task\":\"{task}\",\"changes\":[{{\"role\":string,\
          \"currentColumn\":string,\"suggestedColumn\":string,\"confidence\":number,\
-         \"reason\":string,\"scheme\":string}}]}}。{REVIEW_COMMON}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{specific}{date_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
+         \"reason\":string,\"scheme\":string}}]}}。{review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{specific}{date_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
     );
     let mut payload = params.get("payload").unwrap_or(params).clone();
     // 兼容旧版 FX 请求携带的 hardcodedCandidates。
@@ -1076,7 +1085,20 @@ fn sanitize_change_list(
                 .map(move |role| (role.to_owned(), source.clone()))
         })
         .collect();
-    let mut seen_columns: Vec<String> = Vec::new();
+    let proposed_columns: Vec<(String, String)> = changes
+        .iter()
+        .filter_map(|change| {
+            Some((
+                change.get("role")?.as_str()?.trim().to_owned(),
+                change
+                    .get("suggestedColumn")?
+                    .as_str()?
+                    .trim()
+                    .to_owned(),
+            ))
+        })
+        .collect();
+    let mut seen_columns: Vec<(String, String)> = Vec::new();
     changes.retain(|change| {
         let Some(suggested) = change.get("suggestedColumn").and_then(Value::as_str) else {
             return false;
@@ -1105,7 +1127,20 @@ fn sanitize_change_list(
         }) {
             return false;
         }
-        // 列名必须是表里真实存在的、有有效置信度、且全批里同一列只出现一次。
+        let repeated_by_other_role = seen_columns.iter().any(|(column, seen_role)| {
+            if column != suggested {
+                return false;
+            }
+            let account_pair = ((role == "accountCode" && seen_role == "accountName")
+                || (role == "accountName" && seen_role == "accountCode"))
+                && combined_account_columns
+                    .iter()
+                    .any(|column| column == suggested);
+            !account_pair
+        });
+        // 列名必须是表里真实存在的、有有效置信度、且全批里同一列通常只
+        // 出现一次。唯一例外是经样例验证的科目混写列，可同时建议
+        // accountCode 与 accountName；任何其他角色组合仍禁止共列。
         // 实测模型会输出"reason 说不该映射、置信 0.1 却仍然映射"的自相矛盾行，
         // 0～0.59 的有效建议要留给前端人工确认；零值或越界值才是无效输出。
         if role.is_empty()
@@ -1113,7 +1148,7 @@ fn sanitize_change_list(
             || !(headers.is_empty() || headers.iter().any(|header| header.trim() == suggested))
             || confidence <= 0.0
             || confidence > 1.0
-            || seen_columns.iter().any(|column| column == suggested)
+            || repeated_by_other_role
         {
             return false;
         }
@@ -1132,13 +1167,19 @@ fn sanitize_change_list(
             && combined_account_columns
                 .iter()
                 .any(|column| column == suggested)
-            && columns_of(if role == "accountName" {
-                "accountCode"
-            } else {
-                "accountName"
-            })
-            .iter()
-            .any(|column| column == suggested);
+            && {
+                let counterpart = if role == "accountName" {
+                    "accountCode"
+                } else {
+                    "accountName"
+                };
+                columns_of(counterpart)
+                    .iter()
+                    .any(|column| column == suggested)
+                    || proposed_columns.iter().any(|(other_role, column)| {
+                        other_role == counterpart && column == suggested
+                    })
+            };
         let date_fallback_column = role == "date"
             && headers
                 .iter()
@@ -1252,7 +1293,7 @@ fn sanitize_change_list(
         if occupied_elsewhere {
             return false;
         }
-        seen_columns.push(suggested.to_owned());
+        seen_columns.push((suggested.to_owned(), role.to_owned()));
         true
     });
 }
@@ -1463,13 +1504,14 @@ pub(crate) fn fx_account_translation_llm_call(
 /// 以及金额方案用 A／B 表述。本工具能用哪些角色由 payload 的 `availableRoles` 声明。
 fn kanzhang_mapping_prompt() -> String {
     let je_instruction = review_je_instruction();
+    let review_common = review_common_instruction();
     format!(
         "你是会计凭证字段映射复核助手。输出严格 JSON：\
          {{scheme:\"A\"|\"B\"|\"\",schemeReason:string,\
          fills:[{{role:string,suggestedColumn:string,confidence:number,reason:string}}],\
          reviews:[{{role:string,currentColumn:string,suggestedColumn:string,confidence:number,reason:string}}]}}。\
          方案A＝净额列（可加方向列）；方案B＝借方与贷方两列，二者互斥。\
-         {REVIEW_COMMON}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{je_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
+         {review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{je_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
     )
 }
 
@@ -2214,6 +2256,40 @@ mod tests {
             1,
             "混写列上编码与名称共列不算冲突：{review:#}"
         );
+
+        // 两个角色都尚未映射时，模型会在同一批 changes 里各提一条；
+        // 去重器也必须放行，而不是只留下数组中的第一条。
+        let empty_payload = json!({
+            "headers": [combined, "货币", "期初", "借方发生", "贷方发生", "期末余额"],
+            "currentMapping": {},
+            "sampleRows": payload["sampleRows"].clone(),
+        });
+        let mut pair_review = json!({"changes": [
+            {"role":"accountCode","currentColumn":"","suggestedColumn":combined,"confidence":0.95,"reason":"编码与名称混写"},
+            {"role":"accountName","currentColumn":"","suggestedColumn":combined,"confidence":0.95,"reason":"编码与名称混写"},
+            {"role":"entity","currentColumn":"","suggestedColumn":combined,"confidence":0.95,"reason":"不应共列"}
+        ]});
+        sanitize_change_list(
+            &mut pair_review,
+            &empty_payload,
+            "tb",
+            "changes",
+            ReviewDatePolicy::Strict,
+        );
+        let roles = pair_review["changes"]
+            .as_array()
+            .expect("changes")
+            .iter()
+            .filter_map(|change| change["role"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(roles, vec!["accountCode", "accountName"]);
+    }
+
+    #[test]
+    fn 公共提示词对混写列没有同列去重矛盾() {
+        let instruction = review_common_instruction();
+        assert!(!instruction.contains("同一列在 changes 里最多出现一次。"));
+        assert!(instruction.contains("accountCode 与 accountName 各出现一次"));
     }
 
     #[test]
@@ -2229,7 +2305,7 @@ mod tests {
         let prompt = kanzhang_mapping_prompt();
         // 纪律整段取自共用的两份，不再自带——改一处，五个工具同时生效。
         // 此前看账那份是库里第三份抄本，措辞与汇兑损益的两份各不相同。
-        assert!(prompt.contains(REVIEW_COMMON), "{prompt}");
+        assert!(prompt.contains(&review_common_instruction()), "{prompt}");
         assert!(prompt.contains(&review_je_instruction()), "{prompt}");
         assert!(
             prompt.contains(REVIEW_AMBIGUOUS_ACCOUNT_HEADERS),

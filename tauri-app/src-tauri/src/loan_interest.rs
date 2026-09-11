@@ -4,7 +4,7 @@ use crate::{AppError, excel_merger::PauseCheckpoint};
 use calamine::{Data, Reader, open_workbook_auto};
 use chrono::{Local, NaiveDate};
 use regex::Regex;
-use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Formula, Workbook};
+use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, FormatUnderline, Formula, Url, Workbook};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
@@ -123,8 +123,8 @@ pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
 }
 
 /// 「确认科目与利率」步骤的科目清单：TB 末级科目逐行下发（编码、名称、
-/// 期初/期末余额、行键）。前端按名称含「借款/贷款」预选借款科目，用户
-/// 逐行确认后把行键回传为 loanAccounts。
+/// 期初/期末余额、行键），并给出可解释的借款科目预选建议。建议只负责缩小
+/// 人工确认范围；最终仍以用户逐行确认后回传的 `loanAccounts` 为准。
 fn tb_accounts(params: &Value) -> Result<Value, AppError> {
     let (tb, tm) = source(params, "tbSource")?;
     let tb_leaf =
@@ -168,6 +168,7 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
         } else {
             norm(&code)
         };
+        let suggestion = suggest_loan_account(&code, &name, &account, opening, closing);
         accounts.push(json!({
             "key": key,
             "code": code,
@@ -175,9 +176,158 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
             "account": account,
             "opening": opening,
             "closing": closing,
+            "suggestedType": if suggestion.is_loan { "loan" } else { "skip" },
+            "suggestionReason": suggestion.reason,
         }));
     }
     Ok(json!({ "accounts": accounts }))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LoanAccountSuggestion {
+    is_loan: bool,
+    reason: String,
+}
+
+/// TB 科目是否应预选为借款科目。
+///
+/// 旧页面只检查名称里有没有“借款/贷款”，会把“其他应收款—职工借款”这类
+/// 资产科目也选进来，同时漏掉只写标准代码或写“应付债券/租赁负债”的融资
+/// 负债。这里组合三类证据：
+///
+/// 1. 科目代码大类（首位 `2` 才是负债；标准借款/债券代码是强证据）；
+/// 2. 科目名称的融资负债语义，并排除职工借款、借款费用、委托贷款等非负债；
+/// 3. 期初/期末余额仅作为解释性证据，不能因两个时点恰好为零漏掉年内借还。
+///
+/// 不读取文件名、账套号或固定列位置，ERP 自定义代码时仍可由名称语义进入候选。
+fn suggest_loan_account(
+    code: &str,
+    name: &str,
+    account: &str,
+    opening: f64,
+    closing: f64,
+) -> LoanAccountSuggestion {
+    let normalized_code = ledger_mapping::normalize_account_code(code);
+    let text = norm(if name.trim().is_empty() {
+        account
+    } else {
+        name
+    });
+    let nonzero_balance = opening.abs() > 0.005 || closing.abs() > 0.005;
+    let asset_or_expense = normalized_code
+        .chars()
+        .next()
+        .is_some_and(|head| matches!(head, '1' | '5' | '6'));
+    let liability = normalized_code.starts_with('2');
+
+    let excluded = [
+        "职工借款",
+        "員工借款",
+        "员工借款",
+        "个人借款",
+        "個人借款",
+        "备用金",
+        "備用金",
+        "借款费用",
+        "借款費用",
+        "借款利息",
+        "贷款利息",
+        "貸款利息",
+        "委托贷款",
+        "委託貸款",
+        "发放贷款",
+        "發放貸款",
+        "贷款及垫款",
+        "貸款及墊款",
+        "贷款减值",
+        "貸款減值",
+        "利息收入",
+        "利息支出",
+    ]
+    .iter()
+    .any(|word| text.contains(&norm(word)));
+    if excluded || asset_or_expense {
+        return LoanAccountSuggestion {
+            is_loan: false,
+            reason: if asset_or_expense {
+                "科目代码属于资产／成本损益类，即使名称含“借款/贷款”也不作为融资负债预选。".into()
+            } else {
+                "名称属于职工往来、贷款资产、借款费用或利息科目，不作为借款本金预选。".into()
+            },
+        };
+    }
+
+    // 企业会计准则常见代码；允许后接明细位。这里只把稳定的一级代码作为
+    // 强证据，不用任意“2”开头替代语义判断。
+    let standard_code = ["2001", "2501", "2502"]
+        .iter()
+        .any(|prefix| normalized_code.starts_with(prefix));
+    let strong_terms = [
+        "短期借款",
+        "短期借款本金",
+        "长期借款",
+        "長期借款",
+        "银行借款",
+        "銀行借款",
+        "金融机构借款",
+        "金融機構借款",
+        "借款本金",
+        "贷款本金",
+        "貸款本金",
+        "应付债券",
+        "應付債券",
+        "租赁负债",
+        "租賃負債",
+        "一年内到期的长期借款",
+        "一年內到期的長期借款",
+        "短期融资券",
+        "短期融資券",
+        "超短期融资券",
+        "超短期融資券",
+        "融资租赁",
+        "融資租賃",
+    ]
+    .iter()
+    .any(|word| text.contains(&norm(word)));
+    let generic_borrowing = ["借款", "贷款", "貸款", "融资", "融資"]
+        .iter()
+        .any(|word| text.contains(&norm(word)));
+
+    let is_loan = standard_code || strong_terms || (liability && generic_borrowing);
+    let reason = if standard_code {
+        format!(
+            "科目代码 {} 属于标准借款／债券负债代码{}。",
+            normalized_code,
+            if nonzero_balance {
+                "，且期初或期末有余额"
+            } else {
+                ""
+            }
+        )
+    } else if strong_terms {
+        format!(
+            "科目名称明确表示融资负债{}。",
+            if nonzero_balance {
+                "，且期初或期末有余额"
+            } else {
+                ""
+            }
+        )
+    } else if liability && generic_borrowing {
+        format!(
+            "科目代码属于负债类，名称同时包含借款／贷款／融资语义{}。",
+            if nonzero_balance {
+                "，且期初或期末有余额"
+            } else {
+                ""
+            }
+        )
+    } else if liability {
+        "科目虽属于负债类，但缺少明确借款本金语义，默认不选，保留人工确认。".into()
+    } else {
+        "未发现可靠的融资负债代码或名称证据，默认不选，保留人工确认。".into()
+    };
+    LoanAccountSuggestion { is_loan, reason }
 }
 
 /// 导出「借款利率确认表」模板：借款行逐行列出（行标识、科目、期初/期末），
@@ -2555,10 +2705,29 @@ fn write_lpr_sheet(wb: &mut Workbook, header: &Format, date_fmt: &Format) -> Res
         &warn,
     )
     .map_err(xlsx)?;
+    ws.write_string_with_format(2, 0, "来源（可点击）：", &warn)
+        .map_err(xlsx)?;
+    let link = Format::new()
+        .set_font_color("#0563C1")
+        .set_underline(FormatUnderline::Single);
+    ws.write_url_with_format(
+        2,
+        1,
+        Url::new(lpr::HISTORY_SOURCE).set_text("历史月度报价"),
+        &link,
+    )
+    .map_err(xlsx)?;
+    ws.write_url_with_format(
+        2,
+        2,
+        Url::new(lpr::LATEST_SOURCE).set_text("最新公告"),
+        &link,
+    )
+    .map_err(xlsx)?;
     ws.write_string_with_format(
         2,
-        0,
-        format!("来源：全国银行间同业拆借中心；2026-08-28 核验。历史月表：{}；最新公告：{}。正式出具前请核对合同重定价约定；补录报价时在数据区内按日期升序插入整行并核对公式引用范围。", lpr::HISTORY_SOURCE, lpr::LATEST_SOURCE).as_str(),
+        3,
+        "2026-08-28 核验。正式出具前请核对合同重定价约定；补录报价时按日期升序插入整行并核对公式引用范围。",
         &warn,
     )
     .map_err(xlsx)?;
@@ -2581,6 +2750,7 @@ fn write_lpr_sheet(wb: &mut Workbook, header: &Format, date_fmt: &Format) -> Res
     ws.set_column_width(0, 16).map_err(xlsx)?;
     ws.set_column_width(1, 12).map_err(xlsx)?;
     ws.set_column_width(2, 14).map_err(xlsx)?;
+    ws.set_column_width(3, 68).map_err(xlsx)?;
     Ok(())
 }
 
@@ -3847,6 +4017,29 @@ mod loan_form_tests {
         );
         assert_eq!(quotes.get_value((3, 1)).unwrap().to_string(), "1年期LPR(%)");
 
+        // 来源必须是 Excel 真正的外部超链接，而不是看起来像网址的普通文本。
+        let package = std::fs::read(&out).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(package)).unwrap();
+        let relationship_xml = (0..archive.len())
+            .filter_map(|i| {
+                let mut file = archive.by_index(i).ok()?;
+                if !file.name().contains("worksheets/_rels/") {
+                    return None;
+                }
+                let mut xml = String::new();
+                std::io::Read::read_to_string(&mut file, &mut xml).ok()?;
+                Some(xml)
+            })
+            .collect::<String>();
+        assert!(
+            relationship_xml.contains(lpr::HISTORY_SOURCE),
+            "LPR 报价表缺少历史来源超链接"
+        );
+        assert!(
+            relationship_xml.contains(lpr::LATEST_SOURCE),
+            "LPR 报价表缺少最新公告超链接"
+        );
+
         let formulas =
             calamine::Reader::worksheet_formula(&mut book, "借款变动与利息测算").unwrap();
         // K 列基准利率：INDEX/MATCH 指向报价表，按 I 列的定价基准日取那一期。
@@ -3987,6 +4180,111 @@ mod loan_form_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 借款科目建议结合代码类别与融资负债语义() {
+        let standard = suggest_loan_account("20010001", "银行短期借款", "", 100.0, 80.0);
+        assert!(standard.is_loan, "{standard:?}");
+        assert!(standard.reason.contains("标准借款"), "{standard:?}");
+
+        // 不能再因名称里出现“借款”就把资产类职工往来选成借款本金。
+        let employee = suggest_loan_account(
+            "1221040000",
+            "其他应收款-职工一般借款",
+            "",
+            1_500.0,
+            578_400.0,
+        );
+        assert!(!employee.is_loan, "{employee:?}");
+        assert!(employee.reason.contains("资产"), "{employee:?}");
+
+        // 名称不写“借款”时，标准融资负债也应进入候选。
+        assert!(suggest_loan_account("25020000", "应付债券", "", 0.0, 0.0).is_loan);
+        assert!(
+            suggest_loan_account("", "租赁负债", "", 0.0, 0.0).is_loan,
+            "ERP 自定义代码仍按明确名称语义识别"
+        );
+        assert!(
+            !suggest_loan_account("22410000", "其他应付款", "", 1.0, 2.0).is_loan,
+            "不能把所有负债科目都预选"
+        );
+        assert!(
+            !suggest_loan_account("15010000", "委托贷款", "", 1.0, 2.0).is_loan,
+            "贷款资产不是借款负债"
+        );
+    }
+
+    #[test]
+    fn sap序时账按取值区分总账科目名称与分录摘要() {
+        let headers = [
+            "凭证编号",
+            "凭证日期",
+            "总账科目",
+            "科目名称",
+            "功能范围文本",
+            "本位币金额",
+        ]
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>();
+        let rows = [
+            [
+                "V1",
+                "2025-01-02",
+                "0000943100",
+                "Allocation cafeteria",
+                "canteen allocation",
+                "-64000",
+            ],
+            [
+                "V2",
+                "2025-01-03",
+                "0000943200",
+                "Indirect acty allocation services",
+                "service allocation",
+                "240",
+            ],
+            [
+                "V3",
+                "2025-01-04",
+                "0000943300",
+                "Indirect allocation cafeteria",
+                "allocation correction",
+                "22400",
+            ],
+            [
+                "V4",
+                "2025-01-05",
+                "0000943400",
+                "Interest expense",
+                "loan accrual",
+                "100",
+            ],
+        ]
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+        let mapping = suggest_with_rows(&headers, "je", &rows);
+        assert!(
+            mapping.get("accountCode").is_none(),
+            "总账科目是歧义标题，即使值像编码也留给 LLM: {mapping:?}"
+        );
+        assert_eq!(
+            mapping.get("accountName").and_then(Value::as_str),
+            Some("科目名称"),
+            "英文可读描述属于科目名称: {mapping:?}"
+        );
+        assert_eq!(
+            mapping.get("summary").and_then(Value::as_str),
+            Some("功能范围文本"),
+            "分录文本应独立映射摘要，不能复用科目名称: {mapping:?}"
+        );
+    }
+
     /// 纯合成台账：不依赖本机客户目录，覆盖真实 Excel 上传与解析路径。
     pub(super) struct SyntheticLedger {
         pub(super) dir: PathBuf,
@@ -5565,7 +5863,10 @@ mod loan_real_ledger_mapping_tests {
             .as_object()
             .expect("缺 suggestedMapping");
         println!("{}", serde_json::to_string_pretty(mapping).unwrap());
-        assert_eq!(mapping.get("date").and_then(Value::as_str), Some("凭证日期"));
+        assert_eq!(
+            mapping.get("date").and_then(Value::as_str),
+            Some("凭证日期")
+        );
         assert!(
             mapping.get("accountCode").is_none(),
             "歧义科目表头应留给 LLM，日期列不得被借款科目编码占用: {mapping:?}"
@@ -5573,6 +5874,41 @@ mod loan_real_ledger_mapping_tests {
         assert!(
             mapping.get("accountName").is_none(),
             "歧义科目表头应留给 LLM: {mapping:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "仅本机真实账表验收，需 LEDGER_SAMPLES 指向 TBJEPBC 目录"]
+    fn 借款inspect真实04序时账识别科目代码与名称() {
+        let root = std::env::var("LEDGER_SAMPLES").expect("LEDGER_SAMPLES 未设置");
+        let path = std::path::Path::new(&root).join("04JE.XLSX");
+        let result = inspect(&json!({
+            "kind": "je",
+            "source": {
+                "inputPath": path,
+                "sheet": "Sheet1",
+                "headerRow": 0,
+                "headerDepth": 0
+            }
+        }))
+        .expect("借款 JE inspect 失败");
+        let mapping = result["suggestedMapping"]
+            .as_object()
+            .expect("缺 suggestedMapping");
+        println!("{}", serde_json::to_string_pretty(mapping).unwrap());
+        assert!(
+            mapping.get("accountCode").is_none(),
+            "04 JE 的总账科目是歧义标题，应保留给 LLM 按取值判断: {mapping:?}"
+        );
+        assert_eq!(
+            mapping.get("accountName").and_then(Value::as_str),
+            Some("科目名称"),
+            "04 JE 的英文描述取值列应映射借款科目名称: {mapping:?}"
+        );
+        assert_eq!(
+            mapping.get("summary").and_then(Value::as_str),
+            Some("功能范围文本"),
+            "04 JE 的分录文本应映射摘要；不能拿科目名称重复凑摘要: {mapping:?}"
         );
     }
 }

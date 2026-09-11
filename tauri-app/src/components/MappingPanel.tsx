@@ -1,4 +1,5 @@
 import { DataTable } from "@/components/DataTable";
+import { canShareCombinedAccountColumn } from "@/ledgerMapping";
 
 /**
  * 五个工具共用的字段映射面板。
@@ -94,6 +95,24 @@ export function MappingPanel(props: MappingPanelProps) {
   const isMulti = (role: string) => Boolean(multi?.has(role));
   const locked = (role: string) => Boolean(props.isLocked?.(role));
 
+  // “科目编码＋科目名称”是公共账表映射里唯一允许共用物理列的身份角色。
+  // 必须先由样例值确认该列确实呈编码/名称混写形态；列标题本身不构成依据。
+  const combinedAccountColumns = new Set(
+    headers
+      .filter((header) =>
+        canShareCombinedAccountColumn(
+          headers,
+          rows,
+          header,
+          "accountCode",
+          "accountName",
+        ),
+      )
+      .map((header) => header.trim()),
+  );
+  const isAccountIdentityRole = (role: string) =>
+    role === "accountCode" || role === "accountName";
+
   // 某一列当前落在哪个角色上。可共用一列的角色不参与判定——否则币种线索
   // 文本会把科目名称的标记抢走，用户看到的下拉就跟实际映射对不上。
   const roleOf = (column: string) =>
@@ -110,8 +129,24 @@ export function MappingPanel(props: MappingPanelProps) {
 
   const update = (column: string, role: string) => {
     const next: MappingDict = { ...mapping };
+    const combinedAccount = combinedAccountColumns.has(column);
     // 先把这一列从原来的角色上摘下来，再挂到新角色上。
     for (const [key] of roles) {
+      // 经样例确认的混写列可同时承担科目编码、科目名称。除此以外仍严格
+      // 一列一角色，包括摘要、辅助核算、币种等都不能借此例外叠加。
+      if (
+        role &&
+        combinedAccount &&
+        canShareCombinedAccountColumn(
+          headers,
+          rows,
+          column,
+          role,
+          key,
+        )
+      ) {
+        continue;
+      }
       const columns = asColumns(next[key]);
       if (!columns.includes(column)) continue;
       const rest = columns.filter((item) => item !== column);
@@ -120,6 +155,29 @@ export function MappingPanel(props: MappingPanelProps) {
     if (role) {
       next[role] = isMulti(role) ? [...asColumns(next[role]), column] : column;
     }
+    props.onChange(next);
+  };
+
+  const rolesOnColumn = (column: string): string[] =>
+    roles
+      .map(([role]) => role)
+      .filter((role) => asColumns(mapping[role]).includes(column));
+
+  // 双角色状态下原生单选框没有可表达的 value，改用摘要占位；点击已勾选
+  // 的科目角色可单独取消，点击其他角色则回到普通的一列一角色。
+  const updateCombinedAccount = (column: string, role: string) => {
+    if (!isAccountIdentityRole(role)) {
+      update(column, role);
+      return;
+    }
+    const held = rolesOnColumn(column);
+    if (!held.includes(role)) {
+      update(column, role);
+      return;
+    }
+    const next: MappingDict = { ...mapping };
+    const rest = asColumns(next[role]).filter((item) => item !== column);
+    next[role] = isMulti(role) ? rest : rest[0];
     props.onChange(next);
   };
 
@@ -190,15 +248,30 @@ export function MappingPanel(props: MappingPanelProps) {
     const column = header.trim();
     const held = toggleMode ? (props.rolesOf?.(header) ?? []) : [];
     const current = toggleMode ? "" : roleOf(column);
+    const accountHeld = !toggleMode && combinedAccountColumns.has(column)
+      ? rolesOnColumn(column).filter(isAccountIdentityRole)
+      : [];
+    const combinedAccountMapped = accountHeld.length > 1;
     const byRole = labelOf;
-    const summary = held.length
-      ? held.map((role) => labelOf.get(role) ?? role).join(" ＋ ")
+    const summaryRoles = toggleMode ? held : accountHeld;
+    const summary = summaryRoles.length
+      ? summaryRoles.map((role) => labelOf.get(role) ?? role).join(" ＋ ")
       : "— 选择字段";
     const renderOption = toggleMode
       ? (role: string, label: string, group?: MappingGroup) =>
           toggleOption(role, label, held, group)
-      : (role: string, label: string, group?: MappingGroup) =>
-          option(role, label, current, group);
+      : combinedAccountMapped
+        ? (role: string, label: string, group?: MappingGroup) =>
+            isAccountIdentityRole(role) ? (
+              <option key={role} value={role}>
+                {accountHeld.includes(role) ? `✓ ${label}（再点取消）` : label}
+                {mark(role, group)}
+              </option>
+            ) : (
+              option(role, label, current, group)
+            )
+        : (role: string, label: string, group?: MappingGroup) =>
+            option(role, label, current, group);
     return (
       <label className="dt-header-control" key={header}>
         <select
@@ -214,24 +287,37 @@ export function MappingPanel(props: MappingPanelProps) {
           disabled={
             busy || (!toggleMode && Boolean(current) && locked(current))
           }
-          value={toggleMode ? "" : current}
+          value={toggleMode || combinedAccountMapped ? "" : current}
           data-mapped={
-            toggleMode ? held.length > 0 : Boolean(current && !locked(current))
+            toggleMode
+              ? held.length > 0
+              : combinedAccountMapped || Boolean(current && !locked(current))
           }
-          title={toggleMode && held.length ? summary : undefined}
+          title={
+            (toggleMode && held.length) || combinedAccountMapped
+              ? summary
+              : undefined
+          }
           onChange={(e) => {
             const role = e.target.value;
             if (toggleMode) {
               if (role) props.onToggle?.(header, role);
+              e.currentTarget.value = "";
+            } else if (combinedAccountMapped) {
+              updateCombinedAccount(column, role);
               e.currentTarget.value = "";
             } else update(column, role);
           }}
         >
           <option
             value=""
-            className={held.length ? "dt-current-mapping" : undefined}
+            className={
+              held.length || combinedAccountMapped
+                ? "dt-current-mapping"
+                : undefined
+            }
           >
-            {toggleMode ? summary : "— 选择字段"}
+            {toggleMode || combinedAccountMapped ? summary : "— 选择字段"}
           </option>
           {props.groups
             ? props.groups.map((group) => (

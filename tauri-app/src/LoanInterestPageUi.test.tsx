@@ -316,8 +316,8 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
     if (method === "loan.tb_accounts") {
       return {
         accounts: [
-          { key: "2001", code: "2001", name: "短期借款", account: "2001 短期借款", opening: 1000, closing: 900 },
-          { key: "1122", code: "1122", name: "应收账款", account: "1122 应收账款", opening: 5, closing: 6 },
+          { key: "1122", code: "1122", name: "应收账款", account: "1122 应收账款", opening: 5, closing: 6, suggestedType: "skip", suggestionReason: "资产类科目" },
+          { key: "2001", code: "2001", name: "短期借款", account: "2001 短期借款", opening: 1000, closing: 900, suggestedType: "loan", suggestionReason: "负债类借款科目" },
         ],
       };
     }
@@ -339,6 +339,11 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   expect((loanSelect as HTMLSelectElement).value).toBe("loan");
   const skipSelect = screen.getByRole("combobox", { name: "1122 应收账款的科目类型" });
   expect((skipSelect as HTMLSelectElement).value).toBe("skip");
+  const accountRows = screen.getAllByRole("row");
+  expect(accountRows[1]).toHaveTextContent("短期借款");
+  expect(accountRows[2]).toHaveTextContent("应收账款");
+  expect(screen.getByText("设置借款利率")).toBeVisible();
+  expect(screen.getByRole("region", { name: "等待生成利率明细" })).toBeVisible();
   // 金额映射没补齐：下一步仍拦，但不再出现「借款明细/辅助核算」的旧提示。
   expect(
     screen.getByRole("button", { name: "下一步：测算与底稿" }),

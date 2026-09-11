@@ -1,6 +1,116 @@
 .loan-page {
   padding-bottom: 40px;
 }
+.loan-confirm-workspace {
+  display: grid;
+  gap: var(--sp-4);
+}
+.loan-confirm-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  width: 100%;
+}
+.loan-confirm-heading > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+.loan-section-kicker {
+  color: var(--primary);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.loan-account-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.loan-account-confirm {
+  max-height: 520px;
+  margin-top: var(--sp-3);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+}
+.loan-account-confirm table {
+  width: 100%;
+  min-width: 940px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.loan-account-confirm th,
+.loan-account-confirm td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+.loan-account-confirm th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+}
+.loan-account-confirm tr:last-child td {
+  border-bottom: 0;
+}
+.loan-account-confirm tr.is-loan td {
+  background: var(--success-bg);
+}
+.loan-account-confirm tr.is-skipped td {
+  color: var(--text-muted);
+}
+.loan-account-confirm select {
+  min-width: 112px;
+  min-height: 36px;
+  padding: 6px 28px 6px 9px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--background);
+  color: var(--foreground);
+}
+.loan-suggestion {
+  display: inline-block;
+  overflow: hidden;
+  max-width: 250px;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.loan-suggestion.is-positive {
+  color: var(--success-fg);
+  font-weight: 600;
+}
+.loan-rate-toolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-4);
+  padding: var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--muted);
+}
+.loan-rate-toolbar > label {
+  display: grid;
+  gap: 5px;
+  min-width: 220px;
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+}
+.loan-rate-toolbar .loan-paste-actions {
+  justify-content: flex-end;
+  margin-top: 0;
+}
 .loan-result-overview {
   display: flex;
   flex-wrap: wrap;
@@ -194,6 +304,14 @@
   }
   .loan-bridge-equation .fx-operator {
     min-height: 24px;
+  }
+  .loan-confirm-heading,
+  .loan-rate-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .loan-rate-toolbar > label {
+    min-width: 0;
   }
 }
 /* 导出完成反馈：文件名＋打开按钮，完整路径放悬浮提示。 */

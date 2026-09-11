@@ -523,6 +523,30 @@ export const isCombinedAccountValues = (values: string[]): boolean => {
   }
   return total >= 4 && split * 4 >= total * 3;
 };
+
+/**
+ * 公共映射里唯一的同列双角色例外。
+ *
+ * 角色必须恰好是 accountCode + accountName，且当前预览样例能确认目标列为
+ * 编码名称混写；标题叫“科目”或“总账科目”本身不能放行。
+ */
+export function canShareCombinedAccountColumn(
+  headers: string[],
+  sampleRows: string[][],
+  column: string,
+  firstRole: string,
+  secondRole: string,
+): boolean {
+  const accountPair =
+    (firstRole === "accountCode" && secondRole === "accountName") ||
+    (firstRole === "accountName" && secondRole === "accountCode");
+  if (!accountPair) return false;
+  const index = headers.findIndex((header) => header.trim() === column.trim());
+  return (
+    index >= 0 &&
+    isCombinedAccountValues(sampleRows.map((row) => row[index] ?? ""))
+  );
+}
 /**
  * 调用共用的映射复核，把够把握的建议应用到通用字典型映射上。
  *
@@ -588,13 +612,6 @@ export function planLedgerChanges(
   const applied: LedgerPlannedChange[] = [];
   const pending: LedgerPlannedChange[] = [];
   // 「编码＋名称混写」的列允许科目编码与科目名称共用（与后端同口径豁免）。
-  const combinedOf = (column: string): boolean => {
-    const index = headers.indexOf(column);
-    return (
-      index >= 0 &&
-      isCombinedAccountValues(sampleRows.map((row) => row[index] ?? ""))
-    );
-  };
   // LLM 的一批建议必须作为一个原子调整计划判断，不能依赖返回顺序。
   // 例如 accountCode 先从「会计科目」挪走，accountName 才能接手该列；
   // 若逐条检查，两条都会因为“当前仍被占用”而被错误丢弃。
@@ -642,10 +659,12 @@ export function planLedgerChanges(
       ([role, value]) =>
         role !== change.role &&
         (Array.isArray(value) ? value.includes(column) : value === column) &&
-        !(
-          ((change.role === "accountName" && role === "accountCode") ||
-            (change.role === "accountCode" && role === "accountName")) &&
-          combinedOf(column)
+        !canShareCombinedAccountColumn(
+          headers,
+          sampleRows,
+          column,
+          change.role,
+          role,
         ),
     );
     const blocking = occupied.filter(

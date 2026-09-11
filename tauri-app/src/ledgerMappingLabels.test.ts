@@ -83,4 +83,67 @@ describe("planLedgerChanges", () => {
     expect(result.mapping.auxiliary).toEqual(["成本中心"]);
     expect(result.applied).toHaveLength(3);
   });
+
+  it("只有经样例确认的编码名称混写列才允许两个科目角色共列", () => {
+    const combinedRows = [
+      ["1001/库存现金"],
+      ["1002/银行存款"],
+      ["1003/存放央行"],
+      ["1004/其他货币资金"],
+    ];
+    const accepted = planLedgerChanges(
+      ["科目"],
+      combinedRows,
+      { accountCode: "科目" },
+      { accountCode: "科目编码", accountName: "科目名称" },
+      [
+        {
+          role: "accountName",
+          suggestedColumn: "科目",
+          confidence: 0.95,
+        },
+      ],
+    );
+    expect(accepted.mapping.accountCode).toBe("科目");
+    expect(accepted.mapping.accountName).toEqual(["科目"]);
+
+    const rejected = planLedgerChanges(
+      ["科目"],
+      [["1001"], ["1002"], ["1003"], ["1004"]],
+      { accountCode: "科目" },
+      { accountCode: "科目编码", accountName: "科目名称" },
+      [
+        {
+          role: "accountName",
+          suggestedColumn: "科目",
+          confidence: 0.95,
+        },
+      ],
+    );
+    expect(rejected.mapping).toEqual({ accountCode: "科目" });
+    expect(rejected.applied).toHaveLength(0);
+  });
+
+  it("混写列也不允许摘要等其他角色与科目编码共列", () => {
+    const result = planLedgerChanges(
+      ["科目"],
+      [
+        ["1001/库存现金"],
+        ["1002/银行存款"],
+        ["1003/存放央行"],
+        ["1004/其他货币资金"],
+      ],
+      { accountCode: "科目" },
+      { accountCode: "科目编码", summary: "摘要" },
+      [
+        {
+          role: "summary",
+          suggestedColumn: "科目",
+          confidence: 0.95,
+        },
+      ],
+    );
+    expect(result.mapping).toEqual({ accountCode: "科目" });
+    expect(result.applied).toHaveLength(0);
+  });
 });

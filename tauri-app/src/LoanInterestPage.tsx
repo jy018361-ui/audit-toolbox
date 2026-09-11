@@ -164,14 +164,37 @@ const LABELS: Record<Kind, Record<string, string>> = {
   },
   rateLedger: LOAN_ROLE_FALLBACK,
 };
+
+type TbAccount = {
+  key: string;
+  code: string;
+  name: string;
+  account: string;
+  opening: number;
+  closing: number;
+  /** 由 Rust 按科目代码与负债语义共同给出的初始建议；用户仍可逐行改写。 */
+  suggestedType?: "loan" | "skip";
+  suggestionReason?: string;
+};
+
+/** 兼容旧任务/浏览器演示数据；新版 Rust 会直接下发更审慎的 suggestedType。 */
+function initialLoanAccountRole(account: TbAccount): "loan" | "skip" {
+  if (account.suggestedType === "loan" || account.suggestedType === "skip") {
+    return account.suggestedType;
+  }
+  return /短期借款|长期借款|银行借款|借款本金|贷款本金|应付债券|有息负债|租赁负债/.test(
+    account.name || account.account,
+  )
+    ? "loan"
+    : "skip";
+}
 /**
- * 借款页当前的映射状态与 MappingPanel 交互是“一角色一列”。
+ * 借款页仍用纯字符串状态：一个角色只取一列，避免公共复核返回数组后让
+ * `loanMissing` 对数组调用 `.trim()` 而触发 WebView 白屏。
  *
- * 公共复核默认会把 accountName / id 等角色保存成数组；若直接写回
- * 本页的纯字符串状态，下一次渲染会在 loanMissing 中对数组调用
- * `.trim()` 并导致 WebView 白屏。在借款页边界显式关闭多列角色，与页面的
- * MappingPanel（未开启 multi）保持一致。Rust 引擎本身可接受数组，
- * 但页面尚未提供多列角色的手工编辑语义。
+ * 这不等于“一列只能有一个角色”：公共 MappingPanel 会在样例确认
+ * “编码＋名称混写”时，唯一允许 accountCode 与 accountName 指向同一列；
+ * 两个角色各自仍保存为字符串。凭证号、辅助核算等不因此获得多列或共列能力。
  */
 const LOAN_SINGLE_COLUMN_ROLES = new Set<string>();
 /** 底稿反馈里只展示文件名，完整路径放 title 悬浮提示。 */
@@ -291,9 +314,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   // 利率确认（TB 模式）：用户从 Excel 复制粘贴的利率区域原文，与匹配出的逐笔利率。
   // 粘贴原文保留（方便换映射后一键重匹配），匹配结果随 TB 来源/映射变化作废。
   /** 「确认科目与利率」步骤：TB 末级科目清单（loan.tb_accounts 下发）。 */
-  const [tbAccounts, setTbAccounts] = useState<
-    { key: string; code: string; name: string; account: string; opening: number; closing: number }[]
-  >([]);
+  const [tbAccounts, setTbAccounts] = useState<TbAccount[]>([]);
   const [accountsBusy, setAccountsBusy] = useState(false);
   /** 科目角色确认：行键 → 借款科目/排除；预选规则为名称含「借款/贷款」。 */
   const [loanAccountRoles, setLoanAccountRoles] = useState<Record<string, "loan" | "skip">>({});
@@ -417,15 +438,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     try {
       const res = (await engineCall("loan.tb_accounts", {
         tbSource: source("tb"),
-      })) as {
-        accounts: { key: string; code: string; name: string; account: string; opening: number; closing: number }[];
-      };
+      })) as { accounts: TbAccount[] };
       setTbAccounts(res.accounts ?? []);
       setLoanAccountRoles(
         Object.fromEntries(
           (res.accounts ?? []).map((a) => [
             a.key,
-            /借款|贷款/.test(a.name || a.account) ? "loan" : "skip",
+            initialLoanAccountRole(a),
           ]),
         ),
       );
@@ -836,6 +855,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   // 导出完成后除结果区的打开按钮外，测算卡里也要有明确的「已生成＋文件名＋打开」
   // 反馈——此前唯一反馈是结果区标题旁悄悄出现的小按钮，用户感知不到已导出。
   const exported = ((result?.outputPaths ?? []) as string[]).filter(Boolean);
+  const orderedTbAccounts = [...tbAccounts].sort((a, b) => {
+    const roleOrder =
+      Number(loanAccountRoles[a.key] !== "loan") -
+      Number(loanAccountRoles[b.key] !== "loan");
+    return roleOrder || a.code.localeCompare(b.code, "zh-CN", { numeric: true });
+  });
+  const selectedAccountCount = selectedLoanAccounts().length;
   return (
     <main className="tool-page fx-page loan-page">
       <PageHeader
@@ -1042,15 +1068,25 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               onEdit={editRate}
             />
           ) : (
-            <Card>
-              <CardHeader>
-                <CardTitle>确认借款科目</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="fx-hint">
-                  名称含「借款/贷款」的科目已预选为借款科目，请逐行确认；确认后点下方按钮生成借款利率表。
-                  借款明细/辅助核算不是必选项——映射了仅用于同科目多笔时区分到笔。
-                </p>
+            <div className="loan-confirm-workspace">
+              <Card>
+                <CardHeader>
+                  <div className="loan-confirm-heading">
+                    <div>
+                      <span className="loan-section-kicker">第 1 项</span>
+                      <CardTitle>确认借款科目</CardTitle>
+                    </div>
+                    <div className="loan-account-summary" aria-label="科目确认汇总">
+                      <Badge variant="secondary">借款科目 {selectedAccountCount}</Badge>
+                      <span>其他科目 {Math.max(0, tbAccounts.length - selectedAccountCount)}</span>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <p className="fx-hint">
+                    系统按科目编码与负债语义共同给出初始建议，借款科目置顶、其他科目随后；
+                    建议仅作起点，请逐行确认。借款明细/辅助核算不是必选项，映射后仅用于同科目多笔时区分到笔。
+                  </p>
                 {accountsBusy ? (
                   <p className="fx-hint">正在读取科目清单…</p>
                 ) : (
@@ -1062,16 +1098,28 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                           <th>科目名称</th>
                           <th>期初余额</th>
                           <th>期末余额</th>
+                          <th>系统建议</th>
                           <th>科目类型</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {tbAccounts.map((a) => (
-                          <tr key={a.key}>
+                        {orderedTbAccounts.map((a) => (
+                          <tr
+                            key={a.key}
+                            className={loanAccountRoles[a.key] === "loan" ? "is-loan" : "is-skipped"}
+                          >
                             <td>{a.code}</td>
                             <td title={a.account}>{a.name || a.account}</td>
                             <td className="loan-num">{a.opening.toLocaleString()}</td>
                             <td className="loan-num">{a.closing.toLocaleString()}</td>
+                            <td>
+                              <span
+                                className={`loan-suggestion ${a.suggestedType === "loan" ? "is-positive" : ""}`}
+                                title={a.suggestionReason || undefined}
+                              >
+                                {a.suggestionReason || (initialLoanAccountRole(a) === "loan" ? "疑似有息负债" : "未命中借款特征")}
+                              </span>
+                            </td>
                             <td>
                               <select
                                 aria-label={`${a.account}的科目类型`}
@@ -1093,65 +1141,84 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                     </table>
                   </div>
                 )}
-                <div className="loan-run-grid">
-                  <label>
-                    资产负债表日
-                    <Input
-                      type="date"
-                      value={reportEnd}
-                      onChange={(e) => setReportEnd(e.target.value)}
-                    />
-                  </label>
-                </div>
                 <div className="loan-paste-actions">
                   <Button
                     variant="secondary"
-                    disabled={accountsBusy || !selectedLoanAccounts().length}
+                    disabled={accountsBusy || !tbAccounts.length}
                     onClick={() => {
-                      setLoanAccountRoles((v) =>
+                      setLoanAccountRoles(
                         Object.fromEntries(
                           tbAccounts.map((a) => [
                             a.key,
-                            /借款|贷款/.test(a.name || a.account) ? "loan" : "skip",
+                            initialLoanAccountRole(a),
                           ]),
                         ),
                       );
-                      void loadTbAccounts();
                     }}
                   >
-                    按名称建议重选
+                    恢复系统建议
                   </Button>
-                  <Button
-                    variant="default"
-                    disabled={
-                      busy || accountsBusy || !selectedLoanAccounts().length || !mappingsReady
-                    }
-                    onClick={() => void run("loan.preview")}
-                    title={mappingsReady ? undefined : "请先补齐字段映射"}
-                  >
-                    生成借款利率表
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    disabled={busy || !selectedLoanAccounts().length}
-                    onClick={() => void exportRateTemplate()}
-                  >
-                    导出利率确认表
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    disabled={busy || !rows.length}
-                    onClick={() => void importRates()}
-                    title={rows.length ? undefined : "先生成借款利率表再回读"}
-                  >
-                    回读已填利率表
-                  </Button>
-                  {rateNoteText && (
-                    <span className="loan-paste-note">{rateNoteText}</span>
-                  )}
                 </div>
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <div className="loan-confirm-heading">
+                    <div>
+                      <span className="loan-section-kicker">第 2 项</span>
+                      <CardTitle>设置借款利率</CardTitle>
+                    </div>
+                    <Badge variant="secondary">本步骤完成</Badge>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <div className="loan-rate-toolbar">
+                    <label>
+                      资产负债表日
+                      <Input
+                        type="date"
+                        value={reportEnd}
+                        onChange={(e) => setReportEnd(e.target.value)}
+                      />
+                    </label>
+                    <div className="loan-paste-actions">
+                      <Button
+                        variant="default"
+                        disabled={busy || accountsBusy || !selectedAccountCount || !mappingsReady}
+                        onClick={() => void run("loan.preview")}
+                        title={mappingsReady ? undefined : "请先补齐字段映射"}
+                      >
+                        {rows.length ? "重新生成借款利率表" : "生成借款利率表"}
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        disabled={busy || !selectedAccountCount}
+                        onClick={() => void exportRateTemplate()}
+                      >
+                        导出利率确认表
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        disabled={busy || !rows.length}
+                        onClick={() => void importRates()}
+                        title={rows.length ? undefined : "先生成利率明细再回读"}
+                      >
+                        回读已填利率表
+                      </Button>
+                    </div>
+                  </div>
+                  {rateNoteText && <p className="loan-paste-note">{rateNoteText}</p>}
+                  {!rows.length && (
+                    <EmptyState
+                      compact
+                      title="等待生成利率明细"
+                      description="确认上方借款科目与资产负债表日后，点击“生成利率明细”；固定利率、浮动基准与加减点会直接在本步骤逐笔确认。"
+                    />
+                  )}
+                </CardContent>
+              </Card>
+            </div>
           )}
           {mode === "tb" && rows.length > 0 && (
             <TbRateTable rows={rows} edits={tbRateEdits} onEdit={editTbRate} />

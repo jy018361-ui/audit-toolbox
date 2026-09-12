@@ -177,6 +177,36 @@ fn matched_identity(
     (entity, account)
 }
 
+fn scoped_identity_parts(
+    table: &FxTable,
+    row: &[String],
+    map: &Map<String, Value>,
+    fixed: &str,
+    side: ledger_mapping::EntitySide,
+    scope: &ledger_mapping::EntityScope,
+) -> (String, String, String) {
+    let (entity, code, name) = identity_parts(table, row, map, fixed);
+    (
+        ledger_mapping::apply_entity_scope(side, &entity, scope),
+        code,
+        name,
+    )
+}
+
+fn scoped_matched_identity(
+    table: &FxTable,
+    row: &[String],
+    map: &Map<String, Value>,
+    fixed: &str,
+    side: ledger_mapping::EntitySide,
+    scope: &ledger_mapping::EntityScope,
+    policy: &ledger_mapping::AccountMatchPolicy,
+) -> (String, String) {
+    let (entity, code, name) = scoped_identity_parts(table, row, map, fixed, side, scope);
+    let account = policy.account_key(&entity, &code, &name);
+    (entity, account)
+}
+
 fn display_name(table: &FxTable, row: &[String], map: &Map<String, Value>) -> String {
     let name = joined(table, row, map, "accountName");
     if name.is_empty() {
@@ -228,6 +258,7 @@ struct PreparedCheck {
     /// TBJE 公共核对永远保留全部非空行。币种只用于判断列语义，不能成为行过滤条件。
     tb_rows: Vec<bool>,
     je_rows: Option<Vec<bool>>,
+    entity_scope: ledger_mapping::EntityScope,
 }
 
 /// Small ledgers retain the existing in-memory table. Large CSV ledgers keep
@@ -449,6 +480,13 @@ fn prepare_with_control(
     if je_fixed.is_empty() {
         je_fixed = ledger_mapping::DEFAULT_ENTITY.to_owned();
     }
+    let entity_scope = params
+        .get("entityScope")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| error("INVALID_PARAMS", "主体口径参数无效。", Some(e.to_string())))?
+        .unwrap_or_default();
 
     let je_map_before_alignment = je_map.clone();
     let mut mapping_warnings = if let Some(je) = je.as_ref() {
@@ -586,6 +624,7 @@ fn prepare_with_control(
         mapping_warnings,
         tb_rows,
         je_rows,
+        entity_scope,
     })
 }
 
@@ -693,6 +732,7 @@ fn evaluate(
             include_all_accounts,
             &prepared.tb_rows,
             prepared.je_rows.as_deref().unwrap_or(&[]),
+            &prepared.entity_scope,
         )?,
         None => json!({
             "performed": false,
@@ -713,6 +753,7 @@ fn evaluate(
             } else {
                 "TB 与 JE 未同时映射主体，双方统一按“默认主体”处理。"
             },
+            "selection": prepared.entity_scope,
         },
         "currencyScope": {
             "functionalCurrency": Value::Null,
@@ -1816,6 +1857,7 @@ fn check_tb_vs_je(
     include_all_accounts: bool,
     functional_rows: &[bool],
     je_rows: &[bool],
+    entity_scope: &ledger_mapping::EntityScope,
 ) -> Result<Value, AppError> {
     let je_table = &*je.table;
     let tb_debit = columns(tb_map, "ytdFunctionalDebit");
@@ -1851,12 +1893,28 @@ fn check_tb_vs_je(
         .enumerate()
         .filter(|(index, _)| functional_rows.get(*index).copied().unwrap_or(true))
         .filter(|(index, _)| leaf.get(*index).copied().unwrap_or(true))
-        .map(|(_, row)| identity_parts(tb, row, tb_map, tb_fixed))
+        .map(|(_, row)| {
+            scoped_identity_parts(
+                tb,
+                row,
+                tb_map,
+                tb_fixed,
+                ledger_mapping::EntitySide::Tb,
+                entity_scope,
+            )
+        })
         .collect::<Vec<_>>();
     let je_identities = if let Some(disk) = je.disk.as_ref() {
         let mut distinct = BTreeSet::new();
         disk.visit(false, cancel, |row| {
-            distinct.insert(identity_parts(je_table, &row.values, je_map, je_fixed));
+            distinct.insert(scoped_identity_parts(
+                je_table,
+                &row.values,
+                je_map,
+                je_fixed,
+                ledger_mapping::EntitySide::Je,
+                entity_scope,
+            ));
             Ok(())
         })?;
         distinct.into_iter().collect::<Vec<_>>()
@@ -1866,7 +1924,16 @@ fn check_tb_vs_je(
             .iter()
             .enumerate()
             .filter(|(index, _)| je_rows.get(*index).copied().unwrap_or(true))
-            .map(|(_, row)| identity_parts(je_table, row, je_map, je_fixed))
+            .map(|(_, row)| {
+                scoped_identity_parts(
+                    je_table,
+                    row,
+                    je_map,
+                    je_fixed,
+                    ledger_mapping::EntitySide::Je,
+                    entity_scope,
+                )
+            })
             .collect::<Vec<_>>()
     };
     let account_policy =
@@ -1879,7 +1946,15 @@ fn check_tb_vs_je(
         if !leaf.get(index).copied().unwrap_or(true) {
             continue;
         }
-        let key = matched_identity(tb, row, tb_map, tb_fixed, &account_policy);
+        let key = scoped_matched_identity(
+            tb,
+            row,
+            tb_map,
+            tb_fixed,
+            ledger_mapping::EntitySide::Tb,
+            entity_scope,
+            &account_policy,
+        );
         if key.1.is_empty() {
             continue;
         }
@@ -1908,7 +1983,15 @@ fn check_tb_vs_je(
     let mut je_totals = BTreeMap::<(String, String), Side>::new();
     if let Some(disk) = je.disk.as_ref() {
         disk.visit(false, cancel, |row| {
-            let key = matched_identity(je_table, &row.values, je_map, je_fixed, &account_policy);
+            let key = scoped_matched_identity(
+                je_table,
+                &row.values,
+                je_map,
+                je_fixed,
+                ledger_mapping::EntitySide::Je,
+                entity_scope,
+                &account_policy,
+            );
             if key.1.is_empty() {
                 return Ok(());
             }
@@ -1932,7 +2015,15 @@ fn check_tb_vs_je(
             if !je_rows.get(index).copied().unwrap_or(true) {
                 continue;
             }
-            let key = matched_identity(je_table, row, je_map, je_fixed, &account_policy);
+            let key = scoped_matched_identity(
+                je_table,
+                row,
+                je_map,
+                je_fixed,
+                ledger_mapping::EntitySide::Je,
+                entity_scope,
+                &account_policy,
+            );
             if key.1.is_empty() {
                 continue;
             }

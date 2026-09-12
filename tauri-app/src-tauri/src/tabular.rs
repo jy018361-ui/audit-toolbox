@@ -1684,15 +1684,229 @@ fn excluded_ledger_rows(
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KanzhangStructureRow {
+    Opening,
+    Total,
+    Other,
+}
+
+#[derive(Debug)]
+struct SectionedKanzhangPlan {
+    data_rows: Vec<bool>,
+}
+
+fn kanzhang_structure_row(
+    row: &[String],
+    summary_index: Option<usize>,
+    id_indexes: &[usize],
+) -> KanzhangStructureRow {
+    if id_indexes.iter().any(|index| {
+        row.get(*index)
+            .is_some_and(|value| !value.trim().is_empty())
+    }) {
+        return KanzhangStructureRow::Other;
+    }
+    let label = summary_index
+        .and_then(|index| row.get(index))
+        .map(|value| value.trim())
+        .unwrap_or("");
+    match label {
+        "期初余额" => KanzhangStructureRow::Opening,
+        "本月合计" | "本年累计" => KanzhangStructureRow::Total,
+        _ => KanzhangStructureRow::Other,
+    }
+}
+
+/// 识别 SAP 一类“按科目分段”的明细账：科目只写在期初余额行，随后真实分录
+/// 只有凭证号与金额。只有实际观察到“锚点之后的分录缺科目”才启用，普通平铺 JE
+/// 继续走原来的正文判定与合并单元格填充路径。
+fn sectioned_kanzhang_plan(
+    table: &Table,
+    mapping: &LedgerMapping,
+) -> Option<SectionedKanzhangPlan> {
+    let summary_index = mapping
+        .summary
+        .as_deref()
+        .and_then(|name| header_index(&table.headers, name));
+    let id_indexes = mapping
+        .id
+        .iter()
+        .filter_map(|name| header_index(&table.headers, name))
+        .collect::<Vec<_>>();
+    let account_indexes = mapping
+        .account_columns()
+        .into_iter()
+        .filter_map(|name| header_index(&table.headers, name))
+        .collect::<Vec<_>>();
+    let amount_indexes = [
+        mapping.amount.as_deref(),
+        mapping.debit.as_deref(),
+        mapping.credit.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|name| header_index(&table.headers, name))
+    .collect::<Vec<_>>();
+    if summary_index.is_none()
+        || id_indexes.is_empty()
+        || account_indexes.is_empty()
+        || amount_indexes.is_empty()
+    {
+        return None;
+    }
+
+    let mut active_anchor = false;
+    let mut observed_missing_account_detail = false;
+    let mut data_rows = vec![false; table.rows.len()];
+    for (index, row) in table.rows.iter().enumerate() {
+        match kanzhang_structure_row(row, summary_index, &id_indexes) {
+            KanzhangStructureRow::Opening => {
+                active_anchor = account_indexes.iter().any(|position| {
+                    row.get(*position)
+                        .is_some_and(|value| !value.trim().is_empty())
+                });
+                continue;
+            }
+            KanzhangStructureRow::Total => continue,
+            KanzhangStructureRow::Other => {}
+        }
+        let has_id = id_indexes.iter().any(|position| {
+            row.get(*position)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        let has_amount = amount_indexes.iter().any(|position| {
+            row.get(*position)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        if active_anchor && has_id && has_amount {
+            data_rows[index] = true;
+            if account_indexes.iter().all(|position| {
+                row.get(*position)
+                    .is_none_or(|value| value.trim().is_empty())
+            }) {
+                observed_missing_account_detail = true;
+            }
+        }
+    }
+    observed_missing_account_detail.then_some(SectionedKanzhangPlan { data_rows })
+}
+
+fn kanzhang_non_fill_amount_indexes(headers: &[String], mapping: &LedgerMapping) -> HashSet<usize> {
+    let direction_index = mapping
+        .direction
+        .as_deref()
+        .and_then(|name| header_index(headers, name));
+    let mut indexes = [
+        mapping.amount.as_deref(),
+        mapping.debit.as_deref(),
+        mapping.credit.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|name| header_index(headers, name))
+    .collect::<HashSet<_>>();
+    for (index, header) in headers.iter().enumerate() {
+        if Some(index) == direction_index {
+            continue;
+        }
+        let normalized = ledger_mapping::normalize_header(header);
+        let amount_named = normalized.contains("金额")
+            || normalized.contains("金額")
+            || normalized.contains("amount");
+        let debit_credit_named = (normalized.contains("借方")
+            || normalized.contains("贷方")
+            || normalized.contains("貸方")
+            || normalized.contains("debit")
+            || normalized.contains("credit"))
+            && !normalized.contains("方向")
+            && !normalized.contains("标志")
+            && !normalized.contains("標誌")
+            && !normalized.contains("标识")
+            && !normalized.contains("標識");
+        if amount_named || debit_credit_named {
+            indexes.insert(index);
+        }
+    }
+    indexes
+}
+
+/// 把分段报表正规化成每行自包含的 JE。期初余额行先更新整段上下文再删除，
+/// 本月合计/本年累计直接删除；真实分录填充除借方、贷方、单一金额之外的全部空列。
+/// 新期初余额行会重置上下文，避免不同科目之间串值。
+fn normalize_sectioned_kanzhang(table: &mut Table, mapping: &LedgerMapping) -> bool {
+    let Some(plan) = sectioned_kanzhang_plan(table, mapping) else {
+        return false;
+    };
+    let summary_index = mapping
+        .summary
+        .as_deref()
+        .and_then(|name| header_index(&table.headers, name));
+    let id_indexes = mapping
+        .id
+        .iter()
+        .filter_map(|name| header_index(&table.headers, name))
+        .collect::<Vec<_>>();
+    let no_fill = kanzhang_non_fill_amount_indexes(&table.headers, mapping);
+    let width = table.headers.len();
+    let mut context = vec![None::<String>; width];
+    let mut normalized = Vec::new();
+    for (index, mut row) in std::mem::take(&mut table.rows).into_iter().enumerate() {
+        match kanzhang_structure_row(&row, summary_index, &id_indexes) {
+            KanzhangStructureRow::Opening => {
+                context.fill(None);
+                if row.len() < width {
+                    row.resize(width, String::new());
+                }
+                for column in 0..width {
+                    if no_fill.contains(&column) || Some(column) == summary_index {
+                        continue;
+                    }
+                    let value = row[column].trim();
+                    if !value.is_empty() {
+                        context[column] = Some(value.to_owned());
+                    }
+                }
+                continue;
+            }
+            KanzhangStructureRow::Total => continue,
+            KanzhangStructureRow::Other => {}
+        }
+        if !plan.data_rows.get(index).copied().unwrap_or(false) {
+            continue;
+        }
+        if row.len() < width {
+            row.resize(width, String::new());
+        }
+        for column in 0..width {
+            if no_fill.contains(&column) {
+                continue;
+            }
+            let value = row[column].trim();
+            if value.is_empty() {
+                if let Some(previous) = context[column].as_ref() {
+                    row[column] = previous.clone();
+                }
+            } else {
+                context[column] = Some(value.to_owned());
+                row[column] = value.to_owned();
+            }
+        }
+        normalized.push(row);
+    }
+    table.rows = normalized;
+    true
+}
+
 fn preprocess_ledger(
     mut table: Table,
     mapping: &LedgerMapping,
     sign_override: Option<SignConvention>,
 ) -> Result<Table, AppError> {
-    // 顺序不能反：先按公共引擎剔噪声行（表尾小计/手工草稿、有钱没身份的游离行），
-    // 再做非金额列的向下填充——填充会把上一行的科目/凭证号带给空白格，垃圾行被
-    // 填上身份后就再也认不出来了，摇身变成真分录混进发生额（借款利息、TBJE 勾稽
-    // 同序踩过）。
+    normalize_sectioned_kanzhang(&mut table, mapping);
+    // 普通平铺 JE 的顺序不能反：先按公共引擎剔噪声行（表尾小计/手工草稿、
+    // 有钱没身份的游离行），再做非金额列的向下填充。分段明细账已在上一步用
+    // 精确结构标签和“凭证号＋金额”先拆出正文，避免期初余额锚点被当垃圾行删掉。
     let keep = ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
         ledger_role_columns(mapping, role)
     });
@@ -5552,9 +5766,13 @@ fn validate_ledger_amounts(
     // 只校验正文行：表尾手工小计/核对公式行不是凭证明细（金额列常是 SUBTOTAL
     // 结果或失效外链的 #REF!），先按公共引擎的正文判定剔掉再验，它们随后也会
     // 被 preprocess_ledger 挡在导出正文之外。真实分录行的坏值照拦不误。
-    let keep = ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
-        ledger_role_columns(mapping, role)
-    });
+    let keep = sectioned_kanzhang_plan(table, mapping)
+        .map(|plan| plan.data_rows)
+        .unwrap_or_else(|| {
+            ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
+                ledger_role_columns(mapping, role)
+            })
+        });
     let issues =
         ledger_mapping::mapped_amount_parse_issues("je", &table.headers, &table.rows, &|role| {
             ledger_columns_for_role(mapping, role)
@@ -7231,6 +7449,357 @@ mod tests {
         assert_eq!(prepared.rows.len(), 2);
         assert!(prepared.rows.iter().all(|row| row[0] == "记-1"));
         assert!(prepared.rows.iter().all(|row| row[3] != "#REF!"));
+    }
+
+    fn 分段看账映射() -> LedgerMapping {
+        LedgerMapping {
+            id: vec!["凭证号".into()],
+            account_code: Some("总账科目".into()),
+            account_name: vec!["科目名称".into()],
+            entity: Some("公司".into()),
+            date: Some("日期".into()),
+            summary: Some("摘要".into()),
+            debit: Some("借方/本币".into()),
+            credit: Some("贷方/本币".into()),
+            ..Default::default()
+        }
+    }
+
+    fn 分段看账表(rows: Vec<Vec<&str>>) -> Table {
+        Table {
+            path: PathBuf::new(),
+            sheet: "Sheet1".into(),
+            sheets: vec!["Sheet1".into()],
+            headers: vec![
+                "公司".into(),
+                "账".into(),
+                "总账科目".into(),
+                "科目名称".into(),
+                "日期".into(),
+                "凭证号".into(),
+                "摘要".into(),
+                "借方/本币".into(),
+                "贷方/本币".into(),
+                "备注".into(),
+                "对方科目".into(),
+            ],
+            rows: rows
+                .into_iter()
+                .map(|row| row.into_iter().map(String::from).collect())
+                .collect(),
+            encoding: None,
+            delimiter: None,
+        }
+    }
+
+    #[test]
+    fn 分段看账先删结构行再填充除金额外的全部字段() {
+        let table = 分段看账表(vec![
+            vec![
+                "VX00",
+                "L1",
+                "1001",
+                "现金",
+                "",
+                "",
+                "期初余额",
+                "0",
+                "0",
+                "科目备注",
+                "",
+            ],
+            vec![
+                "",
+                "",
+                "",
+                "",
+                "2025-01-01",
+                "V1",
+                "收款",
+                "100",
+                "",
+                "",
+                "2202",
+            ],
+            vec!["", "", "", "", "", "", "本月合计", "100", "0", "", ""],
+            vec!["", "", "", "", "", "", "本年累计", "100", "0", "", ""],
+            vec!["", "", "", "", "2025-01-02", "V2", "", "", "100", "", ""],
+            vec![
+                "VX00",
+                "L1",
+                "2202",
+                "应付账款",
+                "",
+                "",
+                "期初余额",
+                "0",
+                "0",
+                "新科目备注",
+                "",
+            ],
+            vec![
+                "",
+                "",
+                "",
+                "",
+                "2025-01-01",
+                "V1",
+                "付款",
+                "",
+                "100",
+                "",
+                "1001",
+            ],
+            // 有金额但没有凭证号，不得借填充混进正文。
+            vec!["", "", "", "", "", "", "", "999", "", "", ""],
+        ]);
+        let mapping = 分段看账映射();
+        let prepared = preprocess_ledger(table, &mapping, None).unwrap();
+        assert_eq!(prepared.rows.len(), 3);
+        assert_eq!(&prepared.rows[0][0..4], ["VX00", "L1", "1001", "现金"]);
+        assert_eq!(prepared.rows[0][9], "科目备注");
+        assert_eq!(prepared.rows[1][0], "VX00");
+        assert_eq!(prepared.rows[1][2], "1001");
+        assert_eq!(prepared.rows[1][3], "现金");
+        assert_eq!(prepared.rows[1][6], "收款", "非金额空列按确认口径向下填充");
+        assert_eq!(prepared.rows[1][9], "科目备注");
+        assert_eq!(prepared.rows[1][10], "2202");
+        assert_eq!(prepared.rows[1][7], "", "借方金额不得向下填充");
+        assert_eq!(prepared.rows[1][8], "100");
+        assert_eq!(&prepared.rows[2][0..4], ["VX00", "L1", "2202", "应付账款"]);
+        assert_eq!(prepared.rows[2][9], "新科目备注", "新科目块必须重置上下文");
+        assert!(
+            prepared
+                .rows
+                .iter()
+                .all(|row| !matches!(row[6].as_str(), "期初余额" | "本月合计" | "本年累计"))
+        );
+    }
+
+    #[test]
+    fn 分段看账命中目标后仍带出完整凭证() {
+        let table = 分段看账表(vec![
+            vec![
+                "VX00",
+                "L1",
+                "1001",
+                "现金",
+                "",
+                "",
+                "期初余额",
+                "0",
+                "0",
+                "",
+                "",
+            ],
+            vec![
+                "",
+                "",
+                "",
+                "",
+                "2025-01-01",
+                "V1",
+                "收款",
+                "100",
+                "",
+                "",
+                "2202",
+            ],
+            vec![
+                "VX00",
+                "L1",
+                "2202",
+                "应付账款",
+                "",
+                "",
+                "期初余额",
+                "0",
+                "0",
+                "",
+                "",
+            ],
+            vec![
+                "",
+                "",
+                "",
+                "",
+                "2025-01-01",
+                "V1",
+                "付款",
+                "",
+                "100",
+                "",
+                "1001",
+            ],
+        ]);
+        let mapping = 分段看账映射();
+        let prepared = preprocess_ledger(table, &mapping, None).unwrap();
+        let filtered =
+            filter_ledger_rows(&prepared, &mapping, &["2202-应付账款".into()], &[]).unwrap();
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0][2], "1001");
+        assert_eq!(filtered[1][2], "2202");
+    }
+
+    #[test]
+    fn 分段看账正文坏金额仍按原始行号报错() {
+        let table = 分段看账表(vec![
+            vec![
+                "VX00",
+                "L1",
+                "1001",
+                "现金",
+                "",
+                "",
+                "期初余额",
+                "0",
+                "0",
+                "",
+                "",
+            ],
+            vec![
+                "",
+                "",
+                "",
+                "",
+                "2025-01-01",
+                "V1",
+                "收款",
+                "100",
+                "待确认",
+                "",
+                "2202",
+            ],
+        ]);
+        let error = validate_ledger_amounts(&table, &分段看账映射(), 5).unwrap_err();
+        assert_eq!(error.code, "KANZHANG_AMOUNT_VALUE_INVALID");
+        assert!(error.user_message.contains("贷方/本币"));
+        assert!(error.user_message.contains("第7行"));
+        assert!(error.user_message.contains("待确认"));
+    }
+
+    #[test]
+    fn 普通平铺看账不启用分段填充() {
+        let table = 分段看账表(vec![
+            vec![
+                "VX00",
+                "L1",
+                "1001",
+                "现金",
+                "2025-01-01",
+                "V1",
+                "收款",
+                "100",
+                "",
+                "仅首行",
+                "2202",
+            ],
+            vec![
+                "VX00",
+                "L1",
+                "2202",
+                "应付账款",
+                "2025-01-01",
+                "V1",
+                "付款",
+                "",
+                "100",
+                "",
+                "1001",
+            ],
+        ]);
+        let mapping = 分段看账映射();
+        assert!(sectioned_kanzhang_plan(&table, &mapping).is_none());
+        let prepared = preprocess_ledger(table, &mapping, None).unwrap();
+        assert_eq!(prepared.rows.len(), 2);
+        assert_eq!(
+            prepared.rows[1][9], "",
+            "普通 JE 的未映射空列不得被新规则改写"
+        );
+    }
+
+    #[test]
+    #[ignore = "需要通过 KANZHANG_SECTIONED_SAMPLE 指定本机分段明细账"]
+    fn 分段看账真实样例控制数() {
+        let path =
+            std::env::var("KANZHANG_SECTIONED_SAMPLE").expect("请设置 KANZHANG_SECTIONED_SAMPLE");
+        let table = load_ledger_cached(Path::new(&path), Some("Sheet1"), 5, 1).unwrap();
+        let mapping = LedgerMapping {
+            id: vec!["凭证编号".into()],
+            account_code: Some("总账科目".into()),
+            account_name: vec!["总账科目长文本".into()],
+            entity: Some("公司".into()),
+            date: Some("过账日期".into()),
+            summary: Some("摘要".into()),
+            direction: Some("方向".into()),
+            debit: Some("借方/本币".into()),
+            credit: Some("贷方/本币".into()),
+            ..Default::default()
+        };
+        validate_mapping_required(&mapping).unwrap();
+        validate_ledger_amounts(&table, &mapping, 5).unwrap();
+        let prepared = preprocess_ledger(table, &mapping, None).unwrap();
+        assert_eq!(prepared.rows.len(), 12_265);
+        let targets = [
+            "2183909041-其他应付款-关联公司(统驭)".to_owned(),
+            "2183909061-其他应付款-一般(统驭)".to_owned(),
+            "2183909990-其他应付款-其他".to_owned(),
+        ];
+        let filtered = filter_ledger_rows(&prepared, &mapping, &targets, &[]).unwrap();
+        assert_eq!(filtered.len(), 1_228);
+        let id_indexes = ledger_id_indexes(&prepared.headers, &mapping);
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|row| voucher_key(row, &id_indexes))
+                .collect::<HashSet<_>>()
+                .len(),
+            483
+        );
+        let debit_index = header_index(
+            &prepared.headers,
+            mapping.debit.as_deref().expect("借方映射"),
+        )
+        .unwrap();
+        let credit_index = header_index(
+            &prepared.headers,
+            mapping.credit.as_deref().expect("贷方映射"),
+        )
+        .unwrap();
+        let debit = filtered
+            .iter()
+            .map(|row| parse_number(row.get(debit_index).map(String::as_str).unwrap_or("")))
+            .sum::<f64>();
+        let credit = filtered
+            .iter()
+            .map(|row| parse_number(row.get(credit_index).map(String::as_str).unwrap_or("")))
+            .sum::<f64>();
+        assert!((debit - 13_061_773.26).abs() < 0.01, "借方={debit}");
+        assert!((credit - 13_061_773.26).abs() < 0.01, "贷方={credit}");
+        let key_indexes = [
+            mapping.entity.as_deref(),
+            mapping.account_code.as_deref(),
+            mapping.account_name.first().map(String::as_str),
+            mapping.date.as_deref(),
+            mapping.id.first().map(String::as_str),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|name| header_index(&prepared.headers, name))
+        .collect::<Vec<_>>();
+        assert!(filtered.iter().all(|row| key_indexes.iter().all(|index| {
+            row.get(*index)
+                .is_some_and(|value| !value.trim().is_empty())
+        })));
+        let summary_index = mapping
+            .summary
+            .as_deref()
+            .and_then(|name| header_index(&prepared.headers, name))
+            .unwrap();
+        assert!(filtered.iter().all(|row| !matches!(
+            row[summary_index].trim(),
+            "期初余额" | "本月合计" | "本年累计"
+        )));
     }
 
     #[test]

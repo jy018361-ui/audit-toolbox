@@ -51,6 +51,7 @@ import {
   KeywordFilter,
   keywordFilterPredicate,
 } from "@/components/KeywordFilter";
+import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation";
 
 /** 可多列的角色与统一内核一致；`account` 是历史保存映射的旧槽位。 */
 const DEPOSIT_MULTI = new Set(["id", "accountName", "auxiliary", "account"]);
@@ -472,6 +473,16 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     je: JSON.stringify([jePath, je?.sheet, je?.headerRow, je?.headerDepth]),
   });
   const reviewingAny = reviews.reviewing.tb || reviews.reviewing.je;
+  const entityScope = useEntityScopeConfirmation({
+    tbEntities: tb?.entities ?? [],
+    jeEntities: je?.entities ?? [],
+    onInvalidate: () => {
+      activeJob.current = "";
+      setResult(undefined);
+      setRows([]);
+      setJob(undefined);
+    },
+  });
 
   const accounts = useMemo(
     () => mergeAccountList(tb?.accounts ?? [], je?.accounts ?? []),
@@ -893,6 +904,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       accountTierOverrides,
       rateOverrides,
       tierRates,
+      entityScope: entityScope.selection,
       ...(outputPath ? { outputPath } : {}),
     };
   }
@@ -1401,6 +1413,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       )}
       {step === 2 && (
         <>
+          {entityScope.panel}
           <Card>
             <CardHeader>
               <CardTitle>

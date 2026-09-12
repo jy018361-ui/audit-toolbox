@@ -47,6 +47,7 @@ import {
 import { MappingPanel } from "@/components/MappingPanel";
 import { JargonTip } from "@/components/JargonTip";
 import { NumberInput } from "@/components/NumberInput";
+import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation";
 import { errorText } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -67,6 +68,7 @@ type Inspection = {
   sheets: string[];
   headerRow: number;
   headerDepth: number;
+  entities?: string[];
   suggestedMapping: Record<string, string>;
   // 台账专有：角色清单与四型定义由引擎随识别结果下发（唯一定义在 Rust）。
   roles?: LoanRole[];
@@ -739,6 +741,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           : undefined,
       rateLedgerSource: source("rateLedger"),
       rateOverrides: resultRateEdits,
+      entityScope: entityScope.selection,
       ...(outputPath ? { outputPath } : {}),
     };
   }
@@ -862,6 +865,11 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   // 导出完成后除结果区的打开按钮外，测算卡里也要有明确的「已生成＋文件名＋打开」
   // 反馈——此前唯一反馈是结果区标题旁悄悄出现的小按钮，用户感知不到已导出。
   const exported = ((result?.outputPaths ?? []) as string[]).filter(Boolean);
+  const entityScope = useEntityScopeConfirmation({
+    tbEntities: sources.tb.inspection?.entities ?? [],
+    jeEntities: sources.je.inspection?.entities ?? [],
+    onInvalidate: invalidateResults,
+  });
   const orderedTbAccounts = [...tbAccounts].sort((a, b) => {
     const roleOrder =
       Number(loanAccountRoles[a.key] !== "loan") -
@@ -1230,6 +1238,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           {mode === "tb" && rows.length > 0 && (
             <TbRateTable rows={rows} edits={tbRateEdits} onEdit={editTbRate} />
           )}
+          {mode === "tb" && entityScope.panel}
           <div className="fx-step-actions">
             <Button variant="secondary" onClick={() => setStep(0)}>
               返回上传与识别

@@ -10,6 +10,9 @@
 //! 设计依据与实测样例见 `LEDGER_MAPPING_UNIFICATION.md`。
 
 use chrono::{NaiveDate, NaiveDateTime};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// 没有启用双侧主体键时，以及已映射主体列中的空值，统一使用这一稳定键。
@@ -30,6 +33,261 @@ pub(crate) fn effective_entity(raw: &str, enabled: bool) -> String {
     } else {
         DEFAULT_ENTITY.to_owned()
     }
+}
+
+/// 主体归集只接受用户显式选择。`strict` 完全保留原主体，`aggregate` 仅应用
+/// `mappings` 中列出的源主体；候选检测本身永远不会改写账表。
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum EntityScopeMode {
+    #[default]
+    Strict,
+    Aggregate,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum EntitySide {
+    Tb,
+    Je,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EntityMapping {
+    pub(crate) side: EntitySide,
+    pub(crate) source: String,
+    pub(crate) target: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EntityScope {
+    #[serde(default)]
+    pub(crate) mode: EntityScopeMode,
+    #[serde(default)]
+    pub(crate) mappings: Vec<EntityMapping>,
+}
+
+/// 业务层从已标准化账表行聚合出的主体摘要。净额与绝对额都保留：净额便于
+/// 判断总体影响，绝对额不会被借贷相抵掩盖规模。
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EntitySummary {
+    pub(crate) entity: String,
+    pub(crate) row_count: usize,
+    pub(crate) amount: f64,
+    pub(crate) absolute_amount: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EntityAggregationCandidate {
+    pub(crate) source_side: EntitySide,
+    pub(crate) source_entity: String,
+    pub(crate) target_entity: String,
+    pub(crate) row_count: usize,
+    pub(crate) amount: f64,
+    pub(crate) absolute_amount: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EntityAggregationSuggestions {
+    pub(crate) anchors: Vec<String>,
+    pub(crate) candidates: Vec<EntityAggregationCandidate>,
+}
+
+pub(crate) fn entity_without_leading_code(value: &str) -> &str {
+    let trimmed = value.trim();
+    // ERP 常导出“公司代码 公司名称”。只有前段是至少 3 位纯数字、后段确实
+    // 含文字且由空白明确分隔时才剥代码；避免误伤“3M 公司”等合法名称。
+    trimmed
+        .split_once(char::is_whitespace)
+        .filter(|(prefix, suffix)| {
+            prefix.len() >= 3
+                && prefix.chars().all(|ch| ch.is_ascii_digit())
+                && suffix.chars().any(char::is_alphabetic)
+        })
+        .map(|(_, suffix)| suffix.trim())
+        .unwrap_or(trimmed)
+}
+
+pub(crate) fn normalized_entity_name(value: &str) -> String {
+    normalize_name(entity_without_leading_code(value))
+}
+
+fn merge_entity_summaries(rows: &[EntitySummary]) -> BTreeMap<String, EntitySummary> {
+    let mut merged = BTreeMap::<String, EntitySummary>::new();
+    for row in rows {
+        let key = normalized_entity_name(&row.entity);
+        if key.is_empty() {
+            continue;
+        }
+        let entry = merged.entry(key).or_insert_with(|| EntitySummary {
+            entity: row.entity.trim().to_owned(),
+            ..EntitySummary::default()
+        });
+        entry.row_count += row.row_count;
+        entry.amount += row.amount;
+        entry.absolute_amount += row.absolute_amount;
+    }
+    merged
+}
+
+/// 从 TB、JE 双方都精确出现的标准化主体名称建立锚点，再寻找以锚点为前缀、
+/// 且名称更长的疑似下级主体。前缀表达式完全由锚点动态转义生成，不维护
+/// “分公司/管理处”等易漏、易误判的后缀词表。一个名称命中多个锚点时取最长锚点。
+pub(crate) fn suggest_entity_aggregations(
+    tb: &[EntitySummary],
+    je: &[EntitySummary],
+) -> EntityAggregationSuggestions {
+    let tb = merge_entity_summaries(tb);
+    let je = merge_entity_summaries(je);
+    let anchors = tb
+        .keys()
+        .filter(|key| je.contains_key(*key))
+        .filter_map(|key| {
+            tb.get(key).map(|summary| {
+                (
+                    key.clone(),
+                    entity_without_leading_code(&summary.entity).to_owned(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let patterns = anchors
+        .iter()
+        .filter_map(|(key, display)| {
+            Regex::new(&format!(r"^{}.+$", regex::escape(key)))
+                .ok()
+                .map(|pattern| (key, display, pattern))
+        })
+        .collect::<Vec<_>>();
+
+    let mut candidates = Vec::new();
+    for (side, summaries) in [(EntitySide::Tb, &tb), (EntitySide::Je, &je)] {
+        for (key, summary) in summaries {
+            if anchors.iter().any(|(anchor, _)| anchor == key) {
+                continue;
+            }
+            let target = patterns
+                .iter()
+                .filter(|(_, _, pattern)| pattern.is_match(key))
+                .max_by_key(|(anchor, _, _)| anchor.chars().count())
+                .map(|(_, display, _)| (*display).clone());
+            if let Some(target_entity) = target {
+                candidates.push(EntityAggregationCandidate {
+                    source_side: side,
+                    source_entity: summary.entity.clone(),
+                    target_entity,
+                    row_count: summary.row_count,
+                    amount: summary.amount,
+                    absolute_amount: summary.absolute_amount,
+                });
+            }
+        }
+    }
+    candidates.sort_by(|left, right| {
+        left.source_side
+            .cmp(&right.source_side)
+            .then_with(|| left.source_entity.cmp(&right.source_entity))
+    });
+    EntityAggregationSuggestions {
+        anchors: anchors.into_iter().map(|(_, display)| display).collect(),
+        candidates,
+    }
+}
+
+/// 应用用户确认的主体归集。未选择、模式为 strict、侧别不同或源主体不同，
+/// 都严格返回原值；不会做候选推断、模糊匹配或映射链式传递。
+pub(crate) fn apply_entity_scope(side: EntitySide, entity: &str, scope: &EntityScope) -> String {
+    // 前置公司代码只是来源系统的展示口径，不是主体名称的一部分。这个标准化
+    // 与是否选择归集无关：strict 仍应让“10008529 公司名”和“公司名”精确对上。
+    let canonical = entity_without_leading_code(entity).trim();
+    if scope.mode != EntityScopeMode::Aggregate {
+        return canonical.to_owned();
+    }
+    let source = normalized_entity_name(entity);
+    scope
+        .mappings
+        .iter()
+        .find(|mapping| mapping.side == side && normalized_entity_name(&mapping.source) == source)
+        .map(|mapping| entity_without_leading_code(&mapping.target).trim().to_owned())
+        .unwrap_or_else(|| canonical.to_owned())
+}
+
+fn entity_summaries_from_value(
+    params: &Value,
+    field: &str,
+) -> Result<Vec<EntitySummary>, crate::AppError> {
+    let values = params.get(field).and_then(Value::as_array).ok_or_else(|| {
+        crate::AppError::new(
+            "INVALID_PARAMS",
+            format!("缺少 {field} 主体摘要数组。"),
+            false,
+            None,
+        )
+    })?;
+    values
+        .iter()
+        .map(|value| {
+            if let Some(entity) = value.as_str() {
+                return Ok(EntitySummary {
+                    entity: entity.to_owned(),
+                    row_count: 1,
+                    ..EntitySummary::default()
+                });
+            }
+            let object = value.as_object().ok_or_else(|| {
+                crate::AppError::new(
+                    "INVALID_PARAMS",
+                    format!("{field} 的每项必须是主体名称或主体摘要。"),
+                    false,
+                    None,
+                )
+            })?;
+            let entity = object
+                .get("entity")
+                .and_then(Value::as_str)
+                .filter(|entity| !entity.trim().is_empty())
+                .ok_or_else(|| {
+                    crate::AppError::new(
+                        "INVALID_PARAMS",
+                        format!("{field} 的主体摘要缺少 entity。"),
+                        false,
+                        None,
+                    )
+                })?;
+            let amount = object.get("amount").and_then(Value::as_f64).unwrap_or(0.0);
+            Ok(EntitySummary {
+                entity: entity.to_owned(),
+                row_count: object.get("rowCount").and_then(Value::as_u64).unwrap_or(0) as usize,
+                amount,
+                absolute_amount: object
+                    .get("absoluteAmount")
+                    .and_then(Value::as_f64)
+                    .unwrap_or_else(|| amount.abs()),
+            })
+        })
+        .collect()
+}
+
+/// `engine_call` 的轻量同步入口。业务页面可直接传双方去重名称，也可传已经
+/// 聚合好的行数/金额摘要；文件读取仍留在各业务 inspect 阶段，避免公共入口
+/// 重复解压大工作簿。
+pub(crate) fn entity_scope_suggestions_call(params: &Value) -> Result<Value, crate::AppError> {
+    let tb = entity_summaries_from_value(params, "tbEntities")?;
+    let je = entity_summaries_from_value(params, "jeEntities")?;
+    serde_json::to_value(suggest_entity_aggregations(&tb, &je)).map_err(|error| {
+        crate::AppError::new(
+            "SERIALIZE_FAILED",
+            "主体归集候选生成失败。",
+            true,
+            Some(error.to_string()),
+        )
+    })
 }
 
 /// TB与JE跨表对齐的公共结论。这是账表引擎能力，不属于汇兑损益业务。
@@ -2409,7 +2667,7 @@ const IDENTITY_ROLES: &[&str] = &["id", "accountCode", "accountName", "account",
 /// Excel 公式残值。03 号样例的科目名称列是用户自建的 VLOOKUP，
 /// 数据行里也会出现 `#N/A`；10 号样例草稿区最后一行是 `#REF!`。
 /// 这些格子有内容但没信息，判身份时必须当空看。
-fn is_formula_error(value: &str) -> bool {
+pub(crate) fn is_formula_error(value: &str) -> bool {
     matches!(
         value.trim(),
         "#N/A" | "#REF!" | "#VALUE!" | "#DIV/0!" | "#NAME?" | "#NULL!" | "#NUM!" | "#SPILL!"
@@ -2583,10 +2841,26 @@ pub(crate) fn analyze_ledger_rows(
             invalid_account_code_rows: Vec::new(),
         };
     }
-    let mut keep = rows
-        .iter()
-        .map(|row| rule.is_body(row))
-        .collect::<Vec<bool>>();
+    let mut keep = Vec::with_capacity(rows.len());
+    let mut strict_body = false;
+    for row in rows {
+        if row.iter().all(|value| value.trim().is_empty()) {
+            strict_body = true;
+            keep.push(false);
+            continue;
+        }
+        if strict_body && rule.boundary {
+            // 空白分隔符之后不能让表尾草稿靠一个像科目编码的值重新混入正文；
+            // 必须同时具备编码、名称和可解析金额。进入该区段后持续应用同一协议。
+            keep.push(
+                rule.has_field(row, &rule.code)
+                    && rule.has_field(row, &rule.name)
+                    && rule.has_parseable_je_amount(row),
+            );
+        } else {
+            keep.push(rule.is_body(row));
+        }
+    }
     // 表尾噪声：倒着扫到第一个有身份的行就停手。
     for index in (0..rows.len()).rev() {
         if rule.has_identity(&rows[index]) {
@@ -8300,7 +8574,7 @@ mod tests {
         let analysis = analyze_ledger_rows(&headers, &rows, &columns);
         assert_eq!(
             analysis.keep,
-            vec![true, false, false, false, false, true, false]
+            vec![true, true, false, false, false, true, false]
         );
     }
 
@@ -9159,5 +9433,78 @@ mod tests {
         );
         assert_eq!(suggested.get(&2), None, "会计科目不由 Coding 硬判");
         assert_eq!(suggested.get(&3), None, "总账科目不由 Coding 硬判");
+    }
+
+    #[test]
+    fn 主体归集候选以双侧共同主体为锚且多命中取最长() {
+        let summary = |entity: &str, rows, amount: f64| EntitySummary {
+            entity: entity.into(),
+            row_count: rows,
+            amount,
+            absolute_amount: amount.abs() + 10.0,
+        };
+        let tb = vec![
+            summary("集团", 2, 20.0),
+            summary("10008529 集团华东", 3, 30.0),
+            summary("集团华东上海分支", 4, -40.0),
+            summary("孤立主体", 5, 50.0),
+        ];
+        let je = vec![
+            summary("集团", 6, 60.0),
+            summary("集团华东", 7, 70.0),
+            summary("集团华东上海分支销售部", 8, -80.0),
+        ];
+
+        let result = suggest_entity_aggregations(&tb, &je);
+        assert_eq!(result.anchors, vec!["集团", "集团华东"]);
+        let longest = result
+            .candidates
+            .iter()
+            .find(|candidate| candidate.source_entity == "集团华东上海分支")
+            .expect("缺 TB 下级主体候选");
+        assert_eq!(longest.target_entity, "集团华东");
+        assert_eq!(longest.row_count, 4);
+        assert_eq!(longest.amount, -40.0);
+        assert!(
+            !result
+                .candidates
+                .iter()
+                .any(|candidate| candidate.source_entity == "孤立主体"),
+            "不以前后缀词表猜测无锚点主体"
+        );
+    }
+
+    #[test]
+    fn 主体归集只应用aggregate模式下用户明确选择() {
+        let scope = EntityScope {
+            mode: EntityScopeMode::Aggregate,
+            mappings: vec![EntityMapping {
+                side: EntitySide::Je,
+                source: "10008529 集团华东上海分支".into(),
+                target: "集团华东".into(),
+            }],
+        };
+        assert_eq!(
+            apply_entity_scope(EntitySide::Je, "集团华东上海分支", &scope),
+            "集团华东"
+        );
+        assert_eq!(
+            apply_entity_scope(EntitySide::Tb, "集团华东上海分支", &scope),
+            "集团华东上海分支",
+            "不同侧不能误套映射"
+        );
+        assert_eq!(
+            apply_entity_scope(EntitySide::Je, "未选择主体", &scope),
+            "未选择主体"
+        );
+        assert_eq!(
+            apply_entity_scope(EntitySide::Je, "集团华东上海分支", &EntityScope::default()),
+            "集团华东上海分支"
+        );
+        assert_eq!(
+            apply_entity_scope(EntitySide::Tb, "10008529 集团华东", &EntityScope::default()),
+            "集团华东",
+            "严格模式也应消除来源系统附加的前置主体编码"
+        );
     }
 }

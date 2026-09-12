@@ -1,13 +1,14 @@
 use reqwest::blocking::Client;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc,
     },
     thread,
     time::Duration,
@@ -190,8 +191,7 @@ fn export_workpaper(params: &Value) -> Result<Value, AppError> {
                 for key in object.keys() {
                     if !matches!(
                         key.as_str(),
-                        "id"
-                            | "contractId"
+                        "id" | "contractId"
                             | "ruleId"
                             | "ruleVersion"
                             | "fieldKeys"
@@ -389,7 +389,9 @@ fn export_workpaper_bundle(params: &Value) -> Result<Value, AppError> {
         }
         total_rows += rows.len();
         if sheet_index == 0 && columns.is_empty() {
-            sheet.write_string(0, 0, "无可显示字段").map_err(xlsx_error)?;
+            sheet
+                .write_string(0, 0, "无可显示字段")
+                .map_err(xlsx_error)?;
         }
     }
     workbook.save(&output).map_err(xlsx_error)?;
@@ -1090,11 +1092,7 @@ fn sanitize_change_list(
         .filter_map(|change| {
             Some((
                 change.get("role")?.as_str()?.trim().to_owned(),
-                change
-                    .get("suggestedColumn")?
-                    .as_str()?
-                    .trim()
-                    .to_owned(),
+                change.get("suggestedColumn")?.as_str()?.trim().to_owned(),
             ))
         })
         .collect();
@@ -1567,7 +1565,12 @@ fn local_ocr_ready() -> bool {
         .ok()
         .filter(|response| response.status().is_success())
         .and_then(|response| response.json::<Value>().ok())
-        .and_then(|value| value.get("status").and_then(Value::as_str).map(str::to_owned))
+        .and_then(|value| {
+            value
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
         .is_some_and(|status| status == "ok")
 }
 
@@ -1605,7 +1608,11 @@ fn local_ocr(image: &str) -> Result<Value, AppError> {
         )
     })?;
     if let Some(message) = value.get("error").and_then(Value::as_str) {
-        return Err(error("LOCAL_OCR_FAILED", "本机 OCR 识别失败。", Some(message.into())));
+        return Err(error(
+            "LOCAL_OCR_FAILED",
+            "本机 OCR 识别失败。",
+            Some(message.into()),
+        ));
     }
     Ok(json!({
         "text": value.get("text").and_then(Value::as_str).unwrap_or(""),
@@ -2012,10 +2019,12 @@ mod tests {
         let fills = value["fills"].as_array().expect("fills 还在");
         assert_eq!(fills.len(), 1, "{fills:?}");
         assert_eq!(fills[0]["suggestedColumn"], "本位币金额");
-        assert!(value["reviews"]
-            .as_array()
-            .expect("reviews 还在")
-            .is_empty());
+        assert!(
+            value["reviews"]
+                .as_array()
+                .expect("reviews 还在")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2036,10 +2045,12 @@ mod tests {
         let form = &payload["currentForm"];
         assert_eq!(form["id"], "JE2");
         assert_eq!(form["complete"], true);
-        assert!(form["missingSlots"]
-            .as_array()
-            .expect("有该字段")
-            .is_empty());
+        assert!(
+            form["missingSlots"]
+                .as_array()
+                .expect("有该字段")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2630,12 +2641,12 @@ mod mapping_prompt_tests {
         sanitize_mapping_changes(&mut value, &payload, "tb", ReviewDatePolicy::Strict);
         let changes = value["changes"].as_array().unwrap();
         assert_eq!(changes.len(), 2, "只留成对挪移的两条：{changes:?}");
-        assert!(changes
-            .iter()
-            .all(
+        assert!(
+            changes.iter().all(
                 |change| change["suggestedColumn"].as_str() != Some("科目名称")
                     || change["role"].as_str() == Some("accountName")
-            ));
+            )
+        );
     }
 
     #[test]
@@ -2793,8 +2804,10 @@ mod mapping_prompt_tests {
         assert!(REVIEW_AMBIGUOUS_ACCOUNT_HEADERS.contains("没有固定默认角色"));
         assert!(REVIEW_AMBIGUOUS_ACCOUNT_HEADERS.contains("必须逐列比较 sampleRows"));
         assert!(REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY.contains("complete=true"));
-        assert!(REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY
-            .contains("即使 complete=true 也必须输出纠正 change"));
+        assert!(
+            REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY
+                .contains("即使 complete=true 也必须输出纠正 change")
+        );
 
         let kanzhang = kanzhang_mapping_prompt();
         assert!(!kanzhang.contains("会计科目、总账科目、总帐科目"));

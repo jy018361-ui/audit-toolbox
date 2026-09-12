@@ -620,6 +620,7 @@ describe("TbjeCheckPage", () => {
               headerDepth: 1,
             },
             jeMapping: { accountCode: "科目编码" },
+            entityScope: { mode: "strict", mappings: [] },
           },
         ],
         outputDirectory: "C:/exports/tbje",

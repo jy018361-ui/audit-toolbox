@@ -41,6 +41,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useJobEvents } from "@/hooks/useJobEvents";
+import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation";
 import { errorText } from "@/lib/errors";
 import {
   applyLedgerReviewsTogether,
@@ -576,6 +577,33 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const intakeSectionRef = useRef<HTMLElement | null>(null);
   const pairingSectionRef = useRef<HTMLElement | null>(null);
   const resultSectionRef = useRef<HTMLElement | null>(null);
+  const scopeTbEntities = useMemo(
+    () =>
+      [...new Set(
+        visibleGroups.flatMap((group) =>
+          group.tb
+            ? (inspects[pairingFileKey(group.tb)]?.entities ?? [])
+            : [],
+        ),
+      )],
+    [visibleGroups, inspects],
+  );
+  const scopeJeEntities = useMemo(
+    () =>
+      [...new Set(
+        visibleGroups.flatMap((group) =>
+          group.je
+            ? (inspects[pairingFileKey(group.je)]?.entities ?? [])
+            : [],
+        ),
+      )],
+    [visibleGroups, inspects],
+  );
+  const entityScope = useEntityScopeConfirmation({
+    tbEntities: scopeTbEntities,
+    jeEntities: scopeJeEntities,
+    onInvalidate: () => invalidateResults(false),
+  });
   // 用户在配对页明确选过「不配对序时账」的 TB。二次添加文件时这些组不许被
   // 自动配对重新塞回 JE——那是用户亲手清掉的，不是没配上。
   const clearedTbsRef = useRef(new Set<string>());
@@ -1301,6 +1329,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       label: group.label,
       tbSource: source(group.tb),
       tbMapping: mappings[pairingFileKey(group.tb!)] ?? {},
+      entityScope: entityScope.selection,
     };
     const je = source(group.je);
     if (je) {
@@ -1971,6 +2000,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   </div>
                 ))}
               </div>
+              {entityScope.panel}
               <div className="tbje-actions">
                 <Button
                   type="button"

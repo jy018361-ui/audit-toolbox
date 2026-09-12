@@ -183,6 +183,10 @@ pub(crate) fn run_job(
         write_workbook(&output, &analysis, &cancel)?;
         result["outputPaths"] = json!([output.to_string_lossy()]);
     }
+    result["entityScopeSelection"] = params
+        .get("entityScope")
+        .cloned()
+        .unwrap_or_else(|| json!({"mode":"strict","mappings":[]}));
     result["message"] = json!("固定资产 TB＋JE 处理完成，可打开下方结果文件。");
     progress("completed", 4, 4, "固定资产 TB＋JE 处理完成");
     Ok(result)
@@ -382,6 +386,10 @@ fn analyze_with_progress(
     cancel: &AtomicBool,
     progress: Progress<'_>,
 ) -> Result<Analysis, AppError> {
+    let entity_scope: ledger_mapping::EntityScope = params
+        .get("entityScope").cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
     let tb_spec: SourceSpec = parse_param(params, "tbSource", "缺少 TB 数据源。")?;
     let je_spec: SourceSpec = parse_param(params, "jeSource", "缺少 JE 数据源。")?;
     let tb_map = mapping(params, "tbMapping");
@@ -399,7 +407,9 @@ fn analyze_with_progress(
                 .and_then(Value::as_bool)
                 .unwrap_or(false));
     if disk_mode {
-        return analyze_with_disk_je(params, cancel, &tb, &tb_map, &je_spec, &je_map, progress);
+        return analyze_with_disk_je(
+            params, cancel, &tb, &tb_map, &je_spec, &je_map, &entity_scope, progress,
+        );
     }
     let raw_je = load_fx_table(&je_spec)?;
     let je_keep = ledger_mapping::ledger_junk_mask(&raw_je.headers, &raw_je.rows, &|role| {
@@ -506,6 +516,7 @@ fn analyze_with_disk_je(
     tb_map: &Map<String, Value>,
     je_spec: &SourceSpec,
     je_map: &Map<String, Value>,
+    entity_scope: &ledger_mapping::EntityScope,
     progress: Progress<'_>,
 ) -> Result<Analysis, AppError> {
     let disk = tabular::open_prepared_disk_ledger(
@@ -547,6 +558,8 @@ fn analyze_with_disk_je(
             params,
             "jeFixedEntity",
             &row.account,
+            ledger_mapping::EntitySide::Je,
+            &entity_scope,
         );
         unique
             .entry((
@@ -711,6 +724,8 @@ fn account_identity_from_row(
     params: &Value,
     fixed_key: &str,
     display: &str,
+    side: ledger_mapping::EntitySide,
+    entity_scope: &ledger_mapping::EntityScope,
 ) -> AccountIdentity {
     let fixed = params
         .get(fixed_key)
@@ -724,12 +739,13 @@ fn account_identity_from_row(
         name = join(row, &indexes(table, map, "account"));
     }
     name = ledger_mapping::account_name_of(if name.is_empty() { &raw_code } else { &name });
-    AccountIdentity {
-        entity: if entity.is_empty() {
+    let entity = if entity.is_empty() {
             fixed.to_owned()
         } else {
             entity
-        },
+        };
+    AccountIdentity {
+        entity: ledger_mapping::apply_entity_scope(side, &entity, entity_scope),
         code: ledger_mapping::account_code_of(&raw_code),
         name,
         display: display.to_owned(),
@@ -2664,6 +2680,15 @@ fn account_identities(
     params: &Value,
     fixed_key: &str,
 ) -> Vec<AccountIdentity> {
+    let side = if fixed_key == "tbFixedEntity" {
+        ledger_mapping::EntitySide::Tb
+    } else {
+        ledger_mapping::EntitySide::Je
+    };
+    let entity_scope: ledger_mapping::EntityScope = params
+        .get("entityScope").cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
     let (_, display) =
         tabular::ledger_row_keys(&table.rows, &table.headers, &ledger_mapping_for(map));
     let fixed = params
@@ -2691,12 +2716,13 @@ fn account_identities(
             } else {
                 name = ledger_mapping::account_name_of(&name);
             }
-            AccountIdentity {
-                entity: if entity.is_empty() {
+            let entity = if entity.is_empty() {
                     fixed.to_owned()
                 } else {
                     entity
-                },
+                };
+            AccountIdentity {
+                entity: ledger_mapping::apply_entity_scope(side, &entity, &entity_scope),
                 code: ledger_mapping::account_code_of(&raw_code),
                 name,
                 display: display[i].clone(),
@@ -2929,6 +2955,31 @@ mod tests {
     use crate::deposit_interest;
     use calamine::{DataType, Reader, open_workbook_auto};
     use std::io::Read;
+
+    #[test]
+    fn fa科目身份应用用户确认的主体归集() {
+        let spec = SourceSpec {
+            input_path: String::new(), sheet: "Sheet1".into(),
+            header_row: 1, header_depth: 1,
+        };
+        let table = disk_table(
+            &spec,
+            vec!["主体".into(), "科目编码".into(), "科目名称".into()],
+            vec![vec!["母公司杭州管理处".into(), "1601".into(), "固定资产".into()]],
+            1,
+        );
+        let map = serde_json::from_value::<Map<String, Value>>(json!({
+            "entity":"主体", "accountCode":"科目编码", "accountName":"科目名称"
+        })).unwrap();
+        let params = json!({"entityScope": {
+            "mode":"aggregate",
+            "mappings":[{"side":"tb","source":"母公司杭州管理处","target":"母公司"}]
+        }});
+        let identities = account_identities(&table, &map, &params, "tbFixedEntity");
+        assert_eq!(identities[0].entity, "母公司");
+        let je_identities = account_identities(&table, &map, &params, "jeFixedEntity");
+        assert_eq!(je_identities[0].entity, "母公司杭州管理处");
+    }
 
     /// 本机 PBC 回归入口。夹具不进仓库，通过环境变量指向 TBJEPBC 目录。
     /// 跑法：$env:FA_TBJE_PBC_DIR='...\\TBJEPBC'; cargo test pbc10 -- --ignored --nocapture

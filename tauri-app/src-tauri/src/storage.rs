@@ -9,8 +9,8 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
-use zip::{ZipWriter, write::SimpleFileOptions};
 use walkdir::WalkDir;
+use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::AppError;
 

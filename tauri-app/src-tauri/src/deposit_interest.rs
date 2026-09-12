@@ -29,6 +29,25 @@ fn error(code: &str, message: impl Into<String>, detail: Option<String>) -> AppE
     AppError::new(code, message, false, detail)
 }
 
+fn scoped_entity(
+    raw: &str,
+    enabled: bool,
+    side: ledger_mapping::EntitySide,
+    scope: &ledger_mapping::EntityScope,
+) -> String {
+    let entity = ledger_mapping::effective_entity(raw, enabled);
+    if !enabled {
+        return entity;
+    }
+    ledger_mapping::apply_entity_scope(side, &entity, scope)
+}
+
+fn entity_scope(params: &Value) -> ledger_mapping::EntityScope {
+    params.get("entityScope").cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // 内置存款利率档位库
 // ---------------------------------------------------------------------------
@@ -1370,6 +1389,7 @@ fn calculate(
     progress: &dyn Fn(&str, usize, usize, &str),
     total: usize,
 ) -> Result<Value, AppError> {
+    let entity_scope = entity_scope(params);
     let start = date_param(params, "reportStart")?;
     let end = date_param(params, "reportEnd")?;
     if end < start {
@@ -1489,9 +1509,11 @@ fn calculate(
                 };
             booked_interest += net;
             booked_interest_rows.push(json!({
-                "entity": ledger_mapping::effective_entity(
+                "entity": scoped_entity(
                     &cell_text(&tb, row, &tb_map, "entity"),
                     entity_key_enabled,
+                    ledger_mapping::EntitySide::Tb,
+                    &entity_scope,
                 ),
                 "account": account,
                 "debit": debit_raw,
@@ -1508,9 +1530,11 @@ fn calculate(
         if role == "cash_on_hand" && !params["includeCashOnHand"].as_bool().unwrap_or(false) {
             continue;
         }
-        let entity = ledger_mapping::effective_entity(
+        let entity = scoped_entity(
             &cell_text(&tb, row, &tb_map, "entity"),
             entity_key_enabled,
+            ledger_mapping::EntitySide::Tb,
+            &entity_scope,
         );
         let auxiliary = cell_text(&tb, row, &tb_map, "auxiliary");
         let currency = cell_text(&tb, row, &tb_map, "currency");
@@ -1827,6 +1851,7 @@ fn calculate(
             "reportEnd": end.format("%Y-%m-%d").to_string(),
             "hasInterestIncomeAccount": !booked_interest_rows.is_empty()
         },
+        "entityScopeSelection": params.get("entityScope").cloned().unwrap_or_else(|| json!({"mode":"strict","mappings":[]})),
         "outputPaths": []
     }))
 }
@@ -1930,6 +1955,7 @@ fn monthly_movements(
     progress: &dyn Fn(&str, usize, usize, &str),
     total: usize,
 ) -> Result<Option<(MonthlySeries, String, String)>, AppError> {
+    let entity_scope = entity_scope(params);
     if params.get("jeSource").is_none_or(Value::is_null) {
         return Ok(None);
     }
@@ -1977,6 +2003,7 @@ fn monthly_movements(
             &je_map,
             accounts,
             entity_key_enabled,
+            &entity_scope,
             start,
             end,
             cancel,
@@ -2061,9 +2088,11 @@ fn monthly_movements(
             continue;
         }
         let code = account_code(&account);
-        let entity = ledger_mapping::effective_entity(
+        let entity = scoped_entity(
             &cell_text(&je, row, &je_map, "entity"),
             entity_key_enabled,
+            ledger_mapping::EntitySide::Je,
+            &entity_scope,
         );
         let hits = by_account
             .get(&(entity.clone(), normalize_header(&account)))
@@ -2115,6 +2144,7 @@ fn aggregate_disk_monthly(
     mapping: &Map<String, Value>,
     accounts: &[AccountRow],
     entity_key_enabled: bool,
+    entity_scope: &ledger_mapping::EntityScope,
     start: NaiveDate,
     end: NaiveDate,
     cancel: &AtomicBool,
@@ -2214,12 +2244,14 @@ fn aggregate_disk_monthly(
             return Ok(());
         }
         let code = account_code(&account);
-        let entity = ledger_mapping::effective_entity(
+        let entity = scoped_entity(
             entity_index
                 .and_then(|index| row.values.get(index))
                 .map(String::as_str)
                 .unwrap_or(""),
             entity_key_enabled,
+            ledger_mapping::EntitySide::Je,
+            entity_scope,
         );
         let hits = by_account
             .get(&(entity.clone(), normalize_header(&account)))
@@ -3503,6 +3535,31 @@ fn xlsx(value: XlsxError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 存款主体归集按账表侧别应用且未选主体不变() {
+        let params = json!({"entityScope": {
+            "mode": "aggregate",
+            "mappings": [{"side":"tb", "source":"母公司杭州管理处", "target":"母公司"}]
+        }});
+        assert_eq!(
+            scoped_entity(
+                "母公司杭州管理处",
+                true,
+                ledger_mapping::EntitySide::Tb,
+                &entity_scope(&params),
+            ),
+            "母公司"
+        );
+        assert_eq!(
+            scoped_entity("母公司宁波管理处", true, ledger_mapping::EntitySide::Tb, &entity_scope(&params)),
+            "母公司宁波管理处"
+        );
+        assert_eq!(
+            scoped_entity("母公司杭州管理处", true, ledger_mapping::EntitySide::Je, &entity_scope(&params)),
+            "母公司杭州管理处"
+        );
+    }
 
     /// 真实 SAP 样例（汇兑损益测试资料/Oct+BS+PL+TB.xlsx 与 JE+YTD+OCT.xlsx）。
     /// 只在样例文件存在时运行，缺文件就跳过，不阻塞常规测试。
@@ -5313,6 +5370,7 @@ mod tests {
             &mapping,
             &accounts,
             true,
+            &entity_scope(&params),
             start,
             end,
             &cancel,

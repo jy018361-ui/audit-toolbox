@@ -2704,9 +2704,44 @@ pub(crate) fn forward_filled_je_table(
     let mut filled = (**table).clone();
     // 合计行/游离数字行不能参与填充：它们没有身份，一旦被填上一行的科目/凭证
     // 就会混进发生额（借款利息的序时账实测踩过这个坑）。行保留原位，只是不填。
-    let junk = ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
+    let mut junk = ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
         mapped_cols(mapping, role)
     });
+    // JE 常见合并单元格：凭证号可能有值但科目为空，或科目有值但金额留在下一行。
+    // 正文过滤是为“测算前”服务，不能据此阻止身份字段先向下填充；只有既无身份又
+    // 无非汇总摘要的金额行才保持为噪声。汇总标签继续由公共过滤器排除。
+    let identity_columns = [
+        "id",
+        "date",
+        "voucherType",
+        "entity",
+        "accountCode",
+        "accountName",
+        "account",
+        "auxiliary",
+        "summary",
+    ]
+    .into_iter()
+    .flat_map(|role| mapped_cols(mapping, role))
+    .filter_map(|column| ledger_mapping::header_index(&table.headers, &column))
+    .collect::<HashSet<_>>();
+    for (index, row) in table.rows.iter().enumerate() {
+        if junk.get(index).copied().unwrap_or(true) {
+            continue;
+        }
+        let has_identity = identity_columns.iter().any(|column| {
+            row.get(*column).is_some_and(|value| {
+                let value = value.trim();
+                !value.is_empty()
+                    && !ledger_mapping::is_rollup_label(value)
+                    && !ledger_mapping::is_formula_error(value)
+                    && !ledger_mapping::is_report_footer_value(value)
+            })
+        });
+        if has_identity {
+            junk[index] = true;
+        }
+    }
     if junk.iter().all(|kept| *kept) {
         ledger_mapping::forward_fill_columns(&filled.headers, &mut filled.rows, &columns);
     } else {
@@ -2752,6 +2787,41 @@ fn entity_for<'a>(row: &'a RowRecord, mapping: &Map<String, Value>, params: &'a 
     } else {
         mapped
     }
+}
+
+fn scoped_entity_for<'a>(
+    row: &'a RowRecord,
+    mapping: &Map<String, Value>,
+    params: &'a Value,
+    side: ledger_mapping::EntitySide,
+) -> &'a str {
+    let entity = ledger_mapping::entity_without_leading_code(entity_for(row, mapping, params));
+    if params.pointer("/entityScope/mode").and_then(Value::as_str) != Some("aggregate") {
+        return entity;
+    }
+    let source = ledger_mapping::normalized_entity_name(entity);
+    params
+        .pointer("/entityScope/mappings")
+        .and_then(Value::as_array)
+        .and_then(|mappings| {
+            mappings.iter().find_map(|mapping| {
+                let expected_side = match side {
+                    ledger_mapping::EntitySide::Tb => "tb",
+                    ledger_mapping::EntitySide::Je => "je",
+                };
+                (mapping.get("side").and_then(Value::as_str) == Some(expected_side)
+                    && mapping
+                        .get("source")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| {
+                            ledger_mapping::normalized_entity_name(value) == source
+                        }))
+                .then(|| mapping.get("target").and_then(Value::as_str))
+                .flatten()
+            })
+        })
+        .filter(|target| !target.trim().is_empty())
+        .unwrap_or(entity)
 }
 
 /// 币种文本抽取统一放在公共引擎，识别与取值共用同一份词表——
@@ -3570,7 +3640,9 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                 // 一个非本位币的科目，否则这张 TB 根本没有可测算的外币。
                 let readable = records(&table).iter().take(5000).any(|row| {
                     let functional = normalize_currency(&functional_currency(
-                        entity_for(row, &mapping, params),
+                        scoped_entity_for(
+                            row, &mapping, params, ledger_mapping::EntitySide::Tb,
+                        ),
                         params,
                     ));
                     currency_text_hint(row, &mapping)
@@ -4230,8 +4302,12 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
         .get("reportEnd")
         .and_then(Value::as_str)
         .and_then(parse_date);
-    let tb_identities = account_identities_for_matching(&tb_table, &tb_mapping, params);
-    let je_identities = account_identities_for_matching(&je_table, &je_mapping, params);
+    let tb_identities = account_identities_for_matching(
+        &tb_table, &tb_mapping, params, ledger_mapping::EntitySide::Tb,
+    );
+    let je_identities = account_identities_for_matching(
+        &je_table, &je_mapping, params, ledger_mapping::EntitySide::Je,
+    );
     let account_policy =
         ledger_mapping::AccountMatchPolicy::from_sides(&tb_identities, &je_identities);
     // 辅助核算是可选的细化维度：**两边都映射了才启用**。启用后如果匹配不上，
@@ -4252,7 +4328,9 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
             ) {
                 continue;
             }
-            let entity = entity_for(&row, &tb_mapping, params).to_owned();
+            let entity = scoped_entity_for(
+                &row, &tb_mapping, params, ledger_mapping::EntitySide::Tb,
+            ).to_owned();
             let (account_code, account_only_name) = account_code_and_name(&row, &tb_mapping);
             let currency = currency_for(&row, &tb_mapping, &account, params);
             let auxiliary = auxiliary_value(&row, &tb_mapping);
@@ -4316,7 +4394,9 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
             ) {
                 continue;
             }
-            let entity = entity_for(&row, &je_mapping, params).to_owned();
+            let entity = scoped_entity_for(
+                &row, &je_mapping, params, ledger_mapping::EntitySide::Je,
+            ).to_owned();
             let (account_code, account_only_name) = account_code_and_name(&row, &je_mapping);
             let currency = currency_for(&row, &je_mapping, &account, params);
             let auxiliary = auxiliary_value(&row, &je_mapping);
@@ -4842,7 +4922,7 @@ pub(crate) fn ensure_balance_sign_mode(table: &FxTable, mapping: &mut Map<String
 
 fn voucher_id(row: &RowRecord, mapping: &Map<String, Value>, params: &Value) -> String {
     let mut parts = vec![
-        entity_for(row, mapping, params).to_owned(),
+        scoped_entity_for(row, mapping, params, ledger_mapping::EntitySide::Je).to_owned(),
         parse_date(cell(row, mapping, "date"))
             .map(|d| d.format("%Y-%m-%d").to_string())
             .unwrap_or_else(|| cell(row, mapping, "date").trim().to_owned()),
@@ -5035,11 +5115,12 @@ fn account_identities_for_matching(
     table: &FxTable,
     mapping: &Map<String, Value>,
     params: &Value,
+    side: ledger_mapping::EntitySide,
 ) -> Vec<(String, String, String)> {
     records(table)
         .into_iter()
         .map(|row| {
-            let entity = entity_for(&row, mapping, params).to_owned();
+            let entity = scoped_entity_for(&row, mapping, params, side).to_owned();
             let (code, name) = account_code_and_name(&row, mapping);
             (entity, code, name)
         })
@@ -5062,8 +5143,13 @@ fn account_match_policy(params: &Value) -> Result<ledger_mapping::AccountMatchPo
     let je_mapping = mapping_obj(params, "jeMapping");
     let je_table = forward_filled_je_table(&load_fx_table(&je_spec)?, &je_mapping);
     let tb_rows =
-        account_identities_for_matching(&tb_table, &mapping_obj(params, "tbMapping"), params);
-    let je_rows = account_identities_for_matching(&je_table, &je_mapping, params);
+        account_identities_for_matching(
+            &tb_table, &mapping_obj(params, "tbMapping"), params,
+            ledger_mapping::EntitySide::Tb,
+        );
+    let je_rows = account_identities_for_matching(
+        &je_table, &je_mapping, params, ledger_mapping::EntitySide::Je,
+    );
     Ok(ledger_mapping::AccountMatchPolicy::from_sides(
         &tb_rows, &je_rows,
     ))
@@ -6588,6 +6674,7 @@ fn calculate(
         "unrealizedComparison": unrealized,
         "clientRevaluationVouchers": client_revaluation_vouchers,
         "pendingReview": pending_review,
+        "entityScopeSelection": params.get("entityScope").cloned().unwrap_or_else(|| json!({"mode":"strict","mappings":[]})),
         "tbGranularityBlocked": tb_granularity_blocked,
         "dataQuality": quality, "reconciliation": reconciliation,
         "balanceRollforwardValidation": balance_rollforward_validation,
@@ -6667,7 +6754,9 @@ where
         if !is_cash && !matches!(role.as_str(), "monetary_asset" | "monetary_liability") {
             continue;
         }
-        let entity = entity_for(row, mapping, params);
+        let entity = scoped_entity_for(
+            row, mapping, params, ledger_mapping::EntitySide::Je,
+        );
         let currency = normalize_currency(&currency_for(row, mapping, &account, params));
         let functional_currency = normalize_currency(&functional_currency(entity, params));
         let foreign = signed_amount(row, mapping, "foreign").map_err(|detail| {
@@ -7291,7 +7380,9 @@ fn build_relevant_voucher_detail(
         value.insert("reviewReason".into(), json!(reason));
         value.insert("sourceRow".into(), json!(row.source_row));
         value.insert("date".into(), json!(cell(&row, &mapping, "date")));
-        value.insert("entity".into(), json!(entity_for(&row, &mapping, params)));
+        value.insert("entity".into(), json!(scoped_entity_for(
+            &row, &mapping, params, ledger_mapping::EntitySide::Je,
+        )));
         value.insert(
             "voucherType".into(),
             json!(cell(&row, &mapping, "voucherType")),
@@ -7462,7 +7553,9 @@ fn calculate_realized(
                 }
             }
             let is_cash = role == "cash" || is_cash_account(&account, params);
-            let entity = entity_for(row, &mapping, params);
+            let entity = scoped_entity_for(
+                row, &mapping, params, ledger_mapping::EntitySide::Je,
+            );
             let currency = normalize_currency(&currency_for(row, &mapping, &account, params));
             let functional = normalize_currency(&functional_currency(entity, params));
             has_foreign_currency |=
@@ -7585,7 +7678,9 @@ fn calculate_realized(
             && settlement_targets.is_empty()
             && cash_settlements.len() == 1
             && cash_foreign_rows.first().is_some_and(|(row, ..)| {
-                let entity = entity_for(row, &mapping, params);
+                let entity = scoped_entity_for(
+                    row, &mapping, params, ledger_mapping::EntitySide::Je,
+                );
                 let functional_code = functional_currency(&entity, params);
                 cash_settlements
                     .iter()
@@ -7678,7 +7773,9 @@ fn calculate_realized(
             // 再把 targets 按值交给下方循环。
             let no_targets = targets.is_empty();
             for (row, account, role, foreign, functional) in targets {
-                let entity = entity_for(row, &mapping, params);
+                let entity = scoped_entity_for(
+                    row, &mapping, params, ledger_mapping::EntitySide::Je,
+                );
                 let currency = currency_for(row, &mapping, &account, params);
                 let functional_code = functional_currency(entity, params);
                 let day_rate = rate(snapshot, date, &currency, &functional_code);
@@ -7805,7 +7902,9 @@ fn calculate_realized(
                 for (index, (row, account, role, currency, foreign, functional)) in
                     foreign_monetary_rows.iter().enumerate()
                 {
-                    let entity = entity_for(row, &mapping, params);
+                    let entity = scoped_entity_for(
+                        row, &mapping, params, ledger_mapping::EntitySide::Je,
+                    );
                     let functional_code = functional_currency(entity, params);
                     if let Some((opening_rate, opening_published, opening_fallback)) =
                         month_opening_rate(snapshot, date, currency, &functional_code)
@@ -7910,7 +8009,9 @@ fn calculate_unrealized(
     let mut quality = Vec::new();
     let mut seen = HashSet::new();
     for row in records(&table) {
-        let entity = entity_for(&row, &mapping, params);
+        let entity = scoped_entity_for(
+            &row, &mapping, params, ledger_mapping::EntitySide::Tb,
+        );
         let account = account_name(&row, &mapping);
         let currency = currency_for(&row, &mapping, &account, params);
         let auxiliary = mapped_cols(&mapping, "auxiliary")
@@ -8059,7 +8160,9 @@ fn calculate_inferred_opening_unrealized(
         ) {
             continue;
         }
-        let entity = entity_for(&row, &je_mapping, params);
+        let entity = scoped_entity_for(
+            &row, &je_mapping, params, ledger_mapping::EntitySide::Je,
+        );
         let currency = currency_for(&row, &je_mapping, &account, params);
         let auxiliary = auxiliary_value(&row, &je_mapping);
         if currency.is_empty() {
@@ -8133,7 +8236,9 @@ fn calculate_inferred_opening_unrealized(
         ) {
             continue;
         }
-        let entity = entity_for(&row, tb_mapping, params);
+        let entity = scoped_entity_for(
+            &row, tb_mapping, params, ledger_mapping::EntitySide::Tb,
+        );
         let mapped_currency = currency_for(&row, tb_mapping, &account, params);
         let auxiliary = auxiliary_value(&row, tb_mapping);
         let functional = functional_currency(entity, params);
@@ -8324,7 +8429,9 @@ fn calculate_back_calculated_unrealized(
         {
             continue;
         }
-        let entity = entity_for(&row, tb_mapping, params);
+        let entity = scoped_entity_for(
+            &row, tb_mapping, params, ledger_mapping::EntitySide::Tb,
+        );
         // 走统一匹配键：币种在两边来源不同（TB 从科目文本抽、JE 读凭证货币列），
         // 进键会让同一账户被判成两个。重估仍按币种做，币种在端点字段里。
         let key = balance_match_key_for_account(entity, &account, "", false, &account_policy);
@@ -8387,7 +8494,9 @@ fn calculate_back_calculated_unrealized(
                 ) {
                     continue;
                 }
-                let entity = entity_for(row, &je_mapping, params);
+                let entity = scoped_entity_for(
+                    row, &je_mapping, params, ledger_mapping::EntitySide::Je,
+                );
                 let currency = currency_for(row, &je_mapping, &account, params);
                 if currency.is_empty() || currency == functional_currency(entity, params) {
                     continue;
@@ -8445,7 +8554,9 @@ fn calculate_back_calculated_unrealized(
             if !standard_monetary {
                 continue;
             }
-            let entity = entity_for(row, &je_mapping, params).to_owned();
+            let entity = scoped_entity_for(
+                row, &je_mapping, params, ledger_mapping::EntitySide::Je,
+            ).to_owned();
             let currency = currency_for(row, &je_mapping, &account, params);
             if currency.is_empty() || currency == functional_currency(&entity, params) {
                 continue;
@@ -8725,7 +8836,9 @@ fn calculate_monthly_unrealized(
             if !standard_monetary {
                 continue;
             }
-            let entity = entity_for(row, &mapping, params);
+            let entity = scoped_entity_for(
+                row, &mapping, params, ledger_mapping::EntitySide::Je,
+            );
             let currency = currency_for(row, &mapping, &account, params);
             let auxiliary = auxiliary_value(row, &mapping);
             if currency.is_empty() || currency == functional_currency(entity, params) {
@@ -11066,7 +11179,9 @@ pub(crate) fn month_start_rate_assumption_checks(
         for row in voucher {
             let account = account_name(row, &mapping);
             let role = role_for(&account, params);
-            let entity = entity_for(row, &mapping, params).to_owned();
+            let entity = scoped_entity_for(
+                row, &mapping, params, ledger_mapping::EntitySide::Je,
+            ).to_owned();
             let functional = functional_currency(&entity, params);
             entities.insert(entity.clone());
             // 金额解析失败不在本函数报错（约定是不阻断测算）：跳过该行金额信号，
@@ -11425,6 +11540,24 @@ fn xlsx_err(value: XlsxError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 汇兑主体归集按用户选择及侧别应用() {
+        let row = test_row_record(&[("公司", "母公司杭州管理处")]);
+        let mapping = serde_json::from_value::<Map<String, Value>>(json!({"entity":"公司"})).unwrap();
+        let params = json!({"entityScope": {
+            "mode":"aggregate",
+            "mappings":[{"side":"tb","source":"母公司杭州管理处","target":"母公司"}]
+        }});
+        assert_eq!(
+            scoped_entity_for(&row, &mapping, &params, ledger_mapping::EntitySide::Tb),
+            "母公司"
+        );
+        assert_eq!(
+            scoped_entity_for(&row, &mapping, &params, ledger_mapping::EntitySide::Je),
+            "母公司杭州管理处"
+        );
+    }
 
     fn test_row_record(pairs: &[(&str, &str)]) -> RowRecord<'static> {
         let headers = Box::leak(

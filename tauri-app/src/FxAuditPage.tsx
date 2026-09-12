@@ -44,6 +44,7 @@ import {
   KeywordFilter,
   keywordFilterPredicate,
 } from "@/components/KeywordFilter";
+import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation";
 import "./fx-audit.css";
 import { displayFileName } from "./fileDisplay";
 
@@ -791,6 +792,17 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     () => [...new Set([...(je?.entities ?? []), ...(tb?.entities ?? [])])],
     [je, tb],
   );
+  const entityScope = useEntityScopeConfirmation({
+    tbEntities: tb?.entities ?? [],
+    jeEntities: je?.entities ?? [],
+    onInvalidate: () => {
+      activeJob.current = "";
+      setResult(undefined);
+      setJob(undefined);
+      setActiveStage(undefined);
+      setCompletedStage(undefined);
+    },
+  });
   // 主体是选填角色：映射了主体列就按列里的名字，没映射就全表统一挂 DEFAULT_ENTITY，
   // 不再要用户手填。它只是本位币与底稿封面的挂载点——用户要填的是本位币。
   const fixedEntity = entities.length === 1 ? entities[0] : DEFAULT_ENTITY;
@@ -1484,6 +1496,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
           }
         : {}),
       entityCurrencies: effectiveEntities,
+      entityScope: entityScope.selection,
       accountRoles,
       accountCurrencies: fxAccountCurrencyOverrides(accountCurrencies),
       manualClassifications: overrides,
@@ -2127,6 +2140,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
               返回科目类型确认
             </Button>
           </div>
+          {entityScope.panel}
           <Card>
             <CardHeader>
               <CardTitle>测算与底稿</CardTitle>

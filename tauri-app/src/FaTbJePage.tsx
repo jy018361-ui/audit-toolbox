@@ -28,6 +28,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useJobEvents } from "@/hooks/useJobEvents";
+import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation";
 import { useTaskRestore } from "./restore";
 import { errorText } from "@/lib/errors";
 import {
@@ -441,6 +442,15 @@ export function FaTbJePage() {
     ].filter(Boolean);
     return detected.length ? detected : [DEFAULT_ENTITY];
   }, [inspects]);
+  const entityScope = useEntityScopeConfirmation({
+    tbEntities: inspects.tb?.entities ?? [],
+    jeEntities: inspects.je?.entities ?? [],
+    onInvalidate: () => {
+      activeJobId.current = "";
+      setResult(undefined);
+      setJob(undefined);
+    },
+  });
   const missingMappings = {
     tb: faTbJeMissingMappings("tb", mappings.tb),
     je: faTbJeMissingMappings("je", mappings.je),
@@ -770,6 +780,7 @@ export function FaTbJePage() {
       reportEnd,
       tbFixedEntity: DEFAULT_ENTITY,
       jeFixedEntity: DEFAULT_ENTITY,
+      entityScope: entityScope.selection,
       outputPath,
     };
   }
@@ -1264,6 +1275,7 @@ export function FaTbJePage() {
 
       {step === 4 && (
         <div className="fa-tbje-step-stack">
+          {entityScope.panel}
           <Card variant="section">
             <CardHeader className="fa-tbje-card-head">
               <div>

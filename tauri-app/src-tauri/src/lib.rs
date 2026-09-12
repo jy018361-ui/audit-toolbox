@@ -319,6 +319,8 @@ async fn engine_call(
         // TB与JE的跨表对齐是公共账表能力。`fx.*` 旧入口仍保留
         // 兼容，新工具必须从 ledger 命名空间调用。
         fx::check_mapping_alignment(&params)
+    } else if method == "ledger.entity_scope_suggestions" {
+        ledger_mapping::entity_scope_suggestions_call(&params)
     } else if method == "ledger.review_mapping" {
         let settings = storage.settings_get()?;
         let kind = params
@@ -1091,6 +1093,9 @@ pub fn engine_call_for_test(
     if method == "ledger.check_mapping_alignment" {
         return fx::check_mapping_alignment(&params);
     }
+    if method == "ledger.entity_scope_suggestions" {
+        return ledger_mapping::entity_scope_suggestions_call(&params);
+    }
     if method == "ledger.review_mapping" || method == "ledger.review_pair_mapping" {
         let dirs = project_dirs()?;
         let storage = Storage::new(dirs.data_local_dir())?;
@@ -1339,6 +1344,27 @@ mod tests {
         assert_eq!(value["engine"]["available"], true);
         assert_eq!(value["engine"]["mode"], "rust-native");
         assert_eq!(value["engine"]["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn 主体归集候选同步入口已登记且保留摘要() {
+        let value = engine_call_for_test(
+            "ledger.entity_scope_suggestions",
+            json!({
+                "tbEntities": [
+                    {"entity":"10008529 集团", "rowCount":2, "amount":20.0, "absoluteAmount":30.0},
+                    {"entity":"集团华东分支", "rowCount":3, "amount":-10.0, "absoluteAmount":50.0}
+                ],
+                "jeEntities": ["集团"]
+            }),
+        )
+        .expect("公共主体候选入口失败");
+        assert_eq!(value["anchors"], json!(["集团"]));
+        assert_eq!(value["candidates"][0]["sourceSide"], "tb");
+        assert_eq!(value["candidates"][0]["sourceEntity"], "集团华东分支");
+        assert_eq!(value["candidates"][0]["targetEntity"], "集团");
+        assert_eq!(value["candidates"][0]["rowCount"], 3);
+        assert_eq!(value["candidates"][0]["absoluteAmount"], 50.0);
     }
 
     #[test]

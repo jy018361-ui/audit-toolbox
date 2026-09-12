@@ -40,6 +40,25 @@ struct SourceSpec {
 fn one() -> usize {
     1
 }
+
+fn scoped_entity(
+    raw: &str,
+    enabled: bool,
+    side: ledger_mapping::EntitySide,
+    scope: &ledger_mapping::EntityScope,
+) -> String {
+    let entity = ledger_mapping::effective_entity(raw, enabled);
+    if !enabled {
+        return entity;
+    }
+    ledger_mapping::apply_entity_scope(side, &entity, scope)
+}
+
+fn entity_scope(params: &Value) -> ledger_mapping::EntityScope {
+    params.get("entityScope").cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
 #[derive(Clone)]
 struct Table {
     path: PathBuf,
@@ -544,9 +563,12 @@ pub(crate) fn run_job(
     }
     let total: f64 = rows.iter().map(|r| r.calculated_interest).sum();
     let review = rows.iter().filter(|r| r.match_status != "已匹配").count();
-    Ok(
-        json!({"rows":rows,"summary":{"loanCount":rows.len(),"calculatedInterest":total,"reviewCount":review},"outputPaths":output_paths}),
-    )
+    Ok(json!({
+        "rows": rows,
+        "summary": {"loanCount":rows.len(),"calculatedInterest":total,"reviewCount":review},
+        "entityScopeSelection": params.get("entityScope").cloned().unwrap_or_else(|| json!({"mode":"strict","mappings":[]})),
+        "outputPaths": output_paths
+    }))
 }
 fn checkpoint(cancel: &AtomicBool, pause: &PauseCheckpoint) -> Result<(), AppError> {
     if cancel.load(Ordering::Relaxed) {
@@ -1548,6 +1570,7 @@ fn aggregate_large_je_once(
     loan_accounts: &Option<std::collections::HashSet<String>>,
     loan_id_mapped: bool,
     entity_key_enabled: bool,
+    entity_scope: &ledger_mapping::EntityScope,
     progress: &dyn Fn(&str, usize, usize, &str),
     cancel: &AtomicBool,
 ) -> Result<HashMap<usize, JeLoanAggregate>, AppError> {
@@ -1566,9 +1589,11 @@ fn aggregate_large_je_once(
         }
         let raw_id = text(tb, row, tb_mapping, "loanId");
         let code = role_text(tb, row, tb_mapping, "tb", "accountCode");
-        let entity = ledger_mapping::effective_entity(
+        let entity = scoped_entity(
             &role_text(tb, row, tb_mapping, "tb", "entity"),
             entity_key_enabled,
+            ledger_mapping::EntitySide::Tb,
+            entity_scope,
         );
         // 与内存路径同一圈定口径：确认清单或明细列，二者必居其一。
         let selected = match loan_accounts {
@@ -1622,9 +1647,11 @@ fn aggregate_large_je_once(
         }
         let je_code = disk_role_text(&headers, &row.values, &prepared_mapping, "accountCode");
         let je_name = disk_role_text(&headers, &row.values, &prepared_mapping, "accountName");
-        let entity = ledger_mapping::effective_entity(
+        let entity = scoped_entity(
             &disk_role_text(&headers, &row.values, &prepared_mapping, "entity"),
             entity_key_enabled,
+            ledger_mapping::EntitySide::Je,
+            entity_scope,
         );
         let targets = if !je_code.is_empty() {
             candidates.get(&(entity.clone(), norm(&je_code)))
@@ -1755,6 +1782,7 @@ fn calculate_tb_impl(
     cancel: &AtomicBool,
     force_disk_je: bool,
 ) -> Result<Vec<LoanRow>, AppError> {
+    let entity_scope = entity_scope(params);
     let (tb, tm) = source(params, "tbSource")?;
     let (je_spec, je_mapping) = source_config(params, "jeSource")?;
     let entity_key_enabled = ledger_mapping::entity_key_enabled(
@@ -1836,6 +1864,7 @@ fn calculate_tb_impl(
             &loan_accounts,
             loan_id_mapped,
             entity_key_enabled,
+            &entity_scope,
             progress,
             cancel,
         )?)
@@ -1856,9 +1885,11 @@ fn calculate_tb_impl(
             continue;
         }
         let code = role_text(&tb, row, &tm, "tb", "accountCode");
-        let entity = ledger_mapping::effective_entity(
+        let entity = scoped_entity(
             &role_text(&tb, row, &tm, "tb", "entity"),
             entity_key_enabled,
+            ledger_mapping::EntitySide::Tb,
+            &entity_scope,
         );
         let account = account_text(&tb, row, &tm, "tb");
         let raw_id = text(&tb, row, &tm, "loanId");
@@ -1904,9 +1935,11 @@ fn calculate_tb_impl(
         };
         let tb_code = role_text(&tb, row, &tm, "tb", "accountCode");
         let tb_name = role_text(&tb, row, &tm, "tb", "accountName");
-        let entity = ledger_mapping::effective_entity(
+        let entity = scoped_entity(
             &role_text(&tb, row, &tm, "tb", "entity"),
             entity_key_enabled,
+            ledger_mapping::EntitySide::Tb,
+            &entity_scope,
         );
         let code_unique =
             !tb_code.is_empty() && code_rows.get(&(entity.clone(), norm(&tb_code))) == Some(&1);
@@ -1939,9 +1972,11 @@ fn calculate_tb_impl(
                 let summary = text(je, jr, jm, "summary");
                 let je_code = role_text(je, jr, jm, "je", "accountCode");
                 let je_name = role_text(je, jr, jm, "je", "accountName");
-                let je_entity = ledger_mapping::effective_entity(
+                let je_entity = scoped_entity(
                     &role_text(je, jr, jm, "je", "entity"),
                     entity_key_enabled,
+                    ledger_mapping::EntitySide::Je,
+                    &entity_scope,
                 );
                 // 三层科目配对：①编码直归；②编码撞车时明细优先、名称消歧；
                 // ③都消不开不归集（TB 发生额兜底即编码汇总口径）。任一侧没
@@ -4258,6 +4293,26 @@ mod loan_form_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 借款主体归集按侧别且未勾选主体保持原值() {
+        let params = json!({"entityScope": {
+            "mode": "aggregate",
+            "mappings": [{"side":"je", "source":"母公司杭州管理处", "target":"母公司"}]
+        }});
+        assert_eq!(
+            scoped_entity("母公司杭州管理处", true, ledger_mapping::EntitySide::Je, &entity_scope(&params)),
+            "母公司"
+        );
+        assert_eq!(
+            scoped_entity("母公司杭州管理处", true, ledger_mapping::EntitySide::Tb, &entity_scope(&params)),
+            "母公司杭州管理处"
+        );
+        assert_eq!(
+            scoped_entity("母公司宁波管理处", true, ledger_mapping::EntitySide::Je, &entity_scope(&params)),
+            "母公司宁波管理处"
+        );
+    }
 
     #[test]
     fn 借款科目建议结合代码类别与融资负债语义() {

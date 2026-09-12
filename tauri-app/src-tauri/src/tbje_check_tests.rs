@@ -7,6 +7,66 @@ use super::*;
 use serde_json::json;
 use std::sync::atomic::AtomicBool;
 
+#[test]
+fn 主体归集只改写用户勾选的一侧匹配键() {
+    let table = FxTable {
+        path: std::path::PathBuf::new(),
+        sheet: "Sheet1".into(),
+        sheets: vec!["Sheet1".into()],
+        header_row: 1,
+        header_depth: 1,
+        raw_headers: vec![],
+        headers: vec!["主体".into(), "科目编码".into(), "科目名称".into()],
+        rows: vec![vec![
+            "浙江沪杭甬高速公路股份有限公司杭州管理处".into(),
+            "1001".into(),
+            "库存现金".into(),
+        ]],
+        row_count: 1,
+        header_candidates: vec![],
+        sampled: false,
+    };
+    let map = serde_json::from_value::<Map<String, Value>>(json!({
+        "entity": "主体", "accountCode": "科目编码", "accountName": "科目名称"
+    }))
+    .unwrap();
+    let scope: ledger_mapping::EntityScope = serde_json::from_value(json!({
+        "mode": "aggregate",
+        "mappings": [{
+            "side": "tb",
+            "source": "浙江沪杭甬高速公路股份有限公司杭州管理处",
+            "target": "浙江沪杭甬高速公路股份有限公司"
+        }]
+    }))
+    .unwrap();
+
+    assert_eq!(
+        scoped_identity_parts(
+            &table,
+            &table.rows[0],
+            &map,
+            ledger_mapping::DEFAULT_ENTITY,
+            ledger_mapping::EntitySide::Tb,
+            &scope,
+        )
+        .0,
+        "浙江沪杭甬高速公路股份有限公司"
+    );
+    assert_eq!(
+        scoped_identity_parts(
+            &table,
+            &table.rows[0],
+            &map,
+            ledger_mapping::DEFAULT_ENTITY,
+            ledger_mapping::EntitySide::Je,
+            &scope,
+        )
+        .0,
+        "浙江沪杭甬高速公路股份有限公司杭州管理处",
+        "TB 的选择不得误改 JE 主体"
+    );
+}
+
 fn fixture(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("tbje-check-{}-{}", std::process::id(), name));
     std::fs::create_dir_all(&dir).unwrap();

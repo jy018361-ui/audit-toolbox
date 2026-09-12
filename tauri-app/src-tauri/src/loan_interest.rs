@@ -55,7 +55,9 @@ fn scoped_entity(
 }
 
 fn entity_scope(params: &Value) -> ledger_mapping::EntityScope {
-    params.get("entityScope").cloned()
+    params
+        .get("entityScope")
+        .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default()
 }
@@ -2921,6 +2923,9 @@ fn source(params: &Value, key: &str) -> Result<(Table, Map<String, Value>), AppE
         // 草稿），再做非金额列的向下填充——填充会把上一行的科目/凭证号带给
         // 空白格，垃圾行被填上身份后就再也认不出来了。正常分录行不受影响：
         // 每行科目必非空，不会因「无身份＋有金额」被误伤（TBJE 勾稽同序）。
+        ledger_mapping::normalize_sectioned_ledger_rows(&table.headers, &mut table.rows, &|role| {
+            mapped_names(&mapping, "je", role)
+        });
         let keep = ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
             mapped_names(&mapping, "je", role)
         });
@@ -4301,15 +4306,30 @@ mod tests {
             "mappings": [{"side":"je", "source":"母公司杭州管理处", "target":"母公司"}]
         }});
         assert_eq!(
-            scoped_entity("母公司杭州管理处", true, ledger_mapping::EntitySide::Je, &entity_scope(&params)),
+            scoped_entity(
+                "母公司杭州管理处",
+                true,
+                ledger_mapping::EntitySide::Je,
+                &entity_scope(&params)
+            ),
             "母公司"
         );
         assert_eq!(
-            scoped_entity("母公司杭州管理处", true, ledger_mapping::EntitySide::Tb, &entity_scope(&params)),
+            scoped_entity(
+                "母公司杭州管理处",
+                true,
+                ledger_mapping::EntitySide::Tb,
+                &entity_scope(&params)
+            ),
             "母公司杭州管理处"
         );
         assert_eq!(
-            scoped_entity("母公司宁波管理处", true, ledger_mapping::EntitySide::Je, &entity_scope(&params)),
+            scoped_entity(
+                "母公司宁波管理处",
+                true,
+                ledger_mapping::EntitySide::Je,
+                &entity_scope(&params)
+            ),
             "母公司宁波管理处"
         );
     }

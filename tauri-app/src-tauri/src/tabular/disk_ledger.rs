@@ -4,7 +4,7 @@ use super::*;
 use rusqlite::{Connection, params};
 use std::cell::Cell;
 
-const PREPARED_CACHE_VERSION: u64 = 3;
+const PREPARED_CACHE_VERSION: u64 = 4;
 
 pub(super) fn sql_error(e: rusqlite::Error) -> AppError {
     error(
@@ -528,15 +528,38 @@ fn build_prepared(
     let body = ledger_mapping::LedgerBodyRule::new(&ledger.table.headers, &|role| {
         ledger_role_columns(mapping, role)
     });
+    let mut sectioned = ledger_mapping::SectionedLedgerStream::detect(
+        &ledger.table.headers,
+        &cache.table.rows,
+        &|role| ledger_role_columns(mapping, role),
+    );
     let mut insert = ledger.db.prepare("INSERT INTO processed(seq,fills,voucher,account,account_norm,candidate,signkey,signkey_noentity,entity,dr,cr,raw,unsigned,hd,hc,pos,neg) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)").map_err(sql_error)?;
     let mut last_progress = Instant::now();
     cache.visit(None, cancel, |mut row, index| {
-        if !body.is_body(&row) {
+        let before_section_fill = sectioned.as_ref().map(|_| row.clone());
+        if let Some(normalizer) = sectioned.as_mut() {
+            if !normalizer.normalize(&mut row) {
+                return Ok(());
+            }
+        } else if !body.is_body(&row) {
             return Ok(());
         }
         // Validate before fill/filter, exactly as the ordinary export path does.
         validate_disk_amount_row(&ledger.table.headers, &row, mapping, header_row + index)?;
-        let mut applied_fills = Vec::<(usize, String)>::new();
+        let mut applied_fills = before_section_fill
+            .as_ref()
+            .map(|before| {
+                row.iter()
+                    .enumerate()
+                    .filter(|(column, value)| {
+                        before
+                            .get(*column)
+                            .is_none_or(|original| original != *value)
+                    })
+                    .map(|(column, value)| (column, value.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         for &i in &fill {
             let current = row.get(i).map(|s| s.trim()).unwrap_or("");
             if current.is_empty() {
@@ -1691,6 +1714,78 @@ mod tests {
 
         drop(second);
         let raw_path = cache.path.clone();
+        drop(cache);
+        let _ = fs::remove_file(prepared_path);
+        let _ = fs::remove_file(raw_path);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 磁盘路径同样正规化分段明细账() {
+        let root =
+            std::env::temp_dir().join(format!("disk-sectioned-ledger-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("source.csv");
+        fs::write(
+            &input,
+            "凭证号,科目编码,科目名称,摘要,借方,贷方,备注\n\
+             ,1001,库存现金,期初余额,0,0,科目备注\n\
+             V1,,,收款,100,,\n\
+             ,,,本月合计,100,0,\n\
+             ,2202,应付账款,期初余额,0,0,新科目备注\n\
+             V1,,,付款,,100,\n",
+        )
+        .unwrap();
+        let source = SourceParams {
+            input_path: input.to_string_lossy().into_owned(),
+            sheet: None,
+            header_row: 1,
+            header_depth: 1,
+        };
+        let cancel = AtomicBool::new(false);
+        let cache = large_csv::load(&source, &|_, _, _, _| {}, &cancel).unwrap();
+        let mapping = LedgerMapping {
+            id: vec!["凭证号".into()],
+            account_code: Some("科目编码".into()),
+            account_name: vec!["科目名称".into()],
+            summary: Some("摘要".into()),
+            debit: Some("借方".into()),
+            credit: Some("贷方".into()),
+            ..Default::default()
+        };
+        let prepared_path = cache_path(
+            "kanzhang-ledger",
+            &prepared_key(&cache, &mapping, None, 1).unwrap(),
+        )
+        .unwrap()
+        .with_extension("sqlite");
+        let _ = fs::remove_file(&prepared_path);
+        let ledger = prepare(
+            &cache,
+            &mapping,
+            None,
+            1,
+            &|_, _, _, _| {},
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(ledger.count, 2);
+        let mut rows = Vec::new();
+        ledger
+            .visit_processed(false, &cancel, |row| {
+                rows.push(row.values);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(rows[0][1], "1001");
+        assert_eq!(rows[1][1], "2202");
+        assert_eq!(rows[1][2], "应付账款");
+        assert_eq!(rows[1][3], "付款");
+        assert_eq!(rows[1][4], "", "借方金额不得从上一条明细继承");
+        assert_eq!(rows[1][5], "100");
+        assert_eq!(rows[1][6], "新科目备注");
+        let raw_path = cache.path.clone();
+        drop(ledger);
         drop(cache);
         let _ = fs::remove_file(prepared_path);
         let _ = fs::remove_file(raw_path);

@@ -164,6 +164,80 @@ describe("TbjeCheckPage", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("keeps the imported groups visible when returning to the add-files step", async () => {
+    const { engineCall, pickPath } = await import("./api");
+    vi.mocked(pickPath).mockResolvedValue([
+      "C:/samples/01TB.xlsx",
+      "C:/samples/01JE.xlsx",
+    ]);
+    vi.mocked(engineCall).mockImplementation(
+      async (method: string, params: unknown) => {
+        if (method === "ledger.forms") return [];
+        const source = (params as { source: { inputPath: string } }).source;
+        const isTb = source.inputPath.includes("TB");
+        if (method === "deposit.classify_source") {
+          return {
+            kind: isTb ? "tb" : "je",
+            sheet: "Sheet1",
+            headerRow: 1,
+            headerDepth: 1,
+          };
+        }
+        return {
+          sheet: "Sheet1",
+          headerRow: 1,
+          headerDepth: 1,
+          headers: isTb ? ["科目编码", "期末余额"] : ["科目编码", "借方金额"],
+          preview: [],
+          entities: ["主体 A"],
+          suggestedMapping: {},
+        };
+      },
+    );
+
+    const { container } = render(<TbjeCheckPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /把多组 TB 与 JE 一起拖进来/ }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+      ).toBeInTheDocument(),
+    );
+
+    // 回到第一步：文件仍在缓存里，列表必须回显，不能只剩一个空拖放框。
+    const steps = container.querySelector(".step-indicator") as HTMLElement;
+    fireEvent.click(
+      within(steps).getByRole("button", { name: /添加文件/ }),
+    );
+    const recap = container.querySelector(".tbje-intake-recap");
+    expect(recap).not.toBeNull();
+    expect(
+      screen.getByRole("heading", { level: 2, name: "1. 添加 TB 与 JE 文件" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "下一步：确认配对（1 组）" }),
+    ).toBeVisible();
+    expect(within(recap as HTMLElement).getByText("01TB.xlsx / Sheet1"))
+      .toBeVisible();
+    expect(within(recap as HTMLElement).getByText("01JE.xlsx / Sheet1"))
+      .toBeVisible();
+
+    // 点回显行直接回到第二步并展开该组，不用再走一遍导入。
+    fireEvent.click(
+      within(recap as HTMLElement).getByRole("button", { name: /第 1 组/ }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+      ).toBeInTheDocument(),
+    );
+    expect(container.querySelector(".tbje-group")).toHaveAttribute(
+      "data-ui-state",
+      "expanded",
+    );
+  });
+
   it("keeps a signed functional amount mapping after a no-op pair review", async () => {
     const { engineCall, jobStart, pickPath } = await import("./api");
     vi.mocked(pickPath).mockResolvedValue([

@@ -1,6 +1,6 @@
 //! TB（科目余额表）与 JE（序时账）的统一映射内核。
 //!
-//! 五个工具——汇兑损益、存款利息、借款利息、看账、正负数凭证标记——此前各有一套
+//! 汇兑损益、存款利息、借款利息、看账、正负数凭证标记、TBJE 与 FA 勾稽此前各有一套
 //! 表头识别与映射校验，同样的缺陷要修四遍。本模块把三件事收敛成唯一实现：
 //!
 //! 1. **角色词汇表**：每个业务字段的标准名、别名库、冲突词库（[`je_roles`] / [`tb_roles`]）；
@@ -214,7 +214,11 @@ pub(crate) fn apply_entity_scope(side: EntitySide, entity: &str, scope: &EntityS
         .mappings
         .iter()
         .find(|mapping| mapping.side == side && normalized_entity_name(&mapping.source) == source)
-        .map(|mapping| entity_without_leading_code(&mapping.target).trim().to_owned())
+        .map(|mapping| {
+            entity_without_leading_code(&mapping.target)
+                .trim()
+                .to_owned()
+        })
         .unwrap_or_else(|| canonical.to_owned())
 }
 
@@ -1915,6 +1919,301 @@ pub(crate) fn forward_fill_columns_skipping(
     filled
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SectionedLedgerRow {
+    Opening,
+    Total,
+    Other,
+}
+
+#[derive(Debug)]
+struct SectionedLedgerPlan {
+    keep: Vec<bool>,
+    summary_indexes: HashSet<usize>,
+    id_indexes: Vec<usize>,
+    account_indexes: Vec<usize>,
+    amount_indexes: HashSet<usize>,
+}
+
+fn role_indexes(
+    headers: &[String],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+    roles: &[&str],
+) -> Vec<usize> {
+    let mut indexes = roles
+        .iter()
+        .flat_map(|role| column_of(role))
+        .filter_map(|name| header_index(headers, &name))
+        .collect::<Vec<_>>();
+    indexes.sort_unstable();
+    indexes.dedup();
+    indexes
+}
+
+fn sectioned_row_kind(
+    row: &[String],
+    summary_indexes: &HashSet<usize>,
+    id_indexes: &[usize],
+) -> SectionedLedgerRow {
+    if id_indexes.iter().any(|index| {
+        row.get(*index)
+            .is_some_and(|value| !value.trim().is_empty())
+    }) {
+        return SectionedLedgerRow::Other;
+    }
+    let label = summary_indexes
+        .iter()
+        .filter_map(|index| row.get(*index))
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .unwrap_or("");
+    match label {
+        "期初余额" => SectionedLedgerRow::Opening,
+        "本月合计" | "本年累计" => SectionedLedgerRow::Total,
+        _ => SectionedLedgerRow::Other,
+    }
+}
+
+/// 识别“科目写在期初余额行、真实分录只写凭证号和金额”的分段 JE。
+/// 只有实际观察到锚点后的正文缺少科目时才启用，普通平铺 JE 不受影响。
+fn sectioned_ledger_plan(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> Option<SectionedLedgerPlan> {
+    let mut summary_indexes = role_indexes(headers, column_of, &["summary"])
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let id_indexes = role_indexes(headers, column_of, &["id"]);
+    // 摘要不是所有工具的必填映射。结构标签本身足够明确，因此也从实际取值
+    // 发现所在列；这样任一公共 JE 消费方都能识别分段账，不依赖页面是否展示摘要。
+    for row in rows {
+        if id_indexes.iter().any(|index| {
+            row.get(*index)
+                .is_some_and(|value| !value.trim().is_empty())
+        }) {
+            continue;
+        }
+        for (index, value) in row.iter().enumerate() {
+            if matches!(value.trim(), "期初余额" | "本月合计" | "本年累计") {
+                summary_indexes.insert(index);
+            }
+        }
+    }
+    let account_code_indexes = role_indexes(headers, column_of, &["accountCode"]);
+    let account_indexes = role_indexes(
+        headers,
+        column_of,
+        &["accountCode", "accountName", "account"],
+    );
+    let amount_indexes = role_indexes(headers, column_of, JE_AMOUNT_ROLES)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    if summary_indexes.is_empty()
+        || id_indexes.is_empty()
+        || account_indexes.is_empty()
+        || amount_indexes.is_empty()
+    {
+        return None;
+    }
+
+    let mut active_anchor = false;
+    let mut observed_missing_account_detail = false;
+    let mut keep = vec![false; rows.len()];
+    for (index, row) in rows.iter().enumerate() {
+        let kind = sectioned_row_kind(row, &summary_indexes, &id_indexes);
+        match kind {
+            SectionedLedgerRow::Opening => {
+                active_anchor = account_indexes.iter().any(|position| {
+                    row.get(*position)
+                        .is_some_and(|value| !value.trim().is_empty())
+                });
+                continue;
+            }
+            SectionedLedgerRow::Total => continue,
+            SectionedLedgerRow::Other => {}
+        }
+        let has_id = id_indexes.iter().any(|position| {
+            row.get(*position)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        let has_amount = amount_indexes.iter().any(|position| {
+            row.get(*position)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        if active_anchor && has_id && has_amount {
+            keep[index] = true;
+            let required_identity = if account_code_indexes.is_empty() {
+                &account_indexes
+            } else {
+                &account_code_indexes
+            };
+            if required_identity.iter().all(|position| {
+                row.get(*position)
+                    .is_none_or(|value| value.trim().is_empty())
+            }) {
+                observed_missing_account_detail = true;
+            }
+        }
+    }
+    observed_missing_account_detail.then_some(SectionedLedgerPlan {
+        keep,
+        summary_indexes,
+        id_indexes,
+        account_indexes,
+        amount_indexes,
+    })
+}
+
+pub(crate) fn is_sectioned_ledger(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> bool {
+    sectioned_ledger_plan(headers, rows, column_of).is_some()
+}
+
+fn sectioned_non_fill_amount_indexes(
+    headers: &[String],
+    mapped_amount_indexes: &HashSet<usize>,
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> HashSet<usize> {
+    let direction_indexes = role_indexes(headers, column_of, &["direction"])
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let mut indexes = mapped_amount_indexes.clone();
+    for (index, header) in headers.iter().enumerate() {
+        if direction_indexes.contains(&index) {
+            continue;
+        }
+        let normalized = normalize_header(header);
+        let amount_named = normalized.contains("金额")
+            || normalized.contains("金額")
+            || normalized.contains("amount");
+        let debit_credit_named = (normalized.contains("借方")
+            || normalized.contains("贷方")
+            || normalized.contains("貸方")
+            || normalized.contains("debit")
+            || normalized.contains("credit"))
+            && !normalized.contains("方向")
+            && !normalized.contains("标志")
+            && !normalized.contains("標誌")
+            && !normalized.contains("标识")
+            && !normalized.contains("標識");
+        if amount_named || debit_credit_named {
+            indexes.insert(index);
+        }
+    }
+    indexes
+}
+
+pub(crate) struct SectionedLedgerStream {
+    summary_indexes: HashSet<usize>,
+    id_indexes: Vec<usize>,
+    account_indexes: Vec<usize>,
+    amount_indexes: HashSet<usize>,
+    no_fill: HashSet<usize>,
+    context: Vec<Option<String>>,
+    active_anchor: bool,
+}
+
+impl SectionedLedgerStream {
+    /// 先用有界样本确认确属分段 JE，再创建可用于大 CSV 顺序扫描的状态机。
+    pub(crate) fn detect(
+        headers: &[String],
+        sample_rows: &[Vec<String>],
+        column_of: &dyn Fn(&str) -> Vec<String>,
+    ) -> Option<Self> {
+        let plan = sectioned_ledger_plan(headers, sample_rows, column_of)?;
+        let no_fill = sectioned_non_fill_amount_indexes(headers, &plan.amount_indexes, column_of);
+        Some(Self {
+            summary_indexes: plan.summary_indexes,
+            id_indexes: plan.id_indexes,
+            account_indexes: plan.account_indexes,
+            amount_indexes: plan.amount_indexes,
+            no_fill,
+            context: vec![None; headers.len()],
+            active_anchor: false,
+        })
+    }
+
+    /// 返回 `true` 时该行是已补全的真实凭证明细；结构行及游离行返回 `false`。
+    pub(crate) fn normalize(&mut self, row: &mut Vec<String>) -> bool {
+        let width = self.context.len();
+        row.resize(width, String::new());
+        match sectioned_row_kind(row, &self.summary_indexes, &self.id_indexes) {
+            SectionedLedgerRow::Opening => {
+                self.context.fill(None);
+                self.active_anchor = self.account_indexes.iter().any(|position| {
+                    row.get(*position)
+                        .is_some_and(|value| !value.trim().is_empty())
+                });
+                for column in 0..width {
+                    if self.no_fill.contains(&column) || self.summary_indexes.contains(&column) {
+                        continue;
+                    }
+                    let value = row[column].trim();
+                    if !value.is_empty() {
+                        self.context[column] = Some(value.to_owned());
+                    }
+                }
+                return false;
+            }
+            SectionedLedgerRow::Total => return false,
+            SectionedLedgerRow::Other => {}
+        }
+        let has_id = self.id_indexes.iter().any(|position| {
+            row.get(*position)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        let has_amount = self.amount_indexes.iter().any(|position| {
+            row.get(*position)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        if !self.active_anchor || !has_id || !has_amount {
+            return false;
+        }
+        for column in 0..width {
+            if self.no_fill.contains(&column) {
+                continue;
+            }
+            let value = row[column].trim();
+            if value.is_empty() {
+                if let Some(previous) = self.context[column].as_ref() {
+                    row[column] = previous.clone();
+                }
+            } else {
+                self.context[column] = Some(value.to_owned());
+                row[column] = value.to_owned();
+            }
+        }
+        true
+    }
+}
+
+/// 将分段 JE 正规化为每行自包含的凭证明细。
+///
+/// “期初余额”行重置并提供上下文但不进入正文；“本月合计”“本年累计”直接
+/// 删除；真实分录补齐除借方、贷方和金额类列之外的全部空字段。返回 `true`
+/// 表示识别并应用了分段规则，`false` 表示调用方应继续沿用普通平铺 JE 逻辑。
+pub(crate) fn normalize_sectioned_ledger_rows(
+    headers: &[String],
+    rows: &mut Vec<Vec<String>>,
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> bool {
+    let Some(mut normalizer) = SectionedLedgerStream::detect(headers, rows, column_of) else {
+        return false;
+    };
+    let mut normalized = Vec::new();
+    for mut row in std::mem::take(rows) {
+        if normalizer.normalize(&mut row) {
+            normalized.push(row);
+        }
+    }
+    *rows = normalized;
+    true
+}
+
 // ────────────────────────────── 表头归一化与匹配 ──────────────────────────────
 
 /// 表头归一化：去掉空白与各类分隔符，转小写。与 `fx::normalize_header` 行为一致。
@@ -2833,6 +3132,14 @@ pub(crate) fn analyze_ledger_rows(
     rows: &[Vec<String>],
     column_of: &dyn Fn(&str) -> Vec<String>,
 ) -> LedgerRowAnalysis {
+    // 分段 JE 必须先以“期初余额锚点＋凭证号＋金额”识别正文。若先套普通
+    // “每行必须自带科目”协议，真实分录会整片被删，只剩金额为零的期初行。
+    if let Some(plan) = sectioned_ledger_plan(headers, rows, column_of) {
+        return LedgerRowAnalysis {
+            keep: plan.keep,
+            invalid_account_code_rows: Vec::new(),
+        };
+    }
     let rule = LedgerBodyRule::new(headers, column_of);
     // 身份列都没映射就无从判断，一行不删。
     if rule.identity.is_empty() {
@@ -2903,6 +3210,161 @@ pub(crate) fn ledger_junk_mask(
     analyze_ledger_rows(headers, rows, column_of).keep
 }
 
+/// 流水级导出上的凭证/流水特征表头（按整段精确匹配，避免子串误命中）。
+const POSTING_VOUCHER_HEADERS: &[&str] = &[
+    "凭证号",
+    "凭证编号",
+    "凭单号",
+    "凭证字",
+    "凭证日期",
+    "记账日期",
+    "记帐日期",
+    "过账日期",
+    "过帐日期",
+    "单据号",
+    "单据日期",
+    "分录号",
+    "流水号",
+    "voucher",
+    "voucherno",
+    "voucherid",
+    "voucherdate",
+    "documentno",
+    "documentnumber",
+    "documentdate",
+    "docno",
+    "docdate",
+    "postingdate",
+    "journal",
+    "journalno",
+    "journaldate",
+];
+
+/// 流水级导出上的期间特征表头。年度/财年/期间列意味着行是按期间切片的，
+/// 不是传统「一科目一行」的期末余额表。
+const POSTING_PERIOD_HEADERS: &[&str] = &[
+    "年度",
+    "年份",
+    "财年",
+    "会计年度",
+    "年月",
+    "期间",
+    "会计期间",
+    "月份",
+    "会计月份",
+    "year",
+    "fiscalyear",
+    "fiscalperiod",
+    "period",
+    "periodid",
+    "month",
+];
+
+/// 已映射角色与金额语义之外仍算「辅助维度列」的数量阈值。SAP 等系统的
+/// 流水级导出带着公司、子项、项目、销售部门、产品、款项性质、供应商、
+/// 客户、银行、WBS 等十几列维度；传统余额表的客户／供应商／部门撑不满
+/// 这个数。
+const POSTING_DIMENSION_COLUMN_MIN: usize = 6;
+
+/// 判定 TB 是否为「流水级导出」：SAP 等系统按期间逐笔（或多维切片）列示的
+/// 余额明细。这类表**每一行都是真实流水，不存在汇总行**——同科目相邻行的
+/// 金额完全可能巧合满足「某行＝若干行之和」，金额勾稽会把真实流水当明细
+/// 剔掉（实测 2000&2002 合并 TB：594 行被误删、BS/PL 假性不平 91.7 万、
+/// 单科目贷方少 46 万）。
+///
+/// 四个条件**全部满足**才认定——误判的代价是关掉真汇总表的折叠（静默算重），
+/// 漏判的代价只是退回既有折叠行为，宁可漏判：
+///
+/// 1. 映射了主体列：流水级导出必带公司/主体维度；
+/// 2. 存在凭证级（凭证号/记账日期/过账日期…）或期间级（年度/财年/期间/月份…）
+///    特征列，按表头整段精确匹配；
+/// 3. 已映射角色与金额列之外还有 ≥ [`POSTING_DIMENSION_COLUMN_MIN`] 列辅助维度；
+/// 4. 表内没有整格「合计/小计」标签行——有汇总标签说明表里真有汇总结构。
+pub(crate) fn tb_is_posting_level_export(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> bool {
+    if column_of("entity").is_empty() {
+        return false;
+    }
+    let header_of = |name: &str| headers.iter().position(|header| header == name);
+    let mapped: std::collections::BTreeSet<&String> = tb_roles()
+        .iter()
+        .flat_map(|role| column_of(role.name))
+        .filter_map(|name| header_of(&name))
+        .map(|index| &headers[index])
+        .collect();
+    let mut has_posting_column = false;
+    let mut dimensions = 0usize;
+    for header in headers {
+        if mapped.contains(header) {
+            continue;
+        }
+        let normalized = normalize_header(header);
+        if POSTING_VOUCHER_HEADERS
+            .iter()
+            .any(|alias| segment_exact(header, alias))
+            || POSTING_PERIOD_HEADERS
+                .iter()
+                .any(|alias| segment_exact(header, alias))
+        {
+            has_posting_column = true;
+            continue;
+        }
+        // 金额/数量语义的列不算维度：`Begin Amt.`→`beginamt`、`Period Movement`
+        // →`periodmovement` 都要被挡在维度计数之外。
+        let amount_like = [
+            "金额",
+            "金額",
+            "余额",
+            "餘額",
+            "发生",
+            "發生",
+            "借方",
+            "贷方",
+            "貸方",
+            "差异",
+            "差異",
+            "数量",
+            "amount",
+            "amt",
+            "balance",
+            "debit",
+            "credit",
+            "value",
+            "movement",
+            "difference",
+            "qty",
+            "quantity",
+        ]
+        .iter()
+        .any(|keyword| normalized.contains(keyword));
+        if !amount_like {
+            dimensions += 1;
+        }
+    }
+    if !has_posting_column || dimensions < POSTING_DIMENSION_COLUMN_MIN {
+        return false;
+    }
+    // 整格「合计/小计」标签行存在即否决：表里真有汇总结构，折叠必须保留。
+    let label_indexes: Vec<usize> = {
+        let mut names = column_of("accountCode");
+        names.extend(column_of("accountName"));
+        names.extend(column_of("account"));
+        names
+            .into_iter()
+            .filter_map(|name| headers.iter().position(|header| *header == name))
+            .collect()
+    };
+    !rows.iter().any(|row| {
+        label_indexes
+            .iter()
+            .filter_map(|index| row.get(*index))
+            .any(|value| is_rollup_label(value))
+    })
+}
+
 /// 标记 TB 中应当计入的明细行。返回值与 `rows` 一一对应：`true` 表示该行要算。
 ///
 /// 汇总行有三条互补的识别路径，缺一条就会有一类样例静默算重：
@@ -2918,6 +3380,9 @@ pub(crate) fn ledger_junk_mask(
 /// 勾稽成立时，同编码的汇总／辅助明细保留汇总行；核算维度明细没有编码时
 /// 同样保留有编码的父行；反过来小计行没有编码而明细行有，就删小计行。
 /// 同一编码因币种拆成多行时按币种隔离，互不构成汇总关系。
+///
+/// **例外**：流水级导出（[`tb_is_posting_level_export`]）逐笔列示、没有汇总行，
+/// 金额勾稽在该类表上整段跳过，避免把巧合凑数的真实流水当明细剔除。
 ///
 /// 所有读取 TB 的工具都必须调用这里，业务模块不得各自实现一份“末级科目”规则。
 pub(crate) fn tb_leaf_mask(
@@ -3024,7 +3489,11 @@ pub(crate) fn tb_leaf_mask(
     // ③ 金额勾稽。余额必须先折成借正贷负的净额再比较，发生额仍按借、贷
     // 两侧分别比较。01 号样例的父行把期初 150 借 / 50 贷净额列成 100 借，
     // 辅助核算明细却保留两侧毛额；逐原始列比较会漏掉这层汇总并把发生额算重。
-    if amount_indexes.len() >= 2 {
+    //
+    // 流水级导出（[`tb_is_posting_level_export`]）整表都是真实流水、没有汇总行，
+    // 「某行＝相邻若干行之和」只是金额巧合，照常折叠会删掉真金白银。此时跳过
+    // 金额勾稽与多轮折叠；合计标签与噪声行剔除不受影响。
+    if amount_indexes.len() >= 2 && !tb_is_posting_level_export(headers, rows, column_of) {
         let values = rollup_value_columns(headers, rows, column_of);
         // 同一科目按币种拆成多行时，各行之间是**平行**关系，不是父子。02 号样例
         // 有一批科目的 CNY 行与 USD 行四个金额列数值完全相同（只有方向列一个
@@ -7890,6 +8359,225 @@ mod tests {
         assert_eq!(
             tb_leaf_mask(&余额表表头(), &rows, &余额表映射),
             vec![true, false, false, true, false]
+        );
+    }
+
+    /// 2000&2002 合并 TB（SAP 多维流水级导出）的真实表头缩影。
+    fn 流水级余额表表头() -> Vec<String> {
+        [
+            "Company Code",
+            "GL Account",
+            "GL Account Desc.",
+            "Year",
+            "Currency",
+            "Begin Amt.",
+            "Debit Amount",
+            "Credit Amount",
+            "Closing Balance",
+            "Subitem Value",
+            "Sales Division",
+            "Product Category",
+            "Payment Nature",
+            "Supplier",
+            "Customer",
+            "Bank",
+            "WBS Element",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
+    fn 流水级余额表映射(role: &str) -> Vec<String> {
+        match role {
+            "entity" => vec!["Company Code".into()],
+            "accountCode" => vec!["GL Account".into()],
+            "accountName" => vec!["GL Account Desc.".into()],
+            "currency" => vec!["Currency".into()],
+            "openingFunctionalAmount" => vec!["Begin Amt.".into()],
+            "ytdFunctionalDebit" => vec!["Debit Amount".into()],
+            "ytdFunctionalCredit" => vec!["Credit Amount".into()],
+            "closingFunctionalAmount" => vec!["Closing Balance".into()],
+            _ => vec![],
+        }
+    }
+
+    fn 流水行(code: &str, name: &str, amounts: [&str; 4]) -> Vec<String> {
+        vec![
+            "2002".into(),
+            code.into(),
+            name.into(),
+            "2025".into(),
+            "EUR".into(),
+            amounts[0].into(),
+            amounts[1].into(),
+            amounts[2].into(),
+            amounts[3].into(),
+            "5444".into(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            "200070".into(),
+            String::new(),
+            String::new(),
+        ]
+    }
+
+    #[test]
+    fn 流水级导出按主体期间与维度列识别() {
+        let headers = 流水级余额表表头();
+        let rows = vec![流水行(
+            "1405000000",
+            "Accounts receivable",
+            ["0", "360144", "360144", "0"],
+        )];
+        assert!(tb_is_posting_level_export(
+            &headers,
+            &rows,
+            &流水级余额表映射
+        ));
+
+        // 没映射主体列：条件 1 失败，宁可退回折叠。
+        let no_entity = |role: &str| {
+            if role == "entity" {
+                vec![]
+            } else {
+                流水级余额表映射(role)
+            }
+        };
+        assert!(!tb_is_posting_level_export(&headers, &rows, &no_entity));
+
+        // 没有凭证/期间特征列：只是列多的传统余额表。
+        let headers_without_year: Vec<String> = headers
+            .iter()
+            .filter(|header| *header != "Year")
+            .cloned()
+            .collect();
+        assert!(!tb_is_posting_level_export(
+            &headers_without_year,
+            &rows,
+            &流水级余额表映射
+        ));
+
+        // 表里有整格「合计」标签行：真有汇总结构，不能按流水级跳过折叠。
+        let mut with_total = rows.clone();
+        with_total.push(流水行("9999999999", "合计", ["0", "0", "0", "0"]));
+        assert!(!tb_is_posting_level_export(
+            &headers,
+            &with_total,
+            &流水级余额表映射
+        ));
+    }
+
+    #[test]
+    fn 流水级导出上金额巧合不折叠真实流水() {
+        // 2000&2002 真实样例 1405000000 的缩小版：三笔同科目同客户的真实流水，
+        // 第一行金额恰好等于后两行之和（四个金额列同时成立）。传统表上这是
+        // 「汇总行＋辅助明细」，流水级导出上只是巧合——折叠会删掉 360,144 的
+        // 真实贷方（实测差 460,629.03、BS/PL 假性不平 916,849.94）。
+        let rows = vec![
+            流水行(
+                "1405000000",
+                "EDP Comercial",
+                ["0", "360144", "360144", "0"],
+            ),
+            流水行(
+                "1405000000",
+                "EDP Comercial",
+                ["0", "180072", "180072", "0"],
+            ),
+            流水行(
+                "1405000000",
+                "EDP Comercial",
+                ["0", "180072", "180072", "0"],
+            ),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&流水级余额表表头(), &rows, &流水级余额表映射),
+            vec![true, true, true],
+            "流水级导出的每一行都是真实流水，金额巧合不构成汇总关系"
+        );
+
+        // 同样的金额形态放在传统余额表上仍要折叠——证明差别只在流水级跳过，
+        // 既有末级判定没有被削弱。
+        let traditional = vec![
+            行("1405000000", "应收账款", ["0", "360144", "360144", "0"]),
+            行("1405000000", "客户A", ["0", "180072", "180072", "0"]),
+            行("1405000000", "客户B", ["0", "180072", "180072", "0"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&余额表表头(), &traditional, &余额表映射),
+            vec![true, false, false]
+        );
+    }
+
+    #[test]
+    fn 期间列不足以单独触发流水级跳过() {
+        // 带主体＋期间列但辅助维度不足（传统余额表形态）：判据必须落空，
+        // 金额勾稽照常工作。
+        let headers = vec![
+            "主体".into(),
+            "科目编码".into(),
+            "科目名称".into(),
+            "期间".into(),
+            "期初余额".into(),
+            "借方发生额".into(),
+            "贷方发生额".into(),
+            "期末余额".into(),
+        ];
+        let columns = |role: &str| match role {
+            "entity" => vec!["主体".into()],
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "openingFunctionalAmount" => vec!["期初余额".into()],
+            "ytdFunctionalDebit" => vec!["借方发生额".into()],
+            "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+            "closingFunctionalAmount" => vec!["期末余额".into()],
+            _ => vec![],
+        };
+        let rows = vec![
+            vec!["A".into(), "1121.01".into(), "应收票据".into(), "1".into()],
+            vec!["A".into(), "1121.01".into(), "客户A".into(), "1".into()],
+            vec!["A".into(), "1121.01".into(), "客户B".into(), "1".into()],
+        ];
+        assert!(!tb_is_posting_level_export(&headers, &rows, &columns));
+        let full = |code: &str, name: &str| {
+            vec![
+                "A".into(),
+                code.into(),
+                name.into(),
+                "1".into(),
+                "100".into(),
+                "300".into(),
+                "50".into(),
+                "350".into(),
+            ]
+        };
+        let members = |name: &str| {
+            vec![
+                "A".into(),
+                "1121.01".into(),
+                name.into(),
+                "1".into(),
+                "60".into(),
+                "200".into(),
+                "30".into(),
+                "230".into(),
+            ]
+        };
+        let tied = vec![full("1121.01", "应收票据"), members("客户A"), {
+            let mut row = members("客户B");
+            row[4] = "40".into();
+            row[5] = "100".into();
+            row[6] = "20".into();
+            row[7] = "120".into();
+            row
+        }];
+        assert_eq!(
+            tb_leaf_mask(&headers, &tied, &columns),
+            vec![true, false, false],
+            "传统表即便带主体与期间列，汇总勾稽也必须照常剔除明细"
         );
     }
 

@@ -504,6 +504,17 @@ fn prepare_with_control(
         }
     }
 
+    // 流水级导出没有汇总行，末级判定的金额勾稽折叠在该类表上已跳过（公共引擎
+    // 统一行为）。核对口径变了必须让用户知道，否则与旧结果对不上时无从解释。
+    if ledger_mapping::tb_is_posting_level_export(&tb.headers, &tb.rows, &|role| {
+        columns(&tb_map, role)
+    }) {
+        mapping_warnings.push(
+            "余额表识别为流水级导出（带凭证/期间列与多辅助维度，逐笔列示、无汇总行），已跳过“汇总行金额勾稽”剔除，全部数据行参与核对。"
+                .to_owned(),
+        );
+    }
+
     if let Some(je) = je.as_ref() {
         let je = &*je.table;
         if columns(&je_map, "entity").iter().any(|column| {
@@ -549,7 +560,7 @@ fn prepare_with_control(
             ));
         }
     }
-    let je_rows = if let Some(je) = je.as_ref() {
+    let mut je_rows = if let Some(je) = je.as_ref() {
         let je = &*je.table;
         let analysis = ledger_mapping::analyze_ledger_rows(&je.headers, &je.rows, &|role| {
             columns(&je_map, role)
@@ -603,6 +614,10 @@ fn prepare_with_control(
     validate_amount_columns("TB", "tb", &tb, &tb_map, Some(&tb_rows_to_validate))?;
     if let Some(je) = je.as_ref().filter(|je| je.disk.is_none()) {
         validate_amount_columns("JE", "je", &je.table, &je_map, je_rows.as_deref())?;
+    }
+    if let Some(memory_je) = je.as_mut().filter(|value| value.disk.is_none()) {
+        memory_je.table = fx::forward_filled_je_table(&memory_je.table, &je_map);
+        je_rows = Some(vec![true; memory_je.table.rows.len()]);
     }
     fx::ensure_sign_convention(&tb, &mut tb_map, "tb")
         .map_err(|message| error("SIGN_CONVENTION_UNCERTAIN", message, None))?;
@@ -1903,18 +1918,22 @@ fn check_tb_vs_je(
                 entity_scope,
             )
         })
+        .filter(|(_, code, _)| !code.is_empty())
         .collect::<Vec<_>>();
     let je_identities = if let Some(disk) = je.disk.as_ref() {
         let mut distinct = BTreeSet::new();
         disk.visit(false, cancel, |row| {
-            distinct.insert(scoped_identity_parts(
+            let identity = scoped_identity_parts(
                 je_table,
                 &row.values,
                 je_map,
                 je_fixed,
                 ledger_mapping::EntitySide::Je,
                 entity_scope,
-            ));
+            );
+            if !identity.1.is_empty() {
+                distinct.insert(identity);
+            }
             Ok(())
         })?;
         distinct.into_iter().collect::<Vec<_>>()
@@ -1934,6 +1953,7 @@ fn check_tb_vs_je(
                     entity_scope,
                 )
             })
+            .filter(|(_, code, _)| !code.is_empty())
             .collect::<Vec<_>>()
     };
     let account_policy =
@@ -1944,6 +1964,9 @@ fn check_tb_vs_je(
             continue;
         }
         if !leaf.get(index).copied().unwrap_or(true) {
+            continue;
+        }
+        if identity_parts(tb, row, tb_map, tb_fixed).1.is_empty() {
             continue;
         }
         let key = scoped_matched_identity(
@@ -1983,6 +2006,12 @@ fn check_tb_vs_je(
     let mut je_totals = BTreeMap::<(String, String), Side>::new();
     if let Some(disk) = je.disk.as_ref() {
         disk.visit(false, cancel, |row| {
+            if identity_parts(je_table, &row.values, je_map, je_fixed)
+                .1
+                .is_empty()
+            {
+                return Ok(());
+            }
             let key = scoped_matched_identity(
                 je_table,
                 &row.values,
@@ -2013,6 +2042,12 @@ fn check_tb_vs_je(
                 return Err(error("JOB_CANCELLED", "任务已取消。", None));
             }
             if !je_rows.get(index).copied().unwrap_or(true) {
+                continue;
+            }
+            if identity_parts(je_table, row, je_map, je_fixed)
+                .1
+                .is_empty()
+            {
                 continue;
             }
             let key = scoped_matched_identity(

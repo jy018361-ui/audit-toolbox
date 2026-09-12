@@ -82,6 +82,86 @@
   color: var(--text-muted);
   font-size: var(--fs-xs);
 }
+
+/* 第一步「添加文件」的已加载回显：回到本步时文件其实都还在，
+   没有这块列表时界面看起来像导入被清空了。 */
+.tbje-intake-recap {
+  display: grid;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+.tbje-intake-recap-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+}
+.tbje-intake-recap-head strong {
+  color: var(--ink-strong);
+}
+.tbje-intake-recap-head .button {
+  margin-left: auto;
+}
+.tbje-intake-recap-list {
+  display: grid;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tbje-intake-recap-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-3);
+  width: 100%;
+  min-height: 40px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+}
+.tbje-intake-recap-row:hover {
+  border-color: var(--primary);
+}
+.tbje-intake-recap-row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.tbje-intake-recap-row:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.tbje-recap-group {
+  flex: 0 0 auto;
+  font-weight: 600;
+  color: var(--ink-strong);
+}
+.tbje-recap-file {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  flex: 1 1 220px;
+}
+.tbje-recap-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+}
+.tbje-intake-recap-row .tbje-pair-status {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+.tbje-recap-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
 .tbje-group-llm-result {
   display: grid;
   gap: 4px;

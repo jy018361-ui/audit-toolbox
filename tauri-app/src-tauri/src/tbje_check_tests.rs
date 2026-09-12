@@ -114,7 +114,8 @@ fn 平的账(dir: &std::path::Path) {
         dir.join("tb.csv"),
         "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
          1001,库存现金,100,500,300,300\n\
-         2202,应付账款,-100,300,500,-300\n",
+         2202,应付账款,-100,300,500,-300\n\
+         ,资产负债汇总,0,800,800,0\n",
     )
     .unwrap();
     std::fs::write(
@@ -145,6 +146,96 @@ fn 三条核对都通过时不报任何差异() {
         0.0
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 分段明细账由公共引擎补全后进入tbje核对() {
+    let dir = fixture("sectioned-ledger");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,100,500,300,300\n\
+         2202,应付账款,-100,300,500,-300\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,摘要,借方,贷方\n\
+         ,,1001,库存现金,期初余额,0,0\n\
+         2025-03-01,V1,,,收款,500,0\n\
+         2025-03-31,,,,本月合计,500,0\n\
+         2025-06-01,V2,,,付款,0,300\n\
+         ,,2202,应付账款,期初余额,0,0\n\
+         2025-03-01,V1,,,采购,0,500\n\
+         2025-03-31,,,,本年累计,0,500\n\
+         2025-06-01,V2,,,还款,300,0\n",
+    )
+    .unwrap();
+    let mut input = params(&dir, true);
+    input["jeMapping"]["summary"] = json!("摘要");
+    let result = run(&input, &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["tbVsJe"]["accounts"], json!(2), "{result:#}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[ignore = "需要通过 LEDGER_SAMPLES 指定本机 TBJE 样例目录"]
+fn 一至三月真实分段明细账进入完整性核对() {
+    let root = std::path::PathBuf::from(
+        std::env::var("LEDGER_SAMPLES").expect("请设置 LEDGER_SAMPLES 为 TBJE 样例目录"),
+    );
+    let input = json!({
+        "tbSource": {
+            "inputPath": root.join("2025 1-3月余额表.xlsx"),
+            "sheet": "Sheet1", "headerRow": 11, "headerDepth": 1
+        },
+        "jeSource": {
+            "inputPath": root.join("2025 1-3月明细账.xlsx"),
+            "sheet": "Sheet1", "headerRow": 5, "headerDepth": 1
+        },
+        "tbMapping": {
+            "accountCode": "帐号", "accountName": ["账号描述"],
+            "openingFunctionalAmount": "(FP)-LC1",
+            "ytdFunctionalDebit": "借方余额-LC1",
+            "ytdFunctionalCredit": "贷方余额-LC1",
+            "closingFunctionalAmount": "累计差额-LC1",
+            "currency": "交易货币", "functionalCurrency": "LC1货币"
+        },
+        "jeMapping": {
+            "accountCode": "总账科目", "accountName": ["科目名称"],
+            "date": "过账日期", "id": ["凭证编号"], "summary": "摘要",
+            "entity": "公司", "direction": "方向",
+            "functionalDebit": "借方/本币", "functionalCredit": "贷方/本币",
+            "currency": "外币", "functionalCurrency": "本币"
+        }
+    });
+    let je_spec: SourceSpec = serde_json::from_value(input["jeSource"].clone()).unwrap();
+    let raw_je = load_fx_table(&je_spec).unwrap();
+    let je_map = mapping_of(&input, "jeMapping");
+    assert!(
+        ledger_mapping::is_sectioned_ledger(&raw_je.headers, &raw_je.rows, &|role| {
+            fx::mapped_cols(&je_map, role)
+        }),
+        "headers={:?}",
+        raw_je.headers
+    );
+    let prepared = prepare(&input).unwrap();
+    assert_eq!(prepared.je.as_ref().unwrap().table.rows.len(), 12_265);
+    let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
+    assert_eq!(result["tbVsJe"]["mismatched"], json!(2), "{result:#}");
+    assert_eq!(result["tbVsJe"]["accounts"], json!(234), "{result:#}");
+    let items = result["tbVsJe"]["items"].as_array().unwrap();
+    let je_debit = items
+        .iter()
+        .map(|item| item["jeDebit"].as_f64().unwrap_or(0.0))
+        .sum::<f64>();
+    let je_credit = items
+        .iter()
+        .map(|item| item["jeCredit"].as_f64().unwrap_or(0.0))
+        .sum::<f64>();
+    assert!((je_debit - 946_205_700.78).abs() < 0.01, "{result:#}");
+    assert!((je_credit - 946_205_700.78).abs() < 0.01, "{result:#}");
 }
 
 fn add_entity_mappings(value: &mut Value, both_sides: bool) {
@@ -1464,6 +1555,77 @@ fn 二零零二真实样例的主体与本位币口径() {
         Some(&json!("allRows")),
         "币种不得过滤行：{result:#}"
     );
+}
+
+/// 流水级导出回归：真实 2000&2002 合并 TB 上，同科目流水的金额巧合不得
+/// 触发「汇总行折叠」。修复前 1405000000 的 TB 贷方被删 460,629.03
+/// （工具显示 27,355,374.18，真值 27,816,003.21＝JE 贷方），BS/PL 已归类
+/// 科目合计假性不平 -916,849.94。
+///
+/// ```text
+/// LEDGER_SAMPLES=<TBJE目录> cargo test --manifest-path src-tauri/Cargo.toml --lib 二零零二真实样例的流水级导出不折叠 -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "依赖本机 2002 TBJE 样例"]
+fn 二零零二真实样例的流水级导出不折叠() {
+    let root = std::path::PathBuf::from(
+        std::env::var("LEDGER_SAMPLES").expect("请设置 LEDGER_SAMPLES 为 TBJE 样例目录"),
+    );
+    let tb_path = root.join("2000&2002公司TB.xlsx");
+    let je_path = root.join("2002公司JE.XLSX");
+    let source = |path: &std::path::Path| json!({"inputPath": path, "sheet": "", "headerRow": 0, "headerDepth": 0});
+    let tb = crate::engine_call_for_test("fx.inspect_tb", json!({"source": source(&tb_path)}))
+        .expect("2002 TB 应可识别");
+    let je = crate::engine_call_for_test("fx.inspect_je", json!({"source": source(&je_path)}))
+        .expect("2002 JE 应可识别");
+    let value = json!({
+        "tbSource": source(&tb_path),
+        "tbMapping": tb["suggestedMapping"],
+        "jeSource": source(&je_path),
+        "jeMapping": je["suggestedMapping"],
+    });
+    let prepared = prepare(&value).unwrap();
+    let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
+
+    // 口径提示必须带上：核对范围与旧结果不同，用户需要知道原因。
+    assert!(
+        result["mappingWarnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|text| text.contains("流水级导出")))),
+        "应提示已识别流水级导出并跳过汇总勾稽折叠：{result:#}"
+    );
+
+    // 1405000000：TB 与 JE 的借贷发生额必须分毫一致（真值均为
+    // 借 28,132,424.67 / 贷 27,816,003.21）。
+    let item = result["tbVsJe"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["entity"] == json!("2002") && item["code"] == json!("1405000000"))
+        .expect("全科目模式下必须包含 2002/1405000000");
+    let close = |actual: f64| actual.abs() < 0.005;
+    assert!(
+        close(item["debitDifference"].as_f64().unwrap()),
+        "借方不得再少算：{item:#}"
+    );
+    assert!(
+        close(item["creditDifference"].as_f64().unwrap()),
+        "贷方不得再少算（修复前少 460,629.03）：{item:#}"
+    );
+    assert!(
+        close(item["tbCredit"].as_f64().unwrap() - 27_816_003.21),
+        "TB 贷方合计应为原始流水真值：{item:#}"
+    );
+
+    // BS/PL 假性不平消除：两家公司各自账面自平，全表合计应归零。
+    assert!(
+        result["equation"]["balancePassed"].as_bool().unwrap(),
+        "修复前已归类科目合计 -916,849.94：{result:#}"
+    );
+    let closing_total = result["equation"]["closing"]["total"].as_f64().unwrap();
+    assert!(close(closing_total), "期末合计应归零：{closing_total}");
 }
 
 #[test]

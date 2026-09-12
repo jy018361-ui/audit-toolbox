@@ -1572,6 +1572,93 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   description="加入至少一份科目余额表（TB）；如需发生额勾稽，再加入对应的序时账（JE）。支持一次拖入多组文件。"
                 />
               )}
+              {/* 回到本步时文件都还在缓存里，但界面上一个字都不提，看起来像
+                  「导入丢了」；这里把已加载的组回显出来，并留一条回到配对步的
+                  近路。继续拖入新文件不会清掉已确认的配对（见 addFiles）。 */}
+              {visibleGroups.length > 0 && (
+                <div className="tbje-intake-recap">
+                  <div className="tbje-intake-recap-head">
+                    <strong>已加载 {visibleGroups.length} 组核对文件</strong>
+                    {visibleGroups.some((group) => group.needsReview) && (
+                      <span className="tbje-count">
+                        {visibleGroups.filter((group) => group.needsReview).length}{" "}
+                        组待确认
+                      </span>
+                    )}
+                    <Button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => goToStep(1)}
+                    >
+                      下一步：确认配对（{visibleGroups.length} 组）
+                    </Button>
+                  </div>
+                  <ul className="tbje-intake-recap-list">
+                    {visibleGroups.map((group) => {
+                      const status = reviewStatusOf(group);
+                      return (
+                        <li key={group.id}>
+                          <button
+                            type="button"
+                            className="tbje-intake-recap-row"
+                            disabled={busy}
+                            title="回到「确认配对」查看这组文件"
+                            onClick={() => {
+                              goToStep(1);
+                              setExpanded({
+                                groupId: group.id,
+                                kind: group.tb ? "tb" : "je",
+                              });
+                            }}
+                          >
+                            <span className="tbje-recap-group">
+                              第 {group.label} 组
+                            </span>
+                            <span className="tbje-recap-file">
+                              <span className="tbje-kind-tag" aria-hidden="true">
+                                TB
+                              </span>
+                              <span
+                                className="tbje-recap-name"
+                                title={group.tb?.path}
+                              >
+                                {group.tb
+                                  ? pairingFileLabel(group.tb)
+                                  : "未选择"}
+                              </span>
+                            </span>
+                            <span className="tbje-recap-file">
+                              <span
+                                className="tbje-kind-tag je"
+                                aria-hidden="true"
+                              >
+                                JE
+                              </span>
+                              <span
+                                className="tbje-recap-name"
+                                title={group.je?.path}
+                              >
+                                {group.je
+                                  ? pairingFileLabel(group.je)
+                                  : "未选择"}
+                              </span>
+                            </span>
+                            <span
+                              className={`tbje-pair-status${status.attention ? " review" : ""}`}
+                            >
+                              <i aria-hidden="true" />
+                              {status.label}
+                            </span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  <p className="tbje-recap-hint">
+                    这些文件仍在本次核对中，未保存前不会丢失；继续拖入新文件也不会覆盖已确认的配对。
+                  </p>
+                </div>
+              )}
               {status && (
                 <p className="tbje-status" role="status" aria-live="polite">
                   <i aria-hidden="true" />

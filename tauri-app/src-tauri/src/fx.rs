@@ -2730,7 +2730,7 @@ fn first_col(mapping: &Map<String, Value>, role: &str) -> Option<String> {
 ///
 /// 主体是**选填**角色：没映射也没填名字时不拦，用这个默认名兜底即可。
 /// 真正必填的是本位币——它按主体挂，所以主体至少要有个名字当挂载点。
-pub(crate) const DEFAULT_ENTITY: &str = "默认主体";
+pub(crate) const DEFAULT_ENTITY: &str = ledger_mapping::DEFAULT_ENTITY;
 
 fn fixed_entity(params: &Value) -> &str {
     let given = params

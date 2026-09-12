@@ -1387,6 +1387,18 @@ fn calculate(
     // 有序时账时年初余额可缺（倒推），与前端判定同口径。
     let has_je = params.get("jeSource").is_some_and(|value| !value.is_null());
     require_mappings("tb", &tb_map, has_je)?;
+    let je_mapping = params
+        .get("jeMapping")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let entity_key_enabled = ledger_mapping::entity_key_enabled(
+        !column_indexes(&tb, &tb_map, "entity").is_empty(),
+        has_je
+            && je_mapping
+                .get("entity")
+                .is_some_and(|value| !value.is_null() && value != ""),
+    );
     let mut accounts: Vec<AccountRow> = vec![];
     let mut booked_interest_rows: Vec<Value> = vec![];
     let mut booked_interest = 0.0;
@@ -1477,7 +1489,10 @@ fn calculate(
                 };
             booked_interest += net;
             booked_interest_rows.push(json!({
-                "entity": cell_text(&tb, row, &tb_map, "entity"),
+                "entity": ledger_mapping::effective_entity(
+                    &cell_text(&tb, row, &tb_map, "entity"),
+                    entity_key_enabled,
+                ),
                 "account": account,
                 "debit": debit_raw,
                 "credit": credit_raw,
@@ -1493,7 +1508,10 @@ fn calculate(
         if role == "cash_on_hand" && !params["includeCashOnHand"].as_bool().unwrap_or(false) {
             continue;
         }
-        let entity = cell_text(&tb, row, &tb_map, "entity");
+        let entity = ledger_mapping::effective_entity(
+            &cell_text(&tb, row, &tb_map, "entity"),
+            entity_key_enabled,
+        );
         let auxiliary = cell_text(&tb, row, &tb_map, "auxiliary");
         let currency = cell_text(&tb, row, &tb_map, "currency");
         // 货币资金是借方余额资产，净额一律按"借方－贷方"。
@@ -1579,7 +1597,15 @@ fn calculate(
     // 逐月发生额：有序时账就按日期还原，没有序时账就退回期初/期末两点法。
     progress("movement", 2, total, "正在按序时账还原逐月余额变动…");
     let detected = monthly_movements(
-        params, &accounts, start, end, cancel, pause, progress, total,
+        params,
+        &accounts,
+        entity_key_enabled,
+        start,
+        end,
+        cancel,
+        pause,
+        progress,
+        total,
     )?;
     let has_je = detected.is_some();
     let amount_scheme = detected
@@ -1896,6 +1922,7 @@ type MonthlySeries = BTreeMap<String, [(f64, f64); 12]>;
 fn monthly_movements(
     params: &Value,
     accounts: &[AccountRow],
+    entity_key_enabled: bool,
     start: NaiveDate,
     end: NaiveDate,
     cancel: &AtomicBool,
@@ -1946,7 +1973,16 @@ fn monthly_movements(
             cancel,
         )?;
         return aggregate_disk_monthly(
-            &ledger, &je_map, accounts, start, end, cancel, pause, progress, total,
+            &ledger,
+            &je_map,
+            accounts,
+            entity_key_enabled,
+            start,
+            end,
+            cancel,
+            pause,
+            progress,
+            total,
         )
         .map(Some);
     }
@@ -1979,15 +2015,18 @@ fn monthly_movements(
     }
     // 先按 科目全称 / 科目编码 建索引，序时账与 TB 的科目层级不一定完全一致，
     // 允许退化到编码前缀匹配。
-    let mut by_account: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut by_code: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut by_account: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+    let mut by_code: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (index, account) in accounts.iter().enumerate() {
         by_account
-            .entry(normalize_header(&account.account))
+            .entry((account.entity.clone(), normalize_header(&account.account)))
             .or_default()
             .push(index);
         by_code
-            .entry(account_code(&account.account).to_owned())
+            .entry((
+                account.entity.clone(),
+                account_code(&account.account).to_owned(),
+            ))
             .or_default()
             .push(index);
     }
@@ -2022,15 +2061,18 @@ fn monthly_movements(
             continue;
         }
         let code = account_code(&account);
+        let entity = ledger_mapping::effective_entity(
+            &cell_text(&je, row, &je_map, "entity"),
+            entity_key_enabled,
+        );
         let hits = by_account
-            .get(&normalize_header(&account))
-            .or_else(|| by_code.get(code))
+            .get(&(entity.clone(), normalize_header(&account)))
+            .or_else(|| by_code.get(&(entity.clone(), code.to_owned())))
             .cloned()
             .unwrap_or_default();
         if hits.is_empty() {
             continue;
         }
-        let entity = cell_text(&je, row, &je_map, "entity");
         let auxiliary = cell_text(&je, row, &je_map, "auxiliary");
         // 同一科目下有多个辅助核算/主体时，优先精确落到对应账户；
         // 落不到就摊到该科目下唯一的账户，多于一个则跳过并留待复核。
@@ -2038,7 +2080,7 @@ fn monthly_movements(
             .iter()
             .find(|index| {
                 let candidate = &accounts[**index];
-                (entity.is_empty() || candidate.entity.is_empty() || candidate.entity == entity)
+                candidate.entity == entity
                     && (auxiliary.is_empty()
                         || candidate.auxiliary.is_empty()
                         || candidate.auxiliary == auxiliary)
@@ -2072,6 +2114,7 @@ fn aggregate_disk_monthly(
     ledger: &crate::tabular::PreparedDiskLedger,
     mapping: &Map<String, Value>,
     accounts: &[AccountRow],
+    entity_key_enabled: bool,
     start: NaiveDate,
     end: NaiveDate,
     cancel: &AtomicBool,
@@ -2118,15 +2161,18 @@ fn aggregate_disk_monthly(
     let entity_index = indexes("entity").first().copied();
     let auxiliary_index = indexes("auxiliary").first().copied();
 
-    let mut by_account: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut by_code: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut by_account: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+    let mut by_code: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (index, account) in accounts.iter().enumerate() {
         by_account
-            .entry(normalize_header(&account.account))
+            .entry((account.entity.clone(), normalize_header(&account.account)))
             .or_default()
             .push(index);
         by_code
-            .entry(account_code(&account.account).to_owned())
+            .entry((
+                account.entity.clone(),
+                account_code(&account.account).to_owned(),
+            ))
             .or_default()
             .push(index);
     }
@@ -2168,18 +2214,21 @@ fn aggregate_disk_monthly(
             return Ok(());
         }
         let code = account_code(&account);
+        let entity = ledger_mapping::effective_entity(
+            entity_index
+                .and_then(|index| row.values.get(index))
+                .map(String::as_str)
+                .unwrap_or(""),
+            entity_key_enabled,
+        );
         let hits = by_account
-            .get(&normalize_header(&account))
-            .or_else(|| by_code.get(code))
+            .get(&(entity.clone(), normalize_header(&account)))
+            .or_else(|| by_code.get(&(entity.clone(), code.to_owned())))
             .cloned()
             .unwrap_or_default();
         if hits.is_empty() {
             return Ok(());
         }
-        let entity = entity_index
-            .and_then(|index| row.values.get(index))
-            .map(|value| value.trim())
-            .unwrap_or("");
         let auxiliary = auxiliary_index
             .and_then(|index| row.values.get(index))
             .map(|value| value.trim())
@@ -2188,7 +2237,7 @@ fn aggregate_disk_monthly(
             .iter()
             .find(|index| {
                 let candidate = &accounts[**index];
-                (entity.is_empty() || candidate.entity.is_empty() || candidate.entity == entity)
+                candidate.entity == entity
                     && (auxiliary.is_empty()
                         || candidate.auxiliary.is_empty()
                         || candidate.auxiliary == auxiliary)
@@ -5200,7 +5249,8 @@ mod tests {
                 "2025-01-20,记-2,公司A,1002,银行存款,工行,付款,0,30\n",
                 ",,,6603,财务费用,,付款,30,0\n",
                 "2025-02-01,记-3,公司A,1002,银行存款,工行,收款,25,0\n",
-                ",,,6001,主营业务收入,,收款,0,25\n"
+                ",,,6001,主营业务收入,,收款,0,25\n",
+                "2025-01-25,记-4,公司B,1002,银行存款,工行,收款,400,50\n"
             ),
         )
         .unwrap();
@@ -5224,7 +5274,10 @@ mod tests {
         account.account = "1002 银行存款".into();
         account.auxiliary = "工行".into();
         account.key = account_key(&account.entity, &account.account, &account.auxiliary);
-        let accounts = vec![account];
+        let mut other = account.clone();
+        other.entity = "公司B".into();
+        other.key = account_key(&other.entity, &other.account, &other.auxiliary);
+        let accounts = vec![account, other];
         let start = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
         let end = NaiveDate::from_ymd_opt(2025, 12, 31).unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -5232,6 +5285,7 @@ mod tests {
         let memory = monthly_movements(
             &params,
             &accounts,
+            true,
             start,
             end,
             &cancel,
@@ -5258,6 +5312,7 @@ mod tests {
             &ledger,
             &mapping,
             &accounts,
+            true,
             start,
             end,
             &cancel,
@@ -5268,10 +5323,15 @@ mod tests {
         .unwrap();
         assert_eq!(disk.1, memory.1, "金额方案说明必须保持一致");
         assert_eq!(disk.2, memory.2, "金额口径证据必须保持一致");
-        let key = &accounts[0].key;
-        assert_eq!(disk.0[key], memory.0[key]);
-        assert_eq!(disk.0[key][0], (100.0, 30.0));
-        assert_eq!(disk.0[key][1], (25.0, 0.0));
+        let key_a = &accounts[0].key;
+        let key_b = &accounts[1].key;
+        assert_eq!(disk.0[key_a], memory.0[key_a]);
+        assert_eq!(disk.0[key_b], memory.0[key_b]);
+        assert_eq!(disk.0[key_a][0], (100.0, 30.0));
+        assert_eq!(disk.0[key_a][1], (25.0, 0.0));
+        // 当前样例被公共金额判型识别为有符号净额，因此 400-50 归入借方净额；
+        // 关键断言是它只进入公司B，不能串到公司A。
+        assert_eq!(disk.0[key_b][0], (350.0, 0.0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

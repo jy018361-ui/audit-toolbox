@@ -87,6 +87,99 @@ fn 三条核对都通过时不报任何差异() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+fn add_entity_mappings(value: &mut Value, both_sides: bool) {
+    value["tbMapping"]["entity"] = json!("主体");
+    if both_sides {
+        value["jeMapping"]["entity"] = json!("主体");
+    }
+}
+
+#[test]
+fn 双侧映射主体后同科目不得跨主体抵销差异() {
+    let dir = fixture("entity-key-both");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "主体,科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         A,1001,库存现金,0,100,0,100\n\
+         B,1001,库存现金,0,200,0,200\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "主体,日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         A,2025-01-01,V1,1001,库存现金,200,0\n\
+         B,2025-01-01,V2,1001,库存现金,100,0\n",
+    )
+    .unwrap();
+    let mut input = params(&dir, true);
+    add_entity_mappings(&mut input, true);
+    let result = run(&input, &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["passed"], json!(false), "{result:#}");
+    assert_eq!(result["tbVsJe"]["mismatched"], json!(2), "{result:#}");
+    let entities = result["tbVsJe"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["entity"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(entities, ["A", "B"].into_iter().collect());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 单侧映射主体时双方统一归入默认主体() {
+    let dir = fixture("entity-key-single-side");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "主体,科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         A,1001,库存现金,0,100,0,100\n\
+         B,1001,库存现金,0,200,0,200\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-01-01,V1,1001,库存现金,300,0\n",
+    )
+    .unwrap();
+    let mut input = params(&dir, true);
+    add_entity_mappings(&mut input, false);
+    let result = run(&input, &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    assert!(
+        result["mappingWarnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("默认主体")
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 双侧主体空值按默认主体参与匹配() {
+    let dir = fixture("entity-key-blank");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "主体,科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         ,1001,库存现金,0,100,0,100\n\
+         A,1001,库存现金,0,200,0,200\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "主体,日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         ,2025-01-01,V1,1001,库存现金,100,0\n\
+         A,2025-01-01,V2,1001,库存现金,200,0\n",
+    )
+    .unwrap();
+    let mut input = params(&dir, true);
+    add_entity_mappings(&mut input, true);
+    let result = run(&input, &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["tbVsJe"]["accounts"], json!(2), "{result:#}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn tb科目编码名称混写而je分列时按拆分后的科目身份对齐() {
     let dir = fixture("combined-account-vs-split");
@@ -627,12 +720,14 @@ fn je业务行按映射后的编码名称金额三项识别() {
         dir.join("je.csv"),
         "日期,凭证号,科目编码,科目名称,借方,贷方\n\
          2025-03-01,V1,1001,库存现金,500,0\n\
-         2025-03-01,V1,2202,,0,500\n",
+         2025-03-01,V1,2202,,0,500\n\
+         2025-06-01,V2,2202,,300,0\n\
+         2025-06-01,V2,1001,库存现金,0,300\n",
     )
     .unwrap();
     let result = run(&params(&dir, true), &AtomicBool::new(false)).unwrap();
-    // 第二行缺少映射后的科目名称，不属于 JE 业务行；其他列有值也不能放行。
-    assert_eq!(result["tbVsJe"]["passed"], json!(false), "{result:#}");
+    // 已有可靠科目编码与金额时，空科目名称不能把真实分录排除。
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
     assert_eq!(result["tbVsJe"]["accounts"], json!(2));
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -707,7 +802,7 @@ fn 未上传序时账时第二条明确跳过而不是报不平() {
 }
 
 #[test]
-fn tb按币种拆行而je无币种列时仅用tb本位币行核对() {
+fn tb按币种拆行时仍保留全部行核对() {
     let dir = fixture("functional-currency-scope");
     std::fs::write(
         dir.join("tb.csv"),
@@ -723,8 +818,8 @@ fn tb按币种拆行而je无币种列时仅用tb本位币行核对() {
     std::fs::write(
         dir.join("je.csv"),
         "日期,凭证号,科目编码,科目名称,原币金额,借方,贷方\n\
-         2025-01-01,V1,1001,现金,14,100,0\n\
-         2025-01-01,V1,2202,应付账款,14,0,100\n",
+         2025-01-01,V1,1001,现金,14,120,0\n\
+         2025-01-01,V1,2202,应付账款,14,0,120\n",
     )
     .unwrap();
     let value = json!({
@@ -745,14 +840,15 @@ fn tb按币种拆行而je无币种列时仅用tb本位币行核对() {
     assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
     // TB 自勾稽按币种拆行逐行检查，不只保留推断出的 CNY 行。
     assert_eq!(result["rollforward"]["checked"], json!(4));
-    assert_eq!(result["currencyScope"]["functionalCurrency"], json!("CNY"));
-    assert_eq!(result["currencyScope"]["mode"], json!("functionalCurrency"));
-    assert_eq!(result["currencyScope"]["excludedForeignRows"], json!(2));
+    assert_eq!(result["currencyScope"]["functionalCurrency"], Value::Null);
+    assert_eq!(result["currencyScope"]["mode"], json!("allRows"));
+    assert_eq!(result["currencyScope"]["includedRows"], json!(4));
+    assert_eq!(result["currencyScope"]["excludedForeignRows"], json!(0));
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
-fn 情形c的je无币种和独立原币金额时tb按全部币种汇总() {
+fn je无币种和独立原币金额时tb仍按全部行汇总() {
     let dir = fixture("mixed-currency-scope");
     std::fs::write(
         dir.join("tb.csv"),
@@ -788,25 +884,16 @@ fn 情形c的je无币种和独立原币金额时tb按全部币种汇总() {
     });
     let result = run(&value, &AtomicBool::new(false)).unwrap();
     assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
-    assert_eq!(
-        result["tbVsJe"]["currencyScope"],
-        json!("allCurrenciesMixedJe")
-    );
+    assert_eq!(result["tbVsJe"]["currencyScope"], json!("allRows"));
     assert_eq!(result["currencyScope"]["includedRows"], json!(4));
     assert_eq!(result["currencyScope"]["excludedForeignRows"], json!(0));
     assert!(
         result["tbVsJe"]["currencyScopeNote"]
             .as_str()
             .unwrap()
-            .contains("情形C")
+            .contains("不按币种过滤行")
     );
-    assert!(
-        result["mappingWarnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|warning| warning.as_str().unwrap_or("").contains("情形C"))
-    );
+    assert!(result["mappingWarnings"].as_array().unwrap().is_empty());
     let prepared = prepare(&value).unwrap();
     let all = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
     let cash = all["tbVsJe"]["items"]
@@ -1241,6 +1328,82 @@ fn 真实样例的发生额核对() {
             }
         }
     }
+}
+
+/// 针对 2000&2002 TB 与 2002 JE 这组不同文件名前缀的本机样例。
+///
+/// ```text
+/// LEDGER_SAMPLES=<TBJE目录> cargo test --manifest-path src-tauri/Cargo.toml --lib 2002真实样例的主体与本位币口径 -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "依赖本机 2002 TBJE 样例"]
+fn 二零零二真实样例的主体与本位币口径() {
+    let root = std::path::PathBuf::from(
+        std::env::var("LEDGER_SAMPLES").expect("请设置 LEDGER_SAMPLES 为 TBJE 样例目录"),
+    );
+    let tb_path = root.join("2000&2002公司TB.xlsx");
+    let je_path = root.join("2002公司JE.XLSX");
+    let source = |path: &std::path::Path| json!({"inputPath": path, "sheet": "", "headerRow": 0, "headerDepth": 0});
+    let tb = crate::engine_call_for_test("fx.inspect_tb", json!({"source": source(&tb_path)}))
+        .expect("2002 TB 应可识别");
+    let je = crate::engine_call_for_test("fx.inspect_je", json!({"source": source(&je_path)}))
+        .expect("2002 JE 应可识别");
+
+    println!("TB 工作表={} 映射={}", tb["sheet"], tb["suggestedMapping"]);
+    println!("JE 工作表={} 映射={}", je["sheet"], je["suggestedMapping"]);
+    assert!(tb.pointer("/suggestedMapping/entity").is_some(), "{tb:#}");
+    assert!(je.pointer("/suggestedMapping/entity").is_some(), "{je:#}");
+    assert_eq!(
+        tb.pointer("/suggestedMapping/openingFunctionalAmount"),
+        Some(&json!("Begin Amt.")),
+        "{tb:#}"
+    );
+    assert_eq!(
+        tb.pointer("/suggestedMapping/ytdFunctionalDebit"),
+        Some(&json!("Debit Amount")),
+        "{tb:#}"
+    );
+    assert_eq!(
+        tb.pointer("/suggestedMapping/ytdFunctionalCredit"),
+        Some(&json!("Credit Amount")),
+        "{tb:#}"
+    );
+    assert!(
+        je.pointer("/suggestedMapping/functionalAmount").is_some()
+            || (je.pointer("/suggestedMapping/functionalDebit").is_some()
+                && je.pointer("/suggestedMapping/functionalCredit").is_some()),
+        "{je:#}"
+    );
+
+    let result = run(
+        &json!({
+            "tbSource": source(&tb_path),
+            "tbMapping": tb["suggestedMapping"],
+            "jeSource": source(&je_path),
+            "jeMapping": je["suggestedMapping"],
+        }),
+        &AtomicBool::new(false),
+    )
+    .expect("2002 TBJE 应能完成核对");
+    println!(
+        "2002 TBJE 核对：主体口径={} 币种口径={} TB勾稽={}/{} TBJE差异={}/{}",
+        result["entityScope"]["mode"],
+        result["currencyScope"]["mode"],
+        result["rollforward"]["mismatched"],
+        result["rollforward"]["checked"],
+        result["tbVsJe"]["mismatched"],
+        result["tbVsJe"]["accounts"],
+    );
+    assert_eq!(
+        result.pointer("/entityScope/mode"),
+        Some(&json!("entity")),
+        "双侧都映射主体时必须启用主体键：{result:#}"
+    );
+    assert_eq!(
+        result.pointer("/currencyScope/mode"),
+        Some(&json!("allRows")),
+        "币种不得过滤行：{result:#}"
+    );
 }
 
 #[test]

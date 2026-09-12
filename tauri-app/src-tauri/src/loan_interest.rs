@@ -55,6 +55,7 @@ struct Table {
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LoanRow {
+    entity: String,
     loan_id: String,
     opening_principal: f64,
     additions: f64,
@@ -340,15 +341,19 @@ fn rate_template(params: &Value) -> Result<Value, AppError> {
         .map(PathBuf::from)
         .ok_or_else(|| error("INVALID_PARAMS", "请先选择模板保存位置。", None))?;
     let rows = calculate_tb(params, &|_, _, _, _| {}, &AtomicBool::new(false))?;
-    let filled: std::collections::HashMap<String, &Value> = params
+    let filled: std::collections::HashMap<(String, String), &Value> = params
         .get("rateRows")
         .and_then(Value::as_array)
         .map(|all| {
             all.iter()
                 .filter_map(|item| {
-                    item.get("loanId")
-                        .and_then(Value::as_str)
-                        .map(|id| (norm(id), item))
+                    item.get("loanId").and_then(Value::as_str).map(|id| {
+                        let entity = item
+                            .get("entity")
+                            .and_then(Value::as_str)
+                            .unwrap_or(ledger_mapping::DEFAULT_ENTITY);
+                        ((norm(entity), norm(id)), item)
+                    })
                 })
                 .collect()
         })
@@ -383,6 +388,7 @@ fn rate_template(params: &Value) -> Result<Value, AppError> {
         "执行利率（%，固定填这列）",
         "基准利率（%，浮动填这列）",
         "加减点（BP，浮动选填）",
+        "主体",
     ]
     .iter()
     .enumerate()
@@ -391,7 +397,7 @@ fn rate_template(params: &Value) -> Result<Value, AppError> {
     }
     for (index, row) in rows.iter().enumerate() {
         let y = index as u32 + 1;
-        let rate = filled.get(&norm(&row.loan_id));
+        let rate = filled.get(&(norm(&row.entity), norm(&row.loan_id)));
         let pick = |field: &str| -> Option<f64> {
             rate.and_then(|item| item.get(field).and_then(Value::as_f64))
         };
@@ -420,6 +426,7 @@ fn rate_template(params: &Value) -> Result<Value, AppError> {
         if let Some(v) = pick("spreadBps") {
             ws.get_cell_mut((9, y + 1)).set_value_number(v);
         }
+        ws.get_cell_mut((10, y + 1)).set_value(row.entity.clone());
     }
     umya_spreadsheet::writer::xlsx::write(&wb, &output).map_err(|e| {
         error(
@@ -459,7 +466,7 @@ fn import_rates(params: &Value) -> Result<Value, AppError> {
         })?,
     };
     // umya 的数字坐标从 1 起；y 即模板里的第几行（1 起，1 为表头）。
-    // 列序：1 借款行标识 … 6 利率类型 7 执行利率 8 基准利率 9 加减点。
+    // 列序：1 借款行标识 … 6 利率类型 7 执行利率 8 基准利率 9 加减点，10 主体。
     let text = |row: u32, col: u32| -> String { ws.get_value((col + 1, row)).trim().to_string() };
     let header_row = ws.get_highest_row();
     // 表头固定在第 1 行（模板即此形态）；空行跳过，行标识为空的行忽略。
@@ -492,6 +499,7 @@ fn import_rates(params: &Value) -> Result<Value, AppError> {
         let benchmark = percent(text(y, 7));
         let spread = text(y, 8).parse::<f64>().ok();
         rows.push(json!({
+            "entity": ledger_mapping::effective_entity(&text(y, 9), true),
             "loanId": loan_id,
             "rateType": rate_type,
             "fixedRate": fixed,
@@ -612,6 +620,8 @@ fn loan_form_catalog() -> Value {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InlineRateRow {
+    #[serde(default)]
+    entity: String,
     loan_id: String,
     #[serde(default)]
     rate_type: String,
@@ -658,7 +668,7 @@ fn match_rates(params: &Value) -> Result<Value, AppError> {
     let (tb, tm) = source(params, "tbSource")?;
     let tb_leaf =
         ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| mapped_names(&tm, "tb", role));
-    let loans: Vec<String> = tb
+    let loans: Vec<(String, String)> = tb
         .rows
         .iter()
         .enumerate()
@@ -666,7 +676,10 @@ fn match_rates(params: &Value) -> Result<Value, AppError> {
         .filter_map(|(_, row)| {
             let id = text(&tb, row, &tm, "loanId");
             let account = account_text(&tb, row, &tm, "tb");
-            (!id.is_empty() && !account.is_empty()).then_some(id)
+            (!id.is_empty() && !account.is_empty()).then_some((
+                ledger_mapping::effective_entity(&text(&tb, row, &tm, "entity"), true),
+                id,
+            ))
         })
         .collect();
     if loans.is_empty() {
@@ -685,15 +698,24 @@ fn match_rates(params: &Value) -> Result<Value, AppError> {
         ));
     }
     let name_at = |row: &[String]| text(&paste, row, &paste_mapping, "loanId");
+    let entity_at = |row: &[String]| {
+        ledger_mapping::effective_entity(&text(&paste, row, &paste_mapping, "entity"), true)
+    };
+    let paste_has_entity = paste_mapping.contains_key("entity");
     let mut rows = vec![];
     let (mut exact_hits, mut fuzzy_hits) = (0usize, 0usize);
-    for id in &loans {
+    for (entity, id) in &loans {
         let key = norm(id);
-        let exact = paste.rows.iter().position(|r| norm(&name_at(r)) == key);
+        let exact = paste.rows.iter().position(|r| {
+            norm(&name_at(r)) == key && (!paste_has_entity || entity_at(r) == *entity)
+        });
         // 双向包含只对双方都 ≥2 字的名称开放，避免「1」包含在「12」里的假命中。
         let mut fuzzy: Vec<(usize, String)> = vec![];
         if exact.is_none() && key.chars().count() >= 2 {
             for (index, row) in paste.rows.iter().enumerate() {
+                if paste_has_entity && entity_at(row) != *entity {
+                    continue;
+                }
                 let name_key = norm(&name_at(row));
                 if name_key.chars().count() < 2 {
                     continue;
@@ -751,6 +773,7 @@ fn match_rates(params: &Value) -> Result<Value, AppError> {
             None => ("fixed".to_string(), None, None, None),
         };
         rows.push(json!({
+            "entity": entity,
             "loanId": id,
             "rateType": rate_type,
             "fixedRate": fixed,
@@ -761,6 +784,7 @@ fn match_rates(params: &Value) -> Result<Value, AppError> {
         }));
     }
     let role_label = [
+        ("entity", "主体"),
         ("loanId", "名称"),
         ("rate", "利率"),
         ("rateType", "利率类型"),
@@ -801,6 +825,16 @@ fn rate_header_role(cell: &str) -> Option<&'static str> {
     let has = |words: &[&str]| words.iter().any(|w| lower.contains(w));
     if has(&["金额", "余额", "本金", "日期", "到期", "期限", "天数"]) {
         return None;
+    }
+    if has(&[
+        "主体",
+        "公司代码",
+        "公司名称",
+        "核算单位",
+        "entity",
+        "company",
+    ]) {
+        return Some("entity");
     }
     if has(&["bp", "基点", "加点", "减点", "点差"]) {
         return Some("spreadBps");
@@ -1181,6 +1215,7 @@ fn calculate_ledger(params: &Value) -> Result<Vec<LoanRow>, AppError> {
             events.push((value, -reductions));
         }
         out.push(LoanRow {
+            entity: ledger_mapping::effective_entity(&text(&table, row, &mapping, "entity"), true),
             loan_id: id,
             opening_principal: opening,
             additions,
@@ -1422,6 +1457,10 @@ fn contract_rows(
         let mut source_cells = row_orig.to_vec();
         source_cells.resize(table.headers.len().max(source_cells.len()), String::new());
         out.push(LoanRow {
+            entity: ledger_mapping::effective_entity(
+                &text(&table, row_orig, &mapping, "entity"),
+                true,
+            ),
             loan_id: id,
             opening_principal: opening * unit,
             additions: additions * unit,
@@ -1508,13 +1547,15 @@ fn aggregate_large_je_once(
     je_mapping: &Map<String, Value>,
     loan_accounts: &Option<std::collections::HashSet<String>>,
     loan_id_mapped: bool,
+    entity_key_enabled: bool,
     progress: &dyn Fn(&str, usize, usize, &str),
     cancel: &AtomicBool,
 ) -> Result<HashMap<usize, JeLoanAggregate>, AppError> {
     // 三层科目配对（先编码 → 编码撞车按明细/名称消歧 → 消不开留给 TB 发生额
     // 兜底）的候选索引：有编码按编码键，没编码退回科目文本键。元组为
     // （TB 行号，明细 norm，名称 norm，明细是否为回退值）。
-    let mut candidates: HashMap<String, Vec<(usize, String, String, bool)>> = HashMap::new();
+    let mut candidates: HashMap<(String, String), Vec<(usize, String, String, bool)>> =
+        HashMap::new();
     for (row_index, row) in tb.rows.iter().enumerate() {
         if !tb_leaf.get(row_index).copied().unwrap_or(false) {
             continue;
@@ -1525,6 +1566,10 @@ fn aggregate_large_je_once(
         }
         let raw_id = text(tb, row, tb_mapping, "loanId");
         let code = role_text(tb, row, tb_mapping, "tb", "accountCode");
+        let entity = ledger_mapping::effective_entity(
+            &role_text(tb, row, tb_mapping, "tb", "entity"),
+            entity_key_enabled,
+        );
         // 与内存路径同一圈定口径：确认清单或明细列，二者必居其一。
         let selected = match loan_accounts {
             Some(set) => set.contains(&if code.is_empty() {
@@ -1544,7 +1589,7 @@ fn aggregate_large_je_once(
         } else {
             norm(&code)
         };
-        candidates.entry(key).or_default().push((
+        candidates.entry((entity, key)).or_default().push((
             row_index,
             norm(&raw_id),
             norm(&name),
@@ -1577,12 +1622,16 @@ fn aggregate_large_je_once(
         }
         let je_code = disk_role_text(&headers, &row.values, &prepared_mapping, "accountCode");
         let je_name = disk_role_text(&headers, &row.values, &prepared_mapping, "accountName");
+        let entity = ledger_mapping::effective_entity(
+            &disk_role_text(&headers, &row.values, &prepared_mapping, "entity"),
+            entity_key_enabled,
+        );
         let targets = if !je_code.is_empty() {
-            candidates.get(&norm(&je_code))
+            candidates.get(&(entity.clone(), norm(&je_code)))
         } else {
             None
         }
-        .or_else(|| candidates.get(&norm(&row.account)));
+        .or_else(|| candidates.get(&(entity.clone(), norm(&row.account))));
         let Some(targets) = targets else {
             return Ok(());
         };
@@ -1600,7 +1649,7 @@ fn aggregate_large_je_once(
             &prepared_mapping,
             "date",
         ));
-        let code_keyed = !je_code.is_empty() && candidates.contains_key(&norm(&je_code));
+        let code_keyed = !je_code.is_empty() && candidates.contains_key(&(entity, norm(&je_code)));
         let unique = targets.len() == 1;
         for target in targets {
             let (row_index, target_detail, target_name, detail_fallback) = target;
@@ -1708,6 +1757,10 @@ fn calculate_tb_impl(
 ) -> Result<Vec<LoanRow>, AppError> {
     let (tb, tm) = source(params, "tbSource")?;
     let (je_spec, je_mapping) = source_config(params, "jeSource")?;
+    let entity_key_enabled = ledger_mapping::entity_key_enabled(
+        !mapped_names(&tm, "tb", "entity").is_empty(),
+        !mapped_names(&je_mapping, "je", "entity").is_empty(),
+    );
     let disk_je =
         force_disk_je || crate::tabular::disk_ledger_applies(Path::new(&je_spec.input_path));
     let memory_je = if disk_je {
@@ -1782,6 +1835,7 @@ fn calculate_tb_impl(
             &je_mapping,
             &loan_accounts,
             loan_id_mapped,
+            entity_key_enabled,
             progress,
             cancel,
         )?)
@@ -1795,13 +1849,17 @@ fn calculate_tb_impl(
     // 按编码归集（两侧名称写法不同无妨）；撞车时借款明细优先、名称其次消歧
     // 到笔，名称消歧只在编码下唯一时有效；都消不开留给 TB 发生额兜底（编码
     // 汇总口径），不强行归集、绝不重复计数。
-    let mut code_rows: HashMap<String, usize> = HashMap::new();
-    let mut code_name_rows: HashMap<(String, String), usize> = HashMap::new();
+    let mut code_rows: HashMap<(String, String), usize> = HashMap::new();
+    let mut code_name_rows: HashMap<(String, String, String), usize> = HashMap::new();
     for (row_index, row) in tb.rows.iter().enumerate() {
         if !tb_leaf.get(row_index).copied().unwrap_or(true) {
             continue;
         }
         let code = role_text(&tb, row, &tm, "tb", "accountCode");
+        let entity = ledger_mapping::effective_entity(
+            &role_text(&tb, row, &tm, "tb", "entity"),
+            entity_key_enabled,
+        );
         let account = account_text(&tb, row, &tm, "tb");
         let raw_id = text(&tb, row, &tm, "loanId");
         if !row_selected(&code, &account, &raw_id) {
@@ -1810,11 +1868,11 @@ fn calculate_tb_impl(
         if code.is_empty() {
             continue;
         }
-        *code_rows.entry(norm(&code)).or_default() += 1;
+        *code_rows.entry((entity.clone(), norm(&code))).or_default() += 1;
         let name = role_text(&tb, row, &tm, "tb", "accountName");
         if !name.is_empty() {
             *code_name_rows
-                .entry((norm(&code), norm(&name)))
+                .entry((entity, norm(&code), norm(&name)))
                 .or_default() += 1;
         }
     }
@@ -1846,11 +1904,18 @@ fn calculate_tb_impl(
         };
         let tb_code = role_text(&tb, row, &tm, "tb", "accountCode");
         let tb_name = role_text(&tb, row, &tm, "tb", "accountName");
-        let code_unique = !tb_code.is_empty() && code_rows.get(&norm(&tb_code)) == Some(&1);
+        let entity = ledger_mapping::effective_entity(
+            &role_text(&tb, row, &tm, "tb", "entity"),
+            entity_key_enabled,
+        );
+        let code_unique =
+            !tb_code.is_empty() && code_rows.get(&(entity.clone(), norm(&tb_code))) == Some(&1);
         let code_name_unique = !tb_code.is_empty()
             && !tb_name.is_empty()
-            && code_rows.get(&norm(&tb_code)).map_or(false, |&n| n > 1)
-            && code_name_rows.get(&(norm(&tb_code), norm(&tb_name))) == Some(&1);
+            && code_rows
+                .get(&(entity.clone(), norm(&tb_code)))
+                .map_or(false, |&n| n > 1)
+            && code_name_rows.get(&(entity.clone(), norm(&tb_code), norm(&tb_name))) == Some(&1);
         // 借款是负债类科目，贷方为正。六种 TB 形态的差异由内核吸收。
         let opening = ledger_mapping::credit_positive(ledger_mapping::signed_balance(
             &amount_inputs(&tb, row, &tm, "opening"),
@@ -1874,10 +1939,16 @@ fn calculate_tb_impl(
                 let summary = text(je, jr, jm, "summary");
                 let je_code = role_text(je, jr, jm, "je", "accountCode");
                 let je_name = role_text(je, jr, jm, "je", "accountName");
+                let je_entity = ledger_mapping::effective_entity(
+                    &role_text(je, jr, jm, "je", "entity"),
+                    entity_key_enabled,
+                );
                 // 三层科目配对：①编码直归；②编码撞车时明细优先、名称消歧；
                 // ③都消不开不归集（TB 发生额兜底即编码汇总口径）。任一侧没
                 // 映射编码时退回「科目文本全等」的旧口径。
-                let kind: Option<&'static str> = if !tb_code.is_empty()
+                let kind: Option<&'static str> = if je_entity != entity {
+                    None
+                } else if !tb_code.is_empty()
                     && !je_code.is_empty()
                     && norm(&je_code) == norm(&tb_code)
                 {
@@ -1935,10 +2006,11 @@ fn calculate_tb_impl(
         }
         let mut rate_type = "fixed".into();
         let (mut fixed, mut benchmark, mut bps) = (None, None, None);
-        if let Some(row) = inline_rates
-            .iter()
-            .find(|row| norm(&row.loan_id) == norm(&id))
-        {
+        if let Some(row) = inline_rates.iter().find(|row| {
+            norm(&row.loan_id) == norm(&id)
+                && (!entity_key_enabled
+                    || ledger_mapping::effective_entity(&row.entity, true) == entity)
+        }) {
             if !row.rate_type.is_empty() {
                 rate_type = row.rate_type.clone();
             }
@@ -1955,6 +2027,7 @@ fn calculate_tb_impl(
         }
         let diff = opening + additions - reductions - closing;
         out.push(LoanRow {
+            entity,
             loan_id: id,
             opening_principal: opening,
             additions,
@@ -2005,7 +2078,8 @@ fn apply_overrides(rows: &mut [LoanRow], params: &Value) {
         return;
     };
     for row in rows {
-        let Some(v) = all.get(&row.loan_id) else {
+        let entity_key = format!("{}\u{1f}{}", row.entity, row.loan_id);
+        let Some(v) = all.get(&entity_key).or_else(|| all.get(&row.loan_id)) else {
             continue;
         };
         if let Some(t) = v.get("rateType").and_then(Value::as_str) {
@@ -2297,7 +2371,7 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
     // 列序与下面的公式一一对应，改这里必须同步改 `LPR_SHEET` 那几条公式。
     // A借款标识 B期初 C增加 D减少 E期末余额(台账) F期末余额(推算) G勾稽差异
     // H利率类型 I固定利率 J定价基准日 K LPR品种 L基准利率 M加减点 N有效年利率
-    // O计息积数(元·天) P测算利息 Q状态 R依据 S..台账原始列
+    // O计息积数(元·天) P测算利息 Q状态 R依据 S主体 T..台账原始列
     let headers = [
         "借款标识",
         "期初本金",
@@ -2317,6 +2391,7 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
         "测算利息",
         "匹配状态",
         "匹配依据",
+        "主体",
     ];
     for (c, h) in headers.iter().enumerate() {
         ws.write_string_with_format(0, c as u16, *h, &header)
@@ -2459,7 +2534,7 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
             y,
             14,
             Formula::new(format!(
-                "=SUMIF('{sheet}'!$A:$A,A{excel_row},'{sheet}'!$F:$F)",
+                "=SUMIFS('{sheet}'!$F:$F,'{sheet}'!$A:$A,A{excel_row},'{sheet}'!$J:$J,S{excel_row})",
                 sheet = SEG_SHEET,
             ))
             .set_result(seg_days.to_string()),
@@ -2470,7 +2545,7 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
             y,
             15,
             Formula::new(format!(
-                "=SUMIF('{sheet}'!$A:$A,A{excel_row},'{sheet}'!$I:$I)",
+                "=SUMIFS('{sheet}'!$I:$I,'{sheet}'!$A:$A,A{excel_row},'{sheet}'!$J:$J,S{excel_row})",
                 sheet = SEG_SHEET,
             ))
             .set_result(row.calculated_interest.to_string()),
@@ -2479,6 +2554,7 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
         .map_err(xlsx)?;
         ws.write_string(y, 16, &row.match_status).map_err(xlsx)?;
         ws.write_string(y, 17, &row.match_basis).map_err(xlsx)?;
+        ws.write_string(y, 18, &row.entity).map_err(xlsx)?;
         // 台账原始列：按列名对齐（多段台账各段列布局不同，未出现的列留空）。
         for (i, name) in source_columns.iter().enumerate() {
             let value = row
@@ -2587,6 +2663,7 @@ fn write_segments_sheet(wb: &mut Workbook, rows: &[LoanRow]) -> Result<(), AppEr
         "积数（本金×天）",
         "适用年利率",
         "段利息",
+        "主体",
     ];
     for (c, h) in headers.iter().enumerate() {
         ws.write_string_with_format(0, c as u16, *h, &header)
@@ -2639,6 +2716,7 @@ fn write_segments_sheet(wb: &mut Workbook, rows: &[LoanRow]) -> Result<(), AppEr
                 &amount,
             )
             .map_err(xlsx)?;
+            ws.write_string(y, 9, &row.entity).map_err(xlsx)?;
             y += 1;
         }
     }
@@ -4049,15 +4127,15 @@ mod loan_form_tests {
             base.contains("MATCH(J2"),
             "应按定价基准日那一格查表：{base}"
         );
-        // N 列有效年利率是公式；O 计息天数与 P 测算利息都按分段明细 SUMIF。
+        // N 列有效年利率是公式；O 计息天数与 P 测算利息都按借款标识＋主体 SUMIFS。
         assert!(formulas.get_value((1, 13)).unwrap().contains("L2+M2/10000"));
         assert_eq!(
             formulas.get_value((1, 14)).unwrap(),
-            "SUMIF('计息分段明细'!$A:$A,A2,'计息分段明细'!$F:$F)"
+            "SUMIFS('计息分段明细'!$F:$F,'计息分段明细'!$A:$A,A2,'计息分段明细'!$J:$J,S2)"
         );
         assert_eq!(
             formulas.get_value((1, 15)).unwrap(),
-            "SUMIF('计息分段明细'!$A:$A,A2,'计息分段明细'!$I:$I)"
+            "SUMIFS('计息分段明细'!$I:$I,'计息分段明细'!$A:$A,A2,'计息分段明细'!$J:$J,S2)"
         );
         // 分段明细：天数/积数/利率/段利息四列全是活公式，利率引用主表。
         let seg_names = calamine::Reader::sheet_names(&book).to_vec();
@@ -4450,6 +4528,61 @@ mod tests {
         assert!(
             (result["rows"][0]["calculatedInterest"].as_f64().unwrap() - 42_000.0).abs() < 0.01
         );
+    }
+
+    #[test]
+    fn tbje双侧映射主体后同借款标识分别归集() {
+        let fixture = SyntheticLedger::new(&[["4.2%", "浮动", "", "90"]]);
+        let mut book = Workbook::new();
+        for (name, data) in [
+            (
+                "TB",
+                vec![
+                    vec!["主体", "编码", "科目", "借款", "期初贷", "期末贷"],
+                    vec!["A", "2001", "短期借款", "共同借款", "100", "110"],
+                    vec!["B", "2001", "短期借款", "共同借款", "200", "220"],
+                ],
+            ),
+            (
+                "JE",
+                vec![
+                    vec!["主体", "编码", "科目", "借款", "日期", "借方", "贷方"],
+                    vec!["A", "2001", "短期借款", "共同借款", "2025-01-01", "0", "10"],
+                    vec!["B", "2001", "短期借款", "共同借款", "2025-01-01", "0", "20"],
+                ],
+            ),
+        ] {
+            let sheet = book.add_worksheet();
+            sheet.set_name(name).unwrap();
+            for (r, row) in data.iter().enumerate() {
+                for (c, value) in row.iter().enumerate() {
+                    sheet.write_string(r as u32, c as u16, *value).unwrap();
+                }
+            }
+        }
+        let path = fixture.dir.join("multi-entity-tbje.xlsx");
+        book.save(&path).unwrap();
+        let params = json!({
+            "mode": "tb",
+            "reportStart": "2025-01-01",
+            "reportEnd": "2025-12-31",
+            "tbSource": {"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},"mapping":{"entity":"主体","accountCode":"编码","accountName":"科目","loanId":"借款","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷"}},
+            "jeSource": {"source":{"inputPath":path,"sheet":"JE","headerRow":1,"headerDepth":1},"mapping":{"entity":"主体","accountCode":"编码","accountName":"科目","loanId":"借款","date":"日期","functionalDebit":"借方","functionalCredit":"贷方"}}
+        });
+        let result = run_preview(&params).unwrap();
+        let rows = result["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "{result:#}");
+        let by_entity = rows
+            .iter()
+            .map(|row| {
+                (
+                    row["entity"].as_str().unwrap(),
+                    row["additions"].as_f64().unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(by_entity["A"], 10.0);
+        assert_eq!(by_entity["B"], 20.0);
     }
     #[test]
     fn floating_rate_converts_bps() {

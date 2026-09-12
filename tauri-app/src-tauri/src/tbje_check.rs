@@ -225,12 +225,9 @@ struct PreparedCheck {
     tb_fixed: String,
     je_fixed: String,
     mapping_warnings: Vec<String>,
-    tb_functional_rows: Vec<bool>,
-    tbje_rows: Vec<bool>,
+    /// TBJE 公共核对永远保留全部非空行。币种只用于判断列语义，不能成为行过滤条件。
+    tb_rows: Vec<bool>,
     je_rows: Option<Vec<bool>>,
-    tbje_currency_scope: &'static str,
-    tbje_currency_scope_note: String,
-    inferred_functional_currency: Option<String>,
 }
 
 /// Small ledgers retain the existing in-memory table. Large CSV ledgers keep
@@ -246,102 +243,12 @@ impl PreparedJe {
     }
 }
 
-fn currency_code(value: &str) -> String {
-    match value.trim().to_uppercase().as_str() {
-        "RMB" | "人民币" => "CNY".into(),
-        value => value.to_owned(),
-    }
-}
-
-/// 余额表按币种拆行、又只有一套金额列时，这套金额是行币种口径：
-/// TBJE的本位币勾稽只取主体本位币行。如表内已同时映射原币与
-/// 本位币金额列，则每行都有可比本位币金额，不做行过滤。
-fn functional_currency_rows(
-    table: &FxTable,
-    mapping: &Map<String, Value>,
-) -> (Vec<bool>, Option<String>) {
-    let all = || {
-        table
-            .rows
-            .iter()
-            .map(|row| row.iter().any(|value| !value.trim().is_empty()))
-            .collect::<Vec<_>>()
-    };
-    let explicit_foreign_amounts = [
-        "openingForeignAmount",
-        "openingForeignDebit",
-        "openingForeignCredit",
-        "ytdForeignDebit",
-        "ytdForeignCredit",
-        "closingForeignAmount",
-        "closingForeignDebit",
-        "closingForeignCredit",
-    ]
-    .iter()
-    .any(|role| !columns(mapping, role).is_empty());
-    if explicit_foreign_amounts {
-        return (all(), None);
-    }
-    let Some(currency_column) = columns(mapping, "currency")
-        .into_iter()
-        .chain(columns(mapping, "currencyText"))
-        .next()
-    else {
-        return (all(), None);
-    };
-    let Some(currency_index) = table
-        .headers
-        .iter()
-        .position(|header| header == &currency_column)
-    else {
-        return (all(), None);
-    };
-    let supported = [
-        "CNY", "USD", "EUR", "JPY", "HKD", "GBP", "AUD", "NZD", "SGD", "CHF", "CAD", "MOP", "MYR",
-        "RUB", "KRW",
-    ];
-    let mut counts = BTreeMap::<String, usize>::new();
-    for row in &table.rows {
-        let code = currency_code(row.get(currency_index).map(String::as_str).unwrap_or(""));
-        if supported.contains(&code.as_str()) {
-            *counts.entry(code).or_default() += 1;
-        }
-    }
-    if counts.len() <= 1 {
-        return (all(), counts.into_keys().next());
-    }
-    let functional = counts
-        .into_iter()
-        // 行数最多的币种通常是主体本位币；数量相同时优先人民币，避免一科目
-        // 一条CNY、一条原币的成对结构因BTree字母顺序误选USD。这里不删除源行，
-        // 只限定“本位币核对”的参与范围，并把推断结果返回给UI供复核。
-        .max_by_key(|(code, count)| (*count, code == "CNY"))
-        .map(|(code, _)| code)
-        .unwrap_or_default();
-    let mask = table
+fn all_nonblank_rows(table: &FxTable) -> Vec<bool> {
+    table
         .rows
         .iter()
-        .map(|row| {
-            if row.iter().all(|value| value.trim().is_empty()) {
-                return false;
-            }
-            let code = currency_code(row.get(currency_index).map(String::as_str).unwrap_or(""));
-            code.is_empty() || code == functional
-        })
-        .collect();
-    (mask, Some(functional))
-}
-
-/// JE 没有币种字段，也没有一套独立的原币金额角色时，不能证明映射到
-/// `functional*` 的单列只含本位币。真实账中存在同一金额列同时记录原币与
-/// 本位币行的形态（情形 C）；此时 TB 必须把同科目的全部币种行汇总后再比。
-///
-/// 反过来，只要 JE 明确提供了币种或原币金额角色，就仍按 TB 本位币行核对，
-/// 避免把一套清楚分开的原币金额重复并入本位币口径。
-fn je_has_separate_currency_scope(mapping: &Map<String, Value>) -> bool {
-    ["currency", "foreignAmount", "foreignDebit", "foreignCredit"]
-        .iter()
-        .any(|role| !columns(mapping, role).is_empty())
+        .map(|row| row.iter().any(|value| !value.trim().is_empty()))
+        .collect()
 }
 
 fn tb_period_warning(table: &FxTable) -> Option<String> {
@@ -524,18 +431,24 @@ fn prepare_with_control(
         Some(spec) => Some(PreparedJe::memory(load_fx_table(spec)?)),
         None => None,
     };
-    let tb_fixed = params
+    let mut tb_fixed = params
         .get("tbFixedEntity")
         .and_then(Value::as_str)
-        .unwrap_or("")
+        .unwrap_or(ledger_mapping::DEFAULT_ENTITY)
         .trim()
         .to_owned();
-    let je_fixed = params
+    let mut je_fixed = params
         .get("jeFixedEntity")
         .and_then(Value::as_str)
-        .unwrap_or("")
+        .unwrap_or(ledger_mapping::DEFAULT_ENTITY)
         .trim()
         .to_owned();
+    if tb_fixed.is_empty() {
+        tb_fixed = ledger_mapping::DEFAULT_ENTITY.to_owned();
+    }
+    if je_fixed.is_empty() {
+        je_fixed = ledger_mapping::DEFAULT_ENTITY.to_owned();
+    }
 
     let je_map_before_alignment = je_map.clone();
     let mut mapping_warnings = if let Some(je) = je.as_ref() {
@@ -566,13 +479,15 @@ fn prepare_with_control(
         }
         let tb_has_entity = !columns(&tb_map, "entity").is_empty();
         let je_has_entity = !columns(&je_map, "entity").is_empty();
-        if tb_has_entity != je_has_entity {
-            let (table, mapping, label) = if tb_has_entity {
-                (&*tb, &mut tb_map, "TB")
+        let entity_key_enabled = ledger_mapping::entity_key_enabled(tb_has_entity, je_has_entity);
+        if !entity_key_enabled && (tb_has_entity || je_has_entity) {
+            let (table, label) = if tb_has_entity {
+                (&*tb, "TB")
             } else {
-                (je, &mut je_map, "JE")
+                (je, "JE")
             };
-            let entities = indexes(table, mapping, "entity")
+            let source_mapping = if tb_has_entity { &tb_map } else { &je_map };
+            let entities = indexes(table, source_mapping, "entity")
                 .first()
                 .map(|index| {
                     table
@@ -584,9 +499,14 @@ fn prepare_with_control(
                         .collect::<BTreeSet<_>>()
                 })
                 .unwrap_or_default();
-            mapping.remove("entity");
+            // 只有双侧都有主体字段时才启用主体维度。单侧主体不是筛选条件，
+            // 双方统一退回默认主体，避免一侧拆分、另一侧汇总后完全对不上。
+            tb_map.remove("entity");
+            je_map.remove("entity");
+            tb_fixed = ledger_mapping::DEFAULT_ENTITY.to_owned();
+            je_fixed = ledger_mapping::DEFAULT_ENTITY.to_owned();
             mapping_warnings.push(format!(
-                "{label}识别到{}个主体，而另一侧没有可用主体字段；TB与JE发生额勾稽已按科目编码汇总对齐，不把单边主体值作为拆分键。",
+                "{label}识别到{}个主体，而另一侧没有可用主体字段；双方已统一按“默认主体”匹配，不把单边主体值作为拆分键。",
                 entities.len()
             ));
         }
@@ -652,34 +572,7 @@ fn prepare_with_control(
         fx::ensure_sign_convention(&je.table, &mut je_map, "je")
             .map_err(|message| error("SIGN_CONVENTION_UNCERTAIN", message, None))?;
     }
-    let (tb_functional_rows, inferred_functional_currency) = functional_currency_rows(&tb, &tb_map);
-    let excluded_foreign_rows = tb_functional_rows
-        .iter()
-        .filter(|included| !**included)
-        .count();
-    let use_all_currencies_for_tbje =
-        je.is_some() && excluded_foreign_rows > 0 && !je_has_separate_currency_scope(&je_map);
-    let (tbje_rows, tbje_currency_scope, tbje_currency_scope_note) = if use_all_currencies_for_tbje
-    {
-        let all_nonblank_rows = tb
-            .rows
-            .iter()
-            .map(|row| row.iter().any(|value| !value.trim().is_empty()))
-            .collect::<Vec<_>>();
-        let included = all_nonblank_rows.iter().filter(|value| **value).count();
-        let note = format!(
-            "情形C：JE未映射币种或独立原币金额字段，TB与JE发生额勾稽按全部币种行汇总（共{}行；不排除{}条原币行）。",
-            included, excluded_foreign_rows
-        );
-        mapping_warnings.push(note.clone());
-        (all_nonblank_rows, "allCurrenciesMixedJe", note)
-    } else {
-        (
-            tb_functional_rows.clone(),
-            "functionalCurrency",
-            "TB与JE发生额勾稽按本位币行核对。".to_owned(),
-        )
-    };
+    let tb_rows = all_nonblank_rows(&tb);
     if let Some(warning) = tb_period_warning(&tb) {
         mapping_warnings.push(warning);
     }
@@ -691,12 +584,8 @@ fn prepare_with_control(
         tb_fixed,
         je_fixed,
         mapping_warnings,
-        tb_functional_rows,
-        tbje_rows,
+        tb_rows,
         je_rows,
-        tbje_currency_scope,
-        tbje_currency_scope_note,
-        inferred_functional_currency,
     })
 }
 
@@ -775,6 +664,9 @@ fn evaluate(
     cancel: &AtomicBool,
     include_all_accounts: bool,
 ) -> Result<Value, AppError> {
+    let tb_has_entity = !columns(&prepared.tb_map, "entity").is_empty();
+    let je_has_entity = prepared.je.is_some() && !columns(&prepared.je_map, "entity").is_empty();
+    let entity_key_enabled = ledger_mapping::entity_key_enabled(tb_has_entity, je_has_entity);
     // 符号口径在 `prepare` 中判一次并写进映射，三条核对与正式导出共用。
     let rollforward = check_rollforward(&prepared.tb, &prepared.tb_map);
     if cancel.load(Ordering::Relaxed) {
@@ -784,7 +676,7 @@ fn evaluate(
         &prepared.tb,
         &prepared.tb_map,
         &prepared.tb_fixed,
-        &prepared.tb_functional_rows,
+        &prepared.tb_rows,
     );
     if cancel.load(Ordering::Relaxed) {
         return Err(error("JOB_CANCELLED", "任务已取消。", None));
@@ -799,10 +691,8 @@ fn evaluate(
             &prepared.je_fixed,
             cancel,
             include_all_accounts,
-            &prepared.tbje_rows,
+            &prepared.tb_rows,
             prepared.je_rows.as_deref().unwrap_or(&[]),
-            prepared.tbje_currency_scope,
-            &prepared.tbje_currency_scope_note,
         )?,
         None => json!({
             "performed": false,
@@ -810,31 +700,27 @@ fn evaluate(
         }),
     };
 
-    let excluded_functional_rows = prepared
-        .tb_functional_rows
-        .iter()
-        .filter(|included| !**included)
-        .count();
-    let mut mapping_warnings = prepared.mapping_warnings.clone();
-    if excluded_functional_rows > 0 && prepared.tbje_currency_scope == "functionalCurrency" {
-        mapping_warnings.push(format!(
-            "TB按币种拆行：本位币核对采用{}行，另有{}条原币行未参与本位币金额勾稽（源数据仍完整保留）。",
-            prepared.tb_functional_rows.len() - excluded_functional_rows,
-            excluded_functional_rows
-        ));
-    }
     Ok(json!({
         "rollforward": rollforward,
         "tbVsJe": tb_vs_je,
         "equation": equation,
-        "mappingWarnings": mapping_warnings,
+        "mappingWarnings": prepared.mapping_warnings,
+        "entityScope": {
+            "mode": if entity_key_enabled { "entity" } else { "defaultEntity" },
+            "defaultEntity": ledger_mapping::DEFAULT_ENTITY,
+            "description": if entity_key_enabled {
+                "TB 与 JE 双侧均映射主体，主体作为匹配、汇总与测算键。"
+            } else {
+                "TB 与 JE 未同时映射主体，双方统一按“默认主体”处理。"
+            },
+        },
         "currencyScope": {
-            "functionalCurrency": prepared.inferred_functional_currency,
-            "mode": prepared.tbje_currency_scope,
-            "description": prepared.tbje_currency_scope_note,
-            "includedRows": prepared.tbje_rows.iter().filter(|included| **included).count(),
-            "excludedForeignRows": prepared.tbje_rows.iter().filter(|included| !**included).count(),
-            "functionalRowsExcludedForOtherChecks": excluded_functional_rows,
+            "functionalCurrency": Value::Null,
+            "mode": "allRows",
+            "description": "币种只用于判断列语义；TBJE 核对不按币种过滤行。",
+            "includedRows": prepared.tb_rows.iter().filter(|included| **included).count(),
+            "excludedForeignRows": 0,
+            "functionalRowsExcludedForOtherChecks": 0,
         },
     }))
 }
@@ -1466,12 +1352,7 @@ fn equation_details(prepared: &PreparedCheck) -> Vec<EquationDetail> {
     });
     let mut details = Vec::new();
     for (index, row) in prepared.tb.rows.iter().enumerate() {
-        if !prepared
-            .tb_functional_rows
-            .get(index)
-            .copied()
-            .unwrap_or(true)
-        {
+        if !prepared.tb_rows.get(index).copied().unwrap_or(true) {
             continue;
         }
         if !leaf.get(index).copied().unwrap_or(true) {
@@ -1935,8 +1816,6 @@ fn check_tb_vs_je(
     include_all_accounts: bool,
     functional_rows: &[bool],
     je_rows: &[bool],
-    currency_scope: &str,
-    currency_scope_note: &str,
 ) -> Result<Value, AppError> {
     let je_table = &*je.table;
     let tb_debit = columns(tb_map, "ytdFunctionalDebit");
@@ -2146,8 +2025,8 @@ fn check_tb_vs_je(
         "mismatched": mismatched,
         "netMismatched": net_mismatched,
         "widespread": widespread,
-        "currencyScope": currency_scope,
-        "currencyScopeNote": currency_scope_note,
+        "currencyScope": "allRows",
+        "currencyScopeNote": "币种只用于判断列语义；TBJE 核对不按币种过滤行。",
         "accountMatchMode": if account_policy.ambiguous_count() > 0 {
             "codeAndNameWhenAmbiguous"
         } else {

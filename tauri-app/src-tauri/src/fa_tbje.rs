@@ -1551,10 +1551,10 @@ fn preview_json(a: &Analysis) -> Value {
     // 对方科目透视（原值／累计折旧）与导出共用 counterpart_pivots 聚合，
     // 前端「对方科目预览」与底稿两张透视表同源；数组顺序＝BTreeMap 顺序。
     let (cost_pivot, dep_pivot) = counterpart_pivots(a);
-    let pivot_entries = |map: &BTreeMap<String, (f64, f64)>| {
+    let pivot_entries = |map: &BTreeMap<(String, String), (f64, f64)>| {
         map.iter()
-            .map(|(account, (debit, credit))| {
-                json!({"account": account, "debit": debit, "credit": credit})
+            .map(|((entity, account), (debit, credit))| {
+                json!({"entity": entity, "account": account, "debit": debit, "credit": credit})
             })
             .collect::<Vec<_>>()
     };
@@ -2281,12 +2281,15 @@ fn col_letter(mut index: usize) -> String {
 /// 原值／累计折旧各自的对方科目透视聚合：凭证里出现原值变动的，其对方科目
 /// 进「原值」map；出现折旧变动的进「累计折旧」map。原值处置与折旧转出
 /// 常常是同一张凭证的两面，这类凭证的对方科目两边都进，各自完整。
-/// 返回（原值 map，累计折旧 map），键＝科目串、值＝（借方合计，贷方合计）；
+/// 返回（原值 map，累计折旧 map），键＝（主体、科目）、值＝（借方合计，贷方合计）；
 /// 导出落表（write_counterpart_pivots）与前端预览（preview_json 的
 /// counterpartPivots）共用这一份聚合，两边永不漂移。
 fn counterpart_pivots(
     a: &Analysis,
-) -> (BTreeMap<String, (f64, f64)>, BTreeMap<String, (f64, f64)>) {
+) -> (
+    BTreeMap<(String, String), (f64, f64)>,
+    BTreeMap<(String, String), (f64, f64)>,
+) {
     let mut voucher_flags: BTreeMap<(String, String), (bool, bool)> = BTreeMap::new();
     for line in &a.je {
         if line.counterpart || is_net_zero_matched(&line.status) {
@@ -2301,8 +2304,8 @@ fn counterpart_pivots(
             flag.1 = true;
         }
     }
-    let mut cost_map: BTreeMap<String, (f64, f64)> = BTreeMap::new();
-    let mut dep_map: BTreeMap<String, (f64, f64)> = BTreeMap::new();
+    let mut cost_map: BTreeMap<(String, String), (f64, f64)> = BTreeMap::new();
+    let mut dep_map: BTreeMap<(String, String), (f64, f64)> = BTreeMap::new();
     for line in &a.je {
         if line.net.abs() < 0.005 {
             continue;
@@ -2315,8 +2318,10 @@ fn counterpart_pivots(
         // 整张凭证的全部科目（含固定资产科目自身）都进透视：固定资产科目与
         // 对方科目互为镜像，两侧都在表内，借贷自然平衡；固定资产科目行的
         // 借贷差即本类变动额，与汇总表直接勾稽。
-        let entry = |map: &mut BTreeMap<String, (f64, f64)>| {
-            let entry = map.entry(line.account.clone()).or_default();
+        let entry = |map: &mut BTreeMap<(String, String), (f64, f64)>| {
+            let entry = map
+                .entry((line.entity.clone(), line.account.clone()))
+                .or_default();
             if line.net > 0.0 {
                 entry.0 += line.net;
             } else {
@@ -2343,18 +2348,20 @@ fn write_counterpart_pivots(wb: &mut Workbook, a: &Analysis) -> Result<(), AppEr
 fn write_pivot_sheet(
     ws: &mut Worksheet,
     name: &str,
-    groups: &BTreeMap<String, (f64, f64)>,
+    groups: &BTreeMap<(String, String), (f64, f64)>,
 ) -> Result<(), AppError> {
     ws.set_name(name).map_err(xlsx)?;
     let (header, money, text) = formats();
-    write_headers(ws, &["科目", "借方金额", "贷方金额"], &header)?;
-    for (r, (account, (debit, credit))) in groups.iter().enumerate() {
+    write_headers(ws, &["主体", "科目", "借方金额", "贷方金额"], &header)?;
+    for (r, ((entity, account), (debit, credit))) in groups.iter().enumerate() {
         let row = r as u32 + 1;
-        ws.write_string_with_format(row, 0, account, &text)
+        ws.write_string_with_format(row, 0, entity, &text)
             .map_err(xlsx)?;
-        ws.write_number_with_format(row, 1, *debit, &money)
+        ws.write_string_with_format(row, 1, account, &text)
             .map_err(xlsx)?;
-        ws.write_number_with_format(row, 2, *credit, &money)
+        ws.write_number_with_format(row, 2, *debit, &money)
+            .map_err(xlsx)?;
+        ws.write_number_with_format(row, 3, *credit, &money)
             .map_err(xlsx)?;
     }
     let total_row = groups.len() as u32 + 1;
@@ -2368,7 +2375,7 @@ fn write_pivot_sheet(
         .fold((0.0, 0.0), |acc, v| (acc.0 + v.0, acc.1 + v.1));
     ws.write_string_with_format(total_row, 0, "合计", &header)
         .map_err(xlsx)?;
-    for (col, value) in [(1u16, debit), (2, credit)] {
+    for (col, value) in [(2u16, debit), (3, credit)] {
         let letter = (b'A' + col as u8) as char;
         ws.write_formula_with_format(
             total_row,
@@ -3164,8 +3171,8 @@ mod tests {
     #[test]
     fn pivot_total_formula_stops_at_last_data_row() {
         let groups = BTreeMap::from([
-            ("1604 在建工程".to_owned(), (0.0, 30600.0)),
-            ("银行存款".to_owned(), (76725.66, 0.0)),
+            (("A".to_owned(), "1604 在建工程".to_owned()), (0.0, 30600.0)),
+            (("A".to_owned(), "银行存款".to_owned()), (76725.66, 0.0)),
         ]);
         let mut wb = Workbook::new();
         write_pivot_sheet(wb.add_worksheet(), "原值透视表", &groups).unwrap();
@@ -3184,11 +3191,11 @@ mod tests {
                 continue;
             }
             assert!(
-                text.contains("B2:B3") || text.contains("C2:C3"),
+                text.contains("C2:C3") || text.contains("D2:D3"),
                 "SUM 应止于最后一条数据行：{text}"
             );
             assert!(
-                !text.contains("B4") && !text.contains("C4"),
+                !text.contains("C4") && !text.contains("D4"),
                 "合计公式不得圈入合计行自身（循环引用）：{text}"
             );
         }
@@ -3903,7 +3910,7 @@ mod tests {
                 if !hit {
                     continue;
                 }
-                let entry = map.entry(s(r, 4)).or_insert((0.0, 0.0));
+                let entry = map.entry((s(r, 0), s(r, 4))).or_insert((0.0, 0.0));
                 if n(r, 7) > 0.0 {
                     entry.0 += n(r, 7);
                 } else {
@@ -3923,7 +3930,7 @@ mod tests {
             assert_eq!(s(total_row, 0), "合计");
             let mut pivot_map = std::collections::BTreeMap::new();
             for row in &pivot_rows {
-                pivot_map.insert(s(row, 0), (n(row, 1), n(row, 2)));
+                pivot_map.insert((s(row, 0), s(row, 1)), (n(row, 2), n(row, 3)));
             }
             assert_eq!(
                 pivot_map.len(),
@@ -3936,10 +3943,10 @@ mod tests {
                 let actual = pivot_map.get(account).copied().unwrap_or((0.0, 0.0));
                 assert!(
                     (actual.0 - debit).abs() < 0.00001 && (actual.1 - credit).abs() < 0.00001,
-                    "{name} {account} 借贷不匹配"
+                    "{name} {account:?} 借贷不匹配"
                 );
             }
-            for col in [1usize, 2] {
+            for col in [2usize, 3] {
                 let sum: f64 = pivot_rows.iter().map(|r| n(r, col)).sum();
                 assert!(
                     (n(total_row, col) - sum).abs() < 0.00001,

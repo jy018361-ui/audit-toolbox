@@ -78,6 +78,7 @@ type Source = {
   mapping: Record<string, string>;
 };
 type LoanRow = {
+  entity: string;
   loanId: string;
   openingPrincipal: number;
   additions: number;
@@ -98,6 +99,7 @@ type ResultRateEdit = Partial<
 >;
 /** TB 模式「利率确认」：粘贴的利率区域与 TB 借款明细匹配后的逐笔利率。 */
 type PasteRateRow = {
+  entity?: string;
   loanId: string;
   rateType: "fixed" | "floating";
   fixedRate?: number;
@@ -164,6 +166,8 @@ const LABELS: Record<Kind, Record<string, string>> = {
   },
   rateLedger: LOAN_ROLE_FALLBACK,
 };
+const loanRowKey = (row: Pick<LoanRow, "entity" | "loanId">) =>
+  `${row.entity || "默认主体"}\u001f${row.loanId}`;
 
 type TbAccount = {
   key: string;
@@ -415,7 +419,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     setRateEdits((v) => ({ ...v, [index]: { ...v[index], ...patch } }));
   };
   const editResultRate = (index: number, patch: ResultRateEdit) => {
-    const id = rows[index].loanId;
+    const id = loanRowKey(rows[index]);
     setRows((v) =>
       v.map((row, i) => (i === index ? { ...row, ...patch } : row)),
     );
@@ -475,7 +479,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         tbSource: source("tb"),
         jeSource: source("je"),
         loanAccounts: selectedLoanAccounts(),
-        rateRows: Object.entries(tbRateEdits).map(([id, r]) => ({ ...r, loanId: id })),
+        rateRows: Object.values(tbRateEdits),
         outputPath: target,
       });
       setRateNoteText(`利率确认表已导出：${target}`);
@@ -498,10 +502,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       setTbRateEdits((current) => {
         const next = { ...current };
         for (const row of incoming) {
-          const hit = Object.keys(next).find(
-            (k) => k.trim() === row.loanId.trim(),
-          );
-          next[hit ?? row.loanId] = row;
+          const key = `${row.entity || "默认主体"}\u001f${row.loanId}`;
+          next[key] = row;
         }
         return next;
       });
@@ -512,11 +514,15 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
-  const editTbRate = (loanId: string, patch: Partial<PasteRateRow>) => {
+  const editTbRate = (row: LoanRow, patch: Partial<PasteRateRow>) => {
+    const key = loanRowKey(row);
     setTbRateEdits((v) => {
-      const prev = v[loanId] ?? { rateType: "fixed" as const };
+      const prev = v[key] ?? { rateType: "fixed" as const };
       const base: PasteRateRow = { ...prev, ...patch };
-      return { ...v, [loanId]: { ...base, loanId } };
+      return {
+        ...v,
+        [key]: { ...base, entity: row.entity, loanId: row.loanId },
+      };
     });
   };
   const [rateNoteText, setRateNoteText] = useState("");
@@ -724,6 +730,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         mode === "tb" && Object.keys(tbRateEdits).length
           ? Object.values(tbRateEdits).map((r) => ({
               loanId: r.loanId,
+              entity: r.entity,
               rateType: r.rateType,
               fixedRate: r.fixedRate,
               benchmarkRate: r.benchmarkRate,
@@ -1611,10 +1618,10 @@ function TbRateTable({
 }: {
   rows: LoanRow[];
   edits: Record<string, PasteRateRow>;
-  onEdit: (loanId: string, patch: Partial<PasteRateRow>) => void;
+  onEdit: (row: LoanRow, patch: Partial<PasteRateRow>) => void;
 }) {
   const filled = rows.filter((r) => {
-    const e = edits[r.loanId];
+    const e = edits[loanRowKey(r)];
     return e && (e.fixedRate != null || e.benchmarkRate != null);
   }).length;
   return (
@@ -1632,6 +1639,7 @@ function TbRateTable({
           <table>
             <thead>
               <tr>
+                <th>主体</th>
                 <th>借款行</th>
                 <th>期初余额</th>
                 <th>期末余额</th>
@@ -1651,10 +1659,12 @@ function TbRateTable({
             </thead>
             <tbody>
               {rows.map((row) => {
-                const e = edits[row.loanId] ?? { rateType: "fixed" as const };
+                const key = loanRowKey(row);
+                const e = edits[key] ?? { rateType: "fixed" as const };
                 const rateType = e.rateType ?? "fixed";
                 return (
-                  <tr key={row.loanId}>
+                  <tr key={key}>
+                    <td>{row.entity}</td>
                     <td title={row.loanId}>{row.loanId}</td>
                     <td className="loan-num">{row.openingPrincipal.toLocaleString()}</td>
                     <td className="loan-num">{row.closingPrincipal.toLocaleString()}</td>
@@ -1663,7 +1673,7 @@ function TbRateTable({
                         aria-label={`${row.loanId}的利率类型`}
                         value={rateType}
                         onChange={(ev) =>
-                          onEdit(row.loanId, {
+                          onEdit(row, {
                             rateType: ev.target.value as "fixed" | "floating",
                           })
                         }
@@ -1681,7 +1691,7 @@ function TbRateTable({
                         value={e.fixedRate ?? ""}
                         disabled={rateType === "floating"}
                         onChange={(ev) =>
-                          onEdit(row.loanId, {
+                          onEdit(row, {
                             fixedRate: ev.target.value === "" ? undefined : Number(ev.target.value) / 100,
                           })
                         }
@@ -1696,7 +1706,7 @@ function TbRateTable({
                         value={e.benchmarkRate ?? ""}
                         disabled={rateType === "fixed"}
                         onChange={(ev) =>
-                          onEdit(row.loanId, {
+                          onEdit(row, {
                             benchmarkRate: ev.target.value === "" ? undefined : Number(ev.target.value) / 100,
                           })
                         }
@@ -1711,7 +1721,7 @@ function TbRateTable({
                         value={e.spreadBps ?? ""}
                         disabled={rateType === "fixed"}
                         onChange={(ev) =>
-                          onEdit(row.loanId, {
+                          onEdit(row, {
                             spreadBps: ev.target.value === "" ? undefined : Number(ev.target.value),
                           })
                         }
@@ -1935,6 +1945,7 @@ function Results({
         <table>
           <thead>
             <tr>
+              <th>主体</th>
               <th>借款标识</th>
               <th>期初</th>
               <th>增加</th>
@@ -1953,6 +1964,7 @@ function Results({
           <tbody>
             {rows.map((r, i) => (
               <tr key={`${r.loanId}-${i}`}>
+                <td>{r.entity}</td>
                 <td title={r.matchBasis}>{r.loanId}</td>
                 {[
                   r.openingPrincipal,

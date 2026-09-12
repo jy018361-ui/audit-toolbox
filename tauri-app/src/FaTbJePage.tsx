@@ -1484,7 +1484,7 @@ export function FaSummaryTable({
 }
 
 /** 对方科目预览：与导出文件里的「原值透视表」「累计折旧透视表」同一套聚合
-    与版式（科目｜借方金额｜贷方金额＋合计行），预览阶段即可核对方科目的
+    与版式（主体｜科目｜借方金额｜贷方金额＋合计行），预览阶段即可核对方科目的
     借贷构成，确认后再生成正式 Excel。 */
 function FaTbJeCounterpartPreview({ value }: { value: unknown }) {
   const pivots = (value as { counterpartPivots?: unknown } | null | undefined)
@@ -1517,7 +1517,12 @@ function FaTbJeCounterpartPreview({ value }: { value: unknown }) {
   );
 }
 
-type CounterpartRow = { account?: unknown; debit?: unknown; credit?: unknown };
+type CounterpartRow = {
+  entity?: unknown;
+  account?: unknown;
+  debit?: unknown;
+  credit?: unknown;
+};
 
 function FaPivotTable({
   title,
@@ -1540,6 +1545,7 @@ function FaPivotTable({
         <table className="fa-tbje-account-table fa-tbje-pivot-preview">
           <thead>
             <tr>
+              <th>主体</th>
               <th>科目</th>
               <th>借方金额</th>
               <th>贷方金额</th>
@@ -1548,6 +1554,7 @@ function FaPivotTable({
           <tbody>
             {rows.map((row, index) => (
               <tr key={index}>
+                <td title={String(row.entity ?? "")}>{String(row.entity ?? "")}</td>
                 <td
                   className="fa-tbje-pivot-account"
                   title={String(row.account ?? "")}
@@ -1560,7 +1567,7 @@ function FaPivotTable({
             ))}
             {!rows.length && (
               <tr>
-                <td colSpan={3} className="fa-tbje-empty-table">
+                <td colSpan={4} className="fa-tbje-empty-table">
                   期间内没有相关凭证。
                 </td>
               </tr>

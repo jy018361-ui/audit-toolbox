@@ -741,11 +741,11 @@ describe("TbjeCheckPage", () => {
     );
     expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1);
 
-    // 手工解除第 1 组的序时账：05JE 留在候选池，但不单独渲染一行。
+    // 05JE 没有 TB 也必须显示空槽位，用户才知道下一步需要补什么。
     fireEvent.change(screen.getByLabelText("为第 1 组选择序时账"), {
       target: { value: "" },
     });
-    expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(1);
+    expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(2);
 
     // 回到第 1 步，二次添加另一组文件。
     const steps = container.querySelector(".step-indicator") as HTMLElement;
@@ -755,11 +755,11 @@ describe("TbjeCheckPage", () => {
     );
 
     await waitFor(() =>
-      expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(2),
+      expect(container.querySelectorAll(".tbje-group-row")).toHaveLength(3),
     );
     // 第 1 组仍保持「不配对」，5 号序时账也没被强行塞回去。
     expect(screen.getByLabelText("为第 1 组选择序时账")).toHaveValue("");
-    expect(screen.queryByLabelText("为第 5 组选择序时账")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("为第 5 组选择序时账")).toBeInTheDocument();
     expect(
       within(screen.getByLabelText("为第 1 组选择序时账")).getByRole(
         "option",
@@ -779,7 +779,7 @@ describe("TbjeCheckPage", () => {
     expect(screen.queryByText("科目余额表字段映射")).not.toBeInTheDocument();
   });
 
-  it("不显示孤立 JE，并允许手工选择两侧 Excel 与 Sheet 建组", async () => {
+  it("显示孤立 JE，并允许手工选择两侧 Excel 与 Sheet 建组", async () => {
     const { engineCall, pickPath } = await import("./api");
     vi.mocked(pickPath)
       .mockResolvedValueOnce("C:/samples/TB-4800.xlsx")

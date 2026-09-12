@@ -12,6 +12,26 @@
 use chrono::{NaiveDate, NaiveDateTime};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+/// 没有启用双侧主体键时，以及已映射主体列中的空值，统一使用这一稳定键。
+pub(crate) const DEFAULT_ENTITY: &str = "默认主体";
+
+/// 主体是条件性匹配键：只有 TB、JE 双侧都映射了主体列才启用。
+/// 单侧映射时双方都退回默认主体，不能把单边主体当成筛选条件。
+pub(crate) fn entity_key_enabled(tb_has_entity: bool, je_has_entity: bool) -> bool {
+    tb_has_entity && je_has_entity
+}
+
+/// 生成跨工具统一的有效主体键。启用主体维度后，空白主体仍归入默认主体，
+/// 不作为通配符；未启用时忽略单侧原值，双方使用同一个默认键。
+pub(crate) fn effective_entity(raw: &str, enabled: bool) -> String {
+    let value = raw.trim();
+    if enabled && !value.is_empty() {
+        value.to_owned()
+    } else {
+        DEFAULT_ENTITY.to_owned()
+    }
+}
+
 /// TB与JE跨表对齐的公共结论。这是账表引擎能力，不属于汇兑损益业务。
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AccountColumnAlignment {
@@ -374,6 +394,8 @@ static JE_ROLES: &[Role] = &[
             "唯一碼",
             "凭证编号",
             "憑證編號",
+            "会计凭证",
+            "會計憑證",
             "凭证字",
             "憑證字",
             "凭证字号",
@@ -431,6 +453,9 @@ static JE_ROLES: &[Role] = &[
             "科目代碼",
             "科目号",
             "科目編號",
+            // SAP 总账余额导出常把 G/L Account 简写成「帐号」。
+            "帐号",
+            "账号",
             "账户",
             "帳戶",
             "account",
@@ -447,6 +472,8 @@ static JE_ROLES: &[Role] = &[
             "科目名称",
             "科目名稱",
             "科目描述",
+            "帐号描述",
+            "账号描述",
             "科目文本",
             "科目全名",
             "账户名称",
@@ -519,6 +546,8 @@ static JE_ROLES: &[Role] = &[
             // 没有这个别名时它会因「含货币」反而去抢 currency 的位置。
             "总账货币",
             "總賬貨幣",
+            "LC1货币",
+            "LC1幣種",
             "companycodecurrency",
             "ledgercurrency",
             "functionalcurrency",
@@ -536,6 +565,8 @@ static JE_ROLES: &[Role] = &[
             // 04 号样例的 SAP 列叫「借贷标志」，取值是 S／H。
             "借贷标志",
             "借貸標誌",
+            "借/贷标识",
+            "借/貸標識",
             "借贷",
             "借貸",
             "drcr",
@@ -566,6 +597,8 @@ static JE_ROLES: &[Role] = &[
             "本位币金额",
             "本位幣金額",
             "本币金额",
+            "公司代码货币金额",
+            "公司代碼貨幣金額",
             "本位币",
             "本位幣",
             "借正贷负",
@@ -710,6 +743,9 @@ static TB_ROLES: &[Role] = &[
             "科目号",
             "科目編號",
             "科目段组合",
+            // SAP 总账余额导出常把 G/L Account 简写成「帐号」。
+            "帐号",
+            "账号",
             // 04／05 号样例的明细编码列就叫裸的一个「科目」，旁边另有
             // 「科目级别」放一级编码。分数比 `科目编码`（四字）低，同表里
             // 有更具体的写法时抢不过它；`抵销科目` 这类对手方列由 NOT_CODE 挡住。
@@ -733,6 +769,8 @@ static TB_ROLES: &[Role] = &[
             "科目名称三级",
             "科目全称",
             "科目描述",
+            "帐号描述",
+            "账号描述",
             "科目文本",
             "账户名称",
             "帳戶名稱",
@@ -791,6 +829,8 @@ static TB_ROLES: &[Role] = &[
             "记账本位币",
             "总账货币",
             "總賬貨幣",
+            "LC1货币",
+            "LC1幣種",
             "functionalcurrency",
             "ledgercurrency",
         ],
@@ -830,6 +870,9 @@ static TB_ROLES: &[Role] = &[
             // 既有别名一个都对不上。裸的「期初」分数最低，同表里有更具体的
             // 写法时抢不过它；`期初余额方向`、`期初借方` 由冲突词挡住。
             "期初",
+            "(FP)-LC1",
+            // 2000&2002 公司 TB 的 SAP 英文短表头。
+            "Begin Amt.",
             "beginbalance",
             "beginningbalance",
             "openingbalance",
@@ -906,6 +949,8 @@ static TB_ROLES: &[Role] = &[
             // 02 号样例的期末列写作「累计余额」，配一个「累计余额方向」列。
             "累计余额",
             "累計餘額",
+            "累计差额-LC1",
+            "累計差額-LC1",
             "期末金额",
             "期末金額",
             "年末余额",
@@ -995,6 +1040,7 @@ static TB_ROLES: &[Role] = &[
             "借方发生",
             "借方發生",
             "借方金额",
+            "Debit Amount",
             "ytddebit",
             "ytddr",
             "perioddr",
@@ -1019,6 +1065,7 @@ static TB_ROLES: &[Role] = &[
             "贷方发生",
             "貸方發生",
             "贷方金额",
+            "Credit Amount",
             "ytdcredit",
             "ytdcr",
             "periodcr",
@@ -1080,6 +1127,8 @@ static TB_ROLES: &[Role] = &[
             "本期本位币借方发生额",
             "本期借方",
             "本月借方",
+            "借方余额-LC1",
+            "借方餘額-LC1",
             "mtddebit",
         ],
         &[
@@ -1119,6 +1168,8 @@ static TB_ROLES: &[Role] = &[
             "本期本位币贷方发生额",
             "本期贷方",
             "本月贷方",
+            "贷方余额-LC1",
+            "貸方餘額-LC1",
             "mtdcredit",
         ],
         &[
@@ -2446,11 +2497,10 @@ impl LedgerBodyRule {
             name.extend(legacy.iter().skip(1).copied());
         }
         let je_amounts = indexes(JE_AMOUNT_ROLES);
-        // 业务行协议只有 JE 三类必要角色都已映射时才启用——TB 也共用这套判定，
-        // 不能拿 JE 的协议去截余额表。是否属于 JE 只看映射列：科目编码、科目名称
-        // 和至少一个可解析金额三项齐备才纳入；凭证号、备注、任意其他列有值都
-        // 不能把残留行放进正文。
-        let boundary = !code.is_empty() && !name.is_empty() && !je_amounts.is_empty();
+        // JE 正文只要求“可用科目身份＋可解析金额”。有可靠编码时科目名称可以
+        // 为空（2002 JE 的「科目描述」整列为空）；反之只有名称时也允许进入，
+        // 后续跨表策略再判断名称能否安全配对。不能用空名称把真实分录整片删掉。
+        let boundary = (!code.is_empty() || !name.is_empty()) && !je_amounts.is_empty();
         LedgerBodyRule {
             identity,
             amount,
@@ -2467,8 +2517,7 @@ impl LedgerBodyRule {
             return true;
         }
         if self.boundary {
-            return self.has_field(row, &self.code)
-                && self.has_field(row, &self.name)
+            return (self.has_field(row, &self.code) || self.has_field(row, &self.name))
                 && self.has_parseable_je_amount(row);
         }
         self.has_identity(row) || !self.has_amount(row)
@@ -8256,14 +8305,14 @@ mod tests {
     }
 
     #[test]
-    fn 单个必要映射字段空白时该行不属于业务行() {
+    fn 科目编码可靠时科目名称空白仍属于业务行() {
         let headers: Vec<String> = ["科目编码", "科目名称", "金额", "备注"]
             .into_iter()
             .map(String::from)
             .collect();
         let rows = vec![
             vec!["1001".into(), "库存现金".into(), "10".into(), "".into()],
-            // 科目名称为空；即使其他列有值，也不能成为业务行。
+            // 科目名称为空，但可靠科目编码与金额足以证明它是业务行。
             vec!["1002".into(), "".into(), "20".into(), "".into()],
             vec!["1003".into(), "银行存款".into(), "30".into(), "".into()],
         ];
@@ -8275,7 +8324,44 @@ mod tests {
         };
 
         let analysis = analyze_ledger_rows(&headers, &rows, &columns);
-        assert_eq!(analysis.keep, vec![true, false, true]);
+        assert_eq!(analysis.keep, vec![true, true, true]);
+    }
+
+    #[test]
+    fn sap余额表短列名能映射到本位币口径() {
+        let headers: Vec<String> = [
+            "帐号",
+            "账号描述",
+            "交易货币",
+            "LC1货币",
+            "(FP)-LC1",
+            "累计差额-LC1",
+            "借方余额-LC1",
+            "贷方余额-LC1",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let got = suggest_roles("tb", &headers);
+        assert_eq!(got.get(&0), Some(&"accountCode"), "{got:?}");
+        assert_eq!(got.get(&1), Some(&"accountName"), "{got:?}");
+        assert_eq!(got.get(&2), Some(&"currency"), "{got:?}");
+        assert_eq!(got.get(&3), Some(&"functionalCurrency"), "{got:?}");
+        assert_eq!(got.get(&4), Some(&"openingFunctionalAmount"), "{got:?}");
+        assert_eq!(got.get(&5), Some(&"closingFunctionalAmount"), "{got:?}");
+        assert_eq!(got.get(&6), Some(&"periodFunctionalDebit"), "{got:?}");
+        assert_eq!(got.get(&7), Some(&"periodFunctionalCredit"), "{got:?}");
+    }
+
+    #[test]
+    fn 主体维度仅在双侧都有映射时启用且空值归默认主体() {
+        assert!(entity_key_enabled(true, true));
+        assert!(!entity_key_enabled(true, false));
+        assert!(!entity_key_enabled(false, true));
+        assert!(!entity_key_enabled(false, false));
+        assert_eq!(effective_entity("主体 A", true), "主体 A");
+        assert_eq!(effective_entity("  ", true), DEFAULT_ENTITY);
+        assert_eq!(effective_entity("主体 A", false), DEFAULT_ENTITY);
     }
 
     #[test]

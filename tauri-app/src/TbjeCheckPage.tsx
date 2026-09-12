@@ -549,12 +549,9 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const [inspects, setInspects] = useState<Record<string, Inspection>>({});
   const [mappings, setMappings] = useState<Record<string, Mapping>>({});
   const [groups, setGroups] = useState<PairedGroup[]>([]);
-  // JE-only groups remain in memory so a later TB upload or manual selection can
-  // claim them, but they are not rows: this page is TB-led and a JE cannot run alone.
-  const visibleGroups = useMemo(
-    () => groups.filter((group) => Boolean(group.tb)),
-    [groups],
-  );
+  // 任一侧识别成功就展示配对组。JE 虽不能单独执行三条 TB 核对，但必须给用户
+  // 一个可见的空 TB 槽位和下一步入口，不能让已识别资料静默消失。
+  const visibleGroups = groups;
   const tbForms = useLedgerForms("tb");
   const jeForms = useLedgerForms("je");
   const [expanded, setExpanded] = useState<
@@ -1043,7 +1040,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     [groups],
   );
 
-  const runnable = visibleGroups;
+  const runnable = visibleGroups.filter((group) => Boolean(group.tb));
   function invalidateResults(clearLlm = true) {
     activeJobId.current = "__inputs_changed__";
     setOutcomes([]);
@@ -1576,7 +1573,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                 </h2>
               </CardTitle>
               <CardDescription>
-                只展示已找到 TB 的配对组；未配上的 JE 会保留为可选来源，不单独占一行。也可手工选择两侧 Excel 与 Sheet。
+                识别到 TB 或 JE 任一侧都会显示一组；缺少的一侧可在组内补选 Excel 与 Sheet。只有 TB 的组可先做余额勾稽，只有 JE 的组补齐 TB 后再核对。
               </CardDescription>
               <div className="tbje-llm-action">
                 <Button
@@ -1650,11 +1647,15 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                           <button
                             type="button"
                             className="tbje-group-file tbje-file-name-button"
-                            title={`${group.tb?.path}（点击更换）`}
+                            title={
+                              group.tb
+                                ? `${group.tb.path}（点击更换）`
+                                : "选择 TB Excel"
+                            }
                             disabled={busy}
                             onClick={() => void pickManualSource("tb", group.id)}
                           >
-                            {fileName(group.tb!.path)}
+                            {group.tb ? fileName(group.tb.path) : "选择 TB Excel"}
                           </button>
                         </div>
                         {group.tb &&

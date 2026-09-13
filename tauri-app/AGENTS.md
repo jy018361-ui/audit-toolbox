@@ -26,6 +26,18 @@ python scripts/start_tauri_dev.py      # 开发模式
 python scripts/build_tauri_release.py  # 发布打包（--skip-tests / --smoke-only / --legacy-regression 可选）
 ```
 
+Rust 测试迭代经验（2026-09，详见全局 AGENTS.md「Rust 工程经验」）：
+
+* 日常回归跑库测试即可：`cargo test --manifest-path src-tauri/Cargo.toml --lib`——
+  全部业务测试都在 lib 内（735+ 项，约 2 分钟含真实大样本）；`--lib <中文子串>`
+  定向过滤，cargo 的过滤器只认单个子串，不支持正则/多选。
+* `tests/` 下的集成测试（`fx_*_probe`、`mapping_survey`、`fuzzy_roundtrip` 等）是
+  真实数据探针，需要环境变量或外部样例文件、多数 `#[ignore]`，常规回归不跑；
+  且 `cargo build` 通过不代表 `cargo test` 全目标能编过（bin＋集成目标还有第二遍
+  特性组合编译），产物冲突时优先缩小到 `--lib` 验证。
+* 多会话并行时给 cargo 设独立 `CARGO_TARGET_DIR`（首次全量约 10 分钟），并先查
+  残留 cargo 进程再怀疑缓存损坏。
+
 ## 架构
 
 调用链：`React 页面 → src/api.ts → Tauri invoke → src-tauri/src/lib.rs（命令白名单）→ 各业务 .rs`。

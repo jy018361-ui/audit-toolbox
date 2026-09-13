@@ -182,24 +182,7 @@ body .app-shell {
   cursor: default;
 }
 
-/* ---- 品牌区 logo 与桌面端折叠开关 ----
-   logo 用 mask 蒙版实现：形状来自 brand-mark.png 的透明度，
-   颜色引用主题变量，切换界面主题时标志跟着主题色走。 */
-.app-shell .brand-logo {
-  display: block;
-  width: 48px;
-  height: 48px;
-  margin-bottom: var(--sp-3);
-  background: var(--brand-accent);
-  -webkit-mask-image: url(/brand-mark.png);
-  mask-image: url(/brand-mark.png);
-  -webkit-mask-size: contain;
-  mask-size: contain;
-  -webkit-mask-repeat: no-repeat;
-  mask-repeat: no-repeat;
-  -webkit-mask-position: center;
-  mask-position: center;
-}
+/* ---- 桌面端折叠开关 ---- */
 
 .sidebar-collapse-toggle {
   position: absolute;

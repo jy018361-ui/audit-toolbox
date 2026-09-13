@@ -649,9 +649,6 @@ export default function App() {
             >
               ×
             </button>
-            {/* 风车标走 CSS 蒙版，颜色引用主题变量，换主题自动跟随；
-                完整带文字 logo 不进侧边栏——图里的"E点通"会和下面标题重复 */}
-            <span className="brand-logo" role="img" aria-label="EY E点通" />
             {/* 桌面端折叠开关：折叠成窄图标栏；折叠态下抽屉里同一位置变成"展开固定" */}
             <button
               ref={sidebarCollapseToggle}

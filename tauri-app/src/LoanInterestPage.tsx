@@ -11,6 +11,8 @@ import {
   pickPath,
 } from "./api";
 import { depositDropTargetInside } from "./DepositInterestPage";
+import { AuxiliaryLinkStatusView } from "@/components/AuxiliaryLinkStatus";
+import { verifyAuxiliaryLink, type AuxiliaryLinkResult } from "@/ledgerMapping";
 import { DateInput } from "@/components/DateInput";
 import { PageHeader } from "@/components/PageHeader";
 import { FileDropInput } from "@/components/FileDropInput";
@@ -391,6 +393,42 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       void stop.then((x) => x());
     };
   }, []);
+  // 借款明细联动验证（公共锚点反查，角色＝loanId、纯锚点口径）：
+  // 与计算侧同一套判定，用户在映射页就能看到 JE 有没有对应的借款明细列。
+  const [auxLink, setAuxLink] = useState<AuxiliaryLinkResult | null>(null);
+  useEffect(() => {
+    const tb = sources.tb;
+    const je = sources.je;
+    if (!tb.path || !je.path) {
+      setAuxLink(null);
+      return;
+    }
+    let cancelled = false;
+    void verifyAuxiliaryLink({
+      tbSource: {
+        inputPath: tb.path,
+        sheet: tb.inspection?.sheet ?? "",
+        headerRow: tb.inspection?.headerRow ?? 1,
+        headerDepth: tb.inspection?.headerDepth ?? 1,
+      },
+      tbMapping: tb.mapping,
+      jeSource: {
+        inputPath: je.path,
+        sheet: je.inspection?.sheet ?? "",
+        headerRow: je.inspection?.headerRow ?? 1,
+        headerDepth: je.inspection?.headerDepth ?? 1,
+      },
+      jeMapping: je.mapping,
+      auxRole: "loanId",
+      anchorOnly: true,
+    }).then((result) => {
+      if (!cancelled) setAuxLink(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sources]);
   // TB＋JE 模式支持把两个文件整组拖进上传框，与存款利息／FA 一致。
   useEffect(() => {
     const drops = listenPositionedFileDrops(({ paths, x, y }) => {
@@ -1117,6 +1155,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                       ) : null}
                     </div>
                   </div>
+                  {mode === "tb" && <AuxiliaryLinkStatusView result={auxLink} dimensionLabel="借款明细" />}
                 </>
               ) : (
                 <div className="loan-upload-grid">

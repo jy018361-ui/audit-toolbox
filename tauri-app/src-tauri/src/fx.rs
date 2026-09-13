@@ -3597,6 +3597,92 @@ pub(crate) fn check_mapping_alignment(params: &Value) -> Result<Value, AppError>
     }))
 }
 
+/// 辅助核算联动验证（映射阶段公共入口）：TB 锚点反查认定 JE 辅助列。
+/// 只出结论与提示、不改映射——面板拿结论做三态标注，计算侧各自复核同一
+/// 份公共逻辑，映射阶段与运行阶段的认定不会各说各话。
+pub(crate) fn auxiliary_link_check(params: &Value) -> Result<Value, AppError> {
+    let source_of = |key: &str| -> Result<SourceSpec, AppError> {
+        serde_json::from_value(params.get(key).cloned().unwrap_or(Value::Null)).map_err(|e| {
+            error("INVALID_PARAMS", "来源参数无效。", Some(e.to_string()))
+        })
+    };
+    let tb = load_fx_table(&source_of("tbSource")?)?;
+    let je = load_fx_table(&source_of("jeSource")?)?;
+    let tb_mapping = mapping_obj(params, "tbMapping");
+    let je_mapping = mapping_obj(params, "jeMapping");
+    // 借款工具的维度角色是借款明细（loanId）而非通用辅助核算；anchorOnly
+    // 对齐借款计算侧的既有口径——列定位只看锚点唯一性，不看用户映射了哪列。
+    let role = params
+        .get("auxRole")
+        .and_then(Value::as_str)
+        .unwrap_or("auxiliary");
+    let anchor_only = params
+        .get("anchorOnly")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let tb_aux_mapped = !mapped_cols(&tb_mapping, role).is_empty();
+    let leaf =
+        ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|r| mapped_cols(&tb_mapping, r));
+    let anchors =
+        ledger_mapping::tb_auxiliary_anchors(&tb.headers, &tb.rows, &leaf, &tb_mapping, role);
+    let preferred = if anchor_only {
+        None
+    } else {
+        mapped_cols(&je_mapping, role).first().cloned()
+    };
+    let mut accumulator = ledger_mapping::AnchorColumnAccumulator::new(je.headers.len());
+    for row in &je.rows {
+        accumulator.feed(row, &anchors);
+    }
+    let verdict = ledger_mapping::auxiliary_link_verdict(
+        &anchors,
+        accumulator.finish(&je.headers),
+        je.rows.len(),
+        preferred.as_deref(),
+    );
+    let dimension_label = if role == "loanId" {
+        "借款明细"
+    } else {
+        "辅助核算"
+    };
+    let mut warnings = Vec::new();
+    if tb_aux_mapped {
+        match verdict.status {
+            "noMatch" => warnings.push(format!(
+                "TB 已映射{dimension_label}，但 JE 无对应列，勾稽将按主体＋科目进行。"
+            )),
+            "ambiguous" => warnings.push(format!(
+                "JE 中有多列包含{dimension_label}值（{}），无法唯一认定；可在映射中手动指定其一。",
+                verdict.competing_columns.join("、")
+            )),
+            "noAnchors" => warnings.push(format!(
+                "TB {dimension_label}列没有可验证的当期发生额行，勾稽按主体＋科目进行。"
+            )),
+            "partialCoverage" => warnings.push(format!(
+                "JE {dimension_label}列「{}」覆盖不全（{}/{} 个维度命中），维度差异请结合未分维度行复核。",
+                verdict.column.clone().unwrap_or_default(),
+                verdict.anchor_hits,
+                verdict.anchor_total
+            )),
+            _ => {}
+        }
+    }
+    Ok(json!({
+        "tbAuxMapped": tb_aux_mapped,
+        "status": verdict.status,
+        "column": verdict.column,
+        "anchorHits": verdict.anchor_hits,
+        "anchorTotal": verdict.anchor_total,
+        "coverage": if verdict.total_rows > 0 {
+            (verdict.nonempty_rows as f64 / verdict.total_rows as f64 * 10_000.0).round() / 10_000.0
+        } else {
+            0.0
+        },
+        "competingColumns": verdict.competing_columns,
+        "warnings": warnings,
+    }))
+}
+
 fn currency_mapping_issues(params: &Value) -> Result<Vec<String>, AppError> {
     let mut issues = Vec::new();
     for (label, source_key, map_key, side) in [

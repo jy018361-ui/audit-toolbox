@@ -12,6 +12,8 @@ import {
   pickPath,
 } from "./api";
 import { PageHeader } from "@/components/PageHeader";
+import { AuxiliaryLinkStatusView } from "@/components/AuxiliaryLinkStatus";
+import { verifyAuxiliaryLink, type AuxiliaryLinkResult } from "@/ledgerMapping";
 import { errorText } from "@/lib/errors";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
@@ -446,6 +448,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const [tbMapping, setTbMapping] = useState<Record<string, string | string[]>>(
     {},
   );
+  // 辅助核算联动验证（映射阶段公共入口）：只做认定标注与降级提示，
+  // 不改本工具的测算口径。
+  const [auxLink, setAuxLink] = useState<AuxiliaryLinkResult | null>(null);
   const [accountRoles, setAccountRoles] = useState<Record<string, string>>({});
   const [accountRoleOverrides, setAccountRoleOverrides] = useState<
     Record<string, string>
@@ -521,6 +526,21 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       .then((x) => setTiers(x as RateTiers))
       .catch(() => undefined);
   }, []);
+  // 两侧映射齐了就认定一次辅助列联动；用户改列随映射变化重验。
+  useEffect(() => {
+    if (!tb || !je) {
+      setAuxLink(null);
+      return;
+    }
+    let cancelled = false;
+    void verifyAuxiliaryLink(payload()).then((result) => {
+      if (!cancelled) setAuxLink(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tb, je, tbPath, jePath, tbMapping, jeMapping]);
   useEffect(() => {
     setAccountRoles(
       Object.fromEntries(
@@ -1286,6 +1306,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                 }
                 reviewBusy={reviews.reviewing.je}
               />
+            )}
+            {tb && je && (
+              <AuxiliaryLinkStatusView result={auxLink} />
             )}
           </div>
           {/* 步骤条第二步是参考资料、没传文件也允许进（见上方 StepIndicator
@@ -2143,6 +2166,15 @@ function Results({
           <span>{jeCurrencyAllocationWarning}</span>
         </p>
       )}
+      {(Array.isArray(summary.auxiliaryWarnings)
+        ? summary.auxiliaryWarnings.map((item) => String(item)).filter(Boolean)
+        : []
+      ).map((warning) => (
+        <p key={warning} className="deposit-stale">
+          <b>辅助核算联动</b>
+          <span>{warning}</span>
+        </p>
+      ))}
       {jeUncoveredEntities.length > 0 && (
         <p className="deposit-stale" role="alert">
           <b>序时账未覆盖核算主体</b>

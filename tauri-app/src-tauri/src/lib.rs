@@ -319,6 +319,10 @@ async fn engine_call(
         // TB与JE的跨表对齐是公共账表能力。`fx.*` 旧入口仍保留
         // 兼容，新工具必须从 ledger 命名空间调用。
         fx::check_mapping_alignment(&params)
+    } else if method == "ledger.auxiliary_link" {
+        // 辅助核算联动验证（锚点反查认定 JE 辅助列）：映射阶段公共入口，
+        // 计算侧（TBJE 完整性／存款）复核同一份公共判定逻辑。
+        fx::auxiliary_link_check(&params)
     } else if method == "ledger.entity_scope_suggestions" {
         ledger_mapping::entity_scope_suggestions_call(&params)
     } else if method == "ledger.review_mapping" {

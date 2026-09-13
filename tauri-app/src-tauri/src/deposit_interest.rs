@@ -1669,6 +1669,89 @@ fn calculate(
         };
         ledger_mapping::AccountMatchPolicy::from_sides(&tb_identities, &je_identities)
     };
+    // 辅助核算联动验证（公共锚点反查）：本工具的测算建户与利率档次仍按
+    // 主体＋科目归并（辅助核算只作档次线索与披露），这里只把认定结论与
+    // 降级提示带回汇总——用户映射了辅助列却不生效时必须知道原因。
+    let auxiliary_link = match &je_input {
+        Some(je) => {
+            let anchors = ledger_mapping::tb_auxiliary_anchors(
+                &tb.headers,
+                &tb.rows,
+                &tb_leaf,
+                &tb_map,
+                "auxiliary",
+            );
+            let je_map = match je {
+                JeInput::Memory(_, mapping) | JeInput::Disk(_, mapping) => mapping,
+            };
+            let preferred = ledger_mapping::mapped_column_names(je_map, "auxiliary")
+                .first()
+                .cloned();
+            let mut verdict = ledger_mapping::auxiliary_link_verdict(
+                &anchors,
+                Vec::new(),
+                0,
+                preferred.as_deref(),
+            );
+            if !anchors.is_empty() {
+                match je {
+                    JeInput::Memory(table, _) => {
+                        let mut accumulator =
+                            ledger_mapping::AnchorColumnAccumulator::new(table.headers.len());
+                        for row in &table.rows {
+                            accumulator.feed(row, &anchors);
+                        }
+                        verdict = ledger_mapping::auxiliary_link_verdict(
+                            &anchors,
+                            accumulator.finish(&table.headers),
+                            table.rows.len(),
+                            preferred.as_deref(),
+                        );
+                    }
+                    JeInput::Disk(disk, _) => {
+                        let headers = disk.headers().to_vec();
+                        let mut accumulator =
+                            ledger_mapping::AnchorColumnAccumulator::new(headers.len());
+                        let mut total_rows = 0usize;
+                        disk.visit(false, cancel, |row| {
+                            total_rows += 1;
+                            accumulator.feed(&row.values, &anchors);
+                            Ok(())
+                        })?;
+                        verdict = ledger_mapping::auxiliary_link_verdict(
+                            &anchors,
+                            accumulator.finish(&headers),
+                            total_rows,
+                            preferred.as_deref(),
+                        );
+                    }
+                }
+            }
+            (!ledger_mapping::mapped_column_names(&tb_map, "auxiliary").is_empty())
+                .then_some(verdict)
+        }
+        None => None,
+    };
+    let mut auxiliary_warnings: Vec<String> = Vec::new();
+    if let Some(verdict) = auxiliary_link.as_ref() {
+        match verdict.status {
+            "noMatch" => auxiliary_warnings.push(
+                "TB 已映射辅助核算，但 JE 无对应列；本工具按主体＋科目归并测算，辅助核算仅作档次线索与披露。"
+                    .to_owned(),
+            ),
+            "ambiguous" => auxiliary_warnings.push(format!(
+                "JE 中有多列包含辅助核算值（{}），无法唯一认定；本工具按主体＋科目归并测算，辅助核算仅作档次线索与披露。",
+                verdict.competing_columns.join("、")
+            )),
+            "partialCoverage" => auxiliary_warnings.push(format!(
+                "JE 辅助列「{}」覆盖不全（{}/{} 个维度命中），维度披露仅供参考。",
+                verdict.column.clone().unwrap_or_default(),
+                verdict.anchor_hits,
+                verdict.anchor_total
+            )),
+            _ => {}
+        }
+    }
     // 第二遍：按（主体＋公共科目键）聚合维度拆行。辅助核算不进键——
     // 银行户以科目为户，维度差异（银行/款项性质等）并入行注披露。
     struct AccountFold {
@@ -2145,6 +2228,17 @@ fn calculate(
             },
             "jeUncoveredEntities": uncovered_entities,
             "jeUncoveredAccountCount": uncovered_count,
+            // 辅助核算联动（公共锚点反查）：仅披露认定结论，不改测算口径。
+            "auxiliaryMatch": auxiliary_link.as_ref().map(|verdict| {
+                json!({
+                    "status": verdict.status,
+                    "column": verdict.column,
+                    "anchorHits": verdict.anchor_hits,
+                    "anchorTotal": verdict.anchor_total,
+                    "competingColumns": verdict.competing_columns,
+                })
+            }),
+            "auxiliaryWarnings": auxiliary_warnings,
             "amountScheme": amount_scheme,
             "amountEvidence": amount_evidence,
             "openingSource": if accounts.iter().all(|a| a.opening_from_tb) {
@@ -6457,7 +6551,160 @@ mod tests {
         assert!(
             booked_rows
                 .iter()
-                .all(|row| !row["note"].as_str().unwrap().contains("剔除"))
+                .all(|row| !row["note"].as_str().unwrap_or("").contains("剔除"))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 辅助核算联动（公共锚点反查）：存款工具不改测算口径，只披露认定
+    /// 结论；TB 映射了辅助列而 JE 对不上时必须有降级提示，不能无声吞掉。
+    #[test]
+    fn 存款工具披露辅助核算联动认定与降级提示() {
+        let dir = std::env::temp_dir().join(format!(
+            "deposit-aux-link-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb_path = dir.join("tb.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec![
+                    "科目编码",
+                    "科目名称",
+                    "辅助核算",
+                    "期初余额借方",
+                    "期初余额贷方",
+                    "本期发生借方",
+                    "本期发生贷方",
+                    "期末余额借方",
+                    "期末余额贷方",
+                ],
+                vec![
+                    "1002",
+                    "银行存款",
+                    "工行理财",
+                    "1200000",
+                    "0",
+                    "1200000",
+                    "0",
+                    "2400000",
+                    "0",
+                ],
+            ],
+        );
+        let je_linked = dir.join("je-linked.xlsx");
+        write_fixture(
+            &je_linked,
+            &[
+                vec![
+                    "记账日期",
+                    "凭证号",
+                    "科目编码",
+                    "科目名称",
+                    "辅助核算",
+                    "借方金额",
+                    "贷方金额",
+                ],
+                vec![
+                    "2025-06-30",
+                    "记-1",
+                    "1002",
+                    "银行存款",
+                    "工行理财",
+                    "100",
+                    "0",
+                ],
+            ],
+        );
+        let tb = inspect(
+            &json!({"source": {"inputPath": tb_path.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
+        let je = inspect(
+            &json!({"source": {"inputPath": je_linked.to_string_lossy()}}),
+            "je",
+        )
+        .unwrap();
+        let mut tb_mapping = tb["suggestedMapping"].clone();
+        tb_mapping["auxiliary"] = json!("辅助核算");
+        let params = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": tb_mapping,
+            "accountRoles": tb["suggestedAccountRoles"],
+            "jeSource": {"inputPath": je_linked.to_string_lossy()},
+            "jeMapping": je["suggestedMapping"],
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result =
+            run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap();
+        let summary = &result["summary"];
+        assert_eq!(
+            summary["auxiliaryMatch"]["status"],
+            json!("verified"),
+            "{summary:#?}"
+        );
+        assert!(
+            summary["auxiliaryWarnings"]
+                .as_array()
+                .map(Vec::is_empty)
+                .unwrap_or(true),
+            "{summary:#?}"
+        );
+
+        // JE 换成没有辅助列的版本：noMatch 降级＋提示，测算数字不受影响。
+        let je_plain = dir.join("je-plain.xlsx");
+        write_fixture(
+            &je_plain,
+            &[
+                vec![
+                    "记账日期",
+                    "凭证号",
+                    "科目编码",
+                    "科目名称",
+                    "借方金额",
+                    "贷方金额",
+                ],
+                vec!["2025-06-30", "记-1", "1002", "银行存款", "100", "0"],
+            ],
+        );
+        let je_plain_inspected = inspect(
+            &json!({"source": {"inputPath": je_plain.to_string_lossy()}}),
+            "je",
+        )
+        .unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result = run_job(
+            "deposit.preview",
+            json!({
+                "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+                "tbSource": {"inputPath": tb_path.to_string_lossy()},
+                "tbMapping": tb_mapping,
+                "accountRoles": tb["suggestedAccountRoles"],
+                "jeSource": {"inputPath": je_plain.to_string_lossy()},
+                "jeMapping": je_plain_inspected["suggestedMapping"],
+            }),
+            &|_, _, _, _| {},
+            cancel,
+            &pause,
+        )
+        .unwrap();
+        let summary = &result["summary"];
+        assert_eq!(summary["auxiliaryMatch"]["status"], json!("noMatch"), "{summary:#?}");
+        assert!(
+            summary["auxiliaryWarnings"]
+                .as_array()
+                .map(|warnings| warnings.iter().any(|warning| warning
+                    .as_str()
+                    .map(|text| text.contains("JE 无对应列"))
+                    .unwrap_or(false)))
+                .unwrap_or(false),
+            "降级必须带提示: {summary:#?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

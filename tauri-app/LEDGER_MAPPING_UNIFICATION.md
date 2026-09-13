@@ -1,5 +1,12 @@
 # 账表映射统一方案
 
+## 2026-09-13 · 辅助核算联动（锚点反查）收编公共引擎并条件化 TBJE 匹配键
+
+- 列定位能力归公共：`ledger_mapping::auxiliary_link_verdict`（纯判定）＋`AnchorColumnAccumulator`（内存／磁盘单遍扫描同一接口）＋`tb_auxiliary_anchors`（TB 锚点提取）＋`anchor_norm`（维度值归一化，`L-1`／`l_1`／`L1` 同值）。锚点只取 TB 有当期发生额的行——休眠维度不会出现在 JE，不能当锚点；自动认定沿用借款工具验证过的严标准：恰有一列含任一锚点才认定，多列命中为歧义、宁可不细分；用户／LLM 已映射辅助列时只验证该列，对不上按 `noMatch` 静默降级＋提示，绝不悄悄换列。全程不设拦截。
+- 各工具接入边界：**TBJE 完整性**把发生额勾稽键从「主体＋科目」条件化为「主体＋科目＋辅助维度」（`tbVsJe.auxiliaryRefined`、`items[].auxiliary`；JE 辅助为空的分录归「未分维度」行，不猜归属；多列辅助取与 JE 认定列锚点交集最大的 TB 列做键）。**存款利息**测算建户与利率档次仍按主体＋科目（辅助只作档次线索与披露），汇总新增 `summary.auxiliaryMatch`／`auxiliaryWarnings` 披露认定与降级原因。**借款利息**的列定位内部改为调用公共判定，行为与提示逐字保持（既有两条回归照旧）。**FA 套表**按资产科目匹配、不接维度键。**汇兑损益**保留既有「两侧都映射＋结果不好退回」实现（`fx::tests::辅助核算两边都映射且对得上时进入匹配键` 等），与本锚点反查是两种口径，后续单独评估统一。
+- 映射阶段公共命令 `ledger.auxiliary_link`（engine_call，宿主 fx.rs）：入参 tbSource／tbMapping／jeSource／jeMapping，可选 `auxRole=loanId`（借款维度角色）与 `anchorOnly`（对齐借款计算侧的纯锚点口径）；返回 status／column／anchorHits／anchorTotal／coverage／competingColumns／warnings。TBJE、存款、借款三页在两侧映射齐后自动调用，映射面板下统一渲染三态标注（公共组件 `AuxiliaryLinkStatusView`：已验证／覆盖不全／对不上将按主体＋科目）。计算侧复核同一份公共判定，映射阶段与运行阶段不会各说各话。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 辅助`（引擎锚点判定、TBJE 细分／未分维度／降级／手选错列、存款披露与降级、借款既有两条）；前端 `npx vitest run src/components/AuxiliaryLinkStatus.test.tsx`。
+
 ## 2026-09-13 · FA TBJE 接入主体条件键并新增 JE 零命中守卫
 
 - FA TBJE（`fa_tbje.rs`）此前未接入主体条件键：JE 主体列未映射（或指向空列）时，JE 每行身份逐行回退 `jeFixedEntity`，与携带真实主体的已确认科目全不匹配，`find_assignment` 命不中即静默丢弃——整本 JE 归零、导出的新增／处置／JE 明细／透视表全空且零警告（2000&2002 公司 TB＋2002 公司 JE 实测复现）。现按本文件「主体作为条件匹配键」的既有规则接入：只有 TB、JE 双侧都映射了主体列，才启用主体维度；双侧主体列空值归默认主体；只有一侧映射主体时，双方整体按默认主体处理，不能把单侧主体当筛选条件。启用判定 = `entity_key_enabled(mapped_columns(tbMapping,"entity") 非空, mapped_columns(jeMapping,"entity") 非空)`，在 `analyze_with_progress`（内存路径）与 `analyze_with_disk_je`（大表磁盘路径）各算一次并下传到所有身份计算点（`account_identities` / `account_identity_from_row` / `normalize_tb` / `normalize_je` / `assignment_index` / JE-only 告警）；行级主体一律经公共 `effective_entity(raw, enabled)` 折算，不再逐行回退 `tbFixedEntity`/`jeFixedEntity` 的差异值。用户显式确认的归集（`apply_entity_scope`，aggregate 模式）在有效主体之后照常生效。

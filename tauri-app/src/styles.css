@@ -3960,3 +3960,15 @@ input[type="checkbox"].switch-input:disabled {
     transition: none;
   }
 }
+
+/* 辅助核算联动验证三态标注（公共组件 AuxiliaryLinkStatusView）。 */
+.aux-link-status {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--success-fg);
+}
+
+.aux-link-status--warn {
+  color: var(--warning-fg);
+}

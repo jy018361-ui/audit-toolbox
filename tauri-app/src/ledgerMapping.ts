@@ -1238,3 +1238,45 @@ export function undoMappingChange(
   if (wasEmpty) return { ...mapping, [change.role]: multi ? [] : undefined };
   return setKanzhangMapping(mapping, change.role, before as string | string[]);
 }
+
+// ---------------------------------------------------------------------------
+// 辅助核算联动验证（公共锚点反查）
+// ---------------------------------------------------------------------------
+
+export type AuxiliaryLinkStatus =
+  | "verified"
+  | "partialCoverage"
+  | "noMatch"
+  | "noAnchors"
+  | "ambiguous";
+
+export type AuxiliaryLinkResult = {
+  tbAuxMapped: boolean;
+  status: AuxiliaryLinkStatus;
+  column: string | null;
+  anchorHits: number;
+  anchorTotal: number;
+  coverage: number;
+  competingColumns: string[];
+  warnings: string[];
+};
+
+/**
+ * 映射阶段的辅助核算联动验证：TB 锚点反查认定 JE 辅助列。
+ * 结论只用于面板标注与提示；计算侧（TBJE 完整性／存款）复核同一份公共
+ * 判定逻辑，两阶段不会各说各话。验证失败不抛错——标注能力不许阻塞映射。
+ */
+export async function verifyAuxiliaryLink(
+  params: Record<string, unknown>,
+): Promise<AuxiliaryLinkResult | null> {
+  try {
+    const { engineCall } = await import("./api");
+    const result = (await engineCall(
+      "ledger.auxiliary_link",
+      params,
+    )) as AuxiliaryLinkResult;
+    return result && typeof result.status === "string" ? result : null;
+  } catch {
+    return null;
+  }
+}

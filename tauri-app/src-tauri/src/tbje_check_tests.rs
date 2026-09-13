@@ -2009,3 +2009,174 @@ fn 导出真实样例前三组() {
     println!("{result:#}");
     assert_eq!(result["outputPaths"].as_array().map(Vec::len), Some(3));
 }
+
+// ---------------------------------------------------------------------------
+// 辅助核算条件匹配键（公共锚点反查）
+// ---------------------------------------------------------------------------
+
+/// 辅助参数：TB 映射辅助核算列；`je_aux` 控制 JE 侧是否映射辅助列。
+fn auxiliary_params(dir: &std::path::Path, je_aux: Option<&str>) -> Value {
+    let mut value = json!({
+        "tbSource": {"inputPath": dir.join("tb.csv"), "sheet": "", "headerRow": 0, "headerDepth": 0},
+        "jeSource": {"inputPath": dir.join("je.csv"), "sheet": "", "headerRow": 0, "headerDepth": 0},
+        "tbMapping": {
+            "accountCode": "科目编码",
+            "accountName": "科目名称",
+            "auxiliary": "辅助核算",
+            "openingFunctionalAmount": "期初余额",
+            "ytdFunctionalDebit": "本年借方",
+            "ytdFunctionalCredit": "本年贷方",
+            "closingFunctionalAmount": "期末余额",
+        },
+        "jeMapping": {
+            "id": "凭证号",
+            "date": "日期",
+            "accountCode": "科目编码",
+            "accountName": "科目名称",
+            "functionalDebit": "借方",
+            "functionalCredit": "贷方",
+        },
+    });
+    if let Some(column) = je_aux {
+        value["jeMapping"]["auxiliary"] = json!(column);
+    }
+    value
+}
+
+#[test]
+fn 辅助核算锚点认定成功时勾稽细化到维度() {
+    let dir = fixture("aux-verified");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,辅助核算,期初余额,本年借方,本年贷方,期末余额\n\
+         1002,银行存款,A部门,0,100,0,100\n\
+         1002,银行存款,B部门,0,50,0,50\n",
+    )
+    .unwrap();
+    // 科目合计两侧都是 150（A 80＋B 70）：旧口径（主体＋科目）判通过；
+    // 维度口径应暴露 A 记 100、JE 只有 80 的串维度差异——这正是细分的价值。
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,部门,借方,贷方\n\
+         2025-03-01,V1,1002,银行存款,A部门,80,0\n\
+         2025-03-01,V1,1002,银行存款,B部门,70,0\n",
+    )
+    .unwrap();
+    let result = run(&auxiliary_params(&dir, None), &AtomicBool::new(false)).unwrap();
+    let tb_vs_je = &result["tbVsJe"];
+    assert_eq!(tb_vs_je["auxiliaryRefined"], json!(true), "{result:#?}");
+    assert_eq!(tb_vs_je["auxiliaryMatch"]["status"], json!("verified"));
+    assert_eq!(tb_vs_je["accounts"], json!(2), "{result:#?}");
+    let items = tb_vs_je["items"].as_array().unwrap();
+    let row_a = items
+        .iter()
+        .find(|item| item["auxiliary"] == json!("A部门"))
+        .unwrap_or_else(|| panic!("缺 A 部门维度行: {items:?}"));
+    assert_eq!(row_a["tbDebit"], json!(100.0));
+    assert_eq!(row_a["jeDebit"], json!(80.0));
+    assert_eq!(row_a["overallVerdict"], json!("不通过"));
+    assert!(items
+        .iter()
+        .any(|item| item["auxiliary"] == json!("B部门") && item["tbDebit"] == json!(50.0)));
+    assert_eq!(tb_vs_je["passed"], json!(false), "{result:#?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn je辅助列为空的分录归未分维度桶() {
+    let dir = fixture("aux-unassigned");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,辅助核算,期初余额,本年借方,本年贷方,期末余额\n\
+         1002,银行存款,A部门,0,100,0,100\n",
+    )
+    .unwrap();
+    // 科目层两侧都是 100；A 维度只有 60，空格的 40 归未分维度行。
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,部门,借方,贷方\n\
+         2025-03-01,V1,1002,银行存款,A部门,60,0\n\
+         2025-03-02,V2,1002,银行存款,,40,0\n",
+    )
+    .unwrap();
+    let result = run(&auxiliary_params(&dir, None), &AtomicBool::new(false)).unwrap();
+    let tb_vs_je = &result["tbVsJe"];
+    assert_eq!(tb_vs_je["auxiliaryRefined"], json!(true), "{result:#?}");
+    let items = tb_vs_je["items"].as_array().unwrap();
+    assert!(items
+        .iter()
+        .any(|item| item["auxiliary"] == json!("") && item["jeDebit"] == json!(40.0)),
+        "空格分录应归未分维度行: {items:?}"
+    );
+    let warnings = result["mappingWarnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().unwrap_or("").contains("未分维度行")),
+        "应提示未分维度归集: {warnings:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn je无对应辅助列时静默降级并提示() {
+    let dir = fixture("aux-degrade");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,辅助核算,期初余额,本年借方,本年贷方,期末余额\n\
+         1002,银行存款,A部门,0,100,0,100\n\
+         1002,银行存款,B部门,0,50,0,50\n",
+    )
+    .unwrap();
+    // JE 没有任何列含 A部门/B部门：降级按主体＋科目，科目层两侧一致应通过。
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,摘要,借方,贷方\n\
+         2025-03-01,V1,1002,银行存款,收往来款,150,0\n",
+    )
+    .unwrap();
+    let result = run(&auxiliary_params(&dir, None), &AtomicBool::new(false)).unwrap();
+    let tb_vs_je = &result["tbVsJe"];
+    assert_eq!(tb_vs_je["auxiliaryRefined"], json!(false), "{result:#?}");
+    assert_eq!(tb_vs_je["accounts"], json!(1), "{result:#?}");
+    assert_eq!(tb_vs_je["passed"], json!(true), "{result:#?}");
+    let warnings = result["mappingWarnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().unwrap_or("").contains("已按主体＋科目勾稽")),
+        "降级必须带提示: {warnings:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 手选je辅助列对不上按无匹配降级不换列() {
+    let dir = fixture("aux-manual-wrong");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,辅助核算,期初余额,本年借方,本年贷方,期末余额\n\
+         1002,银行存款,A部门,0,100,0,100\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,部门,摘要,借方,贷方\n\
+         2025-03-01,V1,1002,银行存款,A部门,日常收付,100,0\n",
+    )
+    .unwrap();
+    // 用户手选摘要列当辅助列：值对不上，必须 noMatch 降级——即使「部门」
+    // 列本来能对上也不许悄悄换列，用户才知道自己的选择没生效。
+    let result = run(&auxiliary_params(&dir, Some("摘要")), &AtomicBool::new(false)).unwrap();
+    let tb_vs_je = &result["tbVsJe"];
+    assert_eq!(tb_vs_je["auxiliaryMatch"]["status"], json!("noMatch"), "{result:#?}");
+    assert_eq!(tb_vs_je["auxiliaryRefined"], json!(false));
+    let warnings = result["mappingWarnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.as_str().unwrap_or("").contains("JE 无对应列")),
+        "对不上要有降级提示: {warnings:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

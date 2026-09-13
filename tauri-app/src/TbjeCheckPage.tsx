@@ -17,6 +17,7 @@ import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { LedgerReviewCompact } from "@/components/LedgerReviewAll";
 import { llmReviewPresentation } from "@/components/llmReviewPresentation";
+import { AuxiliaryLinkStatusView } from "@/components/AuxiliaryLinkStatus";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
@@ -51,6 +52,8 @@ import {
   scanLedgerUploadSources,
   resolveRoleLabels,
   selectLedgerWorkbookKindSources,
+  verifyAuxiliaryLink,
+  type AuxiliaryLinkResult,
   type LedgerReviewOutcome,
   type LedgerWorkbookSheetClassification,
 } from "@/ledgerMapping";
@@ -597,6 +600,11 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const [expanded, setExpanded] = useState<
     { groupId: string; kind: LedgerKind } | undefined
   >();
+  // 辅助核算联动验证（映射阶段公共入口）：两侧映射齐了就认定一次，
+  // 用户改列即随 mappings 变化重验；验证失败静默——标注不许阻塞映射。
+  const [auxLinks, setAuxLinks] = useState<
+    Record<string, AuxiliaryLinkResult | null>
+  >({});
   const [detail, setDetail] = useState<string | undefined>();
   const [outcomes, setOutcomes] = useState<GroupOutcome[]>([]);
   const [status, setStatus] = useState("");
@@ -1388,6 +1396,26 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     return params;
   }
 
+  useEffect(() => {
+    let cancelled = false;
+    const paired = groups.filter((group) => group.tb && group.je);
+    if (!paired.length) {
+      setAuxLinks({});
+      return;
+    }
+    void (async () => {
+      const next: Record<string, AuxiliaryLinkResult | null> = {};
+      for (const group of paired) {
+        next[group.id] = await verifyAuxiliaryLink(paramsOf(group));
+      }
+      if (!cancelled) setAuxLinks(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groups, mappings, inspects]);
+
   /** 导出某一组的差异明细。逐组导——十组的明细塞一个工作簿没法看。 */
   async function exportGroup(label: string) {
     const group = runnable.find((item) => item.label === label);
@@ -2007,6 +2035,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                           </div>
                         );
                       })()}
+                      <AuxiliaryLinkStatusView result={auxLinks[group.id] ?? null} />
                     {expanded?.groupId === group.id && (
                       <div
                         id={`tbje-mapping-${group.id}-${expanded.kind}`}

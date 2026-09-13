@@ -21,7 +21,7 @@
 use regex::Regex;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Formula, Workbook, Worksheet};
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -762,11 +762,22 @@ fn evaluate(
         }),
     };
 
+    // 辅助核算联动的降级提示并进 mappingWarnings，与既有警告同一展示通道。
+    let mut mapping_warnings = prepared.mapping_warnings.clone();
+    if let Some(warnings) = tb_vs_je.get("auxiliaryWarnings").and_then(Value::as_array) {
+        mapping_warnings.extend(
+            warnings
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned),
+        );
+    }
+
     Ok(json!({
         "rollforward": rollforward,
         "tbVsJe": tb_vs_je,
         "equation": equation,
-        "mappingWarnings": prepared.mapping_warnings,
+        "mappingWarnings": mapping_warnings,
         "entityScope": {
             "mode": if entity_key_enabled { "entity" } else { "defaultEntity" },
             "defaultEntity": ledger_mapping::DEFAULT_ENTITY,
@@ -2055,7 +2066,31 @@ fn check_equation(
     })
 }
 
+fn header_position(headers: &[String], name: &str) -> Option<usize> {
+    headers.iter().position(|header| header == name)
+}
+
+/// 单列的锚点集合：保留行非空单元格的归一化值。用于多列辅助
+/// （编码＋名称双列）时挑与 JE 认定列重叠最多的一列做键。
+fn column_anchor_set(rows: &[Vec<String>], keep: &[bool], column: usize) -> HashSet<String> {
+    let mut set = HashSet::new();
+    for (index, row) in rows.iter().enumerate() {
+        if !keep.get(index).copied().unwrap_or(true) {
+            continue;
+        }
+        if let Some(value) = row.get(column) {
+            let normalized = ledger_mapping::anchor_norm(value);
+            if !normalized.is_empty() {
+                set.insert(normalized);
+            }
+        }
+    }
+    set
+}
+
 /// TB 与 JE 发生额勾稽：TB 本年累计发生额 ↔ JE 按科目汇总的借贷合计。
+/// 科目键之上叠一层辅助维度（公共锚点反查认定成功时），JE 辅助为空的
+/// 分录归“未分维度”桶，不猜维度归属。
 #[allow(clippy::too_many_arguments)]
 fn check_tb_vs_je(
     tb: &FxTable,
@@ -2091,10 +2126,13 @@ fn check_tb_vs_je(
         debit: f64,
         credit: f64,
     }
-    let mut tb_totals = BTreeMap::<(String, String), Side>::new();
-    let mut names = BTreeMap::<(String, String), String>::new();
-    let mut tb_currencies = BTreeMap::<(String, String), BTreeSet<String>>::new();
-    let mut tb_row_counts = BTreeMap::<(String, String), usize>::new();
+    // 键＝（主体，科目键，辅助维度）。辅助维度只在公共锚点反查认定成功时
+    // 才有值，其余场景恒为空串——分组与旧口径完全一致。
+    let mut tb_totals = BTreeMap::<(String, String, String), Side>::new();
+    let mut names = BTreeMap::<(String, String, String), String>::new();
+    let mut aux_display = BTreeMap::<String, String>::new();
+    let mut tb_currencies = BTreeMap::<(String, String, String), BTreeSet<String>>::new();
+    let mut tb_row_counts = BTreeMap::<(String, String, String), usize>::new();
 
     // TB 侧：只收末级行，汇总行的发生额是下级之和，收进来就翻倍。
     let leaf = ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| columns(tb_map, role));
@@ -2154,6 +2192,110 @@ fn check_tb_vs_je(
     };
     let account_policy =
         ledger_mapping::AccountMatchPolicy::from_sides(&tb_identities, &je_identities);
+
+    // 辅助核算联动验证（公共锚点反查）：TB 映射了辅助列时认定 JE 的对应列，
+    // 认定成功才把维度并入勾稽键；对不上按主体＋科目静默降级，附提示。
+    let tb_keep: Vec<bool> = tb
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            functional_rows.get(index).copied().unwrap_or(true)
+                && leaf.get(index).copied().unwrap_or(true)
+        })
+        .collect();
+    let tb_aux_mapped = !ledger_mapping::mapped_column_names(tb_map, "auxiliary").is_empty();
+    let anchors = ledger_mapping::tb_auxiliary_anchors(&tb.headers, &tb.rows, &tb_keep, tb_map, "auxiliary");
+    let je_preferred = ledger_mapping::mapped_column_names(je_map, "auxiliary")
+        .first()
+        .cloned();
+    let mut je_unassigned_rows = 0usize;
+    let (aux_verdict, je_scans) = if anchors.is_empty() {
+        (
+            ledger_mapping::auxiliary_link_verdict(&anchors, Vec::new(), 0, None),
+            Vec::new(),
+        )
+    } else {
+        let mut accumulator =
+            ledger_mapping::AnchorColumnAccumulator::new(je_table.headers.len());
+        let mut total_rows = 0usize;
+        let scan = |accumulator: &mut ledger_mapping::AnchorColumnAccumulator,
+                    total_rows: &mut usize|
+         -> Result<(), AppError> {
+            if let Some(disk) = je.disk.as_ref() {
+                disk.visit(false, cancel, |row| {
+                    *total_rows += 1;
+                    accumulator.feed(&row.values, &anchors);
+                    Ok(())
+                })?;
+            } else {
+                for (index, row) in je_table.rows.iter().enumerate() {
+                    if !je_rows.get(index).copied().unwrap_or(true) {
+                        continue;
+                    }
+                    *total_rows += 1;
+                    accumulator.feed(row, &anchors);
+                }
+            }
+            Ok(())
+        };
+        scan(&mut accumulator, &mut total_rows)?;
+        let scans = accumulator.finish(&je_table.headers);
+        let verdict = ledger_mapping::auxiliary_link_verdict(
+            &anchors,
+            scans.clone(),
+            total_rows,
+            je_preferred.as_deref(),
+        );
+        (verdict, scans)
+    };
+    let aux_refined = aux_verdict.dimension_keys();
+    let je_aux_index: Option<usize> = aux_refined
+        .then(|| {
+            aux_verdict
+                .column
+                .as_deref()
+                .and_then(|name| je_table.headers.iter().position(|header| header == name))
+        })
+        .flatten();
+    // TB 侧取维度的键列：唯一辅助列直接用；多列（编码＋名称）选与 JE
+    // 认定列命中交集最大的一列——键列选错，两侧维度值永远对不上。
+    let tb_aux_index: Option<usize> = if !aux_refined {
+        None
+    } else {
+        let je_hits = aux_verdict
+            .column
+            .as_deref()
+            .and_then(|name| je_scans.iter().find(|scan| scan.header == name))
+            .map(|scan| &scan.hit_anchors);
+        let candidates: Vec<usize> = ledger_mapping::mapped_column_names(tb_map, "auxiliary")
+            .iter()
+            .filter_map(|name| header_position(&tb.headers, name))
+            .collect();
+        candidates
+            .into_iter()
+            .map(|index| {
+                let set = column_anchor_set(&tb.rows, &tb_keep, index);
+                let overlap = je_hits
+                    .map(|hits| set.intersection(hits).count())
+                    .unwrap_or(0);
+                (index, overlap)
+            })
+            .max_by_key(|(_, overlap)| *overlap)
+            .filter(|(_, overlap)| *overlap > 0)
+            .map(|(index, _)| index)
+    };
+    let mut remember_display = |raw: &str| -> String {
+        let normalized = ledger_mapping::anchor_norm(raw);
+        if normalized.is_empty() {
+            return String::new();
+        }
+        let display = raw.trim();
+        aux_display
+            .entry(normalized.clone())
+            .or_insert_with(|| display.to_owned());
+        normalized
+    };
     let tb_records = fx::records(tb);
     for (index, row) in tb.rows.iter().enumerate() {
         if !functional_rows.get(index).copied().unwrap_or(true) {
@@ -2177,6 +2319,11 @@ fn check_tb_vs_je(
         if key.1.is_empty() {
             continue;
         }
+        let aux = tb_aux_index
+            .and_then(|column| row.get(column))
+            .map(|value| remember_display(value))
+            .unwrap_or_default();
+        let key = (key.0, key.1, aux);
         let Some(record) = tb_records.get(index) else {
             continue;
         };
@@ -2199,7 +2346,7 @@ fn check_tb_vs_je(
     }
 
     // JE 侧：剔掉合计行与游离数字行，其余按科目累加借贷。
-    let mut je_totals = BTreeMap::<(String, String), Side>::new();
+    let mut je_totals = BTreeMap::<(String, String, String), Side>::new();
     if let Some(disk) = je.disk.as_ref() {
         disk.visit(false, cancel, |row| {
             if identity_parts(je_table, &row.values, je_map, je_fixed)
@@ -2220,6 +2367,15 @@ fn check_tb_vs_je(
             if key.1.is_empty() {
                 return Ok(());
             }
+            let aux = match je_aux_index.and_then(|column| row.values.get(column)) {
+                Some(value) if !value.trim().is_empty() => remember_display(value),
+                Some(_) => {
+                    je_unassigned_rows += 1;
+                    String::new()
+                }
+                None => String::new(),
+            };
+            let key = (key.0, key.1, aux);
             let entry = je_totals.entry(key.clone()).or_default();
             // The common disk row has already normalized both evidence sides
             // with the final sign convention. A red entry therefore stays on
@@ -2255,6 +2411,15 @@ fn check_tb_vs_je(
             if key.1.is_empty() {
                 continue;
             }
+            let aux = match je_aux_index.and_then(|column| row.get(column)) {
+                Some(value) if !value.trim().is_empty() => remember_display(value),
+                Some(_) => {
+                    je_unassigned_rows += 1;
+                    String::new()
+                }
+                None => String::new(),
+            };
+            let key = (key.0, key.1, aux);
             let Some(record) = je_records.get(index) else {
                 continue;
             };
@@ -2310,6 +2475,8 @@ fn check_tb_vs_je(
                 "entity": key.0,
                 "code": key.1.split('\u{1f}').next().unwrap_or(&key.1),
                 "name": names.get(&key).cloned().unwrap_or_default(),
+                // 辅助维度（认定成功时才有值；空串＝未分维度桶）。
+                "auxiliary": aux_display.get(&key.2).cloned().unwrap_or_default(),
                 "presence": match (tb_side.is_some(), je_side.is_some()) {
                     (true, true) => "both",
                     (true, false) => "tbOnly",
@@ -2335,6 +2502,49 @@ fn check_tb_vs_je(
     // 这里只能客观判断差异覆盖面，不能仅凭“80% 科目不一致”推断期间不匹配。
     // 期间结论必须有日期/会计期间字段的直接证据，避免掩盖映射或口径问题。
     let widespread = total_keys >= 5 && mismatched * 10 >= total_keys * 8;
+    // 辅助核算联动验证的结论与提示：降级一律静默放行＋说明，不拦结果。
+    let mut auxiliary_warnings = Vec::new();
+    if tb_aux_mapped {
+        match aux_verdict.status {
+            "noMatch" => auxiliary_warnings.push(
+                "TB 已映射辅助核算，但 JE 无对应列，已按主体＋科目勾稽。".to_owned(),
+            ),
+            "ambiguous" => auxiliary_warnings.push(format!(
+                "JE 中有多列包含辅助核算值（{}），无法唯一认定，已按主体＋科目勾稽；可在映射中手动指定其一。",
+                aux_verdict.competing_columns.join("、")
+            )),
+            "noAnchors" => auxiliary_warnings.push(
+                "TB 辅助核算列没有可验证的当期发生额行，按主体＋科目勾稽。".to_owned(),
+            ),
+            "partialCoverage" => auxiliary_warnings.push(format!(
+                "JE 辅助列「{}」覆盖不全（{}/{} 个维度命中），维度差异请结合未分维度行复核。",
+                aux_verdict.column.clone().unwrap_or_default(),
+                aux_verdict.anchor_hits,
+                aux_verdict.anchor_total
+            )),
+            _ => {}
+        }
+        if aux_refined && je_unassigned_rows > 0 {
+            auxiliary_warnings.push(format!(
+                "JE 有 {je_unassigned_rows} 行分录辅助列为空，已归入未分维度行与 TB 对平。"
+            ));
+        }
+    }
+    let auxiliary_match = tb_aux_mapped.then(|| {
+        json!({
+            "status": aux_verdict.status,
+            "column": aux_verdict.column,
+            "anchorHits": aux_verdict.anchor_hits,
+            "anchorTotal": aux_verdict.anchor_total,
+            "coverage": if aux_verdict.total_rows > 0 {
+                (aux_verdict.nonempty_rows as f64 / aux_verdict.total_rows as f64 * 10_000.0)
+                    .round() / 10_000.0
+            } else {
+                0.0
+            },
+            "competingColumns": aux_verdict.competing_columns,
+        })
+    });
     Ok(json!({
         "performed": true,
         "passed": mismatched == 0,
@@ -2352,6 +2562,11 @@ fn check_tb_vs_je(
             "code"
         },
         "ambiguousAccountCodes": account_policy.ambiguous_count(),
+        // 辅助核算联动：verified／partialCoverage 时 items 已按维度拆行，
+        // 其余状态与旧口径（主体＋科目）完全一致。
+        "auxiliaryRefined": aux_refined,
+        "auxiliaryMatch": auxiliary_match,
+        "auxiliaryWarnings": auxiliary_warnings,
         "items": items,
     }))
 }

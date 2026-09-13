@@ -6702,6 +6702,235 @@ pub(crate) fn is_profit_transfer_account(account: &str) -> bool {
     normalized.contains("本年利润") || normalized.contains("未分配利润")
 }
 
+// ---------------------------------------------------------------------------
+// 辅助核算锚点反查（公共）
+// ---------------------------------------------------------------------------
+
+/// 辅助核算锚点值的归一化：剥掉空白与连字符类分隔符后转小写。
+/// `L-1`、`l_1`、`L1` 视为同一维度值——分隔符写法差异不应把
+/// “列存在”误判成“找不到对应列”。借款工具列定位的既有口径原样收编。
+pub(crate) fn anchor_norm(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace() && !['-', '_', '/', '—'].contains(c))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// 一列的锚点扫描结果：命中的**去重后**锚点集合与非空单元格数。
+/// 锚点去重、不数行——同一维度出现一百次也只证明“这一列里有它”。
+/// `hit_anchors` 保留命中集合本体，供多列辅助（编码＋名称）时挑键列。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AnchorColumnScan {
+    pub header: String,
+    pub hit_anchors: HashSet<String>,
+    pub nonempty_rows: usize,
+}
+
+impl AnchorColumnScan {
+    pub(crate) fn anchor_hits(&self) -> usize {
+        self.hit_anchors.len()
+    }
+}
+
+/// 锚点反查结论。`status` 对应调用方的处置：
+/// - `verified`：认定成功，辅助核算进匹配键；
+/// - `partialCoverage`：列是对的但部分锚点未见，进键＋覆盖提示；
+/// - `noMatch`／`noAnchors`／`ambiguous`：降级按主体＋科目，`noMatch` 附提示。
+#[derive(Clone, Debug)]
+pub(crate) struct AuxiliaryLinkVerdict {
+    pub column: Option<String>,
+    pub status: &'static str,
+    pub anchor_total: usize,
+    pub anchor_hits: usize,
+    pub nonempty_rows: usize,
+    pub total_rows: usize,
+    pub competing_columns: Vec<String>,
+}
+
+impl AuxiliaryLinkVerdict {
+    /// 是否把辅助核算并入匹配键。
+    pub(crate) fn dimension_keys(&self) -> bool {
+        matches!(self.status, "verified" | "partialCoverage")
+    }
+}
+
+/// 纯判定：给定各列扫描结果与锚点集合出结论，不碰 IO。
+///
+/// - `preferred`（用户/LLM 已映射的辅助列）只验证该列，对不上直接
+///   `noMatch`，不悄悄换列——用户表达了明确意图，降级要带着提示；
+/// - 无 `preferred` 时按借款工具验证过的口径：恰有一列含任一锚点才认定
+///   （多列都命中视为歧义，宁可不细分）。
+pub(crate) fn auxiliary_link_verdict(
+    anchors: &HashSet<String>,
+    columns: Vec<AnchorColumnScan>,
+    total_rows: usize,
+    preferred: Option<&str>,
+) -> AuxiliaryLinkVerdict {
+    let anchor_total = anchors.len();
+    let base = AuxiliaryLinkVerdict {
+        column: None,
+        status: "noAnchors",
+        anchor_total,
+        anchor_hits: 0,
+        nonempty_rows: 0,
+        total_rows,
+        competing_columns: Vec::new(),
+    };
+    if anchors.is_empty() {
+        return base;
+    }
+    let from_scan = |scan: &AnchorColumnScan| AuxiliaryLinkVerdict {
+        column: Some(scan.header.clone()),
+        status: if scan.anchor_hits() >= anchor_total {
+            "verified"
+        } else {
+            "partialCoverage"
+        },
+        anchor_hits: scan.anchor_hits(),
+        nonempty_rows: scan.nonempty_rows,
+        competing_columns: Vec::new(),
+        ..base.clone()
+    };
+    if let Some(name) = preferred {
+        return match columns.iter().find(|scan| scan.header == name) {
+            Some(scan) if scan.anchor_hits() > 0 => from_scan(scan),
+            _ => AuxiliaryLinkVerdict {
+                status: "noMatch",
+                ..base
+            },
+        };
+    }
+    let qualifying: Vec<&AnchorColumnScan> =
+        columns.iter().filter(|scan| scan.anchor_hits() > 0).collect();
+    match qualifying.as_slice() {
+        [] => AuxiliaryLinkVerdict {
+            status: "noMatch",
+            ..base
+        },
+        [only] => from_scan(only),
+        many => AuxiliaryLinkVerdict {
+            status: "ambiguous",
+            competing_columns: many.iter().map(|scan| scan.header.clone()).collect(),
+            ..base
+        },
+    }
+}
+
+/// 磁盘／内存两用的逐列累加器：`feed` 一行累一行，`finish` 出扫描结果。
+/// 大序时账走单遍流式，内存表循环喂同一接口，扫描口径只有一份。
+pub(crate) struct AnchorColumnAccumulator {
+    per_column: Vec<(HashSet<String>, usize)>,
+}
+
+impl AnchorColumnAccumulator {
+    pub(crate) fn new(column_count: usize) -> Self {
+        Self {
+            per_column: vec![(HashSet::new(), 0); column_count],
+        }
+    }
+
+    pub(crate) fn feed(&mut self, row: &[String], anchors: &HashSet<String>) {
+        for (column, value) in row.iter().enumerate() {
+            if value.trim().is_empty() {
+                continue;
+            }
+            let Some((hits, nonempty)) = self.per_column.get_mut(column) else {
+                continue;
+            };
+            *nonempty += 1;
+            let normalized = anchor_norm(value);
+            if anchors.contains(&normalized) {
+                hits.insert(normalized);
+            }
+        }
+    }
+
+    pub(crate) fn finish(self, headers: &[String]) -> Vec<AnchorColumnScan> {
+        self.per_column
+            .into_iter()
+            .zip(headers)
+            .map(|((hits, nonempty), header)| AnchorColumnScan {
+                header: header.clone(),
+                hit_anchors: hits,
+                nonempty_rows: nonempty,
+            })
+            .collect()
+    }
+}
+
+/// 映射角色解析出的列名清单（单列字符串与多列数组两种形态都收）。
+pub(crate) fn mapped_column_names(
+    mapping: &serde_json::Map<String, Value>,
+    role: &str,
+) -> Vec<String> {
+    match mapping.get(role) {
+        Some(Value::String(name)) => vec![name.clone()],
+        Some(Value::Array(names)) => names
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// TB 侧锚点提取：`role` 指定维度角色（通用工具 `auxiliary`、借款工具
+/// `loanId`）；发生额列可用时只取本期有发生额的行——休眠维度本来就不会
+/// 出现在序时账里，拿它当锚点会把“列存在”误判成“无对应列”。
+pub(crate) fn tb_auxiliary_anchors(
+    headers: &[String],
+    rows: &[Vec<String>],
+    keep: &[bool],
+    mapping: &serde_json::Map<String, Value>,
+    role: &str,
+) -> HashSet<String> {
+    let auxiliary_columns = mapped_column_names(mapping, role);
+    if auxiliary_columns.is_empty() {
+        return HashSet::new();
+    }
+    let occurrence_columns: Vec<String> = [
+        "ytdFunctionalCredit",
+        "ytdFunctionalDebit",
+        "periodFunctionalCredit",
+        "periodFunctionalDebit",
+    ]
+    .iter()
+    .flat_map(|role| mapped_column_names(mapping, role))
+    .collect();
+    let auxiliary_indexes: Vec<usize> = auxiliary_columns
+        .iter()
+        .filter_map(|name| header_index(headers, name))
+        .collect();
+    let occurrence_indexes: Vec<usize> = occurrence_columns
+        .iter()
+        .filter_map(|name| header_index(headers, name))
+        .collect();
+    let mut anchors = HashSet::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        if !keep.get(row_index).copied().unwrap_or(true) {
+            continue;
+        }
+        let active = occurrence_indexes.is_empty()
+            || occurrence_indexes.iter().any(|index| {
+                row.get(*index)
+                    .and_then(|value| parse_amount_lenient(value))
+                    .is_some_and(|amount| amount.abs() > 0.005)
+            });
+        if !active {
+            continue;
+        }
+        for index in &auxiliary_indexes {
+            if let Some(value) = row.get(*index) {
+                let normalized = anchor_norm(value);
+                if !normalized.is_empty() {
+                    anchors.insert(normalized);
+                }
+            }
+        }
+    }
+    anchors
+}
+
 impl AccountMatchPolicy {
     /// 每行依次为（主体、科目编码、科目名称）。歧义要求同一编码在两侧**都**
     /// 对应多个名称，且两侧名称集合的交集达到六成（与口径预检的复合配对
@@ -8239,6 +8468,135 @@ mod tests {
         // SAP 常把供应商、客户分成两列，辅助核算必须可多列。
         assert!(role_of("je", "auxiliary").expect("角色存在").multi);
         assert!(!role_of("tb", "loanId").expect("角色存在").multi);
+    }
+
+    #[test]
+    fn 锚点反查唯一命中列认定为已验证() {
+        let hits = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+        let anchors = hits(&["l1", "l2"]);
+        let columns = vec![
+            AnchorColumnScan {
+                header: "摘要".into(),
+                hit_anchors: hits(&[]),
+                nonempty_rows: 10,
+            },
+            AnchorColumnScan {
+                header: "合同维度".into(),
+                hit_anchors: hits(&["l1", "l2"]),
+                nonempty_rows: 8,
+            },
+        ];
+        let verdict = auxiliary_link_verdict(&anchors, columns, 10, None);
+        assert_eq!(verdict.status, "verified");
+        assert_eq!(verdict.column.as_deref(), Some("合同维度"));
+        assert!(verdict.dimension_keys());
+    }
+
+    #[test]
+    fn 锚点反查多列命中视为歧义不认定() {
+        let hits = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+        let anchors = hits(&["l1"]);
+        let columns = vec![
+            AnchorColumnScan {
+                header: "部门编码".into(),
+                hit_anchors: hits(&["l1"]),
+                nonempty_rows: 5,
+            },
+            AnchorColumnScan {
+                header: "部门名称".into(),
+                hit_anchors: hits(&["l1"]),
+                nonempty_rows: 5,
+            },
+        ];
+        let verdict = auxiliary_link_verdict(&anchors, columns, 5, None);
+        assert_eq!(verdict.status, "ambiguous");
+        assert!(verdict.column.is_none());
+        assert!(!verdict.dimension_keys());
+        assert_eq!(verdict.competing_columns.len(), 2);
+    }
+
+    #[test]
+    fn 指定列对不上按无匹配降级不换列() {
+        // 用户手选的列验证不过时不许悄悄换列——降级必须带着提示，
+        // 用户才知道自己选的列没生效。
+        let hits = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+        let anchors = hits(&["l1"]);
+        let columns = vec![
+            AnchorColumnScan {
+                header: "用户选错的列".into(),
+                hit_anchors: hits(&[]),
+                nonempty_rows: 9,
+            },
+            AnchorColumnScan {
+                header: "真正对应的列".into(),
+                hit_anchors: hits(&["l1"]),
+                nonempty_rows: 3,
+            },
+        ];
+        let verdict = auxiliary_link_verdict(&anchors, columns, 9, Some("用户选错的列"));
+        assert_eq!(verdict.status, "noMatch");
+        assert!(verdict.column.is_none());
+        assert!(!verdict.dimension_keys());
+    }
+
+    #[test]
+    fn 部分锚点未命中为覆盖不全() {
+        let hits = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
+        let anchors = hits(&["l1", "l2", "l3"]);
+        let columns = vec![AnchorColumnScan {
+            header: "往来辅助".into(),
+            hit_anchors: hits(&["l1", "l2"]),
+            nonempty_rows: 7,
+        }];
+        let verdict = auxiliary_link_verdict(&anchors, columns, 7, None);
+        assert_eq!(verdict.status, "partialCoverage");
+        assert_eq!(verdict.anchor_hits, 2);
+        assert_eq!(verdict.anchor_total, 3);
+        assert!(verdict.dimension_keys());
+    }
+
+    #[test]
+    fn 累加器与锚点归一化口径一致() {
+        // L-1 与 l_1 是同一维度值：分隔符差异不应漏认。
+        let anchors: HashSet<String> = ["l1", "l2"].iter().map(|s| s.to_string()).collect();
+        let headers: Vec<String> = ["合同维度", "摘要"].iter().map(|s| s.to_string()).collect();
+        let mut accumulator = AnchorColumnAccumulator::new(headers.len());
+        accumulator.feed(&["L-1".into(), "收利息".into()], &anchors);
+        accumulator.feed(&["l_2".into(), "付本金".into()], &anchors);
+        accumulator.feed(&["".into(), "空白不算覆盖".into()], &anchors);
+        let scans = accumulator.finish(&headers);
+        assert_eq!(scans[0].anchor_hits(), 2);
+        assert_eq!(scans[0].nonempty_rows, 2);
+        assert_eq!(scans[1].anchor_hits(), 0);
+        assert_eq!(anchor_norm(" L-1 "), "l1");
+    }
+
+    #[test]
+    fn tb锚点提取只取有发生额的行() {
+        let headers: Vec<String> = [
+            "科目编码",
+            "辅助核算",
+            "本期发生借方",
+            "本期发生贷方",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let rows = vec![
+            vec!["1002".into(), " Dormant-A ".into(), "0".into(), "0".into()],
+            vec!["1002".into(), "Active-B".into(), "100".into(), "0".into()],
+            vec!["1002".into(), "Active-C".into(), "0".into(), "50".into()],
+        ];
+        let mapping = serde_json::json!({
+            "accountCode": "科目编码",
+            "auxiliary": "辅助核算",
+            "periodFunctionalDebit": "本期发生借方",
+            "periodFunctionalCredit": "本期发生贷方"
+        });
+        let mapping = mapping.as_object().cloned().unwrap();
+        let anchors = tb_auxiliary_anchors(&headers, &rows, &[true, true, true], &mapping, "auxiliary");
+        assert!(!anchors.contains("dormanta"), "{anchors:?}");
+        assert!(anchors.contains("activeb") && anchors.contains("activec"), "{anchors:?}");
     }
 
     #[test]

@@ -1808,30 +1808,25 @@ fn fold_scope(fold: &LoanFold) -> LoanScope {
 /// 从 TB 当期借方或贷方发生额非零的借款行取辅助明细值，只用这些值在 JE
 /// 全表中搜索完全相等的单元格，以定位“辅助明细在哪一列”。这一步只识别列，
 /// 不要求 JE 每条分录都完整覆盖 TB 明细；后续本金归集才按找到的列逐笔匹配。
+/// 列定位本体已收编公共引擎（`auxiliary_link_verdict`），这里只留锚点口径。
 fn choose_je_detail_column(folds: &[LoanFold], je: &Table) -> JeDetailChoice {
-    let details = folds
-        .iter()
-        .filter(|fold| fold.has_ytd_movement && !fold.raw_id.trim().is_empty())
-        .map(|fold| norm(&fold.raw_id))
-        .collect::<std::collections::HashSet<_>>();
+    let details = active_tb_details(folds);
     if details.is_empty() {
         return JeDetailChoice::default();
     }
-    let candidates = je
-        .headers
-        .iter()
-        .enumerate()
-        .filter(|(column, _)| {
-            je.rows.iter().any(|row| {
-                row.get(*column)
-                    .is_some_and(|value| details.contains(&norm(value)))
-            })
-        })
-        .map(|(_, header)| header.clone())
-        .collect::<Vec<_>>();
+    let mut accumulator = ledger_mapping::AnchorColumnAccumulator::new(je.headers.len());
+    for row in &je.rows {
+        accumulator.feed(row, &details);
+    }
+    let verdict = ledger_mapping::auxiliary_link_verdict(
+        &details,
+        accumulator.finish(&je.headers),
+        je.rows.len(),
+        None,
+    );
     JeDetailChoice {
         has_active_tb_detail: true,
-        column: (candidates.len() == 1).then(|| candidates[0].clone()),
+        column: verdict.column,
     }
 }
 
@@ -1842,11 +1837,7 @@ fn choose_disk_je_detail_column(
     progress: &dyn Fn(&str, usize, usize, &str),
     cancel: &AtomicBool,
 ) -> Result<JeDetailChoice, AppError> {
-    let details = folds
-        .iter()
-        .filter(|fold| fold.has_ytd_movement && !fold.raw_id.trim().is_empty())
-        .map(|fold| norm(&fold.raw_id))
-        .collect::<std::collections::HashSet<_>>();
+    let details = active_tb_details(folds);
     if details.is_empty() {
         return Ok(JeDetailChoice::default());
     }
@@ -1860,25 +1851,32 @@ fn choose_disk_je_detail_column(
         cancel,
     )?;
     let headers = ledger.headers().to_vec();
-    let mut matched = vec![false; headers.len()];
+    let mut accumulator = ledger_mapping::AnchorColumnAccumulator::new(headers.len());
+    let mut total_rows = 0usize;
     ledger.visit(false, cancel, |row| {
-        for (column, value) in row.values.iter().enumerate() {
-            if details.contains(&norm(value)) {
-                matched[column] = true;
-            }
-        }
+        total_rows += 1;
+        accumulator.feed(&row.values, &details);
         Ok(())
     })?;
-    let candidates = headers
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| matched[*index])
-        .map(|(_, header)| header.clone())
-        .collect::<Vec<_>>();
+    let verdict = ledger_mapping::auxiliary_link_verdict(
+        &details,
+        accumulator.finish(&headers),
+        total_rows,
+        None,
+    );
     Ok(JeDetailChoice {
         has_active_tb_detail: true,
-        column: (candidates.len() == 1).then(|| candidates[0].clone()),
+        column: verdict.column,
     })
+}
+
+/// 借款的锚点口径：有当期发生额的行的借款明细值，公共归一化。
+fn active_tb_details(folds: &[LoanFold]) -> std::collections::HashSet<String> {
+    folds
+        .iter()
+        .filter(|fold| fold.has_ytd_movement && !fold.raw_id.trim().is_empty())
+        .map(|fold| ledger_mapping::anchor_norm(&fold.raw_id))
+        .collect()
 }
 
 fn collapse_folds_to_account(folds: Vec<LoanFold>) -> Vec<LoanFold> {

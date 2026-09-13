@@ -3600,29 +3600,35 @@ pub(crate) fn check_mapping_alignment(params: &Value) -> Result<Value, AppError>
 fn currency_mapping_issues(params: &Value) -> Result<Vec<String>, AppError> {
     let mut issues = Vec::new();
     for (label, source_key, map_key, side) in [
-        ("JE", "jeSource", "jeMapping", ledger_mapping::EntitySide::Je),
-        ("TB", "tbSource", "tbMapping", ledger_mapping::EntitySide::Tb),
+        (
+            "JE",
+            "jeSource",
+            "jeMapping",
+            ledger_mapping::EntitySide::Je,
+        ),
+        (
+            "TB",
+            "tbSource",
+            "tbMapping",
+            ledger_mapping::EntitySide::Tb,
+        ),
     ] {
-        let Some(source) = params.get(source_key) else { continue };
+        let Some(source) = params.get(source_key) else {
+            continue;
+        };
         let spec: SourceSpec = serde_json::from_value(source.clone())
             .map_err(|e| error("INVALID_PARAMS", "来源参数无效。", Some(e.to_string())))?;
         let mapping = mapping_obj(params, map_key);
-        if first_col(&mapping, "currency").is_none() { continue; }
-        let raw = load_fx_table(&spec)?;
-        let table = if label == "JE" { forward_filled_je_table(&raw, &mapping) } else { raw };
-        let supported = supported_currencies();
-        let mut by_entity = BTreeMap::<String, BTreeSet<String>>::new();
-        for row in records(&table) {
-            let currency = normalize_currency(cell(&row, &mapping, "currency"));
-            if currency.is_empty() || !supported.contains(currency.as_str()) { continue; }
-            let entity = scoped_entity_for(&row, &mapping, params, side).trim();
-            // “原币币种”列在本位币记账的 JE 中常被整列填成 CNY；这属于本位币
-            // 证据，不应与真正的 USD/HKD 等原币混在一起触发“一主体多币种”。
-            if currency == normalize_currency(&functional_currency(entity, params)) {
-                continue;
-            }
-            by_entity.entry(entity.to_owned()).or_default().insert(currency);
+        if first_col(&mapping, "currency").is_none() {
+            continue;
         }
+        let raw = load_fx_table(&spec)?;
+        let table = if label == "JE" {
+            forward_filled_je_table(&raw, &mapping)
+        } else {
+            raw
+        };
+        let by_entity = mapped_currencies_by_entity(&table, &mapping, params, side);
         for (entity, currencies) in by_entity.into_iter().filter(|(_, values)| values.len() > 1) {
             issues.push(format!(
                 "{label} 原币币种映射错误：主体“{entity}”的当前映射列出现了{}。同一主体只能有一种原币币种，请返回修改“原币币种”映射列。",
@@ -3631,6 +3637,31 @@ fn currency_mapping_issues(params: &Value) -> Result<Vec<String>, AppError> {
         }
     }
     Ok(issues)
+}
+
+/// 严格按用户当前映射的“原币币种”列取值。主体本位币也是该列的
+/// 一个真实取值，不作例外排除；否则 CNY+USD 会被误放行，违反“同一
+/// 主体原币列只能一种币种”的硬校验规则。
+fn mapped_currencies_by_entity(
+    table: &FxTable,
+    mapping: &Map<String, Value>,
+    params: &Value,
+    side: ledger_mapping::EntitySide,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let supported = supported_currencies();
+    let mut by_entity = BTreeMap::<String, BTreeSet<String>>::new();
+    for row in records(table) {
+        let currency = normalize_currency(cell(&row, mapping, "currency"));
+        if currency.is_empty() || !supported.contains(currency.as_str()) {
+            continue;
+        }
+        let entity = scoped_entity_for(&row, mapping, params, side).trim();
+        by_entity
+            .entry(entity.to_owned())
+            .or_default()
+            .insert(currency);
+    }
+    by_entity
 }
 
 fn validate_currency_mapping(params: &Value) -> Result<Value, AppError> {
@@ -3652,40 +3683,87 @@ fn enforce_currency_mapping(params: &Value) -> Result<(), AppError> {
 }
 
 fn prepare_matched_entity_tables(params: &mut Value) -> Result<(), AppError> {
-    let (Some(je_source), Some(tb_source)) = (params.get("jeSource"), params.get("tbSource")) else { return Ok(()) };
-    let je_spec: SourceSpec = serde_json::from_value(je_source.clone()).map_err(|e| error("INVALID_PARAMS", "JE来源参数无效。", Some(e.to_string())))?;
-    let tb_spec: SourceSpec = serde_json::from_value(tb_source.clone()).map_err(|e| error("INVALID_PARAMS", "TB来源参数无效。", Some(e.to_string())))?;
+    let (Some(je_source), Some(tb_source)) = (params.get("jeSource"), params.get("tbSource"))
+    else {
+        return Ok(());
+    };
+    let je_spec: SourceSpec = serde_json::from_value(je_source.clone())
+        .map_err(|e| error("INVALID_PARAMS", "JE来源参数无效。", Some(e.to_string())))?;
+    let tb_spec: SourceSpec = serde_json::from_value(tb_source.clone())
+        .map_err(|e| error("INVALID_PARAMS", "TB来源参数无效。", Some(e.to_string())))?;
     let je_mapping = mapping_obj(params, "jeMapping");
     let tb_mapping = mapping_obj(params, "tbMapping");
     let je_raw = load_fx_table(&je_spec)?;
     let je_table = forward_filled_je_table(&je_raw, &je_mapping);
     let tb_table = load_fx_table(&tb_spec)?;
     let collect = |table: &FxTable, mapping: &Map<String, Value>, side| {
-        records(table).into_iter().map(|row| {
-            let display = scoped_entity_for(&row, mapping, params, side).trim().to_owned();
-            (ledger_mapping::normalized_entity_name(&display), display)
-        }).filter(|(key, _)| !key.is_empty()).collect::<BTreeMap<_, _>>()
+        records(table)
+            .into_iter()
+            .map(|row| {
+                let display = scoped_entity_for(&row, mapping, params, side)
+                    .trim()
+                    .to_owned();
+                (ledger_mapping::normalized_entity_name(&display), display)
+            })
+            .filter(|(key, _)| !key.is_empty())
+            .collect::<BTreeMap<_, _>>()
     };
     let je_entities = collect(&je_table, &je_mapping, ledger_mapping::EntitySide::Je);
     let tb_entities = collect(&tb_table, &tb_mapping, ledger_mapping::EntitySide::Tb);
-    let matched = je_entities.keys().filter(|key| tb_entities.contains_key(*key)).cloned().collect::<BTreeSet<_>>();
+    let matched = je_entities
+        .keys()
+        .filter(|key| tb_entities.contains_key(*key))
+        .cloned()
+        .collect::<BTreeSet<_>>();
     if matched.is_empty() {
-        return Err(error("ENTITY_SCOPE_NO_MATCH", "TB与JE没有匹配上的主体，无法进入测算。", Some("请返回检查两张表的主体映射，或在主体范围中建立对应关系。".into())));
+        return Err(error(
+            "ENTITY_SCOPE_NO_MATCH",
+            "TB与JE没有匹配上的主体，无法进入测算。",
+            Some("请返回检查两张表的主体映射，或在主体范围中建立对应关系。".into()),
+        ));
     }
     let filter_table = |table: &Arc<FxTable>, mapping: &Map<String, Value>, side| {
-        let mask = records(table).into_iter().map(|row| matched.contains(&ledger_mapping::normalized_entity_name(scoped_entity_for(&row, mapping, params, side)))).collect::<Vec<_>>();
+        let mask = records(table)
+            .into_iter()
+            .map(|row| {
+                matched.contains(&ledger_mapping::normalized_entity_name(scoped_entity_for(
+                    &row, mapping, params, side,
+                )))
+            })
+            .collect::<Vec<_>>();
         let mut filtered = (**table).clone();
-        filtered.rows = filtered.rows.into_iter().zip(mask).filter_map(|(row, keep)| keep.then_some(row)).collect();
+        filtered.rows = filtered
+            .rows
+            .into_iter()
+            .zip(mask)
+            .filter_map(|(row, keep)| keep.then_some(row))
+            .collect();
         filtered.row_count = filtered.rows.len();
         Arc::new(filtered)
     };
     let filtered_je = filter_table(&je_table, &je_mapping, ledger_mapping::EntitySide::Je);
     let filtered_tb = filter_table(&tb_table, &tb_mapping, ledger_mapping::EntitySide::Tb);
-    if let Some(key) = fx_table_cache_key(&je_spec, Path::new(&je_spec.input_path)) { store_job_table(key, &filtered_je); }
-    if let Some(key) = fx_table_cache_key(&tb_spec, Path::new(&tb_spec.input_path)) { store_job_table(key, &filtered_tb); }
-    let matched_display = matched.iter().filter_map(|key| tb_entities.get(key).or_else(|| je_entities.get(key))).cloned().collect::<Vec<_>>();
-    let unmatched_je = je_entities.iter().filter(|(key, _)| !matched.contains(*key)).map(|(_, value)| value.clone()).collect::<Vec<_>>();
-    let unmatched_tb = tb_entities.iter().filter(|(key, _)| !matched.contains(*key)).map(|(_, value)| value.clone()).collect::<Vec<_>>();
+    if let Some(key) = fx_table_cache_key(&je_spec, Path::new(&je_spec.input_path)) {
+        store_job_table(key, &filtered_je);
+    }
+    if let Some(key) = fx_table_cache_key(&tb_spec, Path::new(&tb_spec.input_path)) {
+        store_job_table(key, &filtered_tb);
+    }
+    let matched_display = matched
+        .iter()
+        .filter_map(|key| tb_entities.get(key).or_else(|| je_entities.get(key)))
+        .cloned()
+        .collect::<Vec<_>>();
+    let unmatched_je = je_entities
+        .iter()
+        .filter(|(key, _)| !matched.contains(*key))
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
+    let unmatched_tb = tb_entities
+        .iter()
+        .filter(|(key, _)| !matched.contains(*key))
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
     params["__entityCoverage"] = json!({"matched": matched_display, "unmatchedJe": unmatched_je, "unmatchedTb": unmatched_tb});
     Ok(())
 }
@@ -12361,7 +12439,7 @@ mod tests {
             "公司,日期,凭证号,凭证类型,科目,摘要,币种,原币,本位币\n\
 E,2025-01-02,1,AB,1122,核销应收款,USD,-100,-710\n\
 E,2025-01-02,1,AB,1002,收到银行款,USD,100,700\n\
-E,2025-01-02,1,AB,6603,账面汇兑损益,CNY,0,999\n",
+E,2025-01-02,1,AB,6603,账面汇兑损益,USD,0,999\n",
         )
         .unwrap();
         let params = json!({
@@ -15498,7 +15576,7 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
                     "functionalAmount":"本币金额"},
                 "tbSource":{"inputPath":tb, "sheet":"", "headerRow":1, "headerDepth":1},
                 "tbMapping":{"entity":"公司代码","accountCode":"科目代码","accountName":"科目名称",
-                    "currency":"币种","openingFunctionalAmount":"期初余额","closingFunctionalAmount":"期末余额"}
+                    "currencyText":"科目名称","openingFunctionalAmount":"期初余额","closingFunctionalAmount":"期末余额"}
             })
         };
         let unrealized = validate_mapping(&params("unrealized")).unwrap();
@@ -16680,6 +16758,38 @@ mod bench_load {
         assert_eq!(functional_currency("Example Company", &params), "USD");
         assert_eq!(functional_currency("2000", &params), "EUR");
         assert_eq!(functional_currency("unknown", &params), "CNY");
+    }
+
+    #[test]
+    fn 原币币种严格校验包含主体本位币() {
+        let table = FxTable {
+            path: PathBuf::new(),
+            sheet: "Sheet1".into(),
+            sheets: vec!["Sheet1".into()],
+            header_row: 1,
+            header_depth: 1,
+            raw_headers: vec![vec!["公司".into(), "原币币种".into()]],
+            headers: vec!["公司".into(), "原币币种".into()],
+            rows: vec![
+                vec!["2002".into(), "CNY".into()],
+                vec!["2002".into(), "USD".into()],
+            ],
+            row_count: 2,
+            header_candidates: vec![(1, 1.0)],
+            sampled: false,
+        };
+        let mapping = json!({"entity":"公司","currency":"原币币种"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let params = json!({"entityCurrencies":{"2002":"CNY"}});
+        let currencies =
+            mapped_currencies_by_entity(&table, &mapping, &params, ledger_mapping::EntitySide::Je);
+        assert_eq!(
+            currencies.get("2002").cloned().unwrap_or_default(),
+            BTreeSet::from(["CNY".to_owned(), "USD".to_owned()]),
+            "主体本位币不得从原币映射校验中排除"
+        );
     }
 
     /// 量一下 36 万行序时账各阶段的耗时，决定读表层要不要跟看账一样上 Parquet 缓存。

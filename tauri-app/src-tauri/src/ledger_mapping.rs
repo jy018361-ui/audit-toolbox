@@ -749,7 +749,8 @@ static JE_ROLES: &[Role] = &[
         NOT_NAME,
     ),
     // 「文本」是 SAP（SGTXT 行项目文本）与 AX/D365 对摘要的叫法；
-    // 「抬头」冲突词挡住「凭证抬头文本」——那是单据号不是行摘要。
+    // 「凭证行文本」也是 SAP 的标准行摘要。下方仍用「凭证」挡住泛化误判，
+    // `explicit_line_summary_header` 只为这些明确的行文本别名开窄例外。
     r(
         "summary",
         "摘要",
@@ -761,6 +762,12 @@ static JE_ROLES: &[Role] = &[
             "备注",
             "備註",
             "文本",
+            "凭证行文本",
+            "憑證行文本",
+            "分录文本",
+            "分錄文本",
+            "行项目文本",
+            "行項目文本",
             "entry item",
             "line description",
             "sgtxt",
@@ -2247,6 +2254,13 @@ pub(crate) fn segment_exact(header: &str, alias: &str) -> bool {
     !target.is_empty() && header_segments(header).iter().any(|s| *s == target)
 }
 
+fn explicit_line_summary_header(header: &str) -> bool {
+    matches!(
+        normalize_header(header).as_str(),
+        "凭证行文本" | "憑證行文本" | "分录文本" | "分錄文本" | "行项目文本" | "行項目文本"
+    )
+}
+
 /// 该角色是否受集团货币口径排除约束。
 ///
 /// 角色名有两种写法：`functionalAmount` 小写开头，`ytdFunctionalCredit` 驼峰中段。
@@ -2290,6 +2304,7 @@ pub(crate) fn alias_score(role: &Role, header: &str) -> Option<f64> {
         .conflicts
         .iter()
         .any(|c| n.contains(&normalize_header(c)))
+        && !(role.name == "summary" && explicit_line_summary_header(header))
     {
         return None;
     }
@@ -3080,6 +3095,25 @@ impl LedgerBodyRule {
         self.has_identity(row) || !self.has_amount(row)
     }
 
+    /// 空白分隔后表尾协议区的重开条件。编码与名称两列**实际有值**时要求同时
+    /// 出现在行内；某一列整表无值（2002 类 JE 的科目描述整列为空）时不再强求
+    /// 该列——否则表体中一次偶发空行就会把后面名称空白的真分录整片砍掉。
+    /// 金额始终必须可解析，草稿行靠它挡在正文外。
+    fn strict_reopen_gate(&self, rows: &[Vec<String>]) -> impl Fn(&[String]) -> bool + '_ {
+        let code_alive = rows.iter().any(|row| self.has_field(row, &self.code));
+        let name_alive = rows.iter().any(|row| self.has_field(row, &self.name));
+        move |row: &[String]| {
+            let identity = if code_alive && name_alive {
+                self.has_field(row, &self.code) && self.has_field(row, &self.name)
+            } else if code_alive {
+                self.has_field(row, &self.code)
+            } else {
+                self.has_field(row, &self.name)
+            };
+            identity && self.has_parseable_je_amount(row)
+        }
+    }
+
     /// 合计标签不是身份。各家把「合计」写在哪一列全凭喜好——10 号样例写在日期列，
     /// 07 号样例写在科目编码列。认它作身份，表尾倒扫就会停在合计行上，
     /// 后面那串手工草稿反而留下来了。
@@ -3150,6 +3184,7 @@ pub(crate) fn analyze_ledger_rows(
     }
     let mut keep = Vec::with_capacity(rows.len());
     let mut strict_body = false;
+    let strict_reopen = rule.strict_reopen_gate(rows);
     for row in rows {
         if row.iter().all(|value| value.trim().is_empty()) {
             strict_body = true;
@@ -3158,12 +3193,9 @@ pub(crate) fn analyze_ledger_rows(
         }
         if strict_body && rule.boundary {
             // 空白分隔符之后不能让表尾草稿靠一个像科目编码的值重新混入正文；
-            // 必须同时具备编码、名称和可解析金额。进入该区段后持续应用同一协议。
-            keep.push(
-                rule.has_field(row, &rule.code)
-                    && rule.has_field(row, &rule.name)
-                    && rule.has_parseable_je_amount(row),
-            );
+            // 编码/名称/金额按「列实际有值」的重开门槛判定。进入该区段后
+            // 持续应用同一协议。
+            keep.push(strict_reopen(row));
         } else {
             keep.push(rule.is_body(row));
         }
@@ -3208,6 +3240,75 @@ pub(crate) fn ledger_junk_mask(
     column_of: &dyn Fn(&str) -> Vec<String>,
 ) -> Vec<bool> {
     analyze_ledger_rows(headers, rows, column_of).keep
+}
+
+/// 身份字段向下填充的参与掩码：正文行照常参与；被 [`analyze_ledger_rows`]
+/// 剔除的行里，只有「带身份」且不在表尾协议区的行允许参与填充收发——
+/// 真实账的合并单元格分录（凭证号在、科目空）靠它补齐身份。
+///
+/// 表尾协议区只认**整行空白分隔**。10 号样例合计行下面的人手草稿把金额
+/// 错位写进了科目编码列（`2556.54`）、说明写在摘要/凭证号列，旧口径
+/// 「有文字就恢复」会把它救回正文，填充再补齐名称与编码，凭空造出净差
+/// 5.5 亿的幻影科目。**不能把「合计/小计」行也当分隔符**：合计行出现在
+/// 表体中间、其后跟着待填充续行的形态真实存在（见 fx 回归
+/// `噪声行不参与向下填充`），合计行之后的表尾裁剪由调用方按需执行
+/// （TBJE 用 [`ledger_post_fill_body_mask`]）。协议区内只有通过
+/// [`LedgerBodyRule::strict_reopen_gate`]（编码/名称按列实际有值放宽）
+/// 的行才可重新参与，与正文重开规则保持同一口径。
+pub(crate) fn ledger_fill_mask(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<bool> {
+    let mut mask = analyze_ledger_rows(headers, rows, column_of).keep;
+    let rule = LedgerBodyRule::new(headers, column_of);
+    if rule.identity.is_empty() {
+        return mask;
+    }
+    let strict_reopen = rule.strict_reopen_gate(rows);
+    let mut strict_region = false;
+    for (index, row) in rows.iter().enumerate() {
+        if row.iter().all(|value| value.trim().is_empty()) {
+            strict_region = true;
+            continue;
+        }
+        if mask.get(index).copied().unwrap_or(false) || !rule.has_identity(row) {
+            continue;
+        }
+        if strict_region && rule.boundary && !strict_reopen(row) {
+            continue;
+        }
+        mask[index] = true;
+    }
+    mask
+}
+
+/// TBJE 填充后的 JE 正文行掩码：默认整表保留——合并单元格补齐身份的行、
+/// 名称整列空白的 SAP 导出、表体中偶发空行后的真分录都照常进入；只把
+/// 「合计/小计」屏障之后仍未通过重开门槛的表尾行剔除。序时账的合计行是
+/// 整本账的终点，其后只应是页脚或人手草稿。
+pub(crate) fn ledger_post_fill_body_mask(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<bool> {
+    let rule = LedgerBodyRule::new(headers, column_of);
+    if rule.identity.is_empty() {
+        return vec![true; rows.len()];
+    }
+    let reopen = rule.strict_reopen_gate(rows);
+    let mut mask = vec![true; rows.len()];
+    let mut after_barrier = false;
+    for (index, row) in rows.iter().enumerate() {
+        if row.iter().any(|value| is_rollup_label(value.trim())) {
+            after_barrier = true;
+            continue;
+        }
+        if after_barrier && !reopen(row) {
+            mask[index] = false;
+        }
+    }
+    mask
 }
 
 /// 流水级导出上的凭证/流水特征表头（按整段精确匹配，避免子串误命中）。
@@ -3381,6 +3482,11 @@ pub(crate) fn tb_is_posting_level_export(
 /// 同样保留有编码的父行；反过来小计行没有编码而明细行有，就删小计行。
 /// 同一编码因币种拆成多行时按币种隔离，互不构成汇总关系。
 ///
+/// **固定长度优先**：若全表正常数据行的非空科目编码长度完全一致，
+/// 说明该 TB 使用定长末级编码；此时所有有编码的正常行都是平级末级，禁止再用
+/// “某行金额＝相邻行之和”折叠同编码行。没有科目编码的行直接排除；明确的
+/// 合计标签和噪声行仍会剔除。
+///
 /// **例外**：流水级导出（[`tb_is_posting_level_export`]）逐笔列示、没有汇总行，
 /// 金额勾稽在该类表上整段跳过，避免把巧合凑数的真实流水当明细剔除。
 ///
@@ -3486,6 +3592,27 @@ pub(crate) fn tb_leaf_mask(
         }
     }
 
+    // 定长科目表先于同编码金额勾稽。例如 10 位科目按成本中心拆行时，
+    // 200 恰好等于相邻的 50 + 150 只是数值巧合，不能据此删掉真实明细。
+    // 空编码行不参与长度判定，不能推翻“全部已填编码均为定长”的事实；
+    // 一旦定长模式成立，下一步会把这些缺少匹配键的行统一排除。
+    let account_code_lengths = identities
+        .iter()
+        .enumerate()
+        .filter(|(index, (_, code))| !rollup[*index] && !code.is_empty())
+        .map(|(_, (_, code))| code.chars().count())
+        .collect::<BTreeSet<_>>();
+    let fixed_width_leaf_table = account_code_lengths.len() == 1;
+    if fixed_width_leaf_table {
+        // 平级末级表的匹配键就是科目编码。空编码行既无法参与科目匹配，也不能
+        // 依靠名称或金额猜测归属；统一在公共入口排除，避免各业务工具口径分叉。
+        for (index, (_, code)) in identities.iter().enumerate() {
+            if code.is_empty() {
+                rollup[index] = true;
+            }
+        }
+    }
+
     // ③ 金额勾稽。余额必须先折成借正贷负的净额再比较，发生额仍按借、贷
     // 两侧分别比较。01 号样例的父行把期初 150 借 / 50 贷净额列成 100 借，
     // 辅助核算明细却保留两侧毛额；逐原始列比较会漏掉这层汇总并把发生额算重。
@@ -3517,7 +3644,14 @@ pub(crate) fn tb_leaf_mask(
             // 任何金额丢失。存款利息等只需末级科目的工具依赖这条：
             // `6603` 零值汇总行不进测算，`66030101` 末级行仍保留。
             mark_zero_value_parents(&identities, &currencies, &levels, &values, &mut rollup);
-            mark_rollup_by_sum(&identities, &currencies, &levels, &values, &mut rollup);
+            mark_rollup_by_sum(
+                &identities,
+                &currencies,
+                &levels,
+                &values,
+                &mut rollup,
+                fixed_width_leaf_table,
+            );
             // 真实TB常有多层结构：辅助明细先汇成末级科目，末级科目再汇成上级。
             // 第一轮先锁住同编码的局部关系；随后仅拿仍保留的行再勾稽，由内向外
             // 折叠。每轮都映射回原始行号，源数据和导出行号不变。
@@ -3550,6 +3684,7 @@ pub(crate) fn tb_leaf_mask(
                     &compact_levels,
                     &compact_values,
                     &mut compact_rollup,
+                    fixed_width_leaf_table,
                 );
                 let removed = compact_rollup.iter().filter(|value| **value).count();
                 if removed == 0 {
@@ -3721,6 +3856,7 @@ fn mark_rollup_by_sum(
     levels: &[Option<u32>],
     values: &[Vec<f64>],
     rollup: &mut [bool],
+    preserve_same_code_rows: bool,
 ) {
     let len = rollup.len();
     // 该行在所有金额列上是否全为零。全零行不能当汇总锚点，否则空行会和
@@ -3804,6 +3940,11 @@ fn mark_rollup_by_sum(
                 let same_code = !anchor_code.is_empty()
                     && !member_codes.is_empty()
                     && member_codes.iter().all(|code| *code == anchor_code);
+                // 定长编码已经证明这些有编码行处于同一级；即使金额恰好相加，
+                // 同编码行也只能是并列维度明细，不能再猜其中一行是汇总。
+                if preserve_same_code_rows && same_code {
+                    continue;
+                }
                 let hierarchy = !anchor_code.is_empty()
                     && !member_codes.is_empty()
                     && member_codes.iter().all(|code| {
@@ -3964,6 +4105,7 @@ pub(crate) fn role_rejects_header(kind: &str, role: &str, header: &str) -> bool 
     role.conflicts
         .iter()
         .any(|c| n.contains(&normalize_header(c)))
+        && !(role.name == "summary" && explicit_line_summary_header(header))
 }
 
 // ────────────────────────────── 取值解析 ──────────────────────────────
@@ -8283,10 +8425,12 @@ mod tests {
             行("1121.01", "银行承兑汇票", ["100", "300", "50", "350"]),
             行("1121.01", "水晶火碳电子科技", ["60", "200", "30", "230"]),
             行("1121.01", "宁波杭州湾如意", ["40", "100", "20", "120"]),
+            // 真实的层级/辅助核算混排 TB 并非全表定长；这条代表表内其他级次。
+            行("999", "其他科目", ["1", "2", "0", "3"]),
         ];
         assert_eq!(
             tb_leaf_mask(&余额表表头(), &rows, &余额表映射),
-            vec![true, false, false]
+            vec![true, false, false, true]
         );
     }
 
@@ -8311,6 +8455,7 @@ mod tests {
             vec!["5001.01", "生产成本", "100", "0", "1000", "800", "300", "0"],
             vec!["5001.01", "部门A", "150", "0", "600", "300", "450", "0"],
             vec!["5001.01", "部门B", "0", "50", "400", "500", "0", "150"],
+            vec!["999", "其他科目", "1", "0", "2", "0", "3", "0"],
         ]
         .into_iter()
         .map(|row| row.into_iter().map(String::from).collect())
@@ -8328,7 +8473,7 @@ mod tests {
         };
         assert_eq!(
             tb_leaf_mask(&headers, &rows, &columns),
-            vec![true, false, false],
+            vec![true, false, false, true],
             "余额净额一致时保留一套汇总金额，不能把汇总和辅助明细一起累计"
         );
     }
@@ -8355,10 +8500,49 @@ mod tests {
             行("1121.01", "客户B", ["40", "100", "20", "120"]),
             行("1122.09", "应收账款_未开票", ["0", "20", "0", "20"]),
             行("1122.09", "客户C", ["0", "20", "0", "20"]),
+            行("999", "其他科目", ["1", "2", "0", "3"]),
         ];
         assert_eq!(
             tb_leaf_mask(&余额表表头(), &rows, &余额表映射),
-            vec![true, false, false, true, false]
+            vec![true, false, false, true, false, true]
+        );
+    }
+
+    #[test]
+    fn tb全表科目编码等长时优先按平级末级保留() {
+        // 2025 1-3 月真实 TB 的 8131002884 按成本中心拆成 5 行，编码均为
+        // 10 位。中间的 200 恰好等于相邻 50 + 150，但五行都是业务明细，
+        // 借方发生额应为 700，不得被金额折叠误算成 500。
+        let rows = vec![
+            行("8131002884", "员工生育保险-A", ["0", "150", "0", "150"]),
+            行("8131002884", "员工生育保险-B", ["0", "200", "0", "200"]),
+            行("8131002884", "员工生育保险-C", ["0", "50", "0", "50"]),
+            行("8131002884", "员工生育保险-D", ["0", "150", "0", "150"]),
+            行("8131002884", "员工生育保险-E", ["0", "150", "0", "150"]),
+        ];
+        let mask = tb_leaf_mask(&余额表表头(), &rows, &余额表映射);
+        assert_eq!(mask, vec![true; 5]);
+        let debit = rows
+            .iter()
+            .zip(mask)
+            .filter(|(_, keep)| *keep)
+            .map(|(row, _)| row[3].parse::<f64>().unwrap())
+            .sum::<f64>();
+        assert_eq!(debit, 700.0);
+    }
+
+    #[test]
+    fn tb固定长度平级表的空编码行无条件排除() {
+        // 空编码行的金额故意不与任何有编码行勾稽：过滤依据是缺少匹配键，
+        // 不是“恰好像汇总行”。所有消费 tb_leaf_mask 的工具都应得到同一结果。
+        let rows = vec![
+            行("8131002884", "员工生育保险-A", ["0", "150", "0", "150"]),
+            行("", "无法定位到科目的辅助行", ["0", "37", "0", "37"]),
+            行("2202000000", "应付账款", ["0", "0", "150", "-150"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&余额表表头(), &rows, &余额表映射),
+            vec![true, false, true]
         );
     }
 
@@ -8505,10 +8689,11 @@ mod tests {
             行("1405000000", "应收账款", ["0", "360144", "360144", "0"]),
             行("1405000000", "客户A", ["0", "180072", "180072", "0"]),
             行("1405000000", "客户B", ["0", "180072", "180072", "0"]),
+            行("999", "其他科目", ["1", "2", "0", "3"]),
         ];
         assert_eq!(
             tb_leaf_mask(&余额表表头(), &traditional, &余额表映射),
-            vec![true, false, false]
+            vec![true, false, false, true]
         );
     }
 
@@ -8566,23 +8751,28 @@ mod tests {
                 "230".into(),
             ]
         };
-        let tied = vec![full("1121.01", "应收票据"), members("客户A"), {
-            let mut row = members("客户B");
-            row[4] = "40".into();
-            row[5] = "100".into();
-            row[6] = "20".into();
-            row[7] = "120".into();
-            row
-        }];
+        let tied = vec![
+            full("1121.01", "应收票据"),
+            members("客户A"),
+            {
+                let mut row = members("客户B");
+                row[4] = "40".into();
+                row[5] = "100".into();
+                row[6] = "20".into();
+                row[7] = "120".into();
+                row
+            },
+            full("999", "其他科目"),
+        ];
         assert_eq!(
             tb_leaf_mask(&headers, &tied, &columns),
-            vec![true, false, false],
+            vec![true, false, false, true],
             "传统表即便带主体与期间列，汇总勾稽也必须照常剔除明细"
         );
     }
 
     #[test]
-    fn tb方向小计夹在科目总计与辅助明细之间仍能完整勾稽() {
+    fn tb固定长度表只剔除明确方向小计不按金额删除明细() {
         let rows = vec![
             行("2241.06.09", "应付账款", ["-100", "100", "50", "-50"]),
             行("2241.06.09", "小计", ["-100", "0", "-50", "-150"]),
@@ -8590,7 +8780,7 @@ mod tests {
         ];
         assert_eq!(
             tb_leaf_mask(&余额表表头(), &rows, &余额表映射),
-            vec![true, false, false]
+            vec![true, false, true]
         );
     }
 
@@ -9267,6 +9457,165 @@ mod tests {
     }
 
     #[test]
+    fn 表尾协议区的带字草稿不得借填充还魂() {
+        // 10 号样例实测形态：合计行与整行空白之后是一块人手测算草稿——
+        // 摘要写「管理费用/累计摊销」、凭证号写「原调整冲回」、金额 2556.54
+        // 错位进了科目编码列。旧填充口径「有文字就恢复」把它们救回正文，
+        // 向下填充再补齐名称与编码，凭空造出净差 5.5 亿的幻影科目。
+        let headers: Vec<String> = [
+            "日期",
+            "凭证号",
+            "摘要",
+            "科目编码",
+            "科目全名",
+            "借方金额",
+            "贷方金额",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let rows = vec![
+            // 真分录。
+            vec![
+                "2024/1/31".into(),
+                "记1".into(),
+                "报销".into(),
+                "6602.14".into(),
+                "管理费用_知识产权".into(),
+                "135".into(),
+                "".into(),
+            ],
+            // 合并单元格的续行：日期在、科目空。分析判噪声，但带身份，
+            // 填充掩码必须放行，否则真实分录会被整片丢掉。
+            vec![
+                "2024/1/31".into(),
+                "".into(),
+                "报销".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "135".into(),
+            ],
+            vec![
+                "合计".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "670".into(),
+                "670".into(),
+            ],
+            vec![
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+            ],
+            // 草稿：金额错位进编码列，摘要带字，编码在、名称空。
+            vec![
+                "".into(),
+                "账面摊销".into(),
+                "管理费用".into(),
+                "2556.54".into(),
+                "".into(),
+                "2556.54".into(),
+                "".into(),
+            ],
+            // 草稿：编码列空、名称列被错位金额占据。
+            vec![
+                "".into(),
+                "".into(),
+                "累计摊销".into(),
+                "".into(),
+                "2556.54".into(),
+                "".into(),
+                "276936736.69".into(),
+            ],
+            // 草稿：只有凭证号列带字与一笔借方金额。
+            vec![
+                "".into(),
+                "原调整冲回".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "-276934180.15".into(),
+                "".into(),
+            ],
+            // 游离数字行与公式残值照旧剔除。
+            vec![
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "432584526.18".into(),
+                "432584526.18".into(),
+            ],
+            vec![
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "#REF!".into(),
+                "".into(),
+            ],
+            // 协议区内三要素齐备的行照常重新开启正文。
+            vec![
+                "2024/12/31".into(),
+                "记2".into(),
+                "结转损益".into(),
+                "6603.02".into(),
+                "财务费用_利息收入".into(),
+                "0".into(),
+                "9471.88".into(),
+            ],
+        ];
+        let columns = |role: &str| match role {
+            "date" => vec!["日期".into()],
+            "id" => vec!["凭证号".into()],
+            "summary" => vec!["摘要".into()],
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目全名".into()],
+            "functionalDebit" => vec!["借方金额".into()],
+            "functionalCredit" => vec!["贷方金额".into()],
+            _ => vec![],
+        };
+
+        let analysis = analyze_ledger_rows(&headers, &rows, &columns);
+        assert_eq!(
+            analysis.keep,
+            vec![true, false, false, false, false, false, false, false, false, true],
+            "正文协议先判：合并单元格续行与草稿此时都是噪声"
+        );
+        let mask = ledger_fill_mask(&headers, &rows, &columns);
+        assert_eq!(
+            mask,
+            vec![true, true, false, false, false, false, false, false, false, true],
+            "填充掩码只把带身份的正文续行救回，表尾草稿一律不放行"
+        );
+
+        // 填充执行面：续行收到上一行的科目身份；草稿行不被填充收养。
+        let mut filled = rows.clone();
+        let fill_columns = vec![
+            "日期".to_owned(),
+            "凭证号".to_owned(),
+            "科目编码".to_owned(),
+            "科目全名".to_owned(),
+        ];
+        forward_fill_columns_skipping(&headers, &mut filled, &fill_columns, &mask);
+        assert_eq!(filled[1][3], "6602.14", "续行应继承上一行科目编码");
+        assert_eq!(filled[1][4], "管理费用_知识产权");
+        assert_eq!(filled[4][3], "2556.54", "草稿行自身的错位值不动");
+        assert_eq!(filled[4][4], "", "草稿行不得被填充收养出名称");
+        assert_eq!(filled[5][3], "", "草稿行不得继承编码");
+        assert_eq!(filled[6][3], "");
+    }
+
+    #[test]
     fn 科目编码可靠时科目名称空白仍属于业务行() {
         let headers: Vec<String> = ["科目编码", "科目名称", "金额", "备注"]
             .into_iter()
@@ -9489,6 +9838,16 @@ mod tests {
         ));
         // 认不出的角色名一律不拦。
         assert!(!role_rejects_header("je", "不存在的角色", "随便一列"));
+    }
+
+    #[test]
+    fn sap凭证行文本识别为摘要而凭证抬头文本仍排除() {
+        let headers = vec!["凭证行文本".to_owned(), "凭证抬头文本".to_owned()];
+        let got = suggest_roles("je", &headers);
+        assert_eq!(got.get(&0), Some(&"summary"));
+        assert_eq!(got.get(&1), None);
+        assert!(!role_rejects_header("je", "summary", "凭证行文本"));
+        assert!(role_rejects_header("je", "summary", "凭证抬头文本"));
     }
 
     #[test]

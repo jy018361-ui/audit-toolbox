@@ -43,7 +43,9 @@ fn scoped_entity(
 }
 
 fn entity_scope(params: &Value) -> ledger_mapping::EntityScope {
-    params.get("entityScope").cloned()
+    params
+        .get("entityScope")
+        .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default()
 }
@@ -1330,6 +1332,10 @@ pub(crate) struct AccountRow {
     /// 填入的利率高于该档央行基准时的提示（基准只作上限参照）。
     pub(crate) rate_warning: String,
     pub(crate) opening_balance: f64,
+    /// 该户在 TB 里由几行合并而来。SAP 余额表同一科目按辅助维度拆多行，
+    /// 逐行当独立户会拿「半个科目」去和序时账勾稽；大于 1 时行注要点名。
+    #[serde(default)]
+    pub(crate) merged_rows: usize,
     /// 年初余额是否直接取自 TB。SAP 的 Trial Balance LC/GC 只有 MTD/YTD，
     /// 没有年初余额列，这时用"期末余额 − 全年发生额"倒推。
     pub(crate) opening_from_tb: bool,
@@ -1419,10 +1425,6 @@ fn calculate(
                 .get("entity")
                 .is_some_and(|value| !value.is_null() && value != ""),
     );
-    let mut accounts: Vec<AccountRow> = vec![];
-    let mut booked_interest_rows: Vec<Value> = vec![];
-    let mut booked_interest = 0.0;
-
     let account_cols = account_columns(&tb, &tb_map);
     if account_cols.is_empty() {
         return Err(error(
@@ -1476,6 +1478,26 @@ fn calculate(
         })
         .filter(|(code, name)| !code.is_empty() && !name.is_empty() && code != name)
         .collect();
+    // 第一遍扫描只抽「原料」：末级行的身份（主体/科目/币种/辅助）与金额。
+    // 同一科目的维度拆行是否合并成一户，等公共匹配口径（主体＋科目键）确定
+    // 后在第二遍决定——SAP 余额表同一科目按维度拆多行，逐行当独立户会拿
+    // 「半个科目」去和序时账勾稽，必然出成对的假差异。
+    #[derive(Clone)]
+    struct TbCandidate {
+        entity: String,
+        account: String,
+        auxiliary: String,
+        currency: String,
+        role: String,
+        opening: Option<f64>,
+        closing: f64,
+        debit_raw: f64,
+        credit_raw: f64,
+        net: f64,
+        note: String,
+    }
+    let mut deposit_candidates: Vec<TbCandidate> = vec![];
+    let mut interest_candidates: Vec<TbCandidate> = vec![];
     for (row_index, row) in tb.rows.iter().enumerate() {
         if !tb_leaf[row_index] {
             continue;
@@ -1485,6 +1507,12 @@ fn calculate(
             continue;
         }
         let role = role_for(&account, params);
+        let entity = scoped_entity(
+            &cell_text(&tb, row, &tb_map, "entity"),
+            entity_key_enabled,
+            ledger_mapping::EntitySide::Tb,
+            &entity_scope,
+        );
         if role == "interest_income" {
             // 利息收入是损益类贷方科目：优先用本期发生额净额，只有余额
             // 可用时退回期末余额净额。已结转形态（借贷同额）按红字与
@@ -1507,21 +1535,19 @@ fn calculate(
                     Some((net, note, debit, credit)) => (net, note, debit, credit),
                     None => (-closing_balance, "期末余额净额".into(), 0.0, 0.0),
                 };
-            booked_interest += net;
-            booked_interest_rows.push(json!({
-                "entity": scoped_entity(
-                    &cell_text(&tb, row, &tb_map, "entity"),
-                    entity_key_enabled,
-                    ledger_mapping::EntitySide::Tb,
-                    &entity_scope,
-                ),
-                "account": account,
-                "debit": debit_raw,
-                "credit": credit_raw,
-                "closing": closing_balance,
-                "bookedAmount": net,
-                "note": note
-            }));
+            interest_candidates.push(TbCandidate {
+                entity,
+                account,
+                auxiliary: String::new(),
+                currency: String::new(),
+                role,
+                opening: None,
+                closing: closing_balance,
+                debit_raw,
+                credit_raw,
+                net,
+                note,
+            });
             continue;
         }
         if !is_deposit_role(&role) {
@@ -1530,12 +1556,6 @@ fn calculate(
         if role == "cash_on_hand" && !params["includeCashOnHand"].as_bool().unwrap_or(false) {
             continue;
         }
-        let entity = scoped_entity(
-            &cell_text(&tb, row, &tb_map, "entity"),
-            entity_key_enabled,
-            ledger_mapping::EntitySide::Tb,
-            &entity_scope,
-        );
         let auxiliary = cell_text(&tb, row, &tb_map, "auxiliary");
         let currency = cell_text(&tb, row, &tb_map, "currency");
         // 货币资金是借方余额资产，净额一律按"借方－贷方"。
@@ -1556,15 +1576,130 @@ fn calculate(
             closing_self_signed,
         )
         .unwrap_or(0.0);
-        let (tier, matched_by) = tier_for(&account, &auxiliary, params);
-        let meta = find_tier(tier);
-        accounts.push(AccountRow {
-            key: account_key(&entity, &account, &auxiliary),
+        deposit_candidates.push(TbCandidate {
             entity,
             account,
             auxiliary,
             currency,
             role,
+            opening,
+            closing,
+            debit_raw: 0.0,
+            credit_raw: 0.0,
+            net: 0.0,
+            note: String::new(),
+        });
+    }
+    if deposit_candidates.is_empty() {
+        return Err(error(
+            "NO_DEPOSIT_ACCOUNTS",
+            "未从 TB 识别到货币资金科目；请在科目分类中确认银行存款/其他货币资金科目。",
+            None,
+        ));
+    }
+
+    // JE 打开一次：身份预扫供公共匹配口径判定两侧编码歧义，逐月归集复用
+    // 同一份表/磁盘缓存，不再按参数各读各的。
+    let je_input = open_je_input(params, cancel, progress, total)?;
+    let policy = {
+        let tb_identities: Vec<(String, String, String)> = deposit_candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.entity.clone(),
+                    ledger_mapping::account_code_of(&candidate.account),
+                    ledger_mapping::account_name_of(&candidate.account),
+                )
+            })
+            .collect();
+        let je_identities = match &je_input {
+            Some(je) => je_account_identities(je, entity_key_enabled, &entity_scope, cancel)?,
+            None => Vec::new(),
+        };
+        ledger_mapping::AccountMatchPolicy::from_sides(&tb_identities, &je_identities)
+    };
+
+    // 第二遍：按（主体＋公共科目键）聚合维度拆行。辅助核算不进键——
+    // 银行户以科目为户，维度差异（银行/款项性质等）并入行注披露。
+    struct AccountFold {
+        first: TbCandidate,
+        rows: usize,
+        opening_sum: f64,
+        opening_all: bool,
+        closing_sum: f64,
+        currencies: BTreeSet<String>,
+        auxiliaries: BTreeSet<String>,
+    }
+    let mut fold_order: Vec<(String, String)> = vec![];
+    let mut folds: BTreeMap<(String, String), AccountFold> = BTreeMap::new();
+    for candidate in deposit_candidates {
+        let key = (
+            candidate.entity.clone(),
+            matched_account_key(&candidate.entity, &candidate.account, &policy),
+        );
+        let auxiliary = candidate.auxiliary.trim().to_owned();
+        let currency = candidate.currency.trim().to_uppercase();
+        let Some(fold) = folds.get_mut(&key) else {
+            fold_order.push(key.clone());
+            folds.insert(
+                key,
+                AccountFold {
+                    opening_all: candidate.opening.is_some(),
+                    opening_sum: candidate.opening.unwrap_or(0.0),
+                    closing_sum: candidate.closing,
+                    currencies: (!currency.is_empty())
+                        .then(|| BTreeSet::from([currency]))
+                        .unwrap_or_default(),
+                    auxiliaries: (!auxiliary.is_empty())
+                        .then(|| BTreeSet::from([auxiliary]))
+                        .unwrap_or_default(),
+                    first: candidate,
+                    rows: 1,
+                },
+            );
+            continue;
+        };
+        fold.rows += 1;
+        fold.opening_all &= candidate.opening.is_some();
+        fold.opening_sum += candidate.opening.unwrap_or(0.0);
+        fold.closing_sum += candidate.closing;
+        if !auxiliary.is_empty() {
+            fold.auxiliaries.insert(auxiliary);
+        }
+        if !currency.is_empty() {
+            fold.currencies.insert(currency);
+        }
+    }
+    let mut accounts: Vec<AccountRow> = vec![];
+    let mut multi_currency_keys: BTreeSet<String> = BTreeSet::new();
+    for key in &fold_order {
+        let fold = folds.remove(key).expect("聚合桶按 fold_order 落键");
+        let row_key = [key.0.as_str(), key.1.as_str()].join(" | ");
+        if fold.currencies.len() > 1 {
+            multi_currency_keys.insert(row_key.clone());
+        }
+        let auxiliary = fold
+            .auxiliaries
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("；");
+        let currency = fold
+            .currencies
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("/");
+        let account_text = fold.first.account.clone();
+        let (tier, matched_by) = tier_for(&account_text, &auxiliary, params);
+        let meta = find_tier(tier);
+        accounts.push(AccountRow {
+            key: row_key,
+            entity: key.0.clone(),
+            account: account_text,
+            auxiliary,
+            currency,
+            role: fold.first.role.clone(),
             tier: tier.into(),
             tier_label: tier_label(tier),
             category: meta.map(|x| x.category).unwrap_or("demand").into(),
@@ -1574,10 +1709,15 @@ fn calculate(
             annual_rate: 0.0,
             rate_resolved: false,
             rate_warning: String::new(),
-            opening_balance: opening.unwrap_or(0.0),
-            opening_from_tb: opening.is_some(),
-            tb_closing_balance: closing,
-            derived_closing_balance: closing,
+            opening_balance: if fold.opening_all {
+                fold.opening_sum
+            } else {
+                0.0
+            },
+            merged_rows: fold.rows,
+            opening_from_tb: fold.opening_all,
+            tb_closing_balance: fold.closing_sum,
+            derived_closing_balance: fold.closing_sum,
             reconciliation_diff: 0.0,
             average_balance: 0.0,
             calculated_interest: 0.0,
@@ -1586,25 +1726,75 @@ fn calculate(
             note: String::new(),
         });
     }
-    if accounts.is_empty() {
-        return Err(error(
-            "NO_DEPOSIT_ACCOUNTS",
-            "未从 TB 识别到货币资金科目；请在科目分类中确认银行存款/其他货币资金科目。",
-            None,
-        ));
+
+    // 账面利息收入同样按（主体＋科目）合并：维度拆行各自只有部分发生额，
+    // 合并后的借贷与净额才是该科目的完整口径（合计不变，行数去重）。
+    let mut booked_interest_rows: Vec<Value> = vec![];
+    let mut booked_interest = 0.0_f64;
+    {
+        struct BookedFold {
+            first: TbCandidate,
+            rows: usize,
+            debit: f64,
+            credit: f64,
+            closing: f64,
+            net: f64,
+        }
+        let mut booked_order: Vec<(String, String)> = vec![];
+        let mut booked_folds: BTreeMap<(String, String), BookedFold> = BTreeMap::new();
+        for candidate in interest_candidates {
+            booked_interest += candidate.net;
+            let key = (
+                candidate.entity.clone(),
+                matched_account_key(&candidate.entity, &candidate.account, &policy),
+            );
+            let Some(fold) = booked_folds.get_mut(&key) else {
+                booked_order.push(key.clone());
+                let debit = candidate.debit_raw;
+                let credit = candidate.credit_raw;
+                let closing = candidate.closing;
+                let net = candidate.net;
+                booked_folds.insert(
+                    key,
+                    BookedFold {
+                        first: candidate,
+                        rows: 1,
+                        debit,
+                        credit,
+                        closing,
+                        net,
+                    },
+                );
+                continue;
+            };
+            fold.rows += 1;
+            fold.debit += candidate.debit_raw;
+            fold.credit += candidate.credit_raw;
+            fold.closing += candidate.closing;
+            fold.net += candidate.net;
+        }
+        for key in booked_order {
+            let fold = booked_folds.remove(&key).expect("利息科目按序落键");
+            booked_interest_rows.push(json!({
+                "entity": key.0,
+                "account": fold.first.account,
+                "debit": fold.debit,
+                "credit": fold.credit,
+                "closing": fold.closing,
+                "bookedAmount": fold.net,
+                "note": if fold.rows > 1 {
+                    format!("{}（{} 行合并）", fold.first.note, fold.rows)
+                } else {
+                    fold.first.note.clone()
+                }
+            }));
+        }
     }
-    // JE 没有币种字段时，同一科目在 TB 按多个币种拆行，JE 发生额只能得到
-    // 科目合计，无法可靠分配到每一个币种。按用户要求保留当前计算，只披露
-    // 输入资料局限，不把它冒充成分币种勾稽证据。
-    let je_currency_ambiguous_keys = je_currency_ambiguous_keys(params, &accounts);
-    let je_currency_allocation_warning = if je_currency_ambiguous_keys.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "JE 未提供或未映射币种字段，但 TB 中有 {} 个账户按多个币种列示。JE 发生额只能按账户合计，无法准确分配到各币种；分币种的“年末余额（JE推导）”及勾稽差异仅供参考，请补充 JE 币种字段或按账户合并口径复核。",
-            je_currency_ambiguous_keys.len()
-        )
-    };
+    // JE 没有币种字段时，同一科目在 TB 按多个币种拆行（已按科目合并为一户），
+    // JE 发生额只能得到科目合计，无法可靠分配到每一个币种。按用户要求保留
+    // 当前计算，只披露输入资料局限，不把它冒充成分币种勾稽证据。
+    let je_currency_allocation_warning =
+        currency_allocation_warning(params, &multi_currency_keys);
     checkpoint(cancel, pause)?;
 
     // 只测算期间覆盖到的月份。SAP 的 TB 常常只出到某个期间（例如 10 月），
@@ -1620,27 +1810,31 @@ fn calculate(
 
     // 逐月发生额：有序时账就按日期还原，没有序时账就退回期初/期末两点法。
     progress("movement", 2, total, "正在按序时账还原逐月余额变动…");
-    let detected = monthly_movements(
-        params,
-        &accounts,
-        entity_key_enabled,
-        start,
-        end,
-        cancel,
-        pause,
-        progress,
-        total,
-    )?;
-    let has_je = detected.is_some();
-    let amount_scheme = detected
+    let movements = match &je_input {
+        Some(je) => monthly_movements(
+            je,
+            &policy,
+            &accounts,
+            entity_key_enabled,
+            &entity_scope,
+            start,
+            end,
+            cancel,
+            pause,
+            progress,
+            total,
+        )?,
+        None => None,
+    };
+    let has_je = movements.is_some();
+    let amount_scheme = movements
         .as_ref()
-        .map(|(_, label, _)| label.clone())
+        .map(|aggregate| aggregate.scheme.clone())
         .unwrap_or_default();
-    let amount_evidence = detected
+    let amount_evidence = movements
         .as_ref()
-        .map(|(_, _, note)| note.clone())
+        .map(|aggregate| aggregate.evidence.clone())
         .unwrap_or_default();
-    let movements = detected.map(|(series, _, _)| series);
     checkpoint(cancel, pause)?;
 
     progress("interest", 3, total, "正在按月均余额和存款利率测算利息…");
@@ -1674,7 +1868,24 @@ fn calculate(
 
         // TB 没给年初余额时（SAP Trial Balance LC/GC 就没有这一列），
         // 用"期末余额 − 期间内全部发生额"倒推年初。
-        let series = movements.as_ref().and_then(|all| all.get(&account.key));
+        let series = movements
+            .as_ref()
+            .and_then(|aggregate| aggregate.series.get(&account.key));
+        // 序时账覆盖按户判定：期间内一行都没归集到该科目时，硬按 JE 逐月
+        // 还原会得到全年发生额为 0 的假平线（余额恒等于年初），比不提供
+        // 序时账还糟；退回两点法至少月均口径是"期初→期末"的合理近似。
+        // 例外有二：TB 自证休眠的户（年初=期末且余额直接取自 TB）零归集与
+        // 「全年无发生」一致；年初期末全零的户没有可勾稽的金额。两者都按
+        // 已覆盖处理，休眠户照常显示"已勾稽"、全零户不制造未覆盖噪音。
+        let je_rows = movements
+            .as_ref()
+            .and_then(|aggregate| aggregate.matched_rows.get(&account.key))
+            .copied()
+            .unwrap_or(0);
+        let dormant = (account.opening_from_tb
+            && (account.tb_closing_balance - account.opening_balance).abs() <= 0.01)
+            || (account.opening_balance.abs() <= 0.01 && account.tb_closing_balance.abs() <= 0.01);
+        let je_backed = has_je && (je_rows > 0 || dormant);
         if !account.opening_from_tb {
             let net: f64 = series
                 .map(|all| all.iter().map(|(debit, credit)| debit - credit).sum())
@@ -1689,7 +1900,7 @@ fn calculate(
             let (debit, credit) = series
                 .map(|all| all[(month - 1) as usize])
                 .unwrap_or((0.0, 0.0));
-            let closing = if has_je {
+            let closing = if je_backed {
                 opening + debit - credit
             } else {
                 // 两点法：只有期初和期末，月末余额按直线推进，
@@ -1721,7 +1932,7 @@ fn calculate(
         // 就显示成"已勾稽"。
         account.status = if !account.rate_resolved {
             "待填利率".into()
-        } else if !has_je {
+        } else if !je_backed {
             "两点法推算".into()
         } else if !account.opening_from_tb {
             "年初倒推".into()
@@ -1731,6 +1942,12 @@ fn calculate(
             "待复核".into()
         };
         let mut notes: Vec<String> = vec![];
+        if account.merged_rows > 1 {
+            notes.push(format!(
+                "TB 中该科目按辅助维度拆成 {} 行，已按「主体＋科目编码」合并为一户测算。",
+                account.merged_rows
+            ));
+        }
         if !account.opening_from_tb {
             notes.push(
                 "TB 未提供年初余额，已按“期末余额 − 期间内发生额”倒推；此时期末余额必然勾稽，不构成独立复核证据。"
@@ -1746,17 +1963,21 @@ fn calculate(
         if !account.rate_warning.is_empty() {
             notes.push(account.rate_warning.clone());
         }
-        if je_currency_ambiguous_keys.contains(&account.key) {
+        if multi_currency_keys.contains(&account.key) {
             notes.push(
-                "JE 未提供或未映射币种字段，而该账户在 TB 中按多个币种列示；JE 发生额无法按币种拆分，本行的 JE 推导余额及勾稽差异仅供参考。"
+                "JE 未提供或未映射币种字段，而该科目在 TB 中按多个币种列示；JE 发生额无法按币种拆分，本行的 JE 推导余额及勾稽差异仅供参考。"
                     .into(),
             );
         }
-        if !has_je {
-            notes.push("未提供序时账，月末余额按年初到年末直线推算，月均余额仅供参考。".into());
+        if !je_backed {
+            notes.push(if has_je {
+                "序时账期间内没有任何行归集到该科目，月末余额按年初到年末两点法推算，月均余额仅供参考。".into()
+            } else {
+                "未提供序时账，月末余额按年初到年末直线推算，月均余额仅供参考。".into()
+            });
         } else if account.reconciliation_diff.abs() >= 0.01 {
             notes.push(format!(
-                "JE 推导的年末余额与 TB 相差 {:.2}，请确认科目/辅助核算是否完整匹配。",
+                "JE 推导的年末余额与 TB 相差 {:.2}，请确认科目映射与序时账完整性。",
                 account.reconciliation_diff
             ));
         }
@@ -1796,6 +2017,38 @@ fn calculate(
         ""
     };
     let review = accounts.iter().filter(|a| a.status != "已勾稽").count();
+    // 序时账覆盖体检：TB 里有余额的主体，整家不在序时账里（典型：TB 是两家
+    // 公司、序时账只导了一家）必须在汇总里点名，而不是让用户对着每行
+    // 「JE 推导的年末余额与 TB 相差…」逐行猜原因。
+    let uncovered_count = accounts
+        .iter()
+        .filter(|a| {
+            let uncovered = movements.as_ref().is_some_and(|aggregate| {
+                aggregate.matched_rows.get(&a.key).copied().unwrap_or(0) == 0
+            });
+            // 与逐户判定同一口径：TB 自证休眠（年初=期末）或年初期末全零
+            // 的户不算未覆盖。
+            let dormant = (a.opening_from_tb
+                && (a.tb_closing_balance - a.opening_balance).abs() <= 0.01)
+                || (a.opening_balance.abs() <= 0.01 && a.tb_closing_balance.abs() <= 0.01);
+            uncovered && !dormant
+        })
+        .count();
+    let uncovered_entities: Vec<String> = if has_je {
+        let mut active: BTreeSet<String> = accounts
+            .iter()
+            .filter(|a| a.tb_closing_balance.abs() > 0.01 || a.opening_balance.abs() > 0.01)
+            .map(|a| a.entity.clone())
+            .collect();
+        if let Some(aggregate) = movements.as_ref() {
+            for entity in &aggregate.je_entities {
+                active.remove(entity);
+            }
+        }
+        active.into_iter().collect()
+    } else {
+        Vec::new()
+    };
     let stale_months = listed_rate_age_months();
     let rates_stale = stale_months > RATE_STALE_AFTER_MONTHS;
     Ok(json!({
@@ -1816,7 +2069,15 @@ fn calculate(
             "missingRateCount": missing_rate_count,
             "missingRateBalance": missing_rate_balance,
             "missingRateTiers": missing_rate_tiers,
-            "monthlySource": if has_je { "序时账逐月还原" } else { "期初/期末两点法" },
+            "monthlySource": if !has_je {
+                "期初/期末两点法".to_string()
+            } else if uncovered_count == 0 {
+                "序时账逐月还原".to_string()
+            } else {
+                format!("序时账逐月还原（{uncovered_count} 户未覆盖，退回两点法）")
+            },
+            "jeUncoveredEntities": uncovered_entities,
+            "jeUncoveredAccountCount": uncovered_count,
             "amountScheme": amount_scheme,
             "amountEvidence": amount_evidence,
             "openingSource": if accounts.iter().all(|a| a.opening_from_tb) {
@@ -1837,7 +2098,7 @@ fn calculate(
             "listedRateDate": LISTED_REFERENCE_DATE,
             "ratesStale": rates_stale,
             "rateAgeMonths": stale_months,
-            "jeCurrencyAllocationWarningCount": je_currency_ambiguous_keys.len(),
+            "jeCurrencyAllocationWarningCount": multi_currency_keys.len(),
             "jeCurrencyAllocationWarning": je_currency_allocation_warning,
             "staleMessage": if rates_stale {
                 format!(
@@ -1944,18 +2205,38 @@ type MonthlySeries = BTreeMap<String, [(f64, f64); 12]>;
 
 /// 返回逐月发生额，以及金额口径是怎么判出来的——底稿要能交代清楚
 /// "这本序时账是按哪种方案、哪种符号口径读的"。
-fn monthly_movements(
+/// 公共匹配口径下的科目键：主体＋`AccountMatchPolicy` 判定的键。TB 建户
+/// 聚合与 JE 归集两侧都从这里取键，同一科目不会因为维度拆行对不上；
+/// 前导零、编码/名称混写、名称歧义复合等口径全部由公共引擎裁决。
+fn matched_account_key(
+    entity: &str,
+    account_text: &str,
+    policy: &ledger_mapping::AccountMatchPolicy,
+) -> String {
+    // 科目文本可能是「名称在前、编码在后」的多列合并（4800 样例就是
+    // 一级名称＋二级名称＋编码）。公共口径的编码提取只认首词是编码的
+    // 形态，先用本模块的全文扫描器把编码词提出来再交给它，避免编码
+    // 被提空、键退化成名称串。
+    policy.account_key(
+        entity,
+        account_code(account_text),
+        &ledger_mapping::account_name_of(account_text),
+    )
+}
+
+/// 打开一次的序时账输入：小文件进内存表，大文件落磁盘规范化缓存。
+/// 身份预扫（供匹配口径）与逐月归集复用同一份，避免同一文件读两遍。
+enum JeInput {
+    Memory(Arc<FxTable>, Map<String, Value>),
+    Disk(crate::tabular::PreparedDiskLedger, Map<String, Value>),
+}
+
+fn open_je_input(
     params: &Value,
-    accounts: &[AccountRow],
-    entity_key_enabled: bool,
-    start: NaiveDate,
-    end: NaiveDate,
     cancel: &AtomicBool,
-    pause: &PauseCheckpoint,
     progress: &dyn Fn(&str, usize, usize, &str),
     total: usize,
-) -> Result<Option<(MonthlySeries, String, String)>, AppError> {
-    let entity_scope = entity_scope(params);
+) -> Result<Option<JeInput>, AppError> {
     if params.get("jeSource").is_none_or(Value::is_null) {
         return Ok(None);
     }
@@ -1998,150 +2279,120 @@ fn monthly_movements(
             &disk_progress,
             cancel,
         )?;
-        return aggregate_disk_monthly(
-            &ledger,
-            &je_map,
-            accounts,
-            entity_key_enabled,
-            &entity_scope,
-            start,
-            end,
-            cancel,
-            pause,
-            progress,
-            total,
-        )
-        .map(Some);
+        return Ok(Some(JeInput::Disk(ledger, je_map)));
     }
-    let (je, je_map) = table_for(params, "jeSource", "jeMapping")?;
-    // 抽样表只解析了开头若干行，拿它还原逐月余额会得到一份看似完整、
-    // 实则缺了大半发生额的结果——宁可报错也不能悄悄算错。
-    if je.sampled {
-        return Err(error(
-            "JE_SAMPLED",
-            "序时账过大，当前只读取了部分行，无法据此还原逐月余额。请改用不含序时账的两点法，或提供按期间拆分后的序时账。",
-            None,
-        ));
-    }
-    // 序时账只在提供时校验（与前端一致）；年初余额的放松只对 TB 一侧有意义。
-    require_mappings("je", &je_map, false)?;
-    let date_index = column_index(&je, &je_map, "date").ok_or_else(|| {
-        error(
-            "MAPPING_INCOMPLETE",
-            "序时账尚未映射记账日期，无法还原逐月余额。",
-            None,
-        )
-    })?;
-    let account_cols = account_columns(&je, &je_map);
-    if account_cols.is_empty() {
-        return Err(error(
-            "MAPPING_INCOMPLETE",
-            "序时账尚未映射科目编码/名称。",
-            None,
-        ));
-    }
-    // 先按 科目全称 / 科目编码 建索引，序时账与 TB 的科目层级不一定完全一致，
-    // 允许退化到编码前缀匹配。
-    let mut by_account: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
-    let mut by_code: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
-    for (index, account) in accounts.iter().enumerate() {
-        by_account
-            .entry((account.entity.clone(), normalize_header(&account.account)))
-            .or_default()
-            .push(index);
-        by_code
-            .entry((
-                account.entity.clone(),
-                account_code(&account.account).to_owned(),
-            ))
-            .or_default()
-            .push(index);
-    }
-    let scheme = detect_amount_scheme(&je, &je_map)?;
-    // 垃圾行剔除走引擎一份规则（`ledger_junk_mask`）：合计行、表尾手工草稿、
-    // 游离数字行在此显式挡掉。此前这些行进不来靠的是「日期读不出／科目对不上」
-    // 的间接效果——哪天循环放宽了其中一个条件它们就会漏进来，把合计翻倍。
-    // 掩码语义是 `true` 表示该行要算。
-    let keep = ledger_mapping::ledger_junk_mask(&je.headers, &je.rows, &|role| {
-        column_indexes(&je, &je_map, role)
-            .into_iter()
-            .filter_map(|index| je.headers.get(index).cloned())
-            .collect()
-    });
-    let mut series: MonthlySeries = accounts
-        .iter()
-        .map(|account| (account.key.clone(), [(0.0, 0.0); 12]))
-        .collect();
-    let mut matched = 0usize;
-    for (row_index, row) in je.rows.iter().enumerate() {
-        if !keep.get(row_index).copied().unwrap_or(true) {
-            continue;
-        }
-        let Some(date) = row.get(date_index).and_then(|value| parse_date(value)) else {
-            continue;
-        };
-        if date < start || date > end {
-            continue;
-        }
-        let account = join_columns(row, &account_cols);
-        if account.is_empty() {
-            continue;
-        }
-        let code = account_code(&account);
-        let entity = scoped_entity(
-            &cell_text(&je, row, &je_map, "entity"),
-            entity_key_enabled,
-            ledger_mapping::EntitySide::Je,
-            &entity_scope,
-        );
-        let hits = by_account
-            .get(&(entity.clone(), normalize_header(&account)))
-            .or_else(|| by_code.get(&(entity.clone(), code.to_owned())))
-            .cloned()
-            .unwrap_or_default();
-        if hits.is_empty() {
-            continue;
-        }
-        let auxiliary = cell_text(&je, row, &je_map, "auxiliary");
-        // 同一科目下有多个辅助核算/主体时，优先精确落到对应账户；
-        // 落不到就摊到该科目下唯一的账户，多于一个则跳过并留待复核。
-        let target = hits
-            .iter()
-            .find(|index| {
-                let candidate = &accounts[**index];
-                candidate.entity == entity
-                    && (auxiliary.is_empty()
-                        || candidate.auxiliary.is_empty()
-                        || candidate.auxiliary == auxiliary)
-            })
-            .copied()
-            .or_else(|| (hits.len() == 1).then(|| hits[0]));
-        let Some(target) = target else { continue };
-        let net = scheme.net(row);
-        if net == 0.0 {
-            continue;
-        }
-        let (debit, credit) = if net < 0.0 { (0.0, -net) } else { (net, 0.0) };
-        matched += 1;
-        let slot = &mut series.get_mut(&accounts[target].key).unwrap()[(date.month() - 1) as usize];
-        slot.0 += debit;
-        slot.1 += credit;
-    }
-    if matched == 0 {
-        return Err(error(
-            "NO_JE_MATCH",
-            "序时账中没有任何行匹配到 TB 的货币资金科目；请检查科目映射或改用不含序时账的两点法。",
-            None,
-        ));
-    }
-    Ok(Some((series, scheme.label(), scheme.evidence.clone())))
+    let (table, mapping) = table_for(params, "jeSource", "jeMapping")?;
+    Ok(Some(JeInput::Memory(table, mapping)))
 }
 
-/// 大 CSV 的序时账只在 SQLite 规范化缓存上顺序扫描一次。账户清单和最终
-/// 12 个月汇总留在内存；原始 JE 行、向下填充副本和凭证分组均不进入本进程。
-fn aggregate_disk_monthly(
-    ledger: &crate::tabular::PreparedDiskLedger,
-    mapping: &Map<String, Value>,
+/// 序时账侧的（主体、编码、名称）身份清单，喂给 `AccountMatchPolicy` 判
+/// 两侧编码歧义。只收集身份，不解析金额。
+fn je_account_identities(
+    je: &JeInput,
+    entity_key_enabled: bool,
+    entity_scope: &ledger_mapping::EntityScope,
+    cancel: &AtomicBool,
+) -> Result<Vec<(String, String, String)>, AppError> {
+    let mut seen = BTreeSet::new();
+    match je {
+        JeInput::Memory(table, mapping) => {
+            let account_cols = account_columns(table, mapping);
+            if account_cols.is_empty() {
+                return Ok(Vec::new());
+            }
+            for row in &table.rows {
+                let account = join_columns(row, &account_cols);
+                if account.is_empty() {
+                    continue;
+                }
+                let code = account_code(&account).to_owned();
+                if code.is_empty() {
+                    continue;
+                }
+                seen.insert((
+                    scoped_entity(
+                        &cell_text(table, row, mapping, "entity"),
+                        entity_key_enabled,
+                        ledger_mapping::EntitySide::Je,
+                        entity_scope,
+                    ),
+                    code,
+                    ledger_mapping::account_name_of(&account),
+                ));
+            }
+        }
+        JeInput::Disk(ledger, mapping) => {
+            let headers = ledger.headers();
+            let indexes = |role: &str| -> Vec<usize> {
+                let columns = match mapping.get(role) {
+                    Some(Value::String(value)) => vec![value.as_str()],
+                    Some(Value::Array(values)) => {
+                        values.iter().filter_map(Value::as_str).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                columns
+                    .into_iter()
+                    .filter_map(|column| headers.iter().position(|header| header == column))
+                    .collect()
+            };
+            let mut account_cols = indexes("accountCode");
+            for index in indexes("accountName") {
+                if !account_cols.contains(&index) {
+                    account_cols.push(index);
+                }
+            }
+            if account_cols.is_empty() {
+                account_cols = indexes("account");
+            }
+            account_cols.sort_unstable();
+            if account_cols.is_empty() {
+                return Ok(Vec::new());
+            }
+            let entity_index = indexes("entity").first().copied();
+            ledger.visit(false, cancel, |row| {
+                let account = join_columns(&row.values, &account_cols);
+                if account.is_empty() {
+                    return Ok(());
+                }
+                let code = account_code(&account).to_owned();
+                if code.is_empty() {
+                    return Ok(());
+                }
+                seen.insert((
+                    scoped_entity(
+                        entity_index
+                            .and_then(|index| row.values.get(index))
+                            .map(String::as_str)
+                            .unwrap_or(""),
+                        entity_key_enabled,
+                        ledger_mapping::EntitySide::Je,
+                        entity_scope,
+                    ),
+                    code,
+                    ledger_mapping::account_name_of(&account),
+                ));
+                Ok(())
+            })?;
+        }
+    }
+    Ok(seen.into_iter().collect())
+}
+
+/// 序时账逐月归集结果。
+struct JeMovements {
+    series: MonthlySeries,
+    /// 每个账户归集到的有效发生额行数（净额≠0）；0 表示序时账未覆盖该户。
+    matched_rows: BTreeMap<String, usize>,
+    /// 序时账期间内出现过的核算主体（scoped），供覆盖体检点名。
+    je_entities: BTreeSet<String>,
+    scheme: String,
+    evidence: String,
+}
+
+fn monthly_movements(
+    je: &JeInput,
+    policy: &ledger_mapping::AccountMatchPolicy,
     accounts: &[AccountRow],
     entity_key_enabled: bool,
     entity_scope: &ledger_mapping::EntityScope,
@@ -2151,147 +2402,240 @@ fn aggregate_disk_monthly(
     pause: &PauseCheckpoint,
     progress: &dyn Fn(&str, usize, usize, &str),
     total: usize,
-) -> Result<(MonthlySeries, String, String), AppError> {
-    let headers = ledger.headers();
-    let indexes = |role: &str| -> Vec<usize> {
-        let columns = match mapping.get(role) {
-            Some(Value::String(value)) => vec![value.as_str()],
-            Some(Value::Array(values)) => values.iter().filter_map(Value::as_str).collect(),
-            _ => Vec::new(),
-        };
-        columns
-            .into_iter()
-            .filter_map(|column| headers.iter().position(|header| header == column))
-            .collect()
-    };
-    let date_index = indexes("date").first().copied().ok_or_else(|| {
-        error(
-            "MAPPING_INCOMPLETE",
-            "序时账尚未映射记账日期，无法还原逐月余额。",
-            None,
-        )
-    })?;
-    let mut account_cols = indexes("accountCode");
-    for index in indexes("accountName") {
-        if !account_cols.contains(&index) {
-            account_cols.push(index);
-        }
-    }
-    if account_cols.is_empty() {
-        account_cols = indexes("account");
-    }
-    account_cols.sort_unstable();
-    if account_cols.is_empty() {
-        return Err(error(
-            "MAPPING_INCOMPLETE",
-            "序时账尚未映射科目编码/名称。",
-            None,
-        ));
-    }
-    let entity_index = indexes("entity").first().copied();
-    let auxiliary_index = indexes("auxiliary").first().copied();
-
-    let mut by_account: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
-    let mut by_code: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+) -> Result<Option<JeMovements>, AppError> {
+    // 科目归集键与 TB 建户同一口径：主体＋公共科目键。
+    let mut key_index: BTreeMap<(String, String), usize> = BTreeMap::new();
     for (index, account) in accounts.iter().enumerate() {
-        by_account
-            .entry((account.entity.clone(), normalize_header(&account.account)))
-            .or_default()
-            .push(index);
-        by_code
-            .entry((
+        key_index.insert(
+            (
                 account.entity.clone(),
-                account_code(&account.account).to_owned(),
-            ))
-            .or_default()
-            .push(index);
+                matched_account_key(&account.entity, &account.account, policy),
+            ),
+            index,
+        );
     }
     let mut series: MonthlySeries = accounts
         .iter()
         .map(|account| (account.key.clone(), [(0.0, 0.0); 12]))
         .collect();
+    let mut matched_rows: BTreeMap<String, usize> = BTreeMap::new();
+    let mut je_entities: BTreeSet<String> = BTreeSet::new();
     let mut matched = 0usize;
-    let mut visited = 0usize;
-    let row_count = ledger.row_count();
-    ledger.visit(false, cancel, |row| {
-        visited += 1;
-        if visited % 10_000 == 0 {
+    let (scheme, evidence) = match je {
+        JeInput::Memory(table, mapping) => {
+            // 抽样表只解析了开头若干行，拿它还原逐月余额会得到一份看似完整、
+            // 实则缺了大半发生额的结果——宁可报错也不能悄悄算错。
+            if table.sampled {
+                return Err(error(
+                    "JE_SAMPLED",
+                    "序时账过大，当前只读取了部分行，无法据此还原逐月余额。请改用不含序时账的两点法，或提供按期间拆分后的序时账。",
+                    None,
+                ));
+            }
+            // 序时账只在提供时校验（与前端一致）；年初余额的放松只对 TB 一侧有意义。
+            require_mappings("je", mapping, false)?;
+            let date_index = column_index(table, mapping, "date").ok_or_else(|| {
+                error(
+                    "MAPPING_INCOMPLETE",
+                    "序时账尚未映射记账日期，无法还原逐月余额。",
+                    None,
+                )
+            })?;
+            let account_cols = account_columns(table, mapping);
+            if account_cols.is_empty() {
+                return Err(error(
+                    "MAPPING_INCOMPLETE",
+                    "序时账尚未映射科目编码/名称。",
+                    None,
+                ));
+            }
+            let scheme = detect_amount_scheme(table, mapping)?;
+            // 垃圾行剔除走引擎一份规则（`ledger_junk_mask`）：合计行、表尾手工草稿、
+            // 游离数字行在此显式挡掉。此前这些行进不来靠的是「日期读不出／科目对不上」
+            // 的间接效果——哪天循环放宽了其中一个条件它们就会漏进来，把合计翻倍。
+            // 掩码语义是 `true` 表示该行要算。
+            let keep = ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
+                column_indexes(table, mapping, role)
+                    .into_iter()
+                    .filter_map(|index| table.headers.get(index).cloned())
+                    .collect()
+            });
+            for (row_index, row) in table.rows.iter().enumerate() {
+                if !keep.get(row_index).copied().unwrap_or(true) {
+                    continue;
+                }
+                let Some(date) = row.get(date_index).and_then(|value| parse_date(value)) else {
+                    continue;
+                };
+                if date < start || date > end {
+                    continue;
+                }
+                let account = join_columns(row, &account_cols);
+                if account.is_empty() {
+                    continue;
+                }
+                let entity = scoped_entity(
+                    &cell_text(table, row, mapping, "entity"),
+                    entity_key_enabled,
+                    ledger_mapping::EntitySide::Je,
+                    entity_scope,
+                );
+                je_entities.insert(entity.clone());
+                let Some(target) = key_index
+                    .get(&(
+                        entity.clone(),
+                        matched_account_key(&entity, &account, policy),
+                    ))
+                    .copied()
+                else {
+                    continue;
+                };
+                let net = scheme.net(row);
+                if net == 0.0 {
+                    continue;
+                }
+                let (debit, credit) = if net < 0.0 { (0.0, -net) } else { (net, 0.0) };
+                matched += 1;
+                *matched_rows.entry(accounts[target].key.clone()).or_insert(0) += 1;
+                let slot = &mut series.get_mut(&accounts[target].key).unwrap()
+                    [(date.month() - 1) as usize];
+                slot.0 += debit;
+                slot.1 += credit;
+            }
+            (scheme.label(), scheme.evidence.clone())
+        }
+        JeInput::Disk(ledger, mapping) => {
+            let headers = ledger.headers();
+            let indexes = |role: &str| -> Vec<usize> {
+                let columns = match mapping.get(role) {
+                    Some(Value::String(value)) => vec![value.as_str()],
+                    Some(Value::Array(values)) => {
+                        values.iter().filter_map(Value::as_str).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                columns
+                    .into_iter()
+                    .filter_map(|column| headers.iter().position(|header| header == column))
+                    .collect()
+            };
+            let date_index = indexes("date").first().copied().ok_or_else(|| {
+                error(
+                    "MAPPING_INCOMPLETE",
+                    "序时账尚未映射记账日期，无法还原逐月余额。",
+                    None,
+                )
+            })?;
+            let mut account_cols = indexes("accountCode");
+            for index in indexes("accountName") {
+                if !account_cols.contains(&index) {
+                    account_cols.push(index);
+                }
+            }
+            if account_cols.is_empty() {
+                account_cols = indexes("account");
+            }
+            account_cols.sort_unstable();
+            if account_cols.is_empty() {
+                return Err(error(
+                    "MAPPING_INCOMPLETE",
+                    "序时账尚未映射科目编码/名称。",
+                    None,
+                ));
+            }
+            let entity_index = indexes("entity").first().copied();
+            let row_count = ledger.row_count();
+            let mut visited = 0usize;
+            ledger.visit(false, cancel, |row| {
+                visited += 1;
+                if visited % 10_000 == 0 {
+                    checkpoint(cancel, pause)?;
+                }
+                if visited % 50_000 == 0 {
+                    progress(
+                        "movement",
+                        2,
+                        total,
+                        &format!(
+                            "正在从磁盘汇总序时账月度发生额…已处理 {} / {} 行",
+                            visited, row_count
+                        ),
+                    );
+                }
+                let Some(date) = row
+                    .values
+                    .get(date_index)
+                    .and_then(|value| parse_date(value))
+                else {
+                    return Ok(());
+                };
+                if date < start || date > end {
+                    return Ok(());
+                }
+                let account = join_columns(&row.values, &account_cols);
+                if account.is_empty() {
+                    return Ok(());
+                }
+                let entity = scoped_entity(
+                    entity_index
+                        .and_then(|index| row.values.get(index))
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                    entity_key_enabled,
+                    ledger_mapping::EntitySide::Je,
+                    entity_scope,
+                );
+                je_entities.insert(entity.clone());
+                let Some(target) = key_index
+                    .get(&(
+                        entity.clone(),
+                        matched_account_key(&entity, &account, policy),
+                    ))
+                    .copied()
+                else {
+                    return Ok(());
+                };
+                if row.net == 0.0 {
+                    return Ok(());
+                }
+                let (debit, credit) = if row.net < 0.0 {
+                    (0.0, -row.net)
+                } else {
+                    (row.net, 0.0)
+                };
+                matched += 1;
+                *matched_rows.entry(accounts[target].key.clone()).or_insert(0) += 1;
+                let slot = &mut series.get_mut(&accounts[target].key).unwrap()
+                    [(date.month() - 1) as usize];
+                slot.0 += debit;
+                slot.1 += credit;
+                Ok(())
+            })?;
             checkpoint(cancel, pause)?;
-        }
-        if visited % 50_000 == 0 {
-            progress(
-                "movement",
-                2,
-                total,
-                &format!(
-                    "正在从磁盘汇总序时账月度发生额…已处理 {} / {} 行",
-                    visited, row_count
-                ),
+            let convention = ledger.convention();
+            let layout = if !indexes("functionalDebit").is_empty()
+                && !indexes("functionalCredit").is_empty()
+            {
+                "借贷分列"
+            } else if !indexes("functionalAmount").is_empty()
+                && !indexes("direction").is_empty()
+            {
+                "金额＋方向列"
+            } else {
+                "单一金额列"
+            };
+            let scheme = format!(
+                "{layout}，{}",
+                if convention == ledger_mapping::SignConvention::Signed {
+                    "数值已带符号（借正贷负）"
+                } else {
+                    "借贷符号一样（靠分列/方向区分）"
+                }
             );
+            let evidence = ledger.amount_evidence(cancel)?;
+            (scheme, evidence)
         }
-        let Some(date) = row
-            .values
-            .get(date_index)
-            .and_then(|value| parse_date(value))
-        else {
-            return Ok(());
-        };
-        if date < start || date > end {
-            return Ok(());
-        }
-        let account = join_columns(&row.values, &account_cols);
-        if account.is_empty() {
-            return Ok(());
-        }
-        let code = account_code(&account);
-        let entity = scoped_entity(
-            entity_index
-                .and_then(|index| row.values.get(index))
-                .map(String::as_str)
-                .unwrap_or(""),
-            entity_key_enabled,
-            ledger_mapping::EntitySide::Je,
-            entity_scope,
-        );
-        let hits = by_account
-            .get(&(entity.clone(), normalize_header(&account)))
-            .or_else(|| by_code.get(&(entity.clone(), code.to_owned())))
-            .cloned()
-            .unwrap_or_default();
-        if hits.is_empty() {
-            return Ok(());
-        }
-        let auxiliary = auxiliary_index
-            .and_then(|index| row.values.get(index))
-            .map(|value| value.trim())
-            .unwrap_or("");
-        let target = hits
-            .iter()
-            .find(|index| {
-                let candidate = &accounts[**index];
-                candidate.entity == entity
-                    && (auxiliary.is_empty()
-                        || candidate.auxiliary.is_empty()
-                        || candidate.auxiliary == auxiliary)
-            })
-            .copied()
-            .or_else(|| (hits.len() == 1).then(|| hits[0]));
-        let Some(target) = target else { return Ok(()) };
-        if row.net == 0.0 {
-            return Ok(());
-        }
-        let (debit, credit) = if row.net < 0.0 {
-            (0.0, -row.net)
-        } else {
-            (row.net, 0.0)
-        };
-        matched += 1;
-        let slot = &mut series.get_mut(&accounts[target].key).unwrap()[(date.month() - 1) as usize];
-        slot.0 += debit;
-        slot.1 += credit;
-        Ok(())
-    })?;
-    checkpoint(cancel, pause)?;
+    };
     if matched == 0 {
         return Err(error(
             "NO_JE_MATCH",
@@ -2299,26 +2643,13 @@ fn aggregate_disk_monthly(
             None,
         ));
     }
-
-    let convention = ledger.convention();
-    let layout =
-        if !indexes("functionalDebit").is_empty() && !indexes("functionalCredit").is_empty() {
-            "借贷分列"
-        } else if !indexes("functionalAmount").is_empty() && !indexes("direction").is_empty() {
-            "金额＋方向列"
-        } else {
-            "单一金额列"
-        };
-    let scheme = format!(
-        "{layout}，{}",
-        if convention == ledger_mapping::SignConvention::Signed {
-            "数值已带符号（借正贷负）"
-        } else {
-            "借贷符号一样（靠分列/方向区分）"
-        }
-    );
-    let evidence = ledger.amount_evidence(cancel)?;
-    Ok((series, scheme, evidence))
+    Ok(Some(JeMovements {
+        series,
+        matched_rows,
+        je_entities,
+        scheme,
+        evidence,
+    }))
 }
 
 /// 序时账金额口径。直接复用看账小工具的 `sign_evidence`：它把 JE 的金额
@@ -2470,13 +2801,26 @@ fn account_key(entity: &str, account: &str, auxiliary: &str) -> String {
         .join(" | ")
 }
 
-/// JE 未提供币种维度时，找出 TB 中“同一账户、多币种”的账户键。
-/// 这里只提示输入资料局限，不改变既有计算、状态或匹配结果。
-fn je_currency_ambiguous_keys(params: &Value, accounts: &[AccountRow]) -> BTreeSet<String> {
-    if params.get("jeSource").is_none_or(Value::is_null) {
-        return BTreeSet::new();
+/// JE 侧是否映射了币种字段。多币种拆行的科目在 TB 建户时已按科目合并，
+/// JE 没有币种维度时发生额只能得到科目合计——这里只回答“能不能按币种拆”，
+/// 提示与否由调用侧结合多币种科目集合决定。
+/// 多币种拆行科目集合非空、提供了序时账、且 JE 没映射币种字段时才提示；
+/// 否则返回空串。没提供序时账就不存在“JE 发生额分不到币种”的问题。
+fn currency_allocation_warning(params: &Value, multi_currency_keys: &BTreeSet<String>) -> String {
+    if multi_currency_keys.is_empty()
+        || params.get("jeSource").is_none_or(Value::is_null)
+        || je_currency_mapped(params)
+    {
+        return String::new();
     }
-    let currency_mapped = params
+    format!(
+        "JE 未提供或未映射币种字段，但 TB 中有 {} 个科目按多个币种列示。JE 发生额只能按科目合计，无法准确分配到各币种；分币种的“年末余额（JE推导）”及勾稽差异仅供参考，请补充 JE 币种字段或按科目合并口径复核。",
+        multi_currency_keys.len()
+    )
+}
+
+fn je_currency_mapped(params: &Value) -> bool {
+    params
         .get("jeMapping")
         .and_then(Value::as_object)
         .and_then(|mapping| mapping.get("currency"))
@@ -2487,25 +2831,7 @@ fn je_currency_ambiguous_keys(params: &Value, accounts: &[AccountRow]) -> BTreeS
                 .filter_map(Value::as_str)
                 .any(|column| !column.trim().is_empty()),
             _ => false,
-        });
-    if currency_mapped {
-        return BTreeSet::new();
-    }
-
-    let mut currencies: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for account in accounts {
-        let currency = account.currency.trim().to_uppercase();
-        if !currency.is_empty() {
-            currencies
-                .entry(account.key.clone())
-                .or_default()
-                .insert(currency);
-        }
-    }
-    currencies
-        .into_iter()
-        .filter_map(|(key, values)| (values.len() > 1).then_some(key))
-        .collect()
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -3486,6 +3812,17 @@ fn write_parameters(
         ("月度余额来源".into(), summary["monthlySource"].as_str().unwrap_or("").into()),
         ("序时账金额口径".into(), summary["amountScheme"].as_str().unwrap_or("—").into()),
         ("口径判定依据".into(), summary["amountEvidence"].as_str().unwrap_or("—").into()),
+        (
+            "序时账未覆盖主体".into(),
+            match summary["jeUncoveredEntities"].as_array() {
+                Some(entities) if !entities.is_empty() => entities
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("、"),
+                _ => "无（或未提供序时账）".into(),
+            },
+        ),
         ("计息口径".into(), summary["dayBasisLabel"].as_str().unwrap_or("").into()),
         ("利率口径".into(), summary["rateBasisLabel"].as_str().unwrap_or("").into()),
         ("纳入测算账户数".into(), rows.len().to_string()),
@@ -3552,11 +3889,21 @@ mod tests {
             "母公司"
         );
         assert_eq!(
-            scoped_entity("母公司宁波管理处", true, ledger_mapping::EntitySide::Tb, &entity_scope(&params)),
+            scoped_entity(
+                "母公司宁波管理处",
+                true,
+                ledger_mapping::EntitySide::Tb,
+                &entity_scope(&params)
+            ),
             "母公司宁波管理处"
         );
         assert_eq!(
-            scoped_entity("母公司杭州管理处", true, ledger_mapping::EntitySide::Je, &entity_scope(&params)),
+            scoped_entity(
+                "母公司杭州管理处",
+                true,
+                ledger_mapping::EntitySide::Je,
+                &entity_scope(&params)
+            ),
             "母公司杭州管理处"
         );
     }
@@ -3705,6 +4052,11 @@ mod tests {
             "SAP 样例测算结果: {}",
             serde_json::to_string_pretty(summary).unwrap()
         );
+        for row in result["rows"].as_array().unwrap() {
+            if row["status"] != json!("已勾稽") {
+                eprintln!("非勾稽行: {}", serde_json::to_string(row).unwrap());
+            }
+        }
 
         // 只到 10 月，不能凭空多算 11、12 月。
         assert_eq!(summary["monthCount"], json!(10));
@@ -3758,6 +4110,147 @@ mod tests {
             rows.iter()
                 .all(|row| !row["openingFromTb"].as_bool().unwrap())
         );
+    }
+
+    /// SAP 余额表同一科目按维度（银行/款项性质）拆多行、序时账按整科目记账、
+    /// 且只覆盖其中一家公司：合并后必须整户勾稽；未覆盖主体逐户退回两点法，
+    /// 并在汇总里点名（2000&2002 样本的合成回归，金额取自真实数据）。
+    #[test]
+    fn sap维度拆行按科目合并整户勾稽且未覆盖主体点名() {
+        let dir = std::env::temp_dir().join(format!("deposit-sap-fold-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb_path = dir.join("tb.xlsx");
+        let je_path = dir.join("je.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec![
+                    "Company Code",
+                    "GL Account",
+                    "GL Account Desc.",
+                    "Subitem",
+                    "Bank",
+                    "Currency",
+                    "Begin Amt.",
+                    "Debit Amount",
+                    "Credit Amount",
+                    "Closing Balance",
+                ],
+                // 2002 的中行户：不带银行维度的行 + Bank=BOC 的行，互斥分区，
+                // 加总才是科目全量（金额取自真实样本 1002010200）。
+                vec![
+                    "2002", "1002010200", "Cash in bank-BOC-EUR", "0641", "", "EUR",
+                    "771229.55", "40265114.05", "47179803.92", "-6143460.32",
+                ],
+                vec![
+                    "2002", "1002010200", "Cash in bank-BOC-EUR", "0641", "BOC", "EUR",
+                    "0", "6584325.21", "0", "6584325.21",
+                ],
+                // 2002 的 DBS 户：单行小户。
+                vec![
+                    "2002", "1002010600", "Cash in bank-DBS-U", "5022", "", "EUR",
+                    "57.96", "0", "20.57", "37.39",
+                ],
+                // 2000 的户：序时账整家没有，年内有发生，必须点名并退回两点法。
+                vec![
+                    "2000", "1002010500", "Cash in bank-DBS-E", "5444", "", "USD",
+                    "6484.16", "8241797.2", "10020354.54", "-1772073.18",
+                ],
+                // 利息收入科目也按维度拆两行（贷方发生额，收入方向）。
+                vec![
+                    "2002", "6603020100", "Interest income", "", "", "CNY",
+                    "0", "0", "248787.96", "-248787.96",
+                ],
+                vec![
+                    "2002", "6603020100", "Interest income", "", "BOC", "CNY",
+                    "0", "0", "30441.2", "-30441.2",
+                ],
+            ],
+        );
+        write_fixture(
+            &je_path,
+            &[
+                vec!["公司代码", "凭证号码", "过帐日期", "科目号", "公司代码货币金额"],
+                vec!["2002", "0100000001", "2025-01-15", "1002010200", "1000000"],
+                vec!["2002", "0100000002", "2025-06-15", "1002010200", "-1330364.66"],
+                vec!["2002", "0100000003", "2025-03-10", "1002010600", "-20.57"],
+                // 干扰行：非货币资金科目，一条都不该归集进测算。
+                vec!["2002", "0100000004", "2025-02-10", "6401010000", "-731271.42"],
+            ],
+        );
+        let params = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+            "dayBasis": "month12",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": {
+                "entity": "Company Code",
+                "accountCode": "GL Account",
+                "accountName": "GL Account Desc.",
+                "currency": "Currency",
+                "auxiliary": "Bank",
+                "openingFunctionalAmount": "Begin Amt.",
+                "ytdFunctionalDebit": "Debit Amount",
+                "ytdFunctionalCredit": "Credit Amount",
+                "closingFunctionalAmount": "Closing Balance"
+            },
+            "jeSource": {"inputPath": je_path.to_string_lossy()},
+            "jeMapping": {
+                "entity": "公司代码",
+                "id": "凭证号码",
+                "date": "过帐日期",
+                "accountCode": "科目号",
+                "functionalAmount": "公司代码货币金额"
+            },
+            "accountRoles": {
+                "6603020100 Interest income": "interest_income"
+            }
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap();
+        let rows = result["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 3, "{result:#?}");
+
+        let row_of = |needle: &str| {
+            rows.iter()
+                .find(|row| row["account"].as_str().unwrap_or("").contains(needle))
+                .unwrap_or_else(|| panic!("找不到科目 {needle}: {result:#?}"))
+        };
+        // 中行户：两行维度拆分合并成一户，年初/期末加总，与序时账整户勾稽。
+        let boc = row_of("1002010200");
+        assert_eq!(boc["mergedRows"], json!(2));
+        assert!((boc["openingBalance"].as_f64().unwrap() - 771_229.55).abs() < 0.01);
+        assert!((boc["tbClosingBalance"].as_f64().unwrap() - 440_864.89).abs() < 0.01);
+        assert!((boc["derivedClosingBalance"].as_f64().unwrap() - 440_864.89).abs() < 0.01);
+        assert_eq!(boc["status"], "已勾稽");
+        assert!(boc["note"].as_str().unwrap().contains("合并"), "{boc:#?}");
+        // DBS 户：单行小户照常勾稽。
+        let dbs = row_of("1002010600");
+        assert_eq!(dbs["mergedRows"], json!(1));
+        assert_eq!(dbs["status"], "已勾稽");
+        // 2000 的户：序时账未覆盖，退回两点法，年末仍推到 TB 期末。
+        let uncovered = row_of("1002010500");
+        assert_eq!(uncovered["status"], "两点法推算");
+        assert!(
+            uncovered["note"]
+                .as_str()
+                .unwrap()
+                .contains("序时账期间内没有任何行归集"),
+            "{uncovered:#?}"
+        );
+        assert!(
+            (uncovered["derivedClosingBalance"].as_f64().unwrap() - (-1_772_073.18)).abs() < 0.01
+        );
+        // 覆盖体检：汇总点名 2000，账面利息按科目合并。
+        let summary = &result["summary"];
+        assert_eq!(summary["jeUncoveredEntities"], json!(["2000"]));
+        assert_eq!(summary["jeUncoveredAccountCount"], json!(1));
+        assert!(summary["monthlySource"].as_str().unwrap().contains("未覆盖"));
+        assert!((summary["bookedInterestIncome"].as_f64().unwrap() - 279_229.16).abs() < 0.01);
+        let booked = result["bookedInterestRows"].as_array().unwrap();
+        assert_eq!(booked.len(), 1, "{booked:#?}");
+        assert!(booked[0]["note"].as_str().unwrap().contains("2 行合并"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn sample_dir() -> Option<PathBuf> {
@@ -4229,35 +4722,27 @@ mod tests {
 
     #[test]
     fn warns_only_when_je_lacks_currency_and_tb_splits_one_account_by_currency() {
-        let mut usd = blank_row();
-        usd.key = account_key("3110", "1002013636 银行存款", "");
-        usd.currency = "USD".into();
-        let mut cny = usd.clone();
-        cny.currency = "CNY".into();
-        let accounts = vec![usd.clone(), cny];
-
-        assert!(je_currency_ambiguous_keys(&json!({}), &accounts).is_empty());
-        assert_eq!(
-            je_currency_ambiguous_keys(
-                &json!({"jeSource": {"inputPath": "je.xlsx"}, "jeMapping": {}}),
-                &accounts
-            ),
-            BTreeSet::from([usd.key.clone()])
+        // 建户聚合阶段发现同一科目按币种拆行时，把该户的键记入集合；
+        // 警告只在「集合非空 且 JE 未映射币种字段」时出现。
+        let multi = BTreeSet::from(["3110 | 1002013636".to_string()]);
+        assert!(currency_allocation_warning(&json!({}), &multi).is_empty());
+        let warned = currency_allocation_warning(
+            &json!({"jeSource": {"inputPath": "je.xlsx"}, "jeMapping": {}}),
+            &multi,
         );
+        assert!(warned.contains("1 个科目"), "{warned}");
+        assert!(currency_allocation_warning(
+            &json!({"jeSource": {"inputPath": "je.xlsx"}, "jeMapping": {}}),
+            &BTreeSet::new(),
+        )
+        .is_empty());
         assert!(
-            je_currency_ambiguous_keys(
-                &json!({"jeSource": {"inputPath": "je.xlsx"}, "jeMapping": {}}),
-                &[usd.clone()]
-            )
-            .is_empty()
-        );
-        assert!(
-            je_currency_ambiguous_keys(
+            currency_allocation_warning(
                 &json!({
                     "jeSource": {"inputPath": "je.xlsx"},
                     "jeMapping": {"currency": "币种"}
                 }),
-                &accounts
+                &multi,
             )
             .is_empty()
         );
@@ -4429,6 +4914,7 @@ mod tests {
     fn blank_row() -> AccountRow {
         AccountRow {
             key: String::new(),
+            merged_rows: 1,
             entity: String::new(),
             account: String::new(),
             auxiliary: String::new(),
@@ -5339,10 +5825,28 @@ mod tests {
         let end = NaiveDate::from_ymd_opt(2025, 12, 31).unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
         let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let memory_input = open_je_input(&params, &cancel, &|_, _, _, _| {}, 3)
+            .unwrap()
+            .expect("小文件应走内存路径");
+        let tb_sides = accounts
+            .iter()
+            .map(|account| {
+                (
+                    account.entity.clone(),
+                    ledger_mapping::account_code_of(&account.account),
+                    ledger_mapping::account_name_of(&account.account),
+                )
+            })
+            .collect::<Vec<_>>();
+        let je_sides =
+            je_account_identities(&memory_input, true, &entity_scope(&params), &cancel).unwrap();
+        let policy = ledger_mapping::AccountMatchPolicy::from_sides(&tb_sides, &je_sides);
         let memory = monthly_movements(
-            &params,
+            &memory_input,
+            &policy,
             &accounts,
             true,
+            &entity_scope(&params),
             start,
             end,
             &cancel,
@@ -5365,9 +5869,10 @@ mod tests {
             &cancel,
         )
         .unwrap();
-        let disk = aggregate_disk_monthly(
-            &ledger,
-            &mapping,
+        let disk_input = JeInput::Disk(ledger, mapping);
+        let disk = monthly_movements(
+            &disk_input,
+            &policy,
             &accounts,
             true,
             &entity_scope(&params),
@@ -5378,18 +5883,19 @@ mod tests {
             &|_, _, _, _| {},
             3,
         )
-        .unwrap();
-        assert_eq!(disk.1, memory.1, "金额方案说明必须保持一致");
-        assert_eq!(disk.2, memory.2, "金额口径证据必须保持一致");
+        .unwrap()
+        .expect("磁盘路径同样应归集到发生额");
+        assert_eq!(disk.scheme, memory.scheme, "金额方案说明必须保持一致");
+        assert_eq!(disk.evidence, memory.evidence, "金额口径证据必须保持一致");
         let key_a = &accounts[0].key;
         let key_b = &accounts[1].key;
-        assert_eq!(disk.0[key_a], memory.0[key_a]);
-        assert_eq!(disk.0[key_b], memory.0[key_b]);
-        assert_eq!(disk.0[key_a][0], (100.0, 30.0));
-        assert_eq!(disk.0[key_a][1], (25.0, 0.0));
+        assert_eq!(disk.series[key_a], memory.series[key_a]);
+        assert_eq!(disk.series[key_b], memory.series[key_b]);
+        assert_eq!(disk.series[key_a][0], (100.0, 30.0));
+        assert_eq!(disk.series[key_a][1], (25.0, 0.0));
         // 当前样例被公共金额判型识别为有符号净额，因此 400-50 归入借方净额；
         // 关键断言是它只进入公司B，不能串到公司A。
-        assert_eq!(disk.0[key_b][0], (350.0, 0.0));
+        assert_eq!(disk.series[key_b][0], (350.0, 0.0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

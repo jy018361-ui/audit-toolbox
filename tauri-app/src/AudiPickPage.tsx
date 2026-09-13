@@ -21,6 +21,7 @@ import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { DateInput } from "@/components/DateInput";
 import { EmptyState } from "@/components/EmptyState";
 import { JobProgress } from "@/components/JobProgress";
 import "./audipick.css";
@@ -3130,7 +3131,7 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
                 <div className="form-grid">
                   <label className="field"><span>项目名称</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
                   <label className="field"><span>客户名称</span><input value={client} onChange={(event) => setClient(event.target.value)} /></label>
-                  <label className="field"><span>项目日期</span><input type="date" value={projectDate} onChange={(event) => setProjectDate(event.target.value)} /></label>
+                  <label className="field"><span>项目日期</span><DateInput value={projectDate} onChange={setProjectDate} /></label>
                   <label className="field"><span>默认提取模板</span><select value={defaultRuleId} onChange={(event) => setDefaultRuleId(event.target.value)}>{rules.map((rule) => <option key={rule.id} value={rule.id}>{rule.name}</option>)}</select></label>
                 </div>
                 <div className="actions"><button className="primary" disabled={busy} onClick={() => void create()}>创建并进入项目</button></div>

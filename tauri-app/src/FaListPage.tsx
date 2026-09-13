@@ -43,6 +43,7 @@ import { StatGrid } from "@/components/StatGrid";
 import { DataTable } from "@/components/DataTable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { DateInput } from "@/components/DateInput";
 import { EmptyState } from "@/components/EmptyState";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -2641,10 +2642,9 @@ function FaCardListPage() {
                     />
                   </Field>
                   <Field label="资产负债表日">
-                    <Input
-                      type="date"
+                    <DateInput
                       value={balanceSheetDate}
-                      onChange={(e) => setBalanceSheetDate(e.target.value)}
+                      onChange={setBalanceSheetDate}
                     />
                   </Field>
                 </div>

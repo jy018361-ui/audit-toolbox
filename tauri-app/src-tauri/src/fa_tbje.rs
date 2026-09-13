@@ -387,7 +387,8 @@ fn analyze_with_progress(
     progress: Progress<'_>,
 ) -> Result<Analysis, AppError> {
     let entity_scope: ledger_mapping::EntityScope = params
-        .get("entityScope").cloned()
+        .get("entityScope")
+        .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default();
     let tb_spec: SourceSpec = parse_param(params, "tbSource", "缺少 TB 数据源。")?;
@@ -408,7 +409,14 @@ fn analyze_with_progress(
                 .unwrap_or(false));
     if disk_mode {
         return analyze_with_disk_je(
-            params, cancel, &tb, &tb_map, &je_spec, &je_map, &entity_scope, progress,
+            params,
+            cancel,
+            &tb,
+            &tb_map,
+            &je_spec,
+            &je_map,
+            &entity_scope,
+            progress,
         );
     }
     let raw_je = load_fx_table(&je_spec)?;
@@ -740,10 +748,10 @@ fn account_identity_from_row(
     }
     name = ledger_mapping::account_name_of(if name.is_empty() { &raw_code } else { &name });
     let entity = if entity.is_empty() {
-            fixed.to_owned()
-        } else {
-            entity
-        };
+        fixed.to_owned()
+    } else {
+        entity
+    };
     AccountIdentity {
         entity: ledger_mapping::apply_entity_scope(side, &entity, entity_scope),
         code: ledger_mapping::account_code_of(&raw_code),
@@ -2686,7 +2694,8 @@ fn account_identities(
         ledger_mapping::EntitySide::Je
     };
     let entity_scope: ledger_mapping::EntityScope = params
-        .get("entityScope").cloned()
+        .get("entityScope")
+        .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default();
     let (_, display) =
@@ -2717,10 +2726,10 @@ fn account_identities(
                 name = ledger_mapping::account_name_of(&name);
             }
             let entity = if entity.is_empty() {
-                    fixed.to_owned()
-                } else {
-                    entity
-                };
+                fixed.to_owned()
+            } else {
+                entity
+            };
             AccountIdentity {
                 entity: ledger_mapping::apply_entity_scope(side, &entity, &entity_scope),
                 code: ledger_mapping::account_code_of(&raw_code),
@@ -2959,18 +2968,25 @@ mod tests {
     #[test]
     fn fa科目身份应用用户确认的主体归集() {
         let spec = SourceSpec {
-            input_path: String::new(), sheet: "Sheet1".into(),
-            header_row: 1, header_depth: 1,
+            input_path: String::new(),
+            sheet: "Sheet1".into(),
+            header_row: 1,
+            header_depth: 1,
         };
         let table = disk_table(
             &spec,
             vec!["主体".into(), "科目编码".into(), "科目名称".into()],
-            vec![vec!["母公司杭州管理处".into(), "1601".into(), "固定资产".into()]],
+            vec![vec![
+                "母公司杭州管理处".into(),
+                "1601".into(),
+                "固定资产".into(),
+            ]],
             1,
         );
         let map = serde_json::from_value::<Map<String, Value>>(json!({
             "entity":"主体", "accountCode":"科目编码", "accountName":"科目名称"
-        })).unwrap();
+        }))
+        .unwrap();
         let params = json!({"entityScope": {
             "mode":"aggregate",
             "mappings":[{"side":"tb","source":"母公司杭州管理处","target":"母公司"}]

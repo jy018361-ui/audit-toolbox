@@ -617,7 +617,14 @@ fn prepare_with_control(
     }
     if let Some(memory_je) = je.as_mut().filter(|value| value.disk.is_none()) {
         memory_je.table = fx::forward_filled_je_table(&memory_je.table, &je_map);
-        je_rows = Some(vec![true; memory_je.table.rows.len()]);
+        // 填充后按「合计屏障」重判行集：合并单元格补齐身份的真分录、名称
+        // 整列空白的 SAP 导出照常进入；合计行之后未通过重开门槛的表尾草稿
+        // （10 号样例 2556.54 错位进科目列，实测差出 5.5 亿）不再整表放行。
+        je_rows = Some(ledger_mapping::ledger_post_fill_body_mask(
+            &memory_je.table.headers,
+            &memory_je.table.rows,
+            &|role| columns(&je_map, role),
+        ));
     }
     fx::ensure_sign_convention(&tb, &mut tb_map, "tb")
         .map_err(|message| error("SIGN_CONVENTION_UNCERTAIN", message, None))?;
@@ -1063,13 +1070,30 @@ fn has_balance_scheme(map: &Map<String, Value>, prefix: &str) -> bool {
             && !columns(map, &format!("{prefix}Credit")).is_empty())
 }
 
+/// 0 基列号转 Excel 列字母（A、B、…、Z、AA…）。主体列有无会让整表公式平移，
+/// 公式里的列引用必须按实际列号生成，不能写死字母。
+fn column_letter(mut index: u16) -> String {
+    let mut text = String::new();
+    loop {
+        text.insert(0, (b'A' + (index % 26) as u8) as char);
+        if index < 26 {
+            break;
+        }
+        index = index / 26 - 1;
+    }
+    text
+}
+
 fn write_rollforward_sheet(
     workbook: &mut Workbook,
     prepared: &PreparedCheck,
 ) -> Result<(), AppError> {
     let sheet = workbook.add_worksheet();
     sheet.set_name("TB发生额与余额勾稽").map_err(xlsx)?;
-    let headers = [
+    // 主体列只在用户映射了 TB 主体时输出，与「TB与JE发生额勾稽」表同置首列；
+    // 未映射时整表布局与旧版一致。合并余额表逐行勾稽时靠它分清行属于哪个主体。
+    let has_entity = !columns(&prepared.tb_map, "entity").is_empty();
+    let mut headers: Vec<&str> = vec![
         "TB纳入币种",
         "源表行号",
         "科目编码",
@@ -1082,6 +1106,9 @@ fn write_rollforward_sheet(
         "差异",
         "结论",
     ];
+    if has_entity {
+        headers.insert(0, "主体");
+    }
     write_intro(
         sheet,
         "TB 发生额与余额勾稽",
@@ -1130,7 +1157,7 @@ fn write_rollforward_sheet(
             if open == 0.0 && close == 0.0 && debit == 0.0 && credit == 0.0 {
                 continue;
             }
-            let (_, code) = identity(&prepared.tb, row, &prepared.tb_map, &prepared.tb_fixed);
+            let (entity, code) = identity(&prepared.tb, row, &prepared.tb_map, &prepared.tb_fixed);
             let name = display_name(&prepared.tb, row, &prepared.tb_map);
             let currency = match tb_row_currency(&prepared.tb, row, &prepared.tb_map) {
                 value if value.is_empty() => "未标明".to_owned(),
@@ -1145,46 +1172,73 @@ fn write_rollforward_sheet(
             } else {
                 "通过"
             };
-            for (column, value) in [&currency, "", &code, &name].iter().enumerate() {
-                if column == 1 {
-                    sheet
-                        .write_number_with_format(
-                            output_row,
-                            1,
-                            source_row as f64,
-                            &input_text_format(),
-                        )
-                        .map_err(xlsx)?;
-                } else {
-                    sheet
-                        .write_string_with_format(
-                            output_row,
-                            column as u16,
-                            *value,
-                            &input_text_format(),
-                        )
-                        .map_err(xlsx)?;
-                }
+            let mut column = 0u16;
+            if has_entity {
+                sheet
+                    .write_string_with_format(output_row, column, &entity, &input_text_format())
+                    .map_err(xlsx)?;
+                column += 1;
             }
-            for (column, value) in [(4, open), (5, debit), (6, credit), (8, close)] {
+            sheet
+                .write_string_with_format(output_row, column, &currency, &input_text_format())
+                .map_err(xlsx)?;
+            column += 1;
+            sheet
+                .write_number_with_format(
+                    output_row,
+                    column,
+                    source_row as f64,
+                    &input_text_format(),
+                )
+                .map_err(xlsx)?;
+            column += 1;
+            sheet
+                .write_string_with_format(output_row, column, &code, &input_text_format())
+                .map_err(xlsx)?;
+            column += 1;
+            sheet
+                .write_string_with_format(output_row, column, &name, &input_text_format())
+                .map_err(xlsx)?;
+            let open_col = column + 1;
+            let debit_col = open_col + 1;
+            let credit_col = open_col + 2;
+            let derived_col = open_col + 3;
+            let close_col = open_col + 4;
+            let diff_col = open_col + 5;
+            for (column, value) in [
+                (open_col, open),
+                (debit_col, debit),
+                (credit_col, credit),
+                (close_col, close),
+            ] {
                 sheet
                     .write_number_with_format(output_row, column, value, &input_money_format())
                     .map_err(xlsx)?;
             }
+            let (open_l, debit_l, credit_l, derived_l, close_l, diff_l) = (
+                column_letter(open_col),
+                column_letter(debit_col),
+                column_letter(credit_col),
+                column_letter(derived_col),
+                column_letter(close_col),
+                column_letter(diff_col),
+            );
             sheet
                 .write_formula_with_format(
                     output_row,
-                    7,
-                    Formula::new(format!("E{excel_row}+F{excel_row}-G{excel_row}"))
-                        .set_result(derived.to_string()),
+                    derived_col,
+                    Formula::new(format!(
+                        "{open_l}{excel_row}+{debit_l}{excel_row}-{credit_l}{excel_row}"
+                    ))
+                    .set_result(derived.to_string()),
                     &formula_money_format(),
                 )
                 .map_err(xlsx)?;
             sheet
                 .write_formula_with_format(
                     output_row,
-                    9,
-                    Formula::new(format!("H{excel_row}-I{excel_row}"))
+                    diff_col,
+                    Formula::new(format!("{derived_l}{excel_row}-{close_l}{excel_row}"))
                         .set_result(difference.to_string()),
                     &formula_money_format(),
                 )
@@ -1192,9 +1246,9 @@ fn write_rollforward_sheet(
             sheet
                 .write_formula_with_format(
                     output_row,
-                    10,
+                    diff_col + 1,
                     Formula::new(format!(
-                        "IF(ABS(J{excel_row})<=MAX($B$3,MAX(ABS(E{excel_row}),ABS(H{excel_row}),ABS(I{excel_row}))*1E-8),\"通过\",\"差异\")"
+                        "IF(ABS({diff_l}{excel_row})<=MAX($B$3,MAX(ABS({open_l}{excel_row}),ABS({derived_l}{excel_row}),ABS({close_l}{excel_row}))*1E-8)),\"通过\",\"差异\")"
                     ))
                     .set_result(verdict),
                     &formula_text_format(),
@@ -1203,13 +1257,13 @@ fn write_rollforward_sheet(
             output_row += 1;
         }
     }
-    finish_sheet(
-        sheet,
-        &[
-            10.0, 12.0, 16.0, 28.0, 16.0, 17.0, 17.0, 16.0, 16.0, 15.0, 10.0,
-        ],
-        output_row.saturating_sub(1),
-    )
+    let mut widths: Vec<f64> = vec![
+        10.0, 12.0, 16.0, 28.0, 16.0, 17.0, 17.0, 16.0, 16.0, 15.0, 10.0,
+    ];
+    if has_entity {
+        widths.insert(0, 18.0);
+    }
+    finish_sheet(sheet, &widths, output_row.saturating_sub(1))
 }
 
 fn write_tbje_sheet(
@@ -2044,10 +2098,7 @@ fn check_tb_vs_je(
             if !je_rows.get(index).copied().unwrap_or(true) {
                 continue;
             }
-            if identity_parts(je_table, row, je_map, je_fixed)
-                .1
-                .is_empty()
-            {
+            if identity_parts(je_table, row, je_map, je_fixed).1.is_empty() {
                 continue;
             }
             let key = scoped_matched_identity(

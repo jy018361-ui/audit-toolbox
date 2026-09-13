@@ -29,6 +29,7 @@ import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/EmptyState";
 import { SwitchInput } from "@/components/SwitchInput";
 import { JobProgress } from "@/components/JobProgress";
+import { DateInput } from "@/components/DateInput";
 import { Card } from "@/components/ui/card";
 import "./roll-forward.css";
 type RollSubject = {
@@ -939,10 +940,9 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
               </label>
               <label className="field">
                 <span>资产负债表日</span>
-                <input
+                <DateInput
                   value={company.bs_date}
-                  placeholder="例如：2026/12/31 或 20261231"
-                  onChange={(e) => updateCompany({ bs_date: e.target.value })}
+                  onChange={(value) => updateCompany({ bs_date: value })}
                 />
               </label>
               <div className="field-grid">

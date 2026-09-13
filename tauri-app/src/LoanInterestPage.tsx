@@ -11,6 +11,7 @@ import {
   pickPath,
 } from "./api";
 import { depositDropTargetInside } from "./DepositInterestPage";
+import { DateInput } from "@/components/DateInput";
 import { PageHeader } from "@/components/PageHeader";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
@@ -1191,10 +1192,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                   <div className="loan-rate-toolbar">
                     <label>
                       资产负债表日
-                      <Input
-                        type="date"
+                      <DateInput
                         value={reportEnd}
-                        onChange={(e) => setReportEnd(e.target.value)}
+                        onChange={setReportEnd}
                       />
                     </label>
                     <div className="loan-paste-actions">
@@ -1274,10 +1274,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               <div className="loan-run-grid">
                 <label>
                   资产负债表日
-                  <Input
-                    type="date"
+                  <DateInput
                     value={reportEnd}
-                    onChange={(e) => setReportEnd(e.target.value)}
+                    onChange={setReportEnd}
                   />
                 </label>
                 <label>

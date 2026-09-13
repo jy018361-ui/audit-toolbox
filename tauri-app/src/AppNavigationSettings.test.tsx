@@ -14,7 +14,7 @@ import { MemoryRouter } from "react-router-dom";
 import { useState } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import App, { Settings } from "./App";
+import App, { Field, Settings } from "./App";
 import { ConfirmDialogHost } from "@/components/ConfirmDialog";
 import {
   engineCall,
@@ -64,6 +64,23 @@ beforeEach(() => {
   });
 });
 afterEach(cleanup);
+
+it("uses continuous eight-digit entry for declarative date fields", () => {
+  const onChange = vi.fn();
+  render(
+    <Field
+      field={{ key: "bsDate", label: "资产负债表日", kind: "date", required: true }}
+      value=""
+      onChange={onChange}
+    />,
+  );
+
+  const input = screen.getByLabelText(/^资产负债表日/);
+  expect(input).toHaveAttribute("type", "text");
+  fireEvent.change(input, { target: { value: "20261231" } });
+  expect(input).toHaveValue("2026-12-31");
+  expect(onChange).toHaveBeenLastCalledWith("2026-12-31");
+});
 
 it("presents one product identity and groups every catalog tool once", async () => {
   render(

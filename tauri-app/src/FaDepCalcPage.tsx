@@ -21,6 +21,7 @@ import { displayFileName } from "@/fileDisplay";
 import { DataTable } from "@/components/DataTable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { DateInput } from "@/components/DateInput";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { LlmReview } from "@/components/LlmReview";
@@ -742,10 +743,9 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
             <CardContent>
               <div className="dep-export-grid">
                 <Field label="资产负债表日" required>
-                  <Input
-                    type="date"
+                  <DateInput
                     value={balanceSheetDate}
-                    onChange={(e) => setBalanceSheetDate(e.target.value)}
+                    onChange={setBalanceSheetDate}
                   />
                 </Field>
                 <Field label="输出文件">

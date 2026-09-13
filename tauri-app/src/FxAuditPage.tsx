@@ -15,6 +15,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
+import { DateInput } from "@/components/DateInput";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -122,6 +123,7 @@ type Inspection = {
     foreignCurrencies: string[];
   }>;
   uniformCurrency?: string | null;
+  entityCurrencies?: Record<string, string>;
   sampledPreview?: boolean;
   accountRoleSuggestions?: Record<string, string>;
   accountRoleDetails?: Record<
@@ -148,8 +150,7 @@ type Inspection = {
     }
   >;
 };
-// 下拉框的常备币种。检测到的币种会另行并进选项，所以这里只列常见的，
-// 不求穷尽——真遇到冷门币种，检测结果本身就会把它带出来。
+// 与 Rust `supported_currencies()` 严格一致；下拉选择不得产生后端不支持的币种。
 const CURRENCY_OPTIONS = [
   "CNY",
   "USD",
@@ -158,15 +159,68 @@ const CURRENCY_OPTIONS = [
   "JPY",
   "GBP",
   "AUD",
+  "NZD",
   "SGD",
   "CHF",
   "CAD",
-  "TWD",
-  "KRW",
+  "MOP",
   "MYR",
+  "RUB",
+  "ZAR",
+  "KRW",
+  "AED",
+  "SAR",
+  "HUF",
+  "PLN",
+  "DKK",
+  "SEK",
+  "NOK",
+  "TRY",
+  "MXN",
   "THB",
-  "NZD",
 ];
+
+/**
+ * 本位币只能从币种清单选择。把识别值与历史记录里的值并入常备清单，
+ * 既不丢冷门币种，也不再允许自由输入任意三个字符。
+ */
+export function fxCurrencyOptions(...detected: Array<string | null | undefined>) {
+  return [
+    ...new Set(
+      [...detected, ...CURRENCY_OPTIONS]
+        .map((code) => String(code ?? "").trim().toUpperCase())
+        .filter((code) => CURRENCY_OPTIONS.includes(code)),
+    ),
+  ];
+}
+
+/**
+ * JE/TB 对同一编码的科目名称可能详略不同。清单按编码合并，并优先展示
+ * 编码后仍有名称、且文本更完整的一侧，避免一侧只有编码时盖掉另一侧全称。
+ */
+export function fxAccountDisplayList(
+  jeAccounts: string[] = [],
+  tbAccounts: string[] = [],
+) {
+  const groups = new Map<string, string[]>();
+  for (const raw of [...jeAccounts, ...tbAccounts]) {
+    const account = raw.trim();
+    if (!account) continue;
+    const first = account.split(/\s+/)[0];
+    const key = /^\d[\d.\-]*$/.test(first)
+      ? `code:${first.toUpperCase()}`
+      : `text:${account.toUpperCase()}`;
+    const values = groups.get(key) ?? [];
+    if (!values.includes(account)) values.push(account);
+    groups.set(key, values);
+  }
+  return [...groups.values()].flatMap((values) => {
+    // 同编码可能确实对应多个明细户，名称不同的行必须保留；这里只在至少一侧
+    // 有名称时去掉另一侧的“裸编码”重复项。
+    const named = values.filter((value) => /\s/.test(value));
+    return named.length ? named : values.slice(0, 1);
+  });
+}
 
 type SourceClassification = LedgerWorkbookSheetClassification & {
   reasons: string[];
@@ -467,6 +521,24 @@ export function fxFallbackFunctional(
       .filter(Boolean),
   );
   return codes.size === 1 ? [...codes][0] : "";
+}
+
+/** 主体级本位币优先；用户手选值不被后续识别覆盖。 */
+export function fxResolveEntityCurrencies(
+  entities: string[],
+  detected: Record<string, string> = {},
+  uniformCurrency: string | null | undefined,
+  current: Record<string, string> = {},
+  touched: Record<string, boolean> = {},
+) {
+  return Object.fromEntries(
+    entities.map((entity) => [
+      entity,
+      touched[entity]
+        ? (current[entity] ?? "CNY")
+        : (detected[entity] ?? uniformCurrency ?? "CNY").toUpperCase(),
+    ]),
+  );
 }
 
 export function fxCurrencySourceLabel(side: "JE" | "TB" | "", source: string) {
@@ -807,8 +879,8 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   // 不再要用户手填。它只是本位币与底稿封面的挂载点——用户要填的是本位币。
   const fixedEntity = entities.length === 1 ? entities[0] : DEFAULT_ENTITY;
   const accounts = useMemo(
-    () => [...new Set([...(je?.accounts ?? []), ...(tb?.accounts ?? [])])],
-    [je, tb],
+    () => fxAccountDisplayList(je?.accounts, tb?.accounts),
+    [je?.accounts, tb?.accounts],
   );
   const accountMatches = useMemo(
     () => keywordFilterPredicate(accountFilter),
@@ -877,18 +949,16 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     setEntityCurrencies((v) => ({ ...v, [entity]: value.toUpperCase() }));
   };
   useEffect(() => {
-    const detected = tb?.uniformCurrency;
     setEntityCurrencies((v) =>
-      Object.fromEntries(
-        entities.map((entity) => [
-          entity,
-          currencyTouched[entity]
-            ? (v[entity] ?? "CNY")
-            : (detected ?? v[entity] ?? "CNY"),
-        ]),
+      fxResolveEntityCurrencies(
+        entities,
+        tb?.entityCurrencies,
+        tb?.uniformCurrency,
+        v,
+        currencyTouched,
       ),
     );
-  }, [entities, tb, currencyTouched]);
+  }, [entities, tb?.entityCurrencies, tb?.uniformCurrency, currencyTouched]);
   useEffect(
     () =>
       setAccountRoles((current) =>
@@ -1509,6 +1579,30 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       ...(outputPath ? { outputPath } : {}),
     };
   }
+  async function proceedAfterCurrencyCheck(targetStep = 1) {
+    setError("");
+    setBusy(true);
+    try {
+      const response = (await engineCall(
+        "fx.validate_currency_mapping",
+        payload("fx.preview"),
+      )) as { valid?: boolean; errors?: string[] };
+      if (!response.valid) {
+        setStep(0);
+        setError(
+          (response.errors ?? []).join("；") ||
+            "同一主体的原币币种列出现多种币种，请重新修改映射。",
+        );
+        return;
+      }
+      setStep(targetStep);
+    } catch (e) {
+      setStep(0);
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
   async function run(
     method: "fx.preview" | "fx.export",
     overrides = manualClassifications,
@@ -1583,7 +1677,10 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
           { key: "run", label: "测算与底稿", disabled: !je && !tb },
         ]}
         current={step}
-        onStepClick={setStep}
+        onStepClick={(next) => {
+          if (next === 0) setStep(0);
+          else void proceedAfterCurrencyCheck(next);
+        }}
       />
       {step === 0 && (
         <>
@@ -1804,7 +1901,16 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                 <CardTitle>公司本位币</CardTitle>
               </CardHeader>
               <CardContent className="fx-list">
-                {tb?.uniformCurrency ? (
+                {tb?.entityCurrencies &&
+                Object.keys(tb.entityCurrencies).length > 0 ? (
+                  <p className="fx-hint">
+                    已按主体识别本位币：
+                    {Object.entries(tb.entityCurrencies)
+                      .map(([entity, code]) => `${entity} = ${code}`)
+                      .join("；")}
+                    。下拉框已分别预选，请核对后继续。
+                  </p>
+                ) : tb?.uniformCurrency ? (
                   <p className="fx-hint">
                     TB 的本位币币种列整列都是 {tb.uniformCurrency}
                     ，已自动预填。这与“原币币种”是两个独立口径：原币为 USD
@@ -1820,30 +1926,48 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   entities.map((entity) => (
                     <label key={entity}>
                       <span>{entity}</span>
-                      <input
+                      <select
+                        aria-label={`${entity} 本位币`}
                         value={
                           entityCurrencies[entity] ?? defaultFunctionalCurrency
                         }
-                        maxLength={3}
                         onChange={(e) =>
                           setEntityCurrency(entity, e.target.value)
                         }
-                      />
+                      >
+                        {fxCurrencyOptions(
+                          entityCurrencies[entity],
+                          defaultFunctionalCurrency,
+                        ).map((code) => (
+                          <option key={code} value={code}>
+                            {code}
+                          </option>
+                        ))}
+                      </select>
                     </label>
                   ))
                 ) : (
                   <label>
                     <span>本位币（全表）</span>
-                    <input
+                    <select
+                      aria-label="全表本位币"
                       value={
                         entityCurrencies[fixedEntity] ??
                         defaultFunctionalCurrency
                       }
-                      maxLength={3}
                       onChange={(e) =>
                         setEntityCurrency(fixedEntity, e.target.value)
                       }
-                    />
+                    >
+                      {fxCurrencyOptions(
+                        entityCurrencies[fixedEntity],
+                        defaultFunctionalCurrency,
+                      ).map((code) => (
+                        <option key={code} value={code}>
+                          {code}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                 )}
               </CardContent>
@@ -1939,7 +2063,10 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
             )}
           </div>
           <div className="fx-step-actions">
-            <Button disabled={!je && !tb} onClick={() => setStep(1)}>
+            <Button
+              disabled={(!je && !tb) || busy}
+              onClick={() => void proceedAfterCurrencyCheck(1)}
+            >
               下一步：确认TB科目类型
             </Button>
           </div>
@@ -1991,7 +2118,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                       <div className="fx-accounts-head">
                         <span>科目</span>
                         <span>分类</span>
-                        <span>外币</span>
+                        <span>账户币种与识别状态</span>
                       </div>
                       {visibleAccounts.map((account) => {
                         const detail =
@@ -2017,6 +2144,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                         return (
                           <label key={account}>
                             <span
+                              className="fx-account-name"
                               title={
                                 detail
                                   ? `${account}\n${detail.reason}（置信度 ${Math.round(detail.confidence * 100)}%）`
@@ -2024,6 +2152,11 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                               }
                             >
                               {account}
+                              {!/\s/.test(account.trim()) && (
+                                <small className="fx-account-name-missing">
+                                  名称未识别，请返回检查“科目名称”映射
+                                </small>
+                              )}
                               {detail?.needsConfirmation && (
                                 <small> 建议复核</small>
                               )}
@@ -2061,56 +2194,68 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                                 </option>
                               ))}
                             </select>
-                            <select
-                              className={
-                                currencyRisk
-                                  ? "fx-currency-risky"
-                                  : accountCurrencies[account]
-                                    ? "fx-currency-override"
-                                    : fellBack
-                                      ? "fx-currency-unknown"
-                                      : undefined
-                              }
-                              title={
-                                currencyRisk
-                                  ? `JE中该科目出现过 ${seen.join("、")} 等多个币种，说明该科目可能同时持有多币种敞口。
+                            <span className="fx-currency-cell">
+                              <select
+                                aria-label={`${account} 账户币种`}
+                                aria-invalid={currencyRisk || undefined}
+                                className={
+                                  currencyRisk
+                                    ? "fx-currency-risky"
+                                    : accountCurrencies[account]
+                                      ? "fx-currency-override"
+                                      : fellBack
+                                        ? "fx-currency-unknown"
+                                        : undefined
+                                }
+                                title={
+                                  currencyRisk
+                                    ? `JE中该科目出现过 ${seen.join("、")} 等多个币种，说明该科目可能同时持有多币种敞口。
 请复核TB是否按币种拆分；若TB只给该科目一行合计余额，就无法用单一汇率可靠重估。
 正确做法是改用按币种拆分的科目余额表。`
-                                  : detected
-                                    ? `系统识别：${detected}（依据${source}）${
+                                    : detected
+                                      ? `系统识别：${detected}（依据${source}）${
                                         seen.length > 1
                                           ? `
 该科目出现过：${seen.join("、")}`
                                           : ""
                                       }`
-                                    : fallbackFunctional
-                                      ? `系统未识别到该科目的币种，按界面填写的本位币 ${fallbackFunctional} 处理，不参与重估。
+                                      : fallbackFunctional
+                                        ? `系统未识别到该科目的币种，按界面填写的本位币 ${fallbackFunctional} 处理，不参与重估。
 若该科目实际持有外币，请在此手工指定。`
-                                      : "系统未识别到该科目的币种，请手工指定"
-                              }
-                              value={accountCurrencies[account] ?? ""}
-                              onChange={(e) =>
-                                setAccountCurrencies((v) => ({
-                                  ...v,
-                                  [account]: e.target.value,
-                                }))
-                              }
-                            >
-                              <option value="">
-                                {detected
-                                  ? `自动：${detected}（${fxCurrencySourceLabel(side, source)}）`
-                                  : fallbackFunctional
-                                    ? `自动：${fallbackFunctional}（按本位币）`
-                                    : "自动：未识别"}
-                              </option>
-                              {[...new Set([...seen, ...CURRENCY_OPTIONS])].map(
-                                (code) => (
+                                        : "系统未识别到该科目的币种，请手工指定"
+                                }
+                                value={accountCurrencies[account] ?? ""}
+                                onChange={(e) =>
+                                  setAccountCurrencies((v) => ({
+                                    ...v,
+                                    [account]: e.target.value,
+                                  }))
+                                }
+                              >
+                                <option value="">
+                                  {detected
+                                    ? `自动：${detected}（${fxCurrencySourceLabel(side, source)}）`
+                                    : fallbackFunctional
+                                      ? `自动：${fallbackFunctional}（按本位币）`
+                                      : "自动：未识别"}
+                                </option>
+                                {fxCurrencyOptions(...seen).map((code) => (
                                   <option key={code} value={code}>
                                     {code}
                                   </option>
-                                ),
+                                ))}
+                              </select>
+                              {currencyRisk && (
+                                <small className="fx-currency-risk-label" role="alert">
+                                  JE 多币种；需按币种拆分 TB 后复核
+                                </small>
                               )}
-                            </select>
+                              {!currencyRisk && fellBack && (
+                                <small className="fx-currency-fallback-label">
+                                  未识别账户外币，当前按本位币处理
+                                </small>
+                              )}
+                            </span>
                           </label>
                         );
                       })}
@@ -2149,10 +2294,9 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
               <div className="fx-run-grid">
                 <label>
                   资产负债表日
-                  <input
-                    type="date"
+                  <DateInput
                     value={reportEnd}
-                    onChange={(e) => setReportEnd(e.target.value)}
+                    onChange={setReportEnd}
                   />
                 </label>
                 <label>
@@ -3135,6 +3279,15 @@ function FxResult({
     summary,
     ((result.tbGranularityBlocked ?? []) as unknown[]).length,
   );
+  const entityCoverage = (result.entityCoverage ?? {}) as {
+    matched?: string[];
+    unmatchedJe?: string[];
+    unmatchedTb?: string[];
+  };
+  const unmatchedEntities = [
+    ...(entityCoverage.unmatchedJe ?? []).map((name) => `JE：${name}`),
+    ...(entityCoverage.unmatchedTb ?? []).map((name) => `TB：${name}`),
+  ];
   const metric = (
     label: string,
     value: unknown,
@@ -3171,6 +3324,13 @@ function FxResult({
         <strong>{resultStatus.title}</strong>
         <span>{resultStatus.detail}</span>
       </div>
+      {unmatchedEntities.length > 0 && (
+        <p className="fa-missing-hint">
+          本次仅测算 TB 与 JE 匹配上的主体：
+          {(entityCoverage.matched ?? []).join("、") || "无"}。以下未匹配主体仅作提示，
+          未进入任何测算：{unmatchedEntities.join("、")}。
+        </p>
+      )}
       {Boolean(summary.needsZeroResultReview) && (
         <p className="fa-missing-hint">
           已读取外币凭证，但没有事件进入自动测算；相关金额已归入待复核项目，不会再被当作正常“0”。

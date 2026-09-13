@@ -36,6 +36,7 @@ import { Button } from "@/components/ui/button";
 import { errorText } from "@/lib/errors";
 import { useCountUp } from "./lib/useCountUp";
 import { SwitchInput } from "@/components/SwitchInput";
+import { DateInput } from "@/components/DateInput";
 import { demoDataEnabled } from "./preview/demoRegistry";
 import {
   TOOL_DEFINITIONS,
@@ -1258,7 +1259,7 @@ function ToolPage({
   );
 }
 
-function Field({
+export function Field({
   field,
   value,
   onChange,
@@ -1295,10 +1296,18 @@ function Field({
           checked={Boolean(value)}
           onChange={onChange}
         />
+      ) : field.kind === "date" ? (
+        <div className="input-with-button">
+          <DateInput
+            value={text}
+            placeholder={field.placeholder}
+            onChange={onChange}
+          />
+        </div>
       ) : (
         <div className="input-with-button">
           <input
-            type={field.kind === "date" ? "date" : "text"}
+            type="text"
             value={text}
             placeholder={field.placeholder}
             onChange={(e) =>

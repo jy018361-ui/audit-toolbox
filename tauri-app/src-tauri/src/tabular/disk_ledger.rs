@@ -1760,15 +1760,7 @@ mod tests {
         .unwrap()
         .with_extension("sqlite");
         let _ = fs::remove_file(&prepared_path);
-        let ledger = prepare(
-            &cache,
-            &mapping,
-            None,
-            1,
-            &|_, _, _, _| {},
-            &cancel,
-        )
-        .unwrap();
+        let ledger = prepare(&cache, &mapping, None, 1, &|_, _, _, _| {}, &cancel).unwrap();
         assert_eq!(ledger.count, 2);
         let mut rows = Vec::new();
         ledger

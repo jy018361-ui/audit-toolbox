@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   fxAccountCurrencyDetail,
+  fxAccountDisplayList,
+  fxCurrencyOptions,
+  fxResolveEntityCurrencies,
   fxCurrencySourceLabel,
   fxFallbackFunctional,
   fxAccountCurrencyOverrides,
@@ -34,6 +37,60 @@ import {
 } from "./ledgerMapping";
 import type React from "react";
 describe("fx audit mode selection", () => {
+  it("公司本位币选项包含自动识别值与常备币种并去重", () => {
+    const options = fxCurrencyOptions(" usd ", "AED", "USD", "TWD");
+    expect(options[0]).toBe("USD");
+    expect(options).toContain("AED");
+    expect(options.filter((code) => code === "USD")).toHaveLength(1);
+    expect(options).not.toContain("TWD");
+    expect(new Set(options)).toEqual(
+      new Set([
+        "CNY", "USD", "EUR", "JPY", "HKD", "GBP", "AUD", "NZD", "SGD",
+        "CHF", "CAD", "MOP", "MYR", "RUB", "ZAR", "KRW", "AED", "SAR",
+        "HUF", "PLN", "DKK", "SEK", "NOK", "TRY", "MXN", "THB",
+      ]),
+    );
+  });
+
+  it("同一科目编码优先展示 JE/TB 中名称更完整的一侧", () => {
+    expect(
+      fxAccountDisplayList(
+        ["1122000000", "2221010100"],
+        [
+          "1122000000 Accounts receivable - DBS USD settlement account",
+          "2221010100 应付账款-境外供应商",
+        ],
+      ),
+    ).toEqual([
+      "1122000000 Accounts receivable - DBS USD settlement account",
+      "2221010100 应付账款-境外供应商",
+    ]);
+  });
+
+  it("JE 仅有 2002 时仍按 TB 主体币种把 2002 自动预填为 USD", () => {
+    expect(
+      fxResolveEntityCurrencies(
+        ["2002", "2000"],
+        { "2000": "EUR", "2002": "USD" },
+        null,
+        { "2002": "CNY" },
+        {},
+      ),
+    ).toEqual({ "2002": "USD", "2000": "EUR" });
+  });
+
+  it("用户手选的主体币种不会被后续识别覆盖", () => {
+    expect(
+      fxResolveEntityCurrencies(
+        ["2002"],
+        { "2002": "USD" },
+        null,
+        { "2002": "EUR" },
+        { "2002": true },
+      ),
+    ).toEqual({ "2002": "EUR" });
+  });
+
   it("按模式明确 JE 与 TB 的必需关系", () => {
     expect(fxRequiredSources("realized")).toEqual({ je: true, tb: false });
     expect(fxRequiredSources("unrealized")).toEqual({ je: false, tb: true });

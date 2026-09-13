@@ -600,6 +600,35 @@ fn review_date_instruction(policy: ReviewDatePolicy) -> &'static str {
     }
 }
 
+/// 把金标身份缺项显式交给模型。此前只给 availableRoles，角色太多时模型容易
+/// 只复核已映射列、漏掉真正拦截运行的编码／摘要／日期。
+fn inject_required_missing_roles(payload: &mut Value, kind: &str) {
+    let current = payload.get("currentMapping").and_then(Value::as_object);
+    let available = payload
+        .get("availableRoles")
+        .and_then(Value::as_array)
+        .map(|roles| {
+            roles
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let missing = crate::ledger_mapping::identity_required(kind)
+        .iter()
+        .filter(|role| available.is_empty() || available.contains(**role))
+        .filter(|role| {
+            !current
+                .and_then(|mapping| mapping.get(**role))
+                .is_some_and(value_is_filled)
+        })
+        .map(|role| Value::String((*role).to_owned()))
+        .collect::<Vec<_>>();
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("requiredMissingRoles".into(), Value::Array(missing));
+    }
+}
+
 /// 把**脚本已经判出的账表形态**写进 payload。
 ///
 /// 不给这个，模型就是在盲猜：实测「序时账-1」里它看到金额列全是正数、
@@ -685,10 +714,12 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
     if tb.is_object() {
         inject_current_form(&mut tb, "tb");
         inject_engine_facts(&mut tb);
+        inject_required_missing_roles(&mut tb, "tb");
     }
     if je.is_object() {
         inject_current_form(&mut je, "je");
         inject_engine_facts(&mut je);
+        inject_required_missing_roles(&mut je, "je");
     }
     let date_policy = review_date_policy(root.get("tool").and_then(Value::as_str));
     let je_date_instruction = review_date_instruction(date_policy);
@@ -702,6 +733,7 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
          TB 建议只能使用 tb.availableRoles 与 tb.headers，JE 建议只能使用 je.availableRoles 与 je.headers。\
          两侧 engineFacts 是 Coding 根据样例验证的处理事实；protected=true 的事实不得修改。\
          同一源列可合法承担 engineFacts.mappedRoles 中列出的多个角色，Coding 会在后续完成拆分、组合或标准化。\
+         requiredMissingRoles 是当前仍缺失的金标必填角色清单；只要 headers 与 sampleRows 中存在相容列，就必须逐项输出 change，不得只复核已有映射。\
          联合比较 accountCode/accountName 的标题语义、样例形态与两侧口径；证据接近时维持当前映射，不要为了换成看起来更好的列而改。\
          changes 只放真实调整，确认现状正确不要造条目。{review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}\
          对 TB：{REVIEW_TB}\
@@ -869,6 +901,7 @@ fn ledger_mapping_llm_call(
     }
     inject_current_form(&mut payload, if is_tb { "tb" } else { "je" });
     inject_engine_facts(&mut payload);
+    inject_required_missing_roles(&mut payload, if is_tb { "tb" } else { "je" });
     let payload = &payload;
     let content = request_llm(llm, &prompt, &payload.to_string(), None)?;
     let mut value = parse_json_content(&content);
@@ -908,6 +941,184 @@ fn sanitize_mapping_changes(
     // 结构不同，纪律相同，逐个字段过一遍同一套规则。
     for key in ["changes", "fills", "reviews"] {
         sanitize_change_list(value, payload, kind, key, date_policy);
+    }
+    // TBJE 的金标身份字段不能把成败完全押在模型是否“记得提建议”上。
+    // 模型先完成语义复核；若它漏掉了必填项，再仅按样例值补充唯一、可机器验证
+    // 的候选。多候选或证据不足仍保持空缺，交给用户确认，绝不猜列。
+    if kind == "je" && date_policy == ReviewDatePolicy::TbjeComposite {
+        supplement_tbje_required_je_changes(value, payload);
+    }
+}
+
+fn value_is_filled(value: &Value) -> bool {
+    match value {
+        Value::String(one) => !one.trim().is_empty(),
+        Value::Array(all) => all
+            .iter()
+            .any(|item| item.as_str().is_some_and(|one| !one.trim().is_empty())),
+        _ => false,
+    }
+}
+
+/// LLM 复核后的窄兜底：只补 TBJE JE 侧仍缺失、且从表头＋样例能唯一确定的
+/// 科目编码、摘要与日期组成列。它不是第二套泛化自动映射器。
+fn supplement_tbje_required_je_changes(value: &mut Value, payload: &Value) {
+    let Some(changes) = value.get_mut("changes").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let headers = payload
+        .get("headers")
+        .and_then(Value::as_array)
+        .map(|all| {
+            all.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let Some(rows) = sample_rows_of(payload) else {
+        return;
+    };
+    let current = payload.get("currentMapping").and_then(Value::as_object);
+    let has_role = |role: &str, changes: &[Value]| {
+        current
+            .and_then(|mapping| mapping.get(role))
+            .is_some_and(value_is_filled)
+            || changes.iter().any(|change| {
+                change.get("role").and_then(Value::as_str) == Some(role)
+                    && change
+                        .get("suggestedColumn")
+                        .and_then(Value::as_str)
+                        .is_some_and(|column| !column.trim().is_empty())
+            })
+    };
+    let occupied = |column: &str, changes: &[Value]| {
+        current.is_some_and(|mapping| {
+            mapping.values().any(|value| match value {
+                Value::String(one) => one.trim() == column,
+                Value::Array(all) => all
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|one| one.trim() == column),
+                _ => false,
+            })
+        }) || changes.iter().any(|change| {
+            change
+                .get("suggestedColumn")
+                .and_then(Value::as_str)
+                .is_some_and(|one| one.trim() == column)
+        })
+    };
+
+    if !has_role("accountCode", changes) {
+        let candidates = headers
+            .iter()
+            .enumerate()
+            .filter(|(_, header)| {
+                crate::ledger_mapping::header_segments(header)
+                    .iter()
+                    .any(|segment| {
+                        matches!(
+                            segment.as_str(),
+                            "会计科目"
+                                | "會計科目"
+                                | "总账科目"
+                                | "總賬科目"
+                                | "总帐科目"
+                                | "總帳科目"
+                                | "账户"
+                                | "帳戶"
+                        )
+                    })
+            })
+            .filter(|(index, header)| {
+                !occupied(header, changes)
+                    && matches!(
+                        crate::ledger_mapping::account_column_shape(
+                            rows.iter().filter_map(|row| row.get(*index)).cloned()
+                        ),
+                        crate::ledger_mapping::AccountColumnShape::Code
+                            | crate::ledger_mapping::AccountColumnShape::Combined
+                    )
+            })
+            .map(|(_, header)| header.clone())
+            .collect::<Vec<_>>();
+        if let [column] = candidates.as_slice() {
+            changes.push(json!({
+                "role": "accountCode",
+                "currentColumn": "",
+                "suggestedColumn": column,
+                "confidence": 0.99,
+                "reason": "LLM 复核后按样例值补齐：该歧义科目列是唯一稳定的编码形态列。"
+            }));
+        }
+    }
+
+    if !has_role("summary", changes) {
+        let summary_role = crate::ledger_mapping::role_of("je", "summary");
+        let candidates = headers
+            .iter()
+            .enumerate()
+            .filter(|(_, header)| !occupied(header, changes))
+            .filter(|(_, header)| {
+                summary_role
+                    .and_then(|role| crate::ledger_mapping::alias_score(role, header))
+                    .is_some()
+            })
+            .filter(|(index, _)| {
+                let values = rows
+                    .iter()
+                    .filter_map(|row| row.get(*index))
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty())
+                    .collect::<Vec<_>>();
+                !values.is_empty()
+                    && values.iter().any(|value| {
+                        value
+                            .chars()
+                            .any(|c| !c.is_ascii_digit() && !c.is_ascii_punctuation())
+                    })
+            })
+            .map(|(_, header)| header.clone())
+            .collect::<Vec<_>>();
+        if let [column] = candidates.as_slice() {
+            changes.push(json!({
+                "role": "summary",
+                "currentColumn": "",
+                "suggestedColumn": column,
+                "confidence": 0.99,
+                "reason": "LLM 复核后按表头与样例值补齐：该列是唯一可验证的分录摘要列。"
+            }));
+        }
+    }
+
+    if !has_role("date", changes) && !has_full_date_column(&headers, &rows) {
+        let components = headers
+            .iter()
+            .enumerate()
+            .filter(|(index, header)| {
+                !occupied(header, changes) && tbje_date_component_column(&headers, &rows, *index)
+            })
+            .map(|(_, header)| header.clone())
+            .collect::<Vec<_>>();
+        // 月／年月是日期降级成立的锚点；只有孤立的“年”或“日”仍不能猜。
+        let has_month = components.iter().any(|column| {
+            headers
+                .iter()
+                .position(|header| header == column)
+                .is_some_and(|index| tbje_month_component_column(&headers, &rows, index))
+        });
+        if has_month {
+            for column in components {
+                changes.push(json!({
+                    "role": "date",
+                    "currentColumn": "",
+                    "suggestedColumn": column,
+                    "confidence": 0.99,
+                    "reason": "LLM 复核后按样例值补齐：TBJE 使用月份或年月／月日组成凭证日期键。"
+                }));
+            }
+        }
     }
 }
 
@@ -954,18 +1165,24 @@ fn integer_component_column(
     seen > 0
 }
 
+fn tbje_month_component_column(headers: &[String], rows: &[Vec<String>], index: usize) -> bool {
+    let header = headers.get(index).map(String::as_str).unwrap_or("");
+    let normalized = crate::ledger_mapping::normalize_header(header);
+    (normalized.contains('月')
+        || normalized.contains("month")
+        || normalized.contains("期间")
+        || normalized.contains("period"))
+        && month_shaped_column(rows, index)
+}
+
 /// TBJE 的复合日期组成列。列名与样例取值必须同时成立，避免模型把任意
 /// 1..12 的层级/期间数字误当月份，或把制单人等无关列塞进 date。
 fn tbje_date_component_column(headers: &[String], rows: &[Vec<String>], index: usize) -> bool {
     let header = headers.get(index).map(String::as_str).unwrap_or("");
     let normalized = crate::ledger_mapping::normalize_header(header);
-    let month_header = normalized.contains('月')
-        || normalized.contains("month")
-        || normalized.contains("期间")
-        || normalized.contains("period");
     let day_header = normalized.contains('日') || normalized.contains("day");
     let year_header = normalized.contains('年') || normalized.contains("year");
-    (month_header && month_shaped_column(rows, index))
+    tbje_month_component_column(headers, rows, index)
         || (day_header && integer_component_column(rows, index, 1..=31))
         || (year_header && integer_component_column(rows, index, 1900..=2100))
 }
@@ -2233,6 +2450,111 @@ mod tests {
             fallback["changes"].as_array().expect("changes").is_empty(),
             "已有完整日期时不得退回组成列：{fallback:#}"
         );
+    }
+
+    #[test]
+    fn tbje联合复核漏答时按样例补齐编码摘要和月份日期() {
+        let payload = json!({
+            "headers": ["年-月", "年-日", "凭证号", "总账科目", "科目名称", "凭证行文本", "本位币金额"],
+            "currentMapping": {
+                "id": "凭证号",
+                "accountName": "科目名称",
+                "functionalAmount": "本位币金额"
+            },
+            "availableRoles": ["date", "id", "accountCode", "accountName", "summary", "functionalAmount"],
+            "sampleRows": [
+                ["1", "9", "0001", "100101", "库存现金", "收到货款", "10"],
+                ["1", "9", "0001", "112201", "应收账款", "收到货款", "-10"],
+                ["2", "15", "0002", "100201", "银行存款", "支付费用", "20"],
+                ["2", "15", "0002", "660101", "管理费用", "支付费用", "-20"]
+            ]
+        });
+        let mut review = json!({"changes": []});
+        sanitize_mapping_changes(&mut review, &payload, "je", ReviewDatePolicy::TbjeComposite);
+        let changes = review["changes"].as_array().expect("changes");
+        let suggested = |role: &str| {
+            changes
+                .iter()
+                .filter(|change| change["role"] == role)
+                .filter_map(|change| change["suggestedColumn"].as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(suggested("accountCode"), vec!["总账科目"]);
+        assert_eq!(suggested("summary"), vec!["凭证行文本"]);
+        assert_eq!(suggested("date"), vec!["年-月", "年-日"]);
+    }
+
+    #[test]
+    fn tbje联合复核不会在多个编码候选之间猜测() {
+        let payload = json!({
+            "headers": ["凭证号", "总账科目", "会计科目"],
+            "currentMapping": {"id": "凭证号"},
+            "sampleRows": [
+                ["0001", "100101", "200101"],
+                ["0002", "100102", "200102"],
+                ["0003", "100103", "200103"],
+                ["0004", "100104", "200104"]
+            ]
+        });
+        let mut review = json!({"changes": []});
+        sanitize_mapping_changes(&mut review, &payload, "je", ReviewDatePolicy::TbjeComposite);
+        assert!(
+            review["changes"]
+                .as_array()
+                .expect("changes")
+                .iter()
+                .all(|change| change["role"] != "accountCode"),
+            "多个同形候选必须留给用户判断：{review:#}"
+        );
+    }
+
+    #[test]
+    #[ignore = "依赖本机真实账表验收，需 LEDGER_SAMPLES 指向 TBJEPBC 目录"]
+    fn tbje真实四五八号联合复核补齐截图中的缺项() {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("LEDGER_SAMPLES").expect("LEDGER_SAMPLES 未设置"),
+        );
+        for (file, expected) in [
+            ("04JE.XLSX", vec![("accountCode", "总帐科目")]),
+            (
+                "05序时账 (2).XLSX",
+                vec![("accountCode", "总帐科目"), ("summary", "凭证行文本")],
+            ),
+            (
+                "08序时账 (2).xlsx",
+                vec![("date", "年-月"), ("date", "年-日")],
+            ),
+        ] {
+            let inspected = crate::fx::call(
+                "fx.inspect_je",
+                json!({"source": {
+                    "inputPath": root.join(file),
+                    "sheet": "",
+                    "headerRow": 0,
+                    "headerDepth": 0
+                }}),
+            )
+            .unwrap_or_else(|error| panic!("{file} inspect 失败：{error:?}"));
+            let payload = json!({
+                "headers": inspected["headers"],
+                "currentMapping": inspected["suggestedMapping"],
+                "sampleRows": inspected["preview"],
+            });
+            let mut review = json!({"changes": []});
+            sanitize_mapping_changes(&mut review, &payload, "je", ReviewDatePolicy::TbjeComposite);
+            let current = payload["currentMapping"].as_object().expect("mapping");
+            let changes = review["changes"].as_array().expect("changes");
+            for (role, column) in expected {
+                let present = current.get(role).is_some_and(|value| match value {
+                    Value::String(one) => one == column,
+                    Value::Array(all) => all.iter().any(|one| one.as_str() == Some(column)),
+                    _ => false,
+                }) || changes
+                    .iter()
+                    .any(|change| change["role"] == role && change["suggestedColumn"] == column);
+                assert!(present, "{file} 缺 {role}→{column}：{payload:#} {review:#}");
+            }
+        }
     }
 
     #[test]

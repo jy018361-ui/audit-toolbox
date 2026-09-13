@@ -25,6 +25,7 @@ import { JobProgress } from "@/components/JobProgress";
 import { StepIndicator } from "@/components/StepIndicator";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { DateInput } from "@/components/DateInput";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useJobEvents } from "@/hooks/useJobEvents";
@@ -1316,12 +1317,11 @@ export function FaTbJePage() {
               <div className="form-grid">
                 <label>
                   报告截止日
-                  <Input
+                  <DateInput
                     name="fa-report-end"
                     autoComplete="off"
-                    type="date"
                     value={reportEnd}
-                    onChange={(event) => setReportEnd(event.target.value)}
+                    onChange={setReportEnd}
                   />
                   <small>
                     统计期间为 {reportEnd.slice(0, 4)}-01-01 至{" "}

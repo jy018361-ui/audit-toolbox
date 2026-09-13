@@ -149,6 +149,45 @@ fn 三条核对都通过时不报任何差异() {
 }
 
 #[test]
+fn 定长tb修正同时作用于发生额与bspl勾稽() {
+    let dir = fixture("fixed-width-leaf-shared");
+    // 费用科目按核算维度拆成 5 行，200 恰好等于后面的 50 + 150。
+    // 公共末级行规则应保留全部 5 行，总借方/期末均为 700；负债行把
+    // 期末配平，用来证明 BS 与 PL 勾稽读取的是同一份修正后行集合。
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         6601000000,职工薪酬-A,0,150,0,150\n\
+         6601000000,职工薪酬-B,0,200,0,200\n\
+         6601000000,职工薪酬-C,0,50,0,50\n\
+         6601000000,职工薪酬-D,0,150,0,150\n\
+         6601000000,职工薪酬-E,0,150,0,150\n\
+         2202000000,应付账款,0,0,700,-700\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-03-01,V1,6601000000,职工薪酬,700,0\n\
+         2025-03-01,V1,2202000000,应付账款,0,700\n",
+    )
+    .unwrap();
+
+    let result = run(&params(&dir, true), &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["rollforward"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["tbVsJe"]["accounts"], json!(2), "{result:#}");
+    assert_eq!(result["equation"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["equation"]["accounts"], json!(6), "{result:#}");
+    assert_eq!(
+        result["equation"]["closing"]["total"].as_f64().unwrap(),
+        0.0,
+        "{result:#}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn 分段明细账由公共引擎补全后进入tbje核对() {
     let dir = fixture("sectioned-ledger");
     std::fs::write(
@@ -223,9 +262,28 @@ fn 一至三月真实分段明细账进入完整性核对() {
     let prepared = prepare(&input).unwrap();
     assert_eq!(prepared.je.as_ref().unwrap().table.rows.len(), 12_265);
     let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
-    assert_eq!(result["tbVsJe"]["mismatched"], json!(2), "{result:#}");
+    assert_eq!(result["tbVsJe"]["mismatched"], json!(0), "{result:#}");
     assert_eq!(result["tbVsJe"]["accounts"], json!(234), "{result:#}");
     let items = result["tbVsJe"]["items"].as_array().unwrap();
+    let maternity = items
+        .iter()
+        .find(|item| item["code"] == json!("8131002884"))
+        .expect("结果中应包含 8131002884");
+    assert_eq!(maternity["tbIncludedRows"], json!(5), "{maternity:#}");
+    assert_eq!(maternity["tbDebit"], json!(700.0), "{maternity:#}");
+    assert_eq!(maternity["jeDebit"], json!(700.0), "{maternity:#}");
+    // BS/PL 必须同步使用同一份修正后的 leaf mask；旧口径只纳入 335 行，
+    // 定长平级规则生效后应纳入 366 条可归类 TB 明细。
+    assert_eq!(result["equation"]["accounts"], json!(366), "{result:#}");
+    assert!(
+        (result["equation"]["closing"]["total"]
+            .as_f64()
+            .unwrap()
+            - (-26_524_503.44))
+            .abs()
+            < 0.01,
+        "{result:#}"
+    );
     let je_debit = items
         .iter()
         .map(|item| item["jeDebit"].as_f64().unwrap_or(0.0))
@@ -437,6 +495,85 @@ fn 借贷两侧分开比才抓得住双向虚增() {
     assert_eq!(item["netDifference"].as_f64().unwrap(), 0.0);
     assert_eq!(item["netPassed"], json!(true));
     assert_eq!(item["overallVerdict"], json!("净额通过，单边发生额有差异"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 合计行后的人手草稿不得拼出幻影科目() {
+    // 10 号样例实测：序时账合计行下面被粘贴了一块无形资产摊销测算草稿，
+    // 金额 2556.54 错位进了科目编码列，说明文字写在摘要/凭证号列。旧口径
+    // 把这些行恢复进正文又向下填充补齐名称，凭空造出净差 5.5 亿的假科目。
+    // 用 xlsx 构造（整行空白必须保留成行），与真实文件同一路径。
+    let dir = fixture("tail-draft");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,0,500,300,200\n\
+         2202,应付账款,0,300,500,-200\n",
+    )
+    .unwrap();
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    sheet.set_name("Sheet1").unwrap();
+    let header = ["日期", "凭证号", "摘要", "科目编码", "科目全名", "借方金额", "贷方金额"];
+    for (column, text) in header.iter().enumerate() {
+        sheet.write(0, column as u16, *text).unwrap();
+    }
+    let real_rows: [[&str; 7]; 4] = [
+        ["2025-03-01", "V1", "提现", "1001", "库存现金", "500", "0"],
+        ["2025-03-01", "V1", "提现", "2202", "应付账款", "0", "500"],
+        ["2025-06-01", "V2", "付款", "2202", "应付账款", "300", "0"],
+        ["2025-06-01", "V2", "付款", "1001", "库存现金", "0", "300"],
+    ];
+    for (offset, row) in real_rows.iter().enumerate() {
+        for (column, cell) in row.iter().enumerate() {
+            sheet
+                .write((offset + 1) as u32, column as u16, *cell)
+                .unwrap();
+        }
+    }
+    // 合计行之后两行整行空白，再进入草稿区——与 10 号样例同形。
+    sheet.write(5, 0, "合计").unwrap();
+    sheet.write(5, 5, 800).unwrap();
+    sheet.write(5, 6, 800).unwrap();
+    let draft_rows: [[&str; 7]; 4] = [
+        ["", "账面摊销", "管理费用", "2556.54", "", "2556.54", ""],
+        ["", "", "累计摊销", "", "2556.54", "", "276936736.69"],
+        ["", "原调整冲回", "", "", "", "-276934180.15", ""],
+        ["", "", "", "", "", "#REF!", ""],
+    ];
+    for (offset, row) in draft_rows.iter().enumerate() {
+        for (column, cell) in row.iter().enumerate() {
+            if !cell.is_empty() {
+                sheet
+                    .write((offset + 8) as u32, column as u16, *cell)
+                    .unwrap();
+            }
+        }
+    }
+    workbook.save(dir.join("je.xlsx")).unwrap();
+    let mut input = params(&dir, true);
+    input["jeSource"]["inputPath"] = dir.join("je.xlsx").to_string_lossy().to_string().into();
+    input["jeMapping"] = json!({
+        "id": "凭证号",
+        "date": "日期",
+        "summary": "摘要",
+        "accountCode": "科目编码",
+        "accountName": "科目全名",
+        "functionalDebit": "借方金额",
+        "functionalCredit": "贷方金额",
+    });
+    let result = run(&input, &AtomicBool::new(false)).unwrap();
+    let items = result["tbVsJe"]["items"].as_array().cloned().unwrap_or_default();
+    assert!(
+        items
+            .iter()
+            .all(|item| !item["code"].as_str().unwrap_or("").contains("2556")),
+        "草稿金额不得成为科目：{result:#}"
+    );
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["tbVsJe"]["mismatched"], json!(0), "{result:#}");
+    assert_eq!(result["tbVsJe"]["netMismatched"], json!(0), "{result:#}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1208,6 +1345,61 @@ fn 发生额余额勾稽的界面与导出采用同一行范围() {
         })
         .count();
     assert_eq!(exported, 2, "导出必须与界面 checked 行数一致");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 导出的发生额余额勾稽按主体映射增减主体列() {
+    let dir = fixture("rollforward-entity-column");
+    let tb_path = dir.join("tb.csv");
+    std::fs::write(
+        &tb_path,
+        "主体,科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         甲公司,1001,库存现金,100,500,300,300\n\
+         乙公司,1001,库存现金,50,200,100,150\n",
+    )
+    .unwrap();
+    let mut mapping = tb_mapping();
+    mapping["entity"] = json!("主体");
+    let value = json!({
+        "tbSource": {"inputPath": tb_path},
+        "tbMapping": mapping,
+        "outputPath": dir.join("带主体.xlsx")
+    });
+    let prepared = prepare(&value).unwrap();
+    let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
+    assert_eq!(result["rollforward"]["checked"], json!(2), "{result:#}");
+    let path = export(&value, &result, &prepared).unwrap();
+    let book = umya_spreadsheet::reader::xlsx::read(&path).unwrap();
+    let sheet = book.get_sheet_by_name("TB发生额与余额勾稽").unwrap();
+    // 主体列在最前，其余列整体右移一位。
+    assert_eq!(sheet.get_cell((1, 6)).unwrap().get_value(), "主体");
+    assert_eq!(sheet.get_cell((2, 6)).unwrap().get_value(), "TB纳入币种");
+    assert_eq!(sheet.get_cell((3, 6)).unwrap().get_value(), "源表行号");
+    assert_eq!(sheet.get_cell((6, 6)).unwrap().get_value(), "期初余额");
+    // 数据行的主体值逐行保留，合并余额表才能分清行属于哪个主体。
+    assert_eq!(sheet.get_cell((1, 7)).unwrap().get_value(), "甲公司");
+    assert_eq!(sheet.get_cell((1, 8)).unwrap().get_value(), "乙公司");
+    assert_eq!(sheet.get_cell((4, 7)).unwrap().get_value(), "1001");
+    // 公式随列平移：公式期末＝期初＋借－贷落在 I 列，差异与结论引用新列。
+    assert_eq!(sheet.get_cell((9, 7)).unwrap().get_formula(), "F7+G7-H7");
+    assert_eq!(sheet.get_cell((11, 7)).unwrap().get_formula(), "I7-J7");
+    let verdict = sheet.get_cell((12, 7)).unwrap().get_formula();
+    assert!(verdict.contains("ABS(K7)"), "{verdict}");
+
+    // 未映射主体时整表回到旧布局，第一列仍是币种，公式列不变。
+    let plain = json!({
+        "tbSource": {"inputPath": tb_path},
+        "tbMapping": tb_mapping(),
+        "outputPath": dir.join("无主体.xlsx")
+    });
+    let prepared = prepare(&plain).unwrap();
+    let result = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
+    let path = export(&plain, &result, &prepared).unwrap();
+    let book = umya_spreadsheet::reader::xlsx::read(&path).unwrap();
+    let sheet = book.get_sheet_by_name("TB发生额与余额勾稽").unwrap();
+    assert_eq!(sheet.get_cell((1, 6)).unwrap().get_value(), "TB纳入币种");
+    assert_eq!(sheet.get_cell((8, 7)).unwrap().get_formula(), "E7+F7-G7");
     let _ = std::fs::remove_dir_all(dir);
 }
 

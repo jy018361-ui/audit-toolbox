@@ -24,6 +24,7 @@ import { JargonTip } from "@/components/JargonTip";
 import { EmptyState } from "@/components/EmptyState";
 import { Badge } from "@/components/ui/badge";
 import { NumberInput } from "@/components/NumberInput";
+import { DateInput } from "@/components/DateInput";
 import { displayFileName } from "@/fileDisplay";
 import {
   correctLedgerSourceKinds,
@@ -1425,10 +1426,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               <div className="deposit-run-grid">
                 <label>
                   资产负债表日
-                  <Input
-                    type="date"
+                  <DateInput
                     value={reportEnd}
-                    onChange={(e) => setReportEnd(e.target.value)}
+                    onChange={setReportEnd}
                   />
                 </label>
                 <label>
@@ -2006,6 +2006,13 @@ function Results({
   const jeCurrencyAllocationWarning = String(
     summary.jeCurrencyAllocationWarning ?? "",
   );
+  const jeUncoveredEntities: string[] = Array.isArray(
+    summary.jeUncoveredEntities,
+  )
+    ? summary.jeUncoveredEntities
+        .map((item) => String(item))
+        .filter(Boolean)
+    : [];
 
   return (
     <section className="fx-result deposit-result">
@@ -2096,6 +2103,18 @@ function Results({
         <p className="deposit-stale" role="alert">
           <b>JE 币种资料不完整</b>
           <span>{jeCurrencyAllocationWarning}</span>
+        </p>
+      )}
+      {jeUncoveredEntities.length > 0 && (
+        <p className="deposit-stale" role="alert">
+          <b>序时账未覆盖核算主体</b>
+          <span>
+            序时账期间内没有归集到主体
+            {jeUncoveredEntities.join("、")}
+            的任何发生额，这些主体的账户已按期初/期末两点法推算月均余额（共
+            {Number(summary.jeUncoveredAccountCount ?? 0)}
+            户），测算口径以行备注为准；如需逐月勾稽，请补充对应主体的序时账。
+          </span>
         </p>
       )}
       {stale && (

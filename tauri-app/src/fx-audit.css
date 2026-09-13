@@ -986,7 +986,8 @@
 }
 
 .fx-accounts label {
-  grid-template-columns: minmax(120px, 1fr) 150px 148px;
+  grid-template-columns: minmax(260px, 1fr) 150px minmax(210px, 250px);
+  align-items: start;
 }
 .fx-accounts select.fx-currency-override {
   border-color: var(--primary);
@@ -998,13 +999,47 @@
   top: 0;
   z-index: 1;
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) 150px 148px;
+  grid-template-columns: minmax(260px, 1fr) 150px minmax(210px, 250px);
   gap: 12px;
   padding: 1px 0 6px;
   border-bottom: 1px solid var(--border);
   background: var(--card);
   color: var(--muted-foreground);
   font-size: 11px;
+}
+.fx-accounts label > .fx-account-name {
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+.fx-account-name-missing {
+  display: block;
+  margin-top: 2px;
+  color: var(--warning-fg);
+}
+.fx-currency-cell {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  overflow: visible;
+  white-space: normal;
+}
+.fx-currency-cell select {
+  width: 100%;
+  min-width: 0;
+}
+.fx-currency-risk-label,
+.fx-currency-fallback-label {
+  line-height: 1.35;
+  white-space: normal;
+}
+.fx-currency-risk-label {
+  color: var(--danger-fg);
+  font-weight: 600;
+}
+.fx-currency-fallback-label {
+  color: var(--warning-fg);
 }
 /* 「按本位币」「未识别」都表示没认出账户币种，描边标出来，便于滚一遍就扫到。 */
 .fx-accounts select.fx-currency-unknown {

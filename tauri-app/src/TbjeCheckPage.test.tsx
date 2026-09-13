@@ -159,9 +159,10 @@ describe("TbjeCheckPage", () => {
     expect(
       screen.getByRole("heading", { level: 2, name: "1. 添加 TB 与 JE 文件" }),
     ).toBeVisible();
+    // 配对区在第一步原样保留，用户回来时仍能看到并管理已导入的文件。
     expect(
-      screen.queryByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
+    ).toBeVisible();
   });
 
   it("keeps the imported groups visible when returning to the add-files step", async () => {
@@ -205,37 +206,27 @@ describe("TbjeCheckPage", () => {
       ).toBeInTheDocument(),
     );
 
-    // 回到第一步：文件仍在缓存里，列表必须回显，不能只剩一个空拖放框。
+    // 回到第一步：配对区原样保留在下方，文件可见、可换、能直接移除本组。
     const steps = container.querySelector(".step-indicator") as HTMLElement;
     fireEvent.click(
       within(steps).getByRole("button", { name: /添加文件/ }),
     );
-    const recap = container.querySelector(".tbje-intake-recap");
-    expect(recap).not.toBeNull();
     expect(
       screen.getByRole("heading", { level: 2, name: "1. 添加 TB 与 JE 文件" }),
     ).toBeVisible();
-    expect(
-      screen.getByRole("button", { name: "下一步：确认配对（1 组）" }),
-    ).toBeVisible();
-    expect(within(recap as HTMLElement).getByText("01TB.xlsx / Sheet1"))
-      .toBeVisible();
-    expect(within(recap as HTMLElement).getByText("01JE.xlsx / Sheet1"))
-      .toBeVisible();
+    expect(screen.getByRole("button", { name: "01TB.xlsx" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "01JE.xlsx" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "移除本组" })).toBeVisible();
 
-    // 点回显行直接回到第二步并展开该组，不用再走一遍导入。
     fireEvent.click(
-      within(recap as HTMLElement).getByRole("button", { name: /第 1 组/ }),
+      within(steps).getByRole("button", { name: /确认配对/ }),
     );
-    await waitFor(() =>
-      expect(
-        screen.getByRole("heading", { level: 2, name: /2\. 确认配对与字段/ }),
-      ).toBeInTheDocument(),
-    );
-    expect(container.querySelector(".tbje-group")).toHaveAttribute(
-      "data-ui-state",
-      "expanded",
-    );
+    expect(
+      screen.queryByRole("heading", {
+        level: 2,
+        name: "1. 添加 TB 与 JE 文件",
+      }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps a signed functional amount mapping after a no-op pair review", async () => {

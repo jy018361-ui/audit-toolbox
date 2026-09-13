@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { DateInput } from "@/components/DateInput";
 import "./AudiPickLegacyLoanAudit.css";
 
 export type AudiPickLoanAuditProject = {
@@ -1368,11 +1369,9 @@ export function AudiPickLegacyLoanAudit({
         <div className="alla-header-actions">
           <label>
             项目报告日
-            <input
-              type="date"
+            <DateInput
               value={dateDraft}
-              onChange={(event) => {
-                const value = event.target.value;
+              onChange={(value) => {
                 setDateDraft(value);
                 void actions.onReportDateChange(value);
               }}

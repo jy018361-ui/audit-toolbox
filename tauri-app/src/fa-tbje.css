@@ -304,6 +304,33 @@
   white-space: nowrap;
 }
 
+/* 2026-09-13 科目复核按真实「主体×科目」组合铺清单：同一科目的 TB/JE
+   两种写法合并为一行，行内加来源小标签（TB / JE / TB+JE），
+   悬停可见组内全部原始科目串。 */
+.fa-tbje-account-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.fa-tbje-account-cell .fa-tbje-account-name {
+  flex: 1;
+}
+
+.fa-tbje-source-tag {
+  flex: 0 0 auto;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-pill);
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
 .fa-tbje-account-table td.fa-tbje-empty-table {
   padding: var(--sp-6);
   color: var(--text-muted);

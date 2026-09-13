@@ -96,6 +96,10 @@
 .tbje-group-llm-result > span.failed {
   color: var(--destructive);
 }
+.tbje-group-llm-result > span.attention {
+  color: var(--warning-fg);
+  font-weight: 600;
+}
 .tbje-group-llm-result .ledger-review-compact {
   margin-top: 3px;
 }

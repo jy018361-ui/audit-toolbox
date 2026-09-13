@@ -188,6 +188,127 @@ fn 定长tb修正同时作用于发生额与bspl勾稽() {
 }
 
 #[test]
+fn 未分类科目有可靠符号时纳入恒等式总额但分类仍待补充() {
+    let dir = fixture("equation-unclassified-signed");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,100,0,0,100\n\
+         AAVX001360,结算待支付,-100,0,0,-100\n",
+    )
+    .unwrap();
+
+    let result = run(&params(&dir, false), &AtomicBool::new(false)).unwrap();
+    let equation = &result["equation"];
+    assert_eq!(equation["passed"], json!(true), "{result:#}");
+    assert_eq!(equation["balancePassed"], json!(true), "{result:#}");
+    assert_eq!(equation["coverageComplete"], json!(true), "{result:#}");
+    assert_eq!(
+        equation["classificationComplete"],
+        json!(false),
+        "{result:#}"
+    );
+    assert_eq!(equation["accounts"], json!(2), "{result:#}");
+    assert_eq!(equation["classifiedAccounts"], json!(1), "{result:#}");
+    assert_eq!(equation["unclassifiedAccounts"], json!(1), "{result:#}");
+    assert_eq!(equation["opening"]["total"], json!(0.0), "{result:#}");
+    assert_eq!(equation["closing"]["total"], json!(0.0), "{result:#}");
+    assert_eq!(
+        equation["opening"]["byCategory"][0]["amount"],
+        json!(100.0),
+        "分类小计只用于解释，不能把未分类余额塞进任一类别：{result:#}"
+    );
+    assert_eq!(equation["unclassified"][0]["openingIncluded"], json!(true));
+    assert_eq!(equation["unclassified"][0]["closingIncluded"], json!(true));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 单列全正且无方向时恒等式返回覆盖不足而非金额不平() {
+    let dir = fixture("equation-unsigned-ambiguous");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,100,0,0,100\n\
+         AAVX001360,结算待支付,100,0,0,100\n",
+    )
+    .unwrap();
+
+    let result = run(&params(&dir, false), &AtomicBool::new(false)).unwrap();
+    let equation = &result["equation"];
+    assert!(equation["performed"].as_bool().unwrap(), "{result:#}");
+    assert_eq!(equation["coverageComplete"], json!(false), "{result:#}");
+    assert_eq!(equation["conclusive"], json!(false), "{result:#}");
+    assert!(equation["passed"].is_null(), "{result:#}");
+    assert!(equation["balancePassed"].is_null(), "{result:#}");
+    assert!(equation["opening"]["balanced"].is_null(), "{result:#}");
+    assert!(equation["closing"]["balanced"].is_null(), "{result:#}");
+    assert_eq!(equation["ambiguousAccounts"], json!(2), "{result:#}");
+    assert_eq!(equation["opening"]["includedAccounts"], json!(0));
+    assert_eq!(equation["opening"]["ambiguousAccounts"], json!(2));
+    assert!(
+        equation["reason"]
+            .as_str()
+            .unwrap()
+            .contains("无法完整执行")
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 单列全正但逐行方向完整时未分类科目照常参与恒等式() {
+    let dir = fixture("equation-direction-column");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初方向,期初余额,本年借方,本年贷方,期末方向,期末余额\n\
+         1001,库存现金,借,100,0,0,借,100\n\
+         AAVX001360,结算待支付,贷,100,0,0,贷,100\n",
+    )
+    .unwrap();
+    let mut input = params(&dir, false);
+    input["tbMapping"]["openingDirection"] = json!("期初方向");
+    input["tbMapping"]["closingDirection"] = json!("期末方向");
+
+    let result = run(&input, &AtomicBool::new(false)).unwrap();
+    let equation = &result["equation"];
+    assert_eq!(equation["passed"], json!(true), "{result:#}");
+    assert_eq!(equation["coverageComplete"], json!(true), "{result:#}");
+    assert_eq!(
+        equation["classificationComplete"],
+        json!(false),
+        "{result:#}"
+    );
+    assert_eq!(equation["opening"]["total"], json!(0.0), "{result:#}");
+    assert_eq!(equation["closing"]["total"], json!(0.0), "{result:#}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 方向列个别非零行为空时只把该行标为无法判断() {
+    let dir = fixture("equation-partial-direction");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初方向,期初余额,本年借方,本年贷方,期末方向,期末余额\n\
+         1001,库存现金,借,100,0,0,借,100\n\
+         AAVX001360,结算待支付,,100,0,0,,100\n",
+    )
+    .unwrap();
+    let mut input = params(&dir, false);
+    input["tbMapping"]["openingDirection"] = json!("期初方向");
+    input["tbMapping"]["closingDirection"] = json!("期末方向");
+
+    let result = run(&input, &AtomicBool::new(false)).unwrap();
+    let equation = &result["equation"];
+    assert_eq!(equation["coverageComplete"], json!(false), "{result:#}");
+    assert_eq!(equation["ambiguousAccounts"], json!(1), "{result:#}");
+    assert_eq!(equation["opening"]["includedAccounts"], json!(1));
+    assert_eq!(equation["opening"]["ambiguousAccounts"], json!(1));
+    assert_eq!(equation["ambiguous"][0]["code"], json!("AAVX001360"));
+    assert_eq!(equation["ambiguous"][0]["openingBasis"], json!("ambiguous"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn 分段明细账由公共引擎补全后进入tbje核对() {
     let dir = fixture("sectioned-ledger");
     std::fs::write(
@@ -276,12 +397,7 @@ fn 一至三月真实分段明细账进入完整性核对() {
     // 定长平级规则生效后应纳入 366 条可归类 TB 明细。
     assert_eq!(result["equation"]["accounts"], json!(366), "{result:#}");
     assert!(
-        (result["equation"]["closing"]["total"]
-            .as_f64()
-            .unwrap()
-            - (-26_524_503.44))
-            .abs()
-            < 0.01,
+        (result["equation"]["closing"]["total"].as_f64().unwrap() - (-26_524_503.44)).abs() < 0.01,
         "{result:#}"
     );
     let je_debit = items
@@ -515,7 +631,15 @@ fn 合计行后的人手草稿不得拼出幻影科目() {
     let mut workbook = Workbook::new();
     let sheet = workbook.add_worksheet();
     sheet.set_name("Sheet1").unwrap();
-    let header = ["日期", "凭证号", "摘要", "科目编码", "科目全名", "借方金额", "贷方金额"];
+    let header = [
+        "日期",
+        "凭证号",
+        "摘要",
+        "科目编码",
+        "科目全名",
+        "借方金额",
+        "贷方金额",
+    ];
     for (column, text) in header.iter().enumerate() {
         sheet.write(0, column as u16, *text).unwrap();
     }
@@ -564,7 +688,10 @@ fn 合计行后的人手草稿不得拼出幻影科目() {
         "functionalCredit": "贷方金额",
     });
     let result = run(&input, &AtomicBool::new(false)).unwrap();
-    let items = result["tbVsJe"]["items"].as_array().cloned().unwrap_or_default();
+    let items = result["tbVsJe"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     assert!(
         items
             .iter()
@@ -954,7 +1081,7 @@ fn 父子科目混排时只算末级() {
 }
 
 #[test]
-fn 认不出会计要素的科目单独列出不并入任何一类() {
+fn 认不出会计要素的科目不猜类别但方向可靠时仍纳入总额() {
     let dir = fixture("unclassified");
     std::fs::write(
         dir.join("tb.csv"),
@@ -965,13 +1092,13 @@ fn 认不出会计要素的科目单独列出不并入任何一类() {
     )
     .unwrap();
     let result = run(&params(&dir, false), &AtomicBool::new(false)).unwrap();
-    // 前两个科目本身是平的，但有一个科目没算进去——不能报「通过」。
+    // 未分类只影响解释完整性，不再把方向可靠的金额排除在勾稽之外。
     assert_eq!(result["equation"]["passed"], json!(false), "{result:#}");
-    assert_eq!(result["equation"]["balancePassed"], json!(true));
+    assert_eq!(result["equation"]["balancePassed"], json!(false));
     assert_eq!(result["equation"]["classificationComplete"], json!(false));
     assert_eq!(
         result["equation"]["closing"]["total"].as_f64().unwrap(),
-        0.0
+        500.0
     );
     let unclassified = result["equation"]["unclassified"].as_array().unwrap();
     assert_eq!(unclassified.len(), 1);
@@ -1289,10 +1416,7 @@ fn 导出的工作簿固定三页并保留全量行与公式() {
     assert_eq!(tbje.get_cell((5, 6)).unwrap().get_value(), "TB纳入币种");
     assert_eq!(tbje.get_cell((12, 6)).unwrap().get_value(), "TB净额");
     assert_eq!(tbje.get_cell((15, 6)).unwrap().get_value(), "净额结论");
-    assert_eq!(
-        equation.get_cell((3, 6)).unwrap().get_value(),
-        "带符号归类金额"
-    );
+    assert_eq!(equation.get_cell((3, 6)).unwrap().get_value(), "带符号金额");
     assert_ne!(equation.get_cell((4, 6)).unwrap().get_value(), "平衡差异");
     assert!(!equation.get_cell((3, 7)).unwrap().get_formula().is_empty());
     if let Ok(output) = std::env::var("TBJE_EXPORT_TEST_OUTPUT") {

@@ -363,7 +363,7 @@ struct PivotConfig {
     rows: Vec<(String, usize)>,
     columns: Vec<usize>,
     values: Vec<(String, Option<usize>)>,
-    date: Option<usize>,
+    date: Vec<usize>,
 }
 
 struct AggregateRecord {
@@ -457,8 +457,9 @@ impl PivotConfig {
             values,
             date: mapping
                 .date
-                .as_deref()
-                .and_then(|s| header_index(headers, s)),
+                .iter()
+                .filter_map(|s| header_index(headers, s))
+                .collect(),
         })
     }
 }
@@ -535,10 +536,15 @@ fn aggregate(
                 .and_then(|i| row.get(i))
                 .map(|s| s.trim())
                 .unwrap_or("");
-            let month = config
-                .date
-                .and_then(|i| row.get(i))
-                .and_then(|s| parse_month(s))
+            let month = ledger_mapping::parse_mapped_date(headers, row, &config.date, None)
+                .map(|value| value.format("%Y-%m").to_string())
+                .or_else(|| {
+                    config
+                        .date
+                        .iter()
+                        .filter_map(|i| row.get(*i))
+                        .find_map(|s| parse_month(s))
+                })
                 .unwrap_or_default();
             let summary_value = summary
                 .and_then(|i| row.get(i))
@@ -687,7 +693,7 @@ fn aggregate(
                 .iter()
                 .map(|i| {
                     let raw = row.get(*i).map(String::as_str).unwrap_or("");
-                    if Some(*i) == config.date {
+                    if config.date.contains(i) {
                         parse_month(raw).unwrap_or_else(|| "Unknown".into())
                     } else {
                         raw.to_owned()

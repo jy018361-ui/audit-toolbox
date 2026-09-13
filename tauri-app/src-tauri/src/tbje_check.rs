@@ -1461,6 +1461,18 @@ fn equation_details(prepared: &PreparedCheck) -> Vec<EquationDetail> {
         columns(&prepared.tb_map, role)
     });
     let mut details = Vec::new();
+    let opening_basis = ledger_mapping::balance_sign_basis_by_row(
+        &prepared.tb.headers,
+        &prepared.tb.rows,
+        &|role| columns(&prepared.tb_map, role),
+        "openingFunctional",
+    );
+    let closing_basis = ledger_mapping::balance_sign_basis_by_row(
+        &prepared.tb.headers,
+        &prepared.tb.rows,
+        &|role| columns(&prepared.tb_map, role),
+        "closingFunctional",
+    );
     for (index, row) in prepared.tb.rows.iter().enumerate() {
         if !prepared.tb_rows.get(index).copied().unwrap_or(true) {
             continue;
@@ -1478,7 +1490,10 @@ fn equation_details(prepared: &PreparedCheck) -> Vec<EquationDetail> {
         let category = ledger_mapping::account_category(&code);
         let name = display_name(&prepared.tb, row, &prepared.tb_map);
         let source_row = prepared.tb.header_row + prepared.tb.header_depth + index + 1;
-        for (period, prefix) in [("年初", "openingFunctional"), ("年末", "closingFunctional")] {
+        for (period, prefix, basis) in [
+            ("年初", "openingFunctional", &opening_basis),
+            ("年末", "closingFunctional", &closing_basis),
+        ] {
             details.push(EquationDetail {
                 period,
                 source_row,
@@ -1489,7 +1504,10 @@ fn equation_details(prepared: &PreparedCheck) -> Vec<EquationDetail> {
                     .unwrap_or("未分类")
                     .to_owned(),
                 amount: fx::signed_amount(record, &prepared.tb_map, prefix).unwrap_or(0.0),
-                included: category.is_some(),
+                included: basis
+                    .get(index)
+                    .copied()
+                    .is_some_and(ledger_mapping::BalanceSignBasis::is_reliable),
             });
         }
     }
@@ -1499,10 +1517,19 @@ fn equation_details(prepared: &PreparedCheck) -> Vec<EquationDetail> {
 fn write_equation_sheet(workbook: &mut Workbook, prepared: &PreparedCheck) -> Result<(), AppError> {
     let sheet = workbook.add_worksheet();
     sheet.set_name("BS与PL勾稽").map_err(xlsx)?;
+    let categories = [
+        "资产",
+        "负债",
+        "共同",
+        "所有者权益",
+        "成本",
+        "损益",
+        "未分类",
+    ];
     let summary_headers = [
         "时点",
         "会计要素",
-        "带符号归类金额",
+        "带符号金额",
         "金额结论",
         "分类结论",
         "说明",
@@ -1522,10 +1549,10 @@ fn write_equation_sheet(workbook: &mut Workbook, prepared: &PreparedCheck) -> Re
     }
 
     let details = equation_details(prepared);
-    let detail_header_row = EXPORT_DATA_ROW + 15;
+    // 每个期间包含全部分类行和一行合计；额外留一行空白后再写明细表头。
+    let detail_header_row = EXPORT_DATA_ROW + ((categories.len() + 1) * 2) as u32 + 1;
     let detail_data_row = detail_header_row + 1;
     let detail_last_row = detail_data_row + details.len().saturating_sub(1) as u32;
-    let categories = ["资产", "负债", "共同", "所有者权益", "成本", "损益"];
     let mut summary_row = EXPORT_DATA_ROW;
     for period in ["年初", "年末"] {
         let period_first_row = summary_row;
@@ -1565,7 +1592,15 @@ fn write_equation_sheet(workbook: &mut Workbook, prepared: &PreparedCheck) -> Re
             .filter(|item| item.period == period && item.included)
             .map(|item| item.amount)
             .sum();
-        let unclassified = details.iter().any(|item| !item.included);
+        let unclassified = details
+            .iter()
+            .any(|item| item.period == period && item.category == "未分类");
+        let coverage_complete = details
+            .iter()
+            .filter(|item| item.period == period)
+            .all(|item| item.included);
+        let first_detail = detail_data_row + 1;
+        let last_detail = detail_last_row.max(detail_data_row) + 1;
         sheet
             .write_string_with_format(summary_row, 0, period, &header_format())
             .map_err(xlsx)?;
@@ -1588,9 +1623,11 @@ fn write_equation_sheet(workbook: &mut Workbook, prepared: &PreparedCheck) -> Re
                 summary_row,
                 3,
                 Formula::new(format!(
-                    "IF(ABS(C{excel_row})<=MAX($B$3,ABS(C{excel_row})*1E-8),\"通过\",\"差异\")"
+                    "IF(COUNTIFS($A${first_detail}:$A${last_detail},A{excel_row},$G${first_detail}:$G${last_detail},\"否\")>0,\"无法完整执行\",IF(ABS(C{excel_row})<=MAX($B$3,ABS(C{excel_row})*1E-8),\"通过\",\"差异\"))"
                 ))
-                .set_result(if beyond(total, total) {
+                .set_result(if !coverage_complete {
+                    "无法完整执行"
+                } else if beyond(total, total) {
                     "差异"
                 } else {
                     "通过"
@@ -1600,14 +1637,12 @@ fn write_equation_sheet(workbook: &mut Workbook, prepared: &PreparedCheck) -> Re
                     .set_background_color("#E7F2F1"),
             )
             .map_err(xlsx)?;
-        let first_detail = detail_data_row + 1;
-        let last_detail = detail_last_row.max(detail_data_row) + 1;
         sheet
             .write_formula_with_format(
                 summary_row,
                 4,
                 Formula::new(format!(
-                    "IF(COUNTIF($G${first_detail}:$G${last_detail},\"否\")=0,\"完整\",\"待确认\")"
+                    "IF(COUNTIFS($A${first_detail}:$A${last_detail},A{excel_row},$E${first_detail}:$E${last_detail},\"未分类\")=0,\"完整\",\"待确认\")"
                 ))
                 .set_result(if unclassified { "待确认" } else { "完整" }),
                 &formula_text_format()
@@ -1619,7 +1654,11 @@ fn write_equation_sheet(workbook: &mut Workbook, prepared: &PreparedCheck) -> Re
             .write_string_with_format(
                 summary_row,
                 5,
-                "金额平衡与分类完整性分开判断",
+                if coverage_complete {
+                    "全部方向可靠的末级科目均已纳入；金额平衡与分类完整性分开判断"
+                } else {
+                    "部分非零余额方向不可靠，只显示已覆盖小计，不下金额结论"
+                },
                 &formula_text_format()
                     .set_bold()
                     .set_background_color("#E7F2F1"),
@@ -1680,10 +1719,11 @@ fn write_equation_sheet(workbook: &mut Workbook, prepared: &PreparedCheck) -> Re
             .write_string_with_format(
                 row,
                 7,
-                if item.included {
-                    "按科目编码首位识别"
-                } else {
-                    "编码无法自动归入会计要素"
+                match (item.category.as_str(), item.included) {
+                    ("未分类", true) => "编码无法归类，但方向可靠，已纳入金额勾稽",
+                    ("未分类", false) => "编码无法归类，且余额方向无法可靠判断",
+                    (_, true) => "按科目编码首位识别，方向可靠",
+                    (_, false) => "已识别会计要素，但余额方向无法可靠判断",
                 },
                 &input_text_format(),
             )
@@ -1821,7 +1861,29 @@ fn check_equation(
     let mut closing = BTreeMap::<AccountCategory, f64>::new();
     let mut unclassified: Vec<Value> = Vec::new();
     let mut unclassified_amount = 0.0_f64;
+    let opening_basis = ledger_mapping::balance_sign_basis_by_row(
+        &tb.headers,
+        &tb.rows,
+        &|role| columns(map, role),
+        "openingFunctional",
+    );
+    let closing_basis = ledger_mapping::balance_sign_basis_by_row(
+        &tb.headers,
+        &tb.rows,
+        &|role| columns(map, role),
+        "closingFunctional",
+    );
+    let mut opening_total = 0.0_f64;
+    let mut closing_total = 0.0_f64;
+    let mut opening_included = 0usize;
+    let mut closing_included = 0usize;
+    let mut opening_ambiguous = 0usize;
+    let mut closing_ambiguous = 0usize;
+    let mut ambiguous: Vec<Value> = Vec::new();
+    let mut ambiguous_count = 0usize;
     let mut counted = 0usize;
+    let mut classified_count = 0usize;
+    let mut unclassified_count = 0usize;
     for (index, row) in tb.rows.iter().enumerate() {
         if !functional_rows.get(index).copied().unwrap_or(true) {
             continue;
@@ -1836,40 +1898,92 @@ fn check_equation(
         let Some(record) = records.get(index) else {
             continue;
         };
+        counted += 1;
         let open = fx::signed_amount(record, map, "openingFunctional").unwrap_or(0.0);
         let close = fx::signed_amount(record, map, "closingFunctional").unwrap_or(0.0);
-        match ledger_mapping::account_category(&code) {
-            Some(category) => {
-                counted += 1;
+        let open_basis = opening_basis
+            .get(index)
+            .copied()
+            .unwrap_or(ledger_mapping::BalanceSignBasis::Ambiguous);
+        let close_basis = closing_basis
+            .get(index)
+            .copied()
+            .unwrap_or(ledger_mapping::BalanceSignBasis::Ambiguous);
+        let open_reliable = !has_opening || open_basis.is_reliable();
+        let close_reliable = !has_closing || close_basis.is_reliable();
+        if has_opening {
+            if open_reliable {
+                opening_total += open;
+                opening_included += 1;
+            } else {
+                opening_ambiguous += 1;
+            }
+        }
+        if has_closing {
+            if close_reliable {
+                closing_total += close;
+                closing_included += 1;
+            } else {
+                closing_ambiguous += 1;
+            }
+        }
+        let category = ledger_mapping::account_category(&code);
+        if let Some(category) = category {
+            classified_count += 1;
+            if has_opening && open_reliable {
                 *opening.entry(category).or_default() += open;
+            }
+            if has_closing && close_reliable {
                 *closing.entry(category).or_default() += close;
             }
-            None => {
-                unclassified_amount += close.abs().max(open.abs());
-                if unclassified.len() < 50 {
-                    unclassified.push(json!({
-                        "sourceRow": tb.header_row + index + 2,
-                        "code": code,
-                        "name": display_name(tb, row, map),
-                        "opening": open,
-                        "closing": close,
-                    }));
-                }
+        } else {
+            unclassified_count += 1;
+            unclassified_amount += close.abs().max(open.abs());
+            if unclassified.len() < 50 {
+                unclassified.push(json!({
+                    "sourceRow": tb.header_row + index + 2,
+                    "code": code,
+                    "name": display_name(tb, row, map),
+                    "opening": open,
+                    "closing": close,
+                    "openingIncluded": has_opening && open_reliable,
+                    "closingIncluded": has_closing && close_reliable,
+                }));
+            }
+        }
+        if (has_opening && !open_reliable) || (has_closing && !close_reliable) {
+            ambiguous_count += 1;
+            if ambiguous.len() < 50 {
+                ambiguous.push(json!({
+                    "sourceRow": tb.header_row + index + 2,
+                    "code": code,
+                    "name": display_name(tb, row, map),
+                    "opening": open,
+                    "closing": close,
+                    "openingReliable": open_reliable,
+                    "closingReliable": close_reliable,
+                    "openingBasis": open_basis.as_str(),
+                    "closingBasis": close_basis.as_str(),
+                }));
             }
         }
     }
     if counted == 0 {
         return json!({
             "performed": false,
-            "reason": "没有一个科目的编码能判出会计要素类别（编码首位应为 1～6），本条跳过。",
+            "reason": "没有可参与勾稽的有效末级科目，本条跳过。",
             "unclassified": unclassified,
         });
     }
-    let summarize = |totals: &BTreeMap<AccountCategory, f64>, enabled: bool| {
+    let summarize = |totals: &BTreeMap<AccountCategory, f64>,
+                     total: f64,
+                     included: usize,
+                     ambiguous: usize,
+                     enabled: bool| {
         if !enabled {
             return Value::Null;
         }
-        let total: f64 = totals.values().sum();
+        let coverage_complete = ambiguous == 0;
         json!({
             "byCategory": totals
                 .iter()
@@ -1879,24 +1993,48 @@ fn check_equation(
                 }))
                 .collect::<Vec<_>>(),
             "total": total,
-            "balanced": !beyond(total, total),
+            "balanced": coverage_complete.then(|| !beyond(total, total)),
+            "coverageComplete": coverage_complete,
+            "includedAccounts": included,
+            "ambiguousAccounts": ambiguous,
         })
     };
-    let opening_value = summarize(&opening, has_opening);
-    let closing_value = summarize(&closing, has_closing);
-    let balanced = [&opening_value, &closing_value].iter().all(|value| {
-        value
-            .get("balanced")
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-    });
+    let opening_value = summarize(
+        &opening,
+        opening_total,
+        opening_included,
+        opening_ambiguous,
+        has_opening,
+    );
+    let closing_value = summarize(
+        &closing,
+        closing_total,
+        closing_included,
+        closing_ambiguous,
+        has_closing,
+    );
+    let coverage_complete = opening_ambiguous == 0 && closing_ambiguous == 0;
+    let balanced = coverage_complete
+        && [&opening_value, &closing_value].iter().all(|value| {
+            value
+                .get("balanced")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+        });
     json!({
         "performed": true,
-        "passed": balanced && unclassified.is_empty(),
-        // 金额是否平衡与科目是否完整归类是两个结论。前端分开呈现，避免
-        // “合计 0.00”旁边仍只写“有差异”，让人误以为金额判定自相矛盾。
-        "balancePassed": balanced,
-        "classificationComplete": unclassified.is_empty(),
+        // 覆盖不完整时不能把可靠行小计宣称为“通过”或“不平”。`null` 是有意的
+        // 第三种结论，前端应显示“无法完整执行”，而不是把它降级成 false。
+        "passed": coverage_complete.then_some(balanced),
+        "balancePassed": coverage_complete.then_some(balanced),
+        "coverageComplete": coverage_complete,
+        "conclusive": coverage_complete,
+        "reason": (!coverage_complete).then_some(
+            "部分非零余额既没有可靠的自带符号证据，也缺少逐行借贷方向，无法完整执行金额勾稽。"
+        ),
+        // 分类只负责解释，不再决定余额是否参加总额。方向可靠的未分类科目
+        // 已计入 opening/closing.total，同时继续单列供用户补充分类。
+        "classificationComplete": unclassified_count == 0,
         // 余额是「借正贷负已带符号」还是「借贷都记正数」，结论完全相反，
         // 把判定结果一并回给用户——算错时这是第一个要看的东西。
         "signConvention": match fx::sign_convention(map) {
@@ -1904,12 +2042,16 @@ fn check_equation(
             SignConvention::Unsigned => "unsigned",
         },
         "accounts": counted,
+        "classifiedAccounts": classified_count,
+        "unclassifiedAccounts": unclassified_count,
+        "includedAccounts": counted.saturating_sub(ambiguous_count),
+        "ambiguousAccounts": ambiguous_count,
         "opening": opening_value,
         "closing": closing_value,
-        // 认不出类别的科目单独列出来，不并进任何一类——宁可说「有科目没算进去」，
-        // 也不能猜一个类别把等式凑平。
+        // 认不出类别的科目不猜类别，但方向可靠时照常计入总额。
         "unclassified": unclassified,
         "unclassifiedAmount": unclassified_amount,
+        "ambiguous": ambiguous,
     })
 }
 

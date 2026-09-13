@@ -523,6 +523,14 @@ const AUX: &[&str] = &[
     "輔助核算",
     "辅助項",
     "辅助项",
+    "核算维度",
+    "核算維度",
+    "核算维度编码",
+    "核算維度編碼",
+    "核算维度代码",
+    "核算維度代碼",
+    "核算维度名称",
+    "核算維度名稱",
     "往来单位",
     "往來單位",
     "客户",
@@ -2832,6 +2840,122 @@ pub(crate) fn balance_self_signed(
     credit_rows > 0 && negative_rows * 2 > credit_rows
 }
 
+/// 余额净额是否有足够证据折成「借正贷负」。折算值和证据必须分开：
+/// `fx::ensure_sign_convention` 为兼容旧调用会在 TB 投票不足时缓存 `unsigned`，
+/// 那个默认值不能用来证明单列全正余额的借贷方向可靠。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BalanceSignBasis {
+    /// 借、贷余额分列，列本身已经表达方向。
+    DebitCreditColumns,
+    /// 净额列经整列证据确认自带借正贷负符号。
+    SignedAmount,
+    /// 净额列本身不带可靠符号，本行由有效方向值表达借贷。
+    DirectionColumn,
+    /// 非零净额既没有可靠列级符号，也没有本行方向。
+    Ambiguous,
+}
+
+impl BalanceSignBasis {
+    pub(crate) fn is_reliable(self) -> bool {
+        !matches!(self, Self::Ambiguous)
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::DebitCreditColumns => "debitCreditColumns",
+            Self::SignedAmount => "signedAmount",
+            Self::DirectionColumn => "directionColumn",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+}
+
+/// 返回一个余额时点每行的借贷方向证据。
+///
+/// 可靠性按「时点＋行」判定：借贷分列恒可靠；净额列若由贷方负数多数或正负
+/// 并存证明整列自带符号，所有行可靠；否则只接受本行明确的借／贷方向。零余额
+/// 无论方向如何都不影响合计，也视为可靠。单列全正且方向为空绝不默认成借方。
+pub(crate) fn balance_sign_basis_by_row(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+    prefix: &str,
+) -> Vec<BalanceSignBasis> {
+    let index_of = |role: &str| -> Option<usize> {
+        column_of(role)
+            .into_iter()
+            .find_map(|name| header_index(headers, &name))
+    };
+    if index_of(&format!("{prefix}Debit")).is_some()
+        && index_of(&format!("{prefix}Credit")).is_some()
+    {
+        return vec![BalanceSignBasis::DebitCreditColumns; rows.len()];
+    }
+    let Some(amount_index) = index_of(&format!("{prefix}Amount")) else {
+        return vec![BalanceSignBasis::Ambiguous; rows.len()];
+    };
+    let base = prefix
+        .strip_suffix("Functional")
+        .or_else(|| prefix.strip_suffix("Foreign"))
+        .unwrap_or(prefix);
+    let direction_index = index_of(&format!("{base}Direction"))
+        .or_else(|| index_of("direction"))
+        .or_else(|| index_of(&format!("{prefix}Direction")));
+
+    let (mut positive, mut negative) = (0usize, 0usize);
+    for row in rows {
+        let value = row
+            .get(amount_index)
+            .and_then(|raw| parse_amount(raw).ok().flatten())
+            .unwrap_or(0.0);
+        positive += usize::from(value > 0.0);
+        negative += usize::from(value < 0.0);
+    }
+    // 有方向列时，正负并存也可能只是“绝对值＋方向”中的少量异常余额，不能据此
+    // 推翻方向列（08 号真实样例正是这种形态）。只有没有任何方向列、只能依赖
+    // 金额自身时，正负并存才足以证明该净额列自带借正贷负符号。
+    let column_self_signed = balance_self_signed(headers, rows, column_of, prefix)
+        || (direction_index.is_none() && positive > 0 && negative > 0);
+    if column_self_signed {
+        return vec![BalanceSignBasis::SignedAmount; rows.len()];
+    }
+
+    rows.iter()
+        .map(|row| {
+            let amount = row
+                .get(amount_index)
+                .and_then(|raw| parse_amount(raw).ok().flatten())
+                .unwrap_or(0.0);
+            if amount.abs() <= f64::EPSILON {
+                return BalanceSignBasis::SignedAmount;
+            }
+            let direction = direction_index
+                .and_then(|index| row.get(index))
+                .map(|value| value.trim())
+                .unwrap_or("");
+            if direction_is_known(direction) {
+                BalanceSignBasis::DirectionColumn
+            } else {
+                BalanceSignBasis::Ambiguous
+            }
+        })
+        .collect()
+}
+
+fn direction_is_known(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if is_credit_direction(trimmed) {
+        return true;
+    }
+    let lower = trimmed.to_lowercase();
+    trimmed.contains('借')
+        || lower.contains("debit")
+        || matches!(lower.as_str(), "d" | "dr" | "s" | "j" | "+")
+}
+
 /// 负债类科目的余额惯例是贷方为正（借款本金、应付账款）。
 /// 业务层拿到有符号净额后用它翻个面，不必各自记住符号。
 pub(crate) fn credit_positive(signed: f64) -> f64 {
@@ -4421,6 +4545,68 @@ pub(crate) fn parse_date(raw: &str) -> Option<NaiveDate> {
         }
     }
     None
+}
+
+/// 从映射到 `date` 的一个或多个物理列还原记账日期。
+///
+/// 完整日期列始终优先；没有完整日期时，支持 ERP 双层表头常见的
+/// “年-月”＋“年-日”，以及独立年／月／日列。源表不重复写年份时由调用方
+/// 传入报告期年份。字段识别、LLM 建议和实际取数必须共用这一个入口，避免
+/// 页面允许多列映射、业务模块却仍只读第一列。
+pub(crate) fn parse_mapped_date(
+    headers: &[String],
+    row: &[String],
+    indexes: &[usize],
+    fallback_year: Option<i32>,
+) -> Option<NaiveDate> {
+    if indexes.is_empty() {
+        return None;
+    }
+    if indexes.len() == 1 {
+        return row.get(indexes[0]).and_then(|value| parse_date(value));
+    }
+
+    // 多列映射里若仍有真正的完整日期，不能让组成列覆盖它。
+    for index in indexes {
+        let value = row.get(*index)?.trim();
+        if parse_month(value).is_none() {
+            if let Some(date) = parse_date(value) {
+                return Some(date);
+            }
+        }
+    }
+
+    let mut year = fallback_year;
+    let mut month = None;
+    let mut day = None;
+    for index in indexes {
+        let header = normalize_header(headers.get(*index).map(String::as_str).unwrap_or(""));
+        let value = row.get(*index).map(String::as_str).unwrap_or("").trim();
+        if value.is_empty() {
+            continue;
+        }
+        let month_header = header.contains('月') || header.contains("month");
+        let day_header = header.contains('日') || header.contains("day");
+        let year_header = header.contains('年') || header.contains("year");
+        if month_header {
+            if let Some((source_year, source_month)) = parse_month(value) {
+                year = source_year.or(year);
+                month = Some(source_month);
+            }
+        } else if day_header {
+            day = value
+                .parse::<u32>()
+                .ok()
+                .filter(|value| (1..=31).contains(value));
+        } else if year_header {
+            year = value
+                .parse::<i32>()
+                .ok()
+                .filter(|value| (1900..=2100).contains(value))
+                .or(year);
+        }
+    }
+    NaiveDate::from_ymd_opt(year?, month?, day.unwrap_or(1))
 }
 
 /// 月度取值：供「序时账只有月份列」的兜底口径使用。
@@ -6508,6 +6694,14 @@ pub(crate) struct AccountMatchPolicy {
     ambiguous_codes: HashSet<(String, String)>,
 }
 
+/// 一张凭证是否含损益结转的权益承接科目。调用方应以“整张凭证”为范围
+/// 使用：只要任一分录命中，本凭证内的损益科目行都是结转行，不能拿来判断
+/// 本期真实收入/费用发生方向。
+pub(crate) fn is_profit_transfer_account(account: &str) -> bool {
+    let normalized = normalize_name(account);
+    normalized.contains("本年利润") || normalized.contains("未分配利润")
+}
+
 impl AccountMatchPolicy {
     /// 每行依次为（主体、科目编码、科目名称）。歧义要求同一编码在两侧**都**
     /// 对应多个名称，且两侧名称集合的交集达到六成（与口径预检的复合配对
@@ -8080,6 +8274,23 @@ mod tests {
     }
 
     #[test]
+    fn 核算维度编码与名称共同映射为辅助核算() {
+        let headers: Vec<String> = [
+            "科目编码",
+            "科目名称",
+            "核算维度编码",
+            "核算维度名称",
+            "期末余额-借方",
+        ]
+        .iter()
+        .map(|x| x.to_string())
+        .collect();
+        let got = suggest_roles("tb", &headers);
+        assert_eq!(got.get(&2), Some(&"auxiliary"), "{got:?}");
+        assert_eq!(got.get(&3), Some(&"auxiliary"), "{got:?}");
+    }
+
+    #[test]
     fn 借款明细只认特异写法不与辅助核算打架() {
         // `辅助`、`明细`、`客户` 这类泛词留给辅助核算，否则同一列谁抢到全看分数。
         let headers: Vec<String> = ["科目编码", "辅助核算", "借款合同号"]
@@ -9252,6 +9463,12 @@ mod tests {
             &columns,
             "closingFunctional"
         ));
+        let basis = balance_sign_basis_by_row(&headers, &绝对值, &columns, "closingFunctional");
+        assert!(
+            basis
+                .iter()
+                .all(|item| *item == BalanceSignBasis::DirectionColumn)
+        );
 
         // 折算结果：自带符号时取原样，否则按方向翻号。
         let 贷方 = |amount: f64| AmountInputs {
@@ -9588,13 +9805,17 @@ mod tests {
         let analysis = analyze_ledger_rows(&headers, &rows, &columns);
         assert_eq!(
             analysis.keep,
-            vec![true, false, false, false, false, false, false, false, false, true],
+            vec![
+                true, false, false, false, false, false, false, false, false, true
+            ],
             "正文协议先判：合并单元格续行与草稿此时都是噪声"
         );
         let mask = ledger_fill_mask(&headers, &rows, &columns);
         assert_eq!(
             mask,
-            vec![true, true, false, false, false, false, false, false, false, true],
+            vec![
+                true, true, false, false, false, false, false, false, false, true
+            ],
             "填充掩码只把带身份的正文续行救回，表尾草稿一律不放行"
         );
 
@@ -10133,6 +10354,23 @@ mod tests {
         assert!(parse_month("2025-01-31").is_none());
         assert!(parse_month("一级").is_none());
         assert!(parse_month("").is_none());
+    }
+
+    #[test]
+    fn 多列日期按公共规则结合报告期年份还原() {
+        let headers = vec!["年-月".into(), "年-日".into(), "凭证号".into()];
+        let row = vec!["01".into(), "10".into(), "记-0001".into()];
+        assert_eq!(
+            parse_mapped_date(&headers, &row, &[0, 1], Some(2025)),
+            NaiveDate::from_ymd_opt(2025, 1, 10),
+        );
+
+        let full_headers = vec!["月份".into(), "记账日期".into()];
+        let full_row = vec!["01".into(), "2024-12-31".into()];
+        assert_eq!(
+            parse_mapped_date(&full_headers, &full_row, &[0, 1], Some(2025)),
+            NaiveDate::from_ymd_opt(2024, 12, 31),
+        );
     }
 
     #[test]

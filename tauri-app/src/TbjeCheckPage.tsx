@@ -16,6 +16,7 @@ import {
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
 import { confirmDialog } from "@/components/ConfirmDialog";
 import { LedgerReviewCompact } from "@/components/LedgerReviewAll";
+import { llmReviewPresentation } from "@/components/llmReviewPresentation";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
@@ -108,16 +109,17 @@ export function tbjeReviewStatus(
   reviewed: boolean,
   reviewFailed: boolean,
   missingCount: number,
+  appliedCount = 0,
+  pendingCount = 0,
 ): { label: string; attention: boolean } {
   if (needsPairReview) return { label: "待确认", attention: true };
   if (!reviewed) return { label: "已识别", attention: false };
-  if (reviewFailed) return { label: "LLM 复核失败", attention: true };
-  if (missingCount > 0)
-    return {
-      label: `复核完成，仍缺 ${missingCount} 项`,
-      attention: true,
-    };
-  return { label: "复核完成，映射完整", attention: false };
+  return llmReviewPresentation({
+    failed: reviewFailed,
+    applied: appliedCount,
+    pending: pendingCount,
+    missing: missingCount,
+  });
 }
 
 type Verdict = { performed: boolean; passed?: boolean; reason?: string };
@@ -125,7 +127,10 @@ type Verdict = { performed: boolean; passed?: boolean; reason?: string };
 type SideTotals = {
   byCategory: { category: string; amount: number }[];
   total: number;
-  balanced: boolean;
+  balanced: boolean | null;
+  coverageComplete?: boolean;
+  includedAccounts?: number;
+  ambiguousAccounts?: number;
 };
 
 type CheckResult = {
@@ -177,8 +182,11 @@ type CheckResult = {
     }[];
   };
   equation: Verdict & {
-    balancePassed?: boolean;
+    balancePassed?: boolean | null;
     classificationComplete?: boolean;
+    coverageComplete?: boolean;
+    conclusive?: boolean;
+    reason?: string;
     accounts?: number;
     signConvention?: string;
     opening?: SideTotals | null;
@@ -189,6 +197,17 @@ type CheckResult = {
       name: string;
       opening: number;
       closing: number;
+      openingIncluded?: boolean;
+      closingIncluded?: boolean;
+    }[];
+    ambiguous?: {
+      sourceRow: number;
+      code: string;
+      name: string;
+      opening: number;
+      closing: number;
+      openingReliable: boolean;
+      closingReliable: boolean;
     }[];
   };
   mappingWarnings?: string[];
@@ -236,6 +255,12 @@ function VerdictBadge({ verdict }: { verdict?: Verdict }) {
 
 function EquationVerdict({ equation }: { equation?: CheckResult["equation"] }) {
   if (!equation?.performed) return <VerdictBadge verdict={equation} />;
+  if (equation.coverageComplete === false || equation.conclusive === false)
+    return (
+      <Badge variant="outline" className="badge-warning">
+        无法完整执行
+      </Badge>
+    );
   const balancePassed =
     equation.balancePassed ??
     [equation.opening, equation.closing]
@@ -277,8 +302,7 @@ function TbJeVerdict({ check }: { check?: CheckResult["tbVsJe"] }) {
 
 /** 预览截断的行数。几百条差异全塞进页面没法看——预览管定位，导出管全量。 */
 const PREVIEW_CAP = 100;
-// TBJE 只需用日期组成凭证键，不做按日计息；没有完整日期时允许月／日等
-// 多列共同组成日期键。其他工具是否允许复合日期由各自页面单独声明。
+// 日期组成列已经是公共账表能力；本页保留显式合并以兼容旧版常量。
 const MULTI_COLUMN_ROLES = new Set([
   ...LEDGER_MULTI_COLUMN_ROLES,
   "date",
@@ -298,6 +322,7 @@ function OutcomeDetail({ result }: { result: CheckResult }) {
   );
   const tbItems = result.tbVsJe.items ?? [];
   const unclassified = result.equation.unclassified ?? [];
+  const ambiguous = result.equation.ambiguous ?? [];
   const equationSides = (
     [
       ["年初", result.equation.opening],
@@ -465,7 +490,13 @@ function OutcomeDetail({ result }: { result: CheckResult }) {
       )}
       {equationSides.some(([, side]) => !side!.balanced) && (
         <div className="tbje-preview-block">
-          <h4>{CHECK_NAMES.equation}（已归类科目合计应为 0）</h4>
+          <h4>{CHECK_NAMES.equation}（全部方向可靠的末级科目合计应为 0）</h4>
+          {result.equation.coverageComplete === false && (
+            <p className="fx-hint">
+              {result.equation.reason ??
+                "部分余额缺少可靠借贷方向；下表仅为已覆盖小计，不据此判断通过或不平。"}
+            </p>
+          )}
           <div className="tbje-preview-scroll">
             <Table className="tbje-preview-table">
               <TableHeader>
@@ -507,8 +538,8 @@ function OutcomeDetail({ result }: { result: CheckResult }) {
             {CHECK_NAMES.equation}：{unclassified.length} 个科目无法自动分类
           </h4>
           <p className="fx-hint">
-            这些科目未按科目编码识别为资产、负债、权益、成本或损益，暂未纳入 BS
-            与 PL 勾稽；请核对科目编码或后续补充分类。
+            这些科目未按编码识别为资产、负债、权益、成本或损益。方向可靠的余额已纳入
+            BS 与 PL 金额勾稽，但不会猜测会计要素；请核对编码或后续补充分类。
           </p>
           <div className="tbje-preview-scroll">
             <Table className="tbje-preview-table">
@@ -540,6 +571,14 @@ function OutcomeDetail({ result }: { result: CheckResult }) {
               </TableBody>
             </Table>
           </div>
+        </div>
+      )}
+      {ambiguous.length > 0 && (
+        <div className="tbje-preview-block">
+          <h4>{CHECK_NAMES.equation}：{ambiguous.length} 个科目余额方向无法可靠判断</h4>
+          <p className="fx-hint">
+            这些非零余额既没有可靠的自带符号证据，也缺少逐行借贷方向，当前只展示已覆盖小计，不下金额结论。
+          </p>
         </div>
       )}
     </div>
@@ -630,11 +669,21 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     );
     const missingCount =
       missingOf("tb", group.tb).length + missingOf("je", group.je).length;
+    const appliedCount = Object.values(review ?? {}).reduce(
+      (total, item) => total + (item?.applied.length ?? 0),
+      0,
+    );
+    const pendingCount = Object.values(review ?? {}).reduce(
+      (total, item) => total + (item?.pending.length ?? 0),
+      0,
+    );
     return tbjeReviewStatus(
       group.needsReview,
       Boolean(review),
       failed,
       missingCount,
+      appliedCount,
+      pendingCount,
     );
   };
 
@@ -1920,23 +1969,29 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                         const failed = present.some(
                           (kind) => review[kind]?.failed,
                         );
-                        const changed = present.some(
-                          (kind) =>
-                            (review[kind]?.applied.length ?? 0) > 0 ||
-                            (review[kind]?.pending.length ?? 0) > 0,
+                        const appliedCount = present.reduce(
+                          (total, kind) =>
+                            total + (review[kind]?.applied.length ?? 0),
+                          0,
                         );
-                        if (!failed && !changed) return null;
+                        const pendingCount = present.reduce(
+                          (total, kind) =>
+                            total + (review[kind]?.pending.length ?? 0),
+                          0,
+                        );
+                        if (!failed && !appliedCount && !pendingCount) return null;
+                        const presentation = llmReviewPresentation({
+                          failed,
+                          applied: appliedCount,
+                          pending: pendingCount,
+                        });
                         return (
                           <div
                             className="tbje-group-llm-result"
                             aria-live="polite"
                           >
-                            <span className={failed ? "failed" : undefined}>
-                              {failed
-                                ? "LLM 联合复核失败，已保留 Coding 映射。"
-                                : changed
-                                  ? "LLM 联合复核完成"
-                                  : "LLM 联合复核完成，当前映射无需调整。"}
+                            <span className={failed ? "failed" : presentation.attention ? "attention" : undefined}>
+                              {presentation.label}
                             </span>
                             <LedgerReviewCompact
                               present={present}
@@ -2122,13 +2177,17 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                                 />
                                 {outcome.result?.equation.closing ? (
                                   <span className="tbje-detail">
-                                    已归类科目合计{" "}
+                                    {outcome.result.equation.coverageComplete === false
+                                      ? "已可靠覆盖科目小计 "
+                                      : "全部方向可靠科目合计 "}
                                     {money(
                                       outcome.result.equation.closing.total,
                                     )}
                                     {(outcome.result.equation.unclassified
                                       ?.length ?? 0) > 0 &&
-                                      ` · ${outcome.result!.equation.unclassified!.length} 个科目未纳入勾稽`}
+                                      ` · ${outcome.result!.equation.unclassified!.length} 个科目待补分类`}
+                                    {(outcome.result.equation.ambiguous?.length ?? 0) > 0 &&
+                                      ` · ${outcome.result.equation.ambiguous!.length} 个科目方向无法判断`}
                                   </span>
                                 ) : null}
                               </TableCell>

@@ -10,6 +10,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DepositInterestPage } from "./DepositInterestPage";
+import { publishTaskRestore } from "./restore";
 import type { JobEvent, ToolManifest } from "./types";
 
 const mock = vi.hoisted(() => ({
@@ -144,6 +145,63 @@ beforeEach(() => {
   });
 });
 afterEach(cleanup);
+
+it("历史任务恢复后重新识别完整预览，返回输入文件不白屏", async () => {
+  publishTaskRestore({
+    jobId: "history-deposit",
+    toolId: "deposit_interest",
+    method: "deposit.calculate",
+    params: {
+      tbSource: { inputPath: "fixture-tb.xlsx", sheet: "TB", headerRow: 1, headerDepth: 1 },
+      tbMapping: mapping,
+      accountRoles: { [bank]: "deposit" },
+      reportEnd: "2025-12-31",
+    },
+    missingPaths: [],
+    authorizedPathCount: 1,
+  });
+  render(<DepositInterestPage tool={tool} />);
+  await waitFor(() =>
+    expect(mock.engineCall).toHaveBeenCalledWith("deposit.inspect_tb", {
+      source: { inputPath: "fixture-tb.xlsx", sheet: "TB", headerRow: 1, headerDepth: 1 },
+    }),
+  );
+  expect(await screen.findByText("TB 文件预览与字段映射")).toBeVisible();
+  expect(screen.getByText("历史任务源文件已重新识别，请复核映射后继续。")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: /^2 科目与利率确认/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^1 上传与识别/ }));
+  expect(screen.getByText("TB 文件预览与字段映射")).toBeVisible();
+});
+
+it("连续恢复两条历史任务时忽略先前较慢的识别结果", async () => {
+  let finishFirst: ((value: typeof inspection) => void) | undefined;
+  mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
+    if (method === "deposit.rate_tiers") return { categories: [], tiers: [], links: [], linkGroups: [] };
+    if (method === "deposit.inspect_tb") {
+      const path = (params as { source: { inputPath: string } }).source.inputPath;
+      if (path === "old.xlsx")
+        return new Promise<typeof inspection>((resolve) => { finishFirst = resolve; });
+      return { ...inspection, sheet: "NEW", sheets: ["NEW"] };
+    }
+    throw new Error(`unexpected ${method}`);
+  });
+  const restore = (path: string) => ({
+    jobId: path,
+    toolId: "deposit_interest",
+    method: "deposit.calculate",
+    params: { tbSource: { inputPath: path, sheet: "TB", headerRow: 1, headerDepth: 1 }, tbMapping: mapping },
+    missingPaths: [],
+    authorizedPathCount: 1,
+  });
+  publishTaskRestore(restore("old.xlsx"));
+  render(<DepositInterestPage tool={tool} />);
+  await waitFor(() => expect(finishFirst).toBeDefined());
+  act(() => publishTaskRestore(restore("new.xlsx")));
+  expect(await screen.findByRole("button", { name: "new.xlsx" })).toBeVisible();
+  await act(async () => { finishFirst?.(inspection); });
+  expect(screen.getByRole("button", { name: "new.xlsx" })).toBeVisible();
+  expect(screen.queryByText("old.xlsx")).not.toBeInTheDocument();
+});
 
 /** 三步导引：科目与利率在第二步、测算按钮在第三步。步骤按钮的可访问名带序号
  *  （「2 科目与利率确认」），走完再回看时序号变成「✓」——两种都要认；

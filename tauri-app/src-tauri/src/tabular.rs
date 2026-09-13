@@ -5,7 +5,7 @@ use polars::prelude::*;
 use rust_xlsxwriter::{
     ConditionalFormatFormula, Format, FormatAlign, FormatBorder, Workbook, Worksheet,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -32,6 +32,23 @@ mod disk_suite;
 mod large_csv;
 
 pub(crate) type Progress<'a> = &'a dyn Fn(&str, usize, usize, &str);
+
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrVec {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Option::<StringOrVec>::deserialize(deserializer)? {
+        Some(StringOrVec::One(value)) => vec![value],
+        Some(StringOrVec::Many(values)) => values,
+        None => Vec::new(),
+    })
+}
 
 #[derive(Debug, Clone)]
 struct Table {
@@ -102,7 +119,9 @@ pub(crate) struct LedgerMapping {
     #[serde(default, rename = "account", skip_serializing_if = "Vec::is_empty")]
     pub(crate) legacy_account: Vec<String>,
     pub(crate) entity: Option<String>,
-    pub(crate) date: Option<String>,
+    /// 日期与凭证号一样可以是组合键；兼容历史草稿的单字符串。
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    pub(crate) date: Vec<String>,
     pub(crate) summary: Option<String>,
     /// 线上名统一到内核的标准角色名，Rust 字段名保持简写不动——
     /// 28 处引用不用跟着改，`alias` 让历史保存的旧参数仍能读。
@@ -1567,9 +1586,11 @@ fn filter_ledger_rows(
         .filter_map(|name| header_index(&table.headers, name))
         .collect::<Vec<_>>();
     let mut id_indexes = Vec::new();
-    for optional in [mapping.entity.as_deref(), mapping.date.as_deref()]
+    for optional in mapping
+        .entity
+        .as_deref()
         .into_iter()
-        .flatten()
+        .chain(mapping.date.iter().map(String::as_str))
     {
         if let Some(index) = header_index(&table.headers, optional) {
             id_indexes.push(index);
@@ -2005,9 +2026,11 @@ fn analyze_ledger(
 
 fn ledger_id_indexes(headers: &[String], mapping: &LedgerMapping) -> Vec<usize> {
     let mut indexes = Vec::new();
-    for optional in [mapping.entity.as_deref(), mapping.date.as_deref()]
+    for optional in mapping
+        .entity
+        .as_deref()
         .into_iter()
-        .flatten()
+        .chain(mapping.date.iter().map(String::as_str))
     {
         if let Some(index) = header_index(headers, optional) {
             indexes.push(index);
@@ -2035,7 +2058,7 @@ pub(crate) fn detect_loss_transfer_ids(
         .filter(|row| {
             account_indexes.iter().any(|index| {
                 let value = row.get(*index).map(String::as_str).unwrap_or("");
-                value.contains("本年利润") || value.contains("未分配利润")
+                ledger_mapping::is_profit_transfer_account(value)
             })
         })
         .map(|row| voucher_key(row, id_indexes))
@@ -2283,10 +2306,11 @@ fn voucher_infos(
         .summary
         .as_deref()
         .and_then(|name| header_index(headers, name));
-    let date_index = mapping
+    let date_indexes = mapping
         .date
-        .as_deref()
-        .and_then(|name| header_index(headers, name));
+        .iter()
+        .filter_map(|name| header_index(headers, name))
+        .collect::<Vec<_>>();
     for (row, amount) in rows.iter().zip(amounts.iter()) {
         let id = voucher_key(row, id_indexes);
         if loss_ids.contains(&id) {
@@ -2306,9 +2330,14 @@ fn voucher_infos(
                 bucket.push(value.to_owned());
             }
         }
-        if let Some(month) = date_index
-            .and_then(|index| row.get(index))
-            .and_then(|value| parse_month(value))
+        if let Some(month) = ledger_mapping::parse_mapped_date(headers, row, &date_indexes, None)
+            .map(|value| value.format("%Y-%m").to_string())
+            .or_else(|| {
+                date_indexes
+                    .iter()
+                    .filter_map(|index| row.get(*index))
+                    .find_map(|value| parse_month(value))
+            })
         {
             *month_nets
                 .entry(id.clone())
@@ -2552,10 +2581,11 @@ fn build_custom_ledger_pivot(
         .iter()
         .filter_map(|name| header_index(&table.headers, name).map(|index| (name.clone(), index)))
         .collect::<Vec<_>>();
-    let date_index = mapping
+    let date_indexes = mapping
         .date
-        .as_deref()
-        .and_then(|name| header_index(&table.headers, name));
+        .iter()
+        .filter_map(|name| header_index(&table.headers, name))
+        .collect::<HashSet<_>>();
     let id_indexes = ledger_id_indexes(&table.headers, mapping);
     let mut columns = BTreeSet::new();
     let mut values = BTreeMap::<Vec<String>, BTreeMap<String, f64>>::new();
@@ -2574,7 +2604,7 @@ fn build_custom_ledger_pivot(
                 .iter()
                 .map(|(_, position)| {
                     let raw = row.get(*position).map(String::as_str).unwrap_or("");
-                    if Some(*position) == date_index {
+                    if date_indexes.contains(position) {
                         parse_month(raw).unwrap_or_else(|| "Unknown".into())
                     } else {
                         raw.to_owned()
@@ -3167,7 +3197,6 @@ fn mapped_roles(mapping: &LedgerMapping) -> std::collections::HashSet<&'static s
     }
     for (value, role) in [
         (mapping.entity.as_deref(), "entity"),
-        (mapping.date.as_deref(), "date"),
         (mapping.summary.as_deref(), "summary"),
         (mapping.amount.as_deref(), "functionalAmount"),
         (mapping.direction.as_deref(), "direction"),
@@ -3177,6 +3206,9 @@ fn mapped_roles(mapping: &LedgerMapping) -> std::collections::HashSet<&'static s
         if value.is_some_and(|v| !v.trim().is_empty()) {
             out.insert(role);
         }
+    }
+    if mapping.date.iter().any(|v| !v.trim().is_empty()) {
+        out.insert("date");
     }
     out
 }
@@ -3867,7 +3899,7 @@ fn prepared_mapping(mapping: &Map<String, Value>) -> LedgerMapping {
         account_name: role_columns(mapping, "accountName"),
         legacy_account: role_columns(mapping, "account"),
         entity: role_columns(mapping, "entity").into_iter().next(),
-        date: role_columns(mapping, "date").into_iter().next(),
+        date: role_columns(mapping, "date"),
         summary: role_columns(mapping, "summary").into_iter().next(),
         amount: role_columns(mapping, "functionalAmount").into_iter().next(),
         direction: role_columns(mapping, "direction").into_iter().next(),
@@ -5160,7 +5192,7 @@ fn suggest_mapping(headers: &[String], rows: &[Vec<String>]) -> LedgerMapping {
         account_code: one("accountCode"),
         account_name: columns("accountName"),
         entity: one("entity"),
-        date: one("date"),
+        date: columns("date"),
         summary: one("summary"),
         amount: one("functionalAmount"),
         direction: one("direction"),
@@ -5282,7 +5314,7 @@ pub(crate) fn sign_evidence(
     ledger_mapping::detect_sign_convention(headers, rows, &|role| match role {
         "id" => mapping.id.clone(),
         "entity" => mapping.entity.clone().into_iter().collect(),
-        "date" => mapping.date.clone().into_iter().collect(),
+        "date" => mapping.date.clone(),
         "functionalDebit" => mapping.debit.clone().into_iter().collect(),
         "functionalCredit" => mapping.credit.clone().into_iter().collect(),
         "functionalAmount" => mapping.amount.clone().into_iter().collect(),
@@ -5485,10 +5517,10 @@ fn mapping_columns(m: &LedgerMapping) -> Vec<&str> {
     m.id.iter()
         .map(String::as_str)
         .chain(m.account_columns())
+        .chain(m.date.iter().map(String::as_str))
         .chain(
             [
                 m.entity.as_deref(),
-                m.date.as_deref(),
                 m.summary.as_deref(),
                 m.amount.as_deref(),
                 m.direction.as_deref(),
@@ -5521,7 +5553,7 @@ fn ledger_role_columns(mapping: &LedgerMapping, role: &str) -> Vec<String> {
         // 旧版把编码与名称依次放进 account 数组，引擎自会取首列当编码、其余当名称。
         "account" => mapping.legacy_account.clone(),
         "entity" => mapping.entity.iter().cloned().collect(),
-        "date" => mapping.date.iter().cloned().collect(),
+        "date" => mapping.date.clone(),
         "summary" => mapping.summary.iter().cloned().collect(),
         "direction" => mapping.direction.iter().cloned().collect(),
         "functionalAmount" => mapping.amount.iter().cloned().collect(),
@@ -6681,6 +6713,34 @@ mod tests {
         assert!(events.iter().all(|event| event.1 < 1000));
     }
 
+    #[test]
+    fn 看账与凭证标记共用多列日期并兼容旧草稿() {
+        let legacy: LedgerMapping = serde_json::from_value(json!({
+            "id": ["凭证号"],
+            "accountName": ["科目"],
+            "date": "记账日期"
+        }))
+        .unwrap();
+        assert_eq!(legacy.date, vec!["记账日期"]);
+        let empty: LedgerMapping = serde_json::from_value(json!({"date": null})).unwrap();
+        assert!(empty.date.is_empty());
+
+        let composite: LedgerMapping = serde_json::from_value(json!({
+            "id": ["凭证号"],
+            "accountName": ["科目"],
+            "date": ["年-月", "年-日"]
+        }))
+        .unwrap();
+        assert_eq!(composite.date, vec!["年-月", "年-日"]);
+        assert_eq!(
+            ledger_id_indexes(
+                &["年-月".into(), "年-日".into(), "凭证号".into()],
+                &composite,
+            ),
+            vec![0, 1, 2],
+        );
+    }
+
     fn temp_dir(name: &str) -> PathBuf {
         let path =
             std::env::temp_dir().join(format!("audit-toolbox-{name}-{}", uuid::Uuid::new_v4()));
@@ -7244,7 +7304,7 @@ mod tests {
             account_code: Some("总账科目".into()),
             account_name: vec!["科目名称".into()],
             entity: Some("公司".into()),
-            date: Some("日期".into()),
+            date: vec!["日期".into()],
             summary: Some("摘要".into()),
             debit: Some("借方/本币".into()),
             credit: Some("贷方/本币".into()),
@@ -7521,7 +7581,7 @@ mod tests {
             account_code: Some("总账科目".into()),
             account_name: vec!["总账科目长文本".into()],
             entity: Some("公司".into()),
-            date: Some("过账日期".into()),
+            date: vec!["过账日期".into()],
             summary: Some("摘要".into()),
             direction: Some("方向".into()),
             debit: Some("借方/本币".into()),
@@ -7572,11 +7632,11 @@ mod tests {
             mapping.entity.as_deref(),
             mapping.account_code.as_deref(),
             mapping.account_name.first().map(String::as_str),
-            mapping.date.as_deref(),
             mapping.id.first().map(String::as_str),
         ]
         .into_iter()
         .flatten()
+        .chain(mapping.date.iter().map(String::as_str))
         .filter_map(|name| header_index(&prepared.headers, name))
         .collect::<Vec<_>>();
         assert!(filtered.iter().all(|row| key_indexes.iter().all(|index| {
@@ -8544,7 +8604,7 @@ mod tests {
             id: vec!["凭证号".into()],
             account_name: vec!["科目名称".into()],
             entity: Some("公司".into()),
-            date: Some("记账日期".into()),
+            date: vec!["记账日期".into()],
             summary: Some("ZY".into()),
             debit: Some("借方".into()),
             credit: Some("贷方".into()),

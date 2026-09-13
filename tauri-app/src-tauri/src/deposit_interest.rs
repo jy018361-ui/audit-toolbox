@@ -1198,6 +1198,7 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     let mapping = mapping;
     let accounts = distinct_accounts(&table, &mapping);
     let entities = distinct_values(&table, &mapping, "entity");
+    let entity_accounts = distinct_entity_accounts(&table, &mapping);
     let years = data_years(&table, kind, &mapping);
     let close = table
         .header_candidates
@@ -1220,6 +1221,7 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         // 不再自持会过期的对照表（标签与引擎 MissingRole.label 同源）。
         "roles": engine_role_labels(kind),
         "entities": entities, "accounts": accounts,
+        "entityAccounts": entity_accounts,
         "suggestedAccountRoles": accounts.iter().map(|account|
             (account.clone(), Value::String(suggest_account_role(account).into()))
         ).collect::<Map<_, _>>(),
@@ -1293,6 +1295,42 @@ fn distinct_accounts(table: &FxTable, mapping: &Map<String, Value>) -> Vec<Strin
         .collect()
 }
 
+/// 主体×科目的真实组合：供科目复核按账里实际存在的搭配铺清单，
+/// 不再由前端做“主体×科目”笛卡尔积（会造出数据里不存在的幻影组合）。
+/// 主体单元格留空时归“默认主体”，与匹配引擎的空主体口径一致。
+fn distinct_entity_accounts(
+    table: &FxTable,
+    mapping: &Map<String, Value>,
+) -> Vec<Map<String, Value>> {
+    let indexes = account_columns(table, mapping);
+    if indexes.is_empty() {
+        return vec![];
+    }
+    let entity_index = column_index(table, mapping, "entity");
+    let mut seen = BTreeSet::<(String, String)>::new();
+    for row in &table.rows {
+        let account = join_columns(row, &indexes);
+        if account.is_empty() || ledger_mapping::is_report_footer_value(&account) {
+            continue;
+        }
+        let entity = entity_index
+            .and_then(|index| row.get(index))
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| ledger_mapping::DEFAULT_ENTITY.to_owned());
+        seen.insert((entity, account));
+    }
+    seen.into_iter()
+        .take(2000)
+        .map(|(entity, account)| {
+            let mut pair = Map::new();
+            pair.insert("entity".to_owned(), Value::String(entity));
+            pair.insert("account".to_owned(), Value::String(account));
+            pair
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // 业务计算
 // ---------------------------------------------------------------------------
@@ -1347,6 +1385,22 @@ pub(crate) struct AccountRow {
     pub(crate) months: Vec<MonthCell>,
     pub(crate) status: String,
     pub(crate) note: String,
+}
+
+#[derive(Clone)]
+struct TbCandidate {
+    entity: String,
+    account: String,
+    auxiliary: String,
+    currency: String,
+    role: String,
+    opening: Option<f64>,
+    closing: f64,
+    debit_raw: f64,
+    credit_raw: f64,
+    net: f64,
+    note: String,
+    occurrence_direction_confirmed: bool,
 }
 
 /// 月度利息 = 月均余额 × 年利率 × 计息天数 ÷ 年基数。
@@ -1482,20 +1536,6 @@ fn calculate(
     // 同一科目的维度拆行是否合并成一户，等公共匹配口径（主体＋科目键）确定
     // 后在第二遍决定——SAP 余额表同一科目按维度拆多行，逐行当独立户会拿
     // 「半个科目」去和序时账勾稽，必然出成对的假差异。
-    #[derive(Clone)]
-    struct TbCandidate {
-        entity: String,
-        account: String,
-        auxiliary: String,
-        currency: String,
-        role: String,
-        opening: Option<f64>,
-        closing: f64,
-        debit_raw: f64,
-        credit_raw: f64,
-        net: f64,
-        note: String,
-    }
     let mut deposit_candidates: Vec<TbCandidate> = vec![];
     let mut interest_candidates: Vec<TbCandidate> = vec![];
     for (row_index, row) in tb.rows.iter().enumerate() {
@@ -1530,10 +1570,18 @@ fn calculate(
             )
             .or_else(|| cell_number(&tb, row, &tb_map, "closingFunctionalAmount"))
             .unwrap_or(0.0);
-            let (net, note, debit_raw, credit_raw) =
+            let (net, note, debit_raw, credit_raw, occurrence_direction_confirmed) =
                 match booked_occurrence(&tb, row, &tb_map, tb_convention, direction) {
-                    Some((net, note, debit, credit)) => (net, note, debit, credit),
-                    None => (-closing_balance, "期末余额净额".into(), 0.0, 0.0),
+                    Some((net, note, debit, credit, confirmed)) => {
+                        (net, note, debit, credit, confirmed)
+                    }
+                    None => (
+                        -closing_balance,
+                        "仅据期末余额推定，不能确认本期发生方向".into(),
+                        0.0,
+                        0.0,
+                        false,
+                    ),
                 };
             interest_candidates.push(TbCandidate {
                 entity,
@@ -1547,6 +1595,7 @@ fn calculate(
                 credit_raw,
                 net,
                 note,
+                occurrence_direction_confirmed,
             });
             continue;
         }
@@ -1588,6 +1637,7 @@ fn calculate(
             credit_raw: 0.0,
             net: 0.0,
             note: String::new(),
+            occurrence_direction_confirmed: false,
         });
     }
     if deposit_candidates.is_empty() {
@@ -1604,6 +1654,7 @@ fn calculate(
     let policy = {
         let tb_identities: Vec<(String, String, String)> = deposit_candidates
             .iter()
+            .chain(interest_candidates.iter())
             .map(|candidate| {
                 (
                     candidate.entity.clone(),
@@ -1618,7 +1669,6 @@ fn calculate(
         };
         ledger_mapping::AccountMatchPolicy::from_sides(&tb_identities, &je_identities)
     };
-
     // 第二遍：按（主体＋公共科目键）聚合维度拆行。辅助核算不进键——
     // 银行户以科目为户，维度差异（银行/款项性质等）并入行注披露。
     struct AccountFold {
@@ -1731,6 +1781,7 @@ fn calculate(
     // 合并后的借贷与净额才是该科目的完整口径（合计不变，行数去重）。
     let mut booked_interest_rows: Vec<Value> = vec![];
     let mut booked_interest = 0.0_f64;
+    let mut booked_direction_unconfirmed_count = 0usize;
     {
         struct BookedFold {
             first: TbCandidate,
@@ -1739,11 +1790,11 @@ fn calculate(
             credit: f64,
             closing: f64,
             net: f64,
+            occurrence_direction_confirmed: bool,
         }
         let mut booked_order: Vec<(String, String)> = vec![];
         let mut booked_folds: BTreeMap<(String, String), BookedFold> = BTreeMap::new();
         for candidate in interest_candidates {
-            booked_interest += candidate.net;
             let key = (
                 candidate.entity.clone(),
                 matched_account_key(&candidate.entity, &candidate.account, &policy),
@@ -1754,6 +1805,7 @@ fn calculate(
                 let credit = candidate.credit_raw;
                 let closing = candidate.closing;
                 let net = candidate.net;
+                let occurrence_direction_confirmed = candidate.occurrence_direction_confirmed;
                 booked_folds.insert(
                     key,
                     BookedFold {
@@ -1763,6 +1815,7 @@ fn calculate(
                         credit,
                         closing,
                         net,
+                        occurrence_direction_confirmed,
                     },
                 );
                 continue;
@@ -1772,9 +1825,14 @@ fn calculate(
             fold.credit += candidate.credit_raw;
             fold.closing += candidate.closing;
             fold.net += candidate.net;
+            fold.occurrence_direction_confirmed &= candidate.occurrence_direction_confirmed;
         }
         for key in booked_order {
             let fold = booked_folds.remove(&key).expect("利息科目按序落键");
+            if !fold.occurrence_direction_confirmed {
+                booked_direction_unconfirmed_count += 1;
+            }
+            booked_interest += fold.net;
             booked_interest_rows.push(json!({
                 "entity": key.0,
                 "account": fold.first.account,
@@ -1782,6 +1840,7 @@ fn calculate(
                 "credit": fold.credit,
                 "closing": fold.closing,
                 "bookedAmount": fold.net,
+                "occurrenceDirectionConfirmed": fold.occurrence_direction_confirmed,
                 "note": if fold.rows > 1 {
                     format!("{}（{} 行合并）", fold.first.note, fold.rows)
                 } else {
@@ -1793,8 +1852,7 @@ fn calculate(
     // JE 没有币种字段时，同一科目在 TB 按多个币种拆行（已按科目合并为一户），
     // JE 发生额只能得到科目合计，无法可靠分配到每一个币种。按用户要求保留
     // 当前计算，只披露输入资料局限，不把它冒充成分币种勾稽证据。
-    let je_currency_allocation_warning =
-        currency_allocation_warning(params, &multi_currency_keys);
+    let je_currency_allocation_warning = currency_allocation_warning(params, &multi_currency_keys);
     checkpoint(cancel, pause)?;
 
     // 只测算期间覆盖到的月份。SAP 的 TB 常常只出到某个期间（例如 10 月），
@@ -2011,11 +2069,17 @@ fn calculate(
     let booked = booked_interest;
     let difference = calculated - booked;
     let ratio = (booked.abs() > 0.005).then(|| difference / booked.abs());
-    let booked_note = if booked < -0.005 {
-        "账面利息收入合计为负（净利息支出），请复核科目分类里的利息收入科目。"
-    } else {
-        ""
-    };
+    let mut booked_notes = Vec::new();
+    if booked_direction_unconfirmed_count > 0 {
+        booked_notes.push(format!(
+            "{booked_direction_unconfirmed_count} 个利息科目只有期末余额，或科目登记方向无法识别；当前金额只能估计，确认前不判勾稽通过。"
+        ));
+    }
+    if booked < -0.005 {
+        booked_notes
+            .push("账面利息收入合计为负（净利息支出），请复核科目分类里的利息收入科目。".into());
+    }
+    let booked_note = booked_notes.join(" ");
     let review = accounts.iter().filter(|a| a.status != "已勾稽").count();
     // 序时账覆盖体检：TB 里有余额的主体，整家不在序时账里（典型：TB 是两家
     // 公司、序时账只导了一家）必须在汇总里点名，而不是让用户对着每行
@@ -2060,10 +2124,13 @@ fn calculate(
             "bookedInterestIncome": booked,
             "bookedInterestRaw": booked_interest,
             "bookedNote": booked_note,
+            "bookedDirectionConfirmed": booked_direction_unconfirmed_count == 0,
+            "bookedDirectionUnconfirmedCount": booked_direction_unconfirmed_count,
             "difference": difference,
             "differenceRatio": ratio,
             // 还有账户没填利率时，测算合计本身就不完整，谈不上勾稽通过。
             "reconciliationPassed": missing_rate_count == 0
+                && booked_direction_unconfirmed_count == 0
                 && ratio.map(|r| r.abs() <= 0.05).unwrap_or(false),
             "reviewCount": review,
             "missingRateCount": missing_rate_count,
@@ -2326,9 +2393,7 @@ fn je_account_identities(
             let indexes = |role: &str| -> Vec<usize> {
                 let columns = match mapping.get(role) {
                     Some(Value::String(value)) => vec![value.as_str()],
-                    Some(Value::Array(values)) => {
-                        values.iter().filter_map(Value::as_str).collect()
-                    }
+                    Some(Value::Array(values)) => values.iter().filter_map(Value::as_str).collect(),
                     _ => Vec::new(),
                 };
                 columns
@@ -2434,13 +2499,14 @@ fn monthly_movements(
             }
             // 序时账只在提供时校验（与前端一致）；年初余额的放松只对 TB 一侧有意义。
             require_mappings("je", mapping, false)?;
-            let date_index = column_index(table, mapping, "date").ok_or_else(|| {
-                error(
+            let date_indexes = column_indexes(table, mapping, "date");
+            if date_indexes.is_empty() {
+                return Err(error(
                     "MAPPING_INCOMPLETE",
                     "序时账尚未映射记账日期，无法还原逐月余额。",
                     None,
-                )
-            })?;
+                ));
+            }
             let account_cols = account_columns(table, mapping);
             if account_cols.is_empty() {
                 return Err(error(
@@ -2464,7 +2530,12 @@ fn monthly_movements(
                 if !keep.get(row_index).copied().unwrap_or(true) {
                     continue;
                 }
-                let Some(date) = row.get(date_index).and_then(|value| parse_date(value)) else {
+                let Some(date) = ledger_mapping::parse_mapped_date(
+                    &table.headers,
+                    row,
+                    &date_indexes,
+                    Some(end.year()),
+                ) else {
                     continue;
                 };
                 if date < start || date > end {
@@ -2496,7 +2567,9 @@ fn monthly_movements(
                 }
                 let (debit, credit) = if net < 0.0 { (0.0, -net) } else { (net, 0.0) };
                 matched += 1;
-                *matched_rows.entry(accounts[target].key.clone()).or_insert(0) += 1;
+                *matched_rows
+                    .entry(accounts[target].key.clone())
+                    .or_insert(0) += 1;
                 let slot = &mut series.get_mut(&accounts[target].key).unwrap()
                     [(date.month() - 1) as usize];
                 slot.0 += debit;
@@ -2509,9 +2582,7 @@ fn monthly_movements(
             let indexes = |role: &str| -> Vec<usize> {
                 let columns = match mapping.get(role) {
                     Some(Value::String(value)) => vec![value.as_str()],
-                    Some(Value::Array(values)) => {
-                        values.iter().filter_map(Value::as_str).collect()
-                    }
+                    Some(Value::Array(values)) => values.iter().filter_map(Value::as_str).collect(),
                     _ => Vec::new(),
                 };
                 columns
@@ -2519,13 +2590,14 @@ fn monthly_movements(
                     .filter_map(|column| headers.iter().position(|header| header == column))
                     .collect()
             };
-            let date_index = indexes("date").first().copied().ok_or_else(|| {
-                error(
+            let date_indexes = indexes("date");
+            if date_indexes.is_empty() {
+                return Err(error(
                     "MAPPING_INCOMPLETE",
                     "序时账尚未映射记账日期，无法还原逐月余额。",
                     None,
-                )
-            })?;
+                ));
+            }
             let mut account_cols = indexes("accountCode");
             for index in indexes("accountName") {
                 if !account_cols.contains(&index) {
@@ -2562,11 +2634,12 @@ fn monthly_movements(
                         ),
                     );
                 }
-                let Some(date) = row
-                    .values
-                    .get(date_index)
-                    .and_then(|value| parse_date(value))
-                else {
+                let Some(date) = ledger_mapping::parse_mapped_date(
+                    headers,
+                    &row.values,
+                    &date_indexes,
+                    Some(end.year()),
+                ) else {
                     return Ok(());
                 };
                 if date < start || date > end {
@@ -2604,7 +2677,9 @@ fn monthly_movements(
                     (row.net, 0.0)
                 };
                 matched += 1;
-                *matched_rows.entry(accounts[target].key.clone()).or_insert(0) += 1;
+                *matched_rows
+                    .entry(accounts[target].key.clone())
+                    .or_insert(0) += 1;
                 let slot = &mut series.get_mut(&accounts[target].key).unwrap()
                     [(date.month() - 1) as usize];
                 slot.0 += debit;
@@ -2617,9 +2692,7 @@ fn monthly_movements(
                 && !indexes("functionalCredit").is_empty()
             {
                 "借贷分列"
-            } else if !indexes("functionalAmount").is_empty()
-                && !indexes("direction").is_empty()
-            {
+            } else if !indexes("functionalAmount").is_empty() && !indexes("direction").is_empty() {
                 "金额＋方向列"
             } else {
                 "单一金额列"
@@ -2677,10 +2750,16 @@ fn detect_amount_scheme(
 ) -> Result<AmountScheme, AppError> {
     let column = |role: &str| mapping.get(role).and_then(Value::as_str).map(str::to_owned);
     let ledger = crate::tabular::LedgerMapping {
-        id: column("id").into_iter().collect(),
+        id: column_indexes(table, mapping, "id")
+            .into_iter()
+            .filter_map(|index| table.headers.get(index).cloned())
+            .collect(),
         account_code: column("accountCode"),
         entity: column("entity"),
-        date: column("date"),
+        date: column_indexes(table, mapping, "date")
+            .into_iter()
+            .filter_map(|index| table.headers.get(index).cloned())
+            .collect(),
         summary: column("summary"),
         amount: column("functionalAmount"),
         direction: column("direction"),
@@ -3007,6 +3086,14 @@ fn table_for(
 }
 
 fn column_indexes(table: &FxTable, mapping: &Map<String, Value>, role: &str) -> Vec<usize> {
+    column_indexes_from_headers(&table.headers, mapping, role)
+}
+
+fn column_indexes_from_headers(
+    headers: &[String],
+    mapping: &Map<String, Value>,
+    role: &str,
+) -> Vec<usize> {
     let columns = match mapping.get(role) {
         Some(Value::String(value)) => vec![value.clone()],
         Some(Value::Array(values)) => values
@@ -3018,7 +3105,7 @@ fn column_indexes(table: &FxTable, mapping: &Map<String, Value>, role: &str) -> 
     };
     columns
         .iter()
-        .filter_map(|column| table.headers.iter().position(|header| header == column))
+        .filter_map(|column| headers.iter().position(|header| header == column))
         .collect()
 }
 
@@ -3202,7 +3289,7 @@ fn closed_pair_baseline(
 }
 
 /// 账面利息收入的发生额口径：本年累计优先，表里只给本期时退而求其次。
-/// 返回（金额, 口径说明, 借方原值, 贷方原值）——借贷原值供底稿的
+/// 返回（金额, 口径说明, 借方原值, 贷方原值, 发生方向已由金额确认）——借贷原值供底稿的
 /// 「账面利息收入科目明细」整行列示，审计人员要能看到取数来源的两栏。
 /// `None` 表示该口径下没有可用数据（借贷均未映射或全为 0），让调用方退到期末余额。
 ///
@@ -3216,7 +3303,7 @@ fn booked_occurrence(
     mapping: &Map<String, Value>,
     convention: ledger_mapping::SignConvention,
     direction: AccountDirection,
-) -> Option<(f64, String, f64, f64)> {
+) -> Option<(f64, String, f64, f64, bool)> {
     for (credit_role, debit_role) in [
         ("ytdFunctionalCredit", "ytdFunctionalDebit"),
         ("periodFunctionalCredit", "periodFunctionalDebit"),
@@ -3232,7 +3319,14 @@ fn booked_occurrence(
             ledger_mapping::SignConvention::Signed => -cr - dr,
         };
         if net.abs() > 0.005 {
-            return Some((net, "发生额净额".into(), dr, cr));
+            let side = if net > 0.0 { "贷方" } else { "借方" };
+            return Some((
+                net,
+                format!("{side}净发生额（按借贷金额判定）"),
+                dr,
+                cr,
+                true,
+            ));
         }
         // 年末已结转的损益科目：结转分录使借贷发生同额，净额恒为 0，
         // 期末余额也是 0。此时按红字与科目登记方向定收入/费用符号。
@@ -3240,7 +3334,13 @@ fn booked_occurrence(
             return None;
         }
         let (amount, note) = closed_pair_baseline(convention, direction, cr, dr);
-        return Some((amount, note.into(), dr, cr));
+        return Some((
+            amount,
+            format!("{note}；借贷同额，按科目登记方向与红字符号判定"),
+            dr,
+            cr,
+            direction != AccountDirection::Unknown,
+        ));
     }
     None
 }
@@ -4139,43 +4239,109 @@ mod tests {
                 // 2002 的中行户：不带银行维度的行 + Bank=BOC 的行，互斥分区，
                 // 加总才是科目全量（金额取自真实样本 1002010200）。
                 vec![
-                    "2002", "1002010200", "Cash in bank-BOC-EUR", "0641", "", "EUR",
-                    "771229.55", "40265114.05", "47179803.92", "-6143460.32",
+                    "2002",
+                    "1002010200",
+                    "Cash in bank-BOC-EUR",
+                    "0641",
+                    "",
+                    "EUR",
+                    "771229.55",
+                    "40265114.05",
+                    "47179803.92",
+                    "-6143460.32",
                 ],
                 vec![
-                    "2002", "1002010200", "Cash in bank-BOC-EUR", "0641", "BOC", "EUR",
-                    "0", "6584325.21", "0", "6584325.21",
+                    "2002",
+                    "1002010200",
+                    "Cash in bank-BOC-EUR",
+                    "0641",
+                    "BOC",
+                    "EUR",
+                    "0",
+                    "6584325.21",
+                    "0",
+                    "6584325.21",
                 ],
                 // 2002 的 DBS 户：单行小户。
                 vec![
-                    "2002", "1002010600", "Cash in bank-DBS-U", "5022", "", "EUR",
-                    "57.96", "0", "20.57", "37.39",
+                    "2002",
+                    "1002010600",
+                    "Cash in bank-DBS-U",
+                    "5022",
+                    "",
+                    "EUR",
+                    "57.96",
+                    "0",
+                    "20.57",
+                    "37.39",
                 ],
                 // 2000 的户：序时账整家没有，年内有发生，必须点名并退回两点法。
                 vec![
-                    "2000", "1002010500", "Cash in bank-DBS-E", "5444", "", "USD",
-                    "6484.16", "8241797.2", "10020354.54", "-1772073.18",
+                    "2000",
+                    "1002010500",
+                    "Cash in bank-DBS-E",
+                    "5444",
+                    "",
+                    "USD",
+                    "6484.16",
+                    "8241797.2",
+                    "10020354.54",
+                    "-1772073.18",
                 ],
                 // 利息收入科目也按维度拆两行（贷方发生额，收入方向）。
                 vec![
-                    "2002", "6603020100", "Interest income", "", "", "CNY",
-                    "0", "0", "248787.96", "-248787.96",
+                    "2002",
+                    "6603020100",
+                    "Interest income",
+                    "",
+                    "",
+                    "CNY",
+                    "0",
+                    "0",
+                    "248787.96",
+                    "-248787.96",
                 ],
                 vec![
-                    "2002", "6603020100", "Interest income", "", "BOC", "CNY",
-                    "0", "0", "30441.2", "-30441.2",
+                    "2002",
+                    "6603020100",
+                    "Interest income",
+                    "",
+                    "BOC",
+                    "CNY",
+                    "0",
+                    "0",
+                    "30441.2",
+                    "-30441.2",
                 ],
             ],
         );
         write_fixture(
             &je_path,
             &[
-                vec!["公司代码", "凭证号码", "过帐日期", "科目号", "公司代码货币金额"],
+                vec![
+                    "公司代码",
+                    "凭证号码",
+                    "过帐日期",
+                    "科目号",
+                    "公司代码货币金额",
+                ],
                 vec!["2002", "0100000001", "2025-01-15", "1002010200", "1000000"],
-                vec!["2002", "0100000002", "2025-06-15", "1002010200", "-1330364.66"],
+                vec![
+                    "2002",
+                    "0100000002",
+                    "2025-06-15",
+                    "1002010200",
+                    "-1330364.66",
+                ],
                 vec!["2002", "0100000003", "2025-03-10", "1002010600", "-20.57"],
                 // 干扰行：非货币资金科目，一条都不该归集进测算。
-                vec!["2002", "0100000004", "2025-02-10", "6401010000", "-731271.42"],
+                vec![
+                    "2002",
+                    "0100000004",
+                    "2025-02-10",
+                    "6401010000",
+                    "-731271.42",
+                ],
             ],
         );
         let params = json!({
@@ -4245,7 +4411,12 @@ mod tests {
         let summary = &result["summary"];
         assert_eq!(summary["jeUncoveredEntities"], json!(["2000"]));
         assert_eq!(summary["jeUncoveredAccountCount"], json!(1));
-        assert!(summary["monthlySource"].as_str().unwrap().contains("未覆盖"));
+        assert!(
+            summary["monthlySource"]
+                .as_str()
+                .unwrap()
+                .contains("未覆盖")
+        );
         assert!((summary["bookedInterestIncome"].as_f64().unwrap() - 279_229.16).abs() < 0.01);
         let booked = result["bookedInterestRows"].as_array().unwrap();
         assert_eq!(booked.len(), 1, "{booked:#?}");
@@ -4731,11 +4902,13 @@ mod tests {
             &multi,
         );
         assert!(warned.contains("1 个科目"), "{warned}");
-        assert!(currency_allocation_warning(
-            &json!({"jeSource": {"inputPath": "je.xlsx"}, "jeMapping": {}}),
-            &BTreeSet::new(),
-        )
-        .is_empty());
+        assert!(
+            currency_allocation_warning(
+                &json!({"jeSource": {"inputPath": "je.xlsx"}, "jeMapping": {}}),
+                &BTreeSet::new(),
+            )
+            .is_empty()
+        );
         assert!(
             currency_allocation_warning(
                 &json!({
@@ -5379,7 +5552,8 @@ mod tests {
         use std::collections::BTreeMap;
         let mut tb_accounts = BTreeMap::new();
         tb_accounts.insert("6603".to_string(), "财务费用".to_string());
-        // 费用类优先于收入类：挂在费用科目下的「利息收入」登记方向是借。
+        // 财务费用下的利息收入仍在借方登记；负数借方是红字
+        // 冲减费用，后续换算为经济上的贷方发生。
         assert_eq!(
             registered_direction("66030002 财务费用-利息收入", &tb_accounts),
             AccountDirection::Debit
@@ -5456,6 +5630,24 @@ mod tests {
         );
         assert_eq!(amount, 500.0);
         assert!(note.contains("复核"));
+    }
+
+    #[test]
+    fn 财务费用下的利息收入按红字借方判定贷方发生() {
+        let mut tb_accounts = BTreeMap::new();
+        tb_accounts.insert("6603".into(), "财务费用".into());
+        assert_eq!(
+            registered_direction("66030002 财务费用-利息收入", &tb_accounts),
+            AccountDirection::Debit,
+        );
+        let (amount, note) = closed_pair_baseline(
+            ledger_mapping::SignConvention::Unsigned,
+            AccountDirection::Debit,
+            -72_868.20,
+            -72_868.20,
+        );
+        assert_eq!(amount, 72_868.20);
+        assert!(note.contains("红字冲减费用"));
     }
 
     /// 整表只有一列科目、编码＋名称挤在一格（03 号样例形态）时，
@@ -6107,6 +6299,168 @@ mod tests {
             }
         }
         workbook.save(path).unwrap();
+    }
+
+    #[test]
+    fn tb_closed_pair_uses_registered_direction_and_red_letter_without_recalculating_je() {
+        let dir = std::env::temp_dir().join(format!(
+            "deposit-interest-direction-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb_path = dir.join("tb.xlsx");
+        let je_path = dir.join("je.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec![
+                    "科目编码",
+                    "科目名称",
+                    "年初余额借方",
+                    "期末余额借方",
+                    "本期借方发生额",
+                    "本期贷方发生额",
+                ],
+                vec!["1002", "银行存款", "1000", "1060", "100", "40"],
+                // 独立收入科目正数同额：按贷方登记方向取正。
+                vec!["605101", "利息收入-A", "0", "0", "100", "100"],
+                vec!["6603", "财务费用", "0", "0", "0", "0"],
+                // 1–3 月真实 TB 形态：财务费用下的利息收入借贷同额且都为负，
+                // 即红字借方冲减费用，经济上判为贷方发生。
+                vec!["660301", "财务费用-利息收入-B", "0", "0", "-40", "-40"],
+            ],
+        );
+        write_fixture(
+            &je_path,
+            &[
+                vec![
+                    "记账日期",
+                    "凭证号",
+                    "科目编码",
+                    "科目名称",
+                    "摘要",
+                    "借方金额",
+                    "贷方金额",
+                ],
+                vec![
+                    "2025-06-30",
+                    "记-1",
+                    "1002",
+                    "银行存款",
+                    "收到利息",
+                    "100",
+                    "0",
+                ],
+                vec![
+                    "2025-06-30",
+                    "记-1",
+                    "605101",
+                    "利息收入-A",
+                    "收到利息",
+                    "0",
+                    "100",
+                ],
+                vec![
+                    "2025-12-31",
+                    "记-2",
+                    "605101",
+                    "利息收入-A",
+                    "结转损益",
+                    "100",
+                    "0",
+                ],
+                vec![
+                    "2025-12-31",
+                    "记-2",
+                    "4103",
+                    "本年利润",
+                    "结转损益",
+                    "0",
+                    "100",
+                ],
+                vec![
+                    "2025-07-31",
+                    "记-3",
+                    "660301",
+                    "利息收入-B",
+                    "冲减利息",
+                    "40",
+                    "0",
+                ],
+                vec![
+                    "2025-07-31",
+                    "记-3",
+                    "1002",
+                    "银行存款",
+                    "冲减利息",
+                    "0",
+                    "40",
+                ],
+                vec![
+                    "2025-12-31",
+                    "记-4",
+                    "4103",
+                    "本年利润",
+                    "结转损益",
+                    "40",
+                    "0",
+                ],
+                vec![
+                    "2025-12-31",
+                    "记-4",
+                    "660301",
+                    "利息收入-B",
+                    "结转损益",
+                    "0",
+                    "40",
+                ],
+            ],
+        );
+        let tb = inspect(
+            &json!({"source": {"inputPath": tb_path.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
+        let je = inspect(
+            &json!({"source": {"inputPath": je_path.to_string_lossy()}}),
+            "je",
+        )
+        .unwrap();
+        let params = json!({
+            "reportStart": "2025-01-01",
+            "reportEnd": "2025-12-31",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": tb["suggestedMapping"],
+            "jeSource": {"inputPath": je_path.to_string_lossy()},
+            "jeMapping": je["suggestedMapping"],
+            "accountRoleOverrides": {
+                "605101 利息收入-A": "interest_income",
+                "660301 财务费用-利息收入-B": "interest_income"
+            }
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap();
+        let summary = &result["summary"];
+        assert!((summary["bookedInterestIncome"].as_f64().unwrap() - 140.0).abs() < 0.01);
+        assert_eq!(summary["bookedDirectionConfirmed"], json!(true));
+        assert_eq!(summary["bookedDirectionUnconfirmedCount"], json!(0));
+        let booked_rows = result["bookedInterestRows"].as_array().unwrap();
+        assert!(booked_rows.iter().any(|row| {
+            row["bookedAmount"] == json!(100.0)
+                && row["note"].as_str().unwrap().contains("贷方全额")
+        }));
+        assert!(booked_rows.iter().any(|row| {
+            row["bookedAmount"] == json!(40.0)
+                && row["note"].as_str().unwrap().contains("红字冲减费用")
+        }));
+        assert!(
+            booked_rows
+                .iter()
+                .all(|row| !row["note"].as_str().unwrap().contains("剔除"))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 走完整链路：自动识别表头/字段 → 按序时账还原逐月余额 → 测算 → 导出。

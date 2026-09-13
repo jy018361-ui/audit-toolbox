@@ -275,6 +275,9 @@ describe("共用字段映射面板", () => {
     expect(selects[1].querySelector("optgroup")).toHaveClass(
       "dt-group-adapted",
     );
+    expect(selects[1].querySelector('option[value="accountName"]')).toHaveClass(
+      "dt-option-adapted",
+    );
   });
 
   it("toggle 模式下一列可以叠加多个角色，并显示已承担的语义", () => {

@@ -1344,6 +1344,16 @@ summary:focus-visible {
 .fa-review-item.fa-change .fa-change-diff {
   font-weight: 600;
 }
+.fa-review-item.fa-change em {
+  margin-left: var(--sp-2);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-sm);
+  background: var(--success-dot);
+  color: var(--success-fg);
+  font-size: 0.85em;
+  font-style: normal;
+  white-space: nowrap;
+}
 .fa-review-item.fa-change.attention {
   background: var(--warning-bg);
   border-color: var(--warning-dot);
@@ -2438,10 +2448,34 @@ summary:focus-visible {
   background: var(--success-bg);
   font-weight: 700;
 }
+.fa-review-item.fa-change.attention em {
+  background: var(--warning-dot);
+  color: var(--warning-fg);
+}
+.llm-review-live-summary {
+  padding: var(--sp-2);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  font-weight: 600;
+}
+.data-table-table th .dt-header-control select option.dt-option-adapted {
+  color: var(--success-fg);
+  background: var(--success-bg);
+  font-weight: 700;
+}
 .data-table-table th .dt-header-control select optgroup.dt-group-available {
   color: var(--brand);
   background: var(--surface);
   font-weight: 600;
+}
+.data-table-table th .dt-header-control select option.dt-option-available {
+  color: var(--brand);
+  background: var(--surface);
+}
+.data-table-table th .dt-header-control select option.dt-option-unavailable {
+  color: var(--text-muted);
+  background: var(--surface-muted);
 }
 
 /* 未映射字段提示 */

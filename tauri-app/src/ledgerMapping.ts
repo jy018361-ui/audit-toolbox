@@ -7,7 +7,8 @@ export type Mapping = {
   accountCode?: string;
   accountName: string[];
   entity?: string;
-  date?: string;
+  /** 记账日期可由完整日期列，或年/月/日多列共同组成。 */
+  date?: string | string[];
   summary?: string;
   functionalAmount?: string;
   direction?: string;
@@ -483,6 +484,7 @@ export const LEDGER_MULTI_COLUMN_ROLES = new Set([
   "id",
   "accountName",
   "auxiliary",
+  "date",
 ]);
 
 const appendMappingColumn = (
@@ -569,6 +571,7 @@ export async function applyLedgerReviewToDict(
   mapping: Record<string, string | string[]>;
   applied: LedgerPlannedChange[];
   pending: LedgerPlannedChange[];
+  mappingWarnings: string[];
 }> {
   const response = (await call("ledger.review_mapping", {
     kind,
@@ -579,8 +582,8 @@ export async function applyLedgerReviewToDict(
       availableRoles: Object.keys(labels),
       ...(tool ? { tool } : {}),
     },
-  })) as { changes?: LedgerChange[] };
-  return planLedgerChanges(
+  })) as { changes?: LedgerChange[]; reviewCoverage?: LedgerReviewCoverage };
+  const plan = planLedgerChanges(
     headers,
     sampleRows,
     current,
@@ -588,6 +591,10 @@ export async function applyLedgerReviewToDict(
     response.changes ?? [],
     multiColumnRoles,
   );
+  return {
+    ...plan,
+    mappingWarnings: ledgerReviewCoverageWarnings(response.reviewCoverage, labels),
+  };
 }
 
 const ledgerMappingText = (value: string | string[] | undefined): string =>
@@ -722,7 +729,7 @@ export type LedgerReviewTarget = {
   labels: Record<string, string>;
   tool?: string;
   pairLabel?: string;
-  /** 当前工具允许由多列共同组成的角色；TBJE 的日期可由月／日列组合。 */
+  /** 当前工具允许由多列共同组成的角色；公共默认含日期组成列。 */
   multiColumnRoles?: ReadonlySet<string>;
 };
 /** 一键复核里单个文件的结果：应用后的映射、采纳的建议数与失败原因。 */
@@ -734,7 +741,61 @@ export type LedgerReviewOutcome = {
   applied: LedgerPlannedChange[];
   pending: LedgerPlannedChange[];
   pairFindings: LedgerPairFinding[];
+  /** 只读样例体检：提示明显的错映射，不自动替用户改列。 */
+  mappingWarnings?: string[];
+  /** LLM 是否真正逐项复核已有映射；手工采纳/撤销后仍须保留。 */
+  reviewCoverageWarnings?: string[];
+  /** 应用当前建议后仍缺少的必填字段，仅用于界面实时派生结论。 */
+  missingAfter?: string[];
 };
+
+type LedgerReviewCoverage = {
+  complete?: boolean;
+  unreviewedRoles?: string[];
+};
+
+export function ledgerReviewCoverageWarnings(
+  coverage: LedgerReviewCoverage | undefined,
+  labels: Record<string, string>,
+): string[] {
+  if (!coverage || coverage.complete !== false) return [];
+  const roles = (coverage.unreviewedRoles ?? [])
+    .filter((role) => typeof role === "string" && role.trim())
+    .map((role) => labels[role] ?? role);
+  return [
+    roles.length
+      ? `LLM 未逐项覆盖已有映射：${roles.join("、")}；请人工核对`
+      : "LLM 未完成已有映射的逐项语义复核，请人工核对",
+  ];
+}
+
+export function ledgerMappingValueWarnings(
+  headers: string[],
+  rows: string[][],
+  mapping: Record<string, string | string[]>,
+): string[] {
+  if (!rows.length) return [];
+  const labels: Record<string, string> = {
+    accountCode: "科目编码",
+    accountName: "科目名称",
+  };
+  const warnings: string[] = [];
+  for (const role of Object.keys(labels)) {
+    const columns = Array.isArray(mapping[role])
+      ? mapping[role] as string[]
+      : mapping[role] ? [mapping[role] as string] : [];
+    for (const column of columns) {
+      const index = headers.indexOf(column);
+      if (index < 0) {
+        warnings.push(`${labels[role]}指向不存在的列「${column}」`);
+        continue;
+      }
+      if (rows.every((row) => !String(row[index] ?? "").trim()))
+        warnings.push(`${labels[role]}所选列「${column}」在预览行中全为空，请核对`);
+    }
+  }
+  return warnings;
+}
 /**
  * 一键复核 TB＋JE 的共享引擎。汇兑损益与存款利息此前各写一套复核入口，
  * 改一处漏一处；现在两个页面都调这里。已上传哪个文件就复核哪个，两边
@@ -769,6 +830,8 @@ export async function applyLedgerReviewsTogether(
         tbChanges?: LedgerChange[];
         jeChanges?: LedgerChange[];
         pairFindings?: LedgerPairFinding[];
+        tbReviewCoverage?: LedgerReviewCoverage;
+        jeReviewCoverage?: LedgerReviewCoverage;
       };
       const findings = response.pairFindings ?? [];
       return Object.fromEntries(
@@ -784,6 +847,12 @@ export async function applyLedgerReviewsTogether(
               : (response.jeChanges ?? []),
             target.multiColumnRoles,
           );
+          const reviewCoverageWarnings = ledgerReviewCoverageWarnings(
+            kind === "tb"
+              ? response.tbReviewCoverage
+              : response.jeReviewCoverage,
+            target.labels,
+          );
           return [
             kind,
             {
@@ -794,6 +863,11 @@ export async function applyLedgerReviewsTogether(
               applied: plan.applied,
               pending: plan.pending,
               pairFindings: findings,
+              reviewCoverageWarnings,
+              mappingWarnings: [
+                ...ledgerMappingValueWarnings(target.headers, target.preview, plan.mapping),
+                ...reviewCoverageWarnings,
+              ],
             },
           ] as const;
         }),
@@ -820,7 +894,7 @@ export async function applyLedgerReviewsTogether(
   if (!kind) return {};
   const target = targets[kind]!;
   try {
-    const { mapping, applied, pending } = await applyLedgerReviewToDict(
+    const { mapping, applied, pending, mappingWarnings } = await applyLedgerReviewToDict(
       call,
       kind,
       target.headers,
@@ -839,6 +913,11 @@ export async function applyLedgerReviewsTogether(
         applied,
         pending,
         pairFindings: [],
+        reviewCoverageWarnings: mappingWarnings,
+        mappingWarnings: [
+          ...ledgerMappingValueWarnings(target.headers, target.preview, mapping),
+          ...mappingWarnings,
+        ],
       },
     };
   } catch (e) {
@@ -879,7 +958,15 @@ export const shouldShowKanzhangJobProgress = (phase?: string) =>
   Boolean(phase && !["completed", "failed", "cancelled"].includes(phase));
 
 export const effectiveVoucherKey = (mapping: Mapping) =>
-  [mapping.entity, mapping.date, ...mapping.id].filter(
+  [
+    mapping.entity,
+    ...(Array.isArray(mapping.date)
+      ? mapping.date
+      : mapping.date
+        ? [mapping.date]
+        : []),
+    ...mapping.id,
+  ].filter(
     (value): value is string => Boolean(value),
   );
 
@@ -942,7 +1029,8 @@ export const KZ_ROLE_LABELS: Record<keyof Mapping, string> = {
 };
 export const isMultiRole = (
   role: keyof Mapping,
-): role is "id" | "accountName" => role === "id" || role === "accountName";
+): role is "id" | "accountName" | "date" =>
+  role === "id" || role === "accountName" || role === "date";
 // 预览表头下拉里的角色顺序，两个工具共用同一份，必填项标 true。
 // 科目编码与科目名称各自标 false：单独看谁都不是必填，但两者至少要映射一列，
 // 这条口径由 missingKanzhangRequiredRoles 统一判。

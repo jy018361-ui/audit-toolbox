@@ -191,9 +191,9 @@ fn validate_disk_amount_row(
 
 fn validate_prepared_mapping_required(mapping: &LedgerMapping) -> Result<(), AppError> {
     if mapping.id.is_empty() {
-        if let Some(date) = mapping.date.clone() {
+        if !mapping.date.is_empty() {
             let mut validation = mapping.clone();
-            validation.id.push(date);
+            validation.id.extend(mapping.date.iter().cloned());
             return validate_mapping_required(&validation);
         }
     }
@@ -517,9 +517,8 @@ fn build_prepared(
                     .any(|n| header_index(&ledger.table.headers, n) == Some(*i))
                 || mapping
                     .date
-                    .as_deref()
-                    .and_then(|n| header_index(&ledger.table.headers, n))
-                    == Some(*i)
+                    .iter()
+                    .any(|n| header_index(&ledger.table.headers, n) == Some(*i))
         })
         .collect::<Vec<_>>();
     // 大 CSV 走流式逐行，用引擎的单行正文判定先剔非正文行：表尾小计/手工草稿

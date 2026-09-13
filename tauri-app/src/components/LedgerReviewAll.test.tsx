@@ -219,10 +219,8 @@ describe("共享账表复核生命周期", () => {
       request.resolve({ changes: [] });
       await pending;
     });
-    expect(result.current.status.je).toContain("LLM 未提出调整建议");
-    expect(result.current.status.je).toContain(
-      "仍有未映射：原币币种、原币金额方案",
-    );
+    expect(result.current.status.je).toContain("已复核 · 仍缺 2 项");
+    expect(result.current.status.je).toContain("原币币种、原币金额方案");
     expect(result.current.status.je).not.toContain("无需调整");
   });
 
@@ -259,7 +257,40 @@ describe("共享账表复核生命周期", () => {
       await pending;
     });
     expect(applied).toHaveBeenCalledWith({ accountCode: "B编码" });
-    expect(result.current.status.tb).toContain("已应用 1 项建议");
-    expect(result.current.status.tb).toContain("仍有未映射：期初余额");
+    expect(result.current.status.tb).toContain("已自动调整 1 项");
+    expect(result.current.status.tb).toContain("仍缺 1 项：期初余额");
+  });
+
+  it("撤销与采纳后按当前明细实时重算复核状态", async () => {
+    const applied = vi.fn();
+    const { result } = renderHook(() =>
+      useLedgerDictReviews(async () => ({
+        changes: [
+          { role: "accountCode", suggestedColumn: "B编码", confidence: 0.9 },
+          { role: "accountName", suggestedColumn: "B名称", confidence: 0.5 },
+        ],
+      })),
+    );
+    await act(async () => {
+      await result.current.reviewAll({
+        tb: {
+          headers: ["A编码", "B编码", "B名称"],
+          preview: [],
+          mapping: { accountCode: "A编码" },
+          labels: { accountCode: "科目编码", accountName: "科目名称" },
+          onApplied: applied,
+        },
+      });
+    });
+    expect(result.current.status.tb).toContain("已自动调整 1 项");
+    expect(result.current.status.tb).toContain("1 项建议待确认");
+
+    act(() => result.current.undoChange("tb", 0));
+    expect(result.current.status.tb).not.toContain("已自动调整");
+    expect(result.current.status.tb).toContain("1 项建议待确认");
+
+    act(() => result.current.acceptPending("tb", 0));
+    expect(result.current.status.tb).toContain("已自动调整 1 项");
+    expect(result.current.status.tb).not.toContain("建议待确认");
   });
 });

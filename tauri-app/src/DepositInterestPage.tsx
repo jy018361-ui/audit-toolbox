@@ -55,7 +55,7 @@ import {
 import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation";
 
 /** 可多列的角色与统一内核一致；`account` 是历史保存映射的旧槽位。 */
-const DEPOSIT_MULTI = new Set(["id", "accountName", "auxiliary", "account"]);
+const DEPOSIT_MULTI = new Set(["id", "accountName", "auxiliary", "account", "date"]);
 import "./fx-audit.css";
 import "./deposit-interest.css";
 
@@ -70,6 +70,10 @@ export type Inspection = {
   preview: string[][];
   entities: string[];
   accounts: string[];
+  /** 账里真实存在的「主体×科目」组合（空主体已归默认主体，最多 2000 条），
+      供 FA List 等页面按真实搭配铺科目复核清单；旧后端／预览模式不下发，
+      使用方需自行回退。 */
+  entityAccounts?: Array<{ entity: string; account: string }>;
   suggestedMapping: Record<string, string | string[]>;
   /** 引擎随识别结果全量下发的角色标签（`{name,label}`）；缺失时回落本页的标签表。 */
   roles?: EngineRoleLabels;
@@ -532,8 +536,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   }, [accounts, je, tb, accountRoleOverrides]);
 
   // 历史记录「继续任务」：回填两表路径/基准日/映射与分层利率、逐户改价。
-  // Sheet 等识别信息以存档参数重建最小 Inspection，不点「重新识别」也能直接
-  // 测算；存档的最终科目分类整体写入 overrides，预填 effect 会原样采纳。
+  // 历史参数不含预览表头/行数，不能伪装成完整 Inspection 给映射面板渲染；
+  // 恢复时按存档 Sheet/标题行重新识别，存档的最终科目分类仍由 overrides 采纳。
   // restoredDepositRef：用户重新识别同一文件时，applyInspection 默认套用
   // 建议映射并清空分类覆盖——这里把存档值顶回，逐侧一次性消费。
   const restoredDepositRef = useRef<{
@@ -543,7 +547,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     };
     accountRoleOverrides?: Record<string, string>;
   } | null>(null);
+  const restoreGeneration = useRef(0);
   useTaskRestore(tool.id, (restore) => {
+    const generation = ++restoreGeneration.current;
     type DepositSourceParams = {
       inputPath?: string;
       sheet?: string;
@@ -567,29 +573,15 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     const restoredTbPath =
       typeof p.tbSource?.inputPath === "string" ? p.tbSource.inputPath : "";
     if (!restoredJePath && !restoredTbPath) return;
-    const accountList = [
-      ...new Set([
-        ...Object.keys(p.accountRoles ?? {}),
-        ...Object.keys(p.accountTierOverrides ?? {}),
-        ...Object.keys(p.rateOverrides ?? {}),
-      ]),
-    ];
-    const minimalInspection = (src: DepositSourceParams): Inspection =>
-      ({
-        sheet: src.sheet ?? "",
-        headerRow: src.headerRow ?? 0,
-        headerDepth: src.headerDepth ?? 0,
-        accounts: accountList,
-      }) as Inspection;
     const isMapping = (value: unknown): value is Record<string, string | string[]> =>
       Boolean(value && typeof value === "object");
     restoredDepositRef.current = {
       sides: {
-        ...(restoredJePath && isMapping(p.jeMapping)
-          ? { je: { path: restoredJePath, mapping: p.jeMapping } }
+        ...(restoredJePath
+          ? { je: { path: restoredJePath, mapping: isMapping(p.jeMapping) ? p.jeMapping : {} } }
           : {}),
-        ...(restoredTbPath && isMapping(p.tbMapping)
-          ? { tb: { path: restoredTbPath, mapping: p.tbMapping } }
+        ...(restoredTbPath
+          ? { tb: { path: restoredTbPath, mapping: isMapping(p.tbMapping) ? p.tbMapping : {} } }
           : {}),
       },
       ...(isMapping(p.accountRoles)
@@ -598,8 +590,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     };
     setJePath(restoredJePath);
     setTbPath(restoredTbPath);
-    setJe(restoredJePath ? minimalInspection(p.jeSource!) : undefined);
-    setTb(restoredTbPath ? minimalInspection(p.tbSource!) : undefined);
+    setJe(undefined);
+    setTb(undefined);
     if (typeof p.reportEnd === "string" && p.reportEnd)
       setReportEnd(p.reportEnd);
     setJeMapping(
@@ -626,12 +618,43 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     if (p.tierRates && typeof p.tierRates === "object")
       setTierRates(p.tierRates);
     setOutputPath(typeof p.outputPath === "string" ? p.outputPath : "");
-    setStep(2);
-    setBusy(false);
+    setStep(0);
+    setBusy(true);
     setError("");
     setResult(undefined);
     setRows([]);
     setJob(undefined);
+    setSourceStatus("正在重新识别历史任务的源文件…");
+    void (async () => {
+      const failures: string[] = [];
+      for (const [kind, path, source] of [
+        ["tb", restoredTbPath, p.tbSource],
+        ["je", restoredJePath, p.jeSource],
+      ] as const) {
+        if (!path || !source) continue;
+        try {
+          const response = (await engineCall(`deposit.inspect_${kind}`, {
+            source: {
+              inputPath: path,
+              sheet: source.sheet ?? "",
+              headerRow: source.headerRow ?? 0,
+              headerDepth: source.headerDepth ?? 0,
+            },
+          })) as Inspection;
+          if (generation !== restoreGeneration.current) return;
+          applyInspection(kind, path, response);
+        } catch (e) {
+          if (generation !== restoreGeneration.current) return;
+          failures.push(`${fileName(path)}：${errorText(e)}`);
+        }
+      }
+      if (generation !== restoreGeneration.current) return;
+      if (typeof p.reportEnd === "string" && p.reportEnd)
+        setReportEnd(p.reportEnd);
+      setError(failures.join("；"));
+      setSourceStatus(failures.length ? "历史任务部分源文件未能重新识别。" : "历史任务源文件已重新识别，请复核映射后继续。");
+      setBusy(false);
+    })();
   });
   useEffect(() => {
     const drops = listenPositionedFileDrops(({ paths, x, y }) => {
@@ -684,6 +707,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       /\.(xlsx?|xlsm|csv|txt|tsv|parquet)$/i.test(p),
     );
     if (!files.length) return;
+    ++restoreGeneration.current;
     // 新来源开始识别时，上一批文件产生的复核、测算和手工覆盖全部失效。
     // 利率档位字典属于工具长期配置，保留；逐账户选择属于文件派生状态，清空。
     reviews.clearReview("tb");
@@ -810,6 +834,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     );
     const path = Array.isArray(picked) ? picked[0] : picked;
     if (!path) return;
+    ++restoreGeneration.current;
     reviews.clearReview(kind);
     setBusy(true);
     setError("");
@@ -1202,13 +1227,19 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   Boolean(jePath),
                 )}
                 banner={
-                  reviews.reviewing.tb || reviews.status.tb ? (
-                    <p aria-live="polite" className="fx-hint">
-                      {reviews.reviewing.tb
-                        ? "正在复核字段映射；复核期间暂时锁定。"
-                        : reviews.status.tb}
+                  <>
+                    {(reviews.reviewing.tb || reviews.status.tb) && (
+                      <p aria-live="polite" className="fx-hint">
+                        {reviews.reviewing.tb
+                          ? "正在复核字段映射；复核期间暂时锁定。"
+                          : reviews.status.tb}
+                      </p>
+                    )}
+                    <p className="fx-hint">
+                      辅助核算是选填线索：仅用于识别存款类型、币种和底稿披露；
+                      本工具按“主体＋科目”归并测算，不按辅助核算拆分账户或参与 JE 勾稽。
                     </p>
-                  ) : null
+                  </>
                 }
                 onMappingChange={setTbMapping}
                 onHeaderChange={(row, depth, sheet) =>
@@ -1230,13 +1261,20 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                 labels={JE_LABELS}
                 missing={depositMissingRequired("je", jeMapping)}
                 banner={
-                  reviews.reviewing.je || reviews.status.je ? (
-                    <p aria-live="polite" className="fx-hint">
-                      {reviews.reviewing.je
-                        ? "正在复核字段映射；复核期间暂时锁定。"
-                        : reviews.status.je}
+                  <>
+                    {(reviews.reviewing.je || reviews.status.je) && (
+                      <p aria-live="polite" className="fx-hint">
+                        {reviews.reviewing.je
+                          ? "正在复核字段映射；复核期间暂时锁定。"
+                          : reviews.status.je}
+                      </p>
+                    )}
+                    <p className="fx-hint">
+                      JE 仅用于还原存款逐月发生额；账面利息方向直接按 TB 借贷列、
+                      整表符号口径及科目登记方向判定。
+                      JE 辅助核算列即使映射，当前也不参与归集键或金额计算。
                     </p>
-                  ) : null
+                  </>
                 }
                 onMappingChange={setJeMapping}
                 onHeaderChange={(row, depth, sheet) =>
@@ -2150,7 +2188,11 @@ function Results({
             booked && summary.bookedNote
               ? String(summary.bookedNote)
               : undefined,
-            booked && Number(summary.bookedInterestIncome) < 0 ? "warning" : "",
+            booked &&
+              (summary.bookedDirectionConfirmed === false ||
+                Number(summary.bookedInterestIncome) < 0)
+              ? "warning"
+              : "",
           )}
           <span className="fx-operator" aria-hidden="true">
             ＝

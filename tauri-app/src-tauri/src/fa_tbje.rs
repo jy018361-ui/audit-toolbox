@@ -21,7 +21,7 @@ use crate::{
     AppError,
     excel_merger::PauseCheckpoint,
     fx::{FxTable, SourceSpec, load_fx_table, parse_date},
-    ledger_mapping::{self, AmountInputs, SignConvention},
+    ledger_mapping::{self, AmountInputs, EntitySide, SignConvention},
     tabular::{self, LedgerMapping},
 };
 
@@ -396,6 +396,12 @@ fn analyze_with_progress(
     let tb_map = mapping(params, "tbMapping");
     let je_map = mapping(params, "jeMapping");
     validate_required(&tb_map, &je_map)?;
+    // 主体条件键在两个分析入口各判一次：只有 TB、JE 双侧都映射了主体列才
+    // 启用主体维度，单侧映射（或主体列指向空列）时双方一律按默认主体处理。
+    let entity_key_enabled = ledger_mapping::entity_key_enabled(
+        !mapped_columns(&tb_map, "entity").is_empty(),
+        !mapped_columns(&je_map, "entity").is_empty(),
+    );
     let tb = load_fx_table(&tb_spec)?;
     let tb_keep = ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| {
         crate::fx::mapped_cols(&tb_map, role)
@@ -415,6 +421,7 @@ fn analyze_with_progress(
             &tb_map,
             &je_spec,
             &je_map,
+            entity_key_enabled,
             &entity_scope,
             progress,
         );
@@ -439,7 +446,7 @@ fn analyze_with_progress(
             }
         }
     }
-    let assignments = assignment_index(params, &tb, &tb_map, &je, &je_map)?;
+    let assignments = assignment_index(params, &tb, &tb_map, &je, &je_map, entity_key_enabled)?;
     if assignments.codes.is_empty() && assignments.names.is_empty() {
         return Err(error(
             "FA_TBJE_ACCOUNTS_REQUIRED",
@@ -455,7 +462,7 @@ fn analyze_with_progress(
         "%Y-%m-%d",
     )
     .map_err(|_| error("INVALID_DATE", "报告截止日必须为 YYYY-MM-DD。", None))?;
-    let tb_lines = normalize_tb(&tb, &tb_map, &assignments, params)?;
+    let tb_lines = normalize_tb(&tb, &tb_map, &assignments, params, entity_key_enabled)?;
     if tb_lines.is_empty() {
         return Err(error(
             "FA_TBJE_NO_TB_ACCOUNTS",
@@ -463,12 +470,19 @@ fn analyze_with_progress(
             None,
         ));
     }
-    let (mut je_lines, direct_pairs, cross_pairs, sign_basis) =
-        normalize_je(&je, &je_map, &assignments, params, report_end, cancel)?;
+    let (mut je_lines, direct_pairs, cross_pairs, sign_basis) = normalize_je(
+        &je,
+        &je_map,
+        &assignments,
+        params,
+        report_end,
+        cancel,
+        entity_key_enabled,
+    )?;
     let (additions, disposals, mut totals) = classify_movements(&mut je_lines);
     let mut warnings = Vec::new();
-    let tb_accounts = account_identities(&tb, &tb_map, params, "tbFixedEntity");
-    for id in account_identities(&je, &je_map, params, "jeFixedEntity") {
+    let tb_accounts = account_identities(&tb, &tb_map, params, EntitySide::Tb, entity_key_enabled);
+    for id in account_identities(&je, &je_map, params, EntitySide::Je, entity_key_enabled) {
         if find_assignment(&assignments, &id).is_some()
             && !tb_accounts.iter().any(|other| {
                 other.entity == id.entity
@@ -524,6 +538,7 @@ fn analyze_with_disk_je(
     tb_map: &Map<String, Value>,
     je_spec: &SourceSpec,
     je_map: &Map<String, Value>,
+    entity_key_enabled: bool,
     entity_scope: &ledger_mapping::EntityScope,
     progress: Progress<'_>,
 ) -> Result<Analysis, AppError> {
@@ -542,6 +557,8 @@ fn analyze_with_disk_je(
     let report_end = parse_report_end(params)?;
     let report_start = NaiveDate::from_ymd_opt(report_end.year(), 1, 1).unwrap();
     let mut any_row_in_period = false;
+    let mut in_period_rows = 0usize;
+    let mut raw_entities: Vec<String> = Vec::new();
     let mut years = BTreeSet::new();
     let mut unique = BTreeMap::<(String, String, String, String, String), AccountIdentity>::new();
     let mut scanned = 0usize;
@@ -555,19 +572,27 @@ fn analyze_with_disk_je(
                 "正在识别固定资产科目与报告期间…",
             );
         }
-        if let Some(date) = parse_date(&text(&header_table, &row.values, je_map, "date")) {
+        if let Some(date) = mapped_date(&header_table, &row.values, je_map, report_end.year()) {
             years.insert(date.year());
-            any_row_in_period |= date >= report_start && date <= report_end;
+            if date >= report_start && date <= report_end {
+                any_row_in_period = true;
+                in_period_rows += 1;
+                // 零命中守卫要展示 JE 里的原始主体（未经条件键折算），
+                // 让用户能对照已确认科目的主体口径定位问题。
+                let raw = text(&header_table, &row.values, je_map, "entity");
+                if !raw.is_empty() && !raw_entities.contains(&raw) {
+                    raw_entities.push(raw);
+                }
+            }
         }
         let identity = account_identity_from_row(
             &header_table,
             &row.values,
             je_map,
-            params,
-            "jeFixedEntity",
             &row.account,
-            ledger_mapping::EntitySide::Je,
-            &entity_scope,
+            EntitySide::Je,
+            entity_key_enabled,
+            entity_scope,
         );
         unique
             .entry((
@@ -608,7 +633,7 @@ fn analyze_with_disk_je(
         ));
     }
     let je_identities = unique.into_values().collect::<Vec<_>>();
-    let tb_identities = account_identities(tb, tb_map, params, "tbFixedEntity");
+    let tb_identities = account_identities(tb, tb_map, params, EntitySide::Tb, entity_key_enabled);
     let assignments = assignment_index_from_identities(params, &tb_identities, &je_identities)?;
     if assignments.codes.is_empty() && assignments.names.is_empty() {
         return Err(error(
@@ -624,6 +649,18 @@ fn analyze_with_disk_je(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    // JE 零命中守卫（磁盘路径）：期间内 JE 本有数据行，却没有任何身份命中
+    // 已确认科目——典型是主体列单侧缺失/指向空列导致两侧主体键对不上。
+    // 此时绝不静默走完选择与导出，必须把两侧口径摆给用户。
+    if target_accounts.is_empty() && any_row_in_period && in_period_rows > 0 {
+        return Err(je_unmatched_error(
+            params,
+            &assignments,
+            &je_identities,
+            &raw_entities,
+            in_period_rows,
+        ));
+    }
     disk.select_accounts(&target_accounts, cancel)?;
     let mut selected_rows = Vec::new();
     let mut selected_count = 0usize;
@@ -641,7 +678,7 @@ fn analyze_with_disk_je(
         Ok(())
     })?;
     let je = disk_table(je_spec, headers, selected_rows, disk.row_count());
-    let tb_lines = normalize_tb(tb, tb_map, &assignments, params)?;
+    let tb_lines = normalize_tb(tb, tb_map, &assignments, params, entity_key_enabled)?;
     if tb_lines.is_empty() {
         return Err(error(
             "FA_TBJE_NO_TB_ACCOUNTS",
@@ -649,8 +686,15 @@ fn analyze_with_disk_je(
             None,
         ));
     }
-    let (mut je_lines, direct_pairs, cross_pairs, sign_basis) =
-        normalize_je(&je, je_map, &assignments, params, report_end, cancel)?;
+    let (mut je_lines, direct_pairs, cross_pairs, sign_basis) = normalize_je(
+        &je,
+        je_map,
+        &assignments,
+        params,
+        report_end,
+        cancel,
+        entity_key_enabled,
+    )?;
     let (additions, disposals, mut totals) = classify_movements(&mut je_lines);
     let mut warnings = Vec::new();
     append_je_only_warnings(&mut warnings, &tb_identities, &je_identities, &assignments);
@@ -729,36 +773,43 @@ fn account_identity_from_row(
     table: &FxTable,
     row: &[String],
     map: &Map<String, Value>,
-    params: &Value,
-    fixed_key: &str,
     display: &str,
     side: ledger_mapping::EntitySide,
+    entity_key_enabled: bool,
     entity_scope: &ledger_mapping::EntityScope,
 ) -> AccountIdentity {
-    let fixed = params
-        .get(fixed_key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
-    let entity = text(table, row, map, "entity");
+    let raw_entity = text(table, row, map, "entity");
     let raw_code = text(table, row, map, "accountCode");
     let mut name = join(row, &indexes(table, map, "accountName"));
     if name.is_empty() {
         name = join(row, &indexes(table, map, "account"));
     }
     name = ledger_mapping::account_name_of(if name.is_empty() { &raw_code } else { &name });
-    let entity = if entity.is_empty() {
-        fixed.to_owned()
-    } else {
-        entity
-    };
     AccountIdentity {
-        entity: ledger_mapping::apply_entity_scope(side, &entity, entity_scope),
+        entity: resolve_entity(side, &raw_entity, entity_key_enabled, entity_scope),
         code: ledger_mapping::account_code_of(&raw_code),
         name,
         display: display.to_owned(),
         legacy_display: join(row, &account_indexes(table, map)),
     }
+}
+
+/// 主体条件键（LEDGER_MAPPING_UNIFICATION.md「主体作为条件匹配键」）：
+/// 只有 TB、JE 双侧都映射了主体列才启用主体维度；启用时空白主体归默认
+/// 主体；单侧映射（或主体列全空）时双方一律默认主体，不再回退
+/// tbFixedEntity/jeFixedEntity 的单侧差异值——那会把整本 JE 静默丢空。
+/// 用户显式确认的归集（aggregate）在有效主体之后照常生效。
+fn resolve_entity(
+    side: ledger_mapping::EntitySide,
+    raw: &str,
+    entity_key_enabled: bool,
+    entity_scope: &ledger_mapping::EntityScope,
+) -> String {
+    ledger_mapping::apply_entity_scope(
+        side,
+        &ledger_mapping::effective_entity(raw, entity_key_enabled),
+        entity_scope,
+    )
 }
 
 fn append_je_only_warnings(
@@ -856,6 +907,7 @@ fn normalize_tb(
     map: &Map<String, Value>,
     assignments: &AssignmentIndex,
     params: &Value,
+    entity_key_enabled: bool,
 ) -> Result<Vec<TbLine>, AppError> {
     let mask = ledger_mapping::tb_leaf_mask(&table.headers, &table.rows, &|role| {
         mapped_columns(map, role)
@@ -878,7 +930,7 @@ fn normalize_tb(
         self_signed("openingFunctional"),
         self_signed("closingFunctional"),
     );
-    let identities = account_identities(table, map, params, "tbFixedEntity");
+    let identities = account_identities(table, map, params, EntitySide::Tb, entity_key_enabled);
     let mut out = Vec::new();
     for (index, row) in table.rows.iter().enumerate() {
         if !mask.get(index).copied().unwrap_or(true) {
@@ -916,11 +968,11 @@ fn normalize_tb(
 }
 
 /// 序时账实际覆盖的记账年度，用于把"期间选错了"讲清楚。
-fn je_years(table: &FxTable, map: &Map<String, Value>) -> Vec<String> {
+fn je_years(table: &FxTable, map: &Map<String, Value>, fallback_year: i32) -> Vec<String> {
     table
         .rows
         .iter()
-        .filter_map(|row| parse_date(&text(table, row, map, "date")))
+        .filter_map(|row| mapped_date(table, row, map, fallback_year))
         .map(|date| date.year())
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -935,6 +987,7 @@ fn normalize_je(
     params: &Value,
     end: NaiveDate,
     cancel: &AtomicBool,
+    entity_key_enabled: bool,
 ) -> Result<(Vec<JeLine>, usize, usize, String), AppError> {
     // 期间过滤先于公共 Net=0 匹配，避免未来期间的冲销消掉报告期内变动。
     // 噪声行再先于期间过滤：SAP 的 ALV 分组小计、合计行下面的手工草稿都没有
@@ -945,22 +998,32 @@ fn normalize_je(
     });
     let start = NaiveDate::from_ymd_opt(end.year(), 1, 1).unwrap();
     let mut period_table = table.clone();
+    let date_indexes = indexes(table, map, "date");
+    let primary_date_index = date_indexes.first().copied();
     period_table.rows = table
         .rows
         .iter()
         .enumerate()
         .filter(|(index, row)| {
             junk.get(*index).copied().unwrap_or(true)
-                && parse_date(&text(table, row, map, "date"))
+                && mapped_date(table, row, map, end.year())
                     .is_some_and(|date| date >= start && date <= end)
         })
-        .map(|(_, row)| row.clone())
+        .map(|(_, row)| {
+            let mut normalized = row.clone();
+            if let (Some(index), Some(date)) =
+                (primary_date_index, mapped_date(table, row, map, end.year()))
+            {
+                normalized[index] = date.to_string();
+            }
+            normalized
+        })
         .collect();
     // 期间过滤把整本序时账滤空时必须当场报错。此前只是安静地往下走，
     // 导出的新增／处置／JE 明细全是空表，用户以为"JE 没匹配上"，
     // 实际是报告截止日的年度和账套年度对不上。
     if period_table.rows.is_empty() && !table.rows.is_empty() {
-        let years = je_years(table, map);
+        let years = je_years(table, map, end.year());
         let detail = if years.is_empty() {
             "序时账里没有能解析出来的记账日期。".to_owned()
         } else {
@@ -977,7 +1040,7 @@ fn normalize_je(
     let table = &period_table;
     let ledger = ledger_mapping_for(map);
     let (voucher_keys, accounts) = tabular::ledger_row_keys(&table.rows, &table.headers, &ledger);
-    let identities = account_identities(table, map, params, "jeFixedEntity");
+    let identities = account_identities(table, map, params, EntitySide::Je, entity_key_enabled);
     let target_accounts = identities
         .iter()
         .filter(|identity| find_assignment(assignments, identity).is_some())
@@ -1033,12 +1096,161 @@ fn normalize_je(
             raw: row.clone(),
         });
     }
+    // JE 零命中守卫（内存路径）：报告期间内 JE 本有数据行（上面的
+    // FA_TBJE_PERIOD_EMPTY 已排除「期间全空」），却没有任何一行命中已确认
+    // 科目。典型成因是主体列只在单侧映射（或指向空列），两侧主体键对不上，
+    // JE 行被逐行静默丢弃——此前会导出全空的新增／处置／JE 明细且零警告。
+    if out.is_empty() && !table.rows.is_empty() {
+        let raw_entities = table
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let raw = text(table, row, map, "entity");
+                (!raw.is_empty()).then_some(raw)
+            })
+            .fold(Vec::new(), |mut acc: Vec<String>, raw| {
+                if !acc.contains(&raw) {
+                    acc.push(raw);
+                }
+                acc
+            });
+        return Err(je_unmatched_error(
+            params,
+            assignments,
+            &identities,
+            &raw_entities,
+            table.rows.len(),
+        ));
+    }
     Ok((
         out,
         net_zero.direct_pairs,
         net_zero.cross_pairs,
         net_zero.sign_basis,
     ))
+}
+
+/// JE 零命中守卫的报错组装。错误码 `FA_TBJE_JE_UNMATCHED`，报错必须把
+/// 两侧主体口径、疑似固定资产科目样例摆给用户：
+/// a) JE 中实际出现的原始主体（去重，最多列 5 个）；
+/// b) 已确认科目（原值／累计折旧角色）挂的主体；
+/// c) JE 中形似固定资产科目（编码前缀与已确认科目同头）却未命中的样例，
+///    最多 5 个——没有则说明 JE 里确实没有相近科目；
+/// d) 引导语：检查字段映射（尤其 JE 主体列）与科目复核的主体口径。
+fn je_unmatched_error(
+    params: &Value,
+    assignments: &AssignmentIndex,
+    je_identities: &[AccountIdentity],
+    raw_entities: &[String],
+    period_row_count: usize,
+) -> AppError {
+    let rows: Vec<Assignment> = serde_json::from_value(
+        params
+            .get("accountAssignments")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )
+    .unwrap_or_default();
+    let fa_rows: Vec<&Assignment> = rows
+        .iter()
+        .filter(|a| matches!(a.role.as_str(), "cost" | "depreciation"))
+        .collect();
+    let je_entity_text = if raw_entities.is_empty() {
+        "JE 未映射主体列或主体列全为空".to_owned()
+    } else {
+        format!(
+            "JE 中实际出现的主体：{}",
+            raw_entities
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("、")
+        )
+    };
+    let mut confirmed_entities: Vec<String> = Vec::new();
+    let mut has_unscoped = false;
+    for a in &fa_rows {
+        match a.entity.as_deref().map(str::trim) {
+            Some(entity) if !entity.is_empty() => {
+                if !confirmed_entities.iter().any(|v| v == entity) {
+                    confirmed_entities.push(entity.to_owned());
+                }
+            }
+            Some(_) => {}
+            None => has_unscoped = true,
+        }
+    }
+    let confirmed_text = match (confirmed_entities.is_empty(), has_unscoped) {
+        (true, true) => "已确认科目均未限定主体".to_owned(),
+        (true, false) => "已确认科目未挂任何主体".to_owned(),
+        (false, _) => format!(
+            "已确认科目挂的主体：{}{}",
+            confirmed_entities
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("、"),
+            if has_unscoped {
+                "（另有未限定主体的确认项）"
+            } else {
+                ""
+            }
+        ),
+    };
+    // 形似固定资产科目：取已确认科目编码的数字前缀（前 4 位，如 1601/1602），
+    // 与前缀同头却没命中的 JE 编码列为样例。
+    let mut prefixes: Vec<String> = Vec::new();
+    for a in &fa_rows {
+        let digits: String = a
+            .account
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if digits.is_empty() {
+            continue;
+        }
+        let prefix = if digits.len() > 4 {
+            digits[..4].to_owned()
+        } else {
+            digits
+        };
+        if !prefixes.contains(&prefix) {
+            prefixes.push(prefix);
+        }
+    }
+    let mut samples: Vec<String> = Vec::new();
+    if !prefixes.is_empty() {
+        for id in je_identities {
+            if samples.len() >= 5 || id.code.is_empty() {
+                continue;
+            }
+            if find_assignment(assignments, id).is_some() {
+                continue;
+            }
+            let code = ledger_mapping::normalize_account_code(&id.code);
+            if prefixes
+                .iter()
+                .any(|p| code.starts_with(&ledger_mapping::normalize_account_code(p)))
+                && !samples.contains(&id.code)
+            {
+                samples.push(id.code.clone());
+            }
+        }
+    }
+    let sample_text = if samples.is_empty() {
+        String::new()
+    } else {
+        format!("JE 中形似固定资产科目但未命中的编码样例：{}。", samples.join("、"))
+    };
+    error(
+        "FA_TBJE_JE_UNMATCHED",
+        format!(
+            "报告期间内序时账有 {period_row_count} 行数据，但没有一行命中已确认的固定资产科目，已停止生成底稿，避免导出全空的新增／处置／JE 明细。{je_entity_text}；{confirmed_text}。{sample_text}请检查字段映射（尤其 JE 主体列是否未映射或指向空列），并回到科目确认步骤复核主体口径后重试。"
+        ),
+        None,
+    )
 }
 
 fn classify_movements(
@@ -2674,7 +2886,7 @@ fn ledger_mapping_for(map: &Map<String, Value>) -> LedgerMapping {
         account_name: mapped_columns(map, "accountName"),
         legacy_account: mapped_columns(map, "account"),
         entity: mapped_columns(map, "entity").first().cloned(),
-        date: mapped_columns(map, "date").first().cloned(),
+        date: mapped_columns(map, "date"),
         summary: mapped_columns(map, "summary").first().cloned(),
         amount: mapped_columns(map, "functionalAmount").first().cloned(),
         direction: mapped_columns(map, "direction").first().cloned(),
@@ -2686,13 +2898,9 @@ fn account_identities(
     table: &FxTable,
     map: &Map<String, Value>,
     params: &Value,
-    fixed_key: &str,
+    side: ledger_mapping::EntitySide,
+    entity_key_enabled: bool,
 ) -> Vec<AccountIdentity> {
-    let side = if fixed_key == "tbFixedEntity" {
-        ledger_mapping::EntitySide::Tb
-    } else {
-        ledger_mapping::EntitySide::Je
-    };
     let entity_scope: ledger_mapping::EntityScope = params
         .get("entityScope")
         .cloned()
@@ -2700,17 +2908,12 @@ fn account_identities(
         .unwrap_or_default();
     let (_, display) =
         tabular::ledger_row_keys(&table.rows, &table.headers, &ledger_mapping_for(map));
-    let fixed = params
-        .get(fixed_key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
     table
         .rows
         .iter()
         .enumerate()
         .map(|(i, row)| {
-            let entity = text(table, row, map, "entity");
+            let raw_entity = text(table, row, map, "entity");
             let raw_code = text(table, row, map, "accountCode");
             let mut name = join(row, &indexes(table, map, "accountName"));
             if name.is_empty() {
@@ -2725,13 +2928,8 @@ fn account_identities(
             } else {
                 name = ledger_mapping::account_name_of(&name);
             }
-            let entity = if entity.is_empty() {
-                fixed.to_owned()
-            } else {
-                entity
-            };
             AccountIdentity {
-                entity: ledger_mapping::apply_entity_scope(side, &entity, &entity_scope),
+                entity: resolve_entity(side, &raw_entity, entity_key_enabled, &entity_scope),
                 code: ledger_mapping::account_code_of(&raw_code),
                 name,
                 display: display[i].clone(),
@@ -2747,9 +2945,10 @@ fn assignment_index(
     tb_map: &Map<String, Value>,
     je: &FxTable,
     je_map: &Map<String, Value>,
+    entity_key_enabled: bool,
 ) -> Result<AssignmentIndex, AppError> {
-    let tb_ids = account_identities(tb, tb_map, params, "tbFixedEntity");
-    let je_ids = account_identities(je, je_map, params, "jeFixedEntity");
+    let tb_ids = account_identities(tb, tb_map, params, EntitySide::Tb, entity_key_enabled);
+    let je_ids = account_identities(je, je_map, params, EntitySide::Je, entity_key_enabled);
     assignment_index_from_identities(params, &tb_ids, &je_ids)
 }
 
@@ -2912,6 +3111,19 @@ fn text(table: &FxTable, row: &[String], map: &Map<String, Value>, role: &str) -
         .map(|v| v.trim().to_owned())
         .unwrap_or_default()
 }
+fn mapped_date(
+    table: &FxTable,
+    row: &[String],
+    map: &Map<String, Value>,
+    fallback_year: i32,
+) -> Option<NaiveDate> {
+    ledger_mapping::parse_mapped_date(
+        &table.headers,
+        row,
+        &indexes(table, map, "date"),
+        Some(fallback_year),
+    )
+}
 fn number(table: &FxTable, row: &[String], map: &Map<String, Value>, role: &str) -> Option<f64> {
     // 金额读取走公共引擎的宽松口径：`%`／货币符号／括号负数先剥掉，尾部负号、
     // CR/DR、「借／贷」后缀由 `parse_amount` 认；读不出一律 `None`。余额槽位
@@ -2991,10 +3203,84 @@ mod tests {
             "mode":"aggregate",
             "mappings":[{"side":"tb","source":"母公司杭州管理处","target":"母公司"}]
         }});
-        let identities = account_identities(&table, &map, &params, "tbFixedEntity");
+        // 双侧映射主体（entity_key_enabled = true）时，aggregate 归集照常生效。
+        let identities = account_identities(&table, &map, &params, EntitySide::Tb, true);
         assert_eq!(identities[0].entity, "母公司");
-        let je_identities = account_identities(&table, &map, &params, "jeFixedEntity");
+        let je_identities = account_identities(&table, &map, &params, EntitySide::Je, true);
         assert_eq!(je_identities[0].entity, "母公司杭州管理处");
+    }
+
+    /// 单侧映射主体 → 双方一律默认主体（LEDGER_MAPPING_UNIFICATION.md
+    /// 「主体作为条件匹配键」）。修复前 JE 侧逐行回退 jeFixedEntity 的差异值，
+    /// 与携带真实主体的确认科目全不匹配，整本 JE 被静默丢空。
+    #[test]
+    fn 单侧映射主体时双方一律按默认主体处理() {
+        let spec = SourceSpec {
+            input_path: String::new(),
+            sheet: "Sheet1".into(),
+            header_row: 1,
+            header_depth: 1,
+        };
+        let table = disk_table(
+            &spec,
+            vec!["主体".into(), "科目编码".into(), "科目名称".into()],
+            vec![
+                vec!["2000".into(), "1601".into(), "固定资产".into()],
+                vec!["2002".into(), "1601".into(), "固定资产".into()],
+                vec![String::new(), "1602".into(), "累计折旧".into()],
+            ],
+            3,
+        );
+        let map = serde_json::from_value::<Map<String, Value>>(json!({
+            "entity":"主体", "accountCode":"科目编码", "accountName":"科目名称"
+        }))
+        .unwrap();
+        let params = json!({"entityScope": {
+            "mode":"aggregate",
+            "mappings":[
+                {"side":"tb","source":"2000","target":"合并主体"},
+                {"side":"je","source":"2000","target":"合并主体"}
+            ]
+        }});
+        // JE 侧没有映射主体列（entity_key_enabled = false）：即便 TB 侧有真实
+        // 主体、也配置了归集映射，双方的身份都只能是默认主体——单侧主体值与
+        // 归集目标都不能成为匹配键。
+        for side in [EntitySide::Tb, EntitySide::Je] {
+            let ids = account_identities(&table, &map, &params, side, false);
+            assert!(
+                ids.iter()
+                    .all(|id| id.entity == ledger_mapping::DEFAULT_ENTITY),
+                "{side:?} 单侧无主体时应全部归默认主体：{:?}",
+                ids.iter().map(|id| id.entity.clone()).collect::<Vec<_>>()
+            );
+        }
+        // 对照：双侧映射主体（启用）时，aggregate 归集仍照常生效——仅映射
+        // 列表内的源主体被归集，未列出的保留原值，空白主体归默认主体。
+        let tb_on = account_identities(&table, &map, &params, EntitySide::Tb, true);
+        assert_eq!(tb_on[0].entity, "合并主体");
+        assert_eq!(tb_on[1].entity, "2002");
+        assert_eq!(tb_on[2].entity, ledger_mapping::DEFAULT_ENTITY);
+
+        // 端到端：JE 不映射主体列时，整条链路（修复后前端把确认科目全部挂
+        // 「默认主体」）应照常出数，不再静默丢空 JE。
+        let (dir, _, mut params) = fixture();
+        params["jeMapping"].as_object_mut().unwrap().remove("entity");
+        params["accountAssignments"] = json!([
+            {"entity":"默认主体","account":"1601 机器设备","role":"cost","category":"机器设备"},
+            {"entity":"默认主体","account":"1602 累计折旧","role":"depreciation","category":"机器设备"}
+        ]);
+        let a = analyze(&params, &AtomicBool::new(false)).unwrap();
+        assert!(!a.je.is_empty(), "单侧无主体时 JE 不应再被整本丢弃");
+        assert_eq!(a.tb.len(), 2);
+        let totals = &a.totals[&(
+            ledger_mapping::DEFAULT_ENTITY.to_owned(),
+            "机器设备".to_owned(),
+        )];
+        assert_eq!(totals.opening_cost, 1000.0);
+        assert_eq!(totals.additions, 500.0);
+        assert_eq!(totals.dep_charge, 100.0);
+        assert_eq!(preview_json(&a)["reconciliationDifferences"], 0);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// 本机 PBC 回归入口。夹具不进仓库，通过环境变量指向 TBJEPBC 目录。
@@ -3151,6 +3437,313 @@ mod tests {
         };
         assert_export_caches(&out, &a);
         println!("固定资产 TB＋JE 回归底稿：{}", out.display());
+    }
+
+    /// 本机复现入口：2000&2002 公司 TB ＋ 2002 公司 JE（SAP 导出，JE 科目描述为空）。
+    /// 跑法：$env:FA_TBJE_PBC2002_DIR='...\\TBJEPBC\\TBJE';
+    ///      cargo test repro_2000_2002 -- --ignored --nocapture
+    /// 验收口径（2026-09-13 主体条件键修复后）：
+    /// 变体 A（默认映射，双侧主体）——TB 身份 10 个、JE 身份 6 个、全部命中，
+    /// analyze tb 18 行、je 348 行；
+    /// 变体 B（JE 主体列未映射）——双方身份一律「默认主体」，确认科目全部挂
+    /// 「默认主体」（模拟配套的前端）后必须命中，analyze 的 JE 行数 > 0。
+    #[test]
+    #[ignore = "requires the local 2000&2002 PBC directory"]
+    fn repro_2000_2002_tbje_je_matching() {
+        let dir = PathBuf::from(std::env::var("FA_TBJE_PBC2002_DIR").expect("FA_TBJE_PBC2002_DIR"));
+        let files = [
+            (dir.join("2000&2002公司TB.xlsx"), "tb"),
+            (dir.join("2002公司JE.XLSX"), "je"),
+        ];
+        let mut accounts: Vec<String> = Vec::new();
+        let mut entities: Vec<String> = Vec::new();
+        let mut specs = Vec::new();
+        let mut maps = Vec::new();
+        for (path, kind) in &files {
+            let classified = deposit_interest::call(
+                "deposit.classify_source",
+                json!({"source":{"inputPath":path}}),
+            )
+            .unwrap();
+            println!("{kind} classify: {classified}");
+            let inspected = deposit_interest::call(
+                &format!("deposit.inspect_{kind}"),
+                json!({"source":{
+                    "inputPath":path,
+                    "sheet":classified["sheet"],
+                    "headerRow":classified["headerRow"],
+                    "headerDepth":classified["headerDepth"]
+                }}),
+            )
+            .unwrap();
+            println!("{kind} suggestedMapping: {}", inspected["suggestedMapping"]);
+            println!("{kind} entities: {:?}", inspected["entities"]);
+            let list = inspected["accounts"].as_array().unwrap().clone();
+            println!("{kind} accounts: {} 个", list.len());
+            let fa: Vec<String> = list
+                .iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| s.starts_with("1601") || s.starts_with("1602"))
+                .map(|s| s.to_string())
+                .collect();
+            println!("{kind} FA accounts: {fa:?}");
+            for v in list {
+                let s = v.as_str().unwrap().to_string();
+                if !accounts.contains(&s) {
+                    accounts.push(s);
+                }
+            }
+            for v in inspected["entities"].as_array().unwrap() {
+                let s = v.as_str().unwrap().to_string();
+                if !entities.contains(&s) {
+                    entities.push(s);
+                }
+            }
+            specs.push(json!({
+                "inputPath":path, "sheet":classified["sheet"],
+                "headerRow":classified["headerRow"], "headerDepth":classified["headerDepth"]
+            }));
+            maps.push(inspected["suggestedMapping"].clone());
+        }
+        println!("entities 合并: {entities:?}  accounts 合并: {} 个", accounts.len());
+        // 与前端 suggestFaAccounts 同口径：数字编码按 1601/1602 前缀定角色。
+        let role_of = |account: &str| {
+            let code: String = account
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>();
+            if code.starts_with("1601") {
+                "cost"
+            } else if code.starts_with("1602") {
+                "depreciation"
+            } else if !code.is_empty() {
+                "excluded"
+            } else if account.contains("折旧") {
+                "depreciation"
+            } else {
+                "excluded"
+            }
+        };
+        // 与前端 suggestFaAccounts/faCategory 同口径：类别按编码取首个出现的名称
+        // （accounts 以 TB 在前、JE 在后拼接，同编码的纯编码串继承 TB 名称）。
+        let split_code = |account: &str| -> String {
+            account
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+        };
+        let mut first_name: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for account in &accounts {
+            let code = split_code(account);
+            if code.is_empty() {
+                continue;
+            }
+            let name = account[code.len()..]
+                .trim_start_matches([' ', ':', '：', '-', '—', '/', '\\', '|'])
+                .trim()
+                .to_string();
+            first_name.entry(code).or_insert(name);
+        }
+        let category_of = |account: &str| -> String {
+            let code = split_code(account);
+            if let Some(name) = first_name.get(&code) {
+                if !name.is_empty() {
+                    return name.clone();
+                }
+            }
+            account.trim().to_string()
+        };
+        let mut assignments = Vec::new();
+        for entity in &entities {
+            for account in &accounts {
+                assignments.push(json!({
+                    "entity": entity,
+                    "account": account,
+                    "role": role_of(account),
+                    "category": category_of(account),
+                }));
+            }
+        }
+        println!("assignments: {} 行", assignments.len());
+        let mut params = json!({
+            "tbSource": specs[0],
+            "jeSource": specs[1],
+            "tbMapping": maps[0],
+            "jeMapping": maps[1],
+            "reportEnd": "2025-12-31",
+            "tbFixedEntity": "默认主体",
+            "jeFixedEntity": "默认主体",
+            "entityScope": {"mode": "strict", "mappings": []},
+            "accountAssignments": assignments,
+        });
+        // 先看匹配层：两侧身份各长什么样、find_assignment 是否命中。
+        {
+            let tb_spec: crate::fx::SourceSpec =
+                serde_json::from_value(specs[0].clone()).unwrap();
+            let je_spec: crate::fx::SourceSpec =
+                serde_json::from_value(specs[1].clone()).unwrap();
+            let tb = crate::fx::load_fx_table(&tb_spec).unwrap();
+            let raw_je = crate::fx::load_fx_table(&je_spec).unwrap();
+            let tb_map = serde_json::from_value::<Map<String, Value>>(maps[0].clone()).unwrap();
+            let je_map = serde_json::from_value::<Map<String, Value>>(maps[1].clone()).unwrap();
+            let je = crate::fx::forward_filled_je_table(&raw_je, &je_map);
+            // 主体条件键与生产同口径：双侧都映射主体列才启用。
+            let entity_on = ledger_mapping::entity_key_enabled(
+                !mapped_columns(&tb_map, "entity").is_empty(),
+                !mapped_columns(&je_map, "entity").is_empty(),
+            );
+            let tb_ids = account_identities(&tb, &tb_map, &params, EntitySide::Tb, entity_on);
+            let je_ids = account_identities(&je, &je_map, &params, EntitySide::Je, entity_on);
+            let mut unique_tb: Vec<AccountIdentity> = Vec::new();
+            for id in &tb_ids {
+                if (id.code.starts_with("1601") || id.code.starts_with("1602"))
+                    && !unique_tb.iter().any(|u| u.entity == id.entity && u.code == id.code)
+                {
+                    unique_tb.push(id.clone());
+                }
+            }
+            println!("TB 侧 FA 身份（去重后 {} 个）：", unique_tb.len());
+            for id in &unique_tb {
+                println!(
+                    "  entity={:?} code={:?} name={:?} display={:?}",
+                    id.entity, id.code, id.name, id.display
+                );
+            }
+            let mut unique_je: Vec<AccountIdentity> = Vec::new();
+            for id in &je_ids {
+                if (id.code.starts_with("1601") || id.code.starts_with("1602"))
+                    && !unique_je
+                        .iter()
+                        .any(|u| u.entity == id.entity && u.code == id.code && u.name == id.name)
+                {
+                    unique_je.push(id.clone());
+                }
+            }
+            println!("JE 侧 FA 身份（去重后 {} 个）：", unique_je.len());
+            for id in &unique_je {
+                println!(
+                    "  entity={:?} code={:?} name={:?} display={:?} legacy={:?}",
+                    id.entity, id.code, id.name, id.display, id.legacy_display
+                );
+            }
+            let index = assignment_index_from_identities(&params, &tb_ids, &je_ids).unwrap();
+            println!(
+                "index.codes 键数: {}  index.names 键数: {}",
+                index.codes.len(),
+                index.names.len()
+            );
+            // 变体 A（默认映射，双侧主体）：TB 身份 10 个、JE 身份 6 个，
+            // 全部命中已确认科目。
+            assert_eq!(unique_tb.len(), 10, "TB 侧 FA 身份数");
+            assert_eq!(unique_je.len(), 6, "JE 侧 FA 身份数");
+            for (side, ids) in [("TB", &unique_tb), ("JE", &unique_je)] {
+                for id in ids {
+                    assert!(
+                        find_assignment(&index, id).is_some(),
+                        "[{side}] 变体A必须命中：entity={:?} code={:?} name={:?}",
+                        id.entity,
+                        id.code,
+                        id.name
+                    );
+                }
+            }
+            // 变体 B：JE 主体列未映射（或指向空列）。按 2026-09-13 修复后的
+            // 契约，单侧无主体 → 双方身份一律「默认主体」（不再逐行回退
+            // jeFixedEntity 的差异值）；配套的前端会把确认科目全部挂
+            // 「默认主体」。两侧身份同键，find_assignment 必须命中。
+            let mut params_b = params.clone();
+            let mut je_map_b = je_map.clone();
+            je_map_b.remove("entity");
+            params_b["jeMapping"] = serde_json::to_value(&je_map_b).unwrap();
+            let mut assignments_b = Vec::new();
+            for account in &accounts {
+                assignments_b.push(json!({
+                    "entity": "默认主体",
+                    "account": account,
+                    "role": role_of(account),
+                    "category": category_of(account),
+                }));
+            }
+            params_b["accountAssignments"] = json!(assignments_b);
+            let tb_ids_b = account_identities(&tb, &tb_map, &params_b, EntitySide::Tb, false);
+            let je_ids_b = account_identities(&je, &je_map_b, &params_b, EntitySide::Je, false);
+            let mut unique_b: Vec<AccountIdentity> = Vec::new();
+            for id in &je_ids_b {
+                if (id.code.starts_with("1601") || id.code.starts_with("1602"))
+                    && !unique_b
+                        .iter()
+                        .any(|u| u.entity == id.entity && u.code == id.code)
+                {
+                    unique_b.push(id.clone());
+                }
+            }
+            println!("变体B（JE 无主体映射）FA 身份：");
+            for id in &unique_b {
+                println!(
+                    "  entity={:?} code={:?} name={:?}",
+                    id.entity, id.code, id.name
+                );
+            }
+            assert!(
+                unique_b
+                    .iter()
+                    .all(|id| id.entity == ledger_mapping::DEFAULT_ENTITY),
+                "变体B JE 身份应全部归默认主体"
+            );
+            let index_b =
+                assignment_index_from_identities(&params_b, &tb_ids_b, &je_ids_b).unwrap();
+            println!(
+                "变体B index.codes 键数: {}  index.names 键数: {}",
+                index_b.codes.len(),
+                index_b.names.len()
+            );
+            for id in &unique_b {
+                assert!(
+                    find_assignment(&index_b, id).is_some(),
+                    "[变体B JE] 修复后必须命中：entity={:?} code={:?} name={:?}",
+                    id.entity,
+                    id.code,
+                    id.name
+                );
+            }
+        }
+        // 变体 A：默认映射全链路——tb 18 行、je 348 行。
+        let a = analyze(&params, &AtomicBool::new(false)).unwrap();
+        println!(
+            "analyze 结果：tb {} 行、je {} 行、新增 {} 行、处置 {} 行",
+            a.tb.len(),
+            a.je.len(),
+            a.additions.len(),
+            a.disposals.len()
+        );
+        assert_eq!(a.tb.len(), 18, "变体A TB 行数");
+        assert_eq!(a.je.len(), 348, "变体A JE 行数");
+        println!("warnings: {:?}", a.warnings);
+        // 变体 B：修复后直接 analyze 也必须拿到 JE 行，不再全空。
+        let mut params_b = params.clone();
+        let mut je_map_b = serde_json::from_value::<Map<String, Value>>(maps[1].clone()).unwrap();
+        je_map_b.remove("entity");
+        params_b["jeMapping"] = serde_json::to_value(&je_map_b).unwrap();
+        let mut assignments_b = Vec::new();
+        for account in &accounts {
+            assignments_b.push(json!({
+                "entity": "默认主体",
+                "account": account,
+                "role": role_of(account),
+                "category": category_of(account),
+            }));
+        }
+        params_b["accountAssignments"] = json!(assignments_b);
+        let a_b = analyze(&params_b, &AtomicBool::new(false)).unwrap();
+        println!(
+            "变体B analyze 结果：tb {} 行、je {} 行、新增 {} 行、处置 {} 行",
+            a_b.tb.len(),
+            a_b.je.len(),
+            a_b.additions.len(),
+            a_b.disposals.len()
+        );
+        assert!(!a_b.je.is_empty(), "变体B（JE 无主体映射）修复后 JE 不应全空");
     }
 
     /// 记-0035 形态的更新改造凭证：借原值＋贷原值（净增）＋对方为 1604 在建
@@ -3550,6 +4143,49 @@ mod tests {
         let err = analyze(&params, &AtomicBool::new(false)).unwrap_err();
         assert_eq!(err.code, "FA_TBJE_PERIOD_EMPTY");
         assert!(err.user_message.contains("2025"), "{}", err.user_message);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// JE 零命中守卫：期间内 JE 本有数据，却没有一行命中已确认科目（典型：
+    /// 主体口径错位——TB/确认科目挂 A，JE 整本是 B）。必须报
+    /// FA_TBJE_JE_UNMATCHED 并摆出两侧主体与形似科目，不得静默导出空表；
+    /// 内存与大 CSV 磁盘两条路径都要拦。
+    #[test]
+    fn je期间有数据但零命中时报错而不是静默导出空表() {
+        let (dir, _, mut params) = fixture();
+        std::fs::write(dir.join("je.csv"), "主体,日期,凭证号,科目编码,科目名称,摘要,借方,贷方\nB,2025-01-10,V1,1601,机器设备,购置,500,0\nB,2025-01-10,V1,2202,应付账款,购置,0,500\nB,2025-12-31,V3,6602,折旧费,计提,100,0\nB,2025-12-31,V3,1602,累计折旧,计提,0,100\n").unwrap();
+        // TB 只有主体 A，确认科目也全部挂在 A 名下；JE 整本是主体 B，
+        // 科目编码本身对得上——错的只是主体口径。修复前 JE 行被逐行
+        // 静默丢弃，导出的新增／处置／JE 明细全空、零警告。
+        let assignments_a = json!([
+            {"entity":"A","account":"1601 机器设备","role":"cost","category":"机器设备"},
+            {"entity":"A","account":"1602 累计折旧","role":"depreciation","category":"机器设备"}
+        ]);
+        params["accountAssignments"] = assignments_a.clone();
+        let err = analyze(&params, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(err.code, "FA_TBJE_JE_UNMATCHED");
+        assert!(err.user_message.contains("B"), "{}", err.user_message);
+        assert!(err.user_message.contains("A"), "{}", err.user_message);
+        assert!(err.user_message.contains("1601"), "{}", err.user_message);
+        assert!(err.user_message.contains("主体列"), "{}", err.user_message);
+        // 大 CSV 磁盘路径同样拦截。
+        params["__testForceDiskLedger"] = json!(true);
+        let err = analyze(&params, &AtomicBool::new(false)).unwrap_err();
+        assert_eq!(err.code, "FA_TBJE_JE_UNMATCHED");
+        // 正常多主体对照：确认科目不限定主体（或挂对主体）时同一份账照常
+        // 出数；A/B 主体各挂各类别的严格回归见
+        // alphanumeric_codes_and_same_code_in_two_entities_do_not_share_categories。
+        if let Some(object) = params.as_object_mut() {
+            object.remove("__testForceDiskLedger");
+        }
+        params["accountAssignments"] = json!([
+            {"account":"1601 机器设备","role":"cost","category":"机器设备"},
+            {"account":"1602 累计折旧","role":"depreciation","category":"机器设备"}
+        ]);
+        let a = analyze(&params, &AtomicBool::new(false)).unwrap();
+        assert!(!a.je.is_empty());
+        assert_eq!(a.totals[&("B".into(), "机器设备".into())].additions, 500.0);
+        assert_eq!(a.totals[&("B".into(), "机器设备".into())].dep_charge, 100.0);
         let _ = std::fs::remove_dir_all(dir);
     }
 

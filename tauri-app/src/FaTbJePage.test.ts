@@ -1,10 +1,14 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   faAssignmentsForEntities,
+  faAssignmentsForEntityAccounts,
   faTbJeMissingMappings,
+  groupAssignmentViews,
   splitFaAccount,
   suggestFaAccount,
   suggestFaAccounts,
+  unionEntityAccounts,
 } from "./FaTbJePage";
 
 describe("FA TB+JE account role presets", () => {
@@ -248,5 +252,163 @@ describe("FA TB+JE account role presets", () => {
       ["cost", "固定资产"],
       ["depreciation", "固定资产"],
     ]);
+  });
+});
+
+describe("FA TB+JE 真实主体×科目组合", () => {
+  it("只按账里真实存在的组合铺清单，主体 2000 名下不出现只有 2002 才有的科目", () => {
+    const pairs = unionEntityAccounts(
+      [
+        {
+          entity: "2000",
+          account: "1601040000 Fixed assets_Transportaion equipment",
+        },
+        {
+          entity: "2000",
+          account: "1601020000 Fixed assets_Machinery equipment",
+        },
+      ],
+      [{ entity: "2002", account: "1601020000" }],
+    );
+    expect(pairs).toHaveLength(3);
+    const rows = faAssignmentsForEntityAccounts(pairs, []);
+    // 旧笛卡尔积口径下这会是「2 主体 × 3 科目 = 6 行」，其中一半是幻影组合。
+    expect(rows).toHaveLength(3);
+    const codesUnder2000 = rows
+      .filter((row) => row.entity === "2000")
+      .map((row) => splitFaAccount(row.account).code);
+    expect(codesUnder2000).toEqual(["1601040000", "1601020000"]);
+    // 1601020000 在 2000 名下只来自 TB 的带名称写法，2002 名下只有纯编码写法。
+    expect(
+      rows
+        .filter((row) => splitFaAccount(row.account).code === "1601020000")
+        .map((row) => row.entity),
+    ).toEqual(["2000", "2002"]);
+    // 2002 的纯编码写法保留原串，payload 逐条匹配用。
+    expect(
+      rows.find((row) => row.entity === "2002")?.account,
+    ).toBe("1601020000");
+  });
+
+  it("同一（主体，编码）的两种写法合并为一行，来源标签 TB+JE，payload 仍含两条原始串", () => {
+    const pairs = unionEntityAccounts(
+      [
+        {
+          entity: "2000",
+          account: "1601020000 Fixed assets_Machinery equipment",
+        },
+      ],
+      [{ entity: "2000", account: "1601020000" }],
+    );
+    const rows = faAssignmentsForEntityAccounts(pairs, []);
+    // payload 级：两种写法各自成行、缺一不可（引擎按这些串逐侧匹配）。
+    expect(rows.map((row) => row.account)).toEqual([
+      "1601020000 Fixed assets_Machinery equipment",
+      "1601020000",
+    ]);
+    // 两种写法经自动归一拿到同一角色与类别。
+    expect(new Set(rows.map((row) => `${row.role}|${row.category}`))).toEqual(
+      new Set(["cost|Fixed assets_Machinery equipment"]),
+    );
+    const views = groupAssignmentViews(rows, (entity, account) =>
+      account.includes("Fixed assets") ? ["tb" as const] : ["je" as const],
+    );
+    expect(views).toHaveLength(1);
+    expect(views[0].sources).toEqual(["tb", "je"]);
+    expect(views[0].label).toBe("1601020000 Fixed assets_Machinery equipment");
+    expect(views[0].accounts).toEqual([
+      "1601020000 Fixed assets_Machinery equipment",
+      "1601020000",
+    ]);
+  });
+
+  it("保留用户已确认的角色与类别（按主体＋科目串匹配），排序口径与旧版一致", () => {
+    const pairs = unionEntityAccounts(
+      [
+        { entity: "A", account: "1002 银行存款" },
+        { entity: "A", account: "1601 固定资产" },
+      ],
+      [{ entity: "B", account: "1602 累计折旧" }],
+    );
+    const rows = faAssignmentsForEntityAccounts(pairs, [
+      {
+        entity: "A",
+        account: "1601 固定资产",
+        role: "depreciation",
+        category: "机修设备",
+      },
+    ]);
+    expect(rows.map((row) => [row.entity, row.account])).toEqual([
+      ["A", "1601 固定资产"],
+      ["A", "1002 银行存款"],
+      ["B", "1602 累计折旧"],
+    ]);
+    expect(rows[0]).toEqual({
+      entity: "A",
+      account: "1601 固定资产",
+      role: "depreciation",
+      category: "机修设备",
+    });
+  });
+
+  it("认不出编码的科目按科目串本身分组，互不混并", () => {
+    const views = groupAssignmentViews([
+      { entity: "A", account: "Accumulated Depreciation", role: "depreciation", category: "固定资产" },
+      { entity: "A", account: "Accumulated Depreciation - Vehicles", role: "depreciation", category: "固定资产" },
+    ]);
+    expect(views).toHaveLength(2);
+    expect(views.map((view) => view.key)).toEqual([
+      "Accumulated Depreciation",
+      "Accumulated Depreciation - Vehicles",
+    ]);
+    // 无来源信息（回退口径）时不显示来源标签。
+    expect(views[0].sources).toEqual([]);
+  });
+
+  it("两侧 entityAccounts 均为空时得到空清单（页面据此回退笛卡尔积）", () => {
+    expect(unionEntityAccounts([], [])).toEqual([]);
+    expect(unionEntityAccounts(undefined, undefined)).toEqual([]);
+  });
+});
+
+describe("FA TB+JE 三步向导（源码契约）", () => {
+  const source = readFileSync(
+    new URL("./FaTbJePage.tsx", import.meta.url),
+    "utf8",
+  );
+  const stepOne = source.slice(
+    source.indexOf("{step === 1 && ("),
+    source.indexOf("{step === 2 && ("),
+  );
+
+  it("步骤条只有三步：上传与映射、科目复核、预览与导出", () => {
+    const stepsArray = source.slice(
+      source.indexOf("steps={["),
+      source.indexOf("]}", source.indexOf("steps={[")),
+    );
+    expect(stepsArray.match(/key: "/g)).toHaveLength(3);
+    expect(stepsArray).toContain('label: "上传与映射"');
+    expect(stepsArray).toContain('label: "科目复核"');
+    expect(stepsArray).toContain('label: "预览与导出"');
+    expect(source).not.toContain('label: "上传与识别"');
+    expect(source).not.toContain('label: "字段映射"');
+  });
+
+  it("第 1 步同屏承载源卡片、LLM 联合复核与两侧字段映射面板", () => {
+    expect(stepOne).toContain("FaLedgerSourceCard");
+    expect(stepOne).toContain("<LedgerReviewAll");
+    expect(stepOne).toContain("<FaTbJeMappingPanel");
+    expect(stepOne).not.toContain("继续核对字段");
+    expect(source).not.toContain("返回上传\n");
+  });
+
+  it("第 1 步底部门禁为「TB/JE 均已识别且必填字段映射完成」，按钮为复核科目分类", () => {
+    expect(stepOne).toContain("复核科目分类");
+    expect(stepOne).toContain("disabled={!mappingsReady || reviewing || busy}");
+  });
+
+  it("payload 仍逐条使用 assignments 原始科目串，显示合并只发生在复核表", () => {
+    expect(source).toContain("accountAssignments: assignments");
+    expect(source).toContain("groupAssignmentViews(assignments");
   });
 });

@@ -306,7 +306,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     if(match)restoredMappingRef.current=null;
     const suggested=value.suggestedMapping??EMPTY.mapping;
     const effective=match?match.mapping:suggested;
-    setAccounts(value.accounts??[]);setAccountCodes(value.accountCodes??[]);setCodePrefix("");setAccountTotal(value.accountCount??(value.accounts??[]).length);setAccountsKey(accountColumns(effective).join("|"));setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");patch({inspect:value,knownSheets:value.sheets??draft.knownSheets,sheet:value.selectedSheet??draft.sheet,mapping:effective,pivotRows:match?match.pivotRows:accountColumns(effective),pivotColumns:match?match.pivotColumns:(effective.date?[effective.date]:[]),step:1});setResult(undefined);
+    setAccounts(value.accounts??[]);setAccountCodes(value.accountCodes??[]);setCodePrefix("");setAccountTotal(value.accountCount??(value.accounts??[]).length);setAccountsKey(accountColumns(effective).join("|"));setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");patch({inspect:value,knownSheets:value.sheets??draft.knownSheets,sheet:value.selectedSheet??draft.sheet,mapping:effective,pivotRows:match?match.pivotRows:accountColumns(effective),pivotColumns:match?match.pivotColumns:(Array.isArray(effective.date)?effective.date:effective.date?[effective.date]:[]),step:1});setResult(undefined);
     // 脚本自动映射一出来就直接送 LLM 复核，不再要求用户额外点一次按钮。
     // 恢复的映射已经用户确认过，跳过复核。
     if(match)return;

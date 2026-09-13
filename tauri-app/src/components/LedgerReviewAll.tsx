@@ -3,9 +3,11 @@ import { Button } from "@/components/ui/button";
 import {
   applyLedgerReviewsTogether,
   LEDGER_MULTI_COLUMN_ROLES,
+  ledgerMappingValueWarnings,
   type LedgerReviewOutcome,
   type LedgerReviewTarget,
 } from "@/ledgerMapping";
+import { llmReviewPresentation } from "@/components/llmReviewPresentation";
 
 /** 一键复核里单个文件的输入＋把应用后的映射写回页面 state 的回写函数。 */
 export type LedgerReviewSlot = LedgerReviewTarget & {
@@ -17,6 +19,21 @@ export type LedgerReviewSlot = LedgerReviewTarget & {
    */
   missingAfter?: (mapping: Record<string, string | string[]>) => string[];
 };
+
+function outcomeStatus(outcome: LedgerReviewOutcome): string {
+  if (outcome.failed)
+    return `LLM 复核失败：${outcome.error} 已保留原映射，可继续手工映射。`;
+  const presentation = llmReviewPresentation({
+    applied: outcome.applied.length,
+    pending: outcome.pending.length,
+    missing: outcome.missingAfter?.length,
+    warnings: outcome.mappingWarnings?.length,
+  });
+  const missingDetail = outcome.missingAfter?.length
+    ? `：${outcome.missingAfter.join("、")}，请手工指定`
+    : "";
+  return `${presentation.label}${missingDetail}。`;
+}
 
 /**
  * 一键复核 TB＋JE 的共享状态与共享入口。引擎在 `applyLedgerReviewsTogether`
@@ -94,28 +111,18 @@ export function useLedgerDictReviews(
         if (!mounted.current || generation.current[kind] !== started[kind])
           continue;
         const outcome = outcomes[kind]!;
-        currentOutcomes[kind] = outcome;
-        setResults((current) => ({ ...current, [kind]: outcome }));
         if (!outcome.failed) slots[kind]!.onApplied(outcome.mapping);
         // 结论必须与画面上的"尚未映射"清单一致：还缺着必填字段时，
         // "无需调整"就是在替 LLM 拍胸脯，用户却被必填校验拦着测不了算。
         const missing = outcome.failed
           ? []
           : [...new Set(slots[kind]!.missingAfter?.(outcome.mapping) ?? [])];
-        const missingNote = missing.length
-          ? `仍有未映射：${missing.join("、")}，请手工指定。`
-          : "";
+        const displayedOutcome = { ...outcome, missingAfter: missing };
+        currentOutcomes[kind] = displayedOutcome;
+        setResults((current) => ({ ...current, [kind]: displayedOutcome }));
         setStatus((current) => ({
           ...current,
-          [kind]: outcome.failed
-            ? `复核失败：${outcome.error} 可继续手工映射。`
-            : outcome.appliedCount
-              ? missingNote
-                ? `复核完成，已应用 ${outcome.appliedCount} 项建议；${missingNote}`
-                : `复核完成，已应用 ${outcome.appliedCount} 项建议。`
-              : missingNote
-                ? `复核完成，LLM 未提出调整建议；${missingNote}`
-                : "复核完成，当前映射无需调整。",
+          [kind]: outcomeStatus(displayedOutcome),
         }));
         setReviewing((current) => ({ ...current, [kind]: false }));
       }
@@ -133,59 +140,71 @@ export function useLedgerDictReviews(
       snapshot.tb === generation.current.tb;
   }, []);
   const undoChange = useCallback((kind: "je" | "tb", index: number) => {
-    setResults((current) => {
-      const outcome = current[kind];
-      const change = outcome?.applied[index];
-      const slot = slotsRef.current[kind];
-      if (!outcome || !change || !slot) return current;
-      const mapping = { ...outcome.mapping };
-      if (change.beforeValue === undefined) delete mapping[change.role];
-      else mapping[change.role] = Array.isArray(change.beforeValue)
-        ? [...change.beforeValue]
-        : change.beforeValue;
-      slot.onApplied(mapping);
-      const applied = outcome.applied.filter((_, at) => at !== index);
-      return { ...current, [kind]: {
-        ...outcome,
-        mapping,
-        applied,
-        appliedCount: applied.length,
-      } };
-    });
-  }, []);
+    const outcome = results[kind];
+    const change = outcome?.applied[index];
+    const slot = slotsRef.current[kind];
+    if (!outcome || !change || !slot) return;
+    const mapping = { ...outcome.mapping };
+    if (change.beforeValue === undefined) delete mapping[change.role];
+    else mapping[change.role] = Array.isArray(change.beforeValue)
+      ? [...change.beforeValue]
+      : change.beforeValue;
+    slot.onApplied(mapping);
+    const applied = outcome.applied.filter((_, at) => at !== index);
+    const missingAfter = [...new Set(slot.missingAfter?.(mapping) ?? [])];
+    const nextOutcome = {
+      ...outcome,
+      mapping,
+      mappingWarnings: [
+        ...ledgerMappingValueWarnings(slot.headers, slot.preview, mapping),
+        ...(outcome.reviewCoverageWarnings ?? []),
+      ],
+      applied,
+      appliedCount: applied.length,
+      missingAfter,
+    };
+    setResults((current) => ({ ...current, [kind]: nextOutcome }));
+    setStatus((current) => ({ ...current, [kind]: outcomeStatus(nextOutcome) }));
+  }, [results]);
   const acceptPending = useCallback((kind: "je" | "tb", index: number) => {
-    setResults((current) => {
-      const outcome = current[kind];
-      const change = outcome?.pending[index];
-      const slot = slotsRef.current[kind];
-      if (!outcome || !change || !slot) return current;
-      const mapping = { ...outcome.mapping };
-      const beforeValue = mapping[change.role];
-      mapping[change.role] = LEDGER_MULTI_COLUMN_ROLES.has(change.role)
-        ? [...new Set([
-            ...(Array.isArray(beforeValue) ? beforeValue : beforeValue ? [beforeValue] : []),
-            change.suggestedColumn,
-          ])]
-        : change.suggestedColumn;
-      slot.onApplied(mapping);
-      const pending = outcome.pending.filter((_, at) => at !== index);
-      const applied = [...outcome.applied, {
-        ...change,
-        beforeValue: Array.isArray(beforeValue) ? [...beforeValue] : beforeValue,
-        currentColumn: Array.isArray(beforeValue)
-          ? beforeValue.join("＋")
-          : beforeValue || "未映射",
-        attention: true,
-      }];
-      return { ...current, [kind]: {
-        ...outcome,
-        mapping,
-        applied,
-        pending,
-        appliedCount: applied.length,
-      } };
-    });
-  }, []);
+    const outcome = results[kind];
+    const change = outcome?.pending[index];
+    const slot = slotsRef.current[kind];
+    if (!outcome || !change || !slot) return;
+    const mapping = { ...outcome.mapping };
+    const beforeValue = mapping[change.role];
+    mapping[change.role] = LEDGER_MULTI_COLUMN_ROLES.has(change.role)
+      ? [...new Set([
+          ...(Array.isArray(beforeValue) ? beforeValue : beforeValue ? [beforeValue] : []),
+          change.suggestedColumn,
+        ])]
+      : change.suggestedColumn;
+    slot.onApplied(mapping);
+    const pending = outcome.pending.filter((_, at) => at !== index);
+    const applied = [...outcome.applied, {
+      ...change,
+      beforeValue: Array.isArray(beforeValue) ? [...beforeValue] : beforeValue,
+      currentColumn: Array.isArray(beforeValue)
+        ? beforeValue.join("＋")
+        : beforeValue || "未映射",
+      attention: true,
+    }];
+    const missingAfter = [...new Set(slot.missingAfter?.(mapping) ?? [])];
+    const nextOutcome = {
+      ...outcome,
+      mapping,
+      mappingWarnings: [
+        ...ledgerMappingValueWarnings(slot.headers, slot.preview, mapping),
+        ...(outcome.reviewCoverageWarnings ?? []),
+      ],
+      applied,
+      pending,
+      appliedCount: applied.length,
+      missingAfter,
+    };
+    setResults((current) => ({ ...current, [kind]: nextOutcome }));
+    setStatus((current) => ({ ...current, [kind]: outcomeStatus(nextOutcome) }));
+  }, [results]);
   return {
     reviewing,
     status,
@@ -236,15 +255,36 @@ export function LedgerReviewAll(props: {
         </p>
         <div className="fx-review-states" aria-live="polite">
           {props.present.map((kind) => (
+            (() => {
+              const result = props.results?.[kind];
+              const presentation = result
+                ? llmReviewPresentation({
+                    busy: props.reviewing[kind],
+                    failed: result.failed,
+                    applied: result.applied.length,
+                  pending: result.pending.length,
+                  missing: result.missingAfter?.length,
+                  warnings: result.mappingWarnings?.length,
+                  })
+                : undefined;
+              return (
             <span
               key={kind}
-              className={props.reviewing[kind] ? "running" : undefined}
+              className={
+                props.reviewing[kind]
+                  ? "running"
+                  : presentation?.attention
+                    ? "attention"
+                    : undefined
+              }
             >
               {/* 这里说的是 LLM 复核的进度，不是字段缺失——字段是否齐全由
                   预览面板自己的「尚未映射」提示负责，两件事不能混用一句
                   「待复核」让人误以为映射有问题。 */}
-              {props.names[kind]}：{props.status[kind] || "未做 LLM 复核（不影响手工映射）"}
+              {props.names[kind]}：{(presentation?.label ?? props.status[kind]) || "未做 LLM 复核（不影响手工映射）"}
             </span>
+              );
+            })()
           ))}
         </div>
         <LedgerReviewCompact
@@ -281,13 +321,18 @@ export function LedgerReviewCompact(props: {
         if (!result || result.failed) return null;
         return (
           <div className="ledger-review-side" key={kind}>
+            {result.mappingWarnings?.map((warning, index) => (
+              <div className="ledger-review-change pending" key={`w-${index}`}>
+                <span>{warning}</span><em>请手工核对</em>
+              </div>
+            ))}
             {(result.applied.length > 0 || result.pending.length > 0) && (
               <strong>{props.names[kind]}</strong>
             )}
             {result.applied.map((change, index) => (
-              <div className="ledger-review-change" key={`a-${change.role}-${index}`}>
+              <div className="ledger-review-change applied" key={`a-${change.role}-${index}`}>
                 <span>{change.label}：{change.currentColumn} → {change.suggestedColumn}</span>
-                {change.attention && <em>重点核对</em>}
+                <em>已生效{change.attention ? " · 重点核对" : ""}</em>
                 {props.onUndo && (
                   <button type="button" onClick={() => props.onUndo?.(kind, index)}>撤销</button>
                 )}
@@ -296,7 +341,7 @@ export function LedgerReviewCompact(props: {
             {result.pending.map((change, index) => (
               <div className="ledger-review-change pending" key={`p-${change.role}-${index}`}>
                 <span>{change.label}：{change.currentColumn} → {change.suggestedColumn}</span>
-                <em>{Math.round((change.confidence ?? 0) * 100)}% 待确认</em>
+                <em>尚未生效 · {Math.round((change.confidence ?? 0) * 100)}% 建议待确认</em>
                 {props.onAccept && (
                   <button type="button" onClick={() => props.onAccept?.(kind, index)}>采纳</button>
                 )}

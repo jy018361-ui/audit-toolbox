@@ -512,6 +512,9 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
             );
         }
         inject_current_form(&mut value, "je");
+        inject_engine_facts(&mut value);
+        inject_required_missing_roles(&mut value, "je");
+        inject_mapping_review_scope(&mut value, "je");
         value
     };
     let content = request_llm(llm, prompt, &payload.to_string(), None)?;
@@ -527,6 +530,9 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
         // 与汇兑损益共用同一套卫生过滤，不再各写一份。看账按天取数，
         // 不启用汇兑损益的记账日期月度兜底。
         sanitize_mapping_changes(&mut value, &payload, "je", ReviewDatePolicy::Strict);
+        sanitize_role_reviews(&mut value, &payload, "roleReviews");
+        value["reviewCoverage"] =
+            mapping_review_coverage(&value, &payload, "roleReviews", "reviews");
     }
     Ok(value)
 }
@@ -571,11 +577,10 @@ const REVIEW_TB: &str = "角色共分七组：身份（entity、accountCode、ac
 /// 折算）仍要求完整日期，这条纪律只在 `tool == fx_audit` 时附加。
 const REVIEW_JE_FX_MONTH_DATE: &str = "汇兑损益的月度兜底（仅本工具适用）：date 首选完整日期列；全表确实没有任何完整日期列时，**月份列可以映射为 date**——取值为月份数字或年月文本的列（如「年-月」「月份」，取值 1、01、1月、2025-01、2025年1月），引擎按月归集测算，月份缺年份时按报告期推定。表里存在完整日期列时仍必须用完整日期列，不得拿月份列替代；「年」「日」单独成列的也不是月份列。";
 
-/// TBJE 完整性核对不按日计息；日期只用于把同一张凭证的明细聚在一起。
-/// 一些 ERP 把年份写在标题、月日拆成两列，或只给会计月份。此时允许模型
-/// 逐列建议同一个 date 角色，前端以数组保存，符号口径内核会把这些列共同
-/// 拼进凭证键。卫生过滤仍逐列验证取值，模型不能凭空制造日期列。
-const REVIEW_JE_TBJE_COMPOSITE_DATE: &str = "TBJE完整性核对的日期降级（仅本工具适用）：date 首选完整日期列；全表确实没有完整日期列时，可以由真实存在的年月／月份列，或年、月、日拆分列共同组成 date。这是对前述‘其余角色各占一列’规则的唯一例外。若日期拆在多列，请为每个组成列分别输出一条 role=date 的 change，suggestedColumn 分别填写真实列名；年份只写在工作表标题时，不要虚构年份列，使用月列或月＋日列即可组成账内凭证键。不得使用制单日期、审核日期等非记账日期字段。";
+/// JE 公共日期组成能力：一些 ERP 把年份写在标题、月日拆成两列，或只给
+/// 会计月份。允许模型逐列建议同一个 date 角色；TBJE 用它组成凭证键，按日
+/// 工具由公共日期解析器结合报告期年份还原真实日期。
+const REVIEW_JE_TBJE_COMPOSITE_DATE: &str = "公共JE日期组成规则：date 首选完整日期列；全表确实没有完整日期列时，可以由真实存在的年月／月份列，或年、月、日拆分列共同组成 date。这是对前述‘其余角色各占一列’规则的唯一例外。若日期拆在多列，请为每个组成列分别输出一条 role=date 的 change，suggestedColumn 分别填写真实列名；年份只写在工作表标题时，不要虚构年份列。按日取数工具会用报告期年份补齐月／日列，TBJE 则把组成列用于凭证键。不得使用制单日期、审核日期等非记账日期字段。";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReviewDatePolicy {
@@ -587,8 +592,9 @@ enum ReviewDatePolicy {
 fn review_date_policy(tool: Option<&str>) -> ReviewDatePolicy {
     match tool {
         Some("fx_audit") => ReviewDatePolicy::FxMonth,
-        Some("tbje_check") => ReviewDatePolicy::TbjeComposite,
-        _ => ReviewDatePolicy::Strict,
+        // 复合日期是 JE 公共能力；工具只需要决定如何消费报告期年份，而不再
+        // 各自决定 LLM 能不能建议多列日期。
+        _ => ReviewDatePolicy::TbjeComposite,
     }
 }
 
@@ -627,6 +633,223 @@ fn inject_required_missing_roles(payload: &mut Value, kind: &str) {
     if let Some(object) = payload.as_object_mut() {
         object.insert("requiredMissingRoles".into(), Value::Array(missing));
     }
+}
+
+/// 明确告诉模型本次要复核的两类范围：所有已映射角色，以及所有尚未映射但
+/// 本工具允许使用的角色。`requiredMissingRoles` 只是会阻塞运行的金标子集，
+/// 不能替代完整范围；否则模型很容易只看必填项，漏掉币种、辅助核算等可选角色。
+///
+/// 同时把 Coding 能确定的可疑点单列出来，要求模型优先判断。这里只提供证据，
+/// 不自动删除或改写现有映射；尤其歧义表头仍必须交给样例语义或用户裁决。
+fn inject_mapping_review_scope(payload: &mut Value, kind: &str) {
+    let available = payload
+        .get("availableRoles")
+        .and_then(Value::as_array)
+        .map(|roles| {
+            roles
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mapping = payload.get("currentMapping").and_then(Value::as_object);
+    let headers = payload
+        .get("headers")
+        .and_then(Value::as_array)
+        .map(|all| {
+            all.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let rows = sample_rows_of(payload);
+    let columns_of = |value: &Value| match value {
+        Value::String(one) if !one.trim().is_empty() => vec![one.trim().to_owned()],
+        Value::Array(all) => all
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|one| !one.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    let mut mapped = Vec::new();
+    let mut mapped_names = std::collections::HashSet::new();
+    let mut suspects = Vec::new();
+    if let Some(mapping) = mapping {
+        for (raw_role, value) in mapping {
+            let role = crate::ledger_mapping::migrate_role_name(kind, raw_role);
+            if role.is_empty() {
+                continue;
+            }
+            let columns = columns_of(value);
+            if columns.is_empty() {
+                continue;
+            }
+            mapped_names.insert(role.to_owned());
+            mapped.push(json!({"role": role, "columns": columns.clone()}));
+            for column in &columns {
+                let Some(index) = headers.iter().position(|header| header.trim() == column) else {
+                    suspects.push(json!({
+                        "role": role,
+                        "currentColumn": column,
+                        "issue": "当前映射列不在本次识别出的表头中"
+                    }));
+                    continue;
+                };
+                let Some(rows) = rows.as_deref() else {
+                    continue;
+                };
+                if matches!(role, "accountCode" | "accountName") {
+                    let shape = crate::ledger_mapping::account_column_shape(
+                        rows.iter().filter_map(|row| row.get(index)).cloned(),
+                    );
+                    let incompatible = matches!(
+                        (role, shape),
+                        (
+                            "accountCode",
+                            crate::ledger_mapping::AccountColumnShape::Name
+                        ) | (
+                            "accountName",
+                            crate::ledger_mapping::AccountColumnShape::Code
+                        )
+                    );
+                    if incompatible {
+                        suspects.push(json!({
+                            "role": role,
+                            "currentColumn": column,
+                            "issue": "当前列的样例取值形态与科目编码/名称角色明显冲突"
+                        }));
+                    }
+                }
+                if role.contains("irection") {
+                    let values = rows
+                        .iter()
+                        .filter_map(|row| row.get(index).map(String::as_str));
+                    if direction_values_look_like_side(values) == Some(false) {
+                        suspects.push(json!({
+                            "role": role,
+                            "currentColumn": column,
+                            "issue": "当前列包含非借贷方向取值"
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    let unmapped = available
+        .into_iter()
+        .map(|role| crate::ledger_mapping::migrate_role_name(kind, &role).to_owned())
+        .filter(|role| !role.is_empty() && !mapped_names.contains(role))
+        .map(Value::String)
+        .collect::<Vec<_>>();
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("mappedRolesToReview".into(), Value::Array(mapped));
+        object.insert("unmappedRoles".into(), Value::Array(unmapped));
+        object.insert("suspectMappings".into(), Value::Array(suspects));
+    }
+}
+
+/// `changes=[]` 只有在模型确实逐项复核了所有已有映射时，才足以表达
+/// “现有映射合理”。旧模型/网关若漏回 roleReviews，不阻断主流程，但明确标记
+/// 覆盖不完整，前端不得把它包装成“全部复核通过”。
+fn mapping_review_coverage(
+    parsed: &Value,
+    payload: &Value,
+    reviews_key: &str,
+    changes_key: &str,
+) -> Value {
+    let expected = payload
+        .get("mappedRolesToReview")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("role").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<std::collections::HashSet<_>>();
+    let mut reviewed = parsed
+        .get(reviews_key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("role").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<std::collections::HashSet<_>>();
+    // 实际提出 change 本身也证明模型检查过该角色。
+    for role in parsed
+        .get(changes_key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("role").and_then(Value::as_str))
+    {
+        reviewed.insert(role.to_owned());
+    }
+    let mut unreviewed = expected.difference(&reviewed).cloned().collect::<Vec<_>>();
+    unreviewed.sort();
+    json!({
+        "complete": unreviewed.is_empty(),
+        "reviewedRoleCount": expected.len().saturating_sub(unreviewed.len()),
+        "expectedRoleCount": expected.len(),
+        "unreviewedRoles": unreviewed,
+    })
+}
+
+fn sanitize_role_reviews(value: &mut Value, payload: &Value, key: &str) {
+    let Some(reviews) = value.get_mut(key).and_then(Value::as_array_mut) else {
+        return;
+    };
+    let expected = payload
+        .get("mappedRolesToReview")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            Some((
+                item.get("role")?.as_str()?.to_owned(),
+                item.get("columns")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+            ))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut seen = std::collections::HashSet::new();
+    reviews.retain(|review| {
+        let role = review.get("role").and_then(Value::as_str).unwrap_or("");
+        let status = review.get("status").and_then(Value::as_str).unwrap_or("");
+        let reason = review.get("reason").and_then(Value::as_str).unwrap_or("");
+        let Some(expected_columns) = expected.get(role) else {
+            return false;
+        };
+        if !matches!(status, "keep" | "change" | "uncertain")
+            || reason.trim().is_empty()
+            || !seen.insert(role.to_owned())
+        {
+            return false;
+        }
+        let reported = review
+            .get("currentColumns")
+            .and_then(Value::as_array)
+            .map(|all| {
+                all.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|one| !one.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        reported.len() == expected_columns.len()
+            && expected_columns
+                .iter()
+                .all(|column| reported.iter().any(|one| *one == column))
+    });
 }
 
 /// 把**脚本已经判出的账表形态**写进 payload。
@@ -715,11 +938,13 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
         inject_current_form(&mut tb, "tb");
         inject_engine_facts(&mut tb);
         inject_required_missing_roles(&mut tb, "tb");
+        inject_mapping_review_scope(&mut tb, "tb");
     }
     if je.is_object() {
         inject_current_form(&mut je, "je");
         inject_engine_facts(&mut je);
         inject_required_missing_roles(&mut je, "je");
+        inject_mapping_review_scope(&mut je, "je");
     }
     let date_policy = review_date_policy(root.get("tool").and_then(Value::as_str));
     let je_date_instruction = review_date_instruction(date_policy);
@@ -729,11 +954,15 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
         "你是审计工具箱公共 TB＋JE 联合字段映射复核器。TB 与 JE 属于同一账套，必须在一次判断中同时复核。\
          只输出严格 JSON：{{\"task\":\"ledger_pair_mapping\",\"tbChanges\":[{{\"role\":string,\"currentColumn\":string,\"suggestedColumn\":string,\"confidence\":number,\"reason\":string}}],\
          \"jeChanges\":[{{\"role\":string,\"currentColumn\":string,\"suggestedColumn\":string,\"confidence\":number,\"reason\":string}}],\
+         \"tbRoleReviews\":[{{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"change\"|\"uncertain\",\"reason\":string}}],\
+         \"jeRoleReviews\":[{{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"change\"|\"uncertain\",\"reason\":string}}],\
          \"pairFindings\":[{{\"type\":string,\"confidence\":number,\"reason\":string}}],\"summary\":string}}。\
          TB 建议只能使用 tb.availableRoles 与 tb.headers，JE 建议只能使用 je.availableRoles 与 je.headers。\
          两侧 engineFacts 是 Coding 根据样例验证的处理事实；protected=true 的事实不得修改。\
          同一源列可合法承担 engineFacts.mappedRoles 中列出的多个角色，Coding 会在后续完成拆分、组合或标准化。\
          requiredMissingRoles 是当前仍缺失的金标必填角色清单；只要 headers 与 sampleRows 中存在相容列，就必须逐项输出 change，不得只复核已有映射。\
+         unmappedRoles 是尚未映射的完整角色清单：逐项查看 headers 与 sampleRows，有相容列就输出 change，没有可信候选则维持空缺。\
+         mappedRolesToReview 是必须逐项复核的全部已有映射；另在 tbRoleReviews/jeRoleReviews 中为每个已有角色返回 {{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"change\"|\"uncertain\",\"reason\":string}}，不能用 changes 为空代替语义复核。status=keep 仅限样例值与角色含义相容；明显错配且有可信替代列用 change 并同时输出 change；证据不足用 uncertain。suspectMappings 是 Coding 已发现的确定性疑点，必须优先处理。\
          联合比较 accountCode/accountName 的标题语义、样例形态与两侧口径；证据接近时维持当前映射，不要为了换成看起来更好的列而改。\
          changes 只放真实调整，确认现状正确不要造条目。{review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}\
          对 TB：{REVIEW_TB}\
@@ -746,13 +975,19 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
         "je": je,
     });
     let content = request_llm(llm, &prompt, &payload.to_string(), None)?;
-    let parsed = parse_json_content(&content);
+    let mut parsed = parse_json_content(&content);
     if !parsed.is_object() {
         return Err(error(
             "LLM_RESPONSE_INVALID",
             "LLM 没有返回有效的 TB＋JE 联合复核结果。",
             None,
         ));
+    }
+    if let Some(side) = payload.get("tb").filter(|value| value.is_object()) {
+        sanitize_role_reviews(&mut parsed, side, "tbRoleReviews");
+    }
+    if let Some(side) = payload.get("je").filter(|value| value.is_object()) {
+        sanitize_role_reviews(&mut parsed, side, "jeRoleReviews");
     }
     let mut output = json!({
         "task": "ledger_pair_mapping",
@@ -762,6 +997,8 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
             .or_else(|| parsed.get("pair_findings"))
             .cloned().unwrap_or_else(|| json!([])),
         "summary": parsed.get("summary").cloned().unwrap_or_else(|| json!("")),
+        "tbRoleReviews": parsed.get("tbRoleReviews").cloned().unwrap_or_else(|| json!([])),
+        "jeRoleReviews": parsed.get("jeRoleReviews").cloned().unwrap_or_else(|| json!([])),
     });
     for (key, aliases, side, kind) in [
         (
@@ -788,6 +1025,14 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
         let mut wrapper = json!({"changes": changes});
         sanitize_mapping_changes(&mut wrapper, side, kind, date_policy);
         output[key] = wrapper["changes"].clone();
+    }
+    if let Some(side) = payload.get("tb").filter(|value| value.is_object()) {
+        output["tbReviewCoverage"] =
+            mapping_review_coverage(&output, side, "tbRoleReviews", "tbChanges");
+    }
+    if let Some(side) = payload.get("je").filter(|value| value.is_object()) {
+        output["jeReviewCoverage"] =
+            mapping_review_coverage(&output, side, "jeRoleReviews", "jeChanges");
     }
     Ok(output)
 }
@@ -878,7 +1123,10 @@ fn ledger_mapping_llm_call(
         "你是审计工具箱公共 TB/JE 引擎的{table_name}字段映射复核器，任务名为 {task}。\
          只输出严格 JSON：{{\"task\":\"{task}\",\"changes\":[{{\"role\":string,\
          \"currentColumn\":string,\"suggestedColumn\":string,\"confidence\":number,\
-         \"reason\":string,\"scheme\":string}}]}}。{review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{specific}{date_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
+         \"reason\":string,\"scheme\":string}}],\"roleReviews\":[{{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"change\"|\"uncertain\",\"reason\":string}}]}}。\
+         mappedRolesToReview 是必须逐项复核的全部已有映射：每个角色必须返回一条 roleReviews，不能因为 changes 为空就声称完成。status=keep 仅限 sampleRows 证明当前列与角色相容；明显错配且有可信替代列用 change 并同时输出 changes；证据不足用 uncertain。\
+         unmappedRoles 是尚未映射的完整角色清单，有相容列就输出 change；requiredMissingRoles 是其中会阻塞运行的子集，必须优先；suspectMappings 必须优先复核。\
+         {review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{specific}{date_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
     );
     let mut payload = params.get("payload").unwrap_or(params).clone();
     // 兼容旧版 FX 请求携带的 hardcodedCandidates。
@@ -902,6 +1150,7 @@ fn ledger_mapping_llm_call(
     inject_current_form(&mut payload, if is_tb { "tb" } else { "je" });
     inject_engine_facts(&mut payload);
     inject_required_missing_roles(&mut payload, if is_tb { "tb" } else { "je" });
+    inject_mapping_review_scope(&mut payload, if is_tb { "tb" } else { "je" });
     let payload = &payload;
     let content = request_llm(llm, &prompt, &payload.to_string(), None)?;
     let mut value = parse_json_content(&content);
@@ -918,6 +1167,8 @@ fn ledger_mapping_llm_call(
         if is_tb { "tb" } else { "je" },
         date_policy,
     );
+    sanitize_role_reviews(&mut value, payload, "roleReviews");
+    value["reviewCoverage"] = mapping_review_coverage(&value, payload, "roleReviews", "changes");
     Ok(value)
 }
 
@@ -942,7 +1193,7 @@ fn sanitize_mapping_changes(
     for key in ["changes", "fills", "reviews"] {
         sanitize_change_list(value, payload, kind, key, date_policy);
     }
-    // TBJE 的金标身份字段不能把成败完全押在模型是否“记得提建议”上。
+    // JE 的金标身份字段不能把成败完全押在模型是否“记得提建议”上。
     // 模型先完成语义复核；若它漏掉了必填项，再仅按样例值补充唯一、可机器验证
     // 的候选。多候选或证据不足仍保持空缺，交给用户确认，绝不猜列。
     if kind == "je" && date_policy == ReviewDatePolicy::TbjeComposite {
@@ -960,7 +1211,7 @@ fn value_is_filled(value: &Value) -> bool {
     }
 }
 
-/// LLM 复核后的窄兜底：只补 TBJE JE 侧仍缺失、且从表头＋样例能唯一确定的
+/// LLM 复核后的窄兜底：只补 JE 侧仍缺失、且从表头＋样例能唯一确定的
 /// 科目编码、摘要与日期组成列。它不是第二套泛化自动映射器。
 fn supplement_tbje_required_je_changes(value: &mut Value, payload: &Value) {
     let Some(changes) = value.get_mut("changes").and_then(Value::as_array_mut) else {
@@ -1724,8 +1975,10 @@ fn kanzhang_mapping_prompt() -> String {
         "你是会计凭证字段映射复核助手。输出严格 JSON：\
          {{scheme:\"A\"|\"B\"|\"\",schemeReason:string,\
          fills:[{{role:string,suggestedColumn:string,confidence:number,reason:string}}],\
-         reviews:[{{role:string,currentColumn:string,suggestedColumn:string,confidence:number,reason:string}}]}}。\
+         reviews:[{{role:string,currentColumn:string,suggestedColumn:string,confidence:number,reason:string}}],\
+         roleReviews:[{{role:string,currentColumns:[string],status:\"keep\"|\"change\"|\"uncertain\",reason:string}}]}}。\
          方案A＝净额列（可加方向列）；方案B＝借方与贷方两列，二者互斥。\
+         mappedRolesToReview 中每个已有角色都必须返回一条 roleReviews；不能用 fills/reviews 为空代替语义复核。unmappedRoles 逐项检查，有相容列就输出 fills；requiredMissingRoles 与 suspectMappings 优先。\
          {review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{je_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
     )
 }
@@ -2399,6 +2652,20 @@ mod tests {
 
     #[test]
     fn tbje复核允许月日组成日期但完整日期优先() {
+        for tool in [
+            "tbje_check",
+            "deposit_interest",
+            "loan_interest",
+            "fa_tbje",
+            "kanzhang",
+            "je_sign_mark",
+        ] {
+            assert_eq!(
+                review_date_policy(Some(tool)),
+                ReviewDatePolicy::TbjeComposite,
+                "{tool} 应使用公共 JE 复合日期纪律",
+            );
+        }
         let payload = json!({
             "headers": ["年-月", "年-日", "凭证号"],
             "currentMapping": {"id": "凭证号"},
@@ -3145,5 +3412,70 @@ mod mapping_prompt_tests {
         }))
         .expect("旧版 samples 应继续可读");
         assert_eq!(rows[0], ["1001", "库存现金"]);
+    }
+
+    #[test]
+    fn 公共复核显式列出已映射未映射与确定性疑点() {
+        let mut payload = json!({
+            "headers": ["科目编码", "科目名称", "借贷", "摘要"],
+            "sampleRows": [
+                ["1001", "库存现金", "40", "收款"],
+                ["1002", "银行存款", "50", "付款"],
+                ["6603", "财务费用", "40", "计息"],
+                ["2202", "应付账款", "50", "采购"]
+            ],
+            "currentMapping": {
+                "accountCode": "科目名称",
+                "accountName": "科目编码",
+                "direction": "借贷"
+            },
+            "availableRoles": ["accountCode", "accountName", "direction", "summary"]
+        });
+
+        inject_mapping_review_scope(&mut payload, "je");
+
+        assert_eq!(
+            payload["unmappedRoles"],
+            json!(["summary"]),
+            "可选未映射角色也必须进入 LLM 复核范围"
+        );
+        assert_eq!(payload["mappedRolesToReview"].as_array().unwrap().len(), 3);
+        let suspects = payload["suspectMappings"].as_array().unwrap();
+        assert!(suspects.iter().any(|item| item["role"] == "accountCode"));
+        assert!(suspects.iter().any(|item| item["role"] == "accountName"));
+        assert!(suspects.iter().any(|item| item["role"] == "direction"));
+        assert_eq!(
+            payload["currentMapping"]["accountCode"], "科目名称",
+            "确定性体检只报警，不自动删除歧义映射"
+        );
+    }
+
+    #[test]
+    fn 零修改不等于已完成语义复核() {
+        let mut payload = json!({
+            "headers": ["科目编码", "科目名称"],
+            "sampleRows": [["1001", "库存现金"]],
+            "currentMapping": {"accountCode": "科目编码", "accountName": "科目名称"},
+            "availableRoles": ["accountCode", "accountName"]
+        });
+        inject_mapping_review_scope(&mut payload, "je");
+
+        let empty = json!({"changes": [], "roleReviews": []});
+        let coverage = mapping_review_coverage(&empty, &payload, "roleReviews", "changes");
+        assert_eq!(coverage["complete"], false);
+        assert_eq!(coverage["unreviewedRoles"].as_array().unwrap().len(), 2);
+
+        let mut reviewed = json!({
+            "changes": [],
+            "roleReviews": [
+                {"role":"accountCode","currentColumns":["科目编码"],"status":"keep","reason":"样例为稳定数字编码"},
+                {"role":"accountName","currentColumns":["伪造列"],"status":"keep","reason":"名称文本"}
+            ]
+        });
+        sanitize_role_reviews(&mut reviewed, &payload, "roleReviews");
+        assert_eq!(reviewed["roleReviews"].as_array().unwrap().len(), 1);
+        let partial = mapping_review_coverage(&reviewed, &payload, "roleReviews", "changes");
+        assert_eq!(partial["complete"], false);
+        assert_eq!(partial["unreviewedRoles"], json!(["accountName"]));
     }
 }

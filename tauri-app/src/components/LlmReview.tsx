@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { llmReviewPresentation } from "@/components/llmReviewPresentation";
 
 export type ReviewChange = {
   id: string;
@@ -60,6 +61,12 @@ export function LlmReview({
   skipLabel = "停止并继续主流程",
   closeFailedLabel = "关闭失败提示",
 }: LlmReviewProps) {
+  const presentation = llmReviewPresentation({
+    busy,
+    failed,
+    applied: changes.length,
+    pending: pending.length,
+  });
   const pill =
     busy
       ? "preview"
@@ -74,11 +81,13 @@ export function LlmReview({
     ? "复核中"
     : failed
       ? "失败（不阻塞）"
-      : passed === false
-        ? "需人工复核"
-        : enabled
-          ? "已完成"
-          : "未启用";
+      : !enabled
+        ? "未启用"
+        : changes.length > 0 || pending.length > 0
+          ? presentation.label.replace(/^已复核 · /, "")
+          : passed === false
+            ? "需人工复核"
+            : "无需调整";
 
   return (
     <div className={`fa-llm-review ${passed === false ? "warning" : ""}`}>
@@ -102,13 +111,16 @@ export function LlmReview({
           </Button>
         </div>
       )}
+      {(changes.length > 0 || pending.length > 0) && (
+        <p className="llm-review-live-summary">{presentation.label}。</p>
+      )}
       {!!changes.length && summary && <p>{summary}</p>}
       {changes.map((change) => (
         <div
           className={`fa-review-item fa-change${change.attention ? " attention" : ""}`}
           key={change.id}
         >
-          <strong>{change.label}</strong>
+          <strong>{change.label}<em>已生效</em></strong>
           {change.before !== undefined && (
             <span className="fa-change-diff">
               {change.before} → {change.after}
@@ -131,7 +143,7 @@ export function LlmReview({
         <div className="fa-review-item fa-pending" key={item.id}>
           <strong>
             {item.label}
-            <em>把握不足，未改动</em>
+            <em>建议待确认 · 尚未生效</em>
           </strong>
           {item.current !== undefined && (
             <span className="fa-change-diff">

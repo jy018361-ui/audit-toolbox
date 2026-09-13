@@ -199,11 +199,16 @@ export function MappingPanel(props: MappingPanelProps) {
     const taken = used.has(role) && role !== current;
     const disabled = locked(role);
     const suffix = taken ? "（已用）" : disabled ? "（已停用）" : "";
+    const statusClass = group?.status
+      ? `dt-option-${group.status === "已适配" ? "adapted" : group.status === "未适配" ? "unavailable" : "available"}`
+      : "";
     return (
       <option
         key={role}
         value={role}
-        className={taken || disabled ? "dt-role-taken" : undefined}
+        className={[taken || disabled ? "dt-role-taken" : "", statusClass]
+          .filter(Boolean)
+          .join(" ") || undefined}
       >
         {label}
         {mark(role, group)}
@@ -225,11 +230,16 @@ export function MappingPanel(props: MappingPanelProps) {
     const chosen = held.includes(role);
     const taken = used.has(role) && !chosen;
     const disabled = locked(role);
+    const statusClass = group?.status
+      ? `dt-option-${group.status === "已适配" ? "adapted" : group.status === "未适配" ? "unavailable" : "available"}`
+      : "";
     return (
       <option
         key={role}
         value={role}
-        className={taken || disabled ? "dt-role-taken" : undefined}
+        className={[taken || disabled ? "dt-role-taken" : "", statusClass]
+          .filter(Boolean)
+          .join(" ") || undefined}
       >
         {chosen ? `✓ ${label}` : label}
         {mark(role, group)}
@@ -263,7 +273,11 @@ export function MappingPanel(props: MappingPanelProps) {
       : combinedAccountMapped
         ? (role: string, label: string, group?: MappingGroup) =>
             isAccountIdentityRole(role) ? (
-              <option key={role} value={role}>
+              <option
+                key={role}
+                value={role}
+                className={group?.status ? `dt-option-${group.status === "已适配" ? "adapted" : group.status === "未适配" ? "unavailable" : "available"}` : undefined}
+              >
                 {accountHeld.includes(role) ? `✓ ${label}（再点取消）` : label}
                 {mark(role, group)}
               </option>

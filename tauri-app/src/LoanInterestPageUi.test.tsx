@@ -171,10 +171,10 @@ it("统一上传自动分类出 TB 与 JE 来源卡，并可一键更正类型",
   ).toBeVisible();
 });
 
-/** 公共复核支持多列角色，但借款页当前仍是单列映射交互。
+/** 借款页一次联合复核 TB＋JE，并保持本页的单列映射交互。
  *  曾经把 accountName 的单个建议写成 string[]，随后 loanMissing 调用
  *  `.trim()` 直接把整个 React 界面打成白屏。 */
-it("借款 JE 的 LLM 复核按单列映射写回且不会白屏", async () => {
+it("借款 TB＋JE 一键联合复核并按单列映射写回，不会白屏", async () => {
   const tbHeaders = ["科目编码", "科目名称", "期初余额", "期末余额"];
   const jeHeaders = ["记账日期", "凭证号", "文本", "会计科目", "总账科目", "本币金额"];
   const classify = (kind: "tb" | "je", headers: string[]) => ({
@@ -212,7 +212,11 @@ it("借款 JE 的 LLM 复核按单列映射写回且不会白屏", async () => {
     const p = params as {
       kind?: "tb" | "je";
       source?: { inputPath?: string };
-      payload?: { kind?: "tb" | "je" };
+      payload?: {
+        tool?: string;
+        tb?: { currentMapping?: Record<string, unknown> };
+        je?: { currentMapping?: Record<string, unknown> };
+      };
     };
     if (method === "ledger.forms") return [];
     if (method === "deposit.classify_source") {
@@ -225,10 +229,13 @@ it("借款 JE 的 LLM 复核按单列映射写回且不会白屏", async () => {
         ? inspect("je", jeHeaders)
         : inspect("tb", tbHeaders);
     }
-    if (method === "ledger.review_mapping") {
-      expect(p.kind).toBe("je");
+    if (method === "ledger.review_pair_mapping") {
+      expect(p.payload?.tool).toBe("loan_interest");
+      expect(p.payload?.tb?.currentMapping).toBeTruthy();
+      expect(p.payload?.je?.currentMapping).toBeTruthy();
       return {
-        changes: [
+        tbChanges: [],
+        jeChanges: [
           {
             role: "accountName",
             suggestedColumn: "会计科目",
@@ -250,14 +257,24 @@ it("借款 JE 的 LLM 复核按单列映射写回且不会白屏", async () => {
     }),
   );
   await screen.findByText("已识别：JE 序时账");
-  const reviewButtons = await screen.findAllByRole("button", {
-    name: "LLM 复核映射",
-  });
-  fireEvent.click(reviewButtons[1]);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "一键复核 TB＋JE",
+    }),
+  );
+
+  await waitFor(() =>
+    expect(mock.engineCall).toHaveBeenCalledWith(
+      "ledger.review_pair_mapping",
+      expect.any(Object),
+    ),
+  );
 
   expect(
-    await screen.findByText("复核完成，已应用 1 项建议。"),
+    (await screen.findAllByText(/已复核 · 已自动调整 1 项/))[0],
   ).toBeVisible();
+  expect(screen.getByText(/已生效/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "撤销" })).toBeVisible();
   expect(
     screen
       .getAllByRole("combobox")
@@ -318,6 +335,7 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
         accounts: [
           { key: "1122", code: "1122", name: "应收账款", account: "1122 应收账款", opening: 5, closing: 6, suggestedType: "skip", suggestionReason: "资产类科目" },
           { key: "2001", code: "2001", name: "短期借款", account: "2001 短期借款", opening: 1000, closing: 900, suggestedType: "loan", suggestionReason: "负债类借款科目" },
+          ...Array.from({ length: 160 }, (_, index) => ({ key: `5${index + 10000}`, code: `5${index + 10000}`, name: `其他科目${index}`, account: `5${index + 10000} 其他科目${index}`, opening: 0, closing: 0, suggestedType: "skip" as const, suggestionReason: "其他科目" })),
         ],
       };
     }
@@ -342,6 +360,10 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   const accountRows = screen.getAllByRole("row");
   expect(accountRows[1]).toHaveTextContent("短期借款");
   expect(accountRows[2]).toHaveTextContent("应收账款");
+  expect(accountRows.length).toBeLessThanOrEqual(81);
+  expect(screen.getByText("第 1 / 3 页")).toBeVisible();
+  fireEvent.change(loanSelect, { target: { value: "skip" } });
+  expect(screen.getByText("2001 短期借款已设为排除。")).toBeVisible();
   expect(screen.getByText("设置借款利率")).toBeVisible();
   expect(screen.getByRole("region", { name: "等待生成利率明细" })).toBeVisible();
   // 金额映射没补齐：下一步仍拦，但不再出现「借款明细/辅助核算」的旧提示。
@@ -452,9 +474,16 @@ it("生成借款利率表并手填利率后可进入测算", async () => {
         },
       ],
       summary: { loanCount: 1 },
+      mappingWarnings: ["JE里无借款辅助明细，默认按科目维度进行利息测算"],
     },
   });
   expect(await screen.findByText("借款利率确认表")).toBeVisible();
+  expect(
+    screen.getByText("JE里无借款辅助明细，默认按科目维度进行利息测算"),
+  ).toBeVisible();
+  expect(
+    screen.getByText("TB 辅助明细未继续拆分，以下利率与测算行已按主体＋借款科目合并。"),
+  ).toBeVisible();
   // 手填固定执行利率 3.85。
   fireEvent.change(screen.getByRole("spinbutton", { name: "2001 短期借款的执行利率" }), {
     target: { value: "3.85" },

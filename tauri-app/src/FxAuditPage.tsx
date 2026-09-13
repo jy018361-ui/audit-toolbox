@@ -2549,7 +2549,7 @@ function SourceCard(props: {
 /** 唯一可以与别的角色共用一列的角色：科目名称里常常就写着账户币种。 */
 export const CURRENCY_TEXT = "currencyText";
 /** 可以一个角色对应多列的角色。 */
-const MULTI_COLUMN_ROLES = new Set(["id", "accountName", "auxiliary"]);
+const MULTI_COLUMN_ROLES = new Set(["id", "accountName", "auxiliary", "date"]);
 
 /**
  * 给某一列加上一个角色标记，返回新的映射。

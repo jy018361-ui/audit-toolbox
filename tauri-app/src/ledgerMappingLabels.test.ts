@@ -1,5 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { planLedgerChanges, resolveRoleLabels } from "./ledgerMapping";
+import {
+  effectiveVoucherKey,
+  isMultiRole,
+  planLedgerChanges,
+  resolveRoleLabels,
+} from "./ledgerMapping";
+
+it("看账和正负数标记共用日期多列凭证键", () => {
+  expect(isMultiRole("date")).toBe(true);
+  expect(
+    effectiveVoucherKey({ id: ["凭证号"], accountName: [], date: ["年-月", "年-日"] }),
+  ).toEqual(["年-月", "年-日", "凭证号"]);
+  expect(
+    effectiveVoucherKey({ id: ["凭证号"], accountName: [], date: "记账日期" }),
+  ).toEqual(["记账日期", "凭证号"]);
+});
 
 // 五个账表工具此前各抄一份「角色名→中文标签」，改成后端下发＋本地兜底之后，
 // 这里钉住三条：后端优先、缺项回落、整段缺失时行为与从前完全一致。

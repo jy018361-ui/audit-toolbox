@@ -296,7 +296,7 @@ describe("TbjeCheckPage", () => {
       screen.getByRole("button", { name: "LLM 一键联合复核 1 组" }),
     );
     await screen.findByText("联合复核完成：已复核 1 组。");
-    expect(screen.getByText("复核完成，仍缺 1 项")).toBeVisible();
+    expect(screen.getByText("已复核 · 仍缺 1 项")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "开始核对 1 组" }));
 
     await waitFor(() =>
@@ -405,7 +405,7 @@ describe("TbjeCheckPage", () => {
       screen.getByRole("button", { name: "LLM 一键联合复核 1 组" }),
     );
     await screen.findByText("联合复核完成：已复核 1 组。");
-    expect(screen.getByText("复核完成，映射完整")).toBeVisible();
+    expect(screen.getAllByText("已复核 · 已自动调整 2 项")).not.toHaveLength(0);
     expect(
       screen.queryByRole("button", { name: /JE 缺少 .*必填映射/ }),
     ).not.toBeInTheDocument();
@@ -584,7 +584,7 @@ describe("TbjeCheckPage", () => {
     expect(within(table).getByText("分类待确认")).toBeVisible();
     expect(within(table).getByText("净额通过，单边发生额有差异")).toBeVisible();
     expect(
-      within(table).getByText("已归类科目合计 0.00 · 6 个科目未纳入勾稽"),
+      within(table).getByText("全部方向可靠科目合计 0.00 · 6 个科目待补分类"),
     ).toBeVisible();
     const preview = within(table).getByRole("button", { name: "预览明细" });
     expect(preview).toHaveAttribute("data-variant", "default");

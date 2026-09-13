@@ -62,7 +62,7 @@ type Assignment = {
 };
 type Classification = LedgerWorkbookSheetClassification;
 
-const MULTI = new Set(["id", "accountName", "account", "auxiliary"]);
+const MULTI = new Set(["id", "accountName", "account", "auxiliary", "date"]);
 const PAGE_SIZE = 50;
 
 const hasMapped = (mapping: Mapping, role: string) => {
@@ -285,6 +285,134 @@ export function faAssignmentsForEntities(
   );
 }
 
+/** 账里真实存在的「主体×科目」组合（inspect_* 的 entityAccounts 项）。 */
+export type EntityAccountPair = { entity: string; account: string };
+
+/** TB 在前、JE 在后合并两侧真实组合，按「主体＋科目串」去重（TB 写法优先保留）。 */
+export function unionEntityAccounts(
+  tb: EntityAccountPair[] | undefined,
+  je: EntityAccountPair[] | undefined,
+): EntityAccountPair[] {
+  const seen = new Set<string>();
+  const pairs: EntityAccountPair[] = [];
+  for (const pair of [...(tb ?? []), ...(je ?? [])]) {
+    const entity = pair.entity?.trim() || DEFAULT_ENTITY;
+    const account = pair.account?.trim() ?? "";
+    if (!account) continue;
+    const key = JSON.stringify([entity, account]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    pairs.push({ entity, account });
+  }
+  return pairs;
+}
+
+/**
+ * 按账里真实存在的「主体×科目」组合铺科目复核清单。
+ * 旧口径 faAssignmentsForEntities 是「检测到的主体 × 全部科目」的笛卡尔积，
+ * 会造出数据里不存在的幻影组合（主体 A 名下列出只有主体 B 才用的科目，
+ * 数量还翻倍）。排序与旧口径一致：主体按首次出现分组，组内原值在前、
+ * 折旧次之、其余垫底；用户确认过的行按「主体＋科目串」原样保留。
+ */
+export function faAssignmentsForEntityAccounts(
+  pairs: EntityAccountPair[],
+  current: Assignment[],
+): Assignment[] {
+  const suggested = new Map(
+    suggestFaAccounts([...new Set(pairs.map((pair) => pair.account))]).map(
+      (item) => [item.account, item],
+    ),
+  );
+  const orderOf = (account: string) =>
+    ROLE_ORDER[suggested.get(account)?.role ?? "excluded"];
+  const byEntity = new Map<string, string[]>();
+  for (const { entity, account } of pairs) {
+    const list = byEntity.get(entity) ?? [];
+    if (!list.includes(account)) list.push(account);
+    byEntity.set(entity, list);
+  }
+  return [...byEntity.entries()].flatMap(([entity, accounts]) =>
+    accounts
+      .map((account, index) => ({ account, index }))
+      .sort(
+        (a, b) => orderOf(a.account) - orderOf(b.account) || a.index - b.index,
+      )
+      .map(
+        ({ account }) =>
+          current.find(
+            (item) => item.account === account && item.entity === entity,
+          ) ?? {
+            ...(suggested.get(account) ?? suggestFaAccount(account)),
+            entity,
+          },
+      ),
+  );
+}
+
+/** 科目复核表的一行（显示层）：同一「主体＋科目编码」的 TB/JE 两种写法合并。 */
+export type AssignmentView = {
+  entity: string;
+  /** 分组键：科目编码；认不出编码时用科目串本身。 */
+  key: string;
+  /** 展示用科目串：优先带名称的写法，否则纯编码写法。 */
+  label: string;
+  /** 组内原始科目串的来源侧（TB／JE），空数组表示无从判断（回退口径）。 */
+  sources: Kind[];
+  /** 组内全部原始科目串——payload 逐条使用，缺一不可。 */
+  accounts: string[];
+  /** 组首行在 assignments 里的下标；改角色/类别经 updateAssignment 同步整组。 */
+  index: number;
+  role: AccountRole;
+  category: string;
+};
+
+/**
+ * payload 级分配行 → 显示行：按（主体, splitFaAccount(account).code）分组
+ * （code 为空时按科目串本身分组），每组只渲染一行。
+ * 发给引擎的 accountAssignments 仍逐条使用 entityAccounts 里的原始科目串
+ * （两种写法各自成行），这里只是显示层的合并——引擎按这些串逐侧匹配。
+ */
+export function groupAssignmentViews(
+  assignments: Assignment[],
+  sourcesOf: (entity: string, account: string) => Kind[] = () => [],
+): AssignmentView[] {
+  const groups = new Map<
+    string,
+    { entity: string; rows: { row: Assignment; index: number }[] }
+  >();
+  assignments.forEach((row, index) => {
+    const entity = row.entity ?? DEFAULT_ENTITY;
+    const code = splitFaAccount(row.account).code;
+    const key = JSON.stringify([entity, code || row.account]);
+    const group = groups.get(key) ?? { entity, rows: [] };
+    group.rows.push({ row, index });
+    groups.set(key, group);
+  });
+  return [...groups.values()].map((group) => {
+    const sourceSet = new Set<Kind>();
+    for (const { row } of group.rows) {
+      for (const kind of sourcesOf(row.entity ?? DEFAULT_ENTITY, row.account)) {
+        sourceSet.add(kind);
+      }
+    }
+    const accounts = group.rows.map(({ row }) => row.account);
+    const first = group.rows[0];
+    return {
+      entity: group.entity,
+      key: splitFaAccount(first.row.account).code || first.row.account,
+      label:
+        accounts.find((account) => splitFaAccount(account).name) ?? accounts[0],
+      sources: (["tb", "je"] as const).filter((kind) => sourceSet.has(kind)),
+      accounts,
+      index: first.index,
+      // 组内各行已按「主体＋科目编码」同步（updateAssignment / 自动归一），
+      // 取首行的角色与类别即可代表整组。
+      role: first.row.role,
+      category: first.row.category,
+    };
+  });
+}
+
 function defaultOutput(input: string) {
   const slash = Math.max(input.lastIndexOf("\\"), input.lastIndexOf("/"));
   const dir = slash >= 0 ? input.slice(0, slash + 1) : "";
@@ -302,7 +430,7 @@ function fileName(path: string) {
 }
 
 export function FaTbJePage() {
-  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
+  const [step, setStep] = useState<1 | 2 | 3>(1);
   const [paths, setPaths] = useState<Record<Kind, string>>({ tb: "", je: "" });
   const [inspects, setInspects] = useState<Partial<Record<Kind, Inspection>>>(
     {},
@@ -320,7 +448,7 @@ export function FaTbJePage() {
   const [error, setError] = useState("");
   const [sourceStatus, setSourceStatus] = useState("");
   const [result, setResult] = useState<unknown>();
-  // 科目复核是必经步骤，用户在第三步按过"继续"才算复核过。
+  // 科目复核是必经步骤，用户在第 2 步按过「确认复核并继续」才算复核过。
   const [accountsReviewed, setAccountsReviewed] = useState(false);
   const [assignmentPage, setAssignmentPage] = useState(0);
   const [bulkCategory, setBulkCategory] = useState("");
@@ -416,7 +544,8 @@ export function FaTbJePage() {
     if (typeof p.reportEnd === "string" && p.reportEnd)
       setReportEnd(p.reportEnd);
     if (typeof p.outputPath === "string") setOutputPath(p.outputPath);
-    setStep(2);
+    // 字段映射已并入第 1 步，直接落回「上传与映射」。
+    setStep(1);
     setAccountsReviewed(false);
     setError("");
     setResult(undefined);
@@ -443,6 +572,31 @@ export function FaTbJePage() {
     ].filter(Boolean);
     return detected.length ? detected : [DEFAULT_ENTITY];
   }, [inspects]);
+  // 科目复核的清单来源：账里真实存在的「主体×科目」组合（inspect_* 的
+  // entityAccounts，空主体后端已归默认主体）。旧组合是「主体 × 全部科目」
+  // 笛卡尔积，会造出数据里不存在的幻影行（主体 2000 名下列出只有 2002
+  // 才用的科目）。两侧都拿不到（旧后端／浏览器预览）时回退笛卡尔积。
+  const entityAccountPairs = useMemo(
+    () =>
+      unionEntityAccounts(
+        inspects.tb?.entityAccounts,
+        inspects.je?.entityAccounts,
+      ),
+    [inspects],
+  );
+  // 每条「主体＋科目串」出现在哪一侧（TB／JE），用于复核行上的来源标签。
+  const accountSources = useMemo(() => {
+    const map = new Map<string, Kind[]>();
+    for (const kind of ["tb", "je"] as const) {
+      for (const pair of inspects[kind]?.entityAccounts ?? []) {
+        const key = JSON.stringify([pair.entity, pair.account]);
+        const sides = map.get(key) ?? [];
+        if (!sides.includes(kind)) sides.push(kind);
+        map.set(key, sides);
+      }
+    }
+    return map;
+  }, [inspects]);
   const entityScope = useEntityScopeConfirmation({
     tbEntities: inspects.tb?.entities ?? [],
     jeEntities: inspects.je?.entities ?? [],
@@ -460,20 +614,30 @@ export function FaTbJePage() {
     Boolean(inspects.tb && inspects.je) &&
     missingMappings.tb.length === 0 &&
     missingMappings.je.length === 0;
-  const includedAssignments = assignments.filter(
-    (item) => item.role !== "excluded",
+  // 显示层：payload 级分配行按「主体＋科目编码」合并成可视行——同一科目
+  // 在 TB 与 JE 里可能拼出两种科目串，各自行参与引擎匹配、缺一不可，但
+  // 复核时对用户就是同一个科目，只该看一行（见 groupAssignmentViews）。
+  const assignmentViews = useMemo(
+    () =>
+      groupAssignmentViews(assignments, (entity, account) =>
+        accountSources.get(JSON.stringify([entity, account])) ?? [],
+      ),
+    [assignments, accountSources],
   );
-  const unresolvedAssignments = includedAssignments.filter(
-    (item) => !item.category.trim() || item.category === "未分类",
+  const includedViews = assignmentViews.filter(
+    (view) => view.role !== "excluded",
+  );
+  const unresolvedViews = includedViews.filter(
+    (view) => !view.category.trim() || view.category === "未分类",
   );
   const assignmentsReady =
-    includedAssignments.some((item) => item.role === "cost") &&
-    unresolvedAssignments.length === 0;
+    assignmentViews.some((view) => view.role === "cost") &&
+    unresolvedViews.length === 0;
   // 科目复核铺开全部科目：只列固定资产候选的话，被自动分类漏判的科目
   // 连露面的机会都没有；科目已按角色降序分组，分页浏览即可，不再需要检索。
-  const pageCount = Math.max(1, Math.ceil(assignments.length / PAGE_SIZE));
-  const pagedAssignments = assignments
-    .map((item, index) => ({ item, index }))
+  const pageCount = Math.max(1, Math.ceil(assignmentViews.length / PAGE_SIZE));
+  const pagedViews = assignmentViews
+    .map((view, index) => ({ view, index }))
     .slice(assignmentPage * PAGE_SIZE, (assignmentPage + 1) * PAGE_SIZE);
   // JE 的数据年度由引擎在识别阶段一并下发；报告期间落在数据之外时，
   // 期间过滤会把整本序时账滤空，导出的 JE 相关表就全是空表。
@@ -483,16 +647,18 @@ export function FaTbJePage() {
     if (!years.length || !year || years.includes(year)) return "";
     return `报告截止日在 ${year} 年，但序时账的数据年度是 ${years.join("、")} 年。按当前设置生成，新增、处置与 JE 明细都会是空表，请先改成账套所属年度。`;
   }, [inspects.je, reportEnd]);
-  const roleCounts = assignments.reduce(
-    (counts, item) => ({ ...counts, [item.role]: counts[item.role] + 1 }),
+  const roleCounts = assignmentViews.reduce(
+    (counts, view) => ({ ...counts, [view.role]: counts[view.role] + 1 }),
     { cost: 0, depreciation: 0, excluded: 0 } as Record<AccountRole, number>,
   );
   useEffect(() => {
     setAssignments((current) =>
-      faAssignmentsForEntities(accounts, entities, current),
+      entityAccountPairs.length
+        ? faAssignmentsForEntityAccounts(entityAccountPairs, current)
+        : faAssignmentsForEntities(accounts, entities, current),
     );
     setAccountsReviewed(false);
-  }, [accounts, entities]);
+  }, [entityAccountPairs, accounts, entities]);
   useEffect(() => {
     setAssignmentPage((current) => Math.min(current, pageCount - 1));
   }, [pageCount]);
@@ -795,23 +961,23 @@ export function FaTbJePage() {
       return;
     }
     if (!mappingsReady) {
-      setError("TB 或 JE 仍有必填字段未映射，请返回字段映射步骤处理。");
+      setError("TB 或 JE 仍有必填字段未映射，请返回「上传与映射」步骤处理。");
+      setStep(1);
+      return;
+    }
+    if (!assignmentViews.some((view) => view.role === "cost")) {
+      setError("请至少确认一个固定资产原值科目。");
       setStep(2);
       return;
     }
-    if (!includedAssignments.some((x) => x.role === "cost")) {
-      setError("请至少确认一个固定资产原值科目。");
-      setStep(3);
-      return;
-    }
-    if (unresolvedAssignments.length) {
-      setError("仍有已纳入科目未确认资产类别，请返回科目分类步骤处理。");
-      setStep(3);
+    if (unresolvedViews.length) {
+      setError("仍有已纳入科目未确认资产类别，请返回科目复核步骤处理。");
+      setStep(2);
       return;
     }
     if (!accountsReviewed) {
       setError("请先完成科目复核：确认每个科目的角色与资产类别后再生成底稿。");
-      setStep(3);
+      setStep(2);
       return;
     }
     if (method.endsWith("export") && !outputPath) {
@@ -843,6 +1009,8 @@ export function FaTbJePage() {
   // 同一个科目在 TB 与 JE 里可能拼成两种科目串（列序不同，编码一头一尾），
   // 两行分别参与两侧匹配、缺一不可。用户只改其中一行的话，引擎会按
   // FA_TBJE_ACCOUNT_ASSIGNMENT_CONFLICT 拒绝导出——所以改动按「主体＋科目编码」同步。
+  // 复核表把这两种写法合并成一行显示（见 groupAssignmentViews），本函数的
+  // 同步范围恰好就是该行背后的整组原始串，改一处即整组生效。
   function updateAssignment(index: number, patch: Partial<Assignment>) {
     setAssignments((rows) => {
       const target = rows[index];
@@ -877,12 +1045,7 @@ export function FaTbJePage() {
     <div className="fa-tbje-page">
       <StepIndicator
         steps={[
-          { key: "source", label: "上传与识别" },
-          {
-            key: "mapping",
-            label: "字段映射",
-            disabled: !paths.tb || !paths.je || !entitiesReady,
-          },
+          { key: "source", label: "上传与映射" },
           {
             key: "accounts",
             label: "科目复核",
@@ -895,7 +1058,7 @@ export function FaTbJePage() {
           },
         ]}
         current={step - 1}
-        onStepClick={(index) => setStep((index + 1) as 1 | 2 | 3 | 4)}
+        onStepClick={(index) => setStep((index + 1) as 1 | 2 | 3)}
       />
       <ErrorBox error={error} onDismiss={() => setError("")} />
 
@@ -903,7 +1066,7 @@ export function FaTbJePage() {
         <div className="fa-tbje-step-stack">
           <Card variant="section">
             <CardHeader>
-              <CardTitle>上传审计数据</CardTitle>
+              <CardTitle>上传审计数据并核对字段映射</CardTitle>
             </CardHeader>
             <CardContent>
               <p className="fx-hint">
@@ -975,74 +1138,54 @@ export function FaTbJePage() {
               ))}
             </div>
           )}
-          <Card variant="section">
-            <CardContent>
-              <div className="fa-tbje-step-actions">
-                <span>
-                  {!paths.tb || !paths.je
-                    ? "请补齐 TB 与 JE。"
-                    : "文件已就绪，主体按映射字段自动读取。"}
-                </span>
-                <Button
-                  disabled={!paths.tb || !paths.je || !entitiesReady || busy}
-                  onClick={() => setStep(2)}
-                >
-                  继续核对字段
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
-
-      {step === 2 && (
-        <div className="fa-tbje-step-stack">
-          <LedgerReviewAll
-            present={
-              inspects.tb && inspects.je
-                ? ["tb", "je"]
-                : inspects.tb
-                  ? ["tb"]
-                  : ["je"]
-            }
-            names={{ tb: "TB", je: "JE" }}
-            reviewing={reviews.reviewing}
-            status={reviews.status}
-            results={reviews.results}
-            disabled={busy}
-            onReviewAll={() =>
-              void reviews.reviewAll({
-                tb: inspects.tb
-                  ? {
-                      headers: inspects.tb.headers,
-                      preview: inspects.tb.preview,
-                      mapping: mappings.tb,
-                      labels: resolveRoleLabels(inspects.tb.roles, TB_LABELS),
-                      tool: "fa_tbje",
-                      onApplied: (next) =>
-                        setMappings((value) => ({ ...value, tb: next })),
-                      missingAfter: (mapping) =>
-                        faTbJeMissingMappings("tb", mapping),
-                    }
-                  : undefined,
-                je: inspects.je
-                  ? {
-                      headers: inspects.je.headers,
-                      preview: inspects.je.preview,
-                      mapping: mappings.je,
-                      labels: resolveRoleLabels(inspects.je.roles, JE_LABELS),
-                      tool: "fa_tbje",
-                      onApplied: (next) =>
-                        setMappings((value) => ({ ...value, je: next })),
-                      missingAfter: (mapping) =>
-                        faTbJeMissingMappings("je", mapping),
-                    }
-                  : undefined,
-              })
-            }
-            onUndo={reviews.undoChange}
-            onAccept={reviews.acceptPending}
-          />
+          {(inspects.tb || inspects.je) && (
+            <LedgerReviewAll
+              present={
+                inspects.tb && inspects.je
+                  ? ["tb", "je"]
+                  : inspects.tb
+                    ? ["tb"]
+                    : ["je"]
+              }
+              names={{ tb: "TB", je: "JE" }}
+              reviewing={reviews.reviewing}
+              status={reviews.status}
+              results={reviews.results}
+              disabled={busy}
+              onReviewAll={() =>
+                void reviews.reviewAll({
+                  tb: inspects.tb
+                    ? {
+                        headers: inspects.tb.headers,
+                        preview: inspects.tb.preview,
+                        mapping: mappings.tb,
+                        labels: resolveRoleLabels(inspects.tb.roles, TB_LABELS),
+                        tool: "fa_tbje",
+                        onApplied: (next) =>
+                          setMappings((value) => ({ ...value, tb: next })),
+                        missingAfter: (mapping) =>
+                          faTbJeMissingMappings("tb", mapping),
+                      }
+                    : undefined,
+                  je: inspects.je
+                    ? {
+                        headers: inspects.je.headers,
+                        preview: inspects.je.preview,
+                        mapping: mappings.je,
+                        labels: resolveRoleLabels(inspects.je.roles, JE_LABELS),
+                        tool: "fa_tbje",
+                        onApplied: (next) =>
+                          setMappings((value) => ({ ...value, je: next })),
+                        missingAfter: (mapping) =>
+                          faTbJeMissingMappings("je", mapping),
+                      }
+                    : undefined,
+                })
+              }
+              onUndo={reviews.undoChange}
+              onAccept={reviews.acceptPending}
+            />
+          )}
           {(["tb", "je"] as const).map(
             (kind) =>
               inspects[kind] && (
@@ -1065,33 +1208,36 @@ export function FaTbJePage() {
                 />
               ),
           )}
-          <div className="fa-tbje-step-actions">
-            <Button variant="secondary" onClick={() => setStep(1)}>
-              返回上传
-            </Button>
-            <span>
-              {mappingsReady
-                ? "TB 与 JE 必填字段均已映射。"
-                : "请处理上方标出的未映射字段。"}
-            </span>
-            <Button
-              disabled={!mappingsReady || reviewing || busy}
-              onClick={() => setStep(3)}
-            >
-              复核科目分类
-            </Button>
-          </div>
+          <Card variant="section">
+            <CardContent>
+              <div className="fa-tbje-step-actions">
+                <span>
+                  {!paths.tb || !paths.je
+                    ? "请补齐 TB 与 JE，并在上方核对字段映射。"
+                    : mappingsReady
+                      ? "TB 与 JE 必填字段均已映射。"
+                      : "请处理上方标出的未映射字段。"}
+                </span>
+                <Button
+                  disabled={!mappingsReady || reviewing || busy}
+                  onClick={() => setStep(2)}
+                >
+                  复核科目分类
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
         </div>
       )}
 
-      {step === 3 && (
+      {step === 2 && (
         <Card variant="section">
           <CardHeader className="fa-tbje-card-head">
             <div>
               <CardTitle>复核固定资产科目与资产类别</CardTitle>
               <p>
                 系统按「上级科目 → 一级编码 →
-                名称」自动分类，默认列出全部科目；固定资产原值与累计折旧排在前面，其余科目标记为「排除」垫底。请逐一复核后再进入下一步。
+                名称」自动分类，只列账里真实存在的「主体×科目」组合；固定资产原值与累计折旧排在前面，其余科目标记为「排除」垫底。请逐一复核后再进入下一步。
               </p>
             </div>
             <div className="fa-tbje-counts">
@@ -1102,10 +1248,10 @@ export function FaTbJePage() {
               <Badge variant="outline">排除 {roleCounts.excluded}</Badge>
               <Badge
                 variant={
-                  unresolvedAssignments.length ? "destructive" : "outline"
+                  unresolvedViews.length ? "destructive" : "outline"
                 }
               >
-                待确认类别 {unresolvedAssignments.length}
+                待确认类别 {unresolvedViews.length}
               </Badge>
             </div>
           </CardHeader>
@@ -1151,8 +1297,8 @@ export function FaTbJePage() {
                 应用到全部科目
               </Button>
               <span>
-                批量操作对全部 {assignments.length.toLocaleString("zh-CN")}{" "}
-                个科目生效
+                批量操作对全部{" "}
+                {assignmentViews.length.toLocaleString("zh-CN")} 个科目生效
               </span>
             </div>
             <div className="fa-tbje-account-table-wrap">
@@ -1166,23 +1312,33 @@ export function FaTbJePage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {pagedAssignments.map(({ item, index }) => (
-                    <tr key={JSON.stringify([item.entity, item.account])}>
+                  {pagedViews.map(({ view, index }) => (
+                    <tr key={JSON.stringify([view.entity, view.key])}>
                       <td>
-                        <Badge variant="outline">{item.entity}</Badge>
+                        <Badge variant="outline">{view.entity}</Badge>
                       </td>
-                      <td className="fa-tbje-account-name" title={item.account}>
-                        {item.account}
+                      <td
+                        className="fa-tbje-account-cell"
+                        title={view.accounts.join("；")}
+                      >
+                        <span className="fa-tbje-account-name">{view.label}</span>
+                        {view.sources.length > 0 && (
+                          <span className="fa-tbje-source-tag">
+                            {view.sources.length === 2
+                              ? "TB+JE"
+                              : view.sources[0].toUpperCase()}
+                          </span>
+                        )}
                       </td>
                       <td>
                         <select
-                          aria-label={`${item.account}的科目角色`}
+                          aria-label={`${view.label}的科目角色`}
                           name={`role-${index}`}
                           autoComplete="off"
-                          value={item.role}
+                          value={view.role}
                           disabled={busy}
                           onChange={(event) =>
-                            updateAssignment(index, {
+                            updateAssignment(view.index, {
                               role: event.target.value as AccountRole,
                             })
                           }
@@ -1193,17 +1349,17 @@ export function FaTbJePage() {
                         </select>
                       </td>
                       <td>
-                        {item.role === "excluded" ? (
+                        {view.role === "excluded" ? (
                           <span className="fa-tbje-category-na">—</span>
                         ) : (
                           <Input
-                            aria-label={`${item.account}的资产类别`}
+                            aria-label={`${view.label}的资产类别`}
                             name={`category-${index}`}
                             autoComplete="off"
-                            value={item.category}
+                            value={view.category}
                             disabled={busy}
                             onChange={(event) =>
-                              updateAssignment(index, {
+                              updateAssignment(view.index, {
                                 category: event.target.value,
                               })
                             }
@@ -1212,7 +1368,7 @@ export function FaTbJePage() {
                       </td>
                     </tr>
                   ))}
-                  {!pagedAssignments.length && (
+                  {!pagedViews.length && (
                     <tr>
                       <td colSpan={4} className="fa-tbje-empty-table">
                         没有可复核的科目。
@@ -1250,21 +1406,21 @@ export function FaTbJePage() {
               </div>
             </div>
             <div className="fa-tbje-step-actions">
-              <Button variant="secondary" onClick={() => setStep(2)}>
-                返回字段映射
+              <Button variant="secondary" onClick={() => setStep(1)}>
+                返回上传与映射
               </Button>
               <span>
-                {!includedAssignments.some((item) => item.role === "cost")
+                {!includedViews.some((view) => view.role === "cost")
                   ? "至少需要 1 个固定资产原值科目。"
-                  : unresolvedAssignments.length
-                    ? `还有 ${unresolvedAssignments.length} 个已纳入科目未确认资产类别。`
+                  : unresolvedViews.length
+                    ? `还有 ${unresolvedViews.length} 个已纳入科目未确认资产类别。`
                     : "科目角色与类别已就绪。"}
               </span>
               <Button
                 disabled={!assignmentsReady || busy}
                 onClick={() => {
                   setAccountsReviewed(true);
-                  setStep(4);
+                  setStep(3);
                 }}
               >
                 确认复核并继续
@@ -1274,7 +1430,7 @@ export function FaTbJePage() {
         </Card>
       )}
 
-      {step === 4 && (
+      {step === 3 && (
         <div className="fa-tbje-step-stack">
           {entityScope.panel}
           <Card variant="section">
@@ -1351,7 +1507,7 @@ export function FaTbJePage() {
                 />
               </label>
               <div className="fa-tbje-step-actions">
-                <Button variant="secondary" onClick={() => setStep(3)}>
+                <Button variant="secondary" onClick={() => setStep(2)}>
                   返回科目复核
                 </Button>
                 <span>

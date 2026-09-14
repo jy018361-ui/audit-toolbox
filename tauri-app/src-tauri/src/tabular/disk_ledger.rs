@@ -74,6 +74,7 @@ pub(super) struct MarkResult {
     pub direct_pairs: usize,
     pub cross_pairs: usize,
     pub unmatched_rows: usize,
+    pub loss_transfer_vouchers: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -851,10 +852,22 @@ impl DiskLedger {
 
     pub(super) fn mark_selected_offsets(
         &self,
+        mark_loss_transfer: bool,
         cancel: &AtomicBool,
     ) -> Result<MarkResult, AppError> {
         check_cancel(cancel)?;
         let net = self.selected_net_column();
+        self.db.execute_batch(
+            "DROP TABLE IF EXISTS temp.mark_loss;
+             CREATE TEMP TABLE mark_loss(voucher TEXT PRIMARY KEY) WITHOUT ROWID;",
+        ).map_err(sql_error)?;
+        if mark_loss_transfer {
+            self.db.execute_batch(
+                "INSERT INTO mark_loss
+                 SELECT DISTINCT voucher FROM processed
+                 WHERE account LIKE '%本年利润%' OR account LIKE '%未分配利润%';",
+            ).map_err(sql_error)?;
+        }
         self.db.execute_batch(&format!(
             "DROP TABLE IF EXISTS temp.mark_eligible;
              DROP TABLE IF EXISTS temp.mark_status;
@@ -862,6 +875,7 @@ impl DiskLedger {
                SELECT seq,voucher,account_norm,entity,CAST(ROUND({net}*100.0) AS INTEGER) cents
                FROM processed
                WHERE voucher IN (SELECT voucher FROM selected)
+                 AND voucher NOT IN (SELECT voucher FROM mark_loss)
                  AND account_norm IN (SELECT account FROM targets)
                  AND CAST(ROUND({net}*100.0) AS INTEGER)<>0;
              CREATE UNIQUE INDEX mark_eligible_seq ON mark_eligible(seq);
@@ -870,6 +884,7 @@ impl DiskLedger {
              INSERT INTO mark_status
                SELECT seq,'未匹配' FROM processed
                WHERE voucher IN (SELECT voucher FROM selected)
+                 AND voucher NOT IN (SELECT voucher FROM mark_loss)
                  AND account_norm IN (SELECT account FROM targets);"
         )).map_err(sql_error)?;
         check_cancel(cancel)?;
@@ -953,10 +968,16 @@ impl DiskLedger {
                 |row| row.get::<_, i64>(0),
             )
             .map_err(sql_error)? as usize;
+        let loss_transfer_vouchers = self.db.query_row(
+            "SELECT COUNT(*) FROM mark_loss WHERE voucher IN (SELECT voucher FROM selected)",
+            [],
+            |row| row.get::<_, i64>(0),
+        ).map_err(sql_error)? as usize;
         Ok(MarkResult {
             direct_pairs,
             cross_pairs,
             unmatched_rows,
+            loss_transfer_vouchers,
         })
     }
 
@@ -964,6 +985,7 @@ impl DiskLedger {
         &self,
         output: &Path,
         headers: &[String],
+        mark_loss_transfer: bool,
         progress: Progress<'_>,
         cancel: &AtomicBool,
     ) -> Result<usize, AppError> {
@@ -973,18 +995,26 @@ impl DiskLedger {
             let mut file = File::create(&partial).map_err(io_error)?;
             file.write_all(&[0xEF, 0xBB, 0xBF]).map_err(io_error)?;
             let mut writer = csv::WriterBuilder::new().flexible(true).from_writer(file);
-            let output_headers = ["【辅助_绝对值】", "【辅助_符号】", "【智能匹配状态】"]
-                .into_iter()
-                .map(str::to_owned)
-                .chain(headers.iter().cloned())
-                .collect::<Vec<_>>();
+            let mut output_headers = Vec::with_capacity(headers.len() + 4);
+            if mark_loss_transfer {
+                output_headers.push("【损益结转】".to_owned());
+            }
+            output_headers.extend(
+                ["【辅助_绝对值】", "【辅助_符号】", "【智能匹配状态】"]
+                    .into_iter()
+                    .map(str::to_owned),
+            );
+            output_headers.extend(headers.iter().cloned());
             writer.write_record(&output_headers).map_err(csv_error)?;
             let mut statement = self
                 .db
                 .prepare(&format!(
-                    "SELECT r.data,p.fills,p.{},COALESCE(s.status,'') FROM processed p
+                    "SELECT r.data,p.fills,p.{},COALESCE(s.status,''),
+                            CASE WHEN l.voucher IS NULL THEN 0 ELSE 1 END
+                     FROM processed p
              JOIN raw_cache.rows r ON r.rowid=p.seq+1
              LEFT JOIN mark_status s ON s.seq=p.seq
+             LEFT JOIN mark_loss l ON l.voucher=p.voucher
              WHERE p.voucher IN (SELECT voucher FROM selected) ORDER BY p.seq",
                     self.selected_net_column()
                 ))
@@ -1002,7 +1032,11 @@ impl DiskLedger {
                 let row = normalized_row(&data, &fills, headers.len())?;
                 let amount: f64 = record.get(2).map_err(sql_error)?;
                 let status: String = record.get(3).map_err(sql_error)?;
-                let mut output_row = Vec::with_capacity(row.len() + 3);
+                let loss: i64 = record.get(4).map_err(sql_error)?;
+                let mut output_row = Vec::with_capacity(row.len() + 4);
+                if mark_loss_transfer {
+                    output_row.push(if loss != 0 { "损益结转".into() } else { String::new() });
+                }
                 if status.is_empty() {
                     output_row.extend([String::new(), String::new(), String::new()]);
                 } else {
@@ -1837,7 +1871,7 @@ mod tests {
         ledger
             .set_selected_convention(SignConvention::Unsigned)
             .unwrap();
-        let result = ledger.mark_selected_offsets(&cancel).unwrap();
+        let result = ledger.mark_selected_offsets(false, &cancel).unwrap();
         assert_eq!(result.direct_pairs, 1);
         assert_eq!(result.cross_pairs, 1);
         assert_eq!(result.unmatched_rows, 0);
@@ -1905,7 +1939,7 @@ mod tests {
         ledger
             .set_selected_convention(SignConvention::Unsigned)
             .unwrap();
-        let result = ledger.mark_selected_offsets(&cancel).unwrap();
+        let result = ledger.mark_selected_offsets(false, &cancel).unwrap();
         assert_eq!(result.direct_pairs, 0);
         assert_eq!(result.cross_pairs, 0);
         assert_eq!(result.unmatched_rows, 3);

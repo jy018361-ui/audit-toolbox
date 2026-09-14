@@ -200,7 +200,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
   const [job, setJob] = useState<JobEvent>();
   const [error, setError] = useState("");
   const [dragHover, setDragHover] = useState(false);
-  const [menu, setMenu] = useState<{ field: string; anchor: DOMRect }>();
+  const [menu, setMenu] = useState<{ field: string; anchor: HTMLElement }>();
   const [valueCache, setValueCache] = useState<
     Record<string, ColumnFilterValues>
   >({});
@@ -436,7 +436,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     [state.inputPath, state.sheet, state.headerRow],
   );
 
-  function openFilterMenu(field: string, anchor: DOMRect) {
+  function openFilterMenu(field: string, anchor: HTMLElement) {
     setMenu({ field, anchor });
     if (!valueCache[field]) void loadValues(field, "");
   }

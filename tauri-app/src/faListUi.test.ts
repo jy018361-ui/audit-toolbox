@@ -7,6 +7,7 @@ import {
   faOutputPathAfterSourceSelection,
   faHeaderOption,
   faReviewNarrative,
+  faReviewDisplayMessage,
   faReviewReasons,
   faReviewSummary,
   faRolesForSide,
@@ -402,6 +403,18 @@ describe("FA LLM 复核先改后核", () => {
     expect(faReviewNarrative("LLM 映射复核完成。", 0)).toBe(
       "LLM 复核完成：现有映射与 LLM 判断一致，未做改动。",
     );
+    expect(
+      faReviewDisplayMessage(
+        { enabled: true, message: "原值列样例均为金额，日期格式正确。" },
+        0,
+      ),
+    ).toBe("LLM 复核完成：现有映射与 LLM 判断一致，未做改动。");
+    expect(
+      faReviewDisplayMessage(
+        { enabled: true, failed: true, message: "模型服务超时。" },
+        0,
+      ),
+    ).toBe("模型服务超时。");
     expect(
       faReviewReasons(
         [{ reason: "原值列样例均为金额" }],

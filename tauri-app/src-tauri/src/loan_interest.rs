@@ -398,6 +398,17 @@ fn rate_template(params: &Value) -> Result<Value, AppError> {
     {
         ws.get_cell_mut((col as u32 + 1, 1)).set_value(*title);
     }
+    // F 列先选口径；黄色只填固定执行利率，蓝色只填浮动基准与加减点。
+    // 表头与数据区同色，避免用户把固定利率误填进基准利率列。
+    for col in 1..=10 {
+        ws.get_style_mut((col, 1)).font_mut().set_bold(true);
+        ws.get_style_mut((col, 1)).set_background_color("D9EAD3");
+    }
+    ws.get_style_mut((6, 1)).set_background_color("E7E6E6");
+    ws.get_style_mut((7, 1)).set_background_color("FFF2CC");
+    for col in 8..=9 {
+        ws.get_style_mut((col, 1)).set_background_color("DDEBF7");
+    }
     for (index, row) in rows.iter().enumerate() {
         let y = index as u32 + 1;
         let rate = filled.get(&(norm(&row.entity), norm(&row.loan_id)));
@@ -420,11 +431,17 @@ fn rate_template(params: &Value) -> Result<Value, AppError> {
         ws.get_cell_mut((5, y + 1))
             .set_value_number(row.closing_principal);
         ws.get_cell_mut((6, y + 1)).set_value(rate_type);
+        ws.get_style_mut((6, y + 1)).set_background_color("E7E6E6");
+        ws.get_style_mut((7, y + 1)).set_background_color("FFF2CC");
+        for col in 8..=9 {
+            ws.get_style_mut((col, y + 1))
+                .set_background_color("DDEBF7");
+        }
         if let Some(v) = pick("fixedRate") {
-            ws.get_cell_mut((7, y + 1)).set_value_number(v);
+            ws.get_cell_mut((7, y + 1)).set_value_number(v * 100.0);
         }
         if let Some(v) = pick("benchmarkRate") {
-            ws.get_cell_mut((8, y + 1)).set_value_number(v);
+            ws.get_cell_mut((8, y + 1)).set_value_number(v * 100.0);
         }
         if let Some(v) = pick("spreadBps") {
             ws.get_cell_mut((9, y + 1)).set_value_number(v);
@@ -2755,7 +2772,7 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
         "基准利率",
         "加/减点BP",
         "有效年利率",
-        "计息天数",
+        "计息积数（元·天）",
         "测算利息",
         "匹配状态",
         "匹配依据",
@@ -2891,21 +2908,16 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
             &percent,
         )
         .map_err(xlsx)?;
-        // 计息天数与测算利息都指向「计息分段明细」的 SUMIF：明细里每段的
-        // 本金×天数×利率逐段可查，主表只做按借款标识汇总；明细改动即时联动。
-        let seg_days: i64 = row
-            .segments
-            .iter()
-            .map(|seg| (seg.to_incl - seg.from).num_days() + 1)
-            .sum();
+        // 主表展示真正参与利息计算的计息积数，而不是把分段天数相加成容易
+        // 误读的“365 天”。每次本金增减对应的具体天数在分段明细逐段列示。
         ws.write_formula_with_format(
             y,
             14,
             Formula::new(format!(
-                "=SUMIFS('{sheet}'!$F:$F,'{sheet}'!$A:$A,A{excel_row},'{sheet}'!$J:$J,S{excel_row})",
+                "=SUMIFS('{sheet}'!$G:$G,'{sheet}'!$A:$A,A{excel_row},'{sheet}'!$J:$J,S{excel_row})",
                 sheet = SEG_SHEET,
             ))
-            .set_result(seg_days.to_string()),
+            .set_result(row.principal_days.to_string()),
             &integer,
         )
         .map_err(xlsx)?;
@@ -2962,11 +2974,7 @@ fn export(rows: &[LoanRow], params: &Value) -> Result<PathBuf, AppError> {
                         .ledger_closing
                         .map(|lc| row.opening_principal + row.additions - row.reductions - lc)
                         .unwrap_or(0.0),
-                    14 => row
-                        .segments
-                        .iter()
-                        .map(|seg| ((seg.to_incl - seg.from).num_days() + 1) as f64)
-                        .sum(),
+                    14 => row.principal_days,
                     15 => row.calculated_interest,
                     _ => 0.0,
                 })
@@ -3002,7 +3010,7 @@ const LPR_SHEET: &str = "LPR报价表";
 /// 报价数据从第几行开始（前面是标题与来源说明）。公式的 INDEX/MATCH 区间据此算。
 const LPR_FIRST_DATA_ROW: usize = 5;
 
-/// 底稿里「计息分段明细」Sheet 的名字。主表的计息天数与测算利息按它 SUMIF。
+/// 底稿里「计息分段明细」Sheet 的名字。主表的计息积数与测算利息按它 SUMIF。
 const SEG_SHEET: &str = "计息分段明细";
 
 /// 写「计息分段明细」：计息过程逐段落行展示。每段的起日、止日（含当天）、
@@ -4527,11 +4535,11 @@ mod loan_form_tests {
             base.contains("MATCH(J2"),
             "应按定价基准日那一格查表：{base}"
         );
-        // N 列有效年利率是公式；O 计息天数与 P 测算利息都按借款标识＋主体 SUMIFS。
+        // N 列有效年利率是公式；O 计息积数与 P 测算利息都按借款标识＋主体 SUMIFS。
         assert!(formulas.get_value((1, 13)).unwrap().contains("L2+M2/10000"));
         assert_eq!(
             formulas.get_value((1, 14)).unwrap(),
-            "SUMIFS('计息分段明细'!$F:$F,'计息分段明细'!$A:$A,A2,'计息分段明细'!$J:$J,S2)"
+            "SUMIFS('计息分段明细'!$G:$G,'计息分段明细'!$A:$A,A2,'计息分段明细'!$J:$J,S2)"
         );
         assert_eq!(
             formulas.get_value((1, 15)).unwrap(),
@@ -6109,10 +6117,18 @@ mod tests {
             "tbSource": tb_source,
             "jeSource": {"source":{"inputPath":je,"sheet":"JE","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","functionalDebit":"借方","functionalCredit":"贷方"}},
             "loanAccounts": ["2001"],
+            "rateRows": [{"entity": ledger_mapping::DEFAULT_ENTITY, "loanId": "2001 短期借款", "rateType": "fixed", "fixedRate": 0.0385}],
             "outputPath": template,
         }))
         .unwrap();
         assert_eq!(exported["rowCount"].as_u64().unwrap(), 1);
+        let initial = umya_spreadsheet::reader::xlsx::read(&template).unwrap();
+        let initial_ws = initial.get_sheet_by_name("借款利率确认表").unwrap();
+        assert_eq!(
+            initial_ws.get_value((7, 2)),
+            "3.85",
+            "模板里的小数利率应按百分数展示"
+        );
         // 在模板上补填利率（固定 3.85 与浮动 3.1%+90BP 各一行验证解析）。
         let mut filled_book = umya_spreadsheet::reader::xlsx::read(&template).unwrap();
         let ws = filled_book.get_sheet_by_name_mut("借款利率确认表").unwrap();

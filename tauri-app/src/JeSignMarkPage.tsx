@@ -19,6 +19,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/PageHeader";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JargonTip } from "@/components/JargonTip";
+import { SwitchInput } from "@/components/SwitchInput";
+import { CircleMinus, Equal } from "lucide-react";
 import { JobProgress } from "@/components/JobProgress";
 import { LedgerSourceCard } from "@/components/LedgerSourceCard";
 import { LedgerLlmReview } from "@/components/LedgerLlmReview";
@@ -81,6 +83,8 @@ type JeMarkDraft = {
   outputTouched: boolean;
   /** 金额符号口径：auto=自动检测，unsigned=借贷符号一样，signed=已带符号。 */
   signChoice: "auto" | "unsigned" | "signed";
+  /** 是否识别损益结转凭证并从正负数配对中排除。 */
+  markLossTransfer: boolean;
 };
 
 /** 后端 `kanzhang.mark_sign_report` 返回的口径检测报告。 */
@@ -91,6 +95,7 @@ type SignReport = {
   totalVouchers: number;
   balancedVouchers: number;
   unbalancedVouchers: number;
+  oneSidedVouchers: number;
   filtered: boolean;
   keySuspect: boolean;
 };
@@ -108,6 +113,7 @@ const EMPTY: JeMarkDraft = {
   outputPath: "",
   outputTouched: false,
   signChoice: "auto",
+  markLossTransfer: true,
 };
 const CACHE = "audit-toolbox.je-sign-mark.draft.v2";
 const loadDraft = (): JeMarkDraft => {
@@ -131,7 +137,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   const [job, setJob] = useState<JobEvent>();
   const [result, setResult] = useState<unknown>();
   const [dragHover, setDragHover] = useState(false);
-  const [menu, setMenu] = useState<{ field: string; anchor: DOMRect }>();
+  const [menu, setMenu] = useState<{ field: string; anchor: HTMLElement }>();
   const [valueCache, setValueCache] = useState<
     Record<string, ColumnFilterValues>
   >({});
@@ -217,6 +223,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       targetBatches?: JeMarkDraft["batches"];
       columnFilters?: JeMarkDraft["columnFilters"];
       signConvention?: string;
+      markLossTransfer?: boolean;
       outputPath?: string;
     };
     if (typeof p.inputPath !== "string" || !p.inputPath) return;
@@ -257,6 +264,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         p.signConvention === "signed" || p.signConvention === "unsigned"
           ? p.signConvention
           : "auto",
+      markLossTransfer: p.markLossTransfer ?? true,
     });
     setResult(undefined);
     setJob(undefined);
@@ -497,6 +505,19 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       });
   }, [signKey, draft.inspect]);
 
+  // 手动口径只服务于“所有凭证均为单边”的文件；一旦重新映射后检测到
+  // 完整凭证，立即回到自动检测，避免隐藏的旧选择继续影响导出。
+  const allVouchersOneSided = Boolean(
+    signReport &&
+      signReport.totalVouchers > 0 &&
+      signReport.oneSidedVouchers === signReport.totalVouchers,
+  );
+  useEffect(() => {
+    if (signReport && !allVouchersOneSided && draft.signChoice !== "auto") {
+      patch({ signChoice: "auto" });
+    }
+  }, [allVouchersOneSided, signReport, draft.signChoice]);
+
   function skipReview() {
     llmGeneration.current += 1;
     setLlmBusy(false);
@@ -621,7 +642,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
-  function openMenu(field: string, anchor: DOMRect) {
+  function openMenu(field: string, anchor: HTMLElement) {
     setMenu({ field, anchor });
     if (!valueCache[field]) void loadValues(field, "");
   }
@@ -692,6 +713,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         columnFilters: activeColumnFilters(draft.columnFilters),
         signConvention:
           draft.signChoice === "auto" ? undefined : draft.signChoice,
+        markLossTransfer: draft.markLossTransfer,
         outputPath: target || undefined,
       });
       setJob({
@@ -720,7 +742,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
     signed: "已带符号（借正贷负）",
   };
   const signAllowsChoice =
-    signReport?.scheme === "A" || signReport?.scheme === "B";
+    allVouchersOneSided &&
+    (signReport?.scheme === "A" || signReport?.scheme === "B");
   const signApplied =
     draft.signChoice === "auto"
       ? signReport?.detected === "signed"
@@ -809,20 +832,26 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                       role="group"
                       aria-label="金额符号口径选择"
                     >
-                      {(["auto", "unsigned", "signed"] as const).map(
-                        (value) => (
-                          <button
-                            key={value}
-                            type="button"
-                            className={
-                              draft.signChoice === value ? "active" : ""
-                            }
-                            onClick={() => patch({ signChoice: value })}
-                          >
-                            {signLabels[value]}
-                          </button>
-                        ),
-                      )}
+                      <button
+                        type="button"
+                        className={draft.signChoice === "unsigned" ? "active" : ""}
+                        aria-pressed={draft.signChoice === "unsigned"}
+                        title="适用于借方、贷方金额都以正数记录，借贷方向由分列或方向字段区分的单边凭证文件。再次点击可恢复自动检测。"
+                        onClick={() => patch({ signChoice: draft.signChoice === "unsigned" ? "auto" : "unsigned" })}
+                      >
+                        <Equal size={16} aria-hidden="true" />
+                        借贷符号一样
+                      </button>
+                      <button
+                        type="button"
+                        className={draft.signChoice === "signed" ? "active" : ""}
+                        aria-pressed={draft.signChoice === "signed"}
+                        title="适用于金额本身已表达方向（借方为正、贷方为负）的单边凭证文件。再次点击可恢复自动检测。"
+                        onClick={() => patch({ signChoice: draft.signChoice === "signed" ? "auto" : "signed" })}
+                      >
+                        <CircleMinus size={16} aria-hidden="true" />
+                        已带符号
+                      </button>
                     </span>
                   )}
                 </div>
@@ -929,7 +958,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
                 }
                 openMenu(
                   ACCOUNT_MENU,
-                  event.currentTarget.getBoundingClientRect(),
+                  event.currentTarget,
                 );
               }}
             >
@@ -991,6 +1020,19 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
       {draft.inspect && (
         <section className="kz-card">
           <h2>标记与导出</h2>
+          <div className="jm-export-options">
+            <label>
+              <SwitchInput
+                checked={draft.markLossTransfer}
+                onChange={(value) => patch({ markLossTransfer: value })}
+                ariaLabel="标记损益结转凭证"
+              />
+              <span>
+                <b>标记损益结转凭证</b>
+                <small>命中本年利润或未分配利润的整张凭证会标记为“损益结转”，并不参与正负数配对。</small>
+              </span>
+            </label>
+          </div>
           <label>
             输出文件
             <div className="kz-path">
@@ -1016,7 +1058,8 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               : "默认保存到凭证文件所在目录，文件名为「正负数标记_源文件名[_工作表]_<时间戳>.csv」（导出时按当前时间生成）。"}
             每个批次单独出一个文件，选 .csv 出 CSV、选 .xlsx
             出工作簿；明细最前面是
-            【辅助_绝对值】【辅助_符号】【智能匹配状态】三列，后接原始列。
+            {draft.markLossTransfer ? "【损益结转】" : ""}
+            【辅助_绝对值】【辅助_符号】【智能匹配状态】列，后接原始列。
           </p>
           <div className="kz-actions">
             {busy && job ? (
@@ -1147,6 +1190,7 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
                 <span>直接匹配 {String(item.matchedPairs ?? 0)} 对</span>
                 <span>跨凭证匹配 {String(item.crossMatchedPairs ?? 0)} 对</span>
                 <span>未匹配 {String(item.unmatchedRows ?? 0)} 行</span>
+                <span>损益结转 {String(item.lossTransferVouchers ?? 0)} 笔</span>
               </div>
             ))}
           </div>

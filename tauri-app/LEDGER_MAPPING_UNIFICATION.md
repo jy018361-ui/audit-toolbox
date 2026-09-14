@@ -1,5 +1,11 @@
 # 账表映射统一方案
 
+## 2026-09-14 · JE 无对应维度时撤销 TB 映射，存款维度空白年初按零
+
+- 公共辅助核算联动仍允许计算侧降级为「主体＋科目」；但映射层不再保留一项已经证实无效的 TB 映射。`ledger.auxiliary_link` 返回 `noMatch` 时，所有同时使用 TB＋JE 且提供辅助映射的工具——存款利息、借款利息、TBJE 完整性、汇兑损益与 FA TBJE——统一撤销 TB 的 `auxiliary`／`loanId` 映射并显示说明；`partialCoverage` 已认定唯一 JE 列，继续保留；`ambiguous` 留给用户手动指定，不擅自清空。
+- 存款 TB 按主体＋科目合并辅助明细时，年初余额是否可用改按整张表的映射方案判定。只要映射了年初净额或借贷列，单个辅助明细格空白按 0 合并；不再因任一子行年初为空而把整户错误标成「TB 未提供年初余额」并用 JE 倒推。
+- 回归：`npx vitest run src/ledgerMappingAuxiliary.test.ts src/components/AuxiliaryLinkStatus.test.tsx`；`cargo test --manifest-path src-tauri/Cargo.toml --lib 辅助明细空白年初按零合并而不是整户倒推 -- --test-threads=1`。
+
 ## 2026-09-14 · 资产负债表日统一：借款识别下发建议表日，FA TB＋JE 默认全口径
 
 - 借款利息的 `loan.inspect` 对 TB/JE 新增 `dataYears` 与 `suggestedBalanceSheetDate` 下发（JE 按记账日期取年度、TB 按期间列 4 位年份，与存款利息 `data_years` 同口径；映射不到日期/期间列时不硬猜），前端识别后自动预填"资产负债表日"，期间起点、LPR 取期与 JE 归集不再依赖手填默认值。台账（ledger）形态无期间概念，不参与。

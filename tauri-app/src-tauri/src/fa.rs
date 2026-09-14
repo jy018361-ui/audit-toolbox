@@ -1204,21 +1204,40 @@ fn export(
     let result = merge(&params, progress, &cancel)?;
     pause.wait()?;
     check_cancel(&cancel)?;
-    progress("export", 3, 4, "正在生成 FA List、变动清单、汇总与透视表");
     let output = output_path(&params, &result.end.path)?;
-    if output
+    let is_csv = output
         .extension()
         .and_then(|v| v.to_str())
         .map(|v| v.eq_ignore_ascii_case("csv"))
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    let tax_analysis = if is_csv {
+        None
+    } else {
+        progress("analyze", 3, 5, "正在分析税法最低折旧年限");
+        let period_rows = build_depreciation_period(&result, &params);
+        Some(crate::fa_subtools::build_policy_tax_analysis(
+            &period_rows,
+            &params,
+            &cancel,
+            pause,
+        )?)
+    };
+    progress("export", 4, 5, "正在生成 FA List、变动清单、汇总与透视表");
+    if is_csv {
         pause.wait()?;
         write_csv(&output, &result, strings(params.get("selectedColumns")))?;
     } else {
         pause.wait()?;
-        write_xlsx(&output, &result, &params, &cancel)?;
+        write_xlsx_with_tax_analysis(&output, &result, &params, &cancel, tax_analysis.as_ref())?;
     }
     let mut export_message = "FA List 导出完成".to_owned();
+    if let Some(warning) = tax_analysis
+        .as_ref()
+        .and_then(|analysis| analysis.message.as_deref())
+    {
+        export_message.push('；');
+        export_message.push_str(warning);
+    }
     if !result.unmatched_addition.is_empty() || !result.unmatched_disposal.is_empty() {
         let path = output
             .parent()
@@ -1228,15 +1247,17 @@ fn export(
         write_unmatched(&path, &result, &cancel)?;
         export_message.push_str("；已生成未匹配资产变动清单");
     }
+    let completion_message = export_message.clone();
     let warnings = correction_warnings(&result, &params);
     if !warnings.is_empty() {
         export_message.push_str("===CORRECTION_WARNINGS===");
         export_message.push_str(&warnings.join("\n"));
     }
     check_cancel(&cancel)?;
-    progress("completed", 4, 4, "FA List 导出完成");
+    progress("completed", 5, 5, &completion_message);
     Ok(
         json!({"engine":"rust-fa","message":"完全外连接完成。","exportMessage":export_message,
+        "taxAnalysisCompleted":tax_analysis.as_ref().is_some_and(|analysis| analysis.completed),
         "rows":result.rows.len(),"columns":result_columns(&result,true).len(),"outputPaths":[output.to_string_lossy()]}),
     )
 }
@@ -2287,7 +2308,7 @@ fn key_indexes(table: &Table, keys: &[String]) -> Vec<usize> {
 /// "2024固定资产卡片02.xlsx & Sheet1" — how the legacy exporter labelled which
 /// workbook/sheet a column came from.  Reviewers use it to tell the two periods
 /// apart at a glance, which a bare "期初"/"期末" suffix does not do.
-fn side_label(params: &Value, side: u8) -> String {
+pub(crate) fn side_label(params: &Value, side: u8) -> String {
     let (path_key, sheet_key) = if side == 1 {
         ("beginPath", "beginSheet")
     } else {
@@ -2533,6 +2554,16 @@ fn write_xlsx(
     params: &Value,
     cancel: &AtomicBool,
 ) -> Result<(), AppError> {
+    write_xlsx_with_tax_analysis(path, result, params, cancel, None)
+}
+
+fn write_xlsx_with_tax_analysis(
+    path: &Path,
+    result: &MergeResult,
+    params: &Value,
+    cancel: &AtomicBool,
+    tax_analysis: Option<&crate::fa_subtools::PolicyTaxAnalysis>,
+) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(io_error)?;
     }
@@ -2708,7 +2739,19 @@ fn write_xlsx(
     check_cancel(cancel)?;
     write_business_sheets(&mut wb, result, params, &header, cancel)?;
     check_cancel(cancel)?;
-    write_depreciation_period_sheet(&mut wb, result, params, &header, cancel, "折旧期间")?;
+    if let Some(analysis) = tax_analysis {
+        crate::fa_subtools::write_depreciation_period_tax_sheet(
+            &mut wb,
+            result,
+            params,
+            &header,
+            cancel,
+            "折旧期间",
+            &analysis.rows,
+        )?;
+    } else {
+        write_depreciation_period_sheet(&mut wb, result, params, &header, cancel, "折旧期间")?;
+    }
     check_cancel(cancel)?;
     if fa_llm_enabled(params) {
         write_llm_analysis(&mut wb, result, params)?;
@@ -3689,9 +3732,26 @@ pub(crate) fn write_depreciation_period_sheet(
     cancel: &AtomicBool,
     sheet_name: &str,
 ) -> Result<(), AppError> {
+    let headers = depreciation_period_headers(params);
+    let rows = build_depreciation_period(result, params);
+    write_string_sheet_labelled(
+        wb,
+        sheet_name,
+        &headers.iter().map(String::as_str).collect::<Vec<_>>(),
+        &rows,
+        header,
+        None,
+        Some(cancel),
+        Some(&side_label(params, 2)),
+    )
+}
+
+/// Shared header contract for the regular FA sheet and the policy subtool.
+/// The policy exporter appends its three LLM/tax columns to these base columns.
+pub(crate) fn depreciation_period_headers(params: &Value) -> Vec<String> {
     // Legacy titled the paired columns with the mapped source column of each
     // workbook, and spelled the formula out in the last header.
-    let headers = [
+    vec![
         mapped_display_header(params, 1, "category", "期初资产类别"),
         mapped_display_header(params, 2, "category", "期末资产类别"),
         mapped_display_header(params, 1, "life", "期初使用寿命(月)"),
@@ -3703,17 +3763,7 @@ pub(crate) fn write_depreciation_period_sheet(
         "判断结果".to_owned(),
         "影响当年金额".to_owned(),
         "计算过程=年末原值*(1-年末残值率)/年末寿命-年末原值*(1-年初残值率)/年初寿命".to_owned(),
-    ];
-    write_string_sheet_labelled(
-        wb,
-        sheet_name,
-        &headers.iter().map(String::as_str).collect::<Vec<_>>(),
-        &build_depreciation_period(result, params),
-        header,
-        None,
-        Some(cancel),
-        Some(&side_label(params, 2)),
-    )
+    ]
 }
 
 fn write_anomaly_sheet(
@@ -4106,7 +4156,7 @@ struct DepGroup {
     end_residual_amount: f64,
 }
 
-fn build_depreciation_period(result: &MergeResult, params: &Value) -> Vec<Vec<String>> {
+pub(crate) fn build_depreciation_period(result: &MergeResult, params: &Value) -> Vec<Vec<String>> {
     let begin_life_scale = life_scale(result, params, 1);
     let end_life_scale = life_scale(result, params, 2);
     #[derive(Clone)]
@@ -5006,6 +5056,9 @@ fn field_source_for_header(
             }
         }
         "折旧期间" | "折旧政策对比" => {
+            if header.contains("（LLM）") || header == "税法最低折旧年限（年）" {
+                return "LLM辅助/税法参考";
+            }
             if header.contains("判断") {
                 return "逻辑判断";
             }
@@ -7571,6 +7624,7 @@ mod tests {
         p["balanceSheetDate"] = json!("2025-12-31");
         p["__settings"] = json!({"llm":{"enabled":true}});
         p["__llmAnalysisMock"] = json!({"title":"模拟 LLM 分析"});
+        p["__policyTaxLlmMock"] = json!({"items":[]});
         p["pivotConfig"] = json!({
             "rows":["资产类别"],
             "columns":["数据来源"],
@@ -7600,6 +7654,19 @@ mod tests {
                 "异常清单",
             ]
         );
+        let period = wb.worksheet_range("折旧期间").unwrap();
+        let period_headers = period
+            .rows()
+            .next()
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(period_headers.ends_with(&[
+            "税法资产类别（LLM）".to_owned(),
+            "税法最低折旧年限（年）".to_owned(),
+            "税法年限分析（LLM）".to_owned(),
+        ]));
         let pivot = wb.worksheet_range("数据透视表").unwrap();
         let pivot_headers = pivot
             .rows()
@@ -7805,8 +7872,18 @@ mod tests {
         p["endMapping"] = json!({"category":"资产类别","originalValue":"原值"});
         p["__settings"] = json!({"llm":{"enabled":false}});
         test_export(p).unwrap();
-        let wb = open_workbook_auto(dir.join("FA_List.xlsx")).unwrap();
+        let mut wb = open_workbook_auto(dir.join("FA_List.xlsx")).unwrap();
         assert!(!wb.sheet_names().contains(&"LLM分析".to_owned()));
+        let period = wb.worksheet_range("折旧期间").unwrap();
+        let headers = period.rows().next().unwrap().to_vec();
+        assert_eq!(
+            headers[headers.len() - 3].to_string(),
+            "税法资产类别（LLM）"
+        );
+        assert_eq!(
+            headers[headers.len() - 1].to_string(),
+            "税法年限分析（LLM）"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

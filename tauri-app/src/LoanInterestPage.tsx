@@ -12,7 +12,11 @@ import {
 } from "./api";
 import { depositDropTargetInside } from "./DepositInterestPage";
 import { AuxiliaryLinkStatusView } from "@/components/AuxiliaryLinkStatus";
-import { verifyAuxiliaryLink, type AuxiliaryLinkResult } from "@/ledgerMapping";
+import {
+  dropUnlinkedTbAuxiliary,
+  verifyAuxiliaryLink,
+  type AuxiliaryLinkResult,
+} from "@/ledgerMapping";
 import { DateInput } from "@/components/DateInput";
 import { defaultBalanceSheetDate } from "@/dateDefaults";
 import { PageHeader } from "@/components/PageHeader";
@@ -426,7 +430,25 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       auxRole: "loanId",
       anchorOnly: true,
     }).then((result) => {
-      if (!cancelled) setAuxLink(result);
+      if (cancelled) return;
+      setAuxLink(result);
+      if (result?.tbAuxMapped && result.status === "noMatch") {
+        setSources((current) => ({
+          ...current,
+          tb: {
+            ...current.tb,
+            mapping: dropUnlinkedTbAuxiliary(
+              current.tb.mapping,
+              result,
+              "loanId",
+            ),
+          },
+        }));
+        invalidateResults();
+        setPairStatus(
+          "JE 未找到与 TB 借款明细值对应的列，已取消 TB 的借款明细/辅助核算映射；测算仍按主体＋科目归集。",
+        );
+      }
     });
     return () => {
       cancelled = true;
@@ -644,8 +666,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     if (!files.length) return;
     ++restoreGeneration.current;
     restoredLoanAccounts.current = null;
-    // 重新选择一组 TB/JE 时旧识别与映射整体失效，避免只换一侧时另一侧
-    // 仍沿用旧账套；利率台账是独立补充资料，保留。
+    // 公共入口代表重新选择整组：先清空旧 TB/JE，再按本轮文件重建。
+    // 分批补齐请使用下方待上传单侧卡片，避免“追加”和“换账套”语义混淆。
     setSources((v) => ({ ...v, tb: empty(), je: empty() }));
     invalidateResults();
     setBusy(true);
@@ -1127,8 +1149,17 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                             <EmptyState
                               compact
                               title="还需要 TB"
-                              description="TB 提供期初、期末本金，是推算借款变动的必需资料；请补充上传或检查文件表头。"
+                              description="TB 提供期初、期末本金，是推算借款变动的必需资料。"
                             />
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              className="fx-side-upload"
+                              disabled={busy}
+                              onClick={() => void replaceSource("tb")}
+                            >
+                              补充上传 TB
+                            </Button>
                           </CardContent>
                         </Card>
                       ) : null}
@@ -1159,8 +1190,17 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                             <EmptyState
                               compact
                               title="还需要 JE"
-                              description="JE 用于逐笔还原新增借款与还款；请补充上传或检查文件表头。"
+                              description="JE 用于逐笔还原新增借款与还款。"
                             />
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              className="fx-side-upload"
+                              disabled={busy}
+                              onClick={() => void replaceSource("je")}
+                            >
+                              补充上传 JE
+                            </Button>
                           </CardContent>
                         </Card>
                       ) : null}
@@ -1200,30 +1240,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               )}
             </CardContent>
           </Card>
-          {activeKinds.map(
-            (kind) =>
-              sources[kind].inspection && (
-                <Mapping
-                  key={kind}
-                  kind={kind}
-                  source={sources[kind]}
-                  busy={busy}
-                  reviewing={
-                    (kind === "tb" || kind === "je")
-                      ? reviews.reviewing[kind]
-                      : false
-                  }
-                  change={(mapping) => setSource(kind, { mapping })}
-                  header={(sheet, row, depth) =>
-                    void inspect(kind, undefined, {
-                      sheet,
-                      headerRow: row,
-                      headerDepth: depth,
-                    })
-                  }
-                />
-              ),
-          )}
           {mode === "tb" &&
             (sources.tb.inspection || sources.je.inspection) && (
               <LedgerReviewAll
@@ -1253,8 +1269,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                           tool: "loan_interest",
                           pairLabel: "借款利息测算 TB＋JE",
                           multiColumnRoles: LOAN_MULTI_COLUMN_ROLES,
-                          onApplied: (mapping) =>
-                            setSource("tb", { mapping }),
+                          onApplied: (mapping) => setSource("tb", { mapping }),
                           missingAfter: (mapping) =>
                             loanMissing(
                               "tb",
@@ -1275,8 +1290,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                           tool: "loan_interest",
                           pairLabel: "借款利息测算 TB＋JE",
                           multiColumnRoles: LOAN_MULTI_COLUMN_ROLES,
-                          onApplied: (mapping) =>
-                            setSource("je", { mapping }),
+                          onApplied: (mapping) => setSource("je", { mapping }),
                           missingAfter: (mapping) =>
                             loanMissing(
                               "je",
@@ -1291,6 +1305,30 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                 onAccept={reviews.acceptPending}
               />
             )}
+          {activeKinds.map(
+            (kind) =>
+              sources[kind].inspection && (
+                <Mapping
+                  key={kind}
+                  kind={kind}
+                  source={sources[kind]}
+                  busy={busy}
+                  reviewing={
+                    (kind === "tb" || kind === "je")
+                      ? reviews.reviewing[kind]
+                      : false
+                  }
+                  change={(mapping) => setSource(kind, { mapping })}
+                  header={(sheet, row, depth) =>
+                    void inspect(kind, undefined, {
+                      sheet,
+                      headerRow: row,
+                      headerDepth: depth,
+                    })
+                  }
+                />
+              ),
+          )}
           <div className="fx-step-actions">
             <Button
               disabled={!sourcesReady || reviewingAny}
@@ -1921,7 +1959,7 @@ function TbRateTable({
                         type="number"
                         step="0.0001"
                         placeholder="如 3.85"
-                        value={e.fixedRate ?? ""}
+                        value={e.fixedRate == null ? "" : e.fixedRate * 100}
                         disabled={rateType === "floating"}
                         onChange={(ev) =>
                           onEdit(row, {
@@ -1936,7 +1974,7 @@ function TbRateTable({
                         type="number"
                         step="0.0001"
                         placeholder="如 3.1"
-                        value={e.benchmarkRate ?? ""}
+                        value={e.benchmarkRate == null ? "" : e.benchmarkRate * 100}
                         disabled={rateType === "fixed"}
                         onChange={(ev) =>
                           onEdit(row, {

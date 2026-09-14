@@ -35,9 +35,11 @@ import { errorText } from "@/lib/errors";
 import {
   correctLedgerSourceKinds,
   DEFAULT_ENTITY,
+  dropUnlinkedTbAuxiliary,
   resolveRoleLabels,
   scanLedgerUploadSources,
   selectLedgerSourcePair,
+  verifyAuxiliaryLink,
   type EngineRoleLabels,
   type LedgerWorkbookSheetClassification,
 } from "@/ledgerMapping";
@@ -708,6 +710,45 @@ export function FaTbJePage() {
     Boolean(inspects.tb && inspects.je) &&
     missingMappings.tb.length === 0 &&
     missingMappings.je.length === 0;
+  // FA TB＋JE 虽不以辅助核算作为计算键，也必须遵守公共映射约束：
+  // JE 没有对应列时取消 TB 辅助映射，主体＋科目的原降级计算继续可用。
+  useEffect(() => {
+    const tb = inspects.tb;
+    const je = inspects.je;
+    if (!tb || !je || !paths.tb || !paths.je) return;
+    let cancelled = false;
+    void verifyAuxiliaryLink({
+      tbSource: {
+        inputPath: paths.tb,
+        sheet: tb.sheet,
+        headerRow: tb.headerRow,
+        headerDepth: tb.headerDepth,
+      },
+      tbMapping: mappings.tb,
+      jeSource: {
+        inputPath: paths.je,
+        sheet: je.sheet,
+        headerRow: je.headerRow,
+        headerDepth: je.headerDepth,
+      },
+      jeMapping: mappings.je,
+    }).then((link) => {
+      if (cancelled || !link?.tbAuxMapped || link.status !== "noMatch") return;
+      setMappings((current) => ({
+        ...current,
+        tb: dropUnlinkedTbAuxiliary(current.tb, link) as Mapping,
+      }));
+      activeJobId.current = "";
+      setResult(undefined);
+      setJob(undefined);
+      setSourceStatus(
+        "JE 未找到与 TB 辅助核算值对应的列，已取消 TB 的辅助核算映射；测算仍按主体＋科目归集。",
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [inspects.tb, inspects.je, paths.tb, paths.je, mappings.tb, mappings.je]);
   // 显示层：payload 级分配行按「主体＋科目编码」合并成可视行——同一科目
   // 在 TB 与 JE 里可能拼出两种科目串，各自行参与引擎匹配、缺一不可，但
   // 复核时对用户就是同一个科目，只该看一行（见 groupAssignmentViews）。
@@ -820,8 +861,7 @@ export function FaTbJePage() {
     );
     if (!files.length) return;
     restoreGeneration.current += 1;
-    // 这里是“重新选择一组 TB/JE”，不是增量追加。先使旧文件的映射、
-    // LLM 复核、科目确认与预览失效，避免只换一侧时另一侧仍沿用旧账套。
+    // 公共入口代表重新选择整组；分批补齐走下方待上传单侧卡片。
     reviews.clearReview("tb");
     reviews.clearReview("je");
     setPaths({ tb: "", je: "" });
@@ -1282,6 +1322,15 @@ export function FaTbJePage() {
                       </CardHeader>
                       <CardContent>
                         <p>未识别到 {kind.toUpperCase()}，请继续上传。</p>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          className="fx-side-upload"
+                          disabled={busy}
+                          onClick={() => void replaceSource(kind)}
+                        >
+                          补充上传 {kind.toUpperCase()}
+                        </Button>
                       </CardContent>
                     </Card>
                   )}

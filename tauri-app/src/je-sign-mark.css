@@ -76,6 +76,9 @@
   color: var(--ink-muted);
   font-size: 0.85em;
 }
+.jm-page .kz-summary > div {
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+}
 /* 面板里提示该科目已在别的批次选过，防止无意重复选。 */
 .ts-filter-value .jm-value-note {
   margin-left: auto;
@@ -122,6 +125,9 @@
   margin-left: auto;
 }
 .jm-sign-choices button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
   border: 1px solid var(--control-border);
   border-radius: var(--r-md);
   background: var(--surface);
@@ -146,4 +152,43 @@
   color: var(--warning-fg);
   font-size: 0.85rem;
   font-weight: 600;
+}
+
+.jm-export-options {
+  display: grid;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.jm-export-options > label {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  margin: 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+  cursor: pointer;
+}
+.jm-export-options label > span:last-child {
+  display: grid;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.jm-export-options small {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+@media (max-width: 760px) {
+  .jm-sign-choices {
+    width: 100%;
+    margin-left: 0;
+  }
+  .jm-sign-choices button {
+    flex: 1 1 0;
+    justify-content: center;
+    min-width: 0;
+    white-space: normal;
+  }
 }

@@ -266,6 +266,10 @@
   background: var(--warning-bg);
   color: var(--warning-fg);
 }
+.fx-source-empty .fx-side-upload {
+  align-self: flex-start;
+  margin-top: 12px;
+}
 .fx-review-states span.attention {
   background: var(--warning-bg);
   color: var(--warning-fg);

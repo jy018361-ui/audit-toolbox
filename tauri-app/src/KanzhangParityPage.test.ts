@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   accountColumns,
   activeAmountScheme,
+  addKanzhangNextBatch,
   applyAllPrimaryAccountBatches,
   applyAuditFocusPresetBatches,
   applyLedgerReviews,
@@ -67,6 +68,15 @@ const draft = (): KanzhangDraft => ({
 });
 
 describe("目标批次清空", () => {
+  it("把所选科目直接加入下一批次并切换过去", () => {
+    expect(addKanzhangNextBatch([{ name: "批次1", accounts: ["A"] }], ["B", "B", "C"])).toEqual({
+      batches: [
+        { name: "批次1", accounts: ["A"] },
+        { name: "批次2", accounts: ["B", "C"] },
+      ],
+      activeBatch: 1,
+    });
+  });
   it("看账 LLM 请求统一使用 sampleRows 并限制八行样例", () => {
     const preview = Array.from({ length: 10 }, (_, index) => [String(index)]);
     const payload = kanzhangReviewPayload(["总账科目"], preview, {

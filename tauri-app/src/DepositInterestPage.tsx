@@ -13,7 +13,11 @@ import {
 } from "./api";
 import { PageHeader } from "@/components/PageHeader";
 import { AuxiliaryLinkStatusView } from "@/components/AuxiliaryLinkStatus";
-import { verifyAuxiliaryLink, type AuxiliaryLinkResult } from "@/ledgerMapping";
+import {
+  dropUnlinkedTbAuxiliary,
+  verifyAuxiliaryLink,
+  type AuxiliaryLinkResult,
+} from "@/ledgerMapping";
 import { errorText } from "@/lib/errors";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
@@ -449,8 +453,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const [tbMapping, setTbMapping] = useState<Record<string, string | string[]>>(
     {},
   );
-  // 辅助核算联动验证（映射阶段公共入口）：只做认定标注与降级提示，
-  // 不改本工具的测算口径。
+  // 辅助核算联动验证（映射阶段公共入口）：JE 完全无对应列时撤销 TB
+  // 的无效映射；本工具的测算仍按主体＋科目降级，不因撤销而阻断。
   const [auxLink, setAuxLink] = useState<AuxiliaryLinkResult | null>(null);
   const [accountRoles, setAccountRoles] = useState<Record<string, string>>({});
   const [accountRoleOverrides, setAccountRoleOverrides] = useState<
@@ -535,7 +539,14 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     }
     let cancelled = false;
     void verifyAuxiliaryLink(payload()).then((result) => {
-      if (!cancelled) setAuxLink(result);
+      if (cancelled) return;
+      setAuxLink(result);
+      if (result?.tbAuxMapped && result.status === "noMatch") {
+        setTbMapping((current) => dropUnlinkedTbAuxiliary(current, result));
+        setSourceStatus(
+          "JE 未找到与 TB 辅助核算值对应的列，已取消 TB 的辅助核算映射；测算仍按主体＋科目归集。",
+        );
+      }
     });
     return () => {
       cancelled = true;
@@ -733,6 +744,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     // 利率档位字典属于工具长期配置，保留；逐账户选择属于文件派生状态，清空。
     reviews.clearReview("tb");
     reviews.clearReview("je");
+    // 公共入口代表重新选择整组；单侧补传走下方空卡片，不混用两种语义。
     setJePath("");
     setTbPath("");
     setJe(undefined);
@@ -1149,6 +1161,15 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                       title="JE 为选传资料"
                       description="当前将使用 TB 期初、期末两点法；加入 JE 后可还原月度余额。"
                     />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="fx-side-upload"
+                      disabled={busy}
+                      onClick={() => void replaceSource("je")}
+                    >
+                      补充上传 JE
+                    </Button>
                   </CardContent>
                 </Card>
               ) : null}
@@ -1181,8 +1202,17 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     <EmptyState
                       compact
                       title="还需要 TB"
-                      description="TB 是测算与账面利息勾稽的必需资料，请补充上传或检查文件表头。"
+                      description="TB 是测算与账面利息勾稽的必需资料。"
                     />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="fx-side-upload"
+                      disabled={busy}
+                      onClick={() => void replaceSource("tb")}
+                    >
+                      补充上传 TB
+                    </Button>
                   </CardContent>
                 </Card>
               ) : null}

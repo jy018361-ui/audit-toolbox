@@ -82,11 +82,11 @@ describe("JeSignMarkPage", () => {
     expect(screen.queryByText("透视与导出")).not.toBeInTheDocument();
   });
 
-  // 损益结转整块已从本工具剪除：既没有开关，也不该有任何相关文案。
-  it("has no profit-transfer switch or wording", () => {
+  it("offers profit-transfer marking in the export card", () => {
     seedLoadedDraft();
     render(<JeSignMarkPage tool={tool} />);
-    expect(screen.queryByText(/损益结转/)).not.toBeInTheDocument();
+    expect(screen.getByText("标记损益结转凭证")).toBeInTheDocument();
+    expect(screen.getByText(/不参与正负数配对/)).toBeInTheDocument();
   });
 
   // 金额符号口径卡片：自动检测的结论与依据要亮出来，筛过的账要黄牌提醒，
@@ -108,6 +108,7 @@ describe("JeSignMarkPage", () => {
         totalVouchers: 36,
         balancedVouchers: 36,
         unbalancedVouchers: 0,
+        oneSidedVouchers: 36,
         filtered: true,
         keySuspect: false,
       },
@@ -120,12 +121,35 @@ describe("JeSignMarkPage", () => {
     // 不能让人误以为是字段映射出了问题。
     expect(screen.getByText(/按科目筛选后导出/)).toBeInTheDocument();
     expect(screen.getByText(/这不是映射问题/)).toBeInTheDocument();
-    // 三档选择切换到「已带符号」，导出参数要带上 signConvention。
-    fireEvent.click(screen.getByRole("button", { name: "已带符号（借正贷负）" }));
+    // 全部凭证均为单边时才显示两个人工口径；选择后要进入导出参数。
+    fireEvent.click(screen.getByRole("button", { name: "已带符号" }));
     fireEvent.click(screen.getByRole("button", { name: "标记并导出" }));
     await waitFor(() => expect(jobStart).toHaveBeenCalled());
     const params = vi.mocked(jobStart).mock.calls[0]?.[1] as Record<string, unknown>;
     expect(params.signConvention).toBe("signed");
+    expect(params.markLossTransfer).toBe(true);
+  });
+
+  it("hides manual sign choices when the file contains balanced vouchers", async () => {
+    seedLoadedDraft();
+    const { engineCall } = await import("./api");
+    vi.mocked(engineCall).mockResolvedValue({
+      signConvention: {
+        scheme: "B",
+        detected: "unsigned",
+        basis: "12 张凭证均可按借贷分列配平。",
+        totalVouchers: 12,
+        balancedVouchers: 12,
+        unbalancedVouchers: 0,
+        oneSidedVouchers: 0,
+        filtered: false,
+        keySuspect: false,
+      },
+    });
+    render(<JeSignMarkPage tool={tool} />);
+    await waitFor(() => expect(screen.getByText(/12 张凭证均可/)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "借贷符号一样" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "已带符号" })).not.toBeInTheDocument();
   });
 
   it("omits the selector when a single amount column leaves no ambiguity", async () => {
@@ -139,6 +163,7 @@ describe("JeSignMarkPage", () => {
         totalVouchers: 1,
         balancedVouchers: 0,
         unbalancedVouchers: 0,
+        oneSidedVouchers: 1,
         filtered: false,
         keySuspect: false,
       },

@@ -22,10 +22,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   DEFAULT_ENTITY,
   correctLedgerSourceKinds,
+  dropUnlinkedTbAuxiliary,
   missingGoldIdentity,
   resolveRoleLabels,
   scanLedgerUploadSources,
   selectLedgerSourcePair,
+  verifyAuxiliaryLink,
   type EngineRoleLabels,
   type LedgerWorkbookSheetClassification,
 } from "@/ledgerMapping";
@@ -937,6 +939,42 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     () => setMode(fxDefaultMode(Boolean(jePath), Boolean(tbPath))),
     [jePath, tbPath],
   );
+  // 所有 TB＋JE 工具统一约束：TB 辅助核算值无法在 JE 任何列命中时，
+  // 撤销 TB 侧辅助映射；汇兑测算原有的主体＋科目降级口径保持不变。
+  useEffect(() => {
+    if (!tb || !je || !tbPath || !jePath) return;
+    let cancelled = false;
+    void verifyAuxiliaryLink({
+      tbSource: {
+        inputPath: tbPath,
+        sheet: tb.sheet,
+        headerRow: tb.headerRow,
+        headerDepth: tb.headerDepth,
+      },
+      tbMapping,
+      jeSource: {
+        inputPath: jePath,
+        sheet: je.sheet,
+        headerRow: je.headerRow,
+        headerDepth: je.headerDepth,
+      },
+      jeMapping,
+    }).then((link) => {
+      if (cancelled || !link?.tbAuxMapped || link.status !== "noMatch") return;
+      setTbMapping((current) => dropUnlinkedTbAuxiliary(current, link));
+      activeJob.current = "";
+      setResult(undefined);
+      setJob(undefined);
+      setActiveStage(undefined);
+      setCompletedStage(undefined);
+      setSourceStatus(
+        "JE 未找到与 TB 辅助核算值对应的列，已取消 TB 的辅助核算映射；测算仍按主体＋科目归集。",
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [tb, je, tbPath, jePath, tbMapping, jeMapping]);
   // 只有用户手工改过的主体才不许自动预填覆盖。
   // 之前这里写的是 `v[e] ?? uniformCurrency ?? "CNY"`：JE 比 TB 先解析完时，
   // entities 已经有值而 tb 还是空，先被填成 CNY；等 TB 的 uniformCurrency 到了，

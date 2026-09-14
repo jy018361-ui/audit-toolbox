@@ -6222,9 +6222,9 @@ fn xlsx_error(e: rust_xlsxwriter::XlsxError) -> AppError {
 // ---------------------------------------------------------------------------
 // 正负数智能标记
 //
-// 从看账小工具剪出来的独立工具：只做 JE 对冲标记，不做透视、套表和损益结转。
-// 加载、映射、科目取值三条通道与看账共用，标记算法即 `match_je_rows`，
-// 唯一差别是这里不把损益结转凭证挡在匹配之外——该识别已随功能一并移除。
+// 从看账小工具剪出来的独立工具：做 JE 对冲标记，并可附加损益结转标记；
+// 不做透视、套表或凭证类型分析。
+// 加载、映射、科目取值三条通道与看账共用，标记算法即 `match_je_rows`。
 // ---------------------------------------------------------------------------
 
 /// 引擎用这个字面量表示"该列为空"，与 TS 的列筛选面板同一口径。
@@ -6258,6 +6258,9 @@ struct JeMarkParams {
     /// 金额符号口径：None/"auto" 自动检测，"signed" 已带符号，"unsigned" 借贷符号一样。
     #[serde(default)]
     sign_convention: Option<String>,
+    /// 标记损益结转凭证；这类凭证不参与正负数配对。
+    #[serde(default)]
+    mark_loss_transfer: bool,
     #[serde(default = "default_excel_chunk")]
     rows_per_sheet: usize,
 }
@@ -6385,6 +6388,7 @@ fn analyze_je_mark(
     rows: &[Vec<String>],
     targets: &[String],
     sign: SignConvention,
+    mark_loss_transfer: bool,
     cancel: &AtomicBool,
 ) -> Result<LedgerAnalysis, AppError> {
     let id_indexes = ledger_id_indexes(&table.headers, mapping);
@@ -6406,8 +6410,11 @@ fn analyze_je_mark(
         .filter(|value| !value.is_empty())
         .collect::<HashSet<_>>();
     let amounts = ledger_amounts(rows, &table.headers, mapping, &id_indexes, Some(sign));
-    // 本工具不识别损益结转，结转凭证照常参与匹配。
-    let loss_ids = HashSet::new();
+    let loss_ids = if mark_loss_transfer {
+        detect_loss_transfer_ids(rows, &id_indexes, &account_indexes)
+    } else {
+        HashSet::new()
+    };
     let (je_status, je_pairs, je_cross_pairs) = match_je_rows(
         rows,
         &table.headers,
@@ -6420,7 +6427,10 @@ fn analyze_je_mark(
         cancel,
     )?;
     // 辅助列摆在最前，与看账旧版的明细列序一致。
-    let mut headers = Vec::with_capacity(table.headers.len() + 3);
+    let mut headers = Vec::with_capacity(table.headers.len() + 4);
+    if mark_loss_transfer {
+        headers.push("【损益结转】".into());
+    }
     headers.extend(
         ["【辅助_绝对值】", "【辅助_符号】", "【智能匹配状态】"]
             .into_iter()
@@ -6434,6 +6444,13 @@ fn analyze_je_mark(
         }
         let amount = amounts.net.get(index).copied().unwrap_or(0.0);
         let mut output = Vec::with_capacity(headers.len());
+        if mark_loss_transfer {
+            output.push(if loss_ids.contains(&voucher_key(row, &id_indexes)) {
+                "损益结转".into()
+            } else {
+                String::new()
+            });
+        }
         // 只有目标科目行参与配对，其余行三列留空——铺满全表会让人误以为
         // 每一行都参与了匹配。匹配状态本身就只在这个范围内非空，以它为准。
         let status = je_status.get(index).cloned().unwrap_or_default();
@@ -6492,7 +6509,7 @@ fn analyze_je_mark(
         .flatten()
         .map(str::to_owned)
         .collect(),
-        loss_count: 0,
+        loss_count: loss_ids.len(),
         je_pairs,
         je_cross_pairs,
     })
@@ -6599,12 +6616,18 @@ fn export_je_mark(
             &filtered,
             &batch.accounts,
             resolved,
+            job.mark_loss_transfer,
             cancel,
         )?;
+        let status_index = analysis
+            .headers
+            .iter()
+            .position(|header| header == "【智能匹配状态】")
+            .unwrap_or(2);
         let unmatched = analysis
             .rows
             .iter()
-            .filter(|row| row.get(2).is_some_and(|value| value == "未匹配"))
+            .filter(|row| row.get(status_index).is_some_and(|value| value == "未匹配"))
             .count();
         let output = je_mark_batch_output_path(&job, batch, batch_index, batches.len())?;
         progress(
@@ -6631,7 +6654,8 @@ fn export_je_mark(
             "rows":analysis.rows.len(),
             "matchedPairs":analysis.je_pairs,
             "crossMatchedPairs":analysis.je_cross_pairs,
-            "unmatchedRows":unmatched
+            "unmatchedRows":unmatched,
+            "lossTransferVouchers":analysis.loss_count
         }));
     }
     Ok(json!({
@@ -6715,7 +6739,7 @@ fn export_je_mark_disk(
         ledger.select(&batch.accounts, cancel)?;
         ledger.retain_selected_by_filters(&active_filters, cancel)?;
         progress("match", 760, 1000, "正在磁盘上执行正负数匹配…");
-        let mark = ledger.mark_selected_offsets(cancel)?;
+        let mark = ledger.mark_selected_offsets(job.mark_loss_transfer, cancel)?;
         let output = je_mark_batch_output_path(job, batch, batch_index, batches.len())?;
         if !output
             .extension()
@@ -6730,7 +6754,13 @@ fn export_je_mark_disk(
         }
         progress("write", 860, 1000, "正在流式写出标记结果…");
         let rows =
-            ledger.write_selected_marked_csv(&output, &ledger.table.headers, progress, cancel)?;
+            ledger.write_selected_marked_csv(
+                &output,
+                &ledger.table.headers,
+                job.mark_loss_transfer,
+                progress,
+                cancel,
+            )?;
         outputs.push(output.to_string_lossy().into_owned());
         batch_results.push(json!({
             "name": batch.name,
@@ -6739,6 +6769,7 @@ fn export_je_mark_disk(
             "matchedPairs": mark.direct_pairs,
             "crossMatchedPairs": mark.cross_pairs,
             "unmatchedRows": mark.unmatched_rows,
+            "lossTransferVouchers": mark.loss_transfer_vouchers,
         }));
     }
     progress("completed", 1000, 1000, "正负数标记已完成。");
@@ -9252,6 +9283,41 @@ mod tests {
         assert_eq!(statuses, vec!["已匹配-计提", "已匹配-冲销"]);
     }
     #[test]
+    fn je_mark_can_label_and_exclude_profit_transfer_vouchers() {
+        let root = temp_dir("je-mark-loss-enabled");
+        let input = root.join("ledger.csv");
+        fs::write(
+            &input,
+            "凭证号,科目名称,金额
+1,管理费用,100
+1,银行存款,-100
+2,管理费用,-100
+2,本年利润,100
+",
+        )
+        .unwrap();
+        let output = root.join("marked.csv");
+        let value = export_je_mark(
+            json!({"inputPath":input,"outputPath":output,"markLossTransfer":true,
+                "targetBatches":[{"name":"管理费用","accounts":["管理费用"]}]}),
+            &|_, _, _, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(value["batches"][0]["matchedPairs"], 0);
+        assert_eq!(value["batches"][0]["lossTransferVouchers"], 1);
+        let rows = read_marked_csv(&output);
+        assert_eq!(rows[0][0], "【损益结转】");
+        let loss_rows = rows[1..]
+            .iter()
+            .filter(|row| row[4] == "2")
+            .collect::<Vec<_>>();
+        assert_eq!(loss_rows.len(), 2);
+        assert!(loss_rows.iter().all(|row| row[0] == "损益结转"));
+        assert!(loss_rows.iter().all(|row| row[3].is_empty()));
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
     fn je_mark_requires_a_target_batch() {
         let root = temp_dir("je-mark-empty");
         let input = root.join("ledger.csv");
@@ -10109,7 +10175,7 @@ mod tests {
         let output = root.join("marked.csv");
         fs::write(
             &input,
-            "凭证号,科目,借方,贷方\n001,目标,100,0\n,现金,0,100\n002,目标,0,100\n,现金,100,0\n",
+            "凭证号,科目,借方,贷方\n001,目标,100,0\n,现金,0,100\n002,目标,0,100\n,现金,100,0\n003,目标,50,0\n,本年利润,0,50\n",
         )
         .unwrap();
         let job = JeMarkParams {
@@ -10131,14 +10197,18 @@ mod tests {
             }],
             column_filters: Vec::new(),
             sign_convention: Some("unsigned".into()),
+            mark_loss_transfer: true,
             rows_per_sheet: 1000,
         };
         let result = export_je_mark_disk(&job, &|_, _, _, _| {}, &AtomicBool::new(false)).unwrap();
         assert_eq!(result["engine"], "rust-sqlite");
         assert_eq!(result["batches"][0]["matchedPairs"], 1);
+        assert_eq!(result["batches"][0]["lossTransferVouchers"], 1);
         let exported = PathBuf::from(result["outputPaths"][0].as_str().unwrap());
         let text = fs::read_to_string(&exported).unwrap();
         assert!(text.contains("【辅助_绝对值】,【辅助_符号】,【智能匹配状态】"));
+        assert!(text.contains("【损益结转】"));
+        assert!(text.contains("损益结转"));
         assert!(text.contains("已匹配-计提"));
         assert!(text.contains("已匹配-冲销"));
         let _ = fs::remove_dir_all(root);

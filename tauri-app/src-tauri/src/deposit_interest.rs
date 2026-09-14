@@ -1519,6 +1519,16 @@ fn calculate(
         &tb_columns,
         "openingFunctional",
     );
+    // 是否具备年初余额，要按整张 TB 的映射方案判断，不能按每个辅助明细格
+    // 是否非空判断。维度拆行里空白年初就是 0；此前任一子行为空都会把整户
+    // 标成“TB 未提供年初余额”，继而错误地用 JE 发生额倒推整户年初。
+    let opening_from_tb = [
+        "openingFunctionalAmount",
+        "openingFunctionalDebit",
+        "openingFunctionalCredit",
+    ]
+    .iter()
+    .any(|role| !column_indexes(&tb, &tb_map, role).is_empty());
     let closing_self_signed = ledger_mapping::balance_self_signed(
         &tb.headers,
         &tb.rows,
@@ -1760,7 +1770,6 @@ fn calculate(
         first: TbCandidate,
         rows: usize,
         opening_sum: f64,
-        opening_all: bool,
         closing_sum: f64,
         currencies: BTreeSet<String>,
         auxiliaries: BTreeSet<String>,
@@ -1779,7 +1788,6 @@ fn calculate(
             folds.insert(
                 key,
                 AccountFold {
-                    opening_all: candidate.opening.is_some(),
                     opening_sum: candidate.opening.unwrap_or(0.0),
                     closing_sum: candidate.closing,
                     currencies: (!currency.is_empty())
@@ -1795,7 +1803,6 @@ fn calculate(
             continue;
         };
         fold.rows += 1;
-        fold.opening_all &= candidate.opening.is_some();
         fold.opening_sum += candidate.opening.unwrap_or(0.0);
         fold.closing_sum += candidate.closing;
         if !auxiliary.is_empty() {
@@ -1844,13 +1851,13 @@ fn calculate(
             annual_rate: 0.0,
             rate_resolved: false,
             rate_warning: String::new(),
-            opening_balance: if fold.opening_all {
+            opening_balance: if opening_from_tb {
                 fold.opening_sum
             } else {
                 0.0
             },
             merged_rows: fold.rows,
-            opening_from_tb: fold.opening_all,
+            opening_from_tb,
             tb_closing_balance: fold.closing_sum,
             derived_closing_balance: fold.closing_sum,
             reconciliation_diff: 0.0,
@@ -6374,6 +6381,96 @@ mod tests {
         assert!(
             (rows[0]["derivedClosingBalance"].as_f64().unwrap() - 50000.0).abs() < 0.01,
             "年初倒推后年末余额应与 TB 勾稽: {rows:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 辅助明细空白年初按零合并而不是整户倒推() {
+        let dir = std::env::temp_dir().join(format!(
+            "deposit-opening-blank-detail-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb_path = dir.join("tb.xlsx");
+        let je_path = dir.join("je.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec![
+                    "科目编码",
+                    "科目名称",
+                    "辅助核算",
+                    "年初余额借方",
+                    "期末余额借方",
+                ],
+                vec!["100201", "银行存款", "A银行", "100", "120"],
+                // 空白表示该辅助明细期初为 0，不表示整户没有年初余额方案。
+                vec!["100201", "银行存款", "B银行", "", "50"],
+            ],
+        );
+        write_fixture(
+            &je_path,
+            &[
+                vec![
+                    "记账日期",
+                    "凭证号",
+                    "科目编码",
+                    "科目名称",
+                    "摘要",
+                    "借方金额",
+                    "贷方金额",
+                ],
+                vec![
+                    "2025-06-30",
+                    "记-1",
+                    "100201",
+                    "银行存款",
+                    "收款",
+                    "60",
+                    "0",
+                ],
+            ],
+        );
+        let params = json!({
+            "reportStart": "2025-01-01",
+            "reportEnd": "2025-12-31",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": {
+                "accountCode": "科目编码",
+                "accountName": "科目名称",
+                "auxiliary": ["辅助核算"],
+                "openingFunctionalDebit": "年初余额借方",
+                "closingFunctionalDebit": "期末余额借方"
+            },
+            "jeSource": {"inputPath": je_path.to_string_lossy()},
+            "jeMapping": {
+                "date": "记账日期",
+                "id": ["凭证号"],
+                "accountCode": "科目编码",
+                "accountName": ["科目名称"],
+                "summary": "摘要",
+                "functionalDebit": "借方金额",
+                "functionalCredit": "贷方金额"
+            }
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result =
+            run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap();
+        let row = &result["rows"][0];
+        assert_eq!(row["openingFromTb"], json!(true), "{row:#?}");
+        assert_eq!(row["openingBalance"], json!(100.0), "{row:#?}");
+        assert_eq!(row["tbClosingBalance"], json!(170.0), "{row:#?}");
+        assert_eq!(row["derivedClosingBalance"], json!(160.0), "{row:#?}");
+        assert_eq!(row["reconciliationDiff"], json!(-10.0), "{row:#?}");
+        assert!(
+            !row["note"]
+                .as_str()
+                .unwrap_or("")
+                .contains("TB 未提供年初余额"),
+            "{row:#?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

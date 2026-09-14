@@ -92,6 +92,16 @@ it("uses the shared horizontal steps, gates export, preserves mappings and reset
     )[7],
   ).toHaveValue("currentYearDep");
   fireEvent.click(screen.getByRole("button", { name: "下一步：生成底稿" }));
+  const dateInput = screen.getByLabelText("资产负债表日");
+  fireEvent.change(dateInput, { target: { value: "20212315" } });
+  expect(screen.getByText("请输入有效日期，例如 2025-12-31。")).toBeVisible();
+  expect(
+    screen.getByRole("button", { name: "生成折旧测算表" }),
+  ).toBeDisabled();
+  fireEvent.change(dateInput, { target: { value: "20251231" } });
+  expect(
+    screen.getByRole("button", { name: "生成折旧测算表" }),
+  ).toBeEnabled();
   fireEvent.click(screen.getByRole("button", { name: "生成折旧测算表" }));
   await waitFor(() =>
     expect(jobStart).toHaveBeenCalledWith(

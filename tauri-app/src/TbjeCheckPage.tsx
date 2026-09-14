@@ -53,6 +53,7 @@ import {
   resolveRoleLabels,
   selectLedgerWorkbookKindSources,
   verifyAuxiliaryLink,
+  dropUnlinkedTbAuxiliary,
   type AuxiliaryLinkResult,
   type LedgerReviewOutcome,
   type LedgerWorkbookSheetClassification,
@@ -1405,10 +1406,33 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     }
     void (async () => {
       const next: Record<string, AuxiliaryLinkResult | null> = {};
+      const removals: { key: string; result: AuxiliaryLinkResult }[] = [];
       for (const group of paired) {
         next[group.id] = await verifyAuxiliaryLink(paramsOf(group));
+        const result = next[group.id];
+        if (result?.tbAuxMapped && result.status === "noMatch" && group.tb) {
+          removals.push({ key: pairingFileKey(group.tb), result });
+        }
       }
-      if (!cancelled) setAuxLinks(next);
+      if (!cancelled) {
+        setAuxLinks(next);
+        if (removals.length) {
+          setMappings((current) => {
+            const updated = { ...current };
+            for (const removal of removals) {
+              updated[removal.key] = dropUnlinkedTbAuxiliary(
+                updated[removal.key] ?? {},
+                removal.result,
+              ) as Mapping;
+            }
+            return updated;
+          });
+          invalidateResults();
+          setStatus(
+            `JE 未找到对应列，已取消 ${removals.length} 组 TB 的辅助核算映射；核对仍按主体＋科目执行。`,
+          );
+        }
+      }
     })();
     return () => {
       cancelled = true;

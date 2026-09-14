@@ -35,14 +35,15 @@ describe("AuxiliaryLinkStatusView 三态标注", () => {
     expect(screen.getByText(/3\/3 维度命中，覆盖率 82%/)).toBeInTheDocument();
   });
 
-  it("对不上时按降级口径提示且不换列", () => {
+  it("对不上时提示取消 TB 映射并保留降级计算", () => {
     render(
       <AuxiliaryLinkStatusView
         result={result({ status: "noMatch", column: null, anchorHits: 0 })}
       />,
     );
     expect(screen.getByText(/JE 无对应辅助核算列/)).toBeInTheDocument();
-    expect(screen.getByText(/按主体＋科目归集/)).toBeInTheDocument();
+    expect(screen.getByText(/已取消 TB 的辅助核算映射/)).toBeInTheDocument();
+    expect(screen.getByText(/继续按主体＋科目归集/)).toBeInTheDocument();
   });
 
   it("覆盖不全提示结合未分维度行复核", () => {

@@ -16,8 +16,7 @@ import {
   faMappedRolesForColumn,
   faMissingOptionalRoles,
   faOutputPathAfterSourceSelection,
-  faReviewNarrative,
-  faReviewReasons,
+  faReviewDisplayMessage,
   faHeaderOption,
   faRolesForSide,
   isFaMatchDisabled,
@@ -1256,6 +1255,7 @@ function FaCardListPage() {
       setSupplementLlmReview({
         enabled: true,
         passed: false,
+        failed: true,
         message: errorText(e),
         autoApplied: [],
         fieldReviews: [],
@@ -2297,29 +2297,12 @@ function FaCardListPage() {
                           <div className="fa-review-conclusion" role="status">
                             <strong>复核结论</strong>
                             <p>
-                              {faReviewNarrative(
-                                llmReview.message,
+                              {faReviewDisplayMessage(
+                                llmReview,
                                 llmChanges.length,
                                 llmPending.length,
                               )}
                             </p>
-                            {llmChanges.length === 0 &&
-                              llmPending.length === 0 &&
-                              faReviewReasons(
-                                llmReview.autoApplied,
-                                llmReview.fieldReviews,
-                                llmReview.matchReview?.reasons,
-                              ).length > 0 && (
-                                <ul>
-                                  {faReviewReasons(
-                                    llmReview.autoApplied,
-                                    llmReview.fieldReviews,
-                                    llmReview.matchReview?.reasons,
-                                  ).map((reason) => (
-                                    <li key={reason}>{reason}</li>
-                                  ))}
-                                </ul>
-                              )}
                           </div>
                         ) : null}
                         {(llmBusy || llmReview?.failed) && (
@@ -2548,29 +2531,12 @@ function FaCardListPage() {
                       <div className="fa-review-conclusion" role="status">
                         <strong>复核结论</strong>
                         <p>
-                          {faReviewNarrative(
-                            supplementLlmReview.message,
+                          {faReviewDisplayMessage(
+                            supplementLlmReview,
                             supplementLlmChanges.length,
                             supplementLlmPending.length,
                           )}
                         </p>
-                        {supplementLlmChanges.length === 0 &&
-                          supplementLlmPending.length === 0 &&
-                          faReviewReasons(
-                            supplementLlmReview.autoApplied,
-                            supplementLlmReview.fieldReviews,
-                            supplementLlmReview.matchReview?.reasons,
-                          ).length > 0 && (
-                            <ul>
-                              {faReviewReasons(
-                                supplementLlmReview.autoApplied,
-                                supplementLlmReview.fieldReviews,
-                                supplementLlmReview.matchReview?.reasons,
-                              ).map((reason) => (
-                                <li key={reason}>{reason}</li>
-                              ))}
-                            </ul>
-                          )}
                       </div>
                     ) : null}
                     {supplementLlmChanges.map((change) => (

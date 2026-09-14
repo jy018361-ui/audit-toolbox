@@ -171,6 +171,58 @@ it("统一上传自动分类出 TB 与 JE 来源卡，并可一键更正类型",
   ).toBeVisible();
 });
 
+it("公共入口重建整组，待上传单侧入口只补充对应来源", async () => {
+  const classify = (kind: "tb" | "je", path: string) => ({
+    kind,
+    scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
+    sheet: kind === "tb" ? "余额表" : "序时账",
+    headerRow: 1,
+    headerDepth: 1,
+    headers: kind === "tb" ? ["科目编码", "期末余额"] : ["记账日期", "科目编码", "贷方金额"],
+    preview: [[path]],
+  });
+  mock.pickPath
+    .mockResolvedValueOnce(["tb.xlsx"])
+    .mockResolvedValueOnce("je.xlsx")
+    .mockResolvedValueOnce(["je-new.xlsx"]);
+  mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
+    const p = params as { kind?: "tb" | "je"; source?: { inputPath?: string } };
+    const kind = p.source?.inputPath?.includes("je") ? "je" : "tb";
+    if (method === "ledger.forms") return [];
+    if (method === "deposit.classify_source")
+      return classify(kind, p.source?.inputPath ?? "");
+    if (method === "loan.inspect") {
+      const selected = p.kind ?? kind;
+      return {
+        ...classify(selected, p.source?.inputPath ?? ""),
+        rowCount: 1,
+        sheets: [selected === "tb" ? "余额表" : "序时账"],
+        suggestedMapping: {},
+      };
+    }
+    throw new Error(`unexpected ${method}`);
+  });
+
+  render(<LoanInterestPage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: "TB＋JE" }));
+  const upload = screen.getByRole("button", {
+    name: "拖放或选择 TB、序时账文件（可同时选择）",
+  });
+  fireEvent.click(upload);
+  expect((await screen.findAllByText("tb.xlsx"))[0]).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "补充上传 JE" }));
+  expect((await screen.findAllByText("je.xlsx"))[0]).toBeVisible();
+  expect(screen.getAllByText("tb.xlsx")[0]).toBeVisible();
+  expect(screen.getByText("已识别：TB 科目余额表")).toBeVisible();
+  expect(screen.getByText("已识别：JE 序时账")).toBeVisible();
+
+  // 再走公共入口只选一份 JE：按“重新选择整组”语义，旧 TB 与旧 JE 都清空。
+  fireEvent.click(upload);
+  expect((await screen.findAllByText("je-new.xlsx"))[0]).toBeVisible();
+  expect(screen.queryByText("tb.xlsx")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "补充上传 TB" })).toBeVisible();
+});
+
 /** 借款页一次联合复核 TB＋JE，并保持本页的单列映射交互。
  *  曾经把 accountName 的单个建议写成 string[]，随后 loanMissing 调用
  *  `.trim()` 直接把整个 React 界面打成白屏。 */
@@ -488,6 +540,7 @@ it("生成借款利率表并手填利率后可进入测算", async () => {
   fireEvent.change(screen.getByRole("spinbutton", { name: "2001 短期借款的执行利率" }), {
     target: { value: "3.85" },
   });
+  expect(screen.getByRole("spinbutton", { name: "2001 短期借款的执行利率" })).toHaveValue(3.85);
   // 下一步放行。
   expect(
     screen.getByRole("button", { name: "下一步：测算与底稿" }),

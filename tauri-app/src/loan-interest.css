@@ -382,24 +382,33 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 匹配结果表：六列，列宽与逐行确认表（.loan-rate-confirmation 默认）不同。 */
+/* 借款利率确认表：八列全部给出明确宽度，输入框在横向滚动区内不再互相覆盖。 */
 .loan-rate-match table {
-  min-width: 960px;
+  min-width: 1280px;
   table-layout: fixed;
 }
 .loan-rate-match th:first-child {
-  width: 22%;
-}
-.loan-rate-match th:nth-child(2) {
-  width: 26%;
-}
-.loan-rate-match th:nth-child(3),
-.loan-rate-match th:nth-child(4),
-.loan-rate-match th:nth-child(5) {
   width: 14%;
 }
-.loan-rate-match th:last-child {
+.loan-rate-match th:nth-child(2) {
+  width: 24%;
+}
+.loan-rate-match th:nth-child(3),
+.loan-rate-match th:nth-child(4) {
+  width: 11%;
+}
+.loan-rate-match th:nth-child(5) {
   width: 10%;
+}
+.loan-rate-match th:nth-child(6),
+.loan-rate-match th:nth-child(7),
+.loan-rate-match th:nth-child(8) {
+  width: 10%;
+}
+.loan-rate-match input,
+.loan-rate-match select {
+  width: 100%;
+  min-width: 0;
 }
 .loan-rate-match .loan-match-basis {
   max-width: 260px;

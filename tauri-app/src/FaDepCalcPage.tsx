@@ -22,12 +22,12 @@ import { displayFileName } from "@/fileDisplay";
 import { DataTable } from "@/components/DataTable";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { DateInput } from "@/components/DateInput";
+import { DateInput, isValidIsoDate } from "@/components/DateInput";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { LlmReview } from "@/components/LlmReview";
 import { useJobEvents } from "@/hooks/useJobEvents";
-import { faMappedRolesForColumn } from "./faListUi";
+import { faMappedRolesForColumn, faReviewDisplayMessage } from "./faListUi";
 import {
   DEP_MAPPING_ROLES,
   depMissingOptionalRoles,
@@ -395,6 +395,10 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
       setError("还有必填字段未映射，请在预览表头下拉中补全。");
       return;
     }
+    if (!isValidIsoDate(balanceSheetDate)) {
+      setError("请输入有效的资产负债表日（格式 YYYY-MM-DD）。");
+      return;
+    }
     let target = outputPath;
     if (!outputPathTouched) {
       target = faDepDefaultOutputPath(path);
@@ -440,7 +444,26 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
+  async function cancelExport(jobId: string) {
+    try {
+      await jobCancel(jobId);
+      setJob((current) =>
+        current?.jobId === jobId
+          ? {
+              ...current,
+              phase: "cancelling",
+              message: "正在取消任务…",
+              severity: "warning",
+            }
+          : current,
+      );
+    } catch (e) {
+      setError(errorText(e));
+    }
+  }
+
   const missing = depMissingRoles(mapping);
+  const validBalanceSheetDate = isValidIsoDate(balanceSheetDate);
   const activeStep = !inspection ? 0 : step === 2 && missing.length ? 1 : step;
   const optionalMissing = inspection ? depMissingOptionalRoles(mapping) : [];
   // 每列顶部的角色映射下拉（复制 FA 主工具的列头映射交互）。
@@ -516,10 +539,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
       {job && job.phase !== "completed" && (
         <JobProgress
           job={job}
-          onCancel={(jobId) => {
-            void jobCancel(jobId);
-            setBusy(false);
-          }}
+          onCancel={(jobId) => void cancelExport(jobId)}
           cancelLabel="取消任务"
         />
       )}
@@ -653,7 +673,13 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                   enabled={llmReview?.enabled}
                   failed={llmReview?.failed}
                   message={
-                    llmReview && !llmBusy ? llmReview.message : undefined
+                    llmReview && !llmBusy
+                      ? faReviewDisplayMessage(
+                          llmReview,
+                          llmChanges.length,
+                          llmPending.length,
+                        )
+                      : undefined
                   }
                   detail={llmReview?.detail}
                   changes={llmChanges}
@@ -747,7 +773,14 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                   <DateInput
                     value={balanceSheetDate}
                     onChange={setBalanceSheetDate}
+                    aria-label="资产负债表日"
+                    required
                   />
+                  {!validBalanceSheetDate && (
+                    <span className="dep-date-error">
+                      请输入有效日期，例如 2025-12-31。
+                    </span>
+                  )}
                 </Field>
                 <Field label="输出文件">
                   <FileInput
@@ -768,11 +801,25 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                     clearLabel="恢复默认"
                   />
                 </Field>
-                <div className="dep-export-action">
+              </div>
+              <div className="dep-export-footer">
+                <p className="dep-output-note">
+                  {outputPathTouched
+                    ? "已使用自定义保存位置。"
+                    : "默认保存到清单所在目录，并按导出时间自动命名。"}
+                </p>
+                <div className="dep-export-actions">
+                  <Button
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={() => setStep(1)}
+                  >
+                    返回核对映射
+                  </Button>
                   {busy && job ? (
                     <Button
                       variant="secondary"
-                      onClick={() => void jobCancel(job.jobId)}
+                      onClick={() => void cancelExport(job.jobId)}
                     >
                       停止任务
                     </Button>
@@ -783,6 +830,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                         busy ||
                         llmBusy ||
                         !inspection ||
+                        !validBalanceSheetDate ||
                         Boolean(missing.length)
                       }
                       onClick={() => void startExport()}
@@ -792,18 +840,6 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                   )}
                 </div>
               </div>
-              <Button
-                variant="secondary"
-                disabled={busy}
-                onClick={() => setStep(1)}
-              >
-                返回核对映射
-              </Button>
-              <p className="dep-output-note">
-                {outputPathTouched
-                  ? "已使用自定义保存位置。"
-                  : "默认保存到清单所在目录，并按导出时间自动命名。"}
-              </p>
               {!!outputPaths.length && (
                 <div className="fa-result-summary dep-result-summary">
                   <strong>折旧测算表已生成</strong>

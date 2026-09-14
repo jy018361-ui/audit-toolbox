@@ -60,10 +60,9 @@ export const depMissingOptionalRoles = (mapping: FaMappingLike): string[] =>
 // 折旧政策对比（双文件）
 // ---------------------------------------------------------------------------
 
-/// 政策对比的映射角色与 FA 主工具（FaListPage.mappingRoles）完全一致：
-/// 同样的十个角色、同样的中文名。导出侧（fa_subtools.rs）只消费其中
-/// 类别/原值/寿命/残值率四要素，但映射界面保持同构，用户在两个工具间
-/// 不需要切换心智模型。
+/// 政策对比只展示该底稿实际使用的字段。新增方式/新增日期属于 FA 主工具的
+/// 新增清单口径，不参与折旧政策比较；把它们放进选填提示却又按识别结果隐藏
+/// 下拉，会形成“提示缺失但无法选择”的循环，因此从本子工具角色表中移除。
 export const POLICY_MAPPING_ROLES: [string, string][] = [
   ["category", "资产类别"],
   ["name", "资产名称"],
@@ -73,8 +72,6 @@ export const POLICY_MAPPING_ROLES: [string, string][] = [
   ["life", "使用寿命"],
   ["residualRate", "残值率"],
   ["currentYearDep", "本年折旧"],
-  ["additionMethod", "新增方式"],
-  ["additionDate", "新增日期"],
 ];
 
 /// 必填集合与 FA 主工具 REQUIRED_ROLES 一致（资产ID 在该页面单独校验，
@@ -96,8 +93,7 @@ export const policyMissingRoles = (mapping: FaMappingLike): string[] =>
     policyRoleLabel,
   );
 
-/// 选填未映射提示与 FA 同口径：按侧过滤（期初不出现文件2专属角色）、
-/// 新增方式/新增日期仅在已识别新增方式列时才提醒。
+/// 选填未映射提示与实际可选角色使用同一清单；期初仍按侧过滤本年折旧。
 export const policyMissingOptionalRoles = (
   side: FaSide,
   mapping: FaMappingLike,

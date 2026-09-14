@@ -68,14 +68,12 @@ describe("FA 子工具角色表与缺失检查", () => {
       "使用寿命",
       "残值率",
     ]);
-    // 期末：完整选填集（含本年折旧/新增方式/新增日期）。
+    // 期末：政策比较实际使用的选填集；新增方式/日期不提示也不进入下拉。
     expect(policyMissingOptionalRoles("end", sparse)).toEqual([
       "开始使用日期",
       "使用寿命",
       "残值率",
       "本年折旧",
-      "新增方式",
-      "新增日期",
     ]);
     const full = {
       ...sparse,
@@ -83,14 +81,12 @@ describe("FA 子工具角色表与缺失检查", () => {
       life: "寿命",
       residualRate: "残值率",
       currentYearDep: "本年折旧",
-      additionMethod: "新增方式",
-      additionDate: "新增日期",
     };
     expect(policyMissingOptionalRoles("end", full)).toEqual([]);
     expect(policyMissingOptionalRoles("begin", full)).toEqual([]);
   });
 
-  it("政策对比角色表与 FA 主工具同构（十个角色、同名同序）", () => {
+  it("政策对比角色表排除不参与比较的新增方式和新增日期", () => {
     expect(POLICY_MAPPING_ROLES).toEqual([
       ["category", "资产类别"],
       ["name", "资产名称"],
@@ -100,8 +96,6 @@ describe("FA 子工具角色表与缺失检查", () => {
       ["life", "使用寿命"],
       ["residualRate", "残值率"],
       ["currentYearDep", "本年折旧"],
-      ["additionMethod", "新增方式"],
-      ["additionDate", "新增日期"],
     ]);
     expect(DEP_MAPPING_ROLES.map(([key]) => key)).toContain("currentYearDep");
   });

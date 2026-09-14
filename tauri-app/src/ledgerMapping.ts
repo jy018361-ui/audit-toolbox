@@ -1270,9 +1270,27 @@ export type AuxiliaryLinkResult = {
 };
 
 /**
+ * JE 中完全找不到与 TB 维度值对应的列时，撤销 TB 侧这项无效映射。
+ *
+ * 这里只处理 `noMatch`：覆盖不全说明已经认定到唯一 JE 列；多列歧义仍要
+ * 留给用户手动指定。撤销映射不改变计算侧的降级口径，工具仍按主体＋科目运行。
+ */
+export function dropUnlinkedTbAuxiliary<T extends Record<string, unknown>>(
+  mapping: T,
+  result: AuxiliaryLinkResult | null,
+  role = "auxiliary",
+): T {
+  if (!result?.tbAuxMapped || result.status !== "noMatch" || !(role in mapping))
+    return mapping;
+  const next = { ...mapping };
+  delete next[role];
+  return next;
+}
+
+/**
  * 映射阶段的辅助核算联动验证：TB 锚点反查认定 JE 辅助列。
- * 结论只用于面板标注与提示；计算侧（TBJE 完整性／存款）复核同一份公共
- * 判定逻辑，两阶段不会各说各话。验证失败不抛错——标注能力不许阻塞映射。
+ * 计算侧（TBJE 完整性／存款）复核同一份公共判定逻辑，两阶段不会各说各话。
+ * 调用方在 noMatch 时撤销 TB 映射，但仍允许计算降级；验证调用失败本身不抛错。
  */
 export async function verifyAuxiliaryLink(
   params: Record<string, unknown>,

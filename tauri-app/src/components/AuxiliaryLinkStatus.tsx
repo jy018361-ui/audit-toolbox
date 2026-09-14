@@ -24,7 +24,7 @@ export function AuxiliaryLinkStatusView(props: {
       warn = true;
       break;
     case "noMatch":
-      text = `JE 无对应${label}列，将按主体＋科目归集；TB 的${label}映射不参与匹配键。`;
+      text = `JE 无对应${label}列，已取消 TB 的${label}映射；计算继续按主体＋科目归集。`;
       warn = true;
       break;
     case "ambiguous":

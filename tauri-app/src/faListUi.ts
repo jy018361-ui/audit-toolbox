@@ -621,6 +621,23 @@ export function faReviewSummary(applied: number, pending = 0): string {
   return "LLM 复核完成：现有映射与 LLM 判断一致，未做改动。";
 }
 
+export function faReviewDisplayMessage(
+  review: { enabled?: boolean; failed?: boolean; message?: string },
+  applied: number,
+  pending = 0,
+): string {
+  const original = review.message?.trim() ?? "";
+  if (review.failed || !review.enabled || original.includes("跳过本次 LLM")) {
+    return (
+      original ||
+      (review.enabled
+        ? "LLM 复核失败。"
+        : "LLM 未启用，已保留当前自动映射。")
+    );
+  }
+  return faReviewSummary(applied, pending);
+}
+
 export function faReviewNarrative(
   message: string | undefined,
   applied: number,

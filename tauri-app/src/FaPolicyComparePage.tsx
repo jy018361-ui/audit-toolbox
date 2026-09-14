@@ -28,10 +28,10 @@ import { LlmReview } from "@/components/LlmReview";
 import { useJobEvents } from "@/hooks/useJobEvents";
 import {
   faMappedRolesForColumn,
+  faReviewDisplayMessage,
   faRolesForSide,
   planFaLlmChanges,
   sanitizeFaBeginMapping,
-  shouldShowFaAdditionFields,
   type FaMappingChange,
   type FaPendingSuggestion,
 } from "./faListUi";
@@ -97,8 +97,8 @@ type PolicyDraft = {
 let faPolicyDraftCache: PolicyDraft | undefined;
 
 /// 折旧政策对比：期初+期末两份清单（上传、匹配键、映射与 LLM 复核全部复用
-/// FA 主工具的 fa.inspect / fa.review），导出单工作簿两页：折旧政策对比 +
-/// 税法最低折旧年限参考。
+/// FA 主工具的 fa.inspect / fa.review），导出单工作簿两页：带 LLM 税法年限分析的
+/// 折旧政策对比 + 税法最低折旧年限参考。
 export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
   const draft = faPolicyDraftCache;
   const [step, setStep] = useState<1 | 2>(draft?.step ?? 1);
@@ -309,7 +309,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
     setJob(undefined);
   });
 
-  /// 两表检查直接复用 fa.inspect；建议映射裁剪到政策四要素 + 匹配键。
+  /// 两表检查直接复用 fa.inspect；建议映射裁剪到政策比较实际使用的字段 + 匹配键。
   async function inspect(overrides?: { beginPath?: string; endPath?: string }) {
     const bPath = overrides?.beginPath ?? beginPath;
     const ePath = overrides?.endPath ?? endPath;
@@ -685,13 +685,9 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
     mapping: PolicyMapping,
   ) => {
     const headers = inspect.headers;
-    // 与 FA 主工具同构：新增方式/新增日期仅在期末已识别新增方式列时出现；
-    // 期初不出现文件2专属角色（本年折旧/新增方式/新增日期）。
-    const visibleRoles = POLICY_MAPPING_ROLES.filter(
-      ([key]) =>
-        !["additionMethod", "additionDate"].includes(key) ||
-        shouldShowFaAdditionFields(String(endMapping.additionMethod ?? "")),
-    );
+    // 政策对比的提示和下拉共用 POLICY_MAPPING_ROLES；新增方式/新增日期不参与
+    // 本底稿，避免出现“提示缺失但下拉没有该选项”的矛盾。
+    const visibleRoles = POLICY_MAPPING_ROLES;
     const roleOptions: [string, string][] = [
       ["matchKeys", "资产ID"],
       ...faRolesForSide(side, visibleRoles),
@@ -962,8 +958,14 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                     passed={llmReview?.passed}
                     enabled={llmReview?.enabled}
                     failed={llmReview?.failed}
-                    message={
-                      llmReview && !llmBusy ? llmReview.message : undefined
+                  message={
+                    llmReview && !llmBusy
+                      ? faReviewDisplayMessage(
+                          llmReview,
+                          llmChanges.length,
+                          llmPending.length,
+                        )
+                      : undefined
                     }
                     detail={llmReview?.detail}
                     changes={llmChanges}
@@ -1033,8 +1035,8 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                 </Field>
                 <p className="hint">
                   导出为一个 Excel：第 1
-                  页折旧政策对比（类别/寿命/残值率两期对比、
-                  判断结果与影响金额），第 2 页税法最低折旧年限参考。
+                  页折旧政策对比（含 LLM 判断的税法资产类别、最低年限及风险结论），
+                  第 2 页税法最低折旧年限参考。
                 </p>
                 <div className="actions">
                   <Button

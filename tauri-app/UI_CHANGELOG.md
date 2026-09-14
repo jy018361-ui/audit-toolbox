@@ -1,5 +1,108 @@
 # UI 修改记录
 
+## 2026-09-14 · 无效辅助核算映射自动撤销
+
+### 目标
+
+- JE 完全找不到与 TB 辅助值对应的列时，不再让映射面板保留一项实际不会生效的 TB 辅助核算映射。
+- 保持既有降级计算能力，撤销映射后仍按「主体＋科目」完成测算或核对。
+
+### 设计决策
+
+- 公共联动结论仅在 `noMatch` 时触发撤销；已认定唯一列但覆盖不全的 `partialCoverage` 保留映射，多列歧义 `ambiguous` 留给用户手动指定。
+- 存款利息、借款利息、TBJE 完整性、汇兑损益与 FA TBJE 五个联动入口统一调用同一清理函数，分别撤销 TB 的 `auxiliary` 或 `loanId`，并在页面状态区说明降级计算继续执行。
+
+### 验证方式
+
+- `npx vitest run src/ledgerMappingAuxiliary.test.ts src/components/AuxiliaryLinkStatus.test.tsx`
+- `npx tsc -b --pretty false`
+
+## 2026-09-14 · 账表分批上传与借款利率确认、计息口径修复
+
+### 目标
+
+- 公共上传框保持“重新选择整组”的既有语义，同时允许在缺失的 TB/JE 单侧卡片中补充上传。
+- 让借款页的一键复核位置与其他账表工具一致，并修复利率确认表列宽挤压、百分比回显和 Excel 填写指引不清的问题。
+- 消除主表“计息天数 365 天”对逐笔本金变动计息口径的误导。
+
+### 设计决策
+
+- 存款利息、借款利息和 FA 账表核对的公共入口仍先清空旧 TB/JE 并按本轮文件重建；当只识别到一侧时，另一侧空卡片显示“补充上传 TB/JE”，该入口按明确类型读取且只更新对应侧。批量 TBJE 工具原本已支持增量配对，保持不变。
+- 借款页“一键复核 TB＋JE”移动到两侧字段映射上方；利率确认表的八列设置完整宽度，百分比输入始终按用户可读的 `3.85` 回显，提交时仍转换为小数。
+- 导出的利率确认表用灰色标识利率类型、黄色标识固定执行利率、蓝色标识浮动基准及加减点，并把已有小数利率按百分数显示。
+- “借款变动与利息测算”主表将误导性的分段天数合计改为“计息积数（元·天）”；每笔增加、减少对应的实际起止日和天数继续在“计息分段明细”逐段展示并以活公式联动利息。
+
+### 验证方式
+
+- `npx vitest run src/LoanInterestPageUi.test.tsx`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib loan_interest -- --test-threads=1`
+- `npm run build`
+
+## 2026-09-14 · 折旧测算日期、任务状态与操作区修复
+
+### 目标
+
+- 修复折旧测算第三步操作区层级散乱、无效资产负债表日仍可点击生成的问题。
+- 修复短任务的失败/完成事件被页面“排队中”状态覆盖，导致界面看似卡死且停止任务无反馈的问题。
+- 将税法年限 LLM 分析同步复用到 FA List 主工具的“折旧期间”Sheet。
+
+### 设计决策
+
+- 第三步改为“日期＋输出文件”的双列输入区，以及下方统一的说明/操作栏；“返回核对映射”和“生成/停止”归入同一按钮组，小屏自动纵向排列。
+- 日期不合法或未填写时显示就地提示并禁用生成，提交函数仍保留第二道校验，避免无效任务进入 worker。
+- `useJobEvents` 增加任务状态调和：同一 job 已收到真实进度或终态后，不允许随后返回的本地 queued 占位状态覆盖；终态统一按 completed/failed/cancelled 清理激活任务。
+- 停止任务后保持忙碌状态直至收到 cancelled 事件，并立即显示“正在取消任务…”；取消 API 报错不再静默吞掉。
+- FA List 的 Excel 导出在“折旧期间”末尾复用与政策对比相同的三列、表头颜色、批注及失败降级；CSV 没有该 Sheet，不发起税法分析。
+- FA 主清单、补充清单、折旧测算和政策对比的 LLM 成功结果统一精简为“是否调整／调整几项／待确认几项”；不再展开每个正确字段的样例理由。具体理由只跟随实际改动或待确认项展示，失败原因和技术详情仍保留。
+
+### 验证方式
+
+- `npx vitest run src/FaDepCalcPage.test.tsx src/hooks/useJobEvents.test.ts src/faSubtoolsUi.test.ts`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib fa_subtools -- --test-threads=1`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib export_contains_contract_sheets -- --test-threads=1`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib export_omits_llm_analysis_when_global_llm_is_disabled -- --test-threads=1`
+- `npm run build`
+
+## 2026-09-14 · FA 折旧政策税法年限分析与映射提示统一
+
+### 目标
+
+- 在现有折旧政策聚合结果上增加税法最低折旧年限风险分析，不扩充第三页或另建明细页。
+- 消除“选填未映射：新增方式”提示与下拉框无该选项之间的矛盾。
+
+### 设计决策
+
+- “折旧政策对比”页在原有末列后追加三列：`税法资产类别（LLM）`、`税法最低折旧年限（年）`、`税法年限分析（LLM）`；表头使用浅紫色与原列区分，并以批注解释模型判断及政策适用边界。
+- 后台将期末计划使用月数除以 12 后传给模型；模型只负责把期末资产类别映射到五类锁定税法口径，最低年限和最终比较由 Rust 回填、校验。结论仅显示“未见明显异常”或“可能低于税法年限”；无法归类、年限缺失或为 0 时采用保守结论。
+- LLM 未启用或调用失败不阻断工作簿导出：新增三列留空，完成消息明确提示分析未完成。
+- 折旧政策子工具不使用 `新增方式`、`新增日期`，因此从本页选填提示和映射下拉中同时移除；FA 主工具保持不变。
+
+### 验证方式
+
+- `npx vitest run src/faSubtoolsUi.test.ts`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib fa_subtools -- --test-threads=1`
+- `npm run build`
+
+## 2026-09-14 · 看账批次捷径与正负数标记界面重整
+
+### 目标
+
+- 看账选完科目后可直接建立下一批次，减少在页面顶部与科目列表之间往返。
+- 正负数工具只在整份文件的凭证均为单边时开放人工符号口径，补齐损益结转标记，并修复科目弹层滚动后错位、操作区跑出视口的问题。
+
+### 设计决策
+
+- 看账顶部移除“新增批次”，在“加入目标批次”旁新增“加入下一批次”：把当前所选科目直接放入新批次并切换过去；空选择时不可用。
+- “借贷符号一样”与“已带符号”默认隐藏；仅当检测报告确认 `oneSidedVouchers === totalVouchers` 时显示。两个按钮增加语义图标和适用场景悬浮说明，重复点击当前项恢复自动检测；完整凭证重新出现时清除隐藏的手工选择。
+- 正负数导出默认开启“标记损益结转凭证”：命中本年利润或未分配利润的整张凭证写入【损益结转】，且不参与正负数配对；普通与大 CSV 路径保持一致。
+- 列筛选弹层改为持有真实触发元素并在窗口、页面及表格滚动时重新定位；宽度自适应，取值区独立滚动，底部“确认选择”始终留在视口内。
+
+### 验证方式
+
+- `npx vitest run src/JeSignMarkPage.test.tsx src/jeSignMarkUi.test.ts src/KanzhangParityPage.test.ts`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib je_mark -- --test-threads=1`
+- `npm run build`
+
 ## 2026-09-14 · 资产负债表日统一口径：必填、动态默认与智能预填
 
 ### 目标

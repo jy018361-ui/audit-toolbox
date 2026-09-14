@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
 
@@ -38,7 +38,7 @@ export function ColumnFilterMenu({
   splitCode,
 }: {
   field: string;
-  anchor: DOMRect;
+  anchor: HTMLElement;
   loading: boolean;
   data?: ColumnFilterValues;
   selected: string[];
@@ -56,6 +56,14 @@ export function ColumnFilterMenu({
   const [checked, setChecked] = useState<Set<string>>(() => new Set(selected));
   const panel = useRef<HTMLDivElement>(null);
   const initialized = useRef(selected.length > 0);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const [position, setPosition] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    maxHeight: number;
+  }>();
 
   // 无筛选时 Excel 默认显示「全选」。首次取值异步返回后补齐勾选；若结果被截断，
   // 则不能把眼前这一批冒充整列全选，否则直接应用会意外只保留前 VALUE_LIMIT 项。
@@ -70,10 +78,10 @@ export function ColumnFilterMenu({
       const target = event.target as HTMLElement | null;
       // 点触发按钮时不在这里关：让按钮自己的 onClick 决定开还是合。
       if (target?.closest("[data-ts-filter-trigger]")) return;
-      if (!panel.current?.contains(target as Node)) onClose();
+      if (!panel.current?.contains(target as Node)) onCloseRef.current();
     }
     function keyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") onCloseRef.current();
     }
     window.addEventListener("pointerdown", pointerDown, true);
     window.addEventListener("keydown", keyDown);
@@ -81,7 +89,46 @@ export function ColumnFilterMenu({
       window.removeEventListener("pointerdown", pointerDown, true);
       window.removeEventListener("keydown", keyDown);
     };
-  }, [onClose]);
+  }, []);
+
+  // 触发器可能位于横向预览表或长页面里。始终读取它的当前视口坐标，
+  // 页面/表格滚动后即时重排；弹层放不下时翻到上方，操作按钮仍留在视口内。
+  useLayoutEffect(() => {
+    const place = () => {
+      if (!anchor.isConnected) {
+        onCloseRef.current();
+        return;
+      }
+      const edge = 8;
+      const gap = 6;
+      const rect = anchor.getBoundingClientRect();
+      const width = Math.min(360, Math.max(240, window.innerWidth - edge * 2));
+      const maxHeight = Math.max(220, window.innerHeight - edge * 2);
+      const height = Math.min(panel.current?.scrollHeight ?? 420, maxHeight);
+      const below = window.innerHeight - rect.bottom - edge - gap;
+      const above = rect.top - edge - gap;
+      const top = below >= Math.min(height, 320) || below >= above
+        ? rect.bottom + gap
+        : rect.top - height - gap;
+      const preferredLeft = rect.left + rect.width / 2 - width / 2;
+      setPosition({
+        left: Math.min(Math.max(preferredLeft, edge), window.innerWidth - width - edge),
+        top: Math.min(Math.max(top, edge), window.innerHeight - height - edge),
+        width,
+        maxHeight,
+      });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(place);
+    if (panel.current) observer?.observe(panel.current);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+      observer?.disconnect();
+    };
+  }, [anchor, data?.values.length, data?.truncated, loading]);
 
   const values = data?.values ?? [];
   // 本批取值里已勾中的数量决定"（全选）"的三态；用户勾过、但不在本批里的值
@@ -90,13 +137,6 @@ export function ColumnFilterMenu({
   const allChecked = values.length > 0 && visibleChecked.length === values.length;
   const someChecked = visibleChecked.length > 0 && !allChecked;
   const hiddenChecked = [...checked].filter((value) => !values.includes(value));
-
-  const width = 268;
-  const left = Math.min(
-    Math.max(8, anchor.left),
-    Math.max(8, window.innerWidth - width - 8),
-  );
-  const top = Math.min(anchor.bottom + 4, Math.max(8, window.innerHeight - 340));
 
   function toggle(value: string) {
     setChecked((current) => {
@@ -111,7 +151,13 @@ export function ColumnFilterMenu({
     <div
       ref={panel}
       className="ts-filter-menu"
-      style={{ left, top, width }}
+      style={{
+        left: position?.left ?? 0,
+        top: position?.top ?? 0,
+        width: position?.width ?? 360,
+        maxHeight: position?.maxHeight,
+        visibility: position ? "visible" : "hidden",
+      }}
       role="dialog"
       aria-label={`筛选 ${field}`}
     >
@@ -121,7 +167,10 @@ export function ColumnFilterMenu({
       <div className="ts-filter-menu-search">
         <input
           value={keyword}
-          placeholder={searchPlaceholder ?? "搜索取值，回车重新读取"}
+          placeholder={searchPlaceholder ?? "搜索取值，回车重新读取…"}
+          aria-label={`搜索${field}`}
+          name={`column-filter-${field}`}
+          autoComplete="off"
           onChange={(event) => setKeyword(event.target.value)}
           onKeyDown={(event) => {
             if (event.key !== "Enter") return;
@@ -136,7 +185,7 @@ export function ColumnFilterMenu({
           disabled={loading}
           onClick={() => onSearch(keyword)}
         >
-          {loading ? "读取中" : "读取"}
+          {loading ? "读取中…" : "读取"}
         </Button>
       </div>
       <label className="ts-filter-all">
@@ -226,7 +275,7 @@ export function ColumnFilterMenu({
           size="sm"
           onClick={() => onApply([...checked])}
         >
-          应用
+          确认选择
         </Button>
       </div>
     </div>,
@@ -250,7 +299,7 @@ function splitAccountCode(value: string): { code: string; name: string } | undef
 
 /** 预览表头里的漏斗按钮：已筛选的显示勾中个数，再次点击收起面板。 */
 export function ColumnFilterTrigger({field,chosen,expanded,onToggle}:{
-  field:string;chosen:string[];expanded:boolean;onToggle:(anchor:DOMRect|undefined)=>void;
+  field:string;chosen:string[];expanded:boolean;onToggle:(anchor:HTMLElement|undefined)=>void;
 }){
   return (
     <button
@@ -269,7 +318,7 @@ export function ColumnFilterTrigger({field,chosen,expanded,onToggle}:{
           onToggle(undefined);
           return;
         }
-        onToggle(event.currentTarget.getBoundingClientRect());
+        onToggle(event.currentTarget);
       }}
     >
       <span className="ts-filter-icon">▼</span>

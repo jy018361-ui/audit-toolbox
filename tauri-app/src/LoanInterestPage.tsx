@@ -14,6 +14,7 @@ import { depositDropTargetInside } from "./DepositInterestPage";
 import { AuxiliaryLinkStatusView } from "@/components/AuxiliaryLinkStatus";
 import { verifyAuxiliaryLink, type AuxiliaryLinkResult } from "@/ledgerMapping";
 import { DateInput } from "@/components/DateInput";
+import { defaultBalanceSheetDate } from "@/dateDefaults";
 import { PageHeader } from "@/components/PageHeader";
 import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
@@ -77,6 +78,9 @@ type Inspection = {
   headerDepth: number;
   entities?: string[];
   suggestedMapping: LoanMapping;
+  // TB/JE 专有：数据年度与由它推出的建议表日，识别后自动预填资产负债表日。
+  dataYears?: string[];
+  suggestedBalanceSheetDate?: string;
   // 台账专有：角色清单与四型定义由引擎随识别结果下发（唯一定义在 Rust）。
   roles?: LoanRole[];
   forms?: LoanForm[];
@@ -329,7 +333,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     je: empty(),
     rateLedger: empty(),
   });
-  const [reportEnd, setReportEnd] = useState("");
+  const [reportEnd, setReportEnd] = useState(defaultBalanceSheetDate());
   const [rateEdits, setRateEdits] = useState<
     Record<number, Partial<LoanRateSetting>>
   >({});
@@ -781,6 +785,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       restoredLoanMappings.current[kind] = undefined;
     setSource(kind, { path, inspection: x, mapping });
     if (kind === "ledger") setRateEdits({});
+    // TB/JE 识别出数据年度就预填表日：期间起点、LPR 取期和 JE 归集都由它
+    // 推导，账套不是本年度时留着默认值会把这三处全部带偏。
+    if (kind === "tb" || kind === "je") {
+      if (x.suggestedBalanceSheetDate) setReportEnd(x.suggestedBalanceSheetDate);
+      else if (x.dataYears?.length === 1)
+        setReportEnd(`${x.dataYears[0]}-12-31`);
+    }
   }
   function source(kind: Kind) {
     const x = sources[kind];

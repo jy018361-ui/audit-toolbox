@@ -16,6 +16,7 @@ import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { DateInput } from "@/components/DateInput";
+import { defaultBalanceSheetDate } from "@/dateDefaults";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -805,7 +806,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   const [jePath, setJePath] = useState("");
   const [tbPath, setTbPath] = useState("");
   const [mode, setMode] = useState<Mode>("unrealized");
-  const [reportEnd, setReportEnd] = useState("");
+  const [reportEnd, setReportEnd] = useState(defaultBalanceSheetDate());
   const [je, setJe] = useState<Inspection>();
   const [tb, setTb] = useState<Inspection>();
   const [jeMapping, setJeMapping] = useState<Record<string, string | string[]>>(

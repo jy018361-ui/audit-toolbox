@@ -27,6 +27,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { Badge } from "@/components/ui/badge";
 import { NumberInput } from "@/components/NumberInput";
 import { DateInput } from "@/components/DateInput";
+import { defaultBalanceSheetDate } from "@/dateDefaults";
 import { displayFileName } from "@/fileDisplay";
 import {
   correctLedgerSourceKinds,
@@ -459,7 +460,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     Record<string, string>
   >({});
   const [accountFilter, setAccountFilter] = useState("");
-  const [reportEnd, setReportEnd] = useState("");
+  const [reportEnd, setReportEnd] = useState(defaultBalanceSheetDate());
   const [tiers, setTiers] = useState<RateTiers>();
   const [tierRates, setTierRates] = useState<Record<string, number>>({});
   const [rows, setRows] = useState<AccountRow[]>([]);

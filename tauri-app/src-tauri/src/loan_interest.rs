@@ -582,6 +582,13 @@ fn inspect(params: &Value) -> Result<Value, AppError> {
     } else {
         8
     };
+    // TB/JE 识别时一并下发数据年度与建议表日：借款页只让用户填"资产负债表日"，
+    // 期间起点由它推导；账套不是本年度时，默认值会把 LPR 取期与 JE 归集带偏。
+    let data_years = if kind == "tb" || kind == "je" {
+        Some(inspect_data_years(&table, kind, &suggested))
+    } else {
+        None
+    };
     let mut out = json!({"headers":table.headers,"preview":table.rows.iter().take(preview_rows).collect::<Vec<_>>(),"rowCount":table.rows.len(),"sheet":table.sheet,"sheets":table.sheets,"headerRow":table.header_row,"headerDepth":table.header_depth,"suggestedMapping":suggested});
     // 台账的角色表与形态表随识别结果一起下发：前端据此渲染下拉、判定命中哪一型、
     // 区分 required／optional。**只有 Rust 这一份定义**，前端不再自己抄一遍。
@@ -591,7 +598,50 @@ fn inspect(params: &Value) -> Result<Value, AppError> {
             object.insert("forms".into(), loan_form_catalog());
         }
     }
+    if let Some(years) = data_years {
+        if let Some(object) = out.as_object_mut() {
+            object.insert("dataYears".into(), json!(years));
+            object.insert(
+                "suggestedBalanceSheetDate".into(),
+                years
+                    .last()
+                    .map(|year| json!(format!("{year}-12-31")))
+                    .unwrap_or(Value::Null),
+            );
+        }
+    }
     Ok(out)
+}
+
+/// 与存款利息的口径一致：JE 按记账日期取年度，TB 按期间列里的 4 位年份取年度。
+fn inspect_data_years(table: &Table, kind: &str, mapping: &Map<String, Value>) -> Vec<i32> {
+    let role = if kind == "je" { "date" } else { "period" };
+    let mut years = std::collections::BTreeSet::new();
+    for name in mapped_names(mapping, kind, role) {
+        let Some(index) = table.headers.iter().position(|header| *header == name) else {
+            continue;
+        };
+        for row in &table.rows {
+            let Some(value) = row.get(index) else {
+                continue;
+            };
+            if kind == "je" {
+                if let Some(date) = parse_date(value) {
+                    years.insert(date.year());
+                }
+            } else {
+                for token in value.split(|c: char| !c.is_ascii_digit()) {
+                    if token.len() == 4
+                        && let Ok(year) = token.parse::<i32>()
+                        && (1900..=2200).contains(&year)
+                    {
+                        years.insert(year);
+                    }
+                }
+            }
+        }
+    }
+    years.into_iter().collect()
 }
 
 /// 台账角色表 → 前端下拉用的 `[{name,label}]`，顺序即下拉顺序。
@@ -3217,7 +3267,7 @@ fn source(params: &Value, key: &str) -> Result<(Table, Map<String, Value>), AppE
             }
         }
         table.rows = kept_rows;
-        ledger_mapping::forward_fill_columns(&table.headers, &mut table.rows, &columns);
+        fill_loan_je_identity(&table.headers, &mut table.rows, &mapping, &columns);
     }
     let validation_kind = if matches!(kind, "tb" | "je") {
         kind
@@ -3284,6 +3334,26 @@ fn source(params: &Value, key: &str) -> Result<(Table, Map<String, Value>), AppE
         ));
     }
     Ok((table, mapping))
+}
+
+fn fill_loan_je_identity(
+    headers: &[String],
+    rows: &mut [Vec<String>],
+    mapping: &Map<String, Value>,
+    columns: &[String],
+) {
+    let account_columns = ["accountCode", "accountName", "account"]
+        .iter()
+        .flat_map(|role| mapped_names(mapping, "je", role))
+        .collect::<Vec<_>>();
+    let retained = vec![true; rows.len()];
+    ledger_mapping::forward_fill_ledger_identity_columns_skipping(
+        headers,
+        rows,
+        columns,
+        &account_columns,
+        &retained,
+    );
 }
 /// 台账映射的旧角色名 → 标准名。认不出的旧名原样保留（用户手工填的自定义键不该被吞掉）。
 fn normalize_loan_mapping(m: Map<String, Value>) -> Map<String, Value> {
@@ -4592,6 +4662,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn 借款je新编码不继承上一科目名称() {
+        let headers = ["编码", "科目", "日期"]
+            .map(str::to_owned)
+            .to_vec();
+        let mut rows = vec![
+            vec!["2001".into(), "短期借款".into(), "2025-01-01".into()],
+            vec!["2002".into(), "".into(), "".into()],
+            vec!["".into(), "".into(), "".into()],
+        ];
+        let mapping = json!({"accountCode": "编码", "accountName": "科目", "date": "日期"})
+            .as_object()
+            .unwrap()
+            .clone();
+        fill_loan_je_identity(&headers, &mut rows, &mapping, &headers);
+        assert_eq!(rows[1], ["2002", "", "2025-01-01"]);
+        assert_eq!(rows[2], ["2002", "", "2025-01-01"]);
+    }
+
+    #[test]
     fn 借款主体归集按侧别且未勾选主体保持原值() {
         let params = json!({"entityScope": {
             "mode": "aggregate",
@@ -4736,6 +4825,40 @@ mod tests {
             Some("功能范围文本"),
             "分录文本应独立映射摘要，不能复用科目名称: {mapping:?}"
         );
+    }
+
+    /// TB/JE 识别时一并下发数据年度与建议表日，借款页据此预填"资产负债表日"——
+    /// 期间起点、LPR 取期和 JE 归集都由它推导，与存款利息的口径一致。
+    #[test]
+    fn inspect_data_years_follows_the_shared_period_convention() {
+        fn table(headers: &[&str], rows: &[&[&str]]) -> Table {
+            Table {
+                path: PathBuf::new(),
+                sheet: "Sheet1".into(),
+                sheets: vec!["Sheet1".into()],
+                header_row: 1,
+                header_depth: 1,
+                headers: headers.iter().map(|h| h.to_string()).collect(),
+                rows: rows
+                    .iter()
+                    .map(|row| row.iter().map(|v| v.to_string()).collect())
+                    .collect(),
+            }
+        }
+        let mut je_mapping = Map::new();
+        je_mapping.insert("date".into(), json!("记账日期"));
+        let je = table(
+            &["记账日期"],
+            &[&["2024-12-31"], &["2025-06-01"], &["2025-12-31"]],
+        );
+        assert_eq!(inspect_data_years(&je, "je", &je_mapping), vec![2024, 2025]);
+
+        let mut tb_mapping = Map::new();
+        tb_mapping.insert("period".into(), json!("期间"));
+        let tb = table(&["期间"], &[&["2025-12"], &["2025年1月"], &["合计"]]);
+        assert_eq!(inspect_data_years(&tb, "tb", &tb_mapping), vec![2025]);
+        // 映射不到期间/日期列时不硬猜，建议表日保持空由用户手填。
+        assert!(inspect_data_years(&tb, "tb", &Map::new()).is_empty());
     }
 
     /// 纯合成台账：不依赖本机客户目录，覆盖真实 Excel 上传与解析路径。

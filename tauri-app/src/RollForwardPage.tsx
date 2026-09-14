@@ -608,12 +608,26 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
     else pendingRestoreRef.current = restored;
   });
   const params = () => paramsFor(company);
+  /** 上年底稿匹配成功而表日还空着时，按底稿文件名里的年份建议"上年+1 年末"：
+   *  表日决定上年底稿定位与输出命名，手滑填错年整单就结转不了。 */
+  function suggestBsDateFromPrior(result: unknown) {
+    if (!company?.bs_date.trim()) return;
+    const details = Array.isArray((result as { details?: unknown[] }).details)
+      ? ((result as { details: Array<Record<string, unknown>> }).details)
+      : [];
+    const priorName = details
+      .map((row) => String(row.priorPath ?? "").split(/[\\/]/).pop() ?? "")
+      .find((name) => name.trim());
+    const year = priorName ? Number(priorName.match(/(19|20)\d{2}/)?.[0]) : 0;
+    if (year > 1900) updateCompany({ bs_date: `${year + 1}-12-31` });
+  }
   async function validate() {
     if (!company) return;
     setError("");
     try {
       const result = await engineCall("roll_forward.validate", params());
       setValidation(result);
+      suggestBsDateFromPrior(result);
       await saveProjects();
     } catch (e) {
       setError(errorText(e));

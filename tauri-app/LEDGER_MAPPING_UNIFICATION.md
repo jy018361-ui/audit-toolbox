@@ -1,5 +1,11 @@
 # 账表映射统一方案
 
+## 2026-09-14 · 资产负债表日统一：借款识别下发建议表日，FA TB＋JE 默认全口径
+
+- 借款利息的 `loan.inspect` 对 TB/JE 新增 `dataYears` 与 `suggestedBalanceSheetDate` 下发（JE 按记账日期取年度、TB 按期间列 4 位年份，与存款利息 `data_years` 同口径；映射不到日期/期间列时不硬猜），前端识别后自动预填"资产负债表日"，期间起点、LPR 取期与 JE 归集不再依赖手填默认值。台账（ledger）形态无期间概念，不参与。
+- FA TB＋JE（五表）的 `reportEnd` 改为可选：不传即全口径核对——整本序时账凭证都进底稿，只剔噪声行，期间过滤与 `FA_TBJE_PERIOD_EMPTY` 跳过；显式传入仍按旧期间过滤（历史任务回放口径不变）。内存与大 CSV 磁盘路径同口径。界面删除"报告截止日"输入，全工具箱表日字段统一叫"资产负债表日"。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib inspect_data_years`、`--lib 表日缺省时全口径核对纳入账套内全部凭证`；前端 `npx vitest run src/LoanInterestPage.test.ts src/FaTbJePage.test.ts`。
+
 ## 2026-09-14 · SAP 空编码维度形态：锚点脱离末级过滤，新增公共维度视图
 
 - 06 号样例实测暴露两个缺陷：锚点提取挂在末级掩码上，把“科目编码为空、维度列有值”的 SAP 明细行全部滤掉，误报“暂无可验证的当期发生额行”；即使认定成功，TB 侧按末级行取维度也取不到值。修复分两层：

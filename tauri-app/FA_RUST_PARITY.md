@@ -187,6 +187,31 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ---
 
+## 2026-09-14 表日口径统一：FA List 必填、FA TB＋JE 默认全口径
+
+- **FA List（两期清单）"资产负债表日"改为必填**：前端导出前校验并标注必填；
+  Rust `fa.export` 入口新增 `FA_BS_DATE_REQUIRED`（缺省或不可解析即拦截），
+  不再存在"空值按 2099-12-31 兜底"路径——该兜底会让累计折旧活公式一路算到
+  资产寿命尽头，差异列全是假差异。默认值与折旧测算一并改为动态"当前年度
+  12-31"（原先写死 2025-12-31）。旧版 Python 没有必填拦截，这是刻意加强，
+  不属于行为等价范围。
+- **FA TB＋JE（五表）删除"报告截止日"，默认全口径核对**：前端不再出现日期
+  输入框、年度错位警告与建议回填；Rust `reportEnd` 参数改为可选——不传即
+  全口径（整本序时账凭证都进底稿，期间过滤与 `FA_TBJE_PERIOD_EMPTY` 均跳过，
+  噪声行剔除与 Net=0 冲销匹配不变，内存与大 CSV 磁盘路径同口径）；显式传入
+  仍按"当年 1 月 1 日至表日"过滤并保留原报错，供历史任务回放。2026-08-30
+  条目所述"默认当前年 12-31 会滤空"的整类问题随之消失。
+
+回归：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --lib export_without_balance_sheet_date_is_rejected
+cargo test --manifest-path src-tauri/Cargo.toml --lib 表日缺省时全口径核对纳入账套内全部凭证
+npx vitest run src/FaTbJePage.test.ts src/faSubtoolsUi.test.ts
+```
+
+---
+
 ## 2026-08-28 FA TB＋JE 变动表模式
 
 - 现有两期卡片模式保留；`fa.tbje_preview` / `fa.tbje_export` 仅承接固定资产业务分类与五表输出。

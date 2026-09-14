@@ -4,7 +4,7 @@ use super::*;
 use rusqlite::{Connection, params};
 use std::cell::Cell;
 
-const PREPARED_CACHE_VERSION: u64 = 4;
+const PREPARED_CACHE_VERSION: u64 = 5;
 
 pub(super) fn sql_error(e: rusqlite::Error) -> AppError {
     error(
@@ -501,6 +501,7 @@ fn build_prepared(
             .filter_map(|name| header_index(&ledger.table.headers, name))
             .filter(|index| !amount_indexes.contains(index)),
     );
+    let account_set = accounts.iter().copied().collect::<HashSet<_>>();
     let mut previous = HashMap::<usize, String>::new();
     let entity_index = mapping
         .entity
@@ -559,9 +560,22 @@ fn build_prepared(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let has_account_anchor = accounts
+            .iter()
+            .any(|i| row.get(*i).is_some_and(|value| !value.trim().is_empty()));
+        if has_account_anchor {
+            for i in &accounts {
+                if row.get(*i).is_none_or(|value| value.trim().is_empty()) {
+                    previous.remove(i);
+                }
+            }
+        }
         for &i in &fill {
             let current = row.get(i).map(|s| s.trim()).unwrap_or("");
             if current.is_empty() {
+                if has_account_anchor && account_set.contains(&i) {
+                    continue;
+                }
                 if let (Some(value), Some(cell)) = (previous.get(&i), row.get_mut(i)) {
                     *cell = value.clone();
                     applied_fills.push((i, value.clone()));
@@ -572,7 +586,10 @@ fn build_prepared(
         }
         let present = |i: &usize| row.get(*i).is_some_and(|v| !v.trim().is_empty());
         let has_amount = amount_indexes.iter().any(present);
-        let candidate = has_amount && ids.iter().chain(accounts.iter()).any(|i| !present(i));
+        // 科目编码或名称任一有值即构成完整科目身份；只有凭证键缺失，或全部
+        // 科目身份列都为空，才把金额行列为待剔除候选。与内存路径保持一致。
+        let candidate = has_amount
+            && (ids.iter().any(|i| !present(i)) || accounts.iter().all(|i| !present(i)));
         if mapped.iter().any(present) && (ids.iter().all(present) || has_amount) {
             let (dr, cr, raw, unsigned, hd, hc, pos, neg) = amount_columns.values(&row);
             let sign_key = |indexes: &[usize]| {

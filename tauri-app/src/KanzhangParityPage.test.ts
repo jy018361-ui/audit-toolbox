@@ -12,6 +12,7 @@ import {
   effectiveVoucherKey,
   filterAccounts,
   filterByCodePrefix,
+  accountSearchCriteria,
   formatMappingValue,
   invalidateKanzhangInspection,
   isMultiRole,
@@ -90,8 +91,14 @@ describe("目标批次清空", () => {
 
 describe("看账导出模式联动", () => {
   it("关闭对方科目时强制关闭套表，重新开启时恢复默认套表", () => {
-    expect(setCounterpartMode(false)).toEqual({includeCounterpart:false,includeSuite:false});
-    expect(setCounterpartMode(true)).toEqual({includeCounterpart:true,includeSuite:true});
+    expect(setCounterpartMode(false)).toEqual({
+      includeCounterpart: false,
+      includeSuite: false,
+    });
+    expect(setCounterpartMode(true)).toEqual({
+      includeCounterpart: true,
+      includeSuite: true,
+    });
   });
 });
 
@@ -108,36 +115,63 @@ describe("看账页面状态规则", () => {
       "金额字段（方案A-金额，或方案B-借方和贷方）",
     ]);
     // 只映射编码不再放行——金标要求编码与名称都到位。
-    expect(missingKanzhangRequiredRoles({
-      id: ["凭证号"],
-      accountCode: "会计科目",
-      accountName: [],
-      functionalAmount: "金额",
-    })).toEqual(["记账日期", "科目名称", "摘要"]);
+    expect(
+      missingKanzhangRequiredRoles({
+        id: ["凭证号"],
+        accountCode: "会计科目",
+        accountName: [],
+        functionalAmount: "金额",
+      }),
+    ).toEqual(["记账日期", "科目名称", "摘要"]);
     // 全部齐备才放行。
-    expect(missingKanzhangRequiredRoles({
+    expect(
+      missingKanzhangRequiredRoles({
+        id: ["凭证号"],
+        accountCode: "会计科目",
+        accountName: ["科目文本"],
+        date: "记帐日期",
+        summary: "文本",
+        functionalAmount: "金额",
+      }),
+    ).toEqual([]);
+    // 金额两套方案都算齐备（身份槽同样要补齐）。
+    const identity = {
       id: ["凭证号"],
       accountCode: "会计科目",
-      accountName: ["科目文本"],
-      date: "记帐日期",
-      summary: "文本",
-      functionalAmount: "金额",
-    })).toEqual([]);
-    // 金额两套方案都算齐备（身份槽同样要补齐）。
-    const identity = { id: ["凭证号"], accountCode: "会计科目", accountName: ["科目"], date: "日期", summary: "摘要" };
-    expect(missingKanzhangRequiredRoles({ ...identity, functionalAmount: "金额" })).toEqual([]);
-    expect(missingKanzhangRequiredRoles({ ...identity, functionalDebit: "借方", functionalCredit: "贷方" })).toEqual([]);
+      accountName: ["科目"],
+      date: "日期",
+      summary: "摘要",
+    };
+    expect(
+      missingKanzhangRequiredRoles({ ...identity, functionalAmount: "金额" }),
+    ).toEqual([]);
+    expect(
+      missingKanzhangRequiredRoles({
+        ...identity,
+        functionalDebit: "借方",
+        functionalCredit: "贷方",
+      }),
+    ).toEqual([]);
   });
 
   it("金额方向方案与借贷方案互斥", () => {
     const schemeB = setKanzhangMapping(
-      { id: ["凭证号"], accountName: ["科目"], functionalAmount: "金额", direction: "方向" },
+      {
+        id: ["凭证号"],
+        accountName: ["科目"],
+        functionalAmount: "金额",
+        direction: "方向",
+      },
       "functionalDebit",
       "借方",
     );
     expect(schemeB.functionalAmount).toBeUndefined();
     expect(schemeB.direction).toBeUndefined();
-    const schemeA = setKanzhangMapping({ ...schemeB, functionalCredit: "贷方" }, "functionalAmount", "金额");
+    const schemeA = setKanzhangMapping(
+      { ...schemeB, functionalCredit: "贷方" },
+      "functionalAmount",
+      "金额",
+    );
     expect(schemeA.functionalDebit).toBeUndefined();
     expect(schemeA.functionalCredit).toBeUndefined();
   });
@@ -151,24 +185,31 @@ describe("看账页面状态规则", () => {
   });
 
   it("实际唯一识别码由公司、日期和用户选择的凭证编号组成", () => {
-    expect(effectiveVoucherKey({
-      id: ["凭证号"],
-      accountName: ["科目"],
-      entity: "单位名称",
-      date: "日期",
-    })).toEqual(["单位名称", "日期", "凭证号"]);
+    expect(
+      effectiveVoucherKey({
+        id: ["凭证号"],
+        accountName: ["科目"],
+        entity: "单位名称",
+        date: "日期",
+      }),
+    ).toEqual(["单位名称", "日期", "凭证号"]);
   });
 
   it("只提交有名称且有目标科目的批次", () => {
-    expect(validKanzhangBatches([
-      { name: "收入", accounts: ["主营业务收入"] },
-      { name: "", accounts: ["费用"] },
-      { name: "空批次", accounts: [] },
-    ])).toEqual([{ name: "收入", accounts: ["主营业务收入"] }]);
+    expect(
+      validKanzhangBatches([
+        { name: "收入", accounts: ["主营业务收入"] },
+        { name: "", accounts: ["费用"] },
+        { name: "空批次", accounts: [] },
+      ]),
+    ).toEqual([{ name: "收入", accounts: ["主营业务收入"] }]);
   });
 
   it("切换 Sheet 或标题行会清除旧预览映射但保留 Sheet 选项", () => {
-    const next = invalidateKanzhangInspection(draft(), { sheet: "明细", headerRow: 3 });
+    const next = invalidateKanzhangInspection(draft(), {
+      sheet: "明细",
+      headerRow: 3,
+    });
     expect(next.knownSheets).toEqual(["总账", "明细"]);
     expect(next.sheet).toBe("明细");
     expect(next.headerRow).toBe(3);
@@ -178,7 +219,13 @@ describe("看账页面状态规则", () => {
   });
 
   it("优先显示结构化错误中的用户提示", () => {
-    expect(kanzhangErrorText({ code: "BROKEN", userMessage: "文件被占用。", detail: "secret" })).toBe("文件被占用。");
+    expect(
+      kanzhangErrorText({
+        code: "BROKEN",
+        userMessage: "文件被占用。",
+        detail: "secret",
+      }),
+    ).toBe("文件被占用。");
   });
 
   it("LLM 建议与现有映射一致时不再提示复核", () => {
@@ -192,28 +239,60 @@ describe("看账页面状态规则", () => {
     };
     // 截图里的六条建议全部是"X → X"，采纳与否结果相同，应全部过滤掉
     for (const [role, column] of [
-      ["accountName", "科目名称"], ["functionalCredit", "贷方"], ["date", "记账日期"],
-      ["functionalDebit", "借方"], ["entity", "公司"], ["id", "凭证号"],
+      ["accountName", "科目名称"],
+      ["functionalCredit", "贷方"],
+      ["date", "记账日期"],
+      ["functionalDebit", "借方"],
+      ["entity", "公司"],
+      ["id", "凭证号"],
     ] as const) {
-      expect(isRedundantKanzhangReview(mapping, { role, suggestedColumn: column })).toBe(true);
+      expect(
+        isRedundantKanzhangReview(mapping, { role, suggestedColumn: column }),
+      ).toBe(true);
     }
     // 首尾空格不算差异
-    expect(isRedundantKanzhangReview(mapping, { role: "entity", suggestedColumn: " 公司 " })).toBe(true);
+    expect(
+      isRedundantKanzhangReview(mapping, {
+        role: "entity",
+        suggestedColumn: " 公司 ",
+      }),
+    ).toBe(true);
     // 空建议没有可执行内容
-    expect(isRedundantKanzhangReview(mapping, { role: "summary", suggestedColumn: "  " })).toBe(true);
+    expect(
+      isRedundantKanzhangReview(mapping, {
+        role: "summary",
+        suggestedColumn: "  ",
+      }),
+    ).toBe(true);
   });
 
   it("LLM 建议确实会改变映射时保留提示", () => {
-    const mapping: Mapping = { id: ["凭证号"], accountName: ["科目名称"], entity: "公司" };
+    const mapping: Mapping = {
+      id: ["凭证号"],
+      accountName: ["科目名称"],
+      entity: "公司",
+    };
     // 换成别的列
-    expect(isRedundantKanzhangReview(mapping, { role: "entity", suggestedColumn: "主体" })).toBe(false);
+    expect(
+      isRedundantKanzhangReview(mapping, {
+        role: "entity",
+        suggestedColumn: "主体",
+      }),
+    ).toBe(false);
     // 当前未映射
-    expect(isRedundantKanzhangReview(mapping, { role: "summary", suggestedColumn: "摘要" })).toBe(false);
+    expect(
+      isRedundantKanzhangReview(mapping, {
+        role: "summary",
+        suggestedColumn: "摘要",
+      }),
+    ).toBe(false);
     // 多选列收敛成一列，会丢掉其他列，属于真实变更
-    expect(isRedundantKanzhangReview(
-      { id: ["凭证号", "序号"], accountName: ["科目名称"] },
-      { role: "id", suggestedColumn: "凭证号" },
-    )).toBe(false);
+    expect(
+      isRedundantKanzhangReview(
+        { id: ["凭证号", "序号"], accountName: ["科目名称"] },
+        { role: "id", suggestedColumn: "凭证号" },
+      ),
+    ).toBe(false);
   });
 
   it("把握达到六成才自动改，否则交回用户", () => {
@@ -226,10 +305,18 @@ describe("看账页面状态规则", () => {
   });
 
   it("复核结论分别交代改了什么和还要你定什么", () => {
-    expect(kanzhangReviewSummary(3, 0)).toBe("LLM 复核完成：已自动调整 3 项，不合适可逐条撤销。");
-    expect(kanzhangReviewSummary(3, 2)).toBe("LLM 复核完成：已自动调整 3 项，不合适可逐条撤销；另有 2 项把握不足 60%，未改动，请确认是否采纳。");
-    expect(kanzhangReviewSummary(0, 2)).toBe("LLM 复核完成：另有 2 项把握不足 60%，未改动，请确认是否采纳。");
-    expect(kanzhangReviewSummary(0, 0)).toBe("LLM 复核完成：现有字段映射与 LLM 判断一致，未做改动。");
+    expect(kanzhangReviewSummary(3, 0)).toBe(
+      "LLM 复核完成：已自动调整 3 项，不合适可逐条撤销。",
+    );
+    expect(kanzhangReviewSummary(3, 2)).toBe(
+      "LLM 复核完成：已自动调整 3 项，不合适可逐条撤销；另有 2 项把握不足 60%，未改动，请确认是否采纳。",
+    );
+    expect(kanzhangReviewSummary(0, 2)).toBe(
+      "LLM 复核完成：另有 2 项把握不足 60%，未改动，请确认是否采纳。",
+    );
+    expect(kanzhangReviewSummary(0, 0)).toBe(
+      "LLM 复核完成：现有字段映射与 LLM 判断一致，未做改动。",
+    );
   });
 
   it("变更前后一律显示成人话，未映射不显示为空白", () => {
@@ -243,8 +330,19 @@ describe("看账页面状态规则", () => {
   it("撤销自动补充只清掉该字段，不牵连互斥字段", () => {
     // LLM 补了 amount，用户撤销时 debit/credit 不该被 setKanzhangMapping 的互斥逻辑清掉
     const after = undoMappingChange(
-      { id: ["凭证号"], accountName: ["科目"], functionalAmount: "金额", functionalDebit: "借方", functionalCredit: "贷方" },
-      { role: "functionalAmount", before: undefined, after: "金额", source: "fill" },
+      {
+        id: ["凭证号"],
+        accountName: ["科目"],
+        functionalAmount: "金额",
+        functionalDebit: "借方",
+        functionalCredit: "贷方",
+      },
+      {
+        role: "functionalAmount",
+        before: undefined,
+        after: "金额",
+        source: "fill",
+      },
     );
     expect(after.functionalAmount).toBeUndefined();
     expect(after.functionalDebit).toBe("借方");
@@ -254,8 +352,18 @@ describe("看账页面状态规则", () => {
   it("撤销方案清除会恢复原字段并重新排除互斥方案", () => {
     // LLM 判定方案A清空了借贷方；撤销后借方回来，方案A的金额/方向要让位
     const after = undoMappingChange(
-      { id: ["凭证号"], accountName: ["科目"], functionalAmount: "金额", direction: "方向" },
-      { role: "functionalDebit", before: "借方", after: undefined, source: "scheme" },
+      {
+        id: ["凭证号"],
+        accountName: ["科目"],
+        functionalAmount: "金额",
+        direction: "方向",
+      },
+      {
+        role: "functionalDebit",
+        before: "借方",
+        after: undefined,
+        source: "scheme",
+      },
     );
     expect(after.functionalDebit).toBe("借方");
     expect(after.functionalAmount).toBeUndefined();
@@ -265,7 +373,12 @@ describe("看账页面状态规则", () => {
   it("撤销多选字段能还原全部原列", () => {
     const after = undoMappingChange(
       { id: ["凭证号"], accountName: ["科目名称"] },
-      { role: "id", before: ["凭证号", "序号"], after: ["凭证号"], source: "replace" },
+      {
+        role: "id",
+        before: ["凭证号", "序号"],
+        after: ["凭证号"],
+        source: "replace",
+      },
     );
     expect(after.id).toEqual(["凭证号", "序号"]);
     const cleared = undoMappingChange(
@@ -277,35 +390,95 @@ describe("看账页面状态规则", () => {
 
   it("同一字段被反复改动时只呈现净变化", () => {
     // 先补上金额，又因为判定方案B被清除：净效果是没变，不该出现在清单里
-    expect(mergeMappingChanges([
-      { role: "functionalAmount", before: undefined, after: "金额", source: "fill" },
-      { role: "functionalAmount", before: "金额", after: undefined, source: "scheme" },
-    ])).toEqual([]);
+    expect(
+      mergeMappingChanges([
+        {
+          role: "functionalAmount",
+          before: undefined,
+          after: "金额",
+          source: "fill",
+        },
+        {
+          role: "functionalAmount",
+          before: "金额",
+          after: undefined,
+          source: "scheme",
+        },
+      ]),
+    ).toEqual([]);
     // 连续两次改列名：合并成最初值到最终值的一条
     const merged = mergeMappingChanges([
       { role: "entity", before: "主体", after: "公司", source: "replace" },
-      { role: "entity", before: "公司", after: "单位名称", source: "replace", reason: "更贴近实体列" },
+      {
+        role: "entity",
+        before: "公司",
+        after: "单位名称",
+        source: "replace",
+        reason: "更贴近实体列",
+      },
     ]);
     expect(merged).toEqual([
-      { role: "entity", before: "主体", after: "单位名称", source: "replace", reason: "更贴近实体列" },
+      {
+        role: "entity",
+        before: "主体",
+        after: "单位名称",
+        source: "replace",
+        reason: "更贴近实体列",
+      },
     ]);
   });
 
   it("清除原映射和低把握改动会被标为需重点核对", () => {
-    expect(needsAttention({ role: "functionalDebit", before: "借方", after: undefined, source: "scheme" })).toBe(true);
-    expect(needsAttention({ role: "entity", before: "主体", after: "公司", source: "replace", confidence: 0.4 })).toBe(true);
-    expect(needsAttention({ role: "entity", before: "主体", after: "公司", source: "replace", confidence: 0.95 })).toBe(false);
-    expect(needsAttention({ role: "summary", before: undefined, after: "摘要", source: "fill" })).toBe(false);
+    expect(
+      needsAttention({
+        role: "functionalDebit",
+        before: "借方",
+        after: undefined,
+        source: "scheme",
+      }),
+    ).toBe(true);
+    expect(
+      needsAttention({
+        role: "entity",
+        before: "主体",
+        after: "公司",
+        source: "replace",
+        confidence: 0.4,
+      }),
+    ).toBe(true);
+    expect(
+      needsAttention({
+        role: "entity",
+        before: "主体",
+        after: "公司",
+        source: "replace",
+        confidence: 0.95,
+      }),
+    ).toBe(false);
+    expect(
+      needsAttention({
+        role: "summary",
+        before: undefined,
+        after: "摘要",
+        source: "fill",
+      }),
+    ).toBe(false);
   });
 });
 
 describe("按科目编码段批量筛选", () => {
-  const values = ["6401050002-营业成本-运费", "6603080001-销售费用-仓储", "2241110001-其他应付款-6401专项"];
+  const values = [
+    "6401050002-营业成本-运费",
+    "6603080001-销售费用-仓储",
+    "2241110001-其他应付款-6401专项",
+  ];
   const codes = ["6401050002", "6603080001", "2241110001"];
 
   it("只比编码段，不拿整个拼接串模糊匹配", () => {
     // 第三个科目名称里含 6401，但编码不是 6401 开头，不该被拉进来。
-    expect(filterByCodePrefix(values, codes, ["6401"])).toEqual(["6401050002-营业成本-运费"]);
+    expect(filterByCodePrefix(values, codes, ["6401"])).toEqual([
+      "6401050002-营业成本-运费",
+    ]);
   });
 
   it("多个前缀任一命中即可", () => {
@@ -324,7 +497,9 @@ describe("按科目编码段批量筛选", () => {
     // Oracle 的科目段组合本身带连字符，按第一个 `-` 切开会得到毫无意义的 `01`。
     const oracle = ["01-1002-000-银行存款", "01-2202-000-应付账款"];
     const oracleCodes = ["01-1002-000", "01-2202-000"];
-    expect(filterByCodePrefix(oracle, oracleCodes, ["01-1002"])).toEqual(["01-1002-000-银行存款"]);
+    expect(filterByCodePrefix(oracle, oracleCodes, ["01-1002"])).toEqual([
+      "01-1002-000-银行存款",
+    ]);
   });
 
   it("空前缀不过滤", () => {
@@ -333,23 +508,64 @@ describe("按科目编码段批量筛选", () => {
 
   it("前缀串按逗号、分号、空格、顿号切开", () => {
     expect(parseCodePrefixes("6401,6603")).toEqual(["6401", "6603"]);
-    expect(parseCodePrefixes("6401，6603；1002 2241、5001")).toEqual(["6401", "6603", "1002", "2241", "5001"]);
+    expect(parseCodePrefixes("6401，6603；1002 2241、5001")).toEqual([
+      "6401",
+      "6603",
+      "1002",
+      "2241",
+      "5001",
+    ]);
     expect(parseCodePrefixes("  ,  ; ")).toEqual([]);
+  });
+
+  it("统一搜索框自动区分编码段与名称关键词", () => {
+    expect(accountSearchCriteria("1601")).toEqual({
+      keyword: "",
+      codePrefixes: ["1601"],
+    });
+    expect(accountSearchCriteria("6401,6603")).toEqual({
+      keyword: "",
+      codePrefixes: ["6401", "6603"],
+    });
+    expect(accountSearchCriteria("固定资产")).toEqual({
+      keyword: "固定资产",
+      codePrefixes: [],
+    });
   });
 });
 
 describe("科目编码与科目名称拆成两个角色", () => {
   it("科目键按编码在前、名称在后拼接，并去掉空列与重复列", () => {
-    expect(accountColumns({ id: [], accountCode: "会计科目", accountName: ["科目文本"] }))
-      .toEqual(["会计科目", "科目文本"]);
+    expect(
+      accountColumns({
+        id: [],
+        accountCode: "会计科目",
+        accountName: ["科目文本"],
+      }),
+    ).toEqual(["会计科目", "科目文本"]);
     // 名称可以是多列（科目名称一级＋二级）
-    expect(accountColumns({ id: [], accountCode: "科目代码", accountName: ["科目名称一级", "科目名称二级"] }))
-      .toEqual(["科目代码", "科目名称一级", "科目名称二级"]);
+    expect(
+      accountColumns({
+        id: [],
+        accountCode: "科目代码",
+        accountName: ["科目名称一级", "科目名称二级"],
+      }),
+    ).toEqual(["科目代码", "科目名称一级", "科目名称二级"]);
     // 只有名称也成立，编码空缺不补位
-    expect(accountColumns({ id: [], accountName: ["科目名称"] })).toEqual(["科目名称"]);
-    expect(accountColumns({ id: [], accountCode: "  ", accountName: ["", " 科目 "] })).toEqual(["科目"]);
+    expect(accountColumns({ id: [], accountName: ["科目名称"] })).toEqual([
+      "科目名称",
+    ]);
+    expect(
+      accountColumns({
+        id: [],
+        accountCode: "  ",
+        accountName: ["", " 科目 "],
+      }),
+    ).toEqual(["科目"]);
     // 同一列同时落在两个角色上时只算一次，否则科目值会拼成"科目-科目"
-    expect(accountColumns({ id: [], accountCode: "科目", accountName: ["科目"] })).toEqual(["科目"]);
+    expect(
+      accountColumns({ id: [], accountCode: "科目", accountName: ["科目"] }),
+    ).toEqual(["科目"]);
   });
 
   it("只有科目名称是多列角色，编码固定一列", () => {
@@ -368,16 +584,42 @@ describe("科目编码与科目名称拆成两个角色", () => {
   });
 
   it("复核结果里的野字段不会写进映射", () => {
-    const source: Mapping = { id: ["凭证号"], accountName: [], functionalAmount: "金额" };
+    const source: Mapping = {
+      id: ["凭证号"],
+      accountName: [],
+      functionalAmount: "金额",
+    };
     const { mapping, changes } = applyLedgerReviews(source, {
       fills: [
-        { role: "account" as keyof Mapping, suggestedColumn: "会计科目", confidence: 0.9 },
-        { role: "辅助核算" as keyof Mapping, suggestedColumn: "往来单位", confidence: 0.9 },
+        {
+          role: "account" as keyof Mapping,
+          suggestedColumn: "会计科目",
+          confidence: 0.9,
+        },
+        {
+          role: "辅助核算" as keyof Mapping,
+          suggestedColumn: "往来单位",
+          confidence: 0.9,
+        },
       ],
     });
     expect(mapping.accountCode).toBe("会计科目");
     expect(Object.keys(mapping)).not.toContain("辅助核算");
     expect(changes.map((item) => item.role)).toEqual(["accountCode"]);
+  });
+
+  it("低于 60% 的复核建议不写入映射也不进入待确认", () => {
+    const source: Mapping = { id: ["凭证号"], accountName: ["科目名称"] };
+    const result = applyLedgerReviews(source, {
+      fills: [
+        { role: "summary", suggestedColumn: "摘要", confidence: 0.59 },
+        { role: "accountCode", suggestedColumn: "科目编码", confidence: 0.6 },
+      ],
+    });
+    expect(result.mapping.summary).toBeUndefined();
+    expect(result.mapping.accountCode).toBe("科目编码");
+    expect(result.pending).toEqual([]);
+    expect(result.changes.map((item) => item.role)).toEqual(["accountCode"]);
   });
 });
 
@@ -385,23 +627,47 @@ describe("金额口径方案互斥", () => {
   const base: Mapping = { id: ["凭证号"], accountName: ["科目名称"] };
 
   it("借贷方映射成功后判定为方案B", () => {
-    expect(activeAmountScheme({ ...base, functionalDebit: "借方", functionalCredit: "贷方" })).toBe("B");
+    expect(
+      activeAmountScheme({
+        ...base,
+        functionalDebit: "借方",
+        functionalCredit: "贷方",
+      }),
+    ).toBe("B");
     expect(activeAmountScheme({ ...base, functionalDebit: "借方" })).toBe("B");
   });
 
   it("金额方向映射成功后判定为方案A", () => {
-    expect(activeAmountScheme({ ...base, functionalAmount: "金额", direction: "方向" })).toBe("A");
+    expect(
+      activeAmountScheme({
+        ...base,
+        functionalAmount: "金额",
+        direction: "方向",
+      }),
+    ).toBe("A");
   });
 
   it("两套都空或都有时不锁定任何一方", () => {
     expect(activeAmountScheme(base)).toBeUndefined();
-    expect(activeAmountScheme({ ...base, functionalAmount: "金额", functionalDebit: "借方" })).toBeUndefined();
+    expect(
+      activeAmountScheme({
+        ...base,
+        functionalAmount: "金额",
+        functionalDebit: "借方",
+      }),
+    ).toBeUndefined();
     // 空白字符串不算映射成功
-    expect(activeAmountScheme({ ...base, functionalDebit: "  " })).toBeUndefined();
+    expect(
+      activeAmountScheme({ ...base, functionalDebit: "  " }),
+    ).toBeUndefined();
   });
 
   it("方案B成立时方案A的字段停用，反之亦然", () => {
-    const schemeB: Mapping = { ...base, functionalDebit: "借方", functionalCredit: "贷方" };
+    const schemeB: Mapping = {
+      ...base,
+      functionalDebit: "借方",
+      functionalCredit: "贷方",
+    };
     expect(isSchemeLockedRole(schemeB, "functionalAmount")).toBe(true);
     expect(isSchemeLockedRole(schemeB, "direction")).toBe(true);
     expect(isSchemeLockedRole(schemeB, "functionalDebit")).toBe(false);
@@ -409,13 +675,22 @@ describe("金额口径方案互斥", () => {
     expect(isSchemeLockedRole(schemeB, "summary")).toBe(false);
     expect(isSchemeLockedRole(schemeB, "entity")).toBe(false);
 
-    const schemeA: Mapping = { ...base, functionalAmount: "金额", direction: "方向" };
+    const schemeA: Mapping = {
+      ...base,
+      functionalAmount: "金额",
+      direction: "方向",
+    };
     expect(isSchemeLockedRole(schemeA, "functionalDebit")).toBe(true);
     expect(isSchemeLockedRole(schemeA, "functionalCredit")).toBe(true);
     expect(isSchemeLockedRole(schemeA, "functionalAmount")).toBe(false);
 
     // 方案未定时两套都开放，LLM 也可以照常给建议
-    for (const role of ["functionalAmount", "direction", "functionalDebit", "functionalCredit"] as const) {
+    for (const role of [
+      "functionalAmount",
+      "direction",
+      "functionalDebit",
+      "functionalCredit",
+    ] as const) {
       expect(isSchemeLockedRole(base, role)).toBe(false);
     }
   });
@@ -424,20 +699,58 @@ describe("金额口径方案互斥", () => {
 describe("看账其他交互口径", () => {
   it("审计关注预设排除货币资金并按名称正则和独立编码列生成八个批次", () => {
     const values = [
-      "1002010001-银行存款-美元户", "1601010001-固定资产-设备", "1701010001-Intangible software",
-      "1801000001-长期待摊费用-装修", "6602050001-管理费用-差旅", "6601050001-Selling expense",
-      "6603010001-财务费用-利息", "2202010001-应付账款-A供应商", "2001010001-短期借款-银行",
+      "1002010001-银行存款-美元户",
+      "1601010001-固定资产-设备",
+      "1701010001-Intangible software",
+      "1801000001-长期待摊费用-装修",
+      "6602050001-管理费用-差旅",
+      "6601050001-Selling expense",
+      "6603010001-财务费用-利息",
+      "2202010001-应付账款-A供应商",
+      "2001010001-短期借款-银行",
       // 名称没有关键词，仍应只凭独立编码列命中；显示文本里的 2202 不可影响别项。
-      "客户备注-2202专项", "其他科目",
+      "客户备注-2202专项",
+      "其他科目",
     ];
-    const codes = ["1002010001", "1601010001", "1701010001", "1801000001", "6602050001", "6601050001", "6603010001", "2202010001", "2001010001", "9999", ""];
-    const applied = applyAuditFocusPresetBatches([{ name: "人工批次", accounts: ["其他科目"] }], values, codes, []);
+    const codes = [
+      "1002010001",
+      "1601010001",
+      "1701010001",
+      "1801000001",
+      "6602050001",
+      "6601050001",
+      "6603010001",
+      "2202010001",
+      "2001010001",
+      "9999",
+      "",
+    ];
+    const applied = applyAuditFocusPresetBatches(
+      [{ name: "人工批次", accounts: ["其他科目"] }],
+      values,
+      codes,
+      [],
+    );
     expect(applied.batches).toHaveLength(9);
-    expect(applied.batches[0]).toEqual({ name: "人工批次", accounts: ["其他科目"] });
-    expect(Object.fromEntries(applied.batches.slice(1).map(batch => [batch.presetId, batch.accounts]))).toEqual({
-      fixed_assets: [values[1]], intangible_assets: [values[2]], long_term_prepaid: [values[3]],
-      administrative_expense: [values[4]], selling_expense: [values[5]], financial_expense: [values[6]],
-      accounts_payable: [values[7]], short_term_loans: [values[8]],
+    expect(applied.batches[0]).toEqual({
+      name: "人工批次",
+      accounts: ["其他科目"],
+    });
+    expect(
+      Object.fromEntries(
+        applied.batches
+          .slice(1)
+          .map((batch) => [batch.presetId, batch.accounts]),
+      ),
+    ).toEqual({
+      fixed_assets: [values[1]],
+      intangible_assets: [values[2]],
+      long_term_prepaid: [values[3]],
+      administrative_expense: [values[4]],
+      selling_expense: [values[5]],
+      financial_expense: [values[6]],
+      accounts_payable: [values[7]],
+      short_term_loans: [values[8]],
     });
   });
 
@@ -452,59 +765,155 @@ describe("看账其他交互口径", () => {
     ];
     const codes = ["5301010000", "6602010100", "6602020000", "1701010000"];
     const matches = Object.fromEntries(
-      matchAuditFocusPresets(values, codes).map(match => [match.preset.id, match.accounts]),
+      matchAuditFocusPresets(values, codes).map((match) => [
+        match.preset.id,
+        match.accounts,
+      ]),
     );
     expect(matches.intangible_assets).toEqual([values[3]]);
     expect(matches.long_term_prepaid).toEqual([]);
     expect(matches.administrative_expense).toEqual([values[1], values[2]]);
     // 无编码列时维持纯名称匹配（历史行为）。
     const noCodes = Object.fromEntries(
-      matchAuditFocusPresets([values[0]], [""]).map(match => [match.preset.id, match.accounts]),
+      matchAuditFocusPresets([values[0]], [""]).map((match) => [
+        match.preset.id,
+        match.accounts,
+      ]),
     );
     expect(noCodes.intangible_assets).toEqual([values[0]]);
   });
 
   it("重复套用更新预设、保留人工批次并尊重剔除项", () => {
-    const first = applyAuditFocusPresetBatches([{ name: "人工批次", accounts: ["人工科目"] }], ["银行存款-A", "应付账款-A"], ["1002", "2202"], ["应付账款-A"]);
-    const second = applyAuditFocusPresetBatches(first.batches, ["银行存款-B"], ["1002"], []);
+    const first = applyAuditFocusPresetBatches(
+      [{ name: "人工批次", accounts: ["人工科目"] }],
+      ["银行存款-A", "应付账款-A"],
+      ["1002", "2202"],
+      ["应付账款-A"],
+    );
+    const second = applyAuditFocusPresetBatches(
+      first.batches,
+      ["银行存款-B"],
+      ["1002"],
+      [],
+    );
     expect(second.batches).toHaveLength(9);
     expect(second.summary.created).toBe(0);
     expect(second.summary.updated).toBe(8);
-    expect(second.batches[0]).toEqual({ name: "人工批次", accounts: ["人工科目"] });
-    expect(second.batches.some(batch => batch.accounts.includes("银行存款-B"))).toBe(false);
+    expect(second.batches[0]).toEqual({
+      name: "人工批次",
+      accounts: ["人工科目"],
+    });
+    expect(
+      second.batches.some((batch) => batch.accounts.includes("银行存款-B")),
+    ).toBe(false);
     expect(first.summary.skippedExcludes).toEqual(["应付账款-A"]);
-    expect(first.batches.find(batch => batch.presetId === "accounts_payable")?.accounts).toEqual([]);
+    expect(
+      first.batches.find((batch) => batch.presetId === "accounts_payable")
+        ?.accounts,
+    ).toEqual([]);
   });
 
   it("全科目口径按一级科目分批并排除货币资金", () => {
-    const values = ["100201-货币资金-银行存款", "160101-固定资产-机器", "160102-固定资产-车辆", "220201-应付账款-A", "660201-管理费用-差旅"];
+    const values = [
+      "100201-货币资金-银行存款",
+      "160101-固定资产-机器",
+      "160102-固定资产-车辆",
+      "220201-应付账款-A",
+      "660201-管理费用-差旅",
+    ];
     const codes = ["100201", "160101", "160102", "220201", "660201"];
-    const primaryNames = ["货币资金", "固定资产", "固定资产", "应付账款", "管理费用"];
-    const applied = applyAllPrimaryAccountBatches([{name:"人工",accounts:["自选"]}], values, codes, primaryNames, []);
-    expect(applied.batches[0]).toEqual({name:"人工",accounts:["自选"]});
-    expect(applied.summary.groups.map(group=>[group.name,group.accounts.length])).toEqual([
-      ["全科目｜固定资产",2], ["全科目｜管理费用",1], ["全科目｜应付账款",1],
+    const primaryNames = [
+      "货币资金",
+      "固定资产",
+      "固定资产",
+      "应付账款",
+      "管理费用",
+    ];
+    const applied = applyAllPrimaryAccountBatches(
+      [{ name: "人工", accounts: ["自选"] }],
+      values,
+      codes,
+      primaryNames,
+      [],
+    );
+    expect(applied.batches[0]).toEqual({ name: "人工", accounts: ["自选"] });
+    expect(
+      applied.summary.groups.map((group) => [
+        group.name,
+        group.accounts.length,
+      ]),
+    ).toEqual([
+      ["全科目｜固定资产", 2],
+      ["全科目｜管理费用", 1],
+      ["全科目｜应付账款", 1],
     ]);
     expect(applied.summary.skippedCash).toEqual([values[0]]);
-    expect(applied.batches.some(batch=>batch.accounts.includes(values[0]))).toBe(false);
+    expect(
+      applied.batches.some((batch) => batch.accounts.includes(values[0])),
+    ).toBe(false);
   });
 
   it("重复生成全科目口径会刷新并移除过期的自动批次", () => {
-    const first=applyAllPrimaryAccountBatches([], ["160101-固定资产", "220201-应付账款"], ["160101", "220201"], ["固定资产", "应付账款"], []);
-    const second=applyAllPrimaryAccountBatches([...first.batches,{name:"人工",accounts:["自选"]}], ["160102-固定资产"], ["160102"], ["固定资产"], []);
-    expect(second.summary).toMatchObject({created:0,updated:1,removed:1});
-    expect(second.batches.find(batch=>batch.presetId==="all_primary:固定资产")?.accounts).toEqual(["160102-固定资产"]);
-    expect(second.batches.some(batch=>batch.presetId==="all_primary:应付账款")).toBe(false);
-    expect(second.batches.some(batch=>batch.name==="人工")).toBe(true);
+    const first = applyAllPrimaryAccountBatches(
+      [],
+      ["160101-固定资产", "220201-应付账款"],
+      ["160101", "220201"],
+      ["固定资产", "应付账款"],
+      [],
+    );
+    const second = applyAllPrimaryAccountBatches(
+      [...first.batches, { name: "人工", accounts: ["自选"] }],
+      ["160102-固定资产"],
+      ["160102"],
+      ["固定资产"],
+      [],
+    );
+    expect(second.summary).toMatchObject({
+      created: 0,
+      updated: 1,
+      removed: 1,
+    });
+    expect(
+      second.batches.find((batch) => batch.presetId === "all_primary:固定资产")
+        ?.accounts,
+    ).toEqual(["160102-固定资产"]);
+    expect(
+      second.batches.some((batch) => batch.presetId === "all_primary:应付账款"),
+    ).toBe(false);
+    expect(second.batches.some((batch) => batch.name === "人工")).toBe(true);
   });
 
   it("关注科目与全科目是互斥口径，切换时只保留手工批次", () => {
-    const focus=applyAuditFocusPresetBatches([{name:"人工",accounts:["自选"]}], ["固定资产"], ["1601"], []);
-    const all=applyAllPrimaryAccountBatches(focus.batches, ["固定资产", "应付账款"], ["1601", "2202"], ["固定资产", "应付账款"], []);
-    expect(all.batches.some(batch=>batch.presetId==="fixed_assets")).toBe(false);
-    const focusAgain=applyAuditFocusPresetBatches(all.batches, ["固定资产"], ["1601"], []);
-    expect(focusAgain.batches.some(batch=>batch.presetId?.startsWith("all_primary:"))).toBe(false);
-    expect(focusAgain.batches.some(batch=>batch.name==="人工")).toBe(true);
+    const focus = applyAuditFocusPresetBatches(
+      [{ name: "人工", accounts: ["自选"] }],
+      ["固定资产"],
+      ["1601"],
+      [],
+    );
+    const all = applyAllPrimaryAccountBatches(
+      focus.batches,
+      ["固定资产", "应付账款"],
+      ["1601", "2202"],
+      ["固定资产", "应付账款"],
+      [],
+    );
+    expect(all.batches.some((batch) => batch.presetId === "fixed_assets")).toBe(
+      false,
+    );
+    const focusAgain = applyAuditFocusPresetBatches(
+      all.batches,
+      ["固定资产"],
+      ["1601"],
+      [],
+    );
+    expect(
+      focusAgain.batches.some((batch) =>
+        batch.presetId?.startsWith("all_primary:"),
+      ),
+    ).toBe(false);
+    expect(focusAgain.batches.some((batch) => batch.name === "人工")).toBe(
+      true,
+    );
   });
 
   it("变更清单用中文角色名，不暴露内部键名", () => {
@@ -520,7 +929,10 @@ describe("看账其他交互口径", () => {
 
   it("科目检索在已载入列表上即时过滤，不区分大小写", () => {
     const values = ["主营业务收入", "银行存款-USD", "银行存款-CNY"];
-    expect(filterAccounts(values, "银行")).toEqual(["银行存款-USD", "银行存款-CNY"]);
+    expect(filterAccounts(values, "银行")).toEqual([
+      "银行存款-USD",
+      "银行存款-CNY",
+    ]);
     expect(filterAccounts(values, "usd")).toEqual(["银行存款-USD"]);
     // 空关键词返回全量，不是空列表——原来敲字后列表会瞬间清空
     expect(filterAccounts(values, "  ")).toEqual(values);
@@ -570,23 +982,28 @@ describe("看账其他交互口径", () => {
 
   it("默认导出名沿用旧版命名，且默认走 CSV", () => {
     const now = new Date(2026, 7, 8, 18, 5, 42);
-    expect(defaultKanzhangOutputName("C:\\data\\JE-用于测试.xlsx", "JE-PRC", now))
-      .toBe("看账导出_JE-用于测试_工作表JE-PRC_20260808_180542.csv");
+    expect(
+      defaultKanzhangOutputName("C:\\data\\JE-用于测试.xlsx", "JE-PRC", now),
+    ).toBe("看账导出_JE-用于测试_工作表JE-PRC_20260808_180542.csv");
     // 未选 Sheet 时不拼工作表片段
-    expect(defaultKanzhangOutputName("/tmp/凭证.csv", "", now))
-      .toBe("看账导出_凭证_20260808_180542.csv");
+    expect(defaultKanzhangOutputName("/tmp/凭证.csv", "", now)).toBe(
+      "看账导出_凭证_20260808_180542.csv",
+    );
     // 文件名里的非法字符要替换掉，否则保存对话框直接报错
-    expect(defaultKanzhangOutputName("C:\\data\\a:b?c.xlsx", "", now))
-      .toBe("看账导出_a_b_c_20260808_180542.csv");
+    expect(defaultKanzhangOutputName("C:\\data\\a:b?c.xlsx", "", now)).toBe(
+      "看账导出_a_b_c_20260808_180542.csv",
+    );
   });
 
   it("默认输出路径落在凭证文件所在目录", () => {
     const now = new Date(2026, 7, 8, 18, 5, 42);
-    expect(defaultKanzhangOutputPath("C:\\data\\JE-用于测试.xlsx", "JE-PRC", now))
-      .toBe("C:\\data\\看账导出_JE-用于测试_工作表JE-PRC_20260808_180542.csv");
+    expect(
+      defaultKanzhangOutputPath("C:\\data\\JE-用于测试.xlsx", "JE-PRC", now),
+    ).toBe("C:\\data\\看账导出_JE-用于测试_工作表JE-PRC_20260808_180542.csv");
     // 盘符根目录下的凭证文件不能算成 "C:"
-    expect(defaultKanzhangOutputPath("C:\\凭证.csv", "", now))
-      .toBe("C:\\看账导出_凭证_20260808_180542.csv");
+    expect(defaultKanzhangOutputPath("C:\\凭证.csv", "", now)).toBe(
+      "C:\\看账导出_凭证_20260808_180542.csv",
+    );
     // 没选文件时不猜路径
     expect(defaultKanzhangOutputPath("", "", now)).toBe("");
   });

@@ -90,6 +90,15 @@ export const filterAccounts=(values:string[],keyword:string):string[]=>{
 // 用户输入的前缀串切成多个前缀，与 Rust 侧 `parse_code_prefixes` 同口径。
 export const parseCodePrefixes=(raw:string):string[]=>
   raw.split(/[,，;；、\s]+/).map(value=>value.trim()).filter(Boolean);
+// 一个搜索框同时承担编码段和名称检索：纯编码/编码段输入按前缀匹配，
+// 其他文本按科目完整显示值做包含匹配。逗号分隔的多个编码段沿用“任一命中”。
+export function accountSearchCriteria(raw:string):{keyword:string;codePrefixes:string[]}{
+  const value=raw.trim();
+  if(!value)return {keyword:"",codePrefixes:[]};
+  const tokens=parseCodePrefixes(value);
+  const codeLike=tokens.length>0&&tokens.every(token=>/^[a-z0-9._/-]+$/i.test(token)&&/\d/.test(token));
+  return codeLike?{keyword:"",codePrefixes:tokens}:{keyword:value,codePrefixes:[]};
+}
 // 按**科目编码段**做前缀匹配，不是拿整个拼接串模糊匹配——否则输入 6401
 // 会把科目名称里恰好含 6401 的科目也拉进来。没有编码时退回比对显示值开头。
 export function filterByCodePrefix(values:string[],codes:string[],prefixes:string[]):string[]{
@@ -214,17 +223,16 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const [selectedTarget,setSelectedTarget]=useState<string[]>([]); const [selectedExclude,setSelectedExclude]=useState<string[]>([]);
   const [accountsKey,setAccountsKey]=useState(""); const [accountsBusy,setAccountsBusy]=useState(false); const [showExcludes,setShowExcludes]=useState(true);
   const accountsJob=useRef<{id?:string;key:string}|undefined>(undefined);
-  // 科目编码与 accounts 同序一一对应，供按编码段做前缀匹配。
+  // 科目编码与 accounts 同序一一对应，供统一搜索框识别编码段。
   const [accountCodes,setAccountCodes]=useState<string[]>(draft.inspect?.accountCodes??[]);
-  const [codePrefix,setCodePrefix]=useState("");
   const [changes,setChanges]=useState<MappingChange[]>([]);const [pending,setPending]=useState<Review[]>([]);const [llmStatus,setLlmStatus]=useState("");
   const [llmBusy,setLlmBusy]=useState(false);const [llmFailed,setLlmFailed]=useState(false);const llmGeneration=useRef(0);
   const [busy,setBusy]=useState(false); const [error,setError]=useState(""); const [job,setJob]=useState<JobEvent>(); const [result,setResult]=useState<unknown>();
   const [presetSummary,setPresetSummary]=useState<PresetApplySummary>();
   const [primaryPresetSummary,setPrimaryPresetSummary]=useState<PrimaryPresetSummary>();
   const patch=(value:Partial<KanzhangDraft>)=>setDraft(current=>({...current,...value}));
-  const clearAll=()=>{llmGeneration.current+=1;setDraft({...EMPTY,batches:[{name:"批次1",accounts:[]}]});setAccounts([]);setAccountCodes([]);setCodePrefix("");setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setQuery("");setResult(undefined);setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setChanges([]);setPending([]);setLlmStatus("");setLlmBusy(false);setLlmFailed(false);};
-  const resetSource=(inputPath:string)=>{llmGeneration.current+=1;setDraft({...EMPTY,inputPath,batches:[{name:"批次1",accounts:[]}]});setAccounts([]);setAccountCodes([]);setCodePrefix("");setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");setResult(undefined);setJob(undefined);setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setChanges([]);setPending([]);setLlmStatus("");setLlmBusy(false);setLlmFailed(false);setError("");};
+  const clearAll=()=>{llmGeneration.current+=1;setDraft({...EMPTY,batches:[{name:"批次1",accounts:[]}]});setAccounts([]);setAccountCodes([]);setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setQuery("");setResult(undefined);setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setChanges([]);setPending([]);setLlmStatus("");setLlmBusy(false);setLlmFailed(false);};
+  const resetSource=(inputPath:string)=>{llmGeneration.current+=1;setDraft({...EMPTY,inputPath,batches:[{name:"批次1",accounts:[]}]});setAccounts([]);setAccountCodes([]);setAccountTotal(0);setAccountsKey("");setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");setResult(undefined);setJob(undefined);setPresetSummary(undefined);setPrimaryPresetSummary(undefined);setChanges([]);setPending([]);setLlmStatus("");setLlmBusy(false);setLlmFailed(false);setError("");};
   const [dragHover,setDragHover]=useState(false);
   useEffect(()=>{if(typeof window==="undefined"||!("__TAURI_INTERNALS__" in window))return;let off:()=>void=()=>{};void getCurrentWebview().onDragDropEvent((event)=>{const p=event.payload;if(p.type==="over"||p.type==="enter"){setDragHover(true);}else if(p.type==="drop"){setDragHover(false);if(p.paths.length)resetSource(p.paths[0]);}else if(p.type==="leave"){setDragHover(false);}}).then((fn)=>{off=fn;});return ()=>off();},[]);
   useEffect(()=>{sessionStorage.setItem(CACHE,JSON.stringify(draft));},[draft]);
@@ -281,15 +289,13 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   const batch=draft.batches[draft.activeBatch]??draft.batches[0];
   // 输入框一敲就过滤（旧版是 StringVar trace）；只有科目被截断时才需要回后端补捞。
   const pool=useMemo(()=>{
-    // 先按科目编码前缀圈定范围（6401,6603 选出这两段下的全部明细），再按关键词过滤。
-    const prefixes=parseCodePrefixes(codePrefix);
-    const scoped=filterByCodePrefix(accounts,accountCodes,prefixes);
-    const kw=query.trim();
-    if(!kw)return scoped;
-    const local=filterAccounts(scoped,kw);
+    const criteria=accountSearchCriteria(query);
+    const local=criteria.codePrefixes.length
+      ?filterByCodePrefix(accounts,accountCodes,criteria.codePrefixes)
+      :filterAccounts(accounts,criteria.keyword);
     if(!searchResults.length)return local;
-    return [...new Set([...local,...filterAccounts(searchResults,kw)])].sort((a,b)=>a.localeCompare(b,"zh-Hans-CN"));
-  },[accounts,accountCodes,codePrefix,query,searchResults]);
+    return [...new Set([...local,...searchResults])].sort((a,b)=>a.localeCompare(b,"zh-Hans-CN"));
+  },[accounts,accountCodes,query,searchResults]);
   const available=useMemo(()=>pool.filter(value=>!batch.accounts.includes(value)&&!draft.excludes.includes(value)),[pool,batch.accounts,draft.excludes]);
   const truncated=accountTotal>accounts.length;
   const setMap=(key:keyof Mapping,value:string|string[])=>patch({mapping:setKanzhangMapping(draft.mapping,key,value)});
@@ -306,7 +312,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     if(match)restoredMappingRef.current=null;
     const suggested=value.suggestedMapping??EMPTY.mapping;
     const effective=match?match.mapping:suggested;
-    setAccounts(value.accounts??[]);setAccountCodes(value.accountCodes??[]);setCodePrefix("");setAccountTotal(value.accountCount??(value.accounts??[]).length);setAccountsKey(accountColumns(effective).join("|"));setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");patch({inspect:value,knownSheets:value.sheets??draft.knownSheets,sheet:value.selectedSheet??draft.sheet,mapping:effective,pivotRows:match?match.pivotRows:accountColumns(effective),pivotColumns:match?match.pivotColumns:(Array.isArray(effective.date)?effective.date:effective.date?[effective.date]:[]),step:1});setResult(undefined);
+    setAccounts(value.accounts??[]);setAccountCodes(value.accountCodes??[]);setAccountTotal(value.accountCount??(value.accounts??[]).length);setAccountsKey(accountColumns(effective).join("|"));setSearchResults([]);setSelectedAvailable([]);setSelectedTarget([]);setSelectedExclude([]);setQuery("");patch({inspect:value,knownSheets:value.sheets??draft.knownSheets,sheet:value.selectedSheet??draft.sheet,mapping:effective,pivotRows:match?match.pivotRows:accountColumns(effective),pivotColumns:match?match.pivotColumns:(Array.isArray(effective.date)?effective.date:effective.date?[effective.date]:[]),step:1});setResult(undefined);
     // 脚本自动映射一出来就直接送 LLM 复核，不再要求用户额外点一次按钮。
     // 恢复的映射已经用户确认过，跳过复核。
     if(match)return;
@@ -332,7 +338,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
     }catch(e){setError(kanzhangErrorText(e));setAccountsKey(key);accountsJob.current=undefined;setAccountsBusy(false);}
     finally{if(!draft.inspect?.lowMemory)setAccountsBusy(false);}
   }
-  async function searchAccounts(){try{const value=await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,headerDepth:draft.headerDepth,mapping:draft.mapping,keyword:query,codePrefixes:codePrefix,limit:20000}) as {values:string[]};setSearchResults(value.values);setSelectedAvailable([]);}catch(e){setError(kanzhangErrorText(e));}}
+  async function searchAccounts(){try{const criteria=accountSearchCriteria(query);const value=await engineCall("kanzhang.accounts",{inputPath:draft.inputPath,sheet:draft.sheet||undefined,headerRow:draft.headerRow,headerDepth:draft.headerDepth,mapping:draft.mapping,keyword:criteria.keyword,codePrefixes:criteria.codePrefixes.join(","),limit:20000}) as {values:string[]};setSearchResults(value.values);setSelectedAvailable([]);}catch(e){setError(kanzhangErrorText(e));}}
   function skipReview(){llmGeneration.current+=1;setLlmBusy(false);setLlmFailed(false);setLlmStatus("已跳过本次 LLM 复核，保留当前字段映射，可自行调整后继续。");}
   async function reviewMapping(baseMapping?:Mapping,baseInspect?:Inspect){
     const target=baseInspect??draft.inspect;
@@ -499,7 +505,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
       </LedgerSourceCard>
       <LedgerMappingPreview inspect={draft.inspect} mapping={draft.mapping} setMap={setMap} llmBusy={llmBusy}/></div>}
     {draft.step===2&&<div className="kz-grid kz-filter-grid"><section className="kz-card"><h2>目标批次</h2><div className="kz-row"><Button variant="secondary" size="sm" disabled={accountsBusy||!accounts.length} onClick={()=>void applyAuditFocusPresets()}>{accountsBusy?"正在生成批次…":"套用审计关注科目预设（8类）"}</Button><Button variant="secondary" size="sm" disabled={accountsBusy||!accounts.length} onClick={()=>void applyAllPrimaryAccounts()}>按一级科目生成全科目批次（不含货币资金）</Button><Button variant="secondary" size="sm" onClick={addBatch}>新增批次</Button><Button variant="secondary" size="sm" onClick={deleteBatch}>删除当前批次</Button><Button variant="secondary" size="sm" disabled={draft.batches.length===1&&!draft.batches[0]?.accounts.length} onClick={clearBatches}>一键删除全部批次</Button></div>{presetSummary&&<PresetSummary summary={presetSummary}/>} {primaryPresetSummary&&<PrimaryPresetSummary summary={primaryPresetSummary}/>}<div className="kz-tabs">{draft.batches.map((value,index)=><button className={index===draft.activeBatch?"active":""} onClick={()=>patch({activeBatch:index})} key={`${value.presetId??value.name}-${index}`}>{value.name} ({value.accounts.length})</button>)}</div><label>批次名称<Input value={batch.name} onChange={e=>updateBatch({name:e.target.value})}/></label>
-      <div className="kz-search"><Input className="kz-code-prefix" value={codePrefix} placeholder="按科目编码段筛选，如 6401,660" title="按科目编码段筛选，如 6401,6603" onChange={e=>setCodePrefix(e.target.value)}/><Input value={query} placeholder="输入关键词即时过滤科目" onChange={e=>setQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&truncated)void searchAccounts();}}/>{truncated&&<Button variant="secondary" size="sm" onClick={searchAccounts}>到全库检索</Button>}<Button variant="secondary" size="sm" onClick={()=>{setQuery("");setCodePrefix("");setSearchResults([]);}}>清除</Button></div>
+      <div className="kz-search"><Input value={query} placeholder="输入科目编码或名称，如 1601、固定资产" title="纯编码按前缀筛选，名称按关键词筛选；多个编码可用逗号分隔" onChange={e=>{setQuery(e.target.value);setSearchResults([]);}} onKeyDown={e=>{if(e.key==="Enter"&&truncated)void searchAccounts();}}/>{truncated&&<Button variant="secondary" size="sm" onClick={searchAccounts}>到全库检索</Button>}<Button variant="secondary" size="sm" onClick={()=>{setQuery("");setSearchResults([]);}}>清除</Button></div>
       <div className="kz-source-panel"><h3>待选科目 ({available.length}{truncated?` / 共 ${accountTotal}`:""})</h3>{accountsBusy&&<p className="kz-hint">正在载入全部科目…</p>}{truncated&&<p className="kz-hint">科目过多，仅载入前 {accounts.length} 个；未命中时回车或点"到全库检索"。</p>}
         <ShuttleList zone="source" values={available} selected={selectedAvailable} onSelect={setSelectedAvailable} onDragBegin={beginDrag} drag={drag} emptyText="没有匹配的科目。"/>
         <small>单击选中、Ctrl 加选、Shift 连选、Ctrl+A 全选；选好后直接拖到右侧任一列表，或用下面的按钮。</small>

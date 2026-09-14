@@ -1,3 +1,8 @@
+import {
+  isVisibleLlmReviewConfidence,
+  MIN_VISIBLE_LLM_REVIEW_CONFIDENCE,
+} from "@/llmReviewConfidence";
+
 // 凭证映射的共享逻辑：看账工具与正负数凭证标记共用同一套字段角色、
 // 金额方案取舍和 LLM 复核判定，避免两个工具的口径各自漂移。
 // 角色名与统一内核一致（`functionalAmount` 而不是 `amount`）——五个工具的映射
@@ -646,6 +651,8 @@ export function planLedgerChanges(
     }
   }
   for (const change of changes) {
+    // 明确低于 60% 的模型输出没有足够操作价值：不应用，也不进入待确认 UI。
+    if (!isVisibleLlmReviewConfidence(change.confidence)) continue;
     const column = change?.suggestedColumn?.trim();
     if (!column || !(change.role in labels) || !headers.includes(column))
       continue;
@@ -982,8 +989,8 @@ export function isRedundantKanzhangReview(
     return current.length === 1 && current[0]?.trim() === suggested;
   return typeof current === "string" && current.trim() === suggested;
 }
-// 把握达到门槛的直接改（可撤销），不到门槛的不动手，交回用户决定。
-export const AUTO_APPLY_MIN = 0.6;
+// 把握达到门槛的直接改（可撤销）；明确低于门槛的结果直接隐藏。
+export const AUTO_APPLY_MIN = MIN_VISIBLE_LLM_REVIEW_CONFIDENCE;
 export const shouldAutoApply = (confidence?: number) =>
   confidence === undefined || confidence >= AUTO_APPLY_MIN;
 export function kanzhangReviewSummary(
@@ -1143,7 +1150,7 @@ export function mergeMappingChanges(changes: MappingChange[]): MappingChange[] {
     (change) => !isSameMappingValue(change.before, change.after),
   );
 }
-// LLM 复核结果的应用：把握够的直接改（进变更清单，可撤销），把握不足的交回用户。
+// LLM 复核结果的应用：把握够的直接改（进变更清单，可撤销），低于 60% 的隐藏。
 // 看账与正负数凭证标记必须完全一致，所以放在这里由两个页面共用。
 export type LedgerReviewResponse = {
   scheme?: string;
@@ -1173,6 +1180,7 @@ export function applyLedgerReviews(
   const applied: MappingChange[] = [];
   const waiting: Review[] = [];
   for (const raw of [...(value.fills ?? []), ...(value.reviews ?? [])]) {
+    if (!isVisibleLlmReviewConfidence(raw?.confidence)) continue;
     const role = normalizeLedgerRole(raw?.role);
     const column = raw?.suggestedColumn?.trim();
     if (!role || !column) continue;

@@ -316,6 +316,14 @@
 
 .fa-tbje-account-cell .fa-tbje-account-name {
   flex: 1;
+  min-width: 0;
+}
+
+.fa-tbje-source-legend {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-soft);
 }
 
 .fa-tbje-source-tag {

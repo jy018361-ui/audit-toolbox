@@ -19,6 +19,7 @@ import { ConfirmDialogHost } from "@/components/ConfirmDialog";
 import {
   engineCall,
   historyGet,
+  historyRestore,
   settingsGet,
   settingsSet,
   secretSet,
@@ -37,6 +38,7 @@ vi.mock("./api", async (importOriginal) => ({
     .mockResolvedValue({ appVersion: "test", engine: { available: true } }),
   toolCatalog: vi.fn().mockImplementation(async () => catalog),
   historyGet: vi.fn().mockResolvedValue([]),
+  historyRestore: vi.fn(),
   listenJobEvents: vi.fn().mockResolvedValue(() => {}),
   updateReleaseNotes: vi.fn(),
 }));
@@ -205,6 +207,59 @@ it("offers a useful action when history is empty", async () => {
   expect(
     await screen.findByRole("heading", { name: "今天要处理什么？" }),
   ).toBeVisible();
+});
+
+it("从 FA TB+JE 历史任务继续时重新读取完整源信息，不因缺失行数白屏", async () => {
+  const params = {
+    tbSource: { inputPath: "C:\\test\\tb.xlsx", sheet: "TB", headerRow: 1, headerDepth: 1 },
+    jeSource: { inputPath: "C:\\test\\je.xlsx", sheet: "JE", headerRow: 1, headerDepth: 1 },
+    tbMapping: { accountCode: "科目编码", openingFunctionalAmount: "期初", closingFunctionalAmount: "期末" },
+    jeMapping: { accountCode: "科目编码", id: "凭证号", date: "日期", functionalAmount: "金额" },
+    accountAssignments: [],
+    reportEnd: "2026-12-31",
+  };
+  vi.mocked(historyGet).mockResolvedValue([{
+    jobId: "fa-history",
+    toolId: "fa_list",
+    method: "fa.tbje_export",
+    params,
+    status: "completed",
+    message: "已生成",
+    outputPaths: [],
+    startedAt: "2026-09-14T08:00:00+08:00",
+    finishedAt: null,
+  }]);
+  vi.mocked(historyRestore).mockResolvedValue({
+    jobId: "fa-history", toolId: "fa_list", params,
+    missingPaths: [], authorizedPathCount: 2, method: "fa.tbje_export",
+  });
+  vi.mocked(engineCall).mockImplementation(async (method) => {
+    if (method.startsWith("deposit.inspect_")) return {
+      headers: ["科目编码", "金额"], sheet: method.endsWith("tb") ? "TB" : "JE",
+      sheets: [method.endsWith("tb") ? "TB" : "JE"], headerRow: 1, headerDepth: 1,
+      rowCount: 8, preview: [["1601", "100"]], entities: [], accounts: ["1601 固定资产"],
+      suggestedMapping: {}, suggestedAccountRoles: {}, mappingCandidates: [],
+      headerDetection: { needsConfirmation: false, candidates: [] }, dataYears: [2026],
+    };
+    return { bytes: 0, files: 0 };
+  });
+  render(<MemoryRouter initialEntries={["/history"]}><App /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole("button", { name: "继续任务" }));
+  expect(
+    await screen.findByRole(
+      "heading",
+      { name: "固定资产 TB＋JE 变动表" },
+      { timeout: 5_000 },
+    ),
+  ).toBeVisible();
+  expect(await screen.findByText("历史任务源文件已重新识别，请复核映射与科目分类后继续。")).toBeVisible();
+  expect(screen.getAllByText("8 行")).toHaveLength(2);
+  expect(engineCall).toHaveBeenCalledWith("deposit.inspect_tb", expect.objectContaining({
+    source: expect.objectContaining({ inputPath: params.tbSource.inputPath }),
+  }));
+  expect(engineCall).toHaveBeenCalledWith("deposit.inspect_je", expect.objectContaining({
+    source: expect.objectContaining({ inputPath: params.jeSource.inputPath }),
+  }));
 });
 
 it.each(["/tasks", "/diagnostics"])(

@@ -64,6 +64,8 @@
 
 ## 固定资产 TB＋JE 变动表（2026-09-06 行为更新）
 
+2026-09-14 补充：科目复核的主体×科目组合在进入复核页前按用户**当前确认**的 TB／JE 映射重新提取，不再沿用上传时自动建议映射；这修复了 JE 已映射「核算组织」但分类仍挂「默认主体」、最终触发零命中拦截的错配。既有 `FA_TBJE_JE_UNMATCHED` 守卫继续保留，不把未匹配结果伪装为成功。来源标签 TB／JE／TB+JE 仅表示余额表、序时账或两侧出现；资产类别统一去下划线。两期清单与 TB＋JE 子工具切换保留后者草稿。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 科目复核按人工映射重新提取主体科目组合`、`npx vitest run src/FaTbJePage.test.ts`。
+
 TB＋JE 变动表模式（`fa.tbje_preview` / `fa.tbje_export`，Rust 实现 `src-tauri/src/fa_tbje.rs`）
 本轮四项行为变化，均来自用户对导出底稿与真实混合凭证的走查：
 

@@ -1,3 +1,8 @@
+import {
+  isVisibleLlmReviewConfidence,
+  MIN_VISIBLE_LLM_REVIEW_CONFIDENCE,
+} from "@/llmReviewConfidence";
+
 export function shouldShowFaAdditionFields(additionMethod?: string): boolean {
   return Boolean(additionMethod?.trim());
 }
@@ -194,8 +199,8 @@ export function faMissingOptionalRoles<T extends readonly [string, string]>(
     .map(([, label]) => label);
 }
 export const FA_LOW_CONFIDENCE = 0.7;
-// 把握达到门槛才自动改，不到的原样留着，由用户决定是否采纳。
-export const FA_AUTO_APPLY_MIN = 0.6;
+// 把握达到门槛才自动改；明确低于门槛的结果直接隐藏。
+export const FA_AUTO_APPLY_MIN = MIN_VISIBLE_LLM_REVIEW_CONFIDENCE;
 export const shouldAutoApplyFa = (confidence?: number) =>
   confidence === undefined || confidence >= FA_AUTO_APPLY_MIN;
 export type FaPendingSuggestion = {
@@ -313,6 +318,7 @@ export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
     column: string,
     item: { confidence?: number; reason?: string },
   ) => {
+    if (!isVisibleLlmReviewConfidence(item.confidence)) return;
     if (side === "begin" && FA_FILE2_ONLY_MAPPING_KEYS.has(key)) return;
     const before = mappings[side][key];
     if (faValueText(before) === faValueText(column)) return;
@@ -366,7 +372,9 @@ export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
     matchApplicable &&
     (faValueText(beginKeys) !== faValueText(suggestedBegin) ||
       faValueText(endKeys) !== faValueText(suggestedEnd));
-  if (matchChanged && !shouldAutoApplyFa(match?.confidence)) {
+  if (matchChanged && !isVisibleLlmReviewConfidence(match?.confidence)) {
+    // 低于 60% 的匹配键猜测不展示，也不应用。
+  } else if (matchChanged && !shouldAutoApplyFa(match?.confidence)) {
     pending.push({
       id: "matchKeys",
       label: "匹配 ID",
@@ -463,6 +471,7 @@ export function planFaSupplementChanges(
     column: string,
     item: { confidence?: number; reason?: string },
   ) => {
+    if (!isVisibleLlmReviewConfidence(item.confidence)) return;
     const spec = FA_SUPPLEMENT_ROLES[role];
     if (!spec) return;
     const before = sides[spec.target][spec.key];
@@ -496,6 +505,7 @@ export function planFaSupplementChanges(
     column: string,
     item: { confidence?: number; reason?: string },
   ) => {
+    if (!isVisibleLlmReviewConfidence(item.confidence)) return;
     const spec = FA_SUPPLEMENT_ROLES[role];
     if (!spec) return;
     const before = sides[spec.target][spec.key];
@@ -548,6 +558,9 @@ export function planFaSupplementChanges(
       const current = sides[target].keys ?? [];
       if (!suggestedKeys.length) continue;
       if (faValueText(current) === faValueText(suggestedKeys)) continue;
+      if (!isVisibleLlmReviewConfidence(match.confidence)) {
+        continue;
+      }
       if (!shouldAutoApplyFa(match.confidence)) {
         pending.push({
           id: `${target}.keys`,

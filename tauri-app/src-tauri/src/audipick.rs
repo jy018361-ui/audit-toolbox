@@ -512,6 +512,7 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
             );
         }
         inject_current_form(&mut value, "je");
+        restrict_review_roles_to_current_form(&mut value, "je");
         inject_engine_facts(&mut value);
         inject_required_missing_roles(&mut value, "je");
         inject_mapping_review_scope(&mut value, "je");
@@ -540,7 +541,7 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
 /// 两张表共用的复核纪律。**只放对 TB 与 JE 都成立的规则**——
 /// 各自的角色清单与形态规则分别放在 [`REVIEW_JE`] 与 [`REVIEW_TB`] 里，
 /// 免得复核一张表时眼前摆着另一张表的规矩。
-const REVIEW_COMMON: &str = "只能使用输入 availableRoles 中列出的角色——它是本工具启用的角色清单，没列出的角色即使表里有对应的列也不要提。输入的 currentForm 是脚本按整组匹配判出的账表形态。**complete 为 true 时，构成该形态的那些槽位已经成立，一律不要改动**——净额列里是正数还是自带正负号都不影响判定，借贷符号口径由数据配平判定，不由列名判定；表里另有一列看起来更像净额，也不构成改动理由。**两种映射都能成立时一律维持现状，不要为了让它更好看而改**。complete 只说明该形态自身的槽位成立，不代表整张表的映射已经完备——availableRoles 里本工具需要、currentMapping 还缺着的角色（比如原币币种、原币净额），仍必须照样补齐。complete 为 false 时，优先补齐 currentForm.missingSlots 里点名缺失的槽位。除此之外，必须主动补齐 currentMapping 中缺失、但可由 headers 与 sampleRows 判断出来的角色，不得仅复核已有映射。只能使用输入 headers 中真实存在的列，不得虚构列名。双语表头（如「科目描述 Description」「过账日期 Posting Date」）按其中的中文段判断角色。一列只承载一个语义，不能把同一列同时映射到两个角色——唯一的例外是下述「编码与名称写在同一格」的科目列。判断依据必须落在 sampleRows 的实际取值上：每提出一个 change，先从 sampleRows 里随意取三五行看该列的真实内容，若这几行取值与该角色应有的形态不符（科目编码列应是稳定的数字或字母数字编码，科目名称列应是可读文本，币种列应是三位 ISO 代码，金额列应是数值），就不要提出该 change。accountCode 与 accountName 是两个彼此独立的角色，不能互换：编码给 accountCode，名称/文本给 accountName。**编码与名称写在同一格**是例外情形（`1001010000:库存现金-人民币`、`1001/库存现金`、`1001_现金`，也有编码后面接反斜杠再接多级名称的写法——分隔符是斜杠、冒号、下划线、反斜杠、竖线之一，前半段是一串数字或字母数字编码）：这一列应**同时映射为 accountCode 与 accountName 两个角色**（脚本自动映射正是这么做的），既不要因为这列里有名称就改判成纯 accountName，也不要把其中任何一个角色挪走或删掉。务必与**层级名称拼接**区分开——`交易性金融资产_结构性存款`、`管理费用_研发费用_水电气费`，以及用反斜杠拼起来的「银行存款、在财务公司存款、活期」这种，前半段是上级科目名不是编码，这些整列属于 accountName。科目余额表与序时账是同一套账，同名角色必须同口径——两边的 accountCode 必须是同一种科目编码，accountName 同理。`抵销科目`、`统驭科目`、`对方科目`、`往来科目`、`预算科目` 记的是对手方或参考科目，取值同样是一串科目编码，跟本方科目长得一模一样，但它们绝不是 accountCode，也不是 accountName。entity 是记账主体（公司代码、核算主体、账套公司），绝不是交易对手方、往来单位（往來單位、Counterparty）、客户（客戶）、供应商（供應商）这类对手方字段，也不是制单人、录入人、审核人、过账人这类操作员；没有明确的主体列时让 entity 空缺，不得拿对手方字段凑数。集团货币／报告货币（Group Currency、集团货币金额）是第三套口径，既不是本位币也不是原币，对应的金额列与币种列一律不映射到任何角色。changes 数组只放需要修改或补充的条目：每条的 suggestedColumn 必须是输入 headers 中真实存在的列名，且与该角色当前的 currentColumn 不同（当前为空时是补缺）。只是确认现有映射正确、确认某列不存在、或没有实际变更的，一律不要输出该条——空缺本身就是正确状态，不要为了表态而造条目。suggestedColumn 为空的条目不要输出；低于 0.6 的有效建议可以输出供人工确认，但绝不能表述成确定结论。reason 与 suggestedColumn 必须指向同一个结论：reason 说该列不该映射，就不能输出把它映射上去的条目。同一列在 changes 里最多出现一次。『整列同值』的意思是全列每一行取值完全相同；只要出现两种以上取值，该列就在逐行区分交易或账户，绝不是本位币列。优先建议原始数据列：由其他列推算出的公式辅助列（如按方向列把金额改写成的「借正贷负」列、用日期与凭证号拼出的唯一码列）不要抢原始列的角色。不要计算金额、汇率或业务分类，只管映射。";
+const REVIEW_COMMON: &str = "只能使用输入 availableRoles 中列出的角色——它是本工具当前形态启用的角色清单，包含当前形态的必填、选填角色以及不属于任何互斥形态的公共角色；没列出的角色属于其他形态，即使表里有对应的列也不要提。输入的 currentForm 是脚本按整组匹配判出的账表形态。**complete 为 true 时，构成该形态的那些槽位已经成立，一律不要改动**——净额列里是正数还是自带正负号都不影响判定，借贷符号口径由数据配平判定，不由列名判定；表里另有一列看起来更像净额，也不构成改动理由。**两种映射都能成立时一律维持现状，不要为了让它更好看而改**。complete 只说明该形态自身的槽位成立，不代表整张表的映射已经完备——availableRoles 里本工具需要、currentMapping 还缺着的角色（比如原币币种、会计期间），仍必须照样补齐。complete 为 false 时，优先补齐 currentForm.missingSlots 里点名缺失的槽位。除此之外，必须主动补齐 currentMapping 中缺失、但可由 headers 与 sampleRows 判断出来的角色，不得仅复核已有映射。只能使用输入 headers 中真实存在的列，不得虚构列名。双语表头（如「科目描述 Description」「过账日期 Posting Date」）按其中的中文段判断角色。一列只承载一个语义，不能把同一列同时映射到两个角色——唯一的例外是下述「编码与名称写在同一格」的科目列。判断依据必须落在 sampleRows 的实际取值上：每提出一个 change，先从 sampleRows 里随意取三五行看该列的真实内容，若这几行取值与该角色应有的形态不符（科目编码列应是稳定的数字或字母数字编码，科目名称列应是可读文本，币种列应是三位 ISO 代码，金额列应是数值），就不要提出该 change。accountCode 与 accountName 是两个彼此独立的角色，不能互换：编码给 accountCode，名称/文本给 accountName。**编码与名称写在同一格**是例外情形（`1001010000:库存现金-人民币`、`1001/库存现金`、`1001_现金`，也有编码后面接反斜杠再接多级名称的写法——分隔符是斜杠、冒号、下划线、反斜杠、竖线之一，前半段是一串数字或字母数字编码）：这一列应**同时映射为 accountCode 与 accountName 两个角色**（脚本自动映射正是这么做的），既不要因为这列里有名称就改判成纯 accountName，也不要把其中任何一个角色挪走或删掉。务必与**层级名称拼接**区分开——`交易性金融资产_结构性存款`、`管理费用_研发费用_水电气费`，以及用反斜杠拼起来的「银行存款、在财务公司存款、活期」这种，前半段是上级科目名不是编码，这些整列属于 accountName。科目余额表与序时账是同一套账，同名角色必须同口径——两边的 accountCode 必须是同一种科目编码，accountName 同理。`抵销科目`、`统驭科目`、`对方科目`、`往来科目`、`预算科目` 记的是对手方或参考科目，取值同样是一串科目编码，跟本方科目长得一模一样，但它们绝不是 accountCode，也不是 accountName。entity 是记账主体（公司代码、核算主体、账套公司），绝不是交易对手方、往来单位（往來單位、Counterparty）、客户（客戶）、供应商（供應商）这类对手方字段，也不是制单人、录入人、审核人、过账人这类操作员；没有明确的主体列时让 entity 空缺，不得拿对手方字段凑数。集团货币／报告货币（Group Currency、集团货币金额）是第三套口径，既不是本位币也不是原币，对应的金额列与币种列一律不映射到任何角色。changes 数组只放需要修改或补充的条目：每条的 suggestedColumn 必须是输入 headers 中真实存在的列名，且与该角色当前的 currentColumn 不同（当前为空时是补缺）。只是确认现有映射正确、确认某列不存在、或没有实际变更的，一律不要输出该条——空缺本身就是正确状态，不要为了表态而造条目。suggestedColumn 为空的条目不要输出；置信度低于 0.6 的建议不要输出。reason 与 suggestedColumn 必须指向同一个结论：reason 说该列不该映射，就不能输出把它映射上去的条目。同一列在 changes 里最多出现一次。『整列同值』的意思是全列每一行取值完全相同；只要出现两种以上取值，该列就在逐行区分交易或账户，绝不是本位币列。优先建议原始数据列：由其他列推算出的公式辅助列（如按方向列把金额改写成的「借正贷负」列、用日期与凭证号拼出的唯一码列）不要抢原始列的角色。不要计算金额、汇率或业务分类，只管映射。";
 
 fn review_common_instruction() -> String {
     REVIEW_COMMON.replace(
@@ -653,6 +654,11 @@ fn inject_mapping_review_scope(payload: &mut Value, kind: &str) {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let available_names = available
+        .iter()
+        .map(|role| crate::ledger_mapping::migrate_role_name(kind, role).to_owned())
+        .filter(|role| !role.is_empty())
+        .collect::<std::collections::HashSet<_>>();
     let mapping = payload.get("currentMapping").and_then(Value::as_object);
     let headers = payload
         .get("headers")
@@ -683,7 +689,7 @@ fn inject_mapping_review_scope(payload: &mut Value, kind: &str) {
     if let Some(mapping) = mapping {
         for (raw_role, value) in mapping {
             let role = crate::ledger_mapping::migrate_role_name(kind, raw_role);
-            if role.is_empty() {
+            if role.is_empty() || (!available_names.is_empty() && !available_names.contains(role)) {
                 continue;
             }
             let columns = columns_of(value);
@@ -904,6 +910,50 @@ fn inject_current_form(payload: &mut Value, kind: &str) {
     }
 }
 
+/// 把 LLM 的候选角色限定在 Coding 已判定的当前形态内。
+///
+/// 当前形态的必填、任一、选填槽全部保留；没有归属到任何互斥形态的公共角色
+/// （例如主体、科目、会计期间）也保留。只有明确属于其他形态的角色才排除。
+fn restrict_review_roles_to_current_form(payload: &mut Value, kind: &str) {
+    let Some(form_id) = payload
+        .get("currentForm")
+        .and_then(|form| form.get("id"))
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    let forms = crate::ledger_mapping::forms(kind);
+    let Some(current_form) = forms.iter().find(|form| form.id == form_id) else {
+        return;
+    };
+    let roles_of = |form: &crate::ledger_mapping::Form| {
+        form.required
+            .iter()
+            .chain(form.any_of.iter())
+            .chain(form.optional.iter())
+            .flat_map(|slot| slot.iter().copied())
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let current_roles = roles_of(current_form);
+    let all_form_roles = forms
+        .iter()
+        .flat_map(|form| roles_of(form).into_iter())
+        .collect::<std::collections::HashSet<_>>();
+    let Some(available) = payload
+        .get_mut("availableRoles")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    available.retain(|value| {
+        let Some(raw_role) = value.as_str() else {
+            return false;
+        };
+        let role = crate::ledger_mapping::migrate_role_name(kind, raw_role);
+        !all_form_roles.contains(role) || current_roles.contains(role)
+    });
+}
+
 /// 所有 TB/JE 工具共用的唯一映射复核入口。
 /// 工具能用哪些角色由 payload 的 `availableRoles` 声明。
 pub(crate) fn ledger_review_call(
@@ -936,12 +986,14 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
     }
     if tb.is_object() {
         inject_current_form(&mut tb, "tb");
+        restrict_review_roles_to_current_form(&mut tb, "tb");
         inject_engine_facts(&mut tb);
         inject_required_missing_roles(&mut tb, "tb");
         inject_mapping_review_scope(&mut tb, "tb");
     }
     if je.is_object() {
         inject_current_form(&mut je, "je");
+        restrict_review_roles_to_current_form(&mut je, "je");
         inject_engine_facts(&mut je);
         inject_required_missing_roles(&mut je, "je");
         inject_mapping_review_scope(&mut je, "je");
@@ -1148,6 +1200,7 @@ fn ledger_mapping_llm_call(
         }
     }
     inject_current_form(&mut payload, if is_tb { "tb" } else { "je" });
+    restrict_review_roles_to_current_form(&mut payload, if is_tb { "tb" } else { "je" });
     inject_engine_facts(&mut payload);
     inject_required_missing_roles(&mut payload, if is_tb { "tb" } else { "je" });
     inject_mapping_review_scope(&mut payload, if is_tb { "tb" } else { "je" });
@@ -1492,6 +1545,15 @@ fn sanitize_change_list(
         .get("currentMapping")
         .cloned()
         .unwrap_or(Value::Null);
+    let available_roles = payload
+        .get("availableRoles")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|role| crate::ledger_mapping::migrate_role_name(kind, role).to_owned())
+        .filter(|role| !role.is_empty())
+        .collect::<std::collections::HashSet<_>>();
     // 某角色当前映射到的列集合（multi 角色是多列）。
     let columns_of = |role: &str| -> Vec<String> {
         current_mapping
@@ -1608,11 +1670,12 @@ fn sanitize_change_list(
         // 出现一次。唯一例外是经样例验证的科目混写列，可同时建议
         // accountCode 与 accountName；任何其他角色组合仍禁止共列。
         // 实测模型会输出"reason 说不该映射、置信 0.1 却仍然映射"的自相矛盾行，
-        // 0～0.59 的有效建议要留给前端人工确认；零值或越界值才是无效输出。
+        // 低于 60% 的建议没有足够操作价值，不进入前端，也不提供人工采纳入口。
         if role.is_empty()
+            || (!available_roles.is_empty() && !available_roles.contains(role))
             || suggested.is_empty()
             || !(headers.is_empty() || headers.iter().any(|header| header.trim() == suggested))
-            || confidence <= 0.0
+            || confidence < 0.6
             || confidence > 1.0
             || repeated_by_other_role
         {
@@ -3075,6 +3138,9 @@ mod mapping_prompt_tests {
                 // 零置信：模型自己都不信，丢弃。
                 {"role": "functionalCurrency", "currentColumn": "", "suggestedColumn": "科目编码",
                  "confidence": 0.0, "reason": "没有本位币列", "scheme": ""},
+                // 明确低于展示线：不再交给前端人工确认。
+                {"role": "openingDirection", "currentColumn": "", "suggestedColumn": "方向",
+                 "confidence": 0.59, "reason": "把握不足", "scheme": ""},
                 // 与第三条同列的重复建议：一列一个语义，丢弃。
                 {"role": "accountName", "currentColumn": "", "suggestedColumn": "科目名称",
                  "confidence": 0.7, "reason": "名称", "scheme": ""},
@@ -3447,6 +3513,73 @@ mod mapping_prompt_tests {
         assert_eq!(
             payload["currentMapping"]["accountCode"], "科目名称",
             "确定性体检只报警，不自动删除歧义映射"
+        );
+    }
+
+    #[test]
+    fn 公共复核不越过工具声明的可用角色() {
+        let mut payload = json!({
+            "headers": ["序号", "科目编码"],
+            "sampleRows": [["1", "1001"]],
+            "currentMapping": {"period": "序号", "accountCode": "科目编码"},
+            "availableRoles": ["accountCode"]
+        });
+        inject_mapping_review_scope(&mut payload, "tb");
+        assert_eq!(
+            payload["mappedRolesToReview"],
+            json!([{"role":"accountCode","columns":["科目编码"]}])
+        );
+        assert_eq!(payload["unmappedRoles"], json!([]));
+
+        let mut response = json!({"changes": [{
+            "role": "period",
+            "currentColumn": "",
+            "suggestedColumn": "序号",
+            "confidence": 0.95,
+            "reason": "模型越界猜测"
+        }]});
+        sanitize_mapping_changes(&mut response, &payload, "tb", ReviewDatePolicy::Strict);
+        assert!(response["changes"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn 公共复核保留当前形态选填与公共角色并排除其他形态角色() {
+        let mut payload = json!({
+            "currentMapping": {
+                "openingFunctionalDebit": "年初借方",
+                "openingFunctionalCredit": "年初贷方",
+                "closingFunctionalDebit": "期末借方",
+                "closingFunctionalCredit": "期末贷方",
+                "ytdFunctionalDebit": "本年借方",
+                "ytdFunctionalCredit": "本年贷方"
+            },
+            "availableRoles": [
+                "accountCode",
+                "period",
+                "openingFunctionalDebit",
+                "openingFunctionalCredit",
+                "ytdForeignDebit",
+                "ytdForeignCredit",
+                "openingDirection",
+                "openingFunctionalAmount"
+            ]
+        });
+
+        inject_current_form(&mut payload, "tb");
+        assert_eq!(payload["currentForm"]["id"], "TB3");
+        restrict_review_roles_to_current_form(&mut payload, "tb");
+
+        assert_eq!(
+            payload["availableRoles"],
+            json!([
+                "accountCode",
+                "period",
+                "openingFunctionalDebit",
+                "openingFunctionalCredit",
+                "ytdForeignDebit",
+                "ytdForeignCredit"
+            ]),
+            "公共角色和当前形态选填槽应保留，其他形态专属槽应排除"
         );
     }
 

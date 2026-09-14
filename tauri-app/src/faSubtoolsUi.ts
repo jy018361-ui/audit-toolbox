@@ -9,6 +9,7 @@ import {
   type FaMappingLike,
   type FaSide,
 } from "./faListUi";
+import { isVisibleLlmReviewConfidence } from "@/llmReviewConfidence";
 
 /// FA 子工具（折旧测算 / 折旧政策对比）共用的纯函数助手。
 /// 页面交互在 FaDepCalcPage / FaPolicyComparePage，这里只放可单测的决策逻辑，
@@ -184,8 +185,8 @@ const depValueText = (value?: string | string[]): string => {
   return value?.trim() ? value.trim() : "未映射";
 };
 
-/// 先改后核：高把握建议直接改 mapping 并进变更清单（可撤销），低把握进待定
-/// 清单由用户采纳——与主工具 planFaLlmChanges 同一套规则，只是没有 file1/匹配键。
+/// 先改后核：达到 60% 的建议直接改 mapping 并进变更清单（可撤销），明确
+/// 低于 60% 的结果直接隐藏——与主工具 planFaLlmChanges 同一套规则，只是没有 file1/匹配键。
 export function planDepLlmChanges(input: DepLlmPlanInput): DepLlmPlan {
   const mapping: FaMappingLike = { ...input.mapping };
   const collected = new Map<string, DepMappingChange>();
@@ -223,6 +224,7 @@ export function planDepLlmChanges(input: DepLlmPlanInput): DepLlmPlan {
     column: string,
     item: { confidence?: number; reason?: string },
   ) => {
+    if (!isVisibleLlmReviewConfidence(item.confidence)) return;
     if (!depKeys.has(key)) return;
     const before = mapping[key];
     if (depValueText(before as string | string[]) === column) return;

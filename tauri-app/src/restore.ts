@@ -33,7 +33,31 @@ export function historyRowCanResume(row: {
 }
 
 const listeners = new Set<(restore: TaskRestore) => void>();
+const failureListeners = new Set<(failure: TaskRestoreFailure) => void>();
 let pending: TaskRestore | null = null;
+let recentRestore: { restore: TaskRestore; publishedAt: number } | null = null;
+
+export type TaskRestoreFailure = {
+  restore: TaskRestore;
+  message: string;
+};
+
+function failureMessage(reason: unknown): string {
+  if (reason instanceof Error && reason.message.trim()) return reason.message;
+  if (typeof reason === "string" && reason.trim()) return reason;
+  return "历史任务参数与当前版本不兼容。";
+}
+
+function reportTaskRestoreFailure(restore: TaskRestore, reason: unknown): void {
+  const failure = { restore, message: failureMessage(reason) };
+  for (const listener of [...failureListeners]) {
+    try {
+      listener(failure);
+    } catch {
+      // 错误提示本身不能再次打断应用渲染。
+    }
+  }
+}
 
 /** 一个工具挂多个子界面时（fa_list 有清单对比 / 账表核对两种模式），
  * 按参数形状把恢复包路由到对应子页：页面订阅用这个更具体的 key。 */
@@ -48,15 +72,20 @@ function restoreKeyOf(toolId: string, params: Record<string, unknown>): string {
 /** 历史页点击「继续任务」后调用：暂存恢复包并广播（此时目标页可能未挂载）。 */
 export function publishTaskRestore(restore: TaskRestore): void {
   pending = restore;
-  for (const listener of [...listeners]) listener(restore);
+  recentRestore = { restore, publishedAt: Date.now() };
+  // 一个已保活工具的恢复逻辑即使异常，也不能阻断其他监听器和后续路由。
+  for (const listener of [...listeners]) {
+    try {
+      listener(restore);
+    } catch (reason) {
+      reportTaskRestoreFailure(restore, reason);
+    }
+  }
 }
 
 /** 取走属于指定工具的待恢复包；不是本页的（或没有）返回 null。 */
 export function consumeTaskRestore(toolId: string): TaskRestore | null {
-  if (
-    pending &&
-    restoreKeyOf(pending.toolId, pending.params) === toolId
-  ) {
+  if (pending && restoreKeyOf(pending.toolId, pending.params) === toolId) {
     const restore = pending;
     pending = null;
     return restore;
@@ -73,21 +102,56 @@ export function subscribeTaskRestore(
   };
 }
 
+export function subscribeTaskRestoreFailure(
+  listener: (failure: TaskRestoreFailure) => void,
+): () => void {
+  failureListeners.add(listener);
+  return () => {
+    failureListeners.delete(listener);
+  };
+}
+
+/**
+ * 工具页错误边界调用。只把紧随「继续任务」发生的崩溃归因于恢复，避免把
+ * 用户稍后正常操作产生的错误误报成历史恢复失败。
+ */
+export function reportRecentRestoreRenderFailure(
+  toolId: string,
+  reason: unknown,
+): void {
+  if (!recentRestore || Date.now() - recentRestore.publishedAt > 30_000) return;
+  const restoreKey = restoreKeyOf(
+    recentRestore.restore.toolId,
+    recentRestore.restore.params,
+  );
+  if (restoreKey !== toolId && !restoreKey.startsWith(`${toolId}:`)) return;
+  reportTaskRestoreFailure(recentRestore.restore, reason);
+}
+
 /**
  * 工具页接入历史参数回填。挂载时消费待取的恢复包；页面已保活时经订阅
  * 收到。恢复包 params 为空（旧版本任务）不会触发 apply。
  */
 export function useTaskRestore(
   toolId: string,
-  apply: (restore: TaskRestore) => void,
+  apply: (restore: TaskRestore) => void | Promise<void>,
 ): void {
   const applyRef = useRef(apply);
   applyRef.current = apply;
   useEffect(() => {
     const take = () => {
       const restore = consumeTaskRestore(toolId);
-      if (restore && Object.keys(restore.params).length > 0)
-        applyRef.current(restore);
+      if (!restore || Object.keys(restore.params).length === 0) return;
+      try {
+        const result = applyRef.current(restore);
+        if (result && typeof result.then === "function") {
+          void result.catch((reason) =>
+            reportTaskRestoreFailure(restore, reason),
+          );
+        }
+      } catch (reason) {
+        reportTaskRestoreFailure(restore, reason);
+      }
     };
     const stop = subscribeTaskRestore(take);
     take();

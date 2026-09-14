@@ -52,6 +52,54 @@
   white-space: nowrap;
 }
 
+.restore-notice-error {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+
+.restore-notice-error button {
+  border-color: var(--danger-border);
+}
+
+.tool-recovery-card,
+.application-recovery {
+  max-width: 760px;
+  margin: clamp(32px, 8vh, 96px) auto;
+  padding: var(--sp-6);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-preview);
+  color: var(--ink);
+}
+
+.tool-recovery-card h2,
+.application-recovery h1 {
+  margin: 0 0 var(--sp-2);
+}
+
+.tool-recovery-card p,
+.application-recovery p {
+  color: var(--muted);
+}
+
+.tool-recovery-eyebrow {
+  margin: 0 0 var(--sp-2);
+  color: var(--danger-fg) !important;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+}
+
+.application-recovery button {
+  border: 0;
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--brand);
+  color: var(--on-brand);
+  cursor: pointer;
+}
+
 body .app-shell {
   grid-template-columns: 248px minmax(0, 1fr);
 }

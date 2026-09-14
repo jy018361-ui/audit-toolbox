@@ -54,6 +54,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { RestoreBanner } from "@/components/RestoreBanner";
 import { WindowControls } from "@/components/WindowControls";
 import { PersistentToolPages } from "@/components/PersistentToolPages";
+import { ToolRecoveryBoundary } from "@/components/ToolRecoveryBoundary";
 import { JobDialogProvider } from "@/components/JobDialog";
 import { JobProgress } from "@/components/JobProgress";
 import { ConfirmDialogHost, confirmDialog } from "@/components/ConfirmDialog";
@@ -382,6 +383,7 @@ function SidebarToolLink({
 
 export default function App() {
   const location = useLocation();
+  const navigate = useNavigate();
   const [catalog, setCatalog] = useState<ToolManifest[]>([]);
   const [bootstrap, setBootstrap] = useState<Bootstrap>();
   const [jobs, setJobs] = useState<Record<string, JobEvent>>({});
@@ -871,9 +873,17 @@ export default function App() {
                   )
                   .map((job) => job.toolId)}
                 renderPage={(toolId) => (
-                  <ToolTourProvider toolId={toolId}>
-                    <ToolPage catalog={catalog} toolId={toolId} />
-                  </ToolTourProvider>
+                  <ToolRecoveryBoundary
+                    toolId={toolId}
+                    toolName={
+                      catalog.find((tool) => tool.id === toolId)?.name ?? toolId
+                    }
+                    onBackToHistory={() => navigate("/history")}
+                  >
+                    <ToolTourProvider toolId={toolId}>
+                      <ToolPage catalog={catalog} toolId={toolId} />
+                    </ToolTourProvider>
+                  </ToolRecoveryBoundary>
                 )}
               />
             </>
@@ -1384,7 +1394,17 @@ function History({ catalog }: { catalog: ToolManifest[] }) {
       // Rust 侧同时把仍存在的原输入路径重新授权，回填后即可直接运行。
       const restore = await historyRestore(row.jobId);
       publishTaskRestore(restore);
-      navigate(tool.route);
+      navigate(tool.route, {
+        state:
+          tool.id === "fa_list"
+            ? {
+                faListRestoreMode:
+                  restore.params.tbSource || restore.params.jeSource
+                    ? "tbje"
+                    : "cards",
+              }
+            : undefined,
+      });
     } catch (reason) {
       setRestoreError(appErrorText(reason));
     } finally {

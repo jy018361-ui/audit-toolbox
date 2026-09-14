@@ -5,6 +5,7 @@ import {
   faAssignmentsForEntityAccounts,
   faTbJeMissingMappings,
   groupAssignmentViews,
+  normalizeFaCategory,
   splitFaAccount,
   suggestFaAccount,
   suggestFaAccounts,
@@ -37,7 +38,9 @@ describe("FA TB+JE account role presets", () => {
     });
     expect(splitFaAccount("1602")).toEqual({ code: "1602", name: "" });
     // SAP 型余额表把编码拼在串尾
-    expect(splitFaAccount("固定资产 固定资产-累计折旧-办公设备 1601130001")).toEqual({
+    expect(
+      splitFaAccount("固定资产 固定资产-累计折旧-办公设备 1601130001"),
+    ).toEqual({
       code: "1601130001",
       name: "固定资产 固定资产-累计折旧-办公设备",
     });
@@ -129,9 +132,9 @@ describe("FA TB+JE account role presets", () => {
   it("TBJEPBC 样例：名称带资产字样的非固定资产科目与编码残留的类别", () => {
     // 02 号样例：银行存款户名带「房屋积金」，名称词会把它当原值——
     // 数字编码不是 1601/1602 的一律不进本表。
-    expect(suggestFaAccount("1002016871 银行存款-汉口银行硚口支行(房屋积金)6").role).toBe(
-      "excluded",
-    );
+    expect(
+      suggestFaAccount("1002016871 银行存款-汉口银行硚口支行(房屋积金)6").role,
+    ).toBe("excluded");
     // 10 号样例：自定义 1642 使用权资产折旧。原值侧不含使用权资产，
     // 折旧侧混入必然勾稽不平。
     expect(suggestFaAccount("1642 使用权资产累计折旧").role).toBe("excluded");
@@ -144,12 +147,16 @@ describe("FA TB+JE account role presets", () => {
     );
     // 08 号样例：名称部分自带一份编码（160101\固定资产\房屋建筑物），
     // 类别要剥干净编码与路径分隔，不能显示成「160101\房屋建筑物」。
-    expect(suggestFaAccount("160101 160101\\固定资产\\房屋建筑物").category).toBe(
-      "房屋建筑物",
-    );
+    expect(
+      suggestFaAccount("160101 160101\\固定资产\\房屋建筑物").category,
+    ).toBe("房屋建筑物");
     expect(suggestFaAccount("160101 160101\\固定资产\\房屋建筑物").role).toBe(
       "cost",
     );
+    expect(suggestFaAccount("160104 固定资产_办公设备及其他").category).toBe(
+      "办公设备及其他",
+    );
+    expect(normalizeFaCategory("_房屋_建筑物")).toBe("房屋建筑物");
   });
 
   it("同一科目在 TB 与 JE 里拼法不同也归一到同一角色与类别", () => {
@@ -285,9 +292,9 @@ describe("FA TB+JE 真实主体×科目组合", () => {
         .map((row) => row.entity),
     ).toEqual(["2000", "2002"]);
     // 2002 的纯编码写法保留原串，payload 逐条匹配用。
-    expect(
-      rows.find((row) => row.entity === "2002")?.account,
-    ).toBe("1601020000");
+    expect(rows.find((row) => row.entity === "2002")?.account).toBe(
+      "1601020000",
+    );
   });
 
   it("同一（主体，编码）的两种写法合并为一行，来源标签 TB+JE，payload 仍含两条原始串", () => {
@@ -308,7 +315,7 @@ describe("FA TB+JE 真实主体×科目组合", () => {
     ]);
     // 两种写法经自动归一拿到同一角色与类别。
     expect(new Set(rows.map((row) => `${row.role}|${row.category}`))).toEqual(
-      new Set(["cost|Fixed assets_Machinery equipment"]),
+      new Set(["cost|Fixed assets Machinery equipment"]),
     );
     const views = groupAssignmentViews(rows, (entity, account) =>
       account.includes("Fixed assets") ? ["tb" as const] : ["je" as const],
@@ -353,8 +360,18 @@ describe("FA TB+JE 真实主体×科目组合", () => {
 
   it("认不出编码的科目按科目串本身分组，互不混并", () => {
     const views = groupAssignmentViews([
-      { entity: "A", account: "Accumulated Depreciation", role: "depreciation", category: "固定资产" },
-      { entity: "A", account: "Accumulated Depreciation - Vehicles", role: "depreciation", category: "固定资产" },
+      {
+        entity: "A",
+        account: "Accumulated Depreciation",
+        role: "depreciation",
+        category: "固定资产",
+      },
+      {
+        entity: "A",
+        account: "Accumulated Depreciation - Vehicles",
+        role: "depreciation",
+        category: "固定资产",
+      },
     ]);
     expect(views).toHaveLength(2);
     expect(views.map((view) => view.key)).toEqual([
@@ -405,10 +422,27 @@ describe("FA TB+JE 三步向导（源码契约）", () => {
   it("第 1 步底部门禁为「TB/JE 均已识别且必填字段映射完成」，按钮为复核科目分类", () => {
     expect(stepOne).toContain("复核科目分类");
     expect(stepOne).toContain("disabled={!mappingsReady || reviewing || busy}");
+    expect(stepOne).toContain("openAccountReview");
   });
 
   it("payload 仍逐条使用 assignments 原始科目串，显示合并只发生在复核表", () => {
     expect(source).toContain("accountAssignments: assignments");
-    expect(source).toContain("groupAssignmentViews(assignments");
+    expect(source).toMatch(/groupAssignmentViews\(\s*assignments/);
+  });
+
+  it("复核表保持原生 td 布局并解释 TB、JE 与 TB+JE 来源标签", () => {
+    expect(source).toContain('<div className="fa-tbje-account-cell">');
+    expect(source).not.toContain(
+      '<td\n                        className="fa-tbje-account-cell"',
+    );
+    expect(source).toContain("TB 表示仅余额表出现");
+    expect(source).toContain("TB+JE");
+  });
+
+  it("切换 FA 子工具时缓存并恢复 TB+JE 草稿", () => {
+    expect(source).toContain("let faTbJeDraftCache");
+    expect(source).toContain("faTbJeDraftCache = {");
+    expect(source).toContain("faTbJeDraftCache?.mappings");
+    expect(source).toContain("faTbJeDraftCache?.assignments");
   });
 });

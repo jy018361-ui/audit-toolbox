@@ -152,16 +152,6 @@
 .kz-search button {
   flex-shrink: 0;
 }
-/*
- * 编码前缀框装的是 6401,6603 这种短串，不该和关键词框平分宽度：basis 略短、
- * 只收不伸。旧的 min-width:10rem 硬下限在窄面板下顶住收缩，是"筛选条件"行
- * 挤压和 placeholder 截断的直接原因——现在允许收到 0，空间真不够时整行
- * 优雅换行（上方组选择器已带 wrap），而不是把内容截掉。
- */
-.kz-search input.kz-code-prefix {
-  flex: 0 1 14rem;
-  min-width: 0;
-}
 .kz-two,
 .kz-map,
 .kz-options {

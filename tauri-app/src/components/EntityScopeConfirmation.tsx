@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { engineCall } from "@/api";
 import {
   STRICT_ENTITY_SCOPE,
@@ -18,20 +18,30 @@ export function useEntityScopeConfirmation({
   tbEntities,
   jeEntities,
   onInvalidate,
+  initialSelection,
 }: {
   tbEntities: readonly string[];
   jeEntities: readonly string[];
   onInvalidate: () => void;
+  initialSelection?: EntityScopeSelection;
 }) {
   const tb = clean(tbEntities);
   const je = clean(jeEntities);
   const signature = `${tb.join("\u001e")}\u001d${je.join("\u001e")}`;
   const [suggestions, setSuggestions] = useState<EntityScopeSuggestions>();
-  const [selection, setSelection] = useState<EntityScopeSelection>(STRICT_ENTITY_SCOPE);
+  const [selection, setSelection] = useState<EntityScopeSelection>(
+    () => initialSelection ?? STRICT_ENTITY_SCOPE,
+  );
+  const restoredSignature = useRef(initialSelection ? signature : "");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    setSelection(STRICT_ENTITY_SCOPE);
+    if (restoredSignature.current === signature) {
+      // 同一个已确认主体集合在子工具切换后重新挂载，保留用户选过的归集口径。
+      restoredSignature.current = "";
+    } else {
+      setSelection(STRICT_ENTITY_SCOPE);
+    }
     setSuggestions(undefined);
     if (!tb.length || !je.length) return;
     let active = true;

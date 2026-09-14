@@ -261,13 +261,13 @@ describe("共享账表复核生命周期", () => {
     expect(result.current.status.tb).toContain("仍缺 1 项：期初余额");
   });
 
-  it("撤销与采纳后按当前明细实时重算复核状态", async () => {
+  it("低于 60% 的建议不展示，撤销后按当前明细实时重算复核状态", async () => {
     const applied = vi.fn();
     const { result } = renderHook(() =>
       useLedgerDictReviews(async () => ({
         changes: [
           { role: "accountCode", suggestedColumn: "B编码", confidence: 0.9 },
-          { role: "accountName", suggestedColumn: "B名称", confidence: 0.5 },
+          { role: "accountName", suggestedColumn: "B名称", confidence: 0.59 },
         ],
       })),
     );
@@ -283,14 +283,11 @@ describe("共享账表复核生命周期", () => {
       });
     });
     expect(result.current.status.tb).toContain("已自动调整 1 项");
-    expect(result.current.status.tb).toContain("1 项建议待确认");
+    expect(result.current.results.tb?.pending).toEqual([]);
+    expect(result.current.status.tb).not.toContain("建议待确认");
 
     act(() => result.current.undoChange("tb", 0));
     expect(result.current.status.tb).not.toContain("已自动调整");
-    expect(result.current.status.tb).toContain("1 项建议待确认");
-
-    act(() => result.current.acceptPending("tb", 0));
-    expect(result.current.status.tb).toContain("已自动调整 1 项");
     expect(result.current.status.tb).not.toContain("建议待确认");
   });
 });

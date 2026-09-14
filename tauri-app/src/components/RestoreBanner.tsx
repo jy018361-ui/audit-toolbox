@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react";
-import { subscribeTaskRestore } from "../restore";
+import {
+  subscribeTaskRestore,
+  subscribeTaskRestoreFailure,
+  type TaskRestoreFailure,
+} from "../restore";
 import type { TaskRestore, ToolManifest } from "../types";
 
 /**
@@ -9,15 +13,40 @@ import type { TaskRestore, ToolManifest } from "../types";
  */
 export function RestoreBanner({ catalog }: { catalog: ToolManifest[] }) {
   const [notice, setNotice] = useState<TaskRestore | null>(null);
+  const [failure, setFailure] = useState<TaskRestoreFailure | null>(null);
   useEffect(
-    () => subscribeTaskRestore((restore) => setNotice(restore)),
+    () =>
+      subscribeTaskRestore((restore) => {
+        setFailure(null);
+        setNotice(restore);
+      }),
     [],
   );
+  useEffect(() => subscribeTaskRestoreFailure(setFailure), []);
   useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(null), 15_000);
     return () => window.clearTimeout(timer);
   }, [notice]);
+  if (failure) {
+    const failedToolName =
+      catalog.find((tool) => tool.id === failure.restore.toolId)?.name ??
+      "对应工具";
+    return (
+      <div className="restore-notice restore-notice-error" role="alert">
+        <div>
+          <strong>“{failedToolName}”的历史任务未能完整恢复。</strong>
+          <p>
+            {failure.message}{" "}
+            当前应用仍可继续使用，请返回历史记录或重新选择输入。
+          </p>
+        </div>
+        <button type="button" onClick={() => setFailure(null)}>
+          知道了
+        </button>
+      </div>
+    );
+  }
   if (!notice) return null;
   const toolName =
     catalog.find((tool) => tool.id === notice.toolId)?.name ?? "对应工具";

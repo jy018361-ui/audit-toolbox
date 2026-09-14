@@ -278,7 +278,7 @@ describe("FA LLM 复核先改后核", () => {
     expect(plan.pending).toEqual([]);
   });
 
-  it("把握不足 60% 的一律不改，交回用户采纳", () => {
+  it("把握不足 60% 的一律不改且不展示", () => {
     const plan = planFaLlmChanges({
       ...baseInput,
       fieldReviews: [
@@ -293,25 +293,10 @@ describe("FA LLM 复核先改后核", () => {
     // 映射保持原样
     expect(plan.beginMapping.category).toBe("类别");
     expect(plan.changes).toEqual([]);
-    expect(plan.pending).toEqual([
-      {
-        id: "begin.category",
-        label: "期初 资产类别",
-        current: "类别",
-        suggested: "资产分类",
-        reason: "两列都像类别",
-        confidence: 0.45,
-        apply: {
-          kind: "mapping",
-          side: "begin",
-          key: "category",
-          value: "资产分类",
-        },
-      },
-    ]);
+    expect(plan.pending).toEqual([]);
   });
 
-  it("把握不足的匹配键建议也不自动改", () => {
+  it("把握不足的匹配键建议不自动改也不展示", () => {
     const plan = planFaLlmChanges({
       ...baseInput,
       matchReview: {
@@ -324,14 +309,7 @@ describe("FA LLM 复核先改后核", () => {
     expect(plan.beginKeys).toEqual(["资产编号"]);
     expect(plan.endKeys).toEqual(["编号"]);
     expect(plan.changes).toEqual([]);
-    expect(plan.pending[0]).toMatchObject({
-      id: "matchKeys",
-      apply: {
-        kind: "matchKeys",
-        begin: ["资产编号", "名称"],
-        end: ["编号", "名称"],
-      },
-    });
+    expect(plan.pending).toEqual([]);
   });
 
   it("匹配键改动会整组记录，撤销可还原两侧", () => {
@@ -536,7 +514,7 @@ describe("FA 补充清单 LLM 复核先改后核", () => {
     expect(plan.pending.some((item) => item.id === "addition.keys")).toBe(false);
   });
 
-  it("把握不足的补充清单建议交回用户采纳", () => {
+  it("把握不足的补充清单建议不展示", () => {
     const plan = planFaSupplementChanges({
       ...supplement(),
       fieldReviews: [
@@ -556,14 +534,10 @@ describe("FA 补充清单 LLM 复核先改后核", () => {
     expect(plan.disposal.depreciation).toBe("");
     expect(plan.addition.keys).toEqual(["资产编号"]);
     expect(plan.changes).toEqual([]);
-    expect(plan.pending.map((item) => item.id)).toEqual([
-      "disposal.depreciation",
-      "addition.keys",
-      "disposal.keys",
-    ]);
+    expect(plan.pending).toEqual([]);
   });
 
-  it("同一低把握字段由两路复核返回时只提示一次", () => {
+  it("同一低把握字段由两路复核返回时仍不展示", () => {
     const duplicate = {
       role: "disposal_date",
       suggested_mapping: { file2: "入账开始日期" },
@@ -575,8 +549,7 @@ describe("FA 补充清单 LLM 复核先改后核", () => {
       autoApplied: [duplicate],
       fieldReviews: [duplicate],
     });
-    expect(plan.pending).toHaveLength(1);
-    expect(plan.pending[0].id).toBe("disposal.date");
+    expect(plan.pending).toEqual([]);
   });
 
   it("建议与现状一致或没有建议时不产生变更", () => {

@@ -358,7 +358,7 @@ fn inspect_kanzhang_with_progress(
         source.header_row,
         source.header_depth,
     )?;
-    let mapping = suggest_mapping(&table.headers, &table.rows);
+    let mapping = suggest_mapping_full(&table.headers, &table.rows);
     let (accounts, account_codes, account_count) = (!mapping.account_columns().is_empty())
         .then(|| {
             let (values, codes, total) = account_values(&table, &mapping, "", &[]);
@@ -980,6 +980,7 @@ fn export_kanzhang(
             &job.exclude_accounts,
             job.include_counterpart,
         )?;
+        ensure_kanzhang_batch_has_rows(batch, filtered.len())?;
         progress("polars", 2, 6, "Rust Polars 正在生成凭证、科目及月份汇总…");
         let analysis = analyze_ledger(&table, &mapping, &filtered, &batch.accounts, &job, cancel)?;
         progress("classify", 4, 6, "正在识别凭证类型、JE 匹配和损益结转…");
@@ -1049,6 +1050,27 @@ fn source_from_kanzhang(job: &KanzhangParams) -> SourceParams {
         header_row: job.header_row,
         header_depth: 1,
     }
+}
+
+fn ensure_kanzhang_batch_has_rows(batch: &LedgerBatch, rows: usize) -> Result<(), AppError> {
+    if rows > 0 {
+        return Ok(());
+    }
+    let examples = batch
+        .accounts
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("、");
+    Err(error(
+        "KANZHANG_TARGET_NO_MATCH",
+        format!(
+            "批次「{}」的目标科目在凭证数据中没有命中，未生成空白导出。请返回科目筛选重新选择或检查科目字段映射。",
+            batch.name
+        ),
+        Some(format!("未命中科目示例：{examples}")),
+    ))
 }
 
 /// 看账的预览与导出必须在生成任何缓存键之前共用同一个实际标题行。
@@ -1174,6 +1196,7 @@ fn export_kanzhang_disk(
             &format!("正在磁盘上筛选批次 {}：{}…", batch_index + 1, batch.name),
         );
         let selected_rows = select_disk_batch(&ledger, &batch.accounts, cancel)?;
+        ensure_kanzhang_batch_has_rows(batch, selected_rows)?;
         let output = kanzhang_batch_output_path(job, batch, batch_index, batches.len())?;
         if !output
             .extension()
@@ -1585,23 +1608,7 @@ fn filter_ledger_rows(
         .into_iter()
         .filter_map(|name| header_index(&table.headers, name))
         .collect::<Vec<_>>();
-    let mut id_indexes = Vec::new();
-    for optional in mapping
-        .entity
-        .as_deref()
-        .into_iter()
-        .chain(mapping.date.iter().map(String::as_str))
-    {
-        if let Some(index) = header_index(&table.headers, optional) {
-            id_indexes.push(index);
-        }
-    }
-    id_indexes.extend(
-        mapping
-            .id
-            .iter()
-            .filter_map(|name| header_index(&table.headers, name)),
-    );
+    let id_indexes = ledger_id_indexes(&table.headers, mapping);
     if account_indexes.is_empty() || id_indexes.is_empty() {
         return Err(error(
             "KANZHANG_MAPPING_INCOMPLETE",
@@ -1705,6 +1712,49 @@ fn excluded_ledger_rows(
         .collect()
 }
 
+/// 看账只对“整组科目列都为空”的续行继承科目。
+///
+/// 若本行已经出现新的科目编码（或任一科目层级），其他空白科目列表示该层级
+/// 本来就没有值，不能借用上一科目。否则科目列表里选到的 `1601020000` 会在
+/// 导出预处理后被篡成 `1601020000-上一科目名称`，最终零命中。
+fn forward_fill_ledger_columns(
+    rows: &mut [Vec<String>],
+    fill_indexes: &[usize],
+    account_indexes: &[usize],
+) -> usize {
+    let account_set = account_indexes.iter().copied().collect::<HashSet<_>>();
+    let mut previous = HashMap::<usize, String>::new();
+    let mut filled = 0usize;
+    for row in rows {
+        let has_account_anchor = account_indexes.iter().any(|index| {
+            row.get(*index)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        if has_account_anchor {
+            for index in account_indexes {
+                if row.get(*index).is_none_or(|value| value.trim().is_empty()) {
+                    previous.remove(index);
+                }
+            }
+        }
+        for index in fill_indexes {
+            let current = row.get(*index).map(|value| value.trim()).unwrap_or("");
+            if current.is_empty() {
+                if has_account_anchor && account_set.contains(index) {
+                    continue;
+                }
+                if let (Some(value), Some(cell)) = (previous.get(index), row.get_mut(*index)) {
+                    *cell = value.clone();
+                    filled += 1;
+                }
+            } else {
+                previous.insert(*index, current.to_owned());
+            }
+        }
+    }
+    filled
+}
+
 fn preprocess_ledger(
     mut table: Table,
     mapping: &LedgerMapping,
@@ -1750,22 +1800,23 @@ fn preprocess_ledger(
         .copied()
         .filter(|index| !amount_indexes.contains(index))
         .collect::<Vec<_>>();
-    let fill_columns = fill_indexes
-        .iter()
-        .filter_map(|index| table.headers.get(*index).cloned())
-        .collect::<Vec<_>>();
-    ledger_mapping::forward_fill_columns(&table.headers, &mut table.rows, &fill_columns);
+    forward_fill_ledger_columns(&mut table.rows, &fill_indexes, &account_indexes);
     let mut prepared = Vec::<(Vec<String>, bool)>::new();
     for row in table.rows {
         let had_amount = amount_indexes.iter().any(|index| {
             row.get(*index)
                 .is_some_and(|value| !value.trim().is_empty())
         });
+        // 科目身份由「编码或名称」共同组成：任一列有值就已经足够识别科目。
+        // 不能因为用户映射了一个整列为空的科目名称，就把编码、金额俱全的正常
+        // JE 明细误判成“有钱没身份”的游离行。凭证识别字段仍要求全部完整。
         let candidate = had_amount
-            && id_indexes
+            && (id_indexes
                 .iter()
-                .chain(account_indexes.iter())
-                .any(|index| row.get(*index).is_none_or(|value| value.trim().is_empty()));
+                .any(|index| row.get(*index).is_none_or(|value| value.trim().is_empty()))
+                || account_indexes
+                    .iter()
+                    .all(|index| row.get(*index).is_none_or(|value| value.trim().is_empty())));
         let has_mapped = mapped_indexes.iter().any(|index| {
             row.get(*index)
                 .is_some_and(|value| !value.trim().is_empty())
@@ -2040,6 +2091,9 @@ fn ledger_id_indexes(headers: &[String], mapping: &LedgerMapping) -> Vec<usize> 
         mapping
             .id
             .iter()
+            // 行号是凭证内明细的唯一键，不是凭证键。旧映射或人工误选时也在
+            // 运行期兜底排除，否则每行会被拆成一个“失衡凭证”，继而误删。
+            .filter(|name| !is_ledger_line_item_header(name))
             .filter_map(|name| header_index(headers, name)),
     );
     let mut seen = HashSet::new();
@@ -2047,6 +2101,24 @@ fn ledger_id_indexes(headers: &[String], mapping: &LedgerMapping) -> Vec<usize> 
         .into_iter()
         .filter(|index| seen.insert(*index))
         .collect()
+}
+
+fn is_ledger_line_item_header(header: &str) -> bool {
+    let normalized = ledger_mapping::normalize_header(header);
+    [
+        "凭证行",
+        "憑證行",
+        "行号",
+        "行號",
+        "行项目",
+        "行項目",
+        "分录号",
+        "分錄號",
+        "lineitem",
+        "documentline",
+    ]
+    .iter()
+    .any(|term| normalized.contains(&ledger_mapping::normalize_header(term)))
 }
 
 pub(crate) fn detect_loss_transfer_ids(
@@ -5211,6 +5283,32 @@ fn suggest_mapping(headers: &[String], rows: &[Vec<String>]) -> LedgerMapping {
     mapping
 }
 
+/// 仅在确认拿到了整张表时才据“整列为空”撤销科目建议。大 CSV 的
+/// `cache.table.rows` 只是前 50 行，不能凭样本空白断言后面全空。
+fn suggest_mapping_full(headers: &[String], rows: &[Vec<String>]) -> LedgerMapping {
+    let mut mapping = suggest_mapping(headers, rows);
+    if rows.is_empty() {
+        return mapping;
+    }
+    let has_data = |name: &str| {
+        header_index(headers, name).is_some_and(|index| {
+            rows.iter().any(|row| {
+                row.get(index)
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+        })
+    };
+    mapping.account_name.retain(|name| has_data(name));
+    if mapping
+        .account_code
+        .as_deref()
+        .is_some_and(|name| !has_data(name))
+    {
+        mapping.account_code = None;
+    }
+    mapping
+}
+
 fn find_header(headers: &[String], terms: &[&str]) -> Option<String> {
     let normalized = terms
         .iter()
@@ -8100,6 +8198,123 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+    #[test]
+    fn 新科目编码出现时空白科目名称不会继承上一科目() {
+        let headers = vec![
+            "凭证号".into(),
+            "科目编码".into(),
+            "科目名称".into(),
+            "金额".into(),
+        ];
+        let mapping = LedgerMapping {
+            id: vec!["凭证号".into()],
+            account_code: Some("科目编码".into()),
+            account_name: vec!["科目名称".into()],
+            amount: Some("金额".into()),
+            ..Default::default()
+        };
+        let table = Table {
+            path: PathBuf::new(),
+            sheet: "S".into(),
+            headers,
+            rows: vec![
+                vec!["1".into(), "1001".into(), "银行存款".into(), "-100".into()],
+                vec!["1".into(), "1601020000".into(), "".into(), "100".into()],
+                // 单行/失衡凭证也不能仅因名称列空白而被删掉；编码已经足够
+                // 构成科目身份。
+                vec!["2".into(), "1601020000".into(), "".into(), "50".into()],
+            ],
+            sheets: vec![],
+            encoding: None,
+            delimiter: None,
+        };
+        let prepared = preprocess_ledger(table, &mapping, None).unwrap();
+        assert_eq!(prepared.rows[1][2], "");
+        assert_eq!(prepared.rows.len(), 3);
+        let filtered =
+            filter_ledger_rows(&prepared, &mapping, &["1601020000".into()], &[]).unwrap();
+        assert_eq!(filtered.len(), 3);
+    }
+
+    #[test]
+    fn 整列空白的科目名称不进入自动映射() {
+        let headers = vec![
+            "会计凭证".into(),
+            "科目号".into(),
+            "科目描述".into(),
+            "金额".into(),
+        ];
+        let rows = vec![vec!["1".into(), "1601".into(), "".into(), "100".into()]];
+        let mapping = suggest_mapping_full(&headers, &rows);
+        assert_eq!(mapping.account_code.as_deref(), Some("科目号"));
+        assert!(mapping.account_name.is_empty());
+    }
+
+    #[test]
+    fn 历史映射里的凭证行不会拆散完整凭证() {
+        let headers = vec![
+            "会计凭证".into(),
+            "会计凭证行".into(),
+            "科目号".into(),
+            "金额".into(),
+        ];
+        let mapping = LedgerMapping {
+            id: vec!["会计凭证".into(), "会计凭证行".into()],
+            account_code: Some("科目号".into()),
+            amount: Some("金额".into()),
+            ..Default::default()
+        };
+        assert_eq!(ledger_id_indexes(&headers, &mapping), vec![0]);
+    }
+
+    #[test]
+    fn 看账空命中批次被拦截而不是写出空结构() {
+        let batch = LedgerBatch {
+            name: "固定资产".into(),
+            accounts: vec!["1601020000".into()],
+        };
+        let err = ensure_kanzhang_batch_has_rows(&batch, 0).unwrap_err();
+        assert_eq!(err.code, "KANZHANG_TARGET_NO_MATCH");
+        assert!(err.user_message.contains("未生成空白导出"));
+        assert!(ensure_kanzhang_batch_has_rows(&batch, 1).is_ok());
+    }
+    #[test]
+    #[ignore]
+    fn probe_real_2002_kanzhang_targets() {
+        let Ok(sample) = std::env::var("KANZHANG_REAL_SAMPLE") else {
+            return;
+        };
+        let path = Path::new(&sample);
+        let table = load_ledger_cached(path, Some("Sheet1"), 1, 1).unwrap();
+        let mapping = LedgerMapping {
+            id: vec!["会计凭证".into(), "会计凭证行".into()],
+            account_code: Some("科目号".into()),
+            account_name: vec!["科目描述".into()],
+            entity: Some("公司代码".into()),
+            date: vec!["凭证日期".into()],
+            summary: Some("项目文本".into()),
+            amount: Some("公司代码货币金额".into()),
+            direction: Some("借/贷标识".into()),
+            ..Default::default()
+        };
+        let targets = vec![
+            "1601020000".into(),
+            "1601030000".into(),
+            "1601050000".into(),
+        ];
+        let raw = filter_ledger_rows(&table, &mapping, &targets, &[]).unwrap();
+        let prepared = preprocess_ledger(table, &mapping, None).unwrap();
+        let filtered = filter_ledger_rows(&prepared, &mapping, &targets, &[]).unwrap();
+        eprintln!(
+            "raw={} prepared={} filtered={}",
+            raw.len(),
+            prepared.rows.len(),
+            filtered.len()
+        );
+        assert_eq!(raw.len(), 124, "样例完整凭证行数应稳定");
+        assert_eq!(prepared.rows.len(), 109055, "正常 JE 明细不应被误删");
+        assert_eq!(filtered.len(), raw.len(), "预处理不应丢失目标凭证");
     }
     #[test]
     fn legacy_date_forms_convert_to_month() {

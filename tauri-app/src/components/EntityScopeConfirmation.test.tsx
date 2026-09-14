@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { EntityScopeConfirmation } from "./EntityScopeConfirmation";
+import { EntityScopeConfirmation, useEntityScopeConfirmation } from "./EntityScopeConfirmation";
 import { STRICT_ENTITY_SCOPE } from "@/entityScope";
 
 afterEach(cleanup);
@@ -48,5 +48,25 @@ describe("公共主体口径确认", () => {
       mappings: [{ side: "tb", source: "10008529 乙公司", target: "乙公司" }],
     });
     expect(screen.getByText(/双方已完全匹配主体：甲公司/)).toBeTruthy();
+  });
+
+  it("同一组主体重新挂载时恢复已确认口径，主体集合变化时重置", async () => {
+    const initialSelection = {
+      mode: "aggregate" as const,
+      mappings: [{ side: "tb" as const, source: "乙公司分部", target: "乙公司" }],
+    };
+    const { result, rerender } = renderHook(
+      ({ tbEntities }) =>
+        useEntityScopeConfirmation({
+          tbEntities,
+          jeEntities: ["乙公司"],
+          initialSelection,
+          onInvalidate: () => {},
+        }),
+      { initialProps: { tbEntities: ["乙公司分部"] } },
+    );
+    expect(result.current.selection).toEqual(initialSelection);
+    rerender({ tbEntities: ["丙公司"] });
+    await waitFor(() => expect(result.current.selection).toEqual(STRICT_ENTITY_SCOPE));
   });
 });

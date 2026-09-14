@@ -8,6 +8,7 @@ import "./settings.css";
 import "./merger.css";
 import "./fa-dep-calc.css";
 import { restoreSavedTheme } from "./theme";
+import { ApplicationErrorBoundary } from "./components/ApplicationErrorBoundary";
 
 // Before the first paint, so the window never flashes the default theme.
 restoreSavedTheme();
@@ -32,7 +33,11 @@ async function renderApp() {
     const { TaskStateFixture } = await import("./preview/TaskStateFixture");
     content = <TaskStateFixture />;
   }
-  root.render(<React.StrictMode>{content}</React.StrictMode>);
+  root.render(
+    <React.StrictMode>
+      <ApplicationErrorBoundary>{content}</ApplicationErrorBoundary>
+    </React.StrictMode>,
+  );
 }
 
 void renderApp();

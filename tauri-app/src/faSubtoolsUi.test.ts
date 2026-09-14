@@ -127,7 +127,7 @@ describe("FA 子工具默认输出路径", () => {
 });
 
 describe("折旧测算单文件 LLM 复核规划器", () => {
-  it("高把握建议直接应用并进变更清单，低把握进待定", () => {
+  it("高把握建议直接应用并进变更清单，低于 60% 的不展示", () => {
     const plan = planDepLlmChanges({
       mapping: { originalValue: "原值", life: "寿命" },
       autoApplied: [
@@ -149,7 +149,7 @@ describe("折旧测算单文件 LLM 复核规划器", () => {
     });
     expect(plan.mapping.residualRate).toBe("残值率");
     expect(plan.changes.map((change) => change.label)).toEqual(["残值率"]);
-    expect(plan.pending.map((item) => item.label)).toEqual(["累计折旧"]);
+    expect(plan.pending).toEqual([]);
   });
 
   it("越权角色（政策外的新增方式等）不会进入映射", () => {

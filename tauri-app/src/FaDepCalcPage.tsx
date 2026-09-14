@@ -15,6 +15,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { Field } from "@/components/Field";
+import { defaultBalanceSheetDate } from "@/dateDefaults";
 import { FileInput } from "@/components/FileInput";
 import { FileDropInput } from "@/components/FileDropInput";
 import { displayFileName } from "@/fileDisplay";
@@ -86,7 +87,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
   );
   const [mapping, setMapping] = useState<DepMapping>(draft?.mapping ?? {});
   const [balanceSheetDate, setBalanceSheetDate] = useState(
-    draft?.balanceSheetDate ?? "2025-12-31",
+    draft?.balanceSheetDate ?? defaultBalanceSheetDate(),
   );
   const [outputPath, setOutputPath] = useState(draft?.outputPath ?? "");
   const [outputPathTouched, setOutputPathTouched] = useState(

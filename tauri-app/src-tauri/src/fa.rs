@@ -1186,6 +1186,21 @@ fn export(
     pause: &PauseCheckpoint,
 ) -> Result<Value, AppError> {
     pause.wait()?;
+    // 表日是折旧活公式与跨期新增分析的截止口径；缺省兜底 2099 会把累计折旧
+    // 一路算到资产寿命尽头，差异列全是假差异，必须在入口拦下。
+    let balance_sheet_date = params
+        .get("balanceSheetDate")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    if parse_fa_date(&balance_sheet_date).is_none() {
+        return Err(error(
+            "FA_BS_DATE_REQUIRED",
+            "请填写资产负债表日（格式 YYYY-MM-DD）。",
+            Some(balance_sheet_date),
+        ));
+    }
     let result = merge(&params, progress, &cancel)?;
     pause.wait()?;
     check_cancel(&cancel)?;
@@ -6400,6 +6415,7 @@ mod tests {
         json!({"beginPath":begin,"endPath":end,"beginKeys":["卡片编号"],"endKeys":["卡片编号"],
             "beginMapping":{"category":"资产类别","name":"资产名称","originalValue":"原值","depreciation":"累计折旧","life":"使用寿命","residualRate":"残值率","startDate":"入账开始日期"},
             "endMapping":{"category":"资产类别","name":"资产名称","originalValue":"原值","depreciation":"累计折旧","life":"使用寿命","residualRate":"残值","startDate":"入账开始日期"},
+            "balanceSheetDate":"2025-12-31",
             "outputPath":dir.join("FA_List.xlsx")})
     }
     #[test]
@@ -6421,6 +6437,26 @@ mod tests {
         assert_eq!(output["stats"]["both"], 1);
         assert_eq!(output["stats"]["beginOnly"], 1);
         assert_eq!(output["stats"]["endOnly"], 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 表日是折旧活公式与跨期新增分析的截止口径；缺省兜底 2099 会把累计
+    /// 折旧一路算到资产寿命尽头，差异列全是假差异——导出必须在入口拦下。
+    #[test]
+    fn export_without_balance_sheet_date_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("fa-bsdate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut p = params(&dir);
+        if let Some(object) = p.as_object_mut() {
+            object.remove("balanceSheetDate");
+        }
+        let err = test_export(p).unwrap_err();
+        assert_eq!(err.code, "FA_BS_DATE_REQUIRED");
+        let mut invalid = params(&dir);
+        invalid["balanceSheetDate"] = json!("2025-13-01");
+        let err = test_export(invalid).unwrap_err();
+        assert_eq!(err.code, "FA_BS_DATE_REQUIRED");
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
@@ -7788,6 +7824,7 @@ mod tests {
             "beginPath":begin,"endPath":end,"beginKeys":["编号"],"endKeys":["编号"],
             "beginMapping":{"name":"名称","originalValue":"原值"},
             "endMapping":{"name":"名称","originalValue":"原值"},
+            "balanceSheetDate":"2025-12-31",
             "outputPath":output,"__settings":{"llm":{"enabled":false}}
         });
         test_export(p).unwrap();

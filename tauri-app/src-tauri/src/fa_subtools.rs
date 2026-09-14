@@ -1372,6 +1372,7 @@ mod tests {
             "endKeys": ["编号"],
             "beginMapping": {"category": "类别", "name": "名称", "originalValue": "原值", "depreciation": "累计折旧", "life": "寿命(月)", "residualRate": "残值率"},
             "endMapping": {"category": "类别", "name": "名称", "originalValue": "原值", "depreciation": "累计折旧", "life": "寿命(月)", "residualRate": "残值率"},
+            "balanceSheetDate": "2025-12-31",
             "outputPath": dir.join("折旧政策对比.xlsx").to_string_lossy(),
         });
         let value = run_job_quiet("fa.policy_export", params.clone()).unwrap();

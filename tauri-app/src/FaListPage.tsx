@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
+import { useLocation } from "react-router-dom";
 import { engineCall, jobCancel, jobStart, openOutput, pickPath } from "./api";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -35,6 +36,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { Field } from "@/components/Field";
+import { defaultBalanceSheetDate } from "@/dateDefaults";
 import { JargonTip } from "@/components/JargonTip";
 import { FileInput } from "@/components/FileInput";
 import { FileDropInput } from "@/components/FileDropInput";
@@ -222,7 +224,20 @@ let faListModeCache: "cards" | "tbje" = "tbje";
 const defaultExportName = faDefaultOutputName;
 
 export function FaListPage({ tool }: { tool: ToolManifest }) {
-  const [mode, setModeState] = useState<"cards" | "tbje">(faListModeCache);
+  const location = useLocation();
+  const restoreMode = (location.state as { faListRestoreMode?: unknown } | null)
+    ?.faListRestoreMode;
+  const requestedMode =
+    restoreMode === "cards" || restoreMode === "tbje" ? restoreMode : null;
+  const [mode, setModeState] = useState<"cards" | "tbje">(
+    requestedMode ?? faListModeCache,
+  );
+  useEffect(() => {
+    if (requestedMode) {
+      faListModeCache = requestedMode;
+      setModeState(requestedMode);
+    }
+  }, [location.key, requestedMode]);
   const setMode = (nextMode: "cards" | "tbje") => {
     faListModeCache = nextMode;
     setModeState(nextMode);
@@ -298,7 +313,7 @@ function FaCardListPage() {
     draft?.endDisplayName ?? "期末",
   );
   const [balanceSheetDate, setBalanceSheetDate] = useState(
-    draft?.balanceSheetDate ?? "2025-12-31",
+    draft?.balanceSheetDate ?? defaultBalanceSheetDate(),
   );
   const [outputPath, setOutputPath] = useState(draft?.outputPath ?? "");
   // 用户自己选过保存位置后就不再自动改写它；否则输出框跟着期末文件走，
@@ -1299,6 +1314,10 @@ function FaCardListPage() {
     }
     if (!beginKeys.length || beginKeys.length !== endKeys.length) {
       setError("期初和期末必须选择数量相同的匹配列。");
+      return;
+    }
+    if (method === "fa.export" && !balanceSheetDate.trim()) {
+      setError("请填写资产负债表日，折旧测算与跨期新增分析都以它为截止。");
       return;
     }
     if (method === "fa.match" && llmBusy) {
@@ -2641,7 +2660,11 @@ function FaCardListPage() {
                       onChange={(e) => setEndDisplayName(e.target.value)}
                     />
                   </Field>
-                  <Field label="资产负债表日">
+                  <Field
+                    label="资产负债表日"
+                    required
+                    hint="折旧测算与跨期新增分析按此日期截止，请确认与账套年度一致。"
+                  >
                     <DateInput
                       value={balanceSheetDate}
                       onChange={setBalanceSheetDate}

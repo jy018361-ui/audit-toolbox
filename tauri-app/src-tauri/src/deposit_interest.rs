@@ -1195,7 +1195,14 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     if kind == "tb" {
         crate::fx::promote_period_movement(&table, &mut mapping);
     }
-    let mapping = mapping;
+    // 科目/主体清单必须使用用户当前确认的映射重新计算。初次识别仍返回自动
+    // 建议；FA List 在进入科目复核前会把人工调整后的 mapping 传回来，避免
+    // 界面已选“核算组织”，清单却仍按初始的“默认主体”生成。
+    if let Some(confirmed) = params.get("mapping").and_then(Value::as_object)
+        && !confirmed.is_empty()
+    {
+        mapping = confirmed.clone();
+    }
     let accounts = distinct_accounts(&table, &mapping);
     let entities = distinct_values(&table, &mapping, "entity");
     let entity_accounts = distinct_entity_accounts(&table, &mapping);
@@ -1674,13 +1681,8 @@ fn calculate(
     // 降级提示带回汇总——用户映射了辅助列却不生效时必须知道原因。
     let auxiliary_link = match &je_input {
         Some(je) => {
-            let anchors = ledger_mapping::tb_auxiliary_anchors(
-                &tb.headers,
-                &tb.rows,
-                &tb_leaf,
-                &tb_map,
-                "auxiliary",
-            );
+            let anchors =
+                ledger_mapping::tb_auxiliary_anchors(&tb.headers, &tb.rows, &tb_map, "auxiliary");
             let je_map = match je {
                 JeInput::Memory(_, mapping) | JeInput::Disk(_, mapping) => mapping,
             };
@@ -4066,6 +4068,39 @@ fn xlsx(value: XlsxError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 科目复核按人工映射重新提取主体科目组合() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("je.xlsx");
+        write_fixture(
+            &path,
+            &[
+                vec!["凭证号", "科目编码", "核算组织", "金额", "日期"],
+                vec!["1", "160104", "浙江沪杭甬高速公路股份有限公司", "100", "2025-12-31"],
+                vec!["1", "1001", "浙江沪杭甬高速公路股份有限公司", "-100", "2025-12-31"],
+            ],
+        );
+        let inspected = inspect(
+            &json!({
+                "source": {"inputPath": path.to_string_lossy()},
+                "mapping": {
+                    "id": ["凭证号"],
+                    "accountCode": "科目编码",
+                    "entity": "核算组织",
+                    "functionalAmount": "金额",
+                    "date": ["日期"]
+                }
+            }),
+            "je",
+        )
+        .unwrap();
+        assert_eq!(inspected["suggestedMapping"]["entity"], "核算组织");
+        assert!(inspected["entityAccounts"].as_array().unwrap().iter().any(|pair| {
+            pair["entity"] == "浙江沪杭甬高速公路股份有限公司"
+                && pair["account"] == "160104"
+        }));
+    }
 
     #[test]
     fn 存款主体归集按账表侧别应用且未选主体不变() {

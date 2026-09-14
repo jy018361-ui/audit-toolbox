@@ -685,6 +685,8 @@ static JE_ROLES: &[Role] = &[
             "行號",
             "行项目",
             "行項目",
+            "凭证行",
+            "憑證行",
             "分录号",
             "分錄號",
             "line",
@@ -1923,6 +1925,60 @@ pub(crate) fn forward_fill_columns_skipping(
             if current.is_empty() {
                 if let (Some(previous), Some(cell)) = (last_values.get(index), row.get_mut(*index))
                 {
+                    *cell = previous.clone();
+                    filled += 1;
+                }
+            } else {
+                last_values.insert(*index, current.to_owned());
+            }
+        }
+    }
+    filled
+}
+
+/// JE 科目身份感知的向下填充：一行只要有任一科目身份列（编码或名称）
+/// 非空，就是一个新的科目上下文。该行其他空白科目列不得沿用上一科目，且
+/// 必须清除旧上下文；只有科目身份列**全部**为空的续行才允许继承。
+/// 凭证号、日期等非科目列仍按普通合并单元格规则填充。
+pub(crate) fn forward_fill_ledger_identity_columns_skipping(
+    headers: &[String],
+    rows: &mut [Vec<String>],
+    columns: &[String],
+    account_columns: &[String],
+    keep: &[bool],
+) -> usize {
+    let indexes = columns
+        .iter()
+        .filter_map(|column| header_index(headers, column))
+        .collect::<HashSet<_>>();
+    let accounts = account_columns
+        .iter()
+        .filter_map(|column| header_index(headers, column))
+        .collect::<HashSet<_>>();
+    let mut last_values = HashMap::<usize, String>::new();
+    let mut filled = 0usize;
+    for (row_index, row) in rows.iter_mut().enumerate() {
+        if !keep.get(row_index).copied().unwrap_or(true) {
+            continue;
+        }
+        let new_account = accounts.iter().any(|index| {
+            row.get(*index)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+        if new_account {
+            for index in &accounts {
+                if row.get(*index).is_none_or(|value| value.trim().is_empty()) {
+                    last_values.remove(index);
+                }
+            }
+        }
+        for index in &indexes {
+            let current = row.get(*index).map(|value| value.trim()).unwrap_or("");
+            if current.is_empty() {
+                if new_account && accounts.contains(index) {
+                    continue;
+                }
+                if let (Some(previous), Some(cell)) = (last_values.get(index), row.get_mut(*index)) {
                     *cell = previous.clone();
                     filled += 1;
                 }
@@ -6875,41 +6931,53 @@ pub(crate) fn mapped_column_names(
 }
 
 /// TB 侧锚点提取：`role` 指定维度角色（通用工具 `auxiliary`、借款工具
-/// `loanId`）；发生额列可用时只取本期有发生额的行——休眠维度本来就不会
-/// 出现在序时账里，拿它当锚点会把“列存在”误判成“无对应列”。
+/// `loanId`）。锚点＝维度列有值且当期有发生额的行的维度值——**不挂任何
+/// 末级/编码过滤**：SAP 形态的维度明细行科目编码为空、会被末级掩码剔除，
+/// 但维度值恰恰只存在于这些行上。发生额取四类发生列任一非零；发生额列
+/// 未映射时不设门槛——无从判定休眠，宁多认不错杀。
 pub(crate) fn tb_auxiliary_anchors(
     headers: &[String],
     rows: &[Vec<String>],
-    keep: &[bool],
     mapping: &serde_json::Map<String, Value>,
     role: &str,
 ) -> HashSet<String> {
-    let auxiliary_columns = mapped_column_names(mapping, role);
-    if auxiliary_columns.is_empty() {
-        return HashSet::new();
+    let mut anchors = HashSet::new();
+    for (_, values) in tb_dimension_column_anchors(headers, rows, mapping, role) {
+        anchors.extend(values);
     }
-    let occurrence_columns: Vec<String> = [
+    anchors
+}
+
+/// 逐个维度列的锚点集合（列有值且当期有发生额）。供多列辅助（编码＋名称）
+/// 时挑与 JE 认定列重叠最大的键列。
+pub(crate) fn tb_dimension_column_anchors(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &serde_json::Map<String, Value>,
+    role: &str,
+) -> Vec<(usize, HashSet<String>)> {
+    let auxiliary_indexes: Vec<usize> = mapped_column_names(mapping, role)
+        .iter()
+        .filter_map(|name| header_index(headers, name))
+        .collect();
+    if auxiliary_indexes.is_empty() {
+        return Vec::new();
+    }
+    let occurrence_indexes: Vec<usize> = [
         "ytdFunctionalCredit",
         "ytdFunctionalDebit",
         "periodFunctionalCredit",
         "periodFunctionalDebit",
     ]
     .iter()
-    .flat_map(|role| mapped_column_names(mapping, role))
+    .flat_map(|occurrence| mapped_column_names(mapping, occurrence))
+    .filter_map(|name| header_index(headers, &name))
     .collect();
-    let auxiliary_indexes: Vec<usize> = auxiliary_columns
-        .iter()
-        .filter_map(|name| header_index(headers, name))
-        .collect();
-    let occurrence_indexes: Vec<usize> = occurrence_columns
-        .iter()
-        .filter_map(|name| header_index(headers, name))
-        .collect();
-    let mut anchors = HashSet::new();
-    for (row_index, row) in rows.iter().enumerate() {
-        if !keep.get(row_index).copied().unwrap_or(true) {
-            continue;
-        }
+    let mut per_column = auxiliary_indexes
+        .into_iter()
+        .map(|index| (index, HashSet::new()))
+        .collect::<Vec<_>>();
+    for row in rows {
         let active = occurrence_indexes.is_empty()
             || occurrence_indexes.iter().any(|index| {
                 row.get(*index)
@@ -6919,16 +6987,154 @@ pub(crate) fn tb_auxiliary_anchors(
         if !active {
             continue;
         }
-        for index in &auxiliary_indexes {
+        for (index, values) in per_column.iter_mut() {
             if let Some(value) = row.get(*index) {
                 let normalized = anchor_norm(value);
                 if !normalized.is_empty() {
-                    anchors.insert(normalized);
+                    values.insert(normalized);
                 }
             }
         }
     }
-    anchors
+    per_column
+}
+
+/// TB 的「维度视图」行：把维度拆行还原成可按键的明细。
+///
+/// SAP 形态（06 号样例）：父行带科目编码、维度列为空、金额＝明细之和；
+/// 维度明细行科目编码留空、维度列有值。金额汇总视图（`tb_leaf_mask`）
+/// 保留父行剔明细；本视图反其道——**明细行继承父行科目，父行让位给明细**
+/// （父行金额是明细之和，同计会翻倍）。同编码形态（父行与明细行编码相同）
+/// 同样父行让位。没有维度拆行的科目保持原样（维度值为空串）。
+pub(crate) struct TbDimensionRow {
+    /// 原始行号：金额、币种等按它回读。
+    pub index: usize,
+    /// 归一化科目编码（子行继承父行）。
+    pub code: String,
+    /// 科目名（子行继承父行，显示口径）。
+    pub name: String,
+    /// 归一化维度值；空＝该科目无维度拆行。
+    pub aux: String,
+    /// 维度原始文本（去首尾空白），供展示。
+    pub aux_display: String,
+}
+
+pub(crate) fn tb_dimension_rows(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &serde_json::Map<String, Value>,
+    role: &str,
+    selected_column: Option<usize>,
+) -> Vec<TbDimensionRow> {
+    let mut auxiliary_indexes: Vec<usize> = mapped_column_names(mapping, role)
+        .iter()
+        .filter_map(|name| header_index(headers, name))
+        .collect();
+    if let Some(column) = selected_column {
+        // 键列已按“与 JE 认定列锚点交集最大”选出——只用它取维度值，
+        // 编码＋名称双列形态下另一列的值不进键（值体系不同永不对上）。
+        auxiliary_indexes.retain(|index| *index == column);
+    }
+    let code_index = mapped_column_names(mapping, "accountCode")
+        .first()
+        .and_then(|name| header_index(headers, name));
+    let name_index = mapped_column_names(mapping, "accountName")
+        .first()
+        .and_then(|name| header_index(headers, name));
+    let entity_index = mapped_column_names(mapping, "entity")
+        .first()
+        .and_then(|name| header_index(headers, name));
+    let mut children = Vec::<TbDimensionRow>::new();
+    if auxiliary_indexes.is_empty() || code_index.is_none() {
+        return children;
+    }
+    let code_index = code_index.expect("上方已判空");
+    let raw_of = |row: &[String], index: Option<usize>| -> String {
+        index
+            .and_then(|i| row.get(i))
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_default()
+    };
+    // 先扫一遍收集明细行并标记“被明细取代的父行”，再按原顺序输出独立行＋明细行。
+    let mut parent: Option<(usize, String, String, String)> = None;
+    let mut absorbed = HashSet::<usize>::new();
+    let mut emitted = HashSet::<usize>::new();
+    for (index, row) in rows.iter().enumerate() {
+        let aux_display = auxiliary_indexes
+            .iter()
+            .filter_map(|column| row.get(*column))
+            .map(|value| value.trim())
+            .find(|value| !value.is_empty())
+            .unwrap_or("")
+            .to_owned();
+        let aux = anchor_norm(&aux_display);
+        let own_code = normalize_account_code(&account_code_of(&raw_of(row, Some(code_index))));
+        let entity = raw_of(row, entity_index).to_uppercase();
+        if !aux.is_empty() {
+            // 维度明细行：编码为空时继承最近的同主体父行；找不到父行则无法
+            // 归属科目，跳过（不猜）。
+            let (code, name) = if own_code.is_empty() {
+                match parent.as_ref() {
+                    Some((_, parent_entity, code, name))
+                        if parent_entity.is_empty()
+                            || entity.is_empty()
+                            || *parent_entity == entity =>
+                    {
+                        (code.clone(), name.clone())
+                    }
+                    _ => (String::new(), String::new()),
+                }
+            } else {
+                (
+                    own_code.clone(),
+                    raw_of(row, name_index)
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .to_owned(),
+                )
+            };
+            if code.is_empty() {
+                continue;
+            }
+            if let Some((parent_index, _, _, _)) = parent.as_ref() {
+                absorbed.insert(*parent_index);
+            }
+            emitted.insert(index);
+            children.push(TbDimensionRow {
+                index,
+                code,
+                name,
+                aux,
+                aux_display,
+            });
+            continue;
+        }
+        // 无维度值且带编码：独立科目行，同时是后续明细行的父行候选。
+        if !own_code.is_empty() {
+            let name = raw_of(row, name_index);
+            parent = Some((index, entity, own_code, name));
+        }
+    }
+    let mut out = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        if absorbed.contains(&index) || emitted.contains(&index) {
+            continue;
+        }
+        let own_code = normalize_account_code(&account_code_of(&raw_of(row, Some(code_index))));
+        if own_code.is_empty() {
+            continue;
+        }
+        out.push(TbDimensionRow {
+            index,
+            code: own_code,
+            name: raw_of(row, name_index),
+            aux: String::new(),
+            aux_display: String::new(),
+        });
+    }
+    out.extend(children);
+    out
 }
 
 impl AccountMatchPolicy {
@@ -7949,6 +8155,14 @@ mod tests {
     }
 
     #[test]
+    fn 凭证行不会被建议为凭证识别字段() {
+        let headers = vec!["会计凭证".to_owned(), "会计凭证行".to_owned()];
+        let mapping = suggest_roles("je", &headers);
+        assert_eq!(mapping.get(&0), Some(&"id"));
+        assert_ne!(mapping.get(&1), Some(&"id"));
+    }
+
+    #[test]
     fn 取最长命中而非首个命中() {
         let m = suggest_roles("je", &["借方金额".into(), "贷方金额".into(), "金额".into()]);
         assert_eq!(m.get(&0), Some(&"functionalDebit"));
@@ -8594,7 +8808,7 @@ mod tests {
             "periodFunctionalCredit": "本期发生贷方"
         });
         let mapping = mapping.as_object().cloned().unwrap();
-        let anchors = tb_auxiliary_anchors(&headers, &rows, &[true, true, true], &mapping, "auxiliary");
+        let anchors = tb_auxiliary_anchors(&headers, &rows, &mapping, "auxiliary");
         assert!(!anchors.contains("dormanta"), "{anchors:?}");
         assert!(anchors.contains("activeb") && anchors.contains("activec"), "{anchors:?}");
     }

@@ -1,5 +1,26 @@
 # 账表映射统一方案
 
+## 2026-09-14 · SAP 空编码维度形态：锚点脱离末级过滤，新增公共维度视图
+
+- 06 号样例实测暴露两个缺陷：锚点提取挂在末级掩码上，把“科目编码为空、维度列有值”的 SAP 明细行全部滤掉，误报“暂无可验证的当期发生额行”；即使认定成功，TB 侧按末级行取维度也取不到值。修复分两层：
+- **锚点提取解耦**（`tb_dimension_column_anchors`）：维度列有值且四类发生列任一非零即为锚点行，不看末级/编码；发生额列未映射时不设门槛。`tb_auxiliary_anchors` 变为逐列锚点的并集。借款（loanId 角色）与存款、TBJE、映射阶段命令 `ledger.auxiliary_link` 同步换用。
+- **公共维度视图**（`tb_dimension_rows`）：把维度拆行还原成可按键明细——空编码明细行继承最近同主体父行科目，父行金额＝明细之和故让位（同计翻倍）；同编码形态同理；无维度科目整行保留（维度空串）。`selected_column` 参数支持编码＋名称双列按“与 JE 认定列锚点交集最大”选键列，另一列不进键。TBJE 完整性在 `auxiliaryRefined` 时 TB 侧整体切换到该视图（金额、币种仍按原始行号回读，口径不变）。
+- 真实 06 样例结论：TB 银行账户维度（356 个归一值）与 JE 核算维度（往来/部门，146 个值）逐列交叉零交集——按设计降级主体＋科目并如实提示；工具不再给出误导性“无发生额行”文案。回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib sap空编码`（维度细分＋父行不双计）；`--lib 真实06样例 -- --ignored`（端到端探针，文件缺失时静默跳过）。
+
+
+## 2026-09-14 · 科目身份按编码／名称任一有效，凭证行号不作凭证键
+
+- 公共 JE 正文判定已按“编码或名称任一有效”认定科目身份；公共 JE 向下填充和看账的内存与大 CSV 凭证预处理同步采用此规则。另一列映射后为空不使整行变成游离金额行；本行出现新编码时，空名称保持空白并清除旧名称上下文，只有编码与名称都空的合并单元格续行才继承。汇兑、存款、FA 与 TBJE 使用公共 JE 入口；借款利息的独立 JE 读取入口也调用同一科目身份填充函数。表尾空白分隔后的严格重开门槛仍独立防手工草稿，不能用它代替普通正文的科目完整性定义。
+- 公共映射建议不再把「会计凭证行」建议为凭证识别字段；看账运行时也排除历史映射中的凭证行号，确保按整张凭证分组。FA 科目复核进入下一步时以当前确认映射重提主体×科目组合，避免初始建议与运行参数不一致。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 凭证行`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 公共je填充遇新编码时不继承上一科目名称`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 借款je新编码不继承上一科目名称`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 新科目编码出现时空白科目名称不会继承上一科目`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 科目复核按人工映射重新提取主体科目组合`。
+
+## 2026-09-14 · LLM 映射复核 60% 可见线与当前形态边界
+
+- 公共账表 LLM 响应的卫生过滤新增统一下限：明确置信度低于 60% 的 change 直接丢弃，不再下发给前端作为“建议待确认”；前端规划器保留同一防线。60% 及以上仍按既有“自动应用、允许撤销”口径处理，历史响应未带置信度时保持兼容。
+- 看账、正负数凭证标记与 FA 系列复核规划器同步采用上述可见线，保证“所有映射复核”同一口径；这不改变合同抽取、文档分类等非映射类 LLM 输出。
+- 公共后端在 Coding 判出 `currentForm` 后动态收窄 `availableRoles`：当前形态的 required／any-of／optional 槽全部纳入复核；不属于任何互斥形态的公共角色（主体、科目、会计期间等）也继续纳入。只剔除在形态表中出现、但不属于当前形态的专属角色，避免净额、方向＋净额、借贷分列等不同方案互相串入。
+- 回归：`npx vitest run src/components/LedgerReviewAll.test.tsx src/KanzhangParityPage.test.ts src/faListUi.test.ts src/faSubtoolsUi.test.ts src/DepositInterestPage.test.ts`；`cargo test --manifest-path src-tauri/Cargo.toml --lib 复核建议的卫生过滤`；`cargo test --manifest-path src-tauri/Cargo.toml --lib 公共复核保留当前形态选填与公共角色并排除其他形态角色`。
+
 ## 2026-09-13 · 辅助核算联动（锚点反查）收编公共引擎并条件化 TBJE 匹配键
 
 - 列定位能力归公共：`ledger_mapping::auxiliary_link_verdict`（纯判定）＋`AnchorColumnAccumulator`（内存／磁盘单遍扫描同一接口）＋`tb_auxiliary_anchors`（TB 锚点提取）＋`anchor_norm`（维度值归一化，`L-1`／`l_1`／`L1` 同值）。锚点只取 TB 有当期发生额的行——休眠维度不会出现在 JE，不能当锚点；自动认定沿用借款工具验证过的严标准：恰有一列含任一锚点才认定，多列命中为歧义、宁可不细分；用户／LLM 已映射辅助列时只验证该列，对不上按 `noMatch` 静默降级＋提示，绝不悄悄换列。全程不设拦截。

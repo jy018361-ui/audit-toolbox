@@ -2205,7 +2205,7 @@ fn check_tb_vs_je(
         })
         .collect();
     let tb_aux_mapped = !ledger_mapping::mapped_column_names(tb_map, "auxiliary").is_empty();
-    let anchors = ledger_mapping::tb_auxiliary_anchors(&tb.headers, &tb.rows, &tb_keep, tb_map, "auxiliary");
+    let anchors = ledger_mapping::tb_auxiliary_anchors(&tb.headers, &tb.rows, tb_map, "auxiliary");
     let je_preferred = ledger_mapping::mapped_column_names(je_map, "auxiliary")
         .first()
         .cloned();
@@ -2268,14 +2268,10 @@ fn check_tb_vs_je(
             .as_deref()
             .and_then(|name| je_scans.iter().find(|scan| scan.header == name))
             .map(|scan| &scan.hit_anchors);
-        let candidates: Vec<usize> = ledger_mapping::mapped_column_names(tb_map, "auxiliary")
-            .iter()
-            .filter_map(|name| header_position(&tb.headers, name))
-            .collect();
-        candidates
+        // 逐列锚点不再挂末级过滤：SAP 形态的维度值在空编码明细行上。
+        ledger_mapping::tb_dimension_column_anchors(&tb.headers, &tb.rows, tb_map, "auxiliary")
             .into_iter()
-            .map(|index| {
-                let set = column_anchor_set(&tb.rows, &tb_keep, index);
+            .map(|(index, set)| {
                 let overlap = je_hits
                     .map(|hits| set.intersection(hits).count())
                     .unwrap_or(0);
@@ -2285,64 +2281,110 @@ fn check_tb_vs_je(
             .filter(|(_, overlap)| *overlap > 0)
             .map(|(index, _)| index)
     };
-    let mut remember_display = |raw: &str| -> String {
+    // 认定成功时 TB 侧改用维度视图：空编码明细行继承父行科目、父行让位
+    // （父行金额＝明细之和，同计翻倍）；无维度科目照常整行参与。
+    let dimension_view = aux_refined.then(|| {
+        ledger_mapping::tb_dimension_rows(&tb.headers, &tb.rows, tb_map, "auxiliary", tb_aux_index)
+    });
+    fn remember_display(map: &mut BTreeMap<String, String>, raw: &str) -> String {
         let normalized = ledger_mapping::anchor_norm(raw);
         if normalized.is_empty() {
             return String::new();
         }
         let display = raw.trim();
-        aux_display
-            .entry(normalized.clone())
+        map.entry(normalized.clone())
             .or_insert_with(|| display.to_owned());
         normalized
-    };
+    }
     let tb_records = fx::records(tb);
-    for (index, row) in tb.rows.iter().enumerate() {
-        if !functional_rows.get(index).copied().unwrap_or(true) {
-            continue;
+    if let Some(view) = dimension_view.as_ref() {
+        for dimension in view {
+            let Some(row) = tb.rows.get(dimension.index) else {
+                continue;
+            };
+            let entity = scoped_identity_parts(
+                tb,
+                row,
+                tb_map,
+                tb_fixed,
+                ledger_mapping::EntitySide::Tb,
+                entity_scope,
+            )
+            .0;
+            let account = account_policy.account_key(&entity, &dimension.code, &dimension.name);
+            if account.is_empty() {
+                continue;
+            }
+            let Some(record) = tb_records.get(dimension.index) else {
+                continue;
+            };
+            let (debit, credit) =
+                fx::side_amounts(record, tb_map, "ytdFunctional").unwrap_or((0.0, 0.0));
+            if !dimension.aux.is_empty() {
+                aux_display
+                    .entry(dimension.aux.clone())
+                    .or_insert_with(|| dimension.aux_display.clone());
+            }
+            let key = (entity, account, dimension.aux.clone());
+            let entry = tb_totals.entry(key.clone()).or_default();
+            entry.debit += debit;
+            entry.credit += credit;
+            *tb_row_counts.entry(key.clone()).or_default() += 1;
+            let currency = tb_row_currency(tb, row, tb_map);
+            if !currency.is_empty() {
+                tb_currencies
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(currency);
+            }
+            names
+                .entry(key)
+                .or_insert_with(|| dimension.name.clone());
         }
-        if !leaf.get(index).copied().unwrap_or(true) {
-            continue;
+    } else {
+        for (index, row) in tb.rows.iter().enumerate() {
+            if !functional_rows.get(index).copied().unwrap_or(true) {
+                continue;
+            }
+            if !leaf.get(index).copied().unwrap_or(true) {
+                continue;
+            }
+            if identity_parts(tb, row, tb_map, tb_fixed).1.is_empty() {
+                continue;
+            }
+            let key = scoped_matched_identity(
+                tb,
+                row,
+                tb_map,
+                tb_fixed,
+                ledger_mapping::EntitySide::Tb,
+                entity_scope,
+                &account_policy,
+            );
+            if key.1.is_empty() {
+                continue;
+            }
+            let Some(record) = tb_records.get(index) else {
+                continue;
+            };
+            let (debit, credit) =
+                fx::side_amounts(record, tb_map, "ytdFunctional").unwrap_or((0.0, 0.0));
+            let key = (key.0, key.1, String::new());
+            let entry = tb_totals.entry(key.clone()).or_default();
+            entry.debit += debit;
+            entry.credit += credit;
+            *tb_row_counts.entry(key.clone()).or_default() += 1;
+            let currency = tb_row_currency(tb, row, tb_map);
+            if !currency.is_empty() {
+                tb_currencies
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(currency);
+            }
+            names
+                .entry(key)
+                .or_insert_with(|| display_name(tb, row, tb_map));
         }
-        if identity_parts(tb, row, tb_map, tb_fixed).1.is_empty() {
-            continue;
-        }
-        let key = scoped_matched_identity(
-            tb,
-            row,
-            tb_map,
-            tb_fixed,
-            ledger_mapping::EntitySide::Tb,
-            entity_scope,
-            &account_policy,
-        );
-        if key.1.is_empty() {
-            continue;
-        }
-        let aux = tb_aux_index
-            .and_then(|column| row.get(column))
-            .map(|value| remember_display(value))
-            .unwrap_or_default();
-        let key = (key.0, key.1, aux);
-        let Some(record) = tb_records.get(index) else {
-            continue;
-        };
-        let (debit, credit) =
-            fx::side_amounts(record, tb_map, "ytdFunctional").unwrap_or((0.0, 0.0));
-        let entry = tb_totals.entry(key.clone()).or_default();
-        entry.debit += debit;
-        entry.credit += credit;
-        *tb_row_counts.entry(key.clone()).or_default() += 1;
-        let currency = tb_row_currency(tb, row, tb_map);
-        if !currency.is_empty() {
-            tb_currencies
-                .entry(key.clone())
-                .or_default()
-                .insert(currency);
-        }
-        names
-            .entry(key)
-            .or_insert_with(|| display_name(tb, row, tb_map));
     }
 
     // JE 侧：剔掉合计行与游离数字行，其余按科目累加借贷。
@@ -2368,7 +2410,7 @@ fn check_tb_vs_je(
                 return Ok(());
             }
             let aux = match je_aux_index.and_then(|column| row.values.get(column)) {
-                Some(value) if !value.trim().is_empty() => remember_display(value),
+                Some(value) if !value.trim().is_empty() => remember_display(&mut aux_display, value),
                 Some(_) => {
                     je_unassigned_rows += 1;
                     String::new()
@@ -2412,7 +2454,7 @@ fn check_tb_vs_je(
                 continue;
             }
             let aux = match je_aux_index.and_then(|column| row.get(column)) {
-                Some(value) if !value.trim().is_empty() => remember_display(value),
+                Some(value) if !value.trim().is_empty() => remember_display(&mut aux_display, value),
                 Some(_) => {
                     je_unassigned_rows += 1;
                     String::new()

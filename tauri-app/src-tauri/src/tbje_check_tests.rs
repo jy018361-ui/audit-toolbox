@@ -2180,3 +2180,93 @@ fn 手选je辅助列对不上按无匹配降级不换列() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn sap空编码维度明细行继承父行科目并按维度细分勾稽() {
+    let dir = fixture("aux-sap-empty-code");
+    // 06 号样例形态：父行带编码、维度为空；明细行维度有值、编码留空。
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,核算维度编码,核算维度名称,期初余额,本年借方,本年贷方,期末余额\n\
+         1002,银行存款,,,0,150,150,0\n\
+         ,,DIM-A,A银行,,100,100,0\n\
+         ,,DIM-B,B银行,,50,50,0\n\
+         2202,应付账款,,,0,150,0,-150\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,核算维度,借方,贷方\n\
+         2025-03-01,V1,1002,银行存款,DIM-A,80,0\n\
+         2025-03-01,V1,1002,银行存款,DIM-B,70,0\n\
+         2025-03-01,V1,2202,应付账款,,150,0\n",
+    )
+    .unwrap();
+    let mut params = auxiliary_params(&dir, None);
+    params["tbMapping"]["auxiliary"] = json!(["核算维度编码", "核算维度名称"]);
+    let result = run(&params, &AtomicBool::new(false)).unwrap();
+    let tb_vs_je = &result["tbVsJe"];
+    assert_eq!(tb_vs_je["auxiliaryRefined"], json!(true), "{result:#?}");
+    // 编码＋名称双列对 JE 单列：编码列全中、名称列未中＝覆盖不全，照样细分。
+    assert_eq!(
+        tb_vs_je["auxiliaryMatch"]["status"],
+        json!("partialCoverage"),
+        "{result:#?}"
+    );
+    // 两个维度行＋一个无维度科目；父行必须被明细取代，不得再出一条空维度合计。
+    assert_eq!(tb_vs_je["accounts"], json!(3), "{result:#?}");
+    let items = tb_vs_je["items"].as_array().unwrap();
+    let row_a = items
+        .iter()
+        .find(|item| item["auxiliary"] == json!("DIM-A"))
+        .unwrap_or_else(|| panic!("缺 DIM-A 维度行: {items:?}"));
+    assert_eq!(row_a["code"], json!("1002"), "明细行应继承父行科目编码");
+    assert_eq!(row_a["tbDebit"], json!(100.0));
+    assert_eq!(row_a["jeDebit"], json!(80.0));
+    assert!(
+        !items
+            .iter()
+            .any(|item| item["auxiliary"] == json!("") && item["code"] == json!("1002")),
+        "父行金额是明细之和，不得与明细同计: {items:?}"
+    );
+    // 2202 无维度科目两侧一致（150 对 150），不出现在差异明细里＝照常按科目参与。
+    assert_eq!(tb_vs_je["mismatched"], json!(2), "{result:#?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// 真实 06 样例（SAP 空编码维度明细形态）端到端探针：文件在才跑。
+#[test]
+#[ignore]
+fn 真实06样例辅助核算联动探针() {
+    let tb_path = r"C:\Users\lenovo\Downloads\TBJEPBC\06科目余额表_2024.1-3.xlsx";
+    let je_path = r"C:\Users\lenovo\Downloads\TBJEPBC\06序时账-2024.1-3.xlsx";
+    if !std::path::Path::new(tb_path).exists() || !std::path::Path::new(je_path).exists() {
+        return;
+    }
+    let mut params = json!({
+        "reportStart": "2024-01-01", "reportEnd": "2024-03-31",
+        "tbSource": {"inputPath": tb_path, "sheet": "", "headerRow": 1, "headerDepth": 2},
+        "jeSource": {"inputPath": je_path, "sheet": "", "headerRow": 0, "headerDepth": 1},
+    });
+    let tb = crate::engine_call_for_test("fx.inspect_tb", json!({"source": params["tbSource"].clone()})).unwrap();
+    let je = crate::engine_call_for_test("fx.inspect_je", json!({"source": params["jeSource"].clone()})).unwrap();
+    params["tbMapping"] = tb["suggestedMapping"].clone();
+    params["jeMapping"] = je["suggestedMapping"].clone();
+    let link = crate::fx::auxiliary_link_check(&json!({
+        "tbSource": params["tbSource"].clone(),
+        "tbMapping": params["tbMapping"].clone(),
+        "jeSource": params["jeSource"].clone(),
+        "jeMapping": params["jeMapping"].clone(),
+    }))
+    .unwrap();
+    println!("06 联动认定: {link:#?}");
+    let result = run(&params, &AtomicBool::new(false)).unwrap();
+    println!(
+        "06 tbVsJe 辅助结论: refined={} match={:?} accounts={} mismatched={} warnings={:?}",
+        result["tbVsJe"]["auxiliaryRefined"],
+        result["tbVsJe"]["auxiliaryMatch"],
+        result["tbVsJe"]["accounts"],
+        result["tbVsJe"]["mismatched"],
+        result["mappingWarnings"]
+    );
+}

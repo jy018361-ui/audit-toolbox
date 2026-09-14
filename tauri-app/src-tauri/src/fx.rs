@@ -2839,16 +2839,17 @@ pub(crate) fn forward_filled_je_table(
     let mask = ledger_mapping::ledger_fill_mask(&table.headers, &table.rows, &|role| {
         mapped_cols(mapping, role)
     });
-    if mask.iter().all(|kept| *kept) {
-        ledger_mapping::forward_fill_columns(&filled.headers, &mut filled.rows, &columns);
-    } else {
-        ledger_mapping::forward_fill_columns_skipping(
-            &filled.headers,
-            &mut filled.rows,
-            &columns,
-            &mask,
-        );
-    }
+    let account_columns = ["accountCode", "accountName", "account"]
+        .iter()
+        .flat_map(|role| mapped_cols(mapping, role))
+        .collect::<Vec<_>>();
+    ledger_mapping::forward_fill_ledger_identity_columns_skipping(
+        &filled.headers,
+        &mut filled.rows,
+        &columns,
+        &account_columns,
+        &mask,
+    );
     let filled = Arc::new(filled);
     store_job_table(cache_key, &filled);
     filled
@@ -3621,10 +3622,7 @@ pub(crate) fn auxiliary_link_check(params: &Value) -> Result<Value, AppError> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let tb_aux_mapped = !mapped_cols(&tb_mapping, role).is_empty();
-    let leaf =
-        ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|r| mapped_cols(&tb_mapping, r));
-    let anchors =
-        ledger_mapping::tb_auxiliary_anchors(&tb.headers, &tb.rows, &leaf, &tb_mapping, role);
+    let anchors = ledger_mapping::tb_auxiliary_anchors(&tb.headers, &tb.rows, &tb_mapping, role);
     let preferred = if anchor_only {
         None
     } else {
@@ -12139,6 +12137,38 @@ mod tests {
         // 第三行没有身份只有金额（合计行形态）：不接收填充，保持原样——
         // 填上一行的凭证号/科目它会变成真分录混进发生额。
         assert_eq!(filled.rows[2], vec!["", "", "-100"]);
+    }
+
+    #[test]
+    fn 公共je填充遇新编码时不继承上一科目名称() {
+        let headers = vec!["凭证号".into(), "科目编码".into(), "科目名称".into(), "金额".into()];
+        let table = Arc::new(FxTable {
+            path: PathBuf::new(),
+            sheet: "JE".into(),
+            sheets: vec!["JE".into()],
+            header_row: 1,
+            header_depth: 1,
+            raw_headers: vec![headers.clone()],
+            headers,
+            rows: vec![
+                vec!["JE-1".into(), "1001".into(), "银行存款".into(), "-100".into()],
+                vec!["".into(), "1601020000".into(), "".into(), "100".into()],
+            ],
+            row_count: 2,
+            header_candidates: vec![],
+            sampled: false,
+        });
+        let mapping = json!({
+            "id": ["凭证号"],
+            "accountCode": "科目编码",
+            "accountName": ["科目名称"],
+            "functionalAmount": "金额"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let filled = forward_filled_je_table(&table, &mapping);
+        assert_eq!(filled.rows[1], vec!["JE-1", "1601020000", "", "100"]);
     }
 
     #[test]

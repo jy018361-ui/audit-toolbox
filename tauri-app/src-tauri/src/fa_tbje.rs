@@ -454,14 +454,7 @@ fn analyze_with_progress(
             None,
         ));
     }
-    let report_end = NaiveDate::parse_from_str(
-        params
-            .get("reportEnd")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-        "%Y-%m-%d",
-    )
-    .map_err(|_| error("INVALID_DATE", "报告截止日必须为 YYYY-MM-DD。", None))?;
+    let report_end = parse_report_end(params)?;
     let tb_lines = normalize_tb(&tb, &tb_map, &assignments, params, entity_key_enabled)?;
     if tb_lines.is_empty() {
         return Err(error(
@@ -555,7 +548,7 @@ fn analyze_with_disk_je(
 
     let header_table = disk_table(je_spec, headers.clone(), Vec::new(), disk.row_count());
     let report_end = parse_report_end(params)?;
-    let report_start = NaiveDate::from_ymd_opt(report_end.year(), 1, 1).unwrap();
+    let report_start = report_end.map(|end| NaiveDate::from_ymd_opt(end.year(), 1, 1).unwrap());
     let mut any_row_in_period = false;
     let mut in_period_rows = 0usize;
     let mut raw_entities: Vec<String> = Vec::new();
@@ -572,17 +565,26 @@ fn analyze_with_disk_je(
                 "正在识别固定资产科目与报告期间…",
             );
         }
-        if let Some(date) = mapped_date(&header_table, &row.values, je_map, report_end.year()) {
-            years.insert(date.year());
-            if date >= report_start && date <= report_end {
-                any_row_in_period = true;
-                in_period_rows += 1;
-                // 零命中守卫要展示 JE 里的原始主体（未经条件键折算），
-                // 让用户能对照已确认科目的主体口径定位问题。
-                let raw = text(&header_table, &row.values, je_map, "entity");
-                if !raw.is_empty() && !raw_entities.contains(&raw) {
-                    raw_entities.push(raw);
+        let in_period = match (report_end, report_start) {
+            (Some(end), Some(start)) => {
+                if let Some(date) = mapped_date(&header_table, &row.values, je_map, Some(end.year())) {
+                    years.insert(date.year());
+                    date >= start && date <= end
+                } else {
+                    false
                 }
+            }
+            // 全口径核对：不按日期圈定报告期，任何数据行都属于本期。
+            _ => true,
+        };
+        if in_period {
+            any_row_in_period = true;
+            in_period_rows += 1;
+            // 零命中守卫要展示 JE 里的原始主体（未经条件键折算），
+            // 让用户能对照已确认科目的主体口径定位问题。
+            let raw = text(&header_table, &row.values, je_map, "entity");
+            if !raw.is_empty() && !raw_entities.contains(&raw) {
+                raw_entities.push(raw);
             }
         }
         let identity = account_identity_from_row(
@@ -611,7 +613,10 @@ fn analyze_with_disk_je(
         disk.row_count().max(1),
         "固定资产科目识别完成，正在读取命中凭证…",
     );
-    if disk.row_count() > 0 && !any_row_in_period {
+    if let (Some(end), Some(start)) = (report_end, report_start)
+        && disk.row_count() > 0
+        && !any_row_in_period
+    {
         let detail = if years.is_empty() {
             "序时账里没有能解析出来的记账日期。".to_owned()
         } else {
@@ -627,7 +632,7 @@ fn analyze_with_disk_je(
         return Err(error(
             "FA_TBJE_PERIOD_EMPTY",
             format!(
-                "报告期间 {report_start} 至 {report_end} 内没有任何序时账凭证，无法生成底稿。{detail}请把报告截止日改到账套所属年度后重试。"
+                "报告期间 {start} 至 {end} 内没有任何序时账凭证，无法生成底稿。{detail}请把报告截止日改到账套所属年度后重试。"
             ),
             None,
         ));
@@ -713,15 +718,20 @@ fn analyze_with_disk_je(
     })
 }
 
-fn parse_report_end(params: &Value) -> Result<NaiveDate, AppError> {
-    NaiveDate::parse_from_str(
-        params
-            .get("reportEnd")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-        "%Y-%m-%d",
-    )
-    .map_err(|_| error("INVALID_DATE", "报告截止日必须为 YYYY-MM-DD。", None))
+/// 表日缺省即全口径核对：不再按日期圈定报告期，整本序时账的凭证都进底稿。
+/// 仍接受旧参数（含历史任务回放）并在格式非法时报错，避免静默换口径。
+fn parse_report_end(params: &Value) -> Result<Option<NaiveDate>, AppError> {
+    let raw = params
+        .get("reportEnd")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .map(Some)
+        .map_err(|_| error("INVALID_DATE", "报告截止日必须为 YYYY-MM-DD。", None))
 }
 
 fn disk_table(
@@ -972,7 +982,7 @@ fn je_years(table: &FxTable, map: &Map<String, Value>, fallback_year: i32) -> Ve
     table
         .rows
         .iter()
-        .filter_map(|row| mapped_date(table, row, map, fallback_year))
+        .filter_map(|row| mapped_date(table, row, map, Some(fallback_year)))
         .map(|date| date.year())
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -985,7 +995,7 @@ fn normalize_je(
     map: &Map<String, Value>,
     assignments: &AssignmentIndex,
     params: &Value,
-    end: NaiveDate,
+    end: Option<NaiveDate>,
     cancel: &AtomicBool,
     entity_key_enabled: bool,
 ) -> Result<(Vec<JeLine>, usize, usize, String), AppError> {
@@ -996,7 +1006,7 @@ fn normalize_je(
     let junk = ledger_mapping::ledger_junk_mask(&table.headers, &table.rows, &|role| {
         mapped_columns(map, role)
     });
-    let start = NaiveDate::from_ymd_opt(end.year(), 1, 1).unwrap();
+    let start = end.map(|end| NaiveDate::from_ymd_opt(end.year(), 1, 1).unwrap());
     let mut period_table = table.clone();
     let date_indexes = indexes(table, map, "date");
     let primary_date_index = date_indexes.first().copied();
@@ -1006,14 +1016,19 @@ fn normalize_je(
         .enumerate()
         .filter(|(index, row)| {
             junk.get(*index).copied().unwrap_or(true)
-                && mapped_date(table, row, map, end.year())
-                    .is_some_and(|date| date >= start && date <= end)
+                && match (end, start) {
+                    (Some(end), Some(start)) => mapped_date(table, row, map, Some(end.year()))
+                        .is_some_and(|date| date >= start && date <= end),
+                    // 全口径核对：只剔噪声行，不按日期圈定报告期。
+                    _ => true,
+                }
         })
         .map(|(_, row)| {
             let mut normalized = row.clone();
-            if let (Some(index), Some(date)) =
-                (primary_date_index, mapped_date(table, row, map, end.year()))
-            {
+            if let (Some(index), Some(date)) = (
+                primary_date_index,
+                mapped_date(table, row, map, end.map(|end| end.year())),
+            ) {
                 normalized[index] = date.to_string();
             }
             normalized
@@ -1021,8 +1036,11 @@ fn normalize_je(
         .collect();
     // 期间过滤把整本序时账滤空时必须当场报错。此前只是安静地往下走，
     // 导出的新增／处置／JE 明细全是空表，用户以为"JE 没匹配上"，
-    // 实际是报告截止日的年度和账套年度对不上。
-    if period_table.rows.is_empty() && !table.rows.is_empty() {
+    // 实际是报告截止日的年度和账套年度对不上。全口径没有期间可滤，跳过。
+    if let (Some(end), Some(start)) = (end, start)
+        && period_table.rows.is_empty()
+        && !table.rows.is_empty()
+    {
         let years = je_years(table, map, end.year());
         let detail = if years.is_empty() {
             "序时账里没有能解析出来的记账日期。".to_owned()
@@ -1065,8 +1083,12 @@ fn normalize_je(
         .iter()
         .enumerate()
         .filter_map(|(i, _)| {
-            let date = parse_date(&dates[i])?;
-            (date >= start && date <= end && find_assignment(assignments, &identities[i]).is_some())
+            let in_period = match (end, start) {
+                (Some(end), Some(start)) => parse_date(&dates[i])
+                    .is_some_and(|date| date >= start && date <= end),
+                _ => true,
+            };
+            (in_period && find_assignment(assignments, &identities[i]).is_some())
                 .then(|| voucher_keys[i].clone())
         })
         .collect::<HashSet<_>>();
@@ -3115,13 +3137,13 @@ fn mapped_date(
     table: &FxTable,
     row: &[String],
     map: &Map<String, Value>,
-    fallback_year: i32,
+    fallback_year: Option<i32>,
 ) -> Option<NaiveDate> {
     ledger_mapping::parse_mapped_date(
         &table.headers,
         row,
         &indexes(table, map, "date"),
-        Some(fallback_year),
+        fallback_year,
     )
 }
 fn number(table: &FxTable, row: &[String], map: &Map<String, Value>, role: &str) -> Option<f64> {
@@ -4143,6 +4165,37 @@ mod tests {
         let err = analyze(&params, &AtomicBool::new(false)).unwrap_err();
         assert_eq!(err.code, "FA_TBJE_PERIOD_EMPTY");
         assert!(err.user_message.contains("2025"), "{}", err.user_message);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 表日缺省即全口径核对：整本序时账的凭证都进底稿，不再按年度圈定
+    /// 报告期；显式传旧参数仍按期间过滤（历史任务回放口径不变）。
+    /// 内存与大 CSV 磁盘两条路径都要覆盖。
+    #[test]
+    fn 表日缺省时全口径核对纳入账套内全部凭证() {
+        let (dir, _, mut params) = fixture();
+        let je = dir.join("je.csv");
+        let mut content = std::fs::read_to_string(&je).unwrap();
+        content.push_str("A,2024-12-15,V0,1601,机器设备,上年购置,80,0\nA,2024-12-15,V0,2202,应付账款,上年购置,0,80\n");
+        std::fs::write(&je, content).unwrap();
+        let totals = |analysis: &Analysis| {
+            analysis
+                .totals
+                .get(&(String::from("A"), String::from("机器设备")))
+                .unwrap()
+                .additions
+        };
+        params["reportEnd"] = json!("2025-12-31");
+        let filtered = analyze(&params, &AtomicBool::new(false)).unwrap();
+        assert_eq!(totals(&filtered), 500.0, "显式表日仍按期间滤掉上年凭证");
+        if let Some(object) = params.as_object_mut() {
+            object.remove("reportEnd");
+        }
+        let full = analyze(&params, &AtomicBool::new(false)).unwrap();
+        assert_eq!(totals(&full), 580.0, "缺省表日按全口径纳入上年购置凭证");
+        params["__testForceDiskLedger"] = json!(true);
+        let disk = analyze(&params, &AtomicBool::new(false)).unwrap();
+        assert_eq!(totals(&disk), 580.0, "大 CSV 磁盘路径同样全口径");
         let _ = std::fs::remove_dir_all(dir);
     }
 

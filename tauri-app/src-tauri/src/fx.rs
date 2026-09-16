@@ -3608,9 +3608,10 @@ pub(crate) fn auxiliary_link_check(params: &Value) -> Result<Value, AppError> {
         })
     };
     let tb = load_fx_table(&source_of("tbSource")?)?;
-    let je = load_fx_table(&source_of("jeSource")?)?;
+    let je_raw = load_fx_table(&source_of("jeSource")?)?;
     let tb_mapping = mapping_obj(params, "tbMapping");
     let je_mapping = mapping_obj(params, "jeMapping");
+    let je = forward_filled_je_table(&je_raw, &je_mapping);
     // 借款工具的维度角色是借款明细（loanId）而非通用辅助核算；anchorOnly
     // 对齐借款计算侧的既有口径——列定位只看锚点唯一性，不看用户映射了哪列。
     let role = params
@@ -3622,22 +3623,77 @@ pub(crate) fn auxiliary_link_check(params: &Value) -> Result<Value, AppError> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let tb_aux_mapped = !mapped_cols(&tb_mapping, role).is_empty();
-    let anchors = ledger_mapping::tb_auxiliary_anchors(&tb.headers, &tb.rows, &tb_mapping, role);
     let preferred = if anchor_only {
         None
     } else {
         mapped_cols(&je_mapping, role).first().cloned()
     };
-    let mut accumulator = ledger_mapping::AnchorColumnAccumulator::new(je.headers.len());
-    for row in &je.rows {
-        accumulator.feed(row, &anchors);
+    let entity_enabled = ledger_mapping::entity_key_enabled(!mapped_cols(&tb_mapping, "entity").is_empty(), !mapped_cols(&je_mapping, "entity").is_empty());
+    let scope: ledger_mapping::EntityScope = serde_json::from_value(params.get("entityScope").cloned().unwrap_or_else(|| json!({}))).unwrap_or_default();
+    let identity = |table: &FxTable, row: &[String], mapping: &Map<String, Value>, side| {
+        let value = |role| mapped_cols(mapping, role).iter().filter_map(|name| table.headers.iter().position(|header| header == name)).filter_map(|column| row.get(column)).find(|value| !value.trim().is_empty()).cloned().unwrap_or_default();
+        let raw = value("entity");
+        let entity = ledger_mapping::apply_entity_scope(side, &ledger_mapping::effective_entity(&raw, entity_enabled), &scope);
+        let code = ledger_mapping::normalize_account_code(&ledger_mapping::account_code_of(&value("accountCode")));
+        let name = ledger_mapping::account_name_of(&value("accountName")).to_owned();
+        (entity, code, name)
+    };
+    let selected = params.get("selectedAccounts").and_then(Value::as_array);
+    let selected_entities = params.get("selectedEntities").and_then(Value::as_array);
+    let in_scope = |entity: &str, code: &str| {
+        let entity_ok = selected_entities.is_none_or(|items| items.iter().any(|item| item.as_str().is_some_and(|value| ledger_mapping::effective_entity(value, entity_enabled) == entity)));
+        let account_ok = selected.is_none_or(|items| items.iter().any(|item| {
+            let selected_code = item.get("accountCode").or_else(|| item.get("account")).and_then(Value::as_str).or_else(|| item.as_str()).unwrap_or_default();
+            let selected_entity = item.get("entity").and_then(Value::as_str);
+            ledger_mapping::normalize_account_code(&ledger_mapping::account_code_of(selected_code)) == code
+                && selected_entity.is_none_or(|value| ledger_mapping::effective_entity(value, entity_enabled) == entity)
+        }));
+        entity_ok && account_ok
+    };
+    let mut last = BTreeMap::<String, String>::new();
+    let mut row_groups = vec![None; tb.rows.len()];
+    let anchors = ledger_mapping::tb_auxiliary_anchor_groups(&tb.headers, &tb.rows, &tb_mapping, role, |index, row| {
+        let (entity, own_code, _) = identity(&tb, row, &tb_mapping, ledger_mapping::EntitySide::Tb);
+        if !own_code.is_empty() { last.insert(entity.clone(), own_code.clone()); }
+        let code = if own_code.is_empty() { last.get(&entity).cloned().unwrap_or_default() } else { own_code };
+        if code.is_empty() || !in_scope(&entity, &code) { return None; }
+        let group = (entity, code);
+        row_groups[index] = Some(group.clone());
+        Some(group)
+    });
+    let mut tb_accumulator = ledger_mapping::GroupedAnchorColumnAccumulator::new(tb.headers.len());
+    for (index, row) in tb.rows.iter().enumerate() {
+        if let Some(group) = row_groups[index].clone() {
+            if let Some(values) = anchors.get(&group) { tb_accumulator.feed(group, row, values); }
+        }
     }
-    let verdict = ledger_mapping::auxiliary_link_verdict(
-        &anchors,
-        accumulator.finish(&je.headers),
-        je.rows.len(),
-        preferred.as_deref(),
-    );
+    let tb_scans = tb_accumulator.finish(&tb.headers);
+    let mut accumulator = ledger_mapping::GroupedAnchorColumnAccumulator::new(je.headers.len());
+    let mut totals = BTreeMap::new();
+    let je_mask = ledger_mapping::ledger_post_fill_body_mask(&je.headers, &je.rows, &|role| mapped_cols(&je_mapping, role));
+    for (index, row) in je.rows.iter().enumerate() {
+        if !je_mask[index] { continue; }
+        let (entity, code, _) = identity(&je, row, &je_mapping, ledger_mapping::EntitySide::Je);
+        let group = (entity, code);
+        if let Some(values) = anchors.get(&group) {
+            *totals.entry(group.clone()).or_insert(0usize) += 1;
+            accumulator.feed(group, row, values);
+        }
+    }
+    let scans = accumulator.finish(&je.headers);
+    let groups = ledger_mapping::auxiliary_link_group_verdicts_by_tb_columns(&anchors, &tb_scans, &scans, &totals, &tb_mapping, role, preferred.as_deref());
+    let status = if groups.is_empty() { "noAnchors" }
+        else if groups.iter().all(|group| group.verdict.dimension_keys()) { "verified" }
+        else if groups.iter().all(|group| group.verdict.status == "noMatch") { "noMatch" }
+        else if groups.iter().any(|group| group.verdict.status == "ambiguous") { "ambiguous" }
+        else { "partialCoverage" };
+    let verdict = ledger_mapping::AuxiliaryLinkVerdict {
+        status, column: groups.first().and_then(|group| group.verdict.column.clone()),
+        anchor_hits: groups.iter().map(|group| group.verdict.anchor_hits).sum(),
+        anchor_total: groups.iter().map(|group| group.verdict.anchor_total).sum(),
+        total_rows: totals.values().sum(), nonempty_rows: groups.iter().map(|group| group.verdict.nonempty_rows).sum(),
+        competing_columns: groups.iter().flat_map(|group| group.verdict.competing_columns.clone()).collect::<BTreeSet<_>>().into_iter().collect(),
+    };
     let dimension_label = if role == "loanId" {
         "借款明细"
     } else {
@@ -3657,7 +3713,7 @@ pub(crate) fn auxiliary_link_check(params: &Value) -> Result<Value, AppError> {
                 "TB {dimension_label}列没有可验证的当期发生额行，勾稽按主体＋科目进行。"
             )),
             "partialCoverage" => warnings.push(format!(
-                "JE {dimension_label}列「{}」覆盖不全（{}/{} 个维度命中），维度差异请结合未分维度行复核。",
+                "JE {dimension_label}列「{}」覆盖不全（{}/{} 个维度命中），未通过验证的科目整体按主体＋科目进行。",
                 verdict.column.clone().unwrap_or_default(),
                 verdict.anchor_hits,
                 verdict.anchor_total
@@ -3678,6 +3734,195 @@ pub(crate) fn auxiliary_link_check(params: &Value) -> Result<Value, AppError> {
         },
         "competingColumns": verdict.competing_columns,
         "warnings": warnings,
+        "groups": groups.iter().map(|group| json!({
+            "entity": group.entity, "account": group.account, "tbAuxMapped": tb_aux_mapped,
+            "status": group.verdict.status, "column": group.verdict.column,
+            "anchorHits": group.verdict.anchor_hits, "anchorTotal": group.verdict.anchor_total,
+            "coverage": if group.verdict.total_rows > 0 { group.verdict.nonempty_rows as f64 / group.verdict.total_rows as f64 } else { 0.0 },
+            "competingColumns": group.verdict.competing_columns,
+            "warnings": if group.verdict.dimension_keys() { Vec::<String>::new() } else { vec!["辅助验证未通过，本科目按主体＋科目匹配。".to_owned()] }
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// 多币种账户联动验证（映射阶段公共入口）。只信任用户当前映射的币种列：
+/// TB 外币是锚点，JE 对应主体＋科目中出现一次同币种即命中；JE 其余空白行
+/// 不影响结论。该入口只决定是否需要让存款／借款用户选择退回口径。
+pub(crate) fn currency_link_check(params: &Value) -> Result<Value, AppError> {
+    let source_of = |key: &str| -> Result<SourceSpec, AppError> {
+        serde_json::from_value(params.get(key).cloned().unwrap_or(Value::Null))
+            .map_err(|e| error("INVALID_PARAMS", "来源参数无效。", Some(e.to_string())))
+    };
+    let tb = load_fx_table(&source_of("tbSource")?)?;
+    let je_raw = load_fx_table(&source_of("jeSource")?)?;
+    let tb_mapping = mapping_obj(params, "tbMapping");
+    let je_mapping = mapping_obj(params, "jeMapping");
+    let je = forward_filled_je_table(&je_raw, &je_mapping);
+    let entity_enabled = ledger_mapping::entity_key_enabled(
+        !mapped_cols(&tb_mapping, "entity").is_empty(),
+        !mapped_cols(&je_mapping, "entity").is_empty(),
+    );
+    let scope: ledger_mapping::EntityScope = serde_json::from_value(
+        params
+            .get("entityScope")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    )
+    .unwrap_or_default();
+    let selected = params
+        .get("selectedAccounts")
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty());
+    let identity = |row: &RowRecord,
+                    mapping: &Map<String, Value>,
+                    side: ledger_mapping::EntitySide| {
+        let raw_entity = cell(row, mapping, "entity");
+        let entity = ledger_mapping::apply_entity_scope(
+            side,
+            &ledger_mapping::effective_entity(raw_entity, entity_enabled),
+            &scope,
+        );
+        let code = ledger_mapping::normalize_account_code(
+            &ledger_mapping::account_code_of(cell(row, mapping, "accountCode")),
+        );
+        let name = ledger_mapping::normalize_header(&ledger_mapping::account_name_of(cell(
+            row,
+            mapping,
+            "accountName",
+        )));
+        let account = if code.is_empty() { name } else { code };
+        (entity, account)
+    };
+    let in_scope = |entity: &str, account: &str| {
+        selected.is_none_or(|items| {
+            items.iter().any(|item| {
+                let raw_account = item
+                    .get("accountCode")
+                    .or_else(|| item.get("account"))
+                    .and_then(Value::as_str)
+                    .or_else(|| item.as_str())
+                    .unwrap_or_default();
+                let code = ledger_mapping::normalize_account_code(
+                    &ledger_mapping::account_code_of(raw_account),
+                );
+                let selected_account = if code.is_empty() {
+                    ledger_mapping::normalize_header(&ledger_mapping::account_name_of(raw_account))
+                } else {
+                    code
+                };
+                let entity_ok = item
+                    .get("entity")
+                    .and_then(Value::as_str)
+                    .is_none_or(|value| {
+                        ledger_mapping::effective_entity(value, entity_enabled) == entity
+                    });
+                entity_ok && selected_account == account
+            })
+        })
+    };
+
+    #[derive(Default)]
+    struct TbCurrencies {
+        recognized: BTreeSet<String>,
+        has_blank: bool,
+    }
+    let mut tb_groups = BTreeMap::<(String, String), TbCurrencies>::new();
+    for row in tb_leaf_records(&tb, &tb_mapping) {
+        let group = identity(&row, &tb_mapping, ledger_mapping::EntitySide::Tb);
+        if group.1.is_empty() || !in_scope(&group.0, &group.1) {
+            continue;
+        }
+        let raw = cell(&row, &tb_mapping, "currency").trim();
+        let entry = tb_groups.entry(group).or_default();
+        match ledger_mapping::normalize_currency_code(raw) {
+            Some(code) => {
+                entry.recognized.insert(code.to_owned());
+            }
+            None if raw.is_empty() => entry.has_blank = true,
+            None => {}
+        }
+    }
+    // 只有同一账户存在外币且还有另一币种（含空白本币行）时，JE 才需要
+    // 提供币种来拆分发生额。单一 USD 户按科目已经能够唯一归集。
+    let required_groups = tb_groups
+        .into_iter()
+        .filter_map(|(group, values)| {
+            let foreign = values
+                .recognized
+                .iter()
+                .filter(|code| code.as_str() != "CNY")
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let distinct = values.recognized.len() + usize::from(values.has_blank);
+            (!foreign.is_empty() && distinct > 1).then_some((group, foreign))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut je_hits = BTreeMap::<(String, String), BTreeSet<String>>::new();
+    if first_col(&je_mapping, "currency").is_some() {
+        let body = ledger_mapping::ledger_post_fill_body_mask(
+            &je.headers,
+            &je.rows,
+            &|role| mapped_cols(&je_mapping, role),
+        );
+        for (row, keep) in records(&je).into_iter().zip(body) {
+            if !keep {
+                continue;
+            }
+            let group = identity(&row, &je_mapping, ledger_mapping::EntitySide::Je);
+            if !required_groups.contains_key(&group) {
+                continue;
+            }
+            if let Some(code) = ledger_mapping::normalize_currency_code(cell(
+                &row,
+                &je_mapping,
+                "currency",
+            )) {
+                if code != "CNY" {
+                    je_hits.entry(group).or_default().insert(code.to_owned());
+                }
+            }
+        }
+    }
+    let groups = required_groups
+        .iter()
+        .map(|((entity, account), anchors)| {
+            let hits = je_hits
+                .get(&(entity.clone(), account.clone()))
+                .cloned()
+                .unwrap_or_default();
+            let missing = anchors.difference(&hits).cloned().collect::<Vec<_>>();
+            json!({
+                "entity": entity,
+                "account": account,
+                "foreignCurrencies": anchors,
+                "matchedCurrencies": hits,
+                "missingCurrencies": missing,
+                "verified": missing.is_empty(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let missing = groups
+        .iter()
+        .flat_map(|group| {
+            group["missingCurrencies"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<BTreeSet<_>>();
+    let affected_group_count = groups
+        .iter()
+        .filter(|group| group["verified"] == json!(false))
+        .count();
+    Ok(json!({
+        "required": !required_groups.is_empty(),
+        "verified": affected_group_count == 0,
+        "missingCurrencies": missing,
+        "affectedGroupCount": affected_group_count,
+        "groups": groups,
     }))
 }
 
@@ -4670,10 +4915,38 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
     // 辅助核算是可选的细化维度：**两边都映射了才启用**。启用后如果匹配不上，
     // 下面会自动退回粗粒度重跑一次——宁可粗一点也不要因为两边写法或粒度不同
     // 而全盘失配（实测 4800：TB 无辅助核算列、JE 按供应商客户拆行，332 个键全丢）。
-    let both_have_auxiliary = !mapped_cols(&tb_mapping, "auxiliary").is_empty()
-        && !mapped_cols(&je_mapping, "auxiliary").is_empty();
-    let mut use_auxiliary = both_have_auxiliary;
-    let mut attempt = |use_auxiliary: bool| -> Result<RollforwardAttempt, AppError> {
+    let tb_records = records(&tb_table);
+    let je_records = records(&je_table);
+    let group_of = |row: &RowRecord, mapping: &Map<String, Value>, side| {
+        let account = account_name(row, mapping);
+        if !matches!(role_for(&account, params).as_str(), "cash" | "monetary_asset" | "monetary_liability") {
+            return None;
+        }
+        let entity = scoped_entity_for(row, mapping, params, side).to_owned();
+        let (code, name) = account_code_and_name(row, mapping);
+        Some((entity.clone(), account_policy.account_key(&entity, &code, &name)))
+    };
+    let tb_groups = tb_records.iter().map(|row| group_of(row, &tb_mapping, ledger_mapping::EntitySide::Tb)).collect::<Vec<_>>();
+    let anchors = ledger_mapping::tb_auxiliary_anchor_groups(&tb_table.headers, &tb_table.rows, &tb_mapping, "auxiliary", |index, _| tb_groups[index].clone());
+    let mut tb_acc = ledger_mapping::GroupedAnchorColumnAccumulator::new(tb_table.headers.len());
+    for (row, group) in tb_table.rows.iter().zip(&tb_groups) {
+        if let Some(group) = group && let Some(values) = anchors.get(group) { tb_acc.feed(group.clone(), row, values); }
+    }
+    let mut je_acc = ledger_mapping::GroupedAnchorColumnAccumulator::new(je_table.headers.len());
+    let mut totals = BTreeMap::new();
+    for row in &je_records {
+        if !is_je_business_row(row, &je_mapping) { continue; }
+        if let Some(group) = group_of(row, &je_mapping, ledger_mapping::EntitySide::Je) && let Some(values) = anchors.get(&group) {
+            *totals.entry(group.clone()).or_default() += 1;
+            je_acc.feed(group, row.row, values);
+        }
+    }
+    let tb_scans = tb_acc.finish(&tb_table.headers);
+    let je_scans = je_acc.finish(&je_table.headers);
+    let preferred = mapped_cols(&je_mapping, "auxiliary").first().cloned();
+    let auxiliary_groups = ledger_mapping::auxiliary_link_group_verdicts_by_tb_columns(&anchors, &tb_scans, &je_scans, &totals, &tb_mapping, "auxiliary", preferred.as_deref());
+    let mut auxiliary_columns = ledger_mapping::auxiliary_verified_columns(&auxiliary_groups, &tb_scans, &je_scans, &tb_table.headers, &je_table.headers, &tb_mapping, "auxiliary");
+    let mut attempt = |columns: &BTreeMap<ledger_mapping::AuxiliaryGroupKey, (usize, usize)>| -> Result<RollforwardAttempt, AppError> {
         let mut tb_balances = BTreeMap::<String, (String, String, String, String, f64, f64)>::new();
         // TB 侧认定要校验的余额键。JE 侧照它收行，保证两边口径一致。
         let mut wanted = HashSet::<String>::new();
@@ -4690,7 +4963,10 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
                     .to_owned();
             let (account_code, account_only_name) = account_code_and_name(&row, &tb_mapping);
             let currency = currency_for(&row, &tb_mapping, &account, params);
-            let auxiliary = auxiliary_value(&row, &tb_mapping);
+            let group = (entity.clone(), account_policy.account_key(&entity, &account_code, &account_only_name));
+            let use_auxiliary = columns.contains_key(&group);
+            let auxiliary = columns.get(&group).map(|(index, _)| ledger_mapping::anchor_norm(row.row.get(*index).map(String::as_str).unwrap_or(""))).unwrap_or_default();
+            let auxiliary = if use_auxiliary && auxiliary.is_empty() { "未分辅助".to_owned() } else { auxiliary };
             if currency.is_empty() || currency == functional_currency(&entity, params) {
                 continue;
             }
@@ -4756,7 +5032,10 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
                     .to_owned();
             let (account_code, account_only_name) = account_code_and_name(&row, &je_mapping);
             let currency = currency_for(&row, &je_mapping, &account, params);
-            let auxiliary = auxiliary_value(&row, &je_mapping);
+            let group = (entity.clone(), account_policy.account_key(&entity, &account_code, &account_only_name));
+            let use_auxiliary = columns.contains_key(&group);
+            let auxiliary = columns.get(&group).map(|(_, index)| ledger_mapping::anchor_norm(row.row.get(*index).map(String::as_str).unwrap_or(""))).unwrap_or_default();
+            let auxiliary = if use_auxiliary && auxiliary.is_empty() { "未分辅助".to_owned() } else { auxiliary };
             let key = balance_match_key_with_policy(
                 &entity,
                 &account_code,
@@ -4819,15 +5098,19 @@ fn validate_tb_je_balance_rollforward(params: &Value) -> Result<Value, AppError>
         })
     };
 
-    let mut outcome = attempt(use_auxiliary)?;
+    let mut outcome = attempt(&auxiliary_columns)?;
     // 「能匹配上」才算数：带辅助核算反而对不上时，退回公司＋科目编码重来一次。
-    if use_auxiliary && !outcome.issues.is_empty() {
-        let coarse = attempt(false)?;
-        if coarse.issues.len() < outcome.issues.len() {
-            use_auxiliary = false;
-            outcome = coarse;
+    if !auxiliary_columns.is_empty() && !outcome.issues.is_empty() {
+        // 第二道门是余额滚动；只撤回失败科目的辅助键，不影响其他已通过组。
+        for issue in &outcome.issues {
+            let entity = issue["entity"].as_str().unwrap_or("");
+            let account = issue["account"].as_str().unwrap_or("");
+            let (code, name) = account_code_name_from_display(account);
+            auxiliary_columns.remove(&(entity.to_owned(), account_policy.account_key(entity, &code, &name)));
         }
+        outcome = attempt(&auxiliary_columns)?;
     }
+    let use_auxiliary = !auxiliary_columns.is_empty();
     let checked_keys = outcome.checked;
     let issues = outcome.issues;
     if !issues.is_empty() {
@@ -15464,7 +15747,9 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
                 .filter(|p| {
                     let name = p.file_name().unwrap_or_default().to_string_lossy();
                     !name.starts_with("~$")
-                        && (name.to_lowercase().contains("tb") || name.contains("科目余额"))
+                        && !name.contains("完整性核对")
+                        && !name.starts_with("FA_")
+                        && (name.to_lowercase().contains("tb") || name.contains("余额表"))
                 })
                 .collect();
             files.sort();
@@ -15474,22 +15759,22 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-                let source = SourceSpec {
-                    input_path: path.to_string_lossy().into_owned(),
-                    sheet: String::new(),
-                    header_row: 0,
-                    header_depth: 0,
-                };
-                let Ok(table) = load_fx_table(&source) else {
-                    println!("\n══════ {name}：读取失败");
-                    continue;
-                };
                 // 映射走生产入口，保证这里看到的口径和用户看到的一致。
                 let Ok(inspected) = crate::engine_call_for_test(
                     "fx.inspect_tb",
                     json!({"source": {"inputPath": path.to_string_lossy()}}),
                 ) else {
-                    println!("  识别失败");
+                    println!("\n══════ {name}：识别失败");
+                    continue;
+                };
+                let source = SourceSpec {
+                    input_path: path.to_string_lossy().into_owned(),
+                    sheet: inspected["sheet"].as_str().unwrap_or_default().into(),
+                    header_row: inspected["headerRow"].as_u64().unwrap_or(0) as usize,
+                    header_depth: inspected["headerDepth"].as_u64().unwrap_or(0) as usize,
+                };
+                let Ok(table) = load_fx_table(&source) else {
+                    println!("\n══════ {name}：读取失败");
                     continue;
                 };
                 let mapping = inspected["suggestedMapping"]
@@ -15507,6 +15792,7 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
                     "\n══════ {name}\n  总行 {total}｜计入 {kept}｜剔除 {}（其中无身份噪声行 {junked}）",
                     total - kept
                 );
+                println!("  Sheet={} 标题行={} 表头层数={} 映射={}", source.sheet, source.header_row, source.header_depth, Value::Object(mapping.clone()));
                 // 抽几行被剔除的看看剔得对不对。
                 let code = column_of("accountCode")
                     .first()
@@ -15534,8 +15820,56 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
                         cell(row, name_index)
                     );
                 }
+                // 可选完整诊断：保留所有行而非仅抽样，方便最终一次性汇总异常。
+                if let Ok(output) = std::env::var("TB_STRUCTURE_REPORT_DIR") {
+                    let directory = PathBuf::from(output);
+                    fs::create_dir_all(&directory).unwrap();
+                    let records = table.rows.iter().enumerate().map(|(index, row)| {
+                        json!({"sourceRow": table.header_row + index + 2, "included": leaf[index], "junk": !junk[index], "values": row})
+                    }).collect::<Vec<_>>();
+                    let report = json!({"inputPath": path, "sheet": source.sheet, "headerRow": source.header_row, "headerDepth": source.header_depth, "mapping": mapping, "headers": table.headers, "total": total, "included": kept, "rows": records});
+                    fs::write(directory.join(format!("{name}.json")), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+                }
             }
         }
+    }
+
+    #[test]
+    fn 用户映射币种列按tb外币锚点验证且不要求je整列非空() {
+        let dir = std::env::temp_dir().join(format!("currency-link-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let tb = dir.join("tb.csv");
+        let je = dir.join("je.csv");
+        fs::write(
+            &tb,
+            "主体,科目编码,科目名称,币种,年初余额,年末余额\nE,100201,银行存款,CNY,100,120\nE,100201,银行存款,USD,200,240\n",
+        )
+        .unwrap();
+        fs::write(
+            &je,
+            "主体,日期,凭证号,科目编码,科目名称,币种,本位币金额\nE,2025-01-01,1,100201,银行存款,USD,20\nE,2025-01-02,2,100201,银行存款,,40\n",
+        )
+        .unwrap();
+        let params = json!({
+            "tbSource":{"inputPath":tb,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbMapping":{"entity":"主体","accountCode":"科目编码","accountName":"科目名称","currency":"币种","openingFunctionalAmount":"年初余额","closingFunctionalAmount":"年末余额"},
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{"entity":"主体","date":"日期","id":["凭证号"],"accountCode":"科目编码","accountName":"科目名称","currency":"币种","functionalAmount":"本位币金额"},
+            "selectedAccounts":[{"entity":"E","accountCode":"100201"}]
+        });
+        let linked = currency_link_check(&params).unwrap();
+        assert_eq!(linked["required"], true, "{linked:#}");
+        assert_eq!(linked["verified"], true, "JE 空白行不影响已命中的 USD：{linked:#}");
+
+        fs::write(
+            &tb,
+            "主体,科目编码,科目名称,币种,年初余额,年末余额\nE,100201,银行存款,CNY,100,120\nE,100201,银行存款,USD,200,240\nE,100201,银行存款,HKD,300,360\n",
+        )
+        .unwrap();
+        let missing = currency_link_check(&params).unwrap();
+        assert_eq!(missing["verified"], false, "{missing:#}");
+        assert_eq!(missing["missingCurrencies"], json!(["HKD"]));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

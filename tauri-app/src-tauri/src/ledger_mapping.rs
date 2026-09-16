@@ -603,6 +603,8 @@ static JE_ROLES: &[Role] = &[
             "公司名称",
             "单位名称",
             "核算主体",
+            "核算组织",
+            "核算组织名称",
             "主体",
             "公司",
             "单位",
@@ -1004,6 +1006,8 @@ static TB_ROLES: &[Role] = &[
             "公司代碼",
             "公司名称",
             "核算主体",
+            "核算组织",
+            "核算组织名称",
             "主体",
             "company",
             "companycode",
@@ -3824,6 +3828,19 @@ pub(crate) fn tb_leaf_mask(
             // 任何金额丢失。存款利息等只需末级科目的工具依赖这条：
             // `6603` 零值汇总行不进测算，`66030101` 末级行仍保留。
             mark_zero_value_parents(&identities, &currencies, &levels, &values, &mut rollup);
+            // 多主体 TB 常按“科目优先、主体次之”排列：A/2501、B/2501、
+            // A/250102、B/250102。相邻扫描会在主体变化处停下，因而看不到
+            // 同一主体的父子科目。先按主体＋币种＋科目编码聚合，再用明确的
+            // 编码祖先关系做一次非连续勾稽；只有全部语义金额列都相等才剔除
+            // 父项，避免业务工具各自补一层去重。
+            if !fixed_width_leaf_table {
+                mark_non_contiguous_code_rollups(
+                    &identities,
+                    &currencies,
+                    &values,
+                    &mut rollup,
+                );
+            }
             mark_rollup_by_sum(
                 &identities,
                 &currencies,
@@ -3876,10 +3893,127 @@ pub(crate) fn tb_leaf_mask(
                     }
                 }
             }
+
+            // 同科目的主体／辅助明细折叠后，再做一次非连续科目树勾稽。
+            // 多层 ERP TB 会同时列示“2001 父科目主体汇总”、
+            // “200101 子科目主体汇总”和“200101 辅助明细”。首轮判断时
+            // 子科目汇总与辅助明细尚未折叠，两者相加会使父子金额假性不等。
+            // 此处只对当前仍保留的行复用同一强证据规则：主体、币种、
+            // 最近直接子编码以及全部语义金额都勾稽才删父项。不等时保持旧结果。
+            let kept = rollup
+                .iter()
+                .enumerate()
+                .filter_map(|(index, excluded)| (!*excluded).then_some(index))
+                .collect::<Vec<_>>();
+            if kept.len() >= 2 {
+                let compact_identities = kept
+                    .iter()
+                    .map(|index| identities[*index].clone())
+                    .collect::<Vec<_>>();
+                let compact_currencies = kept
+                    .iter()
+                    .map(|index| currencies[*index].clone())
+                    .collect::<Vec<_>>();
+                let compact_values = values
+                    .iter()
+                    .map(|column| kept.iter().map(|index| column[*index]).collect::<Vec<_>>())
+                    .collect::<Vec<_>>();
+                let mut compact_rollup = vec![false; kept.len()];
+                mark_non_contiguous_code_rollups(
+                    &compact_identities,
+                    &compact_currencies,
+                    &compact_values,
+                    &mut compact_rollup,
+                );
+                for (compact_index, excluded) in compact_rollup.into_iter().enumerate() {
+                    if excluded {
+                        rollup[kept[compact_index]] = true;
+                    }
+                }
+            }
         }
     }
 
     rollup.iter().map(|v| !v).collect()
+}
+
+/// 按主体、币种和科目编码聚合后识别非连续父子科目。
+///
+/// 这里只接受编码前缀提供的强层级证据；同编码辅助明细、空编码维度行以及仅靠
+/// 级次才能判断的结构仍交给相邻勾稽处理。对一个父编码，只汇总当前表内最靠近
+/// 它的直接子编码，避免同时把中间层和孙级重复相加。
+fn mark_non_contiguous_code_rollups(
+    identities: &[(String, String)],
+    currencies: &[String],
+    values: &[Vec<f64>],
+    rollup: &mut [bool],
+) {
+    type GroupKey = (String, String);
+    let mut partitions = BTreeMap::<GroupKey, BTreeMap<String, Vec<usize>>>::new();
+    for index in 0..rollup.len() {
+        if rollup[index] || identities[index].1.is_empty() {
+            continue;
+        }
+        partitions
+            .entry((identities[index].0.clone(), currencies[index].clone()))
+            .or_default()
+            .entry(identities[index].1.clone())
+            .or_default()
+            .push(index);
+    }
+
+    let original_rollup = rollup.to_vec();
+    for codes in partitions.values() {
+        for (parent, parent_rows) in codes {
+            if parent_rows.iter().any(|index| original_rollup[*index]) {
+                continue;
+            }
+            let descendants = codes
+                .keys()
+                .filter(|code| is_ancestor_code(parent, code))
+                .collect::<Vec<_>>();
+            if descendants.is_empty() {
+                continue;
+            }
+            let direct_children = descendants
+                .iter()
+                .copied()
+                .filter(|candidate| {
+                    !descendants.iter().any(|middle| {
+                        *middle != *candidate
+                            && is_ancestor_code(parent, middle)
+                            && is_ancestor_code(middle, candidate)
+                    })
+                })
+                .collect::<Vec<_>>();
+            if direct_children.is_empty() {
+                continue;
+            }
+
+            let matched = values.iter().all(|column| {
+                let parent_total = parent_rows.iter().map(|index| column[*index]).sum::<f64>();
+                let child_total = direct_children
+                    .iter()
+                    .flat_map(|code| codes.get(*code).into_iter().flatten())
+                    .map(|index| column[*index])
+                    .sum::<f64>();
+                amounts_equal(parent_total, child_total)
+            });
+            let parent_is_zero = values.iter().all(|column| {
+                parent_rows
+                    .iter()
+                    .map(|index| column[*index])
+                    .sum::<f64>()
+                    .abs()
+                    <= 0.005
+            });
+            if matched && !parent_is_zero {
+                for index in parent_rows {
+                    rollup[*index] = true;
+                }
+            }
+        }
+    }
 }
 
 fn mark_zero_value_parents(
@@ -4191,13 +4325,19 @@ fn mark_rollup_by_sum(
             .filter(|index| !identities[**index].1.is_empty())
             .collect::<Vec<_>>();
         // 同编码的辅助核算组优先保留父／汇总行；无编码的核算维度同理。
-        // 小计行无编码或父子编码不同，则保留可用于按科目核对的明细。
+        // 不同编码必须保留层级更深的一侧。反向扫描时 anchor 可能是子科目、
+        // members 里反而是父科目，旧逻辑固定删除 anchor 会把终级科目删掉。
         let keep_anchor = !anchor_code.is_empty()
             && (coded_members.is_empty()
                 || coded_members
                     .iter()
                     .all(|index| identities[**index].1 == *anchor_code));
-        if keep_anchor {
+        let members_are_ancestors = !anchor_code.is_empty()
+            && !coded_members.is_empty()
+            && coded_members
+                .iter()
+                .all(|index| is_ancestor_code(&identities[**index].1, anchor_code));
+        if keep_anchor || members_are_ancestors {
             for index in candidate.members {
                 rollup[index] = true;
             }
@@ -6790,7 +6930,7 @@ impl AnchorColumnScan {
 
 /// 锚点反查结论。`status` 对应调用方的处置：
 /// - `verified`：认定成功，辅助核算进匹配键；
-/// - `partialCoverage`：列是对的但部分锚点未见，进键＋覆盖提示；
+/// - `partialCoverage`：列只覆盖部分锚点，不进键，整组回退主体＋科目；
 /// - `noMatch`／`noAnchors`／`ambiguous`：降级按主体＋科目，`noMatch` 附提示。
 #[derive(Clone, Debug)]
 pub(crate) struct AuxiliaryLinkVerdict {
@@ -6806,8 +6946,20 @@ pub(crate) struct AuxiliaryLinkVerdict {
 impl AuxiliaryLinkVerdict {
     /// 是否把辅助核算并入匹配键。
     pub(crate) fn dimension_keys(&self) -> bool {
-        matches!(self.status, "verified" | "partialCoverage")
+        self.status == "verified"
     }
+}
+
+/// 辅助核算验证的最小业务范围：（有效主体，科目键）。
+/// 主体是否有效由调用工具先按双侧主体规则折算；这里不读取、
+/// 也不推断报告期间。
+pub(crate) type AuxiliaryGroupKey = (String, String);
+
+#[derive(Clone, Debug)]
+pub(crate) struct AuxiliaryLinkGroupVerdict {
+    pub entity: String,
+    pub account: String,
+    pub verdict: AuxiliaryLinkVerdict,
 }
 
 /// 纯判定：给定各列扫描结果与锚点集合出结论，不碰 IO。
@@ -6878,6 +7030,146 @@ pub(crate) struct AnchorColumnAccumulator {
     per_column: Vec<(HashSet<String>, usize)>,
 }
 
+/// 按（有效主体，科目）隔离的 JE 锚点扫描器。同一个辅助值
+/// 可以合法地出现在不同科目，不能用全表命中替代本组命中。
+pub(crate) struct GroupedAnchorColumnAccumulator {
+    column_count: usize,
+    per_group: BTreeMap<AuxiliaryGroupKey, Vec<(HashSet<String>, usize)>>,
+}
+
+impl GroupedAnchorColumnAccumulator {
+    pub(crate) fn new(column_count: usize) -> Self {
+        Self {
+            column_count,
+            per_group: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn feed(
+        &mut self,
+        group: AuxiliaryGroupKey,
+        row: &[String],
+        anchors: &HashSet<String>,
+    ) {
+        let columns = self
+            .per_group
+            .entry(group)
+            .or_insert_with(|| vec![(HashSet::new(), 0); self.column_count]);
+        for (column, value) in row.iter().enumerate().take(self.column_count) {
+            if value.trim().is_empty() {
+                continue;
+            }
+            columns[column].1 += 1;
+            let normalized = anchor_norm(value);
+            if anchors.contains(&normalized) {
+                columns[column].0.insert(normalized);
+            }
+        }
+    }
+
+    pub(crate) fn finish(
+        self,
+        headers: &[String],
+    ) -> BTreeMap<AuxiliaryGroupKey, Vec<AnchorColumnScan>> {
+        self.per_group
+            .into_iter()
+            .map(|(group, columns)| {
+                let scans = columns
+                    .into_iter()
+                    .zip(headers)
+                    .map(|((hit_anchors, nonempty_rows), header)| AnchorColumnScan {
+                        header: header.clone(),
+                        hit_anchors,
+                        nonempty_rows,
+                    })
+                    .collect();
+                (group, scans)
+            })
+            .collect()
+    }
+}
+
+/// 每个主体＋科目独立出结论。未在 JE 出现的 TB 组也会返回
+/// `noMatch`；不允许一个组的命中使另一组误进辅助键。
+pub(crate) fn auxiliary_link_group_verdicts(
+    anchors: &BTreeMap<AuxiliaryGroupKey, HashSet<String>>,
+    scans: BTreeMap<AuxiliaryGroupKey, Vec<AnchorColumnScan>>,
+    totals: &BTreeMap<AuxiliaryGroupKey, usize>,
+    preferred: Option<&str>,
+) -> Vec<AuxiliaryLinkGroupVerdict> {
+    anchors
+        .iter()
+        .map(|((entity, account), group_anchors)| AuxiliaryLinkGroupVerdict {
+            entity: entity.clone(),
+            account: account.clone(),
+            verdict: auxiliary_link_verdict(
+                group_anchors,
+                scans
+                    .get(&(entity.clone(), account.clone()))
+                    .cloned()
+                    .unwrap_or_default(),
+                totals
+                    .get(&(entity.clone(), account.clone()))
+                    .copied()
+                    .unwrap_or(0),
+                preferred,
+            ),
+        })
+        .collect()
+}
+
+/// 从逐组结论生成唯一的计算计划。任何未完全验证的组均不出现在
+/// 计划中，调用方据此整组回退主体＋科目。TB 多列辅助只选与已验证
+/// JE 列命中交集最多的一列，不把编码与名称拼成另一种值体系。
+pub(crate) fn auxiliary_verified_columns(
+    groups: &[AuxiliaryLinkGroupVerdict],
+    tb_scans: &BTreeMap<AuxiliaryGroupKey, Vec<AnchorColumnScan>>,
+    je_scans: &BTreeMap<AuxiliaryGroupKey, Vec<AnchorColumnScan>>,
+    tb_headers: &[String],
+    je_headers: &[String],
+    tb_mapping: &serde_json::Map<String, Value>,
+    role: &str,
+) -> BTreeMap<AuxiliaryGroupKey, (usize, usize)> {
+    let tb_columns = mapped_column_names(tb_mapping, role);
+    groups.iter().filter(|group| group.verdict.dimension_keys()).filter_map(|group| {
+        let key = (group.entity.clone(), group.account.clone());
+        let je_name = group.verdict.column.as_deref()?;
+        let je_index = header_index(je_headers, je_name)?;
+        let je_hits = &je_scans.get(&key)?.iter().find(|scan| scan.header == je_name)?.hit_anchors;
+        let tb_index = tb_scans.get(&key)?.iter().enumerate()
+            .filter(|(index, _)| tb_headers.get(*index).is_some_and(|name| tb_columns.contains(name)))
+            .map(|(index, scan)| (index, scan.hit_anchors.intersection(je_hits).count()))
+            .max_by_key(|(_, hits)| *hits).filter(|(_, hits)| *hits > 0)?.0;
+        Some((key, (tb_index, je_index)))
+    }).collect()
+}
+
+/// 编码／名称是同一辅助维度的可选表示，而不是需要 JE 同时具备的
+/// 两套键。分别验证 TB 每个已映射列，以完整覆盖且锚点最多的列为准；
+/// 没有完整覆盖时保留最大命中结论用于提示，但绝不启用计算键。
+pub(crate) fn auxiliary_link_group_verdicts_by_tb_columns(
+    anchors: &BTreeMap<AuxiliaryGroupKey, HashSet<String>>,
+    tb_scans: &BTreeMap<AuxiliaryGroupKey, Vec<AnchorColumnScan>>,
+    je_scans: &BTreeMap<AuxiliaryGroupKey, Vec<AnchorColumnScan>>,
+    totals: &BTreeMap<AuxiliaryGroupKey, usize>,
+    tb_mapping: &serde_json::Map<String, Value>,
+    role: &str,
+    preferred: Option<&str>,
+) -> Vec<AuxiliaryLinkGroupVerdict> {
+    let columns = mapped_column_names(tb_mapping, role);
+    anchors.iter().map(|(key, union)| {
+        let candidates = tb_scans.get(key).into_iter().flatten()
+            .filter(|scan| columns.contains(&scan.header) && !scan.hit_anchors.is_empty())
+            .map(|scan| auxiliary_link_verdict(&scan.hit_anchors,
+                je_scans.get(key).cloned().unwrap_or_default(),
+                totals.get(key).copied().unwrap_or_default(), preferred));
+        let verdict = candidates.max_by_key(|verdict| (verdict.dimension_keys(), verdict.anchor_hits, verdict.anchor_total))
+            .unwrap_or_else(|| auxiliary_link_verdict(union, je_scans.get(key).cloned().unwrap_or_default(),
+                totals.get(key).copied().unwrap_or_default(), preferred));
+        AuxiliaryLinkGroupVerdict { entity: key.0.clone(), account: key.1.clone(), verdict }
+    }).collect()
+}
+
 impl AnchorColumnAccumulator {
     pub(crate) fn new(column_count: usize) -> Self {
         Self {
@@ -6946,6 +7238,69 @@ pub(crate) fn tb_auxiliary_anchors(
         anchors.extend(values);
     }
     anchors
+}
+
+/// TB 锚点按（有效主体，科目）分组。`group_of` 由调用工具
+/// 用已确认的主体范围与科目匹配策略生成；返回 `None` 的行
+/// 不在本次已选范围内。发生额门槛与全局锚点接口完全相同：
+/// 映射了本期／本年发生额时只收非零行；没有任何发生额映射时，
+/// 收范围内全部非空辅助值。不接收报告期间参数。
+pub(crate) fn tb_auxiliary_anchor_groups<F>(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &serde_json::Map<String, Value>,
+    role: &str,
+    mut group_of: F,
+) -> BTreeMap<AuxiliaryGroupKey, HashSet<String>>
+where
+    F: FnMut(usize, &[String]) -> Option<AuxiliaryGroupKey>,
+{
+    let auxiliary_indexes: Vec<usize> = mapped_column_names(mapping, role)
+        .iter()
+        .filter_map(|name| header_index(headers, name))
+        .collect();
+    if auxiliary_indexes.is_empty() {
+        return BTreeMap::new();
+    }
+    let occurrence_indexes: Vec<usize> = [
+        "ytdFunctionalCredit",
+        "ytdFunctionalDebit",
+        "periodFunctionalCredit",
+        "periodFunctionalDebit",
+    ]
+    .iter()
+    .flat_map(|occurrence| mapped_column_names(mapping, occurrence))
+    .filter_map(|name| header_index(headers, &name))
+    .collect();
+    let mut groups = BTreeMap::<AuxiliaryGroupKey, HashSet<String>>::new();
+    for (index, row) in rows.iter().enumerate() {
+        // 身份上下文必须观察所有行。父行可能没有发生额，活跃的
+        // 空编码子行仍须继承它，不能把 active gate 放在回调之前。
+        let Some(group) = group_of(index, row) else {
+            continue;
+        };
+        let active = occurrence_indexes.is_empty()
+            || occurrence_indexes.iter().any(|column| {
+                row.get(*column)
+                    .and_then(|value| parse_amount_lenient(value))
+                    .is_some_and(|amount| amount.abs() > 0.005)
+            });
+        if !active {
+            continue;
+        }
+        let entry = groups.entry(group).or_default();
+        for column in &auxiliary_indexes {
+            let normalized = row
+                .get(*column)
+                .map(|value| anchor_norm(value))
+                .unwrap_or_default();
+            if !normalized.is_empty() {
+                entry.insert(normalized);
+            }
+        }
+    }
+    groups.retain(|_, values| !values.is_empty());
+    groups
 }
 
 /// 逐个维度列的锚点集合（列有值且当期有发生额）。供多列辅助（编码＋名称）
@@ -7044,6 +7399,9 @@ pub(crate) fn tb_dimension_rows(
     let entity_index = mapped_column_names(mapping, "entity")
         .first()
         .and_then(|name| header_index(headers, name));
+    let currency_index = mapped_column_names(mapping, "currency")
+        .first()
+        .and_then(|name| header_index(headers, name));
     let mut children = Vec::<TbDimensionRow>::new();
     if auxiliary_indexes.is_empty() || code_index.is_none() {
         return children;
@@ -7057,7 +7415,7 @@ pub(crate) fn tb_dimension_rows(
     };
     // 先扫一遍收集明细行并标记“被明细取代的父行”，再按原顺序输出独立行＋明细行。
     let mut parent: Option<(usize, String, String, String)> = None;
-    let mut absorbed = HashSet::<usize>::new();
+    let mut parent_children = BTreeMap::<usize, Vec<usize>>::new();
     let mut emitted = HashSet::<usize>::new();
     for (index, row) in rows.iter().enumerate() {
         let aux_display = auxiliary_indexes
@@ -7097,8 +7455,14 @@ pub(crate) fn tb_dimension_rows(
             if code.is_empty() {
                 continue;
             }
-            if let Some((parent_index, _, _, _)) = parent.as_ref() {
-                absorbed.insert(*parent_index);
+            if let Some((parent_index, parent_entity, parent_code, _)) = parent.as_ref() {
+                let same_entity = entity.is_empty() || parent_entity.is_empty() || entity == *parent_entity;
+                let parent_currency = raw_of(&rows[*parent_index], currency_index).to_uppercase();
+                let currency = raw_of(row, currency_index).to_uppercase();
+                let same_currency = currency == parent_currency;
+                if same_entity && same_currency && (own_code.is_empty() || own_code == *parent_code) {
+                    parent_children.entry(*parent_index).or_default().push(index);
+                }
             }
             emitted.insert(index);
             children.push(TbDimensionRow {
@@ -7116,6 +7480,27 @@ pub(crate) fn tb_dimension_rows(
             parent = Some((index, entity, own_code, name));
         }
     }
+    // 空辅助父行只有在公共金额语义列全部证明“父＝子项之和”
+    // 时才是汇总行。仅凭其下有辅助值不足以删除：它也可能是真实
+    // 的“未分辅助”余额。
+    let value_columns = rollup_value_columns(headers, rows, &|mapped_role| {
+        mapped_column_names(mapping, mapped_role)
+    });
+    let absorbed = parent_children
+        .into_iter()
+        .filter_map(|(parent_index, child_indexes)| {
+            (!value_columns.is_empty()
+                && value_columns.iter().all(|values| {
+                    let parent = values.get(parent_index).copied().unwrap_or(0.0);
+                    let children = child_indexes
+                        .iter()
+                        .map(|index| values.get(*index).copied().unwrap_or(0.0))
+                        .sum::<f64>();
+                    (parent - children).abs() <= 0.005
+                }))
+            .then_some(parent_index)
+        })
+        .collect::<HashSet<_>>();
     let mut out = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         if absorbed.contains(&index) || emitted.contains(&index) {
@@ -8766,7 +9151,52 @@ mod tests {
         assert_eq!(verdict.status, "partialCoverage");
         assert_eq!(verdict.anchor_hits, 2);
         assert_eq!(verdict.anchor_total, 3);
-        assert!(verdict.dimension_keys());
+        assert!(
+            !verdict.dimension_keys(),
+            "覆盖不全只说明找到了候选列，不能把不完整维度直接并入匹配键"
+        );
+    }
+
+    #[test]
+    fn 辅助验证按主体科目隔离且覆盖不全整组降级() {
+        let keys = [("甲", "1002"), ("甲", "1003"), ("乙", "1002")];
+        let groups = keys.map(|(entity, account)| (entity.to_owned(), account.to_owned()));
+        let values = |items: &[&str]| items.iter().map(|item| item.to_string()).collect::<HashSet<_>>();
+        let anchors = BTreeMap::from([(groups[0].clone(), values(&["a", "b"])), (groups[1].clone(), values(&["a", "b"])), (groups[2].clone(), values(&["a"]))]);
+        let headers = vec!["辅助".to_owned()];
+        let mut accumulator = GroupedAnchorColumnAccumulator::new(1);
+        for (group, value) in [(groups[0].clone(), "a"), (groups[0].clone(), "b"), (groups[1].clone(), "a")] {
+            accumulator.feed(group.clone(), &[value.to_owned()], &anchors[&group]);
+        }
+        let verdicts = auxiliary_link_group_verdicts(&anchors, accumulator.finish(&headers), &BTreeMap::new(), Some("辅助"));
+        assert!(verdicts.iter().find(|group| group.account == "1002" && group.entity == "甲").unwrap().verdict.dimension_keys());
+        assert_eq!(verdicts.iter().find(|group| group.account == "1003").unwrap().verdict.status, "partialCoverage");
+        assert!(!verdicts.iter().find(|group| group.account == "1003").unwrap().verdict.dimension_keys());
+        assert_eq!(verdicts.iter().find(|group| group.entity == "乙").unwrap().verdict.status, "noMatch");
+    }
+
+    #[test]
+    fn 辅助锚点零发生父行仍提供空编码子行上下文() {
+        let headers = vec!["科目".to_owned(), "辅助".to_owned(), "发生".to_owned()];
+        let rows = vec![vec!["1002".to_owned(), "".to_owned(), "0".to_owned()], vec!["".to_owned(), "A".to_owned(), "10".to_owned()], vec!["1003".to_owned(), "B".to_owned(), "0".to_owned()]];
+        let mapping = serde_json::json!({"auxiliary":"辅助","ytdFunctionalDebit":"发生"}).as_object().unwrap().clone();
+        let mut code = String::new();
+        let groups = tb_auxiliary_anchor_groups(&headers, &rows, &mapping, "auxiliary", |_, row| {
+            if !row[0].is_empty() { code = row[0].clone(); }
+            Some((DEFAULT_ENTITY.to_owned(), code.clone()))
+        });
+        assert_eq!(groups.len(), 1);
+        assert!(groups[&(DEFAULT_ENTITY.to_owned(), "1002".to_owned())].contains("a"));
+    }
+
+    #[test]
+    fn 辅助空白余额不勾稽时保留为真实未分辅助() {
+        let headers = ["科目", "辅助", "期初", "期末", "借方", "贷方"].map(str::to_owned).to_vec();
+        let rows = vec![vec!["1002", "", "30", "40", "10", "0"], vec!["1002", "A", "10", "20", "10", "0"]].into_iter().map(|row| row.into_iter().map(str::to_owned).collect()).collect::<Vec<Vec<String>>>();
+        let mapping = serde_json::json!({"accountCode":"科目","auxiliary":"辅助","openingFunctionalAmount":"期初","closingFunctionalAmount":"期末","ytdFunctionalDebit":"借方","ytdFunctionalCredit":"贷方"}).as_object().unwrap().clone();
+        let view = tb_dimension_rows(&headers, &rows, &mapping, "auxiliary", None);
+        assert_eq!(view.len(), 2, "借方虽相等，期初期末不相等，不能删除空辅助行");
+        assert!(view.iter().any(|row| row.index == 0 && row.aux.is_empty()));
     }
 
     #[test]
@@ -9144,6 +9574,140 @@ mod tests {
             tb_leaf_mask(&headers, &rows, &columns),
             vec![true, true, true, true, true],
             "没有金额证据时不能只凭编码前缀静默排除父项"
+        );
+    }
+
+    #[test]
+    fn tb多主体交错排列仍按主体勾稽非连续父子科目() {
+        let headers = vec![
+            "核算组织".into(),
+            "科目编码".into(),
+            "科目名称".into(),
+            "期初余额".into(),
+            "借方发生额".into(),
+            "贷方发生额".into(),
+            "期末余额".into(),
+        ];
+        let rows = [
+            ["A", "2501", "长期借款", "100", "20", "10", "110"],
+            ["B", "2501", "长期借款", "80", "0", "10", "70"],
+            ["A", "250101", "长期借款甲", "60", "10", "5", "65"],
+            ["B", "250101", "长期借款甲", "30", "0", "5", "25"],
+            ["A", "250102", "长期借款乙", "40", "10", "5", "45"],
+            ["B", "250102", "长期借款乙", "50", "0", "5", "45"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(String::from).collect())
+        .collect::<Vec<Vec<String>>>();
+        let columns = |role: &str| match role {
+            "entity" => vec!["核算组织".into()],
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "openingFunctionalAmount" => vec!["期初余额".into()],
+            "ytdFunctionalDebit" => vec!["借方发生额".into()],
+            "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+            "closingFunctionalAmount" => vec!["期末余额".into()],
+            _ => vec![],
+        };
+        assert_eq!(
+            tb_leaf_mask(&headers, &rows, &columns),
+            vec![false, false, true, true, true, true]
+        );
+    }
+
+    #[test]
+    fn tb辅助明细先折叠后再排除同额父科目() {
+        let headers = vec![
+            "核算组织".into(),
+            "币别".into(),
+            "科目编码".into(),
+            "科目名称".into(),
+            "核算维度".into(),
+            "期初余额".into(),
+            "借方发生额".into(),
+            "贷方发生额".into(),
+            "期末余额".into(),
+        ];
+        let rows = [
+            ["A", "CNY", "2001", "短期借款", "", "160", "0", "8", "152"],
+            ["B", "CNY", "2001", "短期借款", "", "20", "0", "0", "20"],
+            ["A", "CNY", "200101", "银行借款", "", "160", "0", "8", "152"],
+            [
+                "A",
+                "CNY",
+                "200101",
+                "银行借款",
+                "金融机构:农业银行",
+                "160",
+                "0",
+                "8",
+                "152",
+            ],
+            ["A", "CNY", "1002", "银行存款", "", "30", "0", "0", "30"],
+            ["A", "CNY", "1002", "银行存款", "基本户", "10", "0", "0", "10"],
+            ["A", "CNY", "1002", "银行存款", "一般户", "20", "0", "0", "20"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(String::from).collect())
+        .collect::<Vec<Vec<String>>>();
+        let columns = |role: &str| match role {
+            "entity" => vec!["核算组织".into()],
+            "currency" => vec!["币别".into()],
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "auxiliary" => vec!["核算维度".into()],
+            "openingFunctionalAmount" => vec!["期初余额".into()],
+            "ytdFunctionalDebit" => vec!["借方发生额".into()],
+            "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+            "closingFunctionalAmount" => vec!["期末余额".into()],
+            _ => vec![],
+        };
+        assert_eq!(
+            tb_leaf_mask(&headers, &rows, &columns),
+            vec![false, true, true, false, true, false, false],
+            "应先保留子科目汇总、折叠其辅助明细，再排除已被子科目完整覆盖的父科目"
+        );
+    }
+
+    #[test]
+    fn tb辅助折叠后父子金额仍不等时保持父项() {
+        let headers = 余额表表头();
+        let rows = vec![
+            行("2001", "短期借款", ["180", "0", "8", "172"]),
+            行("200101", "银行借款", ["160", "0", "8", "152"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&headers, &rows, &余额表映射),
+            vec![true, true],
+            "子科目没有完整覆盖父科目时不得删除真实残额"
+        );
+    }
+
+    #[test]
+    fn tb非连续父子任一金额不平即保留父项() {
+        let headers = 余额表表头();
+        let rows = vec![
+            行("2501", "长期借款", ["100", "20", "10", "111"]),
+            行("999", "穿插科目", ["1", "1", "0", "2"]),
+            行("250101", "长期借款甲", ["60", "10", "5", "65"]),
+            行("250102", "长期借款乙", ["40", "10", "5", "45"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&headers, &rows, &余额表映射),
+            vec![true, true, true, true]
+        );
+    }
+
+    #[test]
+    fn tb反向扫描勾稽时保留终级科目而不是父科目() {
+        let rows = vec![
+            行("1001010000", "库存现金-人民币", ["100", "20", "10", "110"]),
+            行("1001", "库存现金", ["100", "20", "10", "110"]),
+            行("999", "其他科目", ["1", "2", "0", "3"]),
+        ];
+        assert_eq!(
+            tb_leaf_mask(&余额表表头(), &rows, &余额表映射),
+            vec![true, false, true]
         );
     }
 
@@ -10466,6 +11030,16 @@ mod tests {
         assert_eq!(effective_entity("主体 A", true), "主体 A");
         assert_eq!(effective_entity("  ", true), DEFAULT_ENTITY);
         assert_eq!(effective_entity("主体 A", false), DEFAULT_ENTITY);
+    }
+
+    #[test]
+    fn 核算组织在tb和je都确定性映射为主体() {
+        for kind in ["tb", "je"] {
+            for header in ["核算组织", "核算组织名称"] {
+                let suggested = suggest_roles(kind, &[header.to_owned()]);
+                assert_eq!(suggested.get(&0), Some(&"entity"), "{kind}: {suggested:?}");
+            }
+        }
     }
 
     #[test]

@@ -354,7 +354,7 @@ describe("利率手工填写", () => {
 });
 
 describe("JE 币种资料提示", () => {
-  it("在结果顶部说明分币种 JE 推导余额仅供参考", async () => {
+  it("在结果顶部说明 JE 发生额无法按币种分配", async () => {
     render(<DepositInterestPage tool={tool} />);
     fireEvent.click(
       screen.getByRole("button", {
@@ -410,7 +410,7 @@ describe("JE 币种资料提示", () => {
     );
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "JE 币种资料不完整",
+      "JE 发生额无法按币种分配",
     );
     expect(screen.getByRole("alert")).toHaveTextContent(
       "分币种的年末余额（JE推导）仅供参考",

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   faAssignmentsForEntities,
   faAssignmentsForEntityAccounts,
+  faReviewEntityAccounts,
   faTbJeMissingMappings,
   groupAssignmentViews,
   normalizeFaCategory,
@@ -263,6 +264,20 @@ describe("FA TB+JE account role presets", () => {
 });
 
 describe("FA TB+JE 真实主体×科目组合", () => {
+  it("科目复核只采用 TB 科目，不把 JE 独有的对方科目带入清单", () => {
+    const rows = faReviewEntityAccounts([
+      { entity: "默认主体", account: "1601020000 固定资产-房屋" },
+    ]);
+    const jeOnly = [
+      { entity: "默认主体", account: "修理费-房屋建筑物-大修理" },
+    ];
+
+    expect(rows).toEqual([
+      { entity: "默认主体", account: "1601020000 固定资产-房屋" },
+    ]);
+    expect(rows).not.toContainEqual(jeOnly[0]);
+  });
+
   it("只按账里真实存在的组合铺清单，主体 2000 名下不出现只有 2002 才有的科目", () => {
     const pairs = unionEntityAccounts(
       [
@@ -347,8 +362,8 @@ describe("FA TB+JE 真实主体×科目组合", () => {
     ]);
     expect(rows.map((row) => [row.entity, row.account])).toEqual([
       ["A", "1601 固定资产"],
-      ["A", "1002 银行存款"],
       ["B", "1602 累计折旧"],
+      ["A", "1002 银行存款"],
     ]);
     expect(rows[0]).toEqual({
       entity: "A",
@@ -356,6 +371,24 @@ describe("FA TB+JE 真实主体×科目组合", () => {
       role: "depreciation",
       category: "机修设备",
     });
+  });
+
+  it("跨主体统一把原值和折旧排在排除科目前面", () => {
+    const rows = faAssignmentsForEntityAccounts(
+      [
+        { entity: "2000", account: "1002 银行存款" },
+        { entity: "2000", account: "1601040000 固定资产-运输设备" },
+        { entity: "2002", account: "1601020000 固定资产-机器设备" },
+        { entity: "2002", account: "1602020000 累计折旧-机器设备" },
+      ],
+      [],
+    );
+    expect(rows.map((row) => [row.entity, row.role])).toEqual([
+      ["2000", "cost"],
+      ["2002", "cost"],
+      ["2002", "depreciation"],
+      ["2000", "excluded"],
+    ]);
   });
 
   it("认不出编码的科目按科目串本身分组，互不混并", () => {
@@ -430,13 +463,18 @@ describe("FA TB+JE 三步向导（源码契约）", () => {
     expect(source).toMatch(/groupAssignmentViews\(\s*assignments/);
   });
 
-  it("复核表保持原生 td 布局并解释 TB、JE 与 TB+JE 来源标签", () => {
+  it("复核表只列 TB 科目，并提供按编码或名称即时筛选", () => {
     expect(source).toContain('<div className="fa-tbje-account-cell">');
     expect(source).not.toContain(
       '<td\n                        className="fa-tbje-account-cell"',
     );
-    expect(source).toContain("TB 表示仅余额表出现");
-    expect(source).toContain("TB+JE");
+    expect(source).toContain(
+      "faReviewEntityAccounts(inspects.tb?.entityAccounts)",
+    );
+    expect(source).toContain('ariaLabel="筛选科目"');
+    expect(source).toContain('placeholder="输入科目编码或名称"');
+    expect(source).not.toContain('className="fa-tbje-source-tag"');
+    expect(source).not.toContain("批量资产类别");
   });
 
   it("切换 FA 子工具时缓存并恢复 TB+JE 草稿", () => {

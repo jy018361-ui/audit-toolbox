@@ -13,10 +13,15 @@ import {
 import { depositDropTargetInside } from "./DepositInterestPage";
 import { AuxiliaryLinkStatusView } from "@/components/AuxiliaryLinkStatus";
 import {
-  dropUnlinkedTbAuxiliary,
   verifyAuxiliaryLink,
+  verifyCurrencyLink,
   type AuxiliaryLinkResult,
+  type CurrencyLinkResult,
 } from "@/ledgerMapping";
+import {
+  CurrencyFallbackDialog,
+  type CurrencyFallbackMode,
+} from "@/components/CurrencyFallbackDialog";
 import { DateInput } from "@/components/DateInput";
 import { defaultBalanceSheetDate } from "@/dateDefaults";
 import { PageHeader } from "@/components/PageHeader";
@@ -96,6 +101,10 @@ type Source = {
 };
 type LoanRow = {
   entity: string;
+  rowKey?: string;
+  accountCode?: string;
+  auxiliary?: string;
+  currency?: string;
   loanId: string;
   openingPrincipal: number;
   additions: number;
@@ -117,6 +126,9 @@ type ResultRateEdit = Partial<
 /** TB 模式「利率确认」：粘贴的利率区域与 TB 借款明细匹配后的逐笔利率。 */
 type PasteRateRow = {
   entity?: string;
+  rowKey?: string;
+  accountCode?: string;
+  auxiliary?: string;
   loanId: string;
   rateType: "fixed" | "floating";
   fixedRate?: number;
@@ -156,7 +168,7 @@ const LABELS: Record<Kind, Record<string, string>> = {
     entity: "核算主体",
     accountCode: "借款科目编码",
     accountName: "借款科目名称",
-    loanId: "借款明细/辅助核算",
+    auxiliary: "辅助核算",
     currency: "币种",
     openingDirection: "期初方向",
     closingDirection: "期末方向",
@@ -174,7 +186,8 @@ const LABELS: Record<Kind, Record<string, string>> = {
     id: "凭证号",
     accountCode: "借款科目编码",
     accountName: "借款科目名称",
-    loanId: "借款明细/辅助核算",
+    entity: "核算主体",
+    auxiliary: "辅助核算",
     summary: "摘要",
     functionalDebit: "借方金额",
     functionalCredit: "贷方金额",
@@ -183,8 +196,8 @@ const LABELS: Record<Kind, Record<string, string>> = {
   },
   rateLedger: LOAN_ROLE_FALLBACK,
 };
-const loanRowKey = (row: Pick<LoanRow, "entity" | "loanId">) =>
-  `${row.entity || "默认主体"}\u001f${row.loanId}`;
+const loanRowKey = (row: { entity?: string; loanId: string; rowKey?: string }) =>
+  row.rowKey || `${row.entity || "默认主体"}\u001f${row.loanId}`;
 
 type TbAccount = {
   key: string;
@@ -359,6 +372,11 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const [result, setResult] = useState<Record<string, unknown>>();
   const [error, setError] = useState("");
   const [pairStatus, setPairStatus] = useState("");
+  const [currencyFallbackMode, setCurrencyFallbackMode] = useState<
+    CurrencyFallbackMode | ""
+  >("");
+  const [currencyFallbackPrompt, setCurrencyFallbackPrompt] =
+    useState<CurrencyLinkResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState(0);
   const [job, setJob] = useState<JobEvent>();
@@ -404,6 +422,11 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   // 借款明细联动验证（公共锚点反查，角色＝loanId、纯锚点口径）：
   // 与计算侧同一套判定，用户在映射页就能看到 JE 有没有对应的借款明细列。
   const [auxLink, setAuxLink] = useState<AuxiliaryLinkResult | null>(null);
+  const entityScope = useEntityScopeConfirmation({
+    tbEntities: sources.tb.inspection?.entities ?? [],
+    jeEntities: sources.je.inspection?.entities ?? [],
+    onInvalidate: () => invalidateResults(),
+  });
   useEffect(() => {
     const tb = sources.tb;
     const je = sources.je;
@@ -412,6 +435,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       return;
     }
     let cancelled = false;
+    setAuxLink(null);
     void verifyAuxiliaryLink({
       tbSource: {
         inputPath: tb.path,
@@ -427,34 +451,19 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         headerDepth: je.inspection?.headerDepth ?? 1,
       },
       jeMapping: je.mapping,
-      auxRole: "loanId",
+      auxRole: "auxiliary",
       anchorOnly: true,
+      selectedAccounts: selectedLoanAccounts(),
+      entityScope: entityScope.selection,
     }).then((result) => {
       if (cancelled) return;
       setAuxLink(result);
-      if (result?.tbAuxMapped && result.status === "noMatch") {
-        setSources((current) => ({
-          ...current,
-          tb: {
-            ...current.tb,
-            mapping: dropUnlinkedTbAuxiliary(
-              current.tb.mapping,
-              result,
-              "loanId",
-            ),
-          },
-        }));
-        invalidateResults();
-        setPairStatus(
-          "JE 未找到与 TB 借款明细值对应的列，已取消 TB 的借款明细/辅助核算映射；测算仍按主体＋科目归集。",
-        );
-      }
     });
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sources]);
+  }, [sources, loanAccountRoles, entityScope.selection]);
   // TB＋JE 模式支持把两个文件整组拖进上传框，与存款利息／FA 一致。
   useEffect(() => {
     const drops = listenPositionedFileDrops(({ paths, x, y }) => {
@@ -484,6 +493,10 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   };
   const setSource = (kind: Kind, next: Partial<Source>) => {
     invalidateResults();
+    if (kind === "tb" || kind === "je") {
+      setCurrencyFallbackMode("");
+      setCurrencyFallbackPrompt(null);
+    }
     if (kind === "ledger") setRateEdits({});
     // TB 的文件/Sheet/映射一变，借款行清单就可能变：科目确认与手填利率作废，
     // 回到第二步重新确认。
@@ -607,7 +620,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       setTbRateEdits((current) => {
         const next = { ...current };
         for (const row of incoming) {
-          const key = `${row.entity || "默认主体"}\u001f${row.loanId}`;
+          const key = loanRowKey(row);
           next[key] = row;
         }
         return next;
@@ -626,7 +639,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       const base: PasteRateRow = { ...prev, ...patch };
       return {
         ...v,
-        [key]: { ...base, entity: row.entity, loanId: row.loanId },
+        [key]: { ...base, entity: row.entity, loanId: row.loanId, rowKey: row.rowKey, accountCode: row.accountCode, auxiliary: row.auxiliary },
       };
     });
   };
@@ -848,6 +861,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         mode === "tb" && Object.keys(tbRateEdits).length
           ? Object.values(tbRateEdits).map((r) => ({
               loanId: r.loanId,
+              rowKey: r.rowKey,
+              accountCode: r.accountCode,
+              auxiliary: r.auxiliary,
               entity: r.entity,
               rateType: r.rateType,
               fixedRate: r.fixedRate,
@@ -858,6 +874,10 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       rateLedgerSource: source("rateLedger"),
       rateOverrides: resultRateEdits,
       entityScope: entityScope.selection,
+      currencyFallbackMode:
+        mode === "tb" && currencyFallbackMode
+          ? currencyFallbackMode
+          : undefined,
       ...(outputPath ? { outputPath } : {}),
     };
   }
@@ -892,6 +912,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       rateRows?: PasteRateRow[];
       loanAccounts?: string[];
       outputPath?: string;
+      currencyFallbackMode?: CurrencyFallbackMode;
     };
     const paramsKey: Record<Kind, keyof typeof p> = {
       ledger: "ledgerSource",
@@ -944,13 +965,19 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     if (Array.isArray(p.rateRows))
       setTbRateEdits(
         Object.fromEntries(
-          (p.rateRows as PasteRateRow[]).map((r) => [String(r.loanId), r]),
+          (p.rateRows as PasteRateRow[]).map((r) => [loanRowKey(r), r]),
         ),
       );
     if (p.mode === "ledger" || p.mode === "tb") setMode(p.mode);
     if (typeof p.reportEnd === "string" && p.reportEnd)
       setReportEnd(p.reportEnd);
     setOutputPath(typeof p.outputPath === "string" ? p.outputPath : "");
+    setCurrencyFallbackMode(
+      p.currencyFallbackMode === "functional" ||
+        p.currencyFallbackMode === "twoPointByCurrency"
+        ? p.currencyFallbackMode
+        : "",
+    );
     setStep(0);
     setBusy(true);
     setError("");
@@ -986,9 +1013,15 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       if (Array.isArray(p.rateRows))
         setTbRateEdits(
           Object.fromEntries(
-            p.rateRows.map((rate) => [String(rate.loanId), rate]),
+            p.rateRows.map((rate) => [loanRowKey(rate), rate]),
           ),
         );
+      setCurrencyFallbackMode(
+        p.currencyFallbackMode === "functional" ||
+          p.currencyFallbackMode === "twoPointByCurrency"
+          ? p.currencyFallbackMode
+          : "",
+      );
       setError(failures.join("；"));
       setBusy(false);
     })();
@@ -1017,14 +1050,49 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       setError(errorText(e));
     }
   }
+  async function enterTbRateStep() {
+    if (mode !== "tb") {
+      setStep(1);
+      return;
+    }
+    setError("");
+    setBusy(true);
+    const tb = sources.tb;
+    const je = sources.je;
+    const link = await verifyCurrencyLink({
+      tbSource: {
+        inputPath: tb.path,
+        sheet: tb.inspection?.sheet ?? "",
+        headerRow: tb.inspection?.headerRow ?? 1,
+        headerDepth: tb.inspection?.headerDepth ?? 1,
+      },
+      tbMapping: tb.mapping,
+      jeSource: {
+        inputPath: je.path,
+        sheet: je.inspection?.sheet ?? "",
+        headerRow: je.inspection?.headerRow ?? 1,
+        headerDepth: je.inspection?.headerDepth ?? 1,
+      },
+      jeMapping: je.mapping,
+      selectedAccounts: selectedLoanAccounts(),
+      entityScope: entityScope.selection,
+    });
+    setBusy(false);
+    if (!link) {
+      setError("暂时无法验证 TB 与 JE 的外币币种衔接，请重试。");
+      return;
+    }
+    if (link.required && !link.verified) {
+      setCurrencyFallbackPrompt(link);
+      return;
+    }
+    setCurrencyFallbackMode("");
+    setCurrencyFallbackPrompt(null);
+    setStep(1);
+  }
   // 导出完成后除结果区的打开按钮外，测算卡里也要有明确的「已生成＋文件名＋打开」
   // 反馈——此前唯一反馈是结果区标题旁悄悄出现的小按钮，用户感知不到已导出。
   const exported = ((result?.outputPaths ?? []) as string[]).filter(Boolean);
-  const entityScope = useEntityScopeConfirmation({
-    tbEntities: sources.tb.inspection?.entities ?? [],
-    jeEntities: sources.je.inspection?.entities ?? [],
-    onInvalidate: invalidateResults,
-  });
   const orderedTbAccounts = useMemo(() => {
     const collator = new Intl.Collator("zh-CN", { numeric: true });
     return [...tbAccounts].sort((a, b) => {
@@ -1068,7 +1136,24 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           { key: "run", label: "测算与底稿", disabled: !mappingsReady },
         ]}
         current={step}
-        onStepClick={setStep}
+        onStepClick={(next) => {
+          if (next === 1 && step === 0) void enterTbRateStep();
+          else setStep(next);
+        }}
+      />
+      <CurrencyFallbackDialog
+        open={currencyFallbackPrompt !== null}
+        affectedGroupCount={currencyFallbackPrompt?.affectedGroupCount ?? 0}
+        missingCurrencies={currencyFallbackPrompt?.missingCurrencies ?? []}
+        value={currencyFallbackMode}
+        onChange={setCurrencyFallbackMode}
+        onCancel={() => setCurrencyFallbackPrompt(null)}
+        onContinue={() => {
+          if (!currencyFallbackMode) return;
+          setCurrencyFallbackPrompt(null);
+          invalidateResults();
+          setStep(1);
+        }}
       />
 
       {step === 0 && (
@@ -1081,6 +1166,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               aria-pressed={mode === "ledger"}
               onClick={() => {
                 invalidateResults();
+                setCurrencyFallbackMode("");
+                setCurrencyFallbackPrompt(null);
                 setMode("ledger");
               }}
             >
@@ -1093,18 +1180,14 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               aria-pressed={mode === "tb"}
               onClick={() => {
                 invalidateResults();
+                setCurrencyFallbackMode("");
+                setCurrencyFallbackPrompt(null);
                 setMode("tb");
               }}
             >
               TB＋JE
             </Button>
           </section>
-          {mode === "tb" && (
-            <section className="loan-warning">
-              <strong>TB＋JE 将生成待复核的推算台账</strong>
-              <span>请重点核对本金变动、匹配依据和勾稽差异。</span>
-            </section>
-          )}
           <Card>
             <CardHeader>
               <CardTitle>
@@ -1332,7 +1415,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           <div className="fx-step-actions">
             <Button
               disabled={!sourcesReady || reviewingAny}
-              onClick={() => setStep(1)}
+              onClick={() => void enterTbRateStep()}
             >
               {mode === "tb" ? "下一步：确认科目与利率" : "下一步：利率确认"}
             </Button>
@@ -1368,7 +1451,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                 <CardContent>
                   <p className="fx-hint">
                     系统按科目编码与负债语义共同给出初始建议，借款科目置顶、其他科目随后；
-                    建议仅作起点，请逐行确认。借款明细/辅助核算不是必选项，映射后仅用于同科目多笔时区分到笔。
+                    建议仅作起点，请逐行确认。辅助核算不是必选项，仅在本主体、本科目验证成功后进入 TBJE 匹配键；验证失败时整个科目回退到主体＋科目。
                   </p>
                 {accountsBusy ? (
                   <p className="fx-hint">正在读取科目清单…</p>
@@ -1533,11 +1616,21 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               {mappingWarnings.map((warning) => (
                 <section className="loan-warning" role="status" key={warning}>
                   <strong>{warning}</strong>
-                  <span>TB 辅助明细未继续拆分，以下利率与测算行已按主体＋借款科目合并。</span>
+                  <span>未通过辅助验证的主体＋科目已合并；验证成功的其他科目仍按辅助核算拆分。请按各行匹配依据复核。</span>
                 </section>
               ))}
               <TbRateTable rows={rows} edits={tbRateEdits} onEdit={editTbRate} />
             </>
+          )}
+          {mode === "tb" && currencyFallbackMode && (
+            <section className="loan-currency-policy" role="status">
+              <strong>多币种测算口径</strong>
+              <span>
+                {currencyFallbackMode === "functional"
+                  ? "统一使用本位币匡算：合并各币种余额，使用 JE 本位币发生额。"
+                  : "按币种使用年初、年末平均值：分币种填写利率，不使用 JE 还原逐日余额。"}
+              </span>
+            </section>
           )}
           {mode === "tb" && entityScope.panel}
           <div className="fx-step-actions">
@@ -1567,6 +1660,16 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
 
       {step === 2 && (
         <>
+          {mode === "tb" && currencyFallbackMode && (
+            <section className="loan-currency-policy" role="status">
+              <strong>本次多币种口径</strong>
+              <span>
+                {currencyFallbackMode === "functional"
+                  ? "统一使用本位币匡算"
+                  : "按币种使用年初、年末平均值"}
+              </span>
+            </section>
+          )}
           <Card>
             <CardHeader>
               <CardTitle>测算与底稿</CardTitle>
@@ -1912,6 +2015,7 @@ function TbRateTable({
               <tr>
                 <th>主体</th>
                 <th>借款行</th>
+                <th>币种</th>
                 <th>期初余额</th>
                 <th>期末余额</th>
                 <th>利率类型</th>
@@ -1937,11 +2041,12 @@ function TbRateTable({
                   <tr key={key}>
                     <td>{row.entity}</td>
                     <td title={row.loanId}>{row.loanId}</td>
+                    <td>{row.currency || "—"}</td>
                     <td className="loan-num">{row.openingPrincipal.toLocaleString()}</td>
                     <td className="loan-num">{row.closingPrincipal.toLocaleString()}</td>
                     <td>
                       <select
-                        aria-label={`${row.loanId}的利率类型`}
+                        aria-label={`${row.loanId}${row.currency ? ` ${row.currency}` : ""}的利率类型`}
                         value={rateType}
                         onChange={(ev) =>
                           onEdit(row, {
@@ -1955,7 +2060,7 @@ function TbRateTable({
                     </td>
                     <td>
                       <input
-                        aria-label={`${row.loanId}的执行利率`}
+                        aria-label={`${row.loanId}${row.currency ? ` ${row.currency}` : ""}的执行利率`}
                         type="number"
                         step="0.0001"
                         placeholder="如 3.85"
@@ -1970,7 +2075,7 @@ function TbRateTable({
                     </td>
                     <td>
                       <input
-                        aria-label={`${row.loanId}的基准利率`}
+                        aria-label={`${row.loanId}${row.currency ? ` ${row.currency}` : ""}的基准利率`}
                         type="number"
                         step="0.0001"
                         placeholder="如 3.1"
@@ -1985,7 +2090,7 @@ function TbRateTable({
                     </td>
                     <td>
                       <input
-                        aria-label={`${row.loanId}的加减点`}
+                        aria-label={`${row.loanId}${row.currency ? ` ${row.currency}` : ""}的加减点`}
                         type="number"
                         step="1"
                         placeholder="如 90"
@@ -2220,6 +2325,7 @@ function Results({
             <tr>
               <th>主体</th>
               <th>借款标识</th>
+              <th>币种</th>
               <th>期初</th>
               <th>增加</th>
               <th>减少</th>
@@ -2239,6 +2345,7 @@ function Results({
               <tr key={`${r.loanId}-${i}`}>
                 <td>{r.entity}</td>
                 <td title={r.matchBasis}>{r.loanId}</td>
+                <td>{r.currency || "—"}</td>
                 {[
                   r.openingPrincipal,
                   r.additions,

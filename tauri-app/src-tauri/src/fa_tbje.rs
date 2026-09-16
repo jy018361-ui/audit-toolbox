@@ -61,6 +61,8 @@ struct AccountIdentity {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct TbLine {
+    #[serde(default)]
+    auxiliary: String,
     entity: String,
     account: String,
     role: String,
@@ -72,6 +74,8 @@ struct TbLine {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct JeLine {
+    #[serde(default)]
+    auxiliary: String,
     entity: String,
     voucher: String,
     /// 落表展示用的凭证号：只取凭证识别字段（如「记-0067」），不含主体与日期。
@@ -455,7 +459,23 @@ fn analyze_with_progress(
         ));
     }
     let report_end = parse_report_end(params)?;
-    let tb_lines = normalize_tb(&tb, &tb_map, &assignments, params, entity_key_enabled)?;
+    let auxiliary_columns = fa_auxiliary_columns(
+        &tb,
+        &tb_map,
+        &je,
+        &je_map,
+        &assignments,
+        params,
+        entity_key_enabled,
+    );
+    let tb_lines = normalize_tb(
+        &tb,
+        &tb_map,
+        &assignments,
+        params,
+        entity_key_enabled,
+        &auxiliary_columns,
+    )?;
     if tb_lines.is_empty() {
         return Err(error(
             "FA_TBJE_NO_TB_ACCOUNTS",
@@ -471,6 +491,7 @@ fn analyze_with_progress(
         report_end,
         cancel,
         entity_key_enabled,
+        &auxiliary_columns,
     )?;
     let (additions, disposals, mut totals) = classify_movements(&mut je_lines);
     let mut warnings = Vec::new();
@@ -567,7 +588,9 @@ fn analyze_with_disk_je(
         }
         let in_period = match (report_end, report_start) {
             (Some(end), Some(start)) => {
-                if let Some(date) = mapped_date(&header_table, &row.values, je_map, Some(end.year())) {
+                if let Some(date) =
+                    mapped_date(&header_table, &row.values, je_map, Some(end.year()))
+                {
                     years.insert(date.year());
                     date >= start && date <= end
                 } else {
@@ -683,7 +706,23 @@ fn analyze_with_disk_je(
         Ok(())
     })?;
     let je = disk_table(je_spec, headers, selected_rows, disk.row_count());
-    let tb_lines = normalize_tb(tb, tb_map, &assignments, params, entity_key_enabled)?;
+    let auxiliary_columns = fa_auxiliary_columns(
+        tb,
+        tb_map,
+        &je,
+        je_map,
+        &assignments,
+        params,
+        entity_key_enabled,
+    );
+    let tb_lines = normalize_tb(
+        tb,
+        tb_map,
+        &assignments,
+        params,
+        entity_key_enabled,
+        &auxiliary_columns,
+    )?;
     if tb_lines.is_empty() {
         return Err(error(
             "FA_TBJE_NO_TB_ACCOUNTS",
@@ -699,6 +738,7 @@ fn analyze_with_disk_je(
         report_end,
         cancel,
         entity_key_enabled,
+        &auxiliary_columns,
     )?;
     let (additions, disposals, mut totals) = classify_movements(&mut je_lines);
     let mut warnings = Vec::new();
@@ -918,6 +958,7 @@ fn normalize_tb(
     assignments: &AssignmentIndex,
     params: &Value,
     entity_key_enabled: bool,
+    auxiliary_columns: &BTreeMap<ledger_mapping::AuxiliaryGroupKey, (usize, usize)>,
 ) -> Result<Vec<TbLine>, AppError> {
     let mask = ledger_mapping::tb_leaf_mask(&table.headers, &table.rows, &|role| {
         mapped_columns(map, role)
@@ -940,10 +981,57 @@ fn normalize_tb(
         self_signed("openingFunctional"),
         self_signed("closingFunctional"),
     );
-    let identities = account_identities(table, map, params, EntitySide::Tb, entity_key_enabled);
+    let mut identities = account_identities(table, map, params, EntitySide::Tb, entity_key_enabled);
+    let mut dimension_rows = BTreeMap::new();
+    for (group, (column, _)) in auxiliary_columns {
+        for dimension in ledger_mapping::tb_dimension_rows(
+            &table.headers,
+            &table.rows,
+            map,
+            "auxiliary",
+            Some(*column),
+        ) {
+            if dimension.aux.is_empty() && !mask.get(dimension.index).copied().unwrap_or(true) {
+                continue;
+            }
+            let identity = &mut identities[dimension.index];
+            let code = if identity.code.is_empty() {
+                dimension.code.clone()
+            } else {
+                identity.code.clone()
+            };
+            if (
+                identity.entity.clone(),
+                ledger_mapping::normalize_account_code(&code),
+            ) != *group
+            {
+                continue;
+            }
+            identity.code = code;
+            if identity.name.is_empty() {
+                identity.name = dimension.name.clone();
+            }
+            if identity.display.is_empty() {
+                identity.display = format!("{} {}", identity.code, identity.name)
+                    .trim()
+                    .to_owned();
+            }
+            dimension_rows.insert(
+                dimension.index,
+                if dimension.aux.is_empty() {
+                    "未分辅助".to_owned()
+                } else {
+                    dimension.aux
+                },
+            );
+        }
+    }
     let mut out = Vec::new();
     for (index, row) in table.rows.iter().enumerate() {
-        if !mask.get(index).copied().unwrap_or(true) {
+        let refined = auxiliary_columns.contains_key(&fa_auxiliary_group(&identities[index]));
+        if (refined && !dimension_rows.contains_key(&index))
+            || (!refined && !mask.get(index).copied().unwrap_or(true))
+        {
             continue;
         }
         let identity = &identities[index];
@@ -951,6 +1039,7 @@ fn normalize_tb(
             continue;
         };
         out.push(TbLine {
+            auxiliary: dimension_rows.get(&index).cloned().unwrap_or_default(),
             entity: identity.entity.clone(),
             account: identity.display.clone(),
             role: assigned.role.clone(),
@@ -990,6 +1079,97 @@ fn je_years(table: &FxTable, map: &Map<String, Value>, fallback_year: i32) -> Ve
         .collect()
 }
 
+fn fa_auxiliary_group(identity: &AccountIdentity) -> ledger_mapping::AuxiliaryGroupKey {
+    (
+        identity.entity.clone(),
+        if identity.code.is_empty() {
+            ledger_mapping::normalize_name(&identity.name)
+        } else {
+            ledger_mapping::normalize_account_code(&identity.code)
+        },
+    )
+}
+
+fn fa_auxiliary_columns(
+    tb: &FxTable,
+    tb_map: &Map<String, Value>,
+    je: &FxTable,
+    je_map: &Map<String, Value>,
+    assignments: &AssignmentIndex,
+    params: &Value,
+    entity_key_enabled: bool,
+) -> BTreeMap<ledger_mapping::AuxiliaryGroupKey, (usize, usize)> {
+    let mut tb_ids = account_identities(tb, tb_map, params, EntitySide::Tb, entity_key_enabled);
+    for dimension in
+        ledger_mapping::tb_dimension_rows(&tb.headers, &tb.rows, tb_map, "auxiliary", None)
+    {
+        let identity = &mut tb_ids[dimension.index];
+        if identity.code.is_empty() {
+            identity.code = dimension.code;
+            identity.name = dimension.name;
+            identity.display = format!("{} {}", identity.code, identity.name)
+                .trim()
+                .to_owned();
+        }
+    }
+    let je_ids = account_identities(je, je_map, params, EntitySide::Je, entity_key_enabled);
+    let anchors = ledger_mapping::tb_auxiliary_anchor_groups(
+        &tb.headers,
+        &tb.rows,
+        tb_map,
+        "auxiliary",
+        |index, _| {
+            let identity = &tb_ids[index];
+            find_assignment(assignments, identity)
+                .is_some()
+                .then(|| fa_auxiliary_group(identity))
+        },
+    );
+    let mut tb_acc = ledger_mapping::GroupedAnchorColumnAccumulator::new(tb.headers.len());
+    for (row, identity) in tb.rows.iter().zip(&tb_ids) {
+        let group = fa_auxiliary_group(identity);
+        if let Some(values) = anchors.get(&group) {
+            tb_acc.feed(group, row, values);
+        }
+    }
+    let mut je_acc = ledger_mapping::GroupedAnchorColumnAccumulator::new(je.headers.len());
+    let mut totals = BTreeMap::new();
+    let keep = ledger_mapping::ledger_junk_mask(&je.headers, &je.rows, &|role| {
+        mapped_columns(je_map, role)
+    });
+    for (index, (row, identity)) in je.rows.iter().zip(&je_ids).enumerate() {
+        if !keep.get(index).copied().unwrap_or(true) {
+            continue;
+        }
+        let group = fa_auxiliary_group(identity);
+        if let Some(values) = anchors.get(&group) {
+            *totals.entry(group.clone()).or_default() += 1;
+            je_acc.feed(group, row, values);
+        }
+    }
+    let tb_scans = tb_acc.finish(&tb.headers);
+    let je_scans = je_acc.finish(&je.headers);
+    let preferred = mapped_columns(je_map, "auxiliary").first().cloned();
+    let verdicts = ledger_mapping::auxiliary_link_group_verdicts_by_tb_columns(
+        &anchors,
+        &tb_scans,
+        &je_scans,
+        &totals,
+        tb_map,
+        "auxiliary",
+        preferred.as_deref(),
+    );
+    ledger_mapping::auxiliary_verified_columns(
+        &verdicts,
+        &tb_scans,
+        &je_scans,
+        &tb.headers,
+        &je.headers,
+        tb_map,
+        "auxiliary",
+    )
+}
+
 fn normalize_je(
     table: &FxTable,
     map: &Map<String, Value>,
@@ -998,6 +1178,7 @@ fn normalize_je(
     end: Option<NaiveDate>,
     cancel: &AtomicBool,
     entity_key_enabled: bool,
+    auxiliary_columns: &BTreeMap<ledger_mapping::AuxiliaryGroupKey, (usize, usize)>,
 ) -> Result<(Vec<JeLine>, usize, usize, String), AppError> {
     // 期间过滤先于公共 Net=0 匹配，避免未来期间的冲销消掉报告期内变动。
     // 噪声行再先于期间过滤：SAP 的 ALV 分组小计、合计行下面的手工草稿都没有
@@ -1066,11 +1247,42 @@ fn normalize_je(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    // 配对身份可细分辅助，但原始凭证键与整凭证分类保持不变。
+    // 用独立影子科目列交给公共配对器，绝不改原始 account 展示或 voucher。
+    let mut matching_rows = table.rows.clone();
+    let mut matching_headers = table.headers.clone();
+    matching_headers.push("__固定资产已验证配对身份".to_owned());
+    let mut matching_targets = BTreeSet::new();
+    for (index, row) in matching_rows.iter_mut().enumerate() {
+        let identity = &identities[index];
+        let group = fa_auxiliary_group(identity);
+        let mut key = accounts[index].clone();
+        if let Some((_, column)) = auxiliary_columns.get(&group) {
+            let value =
+                ledger_mapping::anchor_norm(row.get(*column).map(String::as_str).unwrap_or(""));
+            key = format!(
+                "{key}\u{1f}{}",
+                if value.is_empty() {
+                    "未分辅助"
+                } else {
+                    &value
+                }
+            );
+        }
+        if find_assignment(assignments, identity).is_some() {
+            matching_targets.insert(key.clone());
+        }
+        row.push(key);
+    }
+    let mut matching_ledger = ledger.clone();
+    matching_ledger.account_code = Some("__固定资产已验证配对身份".to_owned());
+    matching_ledger.account_name = Vec::new();
+    matching_ledger.legacy_account = Vec::new();
     let net_zero = tabular::net_zero_view(
-        &table.rows,
-        &table.headers,
-        &ledger,
-        &target_accounts,
+        &matching_rows,
+        &matching_headers,
+        &matching_ledger,
+        &matching_targets.into_iter().collect::<Vec<_>>(),
         cancel,
     )?;
     let dates = table
@@ -1084,8 +1296,9 @@ fn normalize_je(
         .enumerate()
         .filter_map(|(i, _)| {
             let in_period = match (end, start) {
-                (Some(end), Some(start)) => parse_date(&dates[i])
-                    .is_some_and(|date| date >= start && date <= end),
+                (Some(end), Some(start)) => {
+                    parse_date(&dates[i]).is_some_and(|date| date >= start && date <= end)
+                }
                 _ => true,
             };
             (in_period && find_assignment(assignments, &identities[i]).is_some())
@@ -1102,6 +1315,19 @@ fn normalize_je(
         }
         let assigned = find_assignment(assignments, &identities[i]);
         out.push(JeLine {
+            auxiliary: auxiliary_columns
+                .get(&fa_auxiliary_group(&identities[i]))
+                .map(|(_, column)| {
+                    let value = ledger_mapping::anchor_norm(
+                        row.get(*column).map(String::as_str).unwrap_or(""),
+                    );
+                    if value.is_empty() {
+                        "未分辅助".to_owned()
+                    } else {
+                        value
+                    }
+                })
+                .unwrap_or_default(),
             entity: identities[i].entity.clone(),
             voucher: voucher_keys[i].clone(),
             voucher_display: voucher_display(table, row, map, &voucher_keys[i]),
@@ -1264,7 +1490,10 @@ fn je_unmatched_error(
     let sample_text = if samples.is_empty() {
         String::new()
     } else {
-        format!("JE 中形似固定资产科目但未命中的编码样例：{}。", samples.join("、"))
+        format!(
+            "JE 中形似固定资产科目但未命中的编码样例：{}。",
+            samples.join("、")
+        )
     };
     error(
         "FA_TBJE_JE_UNMATCHED",
@@ -1822,6 +2051,7 @@ fn preview_json(a: &Analysis) -> Value {
         "directNetZeroPairs":a.direct_pairs, "crossNetZeroPairs":a.cross_pairs,
         "reconciliationDifferences":differences, "signBasis":a.sign_basis,
         "warnings":a.warnings, "summaryTable": summary_table,
+        "auxiliaryReconciliation": auxiliary_reconciliation(a),
         "counterpartPivots": {
             "cost": pivot_entries(&cost_pivot),
             "depreciation": pivot_entries(&dep_pivot),
@@ -1837,6 +2067,48 @@ fn write_workbook(path: &Path, a: &Analysis, cancel: &AtomicBool) -> Result<(), 
     write_je(wb.add_worksheet(), a, cancel)?;
     write_counterpart_pivots(&mut wb, a)?;
     write_tb_hidden(wb.add_worksheet(), a)?;
+    let auxiliary_rows = auxiliary_reconciliation(a);
+    if !auxiliary_rows.is_empty() {
+        let sheet = wb.add_worksheet();
+        sheet.set_name("辅助核算金额勾稽").map_err(xlsx)?;
+        for (column, title) in [
+            "主体",
+            "科目",
+            "辅助核算",
+            "期初",
+            "JE净发生",
+            "期末",
+            "差异",
+        ]
+        .iter()
+        .enumerate()
+        {
+            sheet.write_string(0, column as u16, *title).map_err(xlsx)?;
+        }
+        for (index, row) in auxiliary_rows.iter().enumerate() {
+            for (column, field) in ["entity", "account", "auxiliary"].iter().enumerate() {
+                sheet
+                    .write_string(
+                        index as u32 + 1,
+                        column as u16,
+                        row[*field].as_str().unwrap_or(""),
+                    )
+                    .map_err(xlsx)?;
+            }
+            for (column, field) in ["opening", "movement", "closing", "difference"]
+                .iter()
+                .enumerate()
+            {
+                sheet
+                    .write_number(
+                        index as u32 + 1,
+                        column as u16 + 3,
+                        row[*field].as_f64().unwrap_or(0.0),
+                    )
+                    .map_err(xlsx)?;
+            }
+        }
+    }
     wb.save(path).map_err(|e| {
         error(
             "FA_TBJE_EXPORT_FAILED",
@@ -1844,6 +2116,46 @@ fn write_workbook(path: &Path, a: &Analysis, cancel: &AtomicBool) -> Result<(), 
             Some(e.to_string()),
         )
     })
+}
+
+fn auxiliary_reconciliation(a: &Analysis) -> Vec<Value> {
+    let mut totals = BTreeMap::<(String, String, String), (f64, f64, f64)>::new();
+    for line in &a.tb {
+        if line.auxiliary.is_empty() {
+            continue;
+        }
+        let key = (
+            line.entity.clone(),
+            ledger_mapping::account_code_of(&line.account),
+            line.auxiliary.clone(),
+        );
+        let total = totals.entry(key).or_default();
+        total.0 += line.opening;
+        total.2 += line.closing;
+    }
+    for line in &a.je {
+        if line.auxiliary.is_empty() || line.counterpart {
+            continue;
+        }
+        let key = (
+            line.entity.clone(),
+            ledger_mapping::account_code_of(&line.account),
+            line.auxiliary.clone(),
+        );
+        totals.entry(key).or_default().1 += line.net;
+    }
+    totals
+        .into_iter()
+        .map(
+            |((entity, account, auxiliary), (opening, movement, closing))| {
+                json!({
+                    "entity":entity, "account":account, "auxiliary":auxiliary,
+                    "opening":opening, "movement":movement, "closing":closing,
+                    "difference":opening + movement - closing,
+                })
+            },
+        )
+        .collect()
 }
 
 fn formats() -> (Format, Format, Format) {
@@ -3286,7 +3598,10 @@ mod tests {
         // 端到端：JE 不映射主体列时，整条链路（修复后前端把确认科目全部挂
         // 「默认主体」）应照常出数，不再静默丢空 JE。
         let (dir, _, mut params) = fixture();
-        params["jeMapping"].as_object_mut().unwrap().remove("entity");
+        params["jeMapping"]
+            .as_object_mut()
+            .unwrap()
+            .remove("entity");
         params["accountAssignments"] = json!([
             {"entity":"默认主体","account":"1601 机器设备","role":"cost","category":"机器设备"},
             {"entity":"默认主体","account":"1602 累计折旧","role":"depreciation","category":"机器设备"}
@@ -3527,7 +3842,10 @@ mod tests {
             }));
             maps.push(inspected["suggestedMapping"].clone());
         }
-        println!("entities 合并: {entities:?}  accounts 合并: {} 个", accounts.len());
+        println!(
+            "entities 合并: {entities:?}  accounts 合并: {} 个",
+            accounts.len()
+        );
         // 与前端 suggestFaAccounts 同口径：数字编码按 1601/1602 前缀定角色。
         let role_of = |account: &str| {
             let code: String = account
@@ -3601,10 +3919,8 @@ mod tests {
         });
         // 先看匹配层：两侧身份各长什么样、find_assignment 是否命中。
         {
-            let tb_spec: crate::fx::SourceSpec =
-                serde_json::from_value(specs[0].clone()).unwrap();
-            let je_spec: crate::fx::SourceSpec =
-                serde_json::from_value(specs[1].clone()).unwrap();
+            let tb_spec: crate::fx::SourceSpec = serde_json::from_value(specs[0].clone()).unwrap();
+            let je_spec: crate::fx::SourceSpec = serde_json::from_value(specs[1].clone()).unwrap();
             let tb = crate::fx::load_fx_table(&tb_spec).unwrap();
             let raw_je = crate::fx::load_fx_table(&je_spec).unwrap();
             let tb_map = serde_json::from_value::<Map<String, Value>>(maps[0].clone()).unwrap();
@@ -3620,7 +3936,9 @@ mod tests {
             let mut unique_tb: Vec<AccountIdentity> = Vec::new();
             for id in &tb_ids {
                 if (id.code.starts_with("1601") || id.code.starts_with("1602"))
-                    && !unique_tb.iter().any(|u| u.entity == id.entity && u.code == id.code)
+                    && !unique_tb
+                        .iter()
+                        .any(|u| u.entity == id.entity && u.code == id.code)
                 {
                     unique_tb.push(id.clone());
                 }
@@ -3765,7 +4083,10 @@ mod tests {
             a_b.additions.len(),
             a_b.disposals.len()
         );
-        assert!(!a_b.je.is_empty(), "变体B（JE 无主体映射）修复后 JE 不应全空");
+        assert!(
+            !a_b.je.is_empty(),
+            "变体B（JE 无主体映射）修复后 JE 不应全空"
+        );
     }
 
     /// 记-0035 形态的更新改造凭证：借原值＋贷原值（净增）＋对方为 1604 在建
@@ -5177,6 +5498,7 @@ mod tests {
         net: f64,
     ) -> JeLine {
         JeLine {
+            auxiliary: String::new(),
             entity: entity.into(),
             voucher: voucher.into(),
             voucher_display: voucher.into(),

@@ -1,7 +1,13 @@
 // @vitest-environment jsdom
-import { act, cleanup, renderHook } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  renderHook,
+  screen,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useLedgerDictReviews } from "./LedgerReviewAll";
+import { LedgerReviewAll, useLedgerDictReviews } from "./LedgerReviewAll";
 
 function deferred() {
   let resolve!: (value: unknown) => void;
@@ -22,6 +28,37 @@ const slot = (onApplied = vi.fn(), column = "A编码") => ({
 afterEach(cleanup);
 
 describe("共享账表复核生命周期", () => {
+  it("映射取值告警明确标注来自 TB 还是 JE", () => {
+    render(
+      <LedgerReviewAll
+        present={["je", "tb"]}
+        names={{ je: "JE", tb: "TB" }}
+        reviewing={{ je: false, tb: false }}
+        status={{ je: "", tb: "" }}
+        results={{
+          je: {
+            mapping: { accountName: "科目描述" },
+            appliedCount: 0,
+            failed: false,
+            error: "",
+            applied: [],
+            pending: [],
+            pairFindings: [],
+            mappingWarnings: [
+              "科目名称所选列「科目描述」在预览行中全为空，请核对",
+            ],
+          },
+        }}
+        onReviewAll={() => undefined}
+      />,
+    );
+    expect(
+      screen.getByText(
+        "JE：科目名称所选列「科目描述」在预览行中全为空，请核对",
+      ),
+    ).toBeTruthy();
+  });
+
   it("换源 A→B 后即使 A 无修改建议也不回写旧映射", async () => {
     const request = deferred();
     const call = vi.fn(() => request.promise);
@@ -133,18 +170,23 @@ describe("共享账表复核生命周期", () => {
 
   it("TB 与 JE 同时存在时只发一次真正的联合请求", async () => {
     const call = vi.fn().mockResolvedValue({
-      tbChanges: [{
-        role: "accountCode",
-        suggestedColumn: "TB新编码",
-        confidence: 0.82,
-      }],
-      jeChanges: [{
-        role: "accountCode",
-        suggestedColumn: "JE新编码",
-        confidence: 0.65,
-      }],
+      tbChanges: [
+        {
+          role: "accountCode",
+          suggestedColumn: "TB新编码",
+          confidence: 0.82,
+        },
+      ],
+      jeChanges: [
+        {
+          role: "accountCode",
+          suggestedColumn: "JE新编码",
+          confidence: 0.65,
+        },
+      ],
     });
-    const tbApplied = vi.fn(), jeApplied = vi.fn();
+    const tbApplied = vi.fn(),
+      jeApplied = vi.fn();
     const { result } = renderHook(() => useLedgerDictReviews(call));
     await act(async () => {
       await result.current.reviewAll({
@@ -161,7 +203,12 @@ describe("共享账表复核生命周期", () => {
     expect(call).toHaveBeenCalledOnce();
     expect(call).toHaveBeenCalledWith(
       "ledger.review_pair_mapping",
-      expect.objectContaining({ payload: expect.objectContaining({ tb: expect.any(Object), je: expect.any(Object) }) }),
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          tb: expect.any(Object),
+          je: expect.any(Object),
+        }),
+      }),
     );
     expect(tbApplied).toHaveBeenCalledWith({ accountCode: "TB新编码" });
     expect(jeApplied).toHaveBeenCalledWith({ accountCode: "JE新编码" });
@@ -239,8 +286,7 @@ describe("共享账表复核生命周期", () => {
           mapping: { accountCode: "A编码" },
           labels: { accountCode: "科目编码" },
           onApplied: applied,
-          missingAfter: (mapping) =>
-            mapping.accountCode ? ["期初余额"] : [],
+          missingAfter: (mapping) => (mapping.accountCode ? ["期初余额"] : []),
         },
       });
     });

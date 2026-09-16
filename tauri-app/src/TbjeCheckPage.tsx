@@ -53,7 +53,6 @@ import {
   resolveRoleLabels,
   selectLedgerWorkbookKindSources,
   verifyAuxiliaryLink,
-  dropUnlinkedTbAuxiliary,
   type AuxiliaryLinkResult,
   type LedgerReviewOutcome,
   type LedgerWorkbookSheetClassification,
@@ -1404,41 +1403,21 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       setAuxLinks({});
       return;
     }
+    setAuxLinks({});
     void (async () => {
       const next: Record<string, AuxiliaryLinkResult | null> = {};
-      const removals: { key: string; result: AuxiliaryLinkResult }[] = [];
       for (const group of paired) {
         next[group.id] = await verifyAuxiliaryLink(paramsOf(group));
-        const result = next[group.id];
-        if (result?.tbAuxMapped && result.status === "noMatch" && group.tb) {
-          removals.push({ key: pairingFileKey(group.tb), result });
-        }
       }
       if (!cancelled) {
         setAuxLinks(next);
-        if (removals.length) {
-          setMappings((current) => {
-            const updated = { ...current };
-            for (const removal of removals) {
-              updated[removal.key] = dropUnlinkedTbAuxiliary(
-                updated[removal.key] ?? {},
-                removal.result,
-              ) as Mapping;
-            }
-            return updated;
-          });
-          invalidateResults();
-          setStatus(
-            `JE 未找到对应列，已取消 ${removals.length} 组 TB 的辅助核算映射；核对仍按主体＋科目执行。`,
-          );
-        }
       }
     })();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groups, mappings, inspects]);
+  }, [groups, mappings, inspects, entityScope.selection]);
 
   /** 导出某一组的差异明细。逐组导——十组的明细塞一个工作簿没法看。 */
   async function exportGroup(label: string) {

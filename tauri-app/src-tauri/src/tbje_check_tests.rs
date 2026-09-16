@@ -1587,7 +1587,9 @@ fn 真实样例的三条核对() {
             .filter(|p| {
                 let name = p.file_name().unwrap_or_default().to_string_lossy();
                 !name.starts_with("~$")
-                    && (name.to_lowercase().contains("tb") || name.contains("科目余额"))
+                    && !name.contains("完整性核对")
+                    && !name.starts_with("FA_")
+                    && (name.to_lowercase().contains("tb") || name.contains("余额表"))
             })
             .collect();
         files.sort();
@@ -1605,11 +1607,16 @@ fn 真实样例的三条核对() {
                 continue;
             };
             let params = json!({
-                "tbSource": source,
+                "tbSource": {"inputPath": tb_path.to_string_lossy(), "sheet": inspected["sheet"], "headerRow": inspected["headerRow"], "headerDepth": inspected["headerDepth"]},
                 "tbMapping": inspected["suggestedMapping"],
             });
             match run(&params, &AtomicBool::new(false)) {
                 Ok(result) => {
+                    if let Ok(output) = std::env::var("TB_STRUCTURE_REPORT_DIR") {
+                        let directory = std::path::PathBuf::from(output);
+                        std::fs::create_dir_all(&directory).unwrap();
+                        std::fs::write(directory.join(format!("{name}.checks.json")), serde_json::to_vec_pretty(&json!({"params": params, "result": result})).unwrap()).unwrap();
+                    }
                     let verdict = |key: &str| {
                         let node = &result[key];
                         if node["performed"].as_bool() != Some(true) {
@@ -1665,6 +1672,88 @@ fn 真实样例的三条核对() {
             }
         }
     }
+}
+
+/// 全量调查不因某组识别/核对失败而中断；固定原始15份TB，避免输出工作簿混入。
+#[test]
+#[ignore = "依赖本机 TBJEPBC 样本目录"]
+fn 十三组十五份tb完整样本异常调查() {
+    let root = std::path::PathBuf::from(std::env::var("TBJEPBC_ROOT").expect("请设置 TBJEPBC_ROOT"));
+    let pairs = [
+        ("01科目余额表（TB）.xls", "01序时账 (JE).xlsx"),
+        ("02科目余额表.xlsx", "02序时账 (2).xlsx"),
+        ("03科目余额表.xlsx", "03序时账 (2).xlsx"),
+        ("04TB.XLSX", "04JE.XLSX"),
+        ("05科目余额表.XLSX", "05序时账 (2).XLSX"),
+        ("06科目余额表_2024.1-3.xlsx", "06序时账-2024.1-3.xlsx"),
+        ("06科目余额表_2024.4-12.xlsx", "06序时账-2024.4-12.xlsx"),
+        ("07科目余额表.xls", "07序时账.xls"),
+        ("08TB.xlsx", "08序时账 (2).xlsx"),
+        ("09科目余额表-2025.xls", "09序时账-2025.xls"),
+        ("10科目余额表.xlsx", "10序时账 (2).xlsx"),
+        ("TBJE/2000&2002公司TB.xlsx", "TBJE/2002公司JE.XLSX"),
+        ("TBJE/2025 1-3月余额表.xlsx", "TBJE/2025 1-3月明细账.xlsx"),
+        ("TBJE/2025 4-12月余额表.xlsx", "TBJE/2025 4-12月明细账.xlsx"),
+        ("TBJE/科目余额表-20251231 0115最新.xlsx", "TBJE/浙江沪杭甬高速公路股份有限公司.xlsx"),
+    ];
+    let mut reports = Vec::new();
+    for (tb, je) in pairs {
+        let analyze = || -> Result<Value, AppError> {
+            let inspect = |name: &str, kind: &str| crate::engine_call_for_test(
+                &format!("fx.inspect_{kind}"), json!({"source": {"inputPath": root.join(name)}}));
+            let tb_inspect = inspect(tb, "tb")?;
+            let je_inspect = inspect(je, "je")?;
+            let source = |name, inspected: &Value| json!({"inputPath": root.join(name), "sheet": inspected["sheet"], "headerRow": inspected["headerRow"], "headerDepth": inspected["headerDepth"]});
+            let mut params = json!({"tbSource": source(tb, &tb_inspect), "jeSource": source(je, &je_inspect), "tbMapping": tb_inspect["suggestedMapping"], "jeMapping": je_inspect["suggestedMapping"]});
+            // 真实样本调查要隔离“自动建议是否命中”与“TB 解析是否正确”。
+            // 这些覆盖来自样本的实际表头，相当于用户已在界面手工完成映射。
+            match tb {
+                "02科目余额表.xlsx" => {
+                    params["tbMapping"]["accountCode"] = json!("总账科目");
+                    params["jeMapping"]["accountCode"] = json!("总帐科目");
+                }
+                "03科目余额表.xlsx" => {
+                    params["jeMapping"]["accountCode"] = json!("总账科目");
+                }
+                "04TB.XLSX" | "05科目余额表.XLSX" => {
+                    params["tbMapping"]["accountCode"] = json!("科目");
+                    params["jeMapping"]["accountCode"] = json!("总帐科目");
+                }
+                "TBJE/2025 4-12月余额表.xlsx" => {
+                    params["tbMapping"]["accountCode"] = json!("帐号");
+                    params["tbMapping"]["accountName"] = json!(["账号描述"]);
+                    params["tbMapping"]["auxiliary"] = json!(["成本中心"]);
+                    params["tbMapping"]["closingFunctionalAmount"] = json!("累计差额-LC1");
+                    params["tbMapping"]["openingFunctionalAmount"] = json!("(FP)-LC1");
+                    params["tbMapping"]["ytdFunctionalDebit"] = json!("借方余额-LC1");
+                    params["tbMapping"]["ytdFunctionalCredit"] = json!("贷方余额-LC1");
+                    params["jeMapping"] = json!({
+                        "accountCode": "科目名称", "accountName": ["科目名称"],
+                        "auxiliary": ["成本中心"], "date": "过账日期", "entity": "公司",
+                        "functionalDebit": "借/本币", "functionalCredit": "贷/本币",
+                        "functionalCurrency": "本币", "id": ["凭证编号"], "summary": "摘要"
+                    });
+                }
+                _ => {}
+            }
+            let result = run(&params, &AtomicBool::new(false))?;
+            Ok(json!({"tb": tb, "je": je, "params": params, "result": result}))
+        };
+        let report = match analyze() {
+            Ok(report) => {
+                println!("样本 {tb}: rollforward={} equation={} tbVsJe={} mismatched={}", report["result"]["rollforward"]["passed"], report["result"]["equation"]["passed"], report["result"]["tbVsJe"]["passed"], report["result"]["tbVsJe"]["mismatched"]);
+                report
+            }
+            Err(error) => { println!("样本 {tb}: 错误 {error:?}"); json!({"tb": tb, "je": je, "error": format!("{error:?}")}) }
+        };
+        reports.push(report);
+    }
+    if let Ok(output) = std::env::var("TB_STRUCTURE_REPORT_DIR") {
+        let directory = std::path::PathBuf::from(output);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("all-15-manual-mapped-tbje-checks.json"), serde_json::to_vec_pretty(&reports).unwrap()).unwrap();
+    }
+    assert_eq!(reports.len(), 15);
 }
 
 /// 真实样例的②发生额核对：按文件名开头的编号把余额表和序时账配成对。
@@ -2083,6 +2172,26 @@ fn 辅助核算锚点认定成功时勾稽细化到维度() {
 }
 
 #[test]
+fn 辅助验证逐科目成功细分失败整体回退且映射范围可限定() {
+    let dir = fixture("aux-group-verified-only");
+    std::fs::write(dir.join("tb.csv"), "科目编码,科目名称,辅助核算,期初余额,本年借方,本年贷方,期末余额\n1002,银行存款,A,0,10,0,10\n1002,银行存款,B,0,20,0,20\n1003,其他货币,C,0,10,0,10\n1003,其他货币,D,0,20,0,20\n").unwrap();
+    // JE 日期不限制锚点验证；1003 仅 C 命中，不可细分一半。
+    std::fs::write(dir.join("je.csv"), "日期,凭证号,科目编码,科目名称,部门,借方,贷方\n2024-01-01,V1,1002,银行存款,A,10,0\n2026-01-01,V2,1002,银行存款,B,20,0\n2025-01-01,V3,1003,其他货币,C,30,0\n").unwrap();
+    let mut params = auxiliary_params(&dir, Some("部门"));
+    params["includeAllAccounts"] = json!(true);
+    let result = run(&params, &AtomicBool::new(false)).unwrap();
+    let groups = result["tbVsJe"]["auxiliaryMatch"]["groups"].as_array().unwrap();
+    assert!(groups.iter().any(|group| group["account"] == "1002" && group["status"] == "verified"));
+    assert!(groups.iter().any(|group| group["account"] == "1003" && group["status"] == "partialCoverage"));
+    assert_eq!(result["tbVsJe"]["accounts"], json!(3), "{result:#?}");
+    params["selectedAccounts"] = json!([{ "account": "1002 银行存款" }]);
+    let mapping = fx::auxiliary_link_check(&params).unwrap();
+    assert_eq!(mapping["status"], "verified", "{mapping:#?}");
+    assert_eq!(mapping["groups"].as_array().unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn je辅助列为空的分录归未分维度桶() {
     let dir = fixture("aux-unassigned");
     std::fs::write(
@@ -2207,10 +2316,10 @@ fn sap空编码维度明细行继承父行科目并按维度细分勾稽() {
     let result = run(&params, &AtomicBool::new(false)).unwrap();
     let tb_vs_je = &result["tbVsJe"];
     assert_eq!(tb_vs_je["auxiliaryRefined"], json!(true), "{result:#?}");
-    // 编码＋名称双列对 JE 单列：编码列全中、名称列未中＝覆盖不全，照样细分。
+    // 编码＋名称是可选表示；编码列完全验证后才细分，不要求 JE 另有名称列。
     assert_eq!(
         tb_vs_je["auxiliaryMatch"]["status"],
-        json!("partialCoverage"),
+        json!("verified"),
         "{result:#?}"
     );
     // 两个维度行＋一个无维度科目；父行必须被明细取代，不得再出一条空维度合计。

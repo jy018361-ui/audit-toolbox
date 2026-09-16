@@ -323,6 +323,10 @@ async fn engine_call(
         // 辅助核算联动验证（锚点反查认定 JE 辅助列）：映射阶段公共入口，
         // 计算侧（TBJE 完整性／存款）复核同一份公共判定逻辑。
         fx::auxiliary_link_check(&params)
+    } else if method == "ledger.currency_link" {
+        // 多币种账户映射阶段验证：只检查用户已映射的 JE 币种列中是否存在
+        // TB 外币锚点，不要求整列非空，也不质疑用户选择的列。
+        fx::currency_link_check(&params)
     } else if method == "ledger.entity_scope_suggestions" {
         ledger_mapping::entity_scope_suggestions_call(&params)
     } else if method == "ledger.review_mapping" {

@@ -2195,97 +2195,125 @@ fn check_tb_vs_je(
 
     // 辅助核算联动验证（公共锚点反查）：TB 映射了辅助列时认定 JE 的对应列，
     // 认定成功才把维度并入勾稽键；对不上按主体＋科目静默降级，附提示。
-    let tb_keep: Vec<bool> = tb
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            functional_rows.get(index).copied().unwrap_or(true)
-                && leaf.get(index).copied().unwrap_or(true)
-        })
-        .collect();
     let tb_aux_mapped = !ledger_mapping::mapped_column_names(tb_map, "auxiliary").is_empty();
-    let anchors = ledger_mapping::tb_auxiliary_anchors(&tb.headers, &tb.rows, tb_map, "auxiliary");
     let je_preferred = ledger_mapping::mapped_column_names(je_map, "auxiliary")
         .first()
         .cloned();
     let mut je_unassigned_rows = 0usize;
-    let (aux_verdict, je_scans) = if anchors.is_empty() {
-        (
-            ledger_mapping::auxiliary_link_verdict(&anchors, Vec::new(), 0, None),
-            Vec::new(),
-        )
-    } else {
-        let mut accumulator =
-            ledger_mapping::AnchorColumnAccumulator::new(je_table.headers.len());
-        let mut total_rows = 0usize;
-        let scan = |accumulator: &mut ledger_mapping::AnchorColumnAccumulator,
-                    total_rows: &mut usize|
-         -> Result<(), AppError> {
-            if let Some(disk) = je.disk.as_ref() {
-                disk.visit(false, cancel, |row| {
-                    *total_rows += 1;
-                    accumulator.feed(&row.values, &anchors);
-                    Ok(())
-                })?;
-            } else {
-                for (index, row) in je_table.rows.iter().enumerate() {
-                    if !je_rows.get(index).copied().unwrap_or(true) {
-                        continue;
-                    }
-                    *total_rows += 1;
-                    accumulator.feed(row, &anchors);
-                }
+    // 验证严格隔离到（有效主体，科目）。空编码的 SAP 辅助明细
+    // 继承最近的同主体科目；只在当前核对行集中提锚点，不看报告期间。
+    let mut tb_anchor_row_groups = vec![None; tb.rows.len()];
+    let mut last_tb_account = BTreeMap::<String, (String, String)>::new();
+    let anchor_groups = ledger_mapping::tb_auxiliary_anchor_groups(
+        &tb.headers,
+        &tb.rows,
+        tb_map,
+        "auxiliary",
+        |index, row| {
+            if !functional_rows.get(index).copied().unwrap_or(true) {
+                return None;
             }
-            Ok(())
+            let (entity, own_code, own_name) = scoped_identity_parts(
+                tb,
+                row,
+                tb_map,
+                tb_fixed,
+                ledger_mapping::EntitySide::Tb,
+                entity_scope,
+            );
+            if !own_code.is_empty() {
+                last_tb_account.insert(entity.clone(), (own_code.clone(), own_name.clone()));
+            }
+            let (code, name) = if own_code.is_empty() {
+                last_tb_account.get(&entity).cloned().unwrap_or_default()
+            } else {
+                (own_code, own_name)
+            };
+            let account = account_policy.account_key(&entity, &code, &name);
+            if account.is_empty() {
+                return None;
+            }
+            let group = (entity, account);
+            tb_anchor_row_groups[index] = Some(group.clone());
+            Some(group)
+        },
+    );
+    let mut tb_scan_accumulator =
+        ledger_mapping::GroupedAnchorColumnAccumulator::new(tb.headers.len());
+    for (index, row) in tb.rows.iter().enumerate() {
+        let Some(group) = tb_anchor_row_groups.get(index).and_then(Clone::clone) else {
+            continue;
         };
-        scan(&mut accumulator, &mut total_rows)?;
-        let scans = accumulator.finish(&je_table.headers);
-        let verdict = ledger_mapping::auxiliary_link_verdict(
-            &anchors,
-            scans.clone(),
-            total_rows,
-            je_preferred.as_deref(),
+        if let Some(anchors) = anchor_groups.get(&group) {
+            tb_scan_accumulator.feed(group, row, anchors);
+        }
+    }
+    let tb_group_scans = tb_scan_accumulator.finish(&tb.headers);
+    let mut je_scan_accumulator =
+        ledger_mapping::GroupedAnchorColumnAccumulator::new(je_table.headers.len());
+    let mut je_group_totals = BTreeMap::<ledger_mapping::AuxiliaryGroupKey, usize>::new();
+    let mut scan_je_row = |row: &[String]| {
+        let group = scoped_matched_identity(
+            je_table,
+            row,
+            je_map,
+            je_fixed,
+            ledger_mapping::EntitySide::Je,
+            entity_scope,
+            &account_policy,
         );
-        (verdict, scans)
+        let Some(anchors) = anchor_groups.get(&group) else {
+            return;
+        };
+        *je_group_totals.entry(group.clone()).or_default() += 1;
+        je_scan_accumulator.feed(group, row, anchors);
     };
-    let aux_refined = aux_verdict.dimension_keys();
-    let je_aux_index: Option<usize> = aux_refined
-        .then(|| {
-            aux_verdict
-                .column
-                .as_deref()
-                .and_then(|name| je_table.headers.iter().position(|header| header == name))
-        })
-        .flatten();
-    // TB 侧取维度的键列：唯一辅助列直接用；多列（编码＋名称）选与 JE
-    // 认定列命中交集最大的一列——键列选错，两侧维度值永远对不上。
-    let tb_aux_index: Option<usize> = if !aux_refined {
-        None
+    if let Some(disk) = je.disk.as_ref() {
+        disk.visit(false, cancel, |row| {
+            scan_je_row(&row.values);
+            Ok(())
+        })?;
     } else {
-        let je_hits = aux_verdict
-            .column
-            .as_deref()
-            .and_then(|name| je_scans.iter().find(|scan| scan.header == name))
-            .map(|scan| &scan.hit_anchors);
-        // 逐列锚点不再挂末级过滤：SAP 形态的维度值在空编码明细行上。
-        ledger_mapping::tb_dimension_column_anchors(&tb.headers, &tb.rows, tb_map, "auxiliary")
-            .into_iter()
-            .map(|(index, set)| {
-                let overlap = je_hits
-                    .map(|hits| set.intersection(hits).count())
-                    .unwrap_or(0);
-                (index, overlap)
-            })
-            .max_by_key(|(_, overlap)| *overlap)
-            .filter(|(_, overlap)| *overlap > 0)
-            .map(|(index, _)| index)
-    };
-    // 认定成功时 TB 侧改用维度视图：空编码明细行继承父行科目、父行让位
-    // （父行金额＝明细之和，同计翻倍）；无维度科目照常整行参与。
-    let dimension_view = aux_refined.then(|| {
-        ledger_mapping::tb_dimension_rows(&tb.headers, &tb.rows, tb_map, "auxiliary", tb_aux_index)
-    });
+        for (index, row) in je_table.rows.iter().enumerate() {
+            if je_rows.get(index).copied().unwrap_or(true) {
+                scan_je_row(row);
+            }
+        }
+    }
+    drop(scan_je_row);
+    let je_group_scans = je_scan_accumulator.finish(&je_table.headers);
+    let group_verdicts = ledger_mapping::auxiliary_link_group_verdicts_by_tb_columns(
+        &anchor_groups,
+        &tb_group_scans,
+        &je_group_scans,
+        &je_group_totals,
+        tb_map,
+        "auxiliary",
+        je_preferred.as_deref(),
+    );
+    let verified_groups = ledger_mapping::auxiliary_verified_columns(
+        &group_verdicts, &tb_group_scans, &je_group_scans,
+        &tb.headers, &je_table.headers, tb_map, "auxiliary",
+    );
+    let aux_refined = !verified_groups.is_empty();
+    let dimension_views = verified_groups
+        .values()
+        .map(|(tb_index, _)| *tb_index)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|tb_index| {
+            (
+                tb_index,
+                ledger_mapping::tb_dimension_rows(
+                    &tb.headers,
+                    &tb.rows,
+                    tb_map,
+                    "auxiliary",
+                    Some(tb_index),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     fn remember_display(map: &mut BTreeMap<String, String>, raw: &str) -> String {
         let normalized = ledger_mapping::anchor_norm(raw);
         if normalized.is_empty() {
@@ -2297,7 +2325,7 @@ fn check_tb_vs_je(
         normalized
     }
     let tb_records = fx::records(tb);
-    if let Some(view) = dimension_view.as_ref() {
+    for (tb_column, view) in &dimension_views {
         for dimension in view {
             let Some(row) = tb.rows.get(dimension.index) else {
                 continue;
@@ -2312,7 +2340,11 @@ fn check_tb_vs_je(
             )
             .0;
             let account = account_policy.account_key(&entity, &dimension.code, &dimension.name);
-            if account.is_empty() {
+            if account.is_empty()
+                || verified_groups.get(&(entity.clone(), account.clone()))
+                    .is_none_or(|(selected, _)| selected != tb_column)
+                || !functional_rows.get(dimension.index).copied().unwrap_or(true)
+            {
                 continue;
             }
             let Some(record) = tb_records.get(dimension.index) else {
@@ -2341,7 +2373,8 @@ fn check_tb_vs_je(
                 .entry(key)
                 .or_insert_with(|| dimension.name.clone());
         }
-    } else {
+    }
+    {
         for (index, row) in tb.rows.iter().enumerate() {
             if !functional_rows.get(index).copied().unwrap_or(true) {
                 continue;
@@ -2362,6 +2395,9 @@ fn check_tb_vs_je(
                 &account_policy,
             );
             if key.1.is_empty() {
+                continue;
+            }
+            if verified_groups.contains_key(&key) {
                 continue;
             }
             let Some(record) = tb_records.get(index) else {
@@ -2409,7 +2445,7 @@ fn check_tb_vs_je(
             if key.1.is_empty() {
                 return Ok(());
             }
-            let aux = match je_aux_index.and_then(|column| row.values.get(column)) {
+            let aux = match verified_groups.get(&key).and_then(|(_, column)| row.values.get(*column)) {
                 Some(value) if !value.trim().is_empty() => remember_display(&mut aux_display, value),
                 Some(_) => {
                     je_unassigned_rows += 1;
@@ -2453,7 +2489,7 @@ fn check_tb_vs_je(
             if key.1.is_empty() {
                 continue;
             }
-            let aux = match je_aux_index.and_then(|column| row.get(column)) {
+            let aux = match verified_groups.get(&key).and_then(|(_, column)| row.get(*column)) {
                 Some(value) if !value.trim().is_empty() => remember_display(&mut aux_display, value),
                 Some(_) => {
                     je_unassigned_rows += 1;
@@ -2547,6 +2583,13 @@ fn check_tb_vs_je(
     // 辅助核算联动验证的结论与提示：降级一律静默放行＋说明，不拦结果。
     let mut auxiliary_warnings = Vec::new();
     if tb_aux_mapped {
+        if group_verdicts.is_empty() {
+            auxiliary_warnings.push("已选范围内没有可验证的非零发生额辅助值，按主体＋科目勾稽。".to_owned());
+        }
+        for group in &group_verdicts {
+        let aux_verdict = &group.verdict;
+        let prefix = format!("主体「{}」科目「{}」：", group.entity, group.account.split('\u{1f}').next().unwrap_or(&group.account));
+        let start = auxiliary_warnings.len();
         match aux_verdict.status {
             "noMatch" => auxiliary_warnings.push(
                 "TB 已映射辅助核算，但 JE 无对应列，已按主体＋科目勾稽。".to_owned(),
@@ -2559,12 +2602,16 @@ fn check_tb_vs_je(
                 "TB 辅助核算列没有可验证的当期发生额行，按主体＋科目勾稽。".to_owned(),
             ),
             "partialCoverage" => auxiliary_warnings.push(format!(
-                "JE 辅助列「{}」覆盖不全（{}/{} 个维度命中），维度差异请结合未分维度行复核。",
+                "JE 辅助列「{}」覆盖不全（{}/{} 个维度命中），整科目按主体＋科目勾稽。",
                 aux_verdict.column.clone().unwrap_or_default(),
                 aux_verdict.anchor_hits,
                 aux_verdict.anchor_total
             )),
             _ => {}
+        }
+        for warning in &mut auxiliary_warnings[start..] {
+            *warning = format!("{prefix}{warning}");
+        }
         }
         if aux_refined && je_unassigned_rows > 0 {
             auxiliary_warnings.push(format!(
@@ -2573,18 +2620,28 @@ fn check_tb_vs_je(
         }
     }
     let auxiliary_match = tb_aux_mapped.then(|| {
+        let group_json = group_verdicts.iter().map(|group| {
+            let verdict = &group.verdict;
+            json!({"entity": group.entity, "account": group.account,
+                "status": verdict.status, "column": verdict.column,
+                "anchorHits": verdict.anchor_hits, "anchorTotal": verdict.anchor_total,
+                "competingColumns": verdict.competing_columns})
+        }).collect::<Vec<_>>();
+        let status = if group_verdicts.is_empty() { "noAnchors" }
+            else if group_verdicts.iter().all(|group| group.verdict.dimension_keys()) { "verified" }
+            else if group_verdicts.iter().all(|group| group.verdict.status == "noMatch") { "noMatch" }
+            else if group_verdicts.iter().any(|group| group.verdict.status == "ambiguous") { "ambiguous" }
+            else { "partialCoverage" };
+        let anchor_hits = group_verdicts.iter().map(|group| group.verdict.anchor_hits).sum::<usize>();
+        let anchor_total = group_verdicts.iter().map(|group| group.verdict.anchor_total).sum::<usize>();
         json!({
-            "status": aux_verdict.status,
-            "column": aux_verdict.column,
-            "anchorHits": aux_verdict.anchor_hits,
-            "anchorTotal": aux_verdict.anchor_total,
-            "coverage": if aux_verdict.total_rows > 0 {
-                (aux_verdict.nonempty_rows as f64 / aux_verdict.total_rows as f64 * 10_000.0)
-                    .round() / 10_000.0
-            } else {
-                0.0
-            },
-            "competingColumns": aux_verdict.competing_columns,
+            "status": status,
+            "column": group_verdicts.first().and_then(|group| group.verdict.column.clone()),
+            "anchorHits": anchor_hits,
+            "anchorTotal": anchor_total,
+            "coverage": if anchor_total > 0 { anchor_hits as f64 / anchor_total as f64 } else { 0.0 },
+            "competingColumns": group_verdicts.iter().flat_map(|group| group.verdict.competing_columns.clone()).collect::<BTreeSet<_>>(),
+            "groups": group_json,
         })
     });
     Ok(json!({
@@ -2604,8 +2661,7 @@ fn check_tb_vs_je(
             "code"
         },
         "ambiguousAccountCodes": account_policy.ambiguous_count(),
-        // 辅助核算联动：verified／partialCoverage 时 items 已按维度拆行，
-        // 其余状态与旧口径（主体＋科目）完全一致。
+        // 只有各主体＋科目的 verified 组细分；其余组整体回退。
         "auxiliaryRefined": aux_refined,
         "auxiliaryMatch": auxiliary_match,
         "auxiliaryWarnings": auxiliary_warnings,

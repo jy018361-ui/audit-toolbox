@@ -39,6 +39,14 @@ beforeEach(() => {
   mock.pickPath.mockResolvedValue(null);
   mock.engineCall.mockImplementation(async (method: string) => {
     if (method === "ledger.forms") return [];
+    if (method === "ledger.currency_link") {
+      return {
+        required: false,
+        verified: true,
+        missingCurrencies: [],
+        affectedGroupCount: 0,
+      };
+    }
     throw new Error(`unexpected ${method}`);
   });
 });
@@ -107,6 +115,8 @@ it("统一上传自动分类出 TB 与 JE 来源卡，并可一键更正类型",
       source?: { inputPath?: string };
     };
     if (method === "ledger.forms") return [];
+    if (method === "ledger.currency_link")
+      return { required: false, verified: true, missingCurrencies: [], affectedGroupCount: 0 };
     if (method === "deposit.classify_source") {
       return p.source?.inputPath?.endsWith("je.xlsx")
         ? classify("je", "序时账", jeHeaders)
@@ -189,6 +199,8 @@ it("公共入口重建整组，待上传单侧入口只补充对应来源", asyn
     const p = params as { kind?: "tb" | "je"; source?: { inputPath?: string } };
     const kind = p.source?.inputPath?.includes("je") ? "je" : "tb";
     if (method === "ledger.forms") return [];
+    if (method === "ledger.currency_link")
+      return { required: false, verified: true, missingCurrencies: [], affectedGroupCount: 0 };
     if (method === "deposit.classify_source")
       return classify(kind, p.source?.inputPath ?? "");
     if (method === "loan.inspect") {
@@ -271,6 +283,8 @@ it("借款 TB＋JE 一键联合复核并按单列映射写回，不会白屏", a
       };
     };
     if (method === "ledger.forms") return [];
+    if (method === "ledger.currency_link")
+      return { required: false, verified: true, missingCurrencies: [], affectedGroupCount: 0 };
     if (method === "deposit.classify_source") {
       return p.source?.inputPath?.includes("03")
         ? classify("je", jeHeaders)
@@ -372,6 +386,8 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
     const p = params as { kind?: string; source?: { inputPath?: string } };
     if (method === "ledger.forms") return [];
+    if (method === "ledger.currency_link")
+      return { required: false, verified: true, missingCurrencies: [], affectedGroupCount: 0 };
     if (method === "deposit.classify_source") {
       return p.source?.inputPath?.endsWith("je.xlsx")
         ? classify("je", "序时账", jeHeaders)
@@ -405,9 +421,9 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
   // 科目清单渲染，借款科目按名称预选，应收账款默认排除。
   expect(await screen.findByText("确认借款科目")).toBeVisible();
-  const loanSelect = screen.getByRole("combobox", { name: "2001 短期借款的科目类型" });
+  const loanSelect = await screen.findByRole("combobox", { name: "2001 短期借款的科目类型" });
   expect((loanSelect as HTMLSelectElement).value).toBe("loan");
-  const skipSelect = screen.getByRole("combobox", { name: "1122 应收账款的科目类型" });
+  const skipSelect = await screen.findByRole("combobox", { name: "1122 应收账款的科目类型" });
   expect((skipSelect as HTMLSelectElement).value).toBe("skip");
   const accountRows = screen.getAllByRole("row");
   expect(accountRows[1]).toHaveTextContent("短期借款");
@@ -470,6 +486,8 @@ it("生成借款利率表并手填利率后可进入测算", async () => {
   mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
     const p = params as { kind?: string; source?: { inputPath?: string } };
     if (method === "ledger.forms") return [];
+    if (method === "ledger.currency_link")
+      return { required: false, verified: true, missingCurrencies: [], affectedGroupCount: 0 };
     if (method === "deposit.classify_source") {
       return p.source?.inputPath?.endsWith("je.xlsx")
         ? classify("je", "序时账", jeHeaders)
@@ -534,7 +552,7 @@ it("生成借款利率表并手填利率后可进入测算", async () => {
     screen.getByText("JE里无借款辅助明细，默认按科目维度进行利息测算"),
   ).toBeVisible();
   expect(
-    screen.getByText("TB 辅助明细未继续拆分，以下利率与测算行已按主体＋借款科目合并。"),
+    screen.getByText("未通过辅助验证的主体＋科目已合并；验证成功的其他科目仍按辅助核算拆分。请按各行匹配依据复核。"),
   ).toBeVisible();
   // 手填固定执行利率 3.85。
   fireEvent.change(screen.getByRole("spinbutton", { name: "2001 短期借款的执行利率" }), {

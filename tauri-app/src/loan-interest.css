@@ -222,11 +222,11 @@
   border-collapse: collapse;
 }
 .loan-rate-confirmation table {
-  min-width: 760px;
-  table-layout: fixed;
+  min-width: 1480px;
+  table-layout: auto;
 }
 .loan-rate-table table {
-  min-width: 1200px;
+  min-width: 1280px;
 }
 .loan-rate-confirmation th,
 .loan-rate-confirmation td,
@@ -243,15 +243,38 @@
   font-size: 12px;
 }
 .loan-rate-confirmation th:first-child {
-  width: 34%;
+  min-width: 140px;
 }
 .loan-rate-confirmation th:nth-child(2) {
-  width: 20%;
+  min-width: 320px;
 }
 .loan-rate-confirmation th:nth-child(3),
 .loan-rate-confirmation th:nth-child(4) {
-  width: 16%;
+  min-width: 140px;
 }
+
+.loan-currency-policy {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--primary) 6%, var(--card));
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.loan-currency-policy strong {
+  flex: 0 0 auto;
+}
+
+.loan-currency-policy span {
+  color: var(--muted-foreground);
+}
+.loan-rate-confirmation input { width: 110px; min-width: 110px; }
+.loan-rate-confirmation select { min-width: 90px; }
 .loan-rate-confirmation td:first-child {
   overflow: hidden;
   text-overflow: ellipsis;

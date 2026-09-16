@@ -174,7 +174,7 @@
 }
 .deposit-table > table {
   width: 100%;
-  min-width: 1420px;
+  min-width: 1510px;
   border-collapse: collapse;
 }
 .deposit-table th,
@@ -192,10 +192,10 @@
   background: var(--muted);
   font-size: 12px;
 }
-.deposit-table th:nth-child(-n + 4),
-.deposit-table td:nth-child(-n + 4),
-.deposit-table th:nth-child(6),
-.deposit-table td:nth-child(6),
+.deposit-table th:nth-child(-n + 5),
+.deposit-table td:nth-child(-n + 5),
+.deposit-table th:nth-child(7),
+.deposit-table td:nth-child(7),
 .deposit-table th:last-child,
 .deposit-table td:last-child {
   text-align: left;
@@ -582,4 +582,16 @@
   margin: 8px 0 0;
   color: var(--muted-foreground);
   font-size: 12px;
+}
+.deposit-currency-mode {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--muted);
+  font-size: 13px;
 }

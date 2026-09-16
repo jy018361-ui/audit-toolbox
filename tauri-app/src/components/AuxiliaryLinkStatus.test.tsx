@@ -22,6 +22,17 @@ function result(overrides: Partial<AuxiliaryLinkResult>): AuxiliaryLinkResult {
 }
 
 describe("AuxiliaryLinkStatusView 三态标注", () => {
+  it("逐主体科目显示独立验证结果，不用全局结论覆盖失败组", () => {
+    render(<AuxiliaryLinkStatusView result={result({
+      groups: [
+        { ...result({}), entity: "A", account: "1002" },
+        { ...result({ status: "partialCoverage", anchorHits: 2 }), entity: "A", account: "2001" },
+      ],
+    })} />);
+    expect(screen.getByText("A · 1002")).toBeInTheDocument();
+    expect(screen.getByText("A · 2001")).toBeInTheDocument();
+    expect(screen.getByText(/不启用辅助核算键/)).toBeInTheDocument();
+  });
   it("TB 未映射辅助列时不渲染", () => {
     const { container } = render(
       <AuxiliaryLinkStatusView result={result({ tbAuxMapped: false })} />,
@@ -35,25 +46,27 @@ describe("AuxiliaryLinkStatusView 三态标注", () => {
     expect(screen.getByText(/3\/3 维度命中，覆盖率 82%/)).toBeInTheDocument();
   });
 
-  it("对不上时提示取消 TB 映射并保留降级计算", () => {
+  it("对不上时保留语义映射并停用辅助键", () => {
     render(
       <AuxiliaryLinkStatusView
         result={result({ status: "noMatch", column: null, anchorHits: 0 })}
       />,
     );
     expect(screen.getByText(/JE 无对应辅助核算列/)).toBeInTheDocument();
-    expect(screen.getByText(/已取消 TB 的辅助核算映射/)).toBeInTheDocument();
-    expect(screen.getByText(/继续按主体＋科目归集/)).toBeInTheDocument();
+    expect(screen.getByText(/保留字段映射/)).toBeInTheDocument();
+    expect(screen.getByText(/不启用辅助核算键/)).toBeInTheDocument();
+    expect(screen.getByText(/按主体＋科目归集/)).toBeInTheDocument();
   });
 
-  it("覆盖不全提示结合未分维度行复核", () => {
+  it("覆盖不全明确整组降级且不启用辅助键", () => {
     render(
       <AuxiliaryLinkStatusView
         result={result({ status: "partialCoverage", anchorHits: 2 })}
       />,
     );
     expect(screen.getByText(/覆盖不全（2\/3 维度命中）/)).toBeInTheDocument();
-    expect(screen.getByText(/未分维度行/)).toBeInTheDocument();
+    expect(screen.getByText(/按主体＋科目归集/)).toBeInTheDocument();
+    expect(screen.getByText(/不启用辅助核算键/)).toBeInTheDocument();
   });
 
   it("多列候选提示手动指定", () => {

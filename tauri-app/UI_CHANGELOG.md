@@ -1,5 +1,112 @@
 # UI 修改记录
 
+## 2026-09-15 · 存款与借款进入第二步前选择多币种退回口径
+
+### 目标
+
+- TB 同一账户有多个币种、但用户映射的 JE 币种列未覆盖全部外币时，不由系统静默决定测算方式。
+
+### 设计决策
+
+- 映射完成后进入第二步时，以 TB 外币为锚点检查 JE 对应主体＋科目；JE 中出现一次对应币种即有效，不要求币种列全部非空，也不质疑用户映射的列。
+- 验证未通过时，存款和 TB＋JE 借款统一弹出二选一：合并本位币并使用 JE 发生额，或保留币种并按 TB 年初、年末平均值测算。用户必须明确选择，结果页可查看／更改，选择写入历史参数和 Excel 底稿。
+
+### 验证方式
+
+- `npx vitest run src/components/CurrencyFallbackDialog.test.tsx src/DepositInterestInteractions.test.tsx src/LoanInterestPage.test.ts`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib 多币种 -- --test-threads=1`
+- `npm run build`
+
+## 2026-09-15 · 存款同科目按币种分别测算利率
+
+### 目标
+
+- 同一主体、科目编码及辅助账户下，TB 有多个币种时分别列示账户和填写利率。
+
+### 设计决策
+
+- 逐户测算表新增币种列；每个币种独立保存利率输入、计算月均余额与利息。利率输入的辅助标签标明币种。
+- JE 缺少可用币种且对应 TB 是多币种账户时，不将一条 JE 发生额复制到每种币种；受影响行退回各自 TB 两点法，JE 推导及勾稽显示 `N/A`，并显示补充币种提示。
+
+### 验证方式
+
+- `npm run build`
+- `npx vitest run src/DepositInterestPage.test.ts src/DepositInterestInteractions.test.tsx`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib deposit_interest::tests`
+
+## 2026-09-15 · 存款余额勾稽证据逐户显示
+
+### 目标
+
+- 没有该户 JE 发生额或 TB 独立年初余额时，不再把两点法期末余额展示为 JE 推导。
+- 在状态表头说明已勾稽、两点法、待填利率、年初倒推和待复核的含义。
+
+### 设计决策
+
+- 逐户增加 `jeReconciled` 证据标志；预览与底稿的 JE 推导余额和差异在缺证据时显示 `N/A`，底稿结论写“未执行 JE 勾稽”。
+- 保留两点法月均与利息估算，不改变当前利率填入规则；默认利率暂估模式待确认后单独实现。
+
+### 验证方式
+
+- `npm run build`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib deposit_interest::tests`
+
+## 2026-09-15 · 辅助字段映射与匹配资格分离
+
+### 目标
+
+- 保留用户和 LLM 的辅助核算语义映射，消除联动验证失败后旧提示残留。
+- 让验证结论按主体、科目显示，不以全表命中替代当前科目命中。
+
+### 设计决策
+
+- 验证失败不删除映射；仅验证成功的主体科目组启用辅助键，其余组整体降级为主体＋科目。
+- 验证输入变化先清空旧结论，异步旧请求不覆盖当前结果；验证提示不再写入文件上传状态。
+- 存款页辅助字段说明同步为条件匹配键；主体归集和科目分类变化触发重验。
+
+### 验证方式
+
+- `npx vitest run src/ledgerMappingAuxiliary.test.ts src/components/AuxiliaryLinkStatus.test.tsx`
+- `npm run build`
+
+## 2026-09-15 · FA TB＋JE 科目复核收敛为 TB 科目与即时搜索
+
+### 目标
+
+- 科目复核只展示 TB 中实际存在的科目，不再把 JE 独有的对方科目混入固定资产分类。
+- 将误作“批量资产类别”的输入框改为按科目编码或名称即时筛选，便于快速定位科目。
+- 让联合复核的空列告警明确标注来自 TB 还是 JE，并让所有主体的固定资产科目真正置顶。
+
+### 设计决策
+
+- 科目清单与旧后端回退口径均只取 TB 的主体和科目；JE 继续用于固定资产变动匹配及完整凭证明细，不改变其业务用途。
+- 搜索采用公共关键词筛选组件，支持多关键词同时匹配、命中数显示和一键清空；筛选只影响当前视图，不改变角色或资产类别。
+- 移除 TB／JE 来源标签与批量资产类别写入入口，使本步骤只承担逐项复核和查找。
+- 角色排序跨主体统一执行，不再按主体分块后把后一主体的固定资产科目挤到排除项后面；公共联合复核告警增加 `TB：`／`JE：` 前缀。
+
+### 验证方式
+
+- `npx vitest run src/FaTbJePage.test.ts src/components/KeywordFilter.test.tsx src/components/LedgerReviewAll.test.tsx`
+- `$env:FA_TBJE_PBC2002_DIR='C:\Users\lenovo\Downloads\TBJEPBC\TBJE'; cargo test --manifest-path src-tauri/Cargo.toml --lib repro_2000_2002_tbje_je_matching -- --ignored --nocapture --test-threads=1`
+- `npm run build`
+
+## 2026-09-15 · Windows 应用图标透明底修复
+
+### 目标
+
+- 修复桌面快捷方式、任务栏与安装包图标外围显示大块黑色方底的问题。
+- 保留既有深绿材质 E 标志，只修正图标画布的透明通道。
+
+### 设计决策
+
+- 以高清 E 标志的圆章外轮廓重建透明通道，圆章内部材质、立体阴影和珊瑚色节点保持不变。
+- 由同一透明源图重新生成 Tauri 的 Windows ICO 与各尺寸 PNG，避免桌面、任务栏和安装器使用到不同底色的缓存尺寸。
+
+### 验证方式
+
+- 检查 `src-tauri/icons/app-icon.png`、`icon.png`、`32x32.png`、`64x64.png`、`128x128.png`、`128x128@2x.png` 与 `icon.ico` 四角像素的 Alpha 均为 0。
+- 将生成后的图标合成到白色背景检查边缘，确认没有黑色方底或明显黑边。
+
 ## 2026-09-14 · 无效辅助核算映射自动撤销
 
 ### 目标

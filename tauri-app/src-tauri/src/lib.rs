@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod audipick;
 mod confirmation;
 mod deposit_interest;
@@ -25,6 +27,7 @@ mod tbje_check;
 mod telemetry;
 mod update_notes;
 mod wp;
+mod xls_sample;
 #[cfg(test)]
 mod xls_input_tests;
 

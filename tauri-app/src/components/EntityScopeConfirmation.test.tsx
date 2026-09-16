@@ -18,7 +18,7 @@ describe("公共主体口径确认", () => {
     ],
   };
 
-  it("默认严格区分，部分归集只写入人工勾选项", () => {
+  it("默认全部测算，部分测算只写入人工勾选项", () => {
     const onChange = vi.fn();
     const { rerender } = render(
       <EntityScopeConfirmation
@@ -29,10 +29,10 @@ describe("公共主体口径确认", () => {
     );
 
     expect(
-      (screen.getByRole("radio", { name: /严格区分/ }) as HTMLInputElement)
+      (screen.getByRole("radio", { name: /全部测算/ }) as HTMLInputElement)
         .checked,
     ).toBe(true);
-    fireEvent.click(screen.getByRole("radio", { name: /部分归集/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /部分测算/ }));
     expect(onChange).toHaveBeenLastCalledWith({ mode: "aggregate", mappings: [] });
 
     rerender(

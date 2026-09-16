@@ -1778,11 +1778,11 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                             return (
                               <label className="tbje-sheet-picker">
                                 <span>工作表</span>
-                                {sheets.length > 1 ? (
+                                {sheets.length > 0 ? (
                                   <select
                                     aria-label="余额表使用的工作表"
                                     value={inspected.sheet}
-                                    disabled={busy}
+                                    disabled={busy || sheets.length === 1}
                                     onChange={(event) =>
                                       void switchSheet(
                                         group.tb!,
@@ -1902,11 +1902,11 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                             return (
                               <label className="tbje-sheet-picker">
                                 <span>工作表</span>
-                                {sheets.length > 1 ? (
+                                {sheets.length > 0 ? (
                                   <select
                                     aria-label="序时账使用的工作表"
                                     value={inspected.sheet}
-                                    disabled={busy}
+                                    disabled={busy || sheets.length === 1}
                                     onChange={(event) =>
                                       void switchSheet(
                                         group.je!,

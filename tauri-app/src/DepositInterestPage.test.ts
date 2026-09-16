@@ -1,11 +1,31 @@
 import { describe, expect, it } from "vitest";
 import {
+  depositAccountReviewRows,
   depositAccountCode, mergeAccountList,
   depositAutoRate, depositDropTargetInside, depositEffectiveTierRate, depositFirstTierOf,
   depositMissingRequired, depositMonthlyAverage, depositMonthlyInterest, depositRateAboveBenchmark,
   depositPercentToRate, depositRateOutOfPractice, depositRateToPercent, depositReportStart,
   depositTermsOf, depositJeLayout, JE_LAYOUT_LABEL,
 } from "./DepositInterestPage";
+
+describe("存款第二步辅助明细", () => {
+  it("仅完整验证成功的主体科目组展开", () => {
+    const result = depositAccountReviewRows(["100201 银行存款"], {
+      tbAuxMapped: true, status: "partialCoverage", column: "银行账户", anchorHits: 1,
+      anchorTotal: 2, coverage: 0.5, competingColumns: [], warnings: [],
+      groups: [
+        { entity: "甲", account: "100201", reviewVerified: true,
+          details: [{ key: "a银行", display: "A银行" }], tbAuxMapped: true,
+          status: "verified", column: "银行账户", anchorHits: 1, anchorTotal: 1,
+          coverage: 1, competingColumns: [], warnings: [] },
+        { entity: "乙", account: "100201", reviewVerified: false, details: [], tbAuxMapped: true,
+          status: "noMatch", column: null, anchorHits: 0, anchorTotal: 1,
+          coverage: 0, competingColumns: [], warnings: [] },
+      ],
+    });
+    expect(result.map((row) => row.auxiliary ?? "末级")).toEqual(["A银行", "末级"]);
+  });
+});
 
 describe("deposit account list merge", () => {
   it("TB 与 JE 的两种拼法按科目编码归并成一条", () => {

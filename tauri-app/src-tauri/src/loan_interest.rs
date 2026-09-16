@@ -152,13 +152,17 @@ pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
     }
 }
 
-/// 「确认科目与利率」步骤的科目清单：TB 末级科目逐行下发（编码、名称、
-/// 期初/期末余额、行键），并给出可解释的借款科目预选建议。建议只负责缩小
-/// 人工确认范围；最终仍以用户逐行确认后回传的 `loanAccounts` 为准。
+/// 「确认科目与利率」步骤的科目清单：TB 严格末级科目按选择键聚合后下发，
+/// 并给出可解释的借款科目预选建议。这里是“科目目录”，不改变计算侧保守的
+/// `tb_leaf_mask`；多主体／多辅助行共用同一科目编码时只展示一次，避免重复键
+/// 让前端分页看起来没有变化。最终仍以用户确认后回传的 `loanAccounts` 为准。
 fn tb_accounts(params: &Value) -> Result<Value, AppError> {
     let (tb, tm) = source(params, "tbSource")?;
-    let tb_leaf =
-        ledger_mapping::tb_leaf_mask(&tb.headers, &tb.rows, &|role| mapped_names(&tm, "tb", role));
+    let tb_leaf = ledger_mapping::tb_catalog_leaf_mask(
+        &tb.headers,
+        &tb.rows,
+        &|role| mapped_names(&tm, "tb", role),
+    );
     let balance_self_signed = |prefix: &str| {
         ledger_mapping::balance_self_signed(
             &tb.headers,
@@ -172,7 +176,17 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
         balance_self_signed("openingFunctional"),
         balance_self_signed("closingFunctional"),
     );
-    let mut accounts = Vec::new();
+    #[derive(Clone)]
+    struct CatalogAccount {
+        key: String,
+        code: String,
+        name: String,
+        account: String,
+        opening: f64,
+        closing: f64,
+    }
+    let mut order = Vec::<String>::new();
+    let mut grouped = HashMap::<String, CatalogAccount>::new();
     for (row_index, row) in tb.rows.iter().enumerate() {
         if !tb_leaf.get(row_index).copied().unwrap_or(true) {
             continue;
@@ -198,18 +212,46 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
         } else {
             norm(&code)
         };
-        let suggestion = suggest_loan_account(&code, &name, &account, opening, closing);
-        accounts.push(json!({
-            "key": key,
-            "code": code,
-            "name": name,
-            "account": account,
-            "opening": opening,
-            "closing": closing,
-            "suggestedType": if suggestion.is_loan { "loan" } else { "skip" },
-            "suggestionReason": suggestion.reason,
-        }));
+        if let Some(existing) = grouped.get_mut(&key) {
+            existing.opening += opening;
+            existing.closing += closing;
+            if existing.name.trim().is_empty() && !name.trim().is_empty() {
+                existing.name = name;
+            }
+            if existing.account.trim().is_empty() && !account.trim().is_empty() {
+                existing.account = account;
+            }
+        } else {
+            order.push(key.clone());
+            grouped.insert(
+                key.clone(),
+                CatalogAccount { key, code, name, account, opening, closing },
+            );
+        }
     }
+    let accounts = order
+        .into_iter()
+        .filter_map(|key| grouped.remove(&key))
+        .map(|account| {
+            let suggestion = suggest_loan_account(
+                &account.code,
+                &account.name,
+                &account.account,
+                account.opening,
+                account.closing,
+            );
+            json!({
+                "key": account.key,
+                "code": account.code,
+                "name": account.name,
+                "account": account.account,
+                "opening": account.opening,
+                "closing": account.closing,
+                "suggestedType": if suggestion.is_loan { "loan" } else { "skip" },
+                "suggestionReason": suggestion.reason,
+            })
+        })
+        .collect::<Vec<_>>();
     Ok(json!({ "accounts": accounts }))
 }
 
@@ -2342,6 +2384,24 @@ fn calculate_tb_impl(
                 .map(norm)
                 .collect::<std::collections::HashSet<_>>()
         });
+    // 第二步若已安全展开到辅助明细，用户对该行的分类必须落实到计算，不能
+    // 只在界面上看起来可编辑。未出现在清单里的行沿用末级科目的选择。
+    let loan_review_selections: HashMap<(String, String, String), bool> = params
+        .get("loanReviewSelections")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            Some((
+                (
+                    item.get("entity")?.as_str()?.to_owned(),
+                    norm(item.get("account")?.as_str()?),
+                    norm(item.get("auxiliary")?.as_str()?),
+                ),
+                item.get("selected")?.as_bool()?,
+            ))
+        })
+        .collect();
     let loan_id_mapped = mapped_names(&tm, "tb", "loanId")
         .first()
         .is_some_and(|v| !v.trim().is_empty());
@@ -2403,6 +2463,19 @@ fn calculate_tb_impl(
             folds = collapse_folds_to_account(folds, split_by_currency);
             (HashMap::new(), false)
         };
+    if !loan_review_selections.is_empty() {
+        folds.retain(|fold| {
+            let account = if fold.code.trim().is_empty() {
+                norm(&fold.account)
+            } else {
+                norm(&fold.code)
+            };
+            loan_review_selections
+                .get(&(fold.entity.clone(), account, norm(&fold.raw_id)))
+                .copied()
+                .unwrap_or(true)
+        });
+    }
     let (disk_aggregates, disk_je_entities) = if disk_je && !two_point_by_currency {
         let (aggregates, entities) = aggregate_large_je_once(
             &folds,
@@ -6584,6 +6657,52 @@ mod tests {
     }
 
     #[test]
+    fn 科目确认清单只列唯一末级科目并汇总多主体辅助行() {
+        let fixture = SyntheticLedger::new(&[]);
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet();
+        sheet.set_name("TB").unwrap();
+        for (row_index, row) in [
+            vec!["主体", "编码", "科目", "辅助核算", "期初贷", "期末贷"],
+            vec!["A", "2001", "短期借款", "", "0", "0"],
+            vec!["A", "200101", "短期借款_银行借款", "A银行", "100", "90"],
+            vec!["A", "200101", "短期借款_银行借款", "B银行", "50", "40"],
+            vec!["B", "2001", "短期借款", "", "0", "0"],
+            vec!["B", "200101", "短期借款_银行借款", "C银行", "30", "20"],
+        ]
+        .iter()
+        .enumerate()
+        {
+            for (column_index, value) in row.iter().enumerate() {
+                sheet
+                    .write_string(row_index as u32, column_index as u16, *value)
+                    .unwrap();
+            }
+        }
+        let path = fixture.dir.join("tb-account-catalog.xlsx");
+        book.save(&path).unwrap();
+        let result = tb_accounts(&json!({
+            "tbSource": {
+                "source": {"inputPath": path, "sheet": "TB", "headerRow": 1, "headerDepth": 1},
+                "mapping": {
+                    "entity": "主体",
+                    "accountCode": "编码",
+                    "accountName": "科目",
+                    "auxiliary": "辅助核算",
+                    "openingFunctionalCredit": "期初贷",
+                    "closingFunctionalCredit": "期末贷"
+                }
+            }
+        }))
+        .unwrap();
+        let rows = result["accounts"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "父级与重复辅助行不得重复进入科目目录：{result:#?}");
+        assert_eq!(rows[0]["key"], "200101");
+        assert_eq!(rows[0]["opening"], json!(180.0));
+        assert_eq!(rows[0]["closing"], json!(150.0));
+    }
+
+    #[test]
     fn tbje模式无辅助核算时按科目自成一笔() {
         // 辅助核算按业务口径是选填：TB 没有借款明细列时，科目文本本身就足以
         // 标识借款（每个末级科目一行借款的形态），TB＋JE 测算照常出逐笔行，
@@ -6771,6 +6890,14 @@ mod tests {
             "{}",
             rows[0]["matchBasis"]
         );
+        params["loanAccounts"] = json!(["2001"]);
+        params["loanReviewSelections"] = json!([
+            {"entity": ledger_mapping::DEFAULT_ENTITY, "account": "2001", "auxiliary": "l1", "selected": true},
+            {"entity": ledger_mapping::DEFAULT_ENTITY, "account": "2001", "auxiliary": "l2", "selected": false}
+        ]);
+        let filtered = run_preview(&params).unwrap();
+        assert_eq!(filtered["rows"].as_array().unwrap().len(), 1, "逐辅助项排除必须落实到测算：{filtered:#?}");
+        assert_eq!(filtered["rows"][0]["loanId"], "L-1");
     }
 
     #[test]

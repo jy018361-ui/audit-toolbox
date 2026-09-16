@@ -3,9 +3,49 @@ import {
   loanEffectiveRate,
   loanEquation,
   loanMissing,
+  loanAccountReviewRows,
+  mergeRestoredLoanMapping,
 } from "./LoanInterestPage";
 
 describe("借款利息测算", () => {
+  it("辅助整组经 JE 验证后才在第二步展开", () => {
+    const account = { key: "200101", code: "200101", name: "银行借款", account: "200101 银行借款", opening: 100, closing: 90 };
+    expect(loanAccountReviewRows([account], {
+      tbAuxMapped: true, status: "verified", column: "辅助", anchorHits: 1, anchorTotal: 1,
+      coverage: 1, competingColumns: [], warnings: [],
+      groups: [{ entity: "甲", account: "200101", reviewVerified: true,
+        details: [{ key: "a银行", display: "A银行" }], tbAuxMapped: true,
+        status: "verified", column: "辅助", anchorHits: 1, anchorTotal: 1,
+        coverage: 1, competingColumns: [], warnings: [] }],
+    })).toMatchObject([{ entity: "甲", auxiliary: "A银行" }]);
+    expect(loanAccountReviewRows([account], null)).toMatchObject([{ reviewKey: "200101" }]);
+  });
+  it("恢复旧任务时保留人工映射并补入新版主体建议", () => {
+    expect(
+      mergeRestoredLoanMapping(
+        {
+          entity: "核算组织",
+          accountCode: "科目编码",
+          accountName: "科目名称",
+        },
+        { accountCode: "科目编码", accountName: "科目名称" },
+        ["核算组织", "科目编码", "科目名称"],
+      ),
+    ).toEqual({
+      accountCode: "科目编码",
+      accountName: "科目名称",
+      entity: "核算组织",
+    });
+  });
+  it("恢复任务的人工选择优先且不让新建议复用同一物理列", () => {
+    expect(
+      mergeRestoredLoanMapping(
+        { entity: "核算组织", auxiliary: "核算维度" },
+        { entity: "核算维度" },
+        ["核算组织", "核算维度"],
+      ),
+    ).toEqual({ entity: "核算维度" });
+  });
   it("按基准利率加BP换算浮动利率", () =>
     expect(loanEffectiveRate("floating", 0, 0.035, 75)).toBeCloseTo(0.0425));
   it("未提供基准时显示原执行利率，不将加点当全部利率", () =>

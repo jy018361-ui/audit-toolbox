@@ -32,7 +32,7 @@
   z-index: 60;
   box-sizing: border-box;
   width: max-content;
-  max-width: min(280px, calc(100vw - 16px));
+  max-width: min(360px, calc(100vw - 16px));
   max-height: min(240px, calc(100dvh - 16px));
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -46,6 +46,7 @@
   text-align: left;
   box-shadow: var(--shadow-card);
   overflow-wrap: anywhere;
+  white-space: pre-line;
   animation: jargon-tip-fade 150ms ease-out;
 }
 

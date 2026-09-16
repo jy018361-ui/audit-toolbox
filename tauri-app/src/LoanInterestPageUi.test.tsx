@@ -432,6 +432,9 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   expect(screen.getByText("第 1 / 3 页")).toBeVisible();
   fireEvent.change(loanSelect, { target: { value: "skip" } });
   expect(screen.getByText("2001 短期借款已设为排除。")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  expect(screen.getByText("第 2 / 3 页")).toBeVisible();
+  expect(screen.getByText(/已切换到第 2 页/)).toBeVisible();
   expect(screen.getByText("设置借款利率")).toBeVisible();
   expect(screen.getByRole("region", { name: "等待生成利率明细" })).toBeVisible();
   // 金额映射没补齐：下一步仍拦，但不再出现「借款明细/辅助核算」的旧提示。
@@ -446,7 +449,7 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
 
 /** 映射齐全时生成借款利率表，手填年利率后下一步放行、测算带确认清单与利率。 */
 it("生成借款利率表并手填利率后可进入测算", async () => {
-  const tbHeaders = ["科目编码", "科目名称", "期初余额", "期末余额"];
+  const tbHeaders = ["科目编码", "科目名称", "辅助核算", "期初余额", "期末余额"];
   const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "贷方金额"];
   const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
     kind,
@@ -460,6 +463,7 @@ it("生成借款利率表并手填利率后可进入测算", async () => {
   const fullMapping = {
     accountCode: "科目编码",
     accountName: "科目名称",
+    auxiliary: "辅助核算",
     openingFunctionalAmount: "期初余额",
     closingFunctionalAmount: "期末余额",
   };
@@ -536,6 +540,10 @@ it("生成借款利率表并手填利率后可进入测算", async () => {
     result: {
       rows: [
         {
+          entity: "浙江沪杭甬高速公路股份有限公司",
+          accountCode: "200101",
+          accountName: "短期借款_银行借款",
+          auxiliary: "A银行",
           loanId: "2001 短期借款",
           openingPrincipal: 1000000,
           closingPrincipal: 900000,
@@ -548,6 +556,10 @@ it("生成借款利率表并手填利率后可进入测算", async () => {
     },
   });
   expect(await screen.findByText("借款利率确认表")).toBeVisible();
+  expect(screen.getAllByRole("columnheader", { name: "科目编码" }).at(-1)).toBeVisible();
+  expect(screen.getAllByRole("columnheader", { name: "科目名称" }).at(-1)).toBeVisible();
+  expect(screen.getByRole("columnheader", { name: "辅助核算" })).toBeVisible();
+  expect(screen.getByText("A银行")).toBeVisible();
   expect(
     screen.getByText("JE里无借款辅助明细，默认按科目维度进行利息测算"),
   ).toBeVisible();

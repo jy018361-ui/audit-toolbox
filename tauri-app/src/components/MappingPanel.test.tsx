@@ -67,7 +67,7 @@ describe("共用字段映射面板", () => {
     });
   });
 
-  it("仅当样例确认编码名称混写时允许两个科目身份角色共用一列", () => {
+  it("用户手动确认编码名称混写时允许两个科目身份角色共用一列", () => {
     const mixedHeader = "项目编码、文本/科目编码、文本";
     const mixedRows = [
       ["1001/库存现金", "1000"],
@@ -86,6 +86,25 @@ describe("共用字段映射面板", () => {
     expect(onChange).toHaveBeenCalledWith({
       accountCode: mixedHeader,
       accountName: [mixedHeader],
+    });
+  });
+
+  it("空格分隔的完整编码名称在所有共用面板中也可双映射", () => {
+    const { onChange, selects } = panel({
+      headers: ["科目"],
+      rows: [
+        ["6701090001 财务费用-汇兑收益"],
+        ["1001010000 库存现金-人民币"],
+        ["1002010000 银行存款"],
+        ["2202010000 应付账款"],
+      ],
+      mapping: { accountCode: "科目" },
+      multi: new Set(["accountName"]),
+    });
+    pick(selects[0], "accountName");
+    expect(onChange).toHaveBeenCalledWith({
+      accountCode: "科目",
+      accountName: ["科目"],
     });
   });
 
@@ -111,7 +130,7 @@ describe("共用字段映射面板", () => {
     });
   });
 
-  it("科目双角色例外不扩展到普通列或其他字段角色", () => {
+  it("科目双角色例外不扩展到其他字段角色", () => {
     const mixedHeader = "科目";
     const mixedRows = [
       ["1001/库存现金", "1000"],
@@ -143,9 +162,18 @@ describe("共用字段映射面板", () => {
     });
     pick(second.selects[0], "accountName");
     expect(second.onChange).toHaveBeenCalledWith({
-      accountCode: undefined,
+      accountCode: "会计科目",
       accountName: ["会计科目"],
     });
+  });
+
+  it("预览为空时仍可手动共列，避免大表首屏样本拦住用户确认", () => {
+    const { onChange, selects } = panel({
+      headers: ["科目"], rows: [], mapping: { accountCode: "科目" },
+      multi: new Set(["accountName"]),
+    });
+    pick(selects[0], "accountName");
+    expect(onChange).toHaveBeenCalledWith({ accountCode: "科目", accountName: ["科目"] });
   });
 
   it("双角色混写列可在同一下拉中显示并单独取消一个科目角色", () => {

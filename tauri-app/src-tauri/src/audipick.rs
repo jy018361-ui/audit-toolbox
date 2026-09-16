@@ -964,6 +964,39 @@ pub(crate) fn ledger_review_call(
     ledger_mapping_llm_call(kind, params, settings)
 }
 
+/// TB 已经按交易币种拆分时，JE 的币种不再只是某个工具的“可有可无”字段：
+/// 联合复核必须主动寻找同口径列。角色仍由公共账表字典定义；这里只把跨表条件
+/// 注入复核范围，不猜列、不自动接受模型建议。
+fn inject_pair_currency_requirement(tb: &Value, je: &mut Value) {
+    let mapped = |side: &Value, role: &str| {
+        side.get("currentMapping")
+            .and_then(Value::as_object)
+            .and_then(|mapping| mapping.get(role))
+            .is_some_and(value_is_filled)
+    };
+    if !mapped(tb, "currency") || mapped(je, "currency") {
+        return;
+    }
+    let Some(object) = je.as_object_mut() else {
+        return;
+    };
+    let available = object
+        .entry("availableRoles")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(roles) = available.as_array_mut() {
+        if !roles.iter().any(|role| role.as_str() == Some("currency")) {
+            roles.push(Value::String("currency".into()));
+        }
+    }
+    object.insert(
+        "crossRequiredRoles".into(),
+        json!([{
+            "role": "currency",
+            "because": "TB 已映射交易币种，JE 必须主动寻找逐行交易币种/外币/原币列以保持同口径"
+        }]),
+    );
+}
+
 /// 真正的 TB＋JE 联合映射复核。旧的 `ledger_review_call` 继续服务只上传一侧的
 /// 页面和兼容入口；同时存在 TB、JE 时，公共前端统一走这里，让模型在一次请求里
 /// 看到同一账套两边的字段、样例、当前形态与 Coding 已验证的处理事实。
@@ -987,13 +1020,20 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
     if tb.is_object() {
         inject_current_form(&mut tb, "tb");
         restrict_review_roles_to_current_form(&mut tb, "tb");
+    }
+    if je.is_object() {
+        inject_current_form(&mut je, "je");
+        restrict_review_roles_to_current_form(&mut je, "je");
+    }
+    if tb.is_object() && je.is_object() {
+        inject_pair_currency_requirement(&tb, &mut je);
+    }
+    if tb.is_object() {
         inject_engine_facts(&mut tb);
         inject_required_missing_roles(&mut tb, "tb");
         inject_mapping_review_scope(&mut tb, "tb");
     }
     if je.is_object() {
-        inject_current_form(&mut je, "je");
-        restrict_review_roles_to_current_form(&mut je, "je");
         inject_engine_facts(&mut je);
         inject_required_missing_roles(&mut je, "je");
         inject_mapping_review_scope(&mut je, "je");
@@ -1013,6 +1053,7 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
          两侧 engineFacts 是 Coding 根据样例验证的处理事实；protected=true 的事实不得修改。\
          同一源列可合法承担 engineFacts.mappedRoles 中列出的多个角色，Coding 会在后续完成拆分、组合或标准化。\
          requiredMissingRoles 是当前仍缺失的金标必填角色清单；只要 headers 与 sampleRows 中存在相容列，就必须逐项输出 change，不得只复核已有映射。\
+         crossRequiredRoles 是由另一侧当前映射触发的跨表待补角色；尤其 TB 已映射 currency 时，必须检查 JE 的逐行交易币种、外币或原币代码列，并在样例值为 ISO 币种代码时输出 JE currency 补充建议。不得用整列固定的本币/本位币列代替。\
          unmappedRoles 是尚未映射的完整角色清单：逐项查看 headers 与 sampleRows，有相容列就输出 change，没有可信候选则维持空缺。\
          mappedRolesToReview 是必须逐项复核的全部已有映射；另在 tbRoleReviews/jeRoleReviews 中为每个已有角色返回 {{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"change\"|\"uncertain\",\"reason\":string}}，不能用 changes 为空代替语义复核。status=keep 仅限样例值与角色含义相容；明显错配且有可信替代列用 change 并同时输出 change；证据不足用 uncertain。suspectMappings 是 Coding 已发现的确定性疑点，必须优先处理。\
          联合比较 accountCode/accountName 的标题语义、样例形态与两侧口径；证据接近时维持当前映射，不要为了换成看起来更好的列而改。\
@@ -3610,5 +3651,30 @@ mod mapping_prompt_tests {
         let partial = mapping_review_coverage(&reviewed, &payload, "roleReviews", "changes");
         assert_eq!(partial["complete"], false);
         assert_eq!(partial["unreviewedRoles"], json!(["accountName"]));
+    }
+
+
+    #[test]
+    fn tb已有币种时联合复核强制检查je币种() {
+        let tb = json!({
+            "currentMapping": {"currency": "币种"},
+            "availableRoles": ["accountCode", "currency"]
+        });
+        let mut je = json!({
+            "currentMapping": {"accountCode": "科目编码"},
+            "availableRoles": ["accountCode"]
+        });
+        inject_pair_currency_requirement(&tb, &mut je);
+        assert!(je["availableRoles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|role| role == "currency"));
+        assert_eq!(je["crossRequiredRoles"][0]["role"], "currency");
+
+        je["currentMapping"]["currency"] = json!("外币");
+        je["crossRequiredRoles"] = Value::Null;
+        inject_pair_currency_requirement(&tb, &mut je);
+        assert!(je["crossRequiredRoles"].is_null(), "已映射时不应重复要求");
     }
 }

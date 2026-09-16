@@ -521,11 +521,25 @@ export const isCombinedAccountValues = (values: string[]): boolean => {
     const value = raw.trim();
     if (!value) continue;
     total += 1;
+    // 与 Rust split_code_and_name_ref 同口径：完整日期不是科目；分隔符后
+    // 若仍是编码也不是名称（例如 1001/02）。
+    if (/^(?:19|20)\d{2}\/\d{1,2}\/\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/.test(value))
+      continue;
     const at = value.search(/[/:_\\|]/);
     if (at > 0) {
       const code = value.slice(0, at).trim();
       const name = value.slice(at + 1).trim();
-      if (looksLikeAccountCode(code) && name) split += 1;
+      if (looksLikeAccountCode(code) && name && !looksLikeAccountCode(name))
+        split += 1;
+      continue;
+    }
+    // 用友等导出以空格分开完整编码和名称；短数字＋普通文本不应误判。
+    const space = value.search(/\s/);
+    if (space > 0) {
+      const code = value.slice(0, space);
+      const name = value.slice(space).trim();
+      if (looksLikeAccountCode(code) && (code.match(/\d/g) ?? []).length >= 3 && name)
+        split += 1;
     }
   }
   return total >= 4 && split * 4 >= total * 3;
@@ -1270,6 +1284,10 @@ export type AuxiliaryLinkResult = {
   groups?: Array<Omit<AuxiliaryLinkResult, "groups"> & {
     entity: string;
     account: string;
+    /** 第二步可否安全展开为辅助明细；比仅定位到 JE 列更严格。 */
+    reviewVerified?: boolean;
+    /** 只有本组全部 TB 辅助值均在 JE 对应列命中时才返回。 */
+    details?: Array<{ key: string; display: string }>;
   }>;
 };
 

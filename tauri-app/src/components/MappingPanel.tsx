@@ -1,5 +1,4 @@
 import { DataTable } from "@/components/DataTable";
-import { canShareCombinedAccountColumn } from "@/ledgerMapping";
 
 /**
  * 五个工具共用的字段映射面板。
@@ -95,23 +94,12 @@ export function MappingPanel(props: MappingPanelProps) {
   const isMulti = (role: string) => Boolean(multi?.has(role));
   const locked = (role: string) => Boolean(props.isLocked?.(role));
 
-  // “科目编码＋科目名称”是公共账表映射里唯一允许共用物理列的身份角色。
-  // 必须先由样例值确认该列确实呈编码/名称混写形态；列标题本身不构成依据。
-  const combinedAccountColumns = new Set(
-    headers
-      .filter((header) =>
-        canShareCombinedAccountColumn(
-          headers,
-          rows,
-          header,
-          "accountCode",
-          "accountName",
-        ),
-      )
-      .map((header) => header.trim()),
-  );
+  // 手动映射由用户确认：预览可能只有表头/汇总行，不应用样本阈值阻止
+  // 编码与名称共列。自动识别和 LLM 建议仍在公共引擎按取值验证。
   const isAccountIdentityRole = (role: string) =>
     role === "accountCode" || role === "accountName";
+  const accountPair = (first: string, second: string) =>
+    first !== second && isAccountIdentityRole(first) && isAccountIdentityRole(second);
 
   // 某一列当前落在哪个角色上。可共用一列的角色不参与判定——否则币种线索
   // 文本会把科目名称的标记抢走，用户看到的下拉就跟实际映射对不上。
@@ -129,21 +117,13 @@ export function MappingPanel(props: MappingPanelProps) {
 
   const update = (column: string, role: string) => {
     const next: MappingDict = { ...mapping };
-    const combinedAccount = combinedAccountColumns.has(column);
     // 先把这一列从原来的角色上摘下来，再挂到新角色上。
     for (const [key] of roles) {
       // 经样例确认的混写列可同时承担科目编码、科目名称。除此以外仍严格
       // 一列一角色，包括摘要、辅助核算、币种等都不能借此例外叠加。
       if (
         role &&
-        combinedAccount &&
-        canShareCombinedAccountColumn(
-          headers,
-          rows,
-          column,
-          role,
-          key,
-        )
+        accountPair(role, key)
       ) {
         continue;
       }
@@ -258,7 +238,7 @@ export function MappingPanel(props: MappingPanelProps) {
     const column = header.trim();
     const held = toggleMode ? (props.rolesOf?.(header) ?? []) : [];
     const current = toggleMode ? "" : roleOf(column);
-    const accountHeld = !toggleMode && combinedAccountColumns.has(column)
+    const accountHeld = !toggleMode
       ? rolesOnColumn(column).filter(isAccountIdentityRole)
       : [];
     const combinedAccountMapped = accountHeld.length > 1;
@@ -384,7 +364,7 @@ export function MappingPanel(props: MappingPanelProps) {
           ) : null}
           {props.requirementOf ? (
             <span className="mapping-requirement-legend">
-              ＊ 为必填字段；（选填）须按当前分组的整组规则补充；（已用）＝已有列挂在该角色上，可多列角色仍可继续加列。
+              ＊ 为必填字段；（选填）须按当前分组的整组规则补充；（已用）＝已有列挂在该角色上，可多列角色仍可继续加列。仅“科目编码＋科目名称”可手动共列，请确认单元格确实混写两者。
             </span>
           ) : null}
         </p>

@@ -2196,9 +2196,7 @@ fn check_tb_vs_je(
     // 辅助核算联动验证（公共锚点反查）：TB 映射了辅助列时认定 JE 的对应列，
     // 认定成功才把维度并入勾稽键；对不上按主体＋科目静默降级，附提示。
     let tb_aux_mapped = !ledger_mapping::mapped_column_names(tb_map, "auxiliary").is_empty();
-    let je_preferred = ledger_mapping::mapped_column_names(je_map, "auxiliary")
-        .first()
-        .cloned();
+    let je_preferred = ledger_mapping::mapped_column_names(je_map, "auxiliary");
     let mut je_unassigned_rows = 0usize;
     // 验证严格隔离到（有效主体，科目）。空编码的 SAP 辅助明细
     // 继承最近的同主体科目；只在当前核对行集中提锚点，不看报告期间。
@@ -2289,7 +2287,7 @@ fn check_tb_vs_je(
         &je_group_totals,
         tb_map,
         "auxiliary",
-        je_preferred.as_deref(),
+        &je_preferred,
     );
     let verified_groups = ledger_mapping::auxiliary_verified_columns(
         &group_verdicts, &tb_group_scans, &je_group_scans,

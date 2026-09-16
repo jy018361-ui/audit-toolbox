@@ -862,7 +862,7 @@ describe("TbjeCheckPage", () => {
             headerRow: 3,
             headerDepth: 2,
             headers: ["科目编码", "期末余额"],
-            preview: [],
+            preview: [["1001010000 库存现金", "100"]],
             entities: [],
             suggestedMapping: {},
           };
@@ -873,7 +873,7 @@ describe("TbjeCheckPage", () => {
             headerRow: 2,
             headerDepth: 1,
             headers: ["凭证号", "借方金额"],
-            preview: [],
+            preview: [["记-1", "100"]],
             entities: [],
             suggestedMapping: {},
           };
@@ -885,6 +885,21 @@ describe("TbjeCheckPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "手动添加配对组" }));
     await screen.findByRole("button", { name: "TB-4800.xlsx" });
     expect(screen.getByLabelText("余额表使用的工作表")).toHaveValue("Sheet1");
+    fireEvent.change(screen.getByLabelText("余额表使用的工作表"), {
+      target: { value: "tb种类" },
+    });
+    await waitFor(() =>
+      expect(screen.getByLabelText("余额表使用的工作表")).toHaveValue("tb种类"),
+    );
+    expect(engineCall).toHaveBeenCalledWith("fx.inspect_tb", {
+      source: { inputPath: "C:/samples/TB-4800.xlsx", sheet: "tb种类", headerRow: 0, headerDepth: 0 },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查看并调整 TB 映射" }));
+    const tbPanel = screen.getByText("科目余额表字段映射").closest("section")!;
+    const subjectSelect = () => tbPanel.querySelector(".dt-header-control select") as HTMLSelectElement;
+    fireEvent.change(subjectSelect(), { target: { value: "accountCode" } });
+    fireEvent.change(subjectSelect(), { target: { value: "accountName" } });
+    expect(subjectSelect().querySelector("option")?.textContent).toBe("科目编码 ＋ 科目名称");
     fireEvent.click(screen.getByRole("button", { name: "选择 JE Excel" }));
     await screen.findByRole("button", { name: "4800_JE.xlsx" });
     expect(screen.getByLabelText("序时账使用的工作表")).toHaveValue("JE");
@@ -892,6 +907,27 @@ describe("TbjeCheckPage", () => {
       screen.queryByRole("button", { name: "更换 Excel" }),
     ).not.toBeInTheDocument();
     expect(screen.queryByText("（缺科目余额表）")).not.toBeInTheDocument();
+  });
+
+  it("单 Sheet 的 TB 与 JE 都显示同样的工作表控件", async () => {
+    const { engineCall, pickPath } = await import("./api");
+    vi.mocked(pickPath)
+      .mockResolvedValueOnce("C:/samples/01TB.xlsx")
+      .mockResolvedValueOnce("C:/samples/01JE.xlsx");
+    vi.mocked(engineCall).mockImplementation(async (method: string, params: unknown) => {
+      if (method === "ledger.forms") return [];
+      return {
+        sheet: "Sheet1", sheets: ["Sheet1"], headerRow: 1, headerDepth: 1,
+        headers: ["科目编码"], preview: [], entities: [], suggestedMapping: {},
+      };
+    });
+    render(<TbjeCheckPage tool={tool} />);
+    fireEvent.click(screen.getByRole("button", { name: "手动添加配对组" }));
+    const tb = await screen.findByLabelText("余额表使用的工作表");
+    fireEvent.click(screen.getByRole("button", { name: "选择 JE Excel" }));
+    const je = await screen.findByLabelText("序时账使用的工作表");
+    expect(tb).toBeDisabled();
+    expect(je).toBeDisabled();
   });
 
   it("re-picking an already added file keeps its inspection and mapping untouched", async () => {

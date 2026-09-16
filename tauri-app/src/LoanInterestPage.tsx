@@ -77,6 +77,12 @@ import "./fx-audit.css";
 type Mode = "ledger" | "tb";
 type Kind = "ledger" | "tb" | "je" | "rateLedger";
 type LoanMapping = MappingDict;
+const mappingRoleEnabled = (mapping: LoanMapping, role: string) => {
+  const value = mapping[role];
+  return Array.isArray(value)
+    ? value.some((column) => String(column).trim())
+    : Boolean(String(value ?? "").trim());
+};
 type Inspection = {
   headers: string[];
   preview: string[][];
@@ -103,6 +109,7 @@ type LoanRow = {
   entity: string;
   rowKey?: string;
   accountCode?: string;
+  accountName?: string;
   auxiliary?: string;
   currency?: string;
   loanId: string;
@@ -211,6 +218,44 @@ type TbAccount = {
   suggestionReason?: string;
 };
 
+type LoanAccountReviewRow = TbAccount & {
+  reviewKey: string;
+  entity?: string;
+  auxiliary?: string;
+  auxiliaryKey?: string;
+};
+
+const reviewKey = (entity: string, account: string, auxiliary: string) =>
+  `${entity}\u001f${account}\u001f${auxiliary}`;
+
+/** 公共辅助验证成功才把末级科目展开；没有通过的科目仍只出现一次。 */
+export function loanAccountReviewRows(
+  accounts: TbAccount[],
+  link: AuxiliaryLinkResult | null,
+): LoanAccountReviewRow[] {
+  return accounts.flatMap((account) => {
+    const groups = (link?.groups ?? []).filter(
+      (group) => group.account === account.key,
+    );
+    const expanded = groups.flatMap((group) =>
+      group.reviewVerified
+        ? (group.details ?? []).map((detail) => ({
+            ...account,
+            reviewKey: reviewKey(group.entity, account.key, detail.key),
+            entity: group.entity,
+            auxiliary: detail.display,
+            auxiliaryKey: detail.key,
+          }))
+        : [],
+    );
+    const hasFallback = groups.length === 0 || groups.some((group) => !group.reviewVerified);
+    return [
+      ...expanded,
+      ...(hasFallback ? [{ ...account, reviewKey: account.key }] : []),
+    ];
+  });
+}
+
 /** 兼容旧任务/浏览器演示数据；新版 Rust 会直接下发更审慎的 suggestedType。 */
 function initialLoanAccountRole(account: TbAccount): "loan" | "skip" {
   if (account.suggestedType === "loan" || account.suggestedType === "skip") {
@@ -239,6 +284,47 @@ const loanReviewMapping = (mapping: LoanMapping) =>
         typeof entry[1] === "string" || Array.isArray(entry[1]),
     ),
   );
+/**
+ * 历史任务的手工选择优先，但不能用旧版整份字典覆盖新版确定性建议。
+ * 这样新增的公共别名（如“核算组织”→主体）可在继续任务时自动补入；同时
+ * 已被历史映射占用的物理列不会再分给另一个新角色。
+ */
+export function mergeRestoredLoanMapping(
+  suggested: LoanMapping,
+  restored: LoanMapping,
+  headers: string[],
+): LoanMapping {
+  const validColumns = new Set(headers);
+  const validValue = (value: string | string[] | undefined) =>
+    Array.isArray(value)
+      ? value.filter((column) => validColumns.has(column))
+      : value && validColumns.has(value)
+        ? value
+        : undefined;
+  const merged: LoanMapping = {};
+  const occupied = new Set<string>();
+  for (const [role, raw] of Object.entries(restored)) {
+    const value = validValue(raw);
+    if (!value || (Array.isArray(value) && !value.length)) continue;
+    merged[role] = value;
+    for (const column of Array.isArray(value) ? value : [value]) occupied.add(column);
+  }
+  for (const [role, raw] of Object.entries(suggested)) {
+    if (merged[role]) continue;
+    const value = validValue(raw);
+    if (!value) continue;
+    if (Array.isArray(value)) {
+      const available = value.filter((column) => !occupied.has(column));
+      if (!available.length) continue;
+      merged[role] = available;
+      available.forEach((column) => occupied.add(column));
+    } else if (!occupied.has(value)) {
+      merged[role] = value;
+      occupied.add(value);
+    }
+  }
+  return merged;
+}
 /** 底稿反馈里只展示文件名，完整路径放 title 悬浮提示。 */
 function fileNameOf(path: string) {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
@@ -363,10 +449,12 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const [accountsBusy, setAccountsBusy] = useState(false);
   /** 科目角色确认：行键 → 借款科目/排除；预选规则为名称含「借款/贷款」。 */
   const [loanAccountRoles, setLoanAccountRoles] = useState<Record<string, "loan" | "skip">>({});
+  const [loanDetailRoles, setLoanDetailRoles] = useState<Record<string, "loan" | "skip">>({});
   const restoredLoanAccounts = useRef<string[] | null>(null);
   const [accountQuery, setAccountQuery] = useState("");
   const [accountPage, setAccountPage] = useState(0);
   const [accountChangeNote, setAccountChangeNote] = useState("");
+  const accountListRef = useRef<HTMLDivElement>(null);
   /** 利率手填：行标识 → 利率口径（叠加在 preview 借款行之上）。 */
   const [tbRateEdits, setTbRateEdits] = useState<Record<string, PasteRateRow>>({});
   const [result, setResult] = useState<Record<string, unknown>>();
@@ -503,6 +591,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     if (kind === "tb") {
       setTbAccounts([]);
       setLoanAccountRoles({});
+      setLoanDetailRoles({});
       setTbRateEdits({});
     }
     setSources((v) => ({ ...v, [kind]: { ...v[kind], ...next } }));
@@ -586,6 +675,17 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     tbAccounts
       .filter((a) => loanAccountRoles[a.key] === "loan")
       .map((a) => a.key);
+  const loanReviewRole = (row: LoanAccountReviewRow) =>
+    loanDetailRoles[row.reviewKey] ?? loanAccountRoles[row.key] ?? "skip";
+  const loanReviewSelections = () =>
+    loanAccountReviewRows(tbAccounts, auxLink)
+      .filter((row) => row.auxiliaryKey)
+      .map((row) => ({
+        entity: row.entity ?? "",
+        account: row.key,
+        auxiliary: row.auxiliaryKey,
+        selected: loanReviewRole(row) === "loan",
+      }));
   /** 导出利率确认表模板（带入已填值），用户在 Excel 补填后经 importRates 回读。 */
   async function exportRateTemplate() {
     const target = await pickPath("save", "保存利率确认表", ["xlsx"], "借款利率确认表.xlsx");
@@ -597,6 +697,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         tbSource: source("tb"),
         jeSource: source("je"),
         loanAccounts: selectedLoanAccounts(),
+        loanReviewSelections: loanReviewSelections(),
         rateRows: Object.values(tbRateEdits),
         outputPath: target,
       });
@@ -812,10 +913,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     const stash = restoredLoanMappings.current[kind];
     const samePath = (a: string, b: string) =>
       a.trim().toLowerCase() === b.trim().toLowerCase();
-    const mapping =
-      stash && samePath(stash.path, path)
-        ? stash.mapping
-        : (x.suggestedMapping ?? {});
+    const mapping = stash && samePath(stash.path, path)
+      ? mergeRestoredLoanMapping(x.suggestedMapping ?? {}, stash.mapping, x.headers)
+      : (x.suggestedMapping ?? {});
     if (stash && samePath(stash.path, path))
       restoredLoanMappings.current[kind] = undefined;
     setSource(kind, { path, inspection: x, mapping });
@@ -857,6 +957,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       // TB 模式：确认的借款科目清单 + 「确认科目与利率」步骤手填/回读的利率。
       // 引擎按借款行标识归一化对应，优先于利率台账文件（后者仅历史任务恢复用）。
       loanAccounts: mode === "tb" ? selectedLoanAccounts() : undefined,
+      loanReviewSelections: mode === "tb" ? loanReviewSelections() : undefined,
       rateRows:
         mode === "tb" && Object.keys(tbRateEdits).length
           ? Object.values(tbRateEdits).map((r) => ({
@@ -885,8 +986,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   // 历史记录「继续任务」：回填台账/TB/JE/利率台账路径、模式与映射；Sheet 等
   // 历史参数没有预览表头/行数，必须重新识别，不能把不完整数据传给映射面板。
   // 逐行利率的手工改动依赖台账预览现算默认值，恢复后需在识别后重设。
-  // restoredLoanMappings：用户重新识别同一文件时，inspect 完成会把映射重设
-  // 为建议值——这里把存档映射顶回，逐来源一次性消费。
+  // restoredLoanMappings：重新识别同一文件后，以新版建议补齐旧任务没有的角色，
+  // 再由仍有效的存档人工选择覆盖；逐来源一次性消费。
   const restoredLoanMappings = useRef<
     Partial<Record<Kind, { path: string; mapping: LoanMapping }>>
   >({});
@@ -911,6 +1012,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       rateLedgerSource?: LoanSourceParams;
       rateRows?: PasteRateRow[];
       loanAccounts?: string[];
+      loanReviewSelections?: Array<{ entity?: string; account?: string; auxiliary?: string; selected?: boolean }>;
       outputPath?: string;
       currencyFallbackMode?: CurrencyFallbackMode;
     };
@@ -962,6 +1064,18 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
           (p.loanAccounts as string[]).map((key) => [key, "loan" as const]),
         ),
       );
+    setLoanDetailRoles(
+      Array.isArray(p.loanReviewSelections)
+        ? Object.fromEntries(
+            p.loanReviewSelections
+              .filter((item) => item.account && item.auxiliary)
+              .map((item) => [
+                reviewKey(item.entity ?? "", item.account ?? "", item.auxiliary ?? ""),
+                item.selected === false ? "skip" : "loan",
+              ]),
+          )
+        : {},
+    );
     if (Array.isArray(p.rateRows))
       setTbRateEdits(
         Object.fromEntries(
@@ -1095,18 +1209,18 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const exported = ((result?.outputPaths ?? []) as string[]).filter(Boolean);
   const orderedTbAccounts = useMemo(() => {
     const collator = new Intl.Collator("zh-CN", { numeric: true });
-    return [...tbAccounts].sort((a, b) => {
+    return loanAccountReviewRows(tbAccounts, auxLink).sort((a, b) => {
       const roleOrder =
-        Number(loanAccountRoles[a.key] !== "loan") -
-        Number(loanAccountRoles[b.key] !== "loan");
+        Number(loanReviewRole(a) !== "loan") -
+        Number(loanReviewRole(b) !== "loan");
       return roleOrder || collator.compare(a.code, b.code);
     });
-  }, [tbAccounts, loanAccountRoles]);
+  }, [tbAccounts, loanAccountRoles, loanDetailRoles, auxLink]);
   const filteredTbAccounts = useMemo(() => {
     const keyword = accountQuery.trim().toLowerCase();
     return keyword
       ? orderedTbAccounts.filter((account) =>
-          `${account.code} ${account.name} ${account.account}`.toLowerCase().includes(keyword),
+          `${account.code} ${account.name} ${account.account} ${account.entity ?? ""} ${account.auxiliary ?? ""}`.toLowerCase().includes(keyword),
         )
       : orderedTbAccounts;
   }, [orderedTbAccounts, accountQuery]);
@@ -1117,7 +1231,15 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     visibleAccountPage * accountPageSize,
     (visibleAccountPage + 1) * accountPageSize,
   );
-  const selectedAccountCount = selectedLoanAccounts().length;
+  const goToAccountPage = (nextPage: number) => {
+    const page = Math.max(0, Math.min(nextPage, accountPageCount - 1));
+    setAccountPage(page);
+    const first = page * accountPageSize + 1;
+    const last = Math.min((page + 1) * accountPageSize, filteredTbAccounts.length);
+    setAccountChangeNote(`已切换到第 ${page + 1} 页（第 ${first}–${last} 项）。`);
+    requestAnimationFrame(() => accountListRef.current?.scrollTo?.({ top: 0, left: 0 }));
+  };
+  const selectedAccountCount = orderedTbAccounts.filter((row) => loanReviewRole(row) === "loan").length;
   const mappingWarnings = Array.isArray(result?.mappingWarnings)
     ? result.mappingWarnings.filter((item): item is string => typeof item === "string")
     : [];
@@ -1444,7 +1566,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                     </div>
                     <div className="loan-account-summary" aria-label="科目确认汇总">
                       <Badge variant="secondary">借款科目 {selectedAccountCount}</Badge>
-                      <span>其他科目 {Math.max(0, tbAccounts.length - selectedAccountCount)}</span>
+                      <span>其他项目 {Math.max(0, orderedTbAccounts.length - selectedAccountCount)}</span>
                     </div>
                   </div>
                 </CardHeader>
@@ -1472,12 +1594,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                     <span>{filteredTbAccounts.length} 项；每页最多 {accountPageSize} 项</span>
                     {accountChangeNote && <span role="status">{accountChangeNote}</span>}
                   </div>
-                  <div className="loan-account-confirm">
+                  <div className="loan-account-confirm" ref={accountListRef}>
                     <table>
                       <thead>
                         <tr>
                           <th>科目编码</th>
                           <th>科目名称</th>
+                          <th>辅助明细</th>
                           <th>期初余额</th>
                           <th>期末余额</th>
                           <th>系统建议</th>
@@ -1487,13 +1610,14 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                       <tbody>
                         {displayedTbAccounts.map((a) => (
                           <tr
-                            key={a.key}
-                            className={loanAccountRoles[a.key] === "loan" ? "is-loan" : "is-skipped"}
+                            key={a.reviewKey}
+                            className={loanReviewRole(a) === "loan" ? "is-loan" : "is-skipped"}
                           >
                             <td>{a.code}</td>
                             <td title={a.account}>{a.name || a.account}</td>
-                            <td className="loan-num">{a.opening.toLocaleString()}</td>
-                            <td className="loan-num">{a.closing.toLocaleString()}</td>
+                            <td title={a.auxiliary}>{a.auxiliary ? `${a.entity ? `${a.entity} / ` : ""}${a.auxiliary}` : "—（末级科目）"}</td>
+                            <td className="loan-num">{a.auxiliary ? "—" : a.opening.toLocaleString()}</td>
+                            <td className="loan-num">{a.auxiliary ? "—" : a.closing.toLocaleString()}</td>
                             <td>
                               <span
                                 className={`loan-suggestion ${a.suggestedType === "loan" ? "is-positive" : ""}`}
@@ -1505,13 +1629,14 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                             <td>
                               <select
                                 aria-label={`${a.account}的科目类型`}
-                                value={loanAccountRoles[a.key] ?? "skip"}
+                                value={loanReviewRole(a)}
                                 onChange={(e) => {
                                   const role = e.target.value as "loan" | "skip";
-                                  setLoanAccountRoles((v) => ({
-                                    ...v,
-                                    [a.key]: role,
-                                  }));
+                                  if (a.auxiliaryKey) {
+                                    setLoanDetailRoles((v) => ({ ...v, [a.reviewKey]: role }));
+                                  } else {
+                                    setLoanAccountRoles((v) => ({ ...v, [a.key]: role }));
+                                  }
                                   setAccountChangeNote(`${a.account}已设为${role === "loan" ? "借款科目" : "排除"}。`);
                                 }}
                               >
@@ -1526,9 +1651,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                   </div>
                   {accountPageCount > 1 && (
                     <div className="loan-account-list-pages">
-                      <Button variant="secondary" disabled={visibleAccountPage === 0} onClick={() => setAccountPage(visibleAccountPage - 1)}>上一页</Button>
+                      <Button type="button" variant="secondary" disabled={visibleAccountPage === 0} onClick={() => goToAccountPage(visibleAccountPage - 1)}>上一页</Button>
                       <span>第 {visibleAccountPage + 1} / {accountPageCount} 页</span>
-                      <Button variant="secondary" disabled={visibleAccountPage >= accountPageCount - 1} onClick={() => setAccountPage(visibleAccountPage + 1)}>下一页</Button>
+                      <Button type="button" variant="secondary" disabled={visibleAccountPage >= accountPageCount - 1} onClick={() => goToAccountPage(visibleAccountPage + 1)}>下一页</Button>
                     </div>
                   )}
                   </>
@@ -1619,7 +1744,15 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                   <span>未通过辅助验证的主体＋科目已合并；验证成功的其他科目仍按辅助核算拆分。请按各行匹配依据复核。</span>
                 </section>
               ))}
-              <TbRateTable rows={rows} edits={tbRateEdits} onEdit={editTbRate} />
+              <TbRateTable
+                rows={rows}
+                edits={tbRateEdits}
+                onEdit={editTbRate}
+                showAuxiliary={
+                  mappingRoleEnabled(sources.tb.mapping, "auxiliary") &&
+                  rows.some((row) => Boolean(row.auxiliary?.trim()))
+                }
+              />
             </>
           )}
           {mode === "tb" && currencyFallbackMode && (
@@ -1989,10 +2122,12 @@ function TbRateTable({
   rows,
   edits,
   onEdit,
+  showAuxiliary,
 }: {
   rows: LoanRow[];
   edits: Record<string, PasteRateRow>;
   onEdit: (row: LoanRow, patch: Partial<PasteRateRow>) => void;
+  showAuxiliary: boolean;
 }) {
   const filled = rows.filter((r) => {
     const e = edits[loanRowKey(r)];
@@ -2009,12 +2144,16 @@ function TbRateTable({
           也可「导出利率确认表」在 Excel 里补填后「回读已填利率表」。
           留空的按无利率进入测算（状态列会提示补利率），不影响其他笔。
         </p>
-        <div className="loan-rate-confirmation loan-rate-match">
+        <div
+          className={`loan-rate-confirmation loan-rate-match${showAuxiliary ? " has-auxiliary" : ""}`}
+        >
           <table>
             <thead>
               <tr>
                 <th>主体</th>
-                <th>借款行</th>
+                <th>科目编码</th>
+                <th>科目名称</th>
+                {showAuxiliary && <th>辅助核算</th>}
                 <th>币种</th>
                 <th>期初余额</th>
                 <th>期末余额</th>
@@ -2039,8 +2178,12 @@ function TbRateTable({
                 const rateType = e.rateType ?? "fixed";
                 return (
                   <tr key={key}>
-                    <td>{row.entity}</td>
-                    <td title={row.loanId}>{row.loanId}</td>
+                    <td>{!row.entity || row.entity === "默认主体" ? "未区分主体" : row.entity}</td>
+                    <td>{row.accountCode || "—"}</td>
+                    <td title={row.accountName || row.loanId}>
+                      {row.accountName || (!row.auxiliary ? row.loanId : "—")}
+                    </td>
+                    {showAuxiliary && <td title={row.auxiliary || undefined}>{row.auxiliary || "—"}</td>}
                     <td>{row.currency || "—"}</td>
                     <td className="loan-num">{row.openingPrincipal.toLocaleString()}</td>
                     <td className="loan-num">{row.closingPrincipal.toLocaleString()}</td>
@@ -2343,7 +2486,7 @@ function Results({
           <tbody>
             {rows.map((r, i) => (
               <tr key={`${r.loanId}-${i}`}>
-                <td>{r.entity}</td>
+                <td>{!r.entity || r.entity === "默认主体" ? "未区分主体" : r.entity}</td>
                 <td title={r.matchBasis}>{r.loanId}</td>
                 <td>{r.currency || "—"}</td>
                 {[

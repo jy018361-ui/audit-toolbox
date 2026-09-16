@@ -71,9 +71,8 @@ pub(crate) struct Tier {
     pub(crate) benchmark: Option<f64>,
     /// 国有大行挂牌参考值。
     pub(crate) listed: Option<f64>,
-    /// 是否自动套用默认利率。**只有活期为 true**：对公活期没有议价空间，
-    /// 挂牌值覆盖绝大多数情况；定期/协定/大额存单的利率是逐笔合同约定的，
-    /// 自动填一个"看着合理"的数只会让人直接采信，必须由用户填实际利率。
+    /// 是否自动套用挂牌暂估利率。有挂牌值的标准人民币档位为 true；
+    /// 自定义、外币特殊产品没有统一报价，仍须填写实际利率。
     pub(crate) auto_apply: bool,
     /// 实务中常见区间（下限, 上限）——不是权威数据，只用于提示利率是否离谱。
     pub(crate) practice: Option<(f64, f64)>,
@@ -116,7 +115,7 @@ const RATE_TIERS: &[Tier] = &[
         Some(0.0005),
         true,
         Some((0.0005, 0.0035)),
-        "对公活期几乎没有议价空间，国有大行普遍就是挂牌 0.05%；老协议里仍挂 0.35% 的情况也见得到。这是唯一自动套用默认利率的档位。",
+        "对公活期几乎没有议价空间，国有大行普遍就是挂牌 0.05%；老协议里仍挂 0.35% 的情况也见得到。默认值仅用于暂估，仍需核对实际利率。",
     ),
     tier(
         "agreement",
@@ -125,7 +124,7 @@ const RATE_TIERS: &[Tier] = &[
         "",
         Some(0.0115),
         Some(0.0020),
-        false,
+        true,
         Some((0.0020, 0.0150)),
         "挂牌与实际差最大的一档。超出约定留存额的部分按协定利率计息，大客户议价后普遍高于挂牌，务必看协议。",
     ),
@@ -136,7 +135,7 @@ const RATE_TIERS: &[Tier] = &[
         "1天",
         Some(0.0080),
         Some(0.0010),
-        false,
+        true,
         Some((0.0010, 0.0045)),
         "2024 年 5 月起银行下调通知存款利率并取消自律上限加点，实际水平明显低于央行基准。",
     ),
@@ -147,7 +146,7 @@ const RATE_TIERS: &[Tier] = &[
         "7天",
         Some(0.0135),
         Some(0.0055),
-        false,
+        true,
         Some((0.0055, 0.0100)),
         "企业闲置资金最常用的一档；股份制银行和城商行通常高于国有大行。",
     ),
@@ -158,7 +157,7 @@ const RATE_TIERS: &[Tier] = &[
         "3个月",
         Some(0.0110),
         Some(0.0065),
-        false,
+        true,
         Some((0.0065, 0.0110)),
         "股份制银行、城商行普遍在大行挂牌上加 20~40BP。",
     ),
@@ -169,7 +168,7 @@ const RATE_TIERS: &[Tier] = &[
         "6个月",
         Some(0.0130),
         Some(0.0085),
-        false,
+        true,
         Some((0.0085, 0.0130)),
         "股份制银行、城商行普遍在大行挂牌上加 20~40BP。",
     ),
@@ -180,7 +179,7 @@ const RATE_TIERS: &[Tier] = &[
         "1年",
         Some(0.0150),
         Some(0.0095),
-        false,
+        true,
         Some((0.0095, 0.0150)),
         "最常见的企业定存期限；中小银行 1 年期做到 1.3%~1.5% 并不少见。",
     ),
@@ -191,7 +190,7 @@ const RATE_TIERS: &[Tier] = &[
         "2年",
         Some(0.0210),
         Some(0.0105),
-        false,
+        true,
         Some((0.0105, 0.0160)),
         "期限越长，挂牌与中小银行报价的差距越大。",
     ),
@@ -202,7 +201,7 @@ const RATE_TIERS: &[Tier] = &[
         "3年",
         Some(0.0275),
         Some(0.0125),
-        false,
+        true,
         Some((0.0125, 0.0190)),
         "央行基准 2.75% 已严重脱离实际，只能当上限参照；拿它测算会把利息放大一倍以上。",
     ),
@@ -213,7 +212,7 @@ const RATE_TIERS: &[Tier] = &[
         "5年",
         None,
         Some(0.0130),
-        false,
+        true,
         Some((0.0130, 0.0200)),
         "央行从未公布 5 年期存款基准；部分银行 5 年期报价甚至低于 3 年期。",
     ),
@@ -224,7 +223,7 @@ const RATE_TIERS: &[Tier] = &[
         "1年",
         None,
         Some(0.0110),
-        false,
+        true,
         Some((0.0100, 0.0140)),
         "大额存单通常比同期定存高 10~25BP，按 20 万/100 万/1000 万起存分档，起存越高利率越高。",
     ),
@@ -235,7 +234,7 @@ const RATE_TIERS: &[Tier] = &[
         "2年",
         None,
         Some(0.0120),
-        false,
+        true,
         Some((0.0110, 0.0155)),
         "大额存单通常比同期定存高 10~25BP。",
     ),
@@ -246,7 +245,7 @@ const RATE_TIERS: &[Tier] = &[
         "3年",
         None,
         Some(0.0140),
-        false,
+        true,
         Some((0.0130, 0.0185)),
         "部分国有大行已阶段性停发 3 年期大额存单，若账上有则多为往年存续单。",
     ),
@@ -365,8 +364,8 @@ pub(crate) fn tier_rate(key: &str) -> Option<f64> {
     find_tier(key)?.listed
 }
 
-/// 自动套用的默认利率。只有活期有；其余档位一律返回 None，逼着用户
-/// 去存款协议/对账单上取实际利率，避免一个"看着合理"的数被直接采信。
+/// 自动套用的暂估利率。有挂牌值的人民币标准档位均可先形成测算；
+/// 自定义、外币特殊产品没有可靠统一报价，仍须用户填实际利率。
 pub(crate) fn auto_rate(key: &str) -> Option<f64> {
     let tier = find_tier(key)?;
     tier.auto_apply.then_some(tier.listed).flatten()
@@ -767,6 +766,24 @@ fn tier_for<'a>(account: &str, auxiliary: &str, params: &'a Value) -> (&'a str, 
     (tier, reason)
 }
 
+fn detail_tier_for<'a>(
+    account: &str,
+    auxiliary: &str,
+    detail_key: &str,
+    params: &'a Value,
+) -> (&'a str, String) {
+    if let Some(tier) = params
+        .get("accountDetailTierOverrides")
+        .and_then(Value::as_object)
+        .and_then(|values| values.get(detail_key))
+        .and_then(Value::as_str)
+        .filter(|tier| find_tier(tier).is_some())
+    {
+        return (tier, "用户按辅助明细指定存款类型".into());
+    }
+    tier_for(account, auxiliary, params)
+}
+
 fn is_deposit_role(role: &str) -> bool {
     matches!(role, "deposit" | "other_monetary" | "cash_on_hand")
 }
@@ -1152,7 +1169,7 @@ fn rate_tiers() -> Value {
         ),
         "practiceSource": "实务区间是常见报价范围的经验值，不是官方公布数据，仅用来提示填入的利率是否明显离谱。",
         "authority": "以上三组都只是默认值和合理性参照。审计依据应当是客户的存款协议、银行对账单或银行出具的利息清单。",
-        "autoApplyPolicy": "只有活期自动套用 0.05% 默认利率；识别为外币活期户时仍先按 0.05% 测算，但会提示按对账单核对实际利率。协定、通知、定期、大额存单的利率逐笔合同约定，默认留空，须填入实际利率后才计入测算。",
+        "autoApplyPolicy": "有挂牌参考值的活期、协定、通知、定期和大额存单档位均先按默认值暂估并纳入测算，状态标记为待确认利率；用户填写的档位或账户实际利率优先。自定义、外币特殊产品仍须手填实际利率。",
         "listedRateDate": LISTED_REFERENCE_DATE,
         "rateAgeMonths": age,
         "ratesStale": stale,
@@ -1438,6 +1455,9 @@ pub(crate) struct AccountRow {
     pub(crate) average_balance: f64,
     pub(crate) calculated_interest: f64,
     pub(crate) months: Vec<MonthCell>,
+    /// JE 未覆盖该户时使用全年期初/期末两点法。
+    #[serde(default)]
+    pub(crate) two_point: bool,
     pub(crate) status: String,
     pub(crate) note: String,
 }
@@ -1754,14 +1774,14 @@ fn calculate(
         let prefix = format!("{} / {}", group.entity, group.account);
         match verdict.status {
             "noMatch" => auxiliary_warnings.push(format!(
-                "{prefix}：JE 无对应列或辅助列未通过验证，整组已退回主体＋科目归并。"
+                "{prefix}：JE 无对应列或辅助列未通过验证，本组不按辅助核算拆分，按主体＋科目执行测算。"
             )),
             "ambiguous" => auxiliary_warnings.push(format!(
-                "{prefix}：JE 中多列命中辅助值（{}），整组已退回主体＋科目归并。",
+                "{prefix}：JE 中多列命中辅助值（{}），本组不按辅助核算拆分，按主体＋科目执行测算。",
                 verdict.competing_columns.join("、")
             )),
             "partialCoverage" => auxiliary_warnings.push(format!(
-                "{prefix}：JE 辅助列「{}」覆盖不全（{}/{}），整组已退回主体＋科目归并。",
+                "{prefix}：JE 辅助列「{}」覆盖不全（{}/{}），本组不按辅助核算拆分，按主体＋科目执行测算。",
                 verdict.column.clone().unwrap_or_default(),
                 verdict.anchor_hits,
                 verdict.anchor_total
@@ -1796,6 +1816,26 @@ fn calculate(
                 .get(*index)
                 .cloned()
                 .unwrap_or_default();
+        }
+        let detail_key = format!(
+            "{}\u{1f}{}\u{1f}{}",
+            group.0,
+            group.1,
+            ledger_mapping::anchor_norm(&candidate.auxiliary)
+        );
+        if let Some(role) = params
+            .get("accountDetailRoleOverrides")
+            .and_then(Value::as_object)
+            .and_then(|values| values.get(&detail_key))
+            .and_then(Value::as_str)
+        {
+            candidate.role = role.to_owned();
+        }
+        if !is_deposit_role(&candidate.role)
+            || (candidate.role == "cash_on_hand"
+                && !params["includeCashOnHand"].as_bool().unwrap_or(false))
+        {
+            continue;
         }
         let currency = if combine_functional_currency {
             String::new()
@@ -1872,7 +1912,7 @@ fn calculate(
         .collect::<Vec<_>>()
         .join(" | ");
         let auxiliary = if key.2 == "未分辅助" {
-            "未分辅助".to_owned()
+            String::new()
         } else {
             fold.auxiliaries
                 .iter()
@@ -1882,7 +1922,13 @@ fn calculate(
         };
         let currency = currency_label.to_owned();
         let account_text = fold.first.account.clone();
-        let (tier, matched_by) = tier_for(&account_text, &auxiliary, params);
+        let detail_key = format!(
+            "{}\u{1f}{}\u{1f}{}",
+            key.0,
+            key.1,
+            ledger_mapping::anchor_norm(&auxiliary)
+        );
+        let (tier, matched_by) = detail_tier_for(&account_text, &auxiliary, &detail_key, params);
         let meta = find_tier(tier);
         accounts.push(AccountRow {
             key: row_key,
@@ -1914,6 +1960,7 @@ fn calculate(
             average_balance: 0.0,
             calculated_interest: 0.0,
             months: vec![],
+            two_point: false,
             status: String::new(),
             note: String::new(),
         });
@@ -2094,6 +2141,7 @@ fn calculate(
             && (account.tb_closing_balance - account.opening_balance).abs() <= 0.01)
             || (account.opening_balance.abs() <= 0.01 && account.tb_closing_balance.abs() <= 0.01);
         let je_backed = has_je && (je_rows > 0 || dormant);
+        account.two_point = !je_backed;
         account.je_reconciled = je_rows > 0 && account.opening_from_tb;
         if !account.opening_from_tb {
             let net: f64 = series
@@ -2103,6 +2151,7 @@ fn calculate(
         }
 
         let mut opening = account.opening_balance;
+        let two_point_average = (account.opening_balance + account.tb_closing_balance) / 2.0;
         let mut months = Vec::with_capacity(period.len());
         let span = period.len() as f64;
         for (index, month) in period.iter().copied().enumerate() {
@@ -2112,14 +2161,20 @@ fn calculate(
             let closing = if je_backed {
                 opening + debit - credit
             } else {
-                // 两点法：只有期初和期末，月末余额按直线推进，
-                // 各月月均余额的平均值仍然等于(期初+期末)/2。
+                // closing 只维持内部期间分摊序列；两点法的实际平均余额在下方
+                // 直接取（期初＋期末）÷2，不把这里的插值披露成月末余额。
                 account.opening_balance
                     + (account.tb_closing_balance - account.opening_balance) * (index as f64 + 1.0)
                         / span
             };
             let (days, denominator) = month_days(basis_key, year, month, start, end);
-            let average = (opening + closing) / 2.0;
+            // 两点法直接用期初、期末的算术平均数作为全年暂估余额；不构造、
+            // 不声称取得了任何月末余额。按月循环只用于把全年利息分摊到期间。
+            let average = if je_backed {
+                (opening + closing) / 2.0
+            } else {
+                two_point_average
+            };
             months.push(MonthCell {
                 month,
                 opening,
@@ -2139,10 +2194,13 @@ fn calculate(
         account.calculated_interest = months.iter().map(|m| m.interest).sum();
         // 没有利率是最优先的状态：这一户根本还没测出来，不能被余额勾稽上了
         // 就显示成"已勾稽"。
+        let default_rate = account.rate_source.contains("暂估");
         account.status = if !account.rate_resolved {
             "待填利率".into()
         } else if !je_backed {
             "两点法推算".into()
+        } else if default_rate {
+            "待确认利率".into()
         } else if !account.opening_from_tb {
             "年初倒推".into()
         } else if !account.je_reconciled {
@@ -2174,6 +2232,12 @@ fn calculate(
         if !account.rate_warning.is_empty() {
             notes.push(account.rate_warning.clone());
         }
+        if default_rate {
+            notes.push(
+                "当前利率为内置挂牌暂估值，已纳入测算；请按存款协议、银行对账单或利息清单确认。"
+                    .into(),
+            );
+        }
         if unallocated_currency_keys.contains(&account.key) && !account.je_reconciled {
             notes.push(
                 "该科目在 TB 中按币种拆行，但对应 JE 发生额缺少可用币种，无法分配到本币种；本行退回 TB 年初/年末两点法，JE 勾稽为 N/A。"
@@ -2182,9 +2246,9 @@ fn calculate(
         }
         if !je_backed {
             notes.push(if has_je {
-                "序时账期间内没有任何行归集到该科目，月末余额按年初到年末两点法推算，月均余额仅供参考。".into()
+                "序时账期间内没有任何行匹配到该科目，已直接按（期初余额＋期末余额）÷2 暂估全年平均余额；不推导月末余额，也不执行 JE 勾稽。".into()
             } else {
-                "未提供序时账，月末余额按年初到年末直线推算，月均余额仅供参考。".into()
+                "未提供序时账，已直接按（期初余额＋期末余额）÷2 暂估全年平均余额；不推导月末余额，也不执行 JE 勾稽。".into()
             });
         } else if !account.je_reconciled && account.opening_from_tb {
             notes.push(
@@ -2220,6 +2284,12 @@ fn calculate(
         all.sort();
         all
     };
+    let default_rate: Vec<&AccountRow> = accounts
+        .iter()
+        .filter(|account| account.rate_source.contains("暂估"))
+        .collect();
+    let default_rate_count = default_rate.len();
+    let default_rate_balance: f64 = default_rate.iter().map(|a| a.average_balance).sum();
     // 基准数保持符号：负数＝账面是净利息支出（费用性科目计入负数）。
     // 此前对合计取绝对值是为迁就用友符号惯例，但会把费用翻成一笔正的
     // 利息收入，差异方向失真；符号已在逐行按口径归一，合计不再翻正。
@@ -2287,12 +2357,15 @@ fn calculate(
             "differenceRatio": ratio,
             // 还有账户没填利率时，测算合计本身就不完整，谈不上勾稽通过。
             "reconciliationPassed": missing_rate_count == 0
+                && default_rate_count == 0
                 && booked_direction_unconfirmed_count == 0
                 && ratio.map(|r| r.abs() <= 0.05).unwrap_or(false),
             "reviewCount": review,
             "missingRateCount": missing_rate_count,
             "missingRateBalance": missing_rate_balance,
             "missingRateTiers": missing_rate_tiers,
+            "defaultRateCount": default_rate_count,
+            "defaultRateBalance": default_rate_balance,
             "monthlySource": if !has_je {
                 "期初/期末两点法".to_string()
             } else if uncovered_count == 0 {
@@ -2332,8 +2405,8 @@ fn calculate(
             "dayBasis": basis_key,
             "dayBasisLabel": basis_label,
             "rateBasisLabel": format!(
-                "仅活期自动套用 0.05% 默认值（{LISTED_REFERENCE_DATE}）；外币活期户会提示核对实际利率。\
-                 其余档位须填实际利率。央行基准（{PBC_BENCHMARK_DATE}）只作上限参照，不参与测算。"
+                "标准存款档位自动套用 {LISTED_REFERENCE_DATE} 挂牌暂估利率，并标记为待确认；\
+                 外币账户需核对实际利率，自定义或特殊产品仍须填写实际利率。央行基准（{PBC_BENCHMARK_DATE}）只作上限参照，不参与测算。"
             ),
             "listedRateDate": LISTED_REFERENCE_DATE,
             "ratesStale": rates_stale,
@@ -2358,7 +2431,7 @@ fn calculate(
     }))
 }
 
-/// 利率优先级：账户级手填 > 用户改写的档位利率 > 仅活期的内置默认值。
+/// 利率优先级：账户级手填 > 用户改写的档位利率 > 内置挂牌暂估值。
 /// 第三个返回值是利率来源；`resolved` 为 false 表示这一户还没有可用利率，
 /// 不能算作"已勾稽"，也不该把 0 当成一个正常的测算结果。
 struct ResolvedRate {
@@ -2397,8 +2470,7 @@ fn resolve_rate(
     {
         return done(rate, "自定义档位利率");
     }
-    // 外币户落在活期档时也先套 0.05% 默认值，但必须明确提示这只是暂估值，
-    // 让用户按该币种的银行对账单复核。用户手工填的利率在上面已经返回。
+    // 内置挂牌值只作暂估，必须明确提示用户按协议或对账单复核。
     let identity = format!("{} {}", account.account, account.auxiliary);
     let normalized_identity = normalize_header(&identity);
     // 科目/辅助核算中明写 RMB、CNY 或人民币时，这是账户级证据，
@@ -2418,11 +2490,11 @@ fn resolve_rate(
             Some(code) => done(
                 rate,
                 &format!(
-                    "已识别为 {} 外币活期户，暂按 0.05% 默认值，请核对实际利率",
-                    code.to_uppercase()
+                    "{} 外币账户挂牌暂估值（待确认）",
+                    code.to_uppercase(),
                 ),
             ),
-            None => done(rate, "活期挂牌默认值"),
+            None => done(rate, "挂牌暂估值（待确认）"),
         },
         None => ResolvedRate {
             tier,
@@ -2755,9 +2827,7 @@ fn deposit_auxiliary_plan(
         JeInput::Memory(table, mapping) => (table.headers.as_slice(), mapping),
         JeInput::Disk(disk, mapping) => (disk.headers(), mapping),
     };
-    let preferred = ledger_mapping::mapped_column_names(je_map, "auxiliary")
-        .first()
-        .cloned();
+    let preferred = ledger_mapping::mapped_column_names(je_map, "auxiliary");
     let mut accumulator = ledger_mapping::GroupedAnchorColumnAccumulator::new(headers.len());
     let mut totals = BTreeMap::<ledger_mapping::AuxiliaryGroupKey, usize>::new();
     let mut feed = |row: &[String]| {
@@ -2836,7 +2906,7 @@ fn deposit_auxiliary_plan(
         &totals,
         tb_map,
         "auxiliary",
-        preferred.as_deref(),
+        &preferred,
     );
     let columns = ledger_mapping::auxiliary_verified_columns(
         &verdicts,
@@ -3942,7 +4012,17 @@ fn write_summary(
         let y = index as u32 + 1;
         let line = y + 1;
         let (first, last) = ranges[index];
-        sheet.write_string(y, 0, &row.entity).map_err(xlsx)?;
+        sheet
+            .write_string(
+                y,
+                0,
+                if row.entity == ledger_mapping::DEFAULT_ENTITY {
+                    "未区分主体"
+                } else {
+                    &row.entity
+                },
+            )
+            .map_err(xlsx)?;
         sheet.write_string(y, 1, &row.account).map_err(xlsx)?;
         sheet.write_string(y, 2, &row.auxiliary).map_err(xlsx)?;
         sheet.write_string(y, 3, &row.currency).map_err(xlsx)?;
@@ -4045,6 +4125,9 @@ fn write_summary(
     sheet.set_column_width(2, 22).map_err(xlsx)?;
     sheet.set_column_width(15, 46).map_err(xlsx)?;
     sheet.autofit();
+    if rows.iter().all(|row| row.auxiliary.trim().is_empty()) {
+        sheet.set_column_hidden(2).map_err(xlsx)?;
+    }
     Ok(())
 }
 
@@ -4092,7 +4175,17 @@ fn write_monthly(
         let summary_row = index as u32 + 2;
         for month in &row.months {
             let line = y + 1; // Excel 行号（1 基）
-            sheet.write_string(y, 0, &row.entity).map_err(xlsx)?;
+            sheet
+                .write_string(
+                    y,
+                    0,
+                    if row.entity == ledger_mapping::DEFAULT_ENTITY {
+                        "未区分主体"
+                    } else {
+                        &row.entity
+                    },
+                )
+                .map_err(xlsx)?;
             sheet.write_string(y, 1, &row.account).map_err(xlsx)?;
             sheet.write_string(y, 2, &row.auxiliary).map_err(xlsx)?;
             sheet
@@ -4100,20 +4193,31 @@ fn write_monthly(
                 .map_err(xlsx)?;
             sheet.write_string(y, 4, &row.tier_label).map_err(xlsx)?;
             sheet.write_string(y, 5, &row.currency).map_err(xlsx)?;
-            for (offset, value) in [month.opening, month.debit, month.credit, month.closing]
-                .iter()
-                .enumerate()
-            {
-                sheet
-                    .write_number_with_format(y, 6 + offset as u16, *value, &amount)
-                    .map_err(xlsx)?;
+            if row.two_point {
+                // 两点法没有月初/月末证据，不导出内部分摊用的插值。
+                for column in 6..=9 {
+                    sheet.write_blank(y, column, &amount).map_err(xlsx)?;
+                }
+            } else {
+                for (offset, value) in [month.opening, month.debit, month.credit, month.closing]
+                    .iter()
+                    .enumerate()
+                {
+                    sheet
+                        .write_number_with_format(y, 6 + offset as u16, *value, &amount)
+                        .map_err(xlsx)?;
+                }
             }
-            // 月均余额 =(月初+月末)/2，用户的口径原样落在公式里。
+            let average_formula = if row.two_point {
+                format!("('{SUMMARY_SHEET}'!H{summary_row}+'{SUMMARY_SHEET}'!I{summary_row})/2")
+            } else {
+                format!("(G{line}+J{line})/2")
+            };
             sheet
                 .write_formula_with_format(
                     y,
                     10,
-                    Formula::new(format!("(G{line}+J{line})/2"))
+                    Formula::new(average_formula)
                         .set_result(month.average.to_string()),
                     &amount,
                 )
@@ -4145,6 +4249,9 @@ fn write_monthly(
     sheet.set_column_width(1, 34).map_err(xlsx)?;
     sheet.set_column_width(2, 22).map_err(xlsx)?;
     sheet.autofit();
+    if rows.iter().all(|row| row.auxiliary.trim().is_empty()) {
+        sheet.set_column_hidden(2).map_err(xlsx)?;
+    }
     Ok(())
 }
 
@@ -4325,7 +4432,7 @@ fn write_rate_tiers(sheet: &mut Worksheet, params: &Value) -> Result<(), AppErro
     let mut y = RATE_TIERS.len() as u32 + 2;
     let age = listed_rate_age_months();
     let mut lines = vec![
-        "自动套用范围：只有活期自动套用 0.05% 默认利率；识别为外币活期户时仍先按 0.05% 测算，但须按对账单核对实际利率。协定、通知、定期、大额存单的利率是逐笔合同约定的，默认留空，须填入实际利率后才计入测算合计。".to_string(),
+        "默认暂估范围：有挂牌参考值的活期、协定、通知、定期和大额存单档位均先按默认值暂估并纳入测算；用户改写值优先。自定义、外币特殊产品仍须填实际利率。所有暂估值均须按存款协议、对账单或利息清单确认。".to_string(),
         format!("央行基准来源：中国人民银行《金融机构人民币存款基准利率调整表》，{PBC_BENCHMARK_DATE} 起执行，至今未再调整。仅作合理性上限参照，不参与测算——3 年期基准 2.75% 对比实际约 1.25%，拿它算会把利息放大一倍以上。"),
         format!("大行挂牌来源：国有大型商业银行人民币存款挂牌利率，{LISTED_REFERENCE_DATE} 调整后水平；2022 年建立存款利率市场化调整机制后由各行自主报价，已多轮下调。"),
         "实务常见区间：常见报价范围的经验值，不是官方公布数据，只用于提示填入的利率是否明显偏离。".to_string(),
@@ -4360,7 +4467,7 @@ fn write_parameters(
 ) -> Result<(), AppError> {
     sheet.set_name("参数与口径").map_err(xlsx)?;
     let bold = Format::new().set_bold();
-    let items: Vec<(String, String)> = vec![
+    let mut items: Vec<(String, String)> = vec![
         ("测算期间".into(), format!(
             "{} 至 {}",
             summary["reportStart"].as_str().unwrap_or(""),
@@ -4395,14 +4502,32 @@ fn write_parameters(
         ("待复核账户数".into(), summary["reviewCount"].to_string()),
         ("待填利率账户数".into(), summary["missingRateCount"].to_string()),
         ("计算口径".into(), if summary["dayBasis"].as_str() == Some("month12") {
-            "月均余额 =（月初余额＋月末余额）÷2；当月利息 = 月均余额 × 年利率 ÷ 12（按月平均，月度表 M 列为月份数）。".to_string()
+            "JE 月度法：月均余额 =（月初＋月末）÷2；两点法：年均余额 =（年初＋年末）÷2，无月末余额证据。当期利息 = 平均余额 × 年利率 ÷ 12（月度表 M 列为期数）。".to_string()
         } else {
-            "月均余额 =（月初余额＋月末余额）÷2；当月利息 = 月均余额 × 年利率 × 计息天数 ÷ 年基数。".to_string()
+            "JE 月度法：月均余额 =（月初＋月末）÷2；两点法：年均余额 =（年初＋年末）÷2，无月末余额证据。当期利息 = 平均余额 × 年利率 × 计息天数 ÷ 年基数。".to_string()
         }),
         ("勾稽口径".into(), "测算利息合计与 TB 利息收入类科目本期发生额净额比较，差异率超过 5% 提示复核。".into()),
         ("修改方式".into(), format!("在「{SUMMARY_SHEET}」G 列黄色「年利率」单元格直接改写利率，「{MONTHLY_SHEET}」的月度利息、汇总的测算利息与勾稽差异/结论会自动重算。")),
-        ("空白利率格".into(), "活期以外的档位不自动套用默认利率，H 列留空即表示该户利率尚未确定；填入实际利率后金额自动出现。".into()),
+        ("利率确认".into(), "有挂牌参考值的标准档位已预填暂估利率并纳入测算；黄色利率格均可改写。空白表示自定义或特殊产品尚无可用利率，填入实际利率后金额自动出现。".into()),
     ];
+    if let Some(warnings) = summary["auxiliaryWarnings"].as_array() {
+        let messages = warnings
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>();
+        if !messages.is_empty() {
+            items.push((
+                "辅助核算联动".into(),
+                messages
+                    .iter()
+                    .enumerate()
+                    .map(|(index, message)| format!("{}. {message}", index + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ));
+        }
+    }
     let items = if summary["ratesStale"].as_bool().unwrap_or(false) {
         let mut all = items;
         all.push((
@@ -4706,13 +4831,13 @@ mod tests {
             usd["rateSource"]
                 .as_str()
                 .unwrap()
-                .contains("USD 外币活期户")
+                .contains("USD 外币账户挂牌暂估值")
         );
         assert!(
             usd["rateSource"]
                 .as_str()
                 .unwrap()
-                .contains("请核对实际利率")
+                .contains("待确认")
         );
         assert!(usd["tierMatchedBy"].as_str().unwrap().contains("USD"));
         let rmb = rows_of(&result, "RMB CMB");
@@ -4905,13 +5030,13 @@ mod tests {
         assert!((boc["openingBalance"].as_f64().unwrap() - 771_229.55).abs() < 0.01);
         assert!((boc["tbClosingBalance"].as_f64().unwrap() - 440_864.89).abs() < 0.01);
         assert!((boc["derivedClosingBalance"].as_f64().unwrap() - 440_864.89).abs() < 0.01);
-        assert_eq!(boc["status"], "已勾稽");
+        assert_eq!(boc["status"], "待确认利率");
         assert_eq!(boc["jeReconciled"], true);
         assert!(boc["note"].as_str().unwrap().contains("合并"), "{boc:#?}");
         // DBS 户：单行小户照常勾稽。
         let dbs = row_of("1002010600");
         assert_eq!(dbs["mergedRows"], json!(1));
-        assert_eq!(dbs["status"], "已勾稽");
+        assert_eq!(dbs["status"], "待确认利率");
         // 2000 的户：序时账未覆盖，退回两点法，年末仍推到 TB 期末。
         let uncovered = row_of("1002010500");
         assert_eq!(uncovered["status"], "两点法推算");
@@ -4920,7 +5045,7 @@ mod tests {
             uncovered["note"]
                 .as_str()
                 .unwrap()
-                .contains("序时账期间内没有任何行归集"),
+                .contains("序时账期间内没有任何行匹配"),
             "{uncovered:#?}"
         );
         assert!(
@@ -5392,9 +5517,8 @@ mod tests {
         let resolved = resolve_rate(&row, None, None);
         assert!(resolved.resolved);
         assert_eq!(resolved.rate, 0.0005);
-        assert!(resolved.source.contains("USD 外币活期户"));
-        assert!(resolved.source.contains("暂按 0.05%"));
-        assert!(resolved.source.contains("核对实际利率"));
+        assert!(resolved.source.contains("USD 外币账户挂牌暂估值"));
+        assert!(resolved.source.contains("待确认"));
         // 人民币户不受影响，仍自动套活期挂牌。
         let rmb = AccountRow {
             account: "100201 RMB CMB-CPCSC-SH".into(),
@@ -5720,7 +5844,7 @@ mod tests {
         let resolved = resolve_rate(&row, None, None);
         assert_eq!(
             (resolved.rate, resolved.source.as_str()),
-            (0.0005, "活期挂牌默认值")
+            (0.0005, "挂牌暂估值（待确认）")
         );
         // 档位级改写盖过内置默认
         let resolved = resolve_rate(&row, None, custom);
@@ -5735,11 +5859,12 @@ mod tests {
             (resolved.rate, resolved.source.as_str()),
             (0.0125, "本账户手工指定")
         );
-        // 切到不自动套用的档位后，必须由用户填利率
+        // 切到定期档后自动带出该档挂牌暂估值
         let overrides = json!({"K": {"tier": "term_3y"}});
         let resolved = resolve_rate(&row, overrides.as_object(), None);
         assert_eq!(resolved.tier, "term_3y");
-        assert!(!resolved.resolved && resolved.rate == 0.0);
+        assert!(resolved.resolved);
+        assert!((resolved.rate - 0.0125).abs() < 1e-12);
         // 档位级填了就能用
         let tier_rates = json!({"term_3y": 1.35});
         let resolved = resolve_rate(&row, overrides.as_object(), tier_rates.as_object());
@@ -5774,26 +5899,22 @@ mod tests {
             average_balance: 0.0,
             calculated_interest: 0.0,
             months: vec![],
+            two_point: false,
             status: String::new(),
             note: String::new(),
         }
     }
 
     #[test]
-    fn only_demand_deposits_get_an_automatic_rate() {
-        // 活期是唯一自动套用默认值的档位。
+    fn standard_listed_tiers_get_provisional_rates() {
+        // 有挂牌值的标准档位都自动带出暂估值。
         assert_eq!(auto_rate("demand"), Some(0.0005));
-        for key in [
-            "agreement",
-            "notice_7d",
-            "term_1y",
-            "term_3y",
-            "cd_1y",
-            "custom",
-        ] {
-            assert_eq!(auto_rate(key), None, "{key} 不应自动套用默认利率");
-        }
-        // 挂牌值仍然要能查到，只是不会被自动填进测算。
+        assert_eq!(auto_rate("agreement"), Some(0.0020));
+        assert_eq!(auto_rate("notice_7d"), Some(0.0055));
+        assert_eq!(auto_rate("term_1y"), Some(0.0095));
+        assert_eq!(auto_rate("term_3y"), Some(0.0125));
+        assert_eq!(auto_rate("cd_1y"), Some(0.0110));
+        assert_eq!(auto_rate("custom"), None);
         assert_eq!(tier_rate("term_3y"), Some(0.0125));
         assert_eq!(tier_rate("custom"), None);
     }
@@ -5809,9 +5930,9 @@ mod tests {
             ..blank_row()
         };
         let resolved = resolve_rate(&row, None, None);
-        assert!(!resolved.resolved);
-        assert_eq!(resolved.rate, 0.0);
-        assert_eq!(resolved.source, "需填写实际利率");
+        assert!(resolved.resolved);
+        assert_eq!(resolved.rate, 0.0125);
+        assert_eq!(resolved.source, "挂牌暂估值（待确认）");
     }
 
     #[test]
@@ -5872,17 +5993,44 @@ mod tests {
 
     #[test]
     fn two_point_fallback_matches_simple_average() {
-        // 无序时账时全年月均余额的平均值必须等于（年初＋年末）÷2。
+        // 两点法不拟造月末余额；导出公式直接引用年初、年末。
         let opening = 1_200_000.0;
         let closing = 2_400_000.0;
-        let mut previous = opening;
-        let mut total = 0.0;
-        for month in 1..=12u32 {
-            let current = opening + (closing - opening) * month as f64 / 12.0;
-            total += (previous + current) / 2.0;
-            previous = current;
+        let mut row = blank_row();
+        row.opening_balance = opening;
+        row.tb_closing_balance = closing;
+        row.average_balance = (opening + closing) / 2.0;
+        row.two_point = true;
+        row.months.push(MonthCell {
+            month: 1,
+            opening,
+            debit: 0.0,
+            credit: 0.0,
+            closing,
+            average: row.average_balance,
+            days: 1.0,
+            denominator: 12.0,
+            interest: 0.0,
+        });
+        let path = std::env::temp_dir().join(format!("deposit-two-point-{}.xlsx", std::process::id()));
+        let mut book = Workbook::new();
+        write_summary(book.add_worksheet(), &[row.clone()], &[(2, 2)]).unwrap();
+        write_monthly(book.add_worksheet(), &[row], "month12").unwrap();
+        book.save(&path).unwrap();
+        let mut saved = calamine::open_workbook_auto(&path).unwrap();
+        let cells = calamine::Reader::worksheet_range(&mut saved, MONTHLY_SHEET).unwrap();
+        let formulas = calamine::Reader::worksheet_formula(&mut saved, MONTHLY_SHEET).unwrap();
+        for column in 6..=9 {
+            assert!(cells.get((1, column)).is_none_or(|cell| matches!(cell, calamine::Data::Empty)));
         }
-        assert!(((total / 12.0) - (opening + closing) / 2.0).abs() < 1e-6);
+        assert!(
+            formulas
+                .rows()
+                .flatten()
+                .any(|formula| formula == "('测算汇总'!H2+'测算汇总'!I2)/2"),
+            "两点法平均余额必须直接引用年度期初和期末"
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -7393,7 +7541,7 @@ mod tests {
                     "本期贷方发生额",
                 ],
                 vec!["1002", "银行存款", "1200000", "2400000", "1200000", "0"],
-                // 定期存款不自动套用利率，用来验证"待填利率"这条路径。
+                // 定期存款自动带出挂牌暂估利率，状态必须提示待确认。
                 vec![
                     "1012",
                     "其他货币资金-1年定期存款",
@@ -7482,28 +7630,26 @@ mod tests {
             2_400_000.0
         );
         assert!(demand["reconciliationDiff"].as_f64().unwrap().abs() < 0.01);
-        assert_eq!(demand["status"], "已勾稽");
-        assert_eq!(demand["rateSource"], "活期挂牌默认值");
+        assert_eq!(demand["status"], "待确认利率");
+        assert_eq!(demand["rateSource"], "挂牌暂估值（待确认）");
         assert!(demand["rateResolved"].as_bool().unwrap());
         // 12 个月月均余额之和 21,600,000；活期挂牌 0.05% ÷ 12 → 900。
         assert!((demand["averageBalance"].as_f64().unwrap() - 1_800_000.0).abs() < 0.01);
 
-        // 定期：不自动套用利率，利息不计入合计。
+        // 定期：自动套用挂牌暂估值并纳入测算，但状态明确待确认。
         let term = rows.iter().find(|r| r["tier"] == json!("term_1y")).unwrap();
-        assert!(!term["rateResolved"].as_bool().unwrap());
-        assert_eq!(term["rateSource"], "需填写实际利率");
-        assert_eq!(term["status"], "待填利率");
+        assert!(term["rateResolved"].as_bool().unwrap());
+        assert_eq!(term["rateSource"], "挂牌暂估值（待确认）");
+        assert_eq!(term["status"], "待确认利率");
         assert_eq!(term["jeReconciled"], false);
-        assert_eq!(term["annualRate"].as_f64().unwrap(), 0.0);
-        assert!(term["note"].as_str().unwrap().contains("请按存款协议"));
+        assert!((term["annualRate"].as_f64().unwrap() - 0.0095).abs() < 1e-12);
 
-        assert_eq!(summary["missingRateCount"], 1);
-        assert_eq!(summary["missingRateTiers"], json!(["定期存款（1年）"]));
-        assert!((summary["missingRateBalance"].as_f64().unwrap() - 500_000.0).abs() < 0.01);
-        assert!((summary["calculatedInterest"].as_f64().unwrap() - 900.0).abs() < 0.01);
+        assert_eq!(summary["missingRateCount"], 0);
+        assert_eq!(summary["defaultRateCount"], 2);
+        assert!((summary["calculatedInterest"].as_f64().unwrap() - 5_650.0).abs() < 0.01);
         assert!((summary["bookedInterestIncome"].as_f64().unwrap() - 900.0).abs() < 0.01);
-        assert!(summary["difference"].as_f64().unwrap().abs() < 0.01);
-        // 金额虽然对得上，但还有账户没定利率，测算并不完整，不能判为通过。
+        assert!((summary["difference"].as_f64().unwrap() - 4_750.0).abs() < 0.01);
+        // 暂估利率尚未确认，不能判为最终勾稽通过。
         assert_eq!(summary["reconciliationPassed"], json!(false));
 
         // 导出的月度表必须是公式而不是死值，否则用户在 Excel 里改利率不会重算。
@@ -7592,8 +7738,8 @@ mod tests {
 ",
             );
         assert!(!summary_text.contains("档位匹配依据"));
-        assert!(summary_text.contains("待填利率"));
-        assert!(summary_text.contains("需填写实际利率"));
+        assert!(summary_text.contains("待确认利率"));
+        assert!(summary_text.contains("挂牌暂估值"));
         // 勾稽块并入汇总表后，比较标题与账面明细必须在同一张 sheet 里。
         assert!(
             summary_text.contains("存款利息测算与账面利息收入比较"),
@@ -7604,10 +7750,10 @@ mod tests {
             "账面利息收入科目明细应列示借贷发生额与期末余额"
         );
         assert!(
-            text.contains("只有活期自动套用 0.05% 默认利率")
-                && text.contains("外币活期户")
-                && text.contains("核对实际利率"),
-            "档位表缺少活期默认值或外币复核说明"
+            text.contains("有挂牌参考值的活期、协定、通知、定期和大额存单")
+                && text.contains("暂估")
+                && text.contains("确认"),
+            "档位表缺少标准档位默认暂估政策说明"
         );
         assert!(
             text.contains("仅作合理性上限参照"),

@@ -21,18 +21,38 @@ function result(overrides: Partial<AuxiliaryLinkResult>): AuxiliaryLinkResult {
   };
 }
 
-describe("AuxiliaryLinkStatusView 三态标注", () => {
-  it("逐主体科目显示独立验证结果，不用全局结论覆盖失败组", () => {
+describe("AuxiliaryLinkStatusView 降级提示", () => {
+  it("混合结果只提示退回数量，不逐主体科目列明细", () => {
     render(<AuxiliaryLinkStatusView result={result({
       groups: [
         { ...result({}), entity: "A", account: "1002" },
         { ...result({ status: "partialCoverage", anchorHits: 2 }), entity: "A", account: "2001" },
       ],
     })} />);
-    expect(screen.getByText("A · 1002")).toBeInTheDocument();
-    expect(screen.getByText("A · 2001")).toBeInTheDocument();
-    expect(screen.getByText(/不启用辅助核算键/)).toBeInTheDocument();
+    expect(screen.getByText("TB/JE 辅助核算有 1 项无法匹配，已退回按主体＋科目计算；其余 1 项按辅助核算细分。")).toBeInTheDocument();
+    expect(screen.queryByText(/A · 1002|A · 2001|覆盖不全/)).not.toBeInTheDocument();
   });
+
+  it("全部退回时只显示一条直接的计算口径提示", () => {
+    render(<AuxiliaryLinkStatusView result={result({
+      groups: [
+        { ...result({ status: "noMatch" }), entity: "A", account: "1002" },
+        { ...result({ status: "ambiguous" }), entity: "B", account: "2001" },
+      ],
+    })} />);
+    expect(screen.getAllByText("TB/JE 辅助核算无法匹配，已退回按主体＋科目计算。")).toHaveLength(1);
+  });
+
+  it("全部匹配成功时不增加提示", () => {
+    const { container } = render(<AuxiliaryLinkStatusView result={result({
+      groups: [
+        { ...result({}), entity: "A", account: "1002" },
+        { ...result({ column: "客户" }), entity: "A", account: "1122" },
+      ],
+    })} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
   it("TB 未映射辅助列时不渲染", () => {
     const { container } = render(
       <AuxiliaryLinkStatusView result={result({ tbAuxMapped: false })} />,
@@ -40,51 +60,18 @@ describe("AuxiliaryLinkStatusView 三态标注", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("验证通过显示命中数与覆盖率", () => {
-    render(<AuxiliaryLinkStatusView result={result({})} />);
-    expect(screen.getByText(/已验证：JE「部门」/)).toBeInTheDocument();
-    expect(screen.getByText(/3\/3 维度命中，覆盖率 82%/)).toBeInTheDocument();
+  it("单一未匹配结果也显示简短降级口径", () => {
+    render(<AuxiliaryLinkStatusView result={result({ status: "partialCoverage" })} />);
+    expect(screen.getByText("TB/JE 辅助核算无法匹配，已退回按主体＋科目计算。")).toBeInTheDocument();
   });
 
-  it("对不上时保留语义映射并停用辅助键", () => {
-    render(
-      <AuxiliaryLinkStatusView
-        result={result({ status: "noMatch", column: null, anchorHits: 0 })}
-      />,
-    );
-    expect(screen.getByText(/JE 无对应辅助核算列/)).toBeInTheDocument();
-    expect(screen.getByText(/保留字段映射/)).toBeInTheDocument();
-    expect(screen.getByText(/不启用辅助核算键/)).toBeInTheDocument();
-    expect(screen.getByText(/按主体＋科目归集/)).toBeInTheDocument();
-  });
-
-  it("覆盖不全明确整组降级且不启用辅助键", () => {
-    render(
-      <AuxiliaryLinkStatusView
-        result={result({ status: "partialCoverage", anchorHits: 2 })}
-      />,
-    );
-    expect(screen.getByText(/覆盖不全（2\/3 维度命中）/)).toBeInTheDocument();
-    expect(screen.getByText(/按主体＋科目归集/)).toBeInTheDocument();
-    expect(screen.getByText(/不启用辅助核算键/)).toBeInTheDocument();
-  });
-
-  it("多列候选提示手动指定", () => {
-    render(
-      <AuxiliaryLinkStatusView
-        result={result({ status: "ambiguous", competingColumns: ["部门编码", "部门名称"] })}
-      />,
-    );
-    expect(screen.getByText(/多列疑似辅助核算列（部门编码、部门名称）/)).toBeInTheDocument();
-  });
-
-  it("借款工具自定义维度标签", () => {
+  it("借款工具沿用同一提示并替换维度名称", () => {
     render(
       <AuxiliaryLinkStatusView
         result={result({ status: "noMatch", column: null })}
         dimensionLabel="借款明细"
       />,
     );
-    expect(screen.getByText(/JE 无对应借款明细列/)).toBeInTheDocument();
+    expect(screen.getByText("TB/JE 借款明细无法匹配，已退回按主体＋科目计算。")).toBeInTheDocument();
   });
 });

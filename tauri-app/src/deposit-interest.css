@@ -174,15 +174,17 @@
 }
 .deposit-table > table {
   width: 100%;
-  min-width: 1510px;
+  min-width: 1120px;
+  table-layout: auto;
   border-collapse: collapse;
 }
 .deposit-table th,
 .deposit-table td {
   padding: 9px 10px;
   border-bottom: 1px solid var(--border);
-  text-align: right;
-  white-space: nowrap;
+  vertical-align: middle;
+  text-align: left;
+  white-space: normal;
   font-variant-numeric: tabular-nums;
 }
 .deposit-table th {
@@ -192,18 +194,56 @@
   background: var(--muted);
   font-size: 12px;
 }
-.deposit-table th:nth-child(-n + 5),
-.deposit-table td:nth-child(-n + 5),
+.deposit-table th:first-child,
+.deposit-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  width: 150px;
+  min-width: 150px;
+  background: var(--card);
+}
+.deposit-table th:first-child {
+  z-index: 3;
+  background: var(--muted);
+}
+.deposit-table th:nth-child(2),
+.deposit-table td:nth-child(2) {
+  width: clamp(240px, 28vw, 390px);
+  min-width: 240px;
+}
+.deposit-table th:nth-child(3),
+.deposit-table td:nth-child(3) {
+  min-width: 190px;
+}
+.deposit-table th:nth-child(4),
+.deposit-table td:nth-child(4) {
+  min-width: 120px;
+}
+.deposit-table th:nth-child(5),
+.deposit-table td:nth-child(5) {
+  width: 180px;
+  min-width: 150px;
+  overflow-wrap: anywhere;
+}
+.deposit-table th:nth-child(6),
+.deposit-table td:nth-child(6) {
+  min-width: 235px;
+}
 .deposit-table th:nth-child(7),
 .deposit-table td:nth-child(7),
-.deposit-table th:last-child,
-.deposit-table td:last-child {
-  text-align: left;
+.deposit-table th:nth-child(8),
+.deposit-table td:nth-child(8) {
+  min-width: 130px;
+  text-align: right;
+  white-space: nowrap;
 }
-.deposit-table td:nth-child(2) {
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.deposit-table th:nth-child(9),
+.deposit-table td:nth-child(9),
+.deposit-table th:nth-child(10),
+.deposit-table td:nth-child(10) {
+  min-width: 105px;
+  text-align: center;
 }
 .deposit-table select,
 .deposit-table input {
@@ -220,6 +260,38 @@
 }
 .deposit-review-row {
   background: color-mix(in srgb, var(--warning-border) 12%, transparent);
+}
+.deposit-review-row > td:first-child {
+  background: color-mix(in srgb, var(--warning-border) 12%, var(--card));
+}
+.deposit-account-cell strong,
+.deposit-account-cell small {
+  display: block;
+}
+.deposit-account-cell strong {
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.deposit-account-cell small {
+  margin-top: 3px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+.deposit-balance-cell {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(100px, 1fr));
+  gap: 6px 12px;
+}
+.deposit-balance-cell span {
+  display: grid;
+  gap: 1px;
+  text-align: right;
+  white-space: nowrap;
+}
+.deposit-balance-cell small,
+.deposit-no-monthly {
+  color: var(--muted-foreground);
+  font-size: 11px;
 }
 .deposit-ok,
 .deposit-warn {
@@ -582,6 +654,34 @@
   margin: 8px 0 0;
   color: var(--muted-foreground);
   font-size: 12px;
+}
+.deposit-notice {
+  display: grid;
+  gap: 7px;
+  margin: 0 0 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--warning-border);
+  border-radius: 10px;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+.deposit-notice h4,
+.deposit-notice p,
+.deposit-notice ul {
+  margin: 0;
+}
+.deposit-notice h4 {
+  font-size: 14px;
+}
+.deposit-notice p,
+.deposit-notice li {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.deposit-notice ul {
+  display: grid;
+  gap: 4px;
+  padding-left: 20px;
 }
 .deposit-currency-mode {
   display: flex;

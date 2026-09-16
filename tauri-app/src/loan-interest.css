@@ -405,28 +405,74 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 借款利率确认表：八列全部给出明确宽度，输入框在横向滚动区内不再互相覆盖。 */
+/* 借款利率确认表：默认十列；辅助核算验证成功时扩展为十一列。
+   每列都给出固定宽度，避免百分比列宽合计已满后把最后的 BP 输入框挤成细缝。 */
 .loan-rate-match table {
-  min-width: 1280px;
+  min-width: 1410px;
   table-layout: fixed;
 }
-.loan-rate-match th:first-child {
-  width: 14%;
+.loan-rate-match.has-auxiliary table { min-width: 1630px; }
+.loan-rate-match th:nth-child(1) {
+  width: 160px;
 }
 .loan-rate-match th:nth-child(2) {
-  width: 24%;
+  width: 120px;
 }
-.loan-rate-match th:nth-child(3),
+.loan-rate-match th:nth-child(3) {
+  width: 220px;
+}
 .loan-rate-match th:nth-child(4) {
-  width: 11%;
+  width: 100px;
 }
 .loan-rate-match th:nth-child(5) {
-  width: 10%;
+  width: 140px;
 }
-.loan-rate-match th:nth-child(6),
-.loan-rate-match th:nth-child(7),
+.loan-rate-match th:nth-child(6) { width: 140px; }
+.loan-rate-match th:nth-child(7) { width: 110px; }
 .loan-rate-match th:nth-child(8) {
-  width: 10%;
+  width: 150px;
+}
+.loan-rate-match th:nth-child(9) {
+  width: 150px;
+}
+.loan-rate-match th:nth-child(10) {
+  width: 120px;
+}
+/* 有辅助核算时，后续列整体右移一位。 */
+.loan-rate-match.has-auxiliary th:nth-child(4) { width: 220px; }
+.loan-rate-match.has-auxiliary th:nth-child(5) { width: 100px; }
+.loan-rate-match.has-auxiliary th:nth-child(6),
+.loan-rate-match.has-auxiliary th:nth-child(7) { width: 140px; }
+.loan-rate-match.has-auxiliary th:nth-child(8) { width: 110px; }
+.loan-rate-match.has-auxiliary th:nth-child(9),
+.loan-rate-match.has-auxiliary th:nth-child(10) { width: 150px; }
+.loan-rate-match.has-auxiliary th:nth-child(11) { width: 120px; }
+/* 横向滚动时保留主体、科目编码、科目名称；启用辅助时一并保留辅助核算。 */
+.loan-rate-match th:nth-child(-n + 3),
+.loan-rate-match td:nth-child(-n + 3),
+.loan-rate-match.has-auxiliary th:nth-child(4),
+.loan-rate-match.has-auxiliary td:nth-child(4) {
+  position: sticky;
+  z-index: 2;
+  background: var(--card);
+}
+.loan-rate-match th:nth-child(-n + 3),
+.loan-rate-match.has-auxiliary th:nth-child(4) {
+  z-index: 3;
+  background: var(--muted);
+}
+.loan-rate-match th:nth-child(1),
+.loan-rate-match td:nth-child(1) { left: 0; }
+.loan-rate-match th:nth-child(2),
+.loan-rate-match td:nth-child(2) { left: 160px; }
+.loan-rate-match th:nth-child(3),
+.loan-rate-match td:nth-child(3) { left: 280px; }
+.loan-rate-match.has-auxiliary th:nth-child(4),
+.loan-rate-match.has-auxiliary td:nth-child(4) { left: 500px; }
+.loan-rate-match td:nth-child(3),
+.loan-rate-match.has-auxiliary td:nth-child(4) {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .loan-rate-match input,
 .loan-rate-match select {

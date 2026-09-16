@@ -1149,7 +1149,7 @@ fn fa_auxiliary_columns(
     }
     let tb_scans = tb_acc.finish(&tb.headers);
     let je_scans = je_acc.finish(&je.headers);
-    let preferred = mapped_columns(je_map, "auxiliary").first().cloned();
+    let preferred = mapped_columns(je_map, "auxiliary");
     let verdicts = ledger_mapping::auxiliary_link_group_verdicts_by_tb_columns(
         &anchors,
         &tb_scans,
@@ -1157,7 +1157,7 @@ fn fa_auxiliary_columns(
         &totals,
         tb_map,
         "auxiliary",
-        preferred.as_deref(),
+        &preferred,
     );
     ledger_mapping::auxiliary_verified_columns(
         &verdicts,

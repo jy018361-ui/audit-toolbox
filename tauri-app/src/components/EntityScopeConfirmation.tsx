@@ -37,7 +37,7 @@ export function useEntityScopeConfirmation({
 
   useEffect(() => {
     if (restoredSignature.current === signature) {
-      // 同一个已确认主体集合在子工具切换后重新挂载，保留用户选过的归集口径。
+      // 同一个已确认主体集合在子工具切换后重新挂载，保留用户选过的测算范围。
       restoredSignature.current = "";
     } else {
       setSelection(STRICT_ENTITY_SCOPE);
@@ -126,11 +126,11 @@ export function EntityScopeConfirmation({
         <div className="entity-scope-modes" role="radiogroup" aria-label="主体处理方式">
           <label className={value.mode === "strict" ? "is-active" : ""}>
             <input type="radio" name="entity-scope-mode" checked={value.mode === "strict"} onChange={() => chooseMode("strict")} />
-            <span><strong>严格区分</strong><small>不同主体分别核对，不自动合并。</small></span>
+            <span><strong>全部测算</strong><small>所有主体按各自名称分别执行测算。</small></span>
           </label>
           <label className={value.mode === "aggregate" ? "is-active" : ""}>
             <input type="radio" name="entity-scope-mode" checked={value.mode === "aggregate"} onChange={() => chooseMode("aggregate")} />
-            <span><strong>部分归集</strong><small>只合并下方人工勾选的主体。</small></span>
+            <span><strong>部分测算</strong><small>仅按下方勾选的对应关系测算；未勾选主体仍单独测算。</small></span>
           </label>
         </div>
         {value.mode === "aggregate" && (
@@ -141,7 +141,7 @@ export function EntityScopeConfirmation({
                 <label key={key}>
                   <input type="checkbox" checked={selected.has(key)} onChange={() => toggle(key)} />
                   <span className="entity-scope-side">{candidate.sourceSide.toUpperCase()}</span>
-                  <span><strong>{candidate.sourceEntity}</strong><small>归集至 {candidate.targetEntity}{candidate.reason ? ` · ${candidate.reason}` : ""}</small></span>
+                  <span><strong>{candidate.sourceEntity}</strong><small>对应主体：{candidate.targetEntity}{candidate.reason ? ` · ${candidate.reason}` : ""}</small></span>
                 </label>
               );
             })}

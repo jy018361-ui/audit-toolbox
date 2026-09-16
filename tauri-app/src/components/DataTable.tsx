@@ -35,7 +35,7 @@ export function DataTable({
     <div className="data-table">
       {caption != null && <div className="data-table-caption">{caption}</div>}
       <div className="data-table-scroll" style={{ maxHeight }}>
-        {rows.length === 0 ? (
+        {rows.length === 0 && !headerControls?.length ? (
           <div className="empty">{emptyText}</div>
         ) : (
           <table className="data-table-table">
@@ -55,6 +55,11 @@ export function DataTable({
               </tr>
             </thead>
             <tbody>
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={columns.length + (trailingColumns?.length ?? 0)}>{emptyText}</td>
+                </tr>
+              )}
               {rows.map((row, rowIndex) => (
                 <tr key={rowIndex}>
                   {columns.map((_, colIndex) => {

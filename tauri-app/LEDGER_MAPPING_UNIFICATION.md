@@ -1,5 +1,39 @@
 # 账表映射统一方案
 
+## 2026-09-16 · 科目确认页的辅助明细展开契约
+
+- 公共 `ledger.auxiliary_link` 在既有逐主体＋科目列验证之外返回 `reviewVerified` 与 `details`。只有已唯一认定 JE 辅助列，且该组所有 TB 辅助值均能在 JE 对应列找到时，`reviewVerified=true`；否则 `details` 为空，业务页面必须保持末级科目粒度。
+- 这条“展示验证”刻意严于当期非零发生额锚点：锚点负责可靠定位 JE 列，随后对包括休眠余额户在内的 TB 辅助明细做全集核验。验证不受报告期间限制，也不改变用户／LLM 已确认的字段映射。
+- 存款和借款共用该返回值；逐辅助项的分类覆盖由各业务测算消费，公共 TB 结构识别和原有降级计算规则不变。
+
+## 2026-09-16 · JE Number 凭证号与 Effective Date 日期表头
+
+- 公共 JE 凭证识别字段增加 `JE Number` 精确别名；表头归一化后是 `jenumber`，此前既不匹配 `JE Name` 也不匹配其他凭证号别名。`JE Line Number` 仍由 `line` 冲突词排除，不能当作整张凭证的键。
+- JE 日期增加 `Effective Date`、`生效日期`、`有效日期` 别名；完整标题或双语标题中的完整分段给予显式生效日优先级，不依赖别名长度或列顺序。与 `Entry Date`／记账日期并存时优先生效日期，避免将晚录入的上期分录排除；只有录入／记账日期时仍可映射。人工映射仍优先于自动建议。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib je_number是凭证键而je_line_number不是`。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib je生效日期与录入日期并存时优先生效日期`。
+
+## 2026-09-16 · 辅助列按实际锚点覆盖率自动择优
+
+- JE 表头正则只提供字段语义线索，不能证明 JE 的辅助值与 TB 相同。未映射 JE 辅助列时在全部列中择优；映射多列时只在这些列中择优；仅映射一列时尊重该列。公共 `auxiliary_link_verdict` 按去重 TB 锚点命中数裁决，同一组分母相同，因此命中数最高等价于覆盖率最高。
+- 只有唯一最高列且覆盖该组全部 TB 锚点时才启用辅助键；唯一最高但覆盖不全仍整组按主体＋科目计算；最高分并列仍保留歧义，不按表头或列顺序猜。仅映射一列时验证该列，对不上不悄悄换列。
+- 映射页公共提示只在降级时告知“TB/JE 辅助核算无法匹配，退回按主体＋科目计算”；部分组成功时显示退回及细分项数，不再铺开逐主体／科目和状态原因。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 锚点反查`、`npx vitest run src/components/AuxiliaryLinkStatus.test.tsx`。
+
+## 2026-09-16 · 外币裸表头与 TB→JE 币种联合复核
+
+- 公共 TB/JE Coding 字典将裸表头“外币／外幣／原币／原幣”识别为逐行交易币种 `currency`；“借方/外币、贷方/原币、外币金额”等金额列继续由金额/借贷冲突词排除，不会误挂币种。
+- TB 当前已映射 `currency`、而 JE 尚未映射时，公共 `ledger.review_pair_mapping` 将 JE `currency` 注入 `crossRequiredRoles` 与可复核角色，要求 LLM 主动检查 JE 的交易币种／外币／原币 ISO 代码列；整列固定的本币／本位币不得代替。
+- 该规则位于公共账表映射与联合复核入口，存款、借款、汇兑损益、TBJE 完整性及 FA TBJE 共享，不在页面或单个业务模块维护。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 外币与原币裸列名 -- --test-threads=1`、`cargo test --manifest-path src-tauri/Cargo.toml --lib tb已有币种时联合复核强制检查je币种 -- --test-threads=1`。
+
+## 2026-09-16 · 计算末级与科目目录末级分离
+
+- 公共 `tb_leaf_mask` 继续服务金额计算：父子金额不能完整勾稽时保守保留父项，避免静默丢数。
+- 新增公共 `tb_catalog_leaf_mask` 服务科目确认／筛选目录：在计算掩码之上，同一主体存在更长下级编码时隐藏父级。借款工具再按科目选择键聚合多主体／多辅助物理行，确保页面行键唯一；此目录掩码不得用于金额计算。
+- `suggest_roles_with_data` 在全部数据形态修正完成后重新保护精确主体别名；“核算组织／核算组织名称”稳定映射为 `entity`，裸“单位”仍须通过取值排除计量单位。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 科目确认 -- --test-threads=1`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 核算组织 -- --test-threads=1`。
+
 ## 2026-09-15 · 外币锚点验证与存款／借款可选退回
 
 - 公共映射阶段新增 `ledger.currency_link`：严格读取用户映射的 TB、JE 币种列，按有效主体＋科目隔离，以 TB 多币种账户中的外币为锚点；某外币在对应 JE 中出现至少一次即命中，JE 其他币种空白不影响验证。系统不推断用户是否错映射，也不把币种永久加入公共科目身份。
@@ -178,6 +212,11 @@
 - 借款利息第二步的默认科目类型不再只看名称是否含「借款/贷款」。`loan.tb_accounts` 综合科目代码大类、标准融资负债代码与名称语义返回 `suggestedType`、`suggestionReason`；短期／长期借款、应付债券、租赁负债和融资券可进入候选，资产类职工借款、委托贷款、借款费用与利息科目会被排除。期初／期末余额只作为说明证据，不把年内借还后两端为零的科目漏掉。
 - 该结果仅是预选建议，最终仍由用户逐行确认后以 `loanAccounts` 回传；不按账套号、文件名或固定列位置设特例。
 - 真实 04 JE 回归区分「科目名称」与「摘要」：可读文本的科目名称、分录文本各归自己的角色，绝不把科目名称重复用于摘要来凑必填。「总账科目」继续作为歧义标题留给 LLM 按取值判断，不由 Coding 硬匹配。
+
+## 2026-09-16 · 手动共列不受预览样本阈值限制
+
+- 公共 `MappingPanel` 在用户明确选择时允许 `accountCode` 与 `accountName` 共用同一物理列；首屏预览可能仅有标题／合计，不能用自动判型的四行、75% 门槛否定人工确认。其他角色仍一列一义；自动 Coding 和 LLM 卫生过滤继续按样例证据判型。
+- 前端取值判型补足 Rust 已有的足位编码＋空格＋名称形态，避免自动复核建议在前后端得到不同判断；日期、编码／期间组合不得据此自动共列。
 
 ## 2026-09-11 · 科目编码与名称混写列全链路双映射
 
@@ -676,6 +715,12 @@ TB 要求科目编码与名称齐备——缺一项就拦。今天能跑的账�
 - 汇兑损益上传识别对触发阈值的 CSV 只读取前 256 条完整记录；正式 worker 建立或复用看账的 SQLite 行缓存，并只投影用户确认映射的计算字段。校验、符号口径、已实现、未实现和复核阶段共享同一投影表。
 - FX worker 接入与看账相同的 Job Object 上限及内存等待控制。投影表仍超过当前 worker 安全预算时保留磁盘缓存并退出；凭证分组完全下沉 SQLite 是后续剩余项，当前不宣称 6GB FX 测算已做到恒定内存。
 - 预览缓存命中后，导出不再重复读取 JE 和检测符号口径。触发磁盘模式的超大 JE 不嵌入完整明细 Sheet，底稿保留源文件引用、测算结果和相关凭证明细，避免超过 Excel 行数上限或重新制造整表 JSON。
+
+### 2026-09-16：上传识别的 8 MiB 有界采样统一到 XLSX、CSV、XLS
+
+- 汇兑损益上传识别达到 8 MiB 时，XLSX/XLSM 继续只解压每张 Sheet 开头最多 256 行；CSV/TXT/TSV 只解析前 256 条完整记录。阈值判断使用磁盘文件大小，不使用 XLSX 解压后的体积。
+- BIFF8 `.xls` 新增独立的 OLE/BIFF 识别器：读取工作簿共享字符串和 Sheet 元数据，仅物化各 Sheet 前 256 行的单元格；不再经 Calamine 打开工作簿时物化所有 Sheet。非 BIFF8 或异常记录回退原有完整读取，优先保留判型正确性。
+- 这些改动只覆盖 `classify_source`/`inspect` 的上传识别。用户确认后的正式测算仍读取完整账表；逐 Sheet 串行识别和可选 LLM 复核不在此变更范围。回归入口：`cargo test --manifest-path src-tauri/Cargo.toml --lib eight_mib_csv_and_xls_use_bounded_inspection`、`cargo test --manifest-path src-tauri/Cargo.toml --lib xls_sample::tests`。
 
 **新增能力：按科目编码段批量筛选。** 科目清单改为返回「显示值 ＋ 编码」的结构化数据，
 `kanzhang.accounts` 接受 `codePrefixes`。填 `6401,6603` 圈出这两段下的全部明细科目。
@@ -1574,8 +1619,8 @@ Text"） |
 
 | 角色 | 实务写法 |
 |---|---|
-| `id` | 凭证号、凭证号数、凭证编号、凭证字、凭证字号、`Voucher`、`Document Number`、`Batch Name`、`JE Name`、`BELNR` |
-| `date` | 日期、记账日期、记帐日期、过账日期、凭证日期、`GL Date`、`Posting Date`、`BUDAT` |
+| `id` | 凭证号、凭证号数、凭证编号、凭证字、凭证字号、`Voucher`、`Document Number`、`Batch Name`、`JE Name`、`JE Number`、`BELNR` |
+| `date` | 日期、记账日期、记帐日期、过账日期、凭证日期、`GL Date`、`Posting Date`、`Effective Date`、`Entry Date`、`BUDAT` |
 | `voucherType` | 凭证类型、凭证类别、`Category`、`Document Type`、`BLART` |
 | `accountCode` | 科目编码、科目代码、会计科目、总账科目、账户、`Account Code`、`G/L Account`、`SAKNR` |
 | `accountName` | 科目名称、科目文本、科目描述、科目全名、`Child Description`、`Account Desc` |

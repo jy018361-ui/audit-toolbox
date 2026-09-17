@@ -802,6 +802,29 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     }
     refine_layout(&table, kind, &mut mapping);
     drop_column_conflicts(kind, &candidates, &mut mapping);
+    // 两列同名「借/贷」按位置定归属：余额表一律期初在前、期末在后
+    // （2-2026.08）。冲突消解按字母序让 closingDirection 先挑了前柱，
+    // 事后把这对方向列按列位摆正。
+    if kind == "tb" {
+        let pair = |mapping: &Map<String, Value>| {
+            let col = |role: &str| {
+                mapping.get(role).and_then(Value::as_str).and_then(|c| {
+                    table.headers.iter().position(|h| h == c)
+                })
+            };
+            (col("openingDirection"), col("closingDirection"))
+        };
+        if let (Some(op), Some(cl)) = pair(&mapping) {
+            if op > cl {
+                let a = mapping.get("openingDirection").cloned();
+                let b = mapping.get("closingDirection").cloned();
+                if let (Some(a), Some(b)) = (a, b) {
+                    mapping.insert("openingDirection".into(), b);
+                    mapping.insert("closingDirection".into(), a);
+                }
+            }
+        }
+    }
     fill_combined_account_column(kind, &table, &mut mapping);
     reconcile_account_identity_by_data(kind, &table, &mut mapping);
     // 一份合并 TB 可能同时包含多家公司，各公司的本位币不同。此时币种列
@@ -2130,7 +2153,34 @@ fn drop_column_conflicts(
             _ => true,
         };
         if drop_whole {
-            mapping.remove(&role);
+            // 列被更高分的角色占走时，先试次选列再放弃：两列同名「借/贷」
+            // （2-2026.08 余额表）本该一列期初、一列期末，把输家整个删掉
+            // 会让期初方向凭空消失。
+            let used: std::collections::HashSet<String> = mapping
+                .values()
+                .filter_map(|value| match value {
+                    Value::String(s) => Some(s.clone()),
+                    Value::Array(all) => all
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(|s| s.to_string())
+                        .next(),
+                    _ => None,
+                })
+                .collect();
+            let next = candidates.get(&role).and_then(|all| {
+                all.iter()
+                    .find(|c| c.1 >= 0.55 && !used.contains(&c.0))
+                    .map(|c| c.0.clone())
+            });
+            match next {
+                Some(fallback) => {
+                    mapping.insert(role.clone(), Value::String(fallback));
+                }
+                None => {
+                    mapping.remove(&role);
+                }
+            }
         }
     }
 }
@@ -2264,6 +2314,20 @@ fn pick_currency_text_column(table: &FxTable, kind: &str, mapping: &mut Map<Stri
 /// 画像改变的是排序与置信度，不改变引擎的命中与排除结论。
 fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candidate>> {
     let profiles = column_profiles(table);
+    // 表里是否存在本位币命名的列（本位币/公司代码货币/总账货币…）。
+    // TB 的币种列整列同值时按形态像本位币列，但若全表根本没有本位币
+    // 命名列，这列就是唯一的交易币种列（01 号样例「币别」整列人民币），
+    // 罚分把它压到阈值下会让 currency 整角色消失。
+    let has_functional_named = ledger_mapping::role_of(kind, "functionalCurrency").is_some_and(
+        |def| {
+            table.headers.iter().any(|h| {
+                def.aliases.iter().any(|a| {
+                    normalize_header(h) == normalize_header(a)
+                        || ledger_mapping::segment_exact(h, a)
+                })
+            })
+        },
+    );
     let mut out = BTreeMap::new();
     for definition in ledger_mapping::roles(kind) {
         let (role, aliases, conflicts) =
@@ -2300,12 +2364,23 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
                 // 引擎档位折算成面板的置信度刻度：整体相等（≥2.0）0.94、
                 // 分段相等（≥1.5）0.88、包含命中 0.72；引擎判不匹配时退回
                 // 本工具的列名弱启发（只补期初/期末方向的近义写法，不带词表）。
+                // 档内再按引擎分的小数位微调（每 0.1 记 0.0009），保留
+                // 「长别名/日期加成」的相对次序——否则记帐日期与凭证日期、
+                // 公司代码与单位这类同档平票会退化成按列序取胜。
                 let mut score: f64 = match ledger_mapping::alias_score(definition, h) {
-                    Some(engine_score) if engine_score >= 2.0 => 0.94,
-                    Some(engine_score) if engine_score >= 1.5 => 0.88,
-                    Some(_) => 0.72,
+                    Some(engine_score) if engine_score >= 2.0 => {
+                        0.94 + (engine_score - 2.0) * 0.05
+                    }
+                    Some(engine_score) if engine_score >= 1.5 => {
+                        0.88 + (engine_score - 1.5) * 0.05
+                    }
+                    Some(engine_score) => 0.72 + (engine_score - 1.0) * 0.05,
                     None => semantic_role_score(role, &n),
                 };
+                // 同分列按列位微降（每列 0.0001）：同名「借/贷」方向列等
+                // 完全同分的场景，靠前的列优先被角色收下，冲突消解时
+                // 才能把靠后的列留给对位角色（期初在前、期末在后）。
+                score -= i as f64 * 0.00002;
                 if role == "entity"
                     && ledger_mapping::entity_column_is_measurement_unit(
                         &table.headers,
@@ -2320,7 +2395,7 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
                         .get("dateRatio")
                         .and_then(Value::as_f64)
                         .unwrap_or(0.0)
-                        * 0.12;
+                        * 0.03;
                 }
                 // 币种角色的数据形态判定对两张表都适用：序时账里
                 // 「本位币」这种列名既像本位币标识又像本位币金额，看取值就能分开。
@@ -2351,9 +2426,14 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
                         .iter()
                         .map(|row| row.get(i).map(String::as_str).unwrap_or(""));
                     match ledger_mapping::classify_currency_column(column) {
-                        ledger_mapping::CurrencyColumn::Unusable { .. } => {
-                            // 列名里带“货币”但一个币种代码都认不出（例如“期初金额-集团货币”）。
-                            score -= 0.6;
+                        ledger_mapping::CurrencyColumn::Unusable { unknown } => {
+                            // 列名里带“货币”但一个币种代码都认不出，且**有内容**
+                            // （例如“期初金额-集团货币”装的是金额）——罚分。
+                            // 纯空白列（01 号样例的「币别」整列空，币种藏在科目
+                            // 名称里）没有反证，按列名保留候选。
+                            if !unknown.is_empty() {
+                                score -= 0.6;
+                            }
                         }
                         ledger_mapping::CurrencyColumn::Foreign { .. } => {
                             if role == "currency" {
@@ -2365,13 +2445,21 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
                         ledger_mapping::CurrencyColumn::Functional { .. } => {
                             let je_name_priority = kind == "je";
                             if role == "currency" {
-                                if !(je_name_priority && named_for_role && !functional_named) {
+                                // 国贸系复合表头「币种-人民币」只有包含级命中，
+                                // 也是明确的币种命名——命名证据放宽到包含级。
+                                let named = named_for_role || !partial.is_empty();
+                                if !(je_name_priority && named && !functional_named)
+                                    && !(kind == "tb" && !has_functional_named)
+                                {
                                     score -= 0.6;
                                 }
                             } else if !(je_name_priority && !functional_named) {
                                 // 序时账里没有本位币命名的列，仅凭整列同值不该
-                                // 抢走凭证货币列；
-                                score += 0.62;
+                                // 抢走凭证货币列。列自身已按别名命中本位币命名
+                                // （本币/总账货币）时只加小分：+0.62 会把整档
+                                // 饱和到 1.0，「本币」与「总账货币」的同档次序
+                                // 被抹平，黄金裁决要求的「本币」反而按列位落败。
+                                score += if functional_named { 0.05 } else { 0.62 };
                             }
                         }
                     }
@@ -2380,15 +2468,26 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
                     || role.to_lowercase().contains("debit")
                     || role.to_lowercase().contains("credit")
                 {
+                    // 0.05 而不是 0.12：加成不能把整档饱和到 1.0，否则
+                    // 「借方累计发生额」与裸「借方发生额」的同档次序被抹平，
+                    // 显式累计列反而按列位输给裸列。
                     score += profiles[i]
                         .get("numberRatio")
                         .and_then(Value::as_f64)
                         .unwrap_or(0.0)
-                        * 0.12;
+                        * 0.05;
                 }
                 // 冲突词是排除条件，不是扣分项——「期初余额(借)」含「借」，
                 // 就不该再作为「期初净额」的候选，哪怕别名也命中了「期初余额」。
-                if !bad.is_empty() {
+                // 统一走引擎的 role_rejects_header：它带有「凭证行文本」这类
+                // 行级摘要豁免；本地只查 bad 会把豁免一并清零，04/05 号
+                // SAP 序时账的摘要列就这么漏掉（被功能范围文本顶替）。
+                if !bad.is_empty()
+                    && ledger_mapping::role_rejects_header(kind, role, h)
+                    // 「年月」式期间列（金蝶 08/09 导出）在建议层放行：它就是
+                    // 记账期间。复核层的按工具放行策略不受影响（那里不走这段）。
+                    && !(role == "date" && n == "年月")
+                {
                     score = 0.0;
                 }
                 (
@@ -2407,7 +2506,12 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
             .filter(|x| x.1 > 0.15)
             .collect::<Vec<_>>();
         choices.sort_by(|a, b| b.1.total_cmp(&a.1));
-        choices.truncate(if kind == "tb" && role == "currency" {
+        // 多列角色（科目名称/凭证识别/辅助核算）天然横跨多列：选样-序时账的
+        // 一至五级科目、SAP 导出的几十个维度列都靠它。截到 3 会把四级、五级
+        // 科目这类同分列无声丢掉，多列角色放宽到 24。
+        choices.truncate(if ledger_mapping::role_of(kind, role).is_some_and(|r| r.multi) {
+            24
+        } else if kind == "tb" && role == "currency" {
             8
         } else {
             3
@@ -3624,7 +3728,10 @@ fn cross_table_alignment(
     let je_names = role_values(&je_full, &je_mapping, "accountName");
     let tb_names = role_values(&tb_full, &tb_mapping, "accountName");
     if overlap_ratio(&je_names, &tb_names).is_some_and(|(overlap, _)| overlap > 0) {
-        warnings.push("JE与TB没有可可靠对齐的科目编码，已按科目名称继续匹配。".into());
+        warnings.push(
+            "JE与TB没有可可靠对齐的科目编码；正式核对将仅对同主体下经双侧唯一性验证的同名科目启用名称回退，不做模糊匹配。"
+                .into(),
+        );
         return Ok((errors, warnings, None));
     }
     errors.push(
@@ -15570,7 +15677,7 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
                 .as_array()
                 .is_some_and(|items| items.iter().any(|item| item
                     .as_str()
-                    .is_some_and(|text| text.contains("已按科目名称继续匹配")))),
+                    .is_some_and(|text| text.contains("双侧唯一性验证")))),
             "要说明改用了哪个口径：{by_name:#}"
         );
 
@@ -15828,8 +15935,10 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
         )
         .unwrap();
         let mapping = &inspection["suggestedMapping"];
-        assert!(mapping.get("accountCode").is_none(), "{mapping:#?}");
-        assert!(mapping.get("accountName").is_none(), "{mapping:#?}");
+        // 两可表头不再留白：按数据形态冷启动定性（数字编码→accountCode、
+        // 名称文本→accountName）。本位币/过账代码等断言保持不变。
+        assert_eq!(mapping["accountCode"], json!("总账科目"), "{mapping:#?}");
+        assert_eq!(mapping["accountName"], json!("会计科目"), "{mapping:#?}");
         assert_eq!(
             mapping.get("functionalCurrency"),
             Some(&json!("本币")),
@@ -15984,7 +16093,7 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
                 .as_array()
                 .is_some_and(|items| items.iter().any(|item| item
                     .as_str()
-                    .is_some_and(|text| text.contains("按科目名称继续匹配")))),
+                    .is_some_and(|text| text.contains("双侧唯一性验证")))),
             "要告诉用户当前仅按名称继续，不能暗示已替换编码列：{result:#}"
         );
         fs::remove_file(&je).unwrap();

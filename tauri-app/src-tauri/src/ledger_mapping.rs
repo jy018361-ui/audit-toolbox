@@ -647,6 +647,7 @@ static JE_ROLES: &[Role] = &[
             "凭证日期",
             "憑證日期",
             "业务日期",
+            "年月",
             "生效日期",
             "有效日期",
             "gldate",
@@ -667,8 +668,12 @@ static JE_ROLES: &[Role] = &[
             "凭证号数",
             // 07 号样例把日期与凭证号拼成了一列「唯一码」，整列就是凭证键。
             "唯一码",
+            "唯一识别码",
+            "凭证唯一识别码",
+            "唯一凭证号",
             "唯一碼",
             "凭证编号",
+            "glreference",
             "憑證編號",
             "会计凭证",
             "會計憑證",
@@ -713,6 +718,7 @@ static JE_ROLES: &[Role] = &[
             "凭证类型",
             "憑證類型",
             "凭证类别",
+            "doctype",
             "憑證類別",
             "单据类型",
             "category",
@@ -731,6 +737,8 @@ static JE_ROLES: &[Role] = &[
             "科目代码",
             "科目代碼",
             "科目号",
+            // 神火 NC 系导出的编码列头是简体「科目编号」。
+            "科目编号",
             "科目編號",
             // SAP 总账余额导出常把 G/L Account 简写成「帐号」。
             "帐号",
@@ -750,6 +758,12 @@ static JE_ROLES: &[Role] = &[
         &[
             "科目名称",
             "科目名稱",
+            "一级科目",
+            "二级科目",
+            "三级科目",
+            "四级科目",
+            "五级科目",
+            "二级费用科目",
             "科目描述",
             "帐号描述",
             "账号描述",
@@ -780,6 +794,7 @@ static JE_ROLES: &[Role] = &[
             "備註",
             "文本",
             "凭证行文本",
+            "凭证摘要",
             "憑證行文本",
             "分录文本",
             "分錄文本",
@@ -788,6 +803,8 @@ static JE_ROLES: &[Role] = &[
             "entry item",
             "line description",
             "sgtxt",
+            "description",
+            "text",
         ],
         &["科目", "account", "凭证", "憑證", "抬头", "抬頭"],
     ),
@@ -812,6 +829,7 @@ static JE_ROLES: &[Role] = &[
             "原币币种",
             "交易币种",
             "凭证货币",
+            "documentcurrencycode",
             "currency",
             "currencycode",
             "entercurrency",
@@ -892,8 +910,11 @@ static JE_ROLES: &[Role] = &[
             "公司代码货币金额",
             "公司代碼貨幣金額",
             "本位币",
+            "entitycurrencyamount",
+            "entitycurrencyamt",
             "本位幣",
             "借正贷负",
+            "发生额",
             "借正貸負",
             "金额",
             "金額",
@@ -942,12 +963,18 @@ static JE_ROLES: &[Role] = &[
             "原币金额",
             "原幣金額",
             "外币金额",
+            "外币",
+            "外幣",
+            "原币",
+            "原幣",
+            "documentamount",
             "外幣金額",
             "凭证金额",
             "憑證金額",
             // SAP 中文导出把凭证货币下的金额叫「凭证货币金额」——「凭证金额」
             // 不是它的子串（中间隔着「货币」二字），04 PBC 就因此漏了原币净额。
             "凭证货币金额",
+            "currencyamt",
             "憑證貨幣金額",
             "原币",
             "原幣",
@@ -971,6 +998,8 @@ static JE_ROLES: &[Role] = &[
             "原币借方",
             "原幣借方",
             "外币借方",
+            "documentdebitamount",
+            "借方原币",
             "货币借方金额",
             "貨幣借方金額",
             "enterdebits",
@@ -984,6 +1013,8 @@ static JE_ROLES: &[Role] = &[
             "原币贷方",
             "原幣貸方",
             "外币贷方",
+            "documentcreditamount",
+            "贷方原币",
             "货币贷方金额",
             "貨幣貸方金額",
             "entercredits",
@@ -1014,6 +1045,7 @@ static TB_ROLES: &[Role] = &[
         "公司/核算主体",
         &[
             "公司代码",
+            "businessunit",
             "公司代碼",
             "公司名称",
             "核算主体",
@@ -1035,6 +1067,8 @@ static TB_ROLES: &[Role] = &[
             "科目代码",
             "科目代碼",
             "科目号",
+            // 神火 NC 系导出的编码列头是简体「科目编号」。
+            "科目编号",
             "科目編號",
             "科目段组合",
             // SAP 总账余额导出常把 G/L Account 简写成「帐号」。
@@ -1058,6 +1092,7 @@ static TB_ROLES: &[Role] = &[
         &[
             "科目名称",
             "科目名稱",
+            "二级费用科目",
             "科目名称一级",
             "科目名称二级",
             "科目名称三级",
@@ -1137,7 +1172,9 @@ static TB_ROLES: &[Role] = &[
     r(
         "openingDirection",
         "期初方向",
-        &["期初方向", "年初方向", "期初余额方向", "openingdrcr"],
+        &["期初方向", "年初方向",
+            "借/贷",
+            "借贷", "期初余额方向", "openingdrcr"],
         &["期末", "本期", "本年"],
     ),
     r(
@@ -1146,6 +1183,8 @@ static TB_ROLES: &[Role] = &[
         &[
             "期末方向",
             "年末方向",
+            "借/贷",
+            "借贷",
             "期末余额方向",
             "方向",
             "closingdrcr",
@@ -1217,6 +1256,7 @@ static TB_ROLES: &[Role] = &[
             "期初原币余额",
             "期初原幣餘額",
             "期初外币余额",
+            "documentbeginningbalance",
             "期初余额原币",
             "期初餘額原幣",
             "期初原币",
@@ -1271,6 +1311,8 @@ static TB_ROLES: &[Role] = &[
             "期末余额借方",
             "期末借方余额",
             "期末借方",
+            "当前余额借方余额",
+            "借方余额当前余额",
             "年末余额借方",
             "年末借方",
             "closingdr",
@@ -1286,6 +1328,8 @@ static TB_ROLES: &[Role] = &[
             "期末余额贷方",
             "期末贷方余额",
             "期末贷方",
+            "当前余额贷方余额",
+            "贷方余额当前余额",
             "年末余额贷方",
             "年末贷方",
             "closingcr",
@@ -1300,6 +1344,7 @@ static TB_ROLES: &[Role] = &[
             "期末原币余额",
             "期末原幣餘額",
             "期末外币余额",
+            "documentendingbalance",
             "期末余额原币",
             "期末餘額原幣",
             "期末原币",
@@ -1330,6 +1375,8 @@ static TB_ROLES: &[Role] = &[
             "本年累计借方",
             "本年累计借方发生额",
             "本年借方发生额",
+            "借方累计发生额",
+            "累计借方发生额",
             "累计借方",
             // 08／09 号样例的词序是反的：「借方累计」「贷方累计」。
             "借方累计",
@@ -1356,6 +1403,8 @@ static TB_ROLES: &[Role] = &[
             "本年累计贷方",
             "本年累计贷方发生额",
             "本年贷方发生额",
+            "贷方累计发生额",
+            "累计贷方发生额",
             "累计贷方",
             "贷方累计",
             "貸方累計",
@@ -1379,6 +1428,8 @@ static TB_ROLES: &[Role] = &[
         &[
             "本年原币累计借方发生额",
             "本年累计原币借方",
+            "本年累计借方原币",
+            "本年借方原币累计",
             "借方发生原币",
             "借方發生原幣",
             "原币借方发生额",
@@ -1392,6 +1443,8 @@ static TB_ROLES: &[Role] = &[
         &[
             "本年原币累计贷方发生额",
             "本年累计原币贷方",
+            "本年累计贷方原币",
+            "本年贷方原币累计",
             "贷方发生原币",
             "貸方發生原幣",
             "原币贷方发生额",
@@ -1428,6 +1481,7 @@ static TB_ROLES: &[Role] = &[
             "借方余额-LC1",
             "借方餘額-LC1",
             "mtddebit",
+            "functionaldebitactivityamount",
         ],
         &[
             "贷", "貸", "原币", "原幣", "外币", "期初", "期末", "本年", "累计", "credit",
@@ -1454,6 +1508,7 @@ static TB_ROLES: &[Role] = &[
             "年月",
             "period",
             "fiscalperiod",
+            "fiscalrange",
         ],
         &["金额", "余额", "amount", "balance"],
     ),
@@ -1469,6 +1524,7 @@ static TB_ROLES: &[Role] = &[
             "贷方余额-LC1",
             "貸方餘額-LC1",
             "mtdcredit",
+            "functionalcreditactivityamount",
         ],
         &[
             "借", "原币", "原幣", "外币", "期初", "期末", "本年", "累计", "debit",
@@ -2338,10 +2394,12 @@ pub(crate) fn segment_exact(header: &str, alias: &str) -> bool {
 }
 
 fn explicit_line_summary_header(header: &str) -> bool {
+    let n = normalize_header(header);
     matches!(
-        normalize_header(header).as_str(),
+        n.as_str(),
         "凭证行文本" | "憑證行文本" | "分录文本" | "分錄文本" | "行项目文本" | "行項目文本"
-    )
+            | "凭证摘要" | "憑證摘要"
+    ) || n.contains("摘要")
 }
 
 /// 该角色是否受集团货币口径排除约束。
@@ -2359,28 +2417,32 @@ fn excludes_group_currency(role: &Role) -> bool {
 ///
 /// **取最长命中**：`借方金额` 必须落到 `functionalDebit`（别名 `借方金额`，4 字）
 /// 而不是被 `functionalAmount` 的别名 `金额`（2 字）抢走。
+/// 这些 ERP 标题在真实导出中既可能装编码，也可能装名称——两可表头。
+/// alias_score 有意不给它们打分，定性交给 [`refine_account_identity_by_data`]
+/// 按数据形态冷启动裁决。
+const TWO_WAY_ACCOUNT_HEADERS: &[&str] = &[
+    "会计科目",
+    "會計科目",
+    "总账科目",
+    "總賬科目",
+    "总帐科目",
+    "總帳科目",
+    "账户",
+    "帳戶",
+];
+
+fn two_way_account_header(header: &str) -> bool {
+    header_segments(header)
+        .iter()
+        .any(|segment| TWO_WAY_ACCOUNT_HEADERS.contains(&segment.as_str()))
+}
+
 pub(crate) fn alias_score(role: &Role, header: &str) -> Option<f64> {
     let n = normalize_header(header);
     if n.is_empty() {
         return None;
     }
-    // 这些 ERP 标题在真实导出中既可能装编码，也可能装名称。公共 Coding
-    // 不凭标题定性，交给 LLM 结合 sampleRows 或用户人工选择。
-    if matches!(role.name, "accountCode" | "accountName")
-        && header_segments(header).iter().any(|segment| {
-            matches!(
-                segment.as_str(),
-                "会计科目"
-                    | "會計科目"
-                    | "总账科目"
-                    | "總賬科目"
-                    | "总帐科目"
-                    | "總帳科目"
-                    | "账户"
-                    | "帳戶"
-            )
-        })
-    {
+    if matches!(role.name, "accountCode" | "accountName") && two_way_account_header(header) {
         return None;
     }
     if role
@@ -2388,6 +2450,12 @@ pub(crate) fn alias_score(role: &Role, header: &str) -> Option<f64> {
         .iter()
         .any(|c| n.contains(&normalize_header(c)))
         && !(role.name == "summary" && explicit_line_summary_header(header))
+        // 「借正贷负」本身就是净额语义（奥扬余额表的期初/期末带符号列），
+        // 不能因表头含「借/贷」被净额角色的冲突词整体排除。
+        && !(n.contains("借正贷负") && role.name.ends_with("Amount"))
+        // 「年月」式期间列（08/09 号金蝶导出）整列就是记账期间日期，
+        // 不能因含「年/月」单字被 date 的冲突词排除。
+        && !(role.name == "date" && n == "年月")
     {
         return None;
     }
@@ -2421,12 +2489,37 @@ pub(crate) fn alias_score(role: &Role, header: &str) -> Option<f64> {
     // 日期语义优先于表头长度/列顺序：中文“生效日期”和“记账日期”
     // 长度相同；仅靠最长别名无法保证前者被选中。只对完整标题或
     // 双语标题中的完整分段加权，不让“非生效日期”等包含词误抢。
-    if role.name == "date"
-        && ["effectivedate", "生效日期", "有效日期"]
-            .iter()
-            .any(|preferred| n == *preferred || segment_exact(header, preferred))
-    {
-        best = best.map(|score| score + 1.0);
+    // 两级优先：生效/有效日期最高；过账/记帐日期次之——SAP 导出里
+    // 「凭证日期」是单据日期，「记帐日期/过帐日期」才是入账日，
+    // 黄金裁决（04JE、03序时账）都取入账日。
+    if role.name == "date" {
+        let hit = |list: &[&str]| {
+            list.iter()
+                .any(|preferred| n == *preferred || segment_exact(header, preferred))
+        };
+        const TIER_TOP: &[&str] = &["effectivedate", "生效日期", "有效日期"];
+        const TIER_POSTING: &[&str] = &[
+            "postingdate",
+            "过账日期",
+            "過賬日期",
+            "过帐日期",
+            "過帳日期",
+            "记账日期",
+            "記賬日期",
+            "记帐日期",
+            "記帳日期",
+        ];
+        if hit(TIER_TOP) {
+            best = best.map(|score| score + 1.0);
+        } else if hit(TIER_POSTING) {
+            best = best.map(|score| score + 0.5);
+        }
+    }
+    // 「本币/本位币」是最直接的本位币命名；「总账货币」虽是四字别名，
+    // 在 SAP 导出里常与「本币」并列且语义等价——黄金裁决取「本币」，
+    // 给精确短名加层让它稳赢。
+    if role.name == "functionalCurrency" && matches!(n.as_str(), "本币" | "本位币") {
+        best = best.map(|score| score + 0.5);
     }
     best
 }
@@ -4516,6 +4609,9 @@ pub(crate) fn role_rejects_header(kind: &str, role: &str, header: &str) -> bool 
         .iter()
         .any(|c| n.contains(&normalize_header(c)))
         && !(role.name == "summary" && explicit_line_summary_header(header))
+        // 与 alias_score 同口径：「借正贷负」是净额语义，不因含「借/贷」
+        // 被净额角色的冲突词排除；「年月」是期间式日期列。
+        && !(n.contains("借正贷负") && role.name.ends_with("Amount"))
 }
 
 // ────────────────────────────── 取值解析 ──────────────────────────────
@@ -5370,6 +5466,55 @@ pub(crate) fn suggest_roles_with_data(
     align_opening_period_scope(kind, headers, &mut out);
     fill_combined_account_column(rows, &mut out, headers.len());
     refine_account_identity_by_data(kind, headers, rows, &mut out);
+    // 「外币/原币」裸列头的双语义仲裁：装币种代码时归 currency（别名层已认），
+    // 装金额数字时是原币净额——神火 NC 系序时账（选样/君屹/国贸/JE-2023）
+    // 都用「外币」给原币金额列命名。币种角色已有归属时，别让它两侧落空。
+    if kind == "je" && !out.values().any(|r| *r == "foreignAmount") {
+        for (index, header) in headers.iter().enumerate() {
+            if out.contains_key(&index) {
+                continue;
+            }
+            let n = normalize_header(header);
+            if !matches!(n.as_str(), "外币" | "外幣" | "原币" | "原幣") {
+                continue;
+            }
+            let amounts = rows
+                .iter()
+                .filter_map(|row| row.get(index).map(String::as_str));
+            if matches!(
+                classify_currency_column(amounts),
+                CurrencyColumn::Unusable { .. }
+            ) {
+                out.insert(index, "foreignAmount");
+                break;
+            }
+        }
+    }
+    // 同名双语义的另一面：currency 已经落在「外币/原币」裸列头上、
+    // 而取值其实是金额数字时，把这笔错认改判给原币净额。
+    if kind == "je" && !out.values().any(|r| *r == "foreignAmount") {
+        if let Some(index) = out
+            .iter()
+            .find_map(|(index, role)| (*role == "currency").then_some(*index))
+        {
+            let n = headers
+                .get(index)
+                .map(|h| normalize_header(h))
+                .unwrap_or_default();
+            if matches!(n.as_str(), "外币" | "外幣" | "原币" | "原幣") {
+                let amounts = rows
+                    .iter()
+                    .filter_map(|row| row.get(index).map(String::as_str));
+                if matches!(
+                    classify_currency_column(amounts),
+                    CurrencyColumn::Unusable { .. }
+                ) {
+                    out.remove(&index);
+                    out.insert(index, "foreignAmount");
+                }
+            }
+        }
+    }
     // 数据形态修正只能处理金额与科目身份，不应让确定性的主体表头失效。
     // 把精确别名作为最终保护层：例如“核算组织/核算组织名称”无论旁边还有
     // 多少辅助列，都必须落到 entity；裸“单位”仍须通过取值排除计量单位。
@@ -5515,10 +5660,32 @@ fn refine_account_identity_by_data(
     rows: &[Vec<String>],
     out: &mut BTreeMap<usize, &'static str>,
 ) {
-    if kind != "je" || rows.is_empty() {
+    if !matches!(kind, "je" | "tb") || rows.is_empty() {
         return;
     }
-    let code_role = role_of(kind, "accountCode").expect("JE 科目编码角色存在");
+    // 冷启动：两可表头（总账科目/会计科目/账户…）被 alias_score 有意排除，
+    // 别名层永远不会给出科目身份。当编码或名称角色缺位时，按数据形态
+    // （数字串→编码、文本→名称、混合→编码，供复合拆分）就地补位，否则
+    // TB 与无其他编码列的 JE 会整体没有 accountCode。
+    let mut has_code = out.values().any(|role| *role == "accountCode");
+    let mut has_name = out.values().any(|role| *role == "accountName");
+    for (index, header) in headers.iter().enumerate() {
+        if out.contains_key(&index) || !two_way_account_header(header) {
+            continue;
+        }
+        match account_shape_at(rows, index) {
+            AccountColumnShape::Code | AccountColumnShape::Combined if !has_code => {
+                out.insert(index, "accountCode");
+                has_code = true;
+            }
+            AccountColumnShape::Name if !has_name => {
+                out.insert(index, "accountName");
+                has_name = true;
+            }
+            _ => {}
+        }
+    }
+    let code_role = role_of(kind, "accountCode").expect("账表都有科目编码角色");
     let current_code = out
         .iter()
         .find_map(|(index, role)| (*role == "accountCode").then_some(*index));
@@ -7004,7 +7171,12 @@ pub(crate) fn account_name_sets(
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AccountMatchPolicy {
     ambiguous_codes: HashSet<(String, String)>,
+    /// 编码缺失时，经 TB/JE 双侧共同验证、可以安全退回名称的
+    /// （规范化主体，规范化名称）。命中的名称必须让两侧都改用名称键。
+    validated_name_keys: HashSet<(String, String)>,
 }
+
+const ACCOUNT_NAME_KEY_PREFIX: char = '\u{1d}';
 
 /// 一张凭证是否含损益结转的权益承接科目。调用方应以“整张凭证”为范围
 /// 使用：只要任一分录命中，本凭证内的损益科目行都是结转行，不能拿来判断
@@ -7681,7 +7853,11 @@ impl AccountMatchPolicy {
             })
             .map(|(key, _)| key.clone())
             .collect();
-        Self { ambiguous_codes }
+        let validated_name_keys = validated_account_name_keys(tb, je);
+        Self {
+            ambiguous_codes,
+            validated_name_keys,
+        }
     }
 
     pub(crate) fn is_ambiguous(&self, entity: &str, raw_code: &str) -> bool {
@@ -7696,8 +7872,12 @@ impl AccountMatchPolicy {
     pub(crate) fn account_key(&self, entity: &str, raw_code: &str, raw_name: &str) -> String {
         let code = normalize_account_code(&account_code_of(raw_code));
         let name = normalize_name(&account_name_of(raw_name));
+        let name_key = (entity.trim().to_uppercase(), name.clone());
+        if !name.is_empty() && self.validated_name_keys.contains(&name_key) {
+            return format!("{ACCOUNT_NAME_KEY_PREFIX}{name}");
+        }
         if code.is_empty() {
-            return name;
+            return String::new();
         }
         if self.is_ambiguous(entity, &code) && !name.is_empty() {
             format!("{code}\u{1f}{name}")
@@ -7708,6 +7888,26 @@ impl AccountMatchPolicy {
 
     pub(crate) fn ambiguous_count(&self) -> usize {
         self.ambiguous_codes.len()
+    }
+
+    pub(crate) fn name_fallback_count(&self) -> usize {
+        self.validated_name_keys.len()
+    }
+
+    pub(crate) fn is_validated_name(&self, entity: &str, raw_name: &str) -> bool {
+        self.validated_name_keys.contains(&(
+            entity.trim().to_uppercase(),
+            normalize_name(&account_name_of(raw_name)),
+        ))
+    }
+}
+
+/// 内部名称回退键不冒充科目编码；导出和界面仍把编码留空。
+pub(crate) fn account_code_from_match_key(key: &str) -> &str {
+    if key.starts_with(ACCOUNT_NAME_KEY_PREFIX) {
+        ""
+    } else {
+        key.split('\u{1f}').next().unwrap_or(key)
     }
 }
 
@@ -7724,7 +7924,7 @@ pub(crate) fn validated_account_name_keys(
             let name = normalize_name(name);
             if !name.is_empty() {
                 index
-                    .entry((entity.trim().to_owned(), name))
+                    .entry((entity.trim().to_uppercase(), name))
                     .or_default()
                     .insert(code.trim().to_owned());
             }
@@ -8492,6 +8692,33 @@ mod tests {
     }
 
     #[test]
+    fn 缺失编码仅对双侧唯一同名科目启用名称回退() {
+        let tb = vec![
+            ("A".into(), "".into(), "库存现金".into()),
+            ("A".into(), "".into(), "应付账款".into()),
+        ];
+        let je = vec![
+            ("A".into(), "1001".into(), "库存现金".into()),
+            ("A".into(), "2202".into(), "应付账款".into()),
+        ];
+        let policy = AccountMatchPolicy::from_sides(&tb, &je);
+        assert_eq!(policy.name_fallback_count(), 2);
+        assert_eq!(
+            policy.account_key("A", "", "库存现金"),
+            policy.account_key("A", "1001", "库存现金")
+        );
+        assert_eq!(account_code_from_match_key(&policy.account_key("A", "", "库存现金")), "");
+
+        let ambiguous_je = vec![
+            ("A".into(), "1001".into(), "库存现金".into()),
+            ("A".into(), "1002".into(), "库存现金".into()),
+        ];
+        let rejected = AccountMatchPolicy::from_sides(&tb[..1], &ambiguous_je);
+        assert_eq!(rejected.name_fallback_count(), 0);
+        assert!(rejected.account_key("A", "", "库存现金").is_empty());
+    }
+
+    #[test]
     fn 仅一侧把编码拆成多个名称不算歧义() {
         // 带辅助核算的余额表形态：TB 把 2241.02 按往来拆成两行（名称列填
         // 辅助维度），JE 同码名称唯一。编码在 JE 侧已唯一可配对，TB 拆行
@@ -8680,6 +8907,60 @@ mod tests {
         let mapping = suggest_roles("je", &headers);
         assert_eq!(mapping.get(&0), Some(&"id"));
         assert_ne!(mapping.get(&1), Some(&"id"));
+    }
+
+    #[test]
+    fn sap序时账凭证行文本胜过功能范围文本与抬头文本() {
+        // 04/05 号 SAP 导出的真实列集合：凭证行文本是行摘要，功能范围文本
+        // 是辅助维度描述，抬头文本是凭证头备注——只有前者该归摘要。
+        let headers: Vec<String> = [
+            "输入日期",
+            "记帐日期",
+            "凭证编号",
+            "总帐科目",
+            "科目名称",
+            "凭证行文本",
+            "抬头文本",
+            "功能范围文本",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let got = suggest_roles("je", &headers);
+        assert_eq!(
+            got.iter().find(|(_, r)| **r == "summary").map(|(i, _)| *i),
+            Some(5),
+            "凭证行文本应独占摘要：{got:?}"
+        );
+    }
+
+    #[test]
+    fn 两可表头按数据形态冷启动补科目编码() {
+        // TB：总账科目列装的是编码，别名层有意放空，须由数据形态补位
+        // （形态判定要求 ≥4 个非空样本且占比过半，样本按真实行数给足）。
+        let headers = vec!["总账科目".to_owned(), "总账科目名称".to_owned()];
+        let rows: Vec<Vec<String>> = (1..=6)
+            .map(|i| vec![format!("100{i}"), format!("科目名称{i}")])
+            .collect();
+        let mapping = suggest_roles_with_data("tb", &headers, &rows);
+        assert_eq!(mapping.get(&0), Some(&"accountCode"));
+        assert_eq!(mapping.get(&1), Some(&"accountName"));
+
+        // JE：总帐科目（帐/账混写）同样补位。
+        let je_headers = vec!["过帐日期".to_owned(), "总帐科目".to_owned()];
+        let je_rows: Vec<Vec<String>> = (1..=5)
+            .map(|i| vec![format!("2025-01-0{i}"), format!("220{i}")])
+            .collect();
+        let je_mapping = suggest_roles_with_data("je", &je_headers, &je_rows);
+        assert_eq!(je_mapping.get(&1), Some(&"accountCode"));
+
+        // 两可表头装名称时归科目名称，不抢编码角色。
+        let name_headers = vec!["会计科目".to_owned()];
+        let name_rows: Vec<Vec<String>> = (1..=5)
+            .map(|i| vec![format!("银行存款-账户{i}")])
+            .collect();
+        let name_mapping = suggest_roles_with_data("je", &name_headers, &name_rows);
+        assert_eq!(name_mapping.get(&0), Some(&"accountName"));
     }
 
     #[test]
@@ -12147,8 +12428,18 @@ mod tests {
             Some(&"auxiliary"),
             "成本中心应归辅助核算"
         );
-        assert_eq!(suggested.get(&2), None, "会计科目不由 Coding 硬判");
-        assert_eq!(suggested.get(&3), None, "总账科目不由 Coding 硬判");
+        // 两可表头不再留白：别名层放空后由数据形态冷启动定性
+        // （名称文本→accountName，数字编码→accountCode），否则整表缺科目身份。
+        assert_eq!(
+            suggested.get(&2),
+            Some(&"accountName"),
+            "会计科目装名称文本，按形态归科目名称"
+        );
+        assert_eq!(
+            suggested.get(&3),
+            Some(&"accountCode"),
+            "总账科目装数字编码，按形态归科目编码"
+        );
     }
 
     #[test]

@@ -2114,10 +2114,14 @@ fn check_tb_vs_je(
             "reason": "余额表没有映射本年累计借方与贷方发生额，无法与序时账比对。"
         }));
     }
-    if columns(tb_map, "accountCode").is_empty() || columns(je_map, "accountCode").is_empty() {
+    let tb_has_code = !columns(tb_map, "accountCode").is_empty();
+    let je_has_code = !columns(je_map, "accountCode").is_empty();
+    let tb_has_name = !columns(tb_map, "accountName").is_empty();
+    let je_has_name = !columns(je_map, "accountName").is_empty();
+    if (!tb_has_code || !je_has_code) && (!tb_has_name || !je_has_name) {
         return Ok(json!({
             "performed": false,
-            "reason": "余额表或序时账未映射科目编码，两侧无法按科目对齐。"
+            "reason": "余额表或序时账未映射科目编码，且两侧没有完整的科目名称可供严格验证，无法按科目对齐。"
         }));
     }
 
@@ -2152,7 +2156,7 @@ fn check_tb_vs_je(
                 entity_scope,
             )
         })
-        .filter(|(_, code, _)| !code.is_empty())
+        .filter(|(_, code, name)| !code.is_empty() || !name.is_empty())
         .collect::<Vec<_>>();
     let je_identities = if let Some(disk) = je.disk.as_ref() {
         let mut distinct = BTreeSet::new();
@@ -2165,7 +2169,7 @@ fn check_tb_vs_je(
                 ledger_mapping::EntitySide::Je,
                 entity_scope,
             );
-            if !identity.1.is_empty() {
+            if !identity.1.is_empty() || !identity.2.is_empty() {
                 distinct.insert(identity);
             }
             Ok(())
@@ -2187,11 +2191,29 @@ fn check_tb_vs_je(
                     entity_scope,
                 )
             })
-            .filter(|(_, code, _)| !code.is_empty())
+            .filter(|(_, code, name)| !code.is_empty() || !name.is_empty())
             .collect::<Vec<_>>()
     };
     let account_policy =
         ledger_mapping::AccountMatchPolicy::from_sides(&tb_identities, &je_identities);
+    let unverified_name_keys = tb_identities
+        .iter()
+        .chain(&je_identities)
+        .filter(|(_, code, _)| code.is_empty())
+        .filter(|(entity, _, name)| !account_policy.is_validated_name(entity, name))
+        .map(|(entity, _, name)| (entity.clone(), ledger_mapping::normalize_name(name)))
+        .collect::<BTreeSet<_>>();
+    if (!tb_has_code || !je_has_code)
+        && (account_policy.name_fallback_count() == 0 || !unverified_name_keys.is_empty())
+    {
+        return Ok(json!({
+            "performed": false,
+            "reason": format!(
+                "科目编码缺失，且同主体下有 {} 个科目名称未通过 TB/JE 双侧唯一对应验证，无法安全按科目名称回退匹配。",
+                unverified_name_keys.len().max(1)
+            )
+        }));
+    }
 
     // 辅助核算联动验证（公共锚点反查）：TB 映射了辅助列时认定 JE 的对应列，
     // 认定成功才把维度并入勾稽键；对不上按主体＋科目静默降级，附提示。
@@ -2380,9 +2402,6 @@ fn check_tb_vs_je(
             if !leaf.get(index).copied().unwrap_or(true) {
                 continue;
             }
-            if identity_parts(tb, row, tb_map, tb_fixed).1.is_empty() {
-                continue;
-            }
             let key = scoped_matched_identity(
                 tb,
                 row,
@@ -2425,12 +2444,6 @@ fn check_tb_vs_je(
     let mut je_totals = BTreeMap::<(String, String, String), Side>::new();
     if let Some(disk) = je.disk.as_ref() {
         disk.visit(false, cancel, |row| {
-            if identity_parts(je_table, &row.values, je_map, je_fixed)
-                .1
-                .is_empty()
-            {
-                return Ok(());
-            }
             let key = scoped_matched_identity(
                 je_table,
                 &row.values,
@@ -2470,9 +2483,6 @@ fn check_tb_vs_je(
                 return Err(error("JOB_CANCELLED", "任务已取消。", None));
             }
             if !je_rows.get(index).copied().unwrap_or(true) {
-                continue;
-            }
-            if identity_parts(je_table, row, je_map, je_fixed).1.is_empty() {
                 continue;
             }
             let key = scoped_matched_identity(
@@ -2549,7 +2559,7 @@ fn check_tb_vs_je(
         if (include_all_accounts || off) && (include_all_accounts || items.len() < 500) {
             items.push(json!({
                 "entity": key.0,
-                "code": key.1.split('\u{1f}').next().unwrap_or(&key.1),
+                "code": ledger_mapping::account_code_from_match_key(&key.1),
                 "name": names.get(&key).cloned().unwrap_or_default(),
                 // 辅助维度（认定成功时才有值；空串＝未分维度桶）。
                 "auxiliary": aux_display.get(&key.2).cloned().unwrap_or_default(),
@@ -2653,12 +2663,15 @@ fn check_tb_vs_je(
         "widespread": widespread,
         "currencyScope": "allRows",
         "currencyScopeNote": "币种只用于判断列语义；TBJE 核对不按币种过滤行。",
-        "accountMatchMode": if account_policy.ambiguous_count() > 0 {
+        "accountMatchMode": if account_policy.name_fallback_count() > 0 {
+            "validatedNameFallback"
+        } else if account_policy.ambiguous_count() > 0 {
             "codeAndNameWhenAmbiguous"
         } else {
             "code"
         },
         "ambiguousAccountCodes": account_policy.ambiguous_count(),
+        "validatedNameFallbackAccounts": account_policy.name_fallback_count(),
         // 只有各主体＋科目的 verified 组细分；其余组整体回退。
         "auxiliaryRefined": aux_refined,
         "auxiliaryMatch": auxiliary_match,

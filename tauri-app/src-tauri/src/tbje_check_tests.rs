@@ -149,6 +149,66 @@ fn 三条核对都通过时不报任何差异() {
 }
 
 #[test]
+fn tb缺少科目编码时按双侧唯一科目名称严格回退() {
+    let dir = fixture("validated-name-fallback");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目名称,期初余额,本年借方,本年贷方,期末余额\n\
+         库存现金,100,500,300,300\n\
+         应付账款,-100,300,500,-300\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-03-01,V1,1001,库存现金,500,0\n\
+         2025-03-01,V1,2202,应付账款,0,500\n\
+         2025-06-01,V2,2202,应付账款,300,0\n\
+         2025-06-01,V2,1001,库存现金,0,300\n",
+    )
+    .unwrap();
+    let mut input = params(&dir, true);
+    input["tbMapping"].as_object_mut().unwrap().remove("accountCode");
+    let result = run(&input, &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["performed"], json!(true), "{result:#}");
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    assert_eq!(
+        result["tbVsJe"]["accountMatchMode"],
+        json!("validatedNameFallback")
+    );
+    assert_eq!(
+        result["tbVsJe"]["validatedNameFallbackAccounts"],
+        json!(2)
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 科目名称不能唯一对应时拒绝无编码回退() {
+    let dir = fixture("rejected-name-fallback");
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目名称,期初余额,本年借方,本年贷方,期末余额\n库存现金,0,100,0,100\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-03-01,V1,1001,库存现金,50,0\n\
+         2025-03-01,V2,1002,库存现金,50,0\n",
+    )
+    .unwrap();
+    let mut input = params(&dir, true);
+    input["tbMapping"].as_object_mut().unwrap().remove("accountCode");
+    let result = run(&input, &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["tbVsJe"]["performed"], json!(false), "{result:#}");
+    assert!(result["tbVsJe"]["reason"]
+        .as_str()
+        .is_some_and(|text| text.contains("无法安全按科目名称回退匹配")));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn 定长tb修正同时作用于发生额与bspl勾稽() {
     let dir = fixture("fixed-width-leaf-shared");
     // 费用科目按核算维度拆成 5 行，200 恰好等于后面的 50 + 150。

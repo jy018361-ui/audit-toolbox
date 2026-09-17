@@ -6603,8 +6603,10 @@ mod tests {
         )
         .unwrap();
         let mapping = &inspected["suggestedMapping"];
-        assert!(mapping.get("accountCode").is_none(), "{mapping:#?}");
-        assert!(mapping.get("accountName").is_none(), "{mapping:#?}");
+        // 两可表头不再留白：按数据形态冷启动定性（编码→accountCode、
+        // 名称文本→accountName），摘要与辅助核算断言保持不变。
+        assert_eq!(mapping["accountCode"], json!("总账科目"), "{mapping:#?}");
+        assert_eq!(mapping["accountName"], json!(["会计科目"]), "{mapping:#?}");
         assert_eq!(mapping["summary"], json!("文本"));
         assert_eq!(mapping["auxiliary"], json!(["成本中心"]));
         let _ = std::fs::remove_dir_all(&dir);
@@ -6626,8 +6628,8 @@ mod tests {
         )
         .unwrap();
         let mapping = &inspected["suggestedMapping"];
-        assert!(mapping.get("accountCode").is_none(), "{mapping:#?}");
-        assert!(mapping.get("accountName").is_none(), "{mapping:#?}");
+        // 真实 03 号样例：总帐科目（帐/账混写）装数字编码，冷启动归 accountCode。
+        assert_eq!(mapping["accountCode"], json!("总帐科目"), "{mapping:#?}");
         assert_eq!(mapping["summary"], json!("文本"));
         assert_eq!(mapping["auxiliary"], json!(["成本中心"]));
     }

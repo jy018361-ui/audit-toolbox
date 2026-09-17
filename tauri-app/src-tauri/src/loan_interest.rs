@@ -5242,9 +5242,12 @@ mod tests {
         })
         .collect::<Vec<_>>();
         let mapping = suggest_with_rows(&headers, "je", &rows);
-        assert!(
-            mapping.get("accountCode").is_none(),
-            "总账科目是歧义标题，即使值像编码也留给 LLM: {mapping:?}"
+        // 两可表头（总账科目等）不再留白：公共建议层按数据形态冷启动定性
+        // （数字编码→accountCode），否则整表缺科目编码、必填校验被阻断。
+        assert_eq!(
+            mapping.get("accountCode").and_then(Value::as_str),
+            Some("总账科目"),
+            "总账科目装数字编码，按形态归科目编码: {mapping:?}"
         );
         assert_eq!(
             mapping.get("accountName").and_then(Value::as_str),

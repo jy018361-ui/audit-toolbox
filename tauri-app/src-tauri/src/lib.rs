@@ -27,9 +27,9 @@ mod tbje_check;
 mod telemetry;
 mod update_notes;
 mod wp;
-mod xls_sample;
 #[cfg(test)]
 mod xls_input_tests;
+mod xls_sample;
 
 use directories::ProjectDirs;
 use parking_lot::Mutex;

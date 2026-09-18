@@ -26,7 +26,7 @@ export function LedgerLlmReview({busy,failed,status,mapping,changes,pending,onSk
     </div>)}
     {pending.map(item=><div className="fa-review-item fa-pending" key={`pending-${item.role}-${item.suggestedColumn}`}>
       <strong>{KZ_ROLE_LABELS[item.role]}<em>建议待确认 · 尚未生效</em></strong>
-      <span className="fa-change-diff">{formatMappingValue(mapping[item.role])} → {item.suggestedColumn}</span>
+      <span className="fa-change-diff">{formatMappingValue(mapping[item.role])} → {item.action === "clear" ? "未映射" : item.suggestedColumn}</span>
       {!!item.reason&&<span>{item.reason}{item.confidence?`（把握 ${Math.round(item.confidence*100)}%）`:""}</span>}
       <div className="actions compact"><Button variant="secondary" size="sm" disabled={busy} onClick={()=>onAccept(item)}>采纳</Button><Button variant="secondary" size="sm" disabled={busy} onClick={()=>onKeep(item)}>保留当前</Button></div>
     </div>)}

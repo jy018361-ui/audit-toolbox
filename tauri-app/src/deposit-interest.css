@@ -60,6 +60,15 @@
 .deposit-account-head {
   grid-template-columns: minmax(180px, 1fr) 220px minmax(220px, 300px);
 }
+/* 科目分类（一级科目）与存款类型（末级明细）两张清单各自的两列网格。 */
+.deposit-account-list--classify label,
+.deposit-account-list--classify .deposit-account-head {
+  grid-template-columns: minmax(200px, 1fr) 220px;
+}
+.deposit-account-list--tier label,
+.deposit-account-list--tier .deposit-account-head {
+  grid-template-columns: minmax(200px, 1fr) minmax(240px, 320px);
+}
 .deposit-account-head {
   position: sticky;
   top: 0;
@@ -89,6 +98,14 @@
   .deposit-account-list label,
   .deposit-account-head {
     grid-template-columns: minmax(140px, 1fr) 190px minmax(180px, 240px);
+  }
+  .deposit-account-list--classify label,
+  .deposit-account-list--classify .deposit-account-head {
+    grid-template-columns: minmax(150px, 1fr) 190px;
+  }
+  .deposit-account-list--tier label,
+  .deposit-account-list--tier .deposit-account-head {
+    grid-template-columns: minmax(150px, 1fr) minmax(190px, 250px);
   }
 }
 /* 只剩两个参数：日期是短字段，定宽即可；输出文件（输入框＋「选择位置」

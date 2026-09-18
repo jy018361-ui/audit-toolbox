@@ -7,20 +7,20 @@
 
 use chrono::Local;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, FormatUnderline, Note, Url, Workbook};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
 };
 
-use crate::AppError;
 use crate::excel_merger::PauseCheckpoint;
 use crate::fa;
+use crate::AppError;
 
 /// 折旧测算的字段角色：(映射键名, LLM 角色名)。
 /// 与主工具 file2（期末）侧的角色一致，但只保留单文件测算需要的 8 项——
@@ -151,7 +151,7 @@ fn dep_review(params: Value) -> Result<Value, AppError> {
     )?;
     let mapping = params.get("mapping").cloned().unwrap_or(json!({}));
     let payload = dep_llm_payload(&table, &mapping);
-    let system = "你是固定资产折旧测算字段映射复核助手。只能使用 payload.file2.headers 中的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,current_mapping,suggested_mapping,confidence,action,reason}]}。suggested_mapping 必须是 JSON 对象，例如 {\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep；file_side 固定为 file2；action 只能 fill/review/keep。必须逐项检查 payload.file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因表头规整就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组。";
+    let system = "你是固定资产折旧测算字段映射复核助手。只能使用 payload.file2.headers 中的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}]}。suggested_mapping 必须是 JSON 对象，例如 {\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep；file_side 固定为 file2；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因表头规整就宣称全部映射正确。已有映射必须结合 samples 逐项复核：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side=file2，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组。";
     let content = fa::request_fa_llm(&settings, system, &payload.to_string())?;
     let parsed = fa::parse_llm_json(&content).ok_or_else(|| {
         error(
@@ -1492,10 +1492,9 @@ mod tests {
         let auto = value["autoApplied"].as_array().unwrap();
         let reviews = value["fieldReviews"].as_array().unwrap();
         // LLM 的 life 建议高把握 fill，直接进自动应用。
-        assert!(
-            auto.iter()
-                .any(|item| item["role"] == json!("life") && item["confidence"] == json!(0.9))
-        );
+        assert!(auto
+            .iter()
+            .any(|item| item["role"] == json!("life") && item["confidence"] == json!(0.9)));
         // file1 侧与 8 角色之外的建议必须被丢弃；其余一律不得携带 file1。
         let allowed = [
             "category",
@@ -1514,10 +1513,9 @@ mod tests {
         }
         // 未映射且有本地候选的角色由规则兜底（0.95 fill，同样自动应用）；
         // category 已映射，不应再出现兜底。
-        assert!(
-            auto.iter()
-                .any(|item| item["role"] == json!("name") && item["action"] == json!("fill"))
-        );
+        assert!(auto
+            .iter()
+            .any(|item| item["role"] == json!("name") && item["action"] == json!("fill")));
         assert!(!auto.iter().any(|item| item["role"] == json!("category")));
         // matchReview 固定 keep，前端规划器不会进入匹配键分支。
         assert_eq!(value["matchReview"]["action"], json!("keep"));
@@ -1664,7 +1662,7 @@ mod tests {
         assert!(workbook.contains("税法最低折旧年限参考"));
         let period = sheet_xml_by_name(&output, "折旧政策对比");
         assert!(period.contains("r=\"I3\"")); // 判断结果列有数据行
-        // 与主工具导出的"折旧期间"页逐行同源：同一 merge 参数下表头行一致。
+                                              // 与主工具导出的"折旧期间"页逐行同源：同一 merge 参数下表头行一致。
         let fa_output = dir.join("FA_List.xlsx");
         let mut fa_params = params.clone();
         fa_params["outputPath"] = json!(fa_output.to_string_lossy());

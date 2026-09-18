@@ -568,10 +568,14 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
   };
   const acceptPending = (item: Review) => {
     const before = draft.mapping[item.role];
-    const after = isMultiRole(item.role)
-      ? [item.suggestedColumn.trim()]
-      : item.suggestedColumn.trim();
-    setMap(item.role, after);
+    const after = item.action === "clear"
+      ? isMultiRole(item.role) ? [] : ""
+      : isMultiRole(item.role)
+        ? [item.suggestedColumn!.trim()]
+        : item.suggestedColumn!.trim();
+    if (item.action === "clear")
+      patch({ mapping: { ...draft.mapping, [item.role]: undefined } });
+    else setMap(item.role, after);
     setChanges((values) => [
       ...values,
       {

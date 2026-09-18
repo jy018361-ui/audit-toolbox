@@ -3,25 +3,25 @@
 //! This module deliberately owns the entire deterministic FA workflow.  The
 //! webview passes paths and mappings; files never transit through JSON.
 
-use calamine::{Data, Reader, open_workbook_auto};
+use calamine::{open_workbook_auto, Data, Reader};
 use chrono::{Datelike, Local, Months, NaiveDate};
 use reqwest::blocking::Client;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
     time::Duration,
 };
 
-use crate::AppError;
 use crate::excel_merger::PauseCheckpoint;
+use crate::AppError;
 
 pub(crate) type Progress<'a> = &'a dyn Fn(&str, usize, usize, &str);
 
@@ -378,9 +378,9 @@ fn llm_review(params: Value, supplement: bool) -> Result<Value, AppError> {
         main_llm_payload(&params)?
     };
     let system = if supplement {
-        "你是固定资产审计补充清单映射复核助手。只能使用 payload.headers 中的原始列名。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"新增方式\"}，禁止返回字符串。新增清单角色仅 addition_method/addition_date，file_side=file1；处置清单角色仅 disposal_method/disposal_date/disposal_orig/disposal_dep，file_side=file2。action 只能 fill/review/keep。"
+        "你是固定资产审计补充清单映射复核助手。只能使用 payload.headers 中的原始列名。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"新增方式\"}，禁止返回字符串。新增清单角色仅 addition_method/addition_date，file_side=file1；处置清单角色仅 disposal_method/disposal_date/disposal_orig/disposal_dep，file_side=file2。action 只能 fill/replace/clear/keep。逐项结合样例复核已有映射：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。"
     } else {
-        "你是固定资产清单字段和资产ID复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/review/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。已映射角色同样必须逐项核对：不得仅凭列名相似判定无需调整，必须结合 samples 中该列的样例核对数据形态——类别列应为少量重复的分类文本，原值/折旧/残值率应为数值，日期列为日期，寿命为月数；若当前映射列的形态不符且 headers 中另有形态更符合的列，必须返回 action=review 的 fieldReviews 建议。payload 中的 suspectMappings 是本地规则发现的疑似错配，必须优先复核。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。"
+        "你是固定资产清单字段和资产ID复核助手。只能使用 payload 中对应文件 headers 的原始列名，不得虚构。返回严格 JSON：{suggestions:[{role,file_side,suggested_column,confidence,action,reason}],fieldReviews:[{role,file_side,current_mapping,suggested_mapping,confidence,action,reason}],matchReview:{status,confidence,action,reasons,suggested_file1_columns,suggested_file2_columns,suggestion_reason}}。suggested_mapping 必须是 JSON 对象，例如 {\"file1\":\"期末原值\",\"file2\":\"资产原值\"}，禁止返回字符串或说明文字。角色仅 category/name/original_value/depreciation/date/life/residual/current_year_dep/addition_method/addition_date；file_side 仅 file1/file2；其中 current_year_dep/addition_method/addition_date 仅适用于 file2，禁止为 file1 建议或复核这三个角色；action 只能 fill/replace/clear/keep。必须逐项检查 payload.file1/file2.unmappedRoles；若 headers 中存在可映射列，必须对该角色返回 action=fill 的建议，不能因两个文件表头一致、样例一致或匹配键正确就宣称全部映射正确。payload 中的 unmappedCandidates 是本地规则识别出的高可信候选，应优先复核并在合理时采用。已映射角色同样必须逐项结合 samples 核对：相容才 keep；明显错配且有可信替代列必须 replace；明显错配但无可信替代列必须 clear。clear 必须带 file_side，并省略 suggested_column 与 suggested_mapping；不得只在 reason 中提示错误而不输出可执行调整。类别列应为少量重复的分类文本，原值/折旧/残值率应为数值，日期列为日期，寿命为月数。payload 中的 suspectMappings 是本地规则发现的疑似错配，必须优先复核。只有所有已映射及未映射角色均已检查且确实无需调整时，才返回空数组并令 matchReview.action=keep。"
     };
     let content = request_fa_llm(&settings, system, &payload.to_string())?;
     let parsed = parse_llm_json(&content).ok_or_else(|| {
@@ -689,6 +689,11 @@ pub(crate) fn sanitize_llm_review_item(item: &mut Value, payload: &Value) {
     let Some(object) = item.as_object_mut() else {
         return;
     };
+    if object.get("action").and_then(Value::as_str) == Some("clear") {
+        // FA 的本地疑点多数同时携带可信替代列，不能据此自动删映射。
+        // clear 保留下发供人工采纳，但模型无权自行签发自动清除许可。
+        object.insert("autoClearSafe".into(), Value::Bool(false));
+    }
     if let Some(raw) = object.get("suggested_mapping").cloned() {
         object.insert(
             "suggested_mapping".into(),
@@ -3435,7 +3440,7 @@ fn write_business_sheets(
             "≤12月卡片明细",
             &["提示"],
             &[vec![
-                "经检查，期末FA LIST中未发现任何≤12月的资产卡片".to_owned(),
+                "经检查，期末FA LIST中未发现任何≤12月的资产卡片".to_owned()
             ]],
             header,
             None,
@@ -6249,14 +6254,12 @@ mod tests {
             &["代码", "错误名称"],
             &[&["A1", "甲"], &["A2", "乙"], &["A3", "不存在"]],
         );
-        assert!(
-            infer_supplement_keys_by_samples(
-                &supplement,
-                &reference,
-                &["编码".into(), "名称".into()]
-            )
-            .is_empty()
-        );
+        assert!(infer_supplement_keys_by_samples(
+            &supplement,
+            &reference,
+            &["编码".into(), "名称".into()]
+        )
+        .is_empty());
     }
 
     #[test]
@@ -6572,24 +6575,18 @@ mod tests {
         });
 
         let payload = main_llm_payload(&p).unwrap();
-        assert!(
-            payload["file1"]["unmappedRoles"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("date"))
-        );
-        assert!(
-            payload["file2"]["unmappedRoles"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("date"))
-        );
-        assert!(
-            payload["file1"]["unmappedCandidates"]
-                .as_array()
-                .unwrap()
-                .contains(&json!({"role":"date","column":"入账开始日期"}))
-        );
+        assert!(payload["file1"]["unmappedRoles"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("date")));
+        assert!(payload["file2"]["unmappedRoles"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("date")));
+        assert!(payload["file1"]["unmappedCandidates"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"role":"date","column":"入账开始日期"})));
 
         // Even if the provider overlooks the explicit missing role and returns
         // a no-op, the same deterministic header rule used by initial inspect
@@ -6614,12 +6611,10 @@ mod tests {
                 && item["file_side"] == "file2"
                 && item["suggested_column"] == "入账开始日期"
         }));
-        assert!(
-            reviewed["message"]
-                .as_str()
-                .unwrap()
-                .contains("映射复核完成")
-        );
+        assert!(reviewed["message"]
+            .as_str()
+            .unwrap()
+            .contains("映射复核完成"));
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
@@ -6721,12 +6716,10 @@ mod tests {
         assert_eq!(item["file_side"], "file2");
         assert_eq!(item["suggested_column"], "资产类型描述");
         assert_eq!(item["action"], "review");
-        assert!(
-            item["reason"]
-                .as_str()
-                .unwrap()
-                .contains("疑似期末类别映射错列")
-        );
+        assert!(item["reason"]
+            .as_str()
+            .unwrap()
+            .contains("疑似期末类别映射错列"));
     }
     #[test]
     fn local_category_mismatch_keeps_quiet_when_categories_overlap() {
@@ -6894,10 +6887,9 @@ mod tests {
         assert!(!rows.iter().any(|r| r[1].contains("新增方式:")));
         assert!(rows.iter().any(|r| r[1] == "累计折旧变动净额"));
         assert!(rows.iter().any(|r| r[1] == "——其中-报废"));
-        assert!(
-            rows.iter()
-                .any(|r| r[1] == "——其中-非处置变动（含计提折旧）")
-        );
+        assert!(rows
+            .iter()
+            .any(|r| r[1] == "——其中-非处置变动（含计提折旧）"));
         assert_eq!(noise.len(), 1);
         assert!(noise[0][1].contains("合计"));
         let _ = fs::remove_dir_all(&dir);
@@ -6910,18 +6902,16 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let (result, p) = parity_fixture(&dir);
         let rows = build_depreciation_period(&result, &p);
-        assert!(
-            rows.iter()
-                .any(|r| r[0] == "机器" && r[8] == "不一致" && number(&r[9]).abs() > 0.0)
-        );
+        assert!(rows
+            .iter()
+            .any(|r| r[0] == "机器" && r[8] == "不一致" && number(&r[9]).abs() > 0.0));
         assert!(rows.iter().any(|r| r[1] == "运输" && r[8] == "待确认"));
         // Legacy treats one-sided opening groups as consistent.
         assert!(rows.iter().any(|r| r[0] == "电子" && r[8] == "一致"));
         // Groups with no value on either side are dropped entirely.
-        assert!(
-            rows.iter()
-                .all(|r| number(&r[6]).abs() > 0.005 || number(&r[7]).abs() > 0.005)
-        );
+        assert!(rows
+            .iter()
+            .all(|r| number(&r[6]).abs() > 0.005 || number(&r[7]).abs() > 0.005));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -6937,16 +6927,12 @@ mod tests {
         assert_eq!(&headers[..2], ["类别_parity_end.csv", "数据来源"]);
         // Value columns are titled with the mapped source column + workbook;
         // the aggregation is appended only because two are mixed here.
-        assert!(
-            headers
-                .iter()
-                .any(|value| value == "原值_parity_end.csv_sum_甲")
-        );
-        assert!(
-            headers
-                .iter()
-                .any(|value| value == "原值_parity_end.csv_count_甲")
-        );
+        assert!(headers
+            .iter()
+            .any(|value| value == "原值_parity_end.csv_sum_甲"));
+        assert!(headers
+            .iter()
+            .any(|value| value == "原值_parity_end.csv_count_甲"));
         // Wide cross-tab contract: each row key appears once and aggregate
         // names belong to columns, never as repeated long-form data rows.
         // 3 categories + a trailing 合计.  The fixture's 合计 source row is
@@ -7409,11 +7395,9 @@ mod tests {
             "an unmatched supplement card falls back to file2's mapped method"
         );
         let summary = wb.worksheet_range("固定资产变动汇总表").unwrap();
-        assert!(
-            summary
-                .rows()
-                .any(|row| row.iter().any(|cell| cell.to_string() == "——其中-2"))
-        );
+        assert!(summary
+            .rows()
+            .any(|row| row.iter().any(|cell| cell.to_string() == "——其中-2")));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -7605,12 +7589,10 @@ mod tests {
         assert!(section.contains("vertical=\"center\""));
         let mut wb = open_workbook_auto(&out).unwrap();
         let range = wb.worksheet_range("FA List").unwrap();
-        assert!(
-            range
-                .rows()
-                .flatten()
-                .any(|c| c.to_string().contains("信息来源"))
-        );
+        assert!(range
+            .rows()
+            .flatten()
+            .any(|c| c.to_string().contains("信息来源")));
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
@@ -7675,16 +7657,12 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        assert!(
-            pivot_headers
-                .iter()
-                .any(|header| header == "原值_end.csv_sum_两文件都有")
-        );
-        assert!(
-            pivot_headers
-                .iter()
-                .any(|header| header == "原值_end.csv_count_仅文件2")
-        );
+        assert!(pivot_headers
+            .iter()
+            .any(|header| header == "原值_end.csv_sum_两文件都有"));
+        assert!(pivot_headers
+            .iter()
+            .any(|header| header == "原值_end.csv_count_仅文件2"));
         let anomalies = wb.worksheet_range("异常清单").unwrap();
         assert_eq!(anomalies.get((0, 0)).unwrap().to_string(), "异常类型");
         assert_eq!(anomalies.get((1, 0)).unwrap().to_string(), "逻辑判断");
@@ -7706,11 +7684,9 @@ mod tests {
                 .any(|value| value.contains("DATEVALUE(SUBSTITUTE(") && value.contains("ISNUMBER(")),
             "text dates such as 2022.12.29 must be coerced before YEAR/MONTH"
         );
-        assert!(
-            formulas
-                .iter()
-                .any(|value| value.contains("MIN(EDATE(EDATE("))
-        );
+        assert!(formulas
+            .iter()
+            .any(|value| value.contains("MIN(EDATE(EDATE(")));
         let disposal = wb.worksheet_range("处置清单_BKD").unwrap();
         assert_eq!(disposal.get((0, 6)).unwrap().to_string(), "原值减少");
         assert_eq!(disposal.get((0, 14)).unwrap().to_string(), "处置折旧");
@@ -8040,13 +8016,11 @@ mod tests {
         // 合并预览不再回传明细行，改回变动汇总（类别为列、数值为数字）。
         let summary_columns = output["summary"]["columns"].as_array().unwrap();
         assert!(summary_columns.iter().any(|c| c.as_str() == Some("运输")));
-        assert!(
-            output["summary"]["rows"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|r| r["item"] == "期末原值")
-        );
+        assert!(output["summary"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["item"] == "期末原值"));
         // 补充清单聚合结果直接在合并行上断言（新增方式合并去重、处置金额取绝对值合计）。
         let cancel = Arc::new(AtomicBool::new(false));
         let merged = merge(&p, &|_, _, _, _| {}, &cancel).unwrap();
@@ -8081,12 +8055,10 @@ mod tests {
             json!({"path":addition,"keys":["卡片编号"],"method":"新增方式","date":"新增日期"});
         export_params["disposalSupplement"] = json!({"path":disposal,"keys":["卡片编号"],"method":"处置方式","date":"处置日期","originalValue":"处置原值","depreciation":"处置折旧"});
         let exported = test_export(export_params).unwrap();
-        assert!(
-            exported["exportMessage"]
-                .as_str()
-                .unwrap()
-                .contains("未匹配资产变动清单")
-        );
+        assert!(exported["exportMessage"]
+            .as_str()
+            .unwrap()
+            .contains("未匹配资产变动清单"));
         assert!(dir.join("[未匹配资产变动清单].xlsx").is_file());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -8132,12 +8104,10 @@ mod tests {
             .unwrap();
         assert_eq!(values.get((row_index, 14)).unwrap().to_string(), "0");
         let formulas = wb.worksheet_formula("处置清单_BKD").unwrap();
-        assert!(
-            formulas
-                .rows()
-                .flatten()
-                .any(|value| value.to_string() == format!("O{}-H{}", row_index + 1, row_index + 1))
-        );
+        assert!(formulas
+            .rows()
+            .flatten()
+            .any(|value| value.to_string() == format!("O{}-H{}", row_index + 1, row_index + 1)));
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -84,6 +84,9 @@
 .loan-account-confirm tr.is-loan td {
   background: var(--success-bg);
 }
+.loan-account-confirm tr.is-interest-expense td {
+  background: var(--info-bg);
+}
 .loan-account-confirm tr.is-skipped td {
   color: var(--text-muted);
 }

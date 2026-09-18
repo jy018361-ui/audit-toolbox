@@ -66,6 +66,26 @@ describe("共享账表复核生命周期", () => {
     await waitFor(() => expect(review).toHaveBeenCalledTimes(2));
   });
 
+  it("步骤切换卸载后返回不会对同一来源重复自动复核", async () => {
+    const review = vi.fn();
+    const owner = {};
+    const props = {
+      present: ["tb"] as Array<"tb">,
+      names: { je: "JE", tb: "TB" },
+      reviewing: { je: false, tb: false },
+      status: { je: "", tb: "" },
+      autoReviewKey: "TB-A",
+      autoReviewOwner: owner,
+      onReviewAll: review,
+    };
+    const first = render(<LedgerReviewAll {...props} />);
+    await waitFor(() => expect(review).toHaveBeenCalledTimes(1));
+    first.unmount();
+    render(<LedgerReviewAll {...props} />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(review).toHaveBeenCalledTimes(1);
+  });
+
   it("映射取值告警明确标注来自 TB 还是 JE", () => {
     render(
       <LedgerReviewAll

@@ -228,6 +228,8 @@ export type FaMappingChange = {
 };
 export type FaLlmSuggestionLike = {
   role: string;
+  action?: string;
+  autoClearSafe?: boolean;
   file_side?: "file1" | "file2";
   suggested_column?: string;
   confidence?: number;
@@ -283,12 +285,13 @@ export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
   const record = (
     side: FaSide,
     key: string,
-    column: string,
+    column: string | undefined,
     item: { confidence?: number; reason?: string },
   ) => {
     const before = mappings[side][key];
     if (faValueText(before) === faValueText(column)) return;
-    mappings[side][key] = column;
+    if (column === undefined) delete mappings[side][key];
+    else mappings[side][key] = column;
     const id = `${side}.${key}`;
     const existing = collected.get(id);
     collected.set(id, {
@@ -315,14 +318,17 @@ export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
   const consider = (
     side: FaSide,
     key: string,
-    column: string,
-    item: { confidence?: number; reason?: string },
+    column: string | undefined,
+    item: { confidence?: number; reason?: string; action?: string; autoClearSafe?: boolean },
   ) => {
     if (!isVisibleLlmReviewConfidence(item.confidence)) return;
     if (side === "begin" && FA_FILE2_ONLY_MAPPING_KEYS.has(key)) return;
     const before = mappings[side][key];
     if (faValueText(before) === faValueText(column)) return;
-    if (shouldAutoApplyFa(item.confidence)) {
+    if (
+      shouldAutoApplyFa(item.confidence) &&
+      (item.action !== "clear" || item.autoClearSafe === true)
+    ) {
       record(side, key, column, item);
       return;
     }
@@ -343,6 +349,10 @@ export function planFaLlmChanges(input: FaLlmPlanInput): FaLlmPlan {
   ]) {
     const key = FA_LLM_ROLE_MAP[item.role];
     if (!key) continue;
+    if (item.action === "clear" && item.file_side) {
+      consider(item.file_side === "file1" ? "begin" : "end", key, undefined, item);
+      continue;
+    }
     // suggestions 用 file_side + suggested_column，fieldReviews 用 suggested_mapping 对象
     if (item.suggested_column?.trim() && item.file_side) {
       consider(
@@ -468,7 +478,7 @@ export function planFaSupplementChanges(
   const collected = new Map<string, FaSupplementChange>();
   const record = (
     role: string,
-    column: string,
+    column: string | undefined,
     item: { confidence?: number; reason?: string },
   ) => {
     if (!isVisibleLlmReviewConfidence(item.confidence)) return;
@@ -476,7 +486,8 @@ export function planFaSupplementChanges(
     if (!spec) return;
     const before = sides[spec.target][spec.key];
     if (faValueText(before) === faValueText(column)) return;
-    sides[spec.target][spec.key] = column;
+    if (column === undefined) delete sides[spec.target][spec.key];
+    else sides[spec.target][spec.key] = column;
     const id = `${spec.target}.${spec.key}`;
     const existing = collected.get(id);
     collected.set(id, {
@@ -502,15 +513,18 @@ export function planFaSupplementChanges(
   const pending: FaPendingSuggestion[] = [];
   const consider = (
     role: string,
-    column: string,
-    item: { confidence?: number; reason?: string },
+    column: string | undefined,
+    item: { confidence?: number; reason?: string; action?: string; autoClearSafe?: boolean },
   ) => {
     if (!isVisibleLlmReviewConfidence(item.confidence)) return;
     const spec = FA_SUPPLEMENT_ROLES[role];
     if (!spec) return;
     const before = sides[spec.target][spec.key];
     if (faValueText(before) === faValueText(column)) return;
-    if (shouldAutoApplyFa(item.confidence)) {
+    if (
+      shouldAutoApplyFa(item.confidence) &&
+      (item.action !== "clear" || item.autoClearSafe === true)
+    ) {
       record(role, column, item);
       return;
     }
@@ -534,6 +548,10 @@ export function planFaSupplementChanges(
     ...(input.autoApplied ?? []),
     ...(input.fieldReviews ?? []),
   ]) {
+    if (item.action === "clear") {
+      consider(item.role, undefined, item);
+      continue;
+    }
     if (item.suggested_column?.trim())
       consider(item.role, item.suggested_column.trim(), item);
     const suggested = normalizeFaSuggestedMapping(item.suggested_mapping);

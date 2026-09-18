@@ -1,10 +1,32 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyLedgerReviews,
   effectiveVoucherKey,
   isMultiRole,
   planLedgerChanges,
   resolveRoleLabels,
 } from "./ledgerMapping";
+
+it("看账清除错误映射默认待确认，采纳不改变另一金额方案", () => {
+  const source = {
+    id: ["凭证号"],
+    accountName: [],
+    functionalAmount: "金额",
+    direction: "借贷方向",
+    accountCode: "科目名称",
+  };
+  const result = applyLedgerReviews(source, {
+    reviews: [{
+      role: "accountCode",
+      action: "clear",
+      confidence: 0.96,
+      reason: "当前列为名称文本且无编码列",
+    }],
+  });
+  expect(result.mapping).toEqual(source);
+  expect(result.pending).toHaveLength(1);
+  expect(result.pending[0].suggestedColumn).toBe("");
+});
 
 it("看账和正负数标记共用日期多列凭证键", () => {
   expect(isMultiRole("date")).toBe(true);
@@ -57,6 +79,42 @@ describe("resolveRoleLabels", () => {
 });
 
 describe("planLedgerChanges", () => {
+  it("高置信度 clear 删除错误映射且保留撤销原值", () => {
+    const result = planLedgerChanges(
+      ["科目名称"],
+      [["库存现金"]],
+      { accountCode: "科目名称" },
+      { accountCode: "科目编码" },
+      [
+        {
+          role: "accountCode",
+          action: "clear",
+          autoClearSafe: true,
+          confidence: 0.95,
+          reason: "该列是名称文本，且没有可信编码列",
+        },
+      ],
+    );
+    expect(result.mapping.accountCode).toBeUndefined();
+    expect(result.applied[0]).toMatchObject({
+      action: "clear",
+      suggestedColumn: "",
+      beforeValue: "科目名称",
+      currentColumn: "科目名称",
+    });
+  });
+
+  it("clear 不作用于本来就空缺的角色", () => {
+    const result = planLedgerChanges(
+      ["科目名称"],
+      [["库存现金"]],
+      {},
+      { accountCode: "科目编码" },
+      [{ role: "accountCode", action: "clear", confidence: 0.99 }],
+    );
+    expect(result.applied).toEqual([]);
+  });
+
   it("按整批建议原子交换科目身份且让摘要接管辅助核算中的文本列", () => {
     const result = planLedgerChanges(
       ["文本", "成本中心", "总账科目", "会计科目"],

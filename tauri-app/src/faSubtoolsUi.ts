@@ -158,7 +158,7 @@ export type DepPendingSuggestion = {
   suggested: string;
   reason?: string;
   confidence?: number;
-  apply: { key: string; value: string };
+  apply: { key: string; value?: string };
 };
 
 export type DepLlmPlanInput = {
@@ -190,19 +190,20 @@ export function planDepLlmChanges(input: DepLlmPlanInput): DepLlmPlan {
   const depKeys = new Set(DEP_MAPPING_ROLES.map(([key]) => key));
   const record = (
     key: string,
-    column: string,
+    column: string | undefined,
     item: { confidence?: number; reason?: string },
   ) => {
     const before = mapping[key];
-    if (depValueText(before as string | string[]) === column) return;
-    mapping[key] = column;
+    if (depValueText(before as string | string[]) === depValueText(column)) return;
+    if (column === undefined) delete mapping[key];
+    else mapping[key] = column;
     const id = key;
     const existing = collected.get(id);
     collected.set(id, {
       id,
       label: depRoleLabel(key),
       before: existing ? existing.before : depValueText(before as string | string[]),
-      after: column,
+      after: depValueText(column),
       reason: item.reason,
       confidence: item.confidence,
       attention:
@@ -217,14 +218,17 @@ export function planDepLlmChanges(input: DepLlmPlanInput): DepLlmPlan {
   };
   const consider = (
     key: string,
-    column: string,
-    item: { confidence?: number; reason?: string },
+    column: string | undefined,
+    item: { confidence?: number; reason?: string; action?: string; autoClearSafe?: boolean },
   ) => {
     if (!isVisibleLlmReviewConfidence(item.confidence)) return;
     if (!depKeys.has(key)) return;
     const before = mapping[key];
-    if (depValueText(before as string | string[]) === column) return;
-    if (shouldAutoApplyFa(item.confidence)) {
+    if (depValueText(before as string | string[]) === depValueText(column)) return;
+    if (
+      shouldAutoApplyFa(item.confidence) &&
+      (item.action !== "clear" || item.autoClearSafe === true)
+    ) {
       record(key, column, item);
       return;
     }
@@ -232,7 +236,7 @@ export function planDepLlmChanges(input: DepLlmPlanInput): DepLlmPlan {
       id: key,
       label: depRoleLabel(key),
       current: depValueText(before as string | string[]),
-      suggested: column,
+      suggested: depValueText(column),
       reason: item.reason,
       confidence: item.confidence,
       apply: { key, value: column },
@@ -244,6 +248,10 @@ export function planDepLlmChanges(input: DepLlmPlanInput): DepLlmPlan {
   ]) {
     const key = FA_LLM_ROLE_MAP[item.role];
     if (!key) continue;
+    if (item.action === "clear") {
+      consider(key, undefined, item);
+      continue;
+    }
     // 单文件复核里 file_side 固定为 file2（后端已归一/过滤）。
     if (item.suggested_column?.trim()) {
       consider(key, item.suggested_column.trim(), item);

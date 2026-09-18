@@ -248,7 +248,8 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-start;
+  /* 状态说明占左、复核按钮收右：操作按钮落在行尾是向导页的统一动线。 */
+  justify-content: space-between;
   gap: 20px;
   padding: 18px 20px;
   border: 1px solid color-mix(in srgb, var(--primary) 32%, var(--border));
@@ -1225,11 +1226,17 @@
   line-height: 1.7;
 }
 
-/* 三步导引下的步骤切换按钮：与 FA TBJE 的步骤按钮同一形态。 */
+/* 三步导引下的步骤切换按钮：与 FA TBJE 的步骤按钮同一形态。
+   主按钮（下一步）收在行尾——向导页的操作动线统一靠右，
+   「返回」紧挨在其左侧；提示语留在行首不挤占按钮区。 */
 .fx-step-actions {
   display: flex;
   gap: 10px;
   margin: 16px 0 4px;
+  justify-content: flex-end;
+}
+.fx-step-actions > .fx-hint {
+  margin-right: auto;
 }
 /* 提示语里的「回到上一步」：是按钮，但读起来该像正文里的链接。 */
 .fx-link-button {

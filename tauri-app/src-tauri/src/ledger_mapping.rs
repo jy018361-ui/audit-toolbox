@@ -1175,9 +1175,14 @@ static TB_ROLES: &[Role] = &[
     r(
         "openingDirection",
         "期初方向",
-        &["期初方向", "年初方向",
+        &[
+            "期初方向",
+            "年初方向",
             "借/贷",
-            "借贷", "期初余额方向", "openingdrcr"],
+            "借贷",
+            "期初余额方向",
+            "openingdrcr",
+        ],
         &["期末", "本期", "本年"],
     ),
     r(
@@ -2056,7 +2061,8 @@ pub(crate) fn forward_fill_ledger_identity_columns_skipping(
                 if new_account && accounts.contains(index) {
                     continue;
                 }
-                if let (Some(previous), Some(cell)) = (last_values.get(index), row.get_mut(*index)) {
+                if let (Some(previous), Some(cell)) = (last_values.get(index), row.get_mut(*index))
+                {
                     *cell = previous.clone();
                     filled += 1;
                 }
@@ -2400,8 +2406,14 @@ fn explicit_line_summary_header(header: &str) -> bool {
     let n = normalize_header(header);
     matches!(
         n.as_str(),
-        "凭证行文本" | "憑證行文本" | "分录文本" | "分錄文本" | "行项目文本" | "行項目文本"
-            | "凭证摘要" | "憑證摘要"
+        "凭证行文本"
+            | "憑證行文本"
+            | "分录文本"
+            | "分錄文本"
+            | "行项目文本"
+            | "行項目文本"
+            | "凭证摘要"
+            | "憑證摘要"
     ) || n.contains("摘要")
 }
 
@@ -2558,8 +2570,10 @@ pub(crate) fn align_tb_direction_pair(
             .and_then(Value::as_str)
             .and_then(|c| headers.iter().position(|h| h == c))
     };
-    if let (Some(op), Some(cl)) = (col(mapping, "openingDirection"), col(mapping, "closingDirection"))
-        && op > cl
+    if let (Some(op), Some(cl)) = (
+        col(mapping, "openingDirection"),
+        col(mapping, "closingDirection"),
+    ) && op > cl
     {
         let a = mapping.get("openingDirection").cloned();
         let b = mapping.get("closingDirection").cloned();
@@ -4025,12 +4039,7 @@ pub(crate) fn tb_leaf_mask(
             // 编码祖先关系做一次非连续勾稽；只有全部语义金额列都相等才剔除
             // 父项，避免业务工具各自补一层去重。
             if !fixed_width_leaf_table {
-                mark_non_contiguous_code_rollups(
-                    &identities,
-                    &currencies,
-                    &values,
-                    &mut rollup,
-                );
+                mark_non_contiguous_code_rollups(&identities, &currencies, &values, &mut rollup);
             }
             mark_rollup_by_sum(
                 &identities,
@@ -4179,13 +4188,17 @@ pub(crate) fn tb_catalog_leaf_mask(
         if !keep.get(index).copied().unwrap_or(false) || code.is_empty() {
             continue;
         }
-        let has_descendant = identities.iter().enumerate().any(|(other_index, (other_entity, other_code))| {
-            other_index != index
-                && keep.get(other_index).copied().unwrap_or(false)
-                && entity == other_entity
-                && other_code.len() > code.len()
-                && other_code.starts_with(code)
-        });
+        let has_descendant =
+            identities
+                .iter()
+                .enumerate()
+                .any(|(other_index, (other_entity, other_code))| {
+                    other_index != index
+                        && keep.get(other_index).copied().unwrap_or(false)
+                        && entity == other_entity
+                        && other_code.len() > code.len()
+                        && other_code.starts_with(code)
+                });
         if has_descendant {
             keep[index] = false;
         }
@@ -7380,14 +7393,19 @@ pub(crate) fn auxiliary_link_verdict(
             },
         };
     }
-    let best_hits = columns.iter().map(AnchorColumnScan::anchor_hits).max().unwrap_or(0);
+    let best_hits = columns
+        .iter()
+        .map(AnchorColumnScan::anchor_hits)
+        .max()
+        .unwrap_or(0);
     if best_hits == 0 {
         return AuxiliaryLinkVerdict {
             status: "noMatch",
             ..base
         };
     }
-    let best: Vec<&AnchorColumnScan> = columns.iter()
+    let best: Vec<&AnchorColumnScan> = columns
+        .iter()
         .filter(|scan| scan.anchor_hits() == best_hits)
         .collect();
     match best.as_slice() {
@@ -7475,22 +7493,24 @@ pub(crate) fn auxiliary_link_group_verdicts(
 ) -> Vec<AuxiliaryLinkGroupVerdict> {
     anchors
         .iter()
-        .map(|((entity, account), group_anchors)| AuxiliaryLinkGroupVerdict {
-            entity: entity.clone(),
-            account: account.clone(),
-            verdict: auxiliary_link_verdict(
-                group_anchors,
-                scans
-                    .get(&(entity.clone(), account.clone()))
-                    .cloned()
-                    .unwrap_or_default(),
-                totals
-                    .get(&(entity.clone(), account.clone()))
-                    .copied()
-                    .unwrap_or(0),
-                preferred,
-            ),
-        })
+        .map(
+            |((entity, account), group_anchors)| AuxiliaryLinkGroupVerdict {
+                entity: entity.clone(),
+                account: account.clone(),
+                verdict: auxiliary_link_verdict(
+                    group_anchors,
+                    scans
+                        .get(&(entity.clone(), account.clone()))
+                        .cloned()
+                        .unwrap_or_default(),
+                    totals
+                        .get(&(entity.clone(), account.clone()))
+                        .copied()
+                        .unwrap_or(0),
+                    preferred,
+                ),
+            },
+        )
         .collect()
 }
 
@@ -7507,17 +7527,34 @@ pub(crate) fn auxiliary_verified_columns(
     role: &str,
 ) -> BTreeMap<AuxiliaryGroupKey, (usize, usize)> {
     let tb_columns = mapped_column_names(tb_mapping, role);
-    groups.iter().filter(|group| group.verdict.dimension_keys()).filter_map(|group| {
-        let key = (group.entity.clone(), group.account.clone());
-        let je_name = group.verdict.column.as_deref()?;
-        let je_index = header_index(je_headers, je_name)?;
-        let je_hits = &je_scans.get(&key)?.iter().find(|scan| scan.header == je_name)?.hit_anchors;
-        let tb_index = tb_scans.get(&key)?.iter().enumerate()
-            .filter(|(index, _)| tb_headers.get(*index).is_some_and(|name| tb_columns.contains(name)))
-            .map(|(index, scan)| (index, scan.hit_anchors.intersection(je_hits).count()))
-            .max_by_key(|(_, hits)| *hits).filter(|(_, hits)| *hits > 0)?.0;
-        Some((key, (tb_index, je_index)))
-    }).collect()
+    groups
+        .iter()
+        .filter(|group| group.verdict.dimension_keys())
+        .filter_map(|group| {
+            let key = (group.entity.clone(), group.account.clone());
+            let je_name = group.verdict.column.as_deref()?;
+            let je_index = header_index(je_headers, je_name)?;
+            let je_hits = &je_scans
+                .get(&key)?
+                .iter()
+                .find(|scan| scan.header == je_name)?
+                .hit_anchors;
+            let tb_index = tb_scans
+                .get(&key)?
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| {
+                    tb_headers
+                        .get(*index)
+                        .is_some_and(|name| tb_columns.contains(name))
+                })
+                .map(|(index, scan)| (index, scan.hit_anchors.intersection(je_hits).count()))
+                .max_by_key(|(_, hits)| *hits)
+                .filter(|(_, hits)| *hits > 0)?
+                .0;
+            Some((key, (tb_index, je_index)))
+        })
+        .collect()
 }
 
 /// 编码／名称是同一辅助维度的可选表示，而不是需要 JE 同时具备的
@@ -7535,30 +7572,59 @@ pub(crate) fn auxiliary_link_group_verdicts_by_tb_columns(
     preferred_columns: &[String],
 ) -> Vec<AuxiliaryLinkGroupVerdict> {
     let columns = mapped_column_names(tb_mapping, role);
-    anchors.iter().map(|(key, union)| {
-        let je_columns = je_scans.get(key).cloned().unwrap_or_default();
-        let je_candidates = if preferred_columns.len() > 1 {
-            je_columns.into_iter()
-                .filter(|scan| preferred_columns.contains(&scan.header))
-                .collect::<Vec<_>>()
-        } else {
-            je_columns
-        };
-        let preferred = if preferred_columns.len() == 1 {
-            preferred_columns.first().map(String::as_str)
-        } else {
-            None
-        };
-        let tb_candidates = tb_scans.get(key).into_iter().flatten()
-            .filter(|scan| columns.contains(&scan.header) && !scan.hit_anchors.is_empty())
-            .map(|scan| auxiliary_link_verdict(&scan.hit_anchors,
-                je_candidates.clone(),
-                totals.get(key).copied().unwrap_or_default(), preferred));
-        let verdict = tb_candidates.max_by_key(|verdict| (verdict.dimension_keys(), verdict.anchor_hits, verdict.anchor_total))
-            .unwrap_or_else(|| auxiliary_link_verdict(union, je_candidates,
-                totals.get(key).copied().unwrap_or_default(), preferred));
-        AuxiliaryLinkGroupVerdict { entity: key.0.clone(), account: key.1.clone(), verdict }
-    }).collect()
+    anchors
+        .iter()
+        .map(|(key, union)| {
+            let je_columns = je_scans.get(key).cloned().unwrap_or_default();
+            let je_candidates = if preferred_columns.len() > 1 {
+                je_columns
+                    .into_iter()
+                    .filter(|scan| preferred_columns.contains(&scan.header))
+                    .collect::<Vec<_>>()
+            } else {
+                je_columns
+            };
+            let preferred = if preferred_columns.len() == 1 {
+                preferred_columns.first().map(String::as_str)
+            } else {
+                None
+            };
+            let tb_candidates = tb_scans
+                .get(key)
+                .into_iter()
+                .flatten()
+                .filter(|scan| columns.contains(&scan.header) && !scan.hit_anchors.is_empty())
+                .map(|scan| {
+                    auxiliary_link_verdict(
+                        &scan.hit_anchors,
+                        je_candidates.clone(),
+                        totals.get(key).copied().unwrap_or_default(),
+                        preferred,
+                    )
+                });
+            let verdict = tb_candidates
+                .max_by_key(|verdict| {
+                    (
+                        verdict.dimension_keys(),
+                        verdict.anchor_hits,
+                        verdict.anchor_total,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    auxiliary_link_verdict(
+                        union,
+                        je_candidates,
+                        totals.get(key).copied().unwrap_or_default(),
+                        preferred,
+                    )
+                });
+            AuxiliaryLinkGroupVerdict {
+                entity: key.0.clone(),
+                account: key.1.clone(),
+                verdict,
+            }
+        })
+        .collect()
 }
 
 impl AnchorColumnAccumulator {
@@ -7847,12 +7913,17 @@ pub(crate) fn tb_dimension_rows(
                 continue;
             }
             if let Some((parent_index, parent_entity, parent_code, _)) = parent.as_ref() {
-                let same_entity = entity.is_empty() || parent_entity.is_empty() || entity == *parent_entity;
+                let same_entity =
+                    entity.is_empty() || parent_entity.is_empty() || entity == *parent_entity;
                 let parent_currency = raw_of(&rows[*parent_index], currency_index).to_uppercase();
                 let currency = raw_of(row, currency_index).to_uppercase();
                 let same_currency = currency == parent_currency;
-                if same_entity && same_currency && (own_code.is_empty() || own_code == *parent_code) {
-                    parent_children.entry(*parent_index).or_default().push(index);
+                if same_entity && same_currency && (own_code.is_empty() || own_code == *parent_code)
+                {
+                    parent_children
+                        .entry(*parent_index)
+                        .or_default()
+                        .push(index);
                 }
             }
             emitted.insert(index);
@@ -8791,7 +8862,10 @@ mod tests {
             policy.account_key("A", "", "库存现金"),
             policy.account_key("A", "1001", "库存现金")
         );
-        assert_eq!(account_code_from_match_key(&policy.account_key("A", "", "库存现金")), "");
+        assert_eq!(
+            account_code_from_match_key(&policy.account_key("A", "", "库存现金")),
+            ""
+        );
 
         let ambiguous_je = vec![
             ("A".into(), "1001".into(), "库存现金".into()),
@@ -9040,9 +9114,8 @@ mod tests {
 
         // 两可表头装名称时归科目名称，不抢编码角色。
         let name_headers = vec!["会计科目".to_owned()];
-        let name_rows: Vec<Vec<String>> = (1..=5)
-            .map(|i| vec![format!("银行存款-账户{i}")])
-            .collect();
+        let name_rows: Vec<Vec<String>> =
+            (1..=5).map(|i| vec![format!("银行存款-账户{i}")]).collect();
         let name_mapping = suggest_roles_with_data("je", &name_headers, &name_rows);
         assert_eq!(name_mapping.get(&0), Some(&"accountName"));
     }
@@ -9070,22 +9143,37 @@ mod tests {
             vec!["生效日期".to_owned(), "记账日期".to_owned()],
             vec!["记账日期".to_owned(), "有效日期".to_owned()],
         ] {
-            let effective = headers.iter().position(|h| matches!(h.as_str(), "Effective Date" | "生效日期" | "有效日期")).unwrap();
+            let effective = headers
+                .iter()
+                .position(|h| matches!(h.as_str(), "Effective Date" | "生效日期" | "有效日期"))
+                .unwrap();
             let entry = 1 - effective;
             let mapping = suggest_roles("je", &headers);
             assert_eq!(mapping.get(&effective), Some(&"date"));
             assert_ne!(mapping.get(&entry), Some(&"date"));
 
-            let rows = vec![headers
-                .iter()
-                .map(|h| if matches!(h.as_str(), "Effective Date" | "生效日期" | "有效日期") { "2025-12-21" } else { "2026-01-05" })
-                .map(str::to_owned)
-                .collect::<Vec<_>>()];
+            let rows = vec![
+                headers
+                    .iter()
+                    .map(|h| {
+                        if matches!(h.as_str(), "Effective Date" | "生效日期" | "有效日期")
+                        {
+                            "2025-12-21"
+                        } else {
+                            "2026-01-05"
+                        }
+                    })
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+            ];
             let with_data = suggest_roles_with_data("je", &headers, &rows);
             assert_eq!(with_data.get(&effective), Some(&"date"));
             assert_ne!(with_data.get(&entry), Some(&"date"));
         }
-        assert_eq!(suggest_roles("je", &["Entry Date".to_owned()]).get(&0), Some(&"date"));
+        assert_eq!(
+            suggest_roles("je", &["Entry Date".to_owned()]).get(&0),
+            Some(&"date")
+        );
     }
 
     #[test]
@@ -9660,8 +9748,16 @@ mod tests {
         let hits = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
         let anchors = hits(&["l1", "l2", "l3"]);
         let columns = vec![
-            AnchorColumnScan { header: "摘要".into(), hit_anchors: hits(&["l1"]), nonempty_rows: 10 },
-            AnchorColumnScan { header: "辅助核算".into(), hit_anchors: hits(&["l1", "l2"]), nonempty_rows: 4 },
+            AnchorColumnScan {
+                header: "摘要".into(),
+                hit_anchors: hits(&["l1"]),
+                nonempty_rows: 10,
+            },
+            AnchorColumnScan {
+                header: "辅助核算".into(),
+                hit_anchors: hits(&["l1", "l2"]),
+                nonempty_rows: 4,
+            },
         ];
         let verdict = auxiliary_link_verdict(&anchors, columns, 10, None);
         assert_eq!(verdict.status, "partialCoverage");
@@ -9740,18 +9836,46 @@ mod tests {
         let key = ("甲".to_owned(), "1002".to_owned());
         let hits = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<HashSet<_>>();
         let anchors = BTreeMap::from([(key.clone(), hits(&["a", "b"]))]);
-        let tb_scans = BTreeMap::from([(key.clone(), vec![AnchorColumnScan {
-            header: "TB辅助".into(), hit_anchors: hits(&["a", "b"]), nonempty_rows: 2,
-        }])]);
-        let je_scans = BTreeMap::from([(key.clone(), vec![
-            AnchorColumnScan { header: "辅助一".into(), hit_anchors: hits(&["a"]), nonempty_rows: 4 },
-            AnchorColumnScan { header: "辅助二".into(), hit_anchors: hits(&["a", "b"]), nonempty_rows: 2 },
-            AnchorColumnScan { header: "非映射列".into(), hit_anchors: hits(&["a", "b"]), nonempty_rows: 2 },
-        ])]);
-        let tb_mapping = serde_json::json!({"auxiliary": "TB辅助"}).as_object().unwrap().clone();
+        let tb_scans = BTreeMap::from([(
+            key.clone(),
+            vec![AnchorColumnScan {
+                header: "TB辅助".into(),
+                hit_anchors: hits(&["a", "b"]),
+                nonempty_rows: 2,
+            }],
+        )]);
+        let je_scans = BTreeMap::from([(
+            key.clone(),
+            vec![
+                AnchorColumnScan {
+                    header: "辅助一".into(),
+                    hit_anchors: hits(&["a"]),
+                    nonempty_rows: 4,
+                },
+                AnchorColumnScan {
+                    header: "辅助二".into(),
+                    hit_anchors: hits(&["a", "b"]),
+                    nonempty_rows: 2,
+                },
+                AnchorColumnScan {
+                    header: "非映射列".into(),
+                    hit_anchors: hits(&["a", "b"]),
+                    nonempty_rows: 2,
+                },
+            ],
+        )]);
+        let tb_mapping = serde_json::json!({"auxiliary": "TB辅助"})
+            .as_object()
+            .unwrap()
+            .clone();
         let verdicts = auxiliary_link_group_verdicts_by_tb_columns(
-            &anchors, &tb_scans, &je_scans, &BTreeMap::new(), &tb_mapping,
-            "auxiliary", &["辅助一".into(), "辅助二".into()],
+            &anchors,
+            &tb_scans,
+            &je_scans,
+            &BTreeMap::new(),
+            &tb_mapping,
+            "auxiliary",
+            &["辅助一".into(), "辅助二".into()],
         );
         assert_eq!(verdicts[0].verdict.status, "verified");
         assert_eq!(verdicts[0].verdict.column.as_deref(), Some("辅助二"));
@@ -9761,41 +9885,111 @@ mod tests {
     fn 辅助验证按主体科目隔离且覆盖不全整组降级() {
         let keys = [("甲", "1002"), ("甲", "1003"), ("乙", "1002")];
         let groups = keys.map(|(entity, account)| (entity.to_owned(), account.to_owned()));
-        let values = |items: &[&str]| items.iter().map(|item| item.to_string()).collect::<HashSet<_>>();
-        let anchors = BTreeMap::from([(groups[0].clone(), values(&["a", "b"])), (groups[1].clone(), values(&["a", "b"])), (groups[2].clone(), values(&["a"]))]);
+        let values = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.to_string())
+                .collect::<HashSet<_>>()
+        };
+        let anchors = BTreeMap::from([
+            (groups[0].clone(), values(&["a", "b"])),
+            (groups[1].clone(), values(&["a", "b"])),
+            (groups[2].clone(), values(&["a"])),
+        ]);
         let headers = vec!["辅助".to_owned()];
         let mut accumulator = GroupedAnchorColumnAccumulator::new(1);
-        for (group, value) in [(groups[0].clone(), "a"), (groups[0].clone(), "b"), (groups[1].clone(), "a")] {
+        for (group, value) in [
+            (groups[0].clone(), "a"),
+            (groups[0].clone(), "b"),
+            (groups[1].clone(), "a"),
+        ] {
             accumulator.feed(group.clone(), &[value.to_owned()], &anchors[&group]);
         }
-        let verdicts = auxiliary_link_group_verdicts(&anchors, accumulator.finish(&headers), &BTreeMap::new(), Some("辅助"));
-        assert!(verdicts.iter().find(|group| group.account == "1002" && group.entity == "甲").unwrap().verdict.dimension_keys());
-        assert_eq!(verdicts.iter().find(|group| group.account == "1003").unwrap().verdict.status, "partialCoverage");
-        assert!(!verdicts.iter().find(|group| group.account == "1003").unwrap().verdict.dimension_keys());
-        assert_eq!(verdicts.iter().find(|group| group.entity == "乙").unwrap().verdict.status, "noMatch");
+        let verdicts = auxiliary_link_group_verdicts(
+            &anchors,
+            accumulator.finish(&headers),
+            &BTreeMap::new(),
+            Some("辅助"),
+        );
+        assert!(
+            verdicts
+                .iter()
+                .find(|group| group.account == "1002" && group.entity == "甲")
+                .unwrap()
+                .verdict
+                .dimension_keys()
+        );
+        assert_eq!(
+            verdicts
+                .iter()
+                .find(|group| group.account == "1003")
+                .unwrap()
+                .verdict
+                .status,
+            "partialCoverage"
+        );
+        assert!(
+            !verdicts
+                .iter()
+                .find(|group| group.account == "1003")
+                .unwrap()
+                .verdict
+                .dimension_keys()
+        );
+        assert_eq!(
+            verdicts
+                .iter()
+                .find(|group| group.entity == "乙")
+                .unwrap()
+                .verdict
+                .status,
+            "noMatch"
+        );
     }
 
     #[test]
     fn 辅助锚点零发生父行仍提供空编码子行上下文() {
         let headers = vec!["科目".to_owned(), "辅助".to_owned(), "发生".to_owned()];
-        let rows = vec![vec!["1002".to_owned(), "".to_owned(), "0".to_owned()], vec!["".to_owned(), "A".to_owned(), "10".to_owned()], vec!["1003".to_owned(), "B".to_owned(), "0".to_owned()]];
-        let mapping = serde_json::json!({"auxiliary":"辅助","ytdFunctionalDebit":"发生"}).as_object().unwrap().clone();
+        let rows = vec![
+            vec!["1002".to_owned(), "".to_owned(), "0".to_owned()],
+            vec!["".to_owned(), "A".to_owned(), "10".to_owned()],
+            vec!["1003".to_owned(), "B".to_owned(), "0".to_owned()],
+        ];
+        let mapping = serde_json::json!({"auxiliary":"辅助","ytdFunctionalDebit":"发生"})
+            .as_object()
+            .unwrap()
+            .clone();
         let mut code = String::new();
-        let groups = tb_auxiliary_anchor_groups(&headers, &rows, &mapping, "auxiliary", |_, row| {
-            if !row[0].is_empty() { code = row[0].clone(); }
-            Some((DEFAULT_ENTITY.to_owned(), code.clone()))
-        });
+        let groups =
+            tb_auxiliary_anchor_groups(&headers, &rows, &mapping, "auxiliary", |_, row| {
+                if !row[0].is_empty() {
+                    code = row[0].clone();
+                }
+                Some((DEFAULT_ENTITY.to_owned(), code.clone()))
+            });
         assert_eq!(groups.len(), 1);
         assert!(groups[&(DEFAULT_ENTITY.to_owned(), "1002".to_owned())].contains("a"));
     }
 
     #[test]
     fn 辅助空白余额不勾稽时保留为真实未分辅助() {
-        let headers = ["科目", "辅助", "期初", "期末", "借方", "贷方"].map(str::to_owned).to_vec();
-        let rows = vec![vec!["1002", "", "30", "40", "10", "0"], vec!["1002", "A", "10", "20", "10", "0"]].into_iter().map(|row| row.into_iter().map(str::to_owned).collect()).collect::<Vec<Vec<String>>>();
+        let headers = ["科目", "辅助", "期初", "期末", "借方", "贷方"]
+            .map(str::to_owned)
+            .to_vec();
+        let rows = vec![
+            vec!["1002", "", "30", "40", "10", "0"],
+            vec!["1002", "A", "10", "20", "10", "0"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(str::to_owned).collect())
+        .collect::<Vec<Vec<String>>>();
         let mapping = serde_json::json!({"accountCode":"科目","auxiliary":"辅助","openingFunctionalAmount":"期初","closingFunctionalAmount":"期末","ytdFunctionalDebit":"借方","ytdFunctionalCredit":"贷方"}).as_object().unwrap().clone();
         let view = tb_dimension_rows(&headers, &rows, &mapping, "auxiliary", None);
-        assert_eq!(view.len(), 2, "借方虽相等，期初期末不相等，不能删除空辅助行");
+        assert_eq!(
+            view.len(),
+            2,
+            "借方虽相等，期初期末不相等，不能删除空辅助行"
+        );
         assert!(view.iter().any(|row| row.index == 0 && row.aux.is_empty()));
     }
 
@@ -9817,15 +10011,10 @@ mod tests {
 
     #[test]
     fn tb锚点提取只取有发生额的行() {
-        let headers: Vec<String> = [
-            "科目编码",
-            "辅助核算",
-            "本期发生借方",
-            "本期发生贷方",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        let headers: Vec<String> = ["科目编码", "辅助核算", "本期发生借方", "本期发生贷方"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let rows = vec![
             vec!["1002".into(), " Dormant-A ".into(), "0".into(), "0".into()],
             vec!["1002".into(), "Active-B".into(), "100".into(), "0".into()],
@@ -9840,7 +10029,10 @@ mod tests {
         let mapping = mapping.as_object().cloned().unwrap();
         let anchors = tb_auxiliary_anchors(&headers, &rows, &mapping, "auxiliary");
         assert!(!anchors.contains("dormanta"), "{anchors:?}");
-        assert!(anchors.contains("activeb") && anchors.contains("activec"), "{anchors:?}");
+        assert!(
+            anchors.contains("activeb") && anchors.contains("activec"),
+            "{anchors:?}"
+        );
     }
 
     #[test]
@@ -10244,8 +10436,28 @@ mod tests {
                 "152",
             ],
             ["A", "CNY", "1002", "银行存款", "", "30", "0", "0", "30"],
-            ["A", "CNY", "1002", "银行存款", "基本户", "10", "0", "0", "10"],
-            ["A", "CNY", "1002", "银行存款", "一般户", "20", "0", "0", "20"],
+            [
+                "A",
+                "CNY",
+                "1002",
+                "银行存款",
+                "基本户",
+                "10",
+                "0",
+                "0",
+                "10",
+            ],
+            [
+                "A",
+                "CNY",
+                "1002",
+                "银行存款",
+                "一般户",
+                "20",
+                "0",
+                "0",
+                "20",
+            ],
         ]
         .into_iter()
         .map(|row| row.into_iter().map(String::from).collect())
@@ -11656,7 +11868,11 @@ mod tests {
                     vec!["USD".to_owned()],
                 ];
                 let suggested = suggest_roles_with_data(kind, &[header.to_owned()], &rows);
-                assert_eq!(suggested.get(&0), Some(&"currency"), "{kind}: {suggested:?}");
+                assert_eq!(
+                    suggested.get(&0),
+                    Some(&"currency"),
+                    "{kind}: {suggested:?}"
+                );
             }
             let amount = suggest_roles(kind, &["借方/外币".to_owned()]);
             assert_ne!(amount.get(&0), Some(&"currency"), "{kind}: {amount:?}");
@@ -11687,7 +11903,10 @@ mod tests {
             _ => vec![],
         };
         let calculation = tb_leaf_mask(&headers, &rows, &columns);
-        assert!(calculation[0] && calculation[3], "金额不勾稽时计算掩码须保留父级");
+        assert!(
+            calculation[0] && calculation[3],
+            "金额不勾稽时计算掩码须保留父级"
+        );
         let catalog = tb_catalog_leaf_mask(&headers, &rows, &columns);
         assert_eq!(catalog, vec![false, true, true, false, true]);
     }

@@ -527,6 +527,7 @@ export function FaTbJePage() {
       inspects.je?.headerDepth,
     ]),
   });
+  const ledgerReviewOwner = useRef({});
   const reviewing = Boolean(reviews.reviewing.tb || reviews.reviewing.je);
   const { job, setJob, activeJobId } = useJobEvents({
     toolId: "fa_list",
@@ -1322,6 +1323,7 @@ export function FaTbJePage() {
                       ],
                     ])
               }
+              autoReviewOwner={ledgerReviewOwner.current}
               onReviewAll={() =>
                 void reviews.reviewAll({
                   tb: inspects.tb

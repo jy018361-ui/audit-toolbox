@@ -360,7 +360,7 @@ export function KanzhangParityPage({tool}:{tool:ToolManifest}){
   }
   const undoChange=(target:MappingChange)=>{patch({mapping:undoMappingChange(draft.mapping,target)});setChanges(values=>values.filter(value=>value!==target));};
   // 采纳低把握建议后同样进变更清单，保留反悔的机会。
-  const acceptPending=(item:Review)=>{const before=draft.mapping[item.role];const after=isMultiRole(item.role)?[item.suggestedColumn.trim()]:item.suggestedColumn.trim();setMap(item.role,after);setChanges(values=>[...values,{role:item.role,before,after,source:formatMappingValue(before)==="未映射"?"fill":"replace",reason:item.reason,confidence:item.confidence}]);setPending(values=>values.filter(value=>value!==item));};
+  const acceptPending=(item:Review)=>{const before=draft.mapping[item.role];const after=item.action==="clear"?undefined:isMultiRole(item.role)?[item.suggestedColumn!.trim()]:item.suggestedColumn!.trim();if(item.action==="clear")patch({mapping:{...draft.mapping,[item.role]:undefined}});else setMap(item.role,after!);setChanges(values=>[...values,{role:item.role,before,after,source:item.action==="clear"?"replace":formatMappingValue(before)==="未映射"?"fill":"replace",reason:item.reason,confidence:item.confidence}]);setPending(values=>values.filter(value=>value!==item));};
   const updateBatch=(next:Partial<Batch>)=>patch({batches:draft.batches.map((value,index)=>index===draft.activeBatch?{...value,...next}:value)});
   // 拖拽状态提到页面这一层：三个穿梭区要能互相知道光标落在谁身上。
   const [drag,setDrag]=useState<ShuttleDrag>();

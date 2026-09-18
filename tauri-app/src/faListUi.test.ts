@@ -140,6 +140,28 @@ describe("FA List migration parity", () => {
 });
 
 describe("FA LLM 复核先改后核", () => {
+  it("clear 能删除确定错误且无替代列的已有映射", () => {
+    const plan = planFaLlmChanges({
+      ...baseInput,
+      fieldReviews: [
+        {
+          role: "category",
+          file_side: "file1",
+          action: "clear",
+          confidence: 0.96,
+          reason: "当前列是编码且没有可信类别列",
+        },
+      ],
+    });
+    expect(plan.beginMapping.category).toBe("类别");
+    expect(plan.pending[0]).toMatchObject({
+      id: "begin.category",
+      current: "类别",
+      suggested: "未映射",
+      apply: { kind: "mapping", side: "begin", key: "category", value: undefined },
+    });
+  });
+
   it("重新复核能把已取消的开始使用日期映射补回对应文件", () => {
     const plan = planFaLlmChanges({
       ...baseInput,

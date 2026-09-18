@@ -1348,18 +1348,20 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     if (!file || !outcome || !change) return;
     const mapping = { ...outcome.mapping };
     const beforeValue = mapping[change.role];
-    mapping[change.role] = MULTI_COLUMN_ROLES.has(change.role)
-      ? [
-          ...new Set([
-            ...(Array.isArray(beforeValue)
-              ? beforeValue
-              : beforeValue
-                ? [beforeValue]
-                : []),
-            change.suggestedColumn,
-          ]),
-        ]
-      : change.suggestedColumn;
+    if (change.action === "clear") delete mapping[change.role];
+    else
+      mapping[change.role] = MULTI_COLUMN_ROLES.has(change.role)
+        ? [
+            ...new Set([
+              ...(Array.isArray(beforeValue)
+                ? beforeValue
+                : beforeValue
+                  ? [beforeValue]
+                  : []),
+              change.suggestedColumn,
+            ]),
+          ]
+        : change.suggestedColumn;
     const pending = outcome.pending.filter((_, at) => at !== index);
     const applied = [
       ...outcome.applied,

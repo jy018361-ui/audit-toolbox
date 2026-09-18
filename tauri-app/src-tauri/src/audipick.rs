@@ -1,14 +1,13 @@
 use reqwest::blocking::Client;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc,
+        mpsc, Arc, Mutex,
     },
     thread,
     time::Duration,
@@ -541,7 +540,7 @@ pub(crate) fn kanzhang_llm_call(params: &Value, settings: &Value) -> Result<Valu
 /// 两张表共用的复核纪律。**只放对 TB 与 JE 都成立的规则**——
 /// 各自的角色清单与形态规则分别放在 [`REVIEW_JE`] 与 [`REVIEW_TB`] 里，
 /// 免得复核一张表时眼前摆着另一张表的规矩。
-const REVIEW_COMMON: &str = "只能使用输入 availableRoles 中列出的角色——它是本工具当前形态启用的角色清单，包含当前形态的必填、选填角色以及不属于任何互斥形态的公共角色；没列出的角色属于其他形态，即使表里有对应的列也不要提。输入的 currentForm 是脚本按整组匹配判出的账表形态。**complete 为 true 时，构成该形态的那些槽位已经成立，一律不要改动**——净额列里是正数还是自带正负号都不影响判定，借贷符号口径由数据配平判定，不由列名判定；表里另有一列看起来更像净额，也不构成改动理由。**两种映射都能成立时一律维持现状，不要为了让它更好看而改**。complete 只说明该形态自身的槽位成立，不代表整张表的映射已经完备——availableRoles 里本工具需要、currentMapping 还缺着的角色（比如原币币种、会计期间），仍必须照样补齐。complete 为 false 时，优先补齐 currentForm.missingSlots 里点名缺失的槽位。除此之外，必须主动补齐 currentMapping 中缺失、但可由 headers 与 sampleRows 判断出来的角色，不得仅复核已有映射。只能使用输入 headers 中真实存在的列，不得虚构列名。双语表头（如「科目描述 Description」「过账日期 Posting Date」）按其中的中文段判断角色。一列只承载一个语义，不能把同一列同时映射到两个角色——唯一的例外是下述「编码与名称写在同一格」的科目列。判断依据必须落在 sampleRows 的实际取值上：每提出一个 change，先从 sampleRows 里随意取三五行看该列的真实内容，若这几行取值与该角色应有的形态不符（科目编码列应是稳定的数字或字母数字编码，科目名称列应是可读文本，币种列应是三位 ISO 代码，金额列应是数值），就不要提出该 change。accountCode 与 accountName 是两个彼此独立的角色，不能互换：编码给 accountCode，名称/文本给 accountName。**编码与名称写在同一格**是例外情形（`1001010000:库存现金-人民币`、`1001/库存现金`、`1001_现金`，也有编码后面接反斜杠再接多级名称的写法——分隔符是斜杠、冒号、下划线、反斜杠、竖线之一，前半段是一串数字或字母数字编码）：这一列应**同时映射为 accountCode 与 accountName 两个角色**（脚本自动映射正是这么做的），既不要因为这列里有名称就改判成纯 accountName，也不要把其中任何一个角色挪走或删掉。务必与**层级名称拼接**区分开——`交易性金融资产_结构性存款`、`管理费用_研发费用_水电气费`，以及用反斜杠拼起来的「银行存款、在财务公司存款、活期」这种，前半段是上级科目名不是编码，这些整列属于 accountName。科目余额表与序时账是同一套账，同名角色必须同口径——两边的 accountCode 必须是同一种科目编码，accountName 同理。`抵销科目`、`统驭科目`、`对方科目`、`往来科目`、`预算科目` 记的是对手方或参考科目，取值同样是一串科目编码，跟本方科目长得一模一样，但它们绝不是 accountCode，也不是 accountName。entity 是记账主体（公司代码、核算主体、账套公司），绝不是交易对手方、往来单位（往來單位、Counterparty）、客户（客戶）、供应商（供應商）这类对手方字段，也不是制单人、录入人、审核人、过账人这类操作员；没有明确的主体列时让 entity 空缺，不得拿对手方字段凑数。集团货币／报告货币（Group Currency、集团货币金额）是第三套口径，既不是本位币也不是原币，对应的金额列与币种列一律不映射到任何角色。changes 数组只放需要修改或补充的条目：每条的 suggestedColumn 必须是输入 headers 中真实存在的列名，且与该角色当前的 currentColumn 不同（当前为空时是补缺）。只是确认现有映射正确、确认某列不存在、或没有实际变更的，一律不要输出该条——空缺本身就是正确状态，不要为了表态而造条目。suggestedColumn 为空的条目不要输出；置信度低于 0.6 的建议不要输出。reason 与 suggestedColumn 必须指向同一个结论：reason 说该列不该映射，就不能输出把它映射上去的条目。同一列在 changes 里最多出现一次。『整列同值』的意思是全列每一行取值完全相同；只要出现两种以上取值，该列就在逐行区分交易或账户，绝不是本位币列。优先建议原始数据列：由其他列推算出的公式辅助列（如按方向列把金额改写成的「借正贷负」列、用日期与凭证号拼出的唯一码列）不要抢原始列的角色。不要计算金额、汇率或业务分类，只管映射。";
+const REVIEW_COMMON: &str = "只能使用输入 availableRoles 中列出的角色——它是本工具当前形态启用的角色清单，包含当前形态的必填、选填角色以及不属于任何互斥形态的公共角色；没列出的角色属于其他形态，即使表里有对应的列也不要提。输入的 currentForm 是脚本按整组匹配判出的账表形态。complete=true 只表示构成该形态的槽位已有非空映射，不证明映射正确；必须先结合 headers 与 sampleRows 逐项验证。当前列与角色语义及取值形态相容时维持现状；明显不相容且有可信替代列时必须 replace；明显不相容但没有可信替代列时必须 clear；证据不足时 uncertain。净额列里是正数还是自带正负号不影响形态判定，借贷符号口径由数据配平判定，不由列名判定。**只有当前映射和候选映射都通过语义及样例验证、仅属偏好差异时，才维持现状，不要为了让它更好看而改**。complete 不代表整张表的映射已经完备——availableRoles 里本工具需要、currentMapping 还缺着的角色（比如原币币种、会计期间），仍必须照样补齐。complete 为 false 时，优先补齐 currentForm.missingSlots 里点名缺失的槽位。除此之外，必须主动补齐 currentMapping 中缺失、但可由 headers 与 sampleRows 判断出来的角色，不得仅复核已有映射。只能使用输入 headers 中真实存在的列，不得虚构列名。双语表头（如「科目描述 Description」「过账日期 Posting Date」）按其中的中文段判断角色。一列只承载一个语义，不能把同一列同时映射到两个角色——唯一的例外是下述「编码与名称写在同一格」的科目列。判断依据必须落在 sampleRows 的实际取值上：每提出一个 replace，先从 sampleRows 里随意取三五行看该列的真实内容，若这几行取值与该角色应有的形态不符（科目编码列应是稳定的数字或字母数字编码，科目名称列应是可读文本，币种列应是三位 ISO 代码，金额列应是数值），就不要提出该 replace。accountCode 与 accountName 是两个彼此独立的角色，不能互换：编码给 accountCode，名称/文本给 accountName。**编码与名称写在同一格**是例外情形（`1001010000:库存现金-人民币`、`1001/库存现金`、`1001_现金`，也有编码后面接反斜杠再接多级名称的写法——分隔符是斜杠、冒号、下划线、反斜杠、竖线之一，前半段是一串数字或字母数字编码）：这一列应**同时映射为 accountCode 与 accountName 两个角色**（脚本自动映射正是这么做的），既不要因为这列里有名称就改判成纯 accountName，也不要把其中任何一个角色挪走或删掉。务必与**层级名称拼接**区分开——`交易性金融资产_结构性存款`、`管理费用_研发费用_水电气费`，以及用反斜杠拼起来的「银行存款、在财务公司存款、活期」这种，前半段是上级科目名不是编码，这些整列属于 accountName。科目余额表与序时账是同一套账，同名角色必须同口径——两边的 accountCode 必须是同一种科目编码，accountName 同理。`抵销科目`、`统驭科目`、`对方科目`、`往来科目`、`预算科目` 记的是对手方或参考科目，取值同样是一串科目编码，跟本方科目长得一模一样，但它们绝不是 accountCode，也不是 accountName。entity 是记账主体（公司代码、核算主体、账套公司），绝不是交易对手方、往来单位（往來單位、Counterparty）、客户（客戶）、供应商（供應商）这类对手方字段，也不是制单人、录入人、审核人、过账人这类操作员；没有明确的主体列时让 entity 空缺，不得拿对手方字段凑数。集团货币／报告货币（Group Currency、集团货币金额）是第三套口径，既不是本位币也不是原币，对应的金额列与币种列一律不映射到任何角色。changes 数组只放真实调整：replace 条目的 suggestedColumn 必须是 headers 中真实存在且不同于当前映射的列；clear 条目必须写 action=clear 并省略 suggestedColumn，只用于删除已经确定错误且无可信替代列的现有映射。确认正确、确认某个本来就空缺的角色应继续空缺、或没有实际变更时不要输出 changes。置信度低于 0.6 的建议不要输出。reason 必须与 action 和 suggestedColumn 指向同一结论。同一列在 changes 里最多出现一次。『整列同值』的意思是全列每一行取值完全相同；只要出现两种以上取值，该列就在逐行区分交易或账户，绝不是本位币列。优先建议原始数据列：由其他列推算出的公式辅助列（如按方向列把金额改写成的「借正贷负」列、用日期与凭证号拼出的唯一码列）不要抢原始列的角色。不要计算金额、汇率或业务分类，只管映射。";
 
 fn review_common_instruction() -> String {
     REVIEW_COMMON.replace(
@@ -554,10 +553,9 @@ fn review_common_instruction() -> String {
 /// Coding 只负责在响应返回后拦截与数据形态明显冲突的建议，不能代替模型补答案。
 const REVIEW_AMBIGUOUS_ACCOUNT_HEADERS: &str = "特别注意：「会计科目」「总账科目」「账户」等都是歧义标题，没有固定默认角色，严禁只凭标题下结论。必须逐列比较 sampleRows：实际存数字或字母数字编码的列才是 accountCode，实际存可读名称的列才是 accountName。两列并存时必须同时检查，既可能是『总账科目=编码、会计科目=名称』，也可能完全相反；若 currentMapping 与取值冲突，必须输出纠正 change，不能因为标题常见而维持。";
 
-/// `currentForm.complete` 只由“形态槽位是否已填”推导，并不校验每个
-/// 角色当前所指列的内容。因此 complete 不能把错指的日期/科目列变成
-/// “不得修改”的事实；这条要放在通用纪律之后，明确收窄它的适用范围。
-const REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY: &str = "关于 currentForm.complete 的强制补充：complete=true 只表示形态所需角色的 currentMapping 有非空值，不证明这些角色指向了正确的列。先用 sampleRows 校验当前列的取值形态；只有当角色与列值相容时，才适用『槽位已成立、不要改动』。若 accountCode 指向日期或名称文本、accountName 指向编码，或其他当前列明显不符合角色取值形态，即使 complete=true 也必须输出纠正 change。";
+/// 对完整形态仍要求给出可执行的纠偏操作；与通用纪律同向强调，
+/// 不再靠后置补丁推翻前面的“一律不改”。
+const REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY: &str = "复核不只是确认，更是纠偏：当前映射所指列在 sampleRows 中整列全空，或与角色取值形态明显冲突时，它不可能承载该角色。有可信替代列必须输出 action=replace 的 change；没有可信替代列必须输出 action=clear 的 change；不得仅在 reason 或 roleReviews 中提示而不输出可执行调整。";
 
 fn review_je_instruction() -> String {
     REVIEW_JE.replacen(
@@ -710,6 +708,18 @@ fn inject_mapping_review_scope(payload: &mut Value, kind: &str) {
                 let Some(rows) = rows.as_deref() else {
                     continue;
                 };
+                if !rows.is_empty()
+                    && rows
+                        .iter()
+                        .all(|row| row.get(index).is_none_or(|value| value.trim().is_empty()))
+                {
+                    suspects.push(json!({
+                        "role": role,
+                        "currentColumn": column,
+                        "issue": "当前映射列在全部样例行中为空"
+                    }));
+                    continue;
+                }
                 if matches!(role, "accountCode" | "accountName") {
                     let shape = crate::ledger_mapping::account_column_shape(
                         rows.iter().filter_map(|row| row.get(index)).cloned(),
@@ -834,8 +844,10 @@ fn sanitize_role_reviews(value: &mut Value, payload: &Value, key: &str) {
         let Some(expected_columns) = expected.get(role) else {
             return false;
         };
-        if !matches!(status, "keep" | "change" | "uncertain")
-            || reason.trim().is_empty()
+        if !matches!(
+            status,
+            "keep" | "change" | "replace" | "clear" | "uncertain"
+        ) || reason.trim().is_empty()
             || !seen.insert(role.to_owned())
         {
             return false;
@@ -1044,10 +1056,10 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
     let review_common = review_common_instruction();
     let prompt = format!(
         "你是审计工具箱公共 TB＋JE 联合字段映射复核器。TB 与 JE 属于同一账套，必须在一次判断中同时复核。\
-         只输出严格 JSON：{{\"task\":\"ledger_pair_mapping\",\"tbChanges\":[{{\"role\":string,\"currentColumn\":string,\"suggestedColumn\":string,\"confidence\":number,\"reason\":string}}],\
-         \"jeChanges\":[{{\"role\":string,\"currentColumn\":string,\"suggestedColumn\":string,\"confidence\":number,\"reason\":string}}],\
-         \"tbRoleReviews\":[{{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"change\"|\"uncertain\",\"reason\":string}}],\
-         \"jeRoleReviews\":[{{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"change\"|\"uncertain\",\"reason\":string}}],\
+         只输出严格 JSON：{{\"task\":\"ledger_pair_mapping\",\"tbChanges\":[{{\"role\":string,\"action\":\"replace\"|\"clear\",\"currentColumn\":string,\"suggestedColumn\":string|null,\"confidence\":number,\"reason\":string}}],\
+         \"jeChanges\":[{{\"role\":string,\"action\":\"replace\"|\"clear\",\"currentColumn\":string,\"suggestedColumn\":string|null,\"confidence\":number,\"reason\":string}}],\
+         \"tbRoleReviews\":[{{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"replace\"|\"clear\"|\"uncertain\",\"reason\":string}}],\
+         \"jeRoleReviews\":[{{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"replace\"|\"clear\"|\"uncertain\",\"reason\":string}}],\
          \"pairFindings\":[{{\"type\":string,\"confidence\":number,\"reason\":string}}],\"summary\":string}}。\
          TB 建议只能使用 tb.availableRoles 与 tb.headers，JE 建议只能使用 je.availableRoles 与 je.headers。\
          两侧 engineFacts 是 Coding 根据样例验证的处理事实；protected=true 的事实不得修改。\
@@ -1055,7 +1067,7 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
          requiredMissingRoles 是当前仍缺失的金标必填角色清单；只要 headers 与 sampleRows 中存在相容列，就必须逐项输出 change，不得只复核已有映射。\
          crossRequiredRoles 是由另一侧当前映射触发的跨表待补角色；尤其 TB 已映射 currency 时，必须检查 JE 的逐行交易币种、外币或原币代码列，并在样例值为 ISO 币种代码时输出 JE currency 补充建议。不得用整列固定的本币/本位币列代替。\
          unmappedRoles 是尚未映射的完整角色清单：逐项查看 headers 与 sampleRows，有相容列就输出 change，没有可信候选则维持空缺。\
-         mappedRolesToReview 是必须逐项复核的全部已有映射；另在 tbRoleReviews/jeRoleReviews 中为每个已有角色返回 {{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"change\"|\"uncertain\",\"reason\":string}}，不能用 changes 为空代替语义复核。status=keep 仅限样例值与角色含义相容；明显错配且有可信替代列用 change 并同时输出 change；证据不足用 uncertain。suspectMappings 是 Coding 已发现的确定性疑点，必须优先处理。\
+         mappedRolesToReview 是必须逐项复核的全部已有映射；不能用 changes 为空代替语义复核。status=keep 仅限样例值与角色含义相容；明显错配且有可信替代列用 replace 并同时输出 action=replace；明显错配但无可信替代列用 clear 并同时输出 action=clear；证据不足用 uncertain。suspectMappings 是 Coding 已发现的确定性疑点，必须优先处理。\
          联合比较 accountCode/accountName 的标题语义、样例形态与两侧口径；证据接近时维持当前映射，不要为了换成看起来更好的列而改。\
          changes 只放真实调整，确认现状正确不要造条目。{review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}\
          对 TB：{REVIEW_TB}\
@@ -1215,9 +1227,9 @@ fn ledger_mapping_llm_call(
     let prompt = format!(
         "你是审计工具箱公共 TB/JE 引擎的{table_name}字段映射复核器，任务名为 {task}。\
          只输出严格 JSON：{{\"task\":\"{task}\",\"changes\":[{{\"role\":string,\
-         \"currentColumn\":string,\"suggestedColumn\":string,\"confidence\":number,\
-         \"reason\":string,\"scheme\":string}}],\"roleReviews\":[{{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"change\"|\"uncertain\",\"reason\":string}}]}}。\
-         mappedRolesToReview 是必须逐项复核的全部已有映射：每个角色必须返回一条 roleReviews，不能因为 changes 为空就声称完成。status=keep 仅限 sampleRows 证明当前列与角色相容；明显错配且有可信替代列用 change 并同时输出 changes；证据不足用 uncertain。\
+         \"currentColumn\":string,\"suggestedColumn\":string|null,\"confidence\":number,\
+         \"action\":\"replace\"|\"clear\",\"reason\":string,\"scheme\":string}}],\"roleReviews\":[{{\"role\":string,\"currentColumns\":[string],\"status\":\"keep\"|\"replace\"|\"clear\"|\"uncertain\",\"reason\":string}}]}}。action=clear 时省略 suggestedColumn。\
+         mappedRolesToReview 是必须逐项复核的全部已有映射：每个角色必须返回一条 roleReviews，不能因为 changes 为空就声称完成。status=keep 仅限 sampleRows 证明当前列与角色相容；明显错配且有可信替代列用 replace 并同时输出 action=replace；明显错配但无可信替代列用 clear 并同时输出 action=clear；证据不足用 uncertain。\
          unmappedRoles 是尚未映射的完整角色清单，有相容列就输出 change；requiredMissingRoles 是其中会阻塞运行的子集，必须优先；suspectMappings 必须优先复核。\
          {review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{specific}{date_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
     );
@@ -1614,25 +1626,28 @@ fn sanitize_change_list(
     // 目标列被占用时，只有占用者同时被挪去另一列，改指才成立。
     let movers: Vec<(String, String)> = changes
         .iter()
-        .filter_map(|change| {
-            let role = change.get("role").and_then(Value::as_str)?;
+        .flat_map(|change| {
+            let Some(role) = change.get("role").and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            let clear = change.get("action").and_then(Value::as_str) == Some("clear");
             let to = change
                 .get("suggestedColumn")
                 .and_then(Value::as_str)
-                .map(str::trim)?;
-            if to.is_empty()
-                || crate::ledger_mapping::role_of(kind, role).is_some_and(|item| item.multi)
+                .map(str::trim)
+                .unwrap_or("");
+            if !clear
+                && (to.is_empty()
+                    || crate::ledger_mapping::role_of(kind, role).is_some_and(|item| item.multi))
             {
-                return None;
+                return Vec::new();
             }
-            Some(
-                columns_of(role)
-                    .into_iter()
-                    .filter(move |from| from != to)
-                    .map(move |from| (role.to_owned(), from)),
-            )
+            columns_of(role)
+                .into_iter()
+                .filter(|from| clear || from != to)
+                .map(|from| (role.to_owned(), from))
+                .collect::<Vec<_>>()
         })
-        .flatten()
         .collect();
     let sample_rows = sample_rows_of(payload);
     // 样例里判得出的「编码＋名称混写」列：这些列允许 accountCode 与
@@ -1667,12 +1682,55 @@ fn sanitize_change_list(
             ))
         })
         .collect();
+    // `autoClearSafe` 只能由 Coding 根据确定性疑点签发，绝不信任模型自报。
+    // 无此标记的 clear 仍会下发，但前端只能作为人工确认项展示。
+    let replacement_roles = changes
+        .iter()
+        .filter(|change| change.get("action").and_then(Value::as_str) != Some("clear"))
+        .filter(|change| {
+            change
+                .get("suggestedColumn")
+                .and_then(Value::as_str)
+                .is_some_and(|column| !column.trim().is_empty())
+        })
+        .filter_map(|change| {
+            change
+                .get("role")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<std::collections::HashSet<_>>();
+    for change in changes.iter_mut() {
+        if change.get("action").and_then(Value::as_str) != Some("clear") {
+            continue;
+        }
+        let role = change.get("role").and_then(Value::as_str).unwrap_or("");
+        let current_columns = columns_of(role);
+        let safe = current_columns.len() == 1
+            && !replacement_roles.contains(role)
+            && payload
+                .get("suspectMappings")
+                .and_then(Value::as_array)
+                .is_some_and(|suspects| {
+                    suspects.iter().any(|suspect| {
+                        suspect.get("role").and_then(Value::as_str) == Some(role)
+                            && suspect.get("currentColumn").and_then(Value::as_str)
+                                == Some(current_columns[0].as_str())
+                            && matches!(
+                                suspect.get("issue").and_then(Value::as_str),
+                                Some("当前映射列不在本次识别出的表头中")
+                                    | Some("当前映射列在全部样例行中为空")
+                                    | Some("当前列的样例取值形态与科目编码/名称角色明显冲突")
+                                    | Some("当前列包含非借贷方向取值")
+                            )
+                    })
+                });
+        if let Some(object) = change.as_object_mut() {
+            object.insert("autoClearSafe".into(), Value::Bool(safe));
+        }
+    }
     let mut seen_columns: Vec<(String, String)> = Vec::new();
     changes.retain(|change| {
-        let Some(suggested) = change.get("suggestedColumn").and_then(Value::as_str) else {
-            return false;
-        };
-        let suggested = suggested.trim();
         let current = change
             .get("currentColumn")
             .and_then(Value::as_str)
@@ -1687,6 +1745,28 @@ fn sanitize_change_list(
             .get("confidence")
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
+        let clear = change.get("action").and_then(Value::as_str) == Some("clear");
+        if clear {
+            if role.is_empty()
+                || (!available_roles.is_empty() && !available_roles.contains(role))
+                || replacement_roles.contains(role)
+                || confidence < 0.6
+                || confidence > 1.0
+                || !columns_of(role)
+                    .iter()
+                    .any(|column| !column.trim().is_empty())
+                || protected_sources
+                    .iter()
+                    .any(|(protected_role, _)| protected_role == role)
+            {
+                return false;
+            }
+            return true;
+        }
+        let Some(suggested) = change.get("suggestedColumn").and_then(Value::as_str) else {
+            return false;
+        };
+        let suggested = suggested.trim();
         // Coding 已验证并保护的映射属于引擎事实。模型可以在 pairFindings 里提示，
         // 但不能把其中任一角色从受保护源列挪走。
         if protected_sources.iter().any(|(protected_role, source)| {
@@ -2078,9 +2158,9 @@ fn kanzhang_mapping_prompt() -> String {
     format!(
         "你是会计凭证字段映射复核助手。输出严格 JSON：\
          {{scheme:\"A\"|\"B\"|\"\",schemeReason:string,\
-         fills:[{{role:string,suggestedColumn:string,confidence:number,reason:string}}],\
-         reviews:[{{role:string,currentColumn:string,suggestedColumn:string,confidence:number,reason:string}}],\
-         roleReviews:[{{role:string,currentColumns:[string],status:\"keep\"|\"change\"|\"uncertain\",reason:string}}]}}。\
+         fills:[{{role:string,action:\"replace\",suggestedColumn:string,confidence:number,reason:string}}],\
+         reviews:[{{role:string,action:\"replace\"|\"clear\",currentColumn:string,suggestedColumn:string|null,confidence:number,reason:string}}],\
+         roleReviews:[{{role:string,currentColumns:[string],status:\"keep\"|\"replace\"|\"clear\"|\"uncertain\",reason:string}}]}}。action=clear 时省略 suggestedColumn。\
          方案A＝净额列（可加方向列）；方案B＝借方与贷方两列，二者互斥。\
          mappedRolesToReview 中每个已有角色都必须返回一条 roleReviews；不能用 fills/reviews 为空代替语义复核。unmappedRoles 逐项检查，有相容列就输出 fills；requiredMissingRoles 与 suspectMappings 优先。\
          {review_common}{REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY}{je_instruction}{REVIEW_AMBIGUOUS_ACCOUNT_HEADERS}"
@@ -2593,12 +2673,10 @@ mod tests {
         let fills = value["fills"].as_array().expect("fills 还在");
         assert_eq!(fills.len(), 1, "{fills:?}");
         assert_eq!(fills[0]["suggestedColumn"], "本位币金额");
-        assert!(
-            value["reviews"]
-                .as_array()
-                .expect("reviews 还在")
-                .is_empty()
-        );
+        assert!(value["reviews"]
+            .as_array()
+            .expect("reviews 还在")
+            .is_empty());
     }
 
     #[test]
@@ -2619,12 +2697,10 @@ mod tests {
         let form = &payload["currentForm"];
         assert_eq!(form["id"], "JE2");
         assert_eq!(form["complete"], true);
-        assert!(
-            form["missingSlots"]
-                .as_array()
-                .expect("有该字段")
-                .is_empty()
-        );
+        assert!(form["missingSlots"]
+            .as_array()
+            .expect("有该字段")
+            .is_empty());
     }
 
     #[test]
@@ -3337,12 +3413,12 @@ mod mapping_prompt_tests {
         sanitize_mapping_changes(&mut value, &payload, "tb", ReviewDatePolicy::Strict);
         let changes = value["changes"].as_array().unwrap();
         assert_eq!(changes.len(), 2, "只留成对挪移的两条：{changes:?}");
-        assert!(
-            changes.iter().all(
+        assert!(changes
+            .iter()
+            .all(
                 |change| change["suggestedColumn"].as_str() != Some("科目名称")
                     || change["role"].as_str() == Some("accountName")
-            )
-        );
+            ));
     }
 
     #[test]
@@ -3499,17 +3575,68 @@ mod mapping_prompt_tests {
         assert!(instruction.contains("科目编码、科目代码、科目号属于 accountCode"));
         assert!(REVIEW_AMBIGUOUS_ACCOUNT_HEADERS.contains("没有固定默认角色"));
         assert!(REVIEW_AMBIGUOUS_ACCOUNT_HEADERS.contains("必须逐列比较 sampleRows"));
-        assert!(REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY.contains("complete=true"));
-        assert!(
-            REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY
-                .contains("即使 complete=true 也必须输出纠正 change")
-        );
+        assert!(REVIEW_COMMON.contains("complete=true 只表示"));
+        assert!(REVIEW_COMMON.contains("明显不相容但没有可信替代列时必须 clear"));
 
         let kanzhang = kanzhang_mapping_prompt();
         assert!(!kanzhang.contains("会计科目、总账科目、总帐科目"));
         assert!(kanzhang.contains("没有固定默认角色"));
         assert!(kanzhang.contains("必须逐列比较 sampleRows"));
         assert!(kanzhang.contains(REVIEW_COMPLETE_REQUIRES_VALUE_COMPATIBILITY));
+    }
+
+    #[test]
+    fn 公共复核允许清除确定错误且无替代列的映射() {
+        let mut payload = json!({
+            "headers": ["科目名称"],
+            "sampleRows": [["库存现金"], ["银行存款"], ["应收账款"], ["财务费用"]],
+            "currentMapping": {"accountCode": "科目名称"},
+            "availableRoles": ["accountCode"]
+        });
+        inject_mapping_review_scope(&mut payload, "je");
+        let mut value = json!({"changes": [{
+            "role": "accountCode",
+            "action": "clear",
+            "currentColumn": "科目名称",
+            "confidence": 0.97,
+            "reason": "当前列是名称文本且没有可信编码列"
+        }]});
+        sanitize_mapping_changes(&mut value, &payload, "je", ReviewDatePolicy::Strict);
+        assert_eq!(value["changes"].as_array().unwrap().len(), 1);
+        assert_eq!(value["changes"][0]["action"], "clear");
+        assert_eq!(value["changes"][0]["autoClearSafe"], true);
+    }
+
+    #[test]
+    fn 公共复核拒绝清除空缺角色和受保护引擎事实() {
+        let mut empty = json!({"changes": [{
+            "role": "accountCode", "action": "clear", "confidence": 0.99,
+            "reason": "没有映射可清除"
+        }]});
+        let empty_payload = json!({
+            "headers": ["科目名称"], "currentMapping": {},
+            "availableRoles": ["accountCode"]
+        });
+        sanitize_mapping_changes(&mut empty, &empty_payload, "je", ReviewDatePolicy::Strict);
+        assert!(empty["changes"].as_array().unwrap().is_empty());
+
+        let mut protected = json!({"changes": [{
+            "role": "accountCode", "action": "clear", "confidence": 0.99,
+            "reason": "模型试图删除引擎事实"
+        }]});
+        let protected_payload = json!({
+            "headers": ["科目"],
+            "currentMapping": {"accountCode": "科目"},
+            "availableRoles": ["accountCode"],
+            "engineFacts": [{"protected": true, "sourceColumn": "科目", "mappedRoles": ["accountCode"]}]
+        });
+        sanitize_mapping_changes(
+            &mut protected,
+            &protected_payload,
+            "je",
+            ReviewDatePolicy::Strict,
+        );
+        assert!(protected["changes"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -3652,7 +3779,6 @@ mod mapping_prompt_tests {
         assert_eq!(partial["complete"], false);
         assert_eq!(partial["unreviewedRoles"], json!(["accountName"]));
     }
-
 
     #[test]
     fn tb已有币种时联合复核强制检查je币种() {

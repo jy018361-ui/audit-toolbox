@@ -183,18 +183,20 @@ export function useLedgerDictReviews(
       if (!outcome || !change || !slot) return;
       const mapping = { ...outcome.mapping };
       const beforeValue = mapping[change.role];
-      mapping[change.role] = LEDGER_MULTI_COLUMN_ROLES.has(change.role)
-        ? [
-            ...new Set([
-              ...(Array.isArray(beforeValue)
-                ? beforeValue
-                : beforeValue
-                  ? [beforeValue]
-                  : []),
-              change.suggestedColumn,
-            ]),
-          ]
-        : change.suggestedColumn;
+      if (change.action === "clear") delete mapping[change.role];
+      else
+        mapping[change.role] = LEDGER_MULTI_COLUMN_ROLES.has(change.role)
+          ? [
+              ...new Set([
+                ...(Array.isArray(beforeValue)
+                  ? beforeValue
+                  : beforeValue
+                    ? [beforeValue]
+                    : []),
+                change.suggestedColumn,
+              ]),
+            ]
+          : change.suggestedColumn;
       slot.onApplied(mapping);
       const pending = outcome.pending.filter((_, at) => at !== index);
       const applied = [
@@ -249,6 +251,8 @@ export function useLedgerDictReviews(
  * 就只复核已上传的；两个都没上传时整个区块不渲染（由调用方控制）。
  * 状态行复用 `.fx-review-all` 样式，存款利息页同样引入了 fx-audit.css。
  */
+const automaticReviewKeys = new WeakMap<object, string>();
+
 export function LedgerReviewAll(props: {
   /** 已上传的文件，顺序即状态行的展示顺序。 */
   present: Array<"je" | "tb">;
@@ -264,6 +268,11 @@ export function LedgerReviewAll(props: {
    * 空串表示上传识别尚未收口，不发请求。
    */
   autoReviewKey?: string;
+  /**
+   * 页面级稳定对象。步骤切换会卸载本组件时，用它保存已自动复核的数据源键；
+   * 页面本身卸载后 WeakMap 自动释放，不会把别的工具或下次任务误判为已复核。
+   */
+  autoReviewOwner?: object;
   onReviewAll: () => void;
   onUndo?: (kind: "je" | "tb", index: number) => void;
   onAccept?: (kind: "je" | "tb", index: number) => void;
@@ -273,10 +282,14 @@ export function LedgerReviewAll(props: {
   latestReview.current = props.onReviewAll;
   useEffect(() => {
     const key = props.autoReviewKey?.trim() ?? "";
-    if (!key || props.disabled || automaticKey.current === key) return;
+    const remembered = props.autoReviewOwner
+      ? automaticReviewKeys.get(props.autoReviewOwner)
+      : automaticKey.current;
+    if (!key || props.disabled || remembered === key) return;
     automaticKey.current = key;
+    if (props.autoReviewOwner) automaticReviewKeys.set(props.autoReviewOwner, key);
     latestReview.current();
-  }, [props.autoReviewKey, props.disabled]);
+  }, [props.autoReviewKey, props.autoReviewOwner, props.disabled]);
   const reviewingAny = props.present.some((kind) => props.reviewing[kind]);
   const both = props.present.length > 1;
   const subject = props.present
@@ -381,7 +394,7 @@ export function LedgerReviewCompact(props: {
               >
                 <span>
                   {change.label}：{change.currentColumn} →{" "}
-                  {change.suggestedColumn}
+                  {change.action === "clear" ? "未映射" : change.suggestedColumn}
                 </span>
                 <em>已生效{change.attention ? " · 重点核对" : ""}</em>
                 {props.onUndo && (
@@ -401,7 +414,7 @@ export function LedgerReviewCompact(props: {
               >
                 <span>
                   {change.label}：{change.currentColumn} →{" "}
-                  {change.suggestedColumn}
+                  {change.action === "clear" ? "未映射" : change.suggestedColumn}
                 </span>
                 <em>
                   尚未生效 · {Math.round((change.confidence ?? 0) * 100)}%

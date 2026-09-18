@@ -121,6 +121,27 @@ describe("FA 子工具默认输出路径", () => {
 });
 
 describe("折旧测算单文件 LLM 复核规划器", () => {
+  it("clear 能删除没有可信替代列的错误映射", () => {
+    const plan = planDepLlmChanges({
+      mapping: { life: "资产名称" },
+      fieldReviews: [
+        {
+          role: "life",
+          file_side: "file2",
+          action: "clear",
+          confidence: 0.94,
+          reason: "当前列不是月数且没有可信寿命列",
+        },
+      ],
+    });
+    expect(plan.mapping.life).toBe("资产名称");
+    expect(plan.pending[0]).toMatchObject({
+      current: "资产名称",
+      suggested: "未映射",
+      apply: { key: "life", value: undefined },
+    });
+  });
+
   it("高把握建议直接应用并进变更清单，低于 60% 的不展示", () => {
     const plan = planDepLlmChanges({
       mapping: { originalValue: "原值", life: "寿命" },

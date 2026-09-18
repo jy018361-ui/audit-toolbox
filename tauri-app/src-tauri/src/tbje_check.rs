@@ -765,12 +765,7 @@ fn evaluate(
     // 辅助核算联动的降级提示并进 mappingWarnings，与既有警告同一展示通道。
     let mut mapping_warnings = prepared.mapping_warnings.clone();
     if let Some(warnings) = tb_vs_je.get("auxiliaryWarnings").and_then(Value::as_array) {
-        mapping_warnings.extend(
-            warnings
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned),
-        );
+        mapping_warnings.extend(warnings.iter().filter_map(Value::as_str).map(str::to_owned));
     }
 
     Ok(json!({
@@ -2312,8 +2307,13 @@ fn check_tb_vs_je(
         &je_preferred,
     );
     let verified_groups = ledger_mapping::auxiliary_verified_columns(
-        &group_verdicts, &tb_group_scans, &je_group_scans,
-        &tb.headers, &je_table.headers, tb_map, "auxiliary",
+        &group_verdicts,
+        &tb_group_scans,
+        &je_group_scans,
+        &tb.headers,
+        &je_table.headers,
+        tb_map,
+        "auxiliary",
     );
     let aux_refined = !verified_groups.is_empty();
     let dimension_views = verified_groups
@@ -2361,9 +2361,13 @@ fn check_tb_vs_je(
             .0;
             let account = account_policy.account_key(&entity, &dimension.code, &dimension.name);
             if account.is_empty()
-                || verified_groups.get(&(entity.clone(), account.clone()))
+                || verified_groups
+                    .get(&(entity.clone(), account.clone()))
                     .is_none_or(|(selected, _)| selected != tb_column)
-                || !functional_rows.get(dimension.index).copied().unwrap_or(true)
+                || !functional_rows
+                    .get(dimension.index)
+                    .copied()
+                    .unwrap_or(true)
             {
                 continue;
             }
@@ -2389,9 +2393,7 @@ fn check_tb_vs_je(
                     .or_default()
                     .insert(currency);
             }
-            names
-                .entry(key)
-                .or_insert_with(|| dimension.name.clone());
+            names.entry(key).or_insert_with(|| dimension.name.clone());
         }
     }
     {
@@ -2456,8 +2458,13 @@ fn check_tb_vs_je(
             if key.1.is_empty() {
                 return Ok(());
             }
-            let aux = match verified_groups.get(&key).and_then(|(_, column)| row.values.get(*column)) {
-                Some(value) if !value.trim().is_empty() => remember_display(&mut aux_display, value),
+            let aux = match verified_groups
+                .get(&key)
+                .and_then(|(_, column)| row.values.get(*column))
+            {
+                Some(value) if !value.trim().is_empty() => {
+                    remember_display(&mut aux_display, value)
+                }
                 Some(_) => {
                     je_unassigned_rows += 1;
                     String::new()
@@ -2497,8 +2504,13 @@ fn check_tb_vs_je(
             if key.1.is_empty() {
                 continue;
             }
-            let aux = match verified_groups.get(&key).and_then(|(_, column)| row.get(*column)) {
-                Some(value) if !value.trim().is_empty() => remember_display(&mut aux_display, value),
+            let aux = match verified_groups
+                .get(&key)
+                .and_then(|(_, column)| row.get(*column))
+            {
+                Some(value) if !value.trim().is_empty() => {
+                    remember_display(&mut aux_display, value)
+                }
                 Some(_) => {
                     je_unassigned_rows += 1;
                     String::new()
@@ -2592,13 +2604,22 @@ fn check_tb_vs_je(
     let mut auxiliary_warnings = Vec::new();
     if tb_aux_mapped {
         if group_verdicts.is_empty() {
-            auxiliary_warnings.push("已选范围内没有可验证的非零发生额辅助值，按主体＋科目勾稽。".to_owned());
+            auxiliary_warnings
+                .push("已选范围内没有可验证的非零发生额辅助值，按主体＋科目勾稽。".to_owned());
         }
         for group in &group_verdicts {
-        let aux_verdict = &group.verdict;
-        let prefix = format!("主体「{}」科目「{}」：", group.entity, group.account.split('\u{1f}').next().unwrap_or(&group.account));
-        let start = auxiliary_warnings.len();
-        match aux_verdict.status {
+            let aux_verdict = &group.verdict;
+            let prefix = format!(
+                "主体「{}」科目「{}」：",
+                group.entity,
+                group
+                    .account
+                    .split('\u{1f}')
+                    .next()
+                    .unwrap_or(&group.account)
+            );
+            let start = auxiliary_warnings.len();
+            match aux_verdict.status {
             "noMatch" => auxiliary_warnings.push(
                 "TB 已映射辅助核算，但 JE 无对应列，已按主体＋科目勾稽。".to_owned(),
             ),
@@ -2617,9 +2638,9 @@ fn check_tb_vs_je(
             )),
             _ => {}
         }
-        for warning in &mut auxiliary_warnings[start..] {
-            *warning = format!("{prefix}{warning}");
-        }
+            for warning in &mut auxiliary_warnings[start..] {
+                *warning = format!("{prefix}{warning}");
+            }
         }
         if aux_refined && je_unassigned_rows > 0 {
             auxiliary_warnings.push(format!(

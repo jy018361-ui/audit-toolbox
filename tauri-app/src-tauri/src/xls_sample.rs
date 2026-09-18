@@ -416,11 +416,24 @@ mod tests {
         let started = std::time::Instant::now();
         let sheets = read(&path, None).unwrap();
         assert!(!sheets.is_empty());
-        assert!(sheets.iter().all(|sheet| sheet.rows.len() <= MAX_SAMPLE_ROWS));
+        assert!(
+            sheets
+                .iter()
+                .all(|sheet| sheet.rows.len() <= MAX_SAMPLE_ROWS)
+        );
         let classified = crate::fx::classify_source(&serde_json::json!({"source": {
             "inputPath": path, "sheet": "", "headerRow": 0, "headerDepth": 0
-        }})).unwrap();
-        assert!(classified["headers"].as_array().is_some_and(|headers| !headers.is_empty()));
-        eprintln!("BIFF8 sampled {} Sheet(s) in {:?}", sheets.len(), started.elapsed());
+        }}))
+        .unwrap();
+        assert!(
+            classified["headers"]
+                .as_array()
+                .is_some_and(|headers| !headers.is_empty())
+        );
+        eprintln!(
+            "BIFF8 sampled {} Sheet(s) in {:?}",
+            sheets.len(),
+            started.elapsed()
+        );
     }
 }

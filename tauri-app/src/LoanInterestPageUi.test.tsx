@@ -2,7 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { LoanInterestPage } from "./LoanInterestPage";
+import { LoanInterestPage, Results } from "./LoanInterestPage";
 import type { ToolManifest } from "./types";
 
 const mock = vi.hoisted(() => ({
@@ -312,6 +312,13 @@ it("借款 TB＋JE 一键联合复核并按单列映射写回，不会白屏", a
         ],
       };
     }
+    if (method === "loan.tb_accounts") {
+      return {
+        accounts: [
+          { key: "2001", code: "2001", name: "短期借款", account: "2001 短期借款", opening: 100, closing: 100, suggestedType: "loan" },
+        ],
+      };
+    }
     throw new Error(`unexpected ${method}`);
   });
 
@@ -347,6 +354,56 @@ it("借款 TB＋JE 一键联合复核并按单列映射写回，不会白屏", a
       .some((element) => (element as HTMLSelectElement).value === "accountName"),
   ).toBe(true);
   expect(screen.queryByText("尚未映射：科目名称")).not.toBeInTheDocument();
+
+  const reviewCallsBeforeReturn = mock.engineCall.mock.calls.filter(
+    ([method]) => method === "ledger.review_pair_mapping",
+  ).length;
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认科目与利率" }));
+  expect(await screen.findByText("确认借款及利息支出科目")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "返回上传与识别" }));
+  expect(await screen.findByRole("button", { name: "一键复核 TB＋JE" })).toBeVisible();
+  await waitFor(() =>
+    expect(
+      mock.engineCall.mock.calls.filter(
+        ([method]) => method === "ledger.review_pair_mapping",
+      ).length,
+    ).toBe(reviewCallsBeforeReturn),
+  );
+});
+
+it("本金无差异与计息口径分开显示，并列示利息支出差异", () => {
+  render(
+    <Results
+      editRate={() => undefined}
+      rows={[
+        {
+          entity: "甲公司",
+          loanId: "2001 短期借款",
+          openingPrincipal: 100,
+          additions: 20,
+          reductions: 10,
+          closingPrincipal: 110,
+          ledgerClosing: 110,
+          rateType: "fixed",
+          calculatedInterest: 8,
+          matchStatus: "待复核",
+          matchBasis: "无利率",
+        },
+      ]}
+      result={{
+        summary: {
+          hasInterestExpenseAccount: true,
+          bookedInterestExpense: 6,
+          interestExpenseDifference: 2,
+        },
+      }}
+    />,
+  );
+  expect(screen.getByText("本金已勾稽")).toBeVisible();
+  expect(screen.getByText("待填利率")).toBeVisible();
+  expect(screen.queryByText("1 笔待复核")).not.toBeInTheDocument();
+  expect(screen.getByText("TB 利息支出")).toBeVisible();
+  expect(screen.getByText("差异（测算－TB）")).toBeVisible();
 });
 
 /** TB＋JE 第二步为「确认科目与利率」：科目清单预选借款科目；借款明细不再拦路。 */
@@ -403,6 +460,7 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
         accounts: [
           { key: "1122", code: "1122", name: "应收账款", account: "1122 应收账款", opening: 5, closing: 6, suggestedType: "skip", suggestionReason: "资产类科目" },
           { key: "2001", code: "2001", name: "短期借款", account: "2001 短期借款", opening: 1000, closing: 900, suggestedType: "loan", suggestionReason: "负债类借款科目" },
+          { key: "66030001", code: "66030001", name: "财务费用-利息支出", account: "66030001 财务费用-利息支出", opening: 0, closing: 0, suggestedType: "interest_expense" },
           ...Array.from({ length: 160 }, (_, index) => ({ key: `5${index + 10000}`, code: `5${index + 10000}`, name: `其他科目${index}`, account: `5${index + 10000} 其他科目${index}`, opening: 0, closing: 0, suggestedType: "skip" as const, suggestionReason: "其他科目" })),
         ],
       };
@@ -420,7 +478,9 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   await screen.findByText("已识别：JE 序时账");
   fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
   // 科目清单渲染，借款科目按名称预选，应收账款默认排除。
-  expect(await screen.findByText("确认借款科目")).toBeVisible();
+  expect(await screen.findByText("确认借款及利息支出科目")).toBeVisible();
+  expect(screen.queryByRole("columnheader", { name: "系统建议" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "恢复系统建议" })).not.toBeInTheDocument();
   expect(
     screen.queryByRole("columnheader", { name: "辅助明细" }),
   ).not.toBeInTheDocument();
@@ -428,9 +488,11 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   expect((loanSelect as HTMLSelectElement).value).toBe("loan");
   const skipSelect = await screen.findByRole("combobox", { name: "1122 应收账款的科目类型" });
   expect((skipSelect as HTMLSelectElement).value).toBe("skip");
+  const expenseSelect = await screen.findByRole("combobox", { name: "66030001 财务费用-利息支出的科目类型" });
+  expect((expenseSelect as HTMLSelectElement).value).toBe("interest_expense");
   const accountRows = screen.getAllByRole("row");
   expect(accountRows[1]).toHaveTextContent("短期借款");
-  expect(accountRows[2]).toHaveTextContent("应收账款");
+  expect(accountRows[2]).toHaveTextContent("利息支出");
   expect(accountRows.length).toBeLessThanOrEqual(81);
   expect(screen.getByText("第 1 / 3 页")).toBeVisible();
   fireEvent.change(loanSelect, { target: { value: "skip" } });
@@ -509,6 +571,7 @@ it("生成借款利率表并手填利率后可进入测算", async () => {
       return {
         accounts: [
           { key: "2001", code: "2001", name: "短期借款", account: "2001 短期借款", opening: 1000000, closing: 900000 },
+          { key: "66030001", code: "66030001", name: "财务费用-利息支出", account: "66030001 财务费用-利息支出", opening: 0, closing: 0, suggestedType: "interest_expense" },
         ],
       };
     }
@@ -523,18 +586,18 @@ it("生成借款利率表并手填利率后可进入测算", async () => {
   );
   await screen.findByText("已识别：TB 科目余额表");
   await screen.findByText("已识别：JE 序时账");
-  fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
-  expect(await screen.findByText("确认借款科目")).toBeVisible();
+  // 表日只在第三步维护：第二步不再出现日期字段。
   mock.jobStart.mockResolvedValue("job-rates");
-  fireEvent.change(screen.getByLabelText("资产负债表日"), {
-    target: { value: "2025-12-31" },
-  });
-  const generate = await screen.findByRole("button", { name: "生成借款利率表" });
-  await waitFor(() => expect(generate).toBeEnabled());
-  fireEvent.click(generate);
+  fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
+  expect(await screen.findByText("确认借款及利息支出科目")).toBeVisible();
+  expect(screen.queryByLabelText("资产负债表日")).not.toBeInTheDocument();
+  // 映射齐全即自动生成利率确认表，不再让用户手动点「生成借款利率表」。
   await waitFor(() => expect(mock.jobStart).toHaveBeenCalledWith(
     "loan.preview",
-    expect.objectContaining({ loanAccounts: ["2001"] }),
+    expect.objectContaining({
+      loanAccounts: ["2001"],
+      interestExpenseAccounts: ["66030001"],
+    }),
   ));
   // preview 任务完成：借款行进入利率确认表。
   mock.jobEvents.callback?.({
@@ -585,6 +648,7 @@ it("生成借款利率表并手填利率后可进入测算", async () => {
       "loan.export",
       expect.objectContaining({
         loanAccounts: ["2001"],
+        interestExpenseAccounts: ["66030001"],
         rateRows: [
           expect.objectContaining({
             loanId: "2001 短期借款",

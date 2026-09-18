@@ -50,6 +50,10 @@ import {
   keywordFilterPredicate,
 } from "@/components/KeywordFilter";
 import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation";
+import {
+  accountHierarchyCode,
+  accountTopLevel,
+} from "@/accountHierarchy";
 import "./fx-audit.css";
 import { displayFileName } from "./fileDisplay";
 
@@ -471,6 +475,49 @@ export function fxAccountCurrencyDetail(
   };
 }
 
+/** 一级科目在清单里的末级子科目（严格编码前缀），没有编码层级时为空。 */
+export function fxAccountChildren(account: string, accounts: string[]) {
+  const code = accountHierarchyCode(account);
+  if (!code) return [];
+  return accounts.filter((other) => {
+    const child = accountHierarchyCode(other);
+    return child && child.length > code.length && child.startsWith(code);
+  });
+}
+
+/**
+ * 一级科目的币种识别按末级汇总：把名下末级的识别结果并成一格——只要任一
+ * 末级认出外币就展示外币，任一末级出现多币种就提示复核，避免一级行显示
+ * 「按本位币」掩盖末级真实持币。
+ */
+export function fxAccountCurrencyAggregate(
+  account: string,
+  children: string[],
+  jeDetails: Parameters<typeof fxAccountCurrencyDetail>[1],
+  tbDetails: Parameters<typeof fxAccountCurrencyDetail>[2],
+): ReturnType<typeof fxAccountCurrencyDetail> {
+  const parts = [
+    fxAccountCurrencyDetail(account, jeDetails, tbDetails),
+    ...children.map((child) =>
+      fxAccountCurrencyDetail(child, jeDetails, tbDetails),
+    ),
+  ];
+  const seen = [
+    ...new Set(parts.flatMap((part) => part.seen).filter(Boolean)),
+  ];
+  const real = parts.filter((part) => !part.fellBack);
+  return {
+    detected: real[0]?.detected ?? parts[0].detected,
+    source: children.length ? "末级汇总" : (real[0]?.source ?? parts[0].source),
+    side: real[0]?.side ?? parts[0].side,
+    seen,
+    fellBack: parts.every((part) => part.fellBack),
+    multiCurrency: seen.length > 1,
+    jeMultiCurrency:
+      parts.some((part) => part.jeMultiCurrency) || seen.length > 1,
+  };
+}
+
 /** 科目筛选的匹配文本：科目本身＋该科目出现过的币种，支持按币种（如 USD）筛科目。 */
 export function fxAccountFilterText(
   account: string,
@@ -548,6 +595,7 @@ export function fxResolveEntityCurrencies(
 export function fxCurrencySourceLabel(side: "JE" | "TB" | "", source: string) {
   if (source === "币种列") return `${side}币种列`;
   if (source === "科目文本") return `${side}科目名`;
+  if (source === "末级汇总") return "末级汇总";
   return "按本位币";
 }
 
@@ -568,12 +616,27 @@ export function fxCurrencyDefaultLabel(
  * 「用户确认过 USD」和「系统猜了 USD」，日后改进识别逻辑也推不动已落盘的值。
  * 主体本位币那一处就是预填踩出来的坑（见下方 entityCurrencies 的注释）。
  */
-export function fxAccountCurrencyOverrides(selections: Record<string, string>) {
-  return Object.fromEntries(
-    Object.entries(selections)
-      .map(([account, code]) => [account, code.trim().toUpperCase()] as const)
-      .filter(([, code]) => code !== ""),
-  );
+export function fxAccountCurrencyOverrides(
+  selections: Record<string, string>,
+  allAccounts: string[] = [],
+) {
+  const expanded: Record<string, string> = {};
+  for (const [account, value] of Object.entries(selections)) {
+    const code = value.trim().toUpperCase();
+    if (!code) continue;
+    expanded[account] = code;
+    // 一级科目上指定的币种要落到名下全部末级：引擎的币种覆盖按科目串精确
+    // 匹配，不做前缀继承，这里在发送前展开成末级键。
+    const parent = accountHierarchyCode(account);
+    if (!parent) continue;
+    for (const candidate of allAccounts) {
+      const child = accountHierarchyCode(candidate);
+      if (child && child.length > parent.length && child.startsWith(parent)) {
+        expanded[candidate] = code;
+      }
+    }
+  }
+  return expanded;
 }
 
 export function fxResolveAccountRoles(
@@ -861,6 +924,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     tb: JSON.stringify([tbPath, tb?.sheet, tb?.headerRow, tb?.headerDepth]),
     je: JSON.stringify([jePath, je?.sheet, je?.headerRow, je?.headerDepth]),
   });
+  const ledgerReviewOwner = useRef({});
   const { reviewing, status: reviewStatus } = reviews;
   const [job, setJob] = useState<JobEvent>();
   const [result, setResult] = useState<Record<string, unknown>>();
@@ -896,13 +960,20 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     () => fxAccountDisplayList(je?.accounts, tb?.accounts),
     [je?.accounts, tb?.accounts],
   );
+  // 科目类型确认只列一级科目：末级科目的币种识别结果在行内汇总展示，
+  // 人工指定的分类与币种对名下全部末级生效（分类靠引擎编码前缀继承，
+  // 币种在发送前展开成末级键）。平级/无编码的账表不受影响。
+  const classificationAccounts = useMemo(
+    () => accountTopLevel(accounts),
+    [accounts],
+  );
   const accountMatches = useMemo(
     () => keywordFilterPredicate(accountFilter),
     [accountFilter],
   );
   const visibleAccounts = useMemo(
     () =>
-      accounts.filter((account) =>
+      classificationAccounts.filter((account) =>
         accountMatches(
           fxAccountFilterText(
             account,
@@ -912,7 +983,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
         ),
       ),
     [
-      accounts,
+      classificationAccounts,
       accountMatches,
       je?.accountCurrencyDetails,
       tb?.accountCurrencyDetails,
@@ -1582,7 +1653,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       entityCurrencies: effectiveEntities,
       entityScope: entityScope.selection,
       accountRoles,
-      accountCurrencies: fxAccountCurrencyOverrides(accountCurrencies),
+      accountCurrencies: fxAccountCurrencyOverrides(accountCurrencies, accounts),
       manualClassifications: overrides,
       translateTbAccountNames: true,
       ...(Object.keys(cachedTranslations).length
@@ -1910,6 +1981,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                       tb && [tbPath, tb.sheet, tb.headerRow, tb.headerDepth],
                     ])
               }
+              autoReviewOwner={ledgerReviewOwner.current}
               onReviewAll={() => void reviewBoth()}
               onUndo={reviews.undoChange}
               onAccept={reviews.acceptPending}
@@ -2114,6 +2186,8 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   <div className="fx-accounts-block">
                     <p className="fx-hint">
                       系统已按科目名称和编码判好每个科目属于哪一类、用的什么币，通常不用改。
+                      多层级科目表按<strong>一级科目</strong>列示，末级的币种识别已汇总到一级行；
+                      在一级行上手工指定的分类与币种对名下全部末级生效。
                       「外币」显示认出的账户币种，括号里是依据：
                       <strong>TB币种列</strong>最准，<strong>科目名</strong>
                       次之；
@@ -2142,7 +2216,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                       ariaLabel="筛选科目"
                       placeholder="输入科目编码、名称或币种（如 USD）关键词，即时过滤"
                       matched={visibleAccounts.length}
-                      total={accounts.length}
+                      total={classificationAccounts.length}
                     />
                     <div className="fx-list fx-accounts">
                       <div className="fx-accounts-head">
@@ -2160,7 +2234,9 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                         const detail =
                           tb?.accountRoleDetails?.[account] ??
                           je?.accountRoleDetails?.[account];
-                        // 两边都看：JE 逐行读凭证货币，比只有一行的 TB 更能反映该科目实际用过哪些币种。
+                        // 一级科目把名下末级的币种识别结果并成一格：
+                        // 任一末级认出外币就展示外币、任一末级多币种就提示复核，
+                        // 不让一级行的「按本位币」掩盖末级真实持币。
                         const {
                           detected,
                           source,
@@ -2169,8 +2245,9 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                           fellBack,
                           multiCurrency,
                           jeMultiCurrency,
-                        } = fxAccountCurrencyDetail(
+                        } = fxAccountCurrencyAggregate(
                           account,
+                          fxAccountChildren(account, accounts),
                           je?.accountCurrencyDetails,
                           tb?.accountCurrencyDetails,
                         );
@@ -2287,7 +2364,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                         );
                       })}
                     </div>
-                    {accounts.length > 0 && visibleAccounts.length === 0 && (
+                    {classificationAccounts.length > 0 && visibleAccounts.length === 0 && (
                       <p className="fx-hint">
                         没有匹配「{accountFilter.trim()}」的科目。
                       </p>

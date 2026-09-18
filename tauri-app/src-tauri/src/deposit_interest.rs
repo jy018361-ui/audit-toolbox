@@ -930,7 +930,8 @@ fn drop_column_conflicts(
 fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candidate>> {
     let mut out: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
     let mut claimed: Vec<String> = Vec::new();
-    for (index, role) in ledger_mapping::suggest_roles_with_data(kind, &table.headers, &table.rows) {
+    for (index, role) in ledger_mapping::suggest_roles_with_data(kind, &table.headers, &table.rows)
+    {
         // 币种线索文本（currencyText）是汇兑损益专用角色，那类列在存款/FA
         // 语义里要留给辅助核算，角色标签表也不下发它。
         if role == "currencyText" {
@@ -966,7 +967,9 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
         let mut alternates =
             local_choices(table, &auxiliary_extra_aliases(kind), &conflicts).unwrap_or_default();
         alternates.retain(|c| !claimed.contains(&c.0));
-        out.entry("auxiliary".to_string()).or_default().extend(alternates);
+        out.entry("auxiliary".to_string())
+            .or_default()
+            .extend(alternates);
     }
     // 本工具自有角色（数量／会计期间）继续本地打分。
     for (role, aliases, conflicts) in tool_roles(kind) {
@@ -976,7 +979,9 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
     }
     // TB 侧「年月」在存款语义里是会计期间：内核对 date×年月的豁免不分侧别，
     // 若 date 抢了 period 的列，让回去——TB 没有日期列时靠 period 取年份。
-    if kind == "tb" && let Some(periods) = out.get("period") {
+    if kind == "tb"
+        && let Some(periods) = out.get("period")
+    {
         let owned: Vec<String> = periods.iter().map(|c| c.0.clone()).collect();
         if let Some(dates) = out.get_mut("date") {
             dates.retain(|c| !owned.contains(&c.0));
@@ -2499,10 +2504,7 @@ fn resolve_rate(
         Some(rate) => match foreign_currency {
             Some(code) => done(
                 rate,
-                &format!(
-                    "{} 外币账户挂牌暂估值（待确认）",
-                    code.to_uppercase(),
-                ),
+                &format!("{} 外币账户挂牌暂估值（待确认）", code.to_uppercase(),),
             ),
             None => done(rate, "挂牌暂估值（待确认）"),
         },
@@ -4227,8 +4229,7 @@ fn write_monthly(
                 .write_formula_with_format(
                     y,
                     10,
-                    Formula::new(average_formula)
-                        .set_result(month.average.to_string()),
+                    Formula::new(average_formula).set_result(month.average.to_string()),
                     &amount,
                 )
                 .map_err(xlsx)?;
@@ -4585,13 +4586,60 @@ mod tests {
             &path,
             &[
                 vec![
-                    "年-月", "年-日", "凭证号", "分录号", "摘要", "科目编码", "科目名称",
-                    "借方金额", "贷方金额",
+                    "年-月",
+                    "年-日",
+                    "凭证号",
+                    "分录号",
+                    "摘要",
+                    "科目编码",
+                    "科目名称",
+                    "借方金额",
+                    "贷方金额",
                 ],
-                vec!["2025-01", "6", "记-1", "1", "提取现金", "1001", "库存现金", "500", ""],
-                vec!["2025-01", "6", "记-1", "2", "提取现金", "100201", "银行存款", "", "500"],
-                vec!["2025-02", "11", "记-2", "1", "支付货款", "220201", "应付账款", "800", ""],
-                vec!["2025-02", "11", "记-2", "2", "支付货款", "100201", "银行存款", "", "800"],
+                vec![
+                    "2025-01",
+                    "6",
+                    "记-1",
+                    "1",
+                    "提取现金",
+                    "1001",
+                    "库存现金",
+                    "500",
+                    "",
+                ],
+                vec![
+                    "2025-01",
+                    "6",
+                    "记-1",
+                    "2",
+                    "提取现金",
+                    "100201",
+                    "银行存款",
+                    "",
+                    "500",
+                ],
+                vec![
+                    "2025-02",
+                    "11",
+                    "记-2",
+                    "1",
+                    "支付货款",
+                    "220201",
+                    "应付账款",
+                    "800",
+                    "",
+                ],
+                vec![
+                    "2025-02",
+                    "11",
+                    "记-2",
+                    "2",
+                    "支付货款",
+                    "100201",
+                    "银行存款",
+                    "",
+                    "800",
+                ],
             ],
         );
         let inspected = inspect(
@@ -4896,12 +4944,7 @@ mod tests {
                 .unwrap()
                 .contains("USD 外币账户挂牌暂估值")
         );
-        assert!(
-            usd["rateSource"]
-                .as_str()
-                .unwrap()
-                .contains("待确认")
-        );
+        assert!(usd["rateSource"].as_str().unwrap().contains("待确认"));
         assert!(usd["tierMatchedBy"].as_str().unwrap().contains("USD"));
         let rmb = rows_of(&result, "RMB CMB");
         assert_eq!(rmb["tier"], "demand");
@@ -5761,18 +5804,36 @@ mod tests {
 
         params["currencyFallbackMode"] = json!("functional");
         let functional = preview(&params);
-        assert_eq!(functional["rows"].as_array().unwrap().len(), 1, "{functional:#?}");
+        assert_eq!(
+            functional["rows"].as_array().unwrap().len(),
+            1,
+            "{functional:#?}"
+        );
         assert_eq!(functional["rows"][0]["currency"], "本位币合并");
-        assert_eq!(functional["rows"][0]["tbClosingBalance"], json!(6_000_000.0));
+        assert_eq!(
+            functional["rows"][0]["tbClosingBalance"],
+            json!(6_000_000.0)
+        );
         assert_eq!(functional["summary"]["currencyFallbackMode"], "functional");
 
         params["currencyFallbackMode"] = json!("twoPointByCurrency");
         let two_point = preview(&params);
-        assert_eq!(two_point["rows"].as_array().unwrap().len(), 2, "{two_point:#?}");
-        assert!(two_point["rows"].as_array().unwrap().iter().all(|row| {
-            row["status"] == "两点法推算" && row["jeReconciled"] == false
-        }));
-        assert_eq!(two_point["summary"]["currencyFallbackMode"], "twoPointByCurrency");
+        assert_eq!(
+            two_point["rows"].as_array().unwrap().len(),
+            2,
+            "{two_point:#?}"
+        );
+        assert!(
+            two_point["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| { row["status"] == "两点法推算" && row["jeReconciled"] == false })
+        );
+        assert_eq!(
+            two_point["summary"]["currencyFallbackMode"],
+            "twoPointByCurrency"
+        );
     }
 
     #[test]
@@ -6079,7 +6140,8 @@ mod tests {
             denominator: 12.0,
             interest: 0.0,
         });
-        let path = std::env::temp_dir().join(format!("deposit-two-point-{}.xlsx", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("deposit-two-point-{}.xlsx", std::process::id()));
         let mut book = Workbook::new();
         write_summary(book.add_worksheet(), &[row.clone()], &[(2, 2)]).unwrap();
         write_monthly(book.add_worksheet(), &[row], "month12").unwrap();
@@ -6088,7 +6150,11 @@ mod tests {
         let cells = calamine::Reader::worksheet_range(&mut saved, MONTHLY_SHEET).unwrap();
         let formulas = calamine::Reader::worksheet_formula(&mut saved, MONTHLY_SHEET).unwrap();
         for column in 6..=9 {
-            assert!(cells.get((1, column)).is_none_or(|cell| matches!(cell, calamine::Data::Empty)));
+            assert!(
+                cells
+                    .get((1, column))
+                    .is_none_or(|cell| matches!(cell, calamine::Data::Empty))
+            );
         }
         assert!(
             formulas

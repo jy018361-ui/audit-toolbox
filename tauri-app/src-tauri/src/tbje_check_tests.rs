@@ -168,7 +168,10 @@ fn tb缺少科目编码时按双侧唯一科目名称严格回退() {
     )
     .unwrap();
     let mut input = params(&dir, true);
-    input["tbMapping"].as_object_mut().unwrap().remove("accountCode");
+    input["tbMapping"]
+        .as_object_mut()
+        .unwrap()
+        .remove("accountCode");
     let result = run(&input, &AtomicBool::new(false)).unwrap();
     assert_eq!(result["tbVsJe"]["performed"], json!(true), "{result:#}");
     assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
@@ -176,10 +179,7 @@ fn tb缺少科目编码时按双侧唯一科目名称严格回退() {
         result["tbVsJe"]["accountMatchMode"],
         json!("validatedNameFallback")
     );
-    assert_eq!(
-        result["tbVsJe"]["validatedNameFallbackAccounts"],
-        json!(2)
-    );
+    assert_eq!(result["tbVsJe"]["validatedNameFallbackAccounts"], json!(2));
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -199,12 +199,17 @@ fn 科目名称不能唯一对应时拒绝无编码回退() {
     )
     .unwrap();
     let mut input = params(&dir, true);
-    input["tbMapping"].as_object_mut().unwrap().remove("accountCode");
+    input["tbMapping"]
+        .as_object_mut()
+        .unwrap()
+        .remove("accountCode");
     let result = run(&input, &AtomicBool::new(false)).unwrap();
     assert_eq!(result["tbVsJe"]["performed"], json!(false), "{result:#}");
-    assert!(result["tbVsJe"]["reason"]
-        .as_str()
-        .is_some_and(|text| text.contains("无法安全按科目名称回退匹配")));
+    assert!(
+        result["tbVsJe"]["reason"]
+            .as_str()
+            .is_some_and(|text| text.contains("无法安全按科目名称回退匹配"))
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1675,7 +1680,12 @@ fn 真实样例的三条核对() {
                     if let Ok(output) = std::env::var("TB_STRUCTURE_REPORT_DIR") {
                         let directory = std::path::PathBuf::from(output);
                         std::fs::create_dir_all(&directory).unwrap();
-                        std::fs::write(directory.join(format!("{name}.checks.json")), serde_json::to_vec_pretty(&json!({"params": params, "result": result})).unwrap()).unwrap();
+                        std::fs::write(
+                            directory.join(format!("{name}.checks.json")),
+                            serde_json::to_vec_pretty(&json!({"params": params, "result": result}))
+                                .unwrap(),
+                        )
+                        .unwrap();
                     }
                     let verdict = |key: &str| {
                         let node = &result[key];
@@ -1738,7 +1748,8 @@ fn 真实样例的三条核对() {
 #[test]
 #[ignore = "依赖本机 TBJEPBC 样本目录"]
 fn 十三组十五份tb完整样本异常调查() {
-    let root = std::path::PathBuf::from(std::env::var("TBJEPBC_ROOT").expect("请设置 TBJEPBC_ROOT"));
+    let root =
+        std::path::PathBuf::from(std::env::var("TBJEPBC_ROOT").expect("请设置 TBJEPBC_ROOT"));
     let pairs = [
         ("01科目余额表（TB）.xls", "01序时账 (JE).xlsx"),
         ("02科目余额表.xlsx", "02序时账 (2).xlsx"),
@@ -1754,13 +1765,20 @@ fn 十三组十五份tb完整样本异常调查() {
         ("TBJE/2000&2002公司TB.xlsx", "TBJE/2002公司JE.XLSX"),
         ("TBJE/2025 1-3月余额表.xlsx", "TBJE/2025 1-3月明细账.xlsx"),
         ("TBJE/2025 4-12月余额表.xlsx", "TBJE/2025 4-12月明细账.xlsx"),
-        ("TBJE/科目余额表-20251231 0115最新.xlsx", "TBJE/浙江沪杭甬高速公路股份有限公司.xlsx"),
+        (
+            "TBJE/科目余额表-20251231 0115最新.xlsx",
+            "TBJE/浙江沪杭甬高速公路股份有限公司.xlsx",
+        ),
     ];
     let mut reports = Vec::new();
     for (tb, je) in pairs {
         let analyze = || -> Result<Value, AppError> {
-            let inspect = |name: &str, kind: &str| crate::engine_call_for_test(
-                &format!("fx.inspect_{kind}"), json!({"source": {"inputPath": root.join(name)}}));
+            let inspect = |name: &str, kind: &str| {
+                crate::engine_call_for_test(
+                    &format!("fx.inspect_{kind}"),
+                    json!({"source": {"inputPath": root.join(name)}}),
+                )
+            };
             let tb_inspect = inspect(tb, "tb")?;
             let je_inspect = inspect(je, "je")?;
             let source = |name, inspected: &Value| json!({"inputPath": root.join(name), "sheet": inspected["sheet"], "headerRow": inspected["headerRow"], "headerDepth": inspected["headerDepth"]});
@@ -1801,17 +1819,30 @@ fn 十三组十五份tb完整样本异常调查() {
         };
         let report = match analyze() {
             Ok(report) => {
-                println!("样本 {tb}: rollforward={} equation={} tbVsJe={} mismatched={}", report["result"]["rollforward"]["passed"], report["result"]["equation"]["passed"], report["result"]["tbVsJe"]["passed"], report["result"]["tbVsJe"]["mismatched"]);
+                println!(
+                    "样本 {tb}: rollforward={} equation={} tbVsJe={} mismatched={}",
+                    report["result"]["rollforward"]["passed"],
+                    report["result"]["equation"]["passed"],
+                    report["result"]["tbVsJe"]["passed"],
+                    report["result"]["tbVsJe"]["mismatched"]
+                );
                 report
             }
-            Err(error) => { println!("样本 {tb}: 错误 {error:?}"); json!({"tb": tb, "je": je, "error": format!("{error:?}")}) }
+            Err(error) => {
+                println!("样本 {tb}: 错误 {error:?}");
+                json!({"tb": tb, "je": je, "error": format!("{error:?}")})
+            }
         };
         reports.push(report);
     }
     if let Ok(output) = std::env::var("TB_STRUCTURE_REPORT_DIR") {
         let directory = std::path::PathBuf::from(output);
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(directory.join("all-15-manual-mapped-tbje-checks.json"), serde_json::to_vec_pretty(&reports).unwrap()).unwrap();
+        std::fs::write(
+            directory.join("all-15-manual-mapped-tbje-checks.json"),
+            serde_json::to_vec_pretty(&reports).unwrap(),
+        )
+        .unwrap();
     }
     assert_eq!(reports.len(), 15);
 }
@@ -2224,9 +2255,11 @@ fn 辅助核算锚点认定成功时勾稽细化到维度() {
     assert_eq!(row_a["tbDebit"], json!(100.0));
     assert_eq!(row_a["jeDebit"], json!(80.0));
     assert_eq!(row_a["overallVerdict"], json!("不通过"));
-    assert!(items
-        .iter()
-        .any(|item| item["auxiliary"] == json!("B部门") && item["tbDebit"] == json!(50.0)));
+    assert!(
+        items
+            .iter()
+            .any(|item| item["auxiliary"] == json!("B部门") && item["tbDebit"] == json!(50.0))
+    );
     assert_eq!(tb_vs_je["passed"], json!(false), "{result:#?}");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -2240,9 +2273,19 @@ fn 辅助验证逐科目成功细分失败整体回退且映射范围可限定()
     let mut params = auxiliary_params(&dir, Some("部门"));
     params["includeAllAccounts"] = json!(true);
     let result = run(&params, &AtomicBool::new(false)).unwrap();
-    let groups = result["tbVsJe"]["auxiliaryMatch"]["groups"].as_array().unwrap();
-    assert!(groups.iter().any(|group| group["account"] == "1002" && group["status"] == "verified"));
-    assert!(groups.iter().any(|group| group["account"] == "1003" && group["status"] == "partialCoverage"));
+    let groups = result["tbVsJe"]["auxiliaryMatch"]["groups"]
+        .as_array()
+        .unwrap();
+    assert!(
+        groups
+            .iter()
+            .any(|group| group["account"] == "1002" && group["status"] == "verified")
+    );
+    assert!(
+        groups
+            .iter()
+            .any(|group| group["account"] == "1003" && group["status"] == "partialCoverage")
+    );
     assert_eq!(result["tbVsJe"]["accounts"], json!(3), "{result:#?}");
     params["selectedAccounts"] = json!([{ "account": "1002 银行存款" }]);
     let mapping = fx::auxiliary_link_check(&params).unwrap();
@@ -2272,9 +2315,10 @@ fn je辅助列为空的分录归未分维度桶() {
     let tb_vs_je = &result["tbVsJe"];
     assert_eq!(tb_vs_je["auxiliaryRefined"], json!(true), "{result:#?}");
     let items = tb_vs_je["items"].as_array().unwrap();
-    assert!(items
-        .iter()
-        .any(|item| item["auxiliary"] == json!("") && item["jeDebit"] == json!(40.0)),
+    assert!(
+        items
+            .iter()
+            .any(|item| item["auxiliary"] == json!("") && item["jeDebit"] == json!(40.0)),
         "空格分录应归未分维度行: {items:?}"
     );
     let warnings = result["mappingWarnings"].as_array().unwrap();
@@ -2311,9 +2355,10 @@ fn je无对应辅助列时静默降级并提示() {
     assert_eq!(tb_vs_je["passed"], json!(true), "{result:#?}");
     let warnings = result["mappingWarnings"].as_array().unwrap();
     assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.as_str().unwrap_or("").contains("已按主体＋科目勾稽")),
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .unwrap_or("")
+            .contains("已按主体＋科目勾稽")),
         "降级必须带提示: {warnings:?}"
     );
     let _ = std::fs::remove_dir_all(dir);
@@ -2336,9 +2381,17 @@ fn 手选je辅助列对不上按无匹配降级不换列() {
     .unwrap();
     // 用户手选摘要列当辅助列：值对不上，必须 noMatch 降级——即使「部门」
     // 列本来能对上也不许悄悄换列，用户才知道自己的选择没生效。
-    let result = run(&auxiliary_params(&dir, Some("摘要")), &AtomicBool::new(false)).unwrap();
+    let result = run(
+        &auxiliary_params(&dir, Some("摘要")),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
     let tb_vs_je = &result["tbVsJe"];
-    assert_eq!(tb_vs_je["auxiliaryMatch"]["status"], json!("noMatch"), "{result:#?}");
+    assert_eq!(
+        tb_vs_je["auxiliaryMatch"]["status"],
+        json!("noMatch"),
+        "{result:#?}"
+    );
     assert_eq!(tb_vs_je["auxiliaryRefined"], json!(false));
     let warnings = result["mappingWarnings"].as_array().unwrap();
     assert!(
@@ -2417,8 +2470,16 @@ fn 真实06样例辅助核算联动探针() {
         "tbSource": {"inputPath": tb_path, "sheet": "", "headerRow": 1, "headerDepth": 2},
         "jeSource": {"inputPath": je_path, "sheet": "", "headerRow": 0, "headerDepth": 1},
     });
-    let tb = crate::engine_call_for_test("fx.inspect_tb", json!({"source": params["tbSource"].clone()})).unwrap();
-    let je = crate::engine_call_for_test("fx.inspect_je", json!({"source": params["jeSource"].clone()})).unwrap();
+    let tb = crate::engine_call_for_test(
+        "fx.inspect_tb",
+        json!({"source": params["tbSource"].clone()}),
+    )
+    .unwrap();
+    let je = crate::engine_call_for_test(
+        "fx.inspect_je",
+        json!({"source": params["jeSource"].clone()}),
+    )
+    .unwrap();
     params["tbMapping"] = tb["suggestedMapping"].clone();
     params["jeMapping"] = je["suggestedMapping"].clone();
     let link = crate::fx::auxiliary_link_check(&json!({

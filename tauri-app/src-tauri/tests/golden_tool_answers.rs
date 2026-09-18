@@ -20,7 +20,11 @@ fn golden_tool_answers() {
             continue;
         };
         let p = PathBuf::from(path);
-        let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let name = p
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let safe: String = name
             .chars()
             .map(|c| if r#"\/:*?"<>|"#.contains(c) { '_' } else { c })

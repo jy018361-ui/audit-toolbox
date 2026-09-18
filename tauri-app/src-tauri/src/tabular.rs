@@ -5292,10 +5292,8 @@ fn suggest_mapping_full(headers: &[String], rows: &[Vec<String>]) -> LedgerMappi
     }
     let has_data = |name: &str| {
         header_index(headers, name).is_some_and(|index| {
-            rows.iter().any(|row| {
-                row.get(index)
-                    .is_some_and(|value| !value.trim().is_empty())
-            })
+            rows.iter()
+                .any(|row| row.get(index).is_some_and(|value| !value.trim().is_empty()))
         })
     };
     mapping.account_name.retain(|name| has_data(name));
@@ -6753,14 +6751,13 @@ fn export_je_mark_disk(
             ));
         }
         progress("write", 860, 1000, "正在流式写出标记结果…");
-        let rows =
-            ledger.write_selected_marked_csv(
-                &output,
-                &ledger.table.headers,
-                job.mark_loss_transfer,
-                progress,
-                cancel,
-            )?;
+        let rows = ledger.write_selected_marked_csv(
+            &output,
+            &ledger.table.headers,
+            job.mark_loss_transfer,
+            progress,
+            cancel,
+        )?;
         outputs.push(output.to_string_lossy().into_owned());
         batch_results.push(json!({
             "name": batch.name,

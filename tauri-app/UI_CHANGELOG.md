@@ -1,5 +1,62 @@
 # UI 修改记录
 
+## 2026-09-18 · 科目清单分层口径统一与借款利率表自动生成
+
+### 目标
+
+- 多层级 TB 的科目分类不再父子全量铺开：存款利息、汇兑损益的分类清单只列一级科目，FA List 维持末级／辅助明细维度不变。
+- 存款利息把「科目分类」与「存款类型」拆成两张卡：分类在一级行上做，存款类型按末级科目（辅助明细验证通过时按辅助户）逐个确认。
+- 借款利息进入第二步即自动生成利率确认表，不再要求手动点「生成」；第二步删除与第三步重复的资产负债表日。
+- 布局回调：字段映射一键复核按钮收回区块右端；各向导页步骤尾的主按钮（下一步）统一靠右，提示语留在左侧。
+
+### 设计决策
+
+- 层级判定只认首词纯数字编码的严格前缀关系（分段编码、无编码、补零混写原样保留），新增 `accountHierarchy.ts` 供存款/汇兑共用；末级对一级人工分类的继承沿用引擎既有的编码前缀继承，测算口径不变。
+- 汇兑的一级行把名下末级的币种识别结果并成一格（任一末级认出外币即展示、多币种即提示复核）；一级行上手工指定的币种在发送前展开成末级键，引擎的精确匹配逻辑不动。
+- 借款自动生成每次进入第二步只跑一次，之后的科目改动仍由「重新生成借款利率表」手动触发；生成后修改表日会作废利率明细（手填利率独立保存不丢失），避免屏幕口径与表日脱节。
+
+### 验证方式
+
+- `npx vitest run src/accountHierarchy.test.ts src/DepositInterestInteractions.test.tsx src/LoanInterestPageUi.test.tsx src/FxAuditPage.test.ts src/DepositInterestPage.test.ts`
+- `npm run build`
+
+## 2026-09-18 · 全工具 LLM 映射纠错与清除
+
+### 目标
+
+- LLM 映射复核不仅补缺和确认，也必须纠正已有错误映射；没有可信替代列时能够明确撤销错误映射。
+
+### 设计决策
+
+- 公共账表与固定资产复核协议区分保留、替换、清除和证据不足；清除在界面统一显示为“原列 → 未映射”，进入既有变更／待确认清单并支持撤销。
+- 公共账表只有后端确定性疑点核准的清除可自动生效；其他清除以及全部 FA 清除均等待人工采纳，模型不能自行声明安全。
+
+### 验证方式
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib mapping_prompt_tests`
+- `npx vitest run src/ledgerMappingLabels.test.ts src/faListUi.test.ts src/faSubtoolsUi.test.ts src/components/LedgerReviewAll.test.tsx`
+- `npm run build`
+
+## 2026-09-18 · 联合复核返回不重载与借款利息支出对比
+
+### 目标
+
+- 修复汇兑、存款、借款、FA TB＋JE 在步骤切换后返回时，对同一批来源重复自动复核的问题。
+- 借款科目确认移除“系统建议”展示，增加利息支出科目确认；结果区分本金勾稽与计息口径，并显示测算利息支出与 TB 利息支出的差异。
+
+### 设计决策
+
+- 公共 `LedgerReviewAll` 以页面级稳定对象记住已自动复核的来源键；组件因步骤切换卸载不丢记忆，页面退出后由 `WeakMap` 自动释放。仅路径、Sheet、标题行或标题层数变化才重新触发。
+- 利息支出只自动识别明确的利息支出／费用科目，排除应付利息、应收利息及利息收入；用户可逐科目改写。发生额本年累计优先、本期其次，借方为费用正数；年末结转借贷同额时按科目登记方向和红字恢复金额。
+- 借款结果不再用一个“待复核”混合本金差异、缺利率和时点推算：本金按差异独立显示“一致／有差异”，计息口径显示“已确认／待填利率／时点待确认／两点法推算”。
+
+### 验证方式
+
+- `npx vitest run src/components/LedgerReviewAll.test.tsx src/LoanInterestPage.test.ts src/LoanInterestPageUi.test.tsx`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib 利息支出`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib loan_interest --no-fail-fast`
+- `npm run build`
+
 ## 2026-09-18 · 存款双状态与汇兑复核说明简化
 
 ### 目标

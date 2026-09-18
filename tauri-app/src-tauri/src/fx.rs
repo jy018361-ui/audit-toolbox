@@ -2300,16 +2300,15 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
     // TB 的币种列整列同值时按形态像本位币列，但若全表根本没有本位币
     // 命名列，这列就是唯一的交易币种列（01 号样例「币别」整列人民币），
     // 罚分把它压到阈值下会让 currency 整角色消失。
-    let has_functional_named = ledger_mapping::role_of(kind, "functionalCurrency").is_some_and(
-        |def| {
+    let has_functional_named =
+        ledger_mapping::role_of(kind, "functionalCurrency").is_some_and(|def| {
             table.headers.iter().any(|h| {
                 def.aliases.iter().any(|a| {
                     normalize_header(h) == normalize_header(a)
                         || ledger_mapping::segment_exact(h, a)
                 })
             })
-        },
-    );
+        });
     let mut out = BTreeMap::new();
     for definition in ledger_mapping::roles(kind) {
         let (role, aliases, conflicts) =
@@ -2350,12 +2349,8 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
                 // 「长别名/日期加成」的相对次序——否则记帐日期与凭证日期、
                 // 公司代码与单位这类同档平票会退化成按列序取胜。
                 let mut score: f64 = match ledger_mapping::alias_score(definition, h) {
-                    Some(engine_score) if engine_score >= 2.0 => {
-                        0.94 + (engine_score - 2.0) * 0.05
-                    }
-                    Some(engine_score) if engine_score >= 1.5 => {
-                        0.88 + (engine_score - 1.5) * 0.05
-                    }
+                    Some(engine_score) if engine_score >= 2.0 => 0.94 + (engine_score - 2.0) * 0.05,
+                    Some(engine_score) if engine_score >= 1.5 => 0.88 + (engine_score - 1.5) * 0.05,
                     Some(engine_score) => 0.72 + (engine_score - 1.0) * 0.05,
                     None => semantic_role_score(role, &n),
                 };
@@ -2491,13 +2486,15 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
         // 多列角色（科目名称/凭证识别/辅助核算）天然横跨多列：选样-序时账的
         // 一至五级科目、SAP 导出的几十个维度列都靠它。截到 3 会把四级、五级
         // 科目这类同分列无声丢掉，多列角色放宽到 24。
-        choices.truncate(if ledger_mapping::role_of(kind, role).is_some_and(|r| r.multi) {
-            24
-        } else if kind == "tb" && role == "currency" {
-            8
-        } else {
-            3
-        });
+        choices.truncate(
+            if ledger_mapping::role_of(kind, role).is_some_and(|r| r.multi) {
+                24
+            } else if kind == "tb" && role == "currency" {
+                8
+            } else {
+                3
+            },
+        );
         out.insert(role.into(), choices);
     }
     out
@@ -3930,17 +3927,27 @@ pub(crate) fn auxiliary_link_check(params: &Value) -> Result<Value, AppError> {
             if let Some(value) = row.get(*column) {
                 let normalized = ledger_mapping::anchor_norm(value);
                 if !normalized.is_empty() {
-                    je_values.entry((entity, code)).or_default().insert(normalized);
+                    je_values
+                        .entry((entity, code))
+                        .or_default()
+                        .insert(normalized);
                 }
             }
         }
     }
-    let mut review_details = BTreeMap::<ledger_mapping::AuxiliaryGroupKey, BTreeMap<String, String>>::new();
+    let mut review_details =
+        BTreeMap::<ledger_mapping::AuxiliaryGroupKey, BTreeMap<String, String>>::new();
     let mut views = BTreeMap::new();
     for (_, (column, _)) in &verified_columns {
-        views.entry(*column).or_insert_with(||
-            ledger_mapping::tb_dimension_rows(&tb.headers, &tb.rows, &tb_mapping, role, Some(*column))
-        );
+        views.entry(*column).or_insert_with(|| {
+            ledger_mapping::tb_dimension_rows(
+                &tb.headers,
+                &tb.rows,
+                &tb_mapping,
+                role,
+                Some(*column),
+            )
+        });
     }
     let entity_column = mapped_cols(&tb_mapping, "entity")
         .first()
@@ -3963,10 +3970,14 @@ pub(crate) fn auxiliary_link_check(params: &Value) -> Result<Value, AppError> {
                 &scope,
             );
             let key = (entity, detail.code.clone());
-            if verified_columns.get(&key).is_some_and(|(selected, _)| *selected == column)
+            if verified_columns
+                .get(&key)
+                .is_some_and(|(selected, _)| *selected == column)
                 && !detail.aux.is_empty()
             {
-                review_details.entry(key).or_default()
+                review_details
+                    .entry(key)
+                    .or_default()
                     .entry(detail.aux.clone())
                     .or_insert_with(|| detail.aux_display.clone());
             }
@@ -16448,15 +16459,27 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             "selectedAccounts":[{"account":"100201"}]
         });
         let partial = auxiliary_link_check(&params).unwrap();
-        assert_eq!(partial["groups"][0]["status"], "verified", "锚点仍应定位到 JE 列：{partial:#}");
-        assert_eq!(partial["groups"][0]["reviewVerified"], false, "休眠余额户未在 JE 命中，第二步不得部分展开：{partial:#}");
+        assert_eq!(
+            partial["groups"][0]["status"], "verified",
+            "锚点仍应定位到 JE 列：{partial:#}"
+        );
+        assert_eq!(
+            partial["groups"][0]["reviewVerified"], false,
+            "休眠余额户未在 JE 命中，第二步不得部分展开：{partial:#}"
+        );
         assert_eq!(partial["groups"][0]["details"], json!([]));
 
         fs::write(&je, "主体,日期,凭证号,科目编码,科目名称,银行账户,金额\nE,2025-01-01,1,100201,银行存款,A银行,10\nE,2025-01-02,2,100201,银行存款,B银行,0\n").unwrap();
         params["jeSource"]["inputPath"] = json!(je);
         let complete = auxiliary_link_check(&params).unwrap();
-        assert_eq!(complete["groups"][0]["reviewVerified"], true, "{complete:#}");
-        assert_eq!(complete["groups"][0]["details"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            complete["groups"][0]["reviewVerified"], true,
+            "{complete:#}"
+        );
+        assert_eq!(
+            complete["groups"][0]["details"].as_array().unwrap().len(),
+            2
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 

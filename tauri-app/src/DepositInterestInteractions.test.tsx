@@ -274,17 +274,21 @@ describe("存款科目手工分类请求", () => {
       "deposit.classify_source_llm",
       expect.anything(),
     );
-    const leafInput = screen.getByRole("combobox", { name: `${leaf}的分类` });
-    expect(leafInput).toHaveValue("");
-    expect((leafInput as HTMLSelectElement).selectedOptions[0]).toHaveTextContent("不参与测算");
-    expect((leafInput as HTMLSelectElement).selectedOptions[0]).not.toHaveTextContent("自动");
+    // 科目分类只列一级科目：末级 66030101 不再出现，分类随一级继承。
+    expect(
+      screen.queryByRole("combobox", { name: `${leaf}的分类` }),
+    ).not.toBeInTheDocument();
+    // 末级口径的存款类型在独立卡片里按计息科目逐个确认。
+    expect(
+      await screen.findByRole("combobox", { name: `${bank}的存款类型` }),
+    ).toBeVisible();
     expect(screen.queryByText("内置挂牌利率可能已过期")).not.toBeInTheDocument();
     fireEvent.change(
       screen.getByRole("combobox", { name: `${bank}的分类` }),
       { target: { value: "cash_on_hand" } },
     );
+    // 库存现金不是计息科目：末级卡片里相应行随之消失。
     expect(screen.queryByRole("combobox", { name: `${bank}的存款类型` })).not.toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: `${bank}的分类` }).closest("label")?.querySelector(".deposit-account-na")).toHaveTextContent("不适用");
     fireEvent.change(
       screen.getByRole("combobox", { name: `${bank}的分类` }),
       { target: { value: "" } },
@@ -310,19 +314,19 @@ describe("存款科目手工分类请求", () => {
     act(() => mock.event?.(complete));
     goToStep(STEP2);
     // 切换步骤会卸载重挂这张卡片，先前抓的引用已脱离文档，必须重新查。
-    fireEvent.change(screen.getByRole("combobox", { name: `${leaf}的分类` }), {
-      target: { value: "excluded" },
+    fireEvent.change(screen.getByRole("combobox", { name: `${bank}的分类` }), {
+      target: { value: "cash_on_hand" },
     });
     goToStep(STEP3);
     fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
     await waitFor(() => expect(mock.jobStart).toHaveBeenCalledTimes(2));
     expect(mock.jobStart.mock.calls[1][1].accountRoleOverrides).toEqual({
       [parent]: "interest_income",
-      [leaf]: "excluded",
+      [bank]: "cash_on_hand",
     });
     act(() => mock.event?.(complete));
     goToStep(STEP2);
-    fireEvent.change(screen.getByRole("combobox", { name: `${leaf}的分类` }), {
+    fireEvent.change(screen.getByRole("combobox", { name: `${bank}的分类` }), {
       target: { value: "" },
     });
     goToStep(STEP3);

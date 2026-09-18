@@ -319,10 +319,10 @@ describe("看账页面状态规则", () => {
       "LLM 复核完成：已自动调整 3 项，不合适可逐条撤销。",
     );
     expect(kanzhangReviewSummary(3, 2)).toBe(
-      "LLM 复核完成：已自动调整 3 项，不合适可逐条撤销；另有 2 项把握不足 60%，未改动，请确认是否采纳。",
+      "LLM 复核完成：已自动调整 3 项，不合适可逐条撤销；另有 2 项需人工确认，尚未改动。",
     );
     expect(kanzhangReviewSummary(0, 2)).toBe(
-      "LLM 复核完成：另有 2 项把握不足 60%，未改动，请确认是否采纳。",
+      "LLM 复核完成：另有 2 项需人工确认，尚未改动。",
     );
     expect(kanzhangReviewSummary(0, 0)).toBe(
       "LLM 复核完成：现有字段映射与 LLM 判断一致，未做改动。",

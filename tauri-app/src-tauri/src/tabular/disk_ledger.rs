@@ -589,8 +589,8 @@ fn build_prepared(
         let has_amount = amount_indexes.iter().any(present);
         // 科目编码或名称任一有值即构成完整科目身份；只有凭证键缺失，或全部
         // 科目身份列都为空，才把金额行列为待剔除候选。与内存路径保持一致。
-        let candidate = has_amount
-            && (ids.iter().any(|i| !present(i)) || accounts.iter().all(|i| !present(i)));
+        let candidate =
+            has_amount && (ids.iter().any(|i| !present(i)) || accounts.iter().all(|i| !present(i)));
         if mapped.iter().any(present) && (ids.iter().all(present) || has_amount) {
             let (dr, cr, raw, unsigned, hd, hc, pos, neg) = amount_columns.values(&row);
             let sign_key = |indexes: &[usize]| {
@@ -857,16 +857,20 @@ impl DiskLedger {
     ) -> Result<MarkResult, AppError> {
         check_cancel(cancel)?;
         let net = self.selected_net_column();
-        self.db.execute_batch(
-            "DROP TABLE IF EXISTS temp.mark_loss;
+        self.db
+            .execute_batch(
+                "DROP TABLE IF EXISTS temp.mark_loss;
              CREATE TEMP TABLE mark_loss(voucher TEXT PRIMARY KEY) WITHOUT ROWID;",
-        ).map_err(sql_error)?;
+            )
+            .map_err(sql_error)?;
         if mark_loss_transfer {
-            self.db.execute_batch(
-                "INSERT INTO mark_loss
+            self.db
+                .execute_batch(
+                    "INSERT INTO mark_loss
                  SELECT DISTINCT voucher FROM processed
                  WHERE account LIKE '%本年利润%' OR account LIKE '%未分配利润%';",
-            ).map_err(sql_error)?;
+                )
+                .map_err(sql_error)?;
         }
         self.db.execute_batch(&format!(
             "DROP TABLE IF EXISTS temp.mark_eligible;
@@ -968,11 +972,14 @@ impl DiskLedger {
                 |row| row.get::<_, i64>(0),
             )
             .map_err(sql_error)? as usize;
-        let loss_transfer_vouchers = self.db.query_row(
-            "SELECT COUNT(*) FROM mark_loss WHERE voucher IN (SELECT voucher FROM selected)",
-            [],
-            |row| row.get::<_, i64>(0),
-        ).map_err(sql_error)? as usize;
+        let loss_transfer_vouchers = self
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM mark_loss WHERE voucher IN (SELECT voucher FROM selected)",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(sql_error)? as usize;
         Ok(MarkResult {
             direct_pairs,
             cross_pairs,
@@ -1035,7 +1042,11 @@ impl DiskLedger {
                 let loss: i64 = record.get(4).map_err(sql_error)?;
                 let mut output_row = Vec::with_capacity(row.len() + 4);
                 if mark_loss_transfer {
-                    output_row.push(if loss != 0 { "损益结转".into() } else { String::new() });
+                    output_row.push(if loss != 0 {
+                        "损益结转".into()
+                    } else {
+                        String::new()
+                    });
                 }
                 if status.is_empty() {
                     output_row.extend([String::new(), String::new(), String::new()]);

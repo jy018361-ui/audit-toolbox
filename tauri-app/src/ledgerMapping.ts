@@ -38,7 +38,10 @@ export type Inspect = {
 export type Review = {
   role: keyof Mapping;
   currentColumn?: string;
-  suggestedColumn: string;
+  suggestedColumn?: string;
+  action?: "replace" | "clear";
+  /** 后端以确定性 suspectMappings 证据核准后，clear 才可自动执行。 */
+  autoClearSafe?: boolean;
   confidence?: number;
   reason?: string;
 };
@@ -462,7 +465,9 @@ export function resolveRoleLabels(
 export type LedgerChange = {
   role: string;
   currentColumn?: string;
-  suggestedColumn: string;
+  suggestedColumn?: string;
+  action?: "replace" | "clear";
+  autoClearSafe?: boolean;
   confidence?: number;
   reason?: string;
 };
@@ -479,6 +484,9 @@ export type LedgerPlannedChange = LedgerChange & {
   attention: boolean;
   beforeValue?: string | string[];
   label: string;
+  /** 清除错误映射时 suggestedColumn 为空，界面统一展示为“未映射”。 */
+  action: "replace" | "clear";
+  suggestedColumn: string;
 };
 
 /**
@@ -503,6 +511,19 @@ const appendMappingColumn = (
   return [...current, column].filter(
     (item, index, all) => Boolean(item?.trim()) && all.indexOf(item) === index,
   );
+};
+
+/** 样例行中整列全空即视为空壳列（与 Rust 内核「全空列不进建议」同口径）。
+ * 样例为空时无从判断，不作空判。 */
+const columnAllEmptyIn = (
+  headers: string[],
+  sampleRows: string[][],
+  column: string,
+): boolean => {
+  if (!sampleRows.length) return false;
+  const index = headers.indexOf(column);
+  if (index < 0) return false;
+  return sampleRows.every((row) => !(row?.[index] ?? "").trim());
 };
 
 /** 一段文本像不像科目编码（与 Rust 内核 looks_like_account_code 同口径）。 */
@@ -645,6 +666,14 @@ export function planLedgerChanges(
   // 例如 accountCode 先从「会计科目」挪走，accountName 才能接手该列；
   // 若逐条检查，两条都会因为“当前仍被占用”而被错误丢弃。
   const validHighChanges = changes.filter((change) => {
+    if (change.action === "clear")
+      return (
+        change.role in labels &&
+        ledgerMappingText(current[change.role]) !== "未映射" &&
+        change.autoClearSafe === true &&
+        change.confidence !== undefined &&
+        change.confidence >= AUTO_APPLY_MIN
+      );
     const column = change?.suggestedColumn?.trim();
     return (
       !!column &&
@@ -656,12 +685,12 @@ export function planLedgerChanges(
   });
   const vacatedByRole = new Map<string, Set<string>>();
   for (const change of validHighChanges) {
-    if (multiColumnRoles.has(change.role)) continue;
-    const target = change.suggestedColumn.trim();
+    if (multiColumnRoles.has(change.role) && change.action !== "clear") continue;
+    const target = change.action === "clear" ? "" : change.suggestedColumn!.trim();
     const before = current[change.role];
     const sources = Array.isArray(before) ? before : before ? [before] : [];
     for (const source of sources) {
-      if (source === target) continue;
+      if (target && source === target) continue;
       const all = vacatedByRole.get(change.role) ?? new Set<string>();
       all.add(source);
       vacatedByRole.set(change.role, all);
@@ -670,20 +699,33 @@ export function planLedgerChanges(
   for (const change of changes) {
     // 明确低于 60% 的模型输出没有足够操作价值：不应用，也不进入待确认 UI。
     if (!isVisibleLlmReviewConfidence(change.confidence)) continue;
-    const column = change?.suggestedColumn?.trim();
-    if (!column || !(change.role in labels) || !headers.includes(column))
-      continue;
+    const action = change.action === "clear" ? "clear" : "replace";
+    const column = change?.suggestedColumn?.trim() ?? "";
+    if (!(change.role in labels)) continue;
+    if (action === "clear") {
+      if (ledgerMappingText(current[change.role]) === "未映射") continue;
+    } else if (!column || !headers.includes(column)) continue;
     const beforeValue = current[change.role];
     const planned: LedgerPlannedChange = {
       ...change,
+      action,
       suggestedColumn: column,
       currentColumn: ledgerMappingText(beforeValue),
       beforeValue: Array.isArray(beforeValue) ? [...beforeValue] : beforeValue,
       attention: change.confidence !== undefined && change.confidence < 0.7,
       label: labels[change.role] ?? change.role,
     };
-    if (change.confidence === undefined || change.confidence < AUTO_APPLY_MIN) {
+    if (
+      change.confidence === undefined ||
+      change.confidence < AUTO_APPLY_MIN ||
+      (action === "clear" && change.autoClearSafe !== true)
+    ) {
       pending.push(planned);
+      continue;
+    }
+    if (action === "clear") {
+      delete next[change.role];
+      applied.push(planned);
       continue;
     }
     const occupied = Object.entries(next).filter(
@@ -723,9 +765,17 @@ export function planLedgerChanges(
     }
     // 多列角色是“追加组成键”，不是“建议一次覆盖一次”。例如目标 JE 的
     // 「凭证字」「凭证号」都属于 id；LLM 分两条返回时两列必须同时保留。
-    next[change.role] = multiColumnRoles.has(change.role)
-      ? appendMappingColumn(next[change.role], column)
-      : column;
+    // 纠偏（2026-09-18）：改指多列角色时顺带剔除样例中整列全空的旧列——
+    // 追加语义不动旧列，空壳列（3300 家族的「二级费用科目」）会一直挂着。
+    if (multiColumnRoles.has(change.role)) {
+      const before = next[change.role];
+      const kept = (Array.isArray(before) ? before : before ? [before] : []).filter(
+        (item) => item?.trim() && !columnAllEmptyIn(headers, sampleRows, item),
+      );
+      next[change.role] = appendMappingColumn(kept, column);
+    } else {
+      next[change.role] = column;
+    }
     applied.push(planned);
   }
   return { mapping: next, applied, pending };
@@ -997,8 +1047,9 @@ export const effectiveVoucherKey = (mapping: Mapping) =>
 // LLM 常把"建议列 = 当前列"的字段也放进 reviews，采纳与否结果一样，属于噪音；这里按采纳后的实际效果判断是否值得展示。
 export function isRedundantKanzhangReview(
   mapping: Mapping,
-  item: { role: keyof Mapping; suggestedColumn?: string },
+  item: { role: keyof Mapping; suggestedColumn?: string; action?: "replace" | "clear" },
 ): boolean {
+  if (item.action === "clear") return formatMappingValue(mapping[item.role]) === "未映射";
   const suggested = item.suggestedColumn?.trim();
   if (!suggested) return true;
   const current = mapping[item.role];
@@ -1016,7 +1067,7 @@ export function kanzhangReviewSummary(
 ): string {
   const done = applied ? `已自动调整 ${applied} 项，不合适可逐条撤销` : "";
   const ask = pending
-    ? `另有 ${pending} 项把握不足 ${Math.round(AUTO_APPLY_MIN * 100)}%，未改动，请确认是否采纳`
+    ? `另有 ${pending} 项需人工确认，尚未改动`
     : "";
   if (done && ask) return `LLM 复核完成：${done}；${ask}。`;
   if (done) return `LLM 复核完成：${done}。`;
@@ -1199,24 +1250,30 @@ export function applyLedgerReviews(
   for (const raw of [...(value.fills ?? []), ...(value.reviews ?? [])]) {
     if (!isVisibleLlmReviewConfidence(raw?.confidence)) continue;
     const role = normalizeLedgerRole(raw?.role);
-    const column = raw?.suggestedColumn?.trim();
-    if (!role || !column) continue;
-    const item: Review = { ...raw, role, suggestedColumn: column };
+    const clear = raw?.action === "clear";
+    const column = raw?.suggestedColumn?.trim() ?? "";
+    if (!role || (!clear && !column)) continue;
+    if (clear && formatMappingValue(next[role]) === "未映射") continue;
+    const item: Review = { ...raw, role, action: clear ? "clear" : "replace", suggestedColumn: column };
     // 另一套金额方案已经映射成功，对它的建议一律丢弃，不进清单也不提示。
     if (isRedundantKanzhangReview(next, item) || isSchemeLockedRole(next, role))
       continue;
-    if (!shouldAutoApply(item.confidence)) {
+    if (!shouldAutoApply(item.confidence) || (clear && raw.autoClearSafe !== true)) {
       waiting.push(item);
       continue;
     }
     const before = next[role];
-    const after = isMultiRole(role) ? [column] : column;
+    const after = clear ? undefined : isMultiRole(role) ? [column] : column;
     next = { ...next, [role]: after };
     applied.push({
       role,
       before,
       after,
-      source: formatMappingValue(before) === "未映射" ? "fill" : "replace",
+      source: clear
+        ? "replace"
+        : formatMappingValue(before) === "未映射"
+          ? "fill"
+          : "replace",
       reason: item.reason,
       confidence: item.confidence,
     });

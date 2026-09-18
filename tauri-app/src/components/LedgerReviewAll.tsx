@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   applyLedgerReviewsTogether,
@@ -259,10 +259,24 @@ export function LedgerReviewAll(props: {
   results?: Partial<Record<"je" | "tb", LedgerReviewOutcome>>;
   /** 页面级忙碌（测算等任务进行中）时一并禁用。 */
   disabled?: boolean;
+  /**
+   * 来源身份（路径／Sheet／表头）变化时自动执行一次复核。
+   * 空串表示上传识别尚未收口，不发请求。
+   */
+  autoReviewKey?: string;
   onReviewAll: () => void;
   onUndo?: (kind: "je" | "tb", index: number) => void;
   onAccept?: (kind: "je" | "tb", index: number) => void;
 }) {
+  const latestReview = useRef(props.onReviewAll);
+  const automaticKey = useRef("");
+  latestReview.current = props.onReviewAll;
+  useEffect(() => {
+    const key = props.autoReviewKey?.trim() ?? "";
+    if (!key || props.disabled || automaticKey.current === key) return;
+    automaticKey.current = key;
+    latestReview.current();
+  }, [props.autoReviewKey, props.disabled]);
   const reviewingAny = props.present.some((kind) => props.reviewing[kind]);
   const both = props.present.length > 1;
   const subject = props.present

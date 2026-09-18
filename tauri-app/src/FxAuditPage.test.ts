@@ -5,12 +5,14 @@ import {
   fxCurrencyOptions,
   fxResolveEntityCurrencies,
   fxCurrencySourceLabel,
+  fxCurrencyDefaultLabel,
   fxFallbackFunctional,
   fxAccountCurrencyOverrides,
   fxAllowedModes,
   fxApplyJobResult,
   fxAttachRole,
   fxDefaultMode,
+  fxQualityAction,
   fxDetachRole,
   fxDropTargetAt,
   fxMergeJobResult,
@@ -29,6 +31,16 @@ import {
   uncoveredBreakdown,
   uncoveredMetricDetail,
 } from "./FxAuditPage";
+
+describe("汇兑检查提示", () => {
+  it("把常见异常转为可执行的短句", () => {
+    expect(fxQualityAction("月末汇率缺失", "隔离")).toContain("补齐后重算");
+    expect(fxQualityAction("当月入账汇率不恒定", "待复核")).toBe("核对该月凭证的入账汇率");
+    expect(fxQualityAction("外币业务凭证不构成汇兑事项", "提示")).toContain("凭证分类");
+    expect(fxQualityAction("同一科目存在多种外币敞口", "隔离")).toContain("TB");
+    expect(fxQualityAction("同一余额键多行", "合并")).toBe("已合并计入，无需处理");
+  });
+});
 import {
   applyLedgerReviewsTogether,
   resolveLedgerPairKinds,
@@ -920,6 +932,12 @@ describe("科目币种覆盖", () => {
     // 退回本位币列等于没认出账户币种，不必再区分来自哪份文件。
     expect(fxCurrencySourceLabel("TB", "本位币列")).toBe("按本位币");
     expect(fxCurrencySourceLabel("", "")).toBe("按本位币");
+  });
+
+  it("账户币种默认项直接展示识别结果，不附加自动前缀", () => {
+    expect(fxCurrencyDefaultLabel("USD", "TB", "币种列", "CNY")).toBe("USD（TB币种列）");
+    expect(fxCurrencyDefaultLabel("", "", "", "CNY")).toBe("CNY（按本位币）");
+    expect(fxCurrencyDefaultLabel("", "", "", "")).toBe("未识别");
   });
 
   it("只有 TB 且依据是本位币列时标记为未识别", () => {

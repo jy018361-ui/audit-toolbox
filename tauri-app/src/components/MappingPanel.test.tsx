@@ -221,6 +221,12 @@ describe("共用字段映射面板", () => {
     expect(option?.textContent).toContain("已用");
   });
 
+  it("当前列已挂的角色同样标为已用", () => {
+    const { selects } = panel({ mapping: { accountCode: "会计科目" } });
+    const option = selects[0].querySelector('option[value="accountCode"]');
+    expect(option?.textContent).toContain("已用");
+  });
+
   it("可多列角色被占用后同样标为已用（不拦截继续挂列）", () => {
     const { selects } = panel({
       mapping: { accountName: ["总账科目"] },
@@ -247,7 +253,7 @@ describe("共用字段映射面板", () => {
             : undefined,
     });
     expect(screen.getByText(/为必填字段/)).toHaveTextContent(
-      "＊ 为必填字段；（选填）须按当前分组的整组规则补充；（已用）＝已有列挂在该角色上，可多列角色仍可继续加列。",
+      "＊ 为必填字段；（选填）须按当前分组的整组规则补充。",
     );
     expect(
       selects[0].querySelector('option[value="functionalAmount"]'),

@@ -664,6 +664,7 @@ summary:focus-visible {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--sp-4);
+  max-width: calc(840px + var(--sp-4));
   /* 与上方整宽字段（如文件选择行）拉开节奏，避免第一行标签紧贴上方控件 */
   margin-top: var(--sp-4);
 }
@@ -2098,6 +2099,11 @@ summary:focus-visible {
   border: 1px solid var(--border-soft);
   border-radius: var(--r-lg);
   background: var(--surface-sunken);
+}
+
+/* 文件选择可占满来源卡；普通参数遵循 420px 标准字段宽度，避免为填满卡片被拉长。 */
+.fa-side > .field:not(:first-of-type) {
+  max-width: 420px;
 }
 .fa-side-title {
   margin: 0;

@@ -32,6 +32,9 @@ async function renderApp() {
   } else if (import.meta.env.DEV && params.has("task-state-fixture")) {
     const { TaskStateFixture } = await import("./preview/TaskStateFixture");
     content = <TaskStateFixture />;
+  } else if (import.meta.env.DEV && params.has("fa-pivot-fixture")) {
+    const { FaPivotFixture } = await import("./preview/FaPivotFixture");
+    content = <FaPivotFixture />;
   }
   root.render(
     <React.StrictMode>

@@ -200,13 +200,10 @@
     flex-direction: column;
   }
 
-  .dep-export-actions,
-  .dep-export-actions button {
-    width: 100%;
-  }
-
-  .dep-export-actions button {
-    flex: 1 1 0;
+  .dep-export-actions {
+    flex-wrap: wrap;
+    width: fit-content;
+    max-width: 100%;
   }
 }
 

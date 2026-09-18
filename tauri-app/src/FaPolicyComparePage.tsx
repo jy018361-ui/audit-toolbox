@@ -745,18 +745,16 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
               </option>
             )}
             {roleOptions.map(([key, label]) => {
-              const mappedHere = mapped.some(
-                ([mappedKey]) => mappedKey === key,
-              );
-              const takenByOther = usedRoles.has(key) && !mappedHere;
+              // 已映射的角色统一标注（已用），含当前列自己挂的角色。
+              const taken = usedRoles.has(key);
               return (
                 <option
                   key={key}
                   value={key}
-                  className={takenByOther ? "dt-role-taken" : undefined}
+                  className={taken ? "dt-role-taken" : undefined}
                 >
                   {label}
-                  {takenByOther ? "（已用）" : ""}
+                  {taken ? "（已用）" : ""}
                 </option>
               );
             })}
@@ -875,52 +873,57 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                           />
                         </div>
                       </Field>
-                      <Field label="Sheet">
-                        {inspection?.[side].sheets.length ? (
-                          <select
-                            value={side === "begin" ? beginSheet : endSheet}
-                            disabled={busy}
-                            onChange={(e) => {
-                              if (side === "begin")
-                                setBeginSheet(e.target.value);
-                              else setEndSheet(e.target.value);
-                              if (side === "begin") setBeginHeaderRow("");
-                              else setEndHeaderRow("");
-                            }}
-                          >
-                            {inspection[side].sheets.map((value) => (
-                              <option key={value}>{value}</option>
-                            ))}
-                          </select>
-                        ) : (
-                          <Input
-                            value={side === "begin" ? beginSheet : endSheet}
-                            disabled={busy}
-                            onChange={(e) => {
-                              if (side === "begin")
-                                setBeginSheet(e.target.value);
-                              else setEndSheet(e.target.value);
-                            }}
-                          />
-                        )}
-                      </Field>
-                      <Field label="标题行（留空自动识别）">
-                        <Input
-                          value={
-                            side === "begin" ? beginHeaderRow : endHeaderRow
-                          }
-                          placeholder="自动"
-                          disabled={busy}
-                          onChange={(e) => {
-                            if (side === "begin")
-                              setBeginHeaderRow(e.target.value);
-                            else setEndHeaderRow(e.target.value);
-                          }}
-                          onBlur={() => {
-                            if (beginPath && endPath) void inspect();
-                          }}
-                        />
-                      </Field>
+                      {/* 与 FA 匹配工具一致：Sheet/标题行在读取后才出现，上传时不先展示。 */}
+                      {inspection && (
+                        <>
+                          <Field label="工作表（Sheet）">
+                            {inspection[side].sheets.length ? (
+                              <select
+                                value={side === "begin" ? beginSheet : endSheet}
+                                disabled={busy}
+                                onChange={(e) => {
+                                  if (side === "begin")
+                                    setBeginSheet(e.target.value);
+                                  else setEndSheet(e.target.value);
+                                  if (side === "begin") setBeginHeaderRow("");
+                                  else setEndHeaderRow("");
+                                }}
+                              >
+                                {inspection[side].sheets.map((value) => (
+                                  <option key={value}>{value}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <Input
+                                value={side === "begin" ? beginSheet : endSheet}
+                                disabled={busy}
+                                onChange={(e) => {
+                                  if (side === "begin")
+                                    setBeginSheet(e.target.value);
+                                  else setEndSheet(e.target.value);
+                                }}
+                              />
+                            )}
+                          </Field>
+                          <Field label="标题行（留空自动识别）">
+                            <Input
+                              value={
+                                side === "begin" ? beginHeaderRow : endHeaderRow
+                              }
+                              placeholder="自动"
+                              disabled={busy}
+                              onChange={(e) => {
+                                if (side === "begin")
+                                  setBeginHeaderRow(e.target.value);
+                                else setEndHeaderRow(e.target.value);
+                              }}
+                              onBlur={() => {
+                                if (beginPath && endPath) void inspect();
+                              }}
+                            />
+                          </Field>
+                        </>
+                      )}
                     </div>
                   ))}
                 </div>

@@ -11,7 +11,6 @@ import {
   pickPath,
 } from "./api";
 import { depositDropTargetInside } from "./DepositInterestPage";
-import { AuxiliaryLinkStatusView } from "@/components/AuxiliaryLinkStatus";
 import {
   verifyAuxiliaryLink,
   verifyCurrencyLink,
@@ -1240,6 +1239,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     requestAnimationFrame(() => accountListRef.current?.scrollTo?.({ top: 0, left: 0 }));
   };
   const selectedAccountCount = orderedTbAccounts.filter((row) => loanReviewRole(row) === "loan").length;
+  const showAccountAuxiliary = orderedTbAccounts.some((row) => Boolean(row.auxiliaryKey));
   const mappingWarnings = Array.isArray(result?.mappingWarnings)
     ? result.mappingWarnings.filter((item): item is string => typeof item === "string")
     : [];
@@ -1411,7 +1411,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                       ) : null}
                     </div>
                   </div>
-                  {mode === "tb" && <AuxiliaryLinkStatusView result={auxLink} dimensionLabel="借款明细" />}
                 </>
               ) : (
                 <div className="loan-upload-grid">
@@ -1460,6 +1459,24 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                 status={reviews.status}
                 results={reviews.results}
                 disabled={busy}
+                autoReviewKey={
+                  busy
+                    ? ""
+                    : JSON.stringify([
+                        sources.tb.inspection && [
+                          sources.tb.path,
+                          sources.tb.inspection.sheet,
+                          sources.tb.inspection.headerRow,
+                          sources.tb.inspection.headerDepth,
+                        ],
+                        sources.je.inspection && [
+                          sources.je.path,
+                          sources.je.inspection.sheet,
+                          sources.je.inspection.headerRow,
+                          sources.je.inspection.headerDepth,
+                        ],
+                      ])
+                }
                 onReviewAll={() =>
                   void reviews.reviewAll({
                     tb: sources.tb.inspection
@@ -1573,7 +1590,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                 <CardContent>
                   <p className="fx-hint">
                     系统按科目编码与负债语义共同给出初始建议，借款科目置顶、其他科目随后；
-                    建议仅作起点，请逐行确认。辅助核算不是必选项，仅在本主体、本科目验证成功后进入 TBJE 匹配键；验证失败时整个科目回退到主体＋科目。
+                    建议仅作起点，请逐行确认。
                   </p>
                 {accountsBusy ? (
                   <p className="fx-hint">正在读取科目清单…</p>
@@ -1600,7 +1617,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                         <tr>
                           <th>科目编码</th>
                           <th>科目名称</th>
-                          <th>辅助明细</th>
+                          {showAccountAuxiliary && <th>辅助明细</th>}
                           <th>期初余额</th>
                           <th>期末余额</th>
                           <th>系统建议</th>
@@ -1615,7 +1632,11 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                           >
                             <td>{a.code}</td>
                             <td title={a.account}>{a.name || a.account}</td>
-                            <td title={a.auxiliary}>{a.auxiliary ? `${a.entity ? `${a.entity} / ` : ""}${a.auxiliary}` : "—（末级科目）"}</td>
+                            {showAccountAuxiliary && (
+                              <td title={a.auxiliary}>
+                                {a.auxiliary ? `${a.entity ? `${a.entity} / ` : ""}${a.auxiliary}` : "—"}
+                              </td>
+                            )}
                             <td className="loan-num">{a.auxiliary ? "—" : a.opening.toLocaleString()}</td>
                             <td className="loan-num">{a.auxiliary ? "—" : a.closing.toLocaleString()}</td>
                             <td>
@@ -1741,7 +1762,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               {mappingWarnings.map((warning) => (
                 <section className="loan-warning" role="status" key={warning}>
                   <strong>{warning}</strong>
-                  <span>未通过辅助验证的主体＋科目已合并；验证成功的其他科目仍按辅助核算拆分。请按各行匹配依据复核。</span>
                 </section>
               ))}
               <TbRateTable
@@ -2142,7 +2162,6 @@ function TbRateTable({
         <p className="fx-hint">
           共 {rows.length} 笔借款，已填利率 {filled} 笔。可直接在下表逐笔填写；
           也可「导出利率确认表」在 Excel 里补填后「回读已填利率表」。
-          留空的按无利率进入测算（状态列会提示补利率），不影响其他笔。
         </p>
         <div
           className={`loan-rate-confirmation loan-rate-match${showAuxiliary ? " has-auxiliary" : ""}`}
@@ -2364,7 +2383,7 @@ function LedgerRateConfirmation({
   );
 }
 
-function Results({
+export function Results({
   rows,
   editRate,
   result,
@@ -2469,23 +2488,32 @@ function Results({
               <th>主体</th>
               <th>借款标识</th>
               <th>币种</th>
-              <th>期初</th>
-              <th>增加</th>
-              <th>减少</th>
-              <th>期末（台账）</th>
-              <th>期末（推算）</th>
-              <th>勾稽差异</th>
+              <th>期初本金</th>
+              <th>本期增加</th>
+              <th>本期归还</th>
+              <th>推算期末</th>
+              <th>台账／TB 期末</th>
+              <th>本金差异</th>
+              <th>本金勾稽</th>
               <th>利率类型</th>
               <th>固定/基准利率</th>
               <th>加点 BP</th>
               <th>有效利率</th>
               <th>测算利息</th>
-              <th>匹配状态</th>
+              <th>
+                匹配状态{" "}
+                <JargonTip
+                  term="匹配状态"
+                  text={"已匹配：台账（或 TB＋JE）与该笔本金勾稽一致。\n待复核：期初、减少或归还时点系推算，或勾稽存在差异；悬停状态标签查看依据。\n两点法推算：缺逐笔台账，按（期初＋期末）÷2 推算全年平均本金。"}
+                />
+              </th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r, i) => (
-              <tr key={`${r.loanId}-${i}`}>
+            {rows.map((r, i) => {
+              const inferredClosing = r.openingPrincipal + r.additions - r.reductions;
+              const principalDifference = loanEquation(r);
+              return <tr key={`${r.loanId}-${i}`}>
                 <td>{!r.entity || r.entity === "默认主体" ? "未区分主体" : r.entity}</td>
                 <td title={r.matchBasis}>{r.loanId}</td>
                 <td>{r.currency || "—"}</td>
@@ -2493,14 +2521,19 @@ function Results({
                   r.openingPrincipal,
                   r.additions,
                   r.reductions,
+                  inferredClosing,
                   r.ledgerClosing ?? null,
-                  r.closingPrincipal,
-                  loanEquation(r),
+                  principalDifference,
                 ].map((n, j) => (
-                  <td key={j}>
-                    {n == null ? "—" : Number(n).toLocaleString()}
+                  <td key={j} className={j === 5 && principalDifference != null && Math.abs(principalDifference) >= 0.005 ? "loan-principal-difference" : undefined}>
+                    {n == null ? "—" : Number(n).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </td>
                 ))}
+                <td>
+                  <Badge variant="outline" className={principalDifference == null ? "badge-warning" : Math.abs(principalDifference) < 0.005 ? "badge-ready" : "badge-warning"}>
+                    {principalDifference == null ? "未比较" : Math.abs(principalDifference) < 0.005 ? "一致" : "有差异"}
+                  </Badge>
+                </td>
                 <td>
                   <select
                     value={r.rateType}
@@ -2580,14 +2613,11 @@ function Results({
                     {r.matchStatus ?? "—"}
                   </Badge>
                 </td>
-              </tr>
-            ))}
+              </tr>;
+            })}
           </tbody>
         </table>
       </div>
-      <p className="fx-rate-note">
-        修改利率后请再次测算。已有执行利率默认为固定利率；手动改为浮动后，不再沿用执行利率，改按基准利率加减BP重算。
-      </p>
     </section>
   );
 }

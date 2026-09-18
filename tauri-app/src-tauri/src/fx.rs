@@ -7652,6 +7652,8 @@ fn calculate(
             "measurementDifference": automatic_total - covered_book,
             "auditFxGainLoss": provisional_total,
             "tbFxGainLoss": tb_fx,
+            "tbFxGainAmount": reconciliation.get("tbFxGainAmount").cloned().unwrap_or(Value::Null),
+            "tbFxLossAmount": reconciliation.get("tbFxLossAmount").cloned().unwrap_or(Value::Null),
             "tbFxGainLossPresentation": reconciliation.get("tbFxGainLossPresentation").cloned().unwrap_or(json!("combined")),
             "tbRealizedGainLoss": reconciliation.get("tbRealizedGainLoss").cloned().unwrap_or(Value::Null),
             "tbUnrealizedGainLoss": reconciliation.get("tbUnrealizedGainLoss").cloned().unwrap_or(Value::Null),
@@ -7857,82 +7859,159 @@ fn manual_classification<'a>(params: &'a Value, voucher_id: &str) -> Option<&'a 
         .filter(|value| matches!(*value, "已实现汇兑损益" | "未实现汇兑损益"))
 }
 
+/// 汇兑损益账面取数：与利息收入一样优先读本年累计借贷，只有没有累计列时
+/// 才考虑本期发生额或期末余额。返回借方为正、贷方为负的金额。
+fn fx_tb_occurrence(
+    row: &RowRecord,
+    mapping: &Map<String, Value>,
+    debit_role: &str,
+    credit_role: &str,
+    account: &str,
+) -> Result<f64, String> {
+    let read = |role: &str| -> Result<f64, String> {
+        let Some(column) = first_col(mapping, role) else {
+            return Ok(0.0);
+        };
+        Ok(strict_number(row.get(column.as_str()).unwrap_or(""))?.unwrap_or(0.0))
+    };
+    let debit = read(debit_role)?;
+    let credit = read(credit_role)?;
+    let convention = sign_convention_of(mapping);
+    // 已结转损益科目的借贷发生额可能相互抵销，直接取净额会把收益/损失抹成 0。
+    // 明确的收益、损失科目按账户性质和红字方向还原；综合科目沿用同额取单列。
+    let closed_pair = match convention {
+        ledger_mapping::SignConvention::Unsigned => {
+            (debit - credit).abs() < 0.01 && debit.signum() == credit.signum()
+        }
+        ledger_mapping::SignConvention::Signed => (debit + credit).abs() < 0.01,
+    };
+    if debit.abs() >= 0.005 && closed_pair {
+        let gain = account.contains("汇兑收益") || account.contains("匯兌收益");
+        let loss = account.contains("汇兑损失") || account.contains("匯兌損失");
+        if gain != loss {
+            let normal_sign = if gain { -1.0 } else { 1.0 };
+            // Signed 表的负贷方本就是正常记法，不能当作红字反转性质。
+            let red_sign = if convention == ledger_mapping::SignConvention::Unsigned && debit < 0.0
+            {
+                -1.0
+            } else {
+                1.0
+            };
+            return Ok(normal_sign * red_sign * debit.abs());
+        }
+        return Ok(debit);
+    }
+    Ok(match convention {
+        ledger_mapping::SignConvention::Unsigned => debit - credit,
+        ledger_mapping::SignConvention::Signed => debit + credit,
+    })
+}
+
+fn fx_tb_effect_nature(amount: f64) -> &'static str {
+    if amount < -0.005 {
+        "汇兑收益"
+    } else if amount > 0.005 {
+        "汇兑损失"
+    } else {
+        "无净额"
+    }
+}
+
 fn reconcile_fx_gain_loss(params: &Value) -> Result<Value, AppError> {
     let mut tb_rows = Vec::new();
     let mut tb_total = 0.0;
     let mut tb_realized_total = 0.0;
     let mut tb_unrealized_total = 0.0;
+    let mut tb_gain_amount = 0.0;
+    let mut tb_loss_amount = 0.0;
     let mut tb_classification_complete = true;
     if let Some(source) = params.get("tbSource") {
         let spec: SourceSpec = serde_json::from_value(source.clone())
             .map_err(|e| error("INVALID_PARAMS", "TB参数无效。", Some(e.to_string())))?;
         let table = load_fx_table(&spec)?;
         let mapping = mapping_obj(params, "tbMapping");
-        let candidates = tb_leaf_records(&table, &mapping)
-            .into_iter()
-            .filter_map(|row| {
-                let account = account_name(&row, &mapping);
-                if role_for(&account, params) != "fx_gain_loss" {
-                    return None;
-                }
-                let debit = first_col(&mapping, "periodFunctionalDebit")
-                    .and_then(|column| row.get(column.as_str()))
-                    .map(|value| strict_number(value).map(|v| v.unwrap_or(0.0)))
-                    .transpose()
-                    .ok()
-                    .flatten();
-                let credit = first_col(&mapping, "periodFunctionalCredit")
-                    .and_then(|column| row.get(column.as_str()))
-                    .map(|value| strict_number(value).map(|v| v.unwrap_or(0.0)))
-                    .transpose()
-                    .ok()
-                    .flatten();
-                let closing = first_col(&mapping, "closingFunctionalAmount")
-                    .and_then(|column| row.get(column.as_str()))
-                    .map(|value| strict_number(value).map(|v| v.unwrap_or(0.0)))
-                    .transpose()
-                    .ok()
-                    .flatten();
-                Some((account, row.source_row, closing, debit, credit))
-            })
-            .collect::<Vec<_>>();
+        let has_ytd = first_col(&mapping, "ytdFunctionalDebit").is_some()
+            && first_col(&mapping, "ytdFunctionalCredit").is_some();
+        let has_period = first_col(&mapping, "periodFunctionalDebit").is_some()
+            && first_col(&mapping, "periodFunctionalCredit").is_some();
+        let has_closing = amount_scheme_ok(&mapping, "closingFunctional");
+        let mut candidates = Vec::new();
+        for row in tb_leaf_records(&table, &mapping) {
+            let account = account_name(&row, &mapping);
+            if role_for(&account, params) != "fx_gain_loss" {
+                continue;
+            }
+            let closing = if has_closing {
+                Some(
+                    signed_amount(&row, &mapping, "closingFunctional").map_err(|detail| {
+                        error(
+                            "NUMERIC_PARSE_FAILED",
+                            "TB汇兑损益余额无法解析。",
+                            Some(format!("第{}行：{detail}", row.source_row)),
+                        )
+                    })?,
+                )
+            } else {
+                None
+            };
+            let occurrence = if has_ytd {
+                Some(fx_tb_occurrence(
+                    &row,
+                    &mapping,
+                    "ytdFunctionalDebit",
+                    "ytdFunctionalCredit",
+                    &account,
+                ))
+            } else if has_period {
+                Some(fx_tb_occurrence(
+                    &row,
+                    &mapping,
+                    "periodFunctionalDebit",
+                    "periodFunctionalCredit",
+                    &account,
+                ))
+            } else {
+                None
+            }
+            .transpose()
+            .map_err(|detail| {
+                error(
+                    "NUMERIC_PARSE_FAILED",
+                    "TB汇兑损益发生额无法解析。",
+                    Some(format!("第{}行：{detail}", row.source_row)),
+                )
+            })?;
+            candidates.push((account, row.source_row, closing, occurrence));
+        }
         // **整表统一口径**：要么所有科目都取期末余额，要么都取借贷发生额。
         //
         // 逐科目各判各的（这个有余额就取余额、那个余额为零就取发生额）会让一张表
         // 里混着两种口径，各科目的数不可比，加总也没有会计意义。
         //
-        // 选法：损益科目期末结转到未分配利润后余额归零，这时整表余额都是 0，
-        // 只能走发生额；余额不为零说明未结转，余额本身就是本期累计发生额，
-        // 比发生额列更可靠——发生额列可能是 MTD（本月）而不是 YTD（本年累计）。
+        // 选法：映射了本年累计借贷列就优先用累计发生额（与利息收入一致）；
+        // 只有本期发生额时，非零期末余额优先，避免把 MTD 当全年；
+        // 损益科目已结转、期末全为零时再用本期发生额。
         //
-        // 发生额借、贷方案只有两列同时映射才成立：单边的 LLM 建议不能覆盖净额列。
-        let split_period_scheme = first_col(&mapping, "periodFunctionalDebit").is_some()
-            && first_col(&mapping, "periodFunctionalCredit").is_some();
+        // 发生额借、贷方案只有两列同时映射才成立：单边建议不能覆盖净额列。
         let any_closing = candidates
             .iter()
-            .any(|(_, _, closing, _, _)| closing.is_some_and(|value| value.abs() >= 0.01));
-        let basis = if any_closing {
+            .any(|(_, _, closing, _)| closing.is_some_and(|value| value.abs() >= 0.01));
+        let basis = if has_ytd {
+            "本年累计借贷发生额"
+        } else if any_closing {
             "期末余额"
-        } else if split_period_scheme {
+        } else if has_period {
             "本期借贷发生额"
         } else {
             "期末余额"
         };
-        let movement_of = |debit: Option<f64>, credit: Option<f64>| match (debit, credit) {
-            // 借贷两列填了同一个数且同号，是「本期发生额」单列被拆着填，取其一即可。
-            (Some(d), Some(c)) if (d - c).abs() < 0.01 && d.signum() == c.signum() => d,
-            (Some(d), Some(c)) => d - c,
-            (Some(d), None) => d,
-            (None, Some(c)) => -c,
-            (None, None) => 0.0,
-        };
         let mut candidates = candidates
             .into_iter()
-            .map(|(account, source_row, closing, debit, credit)| {
+            .map(|(account, source_row, closing, occurrence)| {
                 let amount = if basis == "期末余额" {
-                    closing.unwrap_or_else(|| movement_of(debit, credit))
+                    closing.or(occurrence).unwrap_or(0.0)
                 } else {
-                    movement_of(debit, credit)
+                    occurrence.unwrap_or(0.0)
                 };
                 (account, source_row, amount)
             })
@@ -7954,12 +8033,17 @@ fn reconcile_fx_gain_loss(params: &Value) -> Result<Value, AppError> {
                 _ => tb_classification_complete = false,
             }
             tb_total += amount;
+            if amount < -0.005 {
+                tb_gain_amount += -amount;
+            } else if amount > 0.005 {
+                tb_loss_amount += amount;
+            }
+            let nature = fx_tb_effect_nature(amount);
             tb_rows.push(json!({"account":account, "sourceRow":source_row, "amount":amount,
+                "nature":nature,
                 "classification": account_classification.unwrap_or("无法区分"),
                 "basis": basis,
-                "scheme": if first_col(&mapping, "periodFunctionalDebit").is_some() && first_col(&mapping, "periodFunctionalCredit").is_some() {
-                    "ERP借贷同额带符号时取单列，否则借方减贷方"
-                } else { "TB未提供发生额时，取累计本位币金额" }}));
+                "scheme": if basis == "期末余额" { "期末余额" } else { "借贷发生额；已结转同额时按收益／损失及红字方向还原" }}));
         }
     }
     let mut je_total = 0.0;
@@ -8001,12 +8085,15 @@ fn reconcile_fx_gain_loss(params: &Value) -> Result<Value, AppError> {
     } else {
         "combined"
     };
-    Ok(json!({"tbFxGainLoss":tb_total, "tbRows":tb_rows,
+    Ok(
+        json!({"tbFxGainLoss":tb_total, "tbFxGainAmount":tb_gain_amount,
+        "tbFxLossAmount":tb_loss_amount, "tbRows":tb_rows,
         "tbFxGainLossPresentation": tb_presentation,
         "tbRealizedGainLoss": if tb_presentation == "split" { json!(tb_realized_total) } else { Value::Null },
         "tbUnrealizedGainLoss": if tb_presentation == "split" { json!(tb_unrealized_total) } else { Value::Null },
         "jeFxGainLossAfterTransferExclusion":je_total, "excludedTransferRows":excluded,
-        "jeTbDifference":je_total-tb_total}))
+        "jeTbDifference":je_total-tb_total}),
+    )
 }
 
 fn voucher_account_pattern(
@@ -13936,6 +14023,119 @@ E,2025-01-31,V001,SA,6701120001 财务费用-汇兑损失-未实现,INV-20250131
     }
 
     #[test]
+    fn 汇兑损益已结转时从累计发生额取数并区分收益损失() {
+        let dir = tempfile::tempdir().unwrap();
+        let tb = dir.path().join("tb.csv");
+        fs::write(
+            &tb,
+            "公司,科目,期末借方,期末贷方,本年借方,本年贷方\n\
+             E,66030003 汇兑损益,0,0,-164800.85,-164800.85\n\
+             E,670101 汇兑收益,0,0,120,120\n\
+             E,670102 汇兑损失,0,0,80,80\n",
+        )
+        .unwrap();
+        let out = reconcile_fx_gain_loss(&json!({
+            "tbSource":{"inputPath":tb,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbMapping":{
+                "entity":"公司","account":["科目"],
+                "closingFunctionalDebit":"期末借方","closingFunctionalCredit":"期末贷方",
+                "ytdFunctionalDebit":"本年借方","ytdFunctionalCredit":"本年贷方"
+            },
+            "accountRoles":{
+                "66030003 汇兑损益":"fx_gain_loss",
+                "670101 汇兑收益":"fx_gain_loss",
+                "670102 汇兑损失":"fx_gain_loss"
+            }
+        }))
+        .unwrap();
+        let rows = out["tbRows"].as_array().unwrap();
+        assert_eq!(rows.len(), 3, "{out}");
+        assert!(rows.iter().all(|row| row["basis"] == "本年累计借贷发生额"));
+        let amount = |suffix: &str| -> f64 {
+            rows.iter()
+                .find(|row| row["account"].as_str().unwrap_or("").ends_with(suffix))
+                .unwrap()["amount"]
+                .as_f64()
+                .unwrap()
+        };
+        assert!((amount("汇兑损益") + 164800.85).abs() < 0.01, "{out}");
+        assert!((amount("汇兑收益") + 120.0).abs() < 0.01, "{out}");
+        assert!((amount("汇兑损失") - 80.0).abs() < 0.01, "{out}");
+        for (account, nature) in [("汇兑收益", "汇兑收益"), ("汇兑损失", "汇兑损失")]
+        {
+            let row = rows
+                .iter()
+                .find(|row| row["account"].as_str().unwrap_or("").ends_with(account))
+                .unwrap();
+            assert_eq!(row["nature"], nature);
+        }
+        assert!((out["tbFxGainAmount"].as_f64().unwrap() - 164920.85).abs() < 0.01);
+        assert!((out["tbFxLossAmount"].as_f64().unwrap() - 80.0).abs() < 0.01);
+        assert!((out["tbFxGainLoss"].as_f64().unwrap() + 164840.85).abs() < 0.01);
+    }
+
+    #[test]
+    fn 已带方向符号的累计借贷同额也能区分汇兑收益损失() {
+        let dir = tempfile::tempdir().unwrap();
+        let tb = dir.path().join("tb.csv");
+        fs::write(
+            &tb,
+            "公司,科目,累计借方,累计贷方\n\
+             E,670101 汇兑收益,120,-120\n\
+             E,670102 汇兑损失,80,-80\n",
+        )
+        .unwrap();
+        let out = reconcile_fx_gain_loss(&json!({
+            "tbSource":{"inputPath":tb,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbMapping":{
+                "entity":"公司","account":["科目"],"__signConvention":"signed",
+                "ytdFunctionalDebit":"累计借方","ytdFunctionalCredit":"累计贷方"
+            },
+            "accountRoles":{
+                "670101 汇兑收益":"fx_gain_loss","670102 汇兑损失":"fx_gain_loss"
+            }
+        }))
+        .unwrap();
+        assert!(
+            (out["tbFxGainAmount"].as_f64().unwrap() - 120.0).abs() < 0.01,
+            "{out}"
+        );
+        assert!(
+            (out["tbFxLossAmount"].as_f64().unwrap() - 80.0).abs() < 0.01,
+            "{out}"
+        );
+        assert!(
+            (out["tbFxGainLoss"].as_f64().unwrap() + 40.0).abs() < 0.01,
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn 汇兑损益分列期末余额可作为发生额缺失时的兜底() {
+        let dir = tempfile::tempdir().unwrap();
+        let tb = dir.path().join("tb.csv");
+        fs::write(
+            &tb,
+            "公司,科目,期末借方,期末贷方\nE,66030003 汇兑损益,0,35\n",
+        )
+        .unwrap();
+        let out = reconcile_fx_gain_loss(&json!({
+            "tbSource":{"inputPath":tb,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbMapping":{
+                "entity":"公司","account":["科目"],
+                "closingFunctionalDebit":"期末借方","closingFunctionalCredit":"期末贷方"
+            },
+            "accountRoles":{"66030003 汇兑损益":"fx_gain_loss"}
+        }))
+        .unwrap();
+        assert!(
+            (out["tbFxGainLoss"].as_f64().unwrap() + 35.0).abs() < 0.01,
+            "{out}"
+        );
+        assert_eq!(out["tbRows"][0]["basis"], "期末余额");
+    }
+
+    #[test]
     fn 汇兑损失科目必须判成汇兑损益而不是非货币性项目() {
         // 实测踩坑：关键词表里只有「汇兑损益／汇兑收益／汇兑差额」，漏了同样常见的
         // **汇兑损失**。「汇兑损失」不含「汇兑损益」（第四字不同），于是掉到按科目
@@ -14647,6 +14847,28 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
             params["outputPath"] = json!(path);
         }
         params
+    }
+
+    #[test]
+    #[ignore = "uses the user's immutable 科目余额表.xls and 序时账-1.xlsx samples"]
+    fn real_sample_closed_fx_account_uses_movements_instead_of_zero_balance() {
+        let params = real_sample_params(None);
+        let result = reconcile_fx_gain_loss(&params).unwrap();
+        let row = result["tbRows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["account"].as_str().unwrap_or("").contains("66030003"))
+            .expect("真实 TB 第 206 行应为汇兑损益科目");
+        assert_eq!(row["basis"], "本期借贷发生额");
+        assert!(
+            (row["amount"].as_f64().unwrap() + 164800.85).abs() < 0.01,
+            "{result}"
+        );
+        assert!(
+            result["jeTbDifference"].as_f64().unwrap().abs() < 0.01,
+            "真实样例 TB 与 JE 应按同一发生额口径勾稽：{result}"
+        );
     }
 
     #[test]

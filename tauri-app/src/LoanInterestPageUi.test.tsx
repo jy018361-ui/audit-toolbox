@@ -421,6 +421,9 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
   // 科目清单渲染，借款科目按名称预选，应收账款默认排除。
   expect(await screen.findByText("确认借款科目")).toBeVisible();
+  expect(
+    screen.queryByRole("columnheader", { name: "辅助明细" }),
+  ).not.toBeInTheDocument();
   const loanSelect = await screen.findByRole("combobox", { name: "2001 短期借款的科目类型" });
   expect((loanSelect as HTMLSelectElement).value).toBe("loan");
   const skipSelect = await screen.findByRole("combobox", { name: "1122 应收账款的科目类型" });
@@ -564,8 +567,8 @@ it("生成借款利率表并手填利率后可进入测算", async () => {
     screen.getByText("JE里无借款辅助明细，默认按科目维度进行利息测算"),
   ).toBeVisible();
   expect(
-    screen.getByText("未通过辅助验证的主体＋科目已合并；验证成功的其他科目仍按辅助核算拆分。请按各行匹配依据复核。"),
-  ).toBeVisible();
+    screen.queryByText("未通过辅助验证的主体＋科目已合并；验证成功的其他科目仍按辅助核算拆分。请按各行匹配依据复核。"),
+  ).not.toBeInTheDocument();
   // 手填固定执行利率 3.85。
   fireEvent.change(screen.getByRole("spinbutton", { name: "2001 短期借款的执行利率" }), {
     target: { value: "3.85" },

@@ -624,6 +624,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const intakeSectionRef = useRef<HTMLElement | null>(null);
   const pairingSectionRef = useRef<HTMLElement | null>(null);
   const resultSectionRef = useRef<HTMLElement | null>(null);
+  const automaticReviewKeyRef = useRef("");
   const scopeTbEntities = useMemo(
     () =>
       [...new Set(
@@ -1231,7 +1232,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   };
 
   /** 页面级一键复核：每组一次真正的 TB＋JE 联合请求，最多并发两组。 */
-  async function reviewAllGroups() {
+  async function reviewAllGroups(background = false) {
     const candidates = visibleGroups.filter((group) => {
       const targets = reviewTargetsOf(group);
       return targets.tb || targets.je;
@@ -1239,7 +1240,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     if (!candidates.length || llmReviewBusy) return;
     invalidateResults(false);
     setError("");
-    setBusy(true);
+    if (!background) setBusy(true);
     setLlmReviewBusy(true);
     setLlmReviewStatus(`正在联合复核 0 / ${candidates.length} 组…`);
     let cursor = 0;
@@ -1278,10 +1279,33 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
           : `联合复核完成：已复核 ${candidates.length} 组。`,
       );
     } finally {
-      setBusy(false);
+      if (!background) setBusy(false);
       setLlmReviewBusy(false);
     }
   }
+
+  // 上传识别和自动配对全部收口后，默认执行一次字段映射联合复核。
+  // key 只包含来源身份，LLM 回写 mappings 不会反过来触发第二轮。
+  const automaticReviewKey = visibleGroups.length
+    ? JSON.stringify(
+        visibleGroups.map((group) => [
+          group.id,
+          group.tb ? pairingFileKey(group.tb) : "",
+          group.je ? pairingFileKey(group.je) : "",
+        ]),
+      )
+    : "";
+  useEffect(() => {
+    if (
+      busy ||
+      llmReviewBusy ||
+      !automaticReviewKey ||
+      automaticReviewKeyRef.current === automaticReviewKey
+    )
+      return;
+    automaticReviewKeyRef.current = automaticReviewKey;
+    void reviewAllGroups(true);
+  }, [automaticReviewKey, busy, llmReviewBusy]);
 
   function undoGroupReview(
     group: PairedGroup,

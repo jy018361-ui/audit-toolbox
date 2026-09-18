@@ -1,5 +1,18 @@
 # 账表映射统一方案
 
+## 2026-09-18：汇兑损益损益科目优先读累计发生额
+
+- 汇兑 TB 勾稽兼容公共映射把“本期借贷”提升为“本年累计借贷”的结果：累计借贷优先；只有本期借贷时，整表有非零期末余额则取余额，已结转全零则取发生额；仅余额分列时也能兜底取数。科目确认、公共映射建议和其他工具的取数规则不变。
+- 已结转借贷相互抵销不能直接报零：明确“汇兑收益／汇兑损失”科目按性质还原；无符号表再按红字方向反转，已带方向符号表不把负贷方误当红字。综合“汇兑损益”科目保留单侧发生额。TB 来源行及结果分别披露收益、损失正数总额，净额仍以借方正、贷方负与 JE 比较。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 汇兑损益已结转时从累计发生额取数并区分收益损失`；真实 XLS：`cargo test --manifest-path src-tauri/Cargo.toml --lib real_sample_closed_fx_account_uses_movements_instead_of_zero_balance -- --ignored`。
+
+## 2026-09-18：类型 LLM 按需调用，字段映射默认自动复核
+
+- 公共上传入口现在遵守 Rust 分类器的 `needsLlm`：TB/JE 得分高且差距明确时直接采用 Coding 结果，只有低分或两类得分接近时才调用工具专属类型 LLM。LLM 失败仍保留本地结果。
+- 字段映射复核改为默认自动：汇兑损益、存款利息、借款利息、FA TB＋JE 与 TBJE 完整性在上传识别全部收口后自动执行一次公共联合复核；来源路径、Sheet 或表头改变才会再触发，LLM 回写映射不引起循环。原有“重新复核”按钮保留。
+- TBJE 批量页的自动复核在后台运行，不用页面级 `busy` 锁住继续添加、配对或切换文件；旧请求的回写仍受来源版本保护。
+- 回归：`npx vitest run src/ledgerWorkbookSheets.test.ts src/components/LedgerReviewAll.test.tsx src/TbjeCheckPage.test.tsx`，并运行 `npm run build`。
+
 ## 2026-09-17：缺码科目的严格名称回退
 
 - 公共 `AccountMatchPolicy` 复用 `validated_account_name_keys`：按规范化主体＋规范化名称验证 TB/JE 双侧唯一性；验证通过后两侧统一生成名称键，避免一侧名称、一侧编码形式不同而仍无法对齐。

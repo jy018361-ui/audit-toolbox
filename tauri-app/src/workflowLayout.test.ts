@@ -10,6 +10,22 @@ const audit = readFileSync(
   new URL("../TAURI_UI_STATE_AUDIT.md", import.meta.url),
   "utf8",
 );
+const faTbjeCss = readFileSync(
+  new URL("./fa-tbje.css", import.meta.url),
+  "utf8",
+);
+const faTbjePage = readFileSync(
+  new URL("./FaTbJePage.tsx", import.meta.url),
+  "utf8",
+);
+const fxAuditCss = readFileSync(
+  new URL("./fx-audit.css", import.meta.url),
+  "utf8",
+);
+const workflowAudit = readFileSync(
+  new URL("../scripts/workflow-layout-audit.cjs", import.meta.url),
+  "utf8",
+);
 const catalog = JSON.parse(
   readFileSync(new URL("../public/tool-catalog.json", import.meta.url), "utf8"),
 ) as Array<{ id: string }>;
@@ -66,5 +82,32 @@ describe("任务型页面纵向布局契约", () => {
 
     const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
     expect(app).toContain("value={displayFileName(backupPath)}");
+  });
+
+  it("并排透视表共享固定列契约，合计行保持四列语义", () => {
+    expect(faTbjePage).toContain('<col className="fa-tbje-pivot-col-entity" />');
+    expect(faTbjePage).toContain('<col className="fa-tbje-pivot-col-account" />');
+    expect(faTbjePage).toContain('<td colSpan={2}>合计</td>');
+    expect(faTbjeCss).toMatch(
+      /\.fa-tbje-account-table\.fa-tbje-pivot-preview\s*\{[^}]*table-layout:\s*fixed;/s,
+    );
+  });
+
+  it("来源元数据和标准表单使用紧凑宽度契约", () => {
+    expect(fxAuditCss).toMatch(
+      /\.fx-source-meta\s*\{[^}]*grid-template-columns:[^;}]*5\.5rem 6rem;/s,
+    );
+    expect(shared).toMatch(
+      /\.form-grid\s*\{[^}]*max-width:\s*calc\(840px \+ var\(--sp-4\)\);/s,
+    );
+    expect(fxAuditCss).not.toMatch(/\.fx-review-all\s*>\s*button\s*\{[^}]*width:\s*100%/s);
+  });
+
+  it("深层工作流审计覆盖比例失真而不只检查溢出", () => {
+    expect(workflowAudit).toContain("parallel-table-column-mismatch");
+    expect(workflowAudit).toContain("parallel-source-control-mismatch");
+    expect(workflowAudit).toContain("vertical-table-label-wrap");
+    expect(workflowAudit).toContain("stretched-standard-control");
+    expect(workflowAudit).toContain("stretched-compact-action");
   });
 });

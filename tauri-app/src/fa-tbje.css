@@ -464,7 +464,7 @@
    两张并排、放不下时自动换行;科目列限宽省略,合计行强调。 */
 .fa-tbje-pivot-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(24rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 40rem), 1fr));
   gap: var(--sp-4);
 }
 
@@ -479,7 +479,39 @@
   margin: 0;
 }
 
-.fa-tbje-pivot-preview th:not(:first-child) {
+.fa-tbje-account-table.fa-tbje-pivot-preview {
+  min-width: 40rem;
+  table-layout: fixed;
+}
+
+.fa-tbje-pivot-col-entity {
+  width: 16%;
+}
+
+.fa-tbje-pivot-col-account {
+  width: 42%;
+}
+
+.fa-tbje-pivot-col-amount {
+  width: 21%;
+}
+
+.fa-tbje-pivot-preview th:nth-child(n + 3) {
+  text-align: right;
+}
+
+.fa-tbje-pivot-preview th,
+.fa-tbje-pivot-preview td {
+  min-width: 0;
+}
+
+.fa-tbje-pivot-preview td:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fa-tbje-pivot-preview td.fa-tbje-num {
   text-align: right;
 }
 

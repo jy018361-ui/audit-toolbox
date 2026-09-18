@@ -1660,20 +1660,17 @@ function FaCardListPage() {
               </option>
             )}
             {roleOptions.map(([key, label]) => {
-              // 已被其他列占用的角色：标记"已用"，但当前列已选的除外
-              const mappedHere = mappedRoles.some(
-                ([mappedKey]) => mappedKey === key,
-              );
-              const takenByOther = usedRoles.has(key) && !mappedHere;
+              // 已映射的角色统一标注（已用），含当前列自己挂的角色。
+              const taken = usedRoles.has(key);
               return (
                 <option
                   key={key}
                   value={key}
-                  className={takenByOther ? "dt-role-taken" : undefined}
+                  className={taken ? "dt-role-taken" : undefined}
                 >
                   {label}
                   {markOf(key)}
-                  {takenByOther ? "（已用）" : ""}
+                  {taken ? "（已用）" : ""}
                 </option>
               );
             })}
@@ -1705,6 +1702,13 @@ function FaCardListPage() {
     setter: React.Dispatch<React.SetStateAction<FaSupplementConfig>>,
   ): React.ReactNode[] => {
     const roles = supplementRoleOptions(kind);
+    // 已映射的角色统一标注（已用），与主映射下拉同一套口径。
+    const usedRoles = new Set<string>();
+    for (const { field } of roles) {
+      const v = config[field];
+      const occupied = Array.isArray(v) ? v.length > 0 : Boolean(String(v ?? "").trim());
+      if (occupied) usedRoles.add(String(field));
+    }
     const controls: React.ReactNode[] = [];
     for (const header of inspect.headers) {
       const colValue = header.trim();
@@ -1746,11 +1750,18 @@ function FaCardListPage() {
           >
             <option value="">—</option>
             {/* 补充清单的角色全部必填（缺失会拦截导出），统一标注“＊”。 */}
-            {roles.map(({ field, label }) => (
-              <option key={field} value={String(field)}>
-                {label}＊
-              </option>
-            ))}
+            {roles.map(({ field, label }) => {
+              const taken = usedRoles.has(String(field));
+              return (
+                <option
+                  key={field}
+                  value={String(field)}
+                  className={taken ? "dt-role-taken" : undefined}
+                >
+                  {label}＊{taken ? "（已用）" : ""}
+                </option>
+              );
+            })}
           </select>
         </label>,
       );

@@ -6,7 +6,22 @@ import {
   depositMissingRequired, depositMonthlyAverage, depositMonthlyInterest, depositRateAboveBenchmark,
   depositPercentToRate, depositRateOutOfPractice, depositRateToPercent, depositReportStart,
   depositTermsOf, depositJeLayout, JE_LAYOUT_LABEL,
+  depositBalanceCheckStatus, depositRateCheckStatus,
 } from "./DepositInterestPage";
+
+describe("存款余额勾稽与利率状态分别显示", () => {
+  it("差异为零但使用暂估利率时仍显示已勾稽", () => {
+    expect(depositBalanceCheckStatus({ jeReconciled: true, reconciliationDiff: -0.00001 })).toBe("已勾稽");
+    expect(depositBalanceCheckStatus({ jeReconciled: true, reconciliationDiff: 0.006 })).toBe("待复核");
+    expect(depositRateCheckStatus({ rateResolved: true, rateSource: "挂牌暂估值（待确认）", status: "待确认利率" })).toBe("待确认利率");
+  });
+
+  it("两点法的零差异不冒充 JE 勾稽，余额差异不被利率状态掩盖", () => {
+    expect(depositBalanceCheckStatus({ jeReconciled: false, reconciliationDiff: 0 })).toBe("未做JE核对");
+    expect(depositBalanceCheckStatus({ jeReconciled: true, reconciliationDiff: 10 })).toBe("待复核");
+    expect(depositRateCheckStatus({ rateResolved: false, rateSource: "", status: "待填利率" })).toBe("待填利率");
+  });
+});
 
 describe("存款第二步辅助明细", () => {
   it("仅完整验证成功的主体科目组展开", () => {

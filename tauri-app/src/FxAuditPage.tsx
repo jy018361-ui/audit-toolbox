@@ -18,6 +18,7 @@ import { FileDropInput } from "@/components/FileDropInput";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
 import { DateInput } from "@/components/DateInput";
+import { JargonTip } from "@/components/JargonTip";
 import { defaultBalanceSheetDate } from "@/dateDefaults";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -548,6 +549,16 @@ export function fxCurrencySourceLabel(side: "JE" | "TB" | "", source: string) {
   if (source === "币种列") return `${side}币种列`;
   if (source === "科目文本") return `${side}科目名`;
   return "按本位币";
+}
+
+export function fxCurrencyDefaultLabel(
+  detected: string,
+  side: "JE" | "TB" | "",
+  source: string,
+  fallbackFunctional: string,
+) {
+  if (detected) return `${detected}（${fxCurrencySourceLabel(side, source)}）`;
+  return fallbackFunctional ? `${fallbackFunctional}（按本位币）` : "未识别";
 }
 
 /**
@@ -1891,6 +1902,14 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
               status={reviewStatus}
               results={reviews.results}
               disabled={busy}
+              autoReviewKey={
+                busy
+                  ? ""
+                  : JSON.stringify([
+                      je && [jePath, je.sheet, je.headerRow, je.headerDepth],
+                      tb && [tbPath, tb.sheet, tb.headerRow, tb.headerDepth],
+                    ])
+              }
               onReviewAll={() => void reviewBoth()}
               onUndo={reviews.undoChange}
               onAccept={reviews.acceptPending}
@@ -2129,7 +2148,13 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                       <div className="fx-accounts-head">
                         <span>科目</span>
                         <span>分类</span>
-                        <span>账户币种与识别状态</span>
+                        <span>
+                          账户币种与识别状态
+                          <JargonTip
+                            term="账户币种与识别状态"
+                            text={"币种依据依次为 TB 原币币种列、科目名称、同科目一致的 JE 币种列。\n按本位币：未识别账户外币，不参与外币重估；实际为外币时请手动选择。\nJE 多币种：同科目明细出现多个币种，需核对 TB 是否按币种拆分。\n手动选择的币种优先于识别值。"}
+                          />
+                        </span>
                       </div>
                       {visibleAccounts.map((account) => {
                         const detail =
@@ -2244,11 +2269,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                                 }
                               >
                                 <option value="">
-                                  {detected
-                                    ? `自动：${detected}（${fxCurrencySourceLabel(side, source)}）`
-                                    : fallbackFunctional
-                                      ? `自动：${fallbackFunctional}（按本位币）`
-                                      : "自动：未识别"}
+                                  {fxCurrencyDefaultLabel(detected, side, source, fallbackFunctional)}
                                 </option>
                                 {fxCurrencyOptions(...seen).map((code) => (
                                   <option key={code} value={code}>
@@ -2259,11 +2280,6 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                               {currencyRisk && (
                                 <small className="fx-currency-risk-label" role="alert">
                                   JE 多币种；需按币种拆分 TB 后复核
-                                </small>
-                              )}
-                              {!currencyRisk && fellBack && (
-                                <small className="fx-currency-fallback-label">
-                                  未识别账户外币，当前按本位币处理
                                 </small>
                               )}
                             </span>
@@ -2829,6 +2845,29 @@ export function summarizeQuality(items: Array<Record<string, unknown>>) {
       (order[a.severity] ?? 9) - (order[b.severity] ?? 9) || b.count - a.count,
   );
 }
+export function fxQualityAction(type: string, severity: string): string {
+  if (severity === "合并") return "已合并计入，无需处理";
+  if (type.includes("不构成汇兑事项")) return "核对凭证分类；如有误，修改分类后重算";
+  if (type.includes("入账汇率") && (type.includes("不恒定") || type.includes("偏离")))
+    return "核对该月凭证的入账汇率";
+  if (type.includes("牌价口径回退")) return "核对本次采用的替代牌价";
+  if (type.includes("汇率") || type.includes("牌价")) return "核对对应日期的汇率，补齐后重算";
+  if (type.includes("余额") || type.includes("外币敞口")) return "检查 TB 的科目和币种余额，补齐后重算";
+  if (type.includes("日期")) return "核对原始凭证日期";
+  if (type.includes("科目") || type.includes("映射")) return "检查科目分类及字段映射";
+  if (severity === "提示") return "查看来源资料，确认口径";
+  return "检查相关源行，修正后重算";
+}
+
+function fxQualityImpact(severity: string, type: string): string {
+  if (type.includes("不构成汇兑事项")) return "未纳入测算";
+  if (type.includes("估算") || type.includes("倒算") || type.includes("口径回退"))
+    return "使用替代口径";
+  if (severity === "隔离" || severity === "阻断") return "未计入测算";
+  if (severity === "合并") return "已合并计入";
+  if (severity === "待复核" || severity === "重要提示") return "结果需复核";
+  return "不影响测算";
+}
 /** 测算跑完后的全部检查结论。
  *
  *  这些结论一直都在算，但以前只写进 Excel 底稿的「数据质量 / 异常与限制 /
@@ -2846,6 +2885,12 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
   const tbRows = (reconciliation.tbRows ?? []) as Array<
     Record<string, unknown>
   >;
+  const tbGainAmount = reconciliation.tbFxGainAmount ?? tbRows.reduce(
+    (sum, row) => sum + Math.max(0, -Number(row.amount ?? 0)), 0,
+  );
+  const tbLossAmount = reconciliation.tbFxLossAmount ?? tbRows.reduce(
+    (sum, row) => sum + Math.max(0, Number(row.amount ?? 0)), 0,
+  );
   const groups = summarizeQuality(quality);
   if (!warnings.length && !groups.length && !tbRows.length) return null;
   const money = (value: unknown) =>
@@ -2856,13 +2901,11 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
   const isolated = groups
     .filter((g) => g.severity === "隔离" || g.severity === "阻断")
     .reduce((sum, g) => sum + g.count, 0);
-  const headline =
-    [
-      warnings.length ? `${warnings.length} 项提示` : "",
-      isolated ? "部分数据被隔离" : "",
-    ]
-      .filter(Boolean)
-      .join(" · ") || "全部检查通过";
+  const headline = [
+    isolated ? `${isolated} 行未计入测算` : "",
+    groups.length ? `${groups.length} 类数据问题` : "",
+    warnings.length ? `${warnings.length} 项其他提示` : "",
+  ].filter(Boolean).join(" · ") || "已核对 TB 来源";
   return (
     <details className="fx-checks">
       <summary>
@@ -2872,50 +2915,38 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
       <div className="fx-checks-body">
         {warnings.length > 0 && (
           <section>
-            <h5>映射与数据质量校验</h5>
-            <p>
-              测算前跑的校验。出现错误会直接拦下测算；下面这些是
-              <b>通过但需要你知道</b>的提示。
-            </p>
-            <ul className="fx-checks-list">
-              {warnings.map((text, index) => (
-                <li key={index}>{text}</li>
-              ))}
-            </ul>
+            <h5>其他提示：{warnings.length} 项</h5>
+            <p>测算已完成；如结果不符合预期，再核对这些来源和映射提示。</p>
+            <details className="fx-checks-evidence">
+              <summary>查看原始提示</summary>
+              <ul className="fx-checks-list">
+                {warnings.map((text, index) => <li key={index}>{text}</li>)}
+              </ul>
+            </details>
           </section>
         )}
         {groups.length > 0 && (
           <section>
-            <h5>逐行数据质量</h5>
-            <p>
-              测算过程中逐行记录的问题。<b>隔离</b>表示该行没有进入测算结果，
-              <b>合并</b>表示已并入其他行，<b>提示</b>不影响结果。
-            </p>
-            <div className="fx-checks-table">
+            <h5>需要检查的数据</h5>
+            <div className="fx-checks-table fx-checks-quality">
               <table>
                 <thead>
                   <tr>
-                    <th>严重度</th>
                     <th>问题</th>
-                    <th>行数</th>
-                    <th>示例行号</th>
-                    <th>说明</th>
+                    <th>影响</th>
+                    <th>涉及行</th>
+                    <th>建议操作</th>
+                    <th>依据</th>
                   </tr>
                 </thead>
                 <tbody>
                   {groups.map((group, index) => (
                     <tr key={index}>
-                      <td>
-                        <span
-                          className={`fx-severity ${group.severity === "隔离" || group.severity === "阻断" ? "blocking" : ""}`}
-                        >
-                          {group.severity}
-                        </span>
-                      </td>
                       <td>{group.type}</td>
-                      <td className="fx-checks-number">{group.count}</td>
-                      <td>{group.rows.length ? group.rows.join("、") : "—"}</td>
-                      <td>{group.detail || "—"}</td>
+                      <td><span className={`fx-severity ${group.severity === "隔离" || group.severity === "阻断" ? "blocking" : ""}`}>{fxQualityImpact(group.severity, group.type)}</span></td>
+                      <td>{group.count} 行{group.rows.length ? `（如第 ${group.rows.join("、")} 行）` : ""}</td>
+                      <td>{fxQualityAction(group.type, group.severity)}</td>
+                      <td>{group.detail ? <details className="fx-checks-evidence"><summary>查看</summary><small>{group.detail}</small></details> : "—"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -2926,17 +2957,13 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
         {tbRows.length > 0 && (
           <section>
             <h5>TB 汇兑损益取数</h5>
-            <p>
-              用来和测算结果比较的那个「TB汇兑损益」，是从下面这几个科目取的。
-              序时账同口径合计{" "}
-              {money(reconciliation.jeFxGainLossAfterTransferExclusion)}， 与 TB
-              相差 {money(reconciliation.jeTbDifference)}。
-            </p>
+            <p>汇兑收益 {money(tbGainAmount)}；汇兑损失 {money(tbLossAmount)}。两者抵销后的净额用于比较。JE 与 TB 净额差异：{money(reconciliation.jeTbDifference)}。</p>
             <div className="fx-checks-table">
               <table>
                 <thead>
                   <tr>
                     <th>科目</th>
+                    <th>净额方向</th>
                     <th>金额</th>
                     <th>取数口径</th>
                     <th>源文件行</th>
@@ -2946,6 +2973,7 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
                   {tbRows.map((row, index) => (
                     <tr key={index}>
                       <td>{String(row.account ?? "")}</td>
+                      <td>{String(row.nature ?? "汇兑损益")}</td>
                       <td className="fx-checks-number">{money(row.amount)}</td>
                       <td>{String(row.basis ?? "")}</td>
                       <td className="fx-checks-number">

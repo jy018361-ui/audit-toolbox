@@ -127,6 +127,74 @@ const auditGeometry = () => {
     }
   }
 
+  /*
+   * Proportion contracts: overflow-only checks cannot find the most common
+   * “looks broken” regressions (content-driven sibling columns, one-character
+   * table wrapping, or compact controls stretched to card width).
+   */
+  for (const grid of root.querySelectorAll(".fa-tbje-pivot-grid")) {
+    const tables = [...grid.querySelectorAll(":scope .fa-tbje-pivot-preview")].filter(visible);
+    if (tables.length < 2) continue;
+    const reference = [...tables[0].querySelectorAll("thead th")].map((cell) => box(cell).width);
+    for (const table of tables.slice(1)) {
+      const widths = [...table.querySelectorAll("thead th")].map((cell) => box(cell).width);
+      const mismatch = reference.some((width, index) => Math.abs(width - (widths[index] ?? 0)) > 6);
+      if (mismatch) {
+        add("parallel-table-column-mismatch", table, {
+          reference: reference.map(round),
+          actual: widths.map(round),
+        });
+      }
+    }
+  }
+
+  for (const grid of root.querySelectorAll(".fx-source-grid, .fuzzy-sources")) {
+    const cards = [...grid.children].filter(visible);
+    if (cards.length !== 2 || Math.abs(box(cards[0]).top - box(cards[1]).top) > 4) continue;
+    const controls = cards.map((card) => [...card.querySelectorAll(
+      ".fx-source-meta label select, .fx-source-meta label input, .fuzzy-source-meta label select, .fuzzy-source-meta label input",
+    )].filter(visible));
+    if (controls[0].length < 2 || controls[0].length !== controls[1].length) continue;
+    const reference = controls[0].map((control) => box(control).width);
+    const actual = controls[1].map((control) => box(control).width);
+    if (reference.some((width, index) => Math.abs(width - actual[index]) > 6)) {
+      add("parallel-source-control-mismatch", grid, {
+        reference: reference.map(round), actual: actual.map(round),
+      });
+    }
+  }
+
+  for (const cell of root.querySelectorAll("table th, table td")) {
+    if (!visible(cell) || cell.colSpan > 1) continue;
+    const text = (cell.textContent || "").replace(/\s+/g, "").trim();
+    if (text.length < 2 || text.length > 8 || !/[\u3400-\u9fff]/.test(text)) continue;
+    const style = getComputedStyle(cell);
+    const lineHeight = Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.5;
+    const rect = box(cell);
+    if (rect.width < 56 && rect.height > lineHeight * 2.35) {
+      add("vertical-table-label-wrap", cell, {
+        text,
+        width: round(rect.width),
+        height: round(rect.height),
+        lineHeight: round(lineHeight),
+      });
+    }
+  }
+
+  for (const control of root.querySelectorAll(
+    ".form-grid > .field > input, .form-grid > .field > select",
+  )) {
+    if (!visible(control)) continue;
+    const width = box(control).width;
+    if (width > 430) add("stretched-standard-control", control, { width: round(width), limit: 420 });
+  }
+
+  for (const button of root.querySelectorAll(".fx-review-all > button, .dep-export-actions button")) {
+    if (!visible(button)) continue;
+    const width = box(button).width;
+    if (width > 420) add("stretched-compact-action", button, { width: round(width), limit: 420 });
+  }
+
   return issues;
 };
 
@@ -169,14 +237,26 @@ async function waitForTaskOverlay(page) {
 
 async function settle(page) {
   await page.waitForTimeout(260);
-  await page.evaluate(async () => {
+  await evaluateStable(page, async () => {
     await document.fonts.ready;
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   });
 }
 
+async function evaluateStable(page, callback, argument) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await page.evaluate(callback, argument);
+    } catch (error) {
+      if (!/Execution context was destroyed|Cannot find context/i.test(String(error)) || attempt === 2) throw error;
+      await page.waitForLoadState("domcontentloaded").catch(() => {});
+      await page.waitForTimeout(300);
+    }
+  }
+}
+
 async function captureState(page, tool, viewport, stateLabel, results) {
-  const positions = await page.evaluate(() => {
+  const positions = await evaluateStable(page, () => {
     const root = document.querySelector("main, .main");
     const scrollOwner = root && root.scrollHeight > root.clientHeight + 1
       ? root
@@ -185,7 +265,7 @@ async function captureState(page, tool, viewport, stateLabel, results) {
     return [...new Set([0, Math.round(max / 2), max])];
   });
   for (const [positionIndex, position] of positions.entries()) {
-    await page.evaluate((top) => {
+    await evaluateStable(page, (top) => {
       const root = document.querySelector("main, .main");
       const scrollOwner = root && root.scrollHeight > root.clientHeight + 1
         ? root
@@ -193,7 +273,7 @@ async function captureState(page, tool, viewport, stateLabel, results) {
       scrollOwner?.scrollTo({ top, behavior: "instant" });
     }, position);
     await settle(page);
-    const issues = await page.evaluate(auditGeometry);
+    const issues = await evaluateStable(page, auditGeometry);
     const record = {
       viewport: viewport.label,
       route: tool.route,
@@ -207,7 +287,7 @@ async function captureState(page, tool, viewport, stateLabel, results) {
       await page.screenshot({ path: path.join(output, `${fileName}.png`) });
     }
   }
-  await page.evaluate(() => {
+  await evaluateStable(page, () => {
     const root = document.querySelector("main, .main");
     const scrollOwner = root && root.scrollHeight > root.clientHeight + 1
       ? root
@@ -312,6 +392,25 @@ async function advanceWorkflow(page, tool, viewport, results) {
           await captureState(page, tool, viewport, "files-selected", results);
         }
         await advanceWorkflow(page, tool, viewport, results);
+        if (tool.id === "fa_list") {
+          const accountReview = page.getByRole("button", { name: "复核科目分类" });
+          if (await accountReview.isEnabled().catch(() => false)) {
+            await accountReview.click();
+            await settle(page);
+            await captureState(page, tool, viewport, "fa-tbje-account-review", results);
+            await advanceWorkflow(page, tool, viewport, results);
+          }
+          const cardsTab = page.getByRole("tab", { name: "两期固定资产清单" });
+          await cardsTab.click();
+          await settle(page);
+          await captureState(page, tool, viewport, "fa-cards-initial", results);
+          const cardPickers = await activatePickers(page);
+          if (cardPickers.length) {
+            await page.waitForTimeout(900);
+            await captureState(page, tool, viewport, "fa-cards-files-selected", results);
+          }
+          await advanceWorkflow(page, tool, viewport, results);
+        }
       }
       await context.close();
     }

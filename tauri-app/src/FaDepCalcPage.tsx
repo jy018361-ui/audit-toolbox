@@ -491,8 +491,8 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
             >
               <option value="">—</option>
               {DEP_MAPPING_ROLES.map(([key, label]) => {
-                const taken =
-                  usedRoles.has(key) && !mapped.some(([k]) => k === key);
+                // 已映射的角色统一标注（已用），含当前列自己挂的角色。
+                const taken = usedRoles.has(key);
                 return (
                   <option
                     key={key}
@@ -560,68 +560,26 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
               </Badge>
             </CardHeader>
             <CardContent>
-              <div className="dep-source-grid">
-                <Field label="期末清单" required className="dep-upload-field">
-                  <div ref={uploadDropRef}>
-                    <FileDropInput
-                      value={path}
-                      placeholder="拖放或点击选择期末固定资产清单"
-                      onBrowse={() => void chooseFile()}
-                      onDragStateChange={setDragHover}
-                      highlight={dragHover}
-                      disabled={busy}
-                      onClear={
-                        path && !busy
-                          ? () => applyPathRef.current("")
-                          : undefined
-                      }
-                    />
-                  </div>
-                  <small className="dep-field-note">
-                    支持 Excel、CSV 与文本清单；选择后会立即读取。
-                  </small>
-                </Field>
-                <div className="dep-source-options">
-                  <Field label="工作表 Sheet">
-                    {inspection?.sheets.length ? (
-                      <select
-                        value={sheet}
-                        disabled={busy}
-                        onChange={(e) => {
-                          setSheet(e.target.value);
-                          setHeaderRow("");
-                          void inspect({
-                            sheet: e.target.value,
-                            headerRow: "",
-                          });
-                        }}
-                      >
-                        {inspection.sheets.map((value) => (
-                          <option key={value}>{value}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <Input
-                        value={sheet}
-                        placeholder="自动选择"
-                        disabled={busy}
-                        onChange={(e) => setSheet(e.target.value)}
-                      />
-                    )}
-                  </Field>
-                  <Field label="标题行">
-                    <Input
-                      value={headerRow}
-                      placeholder="自动识别"
-                      disabled={busy}
-                      onChange={(e) => setHeaderRow(e.target.value)}
-                      onBlur={() => {
-                        if (path && inspection) void inspect();
-                      }}
-                    />
-                  </Field>
+              <Field label="期末清单" required className="dep-upload-field">
+                <div ref={uploadDropRef}>
+                  <FileDropInput
+                    value={path}
+                    placeholder="拖放或点击选择期末固定资产清单"
+                    onBrowse={() => void chooseFile()}
+                    onDragStateChange={setDragHover}
+                    highlight={dragHover}
+                    disabled={busy}
+                    onClear={
+                      path && !busy
+                        ? () => applyPathRef.current("")
+                        : undefined
+                    }
+                  />
                 </div>
-              </div>
+                <small className="dep-field-note">
+                  支持 Excel、CSV 与文本清单；选择后会立即读取。
+                </small>
+              </Field>
               <div className="actions dep-source-actions">
                 {inspection && (
                   <Button
@@ -711,6 +669,49 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
                 />
               )}
 
+              {/* 与借款等账表工具一致：Sheet/标题行跟随映射预览，上传时不出现。 */}
+              <div className="mapping-panel-toolbar dep-map-toolbar">
+                <label>
+                  Sheet
+                  {inspection.sheets.length ? (
+                    <select
+                      value={sheet}
+                      disabled={busy}
+                      onChange={(e) => {
+                        setSheet(e.target.value);
+                        setHeaderRow("");
+                        void inspect({
+                          sheet: e.target.value,
+                          headerRow: "",
+                        });
+                      }}
+                    >
+                      {inspection.sheets.map((value) => (
+                        <option key={value}>{value}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <Input
+                      value={sheet}
+                      placeholder="自动选择"
+                      disabled={busy}
+                      onChange={(e) => setSheet(e.target.value)}
+                    />
+                  )}
+                </label>
+                <label>
+                  标题行
+                  <Input
+                    value={headerRow}
+                    placeholder="自动识别"
+                    disabled={busy}
+                    onChange={(e) => setHeaderRow(e.target.value)}
+                    onBlur={() => {
+                      if (path && inspection) void inspect();
+                    }}
+                  />
+                </label>
+              </div>
               <DataTable
                 columns={inspection.headers}
                 rows={inspection.preview}

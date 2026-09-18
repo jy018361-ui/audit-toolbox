@@ -4,7 +4,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { DateInput, formatDateDigits, isValidIsoDate } from "./DateInput";
+import { DateInput, formatDateDigits, formatDateEdit, isValidIsoDate } from "./DateInput";
 
 describe("DateInput", () => {
   it("formats eight continuously typed digits as an ISO date", () => {
@@ -52,6 +52,24 @@ describe("DateInput", () => {
     fireEvent.change(input, { target: { value: "2026-12-3" } });
     expect(input).toHaveValue("2026-12-3");
     expect(onChange).toHaveBeenLastCalledWith("");
+  });
+
+  it("keeps month and day fixed while a digit in the year is replaced", () => {
+    const onChange = vi.fn();
+    render(<DateInput aria-label="编辑日" value="2025-12-31" onChange={onChange} />);
+    const input = screen.getByLabelText("编辑日");
+
+    fireEvent.change(input, { target: { value: "202-12-31" } });
+    expect(input).toHaveValue("202-12-31");
+    expect(onChange).toHaveBeenLastCalledWith("");
+    fireEvent.change(input, { target: { value: "2026-12-31" } });
+    expect(input).toHaveValue("2026-12-31");
+    expect(onChange).toHaveBeenLastCalledWith("2026-12-31");
+
+    fireEvent.change(input, { target: { value: "2026-1-31" } });
+    expect(input).toHaveValue("2026-1-31");
+    expect(onChange).toHaveBeenLastCalledWith("");
+    expect(formatDateEdit("2026-12-3")).toBe("2026-12-3");
   });
 
   it("validates month lengths and leap years", () => {

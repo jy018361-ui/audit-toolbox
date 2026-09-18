@@ -7,7 +7,7 @@
 }
 .fuzzy-sources {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 28rem), 1fr));
   gap: 16px;
   align-items: start;
 }
@@ -15,16 +15,20 @@
   margin-top: 10px;
 }
 .fuzzy-source-meta {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(10rem, 20rem) 5.625rem;
   gap: 12px;
   align-items: end;
-  flex-wrap: wrap;
+  justify-content: start;
   margin-top: 12px;
 }
 .fuzzy-source-meta > span {
+  grid-column: 1 / -1;
+  overflow: hidden;
   color: var(--muted-foreground);
   font-size: 12px;
-  padding-bottom: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .fuzzy-source-meta label {
   display: grid;
@@ -45,7 +49,10 @@
   color: var(--foreground);
 }
 .fuzzy-source-meta input {
-  width: 90px;
+  width: 100%;
+}
+.fuzzy-source-meta select {
+  width: 100%;
 }
 .fuzzy-source-card .kz-preview {
   margin-top: 12px;

@@ -119,11 +119,19 @@
   font-size: 13px;
 }
 .fx-source-meta {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(9rem, 1fr) 5.5rem 6rem;
   align-items: end;
   gap: 10px;
+  /* Sheet 给足可读空间即可；大屏不随卡片继续拉长。窄卡片仍按剩余宽度收缩。 */
+  max-width: calc(31.5rem + 20px);
   margin-top: 12px;
+}
+.fx-source-meta > * {
+  min-width: 0;
+}
+.fx-source-meta > span {
+  grid-column: 1 / -1;
 }
 .fx-source-meta label,
 .fx-run-grid label {
@@ -143,6 +151,13 @@
   border-radius: 8px;
   background: var(--background);
   color: var(--foreground);
+}
+.fx-source-meta label input,
+.fx-source-meta label select {
+  width: 100%;
+}
+.fx-source-meta > .fx-warning {
+  grid-column: 1 / -1;
 }
 .fx-warning {
   color: var(--warning-fg);
@@ -231,13 +246,21 @@
 }
 .fx-review-all {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 20px;
   padding: 18px 20px;
   border: 1px solid color-mix(in srgb, var(--primary) 32%, var(--border));
   border-radius: 12px;
   background: color-mix(in srgb, var(--primary) 6%, var(--card));
+}
+.fx-review-all > div:first-child {
+  flex: 0 1 38rem;
+  min-width: min(100%, 18rem);
+}
+.fx-review-all > button {
+  flex: 0 0 auto;
 }
 .fx-review-all h2 {
   margin: 0 0 5px;
@@ -500,7 +523,6 @@
   .fx-run-grid {
     grid-template-columns: 1fr 1fr;
   }
-  .fx-review-all,
   .fx-result-heading {
     align-items: flex-start;
     flex-direction: column;
@@ -510,9 +532,6 @@
   }
   .fx-operator {
     padding: 2px 0;
-  }
-  .fx-review-all > button {
-    width: 100%;
   }
 }
 /* JE/TB upload cards stay side-by-side; their full-width previews stack below. */
@@ -1026,6 +1045,27 @@
   color: var(--muted-foreground);
   font-size: 11px;
 }
+.fx-checks-evidence > summary {
+  cursor: pointer;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.fx-checks-evidence[open] > small {
+  display: block;
+  margin-top: 6px;
+  max-width: 56ch;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.fx-checks-quality td:nth-child(4) {
+  min-width: 160px;
+}
+.fx-accounts-head > span:last-child {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 .fx-accounts label > .fx-account-name {
   overflow: visible;
   white-space: normal;
@@ -1048,17 +1088,13 @@
   width: 100%;
   min-width: 0;
 }
-.fx-currency-risk-label,
-.fx-currency-fallback-label {
+.fx-currency-risk-label {
   line-height: 1.35;
   white-space: normal;
 }
 .fx-currency-risk-label {
   color: var(--danger-fg);
   font-weight: 600;
-}
-.fx-currency-fallback-label {
-  color: var(--warning-fg);
 }
 /* 「按本位币」「未识别」都表示没认出账户币种，描边标出来，便于滚一遍就扫到。 */
 .fx-accounts select.fx-currency-unknown {

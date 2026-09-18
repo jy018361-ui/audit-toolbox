@@ -270,12 +270,25 @@ describe("存款科目手工分类请求", () => {
     const parentInput = await screen.findByRole("combobox", {
       name: `${parent}的分类`,
     });
-    expect(mock.engineCall).toHaveBeenCalledWith(
+    expect(mock.engineCall).not.toHaveBeenCalledWith(
       "deposit.classify_source_llm",
-      expect.objectContaining({ payload: expect.any(Object) }),
+      expect.anything(),
     );
     const leafInput = screen.getByRole("combobox", { name: `${leaf}的分类` });
     expect(leafInput).toHaveValue("");
+    expect((leafInput as HTMLSelectElement).selectedOptions[0]).toHaveTextContent("不参与测算");
+    expect((leafInput as HTMLSelectElement).selectedOptions[0]).not.toHaveTextContent("自动");
+    expect(screen.queryByText("内置挂牌利率可能已过期")).not.toBeInTheDocument();
+    fireEvent.change(
+      screen.getByRole("combobox", { name: `${bank}的分类` }),
+      { target: { value: "cash_on_hand" } },
+    );
+    expect(screen.queryByRole("combobox", { name: `${bank}的存款类型` })).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: `${bank}的分类` }).closest("label")?.querySelector(".deposit-account-na")).toHaveTextContent("不适用");
+    fireEvent.change(
+      screen.getByRole("combobox", { name: `${bank}的分类` }),
+      { target: { value: "" } },
+    );
     fireEvent.change(parentInput, { target: { value: "interest_income" } });
     fireEvent.change(
       screen.getByRole("combobox", { name: `${bank}的存款类型` }),

@@ -1,5 +1,173 @@
 # UI 修改记录
 
+## 2026-09-18 · 存款双状态与汇兑复核说明简化
+
+### 目标
+
+- 存款逐户结果把“余额勾稽”和“利率状态”分开，避免差异为零却只看到“待确认利率”。
+- 汇兑结果区把逐行技术说明改为问题影响、涉及行和建议操作；原始说明按需展开。
+- 汇兑 TB 来源明细显示收益/损失性质及实际取数口径。
+
+### 设计决策
+
+- 余额勾稽只在 JE 推导与 TB 期初依据都成立时展示“已勾稽”或“待复核”；两点法显示“未做JE核对”，利率另列。
+- 技术细节保留在折叠层；汇兑 TB 金额按借方正、贷方负，收益与损失各列正数总额。
+- Rust 汇兑账面取数优先本年累计发生额；只有本期发生额时遵守整表统一口径，已结转余额为零时走发生额；余额分列也可兜底。
+
+### 验证方式
+
+- `npx vitest run src/DepositInterestPage.test.ts src/DepositInterestInteractions.test.tsx src/FxAuditPage.test.ts`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib 汇兑损益已结转时从累计发生额取数并区分收益损失`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib real_sample_closed_fx_account_uses_movements_instead_of_zero_balance -- --ignored`
+- `npm run build`
+
+## 2026-09-18 · 存款与借款结果表余额勾稽平铺
+
+### 目标
+
+- 按用户调整的 Excel 样稿重排存款利息、借款利息结果表，避免余额差异被压在窄单元格里。
+
+### 设计决策
+
+- 存款按“主体／账户／存款类型 → 期初、期末 TB、JE 推导期末、余额差异 → 利率、来源、测算利息、状态、明细”排列；无 JE 时推导与差异显示横线，不伪装成零差异。年平均余额放到展开明细；两点法账户也可展开查看年平均余额与估算口径。
+- 借款按“主体／借款／币种 → 本金期初、增减、推算期末、台账期末、差异、勾稽结论 → 利率与测算利息、匹配状态”排列。保留币种和原有“推算期末－台账期末”差异方向；本金结论与整体匹配状态分列，缺台账时明确“未比较”。
+- 两表均保留前两列随横向滚动可见；差异行单元格单独提示，不调整测算引擎或导出底稿。
+
+### 验证方式
+
+- `npx vitest run src/BalanceLayouts.test.tsx src/DepositInterestInteractions.test.tsx src/LoanInterestPage.test.ts src/LoanInterestPageUi.test.tsx`
+- `npm run build`
+
+## 2026-09-18 · 汇兑账户币种提示降噪
+
+### 目标
+
+- 科目确认表移除重复的“未识别账户外币”行提示及下拉默认项“自动：”前缀。
+- 账户币种与识别状态增加问号说明，解释来源优先级、按本位币兜底、多币种风险和手工覆盖。
+
+### 设计决策
+
+- 保留默认项的空值语义和原有识别来源括注，仅简化可见文案；JE 多币种风险提示仍逐行保留。
+- 结果表布局与“检查与勾稽”长文案暂不调整，待确认信息层级和核对口径后再改。
+
+### 验证方式
+
+- `npx vitest run src/FxAuditPage.test.ts`
+- `npm run build`
+
+## 2026-09-18 · 存款分类降噪与日期分段编辑
+
+### 目标
+
+- 科目分类只显示实际类别，库存现金不显示存款类型；移除过期挂牌利率提示。
+- 资产负债表日修改某一位时，年、月、日之间不串位。
+
+### 设计决策
+
+- 保留“未手工覆盖”的分类值语义，仅移除下拉默认项的“自动”字样；库存现金及不参与测算科目显示“不适用”。
+- 删除存款利率档位卡片的过期提示，其他利率来源、待确认标记及实际利率编辑保持不变。
+- 公共日期输入在有分隔符时按年、月、日保留原位；连续八位数字输入和 ISO 日期验证维持原行为。余额勾稽跨工具布局留待确认后另行修改。
+
+### 验证方式
+
+- `npx vitest run src/components/DateInput.test.tsx src/DepositInterestInteractions.test.tsx`
+- `npm run build`
+
+## 2026-09-18 · 映射面板降噪、FA 子工具上传布局与借款状态提示
+
+### 目标
+
+- 字段映射界面的（已用）标记自解释：删掉面板底部的长解释文字，改为所有已映射角色（含当前列自己挂的角色、FA 补充清单角色）在下拉中统一带（已用）。
+- 折旧测算、折旧政策对比的上传区与借款/FA 匹配工具对齐：未读取前不显示工作表与标题行。
+- 借款结果表"匹配状态"表头补问号图标（与存款工具"状态"列同款），删除利率确认表两处提示性长文案。
+
+### 设计决策
+
+- MappingPanel 图例只保留"＊ 为必填字段；（选填）须按当前分组的整组规则补充。"；（已用）不再排除当前列自己的角色，取消选中态与未选中态的标注差异。
+- 折旧测算：上传卡只留拖放框；Sheet/标题行移入"核对映射"步骤的工具条（复用 mapping-panel-toolbar 样式，交互不变）。
+- 折旧政策对比：期初/期末两侧的 Sheet/标题行改为读取成功后才出现，与 FA 匹配工具补充清单一致。
+- 借款匹配状态图标悬停说明已匹配/待复核/两点法推算三种取值口径。
+
+### 验证方式
+
+- `npx vitest run src/components/MappingPanel.test.tsx src/FaDepCalcPage.test.tsx src/LoanInterestPageUi.test.tsx src/LoanInterestPage.test.ts src/faListUi.test.ts src/faSubtoolsUi.test.ts`
+- `npm run build`
+- 注：全量 `npm test` 中 DepositInterestInteractions 有一例失败，系工作区另一会话未完成改动所致，与本次无关（stash 验证过）。
+
+## 2026-09-18 · 全局控件比例与并排表格一致性
+
+### 目标
+
+- 修复任务进入深层状态后出现的控件无意义拉伸、并排表格列宽漂移、短标签竖排和动作按钮占满卡片等基础布局问题。
+- 把“比例失真”纳入真实工作流审计，避免只检查页面溢出而漏掉视觉上已经失衡的状态。
+
+### 设计决策
+
+- FA 对方科目两张透视表共用“主体／科目／借方／贷方”固定列契约；主体不再逐字换行，长科目省略。两列不足以容纳金额时改为上下排列，不让数字挤进相邻单元格；表格容器仍可独立横向滚动。合计行恢复完整四列语义。
+- 汇兑、FA TBJE、存款和借款共用的来源元数据改为“摘要一行＋紧凑控件行”，Sheet、表头和层数不再跟随卡片宽度任意拉伸；模糊匹配沿用同一规则。
+- 通用双列表单以 420px 为单字段上限；FA 文件选择保留整宽，普通 Sheet／标题行参数收窄。AudiPick 界面按用户要求暂不纳入本轮修复。
+- 一键复核与导出动作保持内容宽度并靠近说明，不再在窄窗口自动拉成整行按钮。
+- 深层工作流审计新增并排表格列宽差异、并排来源控件宽度差异、短中文表格标签竖排、标准控件过宽和紧凑动作过宽五类守卫；FA List 还会切到内层 TB＋JE 模式继续扫描。
+
+### 验证方式
+
+- `npx vitest run src/workflowLayout.test.ts src/components/ui/styleContract.test.ts`
+- `npm test`（81 个文件、760 项通过）
+- `npm run build`
+- `npm run audit:layout:workflows`（通过 `WORKFLOW_AUDIT_ROUTES` 限定非 AudiPick 的 17 个工具；571 个状态快照、零失败）
+- `npm run audit:layout:fa-pivot`（真实两表数据，检查列宽、金额溢出和右对齐）
+- `npm run audit:layout:overlays`（55 例通过）、`npm run audit:layout:tasks`（540 例通过）、`npm run audit:layout:themes`（排除 AudiPick 后 240 例通过）
+
+## 2026-09-18 · 存款／借款辅助信息降噪
+
+### 目标
+
+- 仅在第二步确有经 TB/JE 验证的辅助明细时显示辅助信息，移除不影响操作的长篇口径说明。
+
+### 设计决策
+
+- 借款科目确认表仅在至少一行已展开到辅助明细时显示“辅助明细”列；全部停留在末级科目时整列隐藏。存款继续沿用同一公共验证结果，仅把验证成功的辅助明细附在科目行中。
+- 删除存款 TB/JE 映射卡片中的静态辅助核算、符号口径说明，以及存款／借款上传区重复的辅助降级提示。公共验证、逐组降级和测算结果不变；需要用户处理的映射失败、缺利率和勾稽异常仍保留。
+
+### 验证方式
+
+- `npx tsc -b --pretty false`
+- `npx vitest run --exclude '.claude/**' src/LoanInterestPageUi.test.tsx src/DepositInterestLinks.test.tsx src/DepositInterestPage.test.ts`
+
+## 2026-09-18 · 账表上传复核默认自动化
+
+### 目标
+
+- 明确 TB/JE 分类时不再浪费网络等待；同时让所有已接入公共账表字段复核的工具在上传后默认执行复核。
+
+### 设计决策
+
+- 类型 LLM 仅在公共分类器返回 `needsLlm=true` 时调用；高置信度文件直接进入字段识别。
+- 公共复核卡根据路径、Sheet 和表头组成的来源身份自动触发一次；保留现有手动重试、撤销和采纳交互。
+- TBJE 批量复核不锁页面级文件操作，避免后台 LLM 阻断用户继续配对。
+- 不调整全局等待窗的文案和视觉展示。
+
+### 验证方式
+
+- `npx vitest run src/ledgerWorkbookSheets.test.ts src/components/LedgerReviewAll.test.tsx src/FxAuditPage.test.ts src/DepositInterestPage.test.ts src/LoanInterestPageUi.test.tsx src/FaTbJePage.test.ts src/TbjeCheckPage.test.tsx`
+- `npm run build`
+
+## 2026-09-17 · Windows 应用图标收紧透明边距
+
+### 目标
+
+- 解决桌面快捷方式和安装包图标中 Logo 显示偏小、未占满图标位置的问题。
+
+### 设计决策
+
+- 以现有 E 点通 Logo 位图为唯一视觉来源，按可见像素边界做最小透明边距的正方形裁切。
+- 同步重生成 Tauri/Windows 使用的 PNG 与 ICO 多尺寸资源，保持 Logo 内容和颜色不变。
+
+### 验证方式
+
+- 检查各 PNG/ICO 尺寸及 Alpha 可见范围。
+- `npm run build`
+
 ## 2026-09-16 · 存款／借款科目确认按验证结果展开辅助明细
 
 ### 目标

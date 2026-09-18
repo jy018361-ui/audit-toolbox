@@ -169,14 +169,10 @@ export function MappingPanel(props: MappingPanelProps) {
     return need === "required" ? "＊" : need === "optional" ? "（选填）" : "";
   };
 
-  const option = (
-    role: string,
-    label: string,
-    current: string,
-    group?: MappingGroup,
-  ) => {
-    // （已用）覆盖所有角色——含可多列角色：提示已挂过，但不拦截继续加列。
-    const taken = used.has(role) && role !== current;
+  const option = (role: string, label: string, group?: MappingGroup) => {
+    // （已用）挂在所有已映射角色上——含当前列自己挂的角色与可多列角色：
+    // 只提示已占用，不拦截继续加列。
+    const taken = used.has(role);
     const disabled = locked(role);
     const suffix = taken ? "（已用）" : disabled ? "（已停用）" : "";
     const statusClass = group?.status
@@ -262,10 +258,10 @@ export function MappingPanel(props: MappingPanelProps) {
                 {mark(role, group)}
               </option>
             ) : (
-              option(role, label, current, group)
+              option(role, label, group)
             )
         : (role: string, label: string, group?: MappingGroup) =>
-            option(role, label, current, group);
+            option(role, label, group);
     return (
       <label className="dt-header-control" key={header}>
         <select
@@ -364,7 +360,7 @@ export function MappingPanel(props: MappingPanelProps) {
           ) : null}
           {props.requirementOf ? (
             <span className="mapping-requirement-legend">
-              ＊ 为必填字段；（选填）须按当前分组的整组规则补充；（已用）＝已有列挂在该角色上，可多列角色仍可继续加列。仅“科目编码＋科目名称”可手动共列，请确认单元格确实混写两者。
+              ＊ 为必填字段；（选填）须按当前分组的整组规则补充。
             </span>
           ) : null}
         </p>

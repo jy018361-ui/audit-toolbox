@@ -174,7 +174,7 @@
 }
 .deposit-table > table {
   width: 100%;
-  min-width: 1120px;
+  min-width: 1990px;
   table-layout: auto;
   border-collapse: collapse;
 }
@@ -194,8 +194,8 @@
   background: var(--muted);
   font-size: 12px;
 }
-.deposit-table th:first-child,
-.deposit-table td:first-child {
+.deposit-table > table > thead th:first-child,
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:first-child {
   position: sticky;
   left: 0;
   z-index: 2;
@@ -203,45 +203,47 @@
   min-width: 150px;
   background: var(--card);
 }
-.deposit-table th:first-child {
+.deposit-table > table > thead th:first-child {
   z-index: 3;
   background: var(--muted);
 }
-.deposit-table th:nth-child(2),
-.deposit-table td:nth-child(2) {
-  width: clamp(240px, 28vw, 390px);
-  min-width: 240px;
+.deposit-table > table > thead th:nth-child(2),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(2) {
+  position: sticky;
+  left: 150px;
+  z-index: 2;
+  width: 300px;
+  min-width: 300px;
+  background: var(--card);
 }
-.deposit-table th:nth-child(3),
-.deposit-table td:nth-child(3) {
+.deposit-table > table > thead th:nth-child(2) {
+  z-index: 3;
+  background: var(--muted);
+}
+.deposit-table > table > thead th:nth-child(3),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(3) {
   min-width: 190px;
 }
-.deposit-table th:nth-child(4),
-.deposit-table td:nth-child(4) {
-  min-width: 120px;
-}
-.deposit-table th:nth-child(5),
-.deposit-table td:nth-child(5) {
+.deposit-table > table > thead th:nth-child(9),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(9) {
   width: 180px;
   min-width: 150px;
   overflow-wrap: anywhere;
 }
-.deposit-table th:nth-child(6),
-.deposit-table td:nth-child(6) {
-  min-width: 235px;
-}
-.deposit-table th:nth-child(7),
-.deposit-table td:nth-child(7),
-.deposit-table th:nth-child(8),
-.deposit-table td:nth-child(8) {
+.deposit-table > table > thead th:nth-child(n + 4):nth-child(-n + 8),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(n + 4):nth-child(-n + 8),
+.deposit-table > table > thead th:nth-child(10),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(10) {
   min-width: 130px;
   text-align: right;
   white-space: nowrap;
 }
-.deposit-table th:nth-child(9),
-.deposit-table td:nth-child(9),
-.deposit-table th:nth-child(10),
-.deposit-table td:nth-child(10) {
+.deposit-table > table > thead th:nth-child(11),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(11),
+.deposit-table > table > thead th:nth-child(12),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(12),
+.deposit-table > table > thead th:nth-child(13),
+.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(13) {
   min-width: 105px;
   text-align: center;
 }
@@ -264,6 +266,14 @@
 .deposit-review-row > td:first-child {
   background: color-mix(in srgb, var(--warning-border) 12%, var(--card));
 }
+.deposit-table > table > tbody > .deposit-review-row > td:nth-child(2) {
+  background: color-mix(in srgb, var(--warning-border) 12%, var(--card));
+}
+.deposit-table > table > tbody > tr > .deposit-difference {
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  font-weight: 700;
+}
 .deposit-account-cell strong,
 .deposit-account-cell small {
   display: block;
@@ -277,21 +287,16 @@
   color: var(--muted-foreground);
   font-size: 11px;
 }
-.deposit-balance-cell {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(100px, 1fr));
-  gap: 6px 12px;
-}
-.deposit-balance-cell span {
-  display: grid;
-  gap: 1px;
-  text-align: right;
+.deposit-average-detail {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
   white-space: nowrap;
 }
-.deposit-balance-cell small,
-.deposit-no-monthly {
+.deposit-average-detail > span {
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 12px;
 }
 .deposit-ok,
 .deposit-warn {

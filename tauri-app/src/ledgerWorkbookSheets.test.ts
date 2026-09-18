@@ -123,7 +123,11 @@ describe("工作簿 Sheet 分类", () => {
     const call = vi.fn(async (method: string, params: Record<string, unknown>) => {
       if (method === "tool.classify_llm") throw new Error("offline");
       const sheet = (params.source as { sheet: string }).sheet;
-      if (!sheet) return classification("TB", ["TB", "说明"], { je: 1, tb: 8 });
+      if (!sheet)
+        return {
+          ...classification("TB", ["TB", "说明"], { je: 4, tb: 5 }),
+          needsLlm: true,
+        };
       return classification("说明", ["TB", "说明"], { je: 1, tb: 1 });
     });
     const result = await scanLedgerUploadSources(call, ["C:/x/账套.xlsx"], {
@@ -132,6 +136,22 @@ describe("工作簿 Sheet 分类", () => {
     expect(result.sources.map((item) => item.classification.sheet)).toEqual(["TB"]);
     expect(result.hiddenSheets).toBe(1);
     expect(result.llmFallbacks).toBe(1);
+  });
+
+  it("高置信度分类明确不需要 LLM 时跳过类型复核", async () => {
+    const call = vi.fn(async (method: string) => {
+      if (method === "tool.classify_llm")
+        throw new Error("高置信度文件不应调用 LLM");
+      return classification("JE", ["JE"], { je: 12, tb: 3 });
+    });
+    const result = await scanLedgerUploadSources(call, ["C:/x/序时账.xls"], {
+      llmMethod: "tool.classify_llm",
+    });
+    expect(result.sources).toHaveLength(1);
+    expect(result.llmFallbacks).toBe(0);
+    expect(call.mock.calls.map(([method]) => method)).toEqual([
+      "deposit.classify_source",
+    ]);
   });
 
   it("公共选对入口在所有工具中统一采用同一工作簿优先", () => {

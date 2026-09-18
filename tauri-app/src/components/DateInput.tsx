@@ -24,6 +24,12 @@ export function formatDateDigits(digits: string): string {
   return `${safe.slice(0, 4)}-${safe.slice(4, 6)}-${safe.slice(6)}`;
 }
 
+/** Keep edited year/month/day in their own slots when separators are present. */
+export function formatDateEdit(raw: string): string {
+  if (/^\d{0,4}-\d{0,2}(?:-\d{0,2})?$/.test(raw)) return raw;
+  return formatDateDigits(raw);
+}
+
 export function isValidIsoDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const [year, month, day] = value.split("-").map(Number);
@@ -33,11 +39,12 @@ export function isValidIsoDate(value: string): boolean {
 
 /**
  * Eight-digit date entry for WebView2. Typing 20261231 continuously produces
- * 2026-12-31; callers only receive an empty string or a complete valid ISO date.
+ * 2026-12-31; editing one segment does not shift digits from another segment.
+ * Callers only receive an empty string or a complete valid ISO date.
  */
 export const DateInput = forwardRef<HTMLInputElement, DateInputProps>(
   function DateInput({ value, onChange, onBlur, placeholder = "YYYYMMDD", ...props }, ref) {
-    const [digits, setDigits] = useState(() => dateDigits(value));
+    const [displayValue, setDisplayValue] = useState(() => formatDateDigits(value));
     const locallyEmitted = useRef<string | null>(null);
 
     useEffect(() => {
@@ -45,11 +52,10 @@ export const DateInput = forwardRef<HTMLInputElement, DateInputProps>(
         locallyEmitted.current = null;
         return;
       }
-      setDigits(dateDigits(value));
+      setDisplayValue(formatDateDigits(value));
     }, [value]);
 
-    const displayValue = formatDateDigits(digits);
-    const invalid = digits.length === 8 && !isValidIsoDate(displayValue);
+    const invalid = dateDigits(displayValue).length === 8 && !isValidIsoDate(displayValue);
 
     return (
       <Input
@@ -63,10 +69,9 @@ export const DateInput = forwardRef<HTMLInputElement, DateInputProps>(
         aria-invalid={props["aria-invalid"] ?? (invalid || undefined)}
         title={invalid ? "请输入有效日期（年份4位、月份2位、日期2位）" : props.title}
         onChange={(event) => {
-          const nextDigits = dateDigits(event.target.value);
-          const nextValue = formatDateDigits(nextDigits);
-          setDigits(nextDigits);
-          const emitted = nextDigits.length === 8 && isValidIsoDate(nextValue) ? nextValue : "";
+          const nextValue = formatDateEdit(event.target.value);
+          setDisplayValue(nextValue);
+          const emitted = isValidIsoDate(nextValue) ? nextValue : "";
           locallyEmitted.current = emitted;
           onChange(emitted);
         }}

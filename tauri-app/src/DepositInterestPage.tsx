@@ -12,7 +12,6 @@ import {
   pickPath,
 } from "./api";
 import { PageHeader } from "@/components/PageHeader";
-import { AuxiliaryLinkStatusView } from "@/components/AuxiliaryLinkStatus";
 import {
   verifyAuxiliaryLink,
   type AuxiliaryLinkResult,
@@ -187,6 +186,23 @@ type AccountRow = {
   status: string;
   note: string;
 };
+
+/** 余额是否勾稽与利率是否可用是两件事，不能用单个优先级状态覆盖。 */
+export function depositBalanceCheckStatus(
+  row: Pick<AccountRow, "jeReconciled" | "reconciliationDiff">,
+): "已勾稽" | "待复核" | "未做JE核对" {
+  if (row.jeReconciled !== true) return "未做JE核对";
+  return Math.abs(row.reconciliationDiff) < 0.005 ? "已勾稽" : "待复核";
+}
+
+export function depositRateCheckStatus(
+  row: Pick<AccountRow, "rateResolved" | "rateSource" | "status">,
+): "已填利率" | "待确认利率" | "待填利率" {
+  if (!row.rateResolved) return "待填利率";
+  return row.rateSource.includes("暂估") || row.status === "待确认利率"
+    ? "待确认利率"
+    : "已填利率";
+}
 
 // 角色名与 Rust 侧的统一映射内核（ledger_mapping.rs）一一对应，五个工具共用。
 export const JE_LABELS: Record<string, string> = {
@@ -1351,6 +1367,14 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               status={reviews.status}
               results={reviews.results}
               disabled={busy}
+              autoReviewKey={
+                busy
+                  ? ""
+                  : JSON.stringify([
+                      tb && [tbPath, tb.sheet, tb.headerRow, tb.headerDepth],
+                      je && [jePath, je.sheet, je.headerRow, je.headerDepth],
+                    ])
+              }
               onReviewAll={() =>
                 void reviews.reviewAll({
                   tb: tb
@@ -1416,10 +1440,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                           : reviews.status.tb}
                       </p>
                     )}
-                    <p className="fx-hint">
-                      辅助核算是选填字段：仅在已选主体、科目范围内验证成功后参与匹配；
-                      覆盖不全或无法验证的科目整体按“主体＋科目”归并，不猜测空白明细归属。
-                    </p>
                   </>
                 }
                 onMappingChange={(mapping) => {
@@ -1453,11 +1473,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                           : reviews.status.je}
                       </p>
                     )}
-                    <p className="fx-hint">
-                      JE 仅用于还原存款逐月发生额；账面利息方向直接按 TB 借贷列、
-                      整表符号口径及科目登记方向判定。
-                      JE 辅助核算列即使映射，当前也不参与归集键或金额计算。
-                    </p>
                   </>
                 }
                 onMappingChange={(mapping) => {
@@ -1473,9 +1488,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                 }
                 reviewBusy={reviews.reviewing.je}
               />
-            )}
-            {tb && je && (
-              <AuxiliaryLinkStatusView result={auxLink} />
             )}
           </div>
           {/* 步骤条第二步是参考资料、没传文件也允许进（见上方 StepIndicator
@@ -1556,7 +1568,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                           }}
                         >
                           <option value="">
-                            自动（
                             {
                               ROLE_OPTIONS.find(
                                 ([role]) =>
@@ -1566,7 +1577,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                                     "excluded"),
                               )?.[1]
                             }
-                            ）
                           </option>
                           {ROLE_OPTIONS.map(([value, label]) => (
                             <option key={value} value={value}>
@@ -1574,9 +1584,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                             </option>
                           ))}
                         </select>
-                        {["deposit", "other_monetary", "cash_on_hand"].includes(
-                          reviewRole(row),
-                        ) ? (
+                        {["deposit", "other_monetary"].includes(reviewRole(row)) ? (
                           <div className="deposit-account-tier">
                             <select
                               aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的存款类型`}
@@ -1621,7 +1629,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                             )}
                           </div>
                         ) : (
-                          <span className="deposit-account-na">—</span>
+                          <span className="deposit-account-na">不适用</span>
                         )}
                       </label>
                     ))}
@@ -1853,12 +1861,6 @@ function RateTierCard({
         </CardTitle>
       </CardHeader>
       <CardContent>
-        {tiers.ratesStale && (
-          <details className="deposit-stale">
-            <summary>内置挂牌利率可能已过期</summary>
-            <span>{tiers.staleMessage}</span>
-          </details>
-        )}
         <div className="deposit-tier-table">
           <table>
             <thead>
@@ -2211,7 +2213,7 @@ function MappingPreview(props: {
   );
 }
 
-function Results({
+export function Results({
   rows,
   result,
   tiers,
@@ -2486,7 +2488,7 @@ function Results({
 
       <div className="deposit-rate-head">
         <div>
-          <h4>逐户利率与利息测算</h4>
+          <h4>逐户余额勾稽与利息测算</h4>
           <p>
             {String(summary.rateBasisLabel ?? "—")}
             改成存款协议或对账单上的实际利率后，点“按新利率重算”。
@@ -2501,15 +2503,20 @@ function Results({
           <thead>
             <tr>
               <th>核算主体</th>
-              <th>账户信息</th>
-              <th>存款档位</th>
+              <th>银行账户／科目</th>
+              <th>存款类型</th>
+              <th>期初余额</th>
+              <th>期末 TB</th>
+              <th>JE 推导期末</th>
+              <th>余额差异</th>
               <th>年利率（%）</th>
               <th>利率来源</th>
-              <th>余额与勾稽</th>
-              <th>年平均余额</th>
               <th>测算利息</th>
               <th>
-                状态 <JargonTip term="测算状态" text={"余额核对\n已勾稽：JE 推导余额与 TB 一致。\n待复核：JE 推导余额与 TB 存在差异。\n\n估算口径\n两点法推算：直接按（期初＋期末）÷2 暂估全年平均余额，不推导月末余额。\n年初倒推：年初由 TB 年末与 JE 发生额倒推。\n\n利率状态\n待确认利率：已使用暂估利率并纳入测算。\n待填利率：尚无可用利率，未计入合计。"} />
+                余额勾稽 <JargonTip term="余额勾稽" text={"已勾稽：JE 推导期末与 TB 一致。\n待复核：两者存在差异。\n未做JE核对：缺少可用 JE 或 TB 期初余额；两点法出现零差异也不算勾稽。"} />
+              </th>
+              <th>
+                利率状态 <JargonTip term="利率状态" text={"已填利率：有可用利率，仍请以协议或对账单复核。\n待确认利率：暂用挂牌参考利率，已纳入测算。\n待填利率：没有可用利率，未纳入合计。"} />
               </th>
               <th>明细</th>
             </tr>
@@ -2519,7 +2526,10 @@ function Results({
               <Fragment key={row.key}>
                 <tr
                   className={
-                    row.status === "已勾稽" ? "" : "deposit-review-row"
+                    depositBalanceCheckStatus(row) === "已勾稽" &&
+                    depositRateCheckStatus(row) === "已填利率"
+                      ? ""
+                      : "deposit-review-row"
                   }
                 >
                   <td>{row.entity === "默认主体" ? "未区分主体" : row.entity}</td>
@@ -2560,6 +2570,14 @@ function Results({
                       )}
                     </div>
                   </td>
+                  <td className="deposit-amount-cell">{amount(row.openingBalance)}</td>
+                  <td className="deposit-amount-cell">{amount(row.tbClosingBalance)}</td>
+                  <td className="deposit-amount-cell">
+                    {row.jeReconciled ? amount(row.derivedClosingBalance) : "—"}
+                  </td>
+                  <td className={`deposit-amount-cell${row.jeReconciled && Math.abs(row.reconciliationDiff) >= 0.005 ? " deposit-difference" : ""}`}>
+                    {row.jeReconciled ? amount(Math.abs(row.reconciliationDiff) < 0.005 ? 0 : row.reconciliationDiff) : "—"}
+                  </td>
                   <td>
                     <span className="deposit-pct">
                       <NumberInput
@@ -2590,52 +2608,56 @@ function Results({
                       ? `${row.rateSource}（高于央行基准）`
                       : row.rateSource}
                   </td>
-                  <td>
-                    <div className="deposit-balance-cell">
-                      <span><small>期初</small>{amount(row.openingBalance)}</span>
-                      <span><small>期末 TB</small>{amount(row.tbClosingBalance)}</span>
-                      <span><small>JE 推导</small>{row.jeReconciled ? amount(row.derivedClosingBalance) : "N/A"}</span>
-                      <span><small>差异</small>{row.jeReconciled ? amount(row.reconciliationDiff) : "N/A"}</span>
-                    </div>
-                  </td>
-                  <td>{amount(row.averageBalance)}</td>
-                  <td>{amount(rowInterest(row))}</td>
+                  <td className="deposit-amount-cell">{amount(rowInterest(row))}</td>
                   <td title={row.note}>
                     <Badge
                       variant="outline"
                       className={
-                        row.status === "已勾稽"
+                        depositBalanceCheckStatus(row) === "已勾稽"
                           ? "badge-ready"
-                          : row.status === "待填利率"
+                          : "badge-warning"
+                      }
+                    >
+                      {depositBalanceCheckStatus(row)}
+                    </Badge>
+                  </td>
+                  <td title={row.rateSource}>
+                    <Badge
+                      variant="outline"
+                      className={
+                        depositRateCheckStatus(row) === "已填利率"
+                          ? "badge-ready"
+                          : depositRateCheckStatus(row) === "待填利率"
                             ? "badge-danger"
                             : "badge-warning"
                       }
                     >
-                      {row.status}
+                      {depositRateCheckStatus(row)}
                     </Badge>
                   </td>
                   <td>
-                    {row.status === "两点法推算" ? (
-                      <span className="deposit-no-monthly">无月度明细</span>
-                    ) : (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        type="button"
-                        className="deposit-expand"
-                        onClick={() =>
-                          onExpand(expanded === row.key ? "" : row.key)
-                        }
-                      >
-                        {expanded === row.key ? "收起" : "展开"}
-                      </Button>
-                    )}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      type="button"
+                      className="deposit-expand"
+                      aria-expanded={expanded === row.key}
+                      aria-label={`${row.account}的测算明细`}
+                      onClick={() => onExpand(expanded === row.key ? "" : row.key)}
+                    >
+                      {expanded === row.key ? "收起" : "展开"}
+                    </Button>
                   </td>
                 </tr>
                 {expanded === row.key && (
                   <tr className="deposit-month-row">
-                    <td colSpan={10}>
-                      <table className="deposit-month-table">
+                    <td colSpan={13}>
+                      <div className="deposit-average-detail">
+                        <span>年平均余额</span>
+                        <strong>{amount(row.averageBalance)}</strong>
+                        {row.status === "两点法推算" && <span>两点法推算，无月度明细</span>}
+                      </div>
+                      {row.months.length > 0 && <table className="deposit-month-table">
                         <thead>
                           <tr>
                             <th>月份</th>
@@ -2676,7 +2698,7 @@ function Results({
                             </tr>
                           ))}
                         </tbody>
-                      </table>
+                      </table>}
                     </td>
                   </tr>
                 )}

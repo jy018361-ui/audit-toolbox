@@ -213,7 +213,10 @@ export async function scanLedgerUploadSources<
           result.hiddenSheets += 1;
           continue;
         }
-        if (!options.llmMethod) {
+        // Rust 已经把「是否需要 LLM」作为分类结果的一部分。
+        // 高置信度的 TB/JE 不再为了「复核而复核」去跑一次网络；
+        // 只有低分或两类得分接近时才交给工具专属 LLM 判型。
+        if (!options.llmMethod || !scripted.needsLlm) {
           result.sources.push({ path, classification: scripted });
           continue;
         }

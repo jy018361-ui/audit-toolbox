@@ -1304,6 +1304,24 @@ export function FaTbJePage() {
               status={reviews.status}
               results={reviews.results}
               disabled={busy}
+              autoReviewKey={
+                busy
+                  ? ""
+                  : JSON.stringify([
+                      inspects.tb && [
+                        paths.tb,
+                        inspects.tb.sheet,
+                        inspects.tb.headerRow,
+                        inspects.tb.headerDepth,
+                      ],
+                      inspects.je && [
+                        paths.je,
+                        inspects.je.sheet,
+                        inspects.je.headerRow,
+                        inspects.je.headerDepth,
+                      ],
+                    ])
+              }
               onReviewAll={() =>
                 void reviews.reviewAll({
                   tb: inspects.tb
@@ -1813,7 +1831,7 @@ type CounterpartRow = {
   credit?: unknown;
 };
 
-function FaPivotTable({
+export function FaPivotTable({
   title,
   rows,
 }: {
@@ -1832,6 +1850,12 @@ function FaPivotTable({
       <h4>{title}</h4>
       <div className="fa-tbje-account-table-wrap">
         <table className="fa-tbje-account-table fa-tbje-pivot-preview">
+          <colgroup>
+            <col className="fa-tbje-pivot-col-entity" />
+            <col className="fa-tbje-pivot-col-account" />
+            <col className="fa-tbje-pivot-col-amount" />
+            <col className="fa-tbje-pivot-col-amount" />
+          </colgroup>
           <thead>
             <tr>
               <th>主体</th>
@@ -1864,7 +1888,7 @@ function FaPivotTable({
               </tr>
             )}
             <tr className="fa-tbje-pivot-total">
-              <td>合计</td>
+              <td colSpan={2}>合计</td>
               <td className="fa-tbje-num">{formatPivotAmount(totals.debit)}</td>
               <td className="fa-tbje-num">
                 {formatPivotAmount(totals.credit)}

@@ -5,6 +5,7 @@ import {
   render,
   renderHook,
   screen,
+  waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LedgerReviewAll, useLedgerDictReviews } from "./LedgerReviewAll";
@@ -28,6 +29,43 @@ const slot = (onApplied = vi.fn(), column = "A编码") => ({
 afterEach(cleanup);
 
 describe("共享账表复核生命周期", () => {
+  it("每个新来源身份默认自动复核一次", async () => {
+    const review = vi.fn();
+    const view = render(
+      <LedgerReviewAll
+        present={["tb"]}
+        names={{ je: "JE", tb: "TB" }}
+        reviewing={{ je: false, tb: false }}
+        status={{ je: "", tb: "" }}
+        autoReviewKey="TB-A"
+        onReviewAll={review}
+      />,
+    );
+    await waitFor(() => expect(review).toHaveBeenCalledTimes(1));
+    view.rerender(
+      <LedgerReviewAll
+        present={["tb"]}
+        names={{ je: "JE", tb: "TB" }}
+        reviewing={{ je: false, tb: false }}
+        status={{ je: "", tb: "" }}
+        autoReviewKey="TB-A"
+        onReviewAll={review}
+      />,
+    );
+    expect(review).toHaveBeenCalledTimes(1);
+    view.rerender(
+      <LedgerReviewAll
+        present={["tb"]}
+        names={{ je: "JE", tb: "TB" }}
+        reviewing={{ je: false, tb: false }}
+        status={{ je: "", tb: "" }}
+        autoReviewKey="TB-B"
+        onReviewAll={review}
+      />,
+    );
+    await waitFor(() => expect(review).toHaveBeenCalledTimes(2));
+  });
+
   it("映射取值告警明确标注来自 TB 还是 JE", () => {
     render(
       <LedgerReviewAll

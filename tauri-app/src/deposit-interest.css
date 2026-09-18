@@ -60,15 +60,6 @@
 .deposit-account-head {
   grid-template-columns: minmax(180px, 1fr) 220px minmax(220px, 300px);
 }
-/* 科目分类（一级科目）与存款类型（末级明细）两张清单各自的两列网格。 */
-.deposit-account-list--classify label,
-.deposit-account-list--classify .deposit-account-head {
-  grid-template-columns: minmax(200px, 1fr) 220px;
-}
-.deposit-account-list--tier label,
-.deposit-account-list--tier .deposit-account-head {
-  grid-template-columns: minmax(200px, 1fr) minmax(240px, 320px);
-}
 .deposit-account-head {
   position: sticky;
   top: 0;
@@ -99,14 +90,27 @@
   .deposit-account-head {
     grid-template-columns: minmax(140px, 1fr) 190px minmax(180px, 240px);
   }
-  .deposit-account-list--classify label,
-  .deposit-account-list--classify .deposit-account-head {
-    grid-template-columns: minmax(150px, 1fr) 190px;
-  }
-  .deposit-account-list--tier label,
-  .deposit-account-list--tier .deposit-account-head {
-    grid-template-columns: minmax(150px, 1fr) minmax(190px, 250px);
-  }
+}
+/* 步骤卡头与借款利息第二步同款：主色 kicker 点题，汇总徽章靠右。 */
+.deposit-confirm-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+.deposit-confirm-heading > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+.deposit-section-kicker {
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.deposit-confirm-heading .deposit-account-summary {
+  margin: 0;
 }
 /* 只剩两个参数：日期是短字段，定宽即可；输出文件（输入框＋「选择位置」
    按钮）吃掉剩余宽度——等宽平分会让日期框空出大半，视觉失衡。 */
@@ -194,6 +198,9 @@
   min-width: 1990px;
   table-layout: auto;
   border-collapse: collapse;
+  /* 固定列（前两列）必须涂不透明底色盖住横向滚动的内容；普通单元格若保持
+     透明就会透出页面底色，与固定列的卡片色形成色块割裂。整表统一上底色。 */
+  background: var(--card);
 }
 .deposit-table th,
 .deposit-table td {

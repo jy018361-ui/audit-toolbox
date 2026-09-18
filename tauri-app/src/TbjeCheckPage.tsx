@@ -856,14 +856,18 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       // 重复选入只当“确认要这份”；已换标题行、改过映射的 Sheet 原样保留。
       if (nextInspects[provisionalKey]) continue;
       try {
-        const inspected = (await engineCall(`fx.inspect_${kind}`, {
-          source: {
-            inputPath: item.path,
-            sheet: item.classification.sheet,
-            headerRow: 0,
-            headerDepth: 0,
+        const inspected = (await engineCall(
+          `fx.inspect_${kind}`,
+          {
+            source: {
+              inputPath: item.path,
+              sheet: item.classification.sheet,
+              headerRow: 0,
+              headerDepth: 0,
+            },
           },
-        })) as Inspection;
+          `${fileName(item.path)} / ${item.classification.sheet}`,
+        )) as Inspection;
         const source: PairingFile = {
           path: item.path,
           sheet: inspected.sheet,
@@ -942,9 +946,13 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     setError("");
     const oldKey = pairingFileKey(file);
     try {
-      const inspected = (await engineCall(`fx.inspect_${kind}`, {
-        source: { inputPath: file.path, sheet, headerRow, headerDepth },
-      })) as Inspection;
+      const inspected = (await engineCall(
+        `fx.inspect_${kind}`,
+        {
+          source: { inputPath: file.path, sheet, headerRow, headerDepth },
+        },
+        `${fileName(file.path)} / ${sheet}`,
+      )) as Inspection;
       const nextFile = { ...file, sheet: inspected.sheet, entities: inspected.entities };
       const nextKey = pairingFileKey(nextFile);
       setInspects((current) => {
@@ -984,14 +992,18 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     setBusy(true);
     setError("");
     try {
-      const inspected = (await engineCall(`fx.inspect_${nextKind}`, {
-        source: {
-          inputPath: file.path,
-          sheet: current.sheet,
-          headerRow: 0,
-          headerDepth: 0,
+      const inspected = (await engineCall(
+        `fx.inspect_${nextKind}`,
+        {
+          source: {
+            inputPath: file.path,
+            sheet: current.sheet,
+            headerRow: 0,
+            headerDepth: 0,
+          },
         },
-      })) as Inspection;
+        `${fileName(file.path)} / ${current.sheet}`,
+      )) as Inspection;
       const changed: PairingFile = {
         ...file,
         kind: nextKind,
@@ -1041,9 +1053,11 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       `正在读取${kind === "tb" ? "科目余额表" : "序时账"}：${fileName(path)}`,
     );
     try {
-      const inspected = (await engineCall(`fx.inspect_${kind}`, {
-        source: { inputPath: path, sheet: "", headerRow: 0, headerDepth: 0 },
-      })) as Inspection;
+      const inspected = (await engineCall(
+        `fx.inspect_${kind}`,
+        { source: { inputPath: path, sheet: "", headerRow: 0, headerDepth: 0 } },
+        fileName(path),
+      )) as Inspection;
       const source: PairingFile = {
         path,
         sheet: inspected.sheet,
@@ -1206,6 +1220,12 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   };
 
   const reviewTargetsOf = (group: PairedGroup) => {
+    // 等待弹窗要能指名道姓：11 组并发复核时，只说「正在联合复核字段映射」
+    // 分不清在算哪一组，把两侧文件名挂上就一目了然。
+    const busyDetail = [group.tb, group.je]
+      .filter((file): file is PairingFile => Boolean(file))
+      .map(pairingFileLabel)
+      .join(" ＋ ");
     const target = (kind: LedgerKind, file?: PairingFile) => {
       if (!file) return undefined;
       const key = pairingFileKey(file);
@@ -1225,6 +1245,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         ),
         tool: "tbje_check",
         pairLabel: group.label,
+        busyDetail,
         multiColumnRoles: MULTI_COLUMN_ROLES,
       };
     };
@@ -1524,6 +1545,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
           const alignment = (await engineCall(
             "ledger.check_mapping_alignment",
             groupParams,
+            `「${group.label}」组`,
           )) as {
             aligned?: boolean;
             errors?: string[];

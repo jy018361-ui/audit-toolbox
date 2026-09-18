@@ -99,6 +99,52 @@
   background: var(--background);
   color: var(--foreground);
 }
+/* 合并表（科目确认＋利率设置）：基础 12 列，主体/辅助核算列按账套有无增减。
+   表格横向滚动，列宽交给浏览器按内容分配，输入框给定最小宽防挤成细缝。 */
+.loan-account-confirm.loan-confirm-table table {
+  min-width: 1520px;
+  table-layout: auto;
+}
+.loan-account-confirm.loan-confirm-table td {
+  white-space: nowrap;
+}
+.loan-account-confirm.loan-confirm-table input {
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--foreground);
+}
+.loan-account-confirm.loan-confirm-table input[type="number"] {
+  width: 112px;
+  min-width: 96px;
+}
+/* 借款明细子行：浅底小字行，挂在借款科目行下方逐笔设置利率。 */
+.loan-account-confirm tr.is-rate-detail td {
+  padding-top: 7px;
+  padding-bottom: 7px;
+  background: color-mix(in srgb, var(--success-bg) 50%, var(--card));
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+.loan-account-confirm tr.is-rate-detail td.loan-num {
+  color: var(--foreground);
+}
+.loan-detail-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--success-bg);
+  color: var(--success-fg);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.loan-account-confirm td.loan-match-basis {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .loan-suggestion {
   display: inline-block;
   overflow: hidden;
@@ -112,27 +158,11 @@
   color: var(--success-fg);
   font-weight: 600;
 }
-.loan-rate-toolbar {
-  display: flex;
-  align-items: end;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  margin-bottom: var(--sp-4);
-  padding: var(--sp-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--muted);
-}
-.loan-rate-toolbar > label {
-  display: grid;
-  gap: 5px;
-  min-width: 220px;
-  color: var(--muted-foreground);
-  font-size: var(--fs-xs);
-}
-.loan-rate-toolbar .loan-paste-actions {
+/* 合并卡（科目确认＋利率设置）工具栏：查找科目在左，利率动作按钮靠右。 */
+.loan-account-list-toolbar .loan-paste-actions {
   justify-content: flex-end;
   margin-top: 0;
+  margin-left: auto;
 }
 .loan-result-overview {
   display: flex;
@@ -398,13 +428,9 @@
   .loan-bridge-equation .fx-operator {
     min-height: 24px;
   }
-  .loan-confirm-heading,
-  .loan-rate-toolbar {
+  .loan-confirm-heading {
     align-items: stretch;
     flex-direction: column;
-  }
-  .loan-rate-toolbar > label {
-    min-width: 0;
   }
 }
 /* 导出完成反馈：文件名＋打开按钮，完整路径放悬浮提示。 */
@@ -454,85 +480,6 @@
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-/* 借款利率确认表：默认十列；辅助核算验证成功时扩展为十一列。
-   每列都给出固定宽度，避免百分比列宽合计已满后把最后的 BP 输入框挤成细缝。 */
-.loan-rate-match table {
-  min-width: 1410px;
-  table-layout: fixed;
-}
-.loan-rate-match.has-auxiliary table { min-width: 1630px; }
-.loan-rate-match th:nth-child(1) {
-  width: 160px;
-}
-.loan-rate-match th:nth-child(2) {
-  width: 120px;
-}
-.loan-rate-match th:nth-child(3) {
-  width: 220px;
-}
-.loan-rate-match th:nth-child(4) {
-  width: 100px;
-}
-.loan-rate-match th:nth-child(5) {
-  width: 140px;
-}
-.loan-rate-match th:nth-child(6) { width: 140px; }
-.loan-rate-match th:nth-child(7) { width: 110px; }
-.loan-rate-match th:nth-child(8) {
-  width: 150px;
-}
-.loan-rate-match th:nth-child(9) {
-  width: 150px;
-}
-.loan-rate-match th:nth-child(10) {
-  width: 120px;
-}
-/* 有辅助核算时，后续列整体右移一位。 */
-.loan-rate-match.has-auxiliary th:nth-child(4) { width: 220px; }
-.loan-rate-match.has-auxiliary th:nth-child(5) { width: 100px; }
-.loan-rate-match.has-auxiliary th:nth-child(6),
-.loan-rate-match.has-auxiliary th:nth-child(7) { width: 140px; }
-.loan-rate-match.has-auxiliary th:nth-child(8) { width: 110px; }
-.loan-rate-match.has-auxiliary th:nth-child(9),
-.loan-rate-match.has-auxiliary th:nth-child(10) { width: 150px; }
-.loan-rate-match.has-auxiliary th:nth-child(11) { width: 120px; }
-/* 横向滚动时保留主体、科目编码、科目名称；启用辅助时一并保留辅助核算。 */
-.loan-rate-match th:nth-child(-n + 3),
-.loan-rate-match td:nth-child(-n + 3),
-.loan-rate-match.has-auxiliary th:nth-child(4),
-.loan-rate-match.has-auxiliary td:nth-child(4) {
-  position: sticky;
-  z-index: 2;
-  background: var(--card);
-}
-.loan-rate-match th:nth-child(-n + 3),
-.loan-rate-match.has-auxiliary th:nth-child(4) {
-  z-index: 3;
-  background: var(--muted);
-}
-.loan-rate-match th:nth-child(1),
-.loan-rate-match td:nth-child(1) { left: 0; }
-.loan-rate-match th:nth-child(2),
-.loan-rate-match td:nth-child(2) { left: 160px; }
-.loan-rate-match th:nth-child(3),
-.loan-rate-match td:nth-child(3) { left: 280px; }
-.loan-rate-match.has-auxiliary th:nth-child(4),
-.loan-rate-match.has-auxiliary td:nth-child(4) { left: 500px; }
-.loan-rate-match td:nth-child(3),
-.loan-rate-match.has-auxiliary td:nth-child(4) {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.loan-rate-match input,
-.loan-rate-match select {
-  width: 100%;
-  min-width: 0;
-}
-.loan-rate-match .loan-match-basis {
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 /* 步骤间门禁说明：下一步被映射卡住时，明说缺什么并给返回入口。 */
 .loan-step-gate {

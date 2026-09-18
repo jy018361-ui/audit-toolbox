@@ -681,7 +681,10 @@ fn expense_account_direction(
     let code = ledger_mapping::account_code_of(account);
     let name = ledger_mapping::account_name_of(account).to_lowercase();
     let ancestor_has = |keywords: &[&str]| {
-        code.chars().all(|c| c.is_ascii_digit())
+        // 编码允许 `.`/`-` 分段（"6603.02"）：只认纯数字时带点末级查不到
+        // 上级，费用属性丢失会把登记方向判反（与存款利息同一教训）。
+        code.chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
             && (1..code.len()).rev().any(|length| {
                 tb_accounts.get(&code[..length]).is_some_and(|parent| {
                     keywords

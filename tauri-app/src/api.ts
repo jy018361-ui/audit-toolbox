@@ -64,14 +64,14 @@ export async function toolCatalog() {
 // engine_call 类操作（导入文档、OCR 识别、读取大表）没有事件流可听，各页面
 // 只能在按钮上转圈，用户不知道要等多久、甚至以为卡死。这里把进行中的调用
 // 集中广播出去，App 层统一弹「正在处理」等待窗（见 SyncBusyDialog）。
-export type SyncBusyEntry = { id: number; method: string };
+export type SyncBusyEntry = { id: number; method: string; detail?: string };
 
 const syncBusyListeners = new Set<(entries: SyncBusyEntry[]) => void>();
 let syncBusySeq = 0;
-const syncBusyActive = new Map<number, string>();
+const syncBusyActive = new Map<number, { method: string; detail?: string }>();
 
 function syncBusySnapshot(): SyncBusyEntry[] {
-  return [...syncBusyActive].map(([id, method]) => ({ id, method }));
+  return [...syncBusyActive].map(([id, item]) => ({ id, ...item }));
 }
 
 function notifySyncBusy() {
@@ -90,6 +90,8 @@ export function onSyncBusyChange(
 export async function engineCall(
   method: string,
   params: Record<string, unknown>,
+  /** 给等待弹窗看的一句话明细（文件名、组名），让用户知道在处理哪份数据。 */
+  detail?: string,
 ) {
   if (!inTauri()) {
     // 演示数据通道：仅浏览器预览 + localStorage 开关打开时生效，
@@ -99,7 +101,7 @@ export async function engineCall(
     throw new Error("浏览器预览模式不能处理本地文件，请使用 Tauri 应用。 ");
   }
   const id = ++syncBusySeq;
-  syncBusyActive.set(id, method);
+  syncBusyActive.set(id, detail ? { method, detail } : { method });
   notifySyncBusy();
   try {
     return await invoke<unknown>("engine_call", { method, params });

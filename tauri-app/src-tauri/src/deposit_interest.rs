@@ -1281,6 +1281,39 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         mapping = confirmed.clone();
     }
     let accounts = distinct_accounts(&table, &mapping);
+    // 科目确认目录按末级口径下发（2026-09-18 定案）：多层级 TB 的分类界面只列
+    // 末级科目。父子层级（1101.01 分段编码、无编码映射、多主体等形态）只有
+    // 公共引擎的目录末级掩码认得，前端不得自造规则。全量 accounts 继续下发，
+    // FA 等页面与历史口径仍在用。
+    let accounts_leaf = if kind == "tb" {
+        let leaf = ledger_mapping::tb_catalog_leaf_mask(
+            &table.headers,
+            &table.rows,
+            &|role| match mapping.get(role) {
+                Some(Value::String(value)) => vec![value.clone()],
+                Some(Value::Array(values)) => values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+                _ => vec![],
+            },
+        );
+        let indexes = account_columns(&table, &mapping);
+        table
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| leaf.get(*index).copied().unwrap_or(true))
+            .map(|(_, row)| join_columns(row, &indexes))
+            .filter(|value| !value.is_empty() && !ledger_mapping::is_report_footer_value(value))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .take(1000)
+            .collect::<Vec<_>>()
+    } else {
+        accounts.clone()
+    };
     let entities = distinct_values(&table, &mapping, "entity");
     let entity_accounts = distinct_entity_accounts(&table, &mapping);
     let years = data_years(&table, kind, &mapping);
@@ -1304,7 +1337,7 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         // 角色标签表与映射建议并列下发：前端用它把英文标准名渲染成中文，
         // 不再自持会过期的对照表（标签与引擎 MissingRole.label 同源）。
         "roles": engine_role_labels(kind),
-        "entities": entities, "accounts": accounts,
+        "entities": entities, "accounts": accounts, "accountsLeaf": accounts_leaf,
         "entityAccounts": entity_accounts,
         "suggestedAccountRoles": accounts.iter().map(|account|
             (account.clone(), Value::String(suggest_account_role(account).into()))
@@ -3761,9 +3794,16 @@ fn registered_direction(account: &str, tb_accounts: &BTreeMap<String, String>) -
     let code = ledger_mapping::account_code_of(account);
     let name = ledger_mapping::account_name_of(account);
     let lower = name.to_lowercase();
-    // 由近及远走编码前缀查上级科目；只认纯数字编码（字节切片安全）。
+    // 由近及远走编码前缀查上级科目；编码允许 `.`/`-` 分段（"6603.02"），
+    // 全 ASCII 同样保证字节切片安全。此前只认纯数字：带点分段的末级永远
+    // 查不到上级，"6603.02 利息收入"落在自身名称的「收入」关键词上，上级
+    // "6603 财务费用"的费用属性失效，红字方向随之判反（10 号 PBC 样例）。
     let ancestor_hits = |keywords: &[&str]| -> bool {
-        if code.len() < 2 || !code.chars().all(|c| c.is_ascii_digit()) {
+        if code.len() < 2
+            || !code
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+        {
             return false;
         }
         (1..code.len())
@@ -6508,6 +6548,17 @@ mod tests {
             registered_direction("66030002 利息", &tb_accounts),
             AccountDirection::Debit
         );
+        // 分段编码（10 号 PBC 样例形态）也必须查得到上级：6603.02 自身
+        // 名称只有「收入」，费用属性在上级 6603 财务费用身上——此前祖先
+        // 查询只认纯数字编码，把它判成贷方收入，红字方向随之整组判反。
+        assert_eq!(
+            registered_direction("6603.02 利息收入", &tb_accounts),
+            AccountDirection::Debit
+        );
+        assert_eq!(
+            registered_direction("6603-02 利息收入", &tb_accounts),
+            AccountDirection::Debit
+        );
         // 独立收入科目按贷方向。
         assert_eq!(
             registered_direction("6051 其他业务收入", &BTreeMap::new()),
@@ -6742,6 +6793,55 @@ mod tests {
         assert_eq!(mapping["accountName"], json!(["会计科目"]), "{mapping:#?}");
         assert_eq!(mapping["summary"], json!("文本"));
         assert_eq!(mapping["auxiliary"], json!(["成本中心"]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inspect下发末级科目清单且兼容分段编码() {
+        let dir = std::env::temp_dir().join(format!("deposit-leaf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tb.xlsx");
+        write_fixture(
+            &path,
+            &[
+                vec!["科目编码", "科目名称", "期初余额", "期末余额"],
+                vec!["1002", "银行存款", "100", "120"],
+                vec!["1101", "交易性金融资产", "0", "0"],
+                vec!["1101.01", "银行理财产品", "10", "10"],
+                vec!["6603", "财务费用", "0", "0"],
+                vec!["6603.02", "利息收入", "-72", "-72"],
+            ],
+        );
+        let inspected = inspect(
+            &json!({"source": {"inputPath": path.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
+        let names = |list: &serde_json::Value| {
+            list.as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect::<Vec<String>>()
+        };
+        let accounts = names(&inspected["accounts"]);
+        let leaf = names(&inspected["accountsLeaf"]);
+        // 全量清单父子都在（FA 等页面继续用）；末级清单只留真正记账的行——
+        // 分段编码 1101.01/6603.02 的父子关系由公共引擎的目录末级掩码判定。
+        assert!(
+            accounts.iter().any(|name| name == "1101 交易性金融资产"),
+            "全量清单应包含父级：{accounts:?}"
+        );
+        assert!(leaf.iter().any(|name| name == "1002 银行存款"), "{leaf:?}");
+        assert!(
+            leaf.iter().any(|name| name == "1101.01 银行理财产品"),
+            "{leaf:?}"
+        );
+        assert!(leaf.iter().any(|name| name == "6603.02 利息收入"), "{leaf:?}");
+        assert!(
+            !leaf.iter().any(|name| name.starts_with("1101 ") || name.starts_with("6603 ")),
+            "父级汇总行不得混进末级清单：{leaf:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

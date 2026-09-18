@@ -75,6 +75,8 @@ const inspection = {
   ],
   entities: [],
   accounts: [bank, parent, leaf],
+  // 引擎目录末级掩码下发的清单：6603 是 66030101 的父级，不进确认界面。
+  accountsLeaf: [bank, leaf],
   suggestedMapping: mapping,
   suggestedAccountRoles: {
     [bank]: "deposit",
@@ -267,33 +269,36 @@ describe("存款科目手工分类请求", () => {
       },
     });
     goToStep(STEP2);
-    const parentInput = await screen.findByRole("combobox", {
-      name: `${parent}的分类`,
+    const leafInput = await screen.findByRole("combobox", {
+      name: `${leaf}的分类`,
     });
     expect(mock.engineCall).not.toHaveBeenCalledWith(
       "deposit.classify_source_llm",
       expect.anything(),
     );
-    // 科目分类只列一级科目：末级 66030101 不再出现，分类随一级继承。
+    // 科目确认只列末级科目：父级 6603 不再出现，利息收入类末级直接可见。
     expect(
-      screen.queryByRole("combobox", { name: `${leaf}的分类` }),
+      screen.queryByRole("combobox", { name: `${parent}的分类` }),
     ).not.toBeInTheDocument();
-    // 末级口径的存款类型在独立卡片里按计息科目逐个确认。
+    expect(leafInput).toHaveValue("");
+    expect((leafInput as HTMLSelectElement).selectedOptions[0]).toHaveTextContent("不参与测算");
+    expect((leafInput as HTMLSelectElement).selectedOptions[0]).not.toHaveTextContent("自动");
+    // 存款类型与分类同卡内联展示。
     expect(
-      await screen.findByRole("combobox", { name: `${bank}的存款类型` }),
+      screen.getByRole("combobox", { name: `${bank}的存款类型` }),
     ).toBeVisible();
     expect(screen.queryByText("内置挂牌利率可能已过期")).not.toBeInTheDocument();
     fireEvent.change(
       screen.getByRole("combobox", { name: `${bank}的分类` }),
       { target: { value: "cash_on_hand" } },
     );
-    // 库存现金不是计息科目：末级卡片里相应行随之消失。
     expect(screen.queryByRole("combobox", { name: `${bank}的存款类型` })).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: `${bank}的分类` }).closest("label")?.querySelector(".deposit-account-na")).toHaveTextContent("不适用");
     fireEvent.change(
       screen.getByRole("combobox", { name: `${bank}的分类` }),
       { target: { value: "" } },
     );
-    fireEvent.change(parentInput, { target: { value: "interest_income" } });
+    fireEvent.change(leafInput, { target: { value: "interest_income" } });
     fireEvent.change(
       screen.getByRole("combobox", { name: `${bank}的存款类型` }),
       {
@@ -304,37 +309,34 @@ describe("存款科目手工分类请求", () => {
     fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
     await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
     expect(mock.jobStart.mock.calls[0][1]).toMatchObject({
-      accountRoles: { [parent]: "interest_income", [leaf]: "excluded" },
-      accountRoleOverrides: { [parent]: "interest_income" },
+      accountRoles: { [bank]: "deposit", [leaf]: "interest_income" },
+      accountRoleOverrides: { [leaf]: "interest_income" },
       accountTierOverrides: { [bank]: "term_1y" },
     });
     expect(
       mock.jobStart.mock.calls[0][1].accountRoleOverrides,
-    ).not.toHaveProperty(leaf);
+    ).not.toHaveProperty(parent);
     act(() => mock.event?.(complete));
     goToStep(STEP2);
     // 切换步骤会卸载重挂这张卡片，先前抓的引用已脱离文档，必须重新查。
-    fireEvent.change(screen.getByRole("combobox", { name: `${bank}的分类` }), {
-      target: { value: "cash_on_hand" },
+    fireEvent.change(screen.getByRole("combobox", { name: `${leaf}的分类` }), {
+      target: { value: "excluded" },
     });
     goToStep(STEP3);
     fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
     await waitFor(() => expect(mock.jobStart).toHaveBeenCalledTimes(2));
     expect(mock.jobStart.mock.calls[1][1].accountRoleOverrides).toEqual({
-      [parent]: "interest_income",
-      [bank]: "cash_on_hand",
+      [leaf]: "excluded",
     });
     act(() => mock.event?.(complete));
     goToStep(STEP2);
-    fireEvent.change(screen.getByRole("combobox", { name: `${bank}的分类` }), {
+    fireEvent.change(screen.getByRole("combobox", { name: `${leaf}的分类` }), {
       target: { value: "" },
     });
     goToStep(STEP3);
     fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
     await waitFor(() => expect(mock.jobStart).toHaveBeenCalledTimes(3));
-    expect(mock.jobStart.mock.calls[2][1].accountRoleOverrides).toEqual({
-      [parent]: "interest_income",
-    });
+    expect(mock.jobStart.mock.calls[2][1].accountRoleOverrides).toEqual({});
   });
 });
 

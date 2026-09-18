@@ -3232,22 +3232,26 @@ pub(crate) fn credit_positive(signed: f64) -> f64 {
 /// 行上手工指定的角色，靠**编码前缀继承**落到末级行：找编码是本科目严格
 /// 前缀的最近上级，取最长前缀（最具体的上级优先）。
 ///
-/// 仅限**纯数字编码**参与：科目首词是普通文本时，`starts_with` 的偶然前缀
-/// （「利息」不是「利息收入」的上级）会误继承。也只应在自动识别给不出结论
-/// 时调用——自动有结论的科目不该被上级的指定覆盖。
+/// 仅限**数字编码（允许 `.`/`-` 分段，如 "6603.02"）**参与：科目首词是普通
+/// 文本时，`starts_with` 的偶然前缀（「利息」不是「利息收入」的上级）会误
+/// 继承；分段符是编码体系的组成部分，参与前缀比对与公共末级掩码同口径。
+/// 也只应在自动识别给不出结论时调用——自动有结论的科目不该被上级的指定
+/// 覆盖。
 pub(crate) fn inherited_role_by_code_prefix<'a>(
     code: &str,
     roles: impl Iterator<Item = (&'a str, &'a str)>,
     key_of: impl Fn(&str) -> &str,
 ) -> Option<String> {
-    if code.is_empty() || !code.chars().all(|c| c.is_ascii_digit()) {
+    let code_shape =
+        |value: &str| !value.is_empty() && value.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-');
+    if !code_shape(code) {
         return None;
     }
     roles
         .filter_map(|(candidate, role)| {
             let parent = key_of(candidate);
             let usable = !parent.is_empty()
-                && parent.chars().all(|c| c.is_ascii_digit())
+                && code_shape(parent)
                 && parent.len() < code.len()
                 && code.starts_with(parent);
             (usable && !role.is_empty() && role != "unassigned").then_some((parent, role))

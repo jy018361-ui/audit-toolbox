@@ -1,6 +1,47 @@
 # UI 修改记录
 
-## 2026-09-18 · 科目清单分层口径统一与借款利率表自动生成
+## 2026-09-18 · 全局等待弹窗报出具体处理对象
+
+### 目标
+
+- 同步等待弹窗（SyncBusyDialog）在多任务并发时此前一排「正在处理」，用户不知道在算哪个文件、哪一组。现在每条等待项都报出「做什么 ＋ 在处理哪份数据」，如「正在联合复核字段映射：04TB.XLSX ＋ 04序时账.xlsx」。
+
+### 设计决策
+
+- `engineCall` 新增可选第三参「明细」：只进全局等待广播、不进引擎请求参数；没有明细时保持两参调用，既有按两参断言的测试不必跟改。
+- 弹窗补全 20 余个未登记方法短语（`ledger.review_pair_mapping`、`ledger.review_mapping`、`fx.inspect_tb/je`、`deposit.inspect_tb/je`、`roll_forward.validate` 等），未登记时依旧退回「正在处理」，不露英文方法名。
+- TBJE 完整性核对页把明细接到三处慢调用上：读取 TB/JE（文件名 / Sheet）、核对字段映射（组名）、LLM 联合复核（两侧文件名，经共享引擎 `LedgerReviewTarget.busyDetail` 透传，不进 LLM 请求）；一次复核 11 组时逐条可辨。
+- 其余账表页一次只处理一份文件，靠静态短语即可说清，暂不传明细。
+
+### 验证方式
+
+- `npx vitest run src/components/SyncBusyDialog.test.tsx src/components/LedgerReviewAll.test.tsx src/TbjeCheckPage.test.tsx src/LoanInterestPageUi.test.tsx`
+- `npm test`（776 项全过）＋ `npx tsc -b`
+
+## 2026-09-18 · 科目确认清单统一末级口径与界面降噪（第二轮）
+
+### 目标
+
+- 多层级 TB 的科目确认清单不再父子全量铺开：存款利息、汇兑损益只列**末级科目**，层级判定交给公共引擎（分段编码 1101.01、无编码映射等形态只有引擎认得），FA List 维持既有维度不变。辅助明细行仍只在 TB 辅助核算与 JE 匹配验证通过后展开。
+- 存款利息的「科目分类」与「存款类型」合回一张卡（末级明细行 × 分类 / 存款类型三列），卡头改用借款页同款主色 kicker＋汇总徽章；「存款利率档位」同样加 kicker。
+- 逐户余额勾稽与利息测算表整表统一底色：此前前两列固定列涂卡片色、其余列透明透出页面底色，形成色块割裂。
+- 全局删除「标题候选得分接近，请确认标题行」提示（存款／汇兑／FA 三处）。
+- 修复 10 号 PBC 样例的 TB 利息收入方向判反（-72,868.20 → +72,868.20）：已结转红字科目的登记方向靠上级科目名判断，而祖先查询只认纯数字编码，"6603.02" 查不到上级 "6603 财务费用"；存款、借款与公共前缀继承三处守卫统一放宽为数字＋分段符（详见 LEDGER_MAPPING_UNIFICATION.md 同日条目）。
+- 借款利息第二步自动生成利率确认表、删除与第三步重复的资产负债表日、一键复核按钮收回右端、步骤尾主按钮统一靠右（第一轮落地，本轮保留）。
+
+### 设计决策
+
+- 引擎侧在 `deposit.inspect_tb` / `fx.inspect_tb` 新增 `accountsLeaf`（公共目录末级掩码 `tb_catalog_leaf_mask` 判定），全量 `accounts` 照旧下发供 FA 等页面使用；前端旧任务无该字段时回退全量清单。上一轮前端自造的纯数字前缀层级助手（`accountHierarchy.ts`）与汇兑一级币种聚合/下推方案全部移除——10 号 PBC 样例（1101/1101.01 分段编码）证明自造规则必然漏形态。
+- 存款合并卡沿用原三列结构：分类（含辅助明细行覆盖）＋存款类型/期限（仅计息科目可用），计数徽章移入卡头；界面不再出现父级行，利息收入类末级科目直接可见可分类。
+- 借款利息第二步的科目确认表与利率确认表合并为一张表（行＝TB 末级科目，利率列仅借款科目可编辑，辅助拆分行在科目下展开）——并行子任务落地，详见借款页测试。
+
+### 验证方式
+
+- `npx vitest run src/DepositInterestInteractions.test.tsx src/DepositInterestPage.test.ts src/FxAuditPage.test.ts src/FaTbJePage.test.ts`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib inspect下发末级科目清单`
+- `npx vitest run src/LoanInterestPageUi.test.tsx src/LoanInterestPage.test.ts`（借款合一）
+
+## 2026-09-18 · 科目清单分层口径统一与借款利率表自动生成（第一轮，一级方案已被上条取代）
 
 ### 目标
 

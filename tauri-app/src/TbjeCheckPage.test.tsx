@@ -891,9 +891,14 @@ describe("TbjeCheckPage", () => {
     await waitFor(() =>
       expect(screen.getByLabelText("余额表使用的工作表")).toHaveValue("tb种类"),
     );
-    expect(engineCall).toHaveBeenCalledWith("fx.inspect_tb", {
-      source: { inputPath: "C:/samples/TB-4800.xlsx", sheet: "tb种类", headerRow: 0, headerDepth: 0 },
-    });
+    expect(engineCall).toHaveBeenCalledWith(
+      "fx.inspect_tb",
+      {
+        source: { inputPath: "C:/samples/TB-4800.xlsx", sheet: "tb种类", headerRow: 0, headerDepth: 0 },
+      },
+      // 第三个参数是给等待弹窗的明细（文件名 / Sheet），不进引擎参数。
+      "TB-4800.xlsx / tb种类",
+    );
     fireEvent.click(screen.getByRole("button", { name: "查看并调整 TB 映射" }));
     const tbPanel = screen.getByText("科目余额表字段映射").closest("section")!;
     const subjectSelect = () => tbPanel.querySelector(".dt-header-control select") as HTMLSelectElement;

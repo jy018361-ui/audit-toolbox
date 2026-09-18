@@ -42,20 +42,53 @@ const METHOD_LABELS: Record<string, string> = {
   "confirmation.inspect": "读取函证清单",
   "deposit.classify_source": "识别存款来源",
   "deposit.rate_tiers": "读取利率档次",
+  "deposit.inspect_tb": "读取 TB 账表",
+  "deposit.inspect_je": "读取序时账",
   "fx.classify_source": "识别外汇来源",
   "fx.check_mapping_alignment": "核对字段映射",
+  "fx.inspect_tb": "读取 TB 账表",
+  "fx.inspect_je": "读取序时账",
   "ledger.check_mapping_alignment": "核对字段映射",
+  "ledger.entity_scope_suggestions": "识别主体范围",
+  "ledger.forms": "读取账表结构",
+  // 字段映射 LLM 复核（单文件 / TB＋JE 成对），一次一组、常与别的调用并发
+  "ledger.review_mapping": "复核字段映射",
+  "ledger.review_pair_mapping": "联合复核字段映射",
   "loan.inspect": "读取借款数据",
+  "loan.import_rates": "导入利率台账",
+  "loan.rate_template": "读取利率模板",
+  "loan.tb_accounts": "读取 TB 科目",
   "fuzzy.inspect": "读取匹配数据",
+  "fuzzy.get_results": "读取匹配结果",
+  "fuzzy.save_confirm": "保存确认结果",
   // Roll Forward / WP
   "roll_forward.cra.parse": "解析 CRA 报表",
+  "roll_forward.catalog": "读取科目配置",
   "roll_forward.detect_subjects": "识别主体",
   "roll_forward.project_export": "导出项目",
+  "roll_forward.validate": "校验滚期数据",
   "wp.validate": "校验 WP 服务单",
+  // AudiPick 其余与缓存、设置页
+  "audipick.config_status": "读取识别配置",
+  "audipick.document_delete": "删除文档",
+  "audipick.document_import_folder": "批量导入文档",
+  "audipick.documents": "读取文档清单",
+  "audipick.export_bundle": "导出打包结果",
+  "audipick.project_delete": "删除项目",
+  "audipick.projects": "读取项目清单",
+  "cache.stat": "统计缓存占用",
+  "cache.sweep": "清理过期缓存",
+  "cache.clear": "清空缓存",
 };
 
 function labelOf(method: string): string {
   return METHOD_LABELS[method] ?? "处理";
+}
+
+/** 一条等待项的完整文案：做什么 ＋（调用方给了明细时）在处理哪份数据。 */
+function busyText(entry?: SyncBusyEntry): string {
+  const label = labelOf(entry?.method ?? "");
+  return `正在${label}${entry?.detail ? `：${entry.detail}` : ""}`;
 }
 
 /**
@@ -149,13 +182,13 @@ export function SyncBusyDialog({
             <DialogTitle>
               {entries.length > 1
                 ? `正在处理 ${entries.length} 项操作`
-                : `正在${labelOf(first?.method ?? "")}`}
+                : busyText(first)}
             </DialogTitle>
             {/* 多任务列表用 ul；DialogDescription 渲染成 <p>，p 里嵌不了 ul */}
             {entries.length > 1 ? (
               <ul className="sync-busy-list">
                 {entries.map((entry) => (
-                  <li key={entry.id}>正在{labelOf(entry.method)}</li>
+                  <li key={entry.id}>{busyText(entry)}</li>
                 ))}
               </ul>
             ) : (

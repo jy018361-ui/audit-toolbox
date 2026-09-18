@@ -890,6 +890,27 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         .into_iter()
         .filter(|account| !is_summary_account(account))
         .collect::<Vec<_>>();
+    // 科目确认目录按末级口径下发（2026-09-18 定案，与存款利息同一裁判权）：
+    // 多层级 TB 的分类界面只列末级科目，父子层级（分段编码、无编码映射等）
+    // 由公共引擎的目录末级掩码判定，前端不自造规则。全量 accounts 仍在下发。
+    let accounts_leaf = if kind == "tb" {
+        let leaf = ledger_mapping::tb_catalog_leaf_mask(
+            &table.headers,
+            &table.rows,
+            &|role| mapped_cols(&mapping, role),
+        );
+        records(&table)
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| leaf.get(*index).copied().unwrap_or(true))
+            .map(|(_, record)| account_name(record, &mapping))
+            .filter(|account| !account.trim().is_empty() && !is_summary_account(account))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        accounts.clone()
+    };
     let account_role_suggestions = accounts
         .iter()
         .map(|account| (account.clone(), suggest_account_role(account)))
@@ -936,7 +957,7 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         "entityCurrencies": entity_currencies,
         "sampledPreview": table.sampled,
         "entities": distinct_for_role(&table, &candidates, "entity"),
-        "accounts": accounts,
+        "accounts": accounts, "accountsLeaf": accounts_leaf,
         "accountRoleSuggestions": account_role_suggestions,
         "accountRoleDetails": account_role_details,
         "accountCurrencyDetails": account_currency_details,

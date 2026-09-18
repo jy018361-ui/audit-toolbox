@@ -2114,11 +2114,6 @@ function FaLedgerSourceCard(props: {
               <option value={2}>2层</option>
             </select>
           </label>
-          {inspection.headerDetection.needsConfirmation && (
-            <strong className="fx-warning">
-              标题候选得分接近，请确认标题行
-            </strong>
-          )}
         </div>
         <p className="fa-tbje-entity-note">
           {inspection.entities.length

@@ -107,6 +107,47 @@ describe("同步操作等待弹窗", () => {
     expect(screen.getByText("正在OCR 识别")).toBeTruthy();
   });
 
+  it("调用方给了明细时，把在处理哪份数据一并亮出来", () => {
+    render(<SyncBusyDialog />);
+    act(() => {
+      void engineCall(
+        "ledger.review_pair_mapping",
+        {},
+        "04TB.XLSX ＋ 04序时账.xlsx",
+      );
+    });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(
+      screen.getByText("正在联合复核字段映射：04TB.XLSX ＋ 04序时账.xlsx"),
+    ).toBeTruthy();
+  });
+
+  it("批量场景下每条各报各的文件，不再一排「正在处理」", () => {
+    render(<SyncBusyDialog />);
+    act(() => {
+      void engineCall("fx.inspect_tb", {}, "04TB.XLSX / Sheet1");
+      void engineCall("fx.inspect_je", {}, "04序时账.xlsx / 序时账");
+      void engineCall(
+        "ledger.review_pair_mapping",
+        {},
+        "01科目余额表（TB）.xls ＋ 01序时账 (JE).xlsx",
+      );
+    });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.getByText("正在处理 3 项操作")).toBeTruthy();
+    expect(screen.getByText("正在读取 TB 账表：04TB.XLSX / Sheet1")).toBeTruthy();
+    expect(screen.getByText("正在读取序时账：04序时账.xlsx / 序时账")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "正在联合复核字段映射：01科目余额表（TB）.xls ＋ 01序时账 (JE).xlsx",
+      ),
+    ).toBeTruthy();
+  });
+
   it("ESC 和点遮罩关不掉：这类操作没法安全中止，弹窗只能等它完成", () => {
     render(<SyncBusyDialog />);
     act(() => {

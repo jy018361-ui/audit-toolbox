@@ -64,11 +64,6 @@ import {
   CurrencyFallbackDialog,
   type CurrencyFallbackMode,
 } from "@/components/CurrencyFallbackDialog";
-import {
-  accountLeafAccounts,
-  accountNearestParent,
-  accountTopLevel,
-} from "@/accountHierarchy";
 
 /** 可多列的角色与统一内核一致；`account` 是历史保存映射的旧槽位。 */
 const DEPOSIT_MULTI = new Set(["id", "accountName", "auxiliary", "account", "date"]);
@@ -86,6 +81,8 @@ export type Inspection = {
   preview: string[][];
   entities: string[];
   accounts: string[];
+  /** 末级科目清单（引擎目录末级掩码下发）；旧任务缺省时回退 accounts。 */
+  accountsLeaf?: string[];
   /** 账里真实存在的「主体×科目」组合（空主体已归默认主体，最多 2000 条），
       供 FA List 等页面按真实搭配铺科目复核清单；旧后端／预览模式不下发，
       使用方需自行回退。 */
@@ -537,7 +534,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const [accountDetailRoleOverrides, setAccountDetailRoleOverrides] = useState<Record<string, string>>({});
   const [accountDetailTierOverrides, setAccountDetailTierOverrides] = useState<Record<string, string>>({});
   const [accountFilter, setAccountFilter] = useState("");
-  const [tierFilter, setTierFilter] = useState("");
   const [reportEnd, setReportEnd] = useState(defaultBalanceSheetDate());
   const [tiers, setTiers] = useState<RateTiers>();
   const [tierRates, setTierRates] = useState<Record<string, number>>({});
@@ -575,7 +571,10 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   });
 
   const accounts = useMemo(
-    () => mergeAccountList(tb?.accounts ?? [], je?.accounts ?? []),
+    // 科目确认只列末级科目：末级清单由公共引擎的目录末级掩码下发
+    // （分段编码等层级形态只有引擎认得）；旧任务没有该字段时回退全量清单。
+    () =>
+      mergeAccountList(tb?.accountsLeaf ?? tb?.accounts ?? [], je?.accounts ?? []),
     [je, tb],
   );
   const depositAccounts = accounts.filter((a) =>
@@ -593,21 +592,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   );
   // 已映射为计息科目/利息收入的排前面，excluded 与未分类沉底；
   // 排序稳定，同组内保持账表原顺序。
-  // 科目分类只列一级科目：多层级 TB 父子全量摆出来只会让用户重复核对，
-  // 末级的人工分类由一级按编码前缀继承（与引擎同口径）。存款类型/利率
-  // 确认只关心真正进入测算的末级科目（含辅助明细）。
-  const classificationAccounts = useMemo(
-    () => accountTopLevel(accounts),
-    [accounts],
-  );
-  const leafAccounts = useMemo(() => accountLeafAccounts(accounts), [accounts]);
   const reviewAccounts = useMemo(
-    () => classificationAccounts.map((account) => ({ key: account, account })),
-    [classificationAccounts],
-  );
-  const tierReviewAccounts = useMemo(
-    () => depositAccountReviewRows(leafAccounts, auxLink),
-    [leafAccounts, auxLink],
+    () => depositAccountReviewRows(accounts, auxLink),
+    [accounts, auxLink],
   );
   const reviewRole = (row: DepositAccountReviewRow) =>
     accountDetailRoleOverrides[row.key] ?? accountRoles[row.account] ?? "";
@@ -616,38 +603,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     return role !== "" && role !== "excluded";
   };
   const visibleAccounts = reviewAccounts
-    .filter((row) => accountMatches(row.account))
+    .filter((row) => accountMatches(`${row.account} ${row.entity ?? ""} ${row.auxiliary ?? ""}`))
     .sort((a, b) => Number(activeAccount(b)) - Number(activeAccount(a)));
-  /** 末级科目的有效分类：人工指定优先，其次系统建议；建议判排除时再继承
-   *  一级科目的人工分类——与引擎测算侧 role_for 的取用顺序一致，否则会出现
-   *  界面认为「不适用」、测算却按计息口径取数的两套口径。 */
-  const effectiveRole = (account: string) => {
-    if (accountRoleOverrides[account]) return accountRoleOverrides[account];
-    const suggested =
-      tb?.suggestedAccountRoles?.[account] ??
-      je?.suggestedAccountRoles?.[account] ??
-      "excluded";
-    if (suggested !== "excluded") return suggested;
-    const parent = accountNearestParent(
-      account,
-      Object.keys(accountRoleOverrides),
-    );
-    if (parent && accountRoleOverrides[parent]) return accountRoleOverrides[parent];
-    return suggested;
-  };
-  const tierRows = tierReviewAccounts.filter((row) => {
-    const role = row.auxiliaryKey
-      ? (accountDetailRoleOverrides[row.key] ?? effectiveRole(row.account))
-      : effectiveRole(row.account);
-    return ["deposit", "other_monetary"].includes(role);
-  });
-  const tierMatches = useMemo(
-    () => keywordFilterPredicate(tierFilter),
-    [tierFilter],
-  );
-  const tierVisibleRows = tierRows.filter((row) =>
-    tierMatches(`${row.account} ${row.entity ?? ""} ${row.auxiliary ?? ""}`),
-  );
 
   useEffect(() => {
     void engineCall("deposit.rate_tiers", {})
@@ -1574,41 +1531,50 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
           {accounts.length > 0 && (
             <Card>
               <CardHeader>
-                <CardTitle>科目分类</CardTitle>
+                <div className="deposit-confirm-heading">
+                  <div>
+                    <span className="deposit-section-kicker">第 1 项</span>
+                    <CardTitle>科目分类与存款类型</CardTitle>
+                  </div>
+                  <div className="deposit-account-summary">
+                    <Badge variant="secondary">计息科目 {depositAccounts.length}</Badge>
+                    <Badge variant="secondary">利息收入 {interestAccounts.length}</Badge>
+                    <HelpTip text="清单只列末级科目，层级判定与公共引擎同一口径；TB 带辅助核算且通过验证时按辅助户拆行。利息收入是 TB 比较基准；未设置时仍可测算，但不能勾稽。存款类型关联下方利率档位；名称无法判断时默认活期。" />
+                  </div>
+                </div>
               </CardHeader>
               <CardContent>
-                <p className="deposit-account-summary">
-                  计息科目 <b>{depositAccounts.length}</b> · 利息收入{" "}
-                  <b>{interestAccounts.length}</b>
-                  <HelpTip text="多层级科目表只列一级科目：末级科目自动继承一级的人工分类（按编码前缀），系统建议不受影响。利息收入是 TB 比较基准；未设置时仍可测算，但不能勾稽。" />
-                </p>
                 <details open>
-                  <summary>逐个核对科目分类（一级科目）</summary>
+                  <summary>逐个核对科目分类（末级明细）</summary>
                   <KeywordFilter
                     value={accountFilter}
                     onChange={setAccountFilter}
                     ariaLabel="筛选科目"
-                    placeholder="输入科目编码或名称关键词，即时过滤（多个词用空格分隔）"
+                    placeholder="输入科目编码、名称或辅助核算关键词，即时过滤（多个词用空格分隔）"
                     matched={visibleAccounts.length}
                     total={reviewAccounts.length}
                   />
-                  <div className="fx-list fx-accounts deposit-account-list deposit-account-list--classify">
+                  <div className="fx-list fx-accounts deposit-account-list">
                     <div className="deposit-account-head" aria-hidden="true">
                       <span>科目</span>
                       <span>分类</span>
+                      <span>存款类型</span>
                     </div>
                     {visibleAccounts.map((row) => (
                       <label key={row.key}>
-                        <span title={row.account}>{row.account}</span>
+                        <span title={`${row.account}${row.auxiliary ? ` / ${row.auxiliary}` : ""}`}>
+                          {row.account}{row.auxiliary ? ` · ${row.entity ? `${row.entity} / ` : ""}${row.auxiliary}` : ""}
+                        </span>
                         <select
-                          aria-label={`${row.account}的分类`}
-                          value={accountRoleOverrides[row.account] ?? ""}
+                          aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的分类`}
+                          value={row.auxiliaryKey ? (accountDetailRoleOverrides[row.key] ?? "") : (accountRoleOverrides[row.account] ?? "")}
                           onChange={(e) => {
                             const value = e.target.value;
-                            setAccountRoleOverrides((current) => {
+                            const setter = row.auxiliaryKey ? setAccountDetailRoleOverrides : setAccountRoleOverrides;
+                            setter((current) => {
                               const next = { ...current };
-                              if (value) next[row.account] = value;
-                              else delete next[row.account];
+                              if (value) next[row.key] = value;
+                              else delete next[row.key];
                               return next;
                             });
                           }}
@@ -1630,54 +1596,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                             </option>
                           ))}
                         </select>
-                      </label>
-                    ))}
-                  </div>
-                  {reviewAccounts.length > 0 && visibleAccounts.length === 0 && (
-                    <p className="fx-hint">
-                      没有匹配「{accountFilter.trim()}」的科目。
-                    </p>
-                  )}
-                </details>
-              </CardContent>
-            </Card>
-          )}
-
-          {accounts.length > 0 && (
-            <Card>
-              <CardHeader>
-                <CardTitle>存款类型与利率确认（末级明细）</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="deposit-account-summary">
-                  计息末级科目 <b>{tierRows.length}</b>
-                  <HelpTip text="存款类型按真正进入测算的末级科目逐个确认；TB 带辅助核算且通过验证时按辅助户拆行。分类在上方一级科目上设置，末级自动继承。存款类型关联下方利率档位；名称无法判断时默认活期。" />
-                </p>
-                {tierRows.length === 0 ? (
-                  <p className="fx-hint">
-                    暂无计息的末级科目：请先在上方「科目分类」把存款类一级科目设为计息。
-                  </p>
-                ) : (
-                  <details open>
-                    <summary>逐个确认存款类型</summary>
-                    <KeywordFilter
-                      value={tierFilter}
-                      onChange={setTierFilter}
-                      ariaLabel="筛选末级科目"
-                      placeholder="输入末级科目编码、名称或辅助核算关键词，即时过滤"
-                      matched={tierVisibleRows.length}
-                      total={tierRows.length}
-                    />
-                    <div className="fx-list fx-accounts deposit-account-list deposit-account-list--tier">
-                      <div className="deposit-account-head" aria-hidden="true">
-                        <span>末级科目</span>
-                        <span>存款类型</span>
-                      </div>
-                      {tierVisibleRows.map((row) => (
-                        <label key={row.key}>
-                          <span title={`${row.account}${row.auxiliary ? ` / ${row.auxiliary}` : ""}`}>
-                            {row.account}{row.auxiliary ? ` · ${row.entity ? `${row.entity} / ` : ""}${row.auxiliary}` : ""}
-                          </span>
+                        {["deposit", "other_monetary"].includes(reviewRole(row)) ? (
                           <div className="deposit-account-tier">
                             <select
                               aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的存款类型`}
@@ -1721,16 +1640,18 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                               </select>
                             )}
                           </div>
-                        </label>
-                      ))}
-                    </div>
-                    {tierRows.length > 0 && tierVisibleRows.length === 0 && (
-                      <p className="fx-hint">
-                        没有匹配「{tierFilter.trim()}」的末级科目。
-                      </p>
-                    )}
-                  </details>
-                )}
+                        ) : (
+                          <span className="deposit-account-na">不适用</span>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                  {reviewAccounts.length > 0 && visibleAccounts.length === 0 && (
+                    <p className="fx-hint">
+                      没有匹配「{accountFilter.trim()}」的科目。
+                    </p>
+                  )}
+                </details>
               </CardContent>
             </Card>
           )}
@@ -1943,6 +1864,7 @@ function RateTierCard({
     <Card>
       <CardHeader>
         <CardTitle>
+          <span className="deposit-section-kicker">第 2 项</span>
           存款利率档位
           <HelpTip text="科目类型会关联这里的档位。有挂牌值的标准档位自动采用暂估利率并纳入测算；账户级改写优先，最终须按协议或对账单确认。" />
           <JargonTip
@@ -2197,11 +2119,6 @@ function SourceCard(props: {
               {props.inspection.rowCount.toLocaleString()} 行 ×{" "}
               {props.inspection.headers.length} 列
             </span>
-            {props.inspection.headerDetection.needsConfirmation && (
-              <strong className="fx-warning">
-                标题候选得分接近，请确认标题行
-              </strong>
-            )}
           </div>
         )}
       </CardContent>

@@ -1,5 +1,15 @@
 # 账表映射统一方案
 
+## 2026-09-18：分段编码参与祖先/前缀判定（方向判反修复）
+
+- 10 号 PBC 样例（6603.02 利息收入，借=贷=-72868.2 已结转红字）暴露：`registered_direction`（存款利息收入方向）、`expense_account_direction`（借款利息支出方向）与 `inherited_role_by_code_prefix`（上级角色继承）三处的编码守卫只认纯数字，带 `.`/`-` 的分段末级查不到上级科目，费用属性落在上级名上时红字方向整组判反（利息收入基准 -72,868.20 应为 +72,868.20）。三处统一放宽为「数字＋`.`/`-`」，与公共末级掩码的分段口径一致；文本首词仍被排除，无误继承风险。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib direction_inference_and_signed_closed_pair`；全量 `--lib` 799 项通过。
+
+## 2026-09-18：inspect 下发末级科目清单（accountsLeaf）
+
+- `deposit.inspect_tb` / `fx.inspect_tb` 在全量 `accounts` 之外新增 `accountsLeaf`：按公共目录末级掩码 `tb_catalog_leaf_mask` 过滤后的末级科目清单，供存款利息、汇兑损益的科目确认界面只列末级（分段编码、无编码映射等层级形态与引擎同一口径）。全量 `accounts` 照旧下发（FA List 等仍在用），前端旧任务缺省该字段时回退全量。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib inspect下发末级科目清单`。
+
 ## 2026-09-18：LLM 复核必须纠正错误映射
 
 - 公共 TB／JE 联合复核、单表复核、看账与正负数标记统一采用四态语义：`keep`、`replace`、`clear`、`uncertain`。`currentForm.complete` 只表示槽位非空，不再把已有映射视为不可修改；已有映射必须结合表头和样例逐项验证。

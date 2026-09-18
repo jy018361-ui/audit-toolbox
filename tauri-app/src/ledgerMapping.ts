@@ -593,6 +593,16 @@ export function canShareCombinedAccountColumn(
   );
 }
 /**
+ * 页面传进来的引擎调用。第三参是给全局等待弹窗的明细（文件名、组名），
+ * 调用方可以忽略——`engineCall` 原生支持，包装函数少了这参也不报错。
+ */
+export type LedgerEngineCall = (
+  method: string,
+  params: Record<string, unknown>,
+  busyDetail?: string,
+) => Promise<unknown>;
+
+/**
  * 调用共用的映射复核，把够把握的建议应用到通用字典型映射上。
  *
  * 汇兑损益、存款利息、借款利息用的都是「角色名 → 列名」的字典，与看账那套
@@ -602,7 +612,7 @@ export function canShareCombinedAccountColumn(
  * `tool` 透传给后端做工具专属纪律（汇兑损益的记账日期月度兜底）。
  */
 export async function applyLedgerReviewToDict(
-  call: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+  call: LedgerEngineCall,
   kind: "je" | "tb",
   headers: string[],
   sampleRows: string[][],
@@ -610,13 +620,15 @@ export async function applyLedgerReviewToDict(
   labels: Record<string, string>,
   tool?: string,
   multiColumnRoles: ReadonlySet<string> = LEDGER_MULTI_COLUMN_ROLES,
+  /** 仅给等待弹窗看的明细（文件名等），不进后端请求。 */
+  busyDetail?: string,
 ): Promise<{
   mapping: Record<string, string | string[]>;
   applied: LedgerPlannedChange[];
   pending: LedgerPlannedChange[];
   mappingWarnings: string[];
 }> {
-  const response = (await call("ledger.review_mapping", {
+  const request = {
     kind,
     payload: {
       headers,
@@ -625,7 +637,15 @@ export async function applyLedgerReviewToDict(
       availableRoles: Object.keys(labels),
       ...(tool ? { tool } : {}),
     },
-  })) as { changes?: LedgerChange[]; reviewCoverage?: LedgerReviewCoverage };
+  };
+  // 没有明细就保持两参调用：引擎调用是否带第三参是可观察的差异，
+  // 各页面的测试按两参断言的不必跟着改。
+  const response = (await (busyDetail === undefined
+    ? call("ledger.review_mapping", request)
+    : call("ledger.review_mapping", request, busyDetail))) as {
+    changes?: LedgerChange[];
+    reviewCoverage?: LedgerReviewCoverage;
+  };
   const plan = planLedgerChanges(
     headers,
     sampleRows,
@@ -803,6 +823,11 @@ export type LedgerReviewTarget = {
   labels: Record<string, string>;
   tool?: string;
   pairLabel?: string;
+  /**
+   * 仅给等待弹窗看的明细（如「04TB.XLSX ＋ 04序时账.xlsx」），
+   * 不进后端请求——pairLabel 会作为上下文发给 LLM，两者各说各的。
+   */
+  busyDetail?: string;
   /** 当前工具允许由多列共同组成的角色；公共默认含日期组成列。 */
   multiColumnRoles?: ReadonlySet<string>;
 };
@@ -877,13 +902,19 @@ export function ledgerMappingValueWarnings(
  * 另一个文件，也不抛出——沿用「复核失败不阻塞」的既有口径。
  */
 export async function applyLedgerReviewsTogether(
-  call: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+  call: LedgerEngineCall,
   targets: Partial<Record<"je" | "tb", LedgerReviewTarget>>,
 ): Promise<Partial<Record<"je" | "tb", LedgerReviewOutcome>>> {
   const kinds = (["je", "tb"] as const).filter((kind) => targets[kind]);
   if (kinds.length === 2) {
+    // 等待弹窗的明细：优先页面给的文件名清单，退回组名。
+    const busyDetail =
+      targets.tb?.busyDetail ??
+      targets.je?.busyDetail ??
+      targets.tb?.pairLabel ??
+      targets.je?.pairLabel;
     try {
-      const response = (await call("ledger.review_pair_mapping", {
+      const request = {
         payload: {
           tool: targets.tb?.tool ?? targets.je?.tool ?? "ledger",
           pairLabel: targets.tb?.pairLabel ?? targets.je?.pairLabel,
@@ -900,7 +931,10 @@ export async function applyLedgerReviewsTogether(
             availableRoles: Object.keys(targets.je!.labels),
           },
         },
-      })) as {
+      };
+      const response = (await (busyDetail === undefined
+        ? call("ledger.review_pair_mapping", request)
+        : call("ledger.review_pair_mapping", request, busyDetail))) as {
         tbChanges?: LedgerChange[];
         jeChanges?: LedgerChange[];
         pairFindings?: LedgerPairFinding[];
@@ -977,6 +1011,7 @@ export async function applyLedgerReviewsTogether(
       target.labels,
       target.tool,
       target.multiColumnRoles,
+      target.busyDetail ?? target.pairLabel,
     );
     return {
       [kind]: {

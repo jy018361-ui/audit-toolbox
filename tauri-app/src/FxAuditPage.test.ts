@@ -8,8 +8,6 @@ import {
   fxCurrencyDefaultLabel,
   fxFallbackFunctional,
   fxAccountCurrencyOverrides,
-  fxAccountChildren,
-  fxAccountCurrencyAggregate,
   fxAllowedModes,
   fxApplyJobResult,
   fxAttachRole,
@@ -1038,90 +1036,5 @@ describe("fxCurrencyRequirement：币种类角色的下拉必填口径", () => {
     expect(fxCurrencyRequirement("tb", {}, "combined", "functionalCurrency")).toBe("optional");
     expect(fxCurrencyRequirement("je", {}, "realized", "functionalCurrency")).toBe("optional");
     expect(fxCurrencyRequirement("tb", {}, "combined", "summary")).toBeUndefined();
-  });
-});
-
-describe("一级科目口径：清单层级与币种聚合（2026-09 需求）", () => {
-  const accounts = [
-    "1002 银行存款",
-    "10020101 银行存款-美元户",
-    "10020102 银行存款-人民币户",
-    "2202 应付账款",
-  ];
-  it("一级行的币种按末级汇总：任一末级认出外币即展示，依据标末级汇总", () => {
-    const tbDetails = {
-      "10020101 银行存款-美元户": {
-        detected: "USD",
-        source: "币种列",
-        seen: ["USD"],
-        needsConfirmation: false,
-      },
-    };
-    const aggregate = fxAccountCurrencyAggregate(
-      "1002 银行存款",
-      fxAccountChildren("1002 银行存款", accounts),
-      {},
-      tbDetails,
-    );
-    expect(aggregate.detected).toBe("USD");
-    expect(fxCurrencySourceLabel(aggregate.side, aggregate.source)).toBe("末级汇总");
-    expect(aggregate.fellBack).toBe(false);
-    expect(aggregate.multiCurrency).toBe(false);
-  });
-  it("名下末级出现多种币种时一级行必须提示复核，不能只显示其一", () => {
-    const tbDetails = {
-      "10020101 银行存款-美元户": {
-        detected: "USD",
-        source: "币种列",
-        seen: ["USD"],
-        needsConfirmation: false,
-      },
-      "10020102 银行存款-人民币户": {
-        detected: "CNY",
-        source: "币种列",
-        seen: ["CNY"],
-        needsConfirmation: false,
-      },
-    };
-    const aggregate = fxAccountCurrencyAggregate(
-      "1002 银行存款",
-      fxAccountChildren("1002 银行存款", accounts),
-      {},
-      tbDetails,
-    );
-    expect(aggregate.seen).toEqual(["USD", "CNY"]);
-    expect(aggregate.multiCurrency).toBe(true);
-    expect(aggregate.jeMultiCurrency).toBe(true);
-  });
-  it("全部末级都没识别时一级行仍按本位币口径展示", () => {
-    const aggregate = fxAccountCurrencyAggregate(
-      "1002 银行存款",
-      fxAccountChildren("1002 银行存款", accounts),
-      {},
-      {},
-    );
-    expect(aggregate.detected).toBe("");
-    expect(aggregate.fellBack).toBe(true);
-  });
-  it("一级科目上手工指定的币种展开到名下全部末级，其他科目不受影响", () => {
-    expect(
-      fxAccountCurrencyOverrides(
-        { "1002 银行存款": "USD", "2202 应付账款": " " },
-        accounts,
-      ),
-    ).toEqual({
-      "1002 银行存款": "USD",
-      "10020101 银行存款-美元户": "USD",
-      "10020102 银行存款-人民币户": "USD",
-    });
-  });
-  it("无编码科目不参与末级展开", () => {
-    expect(
-      fxAccountCurrencyOverrides(
-        { 银行存款: "USD" },
-        [...accounts, "银行存款明细"],
-      ),
-    ).toEqual({ 银行存款: "USD" });
-    expect(fxAccountChildren("银行存款明细", accounts)).toEqual([]);
   });
 });

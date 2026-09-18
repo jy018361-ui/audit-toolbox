@@ -30,10 +30,13 @@ fn golden_tool_answers() {
             println!("SKIP {name}");
             continue;
         }
-        let method = if kind.trim() == "tb" {
-            "fx.inspect_tb"
-        } else {
-            "fx.inspect_je"
+        let method = match kind.trim() {
+            "tb" => "fx.inspect_tb",
+            "je" => "fx.inspect_je",
+            // FA List 匹配工具／存款利息页走 deposit 本地建议管线，与 fx 分开采。
+            "deptb" => "deposit.inspect_tb",
+            "depje" => "deposit.inspect_je",
+            _ => "fx.inspect_je",
         };
         let params = serde_json::json!({ "source": { "inputPath": path } });
         match audit_toolbox_lib::engine_call_for_test(method, params) {

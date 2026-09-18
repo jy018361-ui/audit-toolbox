@@ -995,7 +995,11 @@ fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candida
                 // 冲突词是排除条件，不是扣分项——与内核和汇兑损益同口径：
                 // 「冲销凭证号」含别名"凭证号"，按 0.35 一条扣分仍过得了 0.15
                 // 的门槛，必须整条归零；预算／对方科目不得混进科目名称同理。
-                if !bad.is_empty() {
+                // 例外：「年-月」列（金蝶 08/09 导出）归一后是「年月」，正撞
+                // date 的冲突词「年」「月」。JE 侧它就是记账期间，放行给 date
+                // （与 fx 管线的放行同口径，否则 FA List／存款利息页的记账
+                // 日期永远空着）；TB 侧「年月」归本地 period 角色专用，不放行。
+                if !bad.is_empty() && !(kind == "je" && role == "date" && value == "年月") {
                     score = 0.0;
                 }
                 (
@@ -4563,6 +4567,59 @@ fn xlsx(value: XlsxError) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 序时账年月拆列自动挂记账日期() {
+        // 金蝶 08/09 导出：日期拆成「年-月」「年-日」两列。归一后「年-月」
+        // 是「年月」，正撞 date 的冲突词「年」「月」；不放行的话 FA List／
+        // 存款利息页的记账日期永远空着。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("je.xlsx");
+        write_fixture(
+            &path,
+            &[
+                vec![
+                    "年-月", "年-日", "凭证号", "分录号", "摘要", "科目编码", "科目名称",
+                    "借方金额", "贷方金额",
+                ],
+                vec!["2025-01", "6", "记-1", "1", "提取现金", "1001", "库存现金", "500", ""],
+                vec!["2025-01", "6", "记-1", "2", "提取现金", "100201", "银行存款", "", "500"],
+                vec!["2025-02", "11", "记-2", "1", "支付货款", "220201", "应付账款", "800", ""],
+                vec!["2025-02", "11", "记-2", "2", "支付货款", "100201", "银行存款", "", "800"],
+            ],
+        );
+        let inspected = inspect(
+            &json!({"source": {"inputPath": path.to_string_lossy()}}),
+            "je",
+        )
+        .unwrap();
+        assert_eq!(inspected["suggestedMapping"]["date"], json!("年-月"));
+    }
+
+    #[test]
+    fn 科目余额表年月列仍归会计期间不给记账日期() {
+        // TB 侧「年月」是本地 period 角色的别名（没有日期列时靠它取年份），
+        // 放行只限 JE：这里 period 必须留住，date 不得抢列。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tb.xlsx");
+        write_fixture(
+            &path,
+            &[
+                vec!["科目编码", "科目名称", "年月", "期初余额", "期末余额"],
+                vec!["1001", "库存现金", "2025-01", "1000", "1500"],
+                vec!["100201", "银行存款", "2025-01", "20000", "18000"],
+                vec!["220201", "应付账款", "2025-01", "5000", "6000"],
+                vec!["600101", "主营业务收入", "2025-01", "", "3000"],
+            ],
+        );
+        let inspected = inspect(
+            &json!({"source": {"inputPath": path.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
+        assert_eq!(inspected["suggestedMapping"]["period"], json!("年月"));
+        assert!(inspected["suggestedMapping"].get("date").is_none());
+    }
 
     #[test]
     fn 科目复核按人工映射重新提取主体科目组合() {

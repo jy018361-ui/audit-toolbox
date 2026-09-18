@@ -1388,7 +1388,7 @@ fn je无币种和独立原币金额时tb仍按全部行汇总() {
 }
 
 #[test]
-fn tb非完整自然年只提示且不自动切换发生额列() {
+fn tb非完整自然年按通过率自动选用发生额列并如实报差异() {
     let dir = fixture("partial-period-warning");
     let tb_path = dir.join("TB_2024.4-12.csv");
     std::fs::write(
@@ -1420,8 +1420,9 @@ fn tb非完整自然年只提示且不自动切换发生额列() {
         "jeMapping": je_mapping()
     });
     let result = run(&value, &AtomicBool::new(false)).unwrap();
-    // 如果系统擅自切到“本期”50/30，这里会通过；保持用户映射的本年累计
-    // 500/300 才会如实报告差异。
+    // 仲裁只看数据：这套账 期初＋本年累计＝期末 成立（500-300=200），本期列
+    // 反而不平（50-30=20≠200），通过率不高过本年累计就不切换。序时账只覆盖
+    // 4-12 期、与本期列一致，因此按本年累计核对如实报告差异。
     assert_eq!(result["tbVsJe"]["passed"], json!(false), "{result:#}");
     assert!(
         result["mappingWarnings"]
@@ -1430,7 +1431,7 @@ fn tb非完整自然年只提示且不自动切换发生额列() {
             .iter()
             .any(|warning| {
                 let warning = warning.as_str().unwrap_or("");
-                warning.contains("不是完整自然年") && warning.contains("不会自动切换")
+                warning.contains("不是完整自然年") && warning.contains("自动选用")
             })
     );
     let _ = std::fs::remove_dir_all(dir);
@@ -2499,4 +2500,124 @@ fn 真实06样例辅助核算联动探针() {
         result["tbVsJe"]["mismatched"],
         result["mappingWarnings"]
     );
+}
+
+// ────────────────── 发生额口径仲裁（本期 ↔ 本年累计） ──────────────────
+
+/// 2024.4-12 形态的中期表：一季度（期初之前）的发生额只进本年累计列。
+fn 中期表(dir: &std::path::Path) {
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本期借方,本期贷方,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,100,500,300,1500,300,300\n\
+         2202,应付账款,-100,300,500,300,700,-300\n",
+    )
+    .unwrap();
+    // 序时账只覆盖 4-12 期，与本期发生列一致。
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-04-01,V1,1001,库存现金,500,0\n\
+         2025-04-01,V1,2202,应付账款,0,500\n\
+         2025-06-01,V2,2202,应付账款,300,0\n\
+         2025-06-01,V2,1001,库存现金,0,300\n",
+    )
+    .unwrap();
+}
+
+fn 加本期映射(value: &mut Value) {
+    value["tbMapping"]["periodFunctionalDebit"] = json!("本期借方");
+    value["tbMapping"]["periodFunctionalCredit"] = json!("本期贷方");
+}
+
+#[test]
+fn 中期表同时映射本期与本年累计时按通过率整表选用本期() {
+    let dir = fixture("period-arbitration-midyear");
+    中期表(&dir);
+    let mut value = params(&dir, true);
+    加本期映射(&mut value);
+    let result = run(&value, &AtomicBool::new(false)).unwrap();
+    // 本期列逐行全过：切换后 TB 自身勾稽与 TB/JE 勾稽双双通过。
+    assert_eq!(result["rollforward"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    let warnings = result["mappingWarnings"].as_array().unwrap();
+    let note = warnings
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|text| text.contains("已整表统一采用「本期发生」"))
+        .expect("应输出口径切换说明")
+        .to_owned();
+    assert!(note.contains("本期发生通过 2/2"), "{note}");
+    assert!(note.contains("本年累计通过 0/2"), "{note}");
+    // TB 侧发生额确为本期列的值（1001 借 500），不是本年累计的 1500。
+    // run() 只返回有差异的科目，全对平时用 include_all 展开验证取数口径。
+    let prepared = prepare(&value).unwrap();
+    let all = evaluate(&prepared, &AtomicBool::new(false), true).unwrap();
+    let items = all["tbVsJe"]["items"].as_array().unwrap();
+    let cash = items
+        .iter()
+        .find(|item| item["code"] == json!("1001"))
+        .expect("结果应包含科目 1001");
+    assert_eq!(cash["tbDebit"], json!(500.0), "{cash:#}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 全年表两组发生额并列且全通过时维持本年累计() {
+    let dir = fixture("period-arbitration-annual");
+    // 全年账：本期＝本年累计，两组逐行全过 → 打平维持本年累计，不提示切换。
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本期借方,本期贷方,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,100,500,300,500,300,300\n\
+         2202,应付账款,-100,300,500,300,500,-300\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("je.csv"),
+        "日期,凭证号,科目编码,科目名称,借方,贷方\n\
+         2025-03-01,V1,1001,库存现金,500,0\n\
+         2025-03-01,V1,2202,应付账款,0,500\n\
+         2025-06-01,V2,2202,应付账款,300,0\n\
+         2025-06-01,V2,1001,库存现金,0,300\n",
+    )
+    .unwrap();
+    let mut value = params(&dir, true);
+    加本期映射(&mut value);
+    let result = run(&value, &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["rollforward"]["passed"], json!(true), "{result:#}");
+    assert_eq!(result["tbVsJe"]["passed"], json!(true), "{result:#}");
+    let switched = result["mappingWarnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|text| text.contains("已整表统一采用"));
+    assert!(!switched, "打平时不应切换口径：{result:#}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn 本期列不平时不切换仍用本年累计() {
+    let dir = fixture("period-arbitration-keep-ytd");
+    // 本期列借贷颠倒必挂，本年累计列勾稽成立 → 通过率不高过本年累计就不动。
+    std::fs::write(
+        dir.join("tb.csv"),
+        "科目编码,科目名称,期初余额,本期借方,本期贷方,本年借方,本年贷方,期末余额\n\
+         1001,库存现金,100,300,500,500,300,300\n\
+         2202,应付账款,-100,500,300,300,500,-300\n",
+    )
+    .unwrap();
+    let mut value = params(&dir, false);
+    加本期映射(&mut value);
+    let result = run(&value, &AtomicBool::new(false)).unwrap();
+    assert_eq!(result["rollforward"]["passed"], json!(true), "{result:#}");
+    let switched = result["mappingWarnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|text| text.contains("已整表统一采用"));
+    assert!(!switched, "本期列更差时不得切换：{result:#}");
+    let _ = std::fs::remove_dir_all(dir);
 }

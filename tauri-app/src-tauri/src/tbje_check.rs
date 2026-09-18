@@ -4,7 +4,8 @@
 //! 期间都太常见，拦下来会挡住正常工作；这个工具的价值是把「映射反了、少传了
 //! 一段期间、科目表不完整」这类问题在动手做底稿之前就摆到台面上。
 //!
-//! 1. **TB 发生额与余额勾稽**：期初 ＋ 本年累计借方 − 本年累计贷方 ＝ 期末，逐行验。
+//! 1. **TB 发生额与余额勾稽**：期初 ＋ 借方发生 − 贷方发生 ＝ 期末，逐行验。
+//!    本期发生与本年累计两组列都在时，按逐行通过率整表自动选用（[`arbitrate_movement_basis`]）；
 //!    判定复用 [`fx::tb_self_rollforward`]，与汇兑损益上传时看到的是同一份结论。
 //! 2. **TB 与 JE 发生额勾稽**：按主体＋科目编码汇总，**借贷两侧分开比**。
 //!    只比净额会漏掉「借贷双方同时虚增」这种错。
@@ -255,6 +256,8 @@ struct PreparedCheck {
     tb_fixed: String,
     je_fixed: String,
     mapping_warnings: Vec<String>,
+    /// 发生额口径仲裁触发时给导出说明用的一句话；未触发（单组或打平）为空。
+    movement_note: Option<String>,
     /// TBJE 公共核对永远保留全部非空行。币种只用于判断列语义，不能成为行过滤条件。
     tb_rows: Vec<bool>,
     je_rows: Option<Vec<bool>>,
@@ -327,10 +330,96 @@ fn tb_period_warning(table: &FxTable) -> Option<String> {
             format!("{year}.{start}-{end_year}.{end}")
         };
         return Some(format!(
-            "TB期间为 {shown}，不是完整自然年，可能涉及调整本期发生额映射列，请复核当前发生额映射；系统不会自动切换本期与本年累计列。"
+            "TB期间为 {shown}，不是完整自然年；发生额口径已按「期初＋发生＝期末」的逐行通过率在本期与本年累计之间自动选用，请以核对说明标注的口径为准。"
         ));
     }
     None
+}
+
+/// 以指定的一对借贷发生额列试跑 TB 逐行勾稽，返回 (有效行数, 通过行数)。
+/// 判定与「TB 发生额与余额勾稽」完全同款：同一垃圾行掩码、同一符号口径、
+/// 同一容差、同一全零行跳过规则，保证预检通过率就是正式核对的结果。
+fn movement_pass_score(
+    tb: &FxTable,
+    map: &Map<String, Value>,
+    debit: &str,
+    credit: &str,
+) -> (usize, usize) {
+    let mut candidate = map.clone();
+    candidate.insert("ytdFunctionalDebit".into(), Value::String(debit.to_owned()));
+    candidate.insert(
+        "ytdFunctionalCredit".into(),
+        Value::String(credit.to_owned()),
+    );
+    let junk =
+        ledger_mapping::ledger_junk_mask(&tb.headers, &tb.rows, &|role| columns(&candidate, role));
+    let records = fx::records(tb);
+    let mut eligible = 0usize;
+    let mut passed = 0usize;
+    for (index, row) in tb.rows.iter().enumerate() {
+        if !junk.get(index).copied().unwrap_or(true) {
+            continue;
+        }
+        let Some(record) = records.get(index) else {
+            continue;
+        };
+        let (Ok(open), Ok(close), Ok((debit_amount, credit_amount))) = (
+            fx::signed_amount(record, &candidate, "openingFunctional"),
+            fx::signed_amount(record, &candidate, "closingFunctional"),
+            fx::side_amounts(record, &candidate, "ytdFunctional"),
+        ) else {
+            continue;
+        };
+        if open == 0.0 && close == 0.0 && debit_amount == 0.0 && credit_amount == 0.0 {
+            continue;
+        }
+        eligible += 1;
+        let derived = open + debit_amount - credit_amount;
+        if !beyond(
+            derived - close,
+            open.abs().max(close.abs().max(derived.abs())),
+        ) {
+            passed += 1;
+        }
+    }
+    (eligible, passed)
+}
+
+/// 本期发生与本年累计两组借贷列同时映射时的口径仲裁：各自试跑逐行勾稽，
+/// 谁通过的行多，整张表统一用谁；打平维持本年累计（全年表两者等价，与
+/// 历史行为一致）。切换方式与 [`fx::promote_period_movement`] 同款——把
+/// 本期列写进本位币发生额角色，下游三条核对与导出无需再分叉。
+///
+/// 勾稽等式「期初＋借方发生－贷方发生＝期末」里的发生额必须覆盖期初→期末
+/// 这一段：中期表（如 2024.4-12）只有本期发生满足等式，本年累计会把一季度
+/// 发生额错算成差异。判定只看数据本身，不依赖表头有没有写期间文字。
+/// 切换成功时返回给用户的说明，未切换时返回 `None`。
+fn arbitrate_movement_basis(tb: &FxTable, tb_map: &mut Map<String, Value>) -> Option<String> {
+    let Some(ytd_debit) = columns(tb_map, "ytdFunctionalDebit").first().cloned() else {
+        return None;
+    };
+    let Some(ytd_credit) = columns(tb_map, "ytdFunctionalCredit").first().cloned() else {
+        return None;
+    };
+    let Some(period_debit) = columns(tb_map, "periodFunctionalDebit").first().cloned() else {
+        return None;
+    };
+    let Some(period_credit) = columns(tb_map, "periodFunctionalCredit").first().cloned() else {
+        return None;
+    };
+    let (ytd_eligible, ytd_passed) = movement_pass_score(tb, tb_map, &ytd_debit, &ytd_credit);
+    let (period_eligible, period_passed) =
+        movement_pass_score(tb, tb_map, &period_debit, &period_credit);
+    if period_passed <= ytd_passed {
+        return None;
+    }
+    tb_map.insert("ytdFunctionalDebit".into(), Value::String(period_debit));
+    tb_map.insert("ytdFunctionalCredit".into(), Value::String(period_credit));
+    tb_map.remove("periodFunctionalDebit");
+    tb_map.remove("periodFunctionalCredit");
+    Some(format!(
+        "发生额口径：TB 同时映射了本期发生与本年累计，逐行勾稽预检本期发生通过 {period_passed}/{period_eligible} 行、本年累计通过 {ytd_passed}/{ytd_eligible} 行，已整表统一采用「本期发生」核对。"
+    ))
 }
 
 fn align_account_mappings(
@@ -633,6 +722,10 @@ fn prepare_with_control(
             .map_err(|message| error("SIGN_CONVENTION_UNCERTAIN", message, None))?;
     }
     let tb_rows = all_nonblank_rows(&tb);
+    let movement_note = arbitrate_movement_basis(&tb, &mut tb_map);
+    if let Some(note) = &movement_note {
+        mapping_warnings.push(note.clone());
+    }
     if let Some(warning) = tb_period_warning(&tb) {
         mapping_warnings.push(warning);
     }
@@ -644,6 +737,7 @@ fn prepare_with_control(
         tb_fixed,
         je_fixed,
         mapping_warnings,
+        movement_note,
         tb_rows,
         je_rows,
         entity_scope,
@@ -1115,10 +1209,16 @@ fn write_rollforward_sheet(
     if has_entity {
         headers.insert(0, "主体");
     }
+    let mut description =
+        "按TB每个币种行分别验证：期初余额＋借方发生额－贷方发生额＝期末余额；同一行另有原币金额列时只核对本位币金额列。"
+            .to_owned();
+    if let Some(note) = &prepared.movement_note {
+        description.push_str(note);
+    }
     write_intro(
         sheet,
         "TB 发生额与余额勾稽",
-        "按TB每个币种行分别验证：期初余额＋借方发生额－贷方发生额＝期末余额；同一行另有原币金额列时只核对本位币金额列。",
+        &description,
         &prepared.tb.path.to_string_lossy(),
         headers.len() as u16 - 1,
     )?;
@@ -1297,10 +1397,15 @@ fn write_tbje_sheet(
         "净额结论",
         "综合结论",
     ];
+    let mut tbje_description =
+        "借、贷两侧分别对比；JE 贷方统一为正常贷方为正、红字冲销为负。".to_owned();
+    if let Some(note) = &prepared.movement_note {
+        tbje_description.push_str(note);
+    }
     write_intro(
         sheet,
         "TB 与 JE 发生额勾稽",
-        "借、贷两侧分别对比；JE 贷方统一为正常贷方为正、红字冲销为负。",
+        &tbje_description,
         prepared
             .je
             .as_ref()
@@ -1782,7 +1887,7 @@ fn check_rollforward(tb: &FxTable, map: &Map<String, Value>) -> Value {
     if units.is_empty() {
         return json!({
             "performed": false,
-            "reason": "余额表缺少期初、期末或本年累计借贷发生额，无法勾稽。"
+            "reason": "余额表缺少期初、期末或借贷发生额，无法勾稽。"
         });
     }
     let rows = units
@@ -2083,7 +2188,8 @@ fn column_anchor_set(rows: &[Vec<String>], keep: &[bool], column: usize) -> Hash
     set
 }
 
-/// TB 与 JE 发生额勾稽：TB 本年累计发生额 ↔ JE 按科目汇总的借贷合计。
+/// TB 与 JE 发生额勾稽：TB 发生额（口径经 [`arbitrate_movement_basis`] 仲裁）
+/// ↔ JE 按科目汇总的借贷合计。
 /// 科目键之上叠一层辅助维度（公共锚点反查认定成功时），JE 辅助为空的
 /// 分录归“未分维度”桶，不猜维度归属。
 #[allow(clippy::too_many_arguments)]
@@ -2106,7 +2212,7 @@ fn check_tb_vs_je(
     if tb_debit.is_empty() || tb_credit.is_empty() {
         return Ok(json!({
             "performed": false,
-            "reason": "余额表没有映射本年累计借方与贷方发生额，无法与序时账比对。"
+            "reason": "余额表没有映射借方与贷方发生额（本期或本年累计其一），无法与序时账比对。"
         }));
     }
     let tb_has_code = !columns(tb_map, "accountCode").is_empty();

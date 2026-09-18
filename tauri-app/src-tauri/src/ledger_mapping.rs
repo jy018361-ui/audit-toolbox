@@ -763,7 +763,9 @@ static JE_ROLES: &[Role] = &[
             "三级科目",
             "四级科目",
             "五级科目",
-            "二级费用科目",
+            // 「二级费用科目」不再算科目名称：3300/4800 家族里它 99% 装的是
+            // 管理／研发／销售这类费用属性维度词（黄金裁决 4:1 反对挂名称，
+            // 连 4800 家族自己的另两份都判辅助核算或不映射）。
             "科目描述",
             "帐号描述",
             "账号描述",
@@ -1092,7 +1094,8 @@ static TB_ROLES: &[Role] = &[
         &[
             "科目名称",
             "科目名稱",
-            "二级费用科目",
+            // 「二级费用科目」是费用属性维度而非科目名称层级列（3300/4800
+            // 家族黄金裁决 4:1 反对挂名称），不列别名。
             "科目名称一级",
             "科目名称二级",
             "科目名称三级",
@@ -5610,6 +5613,17 @@ pub(crate) fn suggest_roles_with_data(
                 out.insert(candidate, "entity");
             }
         }
+    }
+    // 全空列不进建议（2026-09-18 裁决：不考虑抽样误伤，直接执行）：
+    // 导出工件列（3300 家族的「二级费用科目」）即使别名精确命中也是空壳，
+    // 挂上只会触发界面空值告警。判据与日期/金额形态判断同源——都基于
+    // 本次读入的行（大文件即抽样行）；完全没有数据行的表无从判断，
+    // 维持按列名的建议。
+    if !rows.is_empty() {
+        out.retain(|index, _| {
+            rows.iter()
+                .any(|row| row.get(*index).is_some_and(|v| !v.trim().is_empty()))
+        });
     }
     // 物理列通常仍是一列一角色。唯一例外是取值本身可稳定拆成
     // 「科目编码＋科目名称」的列：两个科目身份角色必须同时下发，才能让
@@ -12162,6 +12176,75 @@ mod tests {
             m2.get("closingDirection").and_then(Value::as_str),
             Some("方向")
         );
+    }
+
+    #[test]
+    fn 全空列不进建议() {
+        // 层级名称列取值全空（导出工件列）时，别名命中也不得混进
+        // accountName 的多列建议。
+        let headers: Vec<String> = ["科目名称一级", "科目名称二级", "科目代码", "科目名称三级"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let rows = vec![
+            vec![
+                "货币资金".into(),
+                "货币资金-银行存款".into(),
+                "1001".into(),
+                "".into(),
+            ],
+            vec![
+                "应收账款".into(),
+                "应收账款-应收股利".into(),
+                "1101".into(),
+                "".into(),
+            ],
+        ];
+        let out = suggest_roles_with_data("tb", &headers, &rows);
+        let names: Vec<&str> = out
+            .iter()
+            .filter(|(_, role)| **role == "accountName")
+            .map(|(index, _)| headers[*index].as_str())
+            .collect();
+        assert!(names.contains(&"科目名称一级"), "{names:?}");
+        assert!(names.contains(&"科目名称二级"), "{names:?}");
+        assert!(!names.contains(&"科目名称三级"), "{names:?}");
+        // 没有数据行的表无从判空，按列名正常建议。
+        let no_rows: Vec<Vec<String>> = Vec::new();
+        let out2 = suggest_roles_with_data("tb", &headers, &no_rows);
+        assert!(out2.values().any(|role| *role == "accountName"));
+    }
+
+    #[test]
+    fn 二级费用科目是维度词不挂科目名称() {
+        // 3300/4800 家族：「二级费用科目」装的是管理／研发这类费用属性
+        // 维度词，黄金裁决 4:1 反对挂 accountName（借正贷负同理见各专测）。
+        let headers: Vec<String> = ["科目名称一级", "科目名称二级", "科目代码", "二级费用科目"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let rows = vec![
+            vec![
+                "运营费用".into(),
+                "运营费用-工资".into(),
+                "6602".into(),
+                "管理".into(),
+            ],
+            vec![
+                "运营费用".into(),
+                "运营费用-工资".into(),
+                "6602".into(),
+                "研发".into(),
+            ],
+        ];
+        let out = suggest_roles_with_data("tb", &headers, &rows);
+        let names: Vec<&str> = out
+            .iter()
+            .filter(|(_, role)| **role == "accountName")
+            .map(|(index, _)| headers[*index].as_str())
+            .collect();
+        assert!(names.contains(&"科目名称一级") && names.contains(&"科目名称二级"));
+        assert!(!names.contains(&"二级费用科目"), "{names:?}");
     }
 
     #[test]

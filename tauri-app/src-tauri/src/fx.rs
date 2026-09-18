@@ -803,27 +803,9 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     refine_layout(&table, kind, &mut mapping);
     drop_column_conflicts(kind, &candidates, &mut mapping);
     // 两列同名「借/贷」按位置定归属：余额表一律期初在前、期末在后
-    // （2-2026.08）。冲突消解按字母序让 closingDirection 先挑了前柱，
-    // 事后把这对方向列按列位摆正。
+    // （2-2026.08）。摆正逻辑收进公共引擎，存款/FA 的映射组装共用。
     if kind == "tb" {
-        let pair = |mapping: &Map<String, Value>| {
-            let col = |role: &str| {
-                mapping.get(role).and_then(Value::as_str).and_then(|c| {
-                    table.headers.iter().position(|h| h == c)
-                })
-            };
-            (col("openingDirection"), col("closingDirection"))
-        };
-        if let (Some(op), Some(cl)) = pair(&mapping) {
-            if op > cl {
-                let a = mapping.get("openingDirection").cloned();
-                let b = mapping.get("closingDirection").cloned();
-                if let (Some(a), Some(b)) = (a, b) {
-                    mapping.insert("openingDirection".into(), b);
-                    mapping.insert("closingDirection".into(), a);
-                }
-            }
-        }
+        ledger_mapping::align_tb_direction_pair(&table.headers, &mut mapping);
     }
     fill_combined_account_column(kind, &table, &mut mapping);
     reconcile_account_identity_by_data(kind, &table, &mut mapping);

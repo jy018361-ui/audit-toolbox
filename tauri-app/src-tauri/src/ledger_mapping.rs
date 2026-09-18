@@ -2513,6 +2513,12 @@ pub(crate) fn alias_score(role: &Role, header: &str) -> Option<f64> {
             best = best.map(|score| score + 1.0);
         } else if hit(TIER_POSTING) {
             best = best.map(|score| score + 0.5);
+        } else if hit(&["date", "日期"]) {
+            // 裸「日期」是中文导出的正牌记账日期；「长别名优先」的通则会
+            // 让它反输给「业务日期」（2.04 > 2.02）。抬 0.3：折算到各工具
+            // 的数据密度加成后仍稳赢长别名，但不越生效/过账两级加成
+            // （用友 01 号样例黄金裁决取「日期」）。
+            best = best.map(|score| score + 0.3);
         }
     }
     // 「本币/本位币」是最直接的本位币命名；「总账货币」虽是四字别名，
@@ -2521,7 +2527,71 @@ pub(crate) fn alias_score(role: &Role, header: &str) -> Option<f64> {
     if role.name == "functionalCurrency" && matches!(n.as_str(), "本币" | "本位币") {
         best = best.map(|score| score + 0.5);
     }
+    // 裸「金额」是本位币净额的正牌命名；「长别名优先」会让它反输给同时
+    // 存在的「借正贷负」列（2.04 > 2.02）。07 序时账黄金裁决取「金额」、
+    // 「借正贷负」留空；只有裸列的奥扬样例不受影响（无竞争列）。
+    if role.name == "functionalAmount" && matches!(n.as_str(), "金额" | "金額") {
+        best = best.map(|score| score + 0.1);
+    }
     best
+}
+
+/// 成型映射里的方向列按位置定归属，汇兑损益/TBJE 与存款利息/FA List 的
+/// 映射组装共用：
+///
+/// 1. 两列方向（openingDirection/closingDirection）：冲突消解按角色名
+///    字母序让 closing 先挑列，可能把前柱分给期末。余额表一律期初在前、
+///    期末在后（2-2026.08、北重精工等样例），事后换回来。
+/// 2. 单一方向列：按它与期初/期末余额列的远近判归——紧邻期初余额的是
+///    期初方向（北重精工、泓源化工等 R4 裁决），置于表尾靠近期末余额的
+///    是期末方向（陇能建设、澄宇结算中心等裁决）。余额列缺失时不改判。
+pub(crate) fn align_tb_direction_pair(
+    headers: &[String],
+    mapping: &mut serde_json::Map<String, Value>,
+) {
+    let col = |mapping: &serde_json::Map<String, Value>, role: &str| {
+        mapping
+            .get(role)
+            .and_then(Value::as_str)
+            .and_then(|c| headers.iter().position(|h| h == c))
+    };
+    if let (Some(op), Some(cl)) = (col(mapping, "openingDirection"), col(mapping, "closingDirection"))
+        && op > cl
+    {
+        let a = mapping.get("openingDirection").cloned();
+        let b = mapping.get("closingDirection").cloned();
+        if let (Some(a), Some(b)) = (a, b) {
+            mapping.insert("openingDirection".into(), b);
+            mapping.insert("closingDirection".into(), a);
+        }
+        return;
+    }
+    if mapping.contains_key("openingDirection") ^ mapping.contains_key("closingDirection") {
+        let (have, index) = if let Some(i) = col(mapping, "openingDirection") {
+            ("openingDirection", i)
+        } else {
+            (
+                "closingDirection",
+                col(mapping, "closingDirection").expect("上方互斥已保证其一存在"),
+            )
+        };
+        if let (Some(op_bal), Some(cl_bal)) = (
+            col(mapping, "openingFunctionalAmount"),
+            col(mapping, "closingFunctionalAmount"),
+        ) {
+            let target = if index.abs_diff(op_bal) < index.abs_diff(cl_bal) {
+                "openingDirection"
+            } else {
+                "closingDirection"
+            };
+            if target != have
+                && let Some(value) = mapping.get(have).cloned()
+            {
+                mapping.remove(have);
+                mapping.insert(target.into(), value);
+            }
+        }
+    }
 }
 
 /// 期初与期末的方向列常常**列名完全一样**（都叫「方向 Dr/Cr」），光看名字分不出。
@@ -12034,6 +12104,64 @@ mod tests {
         assert_eq!(d("44936"), expect);
         assert!(parse_date("").is_none());
         assert!(parse_date("待定").is_none());
+    }
+
+    #[test]
+    fn 裸日期压过长别名但仍让位过账日期() {
+        // 用友 01 号样例：「日期」与「业务日期」并存，黄金裁决取裸「日期」；
+        // 长别名优先的通则会让「业务日期」(2.04) 反超「日期」(2.02)。
+        let headers = vec!["日期".to_string(), "业务日期".to_string()];
+        let out = suggest_roles("je", &headers);
+        assert_eq!(out.get(&0), Some(&"date"));
+        // 没有裸「日期」竞争时长别名照常取胜，过账/记帐日期仍居最高档。
+        let headers2 = vec!["业务日期".to_string(), "记帐日期".to_string()];
+        let out2 = suggest_roles("je", &headers2);
+        assert_eq!(out2.get(&1), Some(&"date"));
+    }
+
+    #[test]
+    fn 单一方向列按余额远近判归() {
+        let headers: Vec<String> = ["科目", "方向", "期初余额", "期末余额"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut m = serde_json::Map::new();
+        m.insert("closingDirection".into(), Value::String("方向".into()));
+        m.insert(
+            "openingFunctionalAmount".into(),
+            Value::String("期初余额".into()),
+        );
+        m.insert(
+            "closingFunctionalAmount".into(),
+            Value::String("期末余额".into()),
+        );
+        align_tb_direction_pair(&headers, &mut m);
+        // 紧邻期初余额（北重精工等 R4 裁决）。
+        assert_eq!(
+            m.get("openingDirection").and_then(Value::as_str),
+            Some("方向")
+        );
+        assert!(m.get("closingDirection").is_none());
+        // 置于表尾、靠近期末余额的保持期末归属（陇能建设等裁决）。
+        let headers2: Vec<String> = ["科目", "期初余额", "期末余额", "方向"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut m2 = serde_json::Map::new();
+        m2.insert("closingDirection".into(), Value::String("方向".into()));
+        m2.insert(
+            "openingFunctionalAmount".into(),
+            Value::String("期初余额".into()),
+        );
+        m2.insert(
+            "closingFunctionalAmount".into(),
+            Value::String("期末余额".into()),
+        );
+        align_tb_direction_pair(&headers2, &mut m2);
+        assert_eq!(
+            m2.get("closingDirection").and_then(Value::as_str),
+            Some("方向")
+        );
     }
 
     #[test]

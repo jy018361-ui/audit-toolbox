@@ -794,43 +794,18 @@ fn is_deposit_role(role: &str) -> bool {
 
 type Candidate = (String, f64, Vec<String>, Vec<String>);
 
-/// (角色, 命中词, 冲突词)。冲突词命中会扣分，用来把"年初余额-借方"和
-/// "年初余额"这类互相包含的表头分开。
-/// 角色表来自统一内核，另加存款利息的两个专属角色。
-///
-/// 与旧版的实质差别：**科目编码与科目名称拆成两个角色**——旧版把它们混进一个
-/// 多选的 `account`，用户看不出该填哪个。分类仍然需要「编码＋名称」的完整文本，
-/// 由 [`account_columns`] 把两个角色的列合起来给它。
-fn roles(kind: &str) -> Vec<(&'static str, Vec<&'static str>, Vec<&'static str>)> {
-    let mut out: Vec<(&'static str, Vec<&'static str>, Vec<&'static str>)> =
-        ledger_mapping::roles(kind)
-            .iter()
-            // 存款利息不启用原币口径，识别出来也不参与计算；
-            // 币种线索文本是汇兑损益专用的，这里那一列要留给辅助核算。
-            .filter(|role| !role.name.contains("Foreign") && role.name != "currencyText")
-            .map(|role| (role.name, role.aliases.to_vec(), role.conflicts.to_vec()))
-            .collect();
-    // 辅助核算已是公共角色；存款只追加银行业务特有写法。JE 的泛化「文本」
-    // 必须留给摘要，科目文本必须留给科目名称，否则 SAP 行项目文本会与
-    // 成本中心一起被错误挂成辅助核算多列。TB 没有摘要角色，且部分银行余额表
-    // 的「文本」确实承载账户维度，因此只在 TB 侧保留这一兜底。
-    if let Some((_, aliases, _)) = out.iter_mut().find(|(role, _, _)| *role == "auxiliary") {
-        aliases.extend(["账户", "财务项目"]);
-        if kind == "tb" {
-            aliases.extend(["文本", "科目文本", "账户文本"]);
-        }
-    }
+/// 本工具在公共角色表之外的自有角色（角色, 命中词, 冲突词）：
+/// JE 的数量列（识别计息天数之类的辅助信息）、TB 的会计期间
+/// （没有日期列时靠它取年份）。它们的别名不在公共表里，随本工具维护。
+fn tool_roles(kind: &str) -> Vec<(&'static str, Vec<&'static str>, Vec<&'static str>)> {
     if kind == "je" {
-        // 数量列用于识别计息天数之类的辅助信息，同样是本工具专属。
-        out.push((
+        vec![(
             "quantity",
             vec!["数量", "quantity", "menge"],
             vec!["金额", "amount"],
-        ));
+        )]
     } else {
-        // 会计期间只在科目余额表上有用：没有日期列时靠它取年份。
-        // 序时账侧一律走 date 列，所以标准表里没有这个角色。
-        out.push((
+        vec![(
             "period",
             vec![
                 "会计期间",
@@ -841,7 +816,18 @@ fn roles(kind: &str) -> Vec<(&'static str, Vec<&'static str>, Vec<&'static str>)
                 "fiscalperiod",
             ],
             vec!["金额", "余额", "amount", "balance"],
-        ));
+        )]
+    }
+}
+
+/// 辅助核算的银行业务特有写法。公共引擎先判；内核没占到辅助核算时，再用
+/// 这批扩充别名本地补一刀。TB 侧的泛化「文本」只留在 TB——部分银行余额表
+/// 的「文本」确实承载账户维度，而 JE 的「文本」必须留给摘要，否则 SAP 行
+/// 项目文本会与成本中心一起被错误挂成辅助核算多列。
+fn auxiliary_extra_aliases(kind: &str) -> Vec<&'static str> {
+    let mut out = vec!["账户", "财务项目"];
+    if kind == "tb" {
+        out.extend(["文本", "科目文本", "账户文本"]);
     }
     out
 }
@@ -933,123 +919,138 @@ fn drop_column_conflicts(
 }
 
 /// 一个角色映射到的列名集合（单列是字符串、多列是数组，两种形状都收）。
+///
+/// 标准角色的裁判权在公共引擎：alias_score 的全链豁免（SAP 行级摘要、
+/// 借正贷负金额、「年月」式记账日期、过账日期优先、本币加成）、科目数据
+/// 冷启动与外币双语义仲裁都由内核统一裁定，内核胜者是各角色的首选列。
+/// 此前本地自持一份完整打分，内核每修一条豁免这里就漏一条——04/05 号 SAP
+/// 序时账摘要错挂「功能范围文本」、「年-月」不挂记账日期皆因此起。本地
+/// 打分降级为替补候选（永远排在胜者之后），只保留冲突消解落败改派所需
+/// 的多列弹药与本工具自有角色（数量／会计期间）。
 fn suggest_mappings(table: &FxTable, kind: &str) -> BTreeMap<String, Vec<Candidate>> {
-    let numeric = table
-        .headers
-        .iter()
-        .enumerate()
-        .map(|(index, _)| number_ratio(table, index))
-        .collect::<Vec<_>>();
-    let dated = table
-        .headers
-        .iter()
-        .enumerate()
-        .map(|(index, _)| date_ratio(table, index))
-        .collect::<Vec<_>>();
-    let mut out = BTreeMap::new();
-    for (role, aliases, conflicts) in roles(kind) {
-        let mut choices = table
-            .headers
-            .iter()
-            .enumerate()
-            .map(|(index, header)| {
-                let value = normalize_header(header);
-                // 双语表头「科目描述 Description」整体不等于别名，但其中一段正好是。
-                let exact = aliases
-                    .iter()
-                    .filter(|alias| value == normalize_header(alias))
-                    .map(|alias| (*alias).to_string())
-                    .collect::<Vec<_>>();
-                // 双语表头的某一段正好是别名：比「包含」可信，但不压过整体相等。
-                let segment = aliases
-                    .iter()
-                    .filter(|alias| ledger_mapping::segment_exact(header, alias))
-                    .map(|alias| (*alias).to_string())
-                    .collect::<Vec<_>>();
-                // 只允许"真实表头包含完整别名"，避免短别名反向扩散。
-                let partial = aliases
-                    .iter()
-                    .filter(|alias| value.contains(&normalize_header(alias)))
-                    .map(|alias| (*alias).to_string())
-                    .collect::<Vec<_>>();
-                let bad = conflicts
-                    .iter()
-                    .filter(|term| value.contains(&normalize_header(term)))
-                    .map(|term| (*term).to_string())
-                    .collect::<Vec<_>>();
-                let mut score: f64 = if !exact.is_empty() {
-                    0.94
-                } else if !segment.is_empty() {
-                    0.88
-                } else if !partial.is_empty() {
-                    0.72
-                } else {
-                    0.0
-                };
-                if role == "date" {
-                    score += dated[index] * 0.12;
-                }
-                if role.contains("Amount") || role.contains("Debit") || role.contains("Credit") {
-                    score += numeric[index] * 0.12;
-                }
-                // 冲突词是排除条件，不是扣分项——与内核和汇兑损益同口径：
-                // 「冲销凭证号」含别名"凭证号"，按 0.35 一条扣分仍过得了 0.15
-                // 的门槛，必须整条归零；预算／对方科目不得混进科目名称同理。
-                // 例外：「年-月」列（金蝶 08/09 导出）归一后是「年月」，正撞
-                // date 的冲突词「年」「月」。JE 侧它就是记账期间，放行给 date
-                // （与 fx 管线的放行同口径，否则 FA List／存款利息页的记账
-                // 日期永远空着）；TB 侧「年月」归本地 period 角色专用，不放行。
-                if !bad.is_empty() && !(kind == "je" && role == "date" && value == "年月") {
-                    score = 0.0;
-                }
-                (
-                    header.clone(),
-                    score.clamp(0.0, 1.0),
-                    if exact.is_empty() { partial } else { exact },
-                    bad,
-                )
-            })
-            .filter(|choice| choice.1 > 0.15)
-            .collect::<Vec<_>>();
-        choices.sort_by(|a, b| b.1.total_cmp(&a.1));
-        choices.truncate(3);
-        out.insert(role.to_string(), choices);
+    let mut out: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
+    let mut claimed: Vec<String> = Vec::new();
+    for (index, role) in ledger_mapping::suggest_roles_with_data(kind, &table.headers, &table.rows) {
+        // 币种线索文本（currencyText）是汇兑损益专用角色，那类列在存款/FA
+        // 语义里要留给辅助核算，角色标签表也不下发它。
+        if role == "currencyText" {
+            continue;
+        }
+        if let Some(header) = table.headers.get(index) {
+            claimed.push(header.clone());
+            out.entry((*role).to_string()).or_default().push((
+                header.clone(),
+                0.94,
+                vec![normalize_header(header)],
+                vec![],
+            ));
+        }
+    }
+    // 本地旧打分整体降级为「替补候选」：按标准角色的内核别名补齐内核胜者
+    // 之外的列，永远排在胜者之后——裁判权仍在公共引擎，但冲突消解的落败
+    // 改派需要每角色多列弹药（同名「借/贷」两列时 closingDirection 靠它
+    // 拿回次选列，上实城开的 GL Account Name 靠 partial 命中顶上）。
+    for (role, aliases, conflicts) in standard_roles(kind) {
+        let Some(mut alternates) = local_choices(table, &aliases, &conflicts) else {
+            continue;
+        };
+        alternates.retain(|c| !claimed.contains(&c.0));
+        out.entry(role.to_string()).or_default().extend(alternates);
+    }
+    // 辅助核算的银行业务特有写法并入替补池（「账户」「财务项目」，TB 侧
+    // 另有泛化「文本」）；冲突词沿用内核定义。
+    {
+        let conflicts = ledger_mapping::role_of(kind, "auxiliary")
+            .map(|role| role.conflicts.to_vec())
+            .unwrap_or_default();
+        let mut alternates =
+            local_choices(table, &auxiliary_extra_aliases(kind), &conflicts).unwrap_or_default();
+        alternates.retain(|c| !claimed.contains(&c.0));
+        out.entry("auxiliary".to_string()).or_default().extend(alternates);
+    }
+    // 本工具自有角色（数量／会计期间）继续本地打分。
+    for (role, aliases, conflicts) in tool_roles(kind) {
+        if let Some(choices) = local_choices(table, &aliases, &conflicts) {
+            out.insert(role.to_string(), choices);
+        }
+    }
+    // TB 侧「年月」在存款语义里是会计期间：内核对 date×年月的豁免不分侧别，
+    // 若 date 抢了 period 的列，让回去——TB 没有日期列时靠 period 取年份。
+    if kind == "tb" && let Some(periods) = out.get("period") {
+        let owned: Vec<String> = periods.iter().map(|c| c.0.clone()).collect();
+        if let Some(dates) = out.get_mut("date") {
+            dates.retain(|c| !owned.contains(&c.0));
+        }
     }
     out
 }
 
-fn number_ratio(table: &FxTable, index: usize) -> f64 {
-    let values = sample(table, index);
-    if values.is_empty() {
-        return 0.0;
-    }
-    values
+/// 标准角色的（角色, 别名, 冲突词）三元组，来源与顺序同公共引擎；
+/// 仅供替补打分使用，不给 currencyText（存款语义留给辅助核算）。
+fn standard_roles(kind: &str) -> Vec<(&'static str, Vec<&'static str>, Vec<&'static str>)> {
+    ledger_mapping::roles(kind)
         .iter()
-        .filter(|value| parse_number(value).is_some())
-        .count() as f64
-        / values.len() as f64
-}
-
-fn date_ratio(table: &FxTable, index: usize) -> f64 {
-    let values = sample(table, index);
-    if values.is_empty() {
-        return 0.0;
-    }
-    values
-        .iter()
-        .filter(|value| parse_date(value).is_some())
-        .count() as f64
-        / values.len() as f64
-}
-
-fn sample(table: &FxTable, index: usize) -> Vec<&String> {
-    table
-        .rows
-        .iter()
-        .take(200)
-        .filter_map(|row| row.get(index))
-        .filter(|value| !value.trim().is_empty())
+        .filter(|role| role.name != "currencyText")
+        .map(|role| (role.name, role.aliases.to_vec(), role.conflicts.to_vec()))
         .collect()
+}
+
+/// 本地简化打分：只服务本工具自有角色与辅助核算补刀，标准角色一律走公共
+/// 引擎（档位、豁免与数据加成不再有第二套）。冲突词仍是排除条件：
+/// 「冲销凭证号」含别名「凭证号」，按分扣不动，必须整条归零。
+fn local_choices(table: &FxTable, aliases: &[&str], conflicts: &[&str]) -> Option<Vec<Candidate>> {
+    let mut choices = table
+        .headers
+        .iter()
+        .enumerate()
+        .map(|(_index, header)| {
+            let value = normalize_header(header);
+            // 双语表头「科目描述 Description」整体不等于别名，但其中一段正好是。
+            let exact = aliases
+                .iter()
+                .filter(|alias| value == normalize_header(alias))
+                .map(|alias| (*alias).to_string())
+                .collect::<Vec<_>>();
+            // 双语表头的某一段正好是别名：比「包含」可信，但不压过整体相等。
+            let segment = aliases
+                .iter()
+                .filter(|alias| ledger_mapping::segment_exact(header, alias))
+                .map(|alias| (*alias).to_string())
+                .collect::<Vec<_>>();
+            // 只允许"真实表头包含完整别名"，避免短别名反向扩散。
+            let partial = aliases
+                .iter()
+                .filter(|alias| value.contains(&normalize_header(alias)))
+                .map(|alias| (*alias).to_string())
+                .collect::<Vec<_>>();
+            let bad = conflicts
+                .iter()
+                .filter(|term| value.contains(&normalize_header(term)))
+                .map(|term| (*term).to_string())
+                .collect::<Vec<_>>();
+            let score: f64 = if !bad.is_empty() {
+                0.0
+            } else if !exact.is_empty() {
+                0.94
+            } else if !segment.is_empty() {
+                0.88
+            } else if !partial.is_empty() {
+                0.72
+            } else {
+                0.0
+            };
+            (
+                header.clone(),
+                score,
+                if exact.is_empty() { partial } else { exact },
+                bad,
+            )
+        })
+        .filter(|choice| choice.1 > 0.15)
+        .collect::<Vec<_>>();
+    choices.sort_by(|a, b| b.1.total_cmp(&a.1));
+    choices.truncate(3);
+    (!choices.is_empty()).then_some(choices)
 }
 
 fn candidate_json(all: &BTreeMap<String, Vec<Candidate>>) -> Value {
@@ -1236,6 +1237,11 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     let mut mapping = mapping;
     refine_layout(&table, kind, &mut mapping);
     drop_column_conflicts(kind, &candidates, &mut mapping);
+    // 两列同名「借/贷」按位置定归属：余额表一律期初在前、期末在后，
+    // 与汇兑损益/TBJE 走同一份公共摆正（北重精工等样例的仲裁 R4）。
+    if kind == "tb" {
+        ledger_mapping::align_tb_direction_pair(&table.headers, &mut mapping);
+    }
     // 合并科目列的兜底与汇兑损益共用同一份（判定在公共引擎、套用在 fx 侧），
     // 存款利息不再自持一份近似实现。
     crate::fx::fill_combined_account_column(kind, &table, &mut mapping);
@@ -5151,7 +5157,11 @@ mod tests {
             "je",
         )
         .unwrap();
-        assert_eq!(je["suggestedMapping"]["functionalAmount"], "金额");
+        // 裁判权交回公共引擎后，本币「金额」与带符号的「借正贷负」净额列
+        // （原公式列，读入即正负值）同为精确别名，内核按净额数据形态择优。
+        // 两种取数口径在下方全量勾稽断言里等价，这里不做单一断言。
+        let amount_column = je["suggestedMapping"]["functionalAmount"].as_str().unwrap();
+        assert!(["金额", "借正贷负"].contains(&amount_column));
         let params = json!({
             "reportStart": "2024-01-01", "reportEnd": "2024-12-31", "dayBasis": "month12",
             "tbSource": {"inputPath": tb_path.to_string_lossy()}, "tbMapping": tb["suggestedMapping"],

@@ -1153,8 +1153,19 @@ pub fn engine_call_for_test(
         }
     }
     if let Some(rest) = method.strip_prefix("deposit.") {
-        if rest == "classify_source" || rest.starts_with("inspect") || rest == "rate_tiers" {
+        if rest == "classify_source"
+            || rest.starts_with("inspect")
+            || rest == "rate_tiers"
+            || rest == "account_currencies"
+        {
             return deposit_interest::call(method, params);
+        }
+    }
+    // 借款利息的只读识别类：TB 科目分类预选（借款／利息支出／排除），
+    // 与 fx/deposit 的 inspect 同款只读入口，供调查测试采集工具答案。
+    if let Some(rest) = method.strip_prefix("loan.") {
+        if rest.starts_with("inspect") || rest == "tb_accounts" {
+            return loan_interest::call(method, params);
         }
     }
     // 存款利息的只读测算探针：与 fx.preview_probe 同款，调查测试用它拿

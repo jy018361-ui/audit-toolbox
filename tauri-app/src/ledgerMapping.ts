@@ -2,6 +2,7 @@ import {
   isVisibleLlmReviewConfidence,
   MIN_VISIBLE_LLM_REVIEW_CONFIDENCE,
 } from "@/llmReviewConfidence";
+import { fileName } from "./tbjePairing";
 
 // 凭证映射的共享逻辑：看账工具与正负数凭证标记共用同一套字段角色、
 // 金额方案取舍和 LLM 复核判定，避免两个工具的口径各自漂移。
@@ -189,7 +190,7 @@ export function selectLedgerWorkbookKindSources<
 export async function scanLedgerUploadSources<
   T extends LedgerWorkbookSheetClassification,
 >(
-  call: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+  call: LedgerEngineCall,
   paths: string[],
   options: {
     classificationMethod?: string;
@@ -347,6 +348,12 @@ export function resolveLedgerPairKinds<T extends LedgerSourceClassification>(
   return jeThenTb >= tbThenJe ? ["je", "tb"] : ["tb", "je"];
 }
 
+/** 等待弹窗明细：识别入参是「完整路径 / Sheet」，只留文件名＋Sheet，不在弹窗里铺长路径。 */
+function sourceBusyDetail(source: string): string {
+  const [file, sheet] = source.split(" / ");
+  return sheet ? `${fileName(file)} / ${sheet}` : fileName(file);
+}
+
 /** Shared orchestration, not a shared prompt: every caller supplies its own
  * tool-specific backend method. LLM failure is advisory and falls back to the
  * deterministic result without losing the uploaded file. */
@@ -356,21 +363,25 @@ export async function reviewLedgerSourceClassification<
     preview: string[][];
   },
 >(
-  call: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+  call: LedgerEngineCall,
   method: string,
   path: string,
   scripted: T,
 ): Promise<{ classification: T; reviewed: boolean; reviewError?: string }> {
   try {
-    const value = (await call(method, {
-      payload: {
-        path,
-        headers: scripted.headers,
-        sampleRows: scripted.preview,
-        scriptKind: scripted.kind,
-        scriptScores: scripted.scores,
+    const value = (await call(
+      method,
+      {
+        payload: {
+          path,
+          headers: scripted.headers,
+          sampleRows: scripted.preview,
+          scriptKind: scripted.kind,
+          scriptScores: scripted.scores,
+        },
       },
-    })) as { kind?: LedgerSourceKind };
+      sourceBusyDetail(path),
+    )) as { kind?: LedgerSourceKind };
     if (value.kind === "je" || value.kind === "tb") {
       return {
         classification: { ...scripted, kind: value.kind },
@@ -1379,9 +1390,9 @@ export type AuxiliaryLinkResult = {
   groups?: Array<Omit<AuxiliaryLinkResult, "groups"> & {
     entity: string;
     account: string;
-    /** 第二步可否安全展开为辅助明细；比仅定位到 JE 列更严格。 */
+    /** 第二步可否展开为辅助明细：当期有发生额的锚点全部在 JE 命中即放行。 */
     reviewVerified?: boolean;
-    /** 只有本组全部 TB 辅助值均在 JE 对应列命中时才返回。 */
+    /** 该组 TB 的全部辅助维度行（含休眠户）；未通过验证时为空。 */
     details?: Array<{ key: string; display: string }>;
   }>;
 };

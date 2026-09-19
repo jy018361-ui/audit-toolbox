@@ -56,6 +56,7 @@ import {
 } from "@/ledgerForms";
 import "./fx-audit.css";
 import "./fa-tbje.css";
+import { AccountConfirmationActions } from "./AccountConfirmationActions";
 
 type Kind = "tb" | "je";
 type Mapping = Record<string, string | string[]>;
@@ -157,20 +158,16 @@ export function splitFaAccount(account: string): {
  * 1603 减值准备／1604 在建工程／1605 工程物资或使用权资产／1606 固定资产清理都不进本表口径；
  * 1602 整支是累计折旧；1601 整支进表，原值还是折旧再由科目名称定（见 `suggestFaAccounts`）。
  *
- * 数字编码里只有 1601／1602 进表，其余（1603-1606、资产类的 1002／1122、
- * 负债权益成本损益、自定义的 1642 使用权资产折旧）一律排除：名称里带
- * 「房屋」「设备」的费用或存款科目（`6601090401 折旧费-固定资产-…`、
- * `1002016871 银行存款-汉口银行(房屋积金)`）只看名称必然被当成原值捞进来。
- * 字母开头的自定义编码（`FA01`）不适用本规则，继续按名称判。
+ * **非 1601/1602 的数字编码**不再一律排除：自身或按编码前缀回查到的上级科目名
+ * **明确**写着「固定资产／累计折旧」时进表（旧制度 1501/1502、自定义编码的账套）。
+ * 宽词（房屋／设备）不参与这一层——名称里带「房屋」的费用或存款科目
+ * （`6601090401 折旧费-固定资产-…`、`1002016871 银行存款-汉口银行(房屋积金)`）
+ * 只看宽词必然被当成原值捞进来。字母开头的自定义编码（`FA01`）不适用本规则，
+ * 继续按名称判。
  */
 function roleFromCode(code: string): AccountRole | undefined {
   if (/^1601/.test(code)) return "cost";
   if (/^1602/.test(code)) return "depreciation";
-  // 其余一切数字编码都不进本表：除了 1603-1606，还有 02 号样例的
-  // 1002016871 银行存款-汉口银行(房屋积金)——名称带「房屋」曾被当成原值；
-  // 10 号样例的自定义 1642 使用权资产折旧同理（原值侧不含使用权资产，
-  // 折旧侧混入必然勾稽不平）。字母编码（FA01）继续按名称判。
-  if (/^\d/.test(code)) return "excluded";
   return undefined;
 }
 
@@ -181,6 +178,9 @@ const SAYS_NOT_IN_SCOPE = /使用权|使用權|清账|清賬|right[-\s]?of[-\s]?
 /** 名称一出现就不是原值：减值准备、清理清算过渡户、折旧费／摊销／租赁费等费用科目。 */
 const SAYS_NOT_COST =
   /减值准备|減值準備|impairment|清理|清算|折旧费|折舊費|摊销|攤銷|租赁费|租賃費/i;
+/** 非标准数字编码进表的唯一窄门：名称**明确**写出「固定资产」。
+ *  1601/1602 不适用时靠自身或上级科目名匹配（用户定的口径），宽词一律不算。 */
+const SAYS_FA_EXPLICIT = /固定资产|固定資產/i;
 const SAYS_FIXED_ASSET =
   /固定资产|固定資產|房屋|建筑物|建築物|机器|機器|机械|機械|设备|設備|运输工具|運輸工具|电子设备|办公设备|fixture|equipment|building|vehicle/i;
 
@@ -241,7 +241,9 @@ function nearestParent(chart: Map<string, string>, code: string): string {
  *
  * 1. **在不在本表口径内**，由「上级科目 → 一级编码 → 名称关键词」决定，上级科目的
  *    结论一路继承给下级。`1604 在建工程`、`1605 使用权资产`、`5301 研发支出`、
- *    `6601 运营费用` 整枝排除。
+ *    `6601 运营费用` 整枝排除。**非 1601/1602 的数字编码**不据此出局：自身或
+ *    上级科目名明确写出「固定资产／累计折旧」的照常进表（旧制度 1501/1502、
+ *    自定义编码账套）；上级行不存在时以自身名称为准，宽词不算。
  * 2. **在口径内的再分原值还是折旧**，科目名称写了「累计折旧」就是折旧——
  *    SAP 型科目表把累计折旧挂在 1601 底下，只认编码会整片判成原值；
  *    国标科目表（1602 整支折旧）则靠编码，因为明细科目只写「机械设备」不写折旧。
@@ -266,19 +268,39 @@ export function suggestFaAccounts(accounts: string[]): Assignment[] {
     if ((chart.get(code) ?? "").length < name.length) chart.set(code, name);
   }
   const resolved = new Map<string, AccountRole>();
+  /** 一级根节点的口径判定：1601/1602 走编码；其余数字编码只有名称**明确**
+   *  写出「固定资产／累计折旧」才进表（旧制度 1501/1502、自定义编码账套）；
+   *  宽词（房屋／设备）不参与，挡住「银行存款-汉口银行(房屋积金)」式误配。 */
+  const rootRole = (code: string, name: string): AccountRole => {
+    const byCode = roleFromCode(code);
+    if (byCode) return byCode;
+    if (/^\d/.test(code)) {
+      if (SAYS_NOT_IN_SCOPE.test(name)) return "excluded";
+      if (SAYS_DEPRECIATION.test(name)) return "depreciation";
+      if (SAYS_NOT_COST.test(name)) return "excluded";
+      return SAYS_FA_EXPLICIT.test(name) ? "cost" : "excluded";
+    }
+    return roleFromName(name);
+  };
   const roleOf = (code: string, depth: number): AccountRole => {
     const cached = resolved.get(code);
     if (cached) return cached;
     const name = chart.get(code) ?? "";
     const parent = depth < 32 ? nearestParent(chart, code) : "";
-    const base = parent
-      ? roleOf(parent, depth + 1)
-      : (roleFromCode(code) ?? roleFromName(name || code));
+    const base = parent ? roleOf(parent, depth + 1) : rootRole(code, name || code);
     let role = base;
-    if (base !== "excluded") {
-      if (SAYS_NOT_IN_SCOPE.test(name)) role = "excluded";
-      else if (SAYS_DEPRECIATION.test(name)) role = "depreciation";
-      else if (SAYS_NOT_COST.test(name)) role = "excluded";
+    // 名称修正对整枝生效（含继承为「排除」的枝）：累计折旧提为折旧，
+    // 清理／折旧费／使用权压回排除；被排除的数字编码若自身名称明确写出
+    // 「固定资产」则提为原值——上级名不含语义、子级写明的账套也能进表。
+    if (SAYS_NOT_IN_SCOPE.test(name)) role = "excluded";
+    else if (SAYS_DEPRECIATION.test(name)) role = "depreciation";
+    else if (SAYS_NOT_COST.test(name)) role = "excluded";
+    else if (
+      base === "excluded" &&
+      /^\d/.test(code) &&
+      SAYS_FA_EXPLICIT.test(name)
+    ) {
+      role = "cost";
     }
     resolved.set(code, role);
     return role;
@@ -694,6 +716,14 @@ export function FaTbJePage() {
     Boolean(inspects.tb && inspects.je) &&
     missingMappings.tb.length === 0 &&
     missingMappings.je.length === 0;
+  // 与汇兑损益同口径：只有数据源或两侧辅助核算明细映射变化才重新联动验证，
+  // 其余角色的映射调整沿用既有结论，不触发整表重读。
+  const auxiliaryLinkKey = inspects.tb && inspects.je
+    ? JSON.stringify({
+        tb: [source("tb"), mappings.tb.auxiliary ?? null],
+        je: [source("je"), mappings.je.auxiliary ?? null],
+      })
+    : null;
   const auxiliaryLink = useAuxiliaryLink(inspects.tb && inspects.je ? {
     tbSource: source("tb"), jeSource: source("je"),
     tbMapping: mappings.tb, jeMapping: mappings.je,
@@ -701,7 +731,7 @@ export function FaTbJePage() {
     selectedAccounts: assignments.filter((item) => item.role !== "excluded").map((item) => ({
       entity: item.entity, account: item.account,
     })),
-  } : null);
+  } : null, auxiliaryLinkKey);
   // 显示层：payload 级分配行按「主体＋科目编码」合并成可视行——同一科目
   // 在 TB 与 JE 里可能拼出两种科目串，各自行参与引擎匹配、缺一不可，但
   // 复核时对用户就是同一个科目，只该看一行（见 groupAssignmentViews）。
@@ -1213,10 +1243,6 @@ export function FaTbJePage() {
               <CardTitle>上传审计数据并核对字段映射</CardTitle>
             </CardHeader>
             <CardContent>
-              <p className="fx-hint">
-                TB
-                和序时账使用同一入口，可一次拖入两个文件；公共账表引擎自动判定类型、标题行和字段映射。
-              </p>
               <FileDropInput
                 containerRef={uploadDropRef}
                 value={(["tb", "je"] as const)
@@ -1293,6 +1319,7 @@ export function FaTbJePage() {
           )}
           {(inspects.tb || inspects.je) && (
             <LedgerReviewAll
+              showDescription={false}
               present={
                 inspects.tb && inspects.je
                   ? ["tb", "je"]
@@ -1384,13 +1411,13 @@ export function FaTbJePage() {
             <CardContent>
               <AuxiliaryLinkStatusView result={auxiliaryLink} />
               <div className="fa-tbje-step-actions">
-                <span>
-                  {!paths.tb || !paths.je
-                    ? "请补齐 TB 与 JE，并在上方核对字段映射。"
-                    : mappingsReady
+                {paths.tb && paths.je && (
+                  <span>
+                    {mappingsReady
                       ? "TB 与 JE 必填字段均已映射。"
                       : "请处理上方标出的未映射字段。"}
-                </span>
+                  </span>
+                )}
                 <Button
                   disabled={!mappingsReady || reviewing || busy}
                   onClick={() => void openAccountReview()}
@@ -1406,13 +1433,7 @@ export function FaTbJePage() {
       {step === 2 && (
         <Card variant="section">
           <CardHeader className="fa-tbje-card-head">
-            <div>
-              <CardTitle>复核固定资产科目与资产类别</CardTitle>
-              <p>
-                系统按「上级科目 → 一级编码 → 名称」自动分类，只列 TB
-                中真实存在的「主体×科目」组合；固定资产原值与累计折旧排在前面，其余科目标记为「排除」垫底。请逐一复核后再进入下一步。
-              </p>
-            </div>
+            <CardTitle>复核固定资产科目与资产类别</CardTitle>
             <div className="fa-tbje-counts">
               <Badge variant="info">原值 {roleCounts.cost}</Badge>
               <Badge variant="secondary">
@@ -1562,6 +1583,39 @@ export function FaTbJePage() {
                 </Button>
               </div>
             </div>
+            <AccountConfirmationActions
+              tool="fa_tbje"
+              title="固定资产TBJE"
+              context={JSON.stringify([paths, mappings, assignmentViews.map((view) => [view.entity, view.key])])}
+              columns={[
+                { key: "entity", title: "主体" },
+                { key: "account", title: "科目" },
+                { key: "role", title: "角色", editable: true, options: ["排除", "固定资产原值", "累计折旧"] },
+                { key: "category", title: "资产类别", editable: true },
+              ]}
+              rows={assignmentViews.map((view) => ({
+                key: JSON.stringify([view.entity, view.key]),
+                values: [view.entity, view.label,
+                  view.role === "cost" ? "固定资产原值" : view.role === "depreciation" ? "累计折旧" : "排除",
+                  view.category],
+              }))}
+              disabled={busy}
+              onImport={(changed) => {
+                const byKey = new Map(assignmentViews.map((view) => [JSON.stringify([view.entity, view.key]), view]));
+                const updates = new Map(changed.map((row) => {
+                  const view = byKey.get(row.key)!;
+                  const role: AccountRole = row.values[2] === "固定资产原值" ? "cost" : row.values[2] === "累计折旧" ? "depreciation" : "excluded";
+                  if (role !== "excluded" && !row.values[3].trim())
+                    throw new Error(`${view.label}：固定资产原值或累计折旧科目必须填写资产类别。`);
+                  return [row.key, { role, category: normalizeFaCategory(row.values[3]) }] as const;
+                }));
+                setAssignments((current) => current.map((row) => {
+                  const key = JSON.stringify([row.entity ?? DEFAULT_ENTITY, splitFaAccount(row.account).code || row.account]);
+                  return updates.has(key) ? { ...row, ...updates.get(key)! } : row;
+                }));
+                setAccountsReviewed(false);
+              }}
+            />
             <div className="fa-tbje-step-actions">
               <Button variant="secondary" onClick={() => setStep(1)}>
                 返回上传与映射
@@ -1592,10 +1646,7 @@ export function FaTbJePage() {
           {entityScope.panel}
           <Card variant="section">
             <CardHeader className="fa-tbje-card-head">
-              <div>
-                <CardTitle>生成预览并导出五表</CardTitle>
-                <p>先核对输入摘要，再生成预览或正式 Excel。</p>
-              </div>
+              <CardTitle>生成预览并导出五表</CardTitle>
               <Badge variant="success">全部就绪</Badge>
             </CardHeader>
             <CardContent className="form-stack">
@@ -2028,11 +2079,6 @@ function FaLedgerSourceCard(props: {
         </CardTitle>
       </CardHeader>
       <CardContent>
-        <p className="fx-hint">
-          {kind === "tb"
-            ? "期初、期末余额和年末勾稽的数据源"
-            : "新增、处置、折旧及对方科目的完整期间数据源"}
-        </p>
         <div className="fx-detected-file">
           <button
             className="fx-file-name-button"
@@ -2115,11 +2161,6 @@ function FaLedgerSourceCard(props: {
             </select>
           </label>
         </div>
-        <p className="fa-tbje-entity-note">
-          {inspection.entities.length
-            ? `主体：${inspection.entities.join("、")}`
-            : `未检出主体列，按公共引擎的「${DEFAULT_ENTITY}」处理。`}
-        </p>
       </CardContent>
     </Card>
   );

@@ -29,6 +29,7 @@ import {
   resolveRoleLabels,
   scanLedgerUploadSources,
   selectLedgerSourcePair,
+  type AuxiliaryLinkResult,
   type EngineRoleLabels,
   type LedgerWorkbookSheetClassification,
 } from "@/ledgerMapping";
@@ -51,9 +52,11 @@ import {
 } from "@/components/KeywordFilter";
 import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation";
 import "./fx-audit.css";
+import { AccountConfirmationActions } from "./AccountConfirmationActions";
 import { displayFileName } from "./fileDisplay";
 
 type Mode = "realized" | "unrealized" | "combined";
+const FX_ACCOUNT_PAGE_SIZE = 250;
 
 export function fxRequiredSources(mode: Mode): { je: boolean; tb: boolean } {
   return {
@@ -226,6 +229,77 @@ export function fxAccountDisplayList(
     const named = values.filter((value) => /\s/.test(value));
     return named.length ? named : values.slice(0, 1);
   });
+}
+
+type FxAccountReviewRow = {
+  key: string;
+  account: string;
+  auxiliary?: string;
+};
+
+/** 逐辅助户覆盖键：主体␟归一化科目编码␟归一化辅助值，与存款利息同口径。 */
+const fxDetailKey = (entity: string, account: string, auxiliary: string) =>
+  `${entity}\u001f${account}\u001f${auxiliary}`;
+
+/** 与后端 normalize_account_code 同口径：编码段大写并去前导零。 */
+export function fxAccountCodeOf(account: string): string {
+  const token = account.split(/\s+/).find((t) => {
+    const digits = (t.match(/\d/g) ?? []).length;
+    return digits >= 3 && digits * 2 >= t.length && /^\d/.test(t);
+  });
+  const code = (token ?? account.trim()).toUpperCase();
+  return code.replace(/^0+(?=\d)/, "");
+}
+
+/**
+ * 第二步清单的行粒度：公共辅助核算联动验证确认「TB 辅助值在 JE 对应列
+ * 完整命中」的科目按辅助明细拆行，其余（无辅助列、未验证通过）停在末级
+ * 科目并保留一条兜底行。与存款利息／借款利息同一口径。
+ */
+export function fxAccountReviewRows(
+  accounts: string[],
+  link: AuxiliaryLinkResult | null,
+): FxAccountReviewRow[] {
+  return accounts.flatMap((account) => {
+    const code = fxAccountCodeOf(account);
+    const groups = (link?.groups ?? []).filter(
+      (group) => group.account === code,
+    );
+    const expanded = groups.flatMap((group) =>
+      group.reviewVerified
+        ? (group.details ?? []).map((detail) => ({
+            key: fxDetailKey(group.entity, group.account, detail.key),
+            account,
+            auxiliary: detail.display,
+          }))
+        : [],
+    );
+    const hasFallback =
+      groups.length === 0 || groups.some((group) => !group.reviewVerified);
+    return [...expanded, ...(hasFallback ? [{ key: account, account }] : [])];
+  });
+}
+
+/**
+ * 逐辅助户的手选币种进 payload：留空不传；对应行按非货币性项目／其他损益
+ * 成本分类时也不传（这类行界面固定 N/A，残留旧选择不得影响口径）。
+ */
+export function fxDetailCurrencyOverridesPayload(
+  selections: Record<string, string>,
+  reviewRows: FxAccountReviewRow[],
+  roles: Record<string, string>,
+  detailRoles: Record<string, string>,
+) {
+  const accountByKey = new Map(reviewRows.map((row) => [row.key, row.account]));
+  return Object.fromEntries(
+    Object.entries(selections)
+      .map(([key, code]) => [key, code.trim().toUpperCase()] as const)
+      .filter(([key, code]) => {
+        if (!code) return false;
+        const role = detailRoles[key] ?? roles[accountByKey.get(key) ?? ""];
+        return role !== "non_monetary" && role !== "other_pnl";
+      }),
+  );
 }
 
 type SourceClassification = LedgerWorkbookSheetClassification & {
@@ -537,8 +611,12 @@ export function fxResolveEntityCurrencies(
   current: Record<string, string> = {},
   touched: Record<string, boolean> = {},
 ) {
+  // 无主体列时界面挂 DEFAULT_ENTITY（「本位币（全表）」）。若按空列表原样
+  // 返回空 map，手选值会被这个函数的调用方 effect 整体清掉，下拉永远弹回
+  // 识别值——表现为「本位币改不动」。
+  const keys = entities.length ? entities : [DEFAULT_ENTITY];
   return Object.fromEntries(
-    entities.map((entity) => [
+    keys.map((entity) => [
       entity,
       touched[entity]
         ? (current[entity] ?? "CNY")
@@ -575,6 +653,24 @@ export function fxAccountCurrencyOverrides(selections: Record<string, string>) {
     Object.entries(selections)
       .map(([account, code]) => [account, code.trim().toUpperCase()] as const)
       .filter(([, code]) => code !== ""),
+  );
+}
+
+/**
+ * 非货币性项目／其他损益成本科目不参与外币重估，界面币种固定 N/A；
+ * 这些科目的手选币种不再作为覆盖传给后端，避免残留旧选择影响口径。
+ */
+export function fxAccountCurrencyOverridesForRoles(
+  selections: Record<string, string>,
+  roles: Record<string, string>,
+) {
+  return fxAccountCurrencyOverrides(
+    Object.fromEntries(
+      Object.entries(selections).filter(
+        ([account]) =>
+          roles[account] !== "non_monetary" && roles[account] !== "other_pnl",
+      ),
+    ),
   );
 }
 
@@ -740,6 +836,21 @@ export function fxMissingRequired(
 }
 
 /**
+ * inspect 下发的科目、主体和主体×科目目录只依赖账表身份字段。
+ * 金额、日期等映射变化不需要重新读取整本工作簿。
+ */
+export function fxCatalogMappingKey(
+  mapping: Record<string, string | string[]>,
+): string {
+  return JSON.stringify(
+    ["entity", "account", "accountCode", "accountName"].map((role) => [
+      role,
+      mapping[role] ?? "",
+    ]),
+  );
+}
+
+/**
  * 币种类角色的必填口径——本工具自报，覆盖公共形态表「与形态无关」的默认结论，
  * 让下拉标记与校验（fxMissingRaw）一个口径：
  * - TB：原币币种列与币种线索文本**二选一**——都没映射时双双标＊，映射其一后转（选填）；
@@ -830,6 +941,10 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   const [tbMapping, setTbMapping] = useState<Record<string, string | string[]>>(
     {},
   );
+  // 每侧目录记录其生成时采用的身份映射。人工/LLM 修订身份字段后异步
+  // 重新 inspect；代次与对象身份双重守卫，避免慢请求覆盖更换后的来源。
+  const catalogRefreshGeneration = useRef({ tb: 0, je: 0 });
+  const catalogMappingKeys = useRef<{ tb?: string; je?: string }>({});
   const [entityCurrencies, setEntityCurrencies] = useState<
     Record<string, string>
   >({});
@@ -839,12 +954,21 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   >({});
   // 科目分类清单的关键词筛选：只影响展示，不改变角色分类和测算口径。
   const [accountFilter, setAccountFilter] = useState("");
+  const [accountReviewLimit, setAccountReviewLimit] = useState(FX_ACCOUNT_PAGE_SIZE);
   // 三步导引，与其他工具一致：上传识别 → 科目类型确认 → 测算与底稿。
   // 之前所有区块平铺在一页，用户要一路滚到底才知道下一步做什么。
   const [step, setStep] = useState(0);
   // 币种覆盖刻意**不预填**：空字符串就是「按系统识别的来」，只有用户手工选过的
   // 才进 payload。主体本位币那一处预填踩过时序的坑（见下方注释），这里不重蹈。
   const [accountCurrencies, setAccountCurrencies] = useState<
+    Record<string, string>
+  >({});
+  // 辅助核算拆行后的逐户手工覆盖（键＝主体␟科目编码␟辅助键）。留空即回落
+  // 科目级识别结论；换文件上传时与科目级覆盖一起清空。
+  const [accountDetailRoles, setAccountDetailRoles] = useState<
+    Record<string, string>
+  >({});
+  const [accountDetailCurrencies, setAccountDetailCurrencies] = useState<
     Record<string, string>
   >({});
   const [manualClassifications, setManualClassifications] = useState<
@@ -895,34 +1019,59 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   // 主体是选填角色：映射了主体列就按列里的名字，没映射就全表统一挂 DEFAULT_ENTITY，
   // 不再要用户手填。它只是本位币与底稿封面的挂载点——用户要填的是本位币。
   const fixedEntity = entities.length === 1 ? entities[0] : DEFAULT_ENTITY;
+  // 联动验证的触发键只认「数据源＋两侧辅助核算明细映射」：采纳/撤销不涉及
+  // 辅助列的建议（如原币币种、原币金额）时不重验，避免整表重读的等待弹窗。
+  // （声明在科目清单 memo 之前：第二步的行粒度要按验证结果拆辅助明细。）
+  const auxiliaryLinkKey = tb && je
+    ? JSON.stringify({
+        tb: [tbPath, tb.sheet, tb.headerRow, tb.headerDepth, tbMapping.auxiliary ?? null],
+        je: [jePath, je.sheet, je.headerRow, je.headerDepth, jeMapping.auxiliary ?? null],
+      })
+    : null;
+  const auxiliaryLink = useAuxiliaryLink(tb && je ? {
+    tbSource: { inputPath: tbPath, sheet: tb.sheet, headerRow: tb.headerRow, headerDepth: tb.headerDepth },
+    jeSource: { inputPath: jePath, sheet: je.sheet, headerRow: je.headerRow, headerDepth: je.headerDepth },
+    tbMapping, jeMapping, entityScope: entityScope.selection,
+    selectedAccounts: Object.entries(accountRoles).filter(([, role]) => role !== "excluded").map(([account]) => ({ account })),
+  } : null, auxiliaryLinkKey);
   const accounts = useMemo(
     // 科目类型确认只列末级科目：末级清单由公共引擎的目录末级掩码下发，
     // 平级/无编码的账表不受影响；旧任务没有该字段时回退全量清单。
     () => fxAccountDisplayList(je?.accounts, tb?.accountsLeaf ?? tb?.accounts),
     [je?.accounts, tb?.accountsLeaf, tb?.accounts],
   );
+  // 第二步行粒度：辅助核算联动验证通过的科目按辅助明细拆行（与存款利息／
+  // 借款利息同口径），其余停在末级科目。筛选文本包含辅助名，便于按客商找。
+  const reviewRows = useMemo(
+    () => fxAccountReviewRows(accounts, auxiliaryLink),
+    [accounts, auxiliaryLink],
+  );
   const accountMatches = useMemo(
     () => keywordFilterPredicate(accountFilter),
     [accountFilter],
   );
-  const visibleAccounts = useMemo(
+  const visibleRows = useMemo(
     () =>
-      accounts.filter((account) =>
+      reviewRows.filter((row) =>
         accountMatches(
           fxAccountFilterText(
-            account,
+            row.auxiliary ? `${row.account} ${row.auxiliary}` : row.account,
             je?.accountCurrencyDetails,
             tb?.accountCurrencyDetails,
           ),
         ),
       ),
     [
-      accounts,
+      reviewRows,
       accountMatches,
       je?.accountCurrencyDetails,
       tb?.accountCurrencyDetails,
     ],
   );
+  const renderedRows = visibleRows.slice(0, accountReviewLimit);
+  useEffect(() => {
+    setAccountReviewLimit(FX_ACCOUNT_PAGE_SIZE);
+  }, [accountFilter, reviewRows]);
   const reviewingAny = reviewing.je || reviewing.tb;
   const requiredSources = fxRequiredSources(mode);
   const requiredMappingsMissing = [
@@ -1213,6 +1362,8 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     setAccountRoles({});
     setAccountRolesTouched({});
     setAccountCurrencies({});
+    setAccountDetailRoles({});
+    setAccountDetailCurrencies({});
     setEntityCurrencies({});
     setCurrencyTouched({});
     setTbCurrencyConfirmed(false);
@@ -1299,16 +1450,25 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       setAccountRoles({});
       setAccountRolesTouched({});
     }
+    const appliedMapping = match
+      ? match.mapping
+      : (response.suggestedMapping ?? {});
+    catalogRefreshGeneration.current[kind] += 1;
+    // 本次 response 是按 suggestedMapping 生成；历史恢复映射若不同，下面的
+    // effect 必须再按存档映射刷新，不能误把旧目录标成已是最新。
+    catalogMappingKeys.current[kind] = fxCatalogMappingKey(
+      response.suggestedMapping ?? {},
+    );
     if (kind === "je") {
       setManualClassifications(match ? (stash?.manualClassifications ?? {}) : {});
       setClassificationDrafts({});
       setJePath(path);
       setJe(response);
-      setJeMapping(match ? match.mapping : (response.suggestedMapping ?? {}));
+      setJeMapping(appliedMapping);
     } else {
       setTbPath(path);
       setTb(response);
-      setTbMapping(match ? match.mapping : (response.suggestedMapping ?? {}));
+      setTbMapping(appliedMapping);
       setTbCurrencyConfirmed(!response.foreignCurrencyNeedsConfirmation);
       if (match && stash?.entityCurrencies) {
         setEntityCurrencies(stash.entityCurrencies);
@@ -1323,6 +1483,43 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
         setAccountCurrencies(stash.accountCurrencies);
     }
   }
+
+  useEffect(() => {
+    const refresh = async (kind: "je" | "tb") => {
+      const current = kind === "je" ? je : tb;
+      const path = kind === "je" ? jePath : tbPath;
+      const mapping = kind === "je" ? jeMapping : tbMapping;
+      if (!current || !path) return;
+      const mappingKey = fxCatalogMappingKey(mapping);
+      const needsFullCatalog = step === 1 && current.sampledPreview === true;
+      if (catalogMappingKeys.current[kind] === mappingKey && !needsFullCatalog) return;
+      const generation = ++catalogRefreshGeneration.current[kind];
+      try {
+        const response = (await engineCall(`fx.inspect_${kind}`, {
+          source: {
+            inputPath: path,
+            sheet: current.sheet,
+            headerRow: current.headerRow,
+            headerDepth: current.headerDepth,
+          },
+          mapping,
+          fullCatalog: needsFullCatalog,
+        })) as Inspection;
+        if (catalogRefreshGeneration.current[kind] !== generation) return;
+        catalogMappingKeys.current[kind] = mappingKey;
+        if (kind === "je") {
+          setJe((latest) => (latest === current ? response : latest));
+        } else {
+          setTb((latest) => (latest === current ? response : latest));
+        }
+      } catch (reason) {
+        if (catalogRefreshGeneration.current[kind] !== generation) return;
+        setError(`字段映射已更新，但科目清单刷新失败：${errorText(reason)}`);
+      }
+    };
+    void refresh("je");
+    void refresh("tb");
+  }, [je, jeMapping, jePath, tb, tbMapping, tbPath, step]);
   async function inspect(
     kind: "je" | "tb",
     over?: Partial<{ sheet: string; headerRow: number; headerDepth: number }>,
@@ -1587,7 +1784,19 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       entityCurrencies: effectiveEntities,
       entityScope: entityScope.selection,
       accountRoles,
-      accountCurrencies: fxAccountCurrencyOverrides(accountCurrencies),
+      accountCurrencies: fxAccountCurrencyOverridesForRoles(
+        accountCurrencies,
+        accountRoles,
+      ),
+      accountDetailRoleOverrides: Object.fromEntries(
+        Object.entries(accountDetailRoles).filter(([, role]) => role !== ""),
+      ),
+      accountDetailCurrencyOverrides: fxDetailCurrencyOverridesPayload(
+        accountDetailCurrencies,
+        reviewRows,
+        accountRoles,
+        accountDetailRoles,
+      ),
       manualClassifications: overrides,
       translateTbAccountNames: true,
       ...(Object.keys(cachedTranslations).length
@@ -1680,13 +1889,6 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     setManualClassifications(next);
     await run("fx.preview", next);
   }
-
-  const auxiliaryLink = useAuxiliaryLink(tb && je ? {
-    tbSource: { inputPath: tbPath, sheet: tb.sheet, headerRow: tb.headerRow, headerDepth: tb.headerDepth },
-    jeSource: { inputPath: jePath, sheet: je.sheet, headerRow: je.headerRow, headerDepth: je.headerDepth },
-    tbMapping, jeMapping, entityScope: entityScope.selection,
-    selectedAccounts: Object.entries(accountRoles).filter(([, role]) => role !== "excluded").map(([account]) => ({ account })),
-  } : null);
 
   return (
     <main className="tool-page fx-page">
@@ -2110,6 +2312,9 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       )}
       {step === 1 && (
         <>
+          {(tb?.sampledPreview || je?.sampledPreview) && (
+            <p className="fx-hint" role="status">正在读取完整科目清单，当前样本目录不能用于最终分类。</p>
+          )}
           {(je || tb) && (
             <div>
               <Card>
@@ -2118,38 +2323,12 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                 </CardHeader>
                 <CardContent>
                   <div className="fx-accounts-block">
-                    <p className="fx-hint">
-                      系统已按科目名称和编码判好每个科目属于哪一类、用的什么币，通常不用改。
-                      清单只列<strong>末级科目</strong>（层级判定与公共引擎同一口径），
-                      TB 带辅助核算且与 JE 匹配时按辅助明细拆行。
-                      「外币」显示认出的账户币种，括号里是依据：
-                      <strong>TB币种列</strong>最准，<strong>科目名</strong>
-                      次之；
-                      JE币种列只有该科目全部明细币种一致时才作为后备依据。
-                      <strong>按本位币</strong>表示没认出——这类科目不参与重估，
-                      实际持有外币的请在这里手工指定币种。
-                    </p>
-                    <details className="fx-hint fx-accounts-more">
-                      <summary>识别规则详解</summary>
-                      <p>
-                        分类按词典和科目编码归入五类；把握不大的也给默认类别并标「建议复核」，不会留空。
-                      </p>
-                      <p>
-                        账户币种依次取：TB原币币种列 →
-                        科目名／科目文本里的币种线索 → 全部明细一致的JE币种列 →
-                        都没有就按本位币（取 TB
-                        的本位币列，没有则取上面填的公司本位币）。
-                      </p>
-                      <p>
-                        只有多个主体、本位币又互不相同时，才会显示「未识别」。
-                      </p>
-                    </details>
                     <KeywordFilter
                       value={accountFilter}
                       onChange={setAccountFilter}
                       ariaLabel="筛选科目"
-                      placeholder="输入科目编码、名称或币种（如 USD）关键词，即时过滤"
-                      matched={visibleAccounts.length}
+                      placeholder="输入科目编码、名称、辅助核算或币种（如 USD）关键词，即时过滤"
+                      matched={visibleRows.length}
                       total={accounts.length}
                     />
                     <div className="fx-list fx-accounts">
@@ -2160,15 +2339,20 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                           账户币种与识别状态
                           <JargonTip
                             term="账户币种与识别状态"
-                            text={"币种依据依次为 TB 原币币种列、科目名称、同科目一致的 JE 币种列。\n按本位币：未识别账户外币，不参与外币重估；实际为外币时请手动选择。\nJE 多币种：同科目明细出现多个币种，需核对 TB 是否按币种拆分。\n手动选择的币种优先于识别值。"}
+                            text={"（TB币种列）：取自 TB 的原币币种列。\n（TB科目名／JE科目名）：从科目名称中的币种字样识别。\n（JE币种列）：该科目 JE 明细币种全部一致。\n（按本位币）：未识别出账户外币，按公司本位币处理，不参与外币重估。\n（JE 多币种）：该科目 JE 明细出现多个币种，需按币种拆分 TB 后复核。\n未识别：多主体本位币不一致，无法给出唯一币种。"}
                           />
                         </span>
                       </div>
-                      {visibleAccounts.map((account) => {
+                      {renderedRows.map((row) => {
+                        const account = row.account;
+                        const displayName = row.auxiliary
+                          ? `${account} · ${row.auxiliary}`
+                          : account;
                         const detail =
                           tb?.accountRoleDetails?.[account] ??
                           je?.accountRoleDetails?.[account];
                         // 两边都看：JE 逐行读凭证，比只有一行的 TB 更能反映该科目实际用过哪些币种。
+                        // 辅助拆行的行沿用科目级证据作默认：逐户未手选时后端本就按科目级链路取值。
                         const {
                           detected,
                           source,
@@ -2183,28 +2367,37 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                           tb?.accountCurrencyDetails,
                         );
                         // JE 已证明同科目存在多币种时，TB 若只给一行合计余额就无法
-                        // 重估；无需等用户手工指定币种才提示。
-                        const currencyRisk = jeMultiCurrency;
+                        // 重估；拆行后的逐辅助户正是在这里分币种指定，徽标只挂科目行。
+                        const currencyRisk = jeMultiCurrency && !row.auxiliary;
+                        // 逐辅助户手选的角色优先，其余回落科目级分类。
+                        const rowRole =
+                          accountDetailRoles[row.key] ??
+                          accountRoles[account] ??
+                          "non_monetary";
+                        // 非货币性项目／其他损益成本不参与外币重估，账户币种
+                        // 固定 N/A，不再让用户选择。
+                        const currencyNotApplicable =
+                          rowRole === "non_monetary" || rowRole === "other_pnl";
                         return (
-                          <label key={account}>
+                          <label key={row.key}>
                             <span
                               className="fx-account-name"
                               title={
                                 detail
-                                  ? `${account}\n${detail.reason}（置信度 ${Math.round(detail.confidence * 100)}%）`
-                                  : account
+                                  ? `${displayName}\n${detail.reason}（置信度 ${Math.round(detail.confidence * 100)}%）`
+                                  : displayName
                               }
                             >
-                              {account}
-                              {!/\s/.test(account.trim()) && (
+                              {displayName}
+                              {!row.auxiliary && !/\s/.test(account.trim()) && (
                                 <small className="fx-account-name-missing">
                                   名称未识别，请返回检查“科目名称”映射
                                 </small>
                               )}
-                              {detail?.needsConfirmation && (
+                              {!row.auxiliary && detail?.needsConfirmation && (
                                 <small> 建议复核</small>
                               )}
-                              {multiCurrency && (
+                              {!row.auxiliary && multiCurrency && (
                                 <small
                                   title={
                                     jeMultiCurrency
@@ -2220,8 +2413,15 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                               )}
                             </span>
                             <select
-                              value={accountRoles[account] ?? "non_monetary"}
+                              value={rowRole}
                               onChange={(e) => {
+                                if (row.auxiliary) {
+                                  setAccountDetailRoles((v) => ({
+                                    ...v,
+                                    [row.key]: e.target.value,
+                                  }));
+                                  return;
+                                }
                                 setAccountRolesTouched((v) => ({
                                   ...v,
                                   [account]: true,
@@ -2239,53 +2439,75 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                               ))}
                             </select>
                             <span className="fx-currency-cell">
-                              <select
-                                aria-label={`${account} 账户币种`}
-                                aria-invalid={currencyRisk || undefined}
-                                className={
-                                  currencyRisk
-                                    ? "fx-currency-risky"
-                                    : accountCurrencies[account]
-                                      ? "fx-currency-override"
-                                      : fellBack
-                                        ? "fx-currency-unknown"
-                                        : undefined
-                                }
-                                title={
-                                  currencyRisk
-                                    ? `JE中该科目出现过 ${seen.join("、")} 等多个币种，说明该科目可能同时持有多币种敞口。
+                              {currencyNotApplicable ? (
+                                <span
+                                  className="fx-currency-na"
+                                  title="非货币性项目／其他损益成本科目不参与外币重估，无需账户币种"
+                                >
+                                  N/A
+                                </span>
+                              ) : (
+                                <select
+                                  aria-label={`${displayName} 账户币种`}
+                                  aria-invalid={currencyRisk || undefined}
+                                  className={
+                                    currencyRisk
+                                      ? "fx-currency-risky"
+                                      : (row.auxiliary
+                                          ? accountDetailCurrencies[row.key]
+                                          : accountCurrencies[account])
+                                        ? "fx-currency-override"
+                                        : fellBack
+                                          ? "fx-currency-unknown"
+                                          : undefined
+                                  }
+                                  title={
+                                    currencyRisk
+                                      ? `JE中该科目出现过 ${seen.join("、")} 等多个币种，说明该科目可能同时持有多币种敞口。
 请复核TB是否按币种拆分；若TB只给该科目一行合计余额，就无法用单一汇率可靠重估。
 正确做法是改用按币种拆分的科目余额表。`
-                                    : detected
-                                      ? `系统识别：${detected}（依据${source}）${
-                                        seen.length > 1
-                                          ? `
+                                      : detected
+                                        ? `系统识别：${detected}（依据${source}）${
+                                          seen.length > 1
+                                            ? `
 该科目出现过：${seen.join("、")}`
-                                          : ""
-                                      }`
-                                      : fallbackFunctional
-                                        ? `系统未识别到该科目的币种，按界面填写的本位币 ${fallbackFunctional} 处理，不参与重估。
+                                            : ""
+                                        }`
+                                        : fallbackFunctional
+                                          ? `系统未识别到该科目的币种，按界面填写的本位币 ${fallbackFunctional} 处理，不参与重估。
 若该科目实际持有外币，请在此手工指定。`
-                                        : "系统未识别到该科目的币种，请手工指定"
-                                }
-                                value={accountCurrencies[account] ?? ""}
-                                onChange={(e) =>
-                                  setAccountCurrencies((v) => ({
-                                    ...v,
-                                    [account]: e.target.value,
-                                  }))
-                                }
-                              >
-                                <option value="">
-                                  {fxCurrencyDefaultLabel(detected, side, source, fallbackFunctional)}
-                                </option>
-                                {fxCurrencyOptions(...seen).map((code) => (
-                                  <option key={code} value={code}>
-                                    {code}
+                                          : "系统未识别到该科目的币种，请手工指定"
+                                  }
+                                  value={
+                                    (row.auxiliary
+                                      ? accountDetailCurrencies[row.key]
+                                      : accountCurrencies[account]) ?? ""
+                                  }
+                                  onChange={(e) => {
+                                    if (row.auxiliary) {
+                                      setAccountDetailCurrencies((v) => ({
+                                        ...v,
+                                        [row.key]: e.target.value,
+                                      }));
+                                      return;
+                                    }
+                                    setAccountCurrencies((v) => ({
+                                      ...v,
+                                      [account]: e.target.value,
+                                    }));
+                                  }}
+                                >
+                                  <option value="">
+                                    {fxCurrencyDefaultLabel(detected, side, source, fallbackFunctional)}
                                   </option>
-                                ))}
-                              </select>
-                              {currencyRisk && (
+                                  {fxCurrencyOptions(...seen).map((code) => (
+                                    <option key={code} value={code}>
+                                      {code}
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
+                              {currencyRisk && !currencyNotApplicable && (
                                 <small className="fx-currency-risk-label" role="alert">
                                   JE 多币种；需按币种拆分 TB 后复核
                                 </small>
@@ -2295,11 +2517,51 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                         );
                       })}
                     </div>
-                    {accounts.length > 0 && visibleAccounts.length === 0 && (
+                    {renderedRows.length < visibleRows.length && (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() => setAccountReviewLimit((current) => current + FX_ACCOUNT_PAGE_SIZE)}
+                      >
+                        继续显示（已显示 {renderedRows.length} / {visibleRows.length}）
+                      </Button>
+                    )}
+                    {accounts.length > 0 && visibleRows.length === 0 && (
                       <p className="fx-hint">
                         没有匹配「{accountFilter.trim()}」的科目。
                       </p>
                     )}
+                    <AccountConfirmationActions
+                      tool="fx"
+                      title="汇兑损益"
+                      context={JSON.stringify([tbPath, jePath, tbMapping, jeMapping, accounts])}
+                      columns={[
+                        { key: "account", title: "科目" },
+                        { key: "role", title: "分类", editable: true, options: ROLE_OPTIONS.map(([, label]) => label) },
+                        { key: "currency", title: "账户币种", editable: true, options: CURRENCY_OPTIONS },
+                      ]}
+                      rows={accounts.map((account) => {
+                        const detail = fxAccountCurrencyDetail(account, je?.accountCurrencyDetails, tb?.accountCurrencyDetails);
+                        return { key: account, values: [
+                          account,
+                          ROLE_OPTIONS.find(([key]) => key === (accountRoles[account] ?? "non_monetary"))?.[1] ?? "",
+                          accountCurrencies[account] || detail.detected || "",
+                        ] };
+                      })}
+                      onImport={(changed) => {
+                        const roles: Record<string, string> = {};
+                        const currencies: Record<string, string> = {};
+                        for (const row of changed) {
+                          const role = ROLE_OPTIONS.find(([, label]) => label === row.values[1])?.[0];
+                          if (!role) throw new Error(`${row.key}：请选择有效的分类。`);
+                          roles[row.key] = role;
+                          currencies[row.key] = row.values[2];
+                        }
+                        setAccountRoles((current) => ({ ...current, ...roles }));
+                        setAccountRolesTouched((current) => ({ ...current, ...Object.fromEntries(changed.map((row) => [row.key, true])) }));
+                        setAccountCurrencies((current) => ({ ...current, ...currencies }));
+                      }}
+                    />
                   </div>
                 </CardContent>
               </Card>
@@ -2309,7 +2571,10 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
             <Button variant="secondary" onClick={() => setStep(0)}>
               返回上传与识别
             </Button>
-            <Button onClick={() => setStep(2)}>下一步：测算与底稿</Button>
+            <Button
+              disabled={Boolean(tb?.sampledPreview || je?.sampledPreview)}
+              onClick={() => setStep(2)}
+            >下一步：测算与底稿</Button>
           </div>
         </>
       )}

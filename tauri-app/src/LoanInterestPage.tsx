@@ -69,6 +69,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import "./loan-interest.css";
+import { AccountConfirmationActions, type ConfirmationRow } from "./AccountConfirmationActions";
 // 来源卡与统一上传框的样式（fx-source-grid／fx-source-card／fx-detected-file）
 // 与其他账表工具共用，定义在 fx-audit.css。
 import "./fx-audit.css";
@@ -550,10 +551,28 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     jeEntities: sources.je.inspection?.entities ?? [],
     onInvalidate: () => invalidateResults(),
   });
+  // 触发键只认「数据源＋两侧辅助核算明细映射」：其余角色的映射调整不重验，
+  // 与汇兑损益、存款利息同一口径（锚点反查本身仍按完整映射计算）。
+  const auxLinkKey = sources.tb.path && sources.je.path
+    ? JSON.stringify({
+        tb: [
+          sources.tb.path,
+          sources.tb.inspection?.sheet ?? "",
+          sources.tb.inspection?.headerRow ?? 1,
+          sources.tb.inspection?.headerDepth ?? 1,
+          sources.tb.mapping.auxiliary ?? null,
+        ],
+        je: [
+          sources.je.path,
+          sources.je.inspection?.sheet ?? "",
+          sources.je.inspection?.headerRow ?? 1,
+          sources.je.inspection?.headerDepth ?? 1,
+          sources.je.mapping.auxiliary ?? null,
+        ],
+      })
+    : null;
   useEffect(() => {
-    const tb = sources.tb;
-    const je = sources.je;
-    if (!tb.path || !je.path) {
+    if (auxLinkKey === null) {
       setAuxLink(null);
       return;
     }
@@ -561,19 +580,19 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     setAuxLink(null);
     void verifyAuxiliaryLink({
       tbSource: {
-        inputPath: tb.path,
-        sheet: tb.inspection?.sheet ?? "",
-        headerRow: tb.inspection?.headerRow ?? 1,
-        headerDepth: tb.inspection?.headerDepth ?? 1,
+        inputPath: sources.tb.path,
+        sheet: sources.tb.inspection?.sheet ?? "",
+        headerRow: sources.tb.inspection?.headerRow ?? 1,
+        headerDepth: sources.tb.inspection?.headerDepth ?? 1,
       },
-      tbMapping: tb.mapping,
+      tbMapping: sources.tb.mapping,
       jeSource: {
-        inputPath: je.path,
-        sheet: je.inspection?.sheet ?? "",
-        headerRow: je.inspection?.headerRow ?? 1,
-        headerDepth: je.inspection?.headerDepth ?? 1,
+        inputPath: sources.je.path,
+        sheet: sources.je.inspection?.sheet ?? "",
+        headerRow: sources.je.inspection?.headerRow ?? 1,
+        headerDepth: sources.je.inspection?.headerDepth ?? 1,
       },
-      jeMapping: je.mapping,
+      jeMapping: sources.je.mapping,
       auxRole: "auxiliary",
       anchorOnly: true,
       selectedAccounts: selectedLoanAccounts(),
@@ -586,7 +605,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sources, loanAccountRoles, entityScope.selection]);
+  }, [auxLinkKey]);
   // TB＋JE 模式支持把两个文件整组拖进上传框，与存款利息／FA 一致。
   useEffect(() => {
     const drops = listenPositionedFileDrops(({ paths, x, y }) => {
@@ -1350,6 +1369,18 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     }
     return assignment;
   }, [rows, orderedTbAccounts, loanAccountRoles, loanDetailRoles]);
+  const confirmationRateRows = useMemo(() => {
+    const seen = new Set<string>();
+    return orderedTbAccounts
+      .filter((account) => loanReviewRole(account) === "loan")
+      .flatMap((account) => reviewRateDetails.get(account.reviewKey) ?? [])
+      .filter((detail) => {
+        const key = loanRowKey(detail);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  }, [orderedTbAccounts, reviewRateDetails, loanAccountRoles, loanDetailRoles]);
   const filteredTbAccounts = useMemo(() => {
     const keyword = accountQuery.trim().toLowerCase();
     if (!keyword) return orderedTbAccounts;
@@ -1393,11 +1424,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const showSubject =
     orderedTbAccounts.some((row) => Boolean(row.entity)) ||
     rows.some((row) => Boolean(row.entity && row.entity !== "默认主体"));
-  /** 已填利率笔数：固定利率看执行利率，浮动利率看基准利率（与旧利率确认表同口径）。 */
-  const filledRateCount = rows.filter((row) => {
-    const edit = tbRateEdits[loanRowKey(row)];
-    return Boolean(edit && (edit.fixedRate != null || edit.benchmarkRate != null));
-  }).length;
   // 进入「确认科目与利率」即自动生成一次利率确认表：生成是必经动作，不该让
   // 用户自己找按钮。每次进入该步骤只自动跑一次，之后科目选择变化仍由
   // 「重新生成借款利率表」手动触发，避免边看边改时被后台任务打断。
@@ -1860,7 +1886,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                   </div>
                 </CardHeader>
                 <CardContent>
-                  <p className="fx-hint">请确认用于还原本金的借款科目，以及用于和测算结果比较的利息支出科目；借款科目的执行利率在本表利率列逐笔设置，利息支出与排除科目不设利率。</p>
                 {accountsBusy ? (
                   <p className="fx-hint">正在读取科目清单…</p>
                 ) : (
@@ -1884,7 +1909,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                         placeholder="输入编码或名称"
                       />
                     </label>
-                    <span>{filteredTbAccounts.length} 项；每页最多 {accountPageSize} 项</span>
                     {accountChangeNote && <span role="status">{accountChangeNote}</span>}
                     <div className="loan-paste-actions loan-rate-actions">
                       <Button
@@ -1913,11 +1937,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                     </div>
                   </div>
                   {rateNoteText && <p className="loan-paste-note">{rateNoteText}</p>}
-                  {rows.length > 0 && (
-                    <p className="fx-hint">
-                      共 {rows.length} 笔借款明细，已填利率 {filledRateCount} 笔；单一明细直接在科目行利率列填写，按辅助核算拆分的多笔在科目行下方子行逐笔填写。
-                    </p>
-                  )}
                   {!rows.length && (
                     <EmptyState
                       compact
@@ -2083,9 +2102,88 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                       <Button type="button" variant="secondary" disabled={visibleAccountPage >= accountPageCount - 1} onClick={() => goToAccountPage(visibleAccountPage + 1)}>下一页</Button>
                     </div>
                   )}
-                  <p className="fx-rate-note">
-                    利率填百分比数值（3.85 即 3.85%）；浮动利率按“基准利率＋加减点（BP÷10,000）”换算有效年利率。
-                  </p>
+                  <AccountConfirmationActions
+                    tool="loan"
+                    title="借款利息"
+                    context={JSON.stringify([source("tb"), source("je"), orderedTbAccounts.map((account) => account.reviewKey), confirmationRateRows.map(loanRowKey)])}
+                    columns={[
+                      { key: "kind", title: "行类型" },
+                      { key: "entity", title: "主体" },
+                      { key: "account", title: "科目／借款明细" },
+                      { key: "auxiliary", title: "辅助核算" },
+                      { key: "role", title: "科目类型", editable: true, options: ["借款科目", "利息支出科目", "排除"] },
+                      { key: "rateType", title: "利率类型", editable: true, options: ["固定", "浮动"] },
+                      { key: "fixedRate", title: "执行利率（%）", editable: true },
+                      { key: "benchmarkRate", title: "浮动基准（%）", editable: true },
+                      { key: "spreadBps", title: "加减点（BP）", editable: true },
+                    ]}
+                    rows={[
+                      ...orderedTbAccounts.map((account): ConfirmationRow => ({
+                        key: `account:${account.reviewKey}`,
+                        editable: [false, false, false, false, true, false, false, false, false],
+                        values: ["科目", account.entity ?? "", account.account, account.auxiliary ?? "",
+                          loanReviewRole(account) === "loan" ? "借款科目" : loanReviewRole(account) === "interest_expense" ? "利息支出科目" : "排除",
+                          "", "", "", ""],
+                      })),
+                      ...confirmationRateRows.map((detail): ConfirmationRow => {
+                        const edit = tbRateEdits[loanRowKey(detail)];
+                        return { key: `rate:${loanRowKey(detail)}`,
+                          editable: [false, false, false, false, false, true, true, true, true],
+                          values: [
+                          "借款明细", detail.entity ?? "", detail.accountName || detail.loanId, detail.auxiliary ?? "", "",
+                          (edit?.rateType ?? "fixed") === "floating" ? "浮动" : "固定",
+                          edit?.fixedRate == null ? "" : String(edit.fixedRate * 100),
+                          edit?.benchmarkRate == null ? "" : String(edit.benchmarkRate * 100),
+                          edit?.spreadBps == null ? "" : String(edit.spreadBps),
+                        ] };
+                      }),
+                    ]}
+                    disabled={busy || accountsBusy}
+                    onImport={(changed) => {
+                      const accountsByKey = new Map(orderedTbAccounts.map((row) => [`account:${row.reviewKey}`, row]));
+                      const ratesByKey = new Map(confirmationRateRows.map((row) => [`rate:${loanRowKey(row)}`, row]));
+                      const roleUpdates: Array<{ account: LoanAccountReviewRow; role: LoanAccountRole }> = [];
+                      const rateUpdates: Array<{ detail: LoanRow; patch: Partial<PasteRateRow> }> = [];
+                      const percent = (value: string, label: string) => {
+                        if (!value) return undefined;
+                        const parsed = Number(value);
+                        if (!Number.isFinite(parsed)) throw new Error(`${label}必须为数字。`);
+                        return parsed / 100;
+                      };
+                      for (const item of changed) {
+                        if (item.key.startsWith("account:")) {
+                          const account = accountsByKey.get(item.key)!;
+                          const role: LoanAccountRole = item.values[4] === "借款科目" ? "loan" : item.values[4] === "利息支出科目" ? "interest_expense" : "skip";
+                          if (account.auxiliaryKey && role === "interest_expense") throw new Error(`${account.account}：辅助行不能设为利息支出科目。`);
+                          roleUpdates.push({ account, role });
+                        } else {
+                          const detail = ratesByKey.get(item.key)!;
+                          const spread = item.values[8] ? Number(item.values[8]) : undefined;
+                          if (spread !== undefined && !Number.isFinite(spread)) throw new Error(`${detail.loanId}：加减点必须为数字。`);
+                          rateUpdates.push({ detail, patch: {
+                            rateType: item.values[5] === "浮动" ? "floating" : "fixed",
+                            fixedRate: percent(item.values[6], `${detail.loanId}执行利率`),
+                            benchmarkRate: percent(item.values[7], `${detail.loanId}浮动基准`),
+                            spreadBps: spread,
+                          } });
+                        }
+                      }
+                      setLoanDetailRoles((current) => ({ ...current, ...Object.fromEntries(roleUpdates.filter(({ account }) => account.auxiliaryKey).map(({ account, role }) => [account.reviewKey, role])) }));
+                      setLoanAccountRoles((current) => ({ ...current, ...Object.fromEntries(roleUpdates.filter(({ account }) => !account.auxiliaryKey).map(({ account, role }) => [account.key, role])) }));
+                      setTbRateEdits((current) => {
+                        const next = { ...current };
+                        for (const { detail, patch } of rateUpdates) {
+                          const key = loanRowKey(detail);
+                          next[key] = {
+                            ...(next[key] ?? { rateType: "fixed" }), ...patch,
+                            entity: detail.entity, loanId: detail.loanId, rowKey: detail.rowKey,
+                            accountCode: detail.accountCode, auxiliary: detail.auxiliary,
+                          };
+                        }
+                        return next;
+                      });
+                    }}
+                  />
                   </>
                 )}
                 </CardContent>
@@ -2179,9 +2277,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                   </span>
                 </label>
               </div>
-              <p className="fx-rate-note">
-                浮动利率按“基准利率＋加减点（BP÷10,000）”换算有效年利率。
-              </p>
               <div className="fx-actions">
                 <Button
                   variant="secondary"
@@ -2615,10 +2710,7 @@ export function Results({
   return (
     <section className="loan-results">
       <div className="fx-result-heading">
-        <div>
-          <h3>借款本金变动与利息测算</h3>
-          <p>本金勾稽与计息口径分开判断；测算利息再与 TB 利息支出比较。</p>
-        </div>
+        <h3>借款本金变动与利息测算</h3>
         {((result?.outputPaths ?? []) as string[]).map((p) => (
           <Button
             key={p}
@@ -2636,9 +2728,6 @@ export function Results({
         <Badge variant="outline" className={measurementReviewCount ? "badge-warning" : "badge-ready"}>
           {measurementReviewCount ? `${measurementReviewCount} 笔计息口径待确认` : "计息口径已确认"}
         </Badge>
-        <span>
-          本金无差异不再显示为“待复核”；缺利率或还款时点需要确认时，会在“计息口径”单独说明。
-        </span>
       </div>
       <div className="fx-bridge-step">
         <div className="fx-step-label">
@@ -2712,7 +2801,7 @@ export function Results({
               const principalDifference = loanEquation(r);
               return <tr key={`${r.loanId}-${i}`}>
                 <td>{!r.entity || r.entity === "默认主体" ? "未区分主体" : r.entity}</td>
-                <td title={r.matchBasis}>{r.loanId}</td>
+                <td title={[r.loanId, r.matchBasis].filter(Boolean).join("\n")}>{r.loanId}</td>
                 <td>{r.currency || "—"}</td>
                 {[
                   r.openingPrincipal,

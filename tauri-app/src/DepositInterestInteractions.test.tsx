@@ -9,7 +9,10 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DepositInterestPage } from "./DepositInterestPage";
+import {
+  DepositInterestPage,
+  depositCatalogMappingKey,
+} from "./DepositInterestPage";
 import { publishTaskRestore } from "./restore";
 import type { JobEvent, ToolManifest } from "./types";
 
@@ -92,59 +95,61 @@ beforeEach(() => {
   vi.clearAllMocks();
   mock.pickPath.mockResolvedValue("fixture-tb.xlsx");
   mock.jobStart.mockResolvedValue("deposit-job");
-  mock.engineCall.mockImplementation(async (method: string) => {
-    if (method === "deposit.rate_tiers")
-      return {
-        categories: [
-          {
-            key: "demand",
-            label: "活期存款",
-            terms: [{ key: "demand", label: "" }],
-          },
-          {
-            key: "term",
-            label: "定期存款",
-            terms: [{ key: "term_1y", label: "1年" }],
-          },
-        ],
-        tiers: [
-          {
-            key: "demand",
-            category: "demand",
-            categoryLabel: "活期存款",
-            termLabel: "",
-            label: "活期存款",
-            autoApply: true,
-            listedRate: 0.0005,
-          },
-          {
-            key: "term_1y",
-            category: "term",
-            categoryLabel: "定期存款",
-            termLabel: "1年",
-            label: "定期存款（1年）",
-            autoApply: false,
-            listedRate: 0.0095,
-          },
-        ],
-        ratesStale: false,
-        links: [],
-        linkGroups: [],
-      };
-    if (method === "deposit.classify_source")
-      return {
-        kind: "tb",
-        scores: { je: 1, tb: 10 },
-        headers: inspection.headers,
-        preview: inspection.preview,
-        sheet: "TB",
-        headerRow: 1,
-        headerDepth: 1,
-      };
-    if (method === "deposit.classify_source_llm") return { kind: "tb" };
-    if (method === "deposit.inspect_tb") return inspection;
-    throw new Error(`unexpected ${method}`);
-  });
+  mock.engineCall.mockImplementation(
+    async (method: string, params?: unknown) => {
+      if (method === "deposit.rate_tiers")
+        return {
+          categories: [
+            {
+              key: "demand",
+              label: "活期存款",
+              terms: [{ key: "demand", label: "" }],
+            },
+            {
+              key: "term",
+              label: "定期存款",
+              terms: [{ key: "term_1y", label: "1年" }],
+            },
+          ],
+          tiers: [
+            {
+              key: "demand",
+              category: "demand",
+              categoryLabel: "活期存款",
+              termLabel: "",
+              label: "活期存款",
+              autoApply: true,
+              listedRate: 0.0005,
+            },
+            {
+              key: "term_1y",
+              category: "term",
+              categoryLabel: "定期存款",
+              termLabel: "1年",
+              label: "定期存款（1年）",
+              autoApply: false,
+              listedRate: 0.0095,
+            },
+          ],
+          ratesStale: false,
+          links: [],
+          linkGroups: [],
+        };
+      if (method === "deposit.classify_source")
+        return {
+          kind: "tb",
+          scores: { je: 1, tb: 10 },
+          headers: inspection.headers,
+          preview: inspection.preview,
+          sheet: "TB",
+          headerRow: 1,
+          headerDepth: 1,
+        };
+      if (method === "deposit.classify_source_llm") return { kind: "tb" };
+      if (method === "deposit.inspect_tb") return inspection;
+      throw new Error(`unexpected ${method}`);
+    },
+  );
 });
 afterEach(cleanup);
 
@@ -154,7 +159,12 @@ it("历史任务恢复后重新识别完整预览，返回输入文件不白屏"
     toolId: "deposit_interest",
     method: "deposit.calculate",
     params: {
-      tbSource: { inputPath: "fixture-tb.xlsx", sheet: "TB", headerRow: 1, headerDepth: 1 },
+      tbSource: {
+        inputPath: "fixture-tb.xlsx",
+        sheet: "TB",
+        headerRow: 1,
+        headerDepth: 1,
+      },
       tbMapping: mapping,
       accountRoles: { [bank]: "deposit" },
       reportEnd: "2025-12-31",
@@ -164,12 +174,22 @@ it("历史任务恢复后重新识别完整预览，返回输入文件不白屏"
   });
   render(<DepositInterestPage tool={tool} />);
   await waitFor(() =>
-    expect(mock.engineCall).toHaveBeenCalledWith("deposit.inspect_tb", {
-      source: { inputPath: "fixture-tb.xlsx", sheet: "TB", headerRow: 1, headerDepth: 1 },
-    }),
+    expect(mock.engineCall).toHaveBeenCalledWith(
+      "deposit.inspect_tb",
+      expect.objectContaining({
+        source: {
+          inputPath: "fixture-tb.xlsx",
+          sheet: "TB",
+          headerRow: 1,
+          headerDepth: 1,
+        },
+      }),
+    ),
   );
   expect(await screen.findByText("TB 文件预览与字段映射")).toBeVisible();
-  expect(screen.getByText("历史任务源文件已重新识别，请复核映射后继续。")).toBeVisible();
+  expect(
+    screen.getByText("历史任务源文件已重新识别，请复核映射后继续。"),
+  ).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: /^2 科目与利率确认/ }));
   fireEvent.click(screen.getByRole("button", { name: /^1 上传与识别/ }));
   expect(screen.getByText("TB 文件预览与字段映射")).toBeVisible();
@@ -177,21 +197,30 @@ it("历史任务恢复后重新识别完整预览，返回输入文件不白屏"
 
 it("连续恢复两条历史任务时忽略先前较慢的识别结果", async () => {
   let finishFirst: ((value: typeof inspection) => void) | undefined;
-  mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
-    if (method === "deposit.rate_tiers") return { categories: [], tiers: [], links: [], linkGroups: [] };
-    if (method === "deposit.inspect_tb") {
-      const path = (params as { source: { inputPath: string } }).source.inputPath;
-      if (path === "old.xlsx")
-        return new Promise<typeof inspection>((resolve) => { finishFirst = resolve; });
-      return { ...inspection, sheet: "NEW", sheets: ["NEW"] };
-    }
-    throw new Error(`unexpected ${method}`);
-  });
+  mock.engineCall.mockImplementation(
+    async (method: string, params: unknown) => {
+      if (method === "deposit.rate_tiers")
+        return { categories: [], tiers: [], links: [], linkGroups: [] };
+      if (method === "deposit.inspect_tb") {
+        const path = (params as { source: { inputPath: string } }).source
+          .inputPath;
+        if (path === "old.xlsx")
+          return new Promise<typeof inspection>((resolve) => {
+            finishFirst = resolve;
+          });
+        return { ...inspection, sheet: "NEW", sheets: ["NEW"] };
+      }
+      throw new Error(`unexpected ${method}`);
+    },
+  );
   const restore = (path: string) => ({
     jobId: path,
     toolId: "deposit_interest",
     method: "deposit.calculate",
-    params: { tbSource: { inputPath: path, sheet: "TB", headerRow: 1, headerDepth: 1 }, tbMapping: mapping },
+    params: {
+      tbSource: { inputPath: path, sheet: "TB", headerRow: 1, headerDepth: 1 },
+      tbMapping: mapping,
+    },
     missingPaths: [],
     authorizedPathCount: 1,
   });
@@ -200,7 +229,9 @@ it("连续恢复两条历史任务时忽略先前较慢的识别结果", async (
   await waitFor(() => expect(finishFirst).toBeDefined());
   act(() => publishTaskRestore(restore("new.xlsx")));
   expect(await screen.findByRole("button", { name: "new.xlsx" })).toBeVisible();
-  await act(async () => { finishFirst?.(inspection); });
+  await act(async () => {
+    finishFirst?.(inspection);
+  });
   expect(screen.getByRole("button", { name: "new.xlsx" })).toBeVisible();
   expect(screen.queryByText("old.xlsx")).not.toBeInTheDocument();
 });
@@ -213,20 +244,36 @@ const STEP3 = /^3\s*测算与底稿/;
 const goToStep = (label: RegExp) =>
   fireEvent.click(screen.getByRole("button", { name: label }));
 
+it("只有科目身份映射变化才需要重建科目目录", () => {
+  expect(
+    depositCatalogMappingKey({
+      accountCode: "编码",
+      closingFunctionalAmount: "期末",
+    }),
+  ).toBe(
+    depositCatalogMappingKey({
+      accountCode: "编码",
+      closingFunctionalAmount: "期末余额",
+    }),
+  );
+  expect(depositCatalogMappingKey({ accountCode: "编码" })).not.toBe(
+    depositCatalogMappingKey({ accountCode: "科目编码" }),
+  );
+});
+
 describe("存款科目手工分类请求", () => {
-  it("未上传 TB 时给出明确状态且底部主按钮禁用", () => {
+  it("未上传 TB 时保留空状态、删除重复提示且底部主按钮禁用", () => {
     render(<DepositInterestPage tool={tool} />);
     expect(
       screen.getByRole("region", { name: "准备存款利息资料" }),
     ).toBeVisible();
-    // 底部主按钮设防：没上传 TB 时禁用并给出浅色提示；
+    // 底部主按钮设防：没上传 TB 时禁用；空状态已经说明上传入口，
+    // 不再在按钮旁重复一遍门禁提示。
     // 步骤条第二步不受影响（参考资料设计，允许直接点进去）。
     expect(
       screen.getByRole("button", { name: "下一步：科目与利率确认" }),
     ).toBeDisabled();
-    expect(
-      screen.getByText("先加入科目余额表（TB）后可继续下一步。"),
-    ).toBeVisible();
+    expect(screen.queryByText(/先加入科目余额表/)).not.toBeInTheDocument();
   });
   it("自动匹配错误后可直接更换 TB Excel，并按 TB 重新自动识别", async () => {
     render(<DepositInterestPage tool={tool} />);
@@ -249,6 +296,86 @@ describe("存款科目手工分类请求", () => {
       }),
     );
     expect(await screen.findByText("manual-tb.xlsx")).toBeVisible();
+  });
+  it("人工补正科目映射后按确认映射刷新完整科目目录", async () => {
+    const added = "100201 新补出的银行账户";
+    mock.engineCall.mockImplementation(
+      async (method: string, params: unknown) => {
+        if (method === "deposit.rate_tiers")
+          return { categories: [], tiers: [], links: [], linkGroups: [] };
+        if (method === "deposit.classify_source")
+          return {
+            kind: "tb",
+            scores: { je: 1, tb: 10 },
+            headers: inspection.headers,
+            preview: inspection.preview,
+            sheet: "TB",
+            headerRow: 1,
+            headerDepth: 1,
+          };
+        if (method === "deposit.inspect_tb") {
+          const confirmed = (params as { mapping?: typeof mapping }).mapping;
+          if (confirmed?.accountCode === "科目编码") {
+            return {
+              ...inspection,
+              accounts: [...inspection.accounts, added],
+              accountsLeaf: [...inspection.accountsLeaf, added],
+              suggestedMapping: confirmed,
+              suggestedAccountRoles: {
+                ...inspection.suggestedAccountRoles,
+                [added]: "deposit",
+              },
+            };
+          }
+          return inspection;
+        }
+        throw new Error(`unexpected ${method}`);
+      },
+    );
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "拖放或选择 TB、序时账文件（可同时选择）",
+      }),
+    );
+    await screen.findByText("TB 文件预览与字段映射");
+
+    const accountCodeSelect = screen
+      .getAllByRole("combobox")
+      .find(
+        (element) => (element as HTMLSelectElement).value === "accountCode",
+      );
+    expect(accountCodeSelect).toBeDefined();
+    fireEvent.change(accountCodeSelect!, { target: { value: "" } });
+    await waitFor(() =>
+      expect(mock.engineCall).toHaveBeenCalledWith(
+        "deposit.inspect_tb",
+        expect.objectContaining({
+          mapping: expect.not.objectContaining({ accountCode: "科目编码" }),
+        }),
+      ),
+    );
+    const clearedSelect = screen
+      .getAllByRole("combobox")
+      .find((element) =>
+        Array.from((element as HTMLSelectElement).options).some(
+          (option) => option.value === "accountCode",
+        ),
+      );
+    fireEvent.change(clearedSelect!, { target: { value: "accountCode" } });
+    await waitFor(() =>
+      expect(mock.engineCall).toHaveBeenCalledWith(
+        "deposit.inspect_tb",
+        expect.objectContaining({
+          mapping: expect.objectContaining({ accountCode: "科目编码" }),
+        }),
+      ),
+    );
+
+    goToStep(STEP2);
+    expect(
+      await screen.findByRole("combobox", { name: `${added}的分类` }),
+    ).toBeVisible();
   });
   it("真实页面区分默认excluded和手工排除，并支持撤销手工选择", async () => {
     render(<DepositInterestPage tool={tool} />);
@@ -276,28 +403,49 @@ describe("存款科目手工分类请求", () => {
       "deposit.classify_source_llm",
       expect.anything(),
     );
+    expect(mock.engineCall).not.toHaveBeenCalledWith(
+      "ledger.review_mapping",
+      expect.anything(),
+      expect.anything(),
+    );
     // 科目确认只列末级科目：父级 6603 不再出现，利息收入类末级直接可见。
     expect(
       screen.queryByRole("combobox", { name: `${parent}的分类` }),
     ).not.toBeInTheDocument();
     expect(leafInput).toHaveValue("");
-    expect((leafInput as HTMLSelectElement).selectedOptions[0]).toHaveTextContent("不参与测算");
-    expect((leafInput as HTMLSelectElement).selectedOptions[0]).not.toHaveTextContent("自动");
+    expect(
+      (leafInput as HTMLSelectElement).selectedOptions[0],
+    ).toHaveTextContent("不参与测算");
+    expect(
+      (leafInput as HTMLSelectElement).selectedOptions[0],
+    ).not.toHaveTextContent("自动");
     // 存款类型与分类同卡内联展示。
     expect(
       screen.getByRole("combobox", { name: `${bank}的存款类型` }),
     ).toBeVisible();
-    expect(screen.queryByText("内置挂牌利率可能已过期")).not.toBeInTheDocument();
-    fireEvent.change(
-      screen.getByRole("combobox", { name: `${bank}的分类` }),
-      { target: { value: "cash_on_hand" } },
-    );
-    expect(screen.queryByRole("combobox", { name: `${bank}的存款类型` })).not.toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: `${bank}的分类` }).closest("label")?.querySelector(".deposit-account-na")).toHaveTextContent("不适用");
-    fireEvent.change(
-      screen.getByRole("combobox", { name: `${bank}的分类` }),
-      { target: { value: "" } },
-    );
+    expect(screen.getByRole("columnheader", { name: "科目" })).toBeVisible();
+    expect(screen.getByRole("columnheader", { name: "分类" })).toBeVisible();
+    expect(
+      screen.getByRole("columnheader", { name: "存款类型" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByText("内置挂牌利率可能已过期"),
+    ).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("combobox", { name: `${bank}的分类` }), {
+      target: { value: "cash_on_hand" },
+    });
+    expect(
+      screen.queryByRole("combobox", { name: `${bank}的存款类型` }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen
+        .getByRole("combobox", { name: `${bank}的分类` })
+        .closest("tr")
+        ?.querySelector(".deposit-account-na"),
+    ).toHaveTextContent("不适用");
+    fireEvent.change(screen.getByRole("combobox", { name: `${bank}的分类` }), {
+      target: { value: "" },
+    });
     fireEvent.change(leafInput, { target: { value: "interest_income" } });
     fireEvent.change(
       screen.getByRole("combobox", { name: `${bank}的存款类型` }),
@@ -392,6 +540,7 @@ describe("JE 币种资料提示", () => {
       mock.event?.({
         ...complete,
         result: {
+          outputPaths: ["C:\\output\\存款利息测算.xlsx"],
           rows: [
             {
               key: "3110 | 1002013636 银行存款 | ",
@@ -434,5 +583,10 @@ describe("JE 币种资料提示", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "分币种的年末余额（JE推导）仅供参考",
     );
+    const openWorkbook = screen.getByRole("button", {
+      name: "打开 Excel 底稿",
+    });
+    expect(openWorkbook.closest(".deposit-export-done")).not.toBeNull();
+    expect(screen.getByText(/黄色“年利率”单元格可直接改写/)).toBeVisible();
   });
 });

@@ -1285,35 +1285,33 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     // 末级科目。父子层级（1101.01 分段编码、无编码映射、多主体等形态）只有
     // 公共引擎的目录末级掩码认得，前端不得自造规则。全量 accounts 继续下发，
     // FA 等页面与历史口径仍在用。
-    let accounts_leaf = if kind == "tb" {
-        let leaf = ledger_mapping::tb_catalog_leaf_mask(
-            &table.headers,
-            &table.rows,
-            &|role| match mapping.get(role) {
-                Some(Value::String(value)) => vec![value.clone()],
-                Some(Value::Array(values)) => values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect(),
-                _ => vec![],
-            },
-        );
-        let indexes = account_columns(&table, &mapping);
-        table
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| leaf.get(*index).copied().unwrap_or(true))
-            .map(|(_, row)| join_columns(row, &indexes))
-            .filter(|value| !value.is_empty() && !ledger_mapping::is_report_footer_value(value))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .take(1000)
-            .collect::<Vec<_>>()
-    } else {
-        accounts.clone()
-    };
+    let accounts_leaf =
+        if kind == "tb" {
+            let leaf = ledger_mapping::tb_catalog_leaf_mask(&table.headers, &table.rows, &|role| {
+                match mapping.get(role) {
+                    Some(Value::String(value)) => vec![value.clone()],
+                    Some(Value::Array(values)) => values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect(),
+                    _ => vec![],
+                }
+            });
+            let indexes = account_columns(&table, &mapping);
+            table
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| leaf.get(*index).copied().unwrap_or(true))
+                .map(|(_, row)| join_columns(row, &indexes))
+                .filter(|value| !value.is_empty() && !ledger_mapping::is_report_footer_value(value))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            accounts.clone()
+        };
     let entities = distinct_values(&table, &mapping, "entity");
     let entity_accounts = distinct_entity_accounts(&table, &mapping);
     let years = data_years(&table, kind, &mapping);
@@ -1408,7 +1406,6 @@ fn distinct_accounts(table: &FxTable, mapping: &Map<String, Value>) -> Vec<Strin
         .filter(|value| !value.is_empty() && !ledger_mapping::is_report_footer_value(value))
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .take(1000)
         .collect()
 }
 
@@ -1438,7 +1435,6 @@ fn distinct_entity_accounts(
         seen.insert((entity, account));
     }
     seen.into_iter()
-        .take(2000)
         .map(|(entity, account)| {
             let mut pair = Map::new();
             pair.insert("entity".to_owned(), Value::String(entity));
@@ -1496,7 +1492,8 @@ pub(crate) struct AccountRow {
     pub(crate) opening_from_tb: bool,
     pub(crate) tb_closing_balance: f64,
     pub(crate) derived_closing_balance: f64,
-    /// 仅当有该户 JE 发生额且年初余额直接取自 TB，期末推导才是独立勾稽证据。
+    /// 年初直接取自 TB，且 JE 有该户发生额，或 JE 零发生额与 TB 年初＝年末
+    /// 相互印证时，期末推导才是独立勾稽证据。
     #[serde(default)]
     pub(crate) je_reconciled: bool,
     pub(crate) reconciliation_diff: f64,
@@ -1705,7 +1702,14 @@ fn calculate(
             .or_else(|| cell_number(&tb, row, &tb_map, "closingFunctionalAmount"))
             .unwrap_or(0.0);
             let (net, note, debit_raw, credit_raw, occurrence_direction_confirmed) =
-                match booked_occurrence(&tb, row, &tb_map, tb_convention, direction) {
+                match booked_occurrence(
+                    &tb,
+                    row,
+                    &tb_map,
+                    tb_convention,
+                    direction,
+                    explicit_interest_income_name(&account),
+                ) {
                     Some((net, note, debit, credit, confirmed)) => {
                         (net, note, debit, credit, confirmed)
                     }
@@ -2190,7 +2194,11 @@ fn calculate(
             || (account.opening_balance.abs() <= 0.01 && account.tb_closing_balance.abs() <= 0.01);
         let je_backed = has_je && (je_rows > 0 || dormant);
         account.two_point = !je_backed;
-        account.je_reconciled = je_rows > 0 && account.opening_from_tb;
+        // 已提供 JE、但该账户在期间内没有任何发生额时，发生额就是 0。
+        // 若 TB 同时证明年初＝年末，这条“0 发生额”仍是有效勾稽证据：
+        // JE 推导期末 = TB 年初 + 0 = TB 年末。此前虽然内部按休眠户生成
+        // 平线，却把 jeReconciled 留成 false，界面和底稿反而显示“未执行”。
+        account.je_reconciled = je_backed && account.opening_from_tb;
         if !account.opening_from_tb {
             let net: f64 = series
                 .map(|all| all.iter().map(|(debit, credit)| debit - credit).sum())
@@ -2452,10 +2460,6 @@ fn calculate(
             "monthCount": period.len(),
             "dayBasis": basis_key,
             "dayBasisLabel": basis_label,
-            "rateBasisLabel": format!(
-                "标准存款档位自动套用 {LISTED_REFERENCE_DATE} 挂牌暂估利率，并标记为待确认；\
-                 外币账户需核对实际利率，自定义或特殊产品仍须填写实际利率。央行基准（{PBC_BENCHMARK_DATE}）只作上限参照，不参与测算。"
-            ),
             "listedRateDate": LISTED_REFERENCE_DATE,
             "ratesStale": rates_stale,
             "rateAgeMonths": stale_months,
@@ -3768,9 +3772,10 @@ fn signed(
 /// 已结转的损益科目借贷同额、期末为零，收入还是费用只能按「活动落在
 /// 登记方向的哪一侧」判：红字（负数）＝与登记方向相反的活动。登记方向
 /// 本身不在余额表里，只能从科目身份推——**费用类关键词优先于收入类**，
-/// 且自身名称与 TB 里的上级科目名都查：`财务费用-利息收入` 挂在费用
-/// 科目下，真实登记方向是借，利息收入以红字借方冲减费用，这正是用友
-/// 等账套的标准记法；反之 `6051 其他业务收入` 这类独立收入科目按贷方向。
+/// 且自身名称与 TB 里的上级科目名都查：挂在财务费用下、只有“利息”的
+/// 子科目通常以红字借方冲减费用；`6051 其他业务收入` 这类独立收入科目
+/// 按贷方向。末级明确写“利息收入”且借贷同为正数的结转形态，另由
+/// [`explicit_interest_income_name`] 保留其贷方收入语义。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum AccountDirection {
     Debit,
@@ -3824,6 +3829,20 @@ fn registered_direction(account: &str, tb_accounts: &BTreeMap<String, String>) -
     AccountDirection::Unknown
 }
 
+/// 科目自身是否明确写的是“利息收入”。
+///
+/// `财务费用-利息收入` 在科目层级上仍属于借方费用类，但不少账套把该末级
+/// 直接按贷方登记收入，再以年末借方结转，余额表因此呈现“借贷同正”。这与
+/// 只有“利息”的用友红字冲减费用形态不同，必须保留这条末级语义证据。
+fn explicit_interest_income_name(account: &str) -> bool {
+    let name = ledger_mapping::account_name_of(account).to_lowercase();
+    let compact: String = name
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !['-', '_', '/', '\\'].contains(ch))
+        .collect();
+    compact.contains("利息收入") || compact.contains("interestincome")
+}
+
 /// 已结转形态（借贷发生同额、净额为 0）下的账面利息收入取数。
 /// 返回（金额, 口径说明）。
 ///
@@ -3838,9 +3857,16 @@ fn closed_pair_baseline(
     direction: AccountDirection,
     credit: f64,
     debit: f64,
+    explicit_interest_income: bool,
 ) -> (f64, &'static str) {
     let magnitude = credit.abs().max(debit.abs());
     let red = credit < 0.0 || debit < 0.0;
+    // “利息收入”末级借贷同为正数时，贷方是本年收入、借方是期末结转，
+    // 经济发生额应取正的贷方全额。不能仅因上级叫“财务费用”就把它判成
+    // 借方费用并取负；陇能建设样例的 660302 正是这种标准形态。
+    if explicit_interest_income && !red {
+        return (magnitude, "已结转·末级明确为利息收入，按贷方全额计入");
+    }
     match (convention, direction) {
         (ledger_mapping::SignConvention::Unsigned, AccountDirection::Debit) => {
             if red {
@@ -3883,6 +3909,7 @@ fn booked_occurrence(
     mapping: &Map<String, Value>,
     convention: ledger_mapping::SignConvention,
     direction: AccountDirection,
+    explicit_interest_income: bool,
 ) -> Option<(f64, String, f64, f64, bool)> {
     for (credit_role, debit_role) in [
         ("ytdFunctionalCredit", "ytdFunctionalDebit"),
@@ -3913,7 +3940,8 @@ fn booked_occurrence(
         if cr.abs() <= 0.005 && dr.abs() <= 0.005 {
             return None;
         }
-        let (amount, note) = closed_pair_baseline(convention, direction, cr, dr);
+        let (amount, note) =
+            closed_pair_baseline(convention, direction, cr, dr, explicit_interest_income);
         return Some((
             amount,
             format!("{note}；借贷同额，按科目登记方向与红字符号判定"),
@@ -4094,8 +4122,8 @@ fn write_summary(
         sheet
             .write_number_with_format(y, 8, row.tb_closing_balance, &amount)
             .map_err(xlsx)?;
-        // 有该户 JE 发生额且 TB 给了独立年初余额时才可勾稽；
-        // 否则两点法的期末必然等于 TB，不能冒充 JE 推导。
+        // TB 给了独立年初余额，且 JE 有发生额或以零发生额与年初＝年末相互
+        // 印证时才可勾稽；否则两点法的期末不能冒充 JE 推导。
         if row.je_reconciled {
             sheet
                 .write_formula_with_format(
@@ -4548,7 +4576,6 @@ fn write_parameters(
             },
         ),
         ("计息口径".into(), summary["dayBasisLabel"].as_str().unwrap_or("").into()),
-        ("利率口径".into(), summary["rateBasisLabel"].as_str().unwrap_or("").into()),
         ("纳入测算账户数".into(), rows.len().to_string()),
         ("待复核账户数".into(), summary["reviewCount"].to_string()),
         ("待填利率账户数".into(), summary["missingRateCount"].to_string()),
@@ -5877,6 +5904,112 @@ mod tests {
     }
 
     #[test]
+    fn je零发生额账户按零推导并确认与tb勾稽() {
+        let dir = tempfile::tempdir().unwrap();
+        let tb_path = dir.path().join("tb.xlsx");
+        let je_path = dir.path().join("je.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec!["科目编码", "科目名称", "年初余额借方", "期末余额借方"],
+                vec!["100201", "银行存款-休眠户", "42360000", "42360000"],
+                vec!["100202", "银行存款-有发生户", "100", "150"],
+            ],
+        );
+        write_fixture(
+            &je_path,
+            &[
+                vec!["记账日期", "凭证号", "科目编码", "科目名称", "借方", "贷方"],
+                vec![
+                    "2025-06-01",
+                    "记-1",
+                    "100202",
+                    "银行存款-有发生户",
+                    "50",
+                    "0",
+                ],
+            ],
+        );
+        let params = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": {
+                "accountCode": "科目编码", "accountName": "科目名称",
+                "openingFunctionalDebit": "年初余额借方",
+                "closingFunctionalDebit": "期末余额借方"
+            },
+            "jeSource": {"inputPath": je_path.to_string_lossy()},
+            "jeMapping": {
+                "date": "记账日期", "id": "凭证号", "accountCode": "科目编码",
+                "accountName": "科目名称", "functionalDebit": "借方",
+                "functionalCredit": "贷方"
+            }
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap();
+        let dormant = result["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["account"].as_str().unwrap_or("").contains("休眠户"))
+            .unwrap();
+        assert_eq!(dormant["jeReconciled"], true, "{dormant:#?}");
+        assert_eq!(dormant["derivedClosingBalance"], json!(42_360_000.0));
+        assert_eq!(dormant["reconciliationDiff"], json!(0.0));
+        assert!(
+            !dormant["note"]
+                .as_str()
+                .unwrap_or("")
+                .contains("没有任何行匹配"),
+            "JE 零发生额不能再被描述成未执行勾稽: {dormant:#?}"
+        );
+    }
+
+    /// 用户验收样例：存在即跑，不把本机 Downloads 文件变成常规测试依赖。
+    #[test]
+    #[ignore = "依赖用户提供的陇能建设真实 Excel"]
+    fn 陇能建设利息收入方向与零发生额账户() {
+        let Some(home) = std::env::var_os("USERPROFILE") else {
+            return;
+        };
+        let base = PathBuf::from(home).join("Downloads/TBJE黄金测试/1_原始件/02_测试集");
+        let tb_path = base.join("03-陇能建设_TB科目余额表.xlsx");
+        let je_path = base.join("03-陇能建设_JE序时账.xlsx");
+        if !tb_path.exists() || !je_path.exists() {
+            return;
+        }
+        let tb = inspect(&json!({"source": {"inputPath": tb_path}}), "tb").unwrap();
+        let je = inspect(&json!({"source": {"inputPath": je_path}}), "je").unwrap();
+        let params = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+            "tbSource": {"inputPath": tb_path}, "tbMapping": tb["suggestedMapping"],
+            "jeSource": {"inputPath": je_path}, "jeMapping": je["suggestedMapping"],
+            "accountRoles": tb["suggestedAccountRoles"],
+            "accountRoleOverrides": {"660302 财务费用-利息收入": "interest_income"}
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result = run_job("deposit.preview", params, &|_, _, _, _| {}, cancel, &pause).unwrap();
+        assert!(
+            (result["summary"]["bookedInterestIncome"].as_f64().unwrap() - 15_286_550.0).abs()
+                < 0.01,
+            "陇能建设利息收入不应翻成负数: {}",
+            result["summary"]
+        );
+        for code in ["100202", "100206"] {
+            let row = result["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["account"].as_str().unwrap_or("").contains(code))
+                .unwrap_or_else(|| panic!("找不到陇能建设账户 {code}: {result:#?}"));
+            assert_eq!(row["jeReconciled"], true, "{row:#?}");
+            assert!(row["reconciliationDiff"].as_f64().unwrap().abs() < 0.01);
+        }
+    }
+
+    #[test]
     fn reports_why_a_tier_was_chosen() {
         assert!(suggest_tier("其他货币资金-定期存款").1.contains("定期"));
         assert_eq!(
@@ -6580,7 +6713,8 @@ mod tests {
                 ledger_mapping::SignConvention::Unsigned,
                 AccountDirection::Debit,
                 -923_800.50,
-                -923_800.50
+                -923_800.50,
+                false,
             )
             .0,
             923_800.50
@@ -6591,7 +6725,8 @@ mod tests {
                 ledger_mapping::SignConvention::Unsigned,
                 AccountDirection::Debit,
                 4_429.49,
-                4_429.49
+                4_429.49,
+                false,
             )
             .0,
             -4_429.49
@@ -6602,7 +6737,8 @@ mod tests {
                 ledger_mapping::SignConvention::Signed,
                 AccountDirection::Credit,
                 -900.0,
-                900.0
+                900.0,
+                false,
             )
             .0,
             900.0
@@ -6612,7 +6748,8 @@ mod tests {
                 ledger_mapping::SignConvention::Signed,
                 AccountDirection::Debit,
                 -900.0,
-                900.0
+                900.0,
+                false,
             )
             .0,
             -900.0
@@ -6623,6 +6760,7 @@ mod tests {
             AccountDirection::Unknown,
             -500.0,
             -500.0,
+            false,
         );
         assert_eq!(amount, 500.0);
         assert!(note.contains("复核"));
@@ -6641,9 +6779,22 @@ mod tests {
             AccountDirection::Debit,
             -72_868.20,
             -72_868.20,
+            true,
         );
         assert_eq!(amount, 72_868.20);
         assert!(note.contains("红字冲减费用"));
+
+        // 陇能建设形态：660302「财务费用-利息收入」本年借贷同为正数，
+        // 贷方是收入发生、借方是期末结转；上级费用属性不能把收入翻成负数。
+        let (amount, note) = closed_pair_baseline(
+            ledger_mapping::SignConvention::Unsigned,
+            AccountDirection::Debit,
+            15_286_550.0,
+            15_286_550.0,
+            true,
+        );
+        assert_eq!(amount, 15_286_550.0);
+        assert!(note.contains("利息收入"));
     }
 
     /// 整表只有一列科目、编码＋名称挤在一格（03 号样例形态）时，
@@ -6837,9 +6988,14 @@ mod tests {
             leaf.iter().any(|name| name == "1101.01 银行理财产品"),
             "{leaf:?}"
         );
-        assert!(leaf.iter().any(|name| name == "6603.02 利息收入"), "{leaf:?}");
         assert!(
-            !leaf.iter().any(|name| name.starts_with("1101 ") || name.starts_with("6603 ")),
+            leaf.iter().any(|name| name == "6603.02 利息收入"),
+            "{leaf:?}"
+        );
+        assert!(
+            !leaf
+                .iter()
+                .any(|name| name.starts_with("1101 ") || name.starts_with("6603 ")),
             "父级汇总行不得混进末级清单：{leaf:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -7876,7 +8032,9 @@ mod tests {
         assert!(term["rateResolved"].as_bool().unwrap());
         assert_eq!(term["rateSource"], "挂牌暂估值（待确认）");
         assert_eq!(term["status"], "待确认利率");
-        assert_eq!(term["jeReconciled"], false);
+        // 该定期户在 JE 中没有发生额，且 TB 年初＝年末；按零发生额推导后
+        // 期末与 TB 一致，仍属于有效勾稽。
+        assert_eq!(term["jeReconciled"], true);
         assert!((term["annualRate"].as_f64().unwrap() - 0.0095).abs() < 1e-12);
 
         assert_eq!(summary["missingRateCount"], 0);
@@ -7958,12 +8116,9 @@ mod tests {
         );
 
         let summary_sheet = calamine::Reader::worksheet_range(&mut book, SUMMARY_SHEET).unwrap();
-        assert_eq!(summary_sheet.get((2, 9)).unwrap().to_string(), "N/A");
-        assert_eq!(summary_sheet.get((2, 10)).unwrap().to_string(), "N/A");
-        assert_eq!(
-            summary_sheet.get((2, 11)).unwrap().to_string(),
-            "未执行 JE 勾稽"
-        );
+        assert_eq!(summary_sheet.get((2, 9)).unwrap().to_string(), "500000");
+        assert_eq!(summary_sheet.get((2, 10)).unwrap().to_string(), "0");
+        assert_eq!(summary_sheet.get((2, 11)).unwrap().to_string(), "勾稽一致");
         let summary_text: String = summary_sheet
             .rows()
             .flat_map(|row| row.iter().map(|cell| cell.to_string()))

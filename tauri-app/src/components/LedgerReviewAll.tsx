@@ -261,6 +261,8 @@ export function LedgerReviewAll(props: {
   reviewing: Record<"je" | "tb", boolean>;
   status: Record<"je" | "tb", string>;
   results?: Partial<Record<"je" | "tb", LedgerReviewOutcome>>;
+  /** 是否显示标题下的静态操作说明；紧凑页面可关闭，状态行仍保留。 */
+  showDescription?: boolean;
   /** 页面级忙碌（测算等任务进行中）时一并禁用。 */
   disabled?: boolean;
   /**
@@ -299,13 +301,15 @@ export function LedgerReviewAll(props: {
     <section className="fx-review-all" aria-label="字段映射一键复核">
       <div>
         <h2>字段映射一键复核</h2>
-        <p>
-          点击一次，
-          {both
-            ? `同时复核 ${subject} 两个文件的字段映射`
-            : `复核 ${subject} 的字段映射`}
-          。
-        </p>
+        {props.showDescription !== false && (
+          <p>
+            点击一次，
+            {both
+              ? `同时复核 ${subject} 两个文件的字段映射`
+              : `复核 ${subject} 的字段映射`}
+            。
+          </p>
+        )}
         <div className="fx-review-states" aria-live="polite">
           {props.present.map((kind) =>
             (() => {

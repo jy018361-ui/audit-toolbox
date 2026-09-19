@@ -344,6 +344,10 @@
   min-width: 220px;
   background: var(--card);
 }
+.loan-rate-table td:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .loan-rate-table th:first-child,
 .loan-rate-table th:nth-child(2) {
   z-index: 3;

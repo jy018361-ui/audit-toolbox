@@ -1101,14 +1101,10 @@
 .fx-accounts select.fx-currency-unknown {
   border-color: var(--warning-border);
 }
-.fx-accounts-more {
-  margin: 0 0 10px;
-}
-.fx-accounts-more summary {
-  cursor: pointer;
-}
-.fx-accounts-more p {
-  margin: 6px 0 0;
+/* 非货币性项目／其他损益成本科目不参与外币重估，账户币种固定 N/A。 */
+.fx-currency-na {
+  color: var(--muted-fg, #6b7280);
+  padding: 6px 4px;
 }
 
 .fx-accounts select.fx-currency-risky {

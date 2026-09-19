@@ -2,12 +2,16 @@ import { describe, expect, it } from "vitest";
 import {
   fxAccountCurrencyDetail,
   fxAccountDisplayList,
+  fxCatalogMappingKey,
   fxCurrencyOptions,
   fxResolveEntityCurrencies,
   fxCurrencySourceLabel,
   fxCurrencyDefaultLabel,
   fxFallbackFunctional,
   fxAccountCurrencyOverrides,
+  fxAccountCurrencyOverridesForRoles,
+  fxAccountReviewRows,
+  fxDetailCurrencyOverridesPayload,
   fxAllowedModes,
   fxApplyJobResult,
   fxAttachRole,
@@ -43,12 +47,20 @@ describe("汇兑检查提示", () => {
 });
 import {
   applyLedgerReviewsTogether,
+  DEFAULT_ENTITY,
   resolveLedgerPairKinds,
   reviewLedgerSourceClassification,
   selectLedgerSourcePair,
+  type AuxiliaryLinkResult,
 } from "./ledgerMapping";
 import type React from "react";
 describe("fx audit mode selection", () => {
+  it("科目目录只在身份映射变化时失效", () => {
+    const before = fxCatalogMappingKey({ accountCode: "科目编码", accountName: "科目名称", closingFunctionalAmount: "期末" });
+    expect(fxCatalogMappingKey({ accountCode: "科目编码", accountName: "科目名称", closingFunctionalAmount: "余额" })).toBe(before);
+    expect(fxCatalogMappingKey({ accountCode: "正确编码", accountName: "科目名称", closingFunctionalAmount: "期末" })).not.toBe(before);
+  });
+
   it("公司本位币选项包含自动识别值与常备币种并去重", () => {
     const options = fxCurrencyOptions(" usd ", "AED", "USD", "TWD");
     expect(options[0]).toBe("USD");
@@ -101,6 +113,127 @@ describe("fx audit mode selection", () => {
         { "2002": true },
       ),
     ).toEqual({ "2002": "EUR" });
+  });
+
+  it("无主体列时手选的全表本位币不会被清空", () => {
+    const resolved = fxResolveEntityCurrencies(
+      [],
+      {},
+      "USD",
+      { [DEFAULT_ENTITY]: "CNY" },
+      { [DEFAULT_ENTITY]: true },
+    );
+    expect(resolved).toEqual({ [DEFAULT_ENTITY]: "CNY" });
+  });
+
+  it("无主体列时未手选则按识别值预填全表本位币", () => {
+    expect(fxResolveEntityCurrencies([], {}, "USD")).toEqual({
+      [DEFAULT_ENTITY]: "USD",
+    });
+  });
+
+  it("非货币性/其他损益科目的手选币种不进 payload", () => {
+    expect(
+      fxAccountCurrencyOverridesForRoles(
+        {
+          "1002 银行存款": "USD",
+          "1601 固定资产": "USD",
+          "6602 管理费用": " eur ",
+          "1122 应收账款": "",
+        },
+        {
+          "1002 银行存款": "monetary_asset",
+          "1601 固定资产": "non_monetary",
+          "6602 管理费用": "other_pnl",
+        },
+      ),
+    ).toEqual({ "1002 银行存款": "USD" });
+  });
+
+  it("验证通过的辅助组按明细拆行，键为主体␟编码␟辅助", () => {
+    const link = {
+      tbAuxMapped: true,
+      status: "verified",
+      column: "辅助核算",
+      anchorHits: 2,
+      anchorTotal: 2,
+      coverage: 1,
+      competingColumns: [],
+      warnings: [],
+      groups: [
+        {
+          entity: "全表",
+          account: "1122",
+          reviewVerified: true,
+          details: [
+            { key: "甲", display: "客商甲" },
+            { key: "乙", display: "客商乙" },
+          ],
+        },
+        {
+          entity: "全表",
+          account: "1403",
+          reviewVerified: false,
+          details: [{ key: "x", display: "y" }],
+        },
+      ],
+    } as unknown as AuxiliaryLinkResult;
+    expect(fxAccountReviewRows(["1122 应收账款", "1403 原材料"], link)).toEqual([
+      { key: "全表\u001f1122\u001f甲", account: "1122 应收账款", auxiliary: "客商甲" },
+      { key: "全表\u001f1122\u001f乙", account: "1122 应收账款", auxiliary: "客商乙" },
+      { key: "1403 原材料", account: "1403 原材料" },
+    ]);
+  });
+
+  it("无辅助链接或无组时停在末级科目", () => {
+    expect(fxAccountReviewRows(["1122 应收账款"], null)).toEqual([
+      { key: "1122 应收账款", account: "1122 应收账款" },
+    ]);
+  });
+
+  it("编码归一化后与辅助组匹配：前导零不影响", () => {
+    const link = {
+      tbAuxMapped: true,
+      status: "verified",
+      column: "辅助核算",
+      anchorHits: 1,
+      anchorTotal: 1,
+      coverage: 1,
+      competingColumns: [],
+      warnings: [],
+      groups: [
+        {
+          entity: "E",
+          account: "1122",
+          reviewVerified: true,
+          details: [{ key: "a", display: "A" }],
+        },
+      ],
+    } as unknown as AuxiliaryLinkResult;
+    const rows = fxAccountReviewRows(["00001122 应收账款"], link);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].auxiliary).toBe("A");
+    expect(rows[0].key).toBe("E\u001f1122\u001fa");
+  });
+
+  it("逐户币种 payload：留空与非货币性/其他损益行不传", () => {
+    const rows = [
+      { key: "E\u001f1122\u001f甲", account: "1122 应收账款", auxiliary: "甲" },
+      { key: "E\u001f1122\u001f乙", account: "1122 应收账款", auxiliary: "乙" },
+      { key: "E\u001f1601\u001f丙", account: "1601 固定资产", auxiliary: "丙" },
+    ];
+    expect(
+      fxDetailCurrencyOverridesPayload(
+        {
+          "E\u001f1122\u001f甲": " usd ",
+          "E\u001f1122\u001f乙": "",
+          "E\u001f1601\u001f丙": "EUR",
+        },
+        rows,
+        { "1122 应收账款": "monetary_asset", "1601 固定资产": "non_monetary" },
+        {},
+      ),
+    ).toEqual({ "E\u001f1122\u001f甲": "USD" });
   });
 
   it("按模式明确 JE 与 TB 的必需关系", () => {

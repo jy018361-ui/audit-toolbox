@@ -131,8 +131,8 @@ describe("FA TB+JE account role presets", () => {
   });
 
   it("TBJEPBC 样例：名称带资产字样的非固定资产科目与编码残留的类别", () => {
-    // 02 号样例：银行存款户名带「房屋积金」，名称词会把它当原值——
-    // 数字编码不是 1601/1602 的一律不进本表。
+    // 02 号样例：银行存款户名带「房屋积金」——宽词（房屋／设备）不参与
+    // 非标准编码的进表判断，只有明确写出「固定资产」才算。
     expect(
       suggestFaAccount("1002016871 银行存款-汉口银行硚口支行(房屋积金)6").role,
     ).toBe("excluded");
@@ -183,6 +183,40 @@ describe("FA TB+JE account role presets", () => {
         (item) => item.role,
       ),
     ).toEqual(["cost", "depreciation"]);
+  });
+
+  it("非标准编码账套：自身或上级科目名明确写固定资产/累计折旧才进表", () => {
+    // 旧制度 1501/1502 形态：上级「1 资产」无语义，靠自身名称进表，
+    // 子级沿编码前缀继承；银行存款户名带宽词依旧被挡。
+    const chart = [
+      "1 资产",
+      "1501 固定资产",
+      "150101 房屋及建筑物",
+      "150102 机械设备",
+      "1502 累计折旧",
+      "150201 房屋及建筑物",
+      "1002 银行存款",
+      "1002016871 银行存款-汉口银行(房屋积金)",
+    ];
+    expect(
+      Object.fromEntries(suggestFaAccounts(chart).map((item) => [item.account, item.role])),
+    ).toEqual({
+      "1 资产": "excluded",
+      "1501 固定资产": "cost",
+      "150101 房屋及建筑物": "cost",
+      "150102 机械设备": "cost",
+      "1502 累计折旧": "depreciation",
+      "150201 房屋及建筑物": "depreciation",
+      "1002 银行存款": "excluded",
+      "1002016871 银行存款-汉口银行(房屋积金)": "excluded",
+    });
+    // 单科目、无上级行可查时：名称明确的进表，宽词的不进。
+    expect(suggestFaAccount("1501 固定资产").role).toBe("cost");
+    expect(suggestFaAccount("1502 累计折旧").role).toBe("depreciation");
+    expect(suggestFaAccount("150101 房屋及建筑物").role).toBe("excluded");
+    // 名称含「固定资产」但属费用/清理口径的依旧排除。
+    expect(suggestFaAccount("6601090401 折旧费-固定资产").role).toBe("excluded");
+    expect(suggestFaAccount("16060001 固定资产清理-设备").role).toBe("excluded");
   });
 
   it("固定资产科目排在前面，其余科目垫底", () => {

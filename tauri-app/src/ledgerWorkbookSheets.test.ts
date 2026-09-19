@@ -120,22 +120,31 @@ describe("工作簿 Sheet 分类", () => {
   });
 
   it("公共扫描入口统一过滤低置信度并保留 LLM 失败时的规则结果", async () => {
-    const call = vi.fn(async (method: string, params: Record<string, unknown>) => {
-      if (method === "tool.classify_llm") throw new Error("offline");
-      const sheet = (params.source as { sheet: string }).sheet;
-      if (!sheet)
-        return {
-          ...classification("TB", ["TB", "说明"], { je: 4, tb: 5 }),
-          needsLlm: true,
-        };
-      return classification("说明", ["TB", "说明"], { je: 1, tb: 1 });
-    });
+    const call = vi.fn(
+      async (
+        method: string,
+        params: Record<string, unknown>,
+        _busyDetail?: string,
+      ) => {
+        if (method === "tool.classify_llm") throw new Error("offline");
+        const sheet = (params.source as { sheet: string }).sheet;
+        if (!sheet)
+          return {
+            ...classification("TB", ["TB", "说明"], { je: 4, tb: 5 }),
+            needsLlm: true,
+          };
+        return classification("说明", ["TB", "说明"], { je: 1, tb: 1 });
+      },
+    );
     const result = await scanLedgerUploadSources(call, ["C:/x/账套.xlsx"], {
       llmMethod: "tool.classify_llm",
     });
     expect(result.sources.map((item) => item.classification.sheet)).toEqual(["TB"]);
     expect(result.hiddenSheets).toBe(1);
     expect(result.llmFallbacks).toBe(1);
+    // 等待弹窗明细只留文件名＋Sheet：LLM 复核慢，用户要能看出在复核哪张表。
+    const llmCall = call.mock.calls.find(([m]) => m === "tool.classify_llm");
+    expect(llmCall?.[2]).toBe("账套.xlsx / TB");
   });
 
   it("高置信度分类明确不需要 LLM 时跳过类型复核", async () => {

@@ -148,6 +148,24 @@ describe("同步操作等待弹窗", () => {
     ).toBeTruthy();
   });
 
+  it("LLM 来源复核、币种校验等并发调用也各报各的名字，不再一排「正在处理」", () => {
+    render(<SyncBusyDialog />);
+    act(() => {
+      void engineCall("ledger.review_pair_mapping", {}, "04TB.XLSX ＋ 04序时账.xlsx");
+      void engineCall("fx.classify_source_llm", {}, "04TB.XLSX / Sheet1");
+      void engineCall("fx.validate_currency_mapping", {});
+    });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.getByText("正在处理 3 项操作")).toBeTruthy();
+    expect(
+      screen.getByText("正在复核外汇来源分类：04TB.XLSX / Sheet1"),
+    ).toBeTruthy();
+    expect(screen.getByText("正在校验币种映射")).toBeTruthy();
+    expect(screen.queryByText(/^正在处理$/)).toBeNull();
+  });
+
   it("ESC 和点遮罩关不掉：这类操作没法安全中止，弹窗只能等它完成", () => {
     render(<SyncBusyDialog />);
     act(() => {

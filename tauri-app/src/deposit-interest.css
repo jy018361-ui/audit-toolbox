@@ -56,21 +56,64 @@
   margin: 0 2px;
   color: var(--foreground);
 }
-.deposit-account-list label,
-.deposit-account-head {
-  grid-template-columns: minmax(180px, 1fr) 220px minmax(220px, 300px);
+.deposit-account-list {
+  max-height: 520px;
+  margin-top: var(--sp-3);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
 }
-.deposit-account-head {
+
+.deposit-account-more {
+  display: flex;
+  justify-content: center;
+  padding-top: 12px;
+}
+.deposit-account-list table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.deposit-account-list th,
+.deposit-account-list td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+.deposit-account-list th {
   position: sticky;
   top: 0;
   z-index: 1;
-  display: grid;
-  gap: 12px;
-  padding: 4px 0 6px;
-  border-bottom: 1px solid var(--border);
-  background: var(--card);
+  background: var(--muted);
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: var(--fs-xs);
+}
+.deposit-account-list tr:last-child td {
+  border-bottom: 0;
+}
+.deposit-account-list th:first-child,
+.deposit-account-list td:first-child {
+  width: 42%;
+}
+.deposit-account-list th:nth-child(2),
+.deposit-account-list td:nth-child(2) {
+  width: 220px;
+}
+.deposit-account-list th:nth-child(3),
+.deposit-account-list td:nth-child(3) {
+  min-width: 260px;
+}
+.deposit-account-list select {
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 28px 6px 9px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--background);
+  color: var(--foreground);
 }
 .deposit-account-tier {
   display: flex;
@@ -84,12 +127,6 @@
 .deposit-account-na {
   color: var(--muted-foreground);
   text-align: center;
-}
-@media (max-width: 900px) {
-  .deposit-account-list label,
-  .deposit-account-head {
-    grid-template-columns: minmax(140px, 1fr) 190px minmax(180px, 240px);
-  }
 }
 /* 步骤卡头与借款利息第二步同款：主色 kicker 点题，汇总徽章靠右。 */
 .deposit-confirm-heading {
@@ -211,6 +248,9 @@
   white-space: normal;
   font-variant-numeric: tabular-nums;
 }
+.deposit-table td {
+  background: var(--card);
+}
 .deposit-table th {
   position: sticky;
   top: 0;
@@ -255,7 +295,11 @@
   overflow-wrap: anywhere;
 }
 .deposit-table > table > thead th:nth-child(n + 4):nth-child(-n + 8),
-.deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(n + 4):nth-child(-n + 8),
+.deposit-table
+  > table
+  > tbody
+  > tr:not(.deposit-month-row)
+  > td:nth-child(n + 4):nth-child(-n + 8),
 .deposit-table > table > thead th:nth-child(10),
 .deposit-table > table > tbody > tr:not(.deposit-month-row) > td:nth-child(10) {
   min-width: 130px;
@@ -287,16 +331,31 @@
 .deposit-review-row {
   background: color-mix(in srgb, var(--warning-border) 12%, transparent);
 }
-.deposit-review-row > td:first-child {
-  background: color-mix(in srgb, var(--warning-border) 12%, var(--card));
-}
-.deposit-table > table > tbody > .deposit-review-row > td:nth-child(2) {
+.deposit-table > table > tbody > .deposit-review-row > td {
   background: color-mix(in srgb, var(--warning-border) 12%, var(--card));
 }
 .deposit-table > table > tbody > tr > .deposit-difference {
   background: var(--warning-bg);
   color: var(--warning-fg);
   font-weight: 700;
+}
+.deposit-export-done {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 11px 14px;
+  border: 1px solid var(--success-border);
+  border-radius: 10px;
+  background: var(--success-bg);
+  color: var(--success-fg);
+}
+.deposit-export-done p {
+  flex: 1 1 560px;
+  margin: 0;
+  line-height: 1.55;
 }
 .deposit-account-cell strong,
 .deposit-account-cell small {

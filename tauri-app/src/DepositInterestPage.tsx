@@ -66,9 +66,17 @@ import {
 } from "@/components/CurrencyFallbackDialog";
 
 /** 可多列的角色与统一内核一致；`account` 是历史保存映射的旧槽位。 */
-const DEPOSIT_MULTI = new Set(["id", "accountName", "auxiliary", "account", "date"]);
+const DEPOSIT_MULTI = new Set([
+  "id",
+  "accountName",
+  "auxiliary",
+  "account",
+  "date",
+]);
+const ACCOUNT_REVIEW_PAGE_SIZE = 250;
 import "./fx-audit.css";
 import "./deposit-interest.css";
+import { AccountConfirmationActions } from "./AccountConfirmationActions";
 
 type Kind = "je" | "tb";
 export type Inspection = {
@@ -278,6 +286,18 @@ export function mergeAccountList(
   return merged;
 }
 
+/** 科目目录只依赖这些身份字段。金额、日期等映射变化不应触发整本 Excel 重读。 */
+export function depositCatalogMappingKey(
+  mapping: Record<string, string | string[]>,
+): string {
+  return JSON.stringify(
+    ["entity", "account", "accountCode", "accountName"].map((role) => [
+      role,
+      mapping[role] ?? "",
+    ]),
+  );
+}
+
 type DepositAccountReviewRow = {
   key: string;
   account: string;
@@ -296,7 +316,9 @@ export function depositAccountReviewRows(
 ): DepositAccountReviewRow[] {
   return accounts.flatMap((account) => {
     const code = depositAccountCode(account);
-    const groups = (link?.groups ?? []).filter((group) => group.account === code);
+    const groups = (link?.groups ?? []).filter(
+      (group) => group.account === code,
+    );
     const expanded = groups.flatMap((group) =>
       group.reviewVerified
         ? (group.details ?? []).map((detail) => ({
@@ -308,7 +330,8 @@ export function depositAccountReviewRows(
           }))
         : [],
     );
-    const hasFallback = groups.length === 0 || groups.some((group) => !group.reviewVerified);
+    const hasFallback =
+      groups.length === 0 || groups.some((group) => !group.reviewVerified);
     return [...expanded, ...(hasFallback ? [{ key: account, account }] : [])];
   });
 }
@@ -514,7 +537,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   );
   // 辅助核算语义映射保留；公共验证逐主体＋科目决定是否启用辅助键。
   const [auxLink, setAuxLink] = useState<AuxiliaryLinkResult | null>(null);
-  const [currencyLink, setCurrencyLink] = useState<CurrencyLinkResult | null>(null);
+  const [currencyLink, setCurrencyLink] = useState<CurrencyLinkResult | null>(
+    null,
+  );
   const [currencyFallbackMode, setCurrencyFallbackMode] = useState<
     CurrencyFallbackMode | ""
   >("");
@@ -531,9 +556,16 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const [accountTierOverrides, setAccountTierOverrides] = useState<
     Record<string, string>
   >({});
-  const [accountDetailRoleOverrides, setAccountDetailRoleOverrides] = useState<Record<string, string>>({});
-  const [accountDetailTierOverrides, setAccountDetailTierOverrides] = useState<Record<string, string>>({});
+  const [accountDetailRoleOverrides, setAccountDetailRoleOverrides] = useState<
+    Record<string, string>
+  >({});
+  const [accountDetailTierOverrides, setAccountDetailTierOverrides] = useState<
+    Record<string, string>
+  >({});
   const [accountFilter, setAccountFilter] = useState("");
+  const [accountReviewLimit, setAccountReviewLimit] = useState(
+    ACCOUNT_REVIEW_PAGE_SIZE,
+  );
   const [reportEnd, setReportEnd] = useState(defaultBalanceSheetDate());
   const [tiers, setTiers] = useState<RateTiers>();
   const [tierRates, setTierRates] = useState<Record<string, number>>({});
@@ -574,7 +606,10 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     // 科目确认只列末级科目：末级清单由公共引擎的目录末级掩码下发
     // （分段编码等层级形态只有引擎认得）；旧任务没有该字段时回退全量清单。
     () =>
-      mergeAccountList(tb?.accountsLeaf ?? tb?.accounts ?? [], je?.accounts ?? []),
+      mergeAccountList(
+        tb?.accountsLeaf ?? tb?.accounts ?? [],
+        je?.accounts ?? [],
+      ),
     [je, tb],
   );
   const depositAccounts = accounts.filter((a) =>
@@ -602,26 +637,54 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     const role = reviewRole(row);
     return role !== "" && role !== "excluded";
   };
-  const visibleAccounts = reviewAccounts
-    .filter((row) => accountMatches(`${row.account} ${row.entity ?? ""} ${row.auxiliary ?? ""}`))
-    .sort((a, b) => Number(activeAccount(b)) - Number(activeAccount(a)));
+  const visibleAccounts = useMemo(
+    () =>
+      reviewAccounts
+        .filter((row) =>
+          accountMatches(
+            `${row.account} ${row.entity ?? ""} ${row.auxiliary ?? ""}`,
+          ),
+        )
+        .sort((a, b) => Number(activeAccount(b)) - Number(activeAccount(a))),
+    // activeAccount reads the two override maps that determine the priority group.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [reviewAccounts, accountMatches, accountDetailRoleOverrides, accountRoles],
+  );
+  const renderedAccounts = visibleAccounts.slice(0, accountReviewLimit);
+
+  useEffect(() => {
+    setAccountReviewLimit(ACCOUNT_REVIEW_PAGE_SIZE);
+  }, [accountFilter, accounts]);
 
   useEffect(() => {
     void engineCall("deposit.rate_tiers", {})
       .then((x) => setTiers(x as RateTiers))
       .catch(() => undefined);
   }, []);
-  // 两侧映射齐了就认定一次辅助列联动；用户改列随映射变化重验。
+  // 两侧映射齐了就认定一次辅助列联动。触发键只认「数据源＋两侧辅助核算
+  // 明细映射」：其余角色（金额/币种/日期等）的调整沿用既有联动结论，
+  // 不再整表重读——与汇兑损益、FA TBJE 同一口径。
+  const auxLinkKey = tb && je
+    ? JSON.stringify({
+        tb: [tbPath, tb.sheet, tb.headerRow, tb.headerDepth, tbMapping.auxiliary ?? null],
+        je: [jePath, je.sheet, je.headerRow, je.headerDepth, jeMapping.auxiliary ?? null],
+      })
+    : null;
   useEffect(() => {
-    if (!tb || !je) {
+    if (!tb || !je || auxLinkKey === null) {
       setAuxLink(null);
       return;
     }
     setAuxLink(null);
     let cancelled = false;
-    void verifyAuxiliaryLink({ ...payload(), selectedAccounts: Object.entries(accountRoles)
-      .filter(([, role]) => ["deposit", "other_monetary", "cash_on_hand"].includes(role))
-      .map(([account]) => ({ account })) }).then((result) => {
+    void verifyAuxiliaryLink({
+      ...payload(),
+      selectedAccounts: Object.entries(accountRoles)
+        .filter(([, role]) =>
+          ["deposit", "other_monetary", "cash_on_hand"].includes(role),
+        )
+        .map(([account]) => ({ account })),
+    }).then((result) => {
       if (cancelled) return;
       setAuxLink(result);
     });
@@ -629,7 +692,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tb, je, tbPath, jePath, tbMapping, jeMapping, accountRoles, entityScope.selection]);
+  }, [auxLinkKey]);
   useEffect(() => {
     resetCurrencyFallback();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -661,6 +724,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     accountRoleOverrides?: Record<string, string>;
   } | null>(null);
   const restoreGeneration = useRef(0);
+  const catalogRefreshGeneration = useRef({ tb: 0, je: 0 });
   useTaskRestore(tool.id, (restore) => {
     const generation = ++restoreGeneration.current;
     type DepositSourceParams = {
@@ -689,15 +753,27 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     const restoredTbPath =
       typeof p.tbSource?.inputPath === "string" ? p.tbSource.inputPath : "";
     if (!restoredJePath && !restoredTbPath) return;
-    const isMapping = (value: unknown): value is Record<string, string | string[]> =>
+    const isMapping = (
+      value: unknown,
+    ): value is Record<string, string | string[]> =>
       Boolean(value && typeof value === "object");
     restoredDepositRef.current = {
       sides: {
         ...(restoredJePath
-          ? { je: { path: restoredJePath, mapping: isMapping(p.jeMapping) ? p.jeMapping : {} } }
+          ? {
+              je: {
+                path: restoredJePath,
+                mapping: isMapping(p.jeMapping) ? p.jeMapping : {},
+              },
+            }
           : {}),
         ...(restoredTbPath
-          ? { tb: { path: restoredTbPath, mapping: isMapping(p.tbMapping) ? p.tbMapping : {} } }
+          ? {
+              tb: {
+                path: restoredTbPath,
+                mapping: isMapping(p.tbMapping) ? p.tbMapping : {},
+              },
+            }
           : {}),
       },
       ...(isMapping(p.accountRoles)
@@ -727,12 +803,14 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         : {},
     );
     setAccountDetailRoleOverrides(
-      p.accountDetailRoleOverrides && typeof p.accountDetailRoleOverrides === "object"
+      p.accountDetailRoleOverrides &&
+        typeof p.accountDetailRoleOverrides === "object"
         ? p.accountDetailRoleOverrides
         : {},
     );
     setAccountDetailTierOverrides(
-      p.accountDetailTierOverrides && typeof p.accountDetailTierOverrides === "object"
+      p.accountDetailTierOverrides &&
+        typeof p.accountDetailTierOverrides === "object"
         ? p.accountDetailTierOverrides
         : {},
     );
@@ -772,6 +850,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               headerRow: source.headerRow ?? 0,
               headerDepth: source.headerDepth ?? 0,
             },
+            // 历史任务保存的是用户最终确认的映射；目录也必须按这份映射
+            // 重建，不能继续沿用初次自动识别时可能为空的科目列。
+            mapping: kind === "tb" ? (p.tbMapping ?? {}) : (p.jeMapping ?? {}),
           })) as Inspection;
           if (generation !== restoreGeneration.current) return;
           applyInspection(kind, path, response);
@@ -790,7 +871,11 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
           : "",
       );
       setError(failures.join("；"));
-      setSourceStatus(failures.length ? "历史任务部分源文件未能重新识别。" : "历史任务源文件已重新识别，请复核映射后继续。");
+      setSourceStatus(
+        failures.length
+          ? "历史任务部分源文件未能重新识别。"
+          : "历史任务源文件已重新识别，请复核映射后继续。",
+      );
       setBusy(false);
     })();
   });
@@ -911,6 +996,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     }
   }
   function applyInspection(kind: Kind, path: string, response: Inspection) {
+    catalogRefreshGeneration.current[kind] += 1;
     resetCurrencyFallback();
     // 历史恢复后重新识别同一文件：用存档映射与科目分类顶回建议值，
     // 逐侧一次性消费；换文件照旧用建议值。
@@ -923,9 +1009,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       delete stash.sides[kind];
       if (!stash.sides.je && !stash.sides.tb) restoredDepositRef.current = null;
     }
-    setAccountRoleOverrides(
-      match ? (stash?.accountRoleOverrides ?? {}) : {},
-    );
+    setAccountRoleOverrides(match ? (stash?.accountRoleOverrides ?? {}) : {});
     if (response.suggestedBalanceSheetDate)
       setReportEnd(response.suggestedBalanceSheetDate);
     else if (response.dataYears?.length === 1)
@@ -942,6 +1026,57 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     reviews.clearReview(kind);
     setRows([]);
     setResult(undefined);
+  }
+
+  /**
+   * 字段复核／人工修订可能补上最初未识别出的科目编码、名称或主体列。
+   * inspect 的 accounts/accountsLeaf 是映射派生数据，因此只改 mapping state
+   * 会留下旧目录。这里按确认后的映射重读元数据，但不重置用户映射、复核状态
+   * 和其他页面状态；对象身份守卫同时避免换文件后的慢请求覆盖新来源。
+   */
+  async function refreshAccountCatalog(
+    kind: Kind,
+    mapping: Record<string, string | string[]>,
+  ) {
+    const current = kind === "tb" ? tb : je;
+    const path = kind === "tb" ? tbPath : jePath;
+    if (!current || !path) return;
+    const generation = ++catalogRefreshGeneration.current[kind];
+    try {
+      const response = (await engineCall(`deposit.inspect_${kind}`, {
+        source: {
+          inputPath: path,
+          sheet: current.sheet,
+          headerRow: current.headerRow,
+          headerDepth: current.headerDepth,
+        },
+        mapping,
+      })) as Inspection;
+      if (catalogRefreshGeneration.current[kind] !== generation) return;
+      if (kind === "tb") {
+        setTb((latest) => (latest === current ? response : latest));
+      } else {
+        setJe((latest) => (latest === current ? response : latest));
+      }
+    } catch (e) {
+      if (catalogRefreshGeneration.current[kind] !== generation) return;
+      setError(`字段映射已更新，但科目清单刷新失败：${errorText(e)}`);
+    }
+  }
+
+  function updateMapping(
+    kind: Kind,
+    mapping: Record<string, string | string[]>,
+  ) {
+    resetCurrencyFallback();
+    const current = kind === "tb" ? tbMapping : jeMapping;
+    if (kind === "tb") setTbMapping(mapping);
+    else setJeMapping(mapping);
+    if (
+      depositCatalogMappingKey(current) !== depositCatalogMappingKey(mapping)
+    ) {
+      void refreshAccountCatalog(kind, mapping);
+    }
   }
   async function inspect(
     kind: Kind,
@@ -1200,8 +1335,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const reviewTier = (row: DepositAccountReviewRow) =>
     accountDetailTierOverrides[row.key] ?? accountTier(row.account);
   const accountCategory = (account: string, tier = accountTier(account)) =>
-    tiers?.tiers.find((item) => item.key === tier)?.category ??
-    "demand";
+    tiers?.tiers.find((item) => item.key === tier)?.category ?? "demand";
 
   return (
     <main className="tool-page fx-page deposit-page">
@@ -1262,7 +1396,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                 <EmptyState
                   compact
                   title="准备存款利息资料"
-                  description="先加入科目余额表（TB）；如需更准确地还原月度余额，可同时加入序时账（JE）。"
+                  description="TB 为必传资料；JE 选传，用于更准确地还原月度余额。"
                 />
               )}
               {sourceStatus && (
@@ -1373,13 +1507,15 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               status={reviews.status}
               results={reviews.results}
               disabled={busy}
+              // 自动复核只针对一组完整的 TB＋JE。删除任一侧后 key 立即清空，
+              // 不会因为 present 从双侧变成单侧而误启动一次新的 LLM 复核。
               autoReviewKey={
-                busy
-                  ? ""
-                  : JSON.stringify([
-                      tb && [tbPath, tb.sheet, tb.headerRow, tb.headerDepth],
-                      je && [jePath, je.sheet, je.headerRow, je.headerDepth],
+                !busy && tb && je
+                  ? JSON.stringify([
+                      [tbPath, tb.sheet, tb.headerRow, tb.headerDepth],
+                      [jePath, je.sheet, je.headerRow, je.headerDepth],
                     ])
+                  : ""
               }
               autoReviewOwner={ledgerReviewOwner.current}
               onReviewAll={() =>
@@ -1391,10 +1527,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                         mapping: tbMapping,
                         labels: resolveRoleLabels(tb.roles, TB_LABELS),
                         tool: "deposit_interest",
-                        onApplied: (mapping) => {
-                          resetCurrencyFallback();
-                          setTbMapping(mapping);
-                        },
+                        onApplied: (mapping) => updateMapping("tb", mapping),
                         missingAfter: (mapping) =>
                           depositMissingRequired(
                             "tb",
@@ -1410,10 +1543,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                         mapping: jeMapping,
                         labels: resolveRoleLabels(je.roles, JE_LABELS),
                         tool: "deposit_interest",
-                        onApplied: (mapping) => {
-                          resetCurrencyFallback();
-                          setJeMapping(mapping);
-                        },
+                        onApplied: (mapping) => updateMapping("je", mapping),
                         missingAfter: (mapping) =>
                           depositMissingRequired("je", mapping),
                       }
@@ -1450,8 +1580,12 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   </>
                 }
                 onMappingChange={(mapping) => {
-                  resetCurrencyFallback();
-                  setTbMapping(mapping);
+                  updateMapping(
+                    "tb",
+                    typeof mapping === "function"
+                      ? mapping(tbMapping)
+                      : mapping,
+                  );
                 }}
                 onHeaderChange={(row, depth, sheet) =>
                   void inspect("tb", {
@@ -1483,8 +1617,12 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   </>
                 }
                 onMappingChange={(mapping) => {
-                  resetCurrencyFallback();
-                  setJeMapping(mapping);
+                  updateMapping(
+                    "je",
+                    typeof mapping === "function"
+                      ? mapping(jeMapping)
+                      : mapping,
+                  );
                 }}
                 onHeaderChange={(row, depth, sheet) =>
                   void inspect("je", {
@@ -1500,12 +1638,10 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
           {/* 步骤条第二步是参考资料、没传文件也允许进（见上方 StepIndicator
               注释）；但底部主按钮要设防：没拿到 TB 就不许走这条快捷路径。 */}
           <div className="fx-step-actions">
-            {!tb && (
-              <p className="fx-hint self-center">
-                先加入科目余额表（TB）后可继续下一步。
-              </p>
-            )}
-            <Button disabled={!tb || busy} onClick={() => void advanceToConfirmation()}>
+            <Button
+              disabled={!tb || busy}
+              onClick={() => void advanceToConfirmation()}
+            >
               下一步：科目与利率确认
             </Button>
           </div>
@@ -1523,7 +1659,10 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     : "按币种使用年初、年末平均值"}
                 </b>
               </span>
-              <Button variant="secondary" onClick={() => setCurrencyDialogOpen(true)}>
+              <Button
+                variant="secondary"
+                onClick={() => setCurrencyDialogOpen(true)}
+              >
                 更改口径
               </Button>
             </section>
@@ -1537,8 +1676,12 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     <CardTitle>科目分类与存款类型</CardTitle>
                   </div>
                   <div className="deposit-account-summary">
-                    <Badge variant="secondary">计息科目 {depositAccounts.length}</Badge>
-                    <Badge variant="secondary">利息收入 {interestAccounts.length}</Badge>
+                    <Badge variant="secondary">
+                      计息科目 {depositAccounts.length}
+                    </Badge>
+                    <Badge variant="secondary">
+                      利息收入 {interestAccounts.length}
+                    </Badge>
                     <HelpTip text="清单只列末级科目，层级判定与公共引擎同一口径；TB 带辅助核算且通过验证时按辅助户拆行。利息收入是 TB 比较基准；未设置时仍可测算，但不能勾稽。存款类型关联下方利率档位；名称无法判断时默认活期。" />
                   </div>
                 </div>
@@ -1554,103 +1697,213 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     matched={visibleAccounts.length}
                     total={reviewAccounts.length}
                   />
-                  <div className="fx-list fx-accounts deposit-account-list">
-                    <div className="deposit-account-head" aria-hidden="true">
-                      <span>科目</span>
-                      <span>分类</span>
-                      <span>存款类型</span>
-                    </div>
-                    {visibleAccounts.map((row) => (
-                      <label key={row.key}>
-                        <span title={`${row.account}${row.auxiliary ? ` / ${row.auxiliary}` : ""}`}>
-                          {row.account}{row.auxiliary ? ` · ${row.entity ? `${row.entity} / ` : ""}${row.auxiliary}` : ""}
-                        </span>
-                        <select
-                          aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的分类`}
-                          value={row.auxiliaryKey ? (accountDetailRoleOverrides[row.key] ?? "") : (accountRoleOverrides[row.account] ?? "")}
-                          onChange={(e) => {
-                            const value = e.target.value;
-                            const setter = row.auxiliaryKey ? setAccountDetailRoleOverrides : setAccountRoleOverrides;
-                            setter((current) => {
-                              const next = { ...current };
-                              if (value) next[row.key] = value;
-                              else delete next[row.key];
-                              return next;
-                            });
-                          }}
-                        >
-                          <option value="">
-                            {
-                              ROLE_OPTIONS.find(
-                                ([role]) =>
-                                  role ===
-                                  (tb?.suggestedAccountRoles?.[row.account] ??
-                                    je?.suggestedAccountRoles?.[row.account] ??
-                                    "excluded"),
-                              )?.[1]
-                            }
-                          </option>
-                          {ROLE_OPTIONS.map(([value, label]) => (
-                            <option key={value} value={value}>
-                              {label}
-                            </option>
-                          ))}
-                        </select>
-                        {["deposit", "other_monetary"].includes(reviewRole(row)) ? (
-                          <div className="deposit-account-tier">
-                            <select
-                              aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的存款类型`}
-                              value={accountCategory(row.account, reviewTier(row))}
-                              onChange={(e) =>
-                                (row.auxiliaryKey ? setAccountDetailTierOverrides : setAccountTierOverrides)((current) => ({
-                                  ...current,
-                                  [row.key]: depositFirstTierOf(
-                                    tiers,
-                                    e.target.value,
-                                  ),
-                                }))
-                              }
+                  <div className="deposit-account-list">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>科目</th>
+                          <th>分类</th>
+                          <th>存款类型</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {renderedAccounts.map((row) => (
+                          <tr key={row.key}>
+                            <td
+                              title={`${row.account}${row.auxiliary ? ` / ${row.auxiliary}` : ""}`}
                             >
-                              {(tiers?.categories ?? []).map((category) => (
-                                <option key={category.key} value={category.key}>
-                                  {category.label}
-                                </option>
-                              ))}
-                            </select>
-                            {depositTermsOf(tiers, accountCategory(row.account, reviewTier(row)))
-                              .length > 0 && (
+                              {row.account}
+                              {row.auxiliary
+                                ? ` · ${row.entity ? `${row.entity} / ` : ""}${row.auxiliary}`
+                                : ""}
+                            </td>
+                            <td>
                               <select
-                                aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的存款期限`}
-                                value={reviewTier(row)}
-                                onChange={(e) =>
-                                  (row.auxiliaryKey ? setAccountDetailTierOverrides : setAccountTierOverrides)((current) => ({
-                                    ...current,
-                                    [row.key]: e.target.value,
-                                  }))
+                                aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的分类`}
+                                value={
+                                  row.auxiliaryKey
+                                    ? (accountDetailRoleOverrides[row.key] ??
+                                      "")
+                                    : (accountRoleOverrides[row.account] ?? "")
                                 }
+                                onChange={(e) => {
+                                  const value = e.target.value;
+                                  const setter = row.auxiliaryKey
+                                    ? setAccountDetailRoleOverrides
+                                    : setAccountRoleOverrides;
+                                  setter((current) => {
+                                    const next = { ...current };
+                                    if (value) next[row.key] = value;
+                                    else delete next[row.key];
+                                    return next;
+                                  });
+                                }}
                               >
-                                {depositTermsOf(
-                                  tiers,
-                                  accountCategory(row.account, reviewTier(row)),
-                                ).map((term) => (
-                                  <option key={term.key} value={term.key}>
-                                    {term.label}
+                                <option value="">
+                                  {
+                                    ROLE_OPTIONS.find(
+                                      ([role]) =>
+                                        role ===
+                                        (tb?.suggestedAccountRoles?.[
+                                          row.account
+                                        ] ??
+                                          je?.suggestedAccountRoles?.[
+                                            row.account
+                                          ] ??
+                                          "excluded"),
+                                    )?.[1]
+                                  }
+                                </option>
+                                {ROLE_OPTIONS.map(([value, label]) => (
+                                  <option key={value} value={value}>
+                                    {label}
                                   </option>
                                 ))}
                               </select>
+                            </td>
+                            {["deposit", "other_monetary"].includes(
+                              reviewRole(row),
+                            ) ? (
+                              <td>
+                                <div className="deposit-account-tier">
+                                  <select
+                                    aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的存款类型`}
+                                    value={accountCategory(
+                                      row.account,
+                                      reviewTier(row),
+                                    )}
+                                    onChange={(e) =>
+                                      (row.auxiliaryKey
+                                        ? setAccountDetailTierOverrides
+                                        : setAccountTierOverrides)(
+                                        (current) => ({
+                                          ...current,
+                                          [row.key]: depositFirstTierOf(
+                                            tiers,
+                                            e.target.value,
+                                          ),
+                                        }),
+                                      )
+                                    }
+                                  >
+                                    {(tiers?.categories ?? []).map(
+                                      (category) => (
+                                        <option
+                                          key={category.key}
+                                          value={category.key}
+                                        >
+                                          {category.label}
+                                        </option>
+                                      ),
+                                    )}
+                                  </select>
+                                  {depositTermsOf(
+                                    tiers,
+                                    accountCategory(
+                                      row.account,
+                                      reviewTier(row),
+                                    ),
+                                  ).length > 0 && (
+                                    <select
+                                      aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的存款期限`}
+                                      value={reviewTier(row)}
+                                      onChange={(e) =>
+                                        (row.auxiliaryKey
+                                          ? setAccountDetailTierOverrides
+                                          : setAccountTierOverrides)(
+                                          (current) => ({
+                                            ...current,
+                                            [row.key]: e.target.value,
+                                          }),
+                                        )
+                                      }
+                                    >
+                                      {depositTermsOf(
+                                        tiers,
+                                        accountCategory(
+                                          row.account,
+                                          reviewTier(row),
+                                        ),
+                                      ).map((term) => (
+                                        <option key={term.key} value={term.key}>
+                                          {term.label}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  )}
+                                </div>
+                              </td>
+                            ) : (
+                              <td className="deposit-account-na">不适用</td>
                             )}
-                          </div>
-                        ) : (
-                          <span className="deposit-account-na">不适用</span>
-                        )}
-                      </label>
-                    ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
-                  {reviewAccounts.length > 0 && visibleAccounts.length === 0 && (
-                    <p className="fx-hint">
-                      没有匹配「{accountFilter.trim()}」的科目。
-                    </p>
+                  {renderedAccounts.length < visibleAccounts.length && (
+                    <div className="deposit-account-more">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() =>
+                          setAccountReviewLimit(
+                            (current) => current + ACCOUNT_REVIEW_PAGE_SIZE,
+                          )
+                        }
+                      >
+                        继续显示（已显示 {renderedAccounts.length} /{" "}
+                        {visibleAccounts.length}）
+                      </Button>
+                    </div>
                   )}
+                  {reviewAccounts.length > 0 &&
+                    visibleAccounts.length === 0 && (
+                      <p className="fx-hint">
+                        没有匹配「{accountFilter.trim()}」的科目。
+                      </p>
+                    )}
+                  <AccountConfirmationActions
+                    tool="deposit"
+                    title="存款利息"
+                    context={JSON.stringify([tbPath, jePath, tbMapping, jeMapping, reviewAccounts.map((row) => row.key)])}
+                    columns={[
+                      { key: "account", title: "科目" },
+                      { key: "role", title: "分类", editable: true, options: ROLE_OPTIONS.map(([, label]) => label) },
+                      { key: "category", title: "存款类型", editable: true, options: (tiers?.categories ?? []).map((category) => category.label) },
+                      { key: "term", title: "存款期限", editable: true, options: [...new Set((tiers?.tiers ?? []).map((tier) => tier.termLabel))] },
+                    ]}
+                    rows={reviewAccounts.map((row) => {
+                      const tier = (tiers?.tiers ?? []).find((item) => item.key === reviewTier(row));
+                      return { key: row.key, values: [
+                        `${row.account}${row.auxiliary ? ` · ${row.entity ? `${row.entity} / ` : ""}${row.auxiliary}` : ""}`,
+                        ROLE_OPTIONS.find(([key]) => key === reviewRole(row))?.[1] ?? "",
+                        (tiers?.categories ?? []).find((item) => item.key === tier?.category)?.label ?? "",
+                        tier?.termLabel ?? "",
+                      ] };
+                    })}
+                    onImport={(changed) => {
+                      const byKey = new Map(reviewAccounts.map((row) => [row.key, row]));
+                      const roleUpdates: Record<string, string> = {};
+                      const tierUpdates: Record<string, string> = {};
+                      for (const item of changed) {
+                        const row = byKey.get(item.key)!;
+                        const role = ROLE_OPTIONS.find(([, label]) => label === item.values[1])?.[0];
+                        if (!role) throw new Error(`${row.account}：请选择有效的科目分类。`);
+                        roleUpdates[row.key] = role;
+                        if (role === "deposit" || role === "other_monetary") {
+                          const category = tiers?.categories.find((value) => value.label === item.values[2]);
+                          const tier = tiers?.tiers.find((value) => value.category === category?.key && value.termLabel === item.values[3]);
+                          if (!tier) throw new Error(`${row.account}：存款类型与期限不匹配。`);
+                          tierUpdates[row.key] = tier.key;
+                        }
+                      }
+                      setAccountRoleOverrides((current) => ({ ...current, ...Object.fromEntries(Object.entries(roleUpdates).filter(([key]) => !byKey.get(key)?.auxiliaryKey)) }));
+                      setAccountDetailRoleOverrides((current) => ({ ...current, ...Object.fromEntries(Object.entries(roleUpdates).filter(([key]) => byKey.get(key)?.auxiliaryKey)) }));
+                      setAccountTierOverrides((current) => ({ ...current, ...Object.fromEntries(Object.entries(tierUpdates).filter(([key]) => !byKey.get(key)?.auxiliaryKey)) }));
+                      setAccountDetailTierOverrides((current) => ({ ...current, ...Object.fromEntries(Object.entries(tierUpdates).filter(([key]) => byKey.get(key)?.auxiliaryKey)) }));
+                    }}
+                  />
                 </details>
               </CardContent>
             </Card>
@@ -1674,9 +1927,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
             <Button variant="secondary" onClick={() => setStep(0)}>
               返回上传与识别
             </Button>
-            <Button onClick={() => setStep(2)}>
-              下一步：测算与底稿
-            </Button>
+            <Button onClick={() => setStep(2)}>下一步：测算与底稿</Button>
           </div>
         </>
       )}
@@ -1712,10 +1963,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               <div className="deposit-run-grid">
                 <label>
                   资产负债表日
-                  <DateInput
-                    value={reportEnd}
-                    onChange={setReportEnd}
-                  />
+                  <DateInput value={reportEnd} onChange={setReportEnd} />
                 </label>
                 <label>
                   输出文件
@@ -1787,6 +2035,24 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   onCancel={busy ? (id) => void jobCancel(id) : undefined}
                 />
               )}
+              {((result?.outputPaths ?? []) as string[]).length > 0 && (
+                <div className="deposit-export-done">
+                  <p>
+                    导出的 Excel
+                    中，「测算汇总」黄色“年利率”单元格可直接改写；月度利息、测算利息合计及与
+                    TB 的勾稽差异会即时重算。
+                  </p>
+                  {((result?.outputPaths ?? []) as string[]).map((path) => (
+                    <Button
+                      key={path}
+                      variant="secondary"
+                      onClick={() => void openOutput(path)}
+                    >
+                      打开 Excel 底稿
+                    </Button>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -1800,6 +2066,43 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               onOverride={overrideRow}
               onRecalculate={() => void run("deposit.preview")}
               busy={busy}
+            />
+          )}
+
+          {rows.length > 0 && (
+            <AccountConfirmationActions
+              tool="deposit"
+              title="存款账户利率"
+              context={JSON.stringify([tbPath, jePath, tbMapping, jeMapping, rows.map((row) => row.key), "account-rates"])}
+              columns={[
+                { key: "entity", title: "主体" },
+                { key: "account", title: "银行账户／科目" },
+                { key: "currency", title: "币种" },
+                { key: "tier", title: "存款档位" },
+                { key: "annualRate", title: "年利率（%）", editable: true },
+              ]}
+              rows={rows.map((row) => ({ key: row.key, values: [
+                row.entity, row.account, row.currency, row.tierLabel,
+                row.rateResolved ? String(depositRateToPercent(row.annualRate)) : "",
+              ] }))}
+              disabled={busy}
+              onImport={(changed) => {
+                const updates = new Map(changed.map((item) => {
+                  const value = Number(item.values[4]);
+                  if (!item.values[4] || !Number.isFinite(value))
+                    throw new Error(`${item.values[1]}：年利率须填写数字百分比。`);
+                  return [item.key, depositPercentToRate(item.values[4])] as const;
+                }));
+                setRateOverrides((current) => {
+                  const next = { ...current };
+                  for (const [key, annualRate] of updates)
+                    next[key] = { ...next[key], annualRate };
+                  return next;
+                });
+                setRows((current) => current.map((row) => updates.has(row.key)
+                  ? { ...row, annualRate: updates.get(row.key)!, rateResolved: true, rateSource: "本账户手工指定" }
+                  : row));
+              }}
             />
           )}
 
@@ -1864,7 +2167,6 @@ function RateTierCard({
     <Card>
       <CardHeader>
         <CardTitle>
-          <span className="deposit-section-kicker">第 2 项</span>
           存款利率档位
           <HelpTip text="科目类型会关联这里的档位。有挂牌值的标准档位自动采用暂估利率并纳入测算；账户级改写优先，最终须按协议或对账单确认。" />
           <JargonTip
@@ -2244,7 +2546,6 @@ export function Results({
   busy: boolean;
 }) {
   const summary = (result?.summary ?? {}) as Record<string, unknown>;
-  const outputs = (result?.outputPaths ?? []) as string[];
   const amount = (value: unknown) =>
     new Intl.NumberFormat("zh-CN", {
       minimumFractionDigits: 2,
@@ -2303,9 +2604,7 @@ export function Results({
   const jeUncoveredEntities: string[] = Array.isArray(
     summary.jeUncoveredEntities,
   )
-    ? summary.jeUncoveredEntities
-        .map((item) => String(item))
-        .filter(Boolean)
+    ? summary.jeUncoveredEntities.map((item) => String(item)).filter(Boolean)
     : [];
 
   return (
@@ -2315,9 +2614,11 @@ export function Results({
           <h3>
             存款利息测算结果
             <HelpTip
-              text={`${String(summary.monthlySource ?? "").includes("两点法")
-                ? "两点法平均余额＝（期初余额＋期末余额）÷2，不推导月末余额"
-                : "序时账口径下，月均余额＝（月初余额＋月末余额）÷2"}；余额来源：${String(
+              text={`${
+                String(summary.monthlySource ?? "").includes("两点法")
+                  ? "两点法平均余额＝（期初余额＋期末余额）÷2，不推导月末余额"
+                  : "序时账口径下，月均余额＝（月初余额＋月末余额）÷2"
+              }；余额来源：${String(
                 summary.monthlySource ?? "—",
               )}；期初余额来源：${String(
                 summary.openingSource ?? "—",
@@ -2336,15 +2637,6 @@ export function Results({
             </p>
           )}
         </div>
-        {outputs.map((path) => (
-          <Button
-            key={path}
-            variant="secondary"
-            onClick={() => void openOutput(path)}
-          >
-            打开 Excel 底稿
-          </Button>
-        ))}
       </div>
 
       <div className="deposit-result-overview" role="status">
@@ -2364,26 +2656,26 @@ export function Results({
             ? "测算未完整"
             : provisional.length
               ? "利率待确认"
-            : stale
-              ? "结果待重算"
-              : !booked
-                ? "待补充勾稽"
-                : summary.reconciliationPassed === true
-                  ? "勾稽一致"
-                  : "存在差异"}
+              : stale
+                ? "结果待重算"
+                : !booked
+                  ? "待补充勾稽"
+                  : summary.reconciliationPassed === true
+                    ? "勾稽一致"
+                    : "存在差异"}
         </Badge>
         <span>
           {missing.length
             ? "先补齐未定利率，再按新利率重算。"
             : provisional.length
               ? "暂估利率已纳入测算，请按协议或对账单确认。"
-            : stale
-              ? "按新利率重新测算后，再复核与 TB 的差异。"
-              : !booked
-                ? "请确认 TB 利息收入科目映射，再完成账面勾稽。"
-                : summary.reconciliationPassed === true
-                  ? "可继续复核逐户明细并生成 Excel 底稿。"
-                  : "请复核利率、科目分类和月度余额后重新测算。"}
+              : stale
+                ? "按新利率重新测算后，再复核与 TB 的差异。"
+                : !booked
+                  ? "请确认 TB 利息收入科目映射，再完成账面勾稽。"
+                  : summary.reconciliationPassed === true
+                    ? "可继续复核逐户明细并生成 Excel 底稿。"
+                    : "请复核利率、科目分类和月度余额后重新测算。"}
         </span>
       </div>
 
@@ -2402,12 +2694,7 @@ export function Results({
       )}
       {provisional.length > 0 && (
         <section className="deposit-notice" aria-label="暂估利率待确认">
-          <h4>{provisional.length} 个账户已采用暂估利率</h4>
-          <p>
-            暂估利率已纳入测算，涉及余额合计 {amount(
-              provisional.reduce((sum, row) => sum + row.averageBalance, 0),
-            )}。请按存款协议、银行对账单或利息清单确认；账户级修改优先于档位默认值。
-          </p>
+          <h4>{provisional.length} 个账户已采用系统预设利率，请确认</h4>
         </section>
       )}
       {jeCurrencyAllocationWarning && (
@@ -2421,7 +2708,9 @@ export function Results({
           <h4>辅助核算联动</h4>
           <p>以下账户未按辅助核算拆分，已按主体＋科目执行测算：</p>
           <ul>
-            {auxiliaryWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+            {auxiliaryWarnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
           </ul>
         </section>
       )}
@@ -2431,7 +2720,8 @@ export function Results({
           <span>
             序时账期间内没有匹配到主体
             {jeUncoveredEntities.join("、")}
-            的任何发生额，这些主体的账户已直接按（期初＋期末）÷2 暂估全年平均余额（共
+            的任何发生额，这些主体的账户已直接按（期初＋期末）÷2
+            暂估全年平均余额（共
             {Number(summary.jeUncoveredAccountCount ?? 0)}
             户），不推导月末余额；如需逐月勾稽，请补充对应主体的序时账。
           </span>
@@ -2495,13 +2785,7 @@ export function Results({
       </div>
 
       <div className="deposit-rate-head">
-        <div>
-          <h4>逐户余额勾稽与利息测算</h4>
-          <p>
-            {String(summary.rateBasisLabel ?? "—")}
-            改成存款协议或对账单上的实际利率后，点“按新利率重算”。
-          </p>
-        </div>
+        <h4>逐户余额勾稽与利息测算</h4>
         <Button variant="secondary" disabled={busy} onClick={onRecalculate}>
           按新利率重算
         </Button>
@@ -2513,18 +2797,30 @@ export function Results({
               <th>核算主体</th>
               <th>银行账户／科目</th>
               <th>存款类型</th>
+              <th>年利率（%）</th>
               <th>期初余额</th>
               <th>期末 TB</th>
               <th>JE 推导期末</th>
               <th>余额差异</th>
-              <th>年利率（%）</th>
               <th>利率来源</th>
               <th>测算利息</th>
               <th>
-                余额勾稽 <JargonTip term="余额勾稽" text={"已勾稽：JE 推导期末与 TB 一致。\n待复核：两者存在差异。\n未做JE核对：缺少可用 JE 或 TB 期初余额；两点法出现零差异也不算勾稽。"} />
+                余额勾稽{" "}
+                <JargonTip
+                  term="余额勾稽"
+                  text={
+                    "已勾稽：JE 推导期末与 TB 一致。\n待复核：两者存在差异。\n未做JE核对：缺少可用 JE 或 TB 期初余额；两点法出现零差异也不算勾稽。"
+                  }
+                />
               </th>
               <th>
-                利率状态 <JargonTip term="利率状态" text={"已填利率：有可用利率，仍请以协议或对账单复核。\n待确认利率：暂用挂牌参考利率，已纳入测算。\n待填利率：没有可用利率，未纳入合计。"} />
+                利率状态{" "}
+                <JargonTip
+                  term="利率状态"
+                  text={
+                    "已填利率：有可用利率，仍请以协议或对账单复核。\n待确认利率：暂用挂牌参考利率，已纳入测算。\n待填利率：没有可用利率，未纳入合计。"
+                  }
+                />
               </th>
               <th>明细</th>
             </tr>
@@ -2540,7 +2836,9 @@ export function Results({
                       : "deposit-review-row"
                   }
                 >
-                  <td>{row.entity === "默认主体" ? "未区分主体" : row.entity}</td>
+                  <td>
+                    {row.entity === "默认主体" ? "未区分主体" : row.entity}
+                  </td>
                   <td className="deposit-account-cell" title={row.account}>
                     <strong>{row.account}</strong>
                     {row.auxiliary && <small>辅助：{row.auxiliary}</small>}
@@ -2578,14 +2876,6 @@ export function Results({
                       )}
                     </div>
                   </td>
-                  <td className="deposit-amount-cell">{amount(row.openingBalance)}</td>
-                  <td className="deposit-amount-cell">{amount(row.tbClosingBalance)}</td>
-                  <td className="deposit-amount-cell">
-                    {row.jeReconciled ? amount(row.derivedClosingBalance) : "—"}
-                  </td>
-                  <td className={`deposit-amount-cell${row.jeReconciled && Math.abs(row.reconciliationDiff) >= 0.005 ? " deposit-difference" : ""}`}>
-                    {row.jeReconciled ? amount(Math.abs(row.reconciliationDiff) < 0.005 ? 0 : row.reconciliationDiff) : "—"}
-                  </td>
                   <td>
                     <span className="deposit-pct">
                       <NumberInput
@@ -2611,12 +2901,34 @@ export function Results({
                       <b>%</b>
                     </span>
                   </td>
+                  <td className="deposit-amount-cell">
+                    {amount(row.openingBalance)}
+                  </td>
+                  <td className="deposit-amount-cell">
+                    {amount(row.tbClosingBalance)}
+                  </td>
+                  <td className="deposit-amount-cell">
+                    {row.jeReconciled ? amount(row.derivedClosingBalance) : "—"}
+                  </td>
+                  <td
+                    className={`deposit-amount-cell${row.jeReconciled && Math.abs(row.reconciliationDiff) >= 0.005 ? " deposit-difference" : ""}`}
+                  >
+                    {row.jeReconciled
+                      ? amount(
+                          Math.abs(row.reconciliationDiff) < 0.005
+                            ? 0
+                            : row.reconciliationDiff,
+                        )
+                      : "—"}
+                  </td>
                   <td title={row.rateWarning}>
                     {row.rateWarning
                       ? `${row.rateSource}（高于央行基准）`
                       : row.rateSource}
                   </td>
-                  <td className="deposit-amount-cell">{amount(rowInterest(row))}</td>
+                  <td className="deposit-amount-cell">
+                    {amount(rowInterest(row))}
+                  </td>
                   <td title={row.note}>
                     <Badge
                       variant="outline"
@@ -2651,7 +2963,9 @@ export function Results({
                       className="deposit-expand"
                       aria-expanded={expanded === row.key}
                       aria-label={`${row.account}的测算明细`}
-                      onClick={() => onExpand(expanded === row.key ? "" : row.key)}
+                      onClick={() =>
+                        onExpand(expanded === row.key ? "" : row.key)
+                      }
                     >
                       {expanded === row.key ? "收起" : "展开"}
                     </Button>
@@ -2663,50 +2977,54 @@ export function Results({
                       <div className="deposit-average-detail">
                         <span>年平均余额</span>
                         <strong>{amount(row.averageBalance)}</strong>
-                        {row.status === "两点法推算" && <span>两点法推算，无月度明细</span>}
+                        {row.status === "两点法推算" && (
+                          <span>两点法推算，无月度明细</span>
+                        )}
                       </div>
-                      {row.months.length > 0 && <table className="deposit-month-table">
-                        <thead>
-                          <tr>
-                            <th>月份</th>
-                            <th>月初余额</th>
-                            <th>本月借方</th>
-                            <th>本月贷方</th>
-                            <th>月末余额</th>
-                            <th>月均余额</th>
-                            <th>当月利息</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {row.months.map((month) => (
-                            <tr key={month.month}>
-                              <td>{month.month}月</td>
-                              <td>{amount(month.opening)}</td>
-                              <td>{amount(month.debit)}</td>
-                              <td>{amount(month.credit)}</td>
-                              <td>{amount(month.closing)}</td>
-                              <td>
-                                {amount(
-                                  depositMonthlyAverage(
-                                    month.opening,
-                                    month.closing,
-                                  ),
-                                )}
-                              </td>
-                              <td>
-                                {amount(
-                                  depositMonthlyInterest(
-                                    month.average,
-                                    row.annualRate,
-                                    month.days,
-                                    month.denominator,
-                                  ),
-                                )}
-                              </td>
+                      {row.months.length > 0 && (
+                        <table className="deposit-month-table">
+                          <thead>
+                            <tr>
+                              <th>月份</th>
+                              <th>月初余额</th>
+                              <th>本月借方</th>
+                              <th>本月贷方</th>
+                              <th>月末余额</th>
+                              <th>月均余额</th>
+                              <th>当月利息</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>}
+                          </thead>
+                          <tbody>
+                            {row.months.map((month) => (
+                              <tr key={month.month}>
+                                <td>{month.month}月</td>
+                                <td>{amount(month.opening)}</td>
+                                <td>{amount(month.debit)}</td>
+                                <td>{amount(month.credit)}</td>
+                                <td>{amount(month.closing)}</td>
+                                <td>
+                                  {amount(
+                                    depositMonthlyAverage(
+                                      month.opening,
+                                      month.closing,
+                                    ),
+                                  )}
+                                </td>
+                                <td>
+                                  {amount(
+                                    depositMonthlyInterest(
+                                      month.average,
+                                      row.annualRate,
+                                      month.days,
+                                      month.denominator,
+                                    ),
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
                     </td>
                   </tr>
                 )}
@@ -2715,11 +3033,6 @@ export function Results({
           </tbody>
         </table>
       </div>
-      <p className="fx-rate-note">
-        导出的 Excel
-        里，「测算汇总」的黄色“年利率”单元格可以直接改写：月度利息、测算利息合计和与
-        TB 的勾稽差异都是活公式，改完即时重算，不必回到工具里。
-      </p>
     </section>
   );
 }

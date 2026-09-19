@@ -1,5 +1,219 @@
 # UI 修改记录
 
+## 2026-09-19 · 辅助拆行放行条件放宽为「活跃锚点全部命中」
+
+### 目标
+
+- 用户定案拆行闸门：只要**当期有借贷发生额**的辅助户（活跃户）都能在序时账对应列找到，就整组拆行；休眠户（有余额、当期无发生）不应阻断。原规则（alpha.86 引入）要求包括休眠余额户在内的全部 TB 辅助值都出现在 JE 才放行，而休眠户本就不会出现在序时账，正常形态也被误判成失配、连累整组退回末级科目。
+
+### 设计决策
+
+- 公共联动验证 `reviewVerified` 的额外门槛（全部明细值 ∈ JE 列值集合）移除，保留组级锚点验证（当期非零发生额的辅助值全部命中认定的 JE 列）＋明细非空。休眠户仍作为明细行进入拆分清单（带余额参与后续测算），只是不参与放行判定。
+- 生效范围：存款利息、借款利息、汇兑损益三个工具的第二步拆行（同一公共返回值）。锚点定位、noMatch/ambiguous/partialCoverage 降级、勾稽口径均不变。
+- 同步修订 LEDGER_MAPPING_UNIFICATION.md 的展开契约描述与前端类型注释；回归测试改名为「科目确认按活跃锚点放行休眠户不阻断」，断言休眠户缺席 JE 时仍拆行且进入明细。
+
+### 验证方式
+
+- `CARGO_TARGET_DIR=src-tauri/target-fxfix cargo test --manifest-path src-tauri/Cargo.toml --lib`（含改名测试与存款/借款休眠户勾稽既有回归）
+
+## 2026-09-19 · 双语表头换行统一，口径核对与测算不再错位
+
+### 目标
+
+- 恒澜重工实测（SAP 双语表头「科目\nAccount」单元格内换行）：上传时自动识别把表头清洗成空格版「科目 Account」并写入映射，确认标题行后的正式读取却原样保留换行。同一份映射识别时对得上、测算时找不到列，导致「TB 与 JE 口径核对」取空编码报「JE编码样例：」空白错误，测算预览直接崩成「Excel 数据处理进程异常退出」。
+
+### 设计决策
+
+- 表头统一口径：`load_fx_table` 的 Polars 快速路径与 Parquet 缓存路径补上与 `merge_headers` 一致的清洗（换行转空格、去首尾空白），两条识别路径、口径核对、正式测算从此读到同一套表头；界面表头同步变为可读的空格版。
+- 列定位加宽容回退：口径核对取值（`role_values`）、本位币预填、数据年份、日期建议、主体/币种目录等映射消费点改走 `ledger_mapping::header_index`，历史存档里换行/空格写法不一致的映射也能取到列，不再误报「编码完全对不上」。
+- 校验环节消灭硬中断：TB 关键余额列与币种列检查里两处「找不到列即 unwrap」改为跳过该列——缺列已由「映射列不存在」逐条报错，不再让整个测算进程崩溃。
+- 口径核对的「编码样例」错误只在两侧都真实取到编码时展示，单侧为空时不再输出「样例：」空白的误导文案。
+- 「同一主体只能有一种原币币种」为 2026-09-13 用户定案的硬校验，本次未动：多币种账（CNY+EUR+USD）修完崩溃后会在第一步得到该规则的明确中文拦截，而不是进程崩溃。
+
+### 验证方式
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib -- 快速路径表头与识别口径一致 口径核对容忍换行写法的表头映射 映射列缺失时校验报错而不中断`（新增 3 项回归）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib`（814 项全过）
+- 真实样例回放：恒澜失败任务参数原样重跑，口径核对 `aligned=true`，预览不再崩溃、返回币种规则的正常业务拦截。
+
+## 2026-09-19 · 汇兑损益第二步接入辅助核算拆行（与存款/借款同口径）
+
+### 目标
+
+- 用户定案：「如果 TBJE 辅助核算匹配上了，颗粒度就到辅助核算」。该规则此前只在存款利息／借款利息（及 TBJE、FA 的计算口径）落地，汇兑损益第二步一直停在末级科目，且界面残留一句未兑现的提示文案（同日前一条记录已删）。
+
+### 设计决策
+
+- 第二步清单行粒度改为 `fxAccountReviewRows`：公共辅助核算联动验证 `reviewVerified` 的科目按辅助明细拆行（行显示「科目 · 辅助户」），其余停在末级科目并保留兜底行——与存款利息完全同一模式；筛选关键词包含辅助名。
+- 拆行后的行各自有「分类」「账户币种」下拉，手工选择存入 `accountDetailRoles`／`accountDetailCurrencies`（键＝`主体␟归一化科目编码␟归一化辅助值`，与存款利息同口径）；留空即回落科目级识别结论；非货币性项目／其他损益行同样固定 N/A。
+- 后端新增 `accountDetailRoleOverrides`／`accountDetailCurrencyOverrides` 两个参数：`currency_for` 与新增 `role_for_row` 在取值链最前端先查逐辅助户覆盖（19 处测算/勾稽/敞口/凭证分类调用点统一换用行级入口），键失配自然回落科目级。多列辅助（拼接 "a|b"）与单列锚点键不同时同样回落，可接受。
+- 币种/分类的科目级徽标（JE 多币种、建议复核、名称未识别）只挂科目行，不逐辅助户重复刷屏。
+- 已知边界：历史任务恢复不回放逐户覆盖（恢复后回落科目级，需重选）；多主体经 entityScope 改名后逐户键可能失配并回落。
+
+### 验证方式
+
+- `npx vitest run src/FxAuditPage.test.ts`（74 项全过，新增拆行/键归一化/payload 过滤 4 项）
+- `CARGO_TARGET_DIR=src-tauri/target-fxfix cargo test --manifest-path src-tauri/Cargo.toml --lib`（新增「逐辅助户的币种与角色覆盖优先于科目级」；样例编码避开 `00001122` 这类会被宽松日期解析当成 0000-11-22、导致编码/名称拆分失效的取值）
+
+## 2026-09-19 · 四个科目复核步骤支持 Excel 批量确认
+
+### 目标
+
+- 末级科目较多时，逐页修改分类、币种、存款类型、利率或固定资产类别效率低；需要把当前完整科目清单下载到本地，批量填写后回传。
+
+### 设计决策
+
+- 存款利息「科目与利率确认」、汇兑损益「TB 科目类型确认」、借款利息 TB+JE「确认科目与利率」、FA TB+JE「复核固定资产科目与资产类别」均在清单左下方提供下载与回传按钮；存款测算结果另提供账户级年利率确认表。导出不受页面筛选及分页限制。
+- 四页共用科目确认工作簿：需要填写的单元格标黄，枚举值设 Excel 下拉；无枚举约束的资产类别与利率数字允许直接填写。隐藏行键随 Excel 排序移动；隐藏模板信息记录工具与数据源。
+- 回传时先检查工具、数据源、行键集合、列数与枚举值；显示修改行数并要求用户确认，之后再批量更新当前页面状态。借款百分比回传时换算为引擎的小数口径；FA 的同一主体＋科目编码组继续同步更新。
+
+### 验证方式
+
+- `npx tsc -b`
+- `npx vitest run src/AccountConfirmationActions.test.tsx src/DepositInterestInteractions.test.tsx src/FxAuditPage.test.ts src/LoanInterestPageUi.test.tsx src/FaTbJePage.test.ts`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib account_confirmation`
+
+## 2026-09-19 · 汇兑损益本位币可手改、识别不再误读「只标外币」列，第二步降噪
+
+### 目标
+
+- 北重精工样例暴露两个叠加问题：①「公司本位币」从 USD 手动改成 CNY 后立刻弹回 USD，像是被锁死；② TB 的币种列是「只标外币」写法（本位币行留空、仅美元户标 USD，81 行只有 1 行非空），识别却声称「本位币币种列整列都是 USD」并预填 USD。
+- 第二步「TB科目类型确认」表格上方的整段灰色说明与「识别规则详解」折叠块被用户定性为噪音，要求删除；列头问号弹窗只保留状态判定依据。
+- 非货币性项目／其他损益成本科目不参与外币重估，账户币种固定 N/A，不再让用户选择。
+
+### 设计决策
+
+- 「改不动」的根因在前端：无主体列的账表 `entities` 为空，回填 effect 按空列表把 `entityCurrencies` 重建为空对象，手选值当轮即被清掉。修复为空列表时回落到 `DEFAULT_ENTITY`（与「本位币（全表）」的挂载键一致），与 `fxFallbackFunctional` 同一模式。
+- 误识别的根因在 Rust `uniform_currency`：回退读原币币种列时只看「非空值去重后唯一」，不看空白率。「只标外币」列的空白恰代表本位币，唯一非空值必是外币。修复为整列空白率 ≥10% 即不预填（与公共引擎 `classify_currency_column` 判本位币列的空白率口径一致）；空白少且唯一才预填。北重精工形态将显示「未识别到单一本位币，暂按 CNY 预填」。
+- 第二步删除表头上方说明段落与「识别规则详解」折叠块（含其样式）；问号弹窗改为纯状态图例：每个括号状态标注判定依据，不再写取值优先级链与手选优先等其余文字。
+- 非货币性项目／其他损益成本行：币种单元格渲染固定 N/A（悬停说明为何无需币种），不提供下拉；payload 侧这类科目的历史手选币种不再作为覆盖传给后端（新增 `fxAccountCurrencyOverridesForRoles`）。
+- 汇兑损益第二步**不做**辅助核算拆行：该需求只在存款利息／借款利息（以及 TBJE、FA 的后端计算键）落地，汇兑页此前只有一句未兑现的提示文案，本次随降噪一并删除（详见会话结论，用户尚未要求在汇兑页实现拆行）。
+
+### 验证方式
+
+- `npx vitest run src/FxAuditPage.test.ts`（70 项全过，新增「无主体列时手选的全表本位币不会被清空」「无主体列时未手选则按识别值预填全表本位币」「非货币性/其他损益科目的手选币种不进 payload」）
+- `CARGO_TARGET_DIR=src-tauri/target-fxfix cargo test --manifest-path src-tauri/Cargo.toml --lib 本位币`（新增「只标外币的币种列不得预填为公司本位币」「整列填满且唯一的币种列才预填为公司本位币」）
+
+## 2026-09-19 · 字段复核不再对「币种线索文本」提建议
+
+### 目标
+
+- 一键复核高频蹦出「币种线索文本：科目名称 → 未映射」的高置信清除建议，逼用户逐条裁决；而该角色指向的列几乎总是科目名称列，引擎取币种本就有「从科目名称抽币种」的兜底，采纳与否测算结果完全一样——纯「待确认」噪声。
+
+### 设计决策
+
+- 按用户定案：**LLM 复核彻底不管 currencyText 角色**。识别阶段的按取值自动挑选、映射面板的手动增删、下游取数逻辑全部保持原样，只有复核不再对它输出任何建议。
+- 后端三处收口：复核请求的 availableRoles 摘除该角色（模型从一开始看不到）；复核范围（mappedRolesToReview／unmappedRoles）排除它；卫生过滤对模型的越权建议（clear／replace）无条件丢弃——即使请求没带角色清单也拦。
+- TB 复核提示词同步改口径：删去「挑哪列当币种线索」的整段指导，改为一句「不在复核范围、维持现状」。
+
+### 验证方式
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib`（807 项全过，新增「币种线索文本角色不进复核」回归）
+- `npx vitest run src/FxAuditPage.test.ts src/components/LedgerReviewAll.test.tsx src/components/llmReviewPresentation.test.ts`（83 项全过）
+
+## 2026-09-19 · 辅助核算联动验证只随辅助映射重跑
+
+### 目标
+
+- 采纳/撤销不涉及辅助核算的映射建议（如原币币种、原币金额）时，后台仍整表重读 JE＋TB 重跑辅助核算联动验证，触发「正在处理」等待弹窗，用户看不出在处理什么也觉得没必要。
+
+### 设计决策
+
+- 按用户定案：**只有数据源变化或两侧「辅助核算明细」映射变化才重新执行联动验证**；币种、金额、日期、主体、科目等其他角色的映射调整沿用既有联动结论，不再触发整表重读。
+- 验证请求本身仍发送完整映射与范围参数；计算侧（TBJE 完整性／存款等）本就会按最终状态复核同一套判定，界面提示短暂滞后无实质风险。
+- 公共钩子 `useAuxiliaryLink` 增加 `key` 触发参数（汇兑损益、FA TBJE）；存款利息、借款利息、TBJE 完整性三处直接调用同步改为按「来源＋辅助列」计算触发键，五处口径一致。
+
+### 验证方式
+
+- `npx vitest run src/hooks/useAuxiliaryLink.test.tsx src/FaTbJePage.test.ts src/FxAuditPage.test.ts src/DepositInterestInteractions.test.tsx src/LoanInterestPageUi.test.tsx src/components/SyncBusyDialog.test.tsx`
+- `npm test`（785 项全过）＋ `npx tsc -b`
+
+## 2026-09-19 · 汇兑损益科目清单按确认映射全量刷新
+
+### 目标
+
+- 修复汇兑损益字段映射更正后仍显示旧科目目录，以及大文件采样目录直接进入分类导致科目缺失。
+
+### 设计决策
+
+- 仅在科目身份字段变更时重新提取科目目录；采样来源进入科目确认步骤时拉取全量，完成前不能进入测算。
+- 全量科目保留在状态中用于搜索、分类和业务请求，界面每批渲染 250 条，避免长列表卡顿。
+
+### 验证方式
+
+- `npx vitest run src/FxAuditPage.test.ts`
+- `npx tsc -b --pretty false`
+
+## 2026-09-19 · 等待弹窗补齐并发调用的具体名称
+
+### 目标
+
+- 汇兑损益等页面并发跑多个同步调用时，等待弹窗里除了「正在联合复核字段映射」，其余条目只显示笼统的「正在处理」，用户看不出在做什么。
+
+### 设计决策
+
+- 补登记 6 个漏配中文短语的方法：`fx.classify_source_llm`／`deposit.classify_source_llm`／`fa_tbje.classify_source_llm`（复核外汇/存款/账表来源分类）、`fx.validate_currency_mapping`（校验币种映射）、`ledger.auxiliary_link`（验证辅助核算联动）、`ledger.currency_link`（验证多币种账户联动）。
+- LLM 来源复核是逐 Sheet 的网络调用、最容易超过一秒弹窗阈值，公共扫描入口现在把「文件名 / Sheet」作为等待明细传入，弹窗里不再铺完整路径；规则分类调用快、通常不触发弹窗，维持不带明细。
+
+### 验证方式
+
+- `npx vitest run src/components/SyncBusyDialog.test.tsx src/ledgerWorkbookSheets.test.ts src/FxAuditPage.test.ts src/DepositInterestInteractions.test.tsx`
+- `npm run build`（tsc -b 零错误）
+
+## 2026-09-19 · FA 非标准编码账套按科目名进表
+
+### 目标
+
+- FA List 的科目预选原先只认 1601（原值）／1602（累计折旧），其余数字编码一律预置排除——旧制度 1501/1502 或自定义编码的账套需要整表手工改角色。按用户定案放宽：1601/1602 不适用时，自身或按编码前缀回查到的上级科目名**明确**写着「固定资产／累计折旧」即进表。
+
+### 设计决策
+
+- 进表的名称口径用窄词（固定资产/累计折旧），宽词（房屋／设备）不参与：`1002016871 银行存款-汉口银行(房屋积金)` 这类名称误配继续被挡在门外；清理／折旧费／使用权／清账等排除规则在编码放宽后原样生效（`6601090401 折旧费-固定资产` 仍排除）。
+- 上级行不存在时以自身名称判定；子级沿编码前缀继承上级结论。测算引擎不挑编码（吃用户确认后的清单），本次仅动预选层，界面零改动。
+- 验证：`npx vitest run src/FaTbJePage.test.ts`（25 项）；全量 `npm test` 780 项通过、`tsc -b` 零错误。
+
+## 2026-09-19 · 借款与固定资产页面说明降噪及结果表对齐
+
+### 目标
+
+- 保留工具页主标题下的总说明，删除借款利息与 FA TB＋JE 各步骤卡片内重复的灰色注释文案。
+- 修复借款测算结果中长借款标识溢出到币种、金额列导致的文字错位。
+
+### 设计决策
+
+- 动态处理状态、校验门禁、汇总徽章和文件识别信息继续保留，仅移除不随任务变化的解释性文字。
+- 借款标识固定列采用单行省略，完整借款标识与匹配依据放在悬停标题中；表格横向滚动和固定列行为不变。
+- 公共字段复核组件增加可选的紧凑展示开关，仅 FA TB＋JE 页面隐藏静态操作说明，不影响其他账表页。
+
+### 验证方式
+
+- `npx vitest run src/LoanInterestPageUi.test.tsx src/FaPageDesign.test.ts src/components/LedgerReviewAll.test.tsx`
+- `npx tsc -b --pretty false`
+
+## 2026-09-19 · 存款利息确认与结果交互收敛
+
+### 目标
+
+- 科目分类与存款类型改用其他账表工具一致的表格样式，结果表把账户级年利率紧邻存款类型展示并允许直接修改。
+- 精简步骤门禁、暂估利率和测算口径长提示，把底稿打开入口与活公式说明放到任务完成反馈附近。
+- 删除单侧 TB／JE 时不再误触发一次 LLM 字段复核。
+- 修正大型 TB 在人工／LLM 补齐科目映射后仍沿用旧目录的问题，移除 1,000 条硬截断；界面每批渐进展示 250 条，搜索和分类口径仍基于全量科目。
+
+### 设计决策
+
+- 科目确认沿用借款工具的描边、吸顶表头、统一行距和控件规格；利率档位标题回归普通卡片标题，不再叠加序号 kicker。
+- 账户级改率继续写入既有 `rateOverrides`，重新测算与导出共用同一请求载荷；仅调整结果表列顺序，不新增第二份利率状态。
+- 自动复核键仅在 TB 与 JE 两侧都存在时生成；删除任一侧立即清空，但保留手动复核入口。
+- 结果表所有普通单元格显式使用卡片底色，待复核行整行使用同一警示底色，避免固定列与滚动列产生色块断层。
+- 科目身份映射变更时重新调用 inspect 生成 `accountsLeaf`，不再只改 mapping state；大目录保留全量状态与计数，仅限制单次 DOM 渲染量。
+
+### 验证方式
+
+- `npx vitest run src/DepositInterestInteractions.test.tsx src/DepositInterestPage.test.ts src/DepositInterestLinks.test.tsx src/BalanceLayouts.test.tsx`
+- `npx tsc -b --pretty false`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib deposit_interest::tests -- --test-threads=1`
+- `DEPOSIT_TB_SAMPLE=<上海君屹TB> cargo test --manifest-path src-tauri/Cargo.toml --test deposit_account_catalog_probe -- --ignored --nocapture`
+
 ## 2026-09-18 · 全局等待弹窗报出具体处理对象
 
 ### 目标

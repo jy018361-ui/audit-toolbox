@@ -36,15 +36,15 @@ describe("余额勾稽结果布局", () => {
     );
     const table = document.querySelector(".deposit-table > table")!;
     expect(within(table as HTMLElement).getAllByRole("columnheader").map((node) => node.textContent?.trim()).slice(0, 10)).toEqual([
-      "核算主体", "银行账户／科目", "存款类型", "期初余额", "期末 TB", "JE 推导期末", "余额差异", "年利率（%）", "利率来源", "测算利息",
+      "核算主体", "银行账户／科目", "存款类型", "年利率（%）", "期初余额", "期末 TB", "JE 推导期末", "余额差异", "利率来源", "测算利息",
     ]);
     const firstRow = within(table as HTMLElement).getByText("1002 银行存款").closest("tr")!;
-    expect(firstRow.children[6]).toHaveTextContent("-1.00");
+    expect(firstRow.children[7]).toHaveTextContent("-1.00");
     expect(firstRow.children[10]).toHaveTextContent("待复核");
     expect(firstRow.children[11]).toHaveTextContent("已填利率");
     const secondRow = within(table as HTMLElement).getByText("1002 农行账户").closest("tr")!;
-    expect(secondRow.children[5]).toHaveTextContent("—");
     expect(secondRow.children[6]).toHaveTextContent("—");
+    expect(secondRow.children[7]).toHaveTextContent("—");
     expect(secondRow.children[10]).toHaveTextContent("未做JE核对");
     fireEvent.click(screen.getByRole("button", { name: "1002 农行账户的测算明细" }));
     expect(screen.getByText("年平均余额")).toBeVisible();

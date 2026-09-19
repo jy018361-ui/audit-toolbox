@@ -637,11 +637,13 @@ it("生成借款利率表并手填利率后可进入测算", async () => {
       mappingWarnings: ["JE里无借款辅助明细，默认按科目维度进行利息测算"],
     },
   });
-  expect(await screen.findByText(/共 1 笔借款明细，已填利率 0 笔/)).toBeVisible();
+  expect(
+    await screen.findByRole("columnheader", { name: "辅助核算" }),
+  ).toBeVisible();
+  expect(screen.queryByText(/共 1 笔借款明细，已填利率 0 笔/)).not.toBeInTheDocument();
   // 科目与利率合并为一张表：科目列与利率列同在这一张表头里。
   expect(screen.getByRole("columnheader", { name: "科目编码" })).toBeVisible();
   expect(screen.getByRole("columnheader", { name: "科目名称" })).toBeVisible();
-  expect(screen.getByRole("columnheader", { name: "辅助核算" })).toBeVisible();
   expect(screen.getByRole("columnheader", { name: "执行利率（%）" })).toBeVisible();
   const loanRateInput = await screen.findByRole("spinbutton", {
     name: "2001 短期借款的执行利率",
@@ -671,7 +673,7 @@ it("生成借款利率表并手填利率后可进入测算", async () => {
     target: { value: "3.85" },
   });
   expect(screen.getByRole("spinbutton", { name: "2001 短期借款的执行利率" })).toHaveValue(3.85);
-  expect(screen.getByText(/已填利率 1 笔/)).toBeVisible();
+  expect(screen.queryByText(/已填利率 1 笔/)).not.toBeInTheDocument();
   // 下一步放行。
   expect(
     screen.getByRole("button", { name: "下一步：测算与底稿" }),

@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 
 mod audipick;
+mod account_confirmation;
 mod confirmation;
 mod deposit_interest;
 #[cfg(windows)]
@@ -140,10 +141,20 @@ fn tool_catalog() -> Result<Value, AppError> {
 async fn engine_call(
     _excel_merger: State<'_, ExcelMergerService>,
     storage: State<'_, Storage>,
+    allowed: State<'_, AllowedPaths>,
     method: String,
     mut params: Value,
 ) -> Result<Value, AppError> {
-    if method == "audipick.projects" {
+    if matches!(method.as_str(), "account_confirmation.export" | "account_confirmation.import") {
+        let field = if method.ends_with("export") { "outputPath" } else { "inputPath" };
+        let selected = PathBuf::from(params.get(field).and_then(Value::as_str).unwrap_or(""));
+        if !allowed.0.lock().iter().any(|path| path_is_permitted(&selected, path)) {
+            return Err(AppError::new("PATH_NOT_AUTHORIZED", "请先选择科目确认表路径。", false, None));
+        }
+        tauri::async_runtime::spawn_blocking(move || account_confirmation::call(&method, params))
+            .await
+            .map_err(|e| AppError::new("CONFIRMATION_TASK_FAILED", "科目确认表处理异常结束。", true, Some(e.to_string())))?
+    } else if method == "audipick.projects" {
         storage.audipick_projects()
     } else if method == "audipick.backup_export" {
         storage.audipick_backup_export(Path::new(

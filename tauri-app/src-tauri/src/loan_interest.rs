@@ -174,6 +174,25 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
         balance_self_signed("openingFunctional"),
         balance_self_signed("closingFunctional"),
     );
+    // 全表「编码 → 名称」目录（含非末级行，键为去分隔符后的纯数字编码）。
+    // 辅助核算行的科目名称列被往来单位名占据（“建设银行-新桥支行”），
+    // 科目本身的语义（应付利息／长期借款）只留在上级行上；预选判断必须能把
+    // 祖先名称带上，否则名称排除词全部失效，编码前缀又恰好命中（君屹样例：
+    // 2001100 应付利息按银行拆行后被整族预选成借款本金）。
+    let mut name_catalog: HashMap<String, String> = HashMap::new();
+    for row in &tb.rows {
+        let code: String = role_text(&tb, row, &tm, "tb", "accountCode")
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .collect();
+        if code.len() < 2 {
+            continue;
+        }
+        let name = role_text(&tb, row, &tm, "tb", "accountName");
+        if !name.trim().is_empty() {
+            name_catalog.entry(code).or_insert(name);
+        }
+    }
     #[derive(Clone)]
     struct CatalogAccount {
         key: String,
@@ -238,15 +257,17 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
         .into_iter()
         .filter_map(|key| grouped.remove(&key))
         .map(|account| {
+            let context = ancestor_names(&account.code, &name_catalog);
             let suggestion = suggest_loan_account(
                 &account.code,
                 &account.name,
                 &account.account,
                 account.opening,
                 account.closing,
+                &context,
             );
             let suggested_type =
-                if suggest_interest_expense_account(&account.code, &account.name, &account.account)
+                if suggest_interest_expense_account(&account.code, &account.name, &account.account, &context)
                 {
                     "interest_expense"
                 } else if suggestion.is_loan {
@@ -269,11 +290,40 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
     Ok(json!({ "accounts": accounts }))
 }
 
+/// 科目按编码前缀回查到的各级上级名称（由近及远拼接）。
+/// 辅助核算行的名称列是往来单位名，语义只在上级行；分段／混合编码规范化后
+/// 走纯数字前缀（与 `tb_catalog_leaf_mask` 同口径），查不到上级行时为空。
+fn ancestor_names(code: &str, catalog: &HashMap<String, String>) -> String {
+    // 去掉分隔符后按纯数字前缀走查（与目录键同规则）：
+    // "2501001-10020001200100" → "2501001…" 才能命中上级行 "2501001"。
+    let normalized: String = code.chars().filter(|c| c.is_ascii_digit()).collect();
+    let mut found: Vec<&str> = Vec::new();
+    if normalized.len() >= 2 {
+        for length in (2..normalized.len()).rev() {
+            if let Some(name) = catalog.get(&normalized[..length]) {
+                found.push(name.as_str());
+            }
+        }
+    }
+    found.join(" ")
+}
+
 /// 利息支出只预选明确的损益科目。应付／应收利息属于资产负债项目，不能因
 /// 名称里有“利息”就纳入；普通“财务费用”也可能混有手续费、汇兑损益，
 /// 没有更具体的利息语义时留给用户确认。
-fn suggest_interest_expense_account(code: &str, name: &str, account: &str) -> bool {
-    let text = norm(&format!("{code} {name} {account}"));
+///
+/// 边界：a) 名称排除与纳入都看「自身名称＋上级科目名称」——辅助核算行的
+/// 名称是往来单位名，科目语义（如“长期借款-应付利息”）只留在上级行；
+/// b) 名称像利息支出但编码属于资产／负债／权益／成本类的不是费用化利息：
+/// 1604004 在建工程-利息费用是**资本化利息**（进资产成本走折旧），不能充当
+/// “测算利息 vs TB 利息支出”的比较基准。
+fn suggest_interest_expense_account(
+    code: &str,
+    name: &str,
+    account: &str,
+    context: &str,
+) -> bool {
+    let text = norm(&format!("{code} {name} {account} {context}"));
     if [
         "应付利息",
         "應付利息",
@@ -285,6 +335,12 @@ fn suggest_interest_expense_account(code: &str, name: &str, account: &str) -> bo
     .iter()
     .any(|word| text.contains(&norm(word)))
     {
+        return false;
+    }
+    let head = ledger_mapping::normalize_account_code(code)
+        .chars()
+        .next();
+    if matches!(head, Some('1') | Some('2') | Some('3') | Some('4')) {
         return false;
     }
     [
@@ -314,8 +370,10 @@ struct LoanAccountSuggestion {
 /// 仅预选短期借款与长期借款本金。债券、租赁负债、应付利息虽同属融资相关
 /// 项目，但其计息依据及工作底稿不同，须由用户另行处理。
 ///
-/// 1. 标准短期/长期借款代码或明确的借款本金名称是正证据；
-/// 2. 应付利息、债券、租赁等排除词优先于名称中的“短期借款”；
+/// 1. 标准短期/长期借款代码或明确的借款本金名称是正证据；但**编码前缀
+///    单独不构成证据**——必须叠加“借款/贷款”语义（自身或上级科目名）；
+/// 2. 应付利息、债券、租赁等排除词优先于名称中的“短期借款”；名称与上级
+///    科目名都参与判断（辅助核算行的名称列是往来单位名，语义在上级行）；
 /// 3. 期初/期末余额仅作为解释性证据，不能因两个时点恰好为零漏掉年内借还。
 ///
 /// 不读取文件名、账套号或固定列位置，ERP 自定义代码时仍可由名称语义进入候选。
@@ -325,13 +383,18 @@ fn suggest_loan_account(
     account: &str,
     opening: f64,
     closing: f64,
+    context: &str,
 ) -> LoanAccountSuggestion {
     let normalized_code = ledger_mapping::normalize_account_code(code);
-    let text = norm(if name.trim().is_empty() {
-        account
-    } else {
-        name
-    });
+    let text = norm(&format!(
+        "{} {}",
+        if name.trim().is_empty() {
+            account
+        } else {
+            name
+        },
+        context
+    ));
     let nonzero_balance = opening.abs() > 0.005 || closing.abs() > 0.005;
     let asset_or_expense = normalized_code
         .chars()
@@ -396,15 +459,18 @@ fn suggest_loan_account(
         };
     }
 
-    // 企业会计准则常见代码；允许后接明细位。这里只把稳定的一级代码作为
-    // 强证据，不用任意“2”开头替代语义判断。
+    // 企业会计准则常见代码；允许后接明细位。编码前缀只是弱证据：必须叠加
+    // 「借款/贷款」语义（自身或上级科目名）才预选——应付利息挂在 2001/2501
+    // 下的账套里，纯前缀会把整族辅助行误选成借款本金（君屹样例）。
     let standard_code = ["2001", "2501"]
         .iter()
         .any(|prefix| normalized_code.starts_with(prefix));
+    let borrowing_semantics =
+        ["借款", "貸款", "贷款", "透支"].iter().any(|word| text.contains(&norm(word)));
     let strong_terms = ["短期借款", "短期借款本金", "长期借款", "長期借款"]
         .iter()
         .any(|word| text.contains(&norm(word)));
-    let is_loan = standard_code || strong_terms;
+    let is_loan = strong_terms || (standard_code && borrowing_semantics);
     let reason = if standard_code {
         format!(
             "科目代码 {} 属于标准短期／长期借款代码{}。",
@@ -5523,7 +5589,7 @@ mod tests {
 
     #[test]
     fn 借款科目建议仅预选短期和长期借款本金() {
-        let standard = suggest_loan_account("20010001", "银行短期借款", "", 100.0, 80.0);
+        let standard = suggest_loan_account("20010001", "银行短期借款", "", 100.0, 80.0, "");
         assert!(standard.is_loan, "{standard:?}");
         assert!(
             standard.reason.contains("标准短期／长期借款"),
@@ -5537,28 +5603,60 @@ mod tests {
             "",
             1_500.0,
             578_400.0,
+            "",
         );
         assert!(!employee.is_loan, "{employee:?}");
         assert!(employee.reason.contains("资产"), "{employee:?}");
 
         // 债券、租赁、应付利息不属于当前工具的借款本金范围；尤其应付
         // 利息明细含“短期借款”时，排除词必须优先于借款关键词。
-        assert!(!suggest_loan_account("25020000", "应付债券", "", 0.0, 0.0).is_loan);
-        assert!(!suggest_loan_account("2231000000", "租赁负债(固)-融资租赁", "", 0.0, 0.0).is_loan);
-        assert!(!suggest_loan_account("2161100060", "应付利息-短期借款一般", "", 0.0, 0.0).is_loan);
-        assert!(suggest_loan_account("2111109990", "其他短期借款-其他", "", 0.0, 0.0).is_loan);
-        assert!(suggest_loan_account("2211400990", "其他长期借款-其他", "", 0.0, 0.0).is_loan);
+        assert!(!suggest_loan_account("25020000", "应付债券", "", 0.0, 0.0, "").is_loan);
+        assert!(!suggest_loan_account("2231000000", "租赁负债(固)-融资租赁", "", 0.0, 0.0, "").is_loan);
+        assert!(!suggest_loan_account("2161100060", "应付利息-短期借款一般", "", 0.0, 0.0, "").is_loan);
+        assert!(suggest_loan_account("2111109990", "其他短期借款-其他", "", 0.0, 0.0, "").is_loan);
+        assert!(suggest_loan_account("2211400990", "其他长期借款-其他", "", 0.0, 0.0, "").is_loan);
         let reclassified =
-            suggest_loan_account("25010001", "一年内到期的长期借款", "", 100.0, 100.0);
+            suggest_loan_account("25010001", "一年内到期的长期借款", "", 100.0, 100.0, "");
         assert!(!reclassified.is_loan, "{reclassified:?}");
         assert!(reclassified.reason.contains("避免与长期借款重复"));
         assert!(
-            !suggest_loan_account("22410000", "其他应付款", "", 1.0, 2.0).is_loan,
+            !suggest_loan_account("22410000", "其他应付款", "", 1.0, 2.0, "").is_loan,
             "不能把所有负债科目都预选"
         );
         assert!(
-            !suggest_loan_account("15010000", "委托贷款", "", 1.0, 2.0).is_loan,
+            !suggest_loan_account("15010000", "委托贷款", "", 1.0, 2.0, "").is_loan,
             "贷款资产不是借款负债"
+        );
+
+        // 编码前缀单独不构成证据：2001/2501 开头但自身与上级都无借款语义
+        // （辅助行名称是往来单位、上级是应付利息）的不得预选（君屹样例）。
+        assert!(
+            !suggest_loan_account("2001100-10020001200100", "建设银行-新桥支行", "", 0.0, 99198.29, "").is_loan,
+            "应付利息的辅助核算行不能只凭 2001 前缀预选成借款"
+        );
+        // 上级科目名提供语义：长期借款-本金下的银行行照常预选。
+        assert!(
+            suggest_loan_account(
+                "2501001-10020001200100",
+                "建设银行-新桥支行",
+                "",
+                0.0,
+                500_000.0,
+                "长期借款-本金",
+            )
+            .is_loan
+        );
+        // 上级科目名里的排除词同样生效：长期借款-应付利息的银行行不选。
+        assert!(
+            !suggest_loan_account(
+                "2501002-10020001200100",
+                "建设银行-新桥支行",
+                "",
+                0.0,
+                53_175.54,
+                "长期借款-应付利息",
+            )
+            .is_loan
         );
     }
 
@@ -5567,15 +5665,27 @@ mod tests {
         assert!(suggest_interest_expense_account(
             "66030001",
             "财务费用-利息支出",
+            "",
             ""
         ));
-        assert!(suggest_interest_expense_account("66039999", "借款利息", ""));
+        assert!(suggest_interest_expense_account("66039999", "借款利息", "", ""));
         assert!(!suggest_interest_expense_account(
             "2231",
             "应付利息-短期借款",
+            "",
             ""
         ));
-        assert!(!suggest_interest_expense_account("6603", "财务费用", ""));
+        assert!(!suggest_interest_expense_account("6603", "财务费用", "", ""));
+        // 资产类编码下名字像利息费用的不是费用化利息：1604004 在建工程-利息
+        // 费用是资本化利息，进资产成本走折旧，不能当 TB 利息支出比较基准。
+        assert!(!suggest_interest_expense_account("1604004", "利息费用", "", ""));
+        // 上级科目名里的应付利息同样排除辅助核算行。
+        assert!(!suggest_interest_expense_account(
+            "2001100-10020001200100",
+            "建设银行-新桥支行",
+            "",
+            "应付利息"
+        ));
     }
 
     #[test]
@@ -7123,6 +7233,70 @@ mod tests {
             0.031
         );
         assert_eq!(floating["rateRows"][0]["spreadBps"].as_f64().unwrap(), 90.0);
+    }
+
+    #[test]
+    fn 科目预选不误报辅助核算应付利息与资本化利息() {
+        // 君屹 202606 样例形态：应付利息按银行户拆行，科目名称列被往来单位
+        // 名占据；应付利息挂在 2001/2501 编码族下；在建工程下有资本化利息。
+        // 预选必须回查上级科目语义，不能只凭编码前缀与行名判断。
+        let fixture = SyntheticLedger::new(&[]);
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet();
+        sheet.set_name("TB").unwrap();
+        let rows = [
+            vec!["编码", "科目", "期初贷", "期末贷"],
+            vec!["2001", "短期借款", "0", "0"],
+            vec!["2001100", "应付利息", "99198.29", "80000"],
+            vec!["2001100-10020001200100", "建设银行-新桥支行（6666）", "18867.74", "20000"],
+            vec!["2501001", "长期借款-本金", "1000000", "900000"],
+            vec!["2501001-10020001200100", "建设银行-新桥支行（6666）", "600000", "500000"],
+            vec!["2501002", "长期借款-应付利息", "0", "53175.54"],
+            vec!["2501002-10020001200100", "建设银行-新桥支行（6666）", "0", "53175.54"],
+            vec!["1604004", "利息费用", "178394.36", "200000"],
+            vec!["6603001", "财务费用-利息支出", "484610.7", "300000"],
+        ];
+        for (r, row) in rows.iter().enumerate() {
+            for (c, v) in row.iter().enumerate() {
+                sheet.write_string(r as u32, c as u16, *v).unwrap();
+            }
+        }
+        let path = fixture.dir.join("tb-boundary.xlsx");
+        book.save(&path).unwrap();
+        let tb_source = json!({"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷"}});
+        let accounts = tb_accounts(&json!({"tbSource": tb_source})).unwrap();
+        let list = accounts["accounts"].as_array().unwrap();
+        let role_of = |code: &str| {
+            list.iter()
+                .find(|item| item["code"].as_str() == Some(code))
+                .map(|item| item["suggestedType"].as_str().unwrap())
+                .unwrap_or_else(|| panic!("清单缺 {code}：{list:#?}"))
+        };
+        assert_eq!(
+            role_of("2001100-10020001200100"),
+            "skip",
+            "应付利息的银行辅助行不能预选成借款本金"
+        );
+        assert_eq!(
+            role_of("2501002-10020001200100"),
+            "skip",
+            "长期借款-应付利息的银行辅助行不能预选成借款本金"
+        );
+        assert_eq!(
+            role_of("2501001-10020001200100"),
+            "loan",
+            "长期借款-本金下的银行辅助行应照常预选"
+        );
+        assert_eq!(
+            role_of("1604004"),
+            "skip",
+            "在建工程下的资本化利息不能预选成利息支出"
+        );
+        assert_eq!(
+            role_of("6603001"),
+            "interest_expense",
+            "财务费用-利息支出照常预选"
+        );
     }
 
     #[test]

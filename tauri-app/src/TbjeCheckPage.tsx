@@ -1443,6 +1443,28 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     return params;
   }
 
+  // 逐组联动验证的触发键只认「配对组成＋各组数据源」：本工具的映射面板
+  // 不提供辅助核算角色，其余角色的映射调整不改变联动结论，不再触发逐组
+  // 整表重读——与汇兑损益、存款利息同一口径。
+  const auxLinkSourceOf = (file?: PairingFile) => {
+    if (!file) return null;
+    const inspected = inspects[pairingFileKey(file)];
+    return [
+      file.path,
+      inspected?.sheet ?? "",
+      inspected?.headerRow ?? 0,
+      inspected?.headerDepth ?? 0,
+    ];
+  };
+  const auxLinksKey = JSON.stringify(
+    groups
+      .filter((group) => group.tb && group.je)
+      .map((group) => [
+        group.id,
+        auxLinkSourceOf(group.tb),
+        auxLinkSourceOf(group.je),
+      ]),
+  );
   useEffect(() => {
     let cancelled = false;
     const paired = groups.filter((group) => group.tb && group.je);
@@ -1464,7 +1486,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groups, mappings, inspects, entityScope.selection]);
+  }, [auxLinksKey]);
 
   /** 导出某一组的差异明细。逐组导——十组的明细塞一个工作簿没法看。 */
   async function exportGroup(label: string) {
@@ -1691,7 +1713,6 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
                   <Plus aria-hidden="true" />
                   手动添加配对组
                 </Button>
-                <span>先选择 TB Excel；进入配对组后可再选择 JE Excel 和两侧 Sheet。</span>
               </div>
               {visibleGroups.length === 0 && (
                 <EmptyState

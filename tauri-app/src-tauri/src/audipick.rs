@@ -569,7 +569,7 @@ fn review_je_instruction() -> String {
 const REVIEW_JE: &str = "角色仅可为 entity、date、id、voucherType、accountCode、accountName、summary、currency、functionalCurrency、direction、functionalAmount、functionalDebit、functionalCredit、foreignAmount、foreignDebit、foreignCredit。id 与 accountName 可以映射多列：Oracle 的凭证键要 Batch＋JE Name 两列组合才唯一，少一列就串号；科目名称可能拆成一级、二级两列。其余角色各占一列。多列仅限上述两种真正的拆分：名称只组合科目名称自己的层级列（一级／二级／三级），凭证号只组合构成凭证键的列（如 Batch＋JE Name、凭证字＋凭证号）；冲销凭证号、被冲销凭证号记录的是「这张凭证冲掉了谁」，不是凭证键，预算科目、对方／往来科目也不是本方科目名称——这些列绝不并入多列。voucherType 只认独立成列的凭证类型（SAP 的 BLART、Document Type、凭证类别这类单独一列）；「凭证字＋号合成一列」（如 记-0001、记0001、记2025-0001）整列就是凭证识别字段 id，绝不要建议把这类合成列同时或改为映射 voucherType，也不要建议从中拆出类型。借贷方向只有 direction 一个角色，原币与本位币共用同一列——一条分录的借贷方向对两个口径必然相同，不存在原币记借方而本位币记贷方的情况。金额有三种记法，同一口径内只能成立一种：单列净额（借正贷负）、借方与贷方两列、净额加方向列。两个口径各自独立判定：原币可以是借贷分列而本位币是净额。借方与贷方两列已经成立时，不要再建议把借方或贷方列改映射为净额角色；净额列（无论正负号是否随方向列拆出）已经成立时，也不要建议把同一净额列同时映射为借方与贷方两个角色——三种记法互斥，多选反而破坏方案。币种**一律分两列判定，与科目余额表同口径**：currency 是原币币种，登记这笔分录按什么币记账（凭证货币、Document Currency Key、Enter Currency），逐行可变；functionalCurrency 是本位币币种，登记主体的记账本位币（公司代码货币、Company Code Currency Key、Ledger Currency），整列同值、不区分行。两者都是**币种代码列**（存 CNY／USD 这类三位代码），不是金额列，别跟本位币金额、原币金额混。两者都存在时不要互换。只有一列时先看列名：凭证货币命名的列（货币、凭证货币、交易币种、Document Currency、Enter Currency）就是 currency——整列只剩一种代码只是「整本账都是本币业务」的正常形态，不是本位币列的证据；本位币命名的列（本位币、本币、公司代码货币、总账货币、Ledger Currency、Company Code Currency）才是 functionalCurrency，整列同一个代码的「本币」「本币币种」列绝不能指给 currency。列名两头都不沾的，再按取值分布判：整列同一个代码且几乎不空的是 functionalCurrency，出现两种以上代码或大量空白的是 currency。常用表头示例：会计科目、总账科目、总帐科目（「帐」是「账」的异体字，两种写法都有）属于 accountCode，科目文本／科目全名／科目名称一级／科目名称二级属于 accountName，借贷标志（取值 S／H）属于 direction，唯一码（日期与凭证号已经拼好的一列）属于 id，凭证货币属于 currency，凭证金额、凭证货币金额属于 foreignAmount，本位币金额属于 functionalAmount，借贷属于 direction。列名只是线索、取值才是判据：「会计科目」「总账科目」命名的列在某些导出里放的是名称文本（如 库存现金-人民币），这时它是 accountName；取值是纯编码时才是 accountCode。过账代码（Posting Key，取值 40、50、01 这类数字过账码）不是借贷方向——统驭过账码没有借贷含义，绝不能映射为 direction。金额方案仅可为 signed、direction、debit_credit。";
 
 /// 科目余额表专属：一行是一个科目在某时点的余额。角色清单以传入的 hardcodedCandidates 为准。
-const REVIEW_TB: &str = "角色共分七组：身份（entity、accountCode、accountName）；币种（currency 原币币种、currencyText 币种线索文本、functionalCurrency 本位币）；方向（openingDirection 期初方向、closingDirection 期末方向）；期初余额六件套（本位币净额/借方/贷方、原币净额/借方/贷方）；期末余额六件套（同上）；本年累计发生额（本位币借方/贷方、原币借方/贷方）；本期发生额（本位币净额/借方/贷方，次选口径）。accountName 可以映射多列（如科目名称一级＋二级），其余角色各占一列。多列仅限科目名称的层级列；预算科目、对方／往来、辅助核算等语义不同的列不得并入。余额有三种记法，期初与期末各自独立判定：单列净额（借正贷负）、借方与贷方两列、净额加方向列。没有方向列时净额必须自带正负号，不要为了凑形态硬给一个方向列。方向列的归属看位置：方向列紧邻在某个余额列的右侧（期初余额…方向 / 期末余额…方向）时属于那个余额，紧跟期初余额右侧的映射 openingDirection、紧跟期末余额右侧的映射 closingDirection；表里只有一列「方向」且不在任何余额列右侧时（常见于表头前部、科目信息旁边），它是余额方向，一律映射 closingDirection——即使它紧邻或位于期初余额列的左侧也不要映射为 openingDirection。发生额口径：`借方累计`／`贷方累计` 与 `本年累计借方`／`本年累计贷方` 是同一回事，只是词序不同，都属于本年累计；期末余额列可能写作 `累计余额`（配一个 `累计余额方向`）。列名没写明「本期」还是「本年」时一律按本年累计（审计取的是全年数）；若同一张表出现两列都叫「借方发生额」，金额合计大的是本年累计、小的是本期发生。币种列判定只看取值分布，与列名无关，按两条二选一，没有第三种情况：（1）整列几乎全填满（空白不到一成）且从头到尾只出现一种币种代码 → functionalCurrency，它登记的是主体本位币；（2）其余一切情形 → currency（原币币种列）。这包括出现两种以上币种代码，也包括「只标外币」写法——大部分行空白、只有外币科目行才填币种，空白行的含义是本位币，这恰恰是 currency 列的正常形态，绝不能因为空白多就把它判成本位币列。反例：某列八成行空白、只在美元户/欧元户行填 USD/EUR——它是 currency；整列二百多行全部填同一个币种代码、无一空白——才是 functionalCurrency。币种角色空缺是正常状态：判为原币币种列的只映射 currency，functionalCurrency 空着（很多表根本不单列本位币）；判为本位币列的只映射 functionalCurrency，currency 空着。绝不要因为某个角色还空着，就把已判给另一币种角色的列再塞给它。判定为 functionalCurrency 后，若某个文本列里逐行写着账户币种（如「美元户」「ICBC USD」「建行USD4150」），把该列映射为 currencyText 供下游抽取。挑哪一列**只看取值、不看列名**：要挑真抽得出币种的那一列——`科目级别描述` 这种整列都是 `1002_银行存款` 的一级科目名，哪怕列名里有「描述」二字也不是线索列。没有任何一列抽得出币种时让 currencyText 空着，不要硬填。但表里另有真正的多币种列（含空白或多币种）时，以那一列为准。可以用勾稽等式验证映射是否成立：期末余额 = 期初余额 + 本年累计借方 − 本年累计贷方。若按当前映射大面积对不上，多半是把某一列映射错了口径，应指出来。";
+const REVIEW_TB: &str = "角色共分七组：身份（entity、accountCode、accountName）；币种（currency 原币币种、functionalCurrency 本位币）；方向（openingDirection 期初方向、closingDirection 期末方向）；期初余额六件套（本位币净额/借方/贷方、原币净额/借方/贷方）；期末余额六件套（同上）；本年累计发生额（本位币借方/贷方、原币借方/贷方）；本期发生额（本位币净额/借方/贷方，次选口径）。accountName 可以映射多列（如科目名称一级＋二级），其余角色各占一列。多列仅限科目名称的层级列；预算科目、对方／往来、辅助核算等语义不同的列不得并入。余额有三种记法，期初与期末各自独立判定：单列净额（借正贷负）、借方与贷方两列、净额加方向列。没有方向列时净额必须自带正负号，不要为了凑形态硬给一个方向列。方向列的归属看位置：方向列紧邻在某个余额列的右侧（期初余额…方向 / 期末余额…方向）时属于那个余额，紧跟期初余额右侧的映射 openingDirection、紧跟期末余额右侧的映射 closingDirection；表里只有一列「方向」且不在任何余额列右侧时（常见于表头前部、科目信息旁边），它是余额方向，一律映射 closingDirection——即使它紧邻或位于期初余额列的左侧也不要映射为 openingDirection。发生额口径：`借方累计`／`贷方累计` 与 `本年累计借方`／`本年累计贷方` 是同一回事，只是词序不同，都属于本年累计；期末余额列可能写作 `累计余额`（配一个 `累计余额方向`）。列名没写明「本期」还是「本年」时一律按本年累计（审计取的是全年数）；若同一张表出现两列都叫「借方发生额」，金额合计大的是本年累计、小的是本期发生。币种列判定只看取值分布，与列名无关，按两条二选一，没有第三种情况：（1）整列几乎全填满（空白不到一成）且从头到尾只出现一种币种代码 → functionalCurrency，它登记的是主体本位币；（2）其余一切情形 → currency（原币币种列）。这包括出现两种以上币种代码，也包括「只标外币」写法——大部分行空白、只有外币科目行才填币种，空白行的含义是本位币，这恰恰是 currency 列的正常形态，绝不能因为空白多就把它判成本位币列。反例：某列八成行空白、只在美元户/欧元户行填 USD/EUR——它是 currency；整列二百多行全部填同一个币种代码、无一空白——才是 functionalCurrency。币种角色空缺是正常状态：判为原币币种列的只映射 currency，functionalCurrency 空着（很多表根本不单列本位币）；判为本位币列的只映射 functionalCurrency，currency 空着。绝不要因为某个角色还空着，就把已判给另一币种角色的列再塞给它。币种线索文本（currencyText）不在复核范围：识别阶段已按取值自动挑选（文本列里逐行写着账户币种时由脚本登记，如「美元户」「ICBC USD」），currentMapping 里即使有它也维持现状，不要对它输出任何 change，也不要建议把任何文本列新指给它。可以用勾稽等式验证映射是否成立：期末余额 = 期初余额 + 本年累计借方 − 本年累计贷方。若按当前映射大面积对不上，多半是把某一列映射错了口径，应指出来。";
 
 /// 汇兑损益专属的月度兜底：未实现测算按月归集，序时账只有月份列时
 /// date 不必非要完整日期。其他工具（存款利息按日计息、借款利息按天
@@ -607,6 +607,37 @@ fn review_date_instruction(policy: ReviewDatePolicy) -> &'static str {
 
 /// 把金标身份缺项显式交给模型。此前只给 availableRoles，角色太多时模型容易
 /// 只复核已映射列、漏掉真正拦截运行的编码／摘要／日期。
+/// LLM 映射复核一律忽略的角色：从 availableRoles 摘除、不进复核范围
+/// （mappedRolesToReview／unmappedRoles），模型越权提出的建议在卫生过滤里
+/// 无条件丢弃——即使请求没带 availableRoles 也拦。
+///
+/// 币种线索文本（currencyText）由识别阶段按取值自动挑选（fx.rs
+/// `pick_currency_text_column`），指向的列几乎总是科目名称列；引擎取币种
+/// 本来就有「从科目名称抽币种」的兜底，这一角色增删与否不影响测算结果。
+/// 复核却高频对它输出「科目名称 → 未映射」之类的高置信清除建议，制造
+/// 待确认噪声（2026-09 用户反馈），定为复核不管这个角色。
+const REVIEW_IGNORED_ROLES: [&str; 1] = ["currencyText"];
+
+fn review_ignores_role(kind: &str, role: &str) -> bool {
+    REVIEW_IGNORED_ROLES.contains(&crate::ledger_mapping::migrate_role_name(kind, role))
+}
+
+/// 复核 payload 组装阶段就把忽略的角色从 availableRoles 里摘掉，
+/// 模型从一开始就看不到它，不浪费建议额度。
+fn exclude_ignored_review_roles(payload: &mut Value, kind: &str) {
+    let Some(available) = payload
+        .get_mut("availableRoles")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    available.retain(|value| {
+        value
+            .as_str()
+            .is_none_or(|role| !review_ignores_role(kind, role))
+    });
+}
+
 fn inject_required_missing_roles(payload: &mut Value, kind: &str) {
     let current = payload.get("currentMapping").and_then(Value::as_object);
     let available = payload
@@ -687,7 +718,10 @@ fn inject_mapping_review_scope(payload: &mut Value, kind: &str) {
     if let Some(mapping) = mapping {
         for (raw_role, value) in mapping {
             let role = crate::ledger_mapping::migrate_role_name(kind, raw_role);
-            if role.is_empty() || (!available_names.is_empty() && !available_names.contains(role)) {
+            if role.is_empty()
+                || REVIEW_IGNORED_ROLES.contains(&role)
+                || (!available_names.is_empty() && !available_names.contains(role))
+            {
                 continue;
             }
             let columns = columns_of(value);
@@ -760,7 +794,11 @@ fn inject_mapping_review_scope(payload: &mut Value, kind: &str) {
     let unmapped = available
         .into_iter()
         .map(|role| crate::ledger_mapping::migrate_role_name(kind, &role).to_owned())
-        .filter(|role| !role.is_empty() && !mapped_names.contains(role))
+        .filter(|role| {
+            !role.is_empty()
+                && !REVIEW_IGNORED_ROLES.contains(&role.as_str())
+                && !mapped_names.contains(role)
+        })
         .map(Value::String)
         .collect::<Vec<_>>();
     if let Some(object) = payload.as_object_mut() {
@@ -1030,10 +1068,12 @@ pub(crate) fn ledger_pair_review_call(params: &Value, settings: &Value) -> Resul
         ));
     }
     if tb.is_object() {
+        exclude_ignored_review_roles(&mut tb, "tb");
         inject_current_form(&mut tb, "tb");
         restrict_review_roles_to_current_form(&mut tb, "tb");
     }
     if je.is_object() {
+        exclude_ignored_review_roles(&mut je, "je");
         inject_current_form(&mut je, "je");
         restrict_review_roles_to_current_form(&mut je, "je");
     }
@@ -1252,6 +1292,7 @@ fn ledger_mapping_llm_call(
             }
         }
     }
+    exclude_ignored_review_roles(&mut payload, if is_tb { "tb" } else { "je" });
     inject_current_form(&mut payload, if is_tb { "tb" } else { "je" });
     restrict_review_roles_to_current_form(&mut payload, if is_tb { "tb" } else { "je" });
     inject_engine_facts(&mut payload);
@@ -1584,6 +1625,13 @@ fn sanitize_change_list(
     let Some(changes) = value.get_mut(key).and_then(Value::as_array_mut) else {
         return;
     };
+    // 复核忽略的角色（币种线索文本）在最前一步统一丢弃：模型的越权输出
+    // 即使漏过 availableRoles 检查（请求没带角色清单时）也到不了前端，
+    // 后续挪移链、autoClearSafe 都不必再考虑它。
+    changes.retain(|change| {
+        let role = change.get("role").and_then(Value::as_str).unwrap_or("");
+        !review_ignores_role(kind, role)
+    });
     let headers: Vec<String> = payload
         .get("headers")
         .and_then(Value::as_array)
@@ -3366,6 +3414,77 @@ mod mapping_prompt_tests {
             value["changes"].as_array().unwrap().is_empty(),
             "货币列已被 functionalCurrency 占用：{value:?}"
         );
+    }
+
+    /// 币种线索文本不进 LLM 复核：availableRoles 摘除、复核范围不含它、
+    /// 模型的 clear／replace 越权建议无条件丢弃。实测模型高频输出
+    /// 「科目名称 → 未映射」的清除建议，而采纳与否不影响测算结果——引擎取
+    /// 币种本就有「从科目名称抽币种」的兜底（2026-09 用户反馈后定的口径）。
+    #[test]
+    fn 币种线索文本角色不进复核() {
+        assert!(
+            !REVIEW_TB.contains("把该列映射为 currencyText"),
+            "提示词不应再指导模型挑选币种线索列"
+        );
+        assert!(
+            REVIEW_TB.contains("currencyText）不在复核范围"),
+            "提示词应明确币种线索文本不在复核范围"
+        );
+        let mut payload = json!({
+            "headers": ["科目编码", "科目名称", "币种"],
+            "sampleRows": [["1002", "银行存款-美元户", "USD"]],
+            "currentMapping": {
+                "accountCode": "科目编码",
+                "accountName": "科目名称",
+                "currencyText": "科目名称",
+            },
+            "availableRoles": ["accountCode", "accountName", "currencyText", "currency"],
+        });
+        exclude_ignored_review_roles(&mut payload, "tb");
+        let roles = payload["availableRoles"].as_array().unwrap();
+        assert!(
+            !roles
+                .iter()
+                .any(|role| role.as_str() == Some("currencyText")),
+            "{roles:?}"
+        );
+        inject_mapping_review_scope(&mut payload, "tb");
+        for key in ["mappedRolesToReview", "unmappedRoles"] {
+            let list = payload[key].as_array().unwrap();
+            assert!(
+                !list.iter().any(|item| {
+                    item.as_str() == Some("currencyText")
+                        || item["role"].as_str() == Some("currencyText")
+                }),
+                "{key} 不应含币种线索文本：{list:?}"
+            );
+        }
+        // 模型越权输出 clear 与 replace：即使请求没带 availableRoles
+        // （卫生过滤无角色清单可查）也要丢弃，其余正常建议不受影响。
+        let mut value = json!({"changes": [
+            {"role": "currencyText", "currentColumn": "科目名称", "action": "clear",
+             "confidence": 0.95, "reason": "抽不出币种", "scheme": ""},
+            {"role": "currencyText", "currentColumn": "", "suggestedColumn": "科目名称",
+             "confidence": 0.9, "reason": "科目名称里有美元户", "scheme": ""},
+            {"role": "currency", "currentColumn": "", "suggestedColumn": "币种",
+             "confidence": 0.9, "reason": "三位币种代码", "scheme": ""},
+        ]});
+        sanitize_mapping_changes(
+            &mut value,
+            &json!({
+                "headers": ["科目编码", "科目名称", "币种"],
+                "currentMapping": {
+                    "accountCode": "科目编码",
+                    "accountName": "科目名称",
+                    "currencyText": "科目名称",
+                },
+            }),
+            "tb",
+            ReviewDatePolicy::Strict,
+        );
+        let changes = value["changes"].as_array().unwrap();
+        assert_eq!(changes.len(), 1, "只剩币种列建议：{changes:?}");
+        assert_eq!(changes[0]["role"].as_str(), Some("currency"));
     }
 
     /// 09 实测场景：reason 明说"暂不映射"，change 却仍把该列映射上去。

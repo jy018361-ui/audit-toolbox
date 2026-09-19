@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { markToolPageLive } from "./toolPageActivity";
 import {
   engineCall,
   jobCancel,
@@ -141,6 +142,9 @@ function normalizeRollProjects(value: unknown): RollProject[] {
 }
 
 export function RollForwardPage({ tool }: { tool: ToolManifest }) {
+  // 内存缓存非空说明本页此前有现场：登记后不参与 LRU 淘汰，
+  // 保活到应用退出。
+  if (rollForwardInMemoryCache) markToolPageLive("audit_roll_forward");
   const [subjects, setSubjects] = useState<RollSubject[]>([]);
   const [projects, setProjects] = useState<RollProject[]>([]);
   const [projectIndex, setProjectIndex] = useState(0);

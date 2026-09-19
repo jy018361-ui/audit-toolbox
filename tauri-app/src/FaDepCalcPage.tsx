@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { markToolPageLive } from "./toolPageActivity";
 import {
   engineCall,
   jobCancel,
@@ -78,6 +79,9 @@ let faDepDraftCache: DepDraft | undefined;
 /// 交互均复制 FA 主工具；导出为单页"折旧测算"Excel（活公式，可审计）。
 export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
   const draft = faDepDraftCache;
+  // 草稿缓存非空说明本页此前有现场：登记后不参与 LRU 淘汰，
+  // 保活到应用退出。
+  if (draft) markToolPageLive("fa_dep_calc");
   const [step, setStep] = useState(draft?.step ?? 0);
   const [path, setPath] = useState(draft?.path ?? "");
   const [sheet, setSheet] = useState(draft?.sheet ?? "");

@@ -54,6 +54,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { RestoreBanner } from "@/components/RestoreBanner";
 import { WindowControls } from "@/components/WindowControls";
 import { PersistentToolPages } from "@/components/PersistentToolPages";
+import { markToolPageLive } from "./toolPageActivity";
 import { ToolRecoveryBoundary } from "@/components/ToolRecoveryBoundary";
 import { JobDialogProvider } from "@/components/JobDialog";
 import { JobProgress } from "@/components/JobProgress";
@@ -591,6 +592,9 @@ export default function App() {
       .finally(() => setStartupReady(true));
     void listenJobEvents((e) => {
       invalidateHistoryCache();
+      // 任何任务事件都说明该工具页有过真实动作，登记为「有现场」，
+      // 退出 LRU 淘汰、保活到应用退出。
+      markToolPageLive(e.toolId);
       setJobs((v) => ({ ...v, [e.jobId]: e }));
     }).catch(() => undefined);
   }, []);
@@ -1173,6 +1177,8 @@ function ToolPage({
       </>
     );
   async function run(action: ActionDefinition) {
+    // 执行动作即「有现场」：登记后本页退出 LRU 淘汰，保活到应用退出。
+    markToolPageLive(toolId);
     setError("");
     setResult(undefined);
     setJob(undefined);

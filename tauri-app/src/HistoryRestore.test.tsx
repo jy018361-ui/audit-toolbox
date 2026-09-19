@@ -6,6 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import { check } from "@tauri-apps/plugin-updater";
 import App from "./App";
 import { historyGet, historyRestore } from "./api";
+import { clearToolPageActivityForTests, toolPageIsLive } from "./toolPageActivity";
 import catalog from "../public/tool-catalog.json";
 
 vi.mock("./api", async (importOriginal) => ({
@@ -51,6 +52,7 @@ const completedRow = (overrides: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearToolPageActivityForTests();
   vi.mocked(historyGet).mockResolvedValue([]);
   vi.mocked(check).mockResolvedValue(null);
 });
@@ -82,6 +84,9 @@ describe("history resume", () => {
     expect(
       screen.getByText("已恢复「FY27 WP服务单生成工具」上次任务的输入。"),
     ).toBeVisible();
+    // 回填走程序赋值不触发 DOM 事件，恢复本身要把该工具页登记为
+    // 「有现场」，否则恢复完的页面仍会被当成空白页淘汰。
+    expect(toolPageIsLive("wp_service_generator")).toBe(true);
   });
 
   it("warns about missing source files after restoring", async () => {

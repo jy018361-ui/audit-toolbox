@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
+import { markToolPageLive } from "./toolPageActivity";
 import { useLocation } from "react-router-dom";
 import { engineCall, jobCancel, jobStart, openOutput, pickPath } from "./api";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -284,6 +285,9 @@ export function FaListPage({ tool }: { tool: ToolManifest }) {
 
 function FaCardListPage() {
   const draft = faListDraftCache;
+  // 草稿缓存非空说明本子页此前有现场：登记后 fa_list 页不参与 LRU 淘汰，
+  // 保活到应用退出。
+  if (draft) markToolPageLive("fa_list");
   const empty: FaMapping = {};
   const [step, setStep] = useState<1 | 2 | 3>(draft?.step ?? 1);
   const [beginPath, setBeginPath] = useState(draft?.beginPath ?? "");

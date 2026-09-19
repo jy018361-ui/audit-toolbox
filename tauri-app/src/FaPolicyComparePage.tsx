@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { markToolPageLive } from "./toolPageActivity";
 import {
   engineCall,
   jobCancel,
@@ -101,6 +102,9 @@ let faPolicyDraftCache: PolicyDraft | undefined;
 /// 折旧政策对比 + 税法最低折旧年限参考。
 export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
   const draft = faPolicyDraftCache;
+  // 草稿缓存非空说明本页此前有现场：登记后不参与 LRU 淘汰，
+  // 保活到应用退出。
+  if (draft) markToolPageLive("fa_policy_compare");
   const [step, setStep] = useState<1 | 2>(draft?.step ?? 1);
   const [beginPath, setBeginPath] = useState(draft?.beginPath ?? "");
   const [endPath, setEndPath] = useState(draft?.endPath ?? "");

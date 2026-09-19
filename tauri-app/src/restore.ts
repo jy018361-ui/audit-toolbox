@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { markToolPageLive } from "./toolPageActivity";
 import type { TaskRestore } from "./types";
 
 // —— 历史记录「继续任务」的参数回填通道 ——
@@ -142,6 +143,9 @@ export function useTaskRestore(
     const take = () => {
       const restore = consumeTaskRestore(toolId);
       if (!restore || Object.keys(restore.params).length === 0) return;
+      // 回填走程序赋值，不触发 DOM 事件，这里显式登记「有现场」，
+      // 否则恢复完的页面仍会被当成空白页淘汰。
+      markToolPageLive(restore.toolId);
       try {
         const result = applyRef.current(restore);
         if (result && typeof result.then === "function") {

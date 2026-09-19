@@ -5025,6 +5025,66 @@ pub(crate) fn parse_date(raw: &str) -> Option<NaiveDate> {
 /// “年-月”＋“年-日”，以及独立年／月／日列。源表不重复写年份时由调用方
 /// 传入报告期年份。字段识别、LLM 建议和实际取数必须共用这一个入口，避免
 /// 页面允许多列映射、业务模块却仍只读第一列。
+/// 「年/月/日」双层表头合并后只剩「月」「日」两列（源表不写年份，年份只
+/// 在标题行「期间: 2025.01-20」里）的账型：date 仅建议到月份列时只有月
+/// 精度，而且单列纯月份依赖报告期年份兜底。发现同表的日列（列名含「日」
+/// 不含「月」、取值真是 1-31 的日号）时，把它一并挂进 date，取数端
+/// [`parse_mapped_date`] 的多列模式即可组装出带日号的完整日期。
+/// 已是多列映射（人工或 LLM 配好）时不动。
+pub(crate) fn pair_month_day_date_columns(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &mut serde_json::Map<String, Value>,
+) {
+    let Some(Value::String(month_column)) = mapping.get("date") else {
+        return;
+    };
+    let month_column = month_column.trim().to_owned();
+    let month_normalized = normalize_header(&month_column);
+    if month_normalized.is_empty() || !month_normalized.contains('月') {
+        return;
+    }
+    let day_like = |value: &str| -> bool {
+        let text = value.trim().trim_end_matches('日');
+        !text.is_empty()
+            && text.len() <= 2
+            && text.chars().all(|c| c.is_ascii_digit())
+            && matches!(text.parse::<u8>(), Ok(day) if (1..=31).contains(&day))
+    };
+    let candidate = headers.iter().find(|header| {
+        let normalized = normalize_header(header);
+        header.trim() != month_column
+            && normalized.contains('日')
+            && !normalized.contains('月')
+            && {
+                // 取值形态必须真是日号，防止「打印日期」这类完整日期列被误挂。
+                let index = header_index(headers, header);
+                let sample: Vec<&str> = rows
+                    .iter()
+                    .take(200)
+                    .filter_map(|row| index.and_then(|i| row.get(i)).map(String::as_str))
+                    .collect();
+                let non_empty: Vec<&str> = sample
+                    .iter()
+                    .copied()
+                    .filter(|value| !value.trim().is_empty())
+                    .collect();
+                non_empty.len() >= 5
+                    && non_empty.iter().filter(|value| day_like(value)).count() * 10
+                        >= non_empty.len() * 9
+            }
+    });
+    if let Some(day_column) = candidate {
+        mapping.insert(
+            "date".into(),
+            Value::Array(vec![
+                Value::String(month_column),
+                Value::String(day_column.trim().to_owned()),
+            ]),
+        );
+    }
+}
+
 pub(crate) fn parse_mapped_date(
     headers: &[String],
     row: &[String],
@@ -5035,7 +5095,28 @@ pub(crate) fn parse_mapped_date(
         return None;
     }
     if indexes.len() == 1 {
-        return row.get(indexes[0]).and_then(|value| parse_date(value));
+        let value = row.get(indexes[0]).map(String::as_str).unwrap_or("");
+        if let Some(date) = parse_date(value) {
+            return Some(date);
+        }
+        // 用友式「年/月/日」双层表头里源表常不写年份（09 号样例整本序时账
+        // 的年份只在标题行「期间: 2025.01-20」），date 只映射到月份列时值
+        // 是纯月份数字。列名含「月」且取值确实是月份时，按调用方给的
+        // 报告期年份组装当月 1 日——与多列模式的同款兜底，否则整本账的
+        // 行都会在日期环节被静默跳过，误报成科目匹配失败。
+        let header = normalize_header(
+            headers
+                .get(indexes[0])
+                .map(String::as_str)
+                .unwrap_or_default(),
+        );
+        if (header.contains('月') || header.contains("month"))
+            && let Some((source_year, month)) = parse_month(value.trim())
+            && let Some(year) = source_year.or(fallback_year)
+        {
+            return NaiveDate::from_ymd_opt(year, month, 1);
+        }
+        return None;
     }
 
     // 多列映射里若仍有真正的完整日期，不能让组成列覆盖它。
@@ -12517,6 +12598,85 @@ mod tests {
             parse_mapped_date(&full_headers, &full_row, &[0, 1], Some(2025)),
             NaiveDate::from_ymd_opt(2024, 12, 31),
         );
+    }
+
+    /// 09 号样例实案：用友式「年/月/日」双层表头合并后 date 只映射到月份列，
+    /// 值是纯月份数字、整本序时账没有年份列。单列也必须按报告期年份还原，
+    /// 否则调用方整本账的行都被静默跳过、误报成科目不匹配。
+    #[test]
+    fn 单列纯月份按报告期年份还原当月一日() {
+        let headers = vec!["年-月".into(), "凭证号".into()];
+        let row = vec!["01".into(), "记-0001".into()];
+        assert_eq!(
+            parse_mapped_date(&headers, &row, &[0], Some(2025)),
+            NaiveDate::from_ymd_opt(2025, 1, 1),
+        );
+        // 值里自带年份时以值为准。
+        let with_year = vec!["2024-12".into(), "记-0001".into()];
+        assert_eq!(
+            parse_mapped_date(&headers, &with_year, &[0], Some(2025)),
+            NaiveDate::from_ymd_opt(2024, 12, 1),
+        );
+        // 没有报告期年份可兜底时不得凭空造日期。
+        assert_eq!(parse_mapped_date(&headers, &row, &[0], None), None);
+        // 列名不含「月」时纯数字不当作月份——不替调用方猜语义。
+        let plain = vec!["期次".into(), "凭证号".into()];
+        assert_eq!(parse_mapped_date(&plain, &row, &[0], Some(2025)), None);
+        // 完整日期仍然优先，不会被月份兜底改写。
+        let full = vec!["2025-03-08".into(), "记-0001".into()];
+        assert_eq!(
+            parse_mapped_date(&headers, &full, &[0], Some(2024)),
+            NaiveDate::from_ymd_opt(2025, 3, 8),
+        );
+    }
+
+    /// 「月/日分列无年份」的账型，识别建议要把日列一并挂进 date，
+    /// 取数端才有日号精度；完整日期列（如打印日期）不得被误挂。
+    #[test]
+    fn 月日分列配对挂载日列进日期映射() {
+        let headers: Vec<String> = ["年-月", "年-日", "打印日期", "凭证号"]
+            .iter()
+            .map(|value| value.to_string())
+            .collect();
+        let rows: Vec<Vec<String>> = (1..=20)
+            .map(|index| {
+                vec![
+                    format!("{:02}", (index % 12) + 1),
+                    format!("{:02}", (index % 28) + 1),
+                    "2025-01-15".to_owned(),
+                    format!("记-{index:04}"),
+                ]
+            })
+            .collect();
+        let mut mapping = serde_json::Map::new();
+        mapping.insert("date".into(), Value::String("年-月".into()));
+        pair_month_day_date_columns(&headers, &rows, &mut mapping);
+        assert_eq!(
+            mapping.get("date"),
+            Some(&Value::Array(vec![
+                Value::String("年-月".into()),
+                Value::String("年-日".into()),
+            ])),
+            "日列应一并挂进 date；「打印日期」列取值是完整日期，不得被误挂"
+        );
+
+        // 已是多列映射（人工或 LLM 配好）时不动。
+        let mut paired = serde_json::Map::new();
+        paired.insert(
+            "date".into(),
+            Value::Array(vec![Value::String("月份".into()), Value::String("日".into())]),
+        );
+        pair_month_day_date_columns(&headers, &rows, &mut paired);
+        assert_eq!(paired.get("date").unwrap().as_array().unwrap().len(), 2);
+
+        // date 未映射或映射到非月份列时不动。
+        let mut none_mapping = serde_json::Map::new();
+        pair_month_day_date_columns(&headers, &rows, &mut none_mapping);
+        assert!(none_mapping.get("date").is_none());
+        let mut other = serde_json::Map::new();
+        other.insert("date".into(), Value::String("打印日期".into()));
+        pair_month_day_date_columns(&headers, &rows, &mut other);
+        assert_eq!(other.get("date"), Some(&Value::String("打印日期".into())));
     }
 
     #[test]

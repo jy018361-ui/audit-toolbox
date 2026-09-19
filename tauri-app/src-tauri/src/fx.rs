@@ -827,6 +827,11 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     if kind == "tb" {
         promote_period_movement(&table, &mut mapping);
     }
+    // 用友式「月/日分列无年份」的序时账：把日列一并挂进 date，避免
+    // 单列纯月份只有月精度、还依赖报告期年份兜底（09 号样例实案）。
+    if kind == "je" {
+        ledger_mapping::pair_month_day_date_columns(&table.headers, &table.rows, &mut mapping);
+    }
     // 分类目录和后续建议必须基于用户当前确认的身份映射，而非初次识别建议。
     if let Some(confirmed) = params.get("mapping").and_then(Value::as_object)
         && !confirmed.is_empty()
@@ -4284,71 +4289,15 @@ pub(crate) fn currency_link_check(params: &Value) -> Result<Value, AppError> {
     }))
 }
 
-fn currency_mapping_issues(params: &Value) -> Result<Vec<String>, AppError> {
-    let mut issues = Vec::new();
-    for (label, source_key, map_key, side) in [
-        (
-            "JE",
-            "jeSource",
-            "jeMapping",
-            ledger_mapping::EntitySide::Je,
-        ),
-        (
-            "TB",
-            "tbSource",
-            "tbMapping",
-            ledger_mapping::EntitySide::Tb,
-        ),
-    ] {
-        let Some(source) = params.get(source_key) else {
-            continue;
-        };
-        let spec: SourceSpec = serde_json::from_value(source.clone())
-            .map_err(|e| error("INVALID_PARAMS", "来源参数无效。", Some(e.to_string())))?;
-        let mapping = mapping_obj(params, map_key);
-        if first_col(&mapping, "currency").is_none() {
-            continue;
-        }
-        let raw = load_fx_table(&spec)?;
-        let table = if label == "JE" {
-            forward_filled_je_table(&raw, &mapping)
-        } else {
-            raw
-        };
-        let by_entity = mapped_currencies_by_entity(&table, &mapping, params, side);
-        for (entity, currencies) in by_entity.into_iter().filter(|(_, values)| values.len() > 1) {
-            issues.push(format!(
-                "{label} 原币币种映射错误：主体“{entity}”的当前映射列出现了{}。同一主体只能有一种原币币种，请返回修改“原币币种”映射列。",
-                currencies.into_iter().collect::<Vec<_>>().join("、")
-            ));
-        }
-    }
-    Ok(issues)
-}
-
-/// 严格按用户当前映射的“原币币种”列取值。主体本位币也是该列的
-/// 一个真实取值，不作例外排除；否则 CNY+USD 会被误放行，违反“同一
-/// 主体原币列只能一种币种”的硬校验规则。
-fn mapped_currencies_by_entity(
-    table: &FxTable,
-    mapping: &Map<String, Value>,
-    params: &Value,
-    side: ledger_mapping::EntitySide,
-) -> BTreeMap<String, BTreeSet<String>> {
-    let supported = supported_currencies();
-    let mut by_entity = BTreeMap::<String, BTreeSet<String>>::new();
-    for row in records(table) {
-        let currency = normalize_currency(cell(&row, mapping, "currency"));
-        if currency.is_empty() || !supported.contains(currency.as_str()) {
-            continue;
-        }
-        let entity = scoped_entity_for(&row, mapping, params, side).trim();
-        by_entity
-            .entry(entity.to_owned())
-            .or_default()
-            .insert(currency);
-    }
-    by_entity
+/// 币种映射的硬拦截清单。
+///
+/// 原币币种列天然多币种混列：同一主体完全可以同时有 CNY、USD、EUR 业务，
+/// 旧版「同一主体只能有一种原币币种」的硬校验会把一切多币种账套拦在测算
+/// 门外（主体 1000 的 JE 列 CNY/EUR/USD 实报），2026-09-19 按用户定案移除。
+/// 入口保留：前端「下一步」与测算/导出前的校验链路仍走这里，日后确有
+/// 必须硬拦的币种映射形态时在此追加。
+fn currency_mapping_issues(_params: &Value) -> Result<Vec<String>, AppError> {
+    Ok(Vec::new())
 }
 
 fn validate_currency_mapping(params: &Value) -> Result<Value, AppError> {
@@ -18230,35 +18179,25 @@ mod bench_load {
     }
 
     #[test]
-    fn 原币币种严格校验包含主体本位币() {
-        let table = FxTable {
-            path: PathBuf::new(),
-            sheet: "Sheet1".into(),
-            sheets: vec!["Sheet1".into()],
-            header_row: 1,
-            header_depth: 1,
-            raw_headers: vec![vec!["公司".into(), "原币币种".into()]],
-            headers: vec!["公司".into(), "原币币种".into()],
-            rows: vec![
-                vec!["2002".into(), "CNY".into()],
-                vec!["2002".into(), "USD".into()],
-            ],
-            row_count: 2,
-            header_candidates: vec![(1, 1.0)],
-            sampled: false,
-        };
-        let mapping = json!({"entity":"公司","currency":"原币币种"})
-            .as_object()
-            .unwrap()
-            .clone();
-        let params = json!({"entityCurrencies":{"2002":"CNY"}});
-        let currencies =
-            mapped_currencies_by_entity(&table, &mapping, &params, ledger_mapping::EntitySide::Je);
-        assert_eq!(
-            currencies.get("2002").cloned().unwrap_or_default(),
-            BTreeSet::from(["CNY".to_owned(), "USD".to_owned()]),
-            "主体本位币不得从原币映射校验中排除"
-        );
+    fn 多币种原币列不再被主体单币种校验拦截() {
+        // 主体 1000 实报形态：JE 原币币种列 CNY/EUR/USD、TB 列 EUR/USD。
+        // 原币列天然多币种混列，不得以「同一主体只能一种原币」拦测算。
+        let dir = std::env::temp_dir().join(format!("currency-mapping-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let je = dir.join("je.csv");
+        let tb = dir.join("tb.csv");
+        fs::write(&je, "主体,日期,凭证号,科目编码,科目名称,币种,金额\n1000,2025-01-01,1,1002,银行存款,CNY,100\n1000,2025-01-02,2,1002,银行存款,USD,200\n1000,2025-01-03,3,1002,银行存款,EUR,300\n").unwrap();
+        fs::write(&tb, "主体,科目编码,科目名称,币种,期末余额\n1000,1002,银行存款,EUR,10\n1000,1002,银行存款,USD,20\n").unwrap();
+        let params = json!({
+            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
+            "jeMapping":{"entity":"主体","date":"日期","id":["凭证号"],"accountCode":"科目编码","accountName":"科目名称","currency":"币种","functionalAmount":"金额"},
+            "tbSource":{"inputPath":tb,"sheet":"","headerRow":1,"headerDepth":1},
+            "tbMapping":{"entity":"主体","accountCode":"科目编码","accountName":"科目名称","currency":"币种","closingFunctionalAmount":"期末余额"}
+        });
+        let verdict = validate_currency_mapping(&params).unwrap();
+        assert_eq!(verdict["valid"], json!(true), "{verdict:#}");
+        assert_eq!(verdict["errors"], json!([]));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// 量一下 36 万行序时账各阶段的耗时，决定读表层要不要跟看账一样上 Parquet 缓存。

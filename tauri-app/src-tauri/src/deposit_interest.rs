@@ -1272,6 +1272,11 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
     if kind == "tb" {
         crate::fx::promote_period_movement(&table, &mut mapping);
     }
+    // 用友式「月/日分列无年份」的序时账：把日列一并挂进 date（09 号样例
+    // 整本账没有年份列，单列纯月份原本全行跳过、误报科目不匹配）。
+    if kind == "je" {
+        ledger_mapping::pair_month_day_date_columns(&table.headers, &table.rows, &mut mapping);
+    }
     // 科目/主体清单必须使用用户当前确认的映射重新计算。初次识别仍返回自动
     // 建议；FA List 在进入科目复核前会把人工调整后的 mapping 传回来，避免
     // 界面已选“核算组织”，清单却仍按初始的“默认主体”生成。
@@ -1480,6 +1485,10 @@ pub(crate) struct AccountRow {
     pub(crate) annual_rate: f64,
     /// false = 这一户还没有可用利率，测算利息不计入合计。
     pub(crate) rate_resolved: bool,
+    /// 利率是否直接取自内置挂牌表（未经任何用户改写）。来源文案统一为
+    /// 「挂牌暂估值」后，「待确认利率」状态与"系统预设利率"汇总都由它驱动。
+    #[serde(default)]
+    pub(crate) rate_provisional: bool,
     /// 填入的利率高于该档央行基准时的提示（基准只作上限参照）。
     pub(crate) rate_warning: String,
     pub(crate) opening_balance: f64,
@@ -1930,6 +1939,9 @@ fn calculate(
         }
     }
     let mut accounts: Vec<AccountRow> = vec![];
+    // 测算行键 → 科目确认表的辅助明细键。逐户利率改写按明细键匹配，
+    // 与存款类型覆盖同一键空间；行键里拼了币种，不能直接当明细键用。
+    let mut detail_keys: BTreeMap<String, String> = BTreeMap::new();
     let mut currencies_by_group: BTreeMap<(String, String, String), BTreeSet<String>> =
         BTreeMap::new();
     for key in &fold_order {
@@ -1981,6 +1993,7 @@ fn calculate(
             ledger_mapping::anchor_norm(&auxiliary)
         );
         let (tier, matched_by) = detail_tier_for(&account_text, &auxiliary, &detail_key, params);
+        detail_keys.insert(row_key.clone(), detail_key.clone());
         let meta = find_tier(tier);
         accounts.push(AccountRow {
             key: row_key,
@@ -1997,6 +2010,7 @@ fn calculate(
             rate_source: String::new(),
             annual_rate: 0.0,
             rate_resolved: false,
+            rate_provisional: false,
             rate_warning: String::new(),
             opening_balance: if opening_from_tb {
                 fold.opening_sum
@@ -2146,9 +2160,14 @@ fn calculate(
 
     progress("interest", 3, total, "正在按月均余额和存款利率测算利息…");
     let overrides = params.get("rateOverrides").and_then(Value::as_object);
+    let account_rates = params.get("accountRateOverrides").and_then(Value::as_object);
     let custom_rates = params.get("tierRates").and_then(Value::as_object);
     for account in &mut accounts {
-        let resolved = resolve_rate(account, overrides, custom_rates);
+        let detail_key = detail_keys
+            .get(&account.key)
+            .map(String::as_str)
+            .unwrap_or("");
+        let resolved = resolve_rate(account, overrides, account_rates, custom_rates, detail_key);
         let (tier, rate) = (resolved.tier, resolved.rate);
         if tier != account.tier {
             account.tier_matched_by = "用户手工选择档位".into();
@@ -2162,6 +2181,7 @@ fn calculate(
         account.annual_rate = rate;
         account.rate_source = resolved.source;
         account.rate_resolved = resolved.resolved;
+        account.rate_provisional = resolved.provisional;
         // 央行基准只在这里起作用：超过基准就提示复核，绝不参与测算。
         account.rate_warning = match benchmark_rate(&tier) {
             Some(benchmark) if resolved.resolved && rate > benchmark + 1e-9 => format!(
@@ -2250,7 +2270,7 @@ fn calculate(
         account.calculated_interest = months.iter().map(|m| m.interest).sum();
         // 没有利率是最优先的状态：这一户根本还没测出来，不能被余额勾稽上了
         // 就显示成"已勾稽"。
-        let default_rate = account.rate_source.contains("暂估");
+        let default_rate = account.rate_provisional;
         account.status = if !account.rate_resolved {
             "待填利率".into()
         } else if !je_backed {
@@ -2342,7 +2362,7 @@ fn calculate(
     };
     let default_rate: Vec<&AccountRow> = accounts
         .iter()
-        .filter(|account| account.rate_source.contains("暂估"))
+        .filter(|account| account.rate_provisional)
         .collect();
     let default_rate_count = default_rate.len();
     let default_rate_balance: f64 = default_rate.iter().map(|a| a.average_balance).sum();
@@ -2484,19 +2504,26 @@ fn calculate(
 }
 
 /// 利率优先级：账户级手填 > 用户改写的档位利率 > 内置挂牌暂估值。
-/// 第三个返回值是利率来源；`resolved` 为 false 表示这一户还没有可用利率，
-/// 不能算作"已勾稽"，也不该把 0 当成一个正常的测算结果。
+/// 账户级手填有两个入口：测算结果表的历史覆盖（rateOverrides，按测算行键）
+/// 与科目确认表的逐户改写（accountRateOverrides，按科目/辅助明细键）。
+/// 来源文案保留真实来源；是否"直接取自内置挂牌表、未经用户确认"
+/// 另由 `provisional` 标记表达，驱动待确认提示与汇总口径。
+/// `resolved` 为 false 表示这一户还没有可用利率，不能算作"已勾稽"，
+/// 也不该把 0 当成一个正常的测算结果。
 struct ResolvedRate {
     tier: String,
     rate: f64,
     source: String,
     resolved: bool,
+    provisional: bool,
 }
 
 fn resolve_rate(
     account: &AccountRow,
     overrides: Option<&Map<String, Value>>,
+    account_rates: Option<&Map<String, Value>>,
     custom_rates: Option<&Map<String, Value>>,
+    detail_key: &str,
 ) -> ResolvedRate {
     let over = overrides.and_then(|all| all.get(&account.key));
     let tier = over
@@ -2504,54 +2531,65 @@ fn resolve_rate(
         .and_then(Value::as_str)
         .unwrap_or(&account.tier)
         .to_owned();
-    let done = |rate: f64, source: &str| ResolvedRate {
+    let done = |rate: f64, source: &str, provisional: bool| ResolvedRate {
         tier: tier.clone(),
         rate: normalize_rate(rate),
         source: source.into(),
         resolved: true,
+        provisional,
     };
     if let Some(rate) = over
         .and_then(|value| value.get("annualRate"))
         .and_then(Value::as_f64)
     {
-        return done(rate, "本账户手工指定");
+        return done(rate, "本账户手工指定", false);
+    }
+    if let Some(rate) = account_rate_for(account, detail_key, account_rates) {
+        return done(rate, "科目确认表手工指定", false);
     }
     if let Some(rate) = custom_rates
         .and_then(|all| all.get(&tier))
         .and_then(Value::as_f64)
     {
-        return done(rate, "自定义档位利率");
+        return done(rate, "自定义档位利率", false);
     }
     // 内置挂牌值只作暂估，必须明确提示用户按协议或对账单复核。
-    let identity = format!("{} {}", account.account, account.auxiliary);
-    let normalized_identity = normalize_header(&identity);
-    // 科目/辅助核算中明写 RMB、CNY 或人民币时，这是账户级证据，
-    // 优先级高于可能是公司或集团默认币种的单独币种列。4800 样例的
-    // 币种列全表为 USD，但辅助核算明确写着 RMB，不能把人民币户误判为外币户。
-    let explicitly_domestic = ["rmb", "cny", "人民币"]
-        .iter()
-        .any(|token| normalized_identity.contains(token));
-    let foreign_currency = (!explicitly_domestic)
-        .then(|| {
-            detect_foreign_currency(&identity)
-                .or_else(|| detect_foreign_currency(&account.currency))
-        })
-        .flatten();
     match auto_rate(&tier) {
-        Some(rate) => match foreign_currency {
-            Some(code) => done(
-                rate,
-                &format!("{} 外币账户挂牌暂估值（待确认）", code.to_uppercase(),),
-            ),
-            None => done(rate, "挂牌暂估值（待确认）"),
-        },
+        Some(rate) => done(rate, "挂牌暂估值", true),
         None => ResolvedRate {
             tier,
             rate: 0.0,
             source: "需填写实际利率".into(),
             resolved: false,
+            provisional: false,
         },
     }
+}
+
+/// 科目确认表（第二步）的逐户利率改写。键空间与存款类型覆盖同一套：
+/// 辅助明细键（主体␟科目␟辅助）优先，其次科目全文；全文因 TB/JE 拼法
+/// 不同对不上时按科目编码回退。
+fn account_rate_for(
+    account: &AccountRow,
+    detail_key: &str,
+    rates: Option<&Map<String, Value>>,
+) -> Option<f64> {
+    let rates = rates?;
+    if let Some(rate) = rates.get(detail_key).and_then(Value::as_f64) {
+        return Some(rate);
+    }
+    if let Some(rate) = rates.get(&account.account).and_then(Value::as_f64) {
+        return Some(rate);
+    }
+    let code = account_code(&account.account);
+    if code.is_empty() {
+        return None;
+    }
+    rates.iter().find_map(|(candidate, rate)| {
+        (account_code(candidate) == code)
+            .then(|| rate.as_f64())
+            .flatten()
+    })
 }
 
 /// 大于 1 的输入按百分数理解（4.2 → 0.042）；利率不可能大于 100%。
@@ -3040,6 +3078,11 @@ fn monthly_movements(
     let mut unallocated_currency_keys = BTreeSet::new();
     let mut je_entities: BTreeSet<String> = BTreeSet::new();
     let mut matched = 0usize;
+    // 进入日期解析的行数与解析失败的行数：全灭时「没有任何行匹配货币资金
+    // 科目」会把人引去查科目映射，实际死因在日期（09 号样例：整本序时账
+    // 没有「年」列，单列纯月份解析不出任何日期）。
+    let mut considered_rows = 0usize;
+    let mut unparsed_dates = 0usize;
     let (scheme, evidence) = match je {
         JeInput::Memory(table, mapping) => {
             // 抽样表只解析了开头若干行，拿它还原逐月余额会得到一份看似完整、
@@ -3084,12 +3127,14 @@ fn monthly_movements(
                 if !keep.get(row_index).copied().unwrap_or(true) {
                     continue;
                 }
+                considered_rows += 1;
                 let Some(date) = ledger_mapping::parse_mapped_date(
                     &table.headers,
                     row,
                     &date_indexes,
                     Some(end.year()),
                 ) else {
+                    unparsed_dates += 1;
                     continue;
                 };
                 if date < start || date > end {
@@ -3217,8 +3262,11 @@ fn monthly_movements(
                     &date_indexes,
                     Some(end.year()),
                 ) else {
+                    unparsed_dates += 1;
+                    considered_rows += 1;
                     return Ok(());
                 };
+                considered_rows += 1;
                 if date < start || date > end {
                     return Ok(());
                 }
@@ -3308,6 +3356,13 @@ fn monthly_movements(
         }
     };
     if matched == 0 && unallocated_currency_rows == 0 {
+        if considered_rows > 0 && unparsed_dates == considered_rows {
+            return Err(error(
+                "NO_JE_DATE",
+                "序时账的记账日期列解析不出任何一行日期：常见原因是「年/月/日」分列但源表没写年份，或日期角色映射到了非日期列。请回到第一步检查「记账日期」的映射。",
+                None,
+            ));
+        }
         return Err(error(
             "NO_JE_MATCH",
             "序时账中没有任何行匹配到 TB 的货币资金科目；请检查科目映射或改用不含序时账的两点法。",
@@ -5005,13 +5060,9 @@ mod tests {
         assert_eq!(usd["tier"], "demand");
         assert!(usd["rateResolved"].as_bool().unwrap());
         assert_eq!(usd["annualRate"], json!(0.0005));
-        assert!(
-            usd["rateSource"]
-                .as_str()
-                .unwrap()
-                .contains("USD 外币账户挂牌暂估值")
-        );
-        assert!(usd["rateSource"].as_str().unwrap().contains("待确认"));
+        // 来源统一为「挂牌暂估值」，外币默认值的待确认提示交给标记位。
+        assert_eq!(usd["rateSource"], json!("挂牌暂估值"));
+        assert_eq!(usd["rateProvisional"], json!(true));
         assert!(usd["tierMatchedBy"].as_str().unwrap().contains("USD"));
         let rmb = rows_of(&result, "RMB CMB");
         assert_eq!(rmb["tier"], "demand");
@@ -5691,11 +5742,13 @@ mod tests {
             tier: "demand".into(),
             ..blank_row()
         };
-        let resolved = resolve_rate(&row, None, None);
+        let resolved = resolve_rate(&row, None, None, None, "");
         assert!(resolved.resolved);
         assert_eq!(resolved.rate, 0.0005);
-        assert!(resolved.source.contains("USD 外币账户挂牌暂估值"));
-        assert!(resolved.source.contains("待确认"));
+        // 来源文案已统一：外币户与人民币户同显「挂牌暂估值」，
+        // 待确认提示由 provisional 标记承担。
+        assert_eq!(resolved.source, "挂牌暂估值");
+        assert!(resolved.provisional);
         // 人民币户不受影响，仍自动套活期挂牌。
         let rmb = AccountRow {
             account: "100201 RMB CMB-CPCSC-SH".into(),
@@ -5705,7 +5758,7 @@ mod tests {
             tier: "demand".into(),
             ..blank_row()
         };
-        assert!(resolve_rate(&rmb, None, None).resolved);
+        assert!(resolve_rate(&rmb, None, None, None, "").resolved);
         // 认不出的档位键也回落活期，不再冒出"自定义"。
         assert_eq!(RATE_TIERS[0].key, "demand", "第一档必须是活期，兜底靠它");
         assert_eq!(tier_label("不存在的档位"), "活期存款");
@@ -5727,6 +5780,113 @@ mod tests {
         let warned = currency_allocation_warning(12, 1);
         assert!(warned.contains("12 条 JE"), "{warned}");
         assert!(warned.contains("1 个主体科目"), "{warned}");
+    }
+
+    /// 09 号样例实案：用友式序时账整本没有「年」列，date 只映射到月份列时
+    /// 值是纯月份数字。公共内核按报告期年份还原后，逐月归集必须照常工作，
+    /// 而不是全行跳过误报「没有任何行匹配货币资金科目」。
+    #[test]
+    fn 单列纯月份的序时账按报告期年份逐月还原() {
+        let dir = tempfile::tempdir().unwrap();
+        let tb_path = dir.path().join("tb.xlsx");
+        let je_path = dir.path().join("je.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec!["科目编码", "科目名称", "年初余额借方本位币", "期末余额借方本位币"],
+                vec!["10020101", "银行存款_基本户", "1000000", "1200000"],
+            ],
+        );
+        write_fixture(
+            &je_path,
+            &[
+                vec!["年-月", "凭证号", "科目编码", "科目名称", "借方", "贷方"],
+                vec!["01", "记-0001", "10020101", "银行存款_基本户", "50000", "0"],
+                vec!["02", "记-0002", "10020101", "银行存款_基本户", "0", "30000"],
+            ],
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result = run_job(
+            "deposit.preview",
+            json!({
+                "reportStart": "2025-01-01", "reportEnd": "2025-06-30",
+                "tbSource": {"inputPath": tb_path.to_string_lossy()},
+                "tbMapping": {
+                    "accountCode": "科目编码", "accountName": "科目名称",
+                    "openingFunctionalDebit": "年初余额借方本位币",
+                    "closingFunctionalDebit": "期末余额借方本位币"
+                },
+                "jeSource": {"inputPath": je_path.to_string_lossy()},
+                "jeMapping": {
+                    "date": "年-月", "id": "凭证号", "accountCode": "科目编码",
+                    "accountName": "科目名称",
+                    "functionalDebit": "借方", "functionalCredit": "贷方"
+                }
+            }),
+            &|_, _, _, _| {},
+            cancel,
+            &pause,
+        )
+        .unwrap();
+        let source = result["summary"]["monthlySource"].as_str().unwrap();
+        assert!(
+            source.contains("序时账逐月还原"),
+            "单列纯月份应按报告期年份逐月还原，实际：{source}"
+        );
+    }
+
+    /// 日期列整体解析不出任何一行时，报错必须点名日期映射，而不是把人
+    /// 引去查科目映射的「没有任何行匹配货币资金科目」。
+    #[test]
+    fn 序时账日期全灭时报日期专属错误() {
+        let dir = tempfile::tempdir().unwrap();
+        let tb_path = dir.path().join("tb.xlsx");
+        let je_path = dir.path().join("je.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec!["科目编码", "科目名称", "年初余额借方本位币", "期末余额借方本位币"],
+                vec!["10020101", "银行存款_基本户", "1000000", "1200000"],
+            ],
+        );
+        write_fixture(
+            &je_path,
+            &[
+                vec!["期次", "凭证号", "科目编码", "科目名称", "借方", "贷方"],
+                vec!["一季度", "记-0001", "10020101", "银行存款_基本户", "50000", "0"],
+                vec!["二季度", "记-0002", "10020101", "银行存款_基本户", "0", "30000"],
+            ],
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let err = run_job(
+            "deposit.preview",
+            json!({
+                "reportStart": "2025-01-01", "reportEnd": "2025-06-30",
+                "tbSource": {"inputPath": tb_path.to_string_lossy()},
+                "tbMapping": {
+                    "accountCode": "科目编码", "accountName": "科目名称",
+                    "openingFunctionalDebit": "年初余额借方本位币",
+                    "closingFunctionalDebit": "期末余额借方本位币"
+                },
+                "jeSource": {"inputPath": je_path.to_string_lossy()},
+                "jeMapping": {
+                    "date": "期次", "id": "凭证号", "accountCode": "科目编码",
+                    "accountName": "科目名称",
+                    "functionalDebit": "借方", "functionalCredit": "贷方"
+                }
+            }),
+            &|_, _, _, _| {},
+            cancel,
+            &pause,
+        )
+        .unwrap_err();
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("NO_JE_DATE") && text.contains("记账日期"),
+            "应报日期专属错误，实际：{text}"
+        );
     }
 
     #[test]
@@ -6141,36 +6301,74 @@ mod tests {
         };
         let custom = json!({"demand": 0.002});
         let custom = custom.as_object();
-        // 活期的内置默认
-        let resolved = resolve_rate(&row, None, None);
+        // 活期的内置默认：来源统一为「挂牌暂估值」，且必须标记待确认。
+        let resolved = resolve_rate(&row, None, None, None, "");
         assert_eq!(
             (resolved.rate, resolved.source.as_str()),
-            (0.0005, "挂牌暂估值（待确认）")
+            (0.0005, "挂牌暂估值")
         );
-        // 档位级改写盖过内置默认
-        let resolved = resolve_rate(&row, None, custom);
+        assert!(resolved.provisional);
+        // 档位级改写盖过内置默认：属于用户改写，不再是待确认的暂估。
+        let resolved = resolve_rate(&row, None, None, custom, "");
         assert_eq!(
             (resolved.rate, resolved.source.as_str()),
             (0.002, "自定义档位利率")
         );
+        assert!(!resolved.provisional);
         // 账户级改写优先于档位级；百分数写法自动归一
         let overrides = json!({"K": {"annualRate": 1.25}});
-        let resolved = resolve_rate(&row, overrides.as_object(), custom);
+        let resolved = resolve_rate(&row, overrides.as_object(), None, custom, "");
         assert_eq!(
             (resolved.rate, resolved.source.as_str()),
             (0.0125, "本账户手工指定")
         );
+        assert!(!resolved.provisional);
         // 切到定期档后自动带出该档挂牌暂估值
         let overrides = json!({"K": {"tier": "term_3y"}});
-        let resolved = resolve_rate(&row, overrides.as_object(), None);
+        let resolved = resolve_rate(&row, overrides.as_object(), None, None, "");
         assert_eq!(resolved.tier, "term_3y");
         assert!(resolved.resolved);
+        assert!(resolved.provisional);
         assert!((resolved.rate - 0.0125).abs() < 1e-12);
         // 档位级填了就能用
         let tier_rates = json!({"term_3y": 1.35});
-        let resolved = resolve_rate(&row, overrides.as_object(), tier_rates.as_object());
+        let resolved = resolve_rate(&row, overrides.as_object(), None, tier_rates.as_object(), "");
         assert!(resolved.resolved);
+        assert!(!resolved.provisional);
         assert!((resolved.rate - 0.0135).abs() < 1e-12);
+    }
+
+    #[test]
+    fn confirmation_table_rate_overrides_match_detail_key_then_account() {
+        let row = AccountRow {
+            key: "默认主体 | 1002 银行存款 | 工行 | CNY".into(),
+            account: "1002 银行存款".into(),
+            tier: "demand".into(),
+            ..blank_row()
+        };
+        // 辅助明细键（第二步展开行写入的键空间）优先命中。
+        let rates = json!({"默认主体\u{1f}1002 银行存款\u{1f}工行": 0.0031});
+        let resolved = resolve_rate(
+            &row,
+            None,
+            rates.as_object(),
+            None,
+            "默认主体\u{1f}1002 银行存款\u{1f}工行",
+        );
+        assert_eq!(resolved.rate, 0.0031);
+        assert!(!resolved.provisional);
+        // 没有明细键时按科目全文回退；全文对不上再按科目编码回退
+        // （TB/JE 拼法差异，与存款类型覆盖同一口径）。
+        let rates = json!({"1002 银行存款": 0.0042});
+        let resolved = resolve_rate(&row, None, rates.as_object(), None, "别的明细键");
+        assert_eq!(resolved.rate, 0.0042);
+        let rates = json!({"1002 银行存款-人民币户": 0.0053});
+        let resolved = resolve_rate(&row, None, rates.as_object(), None, "别的明细键");
+        assert_eq!(resolved.rate, 0.0053);
+        // 表里没写就回落内置挂牌暂估。
+        let resolved = resolve_rate(&row, None, None, None, "别的明细键");
+        assert_eq!(resolved.rate, 0.0005);
+        assert!(resolved.provisional);
     }
 
     fn blank_row() -> AccountRow {
@@ -6190,6 +6388,7 @@ mod tests {
             rate_source: String::new(),
             annual_rate: 0.0,
             rate_resolved: false,
+            rate_provisional: false,
             rate_warning: String::new(),
             opening_balance: 0.0,
             opening_from_tb: true,
@@ -6221,6 +6420,33 @@ mod tests {
     }
 
     #[test]
+    fn rate_source_distinguishes_account_tier_and_listed_values() {
+        let row = AccountRow {
+            key: "K".into(),
+            account: "100201 银行存款".into(),
+            tier: "demand".into(),
+            ..blank_row()
+        };
+        let account_override = serde_json::from_value::<Map<String, Value>>(json!({
+            "100201 银行存款": 0.013
+        })).unwrap();
+        let resolved = resolve_rate(&row, None, Some(&account_override), None, "");
+        assert_eq!(resolved.source, "科目确认表手工指定");
+        assert!(!resolved.provisional);
+
+        let tier_override = serde_json::from_value::<Map<String, Value>>(json!({
+            "demand": 0.002
+        })).unwrap();
+        let resolved = resolve_rate(&row, None, None, Some(&tier_override), "");
+        assert_eq!(resolved.source, "自定义档位利率");
+        assert!(!resolved.provisional);
+
+        let resolved = resolve_rate(&row, None, None, None, "");
+        assert_eq!(resolved.source, "挂牌暂估值");
+        assert!(resolved.provisional);
+    }
+
+    #[test]
     fn benchmark_is_reference_only_and_never_computes() {
         // 央行基准仍可查询，但没有任何路径会把它当成测算利率。
         assert_eq!(benchmark_rate("term_3y"), Some(0.0275));
@@ -6230,10 +6456,11 @@ mod tests {
             tier: "term_3y".into(),
             ..blank_row()
         };
-        let resolved = resolve_rate(&row, None, None);
+        let resolved = resolve_rate(&row, None, None, None, "");
         assert!(resolved.resolved);
         assert_eq!(resolved.rate, 0.0125);
-        assert_eq!(resolved.source, "挂牌暂估值（待确认）");
+        assert_eq!(resolved.source, "挂牌暂估值");
+        assert!(resolved.provisional);
     }
 
     #[test]
@@ -8022,7 +8249,8 @@ mod tests {
         );
         assert!(demand["reconciliationDiff"].as_f64().unwrap().abs() < 0.01);
         assert_eq!(demand["status"], "待确认利率");
-        assert_eq!(demand["rateSource"], "挂牌暂估值（待确认）");
+        assert_eq!(demand["rateSource"], "挂牌暂估值");
+        assert_eq!(demand["rateProvisional"], json!(true));
         assert!(demand["rateResolved"].as_bool().unwrap());
         // 12 个月月均余额之和 21,600,000；活期挂牌 0.05% ÷ 12 → 900。
         assert!((demand["averageBalance"].as_f64().unwrap() - 1_800_000.0).abs() < 0.01);
@@ -8030,7 +8258,8 @@ mod tests {
         // 定期：自动套用挂牌暂估值并纳入测算，但状态明确待确认。
         let term = rows.iter().find(|r| r["tier"] == json!("term_1y")).unwrap();
         assert!(term["rateResolved"].as_bool().unwrap());
-        assert_eq!(term["rateSource"], "挂牌暂估值（待确认）");
+        assert_eq!(term["rateSource"], "挂牌暂估值");
+        assert_eq!(term["rateProvisional"], json!(true));
         assert_eq!(term["status"], "待确认利率");
         // 该定期户在 JE 中没有发生额，且 TB 年初＝年末；按零发生额推导后
         // 期末与 TB 一致，仍属于有效勾稽。

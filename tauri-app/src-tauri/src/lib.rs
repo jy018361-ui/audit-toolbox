@@ -1157,6 +1157,19 @@ pub fn engine_call_for_test(
             return deposit_interest::call(method, params);
         }
     }
+    // 存款利息的只读测算探针：与 fx.preview_probe 同款，调查测试用它拿
+    // 真实样例定位匹配链路（如「序时账没有任何行匹配货币资金科目」）。
+    if method == "deposit.preview_probe" {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pause = excel_merger::PauseCheckpoint::unpaused(cancel.clone());
+        return deposit_interest::run_job(
+            "deposit.preview",
+            params,
+            &|_, _, _, _| {},
+            cancel,
+            &pause,
+        );
+    }
     // 看账的只读识别类：不写文件、不动任务，调查测试用它量缓存效果。
     // 余额滚动校验是只读的，调查测试用它拿真实样例定位失配。
     if method == "fx.preview_probe" {

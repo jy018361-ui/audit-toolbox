@@ -11,6 +11,8 @@ import {
   fxAccountCurrencyOverrides,
   fxAccountCurrencyOverridesForRoles,
   fxAccountReviewRows,
+  fxConfirmationRows,
+  fxConfirmationImportPatches,
   fxDetailCurrencyOverridesPayload,
   fxAllowedModes,
   fxApplyJobResult,
@@ -35,6 +37,50 @@ import {
   uncoveredBreakdown,
   uncoveredMetricDetail,
 } from "./FxAuditPage";
+
+describe("汇兑损益科目确认表", () => {
+  const rows = [
+    { key: "1002", account: "1002 银行存款" },
+    { key: "主体\u001f1002\u001fUSD户", account: "1002 银行存款", entity: "主体", auxiliary: "美元户", auxiliaryKey: "USD户" },
+  ];
+
+  it("导出与界面逐辅助户行一致，回传不污染科目级覆盖", () => {
+    const exported = fxConfirmationRows(
+      rows, { "1002 银行存款": "monetary_asset" }, {},
+      { "1002 银行存款": "CNY" }, { "主体\u001f1002\u001fUSD户": "USD" },
+      undefined, undefined, "CNY",
+    );
+    expect(exported).toHaveLength(2);
+    expect(exported[1]).toEqual(expect.objectContaining({
+      key: "主体\u001f1002\u001fUSD户",
+      values: ["1002 银行存款 · 美元户", "货币性资产", "USD"],
+    }));
+    const patches = fxConfirmationImportPatches(
+      [{ ...exported[1], values: [exported[1].values[0], "货币性负债", "EUR"] }],
+      rows, exported,
+      { "1002 银行存款": "monetary_asset" }, { "1002 银行存款": "CNY" },
+      undefined, undefined, "CNY",
+    );
+    expect(patches.roles).toEqual({});
+    expect(patches.detailRoles).toEqual({ "主体\u001f1002\u001fUSD户": "monetary_liability" });
+    expect(patches.detailCurrencies).toEqual({ "主体\u001f1002\u001fUSD户": "EUR" });
+
+    const inherited = fxConfirmationImportPatches(
+      [{ ...exported[1], values: [exported[1].values[0], "货币性资产", "CNY"] }],
+      rows,
+      [{ ...exported[1], values: [exported[1].values[0], "货币性负债", "EUR"] }],
+      { "1002 银行存款": "monetary_asset" },
+      { "1002 银行存款": "CNY" },
+      undefined,
+      undefined,
+      "CNY",
+    );
+    expect(inherited.detailRoles).toEqual({});
+    expect(inherited.detailCurrencies).toEqual({});
+    expect(inherited.detailRoleDeletes).toEqual(["主体\u001f1002\u001fUSD户"]);
+    expect(inherited.detailCurrencyDeletes).toEqual(["主体\u001f1002\u001fUSD户"]);
+  });
+});
 
 describe("汇兑检查提示", () => {
   it("把常见异常转为可执行的短句", () => {

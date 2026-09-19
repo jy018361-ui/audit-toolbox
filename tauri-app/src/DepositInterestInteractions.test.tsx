@@ -554,9 +554,10 @@ describe("JE 币种资料提示", () => {
               category: "demand",
               termLabel: "",
               tierMatchedBy: "默认按活期",
-              rateSource: "活期挂牌默认值",
+              rateSource: "挂牌暂估值",
               annualRate: 0.0005,
               rateResolved: true,
+              rateProvisional: true,
               rateWarning: "",
               openingBalance: 100,
               tbClosingBalance: 100,
@@ -588,5 +589,58 @@ describe("JE 币种资料提示", () => {
     });
     expect(openWorkbook.closest(".deposit-export-done")).not.toBeNull();
     expect(screen.getByText(/黄色“年利率”单元格可直接改写/)).toBeVisible();
+  });
+});
+
+/** 第二步利率列的行为：默认带出挂牌利率；改写后随测算提交；
+ *  换存款类型自动回到新档位默认（本夹具的定期档没有自动利率，应显示待填）。 */
+describe("第二步逐户利率列", () => {
+  it("默认带出活期挂牌利率，改写提交，换类型后回到新档位默认", async () => {
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "拖放或选择 TB、序时账文件（可同时选择）",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled(),
+    );
+    goToStep(STEP2);
+
+    const rate = (await screen.findByRole("spinbutton", {
+      name: `${bank}的年利率`,
+    })) as HTMLInputElement;
+    expect(rate.value).toBe("0.05");
+
+    // 改写成协议利率 1.25%，测算参数应带上逐户改写（小数口径）。
+    fireEvent.change(rate, { target: { value: "1.25" } });
+    fireEvent.blur(rate);
+    goToStep(STEP3);
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+    expect(mock.jobStart.mock.calls[0][1]).toMatchObject({
+      accountRateOverrides: { [bank]: 0.0125 },
+    });
+    act(() => mock.event?.(complete));
+
+    // 换成定期存款：手改利率被清掉，利率列回到新档位默认（定期档须手填）。
+    goToStep(STEP2);
+    // 回到第二步后表格重新挂载，输入框要重新取引用。
+    const rateAgain = screen.getByRole("spinbutton", {
+      name: `${bank}的年利率`,
+    }) as HTMLInputElement;
+    expect(rateAgain.value).toBe("1.25");
+    fireEvent.change(
+      screen.getByRole("combobox", { name: `${bank}的存款类型` }),
+      { target: { value: "term" } },
+    );
+    expect(rateAgain.value).toBe("");
+    goToStep(STEP3);
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledTimes(2));
+    expect(mock.jobStart.mock.calls[1][1]).toMatchObject({
+      accountRateOverrides: {},
+      accountTierOverrides: { [bank]: "term_1y" },
+    });
   });
 });

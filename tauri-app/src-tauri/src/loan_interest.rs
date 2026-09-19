@@ -992,6 +992,11 @@ fn inspect(params: &Value) -> Result<Value, AppError> {
     if kind == "tb" {
         crate::fx::promote_period_movement_rows(&table.headers, &table.rows, &mut suggested);
     }
+    // 用友式「月/日分列无年份」的序时账：把日列一并挂进 date（与存款利息
+    // 同一份公共配对，09 号样例实案）。
+    if kind == "je" {
+        ledger_mapping::pair_month_day_date_columns(&table.headers, &table.rows, &mut suggested);
+    }
     // 台账要在预览区逐行确认利率口径，只给 8 行的话第 9 行往后就没法设置了。
     // 台账普遍几十行，整表下发；上限 2000 行防止误选超大表把界面拖垮。
     let preview_rows = if kind == "ledger" || kind == "rateLedger" {

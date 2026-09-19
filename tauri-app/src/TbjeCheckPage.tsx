@@ -84,6 +84,20 @@ import "./tbje-check.css";
 type Mapping = MappingDict;
 type GroupLedgerReview = Partial<Record<LedgerKind, LedgerReviewOutcome>>;
 
+/**
+ * 批量核对页只为完整的 TB＋JE 组合生成自动复核身份。
+ * 删除任一侧时该组立即退出列表；换入新文件后身份变化，允许重新自动复核。
+ */
+export function tbjeCompleteAutomaticReviewKeys(
+  groups: readonly Pick<PairedGroup, "tb" | "je">[],
+): string[] {
+  return groups.flatMap((group) =>
+    group.tb && group.je
+      ? [JSON.stringify([pairingFileKey(group.tb), pairingFileKey(group.je)])]
+      : [],
+  );
+}
+
 export function tbjeMissingMappings(
   kind: LedgerKind,
   mapping: MappingDict,
@@ -624,7 +638,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const intakeSectionRef = useRef<HTMLElement | null>(null);
   const pairingSectionRef = useRef<HTMLElement | null>(null);
   const resultSectionRef = useRef<HTMLElement | null>(null);
-  const automaticReviewKeyRef = useRef("");
+  const automaticReviewKeysRef = useRef(new Set<string>());
   const scopeTbEntities = useMemo(
     () =>
       [...new Set(
@@ -1253,8 +1267,13 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   };
 
   /** 页面级一键复核：每组一次真正的 TB＋JE 联合请求，最多并发两组。 */
-  async function reviewAllGroups(background = false) {
+  async function reviewAllGroups(background = false, automaticKeys?: Set<string>) {
     const candidates = visibleGroups.filter((group) => {
+      if (background && (!group.tb || !group.je)) return false;
+      if (background && automaticKeys) {
+        const key = JSON.stringify([pairingFileKey(group.tb!), pairingFileKey(group.je!)]);
+        if (!automaticKeys.has(key)) return false;
+      }
       const targets = reviewTargetsOf(group);
       return targets.tb || targets.je;
     });
@@ -1307,25 +1326,21 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
 
   // 上传识别和自动配对全部收口后，默认执行一次字段映射联合复核。
   // key 只包含来源身份，LLM 回写 mappings 不会反过来触发第二轮。
-  const automaticReviewKey = visibleGroups.length
-    ? JSON.stringify(
-        visibleGroups.map((group) => [
-          group.id,
-          group.tb ? pairingFileKey(group.tb) : "",
-          group.je ? pairingFileKey(group.je) : "",
-        ]),
-      )
+  const completeAutomaticReviewKeys =
+    tbjeCompleteAutomaticReviewKeys(visibleGroups);
+  const automaticReviewKey = completeAutomaticReviewKeys.length
+    ? JSON.stringify(completeAutomaticReviewKeys)
     : "";
   useEffect(() => {
-    if (
-      busy ||
-      llmReviewBusy ||
-      !automaticReviewKey ||
-      automaticReviewKeyRef.current === automaticReviewKey
-    )
-      return;
-    automaticReviewKeyRef.current = automaticReviewKey;
-    void reviewAllGroups(true);
+    if (busy || llmReviewBusy || !automaticReviewKey) return;
+    const pending = new Set(
+      completeAutomaticReviewKeys.filter(
+        (key) => !automaticReviewKeysRef.current.has(key),
+      ),
+    );
+    if (!pending.size) return;
+    pending.forEach((key) => automaticReviewKeysRef.current.add(key));
+    void reviewAllGroups(true, pending);
   }, [automaticReviewKey, busy, llmReviewBusy]);
 
   function undoGroupReview(

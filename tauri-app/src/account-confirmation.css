@@ -1,3 +1,4 @@
 .account-confirmation-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 16px; justify-content: flex-start; }
 .account-confirmation-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
-.account-confirmation-actions [role="status"] { color: var(--muted-foreground, #627678); font-size: .875rem; }
+.account-confirmation-actions [role="status"] { color: var(--muted-foreground); font-size: .875rem; }
+.account-confirmation-actions .account-confirmation-open { display: inline; margin: 0; font-size: .875rem; align-self: center; text-align: left; }

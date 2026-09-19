@@ -2019,6 +2019,9 @@ summary:focus-visible {
   border-radius: var(--r-md);
   background: var(--surface);
 }
+.file-drop-slot.without-label {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
 .file-drop-slot-label {
   font-size: var(--fs-sm);
   font-weight: 600;

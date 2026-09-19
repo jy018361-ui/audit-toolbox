@@ -43,6 +43,7 @@ import {
 import { MappingPanel } from "@/components/MappingPanel";
 import { StepIndicator } from "@/components/StepIndicator";
 import {
+  completeLedgerPairReviewKey,
   LedgerReviewAll,
   useLedgerDictReviews,
 } from "@/components/LedgerReviewAll";
@@ -52,7 +53,7 @@ import {
 } from "@/components/KeywordFilter";
 import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation";
 import "./fx-audit.css";
-import { AccountConfirmationActions } from "./AccountConfirmationActions";
+import { AccountConfirmationActions, type ConfirmationRow } from "./AccountConfirmationActions";
 import { displayFileName } from "./fileDisplay";
 
 type Mode = "realized" | "unrealized" | "combined";
@@ -278,6 +279,83 @@ export function fxAccountReviewRows(
       groups.length === 0 || groups.some((group) => !group.reviewVerified);
     return [...expanded, ...(hasFallback ? [{ key: account, account }] : [])];
   });
+}
+
+/** 确认表与第二步清单使用同一行粒度；筛选和「继续显示」都不截断导出。 */
+export function fxConfirmationRows(
+  reviewRows: FxAccountReviewRow[],
+  accountRoles: Record<string, string>,
+  detailRoles: Record<string, string>,
+  accountCurrencies: Record<string, string>,
+  detailCurrencies: Record<string, string>,
+  jeCurrencyDetails: Inspection["accountCurrencyDetails"],
+  tbCurrencyDetails: Inspection["accountCurrencyDetails"],
+  fallbackFunctional: string,
+): ConfirmationRow[] {
+  return reviewRows.map((row) => {
+    const role = detailRoles[row.key] ?? accountRoles[row.account] ?? "non_monetary";
+    const roleLabel = ROLE_OPTIONS.find(([value]) => value === role)?.[1] ?? "非货币性项目";
+    const currency = role === "non_monetary" || role === "other_pnl"
+      ? "N/A"
+      : (row.auxiliary ? detailCurrencies[row.key] : accountCurrencies[row.account]) ||
+        fxAccountCurrencyDetail(row.account, jeCurrencyDetails, tbCurrencyDetails).detected ||
+        fallbackFunctional;
+    return {
+      key: row.key,
+      values: [row.auxiliary ? `${row.account} · ${row.auxiliary}` : row.account, roleLabel, currency],
+    };
+  });
+}
+
+/** 回传按稳定行键落到逐户或科目级状态，不能把辅助行误写成科目级覆盖。 */
+export function fxConfirmationImportPatches(
+  changed: ConfirmationRow[],
+  reviewRows: FxAccountReviewRow[],
+  currentRows: ConfirmationRow[],
+  accountRoles: Record<string, string>,
+  accountCurrencies: Record<string, string>,
+  jeCurrencyDetails: Inspection["accountCurrencyDetails"],
+  tbCurrencyDetails: Inspection["accountCurrencyDetails"],
+  fallbackFunctional: string,
+) {
+  const reviewByKey = new Map(reviewRows.map((row) => [row.key, row]));
+  const currentByKey = new Map(currentRows.map((row) => [row.key, row]));
+  const roles: Record<string, string> = {};
+  const detailRoles: Record<string, string> = {};
+  const currencies: Record<string, string> = {};
+  const detailCurrencies: Record<string, string> = {};
+  const detailRoleDeletes: string[] = [];
+  const detailCurrencyDeletes: string[] = [];
+  for (const item of changed) {
+    const row = reviewByKey.get(item.key);
+    const original = currentByKey.get(item.key);
+    if (!row || !original) throw new Error(`科目 ${item.key} 已不在当前确认清单，请重新下载。`);
+    const role = ROLE_OPTIONS.find(([, label]) => label === item.values[1])?.[0];
+    if (!role) throw new Error(`${item.key}：请选择有效的分类。`);
+    const currency = item.values[2].trim().toUpperCase();
+    if (currency && currency !== "N/A" && !CURRENCY_OPTIONS.includes(currency))
+      throw new Error(`${item.key}：请选择有效的账户币种。`);
+    if (item.values[1] !== original.values[1]) {
+      if (row.auxiliary) {
+        if (role === (accountRoles[row.account] ?? "non_monetary")) detailRoleDeletes.push(row.key);
+        else detailRoles[row.key] = role;
+      }
+      else roles[row.account] = role;
+    }
+    if (item.values[2] !== original.values[2] || role === "non_monetary" || role === "other_pnl") {
+      const detected = fxAccountCurrencyDetail(row.account, jeCurrencyDetails, tbCurrencyDetails).detected;
+      const inherited = (row.auxiliary ? accountCurrencies[row.account] : "") || detected || fallbackFunctional;
+      const override = role === "non_monetary" || role === "other_pnl" || currency === "N/A" || currency === inherited
+        ? ""
+        : currency;
+      if (row.auxiliary) {
+        if (override) detailCurrencies[row.key] = override;
+        else detailCurrencyDeletes.push(row.key);
+      }
+      else currencies[row.account] = override;
+    }
+  }
+  return { roles, detailRoles, currencies, detailCurrencies, detailRoleDeletes, detailCurrencyDeletes };
 }
 
 /**
@@ -1092,6 +1170,28 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
         defaultFunctionalCurrency,
       ),
     [entities, entityCurrencies, fixedEntity, defaultFunctionalCurrency],
+  );
+  const confirmationRows = useMemo(
+    () => fxConfirmationRows(
+      reviewRows,
+      accountRoles,
+      accountDetailRoles,
+      accountCurrencies,
+      accountDetailCurrencies,
+      je?.accountCurrencyDetails,
+      tb?.accountCurrencyDetails,
+      fallbackFunctional,
+    ),
+    [
+      reviewRows,
+      accountRoles,
+      accountDetailRoles,
+      accountCurrencies,
+      accountDetailCurrencies,
+      je?.accountCurrencyDetails,
+      tb?.accountCurrencyDetails,
+      fallbackFunctional,
+    ],
   );
   const currencyConfirmationMissing = Boolean(
     tb &&
@@ -1975,6 +2075,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
               <FileDropInput
                 containerRef={uploadDropRef}
                 value={jePath || tbPath}
+                hideFilledLabel
                 ariaLabel="重新选择 JE、TB 文件"
                 displayValue={[
                   jePath && `JE：${fileName(jePath)}${je?.sheet ? ` / ${je.sheet}` : ""}`,
@@ -2109,14 +2210,10 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
               status={reviewStatus}
               results={reviews.results}
               disabled={busy}
-              autoReviewKey={
-                busy
-                  ? ""
-                  : JSON.stringify([
-                      je && [jePath, je.sheet, je.headerRow, je.headerDepth],
-                      tb && [tbPath, tb.sheet, tb.headerRow, tb.headerDepth],
-                    ])
-              }
+              autoReviewKey={busy ? "" : completeLedgerPairReviewKey(
+                tb && [tbPath, tb.sheet, tb.headerRow, tb.headerDepth],
+                je && [jePath, je.sheet, je.headerRow, je.headerDepth],
+              )}
               autoReviewOwner={ledgerReviewOwner.current}
               onReviewAll={() => void reviewBoth()}
               onUndo={reviews.undoChange}
@@ -2534,32 +2631,37 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                     <AccountConfirmationActions
                       tool="fx"
                       title="汇兑损益"
-                      context={JSON.stringify([tbPath, jePath, tbMapping, jeMapping, accounts])}
+                      context={JSON.stringify([tbPath, jePath, tbMapping, jeMapping, reviewRows.map((row) => row.key)])}
                       columns={[
                         { key: "account", title: "科目" },
                         { key: "role", title: "分类", editable: true, options: ROLE_OPTIONS.map(([, label]) => label) },
-                        { key: "currency", title: "账户币种", editable: true, options: CURRENCY_OPTIONS },
+                        { key: "currency", title: "账户币种", editable: true, options: ["N/A", ...CURRENCY_OPTIONS] },
                       ]}
-                      rows={accounts.map((account) => {
-                        const detail = fxAccountCurrencyDetail(account, je?.accountCurrencyDetails, tb?.accountCurrencyDetails);
-                        return { key: account, values: [
-                          account,
-                          ROLE_OPTIONS.find(([key]) => key === (accountRoles[account] ?? "non_monetary"))?.[1] ?? "",
-                          accountCurrencies[account] || detail.detected || "",
-                        ] };
-                      })}
+                      rows={confirmationRows}
                       onImport={(changed) => {
-                        const roles: Record<string, string> = {};
-                        const currencies: Record<string, string> = {};
-                        for (const row of changed) {
-                          const role = ROLE_OPTIONS.find(([, label]) => label === row.values[1])?.[0];
-                          if (!role) throw new Error(`${row.key}：请选择有效的分类。`);
-                          roles[row.key] = role;
-                          currencies[row.key] = row.values[2];
-                        }
-                        setAccountRoles((current) => ({ ...current, ...roles }));
+                        const patches = fxConfirmationImportPatches(
+                          changed,
+                          reviewRows,
+                          confirmationRows,
+                          accountRoles,
+                          accountCurrencies,
+                          je?.accountCurrencyDetails,
+                          tb?.accountCurrencyDetails,
+                          fallbackFunctional,
+                        );
+                        setAccountRoles((current) => ({ ...current, ...patches.roles }));
+                        setAccountDetailRoles((current) => {
+                          const next = { ...current, ...patches.detailRoles };
+                          patches.detailRoleDeletes.forEach((key) => delete next[key]);
+                          return next;
+                        });
                         setAccountRolesTouched((current) => ({ ...current, ...Object.fromEntries(changed.map((row) => [row.key, true])) }));
-                        setAccountCurrencies((current) => ({ ...current, ...currencies }));
+                        setAccountCurrencies((current) => ({ ...current, ...patches.currencies }));
+                        setAccountDetailCurrencies((current) => {
+                          const next = { ...current, ...patches.detailCurrencies };
+                          patches.detailCurrencyDeletes.forEach((key) => delete next[key]);
+                          return next;
+                        });
                       }}
                     />
                   </div>

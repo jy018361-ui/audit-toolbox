@@ -16,6 +16,11 @@ describe("存款余额勾稽与利率状态分别显示", () => {
     expect(depositRateCheckStatus({ rateResolved: true, rateSource: "挂牌暂估值（待确认）", status: "待确认利率" })).toBe("待确认利率");
   });
 
+  it("来源文案统一后，是否待确认只看标记位不看文案", () => {
+    expect(depositRateCheckStatus({ rateResolved: true, rateSource: "挂牌暂估值", rateProvisional: true, status: "已勾稽" })).toBe("待确认利率");
+    expect(depositRateCheckStatus({ rateResolved: true, rateSource: "挂牌暂估值", rateProvisional: false, status: "已勾稽" })).toBe("已填利率");
+  });
+
   it("两点法的零差异不冒充 JE 勾稽，余额差异不被利率状态掩盖", () => {
     expect(depositBalanceCheckStatus({ jeReconciled: false, reconciliationDiff: 0 })).toBe("未做JE核对");
     expect(depositBalanceCheckStatus({ jeReconciled: true, reconciliationDiff: 10 })).toBe("待复核");

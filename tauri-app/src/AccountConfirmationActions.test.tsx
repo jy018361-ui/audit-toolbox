@@ -4,8 +4,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountConfirmationActions } from "./AccountConfirmationActions";
 
-const mock = vi.hoisted(() => ({ engineCall: vi.fn(), pickPath: vi.fn() }));
-vi.mock("./api", () => ({ engineCall: mock.engineCall, pickPath: mock.pickPath }));
+const mock = vi.hoisted(() => ({ engineCall: vi.fn(), openOutput: vi.fn(), pickPath: vi.fn() }));
+vi.mock("./api", () => ({ engineCall: mock.engineCall, openOutput: mock.openOutput, pickPath: mock.pickPath }));
 
 const columns = [
   { key: "account", title: "科目" },
@@ -19,6 +19,7 @@ const props = { tool: "deposit" as const, title: "存款", context: "current-sou
 
 beforeEach(() => {
   mock.engineCall.mockReset();
+  mock.openOutput.mockReset();
   mock.pickPath.mockReset();
   vi.spyOn(window, "confirm").mockReturnValue(true);
 });
@@ -39,6 +40,17 @@ describe("科目确认表", () => {
     await waitFor(() => expect(mock.engineCall).toHaveBeenCalledWith("account_confirmation.export", expect.objectContaining({ rows })));
     fireEvent.click(screen.getByRole("button", { name: "回传科目确认表" }));
     await waitFor(() => expect(onImport).toHaveBeenCalledWith([{ key: "b", values: ["1001 现金", "计息"] }]));
+  });
+
+  it("下载成功后提供一键打开所在文件夹的链接", async () => {
+    mock.pickPath.mockResolvedValueOnce("C:/audit/存款科目确认表.xlsx");
+    mock.engineCall.mockResolvedValueOnce({ count: 2 });
+    render(<AccountConfirmationActions {...props} onImport={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "下载科目确认表" }));
+    const link = await screen.findByRole("button", { name: /打开所在文件夹/ });
+    expect(link).toHaveAttribute("title", "C:/audit/存款科目确认表.xlsx");
+    fireEvent.click(link);
+    expect(mock.openOutput).toHaveBeenCalledWith("C:/audit/存款科目确认表.xlsx");
   });
 
   it("拒绝 Excel 绕过下拉框填入非法分类", async () => {

@@ -1103,7 +1103,7 @@
 }
 /* 非货币性项目／其他损益成本科目不参与外币重估，账户币种固定 N/A。 */
 .fx-currency-na {
-  color: var(--muted-fg, #6b7280);
+  color: var(--muted-foreground);
   padding: 6px 4px;
 }
 

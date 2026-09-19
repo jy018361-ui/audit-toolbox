@@ -39,6 +39,7 @@ import {
   type LedgerWorkbookSheetClassification,
 } from "@/ledgerMapping";
 import {
+  completeLedgerPairReviewKey,
   LedgerReviewAll,
   useLedgerDictReviews,
 } from "@/components/LedgerReviewAll";
@@ -732,7 +733,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       void loadTbAccounts();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, mode, sources.tb.inspection]);
+  }, [step, mode, sources.tb.inspection, sources.tb.mapping, tbAccounts.length]);
   const selectedLoanAccounts = () =>
     tbAccounts
       .filter((a) => loanAccountRoles[a.key] === "loan")
@@ -1540,7 +1541,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       </>
     );
   };
-  const reviewSourceKey = JSON.stringify([
+  const reviewSourceKey = completeLedgerPairReviewKey(
     sources.tb.inspection && [
       sources.tb.path,
       sources.tb.inspection.sheet,
@@ -1553,7 +1554,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       sources.je.inspection.headerRow,
       sources.je.inspection.headerDepth,
     ],
-  ]);
+  );
   return (
     <main className="tool-page fx-page loan-page">
       <PageHeader
@@ -1630,13 +1631,36 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
             <CardContent>
               {mode === "tb" ? (
                 <>
+                  <div className="fx-source-requirements" aria-label="所需审计资料">
+                    <strong>当前模式所需资料</strong>
+                    <span className={sources.je.path ? "ready" : "required"}>
+                      JE 序时账{sources.je.path ? "（已添加）" : "（必需）"}
+                    </span>
+                    <span className={sources.tb.path ? "ready" : "required"}>
+                      TB 科目余额表{sources.tb.path ? "（已添加）" : "（必需）"}
+                    </span>
+                  </div>
                   <FileDropInput
                     containerRef={uploadDropRef}
-                    value=""
+                    value={sources.je.path || sources.tb.path}
+                    displayValue={[
+                      sources.je.path && `JE：${fileNameOf(sources.je.path)}${sources.je.inspection?.sheet ? ` / ${sources.je.inspection.sheet}` : ""}`,
+                      sources.tb.path && `TB：${fileNameOf(sources.tb.path)}${sources.tb.inspection?.sheet ? ` / ${sources.tb.inspection.sheet}` : ""}`,
+                    ]
+                      .filter(Boolean)
+                      .join("；")}
+                    hideFilledLabel
                     disabled={busy}
                     placeholder="拖放或选择 TB、序时账文件（可同时选择）"
                     onBrowse={() => void browsePair()}
                     onDragStateChange={() => {}}
+                    onClear={() => {
+                      reviews.clearReview("tb");
+                      reviews.clearReview("je");
+                      setSource("tb", empty());
+                      setSource("je", empty());
+                      setPairStatus("");
+                    }}
                   />
                   <div className="fx-source-grid">
                     <div className="fx-source-slot fx-source-slot-tb">

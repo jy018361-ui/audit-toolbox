@@ -253,6 +253,14 @@ export function useLedgerDictReviews(
  */
 const automaticReviewKeys = new WeakMap<object, string>();
 
+/** 单侧来源仍可手工复核；自动复核只在 TB、JE 均已识别时启动。 */
+export function completeLedgerPairReviewKey(
+  tb: readonly unknown[] | undefined | null,
+  je: readonly unknown[] | undefined | null,
+): string {
+  return tb && je ? JSON.stringify([tb, je]) : "";
+}
+
 export function LedgerReviewAll(props: {
   /** 已上传的文件，顺序即状态行的展示顺序。 */
   present: Array<"je" | "tb">;

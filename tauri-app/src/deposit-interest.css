@@ -60,6 +60,8 @@
   max-height: 520px;
   margin-top: var(--sp-3);
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--card);
@@ -72,7 +74,7 @@
 }
 .deposit-account-list table {
   width: 100%;
-  min-width: 760px;
+  min-width: 900px;
   border-collapse: separate;
   border-spacing: 0;
 }
@@ -100,11 +102,21 @@
 }
 .deposit-account-list th:nth-child(2),
 .deposit-account-list td:nth-child(2) {
-  width: 220px;
+  width: 204px;
 }
 .deposit-account-list th:nth-child(3),
 .deposit-account-list td:nth-child(3) {
-  min-width: 260px;
+  width: 172px;
+  min-width: 172px;
+}
+/* 第四列＝利率（%）：数字输入框保持窄列，别把科目列挤没。 */
+.deposit-account-list th:nth-child(4),
+.deposit-account-list td:nth-child(4) {
+  width: 128px;
+  min-width: 118px;
+}
+.deposit-account-list .deposit-pct input {
+  width: 84px;
 }
 .deposit-account-list select {
   width: 100%;
@@ -119,10 +131,27 @@
   display: flex;
   gap: 6px;
   min-width: 0;
+  width: max-content;
+  max-width: 100%;
 }
 .deposit-account-tier select {
   min-width: 0;
-  flex: 1 1 0;
+  flex: 0 1 148px;
+  width: 148px;
+}
+/* 这些枚举的最长文案由内置利率档位决定。下拉框保持可读的固定宽度，
+   不因表格剩余空间被拉成长条；定期/通知存款出现期限时则让短选项并列。 */
+.deposit-account-list .deposit-account-role {
+  width: 196px;
+  max-width: 100%;
+}
+.deposit-account-list .deposit-account-category {
+  width: 148px;
+  max-width: 100%;
+}
+.deposit-account-list .deposit-account-term {
+  flex-basis: 112px;
+  width: 112px;
 }
 .deposit-account-na {
   color: var(--muted-foreground);
@@ -131,6 +160,7 @@
 /* 步骤卡头与借款利息第二步同款：主色 kicker 点题，汇总徽章靠右。 */
 .deposit-confirm-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
@@ -249,7 +279,7 @@
   font-variant-numeric: tabular-nums;
 }
 .deposit-table td {
-  background: var(--card);
+  background: var(--deposit-row-bg, var(--card));
 }
 .deposit-table th {
   position: sticky;
@@ -265,7 +295,7 @@
   z-index: 2;
   width: 150px;
   min-width: 150px;
-  background: var(--card);
+  background: var(--deposit-row-bg, var(--card));
 }
 .deposit-table > table > thead th:first-child {
   z-index: 3;
@@ -278,7 +308,7 @@
   z-index: 2;
   width: 300px;
   min-width: 300px;
-  background: var(--card);
+  background: var(--deposit-row-bg, var(--card));
 }
 .deposit-table > table > thead th:nth-child(2) {
   z-index: 3;
@@ -328,11 +358,8 @@
   width: 104px;
   text-align: right;
 }
-.deposit-review-row {
-  background: color-mix(in srgb, var(--warning-border) 12%, transparent);
-}
-.deposit-table > table > tbody > .deposit-review-row > td {
-  background: color-mix(in srgb, var(--warning-border) 12%, var(--card));
+.deposit-table > table > tbody > .deposit-review-row {
+  --deposit-row-bg: color-mix(in srgb, var(--warning-border) 12%, var(--card));
 }
 .deposit-table > table > tbody > tr > .deposit-difference {
   background: var(--warning-bg);
@@ -591,6 +618,18 @@
   background: var(--warning-bg);
 }
 .deposit-table input.deposit-rate-missing::placeholder {
+  color: var(--warning-fg);
+}
+/* 第三步利率只读展示：利率改在第二步维护，这里仅披露测算采用值。 */
+.deposit-rate-readonly {
+  font-variant-numeric: tabular-nums;
+}
+span.deposit-rate-missing {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: var(--warning-bg);
   color: var(--warning-fg);
 }
 .deposit-missing {

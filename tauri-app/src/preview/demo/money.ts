@@ -1200,6 +1200,7 @@ type DepositRowSeed = {
   rate: number;
   rateResolved: boolean;
   rateSource: string;
+  rateProvisional?: boolean;
   tierMatchedBy: string;
   opening: number;
   closing: number;
@@ -1246,6 +1247,7 @@ const depositResultRow = (seed: DepositRowSeed) => {
     termLabel: seed.termLabel,
     tierMatchedBy: seed.tierMatchedBy,
     rateSource: seed.rateSource,
+    rateProvisional: seed.rateProvisional ?? false,
     annualRate: seed.rate,
     rateResolved: seed.rateResolved,
     rateWarning: "",
@@ -1264,15 +1266,15 @@ const depositResultRow = (seed: DepositRowSeed) => {
 };
 
 const DEPOSIT_ROW_SEEDS: DepositRowSeed[] = [
-  { key: "1002010101", auxiliary: "工行基本户-0200", currency: "CNY", category: "demand", tier: "demand", tierLabel: "活期存款", termLabel: "", rate: 0.0005, rateResolved: true, rateSource: "活期挂牌利率（自动套用）", tierMatchedBy: "档位字典：对公活期", opening: 4580000, closing: 5236500, moves: DEMAND_MOVES },
-  { key: "1002010102", auxiliary: "招行一般户-6606", currency: "CNY", category: "demand", tier: "demand", tierLabel: "活期存款", termLabel: "", rate: 0.0005, rateResolved: true, rateSource: "活期挂牌利率（自动套用）", tierMatchedBy: "档位字典：对公活期", opening: 8650000, closing: 7980000, moves: DEMAND_MOVES },
-  { key: "1002010104", account: "1002010104 银行存款-交通银行股份有限公司北京朝阳支行-一般存款账户-人民币", auxiliary: "交行一般户-3310", currency: "CNY", category: "demand", tier: "demand", tierLabel: "活期存款", termLabel: "", rate: 0.0005, rateResolved: true, rateSource: "活期挂牌利率（自动套用）", tierMatchedBy: "档位字典：对公活期", opening: 2340000, closing: 2187600, moves: DEMAND_MOVES },
-  { key: "1012010101", auxiliary: "支付宝备付金", currency: "CNY", category: "notice", tier: "notice_7d", tierLabel: "7天通知存款", termLabel: "7天", rate: 0.0055, rateResolved: true, rateSource: "存款协议约定", tierMatchedBy: "科目名「备付金存款」→ 通知 7 天", opening: 2340000, closing: 1876000, moves: DEMAND_MOVES },
-  { key: "1012020101", auxiliary: "建行承兑保证金", currency: "CNY", category: "term", tier: "term_6m", tierLabel: "6个月定期存款", termLabel: "6个月", rate: 0.0085, rateResolved: true, rateSource: "存款协议约定", tierMatchedBy: "科目名「保证金」→ 定期 6 个月", opening: 8000000, closing: 8000000, moves: FLAT_MOVES },
-  { key: "1002010103", account: "1002010103 银行存款-中国银行股份有限公司北京王府井支行-大额存单账户-人民币", auxiliary: "中银大额存单-0517", currency: "CNY", category: "large_cd", tier: "cd_1y", tierLabel: "1年大额存单", termLabel: "1年", rate: 0, rateResolved: false, rateSource: "存单协议（待填）", tierMatchedBy: "底稿备注：2025-05 签发一年期大额存单", opening: 5000000, closing: 5000000, moves: FLAT_MOVES },
-  { key: "1002020101", auxiliary: "汇丰外币户-8801", currency: "USD", category: "term", tier: "term_3m", tierLabel: "3个月定期存款", termLabel: "3个月", rate: 0.0165, rateResolved: true, rateSource: "存款协议约定（美元户）", tierMatchedBy: "档位字典：外币定期", opening: 1284000, closing: 1452800, moves: DEMAND_MOVES },
-  { key: "1002020102", account: "1002020102 银行存款-星展银行（中国）有限公司上海分行-外币存款账户-美元", auxiliary: "星展美元户-6620", currency: "USD", category: "demand", tier: "demand", tierLabel: "活期存款", termLabel: "", rate: 0.0005, rateResolved: true, rateSource: "活期挂牌利率（自动套用）", tierMatchedBy: "档位字典：对公活期", opening: 862000, closing: 905400, moves: DEMAND_MOVES },
-  { key: "1002030101", auxiliary: "中行港币户-2210", currency: "HKD", category: "notice", tier: "notice_1d", tierLabel: "1天通知存款", termLabel: "1天", rate: 0.0035, rateResolved: true, rateSource: "存款协议约定（港币户）", tierMatchedBy: "档位字典：外币通知", opening: 765300, closing: 698400, moves: DEMAND_MOVES },
+  { key: "1002010101", auxiliary: "工行基本户-0200", currency: "CNY", category: "demand", tier: "demand", tierLabel: "活期存款", termLabel: "", rate: 0.0005, rateResolved: true, rateSource: "挂牌暂估值", rateProvisional: true, tierMatchedBy: "档位字典：对公活期", opening: 4580000, closing: 5236500, moves: DEMAND_MOVES },
+  { key: "1002010102", auxiliary: "招行一般户-6606", currency: "CNY", category: "demand", tier: "demand", tierLabel: "活期存款", termLabel: "", rate: 0.0005, rateResolved: true, rateSource: "挂牌暂估值", rateProvisional: true, tierMatchedBy: "档位字典：对公活期", opening: 8650000, closing: 7980000, moves: DEMAND_MOVES },
+  { key: "1002010104", account: "1002010104 银行存款-交通银行股份有限公司北京朝阳支行-一般存款账户-人民币", auxiliary: "交行一般户-3310", currency: "CNY", category: "demand", tier: "demand", tierLabel: "活期存款", termLabel: "", rate: 0.0005, rateResolved: true, rateSource: "挂牌暂估值", rateProvisional: true, tierMatchedBy: "档位字典：对公活期", opening: 2340000, closing: 2187600, moves: DEMAND_MOVES },
+  { key: "1012010101", auxiliary: "支付宝备付金", currency: "CNY", category: "notice", tier: "notice_7d", tierLabel: "7天通知存款", termLabel: "7天", rate: 0.0055, rateResolved: true, rateSource: "科目确认表手工指定", tierMatchedBy: "科目名「备付金存款」→ 通知 7 天", opening: 2340000, closing: 1876000, moves: DEMAND_MOVES },
+  { key: "1012020101", auxiliary: "建行承兑保证金", currency: "CNY", category: "term", tier: "term_6m", tierLabel: "6个月定期存款", termLabel: "6个月", rate: 0.0085, rateResolved: true, rateSource: "科目确认表手工指定", tierMatchedBy: "科目名「保证金」→ 定期 6 个月", opening: 8000000, closing: 8000000, moves: FLAT_MOVES },
+  { key: "1002010103", account: "1002010103 银行存款-中国银行股份有限公司北京王府井支行-大额存单账户-人民币", auxiliary: "中银大额存单-0517", currency: "CNY", category: "large_cd", tier: "cd_1y", tierLabel: "1年大额存单", termLabel: "1年", rate: 0, rateResolved: false, rateSource: "需填写实际利率", tierMatchedBy: "底稿备注：2025-05 签发一年期大额存单", opening: 5000000, closing: 5000000, moves: FLAT_MOVES },
+  { key: "1002020101", auxiliary: "汇丰外币户-8801", currency: "USD", category: "term", tier: "term_3m", tierLabel: "3个月定期存款", termLabel: "3个月", rate: 0.0165, rateResolved: true, rateSource: "科目确认表手工指定", tierMatchedBy: "档位字典：外币定期", opening: 1284000, closing: 1452800, moves: DEMAND_MOVES },
+  { key: "1002020102", account: "1002020102 银行存款-星展银行（中国）有限公司上海分行-外币存款账户-美元", auxiliary: "星展美元户-6620", currency: "USD", category: "demand", tier: "demand", tierLabel: "活期存款", termLabel: "", rate: 0.0005, rateResolved: true, rateSource: "挂牌暂估值", rateProvisional: true, tierMatchedBy: "档位字典：对公活期", opening: 862000, closing: 905400, moves: DEMAND_MOVES },
+  { key: "1002030101", auxiliary: "中行港币户-2210", currency: "HKD", category: "notice", tier: "notice_1d", tierLabel: "1天通知存款", termLabel: "1天", rate: 0.0035, rateResolved: true, rateSource: "科目确认表手工指定", tierMatchedBy: "档位字典：外币通知", opening: 765300, closing: 698400, moves: DEMAND_MOVES },
 ];
 
 const DEPOSIT_ROWS = DEPOSIT_ROW_SEEDS.map(depositResultRow);

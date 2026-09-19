@@ -10,7 +10,10 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TbjeCheckPage } from "./TbjeCheckPage";
+import {
+  TbjeCheckPage,
+  tbjeCompleteAutomaticReviewKeys,
+} from "./TbjeCheckPage";
 import { pairingFileKey } from "./tbjePairing";
 import { ConfirmDialogHost } from "./components/ConfirmDialog";
 import type { ToolManifest } from "./types";
@@ -34,6 +37,23 @@ const tool: ToolManifest = {
   capabilities: [],
   migrationStatus: "ready",
 };
+
+it("批量核对仅对完整组合生成自动复核身份，替换任一文件会生成新身份", () => {
+  const tbA = { path: "C:/samples/TB-A.xlsx", kind: "tb" as const };
+  const tbB = { path: "C:/samples/TB-B.xlsx", kind: "tb" as const };
+  const jeA = { path: "C:/samples/JE-A.xlsx", kind: "je" as const };
+
+  expect(tbjeCompleteAutomaticReviewKeys([{ tb: tbA }])).toEqual([]);
+  expect(tbjeCompleteAutomaticReviewKeys([{ je: jeA }])).toEqual([]);
+
+  const first = tbjeCompleteAutomaticReviewKeys([{ tb: tbA, je: jeA }]);
+  const replaced = tbjeCompleteAutomaticReviewKeys([{ tb: tbB, je: jeA }]);
+  expect(first).toEqual([
+    JSON.stringify([pairingFileKey(tbA), pairingFileKey(jeA)]),
+  ]);
+  expect(replaced).toHaveLength(1);
+  expect(replaced[0]).not.toBe(first[0]);
+});
 
 describe("TbjeCheckPage", () => {
   afterEach(() => {

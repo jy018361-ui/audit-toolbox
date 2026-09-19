@@ -229,7 +229,9 @@ it("公共入口重建整组，待上传单侧入口只补充对应来源", asyn
   expect(screen.getByText("已识别：JE 序时账")).toBeVisible();
 
   // 再走公共入口只选一份 JE：按“重新选择整组”语义，旧 TB 与旧 JE 都清空。
-  fireEvent.click(upload);
+  fireEvent.click(
+    screen.getByRole("button", { name: "重新选择文件：je.xlsx" }),
+  );
   expect((await screen.findAllByText("je-new.xlsx"))[0]).toBeVisible();
   expect(screen.queryByText("tb.xlsx")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "补充上传 TB" })).toBeVisible();

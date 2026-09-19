@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { engineCall, pickPath } from "./api";
+import { displayFileName } from "./fileDisplay";
+import { engineCall, openOutput, pickPath } from "./api";
 import { Button } from "./components/ui/button";
 import "./account-confirmation.css";
 
@@ -33,15 +34,18 @@ export function AccountConfirmationActions({
 }: Props) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
+  const [downloadPath, setDownloadPath] = useState("");
 
   async function download() {
     const outputPath = await pickPath("save", "保存科目确认表", ["xlsx"], `${title}科目确认表.xlsx`);
     if (typeof outputPath !== "string") return;
     setBusy(true);
     setNote("");
+    setDownloadPath("");
     try {
       await engineCall("account_confirmation.export", { tool, context, columns, rows, outputPath });
       setNote(`已下载 ${rows.length} 行科目确认表。`);
+      setDownloadPath(outputPath);
     } catch (error) {
       setNote(errorMessage(error));
     } finally {
@@ -54,6 +58,7 @@ export function AccountConfirmationActions({
     if (typeof inputPath !== "string") return;
     setBusy(true);
     setNote("");
+    setDownloadPath("");
     try {
       const response = await engineCall("account_confirmation.import", {
         tool, context, keys: rows.map((row) => row.key), inputPath,
@@ -96,6 +101,16 @@ export function AccountConfirmationActions({
         <Button type="button" variant="secondary" disabled={disabled || busy || !rows.length} onClick={() => void upload()}>回传科目确认表</Button>
       </div>
       {note && <span role="status">{note}</span>}
+      {downloadPath && (
+        <button
+          type="button"
+          className="link-button account-confirmation-open"
+          title={downloadPath}
+          onClick={() => void openOutput(downloadPath)}
+        >
+          打开所在文件夹（{displayFileName(downloadPath)}）
+        </button>
+      )}
     </div>
   );
 }

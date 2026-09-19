@@ -15,6 +15,7 @@ import {
 } from "./DepositInterestPage";
 import { MappingPanel, type MappingDict } from "@/components/MappingPanel";
 import {
+  completeLedgerPairReviewKey,
   LedgerReviewAll,
   useLedgerDictReviews,
 } from "@/components/LedgerReviewAll";
@@ -57,6 +58,7 @@ import {
 import "./fx-audit.css";
 import "./fa-tbje.css";
 import { AccountConfirmationActions } from "./AccountConfirmationActions";
+import { markToolPageLive } from "./toolPageActivity";
 
 type Kind = "tb" | "je";
 type Mapping = Record<string, string | string[]>;
@@ -499,6 +501,9 @@ function fileName(path: string) {
 }
 
 export function FaTbJePage() {
+  // 草稿缓存非空说明本页此前有现场：登记后不参与 LRU 淘汰，
+  // 保活到应用退出（避免重挂载后再次被清）。
+  if (faTbJeDraftCache) markToolPageLive("fa_list");
   const [step, setStep] = useState<1 | 2 | 3>(
     () => faTbJeDraftCache?.step ?? 1,
   );
@@ -1243,14 +1248,26 @@ export function FaTbJePage() {
               <CardTitle>上传审计数据并核对字段映射</CardTitle>
             </CardHeader>
             <CardContent>
+              <div className="fx-source-requirements" aria-label="所需审计资料">
+                <strong>当前模式所需资料</strong>
+                <span className={paths.je ? "ready" : "required"}>
+                  JE 序时账{paths.je ? "（已添加）" : "（必需）"}
+                </span>
+                <span className={paths.tb ? "ready" : "required"}>
+                  TB 科目余额表{paths.tb ? "（已添加）" : "（必需）"}
+                </span>
+              </div>
               <FileDropInput
                 containerRef={uploadDropRef}
-                value={(["tb", "je"] as const)
+                value={paths.je || paths.tb}
+                displayValue={(["je", "tb"] as const)
                   .filter((kind) => paths[kind])
-                  .map(
-                    (kind) => `${kind.toUpperCase()}：${fileName(paths[kind])}`,
-                  )
+                  .map((kind) => {
+                    const inspection = inspects[kind];
+                    return `${kind.toUpperCase()}：${fileName(paths[kind])}${inspection?.sheet ? ` / ${inspection.sheet}` : ""}`;
+                  })
                   .join("；")}
+                hideFilledLabel
                 disabled={busy}
                 placeholder={
                   busy
@@ -1332,24 +1349,10 @@ export function FaTbJePage() {
               status={reviews.status}
               results={reviews.results}
               disabled={busy}
-              autoReviewKey={
-                busy
-                  ? ""
-                  : JSON.stringify([
-                      inspects.tb && [
-                        paths.tb,
-                        inspects.tb.sheet,
-                        inspects.tb.headerRow,
-                        inspects.tb.headerDepth,
-                      ],
-                      inspects.je && [
-                        paths.je,
-                        inspects.je.sheet,
-                        inspects.je.headerRow,
-                        inspects.je.headerDepth,
-                      ],
-                    ])
-              }
+              autoReviewKey={busy ? "" : completeLedgerPairReviewKey(
+                inspects.tb && [paths.tb, inspects.tb.sheet, inspects.tb.headerRow, inspects.tb.headerDepth],
+                inspects.je && [paths.je, inspects.je.sheet, inspects.je.headerRow, inspects.je.headerDepth],
+              )}
               autoReviewOwner={ledgerReviewOwner.current}
               onReviewAll={() =>
                 void reviews.reviewAll({

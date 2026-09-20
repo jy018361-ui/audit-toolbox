@@ -53,6 +53,7 @@ export function JargonTip({ term, text, className }: JargonTipProps) {
         tabIndex={0}
         className={`jargon-tip-button${className ? ` ${className}` : ""}`}
         aria-label={`什么是${term}`}
+        aria-expanded={open}
         aria-describedby={open ? tipId : undefined}
         onMouseEnter={() => setOpen(true)}
         onMouseLeave={() => setOpen(false)}
@@ -67,6 +68,10 @@ export function JargonTip({ term, text, className }: JargonTipProps) {
           if (event.key === "Escape") {
             event.preventDefault();
             setOpen(false);
+          } else if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            event.stopPropagation();
+            setOpen((current) => !current);
           }
         }}
       >

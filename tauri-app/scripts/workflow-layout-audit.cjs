@@ -15,7 +15,12 @@ const baseUrl = process.env.WORKFLOW_AUDIT_URL || "http://127.0.0.1:1422";
 const requestedRoutes = new Set((process.env.WORKFLOW_AUDIT_ROUTES || "")
   .split(",").map((value) => value.trim()).filter(Boolean));
 const catalog = JSON.parse(fs.readFileSync("public/tool-catalog.json", "utf8"))
+  .filter((tool) => tool.id !== "audipick")
   .filter((tool) => !requestedRoutes.size || requestedRoutes.has(tool.id) || requestedRoutes.has(tool.route));
+const desiredTaskStates = [
+  "loading", "queued", "running", "paused", "cancelled",
+  "failed", "completed", "partial", "restored", "history_resume",
+];
 const requestedViewports = new Set((process.env.WORKFLOW_AUDIT_VIEWPORTS || "")
   .split(",").map((value) => value.trim()).filter(Boolean));
 const viewports = [
@@ -274,11 +279,22 @@ async function captureState(page, tool, viewport, stateLabel, results) {
     }, position);
     await settle(page);
     const issues = await evaluateStable(page, auditGeometry);
+    const observedTaskStates = await evaluateStable(page, () => {
+      const visible = (element) => element.getClientRects().length > 0 &&
+        getComputedStyle(element).visibility !== "hidden";
+      const states = [...document.querySelectorAll(".main [data-job-state]")]
+        .filter(visible).map((element) => element.getAttribute("data-job-state"));
+      if ([...document.querySelectorAll(".job-dialog, .job-dialog-pill")].some(visible)) {
+        states.push("running");
+      }
+      return [...new Set(states.filter(Boolean))];
+    });
     const record = {
       viewport: viewport.label,
       route: tool.route,
       state: stateLabel,
       scroll: ["top", "middle", "bottom"][positionIndex] || String(positionIndex),
+      observedTaskStates,
       issues,
     };
     results.push(record);
@@ -364,7 +380,7 @@ async function advanceWorkflow(page, tool, viewport, results) {
   }
 }
 
-(async () => {
+async function runWorkflowAudit() {
   const browser = await chromium.launch({ channel: "chrome", headless: true, args: ["--no-proxy-server"] });
   const results = [];
   try {
@@ -419,14 +435,46 @@ async function advanceWorkflow(page, tool, viewport, results) {
   }
   fs.writeFileSync(path.join(output, "report.json"), JSON.stringify(results, null, 2));
   const failures = results.filter((result) => result.issues.length);
+  const observedByTool = Object.fromEntries(catalog.map((tool) => {
+    const observed = [...new Set(results
+      .filter((result) => result.route === tool.route)
+      .flatMap((result) => result.observedTaskStates))];
+    return [tool.id, {
+      observed,
+      unverified: desiredTaskStates.filter((state) => !observed.includes(state)),
+    }];
+  }));
+  fs.writeFileSync(path.join(output, "coverage.json"), JSON.stringify({
+    coverageKind: "real-pages-positive-path-only",
+    excludedToolIds: ["audipick"],
+    taskEventMatrixComplete: false,
+    observedByTool,
+  }, null, 2));
   console.log(JSON.stringify({
     output,
+    coverageKind: "real-pages-positive-path-only",
+    taskEventMatrixComplete: false,
+    coverageFile: path.join(output, "coverage.json"),
     snapshots: results.length,
     failures: failures.length,
     summary: failures.slice(0, 120),
   }, null, 2));
   if (failures.length) process.exitCode = 1;
-})().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+}
+
+module.exports = {
+  auditGeometry,
+  currentButtons,
+  activatePickers,
+  completeRequiredSelects,
+  settle,
+  progressPattern,
+  unsafePattern,
+};
+
+if (require.main === module) {
+  runWorkflowAudit().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

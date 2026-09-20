@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { FxAuditPage } from "./FxAuditPage";
 import type { ToolManifest } from "./types";
@@ -9,12 +9,16 @@ const mock = vi.hoisted(() => ({
   engineCall: vi.fn(),
   pickPath: vi.fn(),
   jobStart: vi.fn(),
+  jobListener: undefined as undefined | ((event: Record<string, unknown>) => void),
 }));
 vi.mock("./api", () => ({
   engineCall: mock.engineCall,
   jobCancel: vi.fn(),
   jobStart: mock.jobStart,
-  listenJobEvents: vi.fn(async () => () => undefined),
+  listenJobEvents: vi.fn(async (callback: (event: Record<string, unknown>) => void) => {
+    mock.jobListener = callback;
+    return () => undefined;
+  }),
   listenPositionedFileDrops: vi.fn(async () => () => undefined),
   openOutput: vi.fn(),
   pickPath: mock.pickPath,
@@ -96,6 +100,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   inspectionEntities = [];
   mock.pickPath.mockResolvedValue(null);
+  mock.jobStart.mockResolvedValue("fx-job-1");
+  mock.jobListener = undefined;
   mock.engineCall.mockImplementation(async (method: string) => {
     if (method === "ledger.forms") return [];
     if (method === "ledger.review_pair_mapping")
@@ -129,6 +135,48 @@ beforeEach(() => {
       return { valid: true, errors: [] };
     throw new Error(`unexpected ${method}`);
   });
+});
+
+it.each([
+  ["failed", "汇兑测算失败，请检查字段映射。"],
+  ["cancelled", "汇兑测算已取消。"],
+  ["completed", "系统未收到测算结果"],
+] as const)("真实页面消费 %s 任务事件并保持终态说明", async (phase, message) => {
+  render(<FxAuditPage tool={tool} />);
+  await uploadBothSources();
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
+  fireEvent.click(await screen.findByRole("button", { name: "下一步：测算与底稿" }));
+  fireEvent.change(await screen.findByLabelText("资产负债表日"), { target: { value: "20251231" } });
+  fireEvent.click(await screen.findByRole("button", { name: "测算预览" }));
+  await waitFor(() => expect(mock.jobStart).toHaveBeenCalledWith("fx.preview", expect.anything()));
+
+  await act(async () => {
+    mock.jobListener?.({
+      jobId: "fx-job-1",
+      toolId: "fx_audit",
+      phase: "running",
+      current: 45,
+      total: 100,
+      message: "正在计算汇兑损益…",
+      severity: "info",
+      outputPaths: [],
+    });
+  });
+  expect(screen.getByText("正在计算汇兑损益…")).toBeVisible();
+
+  await act(async () => {
+    mock.jobListener?.({
+      jobId: "fx-job-1",
+      toolId: "fx_audit",
+      phase,
+      current: 100,
+      total: 100,
+      message,
+      severity: phase === "failed" ? "error" : phase === "completed" ? "success" : "warning",
+      outputPaths: [],
+    });
+  });
+  expect((await screen.findAllByText(new RegExp(message))).length).toBeGreaterThan(0);
 });
 
 /** 回归（用户反馈 A）：同一输入状态下，无论底部「下一步」还是步骤条导航，

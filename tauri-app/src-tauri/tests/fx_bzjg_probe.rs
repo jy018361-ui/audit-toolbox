@@ -20,10 +20,15 @@ fn replay_beizhong_after_currency_relax() {
         Ok(value) => {
             println!(
                 "preview 成功，键 = {:?}",
-                value.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>())
+                value
+                    .as_object()
+                    .map(|o| o.keys().cloned().collect::<Vec<_>>())
             );
             if let Some(summary) = value.get("summary") {
-                println!("summary = {}", serde_json::to_string_pretty(summary).unwrap_or_default());
+                println!(
+                    "summary = {}",
+                    serde_json::to_string_pretty(summary).unwrap_or_default()
+                );
             }
         }
         Err(err) => println!("preview 失败: {err:?}"),

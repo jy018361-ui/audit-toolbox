@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import type { ChangeEvent } from "react";
 import { markToolPageLive } from "./toolPageActivity";
 import { useLocation } from "react-router-dom";
@@ -2102,9 +2103,10 @@ function FaCardListPage() {
             {job && job.phase !== "completed" && (
               <JobProgress
                 job={job}
-                onCancel={(jobId) => {
-                  void jobCancel(jobId);
-                  setBusy(false);
+                onCancel={async (jobId) => {
+                  const accepted = await jobCancel(jobId);
+                  if (accepted) setBusy(false);
+                  return accepted;
                 }}
                 cancelLabel="取消任务"
               />
@@ -2238,7 +2240,7 @@ function FaCardListPage() {
                     <Button
                       variant="secondary"
                       size="sm"
-                      onClick={() => void jobCancel(job.jobId)}
+                      onClick={() => void cancelJobWithFeedback(job.jobId)}
                     >
                       停止
                     </Button>
@@ -2680,7 +2682,7 @@ function FaCardListPage() {
                     <Button
                       variant="secondary"
                       size="sm"
-                      onClick={() => void jobCancel(job.jobId)}
+                      onClick={() => void cancelJobWithFeedback(job.jobId)}
                     >
                       停止
                     </Button>
@@ -2809,9 +2811,10 @@ function FaCardListPage() {
               {job && (
                 <JobProgress
                   job={job}
-                  onCancel={(jobId) => {
-                    void jobCancel(jobId);
-                    setBusy(false);
+                  onCancel={async (jobId) => {
+                    const accepted = await jobCancel(jobId);
+                    if (accepted) setBusy(false);
+                    return accepted;
                   }}
                   cancelLabel="取消任务"
                 />

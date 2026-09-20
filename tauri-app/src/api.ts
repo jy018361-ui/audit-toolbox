@@ -4,7 +4,8 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ReleaseNotesSchema } from "./updateNotes";
 import { version as appVersion } from "../package.json";
 import { demoDataEnabled, demoJobLookup, demoLookup, demoPath,
-  cancelDemoJob, emitDemoJobEvent, isDemoJobCancelled, subscribeDemoJobs } from "./preview/demoRegistry";
+  cancelDemoJob, demoReplayJobs, injectDemoJobEvent, registerDemoReplayJob,
+  resumeDemoReplayJob, setDemoAutoPlayback, subscribeDemoJobs } from "./preview/demoRegistry";
 import "./preview/layoutAudit";
 import {
   BootstrapSchema,
@@ -113,6 +114,19 @@ export async function engineCall(
 
 let demoJobSeq = 0;
 
+// Browser-only audit seam. It uses the same event listeners as real job events,
+// but is never installed in Tauri (including its development window).
+if (typeof window !== "undefined" && !inTauri()) {
+  Object.assign(window, {
+    __demoTaskReplay: {
+      setAutoPlayback: setDemoAutoPlayback,
+      jobs: demoReplayJobs,
+      inject: injectDemoJobEvent,
+      resume: resumeDemoReplayJob,
+    },
+  });
+}
+
 // 演示任务的 toolId：与 Rust 侧（excel_merger.rs 的 tool_id()）同一套
 // 「方法前缀 → 工具 id」映射。页面按 toolId 过滤事件（如 Excel_Merger、
 // je_sign_mark），直接取方法名第一段会对不上，演示事件会被页面当串台丢弃。
@@ -153,12 +167,7 @@ export async function jobStart(
     const jobId = `demo-job-${++demoJobSeq}`;
     const toolId = demoJobToolId(method);
     const events = planner(params);
-    events.forEach((event, index) => {
-      window.setTimeout(() => {
-        if (isDemoJobCancelled(jobId)) return;
-        emitDemoJobEvent({ ...event, jobId, toolId });
-      }, 260 * (index + 1));
-    });
+    registerDemoReplayJob(jobId, method, toolId, events);
     return Promise.resolve(jobId);
   }
   return invoke<string>("job_start", { method, params });

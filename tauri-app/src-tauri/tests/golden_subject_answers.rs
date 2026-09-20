@@ -12,7 +12,7 @@
 //! 快照）与 采集完成.flag（断点续跑：已有 flag 的份直接跳过）。单个工具失败
 //! 不中断，失败结果以 {"error": …} 落盘。
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 
 fn try_run(method: &str, params: Value) -> Result<Value, String> {
@@ -20,8 +20,11 @@ fn try_run(method: &str, params: Value) -> Result<Value, String> {
 }
 
 fn dump(out_dir: &PathBuf, name: &str, value: &Value) {
-    std::fs::write(out_dir.join(name), serde_json::to_vec_pretty(value).unwrap())
-        .unwrap_or_else(|e| panic!("写出 {name}: {e}"));
+    std::fs::write(
+        out_dir.join(name),
+        serde_json::to_vec_pretty(value).unwrap(),
+    )
+    .unwrap_or_else(|e| panic!("写出 {name}: {e}"));
 }
 
 /// 人工修正的列映射（条目第 5 段 JSON），合并覆盖到建议映射上。
@@ -35,7 +38,14 @@ fn merged(suggested: &Value, manual: &Value) -> Value {
     Value::Object(map)
 }
 
-fn collect(tb: &str, out_dir: &PathBuf, header_row: Option<u32>, header_depth: Option<u32>, mapping: &Value, sheet: Option<&str>) {
+fn collect(
+    tb: &str,
+    out_dir: &PathBuf,
+    header_row: Option<u32>,
+    header_depth: Option<u32>,
+    mapping: &Value,
+    sheet: Option<&str>,
+) {
     std::fs::create_dir_all(out_dir).expect("创建输出目录");
     // 三个工具都先走各自的表头识别，再把建议映射原样带回科目分类调用，
     // 与前端「第一步识别 → 第二步科目确认」的真实链路一致。表头行／层级
@@ -186,6 +196,9 @@ fn collect_subject_tool_answers_batch() {
             .unwrap_or_else(|| tb.to_string());
         println!("开始采集 {tb_name} …");
         collect(tb, &out_dir, header_row, header_depth, &mapping, sheet);
-        println!("完成 {tb_name}，用时 {:.0}s", started.elapsed().as_secs_f32());
+        println!(
+            "完成 {tb_name}，用时 {:.0}s",
+            started.elapsed().as_secs_f32()
+        );
     }
 }

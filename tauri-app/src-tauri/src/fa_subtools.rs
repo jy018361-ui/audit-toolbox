@@ -7,20 +7,20 @@
 
 use chrono::Local;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, FormatUnderline, Note, Url, Workbook};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
 };
 
+use crate::AppError;
 use crate::excel_merger::PauseCheckpoint;
 use crate::fa;
-use crate::AppError;
 
 /// 折旧测算的字段角色：(映射键名, LLM 角色名)。
 /// 与主工具 file2（期末）侧的角色一致，但只保留单文件测算需要的 8 项——
@@ -1492,9 +1492,10 @@ mod tests {
         let auto = value["autoApplied"].as_array().unwrap();
         let reviews = value["fieldReviews"].as_array().unwrap();
         // LLM 的 life 建议高把握 fill，直接进自动应用。
-        assert!(auto
-            .iter()
-            .any(|item| item["role"] == json!("life") && item["confidence"] == json!(0.9)));
+        assert!(
+            auto.iter()
+                .any(|item| item["role"] == json!("life") && item["confidence"] == json!(0.9))
+        );
         // file1 侧与 8 角色之外的建议必须被丢弃；其余一律不得携带 file1。
         let allowed = [
             "category",
@@ -1513,9 +1514,10 @@ mod tests {
         }
         // 未映射且有本地候选的角色由规则兜底（0.95 fill，同样自动应用）；
         // category 已映射，不应再出现兜底。
-        assert!(auto
-            .iter()
-            .any(|item| item["role"] == json!("name") && item["action"] == json!("fill")));
+        assert!(
+            auto.iter()
+                .any(|item| item["role"] == json!("name") && item["action"] == json!("fill"))
+        );
         assert!(!auto.iter().any(|item| item["role"] == json!("category")));
         // matchReview 固定 keep，前端规划器不会进入匹配键分支。
         assert_eq!(value["matchReview"]["action"], json!("keep"));
@@ -1662,7 +1664,7 @@ mod tests {
         assert!(workbook.contains("税法最低折旧年限参考"));
         let period = sheet_xml_by_name(&output, "折旧政策对比");
         assert!(period.contains("r=\"I3\"")); // 判断结果列有数据行
-                                              // 与主工具导出的"折旧期间"页逐行同源：同一 merge 参数下表头行一致。
+        // 与主工具导出的"折旧期间"页逐行同源：同一 merge 参数下表头行一致。
         let fa_output = dir.join("FA_List.xlsx");
         let mut fa_params = params.clone();
         fa_params["outputPath"] = json!(fa_output.to_string_lossy());

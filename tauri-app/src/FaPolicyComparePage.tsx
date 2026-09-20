@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import { markToolPageLive } from "./toolPageActivity";
 import {
   engineCall,
@@ -836,9 +837,10 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
             {job && job.phase !== "completed" && (
               <JobProgress
                 job={job}
-                onCancel={(jobId) => {
-                  void jobCancel(jobId);
-                  setBusy(false);
+                onCancel={async (jobId) => {
+                  const accepted = await jobCancel(jobId);
+                  if (accepted) setBusy(false);
+                  return accepted;
                 }}
                 cancelLabel="取消任务"
               />
@@ -1057,7 +1059,7 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
                     <Button
                       variant="secondary"
                       size="sm"
-                      onClick={() => void jobCancel(job.jobId)}
+                      onClick={() => void cancelJobWithFeedback(job.jobId)}
                     >
                       停止
                     </Button>
@@ -1132,9 +1134,10 @@ export function FaPolicyComparePage({ tool }: { tool: ToolManifest }) {
               {job && (
                 <JobProgress
                   job={job}
-                  onCancel={(jobId) => {
-                    void jobCancel(jobId);
-                    setBusy(false);
+                  onCancel={async (jobId) => {
+                    const accepted = await jobCancel(jobId);
+                    if (accepted) setBusy(false);
+                    return accepted;
                   }}
                   cancelLabel="取消任务"
                 />

@@ -8,6 +8,8 @@ import { StepTourHint } from "@/components/tour/StepTourHint";
 import { SuccessNudge } from "@/components/tour/SuccessNudge";
 import { JargonTip } from "@/components/JargonTip";
 import { FuzzyBatchConfirmDialog } from "@/FuzzyMatchPage";
+import { ColumnFilterMenu } from "@/components/ColumnFilterMenu";
+import { CurrencyFallbackDialog } from "@/components/CurrencyFallbackDialog";
 import type { JobEvent } from "@/types";
 import "./OverlayStateFixture.css";
 
@@ -119,6 +121,70 @@ function FuzzyFixture() {
   );
 }
 
+function JobPillConfirmFixture() {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const minimize = document.querySelector<HTMLButtonElement>(".job-dialog-footer button");
+      minimize?.click();
+      window.setTimeout(() => triggerRef.current?.click(), 0);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+  return (
+    <JobDialogProvider jobs={[job("job-pill", "后台工具", 37)]} nameOf={(toolId) => toolId}>
+      <button ref={triggerRef} type="button" onClick={() => void confirmDialog({
+        title: "停止后台任务并清空记录？",
+        message: longError,
+        tone: "danger",
+      })}>打开任务条上方确认框</button>
+      <ConfirmDialogHost />
+    </JobDialogProvider>
+  );
+}
+
+function FilterFixture({ withConfirm = false }: { withConfirm?: boolean }) {
+  const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!anchor || !withConfirm) return;
+    const timer = window.setTimeout(() => void confirmDialog({
+      title: "确认当前筛选？",
+      message: longError,
+    }), 0);
+    return () => window.clearTimeout(timer);
+  }, [anchor, withConfirm]);
+  return (
+    <>
+      <button ref={setAnchor} type="button">列筛选触发器</button>
+      {anchor && <ColumnFilterMenu
+        field="超长科目名称"
+        anchor={anchor}
+        loading={false}
+        data={{ values: Array.from({ length: 30 }, (_, index) => `${longText}${index}`), total: 30, truncated: false, keyword: "" }}
+        selected={[]}
+        onSearch={() => undefined}
+        onApply={() => undefined}
+        onClose={() => undefined}
+      />}
+      {withConfirm && <ConfirmDialogHost />}
+    </>
+  );
+}
+
+function CurrencyFixture() {
+  const [open, setOpen] = useState(true);
+  const [value, setValue] = useState<"" | "functional" | "twoPointByCurrency">("");
+  return <CurrencyFallbackDialog
+    open={open}
+    affectedGroupCount={37}
+    missingCurrencies={["USD", "EUR", "JPY", longText]}
+    value={value}
+    onChange={setValue}
+    onCancel={() => setOpen(false)}
+    onContinue={() => setOpen(false)}
+  />;
+}
+
 /** Development-only state matrix used by scripts/overlay-layout-audit.cjs. */
 export function OverlayStateFixture() {
   const scenario = new URLSearchParams(window.location.search).get("overlay-fixture") ?? "confirm";
@@ -133,6 +199,7 @@ export function OverlayStateFixture() {
         <h1>浮层状态几何夹具</h1>
         <p className="overlay-fixture-long-content">{longPath} · {longError}</p>
         <button type="button" data-overlay-tour-target="true">被引导的长文案目标按钮</button>
+        <div className="window-controls"><button type="button" aria-label="关闭窗口">×</button></div>
         {scenario === "confirm" && <ConfirmFixture />}
         {scenario === "sync" && (
           <SyncBusyDialog
@@ -170,6 +237,10 @@ export function OverlayStateFixture() {
           <p>资产ID <JargonTip term={longText} text={`${longText}。${longText}。`} /></p>
         )}
         {scenario === "fuzzy" && <FuzzyFixture />}
+        {scenario === "currency" && <CurrencyFixture />}
+        {scenario === "filter" && <FilterFixture />}
+        {scenario === "filter-confirm-stack" && <FilterFixture withConfirm />}
+        {scenario === "job-pill-confirm-stack" && <JobPillConfirmFixture />}
         {scenario === "jargon-confirm-stack" && (
           <div><JargonTip term={longText} text={`${longPath}。${longError}`} /><ConfirmFixture /></div>
         )}

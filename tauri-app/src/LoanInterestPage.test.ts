@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_LOAN_RATE,
   loanEffectiveRate,
+  loanDisplayNumber,
   loanEquation,
   loanMissing,
   loanAccountReviewRows,
@@ -8,6 +10,12 @@ import {
 } from "./LoanInterestPage";
 
 describe("借款利息测算", () => {
+  it("未提供合同利率时预填当前一年期LPR 3.00%", () =>
+    expect(DEFAULT_LOAN_RATE).toBe(0.03));
+  it("正零和负零都只显示0", () => {
+    expect(loanDisplayNumber(0, { minimumFractionDigits: 2 })).toBe("0");
+    expect(loanDisplayNumber(-0, { minimumFractionDigits: 2 })).toBe("0");
+  });
   it("辅助整组经 JE 验证后才在第二步展开", () => {
     const account = { key: "200101", code: "200101", name: "银行借款", account: "200101 银行借款", opening: 100, closing: 90 };
     expect(loanAccountReviewRows([account], {

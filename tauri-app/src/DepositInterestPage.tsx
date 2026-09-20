@@ -64,10 +64,6 @@ import {
   CurrencyFallbackDialog,
   type CurrencyFallbackMode,
 } from "@/components/CurrencyFallbackDialog";
-import {
-  CreditBalanceDialog,
-  type CreditBalanceAccount,
-} from "@/components/CreditBalanceDialog";
 
 /** 可多列的角色与统一内核一致；`account` 是历史保存映射的旧槽位。 */
 const DEPOSIT_MULTI = new Set([
@@ -606,18 +602,11 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       role: string;
     }>
   >([]);
-  // 贷方余额存款账户的处理口径：缺省＝不纳入测算；用户在弹窗里确认后 include。
-  const [creditBalancePolicy, setCreditBalancePolicy] = useState<"" | "include">(
-    "",
-  );
-  const [creditDialogOpen, setCreditDialogOpen] = useState(false);
   // 三步导引，与汇兑损益／FA 一致：上传识别 → 科目分类 → 测算与底稿。
   const [step, setStep] = useState(0);
   const [error, setError] = useState("");
   const [job, setJob] = useState<JobEvent>();
   const activeJob = useRef("");
-  // 启动测算时的口径与方法：完成事件按“本次用没用纳入口径”决定是否弹窗。
-  const creditPolicyAtRunRef = useRef<"" | "include">("");
   const lastRunMethod = useRef<"deposit.preview" | "deposit.export">(
     "deposit.preview",
   );
@@ -812,7 +801,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       rateOverrides?: Record<string, { tier?: string; annualRate?: number }>;
       accountRateOverrides?: Record<string, number>;
       tierRates?: Record<string, number>;
-      creditBalancePolicy?: "include";
       currencyFallbackMode?: CurrencyFallbackMode;
       outputPath?: string;
     };
@@ -898,7 +886,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     );
     if (p.tierRates && typeof p.tierRates === "object")
       setTierRates(p.tierRates);
-    setCreditBalancePolicy(p.creditBalancePolicy === "include" ? "include" : "");
     setCurrencyFallbackMode(
       p.currencyFallbackMode === "functional" ||
         p.currencyFallbackMode === "twoPointByCurrency"
@@ -977,15 +964,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         const next = event.result as Record<string, unknown>;
         setResult((current) => ({ ...current, ...next }));
         setRows((next.rows ?? []) as AccountRow[]);
-        // 贷方余额账户：本次任务按默认口径跑完才提示；已选纳入的不重复弹。
-        const summary = next.summary as
-          | { creditBalanceCount?: number }
-          | undefined;
-        if (
-          Number(summary?.creditBalanceCount ?? 0) > 0 &&
-          creditPolicyAtRunRef.current !== "include"
-        )
-          setCreditDialogOpen(true);
       } else if (event.phase === "failed" || event.phase === "cancelled") {
         setBusy(false);
         const payload = event.result as
@@ -1037,8 +1015,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     setAccountRateOverrides({});
     currencyCheckRef.current = { key: "", check: null };
     setAccountCurrencyRows([]);
-    setCreditBalancePolicy("");
-    setCreditDialogOpen(false);
     setRows([]);
     setExpanded("");
     setResult(undefined);
@@ -1267,7 +1243,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
-  function payload(creditPolicy: "" | "include" = creditBalancePolicy) {
+  function payload() {
     return {
       reportStart: depositReportStart(reportEnd),
       reportEnd,
@@ -1302,7 +1278,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       accountRateOverrides,
       tierRates,
       ...(currencyFallbackMode ? { currencyFallbackMode } : {}),
-      ...(creditPolicy ? { creditBalancePolicy: creditPolicy } : {}),
       entityScope: entityScope.selection,
       ...(outputPath ? { outputPath } : {}),
     };
@@ -1371,11 +1346,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
-  async function run(
-    method: "deposit.preview" | "deposit.export",
-    // 弹窗确认后立即按新口径重算：状态更新是异步的，口径必须显式传参。
-    creditPolicy: "" | "include" = creditBalancePolicy,
-  ) {
+  async function run(method: "deposit.preview" | "deposit.export") {
     setError("");
     if (!tb) return setError("请先上传并识别 TB 科目余额表。");
     if (!reportEnd) return setError("请选择资产负债表日。");
@@ -1397,9 +1368,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       );
     setBusy(true);
     try {
-      creditPolicyAtRunRef.current = creditPolicy;
       lastRunMethod.current = method;
-      activeJob.current = await jobStart(method, payload(creditPolicy));
+      activeJob.current = await jobStart(method, payload());
     } catch (e) {
       setBusy(false);
       setError(errorText(e));
@@ -1497,15 +1467,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     tb?.suggestedAccountTiers?.[account] ??
     je?.suggestedAccountTiers?.[account] ??
     "demand";
-  // 贷方余额账户清单：引擎在测算汇总里下发，弹窗据此点名。
-  const creditBalanceAccounts = useMemo(() => {
-    const list = (
-      result?.summary as
-        | { creditBalanceAccounts?: CreditBalanceAccount[] }
-        | undefined
-    )?.creditBalanceAccounts;
-    return Array.isArray(list) ? list : [];
-  }, [result]);
   const reviewTier = (row: DepositAccountReviewRow) =>
     accountDetailTierOverrides[row.key] ?? accountTier(row.account);
   const accountCategory = (account: string, tier = accountTier(account)) =>
@@ -1569,6 +1530,28 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       }
       return next;
     });
+  }
+  /** 档位利率是下行利率的主数据（单向联动）：改写某档位利率后，该档位下
+      已手改的逐户利率一并清掉、全部跟到新档位利率；下行手改不回写档位。 */
+  function followTierRate(tierKey: string) {
+    const rowsOfTier = reviewAccounts.filter(
+      (row) => reviewTier(row) === tierKey,
+    );
+    if (!rowsOfTier.length) return;
+    setAccountRateOverrides((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const row of rowsOfTier) {
+        if (row.key in next) {
+          delete next[row.key];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+    clearEngineRates(
+      rowsOfTier.flatMap((row) => engineVariantsOf(row).map((item) => item.key)),
+    );
   }
 
   return (
@@ -1917,12 +1900,33 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               </Button>
             </section>
           )}
+          {/* 利率档位表放在上方：档位利率是下行逐户利率的主数据，改写档位
+              后对应类型各户利率全部跟着改（单向联动），下方手改不回写档位。 */}
+          <RateTierCard
+            tiers={tiers}
+            custom={tierRates}
+            onChange={(key, rate) => {
+              setTierRates((current) => {
+                const next = { ...current };
+                if (Number.isFinite(rate)) next[key] = rate;
+                else delete next[key];
+                return next;
+              });
+              followTierRate(key);
+            }}
+            onReset={() => {
+              setTierRates({});
+              setAccountRateOverrides({});
+              clearEngineRates(accountCurrencyRows.map((item) => item.key));
+            }}
+          />
+
           {accounts.length > 0 && (
             <Card>
               <CardHeader>
                 <div className="deposit-confirm-heading">
                   <div>
-                    <span className="deposit-section-kicker">第 1 项</span>
+                    <span className="deposit-section-kicker">第 2 项</span>
                     <CardTitle>科目分类与存款类型</CardTitle>
                   </div>
                   <div className="deposit-account-summary">
@@ -1932,7 +1936,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     <Badge variant="secondary">
                       利息收入 {interestAccounts.length}
                     </Badge>
-                    <HelpTip text="清单只列末级科目，层级判定与公共引擎同一口径；TB 带辅助核算且通过验证时按辅助户拆行。利息收入是 TB 比较基准；未设置时仍可测算，但不能勾稽。存款类型关联下方利率档位，名称无法判断时默认活期；利率列默认带出该类型的挂牌利率，可直接改写。" />
+                    <HelpTip text="清单只列末级科目，层级判定与公共引擎同一口径；TB 带辅助核算且通过验证时按辅助户拆行。利息收入是 TB 比较基准；未设置时仍可测算，但不能勾稽。存款类型关联上方利率档位，名称无法判断时默认活期；利率列默认带出该类型的挂牌利率，可直接改写。" />
                   </div>
                 </div>
               </CardHeader>
@@ -1957,7 +1961,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                           <th>存款类型</th>
                           <th>
                             利率（%）
-                            <HelpTip text="默认带出所选存款类型的挂牌利率（在下方档位表改写过的用改写值）；可直接改写为协议利率。改写后切换存款类型，会自动回到新类型的默认利率。多币种账户按币种拆行，可分别填写各币种利率；与第三步的逐户改价同键联动。" />
+                            <HelpTip text="默认带出所选存款类型的挂牌利率（在上方档位表改写过的用改写值）；可直接改写为协议利率。改写后切换存款类型，会自动回到新类型的默认利率。多币种账户按币种拆行，可分别填写各币种利率；与第三步的逐户改价同键联动。" />
                           </th>
                         </tr>
                       </thead>
@@ -2293,20 +2297,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
             </Card>
           )}
 
-          <RateTierCard
-            tiers={tiers}
-            custom={tierRates}
-            onChange={(key, rate) =>
-              setTierRates((current) => {
-                const next = { ...current };
-                if (Number.isFinite(rate)) next[key] = rate;
-                else delete next[key];
-                return next;
-              })
-            }
-            onReset={() => setTierRates({})}
-          />
-
           <div className="fx-step-actions">
             <Button variant="secondary" onClick={() => setStep(0)}>
               返回上传与识别
@@ -2416,7 +2406,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               {job && (
                 <JobProgress
                   job={job}
-                  onCancel={busy ? (id) => void jobCancel(id) : undefined}
+                  onCancel={busy ? (id) => jobCancel(id) : undefined}
                 />
               )}
               {((result?.outputPaths ?? []) as string[]).length > 0 && (
@@ -2436,21 +2426,6 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     </Button>
                   ))}
                 </div>
-              )}
-              {creditBalancePolicy === "include" && (
-                <p className="deposit-credit-policy">
-                  已按你的选择把贷方余额账户纳入测算，其负余额会抵减测算利息合计。
-                  <Button
-                    variant="secondary"
-                    disabled={busy}
-                    onClick={() => {
-                      setCreditBalancePolicy("");
-                      void run(lastRunMethod.current, "");
-                    }}
-                  >
-                    改回不纳入并重算
-                  </Button>
-                </p>
               )}
             </CardContent>
           </Card>
@@ -2519,23 +2494,13 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         value={currencyFallbackMode}
         onChange={setCurrencyFallbackMode}
         onCancel={() => setCurrencyDialogOpen(false)}
-        onContinue={() => {
-          setCurrencyDialogOpen(false);
-          setResult(undefined);
-          setRows([]);
-          setStep(1);
-        }}
-      />
-      <CreditBalanceDialog
-        open={creditDialogOpen && creditBalanceAccounts.length > 0}
-        accounts={creditBalanceAccounts}
-        onCancel={() => setCreditDialogOpen(false)}
-        onInclude={() => {
-          setCreditBalancePolicy("include");
-          setCreditDialogOpen(false);
-          void run(lastRunMethod.current, "include");
-        }}
-      />
+          onContinue={() => {
+            setCurrencyDialogOpen(false);
+            setResult(undefined);
+            setRows([]);
+            setStep(1);
+          }}
+        />
     </main>
   );
 }
@@ -2563,7 +2528,7 @@ function RateTierCard({
         <CardHeader>
           <div className="deposit-confirm-heading">
             <div>
-              <span className="deposit-section-kicker">第 2 项</span>
+              <span className="deposit-section-kicker">第 1 项</span>
               <CardTitle>存款利率档位</CardTitle>
             </div>
           </div>
@@ -2582,7 +2547,7 @@ function RateTierCard({
       <CardHeader>
         <div className="deposit-confirm-heading">
           <div>
-            <span className="deposit-section-kicker">第 2 项</span>
+            <span className="deposit-section-kicker">第 1 项</span>
             <CardTitle>存款利率档位</CardTitle>
           </div>
         </div>
@@ -3140,12 +3105,6 @@ export function Results({
           </span>
         </p>
       )}
-      {stale && (
-        <p className="fa-missing-hint">
-          存款类型或利率已调整，下方逐户金额已按调整后的利率更新；与
-          TB 的比较仍是上一次测算的结果，点“按新利率重算”后同步。
-        </p>
-      )}
       <div className="fx-bridge-step">
         <div className="fx-step-label">
           <b>1</b>
@@ -3173,9 +3132,7 @@ export function Results({
             booked && summary.bookedNote
               ? String(summary.bookedNote)
               : undefined,
-            booked &&
-              (summary.bookedDirectionConfirmed === false ||
-                Number(summary.bookedInterestIncome) < 0)
+            booked && Number(summary.bookedInterestIncome) < 0
               ? "warning"
               : "",
           )}
@@ -3352,16 +3309,12 @@ export function Results({
                     <Badge
                       variant="outline"
                       className={
-                        row.status.startsWith("贷方余额")
-                          ? "badge-warning"
-                          : depositBalanceCheckStatus(row) === "已勾稽"
-                            ? "badge-ready"
-                            : "badge-warning"
+                        depositBalanceCheckStatus(row) === "已勾稽"
+                          ? "badge-ready"
+                          : "badge-warning"
                       }
                     >
-                      {row.status.startsWith("贷方余额")
-                        ? row.status
-                        : depositBalanceCheckStatus(row)}
+                      {depositBalanceCheckStatus(row)}
                     </Badge>
                   </td>
                   <td title={row.rateSource}>

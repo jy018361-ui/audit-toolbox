@@ -2562,6 +2562,7 @@ pub(crate) fn alias_score(role: &Role, header: &str) -> Option<f64> {
 ///    是期末方向（陇能建设、澄宇结算中心等裁决）。余额列缺失时不改判。
 pub(crate) fn align_tb_direction_pair(
     headers: &[String],
+    rows: &[Vec<String>],
     mapping: &mut serde_json::Map<String, Value>,
 ) {
     let col = |mapping: &serde_json::Map<String, Value>, role: &str| {
@@ -2581,7 +2582,6 @@ pub(crate) fn align_tb_direction_pair(
             mapping.insert("openingDirection".into(), b);
             mapping.insert("closingDirection".into(), a);
         }
-        return;
     }
     if mapping.contains_key("openingDirection") ^ mapping.contains_key("closingDirection") {
         let (have, index) = if let Some(i) = col(mapping, "openingDirection") {
@@ -2609,6 +2609,167 @@ pub(crate) fn align_tb_direction_pair(
             }
         }
     }
+
+    share_single_tb_direction_when_reconciled(headers, rows, mapping);
+}
+
+/// 余额表只给一列方向时，列的位置只能说明它最像哪个时点，不能证明另一个
+/// 时点不受它控制。用整表勾稽比较两个列级假设：维持单时点方向，或让同一列
+/// 同时控制期初与期末。只有至少三条有鉴别力的行参与，且共享假设严格胜出时
+/// 才补齐另一角色；不逐行选符号，避免把真实差异“猜平”。
+fn share_single_tb_direction_when_reconciled(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &mut serde_json::Map<String, Value>,
+) {
+    if rows.is_empty()
+        || !(mapping.contains_key("openingDirection") ^ mapping.contains_key("closingDirection"))
+    {
+        return;
+    }
+    // 借贷分列已经自行表达方向，不走单列方向裁决。
+    if [
+        "openingFunctionalDebit",
+        "openingFunctionalCredit",
+        "closingFunctionalDebit",
+        "closingFunctionalCredit",
+        "openingForeignDebit",
+        "openingForeignCredit",
+        "closingForeignDebit",
+        "closingForeignCredit",
+    ]
+    .iter()
+    .any(|role| mapping.contains_key(*role))
+    {
+        return;
+    }
+    let (present, missing) = if mapping.contains_key("openingDirection") {
+        ("openingDirection", "closingDirection")
+    } else {
+        ("closingDirection", "openingDirection")
+    };
+    let Some(direction) = mapping.get(present).cloned() else {
+        return;
+    };
+    let baseline = tb_direction_rollforward_score(headers, rows, mapping, present);
+    let mut shared = mapping.clone();
+    shared.insert(missing.into(), direction.clone());
+    let shared_score = tb_direction_rollforward_score(headers, rows, &shared, present);
+    if let (Some((baseline_eligible, baseline_passed)), Some((shared_eligible, shared_passed))) =
+        (baseline, shared_score)
+        && baseline_eligible >= 3
+        && shared_eligible == baseline_eligible
+        && shared_passed > baseline_passed
+    {
+        mapping.insert(missing.into(), direction);
+    }
+}
+
+/// 返回（有鉴别力行数，勾稽通过行数）。方向为空、期初为零的行不投票。
+fn tb_direction_rollforward_score(
+    headers: &[String],
+    rows: &[Vec<String>],
+    mapping: &serde_json::Map<String, Value>,
+    direction_role: &str,
+) -> Option<(usize, usize)> {
+    let columns = |role: &str| -> Vec<String> {
+        match mapping.get(role) {
+            Some(Value::String(column)) => vec![column.clone()],
+            Some(Value::Array(values)) => values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let index_of = |role: &str| {
+        columns(role)
+            .into_iter()
+            .find_map(|column| header_index(headers, &column))
+    };
+    let direction_index = index_of(direction_role)?;
+    let unit = ["Functional", "Foreign"].into_iter().find(|unit| {
+        index_of(&format!("opening{unit}Amount")).is_some()
+            && index_of(&format!("closing{unit}Amount")).is_some()
+            && index_of(&format!("ytd{unit}Debit")).is_some()
+            && index_of(&format!("ytd{unit}Credit")).is_some()
+    })?;
+    let opening_prefix = format!("opening{unit}");
+    let closing_prefix = format!("closing{unit}");
+    let opening_index = index_of(&format!("{opening_prefix}Amount"))?;
+    let closing_index = index_of(&format!("{closing_prefix}Amount"))?;
+    let debit_index = index_of(&format!("ytd{unit}Debit"))?;
+    let credit_index = index_of(&format!("ytd{unit}Credit"))?;
+    let convention = detect_tb_sign_convention(headers, rows, &columns)
+        .convention
+        .unwrap_or(SignConvention::Unsigned);
+    let opening_self_signed = balance_self_signed(headers, rows, &columns, &opening_prefix);
+    let closing_self_signed = balance_self_signed(headers, rows, &columns, &closing_prefix);
+    let opening_direction = index_of("openingDirection");
+    let closing_direction = index_of("closingDirection");
+    let number = |row: &[String], index: usize| {
+        parse_amount(row.get(index).map(String::as_str).unwrap_or(""))
+            .ok()
+            .flatten()
+            .unwrap_or(0.0)
+    };
+    let mut eligible = 0usize;
+    let mut passed = 0usize;
+    for row in rows {
+        let direction = row
+            .get(direction_index)
+            .map(String::as_str)
+            .unwrap_or("")
+            .trim();
+        let opening_raw = number(row, opening_index);
+        if direction.is_empty() || opening_raw.abs() <= 0.005 {
+            continue;
+        }
+        let opening = signed_balance(
+            &AmountInputs {
+                amount: Some(opening_raw),
+                direction: opening_direction
+                    .and_then(|index| row.get(index))
+                    .map(ToOwned::to_owned),
+                ..Default::default()
+            },
+            convention,
+            opening_self_signed,
+        );
+        let closing = signed_balance(
+            &AmountInputs {
+                amount: Some(number(row, closing_index)),
+                direction: closing_direction
+                    .and_then(|index| row.get(index))
+                    .map(ToOwned::to_owned),
+                ..Default::default()
+            },
+            convention,
+            closing_self_signed,
+        );
+        let movement = signed_amount(
+            &AmountInputs {
+                debit: Some(number(row, debit_index)),
+                credit: Some(number(row, credit_index)),
+                ..Default::default()
+            },
+            convention,
+        );
+        eligible += 1;
+        if holds(
+            &BalanceRow {
+                opening,
+                debit: movement,
+                credit: 0.0,
+                closing,
+            },
+            -1.0,
+        ) {
+            passed += 1;
+        }
+    }
+    Some((eligible, passed))
 }
 
 /// 期初与期末的方向列常常**列名完全一样**（都叫「方向 Dr/Cr」），光看名字分不出。
@@ -3105,6 +3266,125 @@ pub(crate) fn balance_self_signed(
     credit_rows > 0 && negative_rows * 2 > credit_rows
 }
 
+/// 「绝对值＋单一方向列」版式下，缺失方向一侧的余额符号按勾稽等式逐行向
+/// 对侧借（借正贷负口径）。这是纯数学层：`target_raw` 是缺方向一侧的原始
+/// 净额，`anchor_signed` 是对侧已折算的有符号余额，`(debit, credit)` 是本年
+/// 累计借贷两侧。
+///
+/// 仅当等式在容差内成立才返回 `Some(推断值)`：期初侧解 `anchor − 借 + 贷`，
+/// 期末侧解 `anchor + 借 − 贷`，幅值对不上原始净额说明**哪个符号都凑不平**，
+/// 返回 None 让调用方维持原值——真差异必须照常报出来，不许硬翻吞掉。
+/// 容差与 TB 自身勾稽同口径（0.01 元下限＋1e-8 相对）。
+pub(crate) fn balance_sign_from_equation(
+    target_raw: f64,
+    anchor_signed: f64,
+    movement: Option<(f64, f64)>,
+    target_is_opening: bool,
+) -> Option<f64> {
+    let (debit, credit) = movement?;
+    let candidate = if target_is_opening {
+        anchor_signed - debit + credit
+    } else {
+        anchor_signed + debit - credit
+    };
+    let tolerance = 0.01_f64.max(candidate.abs().max(target_raw.abs()) * 1e-8);
+    ((candidate - target_raw).abs() <= tolerance || (candidate + target_raw).abs() <= tolerance)
+        .then_some(candidate)
+}
+
+/// [`balance_sign_from_equation`] 的逐行组装层。`index_of` 把角色标准名解析成
+/// 列下标（表头查找职责由调用方按自己的表结构提供）；`prefix` 用全前缀
+/// （`openingFunctional`／`closingFunctional`）；`sibling_self_signed` 是对侧
+/// 余额列「整列自带符号」的整表判定结果——锚点侧自带符号时方向列是冗余
+/// 标注，折算必须忽略它，这个标志只能整列判，不能塞进逐行闭包里猜。
+///
+/// 四个读 TB 的工具（汇兑损益/TBJE、借款、存款、FA）的余额取数与
+/// [`balance_sign_basis_by_row`] 的证据判定共用本函数，数学只有这一份。
+/// 触发条件（用户定案：**只有「单侧有方向」的形态才适用逐行逻辑**）：
+/// 1. **本侧没有方向列**（列级，不是行级留空）——两侧各有方向列的形态
+///    （06 号 Oracle 两列同名方向）信息本就完整，个别行留空属数据质量问题，
+///    应照实报出而不是猜；
+/// 2. **对侧有方向列且本行方向值有效**（行级锚点）；
+/// 3. 本侧是净额形态、本年累计发生额已映射（借贷分列或净额均可），
+///    否则无从列方程。
+/// 全然没有方向列的净额带符号形态（TB1）两头都不满足第 2 条，同样不猜。
+pub(crate) fn infer_balance_sign_from_sibling(
+    row: &[String],
+    index_of: &dyn Fn(&str) -> Option<usize>,
+    prefix: &str,
+    convention: SignConvention,
+    sibling_self_signed: bool,
+) -> Option<f64> {
+    if index_of(&format!("{prefix}Debit")).is_some() || index_of(&format!("{prefix}Credit")).is_some()
+    {
+        return None;
+    }
+    let cell = |role: &str| -> Option<String> {
+        index_of(role).and_then(|index| row.get(index)).cloned()
+    };
+    let number = |role: &str| -> Option<f64> {
+        index_of(role)
+            .and_then(|index| row.get(index))
+            .and_then(|raw| parse_amount(raw).ok().flatten())
+    };
+    let target_raw = number(&format!("{prefix}Amount"))?;
+    let base = prefix
+        .strip_suffix("Functional")
+        .or_else(|| prefix.strip_suffix("Foreign"))
+        .unwrap_or(prefix);
+    let (sibling_prefix, sibling_base, scope) = if let Some(scope) = prefix.strip_prefix("opening")
+    {
+        (format!("closing{scope}"), "closing".to_owned(), scope)
+    } else if let Some(scope) = prefix.strip_prefix("closing") {
+        (format!("opening{scope}"), "opening".to_owned(), scope)
+    } else {
+        return None;
+    };
+    // 只有「单侧有方向」才猜：本侧不得有方向列，对侧必须有方向列。
+    // 共享方向列（整表共享后两角色指同一列）算双侧，同样不猜。
+    if index_of(&format!("{base}Direction"))
+        .or_else(|| index_of("direction"))
+        .or_else(|| index_of(&format!("{prefix}Direction")))
+        .is_some()
+    {
+        return None;
+    }
+    let sibling_direction = cell(&format!("{sibling_base}Direction"))
+        .or_else(|| cell("direction"))
+        .or_else(|| cell(&format!("{sibling_prefix}Direction")))
+        .filter(|value| direction_is_known(value.trim()))?;
+    let sibling_inputs = AmountInputs {
+        amount: number(&format!("{sibling_prefix}Amount")),
+        debit: number(&format!("{sibling_prefix}Debit")),
+        credit: number(&format!("{sibling_prefix}Credit")),
+        direction: Some(sibling_direction),
+    };
+    if sibling_inputs.amount.is_none()
+        && (sibling_inputs.debit.is_none() || sibling_inputs.credit.is_none())
+    {
+        return None;
+    }
+    let anchor = signed_balance(&sibling_inputs, convention, sibling_self_signed);
+    let movement_split = index_of(&format!("ytd{scope}Debit")).is_some()
+        && index_of(&format!("ytd{scope}Credit")).is_some();
+    if !movement_split && index_of(&format!("ytd{scope}Amount")).is_none() {
+        return None;
+    }
+    let movement_inputs = AmountInputs {
+        amount: number(&format!("ytd{scope}Amount")),
+        debit: number(&format!("ytd{scope}Debit")),
+        credit: number(&format!("ytd{scope}Credit")),
+        direction: None,
+    };
+    let movement = side_amounts(&movement_inputs, convention);
+    balance_sign_from_equation(
+        target_raw,
+        anchor,
+        Some(movement),
+        prefix.starts_with("opening"),
+    )
+}
+
 /// 余额净额是否有足够证据折成「借正贷负」。折算值和证据必须分开：
 /// `fx::ensure_sign_convention` 为兼容旧调用会在 TB 投票不足时缓存 `unsigned`，
 /// 那个默认值不能用来证明单列全正余额的借贷方向可靠。
@@ -3116,6 +3396,9 @@ pub(crate) enum BalanceSignBasis {
     SignedAmount,
     /// 净额列本身不带可靠符号，本行由有效方向值表达借贷。
     DirectionColumn,
+    /// 本行没有方向值，符号由勾稽等式向对侧借得（「绝对值＋单一方向列」版式，
+    /// 见 [`infer_balance_sign_from_sibling`]）。等式成立即采纳，可靠。
+    EquationInferred,
     /// 非零净额既没有可靠列级符号，也没有本行方向。
     Ambiguous,
 }
@@ -3130,6 +3413,7 @@ impl BalanceSignBasis {
             Self::DebitCreditColumns => "debitCreditColumns",
             Self::SignedAmount => "signedAmount",
             Self::DirectionColumn => "directionColumn",
+            Self::EquationInferred => "equationInferred",
             Self::Ambiguous => "ambiguous",
         }
     }
@@ -3140,11 +3424,17 @@ impl BalanceSignBasis {
 /// 可靠性按「时点＋行」判定：借贷分列恒可靠；净额列若由贷方负数多数或正负
 /// 并存证明整列自带符号，所有行可靠；否则只接受本行明确的借／贷方向。零余额
 /// 无论方向如何都不影响合计，也视为可靠。单列全正且方向为空绝不默认成借方。
+///
+/// 「绝对值＋单一方向列」版式下，缺方向一侧的方向证据由勾稽等式向对侧逐行
+/// 借得（[`infer_balance_sign_from_sibling`]）——等式成立记
+/// [`BalanceSignBasis::EquationInferred`]，仍视为可靠；凑不平的行维持
+/// Ambiguous，照常进入第三态而非假差异。
 pub(crate) fn balance_sign_basis_by_row(
     headers: &[String],
     rows: &[Vec<String>],
     column_of: &dyn Fn(&str) -> Vec<String>,
     prefix: &str,
+    convention: SignConvention,
 ) -> Vec<BalanceSignBasis> {
     let index_of = |role: &str| -> Option<usize> {
         column_of(role)
@@ -3184,6 +3474,19 @@ pub(crate) fn balance_sign_basis_by_row(
     if column_self_signed {
         return vec![BalanceSignBasis::SignedAmount; rows.len()];
     }
+    // 对侧整列自带符号与否只能整表判一次；锚点自带符号时其方向列是冗余标注。
+    let sibling_prefix = if let Some(scope) = prefix.strip_prefix("opening") {
+        format!("closing{scope}")
+    } else if let Some(scope) = prefix.strip_prefix("closing") {
+        format!("opening{scope}")
+    } else {
+        prefix.to_owned()
+    };
+    let sibling_self_signed = if sibling_prefix == prefix {
+        false
+    } else {
+        balance_self_signed(headers, rows, column_of, &sibling_prefix)
+    };
 
     rows.iter()
         .map(|row| {
@@ -3199,10 +3502,14 @@ pub(crate) fn balance_sign_basis_by_row(
                 .map(|value| value.trim())
                 .unwrap_or("");
             if direction_is_known(direction) {
-                BalanceSignBasis::DirectionColumn
-            } else {
-                BalanceSignBasis::Ambiguous
+                return BalanceSignBasis::DirectionColumn;
             }
+            if infer_balance_sign_from_sibling(row, &index_of, prefix, convention, sibling_self_signed)
+                .is_some()
+            {
+                return BalanceSignBasis::EquationInferred;
+            }
+            BalanceSignBasis::Ambiguous
         })
         .collect()
 }
@@ -3242,8 +3549,12 @@ pub(crate) fn inherited_role_by_code_prefix<'a>(
     roles: impl Iterator<Item = (&'a str, &'a str)>,
     key_of: impl Fn(&str) -> &str,
 ) -> Option<String> {
-    let code_shape =
-        |value: &str| !value.is_empty() && value.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-');
+    let code_shape = |value: &str| {
+        !value.is_empty()
+            && value
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+    };
     if !code_shape(code) {
         return None;
     }
@@ -3633,6 +3944,56 @@ pub(crate) fn ledger_junk_mask(
     column_of: &dyn Fn(&str) -> Vec<String>,
 ) -> Vec<bool> {
     analyze_ledger_rows(headers, rows, column_of).keep
+}
+
+/// 金额等字段门禁专用的正文掩码。它复用正式清洗的结构判断，但会救回“身份
+/// 合法、只是金额坏掉”的业务行，让金额门禁仍能报错；明确合计、表尾协议区、
+/// 科目编码整体错位的行则继续剔除。这样公共校验既不会被噪音阻断，也不会把
+/// 真业务行的 `待补`、`RMB` 等坏金额静默吞掉。
+pub(crate) fn ledger_validation_mask(
+    headers: &[String],
+    rows: &[Vec<String>],
+    column_of: &dyn Fn(&str) -> Vec<String>,
+) -> Vec<bool> {
+    let mut keep = analyze_ledger_rows(headers, rows, column_of).keep;
+    let rule = LedgerBodyRule::new(headers, column_of);
+    if rule.identity.is_empty() {
+        return keep;
+    }
+    let mut after_blank_separator = false;
+    for (index, row) in rows.iter().enumerate() {
+        if row.iter().all(|value| value.trim().is_empty()) {
+            after_blank_separator = true;
+            continue;
+        }
+        if keep.get(index).copied().unwrap_or(false) || after_blank_separator {
+            continue;
+        }
+        if row.iter().any(|value| {
+            let value = value.trim();
+            is_rollup_label(value) || is_report_footer_value(value)
+        }) || !rule.has_identity(row)
+        {
+            continue;
+        }
+        let nonempty_codes = rule
+            .code
+            .iter()
+            .filter_map(|column| row.get(*column))
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        if !nonempty_codes.is_empty()
+            && nonempty_codes.iter().all(|raw| {
+                let code = account_code_of(raw);
+                is_formula_error(raw) || !looks_like_account_code(&code)
+            })
+        {
+            continue;
+        }
+        keep[index] = true;
+    }
+    keep
 }
 
 /// 身份字段向下填充的参与掩码：正文行照常参与；被 [`analyze_ledger_rows`]
@@ -4744,6 +5105,11 @@ pub(crate) fn mapped_amount_parse_issues(
     rows: &[Vec<String>],
     column_of: &dyn Fn(&str) -> Vec<String>,
 ) -> Vec<AmountParseIssue> {
+    // 金额门禁与后续识别/测算必须天然消费同一份正文行。把过滤收进公共
+    // 入口，调用方即使忘记另算 keep mask，小计、页脚、整体错位的破损行也
+    // 不会先于正式清洗把整份账表拦死。若调用方只提供金额角色、无法建立
+    // 身份规则，ledger_junk_mask 会保守地保留全部行，行为与旧版一致。
+    let body_mask = ledger_validation_mask(headers, rows, column_of);
     let mut issues = Vec::new();
     let mut visited = HashSet::<(&'static str, usize)>::new();
     for definition in roles(kind)
@@ -4758,6 +5124,9 @@ pub(crate) fn mapped_amount_parse_issues(
                 continue;
             }
             for (row_index, row) in rows.iter().enumerate() {
+                if !body_mask.get(row_index).copied().unwrap_or(false) {
+                    continue;
+                }
                 let raw = row.get(index).map(String::as_str).unwrap_or("");
                 let trimmed = raw.trim();
                 if trimmed.is_empty() || matches!(trimmed, "-" | "—" | "–") {
@@ -11497,7 +11866,13 @@ mod tests {
             &columns,
             "closingFunctional"
         ));
-        let basis = balance_sign_basis_by_row(&headers, &绝对值, &columns, "closingFunctional");
+        let basis = balance_sign_basis_by_row(
+            &headers,
+            &绝对值,
+            &columns,
+            "closingFunctional",
+            SignConvention::Unsigned,
+        );
         assert!(
             basis
                 .iter()
@@ -11538,6 +11913,292 @@ mod tests {
             },
             "closingFunctional"
         ));
+    }
+
+    /// 「绝对值＋单一方向列」版式：缺方向一侧的符号按勾稽等式逐行向对侧借。
+    /// 03 号样例方向列在表尾（判给期末），01/02/08 在期初旁（判给期初），
+    /// 两侧都要能借；哪个符号都凑不平的行维持原判，真差异照报。
+    #[test]
+    fn 缺方向一侧的余额符号按勾稽等式向对侧借() {
+        // 数学层：期初侧解 anchor − 借 + 贷，期末侧解 anchor + 借 − 贷。
+        assert_eq!(
+            balance_sign_from_equation(4_0000_0000.0, -4_0000_0000.0, Some((0.0, 0.0)), true),
+            Some(-4_0000_0000.0)
+        );
+        assert_eq!(
+            balance_sign_from_equation(
+                1_8000_0000.0,
+                -1_3500_0000.0,
+                Some((4500_0000.0, 0.0)),
+                true
+            ),
+            Some(-1_8000_0000.0)
+        );
+        assert_eq!(
+            balance_sign_from_equation(
+                1_0000_0000.0,
+                -5500_0000.0,
+                Some((4500_0000.0, 0.0)),
+                true
+            ),
+            Some(-1_0000_0000.0)
+        );
+        // 哪个符号都凑不平（候选 −1.8 亿，幅值对不上原始 1.35 亿）：不猜。
+        assert_eq!(
+            balance_sign_from_equation(
+                1_3500_0000.0,
+                -1_0000_0000.0,
+                Some((4500_0000.0, 0.0)),
+                true
+            ),
+            None
+        );
+        // 没有发生额列就无从列方程。
+        assert_eq!(
+            balance_sign_from_equation(100.0, -100.0, None, true),
+            None
+        );
+
+        // 03 号摆位：科目编码｜期初余额｜借方发生额｜贷方发生额｜期末余额｜方向。
+        let 尾部方向: Vec<String> = ["科目编码", "期初余额", "借方发生额", "贷方发生额", "期末余额", "方向"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let columns_tail = |role: &str| -> Vec<String> {
+            match role {
+                "openingFunctionalAmount" => vec!["期初余额".into()],
+                "ytdFunctionalDebit" => vec!["借方发生额".into()],
+                "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+                "closingFunctionalAmount" => vec!["期末余额".into()],
+                "closingDirection" => vec!["方向".into()],
+                _ => vec![],
+            }
+        };
+        let index_of_tail =
+            |role: &str| columns_tail(role).into_iter().find_map(|name| 尾部方向.iter().position(|h| *h == name));
+        // 250101 长期借款：期初 4 亿、无发生、期末 4 亿、方向贷——期初借到 −4 亿。
+        let row_250101 = vec![
+            "250101".into(),
+            "400000000".into(),
+            "0".into(),
+            "0".into(),
+            "400000000".into(),
+            "贷".into(),
+        ];
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_250101,
+                &index_of_tail,
+                "openingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            Some(-400000000.0)
+        );
+        // 期末侧自己有方向列，不猜。
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_250101,
+                &index_of_tail,
+                "closingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            None
+        );
+        // 200101 短期借款：期初 7000 万、借方 7000 万、期末 0——期初借到 −7000 万。
+        let row_200101 = vec![
+            "200101".into(),
+            "70000000".into(),
+            "70000000".into(),
+            "0".into(),
+            "0".into(),
+            "贷".into(),
+        ];
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_200101,
+                &index_of_tail,
+                "openingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            Some(-70000000.0)
+        );
+        // 真差异行（黄金集 03 号 200101 台账口径的 30 万差异在发生额侧）：
+        // 借方按 7030 万列方程凑不平期初的 ±7000 万——不猜，维持原值。
+        let row_diff = vec![
+            "200101".into(),
+            "70000000".into(),
+            "70300000".into(),
+            "0".into(),
+            "0".into(),
+            "贷".into(),
+        ];
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_diff,
+                &index_of_tail,
+                "openingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            None
+        );
+
+        // 01/02/08 号摆位：方向列在期初旁，缺方向的是期末。
+        let 前部方向: Vec<String> = ["科目编码", "科目名称", "方向", "期初余额", "借方发生额", "贷方发生额", "期末余额"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let columns_head = |role: &str| -> Vec<String> {
+            match role {
+                "openingFunctionalAmount" => vec!["期初余额".into()],
+                "ytdFunctionalDebit" => vec!["借方发生额".into()],
+                "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+                "closingFunctionalAmount" => vec!["期末余额".into()],
+                "openingDirection" => vec!["方向".into()],
+                _ => vec![],
+            }
+        };
+        let index_of_head =
+            |role: &str| columns_head(role).into_iter().find_map(|name| 前部方向.iter().position(|h| *h == name));
+        // 1602 累计折旧：期初 2.38 亿（贷）、贷方 2616 万、期末 2.64 亿——期末借到 −2.64 亿。
+        let row_1602 = vec![
+            "1602".into(),
+            "累计折旧".into(),
+            "贷".into(),
+            "238415600".into(),
+            "0".into(),
+            "26160000".into(),
+            "264575600".into(),
+        ];
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_1602,
+                &index_of_head,
+                "closingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            Some(-264575600.0)
+        );
+
+        // 用户定案：只有「单侧有方向」才适用逐行逻辑。双侧各有方向列
+        // （06 号 Oracle 形态）信息完整，个别行留空照实报出，不猜——
+        // 即便等式本来能凑平。
+        let 双侧方向: Vec<String> = [
+            "科目编码",
+            "期初余额",
+            "期初方向",
+            "借方发生额",
+            "贷方发生额",
+            "期末余额",
+            "期末方向",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let columns_pair = |role: &str| -> Vec<String> {
+            match role {
+                "openingFunctionalAmount" => vec!["期初余额".into()],
+                "openingDirection" => vec!["期初方向".into()],
+                "ytdFunctionalDebit" => vec!["借方发生额".into()],
+                "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+                "closingFunctionalAmount" => vec!["期末余额".into()],
+                "closingDirection" => vec!["期末方向".into()],
+                _ => vec![],
+            }
+        };
+        let index_of_pair = |role: &str| {
+            columns_pair(role)
+                .into_iter()
+                .find_map(|name| 双侧方向.iter().position(|h| *h == name))
+        };
+        let row_pair = vec![
+            "250101".into(),
+            "400000000".into(),
+            "".into(),
+            "0".into(),
+            "0".into(),
+            "400000000".into(),
+            "贷".into(),
+        ];
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_pair,
+                &index_of_pair,
+                "openingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            None
+        );
+        // 共享方向列（整表共享后两个角色指同一列）同样算双侧，不猜。
+        let columns_shared = |role: &str| -> Vec<String> {
+            match role {
+                "openingFunctionalAmount" => vec!["期初余额".into()],
+                "ytdFunctionalDebit" => vec!["借方发生额".into()],
+                "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+                "closingFunctionalAmount" => vec!["期末余额".into()],
+                "openingDirection" | "closingDirection" => vec!["方向".into()],
+                _ => vec![],
+            }
+        };
+        let index_of_shared = |role: &str| {
+            columns_shared(role)
+                .into_iter()
+                .find_map(|name| 尾部方向.iter().position(|h| *h == name))
+        };
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_250101,
+                &index_of_shared,
+                "openingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            None
+        );
+        // 全然没有方向列（TB1 净额带符号形态）：对侧无锚，不猜。
+        let columns_no_dir = |role: &str| -> Vec<String> {
+            match role {
+                "openingFunctionalAmount" => vec!["期初余额".into()],
+                "ytdFunctionalDebit" => vec!["借方发生额".into()],
+                "ytdFunctionalCredit" => vec!["贷方发生额".into()],
+                "closingFunctionalAmount" => vec!["期末余额".into()],
+                _ => vec![],
+            }
+        };
+        let index_of_no_dir = |role: &str| {
+            columns_no_dir(role)
+                .into_iter()
+                .find_map(|name| 尾部方向.iter().position(|h| *h == name))
+        };
+        assert_eq!(
+            infer_balance_sign_from_sibling(
+                &row_250101,
+                &index_of_no_dir,
+                "openingFunctional",
+                SignConvention::Unsigned,
+                false,
+            ),
+            None
+        );
+
+        // 证据档：缺方向一侧的行记 EquationInferred，仍视为可靠；凑不平的行
+        // 维持 Ambiguous（进入第三态，不造假差异也不吞差异）。
+        let basis_rows = vec![row_250101.clone(), row_200101.clone(), row_diff.clone()];
+        let basis = balance_sign_basis_by_row(
+            &尾部方向,
+            &basis_rows,
+            &columns_tail,
+            "openingFunctional",
+            SignConvention::Unsigned,
+        );
+        assert_eq!(basis[0], BalanceSignBasis::EquationInferred);
+        assert_eq!(basis[1], BalanceSignBasis::EquationInferred);
+        assert_eq!(basis[2], BalanceSignBasis::Ambiguous);
     }
 
     #[test]
@@ -12346,6 +13007,72 @@ mod tests {
     }
 
     #[test]
+    fn 公共金额校验先剔噪音但保留真实业务坏值() {
+        let headers = vec![
+            "日期".into(),
+            "凭证号".into(),
+            "摘要".into(),
+            "科目编码".into(),
+            "科目名称".into(),
+            "币种".into(),
+            "原币金额".into(),
+            "借方金额".into(),
+            "贷方金额".into(),
+        ];
+        let rows = vec![
+            vec![
+                "2025-01-01".into(),
+                "记-1".into(),
+                "正常业务".into(),
+                "1001".into(),
+                "银行存款".into(),
+                "USD".into(),
+                "待补".into(),
+                "700".into(),
+                "".into(),
+            ],
+            vec![
+                "小计".into(),
+                "".into(),
+                "本页小计".into(),
+                "".into(),
+                "".into(),
+                "".into(),
+                "RMB".into(),
+                "700".into(),
+                "700".into(),
+            ],
+            vec![
+                "".into(),
+                "2025-01-02".into(),
+                "记-2".into(),
+                "收回货款".into(),
+                "1002".into(),
+                "银行存款".into(),
+                "RMB".into(),
+                "".into(),
+                "700".into(),
+            ],
+        ];
+        let column_of = |role: &str| match role {
+            "date" => vec!["日期".into()],
+            "id" => vec!["凭证号".into()],
+            "summary" => vec!["摘要".into()],
+            "accountCode" => vec!["科目编码".into()],
+            "accountName" => vec!["科目名称".into()],
+            "currency" => vec!["币种".into()],
+            "foreignAmount" => vec!["原币金额".into()],
+            "functionalDebit" => vec!["借方金额".into()],
+            "functionalCredit" => vec!["贷方金额".into()],
+            _ => Vec::new(),
+        };
+        let issues = mapped_amount_parse_issues("je", &headers, &rows, &column_of);
+        assert_eq!(issues.len(), 1, "小计与整体右移行应由公共入口剔除");
+        assert_eq!(issues[0].row_index, 0, "真实业务坏金额必须继续报错");
+        assert_eq!(issues[0].value, "待补");
+    }
+
+    #[test]
     fn 计量单位不得自动识别为主体() {
         let headers = vec![
             "凭证编号".into(),
@@ -12454,7 +13181,7 @@ mod tests {
             "closingFunctionalAmount".into(),
             Value::String("期末余额".into()),
         );
-        align_tb_direction_pair(&headers, &mut m);
+        align_tb_direction_pair(&headers, &[], &mut m);
         // 紧邻期初余额（北重精工等 R4 裁决）。
         assert_eq!(
             m.get("openingDirection").and_then(Value::as_str),
@@ -12476,7 +13203,7 @@ mod tests {
             "closingFunctionalAmount".into(),
             Value::String("期末余额".into()),
         );
-        align_tb_direction_pair(&headers2, &mut m2);
+        align_tb_direction_pair(&headers2, &[], &mut m2);
         assert_eq!(
             m2.get("closingDirection").and_then(Value::as_str),
             Some("方向")
@@ -12665,7 +13392,10 @@ mod tests {
         let mut paired = serde_json::Map::new();
         paired.insert(
             "date".into(),
-            Value::Array(vec![Value::String("月份".into()), Value::String("日".into())]),
+            Value::Array(vec![
+                Value::String("月份".into()),
+                Value::String("日".into()),
+            ]),
         );
         pair_month_day_date_columns(&headers, &rows, &mut paired);
         assert_eq!(paired.get("date").unwrap().as_array().unwrap().len(), 2);

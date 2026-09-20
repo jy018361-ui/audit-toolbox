@@ -10,7 +10,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { createMemoryRouter, MemoryRouter, RouterProvider } from "react-router-dom";
 import { useState } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -417,6 +417,30 @@ it("protects unsaved settings on leave", async () => {
       screen.queryByText("设置尚未保存，确定离开并放弃这些修改吗？"),
     ).toBeNull(),
   );
+});
+
+it("protects unsaved settings when browser history navigates backward", async () => {
+  const router = createMemoryRouter([
+    { path: "/history", element: <p>历史页</p> },
+    { path: "/settings", element: <Settings availableUpdate={null} onAvailableUpdateChange={() => {}} /> },
+  ], { initialEntries: ["/history", "/settings"], initialIndex: 1 });
+  render(<><RouterProvider router={router} /><ConfirmDialogHost /></>);
+  await waitFor(() => expect(screen.getByLabelText("模型")).toHaveValue("saved-model"));
+  fireEvent.change(screen.getByLabelText("Base URL"), {
+    target: { value: "https://llm.internal" },
+  });
+
+  await act(async () => { await router.navigate(-1); });
+  expect(router.state.location.pathname).toBe("/settings");
+  expect(screen.getByText("设置尚未保存，确定离开并放弃这些修改吗？")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  await waitFor(() => expect(screen.queryByText("设置尚未保存，确定离开并放弃这些修改吗？")).toBeNull());
+  expect(router.state.location.pathname).toBe("/settings");
+
+  await act(async () => { await router.navigate(-1); });
+  fireEvent.click(screen.getByRole("button", { name: "离开" }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/history"));
+  expect(screen.getByText("历史页")).toBeVisible();
 });
 
 it("requires confirmation before clearing local cache", async () => {

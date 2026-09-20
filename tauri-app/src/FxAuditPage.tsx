@@ -283,6 +283,30 @@ export function fxAccountReviewRows(
 }
 
 /**
+ * 科目确认先呈现真正参与汇兑测算的科目：货币性资产／负债与汇兑损益；
+ * 非货币性项目、其他损益成本和排除项沉到后面。组内保持 TB 原始顺序，
+ * 避免同一类科目在角色状态刷新后互相跳位。
+ */
+export function fxSortAccountReviewRows(
+  rows: FxAccountReviewRow[],
+  accountRoles: Record<string, string>,
+  detailRoles: Record<string, string>,
+): FxAccountReviewRow[] {
+  const priority = (row: FxAccountReviewRow) => {
+    const role = detailRoles[row.key] ?? accountRoles[row.account] ?? "non_monetary";
+    if (role === "monetary_asset" || role === "monetary_liability" || role === "fx_gain_loss")
+      return 0;
+    if (role === "non_monetary") return 1;
+    if (role === "other_pnl") return 2;
+    return 3;
+  };
+  return rows
+    .map((row, index) => ({ row, index, priority: priority(row) }))
+    .sort((left, right) => left.priority - right.priority || left.index - right.index)
+    .map(({ row }) => row);
+}
+
+/**
  * 科目确认表是否需要「主体」列：TB/JE 识别出的**实际**主体（去空白、剔除
  * 「默认主体」占位）去重后多于一个才显示；单主体账套维持原有三列布局。
  */
@@ -417,27 +441,6 @@ type SourceClassification = LedgerWorkbookSheetClassification & {
 };
 type VoucherClassification =
   "已实现汇兑损益" | "未实现汇兑损益" | "不构成汇兑事项";
-type ClassificationControl = {
-  voucherId: string;
-  date?: string;
-  voucherType?: string;
-  systemCategory?: string;
-  reviewReason?: string;
-  bookedFxGainLoss?: number;
-  classification: VoucherClassification;
-  measurementStatus?: string;
-  patternKey?: string;
-  patternLabel?: string;
-  debitAccounts?: string[];
-  creditAccounts?: string[];
-  summary?: string;
-  classificationConflict?: string;
-};
-type VoucherDetail = {
-  accountCode?: string;
-  accountNameOriginal?: string;
-  accountNameChinese?: string;
-};
 
 const JE_LABELS: Record<string, string> = {
   id: "凭证识别字段",
@@ -878,7 +881,7 @@ export function uncoveredBreakdown(summary: Record<string, unknown>) {
   };
 }
 export const NOT_FX_EVENT_HINT =
-  "这些凭证按结构看不出汇兑损益，账面汇差未纳入测算；明细见底稿「不构成汇兑事项」页。";
+  "这些凭证按结构看不出汇兑损益，账面汇差未纳入测算；明细见底稿「汇兑事项复核」页。";
 export const UNMEASURABLE_HINT =
   "这些凭证已分好类，但缺少重算所需的原币余额或汇率证据（常见原因：科目余额表没按币种拆分），审计金额暂未测出；补资料后重算。";
 /** 「?」圆形图标：鼠标移上去（或键盘聚焦）显示口径注释。 */
@@ -1084,9 +1087,6 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   const [manualClassifications, setManualClassifications] = useState<
     Record<string, VoucherClassification>
   >({});
-  const [classificationDrafts, setClassificationDrafts] = useState<
-    Record<string, VoucherClassification>
-  >({});
   const [tbCurrencyConfirmed, setTbCurrencyConfirmed] = useState(false);
   const [alignment, setAlignment] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
@@ -1163,13 +1163,17 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     () => fxAccountReviewRows(accounts, auxiliaryLink),
     [accounts, auxiliaryLink],
   );
+  const orderedReviewRows = useMemo(
+    () => fxSortAccountReviewRows(reviewRows, accountRoles, accountDetailRoles),
+    [reviewRows, accountRoles, accountDetailRoles],
+  );
   const accountMatches = useMemo(
     () => keywordFilterPredicate(accountFilter),
     [accountFilter],
   );
   const visibleRows = useMemo(
     () =>
-      reviewRows.filter((row) =>
+      orderedReviewRows.filter((row) =>
         accountMatches(
           fxAccountFilterText(
             row.auxiliary ? `${row.account} ${row.auxiliary}` : row.account,
@@ -1179,7 +1183,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
         ),
       ),
     [
-      reviewRows,
+      orderedReviewRows,
       accountMatches,
       je?.accountCurrencyDetails,
       tb?.accountCurrencyDetails,
@@ -1212,7 +1216,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   );
   const confirmationRows = useMemo(
     () => fxConfirmationRows(
-      reviewRows,
+      orderedReviewRows,
       accountRoles,
       accountDetailRoles,
       accountCurrencies,
@@ -1223,7 +1227,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       showEntityColumn,
     ),
     [
-      reviewRows,
+      orderedReviewRows,
       accountRoles,
       accountDetailRoles,
       accountCurrencies,
@@ -1412,7 +1416,6 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
         ? p.manualClassifications
         : {},
     );
-    setClassificationDrafts({});
     setOutputPath(typeof p.outputPath === "string" ? p.outputPath : "");
     setStep(2);
     setBusy(false);
@@ -1499,7 +1502,6 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     setCompletedStage(undefined);
     setActiveStage(undefined);
     setManualClassifications({});
-    setClassificationDrafts({});
     setAccountRoles({});
     setAccountRolesTouched({});
     setAccountCurrencies({});
@@ -1602,7 +1604,6 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     );
     if (kind === "je") {
       setManualClassifications(match ? (stash?.manualClassifications ?? {}) : {});
-      setClassificationDrafts({});
       setJePath(path);
       setJe(response);
       setJeMapping(appliedMapping);
@@ -2028,20 +2029,8 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       setError(errorText(e));
     }
   }
-  function stageVoucherClassifications(
-    voucherIds: string[],
-    classification: VoucherClassification,
-  ) {
-    setClassificationDrafts((current) => {
-      const next = { ...current };
-      for (const voucherId of voucherIds) next[voucherId] = classification;
-      return next;
-    });
-  }
   async function recalculateClassifications() {
-    const next = { ...manualClassifications, ...classificationDrafts };
-    setManualClassifications(next);
-    await run("fx.preview", next);
+    await run("fx.preview");
   }
 
   return (
@@ -2156,7 +2145,6 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                   setEntityCurrencies({});
                   setCurrencyTouched({});
                   setManualClassifications({});
-                  setClassificationDrafts({});
                   setTbCurrencyConfirmed(false);
                   setAlignment([]);
                   setResult(undefined);
@@ -2867,18 +2855,12 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                 job && (
                   <JobProgress
                     job={job}
-                    onCancel={busy ? (id) => void jobCancel(id) : undefined}
+                    onCancel={busy ? (id) => jobCancel(id) : undefined}
                   />
                 )
               )}
               {result && (
-                <FxResult
-                  result={result}
-                  busy={busy}
-                  classificationDrafts={classificationDrafts}
-                  onClassificationChange={stageVoucherClassifications}
-                  onRecalculate={recalculateClassifications}
-                />
+                <FxResult result={result} />
               )}
             </CardContent>
           </Card>
@@ -3201,32 +3183,6 @@ function FxPreview(props: {
     />
   );
 }
-/** 凭证组分两类：**不构成汇兑事项（披露即可）** 和 **已定分类但算不出金额**。
- *
- *  这两件事性质完全不同：前者是二元分类的口径结论（本位币账户间划转、
- *  非货币性对手），后者要么补资料要么修工具。分类已二元化，「待确认」
- *  不再作为分类值出现。 */
-export function splitClassificationGroups<
-  T extends {
-    voucherId: string;
-    classification: string;
-    measurementStatus?: string;
-  },
->(
-  groups: Array<{ key: string; label: string; items: T[] }>,
-  drafts: Record<string, string>,
-) {
-  const undecided: typeof groups = [];
-  const unmeasurable: typeof groups = [];
-  for (const group of groups) {
-    const pending = group.items.some(
-      (item) =>
-        (drafts[item.voucherId] ?? item.classification) === "不构成汇兑事项",
-    );
-    (pending ? undecided : unmeasurable).push(group);
-  }
-  return { undecided, unmeasurable };
-}
 /** 逐行数据质量按「问题类型 ＋ 严重度」归并，同类几百行不必逐条铺开。 */
 export function summarizeQuality(items: Array<Record<string, unknown>>) {
   const order: Record<string, number> = {
@@ -3271,7 +3227,7 @@ export function summarizeQuality(items: Array<Record<string, unknown>>) {
 }
 export function fxQualityAction(type: string, severity: string): string {
   if (severity === "合并") return "已合并计入，无需处理";
-  if (type.includes("不构成汇兑事项")) return "核对凭证分类；如有误，修改分类后重算";
+  if (type.includes("不构成汇兑事项")) return "在底稿“汇兑事项复核”页查看明细";
   if (type.includes("入账汇率") && (type.includes("不恒定") || type.includes("偏离")))
     return "核对该月凭证的入账汇率";
   if (type.includes("牌价口径回退")) return "核对本次采用的替代牌价";
@@ -3567,97 +3523,15 @@ function RollforwardIssues({
   );
 }
 
-function FxResult({
-  result,
-  busy,
-  classificationDrafts,
-  onClassificationChange,
-  onRecalculate,
-}: {
-  result: Record<string, unknown>;
-  busy: boolean;
-  classificationDrafts: Record<string, VoucherClassification>;
-  onClassificationChange: (
-    voucherIds: string[],
-    classification: VoucherClassification,
-  ) => void;
-  onRecalculate: () => Promise<void>;
-}) {
+function FxResult({ result }: { result: Record<string, unknown> }) {
   const summary = (result.summary ?? {}) as Record<string, unknown>;
   const outputs = (result.outputPaths ?? []) as string[];
-  const controls = (result.classificationControls ??
-    []) as ClassificationControl[];
-  const details = (result.accountNameCatalog ??
-    result.voucherDetail ??
-    []) as VoucherDetail[];
   const rollforward = (result.unrealizedBalanceRollforward ?? []) as Array<
     Record<string, unknown>
   >;
   const unrealizedComparisonDifference = rollforward.reduce(
     (sum, item) => sum + Number(item.suggestedAdjustment ?? 0),
     0,
-  );
-  const groups = Object.values(
-    controls.reduce<
-      Record<
-        string,
-        { key: string; label: string; items: ClassificationControl[] }
-      >
-    >((all, item) => {
-      const key = item.patternKey || item.voucherId;
-      const group = all[key] ?? {
-        key,
-        label: item.patternLabel || key,
-        items: [],
-      };
-      group.items.push(item);
-      all[key] = group;
-      return all;
-    }, {}),
-  );
-  const { undecided, unmeasurable } = splitClassificationGroups(
-    groups,
-    classificationDrafts,
-  );
-  const accountNames = details.reduce<
-    Record<string, { english: Set<string>; chinese: Set<string> }>
-  >((all, item) => {
-    const code = String(item.accountCode ?? "")
-      .trim()
-      .toUpperCase();
-    if (!code) return all;
-    const names = all[code] ?? {
-      english: new Set<string>(),
-      chinese: new Set<string>(),
-    };
-    const original = String(item.accountNameOriginal ?? "").trim();
-    const chinese = String(item.accountNameChinese ?? "").trim();
-    if (original) {
-      if (/[\u4e00-\u9fff]/.test(original)) names.chinese.add(original);
-      else names.english.add(original);
-    }
-    if (chinese) names.chinese.add(chinese);
-    all[code] = names;
-    return all;
-  }, {});
-  const accountSide = (title: string, codes: string[] | undefined) => (
-    <div className="fx-pattern-side">
-      <strong>{title}</strong>
-      <div>
-        {(codes ?? []).map((code) => {
-          const names = accountNames[code.trim().toUpperCase()];
-          const english = names ? [...names.english].join(" / ") : "";
-          const chinese = names ? [...names.chinese].join(" / ") : "";
-          return (
-            <span key={code}>
-              <b>{code}</b>
-              {english && <small>英文：{english}</small>}
-              {chinese && <small>中文：{chinese}</small>}
-            </span>
-          );
-        })}
-      </div>
-    </div>
   );
   const amount = (value: unknown) => {
     const number = Number(value ?? 0);
@@ -3674,67 +3548,6 @@ function FxResult({
           minimumFractionDigits: 2,
           maximumFractionDigits: 2,
         }).format(Number(value));
-  const renderGroup = (group: {
-    key: string;
-    label: string;
-    items: ClassificationControl[];
-  }) => {
-    const selected = [
-      ...new Set(
-        group.items.map(
-          (item) => classificationDrafts[item.voucherId] ?? item.classification,
-        ),
-      ),
-    ];
-    const value = selected.length === 1 ? selected[0] : "不构成汇兑事项";
-    const booked = group.items.reduce(
-      (sum, item) => sum + Number(item.bookedFxGainLoss ?? 0),
-      0,
-    );
-    const failed = group.items.filter((item) =>
-      item.measurementStatus?.startsWith("无法测算"),
-    ).length;
-    const conflicts = group.items.filter((item) => item.classificationConflict);
-    const first = group.items[0];
-    return (
-      <label key={group.key}>
-        <span>
-          <b>{group.label}</b>
-          <div className="fx-pattern-names">
-            {accountSide("借方科目", first.debitAccounts)}
-            {accountSide("贷方科目", first.creditAccounts)}
-          </div>
-          <small>
-            {group.items.length} 张凭证，账面汇差{" "}
-            {booked.toLocaleString("zh-CN", {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: 2,
-            })}
-            {failed ? `；${failed} 张缺少重算证据` : ""}
-          </small>
-          {conflicts.length > 0 && (
-            <small className="fx-conflict-hint">
-              分类冲突：{conflicts[0].classificationConflict}
-            </small>
-          )}
-        </span>
-        <select
-          disabled={busy}
-          value={value}
-          onChange={(e) =>
-            onClassificationChange(
-              group.items.map((item) => item.voucherId),
-              e.target.value as VoucherClassification,
-            )
-          }
-        >
-          <option>已实现汇兑损益</option>
-          <option>未实现汇兑损益</option>
-          <option>不构成汇兑事项</option>
-        </select>
-      </label>
-    );
-  };
   const tbKnown = summary.tbFxGainLoss != null;
   const tbSplit = summary.tbFxGainLossPresentation === "split";
   const passed = summary.reconciliationPassed === true;
@@ -3932,48 +3745,11 @@ function FxResult({
             {metric(
               "与客户入账差异",
               unrealizedComparisonDifference,
-              undefined,
+              "审计重估损益 − 客户已入账未实现汇兑损益",
               "warning",
             )}
           </div>
         </section>
-      )}
-      {groups.length > 0 && (
-        <div className="fx-classification-review">
-          <div className="fx-classification-heading">
-            <div>
-              <h4>凭证分类复核</h4>
-              <p>
-                系统按凭证结构自动分类：已实现、未实现、不构成汇兑事项。借贷科目组合相同的凭证归为一组，整组一次改；判断不对的在这里改，改完点「重新测算」。
-              </p>
-            </div>
-            <Button disabled={busy} onClick={() => void onRecalculate()}>
-              {busy ? "重新测算中…" : "重新测算"}
-            </Button>
-          </div>
-          {undecided.length > 0 && (
-            <section className="fx-classification-section">
-              <h5>不构成汇兑事项</h5>
-              <p>
-                这些凭证按结构看不出汇兑损益，账面汇差未纳入测算（明细见底稿「不构成汇兑事项」页）。若某组判断不对，改分类后点「重新测算」。
-              </p>
-              <div className="fx-classification-list">
-                {undecided.map(renderGroup)}
-              </div>
-            </section>
-          )}
-          {unmeasurable.length > 0 && (
-            <section className="fx-classification-section">
-              <h5>已分好类，但工具算不出审计金额</h5>
-              <p>
-                这些凭证的分类已确定，不用再确认；没进测算是因为缺少重算所需的原币余额或汇率证据，常见原因是科目余额表只给到科目合计。判断不对的，同样可以改。
-              </p>
-              <div className="fx-classification-list">
-                {unmeasurable.map(renderGroup)}
-              </div>
-            </section>
-          )}
-        </div>
       )}
     </section>
   );

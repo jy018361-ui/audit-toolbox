@@ -14,7 +14,8 @@ const viewports = [
 const scenarios = [
   "confirm", "sync", "job-single", "job-multi", "tour",
   "step", "success", "jargon", "fuzzy", "job-success-stack",
-  "step-confirm-stack", "jargon-confirm-stack",
+  "step-confirm-stack", "jargon-confirm-stack", "currency", "filter",
+  "filter-confirm-stack", "job-pill-confirm-stack",
 ];
 
 const auditOverlay = () => {
@@ -31,7 +32,7 @@ const auditOverlay = () => {
     return `${element.tagName.toLowerCase()}${classes ? `.${classes}` : ""}`;
   };
   const roots = [...document.querySelectorAll(
-    '[role="dialog"], .step-hint, .success-nudge, [role="tooltip"], .job-dialog-pill, .settings-update-panel',
+    '[role="dialog"][data-state="open"], .ts-filter-menu, .tour-layer, .sidebar.drawer-open, .step-hint, .success-nudge, [role="tooltip"], .job-dialog-pill, .settings-update-panel',
   )].filter(visible);
   if (!roots.length) issues.push("missing visible overlay root");
 
@@ -68,17 +69,17 @@ const auditOverlay = () => {
     }
   }
 
-  for (const dialog of document.querySelectorAll('[role="dialog"][aria-modal="true"]')) {
+  for (const dialog of document.querySelectorAll('[data-slot="dialog-content"][data-state="open"]')) {
     if (!visible(dialog)) continue;
     if (!(document.activeElement instanceof HTMLElement) || !dialog.contains(document.activeElement)) {
       issues.push(`${selector(dialog)} does not own focus`);
     }
   }
 
-  const modal = [...document.querySelectorAll('[role="dialog"][aria-modal="true"]')].find(visible);
+  const modal = [...document.querySelectorAll('[data-slot="dialog-content"][data-state="open"]')].find(visible);
   if (modal) {
     const modalZ = Number.parseInt(getComputedStyle(modal).zIndex, 10) || 0;
-    for (const lower of document.querySelectorAll(".success-nudge,.step-hint,.job-dialog-pill,[role='tooltip']")) {
+    for (const lower of document.querySelectorAll(".success-nudge,.step-hint,.job-dialog-pill,[role='tooltip'],.window-controls,.ts-filter-menu")) {
       if (!visible(lower) || modal.contains(lower)) continue;
       const lowerZ = Number.parseInt(getComputedStyle(lower).zIndex, 10) || 0;
       if (lowerZ >= modalZ) issues.push(`${selector(lower)} z-index ${lowerZ} competes with modal ${modalZ}`);
@@ -108,22 +109,47 @@ const auditOverlay = () => {
       });
       for (const scenario of scenarios) {
         cases += 1;
+        console.log(`checking ${label} ${scenario}`);
         await page.goto(`${baseUrl}/?overlay-fixture=${scenario}`, { waitUntil: "commit", timeout: 120000 });
         await page.locator(".overlay-state-fixture").waitFor();
         if (scenario === "jargon") await page.getByRole("button", { name: /^什么是/ }).focus();
+        if (scenario === "job-pill-confirm-stack") {
+          await page.locator(".job-dialog-pill").waitFor();
+          await page.getByRole("dialog", { name: "停止后台任务并清空记录？" }).waitFor();
+        }
+        if (scenario === "filter-confirm-stack") {
+          await page.locator(".ts-filter-menu").waitFor();
+          await page.getByRole("dialog", { name: "确认当前筛选？" }).waitFor();
+        }
         const expected = scenario === "success"
           ? ".success-nudge"
           : scenario === "jargon"
             ? '[role="tooltip"]'
             : scenario === "step"
               ? ".step-hint"
-            : '[role="dialog"]';
+            : scenario === "filter"
+              ? ".ts-filter-menu"
+              : scenario === "filter-confirm-stack"
+                ? '[data-slot="dialog-content"]'
+                : scenario === "job-pill-confirm-stack"
+                  ? '[data-slot="dialog-content"][data-state="open"]'
+                : '[role="dialog"]';
         await page.locator(expected).waitFor();
         await page.evaluate(async () => {
           await document.fonts.ready;
           await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         });
         const issues = await page.evaluate(auditOverlay);
+
+        if (scenario === "filter") {
+          const focusedSearch = await page.getByRole("textbox", { name: "搜索超长科目名称" })
+            .evaluate((element) => element === document.activeElement);
+          if (!focusedSearch) issues.push("column filter search did not receive focus");
+          await page.keyboard.press("Escape");
+          const returned = await page.getByRole("button", { name: "列筛选触发器" })
+            .evaluate((element) => element === document.activeElement);
+          if (!returned) issues.push("column filter did not restore focus");
+        }
 
         if (scenario === "job-single" || scenario === "job-multi" || scenario === "job-success-stack") {
           await page.keyboard.press("Escape");
@@ -151,6 +177,8 @@ const auditOverlay = () => {
 
         if (issues.length) {
           failures.push({ viewport: label, scenario, issues: [...new Set(issues)] });
+        }
+        if (issues.length || process.env.OVERLAY_AUDIT_CAPTURE_ALL === "1") {
           await page.screenshot({ path: path.join(output, `${scenario}-${label}.png`), fullPage: true });
         }
       }
@@ -165,6 +193,9 @@ const auditOverlay = () => {
         const issues = await page.evaluate(auditOverlay);
         const mainInert = await page.locator("#main-content").evaluate((element) => element.inert);
         if (!mainInert) issues.push("drawer background is not inert");
+        if (issues.length || process.env.OVERLAY_AUDIT_CAPTURE_ALL === "1") {
+          await page.screenshot({ path: path.join(output, `drawer-${label}.png`), fullPage: true });
+        }
         await page.keyboard.press("Escape");
         const drawerTriggerFocused = await page.waitForFunction(
           () => document.activeElement === document.querySelector(".sidebar-rail-menu"),
@@ -181,6 +212,9 @@ const auditOverlay = () => {
       await page.getByRole("button", { name: /软件更新|发现新版本/ }).click();
       await page.locator("#settings-update-panel").waitFor();
       const updateIssues = await page.evaluate(auditOverlay);
+      if (updateIssues.length || process.env.OVERLAY_AUDIT_CAPTURE_ALL === "1") {
+        await page.screenshot({ path: path.join(output, `settings-update-${label}.png`), fullPage: true });
+      }
       await page.getByRole("button", { name: "收起" }).click();
       const updateTriggerFocused = await page.getByRole("button", { name: /软件更新|发现新版本/ }).evaluate((element) => element === document.activeElement);
       if (!updateTriggerFocused) updateIssues.push("settings update panel did not restore focus to trigger");

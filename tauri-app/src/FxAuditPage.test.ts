@@ -11,6 +11,7 @@ import {
   fxAccountCurrencyOverrides,
   fxAccountCurrencyOverridesForRoles,
   fxAccountReviewRows,
+  fxSortAccountReviewRows,
   fxConfirmationRows,
   fxConfirmationImportPatches,
   fxDetailCurrencyOverridesPayload,
@@ -31,7 +32,6 @@ import {
   fxResultTrustStatus,
   fxResolveAccountRoles,
   granularityLabel,
-  splitClassificationGroups,
   summarizeQuality,
   validationDetail,
   uncoveredDetail,
@@ -87,7 +87,7 @@ describe("汇兑检查提示", () => {
   it("把常见异常转为可执行的短句", () => {
     expect(fxQualityAction("月末汇率缺失", "隔离")).toContain("补齐后重算");
     expect(fxQualityAction("当月入账汇率不恒定", "待复核")).toBe("核对该月凭证的入账汇率");
-    expect(fxQualityAction("外币业务凭证不构成汇兑事项", "提示")).toContain("凭证分类");
+    expect(fxQualityAction("外币业务凭证不构成汇兑事项", "提示")).toContain("汇兑事项复核");
     expect(fxQualityAction("同一科目存在多种外币敞口", "隔离")).toContain("TB");
     expect(fxQualityAction("同一余额键多行", "合并")).toBe("已合并计入，无需处理");
   });
@@ -280,6 +280,31 @@ describe("fx audit mode selection", () => {
   it("无辅助链接或无组时停在末级科目", () => {
     expect(fxAccountReviewRows(["1122 应收账款"], null)).toEqual([
       { key: "1122 应收账款", account: "1122 应收账款" },
+    ]);
+  });
+
+  it("科目确认把货币性项目与汇兑损益排在非货币性和其他损益之前", () => {
+    const rows = fxAccountReviewRows([
+      "1601 固定资产",
+      "6602 管理费用",
+      "1002 银行存款",
+      "6603 汇兑损益",
+      "2202 应付账款",
+    ], null);
+    expect(
+      fxSortAccountReviewRows(rows, {
+        "1601 固定资产": "non_monetary",
+        "6602 管理费用": "other_pnl",
+        "1002 银行存款": "monetary_asset",
+        "6603 汇兑损益": "fx_gain_loss",
+        "2202 应付账款": "monetary_liability",
+      }, {}).map((row) => row.account),
+    ).toEqual([
+      "1002 银行存款",
+      "6603 汇兑损益",
+      "2202 应付账款",
+      "1601 固定资产",
+      "6602 管理费用",
     ]);
   });
 
@@ -985,66 +1010,6 @@ describe("逐行数据质量归并", () => {
     const [group] = summarizeQuality([{ type: "未知" }]);
     expect(group).toMatchObject({ severity: "提示", count: 1 });
     expect(group.rows).toEqual([]);
-  });
-});
-
-describe("凭证分类分两段", () => {
-  const group = (
-    key: string,
-    items: Array<{
-      voucherId: string;
-      classification: string;
-      measurementStatus?: string;
-    }>,
-  ) => ({ key, label: key, items });
-  it("组内还有不构成汇兑事项的归入『不构成』，其余归入『算不出金额』", () => {
-    const { undecided, unmeasurable } = splitClassificationGroups(
-      [
-        group("A", [{ voucherId: "1", classification: "不构成汇兑事项" }]),
-        group("B", [
-          {
-            voucherId: "2",
-            classification: "未实现汇兑损益",
-            measurementStatus: "无法测算，未纳入结果",
-          },
-        ]),
-      ],
-      {},
-    );
-    expect(undecided.map((g) => g.key)).toEqual(["A"]);
-    expect(unmeasurable.map((g) => g.key)).toEqual(["B"]);
-  });
-  it("用户改过的分类立刻生效——草稿优先于后端给的分类", () => {
-    const groups = [
-      group("A", [{ voucherId: "1", classification: "不构成汇兑事项" }]),
-    ];
-    expect(
-      splitClassificationGroups(groups, { "1": "已实现汇兑损益" }).undecided,
-    ).toHaveLength(0);
-    expect(
-      splitClassificationGroups(groups, { "1": "已实现汇兑损益" }).unmeasurable,
-    ).toHaveLength(1);
-    // 反过来：后端判好了，用户手动改成不构成，就该重新进入待办
-    const decided = [
-      group("B", [{ voucherId: "2", classification: "未实现汇兑损益" }]),
-    ];
-    expect(
-      splitClassificationGroups(decided, { "2": "不构成汇兑事项" }).undecided,
-    ).toHaveLength(1);
-  });
-  it("4800 的形态：360 张全部已分类，待确认段为空", () => {
-    const many = Array.from({ length: 12 }, (_, i) =>
-      group(`P${i}`, [
-        {
-          voucherId: `v${i}`,
-          classification: "未实现汇兑损益",
-          measurementStatus: "无法测算，未纳入结果",
-        },
-      ]),
-    );
-    const { undecided, unmeasurable } = splitClassificationGroups(many, {});
-    expect(undecided).toHaveLength(0);
-    expect(unmeasurable).toHaveLength(12);
   });
 });
 

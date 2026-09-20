@@ -57,6 +57,21 @@
   align-items: center;
   justify-content: flex-end;
 }
+.loan-confirm-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+.loan-confirm-footer .account-confirmation-actions,
+.loan-confirm-footer .loan-account-list-pages {
+  margin: 0;
+}
+.loan-confirm-footer .loan-account-list-pages {
+  margin-left: auto;
+}
 .loan-account-confirm table {
   width: 100%;
   min-width: 940px;
@@ -119,6 +134,17 @@
 .loan-account-confirm.loan-confirm-table input[type="number"] {
   width: 112px;
   min-width: 96px;
+}
+/* 利率与 BP 都是审计人员据实录入；隐藏浏览器的步进箭头，避免误点改数。 */
+.loan-manual-number {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.loan-manual-number::-webkit-inner-spin-button,
+.loan-manual-number::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
 }
 /* 借款明细子行：浅底小字行，挂在借款科目行下方逐笔设置利率。 */
 .loan-account-confirm tr.is-rate-detail td {

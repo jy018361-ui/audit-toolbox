@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import catalog from "../public/tool-catalog.json";
 import { JobProgress } from "./components/JobProgress";
@@ -82,6 +82,14 @@ describe("18 个工具的动态任务状态契约", () => {
     );
     expect(screen.queryByRole("button", { name: "取消任务" })).toBeNull();
     expect(screen.queryByRole("progressbar")).toBeNull();
+  });
+
+  it("内联取消失败时保留操作入口并显示原因", async () => {
+    const onCancel = () => Promise.resolve(false);
+    render(<JobProgress job={makeJob()} onCancel={onCancel} />);
+    fireEvent.click(screen.getByRole("button", { name: "取消任务" }));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("取消指令未被接受"));
+    expect(screen.getByRole("button", { name: "取消任务" })).toBeTruthy();
   });
 
   it("长结果仅展示前 20 条并保留完整路径提示", () => {

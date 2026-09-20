@@ -178,18 +178,6 @@
 .deposit-account-continuation {
   padding-left: 34px;
 }
-/* 贷方余额纳入口径提示。 */
-.deposit-credit-policy {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin-top: 12px;
-  padding: 8px 12px;
-  border-radius: var(--radius-md);
-  background: var(--warning-bg);
-  color: var(--warning-fg);
-}
 /* 步骤卡头与借款利息第二步同款：主色 kicker 点题，汇总徽章靠右。 */
 .deposit-confirm-heading {
   display: flex;

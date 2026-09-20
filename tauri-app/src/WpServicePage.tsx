@@ -204,7 +204,7 @@ export function WpServicePage({ tool }: { tool: ToolManifest }) {
             {busy && job && (
               <JobProgress
                 job={job}
-                onCancel={(jobId) => void jobCancel(jobId)}
+                onCancel={(jobId) => jobCancel(jobId)}
                 cancelLabel="取消任务"
               />
             )}

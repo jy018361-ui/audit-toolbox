@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   jobCancel,
   jobStart,
@@ -316,7 +317,7 @@ export default function FileListDirectoryPage({
                       type="button"
                       variant="secondary"
                       size="sm"
-                      onClick={() => void jobCancel(activeJobId)}
+                      onClick={() => void cancelJobWithFeedback(activeJobId)}
                     >
                       取消{job?.phase === "scan" || !scan ? "扫描" : "导出"}
                     </Button>
@@ -427,7 +428,7 @@ export default function FileListDirectoryPage({
             {job && (
               <JobProgress
                 job={job}
-                onCancel={() => void jobCancel(activeJobId)}
+                onCancel={() => jobCancel(activeJobId)}
                 cancelLabel="取消任务"
               />
             )}

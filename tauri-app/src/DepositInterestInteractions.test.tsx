@@ -759,10 +759,10 @@ describe("第二步按币种拆行", () => {
   });
 });
 
-/** 贷方余额的存款账户默认不纳入测算：结果回来先弹窗说明，
- *  用户确认纳入后按新口径自动重算。 */
-describe("贷方余额账户默认不纳入", () => {
-  it("测算完成后弹窗点名，选择纳入后带 include 口径重算", async () => {
+/** 贷方余额弹窗已整体下线：负余额改按月度余额判断计息（引擎侧口径），
+ *  界面不再就该口径打扰用户，旧汇总字段下发也不再触发任何弹窗。 */
+describe("贷方余额弹窗已下线", () => {
+  it("测算完成后不弹贷方余额确认窗", async () => {
     render(<DepositInterestPage tool={tool} />);
     fireEvent.click(
       screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }),
@@ -785,13 +785,46 @@ describe("贷方余额账户默认不纳入", () => {
         },
       }),
     );
-    const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent("1 个存款账户期末为贷方余额");
-    expect(dialog).toHaveTextContent(bank);
-    fireEvent.click(screen.getByRole("button", { name: "纳入测算并重算" }));
-    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledTimes(2));
-    expect(mock.jobStart.mock.calls[1][1]).toMatchObject({
-      creditBalancePolicy: "include",
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+/** 第二步利率档位表在上方、科目分类表在下方；档位利率单向联动下行：
+ *  改档位利率后该类型各户利率跟着改（含清掉手改值），下行手改不回写档位。 */
+describe("利率档位单向联动", () => {
+  it("改档位利率后对应类型各户利率跟着改，档位表排在科目分类表上方", async () => {
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }),
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled());
+    goToStep(STEP2);
+    const rowRate = await screen.findByRole("spinbutton", {
+      name: `${bank}的年利率`,
+    });
+    expect(rowRate).toHaveValue(0.05);
+    // 下行手改利率：不影响上方档位。
+    fireEvent.change(rowRate, { target: { value: "1.25" } });
+    fireEvent.blur(rowRate);
+    expect(rowRate).toHaveValue(1.25);
+    const tierRate = screen.getByRole("spinbutton", {
+      name: "活期存款的采用利率",
+    });
+    expect(tierRate).toHaveValue(0.05);
+    // 改上方档位利率：下行该类型各户（含手改过的）全部跟到新档位利率。
+    fireEvent.change(tierRate, { target: { value: "0.1" } });
+    fireEvent.blur(tierRate);
+    expect(rowRate).toHaveValue(0.1);
+    expect(tierRate).toHaveValue(0.1);
+    // 档位表在科目分类表上方。
+    const tierHeading = screen.getByText("存款利率档位");
+    const accountSummary = screen.getByText("逐个核对科目分类（末级明细）");
+    expect(
+      tierHeading.compareDocumentPosition(accountSummary) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });

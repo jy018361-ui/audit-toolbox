@@ -27,6 +27,8 @@ export function SuccessNudge({
 }: SuccessNudgeProps) {
   const [celebrating, setCelebrating] = useState<JobEvent | null>(null);
   const [pauseDismiss, setPauseDismiss] = useState(false);
+  const [openError, setOpenError] = useState(false);
+  const dismissTimerRef = useRef<number | undefined>(undefined);
   // 已经庆祝过的 jobId：同一任务只庆祝一次，事件流里 completed 事件重复推送也不重弹。
   const celebratedIds = useRef<Set<string>>(new Set());
   const navigate = useNavigate();
@@ -43,17 +45,22 @@ export function SuccessNudge({
       );
     if (!next) return;
     celebratedIds.current.add(next.jobId);
+    setOpenError(false);
     setCelebrating(next);
   }, [jobs]);
 
   useEffect(() => {
-    if (!celebrating || pauseDismiss) return;
+    if (!celebrating || pauseDismiss || openError) return;
     const timer = window.setTimeout(() => setCelebrating(null), autoDismissMs);
-    return () => window.clearTimeout(timer);
-  }, [celebrating, autoDismissMs, pauseDismiss]);
+    dismissTimerRef.current = timer;
+    return () => {
+      window.clearTimeout(timer);
+      if (dismissTimerRef.current === timer) dismissTimerRef.current = undefined;
+    };
+  }, [celebrating, autoDismissMs, pauseDismiss, openError]);
 
   if (!celebrating) return null;
-  // 打开结果只在确有输出文件时提供；路径由 openOutput 走白名单校验，失败保持安静。
+  // 打开结果只在确有输出文件时提供；路径由 openOutput 走白名单校验。
   const outputPath = celebrating.outputPaths[0];
   return (
     <div
@@ -83,9 +90,16 @@ export function SuccessNudge({
             type="button"
             className="success-nudge-btn success-nudge-btn-primary"
             onClick={() => {
-              void openOutput(outputPath).catch(() => {
-                // 文件可能已被移动/删除；打不开时不出错弹窗，卡片稍后自行消失。
-              });
+              // Keep the notice mounted while Windows resolves the file-open request;
+              // otherwise a short dismissal timer can erase the actionable failure.
+              if (dismissTimerRef.current !== undefined) {
+                window.clearTimeout(dismissTimerRef.current);
+                dismissTimerRef.current = undefined;
+              }
+              setPauseDismiss(true);
+              void openOutput(outputPath)
+                .then(() => setPauseDismiss(false))
+                .catch(() => setOpenError(true));
             }}
           >
             打开结果
@@ -102,6 +116,11 @@ export function SuccessNudge({
           返回工作台
         </button>
       </div>
+      {openError && (
+        <p className="success-nudge-error" role="alert">
+          无法打开结果文件。文件可能已移动或删除，请在历史记录中确认输出位置。
+        </p>
+      )}
       <button
         type="button"
         className="success-nudge-close"

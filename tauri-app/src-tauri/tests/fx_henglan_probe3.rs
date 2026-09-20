@@ -1,6 +1,6 @@
 //! 只读诊断：把失败任务里的空格版映射改写成与实际表头一致的换行版后，
 //! 口径核对与预览测算应当都能通过——反向证明根因唯一。
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const PARAMS_DUMP: &str = "../outputs/fx_failed_job_params.json";
 
@@ -48,11 +48,8 @@ fn probe_with_corrected_headers() {
     let je_source = params["jeSource"].clone();
     let tb_source = params["tbSource"].clone();
     let headers_of = |method: &str, source: &Value| {
-        audit_toolbox_lib::engine_call_for_test(
-            method,
-            json!({"source": source}),
-        )
-        .expect("inspect 应当成功")["headers"]
+        audit_toolbox_lib::engine_call_for_test(method, json!({"source": source}))
+            .expect("inspect 应当成功")["headers"]
             .as_array()
             .unwrap()
             .iter()
@@ -63,10 +60,7 @@ fn probe_with_corrected_headers() {
     let tb_headers = headers_of("fx.inspect_tb", &tb_source);
     let je_mapping = remap(&params["jeMapping"], &je_headers);
     let tb_mapping = remap(&params["tbMapping"], &tb_headers);
-    println!(
-        "改写后 JE accountCode = {}",
-        je_mapping["accountCode"]
-    );
+    println!("改写后 JE accountCode = {}", je_mapping["accountCode"]);
 
     let align = audit_toolbox_lib::engine_call_for_test(
         "ledger.check_mapping_alignment",
@@ -76,7 +70,10 @@ fn probe_with_corrected_headers() {
         }),
     )
     .expect("口径核对应当能执行");
-    println!("alignment = {}", serde_json::to_string_pretty(&align).unwrap());
+    println!(
+        "alignment = {}",
+        serde_json::to_string_pretty(&align).unwrap()
+    );
 
     let mut preview = params.clone();
     preview["jeMapping"] = je_mapping;
@@ -85,7 +82,9 @@ fn probe_with_corrected_headers() {
     match audit_toolbox_lib::engine_call_for_test("fx.preview_probe", preview) {
         Ok(value) => println!(
             "preview 完成，键 = {:?}",
-            value.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>())
+            value
+                .as_object()
+                .map(|o| o.keys().cloned().collect::<Vec<_>>())
         ),
         Err(err) => println!("preview 业务错误 = {err:?}"),
     }

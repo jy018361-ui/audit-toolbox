@@ -10,6 +10,8 @@
 // kanzhang.mark_inspect / mark_export），completed 事件的 result 按"页面消费什么就给什么"逐字段给出。
 // 仅浏览器预览 + 演示开关（localStorage audit-toolbox.demo-data = "1"）时被 demoRegistry 收拢生效。
 
+import { fxInspection } from "./money";
+
 // ────────────────────────────── 小工具函数 ──────────────────────────────
 
 type DemoParams = Record<string, unknown>;
@@ -572,8 +574,18 @@ export const handlers: Record<string, (params: DemoParams) => unknown> = {
 
   // TBJE 完整性核对
   "deposit.classify_source": (params) => classifyLedgerSource(params),
-  "fx.inspect_tb": (params) => tbInspectResult(params.source),
-  "fx.inspect_je": (params) => jeInspectResult(params.source),
+  // `fx.inspect_*` 同时服务 TBJE 核对与汇兑测算。汇兑分类使用固定的
+  // `TB` / `JE` Sheet 名，必须返回包含币种口径的完整汇兑 Inspection；
+  // 其余 Sheet 才使用 TBJE 核对的精简账表样例。这样即使本模块在 glob
+  // 注册时覆盖同名 handler，也不会让汇兑页误拿缺字段的数据而禁用测算。
+  "fx.inspect_tb": (params) =>
+    asString(asRecord(params.source).sheet) === "TB"
+      ? fxInspection("tb")
+      : tbInspectResult(params.source),
+  "fx.inspect_je": (params) =>
+    asString(asRecord(params.source).sheet) === "JE"
+      ? fxInspection("je")
+      : jeInspectResult(params.source),
   "ledger.check_mapping_alignment": () => ({ aligned: true, warnings: [] }),
   "ledger.forms": (params) => LEDGER_FORMS[asString(params.kind)] ?? [],
   "ledger.review_mapping": () => ({ changes: [] }),

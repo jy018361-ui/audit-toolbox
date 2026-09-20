@@ -104,6 +104,13 @@
   --focus-ring: var(--brand-link);
   --disabled-opacity: 0.55;
 
+  /* 应用浮层层级：所有模态层必须盖住窗口控件和非模态浮层。 */
+  --layer-window-controls: 800;
+  --layer-task-pill: 900;
+  --layer-popover: 1000;
+  --layer-dialog-overlay: 1100;
+  --layer-dialog-content: 1101;
+
   /* 卡片不使用投影：浅色投影在白底上会被感知为一圈细边框。 */
   --shadow-card: 0 1px 2px rgb(20 53 58 / 6%);
   /* 数据预览是可滚动、可编辑的工作区，不是普通信息卡片；用克制的阴影
@@ -316,7 +323,7 @@ summary:focus-visible {
   position: fixed;
   top: 0;
   right: 0;
-  z-index: 800;
+  z-index: var(--layer-window-controls);
   display: flex;
 }
 .window-controls button {
@@ -2284,7 +2291,7 @@ summary:focus-visible {
 }
 .ts-filter-menu {
   position: fixed;
-  z-index: 1000;
+  z-index: var(--layer-popover);
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
@@ -3602,12 +3609,39 @@ summary:focus-visible {
   justify-content: flex-end;
   padding-top: var(--sp-1);
 }
+.job-dialog-operation-error {
+  margin: var(--sp-2) 0 0;
+  color: var(--danger-fg);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-label);
+  overflow-wrap: anywhere;
+}
+.job-command-notice {
+  position: fixed;
+  right: var(--sp-5);
+  bottom: var(--sp-5);
+  z-index: var(--layer-popover);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  max-width: min(440px, calc(100vw - 2 * var(--sp-4)));
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--r-md);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  box-shadow: var(--shadow-overlay);
+  overflow-wrap: anywhere;
+}
+body:has(.job-dialog-pill) .job-command-notice {
+  bottom: calc(var(--sp-5) + 64px);
+}
 /* 最小化后的常驻小条。固定在右下角，点击展开回弹窗。 */
 .job-dialog-pill {
   position: fixed;
   right: max(var(--sp-5), env(safe-area-inset-right));
   bottom: max(var(--sp-5), env(safe-area-inset-bottom));
-  z-index: 2147483000;
+  z-index: var(--layer-task-pill);
   display: flex;
   align-items: center;
   gap: var(--sp-2);

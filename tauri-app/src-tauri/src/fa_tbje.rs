@@ -1051,6 +1051,7 @@ fn normalize_tb(
                 "openingFunctional",
                 convention,
                 opening_self_signed,
+                closing_self_signed,
             ),
             closing: balance(
                 table,
@@ -1059,6 +1060,7 @@ fn normalize_tb(
                 "closingFunctional",
                 convention,
                 closing_self_signed,
+                opening_self_signed,
             ),
             source_row: table.header_row + index + 2,
         });
@@ -3186,6 +3188,7 @@ fn balance(
     prefix: &str,
     convention: SignConvention,
     self_signed: bool,
+    sibling_self_signed: bool,
 ) -> f64 {
     let debit = number(table, row, map, &format!("{prefix}Debit"));
     let credit = number(table, row, map, &format!("{prefix}Credit"));
@@ -3202,6 +3205,24 @@ fn balance(
     );
     // 余额列走 `signed_balance`：整列自带符号时并排的方向列是冗余标注，
     // 再按它翻一次号，负债与权益会整片变正。判定见 `balance_self_signed`。
+    // 「绝对值＋单一方向列」版式下本行缺方向值时，先按勾稽等式向对侧借符号
+    // （数学在公共内核）；对侧无锚点或凑不平维持原判，真差异照报。
+    if direction.trim().is_empty() {
+        let index_of = |role: &str| -> Option<usize> {
+            mapped_columns(map, role)
+                .first()
+                .and_then(|name| table.headers.iter().position(|h| h == name))
+        };
+        if let Some(inferred) = ledger_mapping::infer_balance_sign_from_sibling(
+            row,
+            &index_of,
+            prefix,
+            convention,
+            sibling_self_signed,
+        ) {
+            return inferred;
+        }
+    }
     ledger_mapping::signed_balance(
         &AmountInputs {
             amount,

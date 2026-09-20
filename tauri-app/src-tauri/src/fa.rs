@@ -3,25 +3,25 @@
 //! This module deliberately owns the entire deterministic FA workflow.  The
 //! webview passes paths and mappings; files never transit through JSON.
 
-use calamine::{open_workbook_auto, Data, Reader};
+use calamine::{Data, Reader, open_workbook_auto};
 use chrono::{Datelike, Local, Months, NaiveDate};
 use reqwest::blocking::Client;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
-use crate::excel_merger::PauseCheckpoint;
 use crate::AppError;
+use crate::excel_merger::PauseCheckpoint;
 
 pub(crate) type Progress<'a> = &'a dyn Fn(&str, usize, usize, &str);
 
@@ -3440,7 +3440,7 @@ fn write_business_sheets(
             "≤12月卡片明细",
             &["提示"],
             &[vec![
-                "经检查，期末FA LIST中未发现任何≤12月的资产卡片".to_owned()
+                "经检查，期末FA LIST中未发现任何≤12月的资产卡片".to_owned(),
             ]],
             header,
             None,
@@ -6254,12 +6254,14 @@ mod tests {
             &["代码", "错误名称"],
             &[&["A1", "甲"], &["A2", "乙"], &["A3", "不存在"]],
         );
-        assert!(infer_supplement_keys_by_samples(
-            &supplement,
-            &reference,
-            &["编码".into(), "名称".into()]
-        )
-        .is_empty());
+        assert!(
+            infer_supplement_keys_by_samples(
+                &supplement,
+                &reference,
+                &["编码".into(), "名称".into()]
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -6575,18 +6577,24 @@ mod tests {
         });
 
         let payload = main_llm_payload(&p).unwrap();
-        assert!(payload["file1"]["unmappedRoles"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("date")));
-        assert!(payload["file2"]["unmappedRoles"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("date")));
-        assert!(payload["file1"]["unmappedCandidates"]
-            .as_array()
-            .unwrap()
-            .contains(&json!({"role":"date","column":"入账开始日期"})));
+        assert!(
+            payload["file1"]["unmappedRoles"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("date"))
+        );
+        assert!(
+            payload["file2"]["unmappedRoles"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("date"))
+        );
+        assert!(
+            payload["file1"]["unmappedCandidates"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({"role":"date","column":"入账开始日期"}))
+        );
 
         // Even if the provider overlooks the explicit missing role and returns
         // a no-op, the same deterministic header rule used by initial inspect
@@ -6611,10 +6619,12 @@ mod tests {
                 && item["file_side"] == "file2"
                 && item["suggested_column"] == "入账开始日期"
         }));
-        assert!(reviewed["message"]
-            .as_str()
-            .unwrap()
-            .contains("映射复核完成"));
+        assert!(
+            reviewed["message"]
+                .as_str()
+                .unwrap()
+                .contains("映射复核完成")
+        );
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
@@ -6716,10 +6726,12 @@ mod tests {
         assert_eq!(item["file_side"], "file2");
         assert_eq!(item["suggested_column"], "资产类型描述");
         assert_eq!(item["action"], "review");
-        assert!(item["reason"]
-            .as_str()
-            .unwrap()
-            .contains("疑似期末类别映射错列"));
+        assert!(
+            item["reason"]
+                .as_str()
+                .unwrap()
+                .contains("疑似期末类别映射错列")
+        );
     }
     #[test]
     fn local_category_mismatch_keeps_quiet_when_categories_overlap() {
@@ -6887,9 +6899,10 @@ mod tests {
         assert!(!rows.iter().any(|r| r[1].contains("新增方式:")));
         assert!(rows.iter().any(|r| r[1] == "累计折旧变动净额"));
         assert!(rows.iter().any(|r| r[1] == "——其中-报废"));
-        assert!(rows
-            .iter()
-            .any(|r| r[1] == "——其中-非处置变动（含计提折旧）"));
+        assert!(
+            rows.iter()
+                .any(|r| r[1] == "——其中-非处置变动（含计提折旧）")
+        );
         assert_eq!(noise.len(), 1);
         assert!(noise[0][1].contains("合计"));
         let _ = fs::remove_dir_all(&dir);
@@ -6902,16 +6915,18 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let (result, p) = parity_fixture(&dir);
         let rows = build_depreciation_period(&result, &p);
-        assert!(rows
-            .iter()
-            .any(|r| r[0] == "机器" && r[8] == "不一致" && number(&r[9]).abs() > 0.0));
+        assert!(
+            rows.iter()
+                .any(|r| r[0] == "机器" && r[8] == "不一致" && number(&r[9]).abs() > 0.0)
+        );
         assert!(rows.iter().any(|r| r[1] == "运输" && r[8] == "待确认"));
         // Legacy treats one-sided opening groups as consistent.
         assert!(rows.iter().any(|r| r[0] == "电子" && r[8] == "一致"));
         // Groups with no value on either side are dropped entirely.
-        assert!(rows
-            .iter()
-            .all(|r| number(&r[6]).abs() > 0.005 || number(&r[7]).abs() > 0.005));
+        assert!(
+            rows.iter()
+                .all(|r| number(&r[6]).abs() > 0.005 || number(&r[7]).abs() > 0.005)
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -6927,12 +6942,16 @@ mod tests {
         assert_eq!(&headers[..2], ["类别_parity_end.csv", "数据来源"]);
         // Value columns are titled with the mapped source column + workbook;
         // the aggregation is appended only because two are mixed here.
-        assert!(headers
-            .iter()
-            .any(|value| value == "原值_parity_end.csv_sum_甲"));
-        assert!(headers
-            .iter()
-            .any(|value| value == "原值_parity_end.csv_count_甲"));
+        assert!(
+            headers
+                .iter()
+                .any(|value| value == "原值_parity_end.csv_sum_甲")
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|value| value == "原值_parity_end.csv_count_甲")
+        );
         // Wide cross-tab contract: each row key appears once and aggregate
         // names belong to columns, never as repeated long-form data rows.
         // 3 categories + a trailing 合计.  The fixture's 合计 source row is
@@ -7395,9 +7414,11 @@ mod tests {
             "an unmatched supplement card falls back to file2's mapped method"
         );
         let summary = wb.worksheet_range("固定资产变动汇总表").unwrap();
-        assert!(summary
-            .rows()
-            .any(|row| row.iter().any(|cell| cell.to_string() == "——其中-2")));
+        assert!(
+            summary
+                .rows()
+                .any(|row| row.iter().any(|cell| cell.to_string() == "——其中-2"))
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -7589,10 +7610,12 @@ mod tests {
         assert!(section.contains("vertical=\"center\""));
         let mut wb = open_workbook_auto(&out).unwrap();
         let range = wb.worksheet_range("FA List").unwrap();
-        assert!(range
-            .rows()
-            .flatten()
-            .any(|c| c.to_string().contains("信息来源")));
+        assert!(
+            range
+                .rows()
+                .flatten()
+                .any(|c| c.to_string().contains("信息来源"))
+        );
         let _ = fs::remove_dir_all(&dir);
     }
     #[test]
@@ -7657,12 +7680,16 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        assert!(pivot_headers
-            .iter()
-            .any(|header| header == "原值_end.csv_sum_两文件都有"));
-        assert!(pivot_headers
-            .iter()
-            .any(|header| header == "原值_end.csv_count_仅文件2"));
+        assert!(
+            pivot_headers
+                .iter()
+                .any(|header| header == "原值_end.csv_sum_两文件都有")
+        );
+        assert!(
+            pivot_headers
+                .iter()
+                .any(|header| header == "原值_end.csv_count_仅文件2")
+        );
         let anomalies = wb.worksheet_range("异常清单").unwrap();
         assert_eq!(anomalies.get((0, 0)).unwrap().to_string(), "异常类型");
         assert_eq!(anomalies.get((1, 0)).unwrap().to_string(), "逻辑判断");
@@ -7684,9 +7711,11 @@ mod tests {
                 .any(|value| value.contains("DATEVALUE(SUBSTITUTE(") && value.contains("ISNUMBER(")),
             "text dates such as 2022.12.29 must be coerced before YEAR/MONTH"
         );
-        assert!(formulas
-            .iter()
-            .any(|value| value.contains("MIN(EDATE(EDATE(")));
+        assert!(
+            formulas
+                .iter()
+                .any(|value| value.contains("MIN(EDATE(EDATE("))
+        );
         let disposal = wb.worksheet_range("处置清单_BKD").unwrap();
         assert_eq!(disposal.get((0, 6)).unwrap().to_string(), "原值减少");
         assert_eq!(disposal.get((0, 14)).unwrap().to_string(), "处置折旧");
@@ -8016,11 +8045,13 @@ mod tests {
         // 合并预览不再回传明细行，改回变动汇总（类别为列、数值为数字）。
         let summary_columns = output["summary"]["columns"].as_array().unwrap();
         assert!(summary_columns.iter().any(|c| c.as_str() == Some("运输")));
-        assert!(output["summary"]["rows"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["item"] == "期末原值"));
+        assert!(
+            output["summary"]["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["item"] == "期末原值")
+        );
         // 补充清单聚合结果直接在合并行上断言（新增方式合并去重、处置金额取绝对值合计）。
         let cancel = Arc::new(AtomicBool::new(false));
         let merged = merge(&p, &|_, _, _, _| {}, &cancel).unwrap();
@@ -8055,10 +8086,12 @@ mod tests {
             json!({"path":addition,"keys":["卡片编号"],"method":"新增方式","date":"新增日期"});
         export_params["disposalSupplement"] = json!({"path":disposal,"keys":["卡片编号"],"method":"处置方式","date":"处置日期","originalValue":"处置原值","depreciation":"处置折旧"});
         let exported = test_export(export_params).unwrap();
-        assert!(exported["exportMessage"]
-            .as_str()
-            .unwrap()
-            .contains("未匹配资产变动清单"));
+        assert!(
+            exported["exportMessage"]
+                .as_str()
+                .unwrap()
+                .contains("未匹配资产变动清单")
+        );
         assert!(dir.join("[未匹配资产变动清单].xlsx").is_file());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -8104,10 +8137,12 @@ mod tests {
             .unwrap();
         assert_eq!(values.get((row_index, 14)).unwrap().to_string(), "0");
         let formulas = wb.worksheet_formula("处置清单_BKD").unwrap();
-        assert!(formulas
-            .rows()
-            .flatten()
-            .any(|value| value.to_string() == format!("O{}-H{}", row_index + 1, row_index + 1)));
+        assert!(
+            formulas
+                .rows()
+                .flatten()
+                .any(|value| value.to_string() == format!("O{}-H{}", row_index + 1, row_index + 1))
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

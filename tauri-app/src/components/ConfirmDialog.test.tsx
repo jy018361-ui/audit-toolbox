@@ -73,4 +73,20 @@ describe("ConfirmDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "继续" }));
     await waitFor(() => expect(second).toBe(true));
   });
+
+  it("长标题限制两行，重复错误合并且正文独立滚动", async () => {
+    render(<ConfirmDialogHost />);
+    void confirmDialog({
+      title: "超长确认标题".repeat(20),
+      message: "无法读取工作簿，请关闭 Excel 后重试。".repeat(8),
+      tone: "danger",
+    });
+
+    const title = await screen.findByRole("heading");
+    expect(title).toHaveClass("line-clamp-2");
+    expect(title).toHaveAttribute("title", "超长确认标题".repeat(20));
+    expect(screen.getByText(/已合并 7 条重复信息/)).toBeInTheDocument();
+    expect(document.querySelector(".confirm-dialog-body")).toHaveClass("overflow-y-auto");
+    expect(document.querySelector(".confirm-dialog-footer")).toHaveClass("shrink-0");
+  });
 });

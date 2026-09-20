@@ -458,6 +458,27 @@ describe("buildToolTourSteps", () => {
 });
 
 describe("引导焦点圈定（aria-modal 落地）", () => {
+  it("上层确认弹窗打开时不抢 Esc、方向键和 Tab", () => {
+    const onFinish = vi.fn();
+    render(<BeginnerTour steps={baseSteps} onFinish={onFinish} />);
+    const upperDialog = document.createElement("div");
+    upperDialog.setAttribute("data-slot", "dialog-content");
+    upperDialog.setAttribute("data-state", "open");
+    const upperButton = document.createElement("button");
+    upperButton.textContent = "确认";
+    upperDialog.appendChild(upperButton);
+    document.body.appendChild(upperDialog);
+    upperButton.focus();
+
+    fireEvent.keyDown(upperButton, { key: "Escape" });
+    fireEvent.keyDown(upperButton, { key: "ArrowRight" });
+    fireEvent.keyDown(upperButton, { key: "Tab" });
+    expect(onFinish).not.toHaveBeenCalled();
+    expect(screen.getByText("欢迎步骤")).toBeInTheDocument();
+    expect(document.activeElement).toBe(upperButton);
+
+    upperDialog.remove();
+  });
   it("Tab / Shift+Tab 在引导层内循环，不会落到背景的「跳过导航」链接上", () => {
     // 模拟应用外壳里排在引导层之前的左上角跳转链接：
     // 没有焦点圈定时，Shift+Tab 会聚焦它并让它在左上角滑入。

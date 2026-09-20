@@ -1,13 +1,14 @@
 use reqwest::blocking::Client;
 use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc,
     },
     thread,
     time::Duration,
@@ -2721,10 +2722,12 @@ mod tests {
         let fills = value["fills"].as_array().expect("fills 还在");
         assert_eq!(fills.len(), 1, "{fills:?}");
         assert_eq!(fills[0]["suggestedColumn"], "本位币金额");
-        assert!(value["reviews"]
-            .as_array()
-            .expect("reviews 还在")
-            .is_empty());
+        assert!(
+            value["reviews"]
+                .as_array()
+                .expect("reviews 还在")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2745,10 +2748,12 @@ mod tests {
         let form = &payload["currentForm"];
         assert_eq!(form["id"], "JE2");
         assert_eq!(form["complete"], true);
-        assert!(form["missingSlots"]
-            .as_array()
-            .expect("有该字段")
-            .is_empty());
+        assert!(
+            form["missingSlots"]
+                .as_array()
+                .expect("有该字段")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -3532,12 +3537,12 @@ mod mapping_prompt_tests {
         sanitize_mapping_changes(&mut value, &payload, "tb", ReviewDatePolicy::Strict);
         let changes = value["changes"].as_array().unwrap();
         assert_eq!(changes.len(), 2, "只留成对挪移的两条：{changes:?}");
-        assert!(changes
-            .iter()
-            .all(
+        assert!(
+            changes.iter().all(
                 |change| change["suggestedColumn"].as_str() != Some("科目名称")
                     || change["role"].as_str() == Some("accountName")
-            ));
+            )
+        );
     }
 
     #[test]
@@ -3910,11 +3915,13 @@ mod mapping_prompt_tests {
             "availableRoles": ["accountCode"]
         });
         inject_pair_currency_requirement(&tb, &mut je);
-        assert!(je["availableRoles"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|role| role == "currency"));
+        assert!(
+            je["availableRoles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|role| role == "currency")
+        );
         assert_eq!(je["crossRequiredRoles"][0]["role"], "currency");
 
         je["currentMapping"]["currency"] = json!("外币");

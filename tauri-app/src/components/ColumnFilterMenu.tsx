@@ -55,9 +55,16 @@ export function ColumnFilterMenu({
   const [keyword, setKeyword] = useState(data?.keyword ?? "");
   const [checked, setChecked] = useState<Set<string>>(() => new Set(selected));
   const panel = useRef<HTMLDivElement>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
   const initialized = useRef(selected.length > 0);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const closeAndRestoreFocus = () => {
+    onCloseRef.current();
+    if (anchor.isConnected) anchor.focus();
+  };
+  const closeAndRestoreFocusRef = useRef(closeAndRestoreFocus);
+  closeAndRestoreFocusRef.current = closeAndRestoreFocus;
   const [position, setPosition] = useState<{
     left: number;
     top: number;
@@ -67,6 +74,12 @@ export function ColumnFilterMenu({
 
   // 无筛选时 Excel 默认显示「全选」。首次取值异步返回后补齐勾选；若结果被截断，
   // 则不能把眼前这一批冒充整列全选，否则直接应用会意外只保留前 VALUE_LIMIT 项。
+  useEffect(() => {
+    // Portal 初次挂载后让浏览器完成当前点击/焦点事件，再移入菜单。
+    const frame = window.requestAnimationFrame(() => searchInput.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+
   useEffect(() => {
     if (initialized.current || !data || data.truncated) return;
     initialized.current = true;
@@ -81,7 +94,12 @@ export function ColumnFilterMenu({
       if (!panel.current?.contains(target as Node)) onCloseRef.current();
     }
     function keyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onCloseRef.current();
+      if (event.key === "Escape") {
+        // 上层确认框拥有当前键盘交互；先关闭确认框，勿连带关闭底下的筛选。
+        if (document.querySelector('[data-slot="dialog-content"][data-state="open"]')) return;
+        event.preventDefault();
+        closeAndRestoreFocusRef.current();
+      }
     }
     window.addEventListener("pointerdown", pointerDown, true);
     window.addEventListener("keydown", keyDown);
@@ -136,7 +154,8 @@ export function ColumnFilterMenu({
   const visibleChecked = values.filter((value) => checked.has(value));
   const allChecked = values.length > 0 && visibleChecked.length === values.length;
   const someChecked = visibleChecked.length > 0 && !allChecked;
-  const hiddenChecked = [...checked].filter((value) => !values.includes(value));
+  const visibleValues = new Set(values);
+  const hiddenChecked = [...checked].filter((value) => !visibleValues.has(value));
 
   function toggle(value: string) {
     setChecked((current) => {
@@ -159,6 +178,7 @@ export function ColumnFilterMenu({
         visibility: position ? "visible" : "hidden",
       }}
       role="dialog"
+      aria-modal="false"
       aria-label={`筛选 ${field}`}
     >
       <div className="ts-filter-menu-title" title={field}>
@@ -166,6 +186,7 @@ export function ColumnFilterMenu({
       </div>
       <div className="ts-filter-menu-search">
         <input
+          ref={searchInput}
           value={keyword}
           placeholder={searchPlaceholder ?? "搜索取值，回车重新读取…"}
           aria-label={`搜索${field}`}
@@ -266,14 +287,17 @@ export function ColumnFilterMenu({
         >
           清除
         </Button>
-        <Button type="button" variant="secondary" size="sm" onClick={onClose}>
+        <Button type="button" variant="secondary" size="sm" onClick={closeAndRestoreFocus}>
           取消
         </Button>
         <Button
           type="button"
           variant="default"
           size="sm"
-          onClick={() => onApply([...checked])}
+          onClick={() => {
+            onApply([...checked]);
+            if (anchor.isConnected) anchor.focus();
+          }}
         >
           确认选择
         </Button>

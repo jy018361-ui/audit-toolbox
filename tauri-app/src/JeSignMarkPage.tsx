@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
   jobCancel,
@@ -794,7 +795,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
         onHeaderRowChange={(value) => invalidate({ headerRow: value })}
         onHeaderDepthChange={(value) => invalidate({ headerDepth: value })}
         onInspect={inspect}
-        onCancel={(jobId) => void jobCancel(jobId)}
+        onCancel={(jobId) => jobCancel(jobId)}
       >
         {draft.inspect && (
           <>
@@ -1070,7 +1071,7 @@ export function JeSignMarkPage({ tool }: { tool: ToolManifest }) {
               <Button
                 variant="secondary"
                 size="sm"
-                onClick={() => void jobCancel(job.jobId)}
+                onClick={() => void cancelJobWithFeedback(job.jobId)}
               >
                 停止
               </Button>
@@ -1166,7 +1167,7 @@ function Result({ job, result }: { job?: JobEvent; result?: unknown }) {
         {job && showProgress && (
           <JobProgress
             job={job}
-            onCancel={(jobId) => void jobCancel(jobId)}
+            onCancel={(jobId) => jobCancel(jobId)}
             cancelLabel="取消任务"
           />
         )}

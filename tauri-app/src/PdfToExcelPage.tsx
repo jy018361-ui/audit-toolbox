@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
   jobCancel,
@@ -320,7 +321,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
                   type="button"
                   variant="secondary"
                   size="sm"
-                  onClick={() => void jobCancel(job.jobId)}
+                  onClick={() => void cancelJobWithFeedback(job.jobId)}
                 >
                   取消任务
                 </Button>
@@ -349,7 +350,7 @@ export default function PdfToExcelPage({ tool }: { tool: ToolManifest }) {
             {job && job.phase !== "completed" && (
               <JobProgress
                 job={job}
-                onCancel={(jobId) => void jobCancel(jobId)}
+                onCancel={(jobId) => jobCancel(jobId)}
                 cancelLabel="取消任务"
               />
             )}

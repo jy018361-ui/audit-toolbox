@@ -8,7 +8,7 @@
 //! ```
 
 use audit_toolbox_lib::engine_call_for_test;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const PARAMS_DUMP: &str = "../outputs/deposit09_failed_job_params.json";
 
@@ -19,7 +19,9 @@ fn preview(label: &str, params: Value) {
             let s = &value["summary"];
             println!(
                 "preview 成功 accountCount={} monthlySource={} calculatedInterest={:?}",
-                s["accountCount"], s["monthlySource"], s["calculatedInterest"].as_f64()
+                s["accountCount"],
+                s["monthlySource"],
+                s["calculatedInterest"].as_f64()
             );
         }
         Err(err) => println!("preview 失败: {err:?}"),

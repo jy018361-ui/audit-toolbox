@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { HashRouter } from "react-router-dom";
+import { createHashRouter, RouterProvider } from "react-router-dom";
 import App from "./App";
 import AudiPickWindow from "./AudiPickWindow";
 import "./styles.css";
@@ -20,10 +20,11 @@ if ("__TAURI_INTERNALS__" in window) {
 }
 
 const root = ReactDOM.createRoot(document.getElementById("root")!);
+const appRouter = createHashRouter([{ path: "*", element: <App /> }]);
 
 async function renderApp() {
   const params = new URLSearchParams(window.location.search);
-  let content: React.ReactNode = <HashRouter><App /></HashRouter>;
+  let content: React.ReactNode = <RouterProvider router={appRouter} />;
   // 几何验收夹具仅由开发服务器按需加载；生产构建不会把夹具及其
   // 依赖打进主包，也不会改变桌面应用的启动路径。
   if (import.meta.env.DEV && params.has("overlay-fixture")) {

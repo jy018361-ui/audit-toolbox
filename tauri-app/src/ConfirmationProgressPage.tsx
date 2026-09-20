@@ -267,8 +267,8 @@ export default function ConfirmationProgressPage({
   }
 
   async function cancel() {
-    if (!activeJob.current) return;
-    await jobCancel(activeJob.current);
+    if (!activeJob.current) return false;
+    return jobCancel(activeJob.current);
   }
 
   const outputPaths =
@@ -338,7 +338,7 @@ export default function ConfirmationProgressPage({
               !["completed", "failed", "cancelled"].includes(job.phase) && (
                 <JobProgress
                   job={job}
-                  onCancel={() => void cancel()}
+                  onCancel={() => cancel()}
                   cancelLabel="取消任务"
                 />
               )}

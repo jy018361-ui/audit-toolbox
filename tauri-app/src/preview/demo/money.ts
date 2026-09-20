@@ -508,7 +508,7 @@ const FX_JE_MAPPING: Dict = {
   functionalCredit: "本位币贷方",
 };
 
-const fxInspection = (kind: "tb" | "je") => ({
+export const fxInspection = (kind: "tb" | "je") => ({
   kind,
   path: DEMO_PATH,
   sheet: kind === "tb" ? "TB" : "JE",
@@ -1105,6 +1105,7 @@ export const handlers: Record<string, (params: Record<string, unknown>) => unkno
   "fx.classify_source_llm": (params) => ({ kind: scriptKind(params) }),
   "fx.inspect_je": () => fxInspection("je"),
   "fx.inspect_tb": () => fxInspection("tb"),
+  "fx.validate_currency_mapping": () => ({ valid: true, errors: [] }),
 
   // —— 借款利息测算 ——
   "loan.inspect": (params) =>
@@ -1136,7 +1137,7 @@ export const handlers: Record<string, (params: Record<string, unknown>) => unkno
 //   summary.calculatedInterest 对账，这里用同一条公式现算，保证不出现
 //   「结果待重算」提示；故意留 1 户大额存单待填利率，让"测算未完整"布局可达。
 // - loan.*：result.rows（逐笔本金变动＋利率＋利息，含 2 笔待复核）+ result.summary。
-// - fx.*：完整汇兑测算结果（summary 勾稽桥、凭证分类复核、余额滚动、检查与勾稽、
+// - fx.*：完整汇兑测算结果（summary 勾稽桥、异常事项披露、余额滚动、检查与勾稽、
 //   previewToken）。preview 整体替换 result、export 按键合并，因此 export 的
 //   result 也带全量字段——直接导出（不先预览）时页面同样能渲染。
 // 三个页面的导出按钮都读 result.outputPaths，导出完成的剧本给 C:\演示数据\ 下的底稿路径。
@@ -1405,7 +1406,7 @@ const loanExportEvents = (): DemoJobEvent[] => [
   }),
 ];
 
-// —— 汇兑损益：summary 勾稽桥 + 凭证分类复核 + 余额滚动 + 检查与勾稽 ——
+// —— 汇兑损益：summary 勾稽桥 + 异常事项披露 + 余额滚动 + 检查与勾稽 ——
 
 const FX_SUMMARY = {
   realizedGainLoss: 236180,
@@ -1429,7 +1430,7 @@ const FX_SUMMARY = {
   uncoveredTbFxGainLoss: 88340,
 };
 
-/** 凭证分类复核：按借贷科目组合分 4 组，覆盖已实现/未实现/不构成/缺证据四种状态。 */
+/** 自动分类结果中的异常事项；页面不再提供人工改分类界面，数据供导出底稿使用。 */
 const FX_CLASSIFICATION_CONTROLS = [
   { voucherId: "记-0112", date: "2025-01-31", voucherType: "记", systemCategory: "月末重估", patternKey: "重估-银行存款↔汇兑损益", patternLabel: "月末重估：银行存款 ↔ 汇兑损益", classification: "已实现汇兑损益", bookedFxGainLoss: 23500, measurementStatus: "已测算", debitAccounts: ["1002010101"], creditAccounts: ["6603010101"], summary: "月末外币账户按中间价重估" },
   { voucherId: "记-0233", date: "2025-06-30", voucherType: "记", systemCategory: "月末重估", patternKey: "重估-银行存款↔汇兑损益", patternLabel: "月末重估：银行存款 ↔ 汇兑损益", classification: "已实现汇兑损益", bookedFxGainLoss: 41200, measurementStatus: "已测算", debitAccounts: ["1002010101"], creditAccounts: ["6603010101"], summary: "半年末外币项目重估" },
@@ -1517,7 +1518,7 @@ const fxPreviewEvents = (): DemoJobEvent[] => [
 const fxExportEvents = (): DemoJobEvent[] => [
   jobEvent("queued", 0, "排队生成汇兑损益底稿…"),
   jobEvent("running", 44, "正在写入余额滚动与未实现损益测算表…"),
-  jobEvent("running", 85, "正在写入凭证分类复核与 TB 勾稽表…"),
+  jobEvent("running", 85, "正在写入汇兑事项复核与 TB 勾稽表…"),
   jobEvent("completed", 100, `导出完成：${FX_EXPORT_PATHS[0]} 已生成。`, {
     outputPaths: FX_EXPORT_PATHS,
     // 页面对 fx.export 的结果按键合并进现有 result，这里给全量字段，

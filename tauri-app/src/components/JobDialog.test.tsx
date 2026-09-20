@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const jobPause = vi.fn((_jobId: string, _paused: boolean) =>
@@ -80,15 +80,35 @@ describe("任务进度弹窗", () => {
     expect(screen.queryByText("正在处理")).toBeNull();
   });
 
-  it("暂停按钮切换文案并把暂停状态传给后端，再点恢复", () => {
+  it("后端接受暂停后才切换文案，再点恢复", async () => {
     renderDialog([job()]);
     fireEvent.click(screen.getByText("暂停"));
     expect(jobPause).toHaveBeenCalledWith("job-1", true);
-    expect(screen.getByText("已暂停")).toBeTruthy();
+    expect(screen.getByText("正在发送…")).toBeTruthy();
+    await waitFor(() => expect(screen.getByText("已暂停")).toBeTruthy());
 
     fireEvent.click(screen.getByText("继续"));
     expect(jobPause).toHaveBeenLastCalledWith("job-1", false);
+    await waitFor(() => expect(screen.getByText("30%")).toBeTruthy());
+  });
+
+  it("暂停未被接受时保持原状态并解释失败", async () => {
+    jobPause.mockResolvedValueOnce(false);
+    renderDialog([job()]);
+    fireEvent.click(screen.getByText("暂停"));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("指令未被接受"));
     expect(screen.getByText("30%")).toBeTruthy();
+    expect(screen.getByText("暂停")).toBeTruthy();
+  });
+
+  it("停止失败时允许重试且不会静默吞错", async () => {
+    jobCancel.mockRejectedValueOnce(new Error("任务取消通道不可用"));
+    renderDialog([job()]);
+    fireEvent.click(screen.getByText("停止"));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("任务取消通道不可用"));
+    expect(screen.getByText("停止")).toBeTruthy();
+    fireEvent.click(screen.getByText("停止"));
+    expect(jobCancel).toHaveBeenCalledTimes(2);
   });
 
   it("内存自动暂停时显示等待状态并允许手动尝试继续", () => {

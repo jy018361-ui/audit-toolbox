@@ -8,7 +8,7 @@
 //! ```
 
 use audit_toolbox_lib::engine_call_for_test;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const BASE: &str = "C:/Users/lenovo/Downloads/TBJE黄金测试/1_原始件/01_TBJEPBC";
 const TB: &str = "2-上海君屹科目余额表202606.xls";
@@ -42,10 +42,22 @@ fn preview(params: Value) {
 fn probe_junyi_matching() {
     let tb = inspect("tb", &format!("{BASE}/{TB}"));
     let je = inspect("je", &format!("{BASE}/{JE}"));
-    println!("TB sheet={} headerRow={} depth={}", tb["sheet"], tb["headerRow"], tb["headerDepth"]);
-    println!("TB headers = {}", serde_json::to_string(&tb["headers"]).unwrap());
-    println!("TB suggested = {}", serde_json::to_string(&tb["suggestedMapping"]).unwrap());
-    println!("JE suggested = {}", serde_json::to_string(&je["suggestedMapping"]).unwrap());
+    println!(
+        "TB sheet={} headerRow={} depth={}",
+        tb["sheet"], tb["headerRow"], tb["headerDepth"]
+    );
+    println!(
+        "TB headers = {}",
+        serde_json::to_string(&tb["headers"]).unwrap()
+    );
+    println!(
+        "TB suggested = {}",
+        serde_json::to_string(&tb["suggestedMapping"]).unwrap()
+    );
+    println!(
+        "JE suggested = {}",
+        serde_json::to_string(&je["suggestedMapping"]).unwrap()
+    );
     if let Some(roles) = tb["suggestedAccountRoles"].as_object() {
         let deposit_roles: Vec<_> = roles
             .iter()

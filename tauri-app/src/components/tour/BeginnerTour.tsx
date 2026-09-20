@@ -302,6 +302,11 @@ export function BeginnerTour({
   // 正在输入的控件不抢按键。
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      // 确认框、任务弹窗等共享 Dialog 位于引导之上。它们打开时键盘
+      // 应由最上层弹窗处理，不能让下层引导同时响应 Esc / 方向键或抢 Tab。
+      if (document.querySelector('[data-slot="dialog-content"][data-state="open"]')) {
+        return;
+      }
       const target = event.target as HTMLElement | null;
       if (
         target &&
@@ -377,7 +382,9 @@ export function BeginnerTour({
 
   // 每换一步把焦点移到主按钮，键盘用户不用重新找位置。
   useEffect(() => {
-    primaryButtonRef.current?.focus();
+    if (!document.querySelector('[data-slot="dialog-content"][data-state="open"]')) {
+      primaryButtonRef.current?.focus();
+    }
   }, [index, bubblePos, targetGaveUp]);
 
   if (!currentStep) return null;

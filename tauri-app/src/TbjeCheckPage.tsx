@@ -1686,7 +1686,7 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       {job && (
         <JobProgress
           job={job}
-          onCancel={busy ? (id) => void jobCancel(id) : undefined}
+          onCancel={busy ? (id) => jobCancel(id) : undefined}
         />
       )}
 

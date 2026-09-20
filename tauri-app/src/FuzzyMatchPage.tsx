@@ -895,7 +895,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
             {jobKind === "match" && job && (
               <JobProgress
                 job={job}
-                onCancel={busy ? (id) => void jobCancel(id) : undefined}
+                onCancel={busy ? (id) => jobCancel(id) : undefined}
               />
             )}
             <p className="fx-hint">
@@ -1082,7 +1082,7 @@ export function FuzzyMatchPage({ tool }: { tool: ToolManifest }) {
           {jobKind === "export" && job && (
             <JobProgress
               job={job}
-              onCancel={busy ? (id) => void jobCancel(id) : undefined}
+              onCancel={busy ? (id) => jobCancel(id) : undefined}
             />
           )}
         </CardContent>

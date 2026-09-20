@@ -214,16 +214,26 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
         if account.trim().is_empty() {
             continue;
         }
-        let opening = ledger_mapping::credit_positive(ledger_mapping::signed_balance(
-            &amount_inputs(&tb, row, &tm, "opening"),
-            tb_convention,
-            opening_signed,
-        ));
-        let closing = ledger_mapping::credit_positive(ledger_mapping::signed_balance(
-            &amount_inputs(&tb, row, &tm, "closing"),
-            tb_convention,
-            closing_signed,
-        ));
+        let opening = ledger_mapping::credit_positive(
+            inferred_balance(&tb, row, &tm, "openingFunctional", tb_convention, closing_signed)
+                .unwrap_or_else(|| {
+                    ledger_mapping::signed_balance(
+                        &amount_inputs(&tb, row, &tm, "opening"),
+                        tb_convention,
+                        opening_signed,
+                    )
+                }),
+        );
+        let closing = ledger_mapping::credit_positive(
+            inferred_balance(&tb, row, &tm, "closingFunctional", tb_convention, opening_signed)
+                .unwrap_or_else(|| {
+                    ledger_mapping::signed_balance(
+                        &amount_inputs(&tb, row, &tm, "closing"),
+                        tb_convention,
+                        closing_signed,
+                    )
+                }),
+        );
         let key = if code.trim().is_empty() {
             norm(&account)
         } else {
@@ -266,15 +276,18 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
                 account.closing,
                 &context,
             );
-            let suggested_type =
-                if suggest_interest_expense_account(&account.code, &account.name, &account.account, &context)
-                {
-                    "interest_expense"
-                } else if suggestion.is_loan {
-                    "loan"
-                } else {
-                    "skip"
-                };
+            let suggested_type = if suggest_interest_expense_account(
+                &account.code,
+                &account.name,
+                &account.account,
+                &context,
+            ) {
+                "interest_expense"
+            } else if suggestion.is_loan {
+                "loan"
+            } else {
+                "skip"
+            };
             json!({
                 "key": account.key,
                 "code": account.code,
@@ -317,12 +330,7 @@ fn ancestor_names(code: &str, catalog: &HashMap<String, String>) -> String {
 /// b) 名称像利息支出但编码属于资产／负债／权益／成本类的不是费用化利息：
 /// 1604004 在建工程-利息费用是**资本化利息**（进资产成本走折旧），不能充当
 /// “测算利息 vs TB 利息支出”的比较基准。
-fn suggest_interest_expense_account(
-    code: &str,
-    name: &str,
-    account: &str,
-    context: &str,
-) -> bool {
+fn suggest_interest_expense_account(code: &str, name: &str, account: &str, context: &str) -> bool {
     let text = norm(&format!("{code} {name} {account} {context}"));
     if [
         "应付利息",
@@ -331,6 +339,73 @@ fn suggest_interest_expense_account(
         "應收利息",
         "利息收入",
         "利息收益",
+        "interestincome",
+        "interestreceivable",
+        "interestpayable",
+    ]
+    .iter()
+    .any(|word| text.contains(&norm(word)))
+    {
+        return false;
+    }
+    // ZC-J2（黄金修正·判官对比 27 条样例）：仅凭「利息支出」字样整树选中，
+    // 会把租赁利息、债券利息、回购/转融通利息、存款付息（内部存款/结算
+    // 中心）、资本化与预提利息全部错纳入借款勾稽基准——它们另有计息底稿
+    // 或方向相反，逐一反向剔除。
+    if [
+        "租赁",
+        "租赁负债",
+        "债券",
+        "融资券",
+        "回购",
+        "转融通",
+        "转融券",
+        // 末轮A29：证券行业非借款类利息支出另册管理——转融资/交易性金融
+        // 负债/客户保证金/次级债/收益凭证的利息不进借款勾稽基准（借款
+        // 本金基数不含对应负债，基准含其利息必造成配比缺口）；卖出回购/
+        // 应付债券已由上方「回购」「债券」覆盖。贷款利息、借款利息、
+        // 拆入资金利息不受影响，仍正向保留。
+        "转融资",
+        "交易性金融负债",
+        "客户保证金",
+        "次级债",
+        "收益凭证",
+        "资本化",
+        // 末轮A28：成本类祖先路径下的借款费用是资本化利息（进资产成本
+        // 走折旧/结转），不是费用化利息支出基准（5501040401 合同履约
+        // 成本_投资类项目_借款费用_利息支出样例）。
+        "合同履约成本",
+        "在建工程",
+        "研发支出",
+        "生产成本",
+        "开发成本",
+        "工程施工",
+        // 末轮A31：永续债利息按权益处理计入利润分配，不是损益类利息
+        // 支出（410406 利润分配_应付永续债利息样例）。
+        "利润分配",
+        "永续债",
+        "存款利息支出",
+        "内部存款利息",
+        "拆借利息",
+        "拆放",
+        "预提利息",
+        // 末轮B34：使用权/租赁利息另有租赁底稿（right of use/使用权/
+        // lease，「租赁」已有）；名称含「除外/不含/excluding/except」的
+        // 否定语境（融资利息除外=手续费类）；预提费用/应计费用下的借款
+        // 利息是应付利息性质负债；活期账户负利息是存款侧费用——都不进
+        // 利息支出勾稽基准。
+        "right of use",
+        "使用权",
+        "lease",
+        "除外",
+        "不含",
+        "excluding",
+        "except",
+        "预提费用",
+        "accrued expenses",
+        "应计费用",
+        "negative interest",
+        "负利息",
     ]
     .iter()
     .any(|word| text.contains(&norm(word)))
@@ -361,6 +436,11 @@ fn suggest_interest_expense_account(
         "融資利息",
         "interestexpense",
         "financecost",
+        // ZC-J1（黄金修正）：财务费用下恰名为「利息」的明细（07/10 账套
+        // 66030002）与英文账套的利息费用写法，都是费用化借款利息，
+        // 曾被编码规则一刀切跳过（判官对比 8 条样例）。
+        "利息",
+        "interest",
     ]
     .iter()
     .any(|word| text.contains(&norm(word)))
@@ -423,6 +503,15 @@ fn suggest_loan_account(
                 .into(),
         };
     }
+    // 末轮A27：「债券」排除词在 2001/2501 借款编码族内不生效——政府专项
+    // 债券转贷的母科目是短期/长期借款，名称仍属借款本金语义（250104
+    // 长期借款_政府专项债券样例）；名称含「转贷」时同理（250101 国债
+    // 转贷）。仅豁免「债券」一词，应付利息等其余排除词照常生效。
+    let bond_under_loan_family = text.contains(&norm("转贷"))
+        || ((normalized_code.starts_with("2001") || normalized_code.starts_with("2501"))
+            && ["借款", "貸款", "贷款"]
+                .iter()
+                .any(|word| text.contains(&norm(word))));
     let excluded = [
         "职工借款",
         "員工借款",
@@ -458,9 +547,18 @@ fn suggest_loan_account(
         "融資券",
         "融资租赁",
         "融資租賃",
+        "interest",
+        "lease",
+        "bond",
     ]
     .iter()
-    .any(|word| text.contains(&norm(word)));
+    .any(|word| {
+        // 末轮A27：借款编码族/转贷语境下「债券」不触发排除（见上方说明）。
+        if (*word == "债券" || *word == "債券") && bond_under_loan_family {
+            return false;
+        }
+        text.contains(&norm(word))
+    });
     if excluded || asset_or_expense {
         return LoanAccountSuggestion {
             is_loan: false,
@@ -478,13 +576,26 @@ fn suggest_loan_account(
     let standard_code = ["2001", "2501"]
         .iter()
         .any(|prefix| normalized_code.starts_with(prefix));
-    let borrowing_semantics =
-        ["借款", "貸款", "贷款", "透支"].iter().any(|word| text.contains(&norm(word)));
-    let strong_terms = ["短期借款", "短期借款本金", "长期借款", "長期借款"]
+    let borrowing_semantics = ["借款", "貸款", "贷款", "透支"]
         .iter()
         .any(|word| text.contains(&norm(word)));
+    // ZC-J3（黄金修正·判官对比 7 条样例）：英文/旧账套借款写法不在
+    // 「短期/长期借款」词表里——Inter-Company Loan、Long term borrowing、
+    // 拆入资金、「其他应付款_借款本金」都曾被默认不选。
+    let strong_terms = [
+        "短期借款",
+        "短期借款本金",
+        "长期借款",
+        "長期借款",
+        "borrowing",
+        "loan",
+        "拆入资金",
+        "借款本金",
+    ]
+    .iter()
+    .any(|word| text.contains(&norm(word)));
     let is_loan = strong_terms || (standard_code && borrowing_semantics);
-    let reason = if standard_code {
+    let mut reason = if standard_code {
         format!(
             "科目代码 {} 属于标准短期／长期借款代码{}。",
             normalized_code,
@@ -508,6 +619,16 @@ fn suggest_loan_account(
     } else {
         "未发现可靠的短期／长期借款代码或名称证据，默认不选。".into()
     };
+    // ZC-J4（黄金修正）：名称与上级语义冲突（「长期借款」挂在长期应付款/
+    // 分期款/融资租赁下）多为融资租赁分期款，预选时必须标存疑提示人工
+    // 确认合同性质，不再静默通过（上海君屹 2701001 样例）。
+    if is_loan
+        && ["长期应付款", "分期款", "融资租赁", "融資租賃"]
+            .iter()
+            .any(|word| text.contains(&norm(word)))
+    {
+        reason.push_str("；注意：科目名称与上级科目语义存在冲突（可能为融资租赁或分期应付款），请人工确认合同性质后再计息。");
+    }
     LoanAccountSuggestion { is_loan, reason }
 }
 
@@ -2383,7 +2504,9 @@ fn currency_code(raw: &str) -> String {
         "SGD" | "新加坡元" | "新币" => "SGD".into(),
         // 公共内核的币种表更全（韩元、新台币等 26 种）。
         _ if ledger_mapping::normalize_currency_code(raw.trim()).is_some() => {
-            ledger_mapping::normalize_currency_code(raw.trim()).unwrap().into()
+            ledger_mapping::normalize_currency_code(raw.trim())
+                .unwrap()
+                .into()
         }
         _ => String::new(),
     }
@@ -2411,11 +2534,7 @@ fn functional_currency_param(params: &Value) -> String {
         .map(str::trim)
         .unwrap_or("");
     let code = currency_code(raw);
-    if code.is_empty() {
-        "CNY".into()
-    } else {
-        code
-    }
+    if code.is_empty() { "CNY".into() } else { code }
 }
 
 type LoanScope = (String, String);
@@ -2722,16 +2841,43 @@ fn fold_loan_rows(
             currency.clone(),
         );
         // 借款是负债类科目，贷方为正；六种 TB 形态的差异由内核吸收。
-        let opening = ledger_mapping::credit_positive(ledger_mapping::signed_balance(
-            &amount_inputs(tb, row, tm, "opening"),
-            tb_convention,
-            opening_self_signed,
-        ));
-        let closing = ledger_mapping::credit_positive(ledger_mapping::signed_balance(
-            &amount_inputs(tb, row, tm, "closing"),
-            tb_convention,
-            closing_self_signed,
-        ));
+        // 「绝对值＋单一方向列」版式先按勾稽等式向对侧借符号（03 陇能建设
+        // 方向列在表尾时期初侧、01/02/08 方向列在期初旁时期末侧），凑不平
+        // 的行维持原判，差异照报。
+        let opening = ledger_mapping::credit_positive(
+            inferred_balance(
+                &tb,
+                row,
+                &tm,
+                "openingFunctional",
+                tb_convention,
+                closing_self_signed,
+            )
+            .unwrap_or_else(|| {
+                ledger_mapping::signed_balance(
+                    &amount_inputs(tb, row, tm, "opening"),
+                    tb_convention,
+                    opening_self_signed,
+                )
+            }),
+        );
+        let closing = ledger_mapping::credit_positive(
+            inferred_balance(
+                &tb,
+                row,
+                &tm,
+                "closingFunctional",
+                tb_convention,
+                opening_self_signed,
+            )
+            .unwrap_or_else(|| {
+                ledger_mapping::signed_balance(
+                    &amount_inputs(tb, row, tm, "closing"),
+                    tb_convention,
+                    closing_self_signed,
+                )
+            }),
+        );
         let ytd_inputs = amount_inputs(tb, row, tm, "ytd");
         let movement_mapped = [
             "ytdFunctionalAmount",
@@ -3201,6 +3347,14 @@ fn calculate_tb_impl(
             }
         }
         let diff = opening + additions - reductions - closing;
+        // JE 没有该科目分录并不必然代表“时点未知”：若 TB 明确映射了本期
+        // 借贷发生额、两边均为 0，且期初期末一致，则全年本金没有变动，
+        // 不存在需要猜测的新增/归还时点（恒澜重工 25010200 金标）。
+        let stable_without_activity = matched == 0
+            && !fold.has_ytd_movement
+            && additions.abs() < 0.01
+            && reductions.abs() < 0.01
+            && diff.abs() < 0.01;
         let match_basis = {
             let fallback_note = if auxiliary_fallback {
                 format!("{AUXILIARY_FALLBACK_NOTICE}；")
@@ -3212,7 +3366,11 @@ fn calculate_tb_impl(
             } else {
                 String::new()
             };
-            if two_point_by_currency {
+            if stable_without_activity {
+                format!(
+                    "{fallback_note}{merged_note}TB 本期借贷发生额均为 0 且期初期末一致，无本金变动"
+                )
+            } else if two_point_by_currency {
                 format!(
                     "{fallback_note}{merged_note}按币种保留 TB 年初、年末余额，不使用 JE 还原逐日变动"
                 )
@@ -3264,7 +3422,7 @@ fn calculate_tb_impl(
             lpr_term: String::new(),
             match_status: if two_point_by_currency {
                 "两点法推算".into()
-            } else if matched > 0 && diff.abs() < 0.01 {
+            } else if (matched > 0 && diff.abs() < 0.01) || stable_without_activity {
                 "已匹配".into()
             } else {
                 "待复核".into()
@@ -3509,7 +3667,15 @@ fn calculate_interest(rows: &mut [LoanRow], params: &Value) -> Result<(), AppErr
                 to_incl: end,
                 principal: average,
             }];
-            row.match_basis.push_str("；无逐笔日期，按平均本金粗算");
+            if (row.opening_principal - row.closing_principal).abs() < 0.01
+                && row.additions.abs() < 0.01
+                && row.reductions.abs() < 0.01
+            {
+                row.match_basis
+                    .push_str("；本期无本金变动，按期初期末一致本金计息");
+            } else {
+                row.match_basis.push_str("；无逐笔日期，按平均本金粗算");
+            }
         } else {
             row.events.sort_by_key(|event| event.0);
             let mut principal = row.opening_principal;
@@ -4485,6 +4651,9 @@ fn suggest_with_rows(headers: &[String], kind: &str, rows: &[Vec<String>]) -> Ma
                 out.insert((*role).into(), Value::String(header.clone()));
             }
         }
+        if kind == "tb" {
+            ledger_mapping::align_tb_direction_pair(headers, rows, &mut out);
+        }
         // 借款标识只能由公共引擎对「合同编号/借据号/登记编号」等特异列提出。
         // 泛称的辅助核算、客户、附加信息并不一定是借款逐笔标识；把它们私自
         // 补成 loanId 会把整张 TB 按无关维度拆笔，甚至在未确认科目时圈进非借款。
@@ -4769,6 +4938,26 @@ fn account_text(table: &Table, row: &[String], m: &Map<String, Value>, kind: &st
         }
     }
     parts.join(" ")
+}
+
+/// 「绝对值＋单一方向列」版式下，缺方向一侧的余额符号按勾稽等式逐行向对侧
+/// 借（借正贷负口径），数学与判定在公共内核（[`ledger_mapping::
+/// infer_balance_sign_from_sibling`]）。对侧无锚点、本年累计发生额未映射或
+/// 哪个符号都凑不平（真差异）时返回 None，调用方维持 `signed_balance` 原判。
+fn inferred_balance(
+    tb: &Table,
+    row: &[String],
+    tm: &Map<String, Value>,
+    prefix: &str,
+    convention: ledger_mapping::SignConvention,
+    sibling_self_signed: bool,
+) -> Option<f64> {
+    let index_of = |role: &str| -> Option<usize> {
+        mapped_names(tm, "tb", role)
+            .iter()
+            .find_map(|name| tb.headers.iter().position(|h| h == name))
+    };
+    ledger_mapping::infer_balance_sign_from_sibling(row, &index_of, prefix, convention, sibling_self_signed)
 }
 
 /// 收集某个时点（`opening` / `closing`）在这一行的原始取值，交给内核折算。
@@ -5612,8 +5801,16 @@ mod tests {
     fn 借款币种认不出按本位币空串处理() {
         assert_eq!(loan_currency("人民币元", "CNY"), "");
         assert_eq!(loan_currency("美元", "CNY"), "USD");
-        assert_eq!(loan_currency("KRW", "CNY"), "KRW", "公共内核币种表应认出韩元");
-        assert_eq!(loan_currency("币种待定", "CNY"), "", "认不出的取值不得原文直通");
+        assert_eq!(
+            loan_currency("KRW", "CNY"),
+            "KRW",
+            "公共内核币种表应认出韩元"
+        );
+        assert_eq!(
+            loan_currency("币种待定", "CNY"),
+            "",
+            "认不出的取值不得原文直通"
+        );
         // 本位币 = USD：空白行与 USD 分录同入本位币桶，人民币行保持外币桶。
         assert_eq!(loan_currency("", "USD"), "");
         assert_eq!(loan_currency("USD", "USD"), "");
@@ -5779,8 +5976,12 @@ mod tests {
         // 债券、租赁、应付利息不属于当前工具的借款本金范围；尤其应付
         // 利息明细含“短期借款”时，排除词必须优先于借款关键词。
         assert!(!suggest_loan_account("25020000", "应付债券", "", 0.0, 0.0, "").is_loan);
-        assert!(!suggest_loan_account("2231000000", "租赁负债(固)-融资租赁", "", 0.0, 0.0, "").is_loan);
-        assert!(!suggest_loan_account("2161100060", "应付利息-短期借款一般", "", 0.0, 0.0, "").is_loan);
+        assert!(
+            !suggest_loan_account("2231000000", "租赁负债(固)-融资租赁", "", 0.0, 0.0, "").is_loan
+        );
+        assert!(
+            !suggest_loan_account("2161100060", "应付利息-短期借款一般", "", 0.0, 0.0, "").is_loan
+        );
         assert!(suggest_loan_account("2111109990", "其他短期借款-其他", "", 0.0, 0.0, "").is_loan);
         assert!(suggest_loan_account("2211400990", "其他长期借款-其他", "", 0.0, 0.0, "").is_loan);
         let reclassified =
@@ -5799,7 +6000,15 @@ mod tests {
         // 编码前缀单独不构成证据：2001/2501 开头但自身与上级都无借款语义
         // （辅助行名称是往来单位、上级是应付利息）的不得预选（君屹样例）。
         assert!(
-            !suggest_loan_account("2001100-10020001200100", "建设银行-新桥支行", "", 0.0, 99198.29, "").is_loan,
+            !suggest_loan_account(
+                "2001100-10020001200100",
+                "建设银行-新桥支行",
+                "",
+                0.0,
+                99198.29,
+                ""
+            )
+            .is_loan,
             "应付利息的辅助核算行不能只凭 2001 前缀预选成借款"
         );
         // 上级科目名提供语义：长期借款-本金下的银行行照常预选。
@@ -5836,17 +6045,32 @@ mod tests {
             "",
             ""
         ));
-        assert!(suggest_interest_expense_account("66039999", "借款利息", "", ""));
+        assert!(suggest_interest_expense_account(
+            "66039999",
+            "借款利息",
+            "",
+            ""
+        ));
         assert!(!suggest_interest_expense_account(
             "2231",
             "应付利息-短期借款",
             "",
             ""
         ));
-        assert!(!suggest_interest_expense_account("6603", "财务费用", "", ""));
+        assert!(!suggest_interest_expense_account(
+            "6603",
+            "财务费用",
+            "",
+            ""
+        ));
         // 资产类编码下名字像利息费用的不是费用化利息：1604004 在建工程-利息
         // 费用是资本化利息，进资产成本走折旧，不能当 TB 利息支出比较基准。
-        assert!(!suggest_interest_expense_account("1604004", "利息费用", "", ""));
+        assert!(!suggest_interest_expense_account(
+            "1604004",
+            "利息费用",
+            "",
+            ""
+        ));
         // 上级科目名里的应付利息同样排除辅助核算行。
         assert!(!suggest_interest_expense_account(
             "2001100-10020001200100",
@@ -7430,11 +7654,26 @@ mod tests {
             vec!["编码", "科目", "期初贷", "期末贷"],
             vec!["2001", "短期借款", "0", "0"],
             vec!["2001100", "应付利息", "99198.29", "80000"],
-            vec!["2001100-10020001200100", "建设银行-新桥支行（6666）", "18867.74", "20000"],
+            vec![
+                "2001100-10020001200100",
+                "建设银行-新桥支行（6666）",
+                "18867.74",
+                "20000",
+            ],
             vec!["2501001", "长期借款-本金", "1000000", "900000"],
-            vec!["2501001-10020001200100", "建设银行-新桥支行（6666）", "600000", "500000"],
+            vec![
+                "2501001-10020001200100",
+                "建设银行-新桥支行（6666）",
+                "600000",
+                "500000",
+            ],
             vec!["2501002", "长期借款-应付利息", "0", "53175.54"],
-            vec!["2501002-10020001200100", "建设银行-新桥支行（6666）", "0", "53175.54"],
+            vec![
+                "2501002-10020001200100",
+                "建设银行-新桥支行（6666）",
+                "0",
+                "53175.54",
+            ],
             vec!["1604004", "利息费用", "178394.36", "200000"],
             vec!["6603001", "财务费用-利息支出", "484610.7", "300000"],
         ];
@@ -7903,6 +8142,58 @@ mod tests {
         assert_eq!(disk_rows[0].loan_id, "L-1");
         assert_eq!(disk_rows[0].additions, 200_000.0);
         assert_eq!(disk_rows[1].reductions, 100_000.0);
+    }
+
+    #[test]
+    fn tbje模式无发生且期初期末一致不再误报时点待确认() {
+        let fixture = SyntheticLedger::new(&[]);
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet();
+        sheet.set_name("TB").unwrap();
+        for (r, row) in [
+            vec!["编码", "科目", "期初贷", "期末贷", "本年借", "本年贷"],
+            vec![
+                "25010200",
+                "长期借款-交通银行",
+                "120000000",
+                "120000000",
+                "0",
+                "0",
+            ],
+        ]
+        .iter()
+        .enumerate()
+        {
+            for (c, value) in row.iter().enumerate() {
+                sheet.write_string(r as u32, c as u16, *value).unwrap();
+            }
+        }
+        let sheet = book.add_worksheet();
+        sheet.set_name("JE").unwrap();
+        for (c, value) in ["编码", "科目", "日期", "借方", "贷方"].iter().enumerate() {
+            sheet.write_string(0, c as u16, *value).unwrap();
+        }
+        let path = fixture.dir.join("tbje-stable-loan.xlsx");
+        book.save(&path).unwrap();
+
+        let mut params = fixture.params();
+        params["mode"] = json!("tb");
+        params["loanAccounts"] = json!(["25010200"]);
+        params["rateRows"] = json!([{
+            "accountCode": "25010200",
+            "loanId": "25010200 长期借款-交通银行",
+            "rateType": "fixed",
+            "fixedRate": 0.03
+        }]);
+        params["tbSource"] = json!({"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷","ytdFunctionalDebit":"本年借","ytdFunctionalCredit":"本年贷"}});
+        params["jeSource"] = json!({"source":{"inputPath":path,"sheet":"JE","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","date":"日期","functionalDebit":"借方","functionalCredit":"贷方"}});
+
+        let result = run_preview(&params).unwrap();
+        let row = &result["rows"][0];
+        assert_eq!(row["matchStatus"], "已匹配");
+        assert!(row["matchBasis"].as_str().unwrap().contains("无本金变动"));
+        assert!(!row["matchBasis"].as_str().unwrap().contains("平均本金粗算"));
+        assert!((row["calculatedInterest"].as_f64().unwrap() - 3_600_000.0).abs() < 0.01);
     }
 
     #[test]

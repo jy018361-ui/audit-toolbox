@@ -654,6 +654,17 @@ it("手填利率后直接下一步：自动用当前利率重算，测算利息�
   const loanRateInput = await screen.findByRole("spinbutton", {
     name: "2001 短期借款的执行利率",
   });
+  expect(loanRateInput).toHaveValue(3);
+  expect(loanRateInput).toHaveClass("loan-manual-number");
+  expect(screen.queryByRole("button", { name: "导出利率确认表" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "回读已填利率表" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "下载科目确认表" })).toBeVisible();
+  const rateTip = screen.getByRole("button", { name: "什么是执行利率" });
+  fireEvent.mouseEnter(rateTip);
+  expect(screen.getByRole("tooltip")).toHaveTextContent(
+    "工具会默认写入利率，用户应就据实修改",
+  );
+  fireEvent.mouseLeave(rateTip);
   // 借款行利率可编辑，单一明细的辅助核算就地显示在科目行的辅助核算列。
   expect(loanRateInput).toBeEnabled();
   const loanRow = loanRateInput.closest("tr")!;
@@ -1222,13 +1233,13 @@ it("同一科目多笔借款明细展开为子行逐笔设置利率，改类型�
       "loan.preview",
       expect.objectContaining({
         loanAccounts: ["2001"],
-        rateRows: [
+        rateRows: expect.arrayContaining([
           expect.objectContaining({
             rowKey: "tb\u001f甲公司\u001f2001\u001fA银行",
             rateType: "fixed",
             fixedRate: 0.0385,
           }),
-        ],
+        ]),
       }),
     ),
   );
@@ -1277,13 +1288,13 @@ it("同一科目多笔借款明细展开为子行逐笔设置利率，改类型�
       "loan.export",
       expect.objectContaining({
         loanAccounts: ["2001"],
-        rateRows: [
+        rateRows: expect.arrayContaining([
           expect.objectContaining({
             rowKey: "tb\u001f甲公司\u001f2001\u001fA银行",
             rateType: "fixed",
             fixedRate: 0.0385,
           }),
-        ],
+        ]),
       }),
     ),
   );

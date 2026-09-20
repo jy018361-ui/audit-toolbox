@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { jobCancel, jobPause } from "@/api";
+import { errorText } from "@/lib/errors";
 import type { JobEvent } from "@/types";
 
 /** 结束态的三个 phase 由 Rust 侧统一约定（excel_merger.rs）。 */
@@ -89,9 +90,12 @@ type JobRowProps = {
   memoryPaused: boolean;
   onTogglePause: () => void;
   onStop: () => void;
+  pending?: "pause" | "stop";
+  stopRequested: boolean;
+  operationError?: string;
 };
 
-function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop }: JobRowProps) {
+function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop, pending, stopRequested, operationError }: JobRowProps) {
   const pct = percent(job);
   const tone = toneOf(job);
   return (
@@ -113,13 +117,15 @@ function JobRow({ job, label, paused, memoryPaused, onTogglePause, onStop }: Job
           variant="secondary"
           size="sm"
           onClick={onTogglePause}
+          disabled={Boolean(pending) || stopRequested}
         >
-          {memoryPaused ? "尝试继续" : paused ? "继续" : "暂停"}
+          {pending === "pause" ? "正在发送…" : memoryPaused ? "尝试继续" : paused ? "继续" : "暂停"}
         </Button>
-        <Button type="button" variant="destructive" size="sm" onClick={onStop}>
-          停止
+        <Button type="button" variant="destructive" size="sm" onClick={onStop} disabled={Boolean(pending) || stopRequested}>
+          {pending === "stop" || stopRequested ? "停止中…" : "停止"}
         </Button>
       </div>
+      {operationError && <p className="job-dialog-operation-error" role="alert">{operationError}</p>}
     </section>
   );
 }
@@ -147,6 +153,10 @@ export function JobDialogProvider({
   const [minimized, setMinimized] = useState(false);
   const minimizedButtonRef = useRef<HTMLButtonElement>(null);
   const [paused, setPaused] = useState<Record<string, boolean>>({});
+  const [pending, setPending] = useState<Record<string, "pause" | "stop">>({});
+  const pendingIds = useRef(new Set<string>());
+  const [stopRequested, setStopRequested] = useState<Record<string, boolean>>({});
+  const [operationErrors, setOperationErrors] = useState<Record<string, string>>({});
   const running = jobs.filter(isJobRunning);
   const runningIds = running.map((job) => job.jobId).join("|");
 
@@ -156,6 +166,10 @@ export function JobDialogProvider({
     if (runningIds === "") {
       setMinimized(false);
       setPaused((current) => (Object.keys(current).length ? {} : current));
+      setPending({});
+      setStopRequested({});
+      setOperationErrors({});
+      pendingIds.current.clear();
     }
   }, [runningIds]);
 
@@ -166,25 +180,51 @@ export function JobDialogProvider({
     [minimized, runningIds],
   );
 
+  const runCommand = async (jobId: string, command: "pause" | "stop", request: () => Promise<boolean>) => {
+    if (pendingIds.current.has(jobId) || stopRequested[jobId]) return false;
+    pendingIds.current.add(jobId);
+    setPending((current) => ({ ...current, [jobId]: command }));
+    setOperationErrors((current) => ({ ...current, [jobId]: "" }));
+    try {
+      const accepted = await request();
+      if (!accepted) throw new Error("任务可能已结束，指令未被接受。请检查任务状态后重试。");
+      return true;
+    } catch (error) {
+      setOperationErrors((current) => ({
+        ...current,
+        [jobId]: `${command === "stop" ? "停止" : "暂停或继续"}失败：${errorText(error)}`,
+      }));
+      return false;
+    } finally {
+      pendingIds.current.delete(jobId);
+      setPending((current) => {
+        const next = { ...current };
+        delete next[jobId];
+        return next;
+      });
+    }
+  };
+
   const togglePause = (jobId: string) => {
     const memoryPaused = running.some(
       (job) => job.jobId === jobId && job.phase === "memory_paused",
     );
     const next = memoryPaused ? false : !paused[jobId];
-    setPaused((current) => ({ ...current, [jobId]: next }));
-    void jobPause(jobId, next).catch(() => {
-      // 任务可能刚好结束；回滚状态，不打断用户。
-      setPaused((current) => ({ ...current, [jobId]: !next }));
+    void runCommand(jobId, "pause", () => jobPause(jobId, next)).then((accepted) => {
+      if (accepted) setPaused((current) => ({ ...current, [jobId]: next }));
     });
   };
 
   const retryAfterMemoryPause = (jobId: string) => {
-    setPaused((current) => ({ ...current, [jobId]: false }));
-    void jobPause(jobId, false).catch(() => undefined);
+    void runCommand(jobId, "pause", () => jobPause(jobId, false)).then((accepted) => {
+      if (accepted) setPaused((current) => ({ ...current, [jobId]: false }));
+    });
   };
 
   const stop = (jobId: string) => {
-    void jobCancel(jobId).catch(() => undefined);
+    void runCommand(jobId, "stop", () => jobCancel(jobId)).then((accepted) => {
+      if (accepted) setStopRequested((current) => ({ ...current, [jobId]: true }));
+    });
   };
 
   const open = running.length > 0 && !minimized;
@@ -239,6 +279,9 @@ export function JobDialogProvider({
                     ? retryAfterMemoryPause(job.jobId)
                     : togglePause(job.jobId)}
                   onStop={() => stop(job.jobId)}
+                  pending={pending[job.jobId]}
+                  stopRequested={Boolean(stopRequested[job.jobId])}
+                  operationError={operationErrors[job.jobId]}
                 />
               </div>
             ))}

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
-  jobCancel,
   jobStart,
   listenPositionedFileDrops,
   openOutput,
@@ -1558,71 +1558,70 @@ export function FaTbJePage() {
                 </tbody>
               </table>
             </div>
-            <div className="fa-tbje-pagination">
-              <span>
-                第 {visibleAssignmentPage + 1}/{pageCount} 页，每页最多{" "}
-                {PAGE_SIZE} 项
-              </span>
-              <div>
-                <Button
-                  variant="ghost"
-                  disabled={visibleAssignmentPage === 0}
-                  onClick={() =>
-                    setAssignmentPage((value) => Math.max(0, value - 1))
-                  }
-                >
-                  上一页
-                </Button>
-                <Button
-                  variant="ghost"
-                  disabled={visibleAssignmentPage + 1 >= pageCount}
-                  onClick={() =>
-                    setAssignmentPage((value) =>
-                      Math.min(pageCount - 1, value + 1),
-                    )
-                  }
-                >
-                  下一页
-                </Button>
+            <div className="fa-tbje-confirm-footer">
+              <div className="fa-tbje-pagination">
+                <span>
+                  第 {visibleAssignmentPage + 1}/{pageCount} 页，每页最多{" "}
+                  {PAGE_SIZE} 项
+                </span>
+                <div>
+                  <Button
+                    variant="ghost"
+                    disabled={visibleAssignmentPage === 0}
+                    onClick={() =>
+                      setAssignmentPage((value) => Math.max(0, value - 1))
+                    }
+                  >
+                    上一页
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    disabled={visibleAssignmentPage + 1 >= pageCount}
+                    onClick={() =>
+                      setAssignmentPage((value) =>
+                        Math.min(pageCount - 1, value + 1),
+                      )
+                    }
+                  >
+                    下一页
+                  </Button>
+                </div>
               </div>
+              <AccountConfirmationActions
+                tool="fa_tbje"
+                title="固定资产TBJE"
+                context={JSON.stringify([paths, mappings, assignmentViews.map((view) => [view.entity, view.key])])}
+                columns={[
+                  { key: "entity", title: "主体" },
+                  { key: "account", title: "科目" },
+                  { key: "role", title: "角色", editable: true, options: ["排除", "固定资产原值", "累计折旧"] },
+                  { key: "category", title: "资产类别", editable: true },
+                ]}
+                rows={assignmentViews.map((view) => ({
+                  key: JSON.stringify([view.entity, view.key]),
+                  values: [view.entity, view.label,
+                    view.role === "cost" ? "固定资产原值" : view.role === "depreciation" ? "累计折旧" : "排除",
+                    view.category],
+                }))}
+                disabled={busy}
+                onImport={(changed) => {
+                  const byKey = new Map(assignmentViews.map((view) => [JSON.stringify([view.entity, view.key]), view]));
+                  const updates = new Map(changed.map((row) => {
+                    const view = byKey.get(row.key)!;
+                    const role: AccountRole = row.values[2] === "固定资产原值" ? "cost" : row.values[2] === "累计折旧" ? "depreciation" : "excluded";
+                    if (role !== "excluded" && !row.values[3].trim())
+                      throw new Error(`${view.label}：固定资产原值或累计折旧科目必须填写资产类别。`);
+                    return [row.key, { role, category: normalizeFaCategory(row.values[3]) }] as const;
+                  }));
+                  setAssignments((current) => current.map((row) => {
+                    const key = JSON.stringify([row.entity ?? DEFAULT_ENTITY, splitFaAccount(row.account).code || row.account]);
+                    return updates.has(key) ? { ...row, ...updates.get(key)! } : row;
+                  }));
+                  setAccountsReviewed(false);
+                }}
+              />
             </div>
-            <AccountConfirmationActions
-              tool="fa_tbje"
-              title="固定资产TBJE"
-              context={JSON.stringify([paths, mappings, assignmentViews.map((view) => [view.entity, view.key])])}
-              columns={[
-                { key: "entity", title: "主体" },
-                { key: "account", title: "科目" },
-                { key: "role", title: "角色", editable: true, options: ["排除", "固定资产原值", "累计折旧"] },
-                { key: "category", title: "资产类别", editable: true },
-              ]}
-              rows={assignmentViews.map((view) => ({
-                key: JSON.stringify([view.entity, view.key]),
-                values: [view.entity, view.label,
-                  view.role === "cost" ? "固定资产原值" : view.role === "depreciation" ? "累计折旧" : "排除",
-                  view.category],
-              }))}
-              disabled={busy}
-              onImport={(changed) => {
-                const byKey = new Map(assignmentViews.map((view) => [JSON.stringify([view.entity, view.key]), view]));
-                const updates = new Map(changed.map((row) => {
-                  const view = byKey.get(row.key)!;
-                  const role: AccountRole = row.values[2] === "固定资产原值" ? "cost" : row.values[2] === "累计折旧" ? "depreciation" : "excluded";
-                  if (role !== "excluded" && !row.values[3].trim())
-                    throw new Error(`${view.label}：固定资产原值或累计折旧科目必须填写资产类别。`);
-                  return [row.key, { role, category: normalizeFaCategory(row.values[3]) }] as const;
-                }));
-                setAssignments((current) => current.map((row) => {
-                  const key = JSON.stringify([row.entity ?? DEFAULT_ENTITY, splitFaAccount(row.account).code || row.account]);
-                  return updates.has(key) ? { ...row, ...updates.get(key)! } : row;
-                }));
-                setAccountsReviewed(false);
-              }}
-            />
             <div className="fa-tbje-step-actions">
-              <Button variant="secondary" onClick={() => setStep(1)}>
-                返回上传与映射
-              </Button>
               <span>
                 {!includedViews.some((view) => view.role === "cost")
                   ? "至少需要 1 个固定资产原值科目。"
@@ -1698,9 +1697,6 @@ export function FaTbJePage() {
                 />
               </label>
               <div className="fa-tbje-step-actions">
-                <Button variant="secondary" onClick={() => setStep(2)}>
-                  返回科目复核
-                </Button>
                 <span>
                   {outputPath
                     ? "输出路径已确认。"
@@ -1722,7 +1718,7 @@ export function FaTbJePage() {
                 {busy && activeJobId.current && (
                   <Button
                     variant="destructive"
-                    onClick={() => void jobCancel(activeJobId.current!)}
+                    onClick={() => void cancelJobWithFeedback(activeJobId.current!)}
                   >
                     取消
                   </Button>

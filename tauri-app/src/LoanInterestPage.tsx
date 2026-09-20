@@ -140,6 +140,9 @@ type PasteRateRow = {
   matchStatus?: string;
   matchBasis?: string;
 };
+/** TB＋JE 没有合同利率时的界面预填值：当前 1 年期 LPR（2026-08-20）为 3.00%。
+ *  这里只作为可编辑起点，不冒充合同执行利率；表头提示用户必须据实修改。 */
+export const DEFAULT_LOAN_RATE = 0.03;
 /** 与 Rust `ledger_mapping::loan_roles()` 同名同序的兜底清单（浏览器预览模式用）。 */
 const LOAN_ROLE_FALLBACK: Record<string, string> = {
   principal: "本金",
@@ -364,6 +367,14 @@ export function mergeRestoredLoanMapping(
 /** 底稿反馈里只展示文件名，完整路径放 title 悬浮提示。 */
 function fileNameOf(path: string) {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+/** JavaScript 会把 IEEE-754 的 -0 原样格式化成“-0”；界面展示统一归零。 */
+export function loanDisplayNumber(
+  value: number,
+  options?: Intl.NumberFormatOptions,
+) {
+  if (value === 0) return "0";
+  return value.toLocaleString("zh-CN", options);
 }
 export function loanEffectiveRate(
   type: string,
@@ -778,54 +789,6 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [tbAccounts, loanAccountRoles, loanDetailRoles, auxLink, entityScope.selection, functionalCurrency],
   );
-  /** 导出利率确认表模板（带入已填值），用户在 Excel 补填后经 importRates 回读。 */
-  async function exportRateTemplate() {
-    const target = await pickPath("save", "保存利率确认表", ["xlsx"], "借款利率确认表.xlsx");
-    if (typeof target !== "string") return;
-    setBusy(true);
-    setError("");
-    try {
-      await engineCall("loan.rate_template", {
-        tbSource: source("tb"),
-        jeSource: source("je"),
-        loanAccounts: selectedLoanAccounts(),
-        loanReviewSelections: loanReviewSelections(),
-        functionalCurrency: functionalCurrency || undefined,
-        rateRows: Object.values(tbRateEdits),
-        outputPath: target,
-      });
-      setRateNoteText(`利率确认表已导出：${target}`);
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function importRates() {
-    const picked = await pickPath("file", "选择已填写的利率确认表", ["xlsx"]);
-    if (typeof picked !== "string") return;
-    setBusy(true);
-    setError("");
-    try {
-      const res = (await engineCall("loan.import_rates", {
-        inputPath: picked,
-      })) as { rateRows: PasteRateRow[] };
-      const incoming = res.rateRows ?? [];
-      setTbRateEdits((current) => {
-        const next = { ...current };
-        for (const row of incoming) {
-          const key = loanRowKey(row);
-          next[key] = row;
-        }
-        return next;
-      });
-      setRateNoteText(`已回读 ${incoming.length} 行利率。`);
-    } catch (e) {
-      setError(errorText(e));
-    } finally {
-      setBusy(false);
-    }
-  }
   const editTbRate = (row: LoanRow, patch: Partial<PasteRateRow>) => {
     const key = loanRowKey(row);
     setTbRateEdits((v) => {
@@ -837,7 +800,28 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       };
     });
   };
-  const [rateNoteText, setRateNoteText] = useState("");
+  /** 合并引擎识别值、人工改写与市场基准预填。默认值只在固定利率且原始资料
+   *  没有数值利率时生效；用户的回传/手填始终优先。 */
+  const resolvedTbRate = (row: LoanRow): PasteRateRow => {
+    const edit = tbRateEdits[loanRowKey(row)];
+    const rateType = edit?.rateType ?? row.rateType ?? "fixed";
+    return {
+      entity: row.entity,
+      loanId: row.loanId,
+      rowKey: row.rowKey,
+      accountCode: row.accountCode,
+      auxiliary: row.auxiliary,
+      rateType,
+      fixedRate:
+        rateType === "fixed"
+          ? (edit?.fixedRate ?? row.fixedRate ?? DEFAULT_LOAN_RATE)
+          : edit?.fixedRate,
+      benchmarkRate: edit?.benchmarkRate ?? row.benchmarkRate,
+      spreadBps: edit?.spreadBps ?? row.spreadBps,
+      matchStatus: row.matchStatus,
+      matchBasis: row.matchBasis,
+    };
+  };
   async function browse(kind: Kind) {
     const picked = await pickPath("file", "选择表格文件", [
       "xlsx",
@@ -1054,18 +1038,21 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         mode === "tb" ? selectedInterestExpenseAccounts() : undefined,
       loanReviewSelections: mode === "tb" ? loanReviewSelections() : undefined,
       rateRows:
-        mode === "tb" && Object.keys(tbRateEdits).length
-          ? Object.values(tbRateEdits).map((r) => ({
-              loanId: r.loanId,
-              rowKey: r.rowKey,
-              accountCode: r.accountCode,
-              auxiliary: r.auxiliary,
-              entity: r.entity,
-              rateType: r.rateType,
-              fixedRate: r.fixedRate,
-              benchmarkRate: r.benchmarkRate,
-              spreadBps: r.spreadBps,
-            }))
+        mode === "tb" && rows.length
+          ? rows.map((r) => {
+              const rate = resolvedTbRate(r);
+              return {
+                loanId: rate.loanId,
+                rowKey: rate.rowKey,
+                accountCode: rate.accountCode,
+                auxiliary: rate.auxiliary,
+                entity: rate.entity,
+                rateType: rate.rateType,
+                fixedRate: rate.fixedRate,
+                benchmarkRate: rate.benchmarkRate,
+                spreadBps: rate.spreadBps,
+              };
+            })
           : undefined,
       rateLedgerSource: source("rateLedger"),
       rateOverrides: resultRateEdits,
@@ -1526,10 +1513,9 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   /** 利率编辑六格（利率类型／执行利率／浮动基准／加减点／匹配状态／匹配依据）：
    *  合并表里科目行的单一明细与辅助子行共用；手填值以百分数展示
    *  （3.85 ↔ 0.0385），行键沿用 tbRateEdits（按明细行 rowKey），
-   *  与导出模板、回读、测算 payload 同一口径。 */
+   *  与合并科目确认表的下载、回传及测算 payload 同一口径。 */
   const rateEditCells = (detail: LoanRow) => {
-    const key = loanRowKey(detail);
-    const e = tbRateEdits[key] ?? { rateType: "fixed" as const };
+    const e = resolvedTbRate(detail);
     const rateType = e.rateType ?? "fixed";
     const label = `${detail.loanId}${detail.currency ? ` ${detail.currency}` : ""}`;
     return (
@@ -1551,6 +1537,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         <td>
           <input
             aria-label={`${label}的执行利率`}
+            className="loan-manual-number"
             type="number"
             step="0.0001"
             placeholder="如 3.85"
@@ -1567,6 +1554,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         <td>
           <input
             aria-label={`${label}的基准利率`}
+            className="loan-manual-number"
             type="number"
             step="0.0001"
             placeholder="如 3.1"
@@ -1583,6 +1571,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         <td>
           <input
             aria-label={`${label}的加减点`}
+            className="loan-manual-number"
             type="number"
             step="1"
             placeholder="如 90"
@@ -2016,27 +2005,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                       </select>
                     </label>
                     {accountChangeNote && <span role="status">{accountChangeNote}</span>}
-                    <div className="loan-paste-actions loan-rate-actions">
-                      {/* 利率明细的生成/刷新全自动（进入本步骤与科目类型改动
-                          各自触发），不再提供「重新生成借款利率表」按钮。 */}
-                      <Button
-                        variant="secondary"
-                        disabled={busy || !selectedAccountCount}
-                        onClick={() => void exportRateTemplate()}
-                      >
-                        导出利率确认表
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        disabled={busy || !rows.length}
-                        onClick={() => void importRates()}
-                        title={rows.length ? undefined : "先生成利率明细再回读"}
-                      >
-                        回读已填利率表
-                      </Button>
-                    </div>
                   </div>
-                  {rateNoteText && <p className="loan-paste-note">{rateNoteText}</p>}
                   {!rows.length && (
                     <EmptyState
                       compact
@@ -2059,7 +2028,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                           <th>期初余额</th>
                           <th>期末余额</th>
                           <th>利率类型</th>
-                          <th>执行利率（%）</th>
+                          <th aria-label="执行利率（%）">
+                            执行利率（%）
+                            <JargonTip
+                              term="执行利率"
+                              text="工具会默认写入利率，用户应就据实修改"
+                            />
+                          </th>
                           <th>浮动基准（%）</th>
                           <th>
                             加减点（BP）
@@ -2135,8 +2110,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                                 <option value="skip">排除</option>
                               </select>
                             </td>
-                            <td className="loan-num">{a.auxiliary ? "—" : a.opening.toLocaleString()}</td>
-                            <td className="loan-num">{a.auxiliary ? "—" : a.closing.toLocaleString()}</td>
+                            <td className="loan-num">{a.auxiliary ? "—" : loanDisplayNumber(a.opening)}</td>
+                            <td className="loan-num">{a.auxiliary ? "—" : loanDisplayNumber(a.closing)}</td>
                             {role === "loan" && inline ? (
                               rateEditCells(inline)
                             ) : role === "loan" && rateRows.length > 1 ? (
@@ -2187,8 +2162,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                               <td>
                                 <span className="loan-detail-tag">借款明细</span>
                               </td>
-                              <td className="loan-num">{detail.openingPrincipal.toLocaleString()}</td>
-                              <td className="loan-num">{detail.closingPrincipal.toLocaleString()}</td>
+                              <td className="loan-num">{loanDisplayNumber(detail.openingPrincipal)}</td>
+                              <td className="loan-num">{loanDisplayNumber(detail.closingPrincipal)}</td>
                               {rateEditCells(detail)}
                             </tr>
                           )),
@@ -2197,14 +2172,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                       </tbody>
                     </table>
                   </div>
-                  {accountPageCount > 1 && (
-                    <div className="loan-account-list-pages">
-                      <Button type="button" variant="secondary" disabled={visibleAccountPage === 0} onClick={() => goToAccountPage(visibleAccountPage - 1)}>上一页</Button>
-                      <span>第 {visibleAccountPage + 1} / {accountPageCount} 页</span>
-                      <Button type="button" variant="secondary" disabled={visibleAccountPage >= accountPageCount - 1} onClick={() => goToAccountPage(visibleAccountPage + 1)}>下一页</Button>
-                    </div>
-                  )}
-                  <AccountConfirmationActions
+                  <div className="loan-confirm-footer">
+                    <AccountConfirmationActions
                     tool="loan"
                     title="借款利息"
                     context={JSON.stringify([source("tb"), source("je"), orderedTbAccounts.map((account) => account.reviewKey), confirmationRateRows.map(loanRowKey)])}
@@ -2228,15 +2197,15 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                           "", "", "", ""],
                       })),
                       ...confirmationRateRows.map((detail): ConfirmationRow => {
-                        const edit = tbRateEdits[loanRowKey(detail)];
+                        const edit = resolvedTbRate(detail);
                         return { key: `rate:${loanRowKey(detail)}`,
                           editable: [false, false, false, false, false, true, true, true, true],
                           values: [
                           "借款明细", detail.entity ?? "", detail.accountName || detail.loanId, detail.auxiliary ?? "", "",
-                          (edit?.rateType ?? "fixed") === "floating" ? "浮动" : "固定",
-                          edit?.fixedRate == null ? "" : String(edit.fixedRate * 100),
-                          edit?.benchmarkRate == null ? "" : String(edit.benchmarkRate * 100),
-                          edit?.spreadBps == null ? "" : String(edit.spreadBps),
+                          edit.rateType === "floating" ? "浮动" : "固定",
+                          edit.fixedRate == null ? "" : String(edit.fixedRate * 100),
+                          edit.benchmarkRate == null ? "" : String(edit.benchmarkRate * 100),
+                          edit.spreadBps == null ? "" : String(edit.spreadBps),
                         ] };
                       }),
                     ]}
@@ -2285,7 +2254,15 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                         return next;
                       });
                     }}
-                  />
+                    />
+                    {accountPageCount > 1 && (
+                      <div className="loan-account-list-pages">
+                        <Button type="button" variant="secondary" disabled={visibleAccountPage === 0} onClick={() => goToAccountPage(visibleAccountPage - 1)}>上一页</Button>
+                        <span>第 {visibleAccountPage + 1} / {accountPageCount} 页</span>
+                        <Button type="button" variant="secondary" disabled={visibleAccountPage >= accountPageCount - 1} onClick={() => goToAccountPage(visibleAccountPage + 1)}>下一页</Button>
+                      </div>
+                    )}
+                  </div>
                   </>
                 )}
                 </CardContent>
@@ -2416,7 +2393,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
               {job && (
                 <JobProgress
                   job={job}
-                  onCancel={busy ? (id) => void jobCancel(id) : undefined}
+                  onCancel={busy ? (id) => jobCancel(id) : undefined}
                 />
               )}
             </CardContent>
@@ -2730,7 +2707,7 @@ function LedgerRateConfirmation({
                     <td>
                       <NumberInput
                         label={`${loanId}的加减点`}
-                        className="loan-rate-bps"
+                        className="loan-rate-bps loan-manual-number"
                         step="1"
                         disabled={busy || rate.rateType !== "floating"}
                         value={rate.spreadBps}
@@ -2778,7 +2755,7 @@ export function Results({
     { opening: 0, additions: 0, reductions: 0, closing: 0 },
   );
   const amount = (value: number) =>
-    value.toLocaleString("zh-CN", {
+    loanDisplayNumber(value, {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     });
@@ -2917,7 +2894,7 @@ export function Results({
                   principalDifference,
                 ].map((n, j) => (
                   <td key={j} className={j === 5 && principalDifference != null && Math.abs(principalDifference) >= 0.005 ? "loan-principal-difference" : undefined}>
-                    {n == null ? "—" : Number(n).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    {n == null ? "—" : loanDisplayNumber(Number(n), { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </td>
                 ))}
                 <td>
@@ -2952,6 +2929,7 @@ export function Results({
                       r.rateType === "fixed" ? "固定利率" : "基准利率"
                     }`}
                     step=".0001"
+                    className="loan-manual-number"
                     value={
                       r.rateType === "fixed"
                         ? (r.fixedRate ?? "")
@@ -2971,6 +2949,7 @@ export function Results({
                   <NumberInput
                     label={`${r.loanId}的加点 BP`}
                     step="1"
+                    className="loan-manual-number"
                     disabled={r.rateType !== "floating"}
                     value={r.spreadBps ?? 0}
                     onCommit={(text) =>
@@ -2981,16 +2960,23 @@ export function Results({
                 <td>
                   {r.rateType === "floating" && r.benchmarkRate == null
                     ? "请再次测算"
-                    : `${(
-                        loanEffectiveRate(
-                          r.rateType,
-                          r.fixedRate,
-                          r.benchmarkRate,
-                          r.spreadBps,
-                        ) * 100
-                      ).toFixed(4)}%`}
+                    : loanEffectiveRate(
+                        r.rateType,
+                        r.fixedRate,
+                        r.benchmarkRate,
+                        r.spreadBps,
+                      ) === 0
+                      ? "0%"
+                      : `${(
+                          loanEffectiveRate(
+                            r.rateType,
+                            r.fixedRate,
+                            r.benchmarkRate,
+                            r.spreadBps,
+                          ) * 100
+                        ).toFixed(4)}%`}
                 </td>
-                <td>{Number(r.calculatedInterest ?? 0).toLocaleString()}</td>
+                <td>{loanDisplayNumber(Number(r.calculatedInterest ?? 0))}</td>
                 <td>
                   <Badge
                     variant="outline"

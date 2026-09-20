@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
-  jobCancel,
   jobStart,
   listenFileDrops,
   listenJobEvents,
@@ -612,7 +612,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             {busy && job ? (
               <Button
                 variant="secondary"
-                onClick={() => void jobCancel(job.jobId)}
+                onClick={() => void cancelJobWithFeedback(job.jobId)}
               >
                 <BusySpinner />
                 停止执行

@@ -1,7 +1,7 @@
 #![recursion_limit = "256"]
 
-mod audipick;
 mod account_confirmation;
+mod audipick;
 mod confirmation;
 mod deposit_interest;
 #[cfg(windows)]
@@ -145,15 +145,39 @@ async fn engine_call(
     method: String,
     mut params: Value,
 ) -> Result<Value, AppError> {
-    if matches!(method.as_str(), "account_confirmation.export" | "account_confirmation.import") {
-        let field = if method.ends_with("export") { "outputPath" } else { "inputPath" };
+    if matches!(
+        method.as_str(),
+        "account_confirmation.export" | "account_confirmation.import"
+    ) {
+        let field = if method.ends_with("export") {
+            "outputPath"
+        } else {
+            "inputPath"
+        };
         let selected = PathBuf::from(params.get(field).and_then(Value::as_str).unwrap_or(""));
-        if !allowed.0.lock().iter().any(|path| path_is_permitted(&selected, path)) {
-            return Err(AppError::new("PATH_NOT_AUTHORIZED", "请先选择科目确认表路径。", false, None));
+        if !allowed
+            .0
+            .lock()
+            .iter()
+            .any(|path| path_is_permitted(&selected, path))
+        {
+            return Err(AppError::new(
+                "PATH_NOT_AUTHORIZED",
+                "请先选择科目确认表路径。",
+                false,
+                None,
+            ));
         }
         tauri::async_runtime::spawn_blocking(move || account_confirmation::call(&method, params))
             .await
-            .map_err(|e| AppError::new("CONFIRMATION_TASK_FAILED", "科目确认表处理异常结束。", true, Some(e.to_string())))?
+            .map_err(|e| {
+                AppError::new(
+                    "CONFIRMATION_TASK_FAILED",
+                    "科目确认表处理异常结束。",
+                    true,
+                    Some(e.to_string()),
+                )
+            })?
     } else if method == "audipick.projects" {
         storage.audipick_projects()
     } else if method == "audipick.backup_export" {

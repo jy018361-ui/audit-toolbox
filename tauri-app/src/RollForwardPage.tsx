@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import { markToolPageLive } from "./toolPageActivity";
 import {
   engineCall,
-  jobCancel,
   jobStart,
   listenJobEvents,
   openOutput,
@@ -1464,7 +1464,7 @@ export function RollForwardPage({ tool }: { tool: ToolManifest }) {
           {job && busy && (
             <Button
               variant="destructive"
-              onClick={() => void jobCancel(job.jobId)}
+              onClick={() => void cancelJobWithFeedback(job.jobId)}
             >
               取消任务
             </Button>

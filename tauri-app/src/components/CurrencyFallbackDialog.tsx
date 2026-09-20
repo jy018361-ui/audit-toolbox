@@ -68,7 +68,7 @@ export function CurrencyFallbackDialog({
             TB 中发现同一账户包含多个币种，但 JE 无法支持全部外币按币种还原逐月余额。请选择本次测算口径。
           </DialogDescription>
         </DialogHeader>
-        <p className="rounded-md bg-muted px-3 py-2 text-sm text-foreground">{facts}</p>
+        <p className="break-words rounded-md bg-muted px-3 py-2 text-sm text-foreground">{facts}</p>
         <div className="grid gap-3">
           {option(
             "functional",

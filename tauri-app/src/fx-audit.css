@@ -541,104 +541,6 @@
   grid-template-columns: minmax(0, 1fr);
   gap: 20px;
 }
-.fx-classification-review {
-  display: grid;
-  gap: 12px;
-  margin-top: 18px;
-  padding: 18px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--card);
-}
-.fx-classification-review h4,
-.fx-classification-review p {
-  margin: 0;
-}
-.fx-classification-review p {
-  margin-top: 5px;
-  color: var(--muted-foreground);
-  font-size: 13px;
-}
-.fx-classification-list {
-  display: grid;
-  gap: 8px;
-  max-height: 360px;
-  overflow: auto;
-}
-.fx-classification-list label {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 190px;
-  gap: 16px;
-  align-items: center;
-  padding: 10px 0;
-  border-top: 1px solid var(--border);
-}
-.fx-classification-list label > span {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-.fx-classification-list b,
-.fx-classification-list small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.fx-classification-list small {
-  color: var(--muted-foreground);
-}
-.fx-classification-list select {
-  min-height: 36px;
-  padding: 6px 9px;
-  border: 1px solid var(--control-border);
-  border-radius: 8px;
-  background: var(--background);
-  color: var(--foreground);
-}
-.fx-classification-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-.fx-classification-heading > button {
-  flex: 0 0 auto;
-}
-.fx-pattern-names {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin: 5px 0;
-}
-.fx-pattern-side {
-  display: grid;
-  gap: 5px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--muted);
-}
-.fx-pattern-side > strong {
-  font-size: 12px;
-}
-.fx-pattern-side > div {
-  display: grid;
-  gap: 6px;
-}
-.fx-pattern-side span {
-  display: grid;
-  grid-template-columns: minmax(70px, 0.35fr) minmax(0, 1fr) minmax(0, 1fr);
-  gap: 8px;
-  align-items: start;
-}
-.fx-pattern-side span b,
-.fx-pattern-side span small {
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-.fx-pattern-side span small {
-  font-size: 11px;
-}
 .fx-unrealized-module {
   display: grid;
   gap: 12px;
@@ -667,19 +569,8 @@
   }
 }
 @media (max-width: 720px) {
-  .fx-classification-heading {
-    flex-direction: column;
-  }
-  .fx-classification-heading > button {
-    width: 100%;
-  }
-  .fx-classification-list label,
-  .fx-pattern-names,
   .fx-unrealized-metrics {
     grid-template-columns: 1fr;
-  }
-  .fx-classification-list select {
-    width: 100%;
   }
 }
 .fx-source-status {
@@ -1009,24 +900,29 @@
   color: var(--destructive);
 }
 
-/* 凭证分类复核分两段：等你定分类 / 已定分类但算不出金额。 */
-.fx-classification-section {
-  margin-top: 16px;
-}
-.fx-classification-section h5 {
-  margin: 0 0 4px;
-  font-size: 14px;
-}
-.fx-classification-section > p {
-  margin: 0 0 10px;
-  font-size: 13px;
-  color: var(--muted-foreground);
-  line-height: 1.7;
-}
-
 .fx-accounts label {
   grid-template-columns: minmax(260px, 1fr) 150px minmax(210px, 250px);
   align-items: start;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--card);
+}
+.fx-accounts label:last-of-type {
+  border-bottom: 0;
+}
+.fx-accounts label:hover {
+  background: color-mix(in srgb, var(--primary) 4%, var(--card));
+}
+.fx-accounts.fx-list {
+  gap: 0;
+  margin-top: var(--sp-3);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
 }
 /* 多主体账套加「主体」列：辅助拆行挂各自主体，末级兜底行主体未知显示 —。 */
 .fx-accounts.has-entity label,
@@ -1051,11 +947,12 @@
   display: grid;
   grid-template-columns: minmax(260px, 1fr) 150px minmax(210px, 250px);
   gap: 12px;
-  padding: 1px 0 6px;
+  padding: 11px 14px;
   border-bottom: 1px solid var(--border);
-  background: var(--card);
+  background: var(--muted);
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
 }
 .fx-checks-evidence > summary {
   cursor: pointer;

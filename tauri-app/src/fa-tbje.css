@@ -327,6 +327,16 @@
   justify-content: space-between;
   font-variant-numeric: tabular-nums;
 }
+.fa-tbje-confirm-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.fa-tbje-confirm-footer .account-confirmation-actions {
+  margin: 0 0 0 auto;
+}
 
 .fa-tbje-readiness-grid {
   display: grid;

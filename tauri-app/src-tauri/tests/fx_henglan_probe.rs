@@ -7,33 +7,34 @@
 //! cargo test --test fx_henglan_probe -- --ignored --nocapture
 //! ```
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const PARAMS_DUMP: &str = "../outputs/fx_failed_job_params.json";
 
 #[test]
 #[ignore]
 fn probe_alignment_then_preview() {
-    let params: Value = serde_json::from_str(
-        &std::fs::read_to_string(PARAMS_DUMP).expect("缺少失败任务参数转储"),
-    )
-    .expect("参数转储不是合法 JSON");
+    let params: Value =
+        serde_json::from_str(&std::fs::read_to_string(PARAMS_DUMP).expect("缺少失败任务参数转储"))
+            .expect("参数转储不是合法 JSON");
     let je_source = params["jeSource"].clone();
     let tb_source = params["tbSource"].clone();
 
     // 1) 识别：确认引擎加载出的表头到底含不含换行、与映射字符串是否一致。
-    let je_inspected = audit_toolbox_lib::engine_call_for_test(
-        "fx.inspect_je",
-        json!({"source": je_source}),
-    )
-    .expect("fx.inspect_je 应当成功");
-    let tb_inspected = audit_toolbox_lib::engine_call_for_test(
-        "fx.inspect_tb",
-        json!({"source": tb_source}),
-    )
-    .expect("fx.inspect_tb 应当成功");
-    println!("JE headers = {}", serde_json::to_string(&je_inspected["headers"]).unwrap());
-    println!("TB headers = {}", serde_json::to_string(&tb_inspected["headers"]).unwrap());
+    let je_inspected =
+        audit_toolbox_lib::engine_call_for_test("fx.inspect_je", json!({"source": je_source}))
+            .expect("fx.inspect_je 应当成功");
+    let tb_inspected =
+        audit_toolbox_lib::engine_call_for_test("fx.inspect_tb", json!({"source": tb_source}))
+            .expect("fx.inspect_tb 应当成功");
+    println!(
+        "JE headers = {}",
+        serde_json::to_string(&je_inspected["headers"]).unwrap()
+    );
+    println!(
+        "TB headers = {}",
+        serde_json::to_string(&tb_inspected["headers"]).unwrap()
+    );
     println!(
         "JE suggested = {}",
         serde_json::to_string(&je_inspected["suggestedMapping"]).unwrap()
@@ -52,7 +53,10 @@ fn probe_alignment_then_preview() {
         }),
     )
     .expect("口径核对应当能执行");
-    println!("alignment = {}", serde_json::to_string_pretty(&align).unwrap());
+    println!(
+        "alignment = {}",
+        serde_json::to_string_pretty(&align).unwrap()
+    );
 
     // 3) 预览测算：完整回放，观察是否出现进程级崩溃（panic=abort 在
     //    release 下表现为「Excel 数据处理进程异常退出」；debug 下 panic
@@ -65,7 +69,10 @@ fn probe_alignment_then_preview() {
                 "keys": value.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()),
                 "error": value.get("error"),
             });
-            println!("preview 完成 = {}", serde_json::to_string_pretty(&summary).unwrap());
+            println!(
+                "preview 完成 = {}",
+                serde_json::to_string_pretty(&summary).unwrap()
+            );
         }
         Err(err) => {
             println!(

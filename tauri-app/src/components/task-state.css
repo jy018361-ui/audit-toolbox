@@ -18,19 +18,32 @@
 
 .job-progress .job-banner {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: var(--sp-2) var(--sp-3);
   min-width: 0;
 }
 
+.job-progress .job-cancel {
+  grid-column: 4;
+  justify-self: end;
+}
+
 .job-progress-message,
+.job-progress-error,
 .result-summary > p,
 .result-summary li,
 .error-box-message {
   min-width: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.job-progress-error {
+  margin: 0;
+  color: var(--danger-fg);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-label);
 }
 
 .job-progress-copy {
@@ -147,6 +160,15 @@
 
 .error-box-message {
   flex: 1 1 auto;
+  white-space: pre-line;
+}
+
+.error-box-message--expanded {
+  max-height: min(240px, 36vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: var(--sp-1);
+  scrollbar-gutter: stable;
 }
 
 .error-box-actions {

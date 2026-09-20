@@ -1,12 +1,14 @@
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useJobOwnedByDialog } from "@/components/JobDialog";
+import { errorText } from "@/lib/errors";
 import type { JobEvent } from "@/types";
 import { jobPresentation } from "@/jobState";
 import "./task-state.css";
 
 export type JobProgressProps = {
   job: JobEvent;
-  onCancel?: (jobId: string) => void;
+  onCancel?: (jobId: string) => void | boolean | Promise<void | boolean>;
   /** 取消按钮文案，统一为 "取消任务" */
   cancelLabel?: string;
   compact?: boolean;
@@ -24,6 +26,21 @@ export function JobProgress({
   cancelLabel = "取消任务",
   compact = false,
 }: JobProgressProps) {
+  const [cancelPending, setCancelPending] = useState(false);
+  const [cancelError, setCancelError] = useState("");
+  async function cancel() {
+    if (!onCancel || cancelPending) return;
+    setCancelPending(true);
+    setCancelError("");
+    try {
+      const accepted = await onCancel(job.jobId);
+      if (accepted === false) throw new Error("任务可能已结束，取消指令未被接受。请检查任务状态后重试。");
+    } catch (error) {
+      setCancelError(`取消失败：${errorText(error)}`);
+    } finally {
+      setCancelPending(false);
+    }
+  }
   // 进度弹窗正展示同一个任务时这里让位，免得一个任务看着像跑了两遍。
   // 弹窗最小化后 owned 转 false，内联进度条回到页面上。
   const owned = useJobOwnedByDialog(job.jobId);
@@ -72,12 +89,14 @@ export function JobProgress({
             size="xs"
             type="button"
             className="job-cancel"
-            onClick={() => onCancel(job.jobId)}
+            onClick={() => void cancel()}
+            disabled={cancelPending}
           >
-            {cancelLabel}
+            {cancelPending ? "正在取消…" : cancelLabel}
           </Button>
         )}
       </div>
+      {cancelError && <p className="job-progress-error" role="alert">{cancelError}</p>}
       {!presentation.terminal && (
         <progress
           aria-label={`${presentation.label}进度`}

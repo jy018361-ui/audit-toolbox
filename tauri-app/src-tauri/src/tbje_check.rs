@@ -1572,17 +1572,20 @@ fn equation_details(prepared: &PreparedCheck) -> Vec<EquationDetail> {
         columns(&prepared.tb_map, role)
     });
     let mut details = Vec::new();
+    let convention = fx::sign_convention_of(&prepared.tb_map);
     let opening_basis = ledger_mapping::balance_sign_basis_by_row(
         &prepared.tb.headers,
         &prepared.tb.rows,
         &|role| columns(&prepared.tb_map, role),
         "openingFunctional",
+        convention,
     );
     let closing_basis = ledger_mapping::balance_sign_basis_by_row(
         &prepared.tb.headers,
         &prepared.tb.rows,
         &|role| columns(&prepared.tb_map, role),
         "closingFunctional",
+        convention,
     );
     for (index, row) in prepared.tb.rows.iter().enumerate() {
         if !prepared.tb_rows.get(index).copied().unwrap_or(true) {
@@ -1977,12 +1980,14 @@ fn check_equation(
         &tb.rows,
         &|role| columns(map, role),
         "openingFunctional",
+        fx::sign_convention_of(map),
     );
     let closing_basis = ledger_mapping::balance_sign_basis_by_row(
         &tb.headers,
         &tb.rows,
         &|role| columns(map, role),
         "closingFunctional",
+        fx::sign_convention_of(map),
     );
     let mut opening_total = 0.0_f64;
     let mut closing_total = 0.0_f64;

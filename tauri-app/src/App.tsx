@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ComponentType, ReactElement } from "react";
 import {
   matchPath,
@@ -9,6 +9,8 @@ import {
   useLocation,
   useNavigate,
   useParams,
+  useBlocker,
+  UNSAFE_DataRouterContext,
 } from "react-router-dom";
 import "./app-shell.css";
 import {
@@ -57,6 +59,7 @@ import { PersistentToolPages } from "@/components/PersistentToolPages";
 import { markToolPageLive } from "./toolPageActivity";
 import { ToolRecoveryBoundary } from "@/components/ToolRecoveryBoundary";
 import { JobDialogProvider } from "@/components/JobDialog";
+import { JobCommandNotice } from "@/components/JobCommandNotice";
 import { JobProgress } from "@/components/JobProgress";
 import { ConfirmDialogHost, confirmDialog } from "@/components/ConfirmDialog";
 import { displayFileName } from "@/fileDisplay";
@@ -630,6 +633,7 @@ export default function App() {
       }
     >
       <SyncBusyDialog />
+      <JobCommandNotice />
       <ConfirmDialogHost />
       <div className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
         <a className="skip-navigation" href="#main-content" onClick={(event) => { event.preventDefault(); document.getElementById("main-content")?.focus(); }}>跳过导航，进入工作区</a>
@@ -1252,7 +1256,7 @@ function ToolPage({
           {job && (
             <JobProgress
               job={job}
-              onCancel={busy ? (jobId) => void jobCancel(jobId) : undefined}
+              onCancel={busy ? (jobId) => jobCancel(jobId) : undefined}
             />
           )}
           {result ? (
@@ -1547,6 +1551,27 @@ function settingsSignature(form: Record<string, unknown>, cacheMode: string) {
   return JSON.stringify({ form, cacheMode });
 }
 
+function SettingsNavigationBlocker({ dirty }: { dirty: boolean }) {
+  const blocker = useBlocker(({ currentLocation, nextLocation }) =>
+    dirty && currentLocation.pathname !== nextLocation.pathname,
+  );
+  const confirming = useRef(false);
+  useEffect(() => {
+    if (blocker.state !== "blocked" || confirming.current) return;
+    confirming.current = true;
+    void confirmDialog({
+      title: "放弃未保存的修改？",
+      message: "设置尚未保存，确定离开并放弃这些修改吗？",
+      confirmLabel: "离开",
+      tone: "danger",
+    }).then((leave) => {
+      if (leave) blocker.proceed();
+      else blocker.reset();
+    }).finally(() => { confirming.current = false; });
+  }, [blocker]);
+  return null;
+}
+
 export function Settings({
   availableUpdate,
   onAvailableUpdateChange,
@@ -1788,6 +1813,7 @@ export function Settings({
   const dirty =
     savedSettingsSignature.current !== undefined &&
     settingsSignature(form, cacheMode) !== savedSettingsSignature.current;
+  const hasDataRouter = useContext(UNSAFE_DataRouterContext) !== null;
   useEffect(() => {
     if (!dirty) return;
     const warnBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -1819,12 +1845,13 @@ export function Settings({
       });
     };
     window.addEventListener("beforeunload", warnBeforeUnload);
-    document.addEventListener("click", confirmLinkNavigation, true);
+    // 正式应用由数据路由统一拦截链接、后退和前进；普通 MemoryRouter 测试保留旧回退。
+    if (!hasDataRouter) document.addEventListener("click", confirmLinkNavigation, true);
     return () => {
       window.removeEventListener("beforeunload", warnBeforeUnload);
-      document.removeEventListener("click", confirmLinkNavigation, true);
+      if (!hasDataRouter) document.removeEventListener("click", confirmLinkNavigation, true);
     };
-  }, [dirty]);
+  }, [dirty, hasDataRouter]);
   const set = <K extends keyof typeof form>(key: K, value: (typeof form)[K]) =>
     setForm((x) => ({ ...x, [key]: value }));
   const llmSettings = () => ({
@@ -1910,6 +1937,7 @@ export function Settings({
   }
   return (
     <div className="settings-page">
+      {hasDataRouter && <SettingsNavigationBlocker dirty={dirty} />}
       <PageHeader
         eyebrow="本机配置"
         title="设置"

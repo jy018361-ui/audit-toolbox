@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import {
   engineCall,
   jobCancel,
@@ -634,7 +635,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
               !["completed", "failed", "cancelled"].includes(job.phase) && (
                 <JobProgress
                   job={job}
-                  onCancel={(jobId) => void jobCancel(jobId)}
+                  onCancel={(jobId) => jobCancel(jobId)}
                   cancelLabel="取消任务"
                 />
               )}
@@ -819,7 +820,7 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
                       type="button"
                       variant="secondary"
                       size="sm"
-                      onClick={() => void jobCancel(job.jobId)}
+                      onClick={() => void cancelJobWithFeedback(job.jobId)}
                     >
                       取消
                     </Button>

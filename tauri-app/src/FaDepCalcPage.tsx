@@ -450,7 +450,8 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
 
   async function cancelExport(jobId: string) {
     try {
-      await jobCancel(jobId);
+      const accepted = await jobCancel(jobId);
+      if (!accepted) throw new Error("任务可能已结束，取消指令未被接受。");
       setJob((current) =>
         current?.jobId === jobId
           ? {
@@ -461,8 +462,10 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
             }
           : current,
       );
+      return true;
     } catch (e) {
       setError(errorText(e));
+      return false;
     }
   }
 
@@ -543,7 +546,7 @@ export function FaDepCalcPage({ tool }: { tool: ToolManifest }) {
       {job && job.phase !== "completed" && (
         <JobProgress
           job={job}
-          onCancel={(jobId) => void cancelExport(jobId)}
+          onCancel={(jobId) => cancelExport(jobId)}
           cancelLabel="取消任务"
         />
       )}

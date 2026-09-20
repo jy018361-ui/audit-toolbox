@@ -13,6 +13,7 @@ import {
 } from "./api";
 import { PageHeader } from "@/components/PageHeader";
 import {
+  ledgerEntityKeyEnabled,
   verifyAuxiliaryLink,
   type AuxiliaryLinkResult,
   verifyCurrencyLink,
@@ -619,8 +620,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const ledgerReviewOwner = useRef({});
   const reviewingAny = reviews.reviewing.tb || reviews.reviewing.je;
   const entityScope = useEntityScopeConfirmation({
-    tbEntities: tb?.entities ?? [],
-    jeEntities: je?.entities ?? [],
+    tbEntities: ledgerEntityKeyEnabled(tbMapping, jeMapping) ? (tb?.entities ?? []) : [],
+    jeEntities: ledgerEntityKeyEnabled(tbMapping, jeMapping) ? (je?.entities ?? []) : [],
     onInvalidate: () => {
       activeJob.current = "";
       setResult(undefined);

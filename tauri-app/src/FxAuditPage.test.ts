@@ -887,7 +887,7 @@ describe("同一列的多重映射", () => {
     m = fxAttachRole(m, "科目全称", "accountName");
     m = fxAttachRole(m, "科目全称", "currencyText");
     m = fxAttachRole(m, "科目全称", "accountCode");
-    expect(m.accountName).toEqual([]);
+    expect(m).not.toHaveProperty("accountName");
     expect(m.accountCode).toBe("科目全称");
     expect(m.currencyText).toBe("科目全称");
   });
@@ -896,7 +896,7 @@ describe("同一列的多重映射", () => {
     let m: Record<string, string | string[]> = {};
     m = fxAttachRole(m, "期初余额", "openingFunctionalAmount");
     m = fxAttachRole(m, "期初余额", "closingFunctionalAmount");
-    expect(m.openingFunctionalAmount).toBe("");
+    expect(m).not.toHaveProperty("openingFunctionalAmount");
     expect(m.closingFunctionalAmount).toBe("期初余额");
   });
 
@@ -906,7 +906,7 @@ describe("同一列的多重映射", () => {
     m = fxAttachRole(m, "科目名称", "currencyText");
     m = fxDetachRole(m, "科目名称", "currencyText");
     expect(m.accountName).toEqual(["科目名称"]);
-    expect(m.currencyText).toBe("");
+    expect(m).not.toHaveProperty("currencyText");
   });
 });
 

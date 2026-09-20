@@ -13,6 +13,7 @@ import {
 import { depositDropTargetInside } from "./DepositInterestPage";
 import {
   DEFAULT_ENTITY,
+  ledgerEntityKeyEnabled,
   verifyAuxiliaryLink,
   verifyCurrencyLink,
   type AuxiliaryLinkResult,
@@ -564,8 +565,10 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   // 与计算侧同一套判定，用户在映射页就能看到 JE 有没有对应的借款明细列。
   const [auxLink, setAuxLink] = useState<AuxiliaryLinkResult | null>(null);
   const entityScope = useEntityScopeConfirmation({
-    tbEntities: sources.tb.inspection?.entities ?? [],
-    jeEntities: sources.je.inspection?.entities ?? [],
+    tbEntities: ledgerEntityKeyEnabled(sources.tb.mapping, sources.je.mapping)
+      ? (sources.tb.inspection?.entities ?? []) : [],
+    jeEntities: ledgerEntityKeyEnabled(sources.tb.mapping, sources.je.mapping)
+      ? (sources.je.inspection?.entities ?? []) : [],
     onInvalidate: () => invalidateResults(),
   });
   // 触发键只认「数据源＋两侧辅助核算明细映射」：其余角色的映射调整不重验，
@@ -1463,7 +1466,10 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const showAuxiliaryColumn =
     orderedTbAccounts.some((row) => Boolean(row.auxiliaryKey)) ||
     rows.some((row) => Boolean(row.auxiliary?.trim()));
+  const showEntityDimension = mode !== "tb" ||
+    ledgerEntityKeyEnabled(sources.tb.mapping, sources.je.mapping);
   const multiEntityLedger = useMemo(() => {
+    if (!showEntityDimension) return false;
     const names = [
       ...(sources.tb.inspection?.entities ?? []),
       ...(sources.je.inspection?.entities ?? []),
@@ -1471,11 +1477,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       .map((value) => value.trim())
       .filter((value) => value && value !== DEFAULT_ENTITY);
     return new Set(names).size > 1;
-  }, [sources.tb.inspection, sources.je.inspection]);
+  }, [sources.tb.inspection, sources.je.inspection, showEntityDimension]);
   const showSubject =
-    multiEntityLedger ||
-    orderedTbAccounts.some((row) => Boolean(row.entity)) ||
-    rows.some((row) => Boolean(row.entity && row.entity !== DEFAULT_ENTITY));
+    showEntityDimension && (
+      multiEntityLedger ||
+      orderedTbAccounts.some((row) => Boolean(row.entity)) ||
+      rows.some((row) => Boolean(row.entity && row.entity !== DEFAULT_ENTITY))
+    );
   // 进入「确认科目与利率」即自动生成利率确认表，且科目选择（含辅助明细勾选、
   // 利息支出科目、主体范围）一变就自动按新选择重新生成：生成是必经动作，
   // 利率填写入口必须随科目类型实时出现，不再依赖「重新生成借款利率表」按钮。

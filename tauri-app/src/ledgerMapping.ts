@@ -56,6 +56,25 @@ export const EMPTY_MAPPING: Mapping = { id: [], accountName: [] };
  */
 export const DEFAULT_ENTITY = "默认主体";
 
+/** 与 Rust mapped_cols 一致：空字符串、空数组均视为未映射。 */
+export function ledgerHasMappedRole(
+  mapping: Record<string, string | string[] | undefined>,
+  role: string,
+): boolean {
+  const value = mapping[role];
+  return Array.isArray(value)
+    ? value.some((column) => Boolean(column.trim()))
+    : Boolean(value?.trim());
+}
+
+/** 主体仅在 TB 与 JE 双侧均确认映射后成为匹配键。 */
+export function ledgerEntityKeyEnabled(
+  tbMapping: Record<string, string | string[] | undefined>,
+  jeMapping: Record<string, string | string[] | undefined>,
+): boolean {
+  return ledgerHasMappedRole(tbMapping, "entity") && ledgerHasMappedRole(jeMapping, "entity");
+}
+
 export type LedgerSourceKind = "je" | "tb";
 export type LedgerSourceClassification = {
   kind: LedgerSourceKind;

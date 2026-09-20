@@ -4697,10 +4697,11 @@ fn mapped_names(m: &Map<String, Value>, kind: &str, role: &str) -> Vec<String> {
         slot(m, kind, role)
     };
     match value {
-        Some(Value::String(name)) => vec![name.clone()],
+        Some(Value::String(name)) if !name.trim().is_empty() => vec![name.clone()],
         Some(Value::Array(names)) => names
             .iter()
             .filter_map(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
             .map(str::to_owned)
             .collect(),
         _ => vec![],
@@ -5520,6 +5521,11 @@ mod loan_form_tests {
         assert_eq!(mapped_names(&mapping, "tb", "loanId"), vec!["辅助核算"]);
         let legacy = json!({"loanId":"合同编号"}).as_object().unwrap().clone();
         assert_eq!(mapped_names(&legacy, "je", "loanId"), vec!["合同编号"]);
+        for value in [json!(""), json!([" ", ""]), Value::Null] {
+            let mapping = json!({"entity": value}).as_object().unwrap().clone();
+            assert!(mapped_names(&mapping, "tb", "entity").is_empty());
+            assert!(mapped_names(&mapping, "je", "entity").is_empty());
+        }
     }
 
     #[test]

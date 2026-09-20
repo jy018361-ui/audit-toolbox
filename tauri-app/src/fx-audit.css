@@ -816,6 +816,19 @@
 }
 
 /* 检查与勾稽：默认折叠，用户想追到「哪一步没通过」时展开。 */
+.fx-prominent-warnings {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-bg);
+  color: var(--foreground);
+  line-height: 1.6;
+}
+.fx-prominent-warnings ul {
+  margin: 6px 0 0;
+  padding-left: 1.25rem;
+}
 .fx-checks {
   border: 1px solid var(--border);
   border-radius: 8px;

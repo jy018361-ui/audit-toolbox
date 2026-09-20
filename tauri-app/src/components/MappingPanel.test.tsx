@@ -203,7 +203,6 @@ describe("共用字段映射面板", () => {
     pick(selects[0], "accountName");
     expect(onChange).toHaveBeenCalledWith({
       accountCode: mixedHeader,
-      accountName: [],
     });
   });
 

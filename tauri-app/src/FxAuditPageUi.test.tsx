@@ -34,8 +34,8 @@ const tool: ToolManifest = {
   migrationStatus: "ready",
 };
 
-const tbHeaders = ["科目编码", "科目名称", "币种", "期初余额", "期末余额", "本年累计借方", "本年累计贷方"];
-const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "原币币种", "原币金额", "本币金额"];
+const tbHeaders = ["主体", "科目编码", "科目名称", "币种", "期初余额", "期末余额", "本年累计借方", "本年累计贷方"];
+const jeHeaders = ["主体", "记账日期", "凭证号", "科目编码", "科目名称", "摘要", "原币币种", "原币金额", "本币金额"];
 
 /** 识别结果由用例通过改写 entities 控制（单主体/多主体两版）。 */
 let inspectionEntities: string[] = [];
@@ -62,6 +62,7 @@ const inspect = (kind: "tb" | "je") => ({
   suggestedMapping:
     kind === "tb"
       ? {
+          entity: "主体",
           accountCode: "科目编码",
           accountName: "科目名称",
           currency: "币种",
@@ -71,6 +72,7 @@ const inspect = (kind: "tb" | "je") => ({
           ytdFunctionalCredit: "本年累计贷方",
         }
       : {
+          entity: "主体",
           date: "记账日期",
           id: "凭证号",
           accountCode: "科目编码",

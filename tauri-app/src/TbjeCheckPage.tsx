@@ -47,6 +47,7 @@ import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation
 import { errorText } from "@/lib/errors";
 import {
   applyLedgerReviewsTogether,
+  ledgerEntityKeyEnabled,
   LEDGER_MULTI_COLUMN_ROLES,
   missingGoldIdentity,
   scanLedgerUploadSources,
@@ -639,27 +640,33 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
   const pairingSectionRef = useRef<HTMLElement | null>(null);
   const resultSectionRef = useRef<HTMLElement | null>(null);
   const automaticReviewKeysRef = useRef(new Set<string>());
+  const scopeEntityGroups = visibleGroups.filter((group) =>
+    group.tb && group.je && ledgerEntityKeyEnabled(
+      mappings[pairingFileKey(group.tb)] ?? {},
+      mappings[pairingFileKey(group.je)] ?? {},
+    ),
+  );
   const scopeTbEntities = useMemo(
     () =>
       [...new Set(
-        visibleGroups.flatMap((group) =>
+        scopeEntityGroups.flatMap((group) =>
           group.tb
             ? (inspects[pairingFileKey(group.tb)]?.entities ?? [])
             : [],
         ),
       )],
-    [visibleGroups, inspects],
+    [visibleGroups, inspects, mappings],
   );
   const scopeJeEntities = useMemo(
     () =>
       [...new Set(
-        visibleGroups.flatMap((group) =>
+        scopeEntityGroups.flatMap((group) =>
           group.je
             ? (inspects[pairingFileKey(group.je)]?.entities ?? [])
             : [],
         ),
       )],
-    [visibleGroups, inspects],
+    [visibleGroups, inspects, mappings],
   );
   const entityScope = useEntityScopeConfirmation({
     tbEntities: scopeTbEntities,

@@ -1,5 +1,7 @@
 # FA List：原版与 Tauri 一比一迁移清单
 
+2026-09-20 补充：诺桥美国单侧主体样例中，TB 原始公司代码为 3000、JE 无主体列，复核页现在按公共有效主体显示“默认主体”，使已确认的 4 个原值与 1 个折旧科目可进入测算；旧任务保存的 3000 确认项在身份全集确为默认主体时也能命中。艾维特苏州的 `01-1401-000-000-000` 等分段编码按完整编码分组，不再把 86 个科目压成账套段 `01` 的一行；源表含 5 个固定资产原值科目和 1 个累计折旧科目。回归：`npx vitest run src/FaTbJePage.test.ts`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 单侧映射主体时双方一律按默认主体处理`。
+
 基线以 `tools/fa_list/gui/main_window.py`、`file_and_match_config.py` 以及
 `FileHandler → DataPreprocessor → MergeEngine → PivotEngine → Exporter`
 实际生效的调用路径为准，不以旧说明文档或废弃页面为准。

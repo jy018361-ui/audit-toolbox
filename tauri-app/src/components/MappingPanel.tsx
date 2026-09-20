@@ -130,7 +130,8 @@ export function MappingPanel(props: MappingPanelProps) {
       const columns = asColumns(next[key]);
       if (!columns.includes(column)) continue;
       const rest = columns.filter((item) => item !== column);
-      next[key] = isMulti(key) ? rest : rest[0];
+      if (rest.length) next[key] = isMulti(key) ? rest : rest[0];
+      else delete next[key];
     }
     if (role) {
       next[role] = isMulti(role) ? [...asColumns(next[role]), column] : column;
@@ -157,7 +158,8 @@ export function MappingPanel(props: MappingPanelProps) {
     }
     const next: MappingDict = { ...mapping };
     const rest = asColumns(next[role]).filter((item) => item !== column);
-    next[role] = isMulti(role) ? rest : rest[0];
+    if (rest.length) next[role] = isMulti(role) ? rest : rest[0];
+    else delete next[role];
     props.onChange(next);
   };
 

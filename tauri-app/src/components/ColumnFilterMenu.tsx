@@ -313,6 +313,11 @@ export function ColumnFilterMenu({
  * 不会被误拆。拆不开返回 undefined。
  */
 function splitAccountCode(value: string): { code: string; name: string } | undefined {
+  // Oracle 等分段编码中的连字符不是「编码－名称」分界。
+  const spaced = /^([0-9A-Za-z][0-9A-Za-z._-]*)\s+(.+)$/.exec(value.trim());
+  if (spaced && /\d/.test(spaced[1]))
+    return { code: spaced[1], name: spaced[2].trim() };
+  if (/^[0-9A-Za-z._-]+$/.test(value.trim())) return undefined;
   const dash = value.indexOf("-");
   if (dash <= 0 || dash === value.length - 1) return undefined;
   const code = value.slice(0, dash).trim();

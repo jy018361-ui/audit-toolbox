@@ -38,6 +38,14 @@ describe("FA TB+JE account role presets", () => {
       name: "数据处理设备",
     });
     expect(splitFaAccount("1602")).toEqual({ code: "1602", name: "" });
+    expect(splitFaAccount("01-1401-000-000-000 固定资产-厂房 FA - Buildings")).toEqual({
+      code: "01-1401-000-000-000",
+      name: "固定资产-厂房 FA - Buildings",
+    });
+    expect(splitFaAccount("01-1001-000-000-000")).toEqual({
+      code: "01-1001-000-000-000",
+      name: "",
+    });
     // SAP 型余额表把编码拼在串尾
     expect(
       splitFaAccount("固定资产 固定资产-累计折旧-办公设备 1601130001"),
@@ -312,6 +320,34 @@ describe("FA TB+JE 真实主体×科目组合", () => {
     expect(rows).not.toContainEqual(jeOnly[0]);
   });
 
+  it("只有 TB 有主体映射时，复核项使用测算引擎的默认主体", () => {
+    const rows = faReviewEntityAccounts([
+      { entity: "3000", account: "130010 PP&E - Land 固定资产-土地" },
+      { entity: "3000", account: "140000 Accumulated Depreciation 累计折旧" },
+    ], false);
+    expect(rows.map((row) => row.entity)).toEqual(["默认主体", "默认主体"]);
+    expect(faAssignmentsForEntityAccounts(rows, []).map((row) => row.role)).toEqual([
+      "cost", "depreciation",
+    ]);
+  });
+
+  it("分段科目编码不按账套段合并，保留各原值和折旧科目", () => {
+    const names = [
+      "01-1001-000-000-000 库存现金 Cash on hand",
+      "01-1401-000-000-000 固定资产-厂房 FA - Buildings",
+      "01-1402-000-000-000 固定资产-机器设备 FA - Machinery",
+      "01-1451-000-000-000 累计折旧 Accumulated depreciation",
+    ];
+    const rows = faAssignmentsForEntityAccounts(
+      names.map((account) => ({ entity: "默认主体", account })), [],
+    );
+    const views = groupAssignmentViews(rows);
+    expect(views).toHaveLength(4);
+    expect(views.map((view) => view.role)).toEqual([
+      "cost", "cost", "depreciation", "excluded",
+    ]);
+  });
+
   it("只按账里真实存在的组合铺清单，主体 2000 名下不出现只有 2002 才有的科目", () => {
     const pairs = unionEntityAccounts(
       [
@@ -503,7 +539,7 @@ describe("FA TB+JE 三步向导（源码契约）", () => {
       '<td\n                        className="fa-tbje-account-cell"',
     );
     expect(source).toContain(
-      "faReviewEntityAccounts(inspects.tb?.entityAccounts)",
+      "faReviewEntityAccounts(inspects.tb?.entityAccounts, entityKeyEnabled)",
     );
     expect(source).toContain('ariaLabel="筛选科目"');
     expect(source).toContain('placeholder="输入科目编码或名称"');

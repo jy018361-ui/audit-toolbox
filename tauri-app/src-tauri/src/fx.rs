@@ -3033,6 +3033,11 @@ fn fixed_entity(params: &Value) -> &str {
 }
 
 fn entity_for<'a>(row: &'a RowRecord, mapping: &Map<String, Value>, params: &'a Value) -> &'a str {
+    // TB／JE 同时参与测算时，主体只有双侧都有映射才可作为匹配键。
+    // 预处理阶段写入此标记，避免逐行重复检查／克隆两份映射。
+    if params.get("__entityKeyEnabled").and_then(Value::as_bool) == Some(false) {
+        return fixed_entity(params);
+    }
     let mapped = cell(row, mapping, "entity").trim();
     if mapped.is_empty() {
         fixed_entity(params)
@@ -4330,6 +4335,10 @@ fn prepare_matched_entity_tables(params: &mut Value) -> Result<(), AppError> {
         .map_err(|e| error("INVALID_PARAMS", "TB来源参数无效。", Some(e.to_string())))?;
     let je_mapping = mapping_obj(params, "jeMapping");
     let tb_mapping = mapping_obj(params, "tbMapping");
+    params["__entityKeyEnabled"] = Value::Bool(ledger_mapping::entity_key_enabled(
+        !mapped_cols(&tb_mapping, "entity").is_empty(),
+        !mapped_cols(&je_mapping, "entity").is_empty(),
+    ));
     let je_raw = load_fx_table(&je_spec)?;
     let je_table = forward_filled_je_table(&je_raw, &je_mapping);
     let tb_table = load_fx_table(&tb_spec)?;
@@ -4460,6 +4469,39 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                 &table.rows,
                 &column_of,
             );
+            if kind == "JE" {
+                let validation_mask = ledger_mapping::ledger_validation_mask(
+                    &table.headers,
+                    &table.rows,
+                    &column_of,
+                );
+                let amount_columns = [
+                    "foreignAmount", "foreignDebit", "foreignCredit",
+                    "functionalAmount", "functionalDebit", "functionalCredit",
+                ]
+                .into_iter()
+                .flat_map(column_of)
+                .filter_map(|column| ledger_mapping::header_index(&table.headers, &column))
+                .collect::<HashSet<_>>();
+                let skipped = table.rows.iter().enumerate().filter_map(|(index, row)| {
+                    if validation_mask.get(index).copied().unwrap_or(false) {
+                        return None;
+                    }
+                    amount_columns.iter().any(|column| {
+                        row.get(*column).is_some_and(|raw| {
+                            let raw = raw.trim();
+                            !raw.is_empty() && ledger_mapping::parse_amount(raw).is_err()
+                        })
+                    }).then_some(table.header_row + table.header_depth + index)
+                }).collect::<Vec<_>>();
+                if !skipped.is_empty() {
+                    warnings.push(format!(
+                        "JE 已跳过 {} 行非正文噪音（金额列含无法解析的文本）；示例源文件行号：{}。这些行未参与测算，请核对。",
+                        skipped.len(),
+                        skipped.iter().take(5).map(ToString::to_string).collect::<Vec<_>>().join("、")
+                    ));
+                }
+            }
             for issue in amount_issues.iter().take(5) {
                 let source_row = table.header_row + table.header_depth + issue.row_index;
                 errors.push(format!(
@@ -4490,8 +4532,8 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                 source_data_years(&table, if kind == "JE" { "je" } else { "tb" }, &mapping);
             if let Some(year) = report_year {
                 if !data_years.is_empty() && !data_years.contains(&year) {
-                    errors.push(format!(
-                        "资产负债表日为{year}年，但{kind}数据期间为{}年",
+                    warnings.push(format!(
+                        "【期间不一致，请复核】资产负债表日为{year}年，但{kind}数据期间为{}年；测算继续，结果可能使用了错误年度的数据。",
                         data_years
                             .iter()
                             .map(ToString::to_string)
@@ -4506,10 +4548,11 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                 .filter(|(role, _)| !role.starts_with("__"))
                 .map(|(_, value)| value)
                 .flat_map(|v| match v {
-                    Value::String(s) => vec![s.clone()],
+                    Value::String(s) if !s.trim().is_empty() => vec![s.clone()],
                     Value::Array(a) => a
                         .iter()
                         .filter_map(Value::as_str)
+                        .filter(|s| !s.trim().is_empty())
                         .map(str::to_owned)
                         .collect(),
                     _ => vec![],
@@ -13333,6 +13376,32 @@ mod tests {
             scoped_entity_for(&row, &mapping, &params, ledger_mapping::EntitySide::Je),
             "母公司杭州管理处"
         );
+        let one_sided = json!({"fixedEntity":"默认主体", "__entityKeyEnabled":false});
+        assert_eq!(
+            scoped_entity_for(&row, &mapping, &one_sided, ledger_mapping::EntitySide::Tb),
+            "默认主体"
+        );
+    }
+
+    #[test]
+    fn 单侧主体汇兑预处理按默认主体匹配() {
+        let dir = std::env::temp_dir().join(format!("fx-one-sided-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb = dir.join("tb.csv");
+        let je = dir.join("je.csv");
+        std::fs::write(&tb, "主体,科目编码,科目名称,期初,期末\n3000,130010,固定资产,100,100\n").unwrap();
+        std::fs::write(&je, "日期,凭证号,科目编码,科目名称,借方,贷方\n2025-01-01,V1,130010,固定资产,1,0\n").unwrap();
+        let mut params = json!({
+            "tbSource":{"inputPath":tb,"headerRow":1,"headerDepth":1},
+            "jeSource":{"inputPath":je,"headerRow":1,"headerDepth":1},
+            "tbMapping":{"entity":"主体","accountCode":"科目编码","accountName":"科目名称"},
+            "jeMapping":{"date":"日期","id":"凭证号","accountCode":"科目编码","accountName":"科目名称"},
+            "fixedEntity":"默认主体"
+        });
+        prepare_matched_entity_tables(&mut params).unwrap();
+        assert_eq!(params["__entityKeyEnabled"], json!(false));
+        assert_eq!(params["__entityCoverage"]["matched"], json!(["默认主体"]));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn test_row_record(pairs: &[(&str, &str)]) -> RowRecord<'static> {
@@ -13623,6 +13692,8 @@ mod tests {
             "tbMapping": {
                 "accountCode": "科目编码",
                 "accountName": "科目名称",
+                "entity": "",
+                "auxiliary": [" ", ""],
                 "openingFunctionalDebit": "期初余额",
                 "closingFunctionalDebit": "期末余额",
                 "currency": "不存在列"
@@ -13637,6 +13708,10 @@ mod tests {
                 .any(|value| value.as_str().unwrap_or("").contains("映射列不存在")),
             "缺列必须明确报错：{errors:?}"
         );
+        assert!(
+            !errors.iter().any(|value| value.as_str().unwrap_or("") == "TB 映射列不存在："),
+            "空的可选映射应视为未映射：{errors:?}"
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -13649,7 +13724,7 @@ mod tests {
             concat!(
                 "日期,凭证号,摘要,科目编码,科目名称,币种,原币金额,本位币借方,本位币贷方\n",
                 "2025-04-15,记-0121,计提费用,221101,应付款项,RMB,,250000,\n",
-                "小计,,本页小计,,,,,179303144.55,179288993.61\n",
+                "小计,,本页小计,,,,,非数字小计,179288993.61\n",
                 ",2025-06-20,记-0136,计提利息,6402,主营业务成本,RMB,,,190375.02\n",
                 "2025-06-20,记-0136,计提利息,223201,应付利息,RMB,,,90000\n",
             ),
@@ -13679,6 +13754,25 @@ mod tests {
             errors.is_empty(),
             "噪音行不得触发金额或匹配ID错误：{errors:?}"
         );
+        let warnings = validation["warnings"].as_array().unwrap();
+        assert!(warnings.iter().any(|value| value.as_str().is_some_and(|message|
+            message.contains("已跳过 2 行非正文噪音") && message.contains("示例源文件行号：3、4")
+        )), "跳过的噪音金额行须向用户提示行号：{warnings:?}");
+        let different_year = validate_mapping(&json!({
+            "mode": "realized",
+            "fixedEntity": "测试主体",
+            "reportEnd": "2026-12-31",
+            "jeSource": {"inputPath": path.to_string_lossy(), "headerRow": 1, "headerDepth": 1},
+            "jeMapping": {
+                "date": "日期", "id": ["凭证号"], "summary": "摘要",
+                "accountCode": "科目编码", "accountName": "科目名称",
+                "currency": "币种", "foreignAmount": "原币金额",
+                "functionalDebit": "本位币借方", "functionalCredit": "本位币贷方"
+            }
+        })).unwrap();
+        assert_eq!(different_year["valid"], json!(true), "年份不同应提示而不阻断：{different_year}");
+        assert!(different_year["warnings"].as_array().unwrap().iter().any(|value|
+            value.as_str().is_some_and(|message| message.contains("期间不一致，请复核"))));
         let _ = std::fs::remove_file(path);
     }
 

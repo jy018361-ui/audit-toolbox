@@ -3325,6 +3325,11 @@ fn assignment_index_from_identities(
             .collect::<Vec<_>>()
     };
     let valid_names = ledger_mapping::validated_account_name_keys(&tuples(tb_ids), &tuples(je_ids));
+    // 单侧有主体列时，两侧身份都已归到默认主体。旧任务存档里确认项可能仍
+    // 挂原始主体（如诺桥美国 3000）；只有身份全集确实只剩默认主体才兼容它。
+    let only_default_entity = tb_ids.iter().chain(je_ids).all(|id| {
+        id.entity == ledger_mapping::DEFAULT_ENTITY
+    });
     let mut out = AssignmentIndex::default();
     for a in &rows {
         if !matches!(a.role.as_str(), "cost" | "depreciation") {
@@ -3340,7 +3345,7 @@ fn assignment_index_from_identities(
         for id in tb_ids.iter().chain(je_ids).filter(|id| {
             a.entity
                 .as_ref()
-                .is_none_or(|entity| entity.trim() == id.entity)
+                .is_none_or(|entity| entity.trim() == id.entity || only_default_entity)
                 && (norm(&a.account) == norm(&id.display)
                     || norm(&a.account) == norm(&id.legacy_display))
         }) {
@@ -3638,6 +3643,14 @@ mod tests {
         assert_eq!(totals.additions, 500.0);
         assert_eq!(totals.dep_charge, 100.0);
         assert_eq!(preview_json(&a)["reconciliationDifferences"], 0);
+        // 兼容修复前保存的任务：界面曾把确认科目挂在 TB 原始主体下。
+        params["accountAssignments"] = json!([
+            {"entity":"3000","account":"1601 机器设备","role":"cost","category":"机器设备"},
+            {"entity":"3000","account":"1602 累计折旧","role":"depreciation","category":"机器设备"}
+        ]);
+        let restored = analyze(&params, &AtomicBool::new(false)).unwrap();
+        assert_eq!(restored.tb.len(), 2);
+        assert!(!restored.je.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

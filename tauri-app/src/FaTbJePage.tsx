@@ -42,6 +42,7 @@ import { errorText } from "@/lib/errors";
 import {
   correctLedgerSourceKinds,
   DEFAULT_ENTITY,
+  ledgerEntityKeyEnabled,
   resolveRoleLabels,
   scanLedgerUploadSources,
   selectLedgerSourcePair,
@@ -142,15 +143,17 @@ export function splitFaAccount(account: string): {
   name: string;
 } {
   const value = account.trim();
-  const head = /^([0-9A-Za-z][0-9A-Za-z._]*)\s*[\s:：\-—/\\|]\s*(.*)$/.exec(
-    value,
-  );
+  // 分段编码中的连字符属于编码本身；优先用空格切完整 token。
+  const head = /^([0-9A-Za-z][0-9A-Za-z._-]*)\s+(.+)$/.exec(value);
   if (head && /\d/.test(head[1]))
     return { code: head[1], name: head[2].trim() };
-  const tail = /^(.*?)\s*[\s:：\-—/\\|]\s*([0-9][0-9A-Za-z._]*)$/.exec(value);
-  if (tail && tail[1].trim()) return { code: tail[2], name: tail[1].trim() };
-  if (/^[0-9A-Za-z._]+$/.test(value) && /\d/.test(value))
+  const compact = /^([0-9A-Za-z][0-9A-Za-z._-]*[0-9A-Za-z._])\s*[-:：—/\\|]\s*(.+)$/.exec(value);
+  if (compact && /\d/.test(compact[1]) && !/^[0-9A-Za-z._-]+$/.test(compact[2]))
+    return { code: compact[1], name: compact[2].trim() };
+  if (/^[0-9A-Za-z._-]+$/.test(value) && /\d/.test(value))
     return { code: value, name: "" };
+  const tail = /^(.*?)\s*[\s:：\-—/\\|]\s*([0-9][0-9A-Za-z._-]*)$/.exec(value);
+  if (tail && tail[1].trim()) return { code: tail[2], name: tail[1].trim() };
   return { code: "", name: value };
 }
 
@@ -379,8 +382,15 @@ export function unionEntityAccounts(
 /** 固定资产科目复核只以 TB 为范围；JE 只用于匹配变动与保留整张凭证。 */
 export function faReviewEntityAccounts(
   tb: EntityAccountPair[] | undefined,
+  entityKeyEnabled = true,
 ): EntityAccountPair[] {
-  return unionEntityAccounts(tb, undefined);
+  return unionEntityAccounts(
+    tb?.map((pair) => ({
+      ...pair,
+      entity: entityKeyEnabled ? pair.entity : DEFAULT_ENTITY,
+    })),
+    undefined,
+  );
 }
 
 /**
@@ -692,20 +702,22 @@ export function FaTbJePage() {
   );
   // 主体是公共映射字段；源表没有主体列时由引擎统一使用默认主体。
   const entitiesReady = Boolean(inspects.tb && inspects.je);
+  const entityKeyEnabled = ledgerEntityKeyEnabled(mappings.tb, mappings.je);
   const entities = useMemo(() => {
+    if (!entityKeyEnabled) return [DEFAULT_ENTITY];
     const detected = [...new Set(inspects.tb?.entities ?? [])].filter(Boolean);
     return detected.length ? detected : [DEFAULT_ENTITY];
-  }, [inspects.tb]);
+  }, [inspects.tb, entityKeyEnabled]);
   // 科目复核只以 TB 中真实存在的「主体×科目」为范围。JE 是变动明细来源，
   // 其中的对方科目不能进入固定资产科目分类。旧后端／浏览器预览没有
   // entityAccounts 时，回退为 TB 主体 × TB 科目。
   const entityAccountPairs = useMemo(
-    () => faReviewEntityAccounts(inspects.tb?.entityAccounts),
-    [inspects.tb?.entityAccounts],
+    () => faReviewEntityAccounts(inspects.tb?.entityAccounts, entityKeyEnabled),
+    [inspects.tb?.entityAccounts, entityKeyEnabled],
   );
   const entityScope = useEntityScopeConfirmation({
-    tbEntities: inspects.tb?.entities ?? [],
-    jeEntities: inspects.je?.entities ?? [],
+    tbEntities: entityKeyEnabled ? (inspects.tb?.entities ?? []) : [],
+    jeEntities: entityKeyEnabled ? (inspects.je?.entities ?? []) : [],
     initialSelection: faTbJeDraftCache?.entityScope,
     onInvalidate: () => {
       activeJobId.current = "";

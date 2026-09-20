@@ -1951,10 +1951,7 @@ fn fold_tb_accounts(
         .unwrap_or_default();
     let entity_key_enabled = ledger_mapping::entity_key_enabled(
         !column_indexes(&tb, &tb_map, "entity").is_empty(),
-        has_je
-            && je_mapping
-                .get("entity")
-                .is_some_and(|value| !value.is_null() && value != ""),
+        has_je && mapped_roles(&je_mapping).contains("entity"),
     );
     let account_cols = account_columns(&tb, &tb_map);
     if account_cols.is_empty() {
@@ -5307,6 +5304,11 @@ mod tests {
 
     #[test]
     fn 存款主体归集按账表侧别应用且未选主体不变() {
+        // 历史任务可能保存 entity:"" 或 entity:[" "]；均不启用主体键。
+        for value in [json!(""), json!([" ", ""]), Value::Null] {
+            let mapping = serde_json::from_value::<Map<String, Value>>(json!({"entity": value})).unwrap();
+            assert!(!mapped_roles(&mapping).contains("entity"));
+        }
         let params = json!({"entityScope": {
             "mode": "aggregate",
             "mappings": [{"side":"tb", "source":"母公司杭州管理处", "target":"母公司"}]

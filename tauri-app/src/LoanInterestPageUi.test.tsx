@@ -1302,9 +1302,13 @@ it("同一科目多笔借款明细展开为子行逐笔设置利率，改类型�
 
 /** TB＋JE 第二步进入口（底部「下一步」与步骤条导航共用）的币种衔接验证：
  *  同一验证输入已通过后，反复进出第二步不得重复请求 ledger.currency_link。 */
-function renderLoanTbJeWorkspace(entities: string[]) {
-  const tbHeaders = ["科目编码", "科目名称", "期初余额", "期末余额"];
-  const jeHeaders = ["记账日期", "凭证号", "科目编码", "贷方金额"];
+function renderLoanTbJeWorkspace(entities: string[], jeEntityMapped = true) {
+  const tbHeaders = entities.length
+    ? ["主体", "科目编码", "科目名称", "期初余额", "期末余额"]
+    : ["科目编码", "科目名称", "期初余额", "期末余额"];
+  const jeHeaders = entities.length && jeEntityMapped
+    ? ["主体", "记账日期", "凭证号", "科目编码", "贷方金额"]
+    : ["记账日期", "凭证号", "科目编码", "贷方金额"];
   const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
     kind,
     scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
@@ -1326,8 +1330,8 @@ function renderLoanTbJeWorkspace(entities: string[]) {
     // TB 故意只建议科目两列：金额缺失拦住自动生成利率表，专注导航行为本身。
     suggestedMapping:
       kind === "tb"
-        ? { accountCode: "科目编码", accountName: "科目名称" }
-        : { date: "记账日期", accountCode: "科目编码" },
+        ? { ...(entities.length ? { entity: "主体" } : {}), accountCode: "科目编码", accountName: "科目名称" }
+        : { ...(entities.length && jeEntityMapped ? { entity: "主体" } : {}), date: "记账日期", accountCode: "科目编码" },
   });
   mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
   mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
@@ -1416,4 +1420,13 @@ it("多主体账套第二步合并表显示主体列", async () => {
     .findByRole("combobox", { name: "2001 短期借款的科目类型" })
     .then((element) => element.closest("tr")!);
   expect(loanRow.querySelector("td")?.textContent).toBe("—");
+});
+
+it("仅 TB 有主体映射时按默认主体复核，不显示原始主体列", async () => {
+  renderLoanTbJeWorkspace(["甲公司", "乙公司"], false);
+  await screen.findByText("已识别：TB 科目余额表");
+  await screen.findByText("已识别：JE 序时账");
+  fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
+  await screen.findByText("确认借款及利息支出科目并设置利率");
+  expect(screen.queryByRole("columnheader", { name: "主体" })).not.toBeInTheDocument();
 });

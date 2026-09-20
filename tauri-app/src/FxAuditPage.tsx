@@ -24,6 +24,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   DEFAULT_ENTITY,
+  ledgerEntityKeyEnabled,
+  ledgerHasMappedRole,
   correctLedgerSourceKinds,
   missingGoldIdentity,
   resolveRoleLabels,
@@ -1111,19 +1113,24 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
   const activeJobMethod = useRef<"fx.preview" | "fx.export">("fx.preview");
   const uploadDropRef = useRef<HTMLDivElement>(null);
   const allowedModes = fxAllowedModes(Boolean(jePath), Boolean(tbPath));
+  const entityKeyEnabled = je && tb
+    ? ledgerEntityKeyEnabled(tbMapping, jeMapping)
+    : je ? ledgerHasMappedRole(jeMapping, "entity") : ledgerHasMappedRole(tbMapping, "entity");
   const entities = useMemo(
-    () => [...new Set([...(je?.entities ?? []), ...(tb?.entities ?? [])])],
-    [je, tb],
+    () => entityKeyEnabled
+      ? [...new Set([...(je?.entities ?? []), ...(tb?.entities ?? [])])]
+      : [],
+    [je, tb, entityKeyEnabled],
   );
   // 多主体账套：第二步科目确认的屏幕表与导出确认表都加「主体」列；
   // 单主体保持原有三列布局，不占列宽。
   const showEntityColumn = useMemo(
-    () => fxMultiEntityNames(je?.entities ?? [], tb?.entities ?? []).length > 1,
-    [je?.entities, tb?.entities],
+    () => entityKeyEnabled && fxMultiEntityNames(je?.entities ?? [], tb?.entities ?? []).length > 1,
+    [je?.entities, tb?.entities, entityKeyEnabled],
   );
   const entityScope = useEntityScopeConfirmation({
-    tbEntities: tb?.entities ?? [],
-    jeEntities: je?.entities ?? [],
+    tbEntities: entityKeyEnabled ? (tb?.entities ?? []) : [],
+    jeEntities: entityKeyEnabled ? (je?.entities ?? []) : [],
     onInvalidate: () => {
       activeJob.current = "";
       setResult(undefined);
@@ -3003,9 +3010,12 @@ export function fxAttachRole(
     for (const [key, value] of Object.entries(next)) {
       if (key === CURRENCY_TEXT) continue;
       if (Array.isArray(value)) {
-        if (value.includes(header))
-          next[key] = value.filter((x) => x !== header);
-      } else if (value === header) next[key] = "";
+        if (value.includes(header)) {
+          const remaining = value.filter((x) => x !== header);
+          if (remaining.length) next[key] = remaining;
+          else delete next[key];
+        }
+      } else if (value === header) delete next[key];
     }
   }
   if (!MULTI_COLUMN_ROLES.has(role)) {
@@ -3029,8 +3039,11 @@ export function fxDetachRole(
 ): Record<string, string | string[]> {
   const next = { ...mapping };
   const value = next[role];
-  if (Array.isArray(value)) next[role] = value.filter((x) => x !== header);
-  else if (value === header) next[role] = "";
+  if (Array.isArray(value)) {
+    const remaining = value.filter((x) => x !== header);
+    if (remaining.length) next[role] = remaining;
+    else delete next[role];
+  } else if (value === header) delete next[role];
   return next;
 }
 
@@ -3273,6 +3286,9 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
   );
   const groups = summarizeQuality(quality);
   if (!warnings.length && !groups.length && !tbRows.length) return null;
+  const prominentWarnings = warnings.filter((message) =>
+    message.startsWith("【期间不一致") || message.startsWith("JE 已跳过"),
+  );
   const money = (value: unknown) =>
     new Intl.NumberFormat("zh-CN", {
       minimumFractionDigits: 2,
@@ -3287,6 +3303,13 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
     warnings.length ? `${warnings.length} 项其他提示` : "",
   ].filter(Boolean).join(" · ") || "已核对 TB 来源";
   return (
+    <>
+    {prominentWarnings.length > 0 && (
+      <div className="fx-prominent-warnings" role="status">
+        <strong>测算已完成，请复核以下来源问题</strong>
+        <ul>{prominentWarnings.map((message, index) => <li key={index}>{message}</li>)}</ul>
+      </div>
+    )}
     <details className="fx-checks">
       <summary>
         <strong>检查与勾稽</strong>
@@ -3368,6 +3391,7 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
         )}
       </div>
     </details>
+    </>
   );
 }
 /** 一句话说清这条隔离属于哪种粒度问题：先摆证据、再下结论，用户不必读完整段 detail。 */

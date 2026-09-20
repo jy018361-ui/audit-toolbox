@@ -337,10 +337,17 @@ fn suggest_interest_expense_account(
     {
         return false;
     }
+    // 编码性质位：分段编码（「01-4501-…」）首段只是集团/账套号，性质位取
+    // 第一个真正的科目层级段（首个 ≥3 位数字段）的首位。资产/负债/共同类
+    // 不是费用化利息（1604004 在建工程-利息费用是资本化利息）；4 不再一刀
+    // 切排除——Oracle 等自定义科目表把损益放在 4 位段（艾维特苏州 4501
+    // 财务费用-利息支出），名称侧已要求带明确的利息支出语义。
     let head = ledger_mapping::normalize_account_code(code)
-        .chars()
-        .next();
-    if matches!(head, Some('1') | Some('2') | Some('3') | Some('4')) {
+        .split(['-', '.', '—'])
+        .find(|segment| segment.chars().filter(char::is_ascii_digit).count() >= 3)
+        .and_then(|segment| segment.chars().next())
+        .or_else(|| ledger_mapping::normalize_account_code(code).chars().next());
+    if matches!(head, Some('1') | Some('2') | Some('3')) {
         return false;
     }
     [
@@ -396,9 +403,15 @@ fn suggest_loan_account(
         context
     ));
     let nonzero_balance = opening.abs() > 0.005 || closing.abs() > 0.005;
+    // 编码性质位：分段编码（「01-2101-…」）首段只是集团/账套号，性质位取
+    // 第一个真正的科目层级段（首个 ≥3 位数字段）——否则去前导零后公司段
+    // 打头的「1」会把名称明写「短期借款-XX银行」的户整批挡成资产类
+    // （艾维特苏州样例）。与存款利息模块同款口径。
     let asset_or_expense = normalized_code
-        .chars()
-        .next()
+        .split(['-', '.', '—'])
+        .find(|segment| segment.chars().filter(char::is_ascii_digit).count() >= 3)
+        .and_then(|segment| segment.chars().next())
+        .or_else(|| normalized_code.chars().next())
         .is_some_and(|head| matches!(head, '1' | '5' | '6'));
     if ["一年内到期", "一年內到期"]
         .iter()
@@ -2088,6 +2101,7 @@ fn aggregate_large_je_once(
     period: Option<(NaiveDate, NaiveDate)>,
     detail_columns: &HashMap<LoanScope, String>,
     match_currency: bool,
+    functional_currency: &str,
     progress: &dyn Fn(&str, usize, usize, &str),
     cancel: &AtomicBool,
 ) -> Result<
@@ -2178,12 +2192,10 @@ fn aggregate_large_je_once(
             .map(|value| value.trim().to_string())
             .unwrap_or_default();
         let loan_key = norm(&loan_id);
-        let je_currency = loan_currency(&disk_role_text(
-            &headers,
-            &row.values,
-            &prepared_mapping,
-            "currency",
-        ));
+        let je_currency = loan_currency(
+            &disk_role_text(&headers, &row.values, &prepared_mapping, "currency"),
+            functional_currency,
+        );
         let date_indexes = mapped_names(&prepared_mapping, "je", "date")
             .iter()
             .filter_map(|name| headers.iter().position(|header| header == name))
@@ -2352,12 +2364,15 @@ fn currency_fallback_mode(params: &Value) -> Result<Option<CurrencyFallbackMode>
     }
 }
 
-/// 币种列按“外币币种”语义使用：空白和人民币均归入本位币桶，
-/// 外币仅做大小写/中文别名归一，不反向质疑用户的列映射。
-fn loan_currency(raw: &str) -> String {
+/// 币种别名归一：空白与「本位币」字样返回空串（本位币语义），人民币别名
+/// 折成 CNY，外币做大小写/中文别名归一。认不出的取值同样返回空串——
+/// 用户定案（2026-09-19，与 fx 同口径）不再原文直通，货币性科目的币种由
+/// 确认步骤兜底。
+fn currency_code(raw: &str) -> String {
     let compact = raw.trim().replace([' ', '\t', '-', '_'], "").to_uppercase();
     match compact.as_str() {
-        "" | "CNY" | "RMB" | "人民币" | "人民币元" | "本位币" => String::new(),
+        "" | "本位币" => String::new(),
+        "CNY" | "RMB" | "人民币" | "人民币元" => "CNY".into(),
         "USD" | "美元" | "美金" => "USD".into(),
         "HKD" | "港币" | "港元" => "HKD".into(),
         "EUR" | "欧元" => "EUR".into(),
@@ -2366,7 +2381,40 @@ fn loan_currency(raw: &str) -> String {
         "AUD" | "澳元" | "澳币" => "AUD".into(),
         "CAD" | "加元" | "加币" => "CAD".into(),
         "SGD" | "新加坡元" | "新币" => "SGD".into(),
-        _ => compact,
+        // 公共内核的币种表更全（韩元、新台币等 26 种）。
+        _ if ledger_mapping::normalize_currency_code(raw.trim()).is_some() => {
+            ledger_mapping::normalize_currency_code(raw.trim()).unwrap().into()
+        }
+        _ => String::new(),
+    }
+}
+
+/// 币种列按“外币币种”语义使用：空白、认不出的取值与等于本位币的币种均
+/// 归入本位币桶（空串），其余外币返回三位代码，不反向质疑用户的列映射。
+/// 本位币来自前端参数（缺省 CNY，即“空白/人民币=本位币”的旧口径）；
+/// 美元本位币的海外主体里，余额表本位币行留空、序时账逐行标 USD 的分录
+/// 只有指定本位币后才能与空白行同桶、按科目归集（诺桥美国样例）。
+fn loan_currency(raw: &str, functional: &str) -> String {
+    let code = currency_code(raw);
+    if code.is_empty() || code == functional {
+        String::new()
+    } else {
+        code
+    }
+}
+
+/// 读取前端传入的本位币参数并归一到三位代码；缺省按人民币口径返回 CNY。
+fn functional_currency_param(params: &Value) -> String {
+    let raw = params
+        .get("functionalCurrency")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let code = currency_code(raw);
+    if code.is_empty() {
+        "CNY".into()
+    } else {
+        code
     }
 }
 
@@ -2617,6 +2665,7 @@ fn fold_loan_rows(
     opening_self_signed: bool,
     closing_self_signed: bool,
     split_by_currency: bool,
+    functional_currency: &str,
 ) -> Vec<LoanFold> {
     let mut order: Vec<(String, String, String, String)> = vec![];
     let mut folds: HashMap<(String, String, String, String), LoanFold> = HashMap::new();
@@ -2655,7 +2704,10 @@ fn fold_loan_rows(
             norm(&name)
         };
         let currency = if split_by_currency {
-            loan_currency(&role_text(tb, row, tm, "tb", "currency"))
+            loan_currency(
+                &role_text(tb, row, tm, "tb", "currency"),
+                functional_currency,
+            )
         } else {
             String::new()
         };
@@ -2733,6 +2785,9 @@ fn calculate_tb_impl(
     force_disk_je: bool,
 ) -> Result<Vec<LoanRow>, AppError> {
     let currency_mode = currency_fallback_mode(params)?;
+    // 本位币由前端参数指定（缺省人民币口径）：美元等外币本位币主体的
+    // 币种桶归一依赖它，见 loan_currency 的说明。
+    let functional_currency = functional_currency_param(params);
     // TB归集本身不应因测算期间尚未填写而失败；拆分年/月/日时
     // 才用报告期年份补全，已有完整日期不依赖该字段。
     let report_year = params
@@ -2743,7 +2798,11 @@ fn calculate_tb_impl(
     let entity_scope = entity_scope(params);
     let (tb, tm) = source(params, "tbSource")?;
     let (je_spec, je_mapping) = source_config(params, "jeSource")?;
-    let split_by_currency = currency_mode != Some(CurrencyFallbackMode::Functional)
+    // 币种拆分只发生在用户显式选择「按币种两点法」时：默认与「本位币匡算」
+    // 都不把币种并入账户键，按主体＋科目直接归集、不列示币种——余额表
+    // 本位币行币种留空、序时账逐行标币种的海外主体默认即可按科目匹配
+    // （诺桥美国样例）。本位币参数仅在「按币种」拆分时参与分桶。
+    let split_by_currency = currency_mode == Some(CurrencyFallbackMode::TwoPointByCurrency)
         && !mapped_names(&tm, "tb", "currency").is_empty();
     let two_point_by_currency = currency_mode == Some(CurrencyFallbackMode::TwoPointByCurrency);
     let entity_key_enabled = ledger_mapping::entity_key_enabled(
@@ -2832,6 +2891,7 @@ fn calculate_tb_impl(
         opening_self_signed,
         closing_self_signed,
         split_by_currency,
+        &functional_currency,
     );
     let period = params
         .get("reportStart")
@@ -2911,6 +2971,7 @@ fn calculate_tb_impl(
             period,
             &detail_columns,
             split_by_currency,
+            &functional_currency,
             progress,
             cancel,
         )?;
@@ -3027,7 +3088,10 @@ fn calculate_tb_impl(
                         ledger_mapping::EntitySide::Je,
                         &entity_scope,
                     );
-                    let je_currency = loan_currency(&role_text(je, jr, jm, "je", "currency"));
+                    let je_currency = loan_currency(
+                        &role_text(je, jr, jm, "je", "currency"),
+                        &functional_currency,
+                    );
                     // 三层科目配对：①编码直归；②编码撞车时明细优先、名称消歧；
                     // ③都消不开不归集（TB 发生额兜底即编码汇总口径）。任一侧没
                     // 映射编码时退回「科目文本全等」的旧口径。
@@ -5540,6 +5604,105 @@ mod loan_form_tests {
 mod tests {
     use super::*;
 
+    /// 用户定案（2026-09-19，与 fx 同口径）：币种取值认不出不再原文直通，
+    /// 按本位币（空串）处理；公共内核币种表认得出的（如韩元）照常保留。
+    /// 2026-09-20 补充：本位币由前端参数指定，美元本位币主体的空白 TB 行
+    /// 与逐行标 USD 的 JE 分录归入同一桶（诺桥美国样例）。
+    #[test]
+    fn 借款币种认不出按本位币空串处理() {
+        assert_eq!(loan_currency("人民币元", "CNY"), "");
+        assert_eq!(loan_currency("美元", "CNY"), "USD");
+        assert_eq!(loan_currency("KRW", "CNY"), "KRW", "公共内核币种表应认出韩元");
+        assert_eq!(loan_currency("币种待定", "CNY"), "", "认不出的取值不得原文直通");
+        // 本位币 = USD：空白行与 USD 分录同入本位币桶，人民币行保持外币桶。
+        assert_eq!(loan_currency("", "USD"), "");
+        assert_eq!(loan_currency("USD", "USD"), "");
+        assert_eq!(loan_currency("美元", "USD"), "");
+        assert_eq!(loan_currency("RMB", "USD"), "CNY");
+        assert_eq!(loan_currency("EUR", "USD"), "EUR");
+        assert_eq!(functional_currency_param(&json!({})), "CNY");
+        assert_eq!(
+            functional_currency_param(&json!({"functionalCurrency": "美元"})),
+            "USD"
+        );
+        assert_eq!(
+            functional_currency_param(&json!({"functionalCurrency": "USD"})),
+            "USD"
+        );
+    }
+
+    /// 艾维特苏州（Oracle 段组合编码）：首段 01 是公司/账套段，科目类别在
+    /// 后续段。性质位取首个 ≥3 位数字段后，名称明写借款本金的户不再被
+    /// 公司段打头的「1」整批否决；资本化利息与应付利息族照旧拦在门外。
+    #[test]
+    fn 段式编码的借款科目不被公司段挡掉() {
+        let loan = suggest_loan_account(
+            "01-2101-032-000-000",
+            "短期借款-工商银行苏州分行 ST borrowing ICBC",
+            "",
+            0.0,
+            40_000_000.0,
+            "",
+        );
+        assert!(
+            loan.is_loan,
+            "名称明写短期借款，公司段不得当成资产类整行否决：{}",
+            loan.reason
+        );
+        let long_term = suggest_loan_account(
+            "01-2500-030-000-000",
+            "长期借款-三井住友银行(日元) LT borrowing SMBC JPY",
+            "",
+            39_680_000.0,
+            37_200_000.0,
+            "",
+        );
+        assert!(long_term.is_loan, "{}", long_term.reason);
+        let capitalized = suggest_loan_account(
+            "01-1604-031-000-000",
+            "在建工程-借款费用",
+            "",
+            0.0,
+            1_000_000.0,
+            "",
+        );
+        assert!(!capitalized.is_loan, "资本化利息不得预选为借款本金");
+        // 旧口径回归：纯 6 位编码的行为不变。
+        let plain = suggest_loan_account("220000", "短期借款-Sierra Bank", "", 100_000.0, 0.0, "");
+        assert!(plain.is_loan);
+    }
+
+    /// 艾维特苏州 4501 财务费用-利息支出：Oracle 科目表把损益放在 4 位段，
+    /// 编码性质位不再一刀切排除 4；应付利息族与资本化利息仍不预选。
+    #[test]
+    fn 段式编码的利息支出科目可预选() {
+        assert!(suggest_interest_expense_account(
+            "01-4501-000-000-000",
+            "财务费用-利息支出",
+            "",
+            ""
+        ));
+        assert!(!suggest_interest_expense_account(
+            "01-2220-031-000-000",
+            "应付利息-三井住友银行",
+            "",
+            ""
+        ));
+        assert!(!suggest_interest_expense_account(
+            "01-1604-031-000-000",
+            "在建工程-利息费用",
+            "",
+            ""
+        ));
+        // 旧口径回归：CAS 六位编码的资本化利息（1 资产）照旧不选。
+        assert!(!suggest_interest_expense_account(
+            "1604004",
+            "在建工程-利息费用",
+            "",
+            ""
+        ));
+    }
+
     #[test]
     fn 借款je新编码不继承上一科目名称() {
         let headers = ["编码", "科目", "日期"].map(str::to_owned).to_vec();
@@ -7107,6 +7270,20 @@ mod tests {
         params["loanAccounts"] = json!(["2001"]);
         params["tbSource"] = json!({"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","loanId":"借款","currency":"币种","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷"}});
         params["jeSource"] = json!({"source":{"inputPath":path,"sheet":"JE","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","loanId":"借款","date":"日期","currency":"币种","functionalDebit":"借方","functionalCredit":"贷方"}});
+
+        // 默认（未选多币种口径）不拆币种：与「本位币匡算」同样合并成一行，
+        // 币种只在用户显式选择「按币种」方案时才列示。
+        let default_merged = run_preview(&params).unwrap();
+        assert_eq!(
+            default_merged["rows"].as_array().unwrap().len(),
+            1,
+            "{default_merged:#?}"
+        );
+        assert_eq!(default_merged["rows"][0]["currency"], "本位币汇总");
+        assert_eq!(
+            default_merged["rows"][0]["openingPrincipal"],
+            json!(3_000_000.0)
+        );
 
         params["currencyFallbackMode"] = json!("functional");
         let functional = run_preview(&params).unwrap();

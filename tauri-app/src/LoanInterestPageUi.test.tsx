@@ -515,10 +515,14 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   fireEvent.click(screen.getByRole("button", { name: "下一页" }));
   expect(screen.getByText("第 2 / 3 页")).toBeVisible();
   expect(screen.getByText(/已切换到第 2 页/)).toBeVisible();
-  // 「第 2 项 设置借款利率」卡已并入同一张表：利率动作按钮在合并卡工具栏里。
+  // 「第 2 项 设置借款利率」卡已并入同一张表：生成利率表已全自动化，按钮删除，
+  // 映射缺失时只显示等待空态（回第一步补齐映射后再进入本步骤会自动生成）。
   expect(
-    screen.getByRole("button", { name: "生成借款利率表" }),
-  ).toBeVisible();
+    screen.queryByRole("button", { name: "生成借款利率表" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "重新生成借款利率表" }),
+  ).not.toBeInTheDocument();
   expect(screen.getByRole("region", { name: "等待生成利率明细" })).toBeVisible();
   // 金额映射没补齐：下一步仍拦，但不再出现「借款明细/辅助核算」的旧提示。
   expect(
@@ -527,11 +531,11 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   expect(
     screen.queryByText(/尚未映射「借款明细\/辅助核算」/),
   ).not.toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "生成借款利率表" })).toBeDisabled();
 });
 
-/** 映射齐全时生成借款利率表，手填年利率后下一步放行、测算带确认清单与利率。 */
-it("生成借款利率表并手填利率后可进入测算", async () => {
+/** 映射齐全时进入第二步自动生成利率表；手填年利率后直接「下一步」，进入第三步
+ *  即自动用当前利率重算（携带 rateRows），测算利息不再停留在旧快照的 0。 */
+it("手填利率后直接下一步：自动用当前利率重算，测算利息非 0", async () => {
   const tbHeaders = ["科目编码", "科目名称", "辅助核算", "期初余额", "期末余额"];
   const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "贷方金额"];
   const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
@@ -681,6 +685,50 @@ it("生成借款利率表并手填利率后可进入测算", async () => {
     screen.getByRole("button", { name: "下一步：测算与底稿" }),
   ).toBeEnabled();
   fireEvent.click(screen.getByRole("button", { name: "下一步：测算与底稿" }));
+  // 缺陷回归：进入第三步即用当前已填利率自动重算（loan.preview 携带 rateRows），
+  // 不再要求先点「重新生成借款利率表」。
+  await waitFor(() =>
+    expect(mock.jobStart).toHaveBeenLastCalledWith(
+      "loan.preview",
+      expect.objectContaining({
+        loanAccounts: ["2001"],
+        interestExpenseAccounts: ["66030001"],
+        rateRows: [
+          expect.objectContaining({
+            loanId: "2001 短期借款",
+            rateType: "fixed",
+            fixedRate: 0.0385,
+          }),
+        ],
+      }),
+    ),
+  );
+  // 重算完成：结果表带出非 0 的测算利息（旧快照生成于填利率之前，利息为 0）。
+  mock.jobEvents.callback?.({
+    jobId: "job-rates",
+    phase: "completed",
+    result: {
+      rows: [
+        {
+          entity: "浙江沪杭甬高速公路股份有限公司",
+          accountCode: "200101",
+          accountName: "短期借款_银行借款",
+          auxiliary: "A银行",
+          loanId: "2001 短期借款",
+          openingPrincipal: 1000000,
+          closingPrincipal: 900000,
+          rateType: "fixed",
+          fixedRate: 0.0385,
+          calculatedInterest: 38500,
+          matchStatus: "已匹配",
+          matchBasis: "匹配 2 条 JE（编码 2）",
+        },
+      ],
+      summary: { loanCount: 1 },
+    },
+  });
+  expect(await screen.findByText("38,500")).toBeVisible();
+  // 导出底稿沿用同一份确认清单与利率。
   fireEvent.click(screen.getByRole("button", { name: "生成 Excel 底稿" }));
   await waitFor(() =>
     expect(mock.jobStart).toHaveBeenCalledWith(
@@ -698,6 +746,330 @@ it("生成借款利率表并手填利率后可进入测算", async () => {
       }),
     ),
   );
+});
+
+/** 本位币选择（TB 模式）：默认人民币口径不传 functionalCurrency；海外主体
+ *  选择美元后，利率明细快照过期并自动按新口径重跑 loan.preview、携带
+ *  functionalCurrency——引擎据此把币种留空的 TB 行与逐行标 USD 的 JE
+ *  分录归入同一币种桶（诺桥美国样例）。 */
+it("选择本位币后利率明细按新口径自动重算并携带 functionalCurrency", async () => {
+  const tbHeaders = ["科目编码", "科目名称", "辅助核算", "期初余额", "期末余额"];
+  const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "贷方金额"];
+  const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
+    kind,
+    scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
+    sheet,
+    headerRow: 1,
+    headerDepth: 1,
+    headers,
+    preview: [headers.map(() => "x")],
+  });
+  const fullMapping = {
+    accountCode: "科目编码",
+    accountName: "科目名称",
+    auxiliary: "辅助核算",
+    openingFunctionalAmount: "期初余额",
+    closingFunctionalAmount: "期末余额",
+  };
+  const inspect = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
+    headers,
+    preview: [headers.map(() => "x")],
+    rowCount: 2,
+    sheet,
+    sheets: [sheet],
+    headerRow: 1,
+    headerDepth: 1,
+    suggestedMapping:
+      kind === "tb"
+        ? fullMapping
+        : {
+            date: "记账日期",
+            id: "凭证号",
+            accountCode: "科目编码",
+            accountName: "科目名称",
+            summary: "摘要",
+          },
+  });
+  mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
+  mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
+    const p = params as { kind?: string; source?: { inputPath?: string } };
+    if (method === "ledger.forms") return [];
+    if (method === "ledger.currency_link")
+      return { required: false, verified: true, missingCurrencies: [], affectedGroupCount: 0 };
+    if (method === "deposit.classify_source") {
+      return p.source?.inputPath?.endsWith("je.xlsx")
+        ? classify("je", "序时账", jeHeaders)
+        : classify("tb", "余额表", tbHeaders);
+    }
+    if (method === "loan.inspect") {
+      return p.kind === "je"
+        ? inspect("je", "序时账", jeHeaders)
+        : inspect("tb", "余额表", tbHeaders);
+    }
+    if (method === "loan.tb_accounts") {
+      return {
+        accounts: [
+          { key: "241000", code: "241000", name: "长期借款-美洲银行", account: "241000 长期借款-美洲银行", opening: 8000000, closing: 6400000 },
+        ],
+      };
+    }
+    throw new Error(`unexpected ${method}`);
+  });
+  render(<LoanInterestPage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: "TB＋JE" }));
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "拖放或选择 TB、序时账文件（可同时选择）",
+    }),
+  );
+  await screen.findByText("已识别：TB 科目余额表");
+  await screen.findByText("已识别：JE 序时账");
+  mock.jobStart.mockResolvedValue("job-rates");
+  fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
+  expect(await screen.findByText("确认借款及利息支出科目并设置利率")).toBeVisible();
+  await waitFor(() =>
+    expect(mock.jobStart).toHaveBeenCalledWith(
+      "loan.preview",
+      expect.objectContaining({ loanAccounts: ["241000"] }),
+    ),
+  );
+  // 默认人民币口径：payload 不携带本位币参数。
+  const previewCalls = mock.jobStart.mock.calls.filter(
+    ([method]) => method === "loan.preview",
+  );
+  const defaultPreview = previewCalls[previewCalls.length - 1][1] as Record<
+    string,
+    unknown
+  >;
+  expect(defaultPreview.functionalCurrency).toBeUndefined();
+  mock.jobEvents.callback?.({
+    jobId: "job-rates",
+    phase: "completed",
+    result: {
+      rows: [
+        {
+          entity: "诺桥美国",
+          accountCode: "241000",
+          accountName: "长期借款-美洲银行",
+          auxiliary: "",
+          loanId: "241000 长期借款-美洲银行",
+          openingPrincipal: 8000000,
+          closingPrincipal: 6400000,
+          matchStatus: "待复核",
+          matchBasis: "未匹配 JE，采用 TB 发生额（编码汇总口径）",
+        },
+      ],
+      summary: { loanCount: 1 },
+    },
+  });
+  expect(await screen.findByText("长期借款-美洲银行")).toBeVisible();
+  // 海外主体切换本位币为美元：利率明细自动按新口径重跑并携带参数。
+  fireEvent.change(screen.getByRole("combobox", { name: "本位币" }), {
+    target: { value: "USD" },
+  });
+  await waitFor(() =>
+    expect(mock.jobStart).toHaveBeenLastCalledWith(
+      "loan.preview",
+      expect.objectContaining({ functionalCurrency: "USD" }),
+    ),
+  );
+  mock.jobEvents.callback?.({
+    jobId: "job-rates",
+    phase: "completed",
+    result: {
+      rows: [
+        {
+          entity: "诺桥美国",
+          accountCode: "241000",
+          accountName: "长期借款-美洲银行",
+          auxiliary: "",
+          loanId: "241000 长期借款-美洲银行",
+          openingPrincipal: 8000000,
+          closingPrincipal: 6400000,
+          matchStatus: "已匹配",
+          matchBasis: "匹配 1 条 JE（编码 1）",
+        },
+      ],
+      summary: { loanCount: 1 },
+    },
+  });
+  expect(await screen.findByText("匹配 1 条 JE（编码 1）")).toBeVisible();
+});
+
+/** 缺陷回归：手动把某行科目类型改成「借款科目」后，无需点「重新生成借款利率表」，
+ *  页面自动按新选择重跑 loan.preview，利率输入随新明细立即可编辑；改回
+ *  「排除」时利率输入随之消失。 */
+it("科目类型改为借款后利率输入立即可编辑（自动重生成）", async () => {
+  const tbHeaders = ["科目编码", "科目名称", "辅助核算", "期初余额", "期末余额"];
+  const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "贷方金额"];
+  const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
+    kind,
+    scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
+    sheet,
+    headerRow: 1,
+    headerDepth: 1,
+    headers,
+    preview: [headers.map(() => "x")],
+  });
+  const fullMapping = {
+    accountCode: "科目编码",
+    accountName: "科目名称",
+    auxiliary: "辅助核算",
+    openingFunctionalAmount: "期初余额",
+    closingFunctionalAmount: "期末余额",
+  };
+  const inspect = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
+    headers,
+    preview: [headers.map(() => "x")],
+    rowCount: 2,
+    sheet,
+    sheets: [sheet],
+    headerRow: 1,
+    headerDepth: 1,
+    suggestedMapping:
+      kind === "tb"
+        ? fullMapping
+        : {
+            date: "记账日期",
+            id: "凭证号",
+            accountCode: "科目编码",
+            accountName: "科目名称",
+            summary: "摘要",
+          },
+  });
+  mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
+  mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
+    const p = params as { kind?: string; source?: { inputPath?: string } };
+    if (method === "ledger.forms") return [];
+    if (method === "ledger.currency_link")
+      return { required: false, verified: true, missingCurrencies: [], affectedGroupCount: 0 };
+    if (method === "deposit.classify_source") {
+      return p.source?.inputPath?.endsWith("je.xlsx")
+        ? classify("je", "序时账", jeHeaders)
+        : classify("tb", "余额表", tbHeaders);
+    }
+    if (method === "loan.inspect") {
+      return p.kind === "je"
+        ? inspect("je", "序时账", jeHeaders)
+        : inspect("tb", "余额表", tbHeaders);
+    }
+    if (method === "loan.tb_accounts") {
+      return {
+        accounts: [
+          { key: "2001", code: "2001", name: "短期借款", account: "2001 短期借款", opening: 1000000, closing: 900000 },
+          // 2202 初始建议排除：预选只有 2001，首张利率表没有它的利率输入。
+          { key: "2202", code: "2202", name: "长期借款", account: "2202 长期借款", opening: 500000, closing: 500000, suggestedType: "skip", suggestionReason: "初始建议排除" },
+        ],
+      };
+    }
+    throw new Error(`unexpected ${method}`);
+  });
+  render(<LoanInterestPage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: "TB＋JE" }));
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "拖放或选择 TB、序时账文件（可同时选择）",
+    }),
+  );
+  await screen.findByText("已识别：TB 科目余额表");
+  await screen.findByText("已识别：JE 序时账");
+  mock.jobStart.mockResolvedValue("job-auto");
+  fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
+  expect(await screen.findByText("确认借款及利息支出科目并设置利率")).toBeVisible();
+  // 进入第二步自动生成：只含预选的 2001。
+  await waitFor(() =>
+    expect(mock.jobStart).toHaveBeenCalledWith(
+      "loan.preview",
+      expect.objectContaining({ loanAccounts: ["2001"] }),
+    ),
+  );
+  mock.jobEvents.callback?.({
+    jobId: "job-auto",
+    phase: "completed",
+    result: {
+      rows: [
+        {
+          rowKey: "tb\u001f默认主体\u001f2001\u001fA银行",
+          accountCode: "2001",
+          accountName: "短期借款",
+          auxiliary: "A银行",
+          loanId: "A银行借款",
+          openingPrincipal: 1000000,
+          closingPrincipal: 900000,
+          matchStatus: "待复核",
+          matchBasis: "匹配 2 条 JE（编码 2）",
+        },
+      ],
+      summary: { loanCount: 1 },
+    },
+  });
+  expect(
+    await screen.findByRole("spinbutton", { name: "A银行借款的执行利率" }),
+  ).toBeEnabled();
+  // 2202 还是排除：利率栏全是「—」，没有输入框。
+  const skipRow = screen
+    .getByRole("combobox", { name: "2202 长期借款的科目类型" })
+    .closest("tr")!;
+  expect((skipRow.querySelector("select") as HTMLSelectElement).value).toBe("skip");
+  expect(within(skipRow).queryAllByRole("spinbutton")).toHaveLength(0);
+  // 手动改成「借款科目」：无需任何按钮，自动按新选择重跑 loan.preview。
+  fireEvent.change(
+    screen.getByRole("combobox", { name: "2202 长期借款的科目类型" }),
+    { target: { value: "loan" } },
+  );
+  expect(screen.getByText("2202 长期借款已设为借款科目。")).toBeVisible();
+  await waitFor(() =>
+    expect(mock.jobStart).toHaveBeenLastCalledWith(
+      "loan.preview",
+      expect.objectContaining({ loanAccounts: ["2001", "2202"] }),
+    ),
+  );
+  mock.jobEvents.callback?.({
+    jobId: "job-auto",
+    phase: "completed",
+    result: {
+      rows: [
+        {
+          rowKey: "tb\u001f默认主体\u001f2001\u001fA银行",
+          accountCode: "2001",
+          accountName: "短期借款",
+          auxiliary: "A银行",
+          loanId: "A银行借款",
+          openingPrincipal: 1000000,
+          closingPrincipal: 900000,
+          matchStatus: "待复核",
+          matchBasis: "匹配 2 条 JE（编码 2）",
+        },
+        {
+          rowKey: "tb\u001f默认主体\u001f2202\u001fC银行",
+          accountCode: "2202",
+          accountName: "长期借款",
+          auxiliary: "C银行",
+          loanId: "C银行借款",
+          openingPrincipal: 500000,
+          closingPrincipal: 500000,
+          matchStatus: "待复核",
+          matchBasis: "匹配 1 条 JE（编码 2）",
+        },
+      ],
+      summary: { loanCount: 2 },
+    },
+  });
+  // 新科目的利率输入随重生成结果立即可编辑。
+  const newRate = await screen.findByRole("spinbutton", {
+    name: "C银行借款的执行利率",
+  });
+  expect(newRate).toBeEnabled();
+  fireEvent.change(newRate, { target: { value: "3.10" } });
+  expect(newRate).toHaveValue(3.1);
+  // 改回「排除」：利率输入立即消失，恢复为「—」。
+  fireEvent.change(
+    screen.getByRole("combobox", { name: "2202 长期借款的科目类型" }),
+    { target: { value: "skip" } },
+  );
+  expect(
+    screen.queryByRole("spinbutton", { name: "C银行借款的执行利率" }),
+  ).not.toBeInTheDocument();
 });
 
 /** 同一借款科目按辅助核算拆成多笔明细：科目行只汇总「N 笔明细」，明细在
@@ -842,8 +1214,63 @@ it("同一科目多笔借款明细展开为子行逐笔设置利率，改类型�
   expect(
     screen.getByRole("spinbutton", { name: "A银行借款的执行利率" }),
   ).toHaveValue(3.85);
-  // 手填利率按明细 rowKey 进入测算 payload。
+  // 手填利率按明细 rowKey 进入测算 payload。下一步自动重算：先等 preview
+  // 任务带利率发起并完成，再点导出（任务运行中导出按钮禁用）。
   fireEvent.click(screen.getByRole("button", { name: "下一步：测算与底稿" }));
+  await waitFor(() =>
+    expect(mock.jobStart).toHaveBeenLastCalledWith(
+      "loan.preview",
+      expect.objectContaining({
+        loanAccounts: ["2001"],
+        rateRows: [
+          expect.objectContaining({
+            rowKey: "tb\u001f甲公司\u001f2001\u001fA银行",
+            rateType: "fixed",
+            fixedRate: 0.0385,
+          }),
+        ],
+      }),
+    ),
+  );
+  mock.jobEvents.callback?.({
+    jobId: "job-split",
+    phase: "completed",
+    result: {
+      rows: [
+        {
+          entity: "甲公司",
+          rowKey: "tb\u001f甲公司\u001f2001\u001fA银行",
+          accountCode: "2001",
+          accountName: "短期借款",
+          auxiliary: "A银行",
+          loanId: "A银行借款",
+          openingPrincipal: 600000,
+          closingPrincipal: 500000,
+          matchStatus: "已匹配",
+          matchBasis: "匹配 2 条 JE（编码 2）",
+        },
+        {
+          entity: "甲公司",
+          rowKey: "tb\u001f甲公司\u001f2001\u001fB银行",
+          accountCode: "2001",
+          accountName: "短期借款",
+          auxiliary: "B银行",
+          loanId: "B银行借款",
+          openingPrincipal: 400000,
+          closingPrincipal: 400000,
+          matchStatus: "待复核",
+          matchBasis: "未匹配 JE，采用 TB 发生额（编码汇总口径）",
+        },
+      ],
+      summary: { loanCount: 2 },
+    },
+  });
+  // 重算完成（导出按钮随 busy 复位解禁）后再导出。
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "生成 Excel 底稿" }),
+    ).toBeEnabled(),
+  );
   fireEvent.click(screen.getByRole("button", { name: "生成 Excel 底稿" }));
   await waitFor(() =>
     expect(mock.jobStart).toHaveBeenCalledWith(
@@ -860,4 +1287,122 @@ it("同一科目多笔借款明细展开为子行逐笔设置利率，改类型�
       }),
     ),
   );
+});
+
+/** TB＋JE 第二步进入口（底部「下一步」与步骤条导航共用）的币种衔接验证：
+ *  同一验证输入已通过后，反复进出第二步不得重复请求 ledger.currency_link。 */
+function renderLoanTbJeWorkspace(entities: string[]) {
+  const tbHeaders = ["科目编码", "科目名称", "期初余额", "期末余额"];
+  const jeHeaders = ["记账日期", "凭证号", "科目编码", "贷方金额"];
+  const classify = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
+    kind,
+    scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
+    sheet,
+    headerRow: 1,
+    headerDepth: 1,
+    headers,
+    preview: [headers.map(() => "x")],
+  });
+  const inspect = (kind: "tb" | "je", sheet: string, headers: string[]) => ({
+    headers,
+    preview: [headers.map(() => "x")],
+    rowCount: 2,
+    sheet,
+    sheets: [sheet],
+    headerRow: 1,
+    headerDepth: 1,
+    entities,
+    // TB 故意只建议科目两列：金额缺失拦住自动生成利率表，专注导航行为本身。
+    suggestedMapping:
+      kind === "tb"
+        ? { accountCode: "科目编码", accountName: "科目名称" }
+        : { date: "记账日期", accountCode: "科目编码" },
+  });
+  mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
+  mock.engineCall.mockImplementation(async (method: string, params: unknown) => {
+    const p = params as { kind?: string; source?: { inputPath?: string } };
+    if (method === "ledger.forms") return [];
+    if (method === "ledger.currency_link")
+      return { required: false, verified: true, missingCurrencies: [], affectedGroupCount: 0 };
+    if (method === "ledger.entity_scope_suggestions")
+      return { anchors: [], candidates: [] };
+    if (method === "deposit.classify_source") {
+      return p.source?.inputPath?.endsWith("je.xlsx")
+        ? classify("je", "序时账", jeHeaders)
+        : classify("tb", "余额表", tbHeaders);
+    }
+    if (method === "loan.inspect") {
+      return p.kind === "je"
+        ? inspect("je", "序时账", jeHeaders)
+        : inspect("tb", "余额表", tbHeaders);
+    }
+    if (method === "loan.tb_accounts") {
+      return {
+        accounts: [
+          { key: "2001", code: "2001", name: "短期借款", account: "2001 短期借款", opening: 1000, closing: 900, suggestedType: "loan" },
+        ],
+      };
+    }
+    throw new Error(`unexpected ${method}`);
+  });
+  render(<LoanInterestPage tool={tool} />);
+  fireEvent.click(screen.getByRole("button", { name: "TB＋JE" }));
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "拖放或选择 TB、序时账文件（可同时选择）",
+    }),
+  );
+}
+
+it("同一输入下来回进出第二步不重复验证币种衔接", async () => {
+  renderLoanTbJeWorkspace([]);
+  await screen.findByText("已识别：TB 科目余额表");
+  await screen.findByText("已识别：JE 序时账");
+  const linkCalls = () =>
+    mock.engineCall.mock.calls.filter(
+      ([method]) => method === "ledger.currency_link",
+    ).length;
+
+  fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
+  expect(
+    await screen.findByText("确认借款及利息支出科目并设置利率"),
+  ).toBeVisible();
+  expect(linkCalls()).toBe(1);
+
+  // 底部「返回」再「下一步」：进入第二步后借款科目已从空清单预选为 2001，
+  // 验证输入变了，重新验证一次。
+  fireEvent.click(screen.getByRole("button", { name: "返回上传与识别" }));
+  await screen.findByRole("button", { name: "一键复核 TB＋JE" });
+  fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
+  expect(
+    await screen.findByText("确认借款及利息支出科目并设置利率"),
+  ).toBeVisible();
+  expect(linkCalls()).toBe(2);
+
+  // 步骤条导航 0→1→0→1（已完成步的读法带「（已完成）」后缀）：同一验证
+  // 输入已通过，直接跳步，不再触发验证。
+  fireEvent.click(screen.getByRole("button", { name: /1 上传与识别/ }));
+  await screen.findByRole("button", { name: "一键复核 TB＋JE" });
+  fireEvent.click(screen.getByRole("button", { name: "2 确认科目与利率" }));
+  expect(
+    await screen.findByText("确认借款及利息支出科目并设置利率"),
+  ).toBeVisible();
+  expect(linkCalls()).toBe(2);
+});
+
+/** TB/JE 识别出多个实际主体（「默认主体」占位不算）时，第二步合并表必须
+ *  带主体列；单主体账套维持原有布局（见上方「预选借款科目」用例）。 */
+it("多主体账套第二步合并表显示主体列", async () => {
+  renderLoanTbJeWorkspace(["甲公司", "乙公司"]);
+  await screen.findByText("已识别：TB 科目余额表");
+  await screen.findByText("已识别：JE 序时账");
+  fireEvent.click(screen.getByRole("button", { name: /下一步：确认科目与利率/ }));
+  expect(
+    await screen.findByRole("columnheader", { name: "主体" }),
+  ).toBeVisible();
+  // 科目行由全表汇总而来、无单一主体：主体列显示占位符 —。
+  const loanRow = await screen
+    .findByRole("combobox", { name: "2001 短期借款的科目类型" })
+    .then((element) => element.closest("tr")!);
+  expect(loanRow.querySelector("td")?.textContent).toBe("—");
 });

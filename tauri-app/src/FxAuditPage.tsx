@@ -235,6 +235,8 @@ export function fxAccountDisplayList(
 type FxAccountReviewRow = {
   key: string;
   account: string;
+  /** 辅助核算拆行所属主体（联动验证组下发）；末级兜底行没有主体信息。 */
+  entity?: string;
   auxiliary?: string;
 };
 
@@ -271,6 +273,7 @@ export function fxAccountReviewRows(
         ? (group.details ?? []).map((detail) => ({
             key: fxDetailKey(group.entity, group.account, detail.key),
             account,
+            entity: group.entity,
             auxiliary: detail.display,
           }))
         : [],
@@ -279,6 +282,23 @@ export function fxAccountReviewRows(
       groups.length === 0 || groups.some((group) => !group.reviewVerified);
     return [...expanded, ...(hasFallback ? [{ key: account, account }] : [])];
   });
+}
+
+/**
+ * 科目确认表是否需要「主体」列：TB/JE 识别出的**实际**主体（去空白、剔除
+ * 「默认主体」占位）去重后多于一个才显示；单主体账套维持原有三列布局。
+ */
+export function fxMultiEntityNames(
+  jeEntities: readonly string[] = [],
+  tbEntities: readonly string[] = [],
+): string[] {
+  return [
+    ...new Set(
+      [...jeEntities, ...tbEntities]
+        .map((value) => value.trim())
+        .filter((value) => value && value !== DEFAULT_ENTITY),
+    ),
+  ];
 }
 
 /** 确认表与第二步清单使用同一行粒度；筛选和「继续显示」都不截断导出。 */
@@ -291,6 +311,8 @@ export function fxConfirmationRows(
   jeCurrencyDetails: Inspection["accountCurrencyDetails"],
   tbCurrencyDetails: Inspection["accountCurrencyDetails"],
   fallbackFunctional: string,
+  /** 多主体账套在首列导出「主体」；末级兜底行主体未知，导出为空。 */
+  withEntity = false,
 ): ConfirmationRow[] {
   return reviewRows.map((row) => {
     const role = detailRoles[row.key] ?? accountRoles[row.account] ?? "non_monetary";
@@ -300,9 +322,17 @@ export function fxConfirmationRows(
       : (row.auxiliary ? detailCurrencies[row.key] : accountCurrencies[row.account]) ||
         fxAccountCurrencyDetail(row.account, jeCurrencyDetails, tbCurrencyDetails).detected ||
         fallbackFunctional;
+    const subject = row.auxiliary ? `${row.account} · ${row.auxiliary}` : row.account;
     return {
       key: row.key,
-      values: [row.auxiliary ? `${row.account} · ${row.auxiliary}` : row.account, roleLabel, currency],
+      values: withEntity
+        ? [
+            row.entity && row.entity !== DEFAULT_ENTITY ? row.entity : "",
+            subject,
+            roleLabel,
+            currency,
+          ]
+        : [subject, roleLabel, currency],
     };
   });
 }
@@ -317,6 +347,8 @@ export function fxConfirmationImportPatches(
   jeCurrencyDetails: Inspection["accountCurrencyDetails"],
   tbCurrencyDetails: Inspection["accountCurrencyDetails"],
   fallbackFunctional: string,
+  /** 与导出版式一致：带主体列时「分类／账户币种」各右移一列。 */
+  withEntity = false,
 ) {
   const reviewByKey = new Map(reviewRows.map((row) => [row.key, row]));
   const currentByKey = new Map(currentRows.map((row) => [row.key, row]));
@@ -326,23 +358,25 @@ export function fxConfirmationImportPatches(
   const detailCurrencies: Record<string, string> = {};
   const detailRoleDeletes: string[] = [];
   const detailCurrencyDeletes: string[] = [];
+  const roleIndex = withEntity ? 2 : 1;
+  const currencyIndex = withEntity ? 3 : 2;
   for (const item of changed) {
     const row = reviewByKey.get(item.key);
     const original = currentByKey.get(item.key);
     if (!row || !original) throw new Error(`科目 ${item.key} 已不在当前确认清单，请重新下载。`);
-    const role = ROLE_OPTIONS.find(([, label]) => label === item.values[1])?.[0];
+    const role = ROLE_OPTIONS.find(([, label]) => label === item.values[roleIndex])?.[0];
     if (!role) throw new Error(`${item.key}：请选择有效的分类。`);
-    const currency = item.values[2].trim().toUpperCase();
+    const currency = item.values[currencyIndex].trim().toUpperCase();
     if (currency && currency !== "N/A" && !CURRENCY_OPTIONS.includes(currency))
       throw new Error(`${item.key}：请选择有效的账户币种。`);
-    if (item.values[1] !== original.values[1]) {
+    if (item.values[roleIndex] !== original.values[roleIndex]) {
       if (row.auxiliary) {
         if (role === (accountRoles[row.account] ?? "non_monetary")) detailRoleDeletes.push(row.key);
         else detailRoles[row.key] = role;
       }
       else roles[row.account] = role;
     }
-    if (item.values[2] !== original.values[2] || role === "non_monetary" || role === "other_pnl") {
+    if (item.values[currencyIndex] !== original.values[currencyIndex] || role === "non_monetary" || role === "other_pnl") {
       const detected = fxAccountCurrencyDetail(row.account, jeCurrencyDetails, tbCurrencyDetails).detected;
       const inherited = (row.auxiliary ? accountCurrencies[row.account] : "") || detected || fallbackFunctional;
       const override = role === "non_monetary" || role === "other_pnl" || currency === "N/A" || currency === inherited
@@ -1083,6 +1117,12 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     () => [...new Set([...(je?.entities ?? []), ...(tb?.entities ?? [])])],
     [je, tb],
   );
+  // 多主体账套：第二步科目确认的屏幕表与导出确认表都加「主体」列；
+  // 单主体保持原有三列布局，不占列宽。
+  const showEntityColumn = useMemo(
+    () => fxMultiEntityNames(je?.entities ?? [], tb?.entities ?? []).length > 1,
+    [je?.entities, tb?.entities],
+  );
   const entityScope = useEntityScopeConfirmation({
     tbEntities: tb?.entities ?? [],
     jeEntities: je?.entities ?? [],
@@ -1181,6 +1221,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       je?.accountCurrencyDetails,
       tb?.accountCurrencyDetails,
       fallbackFunctional,
+      showEntityColumn,
     ),
     [
       reviewRows,
@@ -1191,6 +1232,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       je?.accountCurrencyDetails,
       tb?.accountCurrencyDetails,
       fallbackFunctional,
+      showEntityColumn,
     ],
   );
   const currencyConfirmationMissing = Boolean(
@@ -1907,13 +1949,25 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       ...(outputPath ? { outputPath } : {}),
     };
   }
+  // 币种映射验证的记忆化：底部「下一步」与步骤条导航共用同一入口。验证输入
+  // （即完整验证请求体：路径/Sheet/表头/映射/模式/币种口径等）不变且已通过时
+  // 直接跳步，反复来回切换不再重跑重 IO 校验；只有输入变化或尚未通过时才
+  // 再次调用引擎。未通过/失败的结果不记忆，下次仍会重新验证。
+  const currencyCheckRef = useRef<{ key: string; ok: boolean } | null>(null);
   async function proceedAfterCurrencyCheck(targetStep = 1) {
+    const request = payload("fx.preview");
+    const key = JSON.stringify(request);
+    if (currencyCheckRef.current?.key === key && currencyCheckRef.current.ok) {
+      setError("");
+      setStep(targetStep);
+      return;
+    }
     setError("");
     setBusy(true);
     try {
       const response = (await engineCall(
         "fx.validate_currency_mapping",
-        payload("fx.preview"),
+        request,
       )) as { valid?: boolean; errors?: string[] };
       if (!response.valid) {
         setStep(0);
@@ -1923,6 +1977,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
         );
         return;
       }
+      currencyCheckRef.current = { key, ok: true };
       setStep(targetStep);
     } catch (e) {
       setStep(0);
@@ -2428,8 +2483,9 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                       matched={visibleRows.length}
                       total={accounts.length}
                     />
-                    <div className="fx-list fx-accounts">
+                    <div className={`fx-list fx-accounts${showEntityColumn ? " has-entity" : ""}`}>
                       <div className="fx-accounts-head">
+                        {showEntityColumn && <span>主体</span>}
                         <span>科目</span>
                         <span>分类</span>
                         <span>
@@ -2477,6 +2533,16 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                           rowRole === "non_monetary" || rowRole === "other_pnl";
                         return (
                           <label key={row.key}>
+                            {showEntityColumn && (
+                              <span
+                                className="fx-entity-cell"
+                                title={row.entity ?? undefined}
+                              >
+                                {row.entity && row.entity !== DEFAULT_ENTITY
+                                  ? row.entity
+                                  : "—"}
+                              </span>
+                            )}
                             <span
                               className="fx-account-name"
                               title={
@@ -2631,8 +2697,9 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                     <AccountConfirmationActions
                       tool="fx"
                       title="汇兑损益"
-                      context={JSON.stringify([tbPath, jePath, tbMapping, jeMapping, reviewRows.map((row) => row.key)])}
+                      context={JSON.stringify([tbPath, jePath, tbMapping, jeMapping, showEntityColumn, reviewRows.map((row) => row.key)])}
                       columns={[
+                        ...(showEntityColumn ? [{ key: "entity", title: "主体" }] : []),
                         { key: "account", title: "科目" },
                         { key: "role", title: "分类", editable: true, options: ROLE_OPTIONS.map(([, label]) => label) },
                         { key: "currency", title: "账户币种", editable: true, options: ["N/A", ...CURRENCY_OPTIONS] },
@@ -2648,6 +2715,7 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                           je?.accountCurrencyDetails,
                           tb?.accountCurrencyDetails,
                           fallbackFunctional,
+                          showEntityColumn,
                         );
                         setAccountRoles((current) => ({ ...current, ...patches.roles }));
                         setAccountDetailRoles((current) => {

@@ -1028,6 +1028,17 @@
   grid-template-columns: minmax(260px, 1fr) 150px minmax(210px, 250px);
   align-items: start;
 }
+/* 多主体账套加「主体」列：辅助拆行挂各自主体，末级兜底行主体未知显示 —。 */
+.fx-accounts.has-entity label,
+.fx-accounts.has-entity .fx-accounts-head {
+  grid-template-columns: minmax(140px, 220px) minmax(220px, 1fr) 150px minmax(200px, 240px);
+}
+.fx-entity-cell {
+  align-self: start;
+  padding-top: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .fx-accounts select.fx-currency-override {
   border-color: var(--primary);
   font-weight: 600;

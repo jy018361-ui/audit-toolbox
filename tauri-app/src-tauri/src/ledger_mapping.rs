@@ -7240,7 +7240,7 @@ pub(crate) fn account_name_of(value: &str) -> String {
         .unwrap_or_else(|| value.trim().to_owned())
 }
 
-/// 会计要素类别。按《企业会计准则——会计科目和主要账务处理》的编码首位划分。
+/// 会计要素类别。按国标科目首位及已验证的 SAP 损益编码划分。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum AccountCategory {
     /// 1 资产
@@ -7253,7 +7253,7 @@ pub(crate) enum AccountCategory {
     Equity,
     /// 5 成本
     Cost,
-    /// 6 损益
+    /// 6、以及 SAP 风格的 7/8 损益
     ProfitLoss,
 }
 
@@ -7272,8 +7272,9 @@ impl AccountCategory {
 
 /// 按科目编码首位判会计要素。认不出返回 `None`——**绝不猜**。
 ///
-/// 会计恒等式核对全靠这个分类，认错一个大类，结论就是错的。自定义科目表、
-/// 字母开头的编码都归到「认不出」，由调用方决定是跳过整条检查还是列出来给用户看。
+/// 1～6 遵循国标科目编码；7、8 是已验证的 SAP 风格账套中常见的费用／税费段，
+/// 统一归入损益。其他自定义科目表、字母开头的编码都归到「认不出」，由调用方
+/// 决定是跳过整条检查还是列出来给用户看。
 ///
 /// 编码先经 [`normalize_account_code`] 去掉前导零：SAP 那类补零到定长的编码
 /// （`0000943100`）首位是 0，不去零一个都认不出来。
@@ -7284,7 +7285,7 @@ pub(crate) fn account_category(code: &str) -> Option<AccountCategory> {
         '3' => Some(AccountCategory::Shared),
         '4' => Some(AccountCategory::Equity),
         '5' => Some(AccountCategory::Cost),
-        '6' => Some(AccountCategory::ProfitLoss),
+        '6' | '7' | '8' => Some(AccountCategory::ProfitLoss),
         _ => None,
     }
 }
@@ -13107,5 +13108,18 @@ mod tests {
             "集团华东",
             "严格模式也应消除来源系统附加的前置主体编码"
         );
+    }
+
+    #[test]
+    fn sap七八开头科目归为损益且仍保留其他编码待确认() {
+        for code in ["700000", "701206", "805100", "0000829000"] {
+            assert_eq!(
+                account_category(code),
+                Some(AccountCategory::ProfitLoss),
+                "{code} 应按 SAP 风格损益编码归类"
+            );
+        }
+        assert_eq!(account_category("A700000"), None);
+        assert_eq!(account_category("900000"), None);
     }
 }

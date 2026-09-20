@@ -241,6 +241,7 @@ it("连续恢复两条历史任务时忽略先前较慢的识别结果", async (
  *  按开头锚定是为了避开「下一步：测算与底稿」这类导航按钮（撞名会直接抛错）。 */
 const STEP2 = /^(?:2|✓)\s*科目与利率确认/;
 const STEP3 = /^3\s*测算与底稿/;
+const STEP1 = /^1\s*上传与识别/;
 const goToStep = (label: RegExp) =>
   fireEvent.click(screen.getByRole("button", { name: label }));
 
@@ -641,6 +642,156 @@ describe("第二步逐户利率列", () => {
     expect(mock.jobStart.mock.calls[1][1]).toMatchObject({
       accountRateOverrides: {},
       accountTierOverrides: { [bank]: "term_1y" },
+    });
+  });
+});
+
+/** 导航栏步骤切换是纯视图跳转：同一输入的币种衔接验证只跑一次，
+ *  底部“下一步”与导航入口共用缓存，来回切步骤不再重跑引擎调用。 */
+describe("导航步骤切换不重复验证", () => {
+  const withBothSources = () => {
+    mock.engineCall.mockImplementation(
+      async (method: string, params?: unknown) => {
+        if (method === "deposit.rate_tiers")
+          return { categories: [], tiers: [], ratesStale: false, links: [], linkGroups: [] };
+        if (method === "deposit.account_currencies")
+          return { rows: [], multiCurrencyAccounts: [] };
+        if (method === "deposit.classify_source")
+          return { kind: "tb", scores: { je: 1, tb: 10 }, headers: inspection.headers, preview: inspection.preview, sheet: "TB", headerRow: 1, headerDepth: 1 };
+        if (method === "deposit.classify_source_llm") return { kind: "tb" };
+        if (method === "deposit.inspect_tb" || method === "deposit.inspect_je")
+          return inspection;
+        if (method === "ledger.auxiliary_link")
+          return { tbAuxMapped: true, status: "ok", column: null, anchorHits: 0, anchorTotal: 0, coverage: 1, competingColumns: [], warnings: [], groups: [] };
+        if (method === "ledger.currency_link")
+          return { status: "ok", required: false, verified: true, affectedGroupCount: 0, missingCurrencies: [] };
+        throw new Error(`unexpected ${method}: ${JSON.stringify(params ?? "")}`);
+      },
+    );
+    const currencyMapping = { ...mapping, currency: "币种" };
+    publishTaskRestore({
+      jobId: "nav-history",
+      toolId: "deposit_interest",
+      method: "deposit.calculate",
+      params: {
+        tbSource: { inputPath: "fixture-tb.xlsx", sheet: "TB", headerRow: 1, headerDepth: 1 },
+        tbMapping: currencyMapping,
+        jeSource: { inputPath: "fixture-je.xlsx", sheet: "TB", headerRow: 1, headerDepth: 1 },
+        jeMapping: currencyMapping,
+        accountRoles: { [bank]: "deposit" },
+        reportEnd: "2025-12-31",
+      },
+      missingPaths: [],
+      authorizedPathCount: 1,
+    });
+  };
+  const currencyLinkCalls = () =>
+    mock.engineCall.mock.calls.filter(([m]) => m === "ledger.currency_link")
+      .length;
+
+  it("来回切换步骤不重跑币种衔接验证", async () => {
+    withBothSources();
+    render(<DepositInterestPage tool={tool} />);
+    await waitFor(() =>
+      expect(mock.engineCall).toHaveBeenCalledWith(
+        "deposit.inspect_tb",
+        expect.anything(),
+      ),
+    );
+    goToStep(STEP2);
+    await waitFor(() => expect(currencyLinkCalls()).toBe(1));
+    goToStep(STEP1);
+    goToStep(STEP2);
+    goToStep(STEP1);
+    goToStep(STEP2);
+    await waitFor(() =>
+      expect(screen.getByText("逐个核对科目分类（末级明细）")).toBeVisible(),
+    );
+    expect(currencyLinkCalls()).toBe(1);
+  });
+});
+
+/** 引擎下发测算行清单后，第二步按币种拆行，逐币种利率落在引擎行键上，
+ *  与第三步逐户改价同键联动。 */
+describe("第二步按币种拆行", () => {
+  it("多币种账户按 CNY/USD 拆两行，利率改写按引擎行键提交", async () => {
+    mock.engineCall.mockImplementation(async (method: string) => {
+      if (method === "deposit.rate_tiers") return {
+        categories: [
+          { key: "demand", label: "活期存款", terms: [{ key: "demand", label: "" }] },
+        ],
+        tiers: [
+          { key: "demand", category: "demand", categoryLabel: "活期存款", termLabel: "", label: "活期存款", autoApply: true, listedRate: 0.0005 },
+        ],
+        ratesStale: false, links: [], linkGroups: [],
+      };
+      if (method === "deposit.account_currencies") return {
+        rows: [
+          { key: "K-CNY", entity: "默认主体", account: bank, auxiliary: "", currency: "CNY", role: "deposit" },
+          { key: "K-USD", entity: "默认主体", account: bank, auxiliary: "", currency: "USD", role: "deposit" },
+        ],
+        multiCurrencyAccounts: [{ account: bank, currencies: ["CNY", "USD"] }],
+      };
+      if (method === "deposit.classify_source")
+        return { kind: "tb", scores: { je: 1, tb: 10 }, headers: inspection.headers, preview: inspection.preview, sheet: "TB", headerRow: 1, headerDepth: 1 };
+      if (method === "deposit.classify_source_llm") return { kind: "tb" };
+      if (method === "deposit.inspect_tb") return inspection;
+      throw new Error(`unexpected ${method}`);
+    });
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }),
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled());
+    goToStep(STEP2);
+    const cny = await screen.findByRole("spinbutton", { name: `${bank}（CNY）的年利率` });
+    const usd = screen.getByRole("spinbutton", { name: `${bank}（USD）的年利率` });
+    expect(cny).toHaveValue(0.05);
+    expect(usd).toHaveValue(0.05);
+    fireEvent.change(cny, { target: { value: "1.25" } });
+    fireEvent.blur(cny);
+    goToStep(STEP3);
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+    expect(mock.jobStart.mock.calls[0][1]).toMatchObject({
+      rateOverrides: { "K-CNY": { annualRate: 0.0125 } },
+    });
+  });
+});
+
+/** 贷方余额的存款账户默认不纳入测算：结果回来先弹窗说明，
+ *  用户确认纳入后按新口径自动重算。 */
+describe("贷方余额账户默认不纳入", () => {
+  it("测算完成后弹窗点名，选择纳入后带 include 口径重算", async () => {
+    render(<DepositInterestPage tool={tool} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "拖放或选择 TB、序时账文件（可同时选择）" }),
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: STEP2 })).not.toBeDisabled());
+    goToStep(STEP3);
+    fireEvent.click(screen.getByRole("button", { name: "测算预览" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledOnce());
+    act(() =>
+      mock.event?.({
+        ...complete,
+        result: {
+          rows: [],
+          summary: {
+            creditBalanceCount: 1,
+            creditBalanceAccounts: [
+              { key: "K1", account: bank, currency: "CNY", closingBalance: -12345.67 },
+            ],
+          },
+        },
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("1 个存款账户期末为贷方余额");
+    expect(dialog).toHaveTextContent(bank);
+    fireEvent.click(screen.getByRole("button", { name: "纳入测算并重算" }));
+    await waitFor(() => expect(mock.jobStart).toHaveBeenCalledTimes(2));
+    expect(mock.jobStart.mock.calls[1][1]).toMatchObject({
+      creditBalancePolicy: "include",
     });
   });
 });

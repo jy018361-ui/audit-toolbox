@@ -1,0 +1,186 @@
+// @vitest-environment jsdom
+import "@testing-library/jest-dom/vitest";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { FxAuditPage } from "./FxAuditPage";
+import type { ToolManifest } from "./types";
+
+const mock = vi.hoisted(() => ({
+  engineCall: vi.fn(),
+  pickPath: vi.fn(),
+  jobStart: vi.fn(),
+}));
+vi.mock("./api", () => ({
+  engineCall: mock.engineCall,
+  jobCancel: vi.fn(),
+  jobStart: mock.jobStart,
+  listenJobEvents: vi.fn(async () => () => undefined),
+  listenPositionedFileDrops: vi.fn(async () => () => undefined),
+  openOutput: vi.fn(),
+  pickPath: mock.pickPath,
+}));
+afterEach(cleanup);
+const tool: ToolManifest = {
+  id: "fx_audit",
+  name: "汇兑损益测算",
+  description: "",
+  route: "/tools/fx_audit",
+  version: "test",
+  capabilities: [],
+  migrationStatus: "ready",
+};
+
+const tbHeaders = ["科目编码", "科目名称", "币种", "期初余额", "期末余额", "本年累计借方", "本年累计贷方"];
+const jeHeaders = ["记账日期", "凭证号", "科目编码", "科目名称", "摘要", "原币币种", "原币金额", "本币金额"];
+
+/** 识别结果由用例通过改写 entities 控制（单主体/多主体两版）。 */
+let inspectionEntities: string[] = [];
+
+const classify = (kind: "tb" | "je") => ({
+  kind,
+  scores: { je: kind === "je" ? 10 : 1, tb: kind === "tb" ? 10 : 1 },
+  sheet: kind === "tb" ? "余额表" : "序时账",
+  headerRow: 1,
+  headerDepth: 1,
+  headers: kind === "tb" ? tbHeaders : jeHeaders,
+  preview: [(kind === "tb" ? tbHeaders : jeHeaders).map(() => "x")],
+});
+const inspect = (kind: "tb" | "je") => ({
+  headers: kind === "tb" ? tbHeaders : jeHeaders,
+  preview: [(kind === "tb" ? tbHeaders : jeHeaders).map(() => "x")],
+  rowCount: 2,
+  sheet: kind === "tb" ? "余额表" : "序时账",
+  sheets: [kind === "tb" ? "余额表" : "序时账"],
+  headerRow: 1,
+  headerDepth: 1,
+  entities: inspectionEntities,
+  accounts: kind === "tb" ? ["1002 银行存款"] : ["1002 银行存款"],
+  suggestedMapping:
+    kind === "tb"
+      ? {
+          accountCode: "科目编码",
+          accountName: "科目名称",
+          currency: "币种",
+          openingFunctionalAmount: "期初余额",
+          closingFunctionalAmount: "期末余额",
+          ytdFunctionalDebit: "本年累计借方",
+          ytdFunctionalCredit: "本年累计贷方",
+        }
+      : {
+          date: "记账日期",
+          id: "凭证号",
+          accountCode: "科目编码",
+          accountName: "科目名称",
+          summary: "摘要",
+          currency: "原币币种",
+          foreignAmount: "原币金额",
+          functionalAmount: "本币金额",
+        },
+});
+
+async function uploadBothSources() {
+  mock.pickPath.mockResolvedValue(["tb.xlsx", "je.xlsx"]);
+  fireEvent.click(screen.getByRole("button", { name: "重新选择 JE、TB 文件" }));
+  await screen.findByText("已识别：TB 科目余额表");
+  await screen.findByText("已识别：JE 凭证明细");
+  // 上传收口后自动联合复核一次；等它跑完再点下一步，避免 busy 拦住按钮。
+  await waitFor(() =>
+    expect(mock.engineCall).toHaveBeenCalledWith(
+      "ledger.check_mapping_alignment",
+      expect.anything(),
+    ),
+  );
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  inspectionEntities = [];
+  mock.pickPath.mockResolvedValue(null);
+  mock.engineCall.mockImplementation(async (method: string) => {
+    if (method === "ledger.forms") return [];
+    if (method === "ledger.review_pair_mapping")
+      return { tbChanges: [], jeChanges: [] };
+    if (method === "ledger.check_mapping_alignment")
+      return { errors: [], warnings: [], fix: null };
+    if (method === "ledger.entity_scope_suggestions")
+      return { anchors: [], candidates: [] };
+    if (method === "ledger.auxiliary_link")
+      return {
+        tbAuxMapped: false,
+        status: "unmapped",
+        column: null,
+        anchorHits: 0,
+        anchorTotal: 0,
+        coverage: 0,
+        competingColumns: [],
+        warnings: [],
+      };
+    if (method === "fx.classify_source") {
+      // 统一上传框先选 TB 再选 JE：按调用序返回两份分类结论。
+      const classified = classify("tb");
+      const calls = mock.engineCall.mock.calls.filter(
+        ([name]) => name === "fx.classify_source",
+      ).length;
+      return calls % 2 === 1 ? classified : classify("je");
+    }
+    if (method === "fx.inspect_tb") return inspect("tb");
+    if (method === "fx.inspect_je") return inspect("je");
+    if (method === "fx.validate_currency_mapping")
+      return { valid: true, errors: [] };
+    throw new Error(`unexpected ${method}`);
+  });
+});
+
+/** 回归（用户反馈 A）：同一输入状态下，无论底部「下一步」还是步骤条导航，
+ *  反复进出第二步都不应重复调用 fx.validate_currency_mapping。 */
+it("同一输入下来回切换步骤不重复触发币种映射验证", async () => {
+  render(<FxAuditPage tool={tool} />);
+  await uploadBothSources();
+  const validateCalls = () =>
+    mock.engineCall.mock.calls.filter(
+      ([method]) => method === "fx.validate_currency_mapping",
+    ).length;
+
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
+  await screen.findByRole("button", { name: "下一步：测算与底稿" });
+  expect(validateCalls()).toBe(1);
+
+  // 底部「返回」再「下一步」：同一验证输入已通过，直接跳步。
+  fireEvent.click(screen.getByRole("button", { name: "返回上传与识别" }));
+  await screen.findByRole("button", { name: "下一步：确认TB科目类型" });
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
+  await screen.findByRole("button", { name: "下一步：测算与底稿" });
+
+  // 步骤条导航 0→1→0→1：同样不再触发验证（已完成步的读法带「（已完成）」后缀）。
+  fireEvent.click(screen.getByRole("button", { name: /1 上传与识别/ }));
+  await screen.findByRole("button", { name: "下一步：确认TB科目类型" });
+  fireEvent.click(screen.getByRole("button", { name: "2 TB科目类型确认" }));
+  await screen.findByRole("button", { name: "下一步：测算与底稿" });
+  expect(validateCalls()).toBe(1);
+});
+
+/** 回归（用户反馈 B）：TB/JE 识别出多个实际主体时，第二步科目确认表必须
+ *  带主体列；单主体账套维持原三列布局。 */
+it("多主体账套第二步出现主体列，单主体不出现", async () => {
+  inspectionEntities = ["甲公司", "乙公司"];
+  render(<FxAuditPage tool={tool} />);
+  await uploadBothSources();
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
+  await screen.findByRole("button", { name: "下一步：测算与底稿" });
+  const multiHead = document.querySelector(".fx-accounts-head") as HTMLElement;
+  expect(multiHead).toBeTruthy();
+  expect(within(multiHead).getByText("主体")).toBeVisible();
+  // 末级兜底行没有主体信息，主体列显示占位符 —。
+  expect(document.querySelector(".fx-entity-cell")?.textContent).toBe("—");
+
+  cleanup();
+  inspectionEntities = ["甲公司"];
+  render(<FxAuditPage tool={tool} />);
+  await uploadBothSources();
+  fireEvent.click(screen.getByRole("button", { name: "下一步：确认TB科目类型" }));
+  await screen.findByRole("button", { name: "下一步：测算与底稿" });
+  const singleHead = document.querySelector(".fx-accounts-head") as HTMLElement;
+  expect(singleHead).toBeTruthy();
+  expect(within(singleHead).queryByText("主体")).not.toBeInTheDocument();
+  expect(document.querySelector(".fx-entity-cell")).toBeNull();
+});

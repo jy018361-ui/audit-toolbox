@@ -14,6 +14,7 @@ import {
   fxConfirmationRows,
   fxConfirmationImportPatches,
   fxDetailCurrencyOverridesPayload,
+  fxMultiEntityNames,
   fxAllowedModes,
   fxApplyJobResult,
   fxAttachRole,
@@ -100,6 +101,53 @@ import {
   type AuxiliaryLinkResult,
 } from "./ledgerMapping";
 import type React from "react";
+describe("多主体账套的科目确认表主体列", () => {
+  const rows = [
+    { key: "1002", account: "1002 银行存款" },
+    { key: "甲公司\u001f1002\u001fUSD户", account: "1002 银行存款", entity: "甲公司", auxiliary: "美元户" },
+    { key: "默认主体\u001f1002\u001fJPY户", account: "1002 银行存款", entity: "默认主体", auxiliary: "日元户" },
+  ];
+
+  it("fxMultiEntityNames 去重、去空白并剔除「默认主体」占位", () => {
+    expect(
+      fxMultiEntityNames(["甲公司", " 甲公司 ", ""], ["乙公司", "默认主体"]),
+    ).toEqual(["甲公司", "乙公司"]);
+    expect(fxMultiEntityNames(["甲公司"], ["甲公司"])).toEqual(["甲公司"]);
+    expect(fxMultiEntityNames([], ["默认主体"])).toEqual([]);
+    // 多个实际主体才需要主体列；单主体/无主体列维持三列版式。
+    expect(fxMultiEntityNames(["甲公司"], ["乙公司"]).length).toBeGreaterThan(1);
+  });
+
+  it("带主体列导出：主体在首列，末级兜底行与占位主体导出为空", () => {
+    const exported = fxConfirmationRows(
+      rows, {}, {}, {}, {}, undefined, undefined, "CNY", true,
+    );
+    expect(exported[0].values).toHaveLength(4);
+    expect(exported[0].values[0]).toBe("");
+    expect(exported[1].values[0]).toBe("甲公司");
+    expect(exported[1].values[1]).toBe("1002 银行存款 · 美元户");
+    expect(exported[2].values[0]).toBe("");
+    // 默认版式（单主体）仍是三列，不破坏既有确认表。
+    const plain = fxConfirmationRows(rows, {}, {}, {}, {}, undefined, undefined, "CNY");
+    expect(plain[0].values).toHaveLength(3);
+  });
+
+  it("带主体列回传：分类与账户币种按右移后的列位解析", () => {
+    const exported = fxConfirmationRows(
+      rows, { "1002 银行存款": "monetary_asset" }, {}, {}, {}, undefined, undefined, "CNY", true,
+    );
+    const patches = fxConfirmationImportPatches(
+      [{ ...exported[1], values: ["甲公司", exported[1].values[1], "货币性负债", "EUR"] }],
+      rows, exported,
+      { "1002 银行存款": "monetary_asset" }, {},
+      undefined, undefined, "CNY", true,
+    );
+    expect(patches.detailRoles).toEqual({ "甲公司\u001f1002\u001fUSD户": "monetary_liability" });
+    expect(patches.detailCurrencies).toEqual({ "甲公司\u001f1002\u001fUSD户": "EUR" });
+    expect(patches.roles).toEqual({});
+  });
+});
+
 describe("fx audit mode selection", () => {
   it("科目目录只在身份映射变化时失效", () => {
     const before = fxCatalogMappingKey({ accountCode: "科目编码", accountName: "科目名称", closingFunctionalAmount: "期末" });
@@ -225,8 +273,8 @@ describe("fx audit mode selection", () => {
       ],
     } as unknown as AuxiliaryLinkResult;
     expect(fxAccountReviewRows(["1122 应收账款", "1403 原材料"], link)).toEqual([
-      { key: "全表\u001f1122\u001f甲", account: "1122 应收账款", auxiliary: "客商甲" },
-      { key: "全表\u001f1122\u001f乙", account: "1122 应收账款", auxiliary: "客商乙" },
+      { key: "全表\u001f1122\u001f甲", account: "1122 应收账款", entity: "全表", auxiliary: "客商甲" },
+      { key: "全表\u001f1122\u001f乙", account: "1122 应收账款", entity: "全表", auxiliary: "客商乙" },
       { key: "1403 原材料", account: "1403 原材料" },
     ]);
   });

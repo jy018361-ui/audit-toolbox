@@ -157,6 +157,39 @@
   color: var(--muted-foreground);
   text-align: center;
 }
+/* 多主体账套：确认表加“主体”列，科目列相应收窄。 */
+.deposit-account-list table.deposit-multi-entity
+  th:nth-child(1),
+.deposit-account-list table.deposit-multi-entity
+  td:nth-child(1) {
+  width: 128px;
+  min-width: 96px;
+}
+.deposit-account-list table.deposit-multi-entity
+  th:nth-child(2),
+.deposit-account-list table.deposit-multi-entity
+  td:nth-child(2) {
+  width: 30%;
+}
+/* 按币种拆出的后续行：主体/科目列只标币种，其余列留空对齐。 */
+.deposit-account-sub td {
+  color: var(--muted-foreground);
+}
+.deposit-account-continuation {
+  padding-left: 34px;
+}
+/* 贷方余额纳入口径提示。 */
+.deposit-credit-policy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
 /* 步骤卡头与借款利息第二步同款：主色 kicker 点题，汇总徽章靠右。 */
 .deposit-confirm-heading {
   display: flex;

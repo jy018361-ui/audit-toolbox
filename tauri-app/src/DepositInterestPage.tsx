@@ -64,6 +64,10 @@ import {
   CurrencyFallbackDialog,
   type CurrencyFallbackMode,
 } from "@/components/CurrencyFallbackDialog";
+import {
+  CreditBalanceDialog,
+  type CreditBalanceAccount,
+} from "@/components/CreditBalanceDialog";
 
 /** 可多列的角色与统一内核一致；`account` 是历史保存映射的旧槽位。 */
 const DEPOSIT_MULTI = new Set([
@@ -591,11 +595,34 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   const [outputPath, setOutputPath] = useState("");
   const [sourceStatus, setSourceStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  // 引擎下发的「测算前行清单」：键与测算结果行完全一致，供第二步按币种拆行、
+  // 逐行填利率，并与第三步的逐户改价联动。旧后端／预览模式没有这份清单，
+  // 第二步回退到按科目整行显示。
+  const [accountCurrencyRows, setAccountCurrencyRows] = useState<
+    Array<{
+      key: string;
+      entity: string;
+      account: string;
+      auxiliary: string;
+      currency: string;
+      role: string;
+    }>
+  >([]);
+  // 贷方余额存款账户的处理口径：缺省＝不纳入测算；用户在弹窗里确认后 include。
+  const [creditBalancePolicy, setCreditBalancePolicy] = useState<"" | "include">(
+    "",
+  );
+  const [creditDialogOpen, setCreditDialogOpen] = useState(false);
   // 三步导引，与汇兑损益／FA 一致：上传识别 → 科目分类 → 测算与底稿。
   const [step, setStep] = useState(0);
   const [error, setError] = useState("");
   const [job, setJob] = useState<JobEvent>();
   const activeJob = useRef("");
+  // 启动测算时的口径与方法：完成事件按“本次用没用纳入口径”决定是否弹窗。
+  const creditPolicyAtRunRef = useRef<"" | "include">("");
+  const lastRunMethod = useRef<"deposit.preview" | "deposit.export">(
+    "deposit.preview",
+  );
   const uploadDropRef = useRef<HTMLDivElement>(null);
   // 一键复核 TB＋JE：引擎与汇兑损益共用同一份（见 components/LedgerReviewAll）。
   const reviews = useLedgerDictReviews(engineCall, {
@@ -706,6 +733,37 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auxLinkKey]);
+  // 测算前行清单（含分币种拆行与引擎行键）：身份输入一变就重取，
+  // 键与测算结果行一致，第二步的逐行利率与第三步逐户改价共用同一键空间。
+  const accountCurrencyKey = tb
+    ? JSON.stringify({
+        tb: [tbPath, tb.sheet, tb.headerRow, tb.headerDepth, tbMapping],
+        je: [jePath, je?.sheet ?? "", je?.headerRow ?? 0, je?.headerDepth ?? 0, jeMapping],
+        roles: [accountRoles, accountRoleOverrides, accountDetailRoleOverrides],
+        currencyFallbackMode,
+        entityScope: entityScope.selection,
+      })
+    : null;
+  useEffect(() => {
+    if (accountCurrencyKey === null) {
+      setAccountCurrencyRows([]);
+      return;
+    }
+    let cancelled = false;
+    void engineCall("deposit.account_currencies", payload())
+      .then((x) => {
+        if (cancelled) return;
+        const list = (x as { rows?: typeof accountCurrencyRows }).rows;
+        setAccountCurrencyRows(Array.isArray(list) ? list : []);
+      })
+      .catch(() => {
+        if (!cancelled) setAccountCurrencyRows([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountCurrencyKey]);
   useEffect(() => {
     resetCurrencyFallback();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -759,6 +817,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       rateOverrides?: Record<string, { tier?: string; annualRate?: number }>;
       accountRateOverrides?: Record<string, number>;
       tierRates?: Record<string, number>;
+      creditBalancePolicy?: "include";
       currencyFallbackMode?: CurrencyFallbackMode;
       outputPath?: string;
     };
@@ -844,6 +903,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     );
     if (p.tierRates && typeof p.tierRates === "object")
       setTierRates(p.tierRates);
+    setCreditBalancePolicy(p.creditBalancePolicy === "include" ? "include" : "");
     setCurrencyFallbackMode(
       p.currencyFallbackMode === "functional" ||
         p.currencyFallbackMode === "twoPointByCurrency"
@@ -922,6 +982,15 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         const next = event.result as Record<string, unknown>;
         setResult((current) => ({ ...current, ...next }));
         setRows((next.rows ?? []) as AccountRow[]);
+        // 贷方余额账户：本次任务按默认口径跑完才提示；已选纳入的不重复弹。
+        const summary = next.summary as
+          | { creditBalanceCount?: number }
+          | undefined;
+        if (
+          Number(summary?.creditBalanceCount ?? 0) > 0 &&
+          creditPolicyAtRunRef.current !== "include"
+        )
+          setCreditDialogOpen(true);
       } else if (event.phase === "failed" || event.phase === "cancelled") {
         setBusy(false);
         const payload = event.result as
@@ -971,6 +1040,10 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     setAccountTierOverrides({});
     setRateOverrides({});
     setAccountRateOverrides({});
+    currencyCheckRef.current = { key: "", check: null };
+    setAccountCurrencyRows([]);
+    setCreditBalancePolicy("");
+    setCreditDialogOpen(false);
     setRows([]);
     setExpanded("");
     setResult(undefined);
@@ -1199,7 +1272,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     }
   }
 
-  function payload() {
+  function payload(creditPolicy: "" | "include" = creditBalancePolicy) {
     return {
       reportStart: depositReportStart(reportEnd),
       reportEnd,
@@ -1234,11 +1307,48 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       accountRateOverrides,
       tierRates,
       ...(currencyFallbackMode ? { currencyFallbackMode } : {}),
+      ...(creditPolicy ? { creditBalancePolicy: creditPolicy } : {}),
       entityScope: entityScope.selection,
       ...(outputPath ? { outputPath } : {}),
     };
   }
+  // 币种衔接验证只跟这些输入有关：输入没变就复用上次结论，
+  // 导航栏来回切步骤不再重跑验证（重跑只在底部“下一步”或首次进入时发生一次）。
+  const currencyCheckRef = useRef<{
+    key: string;
+    check: CurrencyLinkResult | null;
+  }>({ key: "", check: null });
+  function currencyCheckKey() {
+    return JSON.stringify([
+      tbPath,
+      tb?.sheet,
+      tb?.headerRow,
+      tb?.headerDepth,
+      tbMapping,
+      jePath,
+      je?.sheet,
+      je?.headerRow,
+      je?.headerDepth,
+      jeMapping,
+      accountRoles,
+      accountRoleOverrides,
+      entityScope.selection,
+    ]);
+  }
   async function advanceToConfirmation() {
+    const key = currencyCheckKey();
+    const cached =
+      currencyCheckRef.current.key === key
+        ? currencyCheckRef.current.check
+        : null;
+    // 已验证通过（或用户已选定多币种口径）时，直接进第二步，不再调用引擎。
+    if (
+      cached &&
+      (currencyFallbackMode || !(cached.required && !cached.verified))
+    ) {
+      setStep(1);
+      return;
+    }
     if (!je || !jePath || !tb || !tbMapping.currency) {
       setStep(1);
       return;
@@ -1254,6 +1364,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         setError("暂时无法验证 TB 与 JE 的外币币种对应关系，请稍后重试。");
         return;
       }
+      currencyCheckRef.current = { key, check };
       setCurrencyLink(check);
       if (check.required && !check.verified) {
         setCurrencyDialogOpen(true);
@@ -1265,7 +1376,11 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       setBusy(false);
     }
   }
-  async function run(method: "deposit.preview" | "deposit.export") {
+  async function run(
+    method: "deposit.preview" | "deposit.export",
+    // 弹窗确认后立即按新口径重算：状态更新是异步的，口径必须显式传参。
+    creditPolicy: "" | "include" = creditBalancePolicy,
+  ) {
     setError("");
     if (!tb) return setError("请先上传并识别 TB 科目余额表。");
     if (!reportEnd) return setError("请选择资产负债表日。");
@@ -1287,7 +1402,9 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       );
     setBusy(true);
     try {
-      activeJob.current = await jobStart(method, payload());
+      creditPolicyAtRunRef.current = creditPolicy;
+      lastRunMethod.current = method;
+      activeJob.current = await jobStart(method, payload(creditPolicy));
     } catch (e) {
       setBusy(false);
       setError(errorText(e));
@@ -1385,10 +1502,79 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     tb?.suggestedAccountTiers?.[account] ??
     je?.suggestedAccountTiers?.[account] ??
     "demand";
+  // 贷方余额账户清单：引擎在测算汇总里下发，弹窗据此点名。
+  const creditBalanceAccounts = useMemo(() => {
+    const list = (
+      result?.summary as
+        | { creditBalanceAccounts?: CreditBalanceAccount[] }
+        | undefined
+    )?.creditBalanceAccounts;
+    return Array.isArray(list) ? list : [];
+  }, [result]);
   const reviewTier = (row: DepositAccountReviewRow) =>
     accountDetailTierOverrides[row.key] ?? accountTier(row.account);
   const accountCategory = (account: string, tier = accountTier(account)) =>
     tiers?.tiers.find((item) => item.key === tier)?.category ?? "demand";
+  // 多主体账套才显示“主体”列；单主体保持原布局（与 TBJE 系确认表同口径）。
+  const entitySet = useMemo(
+    () =>
+      new Set(
+        [...(tb?.entities ?? []), ...(je?.entities ?? [])].filter(
+          (entity) => entity && entity !== "默认主体",
+        ),
+      ),
+    [tb?.entities, je?.entities],
+  );
+  const multiEntity = entitySet.size > 1;
+  // 引擎下发的测算行按科目编码归组，确认表据此按币种（或主体）拆行展示。
+  const engineRowsByCode = useMemo(() => {
+    const map = new Map<string, typeof accountCurrencyRows>();
+    for (const item of accountCurrencyRows) {
+      const code = depositAccountCode(item.account);
+      const list = map.get(code);
+      if (list) list.push(item);
+      else map.set(code, [item]);
+    }
+    return map;
+  }, [accountCurrencyRows]);
+  /** 确认表行对应的引擎测算行：键与测算结果一致，利率改写直接落到这些键上。
+      无辅助明细的确认行匹配未分辅助的引擎行；明细行按辅助值匹配（合并行
+      的辅助以「；」连接，任一段命中即可）。 */
+  function engineVariantsOf(row: DepositAccountReviewRow) {
+    const candidates =
+      engineRowsByCode.get(depositAccountCode(row.account)) ?? [];
+    return candidates.filter((item) => {
+      if (row.auxiliaryKey) {
+        if (
+          row.entity &&
+          item.entity !== row.entity &&
+          item.entity !== "默认主体"
+        )
+          return false;
+        return item.auxiliary.split("；").includes(row.auxiliary ?? "");
+      }
+      return item.auxiliary === "";
+    });
+  }
+  /** 引擎行键上的逐户利率（第三步改价与第二步同键，天然联动）。 */
+  const engineRateOf = (key: string) => {
+    const rate = rateOverrides[key]?.annualRate;
+    return Number.isFinite(rate) ? rate : undefined;
+  };
+  /** 换存款类型时把该户各币种行的手改利率一并清掉，全部回到新档位默认。 */
+  function clearEngineRates(keys: string[]) {
+    if (!keys.length) return;
+    setRateOverrides((current) => {
+      const next = { ...current };
+      for (const key of keys) {
+        const entry = next[key];
+        if (!entry) continue;
+        if (entry.tier === undefined) delete next[key];
+        else next[key] = { tier: entry.tier };
+      }
+      return next;
+    });
+  }
 
   return (
     <main className="tool-page fx-page deposit-page">
@@ -1767,134 +1953,137 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                     total={reviewAccounts.length}
                   />
                   <div className="deposit-account-list">
-                    <table>
+                    <table className={multiEntity ? "deposit-multi-entity" : undefined}>
                       <thead>
                         <tr>
+                          {multiEntity && <th>主体</th>}
                           <th>科目</th>
                           <th>分类</th>
                           <th>存款类型</th>
                           <th>
                             利率（%）
-                            <HelpTip text="默认带出所选存款类型的挂牌利率（在下方档位表改写过的用改写值）；可直接改写为协议利率。改写后切换存款类型，会自动回到新类型的默认利率。" />
+                            <HelpTip text="默认带出所选存款类型的挂牌利率（在下方档位表改写过的用改写值）；可直接改写为协议利率。改写后切换存款类型，会自动回到新类型的默认利率。多币种账户按币种拆行，可分别填写各币种利率；与第三步的逐户改价同键联动。" />
                           </th>
                         </tr>
                       </thead>
                       <tbody>
-                        {renderedAccounts.map((row) => {
+                        {renderedAccounts.flatMap((row) => {
                           const tierMeta = tiers?.tiers.find(
                             (item) => item.key === reviewTier(row),
                           );
                           const manualRate = accountRateOverrides[row.key];
+                          const tierRate = depositEffectiveTierRate(
+                            tierMeta,
+                            tierRates,
+                          );
                           const effectiveRate = Number.isFinite(manualRate)
                             ? manualRate
-                            : depositEffectiveTierRate(tierMeta, tierRates);
-                          return (
-                          <tr key={row.key}>
-                            <td
-                              title={`${row.account}${row.auxiliary ? ` / ${row.auxiliary}` : ""}`}
-                            >
-                              {row.account}
-                              {row.auxiliary
-                                ? ` · ${row.entity ? `${row.entity} / ` : ""}${row.auxiliary}`
-                                : ""}
-                            </td>
-                            <td>
-                              <select
-                                className="deposit-account-role"
-                                aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的分类`}
-                                value={
-                                  row.auxiliaryKey
-                                    ? (accountDetailRoleOverrides[row.key] ??
-                                      "")
-                                    : (accountRoleOverrides[row.account] ?? "")
-                                }
-                                onChange={(e) => {
-                                  const value = e.target.value;
-                                  const setter = row.auxiliaryKey
-                                    ? setAccountDetailRoleOverrides
-                                    : setAccountRoleOverrides;
-                                  setter((current) => {
-                                    const next = { ...current };
-                                    if (value) next[row.key] = value;
-                                    else delete next[row.key];
-                                    return next;
-                                  });
-                                }}
+                            : tierRate;
+                          const isDepositRow = ["deposit", "other_monetary"].includes(
+                            reviewRole(row),
+                          );
+                          const variants = engineVariantsOf(row);
+                          // 引擎行按币种（多主体时含主体）拆成多行；没有引擎
+                          // 行的（旧后端／仅在序时账出现）保持科目整行一条。
+                          const lines = variants.length > 0 ? variants : [null];
+                          return lines.map((variant, index) => {
+                            const currency =
+                              variant && lines.length > 1
+                                ? `（${variant.currency}）`
+                                : "";
+                            const rate = variant
+                              ? (engineRateOf(variant.key) ?? effectiveRate)
+                              : effectiveRate;
+                            return (
+                          <tr
+                            key={variant ? variant.key : row.key}
+                            className={index > 0 ? "deposit-account-sub" : undefined}
+                          >
+                            {multiEntity && (
+                              <td>
+                                {variant
+                                  ? variant.entity === "默认主体"
+                                    ? "未区分主体"
+                                    : variant.entity
+                                  : (row.entity ?? "—")}
+                              </td>
+                            )}
+                            {index === 0 ? (
+                              <td
+                                title={`${row.account}${row.auxiliary ? ` / ${row.auxiliary}` : ""}`}
                               >
-                                <option value="">
-                                  {
-                                    ROLE_OPTIONS.find(
-                                      ([role]) =>
-                                        role ===
-                                        (tb?.suggestedAccountRoles?.[
-                                          row.account
-                                        ] ??
-                                          je?.suggestedAccountRoles?.[
+                                {row.account}
+                                {row.auxiliary
+                                  ? ` · ${row.entity ? `${row.entity} / ` : ""}${row.auxiliary}`
+                                  : ""}
+                                {currency}
+                              </td>
+                            ) : (
+                              <td className="deposit-account-continuation">
+                                {currency}
+                              </td>
+                            )}
+                            {index === 0 ? (
+                              <td>
+                                <select
+                                  className="deposit-account-role"
+                                  aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的分类`}
+                                  value={
+                                    row.auxiliaryKey
+                                      ? (accountDetailRoleOverrides[row.key] ??
+                                        "")
+                                      : (accountRoleOverrides[row.account] ?? "")
+                                  }
+                                  onChange={(e) => {
+                                    const value = e.target.value;
+                                    const setter = row.auxiliaryKey
+                                      ? setAccountDetailRoleOverrides
+                                      : setAccountRoleOverrides;
+                                    setter((current) => {
+                                      const next = { ...current };
+                                      if (value) next[row.key] = value;
+                                      else delete next[row.key];
+                                      return next;
+                                    });
+                                  }}
+                                >
+                                  <option value="">
+                                    {
+                                      ROLE_OPTIONS.find(
+                                        ([role]) =>
+                                          role ===
+                                          (tb?.suggestedAccountRoles?.[
                                             row.account
                                           ] ??
-                                          "excluded"),
-                                    )?.[1]
-                                  }
-                                </option>
-                                {ROLE_OPTIONS.map(([value, label]) => (
-                                  <option key={value} value={value}>
-                                    {label}
+                                            je?.suggestedAccountRoles?.[
+                                              row.account
+                                            ] ??
+                                            "excluded"),
+                                      )?.[1]
+                                    }
                                   </option>
-                                ))}
-                              </select>
-                            </td>
-                            {["deposit", "other_monetary"].includes(
-                              reviewRole(row),
-                            ) ? (
+                                  {ROLE_OPTIONS.map(([value, label]) => (
+                                    <option key={value} value={value}>
+                                      {label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </td>
+                            ) : (
+                              <td />
+                            )}
+                            {isDepositRow ? (
                               <>
-                                <td>
-                                  <div className="deposit-account-tier">
-                                    <select
-                                      className="deposit-account-category"
-                                      aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的存款类型`}
-                                      value={accountCategory(
-                                        row.account,
-                                        reviewTier(row),
-                                      )}
-                                      onChange={(e) => {
-                                        (
-                                          row.auxiliaryKey
-                                            ? setAccountDetailTierOverrides
-                                            : setAccountTierOverrides
-                                        )((current) => ({
-                                          ...current,
-                                          [row.key]: depositFirstTierOf(
-                                            tiers,
-                                            e.target.value,
-                                          ),
-                                        }));
-                                        // 换了类型就回到新档位的默认利率，
-                                        // 避免旧类型的手改利率悄悄跟着过去。
-                                        clearAccountRate(row.key);
-                                      }}
-                                    >
-                                      {(tiers?.categories ?? []).map(
-                                        (category) => (
-                                          <option
-                                            key={category.key}
-                                            value={category.key}
-                                          >
-                                            {category.label}
-                                          </option>
-                                        ),
-                                      )}
-                                    </select>
-                                    {depositTermsOf(
-                                      tiers,
-                                      accountCategory(
-                                        row.account,
-                                        reviewTier(row),
-                                      ),
-                                    ).length > 0 && (
+                                {index === 0 ? (
+                                  <td>
+                                    <div className="deposit-account-tier">
                                       <select
-                                        className="deposit-account-term"
-                                        aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的存款期限`}
-                                        value={reviewTier(row)}
+                                        className="deposit-account-category"
+                                        aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的存款类型`}
+                                        value={accountCategory(
+                                          row.account,
+                                          reviewTier(row),
+                                        )}
                                         onChange={(e) => {
                                           (
                                             row.auxiliaryKey
@@ -1902,45 +2091,98 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                                               : setAccountTierOverrides
                                           )((current) => ({
                                             ...current,
-                                            [row.key]: e.target.value,
+                                            [row.key]: depositFirstTierOf(
+                                              tiers,
+                                              e.target.value,
+                                            ),
                                           }));
+                                          // 换了类型就回到新档位的默认利率，
+                                          // 避免旧类型的手改利率悄悄跟着过去。
                                           clearAccountRate(row.key);
+                                          clearEngineRates(
+                                            variants.map((item) => item.key),
+                                          );
                                         }}
                                       >
-                                        {depositTermsOf(
-                                          tiers,
-                                          accountCategory(
-                                            row.account,
-                                            reviewTier(row),
+                                        {(tiers?.categories ?? []).map(
+                                          (category) => (
+                                            <option
+                                              key={category.key}
+                                              value={category.key}
+                                            >
+                                              {category.label}
+                                            </option>
                                           ),
-                                        ).map((term) => (
-                                          <option
-                                            key={term.key}
-                                            value={term.key}
-                                          >
-                                            {term.label}
-                                          </option>
-                                        ))}
+                                        )}
                                       </select>
-                                    )}
-                                  </div>
-                                </td>
+                                      {depositTermsOf(
+                                        tiers,
+                                        accountCategory(
+                                          row.account,
+                                          reviewTier(row),
+                                        ),
+                                      ).length > 0 && (
+                                        <select
+                                          className="deposit-account-term"
+                                          aria-label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的存款期限`}
+                                          value={reviewTier(row)}
+                                          onChange={(e) => {
+                                            (
+                                              row.auxiliaryKey
+                                                ? setAccountDetailTierOverrides
+                                                : setAccountTierOverrides
+                                            )((current) => ({
+                                              ...current,
+                                              [row.key]: e.target.value,
+                                            }));
+                                            clearAccountRate(row.key);
+                                            clearEngineRates(
+                                              variants.map((item) => item.key),
+                                            );
+                                          }}
+                                        >
+                                          {depositTermsOf(
+                                            tiers,
+                                            accountCategory(
+                                              row.account,
+                                              reviewTier(row),
+                                            ),
+                                          ).map((term) => (
+                                            <option
+                                              key={term.key}
+                                              value={term.key}
+                                            >
+                                              {term.label}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      )}
+                                    </div>
+                                  </td>
+                                ) : (
+                                  <td />
+                                )}
                                 <td>
                                   <span className="deposit-pct">
                                     <NumberInput
-                                      label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}的年利率`}
+                                      label={`${row.account}${row.auxiliary ? ` ${row.auxiliary}` : ""}${currency}的年利率`}
                                       step="0.01"
                                       min="0"
                                       max="20"
                                       className={
-                                        effectiveRate === undefined
+                                        rate === undefined
                                           ? "deposit-rate-missing"
                                           : undefined
                                       }
-                                      value={depositRateToPercent(effectiveRate)}
+                                      value={depositRateToPercent(rate)}
                                       placeholder="需填"
                                       onCommit={(text) =>
-                                        commitAccountRate(row.key, text)
+                                        variant
+                                          ? overrideRow(variant.key, {
+                                              annualRate:
+                                                depositPercentToRate(text),
+                                            })
+                                          : commitAccountRate(row.key, text)
                                       }
                                     />
                                     <b>%</b>
@@ -1954,7 +2196,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                               </>
                             )}
                           </tr>
-                          );
+                            );
+                          });
                         })}
                       </tbody>
                     </table>
@@ -2084,7 +2327,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
             <CardHeader>
               <CardTitle>
                 测算与底稿
-                <HelpTip text="存款类型与利率在第二步「科目与利率确认」逐户维护，此处展示测算采用值与来源。来源为「挂牌暂估值」表示系统按内置挂牌利率暂估，请按协议或对账单确认；手工指定的利率以实际填写为准。未取得对应 JE 时，全年平均余额直接按（期初＋期末）÷2 暂估。" />
+                <HelpTip text="利率可在第二步「科目与利率确认」逐户维护，也可在本表直接改写，两处联动、取同一口径。来源为「挂牌暂估值」表示系统按内置挂牌利率暂估，请按协议或对账单确认；手工指定的利率以实际填写为准。未取得对应 JE 时，全年平均余额直接按（期初＋期末）÷2 暂估。" />
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -2199,6 +2442,21 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                   ))}
                 </div>
               )}
+              {creditBalancePolicy === "include" && (
+                <p className="deposit-credit-policy">
+                  已按你的选择把贷方余额账户纳入测算，其负余额会抵减测算利息合计。
+                  <Button
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={() => {
+                      setCreditBalancePolicy("");
+                      void run(lastRunMethod.current, "");
+                    }}
+                  >
+                    改回不纳入并重算
+                  </Button>
+                </p>
+              )}
             </CardContent>
           </Card>
 
@@ -2212,6 +2470,43 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
               onOverride={overrideRow}
               onRecalculate={() => void run("deposit.preview")}
               busy={busy}
+            />
+          )}
+
+          {rows.length > 0 && (
+            <AccountConfirmationActions
+              tool="deposit"
+              title="存款账户利率"
+              context={JSON.stringify([tbPath, jePath, tbMapping, jeMapping, rows.map((row) => row.key), "account-rates"])}
+              columns={[
+                { key: "entity", title: "主体" },
+                { key: "account", title: "银行账户／科目" },
+                { key: "currency", title: "币种" },
+                { key: "tier", title: "存款档位" },
+                { key: "annualRate", title: "年利率（%）", editable: true },
+              ]}
+              rows={rows.map((row) => ({ key: row.key, values: [
+                row.entity, row.account, row.currency, row.tierLabel,
+                row.rateResolved ? String(depositRateToPercent(row.annualRate)) : "",
+              ] }))}
+              disabled={busy}
+              onImport={(changed) => {
+                const updates = new Map(changed.map((item) => {
+                  const value = Number(item.values[4]);
+                  if (!item.values[4] || !Number.isFinite(value))
+                    throw new Error(`${item.values[1]}：年利率须填写数字百分比。`);
+                  return [item.key, depositPercentToRate(item.values[4])] as const;
+                }));
+                setRateOverrides((current) => {
+                  const next = { ...current };
+                  for (const [key, annualRate] of updates)
+                    next[key] = { ...next[key], annualRate };
+                  return next;
+                });
+                setRows((current) => current.map((row) => updates.has(row.key)
+                  ? { ...row, annualRate: updates.get(row.key)!, rateResolved: true, rateSource: "本账户手工指定", rateProvisional: false }
+                  : row));
+              }}
             />
           )}
 
@@ -2234,6 +2529,16 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
           setResult(undefined);
           setRows([]);
           setStep(1);
+        }}
+      />
+      <CreditBalanceDialog
+        open={creditDialogOpen && creditBalanceAccounts.length > 0}
+        accounts={creditBalanceAccounts}
+        onCancel={() => setCreditDialogOpen(false)}
+        onInclude={() => {
+          setCreditBalancePolicy("include");
+          setCreditDialogOpen(false);
+          void run(lastRunMethod.current, "include");
         }}
       />
     </main>
@@ -2992,18 +3297,33 @@ export function Results({
                   <td
                     title={
                       row.rateResolved
-                        ? "利率在第二步「科目与利率确认」中维护"
+                        ? "与第二步「科目与利率确认」联动：这里的改写会体现在第二步的利率列"
                         : undefined
                     }
                   >
-                    {row.rateResolved ? (
-                      <span className="deposit-pct deposit-rate-readonly">
-                        {depositRateToPercent(row.annualRate)}
-                        <b>%</b>
-                      </span>
-                    ) : (
-                      <span className="deposit-rate-missing">需填</span>
-                    )}
+                    <span className="deposit-pct">
+                      <NumberInput
+                        label={`${row.account}（${row.currency || "未标币种"}）的年利率`}
+                        step="0.01"
+                        min="0"
+                        max="20"
+                        className={
+                          !row.rateResolved ? "deposit-rate-missing" : undefined
+                        }
+                        value={
+                          row.rateResolved
+                            ? depositRateToPercent(row.annualRate)
+                            : ""
+                        }
+                        placeholder="需填"
+                        onCommit={(text) =>
+                          onOverride(row.key, {
+                            annualRate: depositPercentToRate(text),
+                          })
+                        }
+                      />
+                      <b>%</b>
+                    </span>
                   </td>
                   <td className="deposit-amount-cell">
                     {amount(row.openingBalance)}
@@ -3037,12 +3357,16 @@ export function Results({
                     <Badge
                       variant="outline"
                       className={
-                        depositBalanceCheckStatus(row) === "已勾稽"
-                          ? "badge-ready"
-                          : "badge-warning"
+                        row.status.startsWith("贷方余额")
+                          ? "badge-warning"
+                          : depositBalanceCheckStatus(row) === "已勾稽"
+                            ? "badge-ready"
+                            : "badge-warning"
                       }
                     >
-                      {depositBalanceCheckStatus(row)}
+                      {row.status.startsWith("贷方余额")
+                        ? row.status
+                        : depositBalanceCheckStatus(row)}
                     </Badge>
                   </td>
                   <td title={row.rateSource}>

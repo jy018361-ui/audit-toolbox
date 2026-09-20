@@ -3266,9 +3266,12 @@ fn currency_for(
         }
     }
     // 其次是币种列。映射阶段已经把“整列同值”的列排除在交易币种之外，
-    // 所以这里映射上的币种列就是可信的逐科目币种。
+    // 所以这里映射上的币种列就是可信的逐科目币种。认不出的取值（非受
+    // 支持币种代码）不再原样返回：回落到名称线索，再兜底主体本位币——
+    // 与映射校验同口径（用户定案 2026-09-19：货币性科目认不出默认本位币，
+    // 第二步确认兜底），免得垃圾值带着行远离测算。
     let mapped = normalize_currency(cell(row, mapping, "currency"));
-    if !mapped.is_empty() {
+    if !mapped.is_empty() && supported_currencies().contains(mapped.as_str()) {
         return mapped;
     }
     // 没有币种列时才看科目名称/科目文本里的币种线索。
@@ -4740,18 +4743,55 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                 if let Some(currency_col) = first_col(&mapping, "currency")
                     && let Some(index) = ledger_mapping::header_index(&table.headers, &currency_col)
                 {
+                    // 用户定案（2026-09-19）：「只标外币」的币种列（本位币行
+                    // 留空，北重精工 81 行只标 1 行 USD 即实案）是合法形态，
+                    // 空白一律按本位币行跳过；非空但认不出的取值只对货币性
+                    // 科目才有意义——非货币性科目直接忽略，货币性科目默认按
+                    // 本位币处理并提示，第二步的账户币种确认会兜底。任何
+                    // 币种单元格都不再拦死测算。
                     let supported = supported_currencies();
-                    for (row_index, row) in table.rows.iter().enumerate() {
+                    let account_indexes = account_columns(&mapping)
+                        .iter()
+                        .filter_map(|column| {
+                            ledger_mapping::header_index(&table.headers, column)
+                        })
+                        .collect::<Vec<_>>();
+                    let account_of = |row: &[String]| {
+                        account_indexes
+                            .iter()
+                            .filter_map(|i| row.get(*i))
+                            .map(|value| value.trim())
+                            .filter(|value| !value.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    };
+                    let mut unrecognized_monetary = 0usize;
+                    let mut first_sample = String::new();
+                    for row in table.rows.iter() {
                         let raw = row.get(index).map(String::as_str).unwrap_or("");
-                        let code = normalize_currency(raw);
-                        if code.len() != 3 || !supported.contains(code.as_str()) {
-                            errors.push(format!(
-                                "TB 第{}行币种无法标准化或不在官方汇率覆盖范围：{}",
-                                table.header_row + table.header_depth + row_index,
-                                raw
-                            ));
-                            break;
+                        if raw.trim().is_empty() {
+                            continue;
                         }
+                        let code = normalize_currency(raw);
+                        if code.len() == 3 && supported.contains(code.as_str()) {
+                            continue;
+                        }
+                        let role = role_for(&account_of(row), params);
+                        if matches!(
+                            role.as_str(),
+                            "non_monetary" | "other_pnl" | "fx_gain_loss"
+                        ) {
+                            continue;
+                        }
+                        unrecognized_monetary += 1;
+                        if first_sample.is_empty() {
+                            first_sample = raw.trim().to_owned();
+                        }
+                    }
+                    if unrecognized_monetary > 0 {
+                        warnings.push(format!(
+                            "TB 币种列有 {unrecognized_monetary} 行认不出的取值（首见“{first_sample}”），货币性科目已按本位币处理，请在第二步确认账户币种。"
+                        ));
                     }
                 }
                 let key_columns = ["entity", "currency"]
@@ -12970,6 +13010,116 @@ mod tests {
             "缺列必须明确报错：{errors:?}"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    /// 用户定案（2026-09-19）：「只标外币」的币种列（本位币行留空，北重
+    /// 精工 81 行只标 1 行 USD 实案）是合法形态——空白行按本位币跳过；
+    /// 非货币性科目认不出的币种忽略；货币性科目认不出默认本位币并提示，
+    /// 由第二步账户币种确认兜底。币种单元格不再拦死测算。
+    #[test]
+    fn 只标外币的币种列不再拦截空白行() {
+        let path = std::env::temp_dir().join(format!(
+            "fx-currency-blank-{}.csv",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "科目编码,科目名称,币种,期初余额,期末余额\n",
+                "1001,库存现金,,10,20\n",
+                "100201,银行存款-人民币户,,30,40\n",
+                "100202,银行存款-美元户,USD,50,60\n",
+                "1601,固定资产,待补充,1,2\n",
+            ),
+        )
+        .unwrap();
+        let validation = validate_mapping(&json!({
+            "mode": "unrealized",
+            "tbSource": {"inputPath": path.to_string_lossy(), "headerRow": 1, "headerDepth": 1},
+            "tbMapping": {
+                "accountCode": "科目编码",
+                "accountName": "科目名称",
+                "openingFunctionalAmount": "期初余额",
+                "closingFunctionalAmount": "期末余额",
+                "currency": "币种"
+            }
+        }))
+        .unwrap();
+        let errors = validation["errors"].as_array().unwrap();
+        assert!(
+            !errors
+                .iter()
+                .any(|value| value.as_str().unwrap_or("").contains("币种")),
+            "空白本位币行与非货币性科目的取值都不该报币种错误：{errors:?}"
+        );
+        assert_eq!(validation["valid"], json!(true), "{validation}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn 货币性科目认不出的币种默认本位币并提示() {
+        let path = std::env::temp_dir().join(format!(
+            "fx-currency-unknown-{}.csv",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "科目编码,科目名称,币种,期初余额,期末余额\n",
+                "1001,库存现金,,10,20\n",
+                "100202,银行存款-外币户,币种待定,50,60\n",
+            ),
+        )
+        .unwrap();
+        let validation = validate_mapping(&json!({
+            "mode": "unrealized",
+            "tbSource": {"inputPath": path.to_string_lossy(), "headerRow": 1, "headerDepth": 1},
+            "tbMapping": {
+                "accountCode": "科目编码",
+                "accountName": "科目名称",
+                "openingFunctionalAmount": "期初余额",
+                "closingFunctionalAmount": "期末余额",
+                "currency": "币种"
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            validation["valid"],
+            json!(true),
+            "货币性科目认不出的币种默认本位币，不拦截：{validation}"
+        );
+        let warnings = validation["warnings"].as_array().unwrap();
+        assert!(
+            warnings.iter().any(|value| value
+                .as_str()
+                .unwrap_or("")
+                .contains("已按本位币处理")),
+            "必须提示第二步确认账户币种：{warnings:?}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 认不出的映射币种在取数端回落：先试科目名称里的币种线索，
+    /// 再兜底主体本位币（与映射校验同口径）。
+    #[test]
+    fn 认不出的映射币种回落名称线索与本位币() {
+        let mapping = json!({"currency": "币种"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let params = json!({"fixedEntity": DEFAULT_ENTITY, "entityCurrencies": {DEFAULT_ENTITY: "CNY"}});
+        let hinted = test_row_record(&[("科目", "100202 银行存款-美元户"), ("币种", "币种待定")]);
+        assert_eq!(
+            currency_for(&hinted, &mapping, "100202 银行存款-美元户", &params),
+            "USD",
+            "科目名称里的「美元」线索优先于认不出的币种格"
+        );
+        let plain = test_row_record(&[("科目", "100201 银行存款-人民币户"), ("币种", "币种待定")]);
+        assert_eq!(
+            currency_for(&plain, &mapping, "100201 银行存款-人民币户", &params),
+            "CNY",
+            "无线索时兜底主体本位币，而不是把垃圾值带进测算"
+        );
     }
 
     #[test]

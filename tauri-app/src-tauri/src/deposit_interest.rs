@@ -396,6 +396,11 @@ fn currency_key(raw: &str) -> String {
     if value.is_empty() || value == "未标币种" {
         return String::new();
     }
+    // 公共内核的币种表更全（韩元、新台币等 26 种），先走它；
+    // 本模块的历史别名（如「中国元」）作为补充。
+    if let Some(code) = ledger_mapping::normalize_currency_code(raw.trim()) {
+        return code.into();
+    }
     for (name, code) in [
         ("人民币", "CNY"),
         ("RMB", "CNY"),
@@ -416,7 +421,10 @@ fn currency_key(raw: &str) -> String {
             return code.into();
         }
     }
-    value
+    // 用户定案（2026-09-19，与 fx 同口径）：认不出的取值不再原样直通——
+    // 按本位币（空键）处理，免得「币种待定」一类文本变成账户的“币种”
+    // 参与匹配；货币性科目的币种由第二步确认兜底。
+    String::new()
 }
 
 /// 账户名称／辅助核算里明确写出的币种是账户级证据；独立币种列在部分
@@ -592,11 +600,17 @@ pub(crate) fn suggest_account_role(account: &str) -> &'static str {
 
     // 科目性质护栏：会计科目首位 1=资产，2=负债，4=权益，5=成本，6=损益。
     // 没有这道闸，"其他应付款-销售保证金"这类负债科目会被关键字带成存款。
-    if code
-        .chars()
-        .next()
-        .is_some_and(|first| first.is_ascii_digit() && first != '1')
-    {
+    // 分段编码（「01-1010-101-000-000 银行存款-…」）的首段只是集团/账套号，
+    // 性质首位必须取第一个真正的科目层级段（首个 ≥3 位数字的段），不能拿
+    // 集团号当性质位——否则名称明写「银行存款」的户会被整批挡成 excluded
+    // （艾维特苏州样例）；而 4800 的损益类整段编码（6701…财务费用-汇兑
+    // 收益-银行存款\现金）首段就是性质位，照常挡在门外。
+    let class_digit = code
+        .split(['-', '.', '—'])
+        .find(|segment| segment.chars().filter(char::is_ascii_digit).count() >= 3)
+        .and_then(|segment| segment.chars().next())
+        .or_else(|| code.chars().next());
+    if class_digit.is_some_and(|first| first.is_ascii_digit() && first != '1') {
         return "excluded";
     }
 
@@ -617,7 +631,7 @@ pub(crate) fn suggest_account_role(account: &str) -> &'static str {
         "restrictedcash",
         "otherbankbalance",
         "depositcertificate",
-        "notice deposit",
+        "noticedeposit",
     ]) {
         return "other_monetary";
     }
@@ -630,6 +644,9 @@ pub(crate) fn suggest_account_role(account: &str) -> &'static str {
     ]) {
         return "cash_on_hand";
     }
+    // 名称单写「存款」二字的也算存款户（外币存款、存款(BOC)一类）；
+    // 但「存款利息…」是利息收入／资本化利息的名称形态（在建工程-存款
+    // 利息收入），不能因带存款二字就当货币资金。
     if has(&[
         "银行存款",
         "银行账户",
@@ -656,7 +673,8 @@ pub(crate) fn suggest_account_role(account: &str) -> &'static str {
         "spdb",
         "cib",
         "ceb",
-    ]) {
+    ]) || (value.contains("存款") && !value.contains("利息"))
+    {
         return "deposit";
     }
 
@@ -1103,6 +1121,7 @@ pub(crate) fn call(method: &str, params: Value) -> Result<Value, AppError> {
         "deposit.inspect_je" => inspect(&params, "je"),
         "deposit.inspect_tb" => inspect(&params, "tb"),
         "deposit.rate_tiers" => Ok(rate_tiers()),
+        "deposit.account_currencies" => account_currencies(&params),
         _ => Err(error(
             "METHOD_NOT_FOUND",
             "未找到存款利息业务方法。",
@@ -1207,6 +1226,33 @@ fn rate_tiers() -> Value {
             "practiceNote": tier.practice_note
         })).collect::<Vec<_>>()
     })
+}
+
+/// 测算前的分币种清单：第二步科目确认表按币种拆行、逐行填利率，行键必须
+/// 与测算结果行逐字符一致（共用 `fold_tb_accounts` 的折叠口径）。rows 覆盖
+/// 所有折叠后的账户行并携带当前角色，前端自行过滤计息角色——用户在
+/// 计息/不计息之间改分类时不需要重新取键。
+fn account_currencies(params: &Value) -> Result<Value, AppError> {
+    let cancel = AtomicBool::new(false);
+    let folded = fold_tb_accounts(params, &cancel, &|_, _, _, _| {}, 1)?;
+    let rows = folded
+        .accounts
+        .iter()
+        .map(|row| {
+            json!({
+                "key": row.key,
+                "entity": row.entity,
+                "account": row.account,
+                "auxiliary": row.auxiliary,
+                "currency": row.currency,
+                "role": row.role,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "rows": rows,
+        "multiCurrencyAccounts": folded.multi_currency_accounts,
+    }))
 }
 
 fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
@@ -1512,6 +1558,14 @@ pub(crate) struct AccountRow {
     /// JE 未覆盖该户时使用全年期初/期末两点法。
     #[serde(default)]
     pub(crate) two_point: bool,
+    /// 期末余额为贷方（资产科目反常余额，如资金池归集/透支户）。
+    #[serde(default)]
+    pub(crate) credit_balance: bool,
+    /// 贷方余额户当前是否被排除在测算外（缺省政策）。排除户利率照常解析、
+    /// 月度利息按 0 列示，不计入测算合计与利率待处理口径；用户选择纳入后
+    /// 负利息自然抵减合计。
+    #[serde(default)]
+    pub(crate) credit_balance_excluded: bool,
     pub(crate) status: String,
     pub(crate) note: String,
 }
@@ -1572,26 +1626,41 @@ fn month_days(basis: &str, year: i32, month: u32, start: NaiveDate, end: NaiveDa
     (days, if basis == "actual360" { 360.0 } else { 365.0 })
 }
 
-fn calculate(
+/// 折叠后的计息账户行与账面利息基准。测算（`calculate`）与测算前的分币种
+/// 清单（`account_currencies`）共用同一套建户/折叠逻辑，行键才会逐字符
+/// 一致——「主体＋公共科目键＋辅助核算＋币种」的折叠口径若在两处各写
+/// 一份，用户改一次科目分类，测算行键就与第二步确认表对不上了。
+struct FoldedTb {
+    entity_scope: ledger_mapping::EntityScope,
+    entity_key_enabled: bool,
+    policy: ledger_mapping::AccountMatchPolicy,
+    auxiliary_plan: DepositAuxiliaryPlan,
+    je_input: Option<JeInput>,
+    accounts: Vec<AccountRow>,
+    /// 测算行键 → 科目确认表的辅助明细键。逐户利率改写按明细键匹配，
+    /// 与存款类型覆盖同一键空间；行键里拼了币种，不能直接当明细键用。
+    detail_keys: BTreeMap<String, String>,
+    currency_fallback_mode: String,
+    multi_currency_group_count: usize,
+    /// 同一账户名下出现多个币种的清单（分币种拆行的提示用）。
+    multi_currency_accounts: Vec<Value>,
+    auxiliary_warnings: Vec<String>,
+    booked_interest_rows: Vec<Value>,
+    booked_interest: f64,
+    booked_direction_unconfirmed_count: usize,
+}
+
+/// 读 TB 建户折叠并归集账面利息收入。不做 JE 逐月归集，也不需要测算
+/// 期间——测算前的分币种清单没有 reportStart/reportEnd 也要能出同样的键；
+/// JE 只用于匹配口径与辅助核算验证（与测算同一份判定），缺 JE 时按测算
+/// 对无序时账的回退口径出键。
+fn fold_tb_accounts(
     params: &Value,
     cancel: &AtomicBool,
-    pause: &PauseCheckpoint,
     progress: &dyn Fn(&str, usize, usize, &str),
     total: usize,
-) -> Result<Value, AppError> {
+) -> Result<FoldedTb, AppError> {
     let entity_scope = entity_scope(params);
-    let start = date_param(params, "reportStart")?;
-    let end = date_param(params, "reportEnd")?;
-    if end < start {
-        return Err(error(
-            "INVALID_PERIOD",
-            "测算期间结束日不能早于开始日。",
-            None,
-        ));
-    }
-    let year = end.year();
-    let (basis_key, basis_label) = day_basis(params);
-
     let (tb, tb_map) = table_for(params, "tbSource", "tbMapping")?;
     // 必填校验放在一切计算之前：缺金标身份就报错，不沉默算错账。
     // 有序时账时年初余额可缺（倒推），与前端判定同口径。
@@ -1854,10 +1923,16 @@ fn calculate(
         .get("currencyFallbackMode")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let combine_functional_currency = currency_fallback_mode == "functional";
-    let force_currency_two_point = currency_fallback_mode == "twoPointByCurrency";
-    // 第二遍：验证成功的组按辅助拆户；其他状态整组按主体＋科目。用户选择
-    // “统一本位币匡算”时不把币种并入账户键；按币种两点法仍保留币种。
+    // 币种拆分只发生在用户显式选择「按币种两点法」时（与借款工具同口径）：
+    // 默认与「统一本位币匡算」都不把币种并入账户键，按主体＋科目直接归集、
+    // 不列示币种。多币种账户的识别按折叠前的原始行币种统计，默认合并口径
+    // 下仍能把多币种户点名给用户去选退回方案。
+    let split_by_currency = currency_fallback_mode == "twoPointByCurrency";
+    let mut currencies_by_group: BTreeMap<
+        (String, String, String),
+        (String, BTreeSet<String>),
+    > = BTreeMap::new();
+    // 第二遍：验证成功的组按辅助拆户；其他状态整组按主体＋科目。
     struct AccountFold {
         first: TbCandidate,
         rows: usize,
@@ -1898,19 +1973,30 @@ fn calculate(
         {
             continue;
         }
-        let currency = if combine_functional_currency {
-            String::new()
+        let tagged_currency = account_currency(
+            &candidate.account,
+            &candidate.auxiliary,
+            &candidate.currency,
+        );
+        let currency = if split_by_currency {
+            tagged_currency.clone()
         } else {
-            account_currency(
-                &candidate.account,
-                &candidate.auxiliary,
-                &candidate.currency,
-            )
+            String::new()
         };
+        let aux_key = auxiliary_plan.key_for_tb(&group, &candidate.auxiliary);
+        currencies_by_group
+            .entry((group.0.clone(), group.1.clone(), aux_key.clone()))
+            .or_insert_with(|| (candidate.account.clone(), BTreeSet::new()))
+            .1
+            .insert(if tagged_currency.is_empty() {
+                "未标币种".to_string()
+            } else {
+                tagged_currency.clone()
+            });
         let key = (
             group.0.clone(),
             group.1.clone(),
-            auxiliary_plan.key_for_tb(&group, &candidate.auxiliary),
+            aux_key,
             currency.clone(),
         );
         let auxiliary = candidate.auxiliary.trim().to_owned();
@@ -1942,25 +2028,17 @@ fn calculate(
     // 测算行键 → 科目确认表的辅助明细键。逐户利率改写按明细键匹配，
     // 与存款类型覆盖同一键空间；行键里拼了币种，不能直接当明细键用。
     let mut detail_keys: BTreeMap<String, String> = BTreeMap::new();
-    let mut currencies_by_group: BTreeMap<(String, String, String), BTreeSet<String>> =
-        BTreeMap::new();
-    for key in &fold_order {
-        currencies_by_group
-            .entry((key.0.clone(), key.1.clone(), key.2.clone()))
-            .or_default()
-            .insert(key.3.clone());
-    }
     let multi_currency_group_count = currencies_by_group
         .values()
-        .filter(|set| set.len() > 1)
+        .filter(|(_, currencies)| currencies.len() > 1)
         .count();
     for key in &fold_order {
         let fold = folds.remove(key).expect("聚合桶按 fold_order 落键");
         let currency_label = if key.3.is_empty() {
-            if combine_functional_currency {
-                "本位币合并"
-            } else {
+            if split_by_currency {
                 "未标币种"
+            } else {
+                "本位币合并"
             }
         } else {
             key.3.as_str()
@@ -2027,6 +2105,10 @@ fn calculate(
             calculated_interest: 0.0,
             months: vec![],
             two_point: false,
+            // 期末净额（借正贷负）在贷方的户是资产科目的反常余额：资金池
+            // 归集户/透支户。口径判定在折叠后做，多行合并按净额合计定方向。
+            credit_balance: fold.closing_sum < -0.005,
+            credit_balance_excluded: false,
             status: String::new(),
             note: String::new(),
         });
@@ -2104,6 +2186,74 @@ fn calculate(
             }));
         }
     }
+    // 同一账户文本名下的币种清单：分币种拆行时一币一行，界面据此提示
+    // 「该户按币种拆成 N 行、每行单独填利率」。按折叠前的原始行币种统计，
+    // 默认合并口径下账户行不拆币种，也仍能点名多币种户。
+    let multi_currency_accounts = currencies_by_group
+        .iter()
+        .filter(|(_, (_, currencies))| currencies.len() > 1)
+        .map(|(_, (account, currencies))| {
+            json!({
+                "account": account,
+                "currencies": currencies.iter().cloned().collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(FoldedTb {
+        entity_scope,
+        entity_key_enabled,
+        policy,
+        auxiliary_plan,
+        je_input,
+        accounts,
+        detail_keys,
+        currency_fallback_mode: currency_fallback_mode.to_owned(),
+        multi_currency_group_count,
+        multi_currency_accounts,
+        auxiliary_warnings,
+        booked_interest_rows,
+        booked_interest,
+        booked_direction_unconfirmed_count,
+    })
+}
+
+fn calculate(
+    params: &Value,
+    cancel: &AtomicBool,
+    pause: &PauseCheckpoint,
+    progress: &dyn Fn(&str, usize, usize, &str),
+    total: usize,
+) -> Result<Value, AppError> {
+    let start = date_param(params, "reportStart")?;
+    let end = date_param(params, "reportEnd")?;
+    if end < start {
+        return Err(error(
+            "INVALID_PERIOD",
+            "测算期间结束日不能早于开始日。",
+            None,
+        ));
+    }
+    let year = end.year();
+    let (basis_key, basis_label) = day_basis(params);
+    let credit_balance_included =
+        params.get("creditBalancePolicy").and_then(Value::as_str) == Some("include");
+    let FoldedTb {
+        entity_scope,
+        entity_key_enabled,
+        policy,
+        auxiliary_plan,
+        je_input,
+        accounts: mut accounts,
+        detail_keys,
+        ref currency_fallback_mode,
+        multi_currency_group_count,
+        multi_currency_accounts: _,
+        auxiliary_warnings,
+        booked_interest_rows,
+        booked_interest,
+        booked_direction_unconfirmed_count,
+    } = fold_tb_accounts(params, cancel, progress, total)?;
+    let force_currency_two_point = currency_fallback_mode == "twoPointByCurrency";
     checkpoint(cancel, pause)?;
 
     // 只测算期间覆盖到的月份。SAP 的 TB 常常只出到某个期间（例如 10 月），
@@ -2267,11 +2417,28 @@ fn calculate(
         account.derived_closing_balance = months.last().map(|m| m.closing).unwrap_or(0.0);
         account.reconciliation_diff = account.derived_closing_balance - account.tb_closing_balance;
         account.average_balance = months.iter().map(|m| m.average).sum::<f64>() / span;
+        // 贷方余额户缺省不纳入：资金池归集/透支户的负余额会把测算利息抵减
+        // 出一笔"负存款利息"，默认口径下月度利息一律按 0 列示且不计入合计；
+        // 用户显式选择纳入后才按负余额参与抵减。
+        let credit_excluded = account.credit_balance && !credit_balance_included;
+        account.credit_balance_excluded = credit_excluded;
+        if credit_excluded {
+            for month in &mut months {
+                month.interest = 0.0;
+            }
+        }
         account.calculated_interest = months.iter().map(|m| m.interest).sum();
         // 没有利率是最优先的状态：这一户根本还没测出来，不能被余额勾稽上了
-        // 就显示成"已勾稽"。
+        // 就显示成"已勾稽"。贷方余额户的纳入/排除口径优先于利率状态——
+        // 该户是否参与测算是比利率来源更靠前的结论。
         let default_rate = account.rate_provisional;
-        account.status = if !account.rate_resolved {
+        account.status = if account.credit_balance {
+            if credit_excluded {
+                "贷方余额未纳入".into()
+            } else {
+                "贷方余额已纳入".into()
+            }
+        } else if !account.rate_resolved {
             "待填利率".into()
         } else if !je_backed {
             "两点法推算".into()
@@ -2336,18 +2503,35 @@ fn calculate(
                 account.reconciliation_diff
             ));
         }
+        if account.credit_balance {
+            if credit_excluded {
+                notes.push(format!(
+                    "期末余额为贷方 {}（资产科目反常余额，常见于资金池归集或透支户），默认不纳入利息测算：月度利息按 0 列示且不计入测算合计，避免负余额抵减测算利息；如需按负余额参与抵减，可在测算参数中选择纳入贷方余额账户。",
+                    account.tb_closing_balance
+                ));
+            } else {
+                notes.push(format!(
+                    "期末余额为贷方 {}（资产科目反常余额），已按用户选择纳入测算：负余额产生负利息，会抵减测算合计，请复核该户性质（资金池归集/透支）。",
+                    account.tb_closing_balance
+                ));
+            }
+        }
         account.note = notes.join(" ");
         account.months = months;
     }
 
     // 未确定利率的账户利息恒为 0，从合计里排除掉只是把这件事说明白，
-    // 避免"0 元利息"被当成一个有效结论。
+    // 避免"0 元利息"被当成一个有效结论。缺省政策下的贷方余额户同理：
+    // 它根本不参与本口径的测算，利率未定也不该撑大「未定利率」规模。
     let calculated: f64 = accounts
         .iter()
-        .filter(|a| a.rate_resolved)
+        .filter(|a| a.rate_resolved && !a.credit_balance_excluded)
         .map(|a| a.calculated_interest)
         .sum();
-    let missing_rate: Vec<&AccountRow> = accounts.iter().filter(|a| !a.rate_resolved).collect();
+    let missing_rate: Vec<&AccountRow> = accounts
+        .iter()
+        .filter(|a| !a.rate_resolved && !a.credit_balance_excluded)
+        .collect();
     let missing_rate_count = missing_rate.len();
     let missing_rate_balance: f64 = missing_rate.iter().map(|a| a.average_balance).sum();
     let missing_rate_tiers: Vec<String> = {
@@ -2362,8 +2546,10 @@ fn calculate(
     };
     let default_rate: Vec<&AccountRow> = accounts
         .iter()
-        .filter(|account| account.rate_provisional)
+        .filter(|account| account.rate_provisional && !account.credit_balance_excluded)
         .collect();
+    let credit_balance_rows: Vec<&AccountRow> =
+        accounts.iter().filter(|a| a.credit_balance).collect();
     let default_rate_count = default_rate.len();
     let default_rate_balance: f64 = default_rate.iter().map(|a| a.average_balance).sum();
     // 基准数保持符号：负数＝账面是净利息支出（费用性科目计入负数）。
@@ -2442,6 +2628,16 @@ fn calculate(
             "missingRateTiers": missing_rate_tiers,
             "defaultRateCount": default_rate_count,
             "defaultRateBalance": default_rate_balance,
+            // 贷方余额存款户（资产科目反常余额）单独点名，两种政策下都下发：
+            // 前端要弹窗让用户知情，显式选择"纳入"后才会按负余额抵减合计。
+            "creditBalancePolicy": if credit_balance_included { "include" } else { "exclude" },
+            "creditBalanceCount": credit_balance_rows.len(),
+            "creditBalanceAccounts": credit_balance_rows.iter().map(|a| json!({
+                "key": a.key,
+                "account": a.account,
+                "currency": a.currency,
+                "closingBalance": a.tb_closing_balance,
+            })).collect::<Vec<_>>(),
             "monthlySource": if !has_je {
                 "期初/期末两点法".to_string()
             } else if uncovered_count == 0 {
@@ -4368,15 +4564,24 @@ fn write_monthly(
                 .map_err(xlsx)?;
             sheet.write_number(y, 12, month.days).map_err(xlsx)?;
             sheet.write_number(y, 13, month.denominator).map_err(xlsx)?;
-            sheet
-                .write_formula_with_format(
-                    y,
-                    14,
-                    Formula::new(format!("K{line}*L{line}*M{line}/N{line}"))
-                        .set_result(month.interest.to_string()),
-                    &amount,
-                )
-                .map_err(xlsx)?;
+            // 贷方余额未纳入的户写死 0 而不是挂公式：利率格是可改写的输入，
+            // 挂公式会让用户在汇总表改利率时把这些户的负利息"改回来"，
+            // 底稿合计就与界面测算合计对不上了。
+            if row.credit_balance_excluded {
+                sheet
+                    .write_number_with_format(y, 14, 0.0, &amount)
+                    .map_err(xlsx)?;
+            } else {
+                sheet
+                    .write_formula_with_format(
+                        y,
+                        14,
+                        Formula::new(format!("K{line}*L{line}*M{line}/N{line}"))
+                            .set_result(month.interest.to_string()),
+                        &amount,
+                    )
+                    .map_err(xlsx)?;
+            }
             y += 1;
         }
     }
@@ -4501,6 +4706,54 @@ fn write_reconciliation(
         sheet
             .write_string(y, 6, item["note"].as_str().unwrap_or(""))
             .map_err(xlsx)?;
+    }
+    // 贷方余额存款户单独列示：资产科目的反常余额（资金池归集/透支）必须
+    // 在底稿里点名并交代处理口径，不能靠用户逐行读状态列才发现。
+    let included = summary["creditBalancePolicy"].as_str() == Some("include");
+    let empty_accounts: Vec<Value> = vec![];
+    let credit_accounts = summary["creditBalanceAccounts"].as_array().unwrap_or(&empty_accounts);
+    if !credit_accounts.is_empty() {
+        y += 2;
+        sheet
+            .write_string_with_format(y, 0, "贷方余额存款账户（资产科目反常余额）", &bold)
+            .map_err(xlsx)?;
+        y += 1;
+        for (column, title) in ["科目", "币种", "期末余额(借正贷负)", "处理口径"]
+            .iter()
+            .enumerate()
+        {
+            sheet
+                .write_string_with_format(y, column as u16, *title, &header_format())
+                .map_err(xlsx)?;
+        }
+        for item in credit_accounts {
+            y += 1;
+            sheet
+                .write_string(y, 0, item["account"].as_str().unwrap_or(""))
+                .map_err(xlsx)?;
+            sheet
+                .write_string(y, 1, item["currency"].as_str().unwrap_or(""))
+                .map_err(xlsx)?;
+            sheet
+                .write_number_with_format(
+                    y,
+                    2,
+                    item["closingBalance"].as_f64().unwrap_or(0.0),
+                    &amount,
+                )
+                .map_err(xlsx)?;
+            sheet
+                .write_string(
+                    y,
+                    3,
+                    if included {
+                        "已纳入测算：负余额产生负利息，会抵减测算合计，请复核该户性质"
+                    } else {
+                        "未纳入测算（默认口径）：月度利息按 0 列示且不计入合计，避免负余额抵减测算利息"
+                    },
+                )
+                .map_err(xlsx)?;
+        }
     }
     // 列宽由上方的汇总表统一决定（autofit 已含本块），不再单独设置。
     Ok(())
@@ -4632,6 +4885,16 @@ fn write_parameters(
         ),
         ("计息口径".into(), summary["dayBasisLabel"].as_str().unwrap_or("").into()),
         ("纳入测算账户数".into(), rows.len().to_string()),
+        ("贷方余额处理".into(), {
+            let count = summary["creditBalanceCount"].as_u64().unwrap_or(0);
+            if count == 0 {
+                "无贷方余额（反常余额）的存款账户。".to_string()
+            } else if summary["creditBalancePolicy"].as_str() == Some("include") {
+                format!("有 {count} 个存款账户期末余额在贷方（资产科目反常余额，常见于资金池归集/透支户），已按用户选择纳入测算：负余额产生负利息并抵减测算合计，请复核该户性质。")
+            } else {
+                format!("有 {count} 个存款账户期末余额在贷方（资产科目反常余额，常见于资金池归集/透支户），默认不纳入测算：这些户月度利息按 0 列示且不计入测算合计，也不计入待填利率规模，避免负余额抵减测算利息；如需纳入请在工具中重选口径。")
+            }
+        }),
         ("待复核账户数".into(), summary["reviewCount"].to_string()),
         ("待填利率账户数".into(), summary["missingRateCount"].to_string()),
         ("计算口径".into(), if summary["dayBasis"].as_str() == Some("month12") {
@@ -4939,6 +5202,113 @@ mod tests {
         assert_eq!(
             suggest_account_role("6603020000 财务费用-利息收入"),
             "interest_income"
+        );
+    }
+
+    #[test]
+    fn 分段编码科目按名称关键词识别银行存款() {
+        // 艾维特苏州样例（06 号）的科目编码是「01-1010-101-000-000」分段式，
+        // 首段 01 是集团/账套号而不是科目性质位：名称明写「银行存款」的必须
+        // 认成存款，不能拿首段数字把整批户都建议成「不参与测算」。
+        assert_eq!(
+            suggest_account_role(
+                "01-1010-101-000-000 银行存款-中国银行苏州分行(人民币) BOC Suzhou RMB"
+            ),
+            "deposit"
+        );
+        assert_eq!(
+            suggest_account_role(
+                "01-1010-103-000-000 银行存款-交通银行苏州分行(人民币) BoCom Suzhou RMB"
+            ),
+            "deposit"
+        );
+        assert_eq!(
+            suggest_account_role("01-1011-030-000-000 银行存款-三井住友银行(日元) SMBC JPY"),
+            "deposit"
+        );
+        assert_eq!(
+            suggest_account_role("01-1001-000-000-000 库存现金 Cash on hand"),
+            "cash_on_hand"
+        );
+        // 同一分段编码下，真正的负债/损益层级仍要挡住：借款不是存款；
+        // 财务费用-汇兑损益里的「银行存款\现金」只是资金来源描述。
+        assert_eq!(
+            suggest_account_role(
+                "01-2101-032-000-000 短期借款-工商银行苏州分行 ST borrowing ICBC"
+            ),
+            "excluded"
+        );
+        assert_eq!(
+            suggest_account_role("6701070001 财务费用-汇兑收益-已实现-银行存款\\现金"),
+            "excluded"
+        );
+        assert_eq!(
+            suggest_account_role("01-2220-030-000-000 应付利息-三井住友银行(日元) SMBC JPY"),
+            "excluded"
+        );
+        assert_eq!(
+            suggest_account_role("01-1103-000-000-000 其他应收款-押金保证金 Deposits"),
+            "excluded"
+        );
+        // 名称带「存款利息」的是利息收入／资本化利息形态，不是存款户本体。
+        assert_eq!(
+            suggest_account_role("1604010310 在建工程\\待摊投资\\存款利息收入"),
+            "excluded"
+        );
+        // 单写「存款」的户名照认（无「利息」字样的干扰）。
+        assert_eq!(suggest_account_role("1002 外币存款-中行美元户"), "deposit");
+    }
+
+    /// 艾维特苏州真实样例（本机黄金测试集，仓库外路径，常规回归跑不到，
+    /// 探针模式手动验证：分段编码 + 双语名称下，银行存款科目不再被整批
+    /// 建议为「不参与测算」）。
+    #[test]
+    #[ignore]
+    fn probe_艾维特苏州分段编码银行存款识别() {
+        let tb_path = Path::new(
+            r"C:\Users\lenovo\Downloads\TBJE黄金测试\汇兑损益_外币TBJE测试集\05_艾维特苏州\06-艾维特苏州_TB科目余额表.xlsx",
+        );
+        if !tb_path.is_file() {
+            eprintln!("跳过：未找到艾维特苏州样例 {}", tb_path.display());
+            return;
+        }
+        let inspected = inspect(
+            &json!({"source": {"inputPath": tb_path.to_string_lossy()}}),
+            "tb",
+        )
+        .unwrap();
+        let roles = inspected["suggestedAccountRoles"].as_object().unwrap();
+        let role_of = |needle: &str| -> String {
+            roles
+                .iter()
+                .find(|(key, _)| key.contains(needle))
+                .map(|(_, value)| value.as_str().unwrap_or("").to_string())
+                .unwrap_or_else(|| panic!("样例里找不到科目 {needle}"))
+        };
+        // 全部 6 个银行存款户（含贷方余额的交通银行户）都必须认成存款。
+        for bank in [
+            "银行存款-中国银行苏州分行",
+            "银行存款-工商银行苏州分行",
+            "银行存款-交通银行苏州分行",
+            "银行存款-汇丰银行苏州分行",
+            "银行存款-三井住友银行",
+            "银行存款-三菱日联银行",
+        ] {
+            assert_eq!(role_of(bank), "deposit", "{bank} 应识别为银行存款");
+        }
+        assert_eq!(role_of("库存现金"), "cash_on_hand");
+        assert_eq!(role_of("财务费用-利息收入"), "interest_income");
+        assert_eq!(role_of("短期借款-工商银行苏州分行"), "excluded");
+        assert_eq!(role_of("应付利息-三井住友银行"), "excluded");
+        assert_eq!(role_of("其他应收款-押金保证金"), "excluded");
+        // 此前的故障形态：全部科目被建议为 excluded、计息科目为 0。
+        let deposit_count = roles
+            .values()
+            .filter(|value| value.as_str() == Some("deposit"))
+            .count();
+        assert!(
+            deposit_count >= 6,
+            "计息科目数应至少覆盖 6 个银行存款户，实际 {deposit_count}"
         );
     }
 
@@ -5261,9 +5631,13 @@ mod tests {
         let dbs = row_of("1002010600");
         assert_eq!(dbs["mergedRows"], json!(1));
         assert_eq!(dbs["status"], "待确认利率");
-        // 2000 的户：序时账未覆盖，退回两点法，年末仍推到 TB 期末。
+        // 2000 的户：序时账未覆盖 + 期末为贷方余额（透支形态）——贷方余额
+        // 缺省不纳入测算，状态优先显示排除口径，余额仍照常披露。
         let uncovered = row_of("1002010500");
-        assert_eq!(uncovered["status"], "两点法推算");
+        assert_eq!(uncovered["status"], "贷方余额未纳入");
+        assert_eq!(uncovered["creditBalance"], true);
+        assert_eq!(uncovered["creditBalanceExcluded"], true);
+        assert_eq!(uncovered["calculatedInterest"], json!(0.0));
         assert_eq!(uncovered["jeReconciled"], false);
         assert!(
             uncovered["note"]
@@ -5273,12 +5647,29 @@ mod tests {
             "{uncovered:#?}"
         );
         assert!(
+            uncovered["note"].as_str().unwrap().contains("贷方"),
+            "{uncovered:#?}"
+        );
+        assert!(
             (uncovered["derivedClosingBalance"].as_f64().unwrap() - (-1_772_073.18)).abs() < 0.01
         );
-        // 覆盖体检：汇总点名 2000，账面利息按科目合并。
+        // 覆盖体检：汇总点名 2000，账面利息按科目合并；贷方余额户在汇总里
+        // 点名并下发期末余额，供前端弹窗提示。
         let summary = &result["summary"];
         assert_eq!(summary["jeUncoveredEntities"], json!(["2000"]));
         assert_eq!(summary["jeUncoveredAccountCount"], json!(1));
+        assert_eq!(summary["creditBalancePolicy"], json!("exclude"));
+        assert_eq!(summary["creditBalanceCount"], json!(1));
+        let credit = &summary["creditBalanceAccounts"][0];
+        assert!(
+            credit["account"]
+                .as_str()
+                .unwrap()
+                .contains("1002010500")
+        );
+        assert!(
+            (credit["closingBalance"].as_f64().unwrap() - (-1_772_073.18)).abs() < 0.01
+        );
         assert!(
             summary["monthlySource"]
                 .as_str()
@@ -5289,6 +5680,396 @@ mod tests {
         let booked = result["bookedInterestRows"].as_array().unwrap();
         assert_eq!(booked.len(), 1, "{booked:#?}");
         assert!(booked[0]["note"].as_str().unwrap().contains("2 行合并"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 第二步科目确认表按币种拆行、逐行填利率，行键必须与测算结果行的键
+    /// 逐字符一致；两种币种口径（默认分币种／统一本位币）、有无序时账都要
+    /// 对齐——键对不上，用户在第二步填的利率就落不到第三步的行上。
+    #[test]
+    fn 分币种清单行键与测算结果完全一致() {
+        let dir = std::env::temp_dir().join(format!(
+            "deposit-account-currencies-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb_path = dir.join("tb.xlsx");
+        // 同一科目按币种拆两行（人民币无币种标注 + 美元），另挂一个其他
+        // 货币资金户与利息收入科目。
+        write_fixture(
+            &tb_path,
+            &[
+                vec!["科目编码", "科目名称", "币种", "期初余额", "期末余额"],
+                vec!["1002", "银行存款-中行", "", "10000", "20000"],
+                vec!["1002", "银行存款-中行", "USD", "3000", "4000"],
+                vec!["1003", "其他货币资金-保证金存款", "", "5000", "6000"],
+                vec!["660302", "财务费用-利息收入", "", "", "100"],
+            ],
+        );
+        let identity = json!({
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": {
+                "accountCode": "科目编码",
+                "accountName": "科目名称",
+                "currency": "币种",
+                "openingFunctionalAmount": "期初余额",
+                "closingFunctionalAmount": "期末余额"
+            },
+            "accountRoles": {"660302 财务费用-利息收入": "interest_income"}
+        });
+        let keys_of = |value: &Value| -> Vec<String> {
+            value["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["key"].as_str().unwrap_or("").to_owned())
+                .collect::<Vec<_>>()
+        };
+        // 默认（未选多币种口径）不拆币种：每户一行、币种「本位币合并」；
+        // 多币种账户仍按折叠前的原始行币种点名，提示用户去选退回方案。
+        let listed = call("deposit.account_currencies", identity.clone()).unwrap();
+        let mut listed_keys = keys_of(&listed);
+        listed_keys.sort();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let preview = run_job(
+            "deposit.preview",
+            json!({
+                "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+                "dayBasis": "month12",
+                "tbSource": identity["tbSource"].clone(),
+                "tbMapping": identity["tbMapping"].clone(),
+                "accountRoles": identity["accountRoles"].clone(),
+            }),
+            &|_, _, _, _| {},
+            cancel,
+            &pause,
+        )
+        .unwrap();
+        let mut preview_keys = keys_of(&preview);
+        preview_keys.sort();
+        assert_eq!(listed_keys, preview_keys, "默认行键与测算结果不一致");
+        assert_eq!(listed_keys.len(), 2, "{listed:#?}");
+        assert!(
+            listed["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["currency"] == json!("本位币合并"))
+        );
+        let multi = listed["multiCurrencyAccounts"].as_array().unwrap();
+        assert_eq!(multi.len(), 1, "{multi:#?}");
+        assert!(multi[0]["account"]
+            .as_str()
+            .unwrap()
+            .contains("银行存款-中行"));
+
+        // 「按币种」方案：一币一行，无币种标注的落「未标币种」；该口径不用
+        // JE 还原逐月余额，没有序时账也要能出键。
+        let mut by_currency = identity.clone();
+        by_currency["currencyFallbackMode"] = json!("twoPointByCurrency");
+        let listed = call("deposit.account_currencies", by_currency.clone()).unwrap();
+        let mut listed_keys = keys_of(&listed);
+        listed_keys.sort();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let preview = run_job(
+            "deposit.preview",
+            json!({
+                "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+                "dayBasis": "month12",
+                "currencyFallbackMode": "twoPointByCurrency",
+                "tbSource": identity["tbSource"].clone(),
+                "tbMapping": identity["tbMapping"].clone(),
+                "accountRoles": identity["accountRoles"].clone(),
+            }),
+            &|_, _, _, _| {},
+            cancel,
+            &pause,
+        )
+        .unwrap();
+        let mut preview_keys = keys_of(&preview);
+        preview_keys.sort();
+        assert_eq!(listed_keys, preview_keys, "按币种行键与测算结果不一致");
+        assert_eq!(listed_keys.len(), 3, "{listed:#?}");
+        let currencies = listed["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row["key"].as_str().unwrap_or("").to_owned(),
+                    row["currency"].as_str().unwrap_or("").to_owned(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            currencies
+                .values()
+                .filter(|currency| *currency == "USD")
+                .count(),
+            1
+        );
+        assert_eq!(
+            currencies
+                .values()
+                .filter(|currency| *currency == "未标币种")
+                .count(),
+            2
+        );
+        // 多币种账户点名：同一账户文本名下出现多个币种。
+        let multi = listed["multiCurrencyAccounts"].as_array().unwrap();
+        assert_eq!(multi.len(), 1, "{multi:#?}");
+        assert!(multi[0]["account"]
+            .as_str()
+            .unwrap()
+            .contains("银行存款-中行"));
+        assert_eq!(
+            multi[0]["currencies"],
+            json!(["USD", "未标币种"]),
+            "币种清单按字典序下发"
+        );
+        // rows 携带当前角色（deposit／other_monetary），前端据此过滤计息行。
+        assert!(listed["rows"].as_array().unwrap().iter().all(|row| {
+            matches!(row["role"].as_str(), Some("deposit") | Some("other_monetary"))
+        }));
+
+        // 统一本位币匡算：每户一行、币种固定「本位币合并」，键仍与测算对齐；
+        // 多币种点名与口径无关，仍按原始行币种统计。
+        let mut functional = identity.clone();
+        functional["currencyFallbackMode"] = json!("functional");
+        let listed = call("deposit.account_currencies", functional.clone()).unwrap();
+        let mut listed_keys = keys_of(&listed);
+        listed_keys.sort();
+        assert_eq!(listed_keys.len(), 2, "{listed:#?}");
+        assert!(
+            listed["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["currency"] == json!("本位币合并"))
+        );
+        assert_eq!(
+            listed["multiCurrencyAccounts"].as_array().unwrap().len(),
+            1
+        );
+        functional["reportStart"] = json!("2025-01-01");
+        functional["reportEnd"] = json!("2025-12-31");
+        functional["dayBasis"] = json!("month12");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let preview = run_job(
+            "deposit.preview",
+            functional,
+            &|_, _, _, _| {},
+            cancel,
+            &pause,
+        )
+        .unwrap();
+        let mut preview_keys = keys_of(&preview);
+        preview_keys.sort();
+        assert_eq!(listed_keys, preview_keys, "本位币口径行键与测算结果不一致");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 有序时账时的行键也要对齐：JE 只影响匹配口径与辅助核算验证，分币种
+    /// 清单与测算共用同一份判定，键才不会在两步之间漂移。
+    #[test]
+    fn 分币种清单行键与含序时账测算一致() {
+        let dir = std::env::temp_dir().join(format!(
+            "deposit-account-currencies-je-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb_path = dir.join("tb.xlsx");
+        let je_path = dir.join("je.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec![
+                    "公司代码",
+                    "科目编码",
+                    "科目名称",
+                    "币种",
+                    "期初余额",
+                    "期末余额",
+                ],
+                vec!["2001", "1002", "银行存款-中行", "USD", "8000", "12000"],
+                vec!["2001", "1002", "银行存款-中行", "", "2000", "3000"],
+                vec!["2001", "660302", "财务费用-利息收入", "", "", "90"],
+            ],
+        );
+        write_fixture(
+            &je_path,
+            &[
+                vec!["公司代码", "凭证号", "记账日期", "科目编码", "金额"],
+                vec!["2001", "0001", "2025-03-31", "1002", "4000"],
+                vec!["2001", "0002", "2025-06-30", "660302", "-90"],
+                vec!["2001", "0003", "2025-06-30", "1002", "-90"],
+            ],
+        );
+        let params = json!({
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": {
+                "entity": "公司代码",
+                "accountCode": "科目编码",
+                "accountName": "科目名称",
+                "currency": "币种",
+                "openingFunctionalAmount": "期初余额",
+                "closingFunctionalAmount": "期末余额"
+            },
+            "jeSource": {"inputPath": je_path.to_string_lossy()},
+            "jeMapping": {
+                "entity": "公司代码",
+                "id": "凭证号",
+                "date": "记账日期",
+                "accountCode": "科目编码",
+                "functionalAmount": "金额"
+            },
+            // 行键对齐的抽查放在「按币种」口径下：默认口径已合并为整户一行。
+            "currencyFallbackMode": "twoPointByCurrency",
+            "accountRoles": {"660302 财务费用-利息收入": "interest_income"}
+        });
+        let listed = call("deposit.account_currencies", params.clone()).unwrap();
+        let mut listed_keys: Vec<String> = listed["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["key"].as_str().unwrap_or("").to_owned())
+            .collect();
+        listed_keys.sort();
+        let mut full = params.clone();
+        full["reportStart"] = json!("2025-01-01");
+        full["reportEnd"] = json!("2025-12-31");
+        full["dayBasis"] = json!("month12");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let preview =
+            run_job("deposit.preview", full, &|_, _, _, _| {}, cancel, &pause).unwrap();
+        let mut preview_keys: Vec<String> = preview["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["key"].as_str().unwrap_or("").to_owned())
+            .collect();
+        preview_keys.sort();
+        assert_eq!(listed_keys, preview_keys, "含序时账时行键与测算结果不一致");
+        assert_eq!(listed_keys.len(), 2, "{listed:#?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 贷方余额的存款户（资产科目反常余额，如资金池归集/透支）缺省不纳入
+    /// 测算：月度利息按 0 列示、不计入合计与待填利率口径，但行照常返回、
+    /// 汇总点名；用户显式选择纳入后按负余额参与抵减。
+    #[test]
+    fn 贷方余额存款户默认不纳入且可显式纳入() {
+        let dir = std::env::temp_dir().join(format!(
+            "deposit-credit-balance-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tb_path = dir.join("tb.xlsx");
+        write_fixture(
+            &tb_path,
+            &[
+                vec!["科目编码", "科目名称", "期初余额", "期末余额"],
+                vec!["1002", "银行存款-工行正常户", "100000", "200000"],
+                // 透支/资金池归集形态：期末净额在贷方（负数）。
+                vec!["100201", "银行存款-交行透支户", "0", "-50000"],
+                vec!["660302", "财务费用-利息收入", "", "100"],
+            ],
+        );
+        let base = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+            "dayBasis": "month12",
+            "tbSource": {"inputPath": tb_path.to_string_lossy()},
+            "tbMapping": {
+                "accountCode": "科目编码",
+                "accountName": "科目名称",
+                "openingFunctionalAmount": "期初余额",
+                "closingFunctionalAmount": "期末余额"
+            },
+            "accountRoles": {"660302 财务费用-利息收入": "interest_income"}
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result =
+            run_job("deposit.preview", base.clone(), &|_, _, _, _| {}, cancel, &pause).unwrap();
+        let rows = result["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "贷方余额户的结果行照常返回: {result:#?}");
+        let overdraft = rows
+            .iter()
+            .find(|row| row["account"].as_str().unwrap_or("").contains("透支户"))
+            .unwrap();
+        assert_eq!(overdraft["status"], json!("贷方余额未纳入"));
+        assert_eq!(overdraft["creditBalance"], json!(true));
+        assert_eq!(overdraft["creditBalanceExcluded"], json!(true));
+        assert_eq!(overdraft["calculatedInterest"], json!(0.0));
+        assert!(
+            overdraft["months"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|month| month["interest"] == json!(0.0))
+        );
+        assert!(overdraft["note"].as_str().unwrap().contains("贷方"));
+        // 正常户两点法暂估：平均余额 150,000 × 活期挂牌 0.05% = 75；
+        // 透支户被排除，合计只含正常户。
+        let summary = &result["summary"];
+        assert!((summary["calculatedInterest"].as_f64().unwrap() - 75.0).abs() < 0.01);
+        assert_eq!(summary["creditBalancePolicy"], json!("exclude"));
+        assert_eq!(summary["creditBalanceCount"], json!(1));
+        let credit = &summary["creditBalanceAccounts"][0];
+        assert!(credit["account"].as_str().unwrap().contains("透支户"));
+        assert_eq!(credit["closingBalance"], json!(-50_000.0));
+        assert!(credit["key"].as_str().unwrap().contains("100201"));
+        // 排除户不计入待填/暂估利率规模（本例有挂牌暂估，计数应为 0 的口径
+        // 同样适用于利率未定的贷方户）。
+        assert_eq!(summary["missingRateCount"], json!(0));
+
+        // 显式纳入：负余额产生负利息，合计被抵减（75 − 12.5 = 62.5）。
+        let mut included = base.clone();
+        included["creditBalancePolicy"] = json!("include");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        let result = run_job(
+            "deposit.preview",
+            included.clone(),
+            &|_, _, _, _| {},
+            cancel,
+            &pause,
+        )
+        .unwrap();
+        let overdraft = result["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["account"].as_str().unwrap_or("").contains("透支户"))
+            .unwrap();
+        assert_eq!(overdraft["status"], json!("贷方余额已纳入"));
+        assert_eq!(overdraft["creditBalance"], json!(true));
+        assert_eq!(overdraft["creditBalanceExcluded"], json!(false));
+        assert!(
+            (overdraft["calculatedInterest"].as_f64().unwrap() - (-12.5)).abs() < 0.01
+        );
+        let summary = &result["summary"];
+        assert!((summary["calculatedInterest"].as_f64().unwrap() - 62.5).abs() < 0.01);
+        assert_eq!(summary["creditBalancePolicy"], json!("include"));
+        assert_eq!(summary["creditBalanceCount"], json!(1));
+        // 导出底稿同样口径：排除政策下的月度表/汇总表/参数表都能落盘。
+        let mut exported = base.clone();
+        exported["outputPath"] = json!(dir.join("底稿_排除.xlsx").to_string_lossy());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let pause = PauseCheckpoint::unpaused(cancel.clone());
+        run_job(
+            "deposit.export",
+            exported,
+            &|_, _, _, _| {},
+            cancel,
+            &pause,
+        )
+        .unwrap();
+        assert!(dir.join("底稿_排除.xlsx").is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5774,6 +6555,20 @@ mod tests {
         assert_eq!(account_currency("100201 银行存款", "", "美元"), "USD");
     }
 
+    /// 用户定案（2026-09-19，与 fx 同口径）：币种列认不出的取值不再原文
+    /// 直通——按本位币（空键）处理，免得「币种待定」一类文本变成账户的
+    /// “币种”参与匹配；公共内核币种表认得出的（如韩元）照常保留。
+    #[test]
+    fn 认不出的币种取值按本位币空键处理() {
+        assert_eq!(currency_key(""), "");
+        assert_eq!(currency_key("未标币种"), "");
+        assert_eq!(currency_key("人民币"), "CNY");
+        assert_eq!(currency_key("中国元"), "CNY");
+        assert_eq!(currency_key("KRW"), "KRW", "公共内核币种表应认出韩元");
+        assert_eq!(currency_key("币种待定"), "", "认不出的取值不得原文直通");
+        assert_eq!(currency_key("美元户"), "", "非精确匹配的文本不当作币种");
+    }
+
     #[test]
     fn warns_only_when_je_movements_cannot_be_allocated_by_currency() {
         assert!(currency_allocation_warning(0, 1).is_empty());
@@ -5982,15 +6777,24 @@ mod tests {
             )
             .unwrap()
         };
+        // 默认（未选多币种口径）不拆币种：整户一行「本位币合并」，JE 发生额
+        // 只计入这一行（不按币种复制），期初＋净发生额与期末勾稽。
         let result = preview(&params);
         let rows = result["rows"].as_array().unwrap();
-        assert_eq!(rows.len(), 2, "{result:#?}");
+        assert_eq!(rows.len(), 1, "{result:#?}");
+        assert_eq!(rows[0]["currency"], "本位币合并");
+        assert_eq!(rows[0]["tbClosingBalance"], json!(6_000_000.0));
+        assert_eq!(rows[0]["jeReconciled"], true);
+
+        // 「按币种」方案：一币一行分别建户填利率；该口径不使用 JE。
+        params["currencyFallbackMode"] = json!("twoPointByCurrency");
+        let by_currency = preview(&params);
+        let rows = by_currency["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "{by_currency:#?}");
         assert_ne!(rows[0]["key"], rows[1]["key"]);
         let row_of = |currency: &str| rows.iter().find(|row| row["currency"] == currency).unwrap();
         assert_eq!(row_of("CNY")["tbClosingBalance"], json!(2_000_000.0));
         assert_eq!(row_of("USD")["tbClosingBalance"], json!(4_000_000.0));
-        assert_eq!(row_of("CNY")["jeReconciled"], true);
-        assert_eq!(row_of("USD")["jeReconciled"], true);
         let overrides = json!({
             row_of("CNY")["key"].as_str().unwrap(): {"annualRate": 0.005},
             row_of("USD")["key"].as_str().unwrap(): {"annualRate": 0.02}
@@ -6012,22 +6816,10 @@ mod tests {
             usd["calculatedInterest"].as_f64().unwrap()
                 > cny["calculatedInterest"].as_f64().unwrap()
         );
-
-        params["jeMapping"]
+        params
             .as_object_mut()
             .unwrap()
-            .remove("currency");
-        let without_currency = preview(&params);
-        for row in without_currency["rows"].as_array().unwrap() {
-            assert_eq!(row["jeReconciled"], false, "{row:#?}");
-            assert_eq!(row["status"], "两点法推算", "{row:#?}");
-        }
-        assert!(
-            without_currency["summary"]["jeCurrencyAllocationWarning"]
-                .as_str()
-                .unwrap()
-                .contains("不能分配")
-        );
+            .remove("rateOverrides");
 
         params["currencyFallbackMode"] = json!("functional");
         let functional = preview(&params);
@@ -6400,6 +7192,8 @@ mod tests {
             calculated_interest: 0.0,
             months: vec![],
             two_point: false,
+            credit_balance: false,
+            credit_balance_excluded: false,
             status: String::new(),
             note: String::new(),
         }

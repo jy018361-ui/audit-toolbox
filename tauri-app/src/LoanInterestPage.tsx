@@ -12,6 +12,7 @@ import {
 } from "./api";
 import { depositDropTargetInside } from "./DepositInterestPage";
 import {
+  DEFAULT_ENTITY,
   verifyAuxiliaryLink,
   verifyCurrencyLink,
   type AuxiliaryLinkResult,
@@ -472,6 +473,10 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     rateLedger: empty(),
   });
   const [reportEnd, setReportEnd] = useState(defaultBalanceSheetDate());
+  /** 本位币（TB 模式）：美元等外币本位币主体需显式指定——余额表本位币行
+   *  币种常留空、序时账逐行标币种，币种桶按本位币归一后凭证才能按科目归集。
+   *  缺省空串 = 人民币口径（空白/人民币都算本位币，与旧行为一致）。 */
+  const [functionalCurrency, setFunctionalCurrency] = useState("");
   const [rateEdits, setRateEdits] = useState<
     Record<number, Partial<LoanRateSetting>>
   >({});
@@ -627,7 +632,12 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
   const [resultRateEdits, setResultRateEdits] = useState<
     Record<string, ResultRateEdit>
   >({});
+  /** 借款利率表自动生成键（取值见 loanSelectionKey）：记录最近一次自动生成
+   *  使用的科目选择；结果作废（换映射/换文件/换主体范围等）时清空，回到
+   *  第二步会自动补一次生成，不给用户留「表没了又没有按钮」的死路。 */
+  const autoRateKey = useRef("");
   const invalidateResults = () => {
+    autoRateKey.current = "";
     activeJob.current = "";
     setRows([]);
     setResult(undefined);
@@ -753,6 +763,21 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         auxiliary: row.auxiliaryKey,
         selected: loanReviewRole(row) === "loan",
       }));
+  /** 借款利率表的自动生成键：借款科目/利息支出科目选择（含辅助明细勾选）
+   *  或主体范围一变，屏幕上的利率明细快照即过期，第二步会自动按新选择
+   *  重新生成——利率填写入口随科目类型实时出现/消失，不再依赖手动按钮。 */
+  const loanSelectionKey = useMemo(
+    () =>
+      JSON.stringify([
+        selectedLoanAccounts(),
+        selectedInterestExpenseAccounts(),
+        loanReviewSelections(),
+        entityScope.selection,
+        functionalCurrency,
+      ]),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tbAccounts, loanAccountRoles, loanDetailRoles, auxLink, entityScope.selection, functionalCurrency],
+  );
   /** 导出利率确认表模板（带入已填值），用户在 Excel 补填后经 importRates 回读。 */
   async function exportRateTemplate() {
     const target = await pickPath("save", "保存利率确认表", ["xlsx"], "借款利率确认表.xlsx");
@@ -765,6 +790,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         jeSource: source("je"),
         loanAccounts: selectedLoanAccounts(),
         loanReviewSelections: loanReviewSelections(),
+        functionalCurrency: functionalCurrency || undefined,
         rateRows: Object.values(tbRateEdits),
         outputPath: target,
       });
@@ -1048,6 +1074,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         mode === "tb" && currencyFallbackMode
           ? currencyFallbackMode
           : undefined,
+      functionalCurrency:
+        mode === "tb" && functionalCurrency ? functionalCurrency : undefined,
       ...(outputPath ? { outputPath } : {}),
     };
   }
@@ -1085,6 +1113,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       loanReviewSelections?: Array<{ entity?: string; account?: string; auxiliary?: string; selected?: boolean }>;
       outputPath?: string;
       currencyFallbackMode?: CurrencyFallbackMode;
+      functionalCurrency?: string;
     };
     const paramsKey: Record<Kind, keyof typeof p> = {
       ledger: "ledgerSource",
@@ -1162,6 +1191,8 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     if (p.mode === "ledger" || p.mode === "tb") setMode(p.mode);
     if (typeof p.reportEnd === "string" && p.reportEnd)
       setReportEnd(p.reportEnd);
+    if (typeof p.functionalCurrency === "string")
+      setFunctionalCurrency(p.functionalCurrency);
     setOutputPath(typeof p.outputPath === "string" ? p.outputPath : "");
     setCurrencyFallbackMode(
       p.currencyFallbackMode === "functional" ||
@@ -1246,16 +1277,19 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       setError(errorText(e));
     }
   }
+  // 进入第二步的币种衔接验证记忆化：底部「下一步」与步骤条导航共用本入口。
+  // 验证输入（TB/JE 来源＋两侧映射＋已选借款科目＋主体口径，即完整验证请求体）
+  // 不变且已通过时直接跳步，反复来回切换不再重读两本账表；输入变化或尚未
+  // 通过时才重新验证。弹口径选择框（required 且未通过）与请求失败不记忆。
+  const currencyLinkCheckRef = useRef<{ key: string; ok: boolean } | null>(null);
   async function enterTbRateStep() {
     if (mode !== "tb") {
       setStep(1);
       return;
     }
-    setError("");
-    setBusy(true);
     const tb = sources.tb;
     const je = sources.je;
-    const link = await verifyCurrencyLink({
+    const request = {
       tbSource: {
         inputPath: tb.path,
         sheet: tb.inspection?.sheet ?? "",
@@ -1272,7 +1306,16 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       jeMapping: je.mapping,
       selectedAccounts: selectedLoanAccounts(),
       entityScope: entityScope.selection,
-    });
+    };
+    const key = JSON.stringify(request);
+    if (currencyLinkCheckRef.current?.key === key && currencyLinkCheckRef.current.ok) {
+      setError("");
+      setStep(1);
+      return;
+    }
+    setError("");
+    setBusy(true);
+    const link = await verifyCurrencyLink(request);
     setBusy(false);
     if (!link) {
       setError("暂时无法验证 TB 与 JE 的外币币种衔接，请重试。");
@@ -1282,9 +1325,18 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
       setCurrencyFallbackPrompt(link);
       return;
     }
+    currencyLinkCheckRef.current = { key, ok: true };
     setCurrencyFallbackMode("");
     setCurrencyFallbackPrompt(null);
     setStep(1);
+  }
+  /** 第二步进入「测算与底稿」：TB 模式立即用当前科目选择与已填利率重算一遍。
+   *  结果表必须反映本次确认的口径——若沿用进入第二步时的旧快照，快照生成于
+   *  填利率之前，测算利息会全部停留在 0，看起来像引擎没拿到刚填的利率。 */
+  function advanceToRunStep() {
+    if (mode === "tb" && !busy && mappingsReady && selectedAccountCount)
+      void run("loan.preview");
+    setStep(2);
   }
   // 导出完成后除结果区的打开按钮外，测算卡里也要有明确的「已生成＋文件名＋打开」
   // 反馈——此前唯一反馈是结果区标题旁悄悄出现的小按钮，用户感知不到已导出。
@@ -1418,28 +1470,37 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     (row) => loanAccountRoles[row.key] === "interest_expense",
   ).length;
   /** 合并表的条件列：辅助核算列在「辅助验证展开」或「利率明细带辅助核算」时显示；
-   *  主体列只在账套确实区分主体时显示，单一主体账套不浪费列宽。 */
+   *  主体列只在账套确实区分主体时显示，单一主体账套不浪费列宽——TB/JE 识别出
+   *  多个实际主体（「默认主体」占位不算）时必须显示，其余沿用辅助拆行/利率明细
+   *  自带主体的旧口径。 */
   const showAuxiliaryColumn =
     orderedTbAccounts.some((row) => Boolean(row.auxiliaryKey)) ||
     rows.some((row) => Boolean(row.auxiliary?.trim()));
+  const multiEntityLedger = useMemo(() => {
+    const names = [
+      ...(sources.tb.inspection?.entities ?? []),
+      ...(sources.je.inspection?.entities ?? []),
+    ]
+      .map((value) => value.trim())
+      .filter((value) => value && value !== DEFAULT_ENTITY);
+    return new Set(names).size > 1;
+  }, [sources.tb.inspection, sources.je.inspection]);
   const showSubject =
+    multiEntityLedger ||
     orderedTbAccounts.some((row) => Boolean(row.entity)) ||
-    rows.some((row) => Boolean(row.entity && row.entity !== "默认主体"));
-  // 进入「确认科目与利率」即自动生成一次利率确认表：生成是必经动作，不该让
-  // 用户自己找按钮。每次进入该步骤只自动跑一次，之后科目选择变化仍由
-  // 「重新生成借款利率表」手动触发，避免边看边改时被后台任务打断。
-  const autoRateTried = useRef(false);
-  useEffect(() => {
-    if (step === 1) autoRateTried.current = false;
-  }, [step]);
+    rows.some((row) => Boolean(row.entity && row.entity !== DEFAULT_ENTITY));
+  // 进入「确认科目与利率」即自动生成利率确认表，且科目选择（含辅助明细勾选、
+  // 利息支出科目、主体范围）一变就自动按新选择重新生成：生成是必经动作，
+  // 利率填写入口必须随科目类型实时出现，不再依赖「重新生成借款利率表」按钮。
+  // 生成键在结果作废时由 invalidateResults 清空，作废后回到本步骤自动补一次；
+  // 键值相同则不重跑，避免引擎返回空明细时陷入无限重试。
   useEffect(() => {
     if (
       mode !== "tb" ||
       step !== 1 ||
-      autoRateTried.current ||
+      autoRateKey.current === loanSelectionKey ||
       accountsBusy ||
       busy ||
-      rows.length > 0 ||
       !tbAccounts.length ||
       !selectedAccountCount ||
       !mappingsReady ||
@@ -1447,12 +1508,12 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     ) {
       return;
     }
-    autoRateTried.current = true;
+    autoRateKey.current = loanSelectionKey;
     void run("loan.preview");
   });
   // 表日只在第三步维护（第二步的重复字段已删）：生成过利率表后再改表日，
-  // 屏幕上的利率明细与 LPR 口径就与表日脱节，作废后一键重新生成即可，
-  // 手填利率存在独立状态里不会丢。
+  // 屏幕上的利率明细与 LPR 口径就与表日脱节，作废后回到第二步会自动重新
+  // 生成，手填利率存在独立状态里不会丢。
   const generatedReportEnd = useRef(reportEnd);
   useEffect(() => {
     if (generatedReportEnd.current === reportEnd) return;
@@ -1572,6 +1633,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
         current={step}
         onStepClick={(next) => {
           if (next === 1 && step === 0) void enterTbRateStep();
+          else if (next === 2 && step !== 2) advanceToRunStep();
           else setStep(next);
         }}
       />
@@ -1933,16 +1995,30 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                         placeholder="输入编码或名称"
                       />
                     </label>
+                    <label>
+                      本位币
+                      <select
+                        value={functionalCurrency}
+                        onChange={(event) =>
+                          setFunctionalCurrency(event.target.value)
+                        }
+                        title="美元等外币本位币的海外主体请选择实际本位币：余额表本位币行币种常留空、序时账逐行标币种，指定本位币后两边才能按科目归集"
+                      >
+                        <option value="">人民币（默认）</option>
+                        <option value="USD">美元 USD</option>
+                        <option value="HKD">港币 HKD</option>
+                        <option value="EUR">欧元 EUR</option>
+                        <option value="JPY">日元 JPY</option>
+                        <option value="GBP">英镑 GBP</option>
+                        <option value="AUD">澳元 AUD</option>
+                        <option value="CAD">加元 CAD</option>
+                        <option value="SGD">新加坡元 SGD</option>
+                      </select>
+                    </label>
                     {accountChangeNote && <span role="status">{accountChangeNote}</span>}
                     <div className="loan-paste-actions loan-rate-actions">
-                      <Button
-                        variant="default"
-                        disabled={busy || accountsBusy || !selectedAccountCount || !mappingsReady}
-                        onClick={() => void run("loan.preview")}
-                        title={mappingsReady ? undefined : "请先补齐字段映射"}
-                      >
-                        {rows.length ? "重新生成借款利率表" : "生成借款利率表"}
-                      </Button>
+                      {/* 利率明细的生成/刷新全自动（进入本步骤与科目类型改动
+                          各自触发），不再提供「重新生成借款利率表」按钮。 */}
                       <Button
                         variant="secondary"
                         disabled={busy || !selectedAccountCount}
@@ -1965,7 +2041,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                     <EmptyState
                       compact
                       title="等待生成利率明细"
-                      description="进入本步骤后按已确认的借款科目自动生成利率明细，并在本表利率列逐笔确认。若因映射缺失未自动生成，请补齐映射后点击“生成借款利率表”。"
+                      description="进入本步骤后按已确认的借款科目自动生成利率明细，并在本表利率列逐笔确认；科目类型改动后也会自动刷新。若因映射缺失未自动生成，请回第一步补齐映射后再进入本步骤。"
                     />
                   )}
                   <div
@@ -2078,11 +2154,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                                 <td>—</td>
                                 <td>—</td>
                                 <td>—</td>
-                                <td>{rows.length ? "无借款行" : "待生成"}</td>
+                                <td>{busy ? "生成中" : rows.length ? "无借款行" : "待生成"}</td>
                                 <td className="loan-match-basis">
-                                  {rows.length
-                                    ? "本次生成的利率明细未包含该科目；请检查借款明细列映射或重新生成"
-                                    : "点击「生成借款利率表」后在此填写利率"}
+                                  {busy
+                                    ? "正在按最新科目选择生成利率明细…"
+                                    : rows.length
+                                      ? "本次生成的利率明细未包含该科目；请检查借款明细列映射或科目类型选择"
+                                      : "利率明细自动生成后在此填写利率"}
                                 </td>
                               </>
                             ) : (
@@ -2229,7 +2307,10 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
             <Button variant="secondary" onClick={() => setStep(0)}>
               返回上传与识别
             </Button>
-            <Button disabled={!mappingsReady} onClick={() => setStep(2)}>
+            <Button
+              disabled={!mappingsReady || busy || accountsBusy}
+              onClick={advanceToRunStep}
+            >
               下一步：测算与底稿
             </Button>
           </div>

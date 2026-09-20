@@ -279,16 +279,14 @@ export function depositAccountCode(account: string): string {
   return token ?? account.trim();
 }
 
-/** 科目分类清单：TB 与 JE 的同一科目按编码去重（TB 拼法优先保留），
+/** 科目分类清单只来自 TB 余额表：该步是 TB 科目分类确认，与 JE 无关
+ *  （全工具统一口径）。清单内同一科目编码去重，保留 TB 首见写法；
  *  排序把已映射为计息科目/利息收入的排在前面，excluded 沉底——
  *  用户要核对的正是参与测算的那批科目。 */
-export function mergeAccountList(
-  tbAccounts: string[],
-  jeAccounts: string[],
-): string[] {
+export function mergeAccountList(tbAccounts: string[]): string[] {
   const seen = new Set<string>();
   const merged: string[] = [];
-  for (const account of [...tbAccounts, ...jeAccounts]) {
+  for (const account of tbAccounts) {
     const code = depositAccountCode(account);
     if (seen.has(code)) continue;
     seen.add(code);
@@ -643,14 +641,11 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
   });
 
   const accounts = useMemo(
-    // 科目确认只列末级科目：末级清单由公共引擎的目录末级掩码下发
-    // （分段编码等层级形态只有引擎认得）；旧任务没有该字段时回退全量清单。
-    () =>
-      mergeAccountList(
-        tb?.accountsLeaf ?? tb?.accounts ?? [],
-        je?.accounts ?? [],
-      ),
-    [je, tb],
+    // 科目确认只列 TB 末级科目：该步与 JE 无关（全工具统一口径）。
+    // 末级清单由公共引擎的目录末级掩码下发（分段编码等层级形态只有引擎
+    // 认得）；旧任务没有该字段时回退全量清单。
+    () => mergeAccountList(tb?.accountsLeaf ?? tb?.accounts ?? []),
+    [tb],
   );
   const depositAccounts = accounts.filter((a) =>
     ["deposit", "other_monetary", "cash_on_hand"].includes(

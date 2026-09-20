@@ -170,15 +170,13 @@ describe("fx audit mode selection", () => {
     );
   });
 
-  it("同一科目编码优先展示 JE/TB 中名称更完整的一侧", () => {
+  it("第二步清单只来自 TB：同编码裸编码行让位给带名称的写法", () => {
     expect(
-      fxAccountDisplayList(
-        ["1122000000", "2221010100"],
-        [
-          "1122000000 Accounts receivable - DBS USD settlement account",
-          "2221010100 应付账款-境外供应商",
-        ],
-      ),
+      fxAccountDisplayList([
+        "1122000000",
+        "1122000000 Accounts receivable - DBS USD settlement account",
+        "2221010100 应付账款-境外供应商",
+      ]),
     ).toEqual([
       "1122000000 Accounts receivable - DBS USD settlement account",
       "2221010100 应付账款-境外供应商",

@@ -205,15 +205,13 @@ export function fxCurrencyOptions(...detected: Array<string | null | undefined>)
 }
 
 /**
- * JE/TB 对同一编码的科目名称可能详略不同。清单按编码合并，并优先展示
- * 编码后仍有名称、且文本更完整的一侧，避免一侧只有编码时盖掉另一侧全称。
+ * 第二步清单只来自 TB 余额表：该步是 TB 科目类型确认，与 JE 无关
+ * （与借款利息、FA 账表核对同口径）。清单内部仍按编码归并，同编码的
+ * “裸编码”行让位给带名称的行；TB 同编码确有多个不同名称的明细户时全部保留。
  */
-export function fxAccountDisplayList(
-  jeAccounts: string[] = [],
-  tbAccounts: string[] = [],
-) {
+export function fxAccountDisplayList(tbAccounts: string[] = []) {
   const groups = new Map<string, string[]>();
-  for (const raw of [...jeAccounts, ...tbAccounts]) {
+  for (const raw of tbAccounts) {
     const account = raw.trim();
     if (!account) continue;
     const first = account.split(/\s+/)[0];
@@ -1153,10 +1151,11 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
     selectedAccounts: Object.entries(accountRoles).filter(([, role]) => role !== "excluded").map(([account]) => ({ account })),
   } : null, auxiliaryLinkKey);
   const accounts = useMemo(
-    // 科目类型确认只列末级科目：末级清单由公共引擎的目录末级掩码下发，
-    // 平级/无编码的账表不受影响；旧任务没有该字段时回退全量清单。
-    () => fxAccountDisplayList(je?.accounts, tb?.accountsLeaf ?? tb?.accounts),
-    [je?.accounts, tb?.accountsLeaf, tb?.accounts],
+    // 科目类型确认只列 TB 末级科目：该步与 JE 无关（全工具统一口径），
+    // 末级清单由公共引擎的目录末级掩码下发，平级/无编码的账表不受影响；
+    // 旧任务没有该字段时回退全量清单。
+    () => fxAccountDisplayList(tb?.accountsLeaf ?? tb?.accounts),
+    [tb?.accountsLeaf, tb?.accounts],
   );
   // 第二步行粒度：辅助核算联动验证通过的科目按辅助明细拆行（与存款利息／
   // 借款利息同口径），其余停在末级科目。筛选文本包含辅助名，便于按客商找。
@@ -2467,6 +2466,11 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
           {(tb?.sampledPreview || je?.sampledPreview) && (
             <p className="fx-hint" role="status">正在读取完整科目清单，当前样本目录不能用于最终分类。</p>
           )}
+          {!tb && (
+            <p className="fx-hint" role="status">
+              未上传 TB 科目余额表：本步无需确认科目类型，可直接进入下一步测算。
+            </p>
+          )}
           {(je || tb) && (
             <div>
               <Card>
@@ -2512,7 +2516,6 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                           side,
                           seen,
                           fellBack,
-                          multiCurrency,
                           jeMultiCurrency,
                         } = fxAccountCurrencyDetail(
                           account,
@@ -2555,23 +2558,6 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
                               {!row.auxiliary && !/\s/.test(account.trim()) && (
                                 <small className="fx-account-name-missing">
                                   名称未识别，请返回检查“科目名称”映射
-                                </small>
-                              )}
-                              {!row.auxiliary && detail?.needsConfirmation && (
-                                <small> 建议复核</small>
-                              )}
-                              {!row.auxiliary && multiCurrency && (
-                                <small
-                                  title={
-                                    jeMultiCurrency
-                                      ? `JE中该科目出现 ${seen.join("、")} 等多个币种；请复核TB是否按币种拆分。`
-                                      : `该科目出现过 ${seen.join("、")}`
-                                  }
-                                >
-                                  {" "}
-                                  {jeMultiCurrency
-                                    ? "JE多币种·复核TB"
-                                    : `${seen.length}种币种`}
                                 </small>
                               )}
                             </span>

@@ -209,6 +209,14 @@ export function OverlayStateFixture() {
             }))}
           />
         )}
+        {scenario === "sync-pill" && (
+          <SyncBusyDialog
+            fixtureEntries={[
+              { id: 0, method: "fx.inspect_je", detail: `${longText}.xlsx / 序时账` },
+            ]}
+            fixtureMinimized
+          />
+        )}
         {(scenario === "job-single" || scenario === "job-multi" || scenario === "job-success-stack") && (
           <JobDialogProvider jobs={jobs} nameOf={(toolId) => toolId}>
             {scenario === "job-success-stack" && (

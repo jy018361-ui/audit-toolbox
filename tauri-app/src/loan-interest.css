@@ -114,10 +114,10 @@
   background: var(--background);
   color: var(--foreground);
 }
-/* 合并表（科目确认＋利率设置）：基础 12 列，主体/辅助核算列按账套有无增减。
+/* 合并表（科目确认＋利率设置）：基础列含余额与发生额，主体/辅助核算列按账套有无增减。
    表格横向滚动，列宽交给浏览器按内容分配，输入框给定最小宽防挤成细缝。 */
 .loan-account-confirm.loan-confirm-table table {
-  min-width: 1520px;
+  min-width: 1640px;
   table-layout: auto;
 }
 .loan-account-confirm.loan-confirm-table td {

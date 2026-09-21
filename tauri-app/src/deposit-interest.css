@@ -74,7 +74,7 @@
 }
 .deposit-account-list table {
   width: 100%;
-  min-width: 900px;
+  min-width: 1040px;
   border-collapse: separate;
   border-spacing: 0;
 }
@@ -98,7 +98,7 @@
 }
 .deposit-account-list th:first-child,
 .deposit-account-list td:first-child {
-  width: 42%;
+  width: 38%;
 }
 .deposit-account-list th:nth-child(2),
 .deposit-account-list td:nth-child(2) {
@@ -106,12 +106,19 @@
 }
 .deposit-account-list th:nth-child(3),
 .deposit-account-list td:nth-child(3) {
+  width: 150px;
+  min-width: 138px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.deposit-account-list th:nth-child(4),
+.deposit-account-list td:nth-child(4) {
   width: 172px;
   min-width: 172px;
 }
-/* 第四列＝利率（%）：数字输入框保持窄列，别把科目列挤没。 */
-.deposit-account-list th:nth-child(4),
-.deposit-account-list td:nth-child(4) {
+/* 第五列＝利率（%）：数字输入框保持窄列，别把科目列挤没。 */
+.deposit-account-list th:nth-child(5),
+.deposit-account-list td:nth-child(5) {
   width: 128px;
   min-width: 118px;
 }

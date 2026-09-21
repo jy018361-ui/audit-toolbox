@@ -8003,6 +8003,9 @@ pub(crate) fn auxiliary_verified_columns(
                         .get(*index)
                         .is_some_and(|name| tb_columns.contains(name))
                 })
+                .filter(|(_, scan)| {
+                    !scan.hit_anchors.is_empty() && scan.hit_anchors.is_subset(je_hits)
+                })
                 .map(|(index, scan)| (index, scan.hit_anchors.intersection(je_hits).count()))
                 .max_by_key(|(_, hits)| *hits)
                 .filter(|(_, hits)| *hits > 0)?
@@ -8027,7 +8030,7 @@ pub(crate) fn auxiliary_link_group_verdicts_by_tb_columns(
     preferred_columns: &[String],
 ) -> Vec<AuxiliaryLinkGroupVerdict> {
     let columns = mapped_column_names(tb_mapping, role);
-    anchors
+    let mut groups = anchors
         .iter()
         .map(|(key, union)| {
             let je_columns = je_scans.get(key).cloned().unwrap_or_default();
@@ -8050,14 +8053,45 @@ pub(crate) fn auxiliary_link_group_verdicts_by_tb_columns(
                 .flatten()
                 .filter(|scan| columns.contains(&scan.header) && !scan.hit_anchors.is_empty())
                 .map(|scan| {
+                    let matched_je_columns = je_candidates
+                        .iter()
+                        .map(|candidate| AnchorColumnScan {
+                            header: candidate.header.clone(),
+                            hit_anchors: candidate.hit_anchors
+                                .intersection(&scan.hit_anchors)
+                                .cloned()
+                                .collect(),
+                            nonempty_rows: candidate.nonempty_rows,
+                        })
+                        .collect();
                     auxiliary_link_verdict(
                         &scan.hit_anchors,
-                        je_candidates.clone(),
+                        matched_je_columns,
                         totals.get(key).copied().unwrap_or_default(),
                         preferred,
                     )
-                });
-            let verdict = tb_candidates
+                })
+                .collect::<Vec<_>>();
+            // 同一个主体＋科目的不同 TB 辅助字段，不能各自指向不同 JE 列。
+            // 即使每列各自覆盖完整，也不能任取一列冒充整组的统一匹配键。
+            let matched_columns = tb_candidates
+                .iter()
+                .filter(|verdict| verdict.dimension_keys())
+                .filter_map(|verdict| verdict.column.as_deref())
+                .collect::<HashSet<_>>();
+            let verdict = if matched_columns.len() > 1 {
+                AuxiliaryLinkVerdict {
+                    column: None,
+                    status: "noMatch",
+                    anchor_total: union.len(),
+                    anchor_hits: 0,
+                    nonempty_rows: 0,
+                    total_rows: totals.get(key).copied().unwrap_or_default(),
+                    competing_columns: matched_columns.into_iter().map(str::to_owned).collect(),
+                }
+            } else {
+                tb_candidates
+                .into_iter()
                 .max_by_key(|verdict| {
                     (
                         verdict.dimension_keys(),
@@ -8072,14 +8106,31 @@ pub(crate) fn auxiliary_link_group_verdicts_by_tb_columns(
                         totals.get(key).copied().unwrap_or_default(),
                         preferred,
                     )
-                });
+                })
+            };
             AuxiliaryLinkGroupVerdict {
                 entity: key.0.clone(),
                 account: key.1.clone(),
                 verdict,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // 同一本配对账里若不同科目认定不同 JE 列，整体视为未匹配；
+    // 不将多列并入辅助字段，也不在计算时按科目切换列。
+    let matched_columns = groups
+        .iter()
+        .filter(|group| group.verdict.dimension_keys())
+        .filter_map(|group| group.verdict.column.as_deref())
+        .collect::<HashSet<_>>();
+    if matched_columns.len() > 1 {
+        let competing = matched_columns.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        for group in &mut groups {
+            group.verdict.status = "noMatch";
+            group.verdict.column = None;
+            group.verdict.competing_columns = competing.clone();
+        }
+    }
+    groups
 }
 
 impl AnchorColumnAccumulator {
@@ -10334,6 +10385,65 @@ mod tests {
         );
         assert_eq!(verdicts[0].verdict.status, "verified");
         assert_eq!(verdicts[0].verdict.column.as_deref(), Some("辅助二"));
+    }
+
+    #[test]
+    fn 不同tb辅助字段不得分别认定不同je列() {
+        let group = ("4800".to_owned(), "1002".to_owned());
+        let anchors = BTreeMap::from([(group.clone(), HashSet::from(["甲".to_owned(), "乙".to_owned()]))]);
+        let tb_scans = BTreeMap::from([(
+            group.clone(),
+            vec![
+                AnchorColumnScan { header: "TB字段一".into(), hit_anchors: HashSet::from(["甲".into()]), nonempty_rows: 1 },
+                AnchorColumnScan { header: "TB字段二".into(), hit_anchors: HashSet::from(["乙".into()]), nonempty_rows: 1 },
+            ],
+        )]);
+        let je_scans = BTreeMap::from([(
+            group.clone(),
+            vec![
+                AnchorColumnScan { header: "JE列一".into(), hit_anchors: HashSet::from(["甲".into()]), nonempty_rows: 1 },
+                AnchorColumnScan { header: "JE列二".into(), hit_anchors: HashSet::from(["乙".into()]), nonempty_rows: 1 },
+            ],
+        )]);
+        let mapping = serde_json::json!({"auxiliary":["TB字段一","TB字段二"]}).as_object().unwrap().clone();
+        let result = auxiliary_link_group_verdicts_by_tb_columns(
+            &anchors, &tb_scans, &je_scans, &BTreeMap::from([(group, 2)]),
+            &mapping, "auxiliary", &[],
+        );
+        assert_eq!(result[0].verdict.status, "noMatch");
+        assert!(result[0].verdict.column.is_none());
+    }
+
+    #[test]
+    fn 不同科目辅助字段命中不同je列时整体不命中() {
+        let first = ("4800".to_owned(), "1002".to_owned());
+        let second = ("4800".to_owned(), "2202".to_owned());
+        let anchors = BTreeMap::from([
+            (first.clone(), HashSet::from(["甲".to_owned()])),
+            (second.clone(), HashSet::from(["乙".to_owned()])),
+        ]);
+        let tb_scans = BTreeMap::from([
+            (first.clone(), vec![AnchorColumnScan { header: "TB辅助".into(), hit_anchors: HashSet::from(["甲".into()]), nonempty_rows: 1 }]),
+            (second.clone(), vec![AnchorColumnScan { header: "TB辅助".into(), hit_anchors: HashSet::from(["乙".into()]), nonempty_rows: 1 }]),
+        ]);
+        let je_scans = BTreeMap::from([
+            (first.clone(), vec![
+                AnchorColumnScan { header: "JE列一".into(), hit_anchors: HashSet::from(["甲".into()]), nonempty_rows: 1 },
+                AnchorColumnScan { header: "JE列二".into(), hit_anchors: HashSet::new(), nonempty_rows: 0 },
+            ]),
+            (second.clone(), vec![
+                AnchorColumnScan { header: "JE列一".into(), hit_anchors: HashSet::new(), nonempty_rows: 0 },
+                AnchorColumnScan { header: "JE列二".into(), hit_anchors: HashSet::from(["乙".into()]), nonempty_rows: 1 },
+            ]),
+        ]);
+        let mapping = serde_json::json!({"auxiliary":"TB辅助"}).as_object().unwrap().clone();
+        let groups = auxiliary_link_group_verdicts_by_tb_columns(
+            &anchors, &tb_scans, &je_scans,
+            &BTreeMap::from([(first, 1), (second, 1)]),
+            &mapping, "auxiliary", &[],
+        );
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().all(|group| group.verdict.status == "noMatch" && group.verdict.column.is_none()));
     }
 
     #[test]

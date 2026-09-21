@@ -1406,9 +1406,22 @@ export type AuxiliaryLinkResult = {
   coverage: number;
   competingColumns: string[];
   warnings: string[];
+  planKey?: string | null;
+  /** 汇兑科目确认复用本次完整 JE 扫描得到的币种证据。 */
+  jeAccountCurrencyDetails?: Record<string, {
+    detected: string;
+    source: string;
+    seen: string[];
+    needsConfirmation: boolean;
+    columnSeen?: string[];
+    columnDetected?: string;
+    textDetected?: string;
+    functionalDetected?: string;
+  }>;
   groups?: Array<Omit<AuxiliaryLinkResult, "groups"> & {
     entity: string;
     account: string;
+    tbColumn?: string | null;
     /** 第二步可否展开为辅助明细：当期有发生额的锚点全部在 JE 命中即放行。 */
     reviewVerified?: boolean;
     /** 该组 TB 的全部辅助维度行（含休眠户）；未通过验证时为空。 */

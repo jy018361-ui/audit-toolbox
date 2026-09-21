@@ -12,7 +12,7 @@ const viewports = [
   { width: 1000, height: 480, label: "1000x480-high-content" },
 ];
 const scenarios = [
-  "confirm", "sync", "job-single", "job-multi", "tour",
+  "confirm", "sync", "sync-pill", "job-single", "job-multi", "tour",
   "step", "success", "jargon", "fuzzy", "job-success-stack",
   "step-confirm-stack", "jargon-confirm-stack", "currency", "filter",
   "filter-confirm-stack", "job-pill-confirm-stack",
@@ -32,7 +32,7 @@ const auditOverlay = () => {
     return `${element.tagName.toLowerCase()}${classes ? `.${classes}` : ""}`;
   };
   const roots = [...document.querySelectorAll(
-    '[role="dialog"][data-state="open"], .ts-filter-menu, .tour-layer, .sidebar.drawer-open, .step-hint, .success-nudge, [role="tooltip"], .job-dialog-pill, .settings-update-panel',
+    '[role="dialog"][data-state="open"], .ts-filter-menu, .tour-layer, .sidebar.drawer-open, .step-hint, .success-nudge, [role="tooltip"], .job-dialog-pill, .sync-busy-pill, .settings-update-panel',
   )].filter(visible);
   if (!roots.length) issues.push("missing visible overlay root");
 
@@ -129,6 +129,8 @@ const auditOverlay = () => {
               ? ".step-hint"
             : scenario === "filter"
               ? ".ts-filter-menu"
+              : scenario === "sync-pill"
+                ? ".sync-busy-pill"
               : scenario === "filter-confirm-stack"
                 ? '[data-slot="dialog-content"]'
                 : scenario === "job-pill-confirm-stack"

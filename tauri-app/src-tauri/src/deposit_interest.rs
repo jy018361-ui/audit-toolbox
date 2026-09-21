@@ -1650,6 +1650,13 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         } else {
             accounts.clone()
         };
+    // 第二步直接展示损益科目的发生额，避免年末结转后只看到零余额。
+    // 该目录与第三步 `booked_occurrence` 复用同一取数与方向规则。
+    let account_metrics = if kind == "tb" {
+        inspect_tb_account_metrics(&table, &mapping)
+    } else {
+        Map::new()
+    };
     let entities = distinct_values(&table, &mapping, "entity");
     let entity_accounts = distinct_entity_accounts(&table, &mapping);
     let years = data_years(&table, kind, &mapping);
@@ -1674,6 +1681,7 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         // 不再自持会过期的对照表（标签与引擎 MissingRole.label 同源）。
         "roles": engine_role_labels(kind),
         "entities": entities, "accounts": accounts, "accountsLeaf": accounts_leaf,
+        "accountMetrics": account_metrics,
         "entityAccounts": entity_accounts,
         "suggestedAccountRoles": accounts.iter().map(|account|
             (account.clone(), Value::String(suggest_account_role(account).into()))
@@ -1685,6 +1693,113 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
         "dataYears": years,
         "suggestedBalanceSheetDate": years.last().map(|year| format!("{year}-12-31"))
     }))
+}
+
+fn inspect_tb_account_metrics(table: &FxTable, mapping: &Map<String, Value>) -> Map<String, Value> {
+    let leaf = ledger_mapping::tb_catalog_leaf_mask(&table.headers, &table.rows, &|role| {
+        match mapping.get(role) {
+            Some(Value::String(value)) => vec![value.clone()],
+            Some(Value::Array(values)) => values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            _ => vec![],
+        }
+    });
+    let account_cols = account_columns(table, mapping);
+    let names = table
+        .rows
+        .iter()
+        .map(|row| {
+            let account = join_columns(row, &account_cols);
+            (
+                ledger_mapping::account_code_of(&account),
+                ledger_mapping::account_name_of(&account),
+            )
+        })
+        .filter(|(code, name)| !code.is_empty() && !name.is_empty() && code != name)
+        .collect::<BTreeMap<_, _>>();
+    let columns = |role: &str| -> Vec<String> {
+        column_indexes(table, mapping, role)
+            .into_iter()
+            .filter_map(|index| table.headers.get(index).cloned())
+            .collect()
+    };
+    let convention = ledger_mapping::detect_tb_sign_convention(
+        &table.headers,
+        &table.rows,
+        &columns,
+    )
+    .convention
+    .unwrap_or(ledger_mapping::SignConvention::Unsigned);
+    let occurrence_basis = if !column_indexes(table, mapping, "ytdFunctionalDebit").is_empty()
+        || !column_indexes(table, mapping, "ytdFunctionalCredit").is_empty()
+    {
+        Some("本年累计发生额")
+    } else if !column_indexes(table, mapping, "periodFunctionalDebit").is_empty()
+        || !column_indexes(table, mapping, "periodFunctionalCredit").is_empty()
+    {
+        Some("本期发生额")
+    } else {
+        None
+    };
+    let mut totals = BTreeMap::<String, (f64, f64, BTreeSet<String>)>::new();
+    for (row_index, row) in table.rows.iter().enumerate() {
+        if !leaf.get(row_index).copied().unwrap_or(true) {
+            continue;
+        }
+        let account = join_columns(row, &account_cols);
+        if account.is_empty() {
+            continue;
+        }
+        let closing = signed(
+            table,
+            row,
+            mapping,
+            "closingFunctionalDebit",
+            "closingFunctionalCredit",
+        )
+        .or_else(|| cell_number(table, row, mapping, "closingFunctionalAmount"))
+        .unwrap_or(0.0);
+        let entry = totals
+            .entry(account.clone())
+            .or_insert_with(|| (0.0, 0.0, BTreeSet::new()));
+        entry.0 += closing;
+        if occurrence_basis.is_some()
+            && let Some((amount, note, _, _, _)) = booked_occurrence(
+                table,
+                row,
+                mapping,
+                convention,
+                registered_direction(&account, &names),
+                explicit_interest_income_name(&account),
+            )
+        {
+            entry.1 += amount;
+            entry.2.insert(note);
+        }
+    }
+    totals
+        .into_iter()
+        .map(|(account, (closing, occurrence, details))| {
+            let basis = occurrence_basis.map(|fallback| {
+                if details.is_empty() {
+                    format!("{fallback}（无非零发生）")
+                } else {
+                    details.into_iter().collect::<Vec<_>>().join("；")
+                }
+            });
+            (
+                account,
+                json!({
+                    "closing": closing,
+                    "occurrence": occurrence_basis.map(|_| occurrence),
+                    "occurrenceBasis": basis,
+                }),
+            )
+        })
+        .collect()
 }
 
 fn data_years(table: &FxTable, kind: &str, mapping: &Map<String, Value>) -> Vec<i32> {
@@ -2176,18 +2291,58 @@ fn fold_tb_accounts(
         };
         ledger_mapping::AccountMatchPolicy::from_sides(&tb_identities, &je_identities)
     };
-    let auxiliary_plan = deposit_auxiliary_plan(
-        &tb,
-        &tb_map,
-        &tb_leaf,
-        je_input.as_ref(),
-        &policy,
-        params,
-        entity_key_enabled,
-        &entity_scope,
-        cancel,
-    )?;
-    let mut auxiliary_warnings: Vec<String> = Vec::new();
+    // 第二步已经用 TB 锨点完整扫过 JE 时，来源指纹与当前映射
+    // 一致就直接复用认定列。计划失效、科目编码歧义或无计划时，
+    // 自动回到原来的全表反查。
+    let reused_auxiliary_columns = je_input.as_ref().and_then(|je| {
+        let je_headers = match je {
+            JeInput::Memory(table, _) => table.headers.as_slice(),
+            JeInput::Disk(disk, _) => disk.headers(),
+        };
+        crate::fx::verified_auxiliary_columns_from_plan_headers(
+            params,
+            &tb.headers,
+            je_headers,
+            &policy,
+        )
+        .map(|columns| (columns, je_headers))
+    });
+    let auxiliary_plan = if let Some((columns, je_headers)) = reused_auxiliary_columns {
+        DepositAuxiliaryPlan {
+            tb_columns: columns
+                .iter()
+                .map(|(group, (tb_index, _))| (group.clone(), *tb_index))
+                .collect(),
+            verified_columns: columns
+                .into_iter()
+                .filter_map(|(group, (_, je_index))| {
+                    je_headers.get(je_index).cloned().map(|name| (group, name))
+                })
+                .collect(),
+            verdicts: Vec::new(),
+        }
+    } else {
+        deposit_auxiliary_plan(
+            &tb,
+            &tb_map,
+            &tb_leaf,
+            je_input.as_ref(),
+            &policy,
+            params,
+            entity_key_enabled,
+            &entity_scope,
+            cancel,
+        )?
+    };
+    let mut auxiliary_warnings: Vec<String> = params
+        .get("auxiliaryPlan")
+        .and_then(|plan| plan.get("warnings"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect();
     for group in &auxiliary_plan.verdicts {
         let verdict = &group.verdict;
         let prefix = format!("{} / {}", group.entity, group.account);
@@ -4437,7 +4592,13 @@ fn booked_occurrence(
         // 年末已结转的损益科目：结转分录使借贷发生同额，净额恒为 0，
         // 期末余额也是 0。此时按红字与科目登记方向定收入/费用符号。
         if cr.abs() <= 0.005 && dr.abs() <= 0.005 {
-            return None;
+            return Some((
+                0.0,
+                "借贷发生额均为 0".into(),
+                dr,
+                cr,
+                false,
+            ));
         }
         let (amount, note) =
             closed_pair_baseline(convention, direction, cr, dr, explicit_interest_income);
@@ -7626,6 +7787,15 @@ mod tests {
             "tb",
         )
         .unwrap();
+        assert_eq!(
+            tb["accountMetrics"]["660299 财务费用-融资成本"]["occurrence"],
+            json!(888.0),
+            "第二步应下发与第三步相同的发生额口径"
+        );
+        assert!(tb["accountMetrics"]["660299 财务费用-融资成本"]
+            ["occurrenceBasis"]
+            .as_str()
+            .is_some_and(|basis| basis.contains("贷方")));
         let params = json!({
             "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
             "tbSource": {"inputPath": tb_path.to_string_lossy()},

@@ -2243,7 +2243,8 @@ fn 辅助核算锚点认定成功时勾稽细化到维度() {
          2025-03-01,V1,1002,银行存款,B部门,70,0\n",
     )
     .unwrap();
-    let result = run(&auxiliary_params(&dir, None), &AtomicBool::new(false)).unwrap();
+    let params = auxiliary_params(&dir, None);
+    let result = run(&params, &AtomicBool::new(false)).unwrap();
     let tb_vs_je = &result["tbVsJe"];
     assert_eq!(tb_vs_je["auxiliaryRefined"], json!(true), "{result:#?}");
     assert_eq!(tb_vs_je["auxiliaryMatch"]["status"], json!("verified"));
@@ -2262,6 +2263,26 @@ fn 辅助核算锚点认定成功时勾稽细化到维度() {
             .any(|item| item["auxiliary"] == json!("B部门") && item["tbDebit"] == json!(50.0))
     );
     assert_eq!(tb_vs_je["passed"], json!(false), "{result:#?}");
+
+    // 映射阶段的辅助反查结论传入测算后，应跳过重复反查并保持
+    // 完全相同的维度勾稽结果。
+    let linked = fx::auxiliary_link_check(&params).unwrap();
+    assert_eq!(linked["status"], json!("verified"), "{linked:#?}");
+    let mut reused = params.clone();
+    reused["auxiliaryPlan"] = json!({
+        "planKey": linked["planKey"],
+        "groups": linked["groups"].as_array().unwrap().iter().map(|group| json!({
+            "entity": group["entity"],
+            "account": group["account"],
+            "tbColumn": group["tbColumn"],
+            "jeColumn": group["column"],
+            "anchorHits": group["anchorHits"],
+            "anchorTotal": group["anchorTotal"],
+        })).collect::<Vec<_>>()
+    });
+    let reused_result = run(&reused, &AtomicBool::new(false)).unwrap();
+    assert_eq!(reused_result["tbVsJe"]["items"], tb_vs_je["items"]);
+    assert_eq!(reused_result["tbVsJe"]["passed"], tb_vs_je["passed"]);
     let _ = std::fs::remove_dir_all(dir);
 }
 

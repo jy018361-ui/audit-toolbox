@@ -70,7 +70,7 @@ describe("同步操作等待弹窗", () => {
       vi.advanceTimersByTime(1);
     });
     expect(screen.getByText("正在导入文档")).toBeTruthy();
-    expect(screen.getByText(/完成后窗口会自动关闭/)).toBeTruthy();
+    expect(screen.getByText(/无法中途暂停/)).toBeTruthy();
 
     // 完成后自动关闭
     act(() => {
@@ -178,7 +178,42 @@ describe("同步操作等待弹窗", () => {
     expect(screen.getByText("正在导入文档")).toBeTruthy();
   });
 
-  it("后台等待把弹窗藏起来，本批不再弹，下一批慢操作照常弹出", async () => {
+  it("终止等待：页面立刻收到失败、弹窗关闭，后台迟到的结果被丢弃", async () => {
+    render(<SyncBusyDialog />);
+    const caught: unknown[] = [];
+    let pending: Promise<unknown> = Promise.resolve({});
+    act(() => {
+      pending = engineCall("fx.inspect_je", {}, "04序时账.xlsx").catch(
+        (error: unknown) => {
+          caught.push(error);
+          return undefined;
+        },
+      );
+    });
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.getByText("正在读取序时账：04序时账.xlsx")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "终止等待" }));
+    await pending;
+    await flush();
+    expect(caught).toHaveLength(1);
+    expect((caught[0] as Error).message).toContain("已终止等待");
+    // 弹窗关闭，也不留右下角小条：终止就是不要了。
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByText(/点击展开/)).toBeNull();
+
+    // 后台迟到的结果放行回来也被吞掉：不弹窗、不再刷新登记。
+    act(() => {
+      for (const resolve of tauri.state.resolvers) resolve({ late: true });
+    });
+    await flush();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByText(/点击展开/)).toBeNull();
+  });
+
+  it("最小化收成右下角小条：点小条展开回来，清空后小条自动消失", async () => {
     render(<SyncBusyDialog />);
     let pending: Promise<unknown> = Promise.resolve({});
     act(() => {
@@ -187,31 +222,54 @@ describe("同步操作等待弹窗", () => {
     act(() => {
       vi.advanceTimersByTime(1000);
     });
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    // 最小化：弹窗收起，右下角小条接管，操作仍在后台跑。
+    fireEvent.click(screen.getByRole("button", { name: "最小化" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.getByText("正在导入文档")).toBeTruthy();
-    // 不是停止：操作仍在后台跑，只是用户不再干等弹窗。
-    fireEvent.click(screen.getByRole("button", { name: "后台等待" }));
-    expect(screen.queryByText("正在导入文档")).toBeNull();
-    // 同批又有新调用进来（没经过空闲）也不重新弹。
+
+    // 同批又有新调用进来（没经过空闲）不重新弹窗，小条合并计数。
     act(() => {
       void engineCall("audipick.ocr", {});
     });
     act(() => {
       vi.advanceTimersByTime(2000);
     });
-    expect(screen.queryByText(/正在处理/)).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByText("2 项操作处理中")).toBeTruthy();
 
-    // 本批结束转空闲后，新一批慢操作照常弹窗。
+    // 点小条展开回弹窗。
+    fireEvent.click(screen.getByRole("button", { name: /展开处理进度/ }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.getByText("正在处理 2 项操作")).toBeTruthy();
+
+    // 全部完成弹窗关闭；转空闲后新一批慢操作照常弹出，小条不残留。
     act(() => {
       for (const resolve of tauri.state.resolvers) resolve({});
     });
     await pending;
     await flush();
+    expect(screen.queryByRole("dialog")).toBeNull();
     act(() => {
       void engineCall("audipick.ocr", {});
     });
     act(() => {
       vi.advanceTimersByTime(1000);
     });
+    expect(screen.getByRole("dialog")).toBeTruthy();
     expect(screen.getByText("正在OCR 识别")).toBeTruthy();
+    expect(screen.queryByText(/点击展开/)).toBeNull();
+  });
+
+  it("夹具注入的最小化形态直接呈现右下角小条", () => {
+    render(
+      <SyncBusyDialog
+        fixtureEntries={[{ id: 1, method: "fx.inspect_je" }]}
+        fixtureMinimized
+      />,
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByText("正在读取序时账")).toBeTruthy();
   });
 });

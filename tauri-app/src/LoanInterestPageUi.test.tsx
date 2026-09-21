@@ -464,7 +464,7 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
         accounts: [
           { key: "1122", code: "1122", name: "应收账款", account: "1122 应收账款", opening: 5, closing: 6, suggestedType: "skip", suggestionReason: "资产类科目" },
           { key: "2001", code: "2001", name: "短期借款", account: "2001 短期借款", opening: 1000, closing: 900, suggestedType: "loan", suggestionReason: "负债类借款科目" },
-          { key: "66030001", code: "66030001", name: "财务费用-利息支出", account: "66030001 财务费用-利息支出", opening: 0, closing: 0, suggestedType: "interest_expense" },
+          { key: "66030001", code: "66030001", name: "财务费用-利息支出", account: "66030001 财务费用-利息支出", opening: 0, closing: 0, occurrence: -923800.5, occurrenceBasis: "本期发生额·已结转，按科目登记方向还原", suggestedType: "interest_expense" },
           ...Array.from({ length: 160 }, (_, index) => ({ key: `5${index + 10000}`, code: `5${index + 10000}`, name: `其他科目${index}`, account: `5${index + 10000} 其他科目${index}`, opening: 0, closing: 0, suggestedType: "skip" as const, suggestionReason: "其他科目" })),
         ],
       };
@@ -497,6 +497,7 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   ).not.toBeInTheDocument();
   // 合并后利率列已并入科目表：表头一次带全科目与利率两组列。
   expect(screen.getByRole("columnheader", { name: "科目类型" })).toBeVisible();
+  expect(screen.getByRole("columnheader", { name: "发生额" })).toBeVisible();
   expect(screen.getByRole("columnheader", { name: "执行利率（%）" })).toBeVisible();
   expect(screen.getByRole("columnheader", { name: "匹配依据" })).toBeVisible();
   const loanSelect = await screen.findByRole("combobox", { name: "2001 短期借款的科目类型" });
@@ -505,6 +506,10 @@ it("确认科目与利率：预选借款科目，缺映射仍拦下一步但不�
   expect((skipSelect as HTMLSelectElement).value).toBe("skip");
   const expenseSelect = await screen.findByRole("combobox", { name: "66030001 财务费用-利息支出的科目类型" });
   expect((expenseSelect as HTMLSelectElement).value).toBe("interest_expense");
+  expect(screen.getByText("-923,800.5")).toHaveAttribute(
+    "title",
+    "本期发生额·已结转，按科目登记方向还原",
+  );
   const accountRows = screen.getAllByRole("row");
   expect(accountRows[1]).toHaveTextContent("短期借款");
   expect(accountRows[2]).toHaveTextContent("利息支出");

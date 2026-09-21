@@ -8,7 +8,7 @@ use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, FormatUnderline, Formul
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -201,6 +201,7 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
         account: String,
         opening: f64,
         closing: f64,
+        row_indexes: Vec<usize>,
     }
     let mut order = Vec::<String>::new();
     let mut grouped = HashMap::<String, CatalogAccount>::new();
@@ -248,6 +249,7 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
             if existing.account.trim().is_empty() && !account.trim().is_empty() {
                 existing.account = account;
             }
+            existing.row_indexes.push(row_index);
         } else {
             order.push(key.clone());
             grouped.insert(
@@ -259,10 +261,31 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
                     account,
                     opening,
                     closing,
+                    row_indexes: vec![row_index],
                 },
             );
         }
     }
+    let direction_catalog = tb
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let code = role_text(&tb, row, &tm, "tb", "accountCode");
+            let name = role_text(&tb, row, &tm, "tb", "accountName");
+            (!code.trim().is_empty()).then_some((code, name))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let occurrence_basis = if !mapped_names(&tm, "tb", "ytdFunctionalDebit").is_empty()
+        || !mapped_names(&tm, "tb", "ytdFunctionalCredit").is_empty()
+    {
+        Some("本年累计发生额")
+    } else if !mapped_names(&tm, "tb", "periodFunctionalDebit").is_empty()
+        || !mapped_names(&tm, "tb", "periodFunctionalCredit").is_empty()
+    {
+        Some("本期发生额")
+    } else {
+        None
+    };
     let accounts = order
         .into_iter()
         .filter_map(|key| grouped.remove(&key))
@@ -288,6 +311,34 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
             } else {
                 "skip"
             };
+            // 每个末级科目都下发发生额，用户把任意科目改成“利息支出”时，
+            // 界面无需重新读 TB 就能立即看到该科目的比较基准。
+            let (occurrence, occurrence_detail) = occurrence_basis.map_or(
+                (None, None),
+                |basis| {
+                    let direction = expense_account_direction(&account.account, &direction_catalog);
+                    let mut total = 0.0;
+                    let mut details = BTreeSet::new();
+                    for row_index in &account.row_indexes {
+                        if let Some((amount, detail)) = interest_expense_occurrence(
+                            &tb,
+                            &tb.rows[*row_index],
+                            &tm,
+                            tb_convention,
+                            direction,
+                        ) {
+                            total += amount;
+                            details.insert(detail);
+                        }
+                    }
+                    let detail = if details.is_empty() {
+                        format!("{basis}（无非零发生）")
+                    } else {
+                        details.into_iter().collect::<Vec<_>>().join("；")
+                    };
+                    (Some(total), Some(detail))
+                },
+            );
             json!({
                 "key": account.key,
                 "code": account.code,
@@ -295,6 +346,8 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
                 "account": account.account,
                 "opening": account.opening,
                 "closing": account.closing,
+                "occurrence": occurrence,
+                "occurrenceBasis": occurrence_detail,
                 "suggestedType": suggested_type,
                 "suggestionReason": suggestion.reason,
             })
@@ -959,7 +1012,7 @@ fn interest_expense_occurrence(
             return Some((net_expense, format!("{label}·借方减贷方")));
         }
         if dr.abs() <= 0.005 && cr.abs() <= 0.005 {
-            return None;
+            return Some((0.0, format!("{label}·借贷发生额均为 0")));
         }
         let magnitude = dr.abs().max(cr.abs());
         let red = dr < 0.0 || cr < 0.0;
@@ -3148,6 +3201,37 @@ fn calculate_tb_impl(
     let memory_convention = memory_je
         .as_ref()
         .map(|(je, jm)| je_sign_convention(je, jm));
+    // 内存路径先用主体＋科目编码/科目文本给 JE 建候选索引。后续每个
+    // TB 借款户只检查可能命中的分录，再按原来的币种、辅助明细和消歧
+    // 条件做完整判定。索引只缩小扫描范围，不改变任何匹配口径。
+    type JeCandidateIndex = (
+        HashMap<(String, String), Vec<usize>>,
+        HashMap<(String, String), Vec<usize>>,
+    );
+    let memory_je_candidates: Option<JeCandidateIndex> = memory_je.as_ref().map(|(je, jm)| {
+        let mut by_code: HashMap<(String, String), Vec<usize>> = HashMap::new();
+        let mut by_account: HashMap<(String, String), Vec<usize>> = HashMap::new();
+        for (row_index, row) in je.rows.iter().enumerate() {
+            let entity = scoped_entity(
+                &role_text(je, row, jm, "je", "entity"),
+                entity_key_enabled,
+                ledger_mapping::EntitySide::Je,
+                &entity_scope,
+            );
+            let code = norm(&role_text(je, row, jm, "je", "accountCode"));
+            if !code.is_empty() {
+                by_code
+                    .entry((entity.clone(), code))
+                    .or_default()
+                    .push(row_index);
+            }
+            by_account
+                .entry((entity, norm(&account_text(je, row, jm, "je"))))
+                .or_default()
+                .push(row_index);
+        }
+        (by_code, by_account)
+    });
     // 三层科目配对索引：编码 → 折叠后的笔数、（编码,名称）→ 笔数。编码唯一时
     // 直接按编码归集（两侧名称写法不同无妨）；撞车时借款明细优先、名称其次
     // 消歧到笔，名称消歧只在编码下唯一时有效；都消不开留给 TB 发生额兜底
@@ -3213,7 +3297,25 @@ fn calculate_tb_impl(
             .unwrap_or_default();
         if !two_point_by_currency {
             if let (Some((je, jm)), Some(je_convention)) = (memory_je.as_ref(), memory_convention) {
-                for jr in &je.rows {
+                let detail_index = detail_column
+                    .and_then(|name| je.headers.iter().position(|header| header == name));
+                let mut candidate_indexes = Vec::new();
+                if let Some((by_code, by_account)) = &memory_je_candidates {
+                    if !tb_code.is_empty() {
+                        if let Some(indexes) = by_code.get(&(entity.clone(), norm(&tb_code))) {
+                            candidate_indexes.extend_from_slice(indexes);
+                        }
+                    }
+                    if let Some(indexes) = by_account.get(&(entity.clone(), norm(&account))) {
+                        candidate_indexes.extend_from_slice(indexes);
+                    }
+                }
+                // 同一行可能同时由编码和科目文本命中；恢复 JE 原始顺序并
+                // 去重，保持事件日期和匹配类型的既有输出稳定。
+                candidate_indexes.sort_unstable();
+                candidate_indexes.dedup();
+                for row_index in candidate_indexes {
+                    let jr = &je.rows[row_index];
                     let event_date = mapped_je_date(je, jr, jm, report_year);
                     if period.is_some_and(|(start, end)| {
                         !event_date.is_some_and(|date| date >= start && date <= end)
@@ -3221,8 +3323,7 @@ fn calculate_tb_impl(
                         continue;
                     }
                     let ja = account_text(je, jr, jm, "je");
-                    let ji = detail_column
-                        .and_then(|name| je.headers.iter().position(|header| header == name))
+                    let ji = detail_index
                         .and_then(|index| jr.get(index))
                         .map(|value| value.trim().to_string())
                         .unwrap_or_default();
@@ -6127,6 +6228,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(red_amount, -125.5);
+
+        // 发生额列已提供但本期确实为零时，比较基准就是 0；不能再回退到
+        // 未结转余额，否则“有发生额优先”的口径会因数值为零而改变。
+        let zero = rows_table(&["本年借方", "本年贷方"], &[&["0", "0"]]);
+        let (zero_amount, zero_basis) = interest_expense_occurrence(
+            &zero,
+            &zero.rows[0],
+            &mapping,
+            ledger_mapping::SignConvention::Unsigned,
+            ExpenseAccountDirection::Debit,
+        )
+        .unwrap();
+        assert_eq!(zero_amount, 0.0);
+        assert!(zero_basis.contains("均为 0"));
     }
 
     #[test]
@@ -7564,9 +7679,10 @@ mod tests {
         let sheet = book.add_worksheet();
         sheet.set_name("TB").unwrap();
         for (r, row) in [
-            vec!["编码", "科目", "期初贷", "期末贷"],
-            vec!["2001", "短期借款", "1000000", "900000"],
-            vec!["1122", "应收账款", "5000", "6000"],
+            vec!["编码", "科目", "期初贷", "期末贷", "本期借方", "本期贷方"],
+            vec!["2001", "短期借款", "1000000", "900000", "0", "100000"],
+            vec!["1122", "应收账款", "5000", "6000", "1000", "0"],
+            vec!["66030002", "利息", "0", "0", "-923800.5", "-923800.5"],
         ]
         .iter()
         .enumerate()
@@ -7577,12 +7693,22 @@ mod tests {
         }
         let path = fixture.dir.join("tb-accounts.xlsx");
         book.save(&path).unwrap();
-        let tb_source = json!({"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷"}});
+        let tb_source = json!({"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},"mapping":{"accountCode":"编码","accountName":"科目","openingFunctionalCredit":"期初贷","closingFunctionalCredit":"期末贷","periodFunctionalDebit":"本期借方","periodFunctionalCredit":"本期贷方"}});
         let accounts = tb_accounts(&json!({"tbSource": tb_source})).unwrap();
         let list = accounts["accounts"].as_array().unwrap();
-        assert_eq!(list.len(), 2, "只下发末级科目：{accounts:#?}");
+        assert_eq!(list.len(), 3, "只下发末级科目：{accounts:#?}");
         assert_eq!(list[0]["key"].as_str().unwrap(), "2001");
         assert_eq!(list[0]["opening"].as_f64().unwrap(), 1000000.0);
+        let expense = list
+            .iter()
+            .find(|item| item["code"] == "66030002")
+            .unwrap();
+        assert_eq!(expense["suggestedType"], "interest_expense");
+        assert_eq!(expense["occurrence"], json!(-923800.5));
+        assert!(expense["occurrenceBasis"]
+            .as_str()
+            .unwrap()
+            .contains("已结转"));
         // 模板导出（空 JE 的最小来源）+ 回读往返。
         let je = fixture.dir.join("je-empty.xlsx");
         let mut je_book = Workbook::new();
@@ -8456,6 +8582,46 @@ mod zz_debug2 {
 mod loan_real_ledger_mapping_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    #[ignore = "仅本机真实账表验收，需 LEDGER_SAMPLES 指向 TBJEPBC 目录"]
+    fn 借款真实07利息支出按发生额展示并参与差异() {
+        let root = std::env::var("LEDGER_SAMPLES").expect("LEDGER_SAMPLES 未设置");
+        let path = std::path::Path::new(&root).join("07科目余额表.xls");
+        let inspected = inspect(&json!({
+            "kind": "tb",
+            "source": {"inputPath": path, "sheet": "", "headerRow": 0, "headerDepth": 0}
+        }))
+        .expect("07 TB inspect 失败");
+        let tb_source = json!({
+            "source": {
+                "inputPath": path,
+                "sheet": inspected["sheet"],
+                "headerRow": inspected["headerRow"],
+                "headerDepth": inspected["headerDepth"]
+            },
+            "mapping": inspected["suggestedMapping"]
+        });
+        let catalog = tb_accounts(&json!({"tbSource": tb_source.clone()})).unwrap();
+        let expense = catalog["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["code"] == "66030002")
+            .expect("07 科目清单缺少 66030002 利息");
+        assert_eq!(expense["opening"], json!(0.0));
+        assert_eq!(expense["closing"], json!(0.0));
+        assert_eq!(expense["occurrence"], json!(-923800.5));
+        let booked = booked_interest_expense(&json!({
+            "tbSource": tb_source,
+            "interestExpenseAccounts": ["66030002"]
+        }))
+        .unwrap();
+        assert_eq!(booked.amount, -923800.5);
+        assert!(booked.details[0]["basis"]
+            .as_str()
+            .is_some_and(|basis| basis.contains("已结转")));
+    }
 
     #[test]
     #[ignore = "仅本机真实账表验收，需 LEDGER_SAMPLES 指向 TBJEPBC 目录"]

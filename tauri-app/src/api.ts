@@ -69,10 +69,19 @@ export type SyncBusyEntry = { id: number; method: string; detail?: string };
 
 const syncBusyListeners = new Set<(entries: SyncBusyEntry[]) => void>();
 let syncBusySeq = 0;
-const syncBusyActive = new Map<number, { method: string; detail?: string }>();
+// abort 只掐断前端的「等待」：Rust 侧一口气跑完的处理无法安全击杀，会自行
+// 收尾，但结果按终止要求丢弃（engineCall 的 promise 在 abort 时即拒绝）。
+const syncBusyActive = new Map<
+  number,
+  { method: string; detail?: string; abort: (reason: Error) => void }
+>();
 
 function syncBusySnapshot(): SyncBusyEntry[] {
-  return [...syncBusyActive].map(([id, item]) => ({ id, ...item }));
+  return [...syncBusyActive].map(([id, item]) => ({
+    id,
+    method: item.method,
+    detail: item.detail,
+  }));
 }
 
 function notifySyncBusy() {
@@ -88,12 +97,31 @@ export function onSyncBusyChange(
   return () => syncBusyListeners.delete(listener);
 }
 
+/** 终止等待的统一话术：页面 catch 到的就是这一句。 */
+export const SYNC_BUSY_ABORTED_MESSAGE =
+  "已终止等待：界面已恢复，后台处理会自行收尾，但结果不再应用到页面。";
+
+/**
+ * 终止当前全部同步调用的等待：等待窗立即关闭、页面的调用立刻收到失败，
+ * 后台处理则自行结束后被静默丢弃。返回终止条数（0 = 已经没有在等的）。
+ */
+export function syncBusyAbortAll(): number {
+  const pending = [...syncBusyActive.keys()];
+  for (const id of pending) {
+    const item = syncBusyActive.get(id);
+    syncBusyActive.delete(id);
+    item?.abort(new Error(SYNC_BUSY_ABORTED_MESSAGE));
+  }
+  if (pending.length > 0) notifySyncBusy();
+  return pending.length;
+}
+
 export async function engineCall(
   method: string,
   params: Record<string, unknown>,
   /** 给等待弹窗看的一句话明细（文件名、组名），让用户知道在处理哪份数据。 */
   detail?: string,
-) {
+): Promise<unknown> {
   if (!inTauri()) {
     // 演示数据通道：仅浏览器预览 + localStorage 开关打开时生效，
     // 用仓库内固定样例回放引擎返回，让"有数据之后"的布局可被随时检查。
@@ -102,14 +130,35 @@ export async function engineCall(
     throw new Error("浏览器预览模式不能处理本地文件，请使用 Tauri 应用。 ");
   }
   const id = ++syncBusySeq;
-  syncBusyActive.set(id, detail ? { method, detail } : { method });
-  notifySyncBusy();
-  try {
-    return await invoke<unknown>("engine_call", { method, params });
-  } finally {
-    syncBusyActive.delete(id);
+  return new Promise((resolve, reject) => {
+    let aborted = false;
+    const settle = (
+      outcome: "fulfill" | "reject",
+      value?: unknown,
+      error?: unknown,
+    ) => {
+      // abort 已把等待交还给页面（promise 已拒绝、登记已清），迟到的
+      // 成功/失败一律吞掉，免得页面在终止后又被旧结果刷新。
+      if (aborted) return;
+      syncBusyActive.delete(id);
+      notifySyncBusy();
+      if (outcome === "fulfill") resolve(value);
+      else reject(error);
+    };
+    syncBusyActive.set(id, {
+      method,
+      ...(detail ? { detail } : {}),
+      abort: (reason) => {
+        aborted = true;
+        reject(reason);
+      },
+    });
     notifySyncBusy();
-  }
+    invoke<unknown>("engine_call", { method, params }).then(
+      (value) => settle("fulfill", value),
+      (error) => settle("reject", undefined, error),
+    );
+  });
 }
 
 let demoJobSeq = 0;

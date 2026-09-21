@@ -7,9 +7,14 @@ import {
   depositPercentToRate, depositRateOutOfPractice, depositRateToPercent, depositReportStart,
   depositTermsOf, depositJeLayout, JE_LAYOUT_LABEL,
   depositBalanceCheckStatus, depositRateCheckStatus,
+  depositDisplayAmount,
 } from "./DepositInterestPage";
 
 describe("存款余额勾稽与利率状态分别显示", () => {
+  it("第二步发生额保留红字方向并使用千分位", () => {
+    expect(depositDisplayAmount(-923800.5)).toBe("-923,800.5");
+    expect(depositDisplayAmount(null)).toBe("—");
+  });
   it("差异为零但使用暂估利率时仍显示已勾稽", () => {
     expect(depositBalanceCheckStatus({ jeReconciled: true, reconciliationDiff: -0.00001 })).toBe("已勾稽");
     expect(depositBalanceCheckStatus({ jeReconciled: true, reconciliationDiff: 0.006 })).toBe("待复核");

@@ -19,6 +19,7 @@ import {
   fxAllowedModes,
   fxApplyJobResult,
   fxAttachRole,
+  fxLinkedJeAuxiliaryColumn,
   fxDefaultMode,
   fxQualityAction,
   fxDetachRole,
@@ -359,16 +360,15 @@ describe("fx audit mode selection", () => {
     expect(fxRequiredSources("combined")).toEqual({ je: true, tb: true });
   });
 
-  it("先给出可用、受限或需补资料的结果结论", () => {
-    expect(fxResultTrustStatus({}, 0).tone).toBe("usable");
+  it("先给出可用或受限的结果结论；缺外币余额科目只作提示、不再拦截", () => {
+    expect(fxResultTrustStatus({}).tone).toBe("usable");
     expect(
-      fxResultTrustStatus({ tbFxGainLoss: 10, reconciliationPassed: false }, 0)
+      fxResultTrustStatus({ tbFxGainLoss: 10, reconciliationPassed: false })
         .tone,
     ).toBe("limited");
     expect(
-      fxResultTrustStatus({ unrealizedBalanceBasisComplete: false }, 0),
-    ).toMatchObject({ tone: "blocked", title: "资料不足" });
-    expect(fxResultTrustStatus({}, 1).tone).toBe("blocked");
+      fxResultTrustStatus({ unrealizedBalanceBasisComplete: false }).tone,
+    ).toBe("usable");
   });
 
   it("uses two-point unrealized mode for TB only", () => {
@@ -874,6 +874,28 @@ describe("fx audit upload and mapping parity", () => {
 });
 
 describe("同一列的多重映射", () => {
+  it("TB 反查认定的 JE 辅助列可以叠加任何已有角色", () => {
+    let mapping: Record<string, string | string[]> = { accountName: ["科目文本"] };
+    mapping = fxAttachRole(mapping, "科目文本", "auxiliary");
+    expect(mapping.accountName).toEqual(["科目文本"]);
+    expect(mapping.auxiliary).toEqual(["科目文本"]);
+    mapping = fxAttachRole(mapping, "科目文本", "currencyText");
+    expect(mapping.auxiliary).toEqual(["科目文本"]);
+  });
+
+  it("不同科目指向不同 JE 列时不回填", () => {
+    const result = {
+      tbAuxMapped: true, status: "noMatch", column: null,
+      anchorHits: 2, anchorTotal: 2, coverage: 1,
+      competingColumns: [], warnings: [],
+      groups: [
+        { entity: "4800", account: "1002", status: "verified", column: "账户名" },
+        { entity: "4800", account: "2001", status: "verified", column: "往来单位" },
+      ],
+    } as unknown as AuxiliaryLinkResult;
+    expect(fxLinkedJeAuxiliaryColumn(result)).toBeNull();
+    expect(fxLinkedJeAuxiliaryColumn({ ...result, groups: [result.groups![0]] })).toBe("账户名");
+  });
   it("币种线索文本可以叠加在科目名称上", () => {
     let m: Record<string, string | string[]> = {};
     m = fxAttachRole(m, "科目名称", "accountName");

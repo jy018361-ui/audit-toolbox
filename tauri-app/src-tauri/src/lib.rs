@@ -1210,7 +1210,14 @@ pub fn engine_call_for_test(
     if method == "fx.preview_probe" {
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let pause = excel_merger::PauseCheckpoint::unpaused(cancel.clone());
-        return fx::run_job("fx.preview", params, &|_, _, _, _| {}, cancel, &pause);
+        let started = std::time::Instant::now();
+        let previous = std::cell::RefCell::new(String::new());
+        return fx::run_job("fx.preview", params, &|stage, _, _, message| {
+            if previous.borrow().as_str() != stage {
+                *previous.borrow_mut() = stage.to_owned();
+                eprintln!("fx.preview_probe +{:.2}s {stage}: {message}", started.elapsed().as_secs_f64());
+            }
+        }, cancel, &pause);
     }
     if method == "fx.export_probe" {
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1222,6 +1229,15 @@ pub fn engine_call_for_test(
     }
     if method == "fx.rollforward_check" {
         return fx::rollforward_check_for_test(&params);
+    }
+    if method == "fx.realized_probe" {
+        let started = std::time::Instant::now();
+        return fx::realized_probe_for_test(params, &|stage, _, _, message| {
+            eprintln!(
+                "fx.realized_probe +{:.2}s {stage}: {message}",
+                started.elapsed().as_secs_f64()
+            );
+        });
     }
     if matches!(
         method,

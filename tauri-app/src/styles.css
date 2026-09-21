@@ -3633,7 +3633,8 @@ summary:focus-visible {
   box-shadow: var(--shadow-overlay);
   overflow-wrap: anywhere;
 }
-body:has(.job-dialog-pill) .job-command-notice {
+body:has(.job-dialog-pill) .job-command-notice,
+body:has(.sync-busy-pill) .job-command-notice {
   bottom: calc(var(--sp-5) + 64px);
 }
 /* 最小化后的常驻小条。固定在右下角，点击展开回弹窗。 */
@@ -3739,7 +3740,54 @@ body:has(.job-dialog-pill) .job-command-notice {
 .sync-busy-actions {
   display: flex;
   justify-content: flex-end;
+  gap: var(--sp-2);
   margin-top: var(--sp-3);
+}
+/* 同步等待窗最小化后的右下角小条：与任务弹窗小条同款视觉，点击展开回等待窗，
+   全部操作结束后由组件自行收掉。 */
+.sync-busy-pill {
+  position: fixed;
+  right: max(var(--sp-5), env(safe-area-inset-right));
+  bottom: max(var(--sp-5), env(safe-area-inset-bottom));
+  z-index: var(--layer-task-pill);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: min(210px, calc(100vw - 2 * var(--sp-4)));
+  max-width: min(420px, calc(100vw - 2 * var(--sp-4)));
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid color-mix(in srgb, var(--brand) 75%, white);
+  border-radius: var(--r-pill);
+  background: var(--brand);
+  color: white;
+  box-shadow: var(--shadow-overlay);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.sync-busy-pill:hover {
+  border-color: var(--brand-accent);
+}
+.sync-busy-pill:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+.sync-busy-pill .sync-busy-spinner {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border-width: 2px;
+  border-color: color-mix(in srgb, white 40%, transparent);
+  border-top-color: white;
+}
+.sync-busy-pill-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sync-busy-pill-hint {
+  flex: none;
+  opacity: 0.75;
 }
 
 .confirm-dialog {
@@ -3771,7 +3819,8 @@ body:has(.job-dialog-pill) .job-command-notice {
   .sync-busy-actions > * {
     min-height: 40px;
   }
-  .job-dialog-pill {
+  .job-dialog-pill,
+  .sync-busy-pill {
     right: var(--sp-3);
     bottom: var(--sp-3);
   }

@@ -72,7 +72,7 @@ fn probe_4800_full_year() {
     println!("公司代码 = {entity_code}，本位币 = {currency}");
     let mut entity_currencies = serde_json::Map::new();
     entity_currencies.insert(entity_code.clone(), serde_json::json!(currency));
-    let params = serde_json::json!({
+    let mut params = serde_json::json!({
         "mode": "combined",
         "fixedEntity": entity_code,
         "entityCurrencies": entity_currencies,
@@ -88,6 +88,16 @@ fn probe_4800_full_year() {
         "tbMapping": tb_i["suggestedMapping"],
         "jeMapping": je_map,
     });
+    if std::env::var("FX_PROBE_FRESH").as_deref() == Ok("1") {
+        params["__benchmarkRun"] = serde_json::json!(format!("{:?}", std::time::SystemTime::now()));
+    }
+    if std::env::var("FX_REALIZED_ONLY").as_deref() == Ok("1") {
+        let t0 = std::time::Instant::now();
+        let result = audit_toolbox_lib::engine_call_for_test("fx.realized_probe", params)
+            .expect("已实现分段探针应成功");
+        println!("已实现分段耗时 {:?}，结果 {}", t0.elapsed(), result);
+        return;
+    }
     let t0 = std::time::Instant::now();
     let v = match audit_toolbox_lib::engine_call_for_test("fx.preview_probe", params) {
         Ok(v) => v,

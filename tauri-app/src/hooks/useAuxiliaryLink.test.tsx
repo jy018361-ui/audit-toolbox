@@ -10,6 +10,16 @@ beforeEach(() => {
 });
 
 describe("公共辅助验证最新输入状态", () => {
+  it("验证失败由调用方接管且不产生未处理拒绝", async () => {
+    const onError = vi.fn();
+    verify.mockRejectedValue(new Error("读取失败"));
+    const { result } = renderHook(() =>
+      useAuxiliaryLink({ tbMapping: { auxiliary: "辅助列" } }, "k1", onError),
+    );
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(result.current).toBeNull();
+  });
+
   it("触发键变化立即隐藏旧结论，旧请求晚到不覆盖新结果", async () => {
     let resolveOld!: (value: unknown) => void;
     let resolveNew!: (value: unknown) => void;

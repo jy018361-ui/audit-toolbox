@@ -1461,6 +1461,22 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
     if (je) {
       params.jeSource = je;
       params.jeMapping = mappings[pairingFileKey(group.je!)] ?? {};
+      const auxiliary = auxLinks[group.id];
+      // 第二步已经完整认定的组才下发复用；混合/失败状态交给
+      // Rust 按原路径重扫，保留逐组警告与降级语义。
+      if (auxiliary?.planKey && auxiliary.status === "verified") {
+        params.auxiliaryPlan = {
+          planKey: auxiliary.planKey,
+          groups: (auxiliary.groups ?? []).map((item) => ({
+            entity: item.entity,
+            account: item.account,
+            tbColumn: item.tbColumn,
+            jeColumn: item.column,
+            anchorHits: item.anchorHits,
+            anchorTotal: item.anchorTotal,
+          })),
+        };
+      }
     }
     return params;
   }

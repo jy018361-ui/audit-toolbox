@@ -409,13 +409,6 @@
 .fx-result-status.limited strong {
   color: var(--warning-fg);
 }
-.fx-result-status.blocked {
-  border-color: var(--danger-border);
-  background: var(--danger-bg);
-}
-.fx-result-status.blocked strong {
-  color: var(--danger-fg);
-}
 .fx-bridge-step {
   display: grid;
   grid-template-columns: 145px minmax(0, 1fr);
@@ -755,10 +748,11 @@
 }
 
 /* TB 粒度不足：外币敞口是「科目×币种」粒度，TB 只给到科目粒度时无法测算。
-   用户能做的动作很具体——换一份余额表，所以这条要比普通提示更显眼。 */
+   只作提示不阻断——科目本来就没有外币余额时属正常情况，同余额滚动失配
+   一样用黄色提示，不用红色错误。 */
 .fx-granularity-notice {
-  border: 1px solid var(--danger-border);
-  background: var(--danger-bg);
+  border: 1px solid var(--warning-border);
+  background: var(--warning-bg);
   border-radius: 8px;
   padding: 12px 14px;
   margin-bottom: 12px;
@@ -807,7 +801,7 @@
 .fx-granularity-table thead th {
   position: sticky;
   top: 0;
-  background: var(--danger-bg);
+  background: var(--warning-bg);
   white-space: nowrap;
 }
 .fx-granularity-table td:last-child {

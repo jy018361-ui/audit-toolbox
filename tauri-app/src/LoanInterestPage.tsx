@@ -234,6 +234,9 @@ type TbAccount = {
   account: string;
   opening: number;
   closing: number;
+  /** TB 损益发生额；null 表示源表没有可用发生额列。 */
+  occurrence?: number | null;
+  occurrenceBasis?: string | null;
   /** 仅用于初始化科目角色，不在界面展示内部判断过程。 */
   suggestedType?: LoanAccountRole;
   suggestionReason?: string;
@@ -2035,6 +2038,13 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                           <th>科目类型</th>
                           <th>期初余额</th>
                           <th>期末余额</th>
+                          <th>
+                            发生额
+                            <JargonTip
+                              term="发生额"
+                              text="优先取本年累计借贷发生额，其次取本期借贷发生额；已结转的损益科目按登记方向还原。第三步有发生额时用发生额比较，没有发生额列时才使用余额。"
+                            />
+                          </th>
                           <th>利率类型</th>
                           <th aria-label="执行利率（%）">
                             执行利率（%）
@@ -2120,6 +2130,14 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                             </td>
                             <td className="loan-num">{a.auxiliary ? "—" : loanDisplayNumber(a.opening)}</td>
                             <td className="loan-num">{a.auxiliary ? "—" : loanDisplayNumber(a.closing)}</td>
+                            <td
+                              className="loan-num"
+                              title={a.occurrenceBasis ?? undefined}
+                            >
+                              {role !== "interest_expense" || a.auxiliary || a.occurrence == null
+                                ? "—"
+                                : loanDisplayNumber(a.occurrence)}
+                            </td>
                             {role === "loan" && inline ? (
                               rateEditCells(inline)
                             ) : role === "loan" && rateRows.length > 1 ? (
@@ -2172,6 +2190,7 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
                               </td>
                               <td className="loan-num">{loanDisplayNumber(detail.openingPrincipal)}</td>
                               <td className="loan-num">{loanDisplayNumber(detail.closingPrincipal)}</td>
+                              <td>—</td>
                               {rateEditCells(detail)}
                             </tr>
                           )),

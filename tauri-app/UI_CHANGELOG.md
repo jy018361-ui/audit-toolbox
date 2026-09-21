@@ -1,5 +1,101 @@
 # UI 修改记录
 
+## 2026-09-21 · 借款、存款与 TBJE 大表扫描优化
+
+### 目标
+
+- 把汇兑损益中已验证的“固定取数计划＋阶段结果复用”用到其他账表工具，降低大序时账在第二步和第三步的重复等待。
+
+### 设计决策
+
+- 借款利息的内存 JE 路径改为一次建立“主体＋科目编码/科目文本”候选索引；每个 TB 借款户只读可能命中的分录，仍完整执行币种、辅助明细、编码和名称消歧，候选行按 JE 原始顺序去重。
+- 存款利息等待 TB→JE 辅助列联动结论后再生成逐户清单；清单与测算任务均复用该计划。TBJE 完整性核对在所有组均验证成功时复用同一计划，省掉测算阶段一次 JE 全表辅助反查。
+- 复用计划继续校验文件大小与修改时间、Sheet、表头、字段映射、主体范围和科目键歧义；任一项不一致都自动回到原来的全表扫描。
+
+### 验证方式
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib loan_interest::tests`（40 项通过，10 项真实样例默认忽略）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib deposit_interest::tests`（62 项通过，3 项默认忽略）
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib tbje_check::tests`（47 项通过，11 项真实样例默认忽略）
+- `npx vitest run src/DepositInterestPage.test.ts src/TbjeCheckPage.test.tsx`（46 项通过）
+- `npm run build`
+
+## 2026-09-21 · 利息测算科目确认展示发生额
+
+### 目标
+
+- 借款利息与存款利息的科目确认页直接展示 TB 发生额，避免损益科目年末结转后只显示期初、期末零余额，造成“未识别金额”的误解。
+
+### 设计决策
+
+- 发生额优先采用本年累计借贷列，其次采用本期借贷列；已结转的借贷同额按科目登记方向与红字符号还原。借款 07 样例的 `66030002 利息` 显示 `-923,800.50`。
+- 第三步沿用同一业务口径计算差异：存在可用发生额时以发生额为 TB 比较基准；源表没有发生额列时才退回余额。发生额单元格悬停可查看具体取数依据。
+- 同步应用于借款利息支出与存款利息收入两个损益测算工具；余额类科目仍保留期初、期末余额展示。
+
+### 验证方式
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib 科目清单与利率模板导出回读往返`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib manual_account_roles_survive_snapshot_and_leaf_mismatches`
+- `npx vitest run src/LoanInterestPage.test.ts src/LoanInterestPageUi.test.tsx src/DepositInterestPage.test.ts`
+- `npm run build`
+
+## 2026-09-21 · 汇兑损益 TB 推导 JE 辅助列与测算等待优化
+
+### 目标
+
+- TB、JE 一起上传时，JE 辅助字段只由 TB 当期发生的辅助值反查确定；避免第二步与第三步重复扫描大序时账。
+
+### 设计决策
+
+- 配对状态下 JE 的 Coding 建议和 LLM 联合复核均不填写辅助字段；TB 辅助锚点一次性在 JE 全列检索。已验证的同一 JE 列自动显示到下拉框，允许与已映射角色共用；不同 TB 字段或科目指向不同 JE 列时不自动填写。
+- 联动检索同时返回 JE 完整币种目录，第二步不再单独读取 JE 获取相同目录；结论附来源和映射指纹，测算时复用认定列。相同参数直接复用完整预览，分类调整后复用汇率快照；一次测算内各阶段共享科目角色认定和凭证分类结果。
+- 已实现阶段将符号兜底、凭证结构分类合并到首次逐行扫描，币种集合改为任务内共享；进度文案分开显示损益结转识别、凭证分组和逐凭证测算。金额、科目和币种读取事先编译为固定列下标，不再逐行复制映射列数组；未实现的期初推导和月度滚动同样复用这份取数计划。4900 全年样本的 debug 探针中，已实现阶段由约 92.5 秒降至 9.7～10.4 秒，完整预览由约 473 秒降至 156 秒；release 构建同一样本完整预览为 23.7 秒，其中已实现 1.5 秒。
+
+### 验证方式
+
+- `npx vitest run src/FxAuditPage.test.ts`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib 辅助`
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib manual_realized_classification_reruns_settlement_measurement`
+- `FX_REALIZED_ONLY=1 FX_PROBE_FRESH=1 cargo test --manifest-path src-tauri/Cargo.toml --test fx_real_4800_probe -- --ignored --nocapture`
+- `npm run build`
+
+## 2026-09-21 · 同步等待窗补齐终止等待与最小化恢复小条（全局）
+
+### 目标
+
+- 「正在读取序时账」这类同步操作等待窗此前只有「后台等待」一个出口：点了之后弹窗消失且无处恢复，用户既无法主动结束干等、也不知道操作是否还在跑。全局面板化：弹窗提供「终止等待」与「最小化」，最小化后右下角出现可点击展开的小条，操作全部结束小条自动消失。
+
+### 设计决策
+
+- 这类操作在引擎里一口气跑完、没有可续跑的断点，「暂停/继续」技术上做不到；「终止等待」只掐断前端的等待——界面立即恢复、页面不再采用其结果，后台处理仍会自行收尾，弹窗描述文案如实说明这一点（原「后台等待」更名「最小化」与任务弹窗一致）。
+- 小条复用任务弹窗小条的视觉与位置（右下角、品牌色、转圈动画、超长文案省略），单任务显示操作名与数据明细、多任务显示合并计数；收起时焦点移到小条，键盘/读屏用户不会丢失正在跑的操作。
+- ESC 与点遮罩仍然关闭不掉弹窗（避免误以为操作已停），出口就是「终止等待」「最小化」两个按钮。
+
+### 验证方式
+
+- `npx vitest run src/components/SyncBusyDialog.test.tsx`（11 项通过：终止后页面立刻收到失败、迟到的结果被丢弃；最小化→小条→展开→清空全链路）
+- `npm test`（92 个测试文件、850 项通过）
+- `npm run build`
+- `OVERLAY_AUDIT_CAPTURE_ALL=1 node scripts/overlay-layout-audit.cjs`（新增 `sync-pill` 场景，75 个浮层案例 0 问题）
+
+## 2026-09-21 · 汇兑测算去噪：缺外币余额科目降为非阻断提示
+
+### 目标
+
+- 测算结果页不再因部分科目缺少「科目＋币种」外币余额就弹出「资料不足」红横幅和「未实现汇兑损益测算不完整」长段提示；这类情形保留一处黄色提示，且说明可能是正常情况。
+
+### 设计决策
+
+- 科目年初年末本来就没有外币余额、当期只有已实现汇兑损益时，TB 和 JE 都没有问题，不应显示成错误；`fxResultTrustStatus` 删除 blocked 档，只保留可用／受限两档。
+- 「N 个科目缺少可用的币种余额」清单从红色错误改为黄色提示（与余额滚动失配一致），文案补充"属正常情况，可忽略"，补资料动作改为"如确需测算"的可选建议。
+- Rust 引擎侧字段照常输出，底稿「数据质量」Sheet 不受影响。
+
+### 验证方式
+
+- `npx vitest run src/FxAuditPage.test.ts src/FxAuditPageUi.test.tsx`（81 项通过）
+- `npm test`（92 个测试文件、848 项通过）
+- `npm run build`
+
 ## 2026-09-20 · 汇兑测算来源提示前置显示
 
 ### 目标

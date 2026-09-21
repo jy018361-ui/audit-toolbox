@@ -92,6 +92,11 @@ export type Inspection = {
   accounts: string[];
   /** 末级科目清单（引擎目录末级掩码下发）；旧任务缺省时回退 accounts。 */
   accountsLeaf?: string[];
+  /** TB 末级科目的余额与损益发生额，第二步展示与第三步勾稽共用口径。 */
+  accountMetrics?: Record<
+    string,
+    { closing: number; occurrence?: number | null; occurrenceBasis?: string | null }
+  >;
   /** 账里真实存在的「主体×科目」组合（空主体已归默认主体，最多 2000 条），
       供 FA List 等页面按真实搭配铺科目复核清单；旧后端／预览模式不下发，
       使用方需自行回退。 */
@@ -436,6 +441,14 @@ export function depositPercentToRate(text: string) {
   const value = Number(text);
   return Number.isFinite(value) ? value / 100 : Number.NaN;
 }
+
+export function depositDisplayAmount(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return new Intl.NumberFormat("zh-CN", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  }).format(Object.is(value, -0) ? 0 : value);
+}
 export function depositReportStart(balanceSheetDate: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(balanceSheetDate)
     ? `${balanceSheetDate.slice(0, 4)}-01-01`
@@ -686,13 +699,13 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       .then((x) => setTiers(x as RateTiers))
       .catch(() => undefined);
   }, []);
-  // 两侧映射齐了就认定一次辅助列联动。触发键只认「数据源＋两侧辅助核算
-  // 明细映射」：其余角色（金额/币种/日期等）的调整沿用既有联动结论，
-  // 不再整表重读——与汇兑损益、FA TBJE 同一口径。
+  // 两侧映射齐了就认定辅助列联动。金额/币种/日期映射不影响结论；
+  // 计息科目分类会改变验证范围，必须进入键，避免把旧计划复用到新选中的科目。
   const auxLinkKey = tb && je
     ? JSON.stringify({
         tb: [tbPath, tb.sheet, tb.headerRow, tb.headerDepth, tbMapping.auxiliary ?? null],
         je: [jePath, je.sheet, je.headerRow, je.headerDepth, jeMapping.auxiliary ?? null],
+        roles: [accountRoles, accountRoleOverrides, accountDetailRoleOverrides],
       })
     : null;
   useEffect(() => {
@@ -727,10 +740,17 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
         roles: [accountRoles, accountRoleOverrides, accountDetailRoleOverrides],
         currencyFallbackMode,
         entityScope: entityScope.selection,
+        auxiliaryPlan: je ? [auxLink?.planKey ?? null, auxLink?.status ?? null] : null,
       })
     : null;
   useEffect(() => {
     if (accountCurrencyKey === null) {
+      setAccountCurrencyRows([]);
+      return;
+    }
+    // TB→JE 辅助列认定未返回前不抢跑建户；认定完成后把
+    // 同一份指纹计划传给引擎，避免清单阶段再扫一遍 JE。
+    if (je && auxLink === null) {
       setAccountCurrencyRows([]);
       return;
     }
@@ -1278,6 +1298,27 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
       rateOverrides,
       accountRateOverrides,
       tierRates,
+      ...(tb && je && auxLink?.planKey
+        ? {
+            auxiliaryPlan: {
+              planKey: auxLink.planKey,
+              warnings: auxLink.warnings,
+              groups: (auxLink.groups ?? [])
+                .filter(
+                  (group) =>
+                    group.status === "verified" &&
+                    group.column &&
+                    group.tbColumn,
+                )
+                .map((group) => ({
+                  entity: group.entity,
+                  account: group.account,
+                  tbColumn: group.tbColumn,
+                  jeColumn: group.column,
+                })),
+            },
+          }
+        : {}),
       ...(currencyFallbackMode ? { currencyFallbackMode } : {}),
       entityScope: entityScope.selection,
       ...(outputPath ? { outputPath } : {}),
@@ -1959,6 +2000,10 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                           {multiEntity && <th>主体</th>}
                           <th>科目</th>
                           <th>分类</th>
+                          <th>
+                            发生额
+                            <HelpTip text="优先取本年累计借贷发生额，其次取本期借贷发生额；已结转的损益科目按登记方向还原。第三步有发生额时用发生额比较，没有发生额列时才使用余额。" />
+                          </th>
                           <th>存款类型</th>
                           <th>
                             利率（%）
@@ -1982,6 +2027,8 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                           const isDepositRow = ["deposit", "other_monetary"].includes(
                             reviewRole(row),
                           );
+                          const isInterestIncomeRow =
+                            reviewRole(row) === "interest_income";
                           const variants = engineVariantsOf(row);
                           // 引擎行按币种（多主体时含主体）拆成多行；没有引擎
                           // 行的（旧后端／仅在序时账出现）保持科目整行一条。
@@ -2068,6 +2115,26 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
                                     </option>
                                   ))}
                                 </select>
+                              </td>
+                            ) : (
+                              <td />
+                            )}
+                            {index === 0 ? (
+                              <td
+                                className="deposit-account-amount"
+                                title={
+                                  row.auxiliary
+                                    ? undefined
+                                    : tb?.accountMetrics?.[row.account]
+                                        ?.occurrenceBasis ?? undefined
+                                }
+                              >
+                                {!isInterestIncomeRow || row.auxiliary
+                                  ? "—"
+                                  : depositDisplayAmount(
+                                      tb?.accountMetrics?.[row.account]
+                                        ?.occurrence,
+                                    )}
                               </td>
                             ) : (
                               <td />

@@ -262,6 +262,8 @@ struct PreparedCheck {
     tb_rows: Vec<bool>,
     je_rows: Option<Vec<bool>>,
     entity_scope: ledger_mapping::EntityScope,
+    /// 映射阶段已验证的辅助列计划需用原始来源与映射重算指纹。
+    auxiliary_plan_params: Option<Value>,
 }
 
 /// Small ledgers retain the existing in-memory table. Large CSV ledgers keep
@@ -741,6 +743,9 @@ fn prepare_with_control(
         tb_rows,
         je_rows,
         entity_scope,
+        auxiliary_plan_params: params
+            .get("auxiliaryPlan")
+            .map(|_| params.clone()),
     })
 }
 
@@ -849,6 +854,7 @@ fn evaluate(
             &prepared.tb_rows,
             prepared.je_rows.as_deref().unwrap_or(&[]),
             &prepared.entity_scope,
+            prepared.auxiliary_plan_params.as_ref(),
         )?,
         None => json!({
             "performed": false,
@@ -2210,6 +2216,7 @@ fn check_tb_vs_je(
     functional_rows: &[bool],
     je_rows: &[bool],
     entity_scope: &ledger_mapping::EntityScope,
+    auxiliary_plan_params: Option<&Value>,
 ) -> Result<Value, AppError> {
     let je_table = &*je.table;
     let tb_debit = columns(tb_map, "ytdFunctionalDebit");
@@ -2375,57 +2382,105 @@ fn check_tb_vs_je(
         }
     }
     let tb_group_scans = tb_scan_accumulator.finish(&tb.headers);
-    let mut je_scan_accumulator =
-        ledger_mapping::GroupedAnchorColumnAccumulator::new(je_table.headers.len());
-    let mut je_group_totals = BTreeMap::<ledger_mapping::AuxiliaryGroupKey, usize>::new();
-    let mut scan_je_row = |row: &[String]| {
-        let group = scoped_matched_identity(
-            je_table,
-            row,
-            je_map,
-            je_fixed,
-            ledger_mapping::EntitySide::Je,
-            entity_scope,
+    let planned_columns = auxiliary_plan_params.and_then(|params| {
+        fx::verified_auxiliary_columns_from_plan_headers(
+            params,
+            &tb.headers,
+            &je_table.headers,
             &account_policy,
-        );
-        let Some(anchors) = anchor_groups.get(&group) else {
-            return;
-        };
-        *je_group_totals.entry(group.clone()).or_default() += 1;
-        je_scan_accumulator.feed(group, row, anchors);
-    };
-    if let Some(disk) = je.disk.as_ref() {
-        disk.visit(false, cancel, |row| {
-            scan_je_row(&row.values);
-            Ok(())
-        })?;
+        )
+    });
+    let (group_verdicts, verified_groups) = if let Some(columns) = planned_columns {
+        // 页面在映射阶段已完整扫过 JE；指纹、映射和科目消歧均
+        // 通过上方复核后，直接沿用组级认定列，省掉一次整本 JE 扫描。
+        let verdicts = auxiliary_plan_params
+            .and_then(|params| params.get("auxiliaryPlan"))
+            .and_then(|plan| plan.get("groups"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|group| {
+                let entity = group.get("entity")?.as_str()?.to_owned();
+                let account = group.get("account")?.as_str()?.to_owned();
+                let column = group.get("jeColumn")?.as_str()?.to_owned();
+                let anchor_total = group
+                    .get("anchorTotal")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                let anchor_hits = group
+                    .get("anchorHits")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(anchor_total as u64) as usize;
+                Some(ledger_mapping::AuxiliaryLinkGroupVerdict {
+                    entity,
+                    account,
+                    verdict: ledger_mapping::AuxiliaryLinkVerdict {
+                        column: Some(column),
+                        status: "verified",
+                        anchor_total,
+                        anchor_hits,
+                        nonempty_rows: anchor_hits,
+                        total_rows: anchor_hits,
+                        competing_columns: Vec::new(),
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        (verdicts, columns)
     } else {
-        for (index, row) in je_table.rows.iter().enumerate() {
-            if je_rows.get(index).copied().unwrap_or(true) {
-                scan_je_row(row);
+        let mut je_scan_accumulator =
+            ledger_mapping::GroupedAnchorColumnAccumulator::new(je_table.headers.len());
+        let mut je_group_totals = BTreeMap::<ledger_mapping::AuxiliaryGroupKey, usize>::new();
+        let mut scan_je_row = |row: &[String]| {
+            let group = scoped_matched_identity(
+                je_table,
+                row,
+                je_map,
+                je_fixed,
+                ledger_mapping::EntitySide::Je,
+                entity_scope,
+                &account_policy,
+            );
+            let Some(anchors) = anchor_groups.get(&group) else {
+                return;
+            };
+            *je_group_totals.entry(group.clone()).or_default() += 1;
+            je_scan_accumulator.feed(group, row, anchors);
+        };
+        if let Some(disk) = je.disk.as_ref() {
+            disk.visit(false, cancel, |row| {
+                scan_je_row(&row.values);
+                Ok(())
+            })?;
+        } else {
+            for (index, row) in je_table.rows.iter().enumerate() {
+                if je_rows.get(index).copied().unwrap_or(true) {
+                    scan_je_row(row);
+                }
             }
         }
-    }
-    drop(scan_je_row);
-    let je_group_scans = je_scan_accumulator.finish(&je_table.headers);
-    let group_verdicts = ledger_mapping::auxiliary_link_group_verdicts_by_tb_columns(
-        &anchor_groups,
-        &tb_group_scans,
-        &je_group_scans,
-        &je_group_totals,
-        tb_map,
-        "auxiliary",
-        &je_preferred,
-    );
-    let verified_groups = ledger_mapping::auxiliary_verified_columns(
-        &group_verdicts,
-        &tb_group_scans,
-        &je_group_scans,
-        &tb.headers,
-        &je_table.headers,
-        tb_map,
-        "auxiliary",
-    );
+        drop(scan_je_row);
+        let je_group_scans = je_scan_accumulator.finish(&je_table.headers);
+        let verdicts = ledger_mapping::auxiliary_link_group_verdicts_by_tb_columns(
+            &anchor_groups,
+            &tb_group_scans,
+            &je_group_scans,
+            &je_group_totals,
+            tb_map,
+            "auxiliary",
+            &je_preferred,
+        );
+        let columns = ledger_mapping::auxiliary_verified_columns(
+            &verdicts,
+            &tb_group_scans,
+            &je_group_scans,
+            &tb.headers,
+            &je_table.headers,
+            tb_map,
+            "auxiliary",
+        );
+        (verdicts, columns)
+    };
     let aux_refined = !verified_groups.is_empty();
     let dimension_views = verified_groups
         .values()

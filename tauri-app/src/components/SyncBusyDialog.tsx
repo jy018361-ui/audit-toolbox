@@ -6,7 +6,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { onSyncBusyChange, type SyncBusyEntry } from "@/api";
+import {
+  onSyncBusyChange,
+  syncBusyAbortAll,
+  type SyncBusyEntry,
+} from "@/api";
 
 /** 短于这个时间的调用不弹窗：快操作弹一下就关只会闪。 */
 const SHOW_DELAY_MS = 1000;
@@ -102,31 +106,49 @@ function busyText(entry?: SyncBusyEntry): string {
  * 同步操作（engineCall）的全局等待窗：导入文档、OCR 识别这类「一口气完成」
  * 的调用没有进度事件可听，超过 1 秒仍未返回就弹出转圈提示，完成自动关闭。
  *
- * 和 JobDialog（后台任务弹窗）是两回事：这类操作中途掐断会留下写了一半的
- * 数据，所以没有「停止」按钮——但等不到头确实干耗着，提供「后台等待」：
- * 把弹窗藏起来让操作继续后台跑，结果照常返回页面。 dismissed 只对当前
- * 这批忙碌生效（空闲→忙碌算一批），下一批慢操作照常重新弹出。
+ * 和 JobDialog（后台任务弹窗）是两回事：这类操作在引擎里一口气跑完，没有
+ * 可续跑的断点，「暂停/继续」做不到；「终止等待」也只掐断前端的等待——
+ * 立即恢复界面、页面不再采用其结果，后台处理仍会自行收尾。等不到头又不想
+ * 干等就用「最小化」：弹窗收成右下角小条，点小条随时展开回来；全部操作
+ * 结束后小条自动消失，下一批慢操作照常重新弹出。
  */
 export function SyncBusyDialog({
   fixtureEntries,
+  fixtureMinimized = false,
 }: {
   /** 仅供开发态几何夹具注入；应用运行时不传，仍完全由 API 广播驱动。 */
   fixtureEntries?: SyncBusyEntry[];
+  /** 仅供开发态几何夹具直接呈现「最小化后的小条」形态。 */
+  fixtureMinimized?: boolean;
 } = {}) {
-  const [visible, setVisible] = useState(() => Boolean(fixtureEntries?.length));
+  const [visible, setVisible] = useState(
+    () => Boolean(fixtureEntries?.length) && !fixtureMinimized,
+  );
   const [entries, setEntries] = useState<SyncBusyEntry[]>(() => fixtureEntries ?? []);
+  // 「本批已被最小化」的批次号；null 表示当前没有收起（或已转空闲归零）。
+  const [dismissedSession, setDismissedSession] = useState<number | null>(
+    () => (fixtureMinimized && fixtureEntries?.length ? 0 : null),
+  );
   const entriesRef = useRef<SyncBusyEntry[]>([]);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 忙碌批次号：每次从空闲转入忙碌递增；用户「后台等待」掉的就是当前批。
+  // 忙碌批次号：每次从空闲转入忙碌递增；用户「最小化」掉的就是当前批。
   const sessionRef = useRef(0);
-  const dismissedRef = useRef<number | null>(null);
+  const dismissedRef = useRef<number | null>(
+    fixtureMinimized && fixtureEntries?.length ? 0 : null,
+  );
+  const pillButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(
     () => {
       if (fixtureEntries) {
+        const dismissed = fixtureMinimized && fixtureEntries.length > 0
+          ? sessionRef.current
+          : null;
         entriesRef.current = fixtureEntries;
         setEntries(fixtureEntries);
-        setVisible(fixtureEntries.length > 0);
+        dismissedRef.current = dismissed;
+        setDismissedSession(dismissed);
+        setVisible(fixtureEntries.length > 0 && dismissed === null);
         return;
       }
       return onSyncBusyChange((next) => {
@@ -157,10 +179,11 @@ export function SyncBusyDialog({
           }
           setVisible(false);
           dismissedRef.current = null;
+          setDismissedSession(null);
         }
       });
     },
-    [fixtureEntries],
+    [fixtureEntries, fixtureMinimized],
   );
 
   // 卸载时清掉计时器，避免测试环境泄漏。
@@ -172,54 +195,100 @@ export function SyncBusyDialog({
   );
 
   const first = entries[0];
+  const dialogOpen = visible && Boolean(first);
+  const pillShown = !dialogOpen && dismissedSession !== null && entries.length > 0;
+
+  // 收成小条时把焦点交给小条：键盘/读屏用户不会「丢」了正在跑的操作。
+  useEffect(() => {
+    if (!pillShown) return;
+    // Radix 关闭弹窗时也会恢复焦点；下一帧再把焦点交给真正替代弹窗的小条。
+    const timer = window.setTimeout(() => pillButtonRef.current?.focus(), 0);
+    return () => window.clearTimeout(timer);
+  }, [pillShown]);
+
+  const minimize = () => {
+    dismissedRef.current = sessionRef.current;
+    setDismissedSession(sessionRef.current);
+    setVisible(false);
+  };
+
+  const restore = () => {
+    dismissedRef.current = null;
+    setDismissedSession(null);
+    setVisible(true);
+  };
+
+  const pillText =
+    entries.length > 1
+      ? `${entries.length} 项操作处理中`
+      : busyText(first);
 
   return (
-    <Dialog open={visible && Boolean(first)}>
-      <DialogContent
-        showCloseButton={false}
-        className="sync-busy-dialog"
-        // 没有关闭手段是有意的：这类操作无法安全中止，弹窗只能等它自己完成。
-        onEscapeKeyDown={(event) => event.preventDefault()}
-        onPointerDownOutside={(event) => event.preventDefault()}
-        onInteractOutside={(event) => event.preventDefault()}
-      >
-        <div className="sync-busy-body" aria-live="polite">
-          <span className="sync-busy-spinner" aria-hidden="true" />
-          <div className="sync-busy-text">
-            <DialogTitle>
-              {entries.length > 1
-                ? `正在处理 ${entries.length} 项操作`
-                : busyText(first)}
-            </DialogTitle>
-            {/* 多任务列表用 ul；DialogDescription 渲染成 <p>，p 里嵌不了 ul */}
-            {entries.length > 1 ? (
-              <ul className="sync-busy-list">
-                {entries.map((entry) => (
-                  <li key={entry.id}>{busyText(entry)}</li>
-                ))}
-              </ul>
-            ) : (
+    <>
+      <Dialog open={dialogOpen}>
+        <DialogContent
+          showCloseButton={false}
+          className="sync-busy-dialog"
+          // 关闭手段就是下面两个按钮：ESC 和点遮罩只会让人以为操作停了。
+          onEscapeKeyDown={(event) => event.preventDefault()}
+          onPointerDownOutside={(event) => event.preventDefault()}
+          onInteractOutside={(event) => event.preventDefault()}
+        >
+          <div className="sync-busy-body" aria-live="polite">
+            <span className="sync-busy-spinner" aria-hidden="true" />
+            <div className="sync-busy-text">
+              <DialogTitle>
+                {entries.length > 1
+                  ? `正在处理 ${entries.length} 项操作`
+                  : busyText(first)}
+              </DialogTitle>
+              {/* 多任务列表用 ul；DialogDescription 渲染成 <p>，p 里嵌不了 ul */}
+              {entries.length > 1 && (
+                <ul className="sync-busy-list">
+                  {entries.map((entry) => (
+                    <li key={entry.id}>{busyText(entry)}</li>
+                  ))}
+                </ul>
+              )}
               <DialogDescription>
-                这类操作一口气完成，中途停止可能留下不完整的数据，完成后窗口会自动关闭。
+                这类操作一口气完成，无法中途暂停。等不及可以先最小化到右下角；
+                终止等待则立即恢复界面，后台处理会自行收尾，但结果不再应用到页面。
               </DialogDescription>
-            )}
+            </div>
           </div>
-        </div>
-        {/* 不是「停止」：操作没法安全中止，只能把它藏到后台继续跑。 */}
-        <div className="sync-busy-actions">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              dismissedRef.current = sessionRef.current;
-              setVisible(false);
-            }}
-          >
-            后台等待
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
+          <div className="sync-busy-actions">
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              onClick={() => syncBusyAbortAll()}
+            >
+              终止等待
+            </Button>
+            <Button type="button" variant="secondary" size="sm" onClick={minimize}>
+              最小化
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      {pillShown && (
+        <button
+          ref={pillButtonRef}
+          type="button"
+          className="sync-busy-pill"
+          onClick={restore}
+          aria-label={`展开处理进度：${pillText}`}
+        >
+          <span
+            className="sync-busy-spinner sync-busy-pill-spinner"
+            aria-hidden="true"
+          />
+          <span className="sync-busy-pill-text">{pillText}</span>
+          <span className="sync-busy-pill-hint" aria-hidden="true">
+            点击展开
+          </span>
+        </button>
+      )}
+    </>
   );
 }

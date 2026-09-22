@@ -558,7 +558,8 @@ pub(crate) fn suggest_tier(text: &str) -> (&'static str, String) {
             // 挂"期限不明"待人工按存单选档（判官对比 32 条样例口径）。
             return (
                 "unknown",
-                "名称写明大额存单但没有期限线索，请按存单手工选择档位与利率（黄金修正）".to_string(),
+                "名称写明大额存单但没有期限线索，请按存单手工选择档位与利率（黄金修正）"
+                    .to_string(),
             );
         };
         return (key, format!("命中关键字“{word}”"));
@@ -593,7 +594,8 @@ pub(crate) fn suggest_tier(text: &str) -> (&'static str, String) {
             // 「定期存款」被默认一年以内或活期，凭空抬高/压低利率档）。
             return (
                 "unknown",
-                "名称写明定期但没有期限线索，请按定期存单或利率协议手工选择档位与利率（黄金修正）".to_string(),
+                "名称写明定期但没有期限线索，请按定期存单或利率协议手工选择档位与利率（黄金修正）"
+                    .to_string(),
             );
         };
         return (key, format!("命中关键字“{word}”"));
@@ -614,7 +616,8 @@ pub(crate) fn suggest_tier(text: &str) -> (&'static str, String) {
     if value.contains("其他货币资金") {
         return (
             "unknown",
-            "其他货币资金无期限与保证金线索，请人工确认账户性质与利率后选档（黄金修正）".to_string(),
+            "其他货币资金无期限与保证金线索，请人工确认账户性质与利率后选档（黄金修正）"
+                .to_string(),
         );
     }
     ("demand", "未命中期限关键字，默认按活期".to_string())
@@ -1696,8 +1699,10 @@ fn inspect(params: &Value, kind: &str) -> Result<Value, AppError> {
 }
 
 fn inspect_tb_account_metrics(table: &FxTable, mapping: &Map<String, Value>) -> Map<String, Value> {
-    let leaf = ledger_mapping::tb_catalog_leaf_mask(&table.headers, &table.rows, &|role| {
-        match mapping.get(role) {
+    let leaf =
+        ledger_mapping::tb_catalog_leaf_mask(&table.headers, &table.rows, &|role| match mapping
+            .get(role)
+        {
             Some(Value::String(value)) => vec![value.clone()],
             Some(Value::Array(values)) => values
                 .iter()
@@ -1705,8 +1710,7 @@ fn inspect_tb_account_metrics(table: &FxTable, mapping: &Map<String, Value>) -> 
                 .map(str::to_owned)
                 .collect(),
             _ => vec![],
-        }
-    });
+        });
     let account_cols = account_columns(table, mapping);
     let names = table
         .rows
@@ -1726,13 +1730,10 @@ fn inspect_tb_account_metrics(table: &FxTable, mapping: &Map<String, Value>) -> 
             .filter_map(|index| table.headers.get(index).cloned())
             .collect()
     };
-    let convention = ledger_mapping::detect_tb_sign_convention(
-        &table.headers,
-        &table.rows,
-        &columns,
-    )
-    .convention
-    .unwrap_or(ledger_mapping::SignConvention::Unsigned);
+    let convention =
+        ledger_mapping::detect_tb_sign_convention(&table.headers, &table.rows, &columns)
+            .convention
+            .unwrap_or(ledger_mapping::SignConvention::Unsigned);
     let occurrence_basis = if !column_indexes(table, mapping, "ytdFunctionalDebit").is_empty()
         || !column_indexes(table, mapping, "ytdFunctionalCredit").is_empty()
     {
@@ -4385,8 +4386,7 @@ fn tb_balance(
         },
     );
     if direction.trim().is_empty() {
-        let index_of =
-            |role: &str| -> Option<usize> { column_index(table, mapping, role) };
+        let index_of = |role: &str| -> Option<usize> { column_index(table, mapping, role) };
         if let Some(inferred) = ledger_mapping::infer_balance_sign_from_sibling(
             row,
             &index_of,
@@ -4592,13 +4592,7 @@ fn booked_occurrence(
         // 年末已结转的损益科目：结转分录使借贷发生同额，净额恒为 0，
         // 期末余额也是 0。此时按红字与科目登记方向定收入/费用符号。
         if cr.abs() <= 0.005 && dr.abs() <= 0.005 {
-            return Some((
-                0.0,
-                "借贷发生额均为 0".into(),
-                dr,
-                cr,
-                false,
-            ));
+            return Some((0.0, "借贷发生额均为 0".into(), dr, cr, false));
         }
         let (amount, note) =
             closed_pair_baseline(convention, direction, cr, dr, explicit_interest_income);
@@ -5467,7 +5461,8 @@ mod tests {
     fn 存款主体归集按账表侧别应用且未选主体不变() {
         // 历史任务可能保存 entity:"" 或 entity:[" "]；均不启用主体键。
         for value in [json!(""), json!([" ", ""]), Value::Null] {
-            let mapping = serde_json::from_value::<Map<String, Value>>(json!({"entity": value})).unwrap();
+            let mapping =
+                serde_json::from_value::<Map<String, Value>>(json!({"entity": value})).unwrap();
             assert!(!mapped_roles(&mapping).contains("entity"));
         }
         let params = json!({"entityScope": {
@@ -7792,10 +7787,11 @@ mod tests {
             json!(888.0),
             "第二步应下发与第三步相同的发生额口径"
         );
-        assert!(tb["accountMetrics"]["660299 财务费用-融资成本"]
-            ["occurrenceBasis"]
-            .as_str()
-            .is_some_and(|basis| basis.contains("贷方")));
+        assert!(
+            tb["accountMetrics"]["660299 财务费用-融资成本"]["occurrenceBasis"]
+                .as_str()
+                .is_some_and(|basis| basis.contains("贷方"))
+        );
         let params = json!({
             "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
             "tbSource": {"inputPath": tb_path.to_string_lossy()},

@@ -7,7 +7,7 @@
 //! cargo test --test tbd_deposit_probe -- --ignored --nocapture
 //! ```
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[test]
 #[ignore]
@@ -32,7 +32,10 @@ fn tbd_deposit_coverage_probe() {
     for a in &accounts {
         let text = format!("{a}");
         if text.contains("1020107") || text.contains("16904") || text.contains("1020102") {
-            println!("  inspect 对象: {}", text.chars().take(240).collect::<String>());
+            println!(
+                "  inspect 对象: {}",
+                text.chars().take(240).collect::<String>()
+            );
         }
     }
 
@@ -55,7 +58,12 @@ fn tbd_deposit_coverage_probe() {
         println!(
             "  key={:?} account={:?} cur={:?} tier={:?} opening={}",
             r["key"].as_str().unwrap_or(""),
-            r["account"].as_str().unwrap_or("").chars().take(48).collect::<String>(),
+            r["account"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(48)
+                .collect::<String>(),
             r["currency"].as_str().unwrap_or(""),
             r["tier"].as_str().unwrap_or(""),
             r["openingBalance"].as_f64().unwrap_or(0.0),

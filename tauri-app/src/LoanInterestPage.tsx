@@ -13,6 +13,7 @@ import {
 import { depositDropTargetInside } from "./DepositInterestPage";
 import {
   DEFAULT_ENTITY,
+  dropUnlinkedTbAuxiliary,
   ledgerEntityKeyEnabled,
   verifyAuxiliaryLink,
   verifyCurrencyLink,
@@ -623,6 +624,12 @@ export function LoanInterestPage({ tool }: { tool: ToolManifest }) {
     }).then((result) => {
       if (cancelled) return;
       setAuxLink(result);
+      setSources((current) => {
+        const mapping = dropUnlinkedTbAuxiliary(current.tb.mapping, result);
+        return mapping === current.tb.mapping
+          ? current
+          : { ...current, tb: { ...current.tb, mapping } };
+      });
     });
     return () => {
       cancelled = true;

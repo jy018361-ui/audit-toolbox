@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   DEFAULT_ENTITY,
+  dropUnlinkedTbAuxiliary,
   ledgerEntityKeyEnabled,
   ledgerHasMappedRole,
   correctLedgerSourceKinds,
@@ -1191,6 +1192,12 @@ export function FxAuditPage({ tool }: { tool: ToolManifest }) {
       setError(`辅助字段联动及 JE 目录读取失败：${errorText(fallbackReason)}`);
     });
   });
+  useEffect(() => {
+    if (!auxiliaryLink) return;
+    setTbMapping((current) =>
+      dropUnlinkedTbAuxiliary(current, auxiliaryLink),
+    );
+  }, [auxiliaryLink]);
   useEffect(() => {
     if (!tb || !je || jeAuxiliaryManual) return;
     const column = fxLinkedJeAuxiliaryColumn(auxiliaryLink);
@@ -3493,10 +3500,10 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
 /** 一句话说清这条隔离属于哪种粒度问题：先摆证据、再下结论，用户不必读完整段 detail。 */
 export function granularityLabel(type: unknown): string {
   switch (String(type ?? "")) {
+    case "JE 已识别外币敞口，但 TB 未按币种拆分余额":
     case "科目余额混合本位币与外币":
-      return "余额里混了本位币和外币，TB 只有合计数，拆不出外币部分";
     case "同一科目存在多种外币敞口":
-      return "同一科目持有多种外币，TB 只有合计数，拆不出各币种余额";
+      return "JE 已识别外币敞口，但 TB 未按币种拆分余额";
     case "外币凭证原币金额全为零":
     // 历史结果里的旧类型名，含义相同，同样兜底。
     case "无外币敞口的评估调整科目":

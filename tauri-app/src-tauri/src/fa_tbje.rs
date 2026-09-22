@@ -3327,9 +3327,10 @@ fn assignment_index_from_identities(
     let valid_names = ledger_mapping::validated_account_name_keys(&tuples(tb_ids), &tuples(je_ids));
     // 单侧有主体列时，两侧身份都已归到默认主体。旧任务存档里确认项可能仍
     // 挂原始主体（如诺桥美国 3000）；只有身份全集确实只剩默认主体才兼容它。
-    let only_default_entity = tb_ids.iter().chain(je_ids).all(|id| {
-        id.entity == ledger_mapping::DEFAULT_ENTITY
-    });
+    let only_default_entity = tb_ids
+        .iter()
+        .chain(je_ids)
+        .all(|id| id.entity == ledger_mapping::DEFAULT_ENTITY);
     let mut out = AssignmentIndex::default();
     for a in &rows {
         if !matches!(a.role.as_str(), "cost" | "depreciation") {

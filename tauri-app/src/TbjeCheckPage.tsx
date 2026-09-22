@@ -47,6 +47,7 @@ import { useEntityScopeConfirmation } from "@/components/EntityScopeConfirmation
 import { errorText } from "@/lib/errors";
 import {
   applyLedgerReviewsTogether,
+  dropUnlinkedTbAuxiliary,
   ledgerEntityKeyEnabled,
   LEDGER_MULTI_COLUMN_ROLES,
   missingGoldIdentity,
@@ -1501,6 +1502,8 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
         group.id,
         auxLinkSourceOf(group.tb),
         auxLinkSourceOf(group.je),
+        group.tb ? mappings[pairingFileKey(group.tb)]?.auxiliary ?? null : null,
+        group.je ? mappings[pairingFileKey(group.je)]?.auxiliary ?? null : null,
       ]),
   );
   useEffect(() => {
@@ -1518,6 +1521,22 @@ export function TbjeCheckPage({ tool }: { tool: ToolManifest }) {
       }
       if (!cancelled) {
         setAuxLinks(next);
+        setMappings((current) => {
+          let changed = false;
+          const updated = { ...current };
+          for (const group of paired) {
+            if (!group.tb) continue;
+            const key = pairingFileKey(group.tb);
+            const mapping = current[key];
+            if (!mapping) continue;
+            const cleaned = dropUnlinkedTbAuxiliary(mapping, next[group.id]);
+            if (cleaned !== mapping) {
+              updated[key] = cleaned;
+              changed = true;
+            }
+          }
+          return changed ? updated : current;
+        });
       }
     })();
     return () => {

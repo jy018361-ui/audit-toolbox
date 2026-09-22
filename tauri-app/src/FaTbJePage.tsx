@@ -42,6 +42,7 @@ import { errorText } from "@/lib/errors";
 import {
   correctLedgerSourceKinds,
   DEFAULT_ENTITY,
+  dropUnlinkedTbAuxiliary,
   ledgerEntityKeyEnabled,
   resolveRoleLabels,
   scanLedgerUploadSources,
@@ -749,6 +750,13 @@ export function FaTbJePage() {
       entity: item.entity, account: item.account,
     })),
   } : null, auxiliaryLinkKey);
+  useEffect(() => {
+    if (!auxiliaryLink) return;
+    setMappings((current) => {
+      const tb = dropUnlinkedTbAuxiliary(current.tb, auxiliaryLink);
+      return tb === current.tb ? current : { ...current, tb };
+    });
+  }, [auxiliaryLink]);
   // 显示层：payload 级分配行按「主体＋科目编码」合并成可视行——同一科目
   // 在 TB 与 JE 里可能拼出两种科目串，各自行参与引擎匹配、缺一不可，但
   // 复核时对用户就是同一个科目，只该看一行（见 groupAssignmentViews）。

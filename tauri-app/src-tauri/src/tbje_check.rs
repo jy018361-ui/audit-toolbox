@@ -743,9 +743,7 @@ fn prepare_with_control(
         tb_rows,
         je_rows,
         entity_scope,
-        auxiliary_plan_params: params
-            .get("auxiliaryPlan")
-            .map(|_| params.clone()),
+        auxiliary_plan_params: params.get("auxiliaryPlan").map(|_| params.clone()),
     })
 }
 

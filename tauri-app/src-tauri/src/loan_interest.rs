@@ -216,24 +216,38 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
             continue;
         }
         let opening = ledger_mapping::credit_positive(
-            inferred_balance(&tb, row, &tm, "openingFunctional", tb_convention, closing_signed)
-                .unwrap_or_else(|| {
-                    ledger_mapping::signed_balance(
-                        &amount_inputs(&tb, row, &tm, "opening"),
-                        tb_convention,
-                        opening_signed,
-                    )
-                }),
+            inferred_balance(
+                &tb,
+                row,
+                &tm,
+                "openingFunctional",
+                tb_convention,
+                closing_signed,
+            )
+            .unwrap_or_else(|| {
+                ledger_mapping::signed_balance(
+                    &amount_inputs(&tb, row, &tm, "opening"),
+                    tb_convention,
+                    opening_signed,
+                )
+            }),
         );
         let closing = ledger_mapping::credit_positive(
-            inferred_balance(&tb, row, &tm, "closingFunctional", tb_convention, opening_signed)
-                .unwrap_or_else(|| {
-                    ledger_mapping::signed_balance(
-                        &amount_inputs(&tb, row, &tm, "closing"),
-                        tb_convention,
-                        closing_signed,
-                    )
-                }),
+            inferred_balance(
+                &tb,
+                row,
+                &tm,
+                "closingFunctional",
+                tb_convention,
+                opening_signed,
+            )
+            .unwrap_or_else(|| {
+                ledger_mapping::signed_balance(
+                    &amount_inputs(&tb, row, &tm, "closing"),
+                    tb_convention,
+                    closing_signed,
+                )
+            }),
         );
         let key = if code.trim().is_empty() {
             norm(&account)
@@ -313,32 +327,29 @@ fn tb_accounts(params: &Value) -> Result<Value, AppError> {
             };
             // 每个末级科目都下发发生额，用户把任意科目改成“利息支出”时，
             // 界面无需重新读 TB 就能立即看到该科目的比较基准。
-            let (occurrence, occurrence_detail) = occurrence_basis.map_or(
-                (None, None),
-                |basis| {
-                    let direction = expense_account_direction(&account.account, &direction_catalog);
-                    let mut total = 0.0;
-                    let mut details = BTreeSet::new();
-                    for row_index in &account.row_indexes {
-                        if let Some((amount, detail)) = interest_expense_occurrence(
-                            &tb,
-                            &tb.rows[*row_index],
-                            &tm,
-                            tb_convention,
-                            direction,
-                        ) {
-                            total += amount;
-                            details.insert(detail);
-                        }
+            let (occurrence, occurrence_detail) = occurrence_basis.map_or((None, None), |basis| {
+                let direction = expense_account_direction(&account.account, &direction_catalog);
+                let mut total = 0.0;
+                let mut details = BTreeSet::new();
+                for row_index in &account.row_indexes {
+                    if let Some((amount, detail)) = interest_expense_occurrence(
+                        &tb,
+                        &tb.rows[*row_index],
+                        &tm,
+                        tb_convention,
+                        direction,
+                    ) {
+                        total += amount;
+                        details.insert(detail);
                     }
-                    let detail = if details.is_empty() {
-                        format!("{basis}（无非零发生）")
-                    } else {
-                        details.into_iter().collect::<Vec<_>>().join("；")
-                    };
-                    (Some(total), Some(detail))
-                },
-            );
+                }
+                let detail = if details.is_empty() {
+                    format!("{basis}（无非零发生）")
+                } else {
+                    details.into_iter().collect::<Vec<_>>().join("；")
+                };
+                (Some(total), Some(detail))
+            });
             json!({
                 "key": account.key,
                 "code": account.code,
@@ -2453,14 +2464,19 @@ fn disk_role_text(
     mapping: &Map<String, Value>,
     role: &str,
 ) -> String {
-    mapped_names(mapping, "je", role)
+    let raw = mapped_names(mapping, "je", role)
         .iter()
         .filter_map(|name| headers.iter().position(|header| header == name))
         .filter_map(|index| row.get(index))
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    match role {
+        "accountCode" => ledger_mapping::account_code_of(&raw),
+        "accountName" => ledger_mapping::account_name_of(&raw),
+        _ => raw,
+    }
 }
 
 fn normalized_disk_je_mapping(mapping: &Map<String, Value>) -> Map<String, Value> {
@@ -2511,8 +2527,10 @@ struct LoanFold {
     currency: String,
     opening: f64,
     closing: f64,
-    /// TB 本年累计发生额净额（借正贷负），未匹配 JE 时的兜底口径。
-    ytd_net: f64,
+    /// TB 本年累计新增（贷方侧）与归还（借方侧）。未匹配 JE 时必须保留
+    /// 两侧毛额，不能先压成净额，否则同一科目本年既借又贷时会丢失发生额。
+    ytd_additions: f64,
+    ytd_reductions: f64,
     /// TB 当期借方或贷方至少一项非零。辅助列定位只从这些行取借款明细值。
     has_ytd_movement: bool,
 }
@@ -2815,7 +2833,8 @@ fn collapse_folds_to_account(folds: Vec<LoanFold>, split_by_currency: bool) -> V
         target.rows += fold.rows;
         target.opening += fold.opening;
         target.closing += fold.closing;
-        target.ytd_net += fold.ytd_net;
+        target.ytd_additions += fold.ytd_additions;
+        target.ytd_reductions += fold.ytd_reductions;
         target.has_ytd_movement |= fold.has_ytd_movement;
     }
     order
@@ -2943,7 +2962,11 @@ fn fold_loan_rows(
             || ytd_inputs.amount.is_some_and(|value| value.abs() > 0.005)
             || ytd_inputs.debit.is_some_and(|value| value.abs() > 0.005)
             || ytd_inputs.credit.is_some_and(|value| value.abs() > 0.005);
-        let ytd_net = ledger_mapping::signed_amount(&ytd_inputs, tb_convention);
+        // 借款是负债类：贷方发生是新增，借方发生是归还。这里需要两侧毛额，
+        // 不能走 `signed_amount` 压成净额；公共内核会按已识别的符号口径把
+        // 贷方负数翻回正的贷方发生额，同时把红字保留在原侧冲减。
+        let (ytd_reductions, ytd_additions) =
+            ledger_mapping::side_amounts(&ytd_inputs, tb_convention);
         let Some(fold) = folds.get_mut(&key) else {
             order.push(key.clone());
             folds.insert(
@@ -2959,7 +2982,8 @@ fn fold_loan_rows(
                     currency,
                     opening,
                     closing,
-                    ytd_net,
+                    ytd_additions,
+                    ytd_reductions,
                     has_ytd_movement,
                 },
             );
@@ -2968,7 +2992,8 @@ fn fold_loan_rows(
         fold.rows += 1;
         fold.opening += opening;
         fold.closing += closing;
-        fold.ytd_net += ytd_net;
+        fold.ytd_additions += ytd_additions;
+        fold.ytd_reductions += ytd_reductions;
         fold.has_ytd_movement |= has_ytd_movement;
     }
     order
@@ -3398,12 +3423,8 @@ fn calculate_tb_impl(
             kinds,
         } = aggregate;
         if matched == 0 {
-            let net = fold.ytd_net;
-            if net > 0.0 {
-                reductions = net;
-            } else if net < 0.0 {
-                additions = -net;
-            }
+            additions = fold.ytd_additions;
+            reductions = fold.ytd_reductions;
         }
         let mut rate_type = "fixed".into();
         let (mut fixed, mut benchmark, mut bps) = (None, None, None);
@@ -5017,6 +5038,24 @@ fn role_text(
     kind: &str,
     role: &str,
 ) -> String {
+    let raw = raw_role_text(table, row, m, kind, role);
+    // 公共映射允许 accountCode/accountName 指向同一物理列，例如
+    // `2501010000:长期借款-中国银行`。借款模块过去把整格当编码，导致与
+    // JE 的纯编码无法匹配；身份角色在这里接公共拆码口径。
+    match role {
+        "accountCode" => ledger_mapping::account_code_of(&raw),
+        "accountName" => ledger_mapping::account_name_of(&raw),
+        _ => raw,
+    }
+}
+
+fn raw_role_text(
+    table: &Table,
+    row: &[String],
+    m: &Map<String, Value>,
+    kind: &str,
+    role: &str,
+) -> String {
     mapped_names(m, kind, role)
         .iter()
         .filter_map(|h| table.headers.iter().position(|x| x == h))
@@ -5032,14 +5071,22 @@ fn role_text(
 /// 统一内核的建议只给 accountCode／accountName 新名，按旧名直查会得到空串，
 /// TB＋JE 模式曾经因此一行都进不来。
 fn account_text(table: &Table, row: &[String], m: &Map<String, Value>, kind: &str) -> String {
-    let mut parts = vec![];
-    for role in ["accountCode", "accountName"] {
-        let t = role_text(table, row, m, kind, role);
-        if !t.is_empty() {
-            parts.push(t);
-        }
+    let raw_code = raw_role_text(table, row, m, kind, "accountCode");
+    let raw_name = raw_role_text(table, row, m, kind, "accountName");
+    let code = ledger_mapping::account_code_of(&raw_code);
+    let name_source = if raw_name.is_empty() {
+        &raw_code
+    } else {
+        &raw_name
+    };
+    let name = ledger_mapping::account_name_of(name_source);
+    if code.is_empty() {
+        name
+    } else if name.is_empty() || name == code {
+        code
+    } else {
+        format!("{code} {name}")
     }
-    parts.join(" ")
 }
 
 /// 「绝对值＋单一方向列」版式下，缺方向一侧的余额符号按勾稽等式逐行向对侧
@@ -5059,7 +5106,13 @@ fn inferred_balance(
             .iter()
             .find_map(|name| tb.headers.iter().position(|h| h == name))
     };
-    ledger_mapping::infer_balance_sign_from_sibling(row, &index_of, prefix, convention, sibling_self_signed)
+    ledger_mapping::infer_balance_sign_from_sibling(
+        row,
+        &index_of,
+        prefix,
+        convention,
+        sibling_self_signed,
+    )
 }
 
 /// 收集某个时点（`opening` / `closing`）在这一行的原始取值，交给内核折算。
@@ -7699,16 +7752,15 @@ mod tests {
         assert_eq!(list.len(), 3, "只下发末级科目：{accounts:#?}");
         assert_eq!(list[0]["key"].as_str().unwrap(), "2001");
         assert_eq!(list[0]["opening"].as_f64().unwrap(), 1000000.0);
-        let expense = list
-            .iter()
-            .find(|item| item["code"] == "66030002")
-            .unwrap();
+        let expense = list.iter().find(|item| item["code"] == "66030002").unwrap();
         assert_eq!(expense["suggestedType"], "interest_expense");
         assert_eq!(expense["occurrence"], json!(-923800.5));
-        assert!(expense["occurrenceBasis"]
-            .as_str()
-            .unwrap()
-            .contains("已结转"));
+        assert!(
+            expense["occurrenceBasis"]
+                .as_str()
+                .unwrap()
+                .contains("已结转")
+        );
         // 模板导出（空 JE 的最小来源）+ 回读往返。
         let je = fixture.dir.join("je-empty.xlsx");
         let mut je_book = Workbook::new();
@@ -8489,6 +8541,120 @@ mod tests {
     }
 
     #[test]
+    fn tb混写科目接公共拆码且带符号发生额按侧兜底() {
+        // 真实 03 号形态：TB 的编码与名称在同一格，贷方累计发生额已经带
+        // 负号；JE 则是纯编码。第一户应按纯编码命中 JE，第二户没有 JE，
+        // 必须分别采用 TB 贷方新增和借方归还，不能把两侧压成净额。
+        let fixture = SyntheticLedger::new(&[]);
+        let mut book = Workbook::new();
+        for (name, data) in [
+            (
+                "TB",
+                vec![
+                    vec!["科目", "期初余额", "期末余额", "本年借", "本年贷"],
+                    vec![
+                        "2501010000:长期借款-中国银行",
+                        "-1000",
+                        "-1200",
+                        "100",
+                        "-300",
+                    ],
+                    vec![
+                        "2501020000:长期借款-建设银行",
+                        "-2000",
+                        "-2050",
+                        "50",
+                        "-100",
+                    ],
+                ],
+            ),
+            (
+                "JE",
+                vec![
+                    vec!["编码", "科目", "日期", "借方", "贷方"],
+                    vec!["2501010000", "长期借款-中国银行", "2025-03-01", "100", "0"],
+                    vec!["2501010000", "长期借款-中国银行", "2025-06-01", "0", "-300"],
+                ],
+            ),
+        ] {
+            let sheet = book.add_worksheet();
+            sheet.set_name(name).unwrap();
+            for (r, row) in data.iter().enumerate() {
+                for (c, value) in row.iter().enumerate() {
+                    sheet.write_string(r as u32, c as u16, *value).unwrap();
+                }
+            }
+        }
+        let path = fixture.dir.join("tbje-mixed-account-signed-movement.xlsx");
+        book.save(&path).unwrap();
+        let mut params = fixture.params();
+        params["mode"] = json!("tb");
+        params["loanAccounts"] = json!(["2501010000", "2501020000"]);
+        params["tbSource"] = json!({
+            "source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},
+            "mapping":{
+                "accountCode":"科目",
+                "accountName":"科目",
+                "openingFunctionalAmount":"期初余额",
+                "closingFunctionalAmount":"期末余额",
+                "ytdFunctionalDebit":"本年借",
+                "ytdFunctionalCredit":"本年贷"
+            }
+        });
+        params["jeSource"] = json!({
+            "source":{"inputPath":path,"sheet":"JE","headerRow":1,"headerDepth":1},
+            "mapping":{
+                "accountCode":"编码",
+                "accountName":"科目",
+                "date":"日期",
+                "functionalDebit":"借方",
+                "functionalCredit":"贷方"
+            }
+        });
+
+        let result = run_preview(&params).unwrap();
+        let rows = result["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "{result:#?}");
+        let bank = |code: &str| {
+            rows.iter()
+                .find(|row| row["accountCode"].as_str() == Some(code))
+                .unwrap_or_else(|| panic!("缺少借款科目 {code}: {result:#?}"))
+        };
+        let matched = bank("2501010000");
+        assert_eq!(matched["additions"], json!(300.0));
+        assert_eq!(matched["reductions"], json!(100.0));
+        assert!(
+            matched["matchBasis"]
+                .as_str()
+                .is_some_and(|basis| basis.contains("编码"))
+        );
+
+        let fallback = bank("2501020000");
+        assert_eq!(fallback["additions"], json!(100.0));
+        assert_eq!(fallback["reductions"], json!(50.0));
+        assert!(
+            fallback["matchBasis"]
+                .as_str()
+                .is_some_and(|basis| basis.starts_with("未匹配 JE，采用 TB 发生额"))
+        );
+
+        let disk_mapping = json!({"accountCode":"科目", "accountName":"科目"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let disk_headers = vec!["科目".to_string()];
+        let disk_row = vec!["2501010000:长期借款-中国银行".to_string()];
+        assert_eq!(
+            disk_role_text(&disk_headers, &disk_row, &disk_mapping, "accountCode"),
+            "2501010000"
+        );
+        assert_eq!(
+            disk_role_text(&disk_headers, &disk_row, &disk_mapping, "accountName"),
+            "长期借款-中国银行"
+        );
+    }
+
+    #[test]
     fn tbje模式旧名映射仍然可读() {
         // 历史保存的映射把编码与名称混在一个 account 格子、金额用 debit/credit 旧名。
         let table = je_table(
@@ -8618,9 +8784,11 @@ mod loan_real_ledger_mapping_tests {
         }))
         .unwrap();
         assert_eq!(booked.amount, -923800.5);
-        assert!(booked.details[0]["basis"]
-            .as_str()
-            .is_some_and(|basis| basis.contains("已结转")));
+        assert!(
+            booked.details[0]["basis"]
+                .as_str()
+                .is_some_and(|basis| basis.contains("已结转"))
+        );
     }
 
     #[test]

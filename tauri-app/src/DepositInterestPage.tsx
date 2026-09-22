@@ -13,6 +13,7 @@ import {
 } from "./api";
 import { PageHeader } from "@/components/PageHeader";
 import {
+  dropUnlinkedTbAuxiliary,
   ledgerEntityKeyEnabled,
   verifyAuxiliaryLink,
   type AuxiliaryLinkResult,
@@ -725,6 +726,7 @@ export function DepositInterestPage({ tool }: { tool: ToolManifest }) {
     }).then((result) => {
       if (cancelled) return;
       setAuxLink(result);
+      setTbMapping((current) => dropUnlinkedTbAuxiliary(current, result));
     });
     return () => {
       cancelled = true;

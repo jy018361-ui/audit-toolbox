@@ -3315,13 +3315,13 @@ pub(crate) fn infer_balance_sign_from_sibling(
     convention: SignConvention,
     sibling_self_signed: bool,
 ) -> Option<f64> {
-    if index_of(&format!("{prefix}Debit")).is_some() || index_of(&format!("{prefix}Credit")).is_some()
+    if index_of(&format!("{prefix}Debit")).is_some()
+        || index_of(&format!("{prefix}Credit")).is_some()
     {
         return None;
     }
-    let cell = |role: &str| -> Option<String> {
-        index_of(role).and_then(|index| row.get(index)).cloned()
-    };
+    let cell =
+        |role: &str| -> Option<String> { index_of(role).and_then(|index| row.get(index)).cloned() };
     let number = |role: &str| -> Option<f64> {
         index_of(role)
             .and_then(|index| row.get(index))
@@ -3504,8 +3504,14 @@ pub(crate) fn balance_sign_basis_by_row(
             if direction_is_known(direction) {
                 return BalanceSignBasis::DirectionColumn;
             }
-            if infer_balance_sign_from_sibling(row, &index_of, prefix, convention, sibling_self_signed)
-                .is_some()
+            if infer_balance_sign_from_sibling(
+                row,
+                &index_of,
+                prefix,
+                convention,
+                sibling_self_signed,
+            )
+            .is_some()
             {
                 return BalanceSignBasis::EquationInferred;
             }
@@ -8057,7 +8063,8 @@ pub(crate) fn auxiliary_link_group_verdicts_by_tb_columns(
                         .iter()
                         .map(|candidate| AnchorColumnScan {
                             header: candidate.header.clone(),
-                            hit_anchors: candidate.hit_anchors
+                            hit_anchors: candidate
+                                .hit_anchors
                                 .intersection(&scan.hit_anchors)
                                 .cloned()
                                 .collect(),
@@ -8091,22 +8098,22 @@ pub(crate) fn auxiliary_link_group_verdicts_by_tb_columns(
                 }
             } else {
                 tb_candidates
-                .into_iter()
-                .max_by_key(|verdict| {
-                    (
-                        verdict.dimension_keys(),
-                        verdict.anchor_hits,
-                        verdict.anchor_total,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    auxiliary_link_verdict(
-                        union,
-                        je_candidates,
-                        totals.get(key).copied().unwrap_or_default(),
-                        preferred,
-                    )
-                })
+                    .into_iter()
+                    .max_by_key(|verdict| {
+                        (
+                            verdict.dimension_keys(),
+                            verdict.anchor_hits,
+                            verdict.anchor_total,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        auxiliary_link_verdict(
+                            union,
+                            je_candidates,
+                            totals.get(key).copied().unwrap_or_default(),
+                            preferred,
+                        )
+                    })
             };
             AuxiliaryLinkGroupVerdict {
                 entity: key.0.clone(),
@@ -8123,7 +8130,10 @@ pub(crate) fn auxiliary_link_group_verdicts_by_tb_columns(
         .filter_map(|group| group.verdict.column.as_deref())
         .collect::<HashSet<_>>();
     if matched_columns.len() > 1 {
-        let competing = matched_columns.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        let competing = matched_columns
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         for group in &mut groups {
             group.verdict.status = "noMatch";
             group.verdict.column = None;
@@ -10390,25 +10400,52 @@ mod tests {
     #[test]
     fn 不同tb辅助字段不得分别认定不同je列() {
         let group = ("4800".to_owned(), "1002".to_owned());
-        let anchors = BTreeMap::from([(group.clone(), HashSet::from(["甲".to_owned(), "乙".to_owned()]))]);
+        let anchors = BTreeMap::from([(
+            group.clone(),
+            HashSet::from(["甲".to_owned(), "乙".to_owned()]),
+        )]);
         let tb_scans = BTreeMap::from([(
             group.clone(),
             vec![
-                AnchorColumnScan { header: "TB字段一".into(), hit_anchors: HashSet::from(["甲".into()]), nonempty_rows: 1 },
-                AnchorColumnScan { header: "TB字段二".into(), hit_anchors: HashSet::from(["乙".into()]), nonempty_rows: 1 },
+                AnchorColumnScan {
+                    header: "TB字段一".into(),
+                    hit_anchors: HashSet::from(["甲".into()]),
+                    nonempty_rows: 1,
+                },
+                AnchorColumnScan {
+                    header: "TB字段二".into(),
+                    hit_anchors: HashSet::from(["乙".into()]),
+                    nonempty_rows: 1,
+                },
             ],
         )]);
         let je_scans = BTreeMap::from([(
             group.clone(),
             vec![
-                AnchorColumnScan { header: "JE列一".into(), hit_anchors: HashSet::from(["甲".into()]), nonempty_rows: 1 },
-                AnchorColumnScan { header: "JE列二".into(), hit_anchors: HashSet::from(["乙".into()]), nonempty_rows: 1 },
+                AnchorColumnScan {
+                    header: "JE列一".into(),
+                    hit_anchors: HashSet::from(["甲".into()]),
+                    nonempty_rows: 1,
+                },
+                AnchorColumnScan {
+                    header: "JE列二".into(),
+                    hit_anchors: HashSet::from(["乙".into()]),
+                    nonempty_rows: 1,
+                },
             ],
         )]);
-        let mapping = serde_json::json!({"auxiliary":["TB字段一","TB字段二"]}).as_object().unwrap().clone();
+        let mapping = serde_json::json!({"auxiliary":["TB字段一","TB字段二"]})
+            .as_object()
+            .unwrap()
+            .clone();
         let result = auxiliary_link_group_verdicts_by_tb_columns(
-            &anchors, &tb_scans, &je_scans, &BTreeMap::from([(group, 2)]),
-            &mapping, "auxiliary", &[],
+            &anchors,
+            &tb_scans,
+            &je_scans,
+            &BTreeMap::from([(group, 2)]),
+            &mapping,
+            "auxiliary",
+            &[],
         );
         assert_eq!(result[0].verdict.status, "noMatch");
         assert!(result[0].verdict.column.is_none());
@@ -10423,27 +10460,74 @@ mod tests {
             (second.clone(), HashSet::from(["乙".to_owned()])),
         ]);
         let tb_scans = BTreeMap::from([
-            (first.clone(), vec![AnchorColumnScan { header: "TB辅助".into(), hit_anchors: HashSet::from(["甲".into()]), nonempty_rows: 1 }]),
-            (second.clone(), vec![AnchorColumnScan { header: "TB辅助".into(), hit_anchors: HashSet::from(["乙".into()]), nonempty_rows: 1 }]),
+            (
+                first.clone(),
+                vec![AnchorColumnScan {
+                    header: "TB辅助".into(),
+                    hit_anchors: HashSet::from(["甲".into()]),
+                    nonempty_rows: 1,
+                }],
+            ),
+            (
+                second.clone(),
+                vec![AnchorColumnScan {
+                    header: "TB辅助".into(),
+                    hit_anchors: HashSet::from(["乙".into()]),
+                    nonempty_rows: 1,
+                }],
+            ),
         ]);
         let je_scans = BTreeMap::from([
-            (first.clone(), vec![
-                AnchorColumnScan { header: "JE列一".into(), hit_anchors: HashSet::from(["甲".into()]), nonempty_rows: 1 },
-                AnchorColumnScan { header: "JE列二".into(), hit_anchors: HashSet::new(), nonempty_rows: 0 },
-            ]),
-            (second.clone(), vec![
-                AnchorColumnScan { header: "JE列一".into(), hit_anchors: HashSet::new(), nonempty_rows: 0 },
-                AnchorColumnScan { header: "JE列二".into(), hit_anchors: HashSet::from(["乙".into()]), nonempty_rows: 1 },
-            ]),
+            (
+                first.clone(),
+                vec![
+                    AnchorColumnScan {
+                        header: "JE列一".into(),
+                        hit_anchors: HashSet::from(["甲".into()]),
+                        nonempty_rows: 1,
+                    },
+                    AnchorColumnScan {
+                        header: "JE列二".into(),
+                        hit_anchors: HashSet::new(),
+                        nonempty_rows: 0,
+                    },
+                ],
+            ),
+            (
+                second.clone(),
+                vec![
+                    AnchorColumnScan {
+                        header: "JE列一".into(),
+                        hit_anchors: HashSet::new(),
+                        nonempty_rows: 0,
+                    },
+                    AnchorColumnScan {
+                        header: "JE列二".into(),
+                        hit_anchors: HashSet::from(["乙".into()]),
+                        nonempty_rows: 1,
+                    },
+                ],
+            ),
         ]);
-        let mapping = serde_json::json!({"auxiliary":"TB辅助"}).as_object().unwrap().clone();
+        let mapping = serde_json::json!({"auxiliary":"TB辅助"})
+            .as_object()
+            .unwrap()
+            .clone();
         let groups = auxiliary_link_group_verdicts_by_tb_columns(
-            &anchors, &tb_scans, &je_scans,
+            &anchors,
+            &tb_scans,
+            &je_scans,
             &BTreeMap::from([(first, 1), (second, 1)]),
-            &mapping, "auxiliary", &[],
+            &mapping,
+            "auxiliary",
+            &[],
         );
         assert_eq!(groups.len(), 2);
-        assert!(groups.iter().all(|group| group.verdict.status == "noMatch" && group.verdict.column.is_none()));
+        assert!(
+            groups
+                .iter()
+                .all(|group| group.verdict.status == "noMatch" && group.verdict.column.is_none())
+        );
     }
 
     #[test]
@@ -12045,12 +12129,7 @@ mod tests {
             Some(-1_8000_0000.0)
         );
         assert_eq!(
-            balance_sign_from_equation(
-                1_0000_0000.0,
-                -5500_0000.0,
-                Some((4500_0000.0, 0.0)),
-                true
-            ),
+            balance_sign_from_equation(1_0000_0000.0, -5500_0000.0, Some((4500_0000.0, 0.0)), true),
             Some(-1_0000_0000.0)
         );
         // 哪个符号都凑不平（候选 −1.8 亿，幅值对不上原始 1.35 亿）：不猜。
@@ -12064,16 +12143,20 @@ mod tests {
             None
         );
         // 没有发生额列就无从列方程。
-        assert_eq!(
-            balance_sign_from_equation(100.0, -100.0, None, true),
-            None
-        );
+        assert_eq!(balance_sign_from_equation(100.0, -100.0, None, true), None);
 
         // 03 号摆位：科目编码｜期初余额｜借方发生额｜贷方发生额｜期末余额｜方向。
-        let 尾部方向: Vec<String> = ["科目编码", "期初余额", "借方发生额", "贷方发生额", "期末余额", "方向"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let 尾部方向: Vec<String> = [
+            "科目编码",
+            "期初余额",
+            "借方发生额",
+            "贷方发生额",
+            "期末余额",
+            "方向",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let columns_tail = |role: &str| -> Vec<String> {
             match role {
                 "openingFunctionalAmount" => vec!["期初余额".into()],
@@ -12084,8 +12167,11 @@ mod tests {
                 _ => vec![],
             }
         };
-        let index_of_tail =
-            |role: &str| columns_tail(role).into_iter().find_map(|name| 尾部方向.iter().position(|h| *h == name));
+        let index_of_tail = |role: &str| {
+            columns_tail(role)
+                .into_iter()
+                .find_map(|name| 尾部方向.iter().position(|h| *h == name))
+        };
         // 250101 长期借款：期初 4 亿、无发生、期末 4 亿、方向贷——期初借到 −4 亿。
         let row_250101 = vec![
             "250101".into(),
@@ -12157,10 +12243,18 @@ mod tests {
         );
 
         // 01/02/08 号摆位：方向列在期初旁，缺方向的是期末。
-        let 前部方向: Vec<String> = ["科目编码", "科目名称", "方向", "期初余额", "借方发生额", "贷方发生额", "期末余额"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let 前部方向: Vec<String> = [
+            "科目编码",
+            "科目名称",
+            "方向",
+            "期初余额",
+            "借方发生额",
+            "贷方发生额",
+            "期末余额",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let columns_head = |role: &str| -> Vec<String> {
             match role {
                 "openingFunctionalAmount" => vec!["期初余额".into()],
@@ -12171,8 +12265,11 @@ mod tests {
                 _ => vec![],
             }
         };
-        let index_of_head =
-            |role: &str| columns_head(role).into_iter().find_map(|name| 前部方向.iter().position(|h| *h == name));
+        let index_of_head = |role: &str| {
+            columns_head(role)
+                .into_iter()
+                .find_map(|name| 前部方向.iter().position(|h| *h == name))
+        };
         // 1602 累计折旧：期初 2.38 亿（贷）、贷方 2616 万、期末 2.64 亿——期末借到 −2.64 亿。
         let row_1602 = vec![
             "1602".into(),

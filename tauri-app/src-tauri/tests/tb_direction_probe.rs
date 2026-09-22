@@ -104,7 +104,8 @@ fn 方向列摆位与tb自身勾稽诊断() {
             let mut closing_total = 0.0;
             for account in &rows {
                 let code = account["code"].as_str().unwrap_or("");
-                if code.starts_with("2001") || code.starts_with("2501") || code.starts_with("2231") {
+                if code.starts_with("2001") || code.starts_with("2501") || code.starts_with("2231")
+                {
                     let opening = account["opening"].as_f64().unwrap_or(0.0);
                     let closing = account["closing"].as_f64().unwrap_or(0.0);
                     opening_total += opening;

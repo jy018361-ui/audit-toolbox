@@ -966,12 +966,14 @@ describe("跨表对齐后的币种线索", () => {
 });
 
 describe("TB 粒度不足提示", () => {
-  it("按隔离类型给出用户看得懂的原因", () => {
+  it("两种外币敞口形态合并为同一提示且兼容历史类型", () => {
+    const merged = "JE 已识别外币敞口，但 TB 未按币种拆分余额";
+    expect(granularityLabel(merged)).toBe(merged);
     expect(granularityLabel("科目余额混合本位币与外币")).toBe(
-      "余额里混了本位币和外币，TB 只有合计数，拆不出外币部分",
+      merged,
     );
     expect(granularityLabel("同一科目存在多种外币敞口")).toBe(
-      "同一科目持有多种外币，TB 只有合计数，拆不出各币种余额",
+      merged,
     );
     expect(granularityLabel("外币凭证原币金额全为零")).toBe(
       "该科目的外币凭证原币金额全为 0，没有可测算的外币余额",
@@ -995,19 +997,23 @@ describe("逐行数据质量归并", () => {
     const groups = summarizeQuality([
       { type: "汇率缺失", severity: "提示", row: 5 },
       {
-        type: "同一科目存在多种外币敞口",
+        type: "JE 已识别外币敞口，但 TB 未按币种拆分余额",
         severity: "隔离",
         row: 10,
         detail: "拆不出来",
       },
-      { type: "同一科目存在多种外币敞口", severity: "隔离", row: 11 },
+      {
+        type: "JE 已识别外币敞口，但 TB 未按币种拆分余额",
+        severity: "隔离",
+        row: 11,
+      },
       { type: "汇率缺失", severity: "提示", row: 6 },
       { type: "汇率缺失", severity: "提示", row: 7 },
     ]);
     expect(groups).toHaveLength(2);
     expect(groups[0]).toMatchObject({
       severity: "隔离",
-      type: "同一科目存在多种外币敞口",
+      type: "JE 已识别外币敞口，但 TB 未按币种拆分余额",
       count: 2,
       detail: "拆不出来",
     });

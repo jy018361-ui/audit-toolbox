@@ -1430,21 +1430,28 @@ export type AuxiliaryLinkResult = {
 };
 
 /**
- * 历史兼容入口：辅助字段的“语义映射”与“能否进入跨表匹配键”已经分离。
- * 验证失败只让对应主体＋科目组降级，不得删除用户或 LLM 已确认的列映射。
+ * TB 辅助字段必须由 JE 锚点反查验证后才能保留。
+ *
+ * 映射是整列口径，不能在映射面板里声称“已映射”，计算时却只对部分
+ * 主体＋科目组生效。因此除完整 verified 外，统一撤销 TB 的辅助映射；
+ * 计算侧随后自然退回主体＋科目，不再携带一项未经跨表证明的字段。
  */
 export function dropUnlinkedTbAuxiliary<T extends Record<string, unknown>>(
   mapping: T,
-  _result: AuxiliaryLinkResult | null,
-  _role = "auxiliary",
+  result: AuxiliaryLinkResult | null,
+  role = "auxiliary",
 ): T {
-  return mapping;
+  if (!result?.tbAuxMapped || result.status === "verified" || !(role in mapping))
+    return mapping;
+  const next = { ...mapping };
+  delete next[role];
+  return next;
 }
 
 /**
  * 映射阶段的辅助核算联动验证：TB 锚点反查认定 JE 辅助列。
  * 计算侧（TBJE 完整性／存款）复核同一份公共判定逻辑，两阶段不会各说各话。
- * 验证只决定匹配键粒度，不改动字段映射；验证调用失败本身不抛错。
+ * 调用方对非 verified 结论撤销 TB 辅助映射；验证调用失败本身不抛错。
  */
 export async function verifyAuxiliaryLink(
   params: Record<string, unknown>,

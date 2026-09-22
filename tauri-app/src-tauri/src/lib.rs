@@ -1212,12 +1212,21 @@ pub fn engine_call_for_test(
         let pause = excel_merger::PauseCheckpoint::unpaused(cancel.clone());
         let started = std::time::Instant::now();
         let previous = std::cell::RefCell::new(String::new());
-        return fx::run_job("fx.preview", params, &|stage, _, _, message| {
-            if previous.borrow().as_str() != stage {
-                *previous.borrow_mut() = stage.to_owned();
-                eprintln!("fx.preview_probe +{:.2}s {stage}: {message}", started.elapsed().as_secs_f64());
-            }
-        }, cancel, &pause);
+        return fx::run_job(
+            "fx.preview",
+            params,
+            &|stage, _, _, message| {
+                if previous.borrow().as_str() != stage {
+                    *previous.borrow_mut() = stage.to_owned();
+                    eprintln!(
+                        "fx.preview_probe +{:.2}s {stage}: {message}",
+                        started.elapsed().as_secs_f64()
+                    );
+                }
+            },
+            cancel,
+            &pause,
+        );
     }
     if method == "fx.export_probe" {
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

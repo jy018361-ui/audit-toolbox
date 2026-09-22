@@ -8,8 +8,9 @@
 import type { TourStep } from "./BeginnerTour";
 
 export type ToolTourScript = {
-  /** 这个工具做什么（导览第 1 步，居中卡片）。 */
-  purpose: string;
+  /** 这个工具做什么（导览第 1 步）。可省略：用途一目了然的工具
+   *  （如 audipick）直接从"要准备什么"讲起。 */
+  purpose?: string;
   /** 有多种导入/测算模式的工具：先讲清楚"选哪个、什么时候用"，
    *  聚光到页面上的模式切换区（data-tour="tool-mode"）。 */
   mode?: string;
@@ -22,6 +23,9 @@ export type ToolTourScript = {
   result: string;
   /** 工具内每切换一步的提示：步骤 key → 这一步的意义与做法。 */
   stepHints?: Record<string, string>;
+  /** true 时步骤提示只弹 stepHints 写到的步骤：没写到的步骤不回退
+   *  通用文案、保持安静。用于精简提示、只保留关键计算步骤的工具。 */
+  suppressGenericHints?: boolean;
 };
 
 export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
@@ -51,14 +55,7 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
     flow: "第 1 步读取清单并自动识别字段；第 2 步在表头下拉里核对映射、补齐「待补」项；第 3 步填资产负债表日、生成底稿。三步必须按顺序走。",
     result:
       "生成单页「折旧测算」Excel，里面保留活公式——改参数即时重算，复核计算过程很方便。选填字段（资产类别、资产名称）留空不影响导出。",
-    stepHints: {
-      source:
-        "拖入期末固定资产清单，点「读取并复核字段」——系统自动识别 Sheet、标题行和字段，识别完自动进入下一步。",
-      mapping:
-        "在预览表每列顶部的下拉框里核对字段角色，把「待补 N 项」里的必填项补齐（原值、累计折旧、开始使用日期、使用寿命、残值率、本年折旧）。",
-      export:
-        "填资产负债表日、确认输出文件，点「生成折旧测算表」；生成后可直接打开带活公式的底稿复核。",
-    },
+    suppressGenericHints: true,
   },
 
   fa_policy_compare: {
@@ -70,10 +67,7 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
     flow: "只有两步：第 1 步上传两期清单、核对匹配键后执行匹配；第 2 步直接生成对比底稿。",
     result:
       "一个 Excel 两页：第 1 页是两期折旧政策对比（类别/寿命/残值率、判断结果与影响金额），第 2 页是税法最低折旧年限参考。",
-    stepHints: {
-      "1": "左右两栏分别放年初、年末清单，核对资产ID和必填字段后执行匹配；资产ID选不对，对比结果就不可信。",
-      "2": "可以改期初/期末的显示名称（会出现在底稿里），确认输出文件后生成对比底稿。",
-    },
+    suppressGenericHints: true,
   },
 
   kanzhang: {
@@ -99,7 +93,7 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
       "凭证明细文件（Excel/CSV/Parquet），字段映射要求与看账一致：凭证编号、科目、金额方案。读取后注意「金额符号口径」报告——拿不准时按提示手动指定。",
     prepareTargeted: true,
     result:
-      "每个批次一个 CSV/XLSX，明细最前面多三列：【辅助_绝对值】【辅助_符号】【智能匹配状态】；结果卡会显示直接匹配、跨凭证匹配和未匹配的行数。其他列的漏斗只是数据过滤，目标科目才决定给哪些行打标记。",
+      "每个批次一个 CSV/XLSX，明细最前面多三列：【辅助_绝对值】【辅助_符号】【智能匹配状态】。结果卡的三种计数——直接匹配：同一张凭证里目标科目一正一负两行正好对上（如当期计提、当期冲销）；跨凭证匹配：不同凭证之间按相同金额配成对（如上月计提、本月冲销），行上标「跨行已匹配」；未匹配：找不到配对的单边记录，不等于没有问题，建议逐条过目。其他列的漏斗只是数据过滤，目标科目才决定给哪些行打标记。",
   },
 
   deposit_interest: {
@@ -112,12 +106,10 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
     result:
       "Excel 底稿：逐户月度明细、测算汇总、与 TB 的勾稽差异；汇总里的年利率是活公式，改完即时重算。",
     stepHints: {
-      source:
-        "拖入 TB（必）和序时账（可选），核对自动建议的字段映射——TB 要有期末余额方案；没传 JE 时还要有期初余额方案。",
       accounts:
         "逐个核对科目分类（银行存款/其他货币资金等）和每个账户的存款类型；活期有内置利率，定期、协定等要按协议填实际利率。",
-      run: "选资产负债表日，先「测算预览」逐户看与 TB 的差异，没问题再「生成 Excel 底稿」；改过利率要点「按新利率重算」。",
     },
+    suppressGenericHints: true,
   },
 
   loan_interest: {
@@ -131,31 +123,22 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
     result:
       "生成「借款利息测算.xlsx」底稿，逐笔列示本金变动、有效利率、测算利息和匹配状态。TB＋JE 模式是推算台账，底稿里的本金变动和勾稽差异要重点复核。",
     stepHints: {
-      source:
-        "先选「完整借款台账」还是「TB＋JE」模式，再拖入对应文件核对映射；必填项随台账形态动态变化，缺什么界面会明确提示。",
       rates:
         "逐行确认固定还是浮动利率、加减多少 BP（万分之一）；已有执行利率默认按固定处理，改成浮动后按基准利率加减 BP 重算。",
-      run: "选资产负债表日后「测算预览」；TB＋JE 模式按钮是「生成并复核借款变动表」。改过利率必须重新测算，结果才会更新。",
     },
+    suppressGenericHints: true,
   },
 
   fx_audit: {
     purpose:
       "外币业务的汇兑损益重算：按凭证识别结算事件（已实现损益），外币货币性科目月末按央行中间价重估（未实现损益），并与 TB 账面汇兑损益勾稽。",
-    mode: "第 1 步先选测算范围：只有序时账 → 「仅已实现」；只有科目余额表 → 「仅未实现」；两份都有 → 「已实现＋未实现」一起算。选错范围，该传的文件也会跟着变。",
     prepare:
-      "按模式准备：算已实现传序时账 JE；算未实现传余额表 TB；都算就都传。TB 要按币种拆分导出，否则相关科目测不了；汇率自动取央行中间价。",
+      "TB（科目余额表）和 JE（序时账）两份都要传：TB 要按币种拆分导出，否则相关科目测不了；汇率自动取央行中间价。",
     prepareTargeted: true,
-    flow: "第 1 步选测算模式、拖入文件、核对映射和本位币；第 2 步核对科目分类与币种；第 3 步测算预览并生成底稿。",
+    flow: "第 1 步拖入 TB 和 JE、核对字段映射与公司本位币；第 2 步核对科目分类与币种；第 3 步测算预览并生成底稿。",
     result:
       "Excel 底稿包含测算明细、「检查与勾稽」和「汇兑事项复核」页；复核页用“类型”区分非货币性项目错挂汇差、不构成汇兑事项及属于汇兑事项但无法测算。识别规则有优先级：TB 币种列 ＞ 科目名线索 ＞ JE 币种列 ＞ 按本位币。",
-    stepHints: {
-      source:
-        "选测算模式后拖入 JE/TB（可一起），确认公司本位币（ISO 代码）和字段映射；可以用「LLM 一键联合复核」辅助检查。",
-      accounts:
-        "系统已按科目名自动分类，通常不用改；重点是「按本位币」的科目——实际持有外币的在这里手工指定币种，否则不参与重估。",
-      run: "选资产负债表日→「测算预览」→核对结果与提示→「生成 Excel 底稿」；三类需关注事项统一列在底稿“汇兑事项复核”页。",
-    },
+    suppressGenericHints: true,
   },
 
   tbje_check: {
@@ -266,8 +249,7 @@ export const TOOL_TOUR_SCRIPTS: Record<string, ToolTourScript> = {
   },
 
   audipick: {
-    purpose:
-      "合同审阅的 AI 工作台：按项目整理合同 PDF，用审阅模板提取关键条款，对照原文复核后导出底稿。使用前需在设置里配置 AI 服务。",
+    // purpose 省略：AI 合同审阅用途一目了然，导览直接从"要准备什么"讲起。
     prepare:
       "合同 PDF，按项目管理导入；扫描件也能读（页面自动走 OCR 识别）。",
     flow: "三步：第 1 步建项目；第 2 步导入 PDF 并读取文字；第 3 步选模板、AI 提取、逐条复核、导出底稿。",

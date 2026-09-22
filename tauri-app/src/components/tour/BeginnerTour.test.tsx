@@ -415,13 +415,15 @@ describe("buildToolTourSteps", () => {
     expect(steps[0].body).toContain(unknownTool.description);
   });
 
-  it("目录里每个工具都有针对性剧本，文案齐全", () => {
+  it("目录里每个工具都有针对性剧本，文案齐全（purpose 可省略）", () => {
     const catalog = toolCatalogJson as { id: string }[];
     expect(catalog).toHaveLength(18);
     for (const entry of catalog) {
       const script = TOOL_TOUR_SCRIPTS[entry.id];
       expect(script, `${entry.id} 缺少导览剧本`).toBeDefined();
-      expect(script.purpose.length, entry.id).toBeGreaterThan(10);
+      if (script.purpose) {
+        expect(script.purpose.length, entry.id).toBeGreaterThan(10);
+      }
       expect(script.prepare.length, entry.id).toBeGreaterThan(10);
       expect(script.result.length, entry.id).toBeGreaterThan(10);
       for (const [key, text] of Object.entries(script.stepHints ?? {})) {
@@ -433,13 +435,25 @@ describe("buildToolTourSteps", () => {
     }
   });
 
+  it("省略 purpose 的工具（audipick）导览直接从“要准备什么”讲起", () => {
+    expect(TOOL_TOUR_SCRIPTS.audipick.purpose).toBeUndefined();
+    const steps = buildToolTourSteps({
+      ...kanzhang,
+      id: "audipick",
+      name: "AudiPick 智能合同审阅",
+    });
+    expect(steps.map((step) => step.id)).not.toContain("purpose");
+    expect(steps[0].id).toBe("prepare");
+  });
+
   it("AI/路径选择类工具（无统一上传区）的准备步骤退化为居中卡片", () => {
     expect(TOOL_TOUR_SCRIPTS.audipick.prepareTargeted).toBeFalsy();
     expect(TOOL_TOUR_SCRIPTS.audit_roll_forward.prepareTargeted).toBeFalsy();
   });
 
   it("带双模式的工具导览必讲模式选择，并聚光模式切换区", () => {
-    for (const id of ["fa_list", "loan_interest", "fx_audit"]) {
+    // 汇兑损益已固定为「已实现＋未实现」单一模式，不再讲模式选择。
+    for (const id of ["fa_list", "loan_interest"]) {
       const script = TOOL_TOUR_SCRIPTS[id];
       expect(script?.mode, `${id} 缺少模式说明`).toBeDefined();
       expect(script!.mode!.length).toBeGreaterThan(10);

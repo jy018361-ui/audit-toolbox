@@ -114,16 +114,65 @@ describe("StepTourHint", () => {
       { key: "c", label: "丙" },
     ];
     const { rerender } = render(
-      <ToolTourProvider toolId="deposit_interest">
+      <ToolTourProvider toolId="ts_manager">
         <StepTourHint steps={fallbackSteps} current={0} />
       </ToolTourProvider>,
     );
     rerender(
-      <ToolTourProvider toolId="deposit_interest">
+      <ToolTourProvider toolId="ts_manager">
         <StepTourHint steps={fallbackSteps} current={1} />
       </ToolTourProvider>,
     );
     expect(screen.getByText(/完成这一步的操作后/)).toBeInTheDocument();
+  });
+
+  it("精简提示的工具：没写提示的步骤保持安静，写到的照常弹出", () => {
+    // 存款利息只保留了「科目与利率确认」一步的提示。
+    const depositSteps = [
+      { key: "source", label: "上传与识别" },
+      { key: "accounts", label: "科目与利率确认" },
+    ];
+    const { rerender } = render(
+      <ToolTourProvider toolId="deposit_interest">
+        <StepTourHint steps={depositSteps} current={0} />
+      </ToolTourProvider>,
+    );
+    // 切到 accounts：有专属提示，照常弹出。
+    rerender(
+      <ToolTourProvider toolId="deposit_interest">
+        <StepTourHint steps={depositSteps} current={1} />
+      </ToolTourProvider>,
+    );
+    expect(screen.getByText(/活期有内置利率/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "关闭本步提示" }));
+    // 再切回 source：该步未写提示，整张卡不出现，也不回退通用文案。
+    rerender(
+      <ToolTourProvider toolId="deposit_interest">
+        <StepTourHint steps={depositSteps} current={0} />
+      </ToolTourProvider>,
+    );
+    expect(screen.queryByText("上传与识别")).not.toBeInTheDocument();
+    expect(screen.queryByText(/完成这一步的操作后/)).not.toBeInTheDocument();
+  });
+
+  it("整工具精简（如折旧测算）任何步骤都不弹提示", () => {
+    const depSteps = [
+      { key: "source", label: "读取清单" },
+      { key: "mapping", label: "核对字段映射" },
+    ];
+    const { rerender } = render(
+      <ToolTourProvider toolId="fa_dep_calc">
+        <StepTourHint steps={depSteps} current={0} />
+      </ToolTourProvider>,
+    );
+    rerender(
+      <ToolTourProvider toolId="fa_dep_calc">
+        <StepTourHint steps={depSteps} current={1} />
+      </ToolTourProvider>,
+    );
+    expect(screen.queryByText(/完成这一步的操作后/)).not.toBeInTheDocument();
+    expect(screen.queryByText("读取清单")).not.toBeInTheDocument();
+    expect(screen.queryByText("核对字段映射")).not.toBeInTheDocument();
   });
 
   it("弹出时聚光灯挖孔锁定可见的步骤条", () => {

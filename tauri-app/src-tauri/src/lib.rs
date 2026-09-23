@@ -6,6 +6,7 @@ mod confirmation;
 mod deposit_interest;
 #[cfg(windows)]
 mod excel_com;
+mod excel_header_match;
 mod excel_merger;
 mod fa;
 mod fa_subtools;

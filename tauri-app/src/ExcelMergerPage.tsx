@@ -20,6 +20,14 @@ import { BusySpinner } from "@/components/BusySpinner";
 import { SwitchInput } from "@/components/SwitchInput";
 import { EmptyState } from "@/components/EmptyState";
 import { JobProgress } from "@/components/JobProgress";
+import {
+  HeaderMatchGrid,
+  type HeaderMatchPreview,
+  type HeaderMatchingPlanJson,
+} from "@/components/HeaderMatchGrid";
+import "./header-match.css";
+
+const HEADER_MATCHING_STORAGE_KEY = "merger.headerMatching";
 
 type MergerFile = {
   path: string;
@@ -59,6 +67,18 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
   const [sheetAction, setSheetAction] = useState("merge_all");
   const [targetSheets, setTargetSheets] = useState<string[]>([]);
   const [addHyperlinks, setAddHyperlinks] = useState(true);
+  // 智能表头匹配：开关状态记住上次选择；仅纵向合并成一张大表时可用。
+  const [headerMatching, setHeaderMatching] = useState(() => {
+    try {
+      return window.localStorage.getItem(HEADER_MATCHING_STORAGE_KEY) === "on";
+    } catch {
+      return false;
+    }
+  });
+  const [templatePath, setTemplatePath] = useState("");
+  const [matchPreview, setMatchPreview] = useState<HeaderMatchPreview>();
+  const [showMatch, setShowMatch] = useState(false);
+  const [matchBusy, setMatchBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState<JobEvent>();
   const [error, setError] = useState("");
@@ -127,6 +147,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     setResult(undefined);
     setJob(undefined);
     activeJobId.current = "";
+    setShowMatch(false);
   }, [paths]);
   useEffect(() => {
     if (!outputDirectoryTouched)
@@ -248,7 +269,59 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
       setOutputDirectoryTouched(true);
     }
   }
-  async function start() {
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        HEADER_MATCHING_STORAGE_KEY,
+        headerMatching ? "on" : "off",
+      );
+    } catch {
+      // 本地存储不可用（隐私模式等）只是不记忆，不影响本次使用。
+    }
+  }, [headerMatching]);
+  useEffect(() => {
+    if (!paths.some((path) => path === templatePath)) setTemplatePath(paths[0] ?? "");
+  }, [paths, templatePath]);
+
+  async function startMatchPreview(templateOverride?: string) {
+    if (!paths.length) {
+      setError("请先添加需要合并的文件。");
+      return;
+    }
+    if (sheetAction === "match_selected" && !targetSheets.length) {
+      setError("按名称匹配时请至少选择一个 Sheet。");
+      return;
+    }
+    const template = templateOverride ?? templatePath ?? paths[0];
+    setMatchBusy(true);
+    setError("");
+    try {
+      const value = (await engineCall("excel_merger.match_preview", {
+        inputPaths: paths,
+        templatePath: template || undefined,
+        sheetAction,
+        targetSheets,
+      })) as HeaderMatchPreview;
+      setTemplatePath(value.template.path);
+      setMatchPreview(value);
+      setShowMatch(true);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setMatchBusy(false);
+    }
+  }
+
+  async function chooseExternalTemplate() {
+    const picked = await pickPath("files", "选择外部模板文件（只借表头）", [
+      "xlsx",
+      "xls",
+      "xlsm",
+    ]);
+    if (typeof picked === "string") void startMatchPreview(picked);
+  }
+
+  async function start(plan?: HeaderMatchingPlanJson) {
     if (!paths.length) {
       setError("请先添加输入文件。");
       return;
@@ -270,6 +343,7 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
         sheetAction,
         targetSheets,
         addHyperlinks,
+        ...(plan ? { headerMatching: plan } : {}),
       });
       activeJobId.current = jobId;
       setJob({
@@ -304,6 +378,9 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
     );
   }
   const currentStep = excelMergerStep(paths.length, files.length, Boolean(job));
+  const headerMatchAvailable =
+    outputMode === "one_sheet" && direction === "vertical";
+  const headerMatchActive = headerMatching && headerMatchAvailable;
   const clearFiles = async () => {
     if (!paths.length) return;
     if (
@@ -546,6 +623,18 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
               )}
             </div>
           )}
+          <fieldset disabled={!headerMatchAvailable}>
+            <legend>智能表头匹配</legend>
+            <label className="check-row" title={headerMatchAvailable ? "按模板文件的表头自动对齐各文件的列名，合并前先预览确认" : "仅纵向合并成一张大表时可用"}>
+              <SwitchInput
+                checked={headerMatching && headerMatchAvailable}
+                onChange={setHeaderMatching}
+              />
+              {headerMatchAvailable
+                ? "按模板表头自动对齐列（合并前先预览确认）"
+                : "仅纵向合并成一张大表时可用"}
+            </label>
+          </fieldset>
           <label className="check-row">
             <SwitchInput
               checked={addHyperlinks}
@@ -617,6 +706,14 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
                 <BusySpinner />
                 停止执行
               </Button>
+            ) : headerMatchActive ? (
+              <Button
+                disabled={!paths.length || matchBusy}
+                onClick={() => void startMatchPreview()}
+              >
+                {matchBusy && <BusySpinner />}
+                {matchBusy ? "正在识别表头…" : "智能匹配并预览"}
+              </Button>
             ) : (
               <Button disabled={!paths.length} onClick={() => void start()}>
                 开始合并
@@ -654,6 +751,23 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
           />
         )}
       </section>
+      {showMatch && matchPreview && (
+        <HeaderMatchGrid
+          preview={matchPreview}
+          busy={busy}
+          files={paths.map((path) => ({
+            path,
+            name: path.split(/[\\/]/).pop() ?? path,
+          }))}
+          onTemplateChange={(path) => void startMatchPreview(path)}
+          onExternalTemplate={() => void chooseExternalTemplate()}
+          onCancel={() => setShowMatch(false)}
+          onConfirm={(plan) => {
+            setShowMatch(false);
+            void start(plan);
+          }}
+        />
+      )}
     </>
   );
 }

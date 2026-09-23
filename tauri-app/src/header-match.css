@@ -1,0 +1,436 @@
+/* 智能表头匹配·网格界面。全屏覆盖层 + sticky 首列表头。
+   颜色一律走设计 token；遮罩/阴影的透明色集中定义在 --hmg-* 局部变量
+   （行首 `--` 的定义行走 token 豁免口径），与 styles.css 的组织方式一致。 */
+
+.hmg-overlay {
+  --hmg-scrim: rgba(15, 23, 42, 0.55);
+  --hmg-panel-shadow: 0 24px 64px rgba(0, 0, 0, 0.35);
+  --hmg-menu-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  --hmg-toast-bg: rgba(15, 23, 42, 0.92);
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--hmg-scrim);
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 18px;
+}
+
+.hmg-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(1280px, 100%);
+  background: var(--surface);
+  border-radius: 12px;
+  box-shadow: var(--hmg-panel-shadow);
+  overflow: hidden;
+}
+
+.hmg-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  flex-wrap: wrap;
+}
+
+.hmg-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.hmg-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.hmg-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.hmg-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.hmg-dot-green { background: var(--success-dot); }
+.hmg-dot-yellow { background: var(--warning-dot); }
+.hmg-dot-red { background: var(--danger-dot, var(--danger-fg)); }
+
+.hmg-template {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-sm);
+}
+
+.hmg-template select {
+  max-width: 260px;
+}
+
+.hmg-actions {
+  display: flex;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  flex-wrap: wrap;
+}
+
+.hmg-grid-wrap {
+  flex: 1;
+  overflow: auto;
+  min-height: 200px;
+}
+
+.hmg-grid {
+  border-collapse: separate;
+  border-spacing: 3px;
+  font-size: var(--fs-sm);
+  min-width: 100%;
+}
+
+.hmg-grid th,
+.hmg-grid td {
+  vertical-align: top;
+}
+
+.hmg-th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-weight: 600;
+  min-width: 96px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hmg-th-excluded {
+  text-decoration: line-through;
+  opacity: 0.5;
+}
+
+.hmg-unmatched-col {
+  min-width: 200px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.hmg-file-col {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  background: var(--surface-muted);
+  border-radius: 6px;
+  min-width: 180px;
+}
+
+.hmg-grid thead .hmg-file-col {
+  top: 0;
+  z-index: 4;
+}
+
+.hmg-file-cell {
+  padding: 6px 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 180px;
+}
+
+.hmg-file-cell > span[title] {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hmg-expand {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 0 2px;
+}
+
+.hmg-review-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warning-dot);
+  flex: none;
+}
+
+.hmg-badge {
+  background: var(--brand);
+  color: var(--ink-inverse);
+  font-size: var(--fs-xs);
+  border-radius: 4px;
+  padding: 1px 5px;
+  flex: none;
+}
+
+.hmg-sheet-tag {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  flex: none;
+}
+
+.hmg-slot {
+  min-width: 96px;
+  max-width: 180px;
+}
+
+.hmg-slot-empty {
+  background: transparent;
+}
+
+.hmg-empty-mark {
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  min-height: 26px;
+}
+
+.hmg-cell {
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: grab;
+  user-select: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  font-weight: 500;
+}
+
+.hmg-cell:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
+.hmg-cell-green {
+  background: var(--success-bg);
+  border-color: var(--success-border);
+  color: var(--success-fg);
+}
+
+.hmg-cell-yellow {
+  background: var(--warning-bg);
+  border-color: var(--warning-border);
+  color: var(--warning-fg);
+}
+
+.hmg-cell-manual {
+  background: var(--info-bg);
+  border-color: var(--info-border);
+  color: var(--info-fg);
+}
+
+.hmg-cell-unmatched {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger-fg);
+}
+
+.hmg-cell-discard {
+  background: var(--surface-muted);
+  border-color: var(--border);
+  color: var(--muted-soft);
+  text-decoration: line-through;
+}
+
+.hmg-cell-template {
+  background: var(--surface-sunken);
+  border-color: var(--border-strong);
+  color: var(--ink-strong);
+  cursor: default;
+}
+
+.hmg-manual-mark {
+  margin-right: 4px;
+  font-size: var(--fs-xs);
+}
+
+.hmg-unmatched-slot {
+  max-width: 260px;
+}
+
+.hmg-unmatched-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.hmg-template-row .hmg-file-cell {
+  background: var(--surface-muted);
+  border-radius: 6px;
+}
+
+.hmg-preview-row td {
+  background: var(--surface-sunken);
+  padding: 8px 12px;
+}
+
+.hmg-preview-cols {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.hmg-preview-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 110px;
+  max-width: 180px;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.hmg-preview-col strong {
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hmg-preview-col span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hmg-detect-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+.hmg-detect-input {
+  width: 42px;
+  text-align: center;
+}
+
+.hmg-bottombar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border-soft);
+  flex-wrap: wrap;
+}
+
+.hmg-remember {
+  font-size: var(--fs-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hmg-discard-zone {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+}
+
+.hmg-trash {
+  border: 1px dashed var(--danger-border);
+  color: var(--danger-fg);
+  border-radius: 8px;
+  padding: 4px 14px;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.hmg-main-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.hmg-template-review {
+  padding: 6px 16px;
+  background: var(--warning-bg);
+  font-size: var(--fs-sm);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.hmg-toast {
+  position: absolute;
+  right: 18px;
+  bottom: 64px;
+  background: var(--hmg-toast-bg);
+  color: var(--ink-inverse);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: var(--fs-sm);
+  max-width: 420px;
+}
+
+.hmg-menu {
+  position: fixed;
+  z-index: 70;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--hmg-menu-shadow);
+  min-width: 180px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.hmg-menu-title {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: 2px;
+}
+
+.hmg-menu button {
+  border: none;
+  background: none;
+  text-align: left;
+  padding: 6px 10px;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  border-radius: 4px;
+  color: var(--ink);
+}
+
+.hmg-menu button:hover {
+  background: var(--surface-muted);
+}
+
+.hmg-menu-sep {
+  font-size: 11px;
+  color: var(--muted-soft);
+  padding: 4px 8px 2px;
+  border-top: 1px solid var(--border-soft);
+  margin-top: 2px;
+}

@@ -518,3 +518,16 @@
   padding: 8px;
 }
 
+
+/* === UI 审计修复 P2-10（2026-09-24）：合并任务被取消时的中性提示 ===
+   取消不是失败：不再复用红色 error-box，用灰底中性条说明后果
+   （已合并的部分不会写入输出）。仅 Excel 批量合并页使用。 */
+.merge-cancel-notice {
+  margin: var(--sp-2) 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}

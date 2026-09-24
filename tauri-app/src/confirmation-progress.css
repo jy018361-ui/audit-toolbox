@@ -255,3 +255,29 @@
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* === UI 审计修复 P2-6（2026-09-24）：已选文件名要有「文件名」的样子 ===
+   症状：选中清单后文件槽里是「占位文案 + 文件名」连排，文件名与引导语
+   同为深色粗体、无任何区分，用户以为文件没选上（对照：看账页面的文件名
+   呈灰色胶囊，所以正常回显）。修复：与看账同源——文件名按钮渲染成
+   灰色胶囊、链接色，一眼可辨；清空按钮不受影响。 */
+.confirmation-page .file-drop-slot-value {
+  background: var(--border-soft);
+  color: var(--brand-link);
+  font-weight: 600;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-sm);
+}
+
+/* === UI 审计修复 P3-5（2026-09-24）：清单预览列头不再断字悬挂 ===
+   症状：末列列头（如「询证项回函结果」）被数据列宽压成两行，出现
+   「询证项回函结 / 果」式悬挂字，并在视口边缘被裁切。
+   修复：列头与数据单元格同一口径——单行显示，超宽省略号，整列随
+   横向滚动完整可见，不再出现悬挂字。 */
+.confirmation-page .data-table-table thead th span {
+  display: block;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

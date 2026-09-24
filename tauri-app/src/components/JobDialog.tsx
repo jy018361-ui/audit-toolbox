@@ -17,6 +17,7 @@ import {
 import { jobCancel, jobPause } from "@/api";
 import { errorText } from "@/lib/errors";
 import type { JobEvent } from "@/types";
+import { jobStatusText } from "./JobProgress";
 
 /** 结束态的三个 phase 由 Rust 侧统一约定（excel_merger.rs）。 */
 const FINISHED = ["completed", "failed", "cancelled"];
@@ -81,6 +82,17 @@ function toneOf(job: JobEvent): string {
   if (job.severity === "warning") return "warning";
   if (job.severity === "success") return "success";
   return "info";
+}
+
+/**
+ * 右下角悬浮胶囊的状态口径（P2-3 / P3-13）：与页内 JobProgress 共用同一映射
+ * （queued=排队中、running=处理中…），排队任务不再被说成“处理中”；
+ * 前端暂停 / 内存暂停是弹窗自己记录的覆盖态，优先于共享映射。
+ */
+function pillStatusText(job: JobEvent, frontendPaused: boolean): string {
+  if (job.phase === "memory_paused") return "内存等待";
+  if (frontendPaused) return "已暂停";
+  return jobStatusText(job);
 }
 
 type JobRowProps = {
@@ -312,13 +324,13 @@ export function JobDialogProvider({
           <span className="job-dialog-pill-text">
             {running.length > 1
               ? `${running.length} 个任务进行中`
-              : `${nameOf(first.toolId)} · 点击展开`}
+              : `${nameOf(first.toolId)} · ${pillStatusText(first, Boolean(paused[first.jobId]))}`}
           </span>
-          <span className="job-pct">
-            {(paused[first.jobId] || first.phase === "memory_paused") && running.length === 1
-              ? first.phase === "memory_paused" ? "内存等待" : "已暂停"
-              : first.total > 0 ? `${percent(first)}%` : "处理中"}
-          </span>
+          {running.length > 1 && (
+            <span className="job-pct">
+              {pillStatusText(first, Boolean(paused[first.jobId]))}
+            </span>
+          )}
         </button>
       )}
     </JobDialogContext.Provider>

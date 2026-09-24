@@ -206,6 +206,9 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     Record<string, ColumnFilterValues>
   >({});
   const [valuesLoading, setValuesLoading] = useState(false);
+  // 最近一次「加载文件」任务的 jobId：筛选/导出任务也会推送事件，
+  // 只有 jobId 对得上的失败才能判定为加载失败，chip 才随之回退。
+  const loadJobIdRef = useRef("");
 
   useEffect(() => {
     draft = state;
@@ -217,7 +220,21 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
       if (event.toolId !== "ts_manager") return;
       setJob(event);
       setBusy(!["completed", "failed", "cancelled"].includes(event.phase));
-      if (event.phase === "failed") setError(event.message);
+      if (event.phase === "failed") {
+        setError(event.message);
+        // P3-14：失败的是「加载文件」任务本身时，上一次成功读取的表头、
+        // 筛选与预览不再代表文件现状，必须一并清掉——否则顶部 chip 仍按
+        // 旧表头显示绿色「文件已加载」，与红色报错自相矛盾。
+        if (event.jobId && event.jobId === loadJobIdRef.current) {
+          setState((current) => ({
+            ...current,
+            inspect: undefined,
+            selections: {},
+            filtered: undefined,
+            result: undefined,
+          }));
+        }
+      }
       if (event.phase !== "completed" || !event.result) return;
       const payload = event.result as Record<string, unknown>;
       // 读取和筛选预览都带 headers/preview，靠 sheets/defaults 区分：
@@ -378,11 +395,12 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     setError("");
     try {
       // 读取走任务通道才有进度和取消：网络盘上的大工时表原本加载期间界面全无反馈。
-      await jobStart("ts.inspect", {
+      const jobId = await jobStart("ts.inspect", {
         inputPath,
         sheet: sheet || undefined,
         headerRow: Math.max(1, Number(state.headerRow) || 1),
       });
+      loadJobIdRef.current = jobId;
     } catch (caught) {
       setError(messageOf(caught));
       setBusy(false);
@@ -590,6 +608,12 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
     });
   const totalRows = state.inspect?.dimensions?.rows ?? 0;
   const shownRows = state.filtered?.rows ?? totalRows;
+  // P3-14：chip 的成功态与加载任务解耦——只有最近一次「加载文件」任务
+  // 以失败收场时才显示红色「加载失败」；筛选/导出任务的失败不影响它。
+  const loadJobFailed =
+    job?.phase === "failed" &&
+    Boolean(job.jobId) &&
+    job.jobId === loadJobIdRef.current;
   return (
     <div className="ts-manager-page">
       <PageHeader
@@ -621,12 +645,20 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
               className={
                 busy
                   ? "badge-info"
-                  : headers.length
-                    ? "badge-ready"
-                    : "badge-neutral"
+                  : loadJobFailed
+                    ? "badge-danger"
+                    : headers.length
+                      ? "badge-ready"
+                      : "badge-neutral"
               }
             >
-              {busy ? "处理中" : headers.length ? "文件已加载" : "待加载文件"}
+              {busy
+                ? "处理中"
+                : loadJobFailed
+                  ? "加载失败"
+                  : headers.length
+                    ? "文件已加载"
+                    : "待加载文件"}
             </Badge>
           </CardHeader>
           <CardContent>
@@ -867,7 +899,9 @@ export function TsManagerParityPage({ tool }: { tool: ToolManifest }) {
             {/* Legacy forced a sheet picker before loading; silently taking the
                 first sheet reads a cover page as if it were the data. */}
             {(state.inspect?.sheets?.length ?? 0) > 1 && (
-              <div className="warning-box">
+              /* P3-6a：这是常规信息提示（当前 Sheet 未必有错），用中性蓝的
+                 info-box，不再借用错误级的红底红框。 */
+              <div className="info-box">
                 该工作簿共有 {state.inspect?.sheets?.length}{" "}
                 个工作表，当前使用「
                 {state.sheet || state.inspect?.selectedSheet}」。

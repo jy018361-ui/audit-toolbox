@@ -70,7 +70,7 @@ export function AudiPickLegacyShell({
           <button type="button" onClick={onOpenTheme}><Icon name="palette" />主题设置<small>{themeLabel}</small></button>
           <button type="button" onClick={() => onNavigate("guide")}><Icon name="info" />新手引导</button>
         </div>
-        <div className="apl-local-note"><strong>数据仅存本地</strong><span>For questions, contact Dana D Li.</span></div>
+        <div className="apl-local-note"><strong>数据仅保存在本机</strong><span>如有问题请联系项目管理员</span></div>
       </aside>
       <main className="apl-main">{children}</main>
       <aside className={`apl-log-drawer ${logOpen ? "open" : ""}`} aria-hidden={!logOpen}>{logDrawer}</aside>

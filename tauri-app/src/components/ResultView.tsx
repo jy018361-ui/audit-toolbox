@@ -60,7 +60,13 @@ export function ResultView({
     !outputPaths.includes(obj.outputPath)
   )
     outputPaths.push(obj.outputPath);
-  if (typeof obj.splitFile === "string") outputPaths.push(obj.splitFile);
+  // splitFile 通常已包含在 outputPaths 里（WP 服务单的 Rust 侧与演示数据
+  // 都两者同时下发），不去重会把同一个拆分文件渲染成两个同名链接。
+  if (
+    typeof obj.splitFile === "string" &&
+    !outputPaths.includes(obj.splitFile)
+  )
+    outputPaths.push(obj.splitFile);
   const message = [obj.userMessage, obj.message, obj.statusMessage].find(
     (item): item is string =>
       typeof item === "string" && item.trim().length > 0,

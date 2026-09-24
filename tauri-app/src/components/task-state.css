@@ -263,3 +263,37 @@
     transition: none;
   }
 }
+
+/* === UI 审计修复 P2-9（2026-09-24）：右下角任务/同步小条抬高 ===
+   小条默认只离底边 --sp-5，正好压住页面右下角的主操作按钮（如 Excel 合并
+   运行/排队时的「开始合并/停止执行」、文件夹清单进度条上的「取消执行」）。
+   整体抬高约一个按钮带的高度，给底部操作留出可点击通道；同步等待窗的
+   取消反馈小条同步上移，保持原有 24px 间距。用 body 前缀提高优先级，
+   覆盖 styles.css 的同选择器规则而不依赖 CSS 引入顺序。 */
+body .job-dialog-pill,
+body .sync-busy-pill {
+  bottom: calc(max(var(--sp-5), env(safe-area-inset-bottom)) + 56px);
+}
+
+body:has(.job-dialog-pill) .job-command-notice,
+body:has(.sync-busy-pill) .job-command-notice {
+  bottom: calc(max(var(--sp-5), env(safe-area-inset-bottom)) + 120px);
+}
+
+/* === UI 审计修复 P2-2 / P2-3（2026-09-24）：状态词去重与悬浮胶囊统一口径 ===
+   1) 横幅状态词去重后，状态徽标/百分比两列可能缺席，取消按钮不再钉在第 4 列，
+      改为自动跟随排布，避免空列叠加出成倍列距；窄屏（≤560px）的整行换行规则
+      在上方媒体查询中已有定义，这里只对宽屏生效。
+   2) 右下角悬浮胶囊单任务时只有「圆点 + 文本」两个子元素（文本为
+      「工具名 · 状态 百分比」一体），文本撑满剩余空间以保持原有左对齐观感；
+      多任务时仍是文本 + 百分比两端对齐。 */
+@media (min-width: 561px) {
+  .job-progress .job-cancel {
+    grid-column: auto;
+    justify-self: end;
+  }
+}
+
+.job-dialog-pill .job-dialog-pill-text {
+  flex: 1 1 auto;
+}

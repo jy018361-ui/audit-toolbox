@@ -1,0 +1,28 @@
+/* FA List 匹配工具（FaListPage）与折旧政策对比（FaPolicyComparePage）
+   共用的页面级样式。两页此前都靠 styles.css 的通用规则，没有自己的
+   页面文件；审计修复中两页需要同一套文件槽/映射下拉的视觉修正，
+   因此收进这一个文件（FaListPage 与 FaPolicyComparePage 各自 import）。 */
+
+/* === UI 审计修复 P2-6（2026-09-24）：已选文件名要有「文件名」的样子 ===
+   症状：选中文件后文件槽里是「占位文案 + 文件名」连排，文件名与引导语
+   同为深色粗体、无任何区分，用户以为文件没选上（对照：看账页面的卡片
+   级按钮底色让文件名呈灰色胶囊，所以正常回显）。
+   修复：与看账同源——把文件名按钮渲染成灰色胶囊、链接色，一眼可辨；
+   清空按钮不受影响。fa_list 作用域用页面根 fa-list-shell，
+   fa_policy_compare 无页面根类，在 FileDropInput 上加 fa-file-slot 标记。 */
+.fa-list-shell .file-drop-slot-value,
+.fa-file-slot .file-drop-slot-value {
+  background: var(--border-soft);
+  color: var(--brand-link);
+  font-weight: 600;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-sm);
+}
+
+/* === UI 审计修复 P3-4（2026-09-24）：映射下拉选中项截断无省略号 ===
+   症状：预览表列头的角色映射下拉被列宽压窄，选中项（如
+   「使用寿命＊（已用）」）被硬裁成「使用寿命 i」「原值 *（已」。
+   修复：截断时显示省略号；悬浮查看全名已有 title 属性兜底。 */
+.fa-list-shell .dt-header-control select {
+  text-overflow: ellipsis;
+}

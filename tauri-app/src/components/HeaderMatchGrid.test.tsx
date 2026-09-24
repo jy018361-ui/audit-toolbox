@@ -66,6 +66,16 @@ function setup(preview = makePreview()) {
   const onTemplateChange = vi.fn();
   const onExternalTemplate = vi.fn();
   const onCancel = vi.fn();
+  const onRematch = vi.fn(async (_templateHeaders: string[], headers: string[]) =>
+    headers.map((header) => {
+      const index = preview.template.headers.indexOf(header);
+      return {
+        target: index >= 0 ? index : null,
+        confidence: index >= 0 ? 1 : 0,
+        reason: index >= 0 ? "名称一致" : "",
+      };
+    }),
+  );
   render(
     <HeaderMatchGrid
       preview={preview}
@@ -75,11 +85,12 @@ function setup(preview = makePreview()) {
       ]}
       onTemplateChange={onTemplateChange}
       onExternalTemplate={onExternalTemplate}
+      onRematch={onRematch}
       onCancel={onCancel}
       onConfirm={onConfirm}
     />,
   );
-  return { onConfirm, onTemplateChange, onExternalTemplate, onCancel };
+  return { onConfirm, onTemplateChange, onExternalTemplate, onCancel, onRematch };
 }
 
 const statOf = (key: string) =>
@@ -185,15 +196,21 @@ describe("表头匹配网格", () => {
     expect(b.columns[2]).toMatchObject({ source: 2, target: null, discard: false });
   });
 
-  it("展开数据预览并人工修正表头行后重置映射", async () => {
-    setup();
+  it("展开数据预览并人工修正表头行后自动重跑机器匹配", async () => {
+    const { onRematch } = setup();
     fireEvent.click(screen.getAllByRole("button", { name: "展开数据预览" })[1]);
     expect(screen.getByText("回单")).toBeTruthy();
     const input = screen.getByLabelText("表头所在行号") as HTMLInputElement;
     fireEvent.change(input, { target: { value: "3" } });
     fireEvent.click(screen.getAllByText("✎ 修改")[0]);
-    await waitFor(() => expect(screen.getByText(/表头已重新拍平/)).toBeTruthy());
-    // 表头换成第 3 行后，B 文件的映射全部回到未匹配（A 行不受影响）。
+    await waitFor(() =>
+      expect(screen.getByText(/机器匹配已按新表头重跑/)).toBeTruthy(),
+    );
+    expect(onRematch).toHaveBeenCalledWith(
+      ["日期", "凭证号", "金额"],
+      ["2026-02-01", "D-1", "回单"],
+    );
+    // 新表头三列与模板无同名，重跑后全部回到未匹配。
     expect(statOf("unmatched")).toBe("3 未匹配");
   });
 
@@ -207,6 +224,17 @@ describe("表头匹配网格", () => {
     await waitFor(() => expect(onConfirm).toHaveBeenCalled());
     const plan = onConfirm.mock.calls[0][0] as HeaderMatchingPlanJson;
     expect(plan.rememberAliases).toContainEqual(["备注", "金额"]);
+  });
+
+  it("手动移入未匹配区的列计入未匹配而不是匹配", async () => {
+    setup();
+    fireEvent.contextMenu(
+      screen.getByText("记账日期").closest("[data-cell]") as HTMLElement,
+    );
+    fireEvent.click(screen.getByText("移至未匹配区"));
+    // 记账日期原是机器绿：移走后绿 4→3，未匹配 1→2，核对时不被匹配数误导。
+    expect(statOf("green")).toBe("3 匹配");
+    expect(statOf("unmatched")).toBe("2 未匹配");
   });
 
   it("列头菜单可整列剔除且剔除列不进输出", async () => {

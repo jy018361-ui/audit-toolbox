@@ -132,6 +132,11 @@ export function HeaderMatchGrid(props: {
   busy?: boolean;
   onTemplateChange: (path: string) => void;
   onExternalTemplate: () => void;
+  /** 人工修正表头行/层数后按新表头重跑机器匹配（Rust rematch）。 */
+  onRematch: (
+    templateHeaders: string[],
+    headers: string[],
+  ) => Promise<HeaderMatchPreview["rows"][number]["matches"]>;
   onCancel: () => void;
   onConfirm: (plan: HeaderMatchingPlanJson) => void;
 }) {
@@ -175,14 +180,29 @@ export function HeaderMatchGrid(props: {
     for (const row of rows) {
       for (const cell of row.cells) {
         if (cell.discard) continue;
-        if (cell.manual) green += 1;
-        else if (cell.target == null) unmatched += 1;
-        else if (cell.confidence >= GREEN_THRESHOLD) green += 1;
-        else yellow += 1;
+        // 人工移入未匹配区的列按「未匹配」计——核对待办时不能被匹配数误导。
+        if (cell.target == null) {
+          unmatched += 1;
+        } else if (cell.manual || cell.confidence >= GREEN_THRESHOLD) {
+          green += 1;
+        } else {
+          yellow += 1;
+        }
       }
     }
     return { green, yellow, unmatched };
   }, [rows]);
+
+  /** 源列下标 → Excel 列字母（0→A、25→Z、26→AA）：重名列靠它区分。 */
+  function columnLetter(index: number): string {
+    let value = index;
+    let label = "";
+    do {
+      label = String.fromCharCode(65 + (value % 26)) + label;
+      value = Math.floor(value / 26) - 1;
+    } while (value >= 0);
+    return label;
+  }
 
   function closeMenus() {
     setMenu(null);
@@ -313,8 +333,10 @@ export function HeaderMatchGrid(props: {
     );
   }
 
-  /** 人工修正表头行/层数：本地重新拍平表头，匹配结果重置为未匹配。 */
-  function applyDetectionEdit(
+  /** 人工修正表头行/层数：本地重新拍平表头后按新表头重跑机器匹配；
+   * 之前人工拖过的配对按「源列名→目标列名」能对上的自动恢复，
+   * 不让用户从白纸重连。 */
+  async function applyDetectionEdit(
     isTemplate: boolean,
     row: number,
     headerRow: number,
@@ -326,50 +348,86 @@ export function HeaderMatchGrid(props: {
       }
       return [...(raw[headerRow] ?? [])];
     };
+    // 修改前的人工配对快照（源列名 → 目标列名），重跑后按名字恢复。
+    const manualPairs = new Map<string, string>();
+    const collectManual = (state: RowState) => {
+      state.cells.forEach((cell, index) => {
+        if (cell.manual && !cell.discard && cell.target != null) {
+          manualPairs.set(
+            state.headers[index] ?? "",
+            template.headers[cell.target] ?? "",
+          );
+        }
+      });
+    };
+    const rebuildCells = (
+      headers: string[],
+      matches: { target: number | null; confidence: number; reason: string }[],
+      nextTemplate: string[],
+    ): CellState[] => {
+      const taken = new Set<number>();
+      return matches.map((match, index) => {
+        const manualTarget = (() => {
+          const targetName = manualPairs.get(headers[index] ?? "") ?? "";
+          if (!targetName) return null;
+          const target = nextTemplate.indexOf(targetName);
+          if (target < 0 || taken.has(target)) return null;
+          taken.add(target);
+          return target;
+        })();
+        return {
+          target: manualTarget ?? match.target,
+          discard: false,
+          manual: manualTarget != null,
+          machineTarget: match.target,
+          confidence: manualTarget != null ? 1 : match.confidence,
+          reason: manualTarget != null ? "人工调整" : match.reason,
+        };
+      });
+    };
     if (isTemplate) {
       const headers = reflatten(template.rawRows);
+      const nextTemplate = headers;
+      const before = rows;
+      before.forEach(collectManual);
+      const nextRows: RowState[] = [];
+      for (const state of before) {
+        const rowHeaders = reflatten(state.rawRows);
+        const matches = await props.onRematch(nextTemplate, rowHeaders);
+        nextRows.push({
+          ...state,
+          headers: rowHeaders,
+          cells: rebuildCells(rowHeaders, matches, nextTemplate),
+        });
+      }
       setTemplate((current) => ({
         ...current,
         headers,
         detection: { ...current.detection, headerRow, headerRowsCount },
       }));
       setExcluded(new Set());
-      setRows((currentRows) =>
-        currentRows.map((state) => ({
-          ...state,
-          cells: state.cells.map(() => ({
-            target: null,
-            discard: false,
-            manual: false,
-            machineTarget: null,
-            confidence: 0,
-            reason: "",
-          })),
-        })),
-      );
-      setToast("模板表头已更新，请重新确认各文件的映射");
+      setRows(nextRows);
+      setToast("模板表头已更新，已按新模板重新匹配（人工配对尽量保留）");
       return;
     }
+    const state = rows[row];
+    if (!state) return;
+    collectManual(state);
+    const rowHeaders = reflatten(state.rawRows);
+    const matches = await props.onRematch(template.headers, rowHeaders);
     setRows((current) =>
-      current.map((state, index) => {
-        if (index !== row) return state;
-        const headers = reflatten(state.rawRows);
-        return {
-          ...state,
-          headers,
-          detection: { ...state.detection, headerRow, headerRowsCount },
-          cells: headers.map(() => ({
-            target: null,
-            discard: false,
-            manual: false,
-            machineTarget: null,
-            confidence: 0,
-            reason: "",
-          })),
-        };
-      }),
+      current.map((item, index) =>
+        index === row
+          ? {
+              ...item,
+              headers: rowHeaders,
+              detection: { ...item.detection, headerRow, headerRowsCount },
+              cells: rebuildCells(rowHeaders, matches, template.headers),
+            }
+          : item,
+      ),
     );
-    setToast("表头已重新拍平，该文件的映射已重置");
+    setToast("表头已重新拍平，机器匹配已按新表头重跑（人工配对尽量保留）");
   }
 
   async function buildPlan(): Promise<HeaderMatchingPlanJson | null> {
@@ -522,6 +580,10 @@ export function HeaderMatchGrid(props: {
         </div>
 
         <div className="hmg-actions">
+          <p className="hmg-hint">
+            左键拖拽格子到目标列调整 · 右键格子或列头有菜单 · 行首箭头展开可看数据 ·
+            拖到右下角 🗑 丢弃此列
+          </p>
           <Button variant="secondary" size="sm" disabled={!stats.yellow || busy} onClick={acceptAll}>
             全部按建议执行（{stats.yellow}）
           </Button>
@@ -633,13 +695,14 @@ export function HeaderMatchGrid(props: {
                               className={cellClass(cell)}
                               title={
                                 cell.reason
-                                  ? `${state.headers[occupant]} · ${cell.reason}${cell.manual ? "（人工调整）" : ""}`
-                                  : state.headers[occupant]
+                                  ? `${state.headers[occupant]}（${columnLetter(occupant)}列） · ${cell.reason}${cell.manual ? "（人工调整）" : ""}`
+                                  : `${state.headers[occupant]}（${columnLetter(occupant)}列）`
                               }
                               {...dragProps(row, occupant)}
                             >
                               {cell.manual && <span className="hmg-manual-mark">✎</span>}
                               {state.headers[occupant]}
+                              <span className="hmg-col-tag">{columnLetter(occupant)}</span>
                             </div>
                           </td>
                         );
@@ -650,11 +713,16 @@ export function HeaderMatchGrid(props: {
                             <div
                               key={col}
                               className={cellClass(cell)}
-                              title={cell.discard ? "已丢弃" : "未匹配，默认保留为独立列"}
+                              title={
+                                cell.discard
+                                  ? `${state.headers[col]}（${columnLetter(col)}列）已丢弃`
+                                  : `${state.headers[col]}（${columnLetter(col)}列）未匹配，默认保留为独立列`
+                              }
                               {...dragProps(row, col)}
                             >
                               {cell.manual && <span className="hmg-manual-mark">✎</span>}
                               {cell.discard ? <s>{state.headers[col]}</s> : state.headers[col]}
+                              <span className="hmg-col-tag">{columnLetter(col)}</span>
                             </div>
                           ))}
                         </div>

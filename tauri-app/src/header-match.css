@@ -427,6 +427,11 @@
   background: var(--surface-muted);
 }
 
+/* 网格常挂载、用 hidden 收起（合并失败后一键返回，人工调整不丢）。 */
+.hmg-overlay[hidden] {
+  display: none;
+}
+
 .hmg-menu-sep {
   font-size: 11px;
   color: var(--muted-soft);
@@ -434,3 +439,82 @@
   border-top: 1px solid var(--border-soft);
   margin-top: 2px;
 }
+
+/* 源列位标注（0→A），重名列靠它区分。 */
+.hmg-col-tag {
+  margin-left: 4px;
+  font-size: 10px;
+  opacity: 0.65;
+  font-weight: 400;
+}
+
+.hmg-hint {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  flex: 1;
+  min-width: 240px;
+}
+
+.alias-entry {
+  margin-top: 4px;
+}
+
+.grid-return {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.alias-panel {
+  max-width: 560px;
+  margin: auto;
+  align-self: center;
+}
+
+.alias-list {
+  padding: 12px 16px;
+  overflow: auto;
+  max-height: 50vh;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.alias-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  font-size: var(--fs-sm);
+}
+
+.alias-source,
+.alias-target {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.alias-source {
+  color: var(--danger-fg);
+}
+
+.alias-target {
+  color: var(--success-fg);
+}
+
+.alias-arrow {
+  color: var(--muted-soft);
+}
+
+.alias-empty {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  padding: 8px;
+}
+

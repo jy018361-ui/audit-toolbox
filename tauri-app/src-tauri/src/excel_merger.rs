@@ -1226,6 +1226,45 @@ pub fn call(method: &str, params: Value) -> Result<Value, AppError> {
             inspect(&paths)
         }
         "excel_merger.match_preview" => match_preview(&params),
+        "excel_merger.rematch" => {
+            // 人工修正表头行/层数后按新表头重跑机器匹配，避免全部归零重来。
+            let template_headers = params
+                .get("templateHeaders")
+                .and_then(Value::as_array)
+                .ok_or_else(|| error("INVALID_ARGUMENT", "缺少模板列。", None))?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let headers = params
+                .get("headers")
+                .and_then(Value::as_array)
+                .ok_or_else(|| error("INVALID_ARGUMENT", "缺少文件表头。", None))?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let aliases = crate::excel_header_match::load_aliases();
+            Ok(json!({
+                "matches": crate::excel_header_match::match_columns(&template_headers, &headers, &aliases),
+            }))
+        }
+        "excel_merger.alias_list" => {
+            let aliases = crate::excel_header_match::load_aliases();
+            Ok(json!({"aliases": aliases
+                .iter()
+                .map(|(source, target)| json!({"source": source, "target": target}))
+                .collect::<Vec<_>>()}))
+        }
+        "excel_merger.alias_delete" => {
+            let source = required_string(&params, "source")?;
+            let target = required_string(&params, "target")?;
+            let aliases = crate::excel_header_match::delete_alias(&source, &target);
+            Ok(json!({"deleted": true, "aliases": aliases
+                .iter()
+                .map(|(source, target)| json!({"source": source, "target": target}))
+                .collect::<Vec<_>>()}))
+        }
         _ => Err(error(
             "METHOD_NOT_FOUND",
             "未找到 Excel 合并方法。",
@@ -1866,18 +1905,27 @@ fn write_vertical_xlsx_stream(
             let assignment = matched
                 .as_ref()
                 .and_then(|layout| layout.assignment(path, "CSV"));
+            let assignment_pos = matched
+                .as_ref()
+                .and_then(|layout| layout.assignment_position(path, "CSV"));
             let skip = require_assignment(&matched, path, "CSV", assignment.map(|a| a.header_row + a.header_rows_count))?;
             let mut count = 0usize;
             let mut reorder_buffer = Vec::new();
+            // 预览确认后文件可能被改动：跳过表头前的行时顺手收集当前表头，
+            // 与计划快照比对，不一致宁可停下也不按旧列位错排。
+            let mut snapshot = HeaderSnapshot::new(assignment, path, "CSV");
             for_each_text_row(path, cancel, |row| {
                 if count < skip {
                     count += 1;
+                    snapshot.push(&row)?;
                     return Ok(());
                 }
                 count += 1;
                 if row.iter().any(|cell| !cell.is_empty()) {
-                    if let (Some(layout), Some(assignment)) = (matched.as_ref(), assignment) {
-                        reorder_matched_row(&mut reorder_buffer, &row, assignment, layout);
+                    if let (Some(layout), Some(assignment), Some(pos)) =
+                        (matched.as_ref(), assignment, assignment_pos)
+                    {
+                        reorder_matched_row(&mut reorder_buffer, &row, assignment, pos, layout);
                         write_matched_vertical_row(
                             &mut workbook,
                             &mut worksheet,
@@ -1943,12 +1991,29 @@ fn write_vertical_xlsx_stream(
                 rows: Vec::new(),
             };
             let assignment = matched.as_ref().and_then(|layout| layout.assignment(path, &name));
+            let assignment_pos = matched
+                .as_ref()
+                .and_then(|layout| layout.assignment_position(path, &name));
             let skip = require_assignment(
                 &matched,
                 path,
                 &name,
                 assignment.map(|a| a.header_row + a.header_rows_count),
             )?;
+            if let Some(assignment) = assignment {
+                let current: Vec<Vec<String>> = range
+                    .rows()
+                    .skip(assignment.header_row)
+                    .take(assignment.header_rows_count)
+                    .map(|row| {
+                        row.iter()
+                            .map(Cell::from_excel)
+                            .map(|cell| cell.display())
+                            .collect()
+                    })
+                    .collect();
+                verify_current_headers(&current, path, &name, assignment)?;
+            }
             let mut reorder_buffer = Vec::new();
             for (row_index, data_row) in range.rows().enumerate() {
                 if row_index < skip {
@@ -1960,8 +2025,10 @@ fn write_vertical_xlsx_stream(
                     continue;
                 }
                 let cells = data_row.iter().map(Cell::from_excel).collect::<Vec<_>>();
-                if let (Some(layout), Some(assignment)) = (matched.as_ref(), assignment) {
-                    reorder_matched_row(&mut reorder_buffer, &cells, assignment, layout);
+                if let (Some(layout), Some(assignment), Some(pos)) =
+                    (matched.as_ref(), assignment, assignment_pos)
+                {
+                    reorder_matched_row(&mut reorder_buffer, &cells, assignment, pos, layout);
                     write_matched_vertical_row(
                         &mut workbook,
                         &mut worksheet,
@@ -2029,14 +2096,92 @@ fn require_assignment(
     }
 }
 
-/// 智能表头匹配的输出布局：模板列在前、独立列（跨文件同名合一）在后，
-/// 以及 (路径, Sheet) → 映射计划的索引。
+/// 把当前文件读到的表头行（display 后）按计划层数拍平，与预览快照比对。
+/// 表头列名或列数任何不同都判定"文件在预览后被改动"，中止合并——按旧
+/// 列位继续重排只会整表错位落盘。
+fn verify_current_headers(
+    current_rows: &[Vec<String>],
+    path: &Path,
+    sheet: &str,
+    assignment: &crate::excel_header_match::FileAssignment,
+) -> Result<(), AppError> {
+    let flattened = if assignment.header_rows_count >= 2 {
+        crate::excel_header_match::flatten_two_layer(
+            current_rows.first().map(Vec::as_slice).unwrap_or(&[]),
+            current_rows.get(1).map(Vec::as_slice).unwrap_or(&[]),
+        )
+    } else {
+        current_rows
+            .first()
+            .cloned()
+            .unwrap_or_default()
+    };
+    let same = flattened.len() == assignment.headers.len()
+        && flattened
+            .iter()
+            .zip(assignment.headers.iter())
+            .all(|(a, b)| a.trim() == b.trim());
+    if same {
+        return Ok(());
+    }
+    Err(error(
+        "HEADER_PLAN_STALE",
+        &format!(
+            "「{} / {}」的表头与预览确认时不一致（文件可能在预览后被修改）。请返回匹配界面重新预览确认。",
+            file_name(path),
+            sheet
+        ),
+        Some(path.display().to_string()),
+    ))
+}
+
+/// 文本文件的流式快照复核：跳过表头前的行时逐行收集，收齐即比对。
+struct HeaderSnapshot<'a> {
+    assignment: Option<&'a crate::excel_header_match::FileAssignment>,
+    path: PathBuf,
+    sheet: String,
+    rows: Vec<Vec<String>>,
+}
+
+impl<'a> HeaderSnapshot<'a> {
+    fn new(
+        assignment: Option<&'a crate::excel_header_match::FileAssignment>,
+        path: &Path,
+        sheet: &str,
+    ) -> HeaderSnapshot<'a> {
+        HeaderSnapshot {
+            assignment,
+            path: path.to_path_buf(),
+            sheet: sheet.to_string(),
+            rows: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, row: &[Cell]) -> Result<(), AppError> {
+        let Some(assignment) = self.assignment else {
+            return Ok(());
+        };
+        if self.rows.len() >= assignment.header_rows_count {
+            return Ok(());
+        }
+        self.rows.push(row.iter().map(Cell::display).collect());
+        if self.rows.len() == assignment.header_rows_count {
+            verify_current_headers(&self.rows, &self.path, &self.sheet, assignment)?;
+        }
+        Ok(())
+    }
+}
+
+/// 智能表头匹配的输出布局：模板列在前、独立列（跨文件同名合一）在后。
+/// 独立列落位只认 `independent_slots`（计划 assignment 下标 + 源列下标 →
+/// 独立列下标）——不按名字反查：同文件重名列会互相覆盖、手动移入未匹配
+/// 区的模板同名列会因改名而查空，都是静默丢数据。
 struct MatchedLayout {
     ordered: Vec<crate::excel_header_match::FileAssignment>,
     index: HashMap<(String, String), usize>,
     template_headers: Vec<String>,
     independent: Vec<String>,
-    independent_index: HashMap<String, usize>,
+    independent_slots: HashMap<(usize, usize), usize>,
 }
 
 impl MatchedLayout {
@@ -2049,6 +2194,12 @@ impl MatchedLayout {
             .get(&(path.to_string_lossy().to_lowercase(), sheet.to_string()))
             .map(|&i| &self.ordered[i])
     }
+
+    fn assignment_position(&self, path: &Path, sheet: &str) -> Option<usize> {
+        self.index
+            .get(&(path.to_string_lossy().to_lowercase(), sheet.to_string()))
+            .copied()
+    }
 }
 
 fn build_matched_layout(
@@ -2057,8 +2208,12 @@ fn build_matched_layout(
     let mut ordered = Vec::new();
     let mut index = HashMap::new();
     let mut independent: Vec<String> = Vec::new();
-    let mut independent_index: HashMap<String, usize> = HashMap::new();
-    for assignment in &plan.assignments {
+    // 输出列名 → 独立列下标：跨文件同名独立列并进同一列。
+    let mut by_name: HashMap<String, usize> = HashMap::new();
+    let mut slots: HashMap<(usize, usize), usize> = HashMap::new();
+    for (assignment_index, assignment) in plan.assignments.iter().enumerate() {
+        // 本文件内同名列各自成列（并进一列会互相覆盖），从第二个起加序号。
+        let mut seen_in_file: HashMap<String, usize> = HashMap::new();
         for column in &assignment.columns {
             if column.discard || column.target.is_some() {
                 continue;
@@ -2071,17 +2226,28 @@ fn build_matched_layout(
             if base.trim().is_empty() {
                 continue;
             }
-            // 独立列与模板列或已有独立列同名时加序号，数据列绝不能被吞掉。
-            let mut candidate = base.clone();
-            let mut suffix = 1usize;
-            while plan.template_headers.iter().any(|header| header == &candidate)
-                || independent_index.contains_key(&candidate)
-            {
-                suffix += 1;
-                candidate = format!("{base}({suffix})");
+            let occurrence = seen_in_file.entry(base.clone()).or_insert(0);
+            *occurrence += 1;
+            let mut candidate = if *occurrence == 1 {
+                base.clone()
+            } else {
+                format!("{base}({occurrence})")
+            };
+            // 与模板列同名（用户手动移入未匹配区的场景）加标记后缀，既不
+            // 撞模板列名，也保证数据有自己的落位。
+            if plan.template_headers.iter().any(|header| header == &candidate) {
+                candidate = format!("{candidate}(独立)");
             }
-            independent_index.insert(candidate.clone(), independent.len());
-            independent.push(candidate);
+            let slot = match by_name.get(&candidate) {
+                Some(&slot) => slot,
+                None => {
+                    independent.push(candidate.clone());
+                    let slot = independent.len() - 1;
+                    by_name.insert(candidate, slot);
+                    slot
+                }
+            };
+            slots.insert((assignment_index, column.source), slot);
         }
         index.insert(
             (assignment.path.to_lowercase(), assignment.sheet.clone()),
@@ -2094,15 +2260,17 @@ fn build_matched_layout(
         index,
         template_headers: plan.template_headers.clone(),
         independent,
-        independent_index,
+        independent_slots: slots,
     })
 }
 
-/// 按映射计划把一行源数据重排进「模板列 + 独立列」布局。
+/// 按映射计划把一行源数据重排进「模板列 + 独立列」布局；独立列落位只认
+/// 槽位映射（见 [`MatchedLayout`]），与模板列同下标无关。
 fn reorder_matched_row(
     buffer: &mut Vec<Cell>,
     row: &[Cell],
     assignment: &crate::excel_header_match::FileAssignment,
+    assignment_index: usize,
     layout: &MatchedLayout,
 ) {
     let width = layout.template_headers.len() + layout.independent.len();
@@ -2119,13 +2287,11 @@ fn reorder_matched_row(
         match column.target {
             Some(target) => buffer[target] = value,
             None => {
-                let name = assignment
-                    .headers
-                    .get(column.source)
-                    .map(String::as_str)
-                    .unwrap_or("");
-                if let Some(&offset) = layout.independent_index.get(name) {
-                    buffer[layout.template_headers.len() + offset] = value;
+                if let Some(&slot) = layout
+                    .independent_slots
+                    .get(&(assignment_index, column.source))
+                {
+                    buffer[layout.template_headers.len() + slot] = value;
                 }
             }
         }
@@ -2353,8 +2519,8 @@ fn write_vertical_csv_stream(
                 );
             }
             if let Some(layout) = &matched {
-                let assignment = layout
-                    .assignment(&source.file_path, &source.sheet_name)
+                let position = layout
+                    .assignment_position(&source.file_path, &source.sheet_name)
                     .ok_or_else(|| {
                         error(
                             "HEADER_PLAN_MISSING",
@@ -2365,8 +2531,9 @@ fn write_vertical_csv_stream(
                             Some(source.file_path.display().to_string()),
                         )
                     })?;
+                let assignment = layout.ordered[position].clone();
                 let mut buffer = Vec::new();
-                reorder_matched_row(&mut buffer, row, assignment, layout);
+                reorder_matched_row(&mut buffer, row, &assignment, position, layout);
                 let mut record = vec![source.file_name.clone(), source.sheet_name.clone()];
                 record.extend(buffer.iter().map(Cell::display));
                 writer.write_record(record).map_err(csv_error)?;
@@ -2384,6 +2551,7 @@ fn write_vertical_csv_stream(
         };
         if is_text(path) {
             let source = text_source(path, params);
+            let assignment = matched.as_ref().and_then(|layout| layout.assignment(path, "CSV"));
             let skip = matched.as_ref().and_then(|layout| {
                 layout
                     .assignment(path, "CSV")
@@ -2391,10 +2559,12 @@ fn write_vertical_csv_stream(
             });
             let skip = require_assignment(&matched, path, "CSV", skip)?;
             let mut seen = 0usize;
+            let mut snapshot = HeaderSnapshot::new(assignment, path, "CSV");
             // A late text decoding error must abort, never publish a partially read file.
             for_each_text_row(path, cancel, |row| {
                 if seen < skip {
                     seen += 1;
+                    snapshot.push(&row)?;
                     return Ok(());
                 }
                 seen += 1;
@@ -2405,6 +2575,9 @@ fn write_vertical_csv_stream(
                 Ok((sheets, issues)) => {
                     warnings.extend(issues);
                     for source in &sheets {
+                        let assignment = matched
+                            .as_ref()
+                            .and_then(|layout| layout.assignment(&source.file_path, &source.sheet_name));
                         let skip = matched.as_ref().and_then(|layout| {
                             layout
                                 .assignment(&source.file_path, &source.sheet_name)
@@ -2418,6 +2591,21 @@ fn write_vertical_csv_stream(
                             &source.sheet_name,
                             skip,
                         )?;
+                        if let Some(assignment) = assignment {
+                            let current: Vec<Vec<String>> = source
+                                .rows
+                                .iter()
+                                .skip(assignment.header_row)
+                                .take(assignment.header_rows_count)
+                                .map(|row| row.iter().map(Cell::display).collect())
+                                .collect();
+                            verify_current_headers(
+                                &current,
+                                &source.file_path,
+                                &source.sheet_name,
+                                assignment,
+                            )?;
+                        }
                         for row in source.rows.iter().skip(skip) {
                             write_row(source, row)?;
                         }
@@ -3330,6 +3518,122 @@ mod tests {
         assert_eq!(rows[0], vec!["来源文件", "来源Sheet", "日期", "金额-借方", "金额-贷方"]);
         assert_eq!(rows[1][3], "100");
         assert_eq!(rows[1][4], "50");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn matched_merge_keeps_duplicate_and_template_named_independent_columns() {
+        let root = std::env::temp_dir().join(format!("audit-match-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let template = root.join("A.xlsx");
+        let other = root.join("B.xlsx");
+        // A 有两个同名「金额」：一个并入模板，另一个进未匹配区；
+        // B 的「日期」被手动移入未匹配区（与模板列同名）——独立列数据都不能丢。
+        sample_book(&template, "Sheet1", &[
+            &["日期", "金额", "金额"],
+            &["2026-01-01", "100.00", "200.00"],
+        ]);
+        sample_book(&other, "Sheet1", &[
+            &["金额", "日期"],
+            &["300.00", "2026-02-01"],
+        ]);
+        let output = root.join("independent.xlsx");
+        let mut params = base_params(&[template.clone(), other.clone()], &output);
+        params["headerMatching"] = json!({
+            "templatePath": template.to_string_lossy(),
+            "templateHeaders": ["日期", "金额"],
+            "rememberAliases": [],
+            "assignments": [
+                assignment_json(&template, "Sheet1", 0, 1,
+                    &["日期", "金额", "金额"],
+                    &[
+                        column_json(0, Some(0), false),
+                        column_json(1, Some(1), false),
+                        column_json(2, None, false),
+                    ]),
+                assignment_json(&other, "Sheet1", 0, 1,
+                    &["金额", "日期"],
+                    &[
+                        column_json(0, Some(1), false),
+                        column_json(1, None, false),
+                    ]),
+            ],
+        });
+        test_merge(params, Arc::new(AtomicBool::new(false))).unwrap();
+        let rows = read_merged_sheet(&output, "Merged");
+        assert_eq!(
+            rows[0],
+            vec![
+                "来源文件", "来源Sheet", "日期", "金额", "金额(独立)", "日期(独立)"
+            ],
+            "独立列：A 的第二个「金额」撞模板名加标记，B 被移入未匹配区的「日期」同"
+        );
+        // A 行：第一个金额并入模板「金额」，第二个金额落在自己的独立列。
+        assert_eq!(rows[1][3], "100.00");
+        assert_eq!(rows[1][4], "200.00");
+        // B 行：金额并入模板列，被移入未匹配区的「日期」数据必须保留。
+        assert_eq!(rows[2][3], "300.00");
+        assert_eq!(rows[2][5], "2026-02-01");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn matched_merge_cross_file_same_name_independents_share_one_column() {
+        let root = std::env::temp_dir().join(format!("audit-match-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let template = root.join("A.xlsx");
+        let other = root.join("B.xlsx");
+        sample_book(&template, "Sheet1", &[
+            &["日期"],
+            &["2026-01-01"],
+        ]);
+        sample_book(&other, "Sheet1", &[
+            &["日期", "备注"],
+            &["2026-02-01", "B备注"],
+        ]);
+        let output = root.join("shared.xlsx");
+        let mut params = base_params(&[template.clone(), other.clone()], &output);
+        params["headerMatching"] = json!({
+            "templatePath": template.to_string_lossy(),
+            "templateHeaders": ["日期"],
+            "rememberAliases": [],
+            "assignments": [
+                assignment_json(&template, "Sheet1", 0, 1, &["日期"],
+                    &[column_json(0, Some(0), false)]),
+                assignment_json(&other, "Sheet1", 0, 1, &["日期", "备注"],
+                    &[column_json(0, Some(0), false), column_json(1, None, false)]),
+            ],
+        });
+        test_merge(params, Arc::new(AtomicBool::new(false))).unwrap();
+        let rows = read_merged_sheet(&output, "Merged");
+        assert_eq!(rows[0], vec!["来源文件", "来源Sheet", "日期", "备注"]);
+        assert_eq!(rows[2][3], "B备注");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn matched_merge_rejects_file_modified_after_preview() {
+        let root = std::env::temp_dir().join(format!("audit-match-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let input = root.join("A.xlsx");
+        // 文件当前表头是「日期/金额」：模拟预览确认后用户删了「凭证号」、加了「金额」。
+        sample_book(&input, "Sheet1", &[
+            &["日期", "金额"],
+            &["2026-01-01", "100.00"],
+        ]);
+        let output = root.join("stale.xlsx");
+        let mut params = base_params(&[input.clone()], &output);
+        // 快照与实际不符：模拟预览确认后用户删了「凭证号」列、加了「金额」列。
+        params["headerMatching"] = json!({
+            "templatePath": input.to_string_lossy(),
+            "templateHeaders": ["日期", "凭证号"],
+            "rememberAliases": [],
+            "assignments": [assignment_json(&input, "Sheet1", 0, 1, &["日期", "凭证号"],
+                &[column_json(0, Some(0), false), column_json(1, Some(1), false)])],
+        });
+        let error = test_merge(params, Arc::new(AtomicBool::new(false))).unwrap_err();
+        assert_eq!(error.code, "HEADER_PLAN_STALE");
+        assert!(!output.exists(), "表头不符时不能产出文件");
         let _ = fs::remove_dir_all(root);
     }
 

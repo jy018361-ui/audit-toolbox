@@ -206,8 +206,9 @@ const ALIAS_GROUPS: &[&[&str]] = &[
 ];
 
 /// 对立词对：两边分别命中即语义相反，相似度层一票否决——「借方金额」和
-/// 「贷方金额」只差一个字，错配了借贷方向整个反掉。双字词组避免误伤
-/// 「借贷方向」这类同时含两词的列名。
+/// 「贷方金额」只差一个字，错配了借贷方向整个反掉；「原币/本位币」与
+/// 「含税/不含税」同样是差一个字、口径全反，审计底稿里最要命。
+/// 「不含税」包含子串「含税」，见 [`term_hit`] 的超集词处理。
 const CONFLICT_PAIRS: &[(&str, &str)] = &[
     ("借方", "贷方"),
     ("应收", "应付"),
@@ -217,12 +218,24 @@ const CONFLICT_PAIRS: &[(&str, &str)] = &[
     ("收入", "支出"),
     ("资产", "负债"),
     ("增加", "减少"),
+    ("原币", "本位币"),
+    ("含税", "不含税"),
 ];
 
+/// 词对里一方是另一方的超集词（「不含税」⊃「含税」）时，命中长词不算
+/// 命中短词——否则「不含税金额」会被误判为同时含「含税」，对立判定失效。
+fn term_hit(text: &str, term: &str, opposite: &str) -> bool {
+    if opposite.len() > term.len() && opposite.contains(term) && text.contains(opposite) {
+        return false;
+    }
+    text.contains(term)
+}
+
 fn conflicts(template: &str, header: &str) -> bool {
-    CONFLICT_PAIRS.iter().any(|(a, b)| {
-        (template.contains(a) && header.contains(b) && !header.contains(a))
-            || (template.contains(b) && header.contains(a) && !header.contains(b))
+    CONFLICT_PAIRS.iter().any(|&(a, b)| {
+        let (t_a, t_b) = (term_hit(template, a, b), term_hit(template, b, a));
+        let (h_a, h_b) = (term_hit(header, a, b), term_hit(header, b, a));
+        (t_a && h_b && !h_a) || (t_b && h_a && !h_b)
     })
 }
 
@@ -487,6 +500,27 @@ pub(crate) fn save_aliases(pairs: &[(String, String)]) {
     let _ = std::fs::write(path, value.to_string());
 }
 
+/// 删除一条人工对照（拖错又勾了记住的场景）；返回删除后的清单。
+pub(crate) fn delete_alias(source: &str, target: &str) -> Vec<(String, String)> {
+    let Some(path) = alias_file_path() else {
+        return Vec::new();
+    };
+    let mut existing = load_aliases();
+    let before = existing.len();
+    existing.retain(|(s, t)| !(s == source && t == target));
+    if existing.len() != before {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let value = json!(existing
+            .iter()
+            .map(|(s, t)| json!({"source": s, "target": t}))
+            .collect::<Vec<_>>());
+        let _ = std::fs::write(path, value.to_string());
+    }
+    existing
+}
+
 // ────────────────────────────── 合并计划 ──────────────────────────────
 
 /// 前端匹配网格确认后回传的最终映射，`merge` 纵向路径按它重排列。
@@ -683,10 +717,31 @@ mod tests {
         assert_eq!(matches[0].target, Some(1));
         assert_eq!(matches[1].target, Some(0));
 
-        let template2 = vec!["应收账款".into()];
-        let headers2 = vec!["应付账款".into()];
-        let matches2 = match_columns(&template2, &headers2, &[]);
-        assert_eq!(matches2[0].target, None, "应收/应付一个字之差必须拦下");
+        let cases: &[(&str, &str)] = &[
+            ("应收账款", "应付账款"),
+            ("原币金额", "本位币金额"),
+            ("本位币金额", "原币金额"),
+            ("含税金额", "不含税金额"),
+            ("不含税金额", "含税金额"),
+        ];
+        for (t, h) in cases {
+            let matches = match_columns(
+                std::slice::from_ref(&t.to_string()),
+                std::slice::from_ref(&h.to_string()),
+                &[],
+            );
+            assert!(
+                matches[0].target.is_none(),
+                "「{t}」与「{h}」一个字之差口径全反，必须拦下"
+            );
+        }
+        // 超集词不能误伤：两个「不含税」之间仍是名称一致。
+        let same = match_columns(
+            &["不含税金额".to_string()],
+            &["不含税金额".to_string()],
+            &[],
+        );
+        assert_eq!(same[0].target, Some(0));
     }
 
     #[test]

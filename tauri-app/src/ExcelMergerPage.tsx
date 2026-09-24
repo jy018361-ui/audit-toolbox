@@ -25,9 +25,12 @@ import {
   type HeaderMatchPreview,
   type HeaderMatchingPlanJson,
 } from "@/components/HeaderMatchGrid";
+import { HeaderAliasManager } from "@/components/HeaderAliasManager";
 import "./header-match.css";
 
 const HEADER_MATCHING_STORAGE_KEY = "merger.headerMatching";
+
+type AliasEntry = { source: string; target: string };
 
 type MergerFile = {
   path: string;
@@ -79,6 +82,13 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
   const [matchPreview, setMatchPreview] = useState<HeaderMatchPreview>();
   const [showMatch, setShowMatch] = useState(false);
   const [matchBusy, setMatchBusy] = useState(false);
+  // 合并任务失败后允许一键返回匹配网格：网格常挂载（hidden 而非卸载），
+  // 已有的人工调整全部保留，改完就能重试。
+  const [gridReturnable, setGridReturnable] = useState(false);
+  // 上传过的外部模板在下拉里保持可选，切走也能切回来。
+  const [externalTemplate, setExternalTemplate] = useState("");
+  const [aliasManagerOpen, setAliasManagerOpen] = useState(false);
+  const [aliasCount, setAliasCount] = useState(0);
   const [busy, setBusy] = useState(false);
   const [job, setJob] = useState<JobEvent>();
   const [error, setError] = useState("");
@@ -120,8 +130,11 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
           const payload = event.result as
             { error?: { userMessage?: string } } | undefined;
           setError(payload?.error ? errorText(payload.error) : event.message);
+          // 匹配网格还挂着：失败后一键返回调整重试，人工调整不丢。
+          setGridReturnable(true);
         } else if (event.result) {
           setResult(event.result);
+          setGridReturnable(false);
         }
         setBusy(!["completed", "failed", "cancelled"].includes(event.phase));
       }
@@ -305,11 +318,42 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
       setTemplatePath(value.template.path);
       setMatchPreview(value);
       setShowMatch(true);
+      setGridReturnable(false);
     } catch (e) {
       setError(errorText(e));
     } finally {
       setMatchBusy(false);
     }
+  }
+
+  async function rematchColumns(
+    templateHeaders: string[],
+    headers: string[],
+  ): Promise<HeaderMatchPreview["rows"][number]["matches"]> {
+    const value = (await engineCall("excel_merger.rematch", {
+      templateHeaders,
+      headers,
+    })) as { matches: HeaderMatchPreview["rows"][number]["matches"] };
+    return value.matches ?? [];
+  }
+
+  async function refreshAliasCount() {
+    try {
+      const value = (await engineCall("excel_merger.alias_list", {})) as {
+        aliases?: AliasEntry[];
+      };
+      setAliasCount(value.aliases?.length ?? 0);
+    } catch {
+      setAliasCount(0);
+    }
+  }
+
+  useEffect(() => {
+    void refreshAliasCount();
+  }, []);
+
+  async function openAliasManager() {
+    setAliasManagerOpen(true);
   }
 
   async function chooseExternalTemplate() {
@@ -318,7 +362,10 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
       "xls",
       "xlsm",
     ]);
-    if (typeof picked === "string") void startMatchPreview(picked);
+    if (typeof picked === "string") {
+      setExternalTemplate(picked);
+      void startMatchPreview(picked);
+    }
   }
 
   async function start(plan?: HeaderMatchingPlanJson) {
@@ -634,6 +681,15 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
                 ? "按模板表头自动对齐列（合并前先预览确认）"
                 : "仅纵向合并成一张大表时可用"}
             </label>
+            <div className="alias-entry">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void openAliasManager()}
+              >
+                我的对照表{aliasCount ? `（${aliasCount}）` : ""}
+              </Button>
+            </div>
           </fieldset>
           <label className="check-row">
             <SwitchInput
@@ -697,6 +753,14 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
             {outputMode === "one_workbook" ? "xlsx" : outputFormat}
           </p>
           {error && <div className="error-box">{error}</div>}
+          {error && gridReturnable && (
+            <div className="error-box grid-return">
+              <span>合并失败，匹配网格里的人工调整仍然保留。</span>
+              <Button variant="secondary" size="sm" onClick={() => setShowMatch(true)}>
+                返回匹配网格调整
+              </Button>
+            </div>
+          )}
           <div className="actions">
             {busy && job ? (
               <Button
@@ -751,20 +815,42 @@ export function ExcelMergerPage({ tool }: { tool: ToolManifest }) {
           />
         )}
       </section>
-      {showMatch && matchPreview && (
-        <HeaderMatchGrid
-          preview={matchPreview}
-          busy={busy}
-          files={paths.map((path) => ({
-            path,
-            name: path.split(/[\\/]/).pop() ?? path,
-          }))}
-          onTemplateChange={(path) => void startMatchPreview(path)}
-          onExternalTemplate={() => void chooseExternalTemplate()}
-          onCancel={() => setShowMatch(false)}
-          onConfirm={(plan) => {
-            setShowMatch(false);
-            void start(plan);
+      {matchPreview && (
+        <div hidden={!showMatch}>
+          <HeaderMatchGrid
+            preview={matchPreview}
+            busy={busy}
+            files={[
+              ...paths.map((path) => ({
+                path,
+                name: path.split(/[\\/]/).pop() ?? path,
+              })),
+              ...(externalTemplate && !paths.includes(externalTemplate)
+                ? [
+                    {
+                      path: externalTemplate,
+                      name: `${externalTemplate.split(/[\\/]/).pop() ?? externalTemplate}（外部）`,
+                    },
+                  ]
+                : []),
+            ]}
+            onTemplateChange={(path) => void startMatchPreview(path)}
+            onExternalTemplate={() => void chooseExternalTemplate()}
+            onRematch={rematchColumns}
+            onCancel={() => setShowMatch(false)}
+            onConfirm={(plan) => {
+              setShowMatch(false);
+              setGridReturnable(false);
+              void start(plan);
+            }}
+          />
+        </div>
+      )}
+      {aliasManagerOpen && (
+        <HeaderAliasManager
+          onClose={() => {
+            setAliasManagerOpen(false);
+            void refreshAliasCount();
           }}
         />
       )}

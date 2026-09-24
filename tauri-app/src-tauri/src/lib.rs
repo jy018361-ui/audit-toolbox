@@ -1206,6 +1206,17 @@ pub fn engine_call_for_test(
             &pause,
         );
     }
+    // Excel 合并·智能表头匹配探针：match_preview 只读识别；merge_probe 按
+    // 调用方给的完整计划真实合并到指定输出，供真实 JE 样例回归
+    // （tests/header_match_je_probe.rs，--ignored）。
+    if method == "excel_merger.match_preview" {
+        return excel_merger::call(method, params);
+    }
+    if method == "excel_merger.merge_probe" {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pause = excel_merger::PauseCheckpoint::unpaused(cancel.clone());
+        return excel_merger::merge(params, &|_, _, _, _| {}, cancel, &pause);
+    }
     // 看账的只读识别类：不写文件、不动任务，调查测试用它量缓存效果。
     // 余额滚动校验是只读的，调查测试用它拿真实样例定位失配。
     if method == "fx.preview_probe" {

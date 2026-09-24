@@ -15,6 +15,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { StepIndicator } from "@/components/StepIndicator";
 import { ErrorBox } from "@/components/ErrorBox";
 import { JobProgress } from "@/components/JobProgress";
+import { cancelJobWithFeedback } from "@/components/JobCommandNotice";
 import { Field } from "@/components/Field";
 import { FileDropInput } from "@/components/FileDropInput";
 import { displayFileName } from "@/fileDisplay";
@@ -467,14 +468,27 @@ export default function ConfirmationProgressPage({
                   >
                     上一步
                   </Button>
-                  <Button
-                    type="button"
-                    variant="default"
-                    disabled={!generateReady}
-                    onClick={() => void generate()}
-                  >
-                    生成进度报告
-                  </Button>
+                  {/* 运行中主按钮换成"停止"次按钮，与折旧政策对比 / FA List
+                      一致；仅禁用不够醒目，审计（P1-3）仍会误读为可再点。 */}
+                  {busy && job ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void cancelJobWithFeedback(job.jobId)}
+                    >
+                      停止
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      variant="default"
+                      disabled={!generateReady}
+                      onClick={() => void generate()}
+                    >
+                      生成进度报告
+                    </Button>
+                  )}
                 </div>
               </>
             )}

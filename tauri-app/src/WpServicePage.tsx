@@ -217,7 +217,14 @@ export function WpServicePage({ tool }: { tool: ToolManifest }) {
           </CardHeader>
           <CardContent>
             {result ? (
-              <ResultView value={result} />
+              <ResultView
+                value={result}
+                // 任务失败/取消后旧结果仍会留在这里，必须标注以免被当成
+                // 本次成功产物（P1：失败后不得宣称"处理完成"）。
+                stale={Boolean(
+                  job && (job.phase === "failed" || job.phase === "cancelled"),
+                )}
+              />
             ) : (
               <EmptyState
                 title={busy ? "正在处理工作目录" : "尚未生成结果"}

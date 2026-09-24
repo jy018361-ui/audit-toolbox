@@ -94,6 +94,17 @@
   scrollbar-gutter: stable;
 }
 
+/* 失败/取消后残留的结果提示：小字但醒目，防止把上次结果当本次成功产物。 */
+.result-summary .result-stale-note {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--warning-border);
+  border-radius: 6px;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  font-size: 0.875rem;
+}
+
 .result-output-list {
   display: grid;
   gap: var(--sp-2);
@@ -196,5 +207,59 @@
 
   .error-box-actions {
     margin-left: 0;
+  }
+}
+
+/* === UI 审计修复 P1-1（2026-09-24）：进度条轨道显式接管 ===
+   原生 <progress> 只设 accent-color 时，WebView2/Chromium 会把"轨道"
+   从 accent 色（#78b7ad）派生加深成深灰，排队 / 0% 时整条深灰实心条
+   看起来像已完成。以下追加规则接管渲染：浅灰轨道（与页面背景有层次、
+   与填充色对比明显，令牌混色、明暗主题自适应）+ 各语气显式填充色。
+   仅追加，不改动上方既有规则。 */
+.job-progress progress {
+  -webkit-appearance: none;
+  appearance: none;
+  overflow: hidden;
+  background-color: color-mix(in srgb, var(--border) 55%, var(--surface-page));
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.job-progress progress::-webkit-progress-bar {
+  background-color: transparent;
+  border-radius: var(--r-pill);
+}
+
+.job-progress progress::-webkit-progress-value {
+  background-color: var(--brand-accent);
+  border-radius: var(--r-pill);
+  transition: width 0.25s ease;
+}
+
+.job-progress progress.progress-tone-warning::-webkit-progress-value { background-color: var(--warning-dot); }
+.job-progress progress.progress-tone-danger::-webkit-progress-value { background-color: var(--danger-fg); }
+.job-progress progress.progress-tone-success::-webkit-progress-value { background-color: var(--success-fg); }
+
+/* 排队态进度不定、无填充：轨道轻微呼吸，明确区分"已排队、尚未开始"。 */
+.job-progress[data-job-state="queued"] progress {
+  animation: job-progress-queued-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes job-progress-queued-pulse {
+  0%,
+  100% {
+    background-color: color-mix(in srgb, var(--border) 55%, var(--surface-page));
+  }
+  50% {
+    background-color: color-mix(in srgb, var(--border) 85%, var(--surface-page));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .job-progress[data-job-state="queued"] progress {
+    animation: none;
+  }
+
+  .job-progress progress::-webkit-progress-value {
+    transition: none;
   }
 }

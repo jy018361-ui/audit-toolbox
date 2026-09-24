@@ -66,7 +66,8 @@ describe("真实工具页任务事件状态", () => {
     expect(state("cancelled")).toHaveTextContent("用户已取消");
     emit(event("Excel_Merger", "completed", "合并完成", { outputCount: 1 }));
     expect(state("completed")).toHaveTextContent("合并完成");
-    expect(state("completed")?.closest(".merger-progress")).toHaveTextContent("处理完成");
+    // 结果对象没有 message 时 ResultView 用中性文案，不再代引擎宣称"处理完成"。
+    expect(state("completed")?.closest(".merger-progress")).toHaveTextContent("运行结束");
   });
 
   it("PDF 转 Excel：运行、部分成功、失败和取消均在进度/结果卡内", async () => {
@@ -98,7 +99,7 @@ describe("真实工具页任务事件状态", () => {
     const api = await import("./api");
     vi.mocked(api.pickPath).mockResolvedValue("C:/客户资料");
     const { container } = render(<FileListDirectoryPage tool={tool("file_list_directory", "文件夹超链接清单")} />);
-    fireEvent.click(screen.getByRole("button", { name: "选择文件夹" }));
+    fireEvent.click(screen.getByRole("button", { name: "源文件夹 *" }));
     await waitFor(() => expect(api.jobStart).toHaveBeenCalledWith("file_list.scan", { sourceDir: "C:/客户资料" }));
     emit(event("file_list_directory", "running", "正在扫描"));
     expect(state("running")).toBeInTheDocument();

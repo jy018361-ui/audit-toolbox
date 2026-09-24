@@ -24,7 +24,7 @@ export const workspaceTourSteps: TourStep[] = [
     id: "sidebar-tools",
     targetSelector: '[data-tour="sidebar-tools"]',
     title: "工具目录",
-    body: "全部工具按「审计工具 / 效率工具 / 运营工具」分组排列，点击工具名称即可打开；带「开发中」标记的工具功能已可使用，仍在继续完善。",
+    body: "全部工具按「审计工具 / 效率工具 / 运营工具」分组排列，点击工具名称即可打开；带「试用」标记的工具功能已可使用，仍在继续完善。",
   },
   {
     id: "tool-cards",
@@ -48,7 +48,7 @@ export const workspaceTourSteps: TourStep[] = [
     id: "newbie-toggle",
     targetSelector: '[data-tour="newbie-toggle"]',
     title: "新手模式",
-    body: "侧边栏最底下的这个小开关管着全部分步引导：开启时，首次使用工具会有动画提示；不需要时随手关掉，重启后也保持你的选择。",
+    body: "侧边栏顶部的这个小开关管着全部分步引导：开启时，首次使用工具会有动画提示；不需要时随手关掉，重启后也保持你的选择。",
   },
   {
     id: "done",

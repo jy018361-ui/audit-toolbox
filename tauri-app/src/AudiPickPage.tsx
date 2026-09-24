@@ -3579,7 +3579,15 @@ function AudiPickPageInner({ tool }: { tool: ToolManifest }) {
             />
           )}{" "}
           {result ? (
-            <ResultView value={result} />
+            <ResultView
+              value={result}
+              // 批量任务失败/取消时旧结果不会清空（失败事件也可能携带
+              // 部分产物），必须标注以免被当成成功产物（P1 缺陷修复）。
+              stale={Boolean(
+                batchJob &&
+                  ["failed", "cancelled"].includes(batchJob.phase),
+              )}
+            />
           ) : (
             <EmptyState compact title={selectedDocument ? "尚无处理结果" : "请先选择合同"} description={selectedDocument ? "读取合同文字，选择模板后开始提取；完成后请对照原文核对。" : "在合同列表中选择“读取/预览”，即可查看原文并继续处理。"} />
           )}

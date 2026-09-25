@@ -4736,6 +4736,10 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                     ledger_mapping::header_index(&table.headers, &currency_column)
             {
                 let supported = supported_currencies();
+                // 「只标外币」的币种列（空白=本位币行）是实务最常见的写法，
+                // 计算层也一直按空=本位币、不继承上下行处理。这里只拦
+                // 「填了却认不出」的值；空白行放行并提示按本位币处理。
+                let mut blank_rows = 0usize;
                 let invalid = table
                     .rows
                     .iter()
@@ -4747,23 +4751,32 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                             .map(String::as_str)
                             .unwrap_or("")
                             .trim();
+                        if raw.is_empty() {
+                            blank_rows += 1;
+                            return None;
+                        }
                         let code = normalize_currency(raw);
-                        (raw.is_empty() || !supported.contains(code.as_str())).then_some((
+                        (!supported.contains(code.as_str())).then_some((
                             table.header_row + table.header_depth + index,
                             raw.to_owned(),
                         ))
                     })
-                    .take(6)
                     .collect::<Vec<_>>();
                 for (source_row, raw) in invalid.iter().take(5) {
-                    errors.push(if raw.is_empty() {
-                        format!("{kind} 第{source_row}行缺少原币币种；币种列必须逐行完整。")
-                    } else {
-                        format!("{kind} 第{source_row}行原币币种“{raw}”无法识别。")
-                    });
+                    errors.push(format!(
+                        "{kind} 第{source_row}行原币币种“{raw}”无法识别。"
+                    ));
                 }
                 if invalid.len() > 5 {
-                    errors.push(format!("{kind} 另有原币币种缺失或无法识别的业务行。"));
+                    errors.push(format!(
+                        "{kind} 另有{}行原币币种无法识别。",
+                        invalid.len() - 5
+                    ));
+                }
+                if blank_rows > 0 {
+                    warnings.push(format!(
+                        "{kind} 币种列有{blank_rows}行为空，将按本位币行处理。"
+                    ));
                 }
             }
             // 套一遍标准形态：命中说明这张表的余额与发生额结构完整，
@@ -14894,7 +14907,7 @@ mod tests {
     }
 
     #[test]
-    fn 原币币种列空白或无法识别必须拦截() {
+    fn 原币币种空白按本位币放行仅拦无法识别值() {
         let path =
             std::env::temp_dir().join(format!("fx-currency-blank-{}.csv", std::process::id()));
         std::fs::write(
@@ -14907,7 +14920,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let validation = validate_mapping(&json!({
+        let params = json!({
             "mode": "unrealized",
             "tbSource": {"inputPath": path.to_string_lossy(), "headerRow": 1, "headerDepth": 1},
             "tbMapping": {
@@ -14919,21 +14932,49 @@ mod tests {
                 "closingFunctionalAmount": "期末余额",
                 "currency": "币种"
             }
-        }))
-        .unwrap();
+        });
+        let validation = validate_mapping(&params).unwrap();
         let errors = validation["errors"].as_array().unwrap();
         assert!(
             errors
                 .iter()
-                .any(|value| value.as_str().unwrap_or("").contains("缺少原币币种")),
-            "空白币种必须被硬门禁拦截：{errors:?}"
+                .any(|value| value.as_str().unwrap_or("").contains("无法识别")),
+            "无法识别的币种仍必须拦截：{errors:?}"
         );
         assert!(
             errors
                 .iter()
-                .any(|value| value.as_str().unwrap_or("").contains("无法识别"))
+                .all(|value| !value.as_str().unwrap_or("").contains("缺少原币币种")),
+            "空白币种代表本位币行，不得再报缺少原币币种：{errors:?}"
+        );
+        assert!(
+            validation["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("币种列有1行为空，将按本位币行处理")),
+            "空白行应以提示说明按本位币处理：{validation:#?}"
         );
         assert_eq!(validation["valid"], json!(false), "{validation}");
+
+        std::fs::write(
+            &path,
+            concat!(
+                "科目编码,科目名称,币种,期初余额,期末余额\n",
+                "1001,库存现金,,10,20\n",
+                "100202,银行存款-美元户,USD,50,60\n",
+            ),
+        )
+        .unwrap();
+        let blank_only = validate_mapping(&params).unwrap();
+        assert_eq!(
+            blank_only["valid"],
+            json!(true),
+            "只标外币（空白=本位币）的常见写法必须整体放行：{blank_only:#?}"
+        );
         let _ = std::fs::remove_file(path);
     }
 

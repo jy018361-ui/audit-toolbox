@@ -3489,85 +3489,6 @@ function FxChecks({ result }: { result: Record<string, unknown> }) {
     </>
   );
 }
-/** 一句话说清这条隔离属于哪种粒度问题：先摆证据、再下结论，用户不必读完整段 detail。 */
-export function granularityLabel(type: unknown): string {
-  switch (String(type ?? "")) {
-    case "JE 已识别外币敞口，但 TB 未按币种拆分余额":
-    case "科目余额混合本位币与外币":
-    case "同一科目存在多种外币敞口":
-      return "JE 已识别外币敞口，但 TB 未按币种拆分余额";
-    case "外币凭证原币金额全为零":
-    // 历史结果里的旧类型名，含义相同，同样兜底。
-    case "无外币敞口的评估调整科目":
-      return "该科目的外币凭证原币金额全为 0，没有可测算的外币余额";
-    default:
-      return "TB 里找不到唯一对应的外币余额行，无法测算";
-  }
-}
-/** TB 粒度不足：外币敞口是「科目×币种」粒度，TB 只给到科目粒度就测不了。
- *  **提示但不阻断**——科目年初年末本来就没有外币余额、当期只有已实现
- *  汇兑损益时，TB 和 JE 都没问题；只有确需测算这些科目时才要补资料。 */
-function TbGranularityNotice({
-  items,
-}: {
-  items: Array<Record<string, unknown>>;
-}) {
-  const [open, setOpen] = useState(false);
-  if (!items.length) return null;
-  return (
-    <section className="fx-granularity-notice">
-      <div className="fx-granularity-head">
-        <div>
-          <strong>
-            {items.length} 个科目缺少可用的币种余额
-          </strong>
-          <small>
-            这些科目未纳入未实现汇兑损益测算。若科目年初年末本来就没有外币余额、
-            当期只有已实现汇兑损益交易，属正常情况，可忽略本提示。
-          </small>
-          <div className="fx-granularity-action">
-            如确需测算这些科目，请提供按“科目＋币种”分行的科目余额表后重新测算。
-          </div>
-        </div>
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={() => setOpen((v) => !v)}
-        >
-          {open ? "收起科目" : "查看科目"}
-        </Button>
-      </div>
-      {open && (
-        <div className="fx-granularity-table">
-          <table>
-            <thead>
-              <tr>
-                <th>科目</th>
-                <th>币种</th>
-                <th>原因</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item, index) => {
-                const currencies = item.currencies;
-                const shown = Array.isArray(currencies)
-                  ? currencies.join("、")
-                  : String(currencies ?? "—");
-                return (
-                  <tr key={index}>
-                    <td>{String(item.account ?? "")}</td>
-                    <td>{shown || "—"}</td>
-                    <td>{granularityLabel(item.type)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </section>
-  );
-}
 /** TB＋JE 余额滚动失配清单：**提示但不阻断**，逐条列出差在哪，用户自己判断。 */
 function RollforwardIssues({
   validation,
@@ -3788,11 +3709,6 @@ function FxResult({ result }: { result: Record<string, unknown> }) {
           已读取外币凭证，但没有事件进入自动测算；相关金额已归入待复核项目，不会再被当作正常“0”。
         </p>
       )}
-      <TbGranularityNotice
-        items={
-          (result.tbGranularityBlocked ?? []) as Array<Record<string, unknown>>
-        }
-      />
       <RollforwardIssues
         validation={
           result.balanceRollforwardValidation as

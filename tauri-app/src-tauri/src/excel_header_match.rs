@@ -450,9 +450,27 @@ pub(crate) fn alias_file_path() -> Option<PathBuf> {
 }
 
 pub(crate) fn load_aliases() -> Vec<(String, String)> {
+    alias_file_path()
+        .map(|path| load_aliases_from(&path))
+        .unwrap_or_default()
+}
+
+pub(crate) fn save_aliases(pairs: &[(String, String)]) {
     let Some(path) = alias_file_path() else {
-        return Vec::new();
+        return;
     };
+    save_aliases_to(&path, pairs);
+}
+
+/// 删除一条人工对照（拖错又勾了记住的场景）；返回删除后的清单。
+pub(crate) fn delete_alias(source: &str, target: &str) -> Vec<(String, String)> {
+    alias_file_path()
+        .map(|path| delete_alias_at(&path, source, target))
+        .unwrap_or_default()
+}
+
+/// 读写落在指定路径上，真实数据目录与测试临时目录共用同一套逻辑。
+fn load_aliases_from(path: &std::path::Path) -> Vec<(String, String)> {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -477,11 +495,8 @@ pub(crate) fn load_aliases() -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-pub(crate) fn save_aliases(pairs: &[(String, String)]) {
-    let Some(path) = alias_file_path() else {
-        return;
-    };
-    let mut existing = load_aliases();
+fn save_aliases_to(path: &std::path::Path, pairs: &[(String, String)]) {
+    let mut existing = load_aliases_from(path);
     for pair in pairs {
         if !existing
             .iter()
@@ -500,12 +515,8 @@ pub(crate) fn save_aliases(pairs: &[(String, String)]) {
     let _ = std::fs::write(path, value.to_string());
 }
 
-/// 删除一条人工对照（拖错又勾了记住的场景）；返回删除后的清单。
-pub(crate) fn delete_alias(source: &str, target: &str) -> Vec<(String, String)> {
-    let Some(path) = alias_file_path() else {
-        return Vec::new();
-    };
-    let mut existing = load_aliases();
+fn delete_alias_at(path: &std::path::Path, source: &str, target: &str) -> Vec<(String, String)> {
+    let mut existing = load_aliases_from(path);
     let before = existing.len();
     existing.retain(|(s, t)| !(s == source && t == target));
     if existing.len() != before {
@@ -788,11 +799,32 @@ mod tests {
 
     #[test]
     fn alias_roundtrip_and_dedupe() {
-        let path = alias_file_path().unwrap();
-        let temp = path.with_extension("json.test");
-        std::fs::remove_file(&temp).ok();
-        // save/load 直接落真实数据目录不合适，这里只验证 JSON 组装口径。
-        let value = json!([{"source":"单据编号","target":"凭证号"}]);
-        assert_eq!(value.to_string(), r#"[{"source":"单据编号","target":"凭证号"}]"#);
+        // save/load 直接落真实数据目录不合适，这里用注入的临时路径走同一套
+        // 落盘/去重/删除逻辑——此前本测试只断言了 JSON 字符串格式，零覆盖。
+        let dir = std::env::temp_dir().join(format!("alias-store-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("aliases.json");
+        let _ = std::fs::remove_file(&path);
+
+        save_aliases_to(&path, &[("单据编号".into(), "凭证号".into())]);
+        // 同源同目标重复入库应去重；同源不同目标应并存。
+        save_aliases_to(&path, &[("单据编号".into(), "凭证号".into())]);
+        save_aliases_to(&path, &[("单据编号".into(), "凭证日期".into())]);
+        assert_eq!(
+            load_aliases_from(&path),
+            vec![
+                ("单据编号".to_string(), "凭证号".to_string()),
+                ("单据编号".to_string(), "凭证日期".to_string()),
+            ]
+        );
+
+        let after_delete = delete_alias_at(&path, "单据编号", "凭证号");
+        assert_eq!(after_delete.len(), 1);
+        assert_eq!(
+            load_aliases_from(&path),
+            after_delete,
+            "删除应即时落盘，回读与返回清单一致"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

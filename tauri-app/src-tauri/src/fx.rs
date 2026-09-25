@@ -30,9 +30,10 @@ use std::{
 
 const SAFE_URL: &str = "https://www.safe.gov.cn/AppStructured/hlw/RMBQuery.do";
 const RATE_SOURCE: &str = "国家外汇管理局人民币汇率中间价查询（数据由中国外汇交易中心公布）";
-const TB_CURRENCY_GRANULARITY_ISSUE: &str = "JE 已识别外币敞口，但 TB 未按币种拆分余额";
 /// 测算口径或结果契约改变时必须更新，避免跨 worker 磁盘缓存恢复旧算法结果。
-const FX_PREVIEW_CACHE_SCHEMA: &str = "2026-09-23-purchase-initial-v5";
+/// 2026-09-25：币种唯一来源改为 TB 币种列、原币端点选填改倒算、退役按序时账
+/// 推断科目币种的估算路线（含 tbGranularityBlocked 输出）。
+const FX_PREVIEW_CACHE_SCHEMA: &str = "2026-09-25-currency-column-truth-v6";
 static FX_PREVIEW_CACHE: OnceLock<Mutex<Option<(String, Value)>>> = OnceLock::new();
 static FX_TABLE_CACHE: OnceLock<Mutex<HashMap<String, Arc<FxTable>>>> = OnceLock::new();
 static FX_INSPECTION_CACHE: OnceLock<Mutex<HashMap<String, Arc<FxTable>>>> = OnceLock::new();
@@ -4877,14 +4878,17 @@ fn validate_mapping(params: &Value) -> Result<Value, AppError> {
                     );
                 }
                 let opening_foreign = amount_scheme_ok(&mapping, "openingForeign");
-                let opening_functional = amount_scheme_ok(&mapping, "openingFunctional");
                 let closing_foreign = amount_scheme_ok(&mapping, "closingForeign");
+                let opening_functional = amount_scheme_ok(&mapping, "openingFunctional");
                 let closing_functional = amount_scheme_ok(&mapping, "closingFunctional");
-                if !opening_foreign {
-                    errors.push("TB 缺少必填字段：期初原币余额".to_string());
-                }
-                if !closing_foreign {
-                    errors.push("TB 缺少必填字段：期末原币余额".to_string());
+                // 原币余额选填（2026-09-25 定案）：未映射时以本位币余额÷官方
+                // 汇率倒算端点参与测算；期初、期末须成对出现，只给一侧按
+                // 未映射处理，提示补齐而不是硬拦。
+                if opening_foreign != closing_foreign {
+                    warnings.push(
+                        "TB 原币余额的期初、期末需成对映射；只给一侧时按未映射处理，测算将以本位币余额÷官方汇率倒算原币端点。"
+                            .to_string(),
+                    );
                 }
                 if !opening_functional {
                     errors.push("TB 缺少必填字段：期初本位币余额".to_string());
@@ -8774,32 +8778,6 @@ fn calculate(
         .iter()
         .filter(|item| item.get("type").and_then(Value::as_str) == Some("未实现测算缺少TB余额基础"))
         .count();
-    // TB 只给到「科目」粒度，而外币敞口是「科目×币种」粒度的。下面这几类隔离
-    // 全都源自这一点，用户能做的动作是同一个：换一份按币种拆分的科目余额表。
-    // 汇总成清单交给界面显著提示——只写进底稿，用户根本看不见，就会误以为
-    // 是工具算不出来。
-    const GRANULARITY_TYPES: &[&str] = &[
-        TB_CURRENCY_GRANULARITY_ISSUE,
-        "外币凭证原币金额全为零",
-        "同一余额键存在多个外币",
-    ];
-    let tb_granularity_blocked = quality
-        .iter()
-        .filter(|item| {
-            item.get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|kind| GRANULARITY_TYPES.contains(&kind))
-        })
-        .map(|item| {
-            json!({
-                "account": item.get("account").cloned().unwrap_or(Value::Null),
-                "type": item.get("type").cloned().unwrap_or(Value::Null),
-                "currencies": item.get("currencies").or_else(|| item.get("currency")).cloned().unwrap_or(Value::Null),
-                "detail": item.get("detail").cloned().unwrap_or(Value::Null),
-                "sourceRow": item.get("row").cloned().unwrap_or(Value::Null)
-            })
-        })
-        .collect::<Vec<_>>();
     let mut formal_gate_reasons = Vec::<String>::new();
     if matches!(mode, "unrealized" | "combined") {
         let rollforward_performed = balance_rollforward_validation
@@ -8822,12 +8800,6 @@ fn calculate(
             formal_gate_reasons.push(format!(
                 "{}个未实现测算键缺少TB余额基础。",
                 unrealized_missing_balance_keys
-            ));
-        }
-        if !tb_granularity_blocked.is_empty() {
-            formal_gate_reasons.push(format!(
-                "{}个余额键缺少可用的科目×币种原币基础。",
-                tb_granularity_blocked.len()
             ));
         }
     }
@@ -8892,7 +8864,6 @@ fn calculate(
             "realizedEvents": realized.len(),
             "unrealizedRows": unrealized.len(),
             "unrealizedMissingBalanceKeys": unrealized_missing_balance_keys,
-            "tbGranularityBlockedCount": tb_granularity_blocked.len(),
             "unrealizedBalanceBasisComplete": unrealized_missing_balance_keys == 0,
             // 按月推算余额依赖 JE 的完整性：TB＋JE 对不上时，未实现那部分是受限结果。
             // 已实现汇兑损益按逐笔结算算，不受影响，所以只标未实现。
@@ -8922,7 +8893,6 @@ fn calculate(
         "clientRevaluationVouchers": client_revaluation_vouchers,
         "pendingReview": pending_review,
         "entityScopeSelection": params.get("entityScope").cloned().unwrap_or_else(|| json!({"mode":"strict","mappings":[]})),
-        "tbGranularityBlocked": tb_granularity_blocked,
         "dataQuality": quality, "reconciliation": reconciliation,
         "balanceRollforwardValidation": balance_rollforward_validation,
         "validation": validation, "rateSnapshot": snapshot
@@ -10451,21 +10421,9 @@ fn calculate_unrealized(
     )
     .ok_or_else(|| error("REPORT_DATE_INVALID", "报告期结束日无效。", None))?;
     let has_je = params.get("jeSource").is_some();
-    let has_foreign_balances = amount_scheme_ok(&mapping, "openingForeign")
+    // 原币端点成对映射才算「提供了原币余额」；否则以本位币÷官方汇率倒算。
+    let foreign_balances_mapped = amount_scheme_ok(&mapping, "openingForeign")
         && amount_scheme_ok(&mapping, "closingForeign");
-    if has_je && !has_foreign_balances {
-        return calculate_inferred_opening_unrealized(
-            params,
-            snapshot,
-            start,
-            end,
-            &table,
-            &mapping,
-            realized,
-            classification,
-            &account_policy,
-        );
-    }
     let mut output = Vec::new();
     let mut quality = Vec::new();
     let mut seen = HashSet::new();
@@ -10473,6 +10431,12 @@ fn calculate_unrealized(
         let entity = scoped_entity_for(&row, &mapping, params, ledger_mapping::EntitySide::Tb);
         let account = account_name(&row, &mapping);
         let currency = currency_for(&row, &mapping, &account, params);
+        let functional_code = functional_currency(entity, params);
+        // 币种唯一来源是币种列：空白或等于本位币的行是本位币行，不参与
+        // 外币重估（2026-09-25 定案；不再按序时账推断科目币种）。
+        if currency.is_empty() || currency == functional_code {
+            continue;
+        }
         let auxiliary = mapped_cols(&mapping, "auxiliary")
             .iter()
             .filter_map(|c| row.get(c.as_str()))
@@ -10516,11 +10480,8 @@ fn calculate_unrealized(
                 )
             })
         };
-        let opening_foreign = parse("openingForeign")?;
         let opening_local = parse("openingFunctional")?;
-        let closing_foreign = parse("closingForeign")?;
         let closing_local = parse("closingFunctional")?;
-        let functional_code = functional_currency(entity, params);
         let Some((opening_rate, opening_published)) =
             rate(snapshot, start, &currency, &functional_code)
         else {
@@ -10538,6 +10499,13 @@ fn calculate_unrealized(
                 "currency": currency, "severity": "隔离"
             }));
             continue;
+        };
+        let (opening_foreign, closing_foreign) = if foreign_balances_mapped {
+            (parse("openingForeign")?, parse("closingForeign")?)
+        } else {
+            // 未提供原币端点：按本位币余额÷官方汇率倒算（2026-09-25 定案，
+            // 不标来源、不分受限档，与提供了原币端点走同一条正式路线）。
+            (opening_local / opening_rate, closing_local / closing_rate)
         };
         let opening_audit = opening_foreign * opening_rate;
         let closing_audit = closing_foreign * closing_rate;
@@ -10583,283 +10551,6 @@ fn calculate_unrealized(
     } else {
         Ok((output, quality))
     }
-}
-
-fn calculate_inferred_opening_unrealized(
-    params: &Value,
-    snapshot: &RateSnapshot,
-    start: NaiveDate,
-    end: NaiveDate,
-    tb_table: &FxTable,
-    tb_mapping: &Map<String, Value>,
-    realized: &[Value],
-    classification: &[Value],
-    account_policy: &ledger_mapping::AccountMatchPolicy,
-) -> Result<(Vec<Value>, Vec<Value>), AppError> {
-    let (je_table, je_mapping) = load_mapped_je_table(params)?;
-    let je_account_columns = account_columns(&je_mapping);
-    let je_foreign_amount = JeAmountPlan::new(&je_table.headers, &je_mapping, "foreign");
-    let je_functional_amount = JeAmountPlan::new(&je_table.headers, &je_mapping, "functional");
-    let mut functional_currency_cache = HashMap::<String, String>::new();
-    let has_opening_local = amount_scheme_ok(tb_mapping, "openingFunctional");
-    let mut je_functional_movements = HashMap::<String, f64>::new();
-    let mut je_foreign_movements = HashMap::<String, f64>::new();
-    let mut account_currencies = HashMap::<String, BTreeSet<String>>::new();
-    // 一个科目「有几种外币」不能按凭证货币的种类数数：客户把外币评估调整
-    // 记在影子科目上时，凭证货币写的是被调整的那种外币，但原币金额恒为零
-    // ——它不持有任何该币种，只承载本位币差额。实测 4800：应付账款-关联方
-    // 因为 51 行原币为零的日元记录被判成「两种外币」而整体隔离，5.4 亿人民币
-    // 敞口随之作废。所以真正的敞口判据是**累计原币金额是否非零**。
-    let mut account_foreign_net = HashMap::<String, f64>::new();
-    // 本位币凭证行的净额：科目余额里沉淀了多少本位币。TB 只给到科目粒度，
-    // 若同一科目既沉淀本位币又持有外币，科目级余额就无法整体归给那种外币
-    // （4800 的应付账款-关联方沉淀了 4,799 万美元，另有 5.4 亿人民币敞口，
-    // TB 上却只有一行合计）——这种情况必须隔离，不能拿合计余额乘汇率。
-    let mut account_functional_net = HashMap::<String, f64>::new();
-    for row in records(&je_table) {
-        if !is_je_business_row(&row, &je_mapping) {
-            continue;
-        }
-        let account = account_name_from_columns(&row, &je_account_columns);
-        if !matches!(
-            role_for_row(&row, &je_mapping, &account, params).as_str(),
-            "cash" | "monetary_asset" | "monetary_liability"
-        ) {
-            continue;
-        }
-        let entity = scoped_entity_for(&row, &je_mapping, params, ledger_mapping::EntitySide::Je);
-        let currency = currency_for(&row, &je_mapping, &account, params);
-        let auxiliary = auxiliary_value(&row, &je_mapping);
-        if currency.is_empty() {
-            continue;
-        }
-        // 走统一匹配键：辅助核算不进键——TB 常常没有这一列而 JE 按往来单位
-        // 拆行，手工拼进去会让两边全盘失配。
-        let account_currency_key =
-            balance_match_key_for_account(entity, &account, "", false, account_policy);
-        let functional_of_row = je_functional_amount.read(&row).map_err(|detail| {
-            error(
-                "NUMERIC_PARSE_FAILED",
-                "JE本位币金额无法解析。",
-                Some(format!("第{}行：{detail}", row.source_row)),
-            )
-        })?;
-        let functional_currency = functional_currency_cache
-            .entry(entity.to_owned())
-            .or_insert_with(|| functional_currency(entity, params));
-        if currency == functional_currency.as_str() {
-            *account_functional_net
-                .entry(account_currency_key)
-                .or_default() += functional_of_row;
-            continue;
-        }
-        let code = normalize_currency(&currency);
-        let foreign_of_row = je_foreign_amount.read(&row).map_err(|detail| {
-            error(
-                "NUMERIC_PARSE_FAILED",
-                "JE原币金额无法解析。",
-                Some(format!("第{}行：{detail}", row.source_row)),
-            )
-        })?;
-        // 用净额而不是累计绝对值。实测 4800：银行存款-建行、应收账款-关联方
-        // 这些**纯本位币科目**上也挂着几行外币凭证货币的评估调整，一借一贷
-        // 抵平——按累计绝对值会把它们判成「持有外币」，再靠后面的混合检查
-        // 兜底，判据链条就乱了。净额为零就是没敞口，直接、准确。
-        *account_foreign_net
-            .entry(format!("{account_currency_key}\u{1f}{code}"))
-            .or_default() += foreign_of_row;
-        account_currencies
-            .entry(account_currency_key)
-            .or_default()
-            .insert(code);
-        let key =
-            balance_match_key_for_account(entity, &account, &auxiliary, false, account_policy);
-        *je_functional_movements.entry(key.clone()).or_default() += functional_of_row;
-        *je_foreign_movements.entry(key).or_default() += foreign_of_row;
-    }
-    // 名义币种里剔掉原币恒为零的，剩下的才是真外币敞口。
-    let account_nominal_currencies = account_currencies.clone();
-    for (account_key, currencies) in account_currencies.iter_mut() {
-        currencies.retain(|code| {
-            account_foreign_net
-                .get(&format!("{account_key}\u{1f}{code}"))
-                .copied()
-                .unwrap_or(0.0)
-                .abs()
-                >= 0.01
-        });
-    }
-
-    let mut endpoints = Vec::new();
-    let mut quality = vec![json!({
-        "source":"TB+JE", "type":"期初原币余额估算", "severity":"重要提示",
-        "detail":"TB未提供原币余额；系统以期初本位币余额÷期初官方汇率估算期初原币，再用JE原币发生额滚动。该结果属于受限测算，底稿单独披露，不以客户已入账未实现汇兑损益凭证倒算审计金额。未实现测算的精度直接依赖该估算值（已实现测算不受影响），建议以银行对账单或函证确认年初外币余额后重算。"
-    })];
-    for row in tb_leaf_records(tb_table, tb_mapping) {
-        let account = account_name(&row, tb_mapping);
-        if !matches!(
-            role_for_row(&row, tb_mapping, &account, params).as_str(),
-            "cash" | "monetary_asset" | "monetary_liability"
-        ) {
-            continue;
-        }
-        let entity = scoped_entity_for(&row, tb_mapping, params, ledger_mapping::EntitySide::Tb);
-        let mapped_currency = currency_for(&row, tb_mapping, &account, params);
-        let auxiliary = auxiliary_value(&row, tb_mapping);
-        let functional = functional_currency(entity, params);
-        // 走统一匹配键：辅助核算不进键——TB 常常没有这一列而 JE 按往来单位
-        // 拆行，手工拼进去会让两边全盘失配。
-        let account_currency_key =
-            balance_match_key_for_account(entity, &account, "", false, account_policy);
-        let inferred_currencies = account_currencies.get(&account_currency_key);
-        // TB 只给到「科目」粒度，而外币敞口是「科目×币种」粒度的。能不能把
-        // 科目级余额整体归给某一种外币，取决于三件事，缺一不可：
-        //   1. 只有一种真外币敞口（原币非零）；
-        //   2. 该科目没有沉淀本位币余额（否则合计余额里混了两部分）；
-        //   3. 币种取得到汇率。
-        // 任何一条不成立都隔离——宁可算不出来，也不能拿混合余额乘汇率造假数。
-        let functional_residue = account_functional_net
-            .get(&account_currency_key)
-            .copied()
-            .unwrap_or(0.0);
-        let currency = if !mapped_currency.is_empty() && mapped_currency != functional {
-            normalize_currency(&mapped_currency)
-        } else if let Some(values) = inferred_currencies.filter(|values| values.len() == 1) {
-            let only = values.iter().next().cloned().unwrap_or_default();
-            // 本位币沉淀相对科目余额可忽略时才算「纯外币科目」；结算过账带来的
-            // 零头不该误伤，所以同时看绝对额与占科目余额的比重。
-            let closing_reference = signed_amount(&row, tb_mapping, "closingFunctional")
-                .unwrap_or(0.0)
-                .abs();
-            // 阈值放到 5%：外币账户偶尔有本位币过账是正常的，只有本位币
-            // 沉淀到「已经改变余额构成」的程度，科目级合计余额才不可归属。
-            let mixed = functional_residue.abs() > 1.0
-                && functional_residue.abs() > closing_reference * 0.05;
-            if mixed {
-                quality.push(json!({
-                    "source":"TB+JE", "row":row.source_row,
-                    "type":TB_CURRENCY_GRANULARITY_ISSUE, "account":account,
-                    "currency":only, "functionalResidue":functional_residue,
-                    "severity":"隔离",
-                    "detail":"JE 已识别外币敞口，但 TB 只有科目合计，未按币种拆分余额。请提供按“科目＋币种”分行的科目余额表后重算。"
-                }));
-                continue;
-            }
-            only
-        } else {
-            let nominal = account_nominal_currencies.get(&account_currency_key);
-            if inferred_currencies.is_some_and(|values| values.len() > 1) {
-                quality.push(json!({
-                    "source":"TB+JE", "row":row.source_row,
-                    "type":TB_CURRENCY_GRANULARITY_ISSUE, "account":account,
-                    "currencies":inferred_currencies,
-                    "severity":"隔离",
-                    "detail":"JE 已识别外币敞口，但 TB 只有科目合计，未按币种拆分余额。请提供按“科目＋币种”分行的科目余额表后重算。"
-                }));
-            } else if inferred_currencies.is_some_and(|values| values.is_empty())
-                && nominal.is_some_and(|values| !values.is_empty())
-                // 本位币科目上挂几行外币凭证货币的调整记录很常见（4800 有 5 个），
-                // 那只是本位币科目，不该当成问题报给用户；真正要提醒的是
-                // 「没有本位币业务、余额却全由评估调整堆出来」的影子科目。
-                && functional_residue.abs() <= 1.0
-                && signed_amount(&row, tb_mapping, "closingFunctional")
-                    .unwrap_or(0.0)
-                    .abs()
-                    > 0.01
-            {
-                // 这类形态多半是客户的评估调整科目，但原币为零也可能只是
-                // 序时账没填原币金额——文案只陈述事实，不下「评估调整」的判语。
-                let detail = nominal
-                    .map(|values| values.iter().cloned().collect::<Vec<_>>().join("、"))
-                    .unwrap_or_default();
-                quality.push(json!({
-                    "source":"TB+JE", "row":row.source_row,
-                    "type":"外币凭证原币金额全为零", "account":account,
-                    "currencies":nominal,
-                    "severity":"隔离",
-                    "detail":format!(
-                        "该科目挂着 {detail} 的凭证，但原币金额全部为 0，没有可测算的外币余额。若序时账本身未填原币金额，请核对数据后重算。"
-                    )
-                }));
-            }
-            continue;
-        };
-        let key =
-            balance_match_key_for_account(entity, &account, &auxiliary, false, account_policy);
-        let closing_local =
-            signed_amount(&row, tb_mapping, "closingFunctional").map_err(|detail| {
-                error(
-                    "NUMERIC_PARSE_FAILED",
-                    "TB期末本位币余额无法解析。",
-                    Some(format!("第{}行：{detail}", row.source_row)),
-                )
-            })?;
-        let opening_local = if has_opening_local {
-            signed_amount(&row, tb_mapping, "openingFunctional").map_err(|detail| {
-                error(
-                    "NUMERIC_PARSE_FAILED",
-                    "TB期初本位币余额无法解析。",
-                    Some(format!("第{}行：{detail}", row.source_row)),
-                )
-            })?
-        } else {
-            closing_local - je_functional_movements.get(&key).copied().unwrap_or(0.0)
-        };
-        let Some((opening_rate, opening_published)) = rate(snapshot, start, &currency, &functional)
-        else {
-            quality.push(json!({
-                "source":"TB", "row":row.source_row, "type":"期初汇率缺失",
-                "currency":currency, "severity":"隔离"
-            }));
-            continue;
-        };
-        if opening_rate.abs() < f64::EPSILON {
-            continue;
-        }
-        let has_closing_foreign = amount_scheme_ok(tb_mapping, "closingForeign");
-        let (inferred_opening_foreign, opening_foreign_source) = if has_closing_foreign {
-            let closing_foreign =
-                signed_amount(&row, tb_mapping, "closingForeign").map_err(|detail| {
-                    error(
-                        "NUMERIC_PARSE_FAILED",
-                        "TB期末原币余额无法解析。",
-                        Some(format!("第{}行：{detail}", row.source_row)),
-                    )
-                })?;
-            (
-                closing_foreign - je_foreign_movements.get(&key).copied().unwrap_or(0.0),
-                "TB期末原币余额－本期JE原币净变动倒推",
-            )
-        } else {
-            (
-                opening_local / opening_rate,
-                "期初本位币余额÷期初官方汇率估算",
-            )
-        };
-        let opening_audit_functional = inferred_opening_foreign * opening_rate;
-        endpoints.push(json!({
-            "entity":entity, "account":account, "auxiliary":auxiliary,
-            "currency":currency, "functionalCurrency":functional,
-            "openingForeign":inferred_opening_foreign,
-            "openingBookFunctional":opening_local,
-            "openingRate":opening_rate, "openingPublishedDate":opening_published,
-            "openingAuditFunctional":opening_audit_functional,
-            "closingBookFunctional":closing_local,
-            "openingForeignSource":opening_foreign_source,
-            "sourceRow":row.source_row
-        }));
-    }
-    let monthly = calculate_monthly_unrealized(
-        params,
-        snapshot,
-        start,
-        end,
-        &endpoints,
-        &mut quality,
-        realized,
-        classification,
-    )?;
-    Ok((monthly, quality))
 }
 
 fn calculate_monthly_unrealized(
@@ -17007,68 +16698,18 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
 
     #[test]
     #[ignore = "uses the user's immutable 科目余额表/序时账-1 samples"]
-    fn real_sample_month_end_fx_transfer_is_auto_classified_and_measured() {
-        let mut params = real_sample_params(None);
-        let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let end = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
-        let mut rates = Vec::new();
-        let mut date = start;
-        while date <= end {
-            let requested = date.format("%Y-%m-%d").to_string();
-            rates.push(RatePoint {
-                requested_date: requested.clone(),
-                published_date: requested.clone(),
-                currency: "CNY".into(),
-                cny_per_unit: 1.0,
-            });
-            rates.push(RatePoint {
-                requested_date: requested.clone(),
-                published_date: requested,
-                currency: "USD".into(),
-                cny_per_unit: 7.0 + f64::from(date.ordinal()) / 10_000.0,
-            });
-            date += Duration::days(1);
-        }
-        params["rateSnapshot"] = json!(RateSnapshot {
-            source: "测试固定汇率".into(),
-            source_url: String::new(),
-            fetched_at: String::new(),
-            response_hash: test_snapshot_hash("real-sample-month-end-fx-transfer"),
-            start_date: "2024-01-01".into(),
-            end_date: "2024-12-31".into(),
-            rates,
-            missing: Vec::new(),
-        });
-        let cancel = AtomicBool::new(false);
-        let pause = PauseCheckpoint::unpaused(Arc::new(AtomicBool::new(false)));
-        let result = calculate(&params, &|_, _, _, _| {}, &cancel, &pause).unwrap();
-        assert_eq!(
-            result.pointer("/summary/pendingUnclassifiedCount"),
-            Some(&json!(0)),
-            "摘要明确为汇兑损益结转的月末重估不应留在待确认：{}",
-            result["classificationControls"]
-        );
-        assert_eq!(
-            result["clientRevaluationVouchers"].as_array().map(Vec::len),
-            Some(12),
-            "全年12个月末重估凭证均应被识别"
-        );
+    fn real_sample_without_tb_currency_column_is_blocked() {
+        // 2026-09-25 口径：TB 币种列必填。这份真实样例的币种只写在科目名称里，
+        // 旧版曾按序时账推断科目币种继续测算（含“库存现金 JE 币种为空按 CNY
+        // 处理”的场景），现统一在映射门禁拦截——币种唯一来源是 TB 的币种列。
+        let params = real_sample_params(None);
+        let validation = validate_mapping(&params).unwrap();
+        assert_eq!(validation["valid"], json!(false), "{validation:#?}");
         assert!(
-            result["summary"]["unrealizedAdjustment"]
-                .as_f64()
-                .is_some_and(|value| value.abs() >= 0.01),
-            "识别客户重估后，审计未实现测算不得继续机械归零：{}",
-            result["summary"]
-        );
-        let blocked = result["tbGranularityBlocked"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        assert!(
-            blocked
-                .iter()
-                .all(|item| { !item["account"].as_str().unwrap_or("").starts_with("1001 ") }),
-            "库存现金的 JE 币种为空，应按 CNY 处理，不能继承 USD：{blocked:#?}"
+            validation["errors"].as_array().is_some_and(|errors| errors.iter().any(|item| item
+                .as_str()
+                .is_some_and(|text| text.contains("TB 缺少必填字段：币种")))),
+            "拦截理由应指名 TB 币种列：{validation:#?}"
         );
     }
 
@@ -19203,158 +18844,6 @@ E,2025-01-15,DZ1,DZ,6603,DIRECT CREDIT,CNY,0,-10\n",
         assert_eq!(filtered[1].unit, "原币");
         assert_eq!(filtered[1].checked, 2, "本位币 mask 不得过滤原币勾稽");
         assert!(filtered[1].issues.is_empty());
-        fs::remove_file(&tb).unwrap();
-    }
-
-    /// 外币敞口按「有没有原币」判，不按凭证货币的种类数数。
-    ///
-    /// 取自 4800 真实数据的三种形态：
-    ///   甲 原币恒为零的币种混进来（应付账款-关联方：5.4 亿人民币敞口 ＋ 51 行
-    ///      原币为零的日元记录）——日元不算敞口，但该科目沉淀了本位币，仍要隔离；
-    ///   乙 影子科目（外币评估调整）：所有币种原币都是零，不持有外币；
-    ///   丙 干净的单外币科目：照常测算。
-    #[test]
-    fn 外币敞口只认有原币的币种且tb未拆币种统一提示() {
-        let dir = std::env::temp_dir().join(format!("fx-exposure-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let je = dir.join("je.csv");
-        let tb = dir.join("tb.csv");
-        // 本位币 USD。三个科目：
-        //   2202010001 人民币敞口 ＋ 原币为零的日元 ＋ 沉淀的美元本位币
-        //   2202010002 影子科目：人民币、日元凭证，原币全为零
-        //   1002010021 干净的港币户
-        //   2202030101 纯本位币科目，外币行一借一贷抵平（净额为零）
-        fs::write(
-            &je,
-            "公司,日期,凭证号,科目,币种,原币,本位币
-             4800,2025-01-05,1,2202010001,CNY,540285789.31,75759407.33
-             4800,2025-02-05,2,2202010001,JPY,0,-4136.15
-             4800,2025-03-05,3,2202010001,USD,-47993736.67,-47993736.67
-             4800,2025-01-06,4,2202010002,CNY,0,-3848968.73
-             4800,2025-02-06,5,2202010002,JPY,0,4136.14
-             4800,2025-01-07,6,1002010021,HKD,121826.91,15580.51
-             4800,2025-01-08,7,2202030101,USD,-1719949.22,-1719949.22
-             4800,2025-02-08,8,2202030101,CNY,5000,700
-             4800,2025-03-08,9,2202030101,CNY,-5000,-700
-             4800,2025-01-09,10,1002990001,CNY,100,14
-             4800,2025-02-09,11,1002990001,HKD,200,26
-",
-        )
-        .unwrap();
-        fs::write(
-            &tb,
-            "公司,科目,期初本位币,期末本位币
-             4800,2202010001,-100000000,-189839178.25
-             4800,2202010002,0,3621343.35
-             4800,1002010021,0,15580.51
-             4800,2202030101,0,-4500535.87
-             4800,1002990001,0,40
-",
-        )
-        .unwrap();
-        let params = json!({
-            "reportStart":"2025-01-01", "reportEnd":"2025-12-31",
-            "fixedEntity":"4800", "entityCurrencies":{"4800":"USD"},
-            "jeSource":{"inputPath":je,"sheet":"","headerRow":1,"headerDepth":1},
-            "tbSource":{"inputPath":tb,"sheet":"","headerRow":1,"headerDepth":1},
-            "jeMapping":{"entity":"公司","date":"日期","id":["凭证号"],"account":["科目"],
-                "currency":"币种","foreignAmount":"原币","functionalAmount":"本位币"},
-            "tbMapping":{"entity":"公司","account":["科目"],
-                "openingFunctionalAmount":"期初本位币","closingFunctionalAmount":"期末本位币"},
-            "accountRoles":{"2202010001":"monetary_liability",
-                "2202010002":"monetary_liability","1002010021":"cash",
-                "2202030101":"monetary_liability","1002990001":"cash"}
-        });
-        let snapshot = RateSnapshot {
-            source: "测试".into(),
-            source_url: String::new(),
-            fetched_at: String::new(),
-            response_hash: test_snapshot_hash("外币敞口只认有原币的币种"),
-            start_date: "2025-01-01".into(),
-            end_date: "2025-12-31".into(),
-            rates: ["2025-01-01", "2025-12-31"]
-                .iter()
-                .flat_map(|date| {
-                    [("USD", 7.2), ("CNY", 1.0), ("HKD", 0.92), ("JPY", 0.048)]
-                        .into_iter()
-                        .map(move |(code, rate)| RatePoint {
-                            requested_date: (*date).into(),
-                            published_date: (*date).into(),
-                            currency: code.into(),
-                            cny_per_unit: rate,
-                        })
-                })
-                .collect(),
-            missing: Vec::new(),
-        };
-        let tb_table =
-            load_fx_table(&serde_json::from_value(params["tbSource"].clone()).unwrap()).unwrap();
-        let tb_mapping = mapping_obj(&params, "tbMapping");
-        let (_rows, quality) = calculate_inferred_opening_unrealized(
-            &params,
-            &snapshot,
-            NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
-            NaiveDate::from_ymd_opt(2025, 12, 31).unwrap(),
-            &tb_table,
-            &tb_mapping,
-            &[],
-            &[],
-            &account_match_policy(&params).unwrap(),
-        )
-        .unwrap();
-        // 按「科目＋问题类型」精确查，不能只按科目——同一个科目在后续的月度
-        // 测算里还会留下别的记录，只看第一条会张冠李戴。
-        let has_issue = |account: &str, kind: &str| {
-            quality.iter().any(|item| {
-                item["account"].as_str() == Some(account) && item["type"].as_str() == Some(kind)
-            })
-        };
-        let issue_of = |account: &str, kind: &str| -> Value {
-            quality
-                .iter()
-                .find(|item| {
-                    item["account"].as_str() == Some(account) && item["type"].as_str() == Some(kind)
-                })
-                .cloned()
-                .unwrap_or_else(|| panic!("{account} 应当留下「{kind}」记录：{quality:#?}"))
-        };
-        // 甲：日元原币恒为零，不该再被判成「多种外币」；真正的障碍是沉淀了本位币。
-        let mixed = issue_of("2202010001", TB_CURRENCY_GRANULARITY_ISSUE);
-        assert_eq!(mixed["currency"], "CNY");
-        assert!(
-            mixed["detail"]
-                .as_str()
-                .unwrap_or("")
-                .contains("按币种拆分"),
-            "要告诉用户补什么资料：{mixed:#}"
-        );
-        let multiple = issue_of("1002990001", TB_CURRENCY_GRANULARITY_ISSUE);
-        assert_eq!(multiple["currencies"], json!(["CNY", "HKD"]));
-        assert_eq!(
-            mixed["detail"], multiple["detail"],
-            "不同敞口成因不再保留二级说明"
-        );
-        // 乙：影子科目所有币种原币都是零，归到「原币金额全为零」。
-        let shadow = issue_of("2202010002", "外币凭证原币金额全为零");
-        assert!(
-            shadow["detail"]
-                .as_str()
-                .unwrap_or("")
-                .contains("原币金额全部为 0"),
-            "文案只陈述原币为零的事实，不下评估调整的判语：{shadow:#}"
-        );
-        // 丙、丁：干净的港币户和纯本位币科目都不该被报成粒度问题。
-        // 2202030101 的外币行一借一贷抵平（净额为零），它只是个本位币科目——
-        // 按累计绝对值判敞口会把这类科目误报，实测 4800 有 5 个。
-        for account in ["1002010021", "2202030101"] {
-            for kind in [TB_CURRENCY_GRANULARITY_ISSUE, "外币凭证原币金额全为零"] {
-                assert!(
-                    !has_issue(account, kind),
-                    "{account} 不该被报成「{kind}」：{quality:#?}"
-                );
-            }
-        }
-        fs::remove_file(&je).unwrap();
         fs::remove_file(&tb).unwrap();
     }
 

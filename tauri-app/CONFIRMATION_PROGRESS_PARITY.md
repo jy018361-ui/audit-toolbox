@@ -38,8 +38,8 @@
 
 | 场景 | 错误码/行为 |
 |---|---|
-| 未选择文件 | `INVALID_ARGUMENT` / 页面阻止启动 |
-| 路径不存在 | `PATH_NOT_FOUND` |
+| 未选择文件 | `INPUT_REQUIRED` / 页面阻止启动 |
+| 路径不存在 | `INPUT_NOT_FOUND` |
 | 损坏或被占用 | `CONFIRMATION_READ_FAILED` |
 | 必需列缺失 | `CONFIRMATION_COLUMNS_MISSING`，列出字段 |
 | 非法报告范围 | `CONFIRMATION_MODE_INVALID` |

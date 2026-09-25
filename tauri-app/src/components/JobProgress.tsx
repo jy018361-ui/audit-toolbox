@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useJobOwnedByDialog } from "@/components/JobDialog";
-import { errorText } from "@/lib/errors";
+import { errorText, isJobGone } from "@/lib/errors";
 import type { JobEvent } from "@/types";
 import { jobPresentation } from "@/jobState";
 import "./task-state.css";
@@ -58,7 +58,11 @@ export function JobProgress({
       const accepted = await onCancel(job.jobId);
       if (accepted === false) throw new Error("任务可能已结束，取消指令未被接受。请检查任务状态后重试。");
     } catch (error) {
-      setCancelError(`取消失败：${errorText(error)}`);
+      setCancelError(
+        isJobGone(error)
+          ? "任务可能已结束，取消指令未被接受。请检查任务状态后重试。"
+          : `取消失败：${errorText(error)}`,
+      );
     } finally {
       setCancelPending(false);
     }

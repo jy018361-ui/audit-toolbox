@@ -471,12 +471,7 @@ export function loanEquation(
 const ANY_OF: Record<string, string[][]> = {
   tb: [
     ["accountCode", "accountName", "account"],
-    [
-      "openingFunctionalAmount",
-      "openingFunctionalDebit",
-      "openingFunctionalCredit",
-      "openingPrincipal",
-    ],
+    // 期初余额不再必填：缺失时后端按 0 参与测算并在利率行注明。
     [
       "closingFunctionalAmount",
       "closingFunctionalDebit",
@@ -487,7 +482,7 @@ const ANY_OF: Record<string, string[][]> = {
   je: [["date"], ["accountCode", "accountName", "account"]],
 };
 const ANY_OF_LABEL: Record<string, string[]> = {
-  tb: ["借款科目", "期初余额", "期末余额"],
+  tb: ["借款科目", "期末余额"],
   je: ["记账日期", "借款科目"],
 };
 /**

@@ -161,6 +161,16 @@ fn prepare_rates(params: &Value) -> Result<Value, AppError> {
     let functional_currency = functional_currency_param(params);
     let entity_scope = entity_scope(params);
     let (tb, tm) = source(params, "tbSource")?;
+    // 期初余额未映射时按 0 参与测算（用户定案，与存款同口径），
+    // 在第二步利率行的依据说明里注明，不作为硬拦截。
+    let opening_unmapped = [
+        "openingFunctionalAmount",
+        "openingFunctionalDebit",
+        "openingFunctionalCredit",
+        "openingPrincipal",
+    ]
+    .iter()
+    .all(|role| mapped_names(&tm, "tb", role).is_empty());
     let je_mapping = params
         .get("jeSource")
         .and_then(|value| value.get("mapping"))
@@ -312,7 +322,11 @@ fn prepare_rates(params: &Value) -> Result<Value, AppError> {
                 "calculatedInterest": 0.0,
                 "principalDays": 0.0,
                 "matchStatus": "待测算",
-                "matchBasis": "利率行由 TB 轻量生成；本金变动、勾稽与利息在第三步测算",
+                "matchBasis": if opening_unmapped {
+                    "利率行由 TB 轻量生成；TB 未提供期初余额，测算按 0 参与平均，请以借款合同或账面期初复核；本金变动、勾稽与利息在第三步测算"
+                } else {
+                    "利率行由 TB 轻量生成；本金变动、勾稽与利息在第三步测算"
+                },
             })
         })
         .collect::<Vec<_>>();
@@ -1431,21 +1445,14 @@ fn validate_run_request(method: &str, params: &Value) -> Result<(), AppError> {
         params,
         "tbSource",
         &[
-            "openingFunctionalAmount",
-            "openingFunctionalDebit",
-            "openingFunctionalCredit",
-            "openingPrincipal",
-        ],
-    ) && mapped_any(
-        params,
-        "tbSource",
-        &[
             "closingFunctionalAmount",
             "closingFunctionalDebit",
             "closingFunctionalCredit",
             "closingPrincipal",
         ],
     );
+    // 期初余额自 2026-09-25 起不再必填（与存款同口径）：缺失时按 0 参与
+    // 测算，第二步利率行的依据说明会注明，请用户以合同或账面期初复核。
     let je_ready = ["date", "id"]
         .iter()
         .all(|role| mapped_role(params, "jeSource", role))
@@ -6431,6 +6438,10 @@ mod tests {
         params["jeSource"]["mapping"]["summary"] = Value::Null;
         assert!(validate_run_request("loan.preview", &params).is_ok());
 
+        // 期初余额自 2026-09-25 起同样选填（缺失按 0 参与测算并在利率行注明）。
+        params["tbSource"]["mapping"]["openingFunctionalAmount"] = Value::Null;
+        assert!(validate_run_request("loan.preview", &params).is_ok());
+
         // 凭证号仍是 JE 公共身份必填字段，缺失时应由 worker 二次门禁拦截。
         params["jeSource"]["mapping"]["id"] = Value::Null;
         assert_eq!(
@@ -7155,11 +7166,58 @@ mod tests {
         });
         let result = call("loan.prepare_rates", params).unwrap();
         let rows = result["rows"].as_array().unwrap();
-        assert_eq!(rows.len(), 2, "{result:#}");
+        assert_eq!(rows.len(), 2, "{result:#?}");
         assert_eq!(rows[0]["auxiliary"], "A银行");
         assert_eq!(rows[1]["auxiliary"], "B银行");
         assert_eq!(rows[0]["matchStatus"], "待测算");
         assert_eq!(rows[0]["calculatedInterest"], 0.0);
+    }
+
+    #[test]
+    fn tb缺期初余额不再拦截且利率行注明按零测算() {
+        let fixture = SyntheticLedger::new(&[["4.2%", "浮动", "", "90"]]);
+        let mut book = Workbook::new();
+        let sheet = book.add_worksheet();
+        sheet.set_name("TB").unwrap();
+        for (row, values) in [
+            ["主体", "编码", "科目", "辅助", "期末贷"],
+            ["甲公司", "2001", "短期借款", "A银行", "50"],
+        ]
+        .iter()
+        .enumerate()
+        {
+            for (column, value) in values.iter().enumerate() {
+                sheet
+                    .write_string(row as u32, column as u16, *value)
+                    .unwrap();
+            }
+        }
+        let path = fixture.dir.join("no-opening-tb.xlsx");
+        book.save(&path).unwrap();
+        let params = json!({
+            "mode": "tb",
+            "tbSource": {"source":{"inputPath":path,"sheet":"TB","headerRow":1,"headerDepth":1},"mapping":{
+                "entity":"主体","accountCode":"编码","accountName":"科目","auxiliary":"辅助",
+                "closingFunctionalCredit":"期末贷"
+            }},
+            "jeSource": {"source":{"inputPath":fixture.dir.join("missing-je.xlsx"),"sheet":"JE","headerRow":1,"headerDepth":1},"mapping":{
+                "entity":"主体","accountCode":"编码","accountName":"科目","date":"日期","id":"凭证号"
+            }},
+            "loanAccounts": ["2001"]
+        });
+        // 第二步轻量方法不设期初余额门禁（入口门禁的期初豁免由
+        // tb任务入口拦截不完整字段映射 覆盖），直接验证产出与注明。
+        let result = call("loan.prepare_rates", params).unwrap();
+        let rows = result["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{result:#?}");
+        assert_eq!(rows[0]["openingPrincipal"], 0.0);
+        assert!(
+            rows[0]["matchBasis"]
+                .as_str()
+                .unwrap()
+                .contains("按 0 参与平均"),
+            "利率行依据应注明按 0 测算：{rows:#?}"
+        );
     }
     #[test]
     fn floating_rate_converts_bps() {

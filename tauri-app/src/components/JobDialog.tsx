@@ -15,7 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { jobCancel, jobPause } from "@/api";
-import { errorText } from "@/lib/errors";
+import { errorText, isJobGone } from "@/lib/errors";
 import type { JobEvent } from "@/types";
 import { jobStatusText } from "./JobProgress";
 
@@ -204,7 +204,9 @@ export function JobDialogProvider({
     } catch (error) {
       setOperationErrors((current) => ({
         ...current,
-        [jobId]: `${command === "stop" ? "停止" : "暂停或继续"}失败：${errorText(error)}`,
+        [jobId]: isJobGone(error)
+          ? "任务可能已结束，指令未被接受。请检查任务状态后重试。"
+          : `${command === "stop" ? "停止" : "暂停或继续"}失败：${errorText(error)}`,
       }));
       return false;
     } finally {

@@ -6521,7 +6521,7 @@ fn account_identities_for_matching(
         .collect()
 }
 
-fn account_match_policy(params: &Value) -> Result<ledger_mapping::AccountMatchPolicy, AppError> {
+pub(crate) fn account_match_policy(params: &Value) -> Result<ledger_mapping::AccountMatchPolicy, AppError> {
     let Some(tb_source) = params.get("tbSource") else {
         return Ok(ledger_mapping::AccountMatchPolicy::default());
     };

@@ -459,11 +459,14 @@ fn analyze_with_progress(
         ));
     }
     let report_end = parse_report_end(params)?;
+    // 同下文磁盘路径：守卫按真实匹配策略判定，计划失效（名称回退／歧义、
+    // 指纹失配）时让位于重扫，不再拿编码级计划误套名称键科目。
+    let plan_policy = crate::fx::account_match_policy(params).unwrap_or_default();
     let auxiliary_columns = crate::fx::verified_auxiliary_columns_from_plan_headers(
         params,
         &tb.headers,
         &je.headers,
-        &ledger_mapping::AccountMatchPolicy::default(),
+        &plan_policy,
     )
     .unwrap_or_else(|| {
         fa_auxiliary_columns(
@@ -714,11 +717,16 @@ fn analyze_with_disk_je(
         Ok(())
     })?;
     let je = disk_table(je_spec, headers, selected_rows, disk.row_count());
+    // 计划复用守卫要按当前账表的真实匹配策略判定（2026-09-25 修复）：
+    // 此前传占位策略，名称回退／歧义形态下守卫永不触发，
+    // “计划失效自动重扫”的承诺落空。SAP 空编码明细行的父行编码继承
+    // 在计划侧与运行侧本就走同一套 tb_dimension_rows 规则。
+    let plan_policy = crate::fx::account_match_policy(params).unwrap_or_default();
     let auxiliary_columns = crate::fx::verified_auxiliary_columns_from_plan_headers(
         params,
         &tb.headers,
         &je.headers,
-        &ledger_mapping::AccountMatchPolicy::default(),
+        &plan_policy,
     )
     .unwrap_or_else(|| {
         fa_auxiliary_columns(
@@ -3585,6 +3593,93 @@ mod tests {
         assert_eq!(identities[0].entity, "母公司");
         let je_identities = account_identities(&table, &map, &params, EntitySide::Je, true);
         assert_eq!(je_identities[0].entity, "母公司杭州管理处");
+    }
+
+    /// 2026-09-25 修复回归：FA 复用第二步辅助计划时此前传占位匹配策略，
+    /// 「名称回退／歧义时让位重扫」的守卫永不触发。名称回退形态（JE 无
+    /// 科目编码、按名称匹配）下计划键比编码键细，复用会错套到别的科目上。
+    #[test]
+    fn 计划复用守卫按真实策略让位于重扫() {
+        let dir = std::env::temp_dir().join(format!("fa-plan-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tb.csv"),
+            "科目编码,科目名称,辅助核算,期初余额,本年借方,本年贷方,期末余额\n\
+             1601,固定资产-原值,A车间,0,10,0,10\n\
+             1601,固定资产-原值,B车间,0,20,0,20\n\
+             6602,管理费用,,0,0,0,0\n",
+        )
+        .unwrap();
+        // 1601 两侧带编码可正常锚点验证（造出有效计划）；V3 缺编码、
+        // 「管理费用」名称双侧唯一，构成名称回退形态。
+        std::fs::write(
+            dir.join("je.csv"),
+            "日期,凭证号,科目编码,科目名称,辅助,借方,贷方\n\
+             2025-01-01,V1,1601,固定资产-原值,A车间,10,0\n\
+             2025-01-02,V2,1601,固定资产-原值,B车间,20,0\n\
+             2025-06-01,V3,,管理费用,,5,0\n",
+        )
+        .unwrap();
+        let mut params = json!({
+            "reportStart": "2025-01-01", "reportEnd": "2025-12-31",
+            "tbSource": {"inputPath": dir.join("tb.csv"), "sheet": "", "headerRow": 0, "headerDepth": 0},
+            "jeSource": {"inputPath": dir.join("je.csv"), "sheet": "", "headerRow": 0, "headerDepth": 0},
+            "tbMapping": {
+                "accountCode": "科目编码", "accountName": "科目名称", "auxiliary": "辅助核算",
+                "openingFunctionalAmount": "期初余额",
+                "ytdFunctionalDebit": "本年借方", "ytdFunctionalCredit": "本年贷方",
+                "closingFunctionalAmount": "期末余额"
+            },
+            "jeMapping": {
+                "id": "凭证号", "date": "日期", "accountCode": "科目编码",
+                "accountName": "科目名称",
+                "functionalDebit": "借方", "functionalCredit": "贷方", "auxiliary": "辅助"
+            }
+        });
+        let linked = crate::fx::auxiliary_link_check(&params).unwrap();
+        assert_eq!(linked["status"], json!("verified"), "{linked:#?}");
+        params["auxiliaryPlan"] = json!({
+            "planKey": linked["planKey"],
+            "groups": linked["groups"].as_array().unwrap().iter().map(|group| json!({
+                "entity": group["entity"],
+                "account": group["account"],
+                "tbColumn": group["tbColumn"],
+                "jeColumn": group["column"]
+            })).collect::<Vec<_>>()
+        });
+        let policy = crate::fx::account_match_policy(&params).unwrap();
+        assert!(
+            policy.name_fallback_count() > 0 || policy.ambiguous_count() > 0,
+            "样例应构成名称回退/歧义形态：{policy:?}"
+        );
+        let tb_headers: Vec<String> = [
+            "科目编码", "科目名称", "辅助核算", "期初余额", "本年借方", "本年贷方", "期末余额",
+        ]
+        .iter()
+        .map(|text| text.to_string())
+        .collect();
+        let je_headers: Vec<String> =
+            ["日期", "凭证号", "科目名称", "辅助", "借方", "贷方"]
+                .iter()
+                .map(|text| text.to_string())
+                .collect();
+        // 真实策略：守卫触发，计划让位于重扫。
+        assert!(crate::fx::verified_auxiliary_columns_from_plan_headers(
+            &params,
+            &tb_headers,
+            &je_headers,
+            &policy
+        )
+        .is_none());
+        // 占位策略（旧行为）：守卫永不触发，名称回退形态下计划被误复用。
+        assert!(crate::fx::verified_auxiliary_columns_from_plan_headers(
+            &params,
+            &tb_headers,
+            &je_headers,
+            &ledger_mapping::AccountMatchPolicy::default()
+        )
+        .is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 单侧映射主体 → 双方一律默认主体（LEDGER_MAPPING_UNIFICATION.md

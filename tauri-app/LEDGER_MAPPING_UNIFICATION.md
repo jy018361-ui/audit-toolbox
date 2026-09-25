@@ -1,5 +1,23 @@
 # 账表映射统一方案
 
+## 2026-09-25：科目确认按金额勾稽与完整身份列示
+
+- 公共 `tb_catalog_leaf_mask` 与计算使用同一金额勾稽掩码；编码前缀、科目级次仅提供父子结构证据，金额无法完整勾稽时保留父项供复核。同编码不同科目名称的汇总行若等于连续多条明细在各金额列之和，剔除汇总行并保留明细名称；仅一条同额不能据此折叠。
+- 复核行去重身份为主体＋映射的科目编码＋映射的科目名称＋有效辅助值＋映射的币种。未映射的可选字段不参与；TB 辅助映射仍须经 JE 完整验证才有效。固定资产分类按完整身份传递，禁止同编码不同名称之间扩散分类。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 科目确认`、`npx vitest run src/FaTbJePage.test.ts src/DepositInterestPage.test.ts`。
+
+## 2026-09-25：FA 计划复用守卫接真实匹配策略
+
+- `fa_tbje` 复用第二步辅助验证计划时此前传入占位 `AccountMatchPolicy`，「名称回退／歧义形态下计划让位于重扫」的守卫（见下方公共守卫注释）永不触发；现按当前账表推导真实策略（与 fx 自用同一入口 `account_match_policy`），失效形态下自动重扫，兑现“计划失效时安全回退”的既有承诺。
+- SAP 空编码维度明细行的父行编码继承在计划侧与 FA 运行侧本就走同一套 `tb_dimension_rows` 规则（TBJE 同款形态有回归锁定）；本条新增 FA 侧守卫回归，防止再退回占位策略。
+- 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 计划复用守卫按真实策略让位于重扫`
+
+## 2026-09-25：LLM 映射建议严格高于 75% 自动采纳
+
+- 公共 TB/JE、看账及 FA List 的 LLM 字段建议统一以 `confidence > 0.75` 自动生效；等于 75% 的建议保留人工确认。低于 60% 的明确低置信建议仍不展示，未返回置信度的历史建议不得自动采纳。
+- 自动采纳仍需通过列存在、互斥占用与清除安全校验；不安全的清除建议继续待确认。TBJE 批量页把自动采纳的映射同步写回分组，确保必填检查和正式核对使用同一结果。
+- 回归：`npx vitest run src/ledgerMappingLabels.test.ts src/faListUi.test.ts src/TbjeCheckPage.test.tsx`。
+
 ## 2026-09-25：汇兑币种口径终版——币种列唯一来源、原币端点选填倒算（用户定案）
 
 - **本条为汇兑币种口径的现行定案，取代下方 2026-09-19「TB 币种列『只标外币』形态放行」与 2026-09-23「汇兑损益取消币种线索并收紧原币证据」两条中与之相抵触的逐行必填表述**（09-19 的“空白行＝本位币行”与 09-23 的“币种列必须存在”均继续有效）。
@@ -219,10 +237,10 @@
 - 该规则位于公共账表映射与联合复核入口，存款、借款、汇兑损益、TBJE 完整性及 FA TBJE 共享，不在页面或单个业务模块维护。
 - 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 外币与原币裸列名 -- --test-threads=1`、`cargo test --manifest-path src-tauri/Cargo.toml --lib tb已有币种时联合复核强制检查je币种 -- --test-threads=1`。
 
-## 2026-09-16 · 计算末级与科目目录末级分离
+## 2026-09-16 · 计算末级与科目目录末级分离（已由 2026-09-25 口径取代）
 
 - 公共 `tb_leaf_mask` 继续服务金额计算：父子金额不能完整勾稽时保守保留父项，避免静默丢数。
-- 新增公共 `tb_catalog_leaf_mask` 服务科目确认／筛选目录：在计算掩码之上，同一主体存在更长下级编码时隐藏父级。借款工具再按科目选择键聚合多主体／多辅助物理行，确保页面行键唯一；此目录掩码不得用于金额计算。
+- 当时新增公共 `tb_catalog_leaf_mask` 服务科目确认／筛选目录：在计算掩码之上，同一主体存在更长下级编码时隐藏父级。该额外隐藏规则现已取消；目录与计算均按金额勾稽判断父子，不能仅凭编码更长隐藏父级。
 - `suggest_roles_with_data` 在全部数据形态修正完成后重新保护精确主体别名；“核算组织／核算组织名称”稳定映射为 `entity`，裸“单位”仍须通过取值排除计量单位。
 - 回归：`cargo test --manifest-path src-tauri/Cargo.toml --lib 科目确认 -- --test-threads=1`、`cargo test --manifest-path src-tauri/Cargo.toml --lib 核算组织 -- --test-threads=1`。
 

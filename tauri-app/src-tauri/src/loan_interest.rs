@@ -297,7 +297,7 @@ fn prepare_rates(params: &Value) -> Result<Value, AppError> {
                 "accountName": fold.name,
                 "auxiliary": fold.raw_id,
                 "currency": if split_by_currency {
-                    if fold.currency.is_empty() { "本位币" } else { fold.currency.as_str() }
+                    if fold.currency.is_empty() { "未标币种" } else { fold.currency.as_str() }
                 } else { "本位币汇总" },
                 "openingPrincipal": fold.opening,
                 "additions": 0.0,
@@ -3294,10 +3294,10 @@ fn fold_loan_rows(
             norm(&name)
         };
         let currency = if split_by_currency {
-            loan_currency(
-                &role_text(tb, row, tm, "tb", "currency"),
-                functional_currency,
-            )
+            // 2026-09-25 用户定案（与存款同口径）：币种列的显式标注是分户
+            // 依据——标了币种（含人民币）自成桶，只有空白/认不出才归
+            // 「未标币种」桶，不再把显式本位币并进空白桶。
+            currency_code(&role_text(tb, row, tm, "tb", "currency"))
         } else {
             String::new()
         };
@@ -3933,7 +3933,7 @@ fn calculate_tb_impl(
             auxiliary: raw_id,
             currency: if split_by_currency {
                 if currency.is_empty() {
-                    "本位币".into()
+                    "未标币种".into()
                 } else {
                     currency
                 }
@@ -8220,6 +8220,9 @@ mod tests {
                     vec!["编码", "科目", "借款", "币种", "期初贷", "期末贷"],
                     vec!["2001", "短期借款", "L-1", "CNY", "1000000", "900000"],
                     vec!["2001", "短期借款", "L-1", "USD", "2000000", "1800000"],
+                    // 币种空白：按 2026-09-25 定案归「未标币种」户，与显式
+                    // 人民币行不再合并。
+                    vec!["2001", "短期借款", "L-2", "", "500000", "400000"],
                 ],
             ),
             (
@@ -8257,7 +8260,7 @@ mod tests {
         assert_eq!(default_merged["rows"][0]["currency"], "本位币汇总");
         assert_eq!(
             default_merged["rows"][0]["openingPrincipal"],
-            json!(3_000_000.0)
+            json!(3_500_000.0)
         );
 
         params["currencyFallbackMode"] = json!("functional");
@@ -8270,14 +8273,14 @@ mod tests {
         assert_eq!(functional["rows"][0]["currency"], "本位币汇总");
         assert_eq!(
             functional["rows"][0]["openingPrincipal"],
-            json!(3_000_000.0)
+            json!(3_500_000.0)
         );
 
         params["currencyFallbackMode"] = json!("twoPointByCurrency");
         let two_point = run_preview(&params).unwrap();
         assert_eq!(
             two_point["rows"].as_array().unwrap().len(),
-            2,
+            3,
             "{two_point:#?}"
         );
         assert!(
@@ -8293,9 +8296,11 @@ mod tests {
             .iter()
             .map(|row| row["currency"].as_str().unwrap())
             .collect::<std::collections::BTreeSet<_>>();
+        // 2026-09-25 用户定案：币种列的显式标注（含人民币）各自成户，
+        // 空白归「未标币种」户，不再把显式本位币并进空白桶。
         assert_eq!(
             currencies,
-            std::collections::BTreeSet::from(["USD", "本位币"])
+            std::collections::BTreeSet::from(["CNY", "USD", "未标币种"])
         );
     }
 

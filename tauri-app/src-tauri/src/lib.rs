@@ -971,6 +971,18 @@ fn secret_set(name: String, value: String) -> Result<(), AppError> {
 
 #[tauri::command]
 fn secret_delete(name: String) -> Result<(), AppError> {
+    // 与 secret_set 同一份白名单：写入有界，删除不得旁路。
+    if !matches!(
+        name.as_str(),
+        "llm_api_key" | "dify_api_key" | "baidu_ocr_key" | "baidu_ocr_secret"
+    ) {
+        return Err(AppError::new(
+            "SECRET_NAME_DENIED",
+            "不允许删除该类型的凭据。",
+            false,
+            None,
+        ));
+    }
     keyring::Entry::new("AuditToolbox", &name)
         .and_then(|entry| entry.delete_credential())
         .map_err(|e| {
@@ -1598,6 +1610,15 @@ mod tests {
         let ids: HashSet<_> = rows.iter().filter_map(|row| row["id"].as_str()).collect();
         assert_eq!(ids.len(), 18);
         assert!(rows.iter().all(|row| row["route"].as_str().is_some()));
+    }
+
+    /// 凭据写入有四名白名单，删除此前可对任意名字调用 keyring——
+    /// 2026-09-25 补齐同一份白名单，防止未来前端接上删除入口后旁路。
+    #[test]
+    fn 凭据删除与写入共用白名单() {
+        let err = secret_delete("arbitrary_secret".into()).unwrap_err();
+        assert_eq!(err.code, "SECRET_NAME_DENIED");
+        assert_eq!(err.user_message, "不允许删除该类型的凭据。");
     }
 
     /// 任务通道的方法白名单分散在两处：`excel_merger::SUPPORTED_JOB_METHODS`
